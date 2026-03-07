@@ -9,7 +9,6 @@ import (
 	"crypto/tls"
 	"encoding/binary"
 	"fmt"
-	"log"
 	"net"
 	"time"
 
@@ -36,13 +35,13 @@ func DnsDoQEngine(ctx context.Context, conf *Config, doqaddrs []string, cert *tl
 	for _, addr := range doqaddrs {
 		for _, port := range ports {
 			hostport := net.JoinHostPort(addr, port) // At the moment, we only support port 853
-			log.Printf("DnsEngine: serving on %s (DoQ)\n", hostport)
+			lgDns.Info("DnsEngine: serving on DoQ", "hostport", hostport)
 			listener, err := quic.ListenAddr(hostport, tlsConfig, &quic.Config{
 				MaxIdleTimeout:  time.Duration(30) * time.Second,
 				KeepAlivePeriod: time.Duration(15) * time.Second,
 			})
 			if err != nil {
-				log.Printf("Failed to setup the DoQ listener on %s: %s", hostport, err.Error())
+				lgDns.Error("failed to setup DoQ listener", "hostport", hostport, "err", err)
 				continue
 			}
 			listeners = append(listeners, listener)
@@ -54,7 +53,7 @@ func DnsDoQEngine(ctx context.Context, conf *Config, doqaddrs []string, cert *tl
 						if ctx.Err() != nil {
 							return
 						}
-						log.Printf("Failed to accept QUIC connection on %s: %s", hp, err.Error())
+						lgDns.Error("failed to accept QUIC connection", "hostport", hp, "err", err)
 						continue
 					}
 					go handleDoQConnection(ctx, conn, ourDNSHandler)
@@ -64,7 +63,7 @@ func DnsDoQEngine(ctx context.Context, conf *Config, doqaddrs []string, cert *tl
 	}
 	go func() {
 		<-ctx.Done()
-		log.Printf("DnsDoQEngine: shutting down DoQ listeners...")
+		lgDns.Info("DnsDoQEngine: shutting down DoQ listeners")
 		for _, l := range listeners {
 			_ = l.Close()
 		}
@@ -76,33 +75,25 @@ func handleDoQConnection(ctx context.Context, conn *quic.Conn, dnsHandler func(w
 	defer conn.CloseWithError(0, "") // ensure clean connection closure
 
 	for {
-		if Globals.Debug {
-			log.Printf("DoQ: waiting for stream on connection from %v", conn.RemoteAddr())
-		}
+		lgDns.Debug("DoQ: waiting for stream on connection", "remote", conn.RemoteAddr())
 		stream, err := conn.AcceptStream(ctx)
 		if err != nil {
 			// Log all errors, but with different levels of detail
 			if err.Error() == "Application error 0x0 (remote)" {
-				if Globals.Debug {
-					log.Printf("DoQ: client %v closed connection: %v", conn.RemoteAddr(), err)
-				}
+				lgDns.Debug("DoQ: client closed connection", "remote", conn.RemoteAddr(), "err", err)
 			} else {
-				log.Printf("DoQ: failed to accept stream: %v", err)
+				lgDns.Error("DoQ: failed to accept stream", "err", err)
 			}
 			return
 		}
 
-		if Globals.Debug {
-			log.Printf("DoQ: accepted stream %v from %v", stream.StreamID(), conn.RemoteAddr())
-		}
+		lgDns.Debug("DoQ: accepted stream", "stream", stream.StreamID(), "remote", conn.RemoteAddr())
 		go handleDoQStream(ctx, stream, conn, dnsHandler)
 	}
 }
 
 func handleDoQStream(ctx context.Context, stream *quic.Stream, conn *quic.Conn, dnsHandler func(w dns.ResponseWriter, r *dns.Msg)) {
-	if Globals.Debug {
-		log.Printf("DoQ: handling stream %v from %v", stream.StreamID(), conn.RemoteAddr())
-	}
+	lgDns.Debug("DoQ: handling stream", "stream", stream.StreamID(), "remote", conn.RemoteAddr())
 
 	// Read the DNS message length (2 bytes)
 	lenBuf := make([]byte, 2)
@@ -112,7 +103,7 @@ func handleDoQStream(ctx context.Context, stream *quic.Stream, conn *quic.Conn, 
 			_ = stream.Close()
 			return
 		}
-		log.Printf("Failed to read message length: %s", err.Error())
+		lgDns.Error("DoQ: failed to read message length", "err", err)
 		stream.Close()
 		return
 	}
@@ -125,31 +116,36 @@ func handleDoQStream(ctx context.Context, stream *quic.Stream, conn *quic.Conn, 
 			_ = stream.Close()
 			return
 		}
-		log.Printf("Failed to read DNS message: %s", err.Error())
+		lgDns.Error("DoQ: failed to read DNS message", "err", err)
 		stream.Close()
 		return
 	}
 
 	msg := new(dns.Msg)
 	if err := msg.Unpack(msgBuf); err != nil {
-		log.Printf("Failed to unpack DNS message: %s", err.Error())
+		lgDns.Error("DoQ: failed to unpack DNS message", "err", err)
 		stream.Close()
+		return
+	}
+
+	if len(msg.Question) == 0 {
+		lgDns.Warn("DoQ: received message with no question section", "remote", conn.RemoteAddr())
+		resp := new(dns.Msg)
+		resp.SetRcode(msg, dns.RcodeFormatError)
+		rw := &doqResponseWriter{stream: stream, conn: conn}
+		rw.WriteMsg(resp)
 		return
 	}
 
 	// Create a response writer for DoQ with both stream and connection
 	rw := &doqResponseWriter{stream: stream, conn: conn}
 
-	if Globals.Debug {
-		log.Printf("*** DoQ received message opcode: %s qname: %s rrtype: %s", dns.OpcodeToString[msg.Opcode], msg.Question[0].Name, dns.TypeToString[msg.Question[0].Qtype])
-	}
+	lgDns.Debug("DoQ: received message", "opcode", dns.OpcodeToString[msg.Opcode], "qname", msg.Question[0].Name, "rrtype", dns.TypeToString[msg.Question[0].Qtype])
 
 	// Handle the DNS message
 	dnsHandler(rw, msg)
 
-	if Globals.Debug {
-		log.Printf("DoQ: finished handling stream %v from %v", stream.StreamID(), conn.RemoteAddr())
-	}
+	lgDns.Debug("DoQ: finished handling stream", "stream", stream.StreamID(), "remote", conn.RemoteAddr())
 }
 
 // readExactWithContext reads exactly len(buf) bytes from the stream,
@@ -199,9 +195,7 @@ func (w *doqResponseWriter) WriteMsg(m *dns.Msg) error {
 	}
 	w.wrote = true
 
-	if Globals.Debug {
-		log.Printf("DoQ: writing response on stream %v", w.stream.StreamID())
-	}
+	lgDns.Debug("DoQ: writing response on stream", "stream", w.stream.StreamID())
 
 	packed, err := m.Pack()
 	if err != nil {
@@ -223,9 +217,7 @@ func (w *doqResponseWriter) WriteMsg(m *dns.Msg) error {
 	// Just signal that we're done writing
 	w.stream.Close()
 
-	if Globals.Debug {
-		log.Printf("DoQ: finished writing response on stream %v", w.stream.StreamID())
-	}
+	lgDns.Debug("DoQ: finished writing response on stream", "stream", w.stream.StreamID())
 	return nil
 }
 

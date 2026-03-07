@@ -6,7 +6,6 @@ package tdns
 
 import (
 	"context"
-	"log"
 	"strings"
 	"sync"
 
@@ -20,31 +19,24 @@ import (
 func NotifyHandlerWithCallback(ctx context.Context, conf *Config, handlerFunc func(context.Context, *DnsNotifyRequest) error) error {
 	dnsnotifyq := conf.Internal.DnsNotifyQ
 
-	log.Printf("*** DnsNotifyHandler: starting (with callback)")
-	if Globals.Debug {
-		log.Printf("DnsNotifyHandler: Channel capacity: %d", cap(dnsnotifyq))
-		log.Printf("DnsNotifyHandler: Waiting for NOTIFYs on dnsnotifyq channel")
-	}
+	lgHandler.Info("DnsNotifyHandler starting (with callback)")
+	lgHandler.Debug("DnsNotifyHandler channel info", "capacity", cap(dnsnotifyq))
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("DnsNotifyHandler: context cancelled")
+			lgHandler.Info("DnsNotifyHandler: context cancelled")
 			return nil
 		case dnr, ok := <-dnsnotifyq:
 			if !ok {
-				log.Println("DnsNotifyHandler: dnsnotifyq closed")
+				lgHandler.Info("DnsNotifyHandler: dnsnotifyq closed")
 				return nil
 			}
-			if Globals.Debug {
-				log.Printf("DnsNotifyHandler: Received NOTIFY from channel (qname=%s, from=%s)", dnr.Qname, dnr.ResponseWriter.RemoteAddr())
-			}
+			lgHandler.Debug("received NOTIFY from channel", "qname", dnr.Qname, "from", dnr.ResponseWriter.RemoteAddr())
 			if err := handlerFunc(ctx, &dnr); err != nil {
-				log.Printf("Error in NOTIFY handler: %v", err)
+				lgHandler.Error("error in NOTIFY handler", "err", err)
 			} else {
-				if Globals.Debug {
-					log.Printf("DnsNotifyHandler: NOTIFY handler completed successfully")
-				}
+				lgHandler.Debug("NOTIFY handler completed successfully")
 			}
 		}
 	}
@@ -56,7 +48,7 @@ func NotifyHandler(ctx context.Context, conf *Config) error {
 	scannerq := conf.Internal.ScannerQ
 	imr := conf.Internal.ImrEngine
 
-	log.Printf("*** DnsNotifyResponderEngine: starting")
+	lgHandler.Info("DnsNotifyResponderEngine starting")
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -65,11 +57,11 @@ func NotifyHandler(ctx context.Context, conf *Config) error {
 		for {
 			select {
 			case <-ctx.Done():
-				log.Println("DnsNotifyResponderEngine: context cancelled")
+				lgHandler.Info("DnsNotifyResponderEngine: context cancelled")
 				return
 			case dhr, ok := <-dnsnotifyq:
 				if !ok {
-					log.Println("DnsNotifyResponderEngine: dnsnotifyq closed")
+					lgHandler.Info("DnsNotifyResponderEngine: dnsnotifyq closed")
 					return
 				}
 				NotifyResponder(ctx, &dhr, zonech, scannerq, imr)
@@ -79,7 +71,7 @@ func NotifyHandler(ctx context.Context, conf *Config) error {
 	}()
 	wg.Wait()
 
-	log.Println("DnsNotifyResponderEngine: terminating")
+	lgHandler.Info("DnsNotifyResponderEngine: terminating")
 	return nil
 }
 
@@ -88,22 +80,22 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 	qname := dnr.Qname
 	// ntype := dnr.Msg.Question[0].Qtype
 	if dnr.Msg == nil || len(dnr.Msg.Question) == 0 {
-		log.Printf("NotifyResponder: Received NOTIFY for zone %q, but no question in message", qname)
+		lgHandler.Warn("received NOTIFY with no question", "zone", qname)
 		m := new(dns.Msg)
 		m.MsgHdr.Rcode = dns.RcodeFormatError
 		m.MsgHdr.Response = true
 		m.MsgHdr.Authoritative = true
-		if dnr.Msg != nil && len(dnr.Msg.Question) > 0 {
-			m.Question = dnr.Msg.Question
+		if dnr.Msg != nil {
+			m.MsgHdr.Id = dnr.Msg.MsgHdr.Id
 		}
 		if err := dnr.ResponseWriter.WriteMsg(m); err != nil {
-			log.Printf("NotifyResponder: WriteMsg error on FormatError: %v", err)
+			lgHandler.Error("WriteMsg error on FormatError", "err", err)
 		}
 		return nil
 	}
 	ntype := dnr.Msg.Question[0].Qtype
 
-	log.Printf("NOTIFY: Received NOTIFY(%s) for zone %q from %s", dns.TypeToString[ntype], qname, dnr.ResponseWriter.RemoteAddr())
+	lgHandler.Info("received NOTIFY", "type", dns.TypeToString[ntype], "zone", qname, "from", dnr.ResponseWriter.RemoteAddr())
 
 	m := new(dns.Msg)
 	m.SetReply(dnr.Msg)
@@ -123,13 +115,13 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 		var found bool
 		zd, found = FindZone(qname)
 		if zd == nil {
-			log.Printf("NotifyResponder: Received NOTIFY(%s) for unknown zone %q. Ignoring.", dns.TypeToString[ntype], qname)
+			lgHandler.Warn("received NOTIFY for unknown zone, ignoring", "type", dns.TypeToString[ntype], "zone", qname)
 			m.SetRcode(dnr.Msg, dns.RcodeRefused)
 			dnr.ResponseWriter.WriteMsg(m)
 			return nil
 		}
 		if !found && zd.IsChildDelegation(qname) {
-			log.Printf("NotifyResponder: Received NOTIFY(%s) for %q, but it's a child delegation. Ignoring.", dns.TypeToString[ntype], qname)
+			lgHandler.Warn("received NOTIFY for child delegation, ignoring", "type", dns.TypeToString[ntype], "qname", qname)
 			m.SetRcode(dnr.Msg, dns.RcodeRefused)
 			dnr.ResponseWriter.WriteMsg(m)
 			return nil
@@ -142,7 +134,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 
 		parentZoneName, err := imr.ParentZone(qname)
 		if err != nil {
-			log.Printf("NotifyResponder: Error finding parent zone for %q: %v", qname, err)
+			lgHandler.Error("error finding parent zone", "qname", qname, "err", err)
 			m.SetRcode(dnr.Msg, dns.RcodeServerFailure)
 			dnr.ResponseWriter.WriteMsg(m)
 			return nil
@@ -156,8 +148,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 			parentZoneNameLower := strings.ToLower(parentZoneName)
 			zd, ok = Zones.Get(parentZoneNameLower)
 			if !ok {
-				log.Printf("NotifyResponder: Received NOTIFY(%s) for %q, but parent zone %q is not authoritative. Refusing.",
-					dns.TypeToString[ntype], qname, parentZoneName)
+				lgHandler.Warn("parent zone not authoritative, refusing NOTIFY", "type", dns.TypeToString[ntype], "qname", qname, "parent", parentZoneName)
 				m.SetRcode(dnr.Msg, dns.RcodeNotAuth)
 				dnr.ResponseWriter.WriteMsg(m)
 				return nil
@@ -167,7 +158,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 		targetZoneName = zd.ZoneName
 
 	default:
-		log.Printf("NotifyResponder: Unknown type of notification: NOTIFY(%s)", dns.TypeToString[ntype])
+		lgHandler.Warn("unknown NOTIFY type", "type", dns.TypeToString[ntype])
 		m.SetRcode(dnr.Msg, dns.RcodeRefused)
 		dnr.ResponseWriter.WriteMsg(m)
 		return nil
@@ -175,15 +166,13 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 
 	// Validate that the target zone is not in an error state
 	if zd.Error && zd.ErrorType != RefreshError {
-		log.Printf("NotifyResponder: Received NOTIFY(%s) for %q targeting zone %q, but it is in error state: %s",
-			dns.TypeToString[ntype], qname, targetZoneName, zd.ErrorMsg)
+		lgHandler.Error("zone in error state, refusing NOTIFY", "type", dns.TypeToString[ntype], "qname", qname, "zone", targetZoneName, "errorMsg", zd.ErrorMsg)
 		m.SetRcode(dnr.Msg, dns.RcodeServerFailure)
 		dnr.ResponseWriter.WriteMsg(m)
 		return nil
 	}
 
-	log.Printf("NotifyResponder: NOTIFY(%s) for %q will be handled by zone %q",
-		dns.TypeToString[ntype], qname, targetZoneName)
+	lgHandler.Info("NOTIFY will be handled", "type", dns.TypeToString[ntype], "qname", qname, "zone", targetZoneName)
 
 	switch ntype {
 	case dns.TypeSOA:
@@ -192,7 +181,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 			// Send immediate failure so NOTIFY sender doesn't block on cancellation
 			m.SetRcode(dnr.Msg, dns.RcodeServerFailure)
 			if err := dnr.ResponseWriter.WriteMsg(m); err != nil {
-				log.Printf("NotifyResponder: WriteMsg error on cancellation (SOA): %v", err)
+				lgHandler.Error("WriteMsg error on cancellation", "notifyType", "SOA", "err", err)
 			}
 			return nil
 		case zonech <- ZoneRefresher{
@@ -201,19 +190,17 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 			Edns0Options: dnr.Options,
 		}:
 		}
-		log.Printf("NotifyResponder: Received NOTIFY(%s) for %q. Refreshing zone %q.",
-			dns.TypeToString[ntype], qname, targetZoneName)
+		lgHandler.Info("refreshing zone on NOTIFY", "type", dns.TypeToString[ntype], "qname", qname, "zone", targetZoneName)
 
 	case dns.TypeCDS, dns.TypeCSYNC:
 		// NOTIFY(CDS/CSYNC) targets the parent zone, which should scan the child zone's CDS/CSYNC RRset
-		log.Printf("NotifyResponder: Received NOTIFY(%s) for child %q. Parent zone %q will scan the %s %s RRset",
-			dns.TypeToString[ntype], qname, targetZoneName, qname, dns.TypeToString[ntype])
+		lgHandler.Info("scanning child zone on NOTIFY", "type", dns.TypeToString[ntype], "child", qname, "parentZone", targetZoneName)
 		select {
 		case <-ctx.Done():
 			// Send immediate failure so NOTIFY sender doesn't block on cancellation
 			m.SetRcode(dnr.Msg, dns.RcodeServerFailure)
 			if err := dnr.ResponseWriter.WriteMsg(m); err != nil {
-				log.Printf("NotifyResponder: WriteMsg error on cancellation (CDS/CSYNC): %v", err)
+				lgHandler.Error("WriteMsg error on cancellation", "notifyType", "CDS/CSYNC", "err", err)
 			}
 			return nil
 		case scannerq <- ScanRequest{
@@ -227,14 +214,13 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 
 	case dns.TypeDNSKEY:
 		// NOTIFY(DNSKEY) targets the zone itself for multi-signer communication
-		log.Printf("NotifyResponder: Received NOTIFY(%s) for %q. Zone %q will scan the %s %s RRset",
-			dns.TypeToString[ntype], qname, targetZoneName, qname, dns.TypeToString[ntype])
+		lgHandler.Info("scanning zone on DNSKEY NOTIFY", "type", dns.TypeToString[ntype], "qname", qname, "zone", targetZoneName)
 		select {
 		case <-ctx.Done():
 			// Send immediate failure so NOTIFY sender doesn't block on cancellation
 			m.SetRcode(dnr.Msg, dns.RcodeServerFailure)
 			if err := dnr.ResponseWriter.WriteMsg(m); err != nil {
-				log.Printf("NotifyResponder: WriteMsg error on cancellation (DNSKEY): %v", err)
+				lgHandler.Error("WriteMsg error on cancellation", "notifyType", "DNSKEY", "err", err)
 			}
 			return nil
 		case scannerq <- ScanRequest{

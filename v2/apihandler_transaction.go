@@ -9,7 +9,6 @@ package tdns
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 )
@@ -61,12 +60,12 @@ func (conf *Config) APIagentTransaction(cache *DistributionCache) func(w http.Re
 		var req TransactionPost
 		err := decoder.Decode(&req)
 		if err != nil {
-			log.Println("APIagentTransaction: error decoding request:", err)
+			lgApi.Warn("error decoding request", "handler", "agentTransaction", "err", err)
 			http.Error(w, fmt.Sprintf("Invalid request format: %v", err), http.StatusBadRequest)
 			return
 		}
 
-		log.Printf("API: received /agent/transaction request (cmd: %s) from %s.", req.Command, r.RemoteAddr)
+		lgApi.Debug("received /agent/transaction request", "cmd", req.Command, "from", r.RemoteAddr)
 
 		resp := TransactionResponse{
 			Time: time.Now(),
@@ -77,7 +76,7 @@ func (conf *Config) APIagentTransaction(cache *DistributionCache) func(w http.Re
 			sanitizedResp := SanitizeForJSON(resp)
 			err := json.NewEncoder(w).Encode(sanitizedResp)
 			if err != nil {
-				log.Printf("Error from json encoder: %v", err)
+				lgApi.Error("json encode failed", "handler", "agentTransaction", "err", err)
 			}
 		}()
 
@@ -128,8 +127,8 @@ func (conf *Config) APIagentTransaction(cache *DistributionCache) func(w http.Re
 						Peer:           prc.OriginatingSender,
 						Operation:      "remote-sync",
 						Zone:           string(prc.Zone),
-						Age:            formatDuration(now.Sub(now)), // We don't track creation time on PendingRemoteConfirmation
-						CreatedAt:      "",
+						Age:            formatDuration(now.Sub(prc.CreatedAt)),
+						CreatedAt:      prc.CreatedAt.Format(time.RFC3339),
 						State:          "awaiting-combiner",
 					})
 				}
@@ -159,12 +158,12 @@ func (conf *Config) APIcombinerTransaction() func(w http.ResponseWriter, r *http
 		var req TransactionPost
 		err := decoder.Decode(&req)
 		if err != nil {
-			log.Println("APIcombinerTransaction: error decoding request:", err)
+			lgApi.Warn("error decoding request", "handler", "combinerTransaction", "err", err)
 			http.Error(w, fmt.Sprintf("Invalid request format: %v", err), http.StatusBadRequest)
 			return
 		}
 
-		log.Printf("API: received /combiner/transaction request (cmd: %s) from %s.", req.Command, r.RemoteAddr)
+		lgApi.Debug("received /combiner/transaction request", "cmd", req.Command, "from", r.RemoteAddr)
 
 		resp := TransactionResponse{
 			Time: time.Now(),
@@ -175,7 +174,7 @@ func (conf *Config) APIcombinerTransaction() func(w http.ResponseWriter, r *http
 			sanitizedResp := SanitizeForJSON(resp)
 			err := json.NewEncoder(w).Encode(sanitizedResp)
 			if err != nil {
-				log.Printf("Error from json encoder: %v", err)
+				lgApi.Error("json encode failed", "handler", "combinerTransaction", "err", err)
 			}
 		}()
 

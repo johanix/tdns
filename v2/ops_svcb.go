@@ -5,7 +5,6 @@ package tdns
 
 import (
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -14,9 +13,7 @@ import (
 )
 
 func (zd *ZoneData) PublishSvcbRR(name string, port uint16, value []dns.SVCBKeyValue) error {
-	if Globals.Debug {
-		log.Printf("PublishSvcbRR: received request to publish SVCB record for %q, port: %d, value: %+v", name, port, value)
-	}
+	lgHandler.Debug("PublishSvcbRR: received request to publish SVCB record", "name", name, "port", port, "value", value)
 	name = dns.Fqdn(name)
 	if _, valid := dns.IsDomainName(name); !valid {
 		return fmt.Errorf("invalid domain name: %q (must be a FQDN)", name)
@@ -30,9 +27,7 @@ func (zd *ZoneData) PublishSvcbRR(name string, port uint16, value []dns.SVCBKeyV
 		return fmt.Errorf("PublishSvcbRR: KeyDB.UpdateQ is nil")
 	}
 
-	if Globals.Debug {
-		log.Printf("PublishSvcbRR: DEBUG: name: %q, port: %d, value: %+v", name, port, value)
-	}
+	lgHandler.Debug("PublishSvcbRR: preparing SVCB record", "name", name, "port", port, "value", value)
 
 	svcb := dns.SVCB{
 		Priority: 1,
@@ -46,7 +41,7 @@ func (zd *ZoneData) PublishSvcbRR(name string, port uint16, value []dns.SVCBKeyV
 		Ttl:    120,
 	}
 
-	log.Printf("PublishSvcbRR: publishing SVCB RR: %s", svcb.String())
+	lgHandler.Info("PublishSvcbRR: publishing SVCB RR", "rr", svcb.String())
 
 	if zd.KeyDB.UpdateQ == nil {
 		return fmt.Errorf("PublishSVCBRR: KeyDB.UpdateQ is nil")

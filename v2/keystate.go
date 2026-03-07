@@ -2,7 +2,6 @@ package tdns
 
 import (
 	"fmt"
-	"log"
 	"time"
 
 	"context"
@@ -13,8 +12,7 @@ import (
 )
 
 func (kdb *KeyDB) ProcessKeyState(ks *edns0.KeyStateOption, zonename string) (*edns0.KeyStateOption, error) {
-	log.Printf("Processing KeyState request for zone %s, keyID %d, state %d",
-		zonename, ks.KeyID, ks.KeyState)
+	lgSigner.Debug("processing KeyState request", "zone", zonename, "keyid", ks.KeyID, "state", ks.KeyState)
 
 	switch ks.KeyState {
 	case edns0.KeyStateRequestAutoBootstrap:
@@ -45,8 +43,7 @@ func (kdb *KeyDB) ProcessKeyState(ks *edns0.KeyStateOption, zonename string) (*e
 			defer cancel()
 
 			for attempt := 1; attempt <= maxAttempts; attempt++ {
-				log.Printf("Auto-bootstrap attempt %d/%d for zone %s, keyID %d",
-					attempt, maxAttempts, zonename, ks.KeyID)
+				lgSigner.Info("auto-bootstrap attempt", "attempt", attempt, "max", maxAttempts, "zone", zonename, "keyid", ks.KeyID)
 
 				/*err := kdb.startAutoBootstrap(ctx, zonename, ks.KeyID)
 				if err == nil {
@@ -60,16 +57,14 @@ func (kdb *KeyDB) ProcessKeyState(ks *edns0.KeyStateOption, zonename string) (*e
 				if attempt < maxAttempts {
 					select {
 					case <-ctx.Done():
-						log.Printf("Auto-bootstrap timed out for zone %s, keyID %d",
-							zonename, ks.KeyID)
+						lgSigner.Warn("auto-bootstrap timed out", "zone", zonename, "keyid", ks.KeyID)
 						return
 					case <-time.After(retryInterval):
 						continue
 					}
 				}
 			}
-			log.Printf("Auto-bootstrap failed after %d attempts for zone %s, keyID %d",
-				maxAttempts, zonename, ks.KeyID)
+			lgSigner.Error("auto-bootstrap failed after all attempts", "attempts", maxAttempts, "zone", zonename, "keyid", ks.KeyID)
 		}()
 
 		return &edns0.KeyStateOption{
@@ -85,7 +80,7 @@ func (kdb *KeyDB) ProcessKeyState(ks *edns0.KeyStateOption, zonename string) (*e
 		// Hämta nyckelstatus från truststore
 		status, err := kdb.GetKeyStatus(zonename, ks.KeyID)
 		if err != nil {
-			log.Printf("Kunde inte hämta nyckelstatus från truststore: %v", err)
+			lgSigner.Error("failed to get key status from truststore", "err", err)
 			return &edns0.KeyStateOption{
 				KeyID:     ks.KeyID,
 				KeyState:  edns0.KeyStateUnknown,
@@ -157,32 +152,27 @@ func (kdb *KeyDB) HandleKeyStateOption(opt *dns.OPT, zonename string) (*dns.EDNS
 }
 
 func (kdb *KeyDB) GetKeyStatus(zonename string, keyID uint16) (*edns0.KeyStateOption, error) {
-	// Skapa en nyckel för att söka i truststore
 	mapKey := fmt.Sprintf("%s::%d", zonename, keyID)
 
-	fmt.Printf("GetKeyStatus: zonename: %s, keyID: %d\n", zonename, keyID)
+	lgSigner.Debug("GetKeyStatus", "zone", zonename, "keyid", keyID)
 
-	// Hämta information från truststore
 	tr, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
 		Command:    "child-sig0-mgmt",
 		SubCommand: "list",
 	})
 	if err != nil {
-		fmt.Printf("kunde inte hämta truststore data: %v\n", err)
+		lgSigner.Error("failed to get truststore data", "err", err)
 		return nil, fmt.Errorf("kunde inte hämta truststore data: %v", err)
 	}
 
-	// Leta efter nyckeln i truststore
 	if key, exists := tr.ChildSig0keys[mapKey]; exists {
 		var state uint8
 		if key.Trusted {
 			state = edns0.KeyStateTrusted
 		} else if key.Validated {
 
-			// Skapa en svarskanal
 			responseChan := make(chan *VerificationInfo)
-			fmt.Printf("GetKeyStatus: Skicka förfrågan med svarskanal\n")
-			// Skicka förfrågan med svarskanal
+			lgSigner.Debug("sending INFO request with response channel")
 			kdb.KeyBootstrapperQ <- KeyBootstrapperRequest{
 				Cmd:          kbCmdInfo,
 				KeyName:      zonename,
@@ -190,11 +180,16 @@ func (kdb *KeyDB) GetKeyStatus(zonename string, keyID uint16) (*edns0.KeyStateOp
 				ResponseChan: responseChan,
 			}
 
-			fmt.Printf("GetKeyStatusVänta på svar\n")
-			verInfo := <-responseChan
+			lgSigner.Debug("waiting for response")
+			var verInfo *VerificationInfo
+			select {
+			case verInfo = <-responseChan:
+			case <-time.After(30 * time.Second):
+				lgSigner.Warn("timeout waiting for key bootstrapper response", "zone", zonename, "keyid", keyID)
+			}
 			if verInfo != nil {
 
-				fmt.Printf("GetKeyStatus: VerInfo: %v\n", verInfo)
+				lgSigner.Debug("received verification info", "info", verInfo)
 
 				if verInfo.FailedAttempts > 0 {
 					state = edns0.KeyStateValidationFail
@@ -206,19 +201,19 @@ func (kdb *KeyDB) GetKeyStatus(zonename string, keyID uint16) (*edns0.KeyStateOp
 				state = edns0.KeyStateValidationFail
 			}
 
-			fmt.Printf("GetKeyStatus: Svar mottaget\n")
+			lgSigner.Debug("response received")
 
 		} else {
-			state = edns0.KeyStateInvalid // eller?
+			state = edns0.KeyStateInvalid
 		}
-		fmt.Printf("GetKeyStatus: KeyState: %d\n", state)
+		lgSigner.Debug("determined key state", "state", state)
 		return &edns0.KeyStateOption{
 			KeyID:     keyID,
 			KeyState:  state,
 			ExtraText: fmt.Sprintf("Key is %d", state),
 		}, nil
 	}
-	fmt.Printf("GetKeyStatus: KeyState: %d\n", edns0.KeyStateUnknown)
+	lgSigner.Debug("key not found in truststore", "state", edns0.KeyStateUnknown)
 	return &edns0.KeyStateOption{
 		KeyID:     keyID,
 		KeyState:  edns0.KeyStateUnknown,

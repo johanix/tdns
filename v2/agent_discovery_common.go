@@ -11,7 +11,6 @@ import (
 	"context"
 	"crypto"
 	"fmt"
-	"log"
 	"net/url"
 
 	"github.com/johanix/tdns/v2/core"
@@ -30,7 +29,7 @@ func (imr *Imr) lookupAgentJWK(ctx context.Context, identity string) (string, cr
 
 	// JWK records are published at dns.<identity> (with DNS transport records)
 	jwkQname := "dns." + identity
-	log.Printf("AgentDiscovery: Looking up JWK at %s", jwkQname)
+	lgAgent.Debug("looking up JWK", "qname", jwkQname)
 
 	// Query for JWK record using IMR
 	resp, err := imr.ImrQuery(ctx, jwkQname, core.TypeJWK, dns.ClassINET, nil)
@@ -52,18 +51,18 @@ func (imr *Imr) lookupAgentJWK(ctx context.Context, identity string) (string, cr
 			if jwk, ok := privateRR.Data.(*core.JWK); ok {
 				// Validate JWK data
 				if err := core.ValidateJWK(jwk.JWKData); err != nil {
-					log.Printf("AgentDiscovery: Invalid JWK data at %s: %v", jwkQname, err)
+					lgAgent.Warn("invalid JWK data", "qname", jwkQname, "err", err)
 					continue
 				}
 
 				// Decode to public key
 				publicKey, algorithm, err := core.DecodeJWKToPublicKey(jwk.JWKData)
 				if err != nil {
-					log.Printf("AgentDiscovery: Failed to decode JWK at %s: %v", jwkQname, err)
+					lgAgent.Warn("failed to decode JWK", "qname", jwkQname, "err", err)
 					continue
 				}
 
-				log.Printf("AgentDiscovery: Found JWK record at %s (algorithm: %s)", jwkQname, algorithm)
+				lgAgent.Debug("found JWK record", "qname", jwkQname, "algorithm", algorithm)
 				return jwk.JWKData, publicKey, algorithm, nil
 			}
 		}
@@ -77,7 +76,7 @@ func (imr *Imr) lookupAgentJWK(ctx context.Context, identity string) (string, cr
 func (imr *Imr) lookupAgentKEY(ctx context.Context, identity string) (*dns.KEY, error) {
 	identity = dns.Fqdn(identity)
 
-	log.Printf("AgentDiscovery: Looking up KEY at %s (legacy fallback)", identity)
+	lgAgent.Debug("looking up KEY (legacy fallback)", "identity", identity)
 
 	resp, err := imr.ImrQuery(ctx, identity, dns.TypeKEY, dns.ClassINET, nil)
 	if err != nil {
@@ -94,7 +93,7 @@ func (imr *Imr) lookupAgentKEY(ctx context.Context, identity string) (*dns.KEY, 
 
 	for _, rr := range resp.RRset.RRs {
 		if keyRR, ok := rr.(*dns.KEY); ok {
-			log.Printf("AgentDiscovery: Found KEY record for %s (algorithm %d)", identity, keyRR.Algorithm)
+			lgAgent.Debug("found KEY record", "identity", identity, "algorithm", keyRR.Algorithm)
 			return keyRR, nil
 		}
 	}
@@ -109,7 +108,7 @@ func (imr *Imr) lookupAgentAPIEndpoint(ctx context.Context, identity string) (st
 	identity = dns.Fqdn(identity)
 
 	apiQname := "_https._tcp." + identity
-	log.Printf("AgentDiscovery: Looking up API URI at %s", apiQname)
+	lgAgent.Debug("looking up API URI", "qname", apiQname)
 
 	resp, err := imr.ImrQuery(ctx, apiQname, dns.TypeURI, dns.ClassINET, nil)
 	if err != nil {
@@ -129,7 +128,7 @@ func (imr *Imr) lookupAgentAPIEndpoint(ctx context.Context, identity string) (st
 			// Parse URI to extract host and port
 			parsed, err := url.Parse(uriRR.Target)
 			if err != nil {
-				log.Printf("AgentDiscovery: Invalid API URI %q: %v", uriRR.Target, err)
+				lgAgent.Warn("invalid API URI", "uri", uriRR.Target, "err", err)
 				continue
 			}
 
@@ -141,7 +140,7 @@ func (imr *Imr) lookupAgentAPIEndpoint(ctx context.Context, identity string) (st
 				port = uint16(p)
 			}
 
-			log.Printf("AgentDiscovery: Found API URI: %s (host: %s, port: %d)", uriRR.Target, host, port)
+			lgAgent.Debug("found API URI", "uri", uriRR.Target, "host", host, "port", port)
 			return uriRR.Target, host, port, nil
 		}
 	}
@@ -156,7 +155,7 @@ func (imr *Imr) lookupAgentDNSEndpoint(ctx context.Context, identity string) (st
 	identity = dns.Fqdn(identity)
 
 	dnsQname := "_dns._tcp." + identity
-	log.Printf("AgentDiscovery: Looking up DNS URI at %s", dnsQname)
+	lgAgent.Debug("looking up DNS URI", "qname", dnsQname)
 
 	resp, err := imr.ImrQuery(ctx, dnsQname, dns.TypeURI, dns.ClassINET, nil)
 	if err != nil {
@@ -176,7 +175,7 @@ func (imr *Imr) lookupAgentDNSEndpoint(ctx context.Context, identity string) (st
 			// Parse URI to extract host and port
 			parsed, err := url.Parse(uriRR.Target)
 			if err != nil {
-				log.Printf("AgentDiscovery: Invalid DNS URI %q: %v", uriRR.Target, err)
+				lgAgent.Warn("invalid DNS URI", "uri", uriRR.Target, "err", err)
 				continue
 			}
 
@@ -188,7 +187,7 @@ func (imr *Imr) lookupAgentDNSEndpoint(ctx context.Context, identity string) (st
 				port = uint16(p)
 			}
 
-			log.Printf("AgentDiscovery: Found DNS URI: %s (host: %s, port: %d)", uriRR.Target, host, port)
+			lgAgent.Debug("found DNS URI", "uri", uriRR.Target, "host", host, "port", port)
 			return uriRR.Target, host, port, nil
 		}
 	}
@@ -203,7 +202,7 @@ func (imr *Imr) lookupAgentTLSA(ctx context.Context, identity string, port uint1
 	identity = dns.Fqdn(identity)
 
 	tlsaQname := fmt.Sprintf("_%d._tcp.%s", port, identity)
-	log.Printf("AgentDiscovery: Looking up TLSA at %s", tlsaQname)
+	lgAgent.Debug("looking up TLSA", "qname", tlsaQname)
 
 	resp, err := imr.ImrQuery(ctx, tlsaQname, dns.TypeTLSA, dns.ClassINET, nil)
 	if err != nil {
@@ -220,8 +219,8 @@ func (imr *Imr) lookupAgentTLSA(ctx context.Context, identity string, port uint1
 
 	for _, rr := range resp.RRset.RRs {
 		if tlsaRR, ok := rr.(*dns.TLSA); ok {
-			log.Printf("AgentDiscovery: Found TLSA record at %s (usage %d, selector %d, type %d)",
-				tlsaQname, tlsaRR.Usage, tlsaRR.Selector, tlsaRR.MatchingType)
+			lgAgent.Debug("found TLSA record", "qname", tlsaQname,
+				"usage", tlsaRR.Usage, "selector", tlsaRR.Selector, "matchingType", tlsaRR.MatchingType)
 			return tlsaRR, nil
 		}
 	}
@@ -237,7 +236,7 @@ func (imr *Imr) lookupServiceAddresses(ctx context.Context, serviceName string) 
 
 	var addresses []string
 
-	log.Printf("AgentDiscovery: Looking up SVCB at %s", serviceName)
+	lgAgent.Debug("looking up SVCB", "service", serviceName)
 
 	// Query SVCB record
 	resp, err := imr.ImrQuery(ctx, serviceName, dns.TypeSVCB, dns.ClassINET, nil)
@@ -281,6 +280,6 @@ func (imr *Imr) lookupServiceAddresses(ctx context.Context, serviceName string) 
 		return nil, fmt.Errorf("no IP hints found in SVCB record at %s", serviceName)
 	}
 
-	log.Printf("AgentDiscovery: Found %d address(es) for %s from SVCB: %v", len(addresses), serviceName, addresses)
+	lgAgent.Debug("found addresses from SVCB", "count", len(addresses), "service", serviceName, "addresses", addresses)
 	return addresses, nil
 }

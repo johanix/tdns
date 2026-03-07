@@ -257,23 +257,19 @@ Modes:
 
 		zone := tdns.ZoneName(tdns.Globals.Zonename)
 
-		// Push: re-send local data to combiner and remote agents
-		if resyncPush || resyncFull {
-			fmt.Printf("Resync push: re-sending local data for zone %s...\n", zone)
-			req := &tdns.AgentMgmtPost{Command: "resync", Zone: zone}
-			amr, err := SendAgentMgmtCmd(req, "peer")
-			if err != nil {
-				fmt.Printf("Error sending resync push: %v\n", err)
-				os.Exit(1)
-			}
-			if amr.Error {
-				fmt.Printf("Resync push error: %s\n", amr.ErrorMsg)
-				os.Exit(1)
-			}
-			fmt.Printf("Resync push: %s\n", amr.Msg)
+		// Refresh key inventory from signer before resync
+		fmt.Printf("Refreshing key inventory for zone %s...\n", zone)
+		keyReq := &tdns.AgentMgmtPost{Command: "refresh-keys", Zone: zone}
+		keyResp, err := SendAgentMgmtCmd(keyReq, "peer")
+		if err != nil {
+			fmt.Printf("Warning: failed to refresh key inventory: %v\n", err)
+		} else if keyResp.Error {
+			fmt.Printf("Warning: key inventory refresh failed: %s\n", keyResp.ErrorMsg)
+		} else {
+			fmt.Printf("%s\n", keyResp.Msg)
 		}
 
-		// Pull: send RFI SYNC to all remote agents
+		// Pull first: fetch remote data so we have the complete picture
 		if resyncPull || resyncFull {
 			fmt.Printf("Resync pull: requesting peers to re-send data for zone %s...\n", zone)
 			req := &tdns.AgentMgmtPost{
@@ -299,6 +295,22 @@ Modes:
 					fmt.Printf("  %s: %s\n", agentId, rfiData.Msg)
 				}
 			}
+		}
+
+		// Push second: re-send local data to combiner and remote agents
+		if resyncPush || resyncFull {
+			fmt.Printf("Resync push: re-sending local data for zone %s...\n", zone)
+			req := &tdns.AgentMgmtPost{Command: "resync", Zone: zone}
+			amr, err := SendAgentMgmtCmd(req, "peer")
+			if err != nil {
+				fmt.Printf("Error sending resync push: %v\n", err)
+				os.Exit(1)
+			}
+			if amr.Error {
+				fmt.Printf("Resync push error: %s\n", amr.ErrorMsg)
+				os.Exit(1)
+			}
+			fmt.Printf("Resync push: %s\n", amr.Msg)
 		}
 	},
 }

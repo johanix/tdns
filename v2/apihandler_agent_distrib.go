@@ -9,7 +9,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -165,17 +164,17 @@ func (dc *DistributionCache) StartCleanupGoroutine(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
-				log.Printf("DistributionCache: Cleanup goroutine stopping")
+				lgApi.Info("cleanup goroutine stopping")
 				return
 			case <-ticker.C:
 				removed := dc.PurgeExpired()
 				if removed > 0 {
-					log.Printf("DistributionCache: Purged %d expired distributions", removed)
+					lgApi.Info("purged expired distributions", "count", removed)
 				}
 			}
 		}
 	}()
-	log.Printf("DistributionCache: Cleanup goroutine started (checks every 1 minute)")
+	lgApi.Info("cleanup goroutine started", "interval", "1m")
 }
 
 // AgentDistribPost represents a request to the agent distrib API
@@ -220,12 +219,12 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 		var req AgentDistribPost
 		err := decoder.Decode(&req)
 		if err != nil {
-			log.Println("APIagentDistrib: error decoding request:", err)
+			lgApi.Warn("error decoding request", "handler", "agentDistrib", "err", err)
 			http.Error(w, fmt.Sprintf("Invalid request format: %v", err), http.StatusBadRequest)
 			return
 		}
 
-		log.Printf("API: received /agent/distrib request (cmd: %s) from %s.", req.Command, r.RemoteAddr)
+		lgApi.Debug("received /agent/distrib request", "cmd", req.Command, "from", r.RemoteAddr)
 
 		resp := AgentDistribResponse{
 			Time: time.Now(),
@@ -238,7 +237,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 				sanitizedResp := SanitizeForJSON(resp)
 				err := json.NewEncoder(w).Encode(sanitizedResp)
 				if err != nil {
-					log.Printf("Error from json encoder: %v", err)
+					lgApi.Error("json encode failed", "handler", "agentDistrib", "err", err)
 				}
 			}
 		}()
@@ -431,13 +430,13 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 						if !authorized {
 							resp.Error = true
 							resp.ErrorMsg = fmt.Sprintf("peer %q is not authorized (not in agent.authorized_peers config or HSYNC): %s", req.To, reason)
-							log.Printf("API: REJECTED discovery attempt for unauthorized agent %q: %s", toFqdn, reason)
+							lgApi.Warn("rejected discovery for unauthorized agent", "agent", toFqdn, "reason", reason)
 							return
 						}
 
 						// Attempt dynamic discovery for authorized but unknown agents
-						log.Printf("API: agent %q not found in PeerRegistry, attempting discovery (authorized: %s)", toFqdn, reason)
-						discoveryCtx, discoveryCancel := context.WithTimeout(context.Background(), 10*time.Second)
+						lgApi.Info("agent not in PeerRegistry, attempting discovery", "agent", toFqdn, "reason", reason)
+						discoveryCtx, discoveryCancel := context.WithTimeout(r.Context(), 10*time.Second)
 						defer discoveryCancel()
 
 						discErr := conf.Internal.TransportManager.DiscoverAndRegisterAgent(discoveryCtx, toFqdn)
@@ -454,14 +453,14 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 							resp.ErrorMsg = fmt.Sprintf("peer %q discovered but not registered properly", req.To)
 							return
 						}
-						log.Printf("API: Successfully discovered and registered agent %q", toFqdn)
+						lgApi.Info("discovered and registered agent", "agent", toFqdn)
 					}
 					if peer.CurrentAddress() == nil {
 						resp.Error = true
 						resp.ErrorMsg = fmt.Sprintf("peer %q has no address configured", req.To)
 						return
 					}
-					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 					defer cancel()
 					pingResp, err := conf.Internal.TransportManager.SendPing(ctx, peer)
 					if err != nil {
@@ -503,13 +502,13 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 			if !authorized {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("agent %q is not authorized (not in agent.authorized_peers config or HSYNC): %s", agentId, reason)
-				log.Printf("API: REJECTED discovery attempt for unauthorized agent %q: %s", agentFqdn, reason)
+				lgApi.Warn("rejected discovery for unauthorized agent", "agent", agentFqdn, "reason", reason)
 				return
 			}
 
-			log.Printf("API: Starting discovery for agent %s (authorized: %s)", agentId, reason)
+			lgApi.Info("starting discovery", "agent", agentId, "reason", reason)
 
-			discoveryCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			discoveryCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 			defer cancel()
 
 			err := conf.Internal.TransportManager.DiscoverAndRegisterAgent(discoveryCtx, agentFqdn)
@@ -568,18 +567,24 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 // 1. Completed distributions older than 5 minutes
 // 2. Expired distributions past their ExpiresAt time (based on message type retention)
 // Incomplete distributions are never purged by GC (only "purge --force" removes them).
-func StartDistributionGC(cache *DistributionCache, interval time.Duration) {
+func StartDistributionGC(cache *DistributionCache, interval time.Duration, stopCh chan struct{}) {
 	ticker := time.NewTicker(interval)
 	go func() {
-		for range ticker.C {
-			completedCount := cache.PurgeCompleted(5 * time.Minute)
-			if completedCount > 0 {
-				log.Printf("Distribution GC: purged %d completed distributions (kept ≥5m after completion)", completedCount)
-			}
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				completedCount := cache.PurgeCompleted(5 * time.Minute)
+				if completedCount > 0 {
+					lgApi.Info("GC purged completed distributions", "count", completedCount)
+				}
 
-			expiredCount := cache.PurgeExpired()
-			if expiredCount > 0 {
-				log.Printf("Distribution GC: purged %d expired distributions (past retention time)", expiredCount)
+				expiredCount := cache.PurgeExpired()
+				if expiredCount > 0 {
+					lgApi.Info("GC purged expired distributions", "count", expiredCount)
+				}
+			case <-stopCh:
+				return
 			}
 		}
 	}()
@@ -698,10 +703,9 @@ func listKnownPeers(conf *Config) []PeerInfo {
 							if !lastUsed.IsZero() {
 								peerInfo.LastUsed = lastUsed
 							}
-							log.Printf("listKnownPeers: Peer %s stats: lastUsed=%s, sent=%d, received=%d",
-								agentIDFqdn, lastUsed.Format("15:04:05"), totalSent, totalRecv)
+							lgApi.Debug("peer stats", "peer", agentIDFqdn, "lastUsed", lastUsed.Format("15:04:05"), "sent", totalSent, "received", totalRecv)
 						} else {
-							log.Printf("listKnownPeers: Peer %s not found in PeerRegistry", agentIDFqdn)
+							lgApi.Debug("peer not found in PeerRegistry", "peer", agentIDFqdn)
 						}
 					}
 					peers = append(peers, peerInfo)
@@ -759,10 +763,9 @@ func listKnownPeers(conf *Config) []PeerInfo {
 							if !lastUsed.IsZero() {
 								peerInfo.LastUsed = lastUsed
 							}
-							log.Printf("listKnownPeers: Peer %s stats: lastUsed=%s, sent=%d, received=%d",
-								agentIDFqdn, lastUsed.Format("15:04:05"), totalSent, totalRecv)
+							lgApi.Debug("peer stats", "peer", agentIDFqdn, "lastUsed", lastUsed.Format("15:04:05"), "sent", totalSent, "received", totalRecv)
 						} else {
-							log.Printf("listKnownPeers: Peer %s not found in PeerRegistry", agentIDFqdn)
+							lgApi.Debug("peer not found in PeerRegistry", "peer", agentIDFqdn)
 						}
 					}
 					peers = append(peers, peerInfo)
@@ -815,8 +818,7 @@ func listKnownPeers(conf *Config) []PeerInfo {
 						if !lastUsed.IsZero() {
 							peerInfo.LastUsed = lastUsed
 						}
-						log.Printf("listKnownPeers: Config-only peer %s stats: lastUsed=%s, sent=%d, received=%d",
-							peerIDFqdn, lastUsed.Format("15:04:05"), totalSent, totalRecv)
+						lgApi.Debug("config-only peer stats", "peer", peerIDFqdn, "lastUsed", lastUsed.Format("15:04:05"), "sent", totalSent, "received", totalRecv)
 					}
 				}
 				peers = append(peers, peerInfo)
@@ -882,8 +884,7 @@ func listKnownPeers(conf *Config) []PeerInfo {
 				}
 
 				peers = append(peers, peerInfo)
-				log.Printf("listKnownPeers: Added peer from PeerRegistry only: %s, state=%s, sent=%d, received=%d",
-					peerID, state, totalSent, totalRecv)
+				lgApi.Debug("added peer from PeerRegistry only", "peer", peerID, "state", state, "sent", totalSent, "received", totalRecv)
 			}
 		}
 	}

@@ -9,7 +9,6 @@ import (
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"net/http"
 	"os"
@@ -150,7 +149,7 @@ func (conf *Config) lookupStaticPeer(peerID string) *transport.Peer {
 func peerFromAddress(peerID string, address string) *transport.Peer {
 	host, portStr, err := net.SplitHostPort(address)
 	if err != nil {
-		log.Printf("lookupStaticPeer: invalid address %q for %s: %v", address, peerID, err)
+		lgApi.Warn("invalid address for static peer", "address", address, "peer", peerID, "err", err)
 		return nil
 	}
 	port, _ := strconv.Atoi(portStr)
@@ -169,12 +168,12 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 		var amp AgentMgmtPost
 		err := decoder.Decode(&amp)
 		if err != nil {
-			log.Println("APIagent: error decoding agent command post:", err)
+			lgApi.Warn("error decoding agent command post", "err", err)
 			http.Error(w, fmt.Sprintf("Invalid request format: %v", err), http.StatusBadRequest)
 			return
 		}
 
-		log.Printf("API: received /agent request (cmd: %s) from %s.", amp.Command, r.RemoteAddr)
+		lgApi.Debug("received /agent request", "cmd", amp.Command, "from", r.RemoteAddr)
 
 		resp := AgentMgmtResponse{
 			Time:     time.Now(),
@@ -186,7 +185,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			sanitizedResp := SanitizeForJSON(resp)
 			err := json.NewEncoder(w).Encode(sanitizedResp)
 			if err != nil {
-				log.Printf("Error from json encoder: %v", err)
+				lgApi.Error("json encoder failed", "err", err)
 			}
 		}()
 
@@ -240,8 +239,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			resp.Msg = pingResp.Msg
 
 		case "update-local-zonedata":
-			log.Printf("API: update-local-zonedata: added RRs: %+v", amp.AddedRRs)
-			log.Printf("API: update-local-zonedata: removed RRs: %+v", amp.RemovedRRs)
+			lgApi.Debug("update-local-zonedata", "addedRRs", amp.AddedRRs, "removedRRs", amp.RemovedRRs)
 
 			conf.Internal.MsgQs.Command <- &AgentMgmtPostPlus{
 				amp,
@@ -254,7 +252,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				// resp.Status = "ok"
 
 			case <-time.After(10 * time.Second):
-				log.Printf("APIagent: no response from CommandHandler after 10 seconds")
+				lgApi.Warn("no response from CommandHandler after 10 seconds")
 				resp.Error = true
 				resp.ErrorMsg = "No response from CommandHandler after 10 seconds, state unknown"
 			}
@@ -509,6 +507,40 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			resp = *routerResp
 			resp.Identity = AgentId(conf.Agent.Identity)
 
+		case "refresh-keys":
+			zd.RequestAndWaitForKeyInventory()
+			if !zd.KeystateOK {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("KEYSTATE exchange failed for zone %s: %s", amp.Zone, zd.KeystateError)
+			} else {
+				nForeign := 0
+				for _, entry := range zd.LastKeyInventory.Inventory {
+					if entry.State == DnskeyStateForeign {
+						nForeign++
+					}
+				}
+				// Derive local DNSKEYs from KEYSTATE and feed changes into SDE
+				changed, dskeyStatus, err := zd.LocalDnskeysFromKeystate()
+				if err != nil {
+					lgApi.Error("LocalDnskeysFromKeystate failed", "err", err)
+				}
+				if changed && dskeyStatus != nil {
+					zd.SyncQ <- SyncRequest{
+						Command:      "SYNC-DNSKEY-RRSET",
+						ZoneName:     ZoneName(zd.ZoneName),
+						ZoneData:     zd,
+						DnskeyStatus: dskeyStatus,
+					}
+				}
+				resp.Msg = fmt.Sprintf("Key inventory refreshed for zone %s: %d keys (%d local, %d foreign)",
+					amp.Zone, len(zd.LastKeyInventory.Inventory),
+					len(zd.LastKeyInventory.Inventory)-nForeign, nForeign)
+				if changed {
+					resp.Msg += fmt.Sprintf(", SDE updated (%d adds, %d removes)",
+						len(dskeyStatus.LocalAdds), len(dskeyStatus.LocalRemoves))
+				}
+			}
+
 		case "resync":
 			if amp.Zone == "" {
 				resp.Error = true
@@ -561,8 +593,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 
 func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request) {
 	if conf.Internal.MsgQs.DebugCommand == nil {
-		log.Println("APIagentDebug: DebugCommand channel is not set. Cannot forward debug commands. This is a fatal error.")
-		log.Printf("APIagentDebug: MsgQs: %+v", conf.Internal.MsgQs)
+		lgApi.Error("DebugCommand channel is not set, cannot forward debug commands, fatal")
 		os.Exit(1)
 	}
 
@@ -581,18 +612,18 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			sanitizedResp := SanitizeForJSON(resp)
 			err := json.NewEncoder(w).Encode(sanitizedResp)
 			if err != nil {
-				log.Printf("APIagentDebug: error encoding response: %v\n", err)
+				lgApi.Error("error encoding agent debug response", "err", err)
 			}
 		}()
 
 		if err != nil {
-			log.Printf("APIagentDebug: error decoding /agent/debugpost: %+v", err)
+			lgApi.Warn("error decoding /agent/debug post", "err", err)
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
 			return
 		}
 
-		log.Printf("APIagentDebug: received /agent/debug request (command: %q, messagetype: %q) from %s.\n", amp.Command, AgentMsgToString[amp.MessageType], r.RemoteAddr)
+		lgApi.Debug("received /agent/debug request", "command", amp.Command, "messagetype", AgentMsgToString[amp.MessageType], "from", r.RemoteAddr)
 
 		rch := make(chan *AgentMgmtResponse, 1)
 
@@ -614,7 +645,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 					resp.Status = "ok"
 
 				case <-time.After(10 * time.Second):
-					log.Printf("APIagentDebug: no response from send-notify after 10 seconds")
+					lgApi.Warn("no response from send-notify after 10 seconds")
 					resp.Error = true
 					resp.ErrorMsg = "No response from CommandHandler after 10 seconds, state unknown"
 				}
@@ -631,13 +662,13 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			// resp.AgentRegistry = conf.Internal.AgentRegistry
 			ar := conf.Internal.AgentRegistry
 			keys := ar.S.Keys()
-			log.Printf("APIagentDebug: dump-agentregistry: keys: %+v", keys)
+			lgApi.Debug("dump-agentregistry", "keys", keys)
 			for _, key := range keys {
 				if agent, exists := ar.S.Get(key); exists {
-					log.Printf("Agent registry: %s", agent.Identity)
+					lgApi.Debug("agent registry entry", "identity", agent.Identity)
 				}
 			}
-			log.Printf("APIagentDebug: dump-agentregistry: num shards: %d", ar.S.NumShards())
+			lgApi.Debug("dump-agentregistry", "numShards", ar.S.NumShards())
 			// dump.P(ar.S)
 			// tmpar := &AgentRegistry{
 			// RegularS:
@@ -662,9 +693,6 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			}
 
 		case "dump-zonedatarepo":
-			// johani 20250324: This does not work, crashes in IterBuffered() with shards=0 for unknown reason
-			// resp.Msg = fmt.Sprintf("Zone data repo: %+v", conf.Internal.ZoneDataRepo)
-			// resp.ZoneDataRepo = conf.Internal.ZoneDataRepo
 			sdcmd := &SynchedDataCmd{
 				Cmd:      "dump-zonedatarepo",
 				Zone:     "",
@@ -675,6 +703,19 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			case response := <-sdcmd.Response:
 				resp.Msg = response.Msg
 				resp.ZoneDataRepo = response.ZDR
+
+				// Include per-zone KEYSTATE health status
+				ksStatus := make(map[ZoneName]KeystateInfo)
+				for zone := range response.ZDR {
+					if zd, exists := Zones.Get(string(zone)); exists {
+						ksStatus[zone] = KeystateInfo{
+							OK:        zd.KeystateOK,
+							Error:     zd.KeystateError,
+							Timestamp: zd.KeystateTime.Format(time.RFC3339),
+						}
+					}
+				}
+				resp.KeystateStatus = ksStatus
 			case <-time.After(2 * time.Second):
 				resp.Error = true
 				resp.ErrorMsg = "No response from SynchedDataCmd after 2 seconds, state unknown"
@@ -806,7 +847,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				zu.RRsets[rrtype] = rrset
 			}
 
-			log.Printf("hsync-inject-sync: Injecting %d RRs from %q for zone %q", len(parsedRRs), amp.AgentId, amp.Zone)
+			lgApi.Info("injecting sync", "rrs", len(parsedRRs), "from", amp.AgentId, "zone", amp.Zone)
 
 			// Create response channel
 			cresp := make(chan *AgentMsgResponse, 1)
@@ -889,7 +930,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				MessageType:    "sync",
 			}
 
-			log.Printf("hsync-force-sync: Forcing sync to peer %q for zone %q", amp.AgentId, amp.Zone)
+			lgApi.Info("forcing sync to peer", "peer", amp.AgentId, "zone", amp.Zone)
 
 			// Send sync with fallback
 			ctx := context.Background()
@@ -997,7 +1038,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				zu.RRsets[rrtype] = rrset
 			}
 
-			log.Printf("hsync-send-to-combiner: Sending %d RRs from %q for zone %q to combiner", len(parsedRRs), amp.AgentId, amp.Zone)
+			lgApi.Info("sending to combiner", "rrs", len(parsedRRs), "from", amp.AgentId, "zone", amp.Zone)
 
 			// Create response channel
 			cresp := make(chan *AgentMsgResponse, 1)
@@ -1051,7 +1092,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				}
 			}
 
-			log.Printf("hsync-test-chain: Running %q scenario for zone %q", scenario, amp.Zone)
+			lgApi.Info("running test chain", "scenario", scenario, "zone", amp.Zone)
 
 			// Parse the RRs
 			var parsedRRs []dns.RR
@@ -1297,7 +1338,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				zu.RRsets[rrtype] = rrset
 			}
 
-			log.Printf("fake-sync-from: Injecting %d RRs from %q for zone %q", len(parsedRRs), amp.AgentId, amp.Zone)
+			lgApi.Info("injecting fake sync", "rrs", len(parsedRRs), "from", amp.AgentId, "zone", amp.Zone)
 
 			// Create response channel
 			cresp := make(chan *AgentMsgResponse, 1)
@@ -1404,7 +1445,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			for name := range rrtypeNames {
 				typeList = append(typeList, name)
 			}
-			log.Printf("%s: %s %d RR(s) (types: %s) for zone %q", amp.Command, action, len(parsedRRs), strings.Join(typeList, ", "), amp.Zone)
+			lgApi.Info("RR operation", "cmd", amp.Command, "action", action, "count", len(parsedRRs), "types", strings.Join(typeList, ", "), "zone", amp.Zone)
 
 			force := false
 			if amp.Data != nil {
@@ -1492,7 +1533,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				MessageType:    "sync",
 			}
 
-			log.Printf("send-sync-to: Sending sync to agent %q for zone %q (%d RRs)", amp.AgentId, amp.Zone, len(amp.RRs))
+			lgApi.Info("sending sync to agent", "target", amp.AgentId, "zone", amp.Zone, "rrs", len(amp.RRs))
 
 			// Send sync with fallback
 			ctx := context.Background()
@@ -1541,7 +1582,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 
 func (conf *Config) APIbeat() func(w http.ResponseWriter, r *http.Request) {
 	if conf.Internal.MsgQs.Beat == nil {
-		log.Println("APIbeat: AgentBeatQ channel is not set. Cannot forward heartbeats. This is a fatal error.")
+		lgApi.Error("AgentBeatQ channel is not set, cannot forward heartbeats, fatal")
 		os.Exit(1)
 	}
 
@@ -1558,12 +1599,12 @@ func (conf *Config) APIbeat() func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			err := json.NewEncoder(w).Encode(resp)
 			if err != nil {
-				log.Printf("APIbeat: error encoding response: %v\n", err)
+				lgApi.Error("error encoding beat response", "err", err)
 			}
 		}()
 
 		if err != nil {
-			log.Printf("APIbeat: error decoding beat post: %+v", err)
+			lgApi.Warn("error decoding beat post", "err", err)
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
 			return
@@ -1595,12 +1636,12 @@ func (conf *Config) APIbeat() func(w http.ResponseWriter, r *http.Request) {
 // This is the agent-to-agent sync API hello handler.
 func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
 	if conf.Internal.MsgQs.Hello == nil {
-		log.Println("APIhello: HelloQ channel is not set. Cannot forward HELLO msgs. This is a fatal error.")
+		lgApi.Error("HelloQ channel is not set, cannot forward HELLO msgs, fatal")
 		os.Exit(1)
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("APIhello: received /hello request from %s.\n", r.RemoteAddr)
+		lgApi.Debug("received /hello request", "from", r.RemoteAddr)
 
 		decoder := json.NewDecoder(r.Body)
 		var ahp AgentHelloPost
@@ -1615,12 +1656,12 @@ func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			err := json.NewEncoder(w).Encode(resp)
 			if err != nil {
-				log.Printf("APIhello: error encoding response: %v\n", err)
+				lgApi.Error("error encoding hello response", "err", err)
 			}
 		}()
 
 		if err != nil {
-			log.Printf("APIhello: error decoding /hello post: %+v", err)
+			lgApi.Warn("error decoding /hello post", "err", err)
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
 			return
@@ -1631,18 +1672,18 @@ func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
 
 		needed, errmsg, err := conf.Internal.AgentRegistry.EvaluateHello(&ahp)
 		if err != nil {
-			log.Printf("APIhello: error evaluating hello: %+v", err)
+			lgApi.Warn("error evaluating hello", "err", err)
 			resp.Error = true
 			resp.ErrorMsg = errmsg
 			return
 		}
 
 		if needed {
-			log.Printf("APIhello: Success: Zone %q HSYNC RRset includes both our identities. Sending nice response", ahp.Zone)
+			lgApi.Info("hello accepted, HSYNC RRset includes both identities", "zone", ahp.Zone)
 			resp.Msg = fmt.Sprintf("Hello there, %s! Nice of you to call on us. I'm a TDNS agent with identity %q and we do share responsibility for zone %q",
 				ahp.MyIdentity, conf.Agent.Identity, ahp.Zone)
 		} else {
-			log.Printf("APIhello: Error: Zone %q HSYNC RRset does not include both our identities", ahp.Zone)
+			lgApi.Warn("hello rejected, HSYNC RRset does not include both identities", "zone", ahp.Zone)
 			resp.Error = true
 			resp.ErrorMsg = errmsg
 			return
@@ -1667,7 +1708,7 @@ func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
 
 func (conf *Config) APImsg() func(w http.ResponseWriter, r *http.Request) {
 	if conf.Internal.MsgQs.Msg == nil {
-		log.Println("APImsg: msgQ channel is not set. Cannot forward API msgs. This is a fatal error.")
+		lgApi.Error("msgQ channel is not set, cannot forward API msgs, fatal")
 		os.Exit(1)
 	}
 
@@ -1682,29 +1723,29 @@ func (conf *Config) APImsg() func(w http.ResponseWriter, r *http.Request) {
 
 		defer func() {
 			w.Header().Set("Content-Type", "application/json")
-			log.Printf("APImsg: encoding response: %+v", resp)
+			lgApi.Debug("encoding msg response", "resp", resp)
 			respData, err := json.Marshal(resp)
 			if err != nil {
-				log.Printf("APImsg: error marshaling response: %v\n", err)
+				lgApi.Error("error marshaling msg response", "err", err)
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("Error marshaling response: %v", err)
 				respData, _ = json.Marshal(resp) // Attempt to marshal the error response
 			}
-			log.Printf("APImsg: response data: %s", string(respData))
+			lgApi.Debug("msg response data", "data", string(respData))
 			_, err = w.Write(respData)
 			if err != nil {
-				log.Printf("APImsg: error writing response: %v\n", err)
+				lgApi.Error("error writing msg response", "err", err)
 			}
 		}()
 
 		if err != nil {
-			log.Printf("APImsg: error decoding /msg post: %+v", err)
+			lgApi.Warn("error decoding /msg post", "err", err)
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
 			return
 		}
 
-		log.Printf("APImsg: received /msg %q request from %s (identity: %s).\n", amp.MessageType, r.RemoteAddr, amp.MyIdentity)
+		lgApi.Debug("received /msg request", "messageType", amp.MessageType, "from", r.RemoteAddr, "originator", amp.OriginatorID)
 
 		switch amp.MessageType {
 		case AgentMsgNotify, AgentMsgStatus, AgentMsgRfi:
@@ -1719,9 +1760,9 @@ func (conf *Config) APImsg() func(w http.ResponseWriter, r *http.Request) {
 			}:
 				select {
 				case r := <-cresp:
-					log.Printf("APImsg: Received response from msg handler: %+v", r)
+					lgApi.Debug("received response from msg handler", "resp", r)
 					if r.Error {
-						log.Printf("APImsg: Error processing message from %s: %s", amp.MyIdentity, r.ErrorMsg)
+						lgApi.Warn("error processing message", "originator", amp.OriginatorID, "err", r.ErrorMsg)
 						resp.Error = true
 						resp.ErrorMsg = r.ErrorMsg
 						resp.Status = "error"
@@ -1732,19 +1773,19 @@ func (conf *Config) APImsg() func(w http.ResponseWriter, r *http.Request) {
 					return
 
 				case <-time.After(2 * time.Second):
-					log.Printf("APImsg: No response received for message from %s after waiting 2 seconds", amp.MyIdentity)
+					lgApi.Warn("no response received for message within timeout", "originator", amp.OriginatorID)
 					resp.Error = true
 					resp.ErrorMsg = "No response received within timeout period"
 				}
 			default:
-				log.Printf("APImsg: Msg response channel is blocked, skipping message from %s", amp.MyIdentity)
+				lgApi.Warn("msg response channel is blocked, skipping message", "originator", amp.OriginatorID)
 				resp.Error = true
 				resp.ErrorMsg = "Msg channel is blocked"
 			}
 
 		default:
 			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("Unknown message type: %q from %s", AgentMsgToString[amp.MessageType], amp.MyIdentity)
+			resp.ErrorMsg = fmt.Sprintf("Unknown message type: %q from %s", AgentMsgToString[amp.MessageType], amp.OriginatorID)
 		}
 	}
 }

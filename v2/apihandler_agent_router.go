@@ -8,7 +8,6 @@ package tdns
 
 import (
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/johanix/tdns/v2/agent/transport"
@@ -175,7 +174,7 @@ func handleRouterReset(router *transport.DNSMessageRouter) *AgentMgmtResponse {
 	}
 
 	router.Reset()
-	log.Printf("Router metrics reset via API")
+	lgApi.Info("router metrics reset via API")
 
 	resp.Msg = "Router metrics reset successfully"
 	return resp
@@ -201,5 +200,5 @@ func handleRouterReset(router *transport.DNSMessageRouter) *AgentMgmtResponse {
 func AddRouterCommandsToSwitch() {
 	// This is a documentation function - the actual switch cases need to be added
 	// manually to apihandler_agent.go. This function serves as a guide.
-	log.Println("Router command handlers available: router-list, router-describe, router-metrics, router-walk, router-reset")
+	lgApi.Info("router command handlers available: router-list, router-describe, router-metrics, router-walk, router-reset")
 }

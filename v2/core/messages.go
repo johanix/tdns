@@ -19,6 +19,7 @@ const (
 	AgentMsgStatus   AgentMsg = "status"
 	AgentMsgPing     AgentMsg = "ping"
 	AgentMsgKeystate AgentMsg = "keystate"
+	AgentMsgEdits    AgentMsg = "edits"
 )
 
 var AgentMsgToString = map[AgentMsg]string{
@@ -30,6 +31,7 @@ var AgentMsgToString = map[AgentMsg]string{
 	AgentMsgStatus:   "STATUS",
 	AgentMsgPing:     "PING",
 	AgentMsgKeystate: "KEYSTATE",
+	AgentMsgEdits:    "EDITS",
 }
 
 // AgentHelloPost represents a hello handshake message.
@@ -80,17 +82,27 @@ type AgentBeatResponse struct {
 	ErrorMsg     string
 }
 
+// RROperation describes an explicit operation on DNS records.
+// When Operations is populated on a message, Records is ignored by the receiver.
+// Operations use explicit semantics instead of overloading the DNS Class field.
+type RROperation struct {
+	Operation string   `json:"operation"`         // "add", "delete", "replace"
+	RRtype    string   `json:"rrtype"`            // DNS RR type name (e.g. "DNSKEY", "NS", "A")
+	Records   []string `json:"records,omitempty"` // RR strings in ClassINET text format
+}
+
 // AgentMsgPost represents a generic agent message (sync, update, rfi, status).
 // Used by both API and DNS transports.
 type AgentMsgPost struct {
 	MessageType  AgentMsg            // "sync", "update", "rfi", "status"
-	MyIdentity   string              // Sender's identity
+	OriginatorID string              // Original author of the update
 	YourIdentity string              // Recipient's identity
 	Addresses    []string            `json:"addresses,omitempty"` // DEPRECATED: Use DNS discovery (SVCB records) instead
 	Port         uint16              `json:"port,omitempty"`      // DEPRECATED: Use DNS discovery (URI scheme) instead
 	TLSA         dns.TLSA            `json:"tlsa,omitempty"`      // DEPRECATED: Use DNS discovery (TLSA query) instead
 	Zone         string              // Zone this message refers to (only one zone per message)
-	Records      map[string][]string // Resource records grouped by owner name (owner → []RR strings)
+	Records      map[string][]string `json:"records,omitempty"`    // Resource records grouped by owner name (legacy: Class-overloaded)
+	Operations   []RROperation       `json:"operations,omitempty"` // Explicit operations (takes precedence over Records)
 	Time         time.Time           // Message timestamp
 	RfiType      string              // Type of RFI request if MessageType is RFI
 }
@@ -163,7 +175,7 @@ type KeyInventoryEntry struct {
 	KeyTag    uint16 `json:"key_tag"`
 	Algorithm uint8  `json:"algorithm"`
 	Flags     uint16 `json:"flags"`
-	State     string `json:"state"`  // "created","published","standby","active","retired","foreign"
+	State     string `json:"state"` // "created","published","standby","active","retired","foreign"
 	KeyRR     string `json:"keyrr"` // Full DNSKEY RR string (public key data)
 }
 
@@ -179,4 +191,17 @@ type AgentKeystateResponse struct {
 	Msg          string
 	Error        bool
 	ErrorMsg     string
+}
+
+// AgentEditsPost represents an EDITS message carrying an agent's current contributions
+// from the combiner back to the requesting agent.
+// Modeled on AgentKeystatePost. The combiner sends this in response to an RFI EDITS request.
+type AgentEditsPost struct {
+	MessageType  AgentMsg            // AgentMsgEdits
+	MyIdentity   string              // Combiner identity
+	YourIdentity string              // Requesting agent identity
+	Zone         string              // Zone (FQDN)
+	Records      map[string][]string // Agent's current contributions (owner → []RR strings)
+	Message      string              // Optional status message
+	Time         time.Time           // Timestamp
 }

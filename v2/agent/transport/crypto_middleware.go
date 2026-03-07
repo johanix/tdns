@@ -9,7 +9,6 @@ package transport
 
 import (
 	"fmt"
-	"log"
 )
 
 // SecurityEvent represents a security-related event that should be logged/alerted.
@@ -30,8 +29,7 @@ type SecurityEventLogger interface {
 type DefaultSecurityLogger struct{}
 
 func (l *DefaultSecurityLogger) LogSecurityEvent(event SecurityEvent) {
-	log.Printf("[SECURITY-%s] %s: peer=%s reason=%s",
-		event.Severity, event.Type, event.PeerID, event.Reason)
+	lgCrypto().Warn("security event", "severity", event.Severity, "type", event.Type, "peer", event.PeerID, "reason", event.Reason)
 }
 
 // CryptoMiddlewareConfig holds configuration for crypto middleware.
@@ -80,16 +78,14 @@ func NewSignatureMiddleware(cfg *CryptoMiddlewareConfig) MiddlewareFunc {
 		// Skip if already processed (e.g., by RouteViaRouter)
 		// ChunkCrypted=false with SignatureValid=true means it was already decrypted/verified upstream
 		if !ctx.ChunkCrypted && ctx.SignatureValid {
-			log.Printf("SignatureMiddleware: Skipping - payload already decrypted/verified upstream (peer %s)",
-				ctx.PeerID)
+			lgCrypto().Debug("skipping signature check, already verified upstream", "peer", ctx.PeerID)
 			return next(ctx)
 		}
 
 		// Skip if payload is not encrypted/signed
 		if !IsPayloadEncrypted(ctx.ChunkPayload) {
 			if cfg.AllowUnencrypted {
-				log.Printf("SignatureMiddleware: Allowing unencrypted payload from peer %s (AllowUnencrypted=true)",
-					ctx.PeerID)
+				lgCrypto().Debug("allowing unencrypted payload", "peer", ctx.PeerID)
 				return next(ctx)
 			}
 			return fmt.Errorf("unencrypted payload not allowed (crypto is enabled)")
@@ -282,17 +278,16 @@ func NewAuthorizationMiddleware(tm interface {
 func NewLoggingMiddleware(verbose bool) MiddlewareFunc {
 	return func(ctx *MessageContext, next MessageHandlerFunc) error {
 		if verbose {
-			log.Printf("LoggingMiddleware: Processing message from %s (peer=%s, distrib=%s)",
-				ctx.RemoteAddr, ctx.PeerID, ctx.DistributionID)
+			lgTransport().Debug("processing message", "source", ctx.RemoteAddr, "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 		}
 
 		err := next(ctx)
 
 		if verbose {
 			if err != nil {
-				log.Printf("LoggingMiddleware: Message processing failed: %v", err)
+				lgTransport().Debug("message processing failed", "err", err)
 			} else {
-				log.Printf("LoggingMiddleware: Message processed successfully")
+				lgTransport().Debug("message processed successfully")
 			}
 		}
 

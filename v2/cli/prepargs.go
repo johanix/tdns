@@ -49,7 +49,7 @@ func PrepArgs(args ...interface{}) {
 		}
 	}
 
-	DefinedDnskeyStates := []string{"created", "published", "active", "retired", "foreign"}
+	DefinedDnskeyStates := []string{"created", "mpdist", "mpremove", "published", "standby", "active", "retired", "removed", "foreign"}
 	DefinedDnskeyTypes := []string{"KSK", "ZSK", "CSK"}
 	// DefinedAlgorithms := []string{"RSASHA256", "RSASHA512", "ED25519", "ECDSAP256SHA256", "ECDSAP384SHA384"}
 

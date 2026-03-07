@@ -13,15 +13,17 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/johanix/tdns/v2/agent/transport"
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
+
+var lgTransport = Logger("transport")
 
 // generatePingNonce returns a random nonce for ping requests.
 func generatePingNonce() string {
@@ -89,6 +91,12 @@ type TransportManager struct {
 	// getImrEngine returns the IMR resolver for DNS-based agent discovery (optional).
 	// Uses a closure because ImrEngine starts asynchronously after TM creation.
 	getImrEngine func() *Imr
+
+	// keystateRfiChan is set by RequestAndWaitForKeyInventory to receive the
+	// solicited inventory response. When non-nil, routeKeystateMessage routes
+	// inventory messages here instead of msgQs.KeystateInventory, preventing
+	// the HsyncEngine from stealing the response.
+	keystateRfiChan atomic.Pointer[chan *KeystateInventoryMsg]
 }
 
 // TransportManagerConfig holds configuration for creating a TransportManager.
@@ -150,7 +158,7 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 	// Production configs MUST specify supported_mechanisms explicitly (validated at config load)
 	supportedMechanisms := cfg.SupportedMechanisms
 	if len(supportedMechanisms) == 0 {
-		log.Printf("WARNING: TransportManager created without supported_mechanisms - defaulting to [api, dns]")
+		lgTransport.Warn("created without supported_mechanisms, defaulting to [api, dns]")
 		supportedMechanisms = []string{"api", "dns"}
 	}
 
@@ -186,7 +194,7 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 		LocalID:        cfg.LocalID,
 		DefaultTimeout: cfg.APITimeout,
 	})
-	log.Printf("TransportManager: API client transport enabled")
+	lgTransport.Info("API client transport enabled")
 
 	// Create DNS transport if control zone is configured AND supported
 	if cfg.ControlZone != "" && tm.isTransportSupported("dns") {
@@ -223,17 +231,17 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 				expiresAt := now.Add(time.Duration(retentionSecs) * time.Second)
 
 				cache.Add(qname, &DistributionInfo{
-					DistributionID:   distributionID,
-					SenderID:         senderID,
-					ReceiverID:       receiverID,
-					Operation:        operation,
-					ContentType:      "",
-					State:            "pending",
-					PayloadSize:      payloadSize,
-					CreatedAt:        now,
-					CompletedAt:      nil,
-					ExpiresAt:        &expiresAt,
-					QNAME:            qname,
+					DistributionID: distributionID,
+					SenderID:       senderID,
+					ReceiverID:     receiverID,
+					Operation:      operation,
+					ContentType:    "",
+					State:          "pending",
+					PayloadSize:    payloadSize,
+					CreatedAt:      now,
+					CompletedAt:    nil,
+					ExpiresAt:      &expiresAt,
+					QNAME:          qname,
 				})
 			}
 			dnsCfg.DistributionMarkCompleted = func(qname string) { cache.MarkCompleted(qname) }
@@ -294,7 +302,7 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 				select {
 				case tm.msgQs.Confirmation <- detail:
 				default:
-					log.Printf("TransportManager: Confirmation channel full, dropping detail for %s", distributionID)
+					lgTransport.Warn("confirmation channel full, dropping detail", "distributionID", distributionID)
 				}
 			}
 		}
@@ -310,14 +318,14 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 
 		// Trigger discovery when we receive messages from authorized but undiscovered peers
 		tm.ChunkHandler.OnPeerDiscoveryNeeded = func(peerID string) {
-			log.Printf("TransportManager: Triggering discovery for peer %s (missing verification key)", peerID)
+			lgTransport.Info("triggering discovery for peer (missing verification key)", "peer", peerID)
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			err := tm.DiscoverAndRegisterAgent(ctx, peerID)
 			if err != nil {
-				log.Printf("TransportManager: Discovery failed for peer %s: %v", peerID, err)
+				lgTransport.Warn("discovery incomplete for peer", "peer", peerID, "err", err)
 			} else {
-				log.Printf("TransportManager: Successfully discovered peer %s, verification key now available", peerID)
+				lgTransport.Info("successfully discovered peer, verification key now available", "peer", peerID)
 			}
 		}
 
@@ -331,17 +339,16 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			AllowUnencrypted:             false,
 			VerboseStats:                 false, // Set to true for verbose statistics logging
 		}
-		log.Printf("InitializeTransport: RouterConfig.PeerRegistry = %v (nil=%t)",
-			routerCfg.PeerRegistry, routerCfg.PeerRegistry == nil)
+		lgTransport.Debug("router config", "peerRegistry", routerCfg.PeerRegistry, "peerRegistryNil", routerCfg.PeerRegistry == nil)
 		if err := transport.InitializeRouter(tm.Router, routerCfg); err != nil {
-			log.Printf("TransportManager: Warning - router initialization failed: %v", err)
+			lgTransport.Warn("router initialization failed", "err", err)
 		}
 
-		log.Printf("TransportManager: DNS transport enabled")
+		lgTransport.Info("DNS transport enabled")
 	} else if cfg.ControlZone == "" {
-		log.Printf("TransportManager: DNS transport not configured (no control zone)")
+		lgTransport.Info("DNS transport not configured (no control zone)")
 	} else {
-		log.Printf("TransportManager: DNS transport disabled by configuration")
+		lgTransport.Info("DNS transport disabled by configuration")
 	}
 
 	return tm
@@ -376,7 +383,7 @@ func (tm *TransportManager) RegisterChunkNotifyHandler() error {
 		return fmt.Errorf("failed to register CHUNK NOTIFY handler: %w", err)
 	}
 
-	log.Printf("TransportManager: Registered CHUNK NOTIFY handler for control zone %s", tm.ControlZone)
+	lgTransport.Info("registered CHUNK NOTIFY handler", "controlZone", tm.ControlZone)
 	return nil
 }
 
@@ -384,19 +391,23 @@ func (tm *TransportManager) RegisterChunkNotifyHandler() error {
 // to the appropriate hsyncengine channels.
 func (tm *TransportManager) StartIncomingMessageRouter(ctx context.Context) {
 	if tm.ChunkHandler == nil {
-		log.Printf("TransportManager: DNS transport not configured, skipping incoming message router")
+		lgTransport.Info("DNS transport not configured, skipping incoming message router")
 		return
 	}
 
 	go func() {
-		log.Printf("TransportManager: Starting incoming DNS message router")
+		lgTransport.Info("starting incoming DNS message router")
 		for {
 			select {
 			case <-ctx.Done():
-				log.Printf("TransportManager: Incoming message router stopped")
+				lgTransport.Info("incoming message router stopped")
 				return
 
-			case msg := <-tm.ChunkHandler.IncomingChan:
+			case msg, ok := <-tm.ChunkHandler.IncomingChan:
+				if !ok {
+					lgTransport.Info("incoming message channel closed, stopping router")
+					return
+				}
 				tm.routeIncomingMessage(msg)
 			}
 		}
@@ -405,7 +416,7 @@ func (tm *TransportManager) StartIncomingMessageRouter(ctx context.Context) {
 
 // routeIncomingMessage routes an incoming DNS message to the appropriate hsyncengine channel.
 func (tm *TransportManager) routeIncomingMessage(msg *transport.IncomingMessage) {
-	log.Printf("TransportManager: Routing %s message from %s", msg.Type, msg.SenderID)
+	lgTransport.Debug("routing message", "type", msg.Type, "sender", msg.SenderID)
 
 	switch msg.Type {
 	case "hello":
@@ -418,10 +429,12 @@ func (tm *TransportManager) routeIncomingMessage(msg *transport.IncomingMessage)
 		tm.routeSyncMessage(msg)
 	case "keystate":
 		tm.routeKeystateMessage(msg)
+	case "edits":
+		tm.routeEditsMessage(msg)
 	case "relocate":
 		tm.routeRelocateMessage(msg)
 	default:
-		log.Printf("TransportManager: Unknown message type: %s", msg.Type)
+		lgTransport.Warn("unknown message type", "type", msg.Type)
 	}
 }
 
@@ -429,14 +442,14 @@ func (tm *TransportManager) routeIncomingMessage(msg *transport.IncomingMessage)
 func (tm *TransportManager) routeHelloMessage(msg *transport.IncomingMessage) {
 	payload, err := transport.ParseHelloPayload(msg.Payload)
 	if err != nil {
-		log.Printf("TransportManager: Failed to parse hello payload: %v", err)
+		lgTransport.Error("failed to parse hello payload", "err", err)
 		return
 	}
 
 	// Authorization already verified by AuthorizationMiddleware in the router.
 	// Messages reaching routeHelloMessage have passed middleware auth.
 	senderID := payload.GetSenderID()
-	log.Printf("TransportManager: Processing authorized DNS hello from %s", senderID)
+	lgTransport.Debug("processing authorized DNS hello", "sender", senderID)
 
 	// DNS-37: Update PeerRegistry state (DNS hello accepted → INTRODUCING state)
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
@@ -451,7 +464,7 @@ func (tm *TransportManager) routeHelloMessage(msg *transport.IncomingMessage) {
 			// This prevents Hello messages from downgrading state (e.g., after peer restart)
 			if agent.DnsDetails.State < AgentStateIntroduced {
 				agent.DnsDetails.State = AgentStateIntroduced
-				log.Printf("TransportManager: Updated agent %s DNS state to INTRODUCED after receiving Hello", senderID)
+				lgTransport.Info("updated agent DNS state to INTRODUCED after receiving Hello", "agent", senderID)
 			}
 			agent.DnsDetails.HelloTime = time.Now()
 			agent.DnsDetails.LastContactTime = time.Now()
@@ -459,22 +472,22 @@ func (tm *TransportManager) routeHelloMessage(msg *transport.IncomingMessage) {
 		} else {
 			// DNS-56: Agent not in registry but authorized - trigger discovery
 			// This ensures receiver can send beats back to sender
-			log.Printf("TransportManager: Authorized Hello from unknown agent %s - triggering discovery", senderID)
+			lgTransport.Info("authorized Hello from unknown agent, triggering discovery", "agent", senderID)
 			go func(peerID string) {
 				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 				defer cancel()
 				err := tm.DiscoverAndRegisterAgent(ctx, peerID)
 				if err != nil {
-					log.Printf("TransportManager: Discovery failed for agent %s: %v", peerID, err)
+					lgTransport.Error("discovery failed for agent", "agent", peerID, "err", err)
 				} else {
-					log.Printf("TransportManager: Successfully discovered agent %s, now in registry", peerID)
+					lgTransport.Info("successfully discovered agent, now in registry", "agent", peerID)
 					// Update the newly discovered agent's DNS state to INTRODUCED
 					if discoveredAgent, ok := tm.agentRegistry.S.Get(AgentId(peerID)); ok {
 						discoveredAgent.DnsDetails.State = AgentStateIntroduced
 						discoveredAgent.DnsDetails.HelloTime = time.Now()
 						discoveredAgent.DnsDetails.LastContactTime = time.Now()
 						tm.agentRegistry.S.Set(discoveredAgent.Identity, discoveredAgent)
-						log.Printf("TransportManager: Updated discovered agent %s DNS state to INTRODUCED", peerID)
+						lgTransport.Info("updated discovered agent DNS state to INTRODUCED", "agent", peerID)
 					}
 				}
 			}(senderID)
@@ -489,15 +502,15 @@ func (tm *TransportManager) routeHelloMessage(msg *transport.IncomingMessage) {
 	}
 
 	if tm.msgQs == nil {
-		log.Printf("TransportManager: Hello from %s authorized but no agent queues (signer mode), ignoring", senderID)
+		lgTransport.Debug("hello authorized but no agent queues (signer mode), ignoring", "sender", senderID)
 		return
 	}
 
 	select {
 	case tm.msgQs.Hello <- report:
-		log.Printf("TransportManager: Routed DNS hello from %s to hsyncengine (now INTRODUCING, distrib=%s)", senderID, msg.DistributionID)
+		lgTransport.Debug("routed DNS hello to hsyncengine", "sender", senderID, "state", "INTRODUCING", "distributionID", msg.DistributionID)
 	default:
-		log.Printf("TransportManager: Hello channel full, dropping message from %s", senderID)
+		lgTransport.Warn("hello channel full, dropping message", "sender", senderID)
 	}
 }
 
@@ -505,7 +518,7 @@ func (tm *TransportManager) routeHelloMessage(msg *transport.IncomingMessage) {
 func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 	payload, err := transport.ParseBeatPayload(msg.Payload)
 	if err != nil {
-		log.Printf("TransportManager: Failed to parse beat payload: %v", err)
+		lgTransport.Error("failed to parse beat payload", "err", err)
 		return
 	}
 
@@ -515,7 +528,7 @@ func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 	// Beat includes Zones field (list of zones sender believes are shared)
 	// Authorization already verified by AuthorizationMiddleware in the router.
 	// Messages reaching routeBeatMessage have passed middleware auth.
-	log.Printf("TransportManager: Processing authorized DNS beat from %s (zones: %v)", senderID, payload.Zones)
+	lgTransport.Debug("processing authorized DNS beat", "sender", senderID, "zones", payload.Zones)
 
 	// DNS-37: Update peer state on successful beat
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
@@ -549,15 +562,15 @@ func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 	}
 
 	if tm.msgQs == nil {
-		log.Printf("TransportManager: Beat from %s authorized but no agent queues (signer mode), ignoring", senderID)
+		lgTransport.Debug("beat authorized but no agent queues (signer mode), ignoring", "sender", senderID)
 		return
 	}
 
 	select {
 	case tm.msgQs.Beat <- report:
-		log.Printf("TransportManager: Routed DNS beat from %s to hsyncengine (now OPERATIONAL, distrib=%s)", senderID, distributionID)
+		lgTransport.Debug("routed DNS beat to hsyncengine", "sender", senderID, "state", "OPERATIONAL", "distributionID", distributionID)
 	default:
-		log.Printf("TransportManager: Beat channel full, dropping message from %s", senderID)
+		lgTransport.Warn("beat channel full, dropping message", "sender", senderID)
 	}
 }
 
@@ -566,7 +579,7 @@ func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 // this routing is for peer liveness tracking and counting.
 func (tm *TransportManager) routePingMessage(msg *transport.IncomingMessage) {
 	senderID := msg.SenderID
-	log.Printf("TransportManager: Processing ping from %s", senderID)
+	lgTransport.Debug("processing ping", "sender", senderID)
 
 	// Update PeerRegistry liveness
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
@@ -585,9 +598,9 @@ func (tm *TransportManager) routePingMessage(msg *transport.IncomingMessage) {
 
 	select {
 	case tm.msgQs.Ping <- report:
-		log.Printf("TransportManager: Routed ping from %s to MsgQs", senderID)
+		lgTransport.Debug("routed ping to MsgQs", "sender", senderID)
 	default:
-		log.Printf("TransportManager: Ping channel full, dropping message from %s", senderID)
+		lgTransport.Warn("ping channel full, dropping message", "sender", senderID)
 	}
 }
 
@@ -595,7 +608,7 @@ func (tm *TransportManager) routePingMessage(msg *transport.IncomingMessage) {
 func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 	payload, err := transport.ParseSyncPayload(msg.Payload)
 	if err != nil {
-		log.Printf("TransportManager: Failed to parse sync payload: %v", err)
+		lgTransport.Error("failed to parse sync payload", "err", err)
 		return
 	}
 
@@ -607,7 +620,11 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 	}
 
 	senderID := payload.GetSenderID() // Use helper method to get sender ID from either format
-	records := payload.GetRecords()   // Use helper method to get records from either format
+	if senderID == "" && msg.TransportSender != "" {
+		senderID = msg.TransportSender // Fallback to transport-level sender (from QNAME)
+		lgTransport.Debug("payload had empty sender, using transport sender", "sender", senderID)
+	}
+	records := payload.GetRecords() // Use helper method to get records from either format
 	zone := payload.Zone
 
 	// Determine message type (sync, update, rfi, or status)
@@ -619,7 +636,7 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 
 	// Authorization already verified by AuthorizationMiddleware in the router.
 	// Messages reaching routeSyncMessage have passed middleware auth.
-	log.Printf("TransportManager: Processing authorized DNS %s from %s for zone %s", msgTypeStr, senderID, zone)
+	lgTransport.Debug("processing authorized DNS message", "msgType", msgTypeStr, "sender", senderID, "zone", zone, "transportSender", msg.TransportSender)
 
 	// Update peer state on successful message
 	peer := tm.PeerRegistry.GetOrCreate(senderID)
@@ -634,12 +651,42 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 		}
 	}
 
+	// DeliveredBy is the transport-level sender (from QNAME), which may differ from
+	// the originator for forwarded messages. The combiner needs this to send confirmations
+	// back to the agent that actually delivered the message, not the original author.
+	deliveredBy := msg.TransportSender
+	if deliveredBy == "" {
+		deliveredBy = senderID // Fallback for direct delivery
+	}
+
+	// Ensure the transport sender (deliverer) has a PeerRegistry entry with an address.
+	// For forwarded messages, the deliverer may be a remote agent not pre-registered in this
+	// combiner's config. Trigger async discovery so the address is available for confirmation.
+	if deliveredBy != senderID {
+		deliverPeer := tm.PeerRegistry.GetOrCreate(deliveredBy)
+		deliverPeer.SetState(transport.PeerStateOperational, fmt.Sprintf("delivered %s for %s", msgTypeStr, senderID))
+		if deliverPeer.CurrentAddress() == nil {
+			lgTransport.Info("transport sender has no address, triggering async discovery", "sender", deliveredBy)
+			go func(peerID string) {
+				ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				defer cancel()
+				if err := tm.DiscoverAndRegisterAgent(ctx, peerID); err != nil {
+					lgTransport.Error("discovery failed for transport sender", "sender", peerID, "err", err)
+				} else {
+					lgTransport.Info("discovered transport sender", "sender", peerID)
+				}
+			}(deliveredBy)
+		}
+	}
+
 	msgPost := &AgentMsgPostPlus{
 		AgentMsgPost: AgentMsgPost{
 			MessageType:    messageType,
-			MyIdentity:     AgentId(senderID),
+			OriginatorID:   AgentId(senderID),
+			DeliveredBy:    AgentId(deliveredBy),
 			Zone:           ZoneName(zone),
 			Records:        records,
+			Operations:     payload.GetOperations(),
 			Time:           time.Unix(payload.Timestamp, 0),
 			RfiType:        payload.RfiType,        // Include RfiType for RFI messages
 			DistributionID: payload.DistributionID, // Originating distID from sending agent
@@ -647,14 +694,13 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 	}
 
 	if tm.msgQs == nil {
-		log.Printf("TransportManager: %s from %s authorized but no agent queues (signer mode), ignoring", msgTypeStr, senderID)
+		lgTransport.Debug("message authorized but no agent queues (signer mode), ignoring", "msgType", msgTypeStr, "sender", senderID)
 		return
 	}
 
 	select {
 	case tm.msgQs.Msg <- msgPost:
-		log.Printf("TransportManager: Routed DNS %s from %s (zone: %s) to hsyncengine",
-			msgTypeStr, senderID, zone)
+		lgTransport.Debug("routed DNS message to hsyncengine", "msgType", msgTypeStr, "sender", senderID, "zone", zone)
 
 		// Send immediate "pending" confirmation back to originating agent (two-phase protocol).
 		// This tells the originator "I received your sync" so it doesn't need to resend.
@@ -664,7 +710,7 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 			go tm.sendImmediateConfirmation(payload)
 		}
 	default:
-		log.Printf("TransportManager: Message channel full, dropping %s from %s", msgTypeStr, senderID)
+		lgTransport.Warn("message channel full, dropping message", "msgType", msgTypeStr, "sender", senderID)
 	}
 }
 
@@ -674,24 +720,40 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 func (tm *TransportManager) routeKeystateMessage(msg *transport.IncomingMessage) {
 	var payload transport.DnsKeystatePayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
-		log.Printf("TransportManager: Failed to parse keystate payload: %v", err)
+		lgTransport.Error("failed to parse keystate payload", "err", err)
 		return
 	}
 
 	senderID := payload.GetSenderID()
-	log.Printf("TransportManager: Processing KEYSTATE %s from %s for zone %s",
-		payload.Signal, senderID, payload.Zone)
+	lgTransport.Debug("processing KEYSTATE", "signal", payload.Signal, "sender", senderID, "zone", payload.Zone)
 
 	if payload.Signal != "inventory" {
-		log.Printf("TransportManager: Non-inventory KEYSTATE %s from %s, routing to Msg queue",
-			payload.Signal, senderID)
-		// Per-key signals go through the normal Msg channel (for hsyncengine)
-		tm.routeSyncMessage(msg)
+		// Per-key signals (propagated/rejected/removed) go to the dedicated KeystateSignal channel
+		// so the SignerMsgHandler can process them. Falls back to routeSyncMessage if the channel
+		// is not available (e.g. on an agent where this signal doesn't apply).
+		if tm.msgQs != nil && tm.msgQs.KeystateSignal != nil {
+			sigMsg := &KeystateSignalMsg{
+				SenderID: senderID,
+				Zone:     payload.Zone,
+				KeyTag:   payload.KeyTag,
+				Signal:   payload.Signal,
+				Message:  payload.Message,
+			}
+			select {
+			case tm.msgQs.KeystateSignal <- sigMsg:
+				lgTransport.Info("routed KEYSTATE signal", "signal", payload.Signal, "sender", senderID, "zone", payload.Zone, "keyTag", payload.KeyTag)
+			default:
+				lgTransport.Warn("KeystateSignal channel full, dropping", "signal", payload.Signal, "sender", senderID)
+			}
+		} else {
+			lgTransport.Debug("non-inventory KEYSTATE, no KeystateSignal channel, routing to Msg queue", "signal", payload.Signal, "sender", senderID)
+			tm.routeSyncMessage(msg)
+		}
 		return
 	}
 
 	if tm.msgQs == nil {
-		log.Printf("TransportManager: KEYSTATE inventory from %s but no MsgQs, ignoring", senderID)
+		lgTransport.Debug("KEYSTATE inventory but no MsgQs, ignoring", "sender", senderID)
 		return
 	}
 
@@ -713,12 +775,55 @@ func (tm *TransportManager) routeKeystateMessage(msg *transport.IncomingMessage)
 		Inventory: items,
 	}
 
+	// If there's a pending RFI request waiting for this inventory, route there
+	// instead of the shared KeystateInventory channel (which HsyncEngine also reads).
+	if rfiChanPtr := tm.keystateRfiChan.Load(); rfiChanPtr != nil {
+		select {
+		case *rfiChanPtr <- inventoryMsg:
+			lgTransport.Info("routed KEYSTATE inventory to RFI requester", "sender", senderID, "zone", payload.Zone, "keys", len(items))
+		default:
+			lgTransport.Warn("keystateRfiChan full, dropping inventory", "sender", senderID)
+		}
+		return
+	}
+
 	select {
 	case tm.msgQs.KeystateInventory <- inventoryMsg:
-		log.Printf("TransportManager: Routed KEYSTATE inventory from %s for zone %s (%d keys) to agent",
-			senderID, payload.Zone, len(items))
+		lgTransport.Info("routed KEYSTATE inventory to agent", "sender", senderID, "zone", payload.Zone, "keys", len(items))
 	default:
-		log.Printf("TransportManager: KeystateInventory channel full, dropping inventory from %s", senderID)
+		lgTransport.Warn("KeystateInventory channel full, dropping inventory", "sender", senderID)
+	}
+}
+
+// routeEditsMessage routes an incoming EDITS message from the combiner.
+// Delivers the contributions to MsgQs.EditsResponse so RequestAndWaitForEdits can pick it up.
+// Modeled on routeKeystateMessage.
+func (tm *TransportManager) routeEditsMessage(msg *transport.IncomingMessage) {
+	var payload transport.DnsEditsPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		lgTransport.Error("failed to parse edits payload", "err", err)
+		return
+	}
+
+	senderID := payload.GetSenderID()
+	lgTransport.Debug("processing EDITS", "sender", senderID, "zone", payload.Zone)
+
+	if tm.msgQs == nil {
+		lgTransport.Debug("EDITS received but no MsgQs, ignoring", "sender", senderID)
+		return
+	}
+
+	editsMsg := &EditsResponseMsg{
+		SenderID: senderID,
+		Zone:     payload.Zone,
+		Records:  payload.Records,
+	}
+
+	select {
+	case tm.msgQs.EditsResponse <- editsMsg:
+		lgTransport.Info("routed EDITS response to agent", "sender", senderID, "zone", payload.Zone, "owners", len(payload.Records))
+	default:
+		lgTransport.Warn("EditsResponse channel full, dropping edits", "sender", senderID)
 	}
 }
 
@@ -726,13 +831,13 @@ func (tm *TransportManager) routeKeystateMessage(msg *transport.IncomingMessage)
 func (tm *TransportManager) routeRelocateMessage(msg *transport.IncomingMessage) {
 	payload, err := transport.ParseRelocatePayload(msg.Payload)
 	if err != nil {
-		log.Printf("TransportManager: Failed to parse relocate payload: %v", err)
+		lgTransport.Error("failed to parse relocate payload", "err", err)
 		return
 	}
 
 	// Authorization already verified by AuthorizationMiddleware in the router.
 	// Messages reaching routeRelocateMessage have passed middleware auth.
-	log.Printf("TransportManager: Processing authorized DNS relocate from %s", payload.SenderID)
+	lgTransport.Debug("processing authorized DNS relocate", "sender", payload.SenderID)
 
 	// Update peer's operational address
 	peer, exists := tm.PeerRegistry.Get(payload.SenderID)
@@ -747,8 +852,7 @@ func (tm *TransportManager) routeRelocateMessage(msg *transport.IncomingMessage)
 		Path:      payload.NewAddress.Path,
 	})
 
-	log.Printf("TransportManager: Updated operational address for %s to %s:%d (reason: %s)",
-		payload.SenderID, payload.NewAddress.Host, payload.NewAddress.Port, payload.Reason)
+	lgTransport.Info("updated operational address", "peer", payload.SenderID, "host", payload.NewAddress.Host, "port", payload.NewAddress.Port, "reason", payload.Reason)
 }
 
 // sendSyncConfirmation sends a confirmation for a received sync message.
@@ -761,7 +865,7 @@ func (tm *TransportManager) sendSyncConfirmation(msg *transport.IncomingMessage,
 	senderID := payload.GetSenderID()
 	peer, exists := tm.PeerRegistry.Get(senderID)
 	if !exists {
-		log.Printf("TransportManager: Cannot send confirmation - peer %s not in registry", senderID)
+		lgTransport.Warn("cannot send confirmation, peer not in registry", "peer", senderID)
 		return
 	}
 
@@ -779,9 +883,9 @@ func (tm *TransportManager) sendSyncConfirmation(msg *transport.IncomingMessage,
 	})
 
 	if err != nil {
-		log.Printf("TransportManager: Failed to send confirmation for %s: %v", payload.DistributionID, err)
+		lgTransport.Error("failed to send confirmation", "distributionID", payload.DistributionID, "err", err)
 	} else {
-		log.Printf("TransportManager: Sent confirmation for sync %s", payload.DistributionID)
+		lgTransport.Debug("sent confirmation for sync", "distributionID", payload.DistributionID)
 	}
 }
 
@@ -795,13 +899,13 @@ func (tm *TransportManager) sendImmediateConfirmation(payload *transport.DnsSync
 
 	senderID := payload.GetSenderID()
 	if payload.DistributionID == "" {
-		log.Printf("TransportManager: Cannot send immediate confirmation — no distribution ID from %s", senderID)
+		lgTransport.Warn("cannot send immediate confirmation, no distribution ID", "sender", senderID)
 		return
 	}
 
 	peer, exists := tm.PeerRegistry.Get(senderID)
 	if !exists {
-		log.Printf("TransportManager: Cannot send immediate confirmation — peer %s not in registry", senderID)
+		lgTransport.Warn("cannot send immediate confirmation, peer not in registry", "peer", senderID)
 		return
 	}
 
@@ -818,11 +922,9 @@ func (tm *TransportManager) sendImmediateConfirmation(payload *transport.DnsSync
 	})
 
 	if err != nil {
-		log.Printf("TransportManager: Failed to send immediate confirmation for %s to %s: %v",
-			payload.DistributionID, senderID, err)
+		lgTransport.Error("failed to send immediate confirmation", "distributionID", payload.DistributionID, "peer", senderID, "err", err)
 	} else {
-		log.Printf("TransportManager: Sent immediate (pending) confirmation for %s to %s",
-			payload.DistributionID, senderID)
+		lgTransport.Debug("sent immediate (pending) confirmation", "distributionID", payload.DistributionID, "peer", senderID)
 	}
 }
 
@@ -836,7 +938,7 @@ func (tm *TransportManager) sendRemoteConfirmation(detail *RemoteConfirmationDet
 
 	peer, exists := tm.PeerRegistry.Get(detail.OriginatingSender)
 	if !exists {
-		log.Printf("TransportManager: Cannot send remote confirmation — peer %s not in registry", detail.OriginatingSender)
+		lgTransport.Warn("cannot send remote confirmation, peer not in registry", "peer", detail.OriginatingSender)
 		return
 	}
 
@@ -873,12 +975,10 @@ func (tm *TransportManager) sendRemoteConfirmation(detail *RemoteConfirmationDet
 	})
 
 	if err != nil {
-		log.Printf("TransportManager: Failed to send remote confirmation for originating distID %s to %s: %v",
-			detail.OriginatingDistID, detail.OriginatingSender, err)
+		lgTransport.Error("failed to send remote confirmation", "distributionID", detail.OriginatingDistID, "peer", detail.OriginatingSender, "err", err)
 	} else {
-		log.Printf("TransportManager: Sent remote confirmation for originating distID %s to %s (applied=%d removed=%d rejected=%d)",
-			detail.OriginatingDistID, detail.OriginatingSender,
-			len(detail.AppliedRecords), len(detail.RemovedRecords), len(detail.RejectedItems))
+		lgTransport.Info("sent remote confirmation", "distributionID", detail.OriginatingDistID, "peer", detail.OriginatingSender,
+			"applied", len(detail.AppliedRecords), "removed", len(detail.RemovedRecords), "rejected", len(detail.RejectedItems))
 	}
 }
 
@@ -916,8 +1016,7 @@ func (tm *TransportManager) SendSyncWithFallback(ctx context.Context, peer *tran
 		if err == nil {
 			return resp, nil
 		}
-		log.Printf("TransportManager: Primary transport %s failed for %s: %v",
-			primary.Name(), peer.ID, err)
+		lgTransport.Warn("primary transport failed", "transport", primary.Name(), "peer", peer.ID, "err", err)
 	}
 
 	// Try fallback transport
@@ -929,7 +1028,7 @@ func (tm *TransportManager) SendSyncWithFallback(ctx context.Context, peer *tran
 	}
 
 	if fallback != nil {
-		log.Printf("TransportManager: Trying fallback transport %s for %s", fallback.Name(), peer.ID)
+		lgTransport.Debug("trying fallback transport", "transport", fallback.Name(), "peer", peer.ID)
 		return fallback.Sync(ctx, peer, req)
 	}
 
@@ -1017,20 +1116,20 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 		apiResp, apiErr = tm.APITransport.Hello(ctx, peer, req)
 		agent.mu.Lock()
 		if apiErr != nil {
-			log.Printf("TransportManager: API Hello to %s failed: %v", peer.ID, apiErr)
+			lgTransport.Warn("API Hello failed", "peer", peer.ID, "err", apiErr)
 			agent.ApiDetails.LatestError = apiErr.Error()
 			agent.ApiDetails.LatestErrorTime = time.Now()
 		} else if apiResp != nil && !apiResp.Accepted {
-			log.Printf("TransportManager: API Hello to %s not accepted: %s", peer.ID, apiResp.RejectReason)
+			lgTransport.Warn("API Hello not accepted", "peer", peer.ID, "reason", apiResp.RejectReason)
 			agent.ApiDetails.LatestError = apiResp.RejectReason
 			agent.ApiDetails.LatestErrorTime = time.Now()
 		} else {
-			log.Printf("TransportManager: API Hello to %s succeeded", peer.ID)
+			lgTransport.Info("API Hello succeeded", "peer", peer.ID)
 			// Only transition to INTRODUCED if not already OPERATIONAL or better
 			// This prevents Hello messages from downgrading state (e.g., after retry or peer restart)
 			if agent.ApiDetails.State < AgentStateIntroduced {
 				agent.ApiDetails.State = AgentStateIntroduced
-				log.Printf("TransportManager: Updated agent %s API state to INTRODUCED after successful Hello", peer.ID)
+				lgTransport.Info("updated agent API state to INTRODUCED after successful Hello", "agent", peer.ID)
 			}
 			agent.ApiDetails.HelloTime = time.Now()
 			agent.ApiDetails.LastContactTime = time.Now()
@@ -1045,20 +1144,20 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 		dnsResp, dnsErr = tm.DNSTransport.Hello(ctx, peer, req)
 		agent.mu.Lock()
 		if dnsErr != nil {
-			log.Printf("TransportManager: DNS Hello to %s failed: %v", peer.ID, dnsErr)
+			lgTransport.Warn("DNS Hello failed", "peer", peer.ID, "err", dnsErr)
 			agent.DnsDetails.LatestError = dnsErr.Error()
 			agent.DnsDetails.LatestErrorTime = time.Now()
 		} else if dnsResp != nil && !dnsResp.Accepted {
-			log.Printf("TransportManager: DNS Hello to %s not accepted: %s", peer.ID, dnsResp.RejectReason)
+			lgTransport.Warn("DNS Hello not accepted", "peer", peer.ID, "reason", dnsResp.RejectReason)
 			agent.DnsDetails.LatestError = dnsResp.RejectReason
 			agent.DnsDetails.LatestErrorTime = time.Now()
 		} else {
-			log.Printf("TransportManager: DNS Hello to %s succeeded", peer.ID)
+			lgTransport.Info("DNS Hello succeeded", "peer", peer.ID)
 			// Only transition to INTRODUCED if not already OPERATIONAL or better
 			// This prevents Hello messages from downgrading state (e.g., after retry or peer restart)
 			if agent.DnsDetails.State < AgentStateIntroduced {
 				agent.DnsDetails.State = AgentStateIntroduced
-				log.Printf("TransportManager: Updated agent %s DNS state to INTRODUCED after successful Hello", peer.ID)
+				lgTransport.Info("updated agent DNS state to INTRODUCED after successful Hello", "agent", peer.ID)
 			}
 			agent.DnsDetails.HelloTime = time.Now()
 			agent.DnsDetails.LastContactTime = time.Now()
@@ -1126,15 +1225,15 @@ func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Age
 			apiResp, apiErr = tm.APITransport.Beat(ctx, peer, req)
 			agent.mu.Lock()
 			if apiErr != nil {
-				log.Printf("TransportManager: API Beat to %s failed: %v", peer.ID, apiErr)
+				lgTransport.Debug("API Beat failed", "peer", peer.ID, "err", apiErr)
 				agent.ApiDetails.LatestError = apiErr.Error()
 				agent.ApiDetails.LatestErrorTime = time.Now()
 			} else if apiResp != nil && !apiResp.Ack {
-				log.Printf("TransportManager: API Beat to %s: no confirmation (Ack=false)", peer.ID)
+				lgTransport.Debug("API Beat no confirmation (Ack=false)", "peer", peer.ID)
 				agent.ApiDetails.LatestError = "beat sent but not confirmed by peer"
 				agent.ApiDetails.LatestErrorTime = time.Now()
 			} else {
-				log.Printf("TransportManager: API Beat to %s succeeded", peer.ID)
+				lgTransport.Debug("API Beat succeeded", "peer", peer.ID)
 				agent.ApiDetails.State = AgentStateOperational
 				agent.ApiDetails.LastContactTime = time.Now()
 				agent.ApiDetails.LatestRBeat = time.Now()
@@ -1151,17 +1250,17 @@ func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Age
 			dnsResp, dnsErr = tm.DNSTransport.Beat(ctx, peer, req)
 			agent.mu.Lock()
 			if dnsErr != nil {
-				log.Printf("TransportManager: DNS Beat to %s failed: %v", peer.ID, dnsErr)
+				lgTransport.Debug("DNS Beat failed", "peer", peer.ID, "err", dnsErr)
 				agent.DnsDetails.LatestError = dnsErr.Error()
 				agent.DnsDetails.LatestErrorTime = time.Now()
 			} else if dnsResp != nil && !dnsResp.Ack {
 				// Beat() returns nil error but Ack:false when EDNS0 confirmation is missing.
 				// This means the DNS response was received but the peer didn't confirm processing.
-				log.Printf("TransportManager: DNS Beat to %s: no confirmation (Ack=false)", peer.ID)
+				lgTransport.Debug("DNS Beat no confirmation (Ack=false)", "peer", peer.ID)
 				agent.DnsDetails.LatestError = "beat sent but not confirmed by peer"
 				agent.DnsDetails.LatestErrorTime = time.Now()
 			} else {
-				log.Printf("TransportManager: DNS Beat to %s succeeded", peer.ID)
+				lgTransport.Debug("DNS Beat succeeded", "peer", peer.ID)
 				agent.DnsDetails.State = AgentStateOperational
 				agent.DnsDetails.LastContactTime = time.Now()
 				agent.DnsDetails.LatestRBeat = time.Now()
@@ -1193,20 +1292,19 @@ func (tm *TransportManager) OnAgentDiscoveryComplete(agent *Agent) {
 	if agent.ApiMethod && agent.DnsMethod {
 		// Both available - prefer API (more reliable)
 		peer.PreferredTransport = "API"
-		log.Printf("TransportManager: Agent %s has both API and DNS, preferring API", agent.Identity)
+		lgTransport.Info("agent has both API and DNS, preferring API", "agent", agent.Identity)
 	} else if agent.ApiMethod {
 		peer.PreferredTransport = "API"
-		log.Printf("TransportManager: Agent %s has API only", agent.Identity)
+		lgTransport.Info("agent has API only", "agent", agent.Identity)
 	} else if agent.DnsMethod {
 		peer.PreferredTransport = "DNS"
-		log.Printf("TransportManager: Agent %s has DNS only", agent.Identity)
+		lgTransport.Info("agent has DNS only", "agent", agent.Identity)
 	}
 
 	// Update peer state
 	peer.SetState(transport.PeerStateKnown, "discovery complete")
 
-	log.Printf("TransportManager: Agent %s discovery complete, peer synced with preferred transport: %s",
-		agent.Identity, peer.PreferredTransport)
+	lgTransport.Info("agent discovery complete, peer synced", "agent", agent.Identity, "preferredTransport", peer.PreferredTransport)
 }
 
 // GetPreferredTransportName returns the preferred transport name for an agent.
@@ -1237,7 +1335,7 @@ func (tm *TransportManager) HasAPITransport(agent *Agent) bool {
 // Must be called after TransportManager is fully initialized (transports, combiner peer, etc.).
 func (tm *TransportManager) StartReliableQueue(ctx context.Context) {
 	if tm.reliableQueue == nil {
-		log.Printf("TransportManager: No reliable queue configured, skipping")
+		lgTransport.Info("no reliable queue configured, skipping")
 		return
 	}
 
@@ -1247,7 +1345,7 @@ func (tm *TransportManager) StartReliableQueue(ctx context.Context) {
 	})
 
 	go tm.reliableQueue.Start(ctx)
-	log.Printf("TransportManager: Reliable message queue started")
+	lgTransport.Info("reliable message queue started")
 }
 
 // deliverMessage is the sendFunc implementation. It converts an OutgoingMessage
@@ -1296,13 +1394,16 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 		DistributionID: msg.DistributionID,
 		MessageType:    "update", // agent→combiner uses "update" (not "sync")
 	}
+	if msg.Update != nil && len(msg.Update.Operations) > 0 {
+		syncReq.Operations = msg.Update.Operations
+	}
 
 	syncResp, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
 
 	// Forward per-RR detail from inline confirmation to SynchedDataEngine.
-	// Skip PENDING status — the detailed confirmation will arrive later via OnConfirmationReceived
-	// when the combiner processes the sync asynchronously.
-	if syncResp != nil && syncResp.Status != transport.ConfirmPending && tm.msgQs != nil && tm.msgQs.Confirmation != nil {
+	// PENDING status is forwarded too so the per-recipient tracking records
+	// that the combiner received the message (even before final confirmation).
+	if syncResp != nil && tm.msgQs != nil && tm.msgQs.Confirmation != nil {
 		var rejItems []RejectedItemInfo
 		for _, ri := range syncResp.RejectedItems {
 			rejItems = append(rejItems, RejectedItemInfo{Record: ri.Record, Reason: ri.Reason})
@@ -1322,7 +1423,7 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 		select {
 		case tm.msgQs.Confirmation <- detail:
 		default:
-			log.Printf("TransportManager: Confirmation channel full, dropping inline detail for %s", msg.DistributionID)
+			lgTransport.Warn("confirmation channel full, dropping inline detail", "distributionID", msg.DistributionID)
 		}
 	}
 
@@ -1352,6 +1453,9 @@ func (tm *TransportManager) deliverToAgent(ctx context.Context, msg *OutgoingMes
 		Timestamp:      msg.CreatedAt,
 		DistributionID: msg.DistributionID,
 		MessageType:    "sync",
+	}
+	if msg.Update != nil && len(msg.Update.Operations) > 0 {
+		syncReq.Operations = msg.Update.Operations
 	}
 
 	_, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
@@ -1397,7 +1501,7 @@ func (tm *TransportManager) EnqueueForZoneAgents(zone ZoneName, update *ZoneUpda
 	}
 
 	if len(agents) == 0 {
-		log.Printf("TransportManager: No remote agents for zone %s, nothing to enqueue", zone)
+		lgTransport.Debug("no remote agents for zone, nothing to enqueue", "zone", zone)
 		return nil
 	}
 
@@ -1423,7 +1527,7 @@ func (tm *TransportManager) EnqueueForZoneAgents(zone ZoneName, update *ZoneUpda
 		return fmt.Errorf("failed to enqueue for some agents: %v", enqueueErrors)
 	}
 
-	log.Printf("TransportManager: Enqueued zone update for %d agents (zone: %s, distID: %s)", len(agents), zone, distID)
+	lgTransport.Info("enqueued zone update for agents", "count", len(agents), "zone", zone, "distributionID", distID)
 	return nil
 }
 
@@ -1482,6 +1586,32 @@ func (tm *TransportManager) getAllAgentsForZone(zone ZoneName) ([]AgentId, error
 	return agents, nil
 }
 
+// GetDistributionRecipients returns the list of recipient identities that will
+// receive an update for the given zone. This is used by the SynchedDataEngine to
+// populate TrackedRR.ExpectedRecipients so that ProcessConfirmation knows who
+// must confirm before transitioning Pending → Accepted.
+// If skipCombiner is true, the combiner is excluded from the list.
+func (tm *TransportManager) GetDistributionRecipients(zone ZoneName, skipCombiner bool) []string {
+	var recipients []string
+
+	// Add combiner unless skipped
+	if !skipCombiner && tm.combinerID != "" {
+		recipients = append(recipients, string(tm.combinerID))
+	}
+
+	// Add all remote agents for this zone
+	agents, err := tm.getAllAgentsForZone(zone)
+	if err != nil {
+		lgTransport.Error("failed to get zone agents", "zone", zone, "err", err)
+	} else {
+		for _, a := range agents {
+			recipients = append(recipients, string(a))
+		}
+	}
+
+	return recipients
+}
+
 // zoneUpdateToGroupedRecords converts a ZoneUpdate into records grouped by owner name,
 // suitable for transport.SyncRequest.Records and core.AgentMsgPost.Records.
 //
@@ -1522,7 +1652,7 @@ func groupRRStringsByOwner(rrStrings []string) map[string][]string {
 	for _, rrStr := range rrStrings {
 		rr, err := dns.NewRR(rrStr)
 		if err != nil {
-			log.Printf("groupRRStringsByOwner: skipping unparseable RR %q: %v", rrStr, err)
+			lgTransport.Warn("skipping unparseable RR", "rr", rrStr, "err", err)
 			continue
 		}
 		owner := rr.Header().Name
@@ -1545,7 +1675,7 @@ type PendingDnskeyPropagation struct {
 }
 
 // TrackDnskeyPropagation registers a DNSKEY distribution for confirmation tracking.
-// Called by DistributeDnskeyChanges after enqueueing for remote agents.
+// Called by SynchedDataEngine after enqueueing DNSKEY changes for remote agents.
 func (tm *TransportManager) TrackDnskeyPropagation(zone ZoneName, distID string, keyTags []uint16, agents []AgentId) {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
@@ -1563,8 +1693,7 @@ func (tm *TransportManager) TrackDnskeyPropagation(zone ZoneName, distID string,
 		CreatedAt:      time.Now(),
 	}
 
-	log.Printf("TrackDnskeyPropagation: zone %s distID %s: tracking %d agents for %d key tags",
-		zone, distID, len(agents), len(keyTags))
+	lgTransport.Info("tracking DNSKEY propagation", "zone", zone, "distributionID", distID, "agents", len(agents), "keyTags", len(keyTags))
 }
 
 // ProcessDnskeyConfirmation checks if a confirmation is for a pending DNSKEY propagation.
@@ -1588,15 +1717,13 @@ func (tm *TransportManager) ProcessDnskeyConfirmation(distID string, source stri
 		if prop.RejectionMsg == "" {
 			prop.RejectionMsg = rejectedItems[0].Reason
 		}
-		log.Printf("ProcessDnskeyConfirmation: zone %s distID %s: agent %s REJECTED (%s)",
-			prop.Zone, distID, source, prop.RejectionMsg)
+		lgTransport.Warn("DNSKEY confirmation rejected", "zone", prop.Zone, "distributionID", distID, "agent", source, "reason", prop.RejectionMsg)
 	}
 
 	// Mark this agent as confirmed
 	if _, expected := prop.ExpectedAgents[agentID]; expected {
 		prop.ExpectedAgents[agentID] = true
-		log.Printf("ProcessDnskeyConfirmation: zone %s distID %s: agent %s confirmed (%s)",
-			prop.Zone, distID, source, status)
+		lgTransport.Info("DNSKEY confirmation received", "zone", prop.Zone, "distributionID", distID, "agent", source, "status", status)
 	}
 
 	// Check if all agents have confirmed
@@ -1613,8 +1740,7 @@ func (tm *TransportManager) ProcessDnskeyConfirmation(distID string, source stri
 	}
 
 	// All agents confirmed — send KEYSTATE to signer
-	log.Printf("ProcessDnskeyConfirmation: zone %s distID %s: ALL %d agents confirmed (rejected=%v)",
-		prop.Zone, distID, len(prop.ExpectedAgents), prop.Rejected)
+	lgTransport.Info("all agents confirmed DNSKEY propagation", "zone", prop.Zone, "distributionID", distID, "agents", len(prop.ExpectedAgents), "rejected", prop.Rejected)
 
 	// Send KEYSTATE asynchronously (don't hold the mutex)
 	zone := prop.Zone
@@ -1638,14 +1764,12 @@ func (tm *TransportManager) ProcessDnskeyConfirmation(distID string, source stri
 // signal is "propagated", "rejected", or "removed".
 func (tm *TransportManager) sendKeystateToSigner(zone ZoneName, keyTags []uint16, signal string, message string) {
 	if tm.signerID == "" || tm.signerAddress == "" {
-		log.Printf("sendKeystateToSigner: zone %s: no signer configured (signerID=%q, signerAddress=%q), cannot send KEYSTATE %s",
-			zone, tm.signerID, tm.signerAddress, signal)
+		lgTransport.Warn("no signer configured, cannot send KEYSTATE", "zone", zone, "signerID", tm.signerID, "signerAddress", tm.signerAddress, "signal", signal)
 		return
 	}
 
 	if tm.DNSTransport == nil {
-		log.Printf("sendKeystateToSigner: zone %s: no DNS transport available, cannot send KEYSTATE %s",
-			zone, signal)
+		lgTransport.Warn("no DNS transport available, cannot send KEYSTATE", "zone", zone, "signal", signal)
 		return
 	}
 
@@ -1675,13 +1799,11 @@ func (tm *TransportManager) sendKeystateToSigner(zone ZoneName, keyTags []uint16
 
 		resp, err := tm.DNSTransport.Keystate(ctx, peer, req)
 		if err != nil {
-			log.Printf("sendKeystateToSigner: zone %s key %d: KEYSTATE %s failed: %v",
-				zone, keyTag, signal, err)
+			lgTransport.Error("KEYSTATE send to signer failed", "zone", zone, "keyTag", keyTag, "signal", signal, "err", err)
 			continue
 		}
 
-		log.Printf("sendKeystateToSigner: zone %s key %d: KEYSTATE %s sent to signer %s (accepted=%v, msg=%s)",
-			zone, keyTag, signal, tm.signerID, resp.Accepted, resp.Message)
+		lgTransport.Info("KEYSTATE sent to signer", "zone", zone, "keyTag", keyTag, "signal", signal, "signer", tm.signerID, "accepted", resp.Accepted, "msg", resp.Message)
 	}
 }
 
@@ -1730,7 +1852,45 @@ func (tm *TransportManager) sendRfiToSigner(zone string, rfiType string) error {
 		return fmt.Errorf("RFI %s to signer %s failed: %w", rfiType, tm.signerID, err)
 	}
 
-	log.Printf("sendRfiToSigner: RFI %s for zone %s sent to signer %s (status=%s)",
-		rfiType, zone, tm.signerID, resp.Status)
+	lgTransport.Info("RFI sent to signer", "rfiType", rfiType, "zone", zone, "signer", tm.signerID, "status", resp.Status)
+	return nil
+}
+
+// sendRfiToCombiner sends an RFI message to the combiner (e.g. RFI EDITS to request contributions).
+// Modeled on sendRfiToSigner. Uses agentRegistry for peer lookup (same as deliverToCombiner).
+func (tm *TransportManager) sendRfiToCombiner(zone string, rfiType string) error {
+	if tm.agentRegistry == nil {
+		return fmt.Errorf("no agent registry")
+	}
+
+	combinerID, err := tm.getCombinerID()
+	if err != nil {
+		return fmt.Errorf("RFI %s: %w", rfiType, err)
+	}
+
+	combiner, exists := tm.agentRegistry.S.Get(combinerID)
+	if !exists {
+		return fmt.Errorf("combiner %q not found in AgentRegistry", combinerID)
+	}
+
+	peer := tm.SyncPeerFromAgent(combiner)
+
+	syncReq := &transport.SyncRequest{
+		SenderID:    tm.LocalID,
+		Zone:        zone,
+		Timestamp:   time.Now(),
+		MessageType: "rfi",
+		RfiType:     rfiType,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
+	if err != nil {
+		return fmt.Errorf("RFI %s to combiner %s failed: %w", rfiType, combinerID, err)
+	}
+
+	lgTransport.Info("RFI sent to combiner", "rfiType", rfiType, "zone", zone, "combiner", combinerID, "status", resp.Status)
 	return nil
 }

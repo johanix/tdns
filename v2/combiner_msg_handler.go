@@ -11,10 +11,12 @@ package tdns
 
 import (
 	"context"
-	"log"
+	"fmt"
 	"time"
 
 	"github.com/johanix/tdns/v2/agent/transport"
+	core "github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
 // CombinerMsgHandler consumes beat, hello, ping, and sync messages from MsgQs.
@@ -24,7 +26,7 @@ import (
 func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 	protectedNamespaces []string, errorJournal *ErrorJournal) {
 	if msgQs == nil {
-		log.Printf("CombinerMsgHandler: No MsgQs configured, exiting")
+		lgCombiner.Warn("no MsgQs configured, exiting")
 		return
 	}
 
@@ -34,12 +36,23 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 		peerRegistry = tm.PeerRegistry
 	}
 
-	log.Printf("CombinerMsgHandler: Starting (peerRegistry=%v, tm=%v)", peerRegistry != nil, tm != nil)
+	// Build set of local agent identities (our own provider's agents).
+	// Protected-namespace checks only apply to remote agents, not our own.
+	localAgents := make(map[string]bool)
+	if conf.Combiner != nil {
+		for _, a := range conf.Combiner.Agents {
+			if a != nil && a.Identity != "" {
+				localAgents[a.Identity] = true
+			}
+		}
+	}
+
+	lgCombiner.Info("message handler starting", "peerRegistry", peerRegistry != nil, "tm", tm != nil, "localAgents", len(localAgents))
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("CombinerMsgHandler: Context cancelled, stopping")
+			lgCombiner.Info("context cancelled, stopping")
 			return
 
 		case report := <-msgQs.Beat:
@@ -47,8 +60,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				continue
 			}
 			senderID := string(report.Identity)
-			log.Printf("CombinerMsgHandler: Beat from %s (interval=%d, distrib=%s)",
-				senderID, report.BeatInterval, report.DistributionID)
+			lgCombiner.Debug("beat received", "sender", senderID, "interval", report.BeatInterval, "distrib", report.DistributionID)
 
 			// Update PeerRegistry liveness
 			if peerRegistry != nil {
@@ -62,7 +74,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				continue
 			}
 			senderID := string(report.Identity)
-			log.Printf("CombinerMsgHandler: Hello from %s", senderID)
+			lgCombiner.Debug("hello received", "sender", senderID)
 
 			// Update PeerRegistry on hello
 			if peerRegistry != nil {
@@ -74,37 +86,174 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			if report == nil {
 				continue
 			}
-			log.Printf("CombinerMsgHandler: Ping from %s (distrib=%s)",
-				string(report.Identity), report.DistributionID)
+			lgCombiner.Debug("ping received", "sender", string(report.Identity), "distrib", report.DistributionID)
 
 		case msg := <-msgQs.Msg:
 			if msg == nil {
 				continue
 			}
-			senderID := string(msg.MyIdentity)
+			senderID := string(msg.OriginatorID)   // Original author of the update
+			deliveredBy := string(msg.DeliveredBy) // Agent that delivered it to us
+			if deliveredBy == "" {
+				deliveredBy = senderID // Fallback: direct delivery
+			}
 			zone := string(msg.Zone)
-			log.Printf("CombinerMsgHandler: Processing async update from %s zone %s (distrib=%s)",
-				senderID, zone, msg.DistributionID)
 
-			// Build CombinerSyncRequest from AgentMsgPostPlus
+			// Handle RFI messages (e.g. RFI EDITS) — dispatch and continue
+			if msg.MessageType == AgentMsgRfi {
+				lgCombiner.Info("RFI received", "type", msg.RfiType, "sender", senderID, "zone", zone)
+				switch msg.RfiType {
+				case "EDITS":
+					go sendEditsToAgent(conf, tm, senderID, zone)
+				default:
+					lgCombiner.Warn("unknown RFI type, ignoring", "type", msg.RfiType, "sender", senderID)
+				}
+				continue
+			}
+
+			lgCombiner.Info("processing async update", "sender", senderID, "deliveredBy", deliveredBy, "zone", zone, "distrib", msg.DistributionID)
+
+			kdb := conf.Internal.KeyDB
+
+			// Persist all incoming edits to CombinerPendingEdits first.
+			var editID int
+			if kdb != nil {
+				editID, _ = kdb.NextEditID()
+				rec := &PendingEditRecord{
+					EditID:         editID,
+					Zone:           zone,
+					SenderID:       senderID,
+					DeliveredBy:    deliveredBy,
+					DistributionID: msg.DistributionID,
+					Records:        msg.Records,
+					ReceivedAt:     time.Now(),
+				}
+				if err := kdb.SavePendingEdit(rec); err != nil {
+					lgCombiner.Error("failed to persist edit", "zone", zone, "err", err)
+				} else {
+					lgCombiner.Debug("persisted edit", "editID", editID, "sender", senderID, "zone", zone)
+				}
+			}
+
+			// Manual approval gate: if zone has mp-manual-approval, keep the
+			// edit pending for operator review — unless it's a no-op.
+			if zd, exists := Zones.Get(dns.Fqdn(zone)); exists && zd.Options[OptMPManualApproval] {
+				// Check for no-op: use Operations-aware check when Operations are present
+				var noOp bool
+				if len(msg.Operations) > 0 {
+					noOp = isNoOpOperations(zd, senderID, msg.Operations)
+				} else {
+					noOp = isNoOpUpdate(zd, senderID, msg.Records)
+				}
+				if noOp {
+					lgCombiner.Debug("no-op edit, auto-confirming", "zone", zone, "editID", editID, "sender", senderID)
+					// Clean up the pending edit (move to approved as no-op)
+					if kdb != nil && editID > 0 {
+						if err := kdb.ResolvePendingEdit(editID, msg.Records, nil, ""); err != nil {
+							lgCombiner.Error("failed to resolve no-op edit", "editID", editID, "err", err)
+						}
+					}
+					// Include the original records as AppliedRecords so the
+					// agent can match them and transition from pending to accepted.
+					var allRRs []string
+					if len(msg.Operations) > 0 {
+						for _, op := range msg.Operations {
+							if op.Operation == "replace" || op.Operation == "add" {
+								allRRs = append(allRRs, op.Records...)
+							}
+						}
+					} else {
+						for _, rrs := range msg.Records {
+							allRRs = append(allRRs, rrs...)
+						}
+					}
+					combinerSendConfirmation(tm, deliveredBy, &CombinerSyncResponse{
+						DistributionID: msg.DistributionID,
+						Zone:           zone,
+						Status:         "ok",
+						Message:        "no changes needed (data already current)",
+						AppliedRecords: allRRs,
+						Timestamp:      time.Now(),
+					})
+					continue
+				}
+				lgCombiner.Info("edit awaits manual approval", "zone", zone, "editID", editID)
+				// Send PENDING confirmation to the delivering agent
+				combinerSendConfirmation(tm, deliveredBy, &CombinerSyncResponse{
+					DistributionID: msg.DistributionID,
+					Zone:           zone,
+					Status:         "pending",
+					Message:        "update queued for manual approval",
+					Timestamp:      time.Now(),
+				})
+				continue
+			}
+
+			// Auto-approve: process the edit immediately.
 			syncReq := &CombinerSyncRequest{
 				SenderID:       senderID,
 				Zone:           zone,
 				Records:        msg.Records,
+				Operations:     msg.Operations,
 				DistributionID: msg.DistributionID,
 				Timestamp:      msg.Time,
 			}
 
-			resp := CombinerProcessUpdate(syncReq, protectedNamespaces)
+			// Only apply protected-namespace checks to remote agents.
+			// Our own agents are trusted to use our namespaces.
+			nsGuard := protectedNamespaces
+			if localAgents[senderID] {
+				nsGuard = nil
+			}
+			resp := CombinerProcessUpdate(syncReq, nsGuard)
 			if resp.Status == "error" {
 				recordCombinerError(errorJournal, msg.DistributionID, senderID, "update", resp.Message, "")
 			}
 
-			log.Printf("CombinerMsgHandler: Update processed from %s zone %s: status=%s applied=%d removed=%d rejected=%d",
-				senderID, zone, resp.Status, len(resp.AppliedRecords), len(resp.RemovedRecords), len(resp.RejectedItems))
+			// Split results into approved and rejected record maps and persist.
+			if kdb != nil && editID > 0 {
+				approved := rrStringsToOwnerMap(resp.AppliedRecords)
+				// Store removals with ClassNONE so the audit trail preserves ADD/DEL intent
+				for owner, rrs := range rrStringsToClassNONE(resp.RemovedRecords) {
+					approved[owner] = append(approved[owner], rrs...)
+				}
+				rejected := make(map[string][]string)
+				var reasons []string
+				for _, ri := range resp.RejectedItems {
+					rr, err := dns.NewRR(ri.Record)
+					if err != nil {
+						continue
+					}
+					owner := rr.Header().Name
+					rejected[owner] = append(rejected[owner], ri.Record)
+					reasons = append(reasons, ri.Reason)
+				}
+				reason := ""
+				if len(reasons) > 0 {
+					reason = reasons[0]
+					if len(reasons) > 1 {
+						reason = fmt.Sprintf("%s (and %d more)", reason, len(reasons)-1)
+					}
+				}
+				if err := kdb.ResolvePendingEdit(editID, approved, rejected, reason); err != nil {
+					lgCombiner.Error("failed to resolve edit", "editID", editID, "err", err)
+				}
+			}
 
-			// Send detailed confirmation back to agent via DNSTransport.Confirm()
-			combinerSendConfirmation(tm, senderID, resp)
+			lgCombiner.Info("update processed", "sender", senderID, "zone", zone, "status", resp.Status, "applied", len(resp.AppliedRecords), "removed", len(resp.RemovedRecords), "rejected", len(resp.RejectedItems))
+
+			// Send detailed confirmation back to the delivering agent via DNSTransport.Confirm()
+			combinerSendConfirmation(tm, deliveredBy, resp)
+
+			// Notify downstream servers (e.g. signer) about the zone change
+			// so they can fetch the updated zone promptly instead of waiting
+			// for the next periodic SOA refresh.
+			// Run async to avoid blocking the message handler on network I/O.
+			if resp.Status != "error" {
+				if zd, ok := Zones.Get(dns.Fqdn(zone)); ok && len(zd.Downstreams) > 0 {
+					go zd.NotifyDownstreams()
+				}
+			}
 		}
 	}
 }
@@ -113,14 +262,13 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 // Uses the same DNSTransport.Confirm() mechanism as sendRemoteConfirmation in hsync_transport.go.
 func combinerSendConfirmation(tm *TransportManager, senderID string, resp *CombinerSyncResponse) {
 	if tm == nil || tm.DNSTransport == nil {
-		log.Printf("CombinerMsgHandler: Cannot send confirmation — no DNSTransport (sender=%s, distrib=%s)",
-			senderID, resp.DistributionID)
+		lgCombiner.Warn("cannot send confirmation, no DNSTransport", "sender", senderID, "distrib", resp.DistributionID)
 		return
 	}
 
 	peer, exists := tm.PeerRegistry.Get(senderID)
 	if !exists {
-		log.Printf("CombinerMsgHandler: Cannot send confirmation — peer %s not in registry", senderID)
+		lgCombiner.Warn("cannot send confirmation, peer not in registry", "sender", senderID)
 		return
 	}
 
@@ -133,6 +281,8 @@ func combinerSendConfirmation(tm *TransportManager, senderID string, resp *Combi
 		status = transport.ConfirmPartial
 	case "error":
 		status = transport.ConfirmFailed
+	case "pending":
+		status = transport.ConfirmPending
 	}
 
 	var rejItems []transport.RejectedItemDTO
@@ -157,11 +307,101 @@ func combinerSendConfirmation(tm *TransportManager, senderID string, resp *Combi
 	})
 
 	if err != nil {
-		log.Printf("CombinerMsgHandler: Failed to send confirmation for %s to %s: %v",
-			resp.DistributionID, senderID, err)
+		lgCombiner.Error("failed to send confirmation", "distrib", resp.DistributionID, "sender", senderID, "err", err)
 	} else {
-		log.Printf("CombinerMsgHandler: Sent confirmation for %s to %s (status=%s applied=%d removed=%d rejected=%d)",
-			resp.DistributionID, senderID, resp.Status,
-			len(resp.AppliedRecords), len(resp.RemovedRecords), len(resp.RejectedItems))
+		lgCombiner.Debug("sent confirmation", "distrib", resp.DistributionID, "sender", senderID, "status", resp.Status, "applied", len(resp.AppliedRecords), "removed", len(resp.RemovedRecords), "rejected", len(resp.RejectedItems))
 	}
+}
+
+// rrStringsToOwnerMap parses RR strings and groups them by owner name.
+func rrStringsToOwnerMap(rrStrings []string) map[string][]string {
+	result := make(map[string][]string)
+	for _, rrStr := range rrStrings {
+		rr, err := dns.NewRR(rrStr)
+		if err != nil {
+			continue
+		}
+		owner := rr.Header().Name
+		result[owner] = append(result[owner], rrStr)
+	}
+	return result
+}
+
+// sendEditsToAgent looks up the agent's current contributions for the zone and sends
+// them back via DNSTransport.Edits(). Called asynchronously from CombinerMsgHandler
+// when an RFI EDITS is received.
+// Modeled on sendKeystateInventoryToAgent in signer_msg_handler.go.
+func sendEditsToAgent(conf *Config, tm *TransportManager, agentID string, zone string) {
+	zd, exists := Zones.Get(dns.Fqdn(zone))
+	if !exists {
+		lgCombiner.Warn("RFI EDITS: zone not found", "zone", zone, "agent", agentID)
+		return
+	}
+
+	// Extract this agent's contributions (may be nil if no prior edits)
+	records := contributionsToRecords(zd.AgentContributions[agentID])
+
+	lgCombiner.Debug("RFI EDITS: preparing response", "zone", zone, "agent", agentID, "owners", len(records))
+
+	if tm == nil || tm.DNSTransport == nil {
+		lgCombiner.Warn("RFI EDITS: no DNSTransport available", "agent", agentID)
+		return
+	}
+
+	peer, peerExists := tm.PeerRegistry.Get(agentID)
+	if !peerExists || peer == nil {
+		lgCombiner.Warn("RFI EDITS: agent not in PeerRegistry", "agent", agentID)
+		return
+	}
+
+	req := &transport.EditsRequest{
+		SenderID:  conf.Combiner.Identity,
+		Zone:      zone,
+		Records:   records,
+		Timestamp: time.Now(),
+	}
+
+	sendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := tm.DNSTransport.Edits(sendCtx, peer, req)
+	if err != nil {
+		lgCombiner.Error("RFI EDITS: failed to send", "agent", agentID, "zone", zone, "err", err)
+		return
+	}
+
+	lgCombiner.Info("RFI EDITS: sent contributions to agent", "agent", agentID, "zone", zone, "owners", len(records), "accepted", resp.Accepted)
+}
+
+// contributionsToRecords converts an agent's contributions map to the flat
+// map[string][]string format used by sync/update messages.
+func contributionsToRecords(contributions map[string]map[uint16]core.RRset) map[string][]string {
+	result := make(map[string][]string)
+	if contributions == nil {
+		return result
+	}
+	for owner, rrtypeMap := range contributions {
+		for _, rrset := range rrtypeMap {
+			for _, rr := range rrset.RRs {
+				result[owner] = append(result[owner], rr.String())
+			}
+		}
+	}
+	return result
+}
+
+// rrStringsToClassNONE parses RR strings, converts them to ClassNONE (to mark
+// as deletions in the audit trail), and groups them by owner name.
+func rrStringsToClassNONE(rrStrings []string) map[string][]string {
+	result := make(map[string][]string)
+	for _, rrStr := range rrStrings {
+		rr, err := dns.NewRR(rrStr)
+		if err != nil {
+			continue
+		}
+		owner := rr.Header().Name
+		rr.Header().Class = dns.ClassNONE
+		result[owner] = append(result[owner], rr.String())
+	}
+	return result
 }

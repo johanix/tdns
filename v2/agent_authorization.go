@@ -9,7 +9,6 @@ package tdns
 
 import (
 	"fmt"
-	"log"
 
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -57,8 +56,7 @@ func (tm *TransportManager) IsPeerAuthorized(senderID string, zone string) (bool
 		if authorized {
 			return true, fmt.Sprintf("authorized via HSYNC membership for zone %s", zone)
 		}
-		log.Printf("IsPeerAuthorized: Sender %s not in HSYNC for zone %s: %s",
-			senderID, zone, reason)
+		lgAgent.Debug("sender not in HSYNC", "sender", senderID, "zone", zone, "reason", reason)
 	} else {
 		// No specific zone - check if sender is in HSYNC for ANY zone we share
 		// This is used for zone-agnostic operations like heartbeats
@@ -134,7 +132,7 @@ func (tm *TransportManager) isInHSYNC(senderID string, zone string) (bool, strin
 		return false, fmt.Sprintf("sender %q not in HSYNC RRset for zone %s", senderID, zone)
 	}
 
-	log.Printf("IsPeerAuthorized: Both %s and %s found in HSYNC for zone %s", tm.LocalID, senderID, zone)
+	lgAgent.Debug("both identities found in HSYNC", "local", tm.LocalID, "sender", senderID, "zone", zone)
 	return true, ""
 }
 
@@ -173,8 +171,8 @@ func (tm *TransportManager) isInHSYNCAnyZone(senderID string) (bool, string) {
 
 		// If we found both in this zone's HSYNC, authorize
 		if foundMe && foundSender {
-			log.Printf("IsPeerAuthorized: Both %s and %s found in HSYNC for zone %s (any-zone check)",
-				tm.LocalID, senderID, zoneName)
+			lgAgent.Debug("both identities found in HSYNC (any-zone check)",
+				"local", tm.LocalID, "sender", senderID, "zone", zoneName)
 			return true, zoneName
 		}
 	}

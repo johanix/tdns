@@ -5,7 +5,6 @@ package tdns
 
 import (
 	"fmt"
-	"log"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -43,12 +42,12 @@ func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {
 
 	const (
 		fetchZoneDnskeysSql = `
-SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='published' OR state='retired' OR state='foreign')`
+SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='mpdist' OR state='published' OR state='standby' OR state='retired' OR state='foreign')`
 	)
 
 	rows, err := zd.KeyDB.Query(fetchZoneDnskeysSql, zd.ZoneName)
 	if err != nil {
-		log.Printf("Error from kdb.Query(%s, %s): %v", fetchZoneDnskeysSql, zd.ZoneName, err)
+		lgHandler.Error("PublishDnskeyRRs: error querying DNSKEY store", "zone", zd.ZoneName, "err", err)
 		return err
 	}
 	defer rows.Close()
@@ -58,13 +57,13 @@ SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (
 		var keyrr string
 		err = rows.Scan(&keyid, &flags, &algorithm, &keyrr)
 		if err != nil {
-			log.Printf("Error from rows.Scan(): %v", err)
+			lgHandler.Error("PublishDnskeyRRs: error scanning DNSKEY row", "err", err)
 			return err
 		}
 
 		rr, err := dns.NewRR(keyrr)
 		if err != nil {
-			log.Printf("Error creating dns.RR from keyrr: %v", err)
+			lgHandler.Error("PublishDnskeyRRs: error creating dns.RR from keyrr", "err", err)
 			return err
 		}
 		publishkeys = append(publishkeys, rr)

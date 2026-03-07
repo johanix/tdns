@@ -12,7 +12,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"strings"
 	"sync/atomic"
@@ -236,12 +235,13 @@ func (h *ChunkNotifyHandler) fetchChunkViaQuery(ctx context.Context, senderID, d
 // parsePayload parses the JSON payload to determine message type and content.
 func (h *ChunkNotifyHandler) parsePayload(distributionID string, payload []byte, sourceAddr string) (*IncomingMessage, error) {
 	var fields struct {
-		MessageType string `json:"MessageType"` // Standard format (string: "sync", "update", "beat", etc.)
-		Type        string `json:"type"`        // Legacy format (fallback)
-		MyIdentity  string `json:"MyIdentity"`
-		SenderID    string `json:"sender_id"` // Legacy
-		Zone        string `json:"Zone"`
-		LegacyZone  string `json:"zone"` // Legacy
+		MessageType  string `json:"MessageType"`  // Standard format (string: "sync", "update", "beat", etc.)
+		Type         string `json:"type"`         // Legacy format (fallback)
+		OriginatorID string `json:"OriginatorID"` // Sync/update messages
+		MyIdentity   string `json:"MyIdentity"`   // Hello/beat/ping messages
+		SenderID     string `json:"sender_id"`    // Legacy
+		Zone         string `json:"Zone"`
+		LegacyZone   string `json:"zone"` // Legacy
 	}
 	if err := json.Unmarshal(payload, &fields); err != nil {
 		return nil, fmt.Errorf("failed to parse message: %w", err)
@@ -256,8 +256,11 @@ func (h *ChunkNotifyHandler) parsePayload(distributionID string, payload []byte,
 		return nil, fmt.Errorf("no message type found in payload")
 	}
 
-	// Get sender ID: prefer MyIdentity, fall back to legacy sender_id
-	senderID := fields.MyIdentity
+	// Get sender ID: OriginatorID (sync/update), MyIdentity (hello/beat/ping), sender_id (legacy)
+	senderID := fields.OriginatorID
+	if senderID == "" {
+		senderID = fields.MyIdentity
+	}
 	if senderID == "" {
 		senderID = fields.SenderID
 	}
@@ -325,7 +328,7 @@ func (h *ChunkNotifyHandler) sendConfirmResponse(w dns.ResponseWriter, req *dns.
 			payloadBytes = encrypted
 			payloadFormat = core.FormatJWT
 		} else {
-			log.Printf("sendConfirmResponse: encryption failed for peer %s: %v", senderID, err)
+			lgTransport().Error("confirm response encryption failed", "peer", senderID, "err", err)
 		}
 	}
 
@@ -371,7 +374,7 @@ func (h *ChunkNotifyHandler) UnsolicitedMessageCount() uint64 {
 // This is the only routing path — the router must be configured.
 func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, msg *dns.Msg, w dns.ResponseWriter) error {
 	if h.Router == nil {
-		log.Printf("RouteViaRouter: ERROR: Router is nil — cannot route message for %s", qname)
+		lgTransport().Error("router is nil, cannot route message", "qname", qname)
 		return fmt.Errorf("router not configured")
 	}
 
@@ -380,12 +383,12 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 		sourceAddr = w.RemoteAddr().String()
 	}
 
-	log.Printf("RouteViaRouter: Received NOTIFY(CHUNK) for %s from %s", qname, sourceAddr)
+	lgTransport().Debug("received NOTIFY(CHUNK)", "qname", qname, "source", sourceAddr)
 
 	// Extract distribution ID and sender identity from QNAME
 	distributionID, senderHint, err := h.extractDistributionIDAndSender(qname)
 	if err != nil {
-		log.Printf("RouteViaRouter: Failed to extract distribution ID from %s: %v", qname, err)
+		lgTransport().Error("failed to extract distribution ID", "qname", qname, "err", err)
 		return h.sendResponse(w, msg, dns.RcodeFormatError)
 	}
 
@@ -395,7 +398,7 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 		// Query mode: NOTIFY has no EDNS0 payload; fetch using {receiver}.{distid}.{sender} from sender
 		payload, err = h.fetchChunkViaQuery(ctx, senderHint, distributionID, msg, w)
 		if err != nil {
-			log.Printf("RouteViaRouter: Failed to get CHUNK payload (EDNS0 and query mode): %v", err)
+			lgTransport().Error("failed to get CHUNK payload (EDNS0 and query mode)", "err", err)
 			return h.sendResponse(w, msg, dns.RcodeFormatError)
 		}
 	}
@@ -403,15 +406,14 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 	// Decrypt the payload if it is encrypted
 	// SECURITY: Use strict decryption - ONLY try the authorized peer's key to prevent DoS
 	if h.SecureWrapper != nil {
-		log.Printf("RouteViaRouter: Attempting to decrypt payload from %s using key for %s", sourceAddr, senderHint)
+		lgTransport().Debug("attempting to decrypt payload", "source", sourceAddr, "key_for", senderHint)
 
 		// Use strict decryption: ONLY the senderHint's key (prevents DoS via QNAME forgery)
 		decrypted, err := h.SecureWrapper.UnwrapIncomingFromPeer(payload, senderHint)
 		if err != nil {
 			// Check if error is due to missing verification key (peer not yet discovered)
 			if strings.Contains(err.Error(), "no verification key for") {
-				log.Printf("RouteViaRouter: Missing verification key for authorized peer %s from %s - triggering discovery, sender should retry",
-					senderHint, sourceAddr)
+				lgTransport().Info("missing verification key, triggering discovery", "peer", senderHint, "source", sourceAddr)
 				// Trigger discovery asynchronously so we have the key for next retry
 				if h.OnPeerDiscoveryNeeded != nil {
 					go h.OnPeerDiscoveryNeeded(senderHint)
@@ -420,7 +422,7 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 				return nil
 			}
 
-			log.Printf("RouteViaRouter: Decryption failed with %s's key: %v", senderHint, err)
+			lgTransport().Warn("decryption failed with sender key", "peer", senderHint, "err", err)
 
 			// Try decryption with combiner's key as fallback (for combiner-to-agent messages)
 			if senderHint != "combiner" {
@@ -428,13 +430,13 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 				if err != nil {
 					// Check if combiner key is also missing
 					if strings.Contains(err.Error(), "no verification key for") {
-						log.Printf("RouteViaRouter: Missing verification key for combiner from %s", sourceAddr)
+						lgTransport().Info("missing verification key for combiner", "source", sourceAddr)
 						// Don't trigger discovery for combiner via this path
 						return nil
 					}
-					log.Printf("RouteViaRouter: Decryption failed with combiner's key: %v", err)
+					lgTransport().Warn("decryption failed with combiner key", "err", err)
 					// Decryption failed with the authorized peer's key - this is a FORGERY ATTEMPT
-					log.Printf("RouteViaRouter: SECURITY: Decryption failed for NOTIFY from %s claiming to be %s", sourceAddr, senderHint)
+					lgTransport().Warn("SECURITY: decryption failed for NOTIFY, possible forgery", "source", sourceAddr, "claimed_peer", senderHint)
 					return h.sendResponse(w, msg, dns.RcodeRefused)
 				}
 			} else {
@@ -442,18 +444,21 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 			}
 		}
 		payload = decrypted
-		log.Printf("RouteViaRouter: Successfully decrypted payload from %s using key for %s", sourceAddr, senderHint)
+		lgTransport().Debug("successfully decrypted payload", "source", sourceAddr, "key_for", senderHint)
 	}
 
 	// Parse payload to normalize message format (converts numeric MessageType to string Type)
 	incomingMsg, err := h.parsePayload(distributionID, payload, sourceAddr)
 	if err != nil {
-		log.Printf("RouteViaRouter: Failed to parse payload: %v", err)
+		lgTransport().Error("failed to parse payload", "err", err)
 		return h.sendResponse(w, msg, dns.RcodeFormatError)
 	}
+	// Set the transport-level sender (from QNAME) — distinct from SenderID (payload OriginatorID).
+	// For forwarded messages, SenderID is the original author while TransportSender is the relay agent.
+	incomingMsg.TransportSender = senderHint
 
 	msgType := MessageType(incomingMsg.Type)
-	log.Printf("RouteViaRouter: Message type: %s from %s", msgType, incomingMsg.SenderID)
+	lgTransport().Debug("determined message type", "type", msgType, "sender", incomingMsg.SenderID, "transport_sender", senderHint)
 
 	// Create message context
 	msgCtx := NewMessageContext(msg, sourceAddr)
@@ -484,7 +489,7 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 	// Extract zone for authorization middleware (HSYNC check)
 	if incomingMsg.Zone != "" {
 		msgCtx.Data["zone"] = incomingMsg.Zone
-		log.Printf("RouteViaRouter: Extracted zone %q for authorization check", incomingMsg.Zone)
+		lgTransport().Debug("extracted zone for authorization", "zone", incomingMsg.Zone)
 	} else if msgType == MessageType("beat") {
 		// For beat messages, extract zones from the Zones array
 		// Parse the raw payload to get the Zones field from AgentBeatPost
@@ -494,7 +499,7 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 		if err := json.Unmarshal(payload, &beatPayload); err == nil && len(beatPayload.Zones) > 0 {
 			// Use first shared zone for authorization
 			msgCtx.Data["zone"] = beatPayload.Zones[0]
-			log.Printf("RouteViaRouter: Extracted zone %q from beat message for authorization check", beatPayload.Zones[0])
+			lgTransport().Debug("extracted zone from beat for authorization", "zone", beatPayload.Zones[0])
 		}
 	}
 
@@ -506,7 +511,7 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 	})
 
 	if err != nil {
-		log.Printf("RouteViaRouter: Routing failed: %v", err)
+		lgTransport().Error("routing failed", "err", err)
 		return h.sendResponse(w, msg, dns.RcodeServerFailure)
 	}
 

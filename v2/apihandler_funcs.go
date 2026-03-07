@@ -6,7 +6,6 @@ package tdns
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -17,9 +16,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-func (kdb *KeyDB) APIkeystore() func(w http.ResponseWriter, r *http.Request) {
-
-	// kdb := conf.Internal.KeyDB
+func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 	return func(w http.ResponseWriter, r *http.Request) {
 
@@ -27,15 +24,11 @@ func (kdb *KeyDB) APIkeystore() func(w http.ResponseWriter, r *http.Request) {
 		var kp KeystorePost
 		err := decoder.Decode(&kp)
 		if err != nil {
-			log.Println("APIkeystore: error decoding command post:", err)
+			lgApi.Warn("error decoding keystore post", "err", err)
 		}
 
-		log.Printf("API: received /keystore request (cmd: %s subcommand: %s) from %s.\n",
-			kp.Command, kp.SubCommand, r.RemoteAddr)
+		lgApi.Debug("received /keystore request", "cmd", kp.Command, "subcmd", kp.SubCommand, "from", r.RemoteAddr)
 
-		// resp := KeystoreResponse{
-		// 	Time: time.Now(),
-		// }
 		var resp *KeystoreResponse
 
 		tx, err := kdb.Begin("APIkeystore")
@@ -53,7 +46,7 @@ func (kdb *KeyDB) APIkeystore() func(w http.ResponseWriter, r *http.Request) {
 		}()
 
 		if err != nil {
-			log.Printf("Error from kdb.Begin(): %v", err)
+			lgApi.Error("kdb.Begin failed", "err", err)
 			resp = &KeystoreResponse{
 				Error:    true,
 				ErrorMsg: err.Error(),
@@ -65,7 +58,7 @@ func (kdb *KeyDB) APIkeystore() func(w http.ResponseWriter, r *http.Request) {
 		case "sig0-mgmt":
 			resp, err = kdb.Sig0KeyMgmt(tx, kp)
 			if err != nil {
-				log.Printf("Error from Sig0Mgmt(): %v", err)
+				lgApi.Error("Sig0Mgmt failed", "err", err)
 				resp = &KeystoreResponse{
 					Error:    true,
 					ErrorMsg: err.Error(),
@@ -73,20 +66,22 @@ func (kdb *KeyDB) APIkeystore() func(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case "dnssec-mgmt":
-			// log.Printf("APIkeystore: received /keystore request (cmd: %s subcommand: %s)\n",
-			//	kp.Command, kp.SubCommand)
 			resp, err = kdb.DnssecKeyMgmt(tx, kp)
 			if err != nil {
-				log.Printf("Error from DnssecKeyMgmt(): %v", err)
+				lgApi.Error("DnssecKeyMgmt failed", "err", err)
 				resp = &KeystoreResponse{
 					Error:    true,
 					ErrorMsg: err.Error(),
 				}
 			}
-			// log.Printf("APIkeystore: keystore dnssec-mgmt response: %v", resp)
+			// Trigger re-sign and inventory push after state-changing operations
+			if err == nil && (kp.SubCommand == "rollover" || kp.SubCommand == "delete" || kp.SubCommand == "setstate" || kp.SubCommand == "clear") {
+				triggerResign(conf, kp.Zone)
+				pushKeystateInventoryToAllAgents(conf, kp.Zone)
+			}
 
 		default:
-			log.Printf("Unknown command: %s", kp.Command)
+			lgApi.Warn("unknown keystore command", "cmd", kp.Command)
 			resp = &KeystoreResponse{
 				Error:    true,
 				ErrorMsg: fmt.Sprintf("Unknown command: %s", kp.Command),
@@ -105,11 +100,10 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 		var tp TruststorePost
 		err := decoder.Decode(&tp)
 		if err != nil {
-			log.Println("APItruststore: error decoding command post:", err)
+			lgApi.Warn("error decoding truststore post", "err", err)
 		}
 
-		log.Printf("API: received /truststore request (cmd: %s subcommand: %s) from %s.\n",
-			tp.Command, tp.SubCommand, r.RemoteAddr)
+		lgApi.Debug("received /truststore request", "cmd", tp.Command, "subcmd", tp.SubCommand, "from", r.RemoteAddr)
 
 		// resp := TruststoreResponse{}
 		var resp *TruststoreResponse
@@ -129,7 +123,7 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 		}()
 
 		if err != nil {
-			log.Printf("Error from kdb.Begin(): %v", err)
+			lgApi.Error("kdb.Begin failed", "err", err)
 			resp = &TruststoreResponse{
 				Error:    true,
 				ErrorMsg: err.Error(),
@@ -139,7 +133,7 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 
 		switch tp.Command {
 		case "list-dnskey":
-			log.Printf("tdnsd truststore list-dnskey inquiry")
+			lgApi.Debug("truststore list-dnskey inquiry")
 			tmp1 := map[string]cache.CachedDnskeyRRset{}
 			for _, key := range cache.DnskeyCache.Map.Keys() {
 				if val, ok := cache.DnskeyCache.Map.Get(key); ok {
@@ -153,7 +147,7 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 		case "child-sig0-mgmt":
 			resp, err = kdb.Sig0TrustMgmt(tx, tp)
 			if err != nil {
-				log.Printf("Error from Sig0TrustMgmt(): %v", err)
+				lgApi.Error("Sig0TrustMgmt failed", "err", err)
 				resp = &TruststoreResponse{
 					Error:    true,
 					ErrorMsg: err.Error(),
@@ -161,7 +155,7 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 			}
 
 		default:
-			log.Printf("Unknown command: %s", tp.Command)
+			lgApi.Warn("unknown truststore command", "cmd", tp.Command)
 		}
 	}
 }
@@ -169,9 +163,9 @@ func (kdb *KeyDB) APItruststore() func(w http.ResponseWriter, r *http.Request) {
 // func APIcommand(stopCh chan struct{}) func(w http.ResponseWriter, r *http.Request) {
 func APIcommand(conf *Config, rtr *mux.Router) func(w http.ResponseWriter, r *http.Request) {
 	if rtr == nil {
-		log.Printf("APIcommand: rtr is nil")
+		lgApi.Error("router is nil")
 		return func(w http.ResponseWriter, r *http.Request) {
-			log.Printf("APIcommand: rtr is nil")
+			lgApi.Error("router is nil")
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 		}
 	}
@@ -183,11 +177,10 @@ func APIcommand(conf *Config, rtr *mux.Router) func(w http.ResponseWriter, r *ht
 		var cp CommandPost
 		err := decoder.Decode(&cp)
 		if err != nil {
-			log.Println("APICommand: error decoding command post:", err)
+			lgApi.Warn("error decoding command post", "err", err)
 		}
 
-		log.Printf("API: received /command request (cmd: %s) from %s. AppName: %s\n",
-			cp.Command, r.RemoteAddr, Globals.App.Name)
+		lgApi.Debug("received /command request", "cmd", cp.Command, "from", r.RemoteAddr, "app", Globals.App.Name)
 
 		resp := CommandResponse{
 			Time:    time.Now(),
@@ -196,12 +189,12 @@ func APIcommand(conf *Config, rtr *mux.Router) func(w http.ResponseWriter, r *ht
 
 		switch cp.Command {
 		case "status":
-			log.Printf("Daemon status inquiry\n")
+			lgApi.Debug("daemon status inquiry")
 			resp.Status = "ok" // only status we know, so far
 			resp.Msg = fmt.Sprintf("%s: I'm happy, but send more cookies", Globals.App.Name)
 
 		case "stop":
-			log.Printf("Daemon instructed to stop\n")
+			lgApi.Info("daemon instructed to stop")
 			// var done struct{}
 			resp.Status = "stopping"
 			resp.Msg = fmt.Sprintf("%s: Daemon was happy, but now winding down", Globals.App.Name)
@@ -231,7 +224,7 @@ func APIcommand(conf *Config, rtr *mux.Router) func(w http.ResponseWriter, r *ht
 		w.Header().Set("Content-Type", "application/json")
 		err = json.NewEncoder(w).Encode(resp)
 		if err != nil {
-			log.Printf("Error from json encoder: %v", err)
+			lgApi.Error("json encoder failed", "err", err)
 		}
 	}
 }
@@ -243,11 +236,10 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		var cp ConfigPost
 		err := decoder.Decode(&cp)
 		if err != nil {
-			log.Println("APIconfig: error decoding config post:", err)
+			lgApi.Warn("error decoding config post", "err", err)
 		}
 
-		log.Printf("API: received /config request (cmd: %s) from %s.\n",
-			cp.Command, r.RemoteAddr)
+		lgApi.Debug("received /config request", "cmd", cp.Command, "from", r.RemoteAddr)
 
 		resp := ConfigResponse{
 			AppName: Globals.App.Name,
@@ -256,7 +248,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 
 		switch cp.Command {
 		case "reload":
-			log.Printf("APIconfig: reloading configuration")
+			lgApi.Info("reloading configuration")
 			resp.Msg, err = conf.ReloadConfig()
 			if err != nil {
 				resp.Error = true
@@ -264,7 +256,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case "reload-zones":
-			log.Printf("APIconfig: reloading zones")
+			lgApi.Info("reloading zones")
 			resp.Msg, err = conf.ReloadZoneConfig(r.Context())
 			if err != nil {
 				resp.Error = true
@@ -272,7 +264,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case "status":
-			log.Printf("APIconfig: config status inquiry")
+			lgApi.Debug("config status inquiry")
 			resp.DnsEngine = conf.DnsEngine
 			resp.ApiServer = conf.ApiServer
 			resp.Identities = conf.Service.Identities
@@ -296,11 +288,10 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 		var dp DelegationPost
 		err := decoder.Decode(&dp)
 		if err != nil {
-			log.Println("APIdelegation: error decoding delegation post:", err)
+			lgApi.Warn("error decoding delegation post", "err", err)
 		}
 
-		log.Printf("API: received /delegation request (cmd: %s) from %s.\n",
-			dp.Command, r.RemoteAddr)
+		lgApi.Debug("received /delegation request", "cmd", dp.Command, "from", r.RemoteAddr)
 
 		resp := DelegationResponse{
 			Time: time.Now(),
@@ -316,7 +307,7 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 		var exist bool
 		if zd, exist = Zones.Get(dp.Zone); !exist {
 			msg := fmt.Sprintf("Zone \"%s\" is unknown.", dp.Zone)
-			log.Printf("APIdelegation: %s", msg)
+			lgApi.Warn("unknown zone", "zone", dp.Zone)
 			resp.Error = true
 			resp.ErrorMsg = msg
 			return
@@ -333,7 +324,7 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 		switch dp.Command {
 		// Find out whether delegation is in sync or not and report on details
 		case "status":
-			log.Printf("APIdelegation: zone %s delegation status inquiry", dp.Zone)
+			lgApi.Debug("delegation status inquiry", "zone", dp.Zone)
 			syncreq.Command = "DELEGATION-STATUS"
 
 			delsyncq <- syncreq
@@ -348,7 +339,7 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 
 		// Find out whether delegation is in sync or not and if not then fix it
 		case "sync":
-			log.Printf("APIdelegation: zone %s: will check and sync changes to delegation data\n", dp.Zone)
+			lgApi.Info("checking and syncing delegation data", "zone", dp.Zone)
 			syncreq.Command = "EXPLICIT-SYNC-DELEGATION"
 
 			delsyncq <- syncreq
@@ -356,7 +347,7 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 			select {
 			case syncstate = <-respch:
 				resp.SyncStatus = syncstate
-				log.Printf("APIdelegation: zone %s: received response from DelegationSyncEngine: %s", dp.Zone, syncstate.Msg)
+				lgApi.Debug("received delegation sync response", "zone", dp.Zone, "msg", syncstate.Msg)
 			case <-time.After(4 * time.Second):
 				resp.Error = true
 				resp.ErrorMsg = "Timeout waiting for delegation sync response"
@@ -381,7 +372,7 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			err := json.NewEncoder(w).Encode(resp)
 			if err != nil {
-				log.Printf("Error from json encoder: %v", err)
+				lgApi.Error("json encoder failed", "err", err)
 			}
 		}()
 
@@ -389,15 +380,14 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		var dp DebugPost
 		err := decoder.Decode(&dp)
 		if err != nil {
-			log.Println("APIdebug: error decoding debug post:", err)
+			lgApi.Warn("error decoding debug post", "err", err)
 		}
 
-		log.Printf("API: received /debug request (cmd: %s) from %s.\n",
-			dp.Command, r.RemoteAddr)
+		lgApi.Debug("received /debug request", "cmd", dp.Command, "from", r.RemoteAddr)
 
 		switch dp.Command {
 		case "rrset":
-			log.Printf("%s debug rrset inquiry", Globals.App.Name)
+			lgApi.Debug("debug rrset inquiry")
 			if zd, ok := Zones.Get(dp.Zone); ok {
 				//			        idx, _ := zd.OwnerIndex.Get(dp.Qname)
 				//				if owner := &zd.Owners[idx]; owner != nil {
@@ -410,13 +400,13 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 				if rrset, ok := owner.RRtypes.Get(dp.Qtype); ok {
 					resp.RRset = rrset
 				}
-				log.Printf("tdnsd debug rrset: owner: %v", owner)
+				lgApi.Debug("debug rrset owner", "owner", owner)
 			} else {
 				resp.Msg = fmt.Sprintf("Zone %s is unknown", dp.Zone)
 			}
 
 		case "validate-rrset":
-			log.Printf("tdnsd debug validate-rrset")
+			lgApi.Debug("debug validate-rrset")
 			if zd, ok := Zones.Get(dp.Zone); ok {
 
 				rrset, valid, err := zd.LookupAndValidateRRset(dp.Qname, dp.Qtype, true)
@@ -436,7 +426,7 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case "lav":
-			log.Printf("tdnsd debug lookup-and-validate inquiry")
+			lgApi.Debug("debug lookup-and-validate inquiry")
 			zd, folded := FindZone(dp.Qname)
 			if zd == nil {
 				resp.ErrorMsg = fmt.Sprintf("Did not find a known zone for qname %s",
@@ -460,7 +450,7 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			}
 
 		case "show-ta":
-			log.Printf("tdnsd debug show-ta")
+			lgApi.Debug("debug show-ta")
 			resp.Msg = fmt.Sprintf("TAStore: %v", cache.DnskeyCache.Map.Keys())
 			cdrs := []cache.CachedDnskeyRRset{}
 			for _, taname := range cache.DnskeyCache.Map.Keys() {
@@ -473,7 +463,7 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.TrustedDnskeys = cdrs
 
 		case "show-rrsetcache":
-			log.Printf("%s debug show-rrsetcache", Globals.App.Name)
+			lgApi.Debug("debug show-rrsetcache")
 			resp.Msg = fmt.Sprintf("RRsetCache: %v", conf.Internal.RRsetCache.RRsets.Keys())
 			rrsets := []cache.CachedRRset{}
 			for _, rrsetkey := range conf.Internal.RRsetCache.RRsets.Keys() {
@@ -504,7 +494,7 @@ func APIscanner(conf *Config, app *AppDetails, scannerq chan ScanRequest, kdb *K
 		var sp ScannerPost
 		err := decoder.Decode(&sp)
 		if err != nil {
-			log.Println("APIscanner: error decoding scanner post:", err)
+			lgApi.Warn("error decoding scanner post", "err", err)
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Error decoding scanner post: %v", err)
 			w.Header().Set("Content-Type", "application/json")
@@ -512,14 +502,13 @@ func APIscanner(conf *Config, app *AppDetails, scannerq chan ScanRequest, kdb *K
 			return
 		}
 
-		log.Printf("API: received /scanner request (cmd: %s) from %s.\n",
-			sp.Command, r.RemoteAddr)
+		lgApi.Debug("received /scanner request", "cmd", sp.Command, "from", r.RemoteAddr)
 
 		sp.Command = strings.ToUpper(sp.Command)
 
 		switch sp.Command {
 		case "SCAN":
-			log.Printf("APIscanner: processing scan request with %d tuples", len(sp.ScanTuples))
+			lgApi.Debug("processing scan request", "tuples", len(sp.ScanTuples))
 
 			// Generate job ID
 			jobID := GenerateJobID()
@@ -538,7 +527,7 @@ func APIscanner(conf *Config, app *AppDetails, scannerq chan ScanRequest, kdb *K
 				resp.Status = "queued"
 				resp.JobID = jobID
 				resp.Msg = fmt.Sprintf("Scan request queued with job ID: %s", jobID)
-				log.Printf("APIscanner: scan request queued with job ID: %s", jobID)
+				lgApi.Info("scan request queued", "jobID", jobID)
 			default:
 				// Queue is full
 				resp.Error = true
@@ -547,7 +536,7 @@ func APIscanner(conf *Config, app *AppDetails, scannerq chan ScanRequest, kdb *K
 
 		case "status":
 			// General status (job status is handled by separate endpoint)
-			log.Printf("APIscanner: scanner status inquiry")
+			lgApi.Debug("scanner status inquiry")
 			resp.Msg = fmt.Sprintf("%s: Configuration is ok, boot time: %s, last config reload: %s",
 				Globals.App.Name, Globals.App.ServerBootTime.Format(TimeLayout), Globals.App.ServerConfigTime.Format(TimeLayout))
 
@@ -585,8 +574,7 @@ func ShowAPI(rtr *mux.Router) ([]string, error) {
 	}
 
 	if err := rtr.Walk(walker); err != nil {
-		// log.Panicf("Logging err: %s\n", err.Error())
-		log.Printf("ShowAPI: Walking error: %v", err)
+		lgApi.Error("walking routes failed", "err", err)
 		return nil, err
 	}
 	//	response := ApiResponse{
@@ -718,7 +706,7 @@ func APIscannerStatus(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 		if jobID == "" {
 			// Return all jobs - create deep copies to avoid race conditions during encoding
-			log.Printf("APIscannerStatus: listing all jobs")
+			lgApi.Debug("listing all scanner jobs")
 			jobs := make([]*ScanJobStatus, 0, len(conf.Internal.Scanner.Jobs))
 			for _, job := range conf.Internal.Scanner.Jobs {
 				jobs = append(jobs, deepCopyScanJobStatus(job))
@@ -730,7 +718,7 @@ func APIscannerStatus(conf *Config) func(w http.ResponseWriter, r *http.Request)
 		}
 
 		// Return specific job - create deep copy to avoid race conditions during encoding
-		log.Printf("APIscannerStatus: job status inquiry for job ID: %s", jobID)
+		lgApi.Debug("job status inquiry", "jobID", jobID)
 		job, exists := conf.Internal.Scanner.Jobs[jobID]
 
 		if !exists {
@@ -769,7 +757,7 @@ func APIscannerDelete(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			// Delete all jobs
 			count := len(conf.Internal.Scanner.Jobs)
 			conf.Internal.Scanner.Jobs = make(map[string]*ScanJobStatus)
-			log.Printf("APIscannerDelete: deleted all %d jobs", count)
+			lgApi.Info("deleted all scanner jobs", "count", count)
 			resp.Msg = fmt.Sprintf("Deleted all %d jobs", count)
 			resp.Status = "success"
 		} else if jobID != "" {
@@ -780,7 +768,7 @@ func APIscannerDelete(conf *Config) func(w http.ResponseWriter, r *http.Request)
 				return
 			}
 			delete(conf.Internal.Scanner.Jobs, jobID)
-			log.Printf("APIscannerDelete: deleted job %s", jobID)
+			lgApi.Info("deleted scanner job", "jobID", jobID)
 			resp.Msg = fmt.Sprintf("Deleted job %s", jobID)
 			resp.Status = "success"
 		} else {

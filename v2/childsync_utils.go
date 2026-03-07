@@ -5,7 +5,6 @@ package tdns
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -27,7 +26,7 @@ func xxxChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns
 
 	pkc, err := LoadSig0SigningKey(Globals.Sig0Keyfile)
 	if err != nil {
-		log.Printf("Error from LoadSig0SigningKeyNG(%s): %v", Globals.Sig0Keyfile, err)
+		lgDns.Error("error from LoadSig0SigningKeyNG", "keyfile", Globals.Sig0Keyfile, "err", err)
 		return UpdateResult{}, fmt.Errorf("error from LoadSig0SigningKeyNG(%s): %v", Globals.Sig0Keyfile, err)
 	}
 	var smsg *dns.Msg
@@ -39,9 +38,8 @@ func xxxChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns
 		fmt.Printf("Signing update.\n")
 		smsg, err = SignMsg(*msg, Globals.Zonename, sak)
 		if err != nil {
-			msg := fmt.Sprintf("error from SignMsg(%s): %v", Globals.Zonename, err)
-			log.Printf(msg)
-			return UpdateResult{}, fmt.Errorf(msg)
+			lgDns.Error("error from SignMsg", "zone", Globals.Zonename, "err", err)
+			return UpdateResult{}, fmt.Errorf("error from SignMsg(%s): %v", Globals.Zonename, err)
 		}
 	} else {
 		fmt.Printf("Keyfile not specified, not signing message.\n")
@@ -49,10 +47,10 @@ func xxxChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns
 
 	rcode, ur, err := SendUpdate(smsg, pzone, target.Addresses)
 	if err != nil {
-		log.Printf("Error from SendUpdate(%s): %v", target.Name, err)
+		lgDns.Error("error from SendUpdate", "target", target.Name, "err", err)
 		return ur, err
 	} else {
-		log.Printf("SendUpdate(parent=%s, target=%s) returned rcode %s", pzone, target.Name, dns.RcodeToString[rcode])
+		lgDns.Info("SendUpdate completed", "parent", pzone, "target", target.Name, "rcode", dns.RcodeToString[rcode])
 	}
 	return ur, nil
 }
@@ -81,11 +79,11 @@ type TargetUpdateStatus struct {
 // func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error, UpdateResult) {
 func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResult, error) {
 	if zonename == "." {
-		log.Printf("Error: zone name not specified. Terminating.\n")
+		lgDns.Error("SendUpdate: zone name not specified")
 		return 0, UpdateResult{}, fmt.Errorf("zone name not specified")
 	}
 
-	log.Printf("SendUpdate(%s) target has %d addresses: %v", zonename, len(addrs), addrs)
+	lgDns.Info("SendUpdate", "zone", zonename, "numAddresses", len(addrs), "addresses", addrs)
 
 	var ur = UpdateResult{
 		TargetStatus: make(map[string]TargetUpdateStatus),
@@ -96,17 +94,13 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResul
 	var edeMessage string
 
 	for _, dst := range addrs {
-		if Globals.Verbose {
-			log.Printf("Sending DNS UPDATE for zone %s to %s\n", zonename, dst)
-		}
+		lgDns.Debug("sending DNS UPDATE", "zone", zonename, "dst", dst)
 
-		if Globals.Debug {
-			log.Printf("Sending Update:\n%s\n", msg.String())
-		}
+		lgDns.Debug("sending update message", "msg", msg.String())
 
 		res, err := dns.Exchange(msg, dst)
 		if err != nil {
-			log.Printf("Error from dns.Exchange(%s, UPDATE): %v. Trying next address", dst, err)
+			lgDns.Warn("error from dns.Exchange, trying next address", "dst", dst, "err", err)
 			ur.TargetStatus[dst] = TargetUpdateStatus{
 				Error:      true,
 				ErrorMsg:   err.Error(),
@@ -114,19 +108,18 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResul
 				EDEMessage: edeMessage,
 				Sender:     dst,
 			}
-			log.Printf("Error msg: %s", res.String())
 			if res != nil {
-				log.Printf("Partial response: %s", res.String())
+				lgDns.Debug("partial response", "msg", res.String())
 			}
 			continue
 		}
 
 		edeFound, edeCode, edeMessage = edns0.ExtractEDEFromMsg(res)
-		log.Printf("after ExtractEDEFromMsg: EDE found: %t, code: %d, message: %s", edeFound, edeCode, edeMessage)
+		lgDns.Debug("ExtractEDEFromMsg result", "edeFound", edeFound, "edeCode", edeCode, "edeMessage", edeMessage)
 		edeSender := ""
 		if edeFound {
 			edeSender = dst
-			log.Printf("EDE Code: %d, EDE Message: %s", edeCode, edeMessage)
+			lgDns.Info("EDE found in response", "edeCode", edeCode, "edeMessage", edeMessage)
 		}
 		ur.TargetStatus[dst] = TargetUpdateStatus{
 			Rcode:      res.Rcode,
@@ -137,17 +130,11 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResul
 		}
 
 		if res.Rcode != dns.RcodeSuccess {
-			if Globals.Verbose {
-				log.Printf("... and got rcode %s back (bad)\n", dns.RcodeToString[res.Rcode])
-				log.Printf("Response:\n%s\n", res.String())
-			}
-			log.Printf("Error from %s: Rcode: %s. Trying next address", dst, dns.RcodeToString[res.Rcode])
+			lgDns.Debug("got bad rcode", "rcode", dns.RcodeToString[res.Rcode], "response", res.String())
+			lgDns.Warn("error rcode from target, trying next address", "dst", dst, "rcode", dns.RcodeToString[res.Rcode])
 			continue
 		} else {
-			if Globals.Verbose {
-				log.Printf("... and got rcode NOERROR back (good)\n")
-				log.Printf("Response:\n%s\n", res.String())
-			}
+			lgDns.Debug("got rcode NOERROR", "response", res.String())
 			return res.Rcode, ur, nil
 		}
 	}
@@ -191,9 +178,7 @@ func CreateChildUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, 
 		}
 	}
 
-	if Globals.Debug {
-		fmt.Printf("Creating update msg:\n%s\n", m.String())
-	}
+	lgDns.Debug("created child update msg", "parent", parent, "child", child, "msg", m.String())
 	return m, nil
 }
 
@@ -256,9 +241,7 @@ func CreateChildReplaceUpdate(parent, child string, newNS, newA, newAAAA []dns.R
 	m.Insert(newA)
 	m.Insert(newAAAA)
 
-	if Globals.Debug {
-		fmt.Printf("Creating replace update msg:\n%s\n", m.String())
-	}
+	lgDns.Debug("created replace update msg", "parent", parent, "child", child, "msg", m.String())
 	return m, nil
 }
 
@@ -279,14 +262,12 @@ func CreateUpdate(zone string, adds, removes []dns.RR) (*dns.Msg, error) {
 
 	m.SetEdns0(1232, true) // UPDsize + DO-bit, the important thing is to have an OPT RR, to enable the return of EDE.
 
-	if Globals.Debug {
-		fmt.Printf("Creating update msg:\n%s\n", m.String())
-	}
+	lgDns.Debug("created update msg", "zone", zone, "msg", m.String())
 	return m, nil
 }
 
 // Only used in the CLI version
-func ComputeRRDiff(childpri, parpri, owner string, rrtype uint16) (bool, []dns.RR, []dns.RR) {
+func ComputeRRDiff(childpri, parpri, owner string, rrtype uint16) (bool, []dns.RR, []dns.RR, error) {
 	if Globals.Debug {
 		//	fmt.Printf("*** ComputeRRDiff(%s, %s)\n", owner, dns.TypeToString[rrtype])
 		fmt.Printf("*** ComputeRRDiff(%s, %s, %s, %s)\n", childpri, parpri, owner, dns.TypeToString[rrtype])
@@ -294,14 +275,12 @@ func ComputeRRDiff(childpri, parpri, owner string, rrtype uint16) (bool, []dns.R
 	rrname := dns.TypeToString[rrtype]
 	rrs_parent, err := AuthQuery(owner, parpri, rrtype)
 	if err != nil {
-		log.Fatalf("Error: looking up child %s %s RRset in parent primary \"%s\": %v",
-			Globals.Zonename, rrname, parpri, err)
+		return false, nil, nil, fmt.Errorf("looking up child %s RRset in parent primary %s: %w", rrname, parpri, err)
 	}
 
 	rrs_child, err := AuthQuery(owner, childpri, rrtype)
 	if err != nil {
-		log.Fatalf("Error: looking up child %s %s RRset in child primary \"%s\": %v",
-			Globals.Zonename, rrname, childpri, err)
+		return false, nil, nil, fmt.Errorf("looking up child %s RRset in child primary %s: %w", rrname, childpri, err)
 	}
 
 	fmt.Printf("%d %s RRs from parent, %d %s RRs from child\n",
@@ -326,23 +305,21 @@ func ComputeRRDiff(childpri, parpri, owner string, rrtype uint16) (bool, []dns.R
 			fmt.Printf("Add:   %s\n", rr.String())
 		}
 	}
-	return differ, adds, removes
+	return differ, adds, removes, nil
 }
 
 // XXX: Should be replaced by four calls: one per child and parent primary to get
 //
 //	the NS RRsets and one to new ComputeBailiwickNS() that takes a []dns.RR + zone name
-func ComputeBailiwickNS(childpri, parpri, owner string) ([]string, []string) {
+func ComputeBailiwickNS(childpri, parpri, owner string) ([]string, []string, error) {
 	ns_parent, err := AuthQuery(owner, parpri, dns.TypeNS)
 	if err != nil {
-		log.Fatalf("Error: looking up child %s NS RRset in parent primary %s: %v",
-			Globals.Zonename, parpri, err)
+		return nil, nil, fmt.Errorf("looking up child NS RRset in parent primary %s: %w", parpri, err)
 	}
 
 	ns_child, err := AuthQuery(Globals.Zonename, childpri, dns.TypeNS)
 	if err != nil {
-		log.Fatalf("Error: looking up child %s NS RRset in child primary %s: %v",
-			Globals.Zonename, childpri, err)
+		return nil, nil, fmt.Errorf("looking up child NS RRset in child primary %s: %w", childpri, err)
 	}
 
 	fmt.Printf("%d NS RRs from parent, %d NS RRs from child\n",
@@ -360,7 +337,7 @@ func ComputeBailiwickNS(childpri, parpri, owner string) ([]string, []string) {
 	// return ComputeBailiwickNS_NG(ns_child, ns_parent, owner)
 	child_inb, _ := BailiwickNS(owner, ns_child)
 	parent_inb, _ := BailiwickNS(owner, ns_parent)
-	return child_inb, parent_inb
+	return child_inb, parent_inb, nil
 }
 
 // Return the names of NS RRs that are in bailiwick for the zone.
@@ -416,22 +393,21 @@ func (zd *ZoneData) BestSyncScheme(ctx context.Context, imr *Imr) (string, *Dsyn
 	var active_scheme string
 	var dsynctarget DsyncTarget
 
-	zd.Logger.Printf("BestSyncScheme: zone=%s", zd.ZoneName)
+	lgDns.Info("BestSyncScheme", "zone", zd.ZoneName)
 
 	// dsync_rrs, parent, err := DsyncDiscovery(zd.ZoneName, Globals.IMR, Globals.Verbose)
 	dsync_res, err := imr.DsyncDiscovery(ctx, zd.ZoneName, Globals.Verbose)
 	if err != nil {
-		zd.Logger.Printf("BestSyncScheme: Error from DsyncDiscovery(): %v", err)
+		lgDns.Error("BestSyncScheme: error from DsyncDiscovery", "zone", zd.ZoneName, "err", err)
 		return "", nil, err
 	}
 	if len(dsync_res.Rdata) == 0 {
-		msg := fmt.Sprintf("No DSYNC RRs for %s found in parent %s.", zd.ZoneName, dsync_res.Parent)
-		zd.Logger.Printf("SyncWithParent: %s. Synching not possible.", msg)
-		return "", nil, fmt.Errorf("error: %s", msg)
+		lgDns.Warn("BestSyncScheme: no DSYNC RRs found, synching not possible", "zone", zd.ZoneName, "parent", dsync_res.Parent)
+		return "", nil, fmt.Errorf("error: No DSYNC RRs for %s found in parent %s.", zd.ZoneName, dsync_res.Parent)
 	}
 	schemes := viper.GetStringSlice("delegationsync.child.schemes")
 	if len(schemes) == 0 {
-		zd.Logger.Printf("BestSyncScheme: Error: no syncronization schemes configured for child %s", zd.ZoneName)
+		lgDns.Error("BestSyncScheme: no synchronization schemes configured", "zone", zd.ZoneName)
 		return "", nil, fmt.Errorf("no synchronizations schemes configured for child %s", zd.ZoneName)
 	}
 
@@ -441,7 +417,7 @@ schemeLoop:
 
 		switch scheme {
 		case "update":
-			log.Printf("BestSyncScheme(): checking UPDATE alternative:")
+			lgDns.Debug("BestSyncScheme: checking UPDATE alternative")
 			for _, drr := range dsync_res.Rdata {
 				if drr.Scheme == core.SchemeUpdate {
 					active_drr = drr
@@ -449,13 +425,13 @@ schemeLoop:
 				}
 			}
 			if active_drr != nil {
-				log.Printf("BestSyncSchemes: found working UPDATE config, happy with that.")
+				lgDns.Debug("BestSyncScheme: found working UPDATE config")
 				active_scheme = "UPDATE"
 				break schemeLoop
 			}
 
 		case "notify":
-			log.Printf("BestSyncScheme(): checking NOTIFY alternative:")
+			lgDns.Debug("BestSyncScheme: checking NOTIFY alternative")
 			for _, drr := range dsync_res.Rdata {
 				if drr.Scheme == core.SchemeNotify && (drr.Type == dns.TypeCSYNC || drr.Type == dns.TypeANY) {
 					active_drr = drr
@@ -468,21 +444,19 @@ schemeLoop:
 			}
 
 		default:
-			msg := fmt.Sprintf("zone %s: error: unknown child scheme: %s", zd.ZoneName, scheme)
-			zd.Logger.Print(msg)
-			return "", nil, errors.New(msg)
+			lgDns.Error("BestSyncScheme: unknown child scheme", "zone", zd.ZoneName, "scheme", scheme)
+			return "", nil, fmt.Errorf("zone %s: error: unknown child scheme: %s", zd.ZoneName, scheme)
 		}
 	}
 
 	if active_drr == nil {
-		msg := fmt.Sprintf("zone %s: error: no working DSYNC scheme alternative found", zd.ZoneName)
-		zd.Logger.Print(msg)
-		return "", nil, errors.New(msg)
+		lgDns.Error("BestSyncScheme: no working DSYNC scheme alternative found", "zone", zd.ZoneName)
+		return "", nil, fmt.Errorf("zone %s: error: no working DSYNC scheme alternative found", zd.ZoneName)
 	}
 
-	zd.Logger.Printf("BestSyncScheme: zone %s (parent %s) DSYNC alternatives are:", zd.ZoneName, dsync_res.Parent)
+	lgDns.Debug("BestSyncScheme: DSYNC alternatives", "zone", zd.ZoneName, "parent", dsync_res.Parent)
 	for _, drr := range dsync_res.Rdata {
-		zd.Logger.Printf("%s\tIN\tDSYNC\t%s", dsync_res.Qname, drr.String())
+		lgDns.Debug("BestSyncScheme: DSYNC RR", "qname", dsync_res.Qname, "rdata", drr.String())
 	}
 
 	tmp, err := net.LookupHost(active_drr.Target)
@@ -500,6 +474,6 @@ schemeLoop:
 	dsynctarget.Name = active_drr.Target
 	dsynctarget.RR = active_drr
 
-	zd.Logger.Printf("BestSyncScheme: Best DSYNC alternative: %s:", active_drr.String())
+	lgDns.Debug("BestSyncScheme: best DSYNC alternative", "rdata", active_drr.String())
 	return active_scheme, &dsynctarget, nil
 }

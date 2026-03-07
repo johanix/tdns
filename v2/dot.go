@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"log"
 	"net"
 	"time"
 
@@ -24,7 +23,7 @@ func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs []string, cert *tl
 		return fmt.Errorf("DnsDoTEngine:DoT certificate is not set")
 	}
 
-	log.Printf("DnsEngine: DoT addresses: %v", dotaddrs)
+	lgDns.Info("DnsEngine: DoT addresses", "addrs", dotaddrs)
 	// tlsConfig := DoTTLSConfig(certFile, keyFile)
 
 	tlsConfig := &tls.Config{
@@ -36,12 +35,7 @@ func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs []string, cert *tl
 
 	// Wrap the DNS handler to add logging
 	loggingHandler := func(w dns.ResponseWriter, r *dns.Msg) {
-		if Globals.Debug {
-			log.Printf("*** DoT received message opcode: %s qname: %s rrtype: %s",
-				dns.OpcodeToString[r.Opcode],
-				r.Question[0].Name,
-				dns.TypeToString[r.Question[0].Qtype])
-		}
+		lgDns.Debug("DoT: received message", "opcode", dns.OpcodeToString[r.Opcode], "qname", r.Question[0].Name, "rrtype", dns.TypeToString[r.Question[0].Qtype])
 		ourDNSHandler(w, r)
 	}
 
@@ -62,18 +56,18 @@ func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs []string, cert *tl
 			}
 			servers = append(servers, server)
 			go func(srv *dns.Server, hp string) {
-				log.Printf("DnsEngine: serving on %s (DoT)\n", hp)
+				lgDns.Info("DnsEngine: serving on DoT", "hostport", hp)
 				if err := srv.ListenAndServe(); err != nil {
-					log.Printf("Failed to setup the DoT server on %s: %s", hp, err.Error())
+					lgDns.Error("failed to setup DoT server", "hostport", hp, "err", err)
 				} else {
-					log.Printf("DnsEngine: listening on %s/DoT", hp)
+					lgDns.Info("DnsEngine: listening on DoT", "hostport", hp)
 				}
 			}(server, hostport)
 		}
 	}
 	go func() {
 		<-ctx.Done()
-		log.Printf("DnsDoTEngine: shutting down DoT servers...")
+		lgDns.Info("DnsDoTEngine: shutting down DoT servers")
 		for _, s := range servers {
 			done := make(chan struct{})
 			go func(srv *dns.Server) {
@@ -83,7 +77,7 @@ func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs []string, cert *tl
 			select {
 			case <-done:
 			case <-time.After(5 * time.Second):
-				log.Printf("DnsDoTEngine: timeout shutting down %s; continuing", s.Addr)
+				lgDns.Warn("DnsDoTEngine: timeout shutting down server, continuing", "addr", s.Addr)
 			}
 		}
 	}()

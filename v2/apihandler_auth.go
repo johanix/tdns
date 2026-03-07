@@ -10,7 +10,6 @@ package tdns
 import (
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -43,7 +42,7 @@ func APIauthPeer(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			err := json.NewEncoder(w).Encode(resp)
 			if err != nil {
-				log.Printf("Error from json encoder: %v", err)
+				lgApi.Error("json encode failed", "handler", "authPeer", "err", err)
 			}
 		}()
 
@@ -56,7 +55,7 @@ func APIauthPeer(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("API: received /auth/peer request (cmd: %s) from %s", dp.Command, r.RemoteAddr)
+		lgApi.Debug("received /auth/peer request", "cmd", dp.Command, "from", r.RemoteAddr)
 
 		switch dp.Command {
 		case "peer-ping":
@@ -125,7 +124,7 @@ func APIauthDistrib(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		log.Printf("API: received /auth/distrib request (cmd: %s) from %s", req.Command, r.RemoteAddr)
+		lgApi.Debug("received /auth/distrib request", "cmd", req.Command, "from", r.RemoteAddr)
 
 		switch req.Command {
 		case "peer-list":

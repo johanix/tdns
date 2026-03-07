@@ -11,7 +11,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"strings"
 	"sync"
@@ -147,7 +146,7 @@ func NewDNSTransport(cfg *DNSTransportConfig) *DNSTransport {
 		ControlZone:                dns.Fqdn(cfg.ControlZone),
 		ListenAddr:                 cfg.ListenAddr,
 		Timeout:                    timeout,
-		DNSClient:                  &dns.Client{Timeout: timeout, Net: "udp"},
+		DNSClient:                  &dns.Client{Timeout: timeout, Net: "tcp"},
 		pendingConfirmations:       make(map[string]*pendingOperation),
 		ConfirmationChan:           make(chan *IncomingConfirmation, 100),
 		chunkMode:                  cfg.ChunkMode,
@@ -278,9 +277,9 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 	sharedZones := peer.GetSharedZones()
 
 	if len(sharedZones) == 0 {
-		log.Printf("DNS Beat: WARNING: No shared zones found for peer %s", peer.ID)
+		lgTransport().Debug("no shared zones found for peer", "peer", peer.ID)
 	} else {
-		log.Printf("DNS Beat: Including %d shared zone(s) for peer %s: %v", len(sharedZones), peer.ID, sharedZones)
+		lgTransport().Debug("including shared zones in beat", "count", len(sharedZones), "peer", peer.ID, "zones", sharedZones)
 	}
 
 	payload := &core.AgentBeatPost{
@@ -301,7 +300,7 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "beat", distributionID, payloadJSON, false)
 	if err != nil {
 		// For beats, we might want to be more lenient with errors
-		log.Printf("DNS Beat to %s failed: %v", peer.ID, err)
+		lgTransport().Warn("beat failed", "peer", peer.ID, "err", err)
 		return &BeatResponse{
 			ResponderID: peer.ID,
 			Timestamp:   time.Now(),
@@ -340,10 +339,11 @@ func (t *DNSTransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 	}
 	payload := &core.AgentMsgPost{
 		MessageType:  messageType,
-		MyIdentity:   req.SenderID,
+		OriginatorID: req.SenderID,
 		YourIdentity: peer.ID,
 		Zone:         req.Zone,
 		Records:      req.Records,
+		Operations:   req.Operations,
 		Time:         req.Timestamp,
 		RfiType:      req.RfiType,
 	}
@@ -675,6 +675,49 @@ func extractKeystateConfirmFromResponse(res *dns.Msg, peerID string, sw *SecureP
 	return nil, fmt.Errorf("no CHUNK option in response")
 }
 
+// Edits sends an EDITS message to an agent, carrying that agent's current contributions.
+// Modeled on DNSTransport.Keystate(). Sent by combiner in response to RFI EDITS.
+func (t *DNSTransport) Edits(ctx context.Context, peer *Peer, req *EditsRequest) (*EditsResponse, error) {
+	addr := peer.CurrentAddress()
+	if addr == nil {
+		return nil, NewTransportError("DNS", "Edits", peer.ID, fmt.Errorf("no address available"), false)
+	}
+
+	distributionID := GenerateDistributionID()
+	qname := t.buildNotifyQNAME(distributionID)
+
+	// Create edits payload using typed struct from core package
+	payload := &core.AgentEditsPost{
+		MessageType:  core.AgentMsgEdits,
+		MyIdentity:   req.SenderID,
+		YourIdentity: peer.ID,
+		Zone:         req.Zone,
+		Records:      req.Records,
+		Message:      req.Message,
+		Time:         req.Timestamp,
+	}
+
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return nil, NewTransportError("DNS", "Edits", peer.ID,
+			fmt.Errorf("failed to marshal edits payload: %w", err), false)
+	}
+
+	// Send via sendNotifyWithPayload (reuses standard NOTIFY+confirm flow)
+	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "edits", distributionID, payloadJSON, false)
+	if err != nil {
+		return nil, err
+	}
+
+	return &EditsResponse{
+		ResponderID: peer.ID,
+		Zone:        req.Zone,
+		Accepted:    resp.Status == ConfirmSuccess,
+		Message:     resp.Message,
+		Timestamp:   time.Now(),
+	}, nil
+}
+
 // Confirm sends an acknowledgment of a sync operation via DNS.
 // Uses NOTIFY(CHUNK) with status in EDNS0 option.
 func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequest) error {
@@ -710,18 +753,8 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 			fmt.Errorf("failed to marshal confirm payload: %w", err), false)
 	}
 
-	// Size guard: EDNS0 payload must fit in UDP. If too large, drop per-RR detail
-	// and set Truncated so the receiver knows full detail was not included.
-	if len(payloadJSON) > 3500 {
-		payload.AppliedRecords = nil
-		payload.RemovedRecords = nil
-		payload.Truncated = true
-		payloadJSON, err = json.Marshal(payload)
-	}
-	if err != nil {
-		return NewTransportError("DNS", "Confirm", peer.ID,
-			fmt.Errorf("failed to marshal confirm payload: %w", err), false)
-	}
+	// No size guard needed: we use TCP and CHUNK fragmentation handles
+	// arbitrary payload sizes. Never silently drop per-RR detail.
 
 	// Encrypt the payload when secure wrapper is configured; do not fall back to cleartext
 	finalPayload := payloadJSON
@@ -862,9 +895,14 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 	// Try to extract application-level confirmation from the DNS response EDNS0.
 	// The combiner embeds a JSON confirmation in an EDNS0 CHUNK option.
 	if confirm := extractConfirmFromResponse(res, peer.ID, t.SecureWrapper); confirm != nil {
-		log.Printf("DNS: Received confirmation for %s %s to %s: status=%s message=%q applied=%d removed=%d rejected=%d",
-			opType, distributionID, peer.ID, confirm.Status, confirm.Message,
-			len(confirm.AppliedRecords), len(confirm.RemovedRecords), len(confirm.RejectedItems))
+		if opType == "sync" || opType == "update" {
+			lgTransport().Info("received confirmation", "op", opType, "distrib", distributionID, "peer", peer.ID,
+				"status", confirm.Status, "message", confirm.Message,
+				"applied", len(confirm.AppliedRecords), "removed", len(confirm.RemovedRecords), "rejected", len(confirm.RejectedItems))
+		} else {
+			lgTransport().Debug("received confirmation", "op", opType, "distrib", distributionID, "peer", peer.ID,
+				"status", confirm.Status, "message", confirm.Message)
+		}
 		status := parseConfirmStatus(confirm.Status)
 		return &operationResponse{
 			Status:         status,
@@ -879,8 +917,8 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 	// No EDNS0 confirmation payload — DNS-level ACK (NOERROR) is NOT sufficient.
 	// The recipient must include an explicit EDNS0 CHUNK confirmation to prove
 	// it received and processed the message.
-	log.Printf("DNS: NOTIFY %s %s to %s: DNS ACK received but no EDNS0 confirmation payload — treating as unconfirmed",
-		opType, distributionID, peer.ID)
+	lgTransport().Warn("DNS ACK received but no EDNS0 confirmation, treating as unconfirmed",
+		"op", opType, "distrib", distributionID, "peer", peer.ID)
 	return nil, NewTransportError("DNS", opType, peer.ID,
 		fmt.Errorf("no EDNS0 confirmation in response (DNS-level ACK only)"), true)
 }
@@ -939,7 +977,9 @@ func (t *DNSTransport) HandleIncomingConfirmation(confirm *IncomingConfirmation)
 	t.pendingMu.RUnlock()
 
 	if !exists {
-		log.Printf("DNS: Received confirmation for unknown distribution ID: %s", confirm.DistributionID)
+		// Expected when the inline DNS response already completed the round-trip.
+		// The async NOTIFY(CHUNK) confirmation still reaches the SDE via the
+		// on_confirmation_received callback in HandleConfirmation.
 		return
 	}
 
@@ -950,7 +990,7 @@ func (t *DNSTransport) HandleIncomingConfirmation(confirm *IncomingConfirmation)
 		Message: confirm.Message,
 	}:
 	default:
-		log.Printf("DNS: Response channel full for distribution ID: %s", confirm.DistributionID)
+		lgTransport().Warn("response channel full", "distrib", confirm.DistributionID)
 	}
 }
 
@@ -1022,11 +1062,12 @@ func (d *DnsBeatPayload) GetSenderID() string {
 // DnsSyncPayload represents a sync message payload.
 type DnsSyncPayload struct {
 	MessageType    string              `json:"MessageType"`
-	MyIdentity     string              `json:"MyIdentity"`
+	OriginatorID   string              `json:"OriginatorID"`
 	YourIdentity   string              `json:"YourIdentity"`
 	Zone           string              `json:"Zone"`
-	Records        map[string][]string `json:"Records"` // RRs grouped by owner name
-	Time           string              `json:"Time"`    // RFC3339 timestamp
+	Records        map[string][]string `json:"Records"`              // RRs grouped by owner name (legacy: Class-overloaded)
+	Operations     []core.RROperation  `json:"Operations,omitempty"` // Explicit operations (takes precedence over Records)
+	Time           string              `json:"Time"`                 // RFC3339 timestamp
 	RfiType        string              `json:"RfiType"`
 	Timestamp      int64               `json:"timestamp"` // Unix timestamp (legacy compat)
 	DistributionID string              `json:"distribution_id"`
@@ -1075,12 +1116,17 @@ type DnsConfirmPayload struct {
 
 // GetSenderID returns the sender ID.
 func (d *DnsSyncPayload) GetSenderID() string {
-	return d.MyIdentity
+	return d.OriginatorID
 }
 
 // GetRecords returns records grouped by owner name.
 func (d *DnsSyncPayload) GetRecords() map[string][]string {
 	return d.Records
+}
+
+// GetOperations returns explicit operations (takes precedence over Records).
+func (d *DnsSyncPayload) GetOperations() []core.RROperation {
+	return d.Operations
 }
 
 // DnsPingPayload represents a ping (liveness) message payload.
@@ -1147,6 +1193,35 @@ type DnsKeystateConfirmPayload struct {
 	Status    string `json:"status"`            // "ok" or "error"
 	Message   string `json:"message,omitempty"` // Optional detail
 	Timestamp int64  `json:"timestamp"`
+}
+
+// DnsEditsPayload represents an EDITS message payload.
+// Carries an agent's current contributions from combiner back to the agent.
+// Modeled on DnsKeystatePayload.
+type DnsEditsPayload struct {
+	// Standard fields
+	MessageType  string `json:"MessageType"`  // "edits"
+	MyIdentity   string `json:"MyIdentity"`   // Sender (combiner) identity
+	YourIdentity string `json:"YourIdentity"` // Recipient (agent) identity
+
+	// EDITS-specific fields
+	Zone    string              `json:"Zone"`              // Zone (FQDN)
+	Records map[string][]string `json:"Records,omitempty"` // Agent's contributions (owner → []RR strings)
+	Message string              `json:"Message,omitempty"` // Optional status message
+
+	Timestamp int64 `json:"timestamp"` // Unix timestamp
+
+	// Legacy fields (fallback)
+	Type     string `json:"type"`      // "edits"
+	SenderID string `json:"sender_id"` // Sender identity (legacy)
+}
+
+// GetSenderID returns the sender ID from either standard or legacy format.
+func (d *DnsEditsPayload) GetSenderID() string {
+	if d.MyIdentity != "" {
+		return d.MyIdentity
+	}
+	return d.SenderID
 }
 
 // DnsPingConfirmPayload is the response to a ping; echoes the nonce.

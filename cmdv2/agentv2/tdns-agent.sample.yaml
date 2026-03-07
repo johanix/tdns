@@ -163,6 +163,11 @@ db:
 
 log:
    file:		/var/log/tdns/tdns-agent.log
+   level:		info		# default level: debug|info|warn|error
+   # subsystems:				# per-subsystem level overrides
+   #    transport:	debug
+   #    engine:		debug
+   #    agent:		info
 
 common:
    servername:		tdns-agent

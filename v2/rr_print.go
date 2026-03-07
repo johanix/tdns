@@ -101,6 +101,16 @@ func PrintKeyRR(rr dns.RR, rrtype, ktype string, keyid uint16, leftpad, rightmar
 	}
 	keyparts := chunkString(p[7], sigWidth)
 
+	// Merge tiny trailing chunk (< sigWidth/3) back into previous chunk.
+	// This avoids e.g. a 4-char "k=" fragment for ED25519 keys.
+	if len(keyparts) > 1 {
+		last := keyparts[len(keyparts)-1]
+		if len(last) < sigWidth/3 {
+			keyparts[len(keyparts)-2] += last
+			keyparts = keyparts[:len(keyparts)-1]
+		}
+	}
+
 	fields = append(fields, "(")
 	fields = append(fields, keyparts...)
 	alg, _ := strconv.Atoi(p[6])

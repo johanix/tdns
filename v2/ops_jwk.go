@@ -10,7 +10,6 @@ package tdns
 import (
 	"crypto"
 	"fmt"
-	"log"
 
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -41,8 +40,8 @@ func (zd *ZoneData) PublishJWKRR(owner string, publicKey crypto.PublicKey, use s
 		useInfo = fmt.Sprintf("use=%s", use)
 	}
 
-	log.Printf("PublishJWKRR: Encoded %s public key to JWK (algorithm: %s, %s, size: %d bytes)",
-		owner, algorithm, useInfo, len(jwkData))
+	lgHandler.Info("PublishJWKRR: encoded public key to JWK",
+		"owner", owner, "algorithm", algorithm, "use", useInfo, "size", len(jwkData))
 
 	// Validate the encoded JWK before publishing
 	if err := core.ValidateJWK(jwkData); err != nil {
@@ -90,7 +89,7 @@ func (zd *ZoneData) PublishJWKRR(owner string, publicKey crypto.PublicKey, use s
 
 	select {
 	case zd.KeyDB.UpdateQ <- updateRequest:
-		log.Printf("PublishJWKRR: Successfully queued JWK record for %s (algorithm: %s, %s)", owner, algorithm, useInfo)
+		lgHandler.Info("PublishJWKRR: successfully queued JWK record", "owner", owner, "algorithm", algorithm, "use", useInfo)
 		return nil
 	default:
 		return fmt.Errorf("PublishJWKRR: failed to send update request (channel full)")

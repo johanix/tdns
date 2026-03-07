@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -20,9 +19,7 @@ import (
 )
 
 func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) error {
-	if Globals.Debug {
-		log.Printf("PublishTlsaRR: received request to publish TLSA record for %q, port: %d", name, port)
-	}
+	lgHandler.Debug("PublishTlsaRR: received request to publish TLSA record", "name", name, "port", port)
 
 	if !strings.HasSuffix(name, zd.ZoneName) {
 		return fmt.Errorf("PublishTlsaRR: name %q is not a subdomain of %q", name, zd.ZoneName)
@@ -46,7 +43,7 @@ func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) erro
 		Ttl:    120,
 	}
 
-	log.Printf("PublishTlsaRR: publishing TLSA RR: %s", tlsa.String())
+	lgHandler.Info("PublishTlsaRR: publishing TLSA RR", "rr", tlsa.String())
 
 	if zd.KeyDB.UpdateQ == nil {
 		return fmt.Errorf("PublishTlsaRR: KeyDB.UpdateQ is nil")

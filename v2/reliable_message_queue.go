@@ -19,7 +19,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -31,10 +30,10 @@ type MessageState uint8
 
 const (
 	MessageQueued          MessageState = iota // Waiting to be sent
-	MessageSending                            // Send in progress
-	MessageAwaitingConfirm                    // Sent, waiting for confirmation
-	MessageConfirmed                          // Delivery confirmed
-	MessageFailed                             // Permanently failed (expired or max retries)
+	MessageSending                             // Send in progress
+	MessageAwaitingConfirm                     // Sent, waiting for confirmation
+	MessageConfirmed                           // Delivery confirmed
+	MessageFailed                              // Permanently failed (expired or max retries)
 )
 
 var messageStateToString = map[MessageState]string{
@@ -147,12 +146,12 @@ type ReliableMessageQueue struct {
 	totalExpired   int
 
 	// Configuration
-	baseBackoff        time.Duration // Initial retry interval (default: 2s)
-	maxBackoff         time.Duration // Maximum retry interval (default: 60s)
-	confirmTimeout     time.Duration // How long to wait for confirmation after send (default: 30s)
-	expirationTimeout  time.Duration // How long to keep retrying (default: 24h)
-	processInterval    time.Duration // How often to process the queue (default: 1s)
-	maxQueueSize       int           // Maximum number of pending messages (default: 10000)
+	baseBackoff       time.Duration // Initial retry interval (default: 2s)
+	maxBackoff        time.Duration // Maximum retry interval (default: 60s)
+	confirmTimeout    time.Duration // How long to wait for confirmation after send (default: 30s)
+	expirationTimeout time.Duration // How long to keep retrying (default: 24h)
+	processInterval   time.Duration // How often to process the queue (default: 1s)
+	maxQueueSize      int           // Maximum number of pending messages (default: 10000)
 }
 
 // ReliableMessageQueueConfig holds configuration for creating a queue.
@@ -192,11 +191,10 @@ func (q *ReliableMessageQueue) SetSendFunc(f func(ctx context.Context, msg *Outg
 // Start begins processing the queue. Runs until the context is cancelled.
 func (q *ReliableMessageQueue) Start(ctx context.Context) {
 	if q.sendFunc == nil {
-		log.Printf("ReliableMessageQueue: WARNING - started without sendFunc, messages will not be delivered")
+		lgTransport.Warn("reliable queue started without sendFunc, messages will not be delivered")
 	}
 
-	log.Printf("ReliableMessageQueue: Starting (backoff: %s-%s, expiration: %s, interval: %s)",
-		q.baseBackoff, q.maxBackoff, q.expirationTimeout, q.processInterval)
+	lgTransport.Info("reliable queue starting", "baseBackoff", q.baseBackoff, "maxBackoff", q.maxBackoff, "expiration", q.expirationTimeout, "interval", q.processInterval)
 
 	ticker := time.NewTicker(q.processInterval)
 	defer ticker.Stop()
@@ -207,7 +205,7 @@ func (q *ReliableMessageQueue) Start(ctx context.Context) {
 			q.mu.RLock()
 			remaining := len(q.pending)
 			q.mu.RUnlock()
-			log.Printf("ReliableMessageQueue: Shutting down with %d pending messages", remaining)
+			lgTransport.Info("reliable queue shutting down", "pending", remaining)
 			return
 
 		case <-ticker.C:
@@ -252,9 +250,7 @@ func (q *ReliableMessageQueue) Enqueue(msg *OutgoingMessage) error {
 
 	q.pending[key] = pending
 
-	log.Printf("ReliableMessageQueue: Enqueued %s for %s (zone: %s, type: %s, expires: %s)",
-		msg.DistributionID, msg.RecipientID, msg.Zone, msg.RecipientType,
-		msg.ExpiresAt.Format(time.RFC3339))
+	lgTransport.Debug("enqueued message", "distributionID", msg.DistributionID, "recipient", msg.RecipientID, "zone", msg.Zone, "type", msg.RecipientType, "expires", msg.ExpiresAt.Format(time.RFC3339))
 
 	return nil
 }
@@ -272,9 +268,7 @@ func (q *ReliableMessageQueue) MarkConfirmed(distributionID string, senderID str
 		return false
 	}
 
-	log.Printf("ReliableMessageQueue: Confirmed %s for %s (after %d attempts, age: %s)",
-		distributionID, pending.Message.RecipientID, pending.AttemptCount,
-		time.Since(pending.Message.CreatedAt).Round(time.Second))
+	lgTransport.Info("message confirmed", "distributionID", distributionID, "recipient", pending.Message.RecipientID, "attempts", pending.AttemptCount, "age", time.Since(pending.Message.CreatedAt).Round(time.Second))
 
 	pending.State = MessageConfirmed
 	delete(q.pending, key)
@@ -365,9 +359,7 @@ func (q *ReliableMessageQueue) processQueue(ctx context.Context) {
 	for key, pending := range q.pending {
 		// Check expiration
 		if now.After(pending.Message.ExpiresAt) {
-			log.Printf("ReliableMessageQueue: Expired %s for %s (after %d attempts, age: %s)",
-				pending.Message.DistributionID, pending.Message.RecipientID, pending.AttemptCount,
-				time.Since(pending.Message.CreatedAt).Round(time.Second))
+			lgTransport.Warn("message expired", "distributionID", pending.Message.DistributionID, "recipient", pending.Message.RecipientID, "attempts", pending.AttemptCount, "age", time.Since(pending.Message.CreatedAt).Round(time.Second))
 			toRemove = append(toRemove, key)
 			q.totalExpired++
 			continue
@@ -401,8 +393,7 @@ func (q *ReliableMessageQueue) processQueue(ctx context.Context) {
 					stateStr = fmt.Sprintf("top-level=%s dns=%s api=%s",
 						AgentStateToString[agent.State], dnsState, apiState)
 				}
-				log.Printf("ReliableMessageQueue: Deferring %s for %s (recipient state: %s)",
-					pending.Message.DistributionID, pending.Message.RecipientID, stateStr)
+				lgTransport.Debug("deferring message, recipient not ready", "distributionID", pending.Message.DistributionID, "recipient", pending.Message.RecipientID, "recipientState", stateStr)
 			}
 			// Not ready - schedule a retry but don't count it as a failed attempt
 			q.scheduleRetryLocked(pending, false)
@@ -481,8 +472,7 @@ func (q *ReliableMessageQueue) attemptDelivery(ctx context.Context, pending *Pen
 	pending.LastAttempt = time.Now()
 
 	if err != nil {
-		log.Printf("ReliableMessageQueue: Send failed for %s to %s (attempt %d): %v",
-			msg.DistributionID, msg.RecipientID, pending.AttemptCount, err)
+		lgTransport.Warn("send failed", "distributionID", msg.DistributionID, "recipient", msg.RecipientID, "attempt", pending.AttemptCount, "err", err)
 		pending.LastError = err.Error()
 		q.scheduleRetryLocked(pending, true)
 		return
@@ -492,9 +482,7 @@ func (q *ReliableMessageQueue) attemptDelivery(ctx context.Context, pending *Pen
 	// SendSyncWithFallback returns nil only when the recipient ACKed the NOTIFY,
 	// which is sufficient confirmation for reliable delivery purposes.
 	// Mark as confirmed and remove from queue.
-	log.Printf("ReliableMessageQueue: Confirmed %s for %s (attempt %d, age: %s)",
-		msg.DistributionID, msg.RecipientID, pending.AttemptCount,
-		time.Since(msg.CreatedAt).Round(time.Second))
+	lgTransport.Info("message delivery confirmed", "distributionID", msg.DistributionID, "recipient", msg.RecipientID, "attempt", pending.AttemptCount, "age", time.Since(msg.CreatedAt).Round(time.Second))
 	pending.State = MessageConfirmed
 	delete(q.pending, pendingKey(msg.DistributionID, msg.RecipientID))
 	q.totalDelivered++
@@ -523,9 +511,7 @@ func (q *ReliableMessageQueue) scheduleRetryLocked(pending *PendingMessage, coun
 	pending.NextAttempt = time.Now().Add(backoff)
 	pending.State = MessageQueued
 
-	log.Printf("ReliableMessageQueue: Retry scheduled for %s to %s in %s (attempt %d)",
-		pending.Message.DistributionID, pending.Message.RecipientID,
-		backoff.Round(time.Millisecond), pending.AttemptCount)
+	lgTransport.Debug("retry scheduled", "distributionID", pending.Message.DistributionID, "recipient", pending.Message.RecipientID, "backoff", backoff.Round(time.Millisecond), "attempt", pending.AttemptCount)
 }
 
 // GenerateQueueDistributionID creates a unique distribution ID for queue messages.
@@ -549,4 +535,3 @@ func withDefaultInt(val, def int) int {
 	}
 	return val
 }
-

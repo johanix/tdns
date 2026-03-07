@@ -13,7 +13,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
 	"strconv"
 	"strings"
 
@@ -45,10 +44,7 @@ func chunkQueryHandler(ctx context.Context, req *DnsQueryRequest, store ChunkPay
 		if seq, err := strconv.ParseUint(labels[0], 10, 16); err == nil {
 			baseQname := dns.Fqdn(strings.Join(labels[1:], "."))
 			if chunk, ok := store.GetChunk(baseQname, uint16(seq)); ok {
-				if Globals.Debug {
-					log.Printf("ChunkQueryHandler: qname=%q seq=%d base=%q datalen=%d",
-						qname, seq, baseQname, len(chunk.Data))
-				}
+				lgHandler.Debug("serving chunk", "qname", qname, "seq", seq, "base", baseQname, "dataLen", len(chunk.Data))
 				return serveChunkRR(req, qname, chunk)
 			}
 		}
@@ -60,10 +56,7 @@ func chunkQueryHandler(ctx context.Context, req *DnsQueryRequest, store ChunkPay
 		return ErrNotHandled
 	}
 
-	if Globals.Debug {
-		log.Printf("ChunkQueryHandler: legacy qname=%q len=%d format=%d",
-			qname, len(payload), format)
-	}
+	lgHandler.Debug("serving legacy chunk", "qname", qname, "len", len(payload), "format", format)
 
 	chunk := &core.CHUNK{
 		Format:     format,
@@ -93,11 +86,9 @@ func serveChunkRR(req *DnsQueryRequest, qname string, chunk *core.CHUNK) error {
 	m.Authoritative = true
 	m.Answer = append(m.Answer, chunkRR)
 	if err := req.ResponseWriter.WriteMsg(m); err != nil {
-		log.Printf("ChunkQueryHandler: failed to write response for %s: %v", qname, err)
+		lgHandler.Error("failed to write chunk response", "qname", qname, "error", err)
 		return err
 	}
-	if Globals.Debug {
-		log.Printf("ChunkQueryHandler: served CHUNK for qname=%q", qname)
-	}
+	lgHandler.Debug("served CHUNK", "qname", qname)
 	return nil
 }

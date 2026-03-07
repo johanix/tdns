@@ -18,7 +18,6 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/johanix/tdns/v2/crypto"
@@ -392,7 +391,7 @@ func (w *SecurePayloadWrapper) WrapOutgoing(peerID string, payload []byte) ([]by
 
 	encrypted, err := w.crypto.EncryptAndSignPayload(peerID, payload, metadata)
 	if err != nil {
-		log.Printf("SecurePayloadWrapper: Encryption failed for peer %s: %v", peerID, err)
+		lgCrypto().Error("encryption failed", "peer", peerID, "err", err)
 		return nil, err
 	}
 
@@ -409,13 +408,13 @@ func (w *SecurePayloadWrapper) UnwrapIncoming(peerID string, payload []byte) ([]
 
 	// Check if payload is encrypted
 	if !IsPayloadEncrypted(payload) {
-		log.Printf("SecurePayloadWrapper: Received unencrypted payload from peer %s when encryption is enabled - REJECTING", peerID)
+		lgCrypto().Warn("received unencrypted payload when encryption is enabled, rejecting", "peer", peerID)
 		return nil, fmt.Errorf("received unencrypted payload from peer %s when encryption is mandatory", peerID)
 	}
 
 	decrypted, err := w.crypto.DecryptAndVerifyPayload(peerID, payload)
 	if err != nil {
-		log.Printf("SecurePayloadWrapper: Decryption failed for peer %q: %v", peerID, err)
+		lgCrypto().Error("decryption failed", "peer", peerID, "err", err)
 		return nil, err
 	}
 

@@ -6,7 +6,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -19,9 +18,10 @@ type SynchedDataUpdate struct {
 	AgentId           AgentId
 	UpdateType        string // "local" or "remote"
 	Update            *ZoneUpdate
-	OriginatingDistID string // Distribution ID from the originating agent (for remote updates)
-	Force             bool   // Bypass dedup check (always send even if RR already present)
-	SkipCombiner      bool   // Don't send to combiner (e.g. local DNSKEY changes — signer adds its own)
+	OriginatingDistID string   // Distribution ID from the originating agent (for remote updates)
+	Force             bool     // Bypass dedup check (always send even if RR already present)
+	SkipCombiner      bool     // Don't send to combiner (e.g. local DNSKEY changes — signer adds its own)
+	DnskeyKeyTags     []uint16 // Key tags for DNSKEY propagation tracking (mpdist flow)
 	// Response chan *SynchedDataResponse
 	Response chan *AgentMsgResponse
 }
@@ -53,10 +53,11 @@ type SynchedDataCmdResponse struct {
 }
 
 type ZoneUpdate struct {
-	Zone    ZoneName
-	AgentId AgentId
-	RRsets  map[uint16]core.RRset // remote updates are only per RRset (i.e. full replace)
-	RRs     []dns.RR              // local updates can be per RR
+	Zone       ZoneName
+	AgentId    AgentId
+	RRsets     map[uint16]core.RRset // remote updates are only per RRset (i.e. full replace)
+	RRs        []dns.RR              // local updates can be per RR
+	Operations []core.RROperation    // explicit operations (takes precedence over RRsets/RRs)
 }
 
 type AgentId string
@@ -93,6 +94,7 @@ type PendingRemoteConfirmation struct {
 	OriginatingDistID string
 	OriginatingSender string
 	Zone              ZoneName
+	CreatedAt         time.Time
 }
 
 // RemoteConfirmationDetail carries per-RR confirmation detail to send back
@@ -143,6 +145,44 @@ func (zdr *ZoneDataRepo) Set(zone ZoneName, agentRepo *AgentRepo) {
 	zdr.Repo.Set(zone, agentRepo)
 }
 
+// AddConfirmedRR adds a single RR to the repo and tracking as RRStateAccepted.
+// Used to hydrate the SDE with pre-confirmed data from the combiner (RFI EDITS).
+func (zdr *ZoneDataRepo) AddConfirmedRR(zone ZoneName, agentID AgentId, rr dns.RR) {
+	// Get or create AgentRepo for this zone
+	nar, ok := zdr.Get(zone)
+	if !ok {
+		nar, _ = NewAgentRepo()
+		zdr.Set(zone, nar)
+	}
+
+	// Get or create OwnerData for this agent
+	nod, ok := nar.Get(agentID)
+	if !ok {
+		nod = NewOwnerData(string(zone))
+		nar.Set(agentID, nod)
+	}
+
+	// Add RR to the RRTypeStore
+	rrtype := rr.Header().Rrtype
+	cur, ok := nod.RRtypes.Get(rrtype)
+	if !ok {
+		cur = core.RRset{
+			Name:   rr.Header().Name,
+			RRtype: rrtype,
+		}
+	}
+	cur.Add(rr)
+	nod.RRtypes.Set(rrtype, cur)
+
+	// Add tracking entry as RRStateAccepted
+	ts := zdr.getOrCreateTracking(zone, agentID, rrtype)
+	ts.Tracked = append(ts.Tracked, TrackedRR{
+		RR:        rr,
+		State:     RRStateAccepted,
+		UpdatedAt: time.Now(),
+	})
+}
+
 // RRState represents the lifecycle state of a tracked RR.
 type RRState uint8
 
@@ -171,13 +211,22 @@ func (s RRState) String() string {
 	}
 }
 
+// RRConfirmation records a single recipient's confirmation status for a tracked RR.
+type RRConfirmation struct {
+	Status    string    `json:"status"`           // "accepted", "rejected", "removed", "pending"
+	Reason    string    `json:"reason,omitempty"` // rejection reason
+	Timestamp time.Time `json:"timestamp"`
+}
+
 // TrackedRR wraps a dns.RR with lifecycle state for combiner confirmation tracking.
 type TrackedRR struct {
-	RR             dns.RR
-	State          RRState
-	Reason         string // Rejection reason (empty unless rejected)
-	DistributionID string // Last distribution this RR was part of
-	UpdatedAt      time.Time
+	RR                 dns.RR
+	State              RRState
+	Reason             string // Rejection reason (empty unless rejected)
+	DistributionID     string // Last distribution this RR was part of
+	UpdatedAt          time.Time
+	Confirmations      map[string]RRConfirmation // recipientID → per-recipient status
+	ExpectedRecipients []string                  // Who must confirm before state transitions to accepted
 }
 
 // TrackedRRset holds a set of tracked RRs for a single RRtype.
@@ -208,11 +257,12 @@ type RejectedItemInfo struct {
 
 // TrackedRRInfo is the JSON-serializable form for dump output.
 type TrackedRRInfo struct {
-	RR             string `json:"rr"`
-	State          string `json:"state"`
-	Reason         string `json:"reason,omitempty"`
-	DistributionID string `json:"distribution_id"`
-	UpdatedAt      string `json:"updated_at"`
+	RR             string                    `json:"rr"`
+	State          string                    `json:"state"`
+	Reason         string                    `json:"reason,omitempty"`
+	DistributionID string                    `json:"distribution_id"`
+	UpdatedAt      string                    `json:"updated_at"`
+	Confirmations  map[string]RRConfirmation `json:"confirmations,omitempty"`
 }
 
 // SynchedDataEngine is a component that updates the combiner with new information
@@ -225,18 +275,18 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 	var ok bool
 
 	if !viper.GetBool("syncheddataengine.active") {
-		log.Printf("SynchedDataEngine is NOT active. No updates will be sent to the combiner.")
+		lgEngine.Warn("SynchedDataEngine is NOT active, no updates will be sent to the combiner")
 		for {
 			select {
 			case <-ctx.Done():
-				log.Printf("SynchedDataEngine: context cancelled")
+				lgEngine.Info("SynchedDataEngine context cancelled")
 				return
 			case synchedDataUpdate, ok = <-SDupdateQ:
 				if !ok {
-					log.Printf("SynchedDataEngine: synchedDataUpdate channel closed")
+					lgEngine.Info("SynchedDataEngine update channel closed")
 					return
 				}
-				log.Printf("SynchedDataEngine: NOT active, but received an update: %+v", synchedDataUpdate)
+				lgEngine.Warn("SynchedDataEngine not active but received an update", "zone", synchedDataUpdate.Zone, "type", synchedDataUpdate.UpdateType)
 				// Send error response back to avoid timeout
 				if synchedDataUpdate.Response != nil {
 					synchedDataUpdate.Response <- &AgentMsgResponse{
@@ -249,25 +299,40 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 			continue
 		}
 	} else {
-		log.Printf("SynchedDataEngine: Starting")
+		lgEngine.Info("SynchedDataEngine starting")
 	}
 
 	// XXX: Set up communication with the combiner
 
 	zdr, err := NewZoneDataRepo()
 	if err != nil {
-		log.Printf("SynchedDataEngine: Failed to create zone data repo: %v", err)
+		lgEngine.Error("failed to create zone data repo", "err", err)
 		return
 	}
 
 	conf.Internal.ZoneDataRepo = zdr
 
-	log.Printf("*** SynchedDataEngine starting ***")
+	// Hydrate SDE from combiner: request our current contributions for each
+	// multi-provider zone. This recovers local edits (e.g. NS records) that
+	// were lost on restart. DNSKEYs come from RFI KEYSTATE, remote agent data
+	// from RFI SYNC — this fills the remaining gap.
+	if conf.Internal.TransportManager != nil && conf.Internal.TransportManager.combinerID != "" {
+		for item := range Zones.IterBuffered() {
+			zd := item.Val
+			if !zd.Options[OptMultiProvider] {
+				continue
+			}
+			lgEngine.Info("requesting edits from combiner", "zone", item.Key)
+			zd.RequestAndWaitForEdits()
+		}
+	}
+
+	lgEngine.Info("SynchedDataEngine started")
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("SynchedDataEngine: context cancelled")
+			lgEngine.Info("SynchedDataEngine context cancelled")
 			return
 			// stopch removed; ctx.Done() handles shutdown
 
@@ -275,7 +340,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 			var change bool
 			switch synchedDataUpdate.UpdateType {
 			case "local":
-				log.Printf("SynchedDataEngine: Received local update: %+v", synchedDataUpdate)
+				lgEngine.Info("received local update", "zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId)
 
 				// 1. Evaluate the update for applicability (valid zone, etc)
 				// 2. Evaluate the update according to policy.
@@ -290,12 +355,12 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				// agent_policy.go: EvaluateUpdate()
 				ok, msg, err := zdr.EvaluateUpdate(synchedDataUpdate)
 				if err != nil {
-					log.Printf("SynchedDataEngine: Failed to evaluate update: %v", err)
+					lgEngine.Error("failed to evaluate update", "err", err)
 					continue
 				}
 
 				if !ok {
-					log.Printf("SynchedDataEngine: Update not applicable, skipping")
+					lgEngine.Info("update not applicable, skipping", "zone", synchedDataUpdate.Zone)
 					resp.Error = true
 					resp.ErrorMsg = msg
 				} else {
@@ -304,7 +369,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					// agent_policy.go: ProcessUpdate()
 					change, msg, err = zdr.ProcessUpdate(synchedDataUpdate)
 					if err != nil {
-						log.Printf("SynchedDataEngine: Failed to add update to agent data repo: %v", err)
+						lgEngine.Error("failed to add update to agent data repo", "err", err)
 						resp.Error = true
 						resp.ErrorMsg = err.Error()
 						resp.Msg = msg
@@ -315,30 +380,45 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 							// Generate a single shared distID for combiner + all agents
 							distID := GenerateQueueDistributionID()
 
+							// Build the expected recipients list for confirmation tracking
+							recipients := tm.GetDistributionRecipients(synchedDataUpdate.Zone, synchedDataUpdate.SkipCombiner)
+
+							// Mark all RRs in this update as pending with the distribution ID
+							zdr.MarkRRsPending(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update, distID, recipients)
+
 							if synchedDataUpdate.SkipCombiner {
-								log.Printf("SynchedDataEngine: Update applied, enqueuing for remote agents only (SkipCombiner)")
+								lgEngine.Info("update applied, enqueuing for remote agents only (SkipCombiner)", "zone", synchedDataUpdate.Zone)
 							} else {
-								log.Printf("SynchedDataEngine: Update applied, enqueuing for combiner and remote agents")
+								lgEngine.Info("update applied, enqueuing for combiner and remote agents", "zone", synchedDataUpdate.Zone)
 								// Enqueue for combiner (reliable delivery with retry)
 								_, err := tm.EnqueueForCombiner(synchedDataUpdate.Zone, synchedDataUpdate.Update, distID)
 								if err != nil {
-									log.Printf("SynchedDataEngine: Failed to enqueue for combiner: %v", err)
+									lgEngine.Error("failed to enqueue for combiner", "zone", synchedDataUpdate.Zone, "err", err)
 									resp.Error = true
 									resp.ErrorMsg = fmt.Sprintf("Combiner enqueue error: %v", err)
-								} else {
-									// Mark all RRs in this update as pending with the distribution ID
-									zdr.MarkRRsPending(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update, distID)
 								}
 							}
 
 							// Enqueue for all remote agents in this zone (same distID)
 							if err := tm.EnqueueForZoneAgents(synchedDataUpdate.Zone, synchedDataUpdate.Update, distID); err != nil {
-								log.Printf("SynchedDataEngine: Failed to enqueue for zone agents: %v", err)
+								lgEngine.Error("failed to enqueue for zone agents", "zone", synchedDataUpdate.Zone, "err", err)
 								if resp.ErrorMsg != "" {
 									resp.ErrorMsg += "; " + fmt.Sprintf("Agent enqueue error: %v", err)
 								} else {
 									resp.Error = true
 									resp.ErrorMsg = fmt.Sprintf("Agent enqueue error: %v", err)
+								}
+							}
+
+							// Register DNSKEY propagation tracking so that when all
+							// remote agents confirm, the agent sends KEYSTATE "propagated"
+							// back to the signer (mpdist → published transition).
+							if len(synchedDataUpdate.DnskeyKeyTags) > 0 {
+								agents, err := tm.getAllAgentsForZone(synchedDataUpdate.Zone)
+								if err != nil {
+									lgEngine.Error("cannot get agents for DNSKEY propagation tracking", "zone", synchedDataUpdate.Zone, "err", err)
+								} else if len(agents) > 0 {
+									tm.TrackDnskeyPropagation(synchedDataUpdate.Zone, distID, synchedDataUpdate.DnskeyKeyTags, agents)
 								}
 							}
 
@@ -350,7 +430,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 								}
 							}
 						} else if tm == nil {
-							log.Printf("SynchedDataEngine: TransportManager not available, cannot enqueue sync messages")
+							lgEngine.Warn("TransportManager not available, cannot enqueue sync messages")
 							resp.Error = true
 							resp.ErrorMsg = "TransportManager not available"
 						}
@@ -361,11 +441,11 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					select {
 					case synchedDataUpdate.Response <- &resp:
 					default:
-						log.Printf("SynchedDataEngine: Response channel blocked, skipping response")
+						lgEngine.Warn("response channel blocked, skipping response")
 					}
 				}
 			case "remote":
-				log.Printf("SynchedDataEngine: Received remote update: %+v", synchedDataUpdate)
+				lgEngine.Info("received remote update", "zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId)
 
 				// 1. Evaluate the update for applicability (valid zone, etc)
 				// 2. Evaluate the update according to policy.
@@ -380,12 +460,12 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				// agent_policy.go: EvaluateUpdate()
 				ok, msg, err := zdr.EvaluateUpdate(synchedDataUpdate)
 				if err != nil {
-					log.Printf("SynchedDataEngine: Failed to evaluate update: %v", err)
+					lgEngine.Error("failed to evaluate remote update", "err", err)
 					continue
 				}
 
 				if !ok {
-					log.Printf("SynchedDataEngine: Update not applicable, skipping")
+					lgEngine.Info("remote update not applicable, skipping", "zone", synchedDataUpdate.Zone)
 					resp.Error = true
 					resp.ErrorMsg = msg
 				} else {
@@ -395,24 +475,29 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					// agent_policy.go: ProcessUpdate()
 					change, msg, err = zdr.ProcessUpdate(synchedDataUpdate)
 					if err != nil {
-						log.Printf("SynchedDataEngine: Failed to add update to agent data repo: %v", err)
+						lgEngine.Error("failed to add remote update to agent data repo", "err", err)
 						resp.Error = true
 						resp.ErrorMsg = err.Error()
 					}
 					resp.Msg = msg
 					if change {
-						log.Printf("SynchedDataEngine: Update applied, remote data has changed, enqueuing for combiner")
+						lgEngine.Info("remote update applied, enqueuing for combiner", "zone", synchedDataUpdate.Zone)
 
 						tm := conf.Internal.TransportManager
 						if tm != nil && synchedDataUpdate.Update != nil {
 							// Remote update: only enqueue for combiner (not back to agents)
 							distID, err := tm.EnqueueForCombiner(synchedDataUpdate.Zone, synchedDataUpdate.Update, "")
 							if err != nil {
-								log.Printf("SynchedDataEngine: Failed to enqueue for combiner: %v", err)
+								lgEngine.Error("failed to enqueue remote update for combiner", "zone", synchedDataUpdate.Zone, "err", err)
 								resp.Error = true
 								resp.ErrorMsg = fmt.Sprintf("Combiner enqueue error: %v", err)
 							} else {
-								zdr.MarkRRsPending(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update, distID)
+								// Remote update: only the combiner is the expected recipient
+								var remoteRecipients []string
+								if tm.combinerID != "" {
+									remoteRecipients = []string{string(tm.combinerID)}
+								}
+								zdr.MarkRRsPending(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update, distID, remoteRecipients)
 								resp.Msg = "Remote update applied, sync enqueued for combiner"
 
 								// Track mapping from our combiner distID to the originating agent's distID
@@ -425,15 +510,69 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 										OriginatingDistID: synchedDataUpdate.OriginatingDistID,
 										OriginatingSender: string(synchedDataUpdate.AgentId),
 										Zone:              synchedDataUpdate.Zone,
+										CreatedAt:         time.Now(),
 									}
-									log.Printf("SynchedDataEngine: Tracking remote confirm: combiner distID %s → originating distID %s from %s",
-										distID, synchedDataUpdate.OriginatingDistID, synchedDataUpdate.AgentId)
+									lgEngine.Debug("tracking remote confirm", "combinerDistID", distID, "originDistID", synchedDataUpdate.OriginatingDistID, "from", synchedDataUpdate.AgentId)
 								}
 							}
 						} else if tm == nil {
-							log.Printf("SynchedDataEngine: TransportManager not available, cannot enqueue sync messages")
+							lgEngine.Warn("TransportManager not available, cannot enqueue sync messages")
 							resp.Error = true
 							resp.ErrorMsg = "TransportManager not available"
+						}
+					} else if !resp.Error && synchedDataUpdate.OriginatingDistID != "" {
+						// Data already present and no error — verify in repo and
+						// send immediate ACCEPTED so the originating agent can
+						// transition from PENDING to ACCEPTED.
+						zone := synchedDataUpdate.Zone
+						agentId := synchedDataUpdate.AgentId
+						if agentRepo, ok := zdr.Repo.Get(zone); ok {
+							if nod, ok := agentRepo.Get(agentId); ok {
+								var appliedRecords []string
+								if synchedDataUpdate.Update != nil {
+									for _, rrset := range synchedDataUpdate.Update.RRsets {
+										for _, rr := range rrset.RRs {
+											repoRRset, exists := nod.RRtypes.Get(rr.Header().Rrtype)
+											if !exists {
+												continue
+											}
+											rrStr := rr.String()
+											for _, repoRR := range repoRRset.RRs {
+												if repoRR.String() == rrStr {
+													appliedRecords = append(appliedRecords, rrStr)
+													break
+												}
+											}
+										}
+									}
+									for _, rr := range synchedDataUpdate.Update.RRs {
+										repoRRset, exists := nod.RRtypes.Get(rr.Header().Rrtype)
+										if !exists {
+											continue
+										}
+										rrStr := rr.String()
+										for _, repoRR := range repoRRset.RRs {
+											if repoRR.String() == rrStr {
+												appliedRecords = append(appliedRecords, rrStr)
+												break
+											}
+										}
+									}
+								}
+								if len(appliedRecords) > 0 && msgQs.OnRemoteConfirmationReady != nil {
+									lgEngine.Info("remote update already accepted, sending immediate confirmation",
+										"zone", zone, "agent", agentId, "records", len(appliedRecords),
+										"originDistID", synchedDataUpdate.OriginatingDistID)
+									msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
+										OriginatingDistID: synchedDataUpdate.OriginatingDistID,
+										OriginatingSender: string(agentId),
+										Zone:              zone,
+										Status:            "ok",
+										Message:           "data already present at remote agent",
+										AppliedRecords:    appliedRecords,
+									})
+								}
+							}
 						}
 					}
 				}
@@ -441,21 +580,21 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					select {
 					case synchedDataUpdate.Response <- &resp:
 					default:
-						log.Printf("SynchedDataEngine: Response channel blocked, skipping response")
+						lgEngine.Warn("response channel blocked, skipping response")
 					}
 				}
 			}
 
 		case sdcmd := <-SDcmdQ:
-			log.Printf("SynchedDataEngine: Received command: %+v", sdcmd)
+			lgEngine.Debug("received command", "cmd", sdcmd.Cmd, "zone", sdcmd.Zone)
 			switch sdcmd.Cmd {
 			case "dump-zonedatarepo":
 
 				if sdcmd.Response == nil {
-					log.Printf("SynchedDataEngine: Command has no response channel, skipping")
+					lgEngine.Warn("command has no response channel, skipping", "cmd", sdcmd.Cmd)
 					continue
 				}
-				log.Printf("SynchedDataEngine: Dumping zone data repo")
+				lgEngine.Debug("dumping zone data repo")
 
 				dumpData := make(map[ZoneName]map[AgentId]map[uint16][]TrackedRRInfo)
 
@@ -486,6 +625,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 										info.Reason = tr.Reason
 										info.DistributionID = tr.DistributionID
 										info.UpdatedAt = tr.UpdatedAt.Format(time.RFC3339)
+										info.Confirmations = tr.Confirmations
 										break
 									}
 								}
@@ -507,6 +647,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 										Reason:         tr.Reason,
 										DistributionID: tr.DistributionID,
 										UpdatedAt:      tr.UpdatedAt.Format(time.RFC3339),
+										Confirmations:  tr.Confirmations,
 									})
 								}
 							}
@@ -528,6 +669,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 									Reason:         tr.Reason,
 									DistributionID: tr.DistributionID,
 									UpdatedAt:      tr.UpdatedAt.Format(time.RFC3339),
+									Confirmations:  tr.Confirmations,
 								})
 							}
 							if len(infos) > 0 {
@@ -566,7 +708,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 
 			case "resync":
 				if sdcmd.Response == nil {
-					log.Printf("SynchedDataEngine: resync command has no response channel, skipping")
+					lgEngine.Warn("resync command has no response channel, skipping")
 					continue
 				}
 				if sdcmd.Zone == "" {
@@ -584,30 +726,112 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					sdcmd.Response <- &SynchedDataCmdResponse{Msg: fmt.Sprintf("No local data for zone %s", sdcmd.Zone)}
 					continue
 				}
-				nod, ok := agentRepo.Data.Get(myAgentId)
-				if !ok {
-					sdcmd.Response <- &SynchedDataCmdResponse{Msg: fmt.Sprintf("No local contributions for zone %s", sdcmd.Zone)}
-					continue
+
+				var totalRRs int
+
+				// 1. Send local data (excluding DNSKEY) to combiner.
+				//    Local DNSKEYs reach the combiner via the signer, not via UPDATE.
+				if nod, ok := agentRepo.Data.Get(myAgentId); ok {
+					zu := &ZoneUpdate{
+						Zone:    sdcmd.Zone,
+						AgentId: myAgentId,
+						RRsets:  make(map[uint16]core.RRset),
+					}
+					for _, rrtype := range nod.RRtypes.Keys() {
+						if rrtype == dns.TypeDNSKEY {
+							continue // local DNSKEYs go via signer, not UPDATE
+						}
+						rrset, exists := nod.RRtypes.Get(rrtype)
+						if !exists || len(rrset.RRs) == 0 {
+							continue
+						}
+						cloned := *rrset.Clone()
+						for i := range cloned.RRs {
+							cloned.RRs[i].Header().Class = dns.ClassINET
+						}
+						zu.RRsets[rrtype] = cloned
+						totalRRs += len(cloned.RRs)
+					}
+					if len(zu.RRsets) > 0 {
+						distID := GenerateQueueDistributionID()
+						if _, err := tm.EnqueueForCombiner(sdcmd.Zone, zu, distID); err != nil {
+							lgEngine.Error("resync: failed to enqueue local data for combiner", "zone", sdcmd.Zone, "err", err)
+						} else {
+							var combinerRecipients []string
+							if tm.combinerID != "" {
+								combinerRecipients = []string{string(tm.combinerID)}
+							}
+							zdr.MarkRRsPending(sdcmd.Zone, myAgentId, zu, distID, combinerRecipients)
+						}
+					}
+
+					// Send all local data (including DNSKEY) to remote agents.
+					// Remote agents need our DNSKEYs to converge.
+					agentZU := &ZoneUpdate{
+						Zone:    sdcmd.Zone,
+						AgentId: myAgentId,
+						RRsets:  make(map[uint16]core.RRset),
+					}
+					for _, rrtype := range nod.RRtypes.Keys() {
+						rrset, exists := nod.RRtypes.Get(rrtype)
+						if !exists || len(rrset.RRs) == 0 {
+							continue
+						}
+						cloned := *rrset.Clone()
+						for i := range cloned.RRs {
+							cloned.RRs[i].Header().Class = dns.ClassINET
+						}
+						agentZU.RRsets[rrtype] = cloned
+					}
+					if len(agentZU.RRsets) > 0 {
+						distID := GenerateQueueDistributionID()
+						if err := tm.EnqueueForZoneAgents(sdcmd.Zone, agentZU, distID); err != nil {
+							lgEngine.Error("resync: failed to enqueue local data for zone agents", "zone", sdcmd.Zone, "err", err)
+						}
+					}
 				}
 
-				// Build ZoneUpdate from all local RRsets
-				zu := &ZoneUpdate{
-					Zone:    sdcmd.Zone,
-					AgentId: myAgentId,
-					RRsets:  make(map[uint16]core.RRset),
-				}
-				var totalRRs int
-				for _, rrtype := range nod.RRtypes.Keys() {
-					rrset, exists := nod.RRtypes.Get(rrtype)
-					if !exists || len(rrset.RRs) == 0 {
+				// 2. Send remote agents' data to combiner (with correct attribution).
+				//    This restores the combiner's knowledge of other agents' contributions.
+				for _, remoteAgentId := range agentRepo.Data.Keys() {
+					if remoteAgentId == myAgentId {
+						continue // already handled above
+					}
+					remoteNod, ok := agentRepo.Data.Get(remoteAgentId)
+					if !ok {
 						continue
 					}
-					cloned := *rrset.Clone()
-					for i := range cloned.RRs {
-						cloned.RRs[i].Header().Class = dns.ClassINET
+					zu := &ZoneUpdate{
+						Zone:    sdcmd.Zone,
+						AgentId: remoteAgentId, // attribute to the remote agent
+						RRsets:  make(map[uint16]core.RRset),
 					}
-					zu.RRsets[rrtype] = cloned
-					totalRRs += len(cloned.RRs)
+					for _, rrtype := range remoteNod.RRtypes.Keys() {
+						rrset, exists := remoteNod.RRtypes.Get(rrtype)
+						if !exists || len(rrset.RRs) == 0 {
+							continue
+						}
+						cloned := *rrset.Clone()
+						for i := range cloned.RRs {
+							cloned.RRs[i].Header().Class = dns.ClassINET
+						}
+						zu.RRsets[rrtype] = cloned
+						totalRRs += len(cloned.RRs)
+					}
+					if len(zu.RRsets) > 0 {
+						distID := GenerateQueueDistributionID()
+						if _, err := tm.EnqueueForCombiner(sdcmd.Zone, zu, distID); err != nil {
+							lgEngine.Error("resync: failed to enqueue remote agent data for combiner", "zone", sdcmd.Zone, "agent", remoteAgentId, "err", err)
+						} else {
+							// Track so ProcessConfirmation can match the combiner's response
+							var combinerRecipients []string
+							if tm.combinerID != "" {
+								combinerRecipients = []string{string(tm.combinerID)}
+							}
+							zdr.MarkRRsPending(sdcmd.Zone, remoteAgentId, zu, distID, combinerRecipients)
+						}
+						lgEngine.Info("resync: sent remote agent data to combiner", "zone", sdcmd.Zone, "agent", remoteAgentId, "rrs", len(zu.RRsets))
+					}
 				}
 
 				if totalRRs == 0 {
@@ -615,29 +839,14 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					continue
 				}
 
-				// Enqueue for combiner + all zone agents (like a normal local update)
-				distID := GenerateQueueDistributionID()
-				_, err := tm.EnqueueForCombiner(sdcmd.Zone, zu, distID)
-				if err != nil {
-					sdcmd.Response <- &SynchedDataCmdResponse{Error: true, ErrorMsg: fmt.Sprintf("Combiner enqueue error: %v", err)}
-					continue
-				}
-				zdr.MarkRRsPending(sdcmd.Zone, myAgentId, zu, distID)
-
-				if err := tm.EnqueueForZoneAgents(sdcmd.Zone, zu, distID); err != nil {
-					log.Printf("SynchedDataEngine: resync: failed to enqueue for zone agents: %v", err)
-				}
-
-				log.Printf("SynchedDataEngine: resync: re-sent %d RRs for zone %s (distID: %s)", totalRRs, sdcmd.Zone, distID)
+				lgEngine.Info("resync complete", "zone", sdcmd.Zone, "rrs", totalRRs)
 				sdcmd.Response <- &SynchedDataCmdResponse{
-					Msg: fmt.Sprintf("Re-synced %d RRs for zone %s (distID: %s)", totalRRs, sdcmd.Zone, distID),
+					Msg: fmt.Sprintf("Re-synced %d RRs for zone %s", totalRRs, sdcmd.Zone),
 				}
 			}
 
 		case detail := <-msgQs.Confirmation:
-			log.Printf("SynchedDataEngine: Received confirmation from %s for distribution %s zone %s status=%s applied=%d removed=%d rejected=%d truncated=%v",
-				detail.Source, detail.DistributionID, detail.Zone, detail.Status,
-				len(detail.AppliedRecords), len(detail.RemovedRecords), len(detail.RejectedItems), detail.Truncated)
+			lgEngine.Info("received confirmation", "source", detail.Source, "distID", detail.DistributionID, "zone", detail.Zone, "status", detail.Status, "applied", len(detail.AppliedRecords), "removed", len(detail.RemovedRecords), "rejected", len(detail.RejectedItems), "truncated", detail.Truncated)
 			zdr.ProcessConfirmation(detail, msgQs)
 		}
 	}
@@ -645,7 +854,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 
 func (zdr *ZoneDataRepo) SendUpdate(update *SynchedDataUpdate) error {
 	// 1. Send the update to the combiner.
-	log.Printf("SynchedDataEngine: Sending update to combiner (NYI)")
+	lgEngine.Debug("sending update to combiner (NYI)")
 	return nil
 }
 
@@ -689,15 +898,70 @@ func (zdr *ZoneDataRepo) removeTrackedRR(zone ZoneName, agent AgentId, rrtype ui
 
 // MarkRRsPending marks all RRs in a ZoneUpdate as pending with the given distribution ID.
 // Called after successful enqueue for combiner delivery.
+// recipients is the list of expected confirmation sources (combiner + agents) for this distID.
+// The RR transitions to accepted only after ALL recipients have confirmed.
 //
 // For ClassINET RRs: marks as RRStatePending (addition awaiting confirmation).
 // For ClassNONE RRs: finds the matching existing tracked RR and marks it as RRStatePendingRemoval.
 // For ClassANY RRs: marks all tracked RRs for the rrtype as RRStatePendingRemoval.
-func (zdr *ZoneDataRepo) MarkRRsPending(zone ZoneName, agent AgentId, update *ZoneUpdate, distID string) {
+func (zdr *ZoneDataRepo) MarkRRsPending(zone ZoneName, agent AgentId, update *ZoneUpdate, distID string, recipients []string) {
 	now := time.Now()
 
-	// Handle RRsets (remote updates)
+	// Handle Operations first — REPLACE operations define the full set and
+	// take precedence over the delta in RRsets/RRs for tracking purposes.
+	// Track which rrtypes were handled by Operations so we don't double-track.
+	opsHandled := map[uint16]bool{}
+	for _, op := range update.Operations {
+		rrtype, ok := dns.StringToType[op.RRtype]
+		if !ok {
+			continue
+		}
+		switch op.Operation {
+		case "replace":
+			// REPLACE: create tracking for ALL records in the replacement set.
+			// The delta in RRsets/RRs only has adds/removes, but we need tracking
+			// for the complete set so confirmations can match every record.
+			// Removals are implicit (absent from the set) — processReplaceOp
+			// already cleaned up tracking for removed keys.
+			tracked := zdr.getOrCreateTracking(zone, agent, rrtype)
+			for _, rrStr := range op.Records {
+				rr, err := dns.NewRR(rrStr)
+				if err != nil {
+					continue
+				}
+				zdr.markAddPending(tracked, rr, distID, now)
+			}
+			opsHandled[rrtype] = true
+
+		case "add":
+			tracked := zdr.getOrCreateTracking(zone, agent, rrtype)
+			for _, rrStr := range op.Records {
+				rr, err := dns.NewRR(rrStr)
+				if err != nil {
+					continue
+				}
+				zdr.markAddPending(tracked, rr, distID, now)
+			}
+			opsHandled[rrtype] = true
+
+		case "delete":
+			tracked := zdr.getOrCreateTracking(zone, agent, rrtype)
+			for _, rrStr := range op.Records {
+				rr, err := dns.NewRR(rrStr)
+				if err != nil {
+					continue
+				}
+				zdr.markDeletePending(tracked, rr, distID, now)
+			}
+			opsHandled[rrtype] = true
+		}
+	}
+
+	// Handle RRsets (remote updates) — skip rrtypes already handled by Operations
 	for rrtype, rrset := range update.RRsets {
+		if opsHandled[rrtype] {
+			continue
+		}
 		tracked := zdr.getOrCreateTracking(zone, agent, rrtype)
 		for _, rr := range rrset.RRs {
 			switch rr.Header().Class {
@@ -711,9 +975,12 @@ func (zdr *ZoneDataRepo) MarkRRsPending(zone ZoneName, agent AgentId, update *Zo
 		}
 	}
 
-	// Handle individual RRs (local updates)
+	// Handle individual RRs (local updates) — skip rrtypes already handled by Operations
 	for _, rr := range update.RRs {
 		rrtype := rr.Header().Rrtype
+		if opsHandled[rrtype] {
+			continue
+		}
 		tracked := zdr.getOrCreateTracking(zone, agent, rrtype)
 		switch rr.Header().Class {
 		case dns.ClassINET:
@@ -724,6 +991,12 @@ func (zdr *ZoneDataRepo) MarkRRsPending(zone ZoneName, agent AgentId, update *Zo
 			zdr.markAllDeletePending(tracked, distID, now)
 		}
 	}
+
+	// Set ExpectedRecipients on all TrackedRRs that now carry this distID.
+	// This tells ProcessConfirmation who must confirm before state can transition.
+	if len(recipients) > 0 {
+		zdr.setExpectedRecipients(zone, agent, distID, recipients)
+	}
 }
 
 // markAddPending marks a ClassINET RR as pending (addition awaiting confirmation).
@@ -731,6 +1004,10 @@ func (zdr *ZoneDataRepo) markAddPending(tracked *TrackedRRset, rr dns.RR, distID
 	rrStr := rr.String()
 	for i := range tracked.Tracked {
 		if tracked.Tracked[i].RR.String() == rrStr {
+			if tracked.Tracked[i].State == RRStateAccepted {
+				lgEngine.Debug("markAddPending: RR already accepted, skipping", "rr", rrStr)
+				return
+			}
 			tracked.Tracked[i].State = RRStatePending
 			tracked.Tracked[i].Reason = ""
 			tracked.Tracked[i].DistributionID = distID
@@ -761,11 +1038,11 @@ func (zdr *ZoneDataRepo) markDeletePending(tracked *TrackedRRset, rr dns.RR, dis
 			tracked.Tracked[i].Reason = ""
 			tracked.Tracked[i].DistributionID = distID
 			tracked.Tracked[i].UpdatedAt = now
-			log.Printf("SynchedDataEngine: Marked RR as pending-removal: %s (dist=%s)", matchStr, distID)
+			lgEngine.Debug("marked RR as pending-removal", "rr", matchStr, "distID", distID)
 			return
 		}
 	}
-	log.Printf("SynchedDataEngine: markDeletePending: no matching tracked RR found for %s", matchStr)
+	lgEngine.Warn("markDeletePending: no matching tracked RR found", "rr", matchStr)
 }
 
 // markAllDeletePending marks all tracked RRs in the RRset as RRStatePendingRemoval (ClassANY delete).
@@ -780,6 +1057,36 @@ func (zdr *ZoneDataRepo) markAllDeletePending(tracked *TrackedRRset, distID stri
 	}
 }
 
+// setExpectedRecipients sets the ExpectedRecipients on all TrackedRRs matching a given distID.
+func (zdr *ZoneDataRepo) setExpectedRecipients(zone ZoneName, agent AgentId, distID string, recipients []string) {
+	if zdr.Tracking[zone] == nil || zdr.Tracking[zone][agent] == nil {
+		return
+	}
+	for _, trackedRRset := range zdr.Tracking[zone][agent] {
+		for i := range trackedRRset.Tracked {
+			if trackedRRset.Tracked[i].DistributionID == distID {
+				trackedRRset.Tracked[i].ExpectedRecipients = recipients
+			}
+		}
+	}
+}
+
+// allRecipientsConfirmed returns true if every expected recipient has sent a
+// non-pending confirmation (accepted, removed, rejected). If ExpectedRecipients
+// is empty (legacy/unset), returns true immediately for backwards compatibility.
+func allRecipientsConfirmed(tr *TrackedRR) bool {
+	if len(tr.ExpectedRecipients) == 0 {
+		return true // No tracking — behave as before
+	}
+	for _, r := range tr.ExpectedRecipients {
+		c, ok := tr.Confirmations[r]
+		if !ok || c.Status == "pending" {
+			return false
+		}
+	}
+	return true
+}
+
 // ProcessConfirmation updates tracked RR states based on combiner confirmation feedback.
 // For additions: Pending → Accepted or Rejected.
 // For deletions: PendingRemoval → Removed (and the RR is actually deleted from the ZoneDataRepo).
@@ -791,11 +1098,35 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 		source = "unknown"
 	}
 
-	// First NOTIFY in two-phase protocol: status="PENDING" means the remote agent
-	// received the sync and is processing it. No RR matching needed — just log and return.
+	// Helper to record per-recipient confirmation on a TrackedRR.
+	setConfirmation := func(tr *TrackedRR, status, reason string) {
+		if tr.Confirmations == nil {
+			tr.Confirmations = make(map[string]RRConfirmation)
+		}
+		tr.Confirmations[source] = RRConfirmation{
+			Status:    status,
+			Reason:    reason,
+			Timestamp: now,
+		}
+	}
+
+	// First NOTIFY in two-phase protocol: status="PENDING" means the remote peer
+	// received the sync and is processing it. Record per-recipient pending status.
 	if detail.Status == "PENDING" {
-		log.Printf("SynchedDataEngine: ProcessConfirmation(%s): pending confirmation for dist %s zone %s (delivery confirmed, awaiting combiner)",
-			source, detail.DistributionID, detail.Zone)
+		lgEngine.Debug("pending confirmation (delivery confirmed, awaiting final response)", "source", source, "distID", detail.DistributionID, "zone", detail.Zone)
+		zoneTracking := zdr.Tracking[detail.Zone]
+		if zoneTracking != nil {
+			for _, agentTracking := range zoneTracking {
+				for _, trackedRRset := range agentTracking {
+					for i := range trackedRRset.Tracked {
+						tr := &trackedRRset.Tracked[i]
+						if tr.DistributionID == detail.DistributionID {
+							setConfirmation(tr, "pending", "")
+						}
+					}
+				}
+			}
+		}
 		return
 	}
 
@@ -820,7 +1151,7 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 	// Walk all tracked RRs for this zone and match by distribution ID + RR string
 	zoneTracking := zdr.Tracking[detail.Zone]
 	if zoneTracking == nil {
-		log.Printf("SynchedDataEngine: ProcessConfirmation(%s): no tracking data for zone %s", source, detail.Zone)
+		lgEngine.Warn("no tracking data for zone", "source", source, "zone", detail.Zone)
 		return
 	}
 
@@ -839,11 +1170,17 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 				case RRStatePending:
 					// Addition confirmation
 					if appliedSet[rrStr] {
-						tr.State = RRStateAccepted
-						tr.Reason = ""
+						setConfirmation(tr, "accepted", "")
 						tr.UpdatedAt = now
 						matched++
+						// Only transition to Accepted if ALL expected recipients have confirmed.
+						if allRecipientsConfirmed(tr) {
+							tr.State = RRStateAccepted
+							tr.Reason = ""
+						}
 					} else if reason, rejected := rejectedMap[rrStr]; rejected {
+						setConfirmation(tr, "rejected", reason)
+						// Any rejection immediately transitions to Rejected
 						tr.State = RRStateRejected
 						tr.Reason = reason
 						tr.UpdatedAt = now
@@ -853,39 +1190,39 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 
 				case RRStatePendingRemoval:
 					if removedSet[rrStr] {
-						// Combiner confirmed removal — transition to Removed and
-						// actually delete the RR from the active ZoneDataRepo.
-						tr.State = RRStateRemoved
-						tr.Reason = ""
+						setConfirmation(tr, "removed", "")
 						tr.UpdatedAt = now
 						matched++
-						removed++
-
-						// Delete from the active repo
-						zdr.deleteRRFromRepo(detail.Zone, agentId, rrtype, tr.RR)
-						log.Printf("SynchedDataEngine: ProcessConfirmation(%s): RR removed (confirmed): %s", source, rrStr)
+						// Only transition to Removed and delete from repo if ALL expected recipients confirmed.
+						if allRecipientsConfirmed(tr) {
+							tr.State = RRStateRemoved
+							tr.Reason = ""
+							removed++
+							zdr.deleteRRFromRepo(detail.Zone, agentId, rrtype, tr.RR)
+							lgEngine.Info("RR removed (all confirmed)", "source", source, "rr", rrStr)
+						}
 					} else if reason, rejected := rejectedMap[rrStr]; rejected {
 						// Combiner rejected the delete — RR is still live, revert to Accepted
+						setConfirmation(tr, "rejected", reason)
 						tr.State = RRStateAccepted
 						tr.Reason = fmt.Sprintf("delete rejected: %s", reason)
 						tr.UpdatedAt = now
 						matched++
-						log.Printf("SynchedDataEngine: ProcessConfirmation(%s): delete rejected for RR: %s reason: %s", source, rrStr, reason)
+						lgEngine.Warn("delete rejected for RR", "source", source, "rr", rrStr, "reason", reason)
 					}
 					// If truncated and RR not in either list, leave as pending-removal
 
 				case RRStateAccepted:
-					// Already accepted (e.g. combiner confirmed first, then remote agent's
-					// second NOTIFY arrives with the same distID). Log informational.
+					// Already accepted — record this recipient's confirmation
 					if appliedSet[rrStr] {
-						log.Printf("SynchedDataEngine: ProcessConfirmation(%s): additional confirmation for already-accepted RR: %s", source, rrStr)
+						setConfirmation(tr, "accepted", "")
 						matched++
 					}
 
 				case RRStateRemoved:
-					// Already removed. Log informational.
+					// Already removed — record this recipient's confirmation
 					if removedSet[rrStr] {
-						log.Printf("SynchedDataEngine: ProcessConfirmation(%s): additional confirmation for already-removed RR: %s", source, rrStr)
+						setConfirmation(tr, "removed", "")
 						matched++
 					}
 				}
@@ -893,21 +1230,42 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 		}
 	}
 
-	log.Printf("SynchedDataEngine: ProcessConfirmation(%s): distribution %s zone %s: matched %d RRs (applied=%d removed=%d rejected=%d truncated=%v)",
-		source, detail.DistributionID, detail.Zone, matched, len(detail.AppliedRecords), removed, len(detail.RejectedItems), detail.Truncated)
+	lgEngine.Info("confirmation processed", "source", source, "distID", detail.DistributionID, "zone", detail.Zone, "matched", matched, "applied", len(detail.AppliedRecords), "removed", removed, "rejected", len(detail.RejectedItems), "truncated", detail.Truncated)
 
 	// Check if this confirmation corresponds to a remote update we forwarded to our combiner.
 	// If so, send the final confirmation back to the originating agent.
 	if prc, ok := zdr.PendingRemoteConfirms[detail.DistributionID]; ok {
-		log.Printf("SynchedDataEngine: ProcessConfirmation(%s): triggering remote confirmation for originating distID %s to %s",
-			source, prc.OriginatingDistID, prc.OriginatingSender)
+		appliedRecords := detail.AppliedRecords
+
+		// If the combiner returned SUCCESS but with no AppliedRecords (no-op),
+		// reconstruct from our local repo so the originating agent can match.
+		if len(appliedRecords) == 0 && (detail.Status == "SUCCESS" || detail.Status == "ok") {
+			agentId := AgentId(prc.OriginatingSender)
+			if agentRepo, ok := zdr.Repo.Get(prc.Zone); ok {
+				if nod, ok := agentRepo.Get(agentId); ok {
+					for _, rrtype := range nod.RRtypes.Keys() {
+						rrset, exists := nod.RRtypes.Get(rrtype)
+						if !exists {
+							continue
+						}
+						for _, rr := range rrset.RRs {
+							appliedRecords = append(appliedRecords, rr.String())
+						}
+					}
+					lgEngine.Debug("reconstructed applied records from repo for relay",
+						"zone", prc.Zone, "agent", agentId, "records", len(appliedRecords))
+				}
+			}
+		}
+
+		lgEngine.Info("triggering remote confirmation", "source", source, "originDistID", prc.OriginatingDistID, "to", prc.OriginatingSender, "applied", len(appliedRecords))
 		remoteDetail := &RemoteConfirmationDetail{
 			OriginatingDistID: prc.OriginatingDistID,
 			OriginatingSender: prc.OriginatingSender,
 			Zone:              prc.Zone,
 			Status:            detail.Status,
 			Message:           detail.Message,
-			AppliedRecords:    detail.AppliedRecords,
+			AppliedRecords:    appliedRecords,
 			RemovedRecords:    detail.RemovedRecords,
 			RejectedItems:     detail.RejectedItems,
 			Truncated:         detail.Truncated,

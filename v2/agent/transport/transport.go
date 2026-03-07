@@ -11,6 +11,8 @@ import (
 	"context"
 	"crypto"
 	"time"
+
+	"github.com/johanix/tdns/v2/core"
 )
 
 // SyncType identifies what type of data is being synchronized.
@@ -146,7 +148,8 @@ type SyncRequest struct {
 	SenderID       string              // Identity of the sender
 	Zone           string              // The zone this sync applies to (FQDN)
 	SyncType       SyncType            // What type of data is being synced
-	Records        map[string][]string // RRs grouped by owner name (owner → []RR strings)
+	Records        map[string][]string // RRs grouped by owner name (legacy: Class-overloaded)
+	Operations     []core.RROperation  // Explicit operations (takes precedence over Records)
 	Timestamp      time.Time           // When this data was generated
 	Serial         uint32              // Zone serial at time of sync
 	DistributionID string              // For tracking confirmations
@@ -209,7 +212,7 @@ type KeyInventoryEntry struct {
 	KeyTag    uint16 `json:"key_tag"`
 	Algorithm uint8  `json:"algorithm"`
 	Flags     uint16 `json:"flags"`
-	State     string `json:"state"`  // "created","published","standby","active","retired","foreign"
+	State     string `json:"state"` // "created","published","standby","active","retired","foreign"
 	KeyRR     string `json:"keyrr"` // Full DNSKEY RR string (public key data)
 }
 
@@ -234,6 +237,25 @@ type KeystateResponse struct {
 	KeyTag      uint16    // Echoed key tag
 	Signal      string    // Echoed signal
 	Accepted    bool      // Whether the signal was accepted
+	Message     string    // Optional status message
+	Timestamp   time.Time // Response timestamp
+}
+
+// EditsRequest carries an agent's current contributions from the combiner back to the agent.
+// Modeled on KeystateRequest. Sent by the combiner in response to an RFI EDITS.
+type EditsRequest struct {
+	SenderID  string              // Combiner identity
+	Zone      string              // Zone (FQDN)
+	Records   map[string][]string // Agent's contributions (owner → []RR strings)
+	Message   string              // Optional status
+	Timestamp time.Time
+}
+
+// EditsResponse acknowledges receipt of an EDITS message.
+type EditsResponse struct {
+	ResponderID string    // Identity of the responder
+	Zone        string    // Echoed zone name
+	Accepted    bool      // Whether the message was accepted
 	Message     string    // Optional status message
 	Timestamp   time.Time // Response timestamp
 }

@@ -77,9 +77,9 @@ var DebugAgentSendRfiCmd = &cobra.Command{
 		PrepArgs("zonename", "identity")
 
 		rfitype = strings.ToUpper(rfitype)
-		validRfiTypes := map[string]bool{"UPSTREAM": true, "DOWNSTREAM": true, "SYNC": true, "AUDIT": true}
+		validRfiTypes := map[string]bool{"UPSTREAM": true, "DOWNSTREAM": true, "SYNC": true, "AUDIT": true, "EDITS": true}
 		if !validRfiTypes[rfitype] {
-			log.Fatalf("Error: RFI type must be one of UPSTREAM, DOWNSTREAM, SYNC, or AUDIT (is %q)", rfitype)
+			log.Fatalf("Error: RFI type must be one of UPSTREAM, DOWNSTREAM, SYNC, AUDIT, or EDITS (is %q)", rfitype)
 		}
 
 		req := tdns.AgentMgmtPost{
@@ -197,105 +197,10 @@ var DebugAgentDumpAgentRegistryCmd = &cobra.Command{
 
 var DebugAgentShowSyncedDataCmd = &cobra.Command{
 	Use:   "show-synced-data",
-	Short: "Show synchronized data from peer agents (formatted)",
-	Long: `Display the agent's ZoneDataRepo showing contributions from all peer agents.
-Data is sorted by: zone → source agent → RRtype → RRs
-
-Example:
-  tdns-cliv2 debug agent show-synced-data
-  tdns-cliv2 debug agent show-synced-data --zone example.com`,
+	Short: "Show synchronized data from peer agents (moved to: agent zone edits list)",
 	Run: func(cmd *cobra.Command, args []string) {
-		zone, _ := cmd.Flags().GetString("zone")
-
-		req := tdns.AgentMgmtPost{
-			Command: "dump-zonedatarepo",
-		}
-		if zone != "" {
-			req.Zone = tdns.ZoneName(zone)
-		}
-
-		amr, err := SendAgentDebugCmd(req, false)
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
-
-		if amr.Error {
-			log.Fatalf("Error: %s", amr.ErrorMsg)
-		}
-
-		if tdns.Globals.Debug {
-			dump.P(amr.ZoneDataRepo)
-		}
-
-		if len(amr.ZoneDataRepo) == 0 {
-			fmt.Printf("No synchronized data stored in agent %q\n", amr.Identity)
-			return
-		}
-
-		// Sort and display by zone → agent → RRtype
-		fmt.Printf("Synchronized Data from Peer Agents\n")
-		fmt.Printf("===================================\n\n")
-
-		for zoneName, agentRepo := range amr.ZoneDataRepo {
-			fmt.Printf("Zone: %s\n", zoneName)
-			fmt.Printf("────────────────────────────────────────\n")
-
-			if len(agentRepo) == 0 {
-				fmt.Printf("  (no peer contributions)\n\n")
-				continue
-			}
-
-			for agentID, rrTypeMap := range agentRepo {
-				fmt.Printf("  Source: %s\n", agentID)
-
-				if len(rrTypeMap) == 0 {
-					fmt.Printf("    (no RRsets)\n")
-					continue
-				}
-
-				// Sort RRtypes for consistent output
-				for rrtype, rrStrings := range rrTypeMap {
-					rrTypeName := dns.TypeToString[rrtype]
-					if rrTypeName == "" {
-						rrTypeName = fmt.Sprintf("TYPE%d", rrtype)
-					}
-
-					fmt.Printf("    %s (%d records):\n", rrTypeName, len(rrStrings))
-					if rrtype == dns.TypeDNSKEY {
-						// Special DNSKEY display: keytag + truncated pub key
-						for _, info := range rrStrings {
-							rr, err := dns.NewRR(info.RR)
-							if err != nil {
-								fmt.Printf("      %s  %s  %s\n", info.RR, info.State, info.UpdatedAt)
-								continue
-							}
-							dnskey, ok := rr.(*dns.DNSKEY)
-							if !ok {
-								fmt.Printf("      %s  %s  %s\n", info.RR, info.State, info.UpdatedAt)
-								continue
-							}
-							pub := dnskey.PublicKey
-							if len(pub) > 15 {
-								pub = pub[:10] + "..." + pub[len(pub)-5:]
-							}
-							flagDesc := "ZSK"
-							if dnskey.Flags&0x0001 != 0 {
-								flagDesc = "KSK"
-							}
-							fmt.Printf("      keytag=%-5d  %s (%d)  alg=%-10s  key=%s  [%s %s]\n",
-								dnskey.KeyTag(), flagDesc, dnskey.Flags,
-								dns.AlgorithmToString[dnskey.Algorithm], pub,
-								info.State, info.UpdatedAt)
-						}
-					} else {
-						for _, info := range rrStrings {
-							fmt.Printf("      %s\n", info)
-						}
-					}
-				}
-				fmt.Printf("\n")
-			}
-		}
+		fmt.Println("This command has moved to: agent zone edits list")
+		fmt.Println("Usage: tdns-cliv2 agent zone edits list [--zone <zone>]")
 	},
 }
 
@@ -1079,7 +984,7 @@ func init() {
 	DebugAgentSendNotifyCmd.Flags().StringVarP(&myIdentity, "id", "I", "", "agent identity to claim")
 	DebugAgentSendNotifyCmd.Flags().StringVarP(&notifyRRtype, "rrtype", "R", "", "RR type sent notify for")
 	DebugAgentSendNotifyCmd.Flags().StringVarP(&dnsRecord, "RR", "", "", "DNS record to send")
-	DebugAgentSendRfiCmd.Flags().StringVarP(&rfitype, "rfi", "", "", "RFI type (UPSTREAM|DOWNSTREAM|SYNC|AUDIT)")
+	DebugAgentSendRfiCmd.Flags().StringVarP(&rfitype, "rfi", "", "", "RFI type (UPSTREAM|DOWNSTREAM|SYNC|AUDIT|EDITS)")
 
 	// New command flags
 	DebugAgentShowSyncedDataCmd.Flags().String("zone", "", "Filter by specific zone")
@@ -1124,8 +1029,7 @@ func truncatePubKey(keyrr string) string {
 }
 
 func SendAgentDebugCmd(req tdns.AgentMgmtPost, printJson bool) (*tdns.AgentMgmtResponse, error) {
-	prefixcmd, _ := getCommandContext("debug")
-	api, err := getApiClient(prefixcmd, true)
+	api, err := getApiClient("agent", true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}

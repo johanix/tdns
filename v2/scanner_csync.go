@@ -6,7 +6,6 @@ package tdns
 
 import (
 	"fmt"
-	"log"
 	"strings"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -20,17 +19,14 @@ func NSInBailiwick(zone string, ns *dns.NS) bool {
 func (scanner *Scanner) CheckCSYNC(sr ScanRequest, cdd *ChildDelegationData) (*ChildDelegationData, error) {
 	zone := sr.ChildZone
 
-	verbose := scanner.Verbose
 	// debug := scanner.Debug
-
-	lg := log.Default()
 
 	csync_rrset, err := scanner.AuthQueryNG(zone, zone, dns.TypeCSYNC, "tcp")
 	if err != nil {
 		return nil, fmt.Errorf("CheckCSYNC: Zone %s: error from AuthQueryNG: %v", zone, err)
 	}
 	if len(csync_rrset.RRs) == 0 {
-		lg.Printf("CheckCSYNC: Zone %s: no CSYNC RR found. Terminating scan.", zone)
+		lg.Info("CheckCSYNC: no CSYNC RR found, terminating scan", "zone", zone)
 		return nil, nil
 	}
 
@@ -60,15 +56,11 @@ func (scanner *Scanner) CheckCSYNC(sr ScanRequest, cdd *ChildDelegationData) (*C
 	}
 	// lg.Printf("Zone %s: CSYNC type bitmap: %v", zone, csynctypes)
 
-	if verbose {
-		lg.Printf("Zone %s CSYNC flags: immediate=%v usesoamin=%v RR types=%v", zone, immediate, usesoamin, csynctypes)
-	}
+	lg.Debug("CheckCSYNC: CSYNC flags", "zone", zone, "immediate", immediate, "usesoamin", usesoamin, "types", csynctypes)
 
 	// 2: Is this a CSYNC that we have already analysed (i.e. same minsoa)?
 	if scanner.ZoneCSYNCKnown(zone, csyncrr) {
-		if verbose {
-			lg.Printf("Zone %s CSYNC with minsoa=%d is already analyzed", zone, csyncrr.Serial)
-		}
+		lg.Debug("CheckCSYNC: CSYNC already analyzed", "zone", zone, "minsoa", csyncrr.Serial)
 		return nil, nil
 	}
 
@@ -96,16 +88,14 @@ func (scanner *Scanner) CheckCSYNC(sr ScanRequest, cdd *ChildDelegationData) (*C
 	// If we're instructed to look at the MinSOA in the CSYNC RR then ensure that current SOA Serial is greater
 	if usesoamin {
 		if csyncrr.Serial > start_serial {
-			lg.Printf("Zone %s: ignoring CSYNC because UseMinSOA=true, CSYNC Serial=%d > SOA Serial=%d",
-				zone, csyncrr.Serial, start_serial)
+			lg.Info("CheckCSYNC: ignoring CSYNC, UseMinSOA=true and CSYNC serial > SOA serial", "zone", zone, "csyncSerial", csyncrr.Serial, "soaSerial", start_serial)
 			return nil, nil
 		}
-		lg.Printf("Zone %s: analysing CSYNC because UseMinSOA=true, CSYNC Serial=%d <= SOA Serial=%d",
-			zone, csyncrr.Serial, start_serial)
+		lg.Info("CheckCSYNC: analysing CSYNC, UseMinSOA=true and CSYNC serial <= SOA serial", "zone", zone, "csyncSerial", csyncrr.Serial, "soaSerial", start_serial)
 	}
 
-	lg.Printf("Zone %s CSYNC with minsoa=%d has not previously been analyzed.", zone, csyncrr.Serial)
-	lg.Printf("Zone %s: Proceeding with new CSYNC analysis.", zone)
+	lg.Info("CheckCSYNC: CSYNC not previously analyzed", "zone", zone, "minsoa", csyncrr.Serial)
+	lg.Info("CheckCSYNC: proceeding with new CSYNC analysis", "zone", zone)
 
 	//	csync_rrset, _, err = AuthDNSQuery(zone, scanner.IMR, dns.TypeCSYNC, lg,
 	//		false, scanner.Verbose, scanner.Debug)
@@ -144,17 +134,17 @@ func (scanner *Scanner) CheckCSYNC(sr ScanRequest, cdd *ChildDelegationData) (*C
 		case dns.TypeA:
 			new_v4glue, v4changed, err = scanner.CsyncAnalyzeA(zone, nib_ns, cdd)
 			if err != nil {
-				lg.Printf("Zone %s: error analyzing v4 glue: %v. %d new v4 glue RRs. Changed v4 glue: %v", zone, err, len(new_v4glue), v4changed)
+				lg.Warn("CheckCSYNC: error analyzing v4 glue", "zone", zone, "error", err, "newGlueCount", len(new_v4glue), "changed", v4changed)
 				// return err
 			}
 		case dns.TypeAAAA:
 			new_v6glue, v6changed, err = scanner.CsyncAnalyzeAAAA(zone, nib_ns, cdd)
 			if err != nil {
-				lg.Printf("Zone %s: error analyzing v6 glue: %v. %d new v6 glue RRs. Changed v6 glue: %v", zone, err, len(new_v6glue), v6changed)
+				lg.Warn("CheckCSYNC: error analyzing v6 glue", "zone", zone, "error", err, "newGlueCount", len(new_v6glue), "changed", v6changed)
 				// return err
 			}
 		default:
-			lg.Printf("Unknown RR type in %s CSYNC bitmap: %d (%s)", zone, t, dns.TypeToString[t])
+			lg.Warn("CheckCSYNC: unknown RR type in CSYNC bitmap", "zone", zone, "rrtype", t, "rrtypeStr", dns.TypeToString[t])
 		}
 	}
 
@@ -172,7 +162,7 @@ func (scanner *Scanner) CheckCSYNC(sr ScanRequest, cdd *ChildDelegationData) (*C
 	if start_serial != end_serial {
 		return nil, fmt.Errorf("zone %s: CSYNC analysis: SOA changed during analysis. Aborting (but will try again later)", zone)
 	}
-	lg.Printf("Zone %s CSYNC analysis: SOA stable during analysis. Continuing with DB update.", zone)
+	lg.Info("CheckCSYNC: SOA stable during analysis, continuing with DB update", "zone", zone)
 
 	//	lg.Printf("Changes: NS=%v (%v),\nv4 glue=%v (%v),\nv6 glue=%v (%v)",
 	//		nschanged, new_nsrrset, v4changed,
@@ -237,22 +227,22 @@ func (scanner *Scanner) CheckCSYNC(sr ScanRequest, cdd *ChildDelegationData) (*C
 	// }
 
 	if !delupdate {
-		lg.Printf("Zone %s: CSYNC analysis: no change from current delegation information. Terminating.", zone)
+		lg.Info("CheckCSYNC: no change from current delegation information, terminating", "zone", zone)
 		return &new_cdd, nil
 	}
 
 	// if we get this far the minsoa of this CSYNC has been analyzed
 	err = scanner.UpdateCsyncStatus(zone, csyncrr)
 	if err != nil {
-		lg.Printf("Error from UpdateCsyncStatus(%s): %v", csyncrr.String(), err)
+		lg.Error("CheckCSYNC: UpdateCsyncStatus failed", "csync", csyncrr.String(), "error", err)
 	}
 
 	if immediate {
-		lg.Printf("Zone %s CSYNC has immediate flag set, committing pending update now.", zone)
+		lg.Info("CheckCSYNC: CSYNC has immediate flag set, committing pending update now", "zone", zone)
 		//		scanner.LabDB.CommitPendingChildDataNG(zone, scanner.IMR, "csync", "del",
 		//			verbose, debug, lg)
 	} else {
-		lg.Printf("Zone %s CSYNC does not have immediate flag set, but right now we only support immediate updates.", zone)
+		lg.Warn("CheckCSYNC: CSYNC does not have immediate flag set, but only immediate updates are supported", "zone", zone)
 	}
 
 	KnownCsyncMinSOAs[zone] = csyncrr.Serial
@@ -261,7 +251,7 @@ func (scanner *Scanner) CheckCSYNC(sr ScanRequest, cdd *ChildDelegationData) (*C
 
 func (scanner *Scanner) CsyncAnalyzeA(zone string, new_nsrrs []*dns.NS, cdd *ChildDelegationData) ([]dns.RR, bool, error) {
 
-	log.Printf("CsyncAnalyzeA: zone %s, new_nsrrs %v", zone, new_nsrrs)
+	lg.Debug("CsyncAnalyzeA", "zone", zone, "newNSRRs", new_nsrrs)
 	// cur_v4glue, err := scanner.LabDB.FetchChildDataFromDB(zone, dns.TypeA)
 	// cur_v4glue := pzd.Children[zone].A_glue
 	cur_v4glue := cdd.A_glue
@@ -319,7 +309,7 @@ func (scanner *Scanner) CsyncAnalyzeA(zone string, new_nsrrs []*dns.NS, cdd *Chi
 
 func (scanner *Scanner) CsyncAnalyzeAAAA(zone string, new_nsrrs []*dns.NS, cdd *ChildDelegationData) ([]dns.RR, bool, error) {
 	//func (scanner *Scanner) CsyncAnalyzeAAAA(zone string, new_nsrrs []*dns.NS, pzd *ZoneData) (*RRset, bool, error) {
-	log.Printf("CsyncAnalyzeAAAA: zone %s, new_nsrrs %v", zone, new_nsrrs)
+	lg.Debug("CsyncAnalyzeAAAA", "zone", zone, "newNSRRs", new_nsrrs)
 	// cur_v6glue := pzd.Children[zone].AAAA_glue
 	cur_v6glue := cdd.AAAA_glue
 
@@ -374,7 +364,7 @@ func (scanner *Scanner) CsyncAnalyzeAAAA(zone string, new_nsrrs []*dns.NS, cdd *
 
 // Returns: new_rrs, changed=true, error
 func (scanner *Scanner) CsyncAnalyzeNS(zone string, cdd *ChildDelegationData) ([]dns.RR, bool, error) {
-	log.Printf("CsyncAnalyzeNS: zone %s", zone)
+	lg.Debug("CsyncAnalyzeNS", "zone", zone)
 
 	// cur_NSrrs := pzd.Children[zone].NS_rrs
 	cur_NSrrs := cdd.NS_rrs
@@ -422,7 +412,7 @@ func (scanner *Scanner) CsyncAnalyzeNS(zone string, cdd *ChildDelegationData) ([
 var KnownCsyncMinSOAs = map[string]uint32{}
 
 func (scanner *Scanner) ZoneCSYNCKnown(zone string, csyncrr *dns.CSYNC) bool {
-	log.Printf("ZoneCSYNCKnown: checking if CSYNC for %s is known", zone)
+	lg.Debug("ZoneCSYNCKnown: checking if CSYNC is known", "zone", zone)
 	new_minsoa := csyncrr.Serial
 	var old_minsoa uint32
 	var ok bool

@@ -41,6 +41,11 @@ common:
 
 log:
    file:		/var/log/tdns/tdns-combiner.log
+   level:		info		# default level: debug|info|warn|error
+   # subsystems:				# per-subsystem level overrides
+   #    transport:	debug
+   #    combiner:	debug
+   #    engine:		info
 
 db:
    file:		/var/tmp/tdns-combiner.db

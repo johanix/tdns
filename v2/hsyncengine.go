@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -14,6 +13,8 @@ import (
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
+
+var lgEngine = Logger("engine")
 
 type SyncRequest struct {
 	Command      string
@@ -73,14 +74,14 @@ func HsyncEngine(ctx context.Context, conf *Config, msgQs *MsgQs) {
 	// Configure intervals
 	heartbeatInterval := configureInterval("agent.remote.beatinterval", 15, 1800)
 
-	log.Printf("*** HsyncEngine starting (heartbeat will run once every %d seconds) ***", heartbeatInterval)
+	lgEngine.Info("starting", "heartbeat_interval", heartbeatInterval)
 
 	HBticker := time.NewTicker(time.Duration(heartbeatInterval) * time.Second)
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("HsyncEngine: context cancelled")
+			lgEngine.Info("context cancelled, stopping")
 			HBticker.Stop()
 			return
 		case syncitem = <-syncQ:
@@ -108,7 +109,35 @@ func HsyncEngine(ctx context.Context, conf *Config, msgQs *MsgQs) {
 		case req := <-conf.Internal.SyncStatusQ:
 			registry.HandleStatusRequest(req)
 
-			// stopch removed; ctx.Done() handles shutdown
+		case inventoryMsg := <-msgQs.KeystateInventory:
+			// Proactive KEYSTATE inventory push from signer.
+			// Store the inventory and check for DNSKEY changes.
+			zd, exists := Zones.Get(inventoryMsg.Zone)
+			if !exists {
+				lgEngine.Warn("proactive inventory: zone not found", "zone", inventoryMsg.Zone)
+				break
+			}
+			zd.LastKeyInventory = &KeyInventorySnapshot{
+				SenderID:  inventoryMsg.SenderID,
+				Zone:      inventoryMsg.Zone,
+				Inventory: inventoryMsg.Inventory,
+				Received:  time.Now(),
+			}
+			changed, ds, err := zd.LocalDnskeysFromKeystate()
+			if err != nil {
+				lgEngine.Error("proactive inventory: LocalDnskeysFromKeystate failed", "zone", inventoryMsg.Zone, "err", err)
+				break
+			}
+			if !changed {
+				lgEngine.Debug("proactive inventory: no DNSKEY changes", "zone", inventoryMsg.Zone)
+				break
+			}
+			lgEngine.Info("proactive inventory: DNSKEY changes detected, triggering sync", "zone", inventoryMsg.Zone, "adds", len(ds.LocalAdds), "removes", len(ds.LocalRemoves))
+			registry.SyncRequestHandler(ourId, SyncRequest{
+				ZoneName:     ZoneName(inventoryMsg.Zone),
+				Command:      "SYNC-DNSKEY-RRSET",
+				DnskeyStatus: ds,
+			}, synchedDataUpdateQ)
 		}
 	}
 }
@@ -118,7 +147,7 @@ func HsyncEngine(ctx context.Context, conf *Config, msgQs *MsgQs) {
 // attempts discovery when the IMR engine is available.
 func (ar *AgentRegistry) DiscoveryRetrierNG(ctx context.Context) {
 	discoveryRetryInterval := configureInterval("agent.syncengine.intervals.discoveryretry", 15, 1800)
-	log.Printf("DiscoveryRetrierNG: Starting discovery retry loop (interval: %d seconds)", discoveryRetryInterval)
+	lgEngine.Info("discovery retrier starting", "interval", discoveryRetryInterval)
 
 	ticker := time.NewTicker(time.Duration(discoveryRetryInterval) * time.Second)
 	defer ticker.Stop()
@@ -126,7 +155,7 @@ func (ar *AgentRegistry) DiscoveryRetrierNG(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("DiscoveryRetrierNG: context cancelled, stopping")
+			lgEngine.Info("discovery retrier context cancelled, stopping")
 			return
 		case <-ticker.C:
 			ar.retryPendingDiscoveries()
@@ -140,9 +169,7 @@ func (ar *AgentRegistry) retryPendingDiscoveries() {
 	// Get IMR engine - skip iteration if not ready yet (will retry next tick)
 	imr := Conf.Internal.ImrEngine
 	if imr == nil {
-		if Globals.Debug {
-			log.Printf("DiscoveryRetrierNG: IMR engine not ready, will retry next interval")
-		}
+		lgEngine.Debug("IMR engine not ready, will retry next interval")
 		return
 	}
 
@@ -165,7 +192,7 @@ func (ar *AgentRegistry) retryPendingDiscoveries() {
 	}
 
 	if neededCount > 0 {
-		log.Printf("DiscoveryRetrierNG: Attempting discovery for %d agents in NEEDED state", neededCount)
+		lgEngine.Info("attempting discovery for agents in NEEDED state", "count", neededCount)
 	}
 }
 
@@ -182,15 +209,15 @@ func configureInterval(key string, min, max int) int {
 }
 
 func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, synchedDataUpdateQ chan *SynchedDataUpdate) {
-	log.Printf("*** handleSyncRequest: enter (zone %q)", req.ZoneName)
+	lgEngine.Debug("sync request received", "zone", req.ZoneName)
 	switch req.Command {
 	case "HSYNC-UPDATE":
-		log.Printf("HsyncEngine: Zone %s HSYNC RRset has changed. Updating agents.", req.ZoneName)
+		lgEngine.Info("HSYNC RRset changed, updating agents", "zone", req.ZoneName)
 		// Run UpdateAgents without waiting for completion
 		go func() {
 			err := ar.UpdateAgents(ourId, req, req.ZoneName, synchedDataUpdateQ)
 			if err != nil {
-				log.Printf("HsyncEngine: Error updating agents for zone %q: %v", req.ZoneName, err)
+				lgEngine.Error("error updating agents", "zone", req.ZoneName, "err", err)
 			}
 			// Send response if needed
 			if req.Response != nil {
@@ -209,38 +236,59 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 		}()
 
 	case "SYNC-DNSKEY-RRSET":
-		log.Printf("HsyncEngine: Zone %s DNSKEY RRset has changed.", req.ZoneName)
+		lgEngine.Info("DNSKEY RRset changed", "zone", req.ZoneName)
 
 		if req.DnskeyStatus == nil {
-			log.Printf("HsyncEngine: Zone %s: SYNC-DNSKEY-RRSET but no DnskeyStatus, ignoring", req.ZoneName)
+			lgEngine.Warn("SYNC-DNSKEY-RRSET but no DnskeyStatus, ignoring", "zone", req.ZoneName)
 			break
 		}
 
 		ds := req.DnskeyStatus
 		totalChanges := len(ds.LocalAdds) + len(ds.LocalRemoves)
 		if totalChanges == 0 {
-			log.Printf("HsyncEngine: Zone %s: DNSKEY changed but no local key changes (remote keys only), ignoring", req.ZoneName)
+			lgEngine.Debug("DNSKEY changed but no local key changes (remote keys only), ignoring", "zone", req.ZoneName)
 			break
 		}
 
-		log.Printf("HsyncEngine: Zone %s: %d local DNSKEY adds, %d local DNSKEY removes → feeding into SynchedDataEngine",
-			req.ZoneName, len(ds.LocalAdds), len(ds.LocalRemoves))
+		lgEngine.Info("local DNSKEY changes, feeding into SynchedDataEngine", "zone", req.ZoneName, "adds", len(ds.LocalAdds), "removes", len(ds.LocalRemoves))
 
-		// Build RR list: adds use ClassINET, removes use ClassNONE
+		// Build RR list for local SDE storage: adds use ClassINET, removes use ClassNONE.
+		// Extract key tags from both adds and removes for DNSKEY propagation tracking.
 		var rrs []dns.RR
+		var keyTags []uint16
 		for _, rr := range ds.LocalAdds {
 			rrs = append(rrs, dns.Copy(rr))
+			if dnskey, ok := rr.(*dns.DNSKEY); ok {
+				keyTags = append(keyTags, dnskey.KeyTag())
+			}
 		}
 		for _, rr := range ds.LocalRemoves {
 			rrCopy := dns.Copy(rr)
 			rrCopy.Header().Class = dns.ClassNONE
 			rrs = append(rrs, rrCopy)
+			if dnskey, ok := rr.(*dns.DNSKEY); ok {
+				keyTags = append(keyTags, dnskey.KeyTag())
+			}
 		}
 
+		// Build REPLACE operation: the complete current set of local DNSKEYs.
+		// Remote agents receive "here are all our DNSKEYs — make yours match"
+		// instead of individual add/delete instructions.
+		var dnskeyRRStrings []string
+		for _, rr := range ds.CurrentLocalKeys {
+			dnskeyRRStrings = append(dnskeyRRStrings, rr.String())
+		}
+		ops := []core.RROperation{{
+			Operation: "replace",
+			RRtype:    "DNSKEY",
+			Records:   dnskeyRRStrings,
+		}}
+
 		zu := &ZoneUpdate{
-			Zone:   req.ZoneName,
-			RRs:    rrs,
-			RRsets: make(map[uint16]core.RRset),
+			Zone:       req.ZoneName,
+			RRs:        rrs,
+			RRsets:     make(map[uint16]core.RRset),
+			Operations: ops,
 		}
 		for _, rr := range rrs {
 			rrtype := rr.Header().Rrtype
@@ -253,85 +301,25 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 		// SynchedDataEngine stores the data and distributes to remote agents.
 		// SkipCombiner: local DNSKEYs don't need to go to the combiner — the signer
 		// adds its own keys during signing. Only remote agents need our DNSKEY changes.
+		// DnskeyKeyTags: enables propagation tracking so the agent sends KEYSTATE
+		// "propagated" back to the signer when all remote agents confirm.
 		synchedDataUpdateQ <- &SynchedDataUpdate{
-			Zone:         req.ZoneName,
-			AgentId:      ourId,
-			UpdateType:   "local",
-			Update:       zu,
-			SkipCombiner: true,
+			Zone:          req.ZoneName,
+			AgentId:       ourId,
+			UpdateType:    "local",
+			Update:        zu,
+			SkipCombiner:  true,
+			DnskeyKeyTags: keyTags,
 		}
 
 	default:
-		log.Printf("HsyncEngine: Unknown command: %s", req.Command)
-	}
-}
-
-// DistributeDnskeyChanges sends local DNSKEY adds/removes to all remote agents
-// for a given zone. Uses the TransportManager's reliable message queue for delivery.
-// This is the core Phase 5 distribution function: when our signer publishes or
-// removes a DNSKEY, we tell all remote agents so they can include/remove it.
-// Phase 6 addition: registers the distribution for propagation tracking, so that
-// KEYSTATE "propagated" (or "rejected") is sent to the signer when all agents confirm.
-func (ar *AgentRegistry) DistributeDnskeyChanges(zone ZoneName, ds *DnskeyStatus) {
-	if ar.TransportManager == nil {
-		log.Printf("DistributeDnskeyChanges: zone %s: no TransportManager, cannot distribute", zone)
-		return
-	}
-
-	// Build the RR list: adds use ClassINET, removes use ClassNONE (DNS UPDATE semantics)
-	var rrs []dns.RR
-	var keyTags []uint16
-	for _, rr := range ds.LocalAdds {
-		rrs = append(rrs, dns.Copy(rr)) // ClassINET (default)
-		if dnskey, ok := rr.(*dns.DNSKEY); ok {
-			keyTags = append(keyTags, dnskey.KeyTag())
-		}
-	}
-	for _, rr := range ds.LocalRemoves {
-		rrCopy := dns.Copy(rr)
-		rrCopy.Header().Class = dns.ClassNONE // Signal removal
-		rrs = append(rrs, rrCopy)
-		if dnskey, ok := rr.(*dns.DNSKEY); ok {
-			keyTags = append(keyTags, dnskey.KeyTag())
-		}
-	}
-
-	if len(rrs) == 0 {
-		return
-	}
-
-	update := &ZoneUpdate{
-		Zone: zone,
-		RRs:  rrs,
-	}
-
-	// Get the list of remote agents for propagation tracking
-	agents, err := ar.TransportManager.getAllAgentsForZone(zone)
-	if err != nil {
-		log.Printf("DistributeDnskeyChanges: zone %s: cannot get agents: %v", zone, err)
-		return
-	}
-	if len(agents) == 0 {
-		log.Printf("DistributeDnskeyChanges: zone %s: no remote agents, nothing to distribute", zone)
-		return
-	}
-
-	distID := GenerateQueueDistributionID()
-	log.Printf("DistributeDnskeyChanges: zone %s: enqueueing %d DNSKEY changes (adds: %d, removes: %d) for %d remote agents (distID: %s)",
-		zone, len(rrs), len(ds.LocalAdds), len(ds.LocalRemoves), len(agents), distID)
-
-	// Register for propagation tracking (Phase 6) before enqueueing
-	ar.TransportManager.TrackDnskeyPropagation(zone, distID, keyTags, agents)
-
-	err = ar.TransportManager.EnqueueForZoneAgents(zone, update, distID)
-	if err != nil {
-		log.Printf("DistributeDnskeyChanges: zone %s: error enqueueing: %v", zone, err)
+		lgEngine.Warn("unknown command", "command", req.Command)
 	}
 }
 
 // Handler for messages received from other agents
 func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ chan *SynchedDataUpdate, synchedDataCmdQ chan *SynchedDataCmd) {
-	log.Printf("MsgHandler: Received %q message from %s: %+v", AgentMsgToString[ampp.MessageType], ampp.MyIdentity, ampp)
+	lgEngine.Info("received message", "type", AgentMsgToString[ampp.MessageType], "from", ampp.OriginatorID)
 
 	// var resp = SynchedDataResponse{
 	var resp = AgentMsgResponse{
@@ -345,9 +333,9 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 		if ampp.Response != nil {
 			select {
 			case ampp.Response <- &resp:
-				// log.Printf("MsgHandler: Response %+v sent to API handler", resp, ampp.MyIdentity)
+				// log.Printf("MsgHandler: Response %+v sent to API handler", resp, ampp.OriginatorID)
 			default:
-				log.Printf("MsgHandler: Response channel blocked, skipping response")
+				lgEngine.Warn("response channel blocked, skipping response")
 			}
 		}
 	}()
@@ -373,18 +361,25 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 	switch ampp.MessageType {
 	case AgentMsgNotify:
 		// if amp, ok := ampp.Msg.(*AgentMsgPost); ok {
-		//	log.Printf("MsgHandler: Contained AgentMsgPost struct from %s: %+v", amp.MyIdentity, amp)
+		//	log.Printf("MsgHandler: Contained AgentMsgPost struct from %s: %+v", amp.OriginatorID, amp)
 
 		var zu = &ZoneUpdate{
 			Zone:    ampp.Zone,
-			AgentId: ampp.MyIdentity,
+			AgentId: ampp.OriginatorID,
 			RRsets:  map[uint16]core.RRset{},
 		}
+
+		// Prefer Operations over Records when both are present
+		if len(ampp.Operations) > 0 {
+			zu.Operations = ampp.Operations
+		}
+
+		// Parse Records into RRsets (used for legacy path and local SDE storage)
 		for _, rrStrs := range ampp.Records {
 			for _, rrstr := range rrStrs {
 				rr, err := dns.NewRR(rrstr)
 				if err != nil {
-					log.Printf("MsgHandler: Error parsing RR %q: %v", rrstr, err)
+					lgEngine.Error("error parsing RR", "rr", rrstr, "err", err)
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("Error parsing RR %q: %v", rrstr, err)
 					return
@@ -397,15 +392,14 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				}
 				rrset.RRs = append(rrset.RRs, rr)
 				zu.RRsets[rrtype] = rrset
-				log.Printf("MsgHandler: RR: %s", rr)
+				lgEngine.Debug("parsed RR", "rr", rr)
 			}
 		}
 
-		// var cresp = make(chan *SynchedDataResponse, 1)
 		var cresp = make(chan *AgentMsgResponse, 1)
 		synchedDataUpdateQ <- &SynchedDataUpdate{
 			Zone:              ampp.Zone,
-			AgentId:           ampp.MyIdentity,
+			AgentId:           ampp.OriginatorID,
 			UpdateType:        "remote",
 			Update:            zu,
 			OriginatingDistID: ampp.DistributionID,
@@ -414,17 +408,17 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 		select {
 		case r := <-cresp:
 			if r.Error {
-				log.Printf("MsgHandler: Error processing update from %s: %s", ampp.MyIdentity, r.ErrorMsg)
+				lgEngine.Error("error processing update", "from", ampp.OriginatorID, "err", r.ErrorMsg)
 				resp.Error = true
 				resp.ErrorMsg = r.ErrorMsg
 			}
 		case <-time.After(3 * time.Second):
-			log.Printf("MsgHandler: No response from SynchedDataEngine received for update from %s after waiting 3 seconds", ampp.MyIdentity)
+			lgEngine.Warn("no response from SynchedDataEngine after 3s", "from", ampp.OriginatorID)
 		}
 
 	case AgentMsgRfi:
 		// Process the RFI
-		log.Printf("MsgHandler: Received RFI request from %s", ampp.MyIdentity)
+		lgEngine.Info("received RFI request", "from", ampp.OriginatorID, "type", ampp.RfiType)
 
 		switch ampp.RfiType {
 		case "UPSTREAM":
@@ -432,18 +426,18 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			// data for xfr.outgoing, (c) send the data to the remote agent.
 			found := false
 			for _, aid := range zad.MyDownstreams {
-				if aid == ampp.MyIdentity {
+				if aid == ampp.OriginatorID {
 					found = true
 					break
 				}
 			}
 			if !found {
 				resp.Error = true
-				resp.Msg = fmt.Sprintf("%s: RFI UPSTREAM request received, but remote agent %q is not a downstream agent", ar.LocalAgent.Identity, ampp.MyIdentity)
+				resp.Msg = fmt.Sprintf("%s: RFI UPSTREAM request received, but remote agent %q is not a downstream agent", ar.LocalAgent.Identity, ampp.OriginatorID)
 				resp.ErrorMsg = resp.Msg
 				return
 			}
-			log.Printf("MsgHandler: RFI UPSTREAM request received from %q, which is a downstream agent (i.e. legitimate request)", ampp.MyIdentity)
+			lgEngine.Info("RFI UPSTREAM request from downstream agent (legitimate)", "from", ampp.OriginatorID)
 
 			if len(ar.LocalAgent.Xfr.Outgoing.Addresses) == 0 {
 				resp.Error = true
@@ -452,25 +446,25 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				return
 			}
 
-			// log.Printf("MsgHandler: Sending RFI UPSTREAM response to %q", ampp.MyIdentity)
+			// log.Printf("MsgHandler: Sending RFI UPSTREAM response to %q", ampp.OriginatorID)
 
 			resp.RfiResponse[AgentId(ar.LocalAgent.Identity)] = &RfiData{
 				ZoneXfrSrcs: ar.LocalAgent.Xfr.Outgoing.Addresses,
 				ZoneXfrAuth: ar.LocalAgent.Xfr.Outgoing.Auth,
 			}
-			// log.Printf("MsgHandler: RFI UPSTREAM response %+v sent to %q", resp.RfiResponse, ampp.MyIdentity)
+			// log.Printf("MsgHandler: RFI UPSTREAM response %+v sent to %q", resp.RfiResponse, ampp.OriginatorID)
 
 		case "DOWNSTREAM":
 			// This is the case where a remote agent has us as downstream. Need to (a) verify that this is correct, (b) verify that we have
 			// data for xfr.incoming, (c) send the data to the remote agent.
-			if zad.MyUpstream != ampp.MyIdentity {
+			if zad.MyUpstream != ampp.OriginatorID {
 				resp.Error = true
-				resp.Msg = fmt.Sprintf("%s: RFI DOWNSTREAM request received, but remote agent %q is not our upstream agent", ar.LocalAgent.Identity, ampp.MyIdentity)
+				resp.Msg = fmt.Sprintf("%s: RFI DOWNSTREAM request received, but remote agent %q is not our upstream agent", ar.LocalAgent.Identity, ampp.OriginatorID)
 				resp.ErrorMsg = resp.Msg
 				return
 			}
 
-			log.Printf("MsgHandler: RFI DOWNSTREAM request received from %q, which is our upstream agent (i.e. legitimate request)", ampp.MyIdentity)
+			lgEngine.Info("RFI DOWNSTREAM request from upstream agent (legitimate)", "from", ampp.OriginatorID)
 
 			if len(ar.LocalAgent.Xfr.Incoming.Addresses) == 0 {
 				resp.Error = true
@@ -479,18 +473,17 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				return
 			}
 
-			// log.Printf("MsgHandler: Sending RFI DOWNSTREAM response to %q", ampp.MyIdentity)
+			// log.Printf("MsgHandler: Sending RFI DOWNSTREAM response to %q", ampp.OriginatorID)
 
 			resp.RfiResponse[AgentId(ar.LocalAgent.Identity)] = &RfiData{
 				ZoneXfrDsts: ar.LocalAgent.Xfr.Incoming.Addresses,
 				ZoneXfrAuth: ar.LocalAgent.Xfr.Incoming.Auth,
 			}
-			// log.Printf("MsgHandler: RFI DOWNSTREAM response %+v sent to %q", resp.RfiResponse, ampp.MyIdentity)
+			// log.Printf("MsgHandler: RFI DOWNSTREAM response %+v sent to %q", resp.RfiResponse, ampp.OriginatorID)
 
 		case "SYNC":
 			// Remote agent asks us to re-send all our local data.
-			log.Printf("MsgHandler: RFI SYNC from %q for zone %q — triggering local resync",
-				ampp.MyIdentity, ampp.Zone)
+			lgEngine.Info("RFI SYNC triggering local resync", "from", ampp.OriginatorID, "zone", ampp.Zone)
 			sdcmd := &SynchedDataCmd{
 				Cmd:      "resync",
 				Zone:     ZoneName(ampp.Zone),
@@ -512,8 +505,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 
 		case "AUDIT":
 			// Remote agent wants to see all data we have for this zone.
-			log.Printf("MsgHandler: RFI AUDIT from %q for zone %q",
-				ampp.MyIdentity, ampp.Zone)
+			lgEngine.Info("RFI AUDIT request", "from", ampp.OriginatorID, "zone", ampp.Zone)
 			sdcmd := &SynchedDataCmd{
 				Cmd:      "dump-zonedatarepo",
 				Zone:     ZoneName(ampp.Zone),
@@ -544,7 +536,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 		}
 
 	default:
-		log.Printf("MsgHandler: Unknown message type: %+v", ampp.MessageType)
+		lgEngine.Warn("unknown message type", "type", ampp.MessageType)
 		resp.Error = true
 		resp.ErrorMsg = fmt.Sprintf("MsgHandler for %s: Unknown message type: %+v", ar.LocalAgent.Identity, ampp.MessageType)
 		resp.Msg = fmt.Sprintf("MsgHandler for %s: Unknown message type: %+v", ar.LocalAgent.Identity, ampp.MessageType)
@@ -554,7 +546,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 // Handler for local commands from CLI or other components in the same organization
 func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdateQ chan *SynchedDataUpdate) {
 
-	log.Printf("CommandHandler: Received mgmt command: %+v", msg)
+	lgEngine.Info("received mgmt command", "command", msg.Command, "zone", msg.Zone)
 	resp := AgentMgmtResponse{
 		Identity:    AgentId(ar.LocalAgent.Identity), // Our identity, sent back to the originator (typically a CLI command)
 		Time:        time.Now(),
@@ -564,13 +556,13 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 
 	defer func() {
 		if resp.ErrorMsg != "" {
-			log.Printf("CommandHandler: Error: %s", resp.ErrorMsg)
+			lgEngine.Error("command handler error", "err", resp.ErrorMsg)
 		}
 		if msg.Response != nil {
 			select {
 			case msg.Response <- &resp:
 			default:
-				log.Printf("CommandHandler: Response channel blocked, skipping response")
+				lgEngine.Warn("command handler response channel blocked, skipping response")
 			}
 		}
 	}()
@@ -591,7 +583,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			// log.Printf("CommandHandler: Error parsing RR: %s", err)
 			return
 		}
-		log.Printf("CommandHandler: RR: %s", rr)
+		lgEngine.Debug("command handler parsed RR", "rr", rr)
 	}
 
 	// Find remote agents for this zone
@@ -623,7 +615,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 	switch msg.Command { // msg.MessageType {
 
 	case "send-notify":
-		log.Printf("CommandHandler: Sending %q message to %d agents", AgentMsgToString[msg.MessageType], len(zad.Agents))
+		lgEngine.Info("sending notify to agents", "type", AgentMsgToString[msg.MessageType], "agents", len(zad.Agents))
 
 		// Send message to each agent (use TransportManager fallback when available)
 		for _, agent := range zad.Agents {
@@ -657,7 +649,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			} else {
 				amr, err := agent.SendApiMsg(&AgentMsgPost{
 					MessageType:  AgentMsgNotify,
-					MyIdentity:   AgentId(ar.LocalAgent.Identity),
+					OriginatorID: AgentId(ar.LocalAgent.Identity),
 					YourIdentity: agent.Identity,
 					Zone:         msg.Zone,
 					Records:      groupRRStringsByOwner(msg.RRs),
@@ -677,7 +669,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			}
 
 			if syncErr != nil {
-				log.Printf("CommandHandler: Error sending message to agent %s: %v", agent.Identity, syncErr)
+				lgEngine.Error("error sending message to agent", "agent", agent.Identity, "err", syncErr)
 				errstrs = append(errstrs, fmt.Sprintf("Error sending message to agent %s: %v", agent.Identity, syncErr))
 				continue
 			}
@@ -693,7 +685,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 		}
 
 	case "send-rfi":
-		log.Printf("CommandHandler: Sending %s RFI message to %d agents", msg.RfiType, len(zad.Agents))
+		lgEngine.Info("sending RFI message to agents", "rfiType", msg.RfiType, "agents", len(zad.Agents))
 		switch msg.RfiType {
 		case "UPSTREAM":
 			agent, exists := ar.S.Get(zad.MyUpstream)
@@ -713,7 +705,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			// Send the RFI to the upstream agent
 			amr, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
 				MessageType:  AgentMsgRfi,
-				MyIdentity:   AgentId(ar.LocalAgent.Identity),
+				OriginatorID: AgentId(ar.LocalAgent.Identity),
 				YourIdentity: agent.Identity,
 				Zone:         msg.Zone,
 				RfiType:      msg.RfiType,
@@ -727,7 +719,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			}
 
 			if rfiresp, ok := amr.RfiResponse[agent.Identity]; ok {
-				log.Printf("CommandHandler: UPSTREAM RFI message to agent %q for zone %q returned status OK: %s", agent.Identity, msg.Zone, amr.Msg)
+				lgEngine.Info("UPSTREAM RFI returned OK", "agent", agent.Identity, "zone", msg.Zone, "msg", amr.Msg)
 				resp.RfiResponse[agent.Identity] = rfiresp
 				resp.Status = "ok"
 				resp.Msg = fmt.Sprintf("RFI(%s) message to agent %s for zone %s returned status OK: %s", msg.RfiType, agent.Identity, msg.Zone, amr.Msg)
@@ -741,7 +733,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 
 		case "DOWNSTREAM":
 			for _, aid := range zad.MyDownstreams {
-				log.Printf("CommandHandler: Sending DOWNSTREAM RFI message to agent %q", aid)
+				lgEngine.Info("sending DOWNSTREAM RFI message", "agent", aid)
 
 				agent, exists := ar.S.Get(aid)
 				if !exists {
@@ -766,7 +758,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 				// Send the RFI to the downstream agent
 				amr, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
 					MessageType:  AgentMsgRfi,
-					MyIdentity:   AgentId(ar.LocalAgent.Identity),
+					OriginatorID: AgentId(ar.LocalAgent.Identity),
 					YourIdentity: agent.Identity,
 					Zone:         msg.Zone,
 					RfiType:      msg.RfiType,
@@ -792,7 +784,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 
 		case "SYNC":
 			// Send RFI SYNC to all remote agents for this zone.
-			log.Printf("CommandHandler: Sending SYNC RFI to %d agents for zone %q", len(zad.Agents), msg.Zone)
+			lgEngine.Info("sending SYNC RFI to agents", "agents", len(zad.Agents), "zone", msg.Zone)
 			for _, agent := range zad.Agents {
 				if !agent.IsAnyTransportOperational() {
 					resp.RfiResponse[agent.Identity] = &RfiData{
@@ -803,7 +795,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 				}
 				amr, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
 					MessageType:  AgentMsgRfi,
-					MyIdentity:   AgentId(ar.LocalAgent.Identity),
+					OriginatorID: AgentId(ar.LocalAgent.Identity),
 					YourIdentity: agent.Identity,
 					Zone:         msg.Zone,
 					RfiType:      "SYNC",
@@ -818,7 +810,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 
 		case "AUDIT":
 			// Send RFI AUDIT to all remote agents for this zone.
-			log.Printf("CommandHandler: Sending AUDIT RFI to %d agents for zone %q", len(zad.Agents), msg.Zone)
+			lgEngine.Info("sending AUDIT RFI to agents", "agents", len(zad.Agents), "zone", msg.Zone)
 			for _, agent := range zad.Agents {
 				if !agent.IsAnyTransportOperational() {
 					resp.RfiResponse[agent.Identity] = &RfiData{
@@ -829,7 +821,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 				}
 				amr, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
 					MessageType:  AgentMsgRfi,
-					MyIdentity:   AgentId(ar.LocalAgent.Identity),
+					OriginatorID: AgentId(ar.LocalAgent.Identity),
 					YourIdentity: agent.Identity,
 					Zone:         msg.Zone,
 					RfiType:      "AUDIT",
@@ -862,7 +854,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 		for _, rrstr := range msg.RRs {
 			rr, err := dns.NewRR(rrstr)
 			if err != nil {
-				log.Printf("MsgHandler: Error parsing RR %q: %v", rrstr, err)
+				lgEngine.Error("error parsing RR in local update", "rr", rrstr, "err", err)
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("Error parsing RR %q: %v", rrstr, err)
 				return
@@ -875,7 +867,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			}
 			rrset.RRs = append(rrset.RRs, rr)
 			zu.RRsets[rrtype] = rrset
-			log.Printf("MsgHandler: RR: %s", rr)
+			lgEngine.Debug("parsed RR for local update", "rr", rr)
 		}
 
 		// var cresp = make(chan *SynchedDataResponse, 1)
@@ -890,13 +882,13 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 		select {
 		case r := <-cresp:
 			if r.Error {
-				log.Printf("MsgHandler: Error processing local update: %s", r.ErrorMsg)
+				lgEngine.Error("error processing local update", "err", r.ErrorMsg)
 				resp.Error = true
 				resp.ErrorMsg = r.ErrorMsg
 			}
 			resp.Msg = r.Msg
 		case <-time.After(2 * time.Second):
-			log.Printf("MsgHandler: No response from SynchedDataEngine received for local update after waiting 2 seconds")
+			lgEngine.Warn("no response from SynchedDataEngine for local update after 2s")
 		}
 
 	default:
@@ -931,7 +923,7 @@ func (ar *AgentRegistry) sendRfiToAgent(agent *Agent, msg *AgentMsgPost) (*Agent
 				Zone:   msg.Zone,
 			}, nil
 		}
-		log.Printf("sendRfiToAgent: DNS transport failed for %q: %v, trying API", agent.Identity, err)
+		lgEngine.Warn("DNS transport failed, trying API", "agent", agent.Identity, "err", err)
 	}
 
 	// Fall back to API transport (synchronous request-response)
@@ -944,9 +936,9 @@ func (ar *AgentRegistry) sendRfiToAgent(agent *Agent, msg *AgentMsgPost) (*Agent
 
 // XXX: Not used at the moment.
 func (ar *AgentRegistry) HandleStatusRequest(req SyncStatus) {
-	log.Printf("HsyncEngine: Received STATUS request")
+	lgEngine.Debug("received STATUS request")
 	if req.Response == nil {
-		log.Printf("HsyncEngine: STATUS request has no response channel")
+		lgEngine.Warn("STATUS request has no response channel")
 		return
 	}
 
@@ -959,7 +951,7 @@ func (ar *AgentRegistry) HandleStatusRequest(req SyncStatus) {
 		if foo, ok := saneAgent.(*Agent); ok {
 			agents[agent.Identity] = foo
 		} else {
-			log.Printf("HsyncEngine: Failed to sanitize agent %s for JSON", agent.Identity)
+			lgEngine.Error("failed to sanitize agent for JSON", "agent", agent.Identity)
 		}
 	}
 
@@ -977,7 +969,7 @@ func (ar *AgentRegistry) HandleStatusRequest(req SyncStatus) {
 		Error:    false,
 	}:
 	case <-time.After(1 * time.Second): // Don't block forever
-		log.Printf("HsyncEngine: STATUS response timed out")
+		lgEngine.Warn("STATUS response timed out")
 	}
 }
 

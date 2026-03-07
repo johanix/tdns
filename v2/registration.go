@@ -10,7 +10,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"sync"
 
 	"github.com/gorilla/mux"
@@ -75,9 +74,7 @@ func RegisterQueryHandler(qtype uint16, handler QueryHandlerFunc) error {
 		// Conf not initialized yet, will be copied from global storage during MainInit
 	}
 
-	if Globals.Debug {
-		log.Printf("RegisterQueryHandler: Registered handler for qtype %d", qtype)
-	}
+	lg.Debug("RegisterQueryHandler: registered handler", "qtype", qtype)
 
 	return nil
 }
@@ -163,9 +160,7 @@ func RegisterNotifyHandler(qtype uint16, handler NotifyHandlerFunc) error {
 		globalNotifyHandlersMutex.Unlock()
 	}
 
-	if Globals.Debug {
-		log.Printf("RegisterNotifyHandler: Registered handler for qtype %d", qtype)
-	}
+	lg.Debug("RegisterNotifyHandler: registered handler", "qtype", qtype)
 
 	return nil
 }
@@ -286,9 +281,7 @@ func RegisterUpdateHandler(matcher UpdateMatcherFunc, handler UpdateHandlerFunc)
 		// Conf not initialized yet, will be copied from global storage during MainInit
 	}
 
-	if Globals.Debug {
-		log.Printf("RegisterUpdateHandler: Registered UPDATE handler")
-	}
+	lg.Debug("RegisterUpdateHandler: registered UPDATE handler")
 
 	return nil
 }
@@ -354,9 +347,7 @@ func RegisterEngine(name string, engine EngineFunc) error {
 	globalEngines = append(globalEngines, EngineRegistration{Name: name, Engine: engine})
 	globalEnginesMutex.Unlock()
 
-	if Globals.Debug {
-		log.Printf("RegisterEngine: Registered engine '%s'", name)
-	}
+	lg.Debug("RegisterEngine: registered engine", "name", name)
 
 	return nil
 }
@@ -393,9 +384,7 @@ func RegisterAPIRoute(routeFunc APIRouteFunc) error {
 	globalAPIRoutes = append(globalAPIRoutes, APIRouteRegistration{RouteFunc: routeFunc})
 	globalAPIRoutesMutex.Unlock()
 
-	if Globals.Debug {
-		log.Printf("RegisterAPIRoute: Registered API route function")
-	}
+	lg.Debug("RegisterAPIRoute: registered API route function")
 
 	return nil
 }
@@ -433,12 +422,12 @@ func StartRegisteredEngines(ctx context.Context) {
 	for _, e := range engines {
 		names = append(names, e.Name)
 	}
-	log.Printf("Starting registered engines: %d engines to start: %v", len(engines), names)
+	lg.Info("starting registered engines", "count", len(engines), "names", names)
 	// engines := getRegisteredEngines()
 	for _, reg := range engines {
 		name := reg.Name
 		engine := reg.Engine
-		log.Printf("StartRegisteredEngines: starting %s", name)
+		lg.Info("StartRegisteredEngines: starting engine", "name", name)
 		startEngine(&Globals.App, name, func() error {
 			return engine(ctx)
 		})

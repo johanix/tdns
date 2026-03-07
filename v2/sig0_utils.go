@@ -14,7 +14,6 @@ import (
 	"slices"
 
 	"fmt"
-	"log"
 	"os/exec"
 	"strings"
 
@@ -50,7 +49,7 @@ func (kdb *KeyDB) SendSig0KeyUpdate(ctx context.Context, childpri, parpri string
 		if err != nil {
 			return fmt.Errorf("error from GenerateSigningKey: %v", err)
 		}
-		log.Println(msg)
+		lgDns.Info("GenerateKeypair result", "msg", msg)
 
 		adds = []dns.RR{&newpkc.KeyRR}
 		removes = []dns.RR{&pkc.KeyRR}
@@ -91,7 +90,7 @@ func (kdb *KeyDB) SendSig0KeyUpdate(ctx context.Context, childpri, parpri string
 	if err != nil {
 		return fmt.Errorf("error from SendUpdate(%v): %v", dsynctarget, err)
 	} else {
-		log.Printf("SendUpdate(parent=%s, target=%s) returned rcode %s", Globals.ParentZone, dsynctarget.Addresses, dns.RcodeToString[rcode])
+		lgDns.Info("SendUpdate completed", "parent", Globals.ParentZone, "target", dsynctarget.Addresses, "rcode", dns.RcodeToString[rcode])
 	}
 	return nil
 }
@@ -128,7 +127,7 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 	mode = strings.ToLower(mode)
 	if mode == "" {
 		mode = "internal"
-		log.Printf("GenerateKeypair: no mode specified (resignerengine.keygen.mode is unset), using default mode: %q", mode)
+		lgDns.Info("GenerateKeypair: no mode specified, using default", "configKey", "resignerengine.keygen.mode", "mode", mode)
 	}
 
 	var bits int
@@ -170,10 +169,10 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 
 		switch rrtype {
 		case dns.TypeKEY:
-			log.Printf("Generated KEY flags: %d", nkey.(*dns.KEY).Flags)
+			lgDns.Debug("GenerateKeypair: generating KEY", "flags", nkey.(*dns.KEY).Flags)
 			privkey, err = nkey.(*dns.KEY).Generate(bits)
 		case dns.TypeDNSKEY:
-			log.Printf("Generated DNSKEY flags: %d", nkey.(*dns.DNSKEY).Flags)
+			lgDns.Debug("GenerateKeypair: generating DNSKEY", "flags", nkey.(*dns.DNSKEY).Flags)
 			privkey, err = nkey.(*dns.DNSKEY).Generate(bits)
 		}
 		if err != nil {
@@ -235,7 +234,7 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 		command := exec.Command(cmdsl[0], cmdsl[1:]...)
 		out, err := command.CombinedOutput()
 		if err != nil {
-			log.Printf("Error from exec: %v: %v\n", cmdsl, err)
+			lgDns.Error("GenerateKeypair: error from external keygen", "cmd", cmdsl, "err", err)
 		}
 
 		var keyname, keyfile string
@@ -261,11 +260,11 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 			// Delete the generated key files
 			err = os.Remove(fmt.Sprintf("%s/%s.private", keydir, keyname))
 			if err != nil {
-				log.Printf("Error deleting private key file: %v", err)
+				lgDns.Warn("GenerateKeypair: error deleting private key file", "err", err)
 			}
 			err = os.Remove(fmt.Sprintf("%s/%s.key", keydir, keyname))
 			if err != nil {
-				log.Printf("Error deleting public key file: %v", err)
+				lgDns.Warn("GenerateKeypair: error deleting public key file", "err", err)
 			}
 		}
 
@@ -318,7 +317,7 @@ INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags,
 			dns.AlgorithmToString[pkc.Algorithm], flags, creator, pkc.PrivateKey, pkc.DnskeyRR.String())
 	}
 	if err != nil {
-		log.Printf("Error storing generated SIG(0) key in keystore: %v", err)
+		lgDns.Error("GenerateKeypair: error storing key in keystore", "err", err)
 		return nil, "", err
 	}
 

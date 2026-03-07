@@ -12,18 +12,19 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
 	"time"
 
 	"github.com/johanix/tdns/v2/agent/transport"
 )
+
+var lgSigner = Logger("signer")
 
 // SignerMsgHandler consumes beat, hello, ping, and RFI messages from MsgQs.
 // Updates PeerRegistry liveness on beats and logs hello/ping messages.
 // Processes RFI KEYSTATE requests by querying KeyDB and pushing inventory.
 func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 	if msgQs == nil {
-		log.Printf("SignerMsgHandler: No MsgQs configured, exiting")
+		lgSigner.Warn("No MsgQs configured, exiting")
 		return
 	}
 
@@ -33,12 +34,12 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 		peerRegistry = tm.PeerRegistry
 	}
 
-	log.Printf("SignerMsgHandler: Starting (peerRegistry=%v)", peerRegistry != nil)
+	lgSigner.Info("Starting", "peerRegistry", peerRegistry != nil)
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Printf("SignerMsgHandler: Context cancelled, stopping")
+			lgSigner.Info("Context cancelled, stopping")
 			return
 
 		case report := <-msgQs.Beat:
@@ -46,8 +47,7 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 				continue
 			}
 			senderID := string(report.Identity)
-			log.Printf("SignerMsgHandler: Beat from %s (interval=%d, distrib=%s)",
-				senderID, report.BeatInterval, report.DistributionID)
+			lgSigner.Debug("Beat received", "sender", senderID, "interval", report.BeatInterval, "distrib", report.DistributionID)
 
 			// Update PeerRegistry liveness
 			if peerRegistry != nil {
@@ -61,7 +61,7 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 				continue
 			}
 			senderID := string(report.Identity)
-			log.Printf("SignerMsgHandler: Hello from %s", senderID)
+			lgSigner.Debug("Hello received", "sender", senderID)
 
 			// Update PeerRegistry on hello
 			if peerRegistry != nil {
@@ -73,28 +73,85 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 			if report == nil {
 				continue
 			}
-			log.Printf("SignerMsgHandler: Ping from %s (distrib=%s)",
-				string(report.Identity), report.DistributionID)
+			lgSigner.Debug("Ping received", "sender", string(report.Identity), "distrib", report.DistributionID)
+
+		case sigMsg := <-msgQs.KeystateSignal:
+			if sigMsg == nil {
+				continue
+			}
+			lgSigner.Info("KEYSTATE signal received", "signal", sigMsg.Signal, "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "sender", sigMsg.SenderID)
+
+			kdb := conf.Internal.KeyDB
+			if kdb == nil {
+				lgSigner.Error("KeyDB not available for KEYSTATE signal processing")
+				continue
+			}
+
+			switch sigMsg.Signal {
+			case "propagated":
+				if err := kdb.SetPropagationConfirmed(sigMsg.Zone, sigMsg.KeyTag); err != nil {
+					lgSigner.Error("SetPropagationConfirmed failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
+					continue
+				}
+				// For MP zones: transition mpdist -> published (no-op if key is not in mpdist)
+				if err := kdb.TransitionMpdistToPublished(sigMsg.Zone, sigMsg.KeyTag); err != nil {
+					lgSigner.Error("mpdist->published transition failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
+				}
+				// For MP zones: transition mpremove -> removed (no-op if key is not in mpremove)
+				if err := kdb.TransitionMpremoveToRemoved(sigMsg.Zone, sigMsg.KeyTag); err != nil {
+					lgSigner.Error("mpremove->removed transition failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
+				}
+				triggerResign(conf, sigMsg.Zone)
+			case "rejected":
+				lgSigner.Warn("KEYSTATE rejection received", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "reason", sigMsg.Message)
+			default:
+				lgSigner.Debug("Unhandled KEYSTATE signal", "signal", sigMsg.Signal, "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag)
+			}
 
 		case msg := <-msgQs.Msg:
 			if msg == nil {
 				continue
 			}
-			senderID := string(msg.MyIdentity)
+			senderID := string(msg.OriginatorID)
+			if senderID == "" {
+				senderID = string(msg.DeliveredBy) // Fallback to transport sender
+			}
 			zone := string(msg.Zone)
 			rfiType := msg.RfiType
 
-			log.Printf("SignerMsgHandler: RFI %s from %s for zone %s", rfiType, senderID, zone)
+			lgSigner.Debug("RFI received", "type", rfiType, "sender", senderID, "zone", zone)
 
 			switch rfiType {
 			case "KEYSTATE":
 				if err := sendKeystateInventoryToAgent(conf, tm, senderID, zone); err != nil {
-					log.Printf("SignerMsgHandler: Failed to send KEYSTATE inventory to %s for zone %s: %v",
-						senderID, zone, err)
+					lgSigner.Error("Failed to send KEYSTATE inventory", "agent", senderID, "zone", zone, "err", err)
 				}
 			default:
-				log.Printf("SignerMsgHandler: Unknown RFI type %q from %s, ignoring", rfiType, senderID)
+				lgSigner.Warn("Unknown RFI type, ignoring", "type", rfiType, "sender", senderID)
 			}
+		}
+	}
+}
+
+// pushKeystateInventoryToAllAgents sends the current KEYSTATE inventory to all
+// configured agents. Called after key state changes (rollover, delete, setstate,
+// retired→mpremove, mpdist→published) so agents learn about the change and can
+// distribute it to remote agents.
+func pushKeystateInventoryToAllAgents(conf *Config, zone string) {
+	if conf.MultiProvider == nil || len(conf.MultiProvider.Agents) == 0 {
+		return
+	}
+	tm := conf.Internal.TransportManager
+	if tm == nil {
+		lgSigner.Warn("pushKeystateInventoryToAllAgents: no TransportManager", "zone", zone)
+		return
+	}
+	for _, agent := range conf.MultiProvider.Agents {
+		if agent.Identity == "" {
+			continue
+		}
+		if err := sendKeystateInventoryToAgent(conf, tm, agent.Identity, zone); err != nil {
+			lgSigner.Error("pushKeystateInventoryToAllAgents: failed", "zone", zone, "agent", agent.Identity, "err", err)
 		}
 	}
 }
@@ -113,7 +170,7 @@ func sendKeystateInventoryToAgent(conf *Config, tm *TransportManager, agentID st
 		return fmt.Errorf("GetKeyInventory failed: %w", err)
 	}
 
-	log.Printf("sendKeystateInventoryToAgent: Zone %s has %d keys in KeyDB", zone, len(items))
+	lgSigner.Debug("KeyDB inventory queried", "zone", zone, "keys", len(items))
 
 	// Convert KeyInventoryItem → transport.KeyInventoryEntry
 	inventory := make([]transport.KeyInventoryEntry, len(items))
@@ -161,7 +218,6 @@ func sendKeystateInventoryToAgent(conf *Config, tm *TransportManager, agentID st
 		return fmt.Errorf("agent %s rejected inventory: %s", agentID, resp.Message)
 	}
 
-	log.Printf("sendKeystateInventoryToAgent: Sent %d-key inventory for zone %s to %s (accepted)",
-		len(inventory), zone, agentID)
+	lgSigner.Info("KEYSTATE inventory sent", "zone", zone, "agent", agentID, "keys", len(inventory))
 	return nil
 }

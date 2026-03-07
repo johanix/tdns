@@ -123,24 +123,24 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 	// Store scanner instance in Config for API handler access
 	conf.Internal.Scanner = scanner
 
-	log.Printf("*** ScannerEngine: starting ***")
+	lg.Info("ScannerEngine: starting")
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("ScannerEngine: context cancelled")
+			lg.Info("ScannerEngine: context cancelled")
 			return nil
 		case <-ticker.C:
 
 		case sr, ok := <-scannerq:
 			if !ok {
-				log.Println("ScannerEngine: scannerq closed")
+				lg.Info("ScannerEngine: scannerq closed")
 				return nil
 			}
 			switch sr.Cmd {
 			case "SCAN":
-				log.Printf("ScannerEngine: Received SCAN request with %d tuples to scan (JobID: %s)", len(sr.ScanTuples), sr.JobID)
+				lg.Info("ScannerEngine: received SCAN request", "tuples", len(sr.ScanTuples), "jobID", sr.JobID)
 				scanner.ImrEngine = conf.Internal.ImrEngine
 
 				// Create or update job status
@@ -171,12 +171,12 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 
 				for _, tuple := range sr.ScanTuples {
 					if tuple.Zone == "" {
-						log.Print("ScannerEngine: Zone unspecified. Ignoring.")
+						lg.Warn("ScannerEngine: zone unspecified, ignoring")
 						job.IgnoredTuples++
 						continue
 					}
 
-					log.Printf("ScannerEngine: Zone %q, Current data:\n%+v", tuple.Zone, tuple.CurrentData)
+					lg.Debug("ScannerEngine: processing zone", "zone", tuple.Zone, "currentData", fmt.Sprintf("%+v", tuple.CurrentData))
 					wg.Add(1)
 
 					switch sr.ScanType {
@@ -185,7 +185,7 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 							log.Printf("ScannerEngine: ScanRRtype not implemented")
 							err := conf.Internal.ImrEngine.SendRfc9567ErrorReport(ctx, tuple.Zone, sr.RRtype, edns0.EDECSyncScannerNotImplemented, sr.Edns0Options)
 							//if err != nil {
-							//	log.Printf("ScannerEngine: Error from SendRfc9567ErrorReport: %v", err)
+							//	lg.Error("ScannerEngine: SendRfc9567ErrorReport failed", "error", err)
 							//}
 							go func(t ScanTuple) {
 								defer wg.Done()
@@ -202,14 +202,14 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 							}(tuple)
 					*/
 					case ScanCDS:
-						log.Printf("go scanner.CheckCDS(sr)")
+						lg.Debug("ScannerEngine: dispatching CheckCDS")
 						go func(t ScanTuple) {
 							defer wg.Done()
 							scanner.CheckCDS(ctx, t, sr.ScanType, sr.Edns0Options, responseCh)
 						}(tuple)
 						// err := conf.Internal.ImrEngine.SendRfc9567ErrorReport(ctx, sr.ChildZone, sr.RRtype, edns0.EDECDSScannerNotImplemented, sr.Edns0Options)
 						//if err != nil {
-						//	log.Printf("ScannerEngine: Error from SendRfc9567ErrorReport: %v", err)
+						//	lg.Error("ScannerEngine: SendRfc9567ErrorReport failed", "error", err)
 						//}
 					case ScanCSYNC:
 						go func(t ScanTuple) {
@@ -217,7 +217,7 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 							scanner.CheckCSYNC_NG(ctx, t, sr.ScanType, sr.Edns0Options, responseCh)
 						}(tuple)
 					case ScanDNSKEY:
-						log.Printf("go scanner.CheckDNSKEY(sr)")
+						lg.Debug("ScannerEngine: dispatching CheckDNSKEY")
 						go func(t ScanTuple) {
 							defer wg.Done()
 							scanner.CheckDNSKEY(ctx, t, sr.ScanType, sr.Edns0Options, responseCh)
@@ -248,10 +248,10 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 					}
 					scanner.JobsMutex.Unlock()
 
-					log.Printf("ScannerEngine: Job %s completed with %d scan responses", jobID, len(responses))
+					lg.Info("ScannerEngine: job completed", "jobID", jobID, "responses", len(responses))
 				}(jobID)
 			default:
-				log.Printf("ScannerEngine: Unknown command: '%s'. Ignoring.", sr.Cmd)
+				lg.Warn("ScannerEngine: unknown command, ignoring", "cmd", sr.Cmd)
 			}
 		}
 	}
@@ -418,13 +418,13 @@ func (scanner *Scanner) queryAllNSAndCompare(ctx context.Context, qname string, 
 }
 
 func (scanner *Scanner) CheckCDS(ctx context.Context, tuple ScanTuple, scanType ScanType, options *edns0.MsgOptions, responseCh chan<- ScanTupleResponse) {
-	lg := scanner.Log["CDS"]
-	if lg == nil {
-		lg = log.Default()
+	scanLog := scanner.Log["CDS"]
+	if scanLog == nil {
+		scanLog = log.Default()
 	}
 
 	zone := tuple.Zone
-	log.Printf("ScannerEngine: Checking CDS for zone %q", zone)
+	lg.Debug("ScannerEngine: checking CDS", "zone", zone)
 
 	// Prepare response
 	newData := CurrentScanData{}
@@ -448,14 +448,14 @@ func (scanner *Scanner) CheckCDS(ctx context.Context, tuple ScanTuple, scanType 
 		// Simple case: just query for CDS and compare to CurrentData
 		resp, err := scanner.ImrEngine.ImrQuery(ctx, zone, dns.TypeCDS, dns.ClassINET, nil)
 		if err != nil {
-			lg.Printf("CheckCDS: Zone %s: error from ImrQuery: %v", zone, err)
+			scanLog.Printf("CheckCDS: Zone %s: error from ImrQuery: %v", zone, err)
 			response.Error = true
 			response.ErrorMsg = fmt.Sprintf("error from ImrQuery: %v", err)
 			responseCh <- response
 			return
 		}
 		if resp == nil || resp.RRset == nil {
-			lg.Printf("CheckCDS: Zone %s: no CDS RRset found", zone)
+			scanLog.Printf("CheckCDS: Zone %s: no CDS RRset found", zone)
 			response.Error = false
 			response.DataChanged = false
 			responseCh <- response
@@ -468,28 +468,28 @@ func (scanner *Scanner) CheckCDS(ctx context.Context, tuple ScanTuple, scanType 
 
 		// Compare with CurrentData.CDS if present
 		if tuple.CurrentData.CDS != nil {
-			changed, adds, removes := core.RRsetDiffer(zone, resp.RRset.RRs, tuple.CurrentData.CDS.RRs, dns.TypeCDS, lg, scanner.Verbose, scanner.Debug)
+			changed, adds, removes := core.RRsetDiffer(zone, resp.RRset.RRs, tuple.CurrentData.CDS.RRs, dns.TypeCDS, scanLog, scanner.Verbose, scanner.Debug)
 			response.DataChanged = changed
 			if changed {
-				lg.Printf("CheckCDS: Zone %s: CDS RRset changed. Adds: %d, Removes: %d", zone, len(adds), len(removes))
+				scanLog.Printf("CheckCDS: Zone %s: CDS RRset changed. Adds: %d, Removes: %d", zone, len(adds), len(removes))
 			} else {
-				lg.Printf("CheckCDS: Zone %s: CDS RRset unchanged", zone)
+				scanLog.Printf("CheckCDS: Zone %s: CDS RRset unchanged", zone)
 			}
 		} else {
 			response.DataChanged = true // New data found where none existed before
-			lg.Printf("CheckCDS: Zone %s: CDS RRset found (no previous data to compare)", zone)
+			scanLog.Printf("CheckCDS: Zone %s: CDS RRset found (no previous data to compare)", zone)
 		}
 		responseCh <- response
 		return
 	}
 
 	// "all-ns" option is set: check all authoritative nameservers
-	lg.Printf("CheckCDS: Zone %s: checking all authoritative nameservers", zone)
+	scanLog.Printf("CheckCDS: Zone %s: checking all authoritative nameservers", zone)
 
 	// Find the enclosing zone and its NS RRset
-	_, nsRRset, err := scanner.ImrEngine.findEnclosingZoneNS(ctx, zone, lg)
+	_, nsRRset, err := scanner.ImrEngine.findEnclosingZoneNS(ctx, zone, scanLog)
 	if err != nil {
-		lg.Printf("CheckCDS: Zone %s: error finding enclosing zone NS: %v", zone, err)
+		scanLog.Printf("CheckCDS: Zone %s: error finding enclosing zone NS: %v", zone, err)
 		response.Error = true
 		response.ErrorMsg = fmt.Sprintf("error finding enclosing zone NS: %v", err)
 		responseCh <- response
@@ -497,9 +497,9 @@ func (scanner *Scanner) CheckCDS(ctx context.Context, tuple ScanTuple, scanType 
 	}
 
 	// Query CDS from all nameservers and compare
-	cdsRRset, allInSync, err := scanner.queryAllNSAndCompare(ctx, zone, dns.TypeCDS, nsRRset, scanner.ImrEngine, lg)
+	cdsRRset, allInSync, err := scanner.queryAllNSAndCompare(ctx, zone, dns.TypeCDS, nsRRset, scanner.ImrEngine, scanLog)
 	if err != nil {
-		lg.Printf("CheckCDS: Zone %s: error querying all NS: %v", zone, err)
+		scanLog.Printf("CheckCDS: Zone %s: error querying all NS: %v", zone, err)
 		response.Error = true
 		response.ErrorMsg = fmt.Sprintf("error querying all NS: %v", err)
 		responseCh <- response
@@ -511,31 +511,31 @@ func (scanner *Scanner) CheckCDS(ctx context.Context, tuple ScanTuple, scanType 
 	response.AllNSInSync = allInSync
 
 	if !allInSync {
-		lg.Printf("CheckCDS: Zone %s: nameservers are not in sync for CDS", zone)
+		scanLog.Printf("CheckCDS: Zone %s: nameservers are not in sync for CDS", zone)
 	}
 
 	// Compare with CurrentData.CDS if present
 	if tuple.CurrentData.CDS != nil {
-		changed, adds, removes := core.RRsetDiffer(zone, cdsRRset.RRs, tuple.CurrentData.CDS.RRs, dns.TypeCDS, lg, scanner.Verbose, scanner.Debug)
+		changed, adds, removes := core.RRsetDiffer(zone, cdsRRset.RRs, tuple.CurrentData.CDS.RRs, dns.TypeCDS, scanLog, scanner.Verbose, scanner.Debug)
 		response.DataChanged = changed
 		if changed {
-			lg.Printf("CheckCDS: Zone %s: CDS RRset changed compared to CurrentData. Adds: %d, Removes: %d", zone, len(adds), len(removes))
+			scanLog.Printf("CheckCDS: Zone %s: CDS RRset changed compared to CurrentData. Adds: %d, Removes: %d", zone, len(adds), len(removes))
 		} else {
-			lg.Printf("CheckCDS: Zone %s: CDS RRset unchanged compared to CurrentData", zone)
+			scanLog.Printf("CheckCDS: Zone %s: CDS RRset unchanged compared to CurrentData", zone)
 		}
 	} else {
 		response.DataChanged = true // New data found where none existed before
-		lg.Printf("CheckCDS: Zone %s: CDS RRset retrieved (no previous data to compare)", zone)
+		scanLog.Printf("CheckCDS: Zone %s: CDS RRset retrieved (no previous data to compare)", zone)
 	}
 
 	responseCh <- response
 }
 
 func (scanner *Scanner) CheckCSYNC_NG(ctx context.Context, tuple ScanTuple, scanType ScanType, options *edns0.MsgOptions, responseCh chan<- ScanTupleResponse) {
-	log.Printf("ScannerEngine: Checking CSYNC for zone %q", tuple.Zone)
+	lg.Info("ScannerEngine: checking CSYNC", "zone", tuple.Zone)
 	err := scanner.ImrEngine.SendRfc9567ErrorReport(ctx, tuple.Zone, dns.TypeCSYNC, edns0.EDECSyncScannerNotImplemented, options)
 	if err != nil {
-		log.Printf("ScannerEngine: Error from SendRfc9567ErrorReport: %v", err)
+		lg.Error("ScannerEngine: SendRfc9567ErrorReport failed", "error", err)
 	}
 
 	// Send response indicating not implemented
@@ -552,10 +552,10 @@ func (scanner *Scanner) CheckCSYNC_NG(ctx context.Context, tuple ScanTuple, scan
 }
 
 func (scanner *Scanner) CheckDNSKEY(ctx context.Context, tuple ScanTuple, scanType ScanType, options *edns0.MsgOptions, responseCh chan<- ScanTupleResponse) {
-	log.Printf("ScannerEngine: Checking DNSKEY for zone %q", tuple.Zone)
+	lg.Info("ScannerEngine: checking DNSKEY", "zone", tuple.Zone)
 	err := scanner.ImrEngine.SendRfc9567ErrorReport(ctx, tuple.Zone, dns.TypeDNSKEY, edns0.EDECSyncScannerNotImplemented, options)
 	if err != nil {
-		log.Printf("ScannerEngine: Error from SendRfc9567ErrorReport: %v", err)
+		lg.Error("ScannerEngine: SendRfc9567ErrorReport failed", "error", err)
 	}
 
 	// Send response indicating not implemented

@@ -17,7 +17,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net"
 	"strings"
 	"time"
@@ -27,6 +26,8 @@ import (
 	"github.com/miekg/dns"
 )
 
+var lgCombiner = Logger("combiner")
+
 // CombinerSyncRequest represents a sync request to the combiner.
 // Uses the same data structure as CombinerPost.Data for transport neutrality.
 type CombinerSyncRequest struct {
@@ -34,6 +35,7 @@ type CombinerSyncRequest struct {
 	Zone           string              // Zone being updated
 	SyncType       string              // Type of sync: "NS", "DNSKEY", "CDS", "CSYNC", "GLUE"
 	Records        map[string][]string // RR strings grouped by owner name (same as CombinerPost.Data)
+	Operations     []core.RROperation  // Explicit operations (takes precedence over Records)
 	Serial         uint32              // Zone serial (optional)
 	DistributionID string              // Distribution ID for tracking
 	Timestamp      time.Time           // When the request was created
@@ -108,20 +110,21 @@ func recordCombinerError(journal *ErrorJournal, distID, sender, messageType, err
 }
 
 // ParseAgentMsgNotify parses a sync payload into a CombinerSyncRequest.
-// Expects the standard AgentMsgPost format (MyIdentity/Zone/Records).
+// Expects the standard AgentMsgPost format (OriginatorID/Zone/Records).
 func ParseAgentMsgNotify(data []byte, distributionID string) (*CombinerSyncRequest, error) {
 	var msg struct {
-		MyIdentity string              `json:"MyIdentity"`
-		Zone       string              `json:"Zone"`
-		Records    map[string][]string `json:"Records"`
-		Time       time.Time           `json:"Time"`
+		OriginatorID string              `json:"OriginatorID"`
+		Zone         string              `json:"Zone"`
+		Records      map[string][]string `json:"Records"`
+		Operations   []core.RROperation  `json:"Operations"`
+		Time         time.Time           `json:"Time"`
 	}
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return nil, fmt.Errorf("JSON unmarshal failed: %w", err)
 	}
 
-	if msg.MyIdentity == "" {
-		return nil, fmt.Errorf("missing MyIdentity")
+	if msg.OriginatorID == "" {
+		return nil, fmt.Errorf("missing OriginatorID")
 	}
 	if msg.Zone == "" {
 		return nil, fmt.Errorf("missing Zone")
@@ -136,13 +139,13 @@ func ParseAgentMsgNotify(data []byte, distributionID string) (*CombinerSyncReque
 	for _, rrs := range records {
 		rrCount += len(rrs)
 	}
-	log.Printf("ParseAgentMsgNotify: Parsed sync from %q for zone %q (%d RRs, %d owners)",
-		msg.MyIdentity, msg.Zone, rrCount, len(records))
+	lgCombiner.Debug("parsed sync", "sender", msg.OriginatorID, "zone", msg.Zone, "rrs", rrCount, "owners", len(records))
 
 	return &CombinerSyncRequest{
-		SenderID:       msg.MyIdentity,
+		SenderID:       msg.OriginatorID,
 		Zone:           msg.Zone,
 		Records:        records,
+		Operations:     msg.Operations,
 		DistributionID: distributionID,
 		Timestamp:      msg.Time,
 	}, nil
@@ -162,8 +165,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	for _, rrs := range req.Records {
 		totalRecords += len(rrs)
 	}
-	log.Printf("CombinerProcessUpdate: Processing sync from %q for zone %q (%d owners, %d records)",
-		req.SenderID, req.Zone, len(req.Records), totalRecords)
+	lgCombiner.Debug("processing legacy update", "sender", req.SenderID, "zone", req.Zone, "owners", len(req.Records), "records", totalRecords)
 
 	resp := &CombinerSyncResponse{
 		DistributionID: req.DistributionID,
@@ -178,6 +180,11 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		resp.Status = "error"
 		resp.Message = fmt.Sprintf("zone %q not found", req.Zone)
 		return resp
+	}
+
+	// Process explicit Operations if present (takes precedence over Records)
+	if len(req.Operations) > 0 {
+		return combinerProcessOperations(req, zd, zonename, protectedNamespaces)
 	}
 
 	// Separate records into adds, deletes (ClassNONE), and bulk deletes (ClassANY)
@@ -233,7 +240,6 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 			switch rr.Header().Class {
 			case dns.ClassINET:
 				addOwnerRRs[owner] = append(addOwnerRRs[owner], rrStr)
-				appliedRecords = append(appliedRecords, rrStr)
 
 			case dns.ClassNONE:
 				// Convert to ClassINET string for removal matching in AgentContributions.
@@ -255,12 +261,22 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	}
 
 	// Apply additions
+	dataChanged := false
 	if len(addOwnerRRs) > 0 {
-		err := zd.AddCombinerDataNG(req.SenderID, addOwnerRRs)
+		addChanged, err := zd.AddCombinerDataNG(req.SenderID, addOwnerRRs)
 		if err != nil {
 			resp.Status = "error"
 			resp.Message = fmt.Sprintf("failed to apply add updates: %v", err)
 			return resp
+		}
+		if addChanged {
+			dataChanged = true
+		}
+		// Always report accepted records regardless of whether data changed.
+		// The agent needs to know its records are present at the combiner so it
+		// can transition them from pending to accepted in the SDE.
+		for _, rrs := range addOwnerRRs {
+			appliedRecords = append(appliedRecords, rrs...)
 		}
 	}
 
@@ -268,8 +284,11 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	if len(deleteOwnerRRs) > 0 {
 		removed, err := zd.RemoveCombinerDataNG(req.SenderID, deleteOwnerRRs)
 		if err != nil {
-			log.Printf("CombinerProcessUpdate: Error removing records: %v", err)
+			lgCombiner.Error("legacy: error removing records", "err", err)
 			// Don't fail the whole request — report partial success
+		}
+		if len(removed) > 0 {
+			dataChanged = true
 		}
 		removedRecords = append(removedRecords, removed...)
 	}
@@ -279,8 +298,10 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		for _, rrtype := range rrtypes {
 			removed, err := zd.RemoveCombinerDataByRRtype(req.SenderID, owner, rrtype)
 			if err != nil {
-				log.Printf("CombinerProcessUpdate: Error removing RRset %s for owner %s: %v",
-					dns.TypeToString[rrtype], owner, err)
+				lgCombiner.Error("legacy: error removing RRset", "rrtype", dns.TypeToString[rrtype], "owner", owner, "err", err)
+			}
+			if len(removed) > 0 {
+				dataChanged = true
 			}
 			removedRecords = append(removedRecords, removed...)
 		}
@@ -294,31 +315,453 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	totalActions := len(appliedRecords) + len(removedRecords)
 	if len(rejectedItems) == 0 {
 		resp.Status = "ok"
-		resp.Message = fmt.Sprintf("applied %d added %d removed for zone %q",
+		resp.Message = fmt.Sprintf("legacy: applied %d added %d removed for zone %q",
 			len(appliedRecords), len(removedRecords), req.Zone)
 	} else if totalActions > 0 {
 		resp.Status = "partial"
-		resp.Message = fmt.Sprintf("applied %d added %d removed %d rejected for zone %q",
+		resp.Message = fmt.Sprintf("legacy: applied %d added %d removed %d rejected for zone %q",
 			len(appliedRecords), len(removedRecords), len(rejectedItems), req.Zone)
 	} else {
 		resp.Status = "error"
-		resp.Message = fmt.Sprintf("all %d records were rejected for zone %q",
+		resp.Message = fmt.Sprintf("legacy: all %d records were rejected for zone %q",
 			len(rejectedItems), req.Zone)
 	}
 
-	log.Printf("CombinerProcessUpdate: %s - %s", resp.Status, resp.Message)
+	lgCombiner.Info("legacy update processed", "status", resp.Status, "message", resp.Message)
 
-	if totalActions > 0 {
+	// Only bump the serial when the zone data actually changed (not for idempotent re-applies).
+	if dataChanged {
 		bumperResp, err := zd.BumpSerialOnly()
 		if err != nil {
-			log.Printf("CombinerProcessUpdate: BumpSerialOnly failed for zone %q: %v", req.Zone, err)
+			lgCombiner.Error("legacy: BumpSerialOnly failed", "zone", req.Zone, "err", err)
 		} else {
-			log.Printf("CombinerProcessUpdate: BumpSerial %s: %d -> %d",
-				req.Zone, bumperResp.OldSerial, bumperResp.NewSerial)
+			lgCombiner.Info("legacy: serial bumped", "zone", req.Zone, "old", bumperResp.OldSerial, "new", bumperResp.NewSerial)
 		}
 	}
 
 	return resp
+}
+
+// combinerProcessOperations handles explicit Operations (add, delete, replace)
+// at the combiner level. Each operation is applied to the agent's contributions.
+func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename string, protectedNamespaces []string) *CombinerSyncResponse {
+	resp := &CombinerSyncResponse{
+		DistributionID: req.DistributionID,
+		Zone:           req.Zone,
+		Timestamp:      time.Now(),
+	}
+
+	var appliedRecords []string
+	var removedRecords []string
+	var rejectedItems []RejectedItem
+	dataChanged := false
+
+	for _, op := range req.Operations {
+		rrtype, ok := dns.StringToType[op.RRtype]
+		if !ok {
+			rejectedItems = append(rejectedItems, RejectedItem{
+				Record: fmt.Sprintf("(operation %s on %s)", op.Operation, op.RRtype),
+				Reason: fmt.Sprintf("unknown RR type: %s", op.RRtype),
+			})
+			continue
+		}
+		if !AllowedLocalRRtypes[rrtype] {
+			rejectedItems = append(rejectedItems, RejectedItem{
+				Record: fmt.Sprintf("(operation %s on %s)", op.Operation, op.RRtype),
+				Reason: fmt.Sprintf("RRtype %s not allowed for combiner updates", op.RRtype),
+			})
+			continue
+		}
+
+		// Parse and validate all RRs in this operation
+		var parsedRRs []dns.RR
+		parseOk := true
+		for _, rrStr := range op.Records {
+			rr, err := dns.NewRR(rrStr)
+			if err != nil {
+				rejectedItems = append(rejectedItems, RejectedItem{
+					Record: rrStr,
+					Reason: fmt.Sprintf("parse error: %v", err),
+				})
+				parseOk = false
+				continue
+			}
+			if !strings.EqualFold(rr.Header().Name, zonename) {
+				rejectedItems = append(rejectedItems, RejectedItem{
+					Record: rrStr,
+					Reason: fmt.Sprintf("owner %q is not at zone apex %q", rr.Header().Name, zonename),
+				})
+				parseOk = false
+				continue
+			}
+			if reason := checkContentPolicy(rr, protectedNamespaces); reason != "" {
+				rejectedItems = append(rejectedItems, RejectedItem{
+					Record: rrStr,
+					Reason: reason,
+				})
+				parseOk = false
+				continue
+			}
+			parsedRRs = append(parsedRRs, rr)
+		}
+
+		switch op.Operation {
+		case "replace":
+			if !parseOk && len(parsedRRs) == 0 && len(op.Records) > 0 {
+				// All records rejected — skip replace to avoid accidental wipe
+				continue
+			}
+			applied, removed, changed, err := zd.ReplaceCombinerDataByRRtype(req.SenderID, zonename, rrtype, parsedRRs)
+			if err != nil {
+				lgCombiner.Error("REPLACE operation failed", "err", err)
+				rejectedItems = append(rejectedItems, RejectedItem{
+					Record: fmt.Sprintf("(replace %s)", op.RRtype),
+					Reason: fmt.Sprintf("replace failed: %v", err),
+				})
+				continue
+			}
+			// Always report records as applied regardless of whether data changed.
+			// The agent needs to know its records are present at the combiner so it
+			// can transition them from pending to accepted in the SDE.
+			if len(applied) > 0 {
+				appliedRecords = append(appliedRecords, applied...)
+			} else if len(parsedRRs) > 0 {
+				// No-op replace: report what's actually stored at the combiner.
+				if stored, ok := zd.AgentContributions[req.SenderID][zonename][rrtype]; ok {
+					for _, rr := range stored.RRs {
+						appliedRecords = append(appliedRecords, rr.String())
+					}
+				}
+			}
+			removedRecords = append(removedRecords, removed...)
+			if changed {
+				dataChanged = true
+			}
+
+		case "add":
+			addRecords := make(map[string][]string)
+			for _, rr := range parsedRRs {
+				addRecords[zonename] = append(addRecords[zonename], rr.String())
+			}
+			if len(addRecords) > 0 {
+				addChanged, err := zd.AddCombinerDataNG(req.SenderID, addRecords)
+				if err != nil {
+					lgCombiner.Error("ADD operation failed", "err", err)
+					rejectedItems = append(rejectedItems, RejectedItem{
+						Record: fmt.Sprintf("(add %s)", op.RRtype),
+						Reason: fmt.Sprintf("add failed: %v", err),
+					})
+					continue
+				}
+				if addChanged {
+					dataChanged = true
+				}
+				for _, rrs := range addRecords {
+					appliedRecords = append(appliedRecords, rrs...)
+				}
+			}
+
+		case "delete":
+			delRecords := make(map[string][]string)
+			for _, rr := range parsedRRs {
+				delRecords[zonename] = append(delRecords[zonename], rr.String())
+			}
+			if len(delRecords) > 0 {
+				removed, err := zd.RemoveCombinerDataNG(req.SenderID, delRecords)
+				if err != nil {
+					lgCombiner.Error("DELETE operation failed", "err", err)
+					rejectedItems = append(rejectedItems, RejectedItem{
+						Record: fmt.Sprintf("(delete %s)", op.RRtype),
+						Reason: fmt.Sprintf("delete failed: %v", err),
+					})
+					continue
+				}
+				if len(removed) > 0 {
+					dataChanged = true
+				}
+				removedRecords = append(removedRecords, removed...)
+			}
+
+		default:
+			rejectedItems = append(rejectedItems, RejectedItem{
+				Record: fmt.Sprintf("(operation %s on %s)", op.Operation, op.RRtype),
+				Reason: fmt.Sprintf("unknown operation: %s", op.Operation),
+			})
+		}
+	}
+
+	resp.AppliedRecords = appliedRecords
+	resp.RemovedRecords = removedRecords
+	resp.RejectedItems = rejectedItems
+
+	totalActions := len(appliedRecords) + len(removedRecords)
+	if len(rejectedItems) == 0 {
+		resp.Status = "ok"
+		resp.Message = fmt.Sprintf("applied %d added %d removed for zone %q (via operations)",
+			len(appliedRecords), len(removedRecords), req.Zone)
+	} else if totalActions > 0 {
+		resp.Status = "partial"
+		resp.Message = fmt.Sprintf("applied %d added %d removed %d rejected for zone %q (via operations)",
+			len(appliedRecords), len(removedRecords), len(rejectedItems), req.Zone)
+	} else {
+		resp.Status = "error"
+		resp.Message = fmt.Sprintf("all operations rejected for zone %q", req.Zone)
+	}
+
+	// Build summary of operation types for log
+	opTypes := make(map[string]int)
+	for _, op := range req.Operations {
+		opTypes[strings.ToUpper(op.Operation)]++
+	}
+	var opSummary []string
+	for opType, count := range opTypes {
+		opSummary = append(opSummary, fmt.Sprintf("%s:%d", opType, count))
+	}
+	lgCombiner.Info("operations processed", "ops", strings.Join(opSummary, ","), "status", resp.Status, "message", resp.Message)
+
+	if dataChanged {
+		bumperResp, err := zd.BumpSerialOnly()
+		if err != nil {
+			lgCombiner.Error("BumpSerialOnly failed", "zone", req.Zone, "err", err)
+		} else {
+			lgCombiner.Info("serial bumped", "zone", req.Zone, "old", bumperResp.OldSerial, "new", bumperResp.NewSerial)
+		}
+	}
+
+	return resp
+}
+
+// isNoOpUpdate checks whether an incoming update would cause any actual change.
+// Checks against both the live zone data (GetRRset) and CombinerData (merged agent
+// contributions). A record is considered present if it exists in either source.
+func isNoOpUpdate(zd *ZoneData, senderID string, records map[string][]string) bool {
+	for owner, rrStrings := range records {
+		for _, rrStr := range rrStrings {
+			rr, err := dns.NewRR(rrStr)
+			if err != nil {
+				return false
+			}
+
+			rrtype := rr.Header().Rrtype
+			switch rr.Header().Class {
+			case dns.ClassINET:
+				if !rrExistsInZone(zd, owner, rrtype, rr) {
+					lgCombiner.Info("legacy isNoOpUpdate: RR not found, update is NOT a no-op",
+						"sender", senderID, "zone", zd.ZoneName, "rr", rr.String())
+					return false
+				}
+				lgCombiner.Debug("legacy isNoOpUpdate: RR already present (no-op)",
+					"sender", senderID, "zone", zd.ZoneName, "rr", rr.String())
+
+			case dns.ClassNONE:
+				delRR := dns.Copy(rr)
+				delRR.Header().Class = dns.ClassINET
+				if rrExistsInZone(zd, owner, rrtype, delRR) {
+					lgCombiner.Info("legacy isNoOpUpdate: RR exists, delete is NOT a no-op",
+						"sender", senderID, "zone", zd.ZoneName, "rr", rr.String())
+					return false // RR exists → removing it IS a change
+				}
+				lgCombiner.Debug("legacy isNoOpUpdate: RR already absent (delete is no-op)",
+					"sender", senderID, "zone", zd.ZoneName, "rr", rr.String())
+
+			case dns.ClassANY:
+				if rrTypeExistsInZone(zd, owner, rrtype) {
+					lgCombiner.Info("legacy isNoOpUpdate: RRtype has records, bulk delete is NOT a no-op",
+						"sender", senderID, "zone", zd.ZoneName, "owner", owner, "rrtype", dns.TypeToString[rrtype])
+					return false
+				}
+				lgCombiner.Debug("legacy isNoOpUpdate: RRtype empty (bulk delete is no-op)",
+					"sender", senderID, "zone", zd.ZoneName, "owner", owner, "rrtype", dns.TypeToString[rrtype])
+
+			default:
+				return false
+			}
+		}
+	}
+
+	lgCombiner.Info("isNoOpUpdate: all records already present, update is a no-op",
+		"sender", senderID, "zone", zd.ZoneName)
+	return true
+}
+
+// isNoOpOperations checks whether explicit Operations would cause any actual change.
+// For replace: compares the replacement set against the agent's current contributions.
+// For add: checks if all RRs already exist. For delete: checks if all RRs are already absent.
+func isNoOpOperations(zd *ZoneData, senderID string, ops []core.RROperation) bool {
+	zonename := zd.ZoneName
+	for _, op := range ops {
+		rrtype, ok := dns.StringToType[op.RRtype]
+		if !ok {
+			return false // Unknown type — not a no-op
+		}
+
+		switch op.Operation {
+		case "replace":
+			// Get agent's current contributions for this rrtype
+			var existingRRs []dns.RR
+			if zd.AgentContributions != nil {
+				if agentData, ok := zd.AgentContributions[senderID]; ok {
+					if ownerMap, ok := agentData[zonename]; ok {
+						if rrset, ok := ownerMap[rrtype]; ok {
+							existingRRs = rrset.RRs
+						}
+					}
+				}
+			}
+
+			// Parse replacement RRs
+			var newRRs []dns.RR
+			for _, rrStr := range op.Records {
+				rr, err := dns.NewRR(rrStr)
+				if err != nil {
+					return false
+				}
+				newRRs = append(newRRs, rr)
+			}
+
+			// Both empty = no-op
+			if len(existingRRs) == 0 && len(newRRs) == 0 {
+				continue
+			}
+			// Different length = change
+			if len(existingRRs) != len(newRRs) {
+				return false
+			}
+			// Check all existing RRs are in the new set
+			for _, oldRR := range existingRRs {
+				found := false
+				for _, newRR := range newRRs {
+					if dns.IsDuplicate(oldRR, newRR) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					return false
+				}
+			}
+
+		case "add":
+			for _, rrStr := range op.Records {
+				rr, err := dns.NewRR(rrStr)
+				if err != nil {
+					return false
+				}
+				if !rrExistsInZone(zd, zonename, rrtype, rr) {
+					return false
+				}
+			}
+
+		case "delete":
+			for _, rrStr := range op.Records {
+				rr, err := dns.NewRR(rrStr)
+				if err != nil {
+					return false
+				}
+				delRR := dns.Copy(rr)
+				delRR.Header().Class = dns.ClassINET
+				if rrExistsInZone(zd, zonename, rrtype, delRR) {
+					return false // RR still exists — deleting it IS a change
+				}
+			}
+
+		default:
+			return false
+		}
+	}
+
+	lgCombiner.Info("isNoOpOperations: all operations are no-ops",
+		"sender", senderID, "zone", zd.ZoneName)
+	return true
+}
+
+// rrExistsInZone checks whether the given RR exists in either the live zone data
+// or CombinerData. Returns true if found in either source.
+func rrExistsInZone(zd *ZoneData, owner string, rrtype uint16, rr dns.RR) bool {
+	rrStr := rr.String()
+	rrtypeStr := dns.TypeToString[rrtype]
+
+	// Check live zone data first
+	existing, err := zd.GetRRset(owner, rrtype)
+	if err != nil {
+		lgCombiner.Info("rrExistsInZone: GetRRset error", "owner", owner, "rrtype", rrtypeStr, "err", err)
+	} else if existing == nil {
+		lgCombiner.Info("rrExistsInZone: no RRset in live zone", "owner", owner, "rrtype", rrtypeStr, "zoneStore", ZoneStoreToString[zd.ZoneStore])
+	} else {
+		for _, existingRR := range existing.RRs {
+			if dns.IsDuplicate(rr, existingRR) {
+				lgCombiner.Info("rrExistsInZone: found in live zone", "owner", owner, "rrtype", rrtypeStr, "rr", rrStr)
+				return true
+			}
+		}
+		// RRset exists but this specific RR is not in it
+		var existingStrs []string
+		for _, e := range existing.RRs {
+			existingStrs = append(existingStrs, e.String())
+		}
+		lgCombiner.Info("rrExistsInZone: RRset exists in live zone but RR not found",
+			"owner", owner, "rrtype", rrtypeStr, "lookingFor", rrStr, "existing", existingStrs)
+	}
+
+	// Check CombinerData
+	if zd.CombinerData == nil {
+		lgCombiner.Info("rrExistsInZone: CombinerData is nil", "zone", zd.ZoneName)
+	} else {
+		ownerData, ownerExists := zd.CombinerData.Get(owner)
+		if !ownerExists {
+			// Dump all CombinerData keys for diagnostics
+			var cdOwners []string
+			for item := range zd.CombinerData.IterBuffered() {
+				cdOwners = append(cdOwners, item.Key)
+			}
+			lgCombiner.Info("rrExistsInZone: owner not in CombinerData",
+				"owner", owner, "cdOwners", cdOwners)
+		} else {
+			cdRRset, rrtypeExists := ownerData.RRtypes.Get(rrtype)
+			if !rrtypeExists || len(cdRRset.RRs) == 0 {
+				var cdRRtypes []string
+				for _, rt := range ownerData.RRtypes.Keys() {
+					cdRRtypes = append(cdRRtypes, dns.TypeToString[rt])
+				}
+				lgCombiner.Info("rrExistsInZone: rrtype not in CombinerData for owner",
+					"owner", owner, "rrtype", rrtypeStr, "cdRRtypes", cdRRtypes)
+			} else {
+				for _, existingRR := range cdRRset.RRs {
+					if dns.IsDuplicate(rr, existingRR) {
+						lgCombiner.Info("rrExistsInZone: found in CombinerData (not in live zone)",
+							"owner", owner, "rrtype", rrtypeStr, "rr", rrStr)
+						return true
+					}
+				}
+				// RRset exists in CombinerData but this specific RR is not in it
+				var existingStrs []string
+				for _, e := range cdRRset.RRs {
+					existingStrs = append(existingStrs, e.String())
+				}
+				lgCombiner.Info("rrExistsInZone: RRset exists in CombinerData but RR not found",
+					"owner", owner, "rrtype", rrtypeStr, "lookingFor", rrStr, "existing", existingStrs)
+			}
+		}
+	}
+
+	return false
+}
+
+// rrTypeExistsInZone checks whether the given owner/rrtype has any records in
+// either the live zone data or CombinerData.
+func rrTypeExistsInZone(zd *ZoneData, owner string, rrtype uint16) bool {
+	existing, err := zd.GetRRset(owner, rrtype)
+	if err == nil && existing != nil && len(existing.RRs) > 0 {
+		return true
+	}
+	if zd.CombinerData != nil {
+		if ownerData, ok := zd.CombinerData.Get(owner); ok {
+			if cdRRset, ok := ownerData.RRtypes.Get(rrtype); ok && len(cdRRset.RRs) > 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // NewCombinerSyncHandler creates a transport.MessageHandlerFunc for combiner UPDATE processing.
@@ -327,8 +770,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 // runs asynchronously, and the detailed confirmation is sent back as a separate CONFIRM NOTIFY.
 func NewCombinerSyncHandler() transport.MessageHandlerFunc {
 	return func(ctx *transport.MessageContext) error {
-		log.Printf("CombinerHandleUpdate: Received update from %s (distrib=%s), sending pending ACK",
-			ctx.PeerID, ctx.DistributionID)
+		lgCombiner.Debug("received update, sending pending ACK", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
 
 		// Build pending ACK for DNS response
 		ack := struct {
@@ -376,9 +818,9 @@ func RegisterCombinerChunkHandler(localID string, secureWrapper *transport.Secur
 	}
 
 	if secureWrapper != nil && secureWrapper.IsEnabled() {
-		log.Printf("RegisterCombinerChunkHandler: Registering CHUNK handler for %s with crypto enabled", localID)
+		lgCombiner.Info("registering CHUNK handler with crypto enabled", "localID", localID)
 	} else {
-		log.Printf("RegisterCombinerChunkHandler: Registering CHUNK handler for %s", localID)
+		lgCombiner.Info("registering CHUNK handler", "localID", localID)
 	}
 
 	// Wire FetchChunkQuery for chunk_mode=query (combiner has no DNSTransport)
@@ -416,9 +858,9 @@ func RegisterSignerChunkHandler(localID string, secureWrapper *transport.SecureP
 	handler.FetchChunkQuery = fetchChunkPayloadViaQuery
 
 	if secureWrapper != nil && secureWrapper.IsEnabled() {
-		log.Printf("RegisterSignerChunkHandler: Registering CHUNK handler for %s with crypto enabled", localID)
+		lgCombiner.Info("registering signer CHUNK handler with crypto enabled", "localID", localID)
 	} else {
-		log.Printf("RegisterSignerChunkHandler: XX Registering CHUNK handler for %s", localID)
+		lgCombiner.Info("registering signer CHUNK handler", "localID", localID)
 	}
 	err := RegisterNotifyHandler(core.TypeCHUNK, func(ctx context.Context, req *DnsNotifyRequest) error {
 		return handler.RouteViaRouter(ctx, req.Qname, req.Msg, req.ResponseWriter)
@@ -503,7 +945,7 @@ func fetchChunkPayloadViaQuery(ctx context.Context, serverAddr, qname string) ([
 // For in-process communication, this calls CombinerProcessUpdate directly.
 func SendToCombiner(state *CombinerState, req *CombinerSyncRequest) *CombinerSyncResponse {
 	if state == nil {
-		log.Printf("SendToCombiner: state is nil, cannot send update")
+		lgCombiner.Error("state is nil, cannot send update")
 		return &CombinerSyncResponse{
 			DistributionID: req.DistributionID,
 			Zone:           req.Zone,
@@ -539,7 +981,7 @@ func ConvertZoneUpdateToSyncRequest(update *ZoneUpdate, senderID string, distrib
 	// Determine sync type from the RRs
 	syncType := determineSyncType(update)
 
-	return &CombinerSyncRequest{
+	req := &CombinerSyncRequest{
 		SenderID:       senderID,
 		Zone:           string(update.Zone),
 		SyncType:       syncType,
@@ -547,6 +989,10 @@ func ConvertZoneUpdateToSyncRequest(update *ZoneUpdate, senderID string, distrib
 		DistributionID: distributionID,
 		Timestamp:      time.Now(),
 	}
+	if len(update.Operations) > 0 {
+		req.Operations = update.Operations
+	}
+	return req
 }
 
 // determineSyncType examines the update and returns an appropriate sync type string.

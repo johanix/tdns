@@ -9,7 +9,6 @@ import (
 
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"runtime/debug"
@@ -23,7 +22,10 @@ import (
 	flag "github.com/spf13/pflag"
 	"github.com/spf13/viper"
 
+	"github.com/miekg/dns"
+
 	"github.com/johanix/tdns/v2/agent/transport"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/crypto"
 	"github.com/johanix/tdns/v2/crypto/jose"
 )
@@ -63,9 +65,9 @@ func startEngine(app *AppDetails, name string, engineFunc func() error) {
 	engineWg.Add(1)
 	go func() {
 		defer engineWg.Done()
-		log.Printf("TDNS %s (%s): starting: %s", app.Name, AppTypeToString[app.Type], name)
+		lgConfig.Info("starting engine", "app", app.Name, "mode", AppTypeToString[app.Type], "engine", name)
 		if err := engineFunc(); err != nil {
-			log.Printf("Error from %s engine: %v", name, err)
+			lgConfig.Error("engine error", "engine", name, "err", err)
 		}
 	}()
 }
@@ -76,7 +78,7 @@ func startEngineNoError(app *AppDetails, name string, engineFunc func()) {
 	engineWg.Add(1)
 	go func() {
 		defer engineWg.Done()
-		log.Printf("TDNS %s (%s): starting: %s", app.Name, AppTypeToString[app.Type], name)
+		lgConfig.Info("starting engine", "app", app.Name, "mode", AppTypeToString[app.Type], "engine", name)
 		engineFunc()
 	}()
 }
@@ -88,10 +90,10 @@ func (conf *Config) MainLoop(ctx context.Context, cancel context.CancelFunc) {
 	for {
 		select {
 		case <-ctx.Done():
-			log.Println("mainloop: context cancelled. Cleaning up.")
+			lgConfig.Info("mainloop: context cancelled, cleaning up")
 			return
 		case <-conf.Internal.APIStopCh:
-			log.Println("mainloop: Stop command received. Cleaning up.")
+			lgConfig.Info("mainloop: stop command received, cleaning up")
 			cancel()
 			return
 		}
@@ -128,9 +130,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		conf.Internal.CfgFile = defaultcfg
 	}
 
-	if Globals.Debug {
-		log.Printf("*** MainInit: 1. defaultcfg: %q conf.Internal.CfgFile: %q ***", defaultcfg, conf.Internal.CfgFile)
-	}
+	lgConfig.Debug("MainInit starting", "defaultcfg", defaultcfg, "cfgfile", conf.Internal.CfgFile)
 
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeImr, AppTypeScanner, AppTypeReporter, AppTypeCli, AppTypeKdc, AppTypeKrs:
@@ -147,7 +147,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	}
 
 	logfile := viper.GetString("log.file")
-	err = SetupLogging(logfile)
+	err = SetupLogging(logfile, Conf.Log)
 	if err != nil {
 		return fmt.Errorf("error setting up logging: %v", err)
 	}
@@ -165,7 +165,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		}
 
 	default:
-		log.Printf("TDNS %s (%s): not initializing KeyDB", Globals.App.Name, AppTypeToString[Globals.App.Type])
+		lgConfig.Info("not initializing KeyDB", "app", Globals.App.Name, "mode", AppTypeToString[Globals.App.Type])
 	}
 
 	err = Globals.Validate()
@@ -218,7 +218,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	conf.Internal.DelegationSyncQ = make(chan DelegationSyncRequest, 10)
 	conf.Internal.SyncQ = make(chan SyncRequest, 10)
 	conf.Internal.MusicSyncQ = make(chan MusicSyncRequest, 10)
-	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, 10)
+	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, max(10, len(conf.Zones)))
 	conf.Internal.NotifyQ = make(chan NotifyRequest, 10)
 	conf.Internal.ValidatorCh = make(chan ValidatorRequest, 10)
 	conf.Internal.RecursorCh = make(chan ImrRequest, 10)
@@ -244,6 +244,8 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		SynchedDataCmd:    make(chan *SynchedDataCmd, 100),
 		Confirmation:      make(chan *ConfirmationDetail, 100),
 		KeystateInventory: make(chan *KeystateInventoryMsg, 10),
+		KeystateSignal:    make(chan *KeystateSignalMsg, 10),
+		EditsResponse:     make(chan *EditsResponseMsg, 10),
 	}
 
 	// Create KeyDB channels if KeyDB exists
@@ -275,7 +277,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		// The warning was already logged during ParseConfig validation
 		// For now, we'll try to load it anyway (it may have been included)
 		if err := conf.LoadDynamicZoneFiles(ctx); err != nil {
-			log.Printf("DYNAMIC-ZONES: Warning: Failed to load dynamic zones: %v", err)
+			lgConfig.Warn("failed to load dynamic zones", "err", err)
 			// Don't fail startup, just log the warning
 		}
 	}
@@ -296,10 +298,10 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		// Use combiner identity from config, or default to "combiner"
 		combinerID := "combiner"
 		if conf.Agent.Combiner != nil && conf.Agent.Combiner.Identity != "" {
-			combinerID = conf.Agent.Combiner.Identity
+			combinerID = dns.Fqdn(conf.Agent.Combiner.Identity)
 			// Inject combiner into authorized_peers so IsPeerAuthorized() accepts it
 			conf.Agent.AuthorizedPeers = append(conf.Agent.AuthorizedPeers, combinerID)
-			log.Printf("MainInit: added combiner %s to authorized_peers", combinerID)
+			lgConfig.Info("added combiner to authorized_peers", "combiner", combinerID)
 		}
 		conf.Internal.CombinerState = &CombinerState{
 			ErrorJournal: NewErrorJournal(1000, 24*time.Hour),
@@ -311,14 +313,14 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			if err := conf.Internal.KeyDB.InitHsyncTables(); err != nil {
 				return fmt.Errorf("InitHsyncTables: %w", err)
 			}
-			log.Printf("MainInit: HSYNC database tables initialized")
+			lgConfig.Info("HSYNC database tables initialized")
 		}
 
 		// Distribution cache for "agent distrib list": keep completed distributions for 5 minutes, then GC purges them; incomplete are never auto-purged
 		if conf.Internal.DistributionCache == nil {
 			conf.Internal.DistributionCache = NewDistributionCache()
-			StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute)
-			log.Printf("MainInit: distribution cache initialized (GC every 1m; completed kept 5m)")
+			StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute, conf.Internal.StopCh)
+			lgConfig.Info("distribution cache initialized (GC every 1m, completed kept 5m)")
 		}
 
 		// Create TransportManager for API + DNS mode with fallback
@@ -342,14 +344,14 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			chunkStore = NewMemChunkPayloadStore(5 * time.Minute)
 			conf.Internal.ChunkPayloadStore = chunkStore
 			if err := RegisterChunkQueryHandler(chunkStore); err != nil {
-				log.Printf("MainInit: failed to register CHUNK query handler: %v", err)
+				lgConfig.Error("failed to register CHUNK query handler", "err", err)
 			} else {
-				log.Printf("MainInit: CHUNK query handler registered (chunk_mode=query)")
+				lgConfig.Info("CHUNK query handler registered", "chunkMode", "query")
 			}
 			// Build CHUNK query endpoint (host:port) so receiver knows where to send CHUNK query; prefer Publish so combiner can reach us
 			chunkQueryEndpoint = buildChunkQueryEndpoint(conf)
 			if chunkQueryEndpoint == "" {
-				log.Printf("MainInit: chunk_mode=query but no agent.dns address/port; CHUNK query endpoint will be empty")
+				lgConfig.Warn("chunk_mode=query but no agent.dns address/port, CHUNK query endpoint will be empty")
 			}
 		}
 
@@ -362,22 +364,22 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 				return fmt.Errorf("failed to initialize agent crypto: %w", err)
 			}
 			payloadCrypto = pc
-			log.Printf("MainInit: PayloadCrypto initialized (encryption enabled)")
+			lgConfig.Info("PayloadCrypto initialized (encryption enabled)")
 		} else {
-			log.Printf("MainInit: Agent crypto not configured - CHUNK payloads will be unencrypted")
+			lgConfig.Info("agent crypto not configured, CHUNK payloads will be unencrypted")
 		}
 
 		// Extract signer peer config for KEYSTATE signaling (Phase 6)
 		var signerID, signerAddress string
 		if conf.Agent.Signer != nil {
-			signerID = conf.Agent.Signer.Identity
+			signerID = dns.Fqdn(conf.Agent.Signer.Identity)
 			signerAddress = conf.Agent.Signer.Address
-			log.Printf("MainInit: Signer peer configured (identity: %s, address: %s)", signerID, signerAddress)
+			lgConfig.Info("signer peer configured", "identity", signerID, "address", signerAddress)
 		}
 
 		tm := NewTransportManager(&TransportManagerConfig{
-			LocalID:                    conf.Agent.Identity,
-			ControlZone:                controlZone,
+			LocalID:                    dns.Fqdn(conf.Agent.Identity),
+			ControlZone:                dns.Fqdn(controlZone),
 			APITimeout:                 10 * time.Second,
 			DNSTimeout:                 5 * time.Second,
 			AgentRegistry:              conf.Internal.AgentRegistry,
@@ -395,12 +397,14 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			SignerAddress:              signerAddress,
 			AuthorizedPeers: func() []string {
 				var peers []string
-				peers = append(peers, conf.Agent.AuthorizedPeers...)
+				for _, p := range conf.Agent.AuthorizedPeers {
+					peers = append(peers, dns.Fqdn(p))
+				}
 				if conf.Agent.Combiner != nil && conf.Agent.Combiner.Identity != "" {
-					peers = append(peers, conf.Agent.Combiner.Identity)
+					peers = append(peers, dns.Fqdn(conf.Agent.Combiner.Identity))
 				}
 				if conf.Agent.Signer != nil && conf.Agent.Signer.Identity != "" {
-					peers = append(peers, conf.Agent.Signer.Identity)
+					peers = append(peers, dns.Fqdn(conf.Agent.Signer.Identity))
 				}
 				return peers
 			},
@@ -411,7 +415,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		})
 		conf.Internal.TransportManager = tm
 		conf.Internal.AgentRegistry.TransportManager = tm
-		log.Printf("MainInit: TransportManager created (control zone: %s, chunk_mode: %s)", controlZone, chunkMode)
+		lgConfig.Info("TransportManager created", "controlZone", controlZone, "chunkMode", chunkMode)
 
 		// Register peer agents from static config
 		if err := registerPeerAgents(conf, tm); err != nil {
@@ -436,16 +440,16 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 					return fmt.Errorf("failed to initialize signer crypto: %w", err)
 				}
 				signerPayloadCrypto = pc
-				log.Printf("MainInit: Signer PayloadCrypto initialized (encryption enabled)")
+				lgConfig.Info("signer PayloadCrypto initialized (encryption enabled)")
 			} else {
-				log.Printf("MainInit: Signer crypto not configured - CHUNK payloads will be unencrypted")
+				lgConfig.Info("signer crypto not configured, CHUNK payloads will be unencrypted")
 			}
 
 			// Initialize distribution cache for outbound tracking
 			if conf.Internal.DistributionCache == nil {
 				conf.Internal.DistributionCache = NewDistributionCache()
-				StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute)
-				log.Printf("MainInit: Signer distribution cache initialized")
+				StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute, conf.Internal.StopCh)
+				lgConfig.Info("signer distribution cache initialized")
 			}
 
 			// Create TransportManager for signer↔agent communication.
@@ -454,9 +458,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			if chunkMode == "" {
 				chunkMode = "edns0"
 			}
-			controlZone := mp.Identity
+			controlZone := dns.Fqdn(mp.Identity)
 			tm := NewTransportManager(&TransportManagerConfig{
-				LocalID:             mp.Identity,
+				LocalID:             dns.Fqdn(mp.Identity),
 				ControlZone:         controlZone,
 				APITimeout:          10 * time.Second,
 				DNSTimeout:          5 * time.Second,
@@ -470,14 +474,14 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 					var peers []string
 					for _, a := range mp.Agents {
 						if a != nil && a.Identity != "" {
-							peers = append(peers, a.Identity)
+							peers = append(peers, dns.Fqdn(a.Identity))
 						}
 					}
 					return peers
 				},
 			})
 			conf.Internal.TransportManager = tm
-			log.Printf("MainInit: Signer TransportManager created (identity: %s, chunk_mode: %s)", mp.Identity, chunkMode)
+			lgConfig.Info("signer TransportManager created", "identity", dns.Fqdn(mp.Identity), "chunkMode", chunkMode)
 
 			// Create SecurePayloadWrapper for decrypting incoming CHUNK payloads
 			var signerSecureWrapper *transport.SecurePayloadWrapper
@@ -491,7 +495,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 				return fmt.Errorf("RegisterSignerChunkHandler: %w", err)
 			}
 			conf.Internal.CombinerState = signerState
-			log.Printf("MainInit: Signer CHUNK handler registered for identity %s", mp.Identity)
+			lgConfig.Info("signer CHUNK handler registered", "identity", mp.Identity)
 
 			// Wire chunk handler into TM so StartIncomingMessageRouter can route messages
 			tm.ChunkHandler = signerState.ChunkHandler()
@@ -512,23 +516,24 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 				return fmt.Errorf("InitializeSignerRouter: %w", err)
 			}
 			signerState.SetRouter(signerRouter)
-			log.Printf("MainInit: Signer router initialized with authorization and message routing middleware")
+			lgConfig.Info("signer router initialized with authorization and message routing middleware")
 
 			// Register agent peers in the TransportManager
 			for _, agentConf := range mp.Agents {
 				if agentConf.Identity == "" {
 					return fmt.Errorf("multi-provider.agents: entry missing identity")
 				}
-				agentPeer := transport.NewPeer(agentConf.Identity)
+				peerID := dns.Fqdn(agentConf.Identity)
+				agentPeer := transport.NewPeer(peerID)
 				agentPeer.SetState(transport.PeerStateKnown, "configured")
 				if agentConf.Address != "" {
 					host, portStr, err := net.SplitHostPort(agentConf.Address)
 					if err != nil {
-						return fmt.Errorf("multi-provider.agents: invalid address %q for %s: %w", agentConf.Address, agentConf.Identity, err)
+						return fmt.Errorf("multi-provider.agents: invalid address %q for %s: %w", agentConf.Address, peerID, err)
 					}
 					port, err := strconv.Atoi(portStr)
 					if err != nil {
-						return fmt.Errorf("multi-provider.agents: invalid port in %q for %s: %w", agentConf.Address, agentConf.Identity, err)
+						return fmt.Errorf("multi-provider.agents: invalid port in %q for %s: %w", agentConf.Address, peerID, err)
 					}
 					agentPeer.SetDiscoveryAddress(&transport.Address{
 						Host:      host,
@@ -540,15 +545,23 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 					agentPeer.APIEndpoint = agentConf.ApiBaseUrl
 				}
 				if err := tm.PeerRegistry.Add(agentPeer); err != nil {
-					return fmt.Errorf("failed to register agent peer %s: %w", agentConf.Identity, err)
+					return fmt.Errorf("failed to register agent peer %s: %w", peerID, err)
 				}
-				log.Printf("MainInit: Registered agent peer %s (address: %s)", agentConf.Identity, agentConf.Address)
+				lgConfig.Info("registered agent peer", "peer", peerID, "address", agentConf.Address)
 			}
 		}
 
 		if Globals.App.Type == AppTypeCombiner {
 			if conf.Combiner == nil {
 				return fmt.Errorf("combiner config block is required for combiner app type")
+			}
+
+			// Initialize only the combiner edit tables (not the full HSYNC schema)
+			if conf.Internal.KeyDB != nil {
+				if err := conf.Internal.KeyDB.InitCombinerEditTables(); err != nil {
+					return fmt.Errorf("InitCombinerEditTables: %w", err)
+				}
+				lgConfig.Info("combiner edit tables initialized")
 			}
 			chunkMode := strings.TrimSpace(conf.Combiner.ChunkMode)
 			if chunkMode == "query" {
@@ -566,9 +579,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 				if err != nil {
 					return fmt.Errorf("failed to initialize combiner crypto: %w", err)
 				}
-				log.Printf("MainInit: Combiner crypto initialized for decrypting agent payloads")
+				lgConfig.Info("combiner crypto initialized for decrypting agent payloads")
 			} else {
-				log.Printf("MainInit: Combiner crypto not configured - encrypted payloads will be rejected")
+				lgConfig.Info("combiner crypto not configured, encrypted payloads will be rejected")
 			}
 			// Register CHUNK handler with combiner's identity from config
 			if conf.Combiner.Identity == "" {
@@ -580,16 +593,16 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			}
 			combinerState.ProtectedNamespaces = conf.Combiner.ProtectedNamespaces
 			if len(combinerState.ProtectedNamespaces) > 0 {
-				log.Printf("MainInit: Combiner protected namespaces: %v", combinerState.ProtectedNamespaces)
+				lgConfig.Info("combiner protected namespaces", "namespaces", combinerState.ProtectedNamespaces)
 			}
 			conf.Internal.CombinerState = combinerState
-			log.Printf("MainInit: Combiner CHUNK handler registered for identity %s", conf.Combiner.Identity)
+			lgConfig.Info("combiner CHUNK handler registered", "identity", conf.Combiner.Identity)
 
 			// Initialize distribution cache for combiner outbound tracking
 			if conf.Internal.DistributionCache == nil {
 				conf.Internal.DistributionCache = NewDistributionCache()
-				StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute)
-				log.Printf("MainInit: Combiner distribution cache initialized")
+				StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute, conf.Internal.StopCh)
+				lgConfig.Info("combiner distribution cache initialized")
 			}
 
 			// Create TransportManager for combiner.
@@ -602,8 +615,8 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 				chunkMode = "edns0"
 			}
 			tm := NewTransportManager(&TransportManagerConfig{
-				LocalID:             conf.Combiner.Identity,
-				ControlZone:         conf.Combiner.Identity,
+				LocalID:             dns.Fqdn(conf.Combiner.Identity),
+				ControlZone:         dns.Fqdn(conf.Combiner.Identity),
 				DNSTimeout:          5 * time.Second,
 				APITimeout:          10 * time.Second,
 				ChunkMode:           chunkMode,
@@ -616,7 +629,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 					var peers []string
 					for _, a := range conf.Combiner.Agents {
 						if a != nil && a.Identity != "" {
-							peers = append(peers, a.Identity)
+							peers = append(peers, dns.Fqdn(a.Identity))
 						}
 					}
 					return peers
@@ -629,16 +642,17 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 				if agentConf.Identity == "" {
 					return fmt.Errorf("combiner.agents: entry missing identity")
 				}
-				agentPeer := transport.NewPeer(agentConf.Identity)
+				peerID := dns.Fqdn(agentConf.Identity)
+				agentPeer := transport.NewPeer(peerID)
 				agentPeer.SetState(transport.PeerStateKnown, "configured")
 				if agentConf.Address != "" {
 					host, portStr, parseErr := net.SplitHostPort(agentConf.Address)
 					if parseErr != nil {
-						return fmt.Errorf("combiner.agents: invalid address %q for %s: %w", agentConf.Address, agentConf.Identity, parseErr)
+						return fmt.Errorf("combiner.agents: invalid address %q for %s: %w", agentConf.Address, peerID, parseErr)
 					}
 					port, parseErr := strconv.Atoi(portStr)
 					if parseErr != nil {
-						return fmt.Errorf("combiner.agents: invalid port in %q for %s: %w", agentConf.Address, agentConf.Identity, parseErr)
+						return fmt.Errorf("combiner.agents: invalid port in %q for %s: %w", agentConf.Address, peerID, parseErr)
 					}
 					agentPeer.SetDiscoveryAddress(&transport.Address{
 						Host:      host,
@@ -653,12 +667,11 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 					agentPeer.PreferredTransport = "DNS"
 				}
 				if addErr := tm.PeerRegistry.Add(agentPeer); addErr != nil {
-					return fmt.Errorf("failed to register combiner agent peer %s: %w", agentConf.Identity, addErr)
+					return fmt.Errorf("failed to register combiner agent peer %s: %w", peerID, addErr)
 				}
-				log.Printf("MainInit: Combiner registered agent peer %s (address=%s, transport=%s)",
-					agentConf.Identity, agentConf.Address, agentPeer.PreferredTransport)
+				lgConfig.Info("combiner registered agent peer", "peer", peerID, "address", agentConf.Address, "transport", agentPeer.PreferredTransport)
 			}
-			log.Printf("MainInit: Combiner TransportManager initialized with %d agent peers", len(conf.Combiner.Agents))
+			lgConfig.Info("combiner TransportManager initialized", "agentPeers", len(conf.Combiner.Agents))
 
 			// Wire GetPeerAddress callback for chunk_mode=query fallback (uses TM PeerRegistry)
 			combinerState.SetGetPeerAddress(func(senderID string) (string, bool) {
@@ -689,26 +702,77 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 				return fmt.Errorf("InitializeCombinerRouter: %w", err)
 			}
 			combinerState.SetRouter(combinerRouter)
-			log.Printf("MainInit: Combiner router initialized with authorization middleware")
+			lgConfig.Info("combiner router initialized with authorization middleware")
 
 			Globals.CombinerConf = conf.Combiner
 			if conf.Combiner.AddSignature {
-				log.Printf("MainInit: Combiner signature TXT enabled")
+				lgConfig.Info("combiner signature TXT enabled")
 			}
 		}
 	default:
 		// ... existing auth/agent/combiner setup ...
 	}
 
-	if Globals.Debug {
-		log.Printf("*** MainInit: DONE ***")
-	}
+	lgConfig.Debug("MainInit complete")
 
 	return nil
 }
 
 // StartCombiner starts subsystems for tdns-combiner
 func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) error {
+	// Attach OnFirstLoad callbacks to zone stubs created by ParseZones.
+	// Stubs already exist in Zones with FirstZoneLoad=true.
+	kdb := conf.Internal.KeyDB
+	for _, zoneName := range conf.Internal.AllZones {
+		zd, exists := Zones.Get(zoneName)
+		if !exists {
+			lgConfig.Error("zone stub not found, skipping callback attachment", "zone", zoneName)
+			continue
+		}
+
+		if kdb != nil {
+			zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *ZoneData) {
+				if !zd.Options[OptMultiProvider] {
+					return
+				}
+
+				// Set PersistContributions callback
+				if zd.PersistContributions == nil && zd.KeyDB != nil {
+					zd.PersistContributions = zd.KeyDB.SaveContributions
+					lgConfig.Info("PersistContributions callback set", "zone", zd.ZoneName)
+				}
+
+				// Hydrate AgentContributions from persistent storage
+				if zd.AgentContributions == nil && zd.KeyDB != nil {
+					allContribs, err := zd.KeyDB.LoadAllContributions()
+					if err != nil {
+						lgConfig.Error("failed to load contributions snapshot", "zone", zd.ZoneName, "err", err)
+						return
+					}
+					if zoneContribs, ok := allContribs[zd.ZoneName]; ok {
+						zd.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
+						for senderID, ownerMap := range zoneContribs {
+							zd.AgentContributions[senderID] = ownerMap
+						}
+						zd.rebuildCombinerData()
+						lgConfig.Info("hydrated AgentContributions from snapshot",
+							"zone", zd.ZoneName, "agents", len(zoneContribs))
+					}
+				}
+
+				// Re-apply combined data now that contributions are loaded
+				if zd.Options[OptAllowCombine] {
+					success, err := zd.CombineWithLocalChanges()
+					if err != nil {
+						lgConfig.Error("CombineWithLocalChanges failed in OnFirstLoad", "zone", zd.ZoneName, "err", err)
+					} else if success {
+						lgConfig.Info("re-applied local changes after hydration", "zone", zd.ZoneName)
+					}
+				}
+			})
+		}
+	}
+
 	startEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
 	startEngineNoError(&Globals.App, "RefreshEngine", func() { RefreshEngine(ctx, conf) })
 	startEngine(&Globals.App, "Notifier", func() error { return Notifier(ctx, conf.Internal.NotifyQ) })
@@ -716,7 +780,7 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 	// Start incoming message router for beat/hello processing
 	if conf.Internal.TransportManager != nil {
 		conf.Internal.TransportManager.StartIncomingMessageRouter(ctx)
-		log.Printf("StartCombiner: Incoming message router started")
+		lgConfig.Info("combiner incoming message router started")
 	}
 
 	// Start combiner message handler for beat/hello/sync consumption from MsgQs
@@ -761,7 +825,7 @@ func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error 
 	if imrActive {
 		startEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx, true) })
 	} else {
-		log.Printf("TDNS %s (%s): NOT starting: imrengine (imrengine.active explicitly set to false)", Globals.App.Name, AppTypeToString[Globals.App.Type])
+		lgConfig.Info("NOT starting imrengine (explicitly set to false)", "app", Globals.App.Name, "mode", AppTypeToString[Globals.App.Type])
 	}
 
 	kdb := conf.Internal.KeyDB
@@ -779,7 +843,7 @@ func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error 
 	// (CHUNK NOTIFY handler was already registered in MainInit via RegisterSignerChunkHandler)
 	if conf.Internal.TransportManager != nil {
 		conf.Internal.TransportManager.StartIncomingMessageRouter(ctx)
-		log.Printf("StartAuth: Signer incoming message router started")
+		lgConfig.Info("signer incoming message router started")
 	}
 
 	// Start signer message handler for beat/hello consumption from MsgQs
@@ -789,6 +853,10 @@ func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error 
 	startEngine(&Globals.App, "NotifyHandler", func() error { return NotifyHandler(ctx, conf) })
 	startEngine(&Globals.App, "DnsEngine", func() error { return DnsEngine(ctx, conf) })
 	startEngineNoError(&Globals.App, "ResignerEngine", func() { ResignerEngine(ctx, conf.Internal.ResignQ) })
+
+	// Start key state worker for automatic DNSSEC key lifecycle transitions
+	startEngine(&Globals.App, "KeyStateWorker", func() error { return KeyStateWorker(ctx, conf) })
+
 	return nil
 }
 
@@ -801,7 +869,7 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	if imrActive {
 		startEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx, true) })
 	} else {
-		log.Printf("TDNS %s (%s): NOT starting: imrengine (imrengine.active explicitly set to false)", Globals.App.Name, AppTypeToString[Globals.App.Type])
+		lgConfig.Info("NOT starting imrengine (explicitly set to false)", "app", Globals.App.Name, "mode", AppTypeToString[Globals.App.Type])
 	}
 
 	kdb := conf.Internal.KeyDB
@@ -811,7 +879,7 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	// Register CHUNK NOTIFY handler and start incoming DNS message router (must be before NotifyHandler)
 	if conf.Internal.TransportManager != nil {
 		if err := conf.Internal.TransportManager.RegisterChunkNotifyHandler(); err != nil {
-			log.Printf("StartAgent: failed to register CHUNK NOTIFY handler: %v", err)
+			lgConfig.Error("failed to register CHUNK NOTIFY handler", "err", err)
 		} else {
 			conf.Internal.TransportManager.StartIncomingMessageRouter(ctx)
 		}
@@ -819,14 +887,12 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 
 	// Initialize combiner as a virtual peer so HsyncEngine can manage heartbeats
 	if err := conf.Internal.AgentRegistry.InitializeCombinerAsPeer(conf); err != nil {
-		log.Printf("StartAgent: WARNING: Failed to initialize combiner as peer: %v", err)
-		log.Printf("StartAgent: Continuing without combiner heartbeat monitoring")
+		lgConfig.Warn("failed to initialize combiner as peer, continuing without combiner heartbeat monitoring", "err", err)
 	}
 
 	// Initialize signer as a virtual peer so it shows in "agent peer list" and can be pinged
 	if err := conf.Internal.AgentRegistry.InitializeSignerAsPeer(conf); err != nil {
-		log.Printf("StartAgent: WARNING: Failed to initialize signer as peer: %v", err)
-		log.Printf("StartAgent: Continuing without signer peer registration")
+		lgConfig.Warn("failed to initialize signer as peer, continuing without signer peer registration", "err", err)
 	}
 
 	// Start the reliable message queue (must be after combiner peer initialization)
@@ -848,7 +914,7 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	}
 
 	startEngine(&Globals.App, "APIdispatcherNG", func() error {
-		log.Printf("TDNS %s (%s): starting agent-to-agent sync engine", Globals.App.Name, AppTypeToString[Globals.App.Type])
+		lgConfig.Info("starting agent-to-agent sync engine", "app", Globals.App.Name, "mode", AppTypeToString[Globals.App.Type])
 		return APIdispatcherNG(conf, syncrtr, conf.Agent.Api.Addresses.Listen, conf.Agent.Api.CertFile, conf.Agent.Api.KeyFile, conf.Internal.APIStopCh)
 	})
 
@@ -866,7 +932,7 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 }
 
 func Shutdowner(conf *Config, msg string) {
-	log.Printf("%s: shutting down: %s", Globals.App.Name, msg)
+	lgConfig.Info("shutting down", "app", Globals.App.Name, "reason", msg)
 	fmt.Printf("%s: shutting down: %s\n", Globals.App.Name, msg)
 	// Prefer closing APIStopCh once as a broadcast to MainLoop and all listeners
 	if conf.Internal.APIStopCh != nil {
@@ -877,7 +943,7 @@ func Shutdowner(conf *Config, msg string) {
 		})
 	}
 	engineWg.Wait() // Wait for all engines to finish (let's see if this works
-	log.Printf("%s: all engines finished", Globals.App.Name)
+	lgConfig.Info("all engines finished", "app", Globals.App.Name)
 	time.Sleep(200 * time.Millisecond)
 	os.Exit(0)
 }
@@ -929,7 +995,7 @@ func initPayloadCrypto(conf *Config) (*transport.PayloadCrypto, error) {
 
 	// Set local keys
 	pc.SetLocalKeys(privKey, pubKey)
-	log.Printf("initPayloadCrypto: Loaded local JOSE key from %s", privKeyPath)
+	lgConfig.Info("loaded local JOSE key", "path", privKeyPath)
 
 	// Load combiner's public key if configured
 	if conf.Agent.Combiner != nil && strings.TrimSpace(conf.Agent.Combiner.LongTermJosePubKey) != "" {
@@ -937,20 +1003,20 @@ func initPayloadCrypto(conf *Config) (*transport.PayloadCrypto, error) {
 		combinerPubKeyData, err := os.ReadFile(combinerPubKeyPath)
 		if err != nil {
 			if os.IsNotExist(err) {
-				log.Printf("initPayloadCrypto: combiner public key file not found %q: %v (combiner encryption disabled)", combinerPubKeyPath, err)
+				lgConfig.Warn("combiner public key file not found, encryption disabled", "path", combinerPubKeyPath, "err", err)
 			} else {
-				log.Printf("initPayloadCrypto: failed to read combiner public key %q: %v (combiner encryption disabled)", combinerPubKeyPath, err)
+				lgConfig.Warn("failed to read combiner public key, encryption disabled", "path", combinerPubKeyPath, "err", err)
 			}
 		} else {
 			combinerPubKeyData = StripKeyFileComments(combinerPubKeyData)
 			combinerPubKey, err := backend.ParsePublicKey(combinerPubKeyData)
 			if err != nil {
-				log.Printf("initPayloadCrypto: failed to parse combiner public key: %v (combiner encryption disabled)", err)
+				lgConfig.Warn("failed to parse combiner public key, encryption disabled", "err", err)
 			} else {
 				// Add combiner as peer for both encryption and verification
 				pc.AddPeerKey("combiner", combinerPubKey)
 				pc.AddPeerVerificationKey("combiner", combinerPubKey)
-				log.Printf("initPayloadCrypto: Loaded combiner public key from %s", combinerPubKeyPath)
+				lgConfig.Info("loaded combiner public key", "path", combinerPubKeyPath)
 			}
 		}
 	}
@@ -958,9 +1024,9 @@ func initPayloadCrypto(conf *Config) (*transport.PayloadCrypto, error) {
 	// DNS-39: Peer keys come from DNS discovery, not config files
 	// Old agent.peers map with embedded keys is no longer supported
 	if len(conf.Agent.AuthorizedPeers) > 0 {
-		log.Printf("initPayloadCrypto: Using agent.authorized_peers - peer keys will be discovered via DNS")
+		lgConfig.Info("using agent.authorized_peers, peer keys will be discovered via DNS")
 	} else {
-		log.Printf("initPayloadCrypto: No agent.authorized_peers configured - no peer crypto available")
+		lgConfig.Info("no agent.authorized_peers configured, no peer crypto available")
 	}
 
 	return pc, nil
@@ -986,7 +1052,7 @@ func initCombinerCrypto(conf *Config) (*transport.SecurePayloadWrapper, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse combiner private key: %w", err)
 	}
-	log.Printf("initCombinerCrypto: Loaded combiner private key from %s", privKeyPath)
+	lgConfig.Info("loaded combiner private key", "path", privKeyPath)
 
 	// Derive public key from private key
 	joseBackend, ok := backend.(*jose.Backend)
@@ -1038,7 +1104,7 @@ func initCombinerCrypto(conf *Config) (*transport.SecurePayloadWrapper, error) {
 		// Register agent with its identity as the peer key ID
 		pc.AddPeerKey(agent.Identity, agentVerifyKey)
 		pc.AddPeerVerificationKey(agent.Identity, agentVerifyKey)
-		log.Printf("initCombinerCrypto: Loaded public key for agent %s from %s", agent.Identity, agentPubKeyPath)
+		lgConfig.Info("loaded public key for agent", "agent", agent.Identity, "path", agentPubKeyPath)
 	}
 
 	return transport.NewSecurePayloadWrapper(pc), nil
@@ -1055,9 +1121,9 @@ func registerPeerAgents(conf *Config, tm *TransportManager) error {
 
 	// DNS-39: All peer addresses come from DNS discovery
 	if len(conf.Agent.AuthorizedPeers) > 0 {
-		log.Printf("registerPeerAgents: Using agent.authorized_peers - peer addresses will be discovered via DNS")
+		lgConfig.Info("using agent.authorized_peers, peer addresses will be discovered via DNS")
 	} else {
-		log.Printf("registerPeerAgents: No agent.authorized_peers configured - no peers available")
+		lgConfig.Info("no agent.authorized_peers configured, no peers available")
 	}
 
 	return nil

@@ -24,6 +24,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+var lgConfig = Logger("config")
+
 // Add near the top of the file with other vars
 var Templates = make(map[string]ZoneConf)
 
@@ -53,9 +55,7 @@ func processConfigFile(file string, baseDir string, depth int) (map[string]inter
 	}
 
 	// Read the file
-	if Globals.Debug {
-		log.Printf("processConfigFile: Reading %q", file)
-	}
+	lgConfig.Debug("reading config file", "file", file)
 	data, err := os.ReadFile(file)
 	if err != nil {
 		return nil, nil, fmt.Errorf("error reading file %s: %v", file, err)
@@ -88,7 +88,7 @@ func processConfigFile(file string, baseDir string, depth int) (map[string]inter
 			if end > len(lines) {
 				end = len(lines)
 			}
-			log.Printf("YAML error at line %d. Context (lines %d-%d):", lineNum, start+1, end)
+			lgConfig.Error("YAML parse error", "line", lineNum, "contextStart", start+1, "contextEnd", end)
 			for i := start; i < end; i++ {
 				line := lines[i]
 				// Reveal tabs and other problematic chars for the failing line
@@ -96,17 +96,17 @@ func processConfigFile(file string, baseDir string, depth int) (map[string]inter
 					reveal := strings.ReplaceAll(line, "\t", "\\t")
 					reveal = strings.ReplaceAll(reveal, "\r", "\\r")
 					if reveal != line {
-						log.Printf("  %d: %s  [raw: %s]", i+1, line, reveal)
+						lgConfig.Error("context line", "num", i+1, "line", line, "raw", reveal)
 					} else {
-						log.Printf("  %d: %s", i+1, line)
+						lgConfig.Error("context line", "num", i+1, "line", line)
 					}
 				} else {
-					log.Printf("  %d: %s", i+1, line)
+					lgConfig.Error("context line", "num", i+1, "line", line)
 				}
 			}
 		}
+		lgConfig.Debug("error unmarshalling YAML to struct", "file", file)
 		if Globals.Debug {
-			log.Printf("processConfigFile: error unmarshalling YAML from %q to struct", file)
 			fmt.Printf("Config that we failed to unmarshal:\n%s\n", string(data))
 		}
 		return nil, nil, fmt.Errorf("error parsing YAML: %v", err)
@@ -163,13 +163,11 @@ func processConfigFile(file string, baseDir string, depth int) (map[string]inter
 }
 
 func (conf *Config) ParseConfig(reload bool) error {
-	if Globals.Debug {
-		log.Printf("Enter ParseConfig")
-	}
+	lgConfig.Debug("entering ParseConfig")
 
 	cfgfile := conf.Internal.CfgFile
 	if cfgfile == "" {
-		log.Printf("No config file specified. Proceed at own risk.")
+		lgConfig.Warn("no config file specified, proceed at own risk")
 		return nil
 	}
 
@@ -191,10 +189,6 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return fmt.Errorf("error creating decoder: %v", err)
 	}
 
-	if Globals.Debug {
-		// log.Printf("Before decoding configuration")
-	}
-
 	// Set default for apiserver.usetls (default: true) before decoding
 	// Check if usetls was explicitly set in the config by checking the raw map
 	if apiserverMap, ok := configMap["apiserver"].(map[string]interface{}); ok {
@@ -214,8 +208,12 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	if len(md.Unused) > 0 {
-		log.Printf("Warning: the following config keys are unknown and were ignored (possible misspellings): %v", md.Unused)
+		lgConfig.Warn("unknown config keys ignored (possible misspellings)", "keys", md.Unused)
 	}
+
+	// Normalize all identity fields (domain names) from config to FQDN form.
+	// Config files may omit trailing dots; wire protocol always uses FQDN.
+	conf.normalizeConfigIdentities()
 
 	// Normalize service.transport.type (default: none)
 	if conf.Service.Transport.Type == "" {
@@ -226,18 +224,12 @@ func (conf *Config) ParseConfig(reload bool) error {
 		case "svcb", "tsync", "none":
 			conf.Service.Transport.Type = ts
 		default:
-			log.Printf("ParseConfig: unknown service.transport.type=%q; defaulting to 'none'", conf.Service.Transport.Type)
+			lgConfig.Warn("unknown service.transport.type, defaulting to none", "type", conf.Service.Transport.Type)
 			conf.Service.Transport.Type = "none"
 		}
 	}
 
-	if Globals.Debug {
-		tmplNames := make([]string, 0, len(conf.Templates))
-		for _, tmpl := range conf.Templates {
-			tmplNames = append(tmplNames, tmpl.Name)
-		}
-		log.Printf("Templates: %d templates defined: %s", len(conf.Templates), strings.Join(tmplNames, " "))
-	}
+	lgConfig.Debug("templates defined", "count", len(conf.Templates))
 
 	if err := conf.buildTemplateMap(); err != nil {
 		return err
@@ -248,11 +240,6 @@ func (conf *Config) ParseConfig(reload bool) error {
 	processedConfig, err := yaml.Marshal(configMap)
 	if err != nil {
 		return fmt.Errorf("error marshaling processed config: %v", err)
-	}
-
-	if Globals.Debug {
-		// log.Printf("*** ParseConfig: 2")
-		// log.Printf("Processed config YAML:\n%s", string(processedConfig))
 	}
 
 	viper.SetConfigType("yaml")
@@ -276,7 +263,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 				CSK:       GenKeyLifetime(dp.CSK.Lifetime, dp.CSK.SigValidity),
 			}
 			if tmp.Algorithm == 0 {
-				log.Printf("Error: DnssecPolicy %s has unknown algorithm: %s. Policy ignored.", name, dp.Algorithm)
+				lgConfig.Error("DNSSEC policy has unknown algorithm, ignored", "policy", name, "algorithm", dp.Algorithm)
 				continue
 			}
 			conf.Internal.DnssecPolicies[name] = tmp
@@ -357,7 +344,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 			case "do53", "dot", "doh", "doq":
 				transports = append(transports, t)
 			default:
-				log.Printf("Error: Unknown transport: %s", t)
+				lgConfig.Error("unknown transport", "transport", t)
 			}
 		}
 		// Add do53 if not already present
@@ -378,10 +365,6 @@ func (conf *Config) ParseConfig(reload bool) error {
 		}
 	}
 
-	if Globals.Debug {
-		// dump.P(conf.Agent)
-		// log.Printf("** ParseConfig: exit")
-	}
 	return nil
 }
 
@@ -408,9 +391,7 @@ func (conf *Config) InitializeKeyDB() error {
 
 		// Create DB file and parent directory if missing (auto-initialize on first run).
 		if _, err := os.Stat(dbFile); os.IsNotExist(err) {
-			if Globals.Verbose {
-				log.Printf("InitializeKeyDB: TDNS DB file %s does not exist, creating.", dbFile)
-			}
+			lgConfig.Info("TDNS DB file does not exist, creating", "file", dbFile)
 			dir := filepath.Dir(dbFile)
 			if err := os.MkdirAll(dir, 0755); err != nil {
 				return fmt.Errorf("ParseConfig: failed to create DB directory %s: %v", dir, err)
@@ -437,13 +418,11 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		ctx = context.Background()
 	}
 	if len(conf.Zones) == 0 {
-		log.Printf("ParseZones: no authoritative zones defined.")
+		lgConfig.Info("no authoritative zones defined")
 		return nil, nil
 	}
 
-	if Globals.Debug {
-		log.Printf("ParseZones: %d authoritative zones defined. Parsing...", len(conf.Zones))
-	}
+	lgConfig.Debug("parsing authoritative zones", "count", len(conf.Zones))
 	var all_zones []string
 
 	// Process each zone configuration
@@ -458,7 +437,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		}
 
 		if strings.Contains(zconf.Name, "..") || strings.Contains(zconf.Name, "//") {
-			log.Printf("ParseZones: Zone %s contains invalid characters. Ignoring.", zconf.Name)
+			lgConfig.Error("zone name contains invalid characters, ignoring", "zone", zconf.Name)
 			zd.SetError(ConfigError, "zone name contains invalid characters: %q", zconf.Name)
 			continue
 		}
@@ -493,7 +472,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		case "slice":
 			zonestore = SliceZone
 		default:
-			log.Printf("Zone %s: Unknown zone store type: %q. Using map store.", zname, zconf.Store)
+			lgConfig.Warn("unknown zone store type, using map store", "zone", zname, "store", zconf.Store)
 			zonestore = MapZone
 		}
 
@@ -506,7 +485,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		case "secondary":
 			zonetype = Secondary
 			if zconf.Primary == "" {
-				log.Printf("Error: Zone %q is a secondary zone but has no primary (upstream) configured. Zone ignored.", zname)
+				lgConfig.Error("secondary zone has no primary configured, ignored", "zone", zname)
 				zd.SetError(ConfigError, "secondary zone but has no primary (upstream) configured")
 				continue
 			}
@@ -515,30 +494,30 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			origPrimary := zconf.Primary
 			zconf.Primary = NormalizeAddress(zconf.Primary)
 			if origPrimary != zconf.Primary {
-				log.Printf("Warning: Zone %q: primary %q has no port specified, using default port :53", zname, origPrimary)
+				lgConfig.Warn("primary has no port specified, using default :53", "zone", zname, "primary", origPrimary)
 			}
 
 		default:
-			log.Printf("Error: Zone %s: Unknown zone type: \"%s\". Zone ignored.", zname, zconf.Type)
+			lgConfig.Error("unknown zone type, ignored", "zone", zname, "type", zconf.Type)
 			zd.SetError(ConfigError, "unknown zone type: %s", zconf.Type)
 			continue
 		}
 
-		log.Printf("ParseZones: zone %s: checking DNSSEC policy", zname)
+		lgConfig.Debug("checking DNSSEC policy", "zone", zname)
 		// dump.P(zconf)
 
 		if zconf.DnssecPolicy == "none" {
-			log.Printf("ParseZones: Zone %s: DNSSEC policy is \"none\". Zone will not be signed.", zname)
+			lgConfig.Info("DNSSEC policy is none, zone will not be signed", "zone", zname)
 			zconf.DnssecPolicy = ""
 		}
 		if zconf.DnssecPolicy != "" {
 			_, exist := conf.Internal.DnssecPolicies[zconf.DnssecPolicy]
 			if !exist {
-				log.Printf("Error: Zone %s refers to non-existing DNSSEC policy %s. Zone will not be signed.", zname, zconf.DnssecPolicy)
+				lgConfig.Error("zone refers to non-existing DNSSEC policy, will not be signed", "zone", zname, "policy", zconf.DnssecPolicy)
 				zconf.DnssecPolicy = ""
 				zd.SetError(DnssecError, "DNSSEC policy %q does not exist", zconf.DnssecPolicy)
 			}
-			log.Printf("ParseZones: zone %s: DNSSEC policy %q accepted", zname, zconf.DnssecPolicy)
+			lgConfig.Info("DNSSEC policy accepted", "zone", zname, "policy", zconf.DnssecPolicy)
 		}
 
 		options := parseZoneOptions(conf, zname, zconf, &zd)
@@ -548,12 +527,11 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 				outopts = append(outopts, ZoneOptionToString[o])
 			}
 		}
-		log.Printf("ParseZones: zone %s outgoing options: %+v", zname, outopts)
+		lgConfig.Debug("zone outgoing options", "zone", zname, "options", outopts)
 
-		log.Printf("ParseZones: zone %s: type: %s, store: %s, primary: %s, notify: %v, zonefile: %s",
-			zname, zconf.Type, zconf.Store, zconf.Primary, zconf.Notify, zconf.Zonefile)
+		lgConfig.Info("zone configuration", "zone", zname, "type", zconf.Type, "store", zconf.Store, "primary", zconf.Primary, "notify", zconf.Notify, "zonefile", zconf.Zonefile)
 
-		log.Printf("ParseZones: zone %s incoming update policy: %+v", zname, zconf.UpdatePolicy)
+		lgConfig.Debug("zone incoming update policy", "zone", zname, "policy", fmt.Sprintf("%+v", zconf.UpdatePolicy))
 
 		switch zconf.UpdatePolicy.Child.Type {
 		case "selfsub", "self":
@@ -562,7 +540,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			// these are also ok, but imply that no updates are allowed
 			options[OptAllowChildUpdates] = false
 		default:
-			log.Printf("ParseZones: Error: zone %s has an unknown child update policy type: \"%s\". Zone ignored.", zname, zconf.UpdatePolicy.Child.Type)
+			lgConfig.Error("zone has unknown child update policy type, ignored", "zone", zname, "type", zconf.UpdatePolicy.Child.Type)
 			zd.SetError(ConfigError, "unknown child update policy type: %s", zconf.UpdatePolicy.Child.Type)
 			continue
 		}
@@ -576,7 +554,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			// these are also ok, but imply that no updates are allowed
 			options[OptAllowUpdates] = false
 		default:
-			log.Printf("ParseZones: Error: zone %s has an unknown update policy type: \"%s\". Zone ignored.", zname, zconf.UpdatePolicy.Zone.Type)
+			lgConfig.Error("zone has unknown update policy type, ignored", "zone", zname, "type", zconf.UpdatePolicy.Zone.Type)
 			zd.SetError(ConfigError, "unknown update policy type: %s", zconf.UpdatePolicy.Zone.Type)
 			continue
 		}
@@ -633,19 +611,60 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		var zones = make(map[string]interface{}, 1)
 		zones["zone:"+zname] = zconf
 		if errmsg, err := ValidateBySection(conf, zones, "foobar"); err != nil {
-			log.Printf("Error validating zone %s:\n%s", zname, errmsg)
+			lgConfig.Error("zone validation failed", "zone", zname, "detail", errmsg)
 			zd.SetError(ConfigError, "config validation: %v", err)
 			continue
 		}
 
 		all_zones = append(all_zones, zname)
 
+		// Get existing zd or create a minimal stub.
+		// On SIGHUP reload, zones already exist — reuse them.
+		zdp, exists := Zones.Get(zname)
+		if !exists {
+			zdp = &ZoneData{
+				ZoneName:      zname,
+				Logger:        log.Default(),
+				FirstZoneLoad: true,
+			}
+			Zones.Set(zname, zdp)
+		}
+
+		if Globals.App.Type != AppTypeAgent && zdp.FirstZoneLoad {
+			lgConfig.Info("considering OnFirstLoad callbacks", "zone", zname,
+				"online-signing", options[OptOnlineSigning],
+				"inline-signing", options[OptInlineSigning],
+				"multi-provider", options[OptMultiProvider],
+				"apptype", AppTypeToString[Globals.App.Type])
+
+			// Signing callback: zones with explicit signing options in config
+			if options[OptOnlineSigning] || options[OptInlineSigning] {
+				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
+					if err := zd.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
+						lgConfig.Error("SetupZoneSigning failed in OnFirstLoad", "zone", zd.ZoneName, "error", err)
+					}
+				})
+			}
+
+			// Multi-provider post-load callback: for auth servers serving MP zones.
+			// By this point, FetchFromUpstream has examined the HSYNC RRset and
+			// may have set OptInlineSigning dynamically. Only sign if it did.
+			// Future: other MP-specific post-load setup goes here.
+			if options[OptMultiProvider] && Globals.App.Type == AppTypeAuth {
+				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
+					if zd.Options[OptInlineSigning] {
+						if err := zd.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
+							lgConfig.Error("SetupZoneSigning failed in MP OnFirstLoad", "zone", zd.ZoneName, "error", err)
+						}
+					}
+				})
+			}
+		}
+
 		switch Globals.App.Type {
 		case AppTypeAuth, AppTypeAgent, AppTypeCombiner:
-			// If validation passed, enqueue refresh. Avoid blocking ParseZones on a bounded channel:
-			// try a non-blocking send; if it would block, send from a goroutine.
 			if conf.Internal.RefreshZoneCh == nil {
-				log.Printf("ParseZones: Error: refresh channel is not configured. Zones will not be refreshed. Terminating.")
+				lgConfig.Error("refresh channel is not configured, zones will not be refreshed, terminating")
 				return nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
 			}
 			zr := ZoneRefresher{
@@ -660,27 +679,13 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 				UpdatePolicy: policy,
 				DnssecPolicy: zconf.DnssecPolicy,
 			}
-			select {
-			case conf.Internal.RefreshZoneCh <- zr:
-				// enqueued immediately
-			default:
-				go func(z ZoneRefresher) {
-					select {
-					case conf.Internal.RefreshZoneCh <- z:
-					case <-ctx.Done():
-					}
-				}(zr)
-			}
+			conf.Internal.RefreshZoneCh <- zr
 		}
 	}
 
-	// ValidateZones(conf, ZonesCfgFile) // will terminate on error
-	log.Printf("ParseZones: %d zones parsed and are now refreshing: %v (queued for refresh: %d zones)",
-		len(all_zones), all_zones, len(conf.Internal.RefreshZoneCh))
+	lgConfig.Info("zones parsed and refreshing", "count", len(all_zones), "zones", all_zones, "queued", len(conf.Internal.RefreshZoneCh))
 
-	if Globals.Debug {
-		log.Print("ParseZones: exit")
-	}
+	lgConfig.Debug("ParseZones complete")
 	return all_zones, nil
 }
 
@@ -759,13 +764,7 @@ func (conf *Config) buildTemplateMap() error {
 		_, _ = expandTemplateChain(t.Name, []string{}, make(map[string]bool), done, Globals.App.Type)
 	}
 
-	if Globals.Debug {
-		tmplNames := make([]string, 0, len(Templates))
-		for _, tmpl := range Templates {
-			tmplNames = append(tmplNames, tmpl.Name)
-		}
-		log.Printf("buildTemplateMap: %d templates defined: %s", len(Templates), strings.Join(tmplNames, " "))
-	}
+	lgConfig.Debug("buildTemplateMap complete", "count", len(Templates))
 	return nil
 }
 
@@ -827,7 +826,7 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 			}
 		}
 		cycle = append(cycle, name)
-		log.Printf("Template cycle detected: %s", strings.Join(cycle, " -> "))
+		lgConfig.Error("template cycle detected", "cycle", strings.Join(cycle, " -> "))
 		for _, n := range cycle {
 			delete(Templates, n)
 		}
@@ -840,7 +839,7 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 	if t.Template != "" && t.Template != name {
 		parent, exists := Templates[t.Template]
 		if !exists {
-			log.Printf("Template %q refers to non-existing template %q. Ignored.", t.Name, t.Template)
+			lgConfig.Warn("template refers to non-existing template, ignored", "template", t.Name, "parent", t.Template)
 			delete(Templates, t.Name)
 			onStack[name] = false
 			return ZoneConf{}, fmt.Errorf("missing parent template %q for %q", t.Template, t.Name)
@@ -854,7 +853,7 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 		// Apply parent's fields into child
 		expandedChild, err := ExpandTemplate(t, &expandedParent, appMode)
 		if err != nil {
-			log.Printf("Error expanding template %q from parent %q: %v", t.Name, t.Template, err)
+			lgConfig.Error("error expanding template from parent", "template", t.Name, "parent", t.Template, "err", err)
 			delete(Templates, t.Name)
 			onStack[name] = false
 			return ZoneConf{}, err
@@ -862,7 +861,7 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 		t = expandedChild
 	} else if t.Template == name {
 		// Self-cycle
-		log.Printf("Template %q: self-referential cycle. Removing.", name)
+		lgConfig.Error("self-referential template cycle, removing", "template", name)
 		delete(Templates, name)
 		onStack[name] = false
 		return ZoneConf{}, fmt.Errorf("self-referential template %q", name)
@@ -902,13 +901,13 @@ func GenKeyLifetime(lifetime, sigvalidity string) KeyLifetime {
 	default:
 		lifetime_secs, err = time.ParseDuration(lifetime)
 		if err != nil {
-			log.Fatalf("Error from ParseDuration: %v", err)
+			Fatal("error from ParseDuration", "err", err)
 		}
 	}
 
 	sigvalidity_secs, err = time.ParseDuration(sigvalidity)
 	if err != nil {
-		log.Fatalf("Error from ParseDuration: %v", err)
+		Fatal("error from ParseDuration", "err", err)
 	}
 	return KeyLifetime{
 		Lifetime:    uint32(lifetime_secs.Seconds()),
@@ -993,14 +992,14 @@ func (conf *Config) migrateCatalogPolicyToDynamicZones() {
 	// migrate the value
 	if conf.Catalog.Policy.Zones.Add != "" && conf.DynamicZones.CatalogMembers.Add == "" {
 		conf.DynamicZones.CatalogMembers.Add = conf.Catalog.Policy.Zones.Add
-		log.Printf("WARNING: catalog.policy.zones.add is deprecated. Use dynamiczones.catalog_members.add instead. Migrated value: %s", conf.Catalog.Policy.Zones.Add)
+		lgConfig.Warn("catalog.policy.zones.add is deprecated, use dynamiczones.catalog_members.add instead", "migratedValue", conf.Catalog.Policy.Zones.Add)
 	}
 
 	// If catalog.policy.zones.remove is set but dynamiczones.catalog_members.remove is not,
 	// migrate the value
 	if conf.Catalog.Policy.Zones.Remove != "" && conf.DynamicZones.CatalogMembers.Remove == "" {
 		conf.DynamicZones.CatalogMembers.Remove = conf.Catalog.Policy.Zones.Remove
-		log.Printf("WARNING: catalog.policy.zones.remove is deprecated. Use dynamiczones.catalog_members.remove instead. Migrated value: %s", conf.Catalog.Policy.Zones.Remove)
+		lgConfig.Warn("catalog.policy.zones.remove is deprecated, use dynamiczones.catalog_members.remove instead", "migratedValue", conf.Catalog.Policy.Zones.Remove)
 	}
 }
 
@@ -1010,7 +1009,7 @@ func (conf *Config) migrateMetaGroupsToConfigGroups() {
 	// If meta_groups is set but config_groups is empty, migrate
 	if len(conf.Catalog.MetaGroups) > 0 && len(conf.Catalog.ConfigGroups) == 0 {
 		conf.Catalog.ConfigGroups = conf.Catalog.MetaGroups
-		log.Printf("WARNING: catalog.meta_groups is deprecated. Use catalog.config_groups instead. Migrated %d groups.", len(conf.Catalog.MetaGroups))
+		lgConfig.Warn("catalog.meta_groups is deprecated, use catalog.config_groups instead", "migratedGroups", len(conf.Catalog.MetaGroups))
 		// Clear meta_groups after migration
 		conf.Catalog.MetaGroups = nil
 	}
@@ -1025,13 +1024,13 @@ func (conf *Config) validateDynamicZonesConfig(includedFiles []string) {
 
 	// Check if configfile path is absolute
 	if !filepath.IsAbs(conf.DynamicZones.ConfigFile) {
-		log.Printf("WARNING: dynamiczones.configfile must be an absolute path, got: %s", conf.DynamicZones.ConfigFile)
+		lgConfig.Warn("dynamiczones.configfile must be an absolute path", "path", conf.DynamicZones.ConfigFile)
 		return
 	}
 
 	// Check if zone directory path is absolute
 	if conf.DynamicZones.ZoneDirectory != "" && !filepath.IsAbs(conf.DynamicZones.ZoneDirectory) {
-		log.Printf("WARNING: dynamiczones.zonedirectory must be an absolute path, got: %s", conf.DynamicZones.ZoneDirectory)
+		lgConfig.Warn("dynamiczones.zonedirectory must be an absolute path", "path", conf.DynamicZones.ZoneDirectory)
 	}
 
 	// Check if the configfile is in the include list
@@ -1116,4 +1115,59 @@ func validateGroupPrefix(prefix string, prefixType string) error {
 	}
 
 	return nil
+}
+
+// normalizeConfigIdentities applies dns.Fqdn() to all identity fields (domain names)
+// in the parsed config. This ensures trailing dots are present regardless of whether
+// the YAML config included them.
+func (conf *Config) normalizeConfigIdentities() {
+	// Agent identity and peers
+	if conf.Agent != nil {
+		conf.Agent.Identity = dns.Fqdn(conf.Agent.Identity)
+		if conf.Agent.Dns.ControlZone != "" {
+			conf.Agent.Dns.ControlZone = dns.Fqdn(conf.Agent.Dns.ControlZone)
+		}
+		if conf.Agent.Combiner != nil && conf.Agent.Combiner.Identity != "" {
+			conf.Agent.Combiner.Identity = dns.Fqdn(conf.Agent.Combiner.Identity)
+		}
+		if conf.Agent.Signer != nil && conf.Agent.Signer.Identity != "" {
+			conf.Agent.Signer.Identity = dns.Fqdn(conf.Agent.Signer.Identity)
+		}
+		for i, p := range conf.Agent.AuthorizedPeers {
+			conf.Agent.AuthorizedPeers[i] = dns.Fqdn(p)
+		}
+		for _, peer := range conf.Agent.Peers {
+			if peer != nil && peer.Identity != "" {
+				peer.Identity = dns.Fqdn(peer.Identity)
+			}
+		}
+	}
+
+	// Combiner identity and agent peers
+	if conf.Combiner != nil {
+		conf.Combiner.Identity = dns.Fqdn(conf.Combiner.Identity)
+		for _, agent := range conf.Combiner.Agents {
+			if agent != nil && agent.Identity != "" {
+				agent.Identity = dns.Fqdn(agent.Identity)
+			}
+		}
+		for i, ns := range conf.Combiner.ProtectedNamespaces {
+			conf.Combiner.ProtectedNamespaces[i] = dns.Fqdn(ns)
+		}
+	}
+
+	// Signer (multi-provider) identity and agent peers
+	if conf.MultiProvider != nil {
+		if conf.MultiProvider.Identity != "" {
+			conf.MultiProvider.Identity = dns.Fqdn(conf.MultiProvider.Identity)
+		}
+		if conf.MultiProvider.HsyncIdentity != "" {
+			conf.MultiProvider.HsyncIdentity = dns.Fqdn(conf.MultiProvider.HsyncIdentity)
+		}
+		for _, agent := range conf.MultiProvider.Agents {
+			if agent != nil && agent.Identity != "" {
+				agent.Identity = dns.Fqdn(agent.Identity)
+			}
+		}
+	}
 }

@@ -28,6 +28,8 @@ const (
 	OptCatalogZone
 	OptCatalogMemberAutoCreate
 	OptCatalogMemberAutoDelete
+	OptMPManualApproval
+	OptMultiSigner // Dynamically set by signer when HSYNC shows multiple signers
 )
 
 var ZoneOptionToString = map[ZoneOption]string{
@@ -51,6 +53,8 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptCatalogZone:             "catalog-zone",
 	OptCatalogMemberAutoCreate: "catalog-member-auto-create",
 	OptCatalogMemberAutoDelete: "catalog-member-auto-delete",
+	OptMPManualApproval:        "mp-manual-approval",
+	OptMultiSigner:             "multi-signer",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -73,6 +77,8 @@ var StringToZoneOption = map[string]ZoneOption{
 	"catalog-zone":               OptCatalogZone,
 	"catalog-member-auto-create": OptCatalogMemberAutoCreate,
 	"catalog-member-auto-delete": OptCatalogMemberAutoDelete,
+	"mp-manual-approval":         OptMPManualApproval,
+	"multi-signer":               OptMultiSigner,
 }
 
 type ImrOption uint8

@@ -7,7 +7,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"log"
 	"slices"
 	"sync"
 	"time"
@@ -29,16 +28,50 @@ type Config struct {
 	DynamicZones   DynamicZonesConf           `yaml:"dynamiczones" mapstructure:"dynamiczones"`
 	Zones          []ZoneConf                 `yaml:"zones"`
 	Templates      []ZoneConf                 `yaml:"templates"`
+	Kasp           KaspConf                   `yaml:"kasp" mapstructure:"kasp"`
 	Keys           KeyConf
 	Db             DbConf
 	Registrars     map[string][]string
-	Log            struct {
-		File string `validate:"required"`
-	}
-	Agent *LocalAgentConf `yaml:"agent"`
+	Log            LogConf
+	Agent          *LocalAgentConf `yaml:"agent"`
 	// Combiner (combiner only): symmetric to Agent block; our config and peer (agent)
 	Combiner *LocalCombinerConf `yaml:"combiner"`
 	Internal InternalConf
+}
+
+// KaspConf holds Key and Signing Policy parameters for the signer.
+// Controls the KeyStateWorker's automatic key state transitions and standby key maintenance.
+// YAML key: "kasp:"
+//
+// Example:
+//
+//	kasp:
+//	    propagation_delay: 1h
+//	    standby_zsk_count: 1
+//	    standby_ksk_count: 0
+//	    check_interval: 1m
+type KaspConf struct {
+	// PropagationDelay is how long to wait for DNSKEY RRsets to propagate
+	// through all caches before allowing state transitions.
+	// Used for published→standby and retired→removed transitions.
+	// Accepts Go duration strings: "1h", "3600s", "90m".
+	// Default: "1h".
+	PropagationDelay string `yaml:"propagation_delay" mapstructure:"propagation_delay"`
+
+	// StandbyZskCount is the number of standby ZSKs to maintain per zone.
+	// When the count drops below this, the KeyStateWorker generates new ZSKs.
+	// Default: 1. A value of 0 (or omitted) means use the default.
+	StandbyZskCount int `yaml:"standby_zsk_count" mapstructure:"standby_zsk_count"`
+
+	// StandbyKskCount is the number of standby KSKs to maintain per zone.
+	// When the count drops below this, the KeyStateWorker generates new KSKs.
+	// Default: 0 (no standby KSKs). Set to 1+ to enable standby KSK maintenance.
+	StandbyKskCount int `yaml:"standby_ksk_count" mapstructure:"standby_ksk_count"`
+
+	// CheckInterval is how often the KeyStateWorker runs its checks.
+	// Accepts Go duration strings: "1m", "60s", "5m".
+	// Default: "1m".
+	CheckInterval string `yaml:"check_interval" mapstructure:"check_interval"`
 }
 
 // LocalCombinerConf holds combiner-specific config (symmetric to LocalAgentConf).
@@ -109,6 +142,12 @@ type AppDetails struct {
 	Date             string
 	ServerBootTime   time.Time
 	ServerConfigTime time.Time
+}
+
+type LogConf struct {
+	File       string            `yaml:"file" validate:"required"`
+	Level      string            `yaml:"level"`      // "debug"|"info"|"warn"|"error"; default "info"
+	Subsystems map[string]string `yaml:"subsystems"` // per-subsystem level overrides
 }
 
 type ServiceConf struct {
@@ -449,6 +488,8 @@ type MsgQs struct {
 	SynchedDataCmd    chan *SynchedDataCmd       // local commands TO the combiner
 	Confirmation      chan *ConfirmationDetail   // combiner confirmation feedback
 	KeystateInventory chan *KeystateInventoryMsg // incoming KEYSTATE inventory from signer
+	KeystateSignal    chan *KeystateSignalMsg    // incoming KEYSTATE signals (propagated/rejected) from agent to signer
+	EditsResponse     chan *EditsResponseMsg     // incoming EDITS response from combiner
 
 	// OnRemoteConfirmationReady is called when this agent (acting as a remote agent)
 	// receives a combiner confirmation for a sync that originated from another agent.
@@ -464,10 +505,29 @@ type KeystateInventoryMsg struct {
 	Inventory []KeyInventoryItem
 }
 
+// KeystateSignalMsg carries a per-key KEYSTATE signal from agent to signer.
+// Delivered via MsgQs.KeystateSignal channel.
+// Signals: "propagated" (all remote providers confirmed), "rejected" (some provider rejected).
+type KeystateSignalMsg struct {
+	SenderID string
+	Zone     string
+	KeyTag   uint16
+	Signal   string // "propagated", "rejected", "removed"
+	Message  string
+}
+
+// EditsResponseMsg carries an agent's contributions from combiner back to the agent.
+// Delivered via MsgQs.EditsResponse channel. Modeled on KeystateInventoryMsg.
+type EditsResponseMsg struct {
+	SenderID string
+	Zone     string
+	Records  map[string][]string // owner → []RR strings
+}
+
 func (conf *Config) ReloadConfig() (string, error) {
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
-		log.Printf("Error parsing config: %v", err)
+		lgConfig.Error("error parsing config", "err", err)
 	}
 	Globals.App.ServerConfigTime = time.Now()
 	return "Config reloaded.", err
@@ -480,34 +540,36 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 
 	// Re-read config file to pick up template changes
 	if err := conf.reloadTemplatesFromFile(); err != nil {
-		log.Printf("ReloadZoneConfig: Warning: failed to reload templates: %v", err)
+		lgConfig.Warn("ReloadZoneConfig: failed to reload templates", "err", err)
 		// Continue with existing templates rather than failing entirely
 	}
 
 	prezones := Zones.Keys()
-	log.Printf("ReloadZones: zones prior to reloading: %v", prezones)
+	lgConfig.Info("ReloadZones: zones prior to reloading", "zones", prezones)
 	// XXX: This is wrong. We must get the zones config file from outside (to enamble things like MUSIC to use a different config file)
 	zonelist, err := conf.ParseZones(ctx, true) // true: reload, not initial parsing
 	if err != nil {
-		log.Printf("ReloadZoneConfig: Error parsing zones: %v", err)
+		lgConfig.Error("ReloadZoneConfig: error parsing zones", "err", err)
+		return "", fmt.Errorf("ReloadZoneConfig: %w", err)
 	}
 
 	for _, zname := range prezones {
 		if !slices.Contains(zonelist, zname) {
 			zd, exists := Zones.Get(zname)
 			if !exists {
-				log.Printf("ReloadZoneConfig: Zone %s not in config and also not in zone list.", zname)
-			}
-			if zd.Options[OptAutomaticZone] {
-				log.Printf("ReloadZoneConfig: Zone %s is an automatic zone. Not removing from zone list.", zname)
+				lgConfig.Warn("ReloadZoneConfig: zone not in config and also not in zone list", "zone", zname)
 				continue
 			}
-			log.Printf("ReloadZoneConfig: Zone %s no longer in config. Removing from zone list.", zname)
+			if zd.Options[OptAutomaticZone] {
+				lgConfig.Info("ReloadZoneConfig: zone is automatic, not removing from zone list", "zone", zname)
+				continue
+			}
+			lgConfig.Info("ReloadZoneConfig: zone no longer in config, removing from zone list", "zone", zname)
 			Zones.Remove(zname)
 		}
 	}
 
-	log.Printf("ReloadZones: zones after reloading: %v", zonelist)
+	lgConfig.Info("ReloadZones: zones after reloading", "zones", zonelist)
 	Globals.App.ServerConfigTime = time.Now()
 	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v", prezones, zonelist), err
 }

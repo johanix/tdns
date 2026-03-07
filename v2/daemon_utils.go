@@ -9,7 +9,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -110,18 +109,18 @@ func (api *ApiClient) StartDaemon(maxwait int, slurp bool, command string, daemo
 			if slurp {
 				stderr, err = cmd.StderrPipe()
 				if err != nil {
-					log.Fatalf("StartDaemon: Error from cmd.StderrPipe(): %v", err)
+					Fatal("error from cmd.StderrPipe()", "err", err)
 				}
 
 				stdout, err = cmd.StdoutPipe()
 				if err != nil {
-					log.Fatalf("StartDaemon: Error from cmd.StdoutPipe(): %v", err)
+					Fatal("error from cmd.StdoutPipe()", "err", err)
 				}
 			}
 
 			err2 := cmd.Start()
 			if err2 != nil {
-				log.Fatalf("StartDaemon: Error from cmd.Start(): %v", err2)
+				Fatal("error from cmd.Start()", "err", err2)
 			}
 
 			to_ticker := time.NewTicker(time.Duration(maxwait) * time.Second)
@@ -221,8 +220,8 @@ func (api *ApiClient) UpdateDaemon(data CommandPost, dieOnError bool) (int, Comm
 
 	err = json.Unmarshal(buf, &cr)
 	if err != nil {
-		log.Printf("Error parsing JSON for CommandResponse: %s", string(buf))
-		log.Fatalf("Error from unmarshal CommandResponse: %v\n", err)
+		lgConfig.Error("error parsing JSON for CommandResponse", "raw", string(buf))
+		Fatal("error from unmarshal CommandResponse", "err", err)
 	}
 	return status, cr, err
 }
@@ -241,8 +240,8 @@ func (api *ApiClient) SendPing(pingcount int, dieOnError bool) (PingResponse, er
 	var pr PingResponse
 	err = json.Unmarshal(buf, &pr)
 	if err != nil {
-		log.Printf("Error parsing JSON for PingResponse: %s", string(buf))
-		log.Fatalf("Error from json.Unmarshal PingResponse: %v\n", err)
+		lgConfig.Error("error parsing JSON for PingResponse", "raw", string(buf))
+		Fatal("error from json.Unmarshal PingResponse", "err", err)
 	}
 	return pr, nil
 }
@@ -313,8 +312,8 @@ func (api *ApiClient) ShowApi() {
 
 	err = json.Unmarshal(buf, &cr)
 	if err != nil {
-		log.Printf("Error parsing JSON for CommandResponse: %s", string(buf))
-		log.Fatalf("Error from unmarshal CommandResponse: %v\n", err)
+		lgConfig.Error("error parsing JSON for CommandResponse", "raw", string(buf))
+		Fatal("error from unmarshal CommandResponse", "err", err)
 	}
 
 	for _, ep := range cr.ApiEndpoints {

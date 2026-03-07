@@ -7,7 +7,6 @@ package tdns
 import (
 	"errors"
 	"fmt"
-	"log"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -41,9 +40,9 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 	}
 
 	if oldapex == nil {
-		log.Printf("HsyncChanged: Zone %s old apexdata was nil. This is the initial zone load.", zd.ZoneName)
+		lgAgent.Info("initial zone load, old apex was nil", "zone", zd.ZoneName)
 		if newhsync == nil {
-			log.Printf("HsyncChanged: Zone %s new apex has no HSYNC RRset. No action.", zd.ZoneName)
+			lgAgent.Debug("new apex has no HSYNC RRset, no action", "zone", zd.ZoneName)
 			return false, &hss, nil
 		}
 		hss.HsyncAdds = newhsync.RRs
@@ -73,10 +72,11 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 
 // DnskeyStatus holds the result of DNSKEY change detection (local keys only).
 type DnskeyStatus struct {
-	Time         time.Time
-	ZoneName     string
-	LocalAdds    []dns.RR // Local DNSKEYs added since last check
-	LocalRemoves []dns.RR // Local DNSKEYs removed since last check
+	Time             time.Time
+	ZoneName         string
+	LocalAdds        []dns.RR // Local DNSKEYs added since last check
+	LocalRemoves     []dns.RR // Local DNSKEYs removed since last check
+	CurrentLocalKeys []dns.RR // Complete current set of local DNSKEYs (for replace operations)
 }
 
 // LocalDnskeysChanged compares old and new DNSKEY RRsets, filtering out
@@ -151,6 +151,83 @@ func (zd *ZoneData) LocalDnskeysChanged(newzd *ZoneData) (bool, *DnskeyStatus, e
 	return differ, ds, nil
 }
 
+// LocalDnskeysFromKeystate derives local DNSKEY adds/removes from the KEYSTATE
+// inventory rather than from the zone transfer's DNSKEY RRset. The KEYSTATE
+// inventory (from the signer) is the authoritative source for which keys are
+// local vs foreign. Each inventory entry's KeyRR field contains the full DNSKEY
+// RR string, so we can build dns.RR objects directly.
+//
+// Returns (changed, status, error). If KEYSTATE is unavailable (LastKeyInventory == nil),
+// returns (false, nil, nil) — caller should suppress SYNC-DNSKEY-RRSET.
+func (zd *ZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) {
+	if zd.LastKeyInventory == nil {
+		zd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: no KEYSTATE inventory available", zd.ZoneName)
+		return false, nil, nil
+	}
+
+	ds := &DnskeyStatus{
+		Time:     time.Now(),
+		ZoneName: zd.ZoneName,
+	}
+
+	// Extract local keys from the KEYSTATE inventory.
+	// Skip states that should NOT be in the DNSKEY RRset:
+	// - foreign: belongs to another signer
+	// - created: not yet staged for distribution
+	// - mpremove: being removed, awaiting agent confirmation
+	// - removed: already removed
+	var newLocalKeys []dns.RR
+	for _, entry := range zd.LastKeyInventory.Inventory {
+		switch entry.State {
+		case DnskeyStateForeign, DnskeyStateCreated, DnskeyStateMpremove, DnskeyStateRemoved:
+			continue
+		}
+		if entry.KeyRR == "" {
+			zd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: skipping key %d with empty KeyRR",
+				zd.ZoneName, entry.KeyTag)
+			continue
+		}
+		rr, err := dns.NewRR(entry.KeyRR)
+		if err != nil {
+			zd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: failed to parse KeyRR for key %d: %v",
+				zd.ZoneName, entry.KeyTag, err)
+			continue
+		}
+		newLocalKeys = append(newLocalKeys, rr)
+	}
+
+	oldLocalKeys := zd.LocalDNSKEYs
+
+	// Handle initial case (no previous local keys)
+	if len(oldLocalKeys) == 0 && len(newLocalKeys) == 0 {
+		return false, ds, nil
+	}
+	if len(oldLocalKeys) == 0 {
+		// First KEYSTATE — all local keys are adds
+		ds.LocalAdds = newLocalKeys
+		ds.CurrentLocalKeys = newLocalKeys
+		zd.LocalDNSKEYs = newLocalKeys
+		if len(ds.LocalAdds) > 0 {
+			zd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: initial KEYSTATE, %d local DNSKEYs",
+				zd.ZoneName, len(ds.LocalAdds))
+			return true, ds, nil
+		}
+		return false, ds, nil
+	}
+
+	differ, adds, removes := core.RRsetDiffer(zd.ZoneName, newLocalKeys, oldLocalKeys,
+		dns.TypeDNSKEY, zd.Logger, Globals.Verbose, Globals.Debug)
+
+	ds.LocalAdds = adds
+	ds.LocalRemoves = removes
+	ds.CurrentLocalKeys = newLocalKeys
+	zd.LocalDNSKEYs = newLocalKeys
+
+	zd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: differ=%v, adds=%d, removes=%d",
+		zd.ZoneName, differ, len(adds), len(removes))
+	return differ, ds, nil
+}
+
 // filterLocalDNSKEYs returns only the DNSKEY RRs whose key tag is NOT in remoteKeyTags.
 func filterLocalDNSKEYs(rrset *core.RRset, remoteKeyTags map[uint16]bool) []dns.RR {
 	if rrset == nil || len(rrset.RRs) == 0 {
@@ -171,27 +248,32 @@ func filterLocalDNSKEYs(rrset *core.RRset, remoteKeyTags map[uint16]bool) []dns.
 // for the inventory response. Uses the inventory to populate zd.RemoteDNSKEYs
 // by matching foreign key tags against the actual DNSKEY RRset in the zone.
 //
-// On timeout or error, falls back to empty RemoteDNSKEYs (conservative — treats
-// all keys as local, which is safe: worst case we send a DNSKEY update that
-// the combiner already has).
+// Sets zd.KeystateOK/KeystateError/KeystateTime to reflect success or failure.
+// KEYSTATE failure is an error condition — the agent depends on KEYSTATE for
+// DNSKEY classification and must not guess when it's unavailable.
 func (zd *ZoneData) RequestAndWaitForKeyInventory() {
+	zd.KeystateTime = time.Now()
+
 	tm := Conf.Internal.TransportManager
 	if tm == nil {
-		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: no TransportManager, falling back to empty RemoteDNSKEYs", zd.ZoneName)
+		zd.KeystateOK = false
+		zd.KeystateError = "no TransportManager available"
+		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: %s", zd.ZoneName, zd.KeystateError)
 		zd.RemoteDNSKEYs = nil
 		return
 	}
 
-	msgQs := Conf.Internal.MsgQs
-	if msgQs == nil || msgQs.KeystateInventory == nil {
-		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: no MsgQs/KeystateInventory channel, falling back to empty RemoteDNSKEYs", zd.ZoneName)
-		zd.RemoteDNSKEYs = nil
-		return
-	}
+	// Use a dedicated channel for this solicited RFI response so the
+	// HsyncEngine's proactive-inventory consumer doesn't steal it.
+	rfiChan := make(chan *KeystateInventoryMsg, 1)
+	tm.keystateRfiChan.Store(&rfiChan)
+	defer tm.keystateRfiChan.Store(nil)
 
 	// Send RFI KEYSTATE to signer
 	if err := tm.sendRfiToSigner(zd.ZoneName, "KEYSTATE"); err != nil {
-		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: RFI KEYSTATE failed: %v, falling back to empty RemoteDNSKEYs", zd.ZoneName, err)
+		zd.KeystateOK = false
+		zd.KeystateError = fmt.Sprintf("RFI KEYSTATE send failed: %v", err)
+		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: %s", zd.ZoneName, zd.KeystateError)
 		zd.RemoteDNSKEYs = nil
 		return
 	}
@@ -201,9 +283,11 @@ func (zd *ZoneData) RequestAndWaitForKeyInventory() {
 	defer timeout.Stop()
 
 	select {
-	case inv := <-msgQs.KeystateInventory:
+	case inv := <-rfiChan:
 		if inv == nil || inv.Zone != zd.ZoneName {
-			zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: received nil or mismatched inventory, falling back to empty RemoteDNSKEYs", zd.ZoneName)
+			zd.KeystateOK = false
+			zd.KeystateError = "received nil or mismatched inventory from signer"
+			zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: %s", zd.ZoneName, zd.KeystateError)
 			zd.RemoteDNSKEYs = nil
 			return
 		}
@@ -227,13 +311,109 @@ func (zd *ZoneData) RequestAndWaitForKeyInventory() {
 		// Match foreign key tags against actual DNSKEYs in the zone
 		zd.RemoteDNSKEYs = zd.buildRemoteDNSKEYsFromTags(foreignKeyTags)
 
+		zd.KeystateOK = true
+		zd.KeystateError = ""
 		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: received %d-key inventory from signer, %d foreign → %d RemoteDNSKEYs",
 			zd.ZoneName, len(inv.Inventory), len(foreignKeyTags), len(zd.RemoteDNSKEYs))
 
 	case <-timeout.C:
-		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: timeout waiting for inventory (15s), falling back to empty RemoteDNSKEYs", zd.ZoneName)
+		zd.KeystateOK = false
+		zd.KeystateError = "timeout waiting for signer response (15s)"
+		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: %s", zd.ZoneName, zd.KeystateError)
 		zd.RemoteDNSKEYs = nil
 	}
+}
+
+// RequestAndWaitForEdits sends an RFI EDITS to the combiner and waits for the
+// contributions response. Applies the received records to the SynchedDataEngine
+// as confirmed data (the combiner already has them).
+//
+// Modeled on RequestAndWaitForKeyInventory.
+func (zd *ZoneData) RequestAndWaitForEdits() {
+	tm := Conf.Internal.TransportManager
+	if tm == nil {
+		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no TransportManager available", zd.ZoneName)
+		return
+	}
+
+	msgQs := Conf.Internal.MsgQs
+	if msgQs == nil || msgQs.EditsResponse == nil {
+		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no EditsResponse channel available", zd.ZoneName)
+		return
+	}
+
+	// Send RFI EDITS to combiner
+	if err := tm.sendRfiToCombiner(zd.ZoneName, "EDITS"); err != nil {
+		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: RFI EDITS send failed: %v", zd.ZoneName, err)
+		return
+	}
+
+	// Wait for the contributions response (combiner sends it as a separate EDITS message)
+	timeout := time.NewTimer(15 * time.Second)
+	defer timeout.Stop()
+
+	select {
+	case resp := <-msgQs.EditsResponse:
+		if resp == nil || resp.Zone != zd.ZoneName {
+			zd.Logger.Printf("RequestAndWaitForEdits: zone %s: received nil or mismatched edits from combiner", zd.ZoneName)
+			return
+		}
+
+		// Count total records for logging
+		totalRRs := 0
+		for _, rrs := range resp.Records {
+			totalRRs += len(rrs)
+		}
+
+		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: received edits from combiner (%d owners, %d RRs)",
+			zd.ZoneName, len(resp.Records), totalRRs)
+
+		// Apply to SDE — this is Step 7 (see plan)
+		zd.applyEditsToSDE(resp.Records)
+
+	case <-timeout.C:
+		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: timeout waiting for combiner EDITS response (15s)", zd.ZoneName)
+	}
+}
+
+// applyEditsToSDE imports the combiner's contributions response into the SynchedDataEngine.
+// Records are the agent's own contributions as tracked by the combiner — they should be
+// added as confirmed data (not queued for sending to the combiner again).
+func (zd *ZoneData) applyEditsToSDE(records map[string][]string) {
+	if len(records) == 0 {
+		zd.Logger.Printf("applyEditsToSDE: zone %s: no records to apply", zd.ZoneName)
+		return
+	}
+
+	zdr := Conf.Internal.ZoneDataRepo
+	if zdr == nil {
+		zd.Logger.Printf("applyEditsToSDE: zone %s: no ZoneDataRepo available", zd.ZoneName)
+		return
+	}
+
+	localAgentID := AgentId(Conf.Agent.Identity)
+	if localAgentID == "" {
+		zd.Logger.Printf("applyEditsToSDE: zone %s: no local agent identity configured", zd.ZoneName)
+		return
+	}
+
+	// Parse the RR strings and add them to the SDE repo as confirmed data.
+	// The records are owner → []RR strings. We need to add each RR to the
+	// agent's repo entry in the SDE, marked as accepted (combiner has them).
+	added := 0
+	for _, rrStrings := range records {
+		for _, rrStr := range rrStrings {
+			rr, err := dns.NewRR(rrStr)
+			if err != nil {
+				zd.Logger.Printf("applyEditsToSDE: zone %s: failed to parse RR %q: %v", zd.ZoneName, rrStr, err)
+				continue
+			}
+			zdr.AddConfirmedRR(ZoneName(zd.ZoneName), localAgentID, rr)
+			added++
+		}
+	}
+
+	zd.Logger.Printf("applyEditsToSDE: zone %s: applied %d confirmed RRs from combiner edits", zd.ZoneName, added)
 }
 
 // buildRemoteDNSKEYsFromTags returns DNSKEY RRs from the zone that match the given key tags.
@@ -303,11 +483,12 @@ func (zd *ZoneData) ValidateHsyncRRset() (bool, error) {
 // On agents: uses Globals.AgentId.
 // On the signer (AppTypeAuth): uses multi-provider.hsync-identity (or
 // multi-provider.agent.identity as fallback, since the HSYNC lists agents).
-// Returns (true, nil) if we should sign, (false, nil) if we should not,
-// or (true, nil) as a safe default if no identity is configured or no
-// matching HSYNC record is found.
-// Handles both HSYNC and HSYNC2 record types.
-func (zd *ZoneData) weAreASigner() (bool, error) {
+// analyzeHsyncSigners walks the HSYNC/HSYNC2 RRset once and returns:
+//   - weShouldSign: whether our identity has SIGN=YES
+//   - otherSigners: count of other identities with SIGN=YES
+//
+// Defaults: sign=true if no matching record found, otherSigners=0 if no records.
+func (zd *ZoneData) analyzeHsyncSigners() (weShouldSign bool, otherSigners int, err error) {
 	ourIdentity := string(Globals.AgentId)
 
 	// On the signer, our HSYNC identity is the agent we represent, not the signer itself.
@@ -321,8 +502,10 @@ func (zd *ZoneData) weAreASigner() (bool, error) {
 
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		return true, fmt.Errorf("weAreASigner: cannot get apex for zone %s: %v", zd.ZoneName, err)
+		return true, 0, fmt.Errorf("analyzeHsyncSigners: cannot get apex for zone %s: %v", zd.ZoneName, err)
 	}
+
+	foundOurRecord := false
 
 	// Try HSYNC first, then HSYNC2
 	hsyncRRset, exists := apex.RRtypes.Get(core.TypeHSYNC)
@@ -330,12 +513,17 @@ func (zd *ZoneData) weAreASigner() (bool, error) {
 		for _, rr := range hsyncRRset.RRs {
 			hsync := rr.(*dns.PrivateRR).Data.(*core.HSYNC)
 			if hsync.Identity == ourIdentity {
-				return hsync.Sign == core.HsyncSignYES, nil
+				foundOurRecord = true
+				weShouldSign = hsync.Sign == core.HsyncSignYES
+			} else if hsync.Sign == core.HsyncSignYES {
+				otherSigners++
 			}
 		}
-		// No matching HSYNC record for our identity
-		zd.Logger.Printf("weAreASigner: zone %s: no HSYNC record matches our identity %q", zd.ZoneName, ourIdentity)
-		return true, nil
+		if !foundOurRecord {
+			zd.Logger.Printf("analyzeHsyncSigners: zone %s: no HSYNC record matches our identity %q", zd.ZoneName, ourIdentity)
+			weShouldSign = true // default: sign if no matching record
+		}
+		return weShouldSign, otherSigners, nil
 	}
 
 	hsync2RRset, exists := apex.RRtypes.Get(core.TypeHSYNC2)
@@ -343,56 +531,27 @@ func (zd *ZoneData) weAreASigner() (bool, error) {
 		for _, rr := range hsync2RRset.RRs {
 			hsync2 := rr.(*dns.PrivateRR).Data.(*core.HSYNC2)
 			if hsync2.Identity == ourIdentity {
-				return hsync2.DoSign(), nil
+				foundOurRecord = true
+				weShouldSign = hsync2.DoSign()
+			} else if hsync2.DoSign() {
+				otherSigners++
 			}
 		}
-		// No matching HSYNC2 record for our identity
-		zd.Logger.Printf("weAreASigner: zone %s: no HSYNC2 record matches our identity %q", zd.ZoneName, ourIdentity)
-		return true, nil
+		if !foundOurRecord {
+			zd.Logger.Printf("analyzeHsyncSigners: zone %s: no HSYNC2 record matches our identity %q", zd.ZoneName, ourIdentity)
+			weShouldSign = true
+		}
+		return weShouldSign, otherSigners, nil
 	}
 
-	// No HSYNC/HSYNC2 records at all — sign by default
-	return true, nil
+	// No HSYNC/HSYNC2 records at all — sign by default, no other signers
+	return true, 0, nil
 }
 
-// isMultiSigner checks the HSYNC RRset and returns true if more than one
-// agent has Sign=SIGN (or DoSign() for HSYNC2). This distinguishes
-// multi-signer mode (mode 4) from single-signer multi-provider (mode 2).
-// Returns (false, nil) if 0 or 1 signers, (true, nil) if 2+.
-func (zd *ZoneData) isMultiSigner() (bool, error) {
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil {
-		return false, fmt.Errorf("isMultiSigner: cannot get apex for zone %s: %v", zd.ZoneName, err)
-	}
-
-	signerCount := 0
-
-	// Try HSYNC first
-	hsyncRRset, exists := apex.RRtypes.Get(core.TypeHSYNC)
-	if exists && len(hsyncRRset.RRs) > 0 {
-		for _, rr := range hsyncRRset.RRs {
-			hsync := rr.(*dns.PrivateRR).Data.(*core.HSYNC)
-			if hsync.Sign == core.HsyncSignYES {
-				signerCount++
-			}
-		}
-		return signerCount > 1, nil
-	}
-
-	// Try HSYNC2
-	hsync2RRset, exists := apex.RRtypes.Get(core.TypeHSYNC2)
-	if exists && len(hsync2RRset.RRs) > 0 {
-		for _, rr := range hsync2RRset.RRs {
-			hsync2 := rr.(*dns.PrivateRR).Data.(*core.HSYNC2)
-			if hsync2.DoSign() {
-				signerCount++
-			}
-		}
-		return signerCount > 1, nil
-	}
-
-	// No HSYNC/HSYNC2 records — not multi-signer
-	return false, nil
+// weAreASigner is a convenience wrapper around analyzeHsyncSigners.
+func (zd *ZoneData) weAreASigner() (bool, error) {
+	shouldSign, _, err := zd.analyzeHsyncSigners()
+	return shouldSign, err
 }
 
 func (zd *ZoneData) PrintOwnerNames() error {

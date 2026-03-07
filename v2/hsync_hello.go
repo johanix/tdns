@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"time"
 
@@ -25,14 +24,12 @@ func (ar *AgentRegistry) HelloHandler(report *AgentMsgReport) {
 
 	switch report.MessageType {
 	case AgentMsgHello:
-		if Globals.Debug {
-			log.Printf("HelloHandler: Received initial HELLO from %s", report.Identity)
-		}
+		lgAgent.Debug("received initial HELLO", "from", report.Identity)
 		// Store in wannabe_agents until we verify it shares zones with us
 		// wannabe_agents[report.Msg.Identity] = report.Agent
 
 	default:
-		log.Printf("HelloHandler: Unknown message type: %s", AgentMsgToString[report.MessageType])
+		lgAgent.Warn("unknown message type in HelloHandler", "type", AgentMsgToString[report.MessageType])
 	}
 }
 
@@ -50,11 +47,9 @@ func (ar *AgentRegistry) HelloRetrier() {
 		}
 	}
 	if len(known_agents) > 0 {
-		log.Printf("HsyncEngine: Retried HELLO to %d remote agents in state KNOWN: %v", len(known_agents), known_agents)
+		lgAgent.Debug("retried HELLO to KNOWN agents", "count", len(known_agents), "agents", known_agents)
 	} else {
-		if Globals.Debug {
-			log.Printf("HsyncEngine: No remote agents in state KNOWN to retry HELLO to")
-		}
+		lgAgent.Debug("no remote agents in state KNOWN to retry HELLO to")
 	}
 }
 
@@ -70,13 +65,15 @@ func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 	go func(agent *Agent) {
 		// Check if ANY transport needs Hello retries
 		if !ar.agentNeedsHello(agent) {
-			log.Printf("HelloRetrierNG: agent %q has no transports in state KNOWN (API: %s, DNS: %s), stopping",
-				agent.Identity, AgentStateToString[agent.ApiDetails.State], AgentStateToString[agent.DnsDetails.State])
+			lgAgent.Debug("no transports in state KNOWN, stopping HelloRetrierNG",
+				"agent", agent.Identity, "apiState", AgentStateToString[agent.ApiDetails.State],
+				"dnsState", AgentStateToString[agent.DnsDetails.State])
 			return
 		}
 
-		log.Printf("HelloRetrierNG: started for agent %q (API: %s, DNS: %s)",
-			agent.Identity, AgentStateToString[agent.ApiDetails.State], AgentStateToString[agent.DnsDetails.State])
+		lgAgent.Info("HelloRetrierNG started", "agent", agent.Identity,
+			"apiState", AgentStateToString[agent.ApiDetails.State],
+			"dnsState", AgentStateToString[agent.DnsDetails.State])
 
 		// Phase 1: Fast attempts — up to 3 tries with 5s spacing
 		const fastAttempts = 3
@@ -92,27 +89,27 @@ func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 			}
 
 			if !ar.agentNeedsHello(agent) {
-				log.Printf("HelloRetrierNG: agent %q HELLO succeeded (fast attempt %d/%d)",
-					agent.Identity, attempt, fastAttempts)
+				lgAgent.Info("HELLO succeeded (fast attempt)", "agent", agent.Identity,
+					"attempt", attempt, "maxAttempts", fastAttempts)
 				// HELLO succeeded — trigger fast beat attempts
 				ar.FastBeatAttempts(ctx, agent)
 				return
 			}
 
-			log.Printf("HelloRetrierNG: fast attempt %d/%d HELLO to %q", attempt, fastAttempts, agent.Identity)
+			lgAgent.Debug("fast HELLO attempt", "attempt", attempt, "maxAttempts", fastAttempts, "agent", agent.Identity)
 			ar.sendHelloToAgent(agent)
 		}
 
 		// Check if fast phase succeeded
 		if !ar.agentNeedsHello(agent) {
-			log.Printf("HelloRetrierNG: agent %q HELLO succeeded after fast attempts", agent.Identity)
+			lgAgent.Info("HELLO succeeded after fast attempts", "agent", agent.Identity)
 			ar.FastBeatAttempts(ctx, agent)
 			return
 		}
 
 		// Phase 2: Fall back to normal ticker
-		log.Printf("HelloRetrierNG: agent %q fast attempts exhausted, falling back to %ds ticker",
-			agent.Identity, helloRetryInterval)
+		lgAgent.Debug("fast attempts exhausted, falling back to ticker",
+			"agent", agent.Identity, "interval", helloRetryInterval)
 
 		ticker := time.NewTicker(time.Duration(helloRetryInterval) * time.Second)
 		defer ticker.Stop()
@@ -120,22 +117,22 @@ func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 		for {
 			select {
 			case <-ctx.Done():
-				log.Printf("HelloRetrierNG: context done, stopping")
+				lgAgent.Debug("HelloRetrierNG context done, stopping")
 				return
 			case <-ticker.C:
 			}
 
 			if !ar.agentNeedsHello(agent) {
-				log.Printf("HelloRetrierNG: agent %q no longer in state KNOWN, stopping", agent.Identity)
+				lgAgent.Info("agent no longer in state KNOWN, stopping HelloRetrierNG", "agent", agent.Identity)
 				ar.FastBeatAttempts(ctx, agent)
 				return
 			}
 
-			log.Printf("HelloRetrierNG: ticker retry HELLO to %q", agent.Identity)
+			lgAgent.Debug("ticker retry HELLO", "agent", agent.Identity)
 			ar.sendHelloToAgent(agent)
 		}
 	}(agent)
-	log.Printf("HelloRetrierNG: started HelloRetrierNG for agent %q", agent.Identity)
+	lgAgent.Debug("launched HelloRetrierNG goroutine", "agent", agent.Identity)
 }
 
 // agentNeedsHello returns true if any transport is still in KNOWN state.
@@ -181,7 +178,7 @@ func (ar *AgentRegistry) FastBeatAttempts(ctx context.Context, agent *Agent) {
 		return
 	}
 
-	log.Printf("FastBeatAttempts: starting for agent %q", agent.Identity)
+	lgAgent.Debug("starting fast beat attempts", "agent", agent.Identity)
 
 	for attempt := 1; attempt <= fastAttempts; attempt++ {
 		if attempt > 1 {
@@ -193,12 +190,12 @@ func (ar *AgentRegistry) FastBeatAttempts(ctx context.Context, agent *Agent) {
 		}
 
 		if !needsBeat() {
-			log.Printf("FastBeatAttempts: agent %q reached OPERATIONAL (attempt %d/%d)",
-				agent.Identity, attempt, fastAttempts)
+			lgAgent.Info("agent reached OPERATIONAL (fast beat)", "agent", agent.Identity,
+				"attempt", attempt, "maxAttempts", fastAttempts)
 			return
 		}
 
-		log.Printf("FastBeatAttempts: fast attempt %d/%d BEAT to %q", attempt, fastAttempts, agent.Identity)
+		lgAgent.Debug("fast beat attempt", "attempt", attempt, "maxAttempts", fastAttempts, "agent", agent.Identity)
 
 		if ar.TransportManager != nil {
 			beatCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
@@ -216,18 +213,18 @@ func (ar *AgentRegistry) FastBeatAttempts(ctx context.Context, agent *Agent) {
 				agent.ApiDetails.LatestError = ""
 				// Execute deferred tasks on first successful beat
 				if len(agent.DeferredTasks) > 0 {
-					log.Printf("FastBeatAttempts: Agent %s has %d deferred tasks, executing", agent.Identity, len(agent.DeferredTasks))
+					lgAgent.Info("executing deferred tasks after fast beat", "agent", agent.Identity, "count", len(agent.DeferredTasks))
 					var remaining []DeferredAgentTask
 					for _, task := range agent.DeferredTasks {
 						if task.Precondition() {
 							ok, taskErr := task.Action()
 							if taskErr != nil {
-								log.Printf("FastBeatAttempts: Deferred task %s error: %v", task.Desc, taskErr)
+								lgAgent.Error("deferred task failed", "task", task.Desc, "err", taskErr)
 								remaining = append(remaining, task)
 							} else if !ok {
 								remaining = append(remaining, task)
 							} else {
-								log.Printf("FastBeatAttempts: Deferred task %s executed", task.Desc)
+								lgAgent.Info("deferred task executed", "task", task.Desc)
 							}
 						} else {
 							remaining = append(remaining, task)
@@ -237,7 +234,7 @@ func (ar *AgentRegistry) FastBeatAttempts(ctx context.Context, agent *Agent) {
 				}
 				ar.S.Set(agent.Identity, agent)
 				agent.mu.Unlock()
-				log.Printf("FastBeatAttempts: agent %q reached OPERATIONAL", agent.Identity)
+				lgAgent.Info("agent reached OPERATIONAL", "agent", agent.Identity)
 				return
 			}
 		}
@@ -245,14 +242,14 @@ func (ar *AgentRegistry) FastBeatAttempts(ctx context.Context, agent *Agent) {
 
 	// Check final state
 	if !needsBeat() {
-		log.Printf("FastBeatAttempts: agent %q reached OPERATIONAL after fast attempts", agent.Identity)
+		lgAgent.Info("agent reached OPERATIONAL after fast attempts", "agent", agent.Identity)
 	} else {
-		log.Printf("FastBeatAttempts: agent %q fast beat attempts exhausted, heartbeat ticker will take over", agent.Identity)
+		lgAgent.Debug("fast beat attempts exhausted, heartbeat ticker will take over", "agent", agent.Identity)
 	}
 }
 
 func (ar *AgentRegistry) SingleHello(agent *Agent, zone ZoneName) {
-	log.Printf("SingleHello: Sending HELLO to %s (zone %q)", agent.Identity, zone)
+	lgAgent.Debug("sending HELLO", "agent", agent.Identity, "zone", zone)
 
 	// Use TransportManager for independent multi-transport handling
 	if ar.TransportManager != nil {
@@ -263,9 +260,9 @@ func (ar *AgentRegistry) SingleHello(agent *Agent, zone ZoneName) {
 		// and updates ApiDetails.State and DnsDetails.State separately
 		_, err := ar.TransportManager.SendHelloWithFallback(ctx, agent, sharedZones)
 		if err != nil {
-			log.Printf("SingleHello: TransportManager HELLO to %q failed on all transports: %v", agent.Identity, err)
+			lgAgent.Warn("HELLO failed on all transports", "agent", agent.Identity, "err", err)
 		} else {
-			log.Printf("SingleHello: Our HELLO to %q accepted on at least one transport", agent.Identity)
+			lgAgent.Info("HELLO accepted on at least one transport", "agent", agent.Identity)
 		}
 		ar.S.Set(agent.Identity, agent)
 		return
@@ -281,21 +278,21 @@ func (ar *AgentRegistry) SingleHello(agent *Agent, zone ZoneName) {
 	agent.mu.Lock()
 	switch {
 	case err != nil:
-		log.Printf("SingleHello: Error sending HELLO to %q: %v", agent.Identity, err)
+		lgAgent.Error("error sending HELLO", "agent", agent.Identity, "err", err)
 		agent.ApiDetails.LatestError = err.Error()
 
 	case ahr.Error:
-		log.Printf("SingleHello: Our HELLO to %q returned error: %s", agent.Identity, ahr.ErrorMsg)
+		lgAgent.Warn("HELLO returned error", "agent", agent.Identity, "error", ahr.ErrorMsg)
 		agent.ApiDetails.LatestError = ahr.ErrorMsg
 		agent.ApiDetails.LatestErrorTime = time.Now()
 
 	default:
-		log.Printf("SingleHello: Our HELLO to %q returned: %s", agent.Identity, ahr.Msg)
+		lgAgent.Info("HELLO accepted", "agent", agent.Identity, "msg", ahr.Msg)
 		// Only transition to INTRODUCED if not already OPERATIONAL or better
 		// This prevents Hello messages from downgrading state (e.g., after retry)
 		if agent.ApiDetails.State < AgentStateIntroduced {
 			agent.ApiDetails.State = AgentStateIntroduced
-			log.Printf("SingleHello: Updated agent %s API state to INTRODUCED after successful Hello", agent.Identity)
+			lgAgent.Info("agent API state updated to INTRODUCED", "agent", agent.Identity)
 		}
 		agent.ApiDetails.LatestError = ""
 	}
@@ -304,29 +301,29 @@ func (ar *AgentRegistry) SingleHello(agent *Agent, zone ZoneName) {
 }
 
 func (ar *AgentRegistry) EvaluateHello(ahp *AgentHelloPost) (bool, string, error) {
-	log.Printf("EvaluateHello: Evaluating agent %q that claims to share the zone %q with us", ahp.MyIdentity, ahp.Zone)
+	lgAgent.Debug("evaluating HELLO", "agent", ahp.MyIdentity, "zone", ahp.Zone)
 
 	// Now let's check if we need to know this agent
 	if ahp.Zone == "" {
-		log.Printf("EvaluateHello: Error: No zone specified in HELLO message")
+		lgAgent.Warn("no zone specified in HELLO message")
 		return false, "Error: No zone specified in HELLO message", nil
 	}
 
 	// Check if we have this zone
 	zd, exists := Zones.Get(string(ahp.Zone))
 	if !exists {
-		log.Printf("EvaluateHello: Error: We don't know about zone %q. This could be a timing issue, so try again in a bit", ahp.Zone)
+		lgAgent.Warn("unknown zone in HELLO, may be a timing issue", "zone", ahp.Zone)
 		return false, fmt.Sprintf("Error: We don't know about zone %q. This could be a timing issue, so try again in a bit", ahp.Zone), nil
 	}
 
 	// Check if zone has HSYNC RRset
 	hsyncRR, err := zd.GetRRset(zd.ZoneName, core.TypeHSYNC)
 	if err != nil {
-		log.Printf("EvaluateHello: Error: Error trying to retrieve HSYNC RRset for zone %q: %v", ahp.Zone, err)
+		lgAgent.Error("error retrieving HSYNC RRset", "zone", ahp.Zone, "err", err)
 		return false, fmt.Sprintf("Error trying to retrieve HSYNC RRset for zone %q: %v", ahp.Zone, err), nil
 	}
 	if hsyncRR == nil {
-		log.Printf("EvaluateHello: Error: Zone %q has no HSYNC RRset", ahp.Zone)
+		lgAgent.Warn("zone has no HSYNC RRset", "zone", ahp.Zone)
 		return false, fmt.Sprintf("Error: Zone %q has no HSYNC RRset", ahp.Zone), nil
 	}
 
@@ -347,9 +344,8 @@ func (ar *AgentRegistry) EvaluateHello(ahp *AgentHelloPost) (bool, string, error
 	}
 
 	if !foundMe || !foundYou {
-		log.Printf("EvaluateHello: Error: Zone %q HSYNC RRset does not include both our identities", ahp.Zone)
-		log.Printf("EvaluateHello: HSYNC RRset: %+v", hsyncRR)
-		log.Printf("EvaluateHello: your identity: %s, my identity: %s", ahp.MyIdentity, ar.LocalAgent.Identity)
+		lgAgent.Warn("HSYNC RRset does not include both identities",
+			"zone", ahp.Zone, "yourIdentity", ahp.MyIdentity, "myIdentity", ar.LocalAgent.Identity)
 		return false, fmt.Sprintf("Error: Zone %q HSYNC RRset does not include both our identities", ahp.Zone), nil
 	}
 

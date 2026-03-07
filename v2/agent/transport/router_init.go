@@ -8,7 +8,6 @@ package transport
 
 import (
 	"encoding/json"
-	"log"
 
 	"github.com/miekg/dns"
 )
@@ -51,7 +50,7 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 		return nil // No router to initialize
 	}
 
-	log.Printf("InitializeRouter: Registering handlers and middleware")
+	lgTransport().Info("registering handlers and middleware")
 
 	// Register default handler for unregistered message types
 	router.SetDefaultHandler(DefaultUnsupportedHandler)
@@ -62,7 +61,7 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 	// 1. Authorization (outermost - prevents unauthorized access)
 	if cfg.TransportManager != nil {
 		router.Use(NewAuthorizationMiddleware(cfg.TransportManager))
-		log.Printf("InitializeRouter: Registered authorization middleware")
+		lgTransport().Info("registered authorization middleware")
 	}
 
 	// 2. Signature verification (authenticates sender)
@@ -73,7 +72,7 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 			AllowUnencrypted:             cfg.AllowUnencrypted,
 		}
 		router.Use(NewSignatureMiddleware(cryptoCfg))
-		log.Printf("InitializeRouter: Registered signature middleware")
+		lgTransport().Info("registered signature middleware")
 	}
 
 	// 3. Statistics tracking (after authentication, before processing)
@@ -83,17 +82,17 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 			Verbose:      cfg.VerboseStats,
 		}
 		router.Use(NewStatsMiddleware(statsCfg))
-		log.Printf("InitializeRouter: Registered statistics middleware")
+		lgTransport().Info("registered statistics middleware")
 	}
 
 	// 4. Logging (for visibility)
 	router.Use(NewLoggingMiddleware(true))
-	log.Printf("InitializeRouter: Registered logging middleware")
+	lgTransport().Info("registered logging middleware")
 
 	// 5. Route to message handler goroutine (after processing)
 	if cfg.IncomingChan != nil {
 		router.Use(RouteToMsgHandler(cfg.IncomingChan))
-		log.Printf("InitializeRouter: Registered message handler routing middleware")
+		lgTransport().Info("registered message handler routing middleware")
 	}
 
 	// Register message handlers (by message type)
@@ -194,8 +193,20 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 		return err
 	}
 
-	log.Printf("InitializeRouter: Registered 8 message handlers")
-	log.Printf("InitializeRouter: Router initialization complete")
+	// Edits handler (priority: 100)
+	err = router.Register(
+		"EditsHandler",
+		MessageType("edits"),
+		HandleEdits,
+		WithPriority(100),
+		WithDescription("Processes EDITS messages with agent contributions from combiner"),
+	)
+	if err != nil {
+		return err
+	}
+
+	lgTransport().Info("registered message handlers", "count", 9)
+	lgTransport().Info("router initialization complete")
 
 	return nil
 }
@@ -238,7 +249,7 @@ func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfi
 		return nil
 	}
 
-	log.Printf("InitializeCombinerRouter: Registering combiner handlers and middleware")
+	lgTransport().Info("registering combiner handlers and middleware")
 
 	// Register default handler for unregistered message types
 	router.SetDefaultHandler(DefaultUnsupportedHandler)
@@ -246,7 +257,7 @@ func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfi
 	// 1. Authorization (outermost — prevents unauthorized access)
 	if cfg.Authorizer != nil {
 		router.Use(NewAuthorizationMiddleware(cfg.Authorizer))
-		log.Printf("InitializeCombinerRouter: Registered authorization middleware")
+		lgTransport().Info("combiner: registered authorization middleware")
 	}
 
 	// 2. Signature verification (authenticates sender)
@@ -256,7 +267,7 @@ func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfi
 			AllowUnencrypted: cfg.AllowUnencrypted,
 		}
 		router.Use(NewSignatureMiddleware(cryptoCfg))
-		log.Printf("InitializeCombinerRouter: Registered signature middleware")
+		lgTransport().Info("combiner: registered signature middleware")
 	}
 
 	// 3. Statistics tracking (after authentication, before processing)
@@ -265,17 +276,17 @@ func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfi
 			PeerRegistry: cfg.PeerRegistry,
 		}
 		router.Use(NewStatsMiddleware(statsCfg))
-		log.Printf("InitializeCombinerRouter: Registered statistics middleware")
+		lgTransport().Info("combiner: registered statistics middleware")
 	}
 
 	// 4. Logging
 	router.Use(NewLoggingMiddleware(true))
-	log.Printf("InitializeCombinerRouter: Registered logging middleware")
+	lgTransport().Info("combiner: registered logging middleware")
 
 	// 5. Route to message handler goroutine (after processing)
 	if cfg.IncomingChan != nil {
 		router.Use(RouteToMsgHandler(cfg.IncomingChan))
-		log.Printf("InitializeCombinerRouter: Registered message handler routing middleware")
+		lgTransport().Info("combiner: registered message handler routing middleware")
 	}
 
 	// Register shared handlers for ping and beat (same implementation as agent)
@@ -299,8 +310,19 @@ func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfi
 		return err
 	}
 
+	// Register RFI handler for combiner (handles RFI EDITS from agents)
+	if err := router.Register(
+		"CombinerRfiHandler",
+		MessageType("rfi"),
+		HandleRfi,
+		WithPriority(100),
+		WithDescription("Combiner: processes RFI messages from agents"),
+	); err != nil {
+		return err
+	}
+
 	// Register combiner-specific update handler (agent→combiner zone contributions)
-	handlerCount := 2
+	handlerCount := 3
 	if cfg.HandleUpdate != nil {
 		if err := router.Register(
 			"CombinerUpdateHandler",
@@ -314,8 +336,8 @@ func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfi
 		handlerCount++
 	}
 
-	log.Printf("InitializeCombinerRouter: Registered %d message handlers", handlerCount)
-	log.Printf("InitializeCombinerRouter: Router initialization complete")
+	lgTransport().Info("combiner: registered message handlers", "count", handlerCount)
+	lgTransport().Info("combiner: router initialization complete")
 
 	return nil
 }
@@ -352,7 +374,7 @@ func InitializeSignerRouter(router *DNSMessageRouter, cfg *SignerRouterConfig) e
 		return nil
 	}
 
-	log.Printf("InitializeSignerRouter: Registering signer handlers and middleware")
+	lgTransport().Info("registering signer handlers and middleware")
 
 	// Register default handler for unregistered message types
 	router.SetDefaultHandler(DefaultUnsupportedHandler)
@@ -360,7 +382,7 @@ func InitializeSignerRouter(router *DNSMessageRouter, cfg *SignerRouterConfig) e
 	// 1. Authorization (outermost — prevents unauthorized access)
 	if cfg.Authorizer != nil {
 		router.Use(NewAuthorizationMiddleware(cfg.Authorizer))
-		log.Printf("InitializeSignerRouter: Registered authorization middleware")
+		lgTransport().Info("signer: registered authorization middleware")
 	}
 
 	// 2. Signature verification (authenticates sender)
@@ -370,7 +392,7 @@ func InitializeSignerRouter(router *DNSMessageRouter, cfg *SignerRouterConfig) e
 			AllowUnencrypted: cfg.AllowUnencrypted,
 		}
 		router.Use(NewSignatureMiddleware(cryptoCfg))
-		log.Printf("InitializeSignerRouter: Registered signature middleware")
+		lgTransport().Info("signer: registered signature middleware")
 	}
 
 	// 3. Statistics tracking (after authentication, before processing)
@@ -379,17 +401,17 @@ func InitializeSignerRouter(router *DNSMessageRouter, cfg *SignerRouterConfig) e
 			PeerRegistry: cfg.PeerRegistry,
 		}
 		router.Use(NewStatsMiddleware(statsCfg))
-		log.Printf("InitializeSignerRouter: Registered statistics middleware")
+		lgTransport().Info("signer: registered statistics middleware")
 	}
 
 	// 4. Logging
 	router.Use(NewLoggingMiddleware(true))
-	log.Printf("InitializeSignerRouter: Registered logging middleware")
+	lgTransport().Info("signer: registered logging middleware")
 
 	// 5. Route to message handler goroutine (after processing)
 	if cfg.IncomingChan != nil {
 		router.Use(RouteToMsgHandler(cfg.IncomingChan))
-		log.Printf("InitializeSignerRouter: Registered message handler routing middleware")
+		lgTransport().Info("signer: registered message handler routing middleware")
 	}
 
 	// Register ping handler (shared implementation with agent/combiner)
@@ -399,6 +421,17 @@ func InitializeSignerRouter(router *DNSMessageRouter, cfg *SignerRouterConfig) e
 		HandlePing,
 		WithPriority(100),
 		WithDescription("Processes ping messages and echoes nonce"),
+	); err != nil {
+		return err
+	}
+
+	// Register beat handler (shared implementation with agent/combiner)
+	if err := router.Register(
+		"BeatHandler",
+		MessageType("beat"),
+		HandleBeat,
+		WithPriority(100),
+		WithDescription("Processes heartbeat messages from peers"),
 	); err != nil {
 		return err
 	}
@@ -425,8 +458,8 @@ func InitializeSignerRouter(router *DNSMessageRouter, cfg *SignerRouterConfig) e
 		return err
 	}
 
-	log.Printf("InitializeSignerRouter: Registered 3 message handlers")
-	log.Printf("InitializeSignerRouter: Router initialization complete")
+	lgTransport().Info("signer: registered message handlers", "count", 4)
+	lgTransport().Info("signer: router initialization complete")
 
 	return nil
 }
@@ -460,6 +493,8 @@ func DetermineMessageType(payload []byte) MessageType {
 		return MessageType("rfi")
 	case "keystate":
 		return MessageType("keystate")
+	case "edits":
+		return MessageType("edits")
 	default:
 		return MessageTypeUnknown
 	}

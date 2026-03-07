@@ -10,7 +10,6 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
-	"log"
 
 	"fmt"
 	"os"
@@ -285,7 +284,7 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 		case *dns.DNSKEY:
 			pkc.K, err = rr.NewPrivateKey(privkey)
 			if err != nil {
-				log.Printf("PrepareKeyCache: Error reading private key from string '%s': %v", privkey, err)
+				lgSigner.Error("failed to read private key from string", "err", err)
 				return nil, fmt.Errorf("error reading private key %q: %v", "**REDACTED**", err)
 			}
 			pkc.KeyType = dns.TypeDNSKEY
@@ -509,7 +508,7 @@ func ReadPubKeys(keydir string) (map[string]dns.KEY, error) {
 
 	for _, f := range entries {
 		fname := f.Name()
-		fmt.Println(fname)
+		lgSigner.Debug("processing key file", "filename", fname)
 
 		if strings.HasSuffix(fname, ".key") {
 			// basename = strings.TrimSuffix(filename, ".key")
@@ -538,7 +537,7 @@ func ReadPubKeys(keydir string) (map[string]dns.KEY, error) {
 			}
 
 		} else {
-			fmt.Printf("File %s is not a public key file. Ignored.\n", fname)
+			lgSigner.Debug("not a public key file, ignored", "filename", fname)
 		}
 	}
 

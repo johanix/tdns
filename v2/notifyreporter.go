@@ -6,7 +6,6 @@ package tdns
 
 import (
 	"fmt"
-	"log"
 	"net"
 
 	"context"
@@ -93,12 +92,12 @@ func NotifyReporter(conf *Config, tsigSecrets map[string]string, addr string) (s
 
 	go func() {
 		if serveErr := udpSrv.ActivateAndServe(); serveErr != nil {
-			log.Printf("notify-only UDP server stopped: %v", serveErr)
+			lgHandler.Error("notify-only UDP server stopped", "err", serveErr)
 		}
 	}()
 	go func() {
 		if serveErr := tcpSrv.ActivateAndServe(); serveErr != nil {
-			log.Printf("notify-only TCP server stopped: %v", serveErr)
+			lgHandler.Error("notify-only TCP server stopped", "err", serveErr)
 		}
 	}()
 

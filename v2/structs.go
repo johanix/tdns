@@ -48,10 +48,13 @@ const (
 	Sig0StateActive      string = "active"
 	Sig0StateRetired     string = "retired"
 	DnskeyStateCreated   string = "created"
+	DnskeyStateMpdist    string = "mpdist"   // multi-provider distribution: awaiting confirmation from all providers
+	DnskeyStateMpremove  string = "mpremove" // multi-provider removal: awaiting confirmation from all providers
 	DnskeyStatePublished string = "published"
 	DnskeyStateStandby   string = "standby"
 	DnskeyStateActive    string = "active"
 	DnskeyStateRetired   string = "retired"
+	DnskeyStateRemoved   string = "removed"
 	DnskeyStateForeign   string = "foreign"
 )
 
@@ -72,9 +75,13 @@ type ZoneData struct {
 	// When merging, all agents' contributions for the same owner/rrtype are combined
 	// into a single RRset in CombinerData.
 	AgentContributions map[string]map[string]map[uint16]core.RRset
-	Ready              bool   // true if zd.Data has been populated (from file or upstream)
-	XfrType            string // axfr | ixfr
-	Logger             *log.Logger
+	// PersistContributions is set by the combiner at init time to persist an agent's
+	// contributions to the snapshot table after every write. Non-combiner apps leave it nil.
+	// Args: zone, senderID, agent's contributions (owner → rrtype → RRset).
+	PersistContributions func(string, string, map[string]map[uint16]core.RRset) error
+	Ready                bool   // true if zd.Data has been populated (from file or upstream)
+	XfrType              string // axfr | ixfr
+	Logger               *log.Logger
 	// ZoneFile           string // TODO: Remove this
 	IncomingSerial     uint32 // SOA serial that we got from upstream
 	CurrentSerial      uint32 // SOA serial after local bumping
@@ -116,6 +123,21 @@ type ZoneData struct {
 	// LastKeyInventory stores the most recent KEYSTATE inventory received from the signer.
 	// Used for diagnostics (CLI show-key-inventory command).
 	LastKeyInventory *KeyInventorySnapshot
+
+	// LocalDNSKEYs holds DNSKEY RRs that the signer classifies as local (not foreign).
+	// Derived from KEYSTATE inventory. Used to compute adds/removes on DNSKEY updates.
+	LocalDNSKEYs []dns.RR
+
+	// KEYSTATE health tracking — we depend on KEYSTATE for DNSKEY classification.
+	// Failure is an error condition that must be visible to the operator.
+	KeystateOK    bool      // true after successful KEYSTATE exchange
+	KeystateError string    // error message from last failed attempt (empty on success)
+	KeystateTime  time.Time // time of last KEYSTATE attempt
+
+	// OnFirstLoad holds one-shot callbacks executed after the zone's first successful load.
+	// Apps register these before RefreshEngine starts, and RefreshEngine clears the slice
+	// after executing them. Protected by zd.mu.
+	OnFirstLoad []func(*ZoneData)
 }
 
 // KeyInventorySnapshot stores a complete key inventory received from the signer.
@@ -501,6 +523,27 @@ type CombinerDebugPost struct {
 	Command string `json:"command"`
 	Zone    string `json:"zone,omitempty"`
 	AgentID string `json:"agent_id,omitempty"` // For agent-targeted commands (e.g. agent-ping)
+}
+
+// CombinerEditPost represents a CLI request for managing pending/rejected edits.
+type CombinerEditPost struct {
+	Command string   `json:"command"` // "list", "list-approved", "list-rejected", "approve", "reject", "clear"
+	Zone    string   `json:"zone"`
+	EditID  int      `json:"edit_id,omitempty"`
+	Reason  string   `json:"reason,omitempty"`
+	Tables  []string `json:"tables,omitempty"` // for "clear": which tables to clear; empty = all
+}
+
+// CombinerEditResponse is the response for edit management commands.
+type CombinerEditResponse struct {
+	Time     time.Time                      `json:"time"`
+	Error    bool                           `json:"error"`
+	ErrorMsg string                         `json:"error_msg,omitempty"`
+	Msg      string                         `json:"msg,omitempty"`
+	Pending  []*PendingEditRecord           `json:"pending,omitempty"`
+	Approved []*ApprovedEditRecord          `json:"approved,omitempty"`
+	Rejected []*RejectedEditRecord          `json:"rejected,omitempty"`
+	Current  map[string]map[string][]string `json:"current,omitempty"` // agent → rrtype → []rr
 }
 
 // CombinerDebugResponse returns both the merged CombinerData and the per-agent

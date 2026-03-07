@@ -48,6 +48,7 @@ const (
 	AgentMsgRfi    = core.AgentMsgRfi
 	AgentMsgStatus = core.AgentMsgStatus
 	AgentMsgPing   = core.AgentMsgPing
+	AgentMsgEdits  = core.AgentMsgEdits
 )
 
 var AgentMsgToString = core.AgentMsgToString
@@ -226,13 +227,15 @@ type AgentHelloResponse struct {
 // AgentMsg{Post,Response} are intended for agent-to-agent messaging
 type AgentMsgPost struct {
 	MessageType    AgentMsg // "sync", "update", "rfi", "status"
-	MyIdentity     AgentId
+	OriginatorID   AgentId  // Original author of the update
+	DeliveredBy    AgentId  // Transport-level sender (who delivered this message to us)
 	YourIdentity   AgentId
 	Addresses      []string            `json:"addresses,omitempty"` // DEPRECATED: Use DNS discovery (SVCB records) instead
 	Port           uint16              `json:"port,omitempty"`      // DEPRECATED: Use DNS discovery (URI scheme) instead
 	TLSA           dns.TLSA            `json:"tlsa,omitempty"`      // DEPRECATED: Use DNS discovery (TLSA query) instead
 	Zone           ZoneName            // An AgentMsgPost should always only refer to one zone.
-	Records        map[string][]string // Resource records grouped by owner name (owner → []RR strings)
+	Records        map[string][]string // Resource records grouped by owner name (legacy: Class-overloaded)
+	Operations     []core.RROperation  // Explicit operations (takes precedence over Records)
 	Time           time.Time
 	RfiType        string
 	DistributionID string // Originating distribution ID from the sending agent
@@ -323,22 +326,30 @@ type AgentDebugPost struct {
 	Data    ZoneUpdate
 }
 
+// KeystateInfo reports the health of the KEYSTATE exchange with the signer for a zone.
+type KeystateInfo struct {
+	OK        bool   `json:"ok"`
+	Error     string `json:"error,omitempty"`
+	Timestamp string `json:"timestamp,omitempty"`
+}
+
 type AgentMgmtResponse struct {
-	Identity      AgentId
-	Status        string
-	Time          time.Time
-	Agents        []*Agent // used for hsync-agentstatus
-	ZoneAgentData *ZoneAgentData
-	HsyncRRs      []string
-	AgentConfig   LocalAgentConf
-	RfiType       string
-	RfiResponse   map[AgentId]*RfiData
-	AgentRegistry *AgentRegistry
-	ZoneDataRepo  map[ZoneName]map[AgentId]map[uint16][]TrackedRRInfo
-	Msg           string
-	Error         bool
-	ErrorMsg      string
-	Data          interface{} `json:"data,omitempty"` // Generic data field for custom responses
+	Identity       AgentId
+	Status         string
+	Time           time.Time
+	Agents         []*Agent // used for hsync-agentstatus
+	ZoneAgentData  *ZoneAgentData
+	HsyncRRs       []string
+	AgentConfig    LocalAgentConf
+	RfiType        string
+	RfiResponse    map[AgentId]*RfiData
+	AgentRegistry  *AgentRegistry
+	ZoneDataRepo   map[ZoneName]map[AgentId]map[uint16][]TrackedRRInfo
+	KeystateStatus map[ZoneName]KeystateInfo `json:"keystate_status,omitempty"`
+	Msg            string
+	Error          bool
+	ErrorMsg       string
+	Data           interface{} `json:"data,omitempty"` // Generic data field for custom responses
 
 	// HSYNC debug data (Phase 5)
 	HsyncPeers         []*HsyncPeerInfo         `json:"hsync_peers,omitempty"`
