@@ -16,6 +16,7 @@ replace (
 require (
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/cli v0.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/viper v1.16.0
 )
@@ -23,7 +24,7 @@ require (
 require (
 	github.com/c-bata/go-prompt v0.2.6 // indirect
 	github.com/chzyer/readline v0.0.0-20180603132655-2972be24d48e // indirect
-	github.com/cloudflare/circl v1.6.2 // indirect
+	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.3 // indirect
@@ -36,7 +37,6 @@ require (
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
-	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39 // indirect
 	github.com/johanix/tdns/v2/crypto v0.0.0-20260125163255-f23369628cc7 // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000 // indirect
 	github.com/johanix/tdns/v2/hpke v0.0.0-00010101000000-000000000000 // indirect
