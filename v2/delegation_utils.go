@@ -92,11 +92,11 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 		child_a_glue := owner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs
 		parent_a_glue, err := AuthQuery(ns, pserver, dns.TypeA)
 		if err != nil {
-			lgDns.Warn("error from AuthQuery for A glue", "server", pserver, "ns", child_inb, "err", err)
+			lgDns.Warn("error from AuthQuery for A glue", "server", pserver, "ns", ns, "err", err)
+			continue
 		}
 		gluediff, adds, removes := core.RRsetDiffer(ns, child_a_glue, parent_a_glue,
 			dns.TypeA, zd.Logger, Globals.Verbose, Globals.Debug)
-		// log.Printf("AnalyseZoneDelegation: Zone %s: A RRsetDiffer: %v InSync: %v", zd.ZoneName, differ, resp.InSync)
 		if gluediff {
 			resp.InSync = false
 			resp.AAdds = append(resp.AAdds, adds...)
@@ -106,11 +106,11 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 		child_aaaa_glue := owner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs
 		parent_aaaa_glue, err := AuthQuery(ns, pserver, dns.TypeAAAA)
 		if err != nil {
-			lgDns.Warn("error from AuthQuery for AAAA glue", "server", pserver, "ns", child_inb, "err", err)
+			lgDns.Warn("error from AuthQuery for AAAA glue", "server", pserver, "ns", ns, "err", err)
+			continue
 		}
 		differ, adds, removes = core.RRsetDiffer(ns, child_aaaa_glue, parent_aaaa_glue,
 			dns.TypeAAAA, zd.Logger, Globals.Verbose, Globals.Debug)
-		// log.Printf("AnalyseZoneDelegation: Zone %s: AAAA RRsetDiffer: %v InSync: %v", zd.ZoneName, differ, resp.InSync)
 		if differ {
 			resp.InSync = false
 			resp.AAAAAdds = append(resp.AAAAAdds, adds...)
@@ -136,14 +136,21 @@ func ChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, [
 	var adds, removes []dns.RR
 
 	if viper.GetBool("childsync.update-ns") {
-		differ, adds, removes = ComputeRRDiff(childpri, parpri,
+		var err error
+		differ, adds, removes, err = ComputeRRDiff(childpri, parpri,
 			Globals.Zonename, dns.TypeNS)
+		if err != nil {
+			return false, nil, nil, fmt.Errorf("computing NS diff: %w", err)
+		}
 	} else {
 		fmt.Printf("*** Note: configured NOT to update NS RRset.\n")
 	}
 
-	child_ns_inb, parent_ns_inb := ComputeBailiwickNS(childpri, parpri,
+	child_ns_inb, parent_ns_inb, err := ComputeBailiwickNS(childpri, parpri,
 		Globals.Zonename)
+	if err != nil {
+		return false, nil, nil, fmt.Errorf("computing bailiwick NS: %w", err)
+	}
 	for _, ns := range child_ns_inb {
 		fmt.Printf("Child in-bailiwick NS: %s\n", ns)
 	}
@@ -154,8 +161,11 @@ func ChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, [
 	for _, ns := range child_ns_inb {
 		if viper.GetBool("childsync.update-a") {
 			fmt.Printf("Comparing A glue for child NS %s:\n", ns)
-			gluediff, a_glue_adds, a_glue_removes := ComputeRRDiff(childpri,
+			gluediff, a_glue_adds, a_glue_removes, err := ComputeRRDiff(childpri,
 				parpri, ns, dns.TypeA)
+			if err != nil {
+				return false, nil, nil, fmt.Errorf("computing A glue diff for %s: %w", ns, err)
+			}
 			if gluediff {
 				differ = true
 				removes = append(removes, a_glue_removes...)
@@ -167,8 +177,11 @@ func ChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, [
 
 		if viper.GetBool("childsync.update-aaaa") {
 			fmt.Printf("Comparing AAAA glue for child NS %s:\n", ns)
-			gluediff, aaaa_glue_adds, aaaa_glue_removes := ComputeRRDiff(childpri,
+			gluediff, aaaa_glue_adds, aaaa_glue_removes, err := ComputeRRDiff(childpri,
 				parpri, ns, dns.TypeAAAA)
+			if err != nil {
+				return false, nil, nil, fmt.Errorf("computing AAAA glue diff for %s: %w", ns, err)
+			}
 			if gluediff {
 				differ = true
 				removes = append(removes, aaaa_glue_removes...)

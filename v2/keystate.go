@@ -181,7 +181,12 @@ func (kdb *KeyDB) GetKeyStatus(zonename string, keyID uint16) (*edns0.KeyStateOp
 			}
 
 			lgSigner.Debug("waiting for response")
-			verInfo := <-responseChan
+			var verInfo *VerificationInfo
+			select {
+			case verInfo = <-responseChan:
+			case <-time.After(30 * time.Second):
+				lgSigner.Warn("timeout waiting for key bootstrapper response", "zone", zonename, "keyid", keyID)
+			}
 			if verInfo != nil {
 
 				lgSigner.Debug("received verification info", "info", verInfo)

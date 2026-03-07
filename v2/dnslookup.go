@@ -1530,6 +1530,7 @@ func RecursiveDNSQuery(server, qname string, qtype uint16, timeout time.Duration
 			continue
 		}
 		if len(r.Answer) == 0 {
+			lastErr = fmt.Errorf("no answers for %s %s from %s", qname, dns.TypeToString[qtype], server)
 			lgDns.Debug("attempt /: no records found using server",
 				"attempt", attempt+1,
 				"retries", retries,

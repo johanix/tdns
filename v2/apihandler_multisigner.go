@@ -19,7 +19,9 @@ func APImultisigner(kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
 		var msp MultiSignerPost
 		err := decoder.Decode(&msp)
 		if err != nil {
-			lgApi.Warn("error decoding request", "handler", "multisigner", "err", err)
+			lgApi.Warn("error decoding request", "handler", "multisigner", "from", r.RemoteAddr, "err", err)
+			http.Error(w, fmt.Sprintf("bad request: %v", err), http.StatusBadRequest)
+			return
 		}
 
 		lgApi.Debug("received /multisigner request", "cmd", msp.Command, "from", r.RemoteAddr)

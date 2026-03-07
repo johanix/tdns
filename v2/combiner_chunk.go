@@ -414,6 +414,11 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 			applied, removed, changed, err := zd.ReplaceCombinerDataByRRtype(req.SenderID, zonename, rrtype, parsedRRs)
 			if err != nil {
 				lgCombiner.Error("REPLACE operation failed", "err", err)
+				rejectedItems = append(rejectedItems, RejectedItem{
+					Record: fmt.Sprintf("(replace %s)", op.RRtype),
+					Reason: fmt.Sprintf("replace failed: %v", err),
+				})
+				continue
 			}
 			// Always report records as applied regardless of whether data changed.
 			// The agent needs to know its records are present at the combiner so it
@@ -442,6 +447,11 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 				addChanged, err := zd.AddCombinerDataNG(req.SenderID, addRecords)
 				if err != nil {
 					lgCombiner.Error("ADD operation failed", "err", err)
+					rejectedItems = append(rejectedItems, RejectedItem{
+						Record: fmt.Sprintf("(add %s)", op.RRtype),
+						Reason: fmt.Sprintf("add failed: %v", err),
+					})
+					continue
 				}
 				if addChanged {
 					dataChanged = true
@@ -460,6 +470,11 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 				removed, err := zd.RemoveCombinerDataNG(req.SenderID, delRecords)
 				if err != nil {
 					lgCombiner.Error("DELETE operation failed", "err", err)
+					rejectedItems = append(rejectedItems, RejectedItem{
+						Record: fmt.Sprintf("(delete %s)", op.RRtype),
+						Reason: fmt.Sprintf("delete failed: %v", err),
+					})
+					continue
 				}
 				if len(removed) > 0 {
 					dataChanged = true

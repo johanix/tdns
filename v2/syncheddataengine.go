@@ -94,6 +94,7 @@ type PendingRemoteConfirmation struct {
 	OriginatingDistID string
 	OriginatingSender string
 	Zone              ZoneName
+	CreatedAt         time.Time
 }
 
 // RemoteConfirmationDetail carries per-RR confirmation detail to send back
@@ -509,6 +510,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 										OriginatingDistID: synchedDataUpdate.OriginatingDistID,
 										OriginatingSender: string(synchedDataUpdate.AgentId),
 										Zone:              synchedDataUpdate.Zone,
+										CreatedAt:         time.Now(),
 									}
 									lgEngine.Debug("tracking remote confirm", "combinerDistID", distID, "originDistID", synchedDataUpdate.OriginatingDistID, "from", synchedDataUpdate.AgentId)
 								}

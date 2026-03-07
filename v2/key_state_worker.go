@@ -28,7 +28,11 @@ func KeyStateWorker(ctx context.Context, conf *Config) error {
 	propagationDelay := defaultPropagationDelay
 	if kasp.PropagationDelay != "" {
 		if d, err := time.ParseDuration(kasp.PropagationDelay); err == nil {
-			propagationDelay = d
+			if d > 0 {
+				propagationDelay = d
+			} else {
+				lgSigner.Warn("kasp.propagation_delay must be positive, using default", "value", kasp.PropagationDelay, "default", defaultPropagationDelay)
+			}
 		} else {
 			lgSigner.Warn("invalid kasp.propagation_delay, using default", "value", kasp.PropagationDelay, "default", defaultPropagationDelay, "err", err)
 		}
@@ -37,7 +41,11 @@ func KeyStateWorker(ctx context.Context, conf *Config) error {
 	checkInterval := defaultCheckInterval
 	if kasp.CheckInterval != "" {
 		if d, err := time.ParseDuration(kasp.CheckInterval); err == nil {
-			checkInterval = d
+			if d > 0 {
+				checkInterval = d
+			} else {
+				lgSigner.Warn("kasp.check_interval must be positive, using default", "value", kasp.CheckInterval, "default", defaultCheckInterval)
+			}
 		} else {
 			lgSigner.Warn("invalid kasp.check_interval, using default", "value", kasp.CheckInterval, "default", defaultCheckInterval, "err", err)
 		}

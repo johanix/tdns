@@ -319,7 +319,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		// Distribution cache for "agent distrib list": keep completed distributions for 5 minutes, then GC purges them; incomplete are never auto-purged
 		if conf.Internal.DistributionCache == nil {
 			conf.Internal.DistributionCache = NewDistributionCache()
-			StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute)
+			StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute, conf.Internal.StopCh)
 			lgConfig.Info("distribution cache initialized (GC every 1m, completed kept 5m)")
 		}
 
@@ -448,7 +448,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			// Initialize distribution cache for outbound tracking
 			if conf.Internal.DistributionCache == nil {
 				conf.Internal.DistributionCache = NewDistributionCache()
-				StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute)
+				StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute, conf.Internal.StopCh)
 				lgConfig.Info("signer distribution cache initialized")
 			}
 
@@ -601,7 +601,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			// Initialize distribution cache for combiner outbound tracking
 			if conf.Internal.DistributionCache == nil {
 				conf.Internal.DistributionCache = NewDistributionCache()
-				StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute)
+				StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute, conf.Internal.StopCh)
 				lgConfig.Info("combiner distribution cache initialized")
 			}
 

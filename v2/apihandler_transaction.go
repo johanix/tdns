@@ -127,8 +127,8 @@ func (conf *Config) APIagentTransaction(cache *DistributionCache) func(w http.Re
 						Peer:           prc.OriginatingSender,
 						Operation:      "remote-sync",
 						Zone:           string(prc.Zone),
-						Age:            formatDuration(now.Sub(now)), // We don't track creation time on PendingRemoteConfirmation
-						CreatedAt:      "",
+						Age:            formatDuration(now.Sub(prc.CreatedAt)),
+						CreatedAt:      prc.CreatedAt.Format(time.RFC3339),
 						State:          "awaiting-combiner",
 					})
 				}

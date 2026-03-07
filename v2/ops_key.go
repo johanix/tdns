@@ -336,8 +336,6 @@ func (zd *ZoneData) RolloverSig0KeyWithParent(ctx context.Context, alg uint8, ac
 	}
 	zd.Logger.Printf("%s", kpresp.Msg)
 
-	tx.Commit() //
-
 	// 4. Get the new key from the keystore
 	newSak, err = zd.KeyDB.GetSig0Keys(zd.ZoneName, Sig0StateCreated)
 	if err != nil {

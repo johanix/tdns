@@ -128,6 +128,15 @@ func handleDoQStream(ctx context.Context, stream *quic.Stream, conn *quic.Conn, 
 		return
 	}
 
+	if len(msg.Question) == 0 {
+		lgDns.Warn("DoQ: received message with no question section", "remote", conn.RemoteAddr())
+		resp := new(dns.Msg)
+		resp.SetRcode(msg, dns.RcodeFormatError)
+		rw := &doqResponseWriter{stream: stream, conn: conn}
+		rw.WriteMsg(resp)
+		return
+	}
+
 	// Create a response writer for DoQ with both stream and connection
 	rw := &doqResponseWriter{stream: stream, conn: conn}
 

@@ -254,6 +254,7 @@ func handleCatalogZoneAdd(catalogZoneName, zoneName string, groups []string, res
 	}
 
 	// If groups were specified, add them to the zone atomically before regenerating
+	var failedGroups []string
 	if len(groups) > 0 {
 		for _, group := range groups {
 			group = strings.TrimSpace(group)
@@ -264,9 +265,8 @@ func handleCatalogZoneAdd(catalogZoneName, zoneName string, groups []string, res
 			// Add the group to the zone
 			err = cm.AddZoneGroup(zoneName, group)
 			if err != nil {
-				// If adding a group fails, log but continue with others
 				lgApi.Warn("failed to add group to zone", "group", group, "zone", zoneName, "err", err)
-				// Note: we don't return here - we try to add all groups
+				failedGroups = append(failedGroups, group)
 			} else {
 				lgApi.Info("added group to zone in catalog", "group", group, "zone", zoneName, "catalog", catalogZoneName)
 			}
@@ -280,7 +280,10 @@ func handleCatalogZoneAdd(catalogZoneName, zoneName string, groups []string, res
 	}
 
 	// Build response message
-	if len(groups) > 0 {
+	if len(failedGroups) > 0 {
+		resp.Msg = fmt.Sprintf("Zone %s added to catalog %s; failed to add groups: %s", zoneName, catalogZoneName, strings.Join(failedGroups, ", "))
+		return fmt.Errorf("failed to add groups: %s", strings.Join(failedGroups, ", "))
+	} else if len(groups) > 0 {
 		resp.Msg = fmt.Sprintf("Zone %s added to catalog %s with groups: %s", zoneName, catalogZoneName, strings.Join(groups, ", "))
 		lgApi.Info("added zone to catalog with groups", "zone", zoneName, "catalog", catalogZoneName, "groups", groups)
 	} else {

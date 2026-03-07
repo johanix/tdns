@@ -403,7 +403,11 @@ func (tm *TransportManager) StartIncomingMessageRouter(ctx context.Context) {
 				lgTransport.Info("incoming message router stopped")
 				return
 
-			case msg := <-tm.ChunkHandler.IncomingChan:
+			case msg, ok := <-tm.ChunkHandler.IncomingChan:
+				if !ok {
+					lgTransport.Info("incoming message channel closed, stopping router")
+					return
+				}
 				tm.routeIncomingMessage(msg)
 			}
 		}

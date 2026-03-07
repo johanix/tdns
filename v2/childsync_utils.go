@@ -267,7 +267,7 @@ func CreateUpdate(zone string, adds, removes []dns.RR) (*dns.Msg, error) {
 }
 
 // Only used in the CLI version
-func ComputeRRDiff(childpri, parpri, owner string, rrtype uint16) (bool, []dns.RR, []dns.RR) {
+func ComputeRRDiff(childpri, parpri, owner string, rrtype uint16) (bool, []dns.RR, []dns.RR, error) {
 	if Globals.Debug {
 		//	fmt.Printf("*** ComputeRRDiff(%s, %s)\n", owner, dns.TypeToString[rrtype])
 		fmt.Printf("*** ComputeRRDiff(%s, %s, %s, %s)\n", childpri, parpri, owner, dns.TypeToString[rrtype])
@@ -275,14 +275,12 @@ func ComputeRRDiff(childpri, parpri, owner string, rrtype uint16) (bool, []dns.R
 	rrname := dns.TypeToString[rrtype]
 	rrs_parent, err := AuthQuery(owner, parpri, rrtype)
 	if err != nil {
-		Fatal("looking up child RRset in parent primary",
-			"zone", Globals.Zonename, "rrtype", rrname, "server", parpri, "err", err)
+		return false, nil, nil, fmt.Errorf("looking up child %s RRset in parent primary %s: %w", rrname, parpri, err)
 	}
 
 	rrs_child, err := AuthQuery(owner, childpri, rrtype)
 	if err != nil {
-		Fatal("looking up child RRset in child primary",
-			"zone", Globals.Zonename, "rrtype", rrname, "server", childpri, "err", err)
+		return false, nil, nil, fmt.Errorf("looking up child %s RRset in child primary %s: %w", rrname, childpri, err)
 	}
 
 	fmt.Printf("%d %s RRs from parent, %d %s RRs from child\n",
@@ -307,23 +305,21 @@ func ComputeRRDiff(childpri, parpri, owner string, rrtype uint16) (bool, []dns.R
 			fmt.Printf("Add:   %s\n", rr.String())
 		}
 	}
-	return differ, adds, removes
+	return differ, adds, removes, nil
 }
 
 // XXX: Should be replaced by four calls: one per child and parent primary to get
 //
 //	the NS RRsets and one to new ComputeBailiwickNS() that takes a []dns.RR + zone name
-func ComputeBailiwickNS(childpri, parpri, owner string) ([]string, []string) {
+func ComputeBailiwickNS(childpri, parpri, owner string) ([]string, []string, error) {
 	ns_parent, err := AuthQuery(owner, parpri, dns.TypeNS)
 	if err != nil {
-		Fatal("looking up child NS RRset in parent primary",
-			"zone", Globals.Zonename, "server", parpri, "err", err)
+		return nil, nil, fmt.Errorf("looking up child NS RRset in parent primary %s: %w", parpri, err)
 	}
 
 	ns_child, err := AuthQuery(Globals.Zonename, childpri, dns.TypeNS)
 	if err != nil {
-		Fatal("looking up child NS RRset in child primary",
-			"zone", Globals.Zonename, "server", childpri, "err", err)
+		return nil, nil, fmt.Errorf("looking up child NS RRset in child primary %s: %w", childpri, err)
 	}
 
 	fmt.Printf("%d NS RRs from parent, %d NS RRs from child\n",
@@ -341,7 +337,7 @@ func ComputeBailiwickNS(childpri, parpri, owner string) ([]string, []string) {
 	// return ComputeBailiwickNS_NG(ns_child, ns_parent, owner)
 	child_inb, _ := BailiwickNS(owner, ns_child)
 	parent_inb, _ := BailiwickNS(owner, ns_parent)
-	return child_inb, parent_inb
+	return child_inb, parent_inb, nil
 }
 
 // Return the names of NS RRs that are in bailiwick for the zone.

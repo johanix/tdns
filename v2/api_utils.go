@@ -70,7 +70,9 @@ func APIping(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		// }
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(response)
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			lgApi.Error("APIping: failed to encode response", "err", err)
+		}
 	}
 }
 

@@ -141,7 +141,9 @@ func (conf *Config) APIcombinerDistrib(cache *DistributionCache) func(w http.Res
 			}
 
 			handledManually = true
-			json.NewEncoder(w).Encode(fullResp)
+			if err := json.NewEncoder(w).Encode(fullResp); err != nil {
+				lgApi.Error("CombinerDistribAPI: failed to encode peer-list response", "err", err)
+			}
 			return
 
 		default:

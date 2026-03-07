@@ -436,7 +436,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 
 						// Attempt dynamic discovery for authorized but unknown agents
 						lgApi.Info("agent not in PeerRegistry, attempting discovery", "agent", toFqdn, "reason", reason)
-						discoveryCtx, discoveryCancel := context.WithTimeout(context.Background(), 10*time.Second)
+						discoveryCtx, discoveryCancel := context.WithTimeout(r.Context(), 10*time.Second)
 						defer discoveryCancel()
 
 						discErr := conf.Internal.TransportManager.DiscoverAndRegisterAgent(discoveryCtx, toFqdn)
@@ -460,7 +460,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 						resp.ErrorMsg = fmt.Sprintf("peer %q has no address configured", req.To)
 						return
 					}
-					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 					defer cancel()
 					pingResp, err := conf.Internal.TransportManager.SendPing(ctx, peer)
 					if err != nil {
@@ -508,7 +508,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 
 			lgApi.Info("starting discovery", "agent", agentId, "reason", reason)
 
-			discoveryCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+			discoveryCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 			defer cancel()
 
 			err := conf.Internal.TransportManager.DiscoverAndRegisterAgent(discoveryCtx, agentFqdn)
@@ -567,18 +567,24 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 // 1. Completed distributions older than 5 minutes
 // 2. Expired distributions past their ExpiresAt time (based on message type retention)
 // Incomplete distributions are never purged by GC (only "purge --force" removes them).
-func StartDistributionGC(cache *DistributionCache, interval time.Duration) {
+func StartDistributionGC(cache *DistributionCache, interval time.Duration, stopCh chan struct{}) {
 	ticker := time.NewTicker(interval)
 	go func() {
-		for range ticker.C {
-			completedCount := cache.PurgeCompleted(5 * time.Minute)
-			if completedCount > 0 {
-				lgApi.Info("GC purged completed distributions", "count", completedCount)
-			}
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				completedCount := cache.PurgeCompleted(5 * time.Minute)
+				if completedCount > 0 {
+					lgApi.Info("GC purged completed distributions", "count", completedCount)
+				}
 
-			expiredCount := cache.PurgeExpired()
-			if expiredCount > 0 {
-				lgApi.Info("GC purged expired distributions", "count", expiredCount)
+				expiredCount := cache.PurgeExpired()
+				if expiredCount > 0 {
+					lgApi.Info("GC purged expired distributions", "count", expiredCount)
+				}
+			case <-stopCh:
+				return
 			}
 		}
 	}()

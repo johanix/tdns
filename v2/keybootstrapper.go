@@ -99,13 +99,10 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 						}
 						info.NextCheckTime = time.Now().Add(time.Duration(retryInterval) * time.Second)
 						if info.AttemptsLeft <= 0 {
-							lgSigner.Info("verification completed", "keyname", utr.KeyName, "verified", utr.Verified)
-							delete(verifications, mapKey)
-							utr.Verified = true
-							// Uppdatera motsvarande nyckel i TrustStore och sätt trusted till true
+							lgSigner.Info("verification completed", "keyname", utr.KeyName)
 							tx, err := kdb.Begin("VerifyTrustEngine")
 							if err != nil {
-								lgSigner.Error("failed to start transaction", "err", err)
+								lgSigner.Error("failed to start transaction, will retry", "err", err)
 							} else {
 								tppost := TruststorePost{
 									SubCommand: "trust",
@@ -114,14 +111,16 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 								}
 								_, err := kdb.Sig0TrustMgmt(tx, tppost)
 								if err != nil {
-									lgSigner.Error("failed to update TrustStore", "err", err)
+									lgSigner.Error("failed to update TrustStore, will retry", "err", err)
 									tx.Rollback()
 								} else {
 									err = tx.Commit()
 									if err != nil {
-										lgSigner.Error("failed to commit transaction", "err", err)
+										lgSigner.Error("failed to commit transaction, will retry", "err", err)
 									} else {
-										lgSigner.Info("TrustStore updated", "keyname", utr.KeyName, "verified", utr.Verified)
+										delete(verifications, mapKey)
+										utr.Verified = true
+										lgSigner.Info("TrustStore updated, verification complete", "keyname", utr.KeyName)
 									}
 								}
 							}

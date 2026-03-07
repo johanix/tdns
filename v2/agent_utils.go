@@ -419,8 +419,9 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 					agent.ErrorMsg = fmt.Sprintf("error creating API client: %v", err)
 					agent.LastState = time.Now()
 					agent.mu.Unlock()
+				} else if agent.Api != nil {
+					agent.Api.ApiClient.Debug = false // disable debug logging for API client
 				}
-				agent.Api.ApiClient.Debug = false // disable debug logging for API client
 
 				// Agent is now known, update and exit the loop
 				ar.S.Set(remoteid, agent)
@@ -542,6 +543,10 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 		// Already discovered - just associate zone
 		if zonename != "" {
 			ar.AddZoneToAgent(remoteid, zonename)
+		}
+		if deferredTask != nil {
+			agent.DeferredTasks = append(agent.DeferredTasks, *deferredTask)
+			ar.S.Set(remoteid, agent)
 		}
 		lgAgent.Debug("agent already exists", "agent", remoteid,
 			"apiState", AgentStateToString[agent.ApiDetails.State],

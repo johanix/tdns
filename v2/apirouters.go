@@ -61,7 +61,7 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 		if Globals.App.Type == AppTypeAgent || Globals.App.Type == AppTypeCombiner {
 			conf.Internal.DistributionCache = NewDistributionCache()
 			// Start background GC to purge old distributions every minute
-			StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute)
+			StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute, conf.Internal.StopCh)
 			lgApi.Info("initialized distribution cache with automatic cleanup")
 		}
 	}

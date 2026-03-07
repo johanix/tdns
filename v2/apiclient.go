@@ -112,11 +112,17 @@ func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 
 	req.Header.Add("Content-Type", "application/json")
 
-	if api.AuthMethod == "" {
-		// do not add any authentication header at all
+	if api.AuthMethod == "" || api.AuthMethod == "none" {
+		// no auth needed
 	} else if api.AuthMethod == "X-API-Key" {
+		if api.apiKey == "" {
+			return 0, nil, fmt.Errorf("X-API-Key auth method requires apiKey to be set")
+		}
 		req.Header.Add("X-API-Key", api.apiKey)
 	} else if api.AuthMethod == "Authorization" {
+		if api.apiKey == "" {
+			return 0, nil, fmt.Errorf("Authorization auth method requires apiKey to be set")
+		}
 		req.Header.Add("Authorization", fmt.Sprintf("token %s", api.apiKey))
 	} else {
 		lgApi.Error("unknown auth method", "method", api.AuthMethod)
@@ -124,11 +130,6 @@ func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 	}
 
 	lgApi.Debug("sending request", "authMethod", api.AuthMethod)
-
-	if api.apiKey == "" {
-		lgApi.Error("apikey not set")
-		os.Exit(1)
-	}
 
 	resp, err := api.Client.Do(req)
 
@@ -305,6 +306,8 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 
 	lgApi.Debug("RequestNG trying addresses", "addresses", addressesToTry)
 
+	bodyBytes := bytebuf.Bytes()
+
 	var resp *http.Response
 
 	// Try each address
@@ -316,11 +319,10 @@ func (api *ApiClient) RequestNG(method, endpoint string, data interface{}, dieOn
 		fullURL := fmt.Sprintf("%s%s", urlCopy.String(), endpoint)
 
 		lgApi.Debug("RequestNG trying URL", "url", fullURL)
-		api.UrlReportNG(method, fullURL, bytebuf.Bytes())
+		api.UrlReportNG(method, fullURL, bodyBytes)
 
-		// Create the request
-		req, err := http.NewRequest(method, fullURL, bytebuf)
-		//	req, err := http.NewRequest(method, api.BaseUrl+endpoint, bytebuf)
+		// Create the request with a fresh reader for each attempt
+		req, err := http.NewRequest(method, fullURL, bytes.NewReader(bodyBytes))
 		if err != nil {
 			// return 501, nil, fmt.Errorf("Error from http.NewRequest: Error: %v", err)
 			lastErr = err

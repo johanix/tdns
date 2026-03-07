@@ -550,6 +550,7 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 	zonelist, err := conf.ParseZones(ctx, true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("ReloadZoneConfig: error parsing zones", "err", err)
+		return "", fmt.Errorf("ReloadZoneConfig: %w", err)
 	}
 
 	for _, zname := range prezones {
@@ -557,6 +558,7 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 			zd, exists := Zones.Get(zname)
 			if !exists {
 				lgConfig.Warn("ReloadZoneConfig: zone not in config and also not in zone list", "zone", zname)
+				continue
 			}
 			if zd.Options[OptAutomaticZone] {
 				lgConfig.Info("ReloadZoneConfig: zone is automatic, not removing from zone list", "zone", zname)

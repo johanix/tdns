@@ -85,8 +85,8 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 		m.MsgHdr.Rcode = dns.RcodeFormatError
 		m.MsgHdr.Response = true
 		m.MsgHdr.Authoritative = true
-		if dnr.Msg != nil && len(dnr.Msg.Question) > 0 {
-			m.Question = dnr.Msg.Question
+		if dnr.Msg != nil {
+			m.MsgHdr.Id = dnr.Msg.MsgHdr.Id
 		}
 		if err := dnr.ResponseWriter.WriteMsg(m); err != nil {
 			lgHandler.Error("WriteMsg error on FormatError", "err", err)

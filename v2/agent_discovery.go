@@ -12,6 +12,7 @@ import (
 	"crypto"
 	"fmt"
 	"net/url"
+	"strconv"
 	"time"
 
 	"github.com/johanix/tdns/v2/agent/transport"
@@ -161,8 +162,10 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 
 		port := uint16(443) // default
 		if parsed.Port() != "" {
-			var p int
-			fmt.Sscanf(parsed.Port(), "%d", &p)
+			p, err := strconv.Atoi(parsed.Port())
+			if err != nil || p < 1 || p > 65535 {
+				return fmt.Errorf("invalid API URI port %q: %v", parsed.Port(), err)
+			}
 			port = uint16(p)
 		}
 
@@ -198,8 +201,10 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 
 		port := uint16(53) // default DNS port
 		if parsed.Port() != "" {
-			var p int
-			fmt.Sscanf(parsed.Port(), "%d", &p)
+			p, err := strconv.Atoi(parsed.Port())
+			if err != nil || p < 1 || p > 65535 {
+				return fmt.Errorf("invalid DNS URI port %q: %v", parsed.Port(), err)
+			}
 			port = uint16(p)
 		}
 

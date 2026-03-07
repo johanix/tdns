@@ -28,7 +28,7 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile
 		var err error
 		msg := new(dns.Msg)
 		if r.Method == http.MethodPost {
-			dnsQuery, err = io.ReadAll(r.Body)
+			dnsQuery, err = io.ReadAll(io.LimitReader(r.Body, 65535))
 			if err != nil {
 				http.Error(w, "Failed to read request body", http.StatusInternalServerError)
 				return
@@ -47,6 +47,12 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile
 		err = msg.Unpack(dnsQuery)
 		if err != nil {
 			http.Error(w, "Failed to unpack DNS message", http.StatusBadRequest)
+			return
+		}
+
+		if len(msg.Question) == 0 {
+			lgDns.Warn("DoH: received message with no question section", "remote", r.RemoteAddr)
+			http.Error(w, "DNS message has no question section", http.StatusBadRequest)
 			return
 		}
 

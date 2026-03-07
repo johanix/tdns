@@ -100,7 +100,7 @@ func dbSetupTables(db *sql.DB) bool {
 	for t, s := range DefaultTables {
 		stmt, err := db.Prepare(s)
 		if err != nil {
-			lgConfig.Error("error from schema prepare", "table", t, "schema", s, "err", err)
+			Fatal("failed to prepare db schema", "table", t, "schema", s, "err", err)
 		}
 		_, err = stmt.Exec()
 		if err != nil {
