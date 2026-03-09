@@ -5,182 +5,250 @@
 
 ## Context
 
-The TDNS multi-provider architecture needs agents to synchronize delegation data (NS, glue, DNSKEY/CDS) with the parent zone. Currently:
+The TDNS multi-provider architecture needs agents to synchronize delegation data (NS, glue, DNSKEY/CDS) with the parent zone. The current HSYNC record conflates two distinct signal types in one RRset:
 
-- Delegation sync (`OptDelSyncChild`) is configured per-zone in the config file, not driven by HSYNC
-- Sync scheme (UPDATE vs NOTIFY) is global viper config, not per-zone
-- No CDS synthesis from DNSKEYs
-- CSYNC only published reactively on the NOTIFY path, not proactively on NS changes
-- HSYNC2 has a `ParentSync` field but it's dead code — never read at runtime
-- No coordination between agents for who sends DDNS updates to the parent
+1. **Zone-wide policy** (NSmgmt, ParentSync, signing config) — must be consistent across all agents
+2. **Per-agent details** (identity, endpoint, upstream, state) — naturally varies per agent
 
-### Design Decisions
+This creates consistency problems: if NSmgmt=OWNER in one RR and NSmgmt=AGENT in another, agents get mixed signals. `ValidateHsyncRRset` (`hsync_utils.go:466-484`) already checks for NSmgmt consistency at runtime, but this is a design flaw — the structure should prevent inconsistency.
+
+### Design: Split into HSYNCPARAM + HSYNC
+
+**HSYNCPARAM** — single RR, zone-wide policy from zone owner to all providers. SVCB-style extensible (key=value pairs). New keys can be added without wire format changes.
+
+**HSYNC** — RRset with one RR per provider. Minimal static record with per-agent operational details.
+
+### Key Design Decisions
 
 - **Agents send to parent** (not combiner — keep combiner simple)
-- **Dynamic leader election** among agents for who sends the actual DDNS update (random number, highest wins — sufficient for 2-3 agents)
+- **Dynamic leader election** for DDNS (random number, highest wins — sufficient for 2-3 agents)
 - **Shared SIG(0) key** across all agents, distributed via existing encrypted CHUNK channel
-- **HSYNC v1 extended now** with ParentSync field; SVCB-style redesign later
 - **No installed base** — wire format changes are fine
+- **Identity is a label, not an FQDN** — customer-chosen tag ("netnod", "cloudflare") used as reference token. Discovery endpoint is a separate FQDN field. This decouples naming from discovery.
+- **Sign moves to HSYNCPARAM** as `signers="provA,provB"` list — zone-wide, not per-agent
+- **Coexistence**: HSYNC v1 and v2 are kept as-is. New HSYNC3+HSYNCPARAM coexist in the same zone files. Old code looks for HSYNC, new code looks for HSYNC3+HSYNCPARAM. No runtime switch.
 
-## Phase 1: Extend HSYNC v1 with ParentSync
+### Field Classification
 
-### 1a. Add ParentSync field to HSYNC struct
+**HSYNCPARAM** (zone-wide, must be consistent):
+- `nsmgmt` — owner/agent (was per-RR in HSYNC, required runtime consistency check)
+- `parentsync` — none/notify/update/auto (new)
+- `audit` — yes/no (was in HSYNC2 flags)
+- `signers` — comma-separated list of agent labels that sign (replaces per-RR `Sign` field)
 
-**File**: `core/rr_hsync.go`
+**HSYNC** (per-agent):
+- `Label` — unqualified string tag, customer-chosen ("netnod", "cloudflare"). Reference token for Upstream and HSYNCPARAM signers.
+- `Endpoint` — FQDN for agent discovery (URI, SVCB, JWK lookups). Only entered once per agent.
+- `Upstream` — label of upstream provider, or "." for top of chain.
+- `State` — on/off for per-agent onboarding/offboarding control.
 
-Add `ParentSync uint8` after `Sign`. Values reuse HSYNC2 semantics:
+## Phase 1: HSYNCPARAM + HSYNC Record Redesign
 
+### 1a. HSYNC3 — per-agent record (static, minimal)
+
+**New file**: `core/rr_hsync3.go`
+
+Zone file format:
 ```
-HsyncParentSyncNone   uint8 = 0  // zone owner handles parent sync (default/backwards compat)
-HsyncParentSyncNotify uint8 = 1  // agents publish CSYNC/CDS + send NOTIFY to parent
-HsyncParentSyncUpdate uint8 = 2  // agents send DDNS UPDATE to parent
-HsyncParentSyncAuto   uint8 = 3  // agents discover parent DSYNC and choose best method
+customer.zone. HSYNC3 cloudflare agent.cloudflare.com. netnod
+customer.zone. HSYNC3 netnod    agent.netnod.se.      .
+customer.zone. HSYNC3 akamai    agent.akamai.com.     cloudflare
 ```
 
-Update:
-- `Pack()` / `Unpack()` — add 1 byte after Sign, before Identity
-- `Parse()` — accept 6 fields (was 5): State, NSmgmt, Sign, ParentSync, Identity, Upstream
-- `String()` — include ParentSync in presentation format
-- `Len()` — add 1
-- `Copy()` — copy ParentSync
-- String/parse maps: `HsyncParentSyncToString`, `StringToHsyncParentSync`
+Wire format: `State(1) + Label(character-string) + Endpoint(domain-name) + Upstream(character-string)`
 
-Zone file example:
-```
-example.com. IN HSYNC ON AGENT SIGN UPDATE agent1.example.com. upstream.example.com.
-example.com. IN HSYNC ON AGENT NOSIGN AUTO agent2.example.com. .
+```go
+type HSYNC3 struct {
+    State    uint8  // 0=OFF, 1=ON
+    Label    string // unqualified tag, e.g. "netnod"
+    Endpoint string // FQDN for discovery, e.g. "agent.netnod.se."
+    Upstream string // label of upstream provider, or "."
+}
 ```
 
-### 1b. Agent reads ParentSync from HSYNC and sets zone option
+~150 lines. Simpler than current HSYNC (no SVCB machinery needed).
 
-**File**: `hsync_utils.go` (or `agent_utils.go`)
+### 1b. HSYNCPARAM — zone-wide policy record (SVCB-style extensible)
 
-When agent processes HSYNC RRset (in `UpdateAgents` or `analyzeHsyncSigners`), also extract ParentSync from *our* HSYNC record:
-- If ParentSync != NONE → set `OptDelSyncChild` on the zone (currently set from config only)
-- Store the desired scheme (NOTIFY/UPDATE/AUTO) in ZoneData or a new per-zone field
-- This replaces the static config-file-based `delegation-sync-child` option
+**New file**: `core/rr_hsyncparam.go` (adapted from `core/rr_deleg.go`, uses `core/zscan.go` zlexer)
 
-### 1c. Update all HSYNC consumers for new field
+Zone file format:
+```
+customer.zone. HSYNCPARAM nsmgmt=agent parentsync=auto signers="netnod" audit=no
+customer.zone. HSYNCPARAM nsmgmt=agent parentsync=update signers="netnod,cloudflare"
+```
 
-**Files**: `cli/hsync_debug_cmds.go`, `hsync_utils.go`, `agent_policy.go`, zone file examples
+```go
+type HSYNCPARAM struct {
+    Value []HSYNCPARAMKeyValue  // key=value pairs
+}
+```
 
-Update parsing, display, validation code that handles HSYNC records.
+Keys:
+```go
+const (
+    HSYNCPARAM_NSMGMT     HSYNCPARAMKey = 0  // uint8: 1=OWNER, 2=AGENT
+    HSYNCPARAM_PARENTSYNC HSYNCPARAMKey = 1  // uint8: 0=NONE, 1=NOTIFY, 2=UPDATE, 3=AUTO
+    HSYNCPARAM_AUDIT      HSYNCPARAMKey = 2  // uint8: 0=NO, 1=YES
+    HSYNCPARAM_SIGNERS    HSYNCPARAMKey = 3  // comma-separated list of agent labels
+    hsyncparam_RESERVED   HSYNCPARAMKey = 65535
+)
+```
+
+Reuses from `rr_deleg.go`: key string/code conversion, zlexer-based key=value parsing, packData/unpackData, DELEGLocal pattern, paramToStr/parseParam helpers.
+
+~350 lines. Most is mechanical adaptation from DELEG.
+
+### 1c. Type registration
+
+**File**: `core/rr_defs.go`
+- `TypeHSYNC3 = 0x0F9F`
+- `TypeHSYNCPARAM = 0x0FA0`
+
+### 1d. Accessor helpers
+
+```go
+func (h *HSYNCPARAM) GetNSmgmt() uint8
+func (h *HSYNCPARAM) GetParentSync() uint8
+func (h *HSYNCPARAM) GetAudit() uint8
+func (h *HSYNCPARAM) GetSigners() []string
+func (h *HSYNCPARAM) IsSignerLabel(label string) bool
+```
+
+### 1e. Update consumers
+
+**AgentId becomes a label, not an FQDN.** Discovery uses the Endpoint field.
+
+| File | Change |
+|------|--------|
+| `agent_utils.go` (~35 sites) | `hsync.Identity` → `hsync.Label` as AgentId, `hsync.Endpoint` for discovery |
+| `hsync_utils.go` (~8 sites) | `hsync.NSmgmt`, `hsync.Sign` → read from HSYNCPARAM |
+| `agent_authorization.go` (~6 sites) | `hsync.Identity` → `hsync.Label` |
+| `agent_policy.go` (~2 sites) | `hsync.NSmgmt` → HSYNCPARAM `GetNSmgmt()` |
+| `hsync_hello.go` (~2 sites) | `hsync.Identity` → `hsync.Label` |
+| `agent_discovery.go` | `result.Identity` → `hsync.Endpoint` as discovery target |
+| `cli/hsync_debug_cmds.go` | Update display for new format |
+
+Key consumer changes:
+- `UpdateAgents`: `DiscoverAgentAsync(AgentId(hsync.Label), hsync.Endpoint, nil)` — pass endpoint separately
+- `analyzeHsyncSigners`: read `signers` list from HSYNCPARAM, check if our label is in the list
+- `EvaluateUpdate`: read `GetNSmgmt()` from HSYNCPARAM
+
+### 1f. Coexistence with HSYNC v1
+
+Keep `rr_hsync.go` and `rr_hsync2.go` as-is. Test zones contain both HSYNC and HSYNC3+HSYNCPARAM. Old code ignores HSYNC3/HSYNCPARAM, new code ignores HSYNC. No runtime switch — which record type is used depends on which codebase is running.
+
+**Phase 1 complexity**: ~8 hours. ~500 lines new code, ~50 consumer site changes.
 
 ## Phase 2: Proactive CDS and CSYNC Publication
 
+**Prerequisite**: Zone must be signed AND have a signed delegation (DS in parent).
+
 ### 2a. CDS synthesis from DNSKEYs
 
-**File**: new function in `ops_cds.go` (or extend `delegation_sync.go`)
+**File**: `delegation_sync.go` or new `ops_cds.go`
 
-When DNSKEYs change (detected via KEYSTATE or zone update):
-- Synthesize CDS RRset from current KSK DNSKEY(s)
-- Publish CDS into the zone via `UpdateQ`
-- CDS format: hash of DNSKEY per RFC 7344 (DS-like record at zone apex)
-
-Trigger: hook into the existing DNSKEY change detection path (KEYSTATE message handler in `signer_msg_handler.go` or agent's SDE).
+On DNSKEY change (via KEYSTATE): synthesize CDS RRset from current KSK DNSKEY(s), publish via UpdateQ. CDS format: hash of DNSKEY per RFC 7344. ~2 hours.
 
 ### 2b. Proactive CSYNC on NS changes
 
 **File**: `zone_updater.go` or `delegation_sync.go`
 
-When `ZoneUpdateChangesDelegationDataNG` detects NS/glue changes:
-- Always publish/update CSYNC RR (currently only done on NOTIFY path)
-- CSYNC should be published regardless of which sync scheme is configured
-- CSYNC serves as a signal to scanning parents even if we also do active DDNS
+On NS/glue change (via `ZoneUpdateChangesDelegationDataNG`): publish/update CSYNC RR. Currently only done on NOTIFY path — extend to always publish. `PublishCsyncRR` in `ops_csync.go` already exists. ~1 hour.
 
 ### 2c. DSYNC discovery on zone setup
 
-**File**: `zone_utils.go` (`SetupZoneSync` or new OnFirstLoad callback)
+**File**: `zone_utils.go`
 
-When a zone's HSYNC says ParentSync != NONE:
-1. Discover parent zone (via IMR)
-2. Look up `_dsync.<parent>` for DSYNC RRset
-3. If parent supports UPDATE scheme → prefer DDNS (if our HSYNC says UPDATE or AUTO)
-4. If parent supports NOTIFY → use NOTIFY (if our HSYNC says NOTIFY or AUTO)
-5. If no DSYNC found → fall back to CSYNC publication only (passive, wait for parent to scan)
-6. Cache discovery result in ZoneData for use by delegation sync engine
+When HSYNCPARAM `parentsync != none`: discover parent via IMR, look up `_dsync.<parent>`, select sync scheme, cache in ZoneData. ~2 hours.
 
-## Phase 3: Leader Election for DDNS Updates
+## Phase 3: Leader Election and Coordinated DDNS
 
-### 3a. Simple leader election protocol
+### 3a. Leader election protocol
 
-**File**: new `parentsync_leader.go` (or extend `hsyncengine.go`)
+**File**: new `parentsync_leader.go`
 
-Protocol (runs per zone, among agents that have ParentSync != NONE):
-1. When an agent detects it needs to send a DDNS update to the parent
-2. Agent generates a random uint32 and broadcasts `PARENTSYNC-ELECT` message to all peer agents (via existing CHUNK messaging)
-3. Each agent responds with its own random number
-4. Highest number wins (ties broken by agent identity string comparison)
-5. Winner sends the DDNS update; losers stand down
-6. Election result cached with a TTL (e.g., 5 minutes) — don't re-elect on every change
+**Triggers** — election is cheap, don't optimize for avoiding it:
+- Agent startup with no known leader
+- HSYNC RRset changes (provider added or removed)
+- Cached leader TTL expires (e.g., 5 minutes)
+- "I don't know who the leader is" = "call election"
 
-Failure handling:
-- If elected leader doesn't respond to beats within timeout → re-elect
-- If only one agent is alive → it sends directly (no election needed)
-- Election only needed when >1 agent has ParentSync set
+**Protocol** (per zone, among agents with parentsync != none):
 
-### 3b. SIG(0) key distribution
+1. **Call**: Any agent broadcasts `PARENTSYNC-ELECT {zone}` to all peers.
+2. **Vote**: Every agent generates a random uint32 and broadcasts `PARENTSYNC-VOTE {zone, random_number, my_label}` to **all** peers.
+3. **Confirm**: After timeout (3s), each agent determines winner (highest number, ties by label) and broadcasts `PARENTSYNC-CONFIRM {zone, winner_label}` to **all** peers.
 
-**File**: extend existing key management in `ops_key.go` + CHUNK messaging
+Outcomes:
+- All confirmations agree → leader established, cached with TTL
+- Confirmations disagree → re-elect (vote was lost)
+- Peer unresponsive → proceed without it
 
-When an agent generates or receives a SIG(0) key for delegation sync:
-1. Agent generates the SIG(0) keypair (as today in `BootstrapSig0KeyWithParent`)
-2. Agent distributes the private key to peer agents via encrypted CHUNK message (new message type `PARENTSYNC-KEY`)
-3. Receiving agents store the private key in their local keystore, associated with the zone
-4. On key rollover, same distribution mechanism
+Message cost (via existing CHUNK messaging):
 
-For first cut: the first agent to set up delegation sync for a zone generates the key and distributes it. Other agents wait for the key before attempting DDNS.
+| Providers | Call | Votes | Confirmations | Total |
+|-----------|------|-------|---------------|-------|
+| 2 | 1 | 2 | 2 | 5 |
+| 3 | 1 | 6 | 6 | 13 |
 
-### 3c. Coordinated DDNS sending
+Single agent: no election needed, sends directly. ~4 hours.
+
+### 3b. SIG(0) key generation and publication
+
+**File**: extend `ops_key.go`
+
+**(b1) RFC 8078 model** (first): KEY RR at zone apex. Existing `BootstrapSig0KeyWithParent` already does this.
+
+**(b2) RFC 9615 model** (second): KEY RR at `_signal.<nameserver-name>`. Publish at both locations.
+
+### 3c. SIG(0) private key distribution
+
+**File**: extend CHUNK messaging
+
+New message type `PARENTSYNC-KEY`. First agent generates keypair, distributes private key to peers via encrypted CHUNK. Receiving agents store in local keystore. ~3 hours.
+
+### 3d. Coordinated DDNS sending
 
 **File**: extend `delegation_sync.go`
 
-When delegation data changes and agent determines DDNS update is needed:
-1. Check if we are the current elected leader for this zone's parent sync
-2. If yes → send the DDNS update (existing `SyncZoneDelegationViaUpdate` machinery)
-3. If no → do nothing (leader will handle it)
-4. If no leader elected → trigger election (Phase 3a)
-
-## Phase 4 (Future): SVCB-style HSYNC Redesign
-
-Not in scope for this implementation, but the direction:
-- Replace fixed RDATA fields with SVCB-like key=value pairs
-- Each pair: `<key-code>` (uint16) + `<value-length>` (uint16) + `<value>` (variable)
-- Existing fields become standard keys (state, nsmgmt, sign, parentsync, identity, upstream)
-- New keys can be added without wire format changes
-- Presentation format: `example.com. IN HSYNC 1 agent1.example.com. upstream.example.com. nsmgmt=agent sign=yes parentsync=auto`
+Gate DDNS sends on leader election result. Existing `SyncZoneDelegationViaUpdate` machinery handles the actual send. ~2 hours.
 
 ## Implementation Order
 
-1. **Phase 1** (HSYNC extension + agent reads ParentSync) — prerequisite for everything
-2. **Phase 2a-2b** (CDS/CSYNC publication) — can be done independently, useful even without DDNS
-3. **Phase 2c** (DSYNC discovery) — needed before Phase 3
-4. **Phase 3a** (leader election) — needed before coordinated DDNS
-5. **Phase 3b** (key distribution) — needed before coordinated DDNS
-6. **Phase 3c** (coordinated DDNS sending) — the final piece
-
-Phases 1 and 2 are the immediate work. Phase 3 can follow as a second iteration.
+1. **Phase 1** (HSYNCPARAM + HSYNC redesign) — prerequisite for everything (~8h)
+2. **Phase 2a-2b** (CDS/CSYNC publication) — independent once Phase 1 done (~3h)
+3. **Phase 2c** (DSYNC discovery) — needed before Phase 3 (~2h)
+4. **Phase 3a** (leader election) (~4h)
+5. **Phase 3b-3c** (SIG(0) key publication + distribution) (~3h)
+6. **Phase 3d** (coordinated DDNS sending) (~2h)
 
 ## Files Modified
 
 | Phase | Files |
 |-------|-------|
-| 1a | `core/rr_hsync.go` |
-| 1b | `hsync_utils.go`, `agent_utils.go` |
-| 1c | `cli/hsync_debug_cmds.go`, `agent_policy.go`, zone files |
-| 2a | new `ops_cds.go` or `delegation_sync.go` |
+| 1a | new `core/rr_hsync3.go` |
+| 1b | new `core/rr_hsyncparam.go` |
+| 1c | `core/rr_defs.go` |
+| 1e | `agent_utils.go`, `hsync_utils.go`, `agent_authorization.go`, `agent_policy.go`, `hsync_hello.go`, `agent_discovery.go`, `cli/hsync_debug_cmds.go` |
+| 1f | no changes — keep `core/rr_hsync.go`, `core/rr_hsync2.go` as-is |
+| 2a | `delegation_sync.go` or new `ops_cds.go` |
 | 2b | `zone_updater.go` or `delegation_sync.go` |
 | 2c | `zone_utils.go` |
 | 3a | new `parentsync_leader.go` |
-| 3b | `ops_key.go`, CHUNK message handlers |
-| 3c | `delegation_sync.go` |
+| 3b | `ops_key.go` |
+| 3c | CHUNK message handlers |
+| 3d | `delegation_sync.go` |
 
 ## Verification
 
 1. Build: `cd tdns/cmdv2 && GOROOT=/opt/local/lib/go make`
-2. Parse HSYNC with ParentSync in zone file → verify correct field values
-3. Wire format round-trip test for HSYNC with ParentSync
-4. Agent startup with HSYNC ParentSync=UPDATE → verify `OptDelSyncChild` set automatically
-5. NS change in zone → verify CSYNC published proactively
-6. DNSKEY change → verify CDS synthesized and published
-7. (Phase 3) Two agents restart → verify leader election and single DDNS update sent
+2. Parse HSYNC3 with label/endpoint/upstream in zone file → verify correct field values
+3. Parse HSYNCPARAM with key=value pairs → verify accessor helpers work
+4. Wire format round-trip for both record types
+5. `signers="netnod"` in HSYNCPARAM → `analyzeHsyncSigners` returns correct result
+6. Agent startup with HSYNCPARAM parentsync=update → `OptDelSyncChild` set automatically
+7. NS change in signed zone with signed delegation → CSYNC published proactively
+8. DNSKEY change in signed zone → CDS synthesized and published
+9. SIG(0) KEY published at zone apex (RFC 8078)
+10. Two agents restart → leader election, single DDNS update sent
