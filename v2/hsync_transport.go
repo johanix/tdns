@@ -1117,9 +1117,9 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 	var apiErr error
 	var dnsErr error
 
-	// Try API transport if available, has valid endpoint, and actually needs Hello (state == KNOWN).
+	// Try API transport if locally supported, available, has valid endpoint, and actually needs Hello (state == KNOWN).
 	// Skip if already INTRODUCED or OPERATIONAL — no point sending Hello to an already-established transport.
-	if tm.APITransport != nil && agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" && agent.ApiDetails.State == AgentStateKnown {
+	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" && agent.ApiDetails.State == AgentStateKnown {
 		apiResp, apiErr = tm.APITransport.Hello(ctx, peer, req)
 		agent.mu.Lock()
 		if apiErr != nil {
@@ -1226,8 +1226,8 @@ func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Age
 	var apiErr error
 	var dnsErr error
 
-	// Try API transport if available, has valid endpoint, and OPERATIONAL/LEGACY
-	if tm.APITransport != nil && agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" {
+	// Try API transport if locally supported, available, has valid endpoint, and OPERATIONAL/LEGACY
+	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" {
 		if agent.ApiDetails.State == AgentStateOperational || agent.ApiDetails.State == AgentStateIntroduced || agent.ApiDetails.State == AgentStateLegacy {
 			apiResp, apiErr = tm.APITransport.Beat(ctx, peer, req)
 			agent.mu.Lock()

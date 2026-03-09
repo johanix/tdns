@@ -57,11 +57,13 @@ func (ar *AgentRegistry) HelloRetrier() {
 // Handles both API and DNS transports independently.
 // Continues retrying while EITHER transport is in KNOWN state.
 //
-// Fast-start: up to 3 immediate attempts with 5s spacing.
-// If all 3 fail, falls back to the normal helloretry ticker.
+// Fast-start: configurable number of immediate attempts with configurable spacing.
+// If all fail, falls back to the normal helloretry ticker.
 // On HELLO success (INTRODUCED), triggers fast beat attempts.
 func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 	helloRetryInterval := configureInterval("agent.syncengine.intervals.helloretry", 15, 1800)
+	fastAttempts := configureInterval("agent.syncengine.intervals.hello_fast_attempts", 3, 20)
+	fastIntervalSec := configureInterval("agent.syncengine.intervals.hello_fast_interval", 1, 30)
 	go func(agent *Agent) {
 		// Check if ANY transport needs Hello retries
 		if !ar.agentNeedsHello(agent) {
@@ -72,12 +74,12 @@ func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 		}
 
 		lgAgent.Info("HelloRetrierNG started", "agent", agent.Identity,
+			"fastAttempts", fastAttempts, "fastInterval", fastIntervalSec,
 			"apiState", AgentStateToString[agent.ApiDetails.State],
 			"dnsState", AgentStateToString[agent.DnsDetails.State])
 
-		// Phase 1: Fast attempts — up to 3 tries with 5s spacing
-		const fastAttempts = 3
-		const fastInterval = 5 * time.Second
+		// Phase 1: Fast attempts — configurable count and spacing
+		fastInterval := time.Duration(fastIntervalSec) * time.Second
 
 		for attempt := 1; attempt <= fastAttempts; attempt++ {
 			if attempt > 1 {
@@ -253,7 +255,7 @@ func (ar *AgentRegistry) SingleHello(agent *Agent, zone ZoneName) {
 
 	// Use TransportManager for independent multi-transport handling
 	if ar.TransportManager != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
 		defer cancel()
 		sharedZones := ar.sharedZonesForAgent(agent)
 		// SendHelloWithFallback now handles both transports independently
