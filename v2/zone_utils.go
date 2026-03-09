@@ -1003,6 +1003,29 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 
 func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	wantsSync := zd.Options[OptDelSyncParent] || zd.Options[OptDelSyncChild]
+
+	// Check HSYNCPARAM for parentsync policy. If set to anything other than "none",
+	// automatically enable delegation sync for this child zone.
+	if !zd.Options[OptDelSyncChild] {
+		apex, err := zd.GetOwner(zd.ZoneName)
+		if err == nil && apex != nil {
+			hsyncparamRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
+			if exists && len(hsyncparamRRset.RRs) > 0 {
+				if prr, ok := hsyncparamRRset.RRs[0].(*dns.PrivateRR); ok {
+					if hsyncparam, ok := prr.Data.(*core.HSYNCPARAM); ok {
+						ps := hsyncparam.GetParentSync()
+						if ps != core.HsyncParentSyncNone {
+							lg.Info("SetupZoneSync: HSYNCPARAM parentsync is set, enabling delegation sync",
+								"zone", zd.ZoneName, "parentsync", core.HsyncParentSyncToString[ps])
+							zd.Options[OptDelSyncChild] = true
+							wantsSync = true
+						}
+					}
+				}
+			}
+		}
+	}
+
 	if !wantsSync {
 		lg.Debug("SetupZoneSync: zone does not require delegation sync", "zone", zd.ZoneName)
 		return nil
@@ -1068,8 +1091,8 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 				}
 
 			case "notify":
-				// Nothing to do here as CSYNC and CDS will only be published when
-				// the zone is modified, not proactively.
+				// CSYNC and CDS are published proactively when the zone is modified
+				// (via zone_updater.go and delegation_sync.go).
 			default:
 			}
 		}

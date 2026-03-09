@@ -159,6 +159,15 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 					}
 				}
 
+				// Publish CDS records from current DNSKEYs if zone has delegation sync
+				if zd.Options[OptDelSyncChild] {
+					if err := zd.PublishCdsRRs(); err != nil {
+						lgDns.Error("DelegationSyncher: error publishing CDS", "zone", zd.ZoneName, "err", err)
+					} else {
+						lgDns.Info("DelegationSyncher: published CDS from DNSKEYs", "zone", zd.ZoneName)
+					}
+				}
+
 			default:
 				lgDns.Warn("DelegationSyncher: unknown command, ignoring", "zone", ds.ZoneName, "command", ds.Command)
 			}

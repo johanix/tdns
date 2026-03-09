@@ -137,6 +137,13 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 							SyncStatus: dss,
 							// XXX: *NOT* populating the Adds and Removes here, using the dss data
 						}
+						// Proactively publish CSYNC when delegation data changes.
+						// This serves as a signal to scanning parents even if we also do active DDNS.
+						if err := zd.PublishCsyncRR(); err != nil {
+							lg.Error("ZoneUpdater: error publishing CSYNC", "zone", zd.ZoneName, "err", err)
+						} else {
+							lg.Debug("ZoneUpdater: published CSYNC proactively", "zone", zd.ZoneName)
+						}
 					}
 
 					var updated bool
