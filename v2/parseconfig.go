@@ -695,6 +695,35 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 					}
 				})
 			}
+
+			// MP zone KEY publication: send SIG(0) KEY to combiner as REPLACE operation.
+			// For MP zones, the combiner manages the zone apex, so the agent cannot
+			// publish the KEY locally — it must send it to the combiner.
+			if options[OptMultiProvider] {
+				tm := conf.Internal.TransportManager
+				kdb := conf.Internal.KeyDB
+				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
+					if tm == nil || kdb == nil || !zd.Options[OptDelSyncChild] {
+						return
+					}
+					targetName := DsyncUpdateTargetName(zd.ZoneName)
+					if targetName == "" {
+						targetName = zd.ZoneName
+					}
+					sak, err := kdb.GetSig0Keys(targetName, Sig0StateActive)
+					if err != nil || len(sak.Keys) == 0 {
+						lgConfig.Debug("MP KEY publication: no active SIG(0) key", "zone", zd.ZoneName)
+						return
+					}
+					keyRR := &sak.Keys[0].KeyRR
+					distID, err := PublishKeyToCombiner(ZoneName(zd.ZoneName), keyRR, tm)
+					if err != nil {
+						lgConfig.Error("MP KEY publication: failed to send KEY to combiner", "zone", zd.ZoneName, "err", err)
+					} else {
+						lgConfig.Info("MP KEY publication: KEY sent to combiner", "zone", zd.ZoneName, "distID", distID)
+					}
+				})
+			}
 		}
 
 		switch Globals.App.Type {

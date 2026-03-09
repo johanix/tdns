@@ -4,11 +4,15 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
 var lgElect = Logger("elect")
@@ -433,4 +437,105 @@ func parseString(records map[string][]string, key string) string {
 		return ""
 	}
 	return vals[0]
+}
+
+// ParentSyncStatus holds on-demand status information about parent delegation sync for a zone.
+type ParentSyncStatus struct {
+	Zone           ZoneName        `json:"zone"`
+	Leader         AgentId         `json:"leader"`
+	LeaderExpiry   time.Time       `json:"leader_expiry"`
+	ElectionTerm   uint64          `json:"election_term"`
+	IsLeader       bool            `json:"is_leader"`
+	KeyAlgorithm   string          `json:"key_algorithm,omitempty"`
+	KeyID          uint16          `json:"key_id,omitempty"`
+	KeyRR          string          `json:"key_rr,omitempty"`
+	ApexPublished  bool            `json:"apex_published"`
+	ChildNS        []string        `json:"child_ns,omitempty"`
+	KeyPublication map[string]bool `json:"key_publication,omitempty"`
+	LastChecked    time.Time       `json:"last_checked"`
+}
+
+// Sig0KeyOwnerName computes the RFC 9615-style owner name for a child SIG(0) KEY RR.
+// Format: _sig0key.<zone>._signal.<nameserver>
+func Sig0KeyOwnerName(zone, nameserver string) string {
+	return "_sig0key." + dns.Fqdn(zone) + "_signal." + dns.Fqdn(nameserver)
+}
+
+// GetParentSyncStatus computes the current parent sync status for a zone on demand.
+func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *ZoneData, kdb *KeyDB, imr *Imr) ParentSyncStatus {
+	status := ParentSyncStatus{
+		Zone:        zone,
+		LastChecked: time.Now(),
+	}
+
+	// 1. Leader election state
+	le := lem.getOrCreate(zone)
+	le.mu.Lock()
+	status.Leader = le.Leader
+	status.LeaderExpiry = le.LeaderExpiry
+	status.ElectionTerm = le.Term
+	le.mu.Unlock()
+	status.IsLeader = status.Leader == lem.localID && time.Now().Before(status.LeaderExpiry)
+
+	if zd == nil || kdb == nil {
+		return status
+	}
+
+	// 2. SIG(0) key info
+	targetName := DsyncUpdateTargetName(string(zone))
+	if targetName == "" {
+		targetName = string(zone)
+	}
+	sak, err := kdb.GetSig0Keys(targetName, Sig0StateActive)
+	if err == nil && len(sak.Keys) > 0 {
+		key := sak.Keys[0]
+		status.KeyAlgorithm = dns.AlgorithmToString[key.Algorithm]
+		status.KeyID = key.KeyId
+		status.KeyRR = key.KeyRR.String()
+	}
+
+	// 3. Check apex KEY publication
+	owner, err := zd.GetOwner(zd.ZoneName)
+	if err == nil && owner != nil {
+		if _, keyExists := owner.RRtypes.Get(dns.TypeKEY); keyExists {
+			status.ApexPublished = true
+		}
+	}
+
+	// 4. Get child NS names
+	if owner != nil {
+		nsRRset := owner.RRtypes.GetOnlyRRSet(dns.TypeNS)
+		for _, rr := range nsRRset.RRs {
+			if nsRR, ok := rr.(*dns.NS); ok {
+				status.ChildNS = append(status.ChildNS, nsRR.Ns)
+			}
+		}
+	}
+
+	// 5. Check _signal KEY publication for each child NS via IMR
+	if imr != nil && len(status.ChildNS) > 0 {
+		status.KeyPublication = make(map[string]bool)
+		for _, ns := range status.ChildNS {
+			ownerName := Sig0KeyOwnerName(string(zone), ns)
+			resp, err := imr.ImrQuery(context.Background(), ownerName, dns.TypeKEY, dns.ClassINET, nil)
+			published := err == nil && resp != nil && resp.RRset != nil && len(resp.RRset.RRs) > 0
+			status.KeyPublication[ownerName] = published
+		}
+	}
+
+	return status
+}
+
+// PublishKeyToCombiner sends a KEY RR to the combiner as a REPLACE operation.
+// Used by MP zones where the combiner manages the zone apex.
+func PublishKeyToCombiner(zone ZoneName, keyRR dns.RR, tm *TransportManager) (string, error) {
+	update := &ZoneUpdate{
+		Zone: zone,
+		Operations: []core.RROperation{{
+			Operation: "replace",
+			RRtype:    "KEY",
+			Records:   []string{keyRR.String()},
+		}},
+	}
+	return tm.EnqueueForCombiner(zone, update, "")
 }

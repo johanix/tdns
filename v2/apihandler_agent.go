@@ -585,6 +585,35 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				resp.ErrorMsg = fmt.Sprintf("send-rfi requires MessageType RFI, got %q", AgentMsgToString[amp.MessageType])
 			}
 
+		case "parentsync-status":
+			lem := conf.Internal.LeaderElectionManager
+			if lem == nil {
+				resp.Error = true
+				resp.ErrorMsg = "leader election manager not initialized"
+				return
+			}
+			status := lem.GetParentSyncStatus(amp.Zone, zd, kdb, conf.Internal.ImrEngine)
+			resp.Data = status
+			resp.Msg = fmt.Sprintf("Parent sync status for zone %s", amp.Zone)
+
+		case "parentsync-election":
+			lem := conf.Internal.LeaderElectionManager
+			if lem == nil {
+				resp.Error = true
+				resp.ErrorMsg = "leader election manager not initialized"
+				return
+			}
+			zad, err := conf.Internal.AgentRegistry.GetZoneAgentData(amp.Zone)
+			peers := 0
+			if err == nil {
+				peers = len(zad.Agents) - 1
+				if peers < 0 {
+					peers = 0
+				}
+			}
+			lem.StartElection(amp.Zone, peers)
+			resp.Msg = fmt.Sprintf("Election started for zone %s with %d peers", amp.Zone, peers)
+
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown agent command: %s", amp.Command)
 			resp.Error = true
