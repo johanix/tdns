@@ -643,7 +643,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			Zones.Set(zname, zdp)
 		}
 
-		if Globals.App.Type != AppTypeAgent && zdp.FirstZoneLoad {
+		if zdp.FirstZoneLoad {
 			lgConfig.Info("considering OnFirstLoad callbacks", "zone", zname,
 				"online-signing", options[OptOnlineSigning],
 				"inline-signing", options[OptInlineSigning],
@@ -680,6 +680,18 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
 					if err := zd.SetupZoneSync(delegationSyncQ); err != nil {
 						lgConfig.Error("SetupZoneSync failed in OnFirstLoad", "zone", zd.ZoneName, "error", err)
+					}
+				})
+			}
+
+			// Leader election callback: trigger initial election for zones with delegation sync.
+			// On startup, peers may not yet be connected, so expectedPeers=0 makes the
+			// agent self-elect. When peers connect later, UpdateAgents triggers re-election.
+			if options[OptDelSyncChild] || options[OptMultiProvider] {
+				lem := conf.Internal.LeaderElectionManager
+				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
+					if lem != nil && zd.Options[OptDelSyncChild] {
+						lem.StartElection(ZoneName(zd.ZoneName), 0)
 					}
 				})
 			}

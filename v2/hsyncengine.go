@@ -529,6 +529,11 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				resp.ErrorMsg = "Timeout waiting for audit data"
 			}
 
+		case "ELECT-CALL", "ELECT-VOTE", "ELECT-CONFIRM":
+			if ar.LeaderElectionManager != nil {
+				ar.LeaderElectionManager.HandleMessage(ampp.Zone, ampp.OriginatorID, ampp.RfiType, ampp.Records)
+			}
+
 		default:
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("MsgHandler for %s: Unknown RFI type: %s", ar.LocalAgent.Identity, ampp.RfiType)

@@ -87,6 +87,15 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 					"ns_removes", len(dss.NsRemoves), "ns_adds", len(dss.NsAdds),
 					"a_removes", len(dss.ARemoves), "a_adds", len(dss.AAdds),
 					"aaaa_removes", len(dss.AAAARemoves), "aaaa_adds", len(dss.AAAAAdds))
+
+				// Only the elected leader sends DDNS to the parent
+				if lem := conf.Internal.LeaderElectionManager; lem != nil {
+					if !lem.IsLeader(ZoneName(ds.ZoneName)) {
+						lgDns.Info("DelegationSyncher: not the delegation sync leader, skipping DDNS", "zone", ds.ZoneName)
+						continue
+					}
+				}
+
 				zd := ds.ZoneData
 				if zd.Parent == "" || zd.Parent == "." {
 					zd.Parent, err = imr.ParentZone(zd.ZoneName)

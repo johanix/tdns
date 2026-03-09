@@ -900,8 +900,17 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 		conf.Internal.TransportManager.StartReliableQueue(ctx)
 	}
 
+	// Leader election manager for coordinated parent delegation sync (DDNS)
+	lem := NewLeaderElectionManager(
+		AgentId(conf.Agent.Identity), 5*time.Minute,
+		func(zone ZoneName, rfiType string, records map[string][]string) error {
+			return conf.Internal.AgentRegistry.broadcastElectToZone(zone, rfiType, records)
+		},
+	)
+	conf.Internal.LeaderElectionManager = lem
+	conf.Internal.AgentRegistry.LeaderElectionManager = lem
+
 	// Agent-specific
-	//log.Printf("TDNS %s (%s): starting: hsyncengine, synceddataengine, apidispatcherNG", Globals.App.Name, AppTypeToString[Globals.App.Type])
 	startEngineNoError(&Globals.App, "HsyncEngine", func() { HsyncEngine(ctx, conf, conf.Internal.MsgQs) })
 	startEngineNoError(&Globals.App, "DiscoveryRetrierNG", func() {
 		conf.Internal.AgentRegistry.DiscoveryRetrierNG(ctx)

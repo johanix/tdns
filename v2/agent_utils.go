@@ -989,6 +989,14 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 		}
 	}
 
+	// Trigger leader election if HSYNC3 RRset changed and we have a leader election manager
+	if len(updatedIdentities) > 0 && ar.LeaderElectionManager != nil {
+		zad, err := ar.GetZoneAgentData(zonename)
+		if err == nil {
+			ar.LeaderElectionManager.StartElection(zonename, len(zad.Agents)-1) // -1 for ourselves
+		}
+	}
+
 	return nil
 }
 

@@ -494,7 +494,8 @@ type InternalConf struct {
 	KrsConf             interface{}        // *krs.KrsConf - using interface{} to avoid circular import
 	Scanner             *Scanner           // Scanner instance for async job tracking
 	CombinerState       *CombinerState     // Combiner business logic state (error journal, protected namespaces)
-	TransportManager    *TransportManager  // Multi-transport (API + DNS) for agent/combiner/signer; nil if transport not initialized
+	TransportManager       *TransportManager       // Multi-transport (API + DNS) for agent/combiner/signer; nil if transport not initialized
+	LeaderElectionManager  *LeaderElectionManager  // Per-zone leader election for delegation sync; nil if not agent
 	ChunkPayloadStore   ChunkPayloadStore  // Optional: for query-mode CHUNK (agent); keyed by qname; set when agent chunk_mode is "query"
 	DistributionCache   *DistributionCache // In-memory cache of distributions (agent/combiner)
 }
