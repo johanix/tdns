@@ -7,6 +7,7 @@ package tdns
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -34,7 +35,7 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 		// Fall through with oldapex == nil (initial load)
 	}
 
-	newhsync, err := newzd.GetRRset(zd.ZoneName, core.TypeHSYNC)
+	newhsync, err := newzd.GetRRset(zd.ZoneName, core.TypeHSYNC3)
 	if err != nil {
 		return false, nil, err
 	}
@@ -42,7 +43,7 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 	if oldapex == nil {
 		lgAgent.Info("initial zone load, old apex was nil", "zone", zd.ZoneName)
 		if newhsync == nil {
-			lgAgent.Debug("new apex has no HSYNC RRset, no action", "zone", zd.ZoneName)
+			lgAgent.Debug("new apex has no HSYNC3 RRset, no action", "zone", zd.ZoneName)
 			return false, &hss, nil
 		}
 		hss.HsyncAdds = newhsync.RRs
@@ -51,7 +52,7 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 
 	var oldhsync *core.RRset
 
-	if rrset, exists := oldapex.RRtypes.Get(core.TypeHSYNC); exists {
+	if rrset, exists := oldapex.RRtypes.Get(core.TypeHSYNC3); exists {
 		oldhsync = &rrset
 	} else {
 		oldhsync = nil
@@ -65,7 +66,7 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 		oldRRs = oldhsync.RRs
 	}
 
-	differ, hss.HsyncAdds, hss.HsyncRemoves = core.RRsetDiffer(zd.ZoneName, newRRs, oldRRs, core.TypeHSYNC, zd.Logger, Globals.Verbose, Globals.Debug)
+	differ, hss.HsyncAdds, hss.HsyncRemoves = core.RRsetDiffer(zd.ZoneName, newRRs, oldRRs, core.TypeHSYNC3, zd.Logger, Globals.Verbose, Globals.Debug)
 	zd.Logger.Printf("*** HsyncChanged: exit (zone %q, differ: %v)", zd.ZoneName, differ)
 	return differ, &hss, nil
 }
@@ -450,48 +451,45 @@ func (zd *ZoneData) buildRemoteDNSKEYsFromTags(foreignKeyTags map[uint16]bool) [
 	return remote
 }
 
-// bool=true if the HSYNC RRset exists and is valid, false otherwise
-// error is non-nil for errors other than the HSYNC RRset not existing
+// ValidateHsyncRRset checks that HSYNC3 and HSYNCPARAM records exist at the
+// zone apex and that the HSYNCPARAM has valid keys. With HSYNCPARAM, NSmgmt
+// is in a single record so per-RR consistency checks are unnecessary.
+// Returns true if both record types exist and are valid, false otherwise.
+// error is non-nil for errors other than the records not existing.
 func (zd *ZoneData) ValidateHsyncRRset() (bool, error) {
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
 		return false, fmt.Errorf("error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 
-	hsyncrrset, exists := apex.RRtypes.Get(core.TypeHSYNC)
-	if !exists || len(hsyncrrset.RRs) == 0 {
+	// Check that HSYNC3 exists
+	hsync3rrset, hsync3exists := apex.RRtypes.Get(core.TypeHSYNC3)
+	if !hsync3exists || len(hsync3rrset.RRs) == 0 {
 		return false, nil
 	}
 
-	// Requirements:
-	// 1. nsmgmt must be consistent across the HSYNC RRs.
-	// 2. ...
-
-	if len(hsyncrrset.RRs) == 1 {
-		return true, nil
+	// Check that HSYNCPARAM exists
+	hsyncparamrrset, paramexists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
+	if !paramexists || len(hsyncparamrrset.RRs) == 0 {
+		return false, nil
 	}
 
-	hsync := hsyncrrset.RRs[0].(*dns.PrivateRR).Data.(*core.HSYNC)
-	nsmgmt := hsync.NSmgmt
-
-	for _, rr := range hsyncrrset.RRs[1:] {
-		hsync := rr.(*dns.PrivateRR).Data.(*core.HSYNC)
-		if hsync.NSmgmt != nsmgmt {
-			return false, fmt.Errorf("nsmgmt is not consistent across the HSYNC RRs")
-		}
-	}
-
+	// HSYNCPARAM exists — NSmgmt is a single value in the param record,
+	// no cross-RR consistency check needed.
 	return true, nil
 }
 
-// weAreASigner checks the HSYNC RRset for a record matching our identity
-// and returns whether its Sign field says SIGN.
+// analyzeHsyncSigners determines whether we should sign the zone and how many
+// other signers exist, by examining HSYNC3+HSYNCPARAM (preferred), then falling
+// back to HSYNC or HSYNC2 for backward compatibility with old zones.
+//
 // On agents: uses Globals.AgentId.
 // On the signer (AppTypeAuth): uses multi-provider.hsync-identity (or
 // multi-provider.agent.identity as fallback, since the HSYNC lists agents).
-// analyzeHsyncSigners walks the HSYNC/HSYNC2 RRset once and returns:
-//   - weShouldSign: whether our identity has SIGN=YES
-//   - otherSigners: count of other identities with SIGN=YES
+//
+// Returns:
+//   - weShouldSign: whether our identity is listed as a signer
+//   - otherSigners: count of other identities listed as signers
 //
 // Defaults: sign=true if no matching record found, otherSigners=0 if no records.
 func (zd *ZoneData) analyzeHsyncSigners() (weShouldSign bool, otherSigners int, err error) {
@@ -511,9 +509,31 @@ func (zd *ZoneData) analyzeHsyncSigners() (weShouldSign bool, otherSigners int, 
 		return true, 0, fmt.Errorf("analyzeHsyncSigners: cannot get apex for zone %s: %v", zd.ZoneName, err)
 	}
 
+	// Try HSYNC3+HSYNCPARAM first (preferred)
+	hsyncparamRRset, paramExists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
+	if paramExists && len(hsyncparamRRset.RRs) > 0 {
+		hsyncparam := hsyncparamRRset.RRs[0].(*dns.PrivateRR).Data.(*core.HSYNCPARAM)
+		signers := hsyncparam.GetSigners()
+		if len(signers) == 0 {
+			// No signers specified — default to sign
+			return true, 0, nil
+		}
+		// HSYNCPARAM signers are plain labels (e.g. "netnod"),
+		// ourIdentity is an FQDN (e.g. "netnod."). Strip trailing dot for comparison.
+		ourLabel := strings.TrimSuffix(ourIdentity, ".")
+		for _, s := range signers {
+			if s == ourLabel {
+				weShouldSign = true
+			} else {
+				otherSigners++
+			}
+		}
+		return weShouldSign, otherSigners, nil
+	}
+
+	// Fallback: try HSYNC, then HSYNC2 (for backward compat with old zones)
 	foundOurRecord := false
 
-	// Try HSYNC first, then HSYNC2
 	hsyncRRset, exists := apex.RRtypes.Get(core.TypeHSYNC)
 	if exists && len(hsyncRRset.RRs) > 0 {
 		for _, rr := range hsyncRRset.RRs {
@@ -550,7 +570,7 @@ func (zd *ZoneData) analyzeHsyncSigners() (weShouldSign bool, otherSigners int, 
 		return weShouldSign, otherSigners, nil
 	}
 
-	// No HSYNC/HSYNC2 records at all — sign by default, no other signers
+	// No HSYNC3+HSYNCPARAM/HSYNC/HSYNC2 records at all — sign by default, no other signers
 	return true, 0, nil
 }
 

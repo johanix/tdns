@@ -19,14 +19,14 @@ import (
 //
 // 1. Configured peers: Provided via AuthorizedPeers callback (role-specific)
 // 2. LEGACY state: Established relationship with zero shared zones
-// 3. HSYNC membership: Both peers listed in HSYNC RRset for a shared zone
+// 3. HSYNC3 membership: Both peers listed in HSYNC3 RRset for a shared zone
 //
 // This function is role-agnostic. Each role injects its own AuthorizedPeers
 // callback at TransportManager creation time.
 //
 // Parameters:
 //   - senderID: Identity of the agent attempting to communicate
-//   - zone: Optional zone name for HSYNC membership check (empty string skips HSYNC check)
+//   - zone: Optional zone name for HSYNC3 membership check (empty string skips HSYNC3 check)
 //
 // Returns:
 //   - authorized: true if agent is authorized
@@ -39,7 +39,7 @@ func (tm *TransportManager) IsPeerAuthorized(senderID string, zone string) (bool
 	}
 
 	// Check 2: LEGACY state agents (established relationship, zero zones)
-	// These agents were previously in HSYNC but all shared zones have been removed
+	// These agents were previously in HSYNC3 but all shared zones have been removed
 	// We still allow beat messages to maintain the relationship
 	if tm.agentRegistry != nil {
 		if agent, exists := tm.agentRegistry.S.Get(AgentId(senderID)); exists {
@@ -49,25 +49,25 @@ func (tm *TransportManager) IsPeerAuthorized(senderID string, zone string) (bool
 		}
 	}
 
-	// Check 3: Implicit authorization via HSYNC membership
+	// Check 3: Implicit authorization via HSYNC3 membership
 	if zone != "" {
-		// Specific zone provided - check HSYNC for that zone
+		// Specific zone provided - check HSYNC3 for that zone
 		authorized, reason := tm.isInHSYNC(senderID, zone)
 		if authorized {
-			return true, fmt.Sprintf("authorized via HSYNC membership for zone %s", zone)
+			return true, fmt.Sprintf("authorized via HSYNC3 membership for zone %s", zone)
 		}
-		lgAgent.Debug("sender not in HSYNC", "sender", senderID, "zone", zone, "reason", reason)
+		lgAgent.Debug("sender not in HSYNC3", "sender", senderID, "zone", zone, "reason", reason)
 	} else {
-		// No specific zone - check if sender is in HSYNC for ANY zone we share
+		// No specific zone - check if sender is in HSYNC3 for ANY zone we share
 		// This is used for zone-agnostic operations like heartbeats
 		authorized, foundZone := tm.isInHSYNCAnyZone(senderID)
 		if authorized {
-			return true, fmt.Sprintf("authorized via HSYNC membership for zone %s", foundZone)
+			return true, fmt.Sprintf("authorized via HSYNC3 membership for zone %s", foundZone)
 		}
 	}
 
 	// Not authorized via either path
-	return false, fmt.Sprintf("not authorized (not in config or HSYNC for zone %q)", zone)
+	return false, fmt.Sprintf("not authorized (not in config or HSYNC3 for zone %q)", zone)
 }
 
 // isAuthorizedPeer checks if senderID is in the role-specific authorized peers list.
@@ -88,8 +88,8 @@ func (tm *TransportManager) isAuthorizedPeer(senderID string) bool {
 	return false
 }
 
-// isInHSYNC checks if senderID is in the HSYNC RRset for the specified zone.
-// This represents implicit authorization - we're both listed in the same HSYNC RRset,
+// isInHSYNC checks if senderID is in the HSYNC3 RRset for the specified zone.
+// This represents implicit authorization - we're both listed in the same HSYNC3 RRset,
 // indicating operational need to communicate for this zone.
 //
 // This mirrors the logic in EvaluateHello() from hsync_hello.go:160-211.
@@ -104,25 +104,25 @@ func (tm *TransportManager) isInHSYNC(senderID string, zone string) (bool, strin
 		return false, fmt.Sprintf("we don't know about zone %q", zone)
 	}
 
-	// Check if zone has HSYNC RRset
-	hsyncRR, err := zd.GetRRset(zd.ZoneName, core.TypeHSYNC)
+	// Check if zone has HSYNC3 RRset
+	hsyncRR, err := zd.GetRRset(zd.ZoneName, core.TypeHSYNC3)
 	if err != nil {
-		return false, fmt.Sprintf("error retrieving HSYNC RRset: %v", err)
+		return false, fmt.Sprintf("error retrieving HSYNC3 RRset: %v", err)
 	}
 	if hsyncRR == nil {
-		return false, fmt.Sprintf("zone %q has no HSYNC RRset", zone)
+		return false, fmt.Sprintf("zone %q has no HSYNC3 RRset", zone)
 	}
 
-	// Check if both our identity and sender are in HSYNC RRset
+	// Check if both our identity and sender are in HSYNC3 RRset
 	foundMe := false
 	foundSender := false
 	for _, rr := range hsyncRR.RRs {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync, ok := prr.Data.(*core.HSYNC); ok {
-				if hsync.Identity == tm.LocalID {
+			if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
+				if hsync3.Label == tm.LocalID {
 					foundMe = true
 				}
-				if hsync.Identity == senderID {
+				if hsync3.Label == senderID {
 					foundSender = true
 				}
 			}
@@ -130,17 +130,17 @@ func (tm *TransportManager) isInHSYNC(senderID string, zone string) (bool, strin
 	}
 
 	if !foundMe {
-		return false, fmt.Sprintf("our identity %q not in HSYNC RRset for zone %s", tm.LocalID, zone)
+		return false, fmt.Sprintf("our identity %q not in HSYNC3 RRset for zone %s", tm.LocalID, zone)
 	}
 	if !foundSender {
-		return false, fmt.Sprintf("sender %q not in HSYNC RRset for zone %s", senderID, zone)
+		return false, fmt.Sprintf("sender %q not in HSYNC3 RRset for zone %s", senderID, zone)
 	}
 
-	lgAgent.Debug("both identities found in HSYNC", "local", tm.LocalID, "sender", senderID, "zone", zone)
+	lgAgent.Debug("both identities found in HSYNC3", "local", tm.LocalID, "sender", senderID, "zone", zone)
 	return true, ""
 }
 
-// isInHSYNCAnyZone checks if senderID is in the HSYNC RRset for ANY zone we share.
+// isInHSYNCAnyZone checks if senderID is in the HSYNC3 RRset for ANY zone we share.
 // This is used for zone-agnostic authorization (e.g., heartbeats, general peer communication).
 // Returns true and the first matching zone name if found.
 func (tm *TransportManager) isInHSYNCAnyZone(senderID string) (bool, string) {
@@ -151,36 +151,36 @@ func (tm *TransportManager) isInHSYNCAnyZone(senderID string) (bool, string) {
 			continue
 		}
 
-		// Check if zone has HSYNC RRset
-		hsyncRR, err := zd.GetRRset(zd.ZoneName, core.TypeHSYNC)
+		// Check if zone has HSYNC3 RRset
+		hsyncRR, err := zd.GetRRset(zd.ZoneName, core.TypeHSYNC3)
 		if err != nil || hsyncRR == nil {
-			continue // No HSYNC for this zone, try next
+			continue // No HSYNC3 for this zone, try next
 		}
 
-		// Check if both our identity and sender are in HSYNC RRset
+		// Check if both our identity and sender are in HSYNC3 RRset
 		foundMe := false
 		foundSender := false
 		for _, rr := range hsyncRR.RRs {
 			if prr, ok := rr.(*dns.PrivateRR); ok {
-				if hsync, ok := prr.Data.(*core.HSYNC); ok {
-					if hsync.Identity == tm.LocalID {
+				if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
+					if hsync3.Label == tm.LocalID {
 						foundMe = true
 					}
-					if hsync.Identity == senderID {
+					if hsync3.Label == senderID {
 						foundSender = true
 					}
 				}
 			}
 		}
 
-		// If we found both in this zone's HSYNC, authorize
+		// If we found both in this zone's HSYNC3, authorize
 		if foundMe && foundSender {
-			lgAgent.Debug("both identities found in HSYNC (any-zone check)",
+			lgAgent.Debug("both identities found in HSYNC3 (any-zone check)",
 				"local", tm.LocalID, "sender", senderID, "zone", zoneName)
 			return true, zoneName
 		}
 	}
 
-	// Not found in any shared HSYNC
+	// Not found in any shared HSYNC3
 	return false, ""
 }

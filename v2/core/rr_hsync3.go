@@ -41,14 +41,14 @@ func (rd *HSYNC3) Parse(txt []string) error {
 		return fmt.Errorf("invalid HSYNC3 state: %s", txt[0])
 	}
 
-	label := txt[1]
+	label := dns.Fqdn(txt[1])
 
 	endpoint := dns.Fqdn(txt[2])
 	if _, ok := dns.IsDomainName(endpoint); !ok {
 		return fmt.Errorf("invalid HSYNC3 endpoint: %s", txt[2])
 	}
 
-	upstream := txt[3]
+	upstream := dns.Fqdn(txt[3])
 
 	rd.State = state
 	rd.Label = label

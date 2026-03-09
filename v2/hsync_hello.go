@@ -318,27 +318,27 @@ func (ar *AgentRegistry) EvaluateHello(ahp *AgentHelloPost) (bool, string, error
 		return false, fmt.Sprintf("Error: We don't know about zone %q. This could be a timing issue, so try again in a bit", ahp.Zone), nil
 	}
 
-	// Check if zone has HSYNC RRset
-	hsyncRR, err := zd.GetRRset(zd.ZoneName, core.TypeHSYNC)
+	// Check if zone has HSYNC3 RRset
+	hsyncRR, err := zd.GetRRset(zd.ZoneName, core.TypeHSYNC3)
 	if err != nil {
-		lgAgent.Error("error retrieving HSYNC RRset", "zone", ahp.Zone, "err", err)
-		return false, fmt.Sprintf("Error trying to retrieve HSYNC RRset for zone %q: %v", ahp.Zone, err), nil
+		lgAgent.Error("error retrieving HSYNC3 RRset", "zone", ahp.Zone, "err", err)
+		return false, fmt.Sprintf("Error trying to retrieve HSYNC3 RRset for zone %q: %v", ahp.Zone, err), nil
 	}
 	if hsyncRR == nil {
-		lgAgent.Warn("zone has no HSYNC RRset", "zone", ahp.Zone)
-		return false, fmt.Sprintf("Error: Zone %q has no HSYNC RRset", ahp.Zone), nil
+		lgAgent.Warn("zone has no HSYNC3 RRset", "zone", ahp.Zone)
+		return false, fmt.Sprintf("Error: Zone %q has no HSYNC3 RRset", ahp.Zone), nil
 	}
 
-	// Check if both our identity and remote agent are in HSYNC RRset
+	// Check if both our identity and remote agent are in HSYNC3 RRset
 	foundMe := false
 	foundYou := false
 	for _, rr := range hsyncRR.RRs {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync, ok := prr.Data.(*core.HSYNC); ok {
-				if hsync.Identity == ar.LocalAgent.Identity {
+			if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
+				if hsync3.Label == ar.LocalAgent.Identity {
 					foundMe = true
 				}
-				if AgentId(hsync.Identity) == ahp.MyIdentity {
+				if AgentId(hsync3.Label) == ahp.MyIdentity {
 					foundYou = true
 				}
 			}
@@ -346,9 +346,9 @@ func (ar *AgentRegistry) EvaluateHello(ahp *AgentHelloPost) (bool, string, error
 	}
 
 	if !foundMe || !foundYou {
-		lgAgent.Warn("HSYNC RRset does not include both identities",
+		lgAgent.Warn("HSYNC3 RRset does not include both identities",
 			"zone", ahp.Zone, "yourIdentity", ahp.MyIdentity, "myIdentity", ar.LocalAgent.Identity)
-		return false, fmt.Sprintf("Error: Zone %q HSYNC RRset does not include both our identities", ahp.Zone), nil
+		return false, fmt.Sprintf("Error: Zone %q HSYNC3 RRset does not include both our identities", ahp.Zone), nil
 	}
 
 	return true, "", nil

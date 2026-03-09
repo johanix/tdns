@@ -723,30 +723,6 @@ func (ar *AgentRegistry) GetAgentInfo(identity AgentId) (*Agent, error) {
 	return agent, nil
 }
 
-// IdentifyAgents looks for HSYNC records in a zone and identifies agents we need to sync with
-func (ar *AgentRegistry) xxxIdentifyAgents(zd *ZoneData, ourIdentity AgentId) ([]*Agent, error) {
-	var agents []*Agent
-
-	rrset, err := zd.GetRRset(zd.ZoneName, core.TypeHSYNC)
-	if err != nil {
-		return nil, fmt.Errorf("error getting HSYNC records: %v", err)
-	}
-
-	// Look for HSYNC records where Target is NOT our identity
-	for _, rr := range rrset.RRs {
-		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync, ok := prr.Data.(*core.HSYNC); ok {
-				if hsync.Identity == string(ourIdentity) {
-					continue
-				}
-				// Found another agent, try to locate it
-				ar.DiscoverAgentAsync(AgentId(hsync.Identity), "", nil)
-			}
-		}
-	}
-
-	return agents, nil
-}
 
 func AgentToString(a *Agent) string {
 	if a == nil {
@@ -821,10 +797,10 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 		return nil, fmt.Errorf("error getting apex for zone %q: %v", zonename, err)
 	}
 
-	hsyncRRset := apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC)
+	hsyncRRset := apex.RRtypes.GetOnlyRRSet(core.TypeHSYNC3)
 	if len(hsyncRRset.RRs) == 0 {
-		lgAgent.Warn("zone has no HSYNC RRset", "zone", zonename)
-		return nil, fmt.Errorf("zone %q has no HSYNC RRset", zonename)
+		lgAgent.Warn("zone has no HSYNC3 RRset", "zone", zonename)
+		return nil, fmt.Errorf("zone %q has no HSYNC3 RRset", zonename)
 	}
 
 	// Convert the RRs to strings for transmission
@@ -835,19 +811,19 @@ func (ar *AgentRegistry) GetZoneAgentData(zonename ZoneName) (*ZoneAgentData, er
 
 	for _, rr := range hsyncRRset.RRs {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync, ok := prr.Data.(*core.HSYNC); ok {
+			if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
 				// Skip if this is our own identity
-				if hsync.Identity == ar.LocalAgent.Identity {
-					zad.MyUpstream = AgentId(hsync.Upstream)
+				if hsync3.Label == ar.LocalAgent.Identity {
+					zad.MyUpstream = AgentId(hsync3.Upstream)
 					continue // don't add ourselves to the list of agents
-				} else if hsync.Upstream == ar.LocalAgent.Identity {
-					zad.MyDownstreams = append(zad.MyDownstreams, AgentId(hsync.Identity))
+				} else if hsync3.Upstream == ar.LocalAgent.Identity {
+					zad.MyDownstreams = append(zad.MyDownstreams, AgentId(hsync3.Label))
 				}
-				// Found an HSYNC record, try to locate the agent
-				agent, err := ar.GetAgentInfo(AgentId(hsync.Identity))
+				// Found an HSYNC3 record, try to locate the agent
+				agent, err := ar.GetAgentInfo(AgentId(hsync3.Label))
 				if err != nil {
 					agent = &Agent{
-						Identity:  AgentId(hsync.Identity),
+						Identity:  AgentId(hsync3.Label),
 						State:     AgentStateError,
 						ErrorMsg:  fmt.Sprintf("error getting agent info: %v", err),
 						LastState: time.Now(),
@@ -873,23 +849,23 @@ func (ar *AgentRegistry) CleanupZoneRelationships(zonename ZoneName) {
 	lgAgent.Warn("TODO: cleanup not yet implemented", "zone", zonename)
 }
 
-// UpdateAgents updates the registry based on the HSYNC records in the request. It has been
+// UpdateAgents updates the registry based on the HSYNC3 records in the request. It has been
 // split into "adds" and "removes" by zd.HsyncCHanged() so we can process them independently.
 
-// XXX: This is likely not sufficient, we must also be able to deal with HSYNC RRs that simply
+// XXX: This is likely not sufficient, we must also be able to deal with HSYNC3 RRs that simply
 // "change" (i.e. the same identity, but now roles). ADD+REMOVE doesn't deal with that.
 func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename ZoneName, synchedDataUpdateQ chan *SynchedDataUpdate) error {
 
 	var updatedIdentities = map[AgentId]bool{}  // Tracks modified agents (both add and remove)
 	var affectedIdentities = map[AgentId]bool{} // Tracks ALL agents that need zone recomputation
 
-	// First pass: Check if WE are in this zone's HSYNC RRset
+	// First pass: Check if WE are in this zone's HSYNC3 RRset
 	// Only process remote agents if we're also involved in this zone
 	weAreInHSYNC := false
 	for _, rr := range req.SyncStatus.HsyncAdds {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync, ok := prr.Data.(*core.HSYNC); ok {
-				if AgentId(hsync.Identity) == ourId || AgentId(hsync.Upstream) == ourId {
+			if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
+				if AgentId(hsync3.Label) == ourId || AgentId(hsync3.Upstream) == ourId {
 					weAreInHSYNC = true
 					break
 				}
@@ -898,108 +874,108 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 	}
 
 	if !weAreInHSYNC {
-		lgAgent.Debug("we are not in HSYNC RRset, ignoring remote agents", "zone", zonename)
+		lgAgent.Debug("we are not in HSYNC3 RRset, ignoring remote agents", "zone", zonename)
 		return nil
 	}
 
-	// Handle new HSYNC records
+	// Handle new HSYNC3 records
 	for _, rr := range req.SyncStatus.HsyncAdds {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync, ok := prr.Data.(*core.HSYNC); ok {
-				lgAgent.Debug("analysing HSYNC", "zone", zonename, "hsync", hsync.String())
+			if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
+				lgAgent.Debug("analysing HSYNC3", "zone", zonename, "hsync3", hsync3.String())
 
-				updatedIdentities[AgentId(hsync.Identity)] = true
-				affectedIdentities[AgentId(hsync.Identity)] = true
-				if AgentId(hsync.Identity) == ourId {
+				updatedIdentities[AgentId(hsync3.Label)] = true
+				affectedIdentities[AgentId(hsync3.Label)] = true
+				if AgentId(hsync3.Label) == ourId {
 					// We're the Target
-					if hsync.Upstream == "." {
+					if hsync3.Upstream == "." {
 						// Special case: no upstream to sync with
 						lgAgent.Debug("we are target but upstream is '.', no sync needed", "zone", zonename)
 						continue
 					}
 
 					// Need to sync with Upstream - mark as needed for discovery
-					ar.MarkAgentAsNeeded(AgentId(hsync.Upstream), zonename,
+					ar.MarkAgentAsNeeded(AgentId(hsync3.Upstream), zonename,
 						&DeferredAgentTask{
 							Precondition: func() bool {
-								if agent, exists := ar.S.Get(AgentId(hsync.Upstream)); exists {
+								if agent, exists := ar.S.Get(AgentId(hsync3.Upstream)); exists {
 									return agent.ApiDetails.State == AgentStateOperational
 								}
 								return false
 							},
 							Action: func() (bool, error) {
-								lgAgent.Info("executing deferred RFI for upstream data", "upstream", hsync.Upstream, "zone", zonename)
+								lgAgent.Info("executing deferred RFI for upstream data", "upstream", hsync3.Upstream, "zone", zonename)
 								amp := AgentMgmtPost{
 									MessageType: AgentMsgRfi,
 									RfiType:     "UPSTREAM",
 									Zone:        zonename,
-									Upstream:    AgentId(hsync.Upstream),
+									Upstream:    AgentId(hsync3.Upstream),
 								}
 
 								ar.CommandHandler(&AgentMgmtPostPlus{amp, nil}, synchedDataUpdateQ)
 								return true, nil // cannot do much else
 							},
-							Desc: fmt.Sprintf("RFI for upstream data from %q", hsync.Upstream),
+							Desc: fmt.Sprintf("RFI for upstream data from %q", hsync3.Upstream),
 						})
-				} else if AgentId(hsync.Upstream) == ourId {
+				} else if AgentId(hsync3.Upstream) == ourId {
 					// Need to sync with downstream agents - mark as needed for discovery
-					ar.MarkAgentAsNeeded(AgentId(hsync.Identity), zonename,
+					ar.MarkAgentAsNeeded(AgentId(hsync3.Label), zonename,
 						&DeferredAgentTask{
 							// XXX: This is not complete, as there is no check for the Precondition
 							// XXX: some sort of periodic check is needed to ensure that the agent is still
 							// operational.
 							Precondition: func() bool {
-								if agent, exists := ar.S.Get(AgentId(hsync.Identity)); exists {
+								if agent, exists := ar.S.Get(AgentId(hsync3.Label)); exists {
 									return agent.State == AgentStateOperational
 								}
 								return false
 							},
 							Action: func() (bool, error) {
-								lgAgent.Info("executing deferred RFI for downstream data", "downstream", hsync.Identity, "zone", zonename)
+								lgAgent.Info("executing deferred RFI for downstream data", "downstream", hsync3.Label, "zone", zonename)
 								amp := AgentMgmtPost{
 									MessageType: AgentMsgRfi,
 									RfiType:     "DOWNSTREAM",
 									Zone:        zonename,
-									Downstream:  AgentId(hsync.Identity),
+									Downstream:  AgentId(hsync3.Label),
 								}
 
 								ar.CommandHandler(&AgentMgmtPostPlus{amp, nil}, synchedDataUpdateQ)
 								return true, nil // cannot do much else
 							},
-							Desc: fmt.Sprintf("RFI for downstream data from %q", hsync.Identity),
+							Desc: fmt.Sprintf("RFI for downstream data from %q", hsync3.Label),
 						})
 
 				} else {
-					lgAgent.Debug("HSYNC is for a remote agent, analysing", "zone", zonename, "agent", hsync.Identity)
+					lgAgent.Debug("HSYNC3 is for a remote agent, analysing", "zone", zonename, "agent", hsync3.Label)
 					// Not our target, mark as needed for discovery
-					ar.MarkAgentAsNeeded(AgentId(hsync.Identity), zonename, nil)
+					ar.MarkAgentAsNeeded(AgentId(hsync3.Label), zonename, nil)
 				}
 			}
 		}
 	}
 
-	// Handle removed HSYNC records
+	// Handle removed HSYNC3 records
 	for _, rr := range req.SyncStatus.HsyncRemoves {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync, ok := prr.Data.(*core.HSYNC); ok {
-				affectedIdentities[AgentId(hsync.Identity)] = true
-				if updatedIdentities[AgentId(hsync.Identity)] {
-					// Don't remove an agent that's still in the HSYNC RRset; it has only changed
-					lgAgent.Debug("not removing agent, HSYNC RR changed", "zone", zonename, "agent", hsync.Identity)
+			if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
+				affectedIdentities[AgentId(hsync3.Label)] = true
+				if updatedIdentities[AgentId(hsync3.Label)] {
+					// Don't remove an agent that's still in the HSYNC3 RRset; it has only changed
+					lgAgent.Debug("not removing agent, HSYNC3 RR changed", "zone", zonename, "agent", hsync3.Label)
 					continue
 				}
-				if AgentId(hsync.Identity) == ourId {
+				if AgentId(hsync3.Label) == ourId {
 					// We're no longer involved in this zone's management
-					lgAgent.Info("we are no longer part of the HSYNC RRset, cleaning up", "zone", zonename, "identity", hsync.Identity)
+					lgAgent.Info("we are no longer part of the HSYNC3 RRset, cleaning up", "zone", zonename, "identity", hsync3.Label)
 					ar.CleanupZoneRelationships(zonename)
 				} else {
 					// Remote agent was removed, update registry
-					lgAgent.Info("agent no longer in HSYNC RRset, cleaning up", "zone", zonename, "agent", hsync.Identity)
-					if agent, exists := ar.S.Get(AgentId(hsync.Identity)); exists {
+					lgAgent.Info("agent no longer in HSYNC3 RRset, cleaning up", "zone", zonename, "agent", hsync3.Label)
+					if agent, exists := ar.S.Get(AgentId(hsync3.Label)); exists {
 						agent.mu.Lock()
 						delete(agent.Zones, zonename)
 						agent.mu.Unlock()
-						ar.RemoveRemoteAgent(zonename, AgentId(hsync.Identity))
+						ar.RemoveRemoteAgent(zonename, AgentId(hsync3.Label))
 					}
 				}
 			}

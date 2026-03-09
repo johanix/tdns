@@ -108,15 +108,15 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 				// System error: database/lookup failure, not a policy decision
 				return false, "", fmt.Errorf("local update for zone %q: cannot get apex: %w", synchedDataUpdate.Zone, err)
 			}
-			hsyncRRset, exists := apex.RRtypes.Get(core.TypeHSYNC)
-			if !exists || len(hsyncRRset.RRs) == 0 {
-				return false, fmt.Sprintf("Local update for zone %q: no HSYNC record (NS management not configured)",
+			hsyncparamRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
+			if !exists || len(hsyncparamRRset.RRs) == 0 {
+				return false, fmt.Sprintf("Local update for zone %q: no HSYNCPARAM record (NS management not configured)",
 					synchedDataUpdate.Zone), nil
 			}
-			hsync := hsyncRRset.RRs[0].(*dns.PrivateRR).Data.(*core.HSYNC)
-			if hsync.NSmgmt != core.HsyncNSmgmtAGENT {
-				return false, fmt.Sprintf("Local update for zone %q: HSYNC nsmgmt=%s, NS management not delegated to agents",
-					synchedDataUpdate.Zone, core.HsyncNSmgmtToString[hsync.NSmgmt]), nil
+			hsyncparam := hsyncparamRRset.RRs[0].(*dns.PrivateRR).Data.(*core.HSYNCPARAM)
+			if hsyncparam.GetNSmgmt() != core.HsyncNSmgmtAGENT {
+				return false, fmt.Sprintf("Local update for zone %q: HSYNCPARAM nsmgmt=%s, NS management not delegated to agents",
+					synchedDataUpdate.Zone, core.HsyncNSmgmtToString[hsyncparam.GetNSmgmt()]), nil
 			}
 		}
 

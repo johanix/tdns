@@ -267,9 +267,9 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 
 			// Get the HSYNC RRset from the apex
-			hsyncRRset := owner.RRtypes.GetOnlyRRSet(core.TypeHSYNC)
+			hsyncRRset := owner.RRtypes.GetOnlyRRSet(core.TypeHSYNC3)
 			if len(hsyncRRset.RRs) == 0 {
-				resp.Msg = fmt.Sprintf("Zone %s has no HSYNC RRset", amp.Zone)
+				resp.Msg = fmt.Sprintf("Zone %s has no HSYNC3 RRset", amp.Zone)
 				return
 			}
 
