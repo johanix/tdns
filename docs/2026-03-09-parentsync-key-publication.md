@@ -1,7 +1,7 @@
 # Parent Sync: SIG(0) KEY Publication + CLI
 
 **Date**: 2026-03-09
-**Status**: Planning
+**Status**: Phase 3b complete, Phase 3c planning
 **Prerequisite**: Phase 3a (leader election) complete
 
 ## Context
@@ -196,3 +196,134 @@ Uses `SendAgentMgmtCmd` pattern from `cli/agent_cmds.go:350`.
 3. `tdns-cliv2 agent parentsync election --force --zone example.com.` → triggers election, returns confirmation
 4. Single agent: status shows self as leader, KEY info, apex published/not, "NOT PUBLISHED" for _signal per NS
 5. MP zone: KEY sent to combiner via REPLACE operation (check combiner log for received KEY)
+
+---
+
+# Phase 3c: CONFIG Message Type + SIG(0) Private Key Distribution
+
+**Status**: Planning
+**Prerequisite**: Phase 3b complete
+
+## Context
+
+After a leader election, the new leader may not have the SIG(0) private key. All agents share the same SIG(0) identity (same KEY RR at the apex), but only the agent that generated the keypair has the private key. The leader must obtain it from peers.
+
+## Design Decisions
+
+1. **New message type constant `CONFIG`** — for "sensitive configuration data NOT intended for publication" (vs SYNC for DNS records). First subtype: `sig0-privkey`. Future subtypes: `tsig-key`, `endpoint-info`, `acl`, etc.
+2. **Leader initiates** — after election, leader checks local keystore. If no key, sends RFI CONFIG to all peers.
+3. **All peers must respond** — "have-key" with encrypted private key, or "no-key". No silent waiting.
+4. **No peer has key** → leader generates new keypair + bootstraps with parent via `BootstrapSig0KeyWithParent`.
+5. **Key verification** — leader verifies received key is "working" via KeyState EDNS(0) inquiry (`UpdateKeyState`).
+6. **Organic spreading** — as leadership changes, each new leader requests the key, so eventually all agents have it.
+7. **CHUNK encryption** — private key material encrypted via existing `SecureWrapper` (FormatJWT) during transport.
+
+## Transport
+
+RFI CONFIG uses the **synchronous agent-to-agent RFI pattern** (like UPSTREAM/DOWNSTREAM/AUDIT in `hsyncengine.go`). The peer responds directly in `AgentMsgResponse.RfiResponse`. This is simpler than the async pattern (KEYSTATE/EDITS) and appropriate because:
+- `sendRfiToAgent` is already synchronous (returns `*AgentMsgResponse`)
+- Election broadcasts already use this pattern (`broadcastElectToZone`)
+- CHUNK/JWT encryption is applied automatically by the transport layer
+- No new channel, handler registration, or router changes needed
+
+## RFI CONFIG Convention
+
+Request (in `AgentMsgPost.Records`):
+```
+Records: {"config-type": ["sig0-privkey"], "zone": ["example.com."]}
+```
+
+Response (in `RfiResponse[agentId].ConfigData`):
+```go
+// Peer has key:
+ConfigData: {"config-type": "sig0-privkey", "status": "have-key",
+             "private-key": "<PEM>", "algorithm": "15", "key-id": "12345",
+             "key-rr": "<KEY RR string>"}
+
+// Peer has no key:
+ConfigData: {"config-type": "sig0-privkey", "status": "no-key"}
+```
+
+## Flow: Leader Key Acquisition
+
+```
+1. Election completes → onLeaderElected callback fires (if this agent won)
+   ↓
+2. Check local keystore: kdb.GetSig0Keys(keyName, Sig0StateActive)
+   ↓
+3a. Key found locally → done (proceed to DDNS when needed)
+3b. No local key → send RFI CONFIG to all peers concurrently
+   ↓
+4. Collect all responses (with 15s timeout per peer)
+   ↓
+5a. Peer has key → import into local keystore via Sig0KeyMgmt("add")
+    → verify via kdb.UpdateKeyState (KeyState EDNS(0) inquiry)
+    → if parent says "unknown": try next peer or generate new
+5b. No peer has key → BootstrapSig0KeyWithParent (generate + send UPDATE)
+   ↓
+6. Key ready → publish KEY (apex/combiner) if not already published
+```
+
+## Existing Code to Reuse
+
+| Code | File | Purpose |
+|------|------|---------|
+| `sendRfiToAgent` | `hsyncengine.go:907` | Send RFI to a peer agent (synchronous) |
+| `broadcastElectToZone` | `parentsync_leader.go:392` | Iterate all zone agents, skip self |
+| `GetZoneAgentData` | `hsyncengine.go` | Get all agents for a zone |
+| `GetSig0Keys` | `keystore.go:520` | Retrieve SIG(0) keys from keystore |
+| `Sig0KeyMgmt("add")` | `keystore.go:71` | Import key into keystore |
+| `PrepareKeyCache` | `readkey.go:230` | Parse private+public key into PrivateKeyCache |
+| `BootstrapSig0KeyWithParent` | `ops_key.go:155` | Generate key + send UPDATE to parent |
+| `UpdateKeyState` | `keybootstrapper.go:276` | KeyState EDNS(0) inquiry to verify key |
+| `DsyncUpdateTargetName` | `ops_dsync.go:240` | Compute DSYNC target name from config |
+
+## Implementation Steps
+
+### Step 1: Add `AgentMsgConfig` constant + `ConfigData` to `RfiData` (~10 lines)
+
+**`core/messages.go`**: Add `AgentMsgConfig AgentMsg = "config"` and `AgentMsgToString` entry. Add `ConfigData map[string]string` field to `core.RfiData`.
+
+**`agent_structs.go`**: Add `ConfigData map[string]string` field to local `RfiData`.
+
+### Step 2: Add `case "CONFIG":` RFI handler in `hsyncengine.go` (~35 lines)
+
+In the `AgentMsgRfi` switch (after ELECT-* cases):
+1. Extract `config-type` from `ampp.Records["config-type"]`
+2. For `"sig0-privkey"`: compute key name via `DsyncUpdateTargetName`, check local keystore
+3. If key found: respond with `ConfigData` containing PEM key, algorithm, key-id, key-rr
+4. If no key: respond with `ConfigData{"status": "no-key"}`
+
+### Step 3: Add `onLeaderElected` callback to `LeaderElectionManager` (~10 lines)
+
+**`parentsync_leader.go`**: Add `onLeaderElected func(zone ZoneName)` field. Call it (in goroutine) from `StartElection` (single-agent path) and `finalizeElection` (multi-agent, when `isUs`).
+
+**`main_initfuncs.go`**: Pass callback to `NewLeaderElectionManager` that calls `AcquireSig0Key`.
+
+### Step 4: Implement `AcquireSig0Key` in `parentsync_leader.go` (~70 lines)
+
+1. Check local keystore → if found, return
+2. Get peers via `GetZoneAgentData`
+3. Send RFI CONFIG to each peer concurrently
+4. Collect responses; find first "have-key"
+5. Import key via `Sig0KeyMgmt("add")`
+6. Verify via `UpdateKeyState`
+7. If no peer has it: `BootstrapSig0KeyWithParent`
+
+## Files Modified
+
+| File | Action | Est. Lines |
+|------|--------|-----------|
+| `core/messages.go` | Add `AgentMsgConfig`, `ConfigData` to `RfiData` | ~5 |
+| `agent_structs.go` | Add `ConfigData` to local `RfiData` | ~2 |
+| `hsyncengine.go` | Add `case "CONFIG":` in RFI switch | ~35 |
+| `parentsync_leader.go` | Add `onLeaderElected` field, `AcquireSig0Key` | ~80 |
+| `main_initfuncs.go` | Wire onLeaderElected callback | ~10 |
+
+## Verification
+
+1. Build: `cd tdns/cmdv2 && GOROOT=/opt/local/lib/go make`
+2. Single agent: after election, leader checks local key → finds it → no RFI sent
+3. `agent parentsync status --zone example.com.` → shows leader + key info
+4. Log inspection: on election, look for "acquiring SIG(0) key" log messages
+5. Future multi-agent test: new leader without key → RFI CONFIG → peer responds → leader imports + verifies
