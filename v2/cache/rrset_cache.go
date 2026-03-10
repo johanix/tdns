@@ -247,6 +247,73 @@ func (rrcache *RRsetCacheT) FlushDomain(domain string, keepStructural bool) (int
 	return removed, nil
 }
 
+// FlushAll removes all cached data except root zone priming data (NS for ".",
+// root server A/AAAA records). Returns the number of RRsets removed.
+func (rrcache *RRsetCacheT) FlushAll() int {
+	if rrcache == nil {
+		return 0
+	}
+
+	// Collect root NS hosts so we can keep their A/AAAA glue
+	rootNSHosts := make(map[string]struct{})
+	for item := range rrcache.RRsets.IterBuffered() {
+		cr := item.Val
+		if dns.CanonicalName(cr.Name) != "." || cr.RRtype != dns.TypeNS || cr.RRset == nil {
+			continue
+		}
+		for _, rr := range cr.RRset.RRs {
+			ns, ok := rr.(*dns.NS)
+			if !ok {
+				continue
+			}
+			rootNSHosts[dns.CanonicalName(ns.Ns)] = struct{}{}
+		}
+	}
+
+	// Remove all RRsets except root NS and root server glue
+	var keysToRemove []string
+	for item := range rrcache.RRsets.IterBuffered() {
+		cr := item.Val
+		name := dns.CanonicalName(cr.Name)
+		// Keep root NS
+		if name == "." && cr.RRtype == dns.TypeNS {
+			continue
+		}
+		// Keep root server A/AAAA glue
+		if cr.RRtype == dns.TypeA || cr.RRtype == dns.TypeAAAA {
+			if _, ok := rootNSHosts[name]; ok {
+				continue
+			}
+		}
+		keysToRemove = append(keysToRemove, item.Key)
+	}
+	for _, key := range keysToRemove {
+		rrcache.RRsets.Remove(key)
+	}
+
+	// Clear non-root Servers and ServerMap entries
+	var auxKeys []string
+	for item := range rrcache.Servers.IterBuffered() {
+		if dns.CanonicalName(item.Key) != "." {
+			auxKeys = append(auxKeys, item.Key)
+		}
+	}
+	for _, key := range auxKeys {
+		rrcache.Servers.Remove(key)
+	}
+	auxKeys = auxKeys[:0]
+	for item := range rrcache.ServerMap.IterBuffered() {
+		if dns.CanonicalName(item.Key) != "." {
+			auxKeys = append(auxKeys, item.Key)
+		}
+	}
+	for _, key := range auxKeys {
+		rrcache.ServerMap.Remove(key)
+	}
+
+	return len(keysToRemove)
+}
+
 func isStructuralRRset(cr *CachedRRset, nsHosts map[string]struct{}) bool {
 	if cr == nil {
 		return false
@@ -836,14 +903,21 @@ func (rrcache *RRsetCacheT) FindClosestKnownZone(qname string) (string, map[stri
 		}
 	}
 
+	// Return a shallow copy of the map so concurrent callers don't race
+	// on writes (e.g. processAddressRecords adding resolved NS addresses).
+	cp := make(map[string]*AuthServer, len(servers))
+	for k, v := range servers {
+		cp[k] = v
+	}
+
 	if rrcache.Debug {
 		auths := []string{}
-		for name := range servers {
+		for name := range cp {
 			auths = append(auths, name)
 		}
 		log.Printf("FindClosestKnownZone: authservers for zone %q: %s", qname, strings.Join(auths, ", "))
 	}
-	return bestmatch, servers, nil
+	return bestmatch, cp, nil
 }
 
 func GetMinTTL(rrs []dns.RR) time.Duration {

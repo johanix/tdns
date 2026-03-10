@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/c-bata/go-prompt"
+	tdns "github.com/johanix/tdns/v2"
 	"github.com/spf13/cobra"
 	"golang.org/x/term"
 )
@@ -141,8 +142,8 @@ func StartInteractiveMode() {
 	p := prompt.New(
 		executor,
 		completer,
-		prompt.OptionPrefix("tdns-imr> "),
-		prompt.OptionTitle("TDNS-IMR Interactive Shell"),
+		prompt.OptionPrefix(tdns.Globals.App.Name+"> "),
+		prompt.OptionTitle(tdns.Globals.App.Name+" Interactive Shell"),
 		// prompt.OptionInputTextColor(prompt.Black),
 		prompt.OptionMaxSuggestion(5),
 	)
@@ -179,7 +180,7 @@ func executor(input string) {
 
 	// Reset flags before parsing (important for interactive mode)
 	cmd.Flags().Parse([]string{})
-	
+
 	// Parse flags properly
 	if err := cmd.ParseFlags(cmdArgs); err != nil {
 		// Check if this is a help request
@@ -211,7 +212,7 @@ func splitArgs(input string) []string {
 	var current strings.Builder
 	inQuote := false
 	quoteChar := rune(0)
-	
+
 	for _, r := range input {
 		switch {
 		case (r == '"' || r == '\'') && !inQuote:
@@ -229,11 +230,11 @@ func splitArgs(input string) []string {
 			current.WriteRune(r)
 		}
 	}
-	
+
 	if current.Len() > 0 {
 		args = append(args, current.String())
 	}
-	
+
 	return args
 }
 

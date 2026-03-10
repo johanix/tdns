@@ -1576,7 +1576,19 @@ func (imr *Imr) createImrHandler(ctx context.Context, conf *Config) func(w dns.R
 				return
 			}
 
-			imr.ImrResponder(ctx, w, r, qname, qtype, msgoptions)
+			// Run IMR client query hooks (dependency analysis, RPZ, etc.)
+			hookCtx := ctx
+			for _, hook := range getImrClientQueryHooks() {
+				newCtx, response := hook(hookCtx, w, r, qname, qtype, msgoptions)
+				if newCtx != nil {
+					hookCtx = newCtx
+				}
+				if response != nil {
+					w.WriteMsg(response)
+					return
+				}
+			}
+			imr.ImrResponder(hookCtx, w, r, qname, qtype, msgoptions)
 			return
 
 		default:
