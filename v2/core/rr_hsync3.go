@@ -11,8 +11,18 @@ import (
 	"github.com/miekg/dns"
 )
 
-// customer.zone. IN HSYNC3 ON cloudflare agent.cloudflare.com. netnod
-// customer.zone. IN HSYNC3 ON netnod    agent.netnod.se.      .
+// Zone file syntax:
+//   owner TTL CLASS HSYNC3 state label endpoint upstream
+//
+// Examples:
+//   customer.zone. 3600 IN HSYNC3 ON cloudflare agent.cloudflare.com. netnod
+//   customer.zone. 3600 IN HSYNC3 ON netnod    agent.netnod.se.      .
+//
+// Fields:
+//   state    - ON or OFF
+//   label    - unqualified provider tag (e.g. "netnod"), NOT an FQDN
+//   endpoint - FQDN for agent discovery (e.g. "agent.netnod.se.")
+//   upstream - label of upstream provider, or "." if none (NOT an FQDN)
 
 func init() {
 	RegisterHsync3RR()

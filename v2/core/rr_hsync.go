@@ -11,14 +11,22 @@ import (
 	"github.com/miekg/dns"
 )
 
-// example.com. IN MSIGNER ON API multisigner.provider.com.
-// example.com. IN MSIGNER OFF 53 ms-conductor.signerco.net.
+// Zone file syntax:
+//   owner TTL CLASS HSYNC state nsmgmt sign identity upstream
+//
+// Example:
+//   example.com. 3600 IN HSYNC ON AGENT SIGN identity.example.com. upstream.example.com.
+//
+// Fields:
+//   state    - ON or OFF
+//   nsmgmt   - OWNER or AGENT (who manages the NS RRset)
+//   sign     - SIGN or NOSIGN (whether this provider signs the zone)
+//   identity - FQDN identifying this provider
+//   upstream - FQDN of upstream provider (or "." if none)
 
 func init() {
 	RegisterHsyncRR()
 }
-
-//const TypeHSYNC = 0x0F9D
 
 type HSYNC struct {
 	State    uint8 // 0=OFF, 1=ON

@@ -17,6 +17,19 @@ import (
 	"github.com/miekg/dns"
 )
 
+// Zone file syntax:
+//   owner TTL CLASS DELEG priority target [key="value" ...]
+//
+// Examples:
+//   example.com. 3600 IN DELEG 1 ns1.example.com. alpn="dot,doq" port="853" ipv4hint="192.0.2.1"
+//   example.com. 3600 IN DELEG 0 pool.ns.example.com.
+//
+// Fields:
+//   priority - uint16 (0 = AliasMode with no SvcParams, >0 = ServiceMode)
+//   target   - FQDN of the target name server
+//   key=val  - SVCB-style key=value pairs: mandatory, alpn, no-default-alpn,
+//              port, ipv4hint, ipv6hint
+
 func init() {
 	RegisterDelegRR()
 }
@@ -87,112 +100,60 @@ func delegStringToKey(s string) DELEGKey {
 	return deleg_RESERVED
 }
 
-// johani
 func (rr *DELEG) Parse(s []string) error {
-	zl := newZLexer(strings.NewReader(strings.Join(s, " ")))
-	pe := rr.parse(zl, "")
-	if pe != nil {
-		return errors.New(pe.Error())
+	// miekg/dns PrivateRR.parse() strips quotes and splits tokens, so
+	// key="value" arrives as ["key=", "value"]. We process the []string
+	// directly rather than re-lexing.
+	if len(s) < 2 {
+		return errors.New("DELEG: need at least priority and target")
 	}
-	return nil
-}
 
-func (rr *DELEG) parse(c *zlexer, o string) *ParseError {
-	l, _ := c.Next()
-	i, e := strconv.ParseUint(l.token, 10, 16)
-	if e != nil || l.err {
-		return &ParseError{file: l.token, err: "bad DELEG priority", lex: l}
+	// Priority
+	i, err := strconv.ParseUint(s[0], 10, 16)
+	if err != nil {
+		return fmt.Errorf("DELEG: bad priority %q", s[0])
 	}
 	rr.Priority = uint16(i)
 
-	c.Next()        // zBlank
-	l, _ = c.Next() // zString
-	rr.Target = l.token
-
-	name, nameOk := toAbsoluteName(l.token, o)
-	if l.err || !nameOk {
-		return &ParseError{file: l.token, err: "bad DELEG Target", lex: l}
+	// Target (domain name, should already be absolute from zone parser)
+	rr.Target = s[1]
+	if !dns.IsFqdn(rr.Target) {
+		rr.Target = dns.Fqdn(rr.Target)
 	}
-	rr.Target = name
 
-	// Values (if any)
-	l, _ = c.Next()
-	var xs []DELEGKeyValue
-	// Helps require whitespace between pairs.
-	// Prevents key1000="a"key1001=...
-	canHaveNextKey := true
-	for l.value != zNewline && l.value != zEOF {
-		switch l.value {
-		case zString:
-			if !canHaveNextKey {
-				// The key we can now read was probably meant to be
-				// a part of the last value.
-				return &ParseError{file: l.token, err: "bad DELEG value quotation", lex: l}
-			}
-
-			// In key=value pairs, value does not have to be quoted unless value
-			// contains whitespace. And keys don't need to have values.
-			// Similarly, keys with an equality signs after them don't need values.
-			// l.token includes at least up to the first equality sign.
-			idx := strings.IndexByte(l.token, '=')
-			var key, value string
-			if idx < 0 {
-				// Key with no value and no equality sign
-				key = l.token
-			} else if idx == 0 {
-				return &ParseError{file: l.token, err: "bad DELEG key", lex: l}
-			} else {
-				key, value = l.token[:idx], l.token[idx+1:]
-
-				if value == "" {
-					// We have a key and an equality sign. Maybe we have nothing
-					// after "=" or we have a double quote.
-					l, _ = c.Next()
-					if l.value == zQuote {
-						// Only needed when value ends with double quotes.
-						// Any value starting with zQuote ends with it.
-						canHaveNextKey = false
-
-						l, _ = c.Next()
-						switch l.value {
-						case zString:
-							// We have a value in double quotes.
-							value = l.token
-							l, _ = c.Next()
-							if l.value != zQuote {
-								return &ParseError{file: l.token, err: "DELEG unterminated value", lex: l}
-							}
-						case zQuote:
-							// There's nothing in double quotes.
-						default:
-							return &ParseError{file: l.token, err: "bad DELEG value", lex: l}
-						}
-					}
-				}
-			}
-			kv := makeDELEGKeyValue(delegStringToKey(key))
-			if kv == nil {
-				return &ParseError{file: l.token, err: "bad DELEG key", lex: l}
-			}
-			if err := kv.parse(value); err != nil {
-				return &ParseError{file: l.token, wrappedErr: err, lex: l}
-			}
-			xs = append(xs, kv)
-		case zQuote:
-			return &ParseError{file: l.token, err: "DELEG key can't contain double quotes", lex: l}
-		case zBlank:
-			canHaveNextKey = true
-		default:
-			return &ParseError{file: l.token, err: "bad DELEG values", lex: l}
+	// Remaining tokens are key=value pairs.
+	// Rejoin split quoted values: ["key=", "value"] → ["key=value"]
+	var tokens []string
+	for j := 2; j < len(s); j++ {
+		tok := s[j]
+		if strings.HasSuffix(tok, "=") && j+1 < len(s) {
+			tok += s[j+1]
+			j++
 		}
-		l, _ = c.Next()
+		tokens = append(tokens, tok)
 	}
 
-	// "In AliasMode, records SHOULD NOT include any SvcParams, and recipients MUST
-	// ignore any SvcParams that are present."
-	// However, we don't check rr.Priority == 0 && len(xs) > 0 here
-	// It is the responsibility of the user of the library to check this.
-	// This is to encourage the fixing of the source of this error.
+	var xs []DELEGKeyValue
+	for _, tok := range tokens {
+		idx := strings.IndexByte(tok, '=')
+		var key, value string
+		if idx < 0 {
+			key = tok
+		} else if idx == 0 {
+			return fmt.Errorf("DELEG: empty key in %q", tok)
+		} else {
+			key, value = tok[:idx], tok[idx+1:]
+		}
+
+		kv := makeDELEGKeyValue(delegStringToKey(key))
+		if kv == nil {
+			return fmt.Errorf("DELEG: unknown key %q", key)
+		}
+		if err := kv.parse(value); err != nil {
+			return err
+		}
+		xs = append(xs, kv)
+	}
 
 	rr.Value = xs
 	return nil

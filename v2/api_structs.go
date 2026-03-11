@@ -92,6 +92,8 @@ type ZonePost struct {
 	SubCommand string
 	Zone       string
 	Force      bool
+	Wait       bool
+	Timeout    string
 }
 
 type ZoneResponse struct {

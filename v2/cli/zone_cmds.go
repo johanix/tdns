@@ -37,6 +37,8 @@ var zoneReloadCmd = &cobra.Command{
 			Command: "reload",
 			Zone:    dns.Fqdn(tdns.Globals.Zonename),
 			Force:   force,
+			Wait:    showError,
+			Timeout: errorTimeout,
 		})
 
 		if err != nil {
@@ -298,6 +300,8 @@ func init() {
 	zoneNsecCmd.AddCommand(zoneNsecGenerateCmd, zoneNsecShowCmd)
 
 	ZoneCmd.PersistentFlags().BoolVarP(&force, "force", "F", false, "force operation")
+	zoneReloadCmd.Flags().BoolVarP(&showError, "error", "e", false, "wait for reload to complete and report any parse errors")
+	zoneReloadCmd.Flags().StringVar(&errorTimeout, "timeout", "10s", "how long to wait for reload when --error is set (e.g. 10s, 2m)")
 
 	zoneListCmd.Flags().BoolVarP(&showfile, "file", "f", false, "Show zone input file")
 	zoneListCmd.Flags().BoolVarP(&shownotify, "notify", "N", false, "Show zone downstream notify addresses")
@@ -324,7 +328,7 @@ func SendZoneCommand(api *tdns.ApiClient, data tdns.ZonePost) (tdns.ZoneResponse
 	}
 
 	if cr.Error {
-		return cr, fmt.Errorf("error from %s: %s", cr.AppName, cr.ErrorMsg)
+		return cr, fmt.Errorf("%s", cr.ErrorMsg)
 	}
 
 	return cr, nil

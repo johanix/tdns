@@ -12,6 +12,18 @@ import (
 	"github.com/miekg/dns"
 )
 
+// Zone file syntax:
+//   owner TTL CLASS NOTIFY rrtype scheme port target
+//
+// Example:
+//   _dsync.example.com. 3600 IN NOTIFY CSYNC 1 5359 ns1.example.com.
+//
+// Fields:
+//   rrtype - DNS RR type mnemonic (e.g. CSYNC, CDS, CDNSKEY, DNSKEY)
+//   scheme - notification scheme (uint8)
+//   port   - target port number (uint16)
+//   target - FQDN of the notification target
+
 func init() {
 	RegisterNotifyRR()
 }

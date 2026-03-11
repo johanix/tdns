@@ -14,6 +14,8 @@ import (
 )
 
 var force bool
+var showError bool
+var errorTimeout string
 
 var StopCmd = &cobra.Command{
 	Use:   "stop",

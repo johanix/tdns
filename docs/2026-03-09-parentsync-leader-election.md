@@ -10,7 +10,7 @@ When multiple agents manage the same zone, all detect NS/DNSKEY changes simultan
 
 ## Solution: Per-Zone Leader Election
 
-A lightweight leader election protocol among agents for each zone where `parentsync != none`. The elected leader is the only agent that sends DNS UPDATE to the parent. All other agents defer.
+A lightweight leader election protocol among agents for each zone where `parentsync=agent`. The elected leader is the only agent that sends DNS UPDATE to the parent. All other agents defer.
 
 ## Design: Reuse RFI Message Type (Zero Transport Changes)
 
@@ -200,7 +200,7 @@ func (ar *AgentRegistry) broadcastElectToZone(zone ZoneName, rfiType string, rec
 ## Verification
 
 1. Build: `cd tdns/cmdv2 && GOROOT=/opt/local/lib/go make`
-2. Single agent with `HSYNCPARAM parentsync=update` → `GetLeader` returns self (no messages needed)
+2. Single agent with `HSYNCPARAM parentsync=agent` → `GetLeader` returns self (no messages needed)
 3. Election state machine: StartElection → castVote → onVoteTimeout → determineWinner → broadcastConfirm → onConfirmTimeout → leader cached
 4. DDNS gating: only leader proceeds with `SyncZoneDelegation`
 5. Leader TTL expiry triggers proactive re-election

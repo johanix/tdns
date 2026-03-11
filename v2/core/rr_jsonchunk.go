@@ -18,6 +18,18 @@ func init() {
 	RegisterJSONCHUNKRR()
 }
 
+// Zone file syntax:
+//   owner TTL CLASS JSONCHUNK base64data [sequence total]
+//
+// Examples:
+//   node.distid.control. 3600 IN JSONCHUNK eyJrZXkiOiJ2YWx1ZSJ9
+//   node.distid.control. 3600 IN JSONCHUNK eyJrZXkiOiJ2YWx1ZSJ9 2 5
+//
+// Fields:
+//   base64data - base64-encoded JSON payload
+//   sequence   - chunk sequence number (optional, default 0)
+//   total      - total number of chunks (optional, default 1)
+
 // JSONCHUNK - Chunked JSON Data Transport
 // Transports large JSON-structured data (zone lists or encrypted blobs) in chunks
 // Format: Base64-encoded JSON data with sequence/total metadata

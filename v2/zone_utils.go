@@ -301,20 +301,6 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 		}
 	}
 
-	if viper.GetBool("service.debug") {
-		fname, err := zd.ZoneFileName()
-		if err != nil {
-			lg.Error("ZoneFileName failed", "zone", zd.ZoneName, "err", err)
-		} else {
-			_, err := new_zd.WriteFile(fname)
-			if err != nil {
-				lg.Error("WriteFile failed", "zone", zd.ZoneName, "err", err)
-			} else {
-				// zd.Logger.Printf("FetchFromFile: Zone %s: zone file written to %s", zd.ZoneName, f)
-			}
-		}
-	}
-
 	return true, nil
 }
 
@@ -1004,8 +990,8 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	wantsSync := zd.Options[OptDelSyncParent] || zd.Options[OptDelSyncChild]
 
-	// Check HSYNCPARAM for parentsync policy. If set to anything other than "none",
-	// automatically enable delegation sync for this child zone.
+	// Check HSYNCPARAM for parentsync=agent, which means the providers
+	// coordinate parent sync via leader election.
 	if !zd.Options[OptDelSyncChild] {
 		apex, err := zd.GetOwner(zd.ZoneName)
 		if err == nil && apex != nil {
@@ -1013,10 +999,9 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 			if exists && len(hsyncparamRRset.RRs) > 0 {
 				if prr, ok := hsyncparamRRset.RRs[0].(*dns.PrivateRR); ok {
 					if hsyncparam, ok := prr.Data.(*core.HSYNCPARAM); ok {
-						ps := hsyncparam.GetParentSync()
-						if ps != core.HsyncParentSyncNone {
-							lg.Info("SetupZoneSync: HSYNCPARAM parentsync is set, enabling delegation sync",
-								"zone", zd.ZoneName, "parentsync", core.HsyncParentSyncToString[ps])
+						if hsyncparam.GetParentSync() == core.HsyncParentSyncAgent {
+							lg.Info("SetupZoneSync: HSYNCPARAM parentsync=agent, enabling delegation sync",
+								"zone", zd.ZoneName)
 							zd.Options[OptDelSyncChild] = true
 							wantsSync = true
 						}
@@ -1364,7 +1349,7 @@ func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
 	return nil
 }
 
-func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool) (string, error) {
+func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool, wait bool, timeoutStr string) (string, error) {
 	if zd.Options[OptDirty] {
 		return "", fmt.Errorf("zone %s: zone has been modified, reload not possible", zd.ZoneName)
 	}
@@ -1374,20 +1359,30 @@ func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool) (stri
 		Name:     zd.ZoneName,
 		Response: respch,
 		Force:    force,
+		Wait:     wait,
 	}
 
 	var resp RefresherResponse
 
+	timeout := 2 * time.Second
+	if wait {
+		timeout = 10 * time.Second // default for --error mode
+		if timeoutStr != "" {
+			if d, err := time.ParseDuration(timeoutStr); err == nil {
+				timeout = d
+			}
+		}
+	}
+
 	select {
 	case resp = <-respch:
-	case <-time.After(2 * time.Second):
+	case <-time.After(timeout):
 		return fmt.Sprintf("Zone %s: timeout waiting for response from RefreshEngine", zd.ZoneName), fmt.Errorf("zone %s: timeout waiting for response from RefreshEngine", zd.ZoneName)
 	}
 
 	if resp.Error {
 		lg.Error("ReloadZone: error from RefreshEngine", "err", resp.ErrorMsg)
-		return fmt.Sprintf("zone %s: Error reloading: %s", zd.ZoneName, resp.ErrorMsg),
-			fmt.Errorf("zone %s: Error reloading: %v", zd.ZoneName, resp.ErrorMsg)
+		return "", fmt.Errorf("%s", resp.ErrorMsg)
 	}
 
 	if resp.Msg == "" {

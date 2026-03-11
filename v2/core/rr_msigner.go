@@ -11,8 +11,11 @@ import (
 	"github.com/miekg/dns"
 )
 
-// example.com. IN MSIGNER ON API multisigner.provider.com.
-// example.com. IN MSIGNER OFF 53 ms-conductor.signerco.net.
+// Zone file syntax:
+//   owner TTL CLASS MSIGNER state method target
+//
+// Example:
+//   example.com. 3600 IN MSIGNER ON API multisigner.provider.com.
 
 func init() {
 	RegisterMsignerRR()

@@ -134,7 +134,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			// XXX: Note: if the zone allows updates and is dirty, then reloading should be denied
 			lgApi.Info("reloading zone, will check for delegation data changes")
 			// resp.Msg, err = ReloadZone(cp.Zone, cp.Force)
-			resp.Msg, err = zd.ReloadZone(refreshq, zp.Force)
+			resp.Msg, err = zd.ReloadZone(refreshq, zp.Force, zp.Wait, zp.Timeout)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()

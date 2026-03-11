@@ -32,7 +32,7 @@ This creates consistency problems: if NSmgmt=OWNER in one RR and NSmgmt=AGENT in
 
 **HSYNCPARAM** (zone-wide, must be consistent):
 - `nsmgmt` — owner/agent (was per-RR in HSYNC, required runtime consistency check)
-- `parentsync` — none/notify/update/auto (new)
+- `parentsync` — owner/agent (who handles parent sync; mechanism comes from parent's DSYNC)
 - `audit` — yes/no (was in HSYNC2 flags)
 - `signers` — comma-separated list of agent labels that sign (replaces per-RR `Sign` field)
 
@@ -74,8 +74,8 @@ type HSYNC3 struct {
 
 Zone file format:
 ```
-customer.zone. HSYNCPARAM nsmgmt=agent parentsync=auto signers="netnod" audit=no
-customer.zone. HSYNCPARAM nsmgmt=agent parentsync=update signers="netnod,cloudflare"
+customer.zone. HSYNCPARAM nsmgmt=agent parentsync=agent signers="netnod" audit=no
+customer.zone. HSYNCPARAM nsmgmt=agent parentsync=agent signers="netnod,cloudflare"
 ```
 
 ```go
@@ -88,7 +88,7 @@ Keys:
 ```go
 const (
     HSYNCPARAM_NSMGMT     HSYNCPARAMKey = 0  // uint8: 1=OWNER, 2=AGENT
-    HSYNCPARAM_PARENTSYNC HSYNCPARAMKey = 1  // uint8: 0=NONE, 1=NOTIFY, 2=UPDATE, 3=AUTO
+    HSYNCPARAM_PARENTSYNC HSYNCPARAMKey = 1  // uint8: 0=OWNER, 1=AGENT
     HSYNCPARAM_AUDIT      HSYNCPARAMKey = 2  // uint8: 0=NO, 1=YES
     HSYNCPARAM_SIGNERS    HSYNCPARAMKey = 3  // comma-separated list of agent labels
     hsyncparam_RESERVED   HSYNCPARAMKey = 65535
@@ -160,7 +160,7 @@ On NS/glue change (via `ZoneUpdateChangesDelegationDataNG`): publish/update CSYN
 
 **File**: `zone_utils.go`
 
-When HSYNCPARAM `parentsync != none`: discover parent via IMR, look up `_dsync.<parent>`, select sync scheme, cache in ZoneData. ~2 hours.
+When HSYNCPARAM `parentsync=agent`: discover parent via IMR, look up `_dsync.<parent>`, select sync scheme, cache in ZoneData. ~2 hours.
 
 ## Phase 3: Leader Election and Coordinated DDNS
 
@@ -174,7 +174,7 @@ When HSYNCPARAM `parentsync != none`: discover parent via IMR, look up `_dsync.<
 - Cached leader TTL expires (e.g., 5 minutes)
 - "I don't know who the leader is" = "call election"
 
-**Protocol** (per zone, among agents with parentsync != none):
+**Protocol** (per zone, among agents with parentsync=agent):
 
 1. **Call**: Any agent broadcasts `PARENTSYNC-ELECT {zone}` to all peers.
 2. **Vote**: Every agent generates a random uint32 and broadcasts `PARENTSYNC-VOTE {zone, random_number, my_label}` to **all** peers.
@@ -247,7 +247,7 @@ Gate DDNS sends on leader election result. Existing `SyncZoneDelegationViaUpdate
 3. Parse HSYNCPARAM with key=value pairs → verify accessor helpers work
 4. Wire format round-trip for both record types
 5. `signers="netnod"` in HSYNCPARAM → `analyzeHsyncSigners` returns correct result
-6. Agent startup with HSYNCPARAM parentsync=update → `OptDelSyncChild` set automatically
+6. Agent startup with HSYNCPARAM parentsync=agent → `OptDelSyncChild` set automatically
 7. NS change in signed zone with signed delegation → CSYNC published proactively
 8. DNSKEY change in signed zone → CDS synthesized and published
 9. SIG(0) KEY published at zone apex (RFC 8078)

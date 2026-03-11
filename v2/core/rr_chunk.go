@@ -26,6 +26,20 @@ func init() {
 	RegisterCHUNKRR()
 }
 
+// Zone file syntax:
+//   owner TTL CLASS CHUNK sequence total format hmac data
+//
+// Examples:
+//   node.distid.control. 3600 IN CHUNK 0 9 JSON a889a20e...c897092 {"chunk_count":9,"chunk_size":200,...}
+//   node.distid.control. 3600 IN CHUNK 1 9 JSON "" bWhBdGR...PQ==
+//
+// Fields:
+//   sequence - uint16 (0 = manifest chunk, 1..N = data chunks)
+//   total    - uint16 total number of data chunks
+//   format   - format identifier (e.g. "JSON")
+//   hmac     - hex-encoded HMAC-SHA256 (manifest) or "" (data chunks)
+//   data     - JSON (manifest) or base64-encoded payload (data chunks)
+
 // CHUNK - Unified Chunk/Manifest RR type
 // Fixed RDATA structure with all fields always present (some unused depending on context)
 //

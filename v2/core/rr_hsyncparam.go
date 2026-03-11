@@ -14,6 +14,18 @@ import (
 	"github.com/miekg/dns"
 )
 
+// Zone file syntax:
+//   owner TTL CLASS HSYNCPARAM key1="val1" key2="val2" ...
+//
+// Example:
+//   example.com. 3600 IN HSYNCPARAM nsmgmt="agent" parentsync="agent" audit="yes" signers="netnod,cloudflare"
+//
+// Known keys:
+//   nsmgmt="owner|agent"                  - who manages the NS RRset
+//   parentsync="owner|agent"              - who handles parent synchronisation
+//   audit="yes|no"                        - whether audit is enabled
+//   signers="label1,label2,..."           - comma-separated list of signer labels
+
 func init() {
 	RegisterHsyncparamRR()
 }
@@ -70,26 +82,21 @@ func hsyncparamStringToKey(s string) HSYNCPARAMKey {
 	return hsyncparam_RESERVED
 }
 
-// ParentSync constants
+// ParentSync constants: who handles parent synchronisation.
+// The mechanism (NOTIFY, UPDATE, etc.) is announced by the parent via DSYNC.
 const (
-	HsyncParentSyncNone   uint8 = 0
-	HsyncParentSyncNotify uint8 = 1
-	HsyncParentSyncUpdate uint8 = 2
-	HsyncParentSyncAuto   uint8 = 3
+	HsyncParentSyncOwner uint8 = 0 // zone owner handles parent sync
+	HsyncParentSyncAgent uint8 = 1 // providers coordinate via leader election
 )
 
 var HsyncParentSyncToString = map[uint8]string{
-	HsyncParentSyncNone:   "none",
-	HsyncParentSyncNotify: "notify",
-	HsyncParentSyncUpdate: "update",
-	HsyncParentSyncAuto:   "auto",
+	HsyncParentSyncOwner: "owner",
+	HsyncParentSyncAgent: "agent",
 }
 
 var StringToHsyncParentSync = map[string]uint8{
-	"none":   HsyncParentSyncNone,
-	"notify": HsyncParentSyncNotify,
-	"update": HsyncParentSyncUpdate,
-	"auto":   HsyncParentSyncAuto,
+	"owner": HsyncParentSyncOwner,
+	"agent": HsyncParentSyncAgent,
 }
 
 // HSYNCPARAMKeyValue defines a key=value pair for the HSYNCPARAM RR type.
@@ -201,72 +208,40 @@ func unpackHsyncparamData(msg []byte, off int) ([]HSYNCPARAMKeyValue, int, error
 // --- PrivateRdata interface ---
 
 func (rr *HSYNCPARAM) Parse(s []string) error {
-	zl := newZLexer(strings.NewReader(strings.Join(s, " ")))
-	pe := rr.parse(zl, "")
-	if pe != nil {
-		return errors.New(pe.Error())
-	}
-	return nil
-}
-
-func (rr *HSYNCPARAM) parse(c *zlexer, o string) *ParseError {
-	// HSYNCPARAM has no priority or target — just key=value pairs.
-	l, _ := c.Next()
-	var xs []HSYNCPARAMKeyValue
-	canHaveNextKey := true
-	for l.value != zNewline && l.value != zEOF {
-		switch l.value {
-		case zString:
-			if !canHaveNextKey {
-				return &ParseError{file: l.token, err: "bad HSYNCPARAM value quotation", lex: l}
-			}
-
-			idx := strings.IndexByte(l.token, '=')
-			var key, value string
-			if idx < 0 {
-				key = l.token
-			} else if idx == 0 {
-				return &ParseError{file: l.token, err: "bad HSYNCPARAM key", lex: l}
-			} else {
-				key, value = l.token[:idx], l.token[idx+1:]
-
-				if value == "" {
-					l, _ = c.Next()
-					if l.value == zQuote {
-						canHaveNextKey = false
-
-						l, _ = c.Next()
-						switch l.value {
-						case zString:
-							value = l.token
-							l, _ = c.Next()
-							if l.value != zQuote {
-								return &ParseError{file: l.token, err: "HSYNCPARAM unterminated value", lex: l}
-							}
-						case zQuote:
-							// Empty quoted value.
-						default:
-							return &ParseError{file: l.token, err: "bad HSYNCPARAM value", lex: l}
-						}
-					}
-				}
-			}
-			kv := makeHSYNCPARAMKeyValue(hsyncparamStringToKey(key))
-			if kv == nil {
-				return &ParseError{file: l.token, err: "bad HSYNCPARAM key", lex: l}
-			}
-			if err := kv.parse(value); err != nil {
-				return &ParseError{file: l.token, wrappedErr: err, lex: l}
-			}
-			xs = append(xs, kv)
-		case zQuote:
-			return &ParseError{file: l.token, err: "HSYNCPARAM key can't contain double quotes", lex: l}
-		case zBlank:
-			canHaveNextKey = true
-		default:
-			return &ParseError{file: l.token, err: "bad HSYNCPARAM values", lex: l}
+	// miekg/dns PrivateRR.parse() strips quotes and splits tokens, so
+	// key="value" arrives as ["key=", "value"]. We rejoin those before
+	// parsing key=value pairs.
+	var tokens []string
+	for i := 0; i < len(s); i++ {
+		tok := s[i]
+		if strings.HasSuffix(tok, "=") && i+1 < len(s) {
+			// "key=" + "value" → "key=value"
+			tok += s[i+1]
+			i++
 		}
-		l, _ = c.Next()
+		tokens = append(tokens, tok)
+	}
+
+	var xs []HSYNCPARAMKeyValue
+	for _, tok := range tokens {
+		idx := strings.IndexByte(tok, '=')
+		if idx < 0 {
+			return fmt.Errorf("HSYNCPARAM: missing '=' in %q", tok)
+		}
+		if idx == 0 {
+			return fmt.Errorf("HSYNCPARAM: empty key in %q", tok)
+		}
+		key := tok[:idx]
+		value := tok[idx+1:]
+
+		kv := makeHSYNCPARAMKeyValue(hsyncparamStringToKey(key))
+		if kv == nil {
+			return fmt.Errorf("HSYNCPARAM: unknown key %q", key)
+		}
+		if err := kv.parse(value); err != nil {
+			return err
+		}
+		xs = append(xs, kv)
 	}
 
 	rr.Value = xs
@@ -334,14 +309,14 @@ func (h *HSYNCPARAM) GetNSmgmt() uint8 {
 	return HsyncNSmgmtOWNER
 }
 
-// GetParentSync returns the parentsync value, defaulting to HsyncParentSyncNone.
+// GetParentSync returns the parentsync value, defaulting to HsyncParentSyncOwner.
 func (h *HSYNCPARAM) GetParentSync() uint8 {
 	for _, kv := range h.Value {
 		if v, ok := kv.(*HSYNCPARAMParentSync); ok {
 			return v.Value
 		}
 	}
-	return HsyncParentSyncNone
+	return HsyncParentSyncOwner
 }
 
 // GetAudit returns the audit value, defaulting to 0 (no).
@@ -450,7 +425,7 @@ func (s *HSYNCPARAMParentSync) unpack(b []byte) error {
 func (s *HSYNCPARAMParentSync) parse(b string) error {
 	v, ok := StringToHsyncParentSync[strings.ToLower(b)]
 	if !ok {
-		return fmt.Errorf("dns: hsyncparam parentsync: unknown value %q (expected \"none\", \"notify\", \"update\", or \"auto\")", b)
+		return fmt.Errorf("dns: hsyncparam parentsync: unknown value %q (expected \"owner\" or \"agent\")", b)
 	}
 	s.Value = v
 	return nil

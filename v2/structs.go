@@ -385,6 +385,7 @@ type ZoneRefresher struct {
 	DnssecPolicy string
 	MultiSigner  string
 	Force        bool // force refresh, ignoring SOA serial
+	Wait         bool // wait for refresh to complete before responding
 	Response     chan RefresherResponse
 }
 

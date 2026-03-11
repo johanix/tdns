@@ -8,10 +8,10 @@
 
 Phase 3a (leader election) is complete. The elected leader is the only agent that sends DNS UPDATE to the parent. Before the leader can send SIG(0)-signed UPDATEs, the KEY record must be published.
 
-All of this is gated on HSYNCPARAM `parentsync != none` (MP zones) or the `delegation-sync-child` config option (non-MP zones). If parentsync is not set, no leader election, no KEY publication, and no DNS UPDATEs happen.
+All of this is gated on HSYNCPARAM `parentsync=agent` (MP zones) or the `delegation-sync-child` config option (non-MP zones). If parentsync is not set (defaults to "owner"), no leader election, no KEY publication, and no DNS UPDATEs happen.
 
 The gating chain:
-1. `SetupZoneSync` (`zone_utils.go:1016`) reads HSYNCPARAM. Only if `GetParentSync() != HsyncParentSyncNone` does it set `OptDelSyncChild = true`.
+1. `SetupZoneSync` (`zone_utils.go`) reads HSYNCPARAM. Only if `GetParentSync() == HsyncParentSyncAgent` does it set `OptDelSyncChild = true`.
 2. Leader election (`parseconfig.go`) is gated on `OptDelSyncChild`.
 3. DDNS sending (`delegation_sync.go`) is gated on `OptDelSyncChild` + `IsLeader`.
 4. KEY publication (`DelegationSyncSetup`) is gated on `OptDelSyncChild`.
@@ -23,7 +23,7 @@ The gating chain:
 Works when the parent zone is signed (most are). The KEY RR is published at the child zone apex.
 
 - **Non-MP zones** (`OptDelSyncChild`): Agent publishes KEY directly via `Sig0KeyPreparation` + `PublishKeyRRs` (already exists).
-- **MP zones** (`HSYNCPARAM parentsync != none`): Agent sends REPLACE UPDATE with KEY to the combiner. The combiner publishes it at the apex.
+- **MP zones** (`HSYNCPARAM parentsync=agent`): Agent sends REPLACE UPDATE with KEY to the combiner. The combiner publishes it at the apex.
 
 ### 2. RFC 9615 (_signal. KEY)
 
