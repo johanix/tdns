@@ -381,12 +381,27 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 			respMap := SanitizeForJSON(resp).(AgentDistribResponse)
 			w.Header().Set("Content-Type", "application/json")
 
+			// Add leader election status per zone
+			var leaderInfo []map[string]interface{}
+			if conf.Internal.LeaderElectionManager != nil {
+				for _, ls := range conf.Internal.LeaderElectionManager.GetAllLeaders() {
+					leaderInfo = append(leaderInfo, map[string]interface{}{
+						"zone":     string(ls.Zone),
+						"leader":   string(ls.Leader),
+						"is_self":  ls.IsSelf,
+						"term":     ls.Term,
+						"ttl_secs": int(time.Until(ls.Expiry).Seconds()),
+					})
+				}
+			}
+
 			// Create response with peers field
 			fullResp := map[string]interface{}{
-				"time":  respMap.Time,
-				"msg":   respMap.Msg,
-				"error": respMap.Error,
-				"peers": peerMaps,
+				"time":    respMap.Time,
+				"msg":     respMap.Msg,
+				"error":   respMap.Error,
+				"peers":   peerMaps,
+				"leaders": leaderInfo,
 			}
 			if respMap.ErrorMsg != "" {
 				fullResp["error_msg"] = respMap.ErrorMsg

@@ -293,44 +293,37 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 
 	// we need a third loop to check for changes in the glue records themselves.
 
-	for _, ns := range oldapex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs {
-		if ns == nil {
+	oldInBailiwick, _ := BailiwickNS(zd.ZoneName, oldapex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs)
+	for _, nsname := range oldInBailiwick {
+		oldowner, err := zd.GetOwner(nsname)
+		if err != nil || oldowner == nil {
+			lgDns.Warn("DDCNG: in-bailiwick nameserver has no address records in old zone", "ns", nsname)
 			continue
 		}
-		if nsrr, ok := ns.(*dns.NS); ok {
-			oldowner, err := zd.GetOwner(nsrr.Ns)
-			if err != nil || oldowner == nil {
-				lgDns.Warn("DDCNG: nameserver has no address records in old zone", "ns", nsrr.Ns)
-				// TODO: We should add all address records found in the new version of the zone.
-				continue
+		newowner, err := newzd.GetOwner(nsname)
+		if err != nil || newowner == nil {
+			lgDns.Warn("DDCNG: in-bailiwick nameserver has no address records in new zone", "ns", nsname)
+			for _, rr := range oldowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs {
+				rr.Header().Class = dns.ClassNONE
+				dss.ARemoves = append(dss.ARemoves, rr)
 			}
-			newowner, err := newzd.GetOwner(nsrr.Ns)
-			if err != nil || newowner == nil {
-				lgDns.Warn("DDCNG: nameserver has no address records in new zone", "ns", nsrr.Ns)
-				for _, rr := range oldowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs {
-					rr.Header().Class = dns.ClassNONE
-					dss.ARemoves = append(dss.ARemoves, rr)
-				}
-				for _, rr := range oldowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs {
-					rr.Header().Class = dns.ClassNONE
-					dss.AAAARemoves = append(dss.AAAARemoves, rr)
-				}
-				continue
+			for _, rr := range oldowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs {
+				rr.Header().Class = dns.ClassNONE
+				dss.AAAARemoves = append(dss.AAAARemoves, rr)
 			}
-			// dump.P(newowner.RRtypes[dns.TypeA])
-			// dump.P(oldowner.RRtypes[dns.TypeA])
-			diff, adds, removes := core.RRsetDiffer(nsrr.Ns, newowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs, oldowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs, dns.TypeA, zd.Logger, Globals.Verbose, Globals.Debug)
-			if diff {
-				dss.AAdds = append(dss.AAdds, adds...)
-				dss.ARemoves = append(dss.ARemoves, removes...)
-				dss.InSync = false
-			}
-			diff, adds, removes = core.RRsetDiffer(nsrr.Ns, newowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs, oldowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs, dns.TypeAAAA, zd.Logger, Globals.Verbose, Globals.Debug)
-			if diff {
-				dss.AAAAAdds = append(dss.AAAAAdds, adds...)
-				dss.AAAARemoves = append(dss.AAAARemoves, removes...)
-				dss.InSync = false
-			}
+			continue
+		}
+		diff, adds, removes := core.RRsetDiffer(nsname, newowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs, oldowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs, dns.TypeA, zd.Logger, Globals.Verbose, Globals.Debug)
+		if diff {
+			dss.AAdds = append(dss.AAdds, adds...)
+			dss.ARemoves = append(dss.ARemoves, removes...)
+			dss.InSync = false
+		}
+		diff, adds, removes = core.RRsetDiffer(nsname, newowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs, oldowner.RRtypes.GetOnlyRRSet(dns.TypeAAAA).RRs, dns.TypeAAAA, zd.Logger, Globals.Verbose, Globals.Debug)
+		if diff {
+			dss.AAAAAdds = append(dss.AAAAAdds, adds...)
+			dss.AAAARemoves = append(dss.AAAARemoves, removes...)
+			dss.InSync = false
 		}
 	}
 

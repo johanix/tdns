@@ -592,7 +592,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				resp.ErrorMsg = "leader election manager not initialized"
 				return
 			}
-			status := lem.GetParentSyncStatus(amp.Zone, zd, kdb, conf.Internal.ImrEngine)
+			status := lem.GetParentSyncStatus(amp.Zone, zd, kdb, conf.Internal.ImrEngine, conf.Internal.AgentRegistry)
 			resp.Data = status
 			resp.Msg = fmt.Sprintf("Parent sync status for zone %s", amp.Zone)
 
@@ -603,16 +603,16 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				resp.ErrorMsg = "leader election manager not initialized"
 				return
 			}
-			zad, err := conf.Internal.AgentRegistry.GetZoneAgentData(amp.Zone)
 			peers := 0
-			if err == nil {
-				peers = len(zad.Agents) - 1
-				if peers < 0 {
-					peers = 0
+			if zad, err := conf.Internal.AgentRegistry.GetZoneAgentData(amp.Zone); err == nil {
+				for _, agent := range zad.Agents {
+					if agent.Identity != AgentId(conf.Agent.Identity) && agent.IsAnyTransportOperational() {
+						peers++
+					}
 				}
 			}
 			lem.StartElection(amp.Zone, peers)
-			resp.Msg = fmt.Sprintf("Election started for zone %s with %d peers", amp.Zone, peers)
+			resp.Msg = fmt.Sprintf("Election started for zone %s with %d operational peers", amp.Zone, peers)
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown agent command: %s", amp.Command)

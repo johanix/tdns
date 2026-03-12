@@ -119,10 +119,10 @@ func (tm *TransportManager) isInHSYNC(senderID string, zone string) (bool, strin
 	for _, rr := range hsyncRR.RRs {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
 			if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
-				if hsync3.Label == tm.LocalID {
+				if hsync3.Identity == tm.LocalID {
 					foundMe = true
 				}
-				if hsync3.Label == senderID {
+				if hsync3.Identity == senderID {
 					foundSender = true
 				}
 			}
@@ -163,10 +163,10 @@ func (tm *TransportManager) isInHSYNCAnyZone(senderID string) (bool, string) {
 		for _, rr := range hsyncRR.RRs {
 			if prr, ok := rr.(*dns.PrivateRR); ok {
 				if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
-					if hsync3.Label == tm.LocalID {
+					if hsync3.Identity == tm.LocalID {
 						foundMe = true
 					}
-					if hsync3.Label == senderID {
+					if hsync3.Identity == senderID {
 						foundSender = true
 					}
 				}

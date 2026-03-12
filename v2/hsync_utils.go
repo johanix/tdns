@@ -41,11 +41,11 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 	}
 
 	if oldapex == nil {
-		lgAgent.Info("initial zone load, old apex was nil", "zone", zd.ZoneName)
 		if newhsync == nil {
-			lgAgent.Debug("new apex has no HSYNC3 RRset, no action", "zone", zd.ZoneName)
+			lgAgent.Debug("initial zone load, no HSYNC3 RRs in new zone", "zone", zd.ZoneName)
 			return false, &hss, nil
 		}
+		lgAgent.Info("initial zone load, found HSYNC3 RRs", "zone", zd.ZoneName, "count", len(newhsync.RRs))
 		hss.HsyncAdds = newhsync.RRs
 		return true, &hss, nil
 	}
@@ -518,9 +518,28 @@ func (zd *ZoneData) analyzeHsyncSigners() (weShouldSign bool, otherSigners int, 
 			// No signers specified — default to sign
 			return true, 0, nil
 		}
-		// HSYNCPARAM signers are plain labels (e.g. "netnod"),
-		// ourIdentity is an FQDN (e.g. "netnod."). Strip trailing dot for comparison.
-		ourLabel := strings.TrimSuffix(ourIdentity, ".")
+		// HSYNCPARAM signers are plain labels (e.g. "netnod").
+		// ourIdentity is an FQDN (e.g. "agent.netnod.se.").
+		// Look up our HSYNC3 record by Identity to find our Label.
+		ourLabel := ""
+		hsync3RRset, h3exists := apex.RRtypes.Get(core.TypeHSYNC3)
+		if h3exists {
+			for _, rr := range hsync3RRset.RRs {
+				if prr, ok := rr.(*dns.PrivateRR); ok {
+					if h3, ok := prr.Data.(*core.HSYNC3); ok {
+						if h3.Identity == ourIdentity {
+							ourLabel = strings.TrimSuffix(h3.Label, ".")
+							break
+						}
+					}
+				}
+			}
+		}
+		if ourLabel == "" {
+			// Fallback: strip trailing dot from FQDN (works if identity happens to be just a label)
+			ourLabel = strings.TrimSuffix(ourIdentity, ".")
+		}
+		zd.Logger.Printf("analyzeHsyncSigners: zone %s: ourIdentity=%q ourLabel=%q signers=%v", zd.ZoneName, ourIdentity, ourLabel, signers)
 		for _, s := range signers {
 			if s == ourLabel {
 				weShouldSign = true

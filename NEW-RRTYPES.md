@@ -15,12 +15,12 @@ Per-provider enrollment record. One HSYNC3 per provider at the zone apex.
 Format:
 
 ```
-owner TTL CLASS HSYNC3 {state} {label} {endpoint} {upstream}
+owner TTL CLASS HSYNC3 {state} {label} {identity} {upstream}
 ```
 
 state:       ON or OFF
 label:       unqualified provider tag (e.g. "netnod"), NOT an FQDN
-endpoint:    FQDN for agent discovery (e.g. "agent.netnod.se.")
+identity:    FQDN for agent discovery (e.g. "agent.netnod.se.")
 upstream:    label of upstream provider, or "." if none (NOT an FQDN)
 
 Example:

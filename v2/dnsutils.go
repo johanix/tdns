@@ -18,7 +18,6 @@ import (
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 	"github.com/twotwotwo/sorts"
-
 	// "github.com/gookit/goutil/dump"
 )
 
@@ -220,6 +219,16 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	apex, _ := zd.GetOwner(zd.ZoneName)
 	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0].(*dns.SOA)
 	soa.Serial = zd.CurrentSerial
+
+	// Re-sign SOA after serial update (the RRSIG covers the serial)
+	if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
+		soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+		if signed, err := zd.SignRRset(&soaRRset, zd.ZoneName, nil, true); err != nil {
+			zd.Logger.Printf("ZoneTransferOut: failed to re-sign SOA: %v", err)
+		} else if signed {
+			apex.RRtypes.Set(dns.TypeSOA, soaRRset)
+		}
+	}
 
 	total_sent := 0
 	count := 0

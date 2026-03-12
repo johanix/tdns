@@ -1,8 +1,8 @@
 # Parent Sync: SIG(0) KEY Publication + CLI
 
-**Date**: 2026-03-09
+**Date**: 2026-03-09 (updated 2026-03-11)
 **Status**: Phase 3b complete, Phase 3c planning
-**Prerequisite**: Phase 3a (leader election) complete
+**Prerequisite**: Phase 1 (HSYNC3+HSYNCPARAM) DONE. Phase 3a (leader election) complete.
 
 ## Context
 

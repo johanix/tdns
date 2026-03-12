@@ -544,9 +544,30 @@ func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 	if tm.agentRegistry != nil {
 		agent, exists := tm.agentRegistry.S.Get(AgentId(senderID))
 		if exists {
+			wasOperational := agent.DnsDetails.State == AgentStateOperational
 			agent.DnsDetails.State = AgentStateOperational
 			agent.DnsDetails.LastContactTime = time.Now()
 			tm.agentRegistry.S.Set(agent.Identity, agent)
+
+			// When a peer first becomes operational, trigger leader election for shared zones
+			if !wasOperational && tm.agentRegistry.LeaderElectionManager != nil {
+				for zone := range agent.Zones {
+					zd, exists := Zones.Get(string(zone))
+					if exists && zd.Options[OptDelSyncChild] {
+						operationalPeers := 0
+						if zad, err := tm.agentRegistry.GetZoneAgentData(zone); err == nil {
+							for _, a := range zad.Agents {
+								if a.Identity != AgentId(tm.agentRegistry.LocalAgent.Identity) && a.IsAnyTransportOperational() {
+									operationalPeers++
+								}
+							}
+						}
+						lgTransport.Info("peer became operational, triggering leader election",
+							"peer", senderID, "zone", zone, "operational_peers", operationalPeers)
+						tm.agentRegistry.LeaderElectionManager.StartElection(zone, operationalPeers)
+					}
+				}
+			}
 		}
 	}
 

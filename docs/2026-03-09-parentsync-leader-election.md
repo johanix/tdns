@@ -1,8 +1,8 @@
 # Parent Sync Leader Election Protocol
 
-**Date**: 2026-03-09
+**Date**: 2026-03-09 (updated 2026-03-11)
 **Status**: Planning
-**Prerequisite**: Phases 1-2 of agent-driven parent delegation sync (HSYNC3, HSYNCPARAM, CDS/CSYNC publication, DSYNC discovery)
+**Prerequisite**: Phase 1 (HSYNC3+HSYNCPARAM) DONE. Phase 2 (CDS/CSYNC publication, DSYNC discovery) still needed before this.
 
 ## Problem
 

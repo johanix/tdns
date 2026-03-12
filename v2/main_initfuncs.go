@@ -909,6 +909,149 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	)
 	conf.Internal.LeaderElectionManager = lem
 	conf.Internal.AgentRegistry.LeaderElectionManager = lem
+	// Wire operational peers counter for re-election decisions
+	lem.SetOperationalPeersFunc(func(zone ZoneName) int {
+		zad, err := conf.Internal.AgentRegistry.GetZoneAgentData(zone)
+		if err != nil {
+			return 0
+		}
+		count := 0
+		for _, agent := range zad.Agents {
+			if agent.Identity != AgentId(conf.Agent.Identity) && agent.IsAnyTransportOperational() {
+				count++
+			}
+		}
+		return count
+	})
+
+	// Attach leader election OnFirstLoad callbacks to zone stubs.
+	// Must happen here (not in ParseZones) because LeaderElectionManager
+	// doesn't exist until StartAgent runs.
+	for _, zoneName := range conf.Internal.AllZones {
+		zd, exists := Zones.Get(zoneName)
+		if !exists {
+			continue
+		}
+		if zd.Options[OptDelSyncChild] || zd.Options[OptMultiProvider] {
+			zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *ZoneData) {
+				if !zd.Options[OptDelSyncChild] {
+					return
+				}
+				hsync3Count := 0
+				if apex, err := zd.GetOwner(zd.ZoneName); err == nil && apex != nil {
+					if rrset, exists := apex.RRtypes.Get(core.TypeHSYNC3); exists {
+						hsync3Count = len(rrset.RRs)
+					}
+				}
+				ar := conf.Internal.AgentRegistry
+				if hsync3Count <= 1 {
+					lem.StartElection(ZoneName(zd.ZoneName), 0)
+				} else if ar != nil {
+					zad, err := ar.GetZoneAgentData(ZoneName(zd.ZoneName))
+					if err == nil {
+						operationalPeers := 0
+						for _, agent := range zad.Agents {
+							if agent.IsAnyTransportOperational() {
+								operationalPeers++
+							}
+						}
+						if operationalPeers > 0 {
+							lem.StartElection(ZoneName(zd.ZoneName), operationalPeers)
+						} else {
+							lgElect.Info("deferring leader election until peers are operational",
+								"zone", zd.ZoneName, "hsync3_peers", hsync3Count-1)
+						}
+					}
+				}
+			})
+		}
+	}
+
+	// When the local agent wins leader election: ensure we have a SIG(0) key,
+	// then trigger delegation sync setup (publish KEY + bootstrap with parent).
+	// Flow: check local keystore → ask peers via RFI CONFIG → generate if nobody has it.
+	delsyncq := conf.Internal.DelegationSyncQ
+	lem.SetOnLeaderElected(func(zone ZoneName) error {
+		zd, ok := Zones.Get(string(zone))
+		if !ok || zd == nil {
+			return fmt.Errorf("onLeaderElected: zone %s not found", zone)
+		}
+		if !zd.Options[OptDelSyncChild] {
+			return nil
+		}
+		hasUpdateScheme := false
+		for _, scheme := range viper.GetStringSlice("delegationsync.child.schemes") {
+			if scheme == "update" {
+				hasUpdateScheme = true
+				break
+			}
+		}
+		if !hasUpdateScheme {
+			return nil
+		}
+
+		kdb := conf.Internal.KeyDB
+		keyName := string(zone)
+
+		// Step a: check local keystore
+		sak, err := kdb.GetSig0Keys(keyName, Sig0StateActive)
+		if err == nil && len(sak.Keys) > 0 {
+			lgElect.Info("leader has local SIG(0) key, proceeding to sync setup",
+				"zone", zone, "keyid", sak.Keys[0].KeyId)
+			goto setup
+		}
+
+		// Step b: ask peers via RFI CONFIG subtype=sig0key
+		{
+			ar := conf.Internal.AgentRegistry
+			zad, err := ar.GetZoneAgentData(zone)
+			if err == nil {
+				for _, agent := range zad.Agents {
+					if agent.Identity == AgentId(ar.LocalAgent.Identity) {
+						continue
+					}
+					if !agent.IsAnyTransportOperational() {
+						continue
+					}
+					lgElect.Info("asking peer for SIG(0) key", "zone", zone, "peer", agent.Identity)
+					amr, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
+						MessageType:  AgentMsgRfi,
+						OriginatorID: AgentId(ar.LocalAgent.Identity),
+						Zone:         zone,
+						RfiType:      "CONFIG",
+						Records:      map[string][]string{"_subtype": {"sig0key"}},
+					})
+					if err != nil {
+						lgElect.Warn("RFI CONFIG failed", "zone", zone, "peer", agent.Identity, "err", err)
+						continue
+					}
+					if rfid, ok := amr.RfiResponse[agent.Identity]; ok && !rfid.Error && len(rfid.ConfigData) > 0 {
+						if err := importSig0KeyFromPeer(kdb, keyName, rfid.ConfigData); err != nil {
+							lgElect.Error("failed to import SIG(0) key from peer",
+								"zone", zone, "peer", agent.Identity, "err", err)
+							continue
+						}
+						lgElect.Info("imported SIG(0) key from peer", "zone", zone, "peer", agent.Identity)
+						goto setup
+					}
+					lgElect.Info("peer does not have SIG(0) key", "zone", zone, "peer", agent.Identity)
+				}
+			}
+		}
+
+		// Step c-d: no peer has the key — DelegationSyncSetup will generate a new one
+		lgElect.Info("no peer has SIG(0) key, will generate new keypair", "zone", zone)
+
+	setup:
+		// Step e: trigger DELEGATION-SYNC-SETUP (publish KEY + bootstrap with parent)
+		lgElect.Info("triggering delegation sync setup", "zone", zone)
+		delsyncq <- DelegationSyncRequest{
+			Command:  "DELEGATION-SYNC-SETUP",
+			ZoneName: zd.ZoneName,
+			ZoneData: zd,
+		}
+		return nil
+	})
 
 	// Agent-specific
 	startEngineNoError(&Globals.App, "HsyncEngine", func() { HsyncEngine(ctx, conf, conf.Internal.MsgQs) })

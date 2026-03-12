@@ -422,7 +422,7 @@ func PrintHsyncRRs(agentid tdns.AgentId, rrs []string) {
 		}
 
 		fields := strings.Fields(rrstr)
-		if tdns.AgentId(hsync3RR.Label) == agentid {
+		if tdns.AgentId(hsync3RR.Identity) == agentid {
 			fields = append(fields, "(local agent)")
 		}
 		lines = append(lines, strings.Join(fields, "|"))

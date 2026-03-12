@@ -36,11 +36,13 @@ type LeaderElection struct {
 
 // LeaderElectionManager coordinates leader election across all zones.
 type LeaderElectionManager struct {
-	mu            sync.RWMutex
-	elections     map[ZoneName]*LeaderElection
-	localID       AgentId
-	leaderTTL     time.Duration
-	broadcastFunc func(zone ZoneName, rfiType string, records map[string][]string) error
+	mu                   sync.RWMutex
+	elections            map[ZoneName]*LeaderElection
+	localID              AgentId
+	leaderTTL            time.Duration
+	broadcastFunc        func(zone ZoneName, rfiType string, records map[string][]string) error
+	operationalPeersFunc func(zone ZoneName) int   // returns count of operational peers for a zone
+	onLeaderElected      func(zone ZoneName) error // called when local agent wins election
 }
 
 func NewLeaderElectionManager(localID AgentId, leaderTTL time.Duration, broadcastFunc func(ZoneName, string, map[string][]string) error) *LeaderElectionManager {
@@ -50,6 +52,17 @@ func NewLeaderElectionManager(localID AgentId, leaderTTL time.Duration, broadcas
 		leaderTTL:     leaderTTL,
 		broadcastFunc: broadcastFunc,
 	}
+}
+
+// SetOperationalPeersFunc sets the callback used to count operational peers for re-election.
+func (lem *LeaderElectionManager) SetOperationalPeersFunc(f func(zone ZoneName) int) {
+	lem.operationalPeersFunc = f
+}
+
+// SetOnLeaderElected sets the callback invoked when the local agent wins an election.
+// Used to trigger delegation sync setup (SIG(0) key generation + bootstrap with parent).
+func (lem *LeaderElectionManager) SetOnLeaderElected(f func(zone ZoneName) error) {
+	lem.onLeaderElected = f
 }
 
 // getOrCreate returns the election state for a zone, creating if needed.
@@ -93,6 +106,36 @@ func (lem *LeaderElectionManager) IsLeader(zone ZoneName) bool {
 	return leader == lem.localID
 }
 
+// LeaderStatus describes the current leader for a single zone.
+type LeaderStatus struct {
+	Zone   ZoneName
+	Leader AgentId
+	IsSelf bool
+	Term   uint64
+	Expiry time.Time
+}
+
+// GetAllLeaders returns the current leader status for all zones with an active leader.
+func (lem *LeaderElectionManager) GetAllLeaders() []LeaderStatus {
+	lem.mu.RLock()
+	defer lem.mu.RUnlock()
+	var result []LeaderStatus
+	for zone, le := range lem.elections {
+		le.mu.Lock()
+		if le.Leader != "" && time.Now().Before(le.LeaderExpiry) {
+			result = append(result, LeaderStatus{
+				Zone:   zone,
+				Leader: le.Leader,
+				IsSelf: le.Leader == lem.localID,
+				Term:   le.Term,
+				Expiry: le.LeaderExpiry,
+			})
+		}
+		le.mu.Unlock()
+	}
+	return result
+}
+
 // StartElection initiates a new election for a zone. If expectedPeers is 0,
 // the local agent immediately becomes leader without sending any messages.
 func (lem *LeaderElectionManager) StartElection(zone ZoneName, expectedPeers int) {
@@ -107,6 +150,15 @@ func (lem *LeaderElectionManager) StartElection(zone ZoneName, expectedPeers int
 		lgElect.Info("single agent, self-elected as leader", "zone", zone)
 		lem.scheduleReelection(le)
 		le.mu.Unlock()
+
+		// Trigger delegation sync setup (SIG(0) key generation + bootstrap)
+		if lem.onLeaderElected != nil {
+			go func() {
+				if err := lem.onLeaderElected(zone); err != nil {
+					lgElect.Error("onLeaderElected callback failed", "zone", zone, "error", err)
+				}
+			}()
+		}
 		return
 	}
 
@@ -129,7 +181,7 @@ func (lem *LeaderElectionManager) StartElection(zone ZoneName, expectedPeers int
 	}
 
 	// Start vote collection timer
-	le.VoteTimer = time.AfterFunc(3*time.Second, func() {
+	le.VoteTimer = time.AfterFunc(5*time.Second, func() {
 		lem.onVoteTimeout(zone, term)
 	})
 
@@ -190,7 +242,7 @@ func (lem *LeaderElectionManager) handleCall(zone ZoneName, senderID AgentId, re
 	if le.VoteTimer != nil {
 		le.VoteTimer.Stop()
 	}
-	le.VoteTimer = time.AfterFunc(3*time.Second, func() {
+	le.VoteTimer = time.AfterFunc(5*time.Second, func() {
 		lem.onVoteTimeout(zone, term)
 	})
 
@@ -240,9 +292,9 @@ func (lem *LeaderElectionManager) handleConfirm(zone ZoneName, senderID AgentId,
 	le := lem.getOrCreate(zone)
 	le.mu.Lock()
 
-	if le.Term != term {
+	if !le.Active || le.Term != term {
 		le.mu.Unlock()
-		lgElect.Debug("ignoring confirm for wrong term", "zone", zone, "expected", le.Term, "got", term)
+		lgElect.Debug("ignoring confirm for inactive/wrong term", "zone", zone, "active", le.Active, "expected", le.Term, "got", term)
 		return
 	}
 
@@ -294,7 +346,7 @@ func (lem *LeaderElectionManager) determineAndConfirm(zone ZoneName, term uint64
 	if le.ConfirmTimer != nil {
 		le.ConfirmTimer.Stop()
 	}
-	le.ConfirmTimer = time.AfterFunc(3*time.Second, func() {
+	le.ConfirmTimer = time.AfterFunc(5*time.Second, func() {
 		lem.onConfirmTimeout(zone, term)
 	})
 
@@ -359,6 +411,15 @@ func (lem *LeaderElectionManager) finalizeElection(zone ZoneName, term uint64) {
 
 	lem.scheduleReelection(le)
 	le.mu.Unlock()
+
+	// If we won, trigger delegation sync setup (SIG(0) key generation + bootstrap)
+	if isUs && lem.onLeaderElected != nil {
+		go func() {
+			if err := lem.onLeaderElected(zone); err != nil {
+				lgElect.Error("onLeaderElected callback failed", "zone", zone, "error", err)
+			}
+		}()
+	}
 }
 
 // scheduleReelection sets up a timer to re-elect at 90% of the leader TTL.
@@ -368,10 +429,20 @@ func (lem *LeaderElectionManager) scheduleReelection(le *LeaderElection) {
 		le.ReelectTimer.Stop()
 	}
 	zone := le.Zone
-	peers := le.ExpectedPeers
 	le.ReelectTimer = time.AfterFunc(lem.leaderTTL*9/10, func() {
-		lgElect.Info("leader TTL expiring, triggering re-election", "zone", zone)
-		lem.StartElection(zone, peers)
+		// Count operational peers at re-election time, not at schedule time.
+		peers := le.ExpectedPeers // fallback to last known count
+		if lem.operationalPeersFunc != nil {
+			peers = lem.operationalPeersFunc(zone)
+		}
+		if peers == 0 {
+			// No operational peers — just re-self-elect, no messages needed
+			lgElect.Info("leader TTL expiring, no operational peers, re-self-electing", "zone", zone)
+			lem.StartElection(zone, 0)
+		} else {
+			lgElect.Info("leader TTL expiring, triggering re-election", "zone", zone, "operational_peers", peers)
+			lem.StartElection(zone, peers)
+		}
 	})
 }
 
@@ -386,6 +457,43 @@ func determineWinner(votes map[AgentId]uint32) AgentId {
 		}
 	}
 	return winner
+}
+
+// importSig0KeyFromPeer imports a SIG(0) key received from a peer via RFI CONFIG.
+// configData must contain "algorithm", "privatekey" (PEM), and "keyrr" (KEY RR string).
+func importSig0KeyFromPeer(kdb *KeyDB, keyName string, configData map[string]string) error {
+	algorithm := configData["algorithm"]
+	privatekey := configData["privatekey"]
+	keyrr := configData["keyrr"]
+
+	if algorithm == "" || privatekey == "" || keyrr == "" {
+		return fmt.Errorf("incomplete key data: algorithm=%q privatekey=%d bytes keyrr=%q",
+			algorithm, len(privatekey), keyrr)
+	}
+
+	// Parse the PEM private key + KEY RR into a PrivateKeyCache
+	pkc, err := PrepareKeyCache(privatekey, keyrr)
+	if err != nil {
+		return fmt.Errorf("PrepareKeyCache failed: %v", err)
+	}
+
+	// Import via Sig0KeyMgmt "add" (also adds to TrustStore)
+	kp := KeystorePost{
+		Command:         "sig0-mgmt",
+		SubCommand:      "add",
+		Keyname:         keyName,
+		State:           Sig0StateActive,
+		PrivateKeyCache: pkc,
+	}
+	resp, err := kdb.Sig0KeyMgmt(nil, kp)
+	if err != nil {
+		return fmt.Errorf("Sig0KeyMgmt add failed: %v", err)
+	}
+	if resp.Error {
+		return fmt.Errorf("Sig0KeyMgmt add error: %s", resp.ErrorMsg)
+	}
+	lgElect.Info("imported SIG(0) key from peer", "name", keyName, "algorithm", algorithm, "keyid", pkc.KeyId)
+	return nil
 }
 
 // broadcastElectToZone sends an election RFI message to all agents in a zone.
@@ -439,6 +547,22 @@ func parseString(records map[string][]string, key string) string {
 	return vals[0]
 }
 
+// PeerSyncInfo describes a peer agent's status for a zone.
+type PeerSyncInfo struct {
+	Identity    AgentId `json:"identity"`
+	State       string  `json:"state"`
+	Transport   string  `json:"transport"`
+	Operational bool    `json:"operational"`
+}
+
+// DsyncSchemeInfo describes a parent DSYNC sync scheme.
+type DsyncSchemeInfo struct {
+	Scheme string `json:"scheme"` // "UPDATE", "NOTIFY", etc.
+	Type   string `json:"type"`   // "CDS", "CSYNC", "ANY", etc.
+	Target string `json:"target"` // target host
+	Port   uint16 `json:"port"`
+}
+
 // ParentSyncStatus holds on-demand status information about parent delegation sync for a zone.
 type ParentSyncStatus struct {
 	Zone           ZoneName        `json:"zone"`
@@ -453,6 +577,19 @@ type ParentSyncStatus struct {
 	ChildNS        []string        `json:"child_ns,omitempty"`
 	KeyPublication map[string]bool `json:"key_publication,omitempty"`
 	LastChecked    time.Time       `json:"last_checked"`
+
+	// Sync scheme info from parent DSYNC discovery
+	ParentZone   string            `json:"parent_zone,omitempty"`
+	SyncSchemes  []DsyncSchemeInfo `json:"sync_schemes,omitempty"`
+	ActiveScheme string            `json:"active_scheme,omitempty"` // best scheme: "UPDATE", "NOTIFY", etc.
+
+	// CDS/CSYNC publication status
+	CdsPublished   bool `json:"cds_published"`
+	CsyncPublished bool `json:"csync_published"`
+	ZoneSigned     bool `json:"zone_signed"`
+
+	// Peer agents for this zone
+	Peers []PeerSyncInfo `json:"peers,omitempty"`
 }
 
 // Sig0KeyOwnerName computes the RFC 9615-style owner name for a child SIG(0) KEY RR.
@@ -462,7 +599,7 @@ func Sig0KeyOwnerName(zone, nameserver string) string {
 }
 
 // GetParentSyncStatus computes the current parent sync status for a zone on demand.
-func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *ZoneData, kdb *KeyDB, imr *Imr) ParentSyncStatus {
+func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *ZoneData, kdb *KeyDB, imr *Imr, ar *AgentRegistry) ParentSyncStatus {
 	status := ParentSyncStatus{
 		Zone:        zone,
 		LastChecked: time.Now(),
@@ -494,12 +631,23 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *ZoneDat
 		status.KeyRR = key.KeyRR.String()
 	}
 
-	// 3. Check apex KEY publication
+	// 3. Check apex records
 	owner, err := zd.GetOwner(zd.ZoneName)
 	if err == nil && owner != nil {
+		// KEY publication
 		if _, keyExists := owner.RRtypes.Get(dns.TypeKEY); keyExists {
 			status.ApexPublished = true
 		}
+		// CDS publication
+		if cdsRRset, exists := owner.RRtypes.Get(dns.TypeCDS); exists && len(cdsRRset.RRs) > 0 {
+			status.CdsPublished = true
+		}
+		// CSYNC publication
+		if csyncRRset, exists := owner.RRtypes.Get(dns.TypeCSYNC); exists && len(csyncRRset.RRs) > 0 {
+			status.CsyncPublished = true
+		}
+		// Zone signing status
+		status.ZoneSigned = zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]
 	}
 
 	// 4. Get child NS names
@@ -512,14 +660,76 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *ZoneDat
 		}
 	}
 
-	// 5. Check _signal KEY publication for each child NS via IMR
-	if imr != nil && len(status.ChildNS) > 0 {
+	// 5. Check _signal KEY publication for each child NS via IMR.
+	// Only check if we actually have a SIG(0) key — if no key exists locally,
+	// any KEY records found at _signal names belong to someone else.
+	if imr != nil && len(status.ChildNS) > 0 && status.KeyAlgorithm != "" {
 		status.KeyPublication = make(map[string]bool)
 		for _, ns := range status.ChildNS {
 			ownerName := Sig0KeyOwnerName(string(zone), ns)
 			resp, err := imr.ImrQuery(context.Background(), ownerName, dns.TypeKEY, dns.ClassINET, nil)
 			published := err == nil && resp != nil && resp.RRset != nil && len(resp.RRset.RRs) > 0
 			status.KeyPublication[ownerName] = published
+		}
+	}
+
+	// 6. DSYNC discovery — find what sync schemes the parent supports
+	if imr != nil {
+		dsyncRes, err := imr.DsyncDiscovery(context.Background(), string(zone), false)
+		if err == nil {
+			status.ParentZone = dsyncRes.Parent
+			for _, drr := range dsyncRes.Rdata {
+				scheme := "UNKNOWN"
+				switch drr.Scheme {
+				case core.SchemeNotify:
+					scheme = "NOTIFY"
+				case core.SchemeUpdate:
+					scheme = "UPDATE"
+				case core.SchemeScanner:
+					scheme = "SCANNER"
+				case core.SchemeAPI:
+					scheme = "API"
+				}
+				rrtype := dns.TypeToString[drr.Type]
+				if rrtype == "" {
+					rrtype = fmt.Sprintf("TYPE%d", drr.Type)
+				}
+				status.SyncSchemes = append(status.SyncSchemes, DsyncSchemeInfo{
+					Scheme: scheme,
+					Type:   rrtype,
+					Target: drr.Target,
+					Port:   drr.Port,
+				})
+			}
+			// Determine best active scheme
+			activeScheme, _, err := zd.BestSyncScheme(context.Background(), imr)
+			if err == nil {
+				status.ActiveScheme = activeScheme
+			}
+		}
+	}
+
+	// 7. Peer agents for this zone
+	if ar != nil {
+		zad, err := ar.GetZoneAgentData(zone)
+		if err == nil {
+			for _, agent := range zad.Agents {
+				if agent.Identity == lem.localID {
+					continue // skip self
+				}
+				transport := "-"
+				if agent.DnsDetails != nil && agent.DnsDetails.State == AgentStateOperational {
+					transport = "DNS"
+				} else if agent.ApiDetails != nil && agent.ApiDetails.State == AgentStateOperational {
+					transport = "API"
+				}
+				status.Peers = append(status.Peers, PeerSyncInfo{
+					Identity:    agent.Identity,
+					State:       string(agent.EffectiveState()),
+					Transport:   transport,
+					Operational: agent.IsAnyTransportOperational(),
+				})
+			}
 		}
 	}
 

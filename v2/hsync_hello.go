@@ -335,10 +335,10 @@ func (ar *AgentRegistry) EvaluateHello(ahp *AgentHelloPost) (bool, string, error
 	for _, rr := range hsyncRR.RRs {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
 			if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
-				if hsync3.Label == ar.LocalAgent.Identity {
+				if hsync3.Identity == ar.LocalAgent.Identity {
 					foundMe = true
 				}
-				if AgentId(hsync3.Label) == ahp.MyIdentity {
+				if AgentId(hsync3.Identity) == ahp.MyIdentity {
 					foundYou = true
 				}
 			}

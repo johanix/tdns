@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/mitchellh/mapstructure"
@@ -673,6 +674,39 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 				})
 			}
 
+			// MP delegation sync callback: for MP zones, check HSYNCPARAM for
+			// parentsync=agent. If set, enable delegation sync and call SetupZoneSync.
+			// Mirrors the MP signing callback pattern above.
+			if options[OptMultiProvider] {
+				delegationSyncQ := conf.Internal.DelegationSyncQ
+				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
+					if zd.Options[OptDelSyncChild] {
+						return // already set via static config, handled by callback below
+					}
+					apex, err := zd.GetOwner(zd.ZoneName)
+					if err != nil || apex == nil {
+						return
+					}
+					hsyncparamRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
+					if !exists || len(hsyncparamRRset.RRs) == 0 {
+						return
+					}
+					if prr, ok := hsyncparamRRset.RRs[0].(*dns.PrivateRR); ok {
+						if hsyncparam, ok := prr.Data.(*core.HSYNCPARAM); ok {
+							if hsyncparam.GetParentSync() == core.HsyncParentSyncAgent {
+								lgConfig.Info("HSYNCPARAM parentsync=agent, enabling delegation sync",
+									"zone", zd.ZoneName)
+								zd.Options[OptDelSyncChild] = true
+								if err := zd.SetupZoneSync(delegationSyncQ); err != nil {
+									lgConfig.Error("SetupZoneSync failed in MP OnFirstLoad",
+										"zone", zd.ZoneName, "error", err)
+								}
+							}
+						}
+					}
+				})
+			}
+
 			// Delegation sync callback: set up DSYNC publication (parent) or
 			// delegation sync monitoring (child) after zone is loaded.
 			if options[OptDelSyncParent] || options[OptDelSyncChild] {
@@ -684,17 +718,8 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 				})
 			}
 
-			// Leader election callback: trigger initial election for zones with delegation sync.
-			// On startup, peers may not yet be connected, so expectedPeers=0 makes the
-			// agent self-elect. When peers connect later, UpdateAgents triggers re-election.
-			if options[OptDelSyncChild] || options[OptMultiProvider] {
-				lem := conf.Internal.LeaderElectionManager
-				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
-					if lem != nil && zd.Options[OptDelSyncChild] {
-						lem.StartElection(ZoneName(zd.ZoneName), 0)
-					}
-				})
-			}
+			// Leader election OnFirstLoad is registered in StartAgent() (not here)
+			// because LeaderElectionManager doesn't exist until StartAgent runs.
 
 			// MP zone KEY publication: send SIG(0) KEY to combiner as REPLACE operation.
 			// For MP zones, the combiner manages the zone apex, so the agent cannot

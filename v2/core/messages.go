@@ -130,7 +130,8 @@ type RfiData struct {
 	ZoneXfrSrcs []string
 	ZoneXfrAuth []string
 	ZoneXfrDsts []string
-	AuditData   interface{} `json:"audit_data,omitempty"` // zone data repo snapshot for RFI AUDIT
+	AuditData   interface{}       `json:"audit_data,omitempty"`  // zone data repo snapshot for RFI AUDIT
+	ConfigData  map[string]string `json:"config_data,omitempty"` // key-value config data for RFI CONFIG
 }
 
 // AgentPingPost represents a ping message for connectivity testing.

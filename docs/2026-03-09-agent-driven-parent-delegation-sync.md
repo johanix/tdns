@@ -1,14 +1,14 @@
 # Agent-Driven Parent Delegation Synchronization
 
-**Date**: 2026-03-09
-**Status**: Planning
+**Date**: 2026-03-09 (updated 2026-03-11)
+**Status**: Phase 1 DONE, Phase 2-3 planning
 
 ## Context
 
 The TDNS multi-provider architecture needs agents to synchronize delegation data (NS, glue, DNSKEY/CDS) with the parent zone. The current HSYNC record conflates two distinct signal types in one RRset:
 
 1. **Zone-wide policy** (NSmgmt, ParentSync, signing config) — must be consistent across all agents
-2. **Per-agent details** (identity, endpoint, upstream, state) — naturally varies per agent
+2. **Per-agent details** (identity/discovery FQDN, upstream, state) — naturally varies per agent
 
 This creates consistency problems: if NSmgmt=OWNER in one RR and NSmgmt=AGENT in another, agents get mixed signals. `ValidateHsyncRRset` (`hsync_utils.go:466-484`) already checks for NSmgmt consistency at runtime, but this is a design flaw — the structure should prevent inconsistency.
 
@@ -24,7 +24,7 @@ This creates consistency problems: if NSmgmt=OWNER in one RR and NSmgmt=AGENT in
 - **Dynamic leader election** for DDNS (random number, highest wins — sufficient for 2-3 agents)
 - **Shared SIG(0) key** across all agents, distributed via existing encrypted CHUNK channel
 - **No installed base** — wire format changes are fine
-- **Identity is a label, not an FQDN** — customer-chosen tag ("netnod", "cloudflare") used as reference token. Discovery endpoint is a separate FQDN field. This decouples naming from discovery.
+- **Label is a tag, not an FQDN** — customer-chosen tag ("netnod", "cloudflare") used as reference token in HSYNCPARAM signers list and Upstream field. Identity is a separate FQDN field for agent discovery. This decouples naming from discovery.
 - **Sign moves to HSYNCPARAM** as `signers="provA,provB"` list — zone-wide, not per-agent
 - **Coexistence**: HSYNC v1 and v2 are kept as-is. New HSYNC3+HSYNCPARAM coexist in the same zone files. Old code looks for HSYNC, new code looks for HSYNC3+HSYNCPARAM. No runtime switch.
 
@@ -38,7 +38,7 @@ This creates consistency problems: if NSmgmt=OWNER in one RR and NSmgmt=AGENT in
 
 **HSYNC** (per-agent):
 - `Label` — unqualified string tag, customer-chosen ("netnod", "cloudflare"). Reference token for Upstream and HSYNCPARAM signers.
-- `Endpoint` — FQDN for agent discovery (URI, SVCB, JWK lookups). Only entered once per agent.
+- `Identity` — FQDN for agent discovery (URI, SVCB, JWK lookups). Used for all "is this us?" comparisons.
 - `Upstream` — label of upstream provider, or "." for top of chain.
 - `State` — on/off for per-agent onboarding/offboarding control.
 
@@ -55,14 +55,14 @@ customer.zone. HSYNC3 netnod    agent.netnod.se.      .
 customer.zone. HSYNC3 akamai    agent.akamai.com.     cloudflare
 ```
 
-Wire format: `State(1) + Label(character-string) + Endpoint(domain-name) + Upstream(character-string)`
+Wire format: `State(1) + Label(character-string) + Identity(domain-name) + Upstream(character-string)`
 
 ```go
 type HSYNC3 struct {
     State    uint8  // 0=OFF, 1=ON
-    Label    string // unqualified tag, e.g. "netnod"
-    Endpoint string // FQDN for discovery, e.g. "agent.netnod.se."
-    Upstream string // label of upstream provider, or "."
+    Label    string // unqualified provider tag, e.g. "netnod" — NOT an FQDN
+    Identity string // FQDN for agent discovery, e.g. "agent.netnod.se."
+    Upstream string // label of upstream provider, or "." — NOT an FQDN
 }
 ```
 
@@ -102,8 +102,8 @@ Reuses from `rr_deleg.go`: key string/code conversion, zlexer-based key=value pa
 ### 1c. Type registration
 
 **File**: `core/rr_defs.go`
-- `TypeHSYNC3 = 0x0F9F`
-- `TypeHSYNCPARAM = 0x0FA0`
+- `TypeHSYNC3 = 65285` (private use range)
+- `TypeHSYNCPARAM = 65286` (private use range)
 
 ### 1d. Accessor helpers
 
@@ -117,28 +117,29 @@ func (h *HSYNCPARAM) IsSignerLabel(label string) bool
 
 ### 1e. Update consumers
 
-**AgentId becomes a label, not an FQDN.** Discovery uses the Endpoint field.
+**AgentId uses the Identity FQDN.** Label is only for HSYNCPARAM signers and Upstream references. A `labelToIdentity` map built from the HSYNC3 RRset resolves Upstream labels to FQDNs.
 
 | File | Change |
 |------|--------|
-| `agent_utils.go` (~35 sites) | `hsync.Identity` → `hsync.Label` as AgentId, `hsync.Endpoint` for discovery |
-| `hsync_utils.go` (~8 sites) | `hsync.NSmgmt`, `hsync.Sign` → read from HSYNCPARAM |
-| `agent_authorization.go` (~6 sites) | `hsync.Identity` → `hsync.Label` |
+| `agent_utils.go` (~35 sites) | `hsync3.Identity` for "is this us?" checks, `labelToIdentity` map for Upstream resolution |
+| `hsync_utils.go` (~8 sites) | `analyzeHsyncSigners` resolves FQDN→Label via HSYNC3 lookup, then compares Label against HSYNCPARAM signers |
+| `agent_authorization.go` (~6 sites) | `hsync3.Identity` for both local and sender identity checks |
 | `agent_policy.go` (~2 sites) | `hsync.NSmgmt` → HSYNCPARAM `GetNSmgmt()` |
-| `hsync_hello.go` (~2 sites) | `hsync.Identity` → `hsync.Label` |
-| `agent_discovery.go` | `result.Identity` → `hsync.Endpoint` as discovery target |
+| `hsync_hello.go` (~2 sites) | `hsync3.Identity` for foundMe/foundYou checks |
+| `agent_discovery.go` | `hsync3.Identity` as discovery target |
 | `cli/hsync_debug_cmds.go` | Update display for new format |
+| `cli/hsync_cmds.go` | `hsync3.Identity` for agent lookup |
 
 Key consumer changes:
-- `UpdateAgents`: `DiscoverAgentAsync(AgentId(hsync.Label), hsync.Endpoint, nil)` — pass endpoint separately
-- `analyzeHsyncSigners`: read `signers` list from HSYNCPARAM, check if our label is in the list
+- `UpdateAgents`: `hsync3.Identity` for "is this us?", `labelToIdentity[hsync3.Upstream]` for upstream resolution
+- `analyzeHsyncSigners`: look up our HSYNC3 record by Identity to find our Label, then compare Label against HSYNCPARAM signers list
 - `EvaluateUpdate`: read `GetNSmgmt()` from HSYNCPARAM
 
 ### 1f. Coexistence with HSYNC v1
 
 Keep `rr_hsync.go` and `rr_hsync2.go` as-is. Test zones contain both HSYNC and HSYNC3+HSYNCPARAM. Old code ignores HSYNC3/HSYNCPARAM, new code ignores HSYNC. No runtime switch — which record type is used depends on which codebase is running.
 
-**Phase 1 complexity**: ~8 hours. ~500 lines new code, ~50 consumer site changes.
+**Phase 1 status**: DONE (2026-03-11). ~500 lines new code, ~50 consumer site changes. Verified: signer signing detection, peer discovery, HELLO handshake all working. Key fix: stale `TypeCHUNK=65015` in `agent/transport/dns.go` (should have been `core.TypeCHUNK=65288`) caused HELLO REFUSED.
 
 ## Phase 2: Proactive CDS and CSYNC Publication
 
@@ -243,7 +244,7 @@ Gate DDNS sends on leader election result. Existing `SyncZoneDelegationViaUpdate
 ## Verification
 
 1. Build: `cd tdns/cmdv2 && GOROOT=/opt/local/lib/go make`
-2. Parse HSYNC3 with label/endpoint/upstream in zone file → verify correct field values
+2. Parse HSYNC3 with label/identity/upstream in zone file → verify correct field values
 3. Parse HSYNCPARAM with key=value pairs → verify accessor helpers work
 4. Wire format round-trip for both record types
 5. `signers="netnod"` in HSYNCPARAM → `analyzeHsyncSigners` returns correct result

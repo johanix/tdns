@@ -157,13 +157,13 @@ type AgentApi struct {
 }
 
 type AgentRegistry struct {
-	S                core.ConcurrentMap[AgentId, *Agent]
-	RegularS         map[AgentId]*Agent
-	RemoteAgents     map[ZoneName][]AgentId
-	mu               sync.RWMutex    // protects remoteAgents
-	LocalAgent       *LocalAgentConf // our own identity
-	LocateInterval   int             // seconds to wait between locating agents (until success)
-	helloContexts    map[AgentId]context.CancelFunc
+	S                     core.ConcurrentMap[AgentId, *Agent]
+	RegularS              map[AgentId]*Agent
+	RemoteAgents          map[ZoneName][]AgentId
+	mu                    sync.RWMutex    // protects remoteAgents
+	LocalAgent            *LocalAgentConf // our own identity
+	LocateInterval        int             // seconds to wait between locating agents (until success)
+	helloContexts         map[AgentId]context.CancelFunc
 	TransportManager      *TransportManager      // optional; when set, Hello/Beat/Sync use transport fallback (API → DNS)
 	LeaderElectionManager *LeaderElectionManager // optional; when set, election messages are processed
 }
@@ -273,6 +273,7 @@ type RfiData struct {
 	ZoneXfrAuth []string
 	ZoneXfrDsts []string
 	AuditData   map[ZoneName]map[AgentId]map[uint16][]TrackedRRInfo `json:"audit_data,omitempty"`
+	ConfigData  map[string]string                                   `json:"config_data,omitempty"` // key-value config data for RFI CONFIG
 }
 
 // AgentPingPost is defined in core package to avoid circular dependencies.

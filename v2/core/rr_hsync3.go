@@ -12,7 +12,7 @@ import (
 )
 
 // Zone file syntax:
-//   owner TTL CLASS HSYNC3 state label endpoint upstream
+//   owner TTL CLASS HSYNC3 state label identity upstream
 //
 // Examples:
 //   customer.zone. 3600 IN HSYNC3 ON cloudflare agent.cloudflare.com. netnod
@@ -21,7 +21,7 @@ import (
 // Fields:
 //   state    - ON or OFF
 //   label    - unqualified provider tag (e.g. "netnod"), NOT an FQDN
-//   endpoint - FQDN for agent discovery (e.g. "agent.netnod.se.")
+//   identity - FQDN for agent discovery (e.g. "agent.netnod.se.")
 //   upstream - label of upstream provider, or "." if none (NOT an FQDN)
 
 func init() {
@@ -30,20 +30,20 @@ func init() {
 
 type HSYNC3 struct {
 	State    uint8  // 0=OFF, 1=ON
-	Label    string // unqualified tag, e.g. "netnod" — NOT an FQDN
-	Endpoint string // FQDN for discovery, e.g. "agent.netnod.se."
+	Label    string // unqualified provider tag, e.g. "netnod" — NOT an FQDN
+	Identity string // FQDN for agent discovery, e.g. "agent.netnod.se."
 	Upstream string // label of upstream provider, or "." — NOT an FQDN
 }
 
 func NewHSYNC3() dns.PrivateRdata { return new(HSYNC3) }
 
 func (rd HSYNC3) String() string {
-	return fmt.Sprintf("%-3s  %s  %s  %s", HsyncStateToString[rd.State], rd.Label, rd.Endpoint, rd.Upstream)
+	return fmt.Sprintf("%-3s  %s  %s  %s", HsyncStateToString[rd.State], rd.Label, rd.Identity, rd.Upstream)
 }
 
 func (rd *HSYNC3) Parse(txt []string) error {
 	if len(txt) != 4 {
-		return errors.New("HSYNC3 requires values for State, Label, Endpoint and Upstream")
+		return errors.New("HSYNC3 requires values for State, Label, Identity and Upstream")
 	}
 
 	state, exist := StringToHsyncState[txt[0]]
@@ -53,16 +53,16 @@ func (rd *HSYNC3) Parse(txt []string) error {
 
 	label := dns.Fqdn(txt[1])
 
-	endpoint := dns.Fqdn(txt[2])
-	if _, ok := dns.IsDomainName(endpoint); !ok {
-		return fmt.Errorf("invalid HSYNC3 endpoint: %s", txt[2])
+	identity := dns.Fqdn(txt[2])
+	if _, ok := dns.IsDomainName(identity); !ok {
+		return fmt.Errorf("invalid HSYNC3 identity: %s", txt[2])
 	}
 
 	upstream := dns.Fqdn(txt[3])
 
 	rd.State = state
 	rd.Label = label
-	rd.Endpoint = endpoint
+	rd.Identity = identity
 	rd.Upstream = upstream
 	return nil
 }
@@ -112,7 +112,7 @@ func (rd *HSYNC3) Pack(buf []byte) (int, error) {
 		return off, err
 	}
 
-	off, err = dns.PackDomainName(rd.Endpoint, buf, off, nil, false)
+	off, err = dns.PackDomainName(rd.Identity, buf, off, nil, false)
 	if err != nil {
 		return off, err
 	}
@@ -145,7 +145,7 @@ func (rd *HSYNC3) Unpack(buf []byte) (int, error) {
 		return off, nil
 	}
 
-	rd.Endpoint, off, err = dns.UnpackDomainName(buf, off)
+	rd.Identity, off, err = dns.UnpackDomainName(buf, off)
 	if err != nil {
 		return off, err
 	}
@@ -171,14 +171,14 @@ func (rd *HSYNC3) Copy(dest dns.PrivateRdata) error {
 	d := dest.(*HSYNC3)
 	d.State = rd.State
 	d.Label = rd.Label
-	d.Endpoint = rd.Endpoint
+	d.Identity = rd.Identity
 	d.Upstream = rd.Upstream
 	return nil
 }
 
 func (rd *HSYNC3) Len() int {
-	// 1 (State) + 1+len(Label) (character-string) + len(Endpoint)+1 (domain-name with terminating zero) + 1+len(Upstream) (character-string)
-	return 1 + 1 + len(rd.Label) + len(rd.Endpoint) + 1 + 1 + len(rd.Upstream)
+	// 1 (State) + 1+len(Label) (character-string) + len(Identity)+1 (domain-name with terminating zero) + 1+len(Upstream) (character-string)
+	return 1 + 1 + len(rd.Label) + len(rd.Identity) + 1 + 1 + len(rd.Upstream)
 }
 
 func RegisterHsync3RR() error {

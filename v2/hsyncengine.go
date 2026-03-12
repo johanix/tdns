@@ -534,6 +534,48 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				ar.LeaderElectionManager.HandleMessage(ampp.Zone, ampp.OriginatorID, ampp.RfiType, ampp.Records)
 			}
 
+		case "CONFIG":
+			subtypes := ampp.Records["_subtype"]
+			if len(subtypes) == 0 {
+				resp.Error = true
+				resp.ErrorMsg = "CONFIG RFI missing _subtype"
+				return
+			}
+			switch subtypes[0] {
+			case "sig0key":
+				zd, ok := Zones.Get(string(ampp.Zone))
+				if !ok || zd == nil || zd.KeyDB == nil {
+					resp.Error = true
+					resp.ErrorMsg = "zone or KeyDB not available"
+					return
+				}
+				algorithm, privatekey, keyrr, found, err := zd.KeyDB.GetSig0KeyRaw(string(ampp.Zone), Sig0StateActive)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("error looking up SIG(0) key: %v", err)
+					return
+				}
+				if !found {
+					resp.RfiResponse[AgentId(ar.LocalAgent.Identity)] = &RfiData{
+						Status: "ok",
+						Msg:    "no sig0 key for zone",
+					}
+					return
+				}
+				lgEngine.Info("CONFIG sig0key: returning key to peer", "zone", ampp.Zone, "peer", ampp.OriginatorID)
+				resp.RfiResponse[AgentId(ar.LocalAgent.Identity)] = &RfiData{
+					Status: "ok",
+					ConfigData: map[string]string{
+						"algorithm":  algorithm,
+						"privatekey": privatekey,
+						"keyrr":      keyrr,
+					},
+				}
+			default:
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("unknown CONFIG subtype: %s", subtypes[0])
+			}
+
 		default:
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("MsgHandler for %s: Unknown RFI type: %s", ar.LocalAgent.Identity, ampp.RfiType)

@@ -490,7 +490,7 @@ func (t *DNSTransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (
 	m := new(dns.Msg)
 	m.SetNotify(qname)
 	m.Question = []dns.Question{
-		{Name: qname, Qtype: TypeCHUNK, Qclass: dns.ClassINET},
+		{Name: qname, Qtype: core.TypeCHUNK, Qclass: dns.ClassINET},
 	}
 	if !useQueryMode {
 		m.SetEdns0(4096, true)
@@ -784,7 +784,7 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 	m := new(dns.Msg)
 	m.SetNotify(qname)
 	m.Question = []dns.Question{
-		{Name: qname, Qtype: TypeCHUNK, Qclass: dns.ClassINET},
+		{Name: qname, Qtype: core.TypeCHUNK, Qclass: dns.ClassINET},
 	}
 
 	// Add payload as CHUNK EDNS0 option
@@ -843,7 +843,7 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 	m := new(dns.Msg)
 	m.SetNotify(qname)
 	m.Question = []dns.Question{
-		{Name: qname, Qtype: TypeCHUNK, Qclass: dns.ClassINET},
+		{Name: qname, Qtype: core.TypeCHUNK, Qclass: dns.ClassINET},
 	}
 
 	// EDNS0: payload in edns0 mode; in query mode include CHUNK query endpoint so receiver knows where to send CHUNK query
@@ -1292,7 +1292,7 @@ func (t *DNSTransport) FetchChunkRR(ctx context.Context, serverAddr, qname strin
 	}
 
 	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(qname), TypeCHUNK)
+	m.SetQuestion(dns.Fqdn(qname), core.TypeCHUNK)
 	m.RecursionDesired = false
 
 	c := &dns.Client{Timeout: t.Timeout, Net: "tcp"}
@@ -1308,7 +1308,7 @@ func (t *DNSTransport) FetchChunkRR(ctx context.Context, serverAddr, qname strin
 		return nil, fmt.Errorf("CHUNK query to %s returned rcode %s", serverAddr, dns.RcodeToString[rcode])
 	}
 	for _, rr := range in.Answer {
-		if prr, ok := rr.(*dns.PrivateRR); ok && prr.Hdr.Rrtype == TypeCHUNK {
+		if prr, ok := rr.(*dns.PrivateRR); ok && prr.Hdr.Rrtype == core.TypeCHUNK {
 			if chunk, ok := prr.Data.(*core.CHUNK); ok && chunk != nil {
 				return chunk, nil
 			}
@@ -1326,10 +1326,3 @@ func (t *DNSTransport) FetchChunkViaQuery(ctx context.Context, serverAddr, qname
 	}
 	return chunk.Data, chunk.Format, nil
 }
-
-// Constants for DNS transport
-// TypeCHUNK is the DNS RRtype for CHUNK records (should match core.TypeCHUNK).
-// EDNS0 CHUNK option code is edns0.EDNS0_CHUNK_OPTION_CODE (65004); do not use RR type as option code.
-const (
-	TypeCHUNK = 65015 // 0xFDF7 - matches core.TypeCHUNK
-)

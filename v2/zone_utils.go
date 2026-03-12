@@ -359,6 +359,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 			lg.Error("HsyncChanged failed", "zone", zd.ZoneName, "err", err)
 			// return false, err
 		}
+		lg.Debug("FetchFromUpstream: HsyncChanged result", "zone", zd.ZoneName, "changed", hsyncchanged)
 		dnskeyschanged, err = zd.DnskeysChangedNG(&new_zd)
 		if err != nil {
 			lg.Error("DnskeysChangedNG failed", "zone", zd.ZoneName, "err", err)

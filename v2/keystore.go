@@ -595,6 +595,27 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 	return &sak, err
 }
 
+// GetSig0KeyRaw returns the raw database column values for a SIG(0) key.
+// Used for transferring key material between agents via RFI CONFIG.
+func (kdb *KeyDB) GetSig0KeyRaw(zonename, state string) (algorithm, privatekey, keyrr string, found bool, err error) {
+	const sql = `SELECT algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND state=?`
+
+	rows, err := kdb.Query(sql, zonename, state)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	defer rows.Close()
+
+	if rows.Next() {
+		err = rows.Scan(&algorithm, &privatekey, &keyrr)
+		if err != nil {
+			return "", "", "", false, err
+		}
+		return algorithm, privatekey, keyrr, true, nil
+	}
+	return "", "", "", false, nil
+}
+
 func (kdb *KeyDB) GetDnssecKeys(zonename, state string) (*DnssecKeys, error) {
 	const (
 		fetchDnssecPrivKeySql = `

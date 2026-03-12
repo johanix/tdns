@@ -137,7 +137,7 @@ This performs a DNS lookup for the HSYNC records at the zone apex.`,
 				rr.Header().Name,
 				rr.Header().Ttl,
 				hsync3.Label,
-				hsync3.Endpoint,
+				hsync3.Identity,
 				hsync3.Upstream))
 		}
 		fmt.Println(columnize.SimpleFormat(lines))
