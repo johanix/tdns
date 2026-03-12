@@ -38,6 +38,7 @@ type LeaderElection struct {
 type LeaderElectionManager struct {
 	mu                   sync.RWMutex
 	elections            map[ZoneName]*LeaderElection
+	pendingElections     map[ZoneName]bool // zones where election was deferred (peers not yet operational)
 	localID              AgentId
 	leaderTTL            time.Duration
 	broadcastFunc        func(zone ZoneName, rfiType string, records map[string][]string) error
@@ -47,10 +48,11 @@ type LeaderElectionManager struct {
 
 func NewLeaderElectionManager(localID AgentId, leaderTTL time.Duration, broadcastFunc func(ZoneName, string, map[string][]string) error) *LeaderElectionManager {
 	return &LeaderElectionManager{
-		elections:     make(map[ZoneName]*LeaderElection),
-		localID:       localID,
-		leaderTTL:     leaderTTL,
-		broadcastFunc: broadcastFunc,
+		elections:        make(map[ZoneName]*LeaderElection),
+		pendingElections: make(map[ZoneName]bool),
+		localID:          localID,
+		leaderTTL:        leaderTTL,
+		broadcastFunc:    broadcastFunc,
 	}
 }
 
@@ -63,6 +65,60 @@ func (lem *LeaderElectionManager) SetOperationalPeersFunc(f func(zone ZoneName) 
 // Used to trigger delegation sync setup (SIG(0) key generation + bootstrap with parent).
 func (lem *LeaderElectionManager) SetOnLeaderElected(f func(zone ZoneName) error) {
 	lem.onLeaderElected = f
+}
+
+// DeferElection records a zone as needing an election once peers become operational.
+// Called from OnFirstLoad when peers aren't ready yet at zone load time.
+func (lem *LeaderElectionManager) DeferElection(zone ZoneName) {
+	lem.mu.Lock()
+	lem.pendingElections[zone] = true
+	lem.mu.Unlock()
+	lgElect.Info("deferring leader election until peers are operational", "zone", zone)
+}
+
+// NotifyPeerOperational is called when a peer becomes operational.
+// Checks if any deferred elections for the peer's zones can now proceed.
+func (lem *LeaderElectionManager) NotifyPeerOperational(peerZones map[ZoneName]bool) {
+	lem.mu.RLock()
+	if len(lem.pendingElections) == 0 {
+		lem.mu.RUnlock()
+		return
+	}
+
+	// Collect zones that are both pending and shared with this peer
+	var ready []ZoneName
+	for zone := range peerZones {
+		if lem.pendingElections[zone] {
+			ready = append(ready, zone)
+		}
+	}
+	lem.mu.RUnlock()
+
+	for _, zone := range ready {
+		peers := 0
+		if lem.operationalPeersFunc != nil {
+			peers = lem.operationalPeersFunc(zone)
+		}
+		if peers > 0 {
+			lgElect.Info("deferred election can now proceed, peers are operational",
+				"zone", zone, "operational_peers", peers)
+			lem.mu.Lock()
+			delete(lem.pendingElections, zone)
+			lem.mu.Unlock()
+			lem.StartElection(zone, peers)
+		}
+	}
+}
+
+// GetPendingElections returns zones with deferred elections (waiting for peers).
+func (lem *LeaderElectionManager) GetPendingElections() []ZoneName {
+	lem.mu.RLock()
+	defer lem.mu.RUnlock()
+	result := make([]ZoneName, 0, len(lem.pendingElections))
+	for zone := range lem.pendingElections {
+		result = append(result, zone)
+	}
+	return result
 }
 
 // getOrCreate returns the election state for a zone, creating if needed.
@@ -274,7 +330,7 @@ func (lem *LeaderElectionManager) handleVote(zone ZoneName, senderID AgentId, re
 	}
 
 	le.Votes[senderID] = vote
-	lgElect.Debug("received vote", "zone", zone, "from", senderID, "vote", vote, "total", len(le.Votes))
+	lgElect.Info("received vote", "zone", zone, "from", senderID, "vote", vote, "votes_collected", len(le.Votes), "expected", le.ExpectedPeers+1)
 
 	// Check if all votes are in (our vote + peers)
 	if len(le.Votes) >= le.ExpectedPeers+1 {
@@ -299,7 +355,7 @@ func (lem *LeaderElectionManager) handleConfirm(zone ZoneName, senderID AgentId,
 	}
 
 	le.Confirms[senderID] = winner
-	lgElect.Debug("received confirm", "zone", zone, "from", senderID, "winner", winner, "total", len(le.Confirms))
+	lgElect.Info("received confirm", "zone", zone, "from", senderID, "winner", winner, "confirms_collected", len(le.Confirms), "expected", le.ExpectedPeers+1)
 
 	// Check if all confirms are in
 	if len(le.Confirms) >= le.ExpectedPeers+1 {

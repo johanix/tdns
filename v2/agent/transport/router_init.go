@@ -205,7 +205,31 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 		return err
 	}
 
-	lgTransport().Info("registered message handlers", "count", 9)
+	// Config handler (priority: 100)
+	err = router.Register(
+		"ConfigHandler",
+		MessageType("config"),
+		HandleConfig,
+		WithPriority(100),
+		WithDescription("Processes CONFIG response messages from peer agents"),
+	)
+	if err != nil {
+		return err
+	}
+
+	// Audit handler (priority: 100)
+	err = router.Register(
+		"AuditHandler",
+		MessageType("audit"),
+		HandleAudit,
+		WithPriority(100),
+		WithDescription("Processes AUDIT response messages from peer agents"),
+	)
+	if err != nil {
+		return err
+	}
+
+	lgTransport().Info("registered message handlers", "count", 11)
 	lgTransport().Info("router initialization complete")
 
 	return nil
@@ -495,6 +519,10 @@ func DetermineMessageType(payload []byte) MessageType {
 		return MessageType("keystate")
 	case "edits":
 		return MessageType("edits")
+	case "config":
+		return MessageType("config")
+	case "audit":
+		return MessageType("audit")
 	default:
 		return MessageTypeUnknown
 	}

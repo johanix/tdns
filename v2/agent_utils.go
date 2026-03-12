@@ -929,7 +929,8 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 								lgAgent.Info("executing deferred RFI for upstream data", "upstream", hsync3.Upstream, "zone", zonename)
 								amp := AgentMgmtPost{
 									MessageType: AgentMsgRfi,
-									RfiType:     "UPSTREAM",
+									RfiType:     "CONFIG",
+									RfiSubtype:  "upstream",
 									Zone:        zonename,
 									Upstream:    upstreamIdentity,
 								}
@@ -956,7 +957,8 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 								lgAgent.Info("executing deferred RFI for downstream data", "downstream", hsync3.Identity, "zone", zonename)
 								amp := AgentMgmtPost{
 									MessageType: AgentMsgRfi,
-									RfiType:     "DOWNSTREAM",
+									RfiType:     "CONFIG",
+									RfiSubtype:  "downstream",
 									Zone:        zonename,
 									Downstream:  AgentId(hsync3.Identity),
 								}

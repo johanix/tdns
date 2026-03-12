@@ -156,7 +156,8 @@ type SyncRequest struct {
 	Nonce          string              // Unique nonce for replay protection
 	Signature      []byte              // Optional signature over the request
 	MessageType    string              // "sync" (agent→agent), "update" (agent→combiner), "rfi" (RFI)
-	RfiType        string              // For RFI messages: "SYNC", "AUDIT", "UPSTREAM", "DOWNSTREAM"
+	RfiType        string              // For RFI messages: "SYNC", "AUDIT", "CONFIG"
+	RfiSubtype     string              // Subtype within an RFI type (e.g. "upstream", "sig0key" for CONFIG)
 }
 
 // SyncResponse represents a synchronization response.
@@ -259,6 +260,45 @@ type EditsResponse struct {
 	Accepted    bool      // Whether the message was accepted
 	Message     string    // Optional status message
 	Timestamp   time.Time // Response timestamp
+}
+
+// ConfigRequest carries config data from a peer agent back to the requester.
+// Sent by the receiving agent in response to an RFI CONFIG.
+type ConfigRequest struct {
+	SenderID   string            // Sender identity
+	Zone       string            // Zone (FQDN)
+	Subtype    string            // Config subtype: "upstream", "downstream", "sig0key"
+	ConfigData map[string]string // Key-value config data
+	Message    string            // Optional status
+	Timestamp  time.Time
+}
+
+// ConfigResponse acknowledges receipt of a CONFIG message.
+type ConfigResponse struct {
+	ResponderID string
+	Zone        string
+	Accepted    bool
+	Message     string
+	Timestamp   time.Time
+}
+
+// AuditRequest carries audit data from a peer agent back to the requester.
+// Sent by the receiving agent in response to an RFI AUDIT.
+type AuditRequest struct {
+	SenderID  string      // Sender identity
+	Zone      string      // Zone (FQDN)
+	AuditData interface{} // Zone data repo snapshot (placeholder)
+	Message   string      // Optional status
+	Timestamp time.Time
+}
+
+// AuditResponse acknowledges receipt of an AUDIT message.
+type AuditResponse struct {
+	ResponderID string
+	Zone        string
+	Accepted    bool
+	Message     string
+	Timestamp   time.Time
 }
 
 // ConfirmRequest confirms receipt and processing of a sync operation.

@@ -449,6 +449,116 @@ func HandleEdits(ctx *MessageContext) error {
 	return nil
 }
 
+// HandleConfig processes CONFIG response messages carrying config data from a peer agent.
+// Sent by the receiving agent in response to an RFI CONFIG request.
+func HandleConfig(ctx *MessageContext) error {
+	lgTransport().Debug("processing config", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
+
+	var config DnsConfigPayload
+	if err := json.Unmarshal(ctx.ChunkPayload, &config); err != nil {
+		return fmt.Errorf("failed to parse config: %w", err)
+	}
+
+	msgType := config.MessageType
+	if msgType == "" {
+		msgType = config.Type
+	}
+	if msgType != "config" {
+		return fmt.Errorf("invalid message type for config handler: %s", msgType)
+	}
+
+	if config.Zone == "" {
+		return fmt.Errorf("config message missing zone")
+	}
+
+	ctx.Data["message_type"] = "config"
+	ctx.Data["incoming_message"] = &IncomingMessage{
+		Type:     "config",
+		SenderID: config.GetSenderID(),
+		Zone:     config.Zone,
+		Payload:  ctx.ChunkPayload,
+	}
+
+	confirmPayload := struct {
+		Type           string `json:"type"`
+		DistributionID string `json:"distribution_id"`
+		Status         string `json:"status"`
+		Message        string `json:"message"`
+		Timestamp      int64  `json:"timestamp"`
+	}{
+		Type:           "confirm",
+		DistributionID: ctx.DistributionID,
+		Status:         "ok",
+		Message:        fmt.Sprintf("config received for zone %s subtype %s", config.Zone, config.Subtype),
+		Timestamp:      time.Now().Unix(),
+	}
+
+	payloadBytes, err := json.Marshal(confirmPayload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal config confirmation: %w", err)
+	}
+
+	ctx.Data["response"] = payloadBytes
+
+	lgTransport().Info("config received", "peer", ctx.PeerID, "zone", config.Zone, "subtype", config.Subtype)
+	return nil
+}
+
+// HandleAudit processes AUDIT response messages carrying audit data from a peer agent.
+// Sent by the receiving agent in response to an RFI AUDIT request.
+func HandleAudit(ctx *MessageContext) error {
+	lgTransport().Debug("processing audit", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
+
+	var audit DnsAuditPayload
+	if err := json.Unmarshal(ctx.ChunkPayload, &audit); err != nil {
+		return fmt.Errorf("failed to parse audit: %w", err)
+	}
+
+	msgType := audit.MessageType
+	if msgType == "" {
+		msgType = audit.Type
+	}
+	if msgType != "audit" {
+		return fmt.Errorf("invalid message type for audit handler: %s", msgType)
+	}
+
+	if audit.Zone == "" {
+		return fmt.Errorf("audit message missing zone")
+	}
+
+	ctx.Data["message_type"] = "audit"
+	ctx.Data["incoming_message"] = &IncomingMessage{
+		Type:     "audit",
+		SenderID: audit.GetSenderID(),
+		Zone:     audit.Zone,
+		Payload:  ctx.ChunkPayload,
+	}
+
+	confirmPayload := struct {
+		Type           string `json:"type"`
+		DistributionID string `json:"distribution_id"`
+		Status         string `json:"status"`
+		Message        string `json:"message"`
+		Timestamp      int64  `json:"timestamp"`
+	}{
+		Type:           "confirm",
+		DistributionID: ctx.DistributionID,
+		Status:         "ok",
+		Message:        fmt.Sprintf("audit received for zone %s", audit.Zone),
+		Timestamp:      time.Now().Unix(),
+	}
+
+	payloadBytes, err := json.Marshal(confirmPayload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal audit confirmation: %w", err)
+	}
+
+	ctx.Data["response"] = payloadBytes
+
+	lgTransport().Info("audit received", "peer", ctx.PeerID, "zone", audit.Zone)
+	return nil
+}
+
 // HandleRelocate processes relocate messages for DDoS mitigation.
 func HandleRelocate(ctx *MessageContext) error {
 	lgTransport().Debug("processing relocate", "peer", ctx.PeerID, "distrib", ctx.DistributionID)

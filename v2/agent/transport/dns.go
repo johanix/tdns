@@ -347,6 +347,7 @@ func (t *DNSTransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 		Operations:   req.Operations,
 		Time:         req.Timestamp,
 		RfiType:      req.RfiType,
+		RfiSubtype:   req.RfiSubtype,
 		Nonce:        req.Nonce,
 	}
 
@@ -720,6 +721,89 @@ func (t *DNSTransport) Edits(ctx context.Context, peer *Peer, req *EditsRequest)
 	}
 
 	return &EditsResponse{
+		ResponderID: peer.ID,
+		Zone:        req.Zone,
+		Accepted:    resp.Status == ConfirmSuccess,
+		Message:     resp.Message,
+		Timestamp:   time.Now(),
+	}, nil
+}
+
+// Config sends a CONFIG response message to a peer agent, carrying config data.
+// Sent by the receiving agent in response to an RFI CONFIG request.
+func (t *DNSTransport) Config(ctx context.Context, peer *Peer, req *ConfigRequest) (*ConfigResponse, error) {
+	addr := peer.CurrentAddress()
+	if addr == nil {
+		return nil, NewTransportError("DNS", "Config", peer.ID, fmt.Errorf("no address available"), false)
+	}
+
+	distributionID := GenerateDistributionID()
+	qname := t.buildNotifyQNAME(distributionID)
+
+	payload := &core.AgentConfigPost{
+		MessageType:  core.AgentMsgConfig,
+		MyIdentity:   req.SenderID,
+		YourIdentity: peer.ID,
+		Zone:         req.Zone,
+		Subtype:      req.Subtype,
+		ConfigData:   req.ConfigData,
+		Message:      req.Message,
+		Time:         req.Timestamp,
+	}
+
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return nil, NewTransportError("DNS", "Config", peer.ID,
+			fmt.Errorf("failed to marshal config payload: %w", err), false)
+	}
+
+	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "config", distributionID, payloadJSON, false)
+	if err != nil {
+		return nil, err
+	}
+
+	return &ConfigResponse{
+		ResponderID: peer.ID,
+		Zone:        req.Zone,
+		Accepted:    resp.Status == ConfirmSuccess,
+		Message:     resp.Message,
+		Timestamp:   time.Now(),
+	}, nil
+}
+
+// Audit sends an AUDIT response message to a peer agent, carrying audit data.
+// Sent by the receiving agent in response to an RFI AUDIT request.
+func (t *DNSTransport) Audit(ctx context.Context, peer *Peer, req *AuditRequest) (*AuditResponse, error) {
+	addr := peer.CurrentAddress()
+	if addr == nil {
+		return nil, NewTransportError("DNS", "Audit", peer.ID, fmt.Errorf("no address available"), false)
+	}
+
+	distributionID := GenerateDistributionID()
+	qname := t.buildNotifyQNAME(distributionID)
+
+	payload := &core.AgentAuditPost{
+		MessageType:  core.AgentMsgAudit,
+		MyIdentity:   req.SenderID,
+		YourIdentity: peer.ID,
+		Zone:         req.Zone,
+		AuditData:    req.AuditData,
+		Message:      req.Message,
+		Time:         req.Timestamp,
+	}
+
+	payloadJSON, err := json.Marshal(payload)
+	if err != nil {
+		return nil, NewTransportError("DNS", "Audit", peer.ID,
+			fmt.Errorf("failed to marshal audit payload: %w", err), false)
+	}
+
+	resp, err := t.sendNotifyWithPayload(ctx, peer, qname, "audit", distributionID, payloadJSON, false)
+	if err != nil {
+		return nil, err
+	}
+
+	return &AuditResponse{
 		ResponderID: peer.ID,
 		Zone:        req.Zone,
 		Accepted:    resp.Status == ConfirmSuccess,
@@ -1109,6 +1193,7 @@ type DnsSyncPayload struct {
 	Operations     []core.RROperation  `json:"Operations,omitempty"` // Explicit operations (takes precedence over Records)
 	Time           string              `json:"Time"`                 // RFC3339 timestamp
 	RfiType        string              `json:"RfiType"`
+	RfiSubtype     string              `json:"rfi_subtype,omitempty"`
 	Timestamp      int64               `json:"timestamp"` // Unix timestamp (legacy compat)
 	DistributionID string              `json:"distribution_id"`
 }
@@ -1259,6 +1344,51 @@ type DnsEditsPayload struct {
 
 // GetSenderID returns the sender ID from either standard or legacy format.
 func (d *DnsEditsPayload) GetSenderID() string {
+	if d.MyIdentity != "" {
+		return d.MyIdentity
+	}
+	return d.SenderID
+}
+
+// DnsConfigPayload represents a CONFIG response message payload.
+// Carries config data from a peer agent back to the requester.
+type DnsConfigPayload struct {
+	MessageType  string            `json:"MessageType"`
+	MyIdentity   string            `json:"MyIdentity"`
+	YourIdentity string            `json:"YourIdentity"`
+	Zone         string            `json:"Zone"`
+	Subtype      string            `json:"Subtype"`
+	ConfigData   map[string]string `json:"ConfigData,omitempty"`
+	Message      string            `json:"Message,omitempty"`
+	Timestamp    int64             `json:"timestamp"`
+	Type         string            `json:"type"`
+	SenderID     string            `json:"sender_id"`
+}
+
+// GetSenderID returns the sender ID from either standard or legacy format.
+func (d *DnsConfigPayload) GetSenderID() string {
+	if d.MyIdentity != "" {
+		return d.MyIdentity
+	}
+	return d.SenderID
+}
+
+// DnsAuditPayload represents an AUDIT response message payload.
+// Carries audit data from a peer agent back to the requester.
+type DnsAuditPayload struct {
+	MessageType  string      `json:"MessageType"`
+	MyIdentity   string      `json:"MyIdentity"`
+	YourIdentity string      `json:"YourIdentity"`
+	Zone         string      `json:"Zone"`
+	AuditData    interface{} `json:"AuditData,omitempty"`
+	Message      string      `json:"Message,omitempty"`
+	Timestamp    int64       `json:"timestamp"`
+	Type         string      `json:"type"`
+	SenderID     string      `json:"sender_id"`
+}
+
+// GetSenderID returns the sender ID from either standard or legacy format.
+func (d *DnsAuditPayload) GetSenderID() string {
 	if d.MyIdentity != "" {
 		return d.MyIdentity
 	}

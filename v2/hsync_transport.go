@@ -436,6 +436,10 @@ func (tm *TransportManager) routeIncomingMessage(msg *transport.IncomingMessage)
 		tm.routeKeystateMessage(msg)
 	case "edits":
 		tm.routeEditsMessage(msg)
+	case "config":
+		tm.routeConfigMessage(msg)
+	case "audit":
+		tm.routeAuditMessage(msg)
 	case "relocate":
 		tm.routeRelocateMessage(msg)
 	default:
@@ -567,6 +571,12 @@ func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 						tm.agentRegistry.LeaderElectionManager.StartElection(zone, operationalPeers)
 					}
 				}
+			}
+
+			// Check deferred elections — zones where election was postponed during
+			// startup because peers weren't operational yet.
+			if tm.agentRegistry.LeaderElectionManager != nil && len(agent.Zones) > 0 {
+				tm.agentRegistry.LeaderElectionManager.NotifyPeerOperational(agent.Zones)
 			}
 		}
 	}
@@ -715,6 +725,7 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 			Operations:     payload.GetOperations(),
 			Time:           time.Unix(payload.Timestamp, 0),
 			RfiType:        payload.RfiType,        // Include RfiType for RFI messages
+			RfiSubtype:     payload.RfiSubtype,     // Include RfiSubtype for CONFIG RFI messages
 			DistributionID: payload.DistributionID, // Originating distID from sending agent
 			Nonce:          msg.Nonce,              // Echo nonce from incoming message for confirmation
 		},
@@ -852,6 +863,138 @@ func (tm *TransportManager) routeEditsMessage(msg *transport.IncomingMessage) {
 	default:
 		lgTransport.Warn("EditsResponse channel full, dropping edits", "sender", senderID)
 	}
+}
+
+// routeConfigMessage routes an incoming CONFIG response message from a peer agent.
+// Delivers the config data to MsgQs.ConfigResponse so RequestAndWaitForConfig can pick it up.
+func (tm *TransportManager) routeConfigMessage(msg *transport.IncomingMessage) {
+	var payload transport.DnsConfigPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		lgTransport.Error("failed to parse config payload", "err", err)
+		return
+	}
+
+	senderID := payload.GetSenderID()
+	lgTransport.Debug("processing CONFIG response", "sender", senderID, "zone", payload.Zone, "subtype", payload.Subtype)
+
+	if tm.msgQs == nil {
+		lgTransport.Debug("CONFIG received but no MsgQs, ignoring", "sender", senderID)
+		return
+	}
+
+	configMsg := &ConfigResponseMsg{
+		SenderID:   senderID,
+		Zone:       payload.Zone,
+		Subtype:    payload.Subtype,
+		ConfigData: payload.ConfigData,
+	}
+
+	select {
+	case tm.msgQs.ConfigResponse <- configMsg:
+		lgTransport.Info("routed CONFIG response to agent", "sender", senderID, "zone", payload.Zone, "subtype", payload.Subtype)
+	default:
+		lgTransport.Warn("ConfigResponse channel full, dropping config", "sender", senderID)
+	}
+}
+
+// sendConfigToAgent gathers config data for the given subtype and sends it as a separate
+// CONFIG message back to the requesting agent. Called asynchronously from MsgHandler when
+// an RFI CONFIG is received.
+func sendConfigToAgent(tm *TransportManager, ar *AgentRegistry, requesterID string, zone string, subtype string, configData map[string]string) {
+	if tm == nil || tm.DNSTransport == nil {
+		lgTransport.Warn("sendConfigToAgent: no DNSTransport available", "requester", requesterID)
+		return
+	}
+
+	peer, peerExists := tm.PeerRegistry.Get(requesterID)
+	if !peerExists || peer == nil {
+		lgTransport.Warn("sendConfigToAgent: requester not in PeerRegistry", "requester", requesterID)
+		return
+	}
+
+	req := &transport.ConfigRequest{
+		SenderID:   ar.LocalAgent.Identity,
+		Zone:       zone,
+		Subtype:    subtype,
+		ConfigData: configData,
+		Timestamp:  time.Now(),
+	}
+
+	sendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := tm.DNSTransport.Config(sendCtx, peer, req)
+	if err != nil {
+		lgTransport.Error("sendConfigToAgent: failed to send", "requester", requesterID, "zone", zone, "subtype", subtype, "err", err)
+		return
+	}
+
+	lgTransport.Info("sendConfigToAgent: sent config to requester", "requester", requesterID, "zone", zone, "subtype", subtype, "accepted", resp.Accepted)
+}
+
+// routeAuditMessage routes an incoming AUDIT response message from a peer agent.
+// Delivers the audit data to MsgQs.AuditResponse so RequestAndWaitForAudit can pick it up.
+func (tm *TransportManager) routeAuditMessage(msg *transport.IncomingMessage) {
+	var payload transport.DnsAuditPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		lgTransport.Error("failed to parse audit payload", "err", err)
+		return
+	}
+
+	senderID := payload.GetSenderID()
+	lgTransport.Debug("processing AUDIT response", "sender", senderID, "zone", payload.Zone)
+
+	if tm.msgQs == nil {
+		lgTransport.Debug("AUDIT received but no MsgQs, ignoring", "sender", senderID)
+		return
+	}
+
+	auditMsg := &AuditResponseMsg{
+		SenderID:  senderID,
+		Zone:      payload.Zone,
+		AuditData: payload.AuditData,
+	}
+
+	select {
+	case tm.msgQs.AuditResponse <- auditMsg:
+		lgTransport.Info("routed AUDIT response to agent", "sender", senderID, "zone", payload.Zone)
+	default:
+		lgTransport.Warn("AuditResponse channel full, dropping audit", "sender", senderID)
+	}
+}
+
+// sendAuditToAgent gathers audit data and sends it as a separate AUDIT message
+// back to the requesting agent. Called asynchronously from MsgHandler when
+// an RFI AUDIT is received.
+func sendAuditToAgent(tm *TransportManager, ar *AgentRegistry, requesterID string, zone string, auditData interface{}) {
+	if tm == nil || tm.DNSTransport == nil {
+		lgTransport.Warn("sendAuditToAgent: no DNSTransport available", "requester", requesterID)
+		return
+	}
+
+	peer, peerExists := tm.PeerRegistry.Get(requesterID)
+	if !peerExists || peer == nil {
+		lgTransport.Warn("sendAuditToAgent: requester not in PeerRegistry", "requester", requesterID)
+		return
+	}
+
+	req := &transport.AuditRequest{
+		SenderID:  ar.LocalAgent.Identity,
+		Zone:      zone,
+		AuditData: auditData,
+		Timestamp: time.Now(),
+	}
+
+	sendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := tm.DNSTransport.Audit(sendCtx, peer, req)
+	if err != nil {
+		lgTransport.Error("sendAuditToAgent: failed to send", "requester", requesterID, "zone", zone, "err", err)
+		return
+	}
+
+	lgTransport.Info("sendAuditToAgent: sent audit to requester", "requester", requesterID, "zone", zone, "accepted", resp.Accepted)
 }
 
 // routeRelocateMessage handles a relocate request.

@@ -383,6 +383,89 @@ func (zd *ZoneData) RequestAndWaitForEdits() {
 	}
 }
 
+// RequestAndWaitForConfig sends an RFI CONFIG to a peer agent and waits for the config
+// response on MsgQs.ConfigResponse. Returns the config data or nil on timeout/error.
+func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subtype string) *ConfigResponseMsg {
+	msgQs := Conf.Internal.MsgQs
+	if msgQs == nil || msgQs.ConfigResponse == nil {
+		lgEngine.Warn("RequestAndWaitForConfig: no ConfigResponse channel available")
+		return nil
+	}
+
+	// Send RFI CONFIG to the peer agent
+	_, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
+		MessageType:  AgentMsgRfi,
+		OriginatorID: AgentId(ar.LocalAgent.Identity),
+		YourIdentity: agent.Identity,
+		Zone:         ZoneName(zone),
+		RfiType:      "CONFIG",
+		RfiSubtype:   subtype,
+	})
+	if err != nil {
+		lgEngine.Warn("RequestAndWaitForConfig: RFI CONFIG send failed", "agent", agent.Identity, "zone", zone, "subtype", subtype, "err", err)
+		return nil
+	}
+
+	// Wait for the config response (peer sends it as a separate CONFIG message)
+	timeout := time.NewTimer(15 * time.Second)
+	defer timeout.Stop()
+
+	select {
+	case resp := <-msgQs.ConfigResponse:
+		if resp == nil {
+			lgEngine.Warn("RequestAndWaitForConfig: received nil config response", "zone", zone, "subtype", subtype)
+			return nil
+		}
+		lgEngine.Info("RequestAndWaitForConfig: received config response", "sender", resp.SenderID, "zone", resp.Zone, "subtype", resp.Subtype)
+		return resp
+
+	case <-timeout.C:
+		lgEngine.Warn("RequestAndWaitForConfig: timeout waiting for config response (15s)", "zone", zone, "subtype", subtype)
+		return nil
+	}
+}
+
+// RequestAndWaitForAudit sends an RFI AUDIT to a peer agent and waits for the audit
+// response on MsgQs.AuditResponse. Returns the audit data or nil on timeout/error.
+func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string) *AuditResponseMsg {
+	msgQs := Conf.Internal.MsgQs
+	if msgQs == nil || msgQs.AuditResponse == nil {
+		lgEngine.Warn("RequestAndWaitForAudit: no AuditResponse channel available")
+		return nil
+	}
+
+	// Send RFI AUDIT to the peer agent
+	_, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
+		MessageType:  AgentMsgRfi,
+		OriginatorID: AgentId(ar.LocalAgent.Identity),
+		YourIdentity: agent.Identity,
+		Zone:         ZoneName(zone),
+		RfiType:      "AUDIT",
+	})
+	if err != nil {
+		lgEngine.Warn("RequestAndWaitForAudit: RFI AUDIT send failed", "agent", agent.Identity, "zone", zone, "err", err)
+		return nil
+	}
+
+	// Wait for the audit response (peer sends it as a separate AUDIT message)
+	timeout := time.NewTimer(15 * time.Second)
+	defer timeout.Stop()
+
+	select {
+	case resp := <-msgQs.AuditResponse:
+		if resp == nil {
+			lgEngine.Warn("RequestAndWaitForAudit: received nil audit response", "zone", zone)
+			return nil
+		}
+		lgEngine.Info("RequestAndWaitForAudit: received audit response", "sender", resp.SenderID, "zone", resp.Zone)
+		return resp
+
+	case <-timeout.C:
+		lgEngine.Warn("RequestAndWaitForAudit: timeout waiting for audit response (15s)", "zone", zone)
+		return nil
+	}
+}
+
 // applyEditsToSDE imports the combiner's contributions response into the SynchedDataEngine.
 // Records are the agent's own contributions as tracked by the combiner — they should be
 // added as confirmed data (not queued for sending to the combiner again).

@@ -20,6 +20,8 @@ const (
 	AgentMsgPing     AgentMsg = "ping"
 	AgentMsgKeystate AgentMsg = "keystate"
 	AgentMsgEdits    AgentMsg = "edits"
+	AgentMsgConfig   AgentMsg = "config"
+	AgentMsgAudit    AgentMsg = "audit"
 )
 
 var AgentMsgToString = map[AgentMsg]string{
@@ -32,6 +34,8 @@ var AgentMsgToString = map[AgentMsg]string{
 	AgentMsgPing:     "PING",
 	AgentMsgKeystate: "KEYSTATE",
 	AgentMsgEdits:    "EDITS",
+	AgentMsgConfig:   "CONFIG",
+	AgentMsgAudit:    "AUDIT",
 }
 
 // AgentHelloPost represents a hello handshake message.
@@ -105,7 +109,8 @@ type AgentMsgPost struct {
 	Operations   []RROperation       `json:"operations,omitempty"` // Explicit operations (takes precedence over Records)
 	Time         time.Time           // Message timestamp
 	RfiType      string              // Type of RFI request if MessageType is RFI
-	Nonce        string              `json:"nonce,omitempty"` // Unique nonce for replay protection and confirmation correlation
+	RfiSubtype   string              `json:"rfi_subtype,omitempty"` // Subtype within an RFI type (e.g. "upstream", "sig0key" for CONFIG)
+	Nonce        string              `json:"nonce,omitempty"`       // Unique nonce for replay protection and confirmation correlation
 }
 
 // AgentMsgResponse represents the response to an AgentMsgPost.
@@ -193,6 +198,33 @@ type AgentKeystateResponse struct {
 	Msg          string
 	Error        bool
 	ErrorMsg     string
+}
+
+// AgentConfigPost represents a CONFIG response message carrying config data
+// back to the requesting agent as a separate transaction (two-phase pattern).
+// Sent by the receiving agent in response to an RFI CONFIG request.
+type AgentConfigPost struct {
+	MessageType  AgentMsg          // AgentMsgConfig
+	MyIdentity   string            // Sender identity
+	YourIdentity string            // Recipient identity
+	Zone         string            // Zone (FQDN)
+	Subtype      string            // Config subtype: "upstream", "downstream", "sig0key"
+	ConfigData   map[string]string // Key-value config data
+	Message      string            // Optional status message
+	Time         time.Time         // Timestamp
+}
+
+// AgentAuditPost represents an AUDIT response message carrying audit data
+// back to the requesting agent as a separate transaction (two-phase pattern).
+// Sent by the receiving agent in response to an RFI AUDIT request.
+type AgentAuditPost struct {
+	MessageType  AgentMsg    // AgentMsgAudit
+	MyIdentity   string      // Sender identity
+	YourIdentity string      // Recipient identity
+	Zone         string      // Zone (FQDN)
+	AuditData    interface{} // Zone data repo snapshot (placeholder)
+	Message      string      // Optional status message
+	Time         time.Time   // Timestamp
 }
 
 // AgentEditsPost represents an EDITS message carrying an agent's current contributions

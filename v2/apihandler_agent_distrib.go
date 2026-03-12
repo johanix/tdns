@@ -384,24 +384,47 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 			// Add leader election status per zone
 			var leaderInfo []map[string]interface{}
 			if conf.Internal.LeaderElectionManager != nil {
+				// Active leaders
+				activeLeaderZones := make(map[string]bool)
 				for _, ls := range conf.Internal.LeaderElectionManager.GetAllLeaders() {
+					activeLeaderZones[string(ls.Zone)] = true
 					leaderInfo = append(leaderInfo, map[string]interface{}{
 						"zone":     string(ls.Zone),
 						"leader":   string(ls.Leader),
 						"is_self":  ls.IsSelf,
 						"term":     ls.Term,
 						"ttl_secs": int(time.Until(ls.Expiry).Seconds()),
+						"status":   "active",
 					})
+				}
+
+				// Pending elections (deferred during startup)
+				for _, zone := range conf.Internal.LeaderElectionManager.GetPendingElections() {
+					if !activeLeaderZones[string(zone)] {
+						leaderInfo = append(leaderInfo, map[string]interface{}{
+							"zone":   string(zone),
+							"status": "pending",
+						})
+					}
+				}
+			}
+
+			// Zones with OptDelSyncChild (parentsync=agent) — for operator visibility
+			var parentsyncZones []string
+			for _, zn := range Zones.Keys() {
+				if zd, ok := Zones.Get(zn); ok && zd.Options[OptDelSyncChild] {
+					parentsyncZones = append(parentsyncZones, zn)
 				}
 			}
 
 			// Create response with peers field
 			fullResp := map[string]interface{}{
-				"time":    respMap.Time,
-				"msg":     respMap.Msg,
-				"error":   respMap.Error,
-				"peers":   peerMaps,
-				"leaders": leaderInfo,
+				"time":             respMap.Time,
+				"msg":              respMap.Msg,
+				"error":            respMap.Error,
+				"peers":            peerMaps,
+				"leaders":          leaderInfo,
+				"parentsync_zones": parentsyncZones,
 			}
 			if respMap.ErrorMsg != "" {
 				fullResp["error_msg"] = respMap.ErrorMsg

@@ -239,6 +239,7 @@ type AgentMsgPost struct {
 	Operations     []core.RROperation  // Explicit operations (takes precedence over Records)
 	Time           time.Time
 	RfiType        string
+	RfiSubtype     string
 	DistributionID string // Originating distribution ID from the sending agent
 	Nonce          string // Nonce from the incoming sync/update message (for confirmation echo)
 }
@@ -315,6 +316,7 @@ type AgentMgmtPost struct {
 	Upstream    AgentId
 	Downstream  AgentId
 	RfiType     string
+	RfiSubtype  string
 	Data        map[string]interface{} `json:"data,omitempty"` // Generic data field for custom parameters
 	// Response    chan *AgentMgmtResponse
 }

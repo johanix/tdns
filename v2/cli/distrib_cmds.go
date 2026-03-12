@@ -438,25 +438,37 @@ func listDistribPeers(cmd *cobra.Command, component string) {
 	}
 
 	// Show leader election status
+	parentsyncZones, _ := resp["parentsync_zones"].([]interface{})
+	hasParentsync := len(parentsyncZones) > 0
+
 	if leadersRaw, ok := resp["leaders"].([]interface{}); ok && len(leadersRaw) > 0 {
 		fmt.Println("\nLeader elections:")
 		for _, lRaw := range leadersRaw {
 			if l, ok := lRaw.(map[string]interface{}); ok {
 				zone := getStringValue(l, "zone")
-				leader := getStringValue(l, "leader")
-				isSelf := false
-				if v, ok := l["is_self"].(bool); ok {
-					isSelf = v
+				status := getStringValue(l, "status")
+
+				switch status {
+				case "pending":
+					fmt.Printf("  %-30s (pending — waiting for operational peers)\n", zone)
+				default:
+					leader := getStringValue(l, "leader")
+					isSelf := false
+					if v, ok := l["is_self"].(bool); ok {
+						isSelf = v
+					}
+					term := l["term"]
+					ttl := l["ttl_secs"]
+					selfTag := ""
+					if isSelf {
+						selfTag = " (self)"
+					}
+					fmt.Printf("  %-30s leader=%s%s  term=%v  ttl=%vs\n", zone, leader, selfTag, term, ttl)
 				}
-				term := l["term"]
-				ttl := l["ttl_secs"]
-				selfTag := ""
-				if isSelf {
-					selfTag = " (self)"
-				}
-				fmt.Printf("  %-30s leader=%s%s  term=%v  ttl=%vs\n", zone, leader, selfTag, term, ttl)
 			}
 		}
+	} else if !hasParentsync {
+		fmt.Println("\nLeader elections: none (no zones with parentsync=agent)")
 	} else {
 		fmt.Println("\nLeader elections: none")
 	}

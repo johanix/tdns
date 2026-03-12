@@ -449,55 +449,55 @@ type DynamicCatalogMemberConf struct {
 }
 
 type InternalConf struct {
-	CfgFile             string //
-	DebugMode           bool   // if true, may activate dangerous tests
-	ZonesCfgFile        string //
-	CertData            string // PEM encoded certificate
-	KeyData             string // PEM encoded key
-	KeyDB               *KeyDB
-	AllZones            []string
-	DnssecPolicies      map[string]DnssecPolicy
-	StopCh              chan struct{}
-	APIStopCh           chan struct{}
-	StopOnce            sync.Once
-	RefreshZoneCh       chan ZoneRefresher
-	BumpZoneCh          chan BumperData
-	ValidatorCh         chan ValidatorRequest
-	RecursorCh          chan ImrRequest
-	ScannerQ            chan ScanRequest
-	UpdateQ             chan UpdateRequest
-	DeferredUpdateQ     chan DeferredUpdate
-	DnsUpdateQ          chan DnsUpdateRequest
-	DnsNotifyQ          chan DnsNotifyRequest
-	DnsQueryQ           chan DnsQueryRequest           // Optional: if nil, queries use direct call to QueryResponder
-	QueryHandlers       map[uint16][]QueryHandlerFunc  // qtype -> list of handlers (registered via RegisterQueryHandler)
-	QueryHandlersMutex  sync.RWMutex                   // protects QueryHandlers map
-	NotifyHandlers      map[uint16][]NotifyHandlerFunc // qtype -> list of handlers (registered via RegisterNotifyHandler, 0 = all NOTIFYs)
-	NotifyHandlersMutex sync.RWMutex                   // protects NotifyHandlers map
-	UpdateHandlers      []UpdateHandlerRegistration    // UPDATE handlers (registered via RegisterUpdateHandler)
-	UpdateHandlersMutex sync.RWMutex                   // protects UpdateHandlers slice
-	DelegationSyncQ     chan DelegationSyncRequest
-	MusicSyncQ          chan MusicSyncRequest
-	NotifyQ             chan NotifyRequest
-	AuthQueryQ          chan AuthQueryRequest
-	ResignQ             chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
-	SyncQ               chan SyncRequest
-	MsgQs               *MsgQs // aggregated channels for agent communication
-	SyncStatusQ         chan SyncStatus
-	AgentRegistry       *AgentRegistry
-	ZoneDataRepo        *ZoneDataRepo
-	RRsetCache          *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
-	ImrEngine           *Imr
-	KdcDB               interface{}        // *kdc.KdcDB - using interface{} to avoid circular import
-	KdcConf             interface{}        // *kdc.KdcConf - using interface{} to avoid circular import
-	KrsDB               interface{}        // *krs.KrsDB - using interface{} to avoid circular import
-	KrsConf             interface{}        // *krs.KrsConf - using interface{} to avoid circular import
-	Scanner             *Scanner           // Scanner instance for async job tracking
-	CombinerState       *CombinerState     // Combiner business logic state (error journal, protected namespaces)
-	TransportManager       *TransportManager       // Multi-transport (API + DNS) for agent/combiner/signer; nil if transport not initialized
-	LeaderElectionManager  *LeaderElectionManager  // Per-zone leader election for delegation sync; nil if not agent
-	ChunkPayloadStore   ChunkPayloadStore  // Optional: for query-mode CHUNK (agent); keyed by qname; set when agent chunk_mode is "query"
-	DistributionCache   *DistributionCache // In-memory cache of distributions (agent/combiner)
+	CfgFile               string //
+	DebugMode             bool   // if true, may activate dangerous tests
+	ZonesCfgFile          string //
+	CertData              string // PEM encoded certificate
+	KeyData               string // PEM encoded key
+	KeyDB                 *KeyDB
+	AllZones              []string
+	DnssecPolicies        map[string]DnssecPolicy
+	StopCh                chan struct{}
+	APIStopCh             chan struct{}
+	StopOnce              sync.Once
+	RefreshZoneCh         chan ZoneRefresher
+	BumpZoneCh            chan BumperData
+	ValidatorCh           chan ValidatorRequest
+	RecursorCh            chan ImrRequest
+	ScannerQ              chan ScanRequest
+	UpdateQ               chan UpdateRequest
+	DeferredUpdateQ       chan DeferredUpdate
+	DnsUpdateQ            chan DnsUpdateRequest
+	DnsNotifyQ            chan DnsNotifyRequest
+	DnsQueryQ             chan DnsQueryRequest           // Optional: if nil, queries use direct call to QueryResponder
+	QueryHandlers         map[uint16][]QueryHandlerFunc  // qtype -> list of handlers (registered via RegisterQueryHandler)
+	QueryHandlersMutex    sync.RWMutex                   // protects QueryHandlers map
+	NotifyHandlers        map[uint16][]NotifyHandlerFunc // qtype -> list of handlers (registered via RegisterNotifyHandler, 0 = all NOTIFYs)
+	NotifyHandlersMutex   sync.RWMutex                   // protects NotifyHandlers map
+	UpdateHandlers        []UpdateHandlerRegistration    // UPDATE handlers (registered via RegisterUpdateHandler)
+	UpdateHandlersMutex   sync.RWMutex                   // protects UpdateHandlers slice
+	DelegationSyncQ       chan DelegationSyncRequest
+	MusicSyncQ            chan MusicSyncRequest
+	NotifyQ               chan NotifyRequest
+	AuthQueryQ            chan AuthQueryRequest
+	ResignQ               chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
+	SyncQ                 chan SyncRequest
+	MsgQs                 *MsgQs // aggregated channels for agent communication
+	SyncStatusQ           chan SyncStatus
+	AgentRegistry         *AgentRegistry
+	ZoneDataRepo          *ZoneDataRepo
+	RRsetCache            *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
+	ImrEngine             *Imr
+	KdcDB                 interface{}            // *kdc.KdcDB - using interface{} to avoid circular import
+	KdcConf               interface{}            // *kdc.KdcConf - using interface{} to avoid circular import
+	KrsDB                 interface{}            // *krs.KrsDB - using interface{} to avoid circular import
+	KrsConf               interface{}            // *krs.KrsConf - using interface{} to avoid circular import
+	Scanner               *Scanner               // Scanner instance for async job tracking
+	CombinerState         *CombinerState         // Combiner business logic state (error journal, protected namespaces)
+	TransportManager      *TransportManager      // Multi-transport (API + DNS) for agent/combiner/signer; nil if transport not initialized
+	LeaderElectionManager *LeaderElectionManager // Per-zone leader election for delegation sync; nil if not agent
+	ChunkPayloadStore     ChunkPayloadStore      // Optional: for query-mode CHUNK (agent); keyed by qname; set when agent chunk_mode is "query"
+	DistributionCache     *DistributionCache     // In-memory cache of distributions (agent/combiner)
 }
 
 type MsgQs struct {
@@ -514,6 +514,8 @@ type MsgQs struct {
 	KeystateInventory chan *KeystateInventoryMsg // incoming KEYSTATE inventory from signer
 	KeystateSignal    chan *KeystateSignalMsg    // incoming KEYSTATE signals (propagated/rejected) from agent to signer
 	EditsResponse     chan *EditsResponseMsg     // incoming EDITS response from combiner
+	ConfigResponse    chan *ConfigResponseMsg    // incoming CONFIG response from peer agent
+	AuditResponse     chan *AuditResponseMsg     // incoming AUDIT response from peer agent
 
 	// OnRemoteConfirmationReady is called when this agent (acting as a remote agent)
 	// receives a combiner confirmation for a sync that originated from another agent.
@@ -546,6 +548,23 @@ type EditsResponseMsg struct {
 	SenderID string
 	Zone     string
 	Records  map[string][]string // owner → []RR strings
+}
+
+// ConfigResponseMsg carries config data from a peer agent back to the requester.
+// Delivered via MsgQs.ConfigResponse channel.
+type ConfigResponseMsg struct {
+	SenderID   string
+	Zone       string
+	Subtype    string            // "upstream", "downstream", "sig0key"
+	ConfigData map[string]string // Key-value config data
+}
+
+// AuditResponseMsg carries audit data from a peer agent back to the requester.
+// Delivered via MsgQs.AuditResponse channel.
+type AuditResponseMsg struct {
+	SenderID  string
+	Zone      string
+	AuditData interface{} // Zone data repo snapshot (placeholder)
 }
 
 func (conf *Config) ReloadConfig() (string, error) {

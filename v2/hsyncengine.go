@@ -418,69 +418,9 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 
 	case AgentMsgRfi:
 		// Process the RFI
-		lgEngine.Info("received RFI request", "from", ampp.OriginatorID, "type", ampp.RfiType)
+		lgEngine.Info("received RFI request", "from", ampp.OriginatorID, "type", ampp.RfiType, "subtype", ampp.RfiSubtype, "zone", ampp.Zone)
 
 		switch ampp.RfiType {
-		case "UPSTREAM":
-			// This is the case where a remote agent has us as upstream. Need to (a) verify that this is correct, (b) verify that we have
-			// data for xfr.outgoing, (c) send the data to the remote agent.
-			found := false
-			for _, aid := range zad.MyDownstreams {
-				if aid == ampp.OriginatorID {
-					found = true
-					break
-				}
-			}
-			if !found {
-				resp.Error = true
-				resp.Msg = fmt.Sprintf("%s: RFI UPSTREAM request received, but remote agent %q is not a downstream agent", ar.LocalAgent.Identity, ampp.OriginatorID)
-				resp.ErrorMsg = resp.Msg
-				return
-			}
-			lgEngine.Info("RFI UPSTREAM request from downstream agent (legitimate)", "from", ampp.OriginatorID)
-
-			if len(ar.LocalAgent.Xfr.Outgoing.Addresses) == 0 {
-				resp.Error = true
-				resp.Msg = fmt.Sprintf("%s: RFI UPSTREAM request received, but local agent %q has no config for outgoing zone transfers", ar.LocalAgent.Identity, ar.LocalAgent.Identity)
-				resp.ErrorMsg = resp.Msg
-				return
-			}
-
-			// log.Printf("MsgHandler: Sending RFI UPSTREAM response to %q", ampp.OriginatorID)
-
-			resp.RfiResponse[AgentId(ar.LocalAgent.Identity)] = &RfiData{
-				ZoneXfrSrcs: ar.LocalAgent.Xfr.Outgoing.Addresses,
-				ZoneXfrAuth: ar.LocalAgent.Xfr.Outgoing.Auth,
-			}
-			// log.Printf("MsgHandler: RFI UPSTREAM response %+v sent to %q", resp.RfiResponse, ampp.OriginatorID)
-
-		case "DOWNSTREAM":
-			// This is the case where a remote agent has us as downstream. Need to (a) verify that this is correct, (b) verify that we have
-			// data for xfr.incoming, (c) send the data to the remote agent.
-			if zad.MyUpstream != ampp.OriginatorID {
-				resp.Error = true
-				resp.Msg = fmt.Sprintf("%s: RFI DOWNSTREAM request received, but remote agent %q is not our upstream agent", ar.LocalAgent.Identity, ampp.OriginatorID)
-				resp.ErrorMsg = resp.Msg
-				return
-			}
-
-			lgEngine.Info("RFI DOWNSTREAM request from upstream agent (legitimate)", "from", ampp.OriginatorID)
-
-			if len(ar.LocalAgent.Xfr.Incoming.Addresses) == 0 {
-				resp.Error = true
-				resp.Msg = fmt.Sprintf("%s: RFI DOWNSTREAM request received, but local agent %q has no config for incoming zone transfers", ar.LocalAgent.Identity, ar.LocalAgent.Identity)
-				resp.ErrorMsg = resp.Msg
-				return
-			}
-
-			// log.Printf("MsgHandler: Sending RFI DOWNSTREAM response to %q", ampp.OriginatorID)
-
-			resp.RfiResponse[AgentId(ar.LocalAgent.Identity)] = &RfiData{
-				ZoneXfrDsts: ar.LocalAgent.Xfr.Incoming.Addresses,
-				ZoneXfrAuth: ar.LocalAgent.Xfr.Incoming.Auth,
-			}
-			// log.Printf("MsgHandler: RFI DOWNSTREAM response %+v sent to %q", resp.RfiResponse, ampp.OriginatorID)
-
 		case "SYNC":
 			// Remote agent asks us to re-send all our local data.
 			lgEngine.Info("RFI SYNC triggering local resync", "from", ampp.OriginatorID, "zone", ampp.Zone)
@@ -504,7 +444,8 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			}
 
 		case "AUDIT":
-			// Remote agent wants to see all data we have for this zone.
+			// Remote agent wants audit data for this zone.
+			// Two-phase: gather audit data, then send as separate AUDIT message.
 			lgEngine.Info("RFI AUDIT request", "from", ampp.OriginatorID, "zone", ampp.Zone)
 			sdcmd := &SynchedDataCmd{
 				Cmd:      "dump-zonedatarepo",
@@ -512,69 +453,123 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				Response: make(chan *SynchedDataCmdResponse, 1),
 			}
 			synchedDataCmdQ <- sdcmd
-			select {
-			case sdResp := <-sdcmd.Response:
-				if sdResp.Error {
-					resp.Error = true
-					resp.ErrorMsg = sdResp.ErrorMsg
-				} else {
-					resp.RfiResponse[AgentId(ar.LocalAgent.Identity)] = &RfiData{
-						Status:    "ok",
-						Msg:       sdResp.Msg,
-						AuditData: sdResp.ZDR,
+			tm := ar.TransportManager
+			go func() {
+				select {
+				case sdResp := <-sdcmd.Response:
+					if sdResp.Error {
+						lgEngine.Error("RFI AUDIT: failed to get audit data", "zone", ampp.Zone, "err", sdResp.ErrorMsg)
+						return
 					}
+					sendAuditToAgent(tm, ar, string(ampp.OriginatorID), string(ampp.Zone), sdResp.ZDR)
+				case <-time.After(5 * time.Second):
+					lgEngine.Error("RFI AUDIT: timeout getting audit data", "zone", ampp.Zone)
 				}
-			case <-time.After(5 * time.Second):
-				resp.Error = true
-				resp.ErrorMsg = "Timeout waiting for audit data"
-			}
+			}()
+			resp.Msg = "AUDIT request received, response pending"
 
 		case "ELECT-CALL", "ELECT-VOTE", "ELECT-CONFIRM":
+			// Log election-specific details from records
+			electionDetails := []interface{}{"from", ampp.OriginatorID, "zone", ampp.Zone}
+			if terms, ok := ampp.Records["_term"]; ok && len(terms) > 0 {
+				electionDetails = append(electionDetails, "term", terms[0])
+			}
+			if votes, ok := ampp.Records["_vote"]; ok && len(votes) > 0 {
+				electionDetails = append(electionDetails, "vote", votes[0])
+			}
+			if winners, ok := ampp.Records["_winner"]; ok && len(winners) > 0 {
+				electionDetails = append(electionDetails, "winner", winners[0])
+			}
+			lgEngine.Info("election message "+ampp.RfiType, electionDetails...)
 			if ar.LeaderElectionManager != nil {
 				ar.LeaderElectionManager.HandleMessage(ampp.Zone, ampp.OriginatorID, ampp.RfiType, ampp.Records)
 			}
 
 		case "CONFIG":
-			subtypes := ampp.Records["_subtype"]
-			if len(subtypes) == 0 {
+			if ampp.RfiSubtype == "" {
+				lgEngine.Error("CONFIG RFI missing subtype", "from", ampp.OriginatorID, "zone", ampp.Zone)
 				resp.Error = true
-				resp.ErrorMsg = "CONFIG RFI missing _subtype"
+				resp.ErrorMsg = "CONFIG RFI missing subtype"
 				return
 			}
-			switch subtypes[0] {
+
+			// Gather config data for the requested subtype.
+			var configData map[string]string
+			var configErr string
+
+			switch ampp.RfiSubtype {
+			case "upstream":
+				// Remote agent has us as upstream — return our outgoing XFR config.
+				found := false
+				for _, aid := range zad.MyDownstreams {
+					if aid == ampp.OriginatorID {
+						found = true
+						break
+					}
+				}
+				if !found {
+					configErr = fmt.Sprintf("%s: CONFIG upstream request, but remote agent %q is not a downstream agent", ar.LocalAgent.Identity, ampp.OriginatorID)
+				} else if len(ar.LocalAgent.Xfr.Outgoing.Addresses) == 0 {
+					configErr = fmt.Sprintf("%s: CONFIG upstream request, but no outgoing XFR config", ar.LocalAgent.Identity)
+				} else {
+					lgEngine.Info("CONFIG upstream: returning XFR config to peer", "from", ampp.OriginatorID)
+					configData = map[string]string{
+						"xfr_srcs": strings.Join(ar.LocalAgent.Xfr.Outgoing.Addresses, ","),
+						"xfr_auth": strings.Join(ar.LocalAgent.Xfr.Outgoing.Auth, ","),
+					}
+				}
+
+			case "downstream":
+				// Remote agent has us as downstream — return our incoming XFR config.
+				if zad.MyUpstream != ampp.OriginatorID {
+					configErr = fmt.Sprintf("%s: CONFIG downstream request, but remote agent %q is not our upstream agent", ar.LocalAgent.Identity, ampp.OriginatorID)
+				} else if len(ar.LocalAgent.Xfr.Incoming.Addresses) == 0 {
+					configErr = fmt.Sprintf("%s: CONFIG downstream request, but no incoming XFR config", ar.LocalAgent.Identity)
+				} else {
+					lgEngine.Info("CONFIG downstream: returning XFR config to peer", "from", ampp.OriginatorID)
+					configData = map[string]string{
+						"xfr_dsts": strings.Join(ar.LocalAgent.Xfr.Incoming.Addresses, ","),
+						"xfr_auth": strings.Join(ar.LocalAgent.Xfr.Incoming.Auth, ","),
+					}
+				}
+
 			case "sig0key":
 				zd, ok := Zones.Get(string(ampp.Zone))
 				if !ok || zd == nil || zd.KeyDB == nil {
-					resp.Error = true
-					resp.ErrorMsg = "zone or KeyDB not available"
-					return
-				}
-				algorithm, privatekey, keyrr, found, err := zd.KeyDB.GetSig0KeyRaw(string(ampp.Zone), Sig0StateActive)
-				if err != nil {
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("error looking up SIG(0) key: %v", err)
-					return
-				}
-				if !found {
-					resp.RfiResponse[AgentId(ar.LocalAgent.Identity)] = &RfiData{
-						Status: "ok",
-						Msg:    "no sig0 key for zone",
+					configErr = "zone or KeyDB not available"
+				} else {
+					algorithm, privatekey, keyrr, found, err := zd.KeyDB.GetSig0KeyRaw(string(ampp.Zone), Sig0StateActive)
+					if err != nil {
+						configErr = fmt.Sprintf("error looking up SIG(0) key: %v", err)
+					} else if !found {
+						configData = map[string]string{"status": "no sig0 key for zone"}
+					} else {
+						lgEngine.Info("CONFIG sig0key: returning key to peer", "zone", ampp.Zone, "peer", ampp.OriginatorID)
+						configData = map[string]string{
+							"algorithm":  algorithm,
+							"privatekey": privatekey,
+							"keyrr":      keyrr,
+						}
 					}
-					return
 				}
-				lgEngine.Info("CONFIG sig0key: returning key to peer", "zone", ampp.Zone, "peer", ampp.OriginatorID)
-				resp.RfiResponse[AgentId(ar.LocalAgent.Identity)] = &RfiData{
-					Status: "ok",
-					ConfigData: map[string]string{
-						"algorithm":  algorithm,
-						"privatekey": privatekey,
-						"keyrr":      keyrr,
-					},
-				}
+
 			default:
 				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("unknown CONFIG subtype: %s", subtypes[0])
+				resp.ErrorMsg = fmt.Sprintf("unknown CONFIG subtype: %s", ampp.RfiSubtype)
+				return
 			}
+
+			if configErr != "" {
+				resp.Error = true
+				resp.ErrorMsg = configErr
+				resp.Msg = configErr
+				return
+			}
+
+			// Send config data back as a separate CONFIG message (two-phase pattern).
+			tm := ar.TransportManager
+			go sendConfigToAgent(tm, ar, string(ampp.OriginatorID), string(ampp.Zone), ampp.RfiSubtype, configData)
+			resp.Msg = fmt.Sprintf("CONFIG %s request received, response pending", ampp.RfiSubtype)
 
 		default:
 			resp.Error = true
@@ -732,102 +727,79 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 		}
 
 	case "send-rfi":
-		lgEngine.Info("sending RFI message to agents", "rfiType", msg.RfiType, "agents", len(zad.Agents))
+		lgEngine.Info("sending RFI message to agents", "rfiType", msg.RfiType, "subtype", msg.RfiSubtype, "agents", len(zad.Agents))
 		switch msg.RfiType {
-		case "UPSTREAM":
-			agent, exists := ar.S.Get(zad.MyUpstream)
-			if !exists {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("zone %q: %s agent %q not found", msg.Zone, msg.RfiType, zad.MyUpstream)
-				return
-			}
-
-			// RFI requires the agent to be operational on at least one transport
-			if !agent.IsAnyTransportOperational() {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("zone %q: Upstream agent %s is not operational (state: %s), ignoring command for now", msg.Zone, zad.MyUpstream, AgentStateToString[agent.EffectiveState()])
-				return
-			}
-
-			// Send the RFI to the upstream agent
-			amr, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
-				MessageType:  AgentMsgRfi,
-				OriginatorID: AgentId(ar.LocalAgent.Identity),
-				YourIdentity: agent.Identity,
-				Zone:         msg.Zone,
-				RfiType:      msg.RfiType,
-			})
-
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("Error sending RFI(%s) message to agent %s: %v", msg.RfiType, agent.Identity, err)
-				// log.Printf("CommandHandler: %s", resp.ErrorMsg)
-				return
-			}
-
-			if rfiresp, ok := amr.RfiResponse[agent.Identity]; ok {
-				lgEngine.Info("UPSTREAM RFI returned OK", "agent", agent.Identity, "zone", msg.Zone, "msg", amr.Msg)
-				resp.RfiResponse[agent.Identity] = rfiresp
-				resp.Status = "ok"
-				resp.Msg = fmt.Sprintf("RFI(%s) message to agent %s for zone %s returned status OK: %s", msg.RfiType, agent.Identity, msg.Zone, amr.Msg)
-				return
-			}
-
-			resp.Error = true
-			resp.ErrorMsg = fmt.Sprintf("zone %q: UPSTREAM RFI message to agent %q returned strange response: %v",
-				msg.Zone, msg.RfiType, amr.RfiResponse)
-			return
-
-		case "DOWNSTREAM":
-			for _, aid := range zad.MyDownstreams {
-				lgEngine.Info("sending DOWNSTREAM RFI message", "agent", aid)
-
-				agent, exists := ar.S.Get(aid)
+		case "CONFIG":
+			// CONFIG RFI uses two-phase: send RFI, wait for CONFIG response on channel.
+			switch msg.RfiSubtype {
+			case "upstream":
+				agent, exists := ar.S.Get(zad.MyUpstream)
 				if !exists {
-					resp.RfiResponse[aid] = &RfiData{
-						Status:   "error",
-						Error:    true,
-						ErrorMsg: fmt.Sprintf("zone %q: Downstream agent %q not found", msg.Zone, aid),
-					}
-					continue
-				}
-
-				// RFI requires the agent to be operational on at least one transport
-				if !agent.IsAnyTransportOperational() {
-					resp.RfiResponse[aid] = &RfiData{
-						Status:   "error",
-						Error:    true,
-						ErrorMsg: fmt.Sprintf("zone %q: Downstream agent %q is not operational (state: %s)", msg.Zone, aid, AgentStateToString[agent.EffectiveState()]),
-					}
-					continue
-				}
-
-				// Send the RFI to the downstream agent
-				amr, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
-					MessageType:  AgentMsgRfi,
-					OriginatorID: AgentId(ar.LocalAgent.Identity),
-					YourIdentity: agent.Identity,
-					Zone:         msg.Zone,
-					RfiType:      msg.RfiType,
-				})
-
-				if err != nil {
 					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("Error sending DOWNSTREAM RFI message to agent %q: %v", aid, err)
-					// log.Printf("CommandHandler: %s", resp.ErrorMsg)
+					resp.ErrorMsg = fmt.Sprintf("zone %q: upstream agent %q not found", msg.Zone, zad.MyUpstream)
 					return
 				}
-
-				if rfiresp, ok := amr.RfiResponse[aid]; ok {
-					resp.RfiResponse[aid] = rfiresp
-					continue
+				if !agent.IsAnyTransportOperational() {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("zone %q: upstream agent %s is not operational (state: %s)", msg.Zone, zad.MyUpstream, AgentStateToString[agent.EffectiveState()])
+					return
+				}
+				configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "upstream")
+				if configResp == nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("zone %q: CONFIG upstream to agent %q: no response (timeout)", msg.Zone, agent.Identity)
+					return
+				}
+				resp.RfiResponse[agent.Identity] = &RfiData{
+					Status:     "ok",
+					ConfigData: configResp.ConfigData,
 				}
 
-				resp.RfiResponse[aid] = &RfiData{
-					Error:    true,
-					ErrorMsg: fmt.Sprintf("DOWNSTREAM RFI message to agent %q for zone %q returned strange response: %v", aid, msg.Zone, amr.RfiResponse),
+			case "downstream":
+				for _, aid := range zad.MyDownstreams {
+					agent, exists := ar.S.Get(aid)
+					if !exists {
+						resp.RfiResponse[aid] = &RfiData{Error: true, ErrorMsg: fmt.Sprintf("agent %q not found", aid)}
+						continue
+					}
+					if !agent.IsAnyTransportOperational() {
+						resp.RfiResponse[aid] = &RfiData{Error: true, ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", aid, AgentStateToString[agent.EffectiveState()])}
+						continue
+					}
+					configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "downstream")
+					if configResp == nil {
+						resp.RfiResponse[aid] = &RfiData{Error: true, ErrorMsg: "no response (timeout)"}
+						continue
+					}
+					resp.RfiResponse[aid] = &RfiData{
+						Status:     "ok",
+						ConfigData: configResp.ConfigData,
+					}
 				}
+
+			case "sig0key":
+				for _, agent := range zad.Agents {
+					if !agent.IsAnyTransportOperational() {
+						resp.RfiResponse[agent.Identity] = &RfiData{Error: true, ErrorMsg: fmt.Sprintf("agent %q not operational (%s)", agent.Identity, AgentStateToString[agent.EffectiveState()])}
+						continue
+					}
+					configResp := RequestAndWaitForConfig(ar, agent, string(msg.Zone), "sig0key")
+					if configResp == nil {
+						resp.RfiResponse[agent.Identity] = &RfiData{Error: true, ErrorMsg: "no response (timeout)"}
+						continue
+					}
+					resp.RfiResponse[agent.Identity] = &RfiData{
+						Status:     "ok",
+						ConfigData: configResp.ConfigData,
+					}
+				}
+
+			default:
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("Unknown CONFIG subtype: %q", msg.RfiSubtype)
+				return
 			}
+			resp.Msg = fmt.Sprintf("CONFIG %s RFI sent for zone %s", msg.RfiSubtype, msg.Zone)
 
 		case "SYNC":
 			// Send RFI SYNC to all remote agents for this zone.
@@ -856,7 +828,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 			resp.Msg = fmt.Sprintf("SYNC RFI sent to %d agents for zone %s", len(zad.Agents), msg.Zone)
 
 		case "AUDIT":
-			// Send RFI AUDIT to all remote agents for this zone.
+			// Send RFI AUDIT to all remote agents for this zone using two-phase pattern.
 			lgEngine.Info("sending AUDIT RFI to agents", "agents", len(zad.Agents), "zone", msg.Zone)
 			for _, agent := range zad.Agents {
 				if !agent.IsAnyTransportOperational() {
@@ -866,22 +838,22 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 					}
 					continue
 				}
-				amr, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
-					MessageType:  AgentMsgRfi,
-					OriginatorID: AgentId(ar.LocalAgent.Identity),
-					YourIdentity: agent.Identity,
-					Zone:         msg.Zone,
-					RfiType:      "AUDIT",
-				})
-				if err != nil {
-					resp.RfiResponse[agent.Identity] = &RfiData{Error: true, ErrorMsg: err.Error()}
+				auditResp := RequestAndWaitForAudit(ar, agent, string(msg.Zone))
+				if auditResp == nil {
+					resp.RfiResponse[agent.Identity] = &RfiData{
+						Error:    true,
+						ErrorMsg: "timeout or error waiting for AUDIT response",
+					}
 					continue
 				}
-				if rfiresp, ok := amr.RfiResponse[agent.Identity]; ok {
-					resp.RfiResponse[agent.Identity] = rfiresp
-				} else {
-					resp.RfiResponse[agent.Identity] = &RfiData{Error: true, ErrorMsg: "unexpected response format"}
+				rfiData := &RfiData{
+					Status: "ok",
+					Msg:    "AUDIT data received",
 				}
+				if typed, ok := auditResp.AuditData.(map[ZoneName]map[AgentId]map[uint16][]TrackedRRInfo); ok {
+					rfiData.AuditData = typed
+				}
+				resp.RfiResponse[agent.Identity] = rfiData
 			}
 			resp.Msg = fmt.Sprintf("AUDIT RFI sent to %d agents for zone %s", len(zad.Agents), msg.Zone)
 
@@ -960,6 +932,7 @@ func (ar *AgentRegistry) sendRfiToAgent(agent *Agent, msg *AgentMsgPost) (*Agent
 			Timestamp:   time.Now(),
 			MessageType: string(msg.MessageType),
 			RfiType:     msg.RfiType,
+			RfiSubtype:  msg.RfiSubtype,
 		}
 
 		syncResp, err := ar.TransportManager.SendSyncWithFallback(ctx, peer, syncReq)
