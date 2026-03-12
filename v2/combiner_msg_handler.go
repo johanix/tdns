@@ -228,11 +228,11 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				rejected := make(map[string][]string)
 				var reasons []string
 				for _, ri := range resp.RejectedItems {
+					owner := zone // default for operation-level rejections
 					rr, err := dns.NewRR(ri.Record)
-					if err != nil {
-						continue
+					if err == nil {
+						owner = rr.Header().Name
 					}
-					owner := rr.Header().Name
 					rejected[owner] = append(rejected[owner], ri.Record)
 					reasons = append(reasons, ri.Reason)
 				}

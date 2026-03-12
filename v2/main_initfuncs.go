@@ -885,9 +885,9 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 		}
 	}
 	// When the local agent wins leader election: ensure we have a SIG(0) key,
-	// then trigger delegation sync setup (publish KEY + bootstrap with parent).
-	// Flow: check local keystore → ask peers via RFI CONFIG → generate if nobody has it.
-	delsyncq := conf.Internal.DelegationSyncQ
+	// then publish KEY to combiner and sync to remote agents.
+	// Flow: check DSYNC → check local keystore → ask peers via RFI CONFIG → generate if nobody has it → publish.
+	tm := conf.Internal.TransportManager
 	lem.SetOnLeaderElected(func(zone ZoneName) error {
 		zd, ok := Zones.Get(string(zone))
 		if !ok || zd == nil {
@@ -898,26 +898,23 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 			return nil
 		}
 		lgElect.Info("onLeaderElected: processing", "zone", zone)
-		hasUpdateScheme := false
-		for _, scheme := range viper.GetStringSlice("delegationsync.child.schemes") {
-			if scheme == "update" {
-				hasUpdateScheme = true
-				break
-			}
-		}
-		if !hasUpdateScheme {
-			lgElect.Info("onLeaderElected: no 'update' in delegationsync.child.schemes, skipping SIG(0) key setup",
-				"zone", zone, "schemes", viper.GetStringSlice("delegationsync.child.schemes"))
+
+		// Guard: parent must advertise DSYNC UPDATE scheme
+		_, err := Globals.ImrEngine.LookupDSYNCTarget(context.Background(), string(zone), dns.TypeANY, core.SchemeUpdate)
+		if err != nil {
+			lgElect.Info("onLeaderElected: parent does not advertise DSYNC UPDATE scheme, skipping SIG(0) key setup",
+				"zone", zone, "err", err)
 			return nil
 		}
+
 		kdb := conf.Internal.KeyDB
 		keyName := string(zone)
 		// Step a: check local keystore
 		sak, err := kdb.GetSig0Keys(keyName, Sig0StateActive)
 		if err == nil && len(sak.Keys) > 0 {
-			lgElect.Info("leader has local SIG(0) key, proceeding to sync setup",
+			lgElect.Info("leader has local SIG(0) key, proceeding to publish",
 				"zone", zone, "keyid", sak.Keys[0].KeyId)
-			goto setup
+			goto publish
 		}
 		// Step b: ask peers via RFI CONFIG subtype=sig0key (two-phase)
 		{
@@ -944,22 +941,62 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 							continue
 						}
 						lgElect.Info("imported SIG(0) key from peer", "zone", zone, "peer", agent.Identity)
-						goto setup
+						goto publish
 					}
 					lgElect.Info("peer does not have SIG(0) key", "zone", zone, "peer", agent.Identity)
 				}
 			}
 		}
-		// Step c-d: no peer has the key — DelegationSyncSetup will generate a new one
+		// Step c: no peer has the key — generate a new keypair
 		lgElect.Info("no peer has SIG(0) key, will generate new keypair", "zone", zone)
-	setup:
-		// Step e: trigger DELEGATION-SYNC-SETUP (publish KEY + bootstrap with parent)
-		lgElect.Info("triggering delegation sync setup", "zone", zone)
-		delsyncq <- DelegationSyncRequest{
-			Command:  "DELEGATION-SYNC-SETUP",
-			ZoneName: zd.ZoneName,
-			ZoneData: zd,
+		{
+			alg, err := parseKeygenAlgorithm("delegationsync.child.update.keygen.algorithm", dns.ED25519)
+			if err != nil {
+				return fmt.Errorf("onLeaderElected: parseKeygenAlgorithm: %v", err)
+			}
+			kp := KeystorePost{
+				Command:    "sig0-mgmt",
+				SubCommand: "generate",
+				Zone:       zd.ZoneName,
+				Keyname:    keyName,
+				Algorithm:  alg,
+				State:      Sig0StateActive,
+				Creator:    "leader-election",
+			}
+			resp, err := kdb.Sig0KeyMgmt(nil, kp)
+			if err != nil {
+				return fmt.Errorf("onLeaderElected: failed to generate SIG(0) keypair: %v", err)
+			}
+			lgElect.Info("generated SIG(0) keypair", "zone", zone, "msg", resp.Msg)
 		}
+	publish:
+		// Step d: get the active key and publish to combiner + remote agents
+		sak, err = kdb.GetSig0Keys(keyName, Sig0StateActive)
+		if err != nil || len(sak.Keys) == 0 {
+			return fmt.Errorf("onLeaderElected: no active SIG(0) key after generation for zone %s", zone)
+		}
+		keyRR := &sak.Keys[0].KeyRR
+		lgElect.Info("publishing KEY to combiner", "zone", zone, "keyid", sak.Keys[0].KeyId)
+		distID, err := PublishKeyToCombiner(zone, keyRR, tm)
+		if err != nil {
+			lgElect.Error("failed to publish KEY to combiner", "zone", zone, "err", err)
+			return err
+		}
+		lgElect.Info("KEY sent to combiner", "zone", zone, "distID", distID)
+
+		// Also sync KEY to remote agents so they publish via their combiners
+		update := &ZoneUpdate{
+			Zone: zone,
+			Operations: []core.RROperation{{
+				Operation: "replace",
+				RRtype:    "KEY",
+				Records:   []string{keyRR.String()},
+			}},
+		}
+		if err := tm.EnqueueForZoneAgents(zone, update, distID); err != nil {
+			lgElect.Error("failed to enqueue KEY for remote agents", "zone", zone, "err", err)
+		}
+
 		return nil
 	})
 	// Agent-specific

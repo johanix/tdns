@@ -13,7 +13,7 @@ import (
 )
 
 // Named presets for allowed RRtypes. Hardcoded for safety.
-// "apex-combiner": manages DNSKEY, CDS, CSYNC, NS at the zone apex.
+// "apex-combiner": manages DNSKEY, CDS, CSYNC, NS, KEY at the zone apex.
 // "delegation-combiner": (future) manages NS, DS, GLUE at delegation points.
 var AllowedRRtypePresets = map[string]map[uint16]bool{
 	"apex-combiner": {
@@ -21,6 +21,7 @@ var AllowedRRtypePresets = map[string]map[uint16]bool{
 		dns.TypeCDS:    true,
 		dns.TypeCSYNC:  true,
 		dns.TypeNS:     true,
+		dns.TypeKEY:    true,
 	},
 	// "delegation-combiner": { dns.TypeNS: true, dns.TypeDS: true, ... },
 }
