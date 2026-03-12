@@ -121,6 +121,18 @@ type LocalCombinerConf struct {
 	// NS records from remote agents whose targets fall within any of these namespaces
 	// are rejected (prevents namespace intrusion). Example: ["echo.dnslab.", "ultrafastdns.com."]
 	ProtectedNamespaces []string `yaml:"protected-namespaces" mapstructure:"protected-namespaces"`
+	// ProviderZones: zones owned by the provider where agents may make targeted edits
+	// (e.g. _signal KEY records). Unlike MP zones, these use config-driven RRtype
+	// restrictions and allow non-apex owners.
+	ProviderZones []ProviderZoneConf `yaml:"provider-zones" mapstructure:"provider-zones"`
+}
+
+// ProviderZoneConf configures a provider-owned zone that the combiner manages.
+// Unlike MP zones (hardcoded RRtype whitelist, apex-only), provider zones use
+// config-driven RRtype restrictions and allow non-apex record owners.
+type ProviderZoneConf struct {
+	Zone           string   `yaml:"zone"`
+	AllowedRRtypes []string `yaml:"allowed-rrtypes" mapstructure:"allowed-rrtypes"`
 }
 
 // FindAgent returns the PeerConf for the agent with the given identity, or nil if not found.

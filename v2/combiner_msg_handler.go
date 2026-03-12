@@ -200,6 +200,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			syncReq := &CombinerSyncRequest{
 				SenderID:       senderID,
 				Zone:           zone,
+				ZoneClass:      msg.ZoneClass,
 				Records:        msg.Records,
 				Operations:     msg.Operations,
 				DistributionID: msg.DistributionID,

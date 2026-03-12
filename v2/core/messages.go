@@ -111,6 +111,7 @@ type AgentMsgPost struct {
 	RfiType      string              // Type of RFI request if MessageType is RFI
 	RfiSubtype   string              `json:"rfi_subtype,omitempty"` // Subtype within an RFI type (e.g. "upstream", "sig0key" for CONFIG)
 	Nonce        string              `json:"nonce,omitempty"`       // Unique nonce for replay protection and confirmation correlation
+	ZoneClass    string              `json:"zone_class,omitempty"`  // "mp" (default) or "provider"
 }
 
 // AgentMsgResponse represents the response to an AgentMsgPost.

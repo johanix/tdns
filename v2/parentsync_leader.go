@@ -805,3 +805,49 @@ func PublishKeyToCombiner(zone ZoneName, keyRR dns.RR, tm *TransportManager) (st
 	}
 	return tm.EnqueueForCombiner(zone, update, "")
 }
+
+// PublishSignalKeyToCombiner publishes a _signal KEY RR to a provider zone.
+// The owner name is _sig0key.{childZone}._signal.{nameserver} and it lives
+// in the provider zone that contains the nameserver name.
+func PublishSignalKeyToCombiner(childZone ZoneName, nameserver string, keyRR *dns.KEY, tm *TransportManager) (string, error) {
+	ownerName := Sig0KeyOwnerName(string(childZone), nameserver)
+
+	// Find the provider zone containing this owner name
+	providerZone := findProviderZone(ownerName)
+	if providerZone == "" {
+		return "", fmt.Errorf("no provider zone found for _signal name %q", ownerName)
+	}
+
+	// Clone the KEY RR with the _signal owner name
+	signalKey := dns.Copy(keyRR).(*dns.KEY)
+	signalKey.Hdr.Name = ownerName
+
+	update := &ZoneUpdate{
+		Zone:      ZoneName(providerZone),
+		ZoneClass: "provider",
+		Operations: []core.RROperation{{
+			Operation: "replace",
+			RRtype:    "KEY",
+			Records:   []string{signalKey.String()},
+		}},
+	}
+	return tm.EnqueueForCombiner(ZoneName(providerZone), update, "")
+}
+
+// findProviderZone finds the most specific loaded zone that contains the given
+// name. Used to determine which provider zone a _signal KEY record belongs to.
+func findProviderZone(name string) string {
+	name = dns.Fqdn(name)
+	best := ""
+	bestLabels := 0
+	Zones.IterCb(func(zonename string, _ *ZoneData) {
+		if dns.IsSubDomain(zonename, name) {
+			labels := dns.CountLabel(zonename)
+			if labels > bestLabels {
+				best = zonename
+				bestLabels = labels
+			}
+		}
+	})
+	return best
+}

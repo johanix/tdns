@@ -997,6 +997,20 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 			lgElect.Error("failed to enqueue KEY for remote agents", "zone", zone, "err", err)
 		}
 
+		// Step e: publish _signal KEY to provider zones for our nameservers
+		if conf.Agent != nil && len(conf.Agent.Local.Nameservers) > 0 {
+			for _, ns := range conf.Agent.Local.Nameservers {
+				sigDistID, sigErr := PublishSignalKeyToCombiner(zone, ns, keyRR, tm)
+				if sigErr != nil {
+					lgElect.Error("failed to publish _signal KEY to provider zone",
+						"zone", zone, "ns", ns, "err", sigErr)
+					continue
+				}
+				lgElect.Info("_signal KEY sent to provider zone",
+					"zone", zone, "ns", ns, "owner", Sig0KeyOwnerName(string(zone), ns), "distID", sigDistID)
+			}
+		}
+
 		return nil
 	})
 	// Agent-specific

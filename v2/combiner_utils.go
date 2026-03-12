@@ -29,6 +29,29 @@ var AllowedRRtypePresets = map[string]map[uint16]bool{
 // AllowedLocalRRtypes is the active preset. Default: "apex-combiner".
 var AllowedLocalRRtypes = AllowedRRtypePresets["apex-combiner"]
 
+// providerZoneRRtypes caches the parsed allowed-RRtype map for each provider zone.
+// Populated during config parsing via RegisterProviderZoneRRtypes.
+var providerZoneRRtypes = map[string]map[uint16]bool{}
+
+// RegisterProviderZoneRRtypes parses a ProviderZoneConf and registers its allowed
+// RRtype map for use by the combiner policy engine.
+func RegisterProviderZoneRRtypes(pz ProviderZoneConf) {
+	zone := dns.Fqdn(pz.Zone)
+	m := make(map[uint16]bool)
+	for _, s := range pz.AllowedRRtypes {
+		if t, ok := dns.StringToType[s]; ok {
+			m[t] = true
+		}
+	}
+	providerZoneRRtypes[zone] = m
+}
+
+// GetProviderZoneRRtypes returns the allowed RRtype map for a provider zone,
+// or nil if the zone is not configured as a provider zone.
+func GetProviderZoneRRtypes(zone string) map[uint16]bool {
+	return providerZoneRRtypes[dns.Fqdn(zone)]
+}
+
 // Returns true if the zone data was modified.
 func (zd *ZoneData) CombineWithLocalChanges() (bool, error) {
 	modified := false

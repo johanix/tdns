@@ -747,6 +747,17 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 					} else {
 						lgConfig.Info("MP KEY publication: KEY sent to combiner", "zone", zd.ZoneName, "distID", distID)
 					}
+					// Also republish _signal KEY to provider zones for our nameservers
+					if conf.Agent != nil && len(conf.Agent.Local.Nameservers) > 0 {
+						for _, ns := range conf.Agent.Local.Nameservers {
+							sigDistID, sigErr := PublishSignalKeyToCombiner(ZoneName(zd.ZoneName), ns, keyRR, tm)
+							if sigErr != nil {
+								lgConfig.Debug("_signal KEY publication: no provider zone", "zone", zd.ZoneName, "ns", ns, "err", sigErr)
+								continue
+							}
+							lgConfig.Info("_signal KEY publication: sent to provider zone", "zone", zd.ZoneName, "ns", ns, "distID", sigDistID)
+						}
+					}
 				})
 			}
 		}
@@ -1259,6 +1270,10 @@ func (conf *Config) normalizeConfigIdentities() {
 		}
 		for i, ns := range conf.Combiner.ProtectedNamespaces {
 			conf.Combiner.ProtectedNamespaces[i] = dns.Fqdn(ns)
+		}
+		for i := range conf.Combiner.ProviderZones {
+			conf.Combiner.ProviderZones[i].Zone = dns.Fqdn(conf.Combiner.ProviderZones[i].Zone)
+			RegisterProviderZoneRRtypes(conf.Combiner.ProviderZones[i])
 		}
 	}
 

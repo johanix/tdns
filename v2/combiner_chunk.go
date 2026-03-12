@@ -33,6 +33,7 @@ var lgCombiner = Logger("combiner")
 type CombinerSyncRequest struct {
 	SenderID       string              // Identity of the sending agent
 	Zone           string              // Zone being updated
+	ZoneClass      string              // "mp" (default) or "provider"
 	SyncType       string              // Type of sync: "NS", "DNSKEY", "CDS", "CSYNC", "GLUE"
 	Records        map[string][]string // RR strings grouped by owner name (same as CombinerPost.Data)
 	Operations     []core.RROperation  // Explicit operations (takes precedence over Records)
@@ -197,6 +198,19 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 	var removedRecords []string
 	var rejectedItems []RejectedItem
 
+	// Select the RRtype whitelist and owner policy based on ZoneClass.
+	isProvider := req.ZoneClass == "provider"
+	allowedRRtypes := AllowedLocalRRtypes
+	if isProvider {
+		if pzt := GetProviderZoneRRtypes(req.Zone); pzt != nil {
+			allowedRRtypes = pzt
+		} else {
+			resp.Status = "error"
+			resp.Message = fmt.Sprintf("zone %q is not configured as a provider zone", req.Zone)
+			return resp
+		}
+	}
+
 	for owner, rrStrings := range req.Records {
 		for _, rrStr := range rrStrings {
 			// Parse to validate
@@ -211,7 +225,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 
 			// Check if RRtype is allowed
 			rrtype := rr.Header().Rrtype
-			if !AllowedLocalRRtypes[rrtype] {
+			if !allowedRRtypes[rrtype] {
 				rejectedItems = append(rejectedItems, RejectedItem{
 					Record: rrStr,
 					Reason: fmt.Sprintf("RRtype %s not allowed for combiner updates", dns.TypeToString[rrtype]),
@@ -219,8 +233,16 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 				continue
 			}
 
-			// Check if owner is at zone apex (combiner only accepts apex updates)
-			if owner != zonename {
+			// MP zones: owner must be at zone apex. Provider zones: any owner within the zone.
+			if isProvider {
+				if !strings.HasSuffix(strings.ToLower(owner), strings.ToLower(zonename)) {
+					rejectedItems = append(rejectedItems, RejectedItem{
+						Record: rrStr,
+						Reason: fmt.Sprintf("owner %q is not within zone %q", owner, zonename),
+					})
+					continue
+				}
+			} else if owner != zonename {
 				rejectedItems = append(rejectedItems, RejectedItem{
 					Record: rrStr,
 					Reason: fmt.Sprintf("owner %q is not at zone apex %q", owner, zonename),
@@ -366,6 +388,19 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 	var rejectedItems []RejectedItem
 	dataChanged := false
 
+	// Select the RRtype whitelist and owner policy based on ZoneClass.
+	isProvider := req.ZoneClass == "provider"
+	allowedRRtypes := AllowedLocalRRtypes
+	if isProvider {
+		if pzt := GetProviderZoneRRtypes(req.Zone); pzt != nil {
+			allowedRRtypes = pzt
+		} else {
+			resp.Status = "error"
+			resp.Message = fmt.Sprintf("zone %q is not configured as a provider zone", req.Zone)
+			return resp
+		}
+	}
+
 	for _, op := range req.Operations {
 		rrtype, ok := dns.StringToType[op.RRtype]
 		if !ok {
@@ -375,7 +410,7 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 			})
 			continue
 		}
-		if !AllowedLocalRRtypes[rrtype] {
+		if !allowedRRtypes[rrtype] {
 			rejectedItems = append(rejectedItems, RejectedItem{
 				Record: fmt.Sprintf("(operation %s on %s)", op.Operation, op.RRtype),
 				Reason: fmt.Sprintf("RRtype %s not allowed for combiner updates", op.RRtype),
@@ -396,7 +431,17 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 				parseOk = false
 				continue
 			}
-			if !strings.EqualFold(rr.Header().Name, zonename) {
+			// MP zones: owner must be at zone apex. Provider zones: any owner within the zone.
+			if isProvider {
+				if !strings.HasSuffix(strings.ToLower(rr.Header().Name), strings.ToLower(zonename)) {
+					rejectedItems = append(rejectedItems, RejectedItem{
+						Record: rrStr,
+						Reason: fmt.Sprintf("owner %q is not within zone %q", rr.Header().Name, zonename),
+					})
+					parseOk = false
+					continue
+				}
+			} else if !strings.EqualFold(rr.Header().Name, zonename) {
 				rejectedItems = append(rejectedItems, RejectedItem{
 					Record: rrStr,
 					Reason: fmt.Sprintf("owner %q is not at zone apex %q", rr.Header().Name, zonename),

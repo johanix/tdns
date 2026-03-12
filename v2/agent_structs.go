@@ -242,6 +242,7 @@ type AgentMsgPost struct {
 	RfiSubtype     string
 	DistributionID string // Originating distribution ID from the sending agent
 	Nonce          string // Nonce from the incoming sync/update message (for confirmation echo)
+	ZoneClass      string // "mp" (default) or "provider"
 }
 
 type AgentMsgPostPlus struct {

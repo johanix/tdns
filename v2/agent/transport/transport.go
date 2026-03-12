@@ -158,6 +158,7 @@ type SyncRequest struct {
 	MessageType    string              // "sync" (agent→agent), "update" (agent→combiner), "rfi" (RFI)
 	RfiType        string              // For RFI messages: "SYNC", "AUDIT", "CONFIG"
 	RfiSubtype     string              // Subtype within an RFI type (e.g. "upstream", "sig0key" for CONFIG)
+	ZoneClass      string              // "mp" (default) or "provider"
 }
 
 // SyncResponse represents a synchronization response.

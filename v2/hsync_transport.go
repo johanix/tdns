@@ -728,6 +728,7 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 			RfiSubtype:     payload.RfiSubtype,     // Include RfiSubtype for CONFIG RFI messages
 			DistributionID: payload.DistributionID, // Originating distID from sending agent
 			Nonce:          msg.Nonce,              // Echo nonce from incoming message for confirmation
+			ZoneClass:      payload.ZoneClass,
 		},
 	}
 
@@ -1557,6 +1558,10 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 		senderID = string(msg.Update.AgentId)
 	}
 
+	zoneClass := ""
+	if msg.Update != nil {
+		zoneClass = msg.Update.ZoneClass
+	}
 	syncReq := &transport.SyncRequest{
 		SenderID:       senderID,
 		Zone:           string(msg.Zone),
@@ -1565,6 +1570,7 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 		DistributionID: msg.DistributionID,
 		Nonce:          msg.Nonce,
 		MessageType:    "update", // agent→combiner uses "update" (not "sync")
+		ZoneClass:      zoneClass,
 	}
 	if msg.Update != nil && len(msg.Update.Operations) > 0 {
 		syncReq.Operations = msg.Update.Operations

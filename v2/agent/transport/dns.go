@@ -349,6 +349,7 @@ func (t *DNSTransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 		RfiType:      req.RfiType,
 		RfiSubtype:   req.RfiSubtype,
 		Nonce:        req.Nonce,
+		ZoneClass:    req.ZoneClass,
 	}
 
 	payloadJSON, err := json.Marshal(payload)
@@ -1196,6 +1197,7 @@ type DnsSyncPayload struct {
 	RfiSubtype     string              `json:"rfi_subtype,omitempty"`
 	Timestamp      int64               `json:"timestamp"` // Unix timestamp (legacy compat)
 	DistributionID string              `json:"distribution_id"`
+	ZoneClass      string              `json:"zone_class,omitempty"`
 }
 
 // DnsAddress represents an address in DNS payloads.
