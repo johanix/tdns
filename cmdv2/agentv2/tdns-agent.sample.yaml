@@ -161,6 +161,18 @@ dnssecpolicies:
 db:
    file:		/var/tmp/tdns-agent.db
 
+imrengine:
+   active:		true
+   root-hints:		/etc/tdns/root.hints
+   addresses:		[ 127.0.0.1:5453, '[::1]:5453' ]
+   transports:		[ do53 ]
+   # IMR query debug logging: logs internal agent queries, cache hits/misses,
+   # outbound iterative queries, and auth server responses to a separate file.
+   # Enable before starting the agent to diagnose UNKNOWN/KNOWN peer state issues.
+   logging:
+      enabled:		false
+      file:		/var/log/tdns/imr-debug.log
+
 log:
    file:		/var/log/tdns/tdns-agent.log
    level:		info		# default level: debug|info|warn|error

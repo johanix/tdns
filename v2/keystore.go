@@ -29,7 +29,25 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 	var resp = KeystoreResponse{Time: time.Now()}
 	var res sql.Result
 
+	var localtx = false
 	var err error
+
+	if tx == nil {
+		tx, err = kdb.Begin("Sig0KeyMgmt")
+		if err != nil {
+			return nil, err
+		}
+		localtx = true
+	}
+	defer func() {
+		if localtx {
+			if err != nil {
+				tx.Rollback()
+			} else {
+				tx.Commit()
+			}
+		}
+	}()
 
 	lgSigner.Debug("Sig0KeyMgmt request", "subcommand", kp.SubCommand)
 

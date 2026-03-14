@@ -225,6 +225,12 @@ type ImrEngineConf struct {
 	TrustAnchorFile string `yaml:"trust-anchor-file"`
 	Verbose         bool
 	Debug           bool
+	Logging         ImrLoggingConf `yaml:"logging" mapstructure:"logging"`
+}
+
+type ImrLoggingConf struct {
+	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
+	File    string `yaml:"file" mapstructure:"file"`
 }
 type ImrStubConf struct {
 	Zone string `validate:"required"`
