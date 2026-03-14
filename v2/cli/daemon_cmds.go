@@ -22,6 +22,7 @@ const timelayout = "2006-01-02 15:04:05"
 var ServerName string = "PLACEHOLDER"
 
 var updateBinary bool
+var clearLogFile string
 
 // extractDaemonFlags collects flags from the CLI command that should be
 // passed through to the daemon when it starts (e.g., --config, --debug, -v)
@@ -138,6 +139,16 @@ var DaemonRestartCmd = &cobra.Command{
 
 		api.StopDaemon()
 		time.Sleep(4 * time.Second)
+
+		if clearLogFile != "" {
+			if f, err := os.OpenFile(clearLogFile, os.O_WRONLY|os.O_TRUNC, 0); err != nil {
+				fmt.Printf("Warning: could not truncate log file %q: %v\n", clearLogFile, err)
+			} else {
+				f.Close()
+				fmt.Printf("Log file truncated: %s\n", clearLogFile)
+			}
+		}
+
 		maxwait := viper.GetInt("cli.maxwait")
 		if maxwait < MaxWait {
 			maxwait = MaxWait
@@ -233,6 +244,8 @@ func init() {
 		"Max seconds to wait until declaring start to have failed")
 	DaemonRestartCmd.Flags().BoolVarP(&updateBinary, "update", "", false,
 		"Update the server binary from /tmp/{binary} to /usr/local/libexec/ before starting")
+	DaemonRestartCmd.Flags().StringVarP(&clearLogFile, "clear", "", "",
+		"Truncate the specified log file before starting")
 
 	PingCmd.Flags().IntVarP(&tdns.Globals.PingCount, "count", "c", 0, "#pings to send")
 	PingCmd.Flags().BoolVarP(&newapi, "newapi", "n", false, "use new api client")

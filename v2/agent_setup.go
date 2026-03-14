@@ -296,7 +296,9 @@ func (conf *Config) SetupAgent(all_zones []string) error {
 			return fmt.Errorf("SetupAgent: failed to parse certificate: %v", err)
 		}
 
-		if cert.Subject.CommonName != conf.Agent.Identity {
+		certCN := strings.TrimSuffix(cert.Subject.CommonName, ".")
+		agentID := strings.TrimSuffix(conf.Agent.Identity, ".")
+		if certCN != agentID {
 			return fmt.Errorf("SetupAgent: certificate CN %q does not match agent identity %q",
 				cert.Subject.CommonName, conf.Agent.Identity)
 		}

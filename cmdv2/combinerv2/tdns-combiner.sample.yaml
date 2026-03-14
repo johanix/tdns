@@ -13,6 +13,11 @@ combiner:
       - identity:		agent.provider.
         address:		1.2.3.4:5678   # CHUNK query target when NOTIFY has no CHUNK_QUERY_ENDPOINT option
         long_term_jose_pub_key:	/etc/tdns/agent.jose.pub
+   # provider-zones: zones this combiner manages where agents may make targeted edits.
+   # Used for _signal KEY records and similar non-apex, non-MP records.
+   # provider-zones:
+   #    - zone:		alpha.dnslab.
+   #      allowed-rrtypes:	[ KEY ]
 
 apiserver:
    usetls:		true

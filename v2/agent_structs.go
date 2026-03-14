@@ -72,6 +72,7 @@ type Agent struct {
 	DnsDetails    *AgentDetails
 	ApiMethod     bool
 	DnsMethod     bool
+	IsInfraPeer   bool // true for combiner/signer — handled by StartInfraBeatLoop, not SendHeartbeats
 	Zones         map[ZoneName]bool
 	Api           *AgentApi
 	State         AgentState // Agent states: needed, known, hello-done, operational, error

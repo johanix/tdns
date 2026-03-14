@@ -33,6 +33,10 @@ type Imr struct {
 	Debug       bool
 	Quiet       bool        // if true, suppress informational logging (useful for CLI tools)
 	DebugLog    *log.Logger // non-nil when imr debug logging is enabled
+	// RequireDnssecValidation: when true, security-sensitive lookups (TLSA, etc.) require
+	// a secure DNSSEC validation state. Default true; set false in lab environments where
+	// the full DNSSEC chain is not yet established.
+	RequireDnssecValidation bool
 }
 
 type ImrRequest struct {
@@ -85,14 +89,19 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 	rrcache.Quiet = quiet // Set quiet flag early, before any logging
 
 	conf.Internal.RRsetCache = rrcache
+	requireDnssec := true // default: enforce DNSSEC validation
+	if conf.Imr.RequireDnssecValidation != nil {
+		requireDnssec = *conf.Imr.RequireDnssecValidation
+	}
 	imr := &Imr{
-		Cache:       rrcache,
-		DnskeyCache: rrcache.DnskeyCache, // Use the same DnskeyCache instance as the cache
-		Options:     conf.Imr.Options,
-		LineWidth:   130, // default line width for truncating long lines in logging and output
-		Verbose:     conf.Imr.Verbose,
-		Debug:       conf.Imr.Debug,
-		Quiet:       quiet, // Set quiet flag early, before any logging
+		Cache:                   rrcache,
+		DnskeyCache:             rrcache.DnskeyCache, // Use the same DnskeyCache instance as the cache
+		Options:                 conf.Imr.Options,
+		LineWidth:               130, // default line width for truncating long lines in logging and output
+		Verbose:                 conf.Imr.Verbose,
+		Debug:                   conf.Imr.Debug,
+		Quiet:                   quiet, // Set quiet flag early, before any logging
+		RequireDnssecValidation: requireDnssec,
 	}
 
 	if conf.Imr.Logging.Enabled {

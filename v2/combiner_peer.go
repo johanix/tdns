@@ -52,9 +52,10 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 
 	// Create an agent entry for the combiner
 	combinerAgent := &Agent{
-		Identity:  combinerID,
-		DnsMethod: true,  // Combiner only supports DNS transport (CHUNK)
-		ApiMethod: false, // Combiner doesn't support API transport for Beat
+		Identity:    combinerID,
+		DnsMethod:   true,  // Combiner supports DNS transport (CHUNK)
+		ApiMethod:   false, // API transport added when combiner.api is configured
+		IsInfraPeer: true,  // handled by StartInfraBeatLoop, not SendHeartbeats
 		DnsDetails: &AgentDetails{
 			State:           AgentStateOperational, // Start as operational
 			BaseUri:         fmt.Sprintf("dns://%s:%d/", host, port),

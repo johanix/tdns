@@ -220,7 +220,11 @@ func (imr *Imr) lookupAgentTLSA(ctx context.Context, identity string, port uint1
 	for _, rr := range resp.RRset.RRs {
 		if tlsaRR, ok := rr.(*dns.TLSA); ok {
 			lgAgent.Debug("found TLSA record", "qname", tlsaQname,
-				"usage", tlsaRR.Usage, "selector", tlsaRR.Selector, "matchingType", tlsaRR.MatchingType)
+				"usage", tlsaRR.Usage, "selector", tlsaRR.Selector, "matchingType", tlsaRR.MatchingType,
+				"validated", resp.Validated)
+			if imr.RequireDnssecValidation && !resp.Validated {
+				return nil, fmt.Errorf("TLSA record at %s has unvalidated DNSSEC state (require_dnssec_validation=true)", tlsaQname)
+			}
 			return tlsaRR, nil
 		}
 	}

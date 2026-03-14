@@ -172,6 +172,10 @@ imrengine:
    logging:
       enabled:		false
       file:		/var/log/tdns/imr-debug.log
+   # require_dnssec_validation: when true (default), TLSA lookups used for API transport
+   # peer verification must have a secure DNSSEC validation state. Set to false in lab
+   # environments where the full DNSSEC chain is not yet established.
+   require_dnssec_validation: true
 
 log:
    file:		/var/log/tdns/tdns-agent.log

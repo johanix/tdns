@@ -161,6 +161,56 @@ func ParseAgentMsgNotify(data []byte, distributionID string) (*CombinerSyncReque
 //   - ClassINET: add/update the RR (existing behavior)
 //   - ClassNONE: delete this specific RR from the agent's contributions
 //   - ClassANY:  delete the entire RRset for the RR's type from the agent's contributions
+//
+// findProviderZoneForRequest finds the best-matching zone for a provider update
+// that did not specify a zone. It examines owner names from Operations and Records,
+// finds the most specific zone in Zones that contains each owner, and returns an
+// error if no matching zone exists or if the matched zone is not a configured
+// provider zone.
+func findProviderZoneForRequest(req *CombinerSyncRequest) (string, error) {
+	// Collect all owner names from the request.
+	var ownerNames []string
+	for _, op := range req.Operations {
+		for _, rrStr := range op.Records {
+			rr, err := dns.NewRR(rrStr)
+			if err == nil {
+				ownerNames = append(ownerNames, dns.Fqdn(rr.Header().Name))
+			}
+		}
+	}
+	for owner := range req.Records {
+		ownerNames = append(ownerNames, dns.Fqdn(owner))
+	}
+	if len(ownerNames) == 0 {
+		return "", fmt.Errorf("provider update has no zone and no records to derive zone from")
+	}
+
+	// Find the most specific zone that contains all owner names. All owners must
+	// fall within the same zone.
+	best := ""
+	bestLabels := 0
+	Zones.IterCb(func(zonename string, _ *ZoneData) {
+		labels := dns.CountLabel(zonename)
+		if labels <= bestLabels {
+			return
+		}
+		for _, owner := range ownerNames {
+			if !dns.IsSubDomain(zonename, owner) {
+				return
+			}
+		}
+		best = zonename
+		bestLabels = labels
+	})
+	if best == "" {
+		return "", fmt.Errorf("no zone found on this combiner that contains owner name(s) %v", ownerNames)
+	}
+	if GetProviderZoneRRtypes(best) == nil {
+		return "", fmt.Errorf("zone %q is known but not configured as a provider zone on this combiner", best)
+	}
+	return best, nil
+}
+
 func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []string) *CombinerSyncResponse {
 	// Count total records for logging
 	totalRecords := 0
@@ -175,12 +225,29 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		Timestamp:      time.Now(),
 	}
 
-	// Get the zone data
-	zonename := dns.Fqdn(req.Zone)
+	// Get the zone data. For provider updates without a specified zone, discover
+	// the zone from the record owner names.
+	var zonename string
+	if req.Zone == "" && req.ZoneClass == "provider" {
+		discovered, err := findProviderZoneForRequest(req)
+		if err != nil {
+			lgCombiner.Error("provider zone discovery failed", "sender", req.SenderID, "err", err)
+			resp.Status = "error"
+			resp.Message = err.Error()
+			return resp
+		}
+		lgCombiner.Debug("provider zone discovered", "zone", discovered, "sender", req.SenderID)
+		zonename = discovered
+		req.Zone = zonename
+		resp.Zone = zonename
+	} else {
+		zonename = dns.Fqdn(req.Zone)
+	}
 	zd, exists := Zones.Get(zonename)
 	if !exists {
+		lgCombiner.Error("zone not found", "zone", req.Zone, "sender", req.SenderID)
 		resp.Status = "error"
-		resp.Message = fmt.Sprintf("zone %q not found", req.Zone)
+		resp.Message = fmt.Sprintf("zone %q not found on this combiner", req.Zone)
 		return resp
 	}
 
@@ -582,6 +649,9 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 		opSummary = append(opSummary, fmt.Sprintf("%s:%d", opType, count))
 	}
 	lgCombiner.Info("operations processed", "ops", strings.Join(opSummary, ","), "status", resp.Status, "message", resp.Message)
+	for _, ri := range rejectedItems {
+		lgCombiner.Warn("operation rejected", "zone", req.Zone, "sender", req.SenderID, "record", ri.Record, "reason", ri.Reason)
+	}
 
 	if dataChanged {
 		bumperResp, err := zd.BumpSerialOnly()
@@ -1048,6 +1118,7 @@ func ConvertZoneUpdateToSyncRequest(update *ZoneUpdate, senderID string, distrib
 	req := &CombinerSyncRequest{
 		SenderID:       senderID,
 		Zone:           string(update.Zone),
+		ZoneClass:      update.ZoneClass,
 		SyncType:       syncType,
 		Records:        records,
 		DistributionID: distributionID,

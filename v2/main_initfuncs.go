@@ -372,7 +372,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			MessageRetention: func(operation string) int {
 				return conf.Agent.Dns.MessageRetention.GetRetentionForMessageType(operation)
 			},
-			GetImrEngine: func() *Imr { return conf.Internal.ImrEngine },
+			GetImrEngine:   func() *Imr { return conf.Internal.ImrEngine },
+			ClientCertFile: conf.Agent.Api.CertFile,
+			ClientKeyFile:  conf.Agent.Api.KeyFile,
 		})
 		conf.Internal.TransportManager = tm
 		conf.Internal.AgentRegistry.TransportManager = tm
@@ -728,6 +730,22 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 		func() { CombinerMsgHandler(ctx, conf, conf.Internal.MsgQs, protectedNS, errJournal) })
 	startEngine(&Globals.App, "NotifyHandler", func() error { return NotifyHandler(ctx, conf) })
 	startEngine(&Globals.App, "DnsEngine", func() error { return DnsEngine(ctx, conf) })
+	// Start combiner sync API router (for agent→combiner HELLO/BEAT/PING over HTTPS)
+	if conf.Combiner != nil && len(conf.Combiner.Api.Addresses.Listen) > 0 {
+		combinerSyncRtr, err := conf.SetupCombinerSyncRouter(ctx)
+		if err != nil {
+			lgConfig.Error("failed to set up combiner sync router", "err", err)
+		} else {
+			startEngine(&Globals.App, "CombinerAPIdispatcherNG", func() error {
+				lgConfig.Info("starting combiner sync API", "addresses", conf.Combiner.Api.Addresses.Listen)
+				return APIdispatcherNG(conf, combinerSyncRtr,
+					conf.Combiner.Api.Addresses.Listen,
+					conf.Combiner.Api.CertFile,
+					conf.Combiner.Api.KeyFile,
+					conf.Internal.APIStopCh)
+			})
+		}
+	}
 	return nil
 }
 
@@ -784,6 +802,22 @@ func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error 
 	startEngineNoError(&Globals.App, "ResignerEngine", func() { ResignerEngine(ctx, conf.Internal.ResignQ) })
 	// Start key state worker for automatic DNSSEC key lifecycle transitions
 	startEngine(&Globals.App, "KeyStateWorker", func() error { return KeyStateWorker(ctx, conf) })
+	// Start signer sync API router (for agent→signer HELLO/BEAT/PING over HTTPS)
+	if conf.MultiProvider != nil && len(conf.MultiProvider.Api.Addresses.Listen) > 0 {
+		signerSyncRtr, err := conf.SetupSignerSyncRouter(ctx)
+		if err != nil {
+			lgConfig.Error("failed to set up signer sync router", "err", err)
+		} else {
+			startEngine(&Globals.App, "SignerAPIdispatcherNG", func() error {
+				lgConfig.Info("starting signer sync API", "addresses", conf.MultiProvider.Api.Addresses.Listen)
+				return APIdispatcherNG(conf, signerSyncRtr,
+					conf.MultiProvider.Api.Addresses.Listen,
+					conf.MultiProvider.Api.CertFile,
+					conf.MultiProvider.Api.KeyFile,
+					conf.Internal.APIStopCh)
+			})
+		}
+	}
 	return nil
 }
 
@@ -1015,6 +1049,9 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	})
 	// Agent-specific
 	startEngineNoError(&Globals.App, "HsyncEngine", func() { HsyncEngine(ctx, conf, conf.Internal.MsgQs) })
+	startEngineNoError(&Globals.App, "InfraBeatLoop", func() {
+		conf.Internal.AgentRegistry.StartInfraBeatLoop(ctx)
+	})
 	startEngineNoError(&Globals.App, "DiscoveryRetrierNG", func() {
 		conf.Internal.AgentRegistry.DiscoveryRetrierNG(ctx)
 	})

@@ -12,6 +12,9 @@ if [ -z "$name" ]; then
     exit 1
 fi
 
+# Strip trailing dot — certs use plain hostnames, not DNS FQDNs
+name="${name%.}"
+
 echo -n "Enter DNS names (comma-separated, or blank to skip, e.g. ddep,tdns-imr): "
 read dns_names
 
@@ -24,6 +27,7 @@ if [ -n "$dns_names" ]; then
     IFS=',' read -ra NAMES <<< "$dns_names"
     for n in "${NAMES[@]}"; do
         n=$(echo "$n" | xargs)  # trim whitespace
+        n="${n%.}"              # strip trailing dot
         [ -n "$san" ] && san="${san},"
         san="${san}DNS:${n}"
     done

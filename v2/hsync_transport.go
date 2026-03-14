@@ -10,6 +10,7 @@ package tdns
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -153,6 +154,12 @@ type TransportManagerConfig struct {
 	// Uses a closure because ImrEngine starts asynchronously after TM creation.
 	// Only the agent needs this; combiner/signer/external apps pass nil.
 	GetImrEngine func() *Imr
+
+	// ClientCertFile and ClientKeyFile are the TLS client certificate presented when
+	// connecting to peers' sync API servers. Required when peers enforce mutual TLS
+	// (e.g. combiner/signer sync routers verify client cert against agent's TLSA record).
+	ClientCertFile string
+	ClientKeyFile  string
 }
 
 // NewTransportManager creates a new TransportManager with both API and DNS transports.
@@ -193,9 +200,26 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 	// implications. An agent that only serves DNS can still act as an API client to
 	// remote agents that serve API. supported_mechanisms controls the server role, not
 	// the client role.
+	apiTLSConfig := &tls.Config{
+		// Peer certificates are validated against TLSA records (discovered via DNS),
+		// not against the system CA store. Self-signed certs are the norm here.
+		InsecureSkipVerify: true, //nolint:gosec
+		MinVersion:         tls.VersionTLS13,
+	}
+	if cfg.ClientCertFile != "" && cfg.ClientKeyFile != "" {
+		clientCert, err := tls.LoadX509KeyPair(cfg.ClientCertFile, cfg.ClientKeyFile)
+		if err != nil {
+			lgTransport.Error("failed to load API client certificate, outbound mTLS will not work",
+				"certFile", cfg.ClientCertFile, "keyFile", cfg.ClientKeyFile, "err", err)
+		} else {
+			apiTLSConfig.Certificates = []tls.Certificate{clientCert}
+			lgTransport.Info("API client certificate loaded", "certFile", cfg.ClientCertFile)
+		}
+	}
 	tm.APITransport = transport.NewAPITransport(&transport.APITransportConfig{
 		LocalID:        cfg.LocalID,
 		DefaultTimeout: cfg.APITimeout,
+		TLSConfig:      apiTLSConfig,
 	})
 	lgTransport.Info("API client transport enabled")
 
@@ -1338,7 +1362,7 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 		agent.mu.Unlock()
 	}
 
-	// Return success if ANY transport succeeded
+	// Return success if ANY transport succeeded this call.
 	if apiErr == nil && apiResp != nil && apiResp.Accepted {
 		return apiResp, nil
 	}
@@ -1346,7 +1370,16 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 		return dnsResp, nil
 	}
 
-	// Both failed or skipped
+	// If a transport was skipped (already past KNOWN) and no transport actively failed,
+	// treat that as success — the peer is already introduced on that transport.
+	if agent.DnsDetails.State >= AgentStateIntroduced && dnsErr == nil {
+		return nil, nil
+	}
+	if agent.ApiDetails.State >= AgentStateIntroduced && apiErr == nil {
+		return nil, nil
+	}
+
+	// Both failed or skipped with nothing established
 	if apiResp == nil && dnsResp == nil && apiErr == nil && dnsErr == nil {
 		// No transport was in KNOWN state — nothing to do
 		return nil, fmt.Errorf("no transports in KNOWN state for Hello to peer %s (API: %s, DNS: %s)",
@@ -1355,19 +1388,18 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 	return nil, fmt.Errorf("all transports failed for Hello to peer %s (API: %v, DNS: %v)", peer.ID, apiErr, dnsErr)
 }
 
-// SendPing sends a CHUNK-based ping to a peer; prefers DNS transport (API does not implement ping).
+// SendPing sends a ping to a peer, preferring API transport when available.
 func (tm *TransportManager) SendPing(ctx context.Context, peer *transport.Peer) (*transport.PingResponse, error) {
 	req := &transport.PingRequest{
 		SenderID:  tm.LocalID,
 		Nonce:     generatePingNonce(),
 		Timestamp: time.Now(),
 	}
-	// Prefer DNS for ping (API transport returns "not implemented")
-	if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
-		return tm.DNSTransport.Ping(ctx, peer, req)
-	}
 	if tm.APITransport != nil && peer.APIEndpoint != "" {
 		return tm.APITransport.Ping(ctx, peer, req)
+	}
+	if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
+		return tm.DNSTransport.Ping(ctx, peer, req)
 	}
 	return nil, fmt.Errorf("no transport available for ping to %s", peer.ID)
 }

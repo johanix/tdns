@@ -125,6 +125,16 @@ type LocalCombinerConf struct {
 	// (e.g. _signal KEY records). Unlike MP zones, these use config-driven RRtype
 	// restrictions and allow non-apex owners.
 	ProviderZones []ProviderZoneConf `yaml:"provider-zones" mapstructure:"provider-zones"`
+	// Api: sync API server config for agent→combiner HELLO/BEAT/PING over HTTPS.
+	// When configured, the combiner runs a dedicated TLS sync API server (separate
+	// from the management API) that agents can reach without API key authentication.
+	Api struct {
+		Addresses struct {
+			Listen []string
+		}
+		CertFile string `yaml:"cert_file" mapstructure:"cert_file"`
+		KeyFile  string `yaml:"key_file" mapstructure:"key_file"`
+	} `yaml:"api"`
 }
 
 // ProviderZoneConf configures a provider-owned zone that the combiner manages.
@@ -168,6 +178,14 @@ type MultiProviderConf struct {
 	// Agents: the local agent peers (address, JOSE public key, optional API URL).
 	// Supports multiple agents for load distribution and fault isolation.
 	Agents []*PeerConf `yaml:"agents"`
+	// Api: sync API server config for agent→signer HELLO/BEAT/PING over HTTPS.
+	Api struct {
+		Addresses struct {
+			Listen []string
+		}
+		CertFile string `yaml:"cert_file" mapstructure:"cert_file"`
+		KeyFile  string `yaml:"key_file" mapstructure:"key_file"`
+	} `yaml:"api"`
 }
 
 type AppDetails struct {
@@ -226,6 +244,11 @@ type ImrEngineConf struct {
 	Verbose         bool
 	Debug           bool
 	Logging         ImrLoggingConf `yaml:"logging" mapstructure:"logging"`
+	// RequireDnssecValidation: when true (default), TLSA and other security-sensitive
+	// records must have a secure DNSSEC validation state. Set to false to allow
+	// indeterminate/insecure records during lab/development when the full DNSSEC
+	// chain is not yet established.
+	RequireDnssecValidation *bool `yaml:"require_dnssec_validation" mapstructure:"require_dnssec_validation"`
 }
 
 type ImrLoggingConf struct {
@@ -637,4 +660,25 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 	lgConfig.Info("ReloadZones: zones after reloading", "zones", zonelist)
 	Globals.App.ServerConfigTime = time.Now()
 	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v", prezones, zonelist), err
+}
+
+// LocalIdentity returns the local node's identity string, regardless of role.
+// Used by sync API handlers (APIhello, APIbeat, APIsyncPing) so they work on
+// agent, combiner, and signer without referencing conf.Agent.Identity directly.
+func (conf *Config) LocalIdentity() string {
+	switch Globals.App.Type {
+	case AppTypeAgent:
+		if conf.Agent != nil {
+			return conf.Agent.Identity
+		}
+	case AppTypeCombiner:
+		if conf.Combiner != nil {
+			return conf.Combiner.Identity
+		}
+	default:
+		if conf.MultiProvider != nil && conf.MultiProvider.Identity != "" {
+			return conf.MultiProvider.Identity
+		}
+	}
+	return ""
 }

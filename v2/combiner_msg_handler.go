@@ -99,7 +99,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			}
 			zone := string(msg.Zone)
 
-			if zone == "" || senderID == "" {
+			if senderID == "" || (zone == "" && msg.ZoneClass != "provider") {
 				lgCombiner.Warn("rejecting message with empty zone or sender", "zone", zone, "sender", senderID)
 				continue
 			}
@@ -215,7 +215,11 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			}
 			resp := CombinerProcessUpdate(syncReq, nsGuard)
 			resp.Nonce = msg.Nonce // Echo nonce for confirmation
+			if resp.Zone != "" {
+				zone = resp.Zone // Update zone from combiner discovery (e.g. provider updates with Zone="")
+			}
 			if resp.Status == "error" {
+				lgCombiner.Error("update failed", "sender", senderID, "zone", zone, "distrib", msg.DistributionID, "reason", resp.Message)
 				recordCombinerError(errorJournal, msg.DistributionID, senderID, "update", resp.Message, "")
 			}
 

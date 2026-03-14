@@ -1642,7 +1642,7 @@ func (conf *Config) APIbeat() func(w http.ResponseWriter, r *http.Request) {
 		}
 
 		resp.YourIdentity = abp.MyIdentity
-		resp.MyIdentity = AgentId(conf.Agent.Identity)
+		resp.MyIdentity = AgentId(conf.LocalIdentity())
 
 		// log.Printf("APIbeat: received /beat request from %s (identity: %s).\n", r.RemoteAddr, abp.MyIdentity)
 
@@ -1680,7 +1680,7 @@ func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
 
 		resp := AgentHelloResponse{
 			Time:       time.Now(),
-			MyIdentity: AgentId(conf.Agent.Identity),
+			MyIdentity: AgentId(conf.LocalIdentity()),
 		}
 
 		defer func() {
@@ -1712,7 +1712,7 @@ func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
 		if needed {
 			lgApi.Info("hello accepted, HSYNC RRset includes both identities", "zone", ahp.Zone)
 			resp.Msg = fmt.Sprintf("Hello there, %s! Nice of you to call on us. I'm a TDNS agent with identity %q and we do share responsibility for zone %q",
-				ahp.MyIdentity, conf.Agent.Identity, ahp.Zone)
+				ahp.MyIdentity, conf.LocalIdentity(), ahp.Zone)
 		} else {
 			lgApi.Warn("hello rejected, HSYNC RRset does not include both identities", "zone", ahp.Zone)
 			resp.Error = true
@@ -1733,6 +1733,55 @@ func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
 		default:
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Unknown hello type: %q from %s", AgentMsgToString[ahp.MessageType], ahp.MyIdentity)
+		}
+	}
+}
+
+// APIsyncPing is the HSYNC peer ping handler on the sync API router (/sync/ping).
+// This is separate from the management /ping (APIping in api_utils.go) which returns
+// boot time and version info. This handler echoes the nonce for round-trip verification
+// and routes the ping to MsgQs.Ping for state tracking.
+func (conf *Config) APIsyncPing() func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		resp := AgentPingResponse{
+			Time:       time.Now(),
+			MyIdentity: AgentId(conf.LocalIdentity()),
+		}
+		decoder := json.NewDecoder(r.Body)
+		var app AgentPingPost
+		err := decoder.Decode(&app)
+
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			if encErr := json.NewEncoder(w).Encode(resp); encErr != nil {
+				lgApi.Error("error encoding ping response", "err", encErr)
+			}
+		}()
+
+		if err != nil {
+			lgApi.Warn("error decoding /sync/ping post", "err", err)
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
+			return
+		}
+
+		if app.Nonce == "" {
+			resp.Error = true
+			resp.ErrorMsg = "ping nonce must not be empty"
+			return
+		}
+
+		resp.YourIdentity = app.MyIdentity
+		resp.Nonce = app.Nonce
+		resp.Status = "ok"
+
+		if conf.Internal.MsgQs != nil && conf.Internal.MsgQs.Ping != nil {
+			conf.Internal.MsgQs.Ping <- &AgentMsgReport{
+				Transport:   "API",
+				MessageType: AgentMsgPing,
+				Identity:    app.MyIdentity,
+				Msg:         &app,
+			}
 		}
 	}
 }
