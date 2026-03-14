@@ -57,10 +57,11 @@ type SynchedDataCmdResponse struct {
 type ZoneUpdate struct {
 	Zone       ZoneName
 	AgentId    AgentId
-	ZoneClass  string                // "mp" (default) or "provider"
-	RRsets     map[uint16]core.RRset // remote updates are only per RRset (i.e. full replace)
-	RRs        []dns.RR              // local updates can be per RR
-	Operations []core.RROperation    // explicit operations (takes precedence over RRsets/RRs)
+	ZoneClass  string                   // "mp" (default) or "provider"
+	RRsets     map[uint16]core.RRset    // remote updates are only per RRset (i.e. full replace)
+	RRs        []dns.RR                 // local updates can be per RR
+	Operations []core.RROperation       // explicit operations (takes precedence over RRsets/RRs)
+	Publish    *core.PublishInstruction // KEY/CDS publication instruction for combiner
 }
 
 type AgentId string
@@ -498,7 +499,9 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 
 						tm := conf.Internal.TransportManager
 						if tm != nil && synchedDataUpdate.Update != nil {
-							// Remote update: only enqueue for combiner (not back to agents)
+							// Remote update: only enqueue for combiner (not back to agents).
+							// The combiner deduplicates KEY/CDS contributions: local agent
+							// contributions take precedence over remote-forwarded ones.
 							distID, err := tm.EnqueueForCombiner(synchedDataUpdate.Zone, synchedDataUpdate.Update, "")
 							if err != nil {
 								lgEngine.Error("failed to enqueue remote update for combiner", "zone", synchedDataUpdate.Zone, "err", err)
@@ -746,11 +749,11 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 
 				// 1. Send local data (excluding DNSKEY) to combiner.
 				//    Local DNSKEYs reach the combiner via the signer, not via UPDATE.
+				//    All RRtypes are sent as Operations (replace) for explicit semantics.
 				if nod, ok := agentRepo.Data.Get(myAgentId); ok {
 					zu := &ZoneUpdate{
 						Zone:    sdcmd.Zone,
 						AgentId: myAgentId,
-						RRsets:  make(map[uint16]core.RRset),
 					}
 					for _, rrtype := range nod.RRtypes.Keys() {
 						if rrtype == dns.TypeDNSKEY {
@@ -760,14 +763,19 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						if !exists || len(rrset.RRs) == 0 {
 							continue
 						}
-						cloned := *rrset.Clone()
-						for i := range cloned.RRs {
-							cloned.RRs[i].Header().Class = dns.ClassINET
+						var records []string
+						for _, rr := range rrset.RRs {
+							rr.Header().Class = dns.ClassINET
+							records = append(records, rr.String())
 						}
-						zu.RRsets[rrtype] = cloned
-						totalRRs += len(cloned.RRs)
+						zu.Operations = append(zu.Operations, core.RROperation{
+							Operation: "replace",
+							RRtype:    dns.TypeToString[rrtype],
+							Records:   records,
+						})
+						totalRRs += len(records)
 					}
-					if len(zu.RRsets) > 0 {
+					if len(zu.Operations) > 0 {
 						distID := GenerateQueueDistributionID()
 						if _, err := tm.EnqueueForCombiner(sdcmd.Zone, zu, distID); err != nil {
 							lgEngine.Error("resync: failed to enqueue local data for combiner", "zone", sdcmd.Zone, "err", err)
@@ -808,6 +816,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 
 				// 2. Send remote agents' data to combiner (with correct attribution).
 				//    This restores the combiner's knowledge of other agents' contributions.
+				//    Uses Operations (replace) for explicit semantics and dedup support.
 				for _, remoteAgentId := range agentRepo.Data.Keys() {
 					if remoteAgentId == myAgentId {
 						continue // already handled above
@@ -819,33 +828,36 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					zu := &ZoneUpdate{
 						Zone:    sdcmd.Zone,
 						AgentId: remoteAgentId, // attribute to the remote agent
-						RRsets:  make(map[uint16]core.RRset),
 					}
 					for _, rrtype := range remoteNod.RRtypes.Keys() {
 						rrset, exists := remoteNod.RRtypes.Get(rrtype)
 						if !exists || len(rrset.RRs) == 0 {
 							continue
 						}
-						cloned := *rrset.Clone()
-						for i := range cloned.RRs {
-							cloned.RRs[i].Header().Class = dns.ClassINET
+						var records []string
+						for _, rr := range rrset.RRs {
+							rr.Header().Class = dns.ClassINET
+							records = append(records, rr.String())
 						}
-						zu.RRsets[rrtype] = cloned
-						totalRRs += len(cloned.RRs)
+						zu.Operations = append(zu.Operations, core.RROperation{
+							Operation: "replace",
+							RRtype:    dns.TypeToString[rrtype],
+							Records:   records,
+						})
+						totalRRs += len(records)
 					}
-					if len(zu.RRsets) > 0 {
+					if len(zu.Operations) > 0 {
 						distID := GenerateQueueDistributionID()
 						if _, err := tm.EnqueueForCombiner(sdcmd.Zone, zu, distID); err != nil {
 							lgEngine.Error("resync: failed to enqueue remote agent data for combiner", "zone", sdcmd.Zone, "agent", remoteAgentId, "err", err)
 						} else {
-							// Track so ProcessConfirmation can match the combiner's response
 							var combinerRecipients []string
 							if tm.combinerID != "" {
 								combinerRecipients = []string{string(tm.combinerID)}
 							}
 							zdr.MarkRRsPending(sdcmd.Zone, remoteAgentId, zu, distID, combinerRecipients)
 						}
-						lgEngine.Info("resync: sent remote agent data to combiner", "zone", sdcmd.Zone, "agent", remoteAgentId, "rrs", len(zu.RRsets))
+						lgEngine.Info("resync: sent remote agent data to combiner", "zone", sdcmd.Zone, "agent", remoteAgentId, "ops", len(zu.Operations))
 					}
 				}
 

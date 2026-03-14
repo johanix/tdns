@@ -203,6 +203,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				ZoneClass:      msg.ZoneClass,
 				Records:        msg.Records,
 				Operations:     msg.Operations,
+				Publish:        msg.Publish,
 				DistributionID: msg.DistributionID,
 				Timestamp:      msg.Time,
 			}
@@ -213,7 +214,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			if localAgents[senderID] {
 				nsGuard = nil
 			}
-			resp := CombinerProcessUpdate(syncReq, nsGuard)
+			resp := CombinerProcessUpdate(syncReq, nsGuard, localAgents, kdb, tm)
 			resp.Nonce = msg.Nonce // Echo nonce for confirmation
 			if resp.Zone != "" {
 				zone = resp.Zone // Update zone from combiner discovery (e.g. provider updates with Zone="")

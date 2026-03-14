@@ -741,22 +741,23 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 						return
 					}
 					keyRR := &sak.Keys[0].KeyRR
-					distID, err := PublishKeyToCombiner(ZoneName(zd.ZoneName), keyRR, tm)
+					zu := &ZoneUpdate{
+						Zone: ZoneName(zd.ZoneName),
+						Operations: []core.RROperation{{
+							Operation: "replace",
+							RRtype:    "KEY",
+							Records:   []string{keyRR.String()},
+						}},
+						Publish: &core.PublishInstruction{
+							KEYRRs:    []string{keyRR.String()},
+							Locations: []string{"at-apex", "at-ns"},
+						},
+					}
+					distID, err := tm.EnqueueForCombiner(ZoneName(zd.ZoneName), zu, "")
 					if err != nil {
 						lgConfig.Error("MP KEY publication: failed to send KEY to combiner", "zone", zd.ZoneName, "err", err)
 					} else {
-						lgConfig.Info("MP KEY publication: KEY sent to combiner", "zone", zd.ZoneName, "distID", distID)
-					}
-					// Also republish _signal KEY to provider zones for our nameservers
-					if conf.Agent != nil && len(conf.Agent.Local.Nameservers) > 0 {
-						for _, ns := range conf.Agent.Local.Nameservers {
-							sigDistID, sigErr := PublishSignalKeyToCombiner(ZoneName(zd.ZoneName), ns, keyRR, tm)
-							if sigErr != nil {
-								lgConfig.Debug("_signal KEY publication: no provider zone", "zone", zd.ZoneName, "ns", ns, "err", sigErr)
-								continue
-							}
-							lgConfig.Info("_signal KEY publication: sent to provider zone", "zone", zd.ZoneName, "ns", ns, "distID", sigDistID)
-						}
+						lgConfig.Info("MP KEY publication: KEY + PublishInstruction sent to combiner", "zone", zd.ZoneName, "distID", distID)
 					}
 				})
 			}

@@ -350,6 +350,7 @@ func (t *DNSTransport) Sync(ctx context.Context, peer *Peer, req *SyncRequest) (
 		RfiSubtype:   req.RfiSubtype,
 		Nonce:        req.Nonce,
 		ZoneClass:    req.ZoneClass,
+		Publish:      req.Publish,
 	}
 
 	payloadJSON, err := json.Marshal(payload)
@@ -1185,19 +1186,25 @@ func (d *DnsBeatPayload) GetSenderID() string {
 
 // DnsSyncPayload represents a sync message payload.
 type DnsSyncPayload struct {
-	MessageType    string              `json:"MessageType"`
-	OriginatorID   string              `json:"OriginatorID"`
-	YourIdentity   string              `json:"YourIdentity"`
-	Zone           string              `json:"Zone"`
-	Nonce          string              `json:"nonce,omitempty"`      // Nonce for replay protection (echoed in confirmation)
-	Records        map[string][]string `json:"Records"`              // RRs grouped by owner name (legacy: Class-overloaded)
-	Operations     []core.RROperation  `json:"Operations,omitempty"` // Explicit operations (takes precedence over Records)
-	Time           string              `json:"Time"`                 // RFC3339 timestamp
-	RfiType        string              `json:"RfiType"`
-	RfiSubtype     string              `json:"rfi_subtype,omitempty"`
-	Timestamp      int64               `json:"timestamp"` // Unix timestamp (legacy compat)
-	DistributionID string              `json:"distribution_id"`
-	ZoneClass      string              `json:"zone_class,omitempty"`
+	MessageType    string                   `json:"MessageType"`
+	OriginatorID   string                   `json:"OriginatorID"`
+	YourIdentity   string                   `json:"YourIdentity"`
+	Zone           string                   `json:"Zone"`
+	Nonce          string                   `json:"nonce,omitempty"`      // Nonce for replay protection (echoed in confirmation)
+	Records        map[string][]string      `json:"Records"`              // RRs grouped by owner name (legacy: Class-overloaded)
+	Operations     []core.RROperation       `json:"Operations,omitempty"` // Explicit operations (takes precedence over Records)
+	Time           string                   `json:"Time"`                 // RFC3339 timestamp
+	RfiType        string                   `json:"RfiType"`
+	RfiSubtype     string                   `json:"rfi_subtype,omitempty"`
+	Timestamp      int64                    `json:"timestamp"` // Unix timestamp (legacy compat)
+	DistributionID string                   `json:"distribution_id"`
+	ZoneClass      string                   `json:"zone_class,omitempty"`
+	Publish        *core.PublishInstruction `json:"publish,omitempty"`
+}
+
+// GetPublish returns the publish instruction (may be nil).
+func (d *DnsSyncPayload) GetPublish() *core.PublishInstruction {
+	return d.Publish
 }
 
 // DnsAddress represents an address in DNS payloads.

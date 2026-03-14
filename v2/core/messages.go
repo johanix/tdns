@@ -86,6 +86,14 @@ type AgentBeatResponse struct {
 	ErrorMsg     string
 }
 
+// PublishInstruction tells the combiner to publish (or retract) KEY/CDS records
+// at the zone apex and/or at _signal names derived from the agent's NS contributions.
+type PublishInstruction struct {
+	KEYRRs    []string `json:"key_rrs,omitempty"` // KEY RRs in text format (supports rollover)
+	CDSRRs    []string `json:"cds_rrs,omitempty"` // CDS RRs in text format (future use)
+	Locations []string `json:"locations"`         // ["at-apex"], ["at-ns"], both, or [] (retract)
+}
+
 // RROperation describes an explicit operation on DNS records.
 // When Operations is populated on a message, Records is ignored by the receiver.
 // Operations use explicit semantics instead of overloading the DNS Class field.
@@ -112,6 +120,7 @@ type AgentMsgPost struct {
 	RfiSubtype   string              `json:"rfi_subtype,omitempty"` // Subtype within an RFI type (e.g. "upstream", "sig0key" for CONFIG)
 	Nonce        string              `json:"nonce,omitempty"`       // Unique nonce for replay protection and confirmation correlation
 	ZoneClass    string              `json:"zone_class,omitempty"`  // "mp" (default) or "provider"
+	Publish      *PublishInstruction `json:"publish,omitempty"`     // KEY/CDS publication instruction for combiner
 }
 
 // AgentMsgResponse represents the response to an AgentMsgPost.

@@ -710,6 +710,12 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 				}
 			})
 		}
+		// Provider zones: re-apply stored _signal KEY publish instructions on startup.
+		if kdb != nil && GetProviderZoneRRtypes(zoneName) != nil {
+			zd.OnFirstLoad = append(zd.OnFirstLoad, func(zd *ZoneData) {
+				applyPendingSignalKeys(zd, kdb)
+			})
+		}
 	}
 	startEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
 	startEngineNoError(&Globals.App, "RefreshEngine", func() { RefreshEngine(ctx, conf) })
@@ -1010,16 +1016,31 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 			return fmt.Errorf("onLeaderElected: no active SIG(0) key after generation for zone %s", zone)
 		}
 		keyRR := &sak.Keys[0].KeyRR
-		lgElect.Info("publishing KEY to combiner", "zone", zone, "keyid", sak.Keys[0].KeyId)
-		distID, err := PublishKeyToCombiner(zone, keyRR, tm)
+		lgElect.Info("publishing KEY to combiner with PublishInstruction", "zone", zone, "keyid", sak.Keys[0].KeyId)
+
+		// Send KEY + PublishInstruction to combiner in a single UPDATE.
+		// The combiner handles at-apex (zone data) and at-ns (_signal names) publication.
+		zu := &ZoneUpdate{
+			Zone: zone,
+			Operations: []core.RROperation{{
+				Operation: "replace",
+				RRtype:    "KEY",
+				Records:   []string{keyRR.String()},
+			}},
+			Publish: &core.PublishInstruction{
+				KEYRRs:    []string{keyRR.String()},
+				Locations: []string{"at-apex", "at-ns"},
+			},
+		}
+		distID, err := tm.EnqueueForCombiner(zone, zu, "")
 		if err != nil {
 			lgElect.Error("failed to publish KEY to combiner", "zone", zone, "err", err)
 			return err
 		}
-		lgElect.Info("KEY sent to combiner", "zone", zone, "distID", distID)
+		lgElect.Info("KEY + PublishInstruction sent to combiner", "zone", zone, "distID", distID)
 
 		// Also sync KEY to remote agents so they publish via their combiners
-		update := &ZoneUpdate{
+		agentUpdate := &ZoneUpdate{
 			Zone: zone,
 			Operations: []core.RROperation{{
 				Operation: "replace",
@@ -1027,22 +1048,8 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 				Records:   []string{keyRR.String()},
 			}},
 		}
-		if err := tm.EnqueueForZoneAgents(zone, update, distID); err != nil {
+		if err := tm.EnqueueForZoneAgents(zone, agentUpdate, distID); err != nil {
 			lgElect.Error("failed to enqueue KEY for remote agents", "zone", zone, "err", err)
-		}
-
-		// Step e: publish _signal KEY to provider zones for our nameservers
-		if conf.Agent != nil && len(conf.Agent.Local.Nameservers) > 0 {
-			for _, ns := range conf.Agent.Local.Nameservers {
-				sigDistID, sigErr := PublishSignalKeyToCombiner(zone, ns, keyRR, tm)
-				if sigErr != nil {
-					lgElect.Error("failed to publish _signal KEY to provider zone",
-						"zone", zone, "ns", ns, "err", sigErr)
-					continue
-				}
-				lgElect.Info("_signal KEY sent to provider zone",
-					"zone", zone, "ns", ns, "owner", Sig0KeyOwnerName(string(zone), ns), "distID", sigDistID)
-			}
 		}
 
 		return nil

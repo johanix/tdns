@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/johanix/tdns/v2/agent/transport"
@@ -31,15 +32,16 @@ var lgCombiner = Logger("combiner")
 // CombinerSyncRequest represents a sync request to the combiner.
 // Uses the same data structure as CombinerPost.Data for transport neutrality.
 type CombinerSyncRequest struct {
-	SenderID       string              // Identity of the sending agent
-	Zone           string              // Zone being updated
-	ZoneClass      string              // "mp" (default) or "provider"
-	SyncType       string              // Type of sync: "NS", "DNSKEY", "CDS", "CSYNC", "GLUE"
-	Records        map[string][]string // RR strings grouped by owner name (same as CombinerPost.Data)
-	Operations     []core.RROperation  // Explicit operations (takes precedence over Records)
-	Serial         uint32              // Zone serial (optional)
-	DistributionID string              // Distribution ID for tracking
-	Timestamp      time.Time           // When the request was created
+	SenderID       string                   // Identity of the sending agent
+	Zone           string                   // Zone being updated
+	ZoneClass      string                   // "mp" (default) or "provider"
+	SyncType       string                   // Type of sync: "NS", "DNSKEY", "CDS", "CSYNC", "GLUE"
+	Records        map[string][]string      // RR strings grouped by owner name (same as CombinerPost.Data)
+	Operations     []core.RROperation       // Explicit operations (takes precedence over Records)
+	Publish        *core.PublishInstruction // KEY/CDS publication instruction
+	Serial         uint32                   // Zone serial (optional)
+	DistributionID string                   // Distribution ID for tracking
+	Timestamp      time.Time                // When the request was created
 }
 
 // CombinerSyncResponse represents a confirmation from the combiner.
@@ -90,8 +92,8 @@ func (cs *CombinerState) ChunkHandler() *transport.ChunkNotifyHandler {
 }
 
 // ProcessUpdate delegates to the standalone CombinerProcessUpdate.
-func (cs *CombinerState) ProcessUpdate(req *CombinerSyncRequest) *CombinerSyncResponse {
-	return CombinerProcessUpdate(req, cs.ProtectedNamespaces)
+func (cs *CombinerState) ProcessUpdate(req *CombinerSyncRequest, localAgents map[string]bool, kdb *KeyDB, tm *TransportManager) *CombinerSyncResponse {
+	return CombinerProcessUpdate(req, cs.ProtectedNamespaces, localAgents, kdb, tm)
 }
 
 // --- Standalone business logic functions ---
@@ -211,7 +213,7 @@ func findProviderZoneForRequest(req *CombinerSyncRequest) (string, error) {
 	return best, nil
 }
 
-func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []string) *CombinerSyncResponse {
+func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []string, localAgents map[string]bool, kdb *KeyDB, tm *TransportManager) *CombinerSyncResponse {
 	// Count total records for logging
 	totalRecords := 0
 	for _, rrs := range req.Records {
@@ -253,7 +255,15 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 
 	// Process explicit Operations if present (takes precedence over Records)
 	if len(req.Operations) > 0 {
-		return combinerProcessOperations(req, zd, zonename, protectedNamespaces)
+		resp = combinerProcessOperations(req, zd, zonename, protectedNamespaces, localAgents)
+		if resp.Status != "error" {
+			if req.Publish != nil {
+				combinerApplyPublishInstruction(req, zd, kdb)
+			}
+			// NS changes may affect _signal KEY publication
+			combinerResyncSignalKeys(req.SenderID, zonename, zd, kdb)
+		}
+		return resp
 	}
 
 	// Separate records into adds, deletes (ClassNONE), and bulk deletes (ClassANY)
@@ -438,12 +448,378 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		}
 	}
 
+	if resp.Status != "error" {
+		if req.Publish != nil {
+			combinerApplyPublishInstruction(req, zd, kdb)
+		}
+		combinerResyncSignalKeys(req.SenderID, zonename, zd, kdb)
+	}
+
 	return resp
+}
+
+// combinerApplyPublishInstruction processes a PublishInstruction from an agent.
+// It publishes/retracts KEY RRs at the zone apex and/or at _signal names
+// in provider zones, and persists the instruction for NS-change resync.
+func combinerApplyPublishInstruction(req *CombinerSyncRequest, zd *ZoneData, kdb *KeyDB) {
+	if req.Publish == nil {
+		return
+	}
+	instr := req.Publish
+	zone := req.Zone
+	senderID := req.SenderID
+
+	// Load previously stored instruction (if any)
+	var storedInstr *StoredPublishInstruction
+	if kdb != nil {
+		storedInstr, _ = kdb.GetPublishInstruction(zone, senderID)
+	}
+
+	// Retract: empty Locations means remove all published KEYs
+	if len(instr.Locations) == 0 {
+		// Remove apex KEY
+		zd.ReplaceCombinerDataByRRtype(senderID, zone, dns.TypeKEY, nil)
+		// Remove all _signal KEYs
+		if storedInstr != nil {
+			for _, ns := range storedInstr.PublishedNS {
+				publishSignalKeyToProvider(zone, ns, senderID, nil)
+			}
+		}
+		if kdb != nil {
+			kdb.DeletePublishInstruction(zone, senderID)
+		}
+		lgCombiner.Info("publish instruction retracted", "zone", zone, "sender", senderID)
+		return
+	}
+
+	locSet := make(map[string]bool)
+	for _, loc := range instr.Locations {
+		locSet[loc] = true
+	}
+
+	// Handle at-apex
+	if locSet["at-apex"] {
+		var parsedRRs []dns.RR
+		for _, rrStr := range instr.KEYRRs {
+			rr, err := dns.NewRR(rrStr)
+			if err != nil {
+				lgCombiner.Warn("publish instruction: bad KEY RR", "zone", zone, "rr", rrStr, "err", err)
+				continue
+			}
+			parsedRRs = append(parsedRRs, rr)
+		}
+		zd.ReplaceCombinerDataByRRtype(senderID, zone, dns.TypeKEY, parsedRRs)
+	} else if storedInstr != nil && containsString(storedInstr.Locations, "at-apex") {
+		// Was at-apex before, now removed
+		zd.ReplaceCombinerDataByRRtype(senderID, zone, dns.TypeKEY, nil)
+	}
+
+	// Handle at-ns
+	var publishedNS []string
+	if locSet["at-ns"] {
+		currentNS := getAgentNSTargets(zd, senderID, zone)
+		var prevPublished []string
+		if storedInstr != nil {
+			prevPublished = storedInstr.PublishedNS
+		}
+		curSet := stringSet(currentNS)
+
+		// Always publish for all current NS targets. The operation is idempotent
+		// (ReplaceCombinerDataByRRtype is a no-op when data matches), so
+		// re-publishing is safe and avoids stale state after zone reloads.
+		for _, ns := range currentNS {
+			publishSignalKeyToProvider(zone, ns, senderID, instr.KEYRRs)
+		}
+		// Remove _signal KEYs for NS targets no longer contributed
+		for _, ns := range prevPublished {
+			if !curSet[ns] {
+				publishSignalKeyToProvider(zone, ns, senderID, nil)
+			}
+		}
+		publishedNS = currentNS
+	} else if storedInstr != nil && containsString(storedInstr.Locations, "at-ns") {
+		// Was at-ns before, now removed — retract all
+		for _, ns := range storedInstr.PublishedNS {
+			publishSignalKeyToProvider(zone, ns, senderID, nil)
+		}
+	}
+
+	// Persist
+	if kdb != nil {
+		if err := kdb.SavePublishInstruction(zone, senderID, instr, publishedNS); err != nil {
+			lgCombiner.Error("failed to save publish instruction", "zone", zone, "sender", senderID, "err", err)
+		}
+	}
+
+	lgCombiner.Info("publish instruction applied", "zone", zone, "sender", senderID, "locations", instr.Locations, "publishedNS", publishedNS)
+}
+
+// combinerResyncSignalKeys is called when NS records change for an agent.
+// It diffs the current NS targets against the stored PublishedNS and
+// adds/removes _signal KEY records accordingly.
+func combinerResyncSignalKeys(senderID, zone string, zd *ZoneData, kdb *KeyDB) {
+	if kdb == nil {
+		return
+	}
+	storedInstr, err := kdb.GetPublishInstruction(zone, senderID)
+	if err != nil || storedInstr == nil {
+		return
+	}
+	if !containsString(storedInstr.Locations, "at-ns") {
+		return
+	}
+
+	currentNS := getAgentNSTargets(zd, senderID, zone)
+	prevSet := stringSet(storedInstr.PublishedNS)
+	curSet := stringSet(currentNS)
+
+	changed := false
+	for _, ns := range currentNS {
+		if !prevSet[ns] {
+			publishSignalKeyToProvider(zone, ns, senderID, storedInstr.KEYRRs)
+			changed = true
+		}
+	}
+	for _, ns := range storedInstr.PublishedNS {
+		if !curSet[ns] {
+			publishSignalKeyToProvider(zone, ns, senderID, nil)
+			changed = true
+		}
+	}
+
+	if changed {
+		instr := storedInstr.ToPublishInstruction()
+		if err := kdb.SavePublishInstruction(zone, senderID, instr, currentNS); err != nil {
+			lgCombiner.Error("failed to update published NS after resync", "zone", zone, "sender", senderID, "err", err)
+		}
+		lgCombiner.Info("signal keys resynced after NS change", "zone", zone, "sender", senderID, "publishedNS", currentNS)
+	}
+}
+
+// publishSignalKeyToProvider directly applies a _signal KEY record to the
+// provider zone that contains the NS target. If keyRRs is nil/empty, the KEY
+// is removed. The combiner applies this locally (no transport needed — we ARE
+// the combiner).
+func publishSignalKeyToProvider(childZone, nsTarget, senderID string, keyRRs []string) {
+	ownerName := Sig0KeyOwnerName(childZone, nsTarget)
+
+	// Find the provider zone that contains this owner name
+	providerZone := findProviderZoneForOwner(ownerName)
+	if providerZone == "" {
+		lgCombiner.Debug("no provider zone found for _signal owner", "owner", ownerName, "childZone", childZone, "ns", nsTarget)
+		return
+	}
+	zd, ok := Zones.Get(providerZone)
+	if !ok {
+		lgCombiner.Warn("provider zone not loaded", "zone", providerZone, "owner", ownerName)
+		return
+	}
+
+	var parsedRRs []dns.RR
+	for _, rrStr := range keyRRs {
+		rr, err := dns.NewRR(rrStr)
+		if err != nil {
+			continue
+		}
+		rr.Header().Name = ownerName
+		parsedRRs = append(parsedRRs, rr)
+	}
+
+	_, _, changed, err := zd.ReplaceCombinerDataByRRtype(senderID, ownerName, dns.TypeKEY, parsedRRs)
+	if err != nil {
+		lgCombiner.Error("failed to apply _signal KEY to provider zone", "zone", providerZone, "owner", ownerName, "err", err)
+		return
+	}
+	if changed {
+		if bumperResp, err := zd.BumpSerialOnly(); err != nil {
+			lgCombiner.Error("BumpSerialOnly failed for provider zone", "zone", providerZone, "err", err)
+		} else {
+			lgCombiner.Debug("provider zone serial bumped", "zone", providerZone, "old", bumperResp.OldSerial, "new", bumperResp.NewSerial)
+		}
+	}
+	lgCombiner.Info("_signal KEY applied to provider zone", "zone", providerZone, "owner", ownerName, "keys", len(parsedRRs), "changed", changed)
+}
+
+// findProviderZoneForOwner finds the most specific configured provider zone
+// that contains the given owner name. Returns "" if no match.
+func findProviderZoneForOwner(ownerName string) string {
+	zd, _ := FindZone(dns.Fqdn(ownerName))
+	if zd == nil {
+		return ""
+	}
+	if GetProviderZoneRRtypes(zd.ZoneName) == nil {
+		return ""
+	}
+	return zd.ZoneName
+}
+
+// getAgentNSTargets returns the NS target names from an agent's contributions for a zone.
+func getAgentNSTargets(zd *ZoneData, senderID, zone string) []string {
+	agentData, ok := zd.AgentContributions[senderID]
+	if !ok {
+		return nil
+	}
+	nsRRset, ok := agentData[zone][dns.TypeNS]
+	if !ok {
+		return nil
+	}
+	var targets []string
+	for _, rr := range nsRRset.RRs {
+		if ns, ok := rr.(*dns.NS); ok {
+			targets = append(targets, dns.Fqdn(ns.Ns))
+		}
+	}
+	return targets
+}
+
+// --- Startup re-apply of stored publish instructions for provider zones ---
+
+// signalKeyEntry represents a _signal KEY that should be published in a provider zone.
+type signalKeyEntry struct {
+	OwnerName string   // e.g. _sig0key.whisky.dnslab._signal.ns2.alpha.dnslab.
+	SenderID  string   // agent identity that owns the KEY
+	KEYRRs    []string // KEY RRs in text format
+}
+
+// pendingSignalKeyMap holds signal keys grouped by provider zone, built once
+// from CombinerPublishInstructions and consumed by each provider zone's OnFirstLoad.
+type pendingSignalKeyMap struct {
+	mu      sync.Mutex
+	built   bool
+	entries map[string][]signalKeyEntry // providerZone → entries
+}
+
+var pendingSignalKeys = &pendingSignalKeyMap{}
+
+// buildPendingSignalKeys is called by the first provider zone's OnFirstLoad.
+// It loads all stored publish instructions and maps NS targets to provider zones.
+func buildPendingSignalKeys(kdb *KeyDB) {
+	allInstr, err := kdb.LoadAllPublishInstructions()
+	if err != nil {
+		lgCombiner.Error("failed to load publish instructions for startup re-apply", "err", err)
+		pendingSignalKeys.entries = make(map[string][]signalKeyEntry)
+		return
+	}
+
+	entries := make(map[string][]signalKeyEntry)
+	for zone, senders := range allInstr {
+		for senderID, stored := range senders {
+			if !containsString(stored.Locations, "at-ns") || len(stored.KEYRRs) == 0 {
+				continue
+			}
+			for _, ns := range stored.PublishedNS {
+				ownerName := Sig0KeyOwnerName(zone, ns)
+				providerZone := findProviderZoneForOwner(ownerName)
+				if providerZone == "" {
+					lgCombiner.Debug("startup re-apply: no provider zone for NS target", "ns", ns, "childZone", zone)
+					continue
+				}
+				entries[providerZone] = append(entries[providerZone], signalKeyEntry{
+					OwnerName: ownerName,
+					SenderID:  senderID,
+					KEYRRs:    stored.KEYRRs,
+				})
+			}
+		}
+	}
+	pendingSignalKeys.entries = entries
+	lgCombiner.Info("built pending signal key map", "providerZones", len(entries))
+}
+
+// applyPendingSignalKeys is called by each provider zone's OnFirstLoad.
+// It applies any pending _signal KEY entries for this zone and removes them from the map.
+func applyPendingSignalKeys(zd *ZoneData, kdb *KeyDB) {
+	pendingSignalKeys.mu.Lock()
+	if !pendingSignalKeys.built {
+		buildPendingSignalKeys(kdb)
+		pendingSignalKeys.built = true
+	}
+	myEntries := pendingSignalKeys.entries[zd.ZoneName]
+	delete(pendingSignalKeys.entries, zd.ZoneName)
+	pendingSignalKeys.mu.Unlock()
+
+	if len(myEntries) == 0 {
+		return
+	}
+
+	for _, entry := range myEntries {
+		var parsedRRs []dns.RR
+		for _, rrStr := range entry.KEYRRs {
+			rr, err := dns.NewRR(rrStr)
+			if err != nil {
+				continue
+			}
+			rr.Header().Name = entry.OwnerName
+			parsedRRs = append(parsedRRs, rr)
+		}
+		_, _, changed, err := zd.ReplaceCombinerDataByRRtype(entry.SenderID, entry.OwnerName, dns.TypeKEY, parsedRRs)
+		if err != nil {
+			lgCombiner.Error("startup re-apply: failed to apply _signal KEY", "zone", zd.ZoneName, "owner", entry.OwnerName, "err", err)
+			continue
+		}
+		if changed {
+			lgCombiner.Info("startup re-apply: _signal KEY applied", "zone", zd.ZoneName, "owner", entry.OwnerName, "sender", entry.SenderID)
+		}
+	}
+}
+
+// findExistingContribution checks whether any sender OTHER than excludeSender
+// already has a contribution for the given zone/rrtype. Returns the sender ID
+// and the RRs, or ("", nil) if no other sender has this rrtype.
+func findExistingContribution(zd *ZoneData, owner string, rrtype uint16, excludeSender string) (string, []dns.RR) {
+	for senderID, zones := range zd.AgentContributions {
+		if senderID == excludeSender {
+			continue
+		}
+		if owners, ok := zones[owner]; ok {
+			if rrset, ok := owners[rrtype]; ok && len(rrset.RRs) > 0 {
+				return senderID, rrset.RRs
+			}
+		}
+	}
+	return "", nil
+}
+
+// sameRRData returns true if two RR slices contain the same records (order-independent).
+func sameRRData(a, b []dns.RR) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for _, ra := range a {
+		found := false
+		for _, rb := range b {
+			if dns.IsDuplicate(ra, rb) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func containsString(slice []string, s string) bool {
+	for _, v := range slice {
+		if v == s {
+			return true
+		}
+	}
+	return false
+}
+
+func stringSet(slice []string) map[string]bool {
+	m := make(map[string]bool, len(slice))
+	for _, s := range slice {
+		m[s] = true
+	}
+	return m
 }
 
 // combinerProcessOperations handles explicit Operations (add, delete, replace)
 // at the combiner level. Each operation is applied to the agent's contributions.
-func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename string, protectedNamespaces []string) *CombinerSyncResponse {
+func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename string, protectedNamespaces []string, localAgents map[string]bool) *CombinerSyncResponse {
 	resp := &CombinerSyncResponse{
 		DistributionID: req.DistributionID,
 		Zone:           req.Zone,
@@ -542,6 +918,36 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 				// All records rejected — skip replace to avoid accidental wipe
 				continue
 			}
+
+			// Local-trumps-remote deduplication for KEY and CDS.
+			// When the same records exist under a different sender, apply single-origin rule:
+			// - Local contribution already exists → remote sender gets no-op (positive confirmation)
+			// - Remote contribution exists, local sender arrives → re-attribute to local sender
+			if (rrtype == dns.TypeKEY || rrtype == dns.TypeCDS) && len(parsedRRs) > 0 {
+				senderIsLocal := localAgents[req.SenderID]
+				if existingSender, existingRRs := findExistingContribution(zd, zonename, rrtype, req.SenderID); existingSender != "" {
+					existingIsLocal := localAgents[existingSender]
+					if sameRRData(existingRRs, parsedRRs) {
+						if existingIsLocal && !senderIsLocal {
+							// Local already has it — no-op for remote sender, report as applied
+							lgCombiner.Debug("dedup: local contribution exists, remote is no-op",
+								"rrtype", op.RRtype, "zone", zonename, "local", existingSender, "remote", req.SenderID)
+							for _, rr := range parsedRRs {
+								appliedRecords = append(appliedRecords, rr.String())
+							}
+							continue
+						}
+						if !existingIsLocal && senderIsLocal {
+							// Remote had it first, local now claims — re-attribute to local
+							lgCombiner.Info("dedup: re-attributing contribution from remote to local",
+								"rrtype", op.RRtype, "zone", zonename, "from", existingSender, "to", req.SenderID)
+							zd.ReplaceCombinerDataByRRtype(existingSender, zonename, rrtype, nil) // remove from remote
+							// fall through to normal replace, which will store under local sender
+						}
+					}
+				}
+			}
+
 			applied, removed, changed, err := zd.ReplaceCombinerDataByRRtype(req.SenderID, zonename, rrtype, parsedRRs)
 			if err != nil {
 				lgCombiner.Error("REPLACE operation failed", "err", err)
@@ -1089,7 +1495,7 @@ func SendToCombiner(state *CombinerState, req *CombinerSyncRequest) *CombinerSyn
 		}
 	}
 
-	return state.ProcessUpdate(req)
+	return state.ProcessUpdate(req, nil, nil, nil)
 }
 
 // ConvertZoneUpdateToSyncRequest converts a ZoneUpdate to a CombinerSyncRequest.
@@ -1126,6 +1532,9 @@ func ConvertZoneUpdateToSyncRequest(update *ZoneUpdate, senderID string, distrib
 	}
 	if len(update.Operations) > 0 {
 		req.Operations = update.Operations
+	}
+	if update.Publish != nil {
+		req.Publish = update.Publish
 	}
 	return req
 }

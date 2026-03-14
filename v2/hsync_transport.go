@@ -753,6 +753,7 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 			DistributionID: payload.DistributionID, // Originating distID from sending agent
 			Nonce:          msg.Nonce,              // Echo nonce from incoming message for confirmation
 			ZoneClass:      payload.ZoneClass,
+			Publish:        payload.GetPublish(),
 		},
 	}
 
@@ -1604,8 +1605,13 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 		MessageType:    "update", // agent→combiner uses "update" (not "sync")
 		ZoneClass:      zoneClass,
 	}
-	if msg.Update != nil && len(msg.Update.Operations) > 0 {
-		syncReq.Operations = msg.Update.Operations
+	if msg.Update != nil {
+		if len(msg.Update.Operations) > 0 {
+			syncReq.Operations = msg.Update.Operations
+		}
+		if msg.Update.Publish != nil {
+			syncReq.Publish = msg.Update.Publish
+		}
 	}
 
 	syncResp, err := tm.SendSyncWithFallback(ctx, peer, syncReq)

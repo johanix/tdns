@@ -241,9 +241,10 @@ type AgentMsgPost struct {
 	Time           time.Time
 	RfiType        string
 	RfiSubtype     string
-	DistributionID string // Originating distribution ID from the sending agent
-	Nonce          string // Nonce from the incoming sync/update message (for confirmation echo)
-	ZoneClass      string // "mp" (default) or "provider"
+	DistributionID string                   // Originating distribution ID from the sending agent
+	Nonce          string                   // Nonce from the incoming sync/update message (for confirmation echo)
+	ZoneClass      string                   // "mp" (default) or "provider"
+	Publish        *core.PublishInstruction // KEY/CDS publication instruction for combiner
 }
 
 type AgentMsgPostPlus struct {
