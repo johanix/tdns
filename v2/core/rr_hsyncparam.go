@@ -25,6 +25,8 @@ import (
 //   parentsync="owner|agent"              - who handles parent synchronisation
 //   audit="yes|no"                        - whether audit is enabled
 //   signers="label1,label2,..."           - comma-separated list of signer labels
+//   pubkey                                - flag: providers publish SIG(0) KEY in zone
+//   pubcds                                - flag: providers publish CDS/CDNSKEY in zone
 
 func init() {
 	RegisterHsyncparamRR()
@@ -38,6 +40,8 @@ const (
 	HSYNCPARAM_PARENTSYNC HSYNCPARAMKey = 1
 	HSYNCPARAM_AUDIT      HSYNCPARAMKey = 2
 	HSYNCPARAM_SIGNERS    HSYNCPARAMKey = 3
+	HSYNCPARAM_PUBKEY     HSYNCPARAMKey = 4
+	HSYNCPARAM_PUBCDS     HSYNCPARAMKey = 5
 	hsyncparam_RESERVED   HSYNCPARAMKey = 65535
 )
 
@@ -46,6 +50,8 @@ var hsyncparamKeyToStringMap = map[HSYNCPARAMKey]string{
 	HSYNCPARAM_PARENTSYNC: "parentsync",
 	HSYNCPARAM_AUDIT:      "audit",
 	HSYNCPARAM_SIGNERS:    "signers",
+	HSYNCPARAM_PUBKEY:     "pubkey",
+	HSYNCPARAM_PUBCDS:     "pubcds",
 }
 
 var hsyncparamStringToKeyMap = reverseHSYNCPARAMKeyMap(hsyncparamKeyToStringMap)
@@ -135,6 +141,10 @@ func makeHSYNCPARAMKeyValue(key HSYNCPARAMKey) HSYNCPARAMKeyValue {
 		return new(HSYNCPARAMAudit)
 	case HSYNCPARAM_SIGNERS:
 		return new(HSYNCPARAMSigners)
+	case HSYNCPARAM_PUBKEY:
+		return &HSYNCPARAMFlag{code: HSYNCPARAM_PUBKEY}
+	case HSYNCPARAM_PUBCDS:
+		return &HSYNCPARAMFlag{code: HSYNCPARAM_PUBCDS}
 	case hsyncparam_RESERVED:
 		return nil
 	default:
@@ -225,14 +235,14 @@ func (rr *HSYNCPARAM) Parse(s []string) error {
 	var xs []HSYNCPARAMKeyValue
 	for _, tok := range tokens {
 		idx := strings.IndexByte(tok, '=')
+		var key, value string
 		if idx < 0 {
-			return fmt.Errorf("HSYNCPARAM: missing '=' in %q", tok)
-		}
-		if idx == 0 {
+			key = tok // bare key → boolean flag (SVCB semantics)
+		} else if idx == 0 {
 			return fmt.Errorf("HSYNCPARAM: empty key in %q", tok)
+		} else {
+			key, value = tok[:idx], tok[idx+1:]
 		}
-		key := tok[:idx]
-		value := tok[idx+1:]
 
 		kv := makeHSYNCPARAMKeyValue(hsyncparamStringToKey(key))
 		if kv == nil {
@@ -254,7 +264,11 @@ func (rr *HSYNCPARAM) String() string {
 		if i > 0 {
 			s += " "
 		}
-		s += e.Key().String() + "=\"" + e.String() + "\""
+		if val := e.String(); val != "" {
+			s += e.Key().String() + "=\"" + val + "\""
+		} else {
+			s += e.Key().String()
+		}
 	}
 	return s
 }
@@ -343,6 +357,26 @@ func (h *HSYNCPARAM) GetSigners() []string {
 func (h *HSYNCPARAM) IsSignerLabel(label string) bool {
 	for _, s := range h.GetSigners() {
 		if s == label {
+			return true
+		}
+	}
+	return false
+}
+
+// HasPubkey returns true if the pubkey flag is present.
+func (h *HSYNCPARAM) HasPubkey() bool {
+	for _, kv := range h.Value {
+		if kv.Key() == HSYNCPARAM_PUBKEY {
+			return true
+		}
+	}
+	return false
+}
+
+// HasPubcds returns true if the pubcds flag is present.
+func (h *HSYNCPARAM) HasPubcds() bool {
+	for _, kv := range h.Value {
+		if kv.Key() == HSYNCPARAM_PUBCDS {
 			return true
 		}
 	}
@@ -526,6 +560,37 @@ func (s *HSYNCPARAMSigners) len() int {
 
 func (s *HSYNCPARAMSigners) copy() HSYNCPARAMKeyValue {
 	return &HSYNCPARAMSigners{Signers: cloneSlice(s.Signers)}
+}
+
+// --- HSYNCPARAMFlag: boolean key (presence = true, no value) ---
+// Follows SVCB no-default-alpn pattern: zero-length value on the wire,
+// bare key name in presentation format.
+
+type HSYNCPARAMFlag struct {
+	code HSYNCPARAMKey
+}
+
+func (s *HSYNCPARAMFlag) Key() HSYNCPARAMKey    { return s.code }
+func (s *HSYNCPARAMFlag) String() string        { return "" }
+func (s *HSYNCPARAMFlag) pack() ([]byte, error) { return []byte{}, nil }
+func (s *HSYNCPARAMFlag) len() int              { return 0 }
+
+func (s *HSYNCPARAMFlag) unpack(b []byte) error {
+	if len(b) != 0 {
+		return fmt.Errorf("dns: hsyncparam %s: flag key must have no value", s.code)
+	}
+	return nil
+}
+
+func (s *HSYNCPARAMFlag) parse(b string) error {
+	if b != "" {
+		return fmt.Errorf("dns: hsyncparam %s: flag key must have no value", s.code)
+	}
+	return nil
+}
+
+func (s *HSYNCPARAMFlag) copy() HSYNCPARAMKeyValue {
+	return &HSYNCPARAMFlag{code: s.code}
 }
 
 // --- HSYNCPARAMLocal: catch-all for unknown keys ---

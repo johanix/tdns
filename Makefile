@@ -1,5 +1,7 @@
 .PHONY: v1 all v2 clean install
 
+default: v2
+
 # production version of major apps
 v1:
 	$(MAKE) -C ./cmd/ v1
