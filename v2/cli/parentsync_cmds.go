@@ -45,6 +45,76 @@ var agentParentSyncStatusCmd = &cobra.Command{
 	},
 }
 
+var agentParentSyncBootstrapCmd = &cobra.Command{
+	Use:   "bootstrap",
+	Short: "Trigger SIG(0) KEY bootstrap with parent for a zone",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs(cmd, "zonename")
+		zone := cmd.Flag("zone").Value.String()
+
+		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+			Command: "parentsync-bootstrap",
+			Zone:    tdns.ZoneName(zone),
+		}, "parentsync")
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+		if amr.Error {
+			log.Fatalf("Error from agent: %s", amr.ErrorMsg)
+		}
+
+		fmt.Printf("%s\n", amr.Msg)
+	},
+}
+
+var agentParentSyncInquireCmd = &cobra.Command{
+	Use:   "inquire",
+	Short: "KeyState EDNS(0) inquiry commands",
+}
+
+var agentParentSyncInquireUpdateCmd = &cobra.Command{
+	Use:   "update",
+	Short: "Send KeyState EDNS(0) inquiry about the current SIG(0) key to the parent",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs(cmd, "zonename")
+		zone := cmd.Flag("zone").Value.String()
+
+		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+			Command: "parentsync-inquire",
+			Zone:    tdns.ZoneName(zone),
+		}, "parentsync")
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+		if amr.Error {
+			log.Fatalf("Error from agent: %s", amr.ErrorMsg)
+		}
+
+		dataMap, ok := amr.Data.(map[string]interface{})
+		if !ok {
+			fmt.Printf("%s\n", amr.Msg)
+			return
+		}
+
+		displayKeyStateInquiry(dataMap)
+	},
+}
+
+func displayKeyStateInquiry(d map[string]interface{}) {
+	zone, _ := d["zone"].(string)
+	keyid, _ := d["keyid"].(float64)
+	stateName, _ := d["state_name"].(string)
+	state, _ := d["state"].(float64)
+	extra, _ := d["extra_text"].(string)
+
+	fmt.Printf("KeyState Inquiry for %s\n", zone)
+	fmt.Printf("  KeyID:        %d\n", int(keyid))
+	fmt.Printf("  Parent says:  %s (code %d)\n", stateName, int(state))
+	if extra != "" {
+		fmt.Printf("  Extra:        %s\n", extra)
+	}
+}
+
 var agentParentSyncElectionCmd = &cobra.Command{
 	Use:   "election",
 	Short: "Trigger leader re-election for a zone",
@@ -130,6 +200,14 @@ func displayParentSyncStatus(zone string, d map[string]interface{}) {
 		fmt.Printf("    Key:           (none generated)\n")
 	}
 
+	// Parent trust state (from last KeyState inquiry)
+	parentStateName, _ := d["parent_state_name"].(string)
+	if parentStateName != "" {
+		fmt.Printf("    Parent trust:  %s\n", parentStateName)
+	} else {
+		fmt.Printf("    Parent trust:  (not checked)\n")
+	}
+
 	apexPublished, _ := d["apex_published"].(bool)
 	if apexPublished {
 		fmt.Printf("    Apex KEY:      PUBLISHED\n")
@@ -209,10 +287,19 @@ func init() {
 	AgentCmd.AddCommand(agentParentSyncCmd)
 	agentParentSyncCmd.AddCommand(agentParentSyncStatusCmd)
 	agentParentSyncCmd.AddCommand(agentParentSyncElectionCmd)
+	agentParentSyncCmd.AddCommand(agentParentSyncBootstrapCmd)
+	agentParentSyncCmd.AddCommand(agentParentSyncInquireCmd)
+	agentParentSyncInquireCmd.AddCommand(agentParentSyncInquireUpdateCmd)
 
 	agentParentSyncStatusCmd.Flags().StringP("zone", "z", "", "Zone name (required)")
 	agentParentSyncStatusCmd.MarkFlagRequired("zone")
 
 	agentParentSyncElectionCmd.Flags().StringP("zone", "z", "", "Zone name (required)")
 	agentParentSyncElectionCmd.MarkFlagRequired("zone")
+
+	agentParentSyncBootstrapCmd.Flags().StringP("zone", "z", "", "Zone name (required)")
+	agentParentSyncBootstrapCmd.MarkFlagRequired("zone")
+
+	agentParentSyncInquireUpdateCmd.Flags().StringP("zone", "z", "", "Zone name (required)")
+	agentParentSyncInquireUpdateCmd.MarkFlagRequired("zone")
 }

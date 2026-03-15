@@ -97,6 +97,10 @@ resolver:
    address:		8.8.8.8:53 
 
 delegationsync:
+   # Leader election TTL: how long a leader remains valid before re-election.
+   # Elections require ALL configured peers to participate — if any peer is
+   # unreachable, the election fails and parent-facing operations freeze.
+   leader-election-ttl:	60m
    parent:
       # in parent zones, we support these schemes, and will publish DSYNC RRs
       # if allowed to:

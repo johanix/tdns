@@ -177,6 +177,12 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				if err != nil {
 					lg.Error("kdb.Begin failed", "error", err)
 				}
+				type pendingVerification struct {
+					childZone string
+					keyid     uint16
+					keyRR     string
+				}
+				var toVerify []pendingVerification
 				for _, rr := range ur.Actions {
 					var subcommand string
 					switch rr.Header().Class {
@@ -207,6 +213,15 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 						if err != nil {
 							lg.Error("kdb.Sig0TrustMgmt failed", "error", err)
 						}
+
+						// Queue untrusted child-update adds for async verification.
+						if subcommand == "add" && !ur.Trusted {
+							toVerify = append(toVerify, pendingVerification{
+								childZone: keyrr.Header().Name,
+								keyid:     uint16(keyrr.KeyTag()),
+								keyRR:     rr.String(),
+							})
+						}
 					} else {
 						lg.Error("ZoneUpdater: TRUSTSTORE-UPDATE: not a KEY RR", "rr", rr.String())
 					}
@@ -214,6 +229,13 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				err = tx.Commit()
 				if err != nil {
 					lg.Error("tx.Commit failed", "error", err)
+				}
+
+				// Trigger async DNS verification for newly stored untrusted child keys.
+				for _, pv := range toVerify {
+					lg.Info("ZoneUpdater: triggering child key verification",
+						"zone", pv.childZone, "keyid", pv.keyid)
+					kdb.TriggerChildKeyVerification(pv.childZone, pv.keyid, pv.keyRR)
 				}
 			default:
 				lg.Error("ZoneUpdater: unknown command, ignoring", "cmd", ur.Cmd)

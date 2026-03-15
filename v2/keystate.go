@@ -173,38 +173,13 @@ func (kdb *KeyDB) GetKeyStatus(zonename string, keyID uint16) (*edns0.KeyStateOp
 		if key.Trusted {
 			state = edns0.KeyStateTrusted
 		} else if key.Validated {
-			responseChan := make(chan *VerificationInfo)
-			lgSigner.Debug("sending INFO request with response channel")
-			kdb.KeyBootstrapperQ <- KeyBootstrapperRequest{
-				Cmd:          kbCmdInfo,
-				KeyName:      zonename,
-				Keyid:        keyID,
-				ResponseChan: responseChan,
-			}
-
-			lgSigner.Debug("waiting for response")
-			var verInfo *VerificationInfo
-			select {
-			case verInfo = <-responseChan:
-			case <-time.After(30 * time.Second):
-				lgSigner.Warn("timeout waiting for key bootstrapper response", "zone", zonename, "keyid", keyID)
-			}
-			if verInfo != nil {
-				lgSigner.Debug("received verification info", "info", verInfo)
-				if verInfo.FailedAttempts > 0 {
-					state = edns0.KeyStateValidationFail
-				} else {
-					state = edns0.KeyStateBootstrapAutoOngoing
-				}
-			} else {
-				state = edns0.KeyStateValidationFail
-			}
-
-			lgSigner.Debug("response received")
+			// Key is validated but not yet trusted — verification is pending or hasn't started.
+			state = edns0.KeyStateBootstrapAutoOngoing
 		} else {
 			state = edns0.KeyStateInvalid
 		}
-		lgSigner.Debug("determined key state", "state", state)
+		lgSigner.Debug("determined key state", "zone", zonename, "keyid", keyID,
+			"validated", key.Validated, "trusted", key.Trusted, "state", state)
 		return &edns0.KeyStateOption{
 			KeyID:     keyID,
 			KeyState:  state,

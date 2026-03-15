@@ -153,6 +153,12 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 		}
 	}
 
+	// Make the IMR available to other engines before trust anchor initialization,
+	// which may block on network queries (e.g. root DNSKEY validation).
+	conf.Internal.ImrEngine = imr
+	Globals.ImrEngine = imr
+	lgImr.Info("ImrEngine available (pre-trust-anchor)")
+
 	// Initialize trust anchors (DS/DNSKEY) and validate root (.) DNSKEY and NS
 	if err := imr.initializeImrTrustAnchors(ctx, conf); err != nil {
 		lgImr.Warn("trust anchor initialization failed", "err", err)
@@ -160,9 +166,6 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 
 	// Start the ImrEngine (i.e. the recursive nameserver responding to queries with RD bit set)
 	go imr.StartImrEngineListeners(ctx, conf)
-
-	conf.Internal.ImrEngine = imr
-	Globals.ImrEngine = imr
 
 	for {
 		select {
@@ -255,6 +258,23 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		Msg:       "ImrEngine: request to look up a RRset",
 	}
 
+	// validateResponse attempts DNSSEC validation of the response RRset.
+	validateResponse := func() {
+		if resp.RRset == nil || len(resp.RRset.RRs) == 0 {
+			return
+		}
+		vstate, err := imr.Cache.ValidateRRsetWithParentZone(ctx, resp.RRset,
+			imr.IterativeDNSQueryFetcher(), imr.ParentZone)
+		if err != nil {
+			lgImr.Debug("ImrQuery: DNSSEC validation failed", "qname", qname, "qtype", dns.TypeToString[qtype], "err", err)
+			return
+		}
+		if vstate == cache.ValidationStateSecure {
+			resp.Validated = true
+			lgImr.Debug("ImrQuery: DNSSEC validated", "qname", qname, "qtype", dns.TypeToString[qtype])
+		}
+	}
+
 	// If a response channel is provided, use it to send responses
 	if respch != nil {
 		defer func() {
@@ -279,6 +299,11 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 			// These are direct answers or negative responses - safe to use
 			lgImr.Debug("ImrQuery: cache hit", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
 			resp.RRset = crrset.RRset
+			if crrset.State == cache.ValidationStateSecure {
+				resp.Validated = true
+			} else {
+				validateResponse()
+			}
 			return &resp, nil
 		case cache.ContextReferral, cache.ContextGlue, cache.ContextHint, cache.ContextPriming, cache.ContextFailure:
 			// These are indirect - issue a direct query to upgrade quality and get DNSSEC signatures
@@ -345,6 +370,7 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 				return &resp, err
 			}
 			if done {
+				validateResponse()
 				return &resp, nil
 			}
 			// If we get here, we tried all responses without finding a usable address
@@ -373,6 +399,7 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 		if rrset != nil {
 			lgImr.Debug("ImrQuery: received response from IterativeDNSQuery", "count", len(rrset.RRs))
 			resp.RRset = rrset
+			validateResponse()
 			return &resp, nil
 		}
 		if rcode == dns.RcodeNameError {

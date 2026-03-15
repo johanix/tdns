@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -43,6 +44,7 @@ type LeaderElectionManager struct {
 	leaderTTL            time.Duration
 	broadcastFunc        func(zone ZoneName, rfiType string, records map[string][]string) error
 	operationalPeersFunc func(zone ZoneName) int   // returns count of operational peers for a zone
+	configuredPeersFunc  func(zone ZoneName) int   // returns count of configured peers for a zone
 	onLeaderElected      func(zone ZoneName) error // called when local agent wins election
 }
 
@@ -61,6 +63,25 @@ func (lem *LeaderElectionManager) SetOperationalPeersFunc(f func(zone ZoneName) 
 	lem.operationalPeersFunc = f
 }
 
+// SetConfiguredPeersFunc sets the callback that returns the number of configured
+// peers for a zone (from HSYNC3 records, minus self). Elections require ALL
+// configured peers to participate — partial elections are aborted.
+func (lem *LeaderElectionManager) SetConfiguredPeersFunc(f func(zone ZoneName) int) {
+	lem.configuredPeersFunc = f
+}
+
+// configuredPeers returns the number of configured peers for a zone.
+// Falls back to operationalPeersFunc if configuredPeersFunc is not set.
+func (lem *LeaderElectionManager) configuredPeers(zone ZoneName) int {
+	if lem.configuredPeersFunc != nil {
+		return lem.configuredPeersFunc(zone)
+	}
+	if lem.operationalPeersFunc != nil {
+		return lem.operationalPeersFunc(zone)
+	}
+	return 0
+}
+
 // SetOnLeaderElected sets the callback invoked when the local agent wins an election.
 // Used to trigger delegation sync setup (SIG(0) key generation + bootstrap with parent).
 func (lem *LeaderElectionManager) SetOnLeaderElected(f func(zone ZoneName) error) {
@@ -77,35 +98,50 @@ func (lem *LeaderElectionManager) DeferElection(zone ZoneName) {
 }
 
 // NotifyPeerOperational is called when a peer becomes operational.
-// Checks if any deferred elections for the peer's zones can now proceed.
+// Checks if deferred elections or leaderless zones can now hold elections.
+// Elections require ALL configured peers to be operational.
 func (lem *LeaderElectionManager) NotifyPeerOperational(peerZones map[ZoneName]bool) {
-	lem.mu.RLock()
-	if len(lem.pendingElections) == 0 {
-		lem.mu.RUnlock()
-		return
-	}
+	// Collect zones that need an election: either deferred or leaderless
+	var candidates []ZoneName
 
-	// Collect zones that are both pending and shared with this peer
-	var ready []ZoneName
+	lem.mu.RLock()
 	for zone := range peerZones {
 		if lem.pendingElections[zone] {
-			ready = append(ready, zone)
+			candidates = append(candidates, zone)
+			continue
+		}
+		// Also check if this zone has no active leader (expired or never elected)
+		if le, ok := lem.elections[zone]; ok {
+			le.mu.Lock()
+			needsElection := le.Leader == "" || time.Now().After(le.LeaderExpiry)
+			le.mu.Unlock()
+			if needsElection {
+				candidates = append(candidates, zone)
+			}
 		}
 	}
 	lem.mu.RUnlock()
 
-	for _, zone := range ready {
-		peers := 0
+	if len(candidates) == 0 {
+		return
+	}
+
+	for _, zone := range candidates {
+		operational := 0
 		if lem.operationalPeersFunc != nil {
-			peers = lem.operationalPeersFunc(zone)
+			operational = lem.operationalPeersFunc(zone)
 		}
-		if peers > 0 {
-			lgElect.Info("deferred election can now proceed, peers are operational",
-				"zone", zone, "operational_peers", peers)
+		configured := lem.configuredPeers(zone)
+		if configured > 0 && operational >= configured {
+			lgElect.Info("all configured peers operational, starting election",
+				"zone", zone, "operational", operational, "configured", configured)
 			lem.mu.Lock()
 			delete(lem.pendingElections, zone)
 			lem.mu.Unlock()
-			lem.StartElection(zone, peers)
+			lem.StartElection(zone, configured)
+		} else if operational > 0 {
+			lgElect.Debug("waiting for all configured peers before election",
+				"zone", zone, "operational", operational, "configured", configured)
 		}
 	}
 }
@@ -371,6 +407,7 @@ func (lem *LeaderElectionManager) handleConfirm(zone ZoneName, senderID AgentId,
 }
 
 // onVoteTimeout is called when the vote collection timer expires.
+// If not all expected peers voted, the election is aborted — no partial elections.
 func (lem *LeaderElectionManager) onVoteTimeout(zone ZoneName, term uint64) {
 	le := lem.getOrCreate(zone)
 	le.mu.Lock()
@@ -378,9 +415,18 @@ func (lem *LeaderElectionManager) onVoteTimeout(zone ZoneName, term uint64) {
 		le.mu.Unlock()
 		return
 	}
+
+	collected := len(le.Votes)
+	expected := le.ExpectedPeers + 1 // peers + self
+	if collected < expected {
+		le.Active = false
+		le.mu.Unlock()
+		lgElect.Warn("election aborted: not all peers voted, cannot elect without full participation",
+			"zone", zone, "term", term, "votes", collected, "expected", expected)
+		return
+	}
 	le.mu.Unlock()
 
-	lgElect.Info("vote timeout, determining winner with available votes", "zone", zone, "term", term)
 	lem.determineAndConfirm(zone, term)
 }
 
@@ -420,8 +466,26 @@ func (lem *LeaderElectionManager) determineAndConfirm(zone ZoneName, term uint64
 }
 
 // onConfirmTimeout is called when the confirm collection timer expires.
+// If not all expected peers confirmed, the election is aborted — no partial elections.
 func (lem *LeaderElectionManager) onConfirmTimeout(zone ZoneName, term uint64) {
-	lgElect.Info("confirm timeout, finalizing with available confirms", "zone", zone, "term", term)
+	le := lem.getOrCreate(zone)
+	le.mu.Lock()
+	if !le.Active || le.Term != term {
+		le.mu.Unlock()
+		return
+	}
+
+	collected := len(le.Confirms)
+	expected := le.ExpectedPeers + 1
+	if collected < expected {
+		le.Active = false
+		le.mu.Unlock()
+		lgElect.Warn("election aborted: not all peers confirmed, cannot elect without full participation",
+			"zone", zone, "term", term, "confirms", collected, "expected", expected)
+		return
+	}
+	le.mu.Unlock()
+
 	lem.finalizeElection(zone, term)
 }
 
@@ -486,18 +550,27 @@ func (lem *LeaderElectionManager) scheduleReelection(le *LeaderElection) {
 	}
 	zone := le.Zone
 	le.ReelectTimer = time.AfterFunc(lem.leaderTTL*9/10, func() {
-		// Count operational peers at re-election time, not at schedule time.
-		peers := le.ExpectedPeers // fallback to last known count
+		configured := lem.configuredPeers(zone)
+		operational := 0
 		if lem.operationalPeersFunc != nil {
-			peers = lem.operationalPeersFunc(zone)
+			operational = lem.operationalPeersFunc(zone)
 		}
-		if peers == 0 {
-			// No operational peers — just re-self-elect, no messages needed
-			lgElect.Info("leader TTL expiring, no operational peers, re-self-electing", "zone", zone)
+
+		if configured == 0 {
+			// Truly single agent — self-elect
+			lgElect.Info("leader TTL expiring, single agent, re-self-electing", "zone", zone)
 			lem.StartElection(zone, 0)
+		} else if operational >= configured {
+			// All configured peers are operational — hold election
+			lgElect.Info("leader TTL expiring, all peers operational, triggering re-election",
+				"zone", zone, "operational", operational, "configured", configured)
+			lem.StartElection(zone, configured)
 		} else {
-			lgElect.Info("leader TTL expiring, triggering re-election", "zone", zone, "operational_peers", peers)
-			lem.StartElection(zone, peers)
+			// Not all configured peers are reachable — cannot elect.
+			// Leader TTL will expire, causing a change freeze until peers reconnect.
+			lgElect.Warn("leader TTL expiring, not all configured peers operational — no election, change freeze",
+				"zone", zone, "operational", operational, "configured", configured)
+			lem.DeferElection(zone)
 		}
 	})
 }
@@ -621,18 +694,20 @@ type DsyncSchemeInfo struct {
 
 // ParentSyncStatus holds on-demand status information about parent delegation sync for a zone.
 type ParentSyncStatus struct {
-	Zone           ZoneName        `json:"zone"`
-	Leader         AgentId         `json:"leader"`
-	LeaderExpiry   time.Time       `json:"leader_expiry"`
-	ElectionTerm   uint64          `json:"election_term"`
-	IsLeader       bool            `json:"is_leader"`
-	KeyAlgorithm   string          `json:"key_algorithm,omitempty"`
-	KeyID          uint16          `json:"key_id,omitempty"`
-	KeyRR          string          `json:"key_rr,omitempty"`
-	ApexPublished  bool            `json:"apex_published"`
-	ChildNS        []string        `json:"child_ns,omitempty"`
-	KeyPublication map[string]bool `json:"key_publication,omitempty"`
-	LastChecked    time.Time       `json:"last_checked"`
+	Zone            ZoneName        `json:"zone"`
+	Leader          AgentId         `json:"leader"`
+	LeaderExpiry    time.Time       `json:"leader_expiry"`
+	ElectionTerm    uint64          `json:"election_term"`
+	IsLeader        bool            `json:"is_leader"`
+	KeyAlgorithm    string          `json:"key_algorithm,omitempty"`
+	KeyID           uint16          `json:"key_id,omitempty"`
+	KeyRR           string          `json:"key_rr,omitempty"`
+	ApexPublished   bool            `json:"apex_published"`
+	ParentState     uint8           `json:"parent_state"`
+	ParentStateName string          `json:"parent_state_name,omitempty"`
+	ChildNS         []string        `json:"child_ns,omitempty"`
+	KeyPublication  map[string]bool `json:"key_publication,omitempty"`
+	LastChecked     time.Time       `json:"last_checked"`
 
 	// Sync scheme info from parent DSYNC discovery
 	ParentZone   string            `json:"parent_zone,omitempty"`
@@ -685,6 +760,15 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *ZoneDat
 		status.KeyAlgorithm = dns.AlgorithmToString[key.Algorithm]
 		status.KeyID = key.KeyId
 		status.KeyRR = key.KeyRR.String()
+
+		// Read parent_state from keystore
+		var parentState int
+		row := kdb.DB.QueryRow("SELECT COALESCE(parent_state, 0) FROM Sig0KeyStore WHERE zonename=? AND keyid=?",
+			targetName, key.KeyId)
+		if err := row.Scan(&parentState); err == nil {
+			status.ParentState = uint8(parentState)
+			status.ParentStateName = edns0.KeyStateToString(uint8(parentState))
+		}
 	}
 
 	// 3. Check apex records

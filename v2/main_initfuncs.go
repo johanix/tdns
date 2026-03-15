@@ -791,6 +791,7 @@ func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error 
 	startEngine(&Globals.App, "ZoneUpdaterEngine", func() error { return kdb.ZoneUpdaterEngine(ctx) })
 	startEngine(&Globals.App, "DeferredUpdaterEngine", func() error { return kdb.DeferredUpdaterEngine(ctx) })
 	startEngine(&Globals.App, "UpdateHandler", func() error { return UpdateHandler(ctx, conf) })
+	startEngine(&Globals.App, "KeyBootstrapper", func() error { return kdb.KeyBootstrapper(ctx) })
 	startEngine(&Globals.App, "DelegationSyncher", func() error {
 		return kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ, conf)
 	})
@@ -861,8 +862,12 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 		conf.Internal.TransportManager.StartReliableQueue(ctx)
 	}
 	// Leader election manager for coordinated parent delegation sync (DDNS)
+	leaderTTL := viper.GetDuration("delegationsync.leader-election-ttl")
+	if leaderTTL == 0 {
+		leaderTTL = 60 * time.Minute
+	}
 	lem := NewLeaderElectionManager(
-		AgentId(conf.Agent.Identity), 5*time.Minute,
+		AgentId(conf.Agent.Identity), leaderTTL,
 		func(zone ZoneName, rfiType string, records map[string][]string) error {
 			return conf.Internal.AgentRegistry.broadcastElectToZone(zone, rfiType, records)
 		},
@@ -883,6 +888,27 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 		}
 		return count
 	})
+	// Wire configured peers counter — elections require ALL configured peers.
+	lem.SetConfiguredPeersFunc(func(zone ZoneName) int {
+		zd, exists := Zones.Get(string(zone))
+		if !exists || zd == nil {
+			return 0
+		}
+		apex, err := zd.GetOwner(zd.ZoneName)
+		if err != nil || apex == nil {
+			return 0
+		}
+		hsync3RRset, exists := apex.RRtypes.Get(core.TypeHSYNC3)
+		if !exists {
+			return 0
+		}
+		// HSYNC3 records include self, so configured peers = count - 1
+		count := len(hsync3RRset.RRs) - 1
+		if count < 0 {
+			count = 0
+		}
+		return count
+	})
 	// Attach leader election OnFirstLoad callbacks to zone stubs.
 	// Must happen here (not in ParseZones) because LeaderElectionManager
 	// doesn't exist until StartAgent runs.
@@ -896,29 +922,21 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 				if !zd.Options[OptDelSyncChild] {
 					return
 				}
-				hsync3Count := 0
-				if apex, err := zd.GetOwner(zd.ZoneName); err == nil && apex != nil {
-					if rrset, exists := apex.RRtypes.Get(core.TypeHSYNC3); exists {
-						hsync3Count = len(rrset.RRs)
+				zone := ZoneName(zd.ZoneName)
+				configured := lem.configuredPeers(zone)
+				if configured == 0 {
+					// Single agent — self-elect immediately
+					lem.StartElection(zone, 0)
+				} else {
+					// Multi-agent — require all configured peers to be operational
+					operational := 0
+					if lem.operationalPeersFunc != nil {
+						operational = lem.operationalPeersFunc(zone)
 					}
-				}
-				ar := conf.Internal.AgentRegistry
-				if hsync3Count <= 1 {
-					lem.StartElection(ZoneName(zd.ZoneName), 0)
-				} else if ar != nil {
-					zad, err := ar.GetZoneAgentData(ZoneName(zd.ZoneName))
-					if err == nil {
-						operationalPeers := 0
-						for _, agent := range zad.Agents {
-							if agent.IsAnyTransportOperational() {
-								operationalPeers++
-							}
-						}
-						if operationalPeers > 0 {
-							lem.StartElection(ZoneName(zd.ZoneName), operationalPeers)
-						} else {
-							lem.DeferElection(ZoneName(zd.ZoneName))
-						}
+					if operational >= configured {
+						lem.StartElection(zone, configured)
+					} else {
+						lem.DeferElection(zone)
 					}
 				}
 			})
@@ -1050,6 +1068,14 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 		}
 		if err := tm.EnqueueForZoneAgents(zone, agentUpdate, distID); err != nil {
 			lgElect.Error("failed to enqueue KEY for remote agents", "zone", zone, "err", err)
+		}
+
+		// Step e: trigger KeyState inquiry + bootstrap with parent (async).
+		// Only if HSYNCPARAM says parentsync=agent.
+		if zd.Options[OptDelSyncChild] {
+			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
+			algorithm := sak.Keys[0].KeyRR.Algorithm
+			go conf.parentSyncAfterKeyPublication(zone, keyName, keyid, algorithm)
 		}
 
 		return nil

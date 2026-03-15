@@ -198,6 +198,20 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+Sig0StateActive)
 		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+Sig0StateRetired)
 
+	case "setparentstate":
+		const setParentStateSql = "UPDATE Sig0KeyStore SET parent_state=? WHERE zonename=? AND keyid=?"
+		res, err = tx.Exec(setParentStateSql, kp.ParentState, kp.Keyname, kp.Keyid)
+		if err != nil {
+			lgSigner.Error("failed to set SIG(0) key parent_state", "err", err)
+			return &resp, err
+		}
+		rows, _ := res.RowsAffected()
+		if rows > 0 {
+			resp.Msg = fmt.Sprintf("Updated parent_state to %d for key %s (keyid %d)", kp.ParentState, kp.Keyname, kp.Keyid)
+		} else {
+			resp.Msg = fmt.Sprintf("Key with name %q and keyid %d not found", kp.Keyname, kp.Keyid)
+		}
+
 	case "delete":
 		const getSig0KeySql = `
 SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`

@@ -577,29 +577,11 @@ func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 			agent.DnsDetails.LastContactTime = time.Now()
 			tm.agentRegistry.S.Set(agent.Identity, agent)
 
-			// When a peer first becomes operational, trigger leader election for shared zones
+			// When a peer first becomes operational, check if all configured peers
+			// are now operational. Elections require full participation.
 			if !wasOperational && tm.agentRegistry.LeaderElectionManager != nil {
-				for zone := range agent.Zones {
-					zd, exists := Zones.Get(string(zone))
-					if exists && zd.Options[OptDelSyncChild] {
-						operationalPeers := 0
-						if zad, err := tm.agentRegistry.GetZoneAgentData(zone); err == nil {
-							for _, a := range zad.Agents {
-								if a.Identity != AgentId(tm.agentRegistry.LocalAgent.Identity) && a.IsAnyTransportOperational() {
-									operationalPeers++
-								}
-							}
-						}
-						lgTransport.Info("peer became operational, triggering leader election",
-							"peer", senderID, "zone", zone, "operational_peers", operationalPeers)
-						tm.agentRegistry.LeaderElectionManager.StartElection(zone, operationalPeers)
-					}
-				}
-			}
-
-			// Check deferred elections — zones where election was postponed during
-			// startup because peers weren't operational yet.
-			if tm.agentRegistry.LeaderElectionManager != nil && len(agent.Zones) > 0 {
+				// NotifyPeerOperational handles both deferred elections and
+				// new elections — it checks configured vs operational counts.
 				tm.agentRegistry.LeaderElectionManager.NotifyPeerOperational(agent.Zones)
 			}
 		}

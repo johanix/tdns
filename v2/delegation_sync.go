@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -22,16 +21,8 @@ const (
 
 func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan DelegationSyncRequest, notifyq chan NotifyRequest, conf *Config) error {
 
-	lgDns.Info("DelegationSyncher: sleeping for 2 seconds to allow ImrEngine to start")
-	time.Sleep(2 * time.Second)
-
-	if conf.Internal.ImrEngine == nil {
-		lgDns.Error("DelegationSyncher: imr is nil, terminating")
-		return fmt.Errorf("DelegationSyncher: imr is nil")
-	}
-
-	imr := conf.Internal.ImrEngine
 	lgDns.Info("DelegationSyncher: starting")
+	imr := func() *Imr { return conf.Internal.ImrEngine }
 	var err error
 	for {
 		select {
@@ -70,7 +61,7 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 			case "DELEGATION-STATUS":
 				lgDns.Info("DelegationSyncher: request for delegation status", "zone", zd.ZoneName)
 
-				syncstate, err := zd.AnalyseZoneDelegation(imr)
+				syncstate, err := zd.AnalyseZoneDelegation(imr())
 				if err != nil {
 					lgDns.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					syncstate.Error = true
@@ -98,14 +89,14 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 
 				zd := ds.ZoneData
 				if zd.Parent == "" || zd.Parent == "." {
-					zd.Parent, err = imr.ParentZone(zd.ZoneName)
+					zd.Parent, err = imr().ParentZone(zd.ZoneName)
 					if err != nil {
 						lgDns.Error("DelegationSyncher: error from ParentZone, ignoring sync request", "zone", ds.ZoneName, "err", err)
 						continue
 					}
 				}
 
-				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, kdb, notifyq, ds.SyncStatus, imr)
+				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, kdb, notifyq, ds.SyncStatus, imr())
 				if err != nil {
 					lgDns.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					continue
@@ -116,7 +107,7 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 			case "EXPLICIT-SYNC-DELEGATION":
 				lgDns.Info("DelegationSyncher: request for explicit delegation sync", "zone", ds.ZoneName)
 
-				syncstate, err := zd.AnalyseZoneDelegation(imr)
+				syncstate, err := zd.AnalyseZoneDelegation(imr())
 				if err != nil {
 					lgDns.Error("DelegationSyncher: error from AnalyseZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					syncstate.Error = true
@@ -137,7 +128,7 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				}
 
 				// Not in sync, let's fix that.
-				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, kdb, notifyq, syncstate, imr)
+				msg, rcode, ur, err := zd.SyncZoneDelegation(ctx, kdb, notifyq, syncstate, imr())
 				if err != nil {
 					lgDns.Error("DelegationSyncher: error from SyncZoneDelegation, ignoring sync request", "zone", ds.ZoneName, "err", err)
 					syncstate.Error = true

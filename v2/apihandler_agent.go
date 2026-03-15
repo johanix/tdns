@@ -18,6 +18,7 @@ import (
 
 	"github.com/johanix/tdns/v2/agent/transport"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -603,16 +604,70 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				resp.ErrorMsg = "leader election manager not initialized"
 				return
 			}
-			peers := 0
-			if zad, err := conf.Internal.AgentRegistry.GetZoneAgentData(amp.Zone); err == nil {
-				for _, agent := range zad.Agents {
-					if agent.Identity != AgentId(conf.Agent.Identity) && agent.IsAnyTransportOperational() {
-						peers++
-					}
-				}
+			configured := lem.configuredPeers(amp.Zone)
+			operational := 0
+			if lem.operationalPeersFunc != nil {
+				operational = lem.operationalPeersFunc(amp.Zone)
 			}
-			lem.StartElection(amp.Zone, peers)
-			resp.Msg = fmt.Sprintf("Election started for zone %s with %d operational peers", amp.Zone, peers)
+			if configured > 0 && operational < configured {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("cannot start election: only %d of %d configured peers are operational", operational, configured)
+				return
+			}
+			lem.StartElection(amp.Zone, configured)
+			resp.Msg = fmt.Sprintf("Election started for zone %s with %d peers", amp.Zone, configured)
+
+		case "parentsync-inquire":
+			imr := conf.Internal.ImrEngine
+			if imr == nil {
+				resp.Error = true
+				resp.ErrorMsg = "IMR engine not available"
+				return
+			}
+			sak, err := kdb.GetSig0Keys(string(amp.Zone), Sig0StateActive)
+			if err != nil || len(sak.Keys) == 0 {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("no active SIG(0) key for zone %s", amp.Zone)
+				return
+			}
+			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
+			keyState, extra, err := queryParentKeyStateDetailed(kdb, imr, string(amp.Zone), keyid)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("KeyState inquiry failed: %v", err)
+				return
+			}
+			resp.Data = map[string]interface{}{
+				"zone":       string(amp.Zone),
+				"keyid":      keyid,
+				"state":      keyState,
+				"state_name": edns0.KeyStateToString(keyState),
+				"extra_text": extra,
+			}
+			resp.Msg = fmt.Sprintf("Parent says: %s", edns0.KeyStateToString(keyState))
+
+		case "parentsync-bootstrap":
+			lem := conf.Internal.LeaderElectionManager
+			if lem == nil {
+				resp.Error = true
+				resp.ErrorMsg = "leader election manager not initialized"
+				return
+			}
+			if !lem.IsLeader(amp.Zone) {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("this agent is not the delegation sync leader for %s", amp.Zone)
+				return
+			}
+			sak, err := kdb.GetSig0Keys(string(amp.Zone), Sig0StateActive)
+			if err != nil || len(sak.Keys) == 0 {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("no active SIG(0) key for zone %s", amp.Zone)
+				return
+			}
+			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
+			algorithm := sak.Keys[0].KeyRR.Algorithm
+			go conf.parentSyncAfterKeyPublication(amp.Zone, string(amp.Zone), keyid, algorithm)
+			resp.Msg = fmt.Sprintf("Bootstrap triggered for zone %s (keyid %d), running async", amp.Zone, keyid)
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown agent command: %s", amp.Command)

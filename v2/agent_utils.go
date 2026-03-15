@@ -1014,21 +1014,23 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 	}
 
 	// Trigger leader election if HSYNC3 RRset changed and we have a leader election manager.
-	// Only count operational peers — an election with non-operational peers is pointless
-	// (messages won't reach them, leading to split elections where both agents win).
+	// Elections require ALL configured peers to be operational.
 	if len(updatedIdentities) > 0 && ar.LeaderElectionManager != nil {
-		zad, err := ar.GetZoneAgentData(zonename)
-		if err == nil {
-			operationalPeers := 0
-			for _, agent := range zad.Agents {
-				if agent.Identity != AgentId(ar.LocalAgent.Identity) && agent.IsAnyTransportOperational() {
-					operationalPeers++
-				}
+		lem := ar.LeaderElectionManager
+		configured := lem.configuredPeers(zonename)
+		if configured == 0 {
+			lem.StartElection(zonename, 0)
+		} else {
+			operational := 0
+			if lem.operationalPeersFunc != nil {
+				operational = lem.operationalPeersFunc(zonename)
 			}
-			if operationalPeers > 0 {
-				ar.LeaderElectionManager.StartElection(zonename, operationalPeers)
+			if operational >= configured {
+				lem.StartElection(zonename, configured)
 			} else {
-				lgAgent.Debug("deferring leader election, no operational peers yet", "zone", zonename)
+				lgAgent.Debug("deferring leader election, not all configured peers operational",
+					"zone", zonename, "operational", operational, "configured", configured)
+				lem.DeferElection(zonename)
 			}
 		}
 	}
