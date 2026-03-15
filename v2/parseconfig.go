@@ -718,6 +718,24 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 				})
 			}
 
+			// Parent delegation backend: initialize on parent zones that accept child updates.
+			if options[OptDelSyncParent] && options[OptAllowChildUpdates] && zconf.DelegationBackend != "" {
+				backendName := zconf.DelegationBackend
+				kdb := conf.Internal.KeyDB
+				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
+					if kdb == nil {
+						return
+					}
+					backend, err := LookupDelegationBackend(backendName, kdb, zd)
+					if err != nil {
+						lgConfig.Error("failed to create delegation backend", "zone", zd.ZoneName, "backend", backendName, "error", err)
+						return
+					}
+					zd.DelegationBackend = backend
+					lgConfig.Info("delegation backend initialized", "zone", zd.ZoneName, "backend", backend.Name())
+				})
+			}
+
 			// Leader election OnFirstLoad is registered in StartAgent() (not here)
 			// because LeaderElectionManager doesn't exist until StartAgent runs.
 

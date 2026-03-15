@@ -65,6 +65,13 @@ childsync:          # What to do when we are the child
                         sync-on-boot:     false
                         syncwithparent:   true
 
+# Named delegation backends for parent zones that receive child UPDATEs.
+# Predefined: "db" and "direct" (no config needed).
+# delegation-backends:
+#   - name:       files-dnslab
+#     type:       zonefile
+#     directory:  /var/lib/tdns/delegations/dnslab
+
 delegationsync:
                         parent:
                            # in parent zones, we support these schemes, and will publish DSYNC RRs

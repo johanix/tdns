@@ -150,11 +150,38 @@ var ddnsUploadCmd = &cobra.Command{
 	},
 }
 
+var delExportCmd = &cobra.Command{
+	Use:   "export",
+	Short: "Export delegation data from a parent zone's backend to a zone file",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+		outfile, _ := cmd.Flags().GetString("outfile")
+		if outfile == "" {
+			fmt.Println("Error: --outfile is required")
+			os.Exit(1)
+		}
+
+		dr, err := SendDelegationCmd(tdns.Globals.Api, tdns.DelegationPost{
+			Command: "export",
+			Zone:    tdns.Globals.Zonename,
+			Outfile: outfile,
+		})
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		fmt.Println(dr.Msg)
+	},
+}
+
 func init() {
-	DelCmd.AddCommand(delStatusCmd, delSyncCmd)
+	DelCmd.AddCommand(delStatusCmd, delSyncCmd, delExportCmd)
 	delSyncCmd.Flags().StringVarP(&schemestr, "scheme", "S", "", "Scheme to use for synchronization of delegation")
 
 	delSyncCmd.MarkFlagRequired("zone")
+
+	delExportCmd.Flags().String("outfile", "", "Destination file path (required)")
 
 	DdnsCmd.AddCommand(ddnsRollCmd, ddnsUploadCmd)
 

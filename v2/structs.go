@@ -97,6 +97,7 @@ type ZoneData struct {
 	ParentNS           []string              // names of parent nameservers
 	ParentServers      []string              // addresses of parent nameservers
 	Children           map[string]*ChildDelegationData
+	DelegationBackend  DelegationBackend // parent-side: backend for storing child delegation data
 	Options            map[ZoneOption]bool
 	UpdatePolicy       UpdatePolicy
 	DnssecPolicy       *DnssecPolicy
@@ -222,10 +223,11 @@ type ZoneConf struct {
 	Options       []ZoneOption `yaml:"-" mapstructure:"-"` // Ignore during both yaml and mapstructure decoding
 	Frozen        bool         // true if zone is frozen; not a config param
 	Dirty         bool         // true if zone has been modified; not a config param
-	UpdatePolicy  UpdatePolicyConf
-	DnssecPolicy  string
-	Template      string
-	MultiSigner   string
+	UpdatePolicy       UpdatePolicyConf
+	DelegationBackend string `yaml:"delegation-backend" mapstructure:"delegation-backend"` // named backend for child delegation data
+	DnssecPolicy      string
+	Template          string
+	MultiSigner       string
 	Error         bool      // zone is broken and cannot be used
 	ErrorType     ErrorType // "config" | "refresh" | "agent" | "DNSSEC"
 	ErrorMsg      string    // reason for the error (if known)

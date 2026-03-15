@@ -146,10 +146,11 @@ type ConfigResponse struct {
 }
 
 type DelegationPost struct {
-	Command string // status | sync | ...
+	Command string // status | sync | export | ...
 	Scheme  uint8  // 1=notify | 2=update
 	Zone    string
 	Force   bool
+	Outfile string `json:"outfile,omitempty"` // for "export": destination file path
 }
 
 type DelegationResponse struct {

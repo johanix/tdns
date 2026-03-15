@@ -90,29 +90,40 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				continue
 
 			case "CHILD-UPDATE":
-				// This is the case where a DNS UPDATE contains updates to child delegation information.
-				// Either we are the primary (in which case we have the ability to directly modify the contents of the zone),
-				// or we are a secondary (i.e. we are an agent) in which case we have the ability to record the changes in the DB).
+				// Child delegation data update: dispatch to the configured DelegationBackend.
 				lg.Debug("ZoneUpdater: CHILD-UPDATE request", "zone", ur.ZoneName, "actions", len(ur.Actions))
 				lg.Debug("ZoneUpdater: CHILD-UPDATE actions detail", "actions", SprintUpdates(ur.Actions))
 				if zd.Options[OptAllowChildUpdates] {
-					var updated bool
-					var err error
+					if zd.DelegationBackend != nil {
+						err := zd.DelegationBackend.ApplyChildUpdate(ur.ZoneName, ur)
+						if err != nil {
+							lg.Error("ZoneUpdater: DelegationBackend.ApplyChildUpdate failed",
+								"backend", zd.DelegationBackend.Name(), "error", err)
+						} else {
+							lg.Info("ZoneUpdater: CHILD-UPDATE applied",
+								"zone", ur.ZoneName, "backend", zd.DelegationBackend.Name())
+							zd.Options[OptDirty] = true
+						}
+					} else {
+						// Fallback: no backend configured, use legacy dispatch
+						var updated bool
+						var err error
 
-					switch zd.ZoneType {
-					case Primary:
-						updated, err = zd.ApplyChildUpdateToZoneData(ur, kdb)
-						if err != nil {
-							lg.Error("ZoneUpdater: ApplyChildUpdateToZoneData failed", "error", err)
+						switch zd.ZoneType {
+						case Primary:
+							updated, err = zd.ApplyChildUpdateToZoneData(ur, kdb)
+							if err != nil {
+								lg.Error("ZoneUpdater: ApplyChildUpdateToZoneData failed", "error", err)
+							}
+						case Secondary:
+							err = kdb.ApplyChildUpdateToDB(ur)
+							if err != nil {
+								lg.Error("ZoneUpdater: ApplyChildUpdateToDB failed", "error", err)
+							}
 						}
-					case Secondary:
-						err := kdb.ApplyChildUpdateToDB(ur)
-						if err != nil {
-							lg.Error("ZoneUpdater: ApplyChildUpdateToDB failed", "error", err)
+						if updated {
+							zd.Options[OptDirty] = true
 						}
-					}
-					if updated {
-						zd.Options[OptDirty] = true
 					}
 				}
 
