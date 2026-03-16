@@ -213,7 +213,9 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 		switch amp.Command {
 		case "config":
 			tmp := SanitizeForJSON(conf.MultiProvider)
-			resp.AgentConfig = tmp.(MultiProviderConf)
+			if p, ok := tmp.(*MultiProviderConf); ok && p != nil {
+				resp.AgentConfig = *p
+			}
 			resp.AgentConfig.Api.CertData = ""
 			resp.AgentConfig.Api.KeyData = ""
 

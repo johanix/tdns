@@ -534,8 +534,22 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				}
 
 			case "sig0key":
-				zd, ok := Zones.Get(string(ampp.Zone))
-				if !ok || zd == nil || zd.KeyDB == nil {
+				// Verify the requestor is an authorized peer (upstream or downstream) before
+				// returning private key material.
+				isAuthorized := false
+				if zad.MyUpstream == ampp.OriginatorID {
+					isAuthorized = true
+				} else {
+					for _, aid := range zad.MyDownstreams {
+						if aid == ampp.OriginatorID {
+							isAuthorized = true
+							break
+						}
+					}
+				}
+				if !isAuthorized {
+					configErr = fmt.Sprintf("%s: CONFIG sig0key request denied — %q is not an authorized peer for zone %s", ar.LocalAgent.Identity, ampp.OriginatorID, ampp.Zone)
+				} else if zd, ok := Zones.Get(string(ampp.Zone)); !ok || zd == nil || zd.KeyDB == nil {
 					configErr = "zone or KeyDB not available"
 				} else {
 					algorithm, privatekey, keyrr, found, err := zd.KeyDB.GetSig0KeyRaw(string(ampp.Zone), Sig0StateActive)

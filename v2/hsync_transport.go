@@ -1355,10 +1355,10 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 
 	// If a transport was skipped (already past KNOWN) and no transport actively failed,
 	// treat that as success — the peer is already introduced on that transport.
-	if agent.DnsDetails.State >= AgentStateIntroduced && dnsErr == nil {
+	if agent.DnsDetails != nil && agent.DnsDetails.State >= AgentStateIntroduced && dnsErr == nil {
 		return nil, nil
 	}
-	if agent.ApiDetails.State >= AgentStateIntroduced && apiErr == nil {
+	if agent.ApiDetails != nil && agent.ApiDetails.State >= AgentStateIntroduced && apiErr == nil {
 		return nil, nil
 	}
 

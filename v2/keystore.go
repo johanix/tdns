@@ -31,6 +31,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 
 	var localtx = false
 	var err error
+	var txSuccess bool
 
 	if tx == nil {
 		tx, err = kdb.Begin("Sig0KeyMgmt")
@@ -41,10 +42,10 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 	}
 	defer func() {
 		if localtx {
-			if err != nil {
-				tx.Rollback()
-			} else {
+			if txSuccess {
 				tx.Commit()
+			} else {
+				tx.Rollback()
 			}
 		}
 	}()
@@ -263,6 +264,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		lgSigner.Warn("unknown Sig0KeyMgmt subcommand", "subcommand", kp.SubCommand)
 	}
 
+	txSuccess = true
 	return &resp, nil
 }
 
