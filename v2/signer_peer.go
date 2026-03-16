@@ -82,7 +82,7 @@ func (ar *AgentRegistry) InitializeSignerAsPeer(conf *Config) error {
 
 	// Load and register signer's public key for encrypted communication
 	if conf.MultiProvider.Signer.LongTermJosePubKey == "" {
-		return fmt.Errorf("signer configured but agent.signer.long_term_jose_pub_key is not set - encrypted communication to signer is mandatory")
+		return fmt.Errorf("signer configured but multi-provider.signer.long_term_jose_pub_key is not set - encrypted communication to signer is mandatory")
 	}
 
 	if conf.Internal.TransportManager == nil || conf.Internal.TransportManager.DNSTransport == nil || conf.Internal.TransportManager.DNSTransport.SecureWrapper == nil {

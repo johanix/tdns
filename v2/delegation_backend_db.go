@@ -114,6 +114,9 @@ func (b *DBDelegationBackend) GetDelegationData(parentZone, childZone string) (m
 		}
 		result[owner][rrtype] = append(result[owner][rrtype], rr)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration: %w", err)
+	}
 
 	if len(result) == 0 {
 		return nil, fmt.Errorf("no delegation data for %s in zone %s", childZone, parentZone)
@@ -137,6 +140,9 @@ func (b *DBDelegationBackend) ListChildren(parentZone string) ([]string, error) 
 			return nil, fmt.Errorf("scan failed: %w", err)
 		}
 		children = append(children, child)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows iteration: %w", err)
 	}
 	return children, nil
 }

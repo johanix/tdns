@@ -80,7 +80,7 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 	// Load and register combiner's public key for encrypted communication
 	// If combiner is configured, encryption is MANDATORY
 	if conf.MultiProvider.Combiner.LongTermJosePubKey == "" {
-		return fmt.Errorf("combiner configured but agent.combiner.long_term_jose_pub_key is not set - encrypted communication to combiner is mandatory")
+		return fmt.Errorf("combiner configured but multi-provider.combiner.long_term_jose_pub_key is not set - encrypted communication to combiner is mandatory")
 	}
 
 	if conf.Internal.TransportManager == nil || conf.Internal.TransportManager.DNSTransport == nil || conf.Internal.TransportManager.DNSTransport.SecureWrapper == nil {

@@ -133,6 +133,9 @@ func (kdb *KeyDB) ProcessKeyState(ks *edns0.KeyStateOption, zonename string) (*e
 }
 
 func (kdb *KeyDB) HandleKeyStateOption(opt *dns.OPT, zonename string) (*edns0.KeyStateOption, error) {
+	if opt == nil {
+		return nil, nil
+	}
 	for _, o := range opt.Option {
 		if local, ok := o.(*dns.EDNS0_LOCAL); ok {
 			if local.Code == edns0.EDNS0_KEYSTATE_OPTION_CODE {

@@ -58,6 +58,9 @@ func CreateKeyStateOption(keyID uint16, keyState uint8, keyData uint8, extraText
 // ParseKeyStateOption extracts KeyState data from an EDNS0_LOCAL option.
 // Wire format per draft-02: KEY-ID(2) + KEY-STATE(1) + KEY-DATA(1) + EXTRA-TEXT(var) = 4+ bytes
 func ParseKeyStateOption(opt *dns.EDNS0_LOCAL) (*KeyStateOption, error) {
+	if opt == nil {
+		return nil, fmt.Errorf("nil EDNS0_LOCAL option")
+	}
 	if len(opt.Data) < 4 {
 		return nil, fmt.Errorf("invalid KeyState option data length: %d (minimum 4)", len(opt.Data))
 	}
