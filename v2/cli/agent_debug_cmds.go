@@ -169,6 +169,15 @@ var DebugAgentSendRfiCmd = &cobra.Command{
 						}
 					}
 				}
+
+			case rfitype == "EDITS":
+				for aid, rfidata := range amr.RfiResponse {
+					if rfidata.Error {
+						fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
+					} else {
+						fmt.Printf("  %s: %s\n", aid, rfidata.Msg)
+					}
+				}
 			}
 		} else {
 			fmt.Printf("No RFI data in response from agent %q\n", amr.Identity)

@@ -953,7 +953,7 @@ func listPeerSharedZones(conf *Config) []interface{} {
 			if combinerID == "" {
 				combinerID = "combiner" // Default identity
 			}
-			if identity == AgentId(combinerID) {
+			if dns.Fqdn(string(identity)) == dns.Fqdn(combinerID) {
 				agent.mu.RUnlock()
 				return
 			}
@@ -1016,7 +1016,7 @@ func listAgentsForZone(conf *Config, zoneName string) []string {
 			if combinerID == "" {
 				combinerID = "combiner" // Default identity
 			}
-			if identity == AgentId(combinerID) {
+			if dns.Fqdn(string(identity)) == dns.Fqdn(combinerID) {
 				return
 			}
 		}

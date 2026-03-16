@@ -117,11 +117,13 @@ func recordCombinerError(journal *ErrorJournal, distID, sender, messageType, err
 // Expects the standard AgentMsgPost format (OriginatorID/Zone/Records).
 func ParseAgentMsgNotify(data []byte, distributionID string) (*CombinerSyncRequest, error) {
 	var msg struct {
-		OriginatorID string              `json:"OriginatorID"`
-		Zone         string              `json:"Zone"`
-		Records      map[string][]string `json:"Records"`
-		Operations   []core.RROperation  `json:"Operations"`
-		Time         time.Time           `json:"Time"`
+		OriginatorID string                   `json:"OriginatorID"`
+		Zone         string                   `json:"Zone"`
+		ZoneClass    string                   `json:"ZoneClass"`
+		Records      map[string][]string      `json:"Records"`
+		Operations   []core.RROperation       `json:"Operations"`
+		Publish      *core.PublishInstruction `json:"Publish,omitempty"`
+		Time         time.Time                `json:"Time"`
 	}
 	if err := json.Unmarshal(data, &msg); err != nil {
 		return nil, fmt.Errorf("JSON unmarshal failed: %w", err)
@@ -130,7 +132,7 @@ func ParseAgentMsgNotify(data []byte, distributionID string) (*CombinerSyncReque
 	if msg.OriginatorID == "" {
 		return nil, fmt.Errorf("missing OriginatorID")
 	}
-	if msg.Zone == "" {
+	if msg.Zone == "" && msg.ZoneClass != "provider" {
 		return nil, fmt.Errorf("missing Zone")
 	}
 
@@ -148,8 +150,10 @@ func ParseAgentMsgNotify(data []byte, distributionID string) (*CombinerSyncReque
 	return &CombinerSyncRequest{
 		SenderID:       msg.OriginatorID,
 		Zone:           msg.Zone,
+		ZoneClass:      msg.ZoneClass,
 		Records:        records,
 		Operations:     msg.Operations,
+		Publish:        msg.Publish,
 		DistributionID: distributionID,
 		Timestamp:      msg.Time,
 	}, nil

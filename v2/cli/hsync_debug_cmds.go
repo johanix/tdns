@@ -111,14 +111,14 @@ This performs a DNS lookup for the HSYNC records at the zone apex.`,
 		fmt.Printf("Answer section (%d records):\n\n", len(r.Answer))
 
 		if len(r.Answer) == 0 {
-			fmt.Println("No HSYNC records found")
+			fmt.Println("No HSYNC3 records found")
 			return
 		}
 
 		// Parse and display HSYNC3 records (core.HSYNC3: State, Label, Endpoint, Upstream)
 		var lines []string
 		if tdns.Globals.ShowHeaders {
-			lines = append(lines, "Owner|TTL|Class|Type|Label|Endpoint|Upstream")
+			lines = append(lines, "Owner|TTL|Class|Type|Label|Identity|Upstream")
 		}
 		for _, rr := range r.Answer {
 			privRR, ok := rr.(*dns.PrivateRR)
