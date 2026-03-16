@@ -284,6 +284,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, pro
 
 	var localtx = false
 	var err error
+	var txSuccess bool
 
 	if tx == nil {
 		tx, err = kdb.Begin("DnssecKeyMgmt")
@@ -294,11 +295,11 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, pro
 	}
 	defer func() {
 		if localtx {
-			if err != nil {
-				lgSigner.Debug("DnssecKeyMgmt rollback", "err", err)
-				tx.Rollback()
-			} else {
+			if txSuccess {
 				tx.Commit()
+			} else {
+				lgSigner.Debug("DnssecKeyMgmt rollback")
+				tx.Rollback()
 			}
 		}
 	}()
@@ -401,6 +402,9 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, pro
 		}
 		resp.Msg = msg
 		delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+kp.State)
+		if err == nil {
+			txSuccess = true
+		}
 		return &resp, err
 
 	case "setstate":
@@ -549,6 +553,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		resp.ErrorMsg = resp.Msg
 	}
 
+	txSuccess = true
 	return &resp, nil
 }
 

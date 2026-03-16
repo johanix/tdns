@@ -726,8 +726,12 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			// Delegation sync callback: set up DSYNC publication (parent) or
 			// delegation sync monitoring (child) after zone is loaded.
 			if options[OptDelSyncParent] || options[OptDelSyncChild] {
-				delegationSyncQ := conf.Internal.DelegationSyncQ
 				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
+					delegationSyncQ := conf.Internal.DelegationSyncQ
+					if delegationSyncQ == nil {
+						lgConfig.Error("DelegationSyncQ not available in OnFirstLoad", "zone", zd.ZoneName)
+						return
+					}
 					if err := zd.SetupZoneSync(delegationSyncQ); err != nil {
 						lgConfig.Error("SetupZoneSync failed in OnFirstLoad", "zone", zd.ZoneName, "error", err)
 					}
@@ -1297,11 +1301,8 @@ func (conf *Config) normalizeConfigIdentities() {
 		}
 	}
 
-	// Multi-provider identity and agent peers
+	// Multi-provider agent peers and combiner-specific normalization
 	if conf.MultiProvider != nil {
-		if conf.MultiProvider.Identity != "" {
-			conf.MultiProvider.Identity = dns.Fqdn(conf.MultiProvider.Identity)
-		}
 		for _, agent := range conf.MultiProvider.Agents {
 			if agent != nil && agent.Identity != "" {
 				agent.Identity = dns.Fqdn(agent.Identity)

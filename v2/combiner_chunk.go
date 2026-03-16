@@ -671,6 +671,7 @@ func publishSignalKeyToProvider(childZone, nsTarget, senderID string, keyRRs []s
 	for _, rrStr := range keyRRs {
 		rr, err := dns.NewRR(rrStr)
 		if err != nil {
+			lgCombiner.Warn("publishSignalKeyToProvider: bad KEY RR", "rr", rrStr, "err", err)
 			continue
 		}
 		rr.Header().Name = ownerName
@@ -928,7 +929,9 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 			}
 			// MP zones: owner must be at zone apex. Provider zones: any owner within the zone.
 			if isProvider {
-				if !strings.HasSuffix(strings.ToLower(rr.Header().Name), strings.ToLower(zonename)) {
+				lowerOwner := strings.ToLower(rr.Header().Name)
+				lowerZone := strings.ToLower(zonename)
+				if lowerOwner != lowerZone && !strings.HasSuffix(lowerOwner, "."+lowerZone) {
 					rejectedItems = append(rejectedItems, RejectedItem{
 						Record: rrStr,
 						Reason: fmt.Sprintf("owner %q is not within zone %q", rr.Header().Name, zonename),

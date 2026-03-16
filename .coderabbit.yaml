@@ -4,23 +4,10 @@ language: "en-US"
 reviews:
   profile: "chill"
 
-  # Only review Go source under v2/ and cmdv2/, exclude everything else
+  # Only review Go source under v2/ and cmdv2/
   path_filters:
     - "v2/**/*.go"
     - "cmdv2/**/*.go"
-    - "!**/*.mod"
-    - "!**/*.sum"
-    - "!**/*.md"
-    - "!**/*.txt"
-    - "!**/*.rst"
-    - "!**/*.o"
-    - "!**/*.a"
-    - "!**/*.so"
-    - "!**/*.dylib"
-    - "!**/Makefile"
-    - "!**/Makefile~"
-    - "!**/.gitignore"
-    - "!**/.gitattributes"
     - "!**/testdata/**"
     - "!**/fixtures/**"
     - "!**/vendor/**"
