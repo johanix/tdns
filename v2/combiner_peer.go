@@ -20,31 +20,31 @@ import (
 // so that the HsyncEngine's Beat mechanism will automatically send heartbeats to it.
 // This ensures we verify combiner connectivity and get early warning of communication issues.
 func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
-	if conf.Agent == nil || conf.Agent.Combiner == nil {
+	if conf.MultiProvider == nil || conf.MultiProvider.Combiner == nil {
 		lgCombiner.Debug("no combiner configured, skipping peer init")
 		return nil
 	}
 
-	if conf.Agent.Combiner.Address == "" {
+	if conf.MultiProvider.Combiner.Address == "" {
 		lgCombiner.Debug("combiner address not configured, skipping peer init")
 		return nil
 	}
 
 	// Parse combiner address
-	host, portStr, err := net.SplitHostPort(conf.Agent.Combiner.Address)
+	host, portStr, err := net.SplitHostPort(conf.MultiProvider.Combiner.Address)
 	if err != nil {
-		return fmt.Errorf("invalid combiner address %q: %w", conf.Agent.Combiner.Address, err)
+		return fmt.Errorf("invalid combiner address %q: %w", conf.MultiProvider.Combiner.Address, err)
 	}
 
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port < 1 || port > 65535 {
-		return fmt.Errorf("invalid port in combiner address %q", conf.Agent.Combiner.Address)
+		return fmt.Errorf("invalid port in combiner address %q", conf.MultiProvider.Combiner.Address)
 	}
 
 	// Use configured combiner identity, or default to "combiner" for backwards compatibility
 	combinerID := AgentId("combiner")
-	if conf.Agent.Combiner.Identity != "" {
-		combinerID = AgentId(conf.Agent.Combiner.Identity)
+	if conf.MultiProvider.Combiner.Identity != "" {
+		combinerID = AgentId(conf.MultiProvider.Combiner.Identity)
 		lgCombiner.Info("using configured combiner identity", "identity", combinerID)
 	} else {
 		lgCombiner.Warn("no combiner identity configured, using default 'combiner' (agents with chunk_mode=query will fail)")
@@ -75,11 +75,11 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 
 	// Register in AgentRegistry with configured identity
 	ar.S.Set(combinerID, combinerAgent)
-	lgCombiner.Info("registered combiner as virtual peer", "identity", combinerID, "address", conf.Agent.Combiner.Address)
+	lgCombiner.Info("registered combiner as virtual peer", "identity", combinerID, "address", conf.MultiProvider.Combiner.Address)
 
 	// Load and register combiner's public key for encrypted communication
 	// If combiner is configured, encryption is MANDATORY
-	if conf.Agent.Combiner.LongTermJosePubKey == "" {
+	if conf.MultiProvider.Combiner.LongTermJosePubKey == "" {
 		return fmt.Errorf("combiner configured but agent.combiner.long_term_jose_pub_key is not set - encrypted communication to combiner is mandatory")
 	}
 
@@ -93,21 +93,21 @@ func (ar *AgentRegistry) InitializeCombinerAsPeer(conf *Config) error {
 		return fmt.Errorf("PayloadCrypto or Backend not initialized - cannot load combiner public key")
 	}
 
-	combinerPubKeyData, err := os.ReadFile(conf.Agent.Combiner.LongTermJosePubKey)
+	combinerPubKeyData, err := os.ReadFile(conf.MultiProvider.Combiner.LongTermJosePubKey)
 	if err != nil {
-		return fmt.Errorf("failed to read combiner public key from %s: %w", conf.Agent.Combiner.LongTermJosePubKey, err)
+		return fmt.Errorf("failed to read combiner public key from %s: %w", conf.MultiProvider.Combiner.LongTermJosePubKey, err)
 	}
 
 	combinerPubKey, err := payloadCrypto.Backend.ParsePublicKey(combinerPubKeyData)
 	if err != nil {
-		return fmt.Errorf("failed to parse combiner public key from %s: %w", conf.Agent.Combiner.LongTermJosePubKey, err)
+		return fmt.Errorf("failed to parse combiner public key from %s: %w", conf.MultiProvider.Combiner.LongTermJosePubKey, err)
 	}
 
 	// Register combiner's public key for encryption and signature verification
 	payloadCrypto.AddPeerKey(string(combinerID), combinerPubKey)
 	payloadCrypto.AddPeerVerificationKey(string(combinerID), combinerPubKey)
 
-	lgCombiner.Info("loaded combiner public key", "path", conf.Agent.Combiner.LongTermJosePubKey)
+	lgCombiner.Info("loaded combiner public key", "path", conf.MultiProvider.Combiner.LongTermJosePubKey)
 
 	// Perform initial connectivity check
 	if err := performCombinerConnectivityCheck(conf); err != nil {
@@ -126,20 +126,20 @@ func performCombinerConnectivityCheck(conf *Config) error {
 	}
 
 	// Parse combiner address
-	host, portStr, err := net.SplitHostPort(conf.Agent.Combiner.Address)
+	host, portStr, err := net.SplitHostPort(conf.MultiProvider.Combiner.Address)
 	if err != nil {
-		return fmt.Errorf("invalid combiner address %q: %w", conf.Agent.Combiner.Address, err)
+		return fmt.Errorf("invalid combiner address %q: %w", conf.MultiProvider.Combiner.Address, err)
 	}
 
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port < 1 || port > 65535 {
-		return fmt.Errorf("invalid port in combiner address %q", conf.Agent.Combiner.Address)
+		return fmt.Errorf("invalid port in combiner address %q", conf.MultiProvider.Combiner.Address)
 	}
 
 	// Create peer for combiner — use configured identity so CHUNK qname matches
 	combinerID := "combiner"
-	if conf.Agent.Combiner.Identity != "" {
-		combinerID = dns.Fqdn(conf.Agent.Combiner.Identity)
+	if conf.MultiProvider.Combiner.Identity != "" {
+		combinerID = dns.Fqdn(conf.MultiProvider.Combiner.Identity)
 	}
 	peer := transport.NewPeer(combinerID)
 	peer.SetDiscoveryAddress(&transport.Address{

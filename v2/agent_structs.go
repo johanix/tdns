@@ -161,9 +161,9 @@ type AgentRegistry struct {
 	S                     core.ConcurrentMap[AgentId, *Agent]
 	RegularS              map[AgentId]*Agent
 	RemoteAgents          map[ZoneName][]AgentId
-	mu                    sync.RWMutex    // protects remoteAgents
-	LocalAgent            *LocalAgentConf // our own identity
-	LocateInterval        int             // seconds to wait between locating agents (until success)
+	mu                    sync.RWMutex       // protects remoteAgents
+	LocalAgent            *MultiProviderConf // our own identity
+	LocateInterval        int                // seconds to wait between locating agents (until success)
 	helloContexts         map[AgentId]context.CancelFunc
 	TransportManager      *TransportManager      // optional; when set, Hello/Beat/Sync use transport fallback (API → DNS)
 	LeaderElectionManager *LeaderElectionManager // optional; when set, election messages are processed
@@ -348,7 +348,7 @@ type AgentMgmtResponse struct {
 	Agents         []*Agent // used for hsync-agentstatus
 	ZoneAgentData  *ZoneAgentData
 	HsyncRRs       []string
-	AgentConfig    LocalAgentConf
+	AgentConfig    MultiProviderConf
 	RfiType        string
 	RfiResponse    map[AgentId]*RfiData
 	AgentRegistry  *AgentRegistry

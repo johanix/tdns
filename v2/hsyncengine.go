@@ -52,7 +52,7 @@ type DeferredTask struct {
 }
 
 func HsyncEngine(ctx context.Context, conf *Config, msgQs *MsgQs) {
-	ourId := AgentId(conf.Agent.Identity)
+	ourId := AgentId(conf.MultiProvider.Identity)
 
 	helloQ := msgQs.Hello
 	heartbeatQ := msgQs.Beat

@@ -93,7 +93,7 @@ func (zd *ZoneData) CombineWithLocalChanges() (bool, error) {
 				}
 			}
 
-			// Replace RRsets for all RRtypes that exist in the combiner data
+			// Apply RRsets for all RRtypes that exist in the combiner data
 			for _, rrtype := range newOwnerData.RRtypes.Keys() {
 				if zd.Debug {
 					zd.Logger.Printf("CombineWithLocalChanges: Zone %s: Processing local change to owner %q RRtype %s", zd.ZoneName, ownerName, dns.TypeToString[rrtype])
@@ -103,7 +103,14 @@ func (zd *ZoneData) CombineWithLocalChanges() (bool, error) {
 					continue
 				}
 				newRRset, _ := newOwnerData.RRtypes.Get(rrtype)
-				existingOwnerData.RRtypes.Set(rrtype, newRRset)
+				if additiveRRtype(rrtype) && ownerName == zd.ZoneName {
+					// ADD semantics: merge agent contributions on top of zone file baseline
+					merged := zd.mergeWithUpstream(ownerName, rrtype, newRRset)
+					existingOwnerData.RRtypes.Set(rrtype, merged)
+				} else {
+					// REPLACE semantics (existing behavior): DNSKEY, KEY, etc.
+					existingOwnerData.RRtypes.Set(rrtype, newRRset)
+				}
 				modified = true
 			}
 
@@ -114,6 +121,49 @@ func (zd *ZoneData) CombineWithLocalChanges() (bool, error) {
 	}
 
 	return false, fmt.Errorf("not implemented")
+}
+
+// additiveRRtype returns true for RR types where agent contributions should be
+// ADDED on top of the zone file baseline rather than REPLACING it.
+func additiveRRtype(rrtype uint16) bool {
+	return rrtype == dns.TypeNS
+}
+
+// mergeWithUpstream merges agent-contributed RRs on top of the zone file baseline
+// from UpstreamData. Deduplicates by rr.String() (same approach as InjectSignatureTXT).
+// If no upstream baseline exists, returns the agent RRset as-is.
+func (zd *ZoneData) mergeWithUpstream(owner string, rrtype uint16, agentRRset core.RRset) core.RRset {
+	merged := core.RRset{
+		Name:   agentRRset.Name,
+		RRtype: agentRRset.RRtype,
+	}
+
+	// Start with upstream baseline if available
+	if zd.UpstreamData != nil {
+		if upstreamOd, ok := zd.UpstreamData.Get(owner); ok {
+			if baselineRRset, exists := upstreamOd.RRtypes.Get(rrtype); exists {
+				merged.RRs = make([]dns.RR, len(baselineRRset.RRs))
+				copy(merged.RRs, baselineRRset.RRs)
+			}
+		}
+	}
+
+	// Append agent contributions, dedup by rr.String()
+	for _, rr := range agentRRset.RRs {
+		rrStr := rr.String()
+		alreadyPresent := false
+		for _, existing := range merged.RRs {
+			if existing.String() == rrStr {
+				alreadyPresent = true
+				break
+			}
+		}
+		if !alreadyPresent {
+			merged.RRs = append(merged.RRs, rr)
+		}
+	}
+
+	return merged
 }
 
 // AddCombinerData adds or updates local RRsets for the zone from a specific agent.
@@ -200,7 +250,7 @@ func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRse
 	}
 
 	// Inject combiner signature TXT if configured
-	if zd.InjectSignatureTXT(Globals.CombinerConf) {
+	if zd.InjectSignatureTXT(Conf.MultiProvider) {
 		zd.Logger.Printf("AddCombinerData: Zone %q: Signature TXT injected", zd.ZoneName)
 	}
 
@@ -483,7 +533,7 @@ func (zd *ZoneData) RemoveCombinerDataNG(senderID string, data map[string][]stri
 	// Clean up rrtypes with no remaining agent contributions
 	zd.cleanupRemovedRRtypes(data)
 
-	if zd.InjectSignatureTXT(Globals.CombinerConf) {
+	if zd.InjectSignatureTXT(Conf.MultiProvider) {
 		zd.Logger.Printf("RemoveCombinerDataNG: Zone %q: Signature TXT injected", zd.ZoneName)
 	}
 
@@ -552,7 +602,7 @@ func (zd *ZoneData) RemoveCombinerDataByRRtype(senderID string, owner string, rr
 	// Clean up if this rrtype has no remaining contributions from any agent
 	zd.cleanupRemovedRRtype(owner, rrtype)
 
-	if zd.InjectSignatureTXT(Globals.CombinerConf) {
+	if zd.InjectSignatureTXT(Conf.MultiProvider) {
 		zd.Logger.Printf("RemoveCombinerDataByRRtype: Zone %q: Signature TXT injected", zd.ZoneName)
 	}
 
@@ -664,7 +714,7 @@ func (zd *ZoneData) ReplaceCombinerDataByRRtype(senderID, owner string, rrtype u
 	// Clean up if no contributions remain for this rrtype
 	zd.cleanupRemovedRRtype(owner, rrtype)
 
-	if zd.InjectSignatureTXT(Globals.CombinerConf) {
+	if zd.InjectSignatureTXT(Conf.MultiProvider) {
 		zd.Logger.Printf("ReplaceCombinerDataByRRtype: Zone %q: Signature TXT injected", zd.ZoneName)
 	}
 
@@ -674,7 +724,7 @@ func (zd *ZoneData) ReplaceCombinerDataByRRtype(senderID, owner string, rrtype u
 // InjectSignatureTXT adds a combiner signature TXT record to the zone data.
 // The record is placed at "hsync-signature.{zone}" to avoid conflicts with apex TXT records.
 // Returns true if the signature was injected.
-func (zd *ZoneData) InjectSignatureTXT(conf *LocalCombinerConf) bool {
+func (zd *ZoneData) InjectSignatureTXT(conf *MultiProviderConf) bool {
 	if conf == nil || !conf.AddSignature || conf.Signature == "" {
 		return false
 	}

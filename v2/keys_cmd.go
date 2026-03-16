@@ -140,10 +140,10 @@ func runKeysShow(conf *Config, appType AppType, backend crypto.Backend, args []s
 func getKeysPrivKeyPath(conf *Config, appType AppType) string {
 	switch appType {
 	case AppTypeAgent:
-		return conf.Agent.LongTermJosePrivKey
+		return conf.MultiProvider.LongTermJosePrivKey
 	case AppTypeCombiner:
-		if conf.Combiner != nil {
-			return conf.Combiner.LongTermJosePrivKey
+		if conf.MultiProvider != nil {
+			return conf.MultiProvider.LongTermJosePrivKey
 		}
 		return ""
 	default:

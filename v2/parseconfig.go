@@ -216,6 +216,21 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// Config files may omit trailing dots; wire protocol always uses FQDN.
 	conf.normalizeConfigIdentities()
 
+	// Validate multi-provider.role matches the application type
+	if conf.MultiProvider != nil {
+		expectedRole := map[AppType]string{
+			AppTypeAuth:     "signer",
+			AppTypeCombiner: "combiner",
+			AppTypeAgent:    "agent",
+		}
+		if expected, ok := expectedRole[Globals.App.Type]; ok {
+			if conf.MultiProvider.Role != expected {
+				return fmt.Errorf("multi-provider.role=%q does not match app type %s (expected %q)",
+					conf.MultiProvider.Role, Globals.App.Name, expected)
+			}
+		}
+	}
+
 	// Normalize service.transport.type (default: none)
 	if conf.Service.Transport.Type == "" {
 		conf.Service.Transport.Type = "none"
@@ -609,8 +624,8 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 
 		if Globals.App.Type == AppTypeAgent && zconf.Type == "primary" {
 			// Agent only supports primary zone if it matches its identity
-			if zname != conf.Agent.Identity {
-				zd.SetError(AgentError, "primary zone does not match agent identity (%q)", conf.Agent.Identity)
+			if zname != conf.MultiProvider.Identity {
+				zd.SetError(AgentError, "primary zone does not match agent identity (%q)", conf.MultiProvider.Identity)
 				continue
 			} else {
 				// For agent's own zone, ensure required options are set
@@ -1258,55 +1273,44 @@ func validateGroupPrefix(prefix string, prefixType string) error {
 // the YAML config included them.
 func (conf *Config) normalizeConfigIdentities() {
 	// Agent identity and peers
-	if conf.Agent != nil {
-		conf.Agent.Identity = dns.Fqdn(conf.Agent.Identity)
-		if conf.Agent.Dns.ControlZone != "" {
-			conf.Agent.Dns.ControlZone = dns.Fqdn(conf.Agent.Dns.ControlZone)
+	if conf.MultiProvider != nil {
+		conf.MultiProvider.Identity = dns.Fqdn(conf.MultiProvider.Identity)
+		if conf.MultiProvider.Dns.ControlZone != "" {
+			conf.MultiProvider.Dns.ControlZone = dns.Fqdn(conf.MultiProvider.Dns.ControlZone)
 		}
-		if conf.Agent.Combiner != nil && conf.Agent.Combiner.Identity != "" {
-			conf.Agent.Combiner.Identity = dns.Fqdn(conf.Agent.Combiner.Identity)
+		if conf.MultiProvider.Combiner != nil && conf.MultiProvider.Combiner.Identity != "" {
+			conf.MultiProvider.Combiner.Identity = dns.Fqdn(conf.MultiProvider.Combiner.Identity)
 		}
-		if conf.Agent.Signer != nil && conf.Agent.Signer.Identity != "" {
-			conf.Agent.Signer.Identity = dns.Fqdn(conf.Agent.Signer.Identity)
+		if conf.MultiProvider.Signer != nil && conf.MultiProvider.Signer.Identity != "" {
+			conf.MultiProvider.Signer.Identity = dns.Fqdn(conf.MultiProvider.Signer.Identity)
 		}
-		for i, p := range conf.Agent.AuthorizedPeers {
-			conf.Agent.AuthorizedPeers[i] = dns.Fqdn(p)
+		for i, p := range conf.MultiProvider.AuthorizedPeers {
+			conf.MultiProvider.AuthorizedPeers[i] = dns.Fqdn(p)
 		}
-		for _, peer := range conf.Agent.Peers {
+		for _, peer := range conf.MultiProvider.Peers {
 			if peer != nil && peer.Identity != "" {
 				peer.Identity = dns.Fqdn(peer.Identity)
 			}
 		}
 	}
 
-	// Combiner identity and agent peers
-	if conf.Combiner != nil {
-		conf.Combiner.Identity = dns.Fqdn(conf.Combiner.Identity)
-		for _, agent := range conf.Combiner.Agents {
-			if agent != nil && agent.Identity != "" {
-				agent.Identity = dns.Fqdn(agent.Identity)
-			}
-		}
-		for i, ns := range conf.Combiner.ProtectedNamespaces {
-			conf.Combiner.ProtectedNamespaces[i] = dns.Fqdn(ns)
-		}
-		for i := range conf.Combiner.ProviderZones {
-			conf.Combiner.ProviderZones[i].Zone = dns.Fqdn(conf.Combiner.ProviderZones[i].Zone)
-			RegisterProviderZoneRRtypes(conf.Combiner.ProviderZones[i])
-		}
-	}
-
-	// Signer (multi-provider) identity and agent peers
+	// Multi-provider identity and agent peers
 	if conf.MultiProvider != nil {
 		if conf.MultiProvider.Identity != "" {
 			conf.MultiProvider.Identity = dns.Fqdn(conf.MultiProvider.Identity)
 		}
-		if conf.MultiProvider.HsyncIdentity != "" {
-			conf.MultiProvider.HsyncIdentity = dns.Fqdn(conf.MultiProvider.HsyncIdentity)
-		}
 		for _, agent := range conf.MultiProvider.Agents {
 			if agent != nil && agent.Identity != "" {
 				agent.Identity = dns.Fqdn(agent.Identity)
+			}
+		}
+		if conf.MultiProvider.Role == "combiner" {
+			for i, ns := range conf.MultiProvider.ProtectedNamespaces {
+				conf.MultiProvider.ProtectedNamespaces[i] = dns.Fqdn(ns)
+			}
+			for i := range conf.MultiProvider.ProviderZones {
+				conf.MultiProvider.ProviderZones[i].Zone = dns.Fqdn(conf.MultiProvider.ProviderZones[i].Zone)
+				RegisterProviderZoneRRtypes(conf.MultiProvider.ProviderZones[i])
 			}
 		}
 	}

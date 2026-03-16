@@ -147,9 +147,8 @@ kasp:
                         standby_ksk_count:  0      # Number of standby KSKs to maintain per zone (0 = no standby)
 
 # Multi-provider DNSSEC configuration (RFC 8901)
-# Signer-side config for tdns-auth. When active, the signer initializes
-# a TransportManager for communication with its local agent (KEYSTATE
-# signaling, PING diagnostics, DNSKEY propagation).
+# Unified config block for all three MP roles: agent, combiner, signer.
+# The "role:" field determines which role-specific fields are relevant.
 #
 # Prerequisites:
 #   - Zones participating must have options: [multi-provider]
@@ -157,16 +156,24 @@ kasp:
 #   - JOSE keypairs generated for secure CHUNK transport (optional but recommended)
 #
 multi-provider:
+                        role:      signer
                         active:    true
                         identity:  signer1.dnslab.org.    # Signer's FQDN identity for transport protocol
                         long_term_jose_priv_key:  /etc/tdns/keys/signer1.jose.priv.json
                         chunk_mode:  edns0                # edns0 | query (default: edns0)
 
-                        # Local agent peer: how the signer reaches its co-located agent
-                        agent:
-                           address:               127.0.0.1:5359    # Agent's DNS listen address (host:port)
-                           identity:              agent.alpha.dnslab.org.   # Agent's FQDN identity
-                           long_term_jose_pub_key:  /etc/tdns/keys/agent-alpha.jose.pub.json
+                        # Agent peers: how the signer reaches its co-located agent(s)
+                        agents:
+                           - address:               127.0.0.1:5359    # Agent's DNS listen address (host:port)
+                             identity:              agent.alpha.dnslab.org.   # Agent's FQDN identity
+                             long_term_jose_pub_key:  /etc/tdns/keys/agent-alpha.jose.pub.json
+
+                        # Sync API server for inbound HELLO/BEAT/PING from agents over HTTPS
+                        sync_api:
+                           addresses:
+                              listen:    [ 127.0.0.1:8991 ]
+                           cert_file:   /etc/tdns/certs/servers/localhost..crt
+                           key_file:    /etc/tdns/certs/servers/localhost..key
 
 multisigner:
                         mstest:

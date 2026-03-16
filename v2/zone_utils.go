@@ -242,13 +242,18 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	// (they may have been lost if not present in the zone file)
 	zd.RepopulateDynamicRRs(dynamicRRs)
 
-	// For multi-provider zones on the signer: evaluate HSYNC SIGN field to
+	// Recompute multi-provider membership and signing state after every refresh.
+	// This must run for all app types (agent, combiner, signer) so that zd.MPdata
+	// is always up-to-date with the zone owner's HSYNC3+HSYNCPARAM declarations.
+	if zd.Options[OptMultiProvider] {
+		zd.populateMPdata()
+	}
+
+	// For multi-provider zones on the signer: use cached MPdata to
 	// dynamically enable/disable inline-signing and detect multi-signer mode.
-	if zd.Options[OptMultiProvider] && Globals.App.Type == AppTypeAuth {
-		shouldSign, otherSigners, err := zd.analyzeHsyncSigners()
-		if err != nil {
-			lg.Error("error analyzing HSYNC signers", "zone", zd.ZoneName, "err", err)
-		}
+	if zd.MPdata != nil && Globals.App.Type == AppTypeAuth {
+		shouldSign := zd.MPdata.WeAreSigner
+		otherSigners := zd.MPdata.OtherSigners
 		if shouldSign && !zd.Options[OptInlineSigning] {
 			lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", zd.ZoneName)
 			zd.Options[OptInlineSigning] = true
@@ -419,14 +424,16 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	// (they may have been lost if not present in the transferred zone)
 	zd.RepopulateDynamicRRs(dynamicRRs)
 
-	// For multi-provider zones on the signer: evaluate HSYNC SIGN field to
+	// Recompute multi-provider membership and signing state after every zone transfer.
+	if zd.Options[OptMultiProvider] {
+		zd.populateMPdata()
+	}
+
+	// For multi-provider zones on the signer: use cached MPdata to
 	// dynamically enable/disable inline-signing and detect multi-signer mode.
-	// The HSYNC is the authority for whether we should sign, not static config.
-	if zd.Options[OptMultiProvider] && Globals.App.Type == AppTypeAuth {
-		shouldSign, otherSigners, err := zd.analyzeHsyncSigners()
-		if err != nil {
-			lg.Error("error analyzing HSYNC signers", "zone", zd.ZoneName, "err", err)
-		}
+	if zd.MPdata != nil && Globals.App.Type == AppTypeAuth {
+		shouldSign := zd.MPdata.WeAreSigner
+		otherSigners := zd.MPdata.OtherSigners
 		if shouldSign && !zd.Options[OptInlineSigning] {
 			lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", zd.ZoneName)
 			zd.Options[OptInlineSigning] = true
@@ -528,7 +535,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 		}
 
 		// Inject combiner signature TXT if configured
-		if zd.InjectSignatureTXT(Globals.CombinerConf) {
+		if zd.InjectSignatureTXT(Conf.MultiProvider) {
 			lg.Debug("signature TXT injected", "zone", zd.ZoneName)
 		}
 	}

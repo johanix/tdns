@@ -94,7 +94,7 @@ func (ar *AgentRegistry) RecomputeSharedZonesAndSyncState(agent *Agent) {
 }
 
 func (conf *Config) NewAgentRegistry() *AgentRegistry {
-	if conf.Agent.Identity == "" {
+	if conf.MultiProvider.Identity == "" {
 		lgAgent.Error("identity is empty")
 		return nil
 	}
@@ -111,7 +111,7 @@ func (conf *Config) NewAgentRegistry() *AgentRegistry {
 		// S:              cmap.New[*Agent](),
 		S:              core.NewStringer[AgentId, *Agent](),
 		RemoteAgents:   make(map[ZoneName][]AgentId),
-		LocalAgent:     conf.Agent,
+		LocalAgent:     conf.MultiProvider,
 		LocateInterval: li,
 		helloContexts:  make(map[AgentId]context.CancelFunc),
 	}

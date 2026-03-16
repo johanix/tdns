@@ -39,8 +39,8 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 	// Build set of local agent identities (our own provider's agents).
 	// Protected-namespace checks only apply to remote agents, not our own.
 	localAgents := make(map[string]bool)
-	if conf.Combiner != nil {
-		for _, a := range conf.Combiner.Agents {
+	if conf.MultiProvider != nil {
+		for _, a := range conf.MultiProvider.Agents {
 			if a != nil && a.Identity != "" {
 				localAgents[a.Identity] = true
 			}
@@ -370,7 +370,7 @@ func sendEditsToAgent(conf *Config, tm *TransportManager, agentID string, zone s
 	}
 
 	req := &transport.EditsRequest{
-		SenderID:  conf.Combiner.Identity,
+		SenderID:  conf.MultiProvider.Identity,
 		Zone:      zone,
 		Records:   records,
 		Timestamp: time.Now(),

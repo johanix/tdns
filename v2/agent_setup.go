@@ -32,9 +32,9 @@ func (conf *Config) SetupAgentAutoZone(zonename string) (*ZoneData, error) {
 
 	var zd *ZoneData
 	var err error
-	if len(conf.Agent.Local.Nameservers) > 0 {
-		nsNames := make([]string, len(conf.Agent.Local.Nameservers))
-		for i, ns := range conf.Agent.Local.Nameservers {
+	if len(conf.MultiProvider.Local.Nameservers) > 0 {
+		nsNames := make([]string, len(conf.MultiProvider.Local.Nameservers))
+		for i, ns := range conf.MultiProvider.Local.Nameservers {
 			nsNames[i] = dns.Fqdn(ns)
 		}
 		zd, err = conf.Internal.KeyDB.CreateAutoZone(zonename, nil, nsNames)
@@ -52,8 +52,8 @@ func (conf *Config) SetupAgentAutoZone(zonename string) (*ZoneData, error) {
 	zd.SyncQ = conf.Internal.SyncQ
 
 	// Check for local notify configuration and set downstream targets
-	if len(conf.Agent.Local.Notify) > 0 {
-		zd.Downstreams = NormalizeAddresses(conf.Agent.Local.Notify)
+	if len(conf.MultiProvider.Local.Notify) > 0 {
+		zd.Downstreams = NormalizeAddresses(conf.MultiProvider.Local.Notify)
 		lgAgent.Debug("setting downstream notify targets", "zone", zonename, "downstreams", zd.Downstreams)
 	}
 
@@ -81,12 +81,12 @@ func (conf *Config) SetupAgentAutoZone(zonename string) (*ZoneData, error) {
 // publishApiTransport publishes HTTPS transport records (URI, address, TLSA, SVCB)
 // for the agent identity zone. Called directly for auto zones or via OnFirstLoad for config zones.
 func (conf *Config) publishApiTransport(zd *ZoneData) error {
-	identity := conf.Agent.Identity
+	identity := conf.MultiProvider.Identity
 	lgAgent.Info("publishing URI record for API transport", "agent", identity)
 
 	// Publish _https._tcp URI record
-	uristr := strings.Replace(conf.Agent.Api.BaseUrl, "{TARGET}", identity, 1)
-	uristr = strings.Replace(uristr, "{PORT}", fmt.Sprintf("%d", conf.Agent.Api.Port), 1)
+	uristr := strings.Replace(conf.MultiProvider.Api.BaseUrl, "{TARGET}", identity, 1)
+	uristr = strings.Replace(uristr, "{PORT}", fmt.Sprintf("%d", conf.MultiProvider.Api.Port), 1)
 	uri, err := url.Parse(uristr)
 	if err != nil {
 		return fmt.Errorf("publishApiTransport: failed to parse base URL: %q", uristr)
@@ -97,13 +97,13 @@ func (conf *Config) publishApiTransport(zd *ZoneData) error {
 	}
 	lgAgent.Debug("publishing _https._tcp URI record", "agent", identity, "target", host)
 
-	err = zd.PublishUriRR("_https._tcp."+identity, identity, conf.Agent.Api.BaseUrl, conf.Agent.Api.Port)
+	err = zd.PublishUriRR("_https._tcp."+identity, identity, conf.MultiProvider.Api.BaseUrl, conf.MultiProvider.Api.Port)
 	if err != nil {
 		return fmt.Errorf("publishApiTransport: failed to publish URI record: %v", err)
 	}
 	lgAgent.Debug("published URI record", "agent", identity)
 
-	for _, addr := range conf.Agent.Api.Addresses.Publish {
+	for _, addr := range conf.MultiProvider.Api.Addresses.Publish {
 		err = zd.PublishAddrRR(host, addr)
 		if err != nil {
 			return fmt.Errorf("publishApiTransport: failed to publish address record for %s %s: %v", host, addr, err)
@@ -111,7 +111,7 @@ func (conf *Config) publishApiTransport(zd *ZoneData) error {
 	}
 	lgAgent.Debug("published address records", "agent", identity)
 
-	err = zd.PublishTlsaRR(host, conf.Agent.Api.Port, conf.Agent.Api.CertData)
+	err = zd.PublishTlsaRR(host, conf.MultiProvider.Api.Port, conf.MultiProvider.Api.CertData)
 	if err != nil {
 		return fmt.Errorf("publishApiTransport: failed to publish TLSA record: %v", err)
 	}
@@ -120,7 +120,7 @@ func (conf *Config) publishApiTransport(zd *ZoneData) error {
 	var value []dns.SVCBKeyValue
 	var ipv4hint, ipv6hint []net.IP
 
-	for _, addr := range conf.Agent.Api.Addresses.Publish {
+	for _, addr := range conf.MultiProvider.Api.Addresses.Publish {
 		ip := net.ParseIP(addr)
 		if ip == nil {
 			continue
@@ -132,8 +132,8 @@ func (conf *Config) publishApiTransport(zd *ZoneData) error {
 		}
 	}
 
-	if conf.Agent.Api.Port != 0 {
-		value = append(value, &dns.SVCBPort{Port: conf.Agent.Api.Port})
+	if conf.MultiProvider.Api.Port != 0 {
+		value = append(value, &dns.SVCBPort{Port: conf.MultiProvider.Api.Port})
 	}
 	if len(ipv4hint) > 0 {
 		value = append(value, &dns.SVCBIPv4Hint{Hint: ipv4hint})
@@ -142,7 +142,7 @@ func (conf *Config) publishApiTransport(zd *ZoneData) error {
 		value = append(value, &dns.SVCBIPv6Hint{Hint: ipv6hint})
 	}
 
-	err = zd.PublishSvcbRR(host, conf.Agent.Api.Port, value)
+	err = zd.PublishSvcbRR(host, conf.MultiProvider.Api.Port, value)
 	if err != nil {
 		return fmt.Errorf("publishApiTransport: failed to publish SVCB record: %v", err)
 	}
@@ -154,11 +154,11 @@ func (conf *Config) publishApiTransport(zd *ZoneData) error {
 // publishDnsTransport publishes DNS transport records (URI, address, KEY, JWK, SVCB)
 // for the agent identity zone. Called directly for auto zones or via OnFirstLoad for config zones.
 func (conf *Config) publishDnsTransport(zd *ZoneData) error {
-	identity := dns.Fqdn(conf.Agent.Identity)
+	identity := dns.Fqdn(conf.MultiProvider.Identity)
 	lgAgent.Info("publishing DNS transport records", "agent", identity)
 
-	uristr := strings.Replace(conf.Agent.Dns.BaseUrl, "{TARGET}", identity, 1)
-	uristr = strings.Replace(uristr, "{PORT}", fmt.Sprintf("%d", conf.Agent.Dns.Port), 1)
+	uristr := strings.Replace(conf.MultiProvider.Dns.BaseUrl, "{TARGET}", identity, 1)
+	uristr = strings.Replace(uristr, "{PORT}", fmt.Sprintf("%d", conf.MultiProvider.Dns.Port), 1)
 	uri, err := url.Parse(uristr)
 	if err != nil {
 		return fmt.Errorf("publishDnsTransport: failed to parse base URL: %q", uristr)
@@ -171,13 +171,13 @@ func (conf *Config) publishDnsTransport(zd *ZoneData) error {
 	}
 	lgAgent.Debug("publishing _dns._tcp URI record", "agent", identity, "target", host)
 
-	err = zd.PublishUriRR("_dns._tcp."+identity, identity, conf.Agent.Dns.BaseUrl, conf.Agent.Dns.Port)
+	err = zd.PublishUriRR("_dns._tcp."+identity, identity, conf.MultiProvider.Dns.BaseUrl, conf.MultiProvider.Dns.Port)
 	if err != nil {
 		return fmt.Errorf("publishDnsTransport: failed to publish URI record: %v", err)
 	}
 	lgAgent.Debug("published DNS URI record", "agent", identity)
 
-	for _, addr := range conf.Agent.Dns.Addresses.Publish {
+	for _, addr := range conf.MultiProvider.Dns.Addresses.Publish {
 		err = zd.PublishAddrRR(host, addr)
 		if err != nil {
 			return fmt.Errorf("publishDnsTransport: failed to publish address record for %s %s: %v", host, addr, err)
@@ -202,7 +202,7 @@ func (conf *Config) publishDnsTransport(zd *ZoneData) error {
 	var value []dns.SVCBKeyValue
 	var ipv4hint, ipv6hint []net.IP
 
-	for _, addr := range conf.Agent.Dns.Addresses.Publish {
+	for _, addr := range conf.MultiProvider.Dns.Addresses.Publish {
 		ip := net.ParseIP(addr)
 		if ip == nil {
 			continue
@@ -214,8 +214,8 @@ func (conf *Config) publishDnsTransport(zd *ZoneData) error {
 		}
 	}
 
-	if conf.Agent.Dns.Port != 0 {
-		value = append(value, &dns.SVCBPort{Port: conf.Agent.Dns.Port})
+	if conf.MultiProvider.Dns.Port != 0 {
+		value = append(value, &dns.SVCBPort{Port: conf.MultiProvider.Dns.Port})
 	}
 	if len(ipv4hint) > 0 {
 		value = append(value, &dns.SVCBIPv4Hint{Hint: ipv4hint})
@@ -224,7 +224,7 @@ func (conf *Config) publishDnsTransport(zd *ZoneData) error {
 		value = append(value, &dns.SVCBIPv6Hint{Hint: ipv6hint})
 	}
 
-	err = zd.PublishSvcbRR(host, conf.Agent.Dns.Port, value)
+	err = zd.PublishSvcbRR(host, conf.MultiProvider.Dns.Port, value)
 	if err != nil {
 		return fmt.Errorf("publishDnsTransport: failed to publish SVCB record: %v", err)
 	}
@@ -236,38 +236,38 @@ func (conf *Config) publishDnsTransport(zd *ZoneData) error {
 func (conf *Config) SetupAgent(all_zones []string) error {
 	lgAgent.Debug("SetupAgent enter", "zones", all_zones)
 
-	if len(conf.Agent.Api.Addresses.Listen) == 0 && len(conf.Agent.Dns.Addresses.Listen) == 0 {
+	if len(conf.MultiProvider.Api.Addresses.Listen) == 0 && len(conf.MultiProvider.Dns.Addresses.Listen) == 0 {
 		lgAgent.Error("neither API nor DNS addresses set in config file")
 		return errors.New("SetupAgent: neither API nor DNS addresses set in config file")
 	}
 
 	// Ensure identity is FQDN
-	conf.Agent.Identity = dns.Fqdn(conf.Agent.Identity)
+	conf.MultiProvider.Identity = dns.Fqdn(conf.MultiProvider.Identity)
 
 	// Determine if agent identity zone is an auto zone or a config-defined zone
-	isAutoZone := !slices.Contains(all_zones, conf.Agent.Identity)
+	isAutoZone := !slices.Contains(all_zones, conf.MultiProvider.Identity)
 	var autoZd *ZoneData
 
 	// Create auto zone for agent identity if needed
 	if isAutoZone {
 		var err error
-		autoZd, err = conf.SetupAgentAutoZone(conf.Agent.Identity)
+		autoZd, err = conf.SetupAgentAutoZone(conf.MultiProvider.Identity)
 		if err != nil {
 			return fmt.Errorf("SetupAgent: failed to create auto zone for agent identity %q: %v",
-				conf.Agent.Identity, err)
+				conf.MultiProvider.Identity, err)
 		}
 	}
 
 	// Determine which transports need setup
-	apiSupported := slices.Contains(conf.Agent.SupportedMechanisms, "api")
-	wantApi := apiSupported && len(conf.Agent.Api.Addresses.Publish) > 0
-	dnsSupported := slices.Contains(conf.Agent.SupportedMechanisms, "dns")
-	wantDns := dnsSupported && len(conf.Agent.Dns.Addresses.Publish) > 0
+	apiSupported := slices.Contains(conf.MultiProvider.SupportedMechanisms, "api")
+	wantApi := apiSupported && len(conf.MultiProvider.Api.Addresses.Publish) > 0
+	dnsSupported := slices.Contains(conf.MultiProvider.SupportedMechanisms, "dns")
+	wantDns := dnsSupported && len(conf.MultiProvider.Dns.Addresses.Publish) > 0
 
 	// Load and verify API certificate if API transport is configured
 	if wantApi {
-		certFile := conf.Agent.Api.CertFile
-		keyFile := conf.Agent.Api.KeyFile
+		certFile := conf.MultiProvider.Api.CertFile
+		keyFile := conf.MultiProvider.Api.KeyFile
 
 		if certFile == "" || keyFile == "" {
 			return errors.New("SetupAgent: API transport defined, but cert or key file not set")
@@ -283,8 +283,8 @@ func (conf *Config) SetupAgent(all_zones []string) error {
 			return fmt.Errorf("SetupAgent: error reading key file: %v", err)
 		}
 
-		conf.Agent.Api.CertData = string(certPEM)
-		conf.Agent.Api.KeyData = string(keyPEM)
+		conf.MultiProvider.Api.CertData = string(certPEM)
+		conf.MultiProvider.Api.KeyData = string(keyPEM)
 
 		block, _ := pem.Decode(certPEM)
 		if block == nil {
@@ -297,10 +297,10 @@ func (conf *Config) SetupAgent(all_zones []string) error {
 		}
 
 		certCN := strings.TrimSuffix(cert.Subject.CommonName, ".")
-		agentID := strings.TrimSuffix(conf.Agent.Identity, ".")
+		agentID := strings.TrimSuffix(conf.MultiProvider.Identity, ".")
 		if certCN != agentID {
 			return fmt.Errorf("SetupAgent: certificate CN %q does not match agent identity %q",
-				cert.Subject.CommonName, conf.Agent.Identity)
+				cert.Subject.CommonName, conf.MultiProvider.Identity)
 		}
 
 		lgAgent.Info("client certificate loaded", "subject", cert.Subject.CommonName,
@@ -321,9 +321,9 @@ func (conf *Config) SetupAgent(all_zones []string) error {
 		}
 	} else {
 		// Config-defined zone — register OnFirstLoad callbacks (zone not loaded yet)
-		zdp, ok := Zones.Get(conf.Agent.Identity)
+		zdp, ok := Zones.Get(conf.MultiProvider.Identity)
 		if !ok {
-			return fmt.Errorf("SetupAgent: config zone %q not found in Zones", conf.Agent.Identity)
+			return fmt.Errorf("SetupAgent: config zone %q not found in Zones", conf.MultiProvider.Identity)
 		}
 		if wantApi {
 			zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
@@ -374,7 +374,7 @@ func (zd *ZoneData) AgentJWKKeyPrep(publishname string, kdb *KeyDB) error {
 	}
 
 	// Load JOSE private key from config
-	privKeyPath := strings.TrimSpace(Conf.Agent.LongTermJosePrivKey)
+	privKeyPath := strings.TrimSpace(Conf.MultiProvider.LongTermJosePrivKey)
 	if privKeyPath == "" {
 		return fmt.Errorf("AgentJWKKeyPrep: no JOSE key path configured")
 	}
@@ -468,7 +468,7 @@ func (zd *ZoneData) AgentJWKKeyPrep(publishname string, kdb *KeyDB) error {
 	return nil
 }
 
-func (agent *Agent) NewAgentSyncApiClient(localagent *LocalAgentConf) error {
+func (agent *Agent) NewAgentSyncApiClient(localagent *MultiProviderConf) error {
 	if agent == nil {
 		return fmt.Errorf("agent is nil")
 	}

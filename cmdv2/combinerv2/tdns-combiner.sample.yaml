@@ -1,14 +1,17 @@
 include:
    - combiner-zones.yaml
 
-# Combiner block (symmetric to agent:); our config and peer (agent)
-combiner:
-   long_term_jose_priv_key:	/etc/tdns/combiner.jose.private
+# Multi-provider config for combiner role.
+# The "role:" field must be "combiner" for the combiner binary.
+multi-provider:
+   role:                        combiner
+   identity:                    combiner.provider.
+   long_term_jose_priv_key:     /etc/tdns/combiner.jose.private
    # chunk_mode:	edns0   # default: send payload in EDNS(0) CHUNK option
    # chunk_mode:	query   # store payload; receiver fetches via CHUNK query (then chunk_query_endpoint is required)
    # chunk_query_endpoint:	include   # when chunk_mode=query: signal CHUNK query endpoint in NOTIFY. Required when chunk_mode=query.
-   # chunk_query_endpoint:	none      # when chunk_mode=query: receiver uses static config (combiner.agents[].address)
-   # When combiner *receives* NOTIFY(CHUNK): always adapts (EDNS0 first, then CHUNK query; target = NOTIFY option if present, else combiner.agents[].address)
+   # chunk_query_endpoint:	none      # when chunk_mode=query: receiver uses static config (agents[].address)
+   # When combiner *receives* NOTIFY(CHUNK): always adapts (EDNS0 first, then CHUNK query; target = NOTIFY option if present, else agents[].address)
    agents:
       - identity:		agent.provider.
         address:		1.2.3.4:5678   # CHUNK query target when NOTIFY has no CHUNK_QUERY_ENDPOINT option
@@ -18,6 +21,13 @@ combiner:
    # provider-zones:
    #    - zone:		alpha.dnslab.
    #      allowed-rrtypes:	[ KEY ]
+
+   # Sync API server for inbound HELLO/BEAT/PING from agents over HTTPS
+   sync_api:
+      addresses:
+         listen:    [ 127.0.0.1:8086 ]
+      cert_file:   /etc/tdns/certs/servers/localhost..crt
+      key_file:    /etc/tdns/certs/servers/localhost..key
 
 apiserver:
    usetls:		true

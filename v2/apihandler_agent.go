@@ -118,20 +118,20 @@ func doPeerPing(conf *Config, peerID string, useAPI bool) *AgentMgmtResponse {
 // signer-side: multi-provider.agent) and returns a temporary Peer if found. Returns nil if not found.
 func (conf *Config) lookupStaticPeer(peerID string) *transport.Peer {
 	// Agent-side: combiner
-	if conf.Agent != nil && conf.Agent.Combiner != nil &&
-		dns.Fqdn(conf.Agent.Combiner.Identity) == peerID && conf.Agent.Combiner.Address != "" {
-		if peer := peerFromAddress(peerID, conf.Agent.Combiner.Address); peer != nil {
-			if conf.Agent.Combiner.ApiBaseUrl != "" {
-				peer.APIEndpoint = conf.Agent.Combiner.ApiBaseUrl
+	if conf.MultiProvider != nil && conf.MultiProvider.Role == "agent" && conf.MultiProvider.Combiner != nil &&
+		dns.Fqdn(conf.MultiProvider.Combiner.Identity) == peerID && conf.MultiProvider.Combiner.Address != "" {
+		if peer := peerFromAddress(peerID, conf.MultiProvider.Combiner.Address); peer != nil {
+			if conf.MultiProvider.Combiner.ApiBaseUrl != "" {
+				peer.APIEndpoint = conf.MultiProvider.Combiner.ApiBaseUrl
 			}
 			return peer
 		}
 	}
 
 	// Agent-side: signer
-	if conf.Agent != nil && conf.Agent.Signer != nil &&
-		dns.Fqdn(conf.Agent.Signer.Identity) == peerID && conf.Agent.Signer.Address != "" {
-		return peerFromAddress(peerID, conf.Agent.Signer.Address)
+	if conf.MultiProvider != nil && conf.MultiProvider.Role == "agent" && conf.MultiProvider.Signer != nil &&
+		dns.Fqdn(conf.MultiProvider.Signer.Identity) == peerID && conf.MultiProvider.Signer.Address != "" {
+		return peerFromAddress(peerID, conf.MultiProvider.Signer.Address)
 	}
 
 	// Signer-side: multi-provider agents
@@ -178,7 +178,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 
 		resp := AgentMgmtResponse{
 			Time:     time.Now(),
-			Identity: AgentId(conf.Agent.Identity),
+			Identity: AgentId(conf.MultiProvider.Identity),
 		}
 
 		defer func() {
@@ -212,8 +212,8 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 
 		switch amp.Command {
 		case "config":
-			tmp := SanitizeForJSON(conf.Agent)
-			resp.AgentConfig = tmp.(LocalAgentConf)
+			tmp := SanitizeForJSON(conf.MultiProvider)
+			resp.AgentConfig = tmp.(MultiProviderConf)
 			resp.AgentConfig.Api.CertData = ""
 			resp.AgentConfig.Api.KeyData = ""
 
@@ -466,7 +466,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 			routerResp := handleRouterList(conf.Internal.TransportManager.Router)
 			resp = *routerResp
-			resp.Identity = AgentId(conf.Agent.Identity)
+			resp.Identity = AgentId(conf.MultiProvider.Identity)
 
 		case "router-describe":
 			if conf.Internal.TransportManager == nil || conf.Internal.TransportManager.Router == nil {
@@ -476,7 +476,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 			routerResp := handleRouterDescribe(conf.Internal.TransportManager.Router)
 			resp = *routerResp
-			resp.Identity = AgentId(conf.Agent.Identity)
+			resp.Identity = AgentId(conf.MultiProvider.Identity)
 
 		case "router-metrics":
 			if conf.Internal.TransportManager == nil || conf.Internal.TransportManager.Router == nil {
@@ -486,7 +486,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 			routerResp := handleRouterMetrics(conf.Internal.TransportManager.Router)
 			resp = *routerResp
-			resp.Identity = AgentId(conf.Agent.Identity)
+			resp.Identity = AgentId(conf.MultiProvider.Identity)
 
 		case "router-walk":
 			if conf.Internal.TransportManager == nil || conf.Internal.TransportManager.Router == nil {
@@ -496,7 +496,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 			routerResp := handleRouterWalk(conf.Internal.TransportManager.Router)
 			resp = *routerResp
-			resp.Identity = AgentId(conf.Agent.Identity)
+			resp.Identity = AgentId(conf.MultiProvider.Identity)
 
 		case "router-reset":
 			if conf.Internal.TransportManager == nil || conf.Internal.TransportManager.Router == nil {
@@ -506,7 +506,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 			routerResp := handleRouterReset(conf.Internal.TransportManager.Router)
 			resp = *routerResp
-			resp.Identity = AgentId(conf.Agent.Identity)
+			resp.Identity = AgentId(conf.MultiProvider.Identity)
 
 		case "refresh-keys":
 			zd.RequestAndWaitForKeyInventory()
@@ -686,7 +686,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 		resp := AgentMgmtResponse{
 			Time:     time.Now(),
 			Msg:      "Hi there! Using debug commands are we?",
-			Identity: AgentId(conf.Agent.Identity),
+			Identity: AgentId(conf.MultiProvider.Identity),
 		}
 		decoder := json.NewDecoder(r.Body)
 		var amp AgentMgmtPost
@@ -1081,7 +1081,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			}
 			if amp.AgentId == "" {
 				// Default to local agent
-				amp.AgentId = AgentId(conf.Agent.Identity)
+				amp.AgentId = AgentId(conf.MultiProvider.Identity)
 			}
 			if len(amp.RRs) == 0 {
 				resp.Error = true
@@ -1195,7 +1195,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			// Step 1: Create local zone update
 			zu := &ZoneUpdate{
 				Zone:    amp.Zone,
-				AgentId: AgentId(conf.Agent.Identity),
+				AgentId: AgentId(conf.MultiProvider.Identity),
 				RRs:     parsedRRs,
 				RRsets:  make(map[uint16]core.RRset),
 			}
@@ -1223,7 +1223,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			cresp := make(chan *AgentMsgResponse, 1)
 			conf.Internal.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{
 				Zone:       amp.Zone,
-				AgentId:    AgentId(conf.Agent.Identity),
+				AgentId:    AgentId(conf.MultiProvider.Identity),
 				UpdateType: "local",
 				Update:     zu,
 				Response:   cresp,
@@ -1265,7 +1265,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				keys := conf.Internal.AgentRegistry.S.Keys()
 				for _, key := range keys {
 					if agent, exists := conf.Internal.AgentRegistry.S.Get(key); exists {
-						if agent.Identity == AgentId(conf.Agent.Identity) {
+						if agent.Identity == AgentId(conf.MultiProvider.Identity) {
 							continue // Skip self
 						}
 
@@ -1498,7 +1498,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			// Create the ZoneUpdate with RRs and RRsets
 			zu := &ZoneUpdate{
 				Zone:    amp.Zone,
-				AgentId: AgentId(conf.Agent.Identity),
+				AgentId: AgentId(conf.MultiProvider.Identity),
 				RRs:     parsedRRs,
 				RRsets:  make(map[uint16]core.RRset),
 			}
@@ -1542,7 +1542,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			cresp := make(chan *AgentMsgResponse, 1)
 			conf.Internal.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{
 				Zone:       amp.Zone,
-				AgentId:    AgentId(conf.Agent.Identity),
+				AgentId:    AgentId(conf.MultiProvider.Identity),
 				UpdateType: "local",
 				Update:     zu,
 				Force:      force,
@@ -1611,7 +1611,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 
 			// Create sync request
 			syncReq := &transport.SyncRequest{
-				SenderID:       conf.Agent.Identity,
+				SenderID:       conf.MultiProvider.Identity,
 				Zone:           string(amp.Zone),
 				SyncType:       transport.SyncTypeNS, // Default to NS, could be detected from RRs
 				Records:        groupRRStringsByOwner(amp.RRs),

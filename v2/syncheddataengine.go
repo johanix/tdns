@@ -738,7 +738,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					sdcmd.Response <- &SynchedDataCmdResponse{Error: true, ErrorMsg: "TransportManager not available"}
 					continue
 				}
-				myAgentId := AgentId(conf.Agent.Identity)
+				myAgentId := AgentId(conf.MultiProvider.Identity)
 				agentRepo, ok := zdr.Repo.Get(sdcmd.Zone)
 				if !ok {
 					sdcmd.Response <- &SynchedDataCmdResponse{Msg: fmt.Sprintf("No local data for zone %s", sdcmd.Zone)}

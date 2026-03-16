@@ -283,7 +283,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 		switch req.Command {
 		case "list":
 			// List all distributions from this agent
-			senderID := string(conf.Agent.Identity)
+			senderID := string(conf.MultiProvider.Identity)
 			infos := cache.List(senderID)
 
 			summaries := make([]*DistributionSummary, 0, len(infos))
@@ -635,8 +635,8 @@ func listKnownPeers(conf *Config) []PeerInfo {
 	var peers []PeerInfo
 
 	// For combiners: list all configured agents
-	if conf.Combiner != nil && len(conf.Combiner.Agents) > 0 {
-		for _, agent := range conf.Combiner.Agents {
+	if conf.MultiProvider != nil && len(conf.MultiProvider.Agents) > 0 {
+		for _, agent := range conf.MultiProvider.Agents {
 			peerID := agent.Identity
 			if peerID == "" {
 				peerID = agent.Address
@@ -674,18 +674,18 @@ func listKnownPeers(conf *Config) []PeerInfo {
 			// Special handling for combiner virtual peer
 			// Check if this agent is the configured combiner (by identity)
 			isCombiner := false
-			if conf.Agent.Combiner != nil && conf.Agent.Combiner.Identity != "" {
-				isCombiner = string(agent.Identity) == conf.Agent.Combiner.Identity ||
-					dns.Fqdn(string(agent.Identity)) == dns.Fqdn(conf.Agent.Combiner.Identity)
+			if conf.MultiProvider.Combiner != nil && conf.MultiProvider.Combiner.Identity != "" {
+				isCombiner = string(agent.Identity) == conf.MultiProvider.Combiner.Identity ||
+					dns.Fqdn(string(agent.Identity)) == dns.Fqdn(conf.MultiProvider.Combiner.Identity)
 			} else {
 				isCombiner = agent.Identity == "combiner"
 			}
 
 			// Special handling for signer virtual peer
 			isSigner := false
-			if conf.Agent.Signer != nil && conf.Agent.Signer.Identity != "" {
-				isSigner = string(agent.Identity) == conf.Agent.Signer.Identity ||
-					dns.Fqdn(string(agent.Identity)) == dns.Fqdn(conf.Agent.Signer.Identity)
+			if conf.MultiProvider.Signer != nil && conf.MultiProvider.Signer.Identity != "" {
+				isSigner = string(agent.Identity) == conf.MultiProvider.Signer.Identity ||
+					dns.Fqdn(string(agent.Identity)) == dns.Fqdn(conf.MultiProvider.Signer.Identity)
 			}
 
 			peerType := "agent"
@@ -815,8 +815,8 @@ func listKnownPeers(conf *Config) []PeerInfo {
 	}
 
 	// Add agents from authorized_peers that haven't been discovered yet
-	if conf.Agent != nil && len(conf.Agent.AuthorizedPeers) > 0 {
-		for _, peerID := range conf.Agent.AuthorizedPeers {
+	if conf.MultiProvider != nil && len(conf.MultiProvider.AuthorizedPeers) > 0 {
+		for _, peerID := range conf.MultiProvider.AuthorizedPeers {
 			peerIDFqdn := dns.Fqdn(peerID)
 
 			// Check if already in peers list (discovered)
@@ -948,8 +948,8 @@ func listPeerSharedZones(conf *Config) []interface{} {
 
 		// Skip combiner - it's a virtual peer for monitoring, not a real agent peer
 		// Check against configured combiner identity (may be "combiner" or a specific FQDN)
-		if conf.Agent != nil && conf.Agent.Combiner != nil {
-			combinerID := conf.Agent.Combiner.Identity
+		if conf.MultiProvider != nil && conf.MultiProvider.Combiner != nil {
+			combinerID := conf.MultiProvider.Combiner.Identity
 			if combinerID == "" {
 				combinerID = "combiner" // Default identity
 			}
@@ -1011,8 +1011,8 @@ func listAgentsForZone(conf *Config, zoneName string) []string {
 
 		// Skip combiner - it's a virtual peer for monitoring, not a real agent peer
 		// Check against configured combiner identity (may be "combiner" or a specific FQDN)
-		if conf.Agent != nil && conf.Agent.Combiner != nil {
-			combinerID := conf.Agent.Combiner.Identity
+		if conf.MultiProvider != nil && conf.MultiProvider.Combiner != nil {
+			combinerID := conf.MultiProvider.Combiner.Identity
 			if combinerID == "" {
 				combinerID = "combiner" // Default identity
 			}

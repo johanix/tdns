@@ -213,6 +213,39 @@ func findProviderZoneForRequest(req *CombinerSyncRequest) (string, error) {
 	return best, nil
 }
 
+// checkMPauthorization verifies that the combiner is authorized to accept
+// contributions for this zone. Returns nil if authorized, or a descriptive
+// error explaining exactly why the contribution was rejected.
+func checkMPauthorization(zd *ZoneData) error {
+	if !zd.Options[OptMultiProvider] {
+		return fmt.Errorf("zone %q: contributions rejected — zone is not configured as a multi-provider zone (OptMultiProvider not set)", zd.ZoneName)
+	}
+	if zd.MPdata == nil {
+		// MPdata is nil despite OptMultiProvider being set. This means one of
+		// guards 2-4 failed during zone refresh. Provide a specific explanation.
+		// Re-run the checks to produce a precise message.
+		apex, err := zd.GetOwner(zd.ZoneName)
+		if err != nil {
+			return fmt.Errorf("zone %q: contributions rejected — cannot inspect zone apex: %v", zd.ZoneName, err)
+		}
+		_, h3exists := apex.RRtypes.Get(core.TypeHSYNC3)
+		_, hpExists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
+		_, h1exists := apex.RRtypes.Get(core.TypeHSYNC)
+		_, h2exists := apex.RRtypes.Get(core.TypeHSYNC2)
+		if !((h3exists && hpExists) || h1exists || h2exists) {
+			return fmt.Errorf("zone %q: contributions rejected — zone has OptMultiProvider set but the zone owner has not published HSYNC3+HSYNCPARAM records (zone is not declared as multi-provider by its owner)", zd.ZoneName)
+		}
+		ourIdentities := ourHsyncIdentities()
+		matched, ourLabel, _ := zd.matchHsyncProvider(ourIdentities)
+		if !matched {
+			return fmt.Errorf("zone %q: contributions rejected — none of our agent identities %v match any HSYNC3 provider record in the zone (we are not a recognized provider for this zone)", zd.ZoneName, ourIdentities)
+		}
+		// Must be guard 4: we are a provider but not a signer
+		return fmt.Errorf("zone %q: contributions rejected — we are provider %q but the zone is signed and our label is not listed in HSYNCPARAM signers (we are not authorized to sign this zone)", zd.ZoneName, ourLabel)
+	}
+	return nil
+}
+
 func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []string, localAgents map[string]bool, kdb *KeyDB, tm *TransportManager) *CombinerSyncResponse {
 	// Count total records for logging
 	totalRecords := 0
@@ -251,6 +284,18 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		resp.Status = "error"
 		resp.Message = fmt.Sprintf("zone %q not found on this combiner", req.Zone)
 		return resp
+	}
+
+	// Multi-provider safety gate: for MP-zone updates (not provider-zone updates),
+	// verify that the zone is a confirmed multi-provider zone and that we are an
+	// authorized provider (and signer, if the zone is signed).
+	if req.ZoneClass != "provider" {
+		if err := checkMPauthorization(zd); err != nil {
+			lgCombiner.Warn("rejecting contribution", "zone", req.Zone, "sender", req.SenderID, "reason", err)
+			resp.Status = "error"
+			resp.Message = err.Error()
+			return resp
+		}
 	}
 
 	// Process explicit Operations if present (takes precedence over Records)
