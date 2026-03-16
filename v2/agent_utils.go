@@ -916,6 +916,11 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 						continue
 					}
 
+					if upstreamIdentity == "" {
+						lgAgent.Warn("cannot resolve upstream label to identity, skipping", "zone", zonename, "upstream", hsync3.Upstream)
+						continue
+					}
+
 					// Need to sync with Upstream - mark as needed for discovery
 					ar.MarkAgentAsNeeded(upstreamIdentity, zonename,
 						&DeferredAgentTask{

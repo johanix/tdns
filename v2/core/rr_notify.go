@@ -56,10 +56,16 @@ func (rd *NOTIFY) Parse(txt []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid NOTIFY scheme: %s. Error: %v", txt[1], err)
 	}
+	if scheme < 0 || scheme > 255 {
+		return fmt.Errorf("invalid NOTIFY scheme: %s. Value must be 0-255", txt[1])
+	}
 
 	port, err := strconv.Atoi(txt[2])
 	if err != nil {
 		return fmt.Errorf("invalid NOTIFY port: %s. Error: %v", txt[2], err)
+	}
+	if port < 0 || port > 65535 {
+		return fmt.Errorf("invalid NOTIFY port: %s. Value must be 0-65535", txt[2])
 	}
 
 	tgt := dns.Fqdn(txt[3])

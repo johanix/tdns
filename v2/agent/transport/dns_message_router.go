@@ -349,6 +349,7 @@ func (r *DNSMessageRouter) Describe() string {
 	}
 
 	// Metrics
+	r.metrics.mu.RLock()
 	desc += "\nRouter Metrics:\n"
 	desc += fmt.Sprintf("  Total Messages: %d\n", r.metrics.TotalMessages)
 	desc += fmt.Sprintf("  Unknown Messages: %d\n", r.metrics.UnknownMessages)
@@ -361,6 +362,7 @@ func (r *DNSMessageRouter) Describe() string {
 			desc += fmt.Sprintf("    %s: %d\n", msgType, count)
 		}
 	}
+	r.metrics.mu.RUnlock()
 
 	return desc
 }

@@ -3,9 +3,6 @@ package tdns
 import (
 	"fmt"
 	"net"
-	"time"
-
-	"context"
 
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
@@ -77,36 +74,15 @@ func (kdb *KeyDB) ProcessKeyState(ks *edns0.KeyStateOption, zonename string) (*e
 			}, nil
 		}
 
-		// Start auto-bootstrap process in the background
-		go func() {
-			maxAttempts := viper.GetInt("keystate.max_bootstrap_attempts")
-			retryInterval := time.Duration(viper.GetInt("keystate.bootstrap_retry_interval")) * time.Second
-			timeout := time.Duration(viper.GetInt("keystate.bootstrap_timeout")) * time.Second
-
-			ctx, cancel := context.WithTimeout(context.Background(), timeout)
-			defer cancel()
-
-			for attempt := 1; attempt <= maxAttempts; attempt++ {
-				lgSigner.Info("auto-bootstrap attempt", "attempt", attempt, "max", maxAttempts, "zone", zonename, "keyid", ks.KeyID)
-
-				// TODO: Implement startAutoBootstrap
-				if attempt < maxAttempts {
-					select {
-					case <-ctx.Done():
-						lgSigner.Warn("auto-bootstrap timed out", "zone", zonename, "keyid", ks.KeyID)
-						return
-					case <-time.After(retryInterval):
-						continue
-					}
-				}
-			}
-			lgSigner.Error("auto-bootstrap failed after all attempts", "attempts", maxAttempts, "zone", zonename, "keyid", ks.KeyID)
-		}()
+		// Auto-bootstrap is not yet implemented. Log and return a truthful
+		// pending state so callers know the request was accepted but no work
+		// will happen yet.
+		lgSigner.Warn("auto-bootstrap requested but not yet implemented", "zone", zonename, "keyid", ks.KeyID)
 
 		return &edns0.KeyStateOption{
 			KeyID:     ks.KeyID,
-			KeyState:  edns0.KeyStateBootstrapAutoOngoing,
-			ExtraText: "Auto bootstrap process initiated",
+			KeyState:  edns0.KeyStateBootstrapAutoPending,
+			ExtraText: "Auto bootstrap process queued",
 		}, nil
 
 	case edns0.KeyStateInquiryKey:

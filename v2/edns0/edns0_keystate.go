@@ -25,7 +25,7 @@ const (
 	KeyStateValidationFail          = 8
 	KeyStateBootstrapAutoOngoing    = 9
 	KeyStateBootstrapManualRequired = 10
-	// Codes 11-12 removed in draft-02 (policy discovery via SVCB bootstrap SvcParamKey)
+	KeyStateBootstrapAutoPending    = 11
 
 	KeyStateUninitialized = 255 // Uninitialized state
 )
@@ -86,6 +86,7 @@ func KeyStateToString(state uint8) string {
 		KeyStateValidationFail:          "Validation Failed",
 		KeyStateBootstrapAutoOngoing:    "Auto Bootstrap Ongoing",
 		KeyStateBootstrapManualRequired: "Manual Bootstrap Required",
+		KeyStateBootstrapAutoPending:    "Auto Bootstrap Pending",
 		KeyStateUninitialized:           "Uninitialized",
 	}
 	if s, ok := states[state]; ok {
