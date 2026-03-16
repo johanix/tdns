@@ -43,7 +43,9 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 	defer func() {
 		if localtx {
 			if txSuccess {
-				tx.Commit()
+				if err := tx.Commit(); err != nil {
+					lgSigner.Error("Sig0KeyMgmt commit failed", "err", err)
+				}
 			} else {
 				tx.Rollback()
 			}
@@ -296,7 +298,9 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, pro
 	defer func() {
 		if localtx {
 			if txSuccess {
-				tx.Commit()
+				if err := tx.Commit(); err != nil {
+					lgSigner.Error("DnssecKeyMgmt commit failed", "err", err)
+				}
 			} else {
 				lgSigner.Debug("DnssecKeyMgmt rollback")
 				tx.Rollback()

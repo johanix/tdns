@@ -747,6 +747,11 @@ var pendingSignalKeys = &pendingSignalKeyMap{}
 // buildPendingSignalKeys is called by the first provider zone's OnFirstLoad.
 // It loads all stored publish instructions and maps NS targets to provider zones.
 func buildPendingSignalKeys(kdb *KeyDB) {
+	if kdb == nil {
+		lgCombiner.Warn("buildPendingSignalKeys: kdb is nil, skipping")
+		pendingSignalKeys.entries = make(map[string][]signalKeyEntry)
+		return
+	}
 	allInstr, err := kdb.LoadAllPublishInstructions()
 	if err != nil {
 		lgCombiner.Error("failed to load publish instructions for startup re-apply", "err", err)

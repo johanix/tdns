@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
@@ -87,10 +88,10 @@ type HandlerRegistration struct {
 	Description string             // Human-readable description
 	Registered  time.Time          // When this handler was registered
 
-	// Metrics
-	CallCount    uint64
-	ErrorCount   uint64
-	TotalLatency time.Duration
+	// Metrics (accessed atomically to avoid data races between concurrent Route calls)
+	CallCount    atomic.Uint64
+	ErrorCount   atomic.Uint64
+	TotalLatency atomic.Int64 // nanoseconds
 }
 
 // DNSMessageRouter routes incoming DNS messages to registered handlers.
@@ -273,15 +274,15 @@ func (r *DNSMessageRouter) buildHandlerChain(handlers []*HandlerRegistration) Me
 
 			if err := h.Handler(ctx); err != nil {
 				// Update handler metrics
-				h.ErrorCount++
-				h.CallCount++
-				h.TotalLatency += time.Since(start)
+				h.ErrorCount.Add(1)
+				h.CallCount.Add(1)
+				h.TotalLatency.Add(time.Since(start).Nanoseconds())
 				return fmt.Errorf("handler %q failed: %w", h.Name, err)
 			}
 
 			// Update handler metrics
-			h.CallCount++
-			h.TotalLatency += time.Since(start)
+			h.CallCount.Add(1)
+			h.TotalLatency.Add(time.Since(start).Nanoseconds())
 		}
 		return nil
 	}
@@ -337,14 +338,17 @@ func (r *DNSMessageRouter) Describe() string {
 	for msgType, handlers := range r.handlers {
 		desc += fmt.Sprintf("\n  %s (%d handlers):\n", msgType, len(handlers))
 		for _, h := range handlers {
+			calls := h.CallCount.Load()
+			errors := h.ErrorCount.Load()
+			latency := time.Duration(h.TotalLatency.Load())
 			avgLatency := time.Duration(0)
-			if h.CallCount > 0 {
-				avgLatency = h.TotalLatency / time.Duration(h.CallCount)
+			if calls > 0 {
+				avgLatency = latency / time.Duration(calls)
 			}
 			desc += fmt.Sprintf("    - %s (priority=%d)\n", h.Name, h.Priority)
 			desc += fmt.Sprintf("      Description: %s\n", h.Description)
 			desc += fmt.Sprintf("      Calls: %d, Errors: %d, Avg Latency: %v\n",
-				h.CallCount, h.ErrorCount, avgLatency)
+				calls, errors, avgLatency)
 		}
 	}
 
@@ -404,9 +408,9 @@ func (r *DNSMessageRouter) Reset() {
 	// Reset handler metrics
 	for _, handlers := range r.handlers {
 		for _, h := range handlers {
-			h.CallCount = 0
-			h.ErrorCount = 0
-			h.TotalLatency = 0
+			h.CallCount.Store(0)
+			h.ErrorCount.Store(0)
+			h.TotalLatency.Store(0)
 		}
 	}
 }

@@ -94,6 +94,10 @@ func (ar *AgentRegistry) RecomputeSharedZonesAndSyncState(agent *Agent) {
 }
 
 func (conf *Config) NewAgentRegistry() *AgentRegistry {
+	if conf.MultiProvider == nil {
+		lgAgent.Error("NewAgentRegistry: multi-provider config is nil")
+		return nil
+	}
 	if conf.MultiProvider.Identity == "" {
 		lgAgent.Error("identity is empty")
 		return nil

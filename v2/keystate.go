@@ -93,7 +93,7 @@ func (kdb *KeyDB) ProcessKeyState(ks *edns0.KeyStateOption, zonename string) (*e
 			return &edns0.KeyStateOption{
 				KeyID:     ks.KeyID,
 				KeyState:  edns0.KeyStateUnknown,
-				ExtraText: fmt.Sprintf("Failed to get key status: %v", err),
+				ExtraText: "Failed to get key status",
 			}, nil
 		}
 

@@ -36,9 +36,12 @@ func handleRouterList(router *transport.DNSMessageRouter) *AgentMgmtResponse {
 	for msgType, regs := range handlers {
 		handlerList := make([]map[string]interface{}, len(regs))
 		for i, reg := range regs {
+			calls := reg.CallCount.Load()
+			errors := reg.ErrorCount.Load()
+			latency := time.Duration(reg.TotalLatency.Load())
 			avgLatency := time.Duration(0)
-			if reg.CallCount > 0 {
-				avgLatency = reg.TotalLatency / time.Duration(reg.CallCount)
+			if calls > 0 {
+				avgLatency = latency / time.Duration(calls)
 			}
 
 			handlerList[i] = map[string]interface{}{
@@ -47,9 +50,9 @@ func handleRouterList(router *transport.DNSMessageRouter) *AgentMgmtResponse {
 				"priority":      reg.Priority,
 				"description":   reg.Description,
 				"registered":    reg.Registered.Format(time.RFC3339),
-				"call_count":    reg.CallCount,
-				"error_count":   reg.ErrorCount,
-				"total_latency": reg.TotalLatency.String(),
+				"call_count":    calls,
+				"error_count":   errors,
+				"total_latency": latency.String(),
 				"avg_latency":   avgLatency.String(),
 			}
 		}
@@ -130,9 +133,12 @@ func handleRouterWalk(router *transport.DNSMessageRouter) *AgentMgmtResponse {
 	var walkResults []map[string]interface{}
 
 	err := router.Walk(func(reg *transport.HandlerRegistration) error {
+		calls := reg.CallCount.Load()
+		errors := reg.ErrorCount.Load()
+		latency := time.Duration(reg.TotalLatency.Load())
 		avgLatency := time.Duration(0)
-		if reg.CallCount > 0 {
-			avgLatency = reg.TotalLatency / time.Duration(reg.CallCount)
+		if calls > 0 {
+			avgLatency = latency / time.Duration(calls)
 		}
 
 		walkResults = append(walkResults, map[string]interface{}{
@@ -141,9 +147,9 @@ func handleRouterWalk(router *transport.DNSMessageRouter) *AgentMgmtResponse {
 			"priority":      reg.Priority,
 			"description":   reg.Description,
 			"registered":    reg.Registered.Format(time.RFC3339),
-			"call_count":    reg.CallCount,
-			"error_count":   reg.ErrorCount,
-			"total_latency": reg.TotalLatency.String(),
+			"call_count":    calls,
+			"error_count":   errors,
+			"total_latency": latency.String(),
 			"avg_latency":   avgLatency.String(),
 		})
 		return nil

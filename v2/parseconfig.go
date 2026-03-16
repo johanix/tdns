@@ -727,6 +727,13 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			// delegation sync monitoring (child) after zone is loaded.
 			if options[OptDelSyncParent] || options[OptDelSyncChild] {
 				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
+					// Skip if the MP HSYNCPARAM callback already set up delegation sync for this zone.
+					if zd.Options[OptDelSyncChild] && !options[OptDelSyncChild] {
+						return
+					}
+					if zd.Options[OptDelSyncParent] && !options[OptDelSyncParent] {
+						return
+					}
 					delegationSyncQ := conf.Internal.DelegationSyncQ
 					if delegationSyncQ == nil {
 						lgConfig.Error("DelegationSyncQ not available in OnFirstLoad", "zone", zd.ZoneName)
