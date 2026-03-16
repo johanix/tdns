@@ -436,9 +436,6 @@ func (conf *Config) InitializeKeyDB() error {
 
 // func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) error {
 func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if len(conf.Zones) == 0 {
 		lgConfig.Info("no authoritative zones defined")
 		return nil, nil

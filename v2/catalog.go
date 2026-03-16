@@ -285,7 +285,7 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 					zoneName, update.CatalogZone, member.MetaGroup, getConfigGroupNames(conf.Catalog.ConfigGroups))
 				lg.Error("CATALOG: validation error", "msg", errorMsg)
 				if catalogExists {
-					catalogZd.SetError(ConfigError, errorMsg)
+					catalogZd.SetError(ConfigError, "%s", errorMsg)
 					catalogZd.LatestError = time.Now()
 				}
 				errorCount++
@@ -300,7 +300,7 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 					zoneName, update.CatalogZone, member.MetaGroup, configGroupConfig.Upstream)
 				lg.Error("CATALOG: validation error", "msg", errorMsg)
 				if catalogExists {
-					catalogZd.SetError(ConfigError, errorMsg)
+					catalogZd.SetError(ConfigError, "%s", errorMsg)
 					catalogZd.LatestError = time.Now()
 				}
 				errorCount++
@@ -630,7 +630,7 @@ func (cm *CatalogMembership) AddZoneGroup(zoneName, group string) error {
 	// Check if group already associated with this zone (exact duplicate)
 	for _, g := range member.Groups {
 		if g == group {
-			return fmt.Errorf("Group %s is already added to zone %s", group, zoneName)
+			return fmt.Errorf("group %s is already added to zone %s", group, zoneName)
 		}
 	}
 
@@ -638,13 +638,13 @@ func (cm *CatalogMembership) AddZoneGroup(zoneName, group string) error {
 	if strings.HasPrefix(group, "meta_") {
 		for _, g := range member.Groups {
 			if strings.HasPrefix(g, "meta_") {
-				return fmt.Errorf("Only one meta group allowed for %s (zone already has group %s)", zoneName, g)
+				return fmt.Errorf("only one meta group allowed for %s (zone already has group %s)", zoneName, g)
 			}
 		}
 	} else if strings.HasPrefix(group, "sign_") {
 		for _, g := range member.Groups {
 			if strings.HasPrefix(g, "sign_") {
-				return fmt.Errorf("Only one sign group allowed for %s (zone already has group %s)", zoneName, g)
+				return fmt.Errorf("only one sign group allowed for %s (zone already has group %s)", zoneName, g)
 			}
 		}
 	}

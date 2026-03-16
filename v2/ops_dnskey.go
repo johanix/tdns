@@ -101,8 +101,7 @@ SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (
 	// Build the DNSKEY RRset: replace the zone's DNSKEY RRset entirely with
 	// publishkeys (local + keystore published/retired/foreign + remote).
 	// This ensures stale keys from incoming zones are stripped.
-	var dnskeys core.RRset
-	dnskeys = core.RRset{
+	dnskeys := core.RRset{
 		RRs: publishkeys,
 	}
 

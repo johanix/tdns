@@ -322,8 +322,8 @@ func (r *DNSMessageRouter) Describe() string {
 	defer r.mu.RUnlock()
 
 	var desc string
-	desc += fmt.Sprintf("DNS Message Router\n")
-	desc += fmt.Sprintf("==================\n\n")
+	desc += "DNS Message Router\n"
+	desc += "==================\n\n"
 
 	// Middleware
 	desc += fmt.Sprintf("Middleware Chain (%d middleware):\n", len(r.middleware))
@@ -349,14 +349,14 @@ func (r *DNSMessageRouter) Describe() string {
 	}
 
 	// Metrics
-	desc += fmt.Sprintf("\nRouter Metrics:\n")
+	desc += "\nRouter Metrics:\n"
 	desc += fmt.Sprintf("  Total Messages: %d\n", r.metrics.TotalMessages)
 	desc += fmt.Sprintf("  Unknown Messages: %d\n", r.metrics.UnknownMessages)
 	desc += fmt.Sprintf("  Middleware Errors: %d\n", r.metrics.MiddlewareErrors)
 	desc += fmt.Sprintf("  Handler Errors: %d\n", r.metrics.HandlerErrors)
 
 	if len(r.metrics.UnhandledTypes) > 0 {
-		desc += fmt.Sprintf("\n  Unhandled Types:\n")
+		desc += "\n  Unhandled Types:\n"
 		for msgType, count := range r.metrics.UnhandledTypes {
 			desc += fmt.Sprintf("    %s: %d\n", msgType, count)
 		}
@@ -365,13 +365,12 @@ func (r *DNSMessageRouter) Describe() string {
 	return desc
 }
 
-// GetMetrics returns a copy of the current router metrics.
-func (r *DNSMessageRouter) GetMetrics() RouterMetrics {
+// GetMetrics returns a snapshot of the current router metrics.
+func (r *DNSMessageRouter) GetMetrics() *RouterMetrics {
 	r.metrics.mu.RLock()
 	defer r.metrics.mu.RUnlock()
 
-	// Create a copy
-	metrics := RouterMetrics{
+	metrics := &RouterMetrics{
 		TotalMessages:    r.metrics.TotalMessages,
 		UnknownMessages:  r.metrics.UnknownMessages,
 		MiddlewareErrors: r.metrics.MiddlewareErrors,

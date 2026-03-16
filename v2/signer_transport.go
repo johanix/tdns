@@ -14,7 +14,6 @@ import (
 	"strings"
 
 	"github.com/johanix/tdns/v2/agent/transport"
-	"github.com/johanix/tdns/v2/crypto"
 	"github.com/johanix/tdns/v2/crypto/jose"
 )
 
@@ -56,7 +55,7 @@ func initSignerCrypto(conf *Config) (*transport.PayloadCrypto, error) {
 
 	// Create PayloadCrypto instance
 	pc, err := transport.NewPayloadCrypto(&transport.PayloadCryptoConfig{
-		Backend: backend.(crypto.Backend),
+		Backend: backend,
 		Enabled: true,
 	})
 	if err != nil {

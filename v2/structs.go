@@ -335,14 +335,6 @@ type OwnerData struct {
 	RRtypes *RRTypeStore
 }
 
-type xxxRRset struct {
-	Name   string
-	Class  uint16
-	RRtype uint16
-	RRs    []dns.RR
-	RRSIGs []dns.RR
-}
-
 type ChildDelegationData struct {
 	DelHasChanged    bool      // When returned from a scanner, this indicates that a change has been detected
 	ParentSerial     uint32    // The parent serial that this data was correct for

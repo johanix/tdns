@@ -312,7 +312,7 @@ func (kdb *KeyDB) ResolvePendingEdit(editID int, approvedRecords, rejectedRecord
 	if len(rejectedRecords) > 0 {
 		// Get a new edit_id for the rejected portion
 		var maxID sql.NullInt64
-		err = tx.QueryRow(`
+		_ = tx.QueryRow(`
 			SELECT MAX(edit_id) FROM (
 				SELECT edit_id FROM CombinerPendingEdits
 				UNION ALL

@@ -420,9 +420,7 @@ func (zdr *ZoneDataRepo) processReplaceOp(synchedDataUpdate *SynchedDataUpdate, 
 
 	// Build the new RRset
 	var newRRset core.RRset
-	for _, rr := range newRRs {
-		newRRset.RRs = append(newRRset.RRs, rr)
-	}
+	newRRset.RRs = append(newRRset.RRs, newRRs...)
 
 	// Check if anything actually changed by comparing old and new
 	if hadOld {

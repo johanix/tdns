@@ -121,7 +121,7 @@ func (api *ApiClient) requestHelper(req *http.Request) (int, []byte, error) {
 		req.Header.Add("X-API-Key", api.apiKey)
 	} else if api.AuthMethod == "Authorization" {
 		if api.apiKey == "" {
-			return 0, nil, fmt.Errorf("Authorization auth method requires apiKey to be set")
+			return 0, nil, fmt.Errorf("authorization auth method requires apiKey to be set")
 		}
 		req.Header.Add("Authorization", fmt.Sprintf("token %s", api.apiKey))
 	} else {

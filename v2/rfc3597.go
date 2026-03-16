@@ -12,47 +12,6 @@ import (
 	"github.com/miekg/dns"
 )
 
-func xxxParentZone(z, imr string) (string, error) {
-	labels := strings.Split(z, ".")
-	var parent string
-
-	if len(labels) == 1 {
-		return z, nil
-	} else if len(labels) > 1 {
-		upone := dns.Fqdn(strings.Join(labels[1:], "."))
-
-		m := new(dns.Msg)
-		m.SetQuestion(upone, dns.TypeSOA)
-		m.SetEdns0(4096, true)
-		m.CheckingDisabled = true
-
-		r, err := dns.Exchange(m, imr)
-		if err != nil {
-			// return fmt.Sprintf("Error from dns.Exchange: %v\n", err)
-			return "", err
-		}
-		if r != nil {
-			if len(r.Answer) != 0 {
-				parent = r.Answer[0].Header().Name
-				return parent, nil
-			}
-			if len(r.Ns) > 0 {
-				for _, rr := range r.Ns {
-					if rr.Header().Rrtype == dns.TypeSOA {
-						parent = r.Ns[0].Header().Name
-						return parent, nil
-					}
-				}
-			}
-
-			lgHandler.Error("failed to locate parent via Answer and Authority, guessing", "zone", z)
-			return upone, fmt.Errorf("failed to located parent of '%s' via Answer and Authority", z)
-		}
-	}
-	lgHandler.Error("had difficulties splitting zone", "zone", z)
-	return z, fmt.Errorf("failed to split zone name '%s' into labels", z)
-}
-
 func (imr *Imr) ParentZone(z string) (string, error) {
 	labels := strings.Split(z, ".")
 	var parent string

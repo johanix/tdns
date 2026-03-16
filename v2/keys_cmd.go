@@ -46,9 +46,9 @@ func RunKeysCmd(conf *Config, appType AppType, args []string) error {
 
 	switch args[0] {
 	case "generate":
-		return runKeysGenerate(conf, appType, backend.(crypto.Backend), args[1:])
+		return runKeysGenerate(conf, appType, backend, args[1:])
 	case "show":
-		return runKeysShow(conf, appType, backend.(crypto.Backend), args[1:])
+		return runKeysShow(conf, appType, backend, args[1:])
 	default:
 		printKeysUsage(appType)
 		return fmt.Errorf("unknown keys command: %q", args[0])

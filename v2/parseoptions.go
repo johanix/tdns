@@ -226,7 +226,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 					"      store: map\n", zname)
 				lg.Error("catalog zone missing group_prefixes config", "zone", zname, "detail", errorMsg)
 				if zd != nil {
-					zd.SetError(ConfigError, errorMsg)
+					zd.SetError(ConfigError, "%s", errorMsg)
 				}
 				continue
 			}
@@ -247,7 +247,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 					"    add: auto\n", zname)
 				lg.Error("catalog zone missing config_groups", "zone", zname, "detail", errorMsg)
 				if zd != nil {
-					zd.SetError(ConfigError, errorMsg)
+					zd.SetError(ConfigError, "%s", errorMsg)
 				}
 				continue
 			}
@@ -262,7 +262,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 				errorMsg := fmt.Sprintf("Zone %s: catalog-member-auto-create option is only valid on catalog zones (must also have catalog-zone option)", zname)
 				lg.Error("catalog-member-auto-create requires catalog-zone option", "zone", zname, "detail", errorMsg)
 				if zd != nil {
-					zd.SetError(ConfigError, errorMsg)
+					zd.SetError(ConfigError, "%s", errorMsg)
 				}
 				continue
 			}
@@ -276,7 +276,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 				errorMsg := fmt.Sprintf("Zone %s: catalog-member-auto-delete option is only valid on catalog zones (must also have catalog-zone option)", zname)
 				lg.Error("catalog-member-auto-delete requires catalog-zone option", "zone", zname, "detail", errorMsg)
 				if zd != nil {
-					zd.SetError(ConfigError, errorMsg)
+					zd.SetError(ConfigError, "%s", errorMsg)
 				}
 				continue
 			}

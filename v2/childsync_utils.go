@@ -18,46 +18,6 @@ import (
 
 // This is only called from the CLI command "tdns-cli ddns sync" and uses a SIG(0) key from the
 // command line rather than the one in the keystore. Not to be used by TDNS-SERVER.
-func xxxChildSendDdnsSync(pzone string, target *DsyncTarget, adds, removes []dns.RR) (UpdateResult, error) {
-	if Globals.Zonename == "" {
-		return UpdateResult{}, fmt.Errorf("xxxChildSendDdnsSync: Globals.Zonename is not set")
-	}
-	msg, err := CreateChildUpdate(pzone, Globals.Zonename, adds, removes)
-	if err != nil {
-		return UpdateResult{}, fmt.Errorf("error from CreateChildUpdate(%s): %v", pzone, err)
-	}
-
-	pkc, err := LoadSig0SigningKey(Globals.Sig0Keyfile)
-	if err != nil {
-		lgDns.Error("error from LoadSig0SigningKeyNG", "keyfile", Globals.Sig0Keyfile, "err", err)
-		return UpdateResult{}, fmt.Errorf("error from LoadSig0SigningKeyNG(%s): %v", Globals.Sig0Keyfile, err)
-	}
-	var smsg *dns.Msg
-	sak := &Sig0ActiveKeys{
-		Keys: []*PrivateKeyCache{pkc},
-	}
-
-	if Globals.Sig0Keyfile != "" {
-		fmt.Printf("Signing update.\n")
-		smsg, err = SignMsg(*msg, Globals.Zonename, sak)
-		if err != nil {
-			lgDns.Error("error from SignMsg", "zone", Globals.Zonename, "err", err)
-			return UpdateResult{}, fmt.Errorf("error from SignMsg(%s): %v", Globals.Zonename, err)
-		}
-	} else {
-		fmt.Printf("Keyfile not specified, not signing message.\n")
-	}
-
-	rcode, ur, err := SendUpdate(smsg, pzone, target.Addresses)
-	if err != nil {
-		lgDns.Error("error from SendUpdate", "target", target.Name, "err", err)
-		return ur, err
-	} else {
-		lgDns.Info("SendUpdate completed", "parent", pzone, "target", target.Name, "rcode", dns.RcodeToString[rcode])
-	}
-	return ur, nil
-}
-
 type UpdateResult struct {
 	EDEFound     bool
 	EDECode      uint16
@@ -406,7 +366,7 @@ func (zd *ZoneData) BestSyncScheme(ctx context.Context, imr *Imr) (string, *Dsyn
 	}
 	if len(dsync_res.Rdata) == 0 {
 		lgDns.Warn("BestSyncScheme: no DSYNC RRs found, synching not possible", "zone", zd.ZoneName, "parent", dsync_res.Parent)
-		return "", nil, fmt.Errorf("error: No DSYNC RRs for %s found in parent %s.", zd.ZoneName, dsync_res.Parent)
+		return "", nil, fmt.Errorf("no DSYNC RRs for %s found in parent %s", zd.ZoneName, dsync_res.Parent)
 	}
 	schemes := viper.GetStringSlice("delegationsync.child.schemes")
 	if len(schemes) == 0 {

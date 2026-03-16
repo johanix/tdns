@@ -1192,14 +1192,12 @@ func (zdr *ZoneDataRepo) ProcessConfirmation(detail *ConfirmationDetail, msgQs *
 	if detail.Status == "PENDING" {
 		lgEngine.Debug("pending confirmation (delivery confirmed, awaiting final response)", "source", source, "distID", detail.DistributionID, "zone", detail.Zone)
 		zoneTracking := zdr.Tracking[detail.Zone]
-		if zoneTracking != nil {
-			for _, agentTracking := range zoneTracking {
-				for _, trackedRRset := range agentTracking {
-					for i := range trackedRRset.Tracked {
-						tr := &trackedRRset.Tracked[i]
-						if tr.DistributionID == detail.DistributionID {
-							setConfirmation(tr, "pending", "")
-						}
+		for _, agentTracking := range zoneTracking {
+			for _, trackedRRset := range agentTracking {
+				for i := range trackedRRset.Tracked {
+					tr := &trackedRRset.Tracked[i]
+					if tr.DistributionID == detail.DistributionID {
+						setConfirmation(tr, "pending", "")
 					}
 				}
 			}

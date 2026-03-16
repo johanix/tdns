@@ -10,7 +10,6 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/johanix/tdns/v2/agent/transport"
 	core "github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/crypto"
 	"github.com/johanix/tdns/v2/crypto/jose"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
@@ -1158,7 +1157,7 @@ func initPayloadCrypto(conf *Config) (*transport.PayloadCrypto, error) {
 	}
 	// Create PayloadCrypto instance
 	pc, err := transport.NewPayloadCrypto(&transport.PayloadCryptoConfig{
-		Backend: backend.(crypto.Backend),
+		Backend: backend,
 		Enabled: true,
 	})
 	if err != nil {
@@ -1231,7 +1230,7 @@ func initCombinerCrypto(conf *Config) (*transport.SecurePayloadWrapper, error) {
 	}
 	// Create PayloadCrypto instance using the generic transport infrastructure
 	pc, err := transport.NewPayloadCrypto(&transport.PayloadCryptoConfig{
-		Backend: backend.(crypto.Backend),
+		Backend: backend,
 		Enabled: true,
 	})
 	if err != nil {
