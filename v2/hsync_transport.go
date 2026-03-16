@@ -937,7 +937,11 @@ func sendConfigToAgent(tm *TransportManager, ar *AgentRegistry, requesterID stri
 		return
 	}
 
-	lgTransport.Info("sendConfigToAgent: sent config to requester", "requester", requesterID, "zone", zone, "subtype", subtype, "accepted", resp.Accepted)
+	if !resp.Accepted {
+		lgTransport.Error("sendConfigToAgent: config not accepted", "requester", requesterID, "zone", zone, "subtype", subtype, "accepted", resp.Accepted)
+		return
+	}
+	lgTransport.Info("sendConfigToAgent: sent config to requester", "requester", requesterID, "zone", zone, "subtype", subtype)
 }
 
 // routeAuditMessage routes an incoming AUDIT response message from a peer agent.
@@ -1002,7 +1006,11 @@ func sendAuditToAgent(tm *TransportManager, ar *AgentRegistry, requesterID strin
 		return
 	}
 
-	lgTransport.Info("sendAuditToAgent: sent audit to requester", "requester", requesterID, "zone", zone, "accepted", resp.Accepted)
+	if !resp.Accepted {
+		lgTransport.Error("sendAuditToAgent: audit not accepted", "requester", requesterID, "zone", zone, "accepted", resp.Accepted)
+		return
+	}
+	lgTransport.Info("sendAuditToAgent: sent audit to requester", "requester", requesterID, "zone", zone)
 }
 
 // routeRelocateMessage handles a relocate request.

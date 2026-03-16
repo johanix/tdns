@@ -177,6 +177,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		}
 		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+kp.State)
 		resp.Msg += fmt.Sprintf("\nAdded public key of newly generated keypair to TrustStore: %s", tsresp.Msg)
+		txSuccess = true
 		return &resp, err
 
 	case "setstate":
@@ -646,6 +647,9 @@ func (kdb *KeyDB) GetSig0KeyRaw(zonename, state string) (algorithm, privatekey, 
 			return "", "", "", false, err
 		}
 		return algorithm, privatekey, keyrr, true, nil
+	}
+	if err := rows.Err(); err != nil {
+		return "", "", "", false, err
 	}
 	return "", "", "", false, nil
 }

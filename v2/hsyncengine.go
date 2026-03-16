@@ -447,13 +447,20 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			// Remote agent wants audit data for this zone.
 			// Two-phase: gather audit data, then send as separate AUDIT message.
 			lgEngine.Info("RFI AUDIT request", "from", ampp.OriginatorID, "zone", ampp.Zone)
+			tm := ar.TransportManager
+			if tm == nil {
+				lgEngine.Error("RFI AUDIT: TransportManager not available", "zone", ampp.Zone, "originator", ampp.OriginatorID)
+				resp.Error = true
+				resp.ErrorMsg = "TransportManager not available"
+				resp.Msg = "AUDIT request failed: transport unavailable"
+				return
+			}
 			sdcmd := &SynchedDataCmd{
 				Cmd:      "dump-zonedatarepo",
 				Zone:     ZoneName(ampp.Zone),
 				Response: make(chan *SynchedDataCmdResponse, 1),
 			}
 			synchedDataCmdQ <- sdcmd
-			tm := ar.TransportManager
 			go func() {
 				select {
 				case sdResp := <-sdcmd.Response:
@@ -582,6 +589,13 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 
 			// Send config data back as a separate CONFIG message (two-phase pattern).
 			tm := ar.TransportManager
+			if tm == nil {
+				lgEngine.Error("RFI CONFIG: TransportManager not available", "zone", ampp.Zone, "originator", ampp.OriginatorID)
+				resp.Error = true
+				resp.ErrorMsg = "TransportManager not available"
+				resp.Msg = "CONFIG request failed: transport unavailable"
+				return
+			}
 			go sendConfigToAgent(tm, ar, string(ampp.OriginatorID), string(ampp.Zone), ampp.RfiSubtype, configData)
 			resp.Msg = fmt.Sprintf("CONFIG %s request received, response pending", ampp.RfiSubtype)
 

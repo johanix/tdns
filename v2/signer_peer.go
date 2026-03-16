@@ -47,7 +47,7 @@ func (ar *AgentRegistry) InitializeSignerAsPeer(conf *Config) error {
 
 	signerID := AgentId("signer")
 	if conf.MultiProvider.Signer.Identity != "" {
-		signerID = AgentId(conf.MultiProvider.Signer.Identity)
+		signerID = AgentId(dns.Fqdn(conf.MultiProvider.Signer.Identity))
 		lgSigner.Debug("using configured signer identity", "identity", signerID)
 	} else {
 		lgSigner.Warn("no signer identity configured, using default 'signer'")

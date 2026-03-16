@@ -281,6 +281,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		resp.Zone = zonename
 	} else {
 		zonename = dns.Fqdn(req.Zone)
+		req.Zone = zonename
 	}
 	zd, exists := Zones.Get(zonename)
 	if !exists {
@@ -361,7 +362,9 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 
 			// MP zones: owner must be at zone apex. Provider zones: any owner within the zone.
 			if isProvider {
-				if !strings.HasSuffix(strings.ToLower(owner), strings.ToLower(zonename)) {
+				lowerOwner := strings.ToLower(owner)
+				lowerZone := strings.ToLower(zonename)
+				if lowerOwner != lowerZone && !strings.HasSuffix(lowerOwner, "."+lowerZone) {
 					rejectedItems = append(rejectedItems, RejectedItem{
 						Record: rrStr,
 						Reason: fmt.Sprintf("owner %q is not within zone %q", owner, zonename),

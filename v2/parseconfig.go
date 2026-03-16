@@ -620,6 +620,10 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		}
 
 		if Globals.App.Type == AppTypeAgent && zconf.Type == "primary" {
+			if conf.MultiProvider == nil {
+				zd.SetError(ConfigError, "agent has primary zone %q but multi-provider config is missing", zname)
+				continue
+			}
 			// Agent only supports primary zone if it matches its identity
 			if zname != conf.MultiProvider.Identity {
 				zd.SetError(AgentError, "primary zone does not match agent identity (%q)", conf.MultiProvider.Identity)
@@ -755,9 +759,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			// For MP zones, the combiner manages the zone apex, so the agent cannot
 			// publish the KEY locally — it must send it to the combiner.
 			if options[OptMultiProvider] {
-				tm := conf.Internal.TransportManager
-				kdb := conf.Internal.KeyDB
 				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
+					tm := conf.Internal.TransportManager
+					kdb := conf.Internal.KeyDB
 					if tm == nil || kdb == nil || !zd.Options[OptDelSyncChild] {
 						return
 					}
@@ -1271,7 +1275,9 @@ func validateGroupPrefix(prefix string, prefixType string) error {
 func (conf *Config) normalizeConfigIdentities() {
 	// Agent identity and peers
 	if conf.MultiProvider != nil {
-		conf.MultiProvider.Identity = dns.Fqdn(conf.MultiProvider.Identity)
+		if conf.MultiProvider.Identity != "" {
+			conf.MultiProvider.Identity = dns.Fqdn(conf.MultiProvider.Identity)
+		}
 		if conf.MultiProvider.Dns.ControlZone != "" {
 			conf.MultiProvider.Dns.ControlZone = dns.Fqdn(conf.MultiProvider.Dns.ControlZone)
 		}

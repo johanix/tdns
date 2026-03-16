@@ -955,6 +955,12 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 		}
 		lgElect.Info("onLeaderElected: processing", "zone", zone)
 
+		// Guard: IMR must be available
+		if Globals.ImrEngine == nil {
+			lgElect.Debug("onLeaderElected: IMR not available, skipping DSYNC bootstrap", "zone", zone)
+			return nil
+		}
+
 		// Guard: parent must advertise DSYNC UPDATE scheme
 		_, err := Globals.ImrEngine.LookupDSYNCTarget(context.Background(), string(zone), dns.TypeANY, core.SchemeUpdate)
 		if err != nil {

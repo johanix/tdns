@@ -113,7 +113,14 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 				return false, fmt.Sprintf("Local update for zone %q: no HSYNCPARAM record (NS management not configured)",
 					synchedDataUpdate.Zone), nil
 			}
-			hsyncparam := hsyncparamRRset.RRs[0].(*dns.PrivateRR).Data.(*core.HSYNCPARAM)
+			privRR, ok := hsyncparamRRset.RRs[0].(*dns.PrivateRR)
+			if !ok || privRR.Data == nil {
+				return false, fmt.Sprintf("Local update for zone %q: HSYNCPARAM record has unexpected type", synchedDataUpdate.Zone), nil
+			}
+			hsyncparam, ok := privRR.Data.(*core.HSYNCPARAM)
+			if !ok {
+				return false, fmt.Sprintf("Local update for zone %q: HSYNCPARAM record data has unexpected type", synchedDataUpdate.Zone), nil
+			}
 			if hsyncparam.GetNSmgmt() != core.HsyncNSmgmtAGENT {
 				return false, fmt.Sprintf("Local update for zone %q: HSYNCPARAM nsmgmt=%s, NS management not delegated to agents",
 					synchedDataUpdate.Zone, core.HsyncNSmgmtToString[hsyncparam.GetNSmgmt()]), nil
