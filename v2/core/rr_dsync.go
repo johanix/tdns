@@ -16,7 +16,17 @@ func init() {
 	RegisterDsyncRR()
 }
 
-// const TypeDSYNC = 0x0F9B
+// Zone file syntax:
+//   owner TTL CLASS DSYNC rrtype scheme port target
+//
+// Example:
+//   _dsync.example.com. 3600 IN DSYNC CDS NOTIFY 5359 ns1.example.com.
+//
+// Fields:
+//   rrtype  - RR type this DSYNC applies to (e.g. CDS, CDNSKEY, CSYNC, DNSKEY)
+//   scheme  - sync scheme: NOTIFY, UPDATE, SCANNER, API, MSUPDATE, REPORT
+//   port    - TCP/UDP port number
+//   target  - FQDN of the target server
 
 type DSYNC struct {
 	Type   uint16

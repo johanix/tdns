@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/mitchellh/mapstructure"
@@ -214,6 +215,21 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// Normalize all identity fields (domain names) from config to FQDN form.
 	// Config files may omit trailing dots; wire protocol always uses FQDN.
 	conf.normalizeConfigIdentities()
+
+	// Validate multi-provider.role matches the application type
+	if conf.MultiProvider != nil {
+		expectedRole := map[AppType]string{
+			AppTypeAuth:     "signer",
+			AppTypeCombiner: "combiner",
+			AppTypeAgent:    "agent",
+		}
+		if expected, ok := expectedRole[Globals.App.Type]; ok {
+			if conf.MultiProvider.Role != expected {
+				return fmt.Errorf("multi-provider.role=%q does not match app type %s (expected %q)",
+					conf.MultiProvider.Role, Globals.App.Name, expected)
+			}
+		}
+	}
 
 	// Normalize service.transport.type (default: none)
 	if conf.Service.Transport.Type == "" {
@@ -420,9 +436,6 @@ func (conf *Config) InitializeKeyDB() error {
 
 // func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) error {
 func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
 	if len(conf.Zones) == 0 {
 		lgConfig.Info("no authoritative zones defined")
 		return nil, nil
@@ -607,9 +620,13 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		}
 
 		if Globals.App.Type == AppTypeAgent && zconf.Type == "primary" {
+			if conf.MultiProvider == nil {
+				zd.SetError(ConfigError, "agent has primary zone %q but multi-provider config is missing", zname)
+				continue
+			}
 			// Agent only supports primary zone if it matches its identity
-			if zname != conf.Agent.Identity {
-				zd.SetError(AgentError, "primary zone does not match agent identity (%q)", conf.Agent.Identity)
+			if zname != conf.MultiProvider.Identity {
+				zd.SetError(AgentError, "primary zone does not match agent identity (%q)", conf.MultiProvider.Identity)
 				continue
 			} else {
 				// For agent's own zone, ensure required options are set
@@ -643,7 +660,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			Zones.Set(zname, zdp)
 		}
 
-		if Globals.App.Type != AppTypeAgent && zdp.FirstZoneLoad {
+		if zdp.FirstZoneLoad {
 			lgConfig.Info("considering OnFirstLoad callbacks", "zone", zname,
 				"online-signing", options[OptOnlineSigning],
 				"inline-signing", options[OptInlineSigning],
@@ -669,6 +686,123 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 						if err := zd.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
 							lgConfig.Error("SetupZoneSigning failed in MP OnFirstLoad", "zone", zd.ZoneName, "error", err)
 						}
+					}
+				})
+			}
+
+			// MP delegation sync callback: for MP zones, check HSYNCPARAM for
+			// parentsync=agent. If set, enable delegation sync and call SetupZoneSync.
+			// Mirrors the MP signing callback pattern above.
+			if options[OptMultiProvider] {
+				delegationSyncQ := conf.Internal.DelegationSyncQ
+				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
+					if zd.Options[OptDelSyncChild] {
+						return // already set via static config, handled by callback below
+					}
+					apex, err := zd.GetOwner(zd.ZoneName)
+					if err != nil || apex == nil {
+						return
+					}
+					hsyncparamRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
+					if !exists || len(hsyncparamRRset.RRs) == 0 {
+						return
+					}
+					if prr, ok := hsyncparamRRset.RRs[0].(*dns.PrivateRR); ok {
+						if hsyncparam, ok := prr.Data.(*core.HSYNCPARAM); ok {
+							if hsyncparam.GetParentSync() == core.HsyncParentSyncAgent {
+								lgConfig.Info("HSYNCPARAM parentsync=agent, enabling delegation sync",
+									"zone", zd.ZoneName)
+								zd.Options[OptDelSyncChild] = true
+								if err := zd.SetupZoneSync(delegationSyncQ); err != nil {
+									lgConfig.Error("SetupZoneSync failed in MP OnFirstLoad",
+										"zone", zd.ZoneName, "error", err)
+								}
+							}
+						}
+					}
+				})
+			}
+
+			// Delegation sync callback: set up DSYNC publication (parent) or
+			// delegation sync monitoring (child) after zone is loaded.
+			if options[OptDelSyncParent] || options[OptDelSyncChild] {
+				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
+					// Skip if the MP HSYNCPARAM callback already set up delegation sync for this zone.
+					if zd.Options[OptDelSyncChild] && !options[OptDelSyncChild] {
+						return
+					}
+					if zd.Options[OptDelSyncParent] && !options[OptDelSyncParent] {
+						return
+					}
+					delegationSyncQ := conf.Internal.DelegationSyncQ
+					if delegationSyncQ == nil {
+						lgConfig.Error("DelegationSyncQ not available in OnFirstLoad", "zone", zd.ZoneName)
+						return
+					}
+					if err := zd.SetupZoneSync(delegationSyncQ); err != nil {
+						lgConfig.Error("SetupZoneSync failed in OnFirstLoad", "zone", zd.ZoneName, "error", err)
+					}
+				})
+			}
+
+			// Parent delegation backend: initialize on parent zones that accept child updates.
+			if options[OptDelSyncParent] && options[OptAllowChildUpdates] && zconf.DelegationBackend != "" {
+				backendName := zconf.DelegationBackend
+				kdb := conf.Internal.KeyDB
+				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
+					if kdb == nil {
+						return
+					}
+					backend, err := LookupDelegationBackend(backendName, kdb, zd)
+					if err != nil {
+						lgConfig.Error("failed to create delegation backend", "zone", zd.ZoneName, "backend", backendName, "error", err)
+						return
+					}
+					zd.DelegationBackend = backend
+					lgConfig.Info("delegation backend initialized", "zone", zd.ZoneName, "backend", backend.Name())
+				})
+			}
+
+			// Leader election OnFirstLoad is registered in StartAgent() (not here)
+			// because LeaderElectionManager doesn't exist until StartAgent runs.
+
+			// MP zone KEY publication: send SIG(0) KEY to combiner as REPLACE operation.
+			// For MP zones, the combiner manages the zone apex, so the agent cannot
+			// publish the KEY locally — it must send it to the combiner.
+			if options[OptMultiProvider] {
+				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
+					tm := conf.Internal.TransportManager
+					kdb := conf.Internal.KeyDB
+					if tm == nil || kdb == nil || !zd.Options[OptDelSyncChild] {
+						return
+					}
+					targetName := DsyncUpdateTargetName(zd.ZoneName)
+					if targetName == "" {
+						targetName = zd.ZoneName
+					}
+					sak, err := kdb.GetSig0Keys(targetName, Sig0StateActive)
+					if err != nil || len(sak.Keys) == 0 {
+						lgConfig.Debug("MP KEY publication: no active SIG(0) key", "zone", zd.ZoneName)
+						return
+					}
+					keyRR := &sak.Keys[0].KeyRR
+					zu := &ZoneUpdate{
+						Zone: ZoneName(zd.ZoneName),
+						Operations: []core.RROperation{{
+							Operation: "replace",
+							RRtype:    "KEY",
+							Records:   []string{keyRR.String()},
+						}},
+						Publish: &core.PublishInstruction{
+							KEYRRs:    []string{keyRR.String()},
+							Locations: []string{"at-apex", "at-ns"},
+						},
+					}
+					distID, err := tm.EnqueueForCombiner(ZoneName(zd.ZoneName), zu, "")
+					if err != nil {
+						lgConfig.Error("MP KEY publication: failed to send KEY to combiner", "zone", zd.ZoneName, "err", err)
+					} else {
+						lgConfig.Info("MP KEY publication: KEY + PublishInstruction sent to combiner", "zone", zd.ZoneName, "distID", distID)
 					}
 				})
 			}
@@ -1151,51 +1285,43 @@ func validateGroupPrefix(prefix string, prefixType string) error {
 // the YAML config included them.
 func (conf *Config) normalizeConfigIdentities() {
 	// Agent identity and peers
-	if conf.Agent != nil {
-		conf.Agent.Identity = dns.Fqdn(conf.Agent.Identity)
-		if conf.Agent.Dns.ControlZone != "" {
-			conf.Agent.Dns.ControlZone = dns.Fqdn(conf.Agent.Dns.ControlZone)
+	if conf.MultiProvider != nil {
+		if conf.MultiProvider.Identity != "" {
+			conf.MultiProvider.Identity = dns.Fqdn(conf.MultiProvider.Identity)
 		}
-		if conf.Agent.Combiner != nil && conf.Agent.Combiner.Identity != "" {
-			conf.Agent.Combiner.Identity = dns.Fqdn(conf.Agent.Combiner.Identity)
+		if conf.MultiProvider.Dns.ControlZone != "" {
+			conf.MultiProvider.Dns.ControlZone = dns.Fqdn(conf.MultiProvider.Dns.ControlZone)
 		}
-		if conf.Agent.Signer != nil && conf.Agent.Signer.Identity != "" {
-			conf.Agent.Signer.Identity = dns.Fqdn(conf.Agent.Signer.Identity)
+		if conf.MultiProvider.Combiner != nil && conf.MultiProvider.Combiner.Identity != "" {
+			conf.MultiProvider.Combiner.Identity = dns.Fqdn(conf.MultiProvider.Combiner.Identity)
 		}
-		for i, p := range conf.Agent.AuthorizedPeers {
-			conf.Agent.AuthorizedPeers[i] = dns.Fqdn(p)
+		if conf.MultiProvider.Signer != nil && conf.MultiProvider.Signer.Identity != "" {
+			conf.MultiProvider.Signer.Identity = dns.Fqdn(conf.MultiProvider.Signer.Identity)
 		}
-		for _, peer := range conf.Agent.Peers {
+		for i, p := range conf.MultiProvider.AuthorizedPeers {
+			conf.MultiProvider.AuthorizedPeers[i] = dns.Fqdn(p)
+		}
+		for _, peer := range conf.MultiProvider.Peers {
 			if peer != nil && peer.Identity != "" {
 				peer.Identity = dns.Fqdn(peer.Identity)
 			}
 		}
 	}
 
-	// Combiner identity and agent peers
-	if conf.Combiner != nil {
-		conf.Combiner.Identity = dns.Fqdn(conf.Combiner.Identity)
-		for _, agent := range conf.Combiner.Agents {
+	// Multi-provider agent peers and combiner-specific normalization
+	if conf.MultiProvider != nil {
+		for _, agent := range conf.MultiProvider.Agents {
 			if agent != nil && agent.Identity != "" {
 				agent.Identity = dns.Fqdn(agent.Identity)
 			}
 		}
-		for i, ns := range conf.Combiner.ProtectedNamespaces {
-			conf.Combiner.ProtectedNamespaces[i] = dns.Fqdn(ns)
-		}
-	}
-
-	// Signer (multi-provider) identity and agent peers
-	if conf.MultiProvider != nil {
-		if conf.MultiProvider.Identity != "" {
-			conf.MultiProvider.Identity = dns.Fqdn(conf.MultiProvider.Identity)
-		}
-		if conf.MultiProvider.HsyncIdentity != "" {
-			conf.MultiProvider.HsyncIdentity = dns.Fqdn(conf.MultiProvider.HsyncIdentity)
-		}
-		for _, agent := range conf.MultiProvider.Agents {
-			if agent != nil && agent.Identity != "" {
-				agent.Identity = dns.Fqdn(agent.Identity)
+		if conf.MultiProvider.Role == "combiner" {
+			for i, ns := range conf.MultiProvider.ProtectedNamespaces {
+				conf.MultiProvider.ProtectedNamespaces[i] = dns.Fqdn(ns)
+			}
+			for i := range conf.MultiProvider.ProviderZones {
+				conf.MultiProvider.ProviderZones[i].Zone = dns.Fqdn(conf.MultiProvider.ProviderZones[i].Zone)
+				RegisterProviderZoneRRtypes(conf.MultiProvider.ProviderZones[i])
 			}
 		}
 	}

@@ -29,7 +29,28 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 	var resp = KeystoreResponse{Time: time.Now()}
 	var res sql.Result
 
+	var localtx = false
 	var err error
+	var txSuccess bool
+
+	if tx == nil {
+		tx, err = kdb.Begin("Sig0KeyMgmt")
+		if err != nil {
+			return nil, err
+		}
+		localtx = true
+	}
+	defer func() {
+		if localtx {
+			if txSuccess {
+				if err := tx.Commit(); err != nil {
+					lgSigner.Error("Sig0KeyMgmt commit failed", "err", err)
+				}
+			} else {
+				tx.Rollback()
+			}
+		}
+	}()
 
 	lgSigner.Debug("Sig0KeyMgmt request", "subcommand", kp.SubCommand)
 
@@ -158,6 +179,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		}
 		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+kp.State)
 		resp.Msg += fmt.Sprintf("\nAdded public key of newly generated keypair to TrustStore: %s", tsresp.Msg)
+		txSuccess = true
 		return &resp, err
 
 	case "setstate":
@@ -179,6 +201,20 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+Sig0StatePublished)
 		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+Sig0StateActive)
 		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+Sig0StateRetired)
+
+	case "setparentstate":
+		const setParentStateSql = "UPDATE Sig0KeyStore SET parent_state=? WHERE zonename=? AND keyid=?"
+		res, err = tx.Exec(setParentStateSql, kp.ParentState, kp.Keyname, kp.Keyid)
+		if err != nil {
+			lgSigner.Error("failed to set SIG(0) key parent_state", "err", err)
+			return &resp, err
+		}
+		rows, _ := res.RowsAffected()
+		if rows > 0 {
+			resp.Msg = fmt.Sprintf("Updated parent_state to %d for key %s (keyid %d)", kp.ParentState, kp.Keyname, kp.Keyid)
+		} else {
+			resp.Msg = fmt.Sprintf("Key with name %q and keyid %d not found", kp.Keyname, kp.Keyid)
+		}
 
 	case "delete":
 		const getSig0KeySql = `
@@ -231,6 +267,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 		lgSigner.Warn("unknown Sig0KeyMgmt subcommand", "subcommand", kp.SubCommand)
 	}
 
+	txSuccess = true
 	return &resp, nil
 }
 
@@ -249,6 +286,7 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, pro
 
 	var localtx = false
 	var err error
+	var txSuccess bool
 
 	if tx == nil {
 		tx, err = kdb.Begin("DnssecKeyMgmt")
@@ -259,11 +297,13 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, pro
 	}
 	defer func() {
 		if localtx {
-			if err != nil {
-				lgSigner.Debug("DnssecKeyMgmt rollback", "err", err)
-				tx.Rollback()
+			if txSuccess {
+				if err := tx.Commit(); err != nil {
+					lgSigner.Error("DnssecKeyMgmt commit failed", "err", err)
+				}
 			} else {
-				tx.Commit()
+				lgSigner.Debug("DnssecKeyMgmt rollback")
+				tx.Rollback()
 			}
 		}
 	}()
@@ -366,6 +406,9 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr, pro
 		}
 		resp.Msg = msg
 		delete(kdb.KeystoreDnskeyCache, kp.Keyname+"+"+kp.State)
+		if err == nil {
+			txSuccess = true
+		}
 		return &resp, err
 
 	case "setstate":
@@ -514,6 +557,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		resp.ErrorMsg = resp.Msg
 	}
 
+	txSuccess = true
 	return &resp, nil
 }
 
@@ -593,6 +637,30 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 	kdb.KeystoreSig0Cache[zonename+"+"+state] = &sak
 
 	return &sak, err
+}
+
+// GetSig0KeyRaw returns the raw database column values for a SIG(0) key.
+// Used for transferring key material between agents via RFI CONFIG.
+func (kdb *KeyDB) GetSig0KeyRaw(zonename, state string) (algorithm, privatekey, keyrr string, found bool, err error) {
+	const sql = `SELECT algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND state=?`
+
+	rows, err := kdb.Query(sql, zonename, state)
+	if err != nil {
+		return "", "", "", false, err
+	}
+	defer rows.Close()
+
+	if rows.Next() {
+		err = rows.Scan(&algorithm, &privatekey, &keyrr)
+		if err != nil {
+			return "", "", "", false, err
+		}
+		return algorithm, privatekey, keyrr, true, nil
+	}
+	if err := rows.Err(); err != nil {
+		return "", "", "", false, err
+	}
+	return "", "", "", false, nil
 }
 
 func (kdb *KeyDB) GetDnssecKeys(zonename, state string) (*DnssecKeys, error) {

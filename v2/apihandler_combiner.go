@@ -155,20 +155,29 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 			// Only apply protected-namespace checks to remote agents.
 			var protectedNamespaces []string
-			if conf.Combiner != nil {
+			if conf.MultiProvider != nil {
 				isLocal := false
-				for _, a := range conf.Combiner.Agents {
+				for _, a := range conf.MultiProvider.Agents {
 					if a != nil && a.Identity == rec.SenderID {
 						isLocal = true
 						break
 					}
 				}
 				if !isLocal {
-					protectedNamespaces = conf.Combiner.ProtectedNamespaces
+					protectedNamespaces = conf.MultiProvider.ProtectedNamespaces
 				}
 			}
 
-			syncResp := CombinerProcessUpdate(syncReq, protectedNamespaces)
+			tm := conf.Internal.TransportManager
+			apiLocalAgents := make(map[string]bool)
+			if conf.MultiProvider != nil {
+				for _, a := range conf.MultiProvider.Agents {
+					if a != nil && a.Identity != "" {
+						apiLocalAgents[a.Identity] = true
+					}
+				}
+			}
+			syncResp := CombinerProcessUpdate(syncReq, protectedNamespaces, apiLocalAgents, kdb, tm)
 
 			lgApi.Info("approved edit", "editID", cp.EditID, "zone", rec.Zone, "status", syncResp.Status, "applied", len(syncResp.AppliedRecords), "removed", len(syncResp.RemovedRecords), "rejected", len(syncResp.RejectedItems))
 
@@ -178,7 +187,6 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			if confirmTarget == "" {
 				confirmTarget = rec.SenderID // Fallback for direct delivery
 			}
-			tm := conf.Internal.TransportManager
 			if tm != nil {
 				combinerSendConfirmation(tm, confirmTarget, syncResp)
 			}
@@ -315,6 +323,21 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			}
 			resp.Msg = fmt.Sprintf("%d current contribution(s) from %d agent(s) for zone %s",
 				totalRRs, len(current), zone)
+
+		case "reapply":
+			zone := dns.Fqdn(cp.Zone)
+			if zone == "" || zone == "." {
+				resp.Error = true
+				resp.ErrorMsg = "zone is required"
+				return
+			}
+			msg, err := combinerReapplyContributions(zone, kdb)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+			resp.Msg = msg
 
 		case "clear":
 			// Determine which tables to clear. Empty Tables list means all.

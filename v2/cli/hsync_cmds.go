@@ -415,14 +415,14 @@ func PrintHsyncRRs(agentid tdns.AgentId, rrs []string) {
 			continue
 		}
 
-		hsyncRR, ok := privRR.Data.(*core.HSYNC)
+		hsync3RR, ok := privRR.Data.(*core.HSYNC3)
 		if !ok {
-			log.Printf("PrivateRR does not contain HSYNC data: %v", privRR)
+			log.Printf("PrivateRR does not contain HSYNC3 data: %v", privRR)
 			continue
 		}
 
 		fields := strings.Fields(rrstr)
-		if tdns.AgentId(hsyncRR.Identity) == agentid {
+		if tdns.AgentId(hsync3RR.Identity) == agentid {
 			fields = append(fields, "(local agent)")
 		}
 		lines = append(lines, strings.Join(fields, "|"))

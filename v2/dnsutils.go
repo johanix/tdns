@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -17,7 +18,6 @@ import (
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 	"github.com/twotwotwo/sorts"
-
 	// "github.com/gookit/goutil/dump"
 )
 
@@ -220,6 +220,16 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0].(*dns.SOA)
 	soa.Serial = zd.CurrentSerial
 
+	// Re-sign SOA after serial update (the RRSIG covers the serial)
+	if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
+		soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+		if signed, err := zd.SignRRset(&soaRRset, zd.ZoneName, nil, true); err != nil {
+			zd.Logger.Printf("ZoneTransferOut: failed to re-sign SOA: %v", err)
+		} else if signed {
+			apex.RRtypes.Set(dns.TypeSOA, soaRRset)
+		}
+	}
+
 	total_sent := 0
 	count := 0
 	batchNum := 1                // Track batch number for debug output
@@ -396,15 +406,15 @@ func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, err
 	if err != nil {
 		return false, 0, fmt.Errorf("ReadZoneFile: Error: failed to read %s: %v", filename, err)
 	}
-	return zd.ParseZoneFromReader(bufio.NewReader(f), force)
+	return zd.ParseZoneFromReader(bufio.NewReader(f), force, filename)
 }
 
 func (zd *ZoneData) ReadZoneData(zoneData string, force bool) (bool, uint32, error) {
 	zd.Logger.Printf("ReadZoneData: zone: %s", zd.ZoneName)
-	return zd.ParseZoneFromReader(strings.NewReader(zoneData), force)
+	return zd.ParseZoneFromReader(strings.NewReader(zoneData), force, "")
 }
 
-func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, error) {
+func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string) (bool, uint32, error) {
 	zd.Logger.Printf("ParseZoneFromReader: zone: %s", zd.ZoneName)
 
 	switch zd.ZoneStore {
@@ -414,7 +424,7 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 		return false, 0, fmt.Errorf("ParseZoneFromReader: zone store %d not supported", zd.ZoneStore)
 	}
 
-	zp := dns.NewZoneParser(r, "", "")
+	zp := dns.NewZoneParser(r, "", filename)
 	zp.SetIncludeAllowed(true)
 
 	firstSoaSeen := false
@@ -453,6 +463,9 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool) (bool, uint32, 
 
 	if err = zp.Err(); err != nil {
 		zd.Logger.Printf("ParseZoneFromReader: Zone %s: Error from ZoneParser: %v", zd.ZoneName, err)
+		if filename != "" {
+			return false, 0, formatZoneParseError(err, filename)
+		}
 		return false, 0, err
 	}
 
@@ -760,4 +773,39 @@ func (owners Owners) Less(i, j int) bool {
 
 func quickSort(sortable sort.Interface) {
 	sorts.Quicksort(sortable)
+}
+
+// formatZoneParseError extracts the line number from the parse error string
+// and appends the offending line from the zone file for context.
+func formatZoneParseError(err error, filename string) error {
+	errStr := err.Error()
+	lineNum := 0
+	if idx := strings.Index(errStr, "at line: "); idx != -1 {
+		numStr := errStr[idx+len("at line: "):]
+		parts := strings.SplitN(numStr, ":", 2)
+		if n, e := strconv.Atoi(parts[0]); e == nil {
+			lineNum = n
+		}
+	}
+	if lineNum > 0 {
+		if line, e := readLineFromFile(filename, lineNum); e == nil {
+			return fmt.Errorf("%w\n  line %d: %s", err, lineNum, line)
+		}
+	}
+	return err
+}
+
+func readLineFromFile(filename string, lineNum int) (string, error) {
+	f, err := os.Open(filename)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for i := 1; scanner.Scan(); i++ {
+		if i == lineNum {
+			return scanner.Text(), nil
+		}
+	}
+	return "", fmt.Errorf("line %d not found", lineNum)
 }

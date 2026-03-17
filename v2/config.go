@@ -56,10 +56,7 @@ type Config struct {
 	Db             DbConf
 	Registrars     map[string][]string
 	Log            LogConf
-	Agent          *LocalAgentConf `yaml:"agent"`
-	// Combiner (combiner only): symmetric to Agent block; our config and peer (agent)
-	Combiner *LocalCombinerConf `yaml:"combiner"`
-	Internal InternalConf
+	Internal       InternalConf
 }
 
 // KaspConf holds Key and Signing Policy parameters for the signer.
@@ -97,65 +94,112 @@ type KaspConf struct {
 	CheckInterval string `yaml:"check_interval" mapstructure:"check_interval"`
 }
 
-// LocalCombinerConf holds combiner-specific config (symmetric to LocalAgentConf).
-type LocalCombinerConf struct {
-	// Identity: combiner's identity (FQDN) for agent protocol communication
-	// Required when agents use chunk_mode=query (needed to construct CHUNK query qnames)
-	Identity string `yaml:"identity" validate:"required,fqdn"`
-	// LongTermJosePrivKey: path to our JOSE private key for secure CHUNK
+// ProviderZoneConf configures a provider-owned zone that the combiner manages.
+// Unlike MP zones (hardcoded RRtype whitelist, apex-only), provider zones use
+// config-driven RRtype restrictions and allow non-apex record owners.
+type ProviderZoneConf struct {
+	Zone           string   `yaml:"zone"`
+	AllowedRRtypes []string `yaml:"allowed-rrtypes" mapstructure:"allowed-rrtypes"`
+}
+
+// MultiProviderConf holds config for multi-provider DNSSEC (RFC 8901).
+// Used by all three MP roles: agent, combiner, and signer.
+// The Role field determines which role-specific fields are relevant.
+// YAML key: "multi-provider:"
+type MultiProviderConf struct {
+	// === Shared fields (all roles) ===
+
+	// Role: "agent", "combiner", or "signer". Determines which fields are active.
+	Role string `yaml:"role"`
+	// Active: master switch for multi-provider mode.
+	// Must be true AND zone must have options: [multi-provider] for MP behavior.
+	Active bool `yaml:"active"`
+	// Identity: this node's identity (FQDN) for transport protocol.
+	Identity string `yaml:"identity"`
+	// LongTermJosePrivKey: path to JOSE private key for secure CHUNK.
 	LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`
-	// Chunk config (same key names as agent.dns for consistency)
-	ChunkMode          string `yaml:"chunk_mode" mapstructure:"chunk_mode"`                     // "edns0" | "query" when combiner sends NOTIFY(CHUNK)
-	ChunkQueryEndpoint string `yaml:"chunk_query_endpoint" mapstructure:"chunk_query_endpoint"` // "include" | "none"; required when chunk_mode=query
+	// ChunkMode: "edns0" | "query" for outbound NOTIFY(CHUNK).
+	ChunkMode string `yaml:"chunk_mode" mapstructure:"chunk_mode"`
 	// ChunkMaxSize: maximum size (bytes) of each data chunk when fragmenting payloads.
 	// 0 = default (60000). Useful for testing fragmentation with small values.
 	ChunkMaxSize int `yaml:"chunk_max_size" mapstructure:"chunk_max_size"`
-	// Agents: list of agents this combiner communicates with.
-	// Each agent must have an identity, address:port, and JOSE public key.
+	// Agents: the agent peers (address, JOSE public key, optional API URL).
+	// Used by signer and combiner roles.
 	Agents []*PeerConf `yaml:"agents"`
+	// SyncApi: sync API server config for inbound HELLO/BEAT/PING over HTTPS.
+	// Used by signer and combiner roles.
+	SyncApi struct {
+		Addresses struct {
+			Listen []string
+		}
+		CertFile string `yaml:"cert_file" mapstructure:"cert_file"`
+		KeyFile  string `yaml:"key_file" mapstructure:"key_file"`
+	} `yaml:"sync_api" mapstructure:"sync_api"`
+
+	// === Combiner-specific fields ===
+
+	// ChunkQueryEndpoint: "include" | "none"; required when chunk_mode=query (combiner role).
+	ChunkQueryEndpoint string `yaml:"chunk_query_endpoint" mapstructure:"chunk_query_endpoint"`
 	// Signature: template string for a TXT record injected into combined zones (demo feature).
 	// Supports {identity} and {zone} placeholders.
 	Signature    string `yaml:"signature"`
 	AddSignature bool   `yaml:"add-signature" mapstructure:"add-signature"`
 	// ProtectedNamespaces: list of domain suffixes that belong to this provider.
 	// NS records from remote agents whose targets fall within any of these namespaces
-	// are rejected (prevents namespace intrusion). Example: ["echo.dnslab.", "ultrafastdns.com."]
+	// are rejected (prevents namespace intrusion).
 	ProtectedNamespaces []string `yaml:"protected-namespaces" mapstructure:"protected-namespaces"`
+	// ProviderZones: zones owned by the provider where agents may make targeted edits
+	// (e.g. _signal KEY records). Unlike MP zones, these use config-driven RRtype
+	// restrictions and allow non-apex owners.
+	ProviderZones []ProviderZoneConf `yaml:"provider-zones" mapstructure:"provider-zones"`
+
+	// === Agent-specific fields ===
+
+	// SupportedMechanisms: List of active transport mechanisms (default: ["api", "dns"] if both configured)
+	SupportedMechanisms []string `yaml:"supported_mechanisms" mapstructure:"supported_mechanisms"`
+	Local               struct {
+		Notify      []string
+		Nameservers []string `yaml:"nameservers,omitempty"`
+	}
+	Remote struct {
+		LocateInterval int
+		BeatInterval   uint32
+	}
+	Syncengine struct {
+		Intervals struct {
+			HelloRetry int
+		}
+	}
+	Api LocalAgentApiConf
+	Dns LocalAgentDnsConf
+	// Combiner peer (agent only): address and combiner's JOSE public key path for secure CHUNK
+	Combiner *PeerConf `yaml:"combiner"`
+	// Signer peer (agent only): address and JOSE public key path for KEYSTATE signaling
+	Signer *PeerConf `yaml:"signer"`
+	// AuthorizedPeers: List of agent identities authorized to communicate
+	AuthorizedPeers []string `yaml:"authorized_peers"`
+	// Peers (DEPRECATED): Old format with embedded addresses/keys - use authorized_peers instead
+	Peers map[string]*PeerConf `yaml:"peers"`
+	Xfr   struct {
+		Outgoing struct {
+			Addresses []string `yaml:"addresses,omitempty"`
+			Auth      []string `yaml:"auth,omitempty"`
+		}
+		Incoming struct {
+			Addresses []string `yaml:"addresses,omitempty"`
+			Auth      []string `yaml:"auth,omitempty"`
+		}
+	}
 }
 
 // FindAgent returns the PeerConf for the agent with the given identity, or nil if not found.
-func (c *LocalCombinerConf) FindAgent(identity string) *PeerConf {
+func (c *MultiProviderConf) FindAgent(identity string) *PeerConf {
 	for _, a := range c.Agents {
 		if a.Identity == identity {
 			return a
 		}
 	}
 	return nil
-}
-
-// MultiProviderConf holds signer-side config for multi-provider DNSSEC (RFC 8901).
-// Only used by tdns-auth. When Active is true, the signer initializes a TransportManager
-// for communication with its local agent (KEYSTATE signaling, PING diagnostics).
-// YAML key: "multi-provider:"
-type MultiProviderConf struct {
-	// Active: master switch for multi-provider mode.
-	// Must be true AND zone must have options: [multi-provider] for MP behavior.
-	Active bool `yaml:"active"`
-	// Identity: signer's identity (FQDN) for transport protocol.
-	Identity string `yaml:"identity"`
-	// HsyncIdentity: identity to match in the HSYNC RRset (typically the agent FQDN).
-	// If empty, falls back to Identity.
-	HsyncIdentity string `yaml:"hsync-identity" mapstructure:"hsync-identity"`
-	// LongTermJosePrivKey: path to signer's JOSE private key for secure CHUNK.
-	LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`
-	// ChunkMode: "edns0" | "query" for outbound NOTIFY(CHUNK) to agent.
-	ChunkMode string `yaml:"chunk_mode" mapstructure:"chunk_mode"`
-	// ChunkMaxSize: maximum size (bytes) of each data chunk when fragmenting payloads.
-	// 0 = default (60000). Useful for testing fragmentation with small values.
-	ChunkMaxSize int `yaml:"chunk_max_size" mapstructure:"chunk_max_size"`
-	// Agents: the local agent peers (address, JOSE public key, optional API URL).
-	// Supports multiple agents for load distribution and fault isolation.
-	Agents []*PeerConf `yaml:"agents"`
 }
 
 type AppDetails struct {
@@ -213,6 +257,17 @@ type ImrEngineConf struct {
 	TrustAnchorFile string `yaml:"trust-anchor-file"`
 	Verbose         bool
 	Debug           bool
+	Logging         ImrLoggingConf `yaml:"logging" mapstructure:"logging"`
+	// RequireDnssecValidation: when true (default), TLSA and other security-sensitive
+	// records must have a secure DNSSEC validation state. Set to false to allow
+	// indeterminate/insecure records during lab/development when the full DNSSEC
+	// chain is not yet established.
+	RequireDnssecValidation *bool `yaml:"require_dnssec_validation" mapstructure:"require_dnssec_validation"`
+}
+
+type ImrLoggingConf struct {
+	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
+	File    string `yaml:"file" mapstructure:"file"`
 }
 type ImrStubConf struct {
 	Zone string `validate:"required"`
@@ -249,49 +304,6 @@ type PeerConf struct {
 	LongTermJosePubKey string `yaml:"long_term_jose_pub_key"`
 	ApiBaseUrl         string `yaml:"api_base_url,omitempty"` // Optional: for API transport (e.g. https://combiner:8085/api/v1)
 	Identity           string `yaml:"identity"`               // Peer identity (FQDN); required for combiner agents, optional for agent combiner
-}
-
-type LocalAgentConf struct {
-	Identity string `validate:"required,hostname"`
-	// SupportedMechanisms: List of active transport mechanisms (default: ["api", "dns"] if both configured)
-	// Valid values: "api", "dns"
-	// Set to ["api"] to disable DNS transport, ["dns"] to disable API transport
-	SupportedMechanisms []string `yaml:"supported_mechanisms" mapstructure:"supported_mechanisms"`
-	Local               struct {
-		Notify      []string // secondaries to notify for an agent autozone
-		Nameservers []string `yaml:"nameservers,omitempty"` // authoritative NS hostnames for the agent autozone (FQDN, no glue; must be outside the autozone)
-	}
-	Remote struct {
-		LocateInterval int    // time in seconds
-		BeatInterval   uint32 // time between outgoing heartbeats to same destination
-	}
-	Syncengine struct {
-		Intervals struct {
-			HelloRetry int // seconds between Hello retries (range: 15-1800)
-		}
-	}
-	Api LocalAgentApiConf
-	Dns LocalAgentDnsConf
-	// Combiner peer (agent only): address and combiner's JOSE public key path for secure CHUNK
-	Combiner *PeerConf `yaml:"combiner"`
-	// Signer peer (agent only): address and JOSE public key path for KEYSTATE signaling (Phase 6)
-	Signer *PeerConf `yaml:"signer"`
-	// AuthorizedPeers: List of agent identities authorized to communicate (identity-only, DNS provides contact info)
-	AuthorizedPeers []string `yaml:"authorized_peers"`
-	// Peers (DEPRECATED): Old format with embedded addresses/keys - use authorized_peers instead
-	Peers map[string]*PeerConf `yaml:"peers"`
-	// Our JOSE keypair for secure CHUNK (agent: path to private key; public derived or adjacent .pub)
-	LongTermJosePrivKey string `yaml:"long_term_jose_priv_key"`
-	Xfr                 struct {
-		Outgoing struct {
-			Addresses []string `yaml:"addresses,omitempty"`
-			Auth      []string `yaml:"auth,omitempty"`
-		}
-		Incoming struct {
-			Addresses []string `yaml:"addresses,omitempty"`
-			Auth      []string `yaml:"auth,omitempty"`
-		}
-	}
 }
 
 type LocalAgentApiConf struct {
@@ -449,54 +461,55 @@ type DynamicCatalogMemberConf struct {
 }
 
 type InternalConf struct {
-	CfgFile             string //
-	DebugMode           bool   // if true, may activate dangerous tests
-	ZonesCfgFile        string //
-	CertData            string // PEM encoded certificate
-	KeyData             string // PEM encoded key
-	KeyDB               *KeyDB
-	AllZones            []string
-	DnssecPolicies      map[string]DnssecPolicy
-	StopCh              chan struct{}
-	APIStopCh           chan struct{}
-	StopOnce            sync.Once
-	RefreshZoneCh       chan ZoneRefresher
-	BumpZoneCh          chan BumperData
-	ValidatorCh         chan ValidatorRequest
-	RecursorCh          chan ImrRequest
-	ScannerQ            chan ScanRequest
-	UpdateQ             chan UpdateRequest
-	DeferredUpdateQ     chan DeferredUpdate
-	DnsUpdateQ          chan DnsUpdateRequest
-	DnsNotifyQ          chan DnsNotifyRequest
-	DnsQueryQ           chan DnsQueryRequest           // Optional: if nil, queries use direct call to QueryResponder
-	QueryHandlers       map[uint16][]QueryHandlerFunc  // qtype -> list of handlers (registered via RegisterQueryHandler)
-	QueryHandlersMutex  sync.RWMutex                   // protects QueryHandlers map
-	NotifyHandlers      map[uint16][]NotifyHandlerFunc // qtype -> list of handlers (registered via RegisterNotifyHandler, 0 = all NOTIFYs)
-	NotifyHandlersMutex sync.RWMutex                   // protects NotifyHandlers map
-	UpdateHandlers      []UpdateHandlerRegistration    // UPDATE handlers (registered via RegisterUpdateHandler)
-	UpdateHandlersMutex sync.RWMutex                   // protects UpdateHandlers slice
-	DelegationSyncQ     chan DelegationSyncRequest
-	MusicSyncQ          chan MusicSyncRequest
-	NotifyQ             chan NotifyRequest
-	AuthQueryQ          chan AuthQueryRequest
-	ResignQ             chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
-	SyncQ               chan SyncRequest
-	MsgQs               *MsgQs // aggregated channels for agent communication
-	SyncStatusQ         chan SyncStatus
-	AgentRegistry       *AgentRegistry
-	ZoneDataRepo        *ZoneDataRepo
-	RRsetCache          *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
-	ImrEngine           *Imr
-	KdcDB               interface{}        // *kdc.KdcDB - using interface{} to avoid circular import
-	KdcConf             interface{}        // *kdc.KdcConf - using interface{} to avoid circular import
-	KrsDB               interface{}        // *krs.KrsDB - using interface{} to avoid circular import
-	KrsConf             interface{}        // *krs.KrsConf - using interface{} to avoid circular import
-	Scanner             *Scanner           // Scanner instance for async job tracking
-	CombinerState       *CombinerState     // Combiner business logic state (error journal, protected namespaces)
-	TransportManager    *TransportManager  // Multi-transport (API + DNS) for agent/combiner/signer; nil if transport not initialized
-	ChunkPayloadStore   ChunkPayloadStore  // Optional: for query-mode CHUNK (agent); keyed by qname; set when agent chunk_mode is "query"
-	DistributionCache   *DistributionCache // In-memory cache of distributions (agent/combiner)
+	CfgFile               string //
+	DebugMode             bool   // if true, may activate dangerous tests
+	ZonesCfgFile          string //
+	CertData              string // PEM encoded certificate
+	KeyData               string // PEM encoded key
+	KeyDB                 *KeyDB
+	AllZones              []string
+	DnssecPolicies        map[string]DnssecPolicy
+	StopCh                chan struct{}
+	APIStopCh             chan struct{}
+	StopOnce              sync.Once
+	RefreshZoneCh         chan ZoneRefresher
+	BumpZoneCh            chan BumperData
+	ValidatorCh           chan ValidatorRequest
+	RecursorCh            chan ImrRequest
+	ScannerQ              chan ScanRequest
+	UpdateQ               chan UpdateRequest
+	DeferredUpdateQ       chan DeferredUpdate
+	DnsUpdateQ            chan DnsUpdateRequest
+	DnsNotifyQ            chan DnsNotifyRequest
+	DnsQueryQ             chan DnsQueryRequest           // Optional: if nil, queries use direct call to QueryResponder
+	QueryHandlers         map[uint16][]QueryHandlerFunc  // qtype -> list of handlers (registered via RegisterQueryHandler)
+	QueryHandlersMutex    sync.RWMutex                   // protects QueryHandlers map
+	NotifyHandlers        map[uint16][]NotifyHandlerFunc // qtype -> list of handlers (registered via RegisterNotifyHandler, 0 = all NOTIFYs)
+	NotifyHandlersMutex   sync.RWMutex                   // protects NotifyHandlers map
+	UpdateHandlers        []UpdateHandlerRegistration    // UPDATE handlers (registered via RegisterUpdateHandler)
+	UpdateHandlersMutex   sync.RWMutex                   // protects UpdateHandlers slice
+	DelegationSyncQ       chan DelegationSyncRequest
+	MusicSyncQ            chan MusicSyncRequest
+	NotifyQ               chan NotifyRequest
+	AuthQueryQ            chan AuthQueryRequest
+	ResignQ               chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
+	SyncQ                 chan SyncRequest
+	MsgQs                 *MsgQs // aggregated channels for agent communication
+	SyncStatusQ           chan SyncStatus
+	AgentRegistry         *AgentRegistry
+	ZoneDataRepo          *ZoneDataRepo
+	RRsetCache            *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
+	ImrEngine             *Imr
+	KdcDB                 interface{}            // *kdc.KdcDB - using interface{} to avoid circular import
+	KdcConf               interface{}            // *kdc.KdcConf - using interface{} to avoid circular import
+	KrsDB                 interface{}            // *krs.KrsDB - using interface{} to avoid circular import
+	KrsConf               interface{}            // *krs.KrsConf - using interface{} to avoid circular import
+	Scanner               *Scanner               // Scanner instance for async job tracking
+	CombinerState         *CombinerState         // Combiner business logic state (error journal, protected namespaces)
+	TransportManager      *TransportManager      // Multi-transport (API + DNS) for agent/combiner/signer; nil if transport not initialized
+	LeaderElectionManager *LeaderElectionManager // Per-zone leader election for delegation sync; nil if not agent
+	ChunkPayloadStore     ChunkPayloadStore      // Optional: for query-mode CHUNK (agent); keyed by qname; set when agent chunk_mode is "query"
+	DistributionCache     *DistributionCache     // In-memory cache of distributions (agent/combiner)
 }
 
 type MsgQs struct {
@@ -513,6 +526,8 @@ type MsgQs struct {
 	KeystateInventory chan *KeystateInventoryMsg // incoming KEYSTATE inventory from signer
 	KeystateSignal    chan *KeystateSignalMsg    // incoming KEYSTATE signals (propagated/rejected) from agent to signer
 	EditsResponse     chan *EditsResponseMsg     // incoming EDITS response from combiner
+	ConfigResponse    chan *ConfigResponseMsg    // incoming CONFIG response from peer agent
+	AuditResponse     chan *AuditResponseMsg     // incoming AUDIT response from peer agent
 
 	// OnRemoteConfirmationReady is called when this agent (acting as a remote agent)
 	// receives a combiner confirmation for a sync that originated from another agent.
@@ -545,6 +560,23 @@ type EditsResponseMsg struct {
 	SenderID string
 	Zone     string
 	Records  map[string][]string // owner → []RR strings
+}
+
+// ConfigResponseMsg carries config data from a peer agent back to the requester.
+// Delivered via MsgQs.ConfigResponse channel.
+type ConfigResponseMsg struct {
+	SenderID   string
+	Zone       string
+	Subtype    string            // "upstream", "downstream", "sig0key"
+	ConfigData map[string]string // Key-value config data
+}
+
+// AuditResponseMsg carries audit data from a peer agent back to the requester.
+// Delivered via MsgQs.AuditResponse channel.
+type AuditResponseMsg struct {
+	SenderID  string
+	Zone      string
+	AuditData interface{} // Zone data repo snapshot (placeholder)
 }
 
 func (conf *Config) ReloadConfig() (string, error) {
@@ -599,4 +631,14 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 	lgConfig.Info("ReloadZones: zones after reloading", "zones", zonelist)
 	Globals.App.ServerConfigTime = time.Now()
 	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v", prezones, zonelist), err
+}
+
+// LocalIdentity returns the local node's identity string, regardless of role.
+// Used by sync API handlers (APIhello, APIbeat, APIsyncPing) so they work on
+// agent, combiner, and signer without referencing conf.Agent.Identity directly.
+func (conf *Config) LocalIdentity() string {
+	if conf.MultiProvider != nil {
+		return conf.MultiProvider.Identity
+	}
+	return ""
 }

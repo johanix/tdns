@@ -96,7 +96,7 @@ func (zd *ZoneData) LoadDynamicZoneFile(zoneDirectory string) (bool, uint32, err
 		}
 
 		// Set persistent error state
-		zd.SetError(ConfigError, fmt.Sprintf("Failed to load zone file: %v", err))
+		zd.SetError(ConfigError, "Failed to load zone file: %v", err)
 
 		return false, 0, fmt.Errorf("zone file corrupted: %v", err)
 	}

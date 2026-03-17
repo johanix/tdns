@@ -57,11 +57,13 @@ func (ar *AgentRegistry) HelloRetrier() {
 // Handles both API and DNS transports independently.
 // Continues retrying while EITHER transport is in KNOWN state.
 //
-// Fast-start: up to 3 immediate attempts with 5s spacing.
-// If all 3 fail, falls back to the normal helloretry ticker.
+// Fast-start: configurable number of immediate attempts with configurable spacing.
+// If all fail, falls back to the normal helloretry ticker.
 // On HELLO success (INTRODUCED), triggers fast beat attempts.
 func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 	helloRetryInterval := configureInterval("agent.syncengine.intervals.helloretry", 15, 1800)
+	fastAttempts := configureInterval("agent.syncengine.intervals.hello_fast_attempts", 3, 20)
+	fastIntervalSec := configureInterval("agent.syncengine.intervals.hello_fast_interval", 1, 30)
 	go func(agent *Agent) {
 		// Check if ANY transport needs Hello retries
 		if !ar.agentNeedsHello(agent) {
@@ -72,12 +74,12 @@ func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 		}
 
 		lgAgent.Info("HelloRetrierNG started", "agent", agent.Identity,
+			"fastAttempts", fastAttempts, "fastInterval", fastIntervalSec,
 			"apiState", AgentStateToString[agent.ApiDetails.State],
 			"dnsState", AgentStateToString[agent.DnsDetails.State])
 
-		// Phase 1: Fast attempts — up to 3 tries with 5s spacing
-		const fastAttempts = 3
-		const fastInterval = 5 * time.Second
+		// Phase 1: Fast attempts — configurable count and spacing
+		fastInterval := time.Duration(fastIntervalSec) * time.Second
 
 		for attempt := 1; attempt <= fastAttempts; attempt++ {
 			if attempt > 1 {
@@ -253,7 +255,7 @@ func (ar *AgentRegistry) SingleHello(agent *Agent, zone ZoneName) {
 
 	// Use TransportManager for independent multi-transport handling
 	if ar.TransportManager != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
 		defer cancel()
 		sharedZones := ar.sharedZonesForAgent(agent)
 		// SendHelloWithFallback now handles both transports independently
@@ -316,27 +318,27 @@ func (ar *AgentRegistry) EvaluateHello(ahp *AgentHelloPost) (bool, string, error
 		return false, fmt.Sprintf("Error: We don't know about zone %q. This could be a timing issue, so try again in a bit", ahp.Zone), nil
 	}
 
-	// Check if zone has HSYNC RRset
-	hsyncRR, err := zd.GetRRset(zd.ZoneName, core.TypeHSYNC)
+	// Check if zone has HSYNC3 RRset
+	hsyncRR, err := zd.GetRRset(zd.ZoneName, core.TypeHSYNC3)
 	if err != nil {
-		lgAgent.Error("error retrieving HSYNC RRset", "zone", ahp.Zone, "err", err)
-		return false, fmt.Sprintf("Error trying to retrieve HSYNC RRset for zone %q: %v", ahp.Zone, err), nil
+		lgAgent.Error("error retrieving HSYNC3 RRset", "zone", ahp.Zone, "err", err)
+		return false, fmt.Sprintf("Error trying to retrieve HSYNC3 RRset for zone %q: %v", ahp.Zone, err), nil
 	}
 	if hsyncRR == nil {
-		lgAgent.Warn("zone has no HSYNC RRset", "zone", ahp.Zone)
-		return false, fmt.Sprintf("Error: Zone %q has no HSYNC RRset", ahp.Zone), nil
+		lgAgent.Warn("zone has no HSYNC3 RRset", "zone", ahp.Zone)
+		return false, fmt.Sprintf("Error: Zone %q has no HSYNC3 RRset", ahp.Zone), nil
 	}
 
-	// Check if both our identity and remote agent are in HSYNC RRset
+	// Check if both our identity and remote agent are in HSYNC3 RRset
 	foundMe := false
 	foundYou := false
 	for _, rr := range hsyncRR.RRs {
 		if prr, ok := rr.(*dns.PrivateRR); ok {
-			if hsync, ok := prr.Data.(*core.HSYNC); ok {
-				if hsync.Identity == ar.LocalAgent.Identity {
+			if hsync3, ok := prr.Data.(*core.HSYNC3); ok {
+				if hsync3.Identity == ar.LocalAgent.Identity {
 					foundMe = true
 				}
-				if AgentId(hsync.Identity) == ahp.MyIdentity {
+				if AgentId(hsync3.Identity) == ahp.MyIdentity {
 					foundYou = true
 				}
 			}
@@ -344,9 +346,9 @@ func (ar *AgentRegistry) EvaluateHello(ahp *AgentHelloPost) (bool, string, error
 	}
 
 	if !foundMe || !foundYou {
-		lgAgent.Warn("HSYNC RRset does not include both identities",
+		lgAgent.Warn("HSYNC3 RRset does not include both identities",
 			"zone", ahp.Zone, "yourIdentity", ahp.MyIdentity, "myIdentity", ar.LocalAgent.Identity)
-		return false, fmt.Sprintf("Error: Zone %q HSYNC RRset does not include both our identities", ahp.Zone), nil
+		return false, fmt.Sprintf("Error: Zone %q HSYNC3 RRset does not include both our identities", ahp.Zone), nil
 	}
 
 	return true, "", nil

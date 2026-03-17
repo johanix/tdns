@@ -48,13 +48,15 @@ func QueryHandler(ctx context.Context, conf *Config, handlerFunc func(context.Co
 
 // Define sets of known types
 var tdnsSpecialTypes = map[uint16]bool{
-	core.TypeDSYNC:   true,
-	core.TypeNOTIFY:  true,
-	core.TypeMSIGNER: true,
-	core.TypeDELEG:   true,
-	core.TypeHSYNC:   true,
-	core.TypeHSYNC2:  true,
-	core.TypeTSYNC:   true,
+	core.TypeDSYNC:      true,
+	core.TypeNOTIFY:     true,
+	core.TypeMSIGNER:    true,
+	core.TypeDELEG:      true,
+	core.TypeHSYNC:      true,
+	core.TypeHSYNC2:     true,
+	core.TypeHSYNC3:     true,
+	core.TypeHSYNCPARAM: true,
+	core.TypeTSYNC:      true,
 }
 
 var standardDNSTypes = map[uint16]bool{

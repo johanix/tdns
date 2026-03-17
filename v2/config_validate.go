@@ -212,11 +212,11 @@ func ValidateConfigWithCustomValidator(v *viper.Viper, cfgfile string) error {
 // ValidateAgentNameservers ensures agent.local.nameservers are non-empty and outside the agent autozone (no glue).
 // Each entry is normalized to FQDN (dns.Fqdn) in place so the config never carries non-FQDN names.
 func ValidateAgentNameservers(config *Config) error {
-	if config.Agent == nil || len(config.Agent.Local.Nameservers) == 0 {
+	if config.MultiProvider == nil || config.MultiProvider.Role != "agent" || len(config.MultiProvider.Local.Nameservers) == 0 {
 		return nil
 	}
-	zoneFqdn := dns.Fqdn(config.Agent.Identity)
-	for i, ns := range config.Agent.Local.Nameservers {
+	zoneFqdn := dns.Fqdn(config.MultiProvider.Identity)
+	for i, ns := range config.MultiProvider.Local.Nameservers {
 		ns = strings.TrimSpace(ns)
 		if ns == "" {
 			return fmt.Errorf("agent.local.nameservers: empty entry")
@@ -226,9 +226,9 @@ func ValidateAgentNameservers(config *Config) error {
 			return fmt.Errorf("agent.local.nameservers: empty entry")
 		}
 		if dns.IsSubDomain(zoneFqdn, nsFqdn) {
-			return fmt.Errorf("agent.local.nameservers: %q is inside the agent autozone %q (glue not supported)", nsFqdn, config.Agent.Identity)
+			return fmt.Errorf("agent.local.nameservers: %q is inside the agent autozone %q (glue not supported)", nsFqdn, config.MultiProvider.Identity)
 		}
-		config.Agent.Local.Nameservers[i] = nsFqdn
+		config.MultiProvider.Local.Nameservers[i] = nsFqdn
 	}
 	return nil
 }
@@ -239,11 +239,11 @@ func ValidateAgentNameservers(config *Config) error {
 // - Can only contain "api" and/or "dns" (case-insensitive)
 // - Default if omitted: ["api", "dns"]
 func ValidateAgentSupportedMechanisms(config *Config) error {
-	if config.Agent == nil {
+	if config.MultiProvider == nil || config.MultiProvider.Role != "agent" {
 		return nil
 	}
 
-	mechanisms := config.Agent.SupportedMechanisms
+	mechanisms := config.MultiProvider.SupportedMechanisms
 
 	// If empty, will default to both transports in NewTransportManager
 	// But we enforce explicit configuration - empty list is an error
@@ -268,7 +268,7 @@ func ValidateAgentSupportedMechanisms(config *Config) error {
 		}
 		seen[m] = true
 		// Normalize to lowercase in place
-		config.Agent.SupportedMechanisms[i] = m
+		config.MultiProvider.SupportedMechanisms[i] = m
 	}
 
 	return nil
@@ -278,21 +278,21 @@ func ValidateAgentSupportedMechanisms(config *Config) error {
 // This is called during config validation to provide early feedback about missing files.
 func ValidateCryptoFiles(config *Config) error {
 	// Validate agent crypto files if configured (paths are trimmed inside validateFileExists)
-	if config.Agent != nil && strings.TrimSpace(config.Agent.LongTermJosePrivKey) != "" {
-		if err := validateFileExists(config.Agent.LongTermJosePrivKey, "agent private key"); err != nil {
+	if config.MultiProvider != nil && config.MultiProvider.Role == "agent" && strings.TrimSpace(config.MultiProvider.LongTermJosePrivKey) != "" {
+		if err := validateFileExists(config.MultiProvider.LongTermJosePrivKey, "agent private key"); err != nil {
 			return err
 		}
 
 		// Check combiner public key if configured
-		if config.Agent.Combiner != nil && strings.TrimSpace(config.Agent.Combiner.LongTermJosePubKey) != "" {
-			if err := validateFileExists(config.Agent.Combiner.LongTermJosePubKey, "combiner public key (agent.combiner)"); err != nil {
+		if config.MultiProvider.Combiner != nil && strings.TrimSpace(config.MultiProvider.Combiner.LongTermJosePubKey) != "" {
+			if err := validateFileExists(config.MultiProvider.Combiner.LongTermJosePubKey, "combiner public key (multi-provider.combiner)"); err != nil {
 				return err
 			}
 		}
 
 		// Check peer agent public keys if configured
-		if config.Agent.Peers != nil {
-			for peerID, peerConf := range config.Agent.Peers {
+		if config.MultiProvider.Peers != nil {
+			for peerID, peerConf := range config.MultiProvider.Peers {
 				if strings.TrimSpace(peerConf.LongTermJosePubKey) != "" {
 					if err := validateFileExists(peerConf.LongTermJosePubKey, fmt.Sprintf("peer agent %s public key", peerID)); err != nil {
 						return err
@@ -303,15 +303,15 @@ func ValidateCryptoFiles(config *Config) error {
 	}
 
 	// Validate combiner crypto files if configured
-	if config.Combiner != nil && strings.TrimSpace(config.Combiner.LongTermJosePrivKey) != "" {
-		if err := validateFileExists(config.Combiner.LongTermJosePrivKey, "combiner private key"); err != nil {
+	if config.MultiProvider != nil && config.MultiProvider.Role == "combiner" && strings.TrimSpace(config.MultiProvider.LongTermJosePrivKey) != "" {
+		if err := validateFileExists(config.MultiProvider.LongTermJosePrivKey, "combiner private key"); err != nil {
 			return err
 		}
 
 		// Check agent public keys for all configured agents
-		for _, agent := range config.Combiner.Agents {
+		for _, agent := range config.MultiProvider.Agents {
 			if strings.TrimSpace(agent.LongTermJosePubKey) != "" {
-				label := fmt.Sprintf("agent public key (combiner.agents[%s])", agent.Identity)
+				label := fmt.Sprintf("agent public key (multi-provider.agents[%s])", agent.Identity)
 				if err := validateFileExists(agent.LongTermJosePubKey, label); err != nil {
 					return err
 				}

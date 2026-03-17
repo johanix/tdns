@@ -205,7 +205,31 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 		return err
 	}
 
-	lgTransport().Info("registered message handlers", "count", 9)
+	// Config handler (priority: 100)
+	err = router.Register(
+		"ConfigHandler",
+		MessageType("config"),
+		HandleConfig,
+		WithPriority(100),
+		WithDescription("Processes CONFIG response messages from peer agents"),
+	)
+	if err != nil {
+		return err
+	}
+
+	// Audit handler (priority: 100)
+	err = router.Register(
+		"AuditHandler",
+		MessageType("audit"),
+		HandleAudit,
+		WithPriority(100),
+		WithDescription("Processes AUDIT response messages from peer agents"),
+	)
+	if err != nil {
+		return err
+	}
+
+	lgTransport().Info("registered message handlers", "count", 11)
 	lgTransport().Info("router initialization complete")
 
 	return nil
@@ -289,7 +313,7 @@ func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfi
 		lgTransport().Info("combiner: registered message handler routing middleware")
 	}
 
-	// Register shared handlers for ping and beat (same implementation as agent)
+	// Register shared handlers for ping, beat, and hello (same implementation as agent)
 	if err := router.Register(
 		"PingHandler",
 		MessageType("ping"),
@@ -310,6 +334,16 @@ func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfi
 		return err
 	}
 
+	if err := router.Register(
+		"HelloHandler",
+		MessageType("hello"),
+		HandleHello,
+		WithPriority(100),
+		WithDescription("Processes Hello messages from agents"),
+	); err != nil {
+		return err
+	}
+
 	// Register RFI handler for combiner (handles RFI EDITS from agents)
 	if err := router.Register(
 		"CombinerRfiHandler",
@@ -322,7 +356,7 @@ func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfi
 	}
 
 	// Register combiner-specific update handler (agent→combiner zone contributions)
-	handlerCount := 3
+	handlerCount := 4
 	if cfg.HandleUpdate != nil {
 		if err := router.Register(
 			"CombinerUpdateHandler",
@@ -436,6 +470,17 @@ func InitializeSignerRouter(router *DNSMessageRouter, cfg *SignerRouterConfig) e
 		return err
 	}
 
+	// Register hello handler (shared implementation with agent/combiner)
+	if err := router.Register(
+		"HelloHandler",
+		MessageType("hello"),
+		HandleHello,
+		WithPriority(100),
+		WithDescription("Processes Hello messages from agents"),
+	); err != nil {
+		return err
+	}
+
 	// Register keystate handler (agent→signer: propagated/rejected/removed)
 	if err := router.Register(
 		"KeystateHandler",
@@ -458,7 +503,7 @@ func InitializeSignerRouter(router *DNSMessageRouter, cfg *SignerRouterConfig) e
 		return err
 	}
 
-	lgTransport().Info("signer: registered message handlers", "count", 4)
+	lgTransport().Info("signer: registered message handlers", "count", 5)
 	lgTransport().Info("signer: router initialization complete")
 
 	return nil
@@ -495,6 +540,10 @@ func DetermineMessageType(payload []byte) MessageType {
 		return MessageType("keystate")
 	case "edits":
 		return MessageType("edits")
+	case "config":
+		return MessageType("config")
+	case "audit":
+		return MessageType("audit")
 	default:
 		return MessageTypeUnknown
 	}

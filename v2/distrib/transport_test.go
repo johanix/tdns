@@ -72,6 +72,10 @@ func (m *mockBackend) Verify(pubKey crypto.PublicKey, data []byte, signature []b
 	return true, nil
 }
 
+func (m *mockBackend) PublicKeyFromStdlib(stdlibKey interface{}) (crypto.PublicKey, error) {
+	return &mockPublicKey{}, nil
+}
+
 type mockPrivateKey struct{}
 
 func (k *mockPrivateKey) Backend() string { return "mock" }

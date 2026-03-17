@@ -10,6 +10,7 @@ package tdns
 import (
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -153,6 +154,12 @@ type TransportManagerConfig struct {
 	// Uses a closure because ImrEngine starts asynchronously after TM creation.
 	// Only the agent needs this; combiner/signer/external apps pass nil.
 	GetImrEngine func() *Imr
+
+	// ClientCertFile and ClientKeyFile are the TLS client certificate presented when
+	// connecting to peers' sync API servers. Required when peers enforce mutual TLS
+	// (e.g. combiner/signer sync routers verify client cert against agent's TLSA record).
+	ClientCertFile string
+	ClientKeyFile  string
 }
 
 // NewTransportManager creates a new TransportManager with both API and DNS transports.
@@ -193,9 +200,26 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 	// implications. An agent that only serves DNS can still act as an API client to
 	// remote agents that serve API. supported_mechanisms controls the server role, not
 	// the client role.
+	apiTLSConfig := &tls.Config{
+		// Peer certificates are validated against TLSA records (discovered via DNS),
+		// not against the system CA store. Self-signed certs are the norm here.
+		InsecureSkipVerify: true, //nolint:gosec
+		MinVersion:         tls.VersionTLS13,
+	}
+	if cfg.ClientCertFile != "" && cfg.ClientKeyFile != "" {
+		clientCert, err := tls.LoadX509KeyPair(cfg.ClientCertFile, cfg.ClientKeyFile)
+		if err != nil {
+			lgTransport.Error("failed to load API client certificate, outbound mTLS will not work",
+				"certFile", cfg.ClientCertFile, "keyFile", cfg.ClientKeyFile, "err", err)
+		} else {
+			apiTLSConfig.Certificates = []tls.Certificate{clientCert}
+			lgTransport.Info("API client certificate loaded", "certFile", cfg.ClientCertFile)
+		}
+	}
 	tm.APITransport = transport.NewAPITransport(&transport.APITransportConfig{
 		LocalID:        cfg.LocalID,
 		DefaultTimeout: cfg.APITimeout,
+		TLSConfig:      apiTLSConfig,
 	})
 	lgTransport.Info("API client transport enabled")
 
@@ -436,6 +460,10 @@ func (tm *TransportManager) routeIncomingMessage(msg *transport.IncomingMessage)
 		tm.routeKeystateMessage(msg)
 	case "edits":
 		tm.routeEditsMessage(msg)
+	case "config":
+		tm.routeConfigMessage(msg)
+	case "audit":
+		tm.routeAuditMessage(msg)
 	case "relocate":
 		tm.routeRelocateMessage(msg)
 	default:
@@ -544,9 +572,18 @@ func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 	if tm.agentRegistry != nil {
 		agent, exists := tm.agentRegistry.S.Get(AgentId(senderID))
 		if exists {
+			wasOperational := agent.DnsDetails.State == AgentStateOperational
 			agent.DnsDetails.State = AgentStateOperational
 			agent.DnsDetails.LastContactTime = time.Now()
 			tm.agentRegistry.S.Set(agent.Identity, agent)
+
+			// When a peer first becomes operational, check if all configured peers
+			// are now operational. Elections require full participation.
+			if !wasOperational && tm.agentRegistry.LeaderElectionManager != nil {
+				// NotifyPeerOperational handles both deferred elections and
+				// new elections — it checks configured vs operational counts.
+				tm.agentRegistry.LeaderElectionManager.NotifyPeerOperational(agent.Zones)
+			}
 		}
 	}
 
@@ -694,8 +731,11 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 			Operations:     payload.GetOperations(),
 			Time:           time.Unix(payload.Timestamp, 0),
 			RfiType:        payload.RfiType,        // Include RfiType for RFI messages
+			RfiSubtype:     payload.RfiSubtype,     // Include RfiSubtype for CONFIG RFI messages
 			DistributionID: payload.DistributionID, // Originating distID from sending agent
 			Nonce:          msg.Nonce,              // Echo nonce from incoming message for confirmation
+			ZoneClass:      payload.ZoneClass,
+			Publish:        payload.GetPublish(),
 		},
 	}
 
@@ -831,6 +871,146 @@ func (tm *TransportManager) routeEditsMessage(msg *transport.IncomingMessage) {
 	default:
 		lgTransport.Warn("EditsResponse channel full, dropping edits", "sender", senderID)
 	}
+}
+
+// routeConfigMessage routes an incoming CONFIG response message from a peer agent.
+// Delivers the config data to MsgQs.ConfigResponse so RequestAndWaitForConfig can pick it up.
+func (tm *TransportManager) routeConfigMessage(msg *transport.IncomingMessage) {
+	var payload transport.DnsConfigPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		lgTransport.Error("failed to parse config payload", "err", err)
+		return
+	}
+
+	senderID := payload.GetSenderID()
+	lgTransport.Debug("processing CONFIG response", "sender", senderID, "zone", payload.Zone, "subtype", payload.Subtype)
+
+	if tm.msgQs == nil {
+		lgTransport.Debug("CONFIG received but no MsgQs, ignoring", "sender", senderID)
+		return
+	}
+
+	configMsg := &ConfigResponseMsg{
+		SenderID:   senderID,
+		Zone:       payload.Zone,
+		Subtype:    payload.Subtype,
+		ConfigData: payload.ConfigData,
+	}
+
+	select {
+	case tm.msgQs.ConfigResponse <- configMsg:
+		lgTransport.Info("routed CONFIG response to agent", "sender", senderID, "zone", payload.Zone, "subtype", payload.Subtype)
+	default:
+		lgTransport.Warn("ConfigResponse channel full, dropping config", "sender", senderID)
+	}
+}
+
+// sendConfigToAgent gathers config data for the given subtype and sends it as a separate
+// CONFIG message back to the requesting agent. Called asynchronously from MsgHandler when
+// an RFI CONFIG is received.
+func sendConfigToAgent(tm *TransportManager, ar *AgentRegistry, requesterID string, zone string, subtype string, configData map[string]string) {
+	if tm == nil || tm.DNSTransport == nil {
+		lgTransport.Warn("sendConfigToAgent: no DNSTransport available", "requester", requesterID)
+		return
+	}
+
+	peer, peerExists := tm.PeerRegistry.Get(requesterID)
+	if !peerExists || peer == nil {
+		lgTransport.Warn("sendConfigToAgent: requester not in PeerRegistry", "requester", requesterID)
+		return
+	}
+
+	req := &transport.ConfigRequest{
+		SenderID:   ar.LocalAgent.Identity,
+		Zone:       zone,
+		Subtype:    subtype,
+		ConfigData: configData,
+		Timestamp:  time.Now(),
+	}
+
+	sendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := tm.DNSTransport.Config(sendCtx, peer, req)
+	if err != nil {
+		lgTransport.Error("sendConfigToAgent: failed to send", "requester", requesterID, "zone", zone, "subtype", subtype, "err", err)
+		return
+	}
+
+	if !resp.Accepted {
+		lgTransport.Error("sendConfigToAgent: config not accepted", "requester", requesterID, "zone", zone, "subtype", subtype, "accepted", resp.Accepted)
+		return
+	}
+	lgTransport.Info("sendConfigToAgent: sent config to requester", "requester", requesterID, "zone", zone, "subtype", subtype)
+}
+
+// routeAuditMessage routes an incoming AUDIT response message from a peer agent.
+// Delivers the audit data to MsgQs.AuditResponse so RequestAndWaitForAudit can pick it up.
+func (tm *TransportManager) routeAuditMessage(msg *transport.IncomingMessage) {
+	var payload transport.DnsAuditPayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		lgTransport.Error("failed to parse audit payload", "err", err)
+		return
+	}
+
+	senderID := payload.GetSenderID()
+	lgTransport.Debug("processing AUDIT response", "sender", senderID, "zone", payload.Zone)
+
+	if tm.msgQs == nil {
+		lgTransport.Debug("AUDIT received but no MsgQs, ignoring", "sender", senderID)
+		return
+	}
+
+	auditMsg := &AuditResponseMsg{
+		SenderID:  senderID,
+		Zone:      payload.Zone,
+		AuditData: payload.AuditData,
+	}
+
+	select {
+	case tm.msgQs.AuditResponse <- auditMsg:
+		lgTransport.Info("routed AUDIT response to agent", "sender", senderID, "zone", payload.Zone)
+	default:
+		lgTransport.Warn("AuditResponse channel full, dropping audit", "sender", senderID)
+	}
+}
+
+// sendAuditToAgent gathers audit data and sends it as a separate AUDIT message
+// back to the requesting agent. Called asynchronously from MsgHandler when
+// an RFI AUDIT is received.
+func sendAuditToAgent(tm *TransportManager, ar *AgentRegistry, requesterID string, zone string, auditData interface{}) {
+	if tm == nil || tm.DNSTransport == nil {
+		lgTransport.Warn("sendAuditToAgent: no DNSTransport available", "requester", requesterID)
+		return
+	}
+
+	peer, peerExists := tm.PeerRegistry.Get(requesterID)
+	if !peerExists || peer == nil {
+		lgTransport.Warn("sendAuditToAgent: requester not in PeerRegistry", "requester", requesterID)
+		return
+	}
+
+	req := &transport.AuditRequest{
+		SenderID:  ar.LocalAgent.Identity,
+		Zone:      zone,
+		AuditData: auditData,
+		Timestamp: time.Now(),
+	}
+
+	sendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	resp, err := tm.DNSTransport.Audit(sendCtx, peer, req)
+	if err != nil {
+		lgTransport.Error("sendAuditToAgent: failed to send", "requester", requesterID, "zone", zone, "err", err)
+		return
+	}
+
+	if !resp.Accepted {
+		lgTransport.Error("sendAuditToAgent: audit not accepted", "requester", requesterID, "zone", zone, "accepted", resp.Accepted)
+		return
+	}
+	lgTransport.Info("sendAuditToAgent: sent audit to requester", "requester", requesterID, "zone", zone)
 }
 
 // routeRelocateMessage handles a relocate request.
@@ -1117,9 +1297,9 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 	var apiErr error
 	var dnsErr error
 
-	// Try API transport if available, has valid endpoint, and actually needs Hello (state == KNOWN).
+	// Try API transport if locally supported, available, has valid endpoint, and actually needs Hello (state == KNOWN).
 	// Skip if already INTRODUCED or OPERATIONAL — no point sending Hello to an already-established transport.
-	if tm.APITransport != nil && agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" && agent.ApiDetails.State == AgentStateKnown {
+	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" && agent.ApiDetails.State == AgentStateKnown {
 		apiResp, apiErr = tm.APITransport.Hello(ctx, peer, req)
 		agent.mu.Lock()
 		if apiErr != nil {
@@ -1173,7 +1353,7 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 		agent.mu.Unlock()
 	}
 
-	// Return success if ANY transport succeeded
+	// Return success if ANY transport succeeded this call.
 	if apiErr == nil && apiResp != nil && apiResp.Accepted {
 		return apiResp, nil
 	}
@@ -1181,7 +1361,16 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 		return dnsResp, nil
 	}
 
-	// Both failed or skipped
+	// If a transport was skipped (already past KNOWN) and no transport actively failed,
+	// treat that as success — the peer is already introduced on that transport.
+	if agent.DnsDetails != nil && agent.DnsDetails.State >= AgentStateIntroduced && dnsErr == nil {
+		return nil, nil
+	}
+	if agent.ApiDetails != nil && agent.ApiDetails.State >= AgentStateIntroduced && apiErr == nil {
+		return nil, nil
+	}
+
+	// Both failed or skipped with nothing established
 	if apiResp == nil && dnsResp == nil && apiErr == nil && dnsErr == nil {
 		// No transport was in KNOWN state — nothing to do
 		return nil, fmt.Errorf("no transports in KNOWN state for Hello to peer %s (API: %s, DNS: %s)",
@@ -1190,19 +1379,18 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 	return nil, fmt.Errorf("all transports failed for Hello to peer %s (API: %v, DNS: %v)", peer.ID, apiErr, dnsErr)
 }
 
-// SendPing sends a CHUNK-based ping to a peer; prefers DNS transport (API does not implement ping).
+// SendPing sends a ping to a peer, preferring API transport when available.
 func (tm *TransportManager) SendPing(ctx context.Context, peer *transport.Peer) (*transport.PingResponse, error) {
 	req := &transport.PingRequest{
 		SenderID:  tm.LocalID,
 		Nonce:     generatePingNonce(),
 		Timestamp: time.Now(),
 	}
-	// Prefer DNS for ping (API transport returns "not implemented")
-	if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
-		return tm.DNSTransport.Ping(ctx, peer, req)
-	}
 	if tm.APITransport != nil && peer.APIEndpoint != "" {
 		return tm.APITransport.Ping(ctx, peer, req)
+	}
+	if tm.DNSTransport != nil && peer.CurrentAddress() != nil {
+		return tm.DNSTransport.Ping(ctx, peer, req)
 	}
 	return nil, fmt.Errorf("no transport available for ping to %s", peer.ID)
 }
@@ -1226,8 +1414,8 @@ func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Age
 	var apiErr error
 	var dnsErr error
 
-	// Try API transport if available, has valid endpoint, and OPERATIONAL/LEGACY
-	if tm.APITransport != nil && agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" {
+	// Try API transport if locally supported, available, has valid endpoint, and OPERATIONAL/LEGACY
+	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" {
 		if agent.ApiDetails.State == AgentStateOperational || agent.ApiDetails.State == AgentStateIntroduced || agent.ApiDetails.State == AgentStateLegacy {
 			apiResp, apiErr = tm.APITransport.Beat(ctx, peer, req)
 			agent.mu.Lock()
@@ -1393,6 +1581,10 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 		senderID = string(msg.Update.AgentId)
 	}
 
+	zoneClass := ""
+	if msg.Update != nil {
+		zoneClass = msg.Update.ZoneClass
+	}
 	syncReq := &transport.SyncRequest{
 		SenderID:       senderID,
 		Zone:           string(msg.Zone),
@@ -1401,9 +1593,15 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 		DistributionID: msg.DistributionID,
 		Nonce:          msg.Nonce,
 		MessageType:    "update", // agent→combiner uses "update" (not "sync")
+		ZoneClass:      zoneClass,
 	}
-	if msg.Update != nil && len(msg.Update.Operations) > 0 {
-		syncReq.Operations = msg.Update.Operations
+	if msg.Update != nil {
+		if len(msg.Update.Operations) > 0 {
+			syncReq.Operations = msg.Update.Operations
+		}
+		if msg.Update.Publish != nil {
+			syncReq.Publish = msg.Update.Publish
+		}
 	}
 
 	syncResp, err := tm.SendSyncWithFallback(ctx, peer, syncReq)

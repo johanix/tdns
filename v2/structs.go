@@ -57,6 +57,18 @@ const (
 	DnskeyStateForeign   string = "foreign"
 )
 
+// MPdata caches multi-provider membership and signing state for a zone.
+// nil means the zone is not confirmed as a multi-provider zone (either OptMultiProvider
+// is not set, or the zone owner hasn't declared it via HSYNC3+HSYNCPARAM, or we are
+// not a listed provider). Populated during zone refresh by populateMPdata().
+type MPdata struct {
+	WeAreProvider bool   // At least one of our agent identities matches an HSYNC3 Identity
+	OurLabel      string // Our provider label from the matching HSYNC3 record
+	WeAreSigner   bool   // Our label appears in HSYNCPARAM signers (or zone is unsigned)
+	OtherSigners  int    // Count of other signers in HSYNCPARAM
+	ZoneSigned    bool   // HSYNCPARAM signers= is non-empty (zone uses multi-signer)
+}
+
 type ZoneData struct {
 	mu         sync.Mutex
 	ZoneName   string
@@ -69,6 +81,7 @@ type ZoneData struct {
 	Data         *core.ConcurrentMap[string, OwnerData]
 	CombinerData *core.ConcurrentMap[string, OwnerData]
 	UpstreamData *core.ConcurrentMap[string, OwnerData] // Original upstream apex data (combiner NS fallback)
+	MPdata       *MPdata                                // Multi-provider membership/signing state; nil = not MP
 	// AgentContributions stores per-agent contributions for the combiner.
 	// Key: agentID (e.g. "agent.alpha.dnslab."), Value: map[owner]map[rrtype]core.RRset
 	// When merging, all agents' contributions for the same owner/rrtype are combined
@@ -97,6 +110,7 @@ type ZoneData struct {
 	ParentNS           []string              // names of parent nameservers
 	ParentServers      []string              // addresses of parent nameservers
 	Children           map[string]*ChildDelegationData
+	DelegationBackend  DelegationBackend // parent-side: backend for storing child delegation data
 	Options            map[ZoneOption]bool
 	UpdatePolicy       UpdatePolicy
 	DnssecPolicy       *DnssecPolicy
@@ -211,26 +225,27 @@ type KeyInventorySnapshot struct {
 
 // ZoneConf represents the external config for a zone; it contains no zone data
 type ZoneConf struct {
-	Name          string `validate:"required"`
-	Zonefile      string
-	Type          string `validate:"required"`
-	Store         string // xfr | map | slice | reg (defaults to "map" if not specified)
-	Primary       string // upstream, for secondary zones
-	Notify        []string
-	Downstreams   []string
-	OptionsStrs   []string     `yaml:"options" mapstructure:"options"`
-	Options       []ZoneOption `yaml:"-" mapstructure:"-"` // Ignore during both yaml and mapstructure decoding
-	Frozen        bool         // true if zone is frozen; not a config param
-	Dirty         bool         // true if zone has been modified; not a config param
-	UpdatePolicy  UpdatePolicyConf
-	DnssecPolicy  string
-	Template      string
-	MultiSigner   string
-	Error         bool      // zone is broken and cannot be used
-	ErrorType     ErrorType // "config" | "refresh" | "agent" | "DNSSEC"
-	ErrorMsg      string    // reason for the error (if known)
-	RefreshCount  int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
-	SourceCatalog string    // if auto-configured, which catalog zone created this zone
+	Name              string `validate:"required"`
+	Zonefile          string
+	Type              string `validate:"required"`
+	Store             string // xfr | map | slice | reg (defaults to "map" if not specified)
+	Primary           string // upstream, for secondary zones
+	Notify            []string
+	Downstreams       []string
+	OptionsStrs       []string     `yaml:"options" mapstructure:"options"`
+	Options           []ZoneOption `yaml:"-" mapstructure:"-"` // Ignore during both yaml and mapstructure decoding
+	Frozen            bool         // true if zone is frozen; not a config param
+	Dirty             bool         // true if zone has been modified; not a config param
+	UpdatePolicy      UpdatePolicyConf
+	DelegationBackend string `yaml:"delegation-backend" mapstructure:"delegation-backend"` // named backend for child delegation data
+	DnssecPolicy      string
+	Template          string
+	MultiSigner       string
+	Error             bool      // zone is broken and cannot be used
+	ErrorType         ErrorType // "config" | "refresh" | "agent" | "DNSSEC"
+	ErrorMsg          string    // reason for the error (if known)
+	RefreshCount      int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
+	SourceCatalog     string    // if auto-configured, which catalog zone created this zone
 }
 
 type TemplateConf struct {
@@ -320,14 +335,6 @@ type OwnerData struct {
 	RRtypes *RRTypeStore
 }
 
-type xxxRRset struct {
-	Name   string
-	Class  uint16
-	RRtype uint16
-	RRs    []dns.RR
-	RRSIGs []dns.RR
-}
-
 type ChildDelegationData struct {
 	DelHasChanged    bool      // When returned from a scanner, this indicates that a change has been detected
 	ParentSerial     uint32    // The parent serial that this data was correct for
@@ -385,6 +392,7 @@ type ZoneRefresher struct {
 	DnssecPolicy string
 	MultiSigner  string
 	Force        bool // force refresh, ignoring SOA serial
+	Wait         bool // wait for refresh to complete before responding
 	Response     chan RefresherResponse
 }
 
@@ -653,6 +661,8 @@ type KeyBootstrapperRequest struct {
 	Key          string
 	Verified     bool
 	Keyid        uint16
+	Algorithm    uint8
+	Imr          *Imr
 	ResponseChan chan *VerificationInfo
 }
 

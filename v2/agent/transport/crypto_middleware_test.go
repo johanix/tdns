@@ -11,56 +11,91 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/johanix/tdns/v2/crypto"
 	"github.com/miekg/dns"
 )
 
-// Mock crypto backend for testing
+// Mock crypto backend for testing — implements crypto.Backend
 type mockCryptoBackend struct {
 	signShouldFail    bool
 	verifyShouldFail  bool
 	decryptShouldFail bool
 }
 
-func (m *mockCryptoBackend) Sign(key interface{}, payload []byte) ([]byte, error) {
+func (m *mockCryptoBackend) Name() string { return "mock" }
+
+func (m *mockCryptoBackend) GenerateKeypair() (crypto.PrivateKey, crypto.PublicKey, error) {
+	return nil, nil, nil
+}
+
+func (m *mockCryptoBackend) ParsePublicKey(data []byte) (crypto.PublicKey, error) {
+	return nil, nil
+}
+
+func (m *mockCryptoBackend) ParsePrivateKey(data []byte) (crypto.PrivateKey, error) {
+	return nil, nil
+}
+
+func (m *mockCryptoBackend) SerializePublicKey(key crypto.PublicKey) ([]byte, error) {
+	return nil, nil
+}
+
+func (m *mockCryptoBackend) SerializePrivateKey(key crypto.PrivateKey) ([]byte, error) {
+	return nil, nil
+}
+
+func (m *mockCryptoBackend) Encrypt(recipientPubKey crypto.PublicKey, plaintext []byte) ([]byte, error) {
+	return []byte("encrypted"), nil
+}
+
+func (m *mockCryptoBackend) Decrypt(privateKey crypto.PrivateKey, ciphertext []byte) ([]byte, error) {
+	if m.decryptShouldFail {
+		return nil, errors.New("mock decrypt error")
+	}
+	return []byte("decrypted"), nil
+}
+
+func (m *mockCryptoBackend) GetEphemeralKey(ciphertext []byte) ([]byte, error) {
+	return nil, nil
+}
+
+func (m *mockCryptoBackend) EncryptMultiRecipient(recipients []crypto.PublicKey, plaintext []byte, metadata map[string]interface{}) ([]byte, error) {
+	return []byte("encrypted"), nil
+}
+
+func (m *mockCryptoBackend) DecryptMultiRecipient(privKey crypto.PrivateKey, ciphertext []byte) ([]byte, error) {
+	if m.decryptShouldFail {
+		return nil, errors.New("mock decrypt error")
+	}
+	return []byte("decrypted"), nil
+}
+
+func (m *mockCryptoBackend) Sign(privKey crypto.PrivateKey, data []byte) ([]byte, error) {
 	if m.signShouldFail {
 		return nil, errors.New("mock sign error")
 	}
-	// Return fake JWS
 	return []byte("mock.jws.signature"), nil
 }
 
-func (m *mockCryptoBackend) Verify(key interface{}, data []byte, signature []byte) (bool, error) {
+func (m *mockCryptoBackend) Verify(pubKey crypto.PublicKey, data []byte, signature []byte) (bool, error) {
 	if m.verifyShouldFail {
 		return false, errors.New("mock verify error")
 	}
 	return true, nil
 }
 
-func (m *mockCryptoBackend) Encrypt(key interface{}, payload []byte) ([]byte, error) {
-	return []byte("encrypted"), nil
+func (m *mockCryptoBackend) PublicKeyFromStdlib(stdlibKey interface{}) (crypto.PublicKey, error) {
+	return nil, nil
 }
 
-func (m *mockCryptoBackend) Decrypt(key interface{}, ciphertext []byte) ([]byte, error) {
-	if m.decryptShouldFail {
-		return nil, errors.New("mock decrypt error")
-	}
-	return []byte("decrypted"), nil
-}
+// Mock key types implementing crypto.PrivateKey and crypto.PublicKey
+type mockCryptoPrivateKey struct{}
 
-func (m *mockCryptoBackend) EncryptMultiRecipient(recipients []interface{}, payload []byte, metadata map[string]interface{}) ([]byte, error) {
-	return []byte("encrypted"), nil
-}
+func (k *mockCryptoPrivateKey) Backend() string { return "mock" }
 
-func (m *mockCryptoBackend) DecryptMultiRecipient(key interface{}, ciphertext []byte) ([]byte, error) {
-	if m.decryptShouldFail {
-		return nil, errors.New("mock decrypt error")
-	}
-	return []byte("decrypted"), nil
-}
+type mockCryptoPublicKey struct{}
 
-func (m *mockCryptoBackend) GenerateKeypair() (interface{}, interface{}, error) {
-	return "private", "public", nil
-}
+func (k *mockCryptoPublicKey) Backend() string { return "mock" }
 
 // Mock security event logger for testing
 type mockSecurityLogger struct {
@@ -112,8 +147,8 @@ func newTestCryptoConfig() *CryptoMiddlewareConfig {
 		Backend: backend,
 		Enabled: true,
 	})
-	pc.SetLocalKeys("local-private", "local-public")
-	pc.AddPeerVerificationKey("peer1", "peer1-public")
+	pc.SetLocalKeys(&mockCryptoPrivateKey{}, &mockCryptoPublicKey{})
+	pc.AddPeerVerificationKey("peer1", &mockCryptoPublicKey{})
 
 	logger := &mockSecurityLogger{}
 

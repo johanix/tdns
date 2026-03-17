@@ -256,7 +256,7 @@ func (t *APITransport) Relocate(ctx context.Context, peer *Peer, req *RelocateRe
 
 // Ping sends a lightweight liveness probe to a peer via HTTPS API.
 func (t *APITransport) Ping(ctx context.Context, peer *Peer, req *PingRequest) (*PingResponse, error) {
-	url, err := apiURL(peer, "/ping")
+	url, err := apiURL(peer, "/sync/ping")
 	if err != nil {
 		return nil, NewTransportError("API", "Ping", peer.ID, err, false)
 	}
@@ -342,7 +342,7 @@ func (t *APITransport) doRequest(ctx context.Context, method, url string, body i
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("HTTP %d from %s: %s", resp.StatusCode, url, string(respBody))
 	}
 
 	return respBody, nil

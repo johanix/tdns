@@ -58,6 +58,7 @@ creator	  	  TEXT,
 privatekey	  TEXT,
 keyrr		  TEXT,
 comment		  TEXT,
+parent_state	  INTEGER DEFAULT 0,
 UNIQUE (zonename, keyid)
 )`,
 

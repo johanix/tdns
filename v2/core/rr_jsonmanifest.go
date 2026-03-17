@@ -16,6 +16,15 @@ func init() {
 	RegisterJSONMANIFESTRR()
 }
 
+// Zone file syntax:
+//   owner TTL CLASS JSONMANIFEST {json}
+//
+// Example:
+//   node.distid.control. 3600 IN JSONMANIFEST {"chunk_count":5,"chunk_size":200,"metadata":{"content":"zonelist"}}
+//
+// Fields:
+//   {json} - single JSON object with chunk_count, chunk_size, checksum, metadata, payload
+
 // JSONMANIFEST - JSON Distribution Manifest
 // Small metadata about a distribution event for a specific node
 // Format: JSON structure with chunk_count, checksum, metadata

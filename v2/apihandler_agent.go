@@ -18,6 +18,7 @@ import (
 
 	"github.com/johanix/tdns/v2/agent/transport"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -117,20 +118,20 @@ func doPeerPing(conf *Config, peerID string, useAPI bool) *AgentMgmtResponse {
 // signer-side: multi-provider.agent) and returns a temporary Peer if found. Returns nil if not found.
 func (conf *Config) lookupStaticPeer(peerID string) *transport.Peer {
 	// Agent-side: combiner
-	if conf.Agent != nil && conf.Agent.Combiner != nil &&
-		dns.Fqdn(conf.Agent.Combiner.Identity) == peerID && conf.Agent.Combiner.Address != "" {
-		if peer := peerFromAddress(peerID, conf.Agent.Combiner.Address); peer != nil {
-			if conf.Agent.Combiner.ApiBaseUrl != "" {
-				peer.APIEndpoint = conf.Agent.Combiner.ApiBaseUrl
+	if conf.MultiProvider != nil && conf.MultiProvider.Role == "agent" && conf.MultiProvider.Combiner != nil &&
+		dns.Fqdn(conf.MultiProvider.Combiner.Identity) == peerID && conf.MultiProvider.Combiner.Address != "" {
+		if peer := peerFromAddress(peerID, conf.MultiProvider.Combiner.Address); peer != nil {
+			if conf.MultiProvider.Combiner.ApiBaseUrl != "" {
+				peer.APIEndpoint = conf.MultiProvider.Combiner.ApiBaseUrl
 			}
 			return peer
 		}
 	}
 
 	// Agent-side: signer
-	if conf.Agent != nil && conf.Agent.Signer != nil &&
-		dns.Fqdn(conf.Agent.Signer.Identity) == peerID && conf.Agent.Signer.Address != "" {
-		return peerFromAddress(peerID, conf.Agent.Signer.Address)
+	if conf.MultiProvider != nil && conf.MultiProvider.Role == "agent" && conf.MultiProvider.Signer != nil &&
+		dns.Fqdn(conf.MultiProvider.Signer.Identity) == peerID && conf.MultiProvider.Signer.Address != "" {
+		return peerFromAddress(peerID, conf.MultiProvider.Signer.Address)
 	}
 
 	// Signer-side: multi-provider agents
@@ -177,7 +178,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 
 		resp := AgentMgmtResponse{
 			Time:     time.Now(),
-			Identity: AgentId(conf.Agent.Identity),
+			Identity: AgentId(conf.MultiProvider.Identity),
 		}
 
 		defer func() {
@@ -211,8 +212,10 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 
 		switch amp.Command {
 		case "config":
-			tmp := SanitizeForJSON(conf.Agent)
-			resp.AgentConfig = tmp.(LocalAgentConf)
+			tmp := SanitizeForJSON(conf.MultiProvider)
+			if p, ok := tmp.(*MultiProviderConf); ok && p != nil {
+				resp.AgentConfig = *p
+			}
 			resp.AgentConfig.Api.CertData = ""
 			resp.AgentConfig.Api.KeyData = ""
 
@@ -267,9 +270,9 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 
 			// Get the HSYNC RRset from the apex
-			hsyncRRset := owner.RRtypes.GetOnlyRRSet(core.TypeHSYNC)
+			hsyncRRset := owner.RRtypes.GetOnlyRRSet(core.TypeHSYNC3)
 			if len(hsyncRRset.RRs) == 0 {
-				resp.Msg = fmt.Sprintf("Zone %s has no HSYNC RRset", amp.Zone)
+				resp.Msg = fmt.Sprintf("Zone %s has no HSYNC3 RRset", amp.Zone)
 				return
 			}
 
@@ -465,7 +468,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 			routerResp := handleRouterList(conf.Internal.TransportManager.Router)
 			resp = *routerResp
-			resp.Identity = AgentId(conf.Agent.Identity)
+			resp.Identity = AgentId(conf.MultiProvider.Identity)
 
 		case "router-describe":
 			if conf.Internal.TransportManager == nil || conf.Internal.TransportManager.Router == nil {
@@ -475,7 +478,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 			routerResp := handleRouterDescribe(conf.Internal.TransportManager.Router)
 			resp = *routerResp
-			resp.Identity = AgentId(conf.Agent.Identity)
+			resp.Identity = AgentId(conf.MultiProvider.Identity)
 
 		case "router-metrics":
 			if conf.Internal.TransportManager == nil || conf.Internal.TransportManager.Router == nil {
@@ -485,7 +488,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 			routerResp := handleRouterMetrics(conf.Internal.TransportManager.Router)
 			resp = *routerResp
-			resp.Identity = AgentId(conf.Agent.Identity)
+			resp.Identity = AgentId(conf.MultiProvider.Identity)
 
 		case "router-walk":
 			if conf.Internal.TransportManager == nil || conf.Internal.TransportManager.Router == nil {
@@ -495,7 +498,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 			routerResp := handleRouterWalk(conf.Internal.TransportManager.Router)
 			resp = *routerResp
-			resp.Identity = AgentId(conf.Agent.Identity)
+			resp.Identity = AgentId(conf.MultiProvider.Identity)
 
 		case "router-reset":
 			if conf.Internal.TransportManager == nil || conf.Internal.TransportManager.Router == nil {
@@ -505,7 +508,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 			routerResp := handleRouterReset(conf.Internal.TransportManager.Router)
 			resp = *routerResp
-			resp.Identity = AgentId(conf.Agent.Identity)
+			resp.Identity = AgentId(conf.MultiProvider.Identity)
 
 		case "refresh-keys":
 			zd.RequestAndWaitForKeyInventory()
@@ -585,6 +588,89 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				resp.ErrorMsg = fmt.Sprintf("send-rfi requires MessageType RFI, got %q", AgentMsgToString[amp.MessageType])
 			}
 
+		case "parentsync-status":
+			lem := conf.Internal.LeaderElectionManager
+			if lem == nil {
+				resp.Error = true
+				resp.ErrorMsg = "leader election manager not initialized"
+				return
+			}
+			status := lem.GetParentSyncStatus(amp.Zone, zd, kdb, conf.Internal.ImrEngine, conf.Internal.AgentRegistry)
+			resp.Data = status
+			resp.Msg = fmt.Sprintf("Parent sync status for zone %s", amp.Zone)
+
+		case "parentsync-election":
+			lem := conf.Internal.LeaderElectionManager
+			if lem == nil {
+				resp.Error = true
+				resp.ErrorMsg = "leader election manager not initialized"
+				return
+			}
+			configured := lem.configuredPeers(amp.Zone)
+			operational := 0
+			if lem.operationalPeersFunc != nil {
+				operational = lem.operationalPeersFunc(amp.Zone)
+			}
+			if configured > 0 && operational < configured {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("cannot start election: only %d of %d configured peers are operational", operational, configured)
+				return
+			}
+			lem.StartElection(amp.Zone, configured)
+			resp.Msg = fmt.Sprintf("Election started for zone %s with %d peers", amp.Zone, configured)
+
+		case "parentsync-inquire":
+			imr := conf.Internal.ImrEngine
+			if imr == nil {
+				resp.Error = true
+				resp.ErrorMsg = "IMR engine not available"
+				return
+			}
+			sak, err := kdb.GetSig0Keys(string(amp.Zone), Sig0StateActive)
+			if err != nil || len(sak.Keys) == 0 {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("no active SIG(0) key for zone %s", amp.Zone)
+				return
+			}
+			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
+			keyState, extra, err := queryParentKeyStateDetailed(kdb, imr, string(amp.Zone), keyid)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("KeyState inquiry failed: %v", err)
+				return
+			}
+			resp.Data = map[string]interface{}{
+				"zone":       string(amp.Zone),
+				"keyid":      keyid,
+				"state":      keyState,
+				"state_name": edns0.KeyStateToString(keyState),
+				"extra_text": extra,
+			}
+			resp.Msg = fmt.Sprintf("Parent says: %s", edns0.KeyStateToString(keyState))
+
+		case "parentsync-bootstrap":
+			lem := conf.Internal.LeaderElectionManager
+			if lem == nil {
+				resp.Error = true
+				resp.ErrorMsg = "leader election manager not initialized"
+				return
+			}
+			if !lem.IsLeader(amp.Zone) {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("this agent is not the delegation sync leader for %s", amp.Zone)
+				return
+			}
+			sak, err := kdb.GetSig0Keys(string(amp.Zone), Sig0StateActive)
+			if err != nil || len(sak.Keys) == 0 {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("no active SIG(0) key for zone %s", amp.Zone)
+				return
+			}
+			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
+			algorithm := sak.Keys[0].KeyRR.Algorithm
+			go conf.parentSyncAfterKeyPublication(amp.Zone, string(amp.Zone), keyid, algorithm)
+			resp.Msg = fmt.Sprintf("Bootstrap triggered for zone %s (keyid %d), running async", amp.Zone, keyid)
+
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown agent command: %s", amp.Command)
 			resp.Error = true
@@ -602,7 +688,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 		resp := AgentMgmtResponse{
 			Time:     time.Now(),
 			Msg:      "Hi there! Using debug commands are we?",
-			Identity: AgentId(conf.Agent.Identity),
+			Identity: AgentId(conf.MultiProvider.Identity),
 		}
 		decoder := json.NewDecoder(r.Body)
 		var amp AgentMgmtPost
@@ -997,7 +1083,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			}
 			if amp.AgentId == "" {
 				// Default to local agent
-				amp.AgentId = AgentId(conf.Agent.Identity)
+				amp.AgentId = AgentId(conf.MultiProvider.Identity)
 			}
 			if len(amp.RRs) == 0 {
 				resp.Error = true
@@ -1111,7 +1197,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			// Step 1: Create local zone update
 			zu := &ZoneUpdate{
 				Zone:    amp.Zone,
-				AgentId: AgentId(conf.Agent.Identity),
+				AgentId: AgentId(conf.MultiProvider.Identity),
 				RRs:     parsedRRs,
 				RRsets:  make(map[uint16]core.RRset),
 			}
@@ -1139,7 +1225,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			cresp := make(chan *AgentMsgResponse, 1)
 			conf.Internal.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{
 				Zone:       amp.Zone,
-				AgentId:    AgentId(conf.Agent.Identity),
+				AgentId:    AgentId(conf.MultiProvider.Identity),
 				UpdateType: "local",
 				Update:     zu,
 				Response:   cresp,
@@ -1181,7 +1267,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				keys := conf.Internal.AgentRegistry.S.Keys()
 				for _, key := range keys {
 					if agent, exists := conf.Internal.AgentRegistry.S.Get(key); exists {
-						if agent.Identity == AgentId(conf.Agent.Identity) {
+						if agent.Identity == AgentId(conf.MultiProvider.Identity) {
 							continue // Skip self
 						}
 
@@ -1414,7 +1500,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			// Create the ZoneUpdate with RRs and RRsets
 			zu := &ZoneUpdate{
 				Zone:    amp.Zone,
-				AgentId: AgentId(conf.Agent.Identity),
+				AgentId: AgentId(conf.MultiProvider.Identity),
 				RRs:     parsedRRs,
 				RRsets:  make(map[uint16]core.RRset),
 			}
@@ -1458,7 +1544,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			cresp := make(chan *AgentMsgResponse, 1)
 			conf.Internal.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{
 				Zone:       amp.Zone,
-				AgentId:    AgentId(conf.Agent.Identity),
+				AgentId:    AgentId(conf.MultiProvider.Identity),
 				UpdateType: "local",
 				Update:     zu,
 				Force:      force,
@@ -1527,7 +1613,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 
 			// Create sync request
 			syncReq := &transport.SyncRequest{
-				SenderID:       conf.Agent.Identity,
+				SenderID:       conf.MultiProvider.Identity,
 				Zone:           string(amp.Zone),
 				SyncType:       transport.SyncTypeNS, // Default to NS, could be detected from RRs
 				Records:        groupRRStringsByOwner(amp.RRs),
@@ -1613,7 +1699,7 @@ func (conf *Config) APIbeat() func(w http.ResponseWriter, r *http.Request) {
 		}
 
 		resp.YourIdentity = abp.MyIdentity
-		resp.MyIdentity = AgentId(conf.Agent.Identity)
+		resp.MyIdentity = AgentId(conf.LocalIdentity())
 
 		// log.Printf("APIbeat: received /beat request from %s (identity: %s).\n", r.RemoteAddr, abp.MyIdentity)
 
@@ -1651,7 +1737,7 @@ func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
 
 		resp := AgentHelloResponse{
 			Time:       time.Now(),
-			MyIdentity: AgentId(conf.Agent.Identity),
+			MyIdentity: AgentId(conf.LocalIdentity()),
 		}
 
 		defer func() {
@@ -1683,7 +1769,7 @@ func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
 		if needed {
 			lgApi.Info("hello accepted, HSYNC RRset includes both identities", "zone", ahp.Zone)
 			resp.Msg = fmt.Sprintf("Hello there, %s! Nice of you to call on us. I'm a TDNS agent with identity %q and we do share responsibility for zone %q",
-				ahp.MyIdentity, conf.Agent.Identity, ahp.Zone)
+				ahp.MyIdentity, conf.LocalIdentity(), ahp.Zone)
 		} else {
 			lgApi.Warn("hello rejected, HSYNC RRset does not include both identities", "zone", ahp.Zone)
 			resp.Error = true
@@ -1704,6 +1790,55 @@ func (conf *Config) APIhello() func(w http.ResponseWriter, r *http.Request) {
 		default:
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Unknown hello type: %q from %s", AgentMsgToString[ahp.MessageType], ahp.MyIdentity)
+		}
+	}
+}
+
+// APIsyncPing is the HSYNC peer ping handler on the sync API router (/sync/ping).
+// This is separate from the management /ping (APIping in api_utils.go) which returns
+// boot time and version info. This handler echoes the nonce for round-trip verification
+// and routes the ping to MsgQs.Ping for state tracking.
+func (conf *Config) APIsyncPing() func(w http.ResponseWriter, r *http.Request) {
+	return func(w http.ResponseWriter, r *http.Request) {
+		resp := AgentPingResponse{
+			Time:       time.Now(),
+			MyIdentity: AgentId(conf.LocalIdentity()),
+		}
+		decoder := json.NewDecoder(r.Body)
+		var app AgentPingPost
+		err := decoder.Decode(&app)
+
+		defer func() {
+			w.Header().Set("Content-Type", "application/json")
+			if encErr := json.NewEncoder(w).Encode(resp); encErr != nil {
+				lgApi.Error("error encoding ping response", "err", encErr)
+			}
+		}()
+
+		if err != nil {
+			lgApi.Warn("error decoding /sync/ping post", "err", err)
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("Invalid request format: %v", err)
+			return
+		}
+
+		if app.Nonce == "" {
+			resp.Error = true
+			resp.ErrorMsg = "ping nonce must not be empty"
+			return
+		}
+
+		resp.YourIdentity = app.MyIdentity
+		resp.Nonce = app.Nonce
+		resp.Status = "ok"
+
+		if conf.Internal.MsgQs != nil && conf.Internal.MsgQs.Ping != nil {
+			conf.Internal.MsgQs.Ping <- &AgentMsgReport{
+				Transport:   "API",
+				MessageType: AgentMsgPing,
+				Identity:    app.MyIdentity,
+				Msg:         &app,
+			}
 		}
 	}
 }

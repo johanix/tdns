@@ -7,6 +7,7 @@ package tdns
 import (
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -34,24 +35,24 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 		// Fall through with oldapex == nil (initial load)
 	}
 
-	newhsync, err := newzd.GetRRset(zd.ZoneName, core.TypeHSYNC)
+	newhsync, err := newzd.GetRRset(zd.ZoneName, core.TypeHSYNC3)
 	if err != nil {
 		return false, nil, err
 	}
 
 	if oldapex == nil {
-		lgAgent.Info("initial zone load, old apex was nil", "zone", zd.ZoneName)
 		if newhsync == nil {
-			lgAgent.Debug("new apex has no HSYNC RRset, no action", "zone", zd.ZoneName)
+			lgAgent.Debug("initial zone load, no HSYNC3 RRs in new zone", "zone", zd.ZoneName)
 			return false, &hss, nil
 		}
+		lgAgent.Info("initial zone load, found HSYNC3 RRs", "zone", zd.ZoneName, "count", len(newhsync.RRs))
 		hss.HsyncAdds = newhsync.RRs
 		return true, &hss, nil
 	}
 
 	var oldhsync *core.RRset
 
-	if rrset, exists := oldapex.RRtypes.Get(core.TypeHSYNC); exists {
+	if rrset, exists := oldapex.RRtypes.Get(core.TypeHSYNC3); exists {
 		oldhsync = &rrset
 	} else {
 		oldhsync = nil
@@ -65,7 +66,7 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 		oldRRs = oldhsync.RRs
 	}
 
-	differ, hss.HsyncAdds, hss.HsyncRemoves = core.RRsetDiffer(zd.ZoneName, newRRs, oldRRs, core.TypeHSYNC, zd.Logger, Globals.Verbose, Globals.Debug)
+	differ, hss.HsyncAdds, hss.HsyncRemoves = core.RRsetDiffer(zd.ZoneName, newRRs, oldRRs, core.TypeHSYNC3, zd.Logger, Globals.Verbose, Globals.Debug)
 	zd.Logger.Printf("*** HsyncChanged: exit (zone %q, differ: %v)", zd.ZoneName, differ)
 	return differ, &hss, nil
 }
@@ -382,6 +383,89 @@ func (zd *ZoneData) RequestAndWaitForEdits() {
 	}
 }
 
+// RequestAndWaitForConfig sends an RFI CONFIG to a peer agent and waits for the config
+// response on MsgQs.ConfigResponse. Returns the config data or nil on timeout/error.
+func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subtype string) *ConfigResponseMsg {
+	msgQs := Conf.Internal.MsgQs
+	if msgQs == nil || msgQs.ConfigResponse == nil {
+		lgEngine.Warn("RequestAndWaitForConfig: no ConfigResponse channel available")
+		return nil
+	}
+
+	// Send RFI CONFIG to the peer agent
+	_, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
+		MessageType:  AgentMsgRfi,
+		OriginatorID: AgentId(ar.LocalAgent.Identity),
+		YourIdentity: agent.Identity,
+		Zone:         ZoneName(zone),
+		RfiType:      "CONFIG",
+		RfiSubtype:   subtype,
+	})
+	if err != nil {
+		lgEngine.Warn("RequestAndWaitForConfig: RFI CONFIG send failed", "agent", agent.Identity, "zone", zone, "subtype", subtype, "err", err)
+		return nil
+	}
+
+	// Wait for the config response (peer sends it as a separate CONFIG message)
+	timeout := time.NewTimer(15 * time.Second)
+	defer timeout.Stop()
+
+	select {
+	case resp := <-msgQs.ConfigResponse:
+		if resp == nil {
+			lgEngine.Warn("RequestAndWaitForConfig: received nil config response", "zone", zone, "subtype", subtype)
+			return nil
+		}
+		lgEngine.Info("RequestAndWaitForConfig: received config response", "sender", resp.SenderID, "zone", resp.Zone, "subtype", resp.Subtype)
+		return resp
+
+	case <-timeout.C:
+		lgEngine.Warn("RequestAndWaitForConfig: timeout waiting for config response (15s)", "zone", zone, "subtype", subtype)
+		return nil
+	}
+}
+
+// RequestAndWaitForAudit sends an RFI AUDIT to a peer agent and waits for the audit
+// response on MsgQs.AuditResponse. Returns the audit data or nil on timeout/error.
+func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string) *AuditResponseMsg {
+	msgQs := Conf.Internal.MsgQs
+	if msgQs == nil || msgQs.AuditResponse == nil {
+		lgEngine.Warn("RequestAndWaitForAudit: no AuditResponse channel available")
+		return nil
+	}
+
+	// Send RFI AUDIT to the peer agent
+	_, err := ar.sendRfiToAgent(agent, &AgentMsgPost{
+		MessageType:  AgentMsgRfi,
+		OriginatorID: AgentId(ar.LocalAgent.Identity),
+		YourIdentity: agent.Identity,
+		Zone:         ZoneName(zone),
+		RfiType:      "AUDIT",
+	})
+	if err != nil {
+		lgEngine.Warn("RequestAndWaitForAudit: RFI AUDIT send failed", "agent", agent.Identity, "zone", zone, "err", err)
+		return nil
+	}
+
+	// Wait for the audit response (peer sends it as a separate AUDIT message)
+	timeout := time.NewTimer(15 * time.Second)
+	defer timeout.Stop()
+
+	select {
+	case resp := <-msgQs.AuditResponse:
+		if resp == nil {
+			lgEngine.Warn("RequestAndWaitForAudit: received nil audit response", "zone", zone)
+			return nil
+		}
+		lgEngine.Info("RequestAndWaitForAudit: received audit response", "sender", resp.SenderID, "zone", resp.Zone)
+		return resp
+
+	case <-timeout.C:
+		lgEngine.Warn("RequestAndWaitForAudit: timeout waiting for audit response (15s)", "zone", zone)
+		return nil
+	}
+}
+
 // applyEditsToSDE imports the combiner's contributions response into the SynchedDataEngine.
 // Records are the agent's own contributions as tracked by the combiner — they should be
 // added as confirmed data (not queued for sending to the combiner again).
@@ -397,7 +481,7 @@ func (zd *ZoneData) applyEditsToSDE(records map[string][]string) {
 		return
 	}
 
-	localAgentID := AgentId(Conf.Agent.Identity)
+	localAgentID := AgentId(Conf.MultiProvider.Identity)
 	if localAgentID == "" {
 		zd.Logger.Printf("applyEditsToSDE: zone %s: no local agent identity configured", zd.ZoneName)
 		return
@@ -450,75 +534,170 @@ func (zd *ZoneData) buildRemoteDNSKEYsFromTags(foreignKeyTags map[uint16]bool) [
 	return remote
 }
 
-// bool=true if the HSYNC RRset exists and is valid, false otherwise
-// error is non-nil for errors other than the HSYNC RRset not existing
+// ValidateHsyncRRset checks that HSYNC3 and HSYNCPARAM records exist at the
+// zone apex and that the HSYNCPARAM has valid keys. With HSYNCPARAM, NSmgmt
+// is in a single record so per-RR consistency checks are unnecessary.
+// Returns true if both record types exist and are valid, false otherwise.
+// error is non-nil for errors other than the records not existing.
 func (zd *ZoneData) ValidateHsyncRRset() (bool, error) {
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
 		return false, fmt.Errorf("error from zd.GetOwner(%s): %v", zd.ZoneName, err)
 	}
 
-	hsyncrrset, exists := apex.RRtypes.Get(core.TypeHSYNC)
-	if !exists || len(hsyncrrset.RRs) == 0 {
+	// Check that HSYNC3 exists
+	hsync3rrset, hsync3exists := apex.RRtypes.Get(core.TypeHSYNC3)
+	if !hsync3exists || len(hsync3rrset.RRs) == 0 {
 		return false, nil
 	}
 
-	// Requirements:
-	// 1. nsmgmt must be consistent across the HSYNC RRs.
-	// 2. ...
-
-	if len(hsyncrrset.RRs) == 1 {
-		return true, nil
+	// Check that HSYNCPARAM exists
+	hsyncparamrrset, paramexists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
+	if !paramexists || len(hsyncparamrrset.RRs) == 0 {
+		return false, nil
 	}
 
-	hsync := hsyncrrset.RRs[0].(*dns.PrivateRR).Data.(*core.HSYNC)
-	nsmgmt := hsync.NSmgmt
-
-	for _, rr := range hsyncrrset.RRs[1:] {
-		hsync := rr.(*dns.PrivateRR).Data.(*core.HSYNC)
-		if hsync.NSmgmt != nsmgmt {
-			return false, fmt.Errorf("nsmgmt is not consistent across the HSYNC RRs")
-		}
-	}
-
+	// HSYNCPARAM exists — NSmgmt is a single value in the param record,
+	// no cross-RR consistency check needed.
 	return true, nil
 }
 
-// weAreASigner checks the HSYNC RRset for a record matching our identity
-// and returns whether its Sign field says SIGN.
-// On agents: uses Globals.AgentId.
-// On the signer (AppTypeAuth): uses multi-provider.hsync-identity (or
-// multi-provider.agent.identity as fallback, since the HSYNC lists agents).
-// analyzeHsyncSigners walks the HSYNC/HSYNC2 RRset once and returns:
-//   - weShouldSign: whether our identity has SIGN=YES
-//   - otherSigners: count of other identities with SIGN=YES
-//
-// Defaults: sign=true if no matching record found, otherSigners=0 if no records.
-func (zd *ZoneData) analyzeHsyncSigners() (weShouldSign bool, otherSigners int, err error) {
-	ourIdentity := string(Globals.AgentId)
+// ourHsyncIdentities returns the set of FQDN identities we should match against
+// HSYNC3 records. On agents this is the single Globals.AgentId; on signers/combiners
+// it is all configured agent identities from Conf.MultiProvider.Agents.
+func ourHsyncIdentities() []string {
+	var ids []string
+	if Conf.MultiProvider != nil && Conf.MultiProvider.Role != "agent" {
+		for _, agent := range Conf.MultiProvider.Agents {
+			if agent != nil && agent.Identity != "" {
+				ids = append(ids, dns.Fqdn(agent.Identity))
+			}
+		}
+	}
+	if len(ids) == 0 {
+		ids = []string{string(Globals.AgentId)}
+	}
+	return ids
+}
 
-	// On the signer, our HSYNC identity is the agent we represent, not the signer itself.
-	if Globals.App.Type == AppTypeAuth && Conf.MultiProvider != nil {
-		if Conf.MultiProvider.HsyncIdentity != "" {
-			ourIdentity = dns.Fqdn(Conf.MultiProvider.HsyncIdentity)
-		} else if len(Conf.MultiProvider.Agents) > 0 && Conf.MultiProvider.Agents[0].Identity != "" {
-			ourIdentity = dns.Fqdn(Conf.MultiProvider.Agents[0].Identity)
+// matchHsyncProvider checks whether any of our identities appear in the zone's
+// HSYNC3 RRset. This determines whether the zone owner considers us a provider
+// for this zone — independent of signing.
+//
+// Returns:
+//   - matched: true if at least one of our identities matches an HSYNC3 Identity
+//   - label: the HSYNC3 Label of the matching record (e.g. "netnod")
+//   - err: non-nil on lookup errors
+func (zd *ZoneData) matchHsyncProvider(ourIdentities []string) (matched bool, label string, err error) {
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil {
+		return false, "", fmt.Errorf("matchHsyncProvider: cannot get apex for zone %s: %v", zd.ZoneName, err)
+	}
+
+	hsync3RRset, exists := apex.RRtypes.Get(core.TypeHSYNC3)
+	if !exists || len(hsync3RRset.RRs) == 0 {
+		return false, "", nil
+	}
+
+	for _, rr := range hsync3RRset.RRs {
+		prr, ok := rr.(*dns.PrivateRR)
+		if !ok {
+			continue
+		}
+		h3, ok := prr.Data.(*core.HSYNC3)
+		if !ok {
+			continue
+		}
+		for _, id := range ourIdentities {
+			if h3.Identity == id {
+				return true, strings.TrimSuffix(h3.Label, "."), nil
+			}
 		}
 	}
 
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil {
-		return true, 0, fmt.Errorf("analyzeHsyncSigners: cannot get apex for zone %s: %v", zd.ZoneName, err)
+	// Also try legacy HSYNC/HSYNC2 — these have Identity but no Label,
+	// so we use the first matching identity (stripped of trailing dot) as label.
+	hsyncRRset, exists := apex.RRtypes.Get(core.TypeHSYNC)
+	if exists {
+		for _, rr := range hsyncRRset.RRs {
+			hsync := rr.(*dns.PrivateRR).Data.(*core.HSYNC)
+			for _, id := range ourIdentities {
+				if hsync.Identity == id {
+					return true, strings.TrimSuffix(id, "."), nil
+				}
+			}
+		}
 	}
 
+	hsync2RRset, exists := apex.RRtypes.Get(core.TypeHSYNC2)
+	if exists {
+		for _, rr := range hsync2RRset.RRs {
+			hsync2 := rr.(*dns.PrivateRR).Data.(*core.HSYNC2)
+			for _, id := range ourIdentities {
+				if hsync2.Identity == id {
+					return true, strings.TrimSuffix(id, "."), nil
+				}
+			}
+		}
+	}
+
+	return false, "", nil
+}
+
+// analyzeHsyncSigners determines whether we should sign the zone and how many
+// other signers exist, by examining HSYNC3+HSYNCPARAM (preferred), then falling
+// back to HSYNC or HSYNC2 for backward compatibility with old zones.
+//
+// Requires that matchHsyncProvider() has already confirmed we are a provider.
+// The ourLabel parameter is the label returned by matchHsyncProvider().
+//
+// Returns:
+//   - weShouldSign: whether our label is listed as a signer
+//   - otherSigners: count of other signers
+//   - zoneSigned: whether the zone has any signers listed (HSYNCPARAM signers= non-empty)
+func (zd *ZoneData) analyzeHsyncSigners(ourIdentities []string, ourLabel string) (weShouldSign bool, otherSigners int, zoneSigned bool, err error) {
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil {
+		return false, 0, false, fmt.Errorf("analyzeHsyncSigners: cannot get apex for zone %s: %v", zd.ZoneName, err)
+	}
+
+	// Try HSYNC3+HSYNCPARAM first (preferred)
+	hsyncparamRRset, paramExists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
+	if paramExists && len(hsyncparamRRset.RRs) > 0 {
+		hsyncparam := hsyncparamRRset.RRs[0].(*dns.PrivateRR).Data.(*core.HSYNCPARAM)
+		signers := hsyncparam.GetSigners()
+		if len(signers) == 0 {
+			// No signers specified — zone is unsigned, default to sign
+			return true, 0, false, nil
+		}
+		zoneSigned = true
+		zd.Logger.Printf("analyzeHsyncSigners: zone %s: ourLabel=%q signers=%v", zd.ZoneName, ourLabel, signers)
+		for _, s := range signers {
+			if s == ourLabel {
+				weShouldSign = true
+			} else {
+				otherSigners++
+			}
+		}
+		return weShouldSign, otherSigners, zoneSigned, nil
+	}
+
+	// Fallback: try HSYNC, then HSYNC2 (for backward compat with old zones)
+	isOurIdentity := func(id string) bool {
+		for _, ours := range ourIdentities {
+			if id == ours {
+				return true
+			}
+		}
+		return false
+	}
 	foundOurRecord := false
 
-	// Try HSYNC first, then HSYNC2
 	hsyncRRset, exists := apex.RRtypes.Get(core.TypeHSYNC)
 	if exists && len(hsyncRRset.RRs) > 0 {
 		for _, rr := range hsyncRRset.RRs {
 			hsync := rr.(*dns.PrivateRR).Data.(*core.HSYNC)
-			if hsync.Identity == ourIdentity {
+			if isOurIdentity(hsync.Identity) {
 				foundOurRecord = true
 				weShouldSign = hsync.Sign == core.HsyncSignYES
 			} else if hsync.Sign == core.HsyncSignYES {
@@ -526,17 +705,19 @@ func (zd *ZoneData) analyzeHsyncSigners() (weShouldSign bool, otherSigners int, 
 			}
 		}
 		if !foundOurRecord {
-			zd.Logger.Printf("analyzeHsyncSigners: zone %s: no HSYNC record matches our identity %q", zd.ZoneName, ourIdentity)
-			weShouldSign = true // default: sign if no matching record
+			zd.Logger.Printf("analyzeHsyncSigners: zone %s: no HSYNC record matches our identities %v", zd.ZoneName, ourIdentities)
+			weShouldSign = true
 		}
-		return weShouldSign, otherSigners, nil
+		// Legacy HSYNC implies zone is signed if any signer exists
+		zoneSigned = weShouldSign || otherSigners > 0
+		return weShouldSign, otherSigners, zoneSigned, nil
 	}
 
 	hsync2RRset, exists := apex.RRtypes.Get(core.TypeHSYNC2)
 	if exists && len(hsync2RRset.RRs) > 0 {
 		for _, rr := range hsync2RRset.RRs {
 			hsync2 := rr.(*dns.PrivateRR).Data.(*core.HSYNC2)
-			if hsync2.Identity == ourIdentity {
+			if isOurIdentity(hsync2.Identity) {
 				foundOurRecord = true
 				weShouldSign = hsync2.DoSign()
 			} else if hsync2.DoSign() {
@@ -544,19 +725,104 @@ func (zd *ZoneData) analyzeHsyncSigners() (weShouldSign bool, otherSigners int, 
 			}
 		}
 		if !foundOurRecord {
-			zd.Logger.Printf("analyzeHsyncSigners: zone %s: no HSYNC2 record matches our identity %q", zd.ZoneName, ourIdentity)
+			zd.Logger.Printf("analyzeHsyncSigners: zone %s: no HSYNC2 record matches our identities %v", zd.ZoneName, ourIdentities)
 			weShouldSign = true
 		}
-		return weShouldSign, otherSigners, nil
+		zoneSigned = weShouldSign || otherSigners > 0
+		return weShouldSign, otherSigners, zoneSigned, nil
 	}
 
-	// No HSYNC/HSYNC2 records at all — sign by default, no other signers
-	return true, 0, nil
+	// No HSYNC3+HSYNCPARAM/HSYNC/HSYNC2 records at all — sign by default, unsigned
+	return true, 0, false, nil
 }
 
-// weAreASigner is a convenience wrapper around analyzeHsyncSigners.
+// populateMPdata evaluates the four multi-provider guards for a zone and
+// populates zd.MPdata accordingly. Called after every zone refresh/transfer.
+//
+// Guard 1: OptMultiProvider must be set in the zone config.
+// Guard 2: The zone owner must declare the zone as MP (HSYNC3+HSYNCPARAM present).
+// Guard 3: We must be a listed provider (our identity matches an HSYNC3 record).
+// Guard 4: If the zone is signed (HSYNCPARAM signers= non-empty), we must be a signer.
+//
+// If any guard fails, zd.MPdata is set to nil. The caller can check zd.MPdata to
+// determine whether this zone should be treated as multi-provider.
+func (zd *ZoneData) populateMPdata() {
+	// Guard 1: static config must declare this as an MP zone
+	if !zd.Options[OptMultiProvider] {
+		zd.MPdata = nil
+		return
+	}
+
+	// Guard 2: zone owner must have HSYNC3+HSYNCPARAM (or legacy HSYNC/HSYNC2)
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil {
+		zd.Logger.Printf("populateMPdata: zone %s: cannot get apex: %v", zd.ZoneName, err)
+		zd.MPdata = nil
+		return
+	}
+
+	_, h3exists := apex.RRtypes.Get(core.TypeHSYNC3)
+	_, hpExists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
+	_, h1exists := apex.RRtypes.Get(core.TypeHSYNC)
+	_, h2exists := apex.RRtypes.Get(core.TypeHSYNC2)
+
+	hasHsyncRecords := (h3exists && hpExists) || h1exists || h2exists
+	if !hasHsyncRecords {
+		zd.Logger.Printf("populateMPdata: zone %s: OptMultiProvider is set but zone owner has no HSYNC3+HSYNCPARAM (or legacy HSYNC/HSYNC2) records — zone is not multi-provider", zd.ZoneName)
+		zd.MPdata = nil
+		return
+	}
+
+	// Guard 3: we must be a listed provider
+	ourIdentities := ourHsyncIdentities()
+	matched, ourLabel, err := zd.matchHsyncProvider(ourIdentities)
+	if err != nil {
+		zd.Logger.Printf("populateMPdata: zone %s: error matching provider identity: %v", zd.ZoneName, err)
+		zd.MPdata = nil
+		return
+	}
+	if !matched {
+		zd.Logger.Printf("populateMPdata: zone %s: none of our identities %v match any HSYNC3 provider in the zone — we are not a provider for this zone", zd.ZoneName, ourIdentities)
+		zd.MPdata = nil
+		return
+	}
+
+	// Guard 4: if zone is signed, we must be a signer
+	weShouldSign, otherSigners, zoneSigned, err := zd.analyzeHsyncSigners(ourIdentities, ourLabel)
+	if err != nil {
+		zd.Logger.Printf("populateMPdata: zone %s: error analyzing signers: %v", zd.ZoneName, err)
+		zd.MPdata = nil
+		return
+	}
+	if zoneSigned && !weShouldSign {
+		zd.Logger.Printf("populateMPdata: zone %s: we are provider %q but not listed as a signer — zone is signed and we must not modify it", zd.ZoneName, ourLabel)
+		zd.MPdata = nil
+		return
+	}
+
+	zd.MPdata = &MPdata{
+		WeAreProvider: true,
+		OurLabel:      ourLabel,
+		WeAreSigner:   weShouldSign,
+		OtherSigners:  otherSigners,
+		ZoneSigned:    zoneSigned,
+	}
+	zd.Logger.Printf("populateMPdata: zone %s: provider=%q signer=%v otherSigners=%d zoneSigned=%v",
+		zd.ZoneName, ourLabel, weShouldSign, otherSigners, zoneSigned)
+}
+
+// weAreASigner is a convenience wrapper that checks provider membership first,
+// then signer status.
 func (zd *ZoneData) weAreASigner() (bool, error) {
-	shouldSign, _, err := zd.analyzeHsyncSigners()
+	ids := ourHsyncIdentities()
+	matched, label, err := zd.matchHsyncProvider(ids)
+	if err != nil {
+		return false, err
+	}
+	if !matched {
+		return false, nil
+	}
+	shouldSign, _, _, err := zd.analyzeHsyncSigners(ids, label)
 	return shouldSign, err
 }
 

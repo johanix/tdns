@@ -876,6 +876,12 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		if Globals.Debug {
 			lg.Printf("IterativeDNSQuery: response from tryServer(dns.Exchange) qname=%s, qtype=%s:\n%s", qname, dns.TypeToString[qtype], PrintMsgFull(r, imr.LineWidth))
 		}
+
+		// Run IMR response hooks
+		for _, hook := range getImrResponseHooks() {
+			hook(ctx, qname, qtype, server.Name, addr, transport, r, r.MsgHdr.Rcode)
+		}
+
 		rcode = r.MsgHdr.Rcode
 
 		// Check for REFUSED/NOTAUTH/NOTIMP/SERVFAIL responses (lame delegations) and record as zone-specific failure
@@ -1607,7 +1613,12 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 			"doh", server.TransportWeights[core.TransportDoH],
 			"do53", server.TransportWeights[core.TransportDo53])
 	}
-	// return c.Exchange(m, addr)
+	// Run IMR outbound query hooks
+	for _, hook := range getImrOutboundQueryHooks() {
+		if err := hook(ctx, qname, qtype, server.Name, addr, t); err != nil {
+			return nil, t, 0, err
+		}
+	}
 	r, _, err := c.Exchange(m, addr, Globals.Debug && !imr.Quiet)
 	if err != nil {
 		lgDns.Error("*** tryServer: query \" \" sent to returned error",

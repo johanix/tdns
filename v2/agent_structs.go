@@ -72,6 +72,7 @@ type Agent struct {
 	DnsDetails    *AgentDetails
 	ApiMethod     bool
 	DnsMethod     bool
+	IsInfraPeer   bool // true for combiner/signer — handled by StartInfraBeatLoop, not SendHeartbeats
 	Zones         map[ZoneName]bool
 	Api           *AgentApi
 	State         AgentState // Agent states: needed, known, hello-done, operational, error
@@ -157,14 +158,15 @@ type AgentApi struct {
 }
 
 type AgentRegistry struct {
-	S                core.ConcurrentMap[AgentId, *Agent]
-	RegularS         map[AgentId]*Agent
-	RemoteAgents     map[ZoneName][]AgentId
-	mu               sync.RWMutex    // protects remoteAgents
-	LocalAgent       *LocalAgentConf // our own identity
-	LocateInterval   int             // seconds to wait between locating agents (until success)
-	helloContexts    map[AgentId]context.CancelFunc
-	TransportManager *TransportManager // optional; when set, Hello/Beat/Sync use transport fallback (API → DNS)
+	S                     core.ConcurrentMap[AgentId, *Agent]
+	RegularS              map[AgentId]*Agent
+	RemoteAgents          map[ZoneName][]AgentId
+	mu                    sync.RWMutex       // protects remoteAgents
+	LocalAgent            *MultiProviderConf // our own identity
+	LocateInterval        int                // seconds to wait between locating agents (until success)
+	helloContexts         map[AgentId]context.CancelFunc
+	TransportManager      *TransportManager      // optional; when set, Hello/Beat/Sync use transport fallback (API → DNS)
+	LeaderElectionManager *LeaderElectionManager // optional; when set, election messages are processed
 }
 
 // AgentBeatPost is defined in core package to avoid circular dependencies.
@@ -238,8 +240,11 @@ type AgentMsgPost struct {
 	Operations     []core.RROperation  // Explicit operations (takes precedence over Records)
 	Time           time.Time
 	RfiType        string
-	DistributionID string // Originating distribution ID from the sending agent
-	Nonce          string // Nonce from the incoming sync/update message (for confirmation echo)
+	RfiSubtype     string
+	DistributionID string                   // Originating distribution ID from the sending agent
+	Nonce          string                   // Nonce from the incoming sync/update message (for confirmation echo)
+	ZoneClass      string                   // "mp" (default) or "provider"
+	Publish        *core.PublishInstruction // KEY/CDS publication instruction for combiner
 }
 
 type AgentMsgPostPlus struct {
@@ -272,6 +277,7 @@ type RfiData struct {
 	ZoneXfrAuth []string
 	ZoneXfrDsts []string
 	AuditData   map[ZoneName]map[AgentId]map[uint16][]TrackedRRInfo `json:"audit_data,omitempty"`
+	ConfigData  map[string]string                                   `json:"config_data,omitempty"` // key-value config data for RFI CONFIG
 }
 
 // AgentPingPost is defined in core package to avoid circular dependencies.
@@ -313,6 +319,7 @@ type AgentMgmtPost struct {
 	Upstream    AgentId
 	Downstream  AgentId
 	RfiType     string
+	RfiSubtype  string
 	Data        map[string]interface{} `json:"data,omitempty"` // Generic data field for custom parameters
 	// Response    chan *AgentMgmtResponse
 }
@@ -341,7 +348,7 @@ type AgentMgmtResponse struct {
 	Agents         []*Agent // used for hsync-agentstatus
 	ZoneAgentData  *ZoneAgentData
 	HsyncRRs       []string
-	AgentConfig    LocalAgentConf
+	AgentConfig    MultiProviderConf
 	RfiType        string
 	RfiResponse    map[AgentId]*RfiData
 	AgentRegistry  *AgentRegistry

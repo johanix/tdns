@@ -75,6 +75,10 @@ SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (
 		}
 		publishkeys = append(publishkeys, rr)
 	}
+	if err = rows.Err(); err != nil {
+		lgHandler.Error("PublishDnskeyRRs: rows iteration error", "err", err)
+		return err
+	}
 
 	// Multi-signer mode 4: merge remote DNSKEYs from other providers.
 	// Per RFC 8901, each signer includes all signers' DNSKEYs in the RRset.
@@ -101,8 +105,7 @@ SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (
 	// Build the DNSKEY RRset: replace the zone's DNSKEY RRset entirely with
 	// publishkeys (local + keystore published/retired/foreign + remote).
 	// This ensures stale keys from incoming zones are stripped.
-	var dnskeys core.RRset
-	dnskeys = core.RRset{
+	dnskeys := core.RRset{
 		RRs: publishkeys,
 	}
 

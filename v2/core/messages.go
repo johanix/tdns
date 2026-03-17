@@ -20,6 +20,8 @@ const (
 	AgentMsgPing     AgentMsg = "ping"
 	AgentMsgKeystate AgentMsg = "keystate"
 	AgentMsgEdits    AgentMsg = "edits"
+	AgentMsgConfig   AgentMsg = "config"
+	AgentMsgAudit    AgentMsg = "audit"
 )
 
 var AgentMsgToString = map[AgentMsg]string{
@@ -32,6 +34,8 @@ var AgentMsgToString = map[AgentMsg]string{
 	AgentMsgPing:     "PING",
 	AgentMsgKeystate: "KEYSTATE",
 	AgentMsgEdits:    "EDITS",
+	AgentMsgConfig:   "CONFIG",
+	AgentMsgAudit:    "AUDIT",
 }
 
 // AgentHelloPost represents a hello handshake message.
@@ -82,6 +86,14 @@ type AgentBeatResponse struct {
 	ErrorMsg     string
 }
 
+// PublishInstruction tells the combiner to publish (or retract) KEY/CDS records
+// at the zone apex and/or at _signal names derived from the agent's NS contributions.
+type PublishInstruction struct {
+	KEYRRs    []string `json:"key_rrs,omitempty"` // KEY RRs in text format (supports rollover)
+	CDSRRs    []string `json:"cds_rrs,omitempty"` // CDS RRs in text format (future use)
+	Locations []string `json:"locations"`         // ["at-apex"], ["at-ns"], both, or [] (retract)
+}
+
 // RROperation describes an explicit operation on DNS records.
 // When Operations is populated on a message, Records is ignored by the receiver.
 // Operations use explicit semantics instead of overloading the DNS Class field.
@@ -105,7 +117,10 @@ type AgentMsgPost struct {
 	Operations   []RROperation       `json:"operations,omitempty"` // Explicit operations (takes precedence over Records)
 	Time         time.Time           // Message timestamp
 	RfiType      string              // Type of RFI request if MessageType is RFI
-	Nonce        string              `json:"nonce,omitempty"` // Unique nonce for replay protection and confirmation correlation
+	RfiSubtype   string              `json:"rfi_subtype,omitempty"` // Subtype within an RFI type (e.g. "upstream", "sig0key" for CONFIG)
+	Nonce        string              `json:"nonce,omitempty"`       // Unique nonce for replay protection and confirmation correlation
+	ZoneClass    string              `json:"zone_class,omitempty"`  // "mp" (default) or "provider"
+	Publish      *PublishInstruction `json:"publish,omitempty"`     // KEY/CDS publication instruction for combiner
 }
 
 // AgentMsgResponse represents the response to an AgentMsgPost.
@@ -130,7 +145,8 @@ type RfiData struct {
 	ZoneXfrSrcs []string
 	ZoneXfrAuth []string
 	ZoneXfrDsts []string
-	AuditData   interface{} `json:"audit_data,omitempty"` // zone data repo snapshot for RFI AUDIT
+	AuditData   interface{}       `json:"audit_data,omitempty"`  // zone data repo snapshot for RFI AUDIT
+	ConfigData  map[string]string `json:"config_data,omitempty"` // key-value config data for RFI CONFIG
 }
 
 // AgentPingPost represents a ping message for connectivity testing.
@@ -192,6 +208,33 @@ type AgentKeystateResponse struct {
 	Msg          string
 	Error        bool
 	ErrorMsg     string
+}
+
+// AgentConfigPost represents a CONFIG response message carrying config data
+// back to the requesting agent as a separate transaction (two-phase pattern).
+// Sent by the receiving agent in response to an RFI CONFIG request.
+type AgentConfigPost struct {
+	MessageType  AgentMsg          // AgentMsgConfig
+	MyIdentity   string            // Sender identity
+	YourIdentity string            // Recipient identity
+	Zone         string            // Zone (FQDN)
+	Subtype      string            // Config subtype: "upstream", "downstream", "sig0key"
+	ConfigData   map[string]string // Key-value config data
+	Message      string            // Optional status message
+	Time         time.Time         // Timestamp
+}
+
+// AgentAuditPost represents an AUDIT response message carrying audit data
+// back to the requesting agent as a separate transaction (two-phase pattern).
+// Sent by the receiving agent in response to an RFI AUDIT request.
+type AgentAuditPost struct {
+	MessageType  AgentMsg    // AgentMsgAudit
+	MyIdentity   string      // Sender identity
+	YourIdentity string      // Recipient identity
+	Zone         string      // Zone (FQDN)
+	AuditData    interface{} // Zone data repo snapshot (placeholder)
+	Message      string      // Optional status message
+	Time         time.Time   // Timestamp
 }
 
 // AgentEditsPost represents an EDITS message carrying an agent's current contributions

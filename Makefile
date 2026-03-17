@@ -1,4 +1,6 @@
-.PHONY: v1 all v2 clean install
+.PHONY: default v1 all v2 clean install
+
+default: v2
 
 # production version of major apps
 v1:

@@ -44,6 +44,8 @@ SELECT zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr FROM 
 SELECT zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		childsig0keyupdatetrustsql = `
 UPDATE Sig0TrustStore SET trusted=? WHERE zonename=? AND keyid=?`
+		childsig0keyverifiedsql = `
+UPDATE Sig0TrustStore SET validated=1, dnssecvalidated=?, trusted=1 WHERE zonename=? AND keyid=?`
 		deleteSig0KeySql = `
 DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 	)
@@ -198,6 +200,23 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		} else {
 			rows, _ := res.RowsAffected()
 			resp.Msg = fmt.Sprintf("Updated %d rows", rows)
+		}
+		// Must also delete from the cache
+		kdb.TruststoreSig0Cache.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))
+
+	case "verify":
+		// Set key as validated + trusted after DNS verification.
+		// tp.DnssecValidated indicates whether DNSSEC validation succeeded.
+		res, err = tx.Exec(childsig0keyverifiedsql, tp.DnssecValidated,
+			tp.Keyname, tp.Keyid)
+		if err != nil {
+			lgSigner.Error("failed to verify SIG(0) key", "err", err)
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+		} else {
+			rows, _ := res.RowsAffected()
+			resp.Msg = fmt.Sprintf("Key %s::%d verified and trusted (dnssec=%v), updated %d rows",
+				tp.Keyname, tp.Keyid, tp.DnssecValidated, rows)
 		}
 		// Must also delete from the cache
 		kdb.TruststoreSig0Cache.Map.Remove(fmt.Sprintf("%s::%d", tp.Keyname, tp.Keyid))

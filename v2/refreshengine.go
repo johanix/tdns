@@ -93,12 +93,10 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 	// Defer transport signal synthesis until all zones are initialized.
 	tryPostpass(zone)
 
-	// Note: SetupZoneSigning is NOT called here. For config-defined zones,
-	// it is registered as an OnFirstLoad callback in ParseZones. For dynamic
-	// zones (catalog, API), it is called explicitly after initialLoadZone.
-	if err := zd.SetupZoneSync(conf.Internal.DelegationSyncQ); err != nil {
-		lgEngine.Error("SetupZoneSync failed", "zone", zone, "error", err)
-	}
+	// Note: SetupZoneSigning and SetupZoneSync are NOT called here.
+	// For config-defined zones, they are registered as OnFirstLoad callbacks
+	// in ParseZones. For dynamic zones (catalog, API), they are called
+	// explicitly after initialLoadZone.
 
 	// Execute OnFirstLoad callbacks (one-shot)
 	zd.mu.Lock()
@@ -241,7 +239,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							// Send response if someone is waiting (e.g. CLI reload)
 							if zr.Response != nil {
 								resp.Error = true
-								resp.ErrorMsg = fmt.Sprintf("zone %s: refresh failed: %v", zone, err)
+								resp.ErrorMsg = err.Error()
 								zr.Response <- resp
 							}
 							continue
@@ -349,12 +347,19 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							})
 						}
 						// XXX: Should do refresh in parallel
-						go func(zd *ZoneData, zone string, force bool, conf *Config) {
+						go func(zd *ZoneData, zone string, force bool, conf *Config, zr ZoneRefresher) {
 							updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, force, conf)
 							if err != nil {
 								lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
 								zd.SetError(RefreshError, "refresh error: %v", err)
 								zd.LatestError = time.Now()
+								// If caller requested error reporting, send the error
+								if zr.Wait && zr.Response != nil {
+									zr.Response <- RefresherResponse{
+										Error:    true,
+										ErrorMsg: err.Error(),
+									}
+								}
 							} else {
 								// Clear any previous error state after successful refresh
 								if zd.Error {
@@ -370,11 +375,12 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 										lgEngine.Error("SetupZoneSigning failed after refresh", "zone", zd.ZoneName, "error", err)
 									}
 
-									// Write zone file after successful update
-									// Two cases:
-									// 1. Auto-configured zones -> write to dynamic zone directory
-									// 2. Regular zones with zonefile configured -> write to configured file
-									if conf.ShouldPersistZone(zd) && zd.Options[OptAutomaticZone] {
+									// Write zone file after successful update.
+									// Skip for primary zones loaded from file — rewriting the source
+									// is pointless unless dynamic changes have been made (OptDirty).
+									if zd.ZoneType == Primary && !zd.Options[OptDirty] {
+										lgEngine.Debug("skipping zone file write for unmodified primary zone", "zone", zd.ZoneName)
+									} else if conf.ShouldPersistZone(zd) && zd.Options[OptAutomaticZone] {
 										// Auto-configured catalog member zone
 										_, err := zd.WriteDynamicZoneFile(conf.DynamicZones.ZoneDirectory)
 										if err != nil {
@@ -444,7 +450,13 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 									}
 								}
 							}
-						}(zd, zone, zr.Force, conf)
+							// If caller requested error reporting, send success
+							if zr.Wait && zr.Response != nil {
+								zr.Response <- RefresherResponse{
+									Msg: fmt.Sprintf("zone %s: reloaded (updated=%v)", zone, updated),
+								}
+							}
+						}(zd, zone, zr.Force, conf, zr)
 					}
 				} else {
 					// DYNAMIC ZONE: not from config (catalog member, API-created).
@@ -491,7 +503,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					}
 				}
 			}
-			if zr.Response != nil {
+			if zr.Response != nil && !zr.Wait {
+				// Only send immediate "refreshing..." when NOT in error-reporting mode.
+				// When Wait is set, the goroutine sends the actual result.
 				zd, _ := Zones.Get(zr.Name)
 				resp.Msg = fmt.Sprintf("RefreshEngine: %s zone %s refreshing (force=%v)",
 					ZoneTypeToString[zd.ZoneType], zr.Name,
@@ -552,11 +566,12 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					if updated {
 						zd.NotifyDownstreams()
 
-						// Write zone file after successful update
-						// Two cases:
-						// 1. Auto-configured zones -> write to dynamic zone directory
-						// 2. Regular zones with zonefile configured -> write to configured file
-						if conf.ShouldPersistZone(zd) && zd.Options[OptAutomaticZone] {
+						// Write zone file after successful update.
+						// Skip for primary zones loaded from file — rewriting the source
+						// is pointless unless dynamic changes have been made (OptDirty).
+						if zd.ZoneType == Primary && !zd.Options[OptDirty] {
+							lgEngine.Debug("skipping zone file write for unmodified primary zone", "zone", zd.ZoneName)
+						} else if conf.ShouldPersistZone(zd) && zd.Options[OptAutomaticZone] {
 							// Auto-configured catalog member zone
 							_, err := zd.WriteDynamicZoneFile(conf.DynamicZones.ZoneDirectory)
 							if err != nil {

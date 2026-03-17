@@ -291,6 +291,7 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 			lgApi.Warn("error decoding delegation post", "err", err)
 		}
 
+		dp.Zone = dns.Fqdn(dp.Zone)
 		lgApi.Debug("received /delegation request", "cmd", dp.Command, "from", r.RemoteAddr)
 
 		resp := DelegationResponse{
@@ -352,6 +353,26 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 				resp.Error = true
 				resp.ErrorMsg = "Timeout waiting for delegation sync response"
 			}
+
+		case "export":
+			lgApi.Info("delegation data export", "zone", dp.Zone, "outfile", dp.Outfile)
+			if dp.Outfile == "" {
+				resp.Error = true
+				resp.ErrorMsg = "export requires outfile parameter"
+				return
+			}
+			if zd.DelegationBackend == nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("zone %s has no delegation backend configured", dp.Zone)
+				return
+			}
+			err := ExportDelegationData(zd.DelegationBackend, dp.Zone, dp.Outfile)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("export failed: %v", err)
+				return
+			}
+			resp.Msg = fmt.Sprintf("Delegation data for %s exported to %s", dp.Zone, dp.Outfile)
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown delegation command: %s", dp.Command)

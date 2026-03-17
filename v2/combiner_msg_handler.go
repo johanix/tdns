@@ -39,8 +39,8 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 	// Build set of local agent identities (our own provider's agents).
 	// Protected-namespace checks only apply to remote agents, not our own.
 	localAgents := make(map[string]bool)
-	if conf.Combiner != nil {
-		for _, a := range conf.Combiner.Agents {
+	if conf.MultiProvider != nil {
+		for _, a := range conf.MultiProvider.Agents {
 			if a != nil && a.Identity != "" {
 				localAgents[a.Identity] = true
 			}
@@ -99,7 +99,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			}
 			zone := string(msg.Zone)
 
-			if zone == "" || senderID == "" {
+			if senderID == "" || (zone == "" && msg.ZoneClass != "provider") {
 				lgCombiner.Warn("rejecting message with empty zone or sender", "zone", zone, "sender", senderID)
 				continue
 			}
@@ -200,8 +200,10 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			syncReq := &CombinerSyncRequest{
 				SenderID:       senderID,
 				Zone:           zone,
+				ZoneClass:      msg.ZoneClass,
 				Records:        msg.Records,
 				Operations:     msg.Operations,
+				Publish:        msg.Publish,
 				DistributionID: msg.DistributionID,
 				Timestamp:      msg.Time,
 			}
@@ -212,9 +214,13 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			if localAgents[senderID] {
 				nsGuard = nil
 			}
-			resp := CombinerProcessUpdate(syncReq, nsGuard)
+			resp := CombinerProcessUpdate(syncReq, nsGuard, localAgents, kdb, tm)
 			resp.Nonce = msg.Nonce // Echo nonce for confirmation
+			if resp.Zone != "" {
+				zone = resp.Zone // Update zone from combiner discovery (e.g. provider updates with Zone="")
+			}
 			if resp.Status == "error" {
+				lgCombiner.Error("update failed", "sender", senderID, "zone", zone, "distrib", msg.DistributionID, "reason", resp.Message)
 				recordCombinerError(errorJournal, msg.DistributionID, senderID, "update", resp.Message, "")
 			}
 
@@ -228,11 +234,11 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				rejected := make(map[string][]string)
 				var reasons []string
 				for _, ri := range resp.RejectedItems {
+					owner := zone // default for operation-level rejections
 					rr, err := dns.NewRR(ri.Record)
-					if err != nil {
-						continue
+					if err == nil {
+						owner = rr.Header().Name
 					}
-					owner := rr.Header().Name
 					rejected[owner] = append(rejected[owner], ri.Record)
 					reasons = append(reasons, ri.Reason)
 				}
@@ -364,7 +370,7 @@ func sendEditsToAgent(conf *Config, tm *TransportManager, agentID string, zone s
 	}
 
 	req := &transport.EditsRequest{
-		SenderID:  conf.Combiner.Identity,
+		SenderID:  conf.MultiProvider.Identity,
 		Zone:      zone,
 		Records:   records,
 		Timestamp: time.Now(),

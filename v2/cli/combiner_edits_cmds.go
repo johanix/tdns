@@ -373,6 +373,27 @@ func SendCombinerEditCmd(req tdns.CombinerEditPost) (*tdns.CombinerEditResponse,
 	return &resp, nil
 }
 
+var combinerZoneEditsReapplyCmd = &cobra.Command{
+	Use:   "reapply",
+	Short: "Reload contributions from DB and re-apply to zone data",
+	Run: func(cmd *cobra.Command, args []string) {
+		zone, _ := cmd.Flags().GetString("zone")
+		if zone == "" {
+			log.Fatalf("--zone is required")
+		}
+
+		resp, err := SendCombinerEditCmd(tdns.CombinerEditPost{
+			Command: "reapply",
+			Zone:    zone,
+		})
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+
+		fmt.Println(resp.Msg)
+	},
+}
+
 var combinerZoneReloadCmd = &cobra.Command{
 	Use:   "reload",
 	Short: "Request re-loading a zone on the combiner",
@@ -437,6 +458,10 @@ func init() {
 	combinerZoneEditsCmd.AddCommand(combinerZoneEditsApproveCmd)
 	combinerZoneEditsCmd.AddCommand(combinerZoneEditsRejectCmd)
 	combinerZoneEditsCmd.AddCommand(combinerZoneEditsClearCmd)
+	combinerZoneEditsCmd.AddCommand(combinerZoneEditsReapplyCmd)
+
+	// Flags for reapply
+	combinerZoneEditsReapplyCmd.Flags().String("zone", "", "Zone to reapply contributions for (required)")
 
 	// Flags for list
 	combinerZoneEditsListCmd.Flags().String("zone", "", "Zone to list edits for")

@@ -23,14 +23,14 @@ func init() {
 	RegisterJWKRR()
 }
 
+// Zone file syntax:
+//   owner TTL CLASS JWK "base64url-encoded-jwk-json"
+//
+// Example:
+//   _jwk.example.com. 3600 IN JWK "eyJrdHkiOiJFQyIsImNydiI6IlAtMjU2IiwieCI6Ii4uLiIsInkiOiIuLi4ifQ"
+//
 // JWK represents the RDATA for a JWK DNS record.
 // The RDATA contains a base64url-encoded JSON Web Key per RFC 7517.
-//
-// Zone file format:
-//
-//	owner TTL IN TYPE65324 \# length hexdata
-//	OR (if registered):
-//	owner TTL IN JWK "base64url-encoded-jwk-json"
 type JWK struct {
 	JWKData string // base64url-encoded JWK JSON
 }

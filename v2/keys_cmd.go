@@ -46,9 +46,9 @@ func RunKeysCmd(conf *Config, appType AppType, args []string) error {
 
 	switch args[0] {
 	case "generate":
-		return runKeysGenerate(conf, appType, backend.(crypto.Backend), args[1:])
+		return runKeysGenerate(conf, appType, backend, args[1:])
 	case "show":
-		return runKeysShow(conf, appType, backend.(crypto.Backend), args[1:])
+		return runKeysShow(conf, appType, backend, args[1:])
 	default:
 		printKeysUsage(appType)
 		return fmt.Errorf("unknown keys command: %q", args[0])
@@ -140,10 +140,13 @@ func runKeysShow(conf *Config, appType AppType, backend crypto.Backend, args []s
 func getKeysPrivKeyPath(conf *Config, appType AppType) string {
 	switch appType {
 	case AppTypeAgent:
-		return conf.Agent.LongTermJosePrivKey
+		if conf.MultiProvider != nil {
+			return conf.MultiProvider.LongTermJosePrivKey
+		}
+		return ""
 	case AppTypeCombiner:
-		if conf.Combiner != nil {
-			return conf.Combiner.LongTermJosePrivKey
+		if conf.MultiProvider != nil {
+			return conf.MultiProvider.LongTermJosePrivKey
 		}
 		return ""
 	default:

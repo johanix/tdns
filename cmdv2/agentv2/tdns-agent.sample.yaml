@@ -2,7 +2,8 @@
 include:
   - agent-zones.yaml
 
-agent:
+multi-provider:
+   role:		agent
    identity:		agent.provider.
    # Active transport mechanisms: "api" and/or "dns" (default: both if configured)
    # Use ["api"] to disable DNS transport, ["dns"] to disable API, or ["api", "dns"] for both
@@ -17,17 +18,17 @@ agent:
    # authorized_peers:
    #    - agent2.example.com
    #    - agent3.example.com
-   # --- agent autozone and secondaries (agent.local) ---
+   # --- agent autozone and secondaries (local) ---
    local:
       # Secondaries to send NOTIFY to when the agent autozone changes
       notify:	[]
       # Authoritative nameserver hostnames for the agent autozone (normalized to FQDN; no glue; must be outside the autozone)
       # nameservers:	[ ns1.example.org., ns2.example.org ]
-   # --- discovery and heartbeat (agent.remote) ---
+   # --- discovery and heartbeat (remote) ---
    remote:
       LocateInterval:	60    # seconds between locate/discovery runs
       BeatInterval:	30    # seconds between heartbeats to the same destination
-   # --- zone transfer (agent.xfr): allow AXFR/IXFR to/from listed addresses, optional TSIG ---
+   # --- zone transfer (xfr): allow AXFR/IXFR to/from listed addresses, optional TSIG ---
    xfr:
       outgoing:
          addresses:	[]   # allow AXFR/IXFR from these addresses
@@ -54,7 +55,7 @@ agent:
       # chunk_mode:	query   # store payload by qname; send NOTIFY without payload; receiver fetches via CHUNK query (then chunk_query_endpoint is required)
       # chunk_query_endpoint:	include   # when chunk_mode=query: signal CHUNK query endpoint in NOTIFY (EDNS0 option 65005). Required when chunk_mode=query.
       # chunk_query_endpoint:	none      # when chunk_mode=query: do not add endpoint to NOTIFY; receiver uses agent_peer.address
-   # --- sync engine (agent.syncengine): always active, manages Hello retries and peer sync ---
+   # --- sync engine (syncengine): always active, manages Hello retries and peer sync ---
    syncengine:
       intervals:
          helloretry:	15    # seconds between Hello retries (range: 15-1800)
@@ -94,9 +95,30 @@ validator:
          file:		/etc/tdns/sig0-keys.yaml
 
 resolver:
-   address:		8.8.8.8:53 
+   address:		8.8.8.8:53
+
+# Named delegation backends for parent zones that receive child UPDATEs.
+# Two predefined backends need no config: "db" and "direct".
+# Named backends are only needed for types that require parameters.
+# Zones reference backends by name via "delegation-backend: <name>".
+delegation-backends:
+   - name:		files-dnslab
+     type:		zonefile
+     directory:	/var/lib/tdns/delegations/dnslab
+     # notify-command: "rndc reload {ZONENAME}"
+
+# In zone config, reference a backend:
+#   zones:
+#     - name:  dnslab.
+#       delegation-backend: db           # predefined, no config needed
+#     - name:  example.com.
+#       delegation-backend: files-dnslab  # looked up from delegation-backends above
 
 delegationsync:
+   # Leader election TTL: how long a leader remains valid before re-election.
+   # Elections require ALL configured peers to participate — if any peer is
+   # unreachable, the election fails and parent-facing operations freeze.
+   leader-election-ttl:	60m
    parent:
       # in parent zones, we support these schemes, and will publish DSYNC RRs
       # if allowed to:
@@ -115,7 +137,6 @@ delegationsync:
             mode:	internal # internal | external
             generator:	/opt/local/bin/dnssec-keygen
             algorithm:	ED25519
-
    child:
       # in child zones, we will attempt the following schemes, if the parent
       # supports them and we're allowed to modify the child zone if needed
@@ -160,6 +181,22 @@ dnssecpolicies:
 
 db:
    file:		/var/tmp/tdns-agent.db
+
+imrengine:
+   active:		true
+   root-hints:		/etc/tdns/root.hints
+   addresses:		[ 127.0.0.1:5453, '[::1]:5453' ]
+   transports:		[ do53 ]
+   # IMR query debug logging: logs internal agent queries, cache hits/misses,
+   # outbound iterative queries, and auth server responses to a separate file.
+   # Enable before starting the agent to diagnose UNKNOWN/KNOWN peer state issues.
+   logging:
+      enabled:		false
+      file:		/var/log/tdns/imr-debug.log
+   # require_dnssec_validation: when true (default), TLSA lookups used for API transport
+   # peer verification must have a secure DNSSEC validation state. Set to false in lab
+   # environments where the full DNSSEC chain is not yet established.
+   require_dnssec_validation: true
 
 log:
    file:		/var/log/tdns/tdns-agent.log

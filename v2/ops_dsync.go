@@ -14,7 +14,7 @@ import (
 )
 
 func (zd *ZoneData) PublishDsyncRRs() error {
-	zd.Logger.Printf("PublishDsyncRRs: zone: %s", zd.ZoneName)
+	lg.Debug("PublishDsyncRRs", "zone", zd.ZoneName)
 	rrset := core.RRset{
 		Name: zd.ZoneName,
 	}
@@ -27,7 +27,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 	if owner != nil {
 		rrset.RRs = owner.RRtypes.GetOnlyRRSet(core.TypeDSYNC).RRs
 		if len(rrset.RRs) > 0 {
-			zd.Logger.Printf("PublishDsyncRRs: zone: %s DSYNC RRset already present; not synthesizing DSYNC RRset", zd.ZoneName)
+			lg.Debug("DSYNC RRset already present, not synthesizing", "zone", zd.ZoneName)
 			return nil
 		}
 	}
@@ -48,7 +48,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 			addr_rr, err = dns.NewRR(addrstr)
 		}
 		if err != nil {
-			zd.Logger.Printf("Error from NewRR(%s): %v", addrstr, err)
+			lg.Error("failed to create address RR", "rr", addrstr, "err", err)
 			return err
 		}
 		for _, existing_rr := range addr_rrs {
@@ -60,17 +60,13 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		return nil
 	}
 
-	// if zd.Debug {
-	zd.Logger.Printf("PublishDsyncRRs: zone: %s defined DSYNC schemes: %v", zd.ZoneName, viper.GetStringSlice("delegationsync.parent.schemes"))
-	// }
+	schemes := viper.GetStringSlice("delegationsync.parent.schemes")
+	lg.Debug("defined DSYNC schemes", "zone", zd.ZoneName, "schemes", schemes)
 
-	for _, scheme := range viper.GetStringSlice("delegationsync.parent.schemes") {
-		// if zd.Debug {
-		zd.Logger.Printf("PublishDsyncRRs: zone: %s checking DSYNC scheme: %s", zd.ZoneName, scheme)
-		// }
+	for _, scheme := range schemes {
+		lg.Debug("checking DSYNC scheme", "zone", zd.ZoneName, "scheme", scheme)
 		switch s := strings.ToUpper(scheme); s {
 		case "NOTIFY":
-			// zd.Logger.Printf("PublishDsyncRRs: zone: %s checking DSYNC scheme: %s", zd.ZoneName, scheme)
 			replacer := zd.ZoneName
 			if replacer == "." {
 				replacer = "root"
@@ -82,20 +78,18 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 
 			port := uint16(viper.GetInt("delegationsync.parent.notify.port"))
 			if port == 0 {
-				zd.Logger.Printf("PublishDsyncRRs: zone: %s no notify port found", zd.ZoneName)
-				return fmt.Errorf("zone %s: no notify port found. config broken", zd.ZoneName)
+				return fmt.Errorf("zone %s: no notify port found, config broken", zd.ZoneName)
 			}
 
 			notifyTypes := viper.GetStringSlice("delegationsync.parent.notify.types")
 			if len(notifyTypes) == 0 {
-				zd.Logger.Printf("PublishDsyncRRs: zone: %s no notify types found", zd.ZoneName)
-				return fmt.Errorf("zone %s: no notify types found. config broken", zd.ZoneName)
+				return fmt.Errorf("zone %s: no notify types found, config broken", zd.ZoneName)
 			}
 			for _, t := range notifyTypes {
 				foo := fmt.Sprintf("_dsync.%s %d IN DSYNC %s %s %d %s", replacer, ttl, t, s, port, target)
 				dsyncrr, err := dns.NewRR(foo)
 				if err != nil {
-					zd.Logger.Printf("Error from NewRR(%s): %v", foo, err)
+					lg.Error("failed to create DSYNC RR", "rr", foo, "err", err)
 					return err
 				}
 				rrset.RRs = append(rrset.RRs, dsyncrr)
@@ -104,12 +98,10 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 
 			notifyAddresses := viper.GetStringSlice("delegationsync.parent.notify.addresses")
 			if len(notifyAddresses) == 0 {
-				zd.Logger.Printf("PublishDsyncRRs: zone: %s no notify addresses found", zd.ZoneName)
-				return fmt.Errorf("zone %s: no notify addresses found. config broken", zd.ZoneName)
+				return fmt.Errorf("zone %s: no notify addresses found, config broken", zd.ZoneName)
 			}
 			for _, addr := range notifyAddresses {
 				if err := MaybeAddAddressRR(target, addr); err != nil {
-					zd.Logger.Printf("Error from MaybeAddAddressRR(%s, %s): %v", target, addr, err)
 					return err
 				}
 			}
@@ -126,20 +118,18 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 
 			port := uint16(viper.GetInt("delegationsync.parent.update.port"))
 			if port == 0 {
-				zd.Logger.Printf("PublishDsyncRRs: zone: %s no update port found", zd.ZoneName)
-				return fmt.Errorf("zone %s: no update port found. config broken", zd.ZoneName)
+				return fmt.Errorf("zone %s: no update port found, config broken", zd.ZoneName)
 			}
 
 			updateTypes := viper.GetStringSlice("delegationsync.parent.update.types")
 			if len(updateTypes) == 0 {
-				zd.Logger.Printf("PublishDsyncRRs: zone: %s no update types found", zd.ZoneName)
-				return fmt.Errorf("zone %s: no update types found. config broken", zd.ZoneName)
+				return fmt.Errorf("zone %s: no update types found, config broken", zd.ZoneName)
 			}
 			for _, t := range updateTypes {
 				foo := fmt.Sprintf("_dsync.%s %d IN DSYNC %s %s %d %s", replacer, ttl, t, s, port, target)
 				dsyncrr, err := dns.NewRR(foo)
 				if err != nil {
-					zd.Logger.Printf("Error from NewRR(%s): %v", foo, err)
+					lg.Error("failed to create DSYNC RR", "rr", foo, "err", err)
 					return err
 				}
 				rrset.RRs = append(rrset.RRs, dsyncrr)
@@ -148,18 +138,16 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 
 			updateAddresses := viper.GetStringSlice("delegationsync.parent.update.addresses")
 			if len(updateAddresses) == 0 {
-				zd.Logger.Printf("PublishDsyncRRs: zone: %s no update addresses found", zd.ZoneName)
-				return fmt.Errorf("zone %s: no update addresses found. config broken", zd.ZoneName)
+				return fmt.Errorf("zone %s: no update addresses found, config broken", zd.ZoneName)
 			}
 			for _, addr := range updateAddresses {
 				if err := MaybeAddAddressRR(target, addr); err != nil {
-					zd.Logger.Printf("Error from MaybeAddAddressRR(%s, %s): %v", target, addr, err)
 					return err
 				}
 			}
 
 		default:
-			zd.Logger.Printf("Error: unknown DSYNC scheme: \"%s\". Ignored.", scheme)
+			lg.Warn("unknown DSYNC scheme, ignoring", "scheme", scheme)
 			continue
 		}
 	}
@@ -168,11 +156,39 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		return fmt.Errorf("no DSYNC RRs added for zone %s", zd.ZoneName)
 	}
 
+	// Publish SVCB bootstrap capability record at the DSYNC UPDATE target.
+	// This advertises which bootstrap methods the parent supports, per
+	// draft-ietf-dnsop-delegation-mgmt-via-ddns-01, section "SvcParamKey bootstrap".
+	bootstrapMethods := viper.GetString("delegationsync.parent.bootstrap.methods")
+	if bootstrapMethods != "" {
+		updateTarget := viper.GetString("delegationsync.parent.update.target")
+		if updateTarget != "" {
+			replacer := zd.ZoneName
+			if replacer == "." {
+				replacer = "root"
+			}
+			target := dns.Fqdn(strings.Replace(updateTarget, "{ZONENAME}", replacer, 1))
+			svcbRR := &dns.SVCB{
+				Hdr:      dns.RR_Header{Name: target, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: uint32(ttl)},
+				Priority: 0,
+				Target:   ".",
+				Value: []dns.SVCBKeyValue{
+					&dns.SVCBLocal{
+						KeyCode: dns.SVCBKey(SvcbBootstrapKey),
+						Data:    []byte(bootstrapMethods),
+					},
+				},
+			}
+			rrset.RRs = append(rrset.RRs, svcbRR)
+			lg.Debug("added SVCB bootstrap record", "zone", zd.ZoneName, "target", target, "methods", bootstrapMethods)
+		}
+	}
+
 	ur := UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
 		Description:    fmt.Sprintf("Publish DSYNC RRs for zone %s", zd.ZoneName),
-		Actions:        rrset.RRs, // Add all the DSYNC RRs first.
+		Actions:        rrset.RRs,
 		InternalUpdate: true,
 	}
 
@@ -217,6 +233,20 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 	}
 
 	return nil
+}
+
+// DsyncUpdateTargetName computes the DSYNC UPDATE target name for a parent zone
+// from the global config. Returns empty string if not configured.
+func DsyncUpdateTargetName(zonename string) string {
+	tpl := viper.GetString("delegationsync.parent.update.target")
+	if tpl == "" {
+		return ""
+	}
+	replacer := zonename
+	if replacer == "." {
+		replacer = "root"
+	}
+	return dns.Fqdn(strings.Replace(tpl, "{ZONENAME}", replacer, 1))
 }
 
 // ZoneIsReady returns a function that can be used as a PreCondition for a DeferredUpdate.

@@ -216,7 +216,7 @@ func sendKeystateInventoryToAgent(conf *Config, tm *TransportManager, agentID st
 
 	resp, err := tm.DNSTransport.Keystate(sendCtx, peer, req)
 	if err != nil {
-		return fmt.Errorf("Keystate send failed: %w", err)
+		return fmt.Errorf("keystate send failed: %w", err)
 	}
 
 	if !resp.Accepted {

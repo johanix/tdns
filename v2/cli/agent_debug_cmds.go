@@ -18,7 +18,7 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var myIdentity, notifyRRtype, rfitype string
+var myIdentity, notifyRRtype, rfitype, rfisubtype string
 
 var DebugAgentCmd = &cobra.Command{
 	Use:   "debug",
@@ -77,15 +77,21 @@ var DebugAgentSendRfiCmd = &cobra.Command{
 		PrepArgs("zonename", "identity")
 
 		rfitype = strings.ToUpper(rfitype)
-		validRfiTypes := map[string]bool{"UPSTREAM": true, "DOWNSTREAM": true, "SYNC": true, "AUDIT": true, "EDITS": true}
+		validRfiTypes := map[string]bool{"CONFIG": true, "SYNC": true, "AUDIT": true, "EDITS": true}
 		if !validRfiTypes[rfitype] {
-			log.Fatalf("Error: RFI type must be one of UPSTREAM, DOWNSTREAM, SYNC, AUDIT, or EDITS (is %q)", rfitype)
+			log.Fatalf("Error: RFI type must be one of CONFIG, SYNC, AUDIT, or EDITS (is %q)", rfitype)
 		}
+
+		if rfitype == "CONFIG" && rfisubtype == "" {
+			log.Fatalf("Error: CONFIG RFI requires --subtype (upstream, downstream, sig0key)")
+		}
+		rfisubtype = strings.ToLower(rfisubtype)
 
 		req := tdns.AgentMgmtPost{
 			Command:     "send-rfi",
 			MessageType: tdns.AgentMsgRfi,
 			RfiType:     rfitype,
+			RfiSubtype:  rfisubtype,
 			Zone:        tdns.ZoneName(tdns.Globals.Zonename),
 			AgentId:     tdns.Globals.AgentId,
 		}
@@ -94,7 +100,6 @@ var DebugAgentSendRfiCmd = &cobra.Command{
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
-		// dump.P(amr)
 
 		if amr.Error {
 			log.Fatalf("Error: %s", amr.ErrorMsg)
@@ -105,23 +110,41 @@ var DebugAgentSendRfiCmd = &cobra.Command{
 			fmt.Printf("%s\n", amr.Msg)
 		}
 		if len(amr.RfiResponse) > 0 {
-			switch rfitype {
-			case "UPSTREAM", "DOWNSTREAM":
+			switch {
+			case rfitype == "CONFIG" && (rfisubtype == "upstream" || rfisubtype == "downstream"):
 				var out []string
 				if tdns.Globals.ShowHeaders {
 					out = append(out, "Zone|Provider|Where|XFR src|XFR dst|XFR auth")
 				}
 				for aid, rfidata := range amr.RfiResponse {
+					if rfidata.Error {
+						fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
+						continue
+					}
 					if len(rfidata.ZoneXfrSrcs) > 0 {
-						out = append(out, fmt.Sprintf("%s|%s|UPSTREAM|%v|%v|%v", tdns.Globals.Zonename, aid, rfidata.ZoneXfrSrcs, "", rfidata.ZoneXfrAuth))
+						out = append(out, fmt.Sprintf("%s|%s|upstream|%v|%v|%v", tdns.Globals.Zonename, aid, rfidata.ZoneXfrSrcs, "", rfidata.ZoneXfrAuth))
 					}
 					if len(rfidata.ZoneXfrDsts) > 0 {
-						out = append(out, fmt.Sprintf("%s|%s|DOWNSTREAM|%v|%v|%v", tdns.Globals.Zonename, aid, "", rfidata.ZoneXfrDsts, rfidata.ZoneXfrAuth))
+						out = append(out, fmt.Sprintf("%s|%s|downstream|%v|%v|%v", tdns.Globals.Zonename, aid, "", rfidata.ZoneXfrDsts, rfidata.ZoneXfrAuth))
 					}
 				}
-				fmt.Printf("%s\n", columnize.SimpleFormat(out))
+				if len(out) > 0 {
+					fmt.Printf("%s\n", columnize.SimpleFormat(out))
+				}
 
-			case "SYNC":
+			case rfitype == "CONFIG":
+				for aid, rfidata := range amr.RfiResponse {
+					if rfidata.Error {
+						fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
+					} else {
+						fmt.Printf("  %s: %s\n", aid, rfidata.Msg)
+						for k, v := range rfidata.ConfigData {
+							fmt.Printf("    %s: %s\n", k, v)
+						}
+					}
+				}
+
+			case rfitype == "SYNC":
 				for aid, rfidata := range amr.RfiResponse {
 					if rfidata.Error {
 						fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
@@ -130,7 +153,7 @@ var DebugAgentSendRfiCmd = &cobra.Command{
 					}
 				}
 
-			case "AUDIT":
+			case rfitype == "AUDIT":
 				for aid, rfidata := range amr.RfiResponse {
 					if rfidata.Error {
 						fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
@@ -144,6 +167,15 @@ var DebugAgentSendRfiCmd = &cobra.Command{
 								fmt.Printf("    Audit data:\n    %s\n", string(auditJSON))
 							}
 						}
+					}
+				}
+
+			case rfitype == "EDITS":
+				for aid, rfidata := range amr.RfiResponse {
+					if rfidata.Error {
+						fmt.Printf("  %s: error: %s\n", aid, rfidata.ErrorMsg)
+					} else {
+						fmt.Printf("  %s: %s\n", aid, rfidata.Msg)
 					}
 				}
 			}
@@ -217,7 +249,7 @@ var DebugAgentRegistryCmd = &cobra.Command{
 	Short: "Test the agent registry",
 	Run: func(cmd *cobra.Command, args []string) {
 		conf := tdns.Config{
-			Agent: &tdns.LocalAgentConf{
+			MultiProvider: &tdns.MultiProviderConf{
 				Identity: "local",
 			},
 		}
@@ -984,7 +1016,9 @@ func init() {
 	DebugAgentSendNotifyCmd.Flags().StringVarP(&myIdentity, "id", "I", "", "agent identity to claim")
 	DebugAgentSendNotifyCmd.Flags().StringVarP(&notifyRRtype, "rrtype", "R", "", "RR type sent notify for")
 	DebugAgentSendNotifyCmd.Flags().StringVarP(&dnsRecord, "RR", "", "", "DNS record to send")
-	DebugAgentSendRfiCmd.Flags().StringVarP(&rfitype, "rfi", "", "", "RFI type (UPSTREAM|DOWNSTREAM|SYNC|AUDIT|EDITS)")
+	DebugAgentSendRfiCmd.Flags().StringVarP(&myIdentity, "id", "I", "", "agent identity to claim")
+	DebugAgentSendRfiCmd.Flags().StringVarP(&rfitype, "rfi", "", "", "RFI type (CONFIG|SYNC|AUDIT|EDITS)")
+	DebugAgentSendRfiCmd.Flags().StringVarP(&rfisubtype, "subtype", "", "", "RFI subtype for CONFIG (upstream|downstream|sig0key)")
 
 	// New command flags
 	DebugAgentShowSyncedDataCmd.Flags().String("zone", "", "Filter by specific zone")

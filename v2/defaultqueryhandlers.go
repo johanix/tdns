@@ -48,6 +48,37 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 
 	lgHandler.Debug("query received", "qname", qname, "opcode", dns.OpcodeToString[r.Opcode], "opcodeNum", r.Opcode, "DO", msgoptions.DO, "qtype", dns.TypeToString[qtype], "from", w.RemoteAddr())
 
+	// If the query contains a KeyState EDNS(0) option and we are a parent zone,
+	// process the KeyState request and wrap the ResponseWriter to attach the
+	// response option to whatever DNS reply is sent. Per draft-berra-dnsop-keystate-02,
+	// the response is also signed with the UPDATE Receiver's SIG(0) key.
+	if msgoptions.KeyState != nil && kdb != nil {
+		if zd, _ := FindZone(qname); zd != nil && zd.Options[OptDelSyncParent] {
+			lgHandler.Debug("processing KeyState option from query", "qname", qname, "keyid", msgoptions.KeyState.KeyID, "state", msgoptions.KeyState.KeyState)
+			ksResponse, err := kdb.ProcessKeyState(msgoptions.KeyState, qname)
+			if err != nil {
+				lgHandler.Error("failed to process KeyState option", "err", err)
+			} else {
+				ksWriter := &keyStateResponseWriter{
+					ResponseWriter:   w,
+					keyStateResponse: ksResponse,
+				}
+				// Look up the parent's UPDATE Receiver SIG(0) key for signing
+				signerName := DsyncUpdateTargetName(zd.ZoneName)
+				if signerName != "" {
+					sak, err := kdb.GetSig0Keys(signerName, Sig0StateActive)
+					if err != nil {
+						lgHandler.Debug("no SIG(0) key for KeyState response signing", "signer", signerName, "err", err)
+					} else {
+						ksWriter.sig0Signer = signerName
+						ksWriter.sig0Keys = sak
+					}
+				}
+				w = ksWriter
+			}
+		}
+	}
+
 	// Check if this is a reporter app handling error channel queries (RFC9567)
 	if Globals.App.Type == AppTypeReporter {
 		if strings.HasPrefix(qname, "_er.") {

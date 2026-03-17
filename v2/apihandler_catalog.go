@@ -531,9 +531,7 @@ func regenerateCatalogZone(catalogZoneName string) error {
 			// Create TXT record with all groups as strings
 			// Format: "group1" "group2" "group3" ...
 			txtStrings := make([]string, len(member.Groups))
-			for i, grp := range member.Groups {
-				txtStrings[i] = grp
-			}
+			copy(txtStrings, member.Groups)
 
 			// Create TXT RR with all group strings
 			txtRR := &dns.TXT{

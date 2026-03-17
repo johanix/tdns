@@ -10,7 +10,6 @@ import (
 	"slices"
 	"time"
 
-	"github.com/gookit/goutil/dump"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
@@ -91,29 +90,40 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				continue
 
 			case "CHILD-UPDATE":
-				// This is the case where a DNS UPDATE contains updates to child delegation information.
-				// Either we are the primary (in which case we have the ability to directly modify the contents of the zone),
-				// or we are a secondary (i.e. we are an agent) in which case we have the ability to record the changes in the DB).
+				// Child delegation data update: dispatch to the configured DelegationBackend.
 				lg.Debug("ZoneUpdater: CHILD-UPDATE request", "zone", ur.ZoneName, "actions", len(ur.Actions))
 				lg.Debug("ZoneUpdater: CHILD-UPDATE actions detail", "actions", SprintUpdates(ur.Actions))
 				if zd.Options[OptAllowChildUpdates] {
-					var updated bool
-					var err error
+					if zd.DelegationBackend != nil {
+						err := zd.DelegationBackend.ApplyChildUpdate(ur.ZoneName, ur)
+						if err != nil {
+							lg.Error("ZoneUpdater: DelegationBackend.ApplyChildUpdate failed",
+								"backend", zd.DelegationBackend.Name(), "error", err)
+						} else {
+							lg.Info("ZoneUpdater: CHILD-UPDATE applied",
+								"zone", ur.ZoneName, "backend", zd.DelegationBackend.Name())
+							zd.Options[OptDirty] = true
+						}
+					} else {
+						// Fallback: no backend configured, use legacy dispatch
+						var updated bool
+						var err error
 
-					switch zd.ZoneType {
-					case Primary:
-						updated, err = zd.ApplyChildUpdateToZoneData(ur, kdb)
-						if err != nil {
-							lg.Error("ZoneUpdater: ApplyChildUpdateToZoneData failed", "error", err)
+						switch zd.ZoneType {
+						case Primary:
+							updated, err = zd.ApplyChildUpdateToZoneData(ur, kdb)
+							if err != nil {
+								lg.Error("ZoneUpdater: ApplyChildUpdateToZoneData failed", "error", err)
+							}
+						case Secondary:
+							err = kdb.ApplyChildUpdateToDB(ur)
+							if err != nil {
+								lg.Error("ZoneUpdater: ApplyChildUpdateToDB failed", "error", err)
+							}
 						}
-					case Secondary:
-						err := kdb.ApplyChildUpdateToDB(ur)
-						if err != nil {
-							lg.Error("ZoneUpdater: ApplyChildUpdateToDB failed", "error", err)
+						if updated {
+							zd.Options[OptDirty] = true
 						}
-					}
-					if updated {
-						zd.Options[OptDirty] = true
 					}
 				}
 
@@ -137,6 +147,13 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 							ZoneData:   zd,
 							SyncStatus: dss,
 							// XXX: *NOT* populating the Adds and Removes here, using the dss data
+						}
+						// Proactively publish CSYNC when delegation data changes.
+						// This serves as a signal to scanning parents even if we also do active DDNS.
+						if err := zd.PublishCsyncRR(); err != nil {
+							lg.Error("ZoneUpdater: error publishing CSYNC", "zone", zd.ZoneName, "err", err)
+						} else {
+							lg.Debug("ZoneUpdater: published CSYNC proactively", "zone", zd.ZoneName)
 						}
 					}
 
@@ -171,6 +188,12 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				if err != nil {
 					lg.Error("kdb.Begin failed", "error", err)
 				}
+				type pendingVerification struct {
+					childZone string
+					keyid     uint16
+					keyRR     string
+				}
+				var toVerify []pendingVerification
 				for _, rr := range ur.Actions {
 					var subcommand string
 					switch rr.Header().Class {
@@ -201,6 +224,15 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 						if err != nil {
 							lg.Error("kdb.Sig0TrustMgmt failed", "error", err)
 						}
+
+						// Queue untrusted child-update adds for async verification.
+						if subcommand == "add" && !ur.Trusted {
+							toVerify = append(toVerify, pendingVerification{
+								childZone: keyrr.Header().Name,
+								keyid:     uint16(keyrr.KeyTag()),
+								keyRR:     rr.String(),
+							})
+						}
 					} else {
 						lg.Error("ZoneUpdater: TRUSTSTORE-UPDATE: not a KEY RR", "rr", rr.String())
 					}
@@ -208,6 +240,13 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				err = tx.Commit()
 				if err != nil {
 					lg.Error("tx.Commit failed", "error", err)
+				}
+
+				// Trigger async DNS verification for newly stored untrusted child keys.
+				for _, pv := range toVerify {
+					lg.Info("ZoneUpdater: triggering child key verification",
+						"zone", pv.childZone, "keyid", pv.keyid)
+					kdb.TriggerChildKeyVerification(pv.childZone, pv.keyid, pv.keyRR)
 				}
 			default:
 				lg.Error("ZoneUpdater: unknown command, ignoring", "cmd", ur.Cmd)
@@ -682,161 +721,7 @@ func (kdb *KeyDB) ApplyZoneUpdateToDB(ur UpdateRequest) error {
 	return nil // placeholder
 }
 
-// ZoneUpdateChangesDelegationData returns a DelegationSyncStatus that describes the changes to the delegation data
-// for the zone (if any). It does not update the zone data.
-
-// XXX: The data in dss is not quite complete. We catch changes to the NS RRset, and changes to glue
-// for the in-bailiwick nameservers. But we don't catch that we should remove glue for a nameserver that is
-// no longer in the NS RRset, nor that we should add glue for a nameserver that is newly in the NS RRset.
-// But it's a start.
-
-func (zd *ZoneData) ZoneUpdateChangesDelegationData(ur UpdateRequest) (DelegationSyncStatus, error) {
-	lg.Debug("ZoneUpdateChangesDelegationData: enter", "request", fmt.Sprintf("%+v", ur))
-	var dss = DelegationSyncStatus{
-		ZoneName: zd.ZoneName,
-		Time:     time.Now(),
-		InSync:   true,
-	}
-
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil {
-		return dss, err
-	}
-	bns, err := BailiwickNS(zd.ZoneName, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs)
-	if err != nil {
-		return dss, err
-	}
-
-	for _, rr := range ur.Actions {
-		lg.Debug("ZoneUpdateChangesDelegationData: checking action", "rr", rr.String())
-		class := rr.Header().Class
-		ownerName := rr.Header().Name
-		rrtype := rr.Header().Rrtype
-		rrtypestr := dns.TypeToString[rrtype]
-
-		rrcopy := dns.Copy(rr)
-		rrcopy.Header().Ttl = 3600
-		rrcopy.Header().Class = dns.ClassINET
-
-		// First check whether this update is allowed by the update-policy.
-		_, ok := zd.UpdatePolicy.Zone.RRtypes[rrtype]
-		if !ok && !ur.InternalUpdate {
-			lg.Error("ZoneUpdateChangesDelegationData: RR type denied by policy", "rrtype", rrtypestr)
-			continue
-		}
-
-		// XXX: The logic here is a bit involved. If this is a delete then it is ~ok that the owner doesn't exist.
-		// If it is an add then it is not ok, and then the owner must be created.
-
-		owner, err := zd.GetOwner(ownerName)
-		if err != nil {
-			lg.Warn("ZoneUpdateChangesDelegationData: unknown owner name", "owner", ownerName)
-			if class == dns.ClassNONE || class == dns.ClassANY {
-				continue
-			}
-		}
-		if owner == nil {
-			owner = &OwnerData{
-				Name:    ownerName,
-				RRtypes: NewRRTypeStore(),
-			}
-			zd.AddOwner(owner) // XXX: This is not ok, as we're not holding the lock here. But this function should die.
-		}
-
-		if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
-			dss.InSync = false
-			// return dss, nil
-		}
-
-		switch class {
-		case dns.ClassNONE:
-			// ClassNONE: Remove exact RR
-			lg.Debug("ZoneUpdateChangesDelegationData: Remove RR", "owner", ownerName, "rrtype", rrtypestr, "rr", rrcopy.String())
-
-			// Is this a change to the NS RRset?
-			if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
-				dss.InSync = false
-				dss.NsRemoves = append(dss.NsRemoves, rrcopy)
-			}
-			// Is this a change to glue for a nameserver?
-			for _, nsname := range bns {
-				if nsname == ownerName {
-					if rrtype == dns.TypeA {
-						dss.InSync = false
-						dss.ARemoves = append(dss.ARemoves, rrcopy)
-					} else if rrtype == dns.TypeAAAA {
-						dss.InSync = false
-						dss.AAAARemoves = append(dss.AAAARemoves, rrcopy)
-					}
-				}
-			}
-			continue
-
-		case dns.ClassANY:
-			// ClassANY: Remove RRset
-			lg.Debug("ZoneUpdateChangesDelegationData: Remove RRset", "rr", rr.String())
-			if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
-				dss.InSync = false
-				dss.NsRemoves = append(dss.NsRemoves, rrcopy)
-			}
-			for _, nsname := range bns {
-				if nsname == ownerName {
-					if rrtype == dns.TypeA {
-						dss.InSync = false
-						dss.ARemoves = append(dss.ARemoves, rrcopy)
-					} else if rrtype == dns.TypeAAAA {
-						dss.InSync = false
-						dss.AAAARemoves = append(dss.AAAARemoves, rrcopy)
-					}
-				}
-			}
-			continue
-
-		case dns.ClassINET:
-			lg.Debug("ZoneUpdateChangesDelegationData: class INET, this is an ADD", "rr", rr.String())
-		default:
-			lg.Error("ZoneUpdateChangesDelegationData: unknown class", "rr", rr.String())
-		}
-
-		dup := false
-		if rrset, exists := owner.RRtypes.Get(rrtype); exists {
-			for _, oldrr := range rrset.RRs {
-				if dns.IsDuplicate(oldrr, rrcopy) {
-					lg.Debug("ZoneUpdateChangesDelegationData: not adding duplicate", "rrtype", rrtypestr, "rr", rrcopy.String())
-					dup = true
-					break
-				}
-			}
-		}
-
-		if !dup {
-			lg.Debug("ZoneUpdateChangesDelegationData: adding RR", "rrtype", rrtypestr, "rr", rrcopy.String())
-			// Is this a change to the NS RRset?
-			if ownerName == zd.ZoneName && rrtype == dns.TypeNS {
-				dss.InSync = false
-				dss.NsAdds = append(dss.NsAdds, rrcopy)
-			}
-			// Iterate over all in-bailiwick nameservers to see if this is an add to the glue for a nameserver.
-			for _, nsname := range bns {
-				lg.Debug("ZoneUpdateChangesDelegationData: checking NS", "nsname", nsname)
-				if nsname == ownerName {
-					if rrtype == dns.TypeA {
-						dss.InSync = false
-						dss.AAdds = append(dss.AAdds, rrcopy)
-					} else if rrtype == dns.TypeAAAA {
-						dss.InSync = false
-						dss.AAAAAdds = append(dss.AAAAAdds, rrcopy)
-					}
-				}
-			}
-		}
-	}
-
-	dump.P(dss)
-	return dss, nil
-}
-
-// New attempt at this elusive function. This may actually be correct now. I.e. the list of action in ddata.Actions
+// ZoneUpdateChangesDelegationDataNG: the list of actions in ddata.Actions
 // is the complete set of actions that should be sent to the parent.
 
 func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (DelegationSyncStatus, error) {

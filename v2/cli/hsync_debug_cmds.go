@@ -89,7 +89,7 @@ This performs a DNS lookup for the HSYNC records at the zone apex.`,
 			resolver = "8.8.8.8:53"
 		}
 
-		fmt.Printf("Querying HSYNC records for zone %s via %s\n\n", zonename, resolver)
+		fmt.Printf("Querying HSYNC3 records for zone %s via %s\n\n", zonename, resolver)
 
 		// Create DNS client
 		c := new(dns.Client)
@@ -97,7 +97,7 @@ This performs a DNS lookup for the HSYNC records at the zone apex.`,
 
 		// Create query for HSYNC type
 		m := new(dns.Msg)
-		m.SetQuestion(zonename, core.TypeHSYNC)
+		m.SetQuestion(zonename, core.TypeHSYNC3)
 		m.SetEdns0(4096, true)
 
 		// Send query
@@ -111,14 +111,14 @@ This performs a DNS lookup for the HSYNC records at the zone apex.`,
 		fmt.Printf("Answer section (%d records):\n\n", len(r.Answer))
 
 		if len(r.Answer) == 0 {
-			fmt.Println("No HSYNC records found")
+			fmt.Println("No HSYNC3 records found")
 			return
 		}
 
-		// Parse and display HSYNC records (core.HSYNC: State, NSmgmt, Sign, Identity, Upstream)
+		// Parse and display HSYNC3 records (core.HSYNC3: State, Label, Endpoint, Upstream)
 		var lines []string
 		if tdns.Globals.ShowHeaders {
-			lines = append(lines, "Owner|TTL|Class|Type|Identity|Sign|NSmgmt|Upstream")
+			lines = append(lines, "Owner|TTL|Class|Type|Label|Identity|Upstream")
 		}
 		for _, rr := range r.Answer {
 			privRR, ok := rr.(*dns.PrivateRR)
@@ -127,19 +127,18 @@ This performs a DNS lookup for the HSYNC records at the zone apex.`,
 				continue
 			}
 
-			hsync, ok := privRR.Data.(*core.HSYNC)
+			hsync3, ok := privRR.Data.(*core.HSYNC3)
 			if !ok {
-				fmt.Printf("  %s (not HSYNC data)\n", rr.String())
+				fmt.Printf("  %s (not HSYNC3 data)\n", rr.String())
 				continue
 			}
 
-			lines = append(lines, fmt.Sprintf("%s|%d|IN|HSYNC|%s|%s|%s|%s",
+			lines = append(lines, fmt.Sprintf("%s|%d|IN|HSYNC3|%s|%s|%s",
 				rr.Header().Name,
 				rr.Header().Ttl,
-				hsync.Identity,
-				core.HsyncSignToString[hsync.Sign],
-				core.HsyncNSmgmtToString[hsync.NSmgmt],
-				hsync.Upstream))
+				hsync3.Label,
+				hsync3.Identity,
+				hsync3.Upstream))
 		}
 		fmt.Println(columnize.SimpleFormat(lines))
 	},

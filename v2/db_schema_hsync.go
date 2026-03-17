@@ -260,6 +260,20 @@ var HsyncTables = map[string]string{
 		reason          TEXT NOT NULL
 	)`,
 
+	// CombinerPublishInstructions stores per-agent KEY/CDS publication instructions.
+	// The combiner uses these to know which _signal names to maintain when NS records change.
+	"CombinerPublishInstructions": `CREATE TABLE IF NOT EXISTS 'CombinerPublishInstructions' (
+		id                INTEGER PRIMARY KEY AUTOINCREMENT,
+		zone              TEXT NOT NULL,
+		sender_id         TEXT NOT NULL,
+		key_rrs_json      TEXT NOT NULL DEFAULT '[]',
+		cds_rrs_json      TEXT NOT NULL DEFAULT '[]',
+		locations_json    TEXT NOT NULL DEFAULT '[]',
+		published_ns_json TEXT NOT NULL DEFAULT '[]',
+		updated_at        INTEGER NOT NULL,
+		UNIQUE(zone, sender_id)
+	)`,
+
 	// CombinerContributions is a snapshot of the current per-agent contributions.
 	// One row per RR. Used to restore AgentContributions on restart.
 	"CombinerContributions": `CREATE TABLE IF NOT EXISTS 'CombinerContributions' (
@@ -313,6 +327,9 @@ var HsyncIndexes = []string{
 
 	// CombinerRejectedEdits indexes
 	`CREATE INDEX IF NOT EXISTS idx_rejected_edits_zone ON CombinerRejectedEdits(zone)`,
+
+	// CombinerPublishInstructions indexes
+	`CREATE INDEX IF NOT EXISTS idx_publish_instr_zone ON CombinerPublishInstructions(zone)`,
 
 	// CombinerContributions indexes
 	`CREATE INDEX IF NOT EXISTS idx_contributions_zone ON CombinerContributions(zone)`,
@@ -381,6 +398,7 @@ func (kdb *KeyDB) InitCombinerEditTables() error {
 		"CombinerApprovedEdits",
 		"CombinerRejectedEdits",
 		"CombinerContributions",
+		"CombinerPublishInstructions",
 	}
 
 	for _, name := range combinerTables {
@@ -399,6 +417,7 @@ func (kdb *KeyDB) InitCombinerEditTables() error {
 		`CREATE INDEX IF NOT EXISTS idx_rejected_edits_zone ON CombinerRejectedEdits(zone)`,
 		`CREATE INDEX IF NOT EXISTS idx_contributions_zone ON CombinerContributions(zone)`,
 		`CREATE INDEX IF NOT EXISTS idx_contributions_zone_sender ON CombinerContributions(zone, sender_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_publish_instr_zone ON CombinerPublishInstructions(zone)`,
 	}
 
 	for _, indexSQL := range combinerIndexes {

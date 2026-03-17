@@ -11,16 +11,18 @@ import (
 
 const TypeDSYNC = 0x0042 // 66 is the official IANA code
 
+// All experimental types use the private use range (65280-65534).
 const (
-	TypeNOTIFY  = 0x0F9A
-	TypeMSIGNER = 0x0F9C
-	TypeHSYNC   = 0x0F9D
-	TypeHSYNC2  = 0x0F9E
-	TypeTSYNC   = 0x0F9F
-	TypeCHUNK   = 65015 // 0xFDF7 - Unified Chunk/Manifest
-	// lots of space
-	TypeJSONMANIFEST = 65100 // Older version of CHUNK
-	TypeJSONCHUNK    = 65100 // Older version of CHUNK
+	TypeNOTIFY       = 65280 // OBE, replaced by DSYNC (RFC 9859)
+	TypeMSIGNER      = 65281 // OBE, replaced by HSYNC
+	TypeHSYNC        = 65282 // Legacy provider enrollment
+	TypeHSYNC2       = 65283 // Legacy provider enrollment (string flags)
+	TypeTSYNC        = 65284 // Transfer sync
+	TypeHSYNC3       = 65285 // Per-provider enrollment
+	TypeHSYNCPARAM   = 65286 // Zone-wide multi-provider policy
+	TypeCHUNK        = 65288 // Unified Chunk/Manifest
+	TypeJSONMANIFEST = 65289 // Older version of CHUNK
+	TypeJSONCHUNK    = 65289 // Older version of CHUNK
 )
 
 // Format constants for CHUNK RR type

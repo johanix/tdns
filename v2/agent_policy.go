@@ -108,15 +108,22 @@ func (zdr *ZoneDataRepo) EvaluateUpdate(synchedDataUpdate *SynchedDataUpdate) (b
 				// System error: database/lookup failure, not a policy decision
 				return false, "", fmt.Errorf("local update for zone %q: cannot get apex: %w", synchedDataUpdate.Zone, err)
 			}
-			hsyncRRset, exists := apex.RRtypes.Get(core.TypeHSYNC)
-			if !exists || len(hsyncRRset.RRs) == 0 {
-				return false, fmt.Sprintf("Local update for zone %q: no HSYNC record (NS management not configured)",
+			hsyncparamRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
+			if !exists || len(hsyncparamRRset.RRs) == 0 {
+				return false, fmt.Sprintf("Local update for zone %q: no HSYNCPARAM record (NS management not configured)",
 					synchedDataUpdate.Zone), nil
 			}
-			hsync := hsyncRRset.RRs[0].(*dns.PrivateRR).Data.(*core.HSYNC)
-			if hsync.NSmgmt != core.HsyncNSmgmtAGENT {
-				return false, fmt.Sprintf("Local update for zone %q: HSYNC nsmgmt=%s, NS management not delegated to agents",
-					synchedDataUpdate.Zone, core.HsyncNSmgmtToString[hsync.NSmgmt]), nil
+			privRR, ok := hsyncparamRRset.RRs[0].(*dns.PrivateRR)
+			if !ok || privRR.Data == nil {
+				return false, fmt.Sprintf("Local update for zone %q: HSYNCPARAM record has unexpected type", synchedDataUpdate.Zone), nil
+			}
+			hsyncparam, ok := privRR.Data.(*core.HSYNCPARAM)
+			if !ok {
+				return false, fmt.Sprintf("Local update for zone %q: HSYNCPARAM record data has unexpected type", synchedDataUpdate.Zone), nil
+			}
+			if hsyncparam.GetNSmgmt() != core.HsyncNSmgmtAGENT {
+				return false, fmt.Sprintf("Local update for zone %q: HSYNCPARAM nsmgmt=%s, NS management not delegated to agents",
+					synchedDataUpdate.Zone, core.HsyncNSmgmtToString[hsyncparam.GetNSmgmt()]), nil
 			}
 		}
 
@@ -420,9 +427,7 @@ func (zdr *ZoneDataRepo) processReplaceOp(synchedDataUpdate *SynchedDataUpdate, 
 
 	// Build the new RRset
 	var newRRset core.RRset
-	for _, rr := range newRRs {
-		newRRset.RRs = append(newRRset.RRs, rr)
-	}
+	newRRset.RRs = append(newRRset.RRs, newRRs...)
 
 	// Check if anything actually changed by comparing old and new
 	if hadOld {

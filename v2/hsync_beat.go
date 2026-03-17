@@ -39,6 +39,10 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport) {
 func (ar *AgentRegistry) SendHeartbeats() {
 	// log.Printf("HsyncEngine: Sending heartbeats to INTRODUCED or OPERATIONAL agents")
 	for _, a := range ar.S.Items() {
+		// Infra peers (combiner, signer) are handled by StartInfraBeatLoop at lower frequency.
+		if a.IsInfraPeer {
+			continue
+		}
 		// DNS-55: Check EITHER transport state (API or DNS)
 		// Send heartbeat if ANY transport is INTRODUCED or better (including LEGACY)
 		apiState := a.ApiDetails.State

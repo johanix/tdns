@@ -191,8 +191,8 @@ func TestRouteHandlerError(t *testing.T) {
 
 	// Check handler metrics
 	handlers := router.List()[MessageTypeChunkNotify]
-	if handlers[0].ErrorCount != 1 {
-		t.Errorf("expected 1 error count on handler, got %d", handlers[0].ErrorCount)
+	if handlers[0].ErrorCount.Load() != 1 {
+		t.Errorf("expected 1 error count on handler, got %d", handlers[0].ErrorCount.Load())
 	}
 }
 
@@ -378,10 +378,10 @@ func TestHandlerMetrics(t *testing.T) {
 	handlers := router.List()[MessageTypeChunkNotify]
 	reg := handlers[0]
 
-	if reg.CallCount != 5 {
-		t.Errorf("expected 5 calls, got %d", reg.CallCount)
+	if reg.CallCount.Load() != 5 {
+		t.Errorf("expected 5 calls, got %d", reg.CallCount.Load())
 	}
-	if reg.TotalLatency == 0 {
+	if reg.TotalLatency.Load() == 0 {
 		t.Error("expected non-zero total latency")
 	}
 }
@@ -405,8 +405,8 @@ func TestReset(t *testing.T) {
 	}
 
 	handlers := router.List()[MessageTypeChunkNotify]
-	if handlers[0].CallCount != 0 {
-		t.Errorf("expected 0 call count after reset, got %d", handlers[0].CallCount)
+	if handlers[0].CallCount.Load() != 0 {
+		t.Errorf("expected 0 call count after reset, got %d", handlers[0].CallCount.Load())
 	}
 }
 

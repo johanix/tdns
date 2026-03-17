@@ -12,6 +12,18 @@ import (
 	"github.com/miekg/dns"
 )
 
+// Zone file syntax:
+//   owner TTL CLASS NOTIFY rrtype scheme port target
+//
+// Example:
+//   _dsync.example.com. 3600 IN NOTIFY CSYNC 1 5359 ns1.example.com.
+//
+// Fields:
+//   rrtype - DNS RR type mnemonic (e.g. CSYNC, CDS, CDNSKEY, DNSKEY)
+//   scheme - notification scheme (uint8)
+//   port   - target port number (uint16)
+//   target - FQDN of the notification target
+
 func init() {
 	RegisterNotifyRR()
 }
@@ -44,15 +56,21 @@ func (rd *NOTIFY) Parse(txt []string) error {
 	if err != nil {
 		return fmt.Errorf("invalid NOTIFY scheme: %s. Error: %v", txt[1], err)
 	}
+	if scheme < 0 || scheme > 255 {
+		return fmt.Errorf("invalid NOTIFY scheme: %s. Value must be 0-255", txt[1])
+	}
 
 	port, err := strconv.Atoi(txt[2])
 	if err != nil {
 		return fmt.Errorf("invalid NOTIFY port: %s. Error: %v", txt[2], err)
 	}
+	if port < 0 || port > 65535 {
+		return fmt.Errorf("invalid NOTIFY port: %s. Value must be 0-65535", txt[2])
+	}
 
 	tgt := dns.Fqdn(txt[3])
 	if _, ok := dns.IsDomainName(tgt); !ok {
-		return fmt.Errorf("invalid NOTIFY target: %s. Error: %v", txt[3], err)
+		return fmt.Errorf("invalid NOTIFY target: %s", txt[3])
 	}
 
 	rd.Type = t

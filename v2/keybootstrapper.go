@@ -3,8 +3,6 @@ package tdns
 import (
 	"context"
 	"fmt"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -26,27 +24,42 @@ const (
 
 func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 	keybootstrapperq := kdb.KeyBootstrapperQ
-	var utr KeyBootstrapperRequest
 
 	var verifications sync.Map
+	// retryTimers tracks per-key timers so they can be cancelled on context done.
+	var retryTimers sync.Map // map[string]*time.Timer
+
+	// scheduleRetry sets a per-key timer that re-runs VerifyKey after the given delay.
+	scheduleRetry := func(info *VerificationInfo, delay time.Duration) {
+		mapKey := fmt.Sprintf("%s::%d", info.KeyName, info.Keyid)
+		// Cancel any existing timer for this key.
+		if old, ok := retryTimers.LoadAndDelete(mapKey); ok {
+			old.(*time.Timer).Stop()
+		}
+		t := time.AfterFunc(delay, func() {
+			retryTimers.Delete(mapKey)
+			go VerifyKey(info.KeyName, info.Key, info.Keyid, info.ZoneData, keybootstrapperq)
+		})
+		retryTimers.Store(mapKey, t)
+	}
 
 	lgSigner.Info("KeyBootstrapper starting")
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ticker := time.NewTicker(10 * time.Second)
-		defer ticker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				lgSigner.Info("KeyBootstrapper received context done signal")
+				// Cancel all pending retry timers.
+				retryTimers.Range(func(key, value any) bool {
+					value.(*time.Timer).Stop()
+					retryTimers.Delete(key)
+					return true
+				})
 				return
-			// XXX: stopchan is being deprecated
-			//			case <-stopchan:
-			//				log.Println("KeyBootstrapper: Received stop signal")
-			//				return
-			case utr = <-keybootstrapperq:
+			case utr := <-keybootstrapperq:
 
 				lgSigner.Debug("KeyBootstrapper received request", "cmd", utr.Cmd, "keyname", utr.KeyName, "zone", utr.ZoneName, "keyid", utr.Keyid, "has_response_chan", utr.ResponseChan != nil)
 
@@ -67,14 +80,14 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 							utr.ResponseChan <- nil
 						}
 					}
-				case kbCmdBootstrap: //Start the verification process
+				case kbCmdBootstrap:
 					mapKey := fmt.Sprintf("%s::%d", utr.KeyName, utr.Keyid)
 					lgSigner.Info("received verification request", "zone", utr.ZoneName)
 
-					// Hämta antalet försök från konfigurationen
+					// Get number of verification attempts from config
 					attempts := viper.GetInt("verifyengine.attempts")
 					if attempts == 0 {
-						attempts = 3 // Standardvärde om det inte är definierat
+						attempts = 3 // default if not configured
 					}
 
 					verifications.Store(mapKey, &VerificationInfo{
@@ -88,6 +101,7 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 						FailedAttempts: 0,
 					})
 					go VerifyKey(utr.KeyName, utr.Key, utr.Keyid, utr.ZoneData, keybootstrapperq)
+
 				case kbCmdVerificationStep:
 					mapKey := fmt.Sprintf("%s::%d", utr.KeyName, utr.Keyid)
 					lgSigner.Info("received verification result", "keyname", utr.KeyName, "keyid", utr.Keyid)
@@ -95,11 +109,6 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 						info := val.(*VerificationInfo)
 						lgSigner.Debug("verification info", "keyname", utr.KeyName, "info", info)
 						info.AttemptsLeft--
-						retryInterval := viper.GetInt("verifyengine.retry_interval")
-						if retryInterval == 0 {
-							retryInterval = 60
-						}
-						info.NextCheckTime = time.Now().Add(time.Duration(retryInterval) * time.Second)
 						if info.AttemptsLeft <= 0 {
 							lgSigner.Info("verification completed", "keyname", utr.KeyName)
 							tx, err := kdb.Begin("VerifyTrustEngine")
@@ -128,9 +137,17 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 							}
 							lgSigner.Info("verification for key completed", "keyname", utr.KeyName, "verified", utr.Verified)
 						} else {
-							lgSigner.Debug("scheduling next check", "keyname", utr.KeyName, "attempts_left", info.AttemptsLeft)
+							// Schedule next verification attempt via per-key timer.
+							retryInterval := viper.GetInt("verifyengine.retry_interval")
+							if retryInterval == 0 {
+								retryInterval = 60
+							}
+							delay := time.Duration(retryInterval) * time.Second
+							lgSigner.Debug("scheduling next verification", "keyname", utr.KeyName, "attempts_left", info.AttemptsLeft, "delay", delay)
+							scheduleRetry(info, delay)
 						}
 					}
+
 				case kbCmdRestart:
 					mapKey := fmt.Sprintf("%s::%d", utr.KeyName, utr.Keyid)
 					if val, exists := verifications.Load(mapKey); exists {
@@ -140,63 +157,34 @@ func (kdb *KeyDB) KeyBootstrapper(ctx context.Context) error {
 
 						attempts := viper.GetInt("verifyengine.attempts")
 						if attempts == 0 {
-							attempts = 3 // Standardvärde om det inte är definierat
+							attempts = 3 // default if not configured
 						}
 
 						info.FailedAttempts++
 						info.AttemptsLeft = attempts
-						info.NextCheckTime = time.Now().Add(time.Duration(info.FailedAttempts) * time.Minute)
-
+						// Exponential backoff: wait FailedAttempts minutes before retrying.
+						delay := time.Duration(info.FailedAttempts) * time.Minute
+						lgSigner.Debug("scheduling retry after failure", "keyname", utr.KeyName, "failed_attempts", info.FailedAttempts, "delay", delay)
+						scheduleRetry(info, delay)
 					}
+
+				case kbCmdUpdateKeyState:
+					// Event-driven key state update: triggered after delegation sync,
+					// key bootstrap, or explicit CLI/API request.
+					lgSigner.Info("updating key state", "keyname", utr.KeyName, "keyid", utr.Keyid)
+					imr := utr.Imr
+					algorithm := utr.Algorithm
+					keyName := utr.KeyName
+					keyid := utr.Keyid
+					go func() {
+						err := kdb.UpdateKeyState(ctx, keyName, keyid, imr, algorithm)
+						if err != nil {
+							lgSigner.Error("failed to update key state", "keyname", keyName, "keyid", keyid, "err", err)
+						}
+					}()
+
 				default:
 					lgSigner.Warn("KeyBootstrapper unknown command, ignoring", "cmd", utr.Cmd)
-				}
-			case <-ticker.C:
-				now := time.Now()
-				verifications.Range(func(_, value any) bool {
-					info := value.(*VerificationInfo)
-					if now.After(info.NextCheckTime) {
-						go VerifyKey(info.KeyName, info.Key, info.Keyid, info.ZoneData, keybootstrapperq)
-					}
-					return true
-				})
-
-				kp := KeystorePost{
-					Command:    "sig0-mgmt",
-					SubCommand: "list",
-				}
-				tx, _ := kdb.Begin("KeyBootstrapper")
-				resp, _ := kdb.Sig0KeyMgmt(tx, kp)
-				tx.Commit()
-
-				for k, v := range resp.Sig0keys {
-					tmp := strings.Split(k, "::")
-					keyname := tmp[0]
-					keyid, _ := strconv.ParseUint(tmp[1], 10, 16)
-					lgSigner.Debug("updating key state", "keyname", keyname, "keyid", keyid)
-
-					go func() {
-						err := kdb.UpdateKeyState(ctx, keyname, uint16(keyid), keybootstrapperq, dns.StringToAlgorithm[v.Algorithm])
-						if err != nil {
-							lgSigner.Error("failed to update key state", "keyname", keyname, "keyid", keyid, "err", err)
-						}
-					}()
-				}
-
-				// Uppdatera keystate för alla aktiva nycklar
-				sak, err := kdb.GetSig0Keys(Globals.Zonename, Sig0StateActive)
-				if err != nil {
-					lgSigner.Error("failed to get active SIG(0) keys", "err", err)
-					continue
-				}
-
-				for _, key := range sak.Keys {
-					go func() {
-						err := kdb.UpdateKeyState(ctx, key.KeyRR.Header().Name, uint16(key.KeyRR.KeyTag()), keybootstrapperq, key.Algorithm)
-						if err != nil {
-							lgSigner.Error("failed to update key state", "keyname", key.KeyRR.Header().Name, "keyid", key.KeyRR.KeyTag(), "err", err)
-						}
-					}()
 				}
 			}
 		}
@@ -282,35 +270,40 @@ func GetNameservers(KeyName string, zd *ZoneData) ([]string, error) {
 	return nameservers, nil
 }
 
-func (kdb *KeyDB) UpdateKeyState(ctx context.Context, KeyName string, keyid uint16, kkeybootstrapperq chan<- KeyBootstrapperRequest, algorithm uint8) error {
-	dsync_target, err := Globals.ImrEngine.LookupDSYNCTarget(ctx, KeyName, dns.TypeANY, core.SchemeUpdate)
+// UpdateKeyState sends a KeyState inquiry to the DSYNC target for the given key
+// and updates the local key store with the parent's response. If the parent
+// reports the key as unknown, triggers a bootstrap.
+func (kdb *KeyDB) UpdateKeyState(ctx context.Context, keyName string, keyid uint16, imr *Imr, algorithm uint8) error {
+	if imr == nil {
+		return fmt.Errorf("UpdateKeyState: no IMR engine provided")
+	}
+
+	dsyncTarget, err := imr.LookupDSYNCTarget(ctx, keyName, dns.TypeANY, core.SchemeUpdate)
 	if err != nil {
 		return fmt.Errorf("could not find DSYNC target: %v", err)
 	}
 
 	// Create DNS message with EDNS(0) KeyState option
 	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(KeyName), dns.TypeANY)
+	m.SetQuestion(dns.Fqdn(keyName), dns.TypeANY)
 
-	// Add EDNS(0) option with KeyState
 	edns0.AttachKeyStateToResponse(m, &edns0.KeyStateOption{
-		KeyID:     keyid,
-		KeyState:  edns0.KeyStateInquiryKey,
-		ExtraText: "",
+		KeyID:    keyid,
+		KeyState: edns0.KeyStateInquiryKey,
 	})
 
 	// Get active key for signing
-	sak, err := kdb.GetSig0Keys(KeyName, Sig0StateActive)
+	sak, err := kdb.GetSig0Keys(keyName, Sig0StateActive)
 	if err != nil {
 		return fmt.Errorf("could not get active SIG(0) key: %v", err)
 	}
 
 	if len(sak.Keys) == 0 {
-		return fmt.Errorf("no active SIG(0) key available for %s", KeyName)
+		return fmt.Errorf("no active SIG(0) key available for %s", keyName)
 	}
 
 	// Sign the message
-	signedMsg, err := SignMsg(*m, KeyName, sak)
+	signedMsg, err := SignMsg(*m, keyName, sak)
 	if err != nil {
 		return fmt.Errorf("could not sign the message: %v", err)
 	}
@@ -319,10 +312,10 @@ func (kdb *KeyDB) UpdateKeyState(ctx context.Context, KeyName string, keyid uint
 	c := new(dns.Client)
 	c.Timeout = 5 * time.Second
 
-	if len(dsync_target.Addresses) == 0 {
-		return fmt.Errorf("DSYNC target has no addresses for %s", KeyName)
+	if len(dsyncTarget.Addresses) == 0 {
+		return fmt.Errorf("DSYNC target has no addresses for %s", keyName)
 	}
-	r, _, err := c.Exchange(signedMsg, dsync_target.Addresses[0])
+	r, _, err := c.Exchange(signedMsg, dsyncTarget.Addresses[0])
 	if err != nil {
 		return fmt.Errorf("could not send DNS request: %v", err)
 	}
@@ -331,18 +324,15 @@ func (kdb *KeyDB) UpdateKeyState(ctx context.Context, KeyName string, keyid uint
 		return fmt.Errorf("DNS request failed with code: %v", dns.RcodeToString[r.Rcode])
 	}
 
-	// Extract KeyState option from response using the new pattern
+	// Extract KeyState option from response
 	opt := r.IsEdns0()
 	if opt == nil {
-		return fmt.Errorf("could not extract KeyState from response: no EDNS(0) OPT RR in response")
+		return fmt.Errorf("no EDNS(0) OPT RR in response")
 	}
 	keystate, found := edns0.ExtractKeyStateOption(opt)
 	if !found {
-		return fmt.Errorf("could not extract KeyState from response: KeyState option missing in response")
+		return fmt.Errorf("KeyState option missing in response")
 	}
-
-	//mapKey := fmt.Sprintf("%s::%d", KeyName, keyid)
-	//log.Printf("KeyBootstrapper: Updating parent state for key %s to %d", mapKey, utr.ParentState)
 
 	tx, err := kdb.Begin("UpdateKeyState")
 	if err != nil {
@@ -353,7 +343,7 @@ func (kdb *KeyDB) UpdateKeyState(ctx context.Context, KeyName string, keyid uint
 	kpparent := KeystorePost{
 		Command:     "sig0-mgmt",
 		SubCommand:  "setparentstate",
-		Keyname:     KeyName,
+		Keyname:     keyName,
 		Keyid:       keyid,
 		ParentState: keystate.KeyState,
 	}
@@ -375,22 +365,15 @@ func (kdb *KeyDB) UpdateKeyState(ctx context.Context, KeyName string, keyid uint
 
 	// If the key is unknown, bootstrap it with parent
 	if keystate.KeyState == edns0.KeyStateUnknown {
-
-		zd, ok := FindZone(KeyName)
-		if !ok {
-			lgSigner.Error("failed to get zone data", "keyname", KeyName, "err", err)
-			return fmt.Errorf("could not get zone data for %s: %v", KeyName, err)
-		}
-
+		zd, _ := FindZone(keyName)
 		if zd == nil {
-			lgSigner.Error("zone data not found", "keyname", KeyName)
-			return fmt.Errorf("zone data not found for %s", KeyName)
+			return fmt.Errorf("could not find zone for %s", keyName)
 		}
 
 		_, _, err = zd.BootstrapSig0KeyWithParent(ctx, algorithm)
 		if err != nil {
-			lgSigner.Error("failed to bootstrap key", "keyname", KeyName, "err", err)
-			return fmt.Errorf("could not bootstrap key for %s: %v", KeyName, err)
+			lgSigner.Error("failed to bootstrap key", "keyname", keyName, "err", err)
+			return fmt.Errorf("could not bootstrap key for %s: %v", keyName, err)
 		}
 	}
 

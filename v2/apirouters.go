@@ -268,9 +268,116 @@ func (conf *Config) SetupAgentSyncRouter(ctx context.Context) (*mux.Router, erro
 	})
 
 	secureRouter.HandleFunc("/ping", APIping(conf)).Methods("POST")
+	secureRouter.HandleFunc("/sync/ping", conf.APIsyncPing()).Methods("POST")
 	secureRouter.HandleFunc("/beat", conf.APIbeat()).Methods("POST")
-	// secureRouter.HandleFunc("/notify", APIbeat(conf)).Methods("POST")
-	// secureRouter.HandleFunc("/query", APIbeat(conf)).Methods("POST")
+	secureRouter.HandleFunc("/msg", conf.APImsg()).Methods("POST")
+
+	return r, nil
+}
+
+// SetupCombinerSyncRouter sets up the HTTPS sync API for the combiner role.
+// Agents can send HELLO, BEAT, PING, and MSG to the combiner over this router.
+// Runs on a dedicated port (combiner.api.addresses.listen) separate from the
+// management API, using mutual TLS with client cert verification against AgentRegistry.
+func (conf *Config) SetupCombinerSyncRouter(ctx context.Context) (*mux.Router, error) {
+	r := mux.NewRouter().StrictSlash(true)
+	r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "CombinerSyncApi: Root endpoint is not allowed", http.StatusForbidden)
+	})
+
+	sr := r.PathPrefix("/api/v1").Subrouter()
+	sr.HandleFunc("/hello", conf.APIhello()).Methods("POST")
+
+	secureRouter := r.PathPrefix("/api/v1").Subrouter()
+	secureRouter.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/hello" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+				http.Error(w, "CombinerSyncApi: Client certificate required", http.StatusUnauthorized)
+				return
+			}
+			clientCert := r.TLS.PeerCertificates[0]
+			clientId := clientCert.Subject.CommonName
+			agent, ok := conf.Internal.AgentRegistry.S.Get(AgentId(clientId))
+			if !ok {
+				lgApi.Warn("combiner sync api: unknown remote agent identity", "clientId", clientId)
+				http.Error(w, "CombinerSyncApi: Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			tlsaRR := agent.ApiDetails.TlsaRR
+			if tlsaRR == nil {
+				lgApi.Warn("combiner sync api: no TLSA record for client", "clientId", clientId)
+				http.Error(w, "CombinerSyncApi: Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if err := VerifyCertAgainstTlsaRR(tlsaRR, clientCert.Raw); err != nil {
+				lgApi.Warn("combiner sync api: certificate verification failed", "clientId", clientId, "err", err)
+				http.Error(w, "CombinerSyncApi: Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	secureRouter.HandleFunc("/ping", APIping(conf)).Methods("POST")
+	secureRouter.HandleFunc("/sync/ping", conf.APIsyncPing()).Methods("POST")
+	secureRouter.HandleFunc("/beat", conf.APIbeat()).Methods("POST")
+	secureRouter.HandleFunc("/msg", conf.APImsg()).Methods("POST")
+
+	return r, nil
+}
+
+// SetupSignerSyncRouter sets up the HTTPS sync API for the signer (tdns-auth) role.
+// Agents can send HELLO, BEAT, PING, and MSG to the signer over this router.
+func (conf *Config) SetupSignerSyncRouter(ctx context.Context) (*mux.Router, error) {
+	r := mux.NewRouter().StrictSlash(true)
+	r.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "SignerSyncApi: Root endpoint is not allowed", http.StatusForbidden)
+	})
+
+	sr := r.PathPrefix("/api/v1").Subrouter()
+	sr.HandleFunc("/hello", conf.APIhello()).Methods("POST")
+
+	secureRouter := r.PathPrefix("/api/v1").Subrouter()
+	secureRouter.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/hello" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
+				http.Error(w, "SignerSyncApi: Client certificate required", http.StatusUnauthorized)
+				return
+			}
+			clientCert := r.TLS.PeerCertificates[0]
+			clientId := clientCert.Subject.CommonName
+			agent, ok := conf.Internal.AgentRegistry.S.Get(AgentId(clientId))
+			if !ok {
+				lgApi.Warn("signer sync api: unknown remote agent identity", "clientId", clientId)
+				http.Error(w, "SignerSyncApi: Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			tlsaRR := agent.ApiDetails.TlsaRR
+			if tlsaRR == nil {
+				lgApi.Warn("signer sync api: no TLSA record for client", "clientId", clientId)
+				http.Error(w, "SignerSyncApi: Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			if err := VerifyCertAgainstTlsaRR(tlsaRR, clientCert.Raw); err != nil {
+				lgApi.Warn("signer sync api: certificate verification failed", "clientId", clientId, "err", err)
+				http.Error(w, "SignerSyncApi: Unauthorized", http.StatusUnauthorized)
+				return
+			}
+			next.ServeHTTP(w, r)
+		})
+	})
+
+	secureRouter.HandleFunc("/ping", APIping(conf)).Methods("POST")
+	secureRouter.HandleFunc("/sync/ping", conf.APIsyncPing()).Methods("POST")
+	secureRouter.HandleFunc("/beat", conf.APIbeat()).Methods("POST")
 	secureRouter.HandleFunc("/msg", conf.APImsg()).Methods("POST")
 
 	return r, nil

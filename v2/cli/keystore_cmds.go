@@ -393,14 +393,13 @@ func Sig0KeyMgmt(cmd string) error {
 	case "list":
 		var out, tmplist []string
 		if tdns.Globals.ShowHeaders {
-			out = append(out, "Signer|State|KeyID|Algorithm|PrivKey|KEY Record")
+			out = append(out, "Signer|State|KeyID|Algorithm|KEY Record")
 		}
 		if len(tr.Sig0keys) > 0 {
-			// fmt.Printf("Known SIG(0) key pairs:\n")
 			for k, v := range tr.Sig0keys {
 				tmp := strings.Split(k, "::")
-				tmplist = append(tmplist, fmt.Sprintf("%s|%s|%s|%v|%v|%.50s...\n",
-					tmp[0], v.State, tmp[1], v.Algorithm, v.PrivateKey, v.Keystr))
+				tmplist = append(tmplist, fmt.Sprintf("%s|%s|%s|%v|%.50s...\n",
+					tmp[0], v.State, tmp[1], v.Algorithm, v.Keystr))
 			}
 			sort.Strings(tmplist)
 			out = append(out, tmplist...)

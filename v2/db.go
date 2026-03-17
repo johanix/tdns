@@ -124,6 +124,7 @@ func dbMigrateSchema(db *sql.DB) {
 		{"DnssecKeyStore", "propagation_confirmed_at", "ALTER TABLE DnssecKeyStore ADD COLUMN propagation_confirmed_at TEXT DEFAULT ''"},
 		{"DnssecKeyStore", "published_at", "ALTER TABLE DnssecKeyStore ADD COLUMN published_at TEXT DEFAULT ''"},
 		{"DnssecKeyStore", "retired_at", "ALTER TABLE DnssecKeyStore ADD COLUMN retired_at TEXT DEFAULT ''"},
+		{"Sig0KeyStore", "parent_state", "ALTER TABLE Sig0KeyStore ADD COLUMN parent_state INTEGER DEFAULT 0"},
 	}
 
 	for _, m := range migrations {
@@ -213,6 +214,7 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 		TruststoreSig0Cache: NewSig0StoreT(),
 		KeystoreDnskeyCache: make(map[string]*DnssecKeys),
 		UpdateQ:             make(chan UpdateRequest),
+		KeyBootstrapperQ:    make(chan KeyBootstrapperRequest, 10),
 		Options:             options,
 	}, nil
 }

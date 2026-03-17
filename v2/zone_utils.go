@@ -242,13 +242,18 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	// (they may have been lost if not present in the zone file)
 	zd.RepopulateDynamicRRs(dynamicRRs)
 
-	// For multi-provider zones on the signer: evaluate HSYNC SIGN field to
+	// Recompute multi-provider membership and signing state after every refresh.
+	// This must run for all app types (agent, combiner, signer) so that zd.MPdata
+	// is always up-to-date with the zone owner's HSYNC3+HSYNCPARAM declarations.
+	if zd.Options[OptMultiProvider] {
+		zd.populateMPdata()
+	}
+
+	// For multi-provider zones on the signer: use cached MPdata to
 	// dynamically enable/disable inline-signing and detect multi-signer mode.
-	if zd.Options[OptMultiProvider] && Globals.App.Type == AppTypeAuth {
-		shouldSign, otherSigners, err := zd.analyzeHsyncSigners()
-		if err != nil {
-			lg.Error("error analyzing HSYNC signers", "zone", zd.ZoneName, "err", err)
-		}
+	if zd.MPdata != nil && Globals.App.Type == AppTypeAuth {
+		shouldSign := zd.MPdata.WeAreSigner
+		otherSigners := zd.MPdata.OtherSigners
 		if shouldSign && !zd.Options[OptInlineSigning] {
 			lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", zd.ZoneName)
 			zd.Options[OptInlineSigning] = true
@@ -297,20 +302,6 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 				ZoneName:   ZoneName(zd.ZoneName),
 				ZoneData:   zd,
 				SyncStatus: hss,
-			}
-		}
-	}
-
-	if viper.GetBool("service.debug") {
-		fname, err := zd.ZoneFileName()
-		if err != nil {
-			lg.Error("ZoneFileName failed", "zone", zd.ZoneName, "err", err)
-		} else {
-			_, err := new_zd.WriteFile(fname)
-			if err != nil {
-				lg.Error("WriteFile failed", "zone", zd.ZoneName, "err", err)
-			} else {
-				// zd.Logger.Printf("FetchFromFile: Zone %s: zone file written to %s", zd.ZoneName, f)
 			}
 		}
 	}
@@ -373,6 +364,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 			lg.Error("HsyncChanged failed", "zone", zd.ZoneName, "err", err)
 			// return false, err
 		}
+		lg.Debug("FetchFromUpstream: HsyncChanged result", "zone", zd.ZoneName, "changed", hsyncchanged)
 		dnskeyschanged, err = zd.DnskeysChangedNG(&new_zd)
 		if err != nil {
 			lg.Error("DnskeysChangedNG failed", "zone", zd.ZoneName, "err", err)
@@ -432,14 +424,16 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	// (they may have been lost if not present in the transferred zone)
 	zd.RepopulateDynamicRRs(dynamicRRs)
 
-	// For multi-provider zones on the signer: evaluate HSYNC SIGN field to
+	// Recompute multi-provider membership and signing state after every zone transfer.
+	if zd.Options[OptMultiProvider] {
+		zd.populateMPdata()
+	}
+
+	// For multi-provider zones on the signer: use cached MPdata to
 	// dynamically enable/disable inline-signing and detect multi-signer mode.
-	// The HSYNC is the authority for whether we should sign, not static config.
-	if zd.Options[OptMultiProvider] && Globals.App.Type == AppTypeAuth {
-		shouldSign, otherSigners, err := zd.analyzeHsyncSigners()
-		if err != nil {
-			lg.Error("error analyzing HSYNC signers", "zone", zd.ZoneName, "err", err)
-		}
+	if zd.MPdata != nil && Globals.App.Type == AppTypeAuth {
+		shouldSign := zd.MPdata.WeAreSigner
+		otherSigners := zd.MPdata.OtherSigners
 		if shouldSign && !zd.Options[OptInlineSigning] {
 			lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", zd.ZoneName)
 			zd.Options[OptInlineSigning] = true
@@ -541,7 +535,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 		}
 
 		// Inject combiner signature TXT if configured
-		if zd.InjectSignatureTXT(Globals.CombinerConf) {
+		if zd.InjectSignatureTXT(Conf.MultiProvider) {
 			lg.Debug("signature TXT injected", "zone", zd.ZoneName)
 		}
 	}
@@ -1003,6 +997,28 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 
 func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	wantsSync := zd.Options[OptDelSyncParent] || zd.Options[OptDelSyncChild]
+
+	// Check HSYNCPARAM for parentsync=agent, which means the providers
+	// coordinate parent sync via leader election.
+	if !zd.Options[OptDelSyncChild] {
+		apex, err := zd.GetOwner(zd.ZoneName)
+		if err == nil && apex != nil {
+			hsyncparamRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
+			if exists && len(hsyncparamRRset.RRs) > 0 {
+				if prr, ok := hsyncparamRRset.RRs[0].(*dns.PrivateRR); ok {
+					if hsyncparam, ok := prr.Data.(*core.HSYNCPARAM); ok {
+						if hsyncparam.GetParentSync() == core.HsyncParentSyncAgent {
+							lg.Info("SetupZoneSync: HSYNCPARAM parentsync=agent, enabling delegation sync",
+								"zone", zd.ZoneName)
+							zd.Options[OptDelSyncChild] = true
+							wantsSync = true
+						}
+					}
+				}
+			}
+		}
+	}
+
 	if !wantsSync {
 		lg.Debug("SetupZoneSync: zone does not require delegation sync", "zone", zd.ZoneName)
 		return nil
@@ -1031,14 +1047,6 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 			lg.Debug("SetupZoneSync: DSYNC RRset exists, will not modify", "zone", zd.ZoneName)
 		} else {
 			lg.Debug("SetupZoneSync: no DSYNC RRset in zone, will add", "zone", zd.ZoneName)
-			//			ur := UpdateRequest{
-			//				Cmd:          "DEFERRED-UPDATE",
-			//				ZoneName:     zd.ZoneName,
-			//				Description:  fmt.Sprintf("Publish DSYNC RRs for zone %s", zd.ZoneName),
-			//				PreCondition: ZoneIsReady(zd.ZoneName),
-			//				Action:       zd.PublishDsyncRRs,
-			//			}
-			//			zd.KeyDB.UpdateQ <- ur
 			err := zd.PublishDsyncRRs()
 			if err != nil {
 				lg.Error("PublishDsyncRRs failed", "zone", zd.ZoneName, "err", err)
@@ -1076,8 +1084,8 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 				}
 
 			case "notify":
-				// Nothing to do here as CSYNC and CDS will only be published when
-				// the zone is modified, not proactively.
+				// CSYNC and CDS are published proactively when the zone is modified
+				// (via zone_updater.go and delegation_sync.go).
 			default:
 			}
 		}
@@ -1349,7 +1357,7 @@ func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
 	return nil
 }
 
-func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool) (string, error) {
+func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool, wait bool, timeoutStr string) (string, error) {
 	if zd.Options[OptDirty] {
 		return "", fmt.Errorf("zone %s: zone has been modified, reload not possible", zd.ZoneName)
 	}
@@ -1359,20 +1367,30 @@ func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool) (stri
 		Name:     zd.ZoneName,
 		Response: respch,
 		Force:    force,
+		Wait:     wait,
 	}
 
 	var resp RefresherResponse
 
+	timeout := 2 * time.Second
+	if wait {
+		timeout = 10 * time.Second // default for --error mode
+		if timeoutStr != "" {
+			if d, err := time.ParseDuration(timeoutStr); err == nil {
+				timeout = d
+			}
+		}
+	}
+
 	select {
 	case resp = <-respch:
-	case <-time.After(2 * time.Second):
+	case <-time.After(timeout):
 		return fmt.Sprintf("Zone %s: timeout waiting for response from RefreshEngine", zd.ZoneName), fmt.Errorf("zone %s: timeout waiting for response from RefreshEngine", zd.ZoneName)
 	}
 
 	if resp.Error {
 		lg.Error("ReloadZone: error from RefreshEngine", "err", resp.ErrorMsg)
-		return fmt.Sprintf("zone %s: Error reloading: %s", zd.ZoneName, resp.ErrorMsg),
-			fmt.Errorf("zone %s: Error reloading: %v", zd.ZoneName, resp.ErrorMsg)
+		return "", fmt.Errorf("%s", resp.ErrorMsg)
 	}
 
 	if resp.Msg == "" {
