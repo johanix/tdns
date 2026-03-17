@@ -782,7 +782,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 		case "dump-zonedatarepo":
 			sdcmd := &SynchedDataCmd{
 				Cmd:      "dump-zonedatarepo",
-				Zone:     "",
+				Zone:     amp.Zone,
 				Response: make(chan *SynchedDataCmdResponse, 1),
 			}
 			conf.Internal.MsgQs.SynchedDataCmd <- sdcmd

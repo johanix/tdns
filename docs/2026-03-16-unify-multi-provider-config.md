@@ -1,5 +1,7 @@
 # Plan: Unify Multi-Provider Config Across Roles
 
+**Status:** Implemented
+
 ## Context
 
 Three separate config blocks (`agent:`, `combiner:`, `multi-provider:`) exist for the three MP roles. This prevents the combiner from reusing helpers like `analyzeHsyncSigners()` that rely on `Conf.MultiProvider.Agents`. Unifying into a single `multi-provider:` block with a `role:` field enables shared helpers and prepares for combiner safety guards (verifying zones are actually MP zones before accepting contributions).

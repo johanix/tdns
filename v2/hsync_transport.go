@@ -863,14 +863,14 @@ func (tm *TransportManager) routeEditsMessage(msg *transport.IncomingMessage) {
 	}
 
 	editsMsg := &EditsResponseMsg{
-		SenderID: senderID,
-		Zone:     payload.Zone,
-		Records:  payload.Records,
+		SenderID:     senderID,
+		Zone:         payload.Zone,
+		AgentRecords: payload.AgentRecords,
 	}
 
 	select {
 	case tm.msgQs.EditsResponse <- editsMsg:
-		lgTransport.Info("routed EDITS response to agent", "sender", senderID, "zone", payload.Zone, "owners", len(payload.Records))
+		lgTransport.Info("routed EDITS response to agent", "sender", senderID, "zone", payload.Zone, "agents", len(payload.AgentRecords))
 	default:
 		lgTransport.Warn("EditsResponse channel full, dropping edits", "sender", senderID)
 	}
@@ -1773,6 +1773,28 @@ func (tm *TransportManager) EnqueueForZoneAgents(zone ZoneName, update *ZoneUpda
 	}
 
 	lgTransport.Info("enqueued zone update for agents", "count", len(agents), "zone", zone, "distributionID", distID)
+	return nil
+}
+
+// EnqueueForSpecificAgent enqueues a zone update for a single agent.
+// Used by "resync-targeted" to respond only to the requesting agent.
+func (tm *TransportManager) EnqueueForSpecificAgent(zone ZoneName, agentID AgentId, update *ZoneUpdate, distID string) error {
+	msg := &OutgoingMessage{
+		DistributionID: distID,
+		RecipientID:    agentID,
+		RecipientType:  "agent",
+		Zone:           zone,
+		Update:         update,
+		Priority:       PriorityNormal,
+		CreatedAt:      time.Now(),
+		ExpiresAt:      time.Now().Add(tm.reliableQueue.expirationTimeout),
+	}
+
+	if err := tm.reliableQueue.Enqueue(msg); err != nil {
+		return fmt.Errorf("EnqueueForSpecificAgent: %s: %w", agentID, err)
+	}
+
+	lgTransport.Info("enqueued zone update for specific agent", "agent", agentID, "zone", zone, "distributionID", distID)
 	return nil
 }
 

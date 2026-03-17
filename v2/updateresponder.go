@@ -207,6 +207,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 			if !zd.Options[OptAllowChildUpdates] {
 				lgHandler.Warn("zone does not allow child updates, ignoring", "zone", zd.ZoneName, "child", childDel)
 				m.SetRcode(r, dns.RcodeRefused)
+				edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdatesNotAllowed)
 				w.WriteMsg(m)
 				return nil
 			}
@@ -241,6 +242,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 			if !zd.Options[OptAllowChildUpdates] {
 				lgHandler.Warn("zone does not allow child updates, ignoring", "zone", zd.ZoneName, "qname", qname)
 				m.SetRcode(r, dns.RcodeRefused)
+				edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdatesNotAllowed)
 				w.WriteMsg(m)
 				return nil
 			}

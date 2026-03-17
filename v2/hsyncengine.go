@@ -453,12 +453,13 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 
 		switch ampp.RfiType {
 		case "SYNC":
-			// Remote agent asks us to re-send all our local data.
-			lgEngine.Info("RFI SYNC triggering local resync", "from", ampp.OriginatorID, "zone", ampp.Zone)
+			// Remote agent asks us to re-send our local data — respond only to the requester.
+			lgEngine.Info("RFI SYNC triggering targeted resync", "from", ampp.OriginatorID, "zone", ampp.Zone)
 			sdcmd := &SynchedDataCmd{
-				Cmd:      "resync",
-				Zone:     ZoneName(ampp.Zone),
-				Response: make(chan *SynchedDataCmdResponse, 1),
+				Cmd:         "resync-targeted",
+				Zone:        ZoneName(ampp.Zone),
+				TargetAgent: ampp.OriginatorID,
+				Response:    make(chan *SynchedDataCmdResponse, 1),
 			}
 			synchedDataCmdQ <- sdcmd
 			select {

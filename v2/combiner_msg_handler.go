@@ -359,10 +359,16 @@ func sendEditsToAgent(conf *Config, tm *TransportManager, agentID string, zone s
 		return
 	}
 
-	// Extract this agent's contributions (may be nil if no prior edits)
-	records := contributionsToRecords(zd.AgentContributions[agentID])
+	// Extract all agents' contributions
+	agentRecords := make(map[string]map[string][]string)
+	for aid, contributions := range zd.AgentContributions {
+		recs := contributionsToRecords(contributions)
+		if len(recs) > 0 {
+			agentRecords[aid] = recs
+		}
+	}
 
-	lgCombiner.Debug("RFI EDITS: preparing response", "zone", zone, "agent", agentID, "owners", len(records))
+	lgCombiner.Debug("RFI EDITS: preparing response", "zone", zone, "agent", agentID, "agents", len(agentRecords))
 
 	if tm == nil || tm.DNSTransport == nil {
 		lgCombiner.Warn("RFI EDITS: no DNSTransport available", "agent", agentID)
@@ -376,10 +382,10 @@ func sendEditsToAgent(conf *Config, tm *TransportManager, agentID string, zone s
 	}
 
 	req := &transport.EditsRequest{
-		SenderID:  conf.MultiProvider.Identity,
-		Zone:      zone,
-		Records:   records,
-		Timestamp: time.Now(),
+		SenderID:     conf.MultiProvider.Identity,
+		Zone:         zone,
+		AgentRecords: agentRecords,
+		Timestamp:    time.Now(),
 	}
 
 	sendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -391,7 +397,7 @@ func sendEditsToAgent(conf *Config, tm *TransportManager, agentID string, zone s
 		return
 	}
 
-	lgCombiner.Info("RFI EDITS: sent contributions to agent", "agent", agentID, "zone", zone, "owners", len(records), "accepted", resp.Accepted)
+	lgCombiner.Info("RFI EDITS: sent contributions to agent", "agent", agentID, "zone", zone, "agents", len(agentRecords), "accepted", resp.Accepted)
 }
 
 // contributionsToRecords converts an agent's contributions map to the flat

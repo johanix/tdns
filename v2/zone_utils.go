@@ -225,6 +225,11 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	} else {
 		zd.CurrentSerial++
 	}
+	if Globals.App.Type == AppTypeCombiner && zd.KeyDB != nil {
+		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
+			lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
+		}
+	}
 	zd.ApexLen = new_zd.ApexLen
 	zd.XfrType = new_zd.XfrType
 	zd.ZoneStore = new_zd.ZoneStore
@@ -406,6 +411,11 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 		zd.FirstZoneLoad = false
 	} else {
 		zd.CurrentSerial++
+	}
+	if Globals.App.Type == AppTypeCombiner && zd.KeyDB != nil {
+		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
+			lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
+		}
 	}
 	zd.ApexLen = new_zd.ApexLen
 	zd.XfrType = new_zd.XfrType
@@ -910,6 +920,11 @@ func (zd *ZoneData) BumpSerialOnly() (BumperResponse, error) {
 	resp.OldSerial = zd.CurrentSerial
 	zd.CurrentSerial++
 	resp.NewSerial = zd.CurrentSerial
+	if Globals.App.Type == AppTypeCombiner && zd.KeyDB != nil {
+		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
+			lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
+		}
+	}
 	if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
 		apex, err := zd.GetOwner(zd.ZoneName)
 		if err != nil {
@@ -1000,7 +1015,7 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 
 	// Check HSYNCPARAM for parentsync=agent, which means the providers
 	// coordinate parent sync via leader election.
-	if !zd.Options[OptDelSyncChild] {
+	if !zd.Options[OptDelSyncChild] && Globals.App.Type == AppTypeAgent {
 		apex, err := zd.GetOwner(zd.ZoneName)
 		if err == nil && apex != nil {
 			hsyncparamRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
@@ -1071,8 +1086,11 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 
 	// If this is a child zone and we have the delegation-sync-child option set, we need to
 	// ensure that there is a SIG(0) keypair and that the public key is published in the zone.
-	// XXX: There is an option for dont-publish-key, but at present we do not support that.
-	if zd.Options[OptDelSyncChild] {
+	// delegation-sync-child is valid for auth (standalone) or agent+multi-provider zones.
+	// Combiner and signer roles don't do child delegation sync.
+	if zd.Options[OptDelSyncChild] &&
+		((Globals.App.Type == AppTypeAuth && !zd.Options[OptMultiProvider]) ||
+			(Globals.App.Type == AppTypeAgent && zd.Options[OptMultiProvider])) {
 		schemes := viper.GetStringSlice("delegationsync.child.schemes")
 		if len(schemes) == 0 {
 			lg.Error("SetupZoneSync: zone has delegation-sync-child enabled but delegationsync.child.schemes is not configured — delegation sync will not work", "zone", zd.ZoneName)

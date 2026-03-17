@@ -132,32 +132,33 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				// (i.e. not child delegation information).
 				lg.Info("ZoneUpdater: ZONE-UPDATE request", "zone", ur.ZoneName, "actions", len(ur.Actions))
 				lg.Debug("ZoneUpdater: ZONE-UPDATE actions detail", "actions", SprintUpdates(ur.Actions))
-				if zd.Options[OptAllowUpdates] {
-					dss, err := zd.ZoneUpdateChangesDelegationDataNG(ur)
-					if err != nil {
-						lg.Error("ZoneUpdateChangesDelegationData failed", "error", err)
-					}
-					lg.Debug("ZoneUpdater: delegation sync status", "inSync", dss.InSync)
-
-					if zd.Options[OptDelSyncChild] && !dss.InSync {
-						lg.Debug("ZoneUpdater: delegation out of sync, sending SYNC-DELEGATION", "zone", zd.ZoneName, "queueLen", len(zd.DelegationSyncQ))
-						zd.DelegationSyncQ <- DelegationSyncRequest{
-							Command:    "SYNC-DELEGATION",
-							ZoneName:   zd.ZoneName,
-							ZoneData:   zd,
-							SyncStatus: dss,
-							// XXX: *NOT* populating the Adds and Removes here, using the dss data
+				if zd.Options[OptAllowUpdates] || ur.InternalUpdate {
+					// Delegation sync checks only apply to external updates
+					if !ur.InternalUpdate {
+						dss, err := zd.ZoneUpdateChangesDelegationDataNG(ur)
+						if err != nil {
+							lg.Error("ZoneUpdateChangesDelegationData failed", "error", err)
 						}
-						// Proactively publish CSYNC when delegation data changes.
-						// This serves as a signal to scanning parents even if we also do active DDNS.
-						if err := zd.PublishCsyncRR(); err != nil {
-							lg.Error("ZoneUpdater: error publishing CSYNC", "zone", zd.ZoneName, "err", err)
-						} else {
-							lg.Debug("ZoneUpdater: published CSYNC proactively", "zone", zd.ZoneName)
+						lg.Debug("ZoneUpdater: delegation sync status", "inSync", dss.InSync)
+
+						if zd.Options[OptDelSyncChild] && !dss.InSync {
+							lg.Debug("ZoneUpdater: delegation out of sync, sending SYNC-DELEGATION", "zone", zd.ZoneName, "queueLen", len(zd.DelegationSyncQ))
+							zd.DelegationSyncQ <- DelegationSyncRequest{
+								Command:    "SYNC-DELEGATION",
+								ZoneName:   zd.ZoneName,
+								ZoneData:   zd,
+								SyncStatus: dss,
+							}
+							if err := zd.PublishCsyncRR(); err != nil {
+								lg.Error("ZoneUpdater: error publishing CSYNC", "zone", zd.ZoneName, "err", err)
+							} else {
+								lg.Debug("ZoneUpdater: published CSYNC proactively", "zone", zd.ZoneName)
+							}
 						}
 					}
 
 					var updated bool
+					var err error
 
 					switch zd.ZoneType {
 					case Primary:

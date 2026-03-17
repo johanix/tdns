@@ -434,7 +434,7 @@ func HandleEdits(ctx *MessageContext) error {
 		Type:           "confirm",
 		DistributionID: ctx.DistributionID,
 		Status:         "ok",
-		Message:        fmt.Sprintf("edits received for zone %s (%d owners)", edits.Zone, len(edits.Records)),
+		Message:        fmt.Sprintf("edits received for zone %s (%d agents)", edits.Zone, len(edits.AgentRecords)),
 		Timestamp:      time.Now().Unix(),
 	}
 
@@ -445,7 +445,7 @@ func HandleEdits(ctx *MessageContext) error {
 
 	ctx.Data["response"] = payloadBytes
 
-	lgTransport().Info("edits received", "peer", ctx.PeerID, "zone", edits.Zone, "owners", len(edits.Records))
+	lgTransport().Info("edits received", "peer", ctx.PeerID, "zone", edits.Zone, "agents", len(edits.AgentRecords))
 	return nil
 }
 

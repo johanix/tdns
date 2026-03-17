@@ -40,9 +40,10 @@ type SynchedDataResponse struct {
 }
 
 type SynchedDataCmd struct {
-	Cmd      string
-	Zone     ZoneName
-	Response chan *SynchedDataCmdResponse
+	Cmd         string
+	Zone        ZoneName
+	TargetAgent AgentId // For "resync-targeted": send only to this agent
+	Response    chan *SynchedDataCmdResponse
 }
 
 type SynchedDataCmdResponse struct {
@@ -266,6 +267,7 @@ type RejectedItemInfo struct {
 type TrackedRRInfo struct {
 	RR             string                    `json:"rr"`
 	State          string                    `json:"state"`
+	KeyState       string                    `json:"key_state,omitempty"`
 	Reason         string                    `json:"reason,omitempty"`
 	DistributionID string                    `json:"distribution_id"`
 	UpdatedAt      string                    `json:"updated_at"`
@@ -319,18 +321,46 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 
 	conf.Internal.ZoneDataRepo = zdr
 
-	// Hydrate SDE from combiner: request our current contributions for each
-	// multi-provider zone. This recovers local edits (e.g. NS records) that
-	// were lost on restart. DNSKEYs come from RFI KEYSTATE, remote agent data
-	// from RFI SYNC — this fills the remaining gap.
-	if conf.Internal.TransportManager != nil && conf.Internal.TransportManager.combinerID != "" {
+	// Hydrate SDE for each multi-provider zone. Per zone, sequentially:
+	// 1. RFI EDITS → combiner: all agents' contributions (baseline)
+	// 2. RFI KEYSTATE → signer: DNSKEY inventory (local vs foreign keys)
+	// Phase 3 (RFI SYNC → remote agents) is added later.
+	//
+	// Both EDITS and KEYSTATE use single-slot response channels, so requests
+	// must be synchronous per zone. See DNS-154 for refactoring this.
+	tm := conf.Internal.TransportManager
+	hasCombiner := tm != nil && tm.combinerID != ""
+	hasSigner := tm != nil && tm.signerID != ""
+
+	if hasCombiner || hasSigner {
 		for item := range Zones.IterBuffered() {
 			zd := item.Val
 			if !zd.Options[OptMultiProvider] {
 				continue
 			}
-			lgEngine.Info("requesting edits from combiner", "zone", item.Key)
-			zd.RequestAndWaitForEdits()
+			if hasCombiner {
+				lgEngine.Info("startup hydration: requesting edits from combiner", "zone", item.Key)
+				zd.RequestAndWaitForEdits()
+			}
+			if hasSigner {
+				lgEngine.Info("startup hydration: requesting key inventory from signer", "zone", item.Key)
+				zd.RequestAndWaitForKeyInventory()
+
+				// Extract local DNSKEYs from the inventory and add to SDE.
+				// RequestAndWaitForKeyInventory sets RemoteDNSKEYs (foreign)
+				// and stores the inventory, but doesn't populate local DNSKEYs
+				// in the SDE.
+				changed, ds, err := zd.LocalDnskeysFromKeystate()
+				if err != nil {
+					lgEngine.Error("startup hydration: LocalDnskeysFromKeystate failed", "zone", item.Key, "err", err)
+				} else if changed && ds != nil {
+					localAgentID := AgentId(conf.MultiProvider.Identity)
+					for _, rr := range ds.CurrentLocalKeys {
+						zdr.AddConfirmedRR(ZoneName(item.Key), localAgentID, rr)
+					}
+					lgEngine.Info("startup hydration: added local DNSKEYs to SDE", "zone", item.Key, "keys", len(ds.CurrentLocalKeys))
+				}
+			}
 		}
 	}
 
@@ -619,7 +649,8 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				// dumpZoneAgent extracts RRs and their tracking state for a zone/agent.
 				// Includes both active RRs from the repo and tracking-only entries
 				// (e.g. Removed RRs that are no longer in the active repo but kept for audit).
-				dumpZoneAgent := func(zone ZoneName, agentId AgentId, ownerData *OwnerData) map[uint16][]TrackedRRInfo {
+				// keyStates maps DNSKEY keytag → signer state (from KEYSTATE inventory).
+				dumpZoneAgent := func(zone ZoneName, agentId AgentId, ownerData *OwnerData, keyStates map[uint16]string) map[uint16][]TrackedRRInfo {
 					rrsetData := make(map[uint16][]TrackedRRInfo)
 
 					// Collect active RRs from the repo with their tracking state
@@ -632,6 +663,14 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 							info := TrackedRRInfo{
 								RR:    rrStr,
 								State: "unknown",
+							}
+							// Populate DNSKEY state from signer inventory
+							if rrtype == dns.TypeDNSKEY {
+								if dnskey, ok := rr.(*dns.DNSKEY); ok {
+									if ks, found := keyStates[dnskey.KeyTag()]; found {
+										info.KeyState = ks
+									}
+								}
 							}
 							// Look up tracking state
 							if zdr.Tracking[zone] != nil &&
@@ -698,19 +737,35 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					return rrsetData
 				}
 
+				// buildKeyStates extracts keytag→state from the signer's KEYSTATE inventory.
+				buildKeyStates := func(zone ZoneName) map[uint16]string {
+					ks := make(map[uint16]string)
+					if zd, exists := Zones.Get(string(zone)); exists {
+						if inv := zd.GetLastKeyInventory(); inv != nil {
+							for _, entry := range inv.Inventory {
+								ks[entry.KeyTag] = strings.ToUpper(entry.State)
+							}
+						}
+					}
+					return ks
+				}
+
 				if sdcmd.Zone != "" {
-					if agentRepo, ok := zdr.Repo.Get(sdcmd.Zone); ok {
+					zone := sdcmd.Zone
+					ks := buildKeyStates(zone)
+					if agentRepo, ok := zdr.Repo.Get(zone); ok {
 						agentData := make(map[AgentId]map[uint16][]TrackedRRInfo)
 						for agentId, ownerData := range agentRepo.Data.Items() {
-							agentData[agentId] = dumpZoneAgent(sdcmd.Zone, agentId, ownerData)
+							agentData[agentId] = dumpZoneAgent(zone, agentId, ownerData, ks)
 						}
-						dumpData[sdcmd.Zone] = agentData
+						dumpData[zone] = agentData
 					}
 				} else {
 					for zone, agentRepo := range zdr.Repo.Items() {
+						ks := buildKeyStates(zone)
 						agentData := make(map[AgentId]map[uint16][]TrackedRRInfo)
 						for agentId, ownerData := range agentRepo.Data.Items() {
-							agentData[agentId] = dumpZoneAgent(zone, agentId, ownerData)
+							agentData[agentId] = dumpZoneAgent(zone, agentId, ownerData, ks)
 						}
 						dumpData[zone] = agentData
 					}
@@ -869,6 +924,73 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				lgEngine.Info("resync complete", "zone", sdcmd.Zone, "rrs", totalRRs)
 				sdcmd.Response <- &SynchedDataCmdResponse{
 					Msg: fmt.Sprintf("Re-synced %d RRs for zone %s", totalRRs, sdcmd.Zone),
+				}
+
+			case "resync-targeted":
+				// Send local data (including DNSKEY) only to the requesting agent.
+				// No combiner push, no fan-out to other agents.
+				// Used when a remote agent sends RFI SYNC on startup.
+				if sdcmd.Response == nil {
+					lgEngine.Warn("resync-targeted command has no response channel, skipping")
+					continue
+				}
+				if sdcmd.Zone == "" || sdcmd.TargetAgent == "" {
+					sdcmd.Response <- &SynchedDataCmdResponse{Error: true, ErrorMsg: "zone and target agent are required for resync-targeted"}
+					continue
+				}
+				tm := conf.Internal.TransportManager
+				if tm == nil {
+					sdcmd.Response <- &SynchedDataCmdResponse{Error: true, ErrorMsg: "TransportManager not available"}
+					continue
+				}
+				myAgentId := AgentId(conf.MultiProvider.Identity)
+				agentRepo, ok := zdr.Repo.Get(sdcmd.Zone)
+				if !ok {
+					sdcmd.Response <- &SynchedDataCmdResponse{Msg: fmt.Sprintf("No local data for zone %s", sdcmd.Zone)}
+					continue
+				}
+
+				nod, ok := agentRepo.Data.Get(myAgentId)
+				if !ok {
+					sdcmd.Response <- &SynchedDataCmdResponse{Msg: fmt.Sprintf("No local agent data for zone %s", sdcmd.Zone)}
+					continue
+				}
+
+				// Build ZoneUpdate with all local data (including DNSKEY)
+				zu := &ZoneUpdate{
+					Zone:    sdcmd.Zone,
+					AgentId: myAgentId,
+					RRsets:  make(map[uint16]core.RRset),
+				}
+				var totalRRs int
+				for _, rrtype := range nod.RRtypes.Keys() {
+					rrset, exists := nod.RRtypes.Get(rrtype)
+					if !exists || len(rrset.RRs) == 0 {
+						continue
+					}
+					cloned := *rrset.Clone()
+					for i := range cloned.RRs {
+						cloned.RRs[i].Header().Class = dns.ClassINET
+					}
+					zu.RRsets[rrtype] = cloned
+					totalRRs += len(cloned.RRs)
+				}
+
+				if totalRRs == 0 {
+					sdcmd.Response <- &SynchedDataCmdResponse{Msg: fmt.Sprintf("No RRs to send for zone %s", sdcmd.Zone)}
+					continue
+				}
+
+				distID := GenerateQueueDistributionID()
+				if err := tm.EnqueueForSpecificAgent(sdcmd.Zone, sdcmd.TargetAgent, zu, distID); err != nil {
+					lgEngine.Error("resync-targeted: failed to enqueue", "zone", sdcmd.Zone, "target", sdcmd.TargetAgent, "err", err)
+					sdcmd.Response <- &SynchedDataCmdResponse{Error: true, ErrorMsg: err.Error()}
+					continue
+				}
+
+				lgEngine.Info("resync-targeted complete", "zone", sdcmd.Zone, "target", sdcmd.TargetAgent, "rrs", totalRRs)
+				sdcmd.Response <- &SynchedDataCmdResponse{
+					Msg: fmt.Sprintf("Sent %d RRs for zone %s to %s", totalRRs, sdcmd.Zone, sdcmd.TargetAgent),
 				}
 			}
 

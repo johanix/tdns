@@ -182,6 +182,7 @@ func (zd *ZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) {
 	// - created: not yet staged for distribution
 	// - mpremove: being removed, awaiting agent confirmation
 	// - removed: already removed
+	// Include: published, standby, active, retired, mpdist
 	var newLocalKeys []dns.RR
 	for _, entry := range inv.Inventory {
 		switch entry.State {
@@ -367,16 +368,19 @@ func (zd *ZoneData) RequestAndWaitForEdits() {
 		}
 
 		// Count total records for logging
+		totalAgents := len(resp.AgentRecords)
 		totalRRs := 0
-		for _, rrs := range resp.Records {
-			totalRRs += len(rrs)
+		for _, ownerMap := range resp.AgentRecords {
+			for _, rrs := range ownerMap {
+				totalRRs += len(rrs)
+			}
 		}
 
-		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: received edits from combiner (%d owners, %d RRs)",
-			zd.ZoneName, len(resp.Records), totalRRs)
+		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: received edits from combiner (%d agents, %d RRs)",
+			zd.ZoneName, totalAgents, totalRRs)
 
-		// Apply to SDE — this is Step 7 (see plan)
-		zd.applyEditsToSDE(resp.Records)
+		// Apply to SDE with per-agent attribution
+		zd.applyEditsToSDE(resp.AgentRecords)
 
 	case <-timeout.C:
 		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: timeout waiting for combiner EDITS response (15s)", zd.ZoneName)
@@ -467,10 +471,10 @@ func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string) *Audit
 }
 
 // applyEditsToSDE imports the combiner's contributions response into the SynchedDataEngine.
-// Records are the agent's own contributions as tracked by the combiner — they should be
-// added as confirmed data (not queued for sending to the combiner again).
-func (zd *ZoneData) applyEditsToSDE(records map[string][]string) {
-	if len(records) == 0 {
+// AgentRecords is agentID → owner → []RR strings. Each agent's records are added with
+// proper attribution so the SDE knows which agent contributed what.
+func (zd *ZoneData) applyEditsToSDE(agentRecords map[string]map[string][]string) {
+	if len(agentRecords) == 0 {
 		zd.Logger.Printf("applyEditsToSDE: zone %s: no records to apply", zd.ZoneName)
 		return
 	}
@@ -481,29 +485,22 @@ func (zd *ZoneData) applyEditsToSDE(records map[string][]string) {
 		return
 	}
 
-	localAgentID := AgentId(Conf.MultiProvider.Identity)
-	if localAgentID == "" {
-		zd.Logger.Printf("applyEditsToSDE: zone %s: no local agent identity configured", zd.ZoneName)
-		return
-	}
-
-	// Parse the RR strings and add them to the SDE repo as confirmed data.
-	// The records are owner → []RR strings. We need to add each RR to the
-	// agent's repo entry in the SDE, marked as accepted (combiner has them).
 	added := 0
-	for _, rrStrings := range records {
-		for _, rrStr := range rrStrings {
-			rr, err := dns.NewRR(rrStr)
-			if err != nil {
-				zd.Logger.Printf("applyEditsToSDE: zone %s: failed to parse RR %q: %v", zd.ZoneName, rrStr, err)
-				continue
+	for agentID, ownerMap := range agentRecords {
+		for _, rrStrings := range ownerMap {
+			for _, rrStr := range rrStrings {
+				rr, err := dns.NewRR(rrStr)
+				if err != nil {
+					zd.Logger.Printf("applyEditsToSDE: zone %s: failed to parse RR %q: %v", zd.ZoneName, rrStr, err)
+					continue
+				}
+				zdr.AddConfirmedRR(ZoneName(zd.ZoneName), AgentId(agentID), rr)
+				added++
 			}
-			zdr.AddConfirmedRR(ZoneName(zd.ZoneName), localAgentID, rr)
-			added++
 		}
 	}
 
-	zd.Logger.Printf("applyEditsToSDE: zone %s: applied %d confirmed RRs from combiner edits", zd.ZoneName, added)
+	zd.Logger.Printf("applyEditsToSDE: zone %s: applied %d confirmed RRs from %d agents", zd.ZoneName, added, len(agentRecords))
 }
 
 // buildRemoteDNSKEYsFromTags returns DNSKEY RRs from the zone that match the given key tags.

@@ -425,6 +425,9 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 				continue
 			}
 
+			// Checkpoint 6: NS target resolvability (advisory)
+			warnNSTargetUnresolvable(rr, zd)
+
 			// Route by class
 			switch rr.Header().Class {
 			case dns.ClassINET:
@@ -1107,6 +1110,7 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 				parseOk = false
 				continue
 			}
+			warnNSTargetUnresolvable(rr, zd)
 			parsedRRs = append(parsedRRs, rr)
 		}
 
@@ -1769,6 +1773,31 @@ func checkContentPolicy(rr dns.RR, protectedNamespaces []string) string {
 		return checkNSNamespacePolicy(rr, protectedNamespaces)
 	}
 	return ""
+}
+
+// warnNSTargetUnresolvable logs a warning if an in-bailiwick NS target has no
+// address records in the combiner's zone data. Out-of-bailiwick targets are
+// skipped (the combiner has no way to verify them without IMR access).
+// This is advisory only — it does not reject the NS record.
+func warnNSTargetUnresolvable(rr dns.RR, zd *ZoneData) {
+	nsRR, ok := rr.(*dns.NS)
+	if !ok {
+		return
+	}
+	target := nsRR.Ns
+	if !strings.HasSuffix(target, "."+zd.ZoneName) && target != zd.ZoneName {
+		return // out-of-bailiwick, skip
+	}
+	owner, err := zd.GetOwner(target)
+	if err != nil || owner == nil {
+		lgCombiner.Warn("NS target has no address records (owner not found)", "zone", zd.ZoneName, "nsTarget", target)
+		return
+	}
+	_, hasA := owner.RRtypes.Get(dns.TypeA)
+	_, hasAAAA := owner.RRtypes.Get(dns.TypeAAAA)
+	if !hasA && !hasAAAA {
+		lgCombiner.Warn("NS target has no address records", "zone", zd.ZoneName, "nsTarget", target)
+	}
 }
 
 // checkNSNamespacePolicy rejects NS records whose targets fall within any of

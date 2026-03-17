@@ -243,13 +243,13 @@ type AgentAuditPost struct {
 // from the combiner back to the requesting agent.
 // Modeled on AgentKeystatePost. The combiner sends this in response to an RFI EDITS request.
 type AgentEditsPost struct {
-	MessageType  AgentMsg            // AgentMsgEdits
-	MyIdentity   string              // Combiner identity
-	YourIdentity string              // Requesting agent identity
-	Zone         string              // Zone (FQDN)
-	Records      map[string][]string // Agent's current contributions (owner → []RR strings)
-	Message      string              // Optional status message
-	Time         time.Time           // Timestamp
+	MessageType  AgentMsg                       // AgentMsgEdits
+	MyIdentity   string                         // Combiner identity
+	YourIdentity string                         // Requesting agent identity
+	Zone         string                         // Zone (FQDN)
+	AgentRecords map[string]map[string][]string // All agents' contributions (agentID → owner → []RR strings)
+	Message      string                         // Optional status message
+	Time         time.Time                      // Timestamp
 }
 
 // StatusUpdatePost represents a generic status update message with subtypes.

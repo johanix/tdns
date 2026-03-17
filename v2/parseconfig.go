@@ -335,6 +335,8 @@ func (conf *Config) ParseConfig(reload bool) error {
 		conf.parseAuthOptions()
 	}
 
+	conf.parseMultiProviderOptions()
+
 	// KDC and KRS configuration parsing has been moved to tdns-nm
 	// See kdc.ParseKdcConfigFromFile() and krs.ParseKrsConfigFromFile()
 
