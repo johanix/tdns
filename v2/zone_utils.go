@@ -114,7 +114,7 @@ func (zd *ZoneData) DoTransfer() (bool, uint32, error) {
 			return false, 0, nil
 		}
 		if soa, ok := r.Answer[0].(*dns.SOA); ok {
-			// log.Printf("UpstreamSOA: %v", soa.String())
+			lg.Info("DoTransfer: serial check", "zone", zd.ZoneName, "notify_serial", soa.Serial, "incoming_serial", zd.IncomingSerial, "current_serial", zd.CurrentSerial)
 			if soa.Serial <= zd.IncomingSerial {
 				// log.Printf("New upstream serial for %s (%d) is <= old incoming serial (%d)",
 				// 	zd.ZoneName, soa.Serial, zd.IncomingSerial)
@@ -1073,7 +1073,13 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	// ensure that there is a SIG(0) keypair and that the public key is published in the zone.
 	// XXX: There is an option for dont-publish-key, but at present we do not support that.
 	if zd.Options[OptDelSyncChild] {
-		for _, scheme := range viper.GetStringSlice("delegationsync.child.schemes") {
+		schemes := viper.GetStringSlice("delegationsync.child.schemes")
+		if len(schemes) == 0 {
+			lg.Error("SetupZoneSync: zone has delegation-sync-child enabled but delegationsync.child.schemes is not configured — delegation sync will not work", "zone", zd.ZoneName)
+			zd.SetError(ConfigError, "delegation-sync-child enabled but delegationsync.child.schemes is not configured")
+			return fmt.Errorf("delegation-sync-child enabled but delegationsync.child.schemes is not configured for zone %s", zd.ZoneName)
+		}
+		for _, scheme := range schemes {
 			switch scheme {
 			case "update":
 				delsyncq <- DelegationSyncRequest{

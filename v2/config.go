@@ -528,6 +528,7 @@ type MsgQs struct {
 	EditsResponse     chan *EditsResponseMsg     // incoming EDITS response from combiner
 	ConfigResponse    chan *ConfigResponseMsg    // incoming CONFIG response from peer agent
 	AuditResponse     chan *AuditResponseMsg     // incoming AUDIT response from peer agent
+	StatusUpdate      chan *StatusUpdateMsg      // incoming STATUS-UPDATE notifications
 
 	// OnRemoteConfirmationReady is called when this agent (acting as a remote agent)
 	// receives a combiner confirmation for a sync that originated from another agent.
@@ -577,6 +578,19 @@ type AuditResponseMsg struct {
 	SenderID  string
 	Zone      string
 	AuditData interface{} // Zone data repo snapshot (placeholder)
+}
+
+// StatusUpdateMsg carries a status-update notification.
+// Delivered via MsgQs.StatusUpdate channel.
+// Subtypes: "ns-changed", "ksk-changed", "parentsync-done".
+type StatusUpdateMsg struct {
+	SenderID  string
+	Zone      string
+	SubType   string
+	NSRecords []string
+	DSRecords []string
+	Result    string
+	Msg       string
 }
 
 func (conf *Config) ReloadConfig() (string, error) {

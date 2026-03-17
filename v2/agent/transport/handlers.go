@@ -559,6 +559,62 @@ func HandleAudit(ctx *MessageContext) error {
 	return nil
 }
 
+// HandleStatusUpdate processes STATUS-UPDATE messages.
+// Used for combiner→agent notifications (delegation changes) and
+// agent→agent notifications (parent sync completed).
+func HandleStatusUpdate(ctx *MessageContext) error {
+	lgTransport().Debug("processing status-update", "peer", ctx.PeerID, "distrib", ctx.DistributionID)
+
+	var statusUpdate DnsStatusUpdatePayload
+	if err := json.Unmarshal(ctx.ChunkPayload, &statusUpdate); err != nil {
+		return fmt.Errorf("failed to parse status-update: %w", err)
+	}
+
+	msgType := statusUpdate.MessageType
+	if msgType == "" {
+		msgType = statusUpdate.Type
+	}
+	if msgType != "status-update" {
+		return fmt.Errorf("invalid message type for status-update handler: %s", msgType)
+	}
+
+	if statusUpdate.Zone == "" {
+		return fmt.Errorf("status-update message missing zone")
+	}
+
+	ctx.Data["message_type"] = "status-update"
+	ctx.Data["incoming_message"] = &IncomingMessage{
+		Type:     "status-update",
+		SenderID: statusUpdate.GetSenderID(),
+		Zone:     statusUpdate.Zone,
+		Payload:  ctx.ChunkPayload,
+	}
+
+	confirmPayload := struct {
+		Type           string `json:"type"`
+		DistributionID string `json:"distribution_id"`
+		Status         string `json:"status"`
+		Message        string `json:"message"`
+		Timestamp      int64  `json:"timestamp"`
+	}{
+		Type:           "confirm",
+		DistributionID: ctx.DistributionID,
+		Status:         "ok",
+		Message:        fmt.Sprintf("status-update received for zone %s", statusUpdate.Zone),
+		Timestamp:      time.Now().Unix(),
+	}
+
+	payloadBytes, err := json.Marshal(confirmPayload)
+	if err != nil {
+		return fmt.Errorf("failed to marshal status-update confirmation: %w", err)
+	}
+
+	ctx.Data["response"] = payloadBytes
+
+	lgTransport().Info("status-update received", "peer", ctx.PeerID, "zone", statusUpdate.Zone, "subtype", statusUpdate.SubType)
+	return nil
+}
+
 // HandleRelocate processes relocate messages for DDoS mitigation.
 func HandleRelocate(ctx *MessageContext) error {
 	lgTransport().Debug("processing relocate", "peer", ctx.PeerID, "distrib", ctx.DistributionID)

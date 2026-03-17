@@ -67,7 +67,53 @@ DS records. This benefits all callers — zone file
 reload, zone transfer, DNS UPDATE, and the new
 combiner notification path.
 
-#### 1a: DelegationSyncStatus — add DS fields
+#### 1a: Refactor ZoneUpdateChangesDelegationDataNG
+
+**File:** `v2/zone_updater.go`
+
+`ZoneUpdateChangesDelegationDataNG` is a 435-line
+monster function that is difficult to extend safely.
+Before adding DS support, break it into three phases
+that correspond to its natural structure:
+
+**Phase 1 (current lines 727-1001): Action
+classification.** Walks the UPDATE actions, classifies
+each by class (ClassNONE/ClassANY/ClassINET) and
+RRtype (NS/A/AAAA), populates adds/removes in `dss`.
+This stays in the main function — its complexity is
+inherent in UPDATE semantics and the phases share
+state (`dss`, `ddata`, `bns`, `new_bns`).
+
+**Phase 2 (current lines 1006-1038): Compute NewNS.**
+Extract to:
+
+```go
+func computeNewNS(dss *DelegationSyncStatus,
+    currentNS []dns.RR)
+```
+
+Takes current NS RRset, applies removes, applies
+adds, produces complete new NS RRset for replace
+mode. ~35 lines.
+
+**Phase 3 (current lines 1040-1156): Compute new
+glue.** Extract to:
+
+```go
+func computeNewGlue(dss *DelegationSyncStatus,
+    zoneName string, ddata *DelegationData) error
+```
+
+Builds maps of current A/AAAA glue, applies removes,
+applies adds, collects glue for bailiwick NS names
+into `NewA`/`NewAAAA`. ~120 lines.
+
+After extraction the main function is ~275 lines +
+two focused helpers. The DS extension (1g) then adds
+a `computeNewDS` helper alongside the other two,
+rather than further bloating the main function.
+
+#### 1b: DelegationSyncStatus — add DS fields
 
 **File:** `v2/structs.go`
 
@@ -79,7 +125,7 @@ DSRemoves []dns.RR
 NewDS     []dns.RR // Complete DS RRset for replace mode
 ```
 
-#### 1b: AnalyseZoneDelegation — add DS comparison
+#### 1c: AnalyseZoneDelegation — add DS comparison
 
 **File:** `v2/delegation_utils.go`
 
@@ -89,7 +135,7 @@ against local DS data (derived from CDS or DNSKEY via
 `ToDS(dns.SHA256)`), and populate the new DS fields in
 `DelegationSyncStatus`.
 
-#### 1c: CreateChildReplaceUpdate — add DS parameter
+#### 1d: CreateChildReplaceUpdate — add DS parameter
 
 **File:** `v2/childsync_utils.go`
 
@@ -97,7 +143,7 @@ Add `newDS []dns.RR` parameter. In replace mode, delete
 all existing DS records for the child zone and add the
 new DS records, alongside the existing NS/A/AAAA logic.
 
-#### 1d: SyncZoneDelegationViaUpdate — include DS
+#### 1e: SyncZoneDelegationViaUpdate — include DS
 
 **File:** `v2/delegation_sync.go`
 
@@ -105,7 +151,7 @@ Pass `syncstate.NewDS` to `CreateChildReplaceUpdate`.
 In delta mode, include `DSAdds`/`DSRemoves` in the
 UPDATE message.
 
-#### 1e: SyncZoneDelegationViaNotify — add NOTIFY(CDS)
+#### 1f: SyncZoneDelegationViaNotify — add NOTIFY(CDS)
 
 **File:** `v2/delegation_sync.go`
 
@@ -115,7 +161,7 @@ changed. CDS is already published by the zone owner
 (combiner in MP mode, or directly in single-provider);
 the NOTIFY tells the parent to fetch and process it.
 
-#### 1f: Update existing callers
+#### 1g: Update existing callers
 
 **Files:** `v2/delegation_utils.go`, `v2/zone_updater.go`
 
@@ -124,7 +170,18 @@ the NOTIFY tells the parent to fetch and process it.
 - `DnskeysChanged` — already detects DNSKEY changes,
   extend to compute DS diff and populate DS fields
 - `ZoneUpdateChangesDelegationDataNG` (UPDATE handler)
-  — same extension
+  — add DNSKEY/DS handling in the action classification
+  phase (Phase 1), add `computeNewDS` helper alongside
+  `computeNewNS` and `computeNewGlue`
+
+```go
+func computeNewDS(dss *DelegationSyncStatus,
+    zd *ZoneData) error
+```
+
+Derives DS from current KSK DNSKEYs via
+`dnskey.ToDS(dns.SHA256)`, applies adds/removes,
+populates `NewDS`. Same pattern as `computeNewNS`.
 
 All existing callers that don't touch DNSKEYs will
 simply have empty DS diffs, which flow through as

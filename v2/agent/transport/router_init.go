@@ -229,7 +229,19 @@ func InitializeRouter(router *DNSMessageRouter, cfg *RouterConfig) error {
 		return err
 	}
 
-	lgTransport().Info("registered message handlers", "count", 11)
+	// Status-update handler (priority: 100)
+	err = router.Register(
+		"StatusUpdateHandler",
+		MessageType("status-update"),
+		HandleStatusUpdate,
+		WithPriority(100),
+		WithDescription("Processes STATUS-UPDATE messages for delegation change notifications"),
+	)
+	if err != nil {
+		return err
+	}
+
+	lgTransport().Info("registered message handlers", "count", 12)
 	lgTransport().Info("router initialization complete")
 
 	return nil
@@ -355,8 +367,19 @@ func InitializeCombinerRouter(router *DNSMessageRouter, cfg *CombinerRouterConfi
 		return err
 	}
 
+	// Register status-update handler for combiner (stub: log and acknowledge)
+	if err := router.Register(
+		"CombinerStatusUpdateHandler",
+		MessageType("status-update"),
+		HandleStatusUpdate,
+		WithPriority(100),
+		WithDescription("Combiner: processes STATUS-UPDATE messages"),
+	); err != nil {
+		return err
+	}
+
 	// Register combiner-specific update handler (agent→combiner zone contributions)
-	handlerCount := 4
+	handlerCount := 5
 	if cfg.HandleUpdate != nil {
 		if err := router.Register(
 			"CombinerUpdateHandler",
@@ -503,7 +526,18 @@ func InitializeSignerRouter(router *DNSMessageRouter, cfg *SignerRouterConfig) e
 		return err
 	}
 
-	lgTransport().Info("signer: registered message handlers", "count", 5)
+	// Register status-update handler for signer (stub: log and acknowledge)
+	if err := router.Register(
+		"SignerStatusUpdateHandler",
+		MessageType("status-update"),
+		HandleStatusUpdate,
+		WithPriority(100),
+		WithDescription("Signer: processes STATUS-UPDATE messages"),
+	); err != nil {
+		return err
+	}
+
+	lgTransport().Info("signer: registered message handlers", "count", 6)
 	lgTransport().Info("signer: router initialization complete")
 
 	return nil
@@ -544,6 +578,8 @@ func DetermineMessageType(payload []byte) MessageType {
 		return MessageType("config")
 	case "audit":
 		return MessageType("audit")
+	case "status-update":
+		return MessageType("status-update")
 	default:
 		return MessageTypeUnknown
 	}

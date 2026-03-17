@@ -11,31 +11,33 @@ import (
 type AgentMsg string
 
 const (
-	AgentMsgHello    AgentMsg = "hello"
-	AgentMsgBeat     AgentMsg = "beat"
-	AgentMsgNotify   AgentMsg = "sync"   // sync: agent→agent zone data synchronization
-	AgentMsgUpdate   AgentMsg = "update" // update: agent→combiner zone data contribution
-	AgentMsgRfi      AgentMsg = "rfi"
-	AgentMsgStatus   AgentMsg = "status"
-	AgentMsgPing     AgentMsg = "ping"
-	AgentMsgKeystate AgentMsg = "keystate"
-	AgentMsgEdits    AgentMsg = "edits"
-	AgentMsgConfig   AgentMsg = "config"
-	AgentMsgAudit    AgentMsg = "audit"
+	AgentMsgHello        AgentMsg = "hello"
+	AgentMsgBeat         AgentMsg = "beat"
+	AgentMsgNotify       AgentMsg = "sync"   // sync: agent→agent zone data synchronization
+	AgentMsgUpdate       AgentMsg = "update" // update: agent→combiner zone data contribution
+	AgentMsgRfi          AgentMsg = "rfi"
+	AgentMsgStatus       AgentMsg = "status"
+	AgentMsgPing         AgentMsg = "ping"
+	AgentMsgKeystate     AgentMsg = "keystate"
+	AgentMsgEdits        AgentMsg = "edits"
+	AgentMsgConfig       AgentMsg = "config"
+	AgentMsgAudit        AgentMsg = "audit"
+	AgentMsgStatusUpdate AgentMsg = "status-update"
 )
 
 var AgentMsgToString = map[AgentMsg]string{
-	AgentMsgHello:    "HELLO",
-	AgentMsgBeat:     "BEAT",
-	AgentMsgNotify:   "SYNC",
-	AgentMsgUpdate:   "UPDATE",
-	AgentMsgRfi:      "RFI",
-	AgentMsgStatus:   "STATUS",
-	AgentMsgPing:     "PING",
-	AgentMsgKeystate: "KEYSTATE",
-	AgentMsgEdits:    "EDITS",
-	AgentMsgConfig:   "CONFIG",
-	AgentMsgAudit:    "AUDIT",
+	AgentMsgHello:        "HELLO",
+	AgentMsgBeat:         "BEAT",
+	AgentMsgNotify:       "SYNC",
+	AgentMsgUpdate:       "UPDATE",
+	AgentMsgRfi:          "RFI",
+	AgentMsgStatus:       "STATUS",
+	AgentMsgPing:         "PING",
+	AgentMsgKeystate:     "KEYSTATE",
+	AgentMsgEdits:        "EDITS",
+	AgentMsgConfig:       "CONFIG",
+	AgentMsgAudit:        "AUDIT",
+	AgentMsgStatusUpdate: "STATUS-UPDATE",
 }
 
 // AgentHelloPost represents a hello handshake message.
@@ -248,4 +250,21 @@ type AgentEditsPost struct {
 	Records      map[string][]string // Agent's current contributions (owner → []RR strings)
 	Message      string              // Optional status message
 	Time         time.Time           // Timestamp
+}
+
+// StatusUpdatePost represents a generic status update message with subtypes.
+// Used for combiner→agent notifications (e.g. delegation data changed) and
+// agent→agent notifications (e.g. parent sync completed).
+// Subtypes: "ns-changed", "ksk-changed", "parentsync-done".
+type StatusUpdatePost struct {
+	MessageType  AgentMsg
+	MyIdentity   string
+	YourIdentity string
+	Zone         string
+	SubType      string
+	NSRecords    []string `json:",omitempty"`
+	DSRecords    []string `json:",omitempty"`
+	Result       string   `json:",omitempty"`
+	Msg          string   `json:",omitempty"`
+	Time         time.Time
 }

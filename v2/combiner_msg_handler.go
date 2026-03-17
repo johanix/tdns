@@ -88,6 +88,12 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			}
 			lgCombiner.Debug("ping received", "sender", string(report.Identity), "distrib", report.DistributionID)
 
+		case statusMsg := <-msgQs.StatusUpdate:
+			if statusMsg == nil {
+				continue
+			}
+			lgCombiner.Info("STATUS-UPDATE received (no action on combiner)", "zone", statusMsg.Zone, "subtype", statusMsg.SubType, "sender", statusMsg.SenderID)
+
 		case msg := <-msgQs.Msg:
 			if msg == nil {
 				continue

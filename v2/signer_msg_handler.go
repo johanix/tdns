@@ -75,6 +75,12 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 			}
 			lgSigner.Debug("Ping received", "sender", string(report.Identity), "distrib", report.DistributionID)
 
+		case statusMsg := <-msgQs.StatusUpdate:
+			if statusMsg == nil {
+				continue
+			}
+			lgSigner.Info("STATUS-UPDATE received (no action on signer)", "zone", statusMsg.Zone, "subtype", statusMsg.SubType, "sender", statusMsg.SenderID)
+
 		case sigMsg := <-msgQs.KeystateSignal:
 			if sigMsg == nil {
 				continue
