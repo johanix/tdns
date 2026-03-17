@@ -332,6 +332,7 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 
 			select {
 			case syncstate = <-respch:
+				syncstate.ToStrings()
 				resp.SyncStatus = syncstate
 			case <-time.After(4 * time.Second):
 				resp.Error = true
@@ -347,6 +348,7 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 
 			select {
 			case syncstate = <-respch:
+				syncstate.ToStrings()
 				resp.SyncStatus = syncstate
 				lgApi.Debug("received delegation sync response", "zone", dp.Zone, "msg", syncstate.Msg)
 			case <-time.After(4 * time.Second):
@@ -366,7 +368,7 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 				resp.ErrorMsg = fmt.Sprintf("zone %s has no delegation backend configured", dp.Zone)
 				return
 			}
-			err := ExportDelegationData(zd.DelegationBackend, dp.Zone, dp.Outfile)
+			err := ExportDelegationData(zd.DelegationBackend, dp.Zone, dp.Outfile, zd.UpdatePolicy.Child.TTL)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("export failed: %v", err)

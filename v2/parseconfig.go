@@ -606,16 +606,26 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		}
 
 		// log.Printf("*** ParseZones: 4")
+		childTTL := zconf.UpdatePolicy.Child.TTL
+		if childTTL == 0 {
+			childTTL = 120
+		}
+		zoneTTL := zconf.UpdatePolicy.Zone.TTL
+		if zoneTTL == 0 {
+			zoneTTL = 120
+		}
 		policy := UpdatePolicy{
 			Child: UpdatePolicyDetail{
 				Type:         zconf.UpdatePolicy.Child.Type,
 				RRtypes:      childrrtypes,
 				KeyBootstrap: zconf.UpdatePolicy.Child.KeyBootstrap,
 				KeyUpload:    zconf.UpdatePolicy.Child.KeyUpload,
+				TTL:          childTTL,
 			},
 			Zone: UpdatePolicyDetail{
 				Type:    zconf.UpdatePolicy.Zone.Type,
 				RRtypes: zonerrtypes,
+				TTL:     zoneTTL,
 			},
 		}
 

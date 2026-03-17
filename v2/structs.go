@@ -267,10 +267,12 @@ type UpdatePolicyConf struct {
 		RRtypes      []string
 		KeyBootstrap []string // manual | dnssec-validated | consistent-lookup
 		KeyUpload    string
+		TTL          uint32 `yaml:"ttl"`
 	}
 	Zone struct {
 		Type    string // "selfsub" | "self" | "sub" | ...
 		RRtypes []string
+		TTL     uint32 `yaml:"ttl"`
 	}
 	Validate bool
 }
@@ -285,6 +287,7 @@ type UpdatePolicyDetail struct {
 	RRtypes      map[uint16]bool
 	KeyBootstrap []string
 	KeyUpload    string
+	TTL          uint32
 }
 
 // DnssecPolicyConf should match the configuration
@@ -360,23 +363,57 @@ type DelegationSyncStatus struct {
 	Status        string
 	Msg           string
 	Rcode         uint8
-	Adds          []dns.RR
-	Removes       []dns.RR
-	NsAdds        []dns.RR
-	NsRemoves     []dns.RR
-	AAdds         []dns.RR
-	ARemoves      []dns.RR
-	AAAAAdds      []dns.RR
-	AAAARemoves   []dns.RR
-	DNSKEYAdds    []dns.RR
-	DNSKEYRemoves []dns.RR
+	Adds          []dns.RR `json:"-"`
+	Removes       []dns.RR `json:"-"`
+	NsAdds        []dns.RR `json:"-"`
+	NsRemoves     []dns.RR `json:"-"`
+	AAdds         []dns.RR `json:"-"`
+	ARemoves      []dns.RR `json:"-"`
+	AAAAAdds      []dns.RR `json:"-"`
+	AAAARemoves   []dns.RR `json:"-"`
+	DNSKEYAdds    []dns.RR `json:"-"`
+	DNSKEYRemoves []dns.RR `json:"-"`
+	DSAdds        []dns.RR `json:"-"`
+	DSRemoves     []dns.RR `json:"-"`
 	Error         bool
 	ErrorMsg      string
 	UpdateResult  UpdateResult // Experimental
 	// Complete new delegation data for replace mode
-	NewNS   []dns.RR // Complete NS RRset after update
-	NewA    []dns.RR // Complete A glue RRs after update
-	NewAAAA []dns.RR // Complete AAAA glue RRs after update
+	NewNS   []dns.RR `json:"-"`
+	NewA    []dns.RR `json:"-"`
+	NewAAAA []dns.RR `json:"-"`
+	NewDS   []dns.RR `json:"-"`
+	// String representations for JSON serialization (populated by ToStrings())
+	NsAddsStr      []string `json:"NsAdds,omitempty"`
+	NsRemovesStr   []string `json:"NsRemoves,omitempty"`
+	AAddsStr       []string `json:"AAdds,omitempty"`
+	ARemovesStr    []string `json:"ARemoves,omitempty"`
+	AAAAAddsStr    []string `json:"AAAAAdds,omitempty"`
+	AAAARemovesStr []string `json:"AAAARemoves,omitempty"`
+	DSAddsStr      []string `json:"DSAdds,omitempty"`
+	DSRemovesStr   []string `json:"DSRemoves,omitempty"`
+}
+
+func (dss *DelegationSyncStatus) ToStrings() {
+	dss.NsAddsStr = rrsToStrings(dss.NsAdds)
+	dss.NsRemovesStr = rrsToStrings(dss.NsRemoves)
+	dss.AAddsStr = rrsToStrings(dss.AAdds)
+	dss.ARemovesStr = rrsToStrings(dss.ARemoves)
+	dss.AAAAAddsStr = rrsToStrings(dss.AAAAAdds)
+	dss.AAAARemovesStr = rrsToStrings(dss.AAAARemoves)
+	dss.DSAddsStr = rrsToStrings(dss.DSAdds)
+	dss.DSRemovesStr = rrsToStrings(dss.DSRemoves)
+}
+
+func rrsToStrings(rrs []dns.RR) []string {
+	if len(rrs) == 0 {
+		return nil
+	}
+	out := make([]string, len(rrs))
+	for i, rr := range rrs {
+		out[i] = rr.String()
+	}
+	return out
 }
 
 type ZoneRefresher struct {

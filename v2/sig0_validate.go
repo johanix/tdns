@@ -18,12 +18,18 @@ import (
 
 // XXX: This should perhaps not be a method of ZoneData, but rather of KeyDB.
 func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
+	var extraTypes []string
+	for _, rr := range r.Extra {
+		extraTypes = append(extraTypes, fmt.Sprintf("%s(%d)", dns.TypeToString[rr.Header().Rrtype], rr.Header().Rrtype))
+	}
+	lgDns.Info("ValidateUpdate: message details", "compress", r.Compress, "id", r.Id, "extra_count", len(r.Extra), "extra_types", extraTypes, "ns_count", len(r.Ns), "question", len(r.Question), "answer", len(r.Answer))
 	msgbuf, err := r.Pack()
 	if err != nil {
 		lgDns.Error("ValidateUpdate: error from msg.Pack()", "err", err)
 		us.ValidationRcode = dns.RcodeFormatError
 		return err
 	}
+	lgDns.Info("ValidateUpdate: packed message", "buflen", len(msgbuf), "first32", fmt.Sprintf("%x", msgbuf[:min(32, len(msgbuf))]))
 
 	if len(r.Extra) == 0 { // there is no signature on the update
 		us.ValidationRcode = dns.RcodeFormatError
@@ -161,10 +167,11 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		}
 
 		// Signature is valid and within its validity period
-		us.Log("* The signature by the SIG(0) key \"%s\" (keyid %d) is within its validity period", signer.Name, signer.KeyId)
+		lgDns.Info("ValidateUpdate: signature within validity period", "signer", signer.Name, "keyid", signer.KeyId)
 		lgDns.Info("ValidateUpdate: update validated by known and validated key")
 		us.ValidationRcode = dns.RcodeSuccess
 		us.Validated = true // Now at least one key has validated the update
+		us.SignerName = signer.Name
 		signer.Validated = true
 		continue
 	}

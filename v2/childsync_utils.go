@@ -141,6 +141,8 @@ func CreateChildUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, 
 		}
 	}
 
+	m.SetEdns0(1232, true) // Enable EDNS0 for EDE support in responses
+
 	lgDns.Debug("created child update msg", "parent", parent, "child", child, "msg", m.String())
 	return m, nil
 }
@@ -150,7 +152,7 @@ func CreateChildUpdate(parent, child string, adds, removes []dns.RR) (*dns.Msg, 
 // It removes all existing NS records for the child and deletes A/AAAA glue for any in-bailiwick nameservers
 // discovered among the provided new NS, A, and AAAA records, then inserts the new NS and glue RRs.
 // Returns an error if parent or child is empty or equal to ".".
-func CreateChildReplaceUpdate(parent, child string, newNS, newA, newAAAA []dns.RR) (*dns.Msg, error) {
+func CreateChildReplaceUpdate(parent, child string, newNS, newA, newAAAA, newDS []dns.RR) (*dns.Msg, error) {
 	if parent == "." || parent == "" {
 		return nil, fmt.Errorf("parent zone name not specified. Terminating")
 	}
@@ -197,12 +199,24 @@ func CreateChildReplaceUpdate(parent, child string, newNS, newA, newAAAA []dns.R
 		m.RemoveRRset([]dns.RR{rrA, rrAAAA})
 	}
 
+	// Remove all existing DS records for the child zone (if we have new DS)
+	if len(newDS) > 0 {
+		rrDS := new(dns.DS)
+		rrDS.Hdr = dns.RR_Header{Name: child, Rrtype: dns.TypeDS, Class: dns.ClassANY, Ttl: 3600}
+		m.RemoveRRset([]dns.RR{rrDS})
+	}
+
 	// Add all new NS records
 	m.Insert(newNS)
 
 	// Add all new glue records
 	m.Insert(newA)
 	m.Insert(newAAAA)
+
+	// Add all new DS records
+	m.Insert(newDS)
+
+	m.SetEdns0(1232, true) // Enable EDNS0 for EDE support in responses
 
 	lgDns.Debug("created replace update msg", "parent", parent, "child", child, "msg", m.String())
 	return m, nil

@@ -8,7 +8,10 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/johanix/tdns/v2/agent/transport"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -103,6 +106,8 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				}
 				ds.SyncStatus.UpdateResult = ur
 				lgDns.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", ds.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
+				// Notify peer agents that parent sync is done
+				go notifyPeersParentSyncDone(conf, ds.ZoneName, dns.RcodeToString[int(rcode)], msg)
 
 			case "EXPLICIT-SYNC-DELEGATION":
 				lgDns.Info("DelegationSyncher: request for explicit delegation sync", "zone", ds.ZoneName)
@@ -148,6 +153,8 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 					syncstate.UpdateResult = ur
 				} else {
 					lgDns.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", ds.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
+					// Notify peer agents that parent sync is done
+					go notifyPeersParentSyncDone(conf, ds.ZoneName, dns.RcodeToString[int(rcode)], msg)
 				}
 				syncstate.Msg = msg
 				syncstate.Rcode = rcode
@@ -184,6 +191,55 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				lgDns.Warn("DelegationSyncher: unknown command, ignoring", "zone", ds.ZoneName, "command", ds.Command)
 			}
 		}
+	}
+}
+
+// notifyPeersParentSyncDone sends STATUS-UPDATE("parentsync-done") to all
+// remote agents for the zone. Called after a successful parent delegation sync.
+func notifyPeersParentSyncDone(conf *Config, zonename string, result string, msg string) {
+	tm := conf.Internal.TransportManager
+	if tm == nil || tm.DNSTransport == nil {
+		lgDns.Debug("notifyPeersParentSyncDone: no TransportManager, skipping peer notification", "zone", zonename)
+		return
+	}
+
+	agents, err := tm.getAllAgentsForZone(ZoneName(zonename))
+	if err != nil {
+		lgDns.Warn("notifyPeersParentSyncDone: failed to get agents for zone", "zone", zonename, "err", err)
+		return
+	}
+
+	if len(agents) == 0 {
+		lgDns.Debug("notifyPeersParentSyncDone: no remote agents for zone", "zone", zonename)
+		return
+	}
+
+	for _, agentID := range agents {
+		peer, exists := tm.PeerRegistry.Get(string(agentID))
+		if !exists {
+			lgDns.Debug("notifyPeersParentSyncDone: agent not in peer registry, skipping", "agent", agentID, "zone", zonename)
+			continue
+		}
+
+		post := &core.StatusUpdatePost{
+			Zone:    zonename,
+			SubType: "parentsync-done",
+			Result:  result,
+			Msg:     msg,
+			Time:    time.Now(),
+		}
+
+		go func(p *transport.Peer, id AgentId) {
+			sendCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			err := tm.DNSTransport.SendStatusUpdate(sendCtx, p, post)
+			if err != nil {
+				lgDns.Warn("notifyPeersParentSyncDone: failed to send", "agent", id, "zone", zonename, "err", err)
+			} else {
+				lgDns.Info("notifyPeersParentSyncDone: sent", "agent", id, "zone", zonename)
+			}
+		}(peer, agentID)
 	}
 }
 
@@ -418,7 +474,7 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 	// dump.P(syncstate)
 
 	// Check the parent-update option to determine whether to use replace or delta mode
-	updateMode := UpdateModeReplace // default
+	updateMode := UpdateModeDelta // default
 	if kdb.Options != nil {
 		if mode, exists := kdb.Options[AuthOptParentUpdate]; exists {
 			updateMode = mode
@@ -431,7 +487,7 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 	if updateMode == UpdateModeReplace {
 		// Replace mode: remove all existing delegation data and add new complete data
 		lgDns.Info("SyncZoneDelegationViaUpdate: using replace mode", "zone", zd.ZoneName)
-		m, err = CreateChildReplaceUpdate(zd.Parent, zd.ZoneName, syncstate.NewNS, syncstate.NewA, syncstate.NewAAAA)
+		m, err = CreateChildReplaceUpdate(zd.Parent, zd.ZoneName, syncstate.NewNS, syncstate.NewA, syncstate.NewAAAA, syncstate.NewDS)
 		if err != nil {
 			return "", 0, UpdateResult{}, err
 		}
@@ -448,9 +504,11 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 		syncstate.Adds = append(syncstate.Adds, syncstate.NsAdds...)
 		syncstate.Adds = append(syncstate.Adds, syncstate.AAdds...)
 		syncstate.Adds = append(syncstate.Adds, syncstate.AAAAAdds...)
+		syncstate.Adds = append(syncstate.Adds, syncstate.DSAdds...)
 		syncstate.Removes = append(syncstate.Removes, syncstate.NsRemoves...)
 		syncstate.Removes = append(syncstate.Removes, syncstate.ARemoves...)
 		syncstate.Removes = append(syncstate.Removes, syncstate.AAAARemoves...)
+		syncstate.Removes = append(syncstate.Removes, syncstate.DSRemoves...)
 
 		// dump.P(syncstate)
 		m, err = CreateChildUpdate(zd.Parent, zd.ZoneName, syncstate.Adds, syncstate.Removes)
@@ -547,15 +605,29 @@ func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyR
 	// log.Printf(msg)
 
 	lgDns.Debug("DSYNC target for NOTIFY", "zone", zd.ZoneName, "target", dsynctarget)
-	notifyq <- NotifyRequest{
-		ZoneName: zd.ZoneName,
-		ZoneData: zd,
-		RRtype:   dns.TypeCSYNC,         // this is only about syncing delegation data, not about rolling DNSSEC keys.
-		Targets:  dsynctarget.Addresses, // already in addr:port format
+
+	// Send NOTIFY(CSYNC) for NS changes
+	if len(syncstate.NsAdds) > 0 || len(syncstate.NsRemoves) > 0 {
+		notifyq <- NotifyRequest{
+			ZoneName: zd.ZoneName,
+			ZoneData: zd,
+			RRtype:   dns.TypeCSYNC,
+			Targets:  dsynctarget.Addresses,
+		}
+		lgDns.Info("SyncZoneDelegationViaNotify: sent NOTIFY(CSYNC)", "zone", zd.ZoneName)
 	}
 
-	msg := fmt.Sprintf("SyncZoneDelegationViaNotify: Sent notify request for zone %s to NotifierEngine", zd.ZoneName)
-	lgDns.Info("SyncZoneDelegationViaNotify: sent notify request to NotifierEngine", "zone", zd.ZoneName)
+	// Send NOTIFY(CDS) for DS/DNSKEY changes
+	if len(syncstate.DSAdds) > 0 || len(syncstate.DSRemoves) > 0 {
+		notifyq <- NotifyRequest{
+			ZoneName: zd.ZoneName,
+			ZoneData: zd,
+			RRtype:   dns.TypeCDS,
+			Targets:  dsynctarget.Addresses,
+		}
+		lgDns.Info("SyncZoneDelegationViaNotify: sent NOTIFY(CDS)", "zone", zd.ZoneName)
+	}
 
+	msg := fmt.Sprintf("SyncZoneDelegationViaNotify: Sent notify request(s) for zone %s to NotifierEngine", zd.ZoneName)
 	return msg, dns.RcodeSuccess, nil
 }

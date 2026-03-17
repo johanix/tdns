@@ -93,7 +93,8 @@ func LookupDelegationBackend(name string, kdb *KeyDB, zd *ZoneData) (DelegationB
 
 // ExportDelegationData writes all delegation data for a parent zone to a file
 // in DNS zone file format. Called from the /delegation API handler.
-func ExportDelegationData(backend DelegationBackend, parentZone, outfile string) error {
+// defaultTTL is applied to any RR with TTL=0.
+func ExportDelegationData(backend DelegationBackend, parentZone, outfile string, defaultTTL uint32) error {
 	children, err := backend.ListChildren(parentZone)
 	if err != nil {
 		return fmt.Errorf("ListChildren: %w", err)
@@ -137,6 +138,9 @@ func ExportDelegationData(backend DelegationBackend, parentZone, outfile string)
 
 		for _, k := range keys {
 			for _, rr := range data[k.owner][k.rrtype] {
+				if rr.Header().Ttl == 0 && defaultTTL > 0 {
+					rr.Header().Ttl = defaultTTL
+				}
 				buf.WriteString(rr.String())
 				buf.WriteString("\n")
 			}
