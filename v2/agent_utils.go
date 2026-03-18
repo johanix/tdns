@@ -113,11 +113,12 @@ func (conf *Config) NewAgentRegistry() *AgentRegistry {
 
 	return &AgentRegistry{
 		// S:              cmap.New[*Agent](),
-		S:              core.NewStringer[AgentId, *Agent](),
-		RemoteAgents:   make(map[ZoneName][]AgentId),
-		LocalAgent:     conf.MultiProvider,
-		LocateInterval: li,
-		helloContexts:  make(map[AgentId]context.CancelFunc),
+		S:                    core.NewStringer[AgentId, *Agent](),
+		RemoteAgents:         make(map[ZoneName][]AgentId),
+		LocalAgent:           conf.MultiProvider,
+		LocateInterval:       li,
+		helloContexts:        make(map[AgentId]context.CancelFunc),
+		ProviderGroupManager: NewProviderGroupManager(conf.MultiProvider.Identity),
 	}
 }
 
@@ -1059,6 +1060,15 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 					"zone", zonename, "operational", operational, "configured", configured)
 				lem.DeferElection(zonename)
 			}
+		}
+	}
+
+	// Recompute provider groups when HSYNC3 data changes
+	if len(updatedIdentities) > 0 && ar.ProviderGroupManager != nil {
+		ar.ProviderGroupManager.RecomputeGroups()
+		groups := ar.ProviderGroupManager.GetGroups()
+		for _, pg := range groups {
+			lgAgent.Info("provider group updated", "group", pg.Name, "hash", pg.GroupHash[:8], "members", len(pg.Members), "zones", len(pg.Zones))
 		}
 	}
 

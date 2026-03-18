@@ -168,6 +168,7 @@ type AgentRegistry struct {
 	helloContexts         map[AgentId]context.CancelFunc
 	TransportManager      *TransportManager      // optional; when set, Hello/Beat/Sync use transport fallback (API → DNS)
 	LeaderElectionManager *LeaderElectionManager // optional; when set, election messages are processed
+	ProviderGroupManager  *ProviderGroupManager  // optional; manages provider group computation
 }
 
 // AgentBeatPost is defined in core package to avoid circular dependencies.

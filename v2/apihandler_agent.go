@@ -198,6 +198,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			"discover": true, "hsync-locate": true,
 			"router-list": true, "router-describe": true, "router-metrics": true, "router-walk": true, "router-reset": true,
 			"imr-query": true, "imr-flush": true, "imr-reset": true, "imr-show": true, "peer-reset": true,
+			"gossip-group-list": true,
 		}
 		if !noZoneCommands[amp.Command] {
 			amp.Zone = ZoneName(dns.Fqdn(string(amp.Zone)))
@@ -849,6 +850,43 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 
 			resp.Msg = fmt.Sprintf("Reset agent %s to NEEDED state (flushed %d cache entries), discovery restarted", amp.AgentId, flushed)
+
+		case "gossip-group-list":
+			ar := conf.Internal.AgentRegistry
+			if ar == nil || ar.ProviderGroupManager == nil {
+				resp.Error = true
+				resp.ErrorMsg = "agent registry or provider group manager not available"
+				return
+			}
+			groups := ar.ProviderGroupManager.GetGroups()
+			var groupData []map[string]interface{}
+			for _, pg := range groups {
+				// Show first 5 zones as sample
+				sampleZones := make([]string, 0)
+				for i, z := range pg.Zones {
+					if i >= 5 {
+						break
+					}
+					sampleZones = append(sampleZones, string(z))
+				}
+				entry := map[string]interface{}{
+					"group_hash":   pg.GroupHash,
+					"name":         pg.Name,
+					"members":      pg.Members,
+					"zone_count":   len(pg.Zones),
+					"sample_zones": sampleZones,
+				}
+				if pg.NameProposal != nil {
+					entry["name_proposal"] = map[string]interface{}{
+						"name":        pg.NameProposal.Name,
+						"proposer":    pg.NameProposal.Proposer,
+						"proposed_at": pg.NameProposal.ProposedAt.Format(time.RFC3339),
+					}
+				}
+				groupData = append(groupData, entry)
+			}
+			resp.Data = groupData
+			resp.Msg = fmt.Sprintf("Found %d provider groups", len(groups))
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown agent command: %s", amp.Command)
