@@ -327,6 +327,10 @@ type ScanTupleResponse struct {
 	AllNSInSync bool                // If "all-ns" option was set, whether all NS were in sync (false if not applicable)
 	DSAdds      []dns.RR            // DS records to add to parent (from CDS→DS conversion)
 	DSRemoves   []dns.RR            // DS records to remove from parent
+	NSAdds      []dns.RR            // NS records to add at child apex (from CSYNC)
+	NSRemoves   []dns.RR            // NS records to remove from child apex (from CSYNC)
+	GlueAdds    []dns.RR            // A/AAAA glue records to add (owner in RR header)
+	GlueRemoves []dns.RR            // A/AAAA glue records to remove
 	Error       bool                // Whether an error occurred
 	ErrorMsg    string              // Error message if Error is true
 }

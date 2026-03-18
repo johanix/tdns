@@ -273,11 +273,13 @@ reports DS changes. Step 5 (~30 lines) connects scan
 results to the delegation backend via callback. Steps 6-7
 (~100 lines) add RFC-specified verification.
 
-## CSYNC (Future)
+## CSYNC — DONE
 
 CSYNC follows the same pattern but updates NS/A/AAAA instead
-of DS. The CSYNC RR contains a bitmap of which types to sync.
-Deferring CSYNC to a follow-up — CDS is the priority.
+of DS. Implemented in `ProcessCSYNCNotify` (scanner.go) with
+full RFC 7477 support: SOA stability checks, flag validation,
+bitmap-driven type processing, per-owner glue diffing.
+See `2026-03-19-csync-scanner-plan.md` for details.
 
 ## Existing Code Reused
 
