@@ -1,5 +1,7 @@
 # Combiner Operations Support: Handle `replace` for DNSKEY Forwarding
 
+**Status:** Implemented
+
 ## Context
 
 Phases 1–4 of the DNSKEY deletion propagation plan are implemented. The agent side correctly:

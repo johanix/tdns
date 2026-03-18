@@ -156,6 +156,9 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (
 	var err error
 	// 1. Get the parent zone
 	if zd.Parent == "" {
+		if Globals.ImrEngine == nil {
+			return "", UpdateResult{}, fmt.Errorf("BootstrapSig0KeyWithParent(%q): IMR engine not yet initialized", zd.ZoneName)
+		}
 		zd.Parent, err = Globals.ImrEngine.ParentZone(zd.ZoneName)
 		if err != nil {
 			return "", UpdateResult{}, err

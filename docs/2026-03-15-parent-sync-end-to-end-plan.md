@@ -1,7 +1,7 @@
 # Parent Sync End-to-End: From KEY Publication to Delegation Management
 
 **Date:** 2026-03-15
-**Status:** Plan
+**Status:** Stages 1-4 substantially complete (2026-03-18)
 **Depends on:** SIG(0) KEY Publication via Combiner (DNS-147/148/149, completed)
 
 ## Context
@@ -13,7 +13,7 @@ child can send signed UPDATEs to manage its delegation data.
 
 Reference: `drafts/draft-ietf-dnsop-delegation-mgmt-via-ddns/draft-ietf-dnsop-delegation-mgmt-via-ddns-01.md`
 
-## Current State
+## Current State (updated 2026-03-18)
 
 ### What works
 - KEY generation, publication to combiner, and distribution to provider zones
@@ -23,19 +23,42 @@ Reference: `drafts/draft-ietf-dnsop-delegation-mgmt-via-ddns/draft-ietf-dnsop-de
 - `LookupDSYNCTarget()` — child discovers parent's UPDATE target via DSYNC DNS queries
 - KeyState EDNS(0) wire format and response signing on parent side
 - `UpdateKeyState()` — child queries parent for key status via KeyState EDNS(0)
+- SIG(0) verification works end-to-end (delta mode avoids ClassANY repack bug)
+- Content-based UPDATE classification: CHILD-UPDATE vs ZONE-UPDATE
+- Child vs zone update policy with configurable TTL
+- InternalUpdate bypass for CSYNC/CDS publication
+- Delegation backend text file export (`ExportDelegationData`) with configurable TTL
+- Combiner-driven parent sync: STATUS-UPDATE message type, detection, transport
+- Role-specific options: combiner-options, signer-options, agent-options in MP config
 
-### What's missing or broken
-- **Gap 1:** `onLeaderElected` publishes KEY but never triggers `BootstrapSig0KeyWithParent()`
-- **Gap 2:** Parent stores child's self-signed KEY in TrustStore as `trusted=false` but never
-  verifies it via DNS lookup (no at-apex or at-ns key lookup on parent side)
-- **Gap 3:** `ProcessKeyState` auto-bootstrap path has a TODO — not implemented
-- **Gap 4:** HSYNCPARAM `parentsync` field is parsed but not used in any control flow
-- **Gap 5:** No CLI tooling for debugging KeyState inquiries
-- **Gap 6:** Parent can only "direct insert" verified UPDATEs into the zone — no other output methods
+### What's missing or broken (original gaps)
+- ~~**Gap 1:** `onLeaderElected` publishes KEY but never triggers
+  `BootstrapSig0KeyWithParent()`~~ — DONE: bootstrap triggered after
+  KEY publication confirmed
+- ~~**Gap 2:** Parent stores child's self-signed KEY in TrustStore as
+  `trusted=false` but never verifies it via DNS lookup~~ — DONE: key
+  verification implemented
+- ~~**Gap 3:** `ProcessKeyState` auto-bootstrap path has a TODO~~ —
+  DONE: implemented
+- ~~**Gap 4:** HSYNCPARAM `parentsync` field is parsed but not used in
+  any control flow~~ — DONE: gates bootstrap trigger
+- **Gap 5:** No CLI tooling for debugging KeyState inquiries — partial
+  (KeyState query works, dedicated CLI command not yet added)
+- ~~**Gap 6:** Parent can only "direct insert" verified UPDATEs into
+  the zone — no other output methods~~ — DONE: text file output via
+  delegation backend
+
+### Remaining items (see also 2026-03-17 plan)
+- Persist outgoing serial from combiner (`CombinerOptPersistOutgoingSerial`
+  defined but not implemented)
+- NOTIFY(CDS/CSYNC) not sent for UPDATE-scheme zones (only NOTIFY-scheme)
+- Combiner NS target sanity check for provider zones
+- Dedicated CLI commands for KeyState debugging
+- End-to-end VM testing
 
 ## Stages
 
-### Stage 1: Wire Child Agent to Trigger Bootstrap
+### Stage 1: Wire Child Agent to Trigger Bootstrap — DONE
 
 **Goal:** After the multi-provider agent publishes its KEY via the combiner, it should
 automatically bootstrap trust with the parent by sending a self-signed UPDATE.
@@ -86,7 +109,7 @@ must not send duplicate bootstraps. The leader election state is already tracked
 
 ---
 
-### Stage 2: Parent Receives Bootstrap and Verifies Key
+### Stage 2: Parent Receives Bootstrap and Verifies Key — DONE
 
 **Goal:** When the parent receives a child's self-signed KEY upload, it should verify that
 the key is actually published in the child zone (via DNS lookup), DNSSEC-validate it, and
@@ -190,10 +213,13 @@ romeo.dnslab.     12345  trusted     dns            yes       yes
 
 ---
 
-### Stage 3: KeyState Inquiry CLI and End-to-End
+### Stage 3: KeyState Inquiry CLI and End-to-End — MOSTLY DONE
 
 **Goal:** Implement CLI tooling for KeyState EDNS(0) inquiries and ensure the full
 query/response flow works end-to-end.
+
+**Status:** Core flow works (KeyState query/response, auto-bootstrap, polling,
+integration with onLeaderElected). Dedicated CLI commands not yet added.
 
 #### 3a. CLI tool for KeyState inquiry
 
@@ -261,11 +287,17 @@ Wire the KeyState check into the post-bootstrap flow:
 
 ---
 
-### Stage 4: Parent Handles Verified UPDATEs (Text File Output)
+### Stage 4: Parent Handles Verified UPDATEs (Text File Output) — DONE
 
 **Goal:** When the parent receives a verified, trusted UPDATE from a child (e.g. CDS record
 addition, NS change), write the delegation data to a text file that can be `$INCLUDE`d into
 the parent zone file.
+
+**Status:** Implemented. Content-based CHILD-UPDATE classification ensures child
+delegation UPDATEs (NS, DS, glue) are routed through `ApplyChildUpdateToZoneData`
+with child policy. `ExportDelegationData` writes text files with configurable TTL.
+SIG(0) verification works end-to-end using delta mode (ClassNONE). Replace mode
+(ClassANY) has a known repack bug and is disabled with a ConfigError guard.
 
 #### 4a. Output method: text file
 
@@ -349,17 +381,12 @@ tdns-cliv2 auth delegations regenerate --zone dnslab.   # regenerate all files f
 
 ## Complexity Assessment
 
-| Stage | Complexity | Estimated LOC | Risk |
-|-------|-----------|---------------|------|
-| 1. Child bootstrap trigger | Low | ~80 | Low — mostly wiring existing functions |
-| 2. Parent key verification | Medium-High | ~300 | Medium — DNS lookups, DNSSEC validation, async retry |
-| 3. KeyState CLI + e2e | Medium | ~200 | Low — building on existing EDNS(0) implementation |
-| 4. Text file output | Low-Medium | ~150 | Low — straightforward file I/O |
-| **Total** | | **~730** | |
-
-Stage 2 is the most complex because it involves DNS lookups with DNSSEC validation across
-potentially multiple nameservers, with async retry logic. The rest is mostly wiring and
-CLI plumbing.
+| Stage | Complexity | Estimated LOC | Risk | Status |
+|-------|-----------|---------------|------|--------|
+| 1. Child bootstrap trigger | Low | ~80 | Low | DONE |
+| 2. Parent key verification | Medium-High | ~300 | Medium | DONE |
+| 3. KeyState CLI + e2e | Medium | ~200 | Low | Mostly done (CLI pending) |
+| 4. Text file output | Low-Medium | ~150 | Low | DONE |
 
 ---
 
@@ -375,3 +402,42 @@ Each stage should be testable independently in the lab:
    Child agent log shows successful KeyState polling.
 4. **Stage 4**: Child sends CDS UPDATE → parent writes delegation file. Verify via
    `cat /var/lib/tdns/delegations/whisky.dnslab.zone`.
+
+---
+
+## Implementation Notes (added 2026-03-18)
+
+### Key fixes during implementation
+
+- **SIG(0) ClassANY repack bug**: Replace mode (ClassANY) UPDATEs with
+  Rdlength=0 get mangled on unpack→repack by miekg/dns, causing a
+  4-byte signature verification failure. Fixed by defaulting to delta
+  mode (ClassNONE with full rdata). Replace mode is disabled with a
+  ConfigError guard until the repack issue is resolved.
+
+- **Content-based UPDATE classification**: RFC 2136 says QNAME is the
+  zone being updated (parent zone), so all child delegation UPDATEs
+  arrive as zone-level updates. Added content inspection in
+  `updateresponder.go`: NS/DS must be at an existing child delegation
+  point (`IsChildDelegation()`), glue must be below a delegation point,
+  all must target a single child. Reclassifies as CHILD-UPDATE.
+
+- **InternalUpdate bypass**: `PublishCsyncRR()` and `PublishCdsRR()`
+  use `InternalUpdate: true` which now bypasses the `OptAllowUpdates`
+  gate in the zone updater, allowing CSYNC/CDS publication on zones
+  that don't have `allow-updates` configured.
+
+- **Policy TTL**: Child and zone update policies now have configurable
+  `ttl` fields (default 120). Applied in `ApplyChildUpdateToZoneData`
+  and `ApplyZoneUpdateToZoneData`.
+
+### Additional work beyond this plan
+
+The combiner-to-agent parent sync pipeline (STATUS-UPDATE message type,
+delegation change detection, transport) was implemented as a separate
+effort. See the parent-sync plan (majestic-jumping-flurry) and the
+remaining items doc (2026-03-17).
+
+Role-specific options (`combiner-options`, `signer-options`,
+`agent-options`) added to multi-provider config with typed enums and
+parsing.

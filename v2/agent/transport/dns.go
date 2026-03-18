@@ -705,7 +705,7 @@ func (t *DNSTransport) Edits(ctx context.Context, peer *Peer, req *EditsRequest)
 		MyIdentity:   req.SenderID,
 		YourIdentity: peer.ID,
 		Zone:         req.Zone,
-		Records:      req.Records,
+		AgentRecords: req.AgentRecords,
 		Message:      req.Message,
 		Time:         req.Timestamp,
 	}
@@ -885,6 +885,62 @@ func (t *DNSTransport) Confirm(ctx context.Context, peer *Peer, req *ConfirmRequ
 	_, _, err = t.DNSClient.ExchangeContext(ctx, m, dnsAddr)
 	if err != nil {
 		return NewTransportError("DNS", "Confirm", peer.ID,
+			fmt.Errorf("NOTIFY exchange failed: %w", err), true)
+	}
+
+	return nil
+}
+
+// SendStatusUpdate sends a fire-and-forget STATUS-UPDATE NOTIFY(CHUNK) to a peer.
+// Used by both the combiner (delegation change notifications to agents) and
+// the leader agent (parentsync-done notifications to peer agents).
+func (t *DNSTransport) SendStatusUpdate(ctx context.Context, peer *Peer, post *core.StatusUpdatePost) error {
+	addr := peer.CurrentAddress()
+	if addr == nil {
+		return NewTransportError("DNS", "SendStatusUpdate", peer.ID, fmt.Errorf("no address available"), false)
+	}
+
+	post.MessageType = core.AgentMsgStatusUpdate
+	post.MyIdentity = t.LocalID
+	post.YourIdentity = peer.ID
+
+	payloadJSON, err := json.Marshal(post)
+	if err != nil {
+		return NewTransportError("DNS", "SendStatusUpdate", peer.ID,
+			fmt.Errorf("failed to marshal status-update payload: %w", err), false)
+	}
+
+	finalPayload := payloadJSON
+	var payloadFormat uint8 = core.FormatJSON
+	if t.SecureWrapper != nil && t.SecureWrapper.IsEnabled() {
+		encrypted, err := t.SecureWrapper.WrapOutgoing(peer.ID, payloadJSON)
+		if err != nil {
+			return NewTransportError("DNS", "SendStatusUpdate", peer.ID,
+				fmt.Errorf("encryption required but failed: %w", err), false)
+		}
+		finalPayload = encrypted
+		payloadFormat = core.FormatJWT
+	}
+
+	distributionID := GenerateDistributionID()
+	qname := t.buildNotifyQNAME(distributionID)
+
+	m := new(dns.Msg)
+	m.SetNotify(qname)
+	m.Question = []dns.Question{
+		{Name: qname, Qtype: core.TypeCHUNK, Qclass: dns.ClassINET},
+	}
+
+	m.SetEdns0(4096, true)
+	opt := m.IsEdns0()
+	if opt != nil {
+		opt.Option = append(opt.Option, edns0.CreateChunkOption(payloadFormat, nil, finalPayload))
+	}
+
+	dnsAddr := fmt.Sprintf("%s:%d", addr.Host, addr.Port)
+	_, _, err = t.DNSClient.ExchangeContext(ctx, m, dnsAddr)
+	if err != nil {
+		return NewTransportError("DNS", "SendStatusUpdate", peer.ID,
 			fmt.Errorf("NOTIFY exchange failed: %w", err), true)
 	}
 
@@ -1340,9 +1396,9 @@ type DnsEditsPayload struct {
 	YourIdentity string `json:"YourIdentity"` // Recipient (agent) identity
 
 	// EDITS-specific fields
-	Zone    string              `json:"Zone"`              // Zone (FQDN)
-	Records map[string][]string `json:"Records,omitempty"` // Agent's contributions (owner → []RR strings)
-	Message string              `json:"Message,omitempty"` // Optional status message
+	Zone         string                         `json:"Zone"`                   // Zone (FQDN)
+	AgentRecords map[string]map[string][]string `json:"AgentRecords,omitempty"` // All agents' contributions (agentID → owner → []RR strings)
+	Message      string                         `json:"Message,omitempty"`      // Optional status message
 
 	Timestamp int64 `json:"timestamp"` // Unix timestamp
 
@@ -1398,6 +1454,32 @@ type DnsAuditPayload struct {
 
 // GetSenderID returns the sender ID from either standard or legacy format.
 func (d *DnsAuditPayload) GetSenderID() string {
+	if d.MyIdentity != "" {
+		return d.MyIdentity
+	}
+	return d.SenderID
+}
+
+// DnsStatusUpdatePayload represents a STATUS-UPDATE message payload.
+// Used for combiner→agent notifications (delegation changes) and
+// agent→agent notifications (parent sync completed).
+type DnsStatusUpdatePayload struct {
+	MessageType  string   `json:"MessageType"`
+	MyIdentity   string   `json:"MyIdentity"`
+	YourIdentity string   `json:"YourIdentity"`
+	Zone         string   `json:"Zone"`
+	SubType      string   `json:"SubType"`
+	NSRecords    []string `json:"NSRecords,omitempty"`
+	DSRecords    []string `json:"DSRecords,omitempty"`
+	Result       string   `json:"Result,omitempty"`
+	Msg          string   `json:"Msg,omitempty"`
+	Timestamp    int64    `json:"timestamp"`
+	Type         string   `json:"type"`
+	SenderID     string   `json:"sender_id"`
+}
+
+// GetSenderID returns the sender ID from either standard or legacy format.
+func (d *DnsStatusUpdatePayload) GetSenderID() string {
 	if d.MyIdentity != "" {
 		return d.MyIdentity
 	}

@@ -117,7 +117,37 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 			resp.AAAARemoves = append(resp.AAAARemoves, removes...)
 		}
 	}
-	// 4. If NS RRsets differ, then also compare glue for parent in-bailiwick nameservers
+	// 4. Compare DS RRsets between parent and child
+	// Query parent for DS records
+	p_dsrrs, err := AuthQuery(zd.ZoneName, pserver, dns.TypeDS)
+	if err != nil {
+		lgDns.Warn("error from AuthQuery for DS", "server", pserver, "zone", zd.ZoneName, "err", err)
+		// DS query failure is not fatal — parent may not have DS records
+	} else if len(p_dsrrs) > 0 || len(apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs) > 0 {
+		// Compute local DS from KSK DNSKEYs
+		var childDS []dns.RR
+		for _, rr := range apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs {
+			if dnskey, ok := rr.(*dns.DNSKEY); ok {
+				if dnskey.Flags&dns.SEP != 0 {
+					ds := dnskey.ToDS(dns.SHA256)
+					if ds != nil {
+						childDS = append(childDS, ds)
+					}
+				}
+			}
+		}
+
+		dsdiff, dsadds, dsremoves := core.RRsetDiffer(zd.ZoneName, childDS,
+			p_dsrrs, dns.TypeDS, zd.Logger, Globals.Verbose, Globals.Debug)
+		if dsdiff {
+			resp.InSync = false
+			resp.DSAdds = append(resp.DSAdds, dsadds...)
+			resp.DSRemoves = append(resp.DSRemoves, dsremoves...)
+		}
+
+		// Compute NewDS for replace mode
+		resp.NewDS = childDS
+	}
 
 	return resp, nil
 }
@@ -327,6 +357,38 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 		}
 	}
 
+	// Compare KSK DNSKEYs and compute DS diff
+	oldkeys := oldapex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs
+	newkeys := newapex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs
+	if len(oldkeys) > 0 || len(newkeys) > 0 {
+		var oldDS, newDS []dns.RR
+		for _, rr := range oldkeys {
+			if dk, ok := rr.(*dns.DNSKEY); ok {
+				if dk.Flags&dns.SEP != 0 {
+					if ds := dk.ToDS(dns.SHA256); ds != nil {
+						oldDS = append(oldDS, ds)
+					}
+				}
+			}
+		}
+		for _, rr := range newkeys {
+			if dk, ok := rr.(*dns.DNSKEY); ok {
+				if dk.Flags&dns.SEP != 0 {
+					if ds := dk.ToDS(dns.SHA256); ds != nil {
+						newDS = append(newDS, ds)
+					}
+				}
+			}
+		}
+		dsdiff, dsadds, dsremoves := core.RRsetDiffer(zd.ZoneName, newDS, oldDS, dns.TypeDS, zd.Logger, Globals.Verbose, Globals.Debug)
+		if dsdiff {
+			dss.DSAdds = append(dss.DSAdds, dsadds...)
+			dss.DSRemoves = append(dss.DSRemoves, dsremoves...)
+			dss.NewDS = newDS
+			dss.InSync = false
+		}
+	}
+
 	if dss.InSync {
 		fmt.Printf("Old delegation data is identical to new. No update needed.\n")
 		return false, dss, nil
@@ -369,6 +431,29 @@ func (zd *ZoneData) DnskeysChanged(newzd *ZoneData) (bool, DelegationSyncStatus,
 	if differ {
 		dss.Time = time.Now()
 		dss.InSync = false
+
+		// Compute DS diff from KSK changes
+		var oldDS, newDS []dns.RR
+		for _, rr := range oldkeys.RRs {
+			if dk, ok := rr.(*dns.DNSKEY); ok {
+				if dk.Flags&dns.SEP != 0 {
+					if ds := dk.ToDS(dns.SHA256); ds != nil {
+						oldDS = append(oldDS, ds)
+					}
+				}
+			}
+		}
+		for _, rr := range newkeys.RRs {
+			if dk, ok := rr.(*dns.DNSKEY); ok {
+				if dk.Flags&dns.SEP != 0 {
+					if ds := dk.ToDS(dns.SHA256); ds != nil {
+						newDS = append(newDS, ds)
+					}
+				}
+			}
+		}
+		_, dss.DSAdds, dss.DSRemoves = core.RRsetDiffer(zd.ZoneName, newDS, oldDS, dns.TypeDS, zd.Logger, Globals.Verbose, Globals.Debug)
+		dss.NewDS = newDS
 	}
 
 	return differ, dss, nil

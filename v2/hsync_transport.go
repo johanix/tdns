@@ -25,6 +25,7 @@ import (
 )
 
 var lgTransport = Logger("transport")
+var lgConnRetry = Logger("conn-retry")
 
 // generatePingNonce returns a random nonce for ping requests.
 // Panics if the system CSPRNG fails, as this indicates a critical system problem.
@@ -466,6 +467,8 @@ func (tm *TransportManager) routeIncomingMessage(msg *transport.IncomingMessage)
 		tm.routeAuditMessage(msg)
 	case "relocate":
 		tm.routeRelocateMessage(msg)
+	case "status-update":
+		tm.routeStatusUpdateMessage(msg)
 	default:
 		lgTransport.Warn("unknown message type", "type", msg.Type)
 	}
@@ -860,14 +863,14 @@ func (tm *TransportManager) routeEditsMessage(msg *transport.IncomingMessage) {
 	}
 
 	editsMsg := &EditsResponseMsg{
-		SenderID: senderID,
-		Zone:     payload.Zone,
-		Records:  payload.Records,
+		SenderID:     senderID,
+		Zone:         payload.Zone,
+		AgentRecords: payload.AgentRecords,
 	}
 
 	select {
 	case tm.msgQs.EditsResponse <- editsMsg:
-		lgTransport.Info("routed EDITS response to agent", "sender", senderID, "zone", payload.Zone, "owners", len(payload.Records))
+		lgTransport.Info("routed EDITS response to agent", "sender", senderID, "zone", payload.Zone, "agents", len(payload.AgentRecords))
 	default:
 		lgTransport.Warn("EditsResponse channel full, dropping edits", "sender", senderID)
 	}
@@ -972,6 +975,41 @@ func (tm *TransportManager) routeAuditMessage(msg *transport.IncomingMessage) {
 		lgTransport.Info("routed AUDIT response to agent", "sender", senderID, "zone", payload.Zone)
 	default:
 		lgTransport.Warn("AuditResponse channel full, dropping audit", "sender", senderID)
+	}
+}
+
+// routeStatusUpdateMessage routes an incoming STATUS-UPDATE notification.
+// Delivers to MsgQs.StatusUpdate for processing by the role-specific message handler.
+func (tm *TransportManager) routeStatusUpdateMessage(msg *transport.IncomingMessage) {
+	var payload transport.DnsStatusUpdatePayload
+	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+		lgTransport.Error("failed to parse status-update payload", "err", err)
+		return
+	}
+
+	senderID := payload.GetSenderID()
+	lgTransport.Debug("processing STATUS-UPDATE", "sender", senderID, "zone", payload.Zone, "subtype", payload.SubType)
+
+	if tm.msgQs == nil {
+		lgTransport.Debug("STATUS-UPDATE received but no MsgQs, ignoring", "sender", senderID)
+		return
+	}
+
+	statusMsg := &StatusUpdateMsg{
+		SenderID:  senderID,
+		Zone:      payload.Zone,
+		SubType:   payload.SubType,
+		NSRecords: payload.NSRecords,
+		DSRecords: payload.DSRecords,
+		Result:    payload.Result,
+		Msg:       payload.Msg,
+	}
+
+	select {
+	case tm.msgQs.StatusUpdate <- statusMsg:
+		lgTransport.Info("routed STATUS-UPDATE to handler", "sender", senderID, "zone", payload.Zone, "subtype", payload.SubType)
+	default:
+		lgTransport.Warn("StatusUpdate channel full, dropping status-update", "sender", senderID)
 	}
 }
 
@@ -1203,7 +1241,7 @@ func (tm *TransportManager) SendSyncWithFallback(ctx context.Context, peer *tran
 		if err == nil {
 			return resp, nil
 		}
-		lgTransport.Warn("primary transport failed", "transport", primary.Name(), "peer", peer.ID, "err", err)
+		lgConnRetry.Warn("primary transport failed", "transport", primary.Name(), "peer", peer.ID, "err", err)
 	}
 
 	// Try fallback transport
@@ -1303,7 +1341,7 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 		apiResp, apiErr = tm.APITransport.Hello(ctx, peer, req)
 		agent.mu.Lock()
 		if apiErr != nil {
-			lgTransport.Warn("API Hello failed", "peer", peer.ID, "err", apiErr)
+			lgConnRetry.Warn("API Hello failed", "peer", peer.ID, "err", apiErr)
 			agent.ApiDetails.LatestError = apiErr.Error()
 			agent.ApiDetails.LatestErrorTime = time.Now()
 		} else if apiResp != nil && !apiResp.Accepted {
@@ -1331,7 +1369,7 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 		dnsResp, dnsErr = tm.DNSTransport.Hello(ctx, peer, req)
 		agent.mu.Lock()
 		if dnsErr != nil {
-			lgTransport.Warn("DNS Hello failed", "peer", peer.ID, "err", dnsErr)
+			lgConnRetry.Warn("DNS Hello failed", "peer", peer.ID, "err", dnsErr)
 			agent.DnsDetails.LatestError = dnsErr.Error()
 			agent.DnsDetails.LatestErrorTime = time.Now()
 		} else if dnsResp != nil && !dnsResp.Accepted {
@@ -1420,7 +1458,7 @@ func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Age
 			apiResp, apiErr = tm.APITransport.Beat(ctx, peer, req)
 			agent.mu.Lock()
 			if apiErr != nil {
-				lgTransport.Debug("API Beat failed", "peer", peer.ID, "err", apiErr)
+				lgConnRetry.Debug("API Beat failed", "peer", peer.ID, "err", apiErr)
 				agent.ApiDetails.LatestError = apiErr.Error()
 				agent.ApiDetails.LatestErrorTime = time.Now()
 			} else if apiResp != nil && !apiResp.Ack {
@@ -1445,7 +1483,7 @@ func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Age
 			dnsResp, dnsErr = tm.DNSTransport.Beat(ctx, peer, req)
 			agent.mu.Lock()
 			if dnsErr != nil {
-				lgTransport.Debug("DNS Beat failed", "peer", peer.ID, "err", dnsErr)
+				lgConnRetry.Debug("DNS Beat failed", "peer", peer.ID, "err", dnsErr)
 				agent.DnsDetails.LatestError = dnsErr.Error()
 				agent.DnsDetails.LatestErrorTime = time.Now()
 			} else if dnsResp != nil && !dnsResp.Ack {
@@ -1735,6 +1773,28 @@ func (tm *TransportManager) EnqueueForZoneAgents(zone ZoneName, update *ZoneUpda
 	}
 
 	lgTransport.Info("enqueued zone update for agents", "count", len(agents), "zone", zone, "distributionID", distID)
+	return nil
+}
+
+// EnqueueForSpecificAgent enqueues a zone update for a single agent.
+// Used by "resync-targeted" to respond only to the requesting agent.
+func (tm *TransportManager) EnqueueForSpecificAgent(zone ZoneName, agentID AgentId, update *ZoneUpdate, distID string) error {
+	msg := &OutgoingMessage{
+		DistributionID: distID,
+		RecipientID:    agentID,
+		RecipientType:  "agent",
+		Zone:           zone,
+		Update:         update,
+		Priority:       PriorityNormal,
+		CreatedAt:      time.Now(),
+		ExpiresAt:      time.Now().Add(tm.reliableQueue.expirationTimeout),
+	}
+
+	if err := tm.reliableQueue.Enqueue(msg); err != nil {
+		return fmt.Errorf("EnqueueForSpecificAgent: %s: %w", agentID, err)
+	}
+
+	lgTransport.Info("enqueued zone update for specific agent", "agent", agentID, "zone", zone, "distributionID", distID)
 	return nil
 }
 

@@ -69,6 +69,29 @@ type CombinerSyncRequestPlus struct {
 	Response chan *CombinerSyncResponse
 }
 
+// detectDelegationChanges inspects a CombinerSyncResponse for changes
+// to NS records or KSK DNSKEYs (flags=257, SEP bit). These changes
+// require parent delegation synchronization.
+func detectDelegationChanges(resp *CombinerSyncResponse) (nsChanged, kskChanged bool) {
+	for _, rr := range append(resp.AppliedRecords, resp.RemovedRecords...) {
+		parsed, err := dns.NewRR(rr)
+		if err != nil {
+			continue
+		}
+		switch parsed.Header().Rrtype {
+		case dns.TypeNS:
+			nsChanged = true
+		case dns.TypeDNSKEY:
+			if dk, ok := parsed.(*dns.DNSKEY); ok {
+				if dk.Flags&dns.SEP != 0 {
+					kskChanged = true
+				}
+			}
+		}
+	}
+	return
+}
+
 // CombinerState holds combiner-specific state that outlives individual CHUNK messages.
 // Used by CLI commands (error journal queries) and in-process SendToCombiner.
 // Transport routing is handled by the unified ChunkNotifyHandler.
@@ -312,6 +335,11 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 			}
 			// NS changes may affect _signal KEY publication
 			combinerResyncSignalKeys(req.SenderID, zonename, zd, kdb)
+			// Delegation changes require parent sync notification
+			nsChanged, kskChanged := detectDelegationChanges(resp)
+			if nsChanged || kskChanged {
+				go combinerNotifyDelegationChange(tm, req.SenderID, zonename, zd, nsChanged, kskChanged)
+			}
 		}
 		return resp
 	}
@@ -396,6 +424,9 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 				})
 				continue
 			}
+
+			// Checkpoint 6: NS target resolvability (advisory)
+			warnNSTargetUnresolvable(rr, zd)
 
 			// Route by class
 			switch rr.Header().Class {
@@ -505,9 +536,119 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 			combinerApplyPublishInstruction(req, zd, kdb)
 		}
 		combinerResyncSignalKeys(req.SenderID, zonename, zd, kdb)
+		// Delegation changes require parent sync notification
+		nsChanged, kskChanged := detectDelegationChanges(resp)
+		if nsChanged || kskChanged {
+			go combinerNotifyDelegationChange(tm, req.SenderID, zonename, zd, nsChanged, kskChanged)
+		}
 	}
 
 	return resp
+}
+
+// combinerNotifyDelegationChange publishes CDS/CSYNC as needed and sends a
+// STATUS-UPDATE notification to the local agent that delivered the update.
+// Runs as a goroutine — fire-and-forget from the combiner's perspective.
+func combinerNotifyDelegationChange(tm *TransportManager, senderID, zonename string, zd *ZoneData, nsChanged, kskChanged bool) {
+	// Determine if the zone is signed by checking HSYNCPARAM signers
+	zoneSigned := false
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err == nil && apex != nil {
+		if hpRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM); exists && len(hpRRset.RRs) > 0 {
+			hsyncparam := hpRRset.RRs[0].(*dns.PrivateRR).Data.(*core.HSYNCPARAM)
+			if len(hsyncparam.GetSigners()) > 0 {
+				zoneSigned = true
+			}
+		}
+	}
+
+	lgCombiner.Info("combinerNotifyDelegationChange: delegation change detected", "zone", zonename, "nsChanged", nsChanged, "kskChanged", kskChanged, "zoneSigned", zoneSigned)
+
+	// Publish indicator records
+	if nsChanged {
+		if !zoneSigned {
+			lgCombiner.Debug("combinerNotifyDelegationChange: NS changed but zone is not signed, skipping CSYNC", "zone", zonename)
+		} else {
+			if err := zd.PublishCsyncRR(); err != nil {
+				lgCombiner.Error("combinerNotifyDelegationChange: PublishCsyncRR failed", "zone", zonename, "err", err)
+			} else {
+				lgCombiner.Info("combinerNotifyDelegationChange: CSYNC enqueued", "zone", zonename)
+			}
+		}
+	}
+	if kskChanged {
+		if err := zd.PublishCdsRRs(); err != nil {
+			lgCombiner.Error("combinerNotifyDelegationChange: PublishCdsRRs failed", "zone", zonename, "err", err)
+		} else {
+			lgCombiner.Info("combinerNotifyDelegationChange: CDS enqueued", "zone", zonename)
+		}
+	}
+
+	// Collect current NS records as strings
+	var nsRecords []string
+	if apex != nil {
+		nsRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeNS)
+		for _, rr := range nsRRset.RRs {
+			nsRecords = append(nsRecords, rr.String())
+		}
+	}
+
+	// Collect current DS records (derived from KSK DNSKEYs) as strings
+	var dsRecords []string
+	if kskChanged && apex != nil {
+		for _, rr := range apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs {
+			if dk, ok := rr.(*dns.DNSKEY); ok {
+				if dk.Flags&dns.SEP != 0 {
+					if ds := dk.ToDS(dns.SHA256); ds != nil {
+						dsRecords = append(dsRecords, ds.String())
+					}
+				}
+			}
+		}
+	}
+
+	// Send one notification per change type
+	if nsChanged {
+		lgCombiner.Info("combinerNotifyDelegationChange: sending ns-changed", "zone", zonename, "agent", senderID)
+		sendDelegationStatusUpdate(tm, senderID, zonename, "ns-changed", nsRecords, nil)
+	}
+	if kskChanged {
+		lgCombiner.Info("combinerNotifyDelegationChange: sending ksk-changed", "zone", zonename, "agent", senderID)
+		sendDelegationStatusUpdate(tm, senderID, zonename, "ksk-changed", nil, dsRecords)
+	}
+}
+
+// sendDelegationStatusUpdate sends a STATUS-UPDATE message to the agent
+// via the DNSTransport fire-and-forget NOTIFY(CHUNK) mechanism.
+func sendDelegationStatusUpdate(tm *TransportManager, agentID, zonename, subtype string, nsRecords, dsRecords []string) {
+	if tm == nil || tm.DNSTransport == nil {
+		lgCombiner.Warn("sendDelegationStatusUpdate: no DNSTransport, cannot notify agent", "zone", zonename, "subtype", subtype)
+		return
+	}
+
+	peer, exists := tm.PeerRegistry.Get(agentID)
+	if !exists {
+		lgCombiner.Warn("sendDelegationStatusUpdate: agent not in peer registry", "agent", agentID, "zone", zonename, "subtype", subtype)
+		return
+	}
+
+	post := &core.StatusUpdatePost{
+		Zone:      zonename,
+		SubType:   subtype,
+		NSRecords: nsRecords,
+		DSRecords: dsRecords,
+		Time:      time.Now(),
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := tm.DNSTransport.SendStatusUpdate(ctx, peer, post)
+	if err != nil {
+		lgCombiner.Error("sendDelegationStatusUpdate: failed to send", "zone", zonename, "subtype", subtype, "agent", agentID, "err", err)
+	} else {
+		lgCombiner.Info("sendDelegationStatusUpdate: sent", "zone", zonename, "subtype", subtype, "agent", agentID)
+	}
 }
 
 // combinerApplyPublishInstruction processes a PublishInstruction from an agent.
@@ -969,6 +1110,7 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 				parseOk = false
 				continue
 			}
+			warnNSTargetUnresolvable(rr, zd)
 			parsedRRs = append(parsedRRs, rr)
 		}
 
@@ -1631,6 +1773,31 @@ func checkContentPolicy(rr dns.RR, protectedNamespaces []string) string {
 		return checkNSNamespacePolicy(rr, protectedNamespaces)
 	}
 	return ""
+}
+
+// warnNSTargetUnresolvable logs a warning if an in-bailiwick NS target has no
+// address records in the combiner's zone data. Out-of-bailiwick targets are
+// skipped (the combiner has no way to verify them without IMR access).
+// This is advisory only — it does not reject the NS record.
+func warnNSTargetUnresolvable(rr dns.RR, zd *ZoneData) {
+	nsRR, ok := rr.(*dns.NS)
+	if !ok {
+		return
+	}
+	target := nsRR.Ns
+	if !strings.HasSuffix(target, "."+zd.ZoneName) && target != zd.ZoneName {
+		return // out-of-bailiwick, skip
+	}
+	owner, err := zd.GetOwner(target)
+	if err != nil || owner == nil {
+		lgCombiner.Warn("NS target has no address records (owner not found)", "zone", zd.ZoneName, "nsTarget", target)
+		return
+	}
+	_, hasA := owner.RRtypes.Get(dns.TypeA)
+	_, hasAAAA := owner.RRtypes.Get(dns.TypeAAAA)
+	if !hasA && !hasAAAA {
+		lgCombiner.Warn("NS target has no address records", "zone", zd.ZoneName, "nsTarget", target)
+	}
 }
 
 // checkNSNamespacePolicy rejects NS records whose targets fall within any of

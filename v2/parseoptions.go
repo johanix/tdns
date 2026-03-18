@@ -77,7 +77,7 @@ func (conf *Config) parseAuthOptions() {
 	clean := make(map[AuthOption]string)
 
 	// Apply defaults for options that have them, even when no options are configured
-	clean[AuthOptParentUpdate] = UpdateModeReplace
+	clean[AuthOptParentUpdate] = UpdateModeDelta
 
 	if len(raw) == 0 {
 		conf.DnsEngine.Options = clean
@@ -110,14 +110,14 @@ func (conf *Config) parseAuthOptions() {
 		case AuthOptParentUpdate:
 			val := strings.ToLower(optval)
 			if val == "" {
-				val = UpdateModeReplace
+				val = UpdateModeDelta
 			}
 			switch val {
 			case UpdateModeReplace, UpdateModeDelta:
 				clean[authOpt] = val
 			default:
-				lg.Warn("Auth option has invalid value, defaulting", "option", key, "value", optval, "allowed", UpdateModeReplace+"|"+UpdateModeDelta, "default", UpdateModeReplace)
-				clean[authOpt] = UpdateModeReplace
+				lg.Warn("Auth option has invalid value, defaulting", "option", key, "value", optval, "allowed", UpdateModeReplace+"|"+UpdateModeDelta, "default", UpdateModeDelta)
+				clean[authOpt] = UpdateModeDelta
 			}
 		default:
 			clean[authOpt] = optval
@@ -125,6 +125,59 @@ func (conf *Config) parseAuthOptions() {
 	}
 
 	conf.DnsEngine.Options = clean
+}
+
+func (conf *Config) parseMultiProviderOptions() {
+	if conf.MultiProvider == nil {
+		return
+	}
+	mp := conf.MultiProvider
+
+	// Combiner options
+	mp.CombinerOptions = map[CombinerOption]bool{}
+	for _, raw := range mp.CombinerOptionsStrs {
+		opt := strings.ToLower(strings.TrimSpace(raw))
+		if opt == "" {
+			continue
+		}
+		if co, ok := StringToCombinerOption[opt]; ok {
+			mp.CombinerOptions[co] = true
+		} else {
+			lg.Warn("unknown combiner option, ignoring", "option", opt)
+		}
+	}
+	// Migrate legacy add-signature field
+	if mp.AddSignature && !mp.CombinerOptions[CombinerOptAddSignature] {
+		mp.CombinerOptions[CombinerOptAddSignature] = true
+	}
+
+	// Signer options
+	mp.SignerOptions = map[SignerOption]bool{}
+	for _, raw := range mp.SignerOptionsStrs {
+		opt := strings.ToLower(strings.TrimSpace(raw))
+		if opt == "" {
+			continue
+		}
+		if so, ok := StringToSignerOption[opt]; ok {
+			mp.SignerOptions[so] = true
+		} else {
+			lg.Warn("unknown signer option, ignoring", "option", opt)
+		}
+	}
+
+	// Agent options
+	mp.AgentOptions = map[AgentOption]bool{}
+	for _, raw := range mp.AgentOptionsStrs {
+		opt := strings.ToLower(strings.TrimSpace(raw))
+		if opt == "" {
+			continue
+		}
+		if ao, ok := StringToAgentOption[opt]; ok {
+			mp.AgentOptions[ao] = true
+		} else {
+			lg.Warn("unknown agent option, ignoring", "option", opt)
+		}
+	}
 }
 
 // parseZoneOptions validates and applies zone-specific option strings, updating zconf.Options and returning a map of enabled ZoneOption flags.

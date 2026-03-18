@@ -130,34 +130,35 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 			case "ZONE-UPDATE":
 				// This is the case where a DNS UPDATE contains updates to authoritative data in the zone
 				// (i.e. not child delegation information).
-				lg.Debug("ZoneUpdater: ZONE-UPDATE request", "zone", ur.ZoneName, "actions", len(ur.Actions))
+				lg.Info("ZoneUpdater: ZONE-UPDATE request", "zone", ur.ZoneName, "actions", len(ur.Actions))
 				lg.Debug("ZoneUpdater: ZONE-UPDATE actions detail", "actions", SprintUpdates(ur.Actions))
-				if zd.Options[OptAllowUpdates] {
-					dss, err := zd.ZoneUpdateChangesDelegationDataNG(ur)
-					if err != nil {
-						lg.Error("ZoneUpdateChangesDelegationData failed", "error", err)
-					}
-					lg.Debug("ZoneUpdater: delegation sync status", "inSync", dss.InSync)
-
-					if zd.Options[OptDelSyncChild] && !dss.InSync {
-						lg.Debug("ZoneUpdater: delegation out of sync, sending SYNC-DELEGATION", "zone", zd.ZoneName, "queueLen", len(zd.DelegationSyncQ))
-						zd.DelegationSyncQ <- DelegationSyncRequest{
-							Command:    "SYNC-DELEGATION",
-							ZoneName:   zd.ZoneName,
-							ZoneData:   zd,
-							SyncStatus: dss,
-							// XXX: *NOT* populating the Adds and Removes here, using the dss data
+				if zd.Options[OptAllowUpdates] || ur.InternalUpdate {
+					// Delegation sync checks only apply to external updates
+					if !ur.InternalUpdate {
+						dss, err := zd.ZoneUpdateChangesDelegationDataNG(ur)
+						if err != nil {
+							lg.Error("ZoneUpdateChangesDelegationData failed", "error", err)
 						}
-						// Proactively publish CSYNC when delegation data changes.
-						// This serves as a signal to scanning parents even if we also do active DDNS.
-						if err := zd.PublishCsyncRR(); err != nil {
-							lg.Error("ZoneUpdater: error publishing CSYNC", "zone", zd.ZoneName, "err", err)
-						} else {
-							lg.Debug("ZoneUpdater: published CSYNC proactively", "zone", zd.ZoneName)
+						lg.Debug("ZoneUpdater: delegation sync status", "inSync", dss.InSync)
+
+						if zd.Options[OptDelSyncChild] && !dss.InSync {
+							lg.Debug("ZoneUpdater: delegation out of sync, sending SYNC-DELEGATION", "zone", zd.ZoneName, "queueLen", len(zd.DelegationSyncQ))
+							zd.DelegationSyncQ <- DelegationSyncRequest{
+								Command:    "SYNC-DELEGATION",
+								ZoneName:   zd.ZoneName,
+								ZoneData:   zd,
+								SyncStatus: dss,
+							}
+							if err := zd.PublishCsyncRR(); err != nil {
+								lg.Error("ZoneUpdater: error publishing CSYNC", "zone", zd.ZoneName, "err", err)
+							} else {
+								lg.Debug("ZoneUpdater: published CSYNC proactively", "zone", zd.ZoneName)
+							}
 						}
 					}
 
 					var updated bool
+					var err error
 
 					switch zd.ZoneType {
 					case Primary:
@@ -177,7 +178,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 						zd.Options[OptDirty] = true
 					}
 				} else {
-					lg.Debug("ZoneUpdater: updates disallowed for zone", "zone", zd.ZoneName)
+					lg.Warn("ZoneUpdater: updates disallowed for zone, dropping ZONE-UPDATE", "zone", zd.ZoneName)
 				}
 				lg.Debug("ZoneUpdater: ZONE-UPDATE done")
 
@@ -470,7 +471,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 		rrtypestr := dns.TypeToString[rrtype]
 
 		rrcopy := dns.Copy(rr)
-		rrcopy.Header().Ttl = 3600
+		rrcopy.Header().Ttl = zd.UpdatePolicy.Child.TTL
 		rrcopy.Header().Class = dns.ClassINET
 
 		// First check whether this update is allowed by the update-policy.
@@ -608,7 +609,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 		rrtypestr := dns.TypeToString[rrtype]
 
 		rrcopy := dns.Copy(rr)
-		rrcopy.Header().Ttl = 3600
+		rrcopy.Header().Ttl = zd.UpdatePolicy.Zone.TTL
 		rrcopy.Header().Class = dns.ClassINET
 
 		// First check whether this update is allowed by the update-policy.
@@ -777,7 +778,7 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 		rrtype := rr.Header().Rrtype
 		rrtypestr := dns.TypeToString[rrtype]
 
-		if rrtype != dns.TypeNS && rrtype != dns.TypeA && rrtype != dns.TypeAAAA {
+		if rrtype != dns.TypeNS && rrtype != dns.TypeA && rrtype != dns.TypeAAAA && rrtype != dns.TypeDNSKEY {
 			//log.Printf("ZUCDDNG: Update does not affect delegation data: %s", rrtypestr)
 			continue
 		}
@@ -849,6 +850,15 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 					}
 				}
 			}
+			// Is this a KSK DNSKEY removal?
+			if ownerName == zd.ZoneName && rrtype == dns.TypeDNSKEY {
+				if dk, ok := rr.(*dns.DNSKEY); ok {
+					if dk.Flags&dns.SEP != 0 {
+						dss.InSync = false
+						dss.DNSKEYRemoves = append(dss.DNSKEYRemoves, rrcopy)
+					}
+				}
+			}
 			continue
 
 		case dns.ClassANY:
@@ -879,6 +889,12 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 						dss.AAAARemoves = append(dss.AAAARemoves, rrcopy)
 						ddata.Actions = append(ddata.Actions, rrcopy)
 					}
+				}
+
+			case dns.TypeDNSKEY:
+				if ownerName == zd.ZoneName {
+					// Removing entire DNSKEY RRset — all KSKs removed
+					dss.InSync = false
 				}
 			}
 			continue
@@ -995,6 +1011,16 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 				ddata.Actions = append(ddata.Actions, rrcopy)
 			}
 
+		case dns.TypeDNSKEY:
+			if ownerName == zd.ZoneName {
+				if dk, ok := rr.(*dns.DNSKEY); ok {
+					if dk.Flags&dns.SEP != 0 {
+						dss.InSync = false
+						dss.DNSKEYAdds = append(dss.DNSKEYAdds, rrcopy)
+					}
+				}
+			}
+
 		default:
 			lg.Error("ZUCDDNG: unexpected RR type", "rrtype", rrtypestr, "rr", rr.String())
 		}
@@ -1003,14 +1029,25 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 	lg.Debug("ZUCDDNG delegation data", "zone", zd.ZoneName, "ddata", fmt.Sprintf("%+v", ddata))
 	lg.Debug("ZUCDDNG delegation actions", "zone", zd.ZoneName, "actions", SprintUpdates(ddata.Actions))
 
-	// Compute complete new delegation data for replace mode
-	// Start with current NS RRset
-	dss.NewNS = make([]dns.RR, 0, len(ddata.CurrentNS.RRs))
-	for _, rr := range ddata.CurrentNS.RRs {
+	computeNewNSFromCurrent(&dss, ddata.CurrentNS.RRs)
+	err = computeNewGlue(&dss, zd.ZoneName, ddata)
+	if err != nil {
+		return dss, err
+	}
+	computeNewDS(&dss, zd)
+
+	return dss, nil
+}
+
+// computeNewNSFromCurrent computes the complete new NS RRset for replace
+// mode by starting from the current NS RRset and applying the adds/removes
+// from dss.
+func computeNewNSFromCurrent(dss *DelegationSyncStatus, currentNS []dns.RR) {
+	dss.NewNS = make([]dns.RR, 0, len(currentNS))
+	for _, rr := range currentNS {
 		dss.NewNS = append(dss.NewNS, dns.Copy(rr))
 	}
 
-	// Remove NS records that are being removed
 	for _, remove := range dss.NsRemoves {
 		for i := len(dss.NewNS) - 1; i >= 0; i-- {
 			if dns.IsDuplicate(dss.NewNS[i], remove) {
@@ -1020,7 +1057,6 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 		}
 	}
 
-	// Add NS records that are being added
 	for _, add := range dss.NsAdds {
 		dup := false
 		for _, existing := range dss.NewNS {
@@ -1036,126 +1072,151 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			dss.NewNS = append(dss.NewNS, rrcopy)
 		}
 	}
+}
 
-	// Compute new glue records for the new NS RRset
-	// Get in-bailiwick NS names from the new NS RRset
-	new_bailiwick_ns, err := BailiwickNS(zd.ZoneName, dss.NewNS)
+// computeNewGlue computes the complete new A and AAAA glue records for
+// replace mode. It builds maps of current glue, applies adds/removes,
+// and collects glue for in-bailiwick NS names from the new NS RRset.
+func computeNewGlue(dss *DelegationSyncStatus, zoneName string, ddata *DelegationData) error {
+	new_bailiwick_ns, err := BailiwickNS(zoneName, dss.NewNS)
 	if err != nil {
-		lg.Error("ZUCDDNG: failed to compute bailiwick NS", "error", err)
-		return dss, err
-	} else {
-		// Build maps of current glue for quick lookup
-		current_a_glue := make(map[string][]dns.RR)
-		current_aaaa_glue := make(map[string][]dns.RR)
-		for nsname, rrset := range ddata.A_glue {
-			current_a_glue[nsname] = make([]dns.RR, len(rrset.RRs))
-			for i, rr := range rrset.RRs {
-				current_a_glue[nsname][i] = dns.Copy(rr)
-			}
-		}
-		for nsname, rrset := range ddata.AAAA_glue {
-			current_aaaa_glue[nsname] = make([]dns.RR, len(rrset.RRs))
-			for i, rr := range rrset.RRs {
-				current_aaaa_glue[nsname][i] = dns.Copy(rr)
-			}
-		}
+		lg.Error("computeNewGlue: failed to compute bailiwick NS", "error", err)
+		return err
+	}
 
-		// Apply removes to current glue
-		for _, remove := range dss.ARemoves {
-			nsname := remove.Header().Name
-			if glue, exists := current_a_glue[nsname]; exists {
-				for i := len(glue) - 1; i >= 0; i-- {
-					if dns.IsDuplicate(glue[i], remove) {
-						glue = append(glue[:i], glue[i+1:]...)
-						current_a_glue[nsname] = glue
-						break
-					}
-				}
-			}
+	current_a_glue := make(map[string][]dns.RR)
+	current_aaaa_glue := make(map[string][]dns.RR)
+	for nsname, rrset := range ddata.A_glue {
+		current_a_glue[nsname] = make([]dns.RR, len(rrset.RRs))
+		for i, rr := range rrset.RRs {
+			current_a_glue[nsname][i] = dns.Copy(rr)
 		}
-		for _, remove := range dss.AAAARemoves {
-			nsname := remove.Header().Name
-			if glue, exists := current_aaaa_glue[nsname]; exists {
-				for i := len(glue) - 1; i >= 0; i-- {
-					if dns.IsDuplicate(glue[i], remove) {
-						glue = append(glue[:i], glue[i+1:]...)
-						current_aaaa_glue[nsname] = glue
-						break
-					}
-				}
-			}
+	}
+	for nsname, rrset := range ddata.AAAA_glue {
+		current_aaaa_glue[nsname] = make([]dns.RR, len(rrset.RRs))
+		for i, rr := range rrset.RRs {
+			current_aaaa_glue[nsname][i] = dns.Copy(rr)
 		}
+	}
 
-		// Apply adds to current glue
-		for _, add := range dss.AAdds {
-			nsname := add.Header().Name
-			if slices.Contains(new_bailiwick_ns, nsname) {
-				if glue, exists := current_a_glue[nsname]; exists {
-					dup := false
-					for _, existing := range glue {
-						if dns.IsDuplicate(existing, add) {
-							dup = true
-							break
-						}
-					}
-					if !dup {
-						rrcopy := dns.Copy(add)
-						rrcopy.Header().Ttl = 3600
-						rrcopy.Header().Class = dns.ClassINET
-						current_a_glue[nsname] = append(current_a_glue[nsname], rrcopy)
-					}
-				} else {
-					rrcopy := dns.Copy(add)
-					rrcopy.Header().Ttl = 3600
-					rrcopy.Header().Class = dns.ClassINET
-					current_a_glue[nsname] = []dns.RR{rrcopy}
+	// Apply removes to current glue
+	for _, remove := range dss.ARemoves {
+		nsname := remove.Header().Name
+		if glue, exists := current_a_glue[nsname]; exists {
+			for i := len(glue) - 1; i >= 0; i-- {
+				if dns.IsDuplicate(glue[i], remove) {
+					glue = append(glue[:i], glue[i+1:]...)
+					current_a_glue[nsname] = glue
+					break
 				}
 			}
 		}
-		for _, add := range dss.AAAAAdds {
-			nsname := add.Header().Name
-			if slices.Contains(new_bailiwick_ns, nsname) {
-				if glue, exists := current_aaaa_glue[nsname]; exists {
-					dup := false
-					for _, existing := range glue {
-						if dns.IsDuplicate(existing, add) {
-							dup = true
-							break
-						}
-					}
-					if !dup {
-						rrcopy := dns.Copy(add)
-						rrcopy.Header().Ttl = 3600
-						rrcopy.Header().Class = dns.ClassINET
-						current_aaaa_glue[nsname] = append(current_aaaa_glue[nsname], rrcopy)
-					}
-				} else {
-					rrcopy := dns.Copy(add)
-					rrcopy.Header().Ttl = 3600
-					rrcopy.Header().Class = dns.ClassINET
-					current_aaaa_glue[nsname] = []dns.RR{rrcopy}
-				}
-			}
-		}
-
-		// Collect all glue records for the new bailiwick NS
-		dss.NewA = []dns.RR{}
-		dss.NewAAAA = []dns.RR{}
-		for _, nsname := range new_bailiwick_ns {
-			if glue, exists := current_a_glue[nsname]; exists {
-				for _, rr := range glue {
-					dss.NewA = append(dss.NewA, dns.Copy(rr))
-				}
-			}
-			if glue, exists := current_aaaa_glue[nsname]; exists {
-				for _, rr := range glue {
-					dss.NewAAAA = append(dss.NewAAAA, dns.Copy(rr))
+	}
+	for _, remove := range dss.AAAARemoves {
+		nsname := remove.Header().Name
+		if glue, exists := current_aaaa_glue[nsname]; exists {
+			for i := len(glue) - 1; i >= 0; i-- {
+				if dns.IsDuplicate(glue[i], remove) {
+					glue = append(glue[:i], glue[i+1:]...)
+					current_aaaa_glue[nsname] = glue
+					break
 				}
 			}
 		}
 	}
 
-	// dump.P(ddata)
-	// dump.P(dss)
-	return dss, nil
+	// Apply adds to current glue
+	for _, add := range dss.AAdds {
+		nsname := add.Header().Name
+		if slices.Contains(new_bailiwick_ns, nsname) {
+			if glue, exists := current_a_glue[nsname]; exists {
+				dup := false
+				for _, existing := range glue {
+					if dns.IsDuplicate(existing, add) {
+						dup = true
+						break
+					}
+				}
+				if !dup {
+					rrcopy := dns.Copy(add)
+					rrcopy.Header().Ttl = 3600
+					rrcopy.Header().Class = dns.ClassINET
+					current_a_glue[nsname] = append(current_a_glue[nsname], rrcopy)
+				}
+			} else {
+				rrcopy := dns.Copy(add)
+				rrcopy.Header().Ttl = 3600
+				rrcopy.Header().Class = dns.ClassINET
+				current_a_glue[nsname] = []dns.RR{rrcopy}
+			}
+		}
+	}
+	for _, add := range dss.AAAAAdds {
+		nsname := add.Header().Name
+		if slices.Contains(new_bailiwick_ns, nsname) {
+			if glue, exists := current_aaaa_glue[nsname]; exists {
+				dup := false
+				for _, existing := range glue {
+					if dns.IsDuplicate(existing, add) {
+						dup = true
+						break
+					}
+				}
+				if !dup {
+					rrcopy := dns.Copy(add)
+					rrcopy.Header().Ttl = 3600
+					rrcopy.Header().Class = dns.ClassINET
+					current_aaaa_glue[nsname] = append(current_aaaa_glue[nsname], rrcopy)
+				}
+			} else {
+				rrcopy := dns.Copy(add)
+				rrcopy.Header().Ttl = 3600
+				rrcopy.Header().Class = dns.ClassINET
+				current_aaaa_glue[nsname] = []dns.RR{rrcopy}
+			}
+		}
+	}
+
+	// Collect all glue records for the new bailiwick NS
+	dss.NewA = []dns.RR{}
+	dss.NewAAAA = []dns.RR{}
+	for _, nsname := range new_bailiwick_ns {
+		if glue, exists := current_a_glue[nsname]; exists {
+			for _, rr := range glue {
+				dss.NewA = append(dss.NewA, dns.Copy(rr))
+			}
+		}
+		if glue, exists := current_aaaa_glue[nsname]; exists {
+			for _, rr := range glue {
+				dss.NewAAAA = append(dss.NewAAAA, dns.Copy(rr))
+			}
+		}
+	}
+
+	return nil
+}
+
+// computeNewDS computes the complete new DS RRset for replace mode
+// by deriving DS records from the current KSK DNSKEYs in the zone.
+func computeNewDS(dss *DelegationSyncStatus, zd *ZoneData) {
+	if len(dss.DNSKEYAdds) == 0 && len(dss.DNSKEYRemoves) == 0 {
+		return
+	}
+
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil || apex == nil {
+		return
+	}
+
+	var newDS []dns.RR
+	for _, rr := range apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs {
+		if dk, ok := rr.(*dns.DNSKEY); ok {
+			if dk.Flags&dns.SEP != 0 {
+				if ds := dk.ToDS(dns.SHA256); ds != nil {
+					newDS = append(newDS, ds)
+				}
+			}
+		}
+	}
+	dss.NewDS = newDS
 }

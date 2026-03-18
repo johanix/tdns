@@ -15,6 +15,7 @@ import (
 )
 
 var lgEngine = Logger("engine")
+var lgConnRetryEngine = Logger("conn-retry")
 
 type SyncRequest struct {
 	Command      string
@@ -108,6 +109,36 @@ func HsyncEngine(ctx context.Context, conf *Config, msgQs *MsgQs) {
 
 		case req := <-conf.Internal.SyncStatusQ:
 			registry.HandleStatusRequest(req)
+
+		case statusMsg := <-msgQs.StatusUpdate:
+			if statusMsg == nil {
+				break
+			}
+			lgEngine.Info("STATUS-UPDATE received", "zone", statusMsg.Zone, "subtype", statusMsg.SubType, "sender", statusMsg.SenderID)
+			switch statusMsg.SubType {
+			case "ns-changed", "ksk-changed":
+				// Only the leader agent should sync delegation with parent
+				lem := conf.Internal.LeaderElectionManager
+				if lem != nil && !lem.IsLeader(ZoneName(statusMsg.Zone)) {
+					lgEngine.Info("STATUS-UPDATE: not the delegation sync leader, ignoring", "zone", statusMsg.Zone, "subtype", statusMsg.SubType)
+					break
+				}
+				zd, exists := Zones.Get(statusMsg.Zone)
+				if !exists {
+					lgEngine.Warn("STATUS-UPDATE: zone not found", "zone", statusMsg.Zone)
+					break
+				}
+				lgEngine.Info("STATUS-UPDATE: enqueuing EXPLICIT-SYNC-DELEGATION", "zone", statusMsg.Zone, "subtype", statusMsg.SubType)
+				zd.DelegationSyncQ <- DelegationSyncRequest{
+					Command:  "EXPLICIT-SYNC-DELEGATION",
+					ZoneName: statusMsg.Zone,
+					ZoneData: zd,
+				}
+			case "parentsync-done":
+				lgEngine.Info("STATUS-UPDATE: parent sync completed by leader", "zone", statusMsg.Zone, "result", statusMsg.Result, "msg", statusMsg.Msg)
+			default:
+				lgEngine.Warn("STATUS-UPDATE: unknown subtype", "zone", statusMsg.Zone, "subtype", statusMsg.SubType)
+			}
 
 		case inventoryMsg := <-msgQs.KeystateInventory:
 			// Proactive KEYSTATE inventory push from signer.
@@ -422,12 +453,13 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 
 		switch ampp.RfiType {
 		case "SYNC":
-			// Remote agent asks us to re-send all our local data.
-			lgEngine.Info("RFI SYNC triggering local resync", "from", ampp.OriginatorID, "zone", ampp.Zone)
+			// Remote agent asks us to re-send our local data — respond only to the requester.
+			lgEngine.Info("RFI SYNC triggering targeted resync", "from", ampp.OriginatorID, "zone", ampp.Zone)
 			sdcmd := &SynchedDataCmd{
-				Cmd:      "resync",
-				Zone:     ZoneName(ampp.Zone),
-				Response: make(chan *SynchedDataCmdResponse, 1),
+				Cmd:         "resync-targeted",
+				Zone:        ZoneName(ampp.Zone),
+				TargetAgent: ampp.OriginatorID,
+				Response:    make(chan *SynchedDataCmdResponse, 1),
 			}
 			synchedDataCmdQ <- sdcmd
 			select {
@@ -971,7 +1003,7 @@ func (ar *AgentRegistry) sendRfiToAgent(agent *Agent, msg *AgentMsgPost) (*Agent
 				Zone:   msg.Zone,
 			}, nil
 		}
-		lgEngine.Warn("DNS transport failed, trying API", "agent", agent.Identity, "err", err)
+		lgConnRetryEngine.Warn("DNS transport failed, trying API", "agent", agent.Identity, "err", err)
 	}
 
 	// Fall back to API transport (synchronous request-response)

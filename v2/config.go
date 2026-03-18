@@ -138,12 +138,17 @@ type MultiProviderConf struct {
 
 	// === Combiner-specific fields ===
 
+	// CombinerOptions: list of combiner-specific option strings parsed at startup.
+	// Known options: "add-signature", "persist-outgoing-serial".
+	CombinerOptionsStrs []string                `yaml:"combiner-options" mapstructure:"combiner-options"`
+	CombinerOptions     map[CombinerOption]bool `yaml:"-" mapstructure:"-"`
+
 	// ChunkQueryEndpoint: "include" | "none"; required when chunk_mode=query (combiner role).
 	ChunkQueryEndpoint string `yaml:"chunk_query_endpoint" mapstructure:"chunk_query_endpoint"`
 	// Signature: template string for a TXT record injected into combined zones (demo feature).
 	// Supports {identity} and {zone} placeholders.
 	Signature    string `yaml:"signature"`
-	AddSignature bool   `yaml:"add-signature" mapstructure:"add-signature"`
+	AddSignature bool   `yaml:"add-signature" mapstructure:"add-signature"` // DEPRECATED: use combiner-options: [add-signature]
 	// ProtectedNamespaces: list of domain suffixes that belong to this provider.
 	// NS records from remote agents whose targets fall within any of these namespaces
 	// are rejected (prevents namespace intrusion).
@@ -153,8 +158,17 @@ type MultiProviderConf struct {
 	// restrictions and allow non-apex owners.
 	ProviderZones []ProviderZoneConf `yaml:"provider-zones" mapstructure:"provider-zones"`
 
+	// === Signer-specific fields ===
+
+	// SignerOptions: list of signer-specific option strings parsed at startup.
+	SignerOptionsStrs []string              `yaml:"signer-options" mapstructure:"signer-options"`
+	SignerOptions     map[SignerOption]bool `yaml:"-" mapstructure:"-"`
+
 	// === Agent-specific fields ===
 
+	// AgentOptions: list of agent-specific option strings parsed at startup.
+	AgentOptionsStrs []string             `yaml:"agent-options" mapstructure:"agent-options"`
+	AgentOptions     map[AgentOption]bool `yaml:"-" mapstructure:"-"`
 	// SupportedMechanisms: List of active transport mechanisms (default: ["api", "dns"] if both configured)
 	SupportedMechanisms []string `yaml:"supported_mechanisms" mapstructure:"supported_mechanisms"`
 	Local               struct {
@@ -528,6 +542,7 @@ type MsgQs struct {
 	EditsResponse     chan *EditsResponseMsg     // incoming EDITS response from combiner
 	ConfigResponse    chan *ConfigResponseMsg    // incoming CONFIG response from peer agent
 	AuditResponse     chan *AuditResponseMsg     // incoming AUDIT response from peer agent
+	StatusUpdate      chan *StatusUpdateMsg      // incoming STATUS-UPDATE notifications
 
 	// OnRemoteConfirmationReady is called when this agent (acting as a remote agent)
 	// receives a combiner confirmation for a sync that originated from another agent.
@@ -557,9 +572,9 @@ type KeystateSignalMsg struct {
 // EditsResponseMsg carries an agent's contributions from combiner back to the agent.
 // Delivered via MsgQs.EditsResponse channel. Modeled on KeystateInventoryMsg.
 type EditsResponseMsg struct {
-	SenderID string
-	Zone     string
-	Records  map[string][]string // owner → []RR strings
+	SenderID     string
+	Zone         string
+	AgentRecords map[string]map[string][]string // agentID → owner → []RR strings
 }
 
 // ConfigResponseMsg carries config data from a peer agent back to the requester.
@@ -577,6 +592,19 @@ type AuditResponseMsg struct {
 	SenderID  string
 	Zone      string
 	AuditData interface{} // Zone data repo snapshot (placeholder)
+}
+
+// StatusUpdateMsg carries a status-update notification.
+// Delivered via MsgQs.StatusUpdate channel.
+// Subtypes: "ns-changed", "ksk-changed", "parentsync-done".
+type StatusUpdateMsg struct {
+	SenderID  string
+	Zone      string
+	SubType   string
+	NSRecords []string
+	DSRecords []string
+	Result    string
+	Msg       string
 }
 
 func (conf *Config) ReloadConfig() (string, error) {

@@ -63,7 +63,11 @@ func SetupLogging(logfile string, logConf LogConf) error {
 	log.SetOutput(bridgeLogger.Writer())
 	log.SetFlags(0) // slog handles formatting; avoid double timestamps
 
-	// Apply per-subsystem levels from config
+	// Suppress noisy connection-retry logging by default (set to Error).
+	// Can be overridden in config via subsystems: { "conn-retry": "debug" }
+	SetSubsystemLevel("conn-retry", slog.LevelError)
+
+	// Apply per-subsystem levels from config (may override defaults above)
 	for name, levelStr := range logConf.Subsystems {
 		SetSubsystemLevel(name, ParseLogLevel(levelStr))
 	}

@@ -152,15 +152,76 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	lgHandler.Debug("setting update type", "zone", zd.ZoneName, "qname", qname)
 	// 1. Is qname the apex of this zone?
 	if qname == zd.ZoneName {
-		dur.Status.Type = "ZONE-UPDATE"
-		zd.Logger.Printf("UpdateResponder: zone %s: qname %s is the apex of this zone",
-			zd.ZoneName, qname)
-		if !zd.Options[OptAllowUpdates] {
-			lgHandler.Warn("zone does not allow updates to auth data, ignoring", "zone", zd.ZoneName, "qname", qname)
-			m.SetRcode(r, dns.RcodeRefused)
-			edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdatesNotAllowed)
-			w.WriteMsg(m)
-			return nil
+		// Per RFC 2136 the QNAME is the zone being updated. Check whether all RRs in the
+		// update section target a single existing child delegation (at or below the delegation
+		// point). If so, this is a child delegation sync, not a zone update.
+		childDel := ""
+		isChildUpdate := len(r.Ns) > 0
+		for _, rr := range r.Ns {
+			ownerName := rr.Header().Name
+			rrtype := rr.Header().Rrtype
+
+			if rrtype == dns.TypeNS || rrtype == dns.TypeDS {
+				// NS and DS must be at a child delegation point
+				if !zd.IsChildDelegation(ownerName) {
+					isChildUpdate = false
+					break
+				}
+				if childDel == "" {
+					childDel = ownerName
+				} else if childDel != ownerName {
+					isChildUpdate = false
+					break
+				}
+			} else {
+				// Glue (A, AAAA, etc.) must be below an existing child delegation.
+				// Walk up the labels to find the delegation point.
+				found := false
+				labels := dns.SplitDomainName(ownerName)
+				for i := 1; i < len(labels); i++ {
+					ancestor := dns.Fqdn(strings.Join(labels[i:], "."))
+					if ancestor == zd.ZoneName {
+						break
+					}
+					if zd.IsChildDelegation(ancestor) {
+						if childDel == "" {
+							childDel = ancestor
+						} else if childDel != ancestor {
+							isChildUpdate = false
+							break
+						}
+						found = true
+						break
+					}
+				}
+				if !found {
+					isChildUpdate = false
+					break
+				}
+			}
+		}
+
+		if isChildUpdate && childDel != "" {
+			lgHandler.Info("update targets child delegation", "child", childDel)
+			dur.Status.Type = "CHILD-UPDATE"
+			if !zd.Options[OptAllowChildUpdates] {
+				lgHandler.Warn("zone does not allow child updates, ignoring", "zone", zd.ZoneName, "child", childDel)
+				m.SetRcode(r, dns.RcodeRefused)
+				edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdatesNotAllowed)
+				w.WriteMsg(m)
+				return nil
+			}
+		} else {
+			dur.Status.Type = "ZONE-UPDATE"
+			zd.Logger.Printf("UpdateResponder: zone %s: qname %s is the apex of this zone",
+				zd.ZoneName, qname)
+			if !zd.Options[OptAllowUpdates] {
+				lgHandler.Warn("zone does not allow updates to auth data, ignoring", "zone", zd.ZoneName, "qname", qname)
+				m.SetRcode(r, dns.RcodeRefused)
+				edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdatesNotAllowed)
+				w.WriteMsg(m)
+				return nil
+			}
 		}
 		// 2. Is qname a zone cut for a child zone? If so, we classify this as a CHILD-UPDATE
 		// even though it may be a KEY update and hence really a TRUSTSTORE-UPDATE. But we don't know that until
@@ -181,6 +242,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 			if !zd.Options[OptAllowChildUpdates] {
 				lgHandler.Warn("zone does not allow child updates, ignoring", "zone", zd.ZoneName, "qname", qname)
 				m.SetRcode(r, dns.RcodeRefused)
+				edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdatesNotAllowed)
 				w.WriteMsg(m)
 				return nil
 			}
@@ -337,19 +399,19 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 
 			if rrtype != dns.TypeKEY {
 				us.Approved = false
-				us.Log("child update rejected: signed by untrusted key", "rrtype", dns.TypeToString[rrtype])
+				lgHandler.Warn("child update rejected: signed by untrusted key", "rrtype", dns.TypeToString[rrtype])
 				return false, false, nil
 			}
 
 			if rrclass == dns.ClassNONE || rrclass == dns.ClassANY {
 				us.Approved = false
-				us.Log("child update rejected: KEY delete signed by untrusted key")
+				lgHandler.Warn("child update rejected: KEY delete signed by untrusted key")
 				return false, false, nil
 			}
 
 			if len(r.Ns) != 1 {
 				us.Approved = false
-				us.Log("child update rejected: only a single KEY record allowed from untrusted key")
+				lgHandler.Warn("child update rejected: only a single KEY record allowed from untrusted key")
 				return false, false, nil
 			}
 
@@ -497,14 +559,6 @@ func (zd *ZoneData) ApproveAuthUpdate(zone string, us *UpdateStatus, r *dns.Msg)
 	return true, true, nil
 }
 
-func (dur *DnsUpdateRequest) Log(msg string, args ...any) {
-	lgHandler.Info(msg, args...)
-}
-
-func (us *UpdateStatus) Log(msg string, args ...any) {
-	lgHandler.Info(msg, args...)
-}
-
 // Trust updates are either validated updates (signed by already trusted key) or unvalidated
 // (selfsigned initial uploads of key). In both cases the update section must only contain a
 // single KEY RR.
@@ -521,7 +575,7 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 
 	if len(r.Ns) != 1 {
 		us.Approved = false
-		us.Log("trust update rejected: only a single KEY record allowed")
+		lgHandler.Warn("trust update rejected: only a single KEY record allowed")
 		return false, false, nil
 	}
 

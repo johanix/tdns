@@ -82,6 +82,23 @@ func (conf *Config) parentSyncAfterKeyPublication(zone ZoneName, keyName string,
 			lgElect.Info("parentSyncAfterKeyPublication: parent trusts our key",
 				"zone", zone, "keyid", keyid)
 			updateParentState(kdb, keyName, keyid, keyState)
+
+			// Post-bootstrap: verify delegation data is in sync with parent.
+			// Enqueue EXPLICIT-SYNC-DELEGATION which queries the parent and
+			// only syncs if there is a real delta.
+			if delsyncq := conf.Internal.DelegationSyncQ; delsyncq != nil {
+				zd, exists := Zones.Get(string(zone))
+				if exists {
+					lgElect.Info("parentSyncAfterKeyPublication: enqueuing post-bootstrap delegation verification", "zone", zone)
+					delsyncq <- DelegationSyncRequest{
+						Command:  "EXPLICIT-SYNC-DELEGATION",
+						ZoneName: string(zone),
+						ZoneData: zd,
+					}
+				} else {
+					lgElect.Warn("parentSyncAfterKeyPublication: zone not found, skipping delegation verification", "zone", zone)
+				}
+			}
 			return
 
 		case edns0.KeyStateUnknown:

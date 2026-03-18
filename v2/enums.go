@@ -124,6 +124,33 @@ var StringToAuthOption = map[string]AuthOption{
 	"parent-update": AuthOptParentUpdate,
 }
 
+type CombinerOption uint8
+
+const (
+	CombinerOptAddSignature CombinerOption = iota + 1
+	CombinerOptPersistOutgoingSerial
+)
+
+var CombinerOptionToString = map[CombinerOption]string{
+	CombinerOptAddSignature:          "add-signature",
+	CombinerOptPersistOutgoingSerial: "persist-outgoing-serial",
+}
+
+var StringToCombinerOption = map[string]CombinerOption{
+	"add-signature":           CombinerOptAddSignature,
+	"persist-outgoing-serial": CombinerOptPersistOutgoingSerial,
+}
+
+type SignerOption uint8
+
+var SignerOptionToString = map[SignerOption]string{}
+var StringToSignerOption = map[string]SignerOption{}
+
+type AgentOption uint8
+
+var AgentOptionToString = map[AgentOption]string{}
+var StringToAgentOption = map[string]AgentOption{}
+
 type AppType uint8
 
 const (

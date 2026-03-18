@@ -40,7 +40,7 @@ Example:
 		zone, _ := cmd.Flags().GetString("zone")
 
 		if zone != "" {
-			showDetailedZoneStatus(zone)
+			showDetailedZoneStatus(dns.Fqdn(zone))
 		} else {
 			showSyncedDataSummary()
 		}
@@ -185,21 +185,26 @@ func showDetailedZoneStatus(zone string) {
 						rows = append(rows, fmt.Sprintf("%s | %s | %s",
 							rrTypeName, state, rrDisplay))
 
-						// Detail row: KeyId for DNSKEY records
-						if rrtype == dns.TypeDNSKEY {
-							if rr, err := dns.NewRR(info.RR); err == nil {
-								if dnskey, ok := rr.(*dns.DNSKEY); ok {
-									rows = append(rows, fmt.Sprintf(" | | KeyId: %d", dnskey.KeyTag()))
-								}
-							}
-						}
-
-						// Detail row: Updated timestamp
+						// Detail row: compact details line
 						updatedStr := info.UpdatedAt
 						if t, err := time.Parse(time.RFC3339, info.UpdatedAt); err == nil {
 							updatedStr = t.Format("2006-01-02 15:04:05")
 						}
-						rows = append(rows, fmt.Sprintf(" | | Updated: %s", updatedStr))
+						if rrtype == dns.TypeDNSKEY {
+							keyId := ""
+							if rr, err := dns.NewRR(info.RR); err == nil {
+								if dnskey, ok := rr.(*dns.DNSKEY); ok {
+									keyId = fmt.Sprintf("KeyId: %d", dnskey.KeyTag())
+								}
+							}
+							keyState := ""
+							if info.KeyState != "" {
+								keyState = fmt.Sprintf("State: %s", info.KeyState)
+							}
+							rows = append(rows, fmt.Sprintf(" | | %s  %s  Updated: %s", keyId, keyState, updatedStr))
+						} else {
+							rows = append(rows, fmt.Sprintf(" | | Updated: %s", updatedStr))
+						}
 
 						// For PENDING: show which recipients are still pending
 						if info.State == "pending" && len(info.Confirmations) > 0 {

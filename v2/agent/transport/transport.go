@@ -248,11 +248,11 @@ type KeystateResponse struct {
 // EditsRequest carries an agent's current contributions from the combiner back to the agent.
 // Modeled on KeystateRequest. Sent by the combiner in response to an RFI EDITS.
 type EditsRequest struct {
-	SenderID  string              // Combiner identity
-	Zone      string              // Zone (FQDN)
-	Records   map[string][]string // Agent's contributions (owner → []RR strings)
-	Message   string              // Optional status
-	Timestamp time.Time
+	SenderID     string                         // Combiner identity
+	Zone         string                         // Zone (FQDN)
+	AgentRecords map[string]map[string][]string // All agents' contributions (agentID → owner → []RR strings)
+	Message      string                         // Optional status
+	Timestamp    time.Time
 }
 
 // EditsResponse acknowledges receipt of an EDITS message.

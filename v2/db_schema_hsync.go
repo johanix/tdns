@@ -286,6 +286,14 @@ var HsyncTables = map[string]string{
 		updated_at  INTEGER NOT NULL,
 		UNIQUE(zone, sender_id, owner, rrtype, rr)
 	)`,
+
+	// OutgoingSerials persists the combiner's outgoing SOA serial per zone.
+	// Prevents serial regression on restart (which causes signers to ignore NOTIFYs).
+	"OutgoingSerials": `CREATE TABLE IF NOT EXISTS 'OutgoingSerials' (
+		zone       TEXT NOT NULL PRIMARY KEY,
+		serial     INTEGER NOT NULL,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`,
 }
 
 // HsyncIndexes defines indexes for the HSYNC tables.
@@ -399,6 +407,7 @@ func (kdb *KeyDB) InitCombinerEditTables() error {
 		"CombinerRejectedEdits",
 		"CombinerContributions",
 		"CombinerPublishInstructions",
+		"OutgoingSerials",
 	}
 
 	for _, name := range combinerTables {

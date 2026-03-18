@@ -6,9 +6,11 @@ package cli
 import (
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
+	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
 )
 
@@ -283,12 +285,100 @@ func publishedStatus(b bool) string {
 	return "NOT PUBLISHED"
 }
 
+var agentParentSyncDeltaCmd = &cobra.Command{
+	Use:   "delta",
+	Short: "Compute delta between parent delegation data and child zone data",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+		prefixcmd, _ := getCommandContext("parentsync")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		dr, err := SendDelegationCmd(api, tdns.DelegationPost{
+			Command: "status",
+			Zone:    tdns.Globals.Zonename,
+		})
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		if dr.Error {
+			fmt.Printf("Error: %s\n", dr.ErrorMsg)
+			os.Exit(1)
+		}
+
+		fmt.Printf("%s\n", dr.Msg)
+		if dr.SyncStatus.InSync {
+			fmt.Printf("Delegation information in parent %s is in sync with child %s. No action needed.\n",
+				dr.SyncStatus.Parent, dr.SyncStatus.ZoneName)
+			os.Exit(0)
+		}
+		fmt.Printf("Delegation information in parent %q is NOT in sync with child %q. Changes needed:\n",
+			dr.SyncStatus.Parent, dr.SyncStatus.ZoneName)
+		out := []string{"Change|RR"}
+		for _, rr := range dr.SyncStatus.NsAddsStr {
+			out = append(out, fmt.Sprintf("ADD NS|%s", rr))
+		}
+		for _, rr := range dr.SyncStatus.NsRemovesStr {
+			out = append(out, fmt.Sprintf("DEL NS|%s", rr))
+		}
+		for _, rr := range dr.SyncStatus.AAddsStr {
+			out = append(out, fmt.Sprintf("ADD IPv4 GLUE|%s", rr))
+		}
+		for _, rr := range dr.SyncStatus.ARemovesStr {
+			out = append(out, fmt.Sprintf("DEL IPv4 GLUE|%s", rr))
+		}
+		for _, rr := range dr.SyncStatus.AAAAAddsStr {
+			out = append(out, fmt.Sprintf("ADD IPv6 GLUE|%s", rr))
+		}
+		for _, rr := range dr.SyncStatus.AAAARemovesStr {
+			out = append(out, fmt.Sprintf("DEL IPv6 GLUE|%s", rr))
+		}
+		fmt.Printf("%s\n", columnize.SimpleFormat(out))
+	},
+}
+
+var agentParentSyncSyncCmd = &cobra.Command{
+	Use:   "sync",
+	Short: "Sync delegation data in parent zone via DDNS UPDATE",
+	Run: func(cmd *cobra.Command, args []string) {
+		PrepArgs("zonename")
+		prefixcmd, _ := getCommandContext("parentsync")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		dr, err := SendDelegationCmd(api, tdns.DelegationPost{
+			Command: "sync",
+			Scheme:  scheme,
+			Zone:    tdns.Globals.Zonename,
+		})
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+
+		if dr.Error {
+			fmt.Printf("Error: %s\n", dr.ErrorMsg)
+			os.Exit(1)
+		}
+
+		fmt.Printf("%s\n", dr.Msg)
+	},
+}
+
 func init() {
 	AgentCmd.AddCommand(agentParentSyncCmd)
 	agentParentSyncCmd.AddCommand(agentParentSyncStatusCmd)
 	agentParentSyncCmd.AddCommand(agentParentSyncElectionCmd)
 	agentParentSyncCmd.AddCommand(agentParentSyncBootstrapCmd)
 	agentParentSyncCmd.AddCommand(agentParentSyncInquireCmd)
+	agentParentSyncCmd.AddCommand(agentParentSyncDeltaCmd)
+	agentParentSyncCmd.AddCommand(agentParentSyncSyncCmd)
 	agentParentSyncInquireCmd.AddCommand(agentParentSyncInquireUpdateCmd)
 
 	agentParentSyncStatusCmd.Flags().StringP("zone", "z", "", "Zone name (required)")
@@ -302,4 +392,6 @@ func init() {
 
 	agentParentSyncInquireUpdateCmd.Flags().StringP("zone", "z", "", "Zone name (required)")
 	agentParentSyncInquireUpdateCmd.MarkFlagRequired("zone")
+
+	agentParentSyncSyncCmd.Flags().StringVarP(&schemestr, "scheme", "S", "", "Scheme to use for synchronization of delegation")
 }

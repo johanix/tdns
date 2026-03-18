@@ -217,6 +217,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		EditsResponse:     make(chan *EditsResponseMsg, 10),
 		ConfigResponse:    make(chan *ConfigResponseMsg, 10),
 		AuditResponse:     make(chan *AuditResponseMsg, 10),
+		StatusUpdate:      make(chan *StatusUpdateMsg, 10),
 	}
 	// Create KeyDB channels if KeyDB exists
 	if conf.Internal.KeyDB != nil {

@@ -49,6 +49,12 @@ func SignMsg(m dns.Msg, signer string, sak *Sig0ActiveKeys) (*dns.Msg, error) {
 		return nil, fmt.Errorf("SignMsg: no active SIG(0) keys available")
 	}
 
+	lgSigner.Info("SignMsg: message details before signing", "compress", m.Compress, "extra_count", len(m.Extra), "ns_count", len(m.Ns), "question_count", len(m.Question), "answer_count", len(m.Answer), "id", m.Id)
+	preBuf, preErr := m.Pack()
+	if preErr == nil {
+		lgSigner.Info("SignMsg: packed message before signing", "buflen", len(preBuf), "first32", fmt.Sprintf("%x", preBuf[:min(32, len(preBuf))]))
+	}
+
 	for _, key := range sak.Keys {
 		sigrr := new(dns.SIG)
 		sigrr.Hdr = dns.RR_Header{
@@ -62,12 +68,20 @@ func SignMsg(m dns.Msg, signer string, sak *Sig0ActiveKeys) (*dns.Msg, error) {
 		sigrr.RRSIG.Inception, sigrr.RRSIG.Expiration = sigLifetime(time.Now().UTC(), 60*5) // 5 minutes
 		sigrr.RRSIG.SignerName = signer
 
-		_, err := sigrr.Sign(key.CS, &m)
+		signedBuf, err := sigrr.Sign(key.CS, &m)
 		if err != nil {
 			lgSigner.Error("sig.Sign failed", "signer", signer, "err", err)
 			return nil, err
 		}
+		lgSigner.Info("SignMsg: sig.Sign returned", "signed_buflen", len(signedBuf), "keyid", sigrr.RRSIG.KeyTag, "first32", fmt.Sprintf("%x", signedBuf[:min(32, len(signedBuf))]))
 		m.Extra = append(m.Extra, sigrr)
+	}
+	lgSigner.Info("SignMsg: message details after signing", "extra_count", len(m.Extra))
+	postBuf, postErr := m.Pack()
+	if postErr == nil {
+		lgSigner.Info("SignMsg: packed message after signing (what will be sent)", "buflen", len(postBuf), "first32", fmt.Sprintf("%x", postBuf[:min(32, len(postBuf))]))
+	} else {
+		lgSigner.Error("SignMsg: failed to pack message after signing", "err", postErr)
 	}
 	lgSigner.Debug("signed message", "msg", m.String())
 
