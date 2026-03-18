@@ -62,7 +62,7 @@ func NotifyHandler(ctx context.Context, conf *Config) error {
 					lgHandler.Info("DnsNotifyResponderEngine: dnsnotifyq closed")
 					return
 				}
-				NotifyResponder(ctx, &dhr, zonech, scannerq, conf.Internal.ImrEngine)
+				NotifyResponder(ctx, &dhr, zonech, scannerq)
 			}
 
 		}
@@ -76,7 +76,7 @@ func NotifyHandler(ctx context.Context, conf *Config) error {
 // TODO: Add per-source rate limiting for NOTIFY messages. An attacker could flood
 // the server with NOTIFY messages to trigger excessive zone refreshes and scanner
 // scans. Consider a token bucket or sliding window rate limiter keyed by source IP.
-func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan ZoneRefresher, scannerq chan ScanRequest, imr *Imr) error {
+func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan ZoneRefresher, scannerq chan ScanRequest) error {
 
 	qname := dnr.Qname
 	// ntype := dnr.Msg.Question[0].Qtype
@@ -130,37 +130,27 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 		targetZoneName = zd.ZoneName
 
 	case dns.TypeCDS, dns.TypeCSYNC:
-		// For CDS and CSYNC, target the parent zone of qname
-		// Use ParentZone() to find the parent zone name via DNS lookup
-		if imr == nil {
-			lgHandler.Error("NOTIFY(CDS/CSYNC) requires IMR engine, not yet available", "qname", qname)
-			m.SetRcode(dnr.Msg, dns.RcodeServerFailure)
+		// For CDS and CSYNC, find the parent zone locally.
+		// Strip first label and use FindZone to walk up.
+		labels := strings.SplitN(qname, ".", 2)
+		if len(labels) < 2 || labels[1] == "" {
+			lgHandler.Warn("NOTIFY(CDS/CSYNC) qname has no parent", "qname", qname)
+			m.SetRcode(dnr.Msg, dns.RcodeRefused)
 			dnr.ResponseWriter.WriteMsg(m)
 			return nil
 		}
-
-		parentZoneName, err := imr.ParentZone(qname)
-		if err != nil {
-			lgHandler.Error("error finding parent zone", "qname", qname, "err", err)
-			m.SetRcode(dnr.Msg, dns.RcodeServerFailure)
+		zd, _ = FindZone(labels[1])
+		if zd == nil {
+			lgHandler.Warn("parent zone not authoritative, refusing NOTIFY", "type", dns.TypeToString[ntype], "qname", qname)
+			m.SetRcode(dnr.Msg, dns.RcodeNotAuth)
 			dnr.ResponseWriter.WriteMsg(m)
 			return nil
 		}
-
-		// Look up the parent zone in our authoritative zones
-		var ok bool
-		zd, ok = Zones.Get(parentZoneName)
-		if !ok {
-			// Try case-insensitive lookup
-			parentZoneNameLower := strings.ToLower(parentZoneName)
-			zd, ok = Zones.Get(parentZoneNameLower)
-			if !ok {
-				lgHandler.Warn("parent zone not authoritative, refusing NOTIFY", "type", dns.TypeToString[ntype], "qname", qname, "parent", parentZoneName)
-				m.SetRcode(dnr.Msg, dns.RcodeNotAuth)
-				dnr.ResponseWriter.WriteMsg(m)
-				return nil
-			}
-			// Use the correct case from the Zones map (parentZoneName already used for logging above)
+		if !zd.IsChildDelegation(qname) {
+			lgHandler.Warn("qname is not a child delegation in parent zone", "type", dns.TypeToString[ntype], "qname", qname, "parent", zd.ZoneName)
+			m.SetRcode(dnr.Msg, dns.RcodeRefused)
+			dnr.ResponseWriter.WriteMsg(m)
+			return nil
 		}
 		targetZoneName = zd.ZoneName
 

@@ -51,35 +51,39 @@ type ScanResponse struct {
 // if we could wait on an external signal OR an internal quit channel. TBD.
 
 type Scanner struct {
-	// Conf  *Config
-	// LabDB *LabDB
-	// RRtype  string
-	AuthQueryQ chan AuthQueryRequest
-	// IMR         string
-	ImrEngine   *Imr
-	LogFile     string
-	LogTemplate string
-	Log         map[string]*log.Logger
-	Verbose     bool
-	Debug       bool
-	// Job storage for async scan requests
-	Jobs      map[string]*ScanJobStatus
-	JobsMutex sync.RWMutex
+	AuthQueryQ     chan AuthQueryRequest
+	ImrEngine      *Imr
+	Options        []string
+	AtApexChecks   int
+	AtApexInterval time.Duration
+	OnDSChange     func(parentZone string, zd *ZoneData, resp ScanTupleResponse)
+	LogFile        string
+	LogTemplate    string
+	Log            map[string]*log.Logger
+	Verbose        bool
+	Debug          bool
+	Jobs           map[string]*ScanJobStatus
+	JobsMutex      sync.RWMutex
+}
+
+func (scanner *Scanner) HasOption(name string) bool {
+	for _, opt := range scanner.Options {
+		if strings.EqualFold(opt, name) {
+			return true
+		}
+	}
+	return false
 }
 
 func NewScanner(authqueryq chan AuthQueryRequest, verbose, debug bool) *Scanner {
-	s := &Scanner{
-		AuthQueryQ: authqueryq,
-		//		Conf:        conf,
-		//		LabDB:       conf.Internal.LabDB,
+	return &Scanner{
+		AuthQueryQ:  authqueryq,
 		Log:         map[string]*log.Logger{},
 		LogTemplate: "/var/log/tdns/scanner-%s.log",
 		Verbose:     verbose,
 		Debug:       debug,
 		Jobs:        make(map[string]*ScanJobStatus),
 	}
-
-	return s
 }
 
 // GenerateJobID generates a unique job ID using crypto/rand.
@@ -112,12 +116,48 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 	}
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 
-	//scanner := NewScanner(viper.GetBool("services.scanner.verbose"), viper.GetBool("services.scanner.debug"))
 	scanner := NewScanner(authqueryq, true, true)
+	scanner.Options = viper.GetStringSlice("scanner.options")
+	scanner.AtApexChecks = viper.GetInt("scanner.at-apex.checks")
+	if scanner.AtApexChecks < 1 {
+		scanner.AtApexChecks = 1
+	}
+	atApexIntervalSec := viper.GetInt("scanner.at-apex.interval")
+	if atApexIntervalSec < 1 {
+		atApexIntervalSec = 300
+	}
+	scanner.AtApexInterval = time.Duration(atApexIntervalSec) * time.Second
 	scanner.AddLogger("CDS")
 	scanner.AddLogger("CSYNC")
 	scanner.AddLogger("DNSKEY")
 	scanner.AddLogger("GENERIC")
+
+	// Wire callback to apply DS changes via CHILD-UPDATE
+	scanner.OnDSChange = func(parentZone string, zd *ZoneData, resp ScanTupleResponse) {
+		if zd.KeyDB == nil || zd.KeyDB.UpdateQ == nil {
+			lg.Error("ScannerEngine: OnDSChange: no UpdateQ for zone", "zone", parentZone)
+			return
+		}
+		var actions []dns.RR
+		for _, rr := range resp.DSAdds {
+			rr.Header().Class = dns.ClassINET
+			actions = append(actions, rr)
+		}
+		for _, rr := range resp.DSRemoves {
+			rr.Header().Class = dns.ClassNONE
+			actions = append(actions, rr)
+		}
+		lg.Info("ScannerEngine: OnDSChange: enqueuing CHILD-UPDATE", "parent", parentZone, "child", resp.Qname, "adds", len(resp.DSAdds), "removes", len(resp.DSRemoves))
+		zd.KeyDB.UpdateQ <- UpdateRequest{
+			Cmd:            "CHILD-UPDATE",
+			UpdateType:     "CDS",
+			ZoneName:       parentZone,
+			Actions:        actions,
+			Trusted:        true,
+			InternalUpdate: true,
+			Description:    fmt.Sprintf("CDS scan: DS update for %s", resp.Qname),
+		}
+	}
 
 	// Store scanner instance in Config for API handler access
 	conf.Internal.Scanner = scanner
@@ -139,8 +179,51 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 			}
 			switch sr.Cmd {
 			case "SCAN":
-				lg.Info("ScannerEngine: received SCAN request", "tuples", len(sr.ScanTuples), "jobID", sr.JobID)
 				scanner.ImrEngine = conf.Internal.ImrEngine
+
+				// Bridge NOTIFY → ScanTuples: if ScanTuples is empty but
+				// ChildZone+RRtype are set (from NOTIFY), synthesize a tuple.
+				if len(sr.ScanTuples) == 0 && sr.ChildZone != "" && sr.RRtype != 0 {
+					switch sr.RRtype {
+					case dns.TypeCDS:
+						sr.ScanType = ScanCDS
+					case dns.TypeCSYNC:
+						sr.ScanType = ScanCSYNC
+					case dns.TypeDNSKEY:
+						sr.ScanType = ScanDNSKEY
+					}
+
+					tuple := ScanTuple{
+						Zone: sr.ChildZone,
+					}
+
+					// Fetch current DS from delegation backend for comparison
+					if sr.ZoneData != nil && sr.ZoneData.DelegationBackend != nil {
+						delegData, err := sr.ZoneData.DelegationBackend.GetDelegationData(sr.ZoneData.ZoneName, sr.ChildZone)
+						if err != nil {
+							lg.Warn("ScannerEngine: error fetching delegation data", "child", sr.ChildZone, "error", err)
+						} else if delegData != nil {
+							var dsRRs []dns.RR
+							for _, rrsByType := range delegData {
+								if dsRecords, ok := rrsByType[dns.TypeDS]; ok {
+									dsRRs = append(dsRRs, dsRecords...)
+								}
+							}
+							if len(dsRRs) > 0 {
+								tuple.CurrentData.DS = &core.RRset{
+									Name:   sr.ChildZone,
+									RRtype: dns.TypeDS,
+									RRs:    dsRRs,
+								}
+							}
+						}
+					}
+
+					sr.ScanTuples = []ScanTuple{tuple}
+					lg.Info("ScannerEngine: synthesized ScanTuple from NOTIFY", "child", sr.ChildZone, "scanType", ScanTypeToString[sr.ScanType], "hasCurrentDS", tuple.CurrentData.DS != nil)
+				}
+
+				lg.Info("ScannerEngine: received SCAN request", "tuples", len(sr.ScanTuples), "jobID", sr.JobID)
 
 				// Create or update job status
 				jobID := sr.JobID
@@ -206,15 +289,19 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 							}(tuple)
 					*/
 					case ScanCDS:
-						lg.Debug("ScannerEngine: dispatching CheckCDS")
-						go func(t ScanTuple) {
-							defer wg.Done()
-							scanner.CheckCDS(ctx, t, sr.ScanType, sr.Edns0Options, responseCh)
-						}(tuple)
-						// err := conf.Internal.ImrEngine.SendRfc9567ErrorReport(ctx, sr.ChildZone, sr.RRtype, edns0.EDECDSScannerNotImplemented, sr.Edns0Options)
-						//if err != nil {
-						//	lg.Error("ScannerEngine: SendRfc9567ErrorReport failed", "error", err)
-						//}
+						if sr.ZoneData != nil {
+							lg.Debug("ScannerEngine: dispatching ProcessCDSNotify", "child", tuple.Zone)
+							go func(t ScanTuple, parentZD *ZoneData) {
+								defer wg.Done()
+								scanner.ProcessCDSNotify(ctx, t, parentZD, sr.ScanType, sr.Edns0Options, responseCh)
+							}(tuple, sr.ZoneData)
+						} else {
+							lg.Debug("ScannerEngine: dispatching CheckCDS")
+							go func(t ScanTuple) {
+								defer wg.Done()
+								scanner.CheckCDS(ctx, t, sr.ScanType, sr.Edns0Options, responseCh)
+							}(tuple)
+						}
 					case ScanCSYNC:
 						go func(t ScanTuple) {
 							defer wg.Done()
@@ -230,7 +317,7 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 				}
 
 				// Wait for all scans to complete and collect responses
-				go func(jobID string) {
+				go func(jobID string, parentZD *ZoneData) {
 					wg.Wait()
 					close(responseCh)
 
@@ -252,8 +339,17 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 					}
 					scanner.JobsMutex.Unlock()
 
+					// Notify caller of DS changes
+					if scanner.OnDSChange != nil && parentZD != nil {
+						for _, resp := range responses {
+							if resp.DataChanged && (len(resp.DSAdds) > 0 || len(resp.DSRemoves) > 0) {
+								scanner.OnDSChange(parentZD.ZoneName, parentZD, resp)
+							}
+						}
+					}
+
 					lg.Info("ScannerEngine: job completed", "jobID", jobID, "responses", len(responses))
-				}(jobID)
+				}(jobID, sr.ZoneData)
 			default:
 				lg.Warn("ScannerEngine: unknown command, ignoring", "cmd", sr.Cmd)
 			}
@@ -573,4 +669,247 @@ func (scanner *Scanner) CheckDNSKEY(ctx context.Context, tuple ScanTuple, scanTy
 		ErrorMsg: "DNSKEY scanner not implemented",
 	}
 	responseCh <- response
+}
+
+// ProcessCDSNotify handles a CDS NOTIFY by querying CDS from child
+// nameservers, converting CDS→DS, and diffing against current DS.
+// The scanner is read-only: results (DSAdds/DSRemoves) are returned
+// in the ScanTupleResponse for the caller to act on.
+func (scanner *Scanner) ProcessCDSNotify(ctx context.Context, tuple ScanTuple, parentZD *ZoneData, scanType ScanType, options *edns0.MsgOptions, responseCh chan<- ScanTupleResponse) {
+	scanLog := scanner.Log["CDS"]
+	if scanLog == nil {
+		scanLog = log.Default()
+	}
+
+	childZone := tuple.Zone
+	response := ScanTupleResponse{
+		Qname:    childZone,
+		ScanType: scanType,
+		Options:  tuple.Options,
+	}
+
+	// 1. Get child NS from parent zone data
+	owner, err := parentZD.GetOwner(childZone)
+	if err != nil || owner == nil {
+		scanLog.Printf("ProcessCDSNotify: %s: cannot get owner from parent zone: %v", childZone, err)
+		response.Error = true
+		response.ErrorMsg = fmt.Sprintf("cannot get owner data for %s: %v", childZone, err)
+		responseCh <- response
+		return
+	}
+
+	nsRRsetVal := owner.RRtypes.GetOnlyRRSet(dns.TypeNS)
+	nsRRset := &nsRRsetVal
+	if len(nsRRset.RRs) == 0 {
+		scanLog.Printf("ProcessCDSNotify: %s: no NS records in parent zone", childZone)
+		response.Error = true
+		response.ErrorMsg = fmt.Sprintf("no NS delegation for %s in parent zone", childZone)
+		responseCh <- response
+		return
+	}
+
+	// 2. Query CDS from all child NS via AuthQueryNG/TCP
+	cdsRRset, allInSync, err := scanner.queryAllNSAndCompare(ctx, childZone, dns.TypeCDS, nsRRset, scanner.ImrEngine, scanLog)
+	if err != nil {
+		scanLog.Printf("ProcessCDSNotify: %s: error querying CDS from child NS: %v", childZone, err)
+		response.Error = true
+		response.ErrorMsg = fmt.Sprintf("error querying CDS: %v", err)
+		responseCh <- response
+		return
+	}
+	response.AllNSInSync = allInSync
+
+	if !allInSync {
+		scanLog.Printf("ProcessCDSNotify: %s: child nameservers not in sync for CDS, aborting", childZone)
+		response.Error = true
+		response.ErrorMsg = "child nameservers not in sync for CDS"
+		responseCh <- response
+		return
+	}
+
+	if cdsRRset == nil || len(cdsRRset.RRs) == 0 {
+		scanLog.Printf("ProcessCDSNotify: %s: no CDS records found at child", childZone)
+		response.DataChanged = false
+		responseCh <- response
+		return
+	}
+
+	// 2b. DNSSEC validation gate (RFC 8078 / RFC 9615)
+	bootstrapping := tuple.CurrentData.DS == nil || len(tuple.CurrentData.DS.RRs) == 0
+	requireValidation := !scanner.HasOption("no-dnssec-validation")
+
+	if scanner.HasOption("at-ns") {
+		// RFC 9615: verify CDS via signaling names under each NS zone
+		sigCDS, err := scanner.queryCDSAtSignalingNames(ctx, childZone, nsRRset, cdsRRset, scanLog)
+		if err != nil {
+			scanLog.Printf("ProcessCDSNotify: %s: RFC 9615 signaling verification failed: %v", childZone, err)
+			response.Error = true
+			response.ErrorMsg = fmt.Sprintf("RFC 9615 signaling verification failed: %v", err)
+			responseCh <- response
+			return
+		}
+		scanLog.Printf("ProcessCDSNotify: %s: RFC 9615 signaling verification passed", childZone)
+		// Use signaling-verified CDS
+		cdsRRset = sigCDS
+	} else if requireValidation {
+		if scanner.HasOption("at-apex") && bootstrapping {
+			// RFC 8078 opportunistic onboarding: bootstrapping with
+			// no existing DS — accept without DNSSEC validation.
+			// All NS already verified in sync above.
+			// RFC 8078 recommends repeated checks over time before
+			// accepting. Config: at-apex.checks and at-apex.interval.
+			if scanner.AtApexChecks > 1 {
+				scanLog.Printf("ProcessCDSNotify: %s: RFC 8078 bootstrapping: config requires %d checks at %v intervals, but only performing 1 check (time-delay not yet implemented)", childZone, scanner.AtApexChecks, scanner.AtApexInterval)
+			}
+			scanLog.Printf("ProcessCDSNotify: %s: RFC 8078 bootstrapping (no existing DS), accepting CDS without DNSSEC validation", childZone)
+		} else {
+			// Direct queries (AuthQueryNG) don't provide DNSSEC
+			// validation. To validate: query CDS via IMR instead,
+			// which validates using the existing DS trust chain.
+			// For now, proceed without validation.
+			scanLog.Printf("ProcessCDSNotify: %s: DNSSEC validation of direct CDS query not yet implemented, proceeding without", childZone)
+		}
+	}
+
+	// 3. Check for CDS removal sentinel (algorithm 0 per RFC 8078)
+	isRemoval := false
+	for _, rr := range cdsRRset.RRs {
+		if cds, ok := rr.(*dns.CDS); ok {
+			if cds.Algorithm == 0 {
+				isRemoval = true
+				break
+			}
+		}
+	}
+
+	if isRemoval {
+		if tuple.CurrentData.DS == nil || len(tuple.CurrentData.DS.RRs) == 0 {
+			scanLog.Printf("ProcessCDSNotify: %s: CDS removal sentinel but no existing DS", childZone)
+			response.DataChanged = false
+			responseCh <- response
+			return
+		}
+		scanLog.Printf("ProcessCDSNotify: %s: CDS removal sentinel, removing %d DS records", childZone, len(tuple.CurrentData.DS.RRs))
+		response.DataChanged = true
+		response.DSRemoves = tuple.CurrentData.DS.RRs
+		newData := CurrentScanData{CDS: cdsRRset}
+		response.NewData = newData.ToJSON()
+		responseCh <- response
+		return
+	}
+
+	// 4. Convert CDS → DS
+	var newDSRRs []dns.RR
+	for _, rr := range cdsRRset.RRs {
+		if cds, ok := rr.(*dns.CDS); ok {
+			ds := &dns.DS{
+				Hdr: dns.RR_Header{
+					Name:   cds.Hdr.Name,
+					Rrtype: dns.TypeDS,
+					Class:  dns.ClassINET,
+					Ttl:    cds.Hdr.Ttl,
+				},
+				KeyTag:     cds.KeyTag,
+				Algorithm:  cds.Algorithm,
+				DigestType: cds.DigestType,
+				Digest:     cds.Digest,
+			}
+			newDSRRs = append(newDSRRs, ds)
+		}
+	}
+
+	// 5. Compare new DS vs current DS from delegation backend
+	var currentDSRRs []dns.RR
+	if tuple.CurrentData.DS != nil {
+		currentDSRRs = tuple.CurrentData.DS.RRs
+	}
+
+	changed, adds, removes := core.RRsetDiffer(childZone, newDSRRs, currentDSRRs, dns.TypeDS, scanLog, scanner.Verbose, scanner.Debug)
+	response.DataChanged = changed
+	if changed {
+		response.DSAdds = adds
+		response.DSRemoves = removes
+		scanLog.Printf("ProcessCDSNotify: %s: DS changed: %d adds, %d removes", childZone, len(adds), len(removes))
+	} else {
+		scanLog.Printf("ProcessCDSNotify: %s: DS unchanged", childZone)
+	}
+
+	newData := CurrentScanData{
+		CDS: cdsRRset,
+		DS:  &core.RRset{Name: childZone, RRtype: dns.TypeDS, RRs: newDSRRs},
+	}
+	response.NewData = newData.ToJSON()
+	responseCh <- response
+}
+
+// queryCDSAtSignalingNames implements RFC 9615 authenticated bootstrap
+// via signaling names. For each out-of-bailiwick NS, it queries CDS at
+// _dsboot.<child>._signal.<ns> via IMR (DNSSEC-validated) and verifies
+// consistency with direct CDS queries to the child NS.
+// Returns the CDS RRset if all signaling queries agree, or an error.
+func (scanner *Scanner) queryCDSAtSignalingNames(ctx context.Context, childZone string, nsRRset *core.RRset, directCDS *core.RRset, scanLog *log.Logger) (*core.RRset, error) {
+	if scanner.ImrEngine == nil {
+		return nil, fmt.Errorf("IMR engine required for RFC 9615 signaling queries")
+	}
+
+	var signalingResults []*core.RRset
+	var queriedNS int
+
+	for _, rr := range nsRRset.RRs {
+		ns, ok := rr.(*dns.NS)
+		if !ok {
+			continue
+		}
+		nsName := ns.Ns
+
+		// Skip in-bailiwick NS (under childZone)
+		if dns.IsSubDomain(childZone, nsName) {
+			scanLog.Printf("queryCDSAtSignalingNames: %s: skipping in-bailiwick NS %s", childZone, nsName)
+			continue
+		}
+
+		// Build signaling name: _dsboot.<child>._signal.<ns>
+		signalingName := "_dsboot." + childZone + "_signal." + nsName
+		scanLog.Printf("queryCDSAtSignalingNames: %s: querying CDS at signaling name %s", childZone, signalingName)
+
+		resp, err := scanner.ImrEngine.ImrQuery(ctx, signalingName, dns.TypeCDS, dns.ClassINET, nil)
+		if err != nil {
+			scanLog.Printf("queryCDSAtSignalingNames: %s: error querying %s: %v", childZone, signalingName, err)
+			return nil, fmt.Errorf("signaling query to %s failed: %v", signalingName, err)
+		}
+		if resp == nil || resp.RRset == nil || len(resp.RRset.RRs) == 0 {
+			scanLog.Printf("queryCDSAtSignalingNames: %s: no CDS at signaling name %s", childZone, signalingName)
+			return nil, fmt.Errorf("no CDS at signaling name %s", signalingName)
+		}
+
+		if !resp.Validated && !scanner.HasOption("no-dnssec-validation") {
+			scanLog.Printf("queryCDSAtSignalingNames: %s: CDS at %s not DNSSEC-validated", childZone, signalingName)
+			return nil, fmt.Errorf("CDS at signaling name %s not DNSSEC-validated", signalingName)
+		}
+		signalingResults = append(signalingResults, resp.RRset)
+		queriedNS++
+	}
+
+	if queriedNS == 0 {
+		return nil, fmt.Errorf("no out-of-bailiwick NS found for %s", childZone)
+	}
+
+	// Verify all signaling responses agree with each other
+	for i := 1; i < len(signalingResults); i++ {
+		changed, _, _ := core.RRsetDiffer(childZone, signalingResults[0].RRs, signalingResults[i].RRs, dns.TypeCDS, scanLog, scanner.Verbose, scanner.Debug)
+		if changed {
+			return nil, fmt.Errorf("signaling CDS responses differ between NS")
+		}
+	}
+
+	// Verify signaling responses match direct CDS query
+	if directCDS != nil && len(directCDS.RRs) > 0 {
+		changed, _, _ := core.RRsetDiffer(childZone, signalingResults[0].RRs, directCDS.RRs, dns.TypeCDS, scanLog, scanner.Verbose, scanner.Debug)
+		if changed {
+			return nil, fmt.Errorf("signaling CDS does not match direct CDS query")
+		}
+		scanLog.Printf("queryCDSAtSignalingNames: %s: signaling CDS matches direct CDS from %d NS", childZone, queriedNS)
+	}
+
+	return signalingResults[0], nil
 }

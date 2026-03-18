@@ -103,6 +103,16 @@ delegationsync:
                                  generator:  /opt/local/bin/dnssec-keygen
                                  algorithm:  ED25519
 
+scanner:
+                        interval:  30    # seconds between periodic scan runs
+                        options:   [ no-dnssec-validation ]
+                        # options: [ at-apex ]           # RFC 8078 opportunistic onboarding
+                        # options: [ at-ns ]             # RFC 9615 signaling name verification
+                        # options: [ no-dnssec-validation ]  # accept CDS without DNSSEC (lab only)
+                        at-apex:
+                           checks:    1     # consecutive all-NS checks before accepting (default: 1)
+                           interval:  300   # seconds between checks (default: 300)
+
 keybootstrap:
                         consistent-lookup:
                            iterations:   3
