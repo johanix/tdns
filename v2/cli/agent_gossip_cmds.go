@@ -90,8 +90,127 @@ var agentGossipGroupListCmd = &cobra.Command{
 	},
 }
 
+var gossipGroupStateName string
+
+var agentGossipGroupStateCmd = &cobra.Command{
+	Use:   "state",
+	Short: "Show gossip state matrix for a provider group",
+	Long: `Display the NxN state matrix for a provider group.
+Each row is a reporting agent; each column shows that reporter's
+view of another agent's state. A healthy group shows OPERATIONAL
+in every non-diagonal cell.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		if gossipGroupStateName == "" {
+			log.Fatal("--group flag is required")
+		}
+
+		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
+			Command: "gossip-group-state",
+			Data: map[string]interface{}{
+				"group": gossipGroupStateName,
+			},
+		}, "gossip")
+		if err != nil {
+			log.Fatalf("Request failed: %v", err)
+		}
+		if amr.Error {
+			fmt.Fprintf(os.Stderr, "Error: %s\n", amr.ErrorMsg)
+			os.Exit(1)
+		}
+
+		data, ok := amr.Data.(map[string]interface{})
+		if !ok {
+			fmt.Println("No data received")
+			return
+		}
+
+		// Print header
+		groupName, _ := data["group_name"].(string)
+		groupHash, _ := data["group_hash"].(string)
+		fmt.Printf("Group: %s (hash: %s)\n", groupName, groupHash)
+
+		// Print election state if present
+		if el, ok := data["election"].(map[string]interface{}); ok {
+			leader, _ := el["leader"].(string)
+			term, _ := el["term"].(float64)
+			expiresIn, _ := el["expires_in"].(string)
+			if leader != "" {
+				fmt.Printf("Leader: %s (term %d, expires in %s)\n", leader, int(term), expiresIn)
+			}
+		}
+		fmt.Println()
+
+		// Get members list
+		var members []string
+		if mlist, ok := data["members"].([]interface{}); ok {
+			for _, m := range mlist {
+				if s, ok := m.(string); ok {
+					members = append(members, s)
+				}
+			}
+		}
+
+		if len(members) == 0 {
+			fmt.Println("No members found")
+			return
+		}
+
+		// Compute short names for columns (use last two labels of FQDN)
+		shortNames := make(map[string]string)
+		for _, m := range members {
+			parts := strings.Split(strings.TrimSuffix(m, "."), ".")
+			if len(parts) >= 2 {
+				shortNames[m] = parts[len(parts)-2] + "." + parts[len(parts)-1]
+			} else {
+				shortNames[m] = m
+			}
+		}
+
+		// Determine column width
+		colWidth := 14
+		for _, sn := range shortNames {
+			if len(sn)+2 > colWidth {
+				colWidth = len(sn) + 2
+			}
+		}
+
+		// Print column headers
+		fmt.Printf("%-20s", "REPORTER / PEER")
+		for _, m := range members {
+			fmt.Printf("%-*s", colWidth, shortNames[m])
+		}
+		fmt.Printf("%-6s\n", "AGE")
+
+		// Print matrix rows
+		matrix, _ := data["matrix"].([]interface{})
+		for _, row := range matrix {
+			r, ok := row.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			reporter, _ := r["reporter"].(string)
+			age, _ := r["age"].(string)
+			peerStates, _ := r["peer_states"].(map[string]interface{})
+
+			fmt.Printf("%-20s", shortNames[reporter])
+			for _, m := range members {
+				if m == reporter {
+					fmt.Printf("%-*s", colWidth, "—")
+				} else if state, ok := peerStates[m].(string); ok {
+					fmt.Printf("%-*s", colWidth, state)
+				} else {
+					fmt.Printf("%-*s", colWidth, "?")
+				}
+			}
+			fmt.Printf("%-6s\n", age)
+		}
+	},
+}
+
 func init() {
 	AgentCmd.AddCommand(agentGossipCmd)
 	agentGossipCmd.AddCommand(agentGossipGroupCmd)
 	agentGossipGroupCmd.AddCommand(agentGossipGroupListCmd)
+	agentGossipGroupCmd.AddCommand(agentGossipGroupStateCmd)
+	agentGossipGroupStateCmd.Flags().StringVar(&gossipGroupStateName, "group", "", "Provider group name or hash (required)")
 }

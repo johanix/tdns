@@ -37,6 +37,11 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport) {
 }
 
 func (ar *AgentRegistry) SendHeartbeats() {
+	// Refresh local gossip state before sending beats
+	if ar.GossipStateTable != nil && ar.ProviderGroupManager != nil {
+		ar.GossipStateTable.RefreshLocalStates(ar, ar.ProviderGroupManager)
+	}
+
 	// log.Printf("HsyncEngine: Sending heartbeats to INTRODUCED or OPERATIONAL agents")
 	for _, a := range ar.S.Items() {
 		// Infra peers (combiner, signer) are handled by StartInfraBeatLoop at lower frequency.

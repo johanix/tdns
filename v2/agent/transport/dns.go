@@ -289,6 +289,7 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 		YourIdentity: peer.ID,
 		Time:         req.Timestamp,
 		Zones:        sharedZones, // Include shared zones for authorization
+		Gossip:       req.Gossip,
 	}
 
 	payloadJSON, err := json.Marshal(payload)
@@ -1228,12 +1229,13 @@ type DnsBeatPayload struct {
 	State     string `json:"state,omitempty"`
 
 	// Standard fields
-	MessageType    string   `json:"MessageType"` // "beat"
-	MyIdentity     string   `json:"MyIdentity"`
-	YourIdentity   string   `json:"YourIdentity"`
-	MyBeatInterval uint32   `json:"MyBeatInterval"`
-	Zones          []string `json:"Zones"`
-	Time           string   `json:"Time"` // RFC3339
+	MessageType    string          `json:"MessageType"` // "beat"
+	MyIdentity     string          `json:"MyIdentity"`
+	YourIdentity   string          `json:"YourIdentity"`
+	MyBeatInterval uint32          `json:"MyBeatInterval"`
+	Zones          []string        `json:"Zones"`
+	Time           string          `json:"Time"`             // RFC3339
+	Gossip         json.RawMessage `json:"Gossip,omitempty"` // Gossip data piggybacked on beats
 }
 
 // GetSenderID returns the sender ID from either old or new format.

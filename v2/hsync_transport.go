@@ -590,6 +590,17 @@ func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 		}
 	}
 
+	// Process gossip data if present
+	if len(payload.Gossip) > 0 && tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil {
+		var gossipMsgs []GossipMessage
+		if err := json.Unmarshal(payload.Gossip, &gossipMsgs); err == nil {
+			for i := range gossipMsgs {
+				tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i])
+			}
+			lgTransport.Debug("merged gossip from beat", "sender", senderID, "groups", len(gossipMsgs))
+		}
+	}
+
 	beatInterval := payload.MyBeatInterval
 	if beatInterval == 0 {
 		beatInterval = 30 // Default if not provided
@@ -1440,11 +1451,22 @@ func (tm *TransportManager) SendPing(ctx context.Context, peer *transport.Peer) 
 func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Agent, sequence uint64) (*transport.BeatResponse, error) {
 	peer := tm.SyncPeerFromAgent(agent)
 
+	// Build gossip for this peer
+	var gossipData json.RawMessage
+	if tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil && tm.agentRegistry.ProviderGroupManager != nil {
+		gossipMsgs := tm.agentRegistry.GossipStateTable.BuildGossipForPeer(
+			string(agent.Identity), tm.agentRegistry.ProviderGroupManager)
+		if len(gossipMsgs) > 0 {
+			gossipData, _ = json.Marshal(gossipMsgs)
+		}
+	}
+
 	req := &transport.BeatRequest{
 		SenderID:  tm.LocalID,
 		Timestamp: time.Now(),
 		Sequence:  sequence,
 		State:     string(agent.State),
+		Gossip:    gossipData,
 	}
 
 	var apiResp *transport.BeatResponse

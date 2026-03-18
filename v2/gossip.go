@@ -1,0 +1,225 @@
+package tdns
+
+import (
+	"sync"
+	"time"
+)
+
+// GossipMessage carries gossip state for one provider group.
+// Included in beats between agents that share group membership.
+type GossipMessage struct {
+	GroupHash string                  `json:"group_hash"`
+	GroupName GroupNameProposal       `json:"group_name"`
+	Members   map[string]*MemberState `json:"members"` // key: provider identity
+	Election  GroupElectionState      `json:"election"`
+}
+
+// MemberState is one member's view of all other members in the group.
+// Only the member itself updates its own MemberState (sets Timestamp).
+// Other agents propagate it via gossip without modification.
+type MemberState struct {
+	Identity   string            `json:"identity"`
+	PeerStates map[string]string `json:"peer_states"` // key: peer identity, value: state string
+	Zones      []string          `json:"zones"`       // zones this member serves in this group
+	Timestamp  time.Time         `json:"timestamp"`   // set by the member itself
+}
+
+// GroupElectionState carries election state for a provider group.
+type GroupElectionState struct {
+	Leader       string    `json:"leader,omitempty"` // identity of current leader
+	Term         uint32    `json:"term,omitempty"`
+	LeaderExpiry time.Time `json:"leader_expiry,omitempty"`
+}
+
+// GossipStateTable manages the NxN state matrix for all provider groups.
+// Each entry is a MemberState keyed by (groupHash, memberIdentity).
+type GossipStateTable struct {
+	mu sync.RWMutex
+	// key: group hash → member identity → MemberState
+	States map[string]map[string]*MemberState
+	// key: group hash → GroupElectionState
+	Elections map[string]*GroupElectionState
+	// key: group hash → GroupNameProposal (best proposal seen)
+	Names map[string]*GroupNameProposal
+	// Our identity
+	LocalID string
+}
+
+// NewGossipStateTable creates a new gossip state table.
+func NewGossipStateTable(localID string) *GossipStateTable {
+	return &GossipStateTable{
+		States:    make(map[string]map[string]*MemberState),
+		Elections: make(map[string]*GroupElectionState),
+		Names:     make(map[string]*GroupNameProposal),
+		LocalID:   localID,
+	}
+}
+
+// UpdateLocalState updates our own state entry for a group.
+// This sets the Timestamp to now — only we update our own state.
+func (gst *GossipStateTable) UpdateLocalState(groupHash string, peerStates map[string]string, zones []string) {
+	gst.mu.Lock()
+	defer gst.mu.Unlock()
+
+	if gst.States[groupHash] == nil {
+		gst.States[groupHash] = make(map[string]*MemberState)
+	}
+
+	gst.States[groupHash][gst.LocalID] = &MemberState{
+		Identity:   gst.LocalID,
+		PeerStates: peerStates,
+		Zones:      zones,
+		Timestamp:  time.Now(),
+	}
+}
+
+// MergeGossip merges received gossip into the local state table.
+// For each member's state entry, keep the one with the latest timestamp.
+// The member's PeerStates map is replaced atomically (never cherry-pick
+// individual peer entries from different timestamps).
+func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
+	gst.mu.Lock()
+	defer gst.mu.Unlock()
+
+	groupHash := msg.GroupHash
+
+	// Merge member states
+	if gst.States[groupHash] == nil {
+		gst.States[groupHash] = make(map[string]*MemberState)
+	}
+	for id, remote := range msg.Members {
+		local, exists := gst.States[groupHash][id]
+		if !exists || remote.Timestamp.After(local.Timestamp) {
+			gst.States[groupHash][id] = remote
+		}
+	}
+
+	// Merge election state (higher term wins)
+	if msg.Election.Term > 0 {
+		existing := gst.Elections[groupHash]
+		if existing == nil || msg.Election.Term > existing.Term {
+			elCopy := msg.Election
+			gst.Elections[groupHash] = &elCopy
+		}
+	}
+
+	// Merge group name proposal (earliest ProposedAt wins)
+	if msg.GroupName.Name != "" {
+		existing := gst.Names[groupHash]
+		if existing == nil || msg.GroupName.ProposedAt.Before(existing.ProposedAt) {
+			nameCopy := msg.GroupName
+			gst.Names[groupHash] = &nameCopy
+		}
+	}
+}
+
+// BuildGossipForPeer builds gossip messages for all groups shared with a peer.
+func (gst *GossipStateTable) BuildGossipForPeer(peerID string, pgm *ProviderGroupManager) []GossipMessage {
+	gst.mu.RLock()
+	defer gst.mu.RUnlock()
+
+	if pgm == nil {
+		return nil
+	}
+
+	var messages []GossipMessage
+
+	pgm.mu.RLock()
+	defer pgm.mu.RUnlock()
+
+	for hash, pg := range pgm.Groups {
+		// Check if both we and the peer are members of this group
+		localInGroup := false
+		peerInGroup := false
+		for _, member := range pg.Members {
+			if member == gst.LocalID {
+				localInGroup = true
+			}
+			if member == peerID {
+				peerInGroup = true
+			}
+		}
+		if !localInGroup || !peerInGroup {
+			continue
+		}
+
+		msg := GossipMessage{
+			GroupHash: hash,
+			Members:   make(map[string]*MemberState),
+		}
+
+		// Include all member states we know about for this group
+		if groupStates, ok := gst.States[hash]; ok {
+			for id, state := range groupStates {
+				msg.Members[id] = state
+			}
+		}
+
+		// Include election state
+		if el, ok := gst.Elections[hash]; ok {
+			msg.Election = *el
+		}
+
+		// Include best group name proposal
+		if name, ok := gst.Names[hash]; ok {
+			msg.GroupName = *name
+		} else if pg.NameProposal != nil {
+			msg.GroupName = *pg.NameProposal
+		}
+
+		messages = append(messages, msg)
+	}
+
+	return messages
+}
+
+// GetGroupState returns the full state matrix for a group.
+func (gst *GossipStateTable) GetGroupState(groupHash string) (map[string]*MemberState, *GroupElectionState, *GroupNameProposal) {
+	gst.mu.RLock()
+	defer gst.mu.RUnlock()
+
+	states := gst.States[groupHash]
+	election := gst.Elections[groupHash]
+	name := gst.Names[groupHash]
+	return states, election, name
+}
+
+// RefreshLocalStates updates our local state entries for all groups
+// based on current agent registry state.
+func (gst *GossipStateTable) RefreshLocalStates(ar *AgentRegistry, pgm *ProviderGroupManager) {
+	if ar == nil || pgm == nil {
+		return
+	}
+
+	pgm.mu.RLock()
+	defer pgm.mu.RUnlock()
+
+	for hash, pg := range pgm.Groups {
+		// Build our peer states for this group
+		peerStates := make(map[string]string)
+		var zones []string
+
+		for _, member := range pg.Members {
+			if member == gst.LocalID {
+				continue
+			}
+			// Look up agent state
+			agent, exists := ar.S.Get(AgentId(member))
+			if !exists {
+				peerStates[member] = AgentStateToString[AgentStateNeeded]
+				continue
+			}
+			agent.mu.RLock()
+			state := agent.EffectiveState()
+			agent.mu.RUnlock()
+			peerStates[member] = AgentStateToString[state]
+		}
+
+		// Zones this member serves
+		for _, z := range pg.Zones {
+			zones = append(zones, string(z))
+		}
+
+		gst.UpdateLocalState(hash, peerStates, zones)
+	}
+}

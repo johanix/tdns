@@ -119,6 +119,7 @@ func (conf *Config) NewAgentRegistry() *AgentRegistry {
 		LocateInterval:       li,
 		helloContexts:        make(map[AgentId]context.CancelFunc),
 		ProviderGroupManager: NewProviderGroupManager(conf.MultiProvider.Identity),
+		GossipStateTable:     NewGossipStateTable(conf.MultiProvider.Identity),
 	}
 }
 

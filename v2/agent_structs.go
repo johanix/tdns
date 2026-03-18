@@ -169,6 +169,7 @@ type AgentRegistry struct {
 	TransportManager      *TransportManager      // optional; when set, Hello/Beat/Sync use transport fallback (API → DNS)
 	LeaderElectionManager *LeaderElectionManager // optional; when set, election messages are processed
 	ProviderGroupManager  *ProviderGroupManager  // optional; manages provider group computation
+	GossipStateTable      *GossipStateTable      // optional; gossip protocol state
 }
 
 // AgentBeatPost is defined in core package to avoid circular dependencies.
@@ -180,6 +181,7 @@ type AgentBeatPost struct {
 	MyBeatInterval uint32   // intended, in seconds
 	Zones          []string // Zones that we share with the remote agent
 	Time           time.Time
+	Gossip         []GossipMessage `json:"Gossip,omitempty"`
 }
 
 // AgentBeatResponse is defined in core package to avoid circular dependencies.

@@ -198,7 +198,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			"discover": true, "hsync-locate": true,
 			"router-list": true, "router-describe": true, "router-metrics": true, "router-walk": true, "router-reset": true,
 			"imr-query": true, "imr-flush": true, "imr-reset": true, "imr-show": true, "peer-reset": true,
-			"gossip-group-list": true,
+			"gossip-group-list": true, "gossip-group-state": true,
 		}
 		if !noZoneCommands[amp.Command] {
 			amp.Zone = ZoneName(dns.Fqdn(string(amp.Zone)))
@@ -850,6 +850,79 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 
 			resp.Msg = fmt.Sprintf("Reset agent %s to NEEDED state (flushed %d cache entries), discovery restarted", amp.AgentId, flushed)
+
+		case "gossip-group-state":
+			ar := conf.Internal.AgentRegistry
+			if ar == nil || ar.GossipStateTable == nil || ar.ProviderGroupManager == nil {
+				resp.Error = true
+				resp.ErrorMsg = "gossip state table not available"
+				return
+			}
+
+			groupName, _ := amp.Data["group"].(string)
+			if groupName == "" {
+				resp.Error = true
+				resp.ErrorMsg = "group name or hash is required"
+				return
+			}
+
+			// Look up group by name first, then by hash
+			pg := ar.ProviderGroupManager.GetGroupByName(groupName)
+			if pg == nil {
+				pg = ar.ProviderGroupManager.GetGroup(groupName)
+			}
+			if pg == nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("provider group %q not found", groupName)
+				return
+			}
+
+			states, election, nameProposal := ar.GossipStateTable.GetGroupState(pg.GroupHash)
+
+			// Build matrix data
+			var matrix []map[string]interface{}
+			for _, member := range pg.Members {
+				row := map[string]interface{}{
+					"reporter": member,
+				}
+				if ms, ok := states[member]; ok {
+					row["peer_states"] = ms.PeerStates
+					row["timestamp"] = ms.Timestamp.Format(time.RFC3339)
+					row["age"] = time.Since(ms.Timestamp).Truncate(time.Second).String()
+					row["zones"] = len(ms.Zones)
+				} else {
+					row["peer_states"] = map[string]string{}
+					row["age"] = "unknown"
+				}
+				matrix = append(matrix, row)
+			}
+
+			result := map[string]interface{}{
+				"group_hash": pg.GroupHash,
+				"group_name": pg.Name,
+				"members":    pg.Members,
+				"matrix":     matrix,
+			}
+
+			if election != nil {
+				result["election"] = map[string]interface{}{
+					"leader":        election.Leader,
+					"term":          election.Term,
+					"leader_expiry": election.LeaderExpiry.Format(time.RFC3339),
+					"expires_in":    time.Until(election.LeaderExpiry).Truncate(time.Second).String(),
+				}
+			}
+
+			if nameProposal != nil {
+				result["name_proposal"] = map[string]interface{}{
+					"name":        nameProposal.Name,
+					"proposer":    nameProposal.Proposer,
+					"proposed_at": nameProposal.ProposedAt.Format(time.RFC3339),
+				}
+			}
+
+			resp.Data = result
+			resp.Msg = fmt.Sprintf("Gossip state for group %s (%s)", pg.Name, pg.GroupHash[:8])
 
 		case "gossip-group-list":
 			ar := conf.Internal.AgentRegistry
