@@ -33,6 +33,7 @@ var lgCombiner = Logger("combiner")
 // Uses the same data structure as CombinerPost.Data for transport neutrality.
 type CombinerSyncRequest struct {
 	SenderID       string                   // Identity of the sending agent
+	DeliveredBy    string                   // Identity of the agent that delivered this to the combiner
 	Zone           string                   // Zone being updated
 	ZoneClass      string                   // "mp" (default) or "provider"
 	SyncType       string                   // Type of sync: "NS", "DNSKEY", "CDS", "CSYNC", "GLUE"
@@ -55,6 +56,7 @@ type CombinerSyncResponse struct {
 	RemovedRecords []string       // RRs that were successfully removed (deletions)
 	RejectedItems  []RejectedItem // Items that were rejected with reasons
 	Timestamp      time.Time      // When the response was created
+	DataChanged    bool           // True when zone data was actually mutated (not idempotent re-apply)
 }
 
 // RejectedItem describes an RR that was rejected and why.
@@ -335,11 +337,14 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 			}
 			// NS changes may affect _signal KEY publication
 			combinerResyncSignalKeys(req.SenderID, zonename, zd, kdb)
-			// Delegation changes require parent sync notification
-			nsChanged, kskChanged := detectDelegationChanges(resp)
-			if nsChanged || kskChanged {
-				go combinerNotifyDelegationChange(tm, req.SenderID, zonename, zd, nsChanged, kskChanged)
+			// Delegation changes require parent sync notification (only on actual mutations)
+			if resp.DataChanged {
+				nsChanged, kskChanged := detectDelegationChanges(resp)
+				if nsChanged || kskChanged {
+					go combinerNotifyDelegationChange(tm, req.DeliveredBy, zonename, zd, nsChanged, kskChanged)
+				}
 			}
+
 		}
 		return resp
 	}
@@ -521,6 +526,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 
 	lgCombiner.Info("legacy update processed", "status", resp.Status, "message", resp.Message)
 
+	resp.DataChanged = dataChanged
 	// Only bump the serial when the zone data actually changed (not for idempotent re-applies).
 	if dataChanged {
 		bumperResp, err := zd.BumpSerialOnly()
@@ -536,11 +542,14 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 			combinerApplyPublishInstruction(req, zd, kdb)
 		}
 		combinerResyncSignalKeys(req.SenderID, zonename, zd, kdb)
-		// Delegation changes require parent sync notification
-		nsChanged, kskChanged := detectDelegationChanges(resp)
-		if nsChanged || kskChanged {
-			go combinerNotifyDelegationChange(tm, req.SenderID, zonename, zd, nsChanged, kskChanged)
+		// Delegation changes require parent sync notification (only on actual mutations)
+		if resp.DataChanged {
+			nsChanged, kskChanged := detectDelegationChanges(resp)
+			if nsChanged || kskChanged {
+				go combinerNotifyDelegationChange(tm, req.DeliveredBy, zonename, zd, nsChanged, kskChanged)
+			}
 		}
+
 	}
 
 	return resp
@@ -564,23 +573,53 @@ func combinerNotifyDelegationChange(tm *TransportManager, senderID, zonename str
 
 	lgCombiner.Info("combinerNotifyDelegationChange: delegation change detected", "zone", zonename, "nsChanged", nsChanged, "kskChanged", kskChanged, "zoneSigned", zoneSigned)
 
-	// Publish indicator records
+	// Publish indicator records via combiner data path (not UpdateQ, which
+	// the combiner doesn't consume). This ensures CSYNC/CDS are stored in
+	// AgentContributions and persisted, surviving combiner restarts.
+	changed := false
 	if nsChanged {
 		if !zoneSigned {
 			lgCombiner.Debug("combinerNotifyDelegationChange: NS changed but zone is not signed, skipping CSYNC", "zone", zonename)
 		} else {
-			if err := zd.PublishCsyncRR(); err != nil {
-				lgCombiner.Error("combinerNotifyDelegationChange: PublishCsyncRR failed", "zone", zonename, "err", err)
+			csync := &dns.CSYNC{
+				Serial:     zd.CurrentSerial,
+				Flags:      0,
+				TypeBitMap: []uint16{dns.TypeA, dns.TypeNS, dns.TypeAAAA},
+			}
+			csync.Hdr = dns.RR_Header{
+				Name:   zd.ZoneName,
+				Rrtype: dns.TypeCSYNC,
+				Class:  dns.ClassINET,
+				Ttl:    120,
+			}
+			_, _, csyncChanged, err := zd.ReplaceCombinerDataByRRtype("combiner", zonename, dns.TypeCSYNC, []dns.RR{csync})
+			if err != nil {
+				lgCombiner.Error("combinerNotifyDelegationChange: CSYNC replace failed", "zone", zonename, "err", err)
 			} else {
-				lgCombiner.Info("combinerNotifyDelegationChange: CSYNC enqueued", "zone", zonename)
+				lgCombiner.Info("combinerNotifyDelegationChange: CSYNC published", "zone", zonename, "changed", csyncChanged)
+				changed = changed || csyncChanged
 			}
 		}
 	}
 	if kskChanged {
-		if err := zd.PublishCdsRRs(); err != nil {
-			lgCombiner.Error("combinerNotifyDelegationChange: PublishCdsRRs failed", "zone", zonename, "err", err)
+		cdsRRs, err := zd.synthesizeCdsRRs()
+		if err != nil {
+			lgCombiner.Error("combinerNotifyDelegationChange: CDS synthesis failed", "zone", zonename, "err", err)
+		} else if len(cdsRRs) > 0 {
+			_, _, cdsChanged, err := zd.ReplaceCombinerDataByRRtype("combiner", zonename, dns.TypeCDS, cdsRRs)
+			if err != nil {
+				lgCombiner.Error("combinerNotifyDelegationChange: CDS replace failed", "zone", zonename, "err", err)
+			} else {
+				lgCombiner.Info("combinerNotifyDelegationChange: CDS published", "zone", zonename, "changed", cdsChanged)
+				changed = changed || cdsChanged
+			}
+		}
+	}
+	if changed {
+		if bumperResp, err := zd.BumpSerialOnly(); err != nil {
+			lgCombiner.Error("combinerNotifyDelegationChange: BumpSerialOnly failed", "zone", zonename, "err", err)
 		} else {
-			lgCombiner.Info("combinerNotifyDelegationChange: CDS enqueued", "zone", zonename)
+			lgCombiner.Debug("combinerNotifyDelegationChange: serial bumped", "zone", zonename, "old", bumperResp.OldSerial, "new", bumperResp.NewSerial)
 		}
 	}
 
@@ -1261,6 +1300,7 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 		lgCombiner.Warn("operation rejected", "zone", req.Zone, "sender", req.SenderID, "record", ri.Record, "reason", ri.Reason)
 	}
 
+	resp.DataChanged = dataChanged
 	if dataChanged {
 		bumperResp, err := zd.BumpSerialOnly()
 		if err != nil {

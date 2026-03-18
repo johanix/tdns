@@ -135,14 +135,15 @@ type ConfigPost struct {
 }
 
 type ConfigResponse struct {
-	AppName    string
-	Time       time.Time
-	DnsEngine  DnsEngineConf
-	ApiServer  ApiServerConf
-	Identities []string
-	Msg        string
-	Error      bool
-	ErrorMsg   string
+	AppName         string
+	Time            time.Time
+	DnsEngine       DnsEngineConf
+	ApiServer       ApiServerConf
+	Identities      []string
+	CombinerOptions map[CombinerOption]bool
+	Msg             string
+	Error           bool
+	ErrorMsg        string
 }
 
 type DelegationPost struct {

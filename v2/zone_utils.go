@@ -222,12 +222,14 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	if zd.FirstZoneLoad {
 		zd.CurrentSerial = new_zd.CurrentSerial
 		zd.FirstZoneLoad = false
+		// Don't persist on first load — the persisted serial (if any) will be
+		// restored in initialLoadZone and must not be overwritten here.
 	} else {
 		zd.CurrentSerial++
-	}
-	if Globals.App.Type == AppTypeCombiner && zd.KeyDB != nil {
-		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
-			lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
+		if zd.KeyDB != nil && zd.KeyDB.Options[AuthOptPersistOutboundSerial] != "" {
+			if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
+				lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
+			}
 		}
 	}
 	zd.ApexLen = new_zd.ApexLen
@@ -409,12 +411,14 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	if zd.FirstZoneLoad {
 		zd.CurrentSerial = new_zd.CurrentSerial
 		zd.FirstZoneLoad = false
+		// Don't persist on first load — the persisted serial (if any) will be
+		// restored in initialLoadZone and must not be overwritten here.
 	} else {
 		zd.CurrentSerial++
-	}
-	if Globals.App.Type == AppTypeCombiner && zd.KeyDB != nil {
-		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
-			lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
+		if zd.KeyDB != nil && zd.KeyDB.Options[AuthOptPersistOutboundSerial] != "" {
+			if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
+				lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
+			}
 		}
 	}
 	zd.ApexLen = new_zd.ApexLen
@@ -920,7 +924,7 @@ func (zd *ZoneData) BumpSerialOnly() (BumperResponse, error) {
 	resp.OldSerial = zd.CurrentSerial
 	zd.CurrentSerial++
 	resp.NewSerial = zd.CurrentSerial
-	if Globals.App.Type == AppTypeCombiner && zd.KeyDB != nil {
+	if zd.KeyDB != nil && zd.KeyDB.Options[AuthOptPersistOutboundSerial] != "" {
 		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
 			lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
 		}

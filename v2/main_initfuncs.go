@@ -649,7 +649,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			}
 			combinerState.SetRouter(combinerRouter)
 			lgConfig.Info("combiner router initialized with authorization middleware")
-			if conf.MultiProvider.AddSignature {
+			if conf.MultiProvider.CombinerOptions[CombinerOptAddSignature] {
 				lgConfig.Info("combiner signature TXT enabled")
 			}
 		}

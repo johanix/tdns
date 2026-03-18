@@ -56,6 +56,24 @@ type DeferredUpdate struct {
 	Action       func() error
 }
 
+// logUpdateActions logs each RR in an update at Info level with
+// ADDED/DELETED prefix based on the RR class.
+func logUpdateActions(updateType string, actions []dns.RR) {
+	for _, rr := range actions {
+		rrcopy := dns.Copy(rr)
+		rrcopy.Header().Class = dns.ClassINET
+		switch rr.Header().Class {
+		case dns.ClassINET:
+			lg.Info(fmt.Sprintf("%s ADDED: %s", updateType, rrcopy.String()))
+		case dns.ClassNONE:
+			lg.Info(fmt.Sprintf("%s DELETED: %s", updateType, rrcopy.String()))
+		case dns.ClassANY:
+			lg.Info(fmt.Sprintf("%s DELETED[rrset]: %s %s", updateType,
+				rr.Header().Name, dns.TypeToString[rr.Header().Rrtype]))
+		}
+	}
+}
+
 func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 	updateq := kdb.UpdateQ
 
@@ -103,6 +121,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 							lg.Info("ZoneUpdater: CHILD-UPDATE applied",
 								"zone", ur.ZoneName, "backend", zd.DelegationBackend.Name())
 							zd.Options[OptDirty] = true
+							logUpdateActions("CHILD-UPDATE", ur.Actions)
 						}
 					} else {
 						// Fallback: no backend configured, use legacy dispatch
@@ -123,6 +142,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 						}
 						if updated {
 							zd.Options[OptDirty] = true
+							logUpdateActions("CHILD-UPDATE", ur.Actions)
 						}
 					}
 				}
@@ -133,28 +153,16 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				lg.Info("ZoneUpdater: ZONE-UPDATE request", "zone", ur.ZoneName, "actions", len(ur.Actions))
 				lg.Debug("ZoneUpdater: ZONE-UPDATE actions detail", "actions", SprintUpdates(ur.Actions))
 				if zd.Options[OptAllowUpdates] || ur.InternalUpdate {
-					// Delegation sync checks only apply to external updates
+					// Compute delegation sync status before apply (needs pre-state),
+					// but only enqueue after successful apply.
+					var dss DelegationSyncStatus
 					if !ur.InternalUpdate {
-						dss, err := zd.ZoneUpdateChangesDelegationDataNG(ur)
+						var err error
+						dss, err = zd.ZoneUpdateChangesDelegationDataNG(ur)
 						if err != nil {
 							lg.Error("ZoneUpdateChangesDelegationData failed", "error", err)
 						}
 						lg.Debug("ZoneUpdater: delegation sync status", "inSync", dss.InSync)
-
-						if zd.Options[OptDelSyncChild] && !dss.InSync {
-							lg.Debug("ZoneUpdater: delegation out of sync, sending SYNC-DELEGATION", "zone", zd.ZoneName, "queueLen", len(zd.DelegationSyncQ))
-							zd.DelegationSyncQ <- DelegationSyncRequest{
-								Command:    "SYNC-DELEGATION",
-								ZoneName:   zd.ZoneName,
-								ZoneData:   zd,
-								SyncStatus: dss,
-							}
-							if err := zd.PublishCsyncRR(); err != nil {
-								lg.Error("ZoneUpdater: error publishing CSYNC", "zone", zd.ZoneName, "err", err)
-							} else {
-								lg.Debug("ZoneUpdater: published CSYNC proactively", "zone", zd.ZoneName)
-							}
-						}
 					}
 
 					var updated bool
@@ -176,6 +184,23 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					if updated && !ur.InternalUpdate {
 						lg.Debug("ZoneUpdater: zone updated, setting dirty flag", "zone", zd.ZoneName)
 						zd.Options[OptDirty] = true
+						logUpdateActions("ZONE-UPDATE", ur.Actions)
+					}
+
+					// Enqueue delegation sync after successful apply
+					if updated && !ur.InternalUpdate && zd.Options[OptDelSyncChild] && !dss.InSync {
+						lg.Debug("ZoneUpdater: delegation out of sync, sending SYNC-DELEGATION", "zone", zd.ZoneName, "queueLen", len(zd.DelegationSyncQ))
+						zd.DelegationSyncQ <- DelegationSyncRequest{
+							Command:    "SYNC-DELEGATION",
+							ZoneName:   zd.ZoneName,
+							ZoneData:   zd,
+							SyncStatus: dss,
+						}
+						if err := zd.PublishCsyncRR(); err != nil {
+							lg.Error("ZoneUpdater: error publishing CSYNC", "zone", zd.ZoneName, "err", err)
+						} else {
+							lg.Debug("ZoneUpdater: published CSYNC proactively", "zone", zd.ZoneName)
+						}
 					}
 				} else {
 					lg.Warn("ZoneUpdater: updates disallowed for zone, dropping ZONE-UPDATE", "zone", zd.ZoneName)
@@ -242,6 +267,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				if err != nil {
 					lg.Error("tx.Commit failed", "error", err)
 				}
+				logUpdateActions("TRUSTSTORE-UPDATE", ur.Actions)
 
 				// Trigger async DNS verification for newly stored untrusted child keys.
 				for _, pv := range toVerify {
@@ -893,8 +919,19 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 
 			case dns.TypeDNSKEY:
 				if ownerName == zd.ZoneName {
-					// Removing entire DNSKEY RRset — all KSKs removed
+					// Removing entire DNSKEY RRset — record all KSK removals
 					dss.InSync = false
+					apex, apexErr := zd.GetOwner(zd.ZoneName)
+					if apexErr == nil && apex != nil {
+						if dkRRset, exists := apex.RRtypes.Get(dns.TypeDNSKEY); exists {
+							for _, dkrr := range dkRRset.RRs {
+								if dk, ok := dkrr.(*dns.DNSKEY); ok && dk.Flags&dns.SEP != 0 {
+									dss.DNSKEYRemoves = append(dss.DNSKEYRemoves, dns.Copy(dkrr))
+								}
+							}
+						}
+					}
+					dss.NewDS = nil
 				}
 			}
 			continue
@@ -1208,14 +1245,33 @@ func computeNewDS(dss *DelegationSyncStatus, zd *ZoneData) {
 		return
 	}
 
-	var newDS []dns.RR
+	// Build the effective post-update DNSKEY set:
+	// start from current, remove DNSKEYRemoves, add DNSKEYAdds.
+	effective := make(map[uint16]*dns.DNSKEY)
 	for _, rr := range apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs {
 		if dk, ok := rr.(*dns.DNSKEY); ok {
 			if dk.Flags&dns.SEP != 0 {
-				if ds := dk.ToDS(dns.SHA256); ds != nil {
-					newDS = append(newDS, ds)
-				}
+				effective[dk.KeyTag()] = dk
 			}
+		}
+	}
+	for _, rr := range dss.DNSKEYRemoves {
+		if dk, ok := rr.(*dns.DNSKEY); ok {
+			delete(effective, dk.KeyTag())
+		}
+	}
+	for _, rr := range dss.DNSKEYAdds {
+		if dk, ok := rr.(*dns.DNSKEY); ok {
+			if dk.Flags&dns.SEP != 0 {
+				effective[dk.KeyTag()] = dk
+			}
+		}
+	}
+
+	var newDS []dns.RR
+	for _, dk := range effective {
+		if ds := dk.ToDS(dns.SHA256); ds != nil {
+			newDS = append(newDS, ds)
 		}
 	}
 	dss.NewDS = newDS

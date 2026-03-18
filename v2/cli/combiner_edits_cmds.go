@@ -367,7 +367,7 @@ func SendCombinerEditCmd(req tdns.CombinerEditPost) (*tdns.CombinerEditResponse,
 	}
 
 	if resp.Error {
-		return nil, fmt.Errorf("API error: %s", resp.ErrorMsg)
+		return nil, fmt.Errorf("%s", resp.ErrorMsg)
 	}
 
 	return &resp, nil

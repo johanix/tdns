@@ -113,14 +113,28 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			return
 		}
 
-		switch cp.Command {
-		case "list":
+		// Commands that require a valid, loaded zone.
+		zoneCommands := map[string]bool{
+			"list": true, "list-approved": true, "list-rejected": true,
+			"list-current": true, "reapply": true,
+		}
+		if zoneCommands[cp.Command] {
 			zone := dns.Fqdn(cp.Zone)
 			if zone == "" || zone == "." {
 				resp.Error = true
 				resp.ErrorMsg = "zone is required"
 				return
 			}
+			if _, exists := Zones.Get(zone); !exists {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("zone %s is not known to this combiner", zone)
+				return
+			}
+		}
+
+		switch cp.Command {
+		case "list":
+			zone := dns.Fqdn(cp.Zone)
 			pending, err := kdb.ListPendingEdits(zone)
 			if err != nil {
 				resp.Error = true
@@ -147,6 +161,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			// Apply the edit via CombinerProcessUpdate
 			syncReq := &CombinerSyncRequest{
 				SenderID:       rec.SenderID,
+				DeliveredBy:    rec.DeliveredBy,
 				Zone:           rec.Zone,
 				Records:        rec.Records,
 				DistributionID: rec.DistributionID,
@@ -254,11 +269,6 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 		case "list-approved":
 			zone := dns.Fqdn(cp.Zone)
-			if zone == "" || zone == "." {
-				resp.Error = true
-				resp.ErrorMsg = "zone is required"
-				return
-			}
 			approved, err := kdb.ListApprovedEdits(zone)
 			if err != nil {
 				resp.Error = true
@@ -270,11 +280,6 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 		case "list-rejected":
 			zone := dns.Fqdn(cp.Zone)
-			if zone == "" || zone == "." {
-				resp.Error = true
-				resp.ErrorMsg = "zone is required"
-				return
-			}
 			rejected, err := kdb.ListRejectedEdits(zone)
 			if err != nil {
 				resp.Error = true
@@ -286,17 +291,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 		case "list-current":
 			zone := dns.Fqdn(cp.Zone)
-			if zone == "" || zone == "." {
-				resp.Error = true
-				resp.ErrorMsg = "zone is required"
-				return
-			}
-			zd, exists := Zones.Get(zone)
-			if !exists {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("zone %q not found", zone)
-				return
-			}
+			zd, _ := Zones.Get(zone)
 			// Build agent → rrtype → []rr from AgentContributions
 			current := make(map[string]map[string][]string)
 			if zd.AgentContributions != nil {
@@ -326,11 +321,6 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 		case "reapply":
 			zone := dns.Fqdn(cp.Zone)
-			if zone == "" || zone == "." {
-				resp.Error = true
-				resp.ErrorMsg = "zone is required"
-				return
-			}
 			msg, err := combinerReapplyContributions(zone, kdb)
 			if err != nil {
 				resp.Error = true

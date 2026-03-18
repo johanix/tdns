@@ -114,31 +114,31 @@ type AuthOption uint8
 
 const (
 	AuthOptParentUpdate AuthOption = iota + 1
+	AuthOptPersistOutboundSerial
 )
 
 var AuthOptionToString = map[AuthOption]string{
-	AuthOptParentUpdate: "parent-update",
+	AuthOptParentUpdate:          "parent-update",
+	AuthOptPersistOutboundSerial: "persist-outbound-serial",
 }
 
 var StringToAuthOption = map[string]AuthOption{
-	"parent-update": AuthOptParentUpdate,
+	"parent-update":           AuthOptParentUpdate,
+	"persist-outbound-serial": AuthOptPersistOutboundSerial,
 }
 
 type CombinerOption uint8
 
 const (
 	CombinerOptAddSignature CombinerOption = iota + 1
-	CombinerOptPersistOutgoingSerial
 )
 
 var CombinerOptionToString = map[CombinerOption]string{
-	CombinerOptAddSignature:          "add-signature",
-	CombinerOptPersistOutgoingSerial: "persist-outgoing-serial",
+	CombinerOptAddSignature: "add-signature",
 }
 
 var StringToCombinerOption = map[string]CombinerOption{
-	"add-signature":           CombinerOptAddSignature,
-	"persist-outgoing-serial": CombinerOptPersistOutgoingSerial,
+	"add-signature": CombinerOptAddSignature,
 }
 
 type SignerOption uint8

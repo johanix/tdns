@@ -36,7 +36,7 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 		return resp, err
 	}
 
-	// resp.Parent = zd.Parent
+	resp.Parent = zd.Parent
 
 	var p_nsrrs []dns.RR
 	var pserver string // outside loop to preserve for later re-use
@@ -122,7 +122,7 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 	p_dsrrs, err := AuthQuery(zd.ZoneName, pserver, dns.TypeDS)
 	if err != nil {
 		lgDns.Warn("error from AuthQuery for DS", "server", pserver, "zone", zd.ZoneName, "err", err)
-		// DS query failure is not fatal — parent may not have DS records
+		// DS query failure — skip DS comparison entirely
 	} else if len(p_dsrrs) > 0 || len(apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY).RRs) > 0 {
 		// Compute local DS from KSK DNSKEYs
 		var childDS []dns.RR

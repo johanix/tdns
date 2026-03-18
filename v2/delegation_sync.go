@@ -605,8 +605,8 @@ func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyR
 
 	lgDns.Debug("DSYNC target for NOTIFY", "zone", zd.ZoneName, "target", dsynctarget)
 
-	// Send NOTIFY(CSYNC) for NS changes
-	if len(syncstate.NsAdds) > 0 || len(syncstate.NsRemoves) > 0 {
+	// Send NOTIFY(CSYNC) for NS or glue (A/AAAA) changes
+	if len(syncstate.NsAdds) > 0 || len(syncstate.NsRemoves) > 0 || len(syncstate.AAdds) > 0 || len(syncstate.ARemoves) > 0 || len(syncstate.AAAAAdds) > 0 || len(syncstate.AAAARemoves) > 0 {
 		notifyq <- NotifyRequest{
 			ZoneName: zd.ZoneName,
 			ZoneData: zd,

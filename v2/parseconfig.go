@@ -430,6 +430,14 @@ func (conf *Config) InitializeKeyDB() error {
 		}
 		conf.Internal.KeyDB = kdb
 
+		// Ensure OutgoingSerials table exists for persist-outbound-serial option
+		if kdb.Options[AuthOptPersistOutboundSerial] != "" {
+			schema := HsyncTables["OutgoingSerials"]
+			if _, err := kdb.DB.Exec(schema); err != nil {
+				return fmt.Errorf("failed to create OutgoingSerials table: %w", err)
+			}
+		}
+
 	default:
 		// do nothing for tdns-imr, tdns-cli
 	}

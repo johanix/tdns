@@ -119,10 +119,13 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 			lgEngine.Info("zone updated from upstream, resetting serial to unixtime",
 				"zone", zone, "serial", zd.CurrentSerial)
 		}
-		if Globals.App.Type == AppTypeCombiner && zd.KeyDB != nil {
-			if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > zd.CurrentSerial {
+		if zd.KeyDB != nil && zd.KeyDB.Options[AuthOptPersistOutboundSerial] != "" {
+			if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > 0 {
+				if saved != zd.CurrentSerial {
+					lgEngine.Info("restored persisted outgoing serial",
+						"zone", zone, "incoming", zd.CurrentSerial, "persisted", saved)
+				}
 				zd.CurrentSerial = saved
-				lgEngine.Info("restored persisted outgoing serial", "zone", zone, "serial", saved)
 			}
 		}
 		zd.NotifyDownstreams()

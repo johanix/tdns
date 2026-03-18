@@ -1779,6 +1779,10 @@ func (tm *TransportManager) EnqueueForZoneAgents(zone ZoneName, update *ZoneUpda
 // EnqueueForSpecificAgent enqueues a zone update for a single agent.
 // Used by "resync-targeted" to respond only to the requesting agent.
 func (tm *TransportManager) EnqueueForSpecificAgent(zone ZoneName, agentID AgentId, update *ZoneUpdate, distID string) error {
+	if tm.reliableQueue == nil {
+		return fmt.Errorf("EnqueueForSpecificAgent: reliable queue not configured")
+	}
+
 	msg := &OutgoingMessage{
 		DistributionID: distID,
 		RecipientID:    agentID,

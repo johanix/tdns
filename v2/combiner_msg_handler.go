@@ -205,6 +205,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			// Auto-approve: process the edit immediately.
 			syncReq := &CombinerSyncRequest{
 				SenderID:       senderID,
+				DeliveredBy:    deliveredBy,
 				Zone:           zone,
 				ZoneClass:      msg.ZoneClass,
 				Records:        msg.Records,

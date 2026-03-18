@@ -938,10 +938,14 @@ func (t *DNSTransport) SendStatusUpdate(ctx context.Context, peer *Peer, post *c
 	}
 
 	dnsAddr := fmt.Sprintf("%s:%d", addr.Host, addr.Port)
-	_, _, err = t.DNSClient.ExchangeContext(ctx, m, dnsAddr)
+	res, _, err := t.DNSClient.ExchangeContext(ctx, m, dnsAddr)
 	if err != nil {
 		return NewTransportError("DNS", "SendStatusUpdate", peer.ID,
 			fmt.Errorf("NOTIFY exchange failed: %w", err), true)
+	}
+	if res.Rcode != dns.RcodeSuccess {
+		return NewTransportError("DNS", "SendStatusUpdate", peer.ID,
+			fmt.Errorf("NOTIFY returned rcode %s", dns.RcodeToString[res.Rcode]), true)
 	}
 
 	return nil

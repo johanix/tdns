@@ -17,34 +17,32 @@ import (
 // Only KSK DNSKEYs (flags & 0x0001 == SEP bit set) are used for CDS synthesis.
 // We publish CDS with digest type SHA-256 (2) which is the mandatory-to-implement
 // algorithm per RFC 8624.
-func (zd *ZoneData) PublishCdsRRs() error {
+// synthesizeCdsRRs creates CDS records from the current KSK DNSKEYs in the zone.
+// Returns the CDS RRs without publishing them — caller decides how to apply.
+func (zd *ZoneData) synthesizeCdsRRs() ([]dns.RR, error) {
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
-		return fmt.Errorf("PublishCdsRRs: cannot get apex for zone %s: %v", zd.ZoneName, err)
+		return nil, fmt.Errorf("synthesizeCdsRRs: cannot get apex for zone %s: %v", zd.ZoneName, err)
 	}
 
 	dnskeyRRset, exists := apex.RRtypes.Get(dns.TypeDNSKEY)
 	if !exists || len(dnskeyRRset.RRs) == 0 {
-		return fmt.Errorf("PublishCdsRRs: zone %s has no DNSKEY RRset", zd.ZoneName)
+		return nil, fmt.Errorf("synthesizeCdsRRs: zone %s has no DNSKEY RRset", zd.ZoneName)
 	}
 
 	var cdsRRs []dns.RR
-
 	for _, rr := range dnskeyRRset.RRs {
 		dnskey, ok := rr.(*dns.DNSKEY)
 		if !ok {
 			continue
 		}
-		// Only synthesize CDS from KSKs (SEP bit set)
 		if dnskey.Flags&dns.SEP == 0 {
 			continue
 		}
-		// Create DS from DNSKEY using SHA-256 (digest type 2)
 		ds := dnskey.ToDS(dns.SHA256)
 		if ds == nil {
 			continue
 		}
-		// Convert DS to CDS (same wire format, different type)
 		cds := &dns.CDS{
 			DS: *ds,
 		}
@@ -56,9 +54,15 @@ func (zd *ZoneData) PublishCdsRRs() error {
 		}
 		cdsRRs = append(cdsRRs, cds)
 	}
+	return cdsRRs, nil
+}
 
+func (zd *ZoneData) PublishCdsRRs() error {
+	cdsRRs, err := zd.synthesizeCdsRRs()
+	if err != nil {
+		return err
+	}
 	if len(cdsRRs) == 0 {
-		// No KSKs found — nothing to publish
 		return nil
 	}
 
