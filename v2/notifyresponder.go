@@ -46,8 +46,6 @@ func NotifyHandler(ctx context.Context, conf *Config) error {
 	zonech := conf.Internal.RefreshZoneCh
 	dnsnotifyq := conf.Internal.DnsNotifyQ
 	scannerq := conf.Internal.ScannerQ
-	imr := conf.Internal.ImrEngine
-
 	lgHandler.Info("DnsNotifyResponderEngine starting")
 
 	var wg sync.WaitGroup
@@ -64,7 +62,7 @@ func NotifyHandler(ctx context.Context, conf *Config) error {
 					lgHandler.Info("DnsNotifyResponderEngine: dnsnotifyq closed")
 					return
 				}
-				NotifyResponder(ctx, &dhr, zonech, scannerq, imr)
+				NotifyResponder(ctx, &dhr, zonech, scannerq, conf.Internal.ImrEngine)
 			}
 
 		}
@@ -134,6 +132,12 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 	case dns.TypeCDS, dns.TypeCSYNC:
 		// For CDS and CSYNC, target the parent zone of qname
 		// Use ParentZone() to find the parent zone name via DNS lookup
+		if imr == nil {
+			lgHandler.Error("NOTIFY(CDS/CSYNC) requires IMR engine, not yet available", "qname", qname)
+			m.SetRcode(dnr.Msg, dns.RcodeServerFailure)
+			dnr.ResponseWriter.WriteMsg(m)
+			return nil
+		}
 
 		parentZoneName, err := imr.ParentZone(qname)
 		if err != nil {

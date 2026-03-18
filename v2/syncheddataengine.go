@@ -856,12 +856,19 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 							continue
 						}
 						cloned := *rrset.Clone()
+						var records []string
 						for i := range cloned.RRs {
 							cloned.RRs[i].Header().Class = dns.ClassINET
+							records = append(records, cloned.RRs[i].String())
 						}
 						agentZU.RRsets[rrtype] = cloned
+						agentZU.Operations = append(agentZU.Operations, core.RROperation{
+							Operation: "replace",
+							RRtype:    dns.TypeToString[rrtype],
+							Records:   records,
+						})
 					}
-					if len(agentZU.RRsets) > 0 {
+					if len(agentZU.Operations) > 0 {
 						distID := GenerateQueueDistributionID()
 						if err := tm.EnqueueForZoneAgents(sdcmd.Zone, agentZU, distID); err != nil {
 							lgEngine.Error("resync: failed to enqueue local data for zone agents", "zone", sdcmd.Zone, "err", err)
@@ -969,11 +976,18 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						continue
 					}
 					cloned := *rrset.Clone()
+					var records []string
 					for i := range cloned.RRs {
 						cloned.RRs[i].Header().Class = dns.ClassINET
+						records = append(records, cloned.RRs[i].String())
 					}
 					zu.RRsets[rrtype] = cloned
-					totalRRs += len(cloned.RRs)
+					zu.Operations = append(zu.Operations, core.RROperation{
+						Operation: "replace",
+						RRtype:    dns.TypeToString[rrtype],
+						Records:   records,
+					})
+					totalRRs += len(records)
 				}
 
 				if totalRRs == 0 {

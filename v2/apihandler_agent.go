@@ -1497,7 +1497,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				parsedRRs = append(parsedRRs, rr)
 			}
 
-			// Create the ZoneUpdate with RRs and RRsets
+			// Create the ZoneUpdate with RRs, RRsets, and Operations
 			zu := &ZoneUpdate{
 				Zone:    amp.Zone,
 				AgentId: AgentId(conf.MultiProvider.Identity),
@@ -1505,7 +1505,12 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				RRsets:  make(map[uint16]core.RRset),
 			}
 
-			// Populate RRsets (needed by ProcessUpdate)
+			// Populate RRsets (needed by ProcessUpdate) and Operations (for wire transport)
+			opStr := "add"
+			if !isAdd {
+				opStr = "delete"
+			}
+			opsMap := make(map[uint16][]string)
 			for _, rr := range parsedRRs {
 				rrtype := rr.Header().Rrtype
 				rrset, exists := zu.RRsets[rrtype]
@@ -1518,6 +1523,17 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				}
 				rrset.RRs = append(rrset.RRs, rr)
 				zu.RRsets[rrtype] = rrset
+				// For Operations, use ClassINET string representation
+				inetRR := dns.Copy(rr)
+				inetRR.Header().Class = dns.ClassINET
+				opsMap[rrtype] = append(opsMap[rrtype], inetRR.String())
+			}
+			for rrtype, records := range opsMap {
+				zu.Operations = append(zu.Operations, core.RROperation{
+					Operation: opStr,
+					RRtype:    dns.TypeToString[rrtype],
+					Records:   records,
+				})
 			}
 
 			action := "Adding"
