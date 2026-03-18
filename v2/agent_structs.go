@@ -96,16 +96,17 @@ type AgentDetails struct {
 	Endpoint    string
 	ContactInfo string // "none", "partial", "complete"
 	//	Zones           map[ZoneName]bool // zones we share with this agent
-	State           AgentState // "discovered", "contact_attempted", "connected", "failed"
-	LatestError     string
-	LatestErrorTime time.Time
-	HelloTime       time.Time
-	LastContactTime time.Time // Last contact of any type (Hello, Beat, Ping, Sync, etc.)
-	BeatInterval    uint32
-	SentBeats       uint32
-	ReceivedBeats   uint32
-	LatestSBeat     time.Time
-	LatestRBeat     time.Time
+	State             AgentState // "discovered", "contact_attempted", "connected", "failed"
+	LatestError       string
+	LatestErrorTime   time.Time
+	DiscoveryFailures uint32 // consecutive discovery failures (for IMR cache flush)
+	HelloTime         time.Time
+	LastContactTime   time.Time // Last contact of any type (Hello, Beat, Ping, Sync, etc.)
+	BeatInterval      uint32
+	SentBeats         uint32
+	ReceivedBeats     uint32
+	LatestSBeat       time.Time
+	LatestRBeat       time.Time
 }
 
 // IsAnyTransportOperational returns true if at least one transport layer

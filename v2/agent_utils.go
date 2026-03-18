@@ -616,10 +616,24 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, d
 	// Check if we got anything useful from the transports we discovered
 	if result.APIUri == "" && result.DNSUri == "" {
 		agent.mu.Lock()
+		agent.ApiDetails.DiscoveryFailures++
+		failures := agent.ApiDetails.DiscoveryFailures
 		agent.ApiDetails.LatestError = "no contact endpoints found"
 		agent.ApiDetails.LatestErrorTime = time.Now()
 		agent.mu.Unlock()
-		lgAgent.Warn("discovery failed, will retry", "agent", agent.Identity, "reason", "no contact endpoints found")
+
+		if failures >= 3 && imr.Cache != nil {
+			identity := string(agent.Identity)
+			removed, err := imr.Cache.FlushDomain(identity, false)
+			if err == nil && removed > 0 {
+				lgAgent.Info("flushed IMR cache for stuck discovery", "agent", agent.Identity, "removed", removed, "after_failures", failures)
+			}
+			agent.mu.Lock()
+			agent.ApiDetails.DiscoveryFailures = 0
+			agent.mu.Unlock()
+		} else {
+			lgAgent.Warn("discovery failed, will retry", "agent", agent.Identity, "reason", "no contact endpoints found", "failures", failures)
+		}
 		return
 	}
 
@@ -637,6 +651,10 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, d
 	}
 
 	// SUCCESS: Discovery complete. Contact info updated.
+	agent.mu.Lock()
+	agent.ApiDetails.DiscoveryFailures = 0
+	agent.mu.Unlock()
+
 	lgAgent.Info("discovery successful", "agent", agent.Identity,
 		"apiState", AgentStateToString[agent.ApiDetails.State],
 		"dnsState", AgentStateToString[agent.DnsDetails.State])

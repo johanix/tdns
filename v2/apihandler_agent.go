@@ -197,6 +197,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			"config": true, "hsync-agentstatus": true, "peer-ping": true, "peer-apiping": true,
 			"discover": true, "hsync-locate": true,
 			"router-list": true, "router-describe": true, "router-metrics": true, "router-walk": true, "router-reset": true,
+			"imr-query": true, "imr-flush": true, "imr-reset": true, "imr-show": true, "peer-reset": true,
 		}
 		if !noZoneCommands[amp.Command] {
 			amp.Zone = ZoneName(dns.Fqdn(string(amp.Zone)))
@@ -670,6 +671,184 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			algorithm := sak.Keys[0].KeyRR.Algorithm
 			go conf.parentSyncAfterKeyPublication(amp.Zone, string(amp.Zone), keyid, algorithm)
 			resp.Msg = fmt.Sprintf("Bootstrap triggered for zone %s (keyid %d), running async", amp.Zone, keyid)
+
+		case "imr-query":
+			imr := Globals.ImrEngine
+			if imr == nil || imr.Cache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "IMR engine not available"
+				return
+			}
+			qname, _ := amp.Data["qname"].(string)
+			qtypeStr, _ := amp.Data["qtype"].(string)
+			if qname == "" || qtypeStr == "" {
+				resp.Error = true
+				resp.ErrorMsg = "qname and qtype are required"
+				return
+			}
+			qname = dns.Fqdn(qname)
+			qtype, ok := dns.StringToType[strings.ToUpper(qtypeStr)]
+			if !ok {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("unknown RR type: %s", qtypeStr)
+				return
+			}
+			crrset := imr.Cache.Get(qname, qtype)
+			if crrset == nil {
+				resp.Msg = fmt.Sprintf("No cache entry for %s %s", qname, qtypeStr)
+				return
+			}
+			// Build response with cache metadata
+			entry := map[string]interface{}{
+				"name":       crrset.Name,
+				"rrtype":     dns.TypeToString[crrset.RRtype],
+				"rcode":      dns.RcodeToString[int(crrset.Rcode)],
+				"ttl":        crrset.Ttl,
+				"expiration": crrset.Expiration.Format(time.RFC3339),
+				"expires_in": time.Until(crrset.Expiration).Truncate(time.Second).String(),
+				"context":    fmt.Sprintf("%d", crrset.Context),
+				"state":      fmt.Sprintf("%d", crrset.State),
+			}
+			if crrset.RRset != nil {
+				var rrs []string
+				for _, rr := range crrset.RRset.RRs {
+					rrs = append(rrs, rr.String())
+				}
+				entry["records"] = rrs
+			}
+			resp.Data = entry
+			resp.Msg = fmt.Sprintf("Cache entry for %s %s", qname, dns.TypeToString[qtype])
+
+		case "imr-flush":
+			imr := Globals.ImrEngine
+			if imr == nil || imr.Cache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "IMR engine not available"
+				return
+			}
+			qname, _ := amp.Data["qname"].(string)
+			if qname == "" {
+				resp.Error = true
+				resp.ErrorMsg = "qname is required"
+				return
+			}
+			qname = dns.Fqdn(qname)
+			removed, err := imr.Cache.FlushDomain(qname, false)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("flush failed: %v", err)
+				return
+			}
+			resp.Msg = fmt.Sprintf("Flushed %d cache entries at and below %s", removed, qname)
+
+		case "imr-reset":
+			imr := Globals.ImrEngine
+			if imr == nil || imr.Cache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "IMR engine not available"
+				return
+			}
+			removed := imr.Cache.FlushAll()
+			resp.Msg = fmt.Sprintf("IMR cache reset: flushed %d entries (root NS and glue preserved)", removed)
+
+		case "imr-show":
+			imr := Globals.ImrEngine
+			if imr == nil || imr.Cache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "IMR engine not available"
+				return
+			}
+			identity := string(amp.AgentId)
+			if identity == "" {
+				resp.Error = true
+				resp.ErrorMsg = "agent_id (--id) is required"
+				return
+			}
+			identity = dns.Fqdn(identity)
+
+			// Collect all cache entries related to this identity's discovery names
+			// Discovery names are subdomains of identity: _https._tcp.<id>, api.<id>,
+			// _dns._tcp.<id>, dns.<id>, and <id> itself
+			var entries []map[string]interface{}
+			idCanon := strings.ToLower(identity)
+			for item := range imr.Cache.RRsets.IterBuffered() {
+				cr := item.Val
+				name := strings.ToLower(cr.Name)
+				// Match: name equals identity or is a subdomain of identity
+				if name != idCanon && !strings.HasSuffix(name, "."+idCanon) {
+					continue
+				}
+				entry := map[string]interface{}{
+					"name":       cr.Name,
+					"rrtype":     dns.TypeToString[cr.RRtype],
+					"rcode":      dns.RcodeToString[int(cr.Rcode)],
+					"ttl":        cr.Ttl,
+					"expiration": cr.Expiration.Format(time.RFC3339),
+					"expires_in": time.Until(cr.Expiration).Truncate(time.Second).String(),
+				}
+				if cr.RRset != nil {
+					var rrs []string
+					for _, rr := range cr.RRset.RRs {
+						rrs = append(rrs, rr.String())
+					}
+					entry["records"] = rrs
+				}
+				entries = append(entries, entry)
+			}
+			resp.Data = entries
+			resp.Msg = fmt.Sprintf("Found %d cache entries for identity %s", len(entries), identity)
+
+		case "peer-reset":
+			if amp.AgentId == "" {
+				resp.Error = true
+				resp.ErrorMsg = "agent_id (--id) is required"
+				return
+			}
+			amp.AgentId = AgentId(dns.Fqdn(string(amp.AgentId)))
+
+			ar := conf.Internal.AgentRegistry
+			if ar == nil {
+				resp.Error = true
+				resp.ErrorMsg = "agent registry not available"
+				return
+			}
+
+			// Flush IMR cache for this identity's discovery names
+			imr := Globals.ImrEngine
+			flushed := 0
+			if imr != nil && imr.Cache != nil {
+				removed, _ := imr.Cache.FlushDomain(string(amp.AgentId), false)
+				flushed = removed
+			}
+
+			// Reset agent to NEEDED state and restart discovery
+			agent, exists := ar.S.Get(amp.AgentId)
+			if !exists {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("agent %q not found in registry", amp.AgentId)
+				return
+			}
+
+			agent.mu.Lock()
+			if agent.ApiDetails != nil {
+				agent.ApiDetails.State = AgentStateNeeded
+				agent.ApiDetails.DiscoveryFailures = 0
+				agent.ApiDetails.LatestError = ""
+			}
+			if agent.DnsDetails != nil {
+				agent.DnsDetails.State = AgentStateNeeded
+				agent.DnsDetails.DiscoveryFailures = 0
+				agent.DnsDetails.LatestError = ""
+			}
+			agent.State = AgentStateNeeded
+			agent.mu.Unlock()
+
+			// Trigger immediate re-discovery
+			if imr != nil {
+				go ar.attemptDiscovery(agent, imr, agent.ApiMethod, agent.DnsMethod)
+			}
+
+			resp.Msg = fmt.Sprintf("Reset agent %s to NEEDED state (flushed %d cache entries), discovery restarted", amp.AgentId, flushed)
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown agent command: %s", amp.Command)
