@@ -374,6 +374,22 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			}
 		}
 
+		// Provide gossip for beat responses: when we receive a beat,
+		// include our gossip state in the response so peers get
+		// bidirectional state exchange on every beat round-trip.
+		tm.ChunkHandler.GossipForPeer = func(peerID string) json.RawMessage {
+			if tm.agentRegistry == nil || tm.agentRegistry.GossipStateTable == nil || tm.agentRegistry.ProviderGroupManager == nil {
+				return nil
+			}
+			gossipMsgs := tm.agentRegistry.GossipStateTable.BuildGossipForPeer(
+				peerID, tm.agentRegistry.ProviderGroupManager, tm.agentRegistry.LeaderElectionManager)
+			if len(gossipMsgs) == 0 {
+				return nil
+			}
+			data, _ := json.Marshal(gossipMsgs)
+			return data
+		}
+
 		// Initialize router with handlers and middleware
 		routerCfg := &transport.RouterConfig{
 			TransportManager:             tm,
@@ -612,7 +628,7 @@ func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 			for i := range gossipMsgs {
 				tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i])
 			}
-			lgTransport.Debug("merged gossip from beat", "sender", senderID, "groups", len(gossipMsgs))
+			lgTransport.Debug("merged gossip from incoming DNS beat", "sender", senderID, "groups", len(gossipMsgs))
 
 			// Check group operational state after merge
 			if tm.agentRegistry.ProviderGroupManager != nil {
@@ -1548,6 +1564,22 @@ func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Age
 				agent.DnsDetails.LatestError = ""
 			}
 			agent.mu.Unlock()
+		}
+	}
+
+	// Merge gossip from beat responses (bidirectional gossip exchange)
+	if tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil {
+		for _, resp := range []*transport.BeatResponse{apiResp, dnsResp} {
+			if resp == nil || len(resp.Gossip) == 0 {
+				continue
+			}
+			var gossipMsgs []GossipMessage
+			if err := json.Unmarshal(resp.Gossip, &gossipMsgs); err == nil {
+				for i := range gossipMsgs {
+					tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i])
+				}
+				lgTransport.Debug("merged gossip from beat response EDNS(0) CHUNK", "peer", peer.ID, "groups", len(gossipMsgs))
+			}
 		}
 	}
 

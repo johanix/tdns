@@ -88,6 +88,7 @@ type operationResponse struct {
 	RemovedRecords []string
 	RejectedItems  []RejectedItemDTO
 	Truncated      bool
+	Gossip         json.RawMessage
 }
 
 // IncomingConfirmation represents a confirmation received via DNS
@@ -317,6 +318,7 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 		Sequence:    req.Sequence,
 		State:       resp.Message,
 		Ack:         resp.Status == ConfirmSuccess,
+		Gossip:      resp.Gossip,
 	}, nil
 }
 
@@ -1072,6 +1074,7 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 			RemovedRecords: confirm.RemovedRecords,
 			RejectedItems:  confirm.RejectedItems,
 			Truncated:      confirm.Truncated,
+			Gossip:         confirm.Gossip,
 		}, nil
 	}
 
@@ -1098,6 +1101,7 @@ type inlineConfirm struct {
 	RemovedRecords []string          `json:"removed_records,omitempty"`
 	RejectedItems  []RejectedItemDTO `json:"rejected_items,omitempty"`
 	Truncated      bool              `json:"truncated,omitempty"`
+	Gossip         json.RawMessage   `json:"Gossip,omitempty"`
 }
 
 // extractConfirmFromResponse extracts a JSON confirmation from the EDNS0 CHUNK option in a DNS response.

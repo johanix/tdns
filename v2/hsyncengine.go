@@ -66,18 +66,47 @@ func HsyncEngine(ctx context.Context, conf *Config, msgQs *MsgQs) {
 
 	if registry.GossipStateTable != nil {
 		registry.GossipStateTable.SetOnGroupOperational(func(groupHash string) {
-			lgEngine.Info("OnGroupOperational fired, triggering group election", "group", groupHash[:8])
 			lem := conf.Internal.LeaderElectionManager
 			pgm := registry.ProviderGroupManager
-			if lem != nil && pgm != nil {
-				pg := pgm.GetGroup(groupHash)
-				if pg != nil {
-					lem.StartGroupElection(groupHash, pg.Members, pg.Zones)
+			if lem == nil || pgm == nil {
+				return
+			}
+			pg := pgm.GetGroup(groupHash)
+			if pg == nil {
+				return
+			}
+
+			// Only the lexicographically smallest member initiates the election.
+			// Others wait for the ELECT-CALL. This prevents concurrent elections
+			// when all agents fire OnGroupOperational simultaneously.
+			initiator := pg.Members[0]
+			for _, m := range pg.Members[1:] {
+				if m < initiator {
+					initiator = m
 				}
+			}
+			localID := string(lem.localID)
+			if localID == initiator {
+				lgEngine.Info("OnGroupOperational: we are initiator, starting election",
+					"group", groupHash[:8])
+				lem.StartGroupElection(groupHash, pg.Members, pg.Zones)
+			} else {
+				lgEngine.Info("OnGroupOperational: waiting for initiator",
+					"group", groupHash[:8], "initiator", initiator)
 			}
 		})
 		registry.GossipStateTable.SetOnGroupDegraded(func(groupHash string) {
-			lgEngine.Info("OnGroupDegraded fired, group leader may become stale", "group", groupHash[:8])
+			lgEngine.Info("OnGroupDegraded: invalidating group leader", "group", groupHash[:8])
+			lem := conf.Internal.LeaderElectionManager
+			if lem != nil {
+				lem.InvalidateGroupLeader(groupHash)
+			}
+		})
+		registry.GossipStateTable.SetOnElectionUpdate(func(groupHash string, state GroupElectionState) {
+			lem := conf.Internal.LeaderElectionManager
+			if lem != nil {
+				lem.ApplyGossipElection(groupHash, state)
+			}
 		})
 	}
 

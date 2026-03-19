@@ -49,6 +49,7 @@ type GossipStateTable struct {
 	// Callbacks
 	onGroupOperational func(groupHash string)
 	onGroupDegraded    func(groupHash string)
+	onElectionUpdate   func(groupHash string, state GroupElectionState)
 	// Track which groups have fired operational callback
 	operationalGroups map[string]bool
 }
@@ -109,6 +110,9 @@ func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
 		if existing == nil || msg.Election.Term > existing.Term {
 			elCopy := msg.Election
 			gst.Elections[groupHash] = &elCopy
+			if gst.onElectionUpdate != nil {
+				gst.onElectionUpdate(groupHash, elCopy)
+			}
 		}
 	}
 
@@ -150,6 +154,10 @@ func (gst *GossipStateTable) BuildGossipForPeer(peerID string, pgm *ProviderGrou
 			}
 		}
 		if !localInGroup || !peerInGroup {
+			lgGossip.Debug("BuildGossipForPeer: skipping group",
+				"group", hash[:8], "peerID", peerID,
+				"localID", gst.LocalID, "members", pg.Members,
+				"localInGroup", localInGroup, "peerInGroup", peerInGroup)
 			continue
 		}
 
@@ -187,6 +195,8 @@ func (gst *GossipStateTable) BuildGossipForPeer(peerID string, pgm *ProviderGrou
 			msg.GroupName = *pg.NameProposal
 		}
 
+		lgGossip.Debug("BuildGossipForPeer: including group",
+			"group", hash[:8], "peerID", peerID, "memberStates", len(msg.Members))
 		messages = append(messages, msg)
 	}
 
@@ -214,6 +224,12 @@ func (gst *GossipStateTable) SetOnGroupDegraded(fn func(groupHash string)) {
 	gst.mu.Lock()
 	defer gst.mu.Unlock()
 	gst.onGroupDegraded = fn
+}
+
+func (gst *GossipStateTable) SetOnElectionUpdate(fn func(groupHash string, state GroupElectionState)) {
+	gst.mu.Lock()
+	defer gst.mu.Unlock()
+	gst.onElectionUpdate = fn
 }
 
 // CheckGroupState checks if all cells in the NxN matrix for a group are OPERATIONAL.
@@ -308,6 +324,8 @@ func (gst *GossipStateTable) RefreshLocalStates(ar *AgentRegistry, pgm *Provider
 			zones = append(zones, string(z))
 		}
 
+		lgGossip.Debug("RefreshLocalStates", "group", hash[:8],
+			"localID", gst.LocalID, "peerStates", peerStates, "zones", zones)
 		gst.UpdateLocalState(hash, peerStates, zones)
 	}
 }

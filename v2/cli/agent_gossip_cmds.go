@@ -129,13 +129,24 @@ in every non-diagonal cell.`,
 		groupHash, _ := data["group_hash"].(string)
 		fmt.Printf("Group: %s (hash: %s)\n", groupName, groupHash)
 
-		// Print election state if present
+		// Print election state
 		if el, ok := data["election"].(map[string]interface{}); ok {
-			leader, _ := el["leader"].(string)
-			term, _ := el["term"].(float64)
-			expiresIn, _ := el["expires_in"].(string)
-			if leader != "" {
+			status, _ := el["status"].(string)
+			switch status {
+			case "active":
+				leader, _ := el["leader"].(string)
+				term, _ := el["term"].(float64)
+				expiresIn, _ := el["expires_in"].(string)
 				fmt.Printf("Leader: %s (term %d, expires in %s)\n", leader, int(term), expiresIn)
+			case "no_election":
+				fmt.Println("Leader: no election held")
+			case "invalidated":
+				term, _ := el["term"].(float64)
+				fmt.Printf("Leader: election invalidated (group degraded, last term %d)\n", int(term))
+			case "expired":
+				leader, _ := el["leader"].(string)
+				term, _ := el["term"].(float64)
+				fmt.Printf("Leader: expired (was %s, term %d)\n", leader, int(term))
 			}
 		}
 		fmt.Println()

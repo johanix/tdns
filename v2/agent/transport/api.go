@@ -143,6 +143,7 @@ func (t *APITransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 		Timestamp:    req.Timestamp.Unix(),
 		Sequence:     req.Sequence,
 		State:        req.State,
+		Gossip:       req.Gossip,
 	}
 	respBody, err := t.doRequest(ctx, "POST", url, apiReq)
 	if err != nil {
@@ -380,12 +381,13 @@ type apiHelloResponse struct {
 }
 
 type apiBeatRequest struct {
-	MessageType  string `json:"message_type"`
-	MyIdentity   string `json:"my_identity"`
-	YourIdentity string `json:"your_identity"`
-	Timestamp    int64  `json:"timestamp"`
-	Sequence     uint64 `json:"sequence"`
-	State        string `json:"state,omitempty"`
+	MessageType  string          `json:"message_type"`
+	MyIdentity   string          `json:"my_identity"`
+	YourIdentity string          `json:"your_identity"`
+	Timestamp    int64           `json:"timestamp"`
+	Sequence     uint64          `json:"sequence"`
+	State        string          `json:"state,omitempty"`
+	Gossip       json.RawMessage `json:"Gossip,omitempty"` // Gossip data, passed through from BeatRequest
 }
 
 type apiBeatResponse struct {

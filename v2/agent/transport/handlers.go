@@ -169,13 +169,14 @@ func HandleBeat(ctx *MessageContext) error {
 	ctx.Data["message_type"] = "beat"
 	ctx.Data["incoming_message"] = beatMsg
 
-	// Construct confirm response (used by both agent and combiner)
+	// Construct confirm response with optional gossip (used by both agent and combiner)
 	confirmPayload := struct {
-		Type           string `json:"type"`
-		DistributionID string `json:"distribution_id"`
-		Status         string `json:"status"`
-		Message        string `json:"message"`
-		Timestamp      int64  `json:"timestamp"`
+		Type           string          `json:"type"`
+		DistributionID string          `json:"distribution_id"`
+		Status         string          `json:"status"`
+		Message        string          `json:"message"`
+		Timestamp      int64           `json:"timestamp"`
+		Gossip         json.RawMessage `json:"Gossip,omitempty"`
 	}{
 		Type:           "confirm",
 		DistributionID: ctx.DistributionID,
@@ -183,6 +184,12 @@ func HandleBeat(ctx *MessageContext) error {
 		Message:        "beat acknowledged",
 		Timestamp:      time.Now().Unix(),
 	}
+
+	// Include our gossip for the sender in the response
+	if gossipFn, ok := ctx.Data["gossip_for_peer"].(func(string) json.RawMessage); ok {
+		confirmPayload.Gossip = gossipFn(ctx.PeerID)
+	}
+
 	payloadBytes, err := json.Marshal(confirmPayload)
 	if err != nil {
 		lgTransport().Error("failed to marshal beat confirm", "err", err)

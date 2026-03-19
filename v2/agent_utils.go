@@ -570,9 +570,13 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 		LastState:  time.Now(),
 	}
 
-	// Mark both transports as needing discovery (will be refined during discovery)
-	agent.ApiMethod = true
-	agent.DnsMethod = true
+	// Only discover transports we ourselves support.
+	if ar.TransportManager != nil {
+		agent.DnsMethod = ar.TransportManager.isTransportSupported("dns")
+		agent.ApiMethod = ar.TransportManager.isTransportSupported("api")
+	} else {
+		agent.DnsMethod = true
+	}
 
 	if zonename != "" {
 		agent.Zones[zonename] = true
@@ -588,7 +592,7 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 	// Trigger immediate discovery instead of waiting for DiscoveryRetrierNG tick
 	if imr := Conf.Internal.ImrEngine; imr != nil {
 		lgAgent.Debug("triggering immediate discovery", "agent", remoteid)
-		go ar.attemptDiscovery(agent, imr, true, true)
+		go ar.attemptDiscovery(agent, imr, agent.ApiMethod, agent.DnsMethod)
 	} else {
 		lgAgent.Debug("IMR not ready, will be discovered by DiscoveryRetrierNG", "agent", remoteid)
 	}
@@ -1043,23 +1047,16 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 	}
 
 	// Trigger leader election if HSYNC3 RRset changed and we have a leader election manager.
-	// Elections require ALL configured peers to be operational.
+	// Use group elections when provider groups exist; zone elections only for single-agent.
 	if len(updatedIdentities) > 0 && ar.LeaderElectionManager != nil {
 		lem := ar.LeaderElectionManager
 		configured := lem.configuredPeers(zonename)
 		if configured == 0 {
 			lem.StartElection(zonename, 0)
-		} else {
-			operational := 0
-			if lem.operationalPeersFunc != nil {
-				operational = lem.operationalPeersFunc(zonename)
-			}
-			if operational >= configured {
-				lem.StartElection(zonename, configured)
-			} else {
-				lgAgent.Debug("deferring leader election, not all configured peers operational",
-					"zone", zonename, "operational", operational, "configured", configured)
-				lem.DeferElection(zonename)
+		} else if ar.ProviderGroupManager != nil {
+			pg := ar.ProviderGroupManager.GetGroupForZone(zonename)
+			if pg != nil {
+				lem.DeferGroupElection(pg.GroupHash)
 			}
 		}
 	}

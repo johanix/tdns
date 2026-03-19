@@ -136,11 +136,12 @@ type BeatRequest struct {
 
 // BeatResponse represents a heartbeat acknowledgment.
 type BeatResponse struct {
-	ResponderID string    // Identity of the responder
-	Timestamp   time.Time // Response timestamp
-	Sequence    uint64    // Echoed sequence number
-	State       string    // Responder's current state
-	Ack         bool      // Whether the beat was acknowledged
+	ResponderID string          // Identity of the responder
+	Timestamp   time.Time       // Response timestamp
+	Sequence    uint64          // Echoed sequence number
+	State       string          // Responder's current state
+	Ack         bool            // Whether the beat was acknowledged
+	Gossip      json.RawMessage // Gossip from responder (if any)
 }
 
 // SyncRequest represents a data synchronization request.

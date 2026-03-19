@@ -608,6 +608,17 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				resp.ErrorMsg = "leader election manager not initialized"
 				return
 			}
+			// Route to group election if zone belongs to a provider group
+			ar := conf.Internal.AgentRegistry
+			if ar != nil && ar.ProviderGroupManager != nil {
+				pg := ar.ProviderGroupManager.GetGroupForZone(amp.Zone)
+				if pg != nil {
+					lem.StartGroupElection(pg.GroupHash, pg.Members, pg.Zones)
+					resp.Msg = fmt.Sprintf("Group election started for zone %s (group %s)", amp.Zone, pg.GroupHash[:8])
+					return
+				}
+			}
+			// No provider group — per-zone election
 			configured := lem.configuredPeers(amp.Zone)
 			operational := 0
 			if lem.operationalPeersFunc != nil {
@@ -904,14 +915,35 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				"matrix":     matrix,
 			}
 
-			if election != nil {
-				result["election"] = map[string]interface{}{
-					"leader":        election.Leader,
-					"term":          election.Term,
-					"leader_expiry": election.LeaderExpiry.Format(time.RFC3339),
-					"expires_in":    time.Until(election.LeaderExpiry).Truncate(time.Second).String(),
-				}
+			// Always include election block with status.
+			// LEM is authoritative; gossip table is fallback.
+			electionData := map[string]interface{}{}
+			lem := conf.Internal.LeaderElectionManager
+			var es GroupElectionState
+			if lem != nil {
+				es = lem.GetGroupElectionState(pg.GroupHash)
 			}
+			if es.Term == 0 && election != nil {
+				es = *election
+			}
+
+			if es.Term == 0 {
+				electionData["status"] = "no_election"
+			} else if es.Leader == "" {
+				electionData["status"] = "invalidated"
+				electionData["term"] = es.Term
+			} else if time.Now().After(es.LeaderExpiry) {
+				electionData["status"] = "expired"
+				electionData["leader"] = es.Leader
+				electionData["term"] = es.Term
+			} else {
+				electionData["status"] = "active"
+				electionData["leader"] = es.Leader
+				electionData["term"] = es.Term
+				electionData["leader_expiry"] = es.LeaderExpiry.Format(time.RFC3339)
+				electionData["expires_in"] = time.Until(es.LeaderExpiry).Truncate(time.Second).String()
+			}
+			result["election"] = electionData
 
 			if nameProposal != nil {
 				result["name_proposal"] = map[string]interface{}{

@@ -9,8 +9,6 @@ import (
 )
 
 func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport) {
-	// log.Printf("HeartbeatHandler: Received %s from %s", report.Msg.MessageType, report.Msg.Identity)
-
 	switch report.MessageType {
 	case AgentMsgBeat:
 		lgAgent.Debug("received BEAT", "from", report.Identity)
@@ -22,14 +20,24 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport) {
 			agent.mu.Unlock()
 		}
 
-		//	case "FULLBEAT":
-		//		if Globals.Debug {
-		//			log.Printf("HeartbeatHandler: Received FULLBEAT from %s", report.Identity)
-		//		}
-		//		if agent, exists := ar.S.Get(report.Identity); exists {
-		//			agent.ApiDetails.LatestRBeat = time.Now()
-		//			agent.ApiDetails.ReceivedBeats++
-		//		}
+		// Process gossip from API beat (DNS beats process gossip in routeBeatMessage)
+		if report.Transport == "API" && ar.GossipStateTable != nil {
+			if abp, ok := report.Msg.(*AgentBeatPost); ok && len(abp.Gossip) > 0 {
+				for i := range abp.Gossip {
+					ar.GossipStateTable.MergeGossip(&abp.Gossip[i])
+				}
+				lgAgent.Debug("merged gossip from incoming API beat", "sender", report.Identity, "groups", len(abp.Gossip))
+
+				if ar.ProviderGroupManager != nil {
+					for i := range abp.Gossip {
+						pg := ar.ProviderGroupManager.GetGroup(abp.Gossip[i].GroupHash)
+						if pg != nil {
+							ar.GossipStateTable.CheckGroupState(pg.GroupHash, pg.Members)
+						}
+					}
+				}
+			}
+		}
 
 	default:
 		lgAgent.Warn("unknown message type in HeartbeatHandler", "type", AgentMsgToString[report.MessageType])
