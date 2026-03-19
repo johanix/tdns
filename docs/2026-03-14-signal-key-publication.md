@@ -5,27 +5,36 @@
 
 ## Problem
 
-When an agent wins leader election for a multi-provider zone (e.g. `whisky.dnslab.`), it needs
-to publish its SIG(0) public key so that the parent zone can validate DNS UPDATE messages from
-it. There are two publication locations, depending on what the parent supports:
+When an agent wins leader election for a multi-provider
+zone (e.g. `whisky.dnslab.`), it needs to publish its
+SIG(0) public key so that the parent zone can validate
+DNS UPDATE messages from it. There are two publication
+locations, depending on what the parent supports:
 
-- **`at-apex`**: KEY RR at the zone apex (`whisky.dnslab. KEY ...`)
-- **`at-ns`**: KEY RR at the RFC 9615 `_signal` name for each NS record the local provider
-  contributes: `_sig0key.<customerzone>._signal.<nstarget>.`
+- **`at-apex`**: KEY RR at the zone apex
+  (`whisky.dnslab. KEY ...`)
+- **`at-ns`**: KEY RR at the RFC 9615 `_signal` name for
+  each NS record the local provider contributes:
+  `_sig0key.<customerzone>._signal.<nstarget>.`
 
-The agent knows which locations the parent supports (via DSYNC RRset lookup). The combiner
-knows which NS records each agent has contributed, has persistent storage, and manages the
-provider zone where `_signal` records live. Therefore the **combiner** should own all KEY
-publication logic once instructed by the agent.
+The agent knows which locations the parent supports (via
+DSYNC RRset lookup). The combiner knows which NS records
+each agent has contributed, has persistent storage, and
+manages the provider zone where `_signal` records live.
+Therefore the **combiner** should own all KEY publication
+logic once instructed by the agent.
 
-The same mechanism will later be used for CDS publication (same location choices).
+The same mechanism will later be used for CDS publication
+(same location choices).
 
 ## Design
 
 ### Protocol: PublishInstruction piggybacked on UPDATE
 
-A new `PublishInstruction` struct is added. It is carried as an optional field on the existing
-UPDATE message. The agent sends it alongside (or instead of) regular zone data contributions.
+A new `PublishInstruction` struct is added. It is carried
+as an optional field on the existing UPDATE message. The
+agent sends it alongside (or instead of) regular zone
+data contributions.
 
 ```go
 // core/messages.go
@@ -38,20 +47,29 @@ type PublishInstruction struct {
 
 `Locations` values:
 - `"at-apex"` — publish at zone apex of the MP zone
-- `"at-ns"` — publish at `_sig0key.<zone>._signal.<nstarget>.` for each NS the local agent contributed
-- `[]` (empty) — retract: remove all published KEYs (apex + all `_signal` names)
+- `"at-ns"` — publish at
+  `_sig0key.<zone>._signal.<nstarget>.` for each NS the
+  local agent contributed
+- `[]` (empty) — retract: remove all published KEYs
+  (apex + all `_signal` names)
 
 `PublishInstruction` is added to:
 - `AgentMsgPost` (core/messages.go) — wire format
-- `CombinerSyncRequest` (combiner_chunk.go) — combiner processing
-- `ZoneUpdate` (syncheddataengine.go) — agent-side construction
-- `ConvertZoneUpdateToSyncRequest` — copies the field through
-- `combiner_msg_handler.go` — copies from `AgentMsgPost` to `CombinerSyncRequest`
+- `CombinerSyncRequest` (combiner_chunk.go) — combiner
+  processing
+- `ZoneUpdate` (syncheddataengine.go) — agent-side
+  construction
+- `ConvertZoneUpdateToSyncRequest` — copies the field
+  through
+- `combiner_msg_handler.go` — copies from `AgentMsgPost`
+  to `CombinerSyncRequest`
 
 ### Agent side (main_initfuncs.go: onLeaderElected)
 
-Replace the current `PublishSignalKeyToCombiner` call with a normal `EnqueueForCombiner`
-carrying `PublishInstruction` with `Locations: ["at-apex", "at-ns"]` (always both for now;
+Replace the current `PublishSignalKeyToCombiner` call
+with a normal `EnqueueForCombiner` carrying
+`PublishInstruction` with
+`Locations: ["at-apex", "at-ns"]` (always both for now;
 parent-capability filtering is future work).
 
 ```go
@@ -66,16 +84,21 @@ zu := &ZoneUpdate{
 sigDistID, err := tm.EnqueueForCombiner(zone, zu, "")
 ```
 
-Delete `PublishSignalKeyToCombiner` from `parentsync_leader.go`. Keep `Sig0KeyOwnerName` as
-a package-level helper (referenced in `GetParentSyncStatus`).
+Delete `PublishSignalKeyToCombiner` from
+`parentsync_leader.go`. Keep `Sig0KeyOwnerName` as a
+package-level helper (referenced in
+`GetParentSyncStatus`).
 
 ### Combiner side: processing PublishInstruction
 
-In `CombinerProcessUpdate`, after handling regular Operations/Records: if `req.Publish != nil`,
-call `combinerApplyPublishInstruction(req, zd, kdb, tm)`.
+In `CombinerProcessUpdate`, after handling regular
+Operations/Records: if `req.Publish != nil`, call
+`combinerApplyPublishInstruction(req, zd, kdb, tm)`.
 
-`CombinerProcessUpdate` gains two new parameters: `kdb *KeyDB` and `tm *TransportManager`.
-Both are available at all call sites in `combiner_msg_handler.go`. `CombinerState.ProcessUpdate`
+`CombinerProcessUpdate` gains two new parameters:
+`kdb *KeyDB` and `tm *TransportManager`. Both are
+available at all call sites in
+`combiner_msg_handler.go`. `CombinerState.ProcessUpdate`
 is updated to thread them through.
 
 `combinerApplyPublishInstruction` logic:
@@ -115,17 +138,22 @@ kdb.SavePublishInstruction(zone, senderID, instr, publishedNS)
 
 ### Combiner side: NS change side-effect
 
-Add `combinerResyncSignalKeys(senderID, zone, zd, kdb, tm)`:
-- Load stored instruction for (zone, senderID); if none or Locations empty: no-op
-- If `"at-ns"` in Locations: diff currentNS vs storedPublishedNS, add/remove `_signal` KEYs,
-  update storedPublishedNS in kdb
+Add
+`combinerResyncSignalKeys(senderID, zone, zd, kdb, tm)`:
+- Load stored instruction for (zone, senderID); if none
+  or Locations empty: no-op
+- If `"at-ns"` in Locations: diff currentNS vs
+  storedPublishedNS, add/remove `_signal` KEYs, update
+  storedPublishedNS in kdb
 
-Call it at the end of `combinerProcessOperations` when any NS records changed (dataChanged &&
-ns was among the changed types).
+Call it at the end of `combinerProcessOperations` when
+any NS records changed (dataChanged && ns was among the
+changed types).
 
 ### Database: CombinerPublishInstructions table
 
-New table in `db_schema_hsync.go`, initialized via `InitCombinerEditTables`:
+New table in `db_schema_hsync.go`, initialized via
+`InitCombinerEditTables`:
 
 ```sql
 CREATE TABLE IF NOT EXISTS 'CombinerPublishInstructions' (
@@ -164,12 +192,15 @@ func (kdb *KeyDB) LoadAllPublishInstructions() (map[string]map[string]*StoredPub
 
 ### NS records: migration to Operations style
 
-The agent currently sends NS records via `ZoneUpdate.RRsets` (legacy). Migrate
-`syncheddataengine.go` to build NS (and all non-DNSKEY RRtypes) using
+The agent currently sends NS records via
+`ZoneUpdate.RRsets` (legacy). Migrate
+`syncheddataengine.go` to build NS (and all non-DNSKEY
+RRtypes) using
 `Operations: []core.RROperation{{Operation: "replace", ...}}`.
 
-The `RRsets` field is kept in `ZoneUpdate` with a TODO comment for future removal once
-the Operations path is trusted.
+The `RRsets` field is kept in `ZoneUpdate` with a TODO
+comment for future removal once the Operations path is
+trusted.
 
 ## Files to modify
 
@@ -186,16 +217,23 @@ the Operations path is trusted.
 
 ## Helper functions
 
-- `sig0KeyOwnerName(zone, nsTarget string) string` — keep in `parentsync_leader.go`
-- `publishSignalKey(zone, nsTarget string, keyRRs []string, tm *TransportManager) error`
-  — internal combiner helper; builds provider ZoneUpdate with `Zone=""` and calls
-  `EnqueueForCombiner("", update, "")` (zone auto-discovery already implemented)
+- `sig0KeyOwnerName(zone, nsTarget string) string` —
+  keep in `parentsync_leader.go`
+- `publishSignalKey(zone, nsTarget string,
+  keyRRs []string, tm *TransportManager) error` —
+  internal combiner helper; builds provider ZoneUpdate
+  with `Zone=""` and calls
+  `EnqueueForCombiner("", update, "")` (zone
+  auto-discovery already implemented)
 
 ## Extensibility for CDS
 
-`PublishInstruction.CDSRRs` is already present. When CDS publication is implemented:
-- Add `"at-apex"` and `"at-ns"` handling for CDS in `combinerApplyPublishInstruction`
-- The `_signal` name for CDS will follow the same pattern (TBD per spec)
+`PublishInstruction.CDSRRs` is already present. When CDS
+publication is implemented:
+- Add `"at-apex"` and `"at-ns"` handling for CDS in
+  `combinerApplyPublishInstruction`
+- The `_signal` name for CDS will follow the same
+  pattern (TBD per spec)
 - No struct or table changes needed
 
 ---
@@ -204,21 +242,31 @@ the Operations path is trusted.
 
 **Overall: Medium**
 
-The struct additions and field threading are mechanical and low-risk. The non-trivial parts are:
+The struct additions and field threading are mechanical
+and low-risk. The non-trivial parts are:
 
-- **`combinerApplyPublishInstruction`**: Must correctly handle all 4 Locations combinations,
-  diff old vs new published NS set, and drive provider zone updates asynchronously via the
-  existing reliable message queue. Moderate complexity (~60–80 LOC).
+- **`combinerApplyPublishInstruction`**: Must correctly
+  handle all 4 Locations combinations, diff old vs new
+  published NS set, and drive provider zone updates
+  asynchronously via the existing reliable message
+  queue. Moderate complexity (~60-80 LOC).
 
-- **`combinerResyncSignalKeys`**: Triggered on NS changes; must be idempotent and handle the
-  case where no instruction is stored. Low-moderate complexity (~30 LOC).
+- **`combinerResyncSignalKeys`**: Triggered on NS
+  changes; must be idempotent and handle the case where
+  no instruction is stored. Low-moderate complexity
+  (~30 LOC).
 
-- **Parameter threading** (`kdb`, `tm` into `CombinerProcessUpdate`): Mechanical but touches
-  several call sites — `combiner_msg_handler.go` (main call), `CombinerState.ProcessUpdate`
-  (wrapper), and the `SendToCombiner` in-process path. All straightforward.
+- **Parameter threading** (`kdb`, `tm` into
+  `CombinerProcessUpdate`): Mechanical but touches
+  several call sites — `combiner_msg_handler.go` (main
+  call), `CombinerState.ProcessUpdate` (wrapper), and
+  the `SendToCombiner` in-process path. All
+  straightforward.
 
-- **NS migration to Operations**: Mechanical refactor. The Operations path is already exercised
-  by DNSKEY and KEY; NS is just another RRtype going through the same code.
+- **NS migration to Operations**: Mechanical refactor.
+  The Operations path is already exercised by DNSKEY
+  and KEY; NS is just another RRtype going through the
+  same code.
 
 ---
 
@@ -255,11 +303,22 @@ The struct additions and field threading are mechanical and low-risk. The non-tr
 
 ## Verification
 
-1. `cd tdns/cmdv2 && GOROOT=/opt/local/lib/go make` — clean build
+1. `cd tdns/cmdv2 && GOROOT=/opt/local/lib/go make` —
+   clean build
 2. Deploy combiner + agent to lab; agent wins election
-3. Combiner log: `[INFO/combiner] publish instruction applied zone=whisky.dnslab. sender=agent.alpha.dnslab. locations=[at-apex at-ns]`
-4. `dogv2 @combiner whisky.dnslab axfr | grep " KEY "` → KEY at zone apex
-5. `dogv2 @combiner alpha.dnslab axfr | grep " KEY "` → `_sig0key.whisky.dnslab._signal.ns2.alpha.dnslab. KEY ...`
-6. Remove NS contribution → verify corresponding `_signal` KEY disappears from provider zone
-7. Send empty Locations (or simulate via restart without re-election) → both apex KEY and all `_signal` KEYs removed
-8. `daemon restart --clear ...` → on re-election, instruction re-sent, all publication restored
+3. Combiner log: `[INFO/combiner] publish instruction
+   applied zone=whisky.dnslab.
+   sender=agent.alpha.dnslab.
+   locations=[at-apex at-ns]`
+4. `dogv2 @combiner whisky.dnslab axfr | grep " KEY "`
+   -> KEY at zone apex
+5. `dogv2 @combiner alpha.dnslab axfr | grep " KEY "`
+   -> `_sig0key.whisky.dnslab._signal.ns2.alpha.dnslab.
+   KEY ...`
+6. Remove NS contribution -> verify corresponding
+   `_signal` KEY disappears from provider zone
+7. Send empty Locations (or simulate via restart without
+   re-election) -> both apex KEY and all `_signal` KEYs
+   removed
+8. `daemon restart --clear ...` -> on re-election,
+   instruction re-sent, all publication restored

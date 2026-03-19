@@ -9,8 +9,8 @@ Three related reliability issues in the current agent
 communication model:
 
 1. **Unreliable leader election.** Elections require all
-   configured peers to be OPERATIONAL, but OPERATIONAL is a
-   unilateral state — agent A may consider B OPERATIONAL
+   configured peers to be OPERATIONAL, but OPERATIONAL is
+   a unilateral state — agent A may consider B OPERATIONAL
    while B considers A UNKNOWN. Elections trigger once (via
    `NotifyPeerOperational`) and if the window is missed,
    nothing retriggers them. Result: one agent has a leader,
@@ -22,11 +22,11 @@ communication model:
    mechanism in the automated path. They stay stuck
    indefinitely.
 
-3. **No shared state.** Each agent maintains its own view of
-   peer states. There is no mechanism for agents to discover
-   that their views disagree. Functions that depend on
-   collective agreement (elections, parentsync) fail silently
-   when views diverge.
+3. **No shared state.** Each agent maintains its own view
+   of peer states. There is no mechanism for agents to
+   discover that their views disagree. Functions that
+   depend on collective agreement (elections, parentsync)
+   fail silently when views diverge.
 
 ## Design Overview
 
@@ -44,9 +44,9 @@ Three new concepts address all three issues:
 
 ### Definition
 
-A **provider group** is the set of provider identities that
-together serve a set of zones. It is derived purely from
-HSYNC3 data.
+A **provider group** is the set of provider identities
+that together serve a set of zones. It is derived purely
+from HSYNC3 data.
 
 For each zone, extract the set of provider identities from
 the HSYNC3 RRset at the zone apex. All zones that have the
@@ -54,16 +54,16 @@ same set of provider identities belong to the same **zone
 group**. The providers in that set form the **provider
 group**.
 
-Example: if zones `a.example.`, `b.example.`, `c.example.`
-all have HSYNC3 records for `{agent.alpha.example.,
-agent.echo.example.}`, they form one zone group served by
-one provider group.
+Example: if zones `a.example.`, `b.example.`,
+`c.example.` all have HSYNC3 records for
+`{agent.alpha.example., agent.echo.example.}`, they form
+one zone group served by one provider group.
 
 ### Group Hash
 
 The group hash is computed from the sorted list of member
-identities. This is deterministic — any agent with the same
-HSYNC3 data computes the same hash.
+identities. This is deterministic — any agent with the
+same HSYNC3 data computes the same hash.
 
 ```go
 func computeGroupHash(identities []string) string {
@@ -85,9 +85,10 @@ displays).
 
 **Naming protocol:**
 
-Each provider includes in its gossip state a proposed name
-for each group it belongs to, along with the proposer's
-identity and a timestamp of when the name was chosen.
+Each provider includes in its gossip state a proposed
+name for each group it belongs to, along with the
+proposer's identity and a timestamp of when the name
+was chosen.
 
 ```go
 type GroupNameProposal struct {
@@ -100,8 +101,8 @@ type GroupNameProposal struct {
 
 **Resolution rules:**
 
-1. For each group hash, collect all proposals (from gossip
-   merge).
+1. For each group hash, collect all proposals (from
+   gossip merge).
 2. The proposal with the earliest `ProposedAt` timestamp
    wins.
 3. On collision (two different group hashes resolve to the
@@ -120,8 +121,8 @@ receive the existing name via gossip and adopt it.
 Adding or removing a zone does not change the provider
 group — the group is defined by the set of providers, not
 the set of zones. If a zone adds a new provider (changing
-its HSYNC3 RRset), that zone migrates to the zone group for
-the new provider set. The old and new provider groups
+its HSYNC3 RRset), that zone migrates to the zone group
+for the new provider set. The old and new provider groups
 continue to exist as long as at least one zone uses each
 set of providers.
 
@@ -130,8 +131,8 @@ set of providers.
 Each agent computes provider groups locally from its own
 HSYNC3 data. Agents may temporarily disagree on group
 composition (e.g., during zone loading). This is handled
-by including group membership in gossip — disagreements are
-detected when an agent receives gossip for a group it
+by including group membership in gossip — disagreements
+are detected when an agent receives gossip for a group it
 doesn't recognize or with different members than expected.
 
 ## Gossip Protocol
@@ -220,62 +221,66 @@ more than one provider group).
 When agent A receives gossip from agent B:
 
 1. For each `MemberState` entry in the gossip:
-   - If the entry is for a member A doesn't have, store it.
+   - If the entry is for a member A doesn't have, store
+     it.
    - If A already has state for that member, compare
      timestamps. **Keep the entry with the later
      timestamp.** Only the member itself sets its own
-     timestamp, so the latest timestamp is always the most
-     authoritative.
-   - Never overwrite a member's state report with an older
-     timestamp, regardless of source.
-   - Note: each member's `PeerStates` map is that member's
-     view of all other members. This is an atomic unit —
-     always replaced as a whole (never merge individual
-     peer entries from different timestamps).
+     timestamp, so the latest timestamp is always the
+     most authoritative.
+   - Never overwrite a member's state report with an
+     older timestamp, regardless of source.
+   - Note: each member's `PeerStates` map is that
+     member's view of all other members. This is an
+     atomic unit — always replaced as a whole (never
+     merge individual peer entries from different
+     timestamps).
 
 2. For `GroupNameProposal`: merge using the naming
    resolution rules (earliest proposal wins).
 
-3. For `GroupElectionState`: accept if term is higher than
-   locally known term.
+3. For `GroupElectionState`: accept if term is higher
+   than locally known term.
 
 ### Convergence
 
 With N agents in a group and beat interval T:
 
-- **Direct path**: Agent A sends gossip to all N-1 peers.
-  Within one beat interval, all agents that can reach A
-  have A's latest state.
+- **Direct path**: Agent A sends gossip to all N-1
+  peers. Within one beat interval, all agents that can
+  reach A have A's latest state.
 - **Transitive path**: If A cannot reach C but both can
-  reach B, then within 2 beat intervals A's state reaches
-  C via B.
-- **Worst case convergence**: (N-1) × T for a chain
-  topology. In practice, with full mesh, convergence is T.
+  reach B, then within 2 beat intervals A's state
+  reaches C via B.
+- **Worst case convergence**: (N-1) x T for a chain
+  topology. In practice, with full mesh, convergence
+  is T.
 
 ### Frequency
 
-Gossip uses the existing beat interval (default 15 seconds,
-configurable via `agent.remote.beatinterval`). No
-additional timers or channels needed.
+Gossip uses the existing beat interval (default 15
+seconds, configurable via `agent.remote.beatinterval`).
+No additional timers or channels needed.
 
 ### Scale
 
-Expected worst case: 20 agents total, one busy agent in 5
-provider groups with up to 5 agents each. That agent sends
-gossip in 5 groups × 4 peers = 20 beat messages per
-interval, each carrying state for up to 5 members. The
-gossip payload per message is ~500 bytes. Total overhead:
-~10 KB per beat interval. Negligible.
+Expected worst case: 20 agents total, one busy agent in
+5 provider groups with up to 5 agents each. That agent
+sends gossip in 5 groups x 4 peers = 20 beat messages
+per interval, each carrying state for up to 5 members.
+The gossip payload per message is ~500 bytes. Total
+overhead: ~10 KB per beat interval. Negligible.
 
 ## IMR Cache Flush for Stuck Discovery
 
 ### Problem
 
-When an agent is stuck in UNKNOWN→KNOWN, the discovery
-retrier queries the IMR for DNS records (`_https._tcp.<id>`,
-`api.<id>`, etc.) and gets NXDOMAIN. The IMR caches the
-negative response per the SOA MINIMUM TTL. The retrier
-loops, hitting cache every time, never getting fresh data.
+When an agent is stuck in UNKNOWN->KNOWN, the discovery
+retrier queries the IMR for DNS records
+(`_https._tcp.<id>`, `api.<id>`, etc.) and gets NXDOMAIN.
+The IMR caches the negative response per the SOA MINIMUM
+TTL. The retrier loops, hitting cache every time, never
+getting fresh data.
 
 ### Fix
 
@@ -297,9 +302,9 @@ process.
 
 ### Scope
 
-Flush is surgical: only the specific names that are failing.
-Not the entire cache, not a subtree — just the exact qnames
-that returned NXDOMAIN.
+Flush is surgical: only the specific names that are
+failing. Not the entire cache, not a subtree — just the
+exact qnames that returned NXDOMAIN.
 
 ## Unverified Gossip (Discovery Kick)
 
@@ -313,28 +318,31 @@ If an agent receives a beat from an unknown sender (JWS
 signature cannot be verified because the sender's key is
 not yet discovered), it cannot trust the content. However,
 the **existence** of the message is informative: someone
-who knows our identity and address is trying to talk to us.
+who knows our identity and address is trying to talk to
+us.
 
 ### Behavior
 
 When an agent receives an unverified beat:
 
-1. **Do NOT merge** gossip state or update any authoritative
-   state tables.
+1. **Do NOT merge** gossip state or update any
+   authoritative state tables.
 2. **Do log** the event: "Received unverified beat from
-   claimed identity X" (at Debug level to avoid log spam).
-3. **Do trigger** a discovery retry for the claimed sender
-   identity, including IMR cache flush for that identity's
-   discovery names. This is safe — worst case it's an extra
-   DNS lookup.
+   claimed identity X" (at Debug level to avoid log
+   spam).
+3. **Do trigger** a discovery retry for the claimed
+   sender identity, including IMR cache flush for that
+   identity's discovery names. This is safe — worst case
+   it's an extra DNS lookup.
 4. **Do NOT respond** to the beat (no acknowledgment to
    unverified senders).
 
 This creates a "discovery kick" path: if A has B as
 OPERATIONAL and B has A as UNKNOWN, A's beats to B will
 cause B to flush its IMR cache and retry discovery for A.
-Once B discovers A, the normal HELLO→INTRODUCED→OPERATIONAL
-progression takes over and verified gossip begins.
+Once B discovers A, the normal
+HELLO->INTRODUCED->OPERATIONAL progression takes over and
+verified gossip begins.
 
 ### Security Considerations
 
@@ -352,10 +360,10 @@ retries. This is low-risk:
 ### Current Problem
 
 `NotifyPeerOperational()` fires when a single peer
-transitions to OPERATIONAL in this agent's local view. But
-the peer may not yet consider us OPERATIONAL. Functions
-that need collective agreement (elections) trigger too
-early.
+transitions to OPERATIONAL in this agent's local view.
+But the peer may not yet consider us OPERATIONAL.
+Functions that need collective agreement (elections)
+trigger too early.
 
 ### New Callback: OnGroupOperational
 
@@ -385,45 +393,48 @@ func (pg *ProviderGroup) checkGroupOperational() {
 }
 ```
 
-This replaces `NotifyPeerOperational()` as the trigger for
-elections and other cooperative functions.
+This replaces `NotifyPeerOperational()` as the trigger
+for elections and other cooperative functions.
 
 ### OnGroupDegraded
 
 Similarly, when any member drops below OPERATIONAL (as
-reported via gossip), fire `OnGroupDegraded(groupHash)`.
-This can trigger leader failover or other recovery actions.
+reported via gossip), fire
+`OnGroupDegraded(groupHash)`. This can trigger leader
+failover or other recovery actions.
 
 ## Per-Group Elections
 
 ### Change
 
 Replace per-zone elections with per-group elections. The
-leader for a provider group handles leader duties (currently
-parentsync) for **all zones** in that group.
+leader for a provider group handles leader duties
+(currently parentsync) for **all zones** in that group.
 
 ### Benefits
 
 - Dramatically fewer elections: one per provider group
   instead of one per zone. For 500 zones with the same
   two providers, that's 1 election instead of 500.
-- Election state propagates via gossip — all group members
-  see the same leader/term/expiry.
+- Election state propagates via gossip — all group
+  members see the same leader/term/expiry.
 - Election trigger is `OnGroupOperational` — guaranteed
-  to fire only when all members agree on collective state.
+  to fire only when all members agree on collective
+  state.
 
 ### Election Protocol
 
-The existing election protocol (ELECT-CALL → ELECT-VOTE →
-ELECT-CONFIRM, 3-phase with 5-second timeouts) works
-unchanged. The only differences:
+The existing election protocol (ELECT-CALL ->
+ELECT-VOTE -> ELECT-CONFIRM, 3-phase with 5-second
+timeouts) works unchanged. The only differences:
 
 - Scope is per-group instead of per-zone.
 - Triggered by `OnGroupOperational` instead of
   `NotifyPeerOperational`.
 - Election state (`GroupElectionState`) is included in
-  gossip, so agents that miss the election messages (e.g.,
-  briefly unreachable) learn the result via gossip merge.
+  gossip, so agents that miss the election messages
+  (e.g., briefly unreachable) learn the result via
+  gossip merge.
 
 ## Implementation Order
 
@@ -441,13 +452,13 @@ unblocks Phase 4)
 **IMR cache query capability:**
 
 The IMR cache supports cache-only lookups via
-`Cache.Get(qname, qtype)` — this never triggers external
-queries. Cache entries carry rich metadata: TTL, expiration
-time, DNSSEC validation state, response code, cache
-context (answer/referral/NXDOMAIN), and transport used.
-The cache is iterable via `RRsets.IterBuffered()` and
-filterable by suffix (existing `imr dump suffix` uses
-this pattern).
+`Cache.Get(qname, qtype)` — this never triggers
+external queries. Cache entries carry rich metadata:
+TTL, expiration time, DNSSEC validation state, response
+code, cache context (answer/referral/NXDOMAIN), and
+transport used. The cache is iterable via
+`RRsets.IterBuffered()` and filterable by suffix
+(existing `imr dump suffix` uses this pattern).
 
 **New CLI commands:**
 
@@ -470,34 +481,36 @@ the cache. Uses existing `Cache.FlushDomain(qname, false)`
 ```
 agent imr reset
 ```
-Flush entire cache from root down, then re-prime (root NS
-+ trust anchors). Uses existing `Cache.FlushAll()` +
+Flush entire cache from root down, then re-prime (root
+NS + trust anchors). Uses existing `Cache.FlushAll()` +
 re-run priming sequence.
 
 ```
 agent peer reset --id {identity}
 ```
-Reset discovery of `{identity}` to initial state (NEEDED).
-All cached discovery data for that identity discarded.
-Flush IMR cache entries for the identity's discovery
-names (`_https._tcp.<id>`, `api.<id>`, `_<port>._tcp.
-api.<id>`, `_dns._tcp.<id>`, `dns.<id>`). Restart
-discovery from scratch.
+Reset discovery of `{identity}` to initial state
+(NEEDED). All cached discovery data for that identity
+discarded. Flush IMR cache entries for the identity's
+discovery names (`_https._tcp.<id>`, `api.<id>`,
+`_<port>._tcp.api.<id>`, `_dns._tcp.<id>`, `dns.<id>`).
+Restart discovery from scratch.
 
 ```
 agent imr show --id {identity}
 ```
 Show all IMR cache entries related to discovery of
-`{identity}`. Iterates cache via `RRsets.IterBuffered()`,
-filters entries where name matches or is a subdomain of
-the identity FQDN, plus the well-known discovery names
-(`_https._tcp.<id>`, `api.<id>`, SVCB, TLSA, KEY
-records). Displays each entry with metadata.
+`{identity}`. Iterates cache via
+`RRsets.IterBuffered()`, filters entries where name
+matches or is a subdomain of the identity FQDN, plus
+the well-known discovery names (`_https._tcp.<id>`,
+`api.<id>`, SVCB, TLSA, KEY records). Displays each
+entry with metadata.
 
 **Files**: `agent_utils.go`, `agent_discovery.go`,
 new CLI commands in `cli/` (or existing agent CLI file)
 
-### Phase 2: Provider Groups (independent, enables Phase 3)
+### Phase 2: Provider Groups (independent, enables
+Phase 3)
 
 - Compute provider groups from HSYNC3 data
 - Group hash computation
@@ -568,7 +581,8 @@ OPERATIONAL in every non-diagonal cell.
 on Phase 1 + 3)
 
 - Detect unverified beats (JWS validation failure)
-- Trigger discovery retry + cache flush for claimed sender
+- Trigger discovery retry + cache flush for claimed
+  sender
 - Diagnostic logging
 - **Files**: beat receiving path in `hsync_beat.go` or
   transport layer
@@ -581,14 +595,15 @@ on Phase 1 + 3)
 - Fire `OnGroupDegraded` callback
 - **Files**: `provider_groups.go`, `hsyncengine.go`
 
-### Phase 6: Per-Group Elections (depends on Phase 5) — DONE
+### Phase 6: Per-Group Elections (depends on Phase 5)
+— DONE
 
-- `LeaderElectionManager` extended with `groupElections`
-  map (keyed by group hash) alongside existing per-zone
-  `elections` map
+- `LeaderElectionManager` extended with
+  `groupElections` map (keyed by group hash) alongside
+  existing per-zone `elections` map
 - `StartGroupElection()` runs the same 3-phase protocol
-  (CALL→VOTE→CONFIRM) but broadcasts via first zone in
-  group, includes `_group` hash in records
+  (CALL->VOTE->CONFIRM) but broadcasts via first zone
+  in group, includes `_group` hash in records
 - `HandleGroupMessage()` dispatches election messages
   with `_group` record to group election handlers
 - `IsLeader(zone)` checks group leader first (via
@@ -603,16 +618,17 @@ on Phase 1 + 3)
   `GetGroupElectionState()` called from
   `BuildGossipForPeer`
 - Re-election scheduled at 90% of leaderTTL per group
-- **Files**: `parentsync_leader.go`, `provider_groups.go`,
-  `gossip.go`, `hsyncengine.go`, `hsync_transport.go`
+- **Files**: `parentsync_leader.go`,
+  `provider_groups.go`, `gossip.go`, `hsyncengine.go`,
+  `hsync_transport.go`
 
 ### Backward Compatibility Note
 
 Phase 3 (gossip) augments the existing beat payload with
 an optional `json:",omitempty"` field. Agents that don't
 understand gossip ignore the field and continue with
-current behavior. This allows gradual rollout — agents can
-be upgraded one at a time.
+current behavior. This allows gradual rollout — agents
+can be upgraded one at a time.
 
 ## Existing Code to Reuse
 
@@ -626,19 +642,21 @@ be upgraded one at a time.
   for group computation
 - IMR flush commands — already implemented in interactive
   IMR, wire into automated path
-- `LeaderElectionManager` — adapt scope from zone to group
+- `LeaderElectionManager` — adapt scope from zone to
+  group
 
 ## Verification
 
 1. Deploy two agents with shared zones
 2. Verify provider group computed correctly (logs)
-3. Verify gossip appears in beat messages (packet capture
-   or debug log)
+3. Verify gossip appears in beat messages (packet
+   capture or debug log)
 4. Kill one agent, verify the other detects state change
-   via gossip timeout (member's timestamp stops advancing)
-5. Restart killed agent, verify UNKNOWN→KNOWN unsticks
-   via IMR cache flush (triggered by unverified beat from
-   the other agent)
+   via gossip timeout (member's timestamp stops
+   advancing)
+5. Restart killed agent, verify UNKNOWN->KNOWN unsticks
+   via IMR cache flush (triggered by unverified beat
+   from the other agent)
 6. Verify `OnGroupOperational` fires when both agents
    reach OPERATIONAL
 7. Verify per-group election succeeds and leader is
