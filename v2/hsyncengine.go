@@ -66,12 +66,18 @@ func HsyncEngine(ctx context.Context, conf *Config, msgQs *MsgQs) {
 
 	if registry.GossipStateTable != nil {
 		registry.GossipStateTable.SetOnGroupOperational(func(groupHash string) {
-			lgEngine.Info("OnGroupOperational fired", "group", groupHash[:8])
-			// Future: trigger per-group election here (Phase 6)
+			lgEngine.Info("OnGroupOperational fired, triggering group election", "group", groupHash[:8])
+			lem := conf.Internal.LeaderElectionManager
+			pgm := registry.ProviderGroupManager
+			if lem != nil && pgm != nil {
+				pg := pgm.GetGroup(groupHash)
+				if pg != nil {
+					lem.StartGroupElection(groupHash, pg.Members, pg.Zones)
+				}
+			}
 		})
 		registry.GossipStateTable.SetOnGroupDegraded(func(groupHash string) {
-			lgEngine.Info("OnGroupDegraded fired", "group", groupHash[:8])
-			// Future: handle leader failover here (Phase 6)
+			lgEngine.Info("OnGroupDegraded fired, group leader may become stale", "group", groupHash[:8])
 		})
 	}
 
@@ -530,9 +536,17 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			if winners, ok := ampp.Records["_winner"]; ok && len(winners) > 0 {
 				electionDetails = append(electionDetails, "winner", winners[0])
 			}
+			if groups, ok := ampp.Records["_group"]; ok && len(groups) > 0 {
+				electionDetails = append(electionDetails, "group", groups[0][:8])
+			}
 			lgEngine.Info("election message "+ampp.RfiType, electionDetails...)
 			if ar.LeaderElectionManager != nil {
-				ar.LeaderElectionManager.HandleMessage(ampp.Zone, ampp.OriginatorID, ampp.RfiType, ampp.Records)
+				// Route to group election if _group record is present
+				if groups, ok := ampp.Records["_group"]; ok && len(groups) > 0 {
+					ar.LeaderElectionManager.HandleGroupMessage(groups[0], ampp.OriginatorID, ampp.RfiType, ampp.Records)
+				} else {
+					ar.LeaderElectionManager.HandleMessage(ampp.Zone, ampp.OriginatorID, ampp.RfiType, ampp.Records)
+				}
 			}
 
 		case "CONFIG":

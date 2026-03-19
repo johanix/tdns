@@ -123,7 +123,8 @@ func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
 }
 
 // BuildGossipForPeer builds gossip messages for all groups shared with a peer.
-func (gst *GossipStateTable) BuildGossipForPeer(peerID string, pgm *ProviderGroupManager) []GossipMessage {
+// If a LeaderElectionManager is provided, group election state is included.
+func (gst *GossipStateTable) BuildGossipForPeer(peerID string, pgm *ProviderGroupManager, lem ...*LeaderElectionManager) []GossipMessage {
 	gst.mu.RLock()
 	defer gst.mu.RUnlock()
 
@@ -164,9 +165,19 @@ func (gst *GossipStateTable) BuildGossipForPeer(peerID string, pgm *ProviderGrou
 			}
 		}
 
-		// Include election state
-		if el, ok := gst.Elections[hash]; ok {
-			msg.Election = *el
+		// Include election state — prefer live state from LeaderElectionManager
+		electionIncluded := false
+		if len(lem) > 0 && lem[0] != nil {
+			es := lem[0].GetGroupElectionState(hash)
+			if es.Term > 0 {
+				msg.Election = es
+				electionIncluded = true
+			}
+		}
+		if !electionIncluded {
+			if el, ok := gst.Elections[hash]; ok {
+				msg.Election = *el
+			}
 		}
 
 		// Include best group name proposal

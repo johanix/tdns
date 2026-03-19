@@ -1,7 +1,7 @@
 # Provider Groups and Gossip-Based State Sharing
 
 **Date:** 2026-03-19
-**Status:** Plan (not started)
+**Status:** All 6 phases implemented
 
 ## Problem
 
@@ -581,15 +581,30 @@ on Phase 1 + 3)
 - Fire `OnGroupDegraded` callback
 - **Files**: `provider_groups.go`, `hsyncengine.go`
 
-### Phase 6: Per-Group Elections (depends on Phase 5)
+### Phase 6: Per-Group Elections (depends on Phase 5) — DONE
 
-- Migrate `LeaderElectionManager` from per-zone to
-  per-group
-- Trigger elections from `OnGroupOperational`
-- Include election state in gossip
-- Update parentsync to use group leader
+- `LeaderElectionManager` extended with `groupElections`
+  map (keyed by group hash) alongside existing per-zone
+  `elections` map
+- `StartGroupElection()` runs the same 3-phase protocol
+  (CALL→VOTE→CONFIRM) but broadcasts via first zone in
+  group, includes `_group` hash in records
+- `HandleGroupMessage()` dispatches election messages
+  with `_group` record to group election handlers
+- `IsLeader(zone)` checks group leader first (via
+  `GetGroupForZone`), falls back to per-zone election
+- `GetAllLeaders()` merges group and per-zone leaders,
+  expanding group leaders to all covered zones
+- `OnGroupOperational` fires `StartGroupElection` with
+  group members and zones
+- `OnFirstLoad` defers to `DeferGroupElection` for
+  multi-agent zones (election triggered by gossip)
+- Election state included in gossip via
+  `GetGroupElectionState()` called from
+  `BuildGossipForPeer`
+- Re-election scheduled at 90% of leaderTTL per group
 - **Files**: `parentsync_leader.go`, `provider_groups.go`,
-  `hsyncengine.go`
+  `gossip.go`, `hsyncengine.go`, `hsync_transport.go`
 
 ### Backward Compatibility Note
 

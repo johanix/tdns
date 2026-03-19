@@ -224,6 +224,20 @@ func (pgm *ProviderGroupManager) GetGroupsForIdentity(identity string) []*Provid
 	return result
 }
 
+// GetGroupForZone returns the provider group that contains the given zone.
+func (pgm *ProviderGroupManager) GetGroupForZone(zone ZoneName) *ProviderGroup {
+	pgm.mu.RLock()
+	defer pgm.mu.RUnlock()
+	for _, pg := range pgm.Groups {
+		for _, z := range pg.Zones {
+			if z == zone {
+				return pg
+			}
+		}
+	}
+	return nil
+}
+
 // GroupSummary returns a compact string representation for logging.
 func (pg *ProviderGroup) GroupSummary() string {
 	memberStr := strings.Join(pg.Members, ", ")

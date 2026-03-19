@@ -1480,7 +1480,7 @@ func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Age
 	var gossipData json.RawMessage
 	if tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil && tm.agentRegistry.ProviderGroupManager != nil {
 		gossipMsgs := tm.agentRegistry.GossipStateTable.BuildGossipForPeer(
-			string(agent.Identity), tm.agentRegistry.ProviderGroupManager)
+			string(agent.Identity), tm.agentRegistry.ProviderGroupManager, tm.agentRegistry.LeaderElectionManager)
 		if len(gossipMsgs) > 0 {
 			gossipData, _ = json.Marshal(gossipMsgs)
 		}
