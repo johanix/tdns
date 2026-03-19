@@ -613,6 +613,16 @@ func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 				tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i])
 			}
 			lgTransport.Debug("merged gossip from beat", "sender", senderID, "groups", len(gossipMsgs))
+
+			// Check group operational state after merge
+			if tm.agentRegistry.ProviderGroupManager != nil {
+				for i := range gossipMsgs {
+					pg := tm.agentRegistry.ProviderGroupManager.GetGroup(gossipMsgs[i].GroupHash)
+					if pg != nil {
+						tm.agentRegistry.GossipStateTable.CheckGroupState(pg.GroupHash, pg.Members)
+					}
+				}
+			}
 		}
 	}
 

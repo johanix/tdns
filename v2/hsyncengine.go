@@ -64,6 +64,17 @@ func HsyncEngine(ctx context.Context, conf *Config, msgQs *MsgQs) {
 	registry := conf.Internal.AgentRegistry
 	registry.LocalAgent.Identity = string(ourId) // Make sure registry knows our identity
 
+	if registry.GossipStateTable != nil {
+		registry.GossipStateTable.SetOnGroupOperational(func(groupHash string) {
+			lgEngine.Info("OnGroupOperational fired", "group", groupHash[:8])
+			// Future: trigger per-group election here (Phase 6)
+		})
+		registry.GossipStateTable.SetOnGroupDegraded(func(groupHash string) {
+			lgEngine.Info("OnGroupDegraded fired", "group", groupHash[:8])
+			// Future: handle leader failover here (Phase 6)
+		})
+	}
+
 	var syncitem SyncRequest
 	syncQ := conf.Internal.SyncQ
 

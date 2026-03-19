@@ -1,9 +1,12 @@
 package tdns
 
 import (
+	"log/slog"
 	"sync"
 	"time"
 )
+
+var lgGossip *slog.Logger = Logger("gossip")
 
 // GossipMessage carries gossip state for one provider group.
 // Included in beats between agents that share group membership.
@@ -43,15 +46,21 @@ type GossipStateTable struct {
 	Names map[string]*GroupNameProposal
 	// Our identity
 	LocalID string
+	// Callbacks
+	onGroupOperational func(groupHash string)
+	onGroupDegraded    func(groupHash string)
+	// Track which groups have fired operational callback
+	operationalGroups map[string]bool
 }
 
 // NewGossipStateTable creates a new gossip state table.
 func NewGossipStateTable(localID string) *GossipStateTable {
 	return &GossipStateTable{
-		States:    make(map[string]map[string]*MemberState),
-		Elections: make(map[string]*GroupElectionState),
-		Names:     make(map[string]*GroupNameProposal),
-		LocalID:   localID,
+		States:            make(map[string]map[string]*MemberState),
+		Elections:         make(map[string]*GroupElectionState),
+		Names:             make(map[string]*GroupNameProposal),
+		LocalID:           localID,
+		operationalGroups: make(map[string]bool),
 	}
 }
 
@@ -182,6 +191,74 @@ func (gst *GossipStateTable) GetGroupState(groupHash string) (map[string]*Member
 	election := gst.Elections[groupHash]
 	name := gst.Names[groupHash]
 	return states, election, name
+}
+
+func (gst *GossipStateTable) SetOnGroupOperational(fn func(groupHash string)) {
+	gst.mu.Lock()
+	defer gst.mu.Unlock()
+	gst.onGroupOperational = fn
+}
+
+func (gst *GossipStateTable) SetOnGroupDegraded(fn func(groupHash string)) {
+	gst.mu.Lock()
+	defer gst.mu.Unlock()
+	gst.onGroupDegraded = fn
+}
+
+// CheckGroupState checks if all cells in the NxN matrix for a group are OPERATIONAL.
+// Fires OnGroupOperational when the group first reaches full agreement.
+// Fires OnGroupDegraded when a previously operational group loses agreement.
+func (gst *GossipStateTable) CheckGroupState(groupHash string, expectedMembers []string) {
+	gst.mu.Lock()
+
+	groupStates := gst.States[groupHash]
+	allOperational := true
+
+	if len(groupStates) < len(expectedMembers) {
+		// Not all members have reported yet
+		allOperational = false
+	} else {
+		for _, member := range expectedMembers {
+			ms, ok := groupStates[member]
+			if !ok {
+				allOperational = false
+				break
+			}
+			for _, peer := range expectedMembers {
+				if peer == member {
+					continue
+				}
+				state, ok := ms.PeerStates[peer]
+				if !ok || state != AgentStateToString[AgentStateOperational] {
+					allOperational = false
+					break
+				}
+			}
+			if !allOperational {
+				break
+			}
+		}
+	}
+
+	wasOperational := gst.operationalGroups[groupHash]
+	gst.operationalGroups[groupHash] = allOperational
+
+	// Capture callbacks before releasing lock
+	onOp := gst.onGroupOperational
+	onDeg := gst.onGroupDegraded
+	gst.mu.Unlock()
+
+	if allOperational && !wasOperational {
+		lgGossip.Info("group reached mutual OPERATIONAL", "group", groupHash[:8])
+		if onOp != nil {
+			onOp(groupHash)
+		}
+	} else if !allOperational && wasOperational {
+		lgGossip.Info("group lost mutual OPERATIONAL", "group", groupHash[:8])
+		if onDeg != nil {
+			onDeg(groupHash)
+		}
+	}
 }
 
 // RefreshLocalStates updates our local state entries for all groups
