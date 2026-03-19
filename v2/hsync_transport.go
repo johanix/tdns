@@ -346,9 +346,24 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			}
 		}
 
-		// Trigger discovery when we receive messages from authorized but undiscovered peers
+		// Trigger discovery when we receive messages from authorized but undiscovered peers.
+		// This is the "discovery kick" (Phase 4 gossip): when a beat arrives from a sender
+		// whose verification key we don't have, flush IMR cache for that identity's discovery
+		// names and retry. This unsticks the UNKNOWN→KNOWN transition when cached NXDOMAIN
+		// is blocking discovery.
 		tm.ChunkHandler.OnPeerDiscoveryNeeded = func(peerID string) {
-			lgTransport.Info("triggering discovery for peer (missing verification key)", "peer", peerID)
+			lgTransport.Info("discovery kick: flushing IMR cache and triggering discovery", "peer", peerID)
+
+			// Flush IMR cache for this peer's discovery names before re-discovery
+			if tm.getImrEngine != nil {
+				if imr := tm.getImrEngine(); imr != nil && imr.Cache != nil {
+					removed, err := imr.Cache.FlushDomain(peerID, false)
+					if err == nil && removed > 0 {
+						lgTransport.Info("flushed IMR cache for peer discovery", "peer", peerID, "removed", removed)
+					}
+				}
+			}
+
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			err := tm.DiscoverAndRegisterAgent(ctx, peerID)
