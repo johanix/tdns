@@ -23,7 +23,7 @@ multi-provider DNSSEC coordination (tdns-agent, tdns-combiner).
 
 ## Documentation
 
-See the [guide/](guide/) directory:
+See the [TDNS Guide](guide/README.md):
 
 - [TDNS Applications](guide/applications.md) -- overview of
   all applications with links to detailed docs
