@@ -712,12 +712,17 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 
 			// MP delegation sync callback: for MP zones, check HSYNCPARAM for
 			// parentsync=agent. If set, enable delegation sync and call SetupZoneSync.
-			// Mirrors the MP signing callback pattern above.
+			// Only if our identity is listed in the zone's HSYNC3 records.
 			if options[OptMultiProvider] {
 				delegationSyncQ := conf.Internal.DelegationSyncQ
 				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
 					if zd.Options[OptDelSyncChild] {
 						return // already set via static config, handled by callback below
+					}
+					// Verify that our identity is listed in HSYNC3 before setting any options.
+					matched, _, _ := zd.matchHsyncProvider(ourHsyncIdentities())
+					if !matched {
+						return
 					}
 					apex, err := zd.GetOwner(zd.ZoneName)
 					if err != nil || apex == nil {
