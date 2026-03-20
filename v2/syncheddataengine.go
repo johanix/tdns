@@ -430,8 +430,15 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 							// Mark all RRs in this update as pending with the distribution ID
 							zdr.MarkRRsPending(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update, distID, recipients)
 
-							if synchedDataUpdate.SkipCombiner {
-								lgEngine.Info("update applied, enqueuing for remote agents only (SkipCombiner)", "zone", synchedDataUpdate.Zone)
+							skipCombiner := synchedDataUpdate.SkipCombiner
+							if !skipCombiner {
+								if zd, ok := Zones.Get(string(synchedDataUpdate.Zone)); ok && zd.Options[OptMPDisallowEdits] {
+									lgEngine.Info("zone is signed but we are not a signer, skipping combiner", "zone", synchedDataUpdate.Zone)
+									skipCombiner = true
+								}
+							}
+							if skipCombiner {
+								lgEngine.Info("update applied, enqueuing for remote agents only", "zone", synchedDataUpdate.Zone)
 							} else {
 								lgEngine.Info("update applied, enqueuing for combiner and remote agents", "zone", synchedDataUpdate.Zone)
 								// Enqueue for combiner (reliable delivery with retry)
@@ -467,7 +474,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 							}
 
 							if !resp.Error {
-								if synchedDataUpdate.SkipCombiner {
+								if skipCombiner {
 									resp.Msg = "Local update applied, sync enqueued for remote agents"
 								} else {
 									resp.Msg = "Local update applied, sync enqueued for combiner and zone agents"
@@ -525,10 +532,21 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					}
 					resp.Msg = msg
 					if change {
-						lgEngine.Info("remote update applied, enqueuing for combiner", "zone", synchedDataUpdate.Zone)
+						// Check if edits are disallowed for this zone (signed, not a signer)
+						remoteSkipCombiner := false
+						if zd, ok := Zones.Get(string(synchedDataUpdate.Zone)); ok && zd.Options[OptMPDisallowEdits] {
+							remoteSkipCombiner = true
+						}
+
+						if remoteSkipCombiner {
+							lgEngine.Info("remote update applied but not forwarding to combiner (mp-disallow-edits)", "zone", synchedDataUpdate.Zone)
+							resp.Msg = "Remote update applied locally (not forwarded to combiner: zone signed, not a signer)"
+						} else {
+							lgEngine.Info("remote update applied, enqueuing for combiner", "zone", synchedDataUpdate.Zone)
+						}
 
 						tm := conf.Internal.TransportManager
-						if tm != nil && synchedDataUpdate.Update != nil {
+						if !remoteSkipCombiner && tm != nil && synchedDataUpdate.Update != nil {
 							// Remote update: only enqueue for combiner (not back to agents).
 							// The combiner deduplicates KEY/CDS contributions: local agent
 							// contributions take precedence over remote-forwarded ones.
