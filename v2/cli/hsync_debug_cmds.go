@@ -40,7 +40,7 @@ func init() {
 	DebugAgentHsyncCmd.AddCommand(DebugHsyncChunkSendCmd)
 	DebugAgentHsyncCmd.AddCommand(DebugHsyncChunkRecvCmd)
 	DebugAgentHsyncCmd.AddCommand(DebugHsyncInitDbCmd)
-	DebugAgentHsyncCmd.AddCommand(DebugHsyncInjectSyncCmd)
+	// DebugHsyncInjectSyncCmd removed (legacy Records-based debug command)
 
 	// Flags for hsync query
 	hsyncQueryCmd.Flags().StringVarP(&hsyncResolver, "imr", "", "", "Resolver address for DNS query (e.g. 8.8.8.8:53)")
@@ -66,10 +66,6 @@ func init() {
 	DebugHsyncChunkSendCmd.Flags().StringVarP(&hsyncSyncType, "type", "t", "NS", "Sync type (NS, DNSKEY, GLUE, CDS, CSYNC)")
 
 	// Flags for inject-sync
-	DebugHsyncInjectSyncCmd.Flags().StringVarP(&hsyncPeerID, "sender", "s", "", "Sender agent identity (required)")
-	DebugHsyncInjectSyncCmd.Flags().StringArrayVarP(&hsyncRRs, "rr", "r", nil, "RR to inject (can be specified multiple times)")
-	DebugHsyncInjectSyncCmd.MarkFlagRequired("sender")
-	DebugHsyncInjectSyncCmd.MarkFlagRequired("rr")
 }
 
 // hsyncQueryCmd queries HSYNC RRset directly via DNS
@@ -598,81 +594,5 @@ var DebugHsyncInitDbCmd = &cobra.Command{
 	},
 }
 
-// DebugHsyncInjectSyncCmd simulates receiving a sync from a remote agent
-var DebugHsyncInjectSyncCmd = &cobra.Command{
-	Use:   "inject-sync",
-	Short: "Inject a simulated sync from a remote agent",
-	Long: `Inject a simulated sync update as if received from a remote agent.
-
-This command simulates the reception of DNS resource records from another
-HSYNC agent, allowing you to test the local agent's processing pipeline
-without requiring an actual remote agent.
-
-The RRs are specified as standard DNS zone file format strings. Multiple
-RRs can be specified to test atomic multi-RRset updates (e.g., NS + glue).
-
-Example:
-  tdns-cli debug agent hsync inject-sync -z example.com \
-    --sender "agent2.example.com." \
-    -r "example.com. 3600 IN NS ns6.example.com." \
-    -r "ns6.example.com. 3600 IN A 1.2.3.4" \
-    -r "ns6.example.com. 3600 IN AAAA 2001:db8::53"
-
-This tests the atomic update flow: a new NS record with its glue records
-are processed as a single transaction.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
-
-		if hsyncPeerID == "" {
-			log.Fatalf("Error: --sender is required")
-		}
-
-		if len(hsyncRRs) == 0 {
-			log.Fatalf("Error: at least one --rr is required")
-		}
-
-		parent, _ := getCommandContext("debug")
-		api, err := getApiClient(parent, true)
-		if err != nil {
-			log.Fatalf("Error getting API client: %v", err)
-		}
-
-		// Validate RRs by parsing them locally first
-		fmt.Println("Validating RRs:")
-		for i, rrStr := range hsyncRRs {
-			rr, err := dns.NewRR(rrStr)
-			if err != nil {
-				log.Fatalf("Invalid RR #%d %q: %v", i+1, rrStr, err)
-			}
-			fmt.Printf("  [%d] %s\n", i+1, rr.String())
-		}
-
-		req := tdns.AgentMgmtPost{
-			Command: "hsync-inject-sync",
-			Zone:    tdns.ZoneName(dns.Fqdn(string(tdns.Globals.Zonename))),
-			AgentId: tdns.AgentId(dns.Fqdn(hsyncPeerID)),
-			RRs:     hsyncRRs,
-		}
-
-		fmt.Printf("\nInjecting sync from %q for zone %q:\n", req.AgentId, req.Zone)
-
-		_, buf, err := api.RequestNG("POST", "/agent/debug", req, true)
-		if err != nil {
-			log.Fatalf("API request failed: %v", err)
-		}
-
-		var resp tdns.AgentMgmtResponse
-		if err := json.Unmarshal(buf, &resp); err != nil {
-			log.Fatalf("Failed to parse response: %v", err)
-		}
-
-		if resp.Error {
-			fmt.Printf("\nError: %s\n", resp.ErrorMsg)
-		} else {
-			fmt.Printf("\nResult: %s\n", resp.Msg)
-			if resp.Status != "" {
-				fmt.Printf("Status: %s\n", resp.Status)
-			}
-		}
-	},
-}
+// DebugHsyncInjectSyncCmd removed (legacy Records-based debug command).
+// Use "agent zone addrr/delrr" for Operations-based testing.
