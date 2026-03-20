@@ -384,7 +384,7 @@ Examples:
 			log.Fatalf("Error getting API client: %v", err)
 		}
 
-		_, buf, err := api.RequestNG("POST", "/agent/debug", req, true)
+		_, buf, err := api.RequestNG("POST", "/agent", req, true)
 		if err != nil {
 			log.Fatalf("API request failed: %v", err)
 		}
@@ -458,7 +458,7 @@ Examples:
 			log.Fatalf("Error getting API client: %v", err)
 		}
 
-		_, buf, err := api.RequestNG("POST", "/agent/debug", req, true)
+		_, buf, err := api.RequestNG("POST", "/agent", req, true)
 		if err != nil {
 			log.Fatalf("API request failed: %v", err)
 		}
