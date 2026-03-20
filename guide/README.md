@@ -27,6 +27,11 @@ servers for multi-provider DNSSEC coordination.
   -- Delegation sync, DNS transport signaling, experimental
   record types, multi-signer DNSSEC.
 
+- [MP Change Tracking Semantics](mp-change-tracking-semantics.md)
+  -- Design decisions for how multi-provider changes are
+  tracked, confirmed, and routed. Corner cases for
+  non-signing providers.
+
 - Future Work (coming soon)
   -- IXFR support, API transport for agent-agent comms,
   TSIG authentication, HPKE encryption.
