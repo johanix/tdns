@@ -343,230 +343,27 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		}
 	}
 
-	// Process explicit Operations if present (takes precedence over Records)
+	// Process Operations (the only supported format for SYNC/UPDATE)
 	if len(req.Operations) > 0 {
 		resp = combinerProcessOperations(req, zd, zonename, protectedNamespaces, localAgents)
 		if resp.Status != "error" {
 			if req.Publish != nil {
 				combinerApplyPublishInstruction(req, zd, kdb)
 			}
-			// NS changes may affect _signal KEY publication
 			combinerResyncSignalKeys(req.SenderID, zonename, zd, kdb)
-			// Delegation changes require parent sync notification (only on actual mutations)
 			if resp.DataChanged {
 				nsChanged, kskChanged := detectDelegationChanges(resp)
 				if nsChanged || kskChanged {
 					go combinerNotifyDelegationChange(tm, req.DeliveredBy, zonename, zd, nsChanged, kskChanged)
 				}
 			}
-
 		}
 		return resp
 	}
 
-	// Separate records into adds, deletes (ClassNONE), and bulk deletes (ClassANY)
-	addOwnerRRs := make(map[string][]string)     // ClassINET: owner → RR strings
-	deleteOwnerRRs := make(map[string][]string)  // ClassNONE: owner → RR strings (with ClassINET for removal matching)
-	bulkDeleteOwner := make(map[string][]uint16) // ClassANY: owner → rrtypes to delete entirely
-
-	var appliedRecords []string
-	var removedRecords []string
-	var rejectedItems []RejectedItem
-
-	// Select the RRtype whitelist and owner policy based on ZoneClass.
-	isProvider := req.ZoneClass == "provider"
-	allowedRRtypes := AllowedLocalRRtypes
-	if isProvider {
-		if pzt := GetProviderZoneRRtypes(req.Zone); pzt != nil {
-			allowedRRtypes = pzt
-		} else {
-			resp.Status = "error"
-			resp.Message = fmt.Sprintf("zone %q is not configured as a provider zone", req.Zone)
-			return resp
-		}
-	}
-
-	for owner, rrStrings := range req.Records {
-		for _, rrStr := range rrStrings {
-			// Parse to validate
-			rr, err := dns.NewRR(rrStr)
-			if err != nil {
-				rejectedItems = append(rejectedItems, RejectedItem{
-					Record: rrStr,
-					Reason: fmt.Sprintf("parse error: %v", err),
-				})
-				continue
-			}
-
-			// Check if RRtype is allowed
-			rrtype := rr.Header().Rrtype
-			if !allowedRRtypes[rrtype] {
-				rejectedItems = append(rejectedItems, RejectedItem{
-					Record: rrStr,
-					Reason: fmt.Sprintf("RRtype %s not allowed for combiner updates", dns.TypeToString[rrtype]),
-				})
-				continue
-			}
-
-			// MP zones: owner must be at zone apex. Provider zones: any owner within the zone.
-			if isProvider {
-				lowerOwner := strings.ToLower(owner)
-				lowerZone := strings.ToLower(zonename)
-				if lowerOwner != lowerZone && !strings.HasSuffix(lowerOwner, "."+lowerZone) {
-					rejectedItems = append(rejectedItems, RejectedItem{
-						Record: rrStr,
-						Reason: fmt.Sprintf("owner %q is not within zone %q", owner, zonename),
-					})
-					continue
-				}
-			} else if owner != zonename {
-				rejectedItems = append(rejectedItems, RejectedItem{
-					Record: rrStr,
-					Reason: fmt.Sprintf("owner %q is not at zone apex %q", owner, zonename),
-				})
-				continue
-			}
-
-			// M71: Validate TTL range
-			if rr.Header().Ttl > 604800 { // 7 days max
-				rejectedItems = append(rejectedItems, RejectedItem{
-					Record: rrStr,
-					Reason: fmt.Sprintf("TTL %d exceeds maximum (604800)", rr.Header().Ttl),
-				})
-				continue
-			}
-
-			// Checkpoint 5: Content-based policy checks
-			if reason := checkContentPolicy(rr, protectedNamespaces); reason != "" {
-				rejectedItems = append(rejectedItems, RejectedItem{
-					Record: rrStr,
-					Reason: reason,
-				})
-				continue
-			}
-
-			// Checkpoint 6: NS target resolvability (advisory)
-			warnNSTargetUnresolvable(rr, zd)
-
-			// Route by class
-			switch rr.Header().Class {
-			case dns.ClassINET:
-				addOwnerRRs[owner] = append(addOwnerRRs[owner], rrStr)
-
-			case dns.ClassNONE:
-				// Convert to ClassINET string for removal matching in AgentContributions.
-				// The stored contributions use ClassINET strings.
-				delRR := dns.Copy(rr)
-				delRR.Header().Class = dns.ClassINET
-				deleteOwnerRRs[owner] = append(deleteOwnerRRs[owner], delRR.String())
-
-			case dns.ClassANY:
-				bulkDeleteOwner[owner] = append(bulkDeleteOwner[owner], rrtype)
-
-			default:
-				rejectedItems = append(rejectedItems, RejectedItem{
-					Record: rrStr,
-					Reason: fmt.Sprintf("unsupported class %d", rr.Header().Class),
-				})
-			}
-		}
-	}
-
-	// Apply additions
-	dataChanged := false
-	if len(addOwnerRRs) > 0 {
-		addChanged, err := zd.AddCombinerDataNG(req.SenderID, addOwnerRRs)
-		if err != nil {
-			resp.Status = "error"
-			resp.Message = fmt.Sprintf("failed to apply add updates: %v", err)
-			return resp
-		}
-		if addChanged {
-			dataChanged = true
-		}
-		// Always report accepted records regardless of whether data changed.
-		// The agent needs to know its records are present at the combiner so it
-		// can transition them from pending to accepted in the SDE.
-		for _, rrs := range addOwnerRRs {
-			appliedRecords = append(appliedRecords, rrs...)
-		}
-	}
-
-	// Apply ClassNONE deletes (specific RR removal)
-	if len(deleteOwnerRRs) > 0 {
-		removed, err := zd.RemoveCombinerDataNG(req.SenderID, deleteOwnerRRs)
-		if err != nil {
-			lgCombiner.Error("legacy: error removing records", "err", err)
-			// Don't fail the whole request — report partial success
-		}
-		if len(removed) > 0 {
-			dataChanged = true
-		}
-		removedRecords = append(removedRecords, removed...)
-	}
-
-	// Apply ClassANY deletes (entire RRset removal by type)
-	for owner, rrtypes := range bulkDeleteOwner {
-		for _, rrtype := range rrtypes {
-			removed, err := zd.RemoveCombinerDataByRRtype(req.SenderID, owner, rrtype)
-			if err != nil {
-				lgCombiner.Error("legacy: error removing RRset", "rrtype", dns.TypeToString[rrtype], "owner", owner, "err", err)
-			}
-			if len(removed) > 0 {
-				dataChanged = true
-			}
-			removedRecords = append(removedRecords, removed...)
-		}
-	}
-
-	// Build response
-	resp.AppliedRecords = appliedRecords
-	resp.RemovedRecords = removedRecords
-	resp.RejectedItems = rejectedItems
-
-	totalActions := len(appliedRecords) + len(removedRecords)
-	if len(rejectedItems) == 0 {
-		resp.Status = "ok"
-		resp.Message = fmt.Sprintf("legacy: applied %d added %d removed for zone %q",
-			len(appliedRecords), len(removedRecords), req.Zone)
-	} else if totalActions > 0 {
-		resp.Status = "partial"
-		resp.Message = fmt.Sprintf("legacy: applied %d added %d removed %d rejected for zone %q",
-			len(appliedRecords), len(removedRecords), len(rejectedItems), req.Zone)
-	} else {
-		resp.Status = "error"
-		resp.Message = fmt.Sprintf("legacy: all %d records were rejected for zone %q",
-			len(rejectedItems), req.Zone)
-	}
-
-	lgCombiner.Info("legacy update processed", "status", resp.Status, "message", resp.Message)
-
-	resp.DataChanged = dataChanged
-	// Only bump the serial when the zone data actually changed (not for idempotent re-applies).
-	if dataChanged {
-		bumperResp, err := zd.BumpSerialOnly()
-		if err != nil {
-			lgCombiner.Error("legacy: BumpSerialOnly failed", "zone", req.Zone, "err", err)
-		} else {
-			lgCombiner.Info("legacy: serial bumped", "zone", req.Zone, "old", bumperResp.OldSerial, "new", bumperResp.NewSerial)
-		}
-	}
-
-	if resp.Status != "error" {
-		if req.Publish != nil {
-			combinerApplyPublishInstruction(req, zd, kdb)
-		}
-		combinerResyncSignalKeys(req.SenderID, zonename, zd, kdb)
-		// Delegation changes require parent sync notification (only on actual mutations)
-		if resp.DataChanged {
-			nsChanged, kskChanged := detectDelegationChanges(resp)
-			if nsChanged || kskChanged {
-				go combinerNotifyDelegationChange(tm, req.DeliveredBy, zonename, zd, nsChanged, kskChanged)
-			}
-		}
-
-	}
-
+	// No Operations: reject the update
+	resp.Status = "error"
+	resp.Message = fmt.Sprintf("update for zone %q has no Operations (legacy Records format no longer supported)", req.Zone)
 	return resp
 }
 

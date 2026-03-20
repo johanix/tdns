@@ -446,32 +446,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			RRsets:  map[uint16]core.RRset{},
 		}
 
-		// Prefer Operations over Records when both are present
-		if len(ampp.Operations) > 0 {
-			zu.Operations = ampp.Operations
-		}
-
-		// Parse Records into RRsets (used for legacy path and local SDE storage)
-		for _, rrStrs := range ampp.Records {
-			for _, rrstr := range rrStrs {
-				rr, err := dns.NewRR(rrstr)
-				if err != nil {
-					lgEngine.Error("error parsing RR", "rr", rrstr, "err", err)
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("Error parsing RR %q: %v", rrstr, err)
-					return
-				}
-				var rrset core.RRset
-				var ok bool
-				rrtype := rr.Header().Rrtype
-				if rrset, ok = zu.RRsets[rrtype]; !ok {
-					rrset = core.RRset{}
-				}
-				rrset.RRs = append(rrset.RRs, rr)
-				zu.RRsets[rrtype] = rrset
-				lgEngine.Debug("parsed RR", "rr", rr)
-			}
-		}
+		zu.Operations = ampp.Operations
 
 		var cresp = make(chan *AgentMsgResponse, 1)
 		synchedDataUpdateQ <- &SynchedDataUpdate{
