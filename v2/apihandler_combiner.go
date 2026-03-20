@@ -291,8 +291,13 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 		case "list-current":
 			zone := dns.Fqdn(cp.Zone)
-			zd, _ := Zones.Get(zone)
-			// Build agent → rrtype → []rr from AgentContributions
+			zd, ok := Zones.Get(zone)
+			if !ok || zd == nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("zone %s not found", zone)
+				return
+			}
+			// Build agent -> rrtype -> []rr from AgentContributions
 			current := make(map[string]map[string][]string)
 			if zd.AgentContributions != nil {
 				for agentID, ownerMap := range zd.AgentContributions {

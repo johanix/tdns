@@ -142,30 +142,36 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 		var actions []dns.RR
 		// DS changes (from CDS scan)
 		for _, rr := range resp.DSAdds {
-			rr.Header().Class = dns.ClassINET
-			actions = append(actions, rr)
+			cp := dns.Copy(rr)
+			cp.Header().Class = dns.ClassINET
+			actions = append(actions, cp)
 		}
 		for _, rr := range resp.DSRemoves {
-			rr.Header().Class = dns.ClassNONE
-			actions = append(actions, rr)
+			cp := dns.Copy(rr)
+			cp.Header().Class = dns.ClassNONE
+			actions = append(actions, cp)
 		}
 		// NS changes (from CSYNC scan)
 		for _, rr := range resp.NSAdds {
-			rr.Header().Class = dns.ClassINET
-			actions = append(actions, rr)
+			cp := dns.Copy(rr)
+			cp.Header().Class = dns.ClassINET
+			actions = append(actions, cp)
 		}
 		for _, rr := range resp.NSRemoves {
-			rr.Header().Class = dns.ClassNONE
-			actions = append(actions, rr)
+			cp := dns.Copy(rr)
+			cp.Header().Class = dns.ClassNONE
+			actions = append(actions, cp)
 		}
 		// Glue changes (from CSYNC scan)
 		for _, rr := range resp.GlueAdds {
-			rr.Header().Class = dns.ClassINET
-			actions = append(actions, rr)
+			cp := dns.Copy(rr)
+			cp.Header().Class = dns.ClassINET
+			actions = append(actions, cp)
 		}
 		for _, rr := range resp.GlueRemoves {
-			rr.Header().Class = dns.ClassNONE
-			actions = append(actions, rr)
+			cp := dns.Copy(rr)
+			cp.Header().Class = dns.ClassNONE
+			actions = append(actions, cp)
 		}
 
 		// Determine update type from which fields are populated
@@ -1285,7 +1291,9 @@ func (scanner *Scanner) queryCDSAtSignalingNames(ctx context.Context, childZone 
 	}
 
 	if queriedNS == 0 {
-		return nil, fmt.Errorf("no out-of-bailiwick NS found for %s", childZone)
+		// All NS are in-bailiwick -- return nil to let caller fall back to direct/apex path
+		scanLog.Printf("queryCDSAtSignalingNames: %s: no out-of-bailiwick NS, falling back", childZone)
+		return nil, nil
 	}
 
 	// Verify all signaling responses agree with each other
