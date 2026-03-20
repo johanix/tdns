@@ -1690,9 +1690,6 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 	// Build transport peer and sync request
 	peer := tm.SyncPeerFromAgent(combiner)
 
-	// Convert ZoneUpdate to flat record list for transport
-	records := zoneUpdateToGroupedRecords(msg.Update)
-
 	// Use the original source agent ID so the combiner can attribute records correctly.
 	// This preserves per-agent isolation in the combiner's AgentContributions.
 	senderID := tm.LocalID
@@ -1707,17 +1704,14 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 	syncReq := &transport.SyncRequest{
 		SenderID:       senderID,
 		Zone:           string(msg.Zone),
-		Records:        records,
 		Timestamp:      msg.CreatedAt,
 		DistributionID: msg.DistributionID,
 		Nonce:          msg.Nonce,
-		MessageType:    "update", // agent→combiner uses "update" (not "sync")
+		MessageType:    "update",
 		ZoneClass:      zoneClass,
 	}
 	if msg.Update != nil {
-		if len(msg.Update.Operations) > 0 {
-			syncReq.Operations = msg.Update.Operations
-		}
+		syncReq.Operations = msg.Update.Operations
 		if msg.Update.Publish != nil {
 			syncReq.Publish = msg.Update.Publish
 		}
@@ -1768,19 +1762,15 @@ func (tm *TransportManager) deliverToAgent(ctx context.Context, msg *OutgoingMes
 
 	peer := tm.SyncPeerFromAgent(agent)
 
-	// Convert ZoneUpdate to flat record list for transport
-	records := zoneUpdateToGroupedRecords(msg.Update)
-
 	syncReq := &transport.SyncRequest{
 		SenderID:       tm.LocalID,
 		Zone:           string(msg.Zone),
-		Records:        records,
 		Timestamp:      msg.CreatedAt,
 		DistributionID: msg.DistributionID,
 		Nonce:          msg.Nonce,
 		MessageType:    "sync",
 	}
-	if msg.Update != nil && len(msg.Update.Operations) > 0 {
+	if msg.Update != nil {
 		syncReq.Operations = msg.Update.Operations
 	}
 
@@ -1962,38 +1952,6 @@ func (tm *TransportManager) GetDistributionRecipients(zone ZoneName, skipCombine
 	}
 
 	return recipients
-}
-
-// zoneUpdateToGroupedRecords converts a ZoneUpdate into records grouped by owner name,
-// suitable for transport.SyncRequest.Records and core.AgentMsgPost.Records.
-//
-// ZoneUpdate has two fields: RRs (for local per-RR updates) and RRsets (for remote
-// full-replace updates). Some callers populate both with the same data, so we use
-// RRs if present, otherwise RRsets, to avoid duplicates.
-func zoneUpdateToGroupedRecords(update *ZoneUpdate) map[string][]string {
-	if update == nil {
-		return nil
-	}
-
-	records := make(map[string][]string)
-
-	if len(update.RRs) > 0 {
-		// Local update: use individual RRs
-		for _, rr := range update.RRs {
-			owner := rr.Header().Name
-			records[owner] = append(records[owner], rr.String())
-		}
-	} else {
-		// Remote update: use RRsets
-		for _, rrset := range update.RRsets {
-			for _, rr := range rrset.RRs {
-				owner := rr.Header().Name
-				records[owner] = append(records[owner], rr.String())
-			}
-		}
-	}
-
-	return records
 }
 
 // groupRRStringsByOwner converts a flat list of RR strings to records grouped by owner name.

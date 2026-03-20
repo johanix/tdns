@@ -46,7 +46,25 @@ against current codebase.
 - **Impact**: The legacy RRsets path works but loses the
   explicit operation semantics (add vs delete vs replace).
 
-### 4. Agent Zone Data Persistence (Phase 4)
+### 4. Combiner Audit Trail: Migrate from Records to Operations
+- **Source**: This session's audit (2026-03-20)
+- **Status**: Open (low urgency)
+- **Description**: The combiner's edit audit trail
+  (PendingEdit, RejectedEdit, ApprovedEdit in
+  db_combiner_edits.go) stores data as Records
+  (map[string][]string) with ClassNONE encoding for
+  deletes. With Operations, the operation type (add/
+  delete/replace) is explicit and ClassNONE encoding is
+  unnecessary. Should migrate DB schema to store
+  Operations directly.
+- **Also**: RFI EDITS bootstrap response
+  (contributionsToRecords in combiner_msg_handler.go)
+  still sends Records format to agents.
+- **Also**: Election RFI messages use Records for
+  pseudo-metadata (_term, _vote, _winner, _group).
+  These need their own struct eventually.
+
+### 5. Agent Zone Data Persistence
 - **Source**: 2026-02-17-transport-unification-and-
   message-symmetry.md
 - **Status**: Not implemented (by design)
@@ -58,7 +76,7 @@ against current codebase.
 - **Impact**: Slow restarts in large deployments; brief
   data loss window during restart until RFI completes.
 
-### 5. Resync on Agent Startup
+### 6. Resync on Agent Startup
 - **Source**: MEMORY.md ("Deferred Future Work")
 - **Status**: Deferred
 - **Description**: Automatically run pull+push resync for
@@ -67,7 +85,7 @@ against current codebase.
   (EDITS + KEYSTATE + peer discovery) partially covers
   this but is not a full bidirectional resync.
 
-### 6. SYNC Handler Unification (Phase 6)
+### 7. SYNC Handler Unification
 - **Source**: 2026-02-17-transport-unification-and-
   message-symmetry.md (line 278)
 - **Status**: Deferred
@@ -78,7 +96,7 @@ against current codebase.
 
 ## Low Priority
 
-### 7. Inline SYNC Confirmation (Phase 7)
+### 8. Inline SYNC Confirmation
 
 - **Source**: 2026-02-17-transport-unification-and-
   message-symmetry.md (line 309)
@@ -87,26 +105,26 @@ against current codebase.
   fallback are missing.
 - **Impact**: Optimization, not a correctness issue.
 
-### 8. DNS-79: GetZoneAgentData Bug
+### 9. DNS-79: GetZoneAgentData Bug
 - **Source**: Linear issue DNS-79
 - **Status**: Open
 - **Description**: Investigate discrepancy between
   GetZoneAgentData and getAllAgentsForZone (returns 0
   remote agents unexpectedly).
 
-### 9. DNS-80: Agent CLI Commands for ClassANY
+### 10. DNS-80: Agent CLI Commands for ClassANY
 - **Source**: Linear issue DNS-80
 - **Status**: Open
 - **Description**: Needed for CSYNC management where
   single-record RRsets require ClassANY operations.
 
-### 10. DNS-81: Audit Command
+### 11. DNS-81: Audit Command
 - **Source**: Linear issue DNS-81
 - **Status**: Open
 - **Description**: CLI command to compare local vs combiner
   vs remote agent state for a zone.
 
-### 11. CLI Purge Tools
+### 12. CLI Purge Tools
 - **Source**: MEMORY.md ("Other Active Work")
 - **Status**: Open
 - **Description**: CLI commands to purge old stale data
