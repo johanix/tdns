@@ -262,6 +262,118 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				resp.ErrorMsg = "No response from CommandHandler after 10 seconds, state unknown"
 			}
 
+		case "add-rr", "del-rr":
+			// Add or delete an RR: store locally + sync to peers + send to combiner
+			if len(amp.RRs) == 0 {
+				resp.Error = true
+				resp.ErrorMsg = "at least one RR is required"
+				return
+			}
+			if zd != nil && zd.Options[OptMPDisallowEdits] {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("zone %s is signed but this provider is not a signer; modifications not allowed", amp.Zone)
+				return
+			}
+
+			isAdd := amp.Command == "add-rr"
+			var parsedRRs []dns.RR
+			for _, rrStr := range amp.RRs {
+				rr, err := dns.NewRR(rrStr)
+				if err != nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("failed to parse RR %q: %v", rrStr, err)
+					return
+				}
+				if !AllowedLocalRRtypes[rr.Header().Rrtype] {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("RR type %s is not allowed", dns.TypeToString[rr.Header().Rrtype])
+					return
+				}
+				if isAdd {
+					rr.Header().Class = dns.ClassINET
+				} else {
+					rr.Header().Class = dns.ClassNONE
+				}
+				parsedRRs = append(parsedRRs, rr)
+			}
+
+			zu := &ZoneUpdate{
+				Zone:    amp.Zone,
+				AgentId: AgentId(conf.MultiProvider.Identity),
+				RRs:     parsedRRs,
+				RRsets:  make(map[uint16]core.RRset),
+			}
+
+			opStr := "add"
+			if !isAdd {
+				opStr = "delete"
+			}
+			opsMap := make(map[uint16][]string)
+			for _, rr := range parsedRRs {
+				rrtype := rr.Header().Rrtype
+				rrset, exists := zu.RRsets[rrtype]
+				if !exists {
+					rrset = core.RRset{
+						Name:   rr.Header().Name,
+						Class:  rr.Header().Class,
+						RRtype: rrtype,
+					}
+				}
+				rrset.RRs = append(rrset.RRs, rr)
+				zu.RRsets[rrtype] = rrset
+				inetRR := dns.Copy(rr)
+				inetRR.Header().Class = dns.ClassINET
+				opsMap[rrtype] = append(opsMap[rrtype], inetRR.String())
+			}
+			for rrtype, records := range opsMap {
+				zu.Operations = append(zu.Operations, core.RROperation{
+					Operation: opStr,
+					RRtype:    dns.TypeToString[rrtype],
+					Records:   records,
+				})
+			}
+
+			action := "Adding"
+			if !isAdd {
+				action = "Removing"
+			}
+			lgApi.Info("RR operation", "cmd", amp.Command, "action", action, "count", len(parsedRRs), "zone", amp.Zone)
+
+			force := false
+			if amp.Data != nil {
+				if f, ok := amp.Data["force"].(bool); ok {
+					force = f
+				}
+			}
+			cresp := make(chan *AgentMsgResponse, 1)
+			conf.Internal.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{
+				Zone:       amp.Zone,
+				AgentId:    AgentId(conf.MultiProvider.Identity),
+				UpdateType: "local",
+				Update:     zu,
+				Force:      force,
+				Response:   cresp,
+			}
+
+			select {
+			case r := <-cresp:
+				if r.Error {
+					resp.Error = true
+					resp.ErrorMsg = r.ErrorMsg
+					resp.Msg = fmt.Sprintf("%s RR(s) failed: %s", amp.Command, r.ErrorMsg)
+				} else {
+					resp.Msg = fmt.Sprintf("%s %d RR(s) for zone %q", action, len(parsedRRs), amp.Zone)
+					if r.Msg != "" {
+						resp.Msg += " - " + r.Msg
+					}
+				}
+				resp.Status = "ok"
+			case <-time.After(5 * time.Second):
+				resp.Error = true
+				resp.ErrorMsg = "timeout waiting for SynchedDataEngine response"
+				resp.Status = "timeout"
+			}
+
 		case "hsync-zonestatus":
 			// Get the apex owner object
 			owner, err := zd.GetOwner(zd.ZoneName)
@@ -1299,139 +1411,6 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			}
 			resp.Msg = fmt.Sprintf("Combiner data retrieved for %d zone(s)", len(combinerData))
 			resp.Status = "ok"
-
-		case "add-rr", "del-rr":
-			// Add or delete an RR of any allowed type: store locally + sync to peers + send to combiner
-			if amp.Zone == "" {
-				resp.Error = true
-				resp.ErrorMsg = "zone is required"
-				return
-			}
-			if len(amp.RRs) == 0 {
-				resp.Error = true
-				resp.ErrorMsg = "at least one RR is required"
-				return
-			}
-
-			// Reject edits for non-signing providers
-			if zd, ok := Zones.Get(string(amp.Zone)); ok && zd.Options[OptMPDisallowEdits] {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("zone %s is signed but this provider is not a signer; modifications not allowed", amp.Zone)
-				return
-			}
-
-			isAdd := amp.Command == "add-rr"
-
-			// Parse and validate the RRs (must be an allowed type at the zone apex)
-			var parsedRRs []dns.RR
-			for _, rrStr := range amp.RRs {
-				rr, err := dns.NewRR(rrStr)
-				if err != nil {
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("failed to parse RR %q: %v", rrStr, err)
-					return
-				}
-				if !AllowedLocalRRtypes[rr.Header().Rrtype] {
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("RR type %s is not allowed", dns.TypeToString[rr.Header().Rrtype])
-					return
-				}
-				if isAdd {
-					rr.Header().Class = dns.ClassINET
-				} else {
-					rr.Header().Class = dns.ClassNONE
-				}
-				parsedRRs = append(parsedRRs, rr)
-			}
-
-			// Create the ZoneUpdate with RRs, RRsets, and Operations
-			zu := &ZoneUpdate{
-				Zone:    amp.Zone,
-				AgentId: AgentId(conf.MultiProvider.Identity),
-				RRs:     parsedRRs,
-				RRsets:  make(map[uint16]core.RRset),
-			}
-
-			// Populate RRsets (needed by ProcessUpdate) and Operations (for wire transport)
-			opStr := "add"
-			if !isAdd {
-				opStr = "delete"
-			}
-			opsMap := make(map[uint16][]string)
-			for _, rr := range parsedRRs {
-				rrtype := rr.Header().Rrtype
-				rrset, exists := zu.RRsets[rrtype]
-				if !exists {
-					rrset = core.RRset{
-						Name:   rr.Header().Name,
-						Class:  rr.Header().Class,
-						RRtype: rrtype,
-					}
-				}
-				rrset.RRs = append(rrset.RRs, rr)
-				zu.RRsets[rrtype] = rrset
-				// For Operations, use ClassINET string representation
-				inetRR := dns.Copy(rr)
-				inetRR.Header().Class = dns.ClassINET
-				opsMap[rrtype] = append(opsMap[rrtype], inetRR.String())
-			}
-			for rrtype, records := range opsMap {
-				zu.Operations = append(zu.Operations, core.RROperation{
-					Operation: opStr,
-					RRtype:    dns.TypeToString[rrtype],
-					Records:   records,
-				})
-			}
-
-			action := "Adding"
-			if !isAdd {
-				action = "Removing"
-			}
-			// Collect RR type names for logging
-			rrtypeNames := make(map[string]bool)
-			for _, rr := range parsedRRs {
-				rrtypeNames[dns.TypeToString[rr.Header().Rrtype]] = true
-			}
-			var typeList []string
-			for name := range rrtypeNames {
-				typeList = append(typeList, name)
-			}
-			lgApi.Info("RR operation", "cmd", amp.Command, "action", action, "count", len(parsedRRs), "types", strings.Join(typeList, ", "), "zone", amp.Zone)
-
-			force := false
-			if amp.Data != nil {
-				if f, ok := amp.Data["force"].(bool); ok {
-					force = f
-				}
-			}
-			cresp := make(chan *AgentMsgResponse, 1)
-			conf.Internal.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{
-				Zone:       amp.Zone,
-				AgentId:    AgentId(conf.MultiProvider.Identity),
-				UpdateType: "local",
-				Update:     zu,
-				Force:      force,
-				Response:   cresp,
-			}
-
-			select {
-			case r := <-cresp:
-				if r.Error {
-					resp.Error = true
-					resp.ErrorMsg = r.ErrorMsg
-					resp.Msg = fmt.Sprintf("%s RR(s) failed: %s", amp.Command, r.ErrorMsg)
-				} else {
-					resp.Msg = fmt.Sprintf("%s %d RR(s) for zone %q", action, len(parsedRRs), amp.Zone)
-					if r.Msg != "" {
-						resp.Msg += " - " + r.Msg
-					}
-				}
-				resp.Status = "ok"
-			case <-time.After(5 * time.Second):
-				resp.Error = true
-				resp.ErrorMsg = "timeout waiting for SynchedDataEngine response"
-				resp.Status = "timeout"
-			}
 
 		case "send-sync-to":
 			// Send a real SYNC to a remote agent
