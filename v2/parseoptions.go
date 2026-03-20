@@ -230,7 +230,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			OptDelSyncChild,
 			OptAllowUpdates,
 			OptAllowChildUpdates,
-			OptAllowCombine,
+			OptAllowEdits,
 			OptFoldCase,
 			OptBlackLies,
 			OptDontPublishKey,

@@ -699,7 +699,7 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 					}
 				}
 				// Re-apply combined data now that contributions are loaded
-				if zd.Options[OptAllowCombine] {
+				if zd.Options[OptAllowEdits] {
 					success, err := zd.CombineWithLocalChanges()
 					if err != nil {
 						lgConfig.Error("CombineWithLocalChanges failed in OnFirstLoad", "zone", zd.ZoneName, "err", err)

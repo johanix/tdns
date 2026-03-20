@@ -33,7 +33,7 @@
 #   allow-child-updates:     Allow updates to child delegation data via DNS UPDATE
 #                           (only child NS, DS, A, AAAA records)
 #
-#   allow-combine:           Allow zone apex RRsets to be dynamically modified
+#   allow-edits:           Allow zone apex RRsets to be dynamically modified
 #                           (NS, DNSKEY, CDS, CSYNC at zone apex)
 #
 # DNSSEC OPTIONS:

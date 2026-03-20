@@ -250,7 +250,7 @@ templates:
    - name:      mp-combiner
      type:      secondary
      store:     map
-     options:   [ allow-combine ]
+     options:   [ allow-edits ]
      primary:   ZONESERVER:53
      notify:    [ PUBADDRESS:8053 ]
 

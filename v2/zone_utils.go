@@ -526,19 +526,19 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 		case AppTypeCombiner:
 			matched, _, _ := zd.matchHsyncProvider(ourHsyncIdentities())
 			if matched {
-				lg.Info("HSYNC RRset confirms we are a listed provider, enabling allow-combine", "zone", zd.ZoneName)
-				zd.Options[OptAllowCombine] = true
+				lg.Info("HSYNC RRset confirms we are a listed provider, enabling allow-edits", "zone", zd.ZoneName)
+				zd.Options[OptAllowEdits] = true
 			} else {
-				lg.Info("HSYNC RRset does not list us as a provider, disabling allow-combine", "zone", zd.ZoneName)
-				zd.Options[OptAllowCombine] = false
+				lg.Info("HSYNC RRset does not list us as a provider, disabling allow-edits", "zone", zd.ZoneName)
+				zd.Options[OptAllowEdits] = false
 			}
 		}
 	}
 
-	lg.Debug("FetchFromUpstream: checking combine status", "zone", zd.ZoneName, "appType", AppTypeToString[Globals.App.Type], "allowCombine", zd.Options[OptAllowCombine])
+	lg.Debug("FetchFromUpstream: checking combine status", "zone", zd.ZoneName, "appType", AppTypeToString[Globals.App.Type], "allowEdits", zd.Options[OptAllowEdits])
 	// XXX: Current thinking: the OptCombiner option is dynamically set for a zone given the combination of
 	//      (a) it contains a HSYNC RRset and (b) appname is "combiner".
-	if Globals.App.Type == AppTypeCombiner && zd.Options[OptAllowCombine] {
+	if Globals.App.Type == AppTypeCombiner && zd.Options[OptAllowEdits] {
 		lg.Info("combining with local changes", "zone", zd.ZoneName)
 		success, err := zd.CombineWithLocalChanges()
 		if err != nil {
