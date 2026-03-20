@@ -324,6 +324,21 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 			lgCombiner.Warn("rejecting contribution", "zone", req.Zone, "sender", req.SenderID, "reason", err)
 			resp.Status = "error"
 			resp.Message = err.Error()
+			// Populate RejectedItems so the agent can match per-record rejections
+			reason := err.Error()
+			if len(req.Operations) > 0 {
+				for _, op := range req.Operations {
+					for _, rr := range op.Records {
+						resp.RejectedItems = append(resp.RejectedItems, RejectedItem{Record: rr, Reason: reason})
+					}
+				}
+			} else {
+				for _, rrs := range req.Records {
+					for _, rr := range rrs {
+						resp.RejectedItems = append(resp.RejectedItems, RejectedItem{Record: rr, Reason: reason})
+					}
+				}
+			}
 			return resp
 		}
 	}

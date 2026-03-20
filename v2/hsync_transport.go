@@ -305,7 +305,9 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, truncated bool, nonce string) {
 			lgTransport.Debug("confirmation received", "distributionID", distributionID, "sender", senderID, "nonce", nonce)
 
-			if tm.reliableQueue != nil && status == transport.ConfirmSuccess {
+			// Stop retrying on any definitive answer (success or failure).
+			// Only keep retrying for transient states (pending, partial).
+			if tm.reliableQueue != nil && (status == transport.ConfirmSuccess || status == transport.ConfirmFailed) {
 				tm.reliableQueue.MarkConfirmed(distributionID, senderID)
 			}
 
