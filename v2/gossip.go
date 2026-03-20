@@ -88,8 +88,12 @@ func (gst *GossipStateTable) UpdateLocalState(groupHash string, peerStates map[s
 // The member's PeerStates map is replaced atomically (never cherry-pick
 // individual peer entries from different timestamps).
 func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
+	// Capture callback and election data under lock, invoke callback outside.
+	var electionCallback func(string, GroupElectionState)
+	var electionHash string
+	var electionState GroupElectionState
+
 	gst.mu.Lock()
-	defer gst.mu.Unlock()
 
 	groupHash := msg.GroupHash
 
@@ -111,7 +115,9 @@ func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
 			elCopy := msg.Election
 			gst.Elections[groupHash] = &elCopy
 			if gst.onElectionUpdate != nil {
-				gst.onElectionUpdate(groupHash, elCopy)
+				electionCallback = gst.onElectionUpdate
+				electionHash = groupHash
+				electionState = elCopy
 			}
 		}
 	}
@@ -123,6 +129,13 @@ func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
 			nameCopy := msg.GroupName
 			gst.Names[groupHash] = &nameCopy
 		}
+	}
+
+	gst.mu.Unlock()
+
+	// Invoke callback outside the lock to avoid deadlocks
+	if electionCallback != nil {
+		electionCallback(electionHash, electionState)
 	}
 }
 
@@ -203,15 +216,39 @@ func (gst *GossipStateTable) BuildGossipForPeer(peerID string, pgm *ProviderGrou
 	return messages
 }
 
-// GetGroupState returns the full state matrix for a group.
+// GetGroupState returns a deep copy of the state matrix for a group.
 func (gst *GossipStateTable) GetGroupState(groupHash string) (map[string]*MemberState, *GroupElectionState, *GroupNameProposal) {
 	gst.mu.RLock()
 	defer gst.mu.RUnlock()
 
-	states := gst.States[groupHash]
-	election := gst.Elections[groupHash]
-	name := gst.Names[groupHash]
-	return states, election, name
+	// Deep copy member states
+	var statesCopy map[string]*MemberState
+	if src := gst.States[groupHash]; src != nil {
+		statesCopy = make(map[string]*MemberState, len(src))
+		for k, ms := range src {
+			cp := *ms
+			cp.PeerStates = make(map[string]string, len(ms.PeerStates))
+			for pk, pv := range ms.PeerStates {
+				cp.PeerStates[pk] = pv
+			}
+			cp.Zones = append([]string(nil), ms.Zones...)
+			statesCopy[k] = &cp
+		}
+	}
+
+	// Shallow copy election and name (scalar + time fields)
+	var electionCopy *GroupElectionState
+	if e := gst.Elections[groupHash]; e != nil {
+		ec := *e
+		electionCopy = &ec
+	}
+	var nameCopy *GroupNameProposal
+	if n := gst.Names[groupHash]; n != nil {
+		nc := *n
+		nameCopy = &nc
+	}
+
+	return statesCopy, electionCopy, nameCopy
 }
 
 func (gst *GossipStateTable) SetOnGroupOperational(fn func(groupHash string)) {

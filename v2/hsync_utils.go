@@ -806,8 +806,9 @@ func (zd *ZoneData) populateMPdata() {
 		zd.MPdata = nil
 		return
 	}
-	// Clear disallow-edits if we are (or became) a signer
+	// Clear disallow-edits and restore allow-edits if we are (or became) a signer
 	zd.Options[OptMPDisallowEdits] = false
+	zd.Options[OptAllowEdits] = true
 
 	zd.MPdata = &MPdata{
 		WeAreProvider: true,

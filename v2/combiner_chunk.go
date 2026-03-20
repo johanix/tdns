@@ -361,9 +361,17 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 		return resp
 	}
 
-	// No Operations: reject the update
+	// No Operations: handle publish-only or reject
+	if req.Publish != nil {
+		combinerApplyPublishInstruction(req, zd, kdb)
+		combinerResyncSignalKeys(req.SenderID, zonename, zd, kdb)
+		resp.Status = "ok"
+		resp.Message = fmt.Sprintf("publish instruction applied for zone %q (no data operations)", req.Zone)
+		return resp
+	}
+
 	resp.Status = "error"
-	resp.Message = fmt.Sprintf("update for zone %q has no Operations (legacy Records format no longer supported)", req.Zone)
+	resp.Message = fmt.Sprintf("update for zone %q has no Operations", req.Zone)
 	return resp
 }
 

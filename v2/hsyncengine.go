@@ -541,7 +541,11 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 				electionDetails = append(electionDetails, "winner", winners[0])
 			}
 			if groups, ok := ampp.Records["_group"]; ok && len(groups) > 0 {
-				electionDetails = append(electionDetails, "group", groups[0][:8])
+				g := groups[0]
+				if len(g) > 8 {
+					g = g[:8]
+				}
+				electionDetails = append(electionDetails, "group", g)
 			}
 			lgEngine.Info("election message "+ampp.RfiType, electionDetails...)
 			if ar.LeaderElectionManager != nil {

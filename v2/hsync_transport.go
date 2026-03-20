@@ -305,9 +305,9 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, truncated bool, nonce string) {
 			lgTransport.Debug("confirmation received", "distributionID", distributionID, "sender", senderID, "nonce", nonce)
 
-			// Stop retrying on any definitive answer (success or failure).
+			// Stop retrying on any definitive answer (success, failure, or rejected).
 			// Only keep retrying for transient states (pending, partial).
-			if tm.reliableQueue != nil && (status == transport.ConfirmSuccess || status == transport.ConfirmFailed) {
+			if tm.reliableQueue != nil && (status == transport.ConfirmSuccess || status == transport.ConfirmFailed || status == transport.ConfirmRejected) {
 				tm.reliableQueue.MarkConfirmed(distributionID, senderID)
 			}
 
@@ -1570,7 +1570,7 @@ func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Age
 	}
 
 	// Merge gossip from beat responses (bidirectional gossip exchange)
-	if tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil {
+	if tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil && tm.agentRegistry.ProviderGroupManager != nil {
 		for _, resp := range []*transport.BeatResponse{apiResp, dnsResp} {
 			if resp == nil || len(resp.Gossip) == 0 {
 				continue
@@ -1579,6 +1579,11 @@ func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Age
 			if err := json.Unmarshal(resp.Gossip, &gossipMsgs); err == nil {
 				for i := range gossipMsgs {
 					tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i])
+					// Re-evaluate group state after merge (may trigger elections)
+					pg := tm.agentRegistry.ProviderGroupManager.GetGroup(gossipMsgs[i].GroupHash)
+					if pg != nil {
+						tm.agentRegistry.GossipStateTable.CheckGroupState(gossipMsgs[i].GroupHash, pg.Members)
+					}
 				}
 				lgTransport.Debug("merged gossip from beat response EDNS(0) CHUNK", "peer", peer.ID, "groups", len(gossipMsgs))
 			}

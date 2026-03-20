@@ -387,7 +387,7 @@ type apiBeatRequest struct {
 	Timestamp    int64           `json:"timestamp"`
 	Sequence     uint64          `json:"sequence"`
 	State        string          `json:"state,omitempty"`
-	Gossip       json.RawMessage `json:"Gossip,omitempty"` // Gossip data, passed through from BeatRequest
+	Gossip       json.RawMessage `json:"gossip,omitempty"` // Gossip data, passed through from BeatRequest
 }
 
 type apiBeatResponse struct {

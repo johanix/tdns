@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"slices"
@@ -47,13 +48,24 @@ func NewProviderGroupManager(localIdentity string) *ProviderGroupManager {
 	}
 }
 
-// ComputeGroupHash computes a deterministic hash from a sorted list of provider identities.
+// ComputeGroupHash computes a deterministic hash from a sorted,
+// deduplicated list of provider identities. Uses length-prefixed
+// encoding to prevent collisions (e.g., ["a","bb"] vs ["ab","b"]).
 func ComputeGroupHash(identities []string) string {
 	sorted := make([]string, len(identities))
 	copy(sorted, identities)
 	slices.Sort(sorted)
+	// Deduplicate
+	deduped := sorted[:0]
+	for i, id := range sorted {
+		if i == 0 || id != sorted[i-1] {
+			deduped = append(deduped, id)
+		}
+	}
 	h := sha256.New()
-	for _, id := range sorted {
+	for _, id := range deduped {
+		// Length-prefix each identity to prevent concatenation collisions
+		binary.Write(h, binary.BigEndian, uint16(len(id)))
 		h.Write([]byte(id))
 	}
 	return hex.EncodeToString(h.Sum(nil))[:16]
@@ -171,6 +183,21 @@ func (pgm *ProviderGroupManager) ProposeGroupName(groupHash, name string) {
 	pg.Name = name
 }
 
+// cloneProviderGroup returns a deep copy of a ProviderGroup.
+func cloneProviderGroup(pg *ProviderGroup) *ProviderGroup {
+	if pg == nil {
+		return nil
+	}
+	cp := *pg
+	cp.Members = append([]string(nil), pg.Members...)
+	cp.Zones = append([]ZoneName(nil), pg.Zones...)
+	if pg.NameProposal != nil {
+		np := *pg.NameProposal
+		cp.NameProposal = &np
+	}
+	return &cp
+}
+
 // GetGroups returns a snapshot of all current provider groups.
 func (pgm *ProviderGroupManager) GetGroups() []*ProviderGroup {
 	pgm.mu.RLock()
@@ -178,10 +205,9 @@ func (pgm *ProviderGroupManager) GetGroups() []*ProviderGroup {
 
 	groups := make([]*ProviderGroup, 0, len(pgm.Groups))
 	for _, pg := range pgm.Groups {
-		groups = append(groups, pg)
+		groups = append(groups, cloneProviderGroup(pg))
 	}
 
-	// Sort by group hash for deterministic output
 	sort.Slice(groups, func(i, j int) bool {
 		return groups[i].GroupHash < groups[j].GroupHash
 	})
@@ -192,7 +218,7 @@ func (pgm *ProviderGroupManager) GetGroups() []*ProviderGroup {
 func (pgm *ProviderGroupManager) GetGroup(groupHash string) *ProviderGroup {
 	pgm.mu.RLock()
 	defer pgm.mu.RUnlock()
-	return pgm.Groups[groupHash]
+	return cloneProviderGroup(pgm.Groups[groupHash])
 }
 
 // GetGroupByName returns a provider group by its human-friendly name.
@@ -201,7 +227,7 @@ func (pgm *ProviderGroupManager) GetGroupByName(name string) *ProviderGroup {
 	defer pgm.mu.RUnlock()
 	for _, pg := range pgm.Groups {
 		if pg.Name == name {
-			return pg
+			return cloneProviderGroup(pg)
 		}
 	}
 	return nil
@@ -216,7 +242,7 @@ func (pgm *ProviderGroupManager) GetGroupsForIdentity(identity string) []*Provid
 	for _, pg := range pgm.Groups {
 		for _, member := range pg.Members {
 			if member == identity {
-				result = append(result, pg)
+				result = append(result, cloneProviderGroup(pg))
 				break
 			}
 		}
@@ -231,7 +257,7 @@ func (pgm *ProviderGroupManager) GetGroupForZone(zone ZoneName) *ProviderGroup {
 	for _, pg := range pgm.Groups {
 		for _, z := range pg.Zones {
 			if z == zone {
-				return pg
+				return cloneProviderGroup(pg)
 			}
 		}
 	}

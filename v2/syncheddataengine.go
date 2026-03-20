@@ -541,6 +541,17 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						if remoteSkipCombiner {
 							lgEngine.Info("remote update applied but not forwarding to combiner (mp-disallow-edits)", "zone", synchedDataUpdate.Zone)
 							resp.Msg = "Remote update applied locally (not forwarded to combiner: zone signed, not a signer)"
+							// Send terminal REJECTED confirmation to originator so it
+							// doesn't wait forever for a combiner confirmation.
+							if synchedDataUpdate.OriginatingDistID != "" && msgQs.OnRemoteConfirmationReady != nil {
+								msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
+									OriginatingDistID: synchedDataUpdate.OriginatingDistID,
+									OriginatingSender: string(synchedDataUpdate.AgentId),
+									Zone:              synchedDataUpdate.Zone,
+									Status:            "rejected",
+									Message:           "zone is signed but this provider is not a signer; edits not forwarded to combiner",
+								})
+							}
 						} else {
 							lgEngine.Info("remote update applied, enqueuing for combiner", "zone", synchedDataUpdate.Zone)
 						}

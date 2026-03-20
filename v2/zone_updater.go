@@ -179,6 +179,8 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 						err := kdb.ApplyZoneUpdateToDB(ur)
 						if err != nil {
 							lg.Error("ZoneUpdater: ApplyZoneUpdateToDB failed", "error", err)
+						} else {
+							updated = true
 						}
 					}
 					if updated && !ur.InternalUpdate {
