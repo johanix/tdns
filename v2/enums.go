@@ -29,8 +29,9 @@ const (
 	OptCatalogMemberAutoCreate
 	OptCatalogMemberAutoDelete
 	OptMPManualApproval
-	OptMultiSigner    // Dynamically set by signer when HSYNC shows multiple signers
-	OptMPNotListedErr // Warning: zone has HSYNC3 but we are not listed as a provider
+	OptMultiSigner     // Dynamically set by signer when HSYNC shows multiple signers
+	OptMPNotListedErr  // Warning: zone has HSYNC3 but we are not listed as a provider
+	OptMPDisallowEdits // Zone is signed but we are not a signer: no edits allowed
 )
 
 var ZoneOptionToString = map[ZoneOption]string{
@@ -57,6 +58,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptMPManualApproval:        "mp-manual-approval",
 	OptMultiSigner:             "multi-signer",
 	OptMPNotListedErr:          "mp-not-listed-error",
+	OptMPDisallowEdits:         "mp-disallow-edits",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -82,6 +84,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"mp-manual-approval":         OptMPManualApproval,
 	"multi-signer":               OptMultiSigner,
 	"mp-not-listed-error":        OptMPNotListedErr,
+	"mp-disallow-edits":          OptMPDisallowEdits,
 }
 
 type ImrOption uint8

@@ -525,9 +525,12 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 			}
 		case AppTypeCombiner:
 			matched, _, _ := zd.matchHsyncProvider(ourHsyncIdentities())
-			if matched {
-				lg.Info("HSYNC RRset confirms we are a listed provider, enabling allow-edits", "zone", zd.ZoneName)
+			if matched && !zd.Options[OptMPDisallowEdits] {
+				lg.Info("HSYNC RRset confirms we are a listed provider and signer, enabling allow-edits", "zone", zd.ZoneName)
 				zd.Options[OptAllowEdits] = true
+			} else if matched && zd.Options[OptMPDisallowEdits] {
+				lg.Info("HSYNC RRset confirms we are a listed provider but not a signer, edits disallowed", "zone", zd.ZoneName)
+				zd.Options[OptAllowEdits] = false
 			} else {
 				lg.Info("HSYNC RRset does not list us as a provider, disabling allow-edits", "zone", zd.ZoneName)
 				zd.Options[OptAllowEdits] = false

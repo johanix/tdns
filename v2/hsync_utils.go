@@ -800,10 +800,14 @@ func (zd *ZoneData) populateMPdata() {
 		return
 	}
 	if zoneSigned && !weShouldSign {
-		zd.Logger.Printf("populateMPdata: zone %s: we are provider %q but not listed as a signer — zone is signed and we must not modify it", zd.ZoneName, ourLabel)
+		zd.Logger.Printf("populateMPdata: zone %s: we are provider %q but not listed as a signer -- zone is signed and we must not modify it", zd.ZoneName, ourLabel)
+		zd.Options[OptMPDisallowEdits] = true
+		zd.Options[OptAllowEdits] = false
 		zd.MPdata = nil
 		return
 	}
+	// Clear disallow-edits if we are (or became) a signer
+	zd.Options[OptMPDisallowEdits] = false
 
 	zd.MPdata = &MPdata{
 		WeAreProvider: true,
