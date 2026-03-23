@@ -1388,9 +1388,9 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 					resp.ErrorMsg = fmt.Sprintf("zone %q not found", zone)
 					return
 				}
-				if zd.CombinerData != nil {
+				if zd.MP.CombinerData != nil {
 					zoneData := make(map[string]map[string][]string)
-					for item := range zd.CombinerData.IterBuffered() {
+					for item := range zd.MP.CombinerData.IterBuffered() {
 						ownerName := item.Key
 						ownerData := item.Val
 						rrTypeData := make(map[string][]string)
@@ -1409,9 +1409,9 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			} else {
 				// All zones
 				for _, zd := range Zones.Items() {
-					if zd.CombinerData != nil {
+					if zd.MP.CombinerData != nil {
 						zoneData := make(map[string]map[string][]string)
-						for item := range zd.CombinerData.IterBuffered() {
+						for item := range zd.MP.CombinerData.IterBuffered() {
 							ownerName := item.Key
 							ownerData := item.Val
 							rrTypeData := make(map[string][]string)

@@ -687,22 +687,25 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 				if !zd.Options[OptMultiProvider] {
 					return
 				}
+
+				zd.EnsureMP()
+
 				// Set PersistContributions callback
-				if zd.PersistContributions == nil && zd.KeyDB != nil {
-					zd.PersistContributions = zd.KeyDB.SaveContributions
+				if zd.MP.PersistContributions == nil && zd.KeyDB != nil {
+					zd.MP.PersistContributions = zd.KeyDB.SaveContributions
 					lgConfig.Info("PersistContributions callback set", "zone", zd.ZoneName)
 				}
 				// Hydrate AgentContributions from persistent storage
-				if zd.AgentContributions == nil && zd.KeyDB != nil {
+				if zd.MP.AgentContributions == nil && zd.KeyDB != nil {
 					allContribs, err := zd.KeyDB.LoadAllContributions()
 					if err != nil {
 						lgConfig.Error("failed to load contributions snapshot", "zone", zd.ZoneName, "err", err)
 						return
 					}
 					if zoneContribs, ok := allContribs[zd.ZoneName]; ok {
-						zd.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
+						zd.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
 						for senderID, ownerMap := range zoneContribs {
-							zd.AgentContributions[senderID] = ownerMap
+							zd.MP.AgentContributions[senderID] = ownerMap
 						}
 						zd.rebuildCombinerData()
 						lgConfig.Info("hydrated AgentContributions from snapshot",

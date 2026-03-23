@@ -70,16 +70,9 @@ type MPdata struct {
 	Options       map[ZoneOption]bool // MP-specific options (future: migrate from zd.Options)
 }
 
-type ZoneData struct {
-	mu         sync.Mutex
-	ZoneName   string
-	ZoneStore  ZoneStore // 1 = "xfr", 2 = "map", 3 = "slice". An xfr zone only supports xfr related ops
-	ZoneType   ZoneType
-	Owners     Owners
-	OwnerIndex *core.ConcurrentMap[string, int]
-	ApexLen    int
-	//	RRs            RRArray
-	Data         *core.ConcurrentMap[string, OwnerData]
+// ZoneMPExtension holds multi-provider state for a zone.
+// Moves to tdns-mp after repo split. Access via zd.MP.
+type ZoneMPExtension struct {
 	CombinerData *core.ConcurrentMap[string, OwnerData]
 	UpstreamData *core.ConcurrentMap[string, OwnerData] // Original upstream apex data (combiner NS fallback)
 	MPdata       *MPdata                                // Multi-provider membership/signing state; nil = not MP
@@ -92,9 +85,37 @@ type ZoneData struct {
 	// contributions to the snapshot table after every write. Non-combiner apps leave it nil.
 	// Args: zone, senderID, agent's contributions (owner → rrtype → RRset).
 	PersistContributions func(string, string, map[string]map[uint16]core.RRset) error
-	Ready                bool   // true if zd.Data has been populated (from file or upstream)
-	XfrType              string // axfr | ixfr
-	Logger               *log.Logger
+
+	// LastKeyInventory stores the most recent KEYSTATE inventory received from the signer.
+	// Used for diagnostics (CLI show-key-inventory command).
+	LastKeyInventory *KeyInventorySnapshot
+
+	// LocalDNSKEYs holds DNSKEY RRs that the signer classifies as local (not foreign).
+	// Derived from KEYSTATE inventory. Used to compute adds/removes on DNSKEY updates.
+	LocalDNSKEYs []dns.RR
+
+	// KEYSTATE health tracking — we depend on KEYSTATE for DNSKEY classification.
+	// Failure is an error condition that must be visible to the operator.
+	KeystateOK    bool      // true after successful KEYSTATE exchange
+	KeystateError string    // error message from last failed attempt (empty on success)
+	KeystateTime  time.Time // time of last KEYSTATE attempt
+}
+
+type ZoneData struct {
+	mu         sync.Mutex
+	ZoneName   string
+	ZoneStore  ZoneStore // 1 = "xfr", 2 = "map", 3 = "slice". An xfr zone only supports xfr related ops
+	ZoneType   ZoneType
+	Owners     Owners
+	OwnerIndex *core.ConcurrentMap[string, int]
+	ApexLen    int
+	//	RRs            RRArray
+	Data  *core.ConcurrentMap[string, OwnerData]
+	MP    *ZoneMPExtension // Multi-provider state; nil for non-MP zones
+	Ready bool             // true if zd.Data has been populated (from file or upstream)
+
+	XfrType string // axfr | ixfr
+	Logger  *log.Logger
 	// ZoneFile           string // TODO: Remove this
 	IncomingSerial     uint32 // SOA serial that we got from upstream
 	CurrentSerial      uint32 // SOA serial after local bumping
@@ -134,20 +155,6 @@ type ZoneData struct {
 	// DNSKEY RRset during PublishDnskeyRRs().
 	RemoteDNSKEYs []dns.RR
 
-	// LastKeyInventory stores the most recent KEYSTATE inventory received from the signer.
-	// Used for diagnostics (CLI show-key-inventory command).
-	LastKeyInventory *KeyInventorySnapshot
-
-	// LocalDNSKEYs holds DNSKEY RRs that the signer classifies as local (not foreign).
-	// Derived from KEYSTATE inventory. Used to compute adds/removes on DNSKEY updates.
-	LocalDNSKEYs []dns.RR
-
-	// KEYSTATE health tracking — we depend on KEYSTATE for DNSKEY classification.
-	// Failure is an error condition that must be visible to the operator.
-	KeystateOK    bool      // true after successful KEYSTATE exchange
-	KeystateError string    // error message from last failed attempt (empty on success)
-	KeystateTime  time.Time // time of last KEYSTATE attempt
-
 	// OnFirstLoad holds one-shot callbacks executed after the zone's first successful load.
 	// Apps register these before RefreshEngine starts, and RefreshEngine clears the slice
 	// after executing them. Protected by zd.mu.
@@ -159,50 +166,79 @@ type ZoneData struct {
 func (zd *ZoneData) GetLastKeyInventory() *KeyInventorySnapshot {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	return zd.LastKeyInventory
+	if zd.MP == nil {
+		return nil
+	}
+	return zd.MP.LastKeyInventory
 }
 
 func (zd *ZoneData) SetLastKeyInventory(inv *KeyInventorySnapshot) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	zd.LastKeyInventory = inv
+	zd.EnsureMP()
+	zd.MP.LastKeyInventory = inv
 }
 
 func (zd *ZoneData) GetKeystateOK() bool {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	return zd.KeystateOK
+	if zd.MP == nil {
+		return false
+	}
+	return zd.MP.KeystateOK
 }
 
 func (zd *ZoneData) SetKeystateOK(ok bool) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	zd.KeystateOK = ok
+	zd.EnsureMP()
+	zd.MP.KeystateOK = ok
 }
 
 func (zd *ZoneData) GetKeystateError() string {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	return zd.KeystateError
+	if zd.MP == nil {
+		return ""
+	}
+	return zd.MP.KeystateError
 }
 
 func (zd *ZoneData) SetKeystateError(err string) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	zd.KeystateError = err
+	zd.EnsureMP()
+	zd.MP.KeystateError = err
 }
 
 func (zd *ZoneData) GetKeystateTime() time.Time {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	return zd.KeystateTime
+	if zd.MP == nil {
+		return time.Time{}
+	}
+	return zd.MP.KeystateTime
 }
 
 func (zd *ZoneData) SetKeystateTime(t time.Time) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
-	zd.KeystateTime = t
+	zd.EnsureMP()
+	zd.MP.KeystateTime = t
 }
+
+// EnsureMP initializes the MP extension if nil. Must be called
+// with zd.mu held or before concurrent access begins.
+func (zd *ZoneData) EnsureMP() {
+	if zd.MP == nil {
+		zd.MP = &ZoneMPExtension{}
+	}
+}
+
+// Lock and Unlock expose the mutex for code that moves to
+// tdns-mp and can no longer access the unexported zd.mu.
+func (zd *ZoneData) Lock()   { zd.mu.Lock() }
+func (zd *ZoneData) Unlock() { zd.mu.Unlock() }
 
 func (zd *ZoneData) GetRemoteDNSKEYs() []dns.RR {
 	zd.mu.Lock()
@@ -597,6 +633,11 @@ type KeyDB struct {
 	KeyBootstrapperQ    chan KeyBootstrapperRequest
 	Options             map[AuthOption]string
 }
+
+// Lock and Unlock expose the mutex for code that moves to
+// tdns-mp and can no longer access the unexported kdb.mu.
+func (kdb *KeyDB) Lock()   { kdb.mu.Lock() }
+func (kdb *KeyDB) Unlock() { kdb.mu.Unlock() }
 
 type Tx struct {
 	*sql.Tx

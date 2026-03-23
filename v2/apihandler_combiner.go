@@ -59,7 +59,7 @@ func APIcombiner(app *AppDetails, refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB
 			resp.Msg = fmt.Sprintf("Added local RRsets for zone %s", cp.Zone)
 
 		case "list":
-			if zd.CombinerData == nil {
+			if zd.MP.CombinerData == nil {
 				resp.Msg = fmt.Sprintf("No local data for zone %s", cp.Zone)
 				return
 			}
@@ -300,8 +300,8 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			// Build agent -> rrtype -> []rr from AgentContributions
 			current := make(map[string]map[string][]string)
 			zd.mu.Lock()
-			if zd.AgentContributions != nil {
-				for agentID, ownerMap := range zd.AgentContributions {
+			if zd.MP.AgentContributions != nil {
+				for agentID, ownerMap := range zd.MP.AgentContributions {
 					for _, rrtypeMap := range ownerMap {
 						for rrtype, rrset := range rrtypeMap {
 							if current[agentID] == nil {
@@ -382,14 +382,14 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 					if zone != "" {
 						if zd, ok := Zones.Get(zone); ok {
 							zd.mu.Lock()
-							zd.AgentContributions = nil
+							zd.MP.AgentContributions = nil
 							zd.rebuildCombinerData()
 							zd.mu.Unlock()
 						}
 					} else {
 						for _, zd := range Zones.Items() {
 							zd.mu.Lock()
-							zd.AgentContributions = nil
+							zd.MP.AgentContributions = nil
 							zd.rebuildCombinerData()
 							zd.mu.Unlock()
 						}
@@ -447,9 +447,9 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 			collectZone := func(zd *ZoneData) {
 				// Merged CombinerData
-				if zd.CombinerData != nil {
+				if zd.MP.CombinerData != nil {
 					zoneData := make(map[string]map[string][]string)
-					for item := range zd.CombinerData.IterBuffered() {
+					for item := range zd.MP.CombinerData.IterBuffered() {
 						ownerName := item.Key
 						ownerData := item.Val
 						rrTypeData := make(map[string][]string)
@@ -469,8 +469,8 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 				}
 
 				// Per-agent AgentContributions
-				if zd.AgentContributions != nil {
-					for agentID, ownerMap := range zd.AgentContributions {
+				if zd.MP.AgentContributions != nil {
+					for agentID, ownerMap := range zd.MP.AgentContributions {
 						for owner, rrtypeMap := range ownerMap {
 							for rrtype, rrset := range rrtypeMap {
 								var rrs []string

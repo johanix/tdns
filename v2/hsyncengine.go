@@ -316,7 +316,7 @@ func (ar *AgentRegistry) SyncRequestHandler(ourId AgentId, req SyncRequest, sync
 		lgEngine.Info("DNSKEY RRset changed", "zone", req.ZoneName)
 
 		// Don't distribute DNSKEYs for unsigned zones
-		if zd, exists := Zones.Get(string(req.ZoneName)); exists && zd.MPdata != nil && !zd.MPdata.ZoneSigned {
+		if zd, exists := Zones.Get(string(req.ZoneName)); exists && zd.MP.MPdata != nil && !zd.MP.MPdata.ZoneSigned {
 			lgEngine.Debug("skipping DNSKEY sync for unsigned zone", "zone", req.ZoneName)
 			break
 		}

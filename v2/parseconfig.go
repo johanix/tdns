@@ -681,7 +681,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		}
 
 		// Apply static options via copy-on-write to avoid racing with
-		// concurrent readers of zdp.Options / zdp.MPdata.Options.
+		// concurrent readers of zdp.Options / zdp.MP.MPdata.Options.
 		// Build from fresh parsed options only; on reload this clears
 		// options that were removed from the config file.
 		newOpts := make(map[ZoneOption]bool, len(options))
@@ -691,9 +691,10 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 
 		var newMPdata *MPdata
 		if options[OptMultiProvider] {
-			if zdp.MPdata != nil {
+			zdp.EnsureMP()
+			if zdp.MP.MPdata != nil {
 				// Copy existing MPdata, build fresh MP Options map
-				cp := *zdp.MPdata
+				cp := *zdp.MP.MPdata
 				newMPdata = &cp
 				newMPdata.Options = map[ZoneOption]bool{OptMultiProvider: true}
 			} else {
@@ -706,9 +707,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		zdp.mu.Lock()
 		zdp.Options = newOpts
 		if newMPdata != nil {
-			zdp.MPdata = newMPdata
+			zdp.MP.MPdata = newMPdata
 		} else if !options[OptMultiProvider] {
-			zdp.MPdata = nil
+			zdp.MP.MPdata = nil
 		}
 		zdp.mu.Unlock()
 

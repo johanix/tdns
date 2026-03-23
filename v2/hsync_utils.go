@@ -164,14 +164,14 @@ func (zd *ZoneData) LocalDnskeysChanged(newzd *ZoneData) (bool, *DnskeyStatus, e
 func (zd *ZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) {
 	// Don't process DNSKEYs for unsigned zones, but clean up any
 	// previously published keys on transition to unsigned.
-	if zd.MPdata != nil && !zd.MPdata.ZoneSigned {
-		if len(zd.LocalDNSKEYs) > 0 {
+	if zd.MP.MPdata != nil && !zd.MP.MPdata.ZoneSigned {
+		if len(zd.MP.LocalDNSKEYs) > 0 {
 			ds := &DnskeyStatus{
 				Time:         time.Now(),
 				ZoneName:     zd.ZoneName,
-				LocalRemoves: zd.LocalDNSKEYs,
+				LocalRemoves: zd.MP.LocalDNSKEYs,
 			}
-			zd.LocalDNSKEYs = nil
+			zd.MP.LocalDNSKEYs = nil
 			return true, ds, nil
 		}
 		return false, nil, nil
@@ -219,7 +219,7 @@ func (zd *ZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) {
 		newLocalKeys = append(newLocalKeys, rr)
 	}
 
-	oldLocalKeys := zd.LocalDNSKEYs
+	oldLocalKeys := zd.MP.LocalDNSKEYs
 
 	// Handle initial case (no previous local keys)
 	if len(oldLocalKeys) == 0 && len(newLocalKeys) == 0 {
@@ -229,7 +229,8 @@ func (zd *ZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) {
 		// First KEYSTATE — all local keys are adds
 		ds.LocalAdds = newLocalKeys
 		ds.CurrentLocalKeys = newLocalKeys
-		zd.LocalDNSKEYs = newLocalKeys
+		zd.EnsureMP()
+		zd.MP.LocalDNSKEYs = newLocalKeys
 		if len(ds.LocalAdds) > 0 {
 			zd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: initial KEYSTATE, %d local DNSKEYs",
 				zd.ZoneName, len(ds.LocalAdds))
@@ -244,7 +245,8 @@ func (zd *ZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) {
 	ds.LocalAdds = adds
 	ds.LocalRemoves = removes
 	ds.CurrentLocalKeys = newLocalKeys
-	zd.LocalDNSKEYs = newLocalKeys
+	zd.EnsureMP()
+	zd.MP.LocalDNSKEYs = newLocalKeys
 
 	zd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: differ=%v, adds=%d, removes=%d",
 		zd.ZoneName, differ, len(adds), len(removes))
@@ -766,19 +768,20 @@ func (zd *ZoneData) analyzeHsyncSigners(ourIdentities []string, ourLabel string)
 }
 
 // populateMPdata evaluates the four multi-provider guards for a zone and
-// populates zd.MPdata accordingly. Called after every zone refresh/transfer.
+// populates zd.MP.MPdata accordingly. Called after every zone refresh/transfer.
 //
 // Guard 1: OptMultiProvider must be set in the zone config.
 // Guard 2: The zone owner must declare the zone as MP (HSYNC3+HSYNCPARAM present).
 // Guard 3: We must be a listed provider (our identity matches an HSYNC3 record).
 // Guard 4: If the zone is signed (HSYNCPARAM signers= non-empty), we must be a signer.
 //
-// If any guard fails, zd.MPdata is set to nil. The caller can check zd.MPdata to
+// If any guard fails, zd.MP.MPdata is set to nil. The caller can check zd.MP.MPdata to
 // determine whether this zone should be treated as multi-provider.
 func (zd *ZoneData) populateMPdata() {
+	zd.EnsureMP()
 	// Guard 1: static config must declare this as an MP zone
 	if !zd.Options[OptMultiProvider] {
-		zd.MPdata = nil
+		zd.MP.MPdata = nil
 		return
 	}
 
@@ -786,7 +789,7 @@ func (zd *ZoneData) populateMPdata() {
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
 		zd.Logger.Printf("populateMPdata: zone %s: cannot get apex: %v", zd.ZoneName, err)
-		zd.MPdata = nil
+		zd.MP.MPdata = nil
 		return
 	}
 
@@ -798,7 +801,7 @@ func (zd *ZoneData) populateMPdata() {
 	hasHsyncRecords := (h3exists && hpExists) || h1exists || h2exists
 	if !hasHsyncRecords {
 		zd.Logger.Printf("populateMPdata: zone %s: OptMultiProvider is set but zone owner has no HSYNC3+HSYNCPARAM (or legacy HSYNC/HSYNC2) records — zone is not multi-provider", zd.ZoneName)
-		zd.MPdata = nil
+		zd.MP.MPdata = nil
 		return
 	}
 
@@ -807,13 +810,13 @@ func (zd *ZoneData) populateMPdata() {
 	matched, ourLabel, err := zd.matchHsyncProvider(ourIdentities)
 	if err != nil {
 		zd.Logger.Printf("populateMPdata: zone %s: error matching provider identity: %v", zd.ZoneName, err)
-		zd.MPdata = nil
+		zd.MP.MPdata = nil
 		return
 	}
 	if !matched {
 		zd.Logger.Printf("populateMPdata: zone %s: none of our identities %v match any HSYNC3 provider in the zone -- we are not a provider for this zone", zd.ZoneName, ourIdentities)
 		zd.Options[OptMPNotListedErr] = true
-		zd.MPdata = nil
+		zd.MP.MPdata = nil
 		return
 	}
 	// Clear warning if we were previously not listed but now are
@@ -823,14 +826,14 @@ func (zd *ZoneData) populateMPdata() {
 	weShouldSign, otherSigners, zoneSigned, err := zd.analyzeHsyncSigners(ourIdentities, ourLabel)
 	if err != nil {
 		zd.Logger.Printf("populateMPdata: zone %s: error analyzing signers: %v", zd.ZoneName, err)
-		zd.MPdata = nil
+		zd.MP.MPdata = nil
 		return
 	}
 	if zoneSigned && !weShouldSign {
 		zd.Logger.Printf("populateMPdata: zone %s: we are provider %q but not listed as a signer -- zone is signed and we must not modify it", zd.ZoneName, ourLabel)
 		zd.Options[OptMPDisallowEdits] = true
 		zd.Options[OptAllowEdits] = false
-		zd.MPdata = nil
+		zd.MP.MPdata = nil
 		return
 	}
 	// Clear disallow-edits and restore allow-edits if we are (or became) a signer
@@ -840,8 +843,8 @@ func (zd *ZoneData) populateMPdata() {
 	// Preserve any existing MPdata.Options (set at parse time),
 	// create the map if needed.
 	var mpOpts map[ZoneOption]bool
-	if zd.MPdata != nil && zd.MPdata.Options != nil {
-		mpOpts = zd.MPdata.Options
+	if zd.MP.MPdata != nil && zd.MP.MPdata.Options != nil {
+		mpOpts = zd.MP.MPdata.Options
 	} else {
 		mpOpts = make(map[ZoneOption]bool)
 	}
@@ -849,7 +852,7 @@ func (zd *ZoneData) populateMPdata() {
 	mpOpts[OptMPDisallowEdits] = zoneSigned && !weShouldSign
 	mpOpts[OptMultiSigner] = weShouldSign && otherSigners > 0
 
-	zd.MPdata = &MPdata{
+	zd.MP.MPdata = &MPdata{
 		WeAreProvider: true,
 		OurLabel:      ourLabel,
 		WeAreSigner:   weShouldSign,
