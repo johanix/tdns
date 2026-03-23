@@ -8,8 +8,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -41,12 +43,12 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 		}()
 
 		zd, exist := Zones.Get(zp.Zone)
-		if !exist && zp.Command != "list-zones" {
+		if !exist && zp.Command != "list-zones" && zp.Command != "list-mp-zones" {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", zp.Zone)
 			return
 		}
-		if zd == nil && zp.Command != "list-zones" {
+		if zd == nil && zp.Command != "list-zones" && zp.Command != "list-mp-zones" {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Zone %s: zone data is nil", zp.Zone)
 			return
@@ -182,6 +184,80 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				zones[zname] = zconf
 			}
 			resp.Zones = zones
+
+		case "list-mp-zones":
+			mpZones := map[string]MPZoneInfo{}
+			for item := range Zones.IterBuffered() {
+				zname := item.Key
+				zd := item.Val
+				if !zd.Options[OptMultiProvider] {
+					continue
+				}
+
+				info := MPZoneInfo{}
+
+				// Collect options
+				for opt, val := range zd.Options {
+					if val {
+						info.Options = append(info.Options, opt)
+					}
+				}
+
+				// Extract HSYNCPARAM and HSYNC3 data from zone apex
+				apex, err := zd.GetOwner(zd.ZoneName)
+				if err == nil && apex != nil {
+					// HSYNC3: provider labels
+					hsync3RRset, exists := apex.RRtypes.Get(core.TypeHSYNC3)
+					if exists {
+						for _, rr := range hsync3RRset.RRs {
+							if prr, ok := rr.(*dns.PrivateRR); ok {
+								if h3, ok := prr.Data.(*core.HSYNC3); ok {
+									info.Providers = append(info.Providers, strings.TrimSuffix(h3.Label, "."))
+								}
+							}
+						}
+					}
+
+					// HSYNCPARAM: nsmgmt, parentsync, signers, suffix
+					hsyncparamRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
+					if exists && len(hsyncparamRRset.RRs) > 0 {
+						if prr, ok := hsyncparamRRset.RRs[0].(*dns.PrivateRR); ok {
+							if hp, ok := prr.Data.(*core.HSYNCPARAM); ok {
+								switch hp.GetNSmgmt() {
+								case core.HsyncNSmgmtAGENT:
+									info.NSmgmt = "agent"
+								default:
+									info.NSmgmt = "owner"
+								}
+								switch hp.GetParentSync() {
+								case core.HsyncParentSyncAgent:
+									info.ParentSync = "agent"
+								default:
+									info.ParentSync = "owner"
+								}
+								info.Signers = hp.GetSigners()
+								info.Suffix = hp.GetSuffix()
+							}
+						}
+					}
+				}
+
+				if info.NSmgmt == "" {
+					info.NSmgmt = "owner"
+				}
+				if info.ParentSync == "" {
+					info.ParentSync = "owner"
+				}
+				if info.Signers == nil {
+					info.Signers = []string{}
+				}
+				if info.Providers == nil {
+					info.Providers = []string{}
+				}
+
+				mpZones[zname] = info
+			}
+			resp.MPZones = mpZones
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown zone command: %s", zp.Command)

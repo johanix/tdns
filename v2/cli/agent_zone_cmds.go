@@ -58,6 +58,28 @@ var agentZoneListCmd = &cobra.Command{
 	},
 }
 
+var agentZoneMPListCmd = &cobra.Command{
+	Use:   "mplist",
+	Short: "List multi-provider zones with HSYNCPARAM details",
+	Run: func(cmd *cobra.Command, args []string) {
+		prefixcmd, _ := getCommandContext("zone")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+		}
+
+		cr, err := SendZoneCommand(api, tdns.ZonePost{
+			Command: "list-mp-zones",
+		})
+		if err != nil {
+			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+			os.Exit(1)
+		}
+
+		ListMPZones(cr)
+	},
+}
+
 var agentZoneReloadCmd = &cobra.Command{
 	Use:   "reload",
 	Short: "Request re-loading a zone",
@@ -502,7 +524,7 @@ func init() {
 	AgentCmd.AddCommand(AgentZoneCmd)
 
 	// Zone subcommands relevant to the agent
-	AgentZoneCmd.AddCommand(agentZoneListCmd, agentZoneReloadCmd, agentZoneWriteCmd)
+	AgentZoneCmd.AddCommand(agentZoneListCmd, agentZoneMPListCmd, agentZoneReloadCmd, agentZoneWriteCmd)
 	AgentZoneCmd.AddCommand(agentZoneUpdateCmd, agentZoneReadFakeCmd)
 	AgentZoneCmd.AddCommand(agentZoneDsyncCmd)
 

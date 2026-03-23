@@ -10,6 +10,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strings"
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
@@ -266,6 +267,28 @@ var zoneListCmd = &cobra.Command{
 	},
 }
 
+var zoneMPListCmd = &cobra.Command{
+	Use:   "mplist",
+	Short: "List multi-provider zones with HSYNCPARAM details",
+	Run: func(cmd *cobra.Command, args []string) {
+		prefixcmd, _ := getCommandContext("zone")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+		}
+
+		cr, err := SendZoneCommand(api, tdns.ZonePost{
+			Command: "list-mp-zones",
+		})
+		if err != nil {
+			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+			os.Exit(1)
+		}
+
+		ListMPZones(cr)
+	},
+}
+
 var zoneSerialBumpCmd = &cobra.Command{
 	Use:   "bump",
 	Short: "Bump SOA serial and epoch (if any) in tdns-auth version of zone",
@@ -294,7 +317,7 @@ var zoneSerialBumpCmd = &cobra.Command{
 }
 
 func init() {
-	ZoneCmd.AddCommand(zoneListCmd, zoneNsecCmd, zoneSignCmd, zoneReloadCmd, zoneSerialBumpCmd)
+	ZoneCmd.AddCommand(zoneListCmd, zoneMPListCmd, zoneNsecCmd, zoneSignCmd, zoneReloadCmd, zoneSerialBumpCmd)
 	ZoneCmd.AddCommand(zoneWriteCmd, zoneFreezeCmd, zoneThawCmd)
 
 	zoneNsecCmd.AddCommand(zoneNsecGenerateCmd, zoneNsecShowCmd)
@@ -380,6 +403,41 @@ func ListZones(cr tdns.ZoneResponse) {
 	})
 	out = append(out, zoneLines...)
 	fmt.Printf("%s\n", columnize.SimpleFormat(out))
+}
+
+// ListMPZones displays multi-provider zone details in tabular format.
+func ListMPZones(cr tdns.ZoneResponse) {
+	if len(cr.MPZones) == 0 {
+		fmt.Println("No multi-provider zones configured")
+		return
+	}
+
+	out := []string{"Zone|Providers|Signers|NSmgmt|ParentSync|Options"}
+
+	var znames []string
+	for zname := range cr.MPZones {
+		znames = append(znames, zname)
+	}
+	sort.Strings(znames)
+
+	for _, zname := range znames {
+		info := cr.MPZones[zname]
+		providers := strings.Join(info.Providers, ",")
+		signers := strings.Join(info.Signers, ",")
+		if signers == "" {
+			signers = "(none)"
+		}
+		opts := []string{}
+		for _, opt := range info.Options {
+			opts = append(opts, tdns.ZoneOptionToString[opt])
+		}
+		sort.Strings(opts)
+		optStr := "[" + strings.Join(opts, " ") + "]"
+		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s",
+			zname, providers, signers, info.NSmgmt, info.ParentSync, optStr))
+	}
+
+	fmt.Println(columnize.SimpleFormat(out))
 }
 
 func VerboseListZone(cr tdns.ZoneResponse) {
