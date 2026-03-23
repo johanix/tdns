@@ -378,21 +378,21 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 					errs = append(errs, fmt.Errorf("contributions: %w", err))
 				} else {
 					parts = append(parts, fmt.Sprintf("%d contributions", n))
-				}
-				// Also clear in-memory AgentContributions and rebuild CombinerData
-				if zone != "" {
-					if zd, ok := Zones.Get(zone); ok {
-						zd.mu.Lock()
-						zd.AgentContributions = nil
-						zd.rebuildCombinerData()
-						zd.mu.Unlock()
-					}
-				} else {
-					for _, zd := range Zones.Items() {
-						zd.mu.Lock()
-						zd.AgentContributions = nil
-						zd.rebuildCombinerData()
-						zd.mu.Unlock()
+					// Clear in-memory AgentContributions only on DB success
+					if zone != "" {
+						if zd, ok := Zones.Get(zone); ok {
+							zd.mu.Lock()
+							zd.AgentContributions = nil
+							zd.rebuildCombinerData()
+							zd.mu.Unlock()
+						}
+					} else {
+						for _, zd := range Zones.Items() {
+							zd.mu.Lock()
+							zd.AgentContributions = nil
+							zd.rebuildCombinerData()
+							zd.mu.Unlock()
+						}
 					}
 				}
 			}

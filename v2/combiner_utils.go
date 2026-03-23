@@ -912,6 +912,7 @@ func combinerReapplyContributions(zone string, kdb *KeyDB) (string, error) {
 		parts = append(parts, fmt.Sprintf("loaded contributions from %d agent(s)", len(zoneContribs)))
 	} else {
 		zd.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
+		zd.rebuildCombinerData()
 		parts = append(parts, "no contributions in snapshot")
 	}
 
@@ -943,8 +944,12 @@ func combinerReapplyContributions(zone string, kdb *KeyDB) (string, error) {
 						rr.Header().Name = ownerName
 						parsedRRs = append(parsedRRs, rr)
 					}
-					zd.replaceCombinerDataByRRtypeLocked(senderID, ownerName, dns.TypeKEY, parsedRRs)
-					keyCount++
+					_, _, changed, replErr := zd.replaceCombinerDataByRRtypeLocked(senderID, ownerName, dns.TypeKEY, parsedRRs)
+					if replErr != nil {
+						lgCombiner.Warn("reapply: failed to replace _signal KEY", "sender", senderID, "owner", ownerName, "err", replErr)
+					} else if changed {
+						keyCount++
+					}
 				}
 			}
 		}
@@ -973,8 +978,12 @@ func combinerReapplyContributions(zone string, kdb *KeyDB) (string, error) {
 					}
 					parsedRRs = append(parsedRRs, rr)
 				}
-				zd.replaceCombinerDataByRRtypeLocked(senderID, zone, dns.TypeKEY, parsedRRs)
-				parts = append(parts, fmt.Sprintf("applied at-apex KEY from %s", senderID))
+				_, _, changed, replErr := zd.replaceCombinerDataByRRtypeLocked(senderID, zone, dns.TypeKEY, parsedRRs)
+				if replErr != nil {
+					lgCombiner.Warn("reapply: failed to replace at-apex KEY", "sender", senderID, "err", replErr)
+				} else if changed {
+					parts = append(parts, fmt.Sprintf("applied at-apex KEY from %s", senderID))
+				}
 			}
 		}
 	}

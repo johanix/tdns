@@ -553,6 +553,23 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 											appliedRecords = append(appliedRecords, op.Records...)
 										}
 									}
+									// Fallback: if Operations was empty, extract from RRsets/RRs
+									if len(appliedRecords) == 0 && len(removedRecords) == 0 {
+										for _, rrset := range synchedDataUpdate.Update.RRsets {
+											for _, rr := range rrset.RRs {
+												appliedRecords = append(appliedRecords, rr.String())
+											}
+										}
+										for _, rr := range synchedDataUpdate.Update.RRs {
+											if rr.Header().Class == dns.ClassNONE {
+												cp := dns.Copy(rr)
+												cp.Header().Class = dns.ClassINET
+												removedRecords = append(removedRecords, cp.String())
+											} else {
+												appliedRecords = append(appliedRecords, rr.String())
+											}
+										}
+									}
 								}
 								lgEngine.Info("sending immediate ACCEPTED for non-signing zone",
 									"zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId,

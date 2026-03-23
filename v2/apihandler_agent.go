@@ -388,6 +388,10 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 					}
 					resp.Status = "ok"
 				}
+			case <-r.Context().Done():
+				resp.Error = true
+				resp.ErrorMsg = "request cancelled"
+				resp.Status = "fail"
 			case <-time.After(5 * time.Second):
 				resp.Error = true
 				resp.ErrorMsg = "timeout waiting for SynchedDataEngine response"
@@ -645,7 +649,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			resp.Identity = AgentId(conf.MultiProvider.Identity)
 
 		case "refresh-keys":
-			zd.RequestAndWaitForKeyInventory(context.Background())
+			zd.RequestAndWaitForKeyInventory(r.Context())
 			if !zd.GetKeystateOK() {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("KEYSTATE exchange failed for zone %s: %s", amp.Zone, zd.GetKeystateError())
