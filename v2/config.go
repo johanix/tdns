@@ -523,6 +523,7 @@ type InternalConf struct {
 	TransportManager      *TransportManager      // Multi-transport (API + DNS) for agent/combiner/signer; nil if transport not initialized
 	LeaderElectionManager *LeaderElectionManager // Per-zone leader election for delegation sync; nil if not agent
 	ChunkPayloadStore     ChunkPayloadStore      // Optional: for query-mode CHUNK (agent); keyed by qname; set when agent chunk_mode is "query"
+	MPZoneNames           []string               // Zone names with OptMultiProvider, collected at parse time for SDE hydration
 	DistributionCache     *DistributionCache     // In-memory cache of distributions (agent/combiner)
 }
 

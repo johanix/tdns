@@ -680,6 +680,32 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			Zones.Set(zname, zdp)
 		}
 
+		// Apply static options to the stub immediately so they
+		// are available before the RefreshEngine processes the
+		// zone. Then invoke registered option handlers.
+		if zdp.Options == nil {
+			zdp.Options = make(map[ZoneOption]bool)
+		}
+		for opt, val := range options {
+			zdp.Options[opt] = val
+		}
+
+		// For MP zones, ensure MPdata exists with Options so that
+		// MP-specific options can be set at parse time.
+		if options[OptMultiProvider] {
+			if zdp.MPdata == nil {
+				zdp.MPdata = &MPdata{
+					Options: make(map[ZoneOption]bool),
+				}
+			}
+			if zdp.MPdata.Options == nil {
+				zdp.MPdata.Options = make(map[ZoneOption]bool)
+			}
+			zdp.MPdata.Options[OptMultiProvider] = true
+		}
+
+		invokeOptionHandlers(zname, options)
+
 		if zdp.FirstZoneLoad {
 			lgConfig.Info("considering OnFirstLoad callbacks", "zone", zname,
 				"online-signing", options[OptOnlineSigning],

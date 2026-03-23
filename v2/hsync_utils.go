@@ -810,12 +810,25 @@ func (zd *ZoneData) populateMPdata() {
 	zd.Options[OptMPDisallowEdits] = false
 	zd.Options[OptAllowEdits] = true
 
+	// Preserve any existing MPdata.Options (set at parse time),
+	// create the map if needed.
+	var mpOpts map[ZoneOption]bool
+	if zd.MPdata != nil && zd.MPdata.Options != nil {
+		mpOpts = zd.MPdata.Options
+	} else {
+		mpOpts = make(map[ZoneOption]bool)
+	}
+	mpOpts[OptMultiProvider] = true
+	mpOpts[OptMPDisallowEdits] = zoneSigned && !weShouldSign
+	mpOpts[OptMultiSigner] = weShouldSign && otherSigners > 0
+
 	zd.MPdata = &MPdata{
 		WeAreProvider: true,
 		OurLabel:      ourLabel,
 		WeAreSigner:   weShouldSign,
 		OtherSigners:  otherSigners,
 		ZoneSigned:    zoneSigned,
+		Options:       mpOpts,
 	}
 	zd.Logger.Printf("populateMPdata: zone %s: provider=%q signer=%v otherSigners=%d zoneSigned=%v",
 		zd.ZoneName, ourLabel, weShouldSign, otherSigners, zoneSigned)

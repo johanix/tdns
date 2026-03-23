@@ -322,43 +322,40 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 	conf.Internal.ZoneDataRepo = zdr
 
 	// Hydrate SDE for each multi-provider zone. Per zone, sequentially:
-	// 1. RFI EDITS → combiner: all agents' contributions (baseline)
-	// 2. RFI KEYSTATE → signer: DNSKEY inventory (local vs foreign keys)
-	// Phase 3 (RFI SYNC → remote agents) is added later.
+	// 1. RFI EDITS -> combiner: all agents' contributions (baseline)
+	// 2. RFI KEYSTATE -> signer: DNSKEY inventory (local vs foreign keys)
 	//
-	// Both EDITS and KEYSTATE use single-slot response channels, so requests
-	// must be synchronous per zone. See DNS-154 for refactoring this.
+	// Uses conf.Internal.MPZoneNames (collected at parse time) instead of
+	// scanning Zones.IterBuffered() -- avoids race with RefreshEngine.
 	tm := conf.Internal.TransportManager
 	hasCombiner := tm != nil && tm.combinerID != ""
 	hasSigner := tm != nil && tm.signerID != ""
 
 	if hasCombiner || hasSigner {
-		for item := range Zones.IterBuffered() {
-			zd := item.Val
-			if !zd.Options[OptMultiProvider] {
+		lgEngine.Info("startup hydration: MP zones to hydrate", "count", len(conf.Internal.MPZoneNames), "zones", conf.Internal.MPZoneNames)
+		for _, zname := range conf.Internal.MPZoneNames {
+			zd, ok := Zones.Get(zname)
+			if !ok || zd == nil {
+				lgEngine.Warn("startup hydration: zone not in Zones map, skipping", "zone", zname)
 				continue
 			}
 			if hasCombiner {
-				lgEngine.Info("startup hydration: requesting edits from combiner", "zone", item.Key)
+				lgEngine.Info("startup hydration: requesting edits from combiner", "zone", zname)
 				zd.RequestAndWaitForEdits()
 			}
 			if hasSigner {
-				lgEngine.Info("startup hydration: requesting key inventory from signer", "zone", item.Key)
+				lgEngine.Info("startup hydration: requesting key inventory from signer", "zone", zname)
 				zd.RequestAndWaitForKeyInventory()
 
-				// Extract local DNSKEYs from the inventory and add to SDE.
-				// RequestAndWaitForKeyInventory sets RemoteDNSKEYs (foreign)
-				// and stores the inventory, but doesn't populate local DNSKEYs
-				// in the SDE.
 				changed, ds, err := zd.LocalDnskeysFromKeystate()
 				if err != nil {
-					lgEngine.Error("startup hydration: LocalDnskeysFromKeystate failed", "zone", item.Key, "err", err)
+					lgEngine.Error("startup hydration: LocalDnskeysFromKeystate failed", "zone", zname, "err", err)
 				} else if changed && ds != nil {
 					localAgentID := AgentId(conf.MultiProvider.Identity)
 					for _, rr := range ds.CurrentLocalKeys {
-						zdr.AddConfirmedRR(ZoneName(item.Key), localAgentID, rr)
+						zdr.AddConfirmedRR(ZoneName(zname), localAgentID, rr)
 					}
-					lgEngine.Info("startup hydration: added local DNSKEYs to SDE", "zone", item.Key, "keys", len(ds.CurrentLocalKeys))
+					lgEngine.Info("startup hydration: added local DNSKEYs to SDE", "zone", zname, "keys", len(ds.CurrentLocalKeys))
 				}
 			}
 		}
@@ -541,16 +538,26 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						if remoteSkipCombiner {
 							lgEngine.Info("remote update accepted locally, not forwarding to combiner (mp-disallow-edits)", "zone", synchedDataUpdate.Zone)
 							resp.Msg = "Remote update accepted locally (not forwarded to combiner: zone signed, not a signer)"
-							// Send ACCEPTED confirmation to originator. The data is in
-							// our SDE; we just don't forward to our combiner because
-							// we're not a signer. The sender should not be blocked.
+							// Send ACCEPTED confirmation with applied records to
+							// originator. The data is in our SDE; we just don't
+							// forward to our combiner. The sender should not be blocked.
 							if synchedDataUpdate.OriginatingDistID != "" && msgQs.OnRemoteConfirmationReady != nil {
+								var appliedRecords []string
+								if synchedDataUpdate.Update != nil {
+									for _, op := range synchedDataUpdate.Update.Operations {
+										appliedRecords = append(appliedRecords, op.Records...)
+									}
+								}
+								lgEngine.Info("sending immediate ACCEPTED for non-signing zone",
+									"zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId,
+									"records", len(appliedRecords), "originDistID", synchedDataUpdate.OriginatingDistID)
 								msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 									OriginatingDistID: synchedDataUpdate.OriginatingDistID,
 									OriginatingSender: string(synchedDataUpdate.AgentId),
 									Zone:              synchedDataUpdate.Zone,
-									Status:            "accepted",
+									Status:            "ok",
 									Message:           "accepted into SDE (not forwarded to combiner: not a signer)",
+									AppliedRecords:    appliedRecords,
 								})
 							}
 						} else {
