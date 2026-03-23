@@ -919,6 +919,26 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 			continue
 		}
 
+		// Defense-in-depth: reject DNSKEY operations for unsigned zones
+		if rrtype == dns.TypeDNSKEY && !isProvider {
+			apex, err := zd.GetOwner(zd.ZoneName)
+			if err == nil && apex != nil {
+				if hpRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM); exists && len(hpRRset.RRs) > 0 {
+					if prr, ok := hpRRset.RRs[0].(*dns.PrivateRR); ok {
+						if hp, ok := prr.Data.(*core.HSYNCPARAM); ok && len(hp.GetSigners()) == 0 {
+							for _, rec := range op.Records {
+								rejectedItems = append(rejectedItems, RejectedItem{
+									Record: rec,
+									Reason: "DNSKEY not allowed in unsigned zone (no signers in HSYNCPARAM)",
+								})
+							}
+							continue
+						}
+					}
+				}
+			}
+		}
+
 		// Parse and validate all RRs in this operation
 		var parsedRRs []dns.RR
 		parseOk := true

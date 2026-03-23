@@ -1,93 +1,112 @@
-# Unsigned Zone DNSKEY Suppression
+# Unsigned Zone DNSKEY Suppression + KEYSTATE Timeout Fix
 
 **Date:** 2026-03-23
-**Status:** Plan
+**Status:** Plan (approved)
 
-## Problem
+## Problem 1: DNSKEY Noise in Unsigned Zones
 
 Zones with no `signers=` key in HSYNCPARAM (unsigned zones)
-are still getting DNSKEYs generated, distributed between
-agents, and published by combiners. This is wrong -- DNSKEYs
-in an unsigned zone are meaningless noise.
+are still getting DNSKEYs distributed between agents and
+published by combiners. DNSKEYs in an unsigned zone are
+meaningless noise.
 
 Example: ardbeg.whisky.dnslab has `nsmgmt="agent"` but no
-signers. Both alpha and delta generate keypairs, exchange
-them via SYNC, and publish them via their combiners.
+signers. Both alpha and delta distribute keypairs and
+publish them via their combiners.
 
-## Three-Layer Fix
+## Problem 2: KEYSTATE Exchange Timeouts
 
-### Layer 1: Signer -- Don't Generate Keys for Unsigned Zones
+Frequent "timeout waiting for signer response (15s)"
+warnings. Root cause: the `keystateRfiChan` in
+TransportManager is zone-agnostic. When zone A is waiting
+for a KEYSTATE response and zone B's proactive KEYSTATE
+arrives, it gets routed to zone A's dedicated channel.
+Zone A rejects it (wrong zone) and times out.
 
-The signer generates keypairs based on DNSSEC policy and
-`OptInlineSigning`. With the "no signing without
-authorization" fix, `OptInlineSigning` is NOT set for zones
-with no signers. But key generation may be triggered by
-other paths:
+## Part A: KEYSTATE Timeout Fix
 
-- DNSSEC policy evaluation during zone load
-- KeyStateWorker periodic checks
-- KEYSTATE inventory requests from agent
+### Root Cause
 
-**Fix:** All key generation paths must check whether the
-zone has signers authorized. If `analyzeHsyncSigners`
-returns `weShouldSign=false` AND `zoneSigned=false`, no
-keys should be generated.
+`routeKeystateMessage()` in `hsync_transport.go` routes
+all inventory messages to `keystateRfiChan` when set,
+without checking the zone name.
 
-Also check: does the signer's KEYSTATE response include
-keys for unsigned zones? If so, the agent receives them
-and distributes.
+### Fix
 
-### Layer 2: Agent -- Don't Distribute DNSKEYs for Unsigned Zones
+Store the expected zone name alongside the channel pointer.
+In `routeKeystateMessage`, check zone match before routing
+to the dedicated channel. Mismatches fall through to the
+shared `KeystateInventory` channel (proactive handler).
 
-The agent receives KEYSTATE from the signer and feeds
-local DNSKEYs into the SDE via `LocalDnskeysFromKeystate`.
-The SDE then distributes them to remote agents and the
-combiner.
+**Files:** hsync_transport.go (~15 lines), hsync_utils.go
+(~5 lines)
 
-**Fix:** `LocalDnskeysFromKeystate` should check the
-HSYNCPARAM: if no signers are listed, return early without
-feeding any keys into the SDE.
+## Part B: DNSKEY Suppression
 
-Also: the DNSKEY SYNC from remote agents (carrying their
-foreign keys) should be accepted into the SDE (for
-awareness) but NOT forwarded to the combiner for unsigned
-zones. This is already handled by the `OptMPDisallowEdits`
-guard for non-signing providers, but for unsigned zones
-(NO provider is a signer) there's no specific guard yet.
+### Current Guards
 
-### Layer 3: Combiner -- Reject DNSKEY Operations for Unsigned Zones
+Key generation at the signer is already guarded:
+`OptInlineSigning` is not set for unsigned zones, so
+`key_state_worker.go` skips generation. **No fix needed
+at signer key generation.**
 
-Last line of defense. The combiner's
-`combinerProcessOperations` should check the HSYNCPARAM:
-if no signers are listed, reject DNSKEY operations.
+### Fix 1: Signer KEYSTATE Inventory Response
 
-**Fix:** In the operation processing loop, when the RR
-type is DNSKEY, check the zone's HSYNCPARAM. If signers
-is empty, reject with reason "DNSKEY not allowed in
-unsigned zone".
+**File:** signer_msg_handler.go
+
+Before calling `GetKeyInventory`, check if we are a signer
+for this zone (`zd.MPdata.WeAreSigner`). If not (whether
+the zone is unsigned or signed by others), send empty
+inventory. The check is "are WE a signer" not "does the
+zone HAVE signers".
+
+### Fix 2: Agent LocalDnskeysFromKeystate
+
+**File:** hsync_utils.go
+
+Add guard at function entry: if zone is unsigned
+(`!zd.MPdata.ZoneSigned`), return early without feeding
+any keys into the SDE.
+
+### Fix 3: Agent SYNC-DNSKEY-RRSET Handler
+
+**File:** hsyncengine.go
+
+Add check before feeding DNSKEY changes to SDE: if zone
+is unsigned, skip the sync.
+
+### Fix 4: Agent Proactive KEYSTATE Handler
+
+**File:** hsyncengine.go
+
+Add check before triggering DNSKEY distribution after
+proactive inventory: if zone is unsigned, skip.
+
+### Fix 5: Combiner DNSKEY Rejection (Defense-in-Depth)
+
+**File:** combiner_chunk.go
+
+In the operation processing loop, reject DNSKEY operations
+for zones where HSYNCPARAM has no signers.
 
 ## Implementation Order
 
-Layer 1 (signer) stops the problem at the source.
-Layer 2 (agent) prevents distribution even if keys exist.
-Layer 3 (combiner) prevents publication as last defense.
+1. Part A (KEYSTATE timeout) -- fixes frequent warnings
+2. Part B fixes 2+4 (agent guards) -- stops distribution
+3. Part B fix 1 (signer guard) -- stops at source
+4. Part B fix 3 (agent SYNC handler) -- covers remote path
+5. Part B fix 5 (combiner guard) -- defense-in-depth
 
-All three should be implemented together for correctness.
+## Verification
 
-## Related Issue: KEYSTATE Timeouts
+### KEYSTATE timeout
+- Restart agent with 4+ MP zones
+- No "timeout waiting for signer response" in logs
+- All zones show successful KEYSTATE exchange
 
-Separate from the DNSKEY suppression, there are frequent
-KEYSTATE exchange failures:
-
-```
-WARNING: KEYSTATE exchange FAILED: timeout waiting for
-signer response (15s)
-```
-
-This needs investigation:
-- Is the signer overloaded?
-- Is the KEYSTATE request not reaching the signer?
-- Is the response being consumed by the wrong handler?
-- Is there a channel contention issue (single-slot
-  response channel)?
-- Does it correlate with specific zones or all zones?
+### DNSKEY suppression
+- ardbeg.whisky.dnslab (unsigned): no DNSKEYs in zone
+  transfer, no DNSKEY entries in SDE
+- Signed zones (caol-ila, whisky): DNSKEYs still work
+- addrr/delrr: still works for signed zones
+- Key rollover: still works for signed zones
