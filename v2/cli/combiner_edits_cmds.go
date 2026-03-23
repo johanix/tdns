@@ -56,6 +56,28 @@ var combinerZoneListCmd = &cobra.Command{
 	},
 }
 
+var combinerZoneMPListCmd = &cobra.Command{
+	Use:   "mplist",
+	Short: "List multi-provider zones with HSYNCPARAM details",
+	Run: func(cmd *cobra.Command, args []string) {
+		prefixcmd, _ := getCommandContext("zone")
+		api, err := getApiClient(prefixcmd, true)
+		if err != nil {
+			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+		}
+
+		cr, err := SendZoneCommand(api, tdns.ZonePost{
+			Command: "list-mp-zones",
+		})
+		if err != nil {
+			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+			log.Fatalf("Error: %v", err)
+		}
+
+		ListMPZones(cr)
+	},
+}
+
 var combinerZoneEditsCmd = &cobra.Command{
 	Use:   "edits",
 	Short: "Manage pending, approved and rejected edits",
@@ -447,7 +469,7 @@ var combinerZoneBumpCmd = &cobra.Command{
 
 func init() {
 	CombinerCmd.AddCommand(combinerZoneCmd)
-	combinerZoneCmd.AddCommand(combinerZoneListCmd)
+	combinerZoneCmd.AddCommand(combinerZoneListCmd, combinerZoneMPListCmd)
 	combinerZoneCmd.AddCommand(combinerZoneBumpCmd)
 	combinerZoneCmd.AddCommand(combinerZoneReloadCmd)
 	combinerZoneCmd.AddCommand(combinerZoneEditsCmd)

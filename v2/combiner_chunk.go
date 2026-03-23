@@ -265,12 +265,12 @@ func checkMPauthorization(zd *ZoneData) error {
 			return fmt.Errorf("zone %q: contributions rejected — zone has OptMultiProvider set but the zone owner has not published HSYNC3+HSYNCPARAM records (zone is not declared as multi-provider by its owner)", zd.ZoneName)
 		}
 		ourIdentities := ourHsyncIdentities()
-		matched, ourLabel, _ := zd.matchHsyncProvider(ourIdentities)
+		matched, _, _ := zd.matchHsyncProvider(ourIdentities)
 		if !matched {
 			return fmt.Errorf("zone %q: contributions rejected — none of our agent identities %v match any HSYNC3 provider record in the zone (we are not a recognized provider for this zone)", zd.ZoneName, ourIdentities)
 		}
 		// Must be guard 4: we are a provider but not a signer
-		return fmt.Errorf("zone %q: contributions rejected — we are provider %q but the zone is signed and our label is not listed in HSYNCPARAM signers (we are not authorized to sign this zone)", zd.ZoneName, ourLabel)
+		return fmt.Errorf("zone %q: rejected (mp-disallow-edits: zone is signed, we are not a signer)", zd.ZoneName)
 	}
 	return nil
 }
@@ -412,7 +412,7 @@ func combinerNotifyDelegationChange(tm *TransportManager, senderID, zonename str
 				Class:  dns.ClassINET,
 				Ttl:    120,
 			}
-			_, _, csyncChanged, err := zd.ReplaceCombinerDataByRRtype("combiner", zonename, dns.TypeCSYNC, []dns.RR{csync})
+			_, _, csyncChanged, err := zd.ReplaceCombinerDataByRRtype(tm.LocalID, zonename, dns.TypeCSYNC, []dns.RR{csync})
 			if err != nil {
 				lgCombiner.Error("combinerNotifyDelegationChange: CSYNC replace failed", "zone", zonename, "err", err)
 			} else {
@@ -426,7 +426,7 @@ func combinerNotifyDelegationChange(tm *TransportManager, senderID, zonename str
 		if err != nil {
 			lgCombiner.Error("combinerNotifyDelegationChange: CDS synthesis failed", "zone", zonename, "err", err)
 		} else if len(cdsRRs) > 0 {
-			_, _, cdsChanged, err := zd.ReplaceCombinerDataByRRtype("combiner", zonename, dns.TypeCDS, cdsRRs)
+			_, _, cdsChanged, err := zd.ReplaceCombinerDataByRRtype(tm.LocalID, zonename, dns.TypeCDS, cdsRRs)
 			if err != nil {
 				lgCombiner.Error("combinerNotifyDelegationChange: CDS replace failed", "zone", zonename, "err", err)
 			} else {

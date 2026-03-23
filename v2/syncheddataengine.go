@@ -331,37 +331,42 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 	hasCombiner := tm != nil && tm.combinerID != ""
 	hasSigner := tm != nil && tm.signerID != ""
 
-	if hasCombiner || hasSigner {
-		lgEngine.Info("startup hydration: MP zones to hydrate", "count", len(conf.Internal.MPZoneNames), "zones", conf.Internal.MPZoneNames)
-		for _, zname := range conf.Internal.MPZoneNames {
-			zd, ok := Zones.Get(zname)
-			if !ok || zd == nil {
-				lgEngine.Warn("startup hydration: zone not in Zones map, skipping", "zone", zname)
-				continue
-			}
-			if hasCombiner {
-				lgEngine.Info("startup hydration: requesting edits from combiner", "zone", zname)
-				zd.RequestAndWaitForEdits()
-			}
-			if hasSigner {
-				lgEngine.Info("startup hydration: requesting key inventory from signer", "zone", zname)
-				zd.RequestAndWaitForKeyInventory()
+	lgEngine.Info("SynchedDataEngine started")
 
-				changed, ds, err := zd.LocalDnskeysFromKeystate()
-				if err != nil {
-					lgEngine.Error("startup hydration: LocalDnskeysFromKeystate failed", "zone", zname, "err", err)
-				} else if changed && ds != nil {
-					localAgentID := AgentId(conf.MultiProvider.Identity)
-					for _, rr := range ds.CurrentLocalKeys {
-						zdr.AddConfirmedRR(ZoneName(zname), localAgentID, rr)
+	// Run hydration in background so the main select loop is immediately
+	// responsive to commands (zone edits list, etc.).
+	if hasCombiner || hasSigner {
+		go func() {
+			lgEngine.Info("startup hydration: MP zones to hydrate", "count", len(conf.Internal.MPZoneNames), "zones", conf.Internal.MPZoneNames)
+			for _, zname := range conf.Internal.MPZoneNames {
+				zd, ok := Zones.Get(zname)
+				if !ok || zd == nil {
+					lgEngine.Warn("startup hydration: zone not in Zones map, skipping", "zone", zname)
+					continue
+				}
+				if hasCombiner {
+					lgEngine.Info("startup hydration: requesting edits from combiner", "zone", zname)
+					zd.RequestAndWaitForEdits()
+				}
+				if hasSigner {
+					lgEngine.Info("startup hydration: requesting key inventory from signer", "zone", zname)
+					zd.RequestAndWaitForKeyInventory()
+
+					changed, ds, err := zd.LocalDnskeysFromKeystate()
+					if err != nil {
+						lgEngine.Error("startup hydration: LocalDnskeysFromKeystate failed", "zone", zname, "err", err)
+					} else if changed && ds != nil {
+						localAgentID := AgentId(conf.MultiProvider.Identity)
+						for _, rr := range ds.CurrentLocalKeys {
+							zdr.AddConfirmedRR(ZoneName(zname), localAgentID, rr)
+						}
+						lgEngine.Info("startup hydration: added local DNSKEYs to SDE", "zone", zname, "keys", len(ds.CurrentLocalKeys))
 					}
-					lgEngine.Info("startup hydration: added local DNSKEYs to SDE", "zone", zname, "keys", len(ds.CurrentLocalKeys))
 				}
 			}
-		}
+			lgEngine.Info("startup hydration complete")
+		}()
 	}
-
-	lgEngine.Info("SynchedDataEngine started")
 
 	// Periodic eviction of stale tracking entries (terminal states older than 1 hour).
 	trackingEvictTicker := time.NewTicker(5 * time.Minute)
