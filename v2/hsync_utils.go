@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -273,7 +274,7 @@ func filterLocalDNSKEYs(rrset *core.RRset, remoteKeyTags map[uint16]bool) []dns.
 // Sets zd.KeystateOK/KeystateError/KeystateTime to reflect success or failure.
 // KEYSTATE failure is an error condition — the agent depends on KEYSTATE for
 // DNSKEY classification and must not guess when it's unavailable.
-func (zd *ZoneData) RequestAndWaitForKeyInventory() {
+func (zd *ZoneData) RequestAndWaitForKeyInventory(ctx context.Context) {
 	zd.SetKeystateTime(time.Now())
 
 	tm := Conf.Internal.TransportManager
@@ -341,6 +342,12 @@ func (zd *ZoneData) RequestAndWaitForKeyInventory() {
 		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: received %d-key inventory from signer, %d foreign → %d RemoteDNSKEYs",
 			zd.ZoneName, len(inv.Inventory), len(foreignKeyTags), len(remoteDNSKEYs))
 
+	case <-ctx.Done():
+		zd.SetKeystateOK(false)
+		zd.SetKeystateError("cancelled")
+		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: cancelled", zd.ZoneName)
+		zd.SetRemoteDNSKEYs(nil)
+
 	case <-timeout.C:
 		zd.SetKeystateOK(false)
 		zd.SetKeystateError("timeout waiting for signer response (15s)")
@@ -354,7 +361,7 @@ func (zd *ZoneData) RequestAndWaitForKeyInventory() {
 // as confirmed data (the combiner already has them).
 //
 // Modeled on RequestAndWaitForKeyInventory.
-func (zd *ZoneData) RequestAndWaitForEdits() {
+func (zd *ZoneData) RequestAndWaitForEdits(ctx context.Context) {
 	tm := Conf.Internal.TransportManager
 	if tm == nil {
 		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no TransportManager available", zd.ZoneName)
@@ -398,6 +405,9 @@ func (zd *ZoneData) RequestAndWaitForEdits() {
 
 		// Apply to SDE with per-agent attribution
 		zd.applyEditsToSDE(resp.AgentRecords)
+
+	case <-ctx.Done():
+		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: cancelled", zd.ZoneName)
 
 	case <-timeout.C:
 		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: timeout waiting for combiner EDITS response (15s)", zd.ZoneName)

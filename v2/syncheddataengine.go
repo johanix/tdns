@@ -343,11 +343,11 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 			}
 			if hasCombiner {
 				lgEngine.Info("startup hydration: requesting edits from combiner", "zone", zname)
-				zd.RequestAndWaitForEdits()
+				zd.RequestAndWaitForEdits(ctx)
 			}
 			if hasSigner {
 				lgEngine.Info("startup hydration: requesting key inventory from signer", "zone", zname)
-				zd.RequestAndWaitForKeyInventory()
+				zd.RequestAndWaitForKeyInventory(ctx)
 
 				changed, ds, err := zd.LocalDnskeysFromKeystate()
 				if err != nil {

@@ -276,12 +276,18 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 
 			isAdd := amp.Command == "add-rr"
+			apex := dns.Fqdn(string(amp.Zone))
 			var parsedRRs []dns.RR
 			for _, rrStr := range amp.RRs {
 				rr, err := dns.NewRR(rrStr)
 				if err != nil {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("failed to parse RR %q: %v", rrStr, err)
+					return
+				}
+				if dns.Fqdn(rr.Header().Name) != apex {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("record owner %q is not the zone apex %q", rr.Header().Name, apex)
 					return
 				}
 				if !AllowedLocalRRtypes[rr.Header().Rrtype] {
@@ -346,13 +352,26 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				}
 			}
 			cresp := make(chan *AgentMsgResponse, 1)
-			conf.Internal.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{
+			select {
+			case conf.Internal.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{
 				Zone:       amp.Zone,
 				AgentId:    AgentId(conf.MultiProvider.Identity),
 				UpdateType: "local",
 				Update:     zu,
 				Force:      force,
 				Response:   cresp,
+			}:
+				// enqueued successfully
+			case <-r.Context().Done():
+				resp.Error = true
+				resp.ErrorMsg = "request cancelled"
+				resp.Status = "fail"
+				return
+			case <-time.After(2 * time.Second):
+				resp.Error = true
+				resp.ErrorMsg = "SynchedDataUpdate queue full, try again later"
+				resp.Status = "fail"
+				return
 			}
 
 			select {
@@ -626,7 +645,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			resp.Identity = AgentId(conf.MultiProvider.Identity)
 
 		case "refresh-keys":
-			zd.RequestAndWaitForKeyInventory()
+			zd.RequestAndWaitForKeyInventory(context.Background())
 			if !zd.GetKeystateOK() {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("KEYSTATE exchange failed for zone %s: %s", amp.Zone, zd.GetKeystateError())

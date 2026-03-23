@@ -384,15 +384,15 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 					if zd, ok := Zones.Get(zone); ok {
 						zd.mu.Lock()
 						zd.AgentContributions = nil
-						zd.mu.Unlock()
 						zd.rebuildCombinerData()
+						zd.mu.Unlock()
 					}
 				} else {
 					for _, zd := range Zones.Items() {
 						zd.mu.Lock()
 						zd.AgentContributions = nil
-						zd.mu.Unlock()
 						zd.rebuildCombinerData()
+						zd.mu.Unlock()
 					}
 				}
 			}
