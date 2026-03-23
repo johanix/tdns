@@ -430,8 +430,15 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 							// Mark all RRs in this update as pending with the distribution ID
 							zdr.MarkRRsPending(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, synchedDataUpdate.Update, distID, recipients)
 
-							if synchedDataUpdate.SkipCombiner {
-								lgEngine.Info("update applied, enqueuing for remote agents only (SkipCombiner)", "zone", synchedDataUpdate.Zone)
+							skipCombiner := synchedDataUpdate.SkipCombiner
+							if !skipCombiner {
+								if zd, ok := Zones.Get(string(synchedDataUpdate.Zone)); ok && zd.Options[OptMPDisallowEdits] {
+									lgEngine.Info("zone is signed but we are not a signer, skipping combiner", "zone", synchedDataUpdate.Zone)
+									skipCombiner = true
+								}
+							}
+							if skipCombiner {
+								lgEngine.Info("update applied, enqueuing for remote agents only", "zone", synchedDataUpdate.Zone)
 							} else {
 								lgEngine.Info("update applied, enqueuing for combiner and remote agents", "zone", synchedDataUpdate.Zone)
 								// Enqueue for combiner (reliable delivery with retry)
@@ -467,7 +474,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 							}
 
 							if !resp.Error {
-								if synchedDataUpdate.SkipCombiner {
+								if skipCombiner {
 									resp.Msg = "Local update applied, sync enqueued for remote agents"
 								} else {
 									resp.Msg = "Local update applied, sync enqueued for combiner and zone agents"
@@ -525,10 +532,32 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					}
 					resp.Msg = msg
 					if change {
-						lgEngine.Info("remote update applied, enqueuing for combiner", "zone", synchedDataUpdate.Zone)
+						// Check if edits are disallowed for this zone (signed, not a signer)
+						remoteSkipCombiner := false
+						if zd, ok := Zones.Get(string(synchedDataUpdate.Zone)); ok && zd.Options[OptMPDisallowEdits] {
+							remoteSkipCombiner = true
+						}
+
+						if remoteSkipCombiner {
+							lgEngine.Info("remote update applied but not forwarding to combiner (mp-disallow-edits)", "zone", synchedDataUpdate.Zone)
+							resp.Msg = "Remote update applied locally (not forwarded to combiner: zone signed, not a signer)"
+							// Send terminal REJECTED confirmation to originator so it
+							// doesn't wait forever for a combiner confirmation.
+							if synchedDataUpdate.OriginatingDistID != "" && msgQs.OnRemoteConfirmationReady != nil {
+								msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
+									OriginatingDistID: synchedDataUpdate.OriginatingDistID,
+									OriginatingSender: string(synchedDataUpdate.AgentId),
+									Zone:              synchedDataUpdate.Zone,
+									Status:            "rejected",
+									Message:           "zone is signed but this provider is not a signer; edits not forwarded to combiner",
+								})
+							}
+						} else {
+							lgEngine.Info("remote update applied, enqueuing for combiner", "zone", synchedDataUpdate.Zone)
+						}
 
 						tm := conf.Internal.TransportManager
-						if tm != nil && synchedDataUpdate.Update != nil {
+						if !remoteSkipCombiner && tm != nil && synchedDataUpdate.Update != nil {
 							// Remote update: only enqueue for combiner (not back to agents).
 							// The combiner deduplicates KEY/CDS contributions: local agent
 							// contributions take precedence over remote-forwarded ones.
@@ -856,12 +885,19 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 							continue
 						}
 						cloned := *rrset.Clone()
+						var records []string
 						for i := range cloned.RRs {
 							cloned.RRs[i].Header().Class = dns.ClassINET
+							records = append(records, cloned.RRs[i].String())
 						}
 						agentZU.RRsets[rrtype] = cloned
+						agentZU.Operations = append(agentZU.Operations, core.RROperation{
+							Operation: "replace",
+							RRtype:    dns.TypeToString[rrtype],
+							Records:   records,
+						})
 					}
-					if len(agentZU.RRsets) > 0 {
+					if len(agentZU.Operations) > 0 {
 						distID := GenerateQueueDistributionID()
 						if err := tm.EnqueueForZoneAgents(sdcmd.Zone, agentZU, distID); err != nil {
 							lgEngine.Error("resync: failed to enqueue local data for zone agents", "zone", sdcmd.Zone, "err", err)
@@ -969,11 +1005,18 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						continue
 					}
 					cloned := *rrset.Clone()
+					var records []string
 					for i := range cloned.RRs {
 						cloned.RRs[i].Header().Class = dns.ClassINET
+						records = append(records, cloned.RRs[i].String())
 					}
 					zu.RRsets[rrtype] = cloned
-					totalRRs += len(cloned.RRs)
+					zu.Operations = append(zu.Operations, core.RROperation{
+						Operation: "replace",
+						RRtype:    dns.TypeToString[rrtype],
+						Records:   records,
+					})
+					totalRRs += len(records)
 				}
 
 				if totalRRs == 0 {

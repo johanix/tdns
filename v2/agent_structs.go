@@ -96,16 +96,17 @@ type AgentDetails struct {
 	Endpoint    string
 	ContactInfo string // "none", "partial", "complete"
 	//	Zones           map[ZoneName]bool // zones we share with this agent
-	State           AgentState // "discovered", "contact_attempted", "connected", "failed"
-	LatestError     string
-	LatestErrorTime time.Time
-	HelloTime       time.Time
-	LastContactTime time.Time // Last contact of any type (Hello, Beat, Ping, Sync, etc.)
-	BeatInterval    uint32
-	SentBeats       uint32
-	ReceivedBeats   uint32
-	LatestSBeat     time.Time
-	LatestRBeat     time.Time
+	State             AgentState // "discovered", "contact_attempted", "connected", "failed"
+	LatestError       string
+	LatestErrorTime   time.Time
+	DiscoveryFailures uint32 // consecutive discovery failures (for IMR cache flush)
+	HelloTime         time.Time
+	LastContactTime   time.Time // Last contact of any type (Hello, Beat, Ping, Sync, etc.)
+	BeatInterval      uint32
+	SentBeats         uint32
+	ReceivedBeats     uint32
+	LatestSBeat       time.Time
+	LatestRBeat       time.Time
 }
 
 // IsAnyTransportOperational returns true if at least one transport layer
@@ -167,6 +168,8 @@ type AgentRegistry struct {
 	helloContexts         map[AgentId]context.CancelFunc
 	TransportManager      *TransportManager      // optional; when set, Hello/Beat/Sync use transport fallback (API → DNS)
 	LeaderElectionManager *LeaderElectionManager // optional; when set, election messages are processed
+	ProviderGroupManager  *ProviderGroupManager  // optional; manages provider group computation
+	GossipStateTable      *GossipStateTable      // optional; gossip protocol state
 }
 
 // AgentBeatPost is defined in core package to avoid circular dependencies.
@@ -178,6 +181,7 @@ type AgentBeatPost struct {
 	MyBeatInterval uint32   // intended, in seconds
 	Zones          []string // Zones that we share with the remote agent
 	Time           time.Time
+	Gossip         []GossipMessage `json:"Gossip,omitempty"`
 }
 
 // AgentBeatResponse is defined in core package to avoid circular dependencies.

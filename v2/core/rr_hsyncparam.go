@@ -27,6 +27,7 @@ import (
 //   signers="label1,label2,..."           - comma-separated list of signer labels
 //   pubkey                                - flag: providers publish SIG(0) KEY in zone
 //   pubcds                                - flag: providers publish CDS/CDNSKEY in zone
+//   suffix="label"                        - DNS label under which providers may add NS+glue
 
 func init() {
 	RegisterHsyncparamRR()
@@ -42,6 +43,7 @@ const (
 	HSYNCPARAM_SIGNERS    HSYNCPARAMKey = 3
 	HSYNCPARAM_PUBKEY     HSYNCPARAMKey = 4
 	HSYNCPARAM_PUBCDS     HSYNCPARAMKey = 5
+	HSYNCPARAM_SUFFIX     HSYNCPARAMKey = 6
 	hsyncparam_RESERVED   HSYNCPARAMKey = 65535
 )
 
@@ -52,6 +54,7 @@ var hsyncparamKeyToStringMap = map[HSYNCPARAMKey]string{
 	HSYNCPARAM_SIGNERS:    "signers",
 	HSYNCPARAM_PUBKEY:     "pubkey",
 	HSYNCPARAM_PUBCDS:     "pubcds",
+	HSYNCPARAM_SUFFIX:     "suffix",
 }
 
 var hsyncparamStringToKeyMap = reverseHSYNCPARAMKeyMap(hsyncparamKeyToStringMap)
@@ -145,6 +148,8 @@ func makeHSYNCPARAMKeyValue(key HSYNCPARAMKey) HSYNCPARAMKeyValue {
 		return &HSYNCPARAMFlag{code: HSYNCPARAM_PUBKEY}
 	case HSYNCPARAM_PUBCDS:
 		return &HSYNCPARAMFlag{code: HSYNCPARAM_PUBCDS}
+	case HSYNCPARAM_SUFFIX:
+		return new(HSYNCPARAMSuffix)
 	case hsyncparam_RESERVED:
 		return nil
 	default:
@@ -383,6 +388,16 @@ func (h *HSYNCPARAM) HasPubcds() bool {
 	return false
 }
 
+// GetSuffix returns the suffix label, or "" if not set.
+func (h *HSYNCPARAM) GetSuffix() string {
+	for _, kv := range h.Value {
+		if v, ok := kv.(*HSYNCPARAMSuffix); ok {
+			return v.Label
+		}
+	}
+	return ""
+}
+
 // --- HSYNCPARAMNSmgmt: uint8 key=value for NS management mode ---
 
 type HSYNCPARAMNSmgmt struct {
@@ -560,6 +575,60 @@ func (s *HSYNCPARAMSigners) len() int {
 
 func (s *HSYNCPARAMSigners) copy() HSYNCPARAMKeyValue {
 	return &HSYNCPARAMSigners{Signers: cloneSlice(s.Signers)}
+}
+
+// --- HSYNCPARAMSuffix: DNS label under which providers may add NS+glue ---
+
+type HSYNCPARAMSuffix struct {
+	Label string
+}
+
+func (*HSYNCPARAMSuffix) Key() HSYNCPARAMKey { return HSYNCPARAM_SUFFIX }
+
+func (s *HSYNCPARAMSuffix) String() string { return s.Label }
+
+func (s *HSYNCPARAMSuffix) pack() ([]byte, error) {
+	return []byte(s.Label), nil
+}
+
+func (s *HSYNCPARAMSuffix) unpack(b []byte) error {
+	label := string(b)
+	if !isValidDNSLabel(label) {
+		return fmt.Errorf("dns: hsyncparam suffix: invalid DNS label %q", label)
+	}
+	s.Label = label
+	return nil
+}
+
+func (s *HSYNCPARAMSuffix) parse(b string) error {
+	if b == "" {
+		return errors.New("dns: hsyncparam suffix: value is required")
+	}
+	if !isValidDNSLabel(b) {
+		return fmt.Errorf("dns: hsyncparam suffix: %q is not a valid DNS label", b)
+	}
+	s.Label = b
+	return nil
+}
+
+func (s *HSYNCPARAMSuffix) len() int                 { return len(s.Label) }
+func (s *HSYNCPARAMSuffix) copy() HSYNCPARAMKeyValue { return &HSYNCPARAMSuffix{Label: s.Label} }
+
+// isValidDNSLabel checks that s is a single DNS label: 1-63 characters,
+// only letters, digits, and hyphens, not starting or ending with a hyphen.
+func isValidDNSLabel(s string) bool {
+	if len(s) == 0 || len(s) > 63 {
+		return false
+	}
+	if s[0] == '-' || s[len(s)-1] == '-' {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 // --- HSYNCPARAMFlag: boolean key (presence = true, no value) ---

@@ -64,6 +64,52 @@ func HsyncEngine(ctx context.Context, conf *Config, msgQs *MsgQs) {
 	registry := conf.Internal.AgentRegistry
 	registry.LocalAgent.Identity = string(ourId) // Make sure registry knows our identity
 
+	if registry.GossipStateTable != nil {
+		registry.GossipStateTable.SetOnGroupOperational(func(groupHash string) {
+			lem := conf.Internal.LeaderElectionManager
+			pgm := registry.ProviderGroupManager
+			if lem == nil || pgm == nil {
+				return
+			}
+			pg := pgm.GetGroup(groupHash)
+			if pg == nil {
+				return
+			}
+
+			// Only the lexicographically smallest member initiates the election.
+			// Others wait for the ELECT-CALL. This prevents concurrent elections
+			// when all agents fire OnGroupOperational simultaneously.
+			initiator := pg.Members[0]
+			for _, m := range pg.Members[1:] {
+				if m < initiator {
+					initiator = m
+				}
+			}
+			localID := string(lem.localID)
+			if localID == initiator {
+				lgEngine.Info("OnGroupOperational: we are initiator, starting election",
+					"group", groupHash[:8])
+				lem.StartGroupElection(groupHash, pg.Members, pg.Zones)
+			} else {
+				lgEngine.Info("OnGroupOperational: waiting for initiator",
+					"group", groupHash[:8], "initiator", initiator)
+			}
+		})
+		registry.GossipStateTable.SetOnGroupDegraded(func(groupHash string) {
+			lgEngine.Info("OnGroupDegraded: invalidating group leader", "group", groupHash[:8])
+			lem := conf.Internal.LeaderElectionManager
+			if lem != nil {
+				lem.InvalidateGroupLeader(groupHash)
+			}
+		})
+		registry.GossipStateTable.SetOnElectionUpdate(func(groupHash string, state GroupElectionState) {
+			lem := conf.Internal.LeaderElectionManager
+			if lem != nil {
+				lem.ApplyGossipElection(groupHash, state)
+			}
+		})
+	}
+
 	var syncitem SyncRequest
 	syncQ := conf.Internal.SyncQ
 
@@ -400,32 +446,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			RRsets:  map[uint16]core.RRset{},
 		}
 
-		// Prefer Operations over Records when both are present
-		if len(ampp.Operations) > 0 {
-			zu.Operations = ampp.Operations
-		}
-
-		// Parse Records into RRsets (used for legacy path and local SDE storage)
-		for _, rrStrs := range ampp.Records {
-			for _, rrstr := range rrStrs {
-				rr, err := dns.NewRR(rrstr)
-				if err != nil {
-					lgEngine.Error("error parsing RR", "rr", rrstr, "err", err)
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("Error parsing RR %q: %v", rrstr, err)
-					return
-				}
-				var rrset core.RRset
-				var ok bool
-				rrtype := rr.Header().Rrtype
-				if rrset, ok = zu.RRsets[rrtype]; !ok {
-					rrset = core.RRset{}
-				}
-				rrset.RRs = append(rrset.RRs, rr)
-				zu.RRsets[rrtype] = rrset
-				lgEngine.Debug("parsed RR", "rr", rr)
-			}
-		}
+		zu.Operations = ampp.Operations
 
 		var cresp = make(chan *AgentMsgResponse, 1)
 		synchedDataUpdateQ <- &SynchedDataUpdate{
@@ -519,9 +540,21 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			if winners, ok := ampp.Records["_winner"]; ok && len(winners) > 0 {
 				electionDetails = append(electionDetails, "winner", winners[0])
 			}
+			if groups, ok := ampp.Records["_group"]; ok && len(groups) > 0 {
+				g := groups[0]
+				if len(g) > 8 {
+					g = g[:8]
+				}
+				electionDetails = append(electionDetails, "group", g)
+			}
 			lgEngine.Info("election message "+ampp.RfiType, electionDetails...)
 			if ar.LeaderElectionManager != nil {
-				ar.LeaderElectionManager.HandleMessage(ampp.Zone, ampp.OriginatorID, ampp.RfiType, ampp.Records)
+				// Route to group election if _group record is present
+				if groups, ok := ampp.Records["_group"]; ok && len(groups) > 0 {
+					ar.LeaderElectionManager.HandleGroupMessage(groups[0], ampp.OriginatorID, ampp.RfiType, ampp.Records)
+				} else {
+					ar.LeaderElectionManager.HandleMessage(ampp.Zone, ampp.OriginatorID, ampp.RfiType, ampp.Records)
+				}
 			}
 
 		case "CONFIG":

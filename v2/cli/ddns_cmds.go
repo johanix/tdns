@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/ryanuber/columnize"
@@ -32,6 +33,15 @@ var delStatusCmd = &cobra.Command{
 	Short: "Make an API call to request TDNSD to analyse whether delegation is in sync or not",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
+		if schemestr != "" {
+			val, err := strconv.ParseUint(schemestr, 10, 8)
+			if err != nil {
+				fmt.Printf("Error: invalid scheme value %q: %s\n", schemestr, err)
+				return
+			}
+			scheme = uint8(val)
+		}
+
 		dr, err := SendDelegationCmd(tdns.Globals.Api, tdns.DelegationPost{
 			Command: "status",
 			Zone:    tdns.Globals.Zonename,
@@ -85,6 +95,15 @@ var delSyncCmd = &cobra.Command{
 	Short: "Make an API call to request TDNSD to send a DDNS update to sync parent delegation info with child data",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
+		if schemestr != "" {
+			val, err := strconv.ParseUint(schemestr, 10, 8)
+			if err != nil {
+				fmt.Printf("Error: invalid scheme value %q: %s\n", schemestr, err)
+				return
+			}
+			scheme = uint8(val)
+		}
+
 		dr, err := SendDelegationCmd(tdns.Globals.Api, tdns.DelegationPost{
 			Command: "sync",
 			Scheme:  scheme,
@@ -159,6 +178,15 @@ var delExportCmd = &cobra.Command{
 		if outfile == "" {
 			fmt.Println("Error: --outfile is required")
 			os.Exit(1)
+		}
+
+		if schemestr != "" {
+			val, err := strconv.ParseUint(schemestr, 10, 8)
+			if err != nil {
+				fmt.Printf("Error: invalid scheme value %q: %s\n", schemestr, err)
+				return
+			}
+			scheme = uint8(val)
 		}
 
 		dr, err := SendDelegationCmd(tdns.Globals.Api, tdns.DelegationPost{

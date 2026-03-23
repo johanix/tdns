@@ -12,7 +12,7 @@ const (
 	OptDelSyncChild
 	OptAllowUpdates
 	OptAllowChildUpdates
-	OptAllowCombine // Dynamically et if app=combiner and zone contains a HSYNC RRset
+	OptAllowEdits // Dynamically et if app=combiner and zone contains a HSYNC RRset
 	OptFoldCase
 	OptBlackLies
 	OptDontPublishKey
@@ -29,7 +29,9 @@ const (
 	OptCatalogMemberAutoCreate
 	OptCatalogMemberAutoDelete
 	OptMPManualApproval
-	OptMultiSigner // Dynamically set by signer when HSYNC shows multiple signers
+	OptMultiSigner     // Dynamically set by signer when HSYNC shows multiple signers
+	OptMPNotListedErr  // Warning: zone has HSYNC3 but we are not listed as a provider
+	OptMPDisallowEdits // Zone is signed but we are not a signer: no edits allowed
 )
 
 var ZoneOptionToString = map[ZoneOption]string{
@@ -37,7 +39,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptDelSyncChild:      "delegation-sync-child",
 	OptAllowUpdates:      "allow-updates",
 	OptAllowChildUpdates: "allow-child-updates",
-	OptAllowCombine:      "allow-combine", // Dynamically et if app=combiner and zone contains a HSYNC RRset
+	OptAllowEdits:        "allow-edits", // Dynamically et if app=combiner and zone contains a HSYNC RRset
 	OptFoldCase:          "fold-case",
 	OptBlackLies:         "black-lies",
 	OptDontPublishKey:    "dont-publish-key",
@@ -55,6 +57,8 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptCatalogMemberAutoDelete: "catalog-member-auto-delete",
 	OptMPManualApproval:        "mp-manual-approval",
 	OptMultiSigner:             "multi-signer",
+	OptMPNotListedErr:          "mp-not-listed-error",
+	OptMPDisallowEdits:         "mp-disallow-edits",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -62,7 +66,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"delegation-sync-child":      OptDelSyncChild,
 	"allow-updates":              OptAllowUpdates,
 	"allow-child-updates":        OptAllowChildUpdates,
-	"allow-combine":              OptAllowCombine,
+	"allow-edits":                OptAllowEdits,
 	"fold-case":                  OptFoldCase,
 	"black-lies":                 OptBlackLies,
 	"dont-publish-key":           OptDontPublishKey,
@@ -79,6 +83,8 @@ var StringToZoneOption = map[string]ZoneOption{
 	"catalog-member-auto-delete": OptCatalogMemberAutoDelete,
 	"mp-manual-approval":         OptMPManualApproval,
 	"multi-signer":               OptMultiSigner,
+	"mp-not-listed-error":        OptMPNotListedErr,
+	"mp-disallow-edits":          OptMPDisallowEdits,
 }
 
 type ImrOption uint8
@@ -114,31 +120,31 @@ type AuthOption uint8
 
 const (
 	AuthOptParentUpdate AuthOption = iota + 1
+	AuthOptPersistOutboundSerial
 )
 
 var AuthOptionToString = map[AuthOption]string{
-	AuthOptParentUpdate: "parent-update",
+	AuthOptParentUpdate:          "parent-update",
+	AuthOptPersistOutboundSerial: "persist-outbound-serial",
 }
 
 var StringToAuthOption = map[string]AuthOption{
-	"parent-update": AuthOptParentUpdate,
+	"parent-update":           AuthOptParentUpdate,
+	"persist-outbound-serial": AuthOptPersistOutboundSerial,
 }
 
 type CombinerOption uint8
 
 const (
 	CombinerOptAddSignature CombinerOption = iota + 1
-	CombinerOptPersistOutgoingSerial
 )
 
 var CombinerOptionToString = map[CombinerOption]string{
-	CombinerOptAddSignature:          "add-signature",
-	CombinerOptPersistOutgoingSerial: "persist-outgoing-serial",
+	CombinerOptAddSignature: "add-signature",
 }
 
 var StringToCombinerOption = map[string]CombinerOption{
-	"add-signature":           CombinerOptAddSignature,
-	"persist-outgoing-serial": CombinerOptPersistOutgoingSerial,
+	"add-signature": CombinerOptAddSignature,
 }
 
 type SignerOption uint8

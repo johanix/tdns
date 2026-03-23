@@ -9,6 +9,7 @@ import (
 
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
 
@@ -135,14 +136,15 @@ type ConfigPost struct {
 }
 
 type ConfigResponse struct {
-	AppName    string
-	Time       time.Time
-	DnsEngine  DnsEngineConf
-	ApiServer  ApiServerConf
-	Identities []string
-	Msg        string
-	Error      bool
-	ErrorMsg   string
+	AppName         string
+	Time            time.Time
+	DnsEngine       DnsEngineConf
+	ApiServer       ApiServerConf
+	Identities      []string
+	CombinerOptions map[CombinerOption]bool
+	Msg             string
+	Error           bool
+	ErrorMsg        string
 }
 
 type DelegationPost struct {
@@ -252,6 +254,7 @@ var StringToScanType = map[string]ScanType{
 type CurrentScanData struct {
 	RRset  *core.RRset `json:"-"` // Current RRset for ScanRRtype test, nil if no data exists (not JSON serialized)
 	CDS    *core.RRset `json:"-"` // Current CDS RRset for ScanCDS test, nil if no data exists (not JSON serialized)
+	DS     *core.RRset `json:"-"` // Current DS RRset from delegation backend (not JSON serialized)
 	CSYNC  *core.RRset `json:"-"` // Current CSYNC RRset for ScanCSYNC test, nil if no data exists (not JSON serialized)
 	DNSKEY *core.RRset `json:"-"` // Current DNSKEY RRset for ScanDNSKEY test, nil if no data exists (not JSON serialized)
 }
@@ -264,6 +267,9 @@ func (csd *CurrentScanData) ToJSON() CurrentScanDataJSON {
 	}
 	if csd.CDS != nil {
 		result.CDS = rrsetToString(csd.CDS)
+	}
+	if csd.DS != nil {
+		result.DS = rrsetToString(csd.DS)
 	}
 	if csd.CSYNC != nil {
 		result.CSYNC = rrsetToString(csd.CSYNC)
@@ -278,6 +284,7 @@ func (csd *CurrentScanData) ToJSON() CurrentScanDataJSON {
 type CurrentScanDataJSON struct {
 	RRset  *core.RRsetString `json:"rrset,omitempty"`
 	CDS    *core.RRsetString `json:"cds,omitempty"`
+	DS     *core.RRsetString `json:"ds,omitempty"`
 	CSYNC  *core.RRsetString `json:"csync,omitempty"`
 	DNSKEY *core.RRsetString `json:"dnskey,omitempty"`
 }
@@ -318,6 +325,12 @@ type ScanTupleResponse struct {
 	NewData     CurrentScanDataJSON // The new data retrieved from the scan (JSON-serializable)
 	DataChanged bool                // Whether the new data differs from the old data (from ScanTuple.CurrentData)
 	AllNSInSync bool                // If "all-ns" option was set, whether all NS were in sync (false if not applicable)
+	DSAdds      []dns.RR            // DS records to add to parent (from CDS→DS conversion)
+	DSRemoves   []dns.RR            // DS records to remove from parent
+	NSAdds      []dns.RR            // NS records to add at child apex (from CSYNC)
+	NSRemoves   []dns.RR            // NS records to remove from child apex (from CSYNC)
+	GlueAdds    []dns.RR            // A/AAAA glue records to add (owner in RR header)
+	GlueRemoves []dns.RR            // A/AAAA glue records to remove
 	Error       bool                // Whether an error occurred
 	ErrorMsg    string              // Error message if Error is true
 }

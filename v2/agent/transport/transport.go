@@ -10,6 +10,7 @@ package transport
 import (
 	"context"
 	"crypto"
+	"encoding/json"
 	"time"
 
 	"github.com/johanix/tdns/v2/core"
@@ -126,19 +127,21 @@ type HelloResponse struct {
 
 // BeatRequest represents a heartbeat message.
 type BeatRequest struct {
-	SenderID  string    // Identity of the sender
-	Timestamp time.Time // Current timestamp
-	Sequence  uint64    // Monotonic sequence number
-	State     string    // Sender's current state
+	SenderID  string          // Identity of the sender
+	Timestamp time.Time       // Current timestamp
+	Sequence  uint64          // Monotonic sequence number
+	State     string          // Sender's current state
+	Gossip    json.RawMessage `json:"gossip,omitempty"` // Gossip data piggybacked on beats
 }
 
 // BeatResponse represents a heartbeat acknowledgment.
 type BeatResponse struct {
-	ResponderID string    // Identity of the responder
-	Timestamp   time.Time // Response timestamp
-	Sequence    uint64    // Echoed sequence number
-	State       string    // Responder's current state
-	Ack         bool      // Whether the beat was acknowledged
+	ResponderID string          // Identity of the responder
+	Timestamp   time.Time       // Response timestamp
+	Sequence    uint64          // Echoed sequence number
+	State       string          // Responder's current state
+	Ack         bool            // Whether the beat was acknowledged
+	Gossip      json.RawMessage // Gossip from responder (if any)
 }
 
 // SyncRequest represents a data synchronization request.

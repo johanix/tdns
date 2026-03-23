@@ -649,7 +649,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			}
 			combinerState.SetRouter(combinerRouter)
 			lgConfig.Info("combiner router initialized with authorization middleware")
-			if conf.MultiProvider.AddSignature {
+			if conf.MultiProvider.CombinerOptions[CombinerOptAddSignature] {
 				lgConfig.Info("combiner signature TXT enabled")
 			}
 		}
@@ -699,7 +699,7 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 					}
 				}
 				// Re-apply combined data now that contributions are loaded
-				if zd.Options[OptAllowCombine] {
+				if zd.Options[OptAllowEdits] {
 					success, err := zd.CombineWithLocalChanges()
 					if err != nil {
 						lgConfig.Error("CombineWithLocalChanges failed in OnFirstLoad", "zone", zd.ZoneName, "err", err)
@@ -908,9 +908,16 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 		}
 		return count
 	})
+	// Wire provider group manager into leader election manager
+	if conf.Internal.AgentRegistry != nil && conf.Internal.AgentRegistry.ProviderGroupManager != nil {
+		lem.SetProviderGroupManager(conf.Internal.AgentRegistry.ProviderGroupManager)
+	}
+
 	// Attach leader election OnFirstLoad callbacks to zone stubs.
 	// Must happen here (not in ParseZones) because LeaderElectionManager
 	// doesn't exist until StartAgent runs.
+	// For multi-agent zones: elections are deferred to OnGroupOperational (Phase 6).
+	// For single-agent zones: self-elect immediately.
 	for _, zoneName := range conf.Internal.AllZones {
 		zd, exists := Zones.Get(zoneName)
 		if !exists {
@@ -924,19 +931,20 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 				zone := ZoneName(zd.ZoneName)
 				configured := lem.configuredPeers(zone)
 				if configured == 0 {
-					// Single agent — self-elect immediately
+					// Single agent — self-elect immediately (per-zone)
 					lem.StartElection(zone, 0)
 				} else {
-					// Multi-agent — require all configured peers to be operational
-					operational := 0
-					if lem.operationalPeersFunc != nil {
-						operational = lem.operationalPeersFunc(zone)
+					// Multi-agent — group election triggered by OnGroupOperational.
+					// Check if group already exists and defer the group election.
+					if lem.providerGroupMgr != nil {
+						pg := lem.providerGroupMgr.GetGroupForZone(zone)
+						if pg != nil {
+							lem.DeferGroupElection(pg.GroupHash)
+							return
+						}
 					}
-					if operational >= configured {
-						lem.StartElection(zone, configured)
-					} else {
-						lem.DeferElection(zone)
-					}
+					// No group yet (HSYNC3 not loaded) — defer per-zone election
+					lem.DeferElection(zone)
 				}
 			})
 		}

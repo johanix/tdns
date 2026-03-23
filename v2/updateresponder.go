@@ -327,6 +327,17 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 
 	if !dur.Status.Approved {
 		lgHandler.Warn("ApproveUpdate rejected the update, ignored")
+		for _, rr := range r.Ns {
+			switch rr.Header().Class {
+			case dns.ClassINET:
+				lgHandler.Warn(fmt.Sprintf("REJECTED[ADD]: %s", rr.String()))
+			case dns.ClassNONE:
+				lgHandler.Warn(fmt.Sprintf("REJECTED[DEL]: %s", rr.String()))
+			case dns.ClassANY:
+				lgHandler.Warn(fmt.Sprintf("REJECTED[DEL-rrset]: %s %s",
+					rr.Header().Name, dns.TypeToString[rr.Header().Rrtype]))
+			}
+		}
 		return nil
 	}
 

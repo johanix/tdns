@@ -305,7 +305,9 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, truncated bool, nonce string) {
 			lgTransport.Debug("confirmation received", "distributionID", distributionID, "sender", senderID, "nonce", nonce)
 
-			if tm.reliableQueue != nil && status == transport.ConfirmSuccess {
+			// Stop retrying on any definitive answer (success, failure, or rejected).
+			// Only keep retrying for transient states (pending, partial).
+			if tm.reliableQueue != nil && (status == transport.ConfirmSuccess || status == transport.ConfirmFailed || status == transport.ConfirmRejected) {
 				tm.reliableQueue.MarkConfirmed(distributionID, senderID)
 			}
 
@@ -346,9 +348,24 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			}
 		}
 
-		// Trigger discovery when we receive messages from authorized but undiscovered peers
+		// Trigger discovery when we receive messages from authorized but undiscovered peers.
+		// This is the "discovery kick" (Phase 4 gossip): when a beat arrives from a sender
+		// whose verification key we don't have, flush IMR cache for that identity's discovery
+		// names and retry. This unsticks the UNKNOWN→KNOWN transition when cached NXDOMAIN
+		// is blocking discovery.
 		tm.ChunkHandler.OnPeerDiscoveryNeeded = func(peerID string) {
-			lgTransport.Info("triggering discovery for peer (missing verification key)", "peer", peerID)
+			lgTransport.Info("discovery kick: flushing IMR cache and triggering discovery", "peer", peerID)
+
+			// Flush IMR cache for this peer's discovery names before re-discovery
+			if tm.getImrEngine != nil {
+				if imr := tm.getImrEngine(); imr != nil && imr.Cache != nil {
+					removed, err := imr.Cache.FlushDomain(peerID, false)
+					if err == nil && removed > 0 {
+						lgTransport.Info("flushed IMR cache for peer discovery", "peer", peerID, "removed", removed)
+					}
+				}
+			}
+
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			err := tm.DiscoverAndRegisterAgent(ctx, peerID)
@@ -357,6 +374,22 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			} else {
 				lgTransport.Info("successfully discovered peer, verification key now available", "peer", peerID)
 			}
+		}
+
+		// Provide gossip for beat responses: when we receive a beat,
+		// include our gossip state in the response so peers get
+		// bidirectional state exchange on every beat round-trip.
+		tm.ChunkHandler.GossipForPeer = func(peerID string) json.RawMessage {
+			if tm.agentRegistry == nil || tm.agentRegistry.GossipStateTable == nil || tm.agentRegistry.ProviderGroupManager == nil {
+				return nil
+			}
+			gossipMsgs := tm.agentRegistry.GossipStateTable.BuildGossipForPeer(
+				peerID, tm.agentRegistry.ProviderGroupManager, tm.agentRegistry.LeaderElectionManager)
+			if len(gossipMsgs) == 0 {
+				return nil
+			}
+			data, _ := json.Marshal(gossipMsgs)
+			return data
 		}
 
 		// Initialize router with handlers and middleware
@@ -586,6 +619,27 @@ func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 				// NotifyPeerOperational handles both deferred elections and
 				// new elections — it checks configured vs operational counts.
 				tm.agentRegistry.LeaderElectionManager.NotifyPeerOperational(agent.Zones)
+			}
+		}
+	}
+
+	// Process gossip data if present
+	if len(payload.Gossip) > 0 && tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil {
+		var gossipMsgs []GossipMessage
+		if err := json.Unmarshal(payload.Gossip, &gossipMsgs); err == nil {
+			for i := range gossipMsgs {
+				tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i])
+			}
+			lgTransport.Debug("merged gossip from incoming DNS beat", "sender", senderID, "groups", len(gossipMsgs))
+
+			// Check group operational state after merge
+			if tm.agentRegistry.ProviderGroupManager != nil {
+				for i := range gossipMsgs {
+					pg := tm.agentRegistry.ProviderGroupManager.GetGroup(gossipMsgs[i].GroupHash)
+					if pg != nil {
+						tm.agentRegistry.GossipStateTable.CheckGroupState(pg.GroupHash, pg.Members)
+					}
+				}
 			}
 		}
 	}
@@ -1440,11 +1494,22 @@ func (tm *TransportManager) SendPing(ctx context.Context, peer *transport.Peer) 
 func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Agent, sequence uint64) (*transport.BeatResponse, error) {
 	peer := tm.SyncPeerFromAgent(agent)
 
+	// Build gossip for this peer
+	var gossipData json.RawMessage
+	if tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil && tm.agentRegistry.ProviderGroupManager != nil {
+		gossipMsgs := tm.agentRegistry.GossipStateTable.BuildGossipForPeer(
+			string(agent.Identity), tm.agentRegistry.ProviderGroupManager, tm.agentRegistry.LeaderElectionManager)
+		if len(gossipMsgs) > 0 {
+			gossipData, _ = json.Marshal(gossipMsgs)
+		}
+	}
+
 	req := &transport.BeatRequest{
 		SenderID:  tm.LocalID,
 		Timestamp: time.Now(),
 		Sequence:  sequence,
 		State:     string(agent.State),
+		Gossip:    gossipData,
 	}
 
 	var apiResp *transport.BeatResponse
@@ -1501,6 +1566,27 @@ func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Age
 				agent.DnsDetails.LatestError = ""
 			}
 			agent.mu.Unlock()
+		}
+	}
+
+	// Merge gossip from beat responses (bidirectional gossip exchange)
+	if tm.agentRegistry != nil && tm.agentRegistry.GossipStateTable != nil && tm.agentRegistry.ProviderGroupManager != nil {
+		for _, resp := range []*transport.BeatResponse{apiResp, dnsResp} {
+			if resp == nil || len(resp.Gossip) == 0 {
+				continue
+			}
+			var gossipMsgs []GossipMessage
+			if err := json.Unmarshal(resp.Gossip, &gossipMsgs); err == nil {
+				for i := range gossipMsgs {
+					tm.agentRegistry.GossipStateTable.MergeGossip(&gossipMsgs[i])
+					// Re-evaluate group state after merge (may trigger elections)
+					pg := tm.agentRegistry.ProviderGroupManager.GetGroup(gossipMsgs[i].GroupHash)
+					if pg != nil {
+						tm.agentRegistry.GossipStateTable.CheckGroupState(gossipMsgs[i].GroupHash, pg.Members)
+					}
+				}
+				lgTransport.Debug("merged gossip from beat response EDNS(0) CHUNK", "peer", peer.ID, "groups", len(gossipMsgs))
+			}
 		}
 	}
 
@@ -1609,9 +1695,6 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 	// Build transport peer and sync request
 	peer := tm.SyncPeerFromAgent(combiner)
 
-	// Convert ZoneUpdate to flat record list for transport
-	records := zoneUpdateToGroupedRecords(msg.Update)
-
 	// Use the original source agent ID so the combiner can attribute records correctly.
 	// This preserves per-agent isolation in the combiner's AgentContributions.
 	senderID := tm.LocalID
@@ -1626,17 +1709,14 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 	syncReq := &transport.SyncRequest{
 		SenderID:       senderID,
 		Zone:           string(msg.Zone),
-		Records:        records,
 		Timestamp:      msg.CreatedAt,
 		DistributionID: msg.DistributionID,
 		Nonce:          msg.Nonce,
-		MessageType:    "update", // agent→combiner uses "update" (not "sync")
+		MessageType:    "update",
 		ZoneClass:      zoneClass,
 	}
 	if msg.Update != nil {
-		if len(msg.Update.Operations) > 0 {
-			syncReq.Operations = msg.Update.Operations
-		}
+		syncReq.Operations = msg.Update.Operations
 		if msg.Update.Publish != nil {
 			syncReq.Publish = msg.Update.Publish
 		}
@@ -1687,19 +1767,15 @@ func (tm *TransportManager) deliverToAgent(ctx context.Context, msg *OutgoingMes
 
 	peer := tm.SyncPeerFromAgent(agent)
 
-	// Convert ZoneUpdate to flat record list for transport
-	records := zoneUpdateToGroupedRecords(msg.Update)
-
 	syncReq := &transport.SyncRequest{
 		SenderID:       tm.LocalID,
 		Zone:           string(msg.Zone),
-		Records:        records,
 		Timestamp:      msg.CreatedAt,
 		DistributionID: msg.DistributionID,
 		Nonce:          msg.Nonce,
 		MessageType:    "sync",
 	}
-	if msg.Update != nil && len(msg.Update.Operations) > 0 {
+	if msg.Update != nil {
 		syncReq.Operations = msg.Update.Operations
 	}
 
@@ -1779,6 +1855,10 @@ func (tm *TransportManager) EnqueueForZoneAgents(zone ZoneName, update *ZoneUpda
 // EnqueueForSpecificAgent enqueues a zone update for a single agent.
 // Used by "resync-targeted" to respond only to the requesting agent.
 func (tm *TransportManager) EnqueueForSpecificAgent(zone ZoneName, agentID AgentId, update *ZoneUpdate, distID string) error {
+	if tm.reliableQueue == nil {
+		return fmt.Errorf("EnqueueForSpecificAgent: reliable queue not configured")
+	}
+
 	msg := &OutgoingMessage{
 		DistributionID: distID,
 		RecipientID:    agentID,
@@ -1877,38 +1957,6 @@ func (tm *TransportManager) GetDistributionRecipients(zone ZoneName, skipCombine
 	}
 
 	return recipients
-}
-
-// zoneUpdateToGroupedRecords converts a ZoneUpdate into records grouped by owner name,
-// suitable for transport.SyncRequest.Records and core.AgentMsgPost.Records.
-//
-// ZoneUpdate has two fields: RRs (for local per-RR updates) and RRsets (for remote
-// full-replace updates). Some callers populate both with the same data, so we use
-// RRs if present, otherwise RRsets, to avoid duplicates.
-func zoneUpdateToGroupedRecords(update *ZoneUpdate) map[string][]string {
-	if update == nil {
-		return nil
-	}
-
-	records := make(map[string][]string)
-
-	if len(update.RRs) > 0 {
-		// Local update: use individual RRs
-		for _, rr := range update.RRs {
-			owner := rr.Header().Name
-			records[owner] = append(records[owner], rr.String())
-		}
-	} else {
-		// Remote update: use RRsets
-		for _, rrset := range update.RRsets {
-			for _, rr := range rrset.RRs {
-				owner := rr.Header().Name
-				records[owner] = append(records[owner], rr.String())
-			}
-		}
-	}
-
-	return records
 }
 
 // groupRRStringsByOwner converts a flat list of RR strings to records grouped by owner name.

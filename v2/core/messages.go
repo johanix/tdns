@@ -1,6 +1,7 @@
 package core
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/miekg/dns"
@@ -69,11 +70,12 @@ type AgentHelloResponse struct {
 // Used by both API and DNS transports.
 type AgentBeatPost struct {
 	MessageType    AgentMsg
-	MyIdentity     string    // Sender's identity
-	YourIdentity   string    // Recipient's identity
-	MyBeatInterval uint32    // Intended beat interval in seconds
-	Zones          []string  // Zones shared with the remote agent
-	Time           time.Time // Message timestamp
+	MyIdentity     string          // Sender's identity
+	YourIdentity   string          // Recipient's identity
+	MyBeatInterval uint32          // Intended beat interval in seconds
+	Zones          []string        // Zones shared with the remote agent
+	Time           time.Time       // Message timestamp
+	Gossip         json.RawMessage `json:"Gossip,omitempty"` // Gossip data (opaque at core level)
 }
 
 // AgentBeatResponse represents the response to a heartbeat.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -296,6 +297,15 @@ var agentParentSyncDeltaCmd = &cobra.Command{
 			log.Fatalf("Error getting API client: %v", err)
 		}
 
+		if schemestr != "" {
+			val, err := strconv.ParseUint(schemestr, 10, 8)
+			if err != nil {
+				fmt.Printf("Error: invalid scheme value %q: %s\n", schemestr, err)
+				return
+			}
+			scheme = uint8(val)
+		}
+
 		dr, err := SendDelegationCmd(api, tdns.DelegationPost{
 			Command: "status",
 			Zone:    tdns.Globals.Zonename,
@@ -350,6 +360,15 @@ var agentParentSyncSyncCmd = &cobra.Command{
 		api, err := getApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
+		}
+
+		if schemestr != "" {
+			val, err := strconv.ParseUint(schemestr, 10, 8)
+			if err != nil {
+				fmt.Printf("Error: invalid scheme value %q: %s\n", schemestr, err)
+				return
+			}
+			scheme = uint8(val)
 		}
 
 		dr, err := SendDelegationCmd(api, tdns.DelegationPost{

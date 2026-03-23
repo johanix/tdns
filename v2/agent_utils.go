@@ -113,11 +113,13 @@ func (conf *Config) NewAgentRegistry() *AgentRegistry {
 
 	return &AgentRegistry{
 		// S:              cmap.New[*Agent](),
-		S:              core.NewStringer[AgentId, *Agent](),
-		RemoteAgents:   make(map[ZoneName][]AgentId),
-		LocalAgent:     conf.MultiProvider,
-		LocateInterval: li,
-		helloContexts:  make(map[AgentId]context.CancelFunc),
+		S:                    core.NewStringer[AgentId, *Agent](),
+		RemoteAgents:         make(map[ZoneName][]AgentId),
+		LocalAgent:           conf.MultiProvider,
+		LocateInterval:       li,
+		helloContexts:        make(map[AgentId]context.CancelFunc),
+		ProviderGroupManager: NewProviderGroupManager(conf.MultiProvider.Identity),
+		GossipStateTable:     NewGossipStateTable(conf.MultiProvider.Identity),
 	}
 }
 
@@ -568,9 +570,13 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 		LastState:  time.Now(),
 	}
 
-	// Mark both transports as needing discovery (will be refined during discovery)
-	agent.ApiMethod = true
-	agent.DnsMethod = true
+	// Only discover transports we ourselves support.
+	if ar.TransportManager != nil {
+		agent.DnsMethod = ar.TransportManager.isTransportSupported("dns")
+		agent.ApiMethod = ar.TransportManager.isTransportSupported("api")
+	} else {
+		agent.DnsMethod = true
+	}
 
 	if zonename != "" {
 		agent.Zones[zonename] = true
@@ -586,7 +592,7 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 	// Trigger immediate discovery instead of waiting for DiscoveryRetrierNG tick
 	if imr := Conf.Internal.ImrEngine; imr != nil {
 		lgAgent.Debug("triggering immediate discovery", "agent", remoteid)
-		go ar.attemptDiscovery(agent, imr, true, true)
+		go ar.attemptDiscovery(agent, imr, agent.ApiMethod, agent.DnsMethod)
 	} else {
 		lgAgent.Debug("IMR not ready, will be discovered by DiscoveryRetrierNG", "agent", remoteid)
 	}
@@ -616,10 +622,24 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, d
 	// Check if we got anything useful from the transports we discovered
 	if result.APIUri == "" && result.DNSUri == "" {
 		agent.mu.Lock()
+		agent.ApiDetails.DiscoveryFailures++
+		failures := agent.ApiDetails.DiscoveryFailures
 		agent.ApiDetails.LatestError = "no contact endpoints found"
 		agent.ApiDetails.LatestErrorTime = time.Now()
 		agent.mu.Unlock()
-		lgAgent.Warn("discovery failed, will retry", "agent", agent.Identity, "reason", "no contact endpoints found")
+
+		if failures >= 3 && imr.Cache != nil {
+			identity := string(agent.Identity)
+			removed, err := imr.Cache.FlushDomain(identity, false)
+			if err == nil && removed > 0 {
+				lgAgent.Info("flushed IMR cache for stuck discovery", "agent", agent.Identity, "removed", removed, "after_failures", failures)
+			}
+			agent.mu.Lock()
+			agent.ApiDetails.DiscoveryFailures = 0
+			agent.mu.Unlock()
+		} else {
+			lgAgent.Warn("discovery failed, will retry", "agent", agent.Identity, "reason", "no contact endpoints found", "failures", failures)
+		}
 		return
 	}
 
@@ -637,6 +657,10 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, d
 	}
 
 	// SUCCESS: Discovery complete. Contact info updated.
+	agent.mu.Lock()
+	agent.ApiDetails.DiscoveryFailures = 0
+	agent.mu.Unlock()
+
 	lgAgent.Info("discovery successful", "agent", agent.Identity,
 		"apiState", AgentStateToString[agent.ApiDetails.State],
 		"dnsState", AgentStateToString[agent.DnsDetails.State])
@@ -1023,24 +1047,26 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 	}
 
 	// Trigger leader election if HSYNC3 RRset changed and we have a leader election manager.
-	// Elections require ALL configured peers to be operational.
+	// Use group elections when provider groups exist; zone elections only for single-agent.
 	if len(updatedIdentities) > 0 && ar.LeaderElectionManager != nil {
 		lem := ar.LeaderElectionManager
 		configured := lem.configuredPeers(zonename)
 		if configured == 0 {
 			lem.StartElection(zonename, 0)
-		} else {
-			operational := 0
-			if lem.operationalPeersFunc != nil {
-				operational = lem.operationalPeersFunc(zonename)
+		} else if ar.ProviderGroupManager != nil {
+			pg := ar.ProviderGroupManager.GetGroupForZone(zonename)
+			if pg != nil {
+				lem.DeferGroupElection(pg.GroupHash)
 			}
-			if operational >= configured {
-				lem.StartElection(zonename, configured)
-			} else {
-				lgAgent.Debug("deferring leader election, not all configured peers operational",
-					"zone", zonename, "operational", operational, "configured", configured)
-				lem.DeferElection(zonename)
-			}
+		}
+	}
+
+	// Recompute provider groups when HSYNC3 data changes
+	if len(updatedIdentities) > 0 && ar.ProviderGroupManager != nil {
+		ar.ProviderGroupManager.RecomputeGroups()
+		groups := ar.ProviderGroupManager.GetGroups()
+		for _, pg := range groups {
+			lgAgent.Info("provider group updated", "group", pg.Name, "hash", pg.GroupHash[:8], "members", len(pg.Members), "zones", len(pg.Zones))
 		}
 	}
 

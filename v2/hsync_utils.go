@@ -564,15 +564,20 @@ func (zd *ZoneData) ValidateHsyncRRset() (bool, error) {
 // it is all configured agent identities from Conf.MultiProvider.Agents.
 func ourHsyncIdentities() []string {
 	var ids []string
-	if Conf.MultiProvider != nil && Conf.MultiProvider.Role != "agent" {
-		for _, agent := range Conf.MultiProvider.Agents {
-			if agent != nil && agent.Identity != "" {
-				ids = append(ids, dns.Fqdn(agent.Identity))
+	if Conf.MultiProvider != nil {
+		if Conf.MultiProvider.Role == "agent" {
+			// Agent: our own identity
+			if Conf.MultiProvider.Identity != "" {
+				ids = append(ids, dns.Fqdn(Conf.MultiProvider.Identity))
+			}
+		} else {
+			// Signer/Combiner: configured agent identities
+			for _, agent := range Conf.MultiProvider.Agents {
+				if agent != nil && agent.Identity != "" {
+					ids = append(ids, dns.Fqdn(agent.Identity))
+				}
 			}
 		}
-	}
-	if len(ids) == 0 {
-		ids = []string{string(Globals.AgentId)}
 	}
 	return ids
 }
@@ -664,13 +669,13 @@ func (zd *ZoneData) analyzeHsyncSigners(ourIdentities []string, ourLabel string)
 		hsyncparam := hsyncparamRRset.RRs[0].(*dns.PrivateRR).Data.(*core.HSYNCPARAM)
 		signers := hsyncparam.GetSigners()
 		if len(signers) == 0 {
-			// No signers specified — zone is unsigned, default to sign
-			return true, 0, false, nil
+			// No signers specified — zone owner has not authorized signing
+			return false, 0, false, nil
 		}
 		zoneSigned = true
 		zd.Logger.Printf("analyzeHsyncSigners: zone %s: ourLabel=%q signers=%v", zd.ZoneName, ourLabel, signers)
 		for _, s := range signers {
-			if s == ourLabel {
+			if strings.TrimSuffix(s, ".") == strings.TrimSuffix(ourLabel, ".") {
 				weShouldSign = true
 			} else {
 				otherSigners++
@@ -729,8 +734,8 @@ func (zd *ZoneData) analyzeHsyncSigners(ourIdentities []string, ourLabel string)
 		return weShouldSign, otherSigners, zoneSigned, nil
 	}
 
-	// No HSYNC3+HSYNCPARAM/HSYNC/HSYNC2 records at all — sign by default, unsigned
-	return true, 0, false, nil
+	// No HSYNC3+HSYNCPARAM/HSYNC/HSYNC2 records at all — no authorization to sign
+	return false, 0, false, nil
 }
 
 // populateMPdata evaluates the four multi-provider guards for a zone and
@@ -779,10 +784,13 @@ func (zd *ZoneData) populateMPdata() {
 		return
 	}
 	if !matched {
-		zd.Logger.Printf("populateMPdata: zone %s: none of our identities %v match any HSYNC3 provider in the zone — we are not a provider for this zone", zd.ZoneName, ourIdentities)
+		zd.Logger.Printf("populateMPdata: zone %s: none of our identities %v match any HSYNC3 provider in the zone -- we are not a provider for this zone", zd.ZoneName, ourIdentities)
+		zd.Options[OptMPNotListedErr] = true
 		zd.MPdata = nil
 		return
 	}
+	// Clear warning if we were previously not listed but now are
+	zd.Options[OptMPNotListedErr] = false
 
 	// Guard 4: if zone is signed, we must be a signer
 	weShouldSign, otherSigners, zoneSigned, err := zd.analyzeHsyncSigners(ourIdentities, ourLabel)
@@ -792,10 +800,15 @@ func (zd *ZoneData) populateMPdata() {
 		return
 	}
 	if zoneSigned && !weShouldSign {
-		zd.Logger.Printf("populateMPdata: zone %s: we are provider %q but not listed as a signer — zone is signed and we must not modify it", zd.ZoneName, ourLabel)
+		zd.Logger.Printf("populateMPdata: zone %s: we are provider %q but not listed as a signer -- zone is signed and we must not modify it", zd.ZoneName, ourLabel)
+		zd.Options[OptMPDisallowEdits] = true
+		zd.Options[OptAllowEdits] = false
 		zd.MPdata = nil
 		return
 	}
+	// Clear disallow-edits and restore allow-edits if we are (or became) a signer
+	zd.Options[OptMPDisallowEdits] = false
+	zd.Options[OptAllowEdits] = true
 
 	zd.MPdata = &MPdata{
 		WeAreProvider: true,

@@ -197,6 +197,8 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			"config": true, "hsync-agentstatus": true, "peer-ping": true, "peer-apiping": true,
 			"discover": true, "hsync-locate": true,
 			"router-list": true, "router-describe": true, "router-metrics": true, "router-walk": true, "router-reset": true,
+			"imr-query": true, "imr-flush": true, "imr-reset": true, "imr-show": true, "peer-reset": true,
+			"gossip-group-list": true, "gossip-group-state": true,
 		}
 		if !noZoneCommands[amp.Command] {
 			amp.Zone = ZoneName(dns.Fqdn(string(amp.Zone)))
@@ -606,6 +608,17 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				resp.ErrorMsg = "leader election manager not initialized"
 				return
 			}
+			// Route to group election if zone belongs to a provider group
+			ar := conf.Internal.AgentRegistry
+			if ar != nil && ar.ProviderGroupManager != nil {
+				pg := ar.ProviderGroupManager.GetGroupForZone(amp.Zone)
+				if pg != nil {
+					lem.StartGroupElection(pg.GroupHash, pg.Members, pg.Zones)
+					resp.Msg = fmt.Sprintf("Group election started for zone %s (group %s)", amp.Zone, pg.GroupHash[:8])
+					return
+				}
+			}
+			// No provider group — per-zone election
 			configured := lem.configuredPeers(amp.Zone)
 			operational := 0
 			if lem.operationalPeersFunc != nil {
@@ -670,6 +683,315 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			algorithm := sak.Keys[0].KeyRR.Algorithm
 			go conf.parentSyncAfterKeyPublication(amp.Zone, string(amp.Zone), keyid, algorithm)
 			resp.Msg = fmt.Sprintf("Bootstrap triggered for zone %s (keyid %d), running async", amp.Zone, keyid)
+
+		case "imr-query":
+			imr := Globals.ImrEngine
+			if imr == nil || imr.Cache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "IMR engine not available"
+				return
+			}
+			qname, _ := amp.Data["qname"].(string)
+			qtypeStr, _ := amp.Data["qtype"].(string)
+			if qname == "" || qtypeStr == "" {
+				resp.Error = true
+				resp.ErrorMsg = "qname and qtype are required"
+				return
+			}
+			qname = dns.Fqdn(qname)
+			qtype, ok := dns.StringToType[strings.ToUpper(qtypeStr)]
+			if !ok {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("unknown RR type: %s", qtypeStr)
+				return
+			}
+			crrset := imr.Cache.Get(qname, qtype)
+			if crrset == nil {
+				resp.Msg = fmt.Sprintf("No cache entry for %s %s", qname, qtypeStr)
+				return
+			}
+			// Build response with cache metadata
+			entry := map[string]interface{}{
+				"name":       crrset.Name,
+				"rrtype":     dns.TypeToString[crrset.RRtype],
+				"rcode":      dns.RcodeToString[int(crrset.Rcode)],
+				"ttl":        crrset.Ttl,
+				"expiration": crrset.Expiration.Format(time.RFC3339),
+				"expires_in": time.Until(crrset.Expiration).Truncate(time.Second).String(),
+				"context":    fmt.Sprintf("%d", crrset.Context),
+				"state":      fmt.Sprintf("%d", crrset.State),
+			}
+			if crrset.RRset != nil {
+				var rrs []string
+				for _, rr := range crrset.RRset.RRs {
+					rrs = append(rrs, rr.String())
+				}
+				entry["records"] = rrs
+			}
+			resp.Data = entry
+			resp.Msg = fmt.Sprintf("Cache entry for %s %s", qname, dns.TypeToString[qtype])
+
+		case "imr-flush":
+			imr := Globals.ImrEngine
+			if imr == nil || imr.Cache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "IMR engine not available"
+				return
+			}
+			qname, _ := amp.Data["qname"].(string)
+			if qname == "" {
+				resp.Error = true
+				resp.ErrorMsg = "qname is required"
+				return
+			}
+			qname = dns.Fqdn(qname)
+			removed, err := imr.Cache.FlushDomain(qname, false)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("flush failed: %v", err)
+				return
+			}
+			resp.Msg = fmt.Sprintf("Flushed %d cache entries at and below %s", removed, qname)
+
+		case "imr-reset":
+			imr := Globals.ImrEngine
+			if imr == nil || imr.Cache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "IMR engine not available"
+				return
+			}
+			removed := imr.Cache.FlushAll()
+			resp.Msg = fmt.Sprintf("IMR cache reset: flushed %d entries (root NS and glue preserved)", removed)
+
+		case "imr-show":
+			imr := Globals.ImrEngine
+			if imr == nil || imr.Cache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "IMR engine not available"
+				return
+			}
+			identity := string(amp.AgentId)
+			if identity == "" {
+				resp.Error = true
+				resp.ErrorMsg = "agent_id (--id) is required"
+				return
+			}
+			identity = dns.Fqdn(identity)
+
+			// Collect all cache entries related to this identity's discovery names
+			// Discovery names are subdomains of identity: _https._tcp.<id>, api.<id>,
+			// _dns._tcp.<id>, dns.<id>, and <id> itself
+			var entries []map[string]interface{}
+			idCanon := strings.ToLower(identity)
+			for item := range imr.Cache.RRsets.IterBuffered() {
+				cr := item.Val
+				name := strings.ToLower(cr.Name)
+				// Match: name equals identity or is a subdomain of identity
+				if name != idCanon && !strings.HasSuffix(name, "."+idCanon) {
+					continue
+				}
+				entry := map[string]interface{}{
+					"name":       cr.Name,
+					"rrtype":     dns.TypeToString[cr.RRtype],
+					"rcode":      dns.RcodeToString[int(cr.Rcode)],
+					"ttl":        cr.Ttl,
+					"expiration": cr.Expiration.Format(time.RFC3339),
+					"expires_in": time.Until(cr.Expiration).Truncate(time.Second).String(),
+				}
+				if cr.RRset != nil {
+					var rrs []string
+					for _, rr := range cr.RRset.RRs {
+						rrs = append(rrs, rr.String())
+					}
+					entry["records"] = rrs
+				}
+				entries = append(entries, entry)
+			}
+			resp.Data = entries
+			resp.Msg = fmt.Sprintf("Found %d cache entries for identity %s", len(entries), identity)
+
+		case "peer-reset":
+			if amp.AgentId == "" {
+				resp.Error = true
+				resp.ErrorMsg = "agent_id (--id) is required"
+				return
+			}
+			amp.AgentId = AgentId(dns.Fqdn(string(amp.AgentId)))
+
+			ar := conf.Internal.AgentRegistry
+			if ar == nil {
+				resp.Error = true
+				resp.ErrorMsg = "agent registry not available"
+				return
+			}
+
+			// Flush IMR cache for this identity's discovery names
+			imr := Globals.ImrEngine
+			flushed := 0
+			if imr != nil && imr.Cache != nil {
+				removed, _ := imr.Cache.FlushDomain(string(amp.AgentId), false)
+				flushed = removed
+			}
+
+			// Reset agent to NEEDED state and restart discovery
+			agent, exists := ar.S.Get(amp.AgentId)
+			if !exists {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("agent %q not found in registry", amp.AgentId)
+				return
+			}
+
+			agent.mu.Lock()
+			if agent.ApiDetails != nil {
+				agent.ApiDetails.State = AgentStateNeeded
+				agent.ApiDetails.DiscoveryFailures = 0
+				agent.ApiDetails.LatestError = ""
+			}
+			if agent.DnsDetails != nil {
+				agent.DnsDetails.State = AgentStateNeeded
+				agent.DnsDetails.DiscoveryFailures = 0
+				agent.DnsDetails.LatestError = ""
+			}
+			agent.State = AgentStateNeeded
+			agent.mu.Unlock()
+
+			// Trigger immediate re-discovery
+			if imr != nil {
+				go ar.attemptDiscovery(agent, imr, agent.ApiMethod, agent.DnsMethod)
+			}
+
+			resp.Msg = fmt.Sprintf("Reset agent %s to NEEDED state (flushed %d cache entries), discovery restarted", amp.AgentId, flushed)
+
+		case "gossip-group-state":
+			ar := conf.Internal.AgentRegistry
+			if ar == nil || ar.GossipStateTable == nil || ar.ProviderGroupManager == nil {
+				resp.Error = true
+				resp.ErrorMsg = "gossip state table not available"
+				return
+			}
+
+			groupName, _ := amp.Data["group"].(string)
+			if groupName == "" {
+				resp.Error = true
+				resp.ErrorMsg = "group name or hash is required"
+				return
+			}
+
+			// Look up group by name first, then by hash
+			pg := ar.ProviderGroupManager.GetGroupByName(groupName)
+			if pg == nil {
+				pg = ar.ProviderGroupManager.GetGroup(groupName)
+			}
+			if pg == nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("provider group %q not found", groupName)
+				return
+			}
+
+			states, election, nameProposal := ar.GossipStateTable.GetGroupState(pg.GroupHash)
+
+			// Build matrix data
+			var matrix []map[string]interface{}
+			for _, member := range pg.Members {
+				row := map[string]interface{}{
+					"reporter": member,
+				}
+				if ms, ok := states[member]; ok {
+					row["peer_states"] = ms.PeerStates
+					row["timestamp"] = ms.Timestamp.Format(time.RFC3339)
+					row["age"] = time.Since(ms.Timestamp).Truncate(time.Second).String()
+					row["zones"] = len(ms.Zones)
+				} else {
+					row["peer_states"] = map[string]string{}
+					row["age"] = "unknown"
+				}
+				matrix = append(matrix, row)
+			}
+
+			result := map[string]interface{}{
+				"group_hash": pg.GroupHash,
+				"group_name": pg.Name,
+				"members":    pg.Members,
+				"matrix":     matrix,
+			}
+
+			// Always include election block with status.
+			// LEM is authoritative; gossip table is fallback.
+			electionData := map[string]interface{}{}
+			lem := conf.Internal.LeaderElectionManager
+			var es GroupElectionState
+			if lem != nil {
+				es = lem.GetGroupElectionState(pg.GroupHash)
+			}
+			if es.Term == 0 && election != nil {
+				es = *election
+			}
+
+			if es.Term == 0 {
+				electionData["status"] = "no_election"
+			} else if es.Leader == "" {
+				electionData["status"] = "invalidated"
+				electionData["term"] = es.Term
+			} else if time.Now().After(es.LeaderExpiry) {
+				electionData["status"] = "expired"
+				electionData["leader"] = es.Leader
+				electionData["term"] = es.Term
+			} else {
+				electionData["status"] = "active"
+				electionData["leader"] = es.Leader
+				electionData["term"] = es.Term
+				electionData["leader_expiry"] = es.LeaderExpiry.Format(time.RFC3339)
+				electionData["expires_in"] = time.Until(es.LeaderExpiry).Truncate(time.Second).String()
+			}
+			result["election"] = electionData
+
+			if nameProposal != nil {
+				result["name_proposal"] = map[string]interface{}{
+					"name":        nameProposal.Name,
+					"proposer":    nameProposal.Proposer,
+					"proposed_at": nameProposal.ProposedAt.Format(time.RFC3339),
+				}
+			}
+
+			resp.Data = result
+			resp.Msg = fmt.Sprintf("Gossip state for group %s (%s)", pg.Name, pg.GroupHash[:8])
+
+		case "gossip-group-list":
+			ar := conf.Internal.AgentRegistry
+			if ar == nil || ar.ProviderGroupManager == nil {
+				resp.Error = true
+				resp.ErrorMsg = "agent registry or provider group manager not available"
+				return
+			}
+			groups := ar.ProviderGroupManager.GetGroups()
+			var groupData []map[string]interface{}
+			for _, pg := range groups {
+				// Show first 5 zones as sample
+				sampleZones := make([]string, 0)
+				for i, z := range pg.Zones {
+					if i >= 5 {
+						break
+					}
+					sampleZones = append(sampleZones, string(z))
+				}
+				entry := map[string]interface{}{
+					"group_hash":   pg.GroupHash,
+					"name":         pg.Name,
+					"members":      pg.Members,
+					"zone_count":   len(pg.Zones),
+					"sample_zones": sampleZones,
+				}
+				if pg.NameProposal != nil {
+					entry["name_proposal"] = map[string]interface{}{
+						"name":        pg.NameProposal.Name,
+						"proposer":    pg.NameProposal.Proposer,
+						"proposed_at": pg.NameProposal.ProposedAt.Format(time.RFC3339),
+					}
+				}
+				groupData = append(groupData, entry)
+			}
+			resp.Data = groupData
+			resp.Msg = fmt.Sprintf("Found %d provider groups", len(groups))
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown agent command: %s", amp.Command)
@@ -881,163 +1203,6 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			resp.Msg = "HSYNC database tables initialized successfully"
 			resp.Status = "ok"
 
-		case "hsync-inject-sync":
-			// Inject a simulated sync from a remote agent for testing
-			if amp.AgentId == "" {
-				resp.Error = true
-				resp.ErrorMsg = "sender agent ID is required"
-				return
-			}
-			if len(amp.RRs) == 0 {
-				resp.Error = true
-				resp.ErrorMsg = "at least one RR is required"
-				return
-			}
-			if amp.Zone == "" {
-				resp.Error = true
-				resp.ErrorMsg = "zone is required"
-				return
-			}
-
-			// Parse the RRs
-			var parsedRRs []dns.RR
-			for _, rrStr := range amp.RRs {
-				rr, err := dns.NewRR(rrStr)
-				if err != nil {
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("failed to parse RR %q: %v", rrStr, err)
-					return
-				}
-				parsedRRs = append(parsedRRs, rr)
-			}
-
-			// Create the ZoneUpdate with RRs (not RRsets, as these are individual RRs to be added)
-			zu := &ZoneUpdate{
-				Zone:    amp.Zone,
-				AgentId: amp.AgentId,
-				RRs:     parsedRRs,
-				RRsets:  make(map[uint16]core.RRset),
-			}
-
-			// Also populate RRsets for the current processing logic
-			// (The SynchedDataEngine currently uses RRsets)
-			for _, rr := range parsedRRs {
-				rrtype := rr.Header().Rrtype
-				rrset, exists := zu.RRsets[rrtype]
-				if !exists {
-					rrset = core.RRset{
-						Name:   rr.Header().Name,
-						Class:  rr.Header().Class,
-						RRtype: rrtype,
-					}
-				}
-				rrset.RRs = append(rrset.RRs, rr)
-				zu.RRsets[rrtype] = rrset
-			}
-
-			lgApi.Info("injecting sync", "rrs", len(parsedRRs), "from", amp.AgentId, "zone", amp.Zone)
-
-			// Create response channel
-			cresp := make(chan *AgentMsgResponse, 1)
-
-			// Send to SynchedDataEngine
-			conf.Internal.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{
-				Zone:       amp.Zone,
-				AgentId:    amp.AgentId,
-				UpdateType: "remote",
-				Update:     zu,
-				Response:   cresp,
-			}
-
-			// Wait for response
-			select {
-			case r := <-cresp:
-				if r.Error {
-					resp.Error = true
-					resp.ErrorMsg = r.ErrorMsg
-					resp.Msg = fmt.Sprintf("Sync injection failed: %s", r.ErrorMsg)
-				} else {
-					resp.Msg = fmt.Sprintf("Sync injected successfully: %d RRs processed from %q", len(parsedRRs), amp.AgentId)
-					if r.Msg != "" {
-						resp.Msg += " - " + r.Msg
-					}
-				}
-				resp.Status = "ok"
-			case <-time.After(5 * time.Second):
-				resp.Error = true
-				resp.ErrorMsg = "timeout waiting for SynchedDataEngine response"
-				resp.Status = "timeout"
-			}
-
-		case "hsync-force-sync":
-			// Force sync with a specific peer
-			if amp.AgentId == "" {
-				resp.Error = true
-				resp.ErrorMsg = "peer agent ID is required"
-				return
-			}
-			if amp.Zone == "" {
-				resp.Error = true
-				resp.ErrorMsg = "zone is required"
-				return
-			}
-
-			// Check if TransportManager is available
-			if conf.Internal.TransportManager == nil {
-				resp.Error = true
-				resp.ErrorMsg = "TransportManager not available (DNS transport not configured)"
-				return
-			}
-
-			// Get peer from agent registry
-			agent, exists := conf.Internal.AgentRegistry.S.Get(amp.AgentId)
-			if !exists {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("peer agent %q not found in registry", amp.AgentId)
-				return
-			}
-
-			// Convert agent to transport peer
-			peer := conf.Internal.TransportManager.SyncPeerFromAgent(agent)
-
-			// Create sync request with provided RRs (or empty for test sync)
-			// RRs are already strings in amp.RRs, just validate they parse
-			for _, rrStr := range amp.RRs {
-				_, err := dns.NewRR(rrStr)
-				if err != nil {
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("failed to parse RR %q: %v", rrStr, err)
-					return
-				}
-			}
-
-			syncReq := &transport.SyncRequest{
-				Zone:           string(amp.Zone),
-				Records:        groupRRStringsByOwner(amp.RRs),
-				DistributionID: fmt.Sprintf("debug-force-sync-%d", time.Now().Unix()),
-				MessageType:    "sync",
-			}
-
-			lgApi.Info("forcing sync to peer", "peer", amp.AgentId, "zone", amp.Zone)
-
-			// Send sync with fallback
-			ctx := context.Background()
-			syncResp, err := conf.Internal.TransportManager.SendSyncWithFallback(ctx, peer, syncReq)
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("sync failed: %v", err)
-			} else {
-				resp.Msg = fmt.Sprintf("Sync sent successfully to %q (distribution: %s)", amp.AgentId, syncReq.DistributionID)
-				resp.Data = map[string]interface{}{
-					"distribution_id": syncReq.DistributionID,
-					"peer_id":         amp.AgentId,
-					"zone":            amp.Zone,
-					"status":          syncResp.Status,
-					"message":         syncResp.Message,
-				}
-			}
-			resp.Status = "ok"
-
 		case "hsync-sync-state":
 			// Show sync state for a zone
 			if amp.Zone == "" {
@@ -1073,244 +1238,6 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				resp.ErrorMsg = "timeout waiting for sync state response"
 				resp.Status = "timeout"
 			}
-
-		case "hsync-send-to-combiner":
-			// Send test data to combiner (via SynchedDataUpdate)
-			if amp.Zone == "" {
-				resp.Error = true
-				resp.ErrorMsg = "zone is required"
-				return
-			}
-			if amp.AgentId == "" {
-				// Default to local agent
-				amp.AgentId = AgentId(conf.MultiProvider.Identity)
-			}
-			if len(amp.RRs) == 0 {
-				resp.Error = true
-				resp.ErrorMsg = "at least one RR is required"
-				return
-			}
-
-			// Parse the RRs
-			var parsedRRs []dns.RR
-			for _, rrStr := range amp.RRs {
-				rr, err := dns.NewRR(rrStr)
-				if err != nil {
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("failed to parse RR %q: %v", rrStr, err)
-					return
-				}
-				parsedRRs = append(parsedRRs, rr)
-			}
-
-			// Create ZoneUpdate
-			zu := &ZoneUpdate{
-				Zone:    amp.Zone,
-				AgentId: amp.AgentId,
-				RRs:     parsedRRs,
-				RRsets:  make(map[uint16]core.RRset),
-			}
-
-			// Populate RRsets
-			for _, rr := range parsedRRs {
-				rrtype := rr.Header().Rrtype
-				rrset, exists := zu.RRsets[rrtype]
-				if !exists {
-					rrset = core.RRset{
-						Name:   rr.Header().Name,
-						Class:  rr.Header().Class,
-						RRtype: rrtype,
-					}
-				}
-				rrset.RRs = append(rrset.RRs, rr)
-				zu.RRsets[rrtype] = rrset
-			}
-
-			lgApi.Info("sending to combiner", "rrs", len(parsedRRs), "from", amp.AgentId, "zone", amp.Zone)
-
-			// Create response channel
-			cresp := make(chan *AgentMsgResponse, 1)
-
-			// Send to SynchedDataEngine (which forwards to combiner)
-			conf.Internal.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{
-				Zone:       amp.Zone,
-				AgentId:    amp.AgentId,
-				UpdateType: "local", // "local" means from this agent to combiner
-				Update:     zu,
-				Response:   cresp,
-			}
-
-			// Wait for response
-			select {
-			case r := <-cresp:
-				if r.Error {
-					resp.Error = true
-					resp.ErrorMsg = r.ErrorMsg
-					resp.Msg = fmt.Sprintf("Send to combiner failed: %s", r.ErrorMsg)
-				} else {
-					resp.Msg = fmt.Sprintf("Data sent to combiner successfully: %d RRs from %q", len(parsedRRs), amp.AgentId)
-					if r.Msg != "" {
-						resp.Msg += " - " + r.Msg
-					}
-				}
-				resp.Status = "ok"
-			case <-time.After(5 * time.Second):
-				resp.Error = true
-				resp.ErrorMsg = "timeout waiting for combiner response"
-				resp.Status = "timeout"
-			}
-
-		case "hsync-test-chain":
-			// Run full end-to-end test chain
-			if amp.Zone == "" {
-				resp.Error = true
-				resp.ErrorMsg = "zone is required"
-				return
-			}
-			if len(amp.RRs) == 0 {
-				resp.Error = true
-				resp.ErrorMsg = "at least one RR is required for test"
-				return
-			}
-
-			scenario := "add" // default scenario
-			if amp.Data != nil {
-				if s, ok := amp.Data["scenario"].(string); ok {
-					scenario = s
-				}
-			}
-
-			lgApi.Info("running test chain", "scenario", scenario, "zone", amp.Zone)
-
-			// Parse the RRs
-			var parsedRRs []dns.RR
-			for _, rrStr := range amp.RRs {
-				rr, err := dns.NewRR(rrStr)
-				if err != nil {
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("failed to parse RR %q: %v", rrStr, err)
-					return
-				}
-				parsedRRs = append(parsedRRs, rr)
-			}
-
-			// Step 1: Create local zone update
-			zu := &ZoneUpdate{
-				Zone:    amp.Zone,
-				AgentId: AgentId(conf.MultiProvider.Identity),
-				RRs:     parsedRRs,
-				RRsets:  make(map[uint16]core.RRset),
-			}
-
-			for _, rr := range parsedRRs {
-				rrtype := rr.Header().Rrtype
-				rrset, exists := zu.RRsets[rrtype]
-				if !exists {
-					rrset = core.RRset{
-						Name:   rr.Header().Name,
-						Class:  rr.Header().Class,
-						RRtype: rrtype,
-					}
-				}
-				rrset.RRs = append(rrset.RRs, rr)
-				zu.RRsets[rrtype] = rrset
-			}
-
-			testResults := make(map[string]interface{})
-			testResults["scenario"] = scenario
-			testResults["zone"] = amp.Zone
-			testResults["rrs_count"] = len(parsedRRs)
-
-			// Step 2: Send to local SynchedDataEngine
-			cresp := make(chan *AgentMsgResponse, 1)
-			conf.Internal.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{
-				Zone:       amp.Zone,
-				AgentId:    AgentId(conf.MultiProvider.Identity),
-				UpdateType: "local",
-				Update:     zu,
-				Response:   cresp,
-			}
-
-			select {
-			case r := <-cresp:
-				if r.Error {
-					testResults["step1_local_update"] = map[string]interface{}{
-						"success": false,
-						"error":   r.ErrorMsg,
-					}
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("Step 1 (local update) failed: %s", r.ErrorMsg)
-					resp.Data = testResults
-					return
-				}
-				testResults["step1_local_update"] = map[string]interface{}{
-					"success": true,
-					"message": r.Msg,
-				}
-			case <-time.After(5 * time.Second):
-				testResults["step1_local_update"] = map[string]interface{}{
-					"success": false,
-					"error":   "timeout",
-				}
-				resp.Error = true
-				resp.ErrorMsg = "Step 1 (local update) timed out"
-				resp.Data = testResults
-				return
-			}
-
-			// Step 3: Sync to remote peers (if TransportManager available)
-			if conf.Internal.TransportManager != nil && conf.Internal.AgentRegistry != nil {
-				peerCount := 0
-				syncResults := make(map[string]interface{})
-
-				// Get all remote agents
-				keys := conf.Internal.AgentRegistry.S.Keys()
-				for _, key := range keys {
-					if agent, exists := conf.Internal.AgentRegistry.S.Get(key); exists {
-						if agent.Identity == AgentId(conf.MultiProvider.Identity) {
-							continue // Skip self
-						}
-
-						peerCount++
-						peer := conf.Internal.TransportManager.SyncPeerFromAgent(agent)
-						syncReq := &transport.SyncRequest{
-							Zone:           string(amp.Zone),
-							Records:        groupRRStringsByOwner(amp.RRs),
-							DistributionID: fmt.Sprintf("test-chain-%d-%s", time.Now().Unix(), agent.Identity),
-							MessageType:    "sync",
-						}
-
-						ctx := context.Background()
-						syncResp, err := conf.Internal.TransportManager.SendSyncWithFallback(ctx, peer, syncReq)
-						if err != nil {
-							syncResults[string(agent.Identity)] = map[string]interface{}{
-								"success": false,
-								"error":   err.Error(),
-							}
-						} else {
-							syncResults[string(agent.Identity)] = map[string]interface{}{
-								"success":         syncResp.Status == transport.ConfirmSuccess,
-								"message":         syncResp.Message,
-								"distribution_id": syncReq.DistributionID,
-							}
-						}
-					}
-				}
-
-				testResults["step2_peer_sync"] = map[string]interface{}{
-					"peers_synced": peerCount,
-					"results":      syncResults,
-				}
-			} else {
-				testResults["step2_peer_sync"] = map[string]interface{}{
-					"skipped": true,
-					"reason":  "TransportManager not available",
-				}
-			}
-
-			resp.Msg = fmt.Sprintf("Test chain completed for zone %q (scenario: %s)", amp.Zone, scenario)
-			resp.Data = testResults
-			resp.Status = "ok"
 
 		case "show-combiner-data":
 			// Show combiner's local modifications store
@@ -1373,93 +1300,6 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			resp.Msg = fmt.Sprintf("Combiner data retrieved for %d zone(s)", len(combinerData))
 			resp.Status = "ok"
 
-		case "fake-sync-from":
-			// Inject a fake SYNC from a remote agent (same as hsync-inject-sync)
-			if amp.AgentId == "" {
-				resp.Error = true
-				resp.ErrorMsg = "source agent ID (--from) is required"
-				return
-			}
-			if len(amp.RRs) == 0 {
-				resp.Error = true
-				resp.ErrorMsg = "at least one RR is required"
-				return
-			}
-			if amp.Zone == "" {
-				resp.Error = true
-				resp.ErrorMsg = "zone is required"
-				return
-			}
-
-			// Parse the RRs
-			var parsedRRs []dns.RR
-			for _, rrStr := range amp.RRs {
-				rr, err := dns.NewRR(rrStr)
-				if err != nil {
-					resp.Error = true
-					resp.ErrorMsg = fmt.Sprintf("failed to parse RR %q: %v", rrStr, err)
-					return
-				}
-				parsedRRs = append(parsedRRs, rr)
-			}
-
-			// Create the ZoneUpdate with RRs
-			zu := &ZoneUpdate{
-				Zone:    amp.Zone,
-				AgentId: amp.AgentId,
-				RRs:     parsedRRs,
-				RRsets:  make(map[uint16]core.RRset),
-			}
-
-			// Also populate RRsets
-			for _, rr := range parsedRRs {
-				rrtype := rr.Header().Rrtype
-				rrset, exists := zu.RRsets[rrtype]
-				if !exists {
-					rrset = core.RRset{
-						Name:   rr.Header().Name,
-						Class:  rr.Header().Class,
-						RRtype: rrtype,
-					}
-				}
-				rrset.RRs = append(rrset.RRs, rr)
-				zu.RRsets[rrtype] = rrset
-			}
-
-			lgApi.Info("injecting fake sync", "rrs", len(parsedRRs), "from", amp.AgentId, "zone", amp.Zone)
-
-			// Create response channel
-			cresp := make(chan *AgentMsgResponse, 1)
-
-			// Send to SynchedDataEngine
-			conf.Internal.MsgQs.SynchedDataUpdate <- &SynchedDataUpdate{
-				Zone:       amp.Zone,
-				AgentId:    amp.AgentId,
-				UpdateType: "remote",
-				Update:     zu,
-				Response:   cresp,
-			}
-
-			// Wait for response
-			select {
-			case r := <-cresp:
-				if r.Error {
-					resp.Error = true
-					resp.ErrorMsg = r.ErrorMsg
-					resp.Msg = fmt.Sprintf("Fake sync injection failed: %s", r.ErrorMsg)
-				} else {
-					resp.Msg = fmt.Sprintf("Fake sync injected successfully: %d RRs processed from %q", len(parsedRRs), amp.AgentId)
-					if r.Msg != "" {
-						resp.Msg += " - " + r.Msg
-					}
-				}
-				resp.Status = "ok"
-			case <-time.After(5 * time.Second):
-				resp.Error = true
-				resp.ErrorMsg = "timeout waiting for SynchedDataEngine response"
-				resp.Status = "timeout"
-			}
-
 		case "add-rr", "del-rr":
 			// Add or delete an RR of any allowed type: store locally + sync to peers + send to combiner
 			if amp.Zone == "" {
@@ -1470,6 +1310,13 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			if len(amp.RRs) == 0 {
 				resp.Error = true
 				resp.ErrorMsg = "at least one RR is required"
+				return
+			}
+
+			// Reject edits for non-signing providers
+			if zd, ok := Zones.Get(string(amp.Zone)); ok && zd.Options[OptMPDisallowEdits] {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("zone %s is signed but this provider is not a signer; modifications not allowed", amp.Zone)
 				return
 			}
 
@@ -1497,7 +1344,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				parsedRRs = append(parsedRRs, rr)
 			}
 
-			// Create the ZoneUpdate with RRs and RRsets
+			// Create the ZoneUpdate with RRs, RRsets, and Operations
 			zu := &ZoneUpdate{
 				Zone:    amp.Zone,
 				AgentId: AgentId(conf.MultiProvider.Identity),
@@ -1505,7 +1352,12 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				RRsets:  make(map[uint16]core.RRset),
 			}
 
-			// Populate RRsets (needed by ProcessUpdate)
+			// Populate RRsets (needed by ProcessUpdate) and Operations (for wire transport)
+			opStr := "add"
+			if !isAdd {
+				opStr = "delete"
+			}
+			opsMap := make(map[uint16][]string)
 			for _, rr := range parsedRRs {
 				rrtype := rr.Header().Rrtype
 				rrset, exists := zu.RRsets[rrtype]
@@ -1518,6 +1370,17 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				}
 				rrset.RRs = append(rrset.RRs, rr)
 				zu.RRsets[rrtype] = rrset
+				// For Operations, use ClassINET string representation
+				inetRR := dns.Copy(rr)
+				inetRR.Header().Class = dns.ClassINET
+				opsMap[rrtype] = append(opsMap[rrtype], inetRR.String())
+			}
+			for rrtype, records := range opsMap {
+				zu.Operations = append(zu.Operations, core.RROperation{
+					Operation: opStr,
+					RRtype:    dns.TypeToString[rrtype],
+					Records:   records,
+				})
 			}
 
 			action := "Adding"

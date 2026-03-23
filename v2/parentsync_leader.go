@@ -36,26 +36,39 @@ type LeaderElection struct {
 }
 
 // LeaderElectionManager coordinates leader election across all zones.
+// Phase 6: supports both per-zone elections (legacy) and per-group elections.
+// When a ProviderGroupManager is set, elections are per-group and the leader
+// covers all zones in the group. IsLeader checks group membership first.
 type LeaderElectionManager struct {
-	mu                   sync.RWMutex
-	elections            map[ZoneName]*LeaderElection
-	pendingElections     map[ZoneName]bool // zones where election was deferred (peers not yet operational)
-	localID              AgentId
-	leaderTTL            time.Duration
-	broadcastFunc        func(zone ZoneName, rfiType string, records map[string][]string) error
-	operationalPeersFunc func(zone ZoneName) int   // returns count of operational peers for a zone
-	configuredPeersFunc  func(zone ZoneName) int   // returns count of configured peers for a zone
-	onLeaderElected      func(zone ZoneName) error // called when local agent wins election
+	mu                    sync.RWMutex
+	elections             map[ZoneName]*LeaderElection
+	pendingElections      map[ZoneName]bool          // zones where election was deferred (peers not yet operational)
+	groupElections        map[string]*LeaderElection // key: group hash
+	pendingGroupElections map[string]bool            // group hashes waiting for OnGroupOperational
+	localID               AgentId
+	leaderTTL             time.Duration
+	broadcastFunc         func(zone ZoneName, rfiType string, records map[string][]string) error
+	operationalPeersFunc  func(zone ZoneName) int   // returns count of operational peers for a zone
+	configuredPeersFunc   func(zone ZoneName) int   // returns count of configured peers for a zone
+	onLeaderElected       func(zone ZoneName) error // called when local agent wins election
+	providerGroupMgr      *ProviderGroupManager
 }
 
 func NewLeaderElectionManager(localID AgentId, leaderTTL time.Duration, broadcastFunc func(ZoneName, string, map[string][]string) error) *LeaderElectionManager {
 	return &LeaderElectionManager{
-		elections:        make(map[ZoneName]*LeaderElection),
-		pendingElections: make(map[ZoneName]bool),
-		localID:          localID,
-		leaderTTL:        leaderTTL,
-		broadcastFunc:    broadcastFunc,
+		elections:             make(map[ZoneName]*LeaderElection),
+		pendingElections:      make(map[ZoneName]bool),
+		groupElections:        make(map[string]*LeaderElection),
+		pendingGroupElections: make(map[string]bool),
+		localID:               localID,
+		leaderTTL:             leaderTTL,
+		broadcastFunc:         broadcastFunc,
 	}
+}
+
+// SetProviderGroupManager sets the provider group manager for group-based elections.
+func (lem *LeaderElectionManager) SetProviderGroupManager(pgm *ProviderGroupManager) {
+	lem.providerGroupMgr = pgm
 }
 
 // SetOperationalPeersFunc sets the callback used to count operational peers for re-election.
@@ -86,6 +99,482 @@ func (lem *LeaderElectionManager) configuredPeers(zone ZoneName) int {
 // Used to trigger delegation sync setup (SIG(0) key generation + bootstrap with parent).
 func (lem *LeaderElectionManager) SetOnLeaderElected(f func(zone ZoneName) error) {
 	lem.onLeaderElected = f
+}
+
+// StartGroupElection initiates a leader election for a provider group.
+// The election is broadcast using one of the group's zones as the RFI channel.
+// The winner becomes leader for ALL zones in the group.
+func (lem *LeaderElectionManager) StartGroupElection(groupHash string, members []string, zones []ZoneName) {
+	expectedPeers := len(members) - 1 // minus self
+
+	lem.mu.Lock()
+	le, ok := lem.groupElections[groupHash]
+	if !ok {
+		le = &LeaderElection{
+			Zone:     ZoneName(groupHash), // use group hash as key
+			Votes:    make(map[AgentId]uint32),
+			Confirms: make(map[AgentId]AgentId),
+		}
+		lem.groupElections[groupHash] = le
+	}
+	delete(lem.pendingGroupElections, groupHash)
+	lem.mu.Unlock()
+
+	le.mu.Lock()
+
+	// Single agent: self-elect immediately
+	if expectedPeers == 0 {
+		le.Leader = lem.localID
+		le.LeaderExpiry = time.Now().Add(lem.leaderTTL)
+		le.Active = false
+		lgElect.Info("single agent in group, self-elected as leader", "group", groupHash[:8])
+		lem.scheduleGroupReelection(le, groupHash, members, zones)
+		le.mu.Unlock()
+
+		if lem.onLeaderElected != nil {
+			for _, zone := range zones {
+				go func(z ZoneName) {
+					if err := lem.onLeaderElected(z); err != nil {
+						lgElect.Error("onLeaderElected callback failed", "zone", z, "group", groupHash[:8], "error", err)
+					}
+				}(zone)
+			}
+		}
+		return
+	}
+
+	// Reset election state
+	le.Active = true
+	le.Term++
+	le.MyVote = rand.Uint32()
+	le.Votes = map[AgentId]uint32{lem.localID: le.MyVote}
+	le.Confirms = make(map[AgentId]AgentId)
+	le.ExpectedPeers = expectedPeers
+	term := le.Term
+	vote := le.MyVote
+
+	if le.VoteTimer != nil {
+		le.VoteTimer.Stop()
+	}
+	if le.ConfirmTimer != nil {
+		le.ConfirmTimer.Stop()
+	}
+
+	le.VoteTimer = time.AfterFunc(5*time.Second, func() {
+		lem.onGroupVoteTimeout(groupHash, term, members, zones)
+	})
+
+	le.mu.Unlock()
+
+	lgElect.Info("starting group election", "group", groupHash[:8], "term", term, "peers", expectedPeers, "zones", len(zones))
+
+	// Broadcast ELECT-CALL using first zone as the RFI channel.
+	// Group hash is included in records so receivers can match to their group.
+	if len(zones) > 0 {
+		records := map[string][]string{
+			"_term":  {strconv.FormatUint(term, 10)},
+			"_group": {groupHash},
+		}
+		if err := lem.broadcastFunc(zones[0], "ELECT-CALL", records); err != nil {
+			lgElect.Error("failed to broadcast group ELECT-CALL", "group", groupHash[:8], "err", err)
+		}
+
+		voteRecords := map[string][]string{
+			"_vote":  {strconv.FormatUint(uint64(vote), 10)},
+			"_term":  {strconv.FormatUint(term, 10)},
+			"_group": {groupHash},
+		}
+		if err := lem.broadcastFunc(zones[0], "ELECT-VOTE", voteRecords); err != nil {
+			lgElect.Error("failed to broadcast group ELECT-VOTE", "group", groupHash[:8], "err", err)
+		}
+	}
+}
+
+// DeferGroupElection records a group as needing an election when OnGroupOperational fires.
+func (lem *LeaderElectionManager) DeferGroupElection(groupHash string) {
+	lem.mu.Lock()
+	lem.pendingGroupElections[groupHash] = true
+	lem.mu.Unlock()
+	lgElect.Info("deferring group election until group is operational", "group", groupHash[:8])
+}
+
+// HandleGroupMessage dispatches an election message that carries a _group record.
+func (lem *LeaderElectionManager) HandleGroupMessage(groupHash string, senderID AgentId, rfiType string, records map[string][]string) {
+	lem.mu.Lock()
+	le, ok := lem.groupElections[groupHash]
+	if !ok {
+		le = &LeaderElection{
+			Zone:     ZoneName(groupHash),
+			Votes:    make(map[AgentId]uint32),
+			Confirms: make(map[AgentId]AgentId),
+		}
+		lem.groupElections[groupHash] = le
+	}
+	lem.mu.Unlock()
+
+	// Find group metadata for callbacks
+	var members []string
+	var zones []ZoneName
+	if lem.providerGroupMgr != nil {
+		pg := lem.providerGroupMgr.GetGroup(groupHash)
+		if pg != nil {
+			members = pg.Members
+			zones = pg.Zones
+		}
+	}
+
+	switch rfiType {
+	case "ELECT-CALL":
+		lem.handleGroupCall(le, groupHash, senderID, records, members, zones)
+	case "ELECT-VOTE":
+		lem.handleGroupVote(le, groupHash, senderID, records, members, zones)
+	case "ELECT-CONFIRM":
+		lem.handleGroupConfirm(le, groupHash, senderID, records, members, zones)
+	}
+}
+
+func (lem *LeaderElectionManager) handleGroupCall(le *LeaderElection, groupHash string, senderID AgentId, records map[string][]string, members []string, zones []ZoneName) {
+	term := parseUint64(records, "_term")
+	le.mu.Lock()
+
+	if le.Active && le.Term >= term {
+		le.mu.Unlock()
+		return
+	}
+
+	le.Active = true
+	le.Term = term
+	le.MyVote = rand.Uint32()
+	le.Votes = map[AgentId]uint32{lem.localID: le.MyVote}
+	le.Confirms = make(map[AgentId]AgentId)
+	le.ExpectedPeers = len(members) - 1
+	vote := le.MyVote
+
+	if le.VoteTimer != nil {
+		le.VoteTimer.Stop()
+	}
+	le.VoteTimer = time.AfterFunc(5*time.Second, func() {
+		lem.onGroupVoteTimeout(groupHash, term, members, zones)
+	})
+	le.mu.Unlock()
+
+	lgElect.Info("joining group election", "group", groupHash[:8], "term", term, "from", senderID)
+
+	if len(zones) > 0 {
+		voteRecords := map[string][]string{
+			"_vote":  {strconv.FormatUint(uint64(vote), 10)},
+			"_term":  {strconv.FormatUint(term, 10)},
+			"_group": {groupHash},
+		}
+		if err := lem.broadcastFunc(zones[0], "ELECT-VOTE", voteRecords); err != nil {
+			lgElect.Error("failed to broadcast group ELECT-VOTE", "group", groupHash[:8], "err", err)
+		}
+	}
+}
+
+func (lem *LeaderElectionManager) handleGroupVote(le *LeaderElection, groupHash string, senderID AgentId, records map[string][]string, members []string, zones []ZoneName) {
+	term := parseUint64(records, "_term")
+	vote := uint32(parseUint64(records, "_vote"))
+
+	le.mu.Lock()
+	defer le.mu.Unlock()
+
+	if !le.Active || le.Term != term {
+		return
+	}
+
+	le.Votes[senderID] = vote
+	lgElect.Info("received group vote", "group", groupHash[:8], "from", senderID, "votes", len(le.Votes), "expected", le.ExpectedPeers+1)
+
+	if len(le.Votes) >= le.ExpectedPeers+1 {
+		if le.VoteTimer != nil {
+			le.VoteTimer.Stop()
+		}
+		go lem.determineAndConfirmGroup(groupHash, term, members, zones)
+	}
+}
+
+func (lem *LeaderElectionManager) handleGroupConfirm(le *LeaderElection, groupHash string, senderID AgentId, records map[string][]string, members []string, zones []ZoneName) {
+	term := parseUint64(records, "_term")
+	winner := AgentId(parseString(records, "_winner"))
+
+	le.mu.Lock()
+	if !le.Active || le.Term != term {
+		le.mu.Unlock()
+		return
+	}
+
+	le.Confirms[senderID] = winner
+
+	if len(le.Confirms) >= le.ExpectedPeers+1 {
+		if le.ConfirmTimer != nil {
+			le.ConfirmTimer.Stop()
+		}
+		le.mu.Unlock()
+		lem.finalizeGroupElection(groupHash, term, members, zones)
+		return
+	}
+	le.mu.Unlock()
+}
+
+func (lem *LeaderElectionManager) onGroupVoteTimeout(groupHash string, term uint64, members []string, zones []ZoneName) {
+	lem.mu.RLock()
+	le := lem.groupElections[groupHash]
+	lem.mu.RUnlock()
+	if le == nil {
+		return
+	}
+
+	le.mu.Lock()
+	if !le.Active || le.Term != term {
+		le.mu.Unlock()
+		return
+	}
+	collected := len(le.Votes)
+	expected := le.ExpectedPeers + 1
+	if collected < expected {
+		le.Active = false
+		le.mu.Unlock()
+		lgElect.Warn("group election aborted: not all members voted",
+			"group", groupHash[:8], "term", term, "votes", collected, "expected", expected)
+		return
+	}
+	le.mu.Unlock()
+	lem.determineAndConfirmGroup(groupHash, term, members, zones)
+}
+
+func (lem *LeaderElectionManager) determineAndConfirmGroup(groupHash string, term uint64, members []string, zones []ZoneName) {
+	lem.mu.RLock()
+	le := lem.groupElections[groupHash]
+	lem.mu.RUnlock()
+	if le == nil {
+		return
+	}
+
+	le.mu.Lock()
+	if !le.Active || le.Term != term {
+		le.mu.Unlock()
+		return
+	}
+
+	winner := determineWinner(le.Votes)
+	le.Confirms[lem.localID] = winner
+
+	if le.ConfirmTimer != nil {
+		le.ConfirmTimer.Stop()
+	}
+	le.ConfirmTimer = time.AfterFunc(5*time.Second, func() {
+		lem.onGroupConfirmTimeout(groupHash, term, members, zones)
+	})
+	le.mu.Unlock()
+
+	lgElect.Info("group election: determined winner, broadcasting confirm", "group", groupHash[:8], "winner", winner, "term", term)
+
+	if len(zones) > 0 {
+		confirmRecords := map[string][]string{
+			"_winner": {string(winner)},
+			"_term":   {strconv.FormatUint(term, 10)},
+			"_group":  {groupHash},
+		}
+		if err := lem.broadcastFunc(zones[0], "ELECT-CONFIRM", confirmRecords); err != nil {
+			lgElect.Error("failed to broadcast group ELECT-CONFIRM", "group", groupHash[:8], "err", err)
+		}
+	}
+}
+
+func (lem *LeaderElectionManager) onGroupConfirmTimeout(groupHash string, term uint64, members []string, zones []ZoneName) {
+	lem.mu.RLock()
+	le := lem.groupElections[groupHash]
+	lem.mu.RUnlock()
+	if le == nil {
+		return
+	}
+
+	le.mu.Lock()
+	if !le.Active || le.Term != term {
+		le.mu.Unlock()
+		return
+	}
+	collected := len(le.Confirms)
+	expected := le.ExpectedPeers + 1
+	if collected < expected {
+		le.Active = false
+		le.mu.Unlock()
+		lgElect.Warn("group election aborted: not all members confirmed",
+			"group", groupHash[:8], "term", term, "confirms", collected, "expected", expected)
+		return
+	}
+	le.mu.Unlock()
+	lem.finalizeGroupElection(groupHash, term, members, zones)
+}
+
+func (lem *LeaderElectionManager) finalizeGroupElection(groupHash string, term uint64, members []string, zones []ZoneName) {
+	lem.mu.RLock()
+	le := lem.groupElections[groupHash]
+	lem.mu.RUnlock()
+	if le == nil {
+		return
+	}
+
+	le.mu.Lock()
+	if le.Term != term {
+		le.mu.Unlock()
+		return
+	}
+
+	var agreedWinner AgentId
+	consensus := true
+	for _, winner := range le.Confirms {
+		if agreedWinner == "" {
+			agreedWinner = winner
+		} else if winner != agreedWinner {
+			consensus = false
+			break
+		}
+	}
+
+	if !consensus || agreedWinner == "" {
+		le.Active = false
+		expectedPeers := le.ExpectedPeers
+		le.mu.Unlock()
+		lgElect.Warn("group election: no consensus, re-electing", "group", groupHash[:8], "term", term)
+		time.AfterFunc(time.Duration(500+rand.Intn(1000))*time.Millisecond, func() {
+			_ = expectedPeers // avoid unused warning
+			lem.StartGroupElection(groupHash, members, zones)
+		})
+		return
+	}
+
+	le.Leader = agreedWinner
+	le.LeaderExpiry = time.Now().Add(lem.leaderTTL)
+	le.Active = false
+
+	isUs := agreedWinner == lem.localID
+	lgElect.Info("group leader elected", "group", groupHash[:8], "leader", agreedWinner, "is_us", isUs, "term", term, "zones", len(zones))
+
+	lem.scheduleGroupReelection(le, groupHash, members, zones)
+	le.mu.Unlock()
+
+	if isUs && lem.onLeaderElected != nil {
+		for _, zone := range zones {
+			go func(z ZoneName) {
+				if err := lem.onLeaderElected(z); err != nil {
+					lgElect.Error("onLeaderElected callback failed", "zone", z, "group", groupHash[:8], "error", err)
+				}
+			}(zone)
+		}
+	}
+}
+
+// scheduleGroupReelection sets up a timer to re-elect at 90% of leader TTL.
+// Must be called with le.mu held.
+func (lem *LeaderElectionManager) scheduleGroupReelection(le *LeaderElection, groupHash string, members []string, zones []ZoneName) {
+	if le.ReelectTimer != nil {
+		le.ReelectTimer.Stop()
+	}
+	le.ReelectTimer = time.AfterFunc(lem.leaderTTL*9/10, func() {
+		lgElect.Info("group leader TTL expiring, triggering re-election", "group", groupHash[:8])
+		lem.StartGroupElection(groupHash, members, zones)
+	})
+}
+
+// GetGroupLeader returns the current leader for a provider group.
+func (lem *LeaderElectionManager) GetGroupLeader(groupHash string) (AgentId, bool) {
+	lem.mu.RLock()
+	le, ok := lem.groupElections[groupHash]
+	lem.mu.RUnlock()
+	if !ok {
+		return "", false
+	}
+	le.mu.Lock()
+	defer le.mu.Unlock()
+	if le.Leader == "" || time.Now().After(le.LeaderExpiry) {
+		return "", false
+	}
+	return le.Leader, true
+}
+
+// InvalidateGroupLeader clears the leader for a group (e.g., when the group degrades).
+// Keeps the term so "invalidated" status can be reported.
+func (lem *LeaderElectionManager) InvalidateGroupLeader(groupHash string) {
+	lem.mu.RLock()
+	le, ok := lem.groupElections[groupHash]
+	lem.mu.RUnlock()
+	if !ok {
+		return
+	}
+	le.mu.Lock()
+	defer le.mu.Unlock()
+	if le.Leader == "" {
+		return
+	}
+	lgElect.Info("invalidating group leader due to degraded state",
+		"group", groupHash[:8], "was", le.Leader, "term", le.Term)
+	le.Leader = ""
+	if le.ReelectTimer != nil {
+		le.ReelectTimer.Stop()
+		le.ReelectTimer = nil
+	}
+}
+
+// GetGroupElectionState returns the election state for a group (for gossip).
+func (lem *LeaderElectionManager) GetGroupElectionState(groupHash string) GroupElectionState {
+	lem.mu.RLock()
+	le, ok := lem.groupElections[groupHash]
+	lem.mu.RUnlock()
+	if !ok {
+		return GroupElectionState{}
+	}
+	le.mu.Lock()
+	defer le.mu.Unlock()
+	return GroupElectionState{
+		Leader:       string(le.Leader),
+		Term:         uint32(le.Term),
+		LeaderExpiry: le.LeaderExpiry,
+	}
+}
+
+// ApplyGossipElection updates the LEM with election state received via gossip.
+// Only accepts the update if the gossip term is higher than the local term.
+func (lem *LeaderElectionManager) ApplyGossipElection(groupHash string, state GroupElectionState) {
+	if state.Leader == "" || state.Term == 0 {
+		return
+	}
+
+	lem.mu.Lock()
+	le, ok := lem.groupElections[groupHash]
+	if !ok {
+		le = &LeaderElection{}
+		lem.groupElections[groupHash] = le
+	}
+	lem.mu.Unlock()
+
+	le.mu.Lock()
+	defer le.mu.Unlock()
+
+	if uint64(state.Term) <= le.Term {
+		return
+	}
+
+	lgElect.Info("accepted leader from gossip",
+		"group", groupHash[:8], "leader", state.Leader,
+		"term", state.Term, "expiry", state.LeaderExpiry)
+
+	le.Leader = AgentId(state.Leader)
+	le.Term = uint64(state.Term)
+	le.LeaderExpiry = state.LeaderExpiry
+	le.Active = false // not running an election, just accepting the result
+
+	// Schedule re-election before leader expires
+	if le.ReelectTimer != nil {
+		le.ReelectTimer.Stop()
+	}
+	if lem.providerGroupMgr != nil {
+		pg := lem.providerGroupMgr.GetGroup(groupHash)
+		if pg != nil {
+			lem.scheduleGroupReelection(le, groupHash, pg.Members, pg.Zones)
+		}
+	}
 }
 
 // DeferElection records a zone as needing an election once peers become operational.
@@ -127,13 +616,30 @@ func (lem *LeaderElectionManager) NotifyPeerOperational(peerZones map[ZoneName]b
 	}
 
 	for _, zone := range candidates {
+		configured := lem.configuredPeers(zone)
+		if configured == 0 {
+			continue
+		}
+
+		// Route to group election if provider group exists
+		if lem.providerGroupMgr != nil {
+			pg := lem.providerGroupMgr.GetGroupForZone(zone)
+			if pg != nil {
+				lem.mu.Lock()
+				delete(lem.pendingElections, zone)
+				lem.mu.Unlock()
+				lem.DeferGroupElection(pg.GroupHash)
+				continue
+			}
+		}
+
+		// No provider group — per-zone election
 		operational := 0
 		if lem.operationalPeersFunc != nil {
 			operational = lem.operationalPeersFunc(zone)
 		}
-		configured := lem.configuredPeers(zone)
-		if configured > 0 && operational >= configured {
-			lgElect.Info("all configured peers operational, starting election",
+		if operational >= configured {
+			lgElect.Info("all configured peers operational, starting per-zone election",
 				"zone", zone, "operational", operational, "configured", configured)
 			lem.mu.Lock()
 			delete(lem.pendingElections, zone)
@@ -190,7 +696,21 @@ func (lem *LeaderElectionManager) GetLeader(zone ZoneName) (AgentId, bool) {
 }
 
 // IsLeader returns true if the local agent is the current leader for a zone.
+// Checks group-based election first (if provider groups are configured),
+// then falls back to per-zone election.
 func (lem *LeaderElectionManager) IsLeader(zone ZoneName) bool {
+	// Check group-based leader first
+	if lem.providerGroupMgr != nil {
+		pg := lem.providerGroupMgr.GetGroupForZone(zone)
+		if pg != nil {
+			leader, ok := lem.GetGroupLeader(pg.GroupHash)
+			if ok {
+				return leader == lem.localID
+			}
+			// Group exists but no leader yet — fall through to per-zone check
+		}
+	}
+	// Fall back to per-zone election
 	leader, ok := lem.GetLeader(zone)
 	if !ok {
 		return false
@@ -211,8 +731,43 @@ type LeaderStatus struct {
 func (lem *LeaderElectionManager) GetAllLeaders() []LeaderStatus {
 	lem.mu.RLock()
 	defer lem.mu.RUnlock()
+
+	// Track zones covered by group elections to avoid duplicates
+	groupCoveredZones := make(map[ZoneName]bool)
+
 	var result []LeaderStatus
+
+	// Group-based leaders first
+	for groupHash, le := range lem.groupElections {
+		le.mu.Lock()
+		if le.Leader != "" && time.Now().Before(le.LeaderExpiry) {
+			// Find all zones in this group
+			var zones []ZoneName
+			if lem.providerGroupMgr != nil {
+				pg := lem.providerGroupMgr.GetGroup(groupHash)
+				if pg != nil {
+					zones = pg.Zones
+				}
+			}
+			for _, zone := range zones {
+				groupCoveredZones[zone] = true
+				result = append(result, LeaderStatus{
+					Zone:   zone,
+					Leader: le.Leader,
+					IsSelf: le.Leader == lem.localID,
+					Term:   le.Term,
+					Expiry: le.LeaderExpiry,
+				})
+			}
+		}
+		le.mu.Unlock()
+	}
+
+	// Per-zone leaders (only for zones not covered by group elections)
 	for zone, le := range lem.elections {
+		if groupCoveredZones[zone] {
+			continue
+		}
 		le.mu.Lock()
 		if le.Leader != "" && time.Now().Before(le.LeaderExpiry) {
 			result = append(result, LeaderStatus{
@@ -231,6 +786,17 @@ func (lem *LeaderElectionManager) GetAllLeaders() []LeaderStatus {
 // StartElection initiates a new election for a zone. If expectedPeers is 0,
 // the local agent immediately becomes leader without sending any messages.
 func (lem *LeaderElectionManager) StartElection(zone ZoneName, expectedPeers int) {
+	// If this zone is covered by a provider group, skip per-zone election.
+	// Group elections are handled by StartGroupElection instead.
+	if expectedPeers > 0 && lem.providerGroupMgr != nil {
+		pg := lem.providerGroupMgr.GetGroupForZone(zone)
+		if pg != nil {
+			lgElect.Debug("skipping per-zone election, zone covered by provider group",
+				"zone", zone, "group", pg.GroupHash[:8])
+			return
+		}
+	}
+
 	le := lem.getOrCreate(zone)
 	le.mu.Lock()
 
@@ -301,6 +867,16 @@ func (lem *LeaderElectionManager) StartElection(zone ZoneName, expectedPeers int
 
 // HandleMessage dispatches an incoming election message to the appropriate handler.
 func (lem *LeaderElectionManager) HandleMessage(zone ZoneName, senderID AgentId, rfiType string, records map[string][]string) {
+	// Ignore per-zone election messages when zone is covered by group election
+	if lem.providerGroupMgr != nil {
+		pg := lem.providerGroupMgr.GetGroupForZone(zone)
+		if pg != nil {
+			lgElect.Debug("ignoring per-zone election message, zone covered by provider group",
+				"zone", zone, "type", rfiType, "group", pg.GroupHash[:8])
+			return
+		}
+	}
+
 	switch rfiType {
 	case "ELECT-CALL":
 		lem.handleCall(zone, senderID, records)
@@ -551,23 +1127,35 @@ func (lem *LeaderElectionManager) scheduleReelection(le *LeaderElection) {
 	zone := le.Zone
 	le.ReelectTimer = time.AfterFunc(lem.leaderTTL*9/10, func() {
 		configured := lem.configuredPeers(zone)
-		operational := 0
-		if lem.operationalPeersFunc != nil {
-			operational = lem.operationalPeersFunc(zone)
-		}
 
 		if configured == 0 {
 			// Truly single agent — self-elect
 			lgElect.Info("leader TTL expiring, single agent, re-self-electing", "zone", zone)
 			lem.StartElection(zone, 0)
-		} else if operational >= configured {
-			// All configured peers are operational — hold election
+			return
+		}
+
+		// Multi-agent — use group election if provider group exists
+		if lem.providerGroupMgr != nil {
+			pg := lem.providerGroupMgr.GetGroupForZone(zone)
+			if pg != nil {
+				lgElect.Info("leader TTL expiring, deferring to group re-election",
+					"zone", zone, "group", pg.GroupHash[:8])
+				lem.DeferGroupElection(pg.GroupHash)
+				return
+			}
+		}
+
+		// No provider group — fall back to per-zone election
+		operational := 0
+		if lem.operationalPeersFunc != nil {
+			operational = lem.operationalPeersFunc(zone)
+		}
+		if operational >= configured {
 			lgElect.Info("leader TTL expiring, all peers operational, triggering re-election",
 				"zone", zone, "operational", operational, "configured", configured)
 			lem.StartElection(zone, configured)
 		} else {
-			// Not all configured peers are reachable — cannot elect.
-			// Leader TTL will expire, causing a change freeze until peers reconnect.
 			lgElect.Warn("leader TTL expiring, not all configured peers operational — no election, change freeze",
 				"zone", zone, "operational", operational, "configured", configured)
 			lem.DeferElection(zone)
@@ -736,13 +1324,32 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *ZoneDat
 		LastChecked: time.Now(),
 	}
 
-	// 1. Leader election state
-	le := lem.getOrCreate(zone)
-	le.mu.Lock()
-	status.Leader = le.Leader
-	status.LeaderExpiry = le.LeaderExpiry
-	status.ElectionTerm = le.Term
-	le.mu.Unlock()
+	// 1. Leader election state — check group-based election first
+	groupFound := false
+	if lem.providerGroupMgr != nil {
+		pg := lem.providerGroupMgr.GetGroupForZone(zone)
+		if pg != nil {
+			lem.mu.RLock()
+			le, ok := lem.groupElections[pg.GroupHash]
+			lem.mu.RUnlock()
+			if ok {
+				le.mu.Lock()
+				status.Leader = le.Leader
+				status.LeaderExpiry = le.LeaderExpiry
+				status.ElectionTerm = le.Term
+				le.mu.Unlock()
+				groupFound = true
+			}
+		}
+	}
+	if !groupFound {
+		le := lem.getOrCreate(zone)
+		le.mu.Lock()
+		status.Leader = le.Leader
+		status.LeaderExpiry = le.LeaderExpiry
+		status.ElectionTerm = le.Term
+		le.mu.Unlock()
+	}
 	status.IsLeader = status.Leader == lem.localID && time.Now().Before(status.LeaderExpiry)
 
 	if zd == nil || kdb == nil {

@@ -222,12 +222,14 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	if zd.FirstZoneLoad {
 		zd.CurrentSerial = new_zd.CurrentSerial
 		zd.FirstZoneLoad = false
+		// Don't persist on first load — the persisted serial (if any) will be
+		// restored in initialLoadZone and must not be overwritten here.
 	} else {
 		zd.CurrentSerial++
-	}
-	if Globals.App.Type == AppTypeCombiner && zd.KeyDB != nil {
-		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
-			lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
+		if zd.KeyDB != nil && zd.KeyDB.Options[AuthOptPersistOutboundSerial] != "" {
+			if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
+				lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
+			}
 		}
 	}
 	zd.ApexLen = new_zd.ApexLen
@@ -409,12 +411,14 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	if zd.FirstZoneLoad {
 		zd.CurrentSerial = new_zd.CurrentSerial
 		zd.FirstZoneLoad = false
+		// Don't persist on first load — the persisted serial (if any) will be
+		// restored in initialLoadZone and must not be overwritten here.
 	} else {
 		zd.CurrentSerial++
-	}
-	if Globals.App.Type == AppTypeCombiner && zd.KeyDB != nil {
-		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
-			lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
+		if zd.KeyDB != nil && zd.KeyDB.Options[AuthOptPersistOutboundSerial] != "" {
+			if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
+				lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
+			}
 		}
 	}
 	zd.ApexLen = new_zd.ApexLen
@@ -520,18 +524,24 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 				SyncStatus: hss,
 			}
 		case AppTypeCombiner:
-			// A combiner needs to act on HSYNC changes, but only to verify whether itself is in the HSYNC RRset
-			lg.Info("HSYNC RRset has changed, verifying whether we are in the HSYNC RRset", "zone", zd.ZoneName)
-			// XXX: Kludge just for testing. Should be replaced by HSYNC RRset parsing
-			zd.Options[OptAllowCombine] = true
-			// TODO: Implement this
+			matched, _, _ := zd.matchHsyncProvider(ourHsyncIdentities())
+			if matched && !zd.Options[OptMPDisallowEdits] {
+				lg.Info("HSYNC RRset confirms we are a listed provider and signer, enabling allow-edits", "zone", zd.ZoneName)
+				zd.Options[OptAllowEdits] = true
+			} else if matched && zd.Options[OptMPDisallowEdits] {
+				lg.Info("HSYNC RRset confirms we are a listed provider but not a signer, edits disallowed", "zone", zd.ZoneName)
+				zd.Options[OptAllowEdits] = false
+			} else {
+				lg.Info("HSYNC RRset does not list us as a provider, disabling allow-edits", "zone", zd.ZoneName)
+				zd.Options[OptAllowEdits] = false
+			}
 		}
 	}
 
-	lg.Debug("FetchFromUpstream: checking combine status", "zone", zd.ZoneName, "appType", AppTypeToString[Globals.App.Type], "allowCombine", zd.Options[OptAllowCombine])
+	lg.Debug("FetchFromUpstream: checking combine status", "zone", zd.ZoneName, "appType", AppTypeToString[Globals.App.Type], "allowEdits", zd.Options[OptAllowEdits])
 	// XXX: Current thinking: the OptCombiner option is dynamically set for a zone given the combination of
 	//      (a) it contains a HSYNC RRset and (b) appname is "combiner".
-	if Globals.App.Type == AppTypeCombiner && zd.Options[OptAllowCombine] {
+	if Globals.App.Type == AppTypeCombiner && zd.Options[OptAllowEdits] {
 		lg.Info("combining with local changes", "zone", zd.ZoneName)
 		success, err := zd.CombineWithLocalChanges()
 		if err != nil {
@@ -920,7 +930,7 @@ func (zd *ZoneData) BumpSerialOnly() (BumperResponse, error) {
 	resp.OldSerial = zd.CurrentSerial
 	zd.CurrentSerial++
 	resp.NewSerial = zd.CurrentSerial
-	if Globals.App.Type == AppTypeCombiner && zd.KeyDB != nil {
+	if zd.KeyDB != nil && zd.KeyDB.Options[AuthOptPersistOutboundSerial] != "" {
 		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
 			lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
 		}
@@ -1015,18 +1025,22 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 
 	// Check HSYNCPARAM for parentsync=agent, which means the providers
 	// coordinate parent sync via leader election.
+	// Only if our identity is listed in the zone's HSYNC3 records.
 	if !zd.Options[OptDelSyncChild] && Globals.App.Type == AppTypeAgent {
-		apex, err := zd.GetOwner(zd.ZoneName)
-		if err == nil && apex != nil {
-			hsyncparamRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
-			if exists && len(hsyncparamRRset.RRs) > 0 {
-				if prr, ok := hsyncparamRRset.RRs[0].(*dns.PrivateRR); ok {
-					if hsyncparam, ok := prr.Data.(*core.HSYNCPARAM); ok {
-						if hsyncparam.GetParentSync() == core.HsyncParentSyncAgent {
-							lg.Info("SetupZoneSync: HSYNCPARAM parentsync=agent, enabling delegation sync",
-								"zone", zd.ZoneName)
-							zd.Options[OptDelSyncChild] = true
-							wantsSync = true
+		matched, _, _ := zd.matchHsyncProvider(ourHsyncIdentities())
+		if matched {
+			apex, err := zd.GetOwner(zd.ZoneName)
+			if err == nil && apex != nil {
+				hsyncparamRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
+				if exists && len(hsyncparamRRset.RRs) > 0 {
+					if prr, ok := hsyncparamRRset.RRs[0].(*dns.PrivateRR); ok {
+						if hsyncparam, ok := prr.Data.(*core.HSYNCPARAM); ok {
+							if hsyncparam.GetParentSync() == core.HsyncParentSyncAgent {
+								lg.Info("SetupZoneSync: HSYNCPARAM parentsync=agent, enabling delegation sync",
+									"zone", zd.ZoneName)
+								zd.Options[OptDelSyncChild] = true
+								wantsSync = true
+							}
 						}
 					}
 				}

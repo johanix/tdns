@@ -207,8 +207,8 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 
 	isLocal := synchedDataUpdate.UpdateType == "local"
 
-	// Process explicit Operations if present (takes precedence over RRsets for remote updates)
-	if !isLocal && len(synchedDataUpdate.Update.Operations) > 0 {
+	// Process explicit Operations if present (takes precedence over RRsets)
+	if len(synchedDataUpdate.Update.Operations) > 0 {
 		changed, msg = zdr.processOperations(synchedDataUpdate, nar, nod)
 		nar.Set(synchedDataUpdate.AgentId, nod)
 		zdr.Set(synchedDataUpdate.Zone, nar)
@@ -324,11 +324,13 @@ func (zdr *ZoneDataRepo) ProcessUpdate(synchedDataUpdate *SynchedDataUpdate) (bo
 	return changed, msg, nil
 }
 
-// processOperations handles explicit Operations (add, delete, replace) on a remote update.
+// processOperations handles explicit Operations (add, delete, replace) on an update.
+// For local updates, deletes are deferred (not applied to repo) pending combiner confirmation.
 // Returns (changed bool, msg string).
 func (zdr *ZoneDataRepo) processOperations(synchedDataUpdate *SynchedDataUpdate, nar *AgentRepo, nod *OwnerData) (bool, string) {
 	var changed bool
 	var msg string
+	isLocal := synchedDataUpdate.UpdateType == "local"
 
 	for _, op := range synchedDataUpdate.Update.Operations {
 		rrtype, ok := dns.StringToType[op.RRtype]
@@ -355,6 +357,9 @@ func (zdr *ZoneDataRepo) processOperations(synchedDataUpdate *SynchedDataUpdate,
 					msg = fmt.Sprintf("Added RR via operation: %s", rr.String())
 					lgAgent.Debug(msg)
 					changed = true
+				} else if synchedDataUpdate.Force {
+					lgAgent.Debug("RR already present but --force set, marking changed", "rr", rr.String())
+					changed = true
 				}
 			}
 			nod.RRtypes.Set(rrtype, curRRset)
@@ -365,23 +370,33 @@ func (zdr *ZoneDataRepo) processOperations(synchedDataUpdate *SynchedDataUpdate,
 				lgAgent.Debug("delete operation: RRset does not exist", "rrtype", op.RRtype)
 				continue
 			}
-			for _, rrStr := range op.Records {
-				rr, err := dns.NewRR(rrStr)
-				if err != nil {
-					lgAgent.Warn("invalid RR in delete operation, skipping", "rr", rrStr, "err", err)
-					continue
-				}
-				curRRset.Delete(rr)
-				zdr.removeTrackedRR(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype, rr.String())
-				msg = fmt.Sprintf("Deleted RR via operation: %s", rr.String())
+			if isLocal {
+				// Local delete: don't remove from repo yet. Mark changed so the
+				// delete intent propagates to combiner/agents. Actual removal
+				// happens when the combiner confirms.
+				msg = fmt.Sprintf("Requesting deletion of %s RR(s) from agent %q (pending combiner confirmation)",
+					op.RRtype, synchedDataUpdate.AgentId)
 				lgAgent.Debug(msg)
 				changed = true
-			}
-			if len(curRRset.RRs) == 0 {
-				nod.RRtypes.Delete(rrtype)
-				zdr.removeTracking(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype)
 			} else {
-				nod.RRtypes.Set(rrtype, curRRset)
+				for _, rrStr := range op.Records {
+					rr, err := dns.NewRR(rrStr)
+					if err != nil {
+						lgAgent.Warn("invalid RR in delete operation, skipping", "rr", rrStr, "err", err)
+						continue
+					}
+					curRRset.Delete(rr)
+					zdr.removeTrackedRR(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype, rr.String())
+					msg = fmt.Sprintf("Deleted RR via operation: %s", rr.String())
+					lgAgent.Debug(msg)
+					changed = true
+				}
+				if len(curRRset.RRs) == 0 {
+					nod.RRtypes.Delete(rrtype)
+					zdr.removeTracking(synchedDataUpdate.Zone, synchedDataUpdate.AgentId, rrtype)
+				} else {
+					nod.RRtypes.Set(rrtype, curRRset)
+				}
 			}
 
 		default:

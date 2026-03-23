@@ -73,6 +73,10 @@ type ChunkNotifyHandler struct {
 	OnConfirmationReceived func(distributionID string, senderID string, status ConfirmStatus,
 		zone string, applied []string, removed []string, rejected []RejectedItemDTO, truncated bool, nonce string)
 
+	// GossipForPeer returns serialized gossip data for a given peer.
+	// Used by HandleBeat to include gossip in beat responses.
+	GossipForPeer func(peerID string) json.RawMessage
+
 	// FetchChunkQuery performs a CHUNK query to the given server for the given qname.
 	// Used when Transport is nil (combiner/signer mode) for chunk_mode=query fallback.
 	// If nil and Transport is nil, query mode is not supported.
@@ -517,6 +521,9 @@ func (h *ChunkNotifyHandler) RouteViaRouter(ctx context.Context, qname string, m
 	msgCtx.Data["response_peer_id"] = senderHint
 	if h.OnConfirmationReceived != nil {
 		msgCtx.Data["on_confirmation_received"] = h.OnConfirmationReceived
+	}
+	if h.GossipForPeer != nil {
+		msgCtx.Data["gossip_for_peer"] = h.GossipForPeer
 	}
 	// Store the parsed message so handlers don't need to re-parse
 	msgCtx.Data["incoming_message"] = incomingMsg

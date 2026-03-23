@@ -139,7 +139,7 @@ type MultiProviderConf struct {
 	// === Combiner-specific fields ===
 
 	// CombinerOptions: list of combiner-specific option strings parsed at startup.
-	// Known options: "add-signature", "persist-outgoing-serial".
+	// Known options: "add-signature".
 	CombinerOptionsStrs []string                `yaml:"combiner-options" mapstructure:"combiner-options"`
 	CombinerOptions     map[CombinerOption]bool `yaml:"-" mapstructure:"-"`
 

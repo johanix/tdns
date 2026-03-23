@@ -88,6 +88,7 @@ type operationResponse struct {
 	RemovedRecords []string
 	RejectedItems  []RejectedItemDTO
 	Truncated      bool
+	Gossip         json.RawMessage
 }
 
 // IncomingConfirmation represents a confirmation received via DNS
@@ -289,6 +290,7 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 		YourIdentity: peer.ID,
 		Time:         req.Timestamp,
 		Zones:        sharedZones, // Include shared zones for authorization
+		Gossip:       req.Gossip,
 	}
 
 	payloadJSON, err := json.Marshal(payload)
@@ -316,6 +318,7 @@ func (t *DNSTransport) Beat(ctx context.Context, peer *Peer, req *BeatRequest) (
 		Sequence:    req.Sequence,
 		State:       resp.Message,
 		Ack:         resp.Status == ConfirmSuccess,
+		Gossip:      resp.Gossip,
 	}, nil
 }
 
@@ -938,10 +941,14 @@ func (t *DNSTransport) SendStatusUpdate(ctx context.Context, peer *Peer, post *c
 	}
 
 	dnsAddr := fmt.Sprintf("%s:%d", addr.Host, addr.Port)
-	_, _, err = t.DNSClient.ExchangeContext(ctx, m, dnsAddr)
+	res, _, err := t.DNSClient.ExchangeContext(ctx, m, dnsAddr)
 	if err != nil {
 		return NewTransportError("DNS", "SendStatusUpdate", peer.ID,
 			fmt.Errorf("NOTIFY exchange failed: %w", err), true)
+	}
+	if res.Rcode != dns.RcodeSuccess {
+		return NewTransportError("DNS", "SendStatusUpdate", peer.ID,
+			fmt.Errorf("NOTIFY returned rcode %s", dns.RcodeToString[res.Rcode]), true)
 	}
 
 	return nil
@@ -1067,6 +1074,7 @@ func (t *DNSTransport) sendNotifyWithPayload(ctx context.Context, peer *Peer, qn
 			RemovedRecords: confirm.RemovedRecords,
 			RejectedItems:  confirm.RejectedItems,
 			Truncated:      confirm.Truncated,
+			Gossip:         confirm.Gossip,
 		}, nil
 	}
 
@@ -1093,6 +1101,7 @@ type inlineConfirm struct {
 	RemovedRecords []string          `json:"removed_records,omitempty"`
 	RejectedItems  []RejectedItemDTO `json:"rejected_items,omitempty"`
 	Truncated      bool              `json:"truncated,omitempty"`
+	Gossip         json.RawMessage   `json:"Gossip,omitempty"`
 }
 
 // extractConfirmFromResponse extracts a JSON confirmation from the EDNS0 CHUNK option in a DNS response.
@@ -1224,12 +1233,13 @@ type DnsBeatPayload struct {
 	State     string `json:"state,omitempty"`
 
 	// Standard fields
-	MessageType    string   `json:"MessageType"` // "beat"
-	MyIdentity     string   `json:"MyIdentity"`
-	YourIdentity   string   `json:"YourIdentity"`
-	MyBeatInterval uint32   `json:"MyBeatInterval"`
-	Zones          []string `json:"Zones"`
-	Time           string   `json:"Time"` // RFC3339
+	MessageType    string          `json:"MessageType"` // "beat"
+	MyIdentity     string          `json:"MyIdentity"`
+	YourIdentity   string          `json:"YourIdentity"`
+	MyBeatInterval uint32          `json:"MyBeatInterval"`
+	Zones          []string        `json:"Zones"`
+	Time           string          `json:"Time"`             // RFC3339
+	Gossip         json.RawMessage `json:"Gossip,omitempty"` // Gossip data piggybacked on beats
 }
 
 // GetSenderID returns the sender ID from either old or new format.

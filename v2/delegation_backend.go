@@ -138,10 +138,12 @@ func ExportDelegationData(backend DelegationBackend, parentZone, outfile string,
 
 		for _, k := range keys {
 			for _, rr := range data[k.owner][k.rrtype] {
+				rrOut := rr
 				if rr.Header().Ttl == 0 && defaultTTL > 0 {
-					rr.Header().Ttl = defaultTTL
+					rrOut = dns.Copy(rr)
+					rrOut.Header().Ttl = defaultTTL
 				}
-				buf.WriteString(rr.String())
+				buf.WriteString(rrOut.String())
 				buf.WriteString("\n")
 			}
 		}

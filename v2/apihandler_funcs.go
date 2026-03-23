@@ -268,6 +268,9 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.DnsEngine = conf.DnsEngine
 			resp.ApiServer = conf.ApiServer
 			resp.Identities = conf.Service.Identities
+			if conf.MultiProvider != nil {
+				resp.CombinerOptions = conf.MultiProvider.CombinerOptions
+			}
 			resp.Msg = fmt.Sprintf("%s: Configuration is ok, boot time: %s, last config reload: %s",
 				Globals.App.Name, Globals.App.ServerBootTime.Format(TimeLayout), Globals.App.ServerConfigTime.Format(TimeLayout))
 
@@ -336,7 +339,7 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 				resp.SyncStatus = syncstate
 			case <-time.After(4 * time.Second):
 				resp.Error = true
-				resp.ErrorMsg = err.Error()
+				resp.ErrorMsg = "timeout waiting for delegation status response"
 			}
 
 		// Find out whether delegation is in sync or not and if not then fix it
