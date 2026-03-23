@@ -1,7 +1,7 @@
 # Unsigned Zone DNSKEY Suppression + KEYSTATE Timeout Fix
 
 **Date:** 2026-03-23
-**Status:** Plan (approved)
+**Status:** Implemented (KEYSTATE timeout still under investigation)
 
 ## Problem 1: DNSKEY Noise in Unsigned Zones
 
