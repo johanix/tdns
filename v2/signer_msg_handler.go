@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/johanix/tdns/v2/agent/transport"
+	"github.com/johanix/tdns-transport/v2/transport"
 )
 
 var lgSigner = Logger("signer")

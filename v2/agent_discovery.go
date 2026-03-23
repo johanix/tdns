@@ -15,7 +15,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/johanix/tdns/v2/agent/transport"
+	"github.com/johanix/tdns-transport/v2/transport"
 	"github.com/miekg/dns"
 )
 
