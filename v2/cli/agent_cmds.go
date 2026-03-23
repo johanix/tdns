@@ -382,7 +382,7 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 
 	amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
 		Command: apiCmd,
-		Zone:    tdns.ZoneName(dns.Fqdn(tdns.Globals.Zonename)),
+		Zone:    tdns.ZoneName(dns.Fqdn(zonename)),
 		RRs:     []string{rr.String()},
 	}, "local")
 

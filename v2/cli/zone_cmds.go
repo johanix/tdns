@@ -412,7 +412,10 @@ func ListMPZones(cr tdns.ZoneResponse) {
 		return
 	}
 
-	out := []string{"Zone|Providers|Signers|NSmgmt|ParentSync|Options"}
+	var out []string
+	if tdns.Globals.ShowHeaders {
+		out = append(out, "Zone|Providers|Signers|NSmgmt|ParentSync|Suffix|Options")
+	}
 
 	var znames []string
 	for zname := range cr.MPZones {
@@ -433,8 +436,8 @@ func ListMPZones(cr tdns.ZoneResponse) {
 		}
 		sort.Strings(opts)
 		optStr := "[" + strings.Join(opts, " ") + "]"
-		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s",
-			zname, providers, signers, info.NSmgmt, info.ParentSync, optStr))
+		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s",
+			zname, providers, signers, info.NSmgmt, info.ParentSync, info.Suffix, optStr))
 	}
 
 	fmt.Println(columnize.SimpleFormat(out))

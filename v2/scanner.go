@@ -1149,8 +1149,10 @@ func (scanner *Scanner) ProcessCDSNotify(ctx context.Context, tuple ScanTuple, p
 			return
 		}
 		scanLog.Printf("ProcessCDSNotify: %s: RFC 9615 signaling verification passed", childZone)
-		// Use signaling-verified CDS
-		cdsRRset = sigCDS
+		// Use signaling-verified CDS (nil means all NS were in-bailiwick, keep original cdsRRset)
+		if sigCDS != nil {
+			cdsRRset = sigCDS
+		}
 	} else if requireValidation {
 		if scanner.HasOption("at-apex") && bootstrapping {
 			// RFC 8078 opportunistic onboarding: bootstrapping with

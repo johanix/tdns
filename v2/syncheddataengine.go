@@ -333,39 +333,35 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 
 	lgEngine.Info("SynchedDataEngine started")
 
-	// Run hydration in background so the main select loop is immediately
-	// responsive to commands (zone edits list, etc.).
 	if hasCombiner || hasSigner {
-		go func() {
-			lgEngine.Info("startup hydration: MP zones to hydrate", "count", len(conf.Internal.MPZoneNames), "zones", conf.Internal.MPZoneNames)
-			for _, zname := range conf.Internal.MPZoneNames {
-				zd, ok := Zones.Get(zname)
-				if !ok || zd == nil {
-					lgEngine.Warn("startup hydration: zone not in Zones map, skipping", "zone", zname)
-					continue
-				}
-				if hasCombiner {
-					lgEngine.Info("startup hydration: requesting edits from combiner", "zone", zname)
-					zd.RequestAndWaitForEdits()
-				}
-				if hasSigner {
-					lgEngine.Info("startup hydration: requesting key inventory from signer", "zone", zname)
-					zd.RequestAndWaitForKeyInventory()
+		lgEngine.Info("startup hydration: MP zones to hydrate", "count", len(conf.Internal.MPZoneNames), "zones", conf.Internal.MPZoneNames)
+		for _, zname := range conf.Internal.MPZoneNames {
+			zd, ok := Zones.Get(zname)
+			if !ok || zd == nil {
+				lgEngine.Warn("startup hydration: zone not in Zones map, skipping", "zone", zname)
+				continue
+			}
+			if hasCombiner {
+				lgEngine.Info("startup hydration: requesting edits from combiner", "zone", zname)
+				zd.RequestAndWaitForEdits()
+			}
+			if hasSigner {
+				lgEngine.Info("startup hydration: requesting key inventory from signer", "zone", zname)
+				zd.RequestAndWaitForKeyInventory()
 
-					changed, ds, err := zd.LocalDnskeysFromKeystate()
-					if err != nil {
-						lgEngine.Error("startup hydration: LocalDnskeysFromKeystate failed", "zone", zname, "err", err)
-					} else if changed && ds != nil {
-						localAgentID := AgentId(conf.MultiProvider.Identity)
-						for _, rr := range ds.CurrentLocalKeys {
-							zdr.AddConfirmedRR(ZoneName(zname), localAgentID, rr)
-						}
-						lgEngine.Info("startup hydration: added local DNSKEYs to SDE", "zone", zname, "keys", len(ds.CurrentLocalKeys))
+				changed, ds, err := zd.LocalDnskeysFromKeystate()
+				if err != nil {
+					lgEngine.Error("startup hydration: LocalDnskeysFromKeystate failed", "zone", zname, "err", err)
+				} else if changed && ds != nil {
+					localAgentID := AgentId(conf.MultiProvider.Identity)
+					for _, rr := range ds.CurrentLocalKeys {
+						zdr.AddConfirmedRR(ZoneName(zname), localAgentID, rr)
 					}
+					lgEngine.Info("startup hydration: added local DNSKEYs to SDE", "zone", zname, "keys", len(ds.CurrentLocalKeys))
 				}
 			}
-			lgEngine.Info("startup hydration complete")
-		}()
+		}
+		lgEngine.Info("startup hydration complete")
 	}
 
 	// Periodic eviction of stale tracking entries (terminal states older than 1 hour).
@@ -548,14 +544,19 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 							// forward to our combiner. The sender should not be blocked.
 							if synchedDataUpdate.OriginatingDistID != "" && msgQs.OnRemoteConfirmationReady != nil {
 								var appliedRecords []string
+								var removedRecords []string
 								if synchedDataUpdate.Update != nil {
 									for _, op := range synchedDataUpdate.Update.Operations {
-										appliedRecords = append(appliedRecords, op.Records...)
+										if op.Operation == "delete" {
+											removedRecords = append(removedRecords, op.Records...)
+										} else {
+											appliedRecords = append(appliedRecords, op.Records...)
+										}
 									}
 								}
 								lgEngine.Info("sending immediate ACCEPTED for non-signing zone",
 									"zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId,
-									"records", len(appliedRecords), "originDistID", synchedDataUpdate.OriginatingDistID)
+									"records", len(appliedRecords), "removed", len(removedRecords), "originDistID", synchedDataUpdate.OriginatingDistID)
 								msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 									OriginatingDistID: synchedDataUpdate.OriginatingDistID,
 									OriginatingSender: string(synchedDataUpdate.AgentId),
@@ -563,6 +564,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 									Status:            "ok",
 									Message:           "accepted into SDE (not forwarded to combiner: not a signer)",
 									AppliedRecords:    appliedRecords,
+									RemovedRecords:    removedRecords,
 								})
 							}
 						} else {

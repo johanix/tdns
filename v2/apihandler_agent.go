@@ -361,13 +361,14 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 					resp.Error = true
 					resp.ErrorMsg = r.ErrorMsg
 					resp.Msg = fmt.Sprintf("%s RR(s) failed: %s", amp.Command, r.ErrorMsg)
+					resp.Status = "fail"
 				} else {
 					resp.Msg = fmt.Sprintf("%s %d RR(s) for zone %q", action, len(parsedRRs), amp.Zone)
 					if r.Msg != "" {
 						resp.Msg += " - " + r.Msg
 					}
+					resp.Status = "ok"
 				}
-				resp.Status = "ok"
 			case <-time.After(5 * time.Second):
 				resp.Error = true
 				resp.ErrorMsg = "timeout waiting for SynchedDataEngine response"

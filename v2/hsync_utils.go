@@ -161,8 +161,18 @@ func (zd *ZoneData) LocalDnskeysChanged(newzd *ZoneData) (bool, *DnskeyStatus, e
 // Returns (changed, status, error). If KEYSTATE is unavailable (LastKeyInventory == nil),
 // returns (false, nil, nil) — caller should suppress SYNC-DNSKEY-RRSET.
 func (zd *ZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) {
-	// Don't process DNSKEYs for unsigned zones
+	// Don't process DNSKEYs for unsigned zones, but clean up any
+	// previously published keys on transition to unsigned.
 	if zd.MPdata != nil && !zd.MPdata.ZoneSigned {
+		if len(zd.LocalDNSKEYs) > 0 {
+			ds := &DnskeyStatus{
+				Time:         time.Now(),
+				ZoneName:     zd.ZoneName,
+				LocalRemoves: zd.LocalDNSKEYs,
+			}
+			zd.LocalDNSKEYs = nil
+			return true, ds, nil
+		}
 		return false, nil, nil
 	}
 
@@ -280,11 +290,8 @@ func (zd *ZoneData) RequestAndWaitForKeyInventory() {
 	// Include the zone name so routeKeystateMessage only routes
 	// matching responses here (prevents cross-zone interference).
 	rfiChan := make(chan *KeystateInventoryMsg, 1)
-	tm.keystateRfiState.Store(&keystateRfiStateT{
-		Zone: zd.ZoneName,
-		Chan: rfiChan,
-	})
-	defer tm.keystateRfiState.Store(nil)
+	tm.setKeystateRfi(zd.ZoneName, rfiChan)
+	defer tm.deleteKeystateRfi(zd.ZoneName)
 
 	// Send RFI KEYSTATE to signer
 	if err := tm.sendRfiToSigner(zd.ZoneName, "KEYSTATE"); err != nil {

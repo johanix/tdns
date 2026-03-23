@@ -89,7 +89,7 @@ func (pgm *ProviderGroupManager) RecomputeGroups() {
 			continue
 		}
 		apex, err := zd.GetOwner(zd.ZoneName)
-		if err != nil {
+		if err != nil || apex == nil {
 			lgProviderGroup.Warn("skipping zone due to apex lookup failure", "zone", zd.ZoneName, "err", err)
 			continue
 		}

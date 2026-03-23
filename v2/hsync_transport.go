@@ -16,7 +16,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/johanix/tdns/v2/agent/transport"
@@ -35,14 +34,6 @@ func generatePingNonce() string {
 		panic(fmt.Sprintf("failed to generate random bytes for ping nonce: %v", err))
 	}
 	return hex.EncodeToString(b)
-}
-
-// keystateRfiStateT pairs a zone name with a response channel so that
-// routeKeystateMessage can route solicited inventory responses to the
-// correct requester without zone mismatches.
-type keystateRfiStateT struct {
-	Zone string
-	Chan chan *KeystateInventoryMsg
 }
 
 // TransportManager manages multiple transports for agent communication.
@@ -105,11 +96,30 @@ type TransportManager struct {
 	// Uses a closure because ImrEngine starts asynchronously after TM creation.
 	getImrEngine func() *Imr
 
-	// keystateRfiState is set by RequestAndWaitForKeyInventory to receive the
-	// solicited inventory response for a specific zone. routeKeystateMessage
-	// checks the zone name before routing here; mismatches fall through to
-	// the shared KeystateInventory channel.
-	keystateRfiState atomic.Pointer[keystateRfiStateT]
+	keystateRfiMu    sync.Mutex
+	keystateRfiState map[string]chan *KeystateInventoryMsg // key: zone name
+}
+
+func (tm *TransportManager) setKeystateRfi(zone string, ch chan *KeystateInventoryMsg) {
+	tm.keystateRfiMu.Lock()
+	defer tm.keystateRfiMu.Unlock()
+	if tm.keystateRfiState == nil {
+		tm.keystateRfiState = make(map[string]chan *KeystateInventoryMsg)
+	}
+	tm.keystateRfiState[zone] = ch
+}
+
+func (tm *TransportManager) deleteKeystateRfi(zone string) {
+	tm.keystateRfiMu.Lock()
+	defer tm.keystateRfiMu.Unlock()
+	delete(tm.keystateRfiState, zone)
+}
+
+func (tm *TransportManager) getKeystateRfi(zone string) (chan *KeystateInventoryMsg, bool) {
+	tm.keystateRfiMu.Lock()
+	defer tm.keystateRfiMu.Unlock()
+	ch, ok := tm.keystateRfiState[zone]
+	return ch, ok
 }
 
 // TransportManagerConfig holds configuration for creating a TransportManager.
@@ -888,9 +898,9 @@ func (tm *TransportManager) routeKeystateMessage(msg *transport.IncomingMessage)
 
 	// If there's a pending RFI request waiting for this zone's inventory,
 	// route there. Zone mismatches fall through to the shared channel.
-	if state := tm.keystateRfiState.Load(); state != nil && state.Zone == payload.Zone {
+	if ch, ok := tm.getKeystateRfi(payload.Zone); ok {
 		select {
-		case state.Chan <- inventoryMsg:
+		case ch <- inventoryMsg:
 			lgTransport.Info("routed KEYSTATE inventory to RFI requester", "sender", senderID, "zone", payload.Zone, "keys", len(items))
 		default:
 			lgTransport.Warn("keystateRfiChan full, dropping inventory", "sender", senderID)

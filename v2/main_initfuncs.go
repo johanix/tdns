@@ -233,21 +233,21 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// Register option handler for multi-provider zones. This fires
 	// during ParseZones for each zone with OptMultiProvider, collecting
 	// zone names for SDE hydration. Must be registered before ParseZones.
-	var mpZoneNames []string
+	// The handler writes to conf.Internal.MPZoneNames directly; callers
+	// must reset it to nil before each ParseZones call.
 	RegisterZoneOptionHandler(OptMultiProvider, func(zname string, options map[ZoneOption]bool) {
-		mpZoneNames = append(mpZoneNames, zname)
+		conf.Internal.MPZoneNames = append(conf.Internal.MPZoneNames, zname)
 	})
 
 	// Parse all configured zones
+	conf.Internal.MPZoneNames = nil
 	all_zones, err := conf.ParseZones(ctx, false) // false = initial load, not reload
 	if err != nil {
 		return fmt.Errorf("error parsing zones: %v", err)
 	}
 	// Provide the complete zone list to engines that need cross-zone post-initialization
 	conf.Internal.AllZones = all_zones
-	// Store MP zone list (collected by the handler above during ParseZones)
-	conf.Internal.MPZoneNames = mpZoneNames
-	lgConfig.Info("multi-provider zones from config", "count", len(mpZoneNames), "zones", mpZoneNames)
+	lgConfig.Info("multi-provider zones from config", "count", len(conf.Internal.MPZoneNames), "zones", conf.Internal.MPZoneNames)
 	// Load dynamic zones from dynamic config file (if configured and included)
 	// This must happen after ParseZones so that main config zones take precedence
 	if conf.DynamicZones.ConfigFile != "" {

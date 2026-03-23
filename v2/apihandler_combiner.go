@@ -299,6 +299,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			}
 			// Build agent -> rrtype -> []rr from AgentContributions
 			current := make(map[string]map[string][]string)
+			zd.mu.Lock()
 			if zd.AgentContributions != nil {
 				for agentID, ownerMap := range zd.AgentContributions {
 					for _, rrtypeMap := range ownerMap {
@@ -314,6 +315,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 					}
 				}
 			}
+			zd.mu.Unlock()
 			resp.Current = current
 			totalRRs := 0
 			for _, rrtypeMap := range current {

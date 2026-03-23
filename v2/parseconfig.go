@@ -680,29 +680,41 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			Zones.Set(zname, zdp)
 		}
 
-		// Apply static options to the stub immediately so they
-		// are available before the RefreshEngine processes the
-		// zone. Then invoke registered option handlers.
-		if zdp.Options == nil {
-			zdp.Options = make(map[ZoneOption]bool)
+		// Apply static options via copy-on-write to avoid racing with
+		// concurrent readers of zdp.Options / zdp.MPdata.Options.
+		newOpts := make(map[ZoneOption]bool)
+		for opt, val := range zdp.Options {
+			newOpts[opt] = val
 		}
 		for opt, val := range options {
-			zdp.Options[opt] = val
+			newOpts[opt] = val
 		}
 
-		// For MP zones, ensure MPdata exists with Options so that
-		// MP-specific options can be set at parse time.
+		var newMPdata *MPdata
 		if options[OptMultiProvider] {
-			if zdp.MPdata == nil {
-				zdp.MPdata = &MPdata{
-					Options: make(map[ZoneOption]bool),
+			if zdp.MPdata != nil {
+				// Copy existing MPdata, build new Options map
+				cp := *zdp.MPdata
+				newMPdata = &cp
+				mpOpts := make(map[ZoneOption]bool)
+				for opt, val := range cp.Options {
+					mpOpts[opt] = val
+				}
+				mpOpts[OptMultiProvider] = true
+				newMPdata.Options = mpOpts
+			} else {
+				newMPdata = &MPdata{
+					Options: map[ZoneOption]bool{OptMultiProvider: true},
 				}
 			}
-			if zdp.MPdata.Options == nil {
-				zdp.MPdata.Options = make(map[ZoneOption]bool)
-			}
-			zdp.MPdata.Options[OptMultiProvider] = true
 		}
+
+		zdp.mu.Lock()
+		zdp.Options = newOpts
+		if newMPdata != nil {
+			zdp.MPdata = newMPdata
+		}
+		zdp.mu.Unlock()
 
 		invokeOptionHandlers(zname, options)
 

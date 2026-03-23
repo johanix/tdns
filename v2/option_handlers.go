@@ -3,6 +3,8 @@
  */
 package tdns
 
+import "sync"
+
 // ZoneOptionHandler is a callback invoked during ParseZones when a
 // zone has a specific option set. Handlers are registered before
 // ParseZones runs and fire synchronously during parsing.
@@ -12,12 +14,17 @@ package tdns
 //   - options: all parsed options for this zone (read-only)
 type ZoneOptionHandler func(zname string, options map[ZoneOption]bool)
 
-var optionHandlers = make(map[ZoneOption][]ZoneOptionHandler)
+var (
+	optionHandlersMu sync.Mutex
+	optionHandlers   = make(map[ZoneOption][]ZoneOptionHandler)
+)
 
 // RegisterZoneOptionHandler registers a callback for a zone option.
 // Multiple handlers can be registered for the same option.
 // Handlers fire synchronously during ParseZones, in registration order.
 func RegisterZoneOptionHandler(opt ZoneOption, handler ZoneOptionHandler) {
+	optionHandlersMu.Lock()
+	defer optionHandlersMu.Unlock()
 	optionHandlers[opt] = append(optionHandlers[opt], handler)
 }
 
@@ -25,6 +32,8 @@ func RegisterZoneOptionHandler(opt ZoneOption, handler ZoneOptionHandler) {
 // zone's options. Returns the set of options that were handled by
 // at least one registered handler (used for unknown-option detection).
 func invokeOptionHandlers(zname string, options map[ZoneOption]bool) map[ZoneOption]bool {
+	optionHandlersMu.Lock()
+	defer optionHandlersMu.Unlock()
 	handled := make(map[ZoneOption]bool)
 	for opt, val := range options {
 		if !val {

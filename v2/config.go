@@ -635,6 +635,7 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 	prezones := Zones.Keys()
 	lgConfig.Info("ReloadZones: zones prior to reloading", "zones", prezones)
 	// XXX: This is wrong. We must get the zones config file from outside (to enamble things like MUSIC to use a different config file)
+	conf.Internal.MPZoneNames = nil             // reset before re-collection by option handler
 	zonelist, err := conf.ParseZones(ctx, true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("ReloadZoneConfig: error parsing zones", "err", err)

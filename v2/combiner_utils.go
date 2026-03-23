@@ -178,6 +178,9 @@ func (zd *ZoneData) mergeWithUpstream(owner string, rrtype uint16, agentRRset co
 // and vice versa. The per-agent storage in AgentContributions already provides
 // structural isolation; policy enforcement needs to happen at the RR level.
 func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRset) (bool, error) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+
 	if zd.CombinerData == nil {
 		zd.CombinerData = core.NewCmap[OwnerData]()
 	}
@@ -614,6 +617,9 @@ func (zd *ZoneData) RemoveCombinerDataByRRtype(senderID string, owner string, rr
 // added and removed RR strings, plus whether any change occurred.
 // Used for "replace" operation semantics at the combiner level.
 func (zd *ZoneData) ReplaceCombinerDataByRRtype(senderID, owner string, rrtype uint16, newRRs []dns.RR) (applied []string, removed []string, changed bool, err error) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+
 	if senderID == "" {
 		senderID = "local"
 	}
