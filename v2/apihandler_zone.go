@@ -204,7 +204,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 						seen[opt] = true
 					}
 				}
-				if zd.MP.MPdata != nil {
+				if zd.MP != nil && zd.MP.MPdata != nil {
 					for opt, val := range zd.MP.MPdata.Options {
 						if val && !seen[opt] {
 							info.Options = append(info.Options, opt)

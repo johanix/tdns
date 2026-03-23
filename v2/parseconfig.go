@@ -707,8 +707,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		zdp.mu.Lock()
 		zdp.Options = newOpts
 		if newMPdata != nil {
+			zdp.EnsureMP()
 			zdp.MP.MPdata = newMPdata
-		} else if !options[OptMultiProvider] {
+		} else if !options[OptMultiProvider] && zdp.MP != nil {
 			zdp.MP.MPdata = nil
 		}
 		zdp.mu.Unlock()

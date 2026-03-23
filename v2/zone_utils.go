@@ -258,7 +258,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 
 	// For multi-provider zones on the signer: use cached MPdata to
 	// dynamically enable/disable inline-signing and detect multi-signer mode.
-	if zd.MP.MPdata != nil && Globals.App.Type == AppTypeAuth {
+	if zd.MP != nil && zd.MP.MPdata != nil && Globals.App.Type == AppTypeAuth {
 		shouldSign := zd.MP.MPdata.WeAreSigner
 		otherSigners := zd.MP.MPdata.OtherSigners
 		if shouldSign && !zd.Options[OptInlineSigning] {
@@ -445,7 +445,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 
 	// For multi-provider zones on the signer: use cached MPdata to
 	// dynamically enable/disable inline-signing and detect multi-signer mode.
-	if zd.MP.MPdata != nil && Globals.App.Type == AppTypeAuth {
+	if zd.MP != nil && zd.MP.MPdata != nil && Globals.App.Type == AppTypeAuth {
 		shouldSign := zd.MP.MPdata.WeAreSigner
 		otherSigners := zd.MP.MPdata.OtherSigners
 		if shouldSign && !zd.Options[OptInlineSigning] {
