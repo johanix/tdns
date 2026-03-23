@@ -37,6 +37,14 @@ func generatePingNonce() string {
 	return hex.EncodeToString(b)
 }
 
+// keystateRfiStateT pairs a zone name with a response channel so that
+// routeKeystateMessage can route solicited inventory responses to the
+// correct requester without zone mismatches.
+type keystateRfiStateT struct {
+	Zone string
+	Chan chan *KeystateInventoryMsg
+}
+
 // TransportManager manages multiple transports for agent communication.
 type TransportManager struct {
 	// APITransport is the HTTPS-based transport
@@ -97,11 +105,11 @@ type TransportManager struct {
 	// Uses a closure because ImrEngine starts asynchronously after TM creation.
 	getImrEngine func() *Imr
 
-	// keystateRfiChan is set by RequestAndWaitForKeyInventory to receive the
-	// solicited inventory response. When non-nil, routeKeystateMessage routes
-	// inventory messages here instead of msgQs.KeystateInventory, preventing
-	// the HsyncEngine from stealing the response.
-	keystateRfiChan atomic.Pointer[chan *KeystateInventoryMsg]
+	// keystateRfiState is set by RequestAndWaitForKeyInventory to receive the
+	// solicited inventory response for a specific zone. routeKeystateMessage
+	// checks the zone name before routing here; mismatches fall through to
+	// the shared KeystateInventory channel.
+	keystateRfiState atomic.Pointer[keystateRfiStateT]
 }
 
 // TransportManagerConfig holds configuration for creating a TransportManager.
@@ -878,11 +886,11 @@ func (tm *TransportManager) routeKeystateMessage(msg *transport.IncomingMessage)
 		Inventory: items,
 	}
 
-	// If there's a pending RFI request waiting for this inventory, route there
-	// instead of the shared KeystateInventory channel (which HsyncEngine also reads).
-	if rfiChanPtr := tm.keystateRfiChan.Load(); rfiChanPtr != nil {
+	// If there's a pending RFI request waiting for this zone's inventory,
+	// route there. Zone mismatches fall through to the shared channel.
+	if state := tm.keystateRfiState.Load(); state != nil && state.Zone == payload.Zone {
 		select {
-		case *rfiChanPtr <- inventoryMsg:
+		case state.Chan <- inventoryMsg:
 			lgTransport.Info("routed KEYSTATE inventory to RFI requester", "sender", senderID, "zone", payload.Zone, "keys", len(items))
 		default:
 			lgTransport.Warn("keystateRfiChan full, dropping inventory", "sender", senderID)
