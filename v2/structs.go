@@ -62,11 +62,12 @@ const (
 // is not set, or the zone owner hasn't declared it via HSYNC3+HSYNCPARAM, or we are
 // not a listed provider). Populated during zone refresh by populateMPdata().
 type MPdata struct {
-	WeAreProvider bool   // At least one of our agent identities matches an HSYNC3 Identity
-	OurLabel      string // Our provider label from the matching HSYNC3 record
-	WeAreSigner   bool   // Our label appears in HSYNCPARAM signers (or zone is unsigned)
-	OtherSigners  int    // Count of other signers in HSYNCPARAM
-	ZoneSigned    bool   // HSYNCPARAM signers= is non-empty (zone uses multi-signer)
+	WeAreProvider bool                // At least one of our agent identities matches an HSYNC3 Identity
+	OurLabel      string              // Our provider label from the matching HSYNC3 record
+	WeAreSigner   bool                // Our label appears in HSYNCPARAM signers (or zone is unsigned)
+	OtherSigners  int                 // Count of other signers in HSYNCPARAM
+	ZoneSigned    bool                // HSYNCPARAM signers= is non-empty (zone uses multi-signer)
+	Options       map[ZoneOption]bool // MP-specific options (future: migrate from zd.Options)
 }
 
 type ZoneData struct {

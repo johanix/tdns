@@ -175,10 +175,17 @@ func sendKeystateInventoryToAgent(conf *Config, tm *TransportManager, agentID st
 		return fmt.Errorf("KeyDB not available")
 	}
 
-	// Query all keys for this zone
-	items, err := kdb.GetKeyInventory(zone)
-	if err != nil {
-		return fmt.Errorf("GetKeyInventory failed: %w", err)
+	// Only include keys if we are a signer for this zone.
+	// Non-signers send empty inventory so the agent gets a response.
+	var items []KeyInventoryItem
+	if zd, ok := Zones.Get(zone); ok && zd.MPdata != nil && !zd.MPdata.WeAreSigner {
+		lgSigner.Debug("not a signer for zone, sending empty inventory", "zone", zone)
+	} else {
+		var err error
+		items, err = kdb.GetKeyInventory(zone)
+		if err != nil {
+			return fmt.Errorf("GetKeyInventory failed: %w", err)
+		}
 	}
 
 	lgSigner.Debug("KeyDB inventory queried", "zone", zone, "keys", len(items))

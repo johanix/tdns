@@ -291,9 +291,15 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 		case "list-current":
 			zone := dns.Fqdn(cp.Zone)
-			zd, _ := Zones.Get(zone)
-			// Build agent → rrtype → []rr from AgentContributions
+			zd, ok := Zones.Get(zone)
+			if !ok || zd == nil {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("zone %s not found", zone)
+				return
+			}
+			// Build agent -> rrtype -> []rr from AgentContributions
 			current := make(map[string]map[string][]string)
+			zd.mu.Lock()
 			if zd.AgentContributions != nil {
 				for agentID, ownerMap := range zd.AgentContributions {
 					for _, rrtypeMap := range ownerMap {
@@ -309,6 +315,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 					}
 				}
 			}
+			zd.mu.Unlock()
 			resp.Current = current
 			totalRRs := 0
 			for _, rrtypeMap := range current {
@@ -371,21 +378,21 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 					errs = append(errs, fmt.Errorf("contributions: %w", err))
 				} else {
 					parts = append(parts, fmt.Sprintf("%d contributions", n))
-				}
-				// Also clear in-memory AgentContributions and rebuild CombinerData
-				if zone != "" {
-					if zd, ok := Zones.Get(zone); ok {
-						zd.mu.Lock()
-						zd.AgentContributions = nil
-						zd.mu.Unlock()
-						zd.rebuildCombinerData()
-					}
-				} else {
-					for _, zd := range Zones.Items() {
-						zd.mu.Lock()
-						zd.AgentContributions = nil
-						zd.mu.Unlock()
-						zd.rebuildCombinerData()
+					// Clear in-memory AgentContributions only on DB success
+					if zone != "" {
+						if zd, ok := Zones.Get(zone); ok {
+							zd.mu.Lock()
+							zd.AgentContributions = nil
+							zd.rebuildCombinerData()
+							zd.mu.Unlock()
+						}
+					} else {
+						for _, zd := range Zones.Items() {
+							zd.mu.Lock()
+							zd.AgentContributions = nil
+							zd.rebuildCombinerData()
+							zd.mu.Unlock()
+						}
 					}
 				}
 			}

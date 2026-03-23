@@ -680,6 +680,40 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			Zones.Set(zname, zdp)
 		}
 
+		// Apply static options via copy-on-write to avoid racing with
+		// concurrent readers of zdp.Options / zdp.MPdata.Options.
+		// Build from fresh parsed options only; on reload this clears
+		// options that were removed from the config file.
+		newOpts := make(map[ZoneOption]bool, len(options))
+		for opt, val := range options {
+			newOpts[opt] = val
+		}
+
+		var newMPdata *MPdata
+		if options[OptMultiProvider] {
+			if zdp.MPdata != nil {
+				// Copy existing MPdata, build fresh MP Options map
+				cp := *zdp.MPdata
+				newMPdata = &cp
+				newMPdata.Options = map[ZoneOption]bool{OptMultiProvider: true}
+			} else {
+				newMPdata = &MPdata{
+					Options: map[ZoneOption]bool{OptMultiProvider: true},
+				}
+			}
+		}
+
+		zdp.mu.Lock()
+		zdp.Options = newOpts
+		if newMPdata != nil {
+			zdp.MPdata = newMPdata
+		} else if !options[OptMultiProvider] {
+			zdp.MPdata = nil
+		}
+		zdp.mu.Unlock()
+
+		invokeOptionHandlers(zname, options)
+
 		if zdp.FirstZoneLoad {
 			lgConfig.Info("considering OnFirstLoad callbacks", "zone", zname,
 				"online-signing", options[OptOnlineSigning],

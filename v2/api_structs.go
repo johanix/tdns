@@ -104,9 +104,20 @@ type ZoneResponse struct {
 	Zone     string
 	Names    []string
 	Zones    map[string]ZoneConf
+	MPZones  map[string]MPZoneInfo `json:"mp_zones,omitempty"`
 	Msg      string
 	Error    bool
 	ErrorMsg string
+}
+
+// MPZoneInfo carries multi-provider zone details for the mplist command.
+type MPZoneInfo struct {
+	Providers  []string     `json:"providers"`
+	Signers    []string     `json:"signers"`
+	NSmgmt     string       `json:"nsmgmt"`
+	ParentSync string       `json:"parentsync"`
+	Suffix     string       `json:"suffix,omitempty"`
+	Options    []ZoneOption `json:"options"`
 }
 type ZoneDsyncPost struct {
 	Command   string // status | bootstrap | ...

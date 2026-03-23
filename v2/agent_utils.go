@@ -21,6 +21,10 @@ import (
 
 var lgAgent = Logger("agent")
 
+// discoveryFailureFlushThreshold is the number of consecutive discovery
+// failures before flushing the IMR cache for the agent's domain.
+const discoveryFailureFlushThreshold = 3
+
 func (ar *AgentRegistry) AddZoneToAgent(identity AgentId, zone ZoneName) {
 	agent, exists := ar.S.Get(identity)
 	if !exists {
@@ -628,7 +632,7 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, d
 		agent.ApiDetails.LatestErrorTime = time.Now()
 		agent.mu.Unlock()
 
-		if failures >= 3 && imr.Cache != nil {
+		if failures >= discoveryFailureFlushThreshold && imr.Cache != nil {
 			identity := string(agent.Identity)
 			removed, err := imr.Cache.FlushDomain(identity, false)
 			if err == nil && removed > 0 {

@@ -322,49 +322,47 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 	conf.Internal.ZoneDataRepo = zdr
 
 	// Hydrate SDE for each multi-provider zone. Per zone, sequentially:
-	// 1. RFI EDITS → combiner: all agents' contributions (baseline)
-	// 2. RFI KEYSTATE → signer: DNSKEY inventory (local vs foreign keys)
-	// Phase 3 (RFI SYNC → remote agents) is added later.
+	// 1. RFI EDITS -> combiner: all agents' contributions (baseline)
+	// 2. RFI KEYSTATE -> signer: DNSKEY inventory (local vs foreign keys)
 	//
-	// Both EDITS and KEYSTATE use single-slot response channels, so requests
-	// must be synchronous per zone. See DNS-154 for refactoring this.
+	// Uses conf.Internal.MPZoneNames (collected at parse time) instead of
+	// scanning Zones.IterBuffered() -- avoids race with RefreshEngine.
 	tm := conf.Internal.TransportManager
 	hasCombiner := tm != nil && tm.combinerID != ""
 	hasSigner := tm != nil && tm.signerID != ""
 
+	lgEngine.Info("SynchedDataEngine started")
+
 	if hasCombiner || hasSigner {
-		for item := range Zones.IterBuffered() {
-			zd := item.Val
-			if !zd.Options[OptMultiProvider] {
+		lgEngine.Info("startup hydration: MP zones to hydrate", "count", len(conf.Internal.MPZoneNames), "zones", conf.Internal.MPZoneNames)
+		for _, zname := range conf.Internal.MPZoneNames {
+			zd, ok := Zones.Get(zname)
+			if !ok || zd == nil {
+				lgEngine.Warn("startup hydration: zone not in Zones map, skipping", "zone", zname)
 				continue
 			}
 			if hasCombiner {
-				lgEngine.Info("startup hydration: requesting edits from combiner", "zone", item.Key)
-				zd.RequestAndWaitForEdits()
+				lgEngine.Info("startup hydration: requesting edits from combiner", "zone", zname)
+				zd.RequestAndWaitForEdits(ctx)
 			}
 			if hasSigner {
-				lgEngine.Info("startup hydration: requesting key inventory from signer", "zone", item.Key)
-				zd.RequestAndWaitForKeyInventory()
+				lgEngine.Info("startup hydration: requesting key inventory from signer", "zone", zname)
+				zd.RequestAndWaitForKeyInventory(ctx)
 
-				// Extract local DNSKEYs from the inventory and add to SDE.
-				// RequestAndWaitForKeyInventory sets RemoteDNSKEYs (foreign)
-				// and stores the inventory, but doesn't populate local DNSKEYs
-				// in the SDE.
 				changed, ds, err := zd.LocalDnskeysFromKeystate()
 				if err != nil {
-					lgEngine.Error("startup hydration: LocalDnskeysFromKeystate failed", "zone", item.Key, "err", err)
+					lgEngine.Error("startup hydration: LocalDnskeysFromKeystate failed", "zone", zname, "err", err)
 				} else if changed && ds != nil {
 					localAgentID := AgentId(conf.MultiProvider.Identity)
 					for _, rr := range ds.CurrentLocalKeys {
-						zdr.AddConfirmedRR(ZoneName(item.Key), localAgentID, rr)
+						zdr.AddConfirmedRR(ZoneName(zname), localAgentID, rr)
 					}
-					lgEngine.Info("startup hydration: added local DNSKEYs to SDE", "zone", item.Key, "keys", len(ds.CurrentLocalKeys))
+					lgEngine.Info("startup hydration: added local DNSKEYs to SDE", "zone", zname, "keys", len(ds.CurrentLocalKeys))
 				}
 			}
 		}
+		lgEngine.Info("startup hydration complete")
 	}
-
-	lgEngine.Info("SynchedDataEngine started")
 
 	// Periodic eviction of stale tracking entries (terminal states older than 1 hour).
 	trackingEvictTicker := time.NewTicker(5 * time.Minute)
@@ -539,17 +537,51 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						}
 
 						if remoteSkipCombiner {
-							lgEngine.Info("remote update applied but not forwarding to combiner (mp-disallow-edits)", "zone", synchedDataUpdate.Zone)
-							resp.Msg = "Remote update applied locally (not forwarded to combiner: zone signed, not a signer)"
-							// Send terminal REJECTED confirmation to originator so it
-							// doesn't wait forever for a combiner confirmation.
+							lgEngine.Info("remote update accepted locally, not forwarding to combiner (mp-disallow-edits)", "zone", synchedDataUpdate.Zone)
+							resp.Msg = "Remote update accepted locally (not forwarded to combiner: zone signed, not a signer)"
+							// Send ACCEPTED confirmation with applied records to
+							// originator. The data is in our SDE; we just don't
+							// forward to our combiner. The sender should not be blocked.
 							if synchedDataUpdate.OriginatingDistID != "" && msgQs.OnRemoteConfirmationReady != nil {
+								var appliedRecords []string
+								var removedRecords []string
+								if synchedDataUpdate.Update != nil {
+									for _, op := range synchedDataUpdate.Update.Operations {
+										if op.Operation == "delete" {
+											removedRecords = append(removedRecords, op.Records...)
+										} else {
+											appliedRecords = append(appliedRecords, op.Records...)
+										}
+									}
+									// Fallback: if Operations was empty, extract from RRsets/RRs
+									if len(appliedRecords) == 0 && len(removedRecords) == 0 {
+										for _, rrset := range synchedDataUpdate.Update.RRsets {
+											for _, rr := range rrset.RRs {
+												appliedRecords = append(appliedRecords, rr.String())
+											}
+										}
+										for _, rr := range synchedDataUpdate.Update.RRs {
+											if rr.Header().Class == dns.ClassNONE {
+												cp := dns.Copy(rr)
+												cp.Header().Class = dns.ClassINET
+												removedRecords = append(removedRecords, cp.String())
+											} else {
+												appliedRecords = append(appliedRecords, rr.String())
+											}
+										}
+									}
+								}
+								lgEngine.Info("sending immediate ACCEPTED for non-signing zone",
+									"zone", synchedDataUpdate.Zone, "agent", synchedDataUpdate.AgentId,
+									"records", len(appliedRecords), "removed", len(removedRecords), "originDistID", synchedDataUpdate.OriginatingDistID)
 								msgQs.OnRemoteConfirmationReady(&RemoteConfirmationDetail{
 									OriginatingDistID: synchedDataUpdate.OriginatingDistID,
 									OriginatingSender: string(synchedDataUpdate.AgentId),
 									Zone:              synchedDataUpdate.Zone,
-									Status:            "rejected",
-									Message:           "zone is signed but this provider is not a signer; edits not forwarded to combiner",
+									Status:            "ok",
+									Message:           "accepted into SDE (not forwarded to combiner: not a signer)",
+									AppliedRecords:    appliedRecords,
+									RemovedRecords:    removedRecords,
 								})
 							}
 						} else {

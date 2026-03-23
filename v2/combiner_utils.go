@@ -178,6 +178,9 @@ func (zd *ZoneData) mergeWithUpstream(owner string, rrtype uint16, agentRRset co
 // and vice versa. The per-agent storage in AgentContributions already provides
 // structural isolation; policy enforcement needs to happen at the RR level.
 func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRset) (bool, error) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+
 	if zd.CombinerData == nil {
 		zd.CombinerData = core.NewCmap[OwnerData]()
 	}
@@ -444,6 +447,9 @@ func (zd *ZoneData) GetCombinerDataNG() map[string][]RRsetString {
 // Returns the list of RR strings that were actually removed. If an RR was already
 // absent, it is not included in the returned list (true no-op detection).
 func (zd *ZoneData) RemoveCombinerDataNG(senderID string, data map[string][]string) ([]string, error) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+
 	if zd.AgentContributions == nil {
 		return nil, nil
 	}
@@ -544,6 +550,9 @@ func (zd *ZoneData) RemoveCombinerDataNG(senderID string, data map[string][]stri
 // for a specific owner. Used for ClassANY delete semantics.
 // Returns the list of RR strings that were removed.
 func (zd *ZoneData) RemoveCombinerDataByRRtype(senderID string, owner string, rrtype uint16) ([]string, error) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+
 	if senderID == "" {
 		senderID = "local"
 	}
@@ -614,6 +623,13 @@ func (zd *ZoneData) RemoveCombinerDataByRRtype(senderID string, owner string, rr
 // added and removed RR strings, plus whether any change occurred.
 // Used for "replace" operation semantics at the combiner level.
 func (zd *ZoneData) ReplaceCombinerDataByRRtype(senderID, owner string, rrtype uint16, newRRs []dns.RR) (applied []string, removed []string, changed bool, err error) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+
+	return zd.replaceCombinerDataByRRtypeLocked(senderID, owner, rrtype, newRRs)
+}
+
+func (zd *ZoneData) replaceCombinerDataByRRtypeLocked(senderID, owner string, rrtype uint16, newRRs []dns.RR) (applied []string, removed []string, changed bool, err error) {
 	if senderID == "" {
 		senderID = "local"
 	}
@@ -886,19 +902,17 @@ func combinerReapplyContributions(zone string, kdb *KeyDB) (string, error) {
 		return "", fmt.Errorf("failed to load contributions: %w", err)
 	}
 
+	zd.mu.Lock()
 	if zoneContribs, ok := allContribs[zone]; ok {
-		zd.mu.Lock()
 		zd.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
 		for senderID, ownerMap := range zoneContribs {
 			zd.AgentContributions[senderID] = ownerMap
 		}
-		zd.mu.Unlock()
 		zd.rebuildCombinerData()
 		parts = append(parts, fmt.Sprintf("loaded contributions from %d agent(s)", len(zoneContribs)))
 	} else {
-		zd.mu.Lock()
 		zd.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
-		zd.mu.Unlock()
+		zd.rebuildCombinerData()
 		parts = append(parts, "no contributions in snapshot")
 	}
 
@@ -906,6 +920,7 @@ func combinerReapplyContributions(zone string, kdb *KeyDB) (string, error) {
 	if isProvider {
 		allInstr, err := kdb.LoadAllPublishInstructions()
 		if err != nil {
+			zd.mu.Unlock()
 			return "", fmt.Errorf("failed to load publish instructions: %w", err)
 		}
 		keyCount := 0
@@ -929,8 +944,12 @@ func combinerReapplyContributions(zone string, kdb *KeyDB) (string, error) {
 						rr.Header().Name = ownerName
 						parsedRRs = append(parsedRRs, rr)
 					}
-					zd.ReplaceCombinerDataByRRtype(senderID, ownerName, dns.TypeKEY, parsedRRs)
-					keyCount++
+					_, _, changed, replErr := zd.replaceCombinerDataByRRtypeLocked(senderID, ownerName, dns.TypeKEY, parsedRRs)
+					if replErr != nil {
+						lgCombiner.Warn("reapply: failed to replace _signal KEY", "sender", senderID, "owner", ownerName, "err", replErr)
+					} else if changed {
+						keyCount++
+					}
 				}
 			}
 		}
@@ -943,6 +962,7 @@ func combinerReapplyContributions(zone string, kdb *KeyDB) (string, error) {
 	if !isProvider {
 		allInstr, err := kdb.LoadAllPublishInstructions()
 		if err != nil {
+			zd.mu.Unlock()
 			return "", fmt.Errorf("failed to load publish instructions: %w", err)
 		}
 		if senders, ok := allInstr[zone]; ok {
@@ -958,11 +978,16 @@ func combinerReapplyContributions(zone string, kdb *KeyDB) (string, error) {
 					}
 					parsedRRs = append(parsedRRs, rr)
 				}
-				zd.ReplaceCombinerDataByRRtype(senderID, zone, dns.TypeKEY, parsedRRs)
-				parts = append(parts, fmt.Sprintf("applied at-apex KEY from %s", senderID))
+				_, _, changed, replErr := zd.replaceCombinerDataByRRtypeLocked(senderID, zone, dns.TypeKEY, parsedRRs)
+				if replErr != nil {
+					lgCombiner.Warn("reapply: failed to replace at-apex KEY", "sender", senderID, "err", replErr)
+				} else if changed {
+					parts = append(parts, fmt.Sprintf("applied at-apex KEY from %s", senderID))
+				}
 			}
 		}
 	}
+	zd.mu.Unlock()
 
 	// 4. Apply to zone data.
 	modified, err := zd.CombineWithLocalChanges()

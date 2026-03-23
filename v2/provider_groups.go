@@ -15,6 +15,8 @@ import (
 	"github.com/miekg/dns"
 )
 
+var lgProviderGroup = Logger("provider-group")
+
 // ProviderGroup represents a set of providers that together serve a group of zones.
 // The group is identified by a hash of the sorted member identities.
 type ProviderGroup struct {
@@ -87,7 +89,8 @@ func (pgm *ProviderGroupManager) RecomputeGroups() {
 			continue
 		}
 		apex, err := zd.GetOwner(zd.ZoneName)
-		if err != nil {
+		if err != nil || apex == nil {
+			lgProviderGroup.Warn("skipping zone due to apex lookup failure", "zone", zd.ZoneName, "err", err)
 			continue
 		}
 

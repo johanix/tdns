@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -161,6 +162,21 @@ func (zd *ZoneData) LocalDnskeysChanged(newzd *ZoneData) (bool, *DnskeyStatus, e
 // Returns (changed, status, error). If KEYSTATE is unavailable (LastKeyInventory == nil),
 // returns (false, nil, nil) — caller should suppress SYNC-DNSKEY-RRSET.
 func (zd *ZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) {
+	// Don't process DNSKEYs for unsigned zones, but clean up any
+	// previously published keys on transition to unsigned.
+	if zd.MPdata != nil && !zd.MPdata.ZoneSigned {
+		if len(zd.LocalDNSKEYs) > 0 {
+			ds := &DnskeyStatus{
+				Time:         time.Now(),
+				ZoneName:     zd.ZoneName,
+				LocalRemoves: zd.LocalDNSKEYs,
+			}
+			zd.LocalDNSKEYs = nil
+			return true, ds, nil
+		}
+		return false, nil, nil
+	}
+
 	inv := zd.GetLastKeyInventory()
 	if inv == nil {
 		zd.Logger.Printf("LocalDnskeysFromKeystate: zone %s: no KEYSTATE inventory available", zd.ZoneName)
@@ -258,7 +274,7 @@ func filterLocalDNSKEYs(rrset *core.RRset, remoteKeyTags map[uint16]bool) []dns.
 // Sets zd.KeystateOK/KeystateError/KeystateTime to reflect success or failure.
 // KEYSTATE failure is an error condition — the agent depends on KEYSTATE for
 // DNSKEY classification and must not guess when it's unavailable.
-func (zd *ZoneData) RequestAndWaitForKeyInventory() {
+func (zd *ZoneData) RequestAndWaitForKeyInventory(ctx context.Context) {
 	zd.SetKeystateTime(time.Now())
 
 	tm := Conf.Internal.TransportManager
@@ -272,9 +288,11 @@ func (zd *ZoneData) RequestAndWaitForKeyInventory() {
 
 	// Use a dedicated channel for this solicited RFI response so the
 	// HsyncEngine's proactive-inventory consumer doesn't steal it.
+	// Include the zone name so routeKeystateMessage only routes
+	// matching responses here (prevents cross-zone interference).
 	rfiChan := make(chan *KeystateInventoryMsg, 1)
-	tm.keystateRfiChan.Store(&rfiChan)
-	defer tm.keystateRfiChan.Store(nil)
+	tm.setKeystateRfi(zd.ZoneName, rfiChan)
+	defer tm.deleteKeystateRfi(zd.ZoneName)
 
 	// Send RFI KEYSTATE to signer
 	if err := tm.sendRfiToSigner(zd.ZoneName, "KEYSTATE"); err != nil {
@@ -324,6 +342,12 @@ func (zd *ZoneData) RequestAndWaitForKeyInventory() {
 		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: received %d-key inventory from signer, %d foreign → %d RemoteDNSKEYs",
 			zd.ZoneName, len(inv.Inventory), len(foreignKeyTags), len(remoteDNSKEYs))
 
+	case <-ctx.Done():
+		zd.SetKeystateOK(false)
+		zd.SetKeystateError("cancelled")
+		zd.Logger.Printf("RequestAndWaitForKeyInventory: zone %s: cancelled", zd.ZoneName)
+		zd.SetRemoteDNSKEYs(nil)
+
 	case <-timeout.C:
 		zd.SetKeystateOK(false)
 		zd.SetKeystateError("timeout waiting for signer response (15s)")
@@ -337,7 +361,7 @@ func (zd *ZoneData) RequestAndWaitForKeyInventory() {
 // as confirmed data (the combiner already has them).
 //
 // Modeled on RequestAndWaitForKeyInventory.
-func (zd *ZoneData) RequestAndWaitForEdits() {
+func (zd *ZoneData) RequestAndWaitForEdits(ctx context.Context) {
 	tm := Conf.Internal.TransportManager
 	if tm == nil {
 		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no TransportManager available", zd.ZoneName)
@@ -381,6 +405,9 @@ func (zd *ZoneData) RequestAndWaitForEdits() {
 
 		// Apply to SDE with per-agent attribution
 		zd.applyEditsToSDE(resp.AgentRecords)
+
+	case <-ctx.Done():
+		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: cancelled", zd.ZoneName)
 
 	case <-timeout.C:
 		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: timeout waiting for combiner EDITS response (15s)", zd.ZoneName)
@@ -810,12 +837,25 @@ func (zd *ZoneData) populateMPdata() {
 	zd.Options[OptMPDisallowEdits] = false
 	zd.Options[OptAllowEdits] = true
 
+	// Preserve any existing MPdata.Options (set at parse time),
+	// create the map if needed.
+	var mpOpts map[ZoneOption]bool
+	if zd.MPdata != nil && zd.MPdata.Options != nil {
+		mpOpts = zd.MPdata.Options
+	} else {
+		mpOpts = make(map[ZoneOption]bool)
+	}
+	mpOpts[OptMultiProvider] = true
+	mpOpts[OptMPDisallowEdits] = zoneSigned && !weShouldSign
+	mpOpts[OptMultiSigner] = weShouldSign && otherSigners > 0
+
 	zd.MPdata = &MPdata{
 		WeAreProvider: true,
 		OurLabel:      ourLabel,
 		WeAreSigner:   weShouldSign,
 		OtherSigners:  otherSigners,
 		ZoneSigned:    zoneSigned,
+		Options:       mpOpts,
 	}
 	zd.Logger.Printf("populateMPdata: zone %s: provider=%q signer=%v otherSigners=%d zoneSigned=%v",
 		zd.ZoneName, ourLabel, weShouldSign, otherSigners, zoneSigned)

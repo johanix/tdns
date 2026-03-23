@@ -198,7 +198,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 		if keyschanged && zd.Options[OptMultiProvider] {
 			if Globals.App.Type == AppTypeAgent {
 				// KEYSTATE is the sole source of truth for local vs foreign DNSKEYs.
-				zd.RequestAndWaitForKeyInventory()
+				zd.RequestAndWaitForKeyInventory(context.Background())
 				_, dskeyStatus, err = zd.LocalDnskeysFromKeystate()
 				if err != nil {
 					lg.Error("LocalDnskeysFromKeystate failed", "zone", zd.ZoneName, "err", err)
@@ -382,7 +382,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 			if Globals.App.Type == AppTypeAgent {
 				// KEYSTATE is the sole source of truth for local vs foreign DNSKEYs.
 				// Request inventory from signer, then derive local keys from it.
-				zd.RequestAndWaitForKeyInventory()
+				zd.RequestAndWaitForKeyInventory(context.Background())
 				_, dskeyStatusUpstream, err = zd.LocalDnskeysFromKeystate()
 				if err != nil {
 					lg.Error("LocalDnskeysFromKeystate failed", "zone", zd.ZoneName, "err", err)

@@ -523,6 +523,7 @@ type InternalConf struct {
 	TransportManager      *TransportManager      // Multi-transport (API + DNS) for agent/combiner/signer; nil if transport not initialized
 	LeaderElectionManager *LeaderElectionManager // Per-zone leader election for delegation sync; nil if not agent
 	ChunkPayloadStore     ChunkPayloadStore      // Optional: for query-mode CHUNK (agent); keyed by qname; set when agent chunk_mode is "query"
+	MPZoneNames           []string               // Zone names with OptMultiProvider, collected at parse time for SDE hydration
 	DistributionCache     *DistributionCache     // In-memory cache of distributions (agent/combiner)
 }
 
@@ -634,6 +635,7 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 	prezones := Zones.Keys()
 	lgConfig.Info("ReloadZones: zones prior to reloading", "zones", prezones)
 	// XXX: This is wrong. We must get the zones config file from outside (to enamble things like MUSIC to use a different config file)
+	conf.Internal.MPZoneNames = nil             // reset before re-collection by option handler
 	zonelist, err := conf.ParseZones(ctx, true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("ReloadZoneConfig: error parsing zones", "err", err)

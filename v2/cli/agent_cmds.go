@@ -99,20 +99,6 @@ var agentLocalZoneDataRemoveRRCmd = &cobra.Command{
 	},
 }
 
-var agentLocalZoneDataRemoveRRsetCmd = &cobra.Command{
-	Use:   "remove-rrset",
-	Short: "Remove a local DNS RRset for an existing zone",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
-
-		err := VerifyAndSendLocalDNSRecord(tdns.Globals.Zonename, dnsRecord, "remove-rrset")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
-		}
-	},
-}
-
 var agentDiscoverCmd = &cobra.Command{
 	Use:   "discover <agent-identity>",
 	Short: "Trigger DNS discovery for a remote agent",
@@ -332,7 +318,6 @@ func init() {
 	agentLocalCmd.AddCommand(agentLocalZoneDataCmd)
 	agentLocalZoneDataCmd.AddCommand(agentLocalZoneDataAddRRCmd)
 	agentLocalZoneDataCmd.AddCommand(agentLocalZoneDataRemoveRRCmd)
-	agentLocalZoneDataCmd.AddCommand(agentLocalZoneDataRemoveRRsetCmd)
 
 	// agentLocalZoneDataCmd.PersistentFlags().StringVarP(&localRRtype, "rrtype", "R", "", "RR type to add")
 	agentLocalZoneDataCmd.PersistentFlags().StringVarP(&dnsRecord, "RR", "", "", "DNS record to add")
@@ -370,14 +355,12 @@ func SendAgentMgmtCmd(req *tdns.AgentMgmtPost, prefix string) (*tdns.AgentMgmtRe
 }
 
 func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
-	var rr dns.RR
-	var err error
-
 	if dnsRecord == "" {
 		return fmt.Errorf("error: DNS record is required")
 	}
 
-	if rr, err = dns.NewRR(dnsRecord); err != nil {
+	rr, err := dns.NewRR(dnsRecord)
+	if err != nil {
 		return fmt.Errorf("error: invalid DNS record (did not parse): %v", err)
 	}
 
@@ -386,36 +369,21 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 			rr.Header().Name, zonename)
 	}
 
-	switch rr.(type) {
-	// let's only support NS, DNSKEY and KEYfor now
-	case *dns.NS, *dns.DNSKEY, *dns.KEY:
-		// all good
-	default:
-		return fmt.Errorf("invalid RR type: %s (only NS, DNSKEY and KEY allowed)", dns.TypeToString[rr.Header().Rrtype])
-	}
-
+	// Map CLI command to API command
+	var apiCmd string
 	switch cmd {
 	case "add-rr":
-		// This is a normal add RR, signaled by the CLASS=IN
-		rr.Header().Class = dns.ClassINET
+		apiCmd = "add-rr"
 	case "remove-rr":
-		// This is a delete RR, signaled by the CLASS=NONE
-		rr.Header().Class = dns.ClassNONE
-	case "remove-rrset":
-		// This is a delete RRset, signaled by the CLASS=ANY
-		rr.Header().Class = dns.ClassANY
+		apiCmd = "del-rr"
 	default:
 		return fmt.Errorf("invalid command: %s", cmd)
 	}
 
-	rrs := []string{rr.String()}
-
 	amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
-		Command: "update-local-zonedata",
-		RRType:  rr.Header().Rrtype,
-		Zone:    tdns.ZoneName(tdns.Globals.Zonename),
-		AgentId: tdns.AgentId(myIdentity),
-		RRs:     rrs,
+		Command: apiCmd,
+		Zone:    tdns.ZoneName(dns.Fqdn(zonename)),
+		RRs:     []string{rr.String()},
 	}, "local")
 
 	if err != nil {
