@@ -170,6 +170,9 @@ const (
 	AppTypeKdc        // Key Distribution Center
 	AppTypeKrs        // Key Receiving Service (edge receiver)
 	AppTypeEdgeSigner // NYI
+	AppTypeMPSigner   // MP signer (tdns-mp): DNS infra from tdns, MP wiring from tdns-mp
+	AppTypeMPAgent    // MP agent (tdns-mp): DNS infra from tdns, MP wiring from tdns-mp
+	AppTypeMPCombiner // MP combiner (tdns-mp): DNS infra from tdns, MP wiring from tdns-mp
 )
 
 var AppTypeToString = map[AppType]string{
@@ -183,6 +186,9 @@ var AppTypeToString = map[AppType]string{
 	AppTypeKdc:        "kdc",
 	AppTypeKrs:        "krs",
 	AppTypeEdgeSigner: "edgeSigner", // NYI
+	AppTypeMPSigner:   "mpsigner",
+	AppTypeMPAgent:    "mpagent",
+	AppTypeMPCombiner: "mpcombiner",
 }
 
 var StringToAppType = map[string]AppType{
@@ -196,6 +202,9 @@ var StringToAppType = map[string]AppType{
 	"kdc":        AppTypeKdc,
 	"krs":        AppTypeKrs,
 	"edgeSigner": AppTypeEdgeSigner, // NYI
+	"mpsigner":   AppTypeMPSigner,
+	"mpagent":    AppTypeMPAgent,
+	"mpcombiner": AppTypeMPCombiner,
 }
 
 type ErrorType uint8

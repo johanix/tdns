@@ -55,7 +55,7 @@ func buildChunkQueryEndpoint(conf *Config) string {
 
 // startEngine wraps engine functions in a goroutine with error handling.
 // It logs errors if the engine function returns an error, preventing silent failures.
-func startEngine(app *AppDetails, name string, engineFunc func() error) {
+func StartEngine(app *AppDetails, name string, engineFunc func() error) {
 	engineWg.Add(1)
 	go func() {
 		defer engineWg.Done()
@@ -68,7 +68,7 @@ func startEngine(app *AppDetails, name string, engineFunc func() error) {
 
 // startEngineNoError wraps engine functions that don't return errors.
 // This is for engines that handle errors internally or never fail during startup.
-func startEngineNoError(app *AppDetails, name string, engineFunc func()) {
+func StartEngineNoError(app *AppDetails, name string, engineFunc func()) {
 	engineWg.Add(1)
 	go func() {
 		defer engineWg.Done()
@@ -106,7 +106,8 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		}
 	}
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner, AppTypeReporter, AppTypeKdc, AppTypeKrs:
+	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner, AppTypeReporter, AppTypeKdc, AppTypeKrs,
+		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner:
 		flag.StringVar(&conf.Internal.CfgFile, "config", defaultcfg, "config file path")
 		flag.BoolVarP(&Globals.Debug, "debug", "", false, "run in debug mode (may activate dangerous tests)")
 		flag.BoolVarP(&Globals.Verbose, "verbose", "v", false, "Verbose mode")
@@ -119,7 +120,8 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	}
 	lgConfig.Debug("MainInit starting", "defaultcfg", defaultcfg, "cfgfile", conf.Internal.CfgFile)
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeImr, AppTypeScanner, AppTypeReporter, AppTypeCli, AppTypeKdc, AppTypeKrs:
+	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeImr, AppTypeScanner, AppTypeReporter, AppTypeCli, AppTypeKdc, AppTypeKrs,
+		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner:
 		fmt.Printf("*** TDNS %s version %s mode of operation: %q (verbose: %t, debug: %t)\n",
 			Globals.App.Name, Globals.App.Version, AppTypeToString[Globals.App.Type], Globals.Verbose, Globals.Debug)
 	default:
@@ -137,8 +139,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	}
 	fmt.Printf("Logging to file: %s\n", logfile)
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner:
-		// Note that AppTypeAuth and AppTypeAgent feel though into here as well.
+	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner,
+		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner:
+		// Note that AppTypeAuth and AppTypeAgent fall through into here as well.
 		kdb := conf.Internal.KeyDB
 		if kdb == nil {
 			err = conf.InitializeKeyDB()
@@ -732,9 +735,9 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 			})
 		}
 	}
-	startEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
-	startEngineNoError(&Globals.App, "RefreshEngine", func() { RefreshEngine(ctx, conf) })
-	startEngine(&Globals.App, "Notifier", func() error { return Notifier(ctx, conf.Internal.NotifyQ) })
+	StartEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
+	StartEngineNoError(&Globals.App, "RefreshEngine", func() { RefreshEngine(ctx, conf) })
+	StartEngine(&Globals.App, "Notifier", func() error { return Notifier(ctx, conf.Internal.NotifyQ) })
 	// Start incoming message router for beat/hello processing
 	if conf.Internal.TransportManager != nil {
 		conf.Internal.TransportManager.StartIncomingMessageRouter(ctx)
@@ -747,17 +750,17 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 		protectedNS = conf.Internal.CombinerState.ProtectedNamespaces
 		errJournal = conf.Internal.CombinerState.ErrorJournal
 	}
-	startEngineNoError(&Globals.App, "CombinerMsgHandler",
+	StartEngineNoError(&Globals.App, "CombinerMsgHandler",
 		func() { CombinerMsgHandler(ctx, conf, conf.Internal.MsgQs, protectedNS, errJournal) })
-	startEngine(&Globals.App, "NotifyHandler", func() error { return NotifyHandler(ctx, conf) })
-	startEngine(&Globals.App, "DnsEngine", func() error { return DnsEngine(ctx, conf) })
+	StartEngine(&Globals.App, "NotifyHandler", func() error { return NotifyHandler(ctx, conf) })
+	StartEngine(&Globals.App, "DnsEngine", func() error { return DnsEngine(ctx, conf) })
 	// Start combiner sync API router (for agent→combiner HELLO/BEAT/PING over HTTPS)
 	if conf.MultiProvider != nil && len(conf.MultiProvider.SyncApi.Addresses.Listen) > 0 {
 		combinerSyncRtr, err := conf.SetupCombinerSyncRouter(ctx)
 		if err != nil {
 			lgConfig.Error("failed to set up combiner sync router", "err", err)
 		} else {
-			startEngine(&Globals.App, "CombinerAPIdispatcherNG", func() error {
+			StartEngine(&Globals.App, "CombinerAPIdispatcherNG", func() error {
 				lgConfig.Info("starting combiner sync API", "addresses", conf.MultiProvider.SyncApi.Addresses.Listen)
 				return APIdispatcherNG(conf, combinerSyncRtr,
 					conf.MultiProvider.SyncApi.Addresses.Listen,
@@ -772,65 +775,67 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 
 // StartImr starts subsystems for tdns-imr
 func (conf *Config) StartImr(ctx context.Context, apirouter *mux.Router) error {
-	startEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
-	startEngineNoError(&Globals.App, "ValidatorEngine", func() { ValidatorEngine(ctx, conf) })
-	startEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx, false) })
+	StartEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
+	StartEngineNoError(&Globals.App, "ValidatorEngine", func() { ValidatorEngine(ctx, conf) })
+	StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx, false) })
 	return nil
 }
 
 // StartScanner starts subsystems for tdns-scanner
 func (conf *Config) StartScanner(ctx context.Context, apirouter *mux.Router) error {
-	startEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
-	startEngine(&Globals.App, "ScannerEngine", func() error { return ScannerEngine(ctx, conf) })
-	startEngineNoError(&Globals.App, "ValidatorEngine", func() { ValidatorEngine(ctx, conf) })
-	startEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx, false) })
+	StartEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
+	StartEngine(&Globals.App, "ScannerEngine", func() error { return ScannerEngine(ctx, conf) })
+	StartEngineNoError(&Globals.App, "ValidatorEngine", func() { ValidatorEngine(ctx, conf) })
+	StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx, false) })
 	return nil
 }
 
 // StartAuth starts subsystems for tdns-auth
 func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error {
-	startEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
-	startEngineNoError(&Globals.App, "ValidatorEngine", func() { ValidatorEngine(ctx, conf) })
+	StartEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
+	StartEngineNoError(&Globals.App, "ValidatorEngine", func() { ValidatorEngine(ctx, conf) })
 	// In tdns-auth, IMR is active by default unless explicitly set to false
 	imrActive := conf.Imr.Active == nil || *conf.Imr.Active
 	if imrActive {
-		startEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx, true) })
+		StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx, true) })
 	} else {
 		lgConfig.Info("NOT starting imrengine (explicitly set to false)", "app", Globals.App.Name, "mode", AppTypeToString[Globals.App.Type])
 	}
 	kdb := conf.Internal.KeyDB
-	startEngineNoError(&Globals.App, "RefreshEngine", func() { RefreshEngine(ctx, conf) })
-	startEngine(&Globals.App, "Notifier", func() error { return Notifier(ctx, conf.Internal.NotifyQ) })
-	startEngineNoError(&Globals.App, "AuthQueryEngine", func() { AuthQueryEngine(ctx, conf.Internal.AuthQueryQ) })
-	startEngine(&Globals.App, "ScannerEngine", func() error { return ScannerEngine(ctx, conf) })
-	startEngine(&Globals.App, "ZoneUpdaterEngine", func() error { return kdb.ZoneUpdaterEngine(ctx) })
-	startEngine(&Globals.App, "DeferredUpdaterEngine", func() error { return kdb.DeferredUpdaterEngine(ctx) })
-	startEngine(&Globals.App, "UpdateHandler", func() error { return UpdateHandler(ctx, conf) })
-	startEngine(&Globals.App, "KeyBootstrapper", func() error { return kdb.KeyBootstrapper(ctx) })
-	startEngine(&Globals.App, "DelegationSyncher", func() error {
+	StartEngineNoError(&Globals.App, "RefreshEngine", func() { RefreshEngine(ctx, conf) })
+	StartEngine(&Globals.App, "Notifier", func() error { return Notifier(ctx, conf.Internal.NotifyQ) })
+	StartEngineNoError(&Globals.App, "AuthQueryEngine", func() { AuthQueryEngine(ctx, conf.Internal.AuthQueryQ) })
+	StartEngine(&Globals.App, "ScannerEngine", func() error { return ScannerEngine(ctx, conf) })
+	StartEngine(&Globals.App, "ZoneUpdaterEngine", func() error { return kdb.ZoneUpdaterEngine(ctx) })
+	StartEngine(&Globals.App, "DeferredUpdaterEngine", func() error { return kdb.DeferredUpdaterEngine(ctx) })
+	StartEngine(&Globals.App, "UpdateHandler", func() error { return UpdateHandler(ctx, conf) })
+	StartEngine(&Globals.App, "KeyBootstrapper", func() error { return kdb.KeyBootstrapper(ctx) })
+	StartEngine(&Globals.App, "DelegationSyncher", func() error {
 		return kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ, conf)
 	})
-	// Start incoming message router for beat/hello processing
-	// (CHUNK NOTIFY handler was already registered in MainInit via RegisterSignerChunkHandler)
-	if conf.Internal.TransportManager != nil {
-		conf.Internal.TransportManager.StartIncomingMessageRouter(ctx)
-		lgConfig.Info("signer incoming message router started")
+	// DNS engines (needed by all auth-like apps including MPSigner)
+	StartEngine(&Globals.App, "NotifyHandler", func() error { return NotifyHandler(ctx, conf) })
+	StartEngine(&Globals.App, "DnsEngine", func() error { return DnsEngine(ctx, conf) })
+	StartEngineNoError(&Globals.App, "ResignerEngine", func() { ResignerEngine(ctx, conf.Internal.ResignQ) })
+
+	// MP signer engines — skipped for AppTypeMPSigner (tdns-mp provides its own)
+	if Globals.App.Type != AppTypeMPSigner {
+		if conf.Internal.TransportManager != nil {
+			conf.Internal.TransportManager.StartIncomingMessageRouter(ctx)
+			lgConfig.Info("signer incoming message router started")
+		}
+		StartEngineNoError(&Globals.App, "SignerMsgHandler",
+			func() { SignerMsgHandler(ctx, conf, conf.Internal.MsgQs) })
+		StartEngine(&Globals.App, "KeyStateWorker", func() error { return KeyStateWorker(ctx, conf) })
 	}
-	// Start signer message handler for beat/hello consumption from MsgQs
-	startEngineNoError(&Globals.App, "SignerMsgHandler",
-		func() { SignerMsgHandler(ctx, conf, conf.Internal.MsgQs) })
-	startEngine(&Globals.App, "NotifyHandler", func() error { return NotifyHandler(ctx, conf) })
-	startEngine(&Globals.App, "DnsEngine", func() error { return DnsEngine(ctx, conf) })
-	startEngineNoError(&Globals.App, "ResignerEngine", func() { ResignerEngine(ctx, conf.Internal.ResignQ) })
-	// Start key state worker for automatic DNSSEC key lifecycle transitions
-	startEngine(&Globals.App, "KeyStateWorker", func() error { return KeyStateWorker(ctx, conf) })
+
 	// Start signer sync API router (for agent→signer HELLO/BEAT/PING over HTTPS)
-	if conf.MultiProvider != nil && len(conf.MultiProvider.SyncApi.Addresses.Listen) > 0 {
+	if Globals.App.Type != AppTypeMPSigner && conf.MultiProvider != nil && len(conf.MultiProvider.SyncApi.Addresses.Listen) > 0 {
 		signerSyncRtr, err := conf.SetupSignerSyncRouter(ctx)
 		if err != nil {
 			lgConfig.Error("failed to set up signer sync router", "err", err)
 		} else {
-			startEngine(&Globals.App, "SignerAPIdispatcherNG", func() error {
+			StartEngine(&Globals.App, "SignerAPIdispatcherNG", func() error {
 				lgConfig.Info("starting signer sync API", "addresses", conf.MultiProvider.SyncApi.Addresses.Listen)
 				return APIdispatcherNG(conf, signerSyncRtr,
 					conf.MultiProvider.SyncApi.Addresses.Listen,
@@ -845,17 +850,17 @@ func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error 
 
 // StartAgent starts subsystems for tdns-agent
 func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error {
-	startEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
+	StartEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
 	// In tdns-agent, IMR is active by default unless explicitly set to false
 	imrActive := conf.Imr.Active == nil || *conf.Imr.Active
 	if imrActive {
-		startEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx, true) })
+		StartEngine(&Globals.App, "ImrEngine", func() error { return conf.ImrEngine(ctx, true) })
 	} else {
 		lgConfig.Info("NOT starting imrengine (explicitly set to false)", "app", Globals.App.Name, "mode", AppTypeToString[Globals.App.Type])
 	}
 	kdb := conf.Internal.KeyDB
-	startEngineNoError(&Globals.App, "RefreshEngine", func() { RefreshEngine(ctx, conf) })
-	startEngine(&Globals.App, "Notifier", func() error { return Notifier(ctx, conf.Internal.NotifyQ) })
+	StartEngineNoError(&Globals.App, "RefreshEngine", func() { RefreshEngine(ctx, conf) })
+	StartEngine(&Globals.App, "Notifier", func() error { return Notifier(ctx, conf.Internal.NotifyQ) })
 	// Register CHUNK NOTIFY handler and start incoming DNS message router (must be before NotifyHandler)
 	if conf.Internal.TransportManager != nil {
 		if err := conf.Internal.TransportManager.RegisterChunkNotifyHandler(); err != nil {
@@ -1110,32 +1115,32 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 		return nil
 	})
 	// Agent-specific
-	startEngineNoError(&Globals.App, "HsyncEngine", func() { HsyncEngine(ctx, conf, conf.Internal.MsgQs) })
-	startEngineNoError(&Globals.App, "InfraBeatLoop", func() {
+	StartEngineNoError(&Globals.App, "HsyncEngine", func() { HsyncEngine(ctx, conf, conf.Internal.MsgQs) })
+	StartEngineNoError(&Globals.App, "InfraBeatLoop", func() {
 		conf.Internal.AgentRegistry.StartInfraBeatLoop(ctx)
 	})
-	startEngineNoError(&Globals.App, "DiscoveryRetrierNG", func() {
+	StartEngineNoError(&Globals.App, "DiscoveryRetrierNG", func() {
 		conf.Internal.AgentRegistry.DiscoveryRetrierNG(ctx)
 	})
-	startEngineNoError(&Globals.App, "SynchedDataEngine", func() { conf.SynchedDataEngine(ctx, conf.Internal.MsgQs) })
+	StartEngineNoError(&Globals.App, "SynchedDataEngine", func() { conf.SynchedDataEngine(ctx, conf.Internal.MsgQs) })
 	syncrtr, err := conf.SetupAgentSyncRouter(ctx)
 	if err != nil {
 		return fmt.Errorf("error setting up agent-to-agent sync router: %v", err)
 	}
-	startEngine(&Globals.App, "APIdispatcherNG", func() error {
+	StartEngine(&Globals.App, "APIdispatcherNG", func() error {
 		lgConfig.Info("starting agent-to-agent sync engine", "app", Globals.App.Name, "mode", AppTypeToString[Globals.App.Type])
 		return APIdispatcherNG(conf, syncrtr, conf.MultiProvider.Api.Addresses.Listen, conf.MultiProvider.Api.CertFile, conf.MultiProvider.Api.KeyFile, conf.Internal.APIStopCh)
 	})
-	startEngineNoError(&Globals.App, "AuthQueryEngine", func() { AuthQueryEngine(ctx, conf.Internal.AuthQueryQ) })
-	startEngine(&Globals.App, "ScannerEngine", func() error { return ScannerEngine(ctx, conf) })
-	startEngine(&Globals.App, "ZoneUpdaterEngine", func() error { return kdb.ZoneUpdaterEngine(ctx) })
-	startEngine(&Globals.App, "DeferredUpdaterEngine", func() error { return kdb.DeferredUpdaterEngine(ctx) })
-	startEngine(&Globals.App, "UpdateHandler", func() error { return UpdateHandler(ctx, conf) })
-	startEngine(&Globals.App, "DelegationSyncher", func() error {
+	StartEngineNoError(&Globals.App, "AuthQueryEngine", func() { AuthQueryEngine(ctx, conf.Internal.AuthQueryQ) })
+	StartEngine(&Globals.App, "ScannerEngine", func() error { return ScannerEngine(ctx, conf) })
+	StartEngine(&Globals.App, "ZoneUpdaterEngine", func() error { return kdb.ZoneUpdaterEngine(ctx) })
+	StartEngine(&Globals.App, "DeferredUpdaterEngine", func() error { return kdb.DeferredUpdaterEngine(ctx) })
+	StartEngine(&Globals.App, "UpdateHandler", func() error { return UpdateHandler(ctx, conf) })
+	StartEngine(&Globals.App, "DelegationSyncher", func() error {
 		return kdb.DelegationSyncher(ctx, conf.Internal.DelegationSyncQ, conf.Internal.NotifyQ, conf)
 	})
-	startEngine(&Globals.App, "NotifyHandler", func() error { return NotifyHandler(ctx, conf) })
-	startEngine(&Globals.App, "DnsEngine", func() error { return DnsEngine(ctx, conf) })
+	StartEngine(&Globals.App, "NotifyHandler", func() error { return NotifyHandler(ctx, conf) })
+	StartEngine(&Globals.App, "DnsEngine", func() error { return DnsEngine(ctx, conf) })
 	return nil
 }
 func Shutdowner(conf *Config, msg string) {
