@@ -344,7 +344,8 @@ func (conf *Config) ParseConfig(reload bool) error {
 
 	// XXX: Hmm. Should not initialize KeyDB on reload?
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner:
+	case AppTypeAuth, AppTypeAgent, AppTypeCombiner,
+		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner:
 		if !reload { // || kdb == nil {
 			err = conf.InitializeKeyDB()
 			if err != nil {
@@ -872,7 +873,8 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		}
 
 		switch Globals.App.Type {
-		case AppTypeAuth, AppTypeAgent, AppTypeCombiner:
+		case AppTypeAuth, AppTypeAgent, AppTypeCombiner,
+			AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner:
 			if conf.Internal.RefreshZoneCh == nil {
 				lgConfig.Error("refresh channel is not configured, zones will not be refreshed, terminating")
 				return nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
