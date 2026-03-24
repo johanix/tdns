@@ -689,6 +689,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			newOpts[opt] = val
 		}
 
+		zdp.mu.Lock()
 		var newMPdata *MPdata
 		if options[OptMultiProvider] {
 			zdp.EnsureMP()
@@ -703,8 +704,6 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 				}
 			}
 		}
-
-		zdp.mu.Lock()
 		zdp.Options = newOpts
 		if newMPdata != nil {
 			zdp.EnsureMP()

@@ -249,7 +249,7 @@ func checkMPauthorization(zd *ZoneData) error {
 	if !zd.Options[OptMultiProvider] {
 		return fmt.Errorf("zone %q: contributions rejected — zone is not configured as a multi-provider zone (OptMultiProvider not set)", zd.ZoneName)
 	}
-	if zd.MP.MPdata == nil {
+	if zd.MP == nil || zd.MP.MPdata == nil {
 		// MPdata is nil despite OptMultiProvider being set. This means one of
 		// guards 2-4 failed during zone refresh. Provide a specific explanation.
 		// Re-run the checks to produce a precise message.

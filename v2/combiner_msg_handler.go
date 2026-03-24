@@ -357,9 +357,14 @@ func sendEditsToAgent(conf *Config, tm *TransportManager, agentID string, zone s
 
 	// Copy AgentContributions under lock, then convert outside the lock
 	zd.mu.Lock()
-	contribsCopy := make(map[string]map[string]map[uint16]core.RRset, len(zd.MP.AgentContributions))
-	for aid, ownerMap := range zd.MP.AgentContributions {
-		contribsCopy[aid] = ownerMap
+	var contribsCopy map[string]map[string]map[uint16]core.RRset
+	if zd.MP == nil {
+		contribsCopy = make(map[string]map[string]map[uint16]core.RRset)
+	} else {
+		contribsCopy = make(map[string]map[string]map[uint16]core.RRset, len(zd.MP.AgentContributions))
+		for aid, ownerMap := range zd.MP.AgentContributions {
+			contribsCopy[aid] = ownerMap
+		}
 	}
 	zd.mu.Unlock()
 

@@ -54,6 +54,9 @@ func GetProviderZoneRRtypes(zone string) map[uint16]bool {
 
 // Returns true if the zone data was modified.
 func (zd *ZoneData) CombineWithLocalChanges() (bool, error) {
+	if zd.MP == nil {
+		return false, nil
+	}
 	modified := false
 	if zd.MP.CombinerData == nil {
 		zd.Logger.Printf("CombineWithLocalChanges: Zone %s: No combiner data to apply", zd.ZoneName)
@@ -265,6 +268,9 @@ func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRse
 // For each owner/rrtype, RRs from all agents are combined into a single RRset,
 // with deduplication based on the string representation of each RR.
 func (zd *ZoneData) rebuildCombinerData() {
+	if zd.MP == nil {
+		return
+	}
 	if zd.MP.CombinerData == nil {
 		zd.MP.CombinerData = core.NewCmap[OwnerData]()
 	}
@@ -331,7 +337,7 @@ func (zd *ZoneData) rebuildCombinerData() {
 
 // GetCombinerData retrieves all local combiner data for the zone
 func (zd *ZoneData) GetCombinerData() (map[string][]core.RRset, error) {
-	if zd.MP.CombinerData == nil {
+	if zd.MP == nil || zd.MP.CombinerData == nil {
 		return nil, fmt.Errorf("no local data exists for zone %s", zd.ZoneName)
 	}
 
@@ -401,7 +407,7 @@ func (zd *ZoneData) AddCombinerDataNG(senderID string, data map[string][]string)
 func (zd *ZoneData) GetCombinerDataNG() map[string][]RRsetString {
 	responseData := make(map[string][]RRsetString)
 
-	if zd.MP.CombinerData == nil {
+	if zd.MP == nil || zd.MP.CombinerData == nil {
 		return responseData
 	}
 
@@ -451,7 +457,7 @@ func (zd *ZoneData) RemoveCombinerDataNG(senderID string, data map[string][]stri
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
 
-	if zd.MP.AgentContributions == nil {
+	if zd.MP == nil || zd.MP.AgentContributions == nil {
 		return nil, nil
 	}
 

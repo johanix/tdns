@@ -178,7 +178,7 @@ func sendKeystateInventoryToAgent(conf *Config, tm *TransportManager, agentID st
 	// Only include keys if we are a signer for this zone.
 	// Non-signers send empty inventory so the agent gets a response.
 	var items []KeyInventoryItem
-	if zd, ok := Zones.Get(zone); ok && zd.MP.MPdata != nil && !zd.MP.MPdata.WeAreSigner {
+	if zd, ok := Zones.Get(zone); ok && zd.MP != nil && zd.MP.MPdata != nil && !zd.MP.MPdata.WeAreSigner {
 		lgSigner.Debug("not a signer for zone, sending empty inventory", "zone", zone)
 	} else {
 		var err error

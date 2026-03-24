@@ -164,7 +164,7 @@ func (zd *ZoneData) LocalDnskeysChanged(newzd *ZoneData) (bool, *DnskeyStatus, e
 func (zd *ZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) {
 	// Don't process DNSKEYs for unsigned zones, but clean up any
 	// previously published keys on transition to unsigned.
-	if zd.MP.MPdata != nil && !zd.MP.MPdata.ZoneSigned {
+	if zd.MP != nil && zd.MP.MPdata != nil && !zd.MP.MPdata.ZoneSigned {
 		if len(zd.MP.LocalDNSKEYs) > 0 {
 			ds := &DnskeyStatus{
 				Time:         time.Now(),
