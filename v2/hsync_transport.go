@@ -521,6 +521,8 @@ func (tm *TransportManager) routeIncomingMessage(msg *transport.IncomingMessage)
 		tm.routeRelocateMessage(msg)
 	case "status-update":
 		tm.routeStatusUpdateMessage(msg)
+	case "confirm":
+		// Already handled by Router's HandleConfirmation handler — nothing to do here
 	default:
 		lgTransport.Warn("unknown message type", "type", msg.Type)
 	}
