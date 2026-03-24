@@ -8,9 +8,9 @@ import (
 	"context"
 	"fmt"
 	"github.com/gorilla/mux"
+	"github.com/johanix/tdns-transport/v2/crypto/jose"
 	"github.com/johanix/tdns-transport/v2/transport"
 	core "github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns-transport/v2/crypto/jose"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	flag "github.com/spf13/pflag"
@@ -472,7 +472,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 				Authorizer:       tm,
 				PeerRegistry:     tm.PeerRegistry,
 				AllowUnencrypted: true,
-				IncomingChan:     signerState.ChunkHandler().IncomingChan,
+				IncomingChan:     nil, // routing via RouteToCallback, not IncomingChan
 			}
 			if signerPayloadCrypto != nil {
 				signerRouterCfg.PayloadCrypto = signerPayloadCrypto
@@ -649,7 +649,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 				Authorizer:   tm,
 				PeerRegistry: tm.PeerRegistry,
 				HandleUpdate: NewCombinerSyncHandler(),
-				IncomingChan: combinerState.ChunkHandler().IncomingChan,
+				IncomingChan: nil, // routing via RouteToCallback, not IncomingChan
 			}
 			// Add crypto middleware if secure wrapper is available
 			if combinerPayloadCrypto != nil {

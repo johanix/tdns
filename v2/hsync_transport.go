@@ -404,7 +404,7 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			TransportManager:             tm,
 			PeerRegistry:                 tm.PeerRegistry,
 			PayloadCrypto:                cfg.PayloadCrypto,
-			IncomingChan:                 tm.ChunkHandler.IncomingChan,
+			IncomingChan:                 nil, // routing via RouteToCallback, not IncomingChan
 			TriggerDiscoveryOnMissingKey: true,
 			AllowUnencrypted:             false,
 			VerboseStats:                 false, // Set to true for verbose statistics logging
@@ -465,23 +465,20 @@ func (tm *TransportManager) StartIncomingMessageRouter(ctx context.Context) {
 		return
 	}
 
-	go func() {
-		lgTransport.Info("starting incoming DNS message router")
-		for {
-			select {
-			case <-ctx.Done():
-				lgTransport.Info("incoming message router stopped")
-				return
+	// Register RouteToCallback middleware on the Router.
+	// When a message arrives via CHUNK NOTIFY, the Router runs the handler
+	// chain (auth, crypto, parse) and then calls our callback with the
+	// parsed IncomingMessage. The callback dispatches to typed MsgQs
+	// channels based on message type.
+	//
+	// This replaces the old pattern of reading from a single IncomingChan
+	// in a dedicated goroutine. Each message type now fans out directly
+	// to its own channel without a shared bottleneck.
+	tm.Router.Use(transport.RouteToCallback(func(msg *transport.IncomingMessage) {
+		tm.routeIncomingMessage(msg)
+	}))
 
-			case msg, ok := <-tm.ChunkHandler.IncomingChan:
-				if !ok {
-					lgTransport.Info("incoming message channel closed, stopping router")
-					return
-				}
-				tm.routeIncomingMessage(msg)
-			}
-		}
-	}()
+	lgTransport.Info("incoming message router registered via RouteToCallback")
 }
 
 // routeIncomingMessage routes an incoming DNS message to the appropriate hsyncengine channel.
