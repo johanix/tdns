@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johanix/tdns-transport/v2/transport"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -420,7 +421,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						tm := conf.Internal.TransportManager
 						if tm != nil && synchedDataUpdate.Update != nil {
 							// Generate a single shared distID for combiner + all agents
-							distID := GenerateQueueDistributionID()
+							distID := transport.GenerateDistributionID()
 
 							// Build the expected recipients list for confirmation tracking
 							recipients := tm.GetDistributionRecipients(synchedDataUpdate.Zone, synchedDataUpdate.SkipCombiner)
@@ -892,7 +893,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						totalRRs += len(records)
 					}
 					if len(zu.Operations) > 0 {
-						distID := GenerateQueueDistributionID()
+						distID := transport.GenerateDistributionID()
 						if _, err := tm.EnqueueForCombiner(sdcmd.Zone, zu, distID); err != nil {
 							lgEngine.Error("resync: failed to enqueue local data for combiner", "zone", sdcmd.Zone, "err", err)
 						} else {
@@ -930,7 +931,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						})
 					}
 					if len(agentZU.Operations) > 0 {
-						distID := GenerateQueueDistributionID()
+						distID := transport.GenerateDistributionID()
 						if err := tm.EnqueueForZoneAgents(sdcmd.Zone, agentZU, distID); err != nil {
 							lgEngine.Error("resync: failed to enqueue local data for zone agents", "zone", sdcmd.Zone, "err", err)
 						}
@@ -970,7 +971,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						totalRRs += len(records)
 					}
 					if len(zu.Operations) > 0 {
-						distID := GenerateQueueDistributionID()
+						distID := transport.GenerateDistributionID()
 						if _, err := tm.EnqueueForCombiner(sdcmd.Zone, zu, distID); err != nil {
 							lgEngine.Error("resync: failed to enqueue remote agent data for combiner", "zone", sdcmd.Zone, "agent", remoteAgentId, "err", err)
 						} else {
@@ -1056,7 +1057,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					continue
 				}
 
-				distID := GenerateQueueDistributionID()
+				distID := transport.GenerateDistributionID()
 				if err := tm.EnqueueForSpecificAgent(sdcmd.Zone, sdcmd.TargetAgent, zu, distID); err != nil {
 					lgEngine.Error("resync-targeted: failed to enqueue", "zone", sdcmd.Zone, "target", sdcmd.TargetAgent, "err", err)
 					sdcmd.Response <- &SynchedDataCmdResponse{Error: true, ErrorMsg: err.Error()}
