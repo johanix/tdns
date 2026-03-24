@@ -265,7 +265,8 @@ func (conf *Config) ParseConfig(reload bool) error {
 
 	// Initialize DnssecPolicies if needed
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent:
+	case AppTypeAuth, AppTypeAgent,
+		AppTypeMPSigner, AppTypeMPAgent:
 		if conf.Internal.DnssecPolicies == nil {
 			conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
 		}
@@ -331,7 +332,8 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner:
+	case AppTypeAuth, AppTypeAgent, AppTypeCombiner,
+		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner:
 		conf.parseAuthOptions()
 	}
 
@@ -411,7 +413,8 @@ func (conf *Config) InitializeKeyDB() error {
 		return fmt.Errorf("database file path %q is a symlink (not allowed)", dbFile)
 	}
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner:
+	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner,
+		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner:
 
 		// Create DB file and parent directory if missing (auto-initialize on first run).
 		if _, err := os.Stat(dbFile); os.IsNotExist(err) {
