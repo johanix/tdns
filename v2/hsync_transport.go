@@ -37,33 +37,19 @@ func generatePingNonce() string {
 }
 
 // TransportManager manages multiple transports for agent communication.
+// TransportManager wraps the generic transport.TransportManager with
+// MP-specific state and methods. The generic TM's exported fields
+// (APITransport, DNSTransport, ChunkHandler, Router, PeerRegistry,
+// ReliableQueue, LocalID, ControlZone) are promoted via embedding.
+//
+// This wrapper is temporary — it will be removed once all MP methods
+// are converted to standalone functions.
 type TransportManager struct {
-	// APITransport is the HTTPS-based transport
-	APITransport *transport.APITransport
+	*transport.TransportManager // generic (fields promoted)
 
-	// DNSTransport is the DNS NOTIFY-based transport
-	DNSTransport *transport.DNSTransport
-
-	// ChunkHandler handles incoming NOTIFY(CHUNK) messages
-	ChunkHandler *transport.ChunkNotifyHandler
-
-	// Router handles DNS message routing and middleware
-	Router *transport.DNSMessageRouter
-
-	// PeerRegistry tracks all known peers
-	PeerRegistry *transport.PeerRegistry
-
-	// LocalID is our agent identity
-	LocalID string
-
-	// ControlZone for DNS transport
-	ControlZone string
-
-	// AgentRegistry for integration with existing code
+	// MP-specific state
 	agentRegistry *AgentRegistry
-
-	// MsgQs for routing messages to hsyncengine
-	msgQs *MsgQs
+	msgQs         *MsgQs
 
 	// SupportedMechanisms lists active transports ("api", "dns")
 	SupportedMechanisms []string
@@ -77,6 +63,7 @@ type TransportManager struct {
 	signerAddress string
 
 	// reliableQueue handles retry-until-confirmed delivery for outgoing sync messages.
+	// TODO: migrate to embedded TM's ReliableQueue in step 4e
 	reliableQueue *ReliableMessageQueue
 
 	// pendingDnskeyPropagations tracks DNSKEY distributions awaiting confirmation from all remote agents.
@@ -192,10 +179,12 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 	}
 
 	tm := &TransportManager{
-		LocalID:                   cfg.LocalID,
-		ControlZone:               cfg.ControlZone,
-		PeerRegistry:              transport.NewPeerRegistry(),
-		Router:                    transport.NewDNSMessageRouter(),
+		TransportManager: &transport.TransportManager{
+			PeerRegistry: transport.NewPeerRegistry(),
+			Router:       transport.NewDNSMessageRouter(),
+			LocalID:      cfg.LocalID,
+			ControlZone:  cfg.ControlZone,
+		},
 		agentRegistry:             cfg.AgentRegistry,
 		msgQs:                     cfg.MsgQs,
 		SupportedMechanisms:       supportedMechanisms,
