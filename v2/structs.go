@@ -61,6 +61,9 @@ const (
 // nil means the zone is not confirmed as a multi-provider zone (either OptMultiProvider
 // is not set, or the zone owner hasn't declared it via HSYNC3+HSYNCPARAM, or we are
 // not a listed provider). Populated during zone refresh by populateMPdata().
+//
+// NOTE: This is an MP type that lives in tdns (not tdns-mp) because it is
+// a field of ZoneMPExtension, which is a field of ZoneData.
 type MPdata struct {
 	WeAreProvider bool                // At least one of our agent identities matches an HSYNC3 Identity
 	OurLabel      string              // Our provider label from the matching HSYNC3 record
@@ -70,8 +73,10 @@ type MPdata struct {
 	Options       map[ZoneOption]bool // MP-specific options (future: migrate from zd.Options)
 }
 
-// ZoneMPExtension holds multi-provider state for a zone.
-// Moves to tdns-mp after repo split. Access via zd.MP.
+// ZoneMPExtension holds multi-provider state for a zone. Access via zd.MP.
+//
+// NOTE: This is an MP type that lives in tdns (not tdns-mp) because it is
+// a field of ZoneData. tdns-mp code accesses these fields via zd.MP.
 type ZoneMPExtension struct {
 	CombinerData *core.ConcurrentMap[string, OwnerData]
 	UpstreamData *core.ConcurrentMap[string, OwnerData] // Original upstream apex data (combiner NS fallback)
@@ -253,6 +258,8 @@ func (zd *ZoneData) SetRemoteDNSKEYs(keys []dns.RR) {
 }
 
 // KeyInventorySnapshot stores a complete key inventory received from the signer.
+//
+// NOTE: MP type in tdns because it is a field of ZoneMPExtension.
 type KeyInventorySnapshot struct {
 	SenderID  string
 	Zone      string

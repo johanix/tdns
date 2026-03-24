@@ -462,13 +462,81 @@ replace (
 
 ### 2.4: Fix compilation — the hard part
 
-All references to tdns types need qualifying:
-- `*ZoneData` → `*tdns.ZoneData`
-- `Conf.Internal` → qualified access via tdns package
-- Unexported field access → use accessors added in Phase 0
+Iterate over each file in tdns-mp/v2/, applying these
+rules:
 
-~50 files, potentially hundreds of references. Approach:
-fix one file at a time, commit after each compiles.
+**For each type definition:**
+Comment it out with a note that it stays in tdns for now,
+to be evaluated for move to tdns-mp later. The commented
+type serves as documentation so a reader can immediately
+see the type's shape without looking up tdns.
+
+**For each pure (non-receiver) function:**
+Evaluate if it is MP-related or not.
+- If NOT MP-related: delete it.
+- If MP-related: modify function signature to use
+  `tdns.TypeName` for any parameters/returns that are
+  tdns types. Hunt for callers and update them.
+
+**For each receiver function (method):**
+Evaluate if it is MP-related or not.
+- If NOT MP-related: delete it.
+- If MP-related: convert to a standalone function.
+  The receiver becomes the first parameter:
+  ```
+  func (zd *ZoneData) Foobar(foo, bar int) error {}
+  ```
+  becomes:
+  ```
+  func Foobar(zd *tdns.ZoneData, foo, bar int) error {}
+  ```
+  Do NOT modify the original method in tdns. Instead,
+  add a **wrapper** in tdns/v2/wrappers.go that calls
+  the original method:
+  ```
+  func ZoneDataFoobar(zd *ZoneData, foo, bar int) error {
+      return zd.Foobar(foo, bar)
+  }
+  ```
+  This allows tdns-mp to call `tdns.ZoneDataFoobar(zd, ...)`
+  while tdns code continues using `zd.Foobar(...)`.
+
+  For unexported methods, the wrapper exports them:
+  ```
+  func ZoneDataFooBar(zd *ZoneData, foo, bar int) error {
+      return zd.fooBar(foo, bar)
+  }
+  ```
+
+  Hunt for callers of the method in tdns-mp and update
+  them to use the new standalone function signature.
+
+**Wrapper naming convention:**
+`TypeName` + `MethodName` (capitalized). Examples:
+- `zd.rebuildCombinerData()` →
+  wrapper: `ZoneDataRebuildCombinerData(zd *ZoneData)`
+  caller: `tdns.ZoneDataRebuildCombinerData(zd)`
+- `conf.ParseZones(...)` →
+  wrapper: `ConfigParseZones(conf *Config, ...)`
+  caller: `tdns.ConfigParseZones(conf, ...)`
+
+**When to create wrappers vs standalone functions:**
+- If the method body is MP logic: create a standalone
+  function in tdns-mp (the method in tdns may become
+  dead code, cleaned up in Phase 3)
+- If the method body is DNS logic called from MP code:
+  create a wrapper in tdns/v2/wrappers.go
+
+**Iteration strategy:**
+Process one file at a time. After converting each file,
+implement the wrapper AND update the caller at the same
+time. This way the compiler complains about the *next*
+missing caller each time, driving progress forward.
+Commit after each file compiles (or after logical batches).
+
+**Keep all types in tdns initially.** Once everything
+compiles and the system works end-to-end, revisit type
+placement with full compiler visibility.
 
 ### 2.5: Rename application binaries
 
