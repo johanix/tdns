@@ -701,12 +701,15 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 
 				// Set PersistContributions callback
 				if zd.MP.PersistContributions == nil && zd.KeyDB != nil {
-					zd.MP.PersistContributions = zd.KeyDB.SaveContributions
+					kdb := zd.KeyDB
+					zd.MP.PersistContributions = func(zone, senderID string, contribs map[string]map[uint16]core.RRset) error {
+						return SaveContributions(kdb, zone, senderID, contribs)
+					}
 					lgConfig.Info("PersistContributions callback set", "zone", zd.ZoneName)
 				}
 				// Hydrate AgentContributions from persistent storage
 				if zd.MP.AgentContributions == nil && zd.KeyDB != nil {
-					allContribs, err := zd.KeyDB.LoadAllContributions()
+					allContribs, err := LoadAllContributions(zd.KeyDB)
 					if err != nil {
 						lgConfig.Error("failed to load contributions snapshot", "zone", zd.ZoneName, "err", err)
 						return

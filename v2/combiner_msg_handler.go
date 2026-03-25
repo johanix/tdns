@@ -129,7 +129,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			// Persist all incoming edits to CombinerPendingEdits first.
 			var editID int
 			if kdb != nil {
-				editID, _ = kdb.NextEditID()
+				editID, _ = NextEditID(kdb)
 				rec := &PendingEditRecord{
 					EditID:         editID,
 					Zone:           zone,
@@ -139,7 +139,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 					Records:        msg.Records,
 					ReceivedAt:     time.Now(),
 				}
-				if err := kdb.SavePendingEdit(rec); err != nil {
+				if err := SavePendingEdit(kdb, rec); err != nil {
 					lgCombiner.Error("failed to persist edit", "zone", zone, "err", err)
 				} else {
 					lgCombiner.Debug("persisted edit", "editID", editID, "sender", senderID, "zone", zone)
@@ -155,7 +155,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 					lgCombiner.Debug("no-op edit, auto-confirming", "zone", zone, "editID", editID, "sender", senderID)
 					// Clean up the pending edit (move to approved as no-op)
 					if kdb != nil && editID > 0 {
-						if err := kdb.ResolvePendingEdit(editID, msg.Records, nil, ""); err != nil {
+						if err := ResolvePendingEdit(kdb, editID, msg.Records, nil, ""); err != nil {
 							lgCombiner.Error("failed to resolve no-op edit", "editID", editID, "err", err)
 						}
 					}
@@ -251,7 +251,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 						reason = fmt.Sprintf("%s (and %d more)", reason, len(reasons)-1)
 					}
 				}
-				if err := kdb.ResolvePendingEdit(editID, approved, rejected, reason); err != nil {
+				if err := ResolvePendingEdit(kdb, editID, approved, rejected, reason); err != nil {
 					lgCombiner.Error("failed to resolve edit", "editID", editID, "err", err)
 				}
 			}

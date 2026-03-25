@@ -412,7 +412,7 @@ func combinerNotifyDelegationChange(tm *MPTransportBridge, senderID, zonename st
 				Class:  dns.ClassINET,
 				Ttl:    120,
 			}
-			_, _, csyncChanged, err := zd.ReplaceCombinerDataByRRtype(tm.LocalID, zonename, dns.TypeCSYNC, []dns.RR{csync})
+			_, _, csyncChanged, err := ReplaceCombinerDataByRRtype(zd, tm.LocalID, zonename, dns.TypeCSYNC, []dns.RR{csync})
 			if err != nil {
 				lgCombiner.Error("combinerNotifyDelegationChange: CSYNC replace failed", "zone", zonename, "err", err)
 			} else {
@@ -426,7 +426,7 @@ func combinerNotifyDelegationChange(tm *MPTransportBridge, senderID, zonename st
 		if err != nil {
 			lgCombiner.Error("combinerNotifyDelegationChange: CDS synthesis failed", "zone", zonename, "err", err)
 		} else if len(cdsRRs) > 0 {
-			_, _, cdsChanged, err := zd.ReplaceCombinerDataByRRtype(tm.LocalID, zonename, dns.TypeCDS, cdsRRs)
+			_, _, cdsChanged, err := ReplaceCombinerDataByRRtype(zd, tm.LocalID, zonename, dns.TypeCDS, cdsRRs)
 			if err != nil {
 				lgCombiner.Error("combinerNotifyDelegationChange: CDS replace failed", "zone", zonename, "err", err)
 			} else {
@@ -524,13 +524,13 @@ func combinerApplyPublishInstruction(req *CombinerSyncRequest, zd *ZoneData, kdb
 	// Load previously stored instruction (if any)
 	var storedInstr *StoredPublishInstruction
 	if kdb != nil {
-		storedInstr, _ = kdb.GetPublishInstruction(zone, senderID)
+		storedInstr, _ = GetPublishInstruction(kdb, zone, senderID)
 	}
 
 	// Retract: empty Locations means remove all published KEYs
 	if len(instr.Locations) == 0 {
 		// Remove apex KEY
-		zd.ReplaceCombinerDataByRRtype(senderID, zone, dns.TypeKEY, nil)
+		ReplaceCombinerDataByRRtype(zd, senderID, zone, dns.TypeKEY, nil)
 		// Remove all _signal KEYs
 		if storedInstr != nil {
 			for _, ns := range storedInstr.PublishedNS {
@@ -538,7 +538,7 @@ func combinerApplyPublishInstruction(req *CombinerSyncRequest, zd *ZoneData, kdb
 			}
 		}
 		if kdb != nil {
-			kdb.DeletePublishInstruction(zone, senderID)
+			DeletePublishInstruction(kdb, zone, senderID)
 		}
 		lgCombiner.Info("publish instruction retracted", "zone", zone, "sender", senderID)
 		return
@@ -560,10 +560,10 @@ func combinerApplyPublishInstruction(req *CombinerSyncRequest, zd *ZoneData, kdb
 			}
 			parsedRRs = append(parsedRRs, rr)
 		}
-		zd.ReplaceCombinerDataByRRtype(senderID, zone, dns.TypeKEY, parsedRRs)
+		ReplaceCombinerDataByRRtype(zd, senderID, zone, dns.TypeKEY, parsedRRs)
 	} else if storedInstr != nil && containsString(storedInstr.Locations, "at-apex") {
 		// Was at-apex before, now removed
-		zd.ReplaceCombinerDataByRRtype(senderID, zone, dns.TypeKEY, nil)
+		ReplaceCombinerDataByRRtype(zd, senderID, zone, dns.TypeKEY, nil)
 	}
 
 	// Handle at-ns
@@ -598,7 +598,7 @@ func combinerApplyPublishInstruction(req *CombinerSyncRequest, zd *ZoneData, kdb
 
 	// Persist
 	if kdb != nil {
-		if err := kdb.SavePublishInstruction(zone, senderID, instr, publishedNS); err != nil {
+		if err := SavePublishInstruction(kdb, zone, senderID, instr, publishedNS); err != nil {
 			lgCombiner.Error("failed to save publish instruction", "zone", zone, "sender", senderID, "err", err)
 		}
 	}
@@ -613,7 +613,7 @@ func combinerResyncSignalKeys(senderID, zone string, zd *ZoneData, kdb *KeyDB) {
 	if kdb == nil {
 		return
 	}
-	storedInstr, err := kdb.GetPublishInstruction(zone, senderID)
+	storedInstr, err := GetPublishInstruction(kdb, zone, senderID)
 	if err != nil || storedInstr == nil {
 		return
 	}
@@ -641,7 +641,7 @@ func combinerResyncSignalKeys(senderID, zone string, zd *ZoneData, kdb *KeyDB) {
 
 	if changed {
 		instr := storedInstr.ToPublishInstruction()
-		if err := kdb.SavePublishInstruction(zone, senderID, instr, currentNS); err != nil {
+		if err := SavePublishInstruction(kdb, zone, senderID, instr, currentNS); err != nil {
 			lgCombiner.Error("failed to update published NS after resync", "zone", zone, "sender", senderID, "err", err)
 		}
 		lgCombiner.Info("signal keys resynced after NS change", "zone", zone, "sender", senderID, "publishedNS", currentNS)
@@ -678,7 +678,7 @@ func publishSignalKeyToProvider(childZone, nsTarget, senderID string, keyRRs []s
 		parsedRRs = append(parsedRRs, rr)
 	}
 
-	_, _, changed, err := zd.ReplaceCombinerDataByRRtype(senderID, ownerName, dns.TypeKEY, parsedRRs)
+	_, _, changed, err := ReplaceCombinerDataByRRtype(zd, senderID, ownerName, dns.TypeKEY, parsedRRs)
 	if err != nil {
 		lgCombiner.Error("failed to apply _signal KEY to provider zone", "zone", providerZone, "owner", ownerName, "err", err)
 		return
@@ -752,7 +752,7 @@ func buildPendingSignalKeys(kdb *KeyDB) {
 		pendingSignalKeys.entries = make(map[string][]signalKeyEntry)
 		return
 	}
-	allInstr, err := kdb.LoadAllPublishInstructions()
+	allInstr, err := LoadAllPublishInstructions(kdb)
 	if err != nil {
 		lgCombiner.Error("failed to load publish instructions for startup re-apply", "err", err)
 		pendingSignalKeys.entries = make(map[string][]signalKeyEntry)
@@ -810,7 +810,7 @@ func applyPendingSignalKeys(zd *ZoneData, kdb *KeyDB) {
 			rr.Header().Name = entry.OwnerName
 			parsedRRs = append(parsedRRs, rr)
 		}
-		_, _, changed, err := zd.ReplaceCombinerDataByRRtype(entry.SenderID, entry.OwnerName, dns.TypeKEY, parsedRRs)
+		_, _, changed, err := ReplaceCombinerDataByRRtype(zd, entry.SenderID, entry.OwnerName, dns.TypeKEY, parsedRRs)
 		if err != nil {
 			lgCombiner.Error("startup re-apply: failed to apply _signal KEY", "zone", zd.ZoneName, "owner", entry.OwnerName, "err", err)
 			continue
@@ -1022,14 +1022,14 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 							// Remote had it first, local now claims — re-attribute to local
 							lgCombiner.Info("dedup: re-attributing contribution from remote to local",
 								"rrtype", op.RRtype, "zone", zonename, "from", existingSender, "to", req.SenderID)
-							zd.ReplaceCombinerDataByRRtype(existingSender, zonename, rrtype, nil) // remove from remote
+							ReplaceCombinerDataByRRtype(zd, existingSender, zonename, rrtype, nil) // remove from remote
 							// fall through to normal replace, which will store under local sender
 						}
 					}
 				}
 			}
 
-			applied, removed, changed, err := zd.ReplaceCombinerDataByRRtype(req.SenderID, zonename, rrtype, parsedRRs)
+			applied, removed, changed, err := ReplaceCombinerDataByRRtype(zd, req.SenderID, zonename, rrtype, parsedRRs)
 			if err != nil {
 				lgCombiner.Error("REPLACE operation failed", "err", err)
 				rejectedItems = append(rejectedItems, RejectedItem{
@@ -1062,7 +1062,7 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 				addRecords[zonename] = append(addRecords[zonename], rr.String())
 			}
 			if len(addRecords) > 0 {
-				addChanged, err := zd.AddCombinerDataNG(req.SenderID, addRecords)
+				addChanged, err := AddCombinerDataNG(zd, req.SenderID, addRecords)
 				if err != nil {
 					lgCombiner.Error("ADD operation failed", "err", err)
 					rejectedItems = append(rejectedItems, RejectedItem{
@@ -1085,7 +1085,7 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 				delRecords[zonename] = append(delRecords[zonename], rr.String())
 			}
 			if len(delRecords) > 0 {
-				removed, err := zd.RemoveCombinerDataNG(req.SenderID, delRecords)
+				removed, err := RemoveCombinerDataNG(zd, req.SenderID, delRecords)
 				if err != nil {
 					lgCombiner.Error("DELETE operation failed", "err", err)
 					rejectedItems = append(rejectedItems, RejectedItem{

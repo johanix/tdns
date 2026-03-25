@@ -1,0 +1,269 @@
+# Combiner Extraction to tdns-mp
+
+Date: 2026-03-25
+Status: PLANNING
+Prerequisite: Signer extraction complete, 4g done
+
+## Context
+
+The signer was successfully extracted to tdns-mp. The
+combiner follows the same pattern but with more files:
+13 MP-specific files vs 4 for the signer.
+
+The combiner does NOT use: AgentRegistry, SDE,
+HsyncEngine, gossip, provider groups, leader election,
+agent discovery, agent policy. It is a data sink — it
+receives zone updates from agents, aggregates them, and
+sends confirmations back.
+
+## Files to copy to tdns-mp
+
+### Core business logic (3 files)
+1. `combiner_chunk.go` — RegisterCombinerChunkHandler,
+   NewCombinerSyncHandler, CombinerProcessUpdate,
+   publish instruction handling, signal key resync.
+   NOTE: CombinerState stays in tdns (signer uses it too).
+   NOTE: RegisterSignerChunkHandler already in tdns-mp.
+   Extract combiner-specific functions only.
+   (~1700 lines total, subset copied)
+2. `combiner_msg_handler.go` — CombinerMsgHandler,
+   combinerSendConfirmation (~440 lines)
+3. `combiner_utils.go` — AddCombinerData,
+   rebuildCombinerData, RRtype policy. Methods converted
+   to standalone functions before copying.
+   (~1010 lines)
+
+NOT copied:
+- `combiner_peer.go` — agent-side only
+  (InitializeCombinerAsPeer called by agent, not combiner)
+
+### Database/persistence (3 files)
+5. `db_combiner_contributions.go` — agent contribution
+   snapshots (~110 lines)
+6. `db_combiner_edits.go` — edit queue management
+   (~500 lines)
+7. `db_combiner_publish_instructions.go` — KEY/CDS
+   publication + NS tracking (~490 lines)
+
+### API handlers (2 files)
+8. `apihandler_combiner.go` — main combiner API
+   (~630 lines)
+9. `apihandler_combiner_distrib.go` — distribution
+   tracking (~1030 lines)
+
+### CLI commands (4 files)
+10. `cli/combiner_cmds.go`
+11. `cli/combiner_debug_cmds.go`
+12. `cli/combiner_edits_cmds.go`
+13. `cli/combiner_peer_cmds.go`
+
+### Startup orchestration (new, in tdns-mp)
+14. `start_combiner.go` — StartMPCombiner()
+
+Total: ~14 files, ~6000+ lines
+
+## Files NOT copied (shared infrastructure, stays in tdns)
+
+- MPTransportBridge (hsync_transport.go) — used via
+  `conf.Internal.MPTransport`
+- config.go, structs.go, enums.go — types
+- db_schema.go, db_schema_hsync.go, db_hsync.go — shared
+- apirouters.go — API setup (guarded by AppType)
+- refreshengine.go, notifier.go, do53.go — DNS engines
+
+## Implementation Steps
+
+### Step 1: Method conversions in tdns — DONE
+
+**(a) Shared callers** — 4 wrappers added to wrappers.go:
+- `ZoneDataCombineWithLocalChanges(zd *ZoneData) (bool, error)`
+- `ZoneDataRebuildCombinerData(zd *ZoneData)`
+- `ZoneDataSnapshotUpstreamData(zd *ZoneData)`
+- `ZoneDataInjectSignatureTXT(zd *ZoneData, conf *MultiProviderConf) bool`
+
+**(b) ZoneData combiner-only** — 12 methods converted to
+standalone functions in combiner_utils.go:
+- AddCombinerData, GetCombinerData, AddCombinerDataNG,
+  GetCombinerDataNG, RemoveCombinerDataNG,
+  RemoveCombinerDataByRRtype, ReplaceCombinerDataByRRtype,
+  replaceCombinerDataByRRtypeLocked, InjectSignatureTXT,
+  restoreUpstreamRRset, cleanupRemovedRRtypes,
+  cleanupRemovedRRtype
+
+**(c) KeyDB combiner methods** — 20 methods converted to
+standalone functions across 3 db files:
+- db_combiner_contributions.go: SaveContributions,
+  LoadAllContributions, DeleteContributions (3)
+- db_combiner_edits.go: NextEditID, SavePendingEdit,
+  ListPendingEdits, GetPendingEdit, ApprovePendingEdit,
+  RejectPendingEdit, ResolvePendingEdit, ListRejectedEdits,
+  ListApprovedEdits, ClearPendingEdits, ClearApprovedEdits,
+  ClearRejectedEdits, ClearContributions (13)
+- db_combiner_publish_instructions.go: SavePublishInstruction,
+  GetPublishInstruction, DeletePublishInstruction,
+  LoadAllPublishInstructions (4)
+
+**(d) Callers updated** — 37 call sites across 7 files:
+combiner_utils.go, combiner_chunk.go, combiner_msg_handler.go,
+apihandler_combiner.go, zone_utils.go, main_initfuncs.go,
+wrappers.go
+
+**Methods kept as receivers** (shared, have wrappers):
+CombineWithLocalChanges, rebuildCombinerData,
+snapshotUpstreamData, mergeWithUpstream
+
+All 6 tdns binaries build clean.
+
+### Step 2: Add AppTypeMPCombiner guards in tdns
+
+Add `AppTypeMPCombiner` to AppType guards:
+- apirouters.go (combiner API endpoints)
+- parseconfig.go (any combiner-specific parsing)
+- main_initfuncs.go: skip MP engines in StartCombiner
+  when AppType == AppTypeMPCombiner
+
+Watch for AppType guards we missed with the signer —
+let crashes guide us.
+
+Verify: all 6 tdns binaries build.
+
+### Step 3: Copy combiner files to tdns-mp
+
+Copy ~12 files. Change `package tdns` → `package tdnsmp`.
+For each file:
+- Add `tdns "github.com/johanix/tdns/v2"` import
+- Prefix tdns types with `tdns.`
+- Standalone functions (from step 1) need `tdns.` prefix
+
+Special handling for combiner_chunk.go:
+- Do NOT copy CombinerState type (stays in tdns)
+- Do NOT copy RegisterSignerChunkHandler (already
+  in tdns-mp)
+- Copy RegisterCombinerChunkHandler and combiner-specific
+  functions
+
+### Step 4: Create StartMPCombiner()
+
+Same pattern as StartMPSigner:
+- `conf.Config.StartCombiner()` for DNS engines
+  (MP engines skipped for AppTypeMPCombiner)
+- Then start MP engines from tdns-mp:
+  - StartIncomingMessageRouter
+  - CombinerMsgHandler
+  - OnFirstLoad callbacks for contribution hydration
+
+OnFirstLoad note: callbacks are closures registered
+during startup, executed by RefreshEngine. They capture
+tdns-mp functions in the closure, so cross-package
+access works naturally.
+
+### Step 5: Create MainInit combiner path
+
+Add combiner init to tdns-mp's MainInit (alongside
+existing signer init):
+- InitCombinerEditTables (via `tdns.KeyDB` method)
+- Combiner crypto init
+- RegisterCombinerChunkHandler (from tdns-mp)
+- Create MPTransportBridge
+- Register agent peers
+- Wire combiner router
+
+### Step 6: Create mpcombiner binary
+
+`cmd/mpcombiner/main.go`:
+- Sets `AppTypeMPCombiner`
+- Calls `conf.MainInit()` → `conf.StartMPCombiner()`
+
+### Step 7: Wire CLI commands
+
+Add combiner CLI commands to mpcli's `shared_cmds.go`.
+Copy combiner CLI files to tdns-mp/v2/cli/.
+
+### Step 8: Verify
+
+- All tdns binaries build
+- mpcombiner + mpsigner + mpcli build
+- Lab test: combiner receives updates, processes them,
+  sends confirmations
+
+Two categories of receiver functions on tdns types:
+
+**(a) Shared callers** (combiner + other code) — add
+wrapper in tdns/v2/wrappers.go. Only 2 methods:
+- `CombineWithLocalChanges` — called from
+  main_initfuncs.go and zone_utils.go
+- `rebuildCombinerData` — called from main_initfuncs.go
+
+**(b) Combiner-only callers** — convert from method to
+standalone function directly in tdns. No wrapper needed.
+tdns-mp calls `tdns.FuncName(zd, ...)`. ~13 methods:
+- AddCombinerData, AddCombinerDataNG
+- GetCombinerData, GetCombinerDataNG
+- RemoveCombinerDataNG, RemoveCombinerDataByRRtype
+- combinerReapplyContributions
+- combinerApplyPublishInstruction
+- combinerResyncSignalKeys
+- combinerProcessOperations
+- snapshotUpstreamData
+- cleanupRemovedRRtype, restoreUpstreamRRset
+
+For case (b), update the existing combiner callers in
+tdns at the same time (they're in the same files being
+copied, so both the old and new callers get the new
+signature).
+
+**KeyDB combiner methods** (db_combiner_*.go) — all are
+combiner-only callers. Convert to standalone functions,
+same as ZoneData methods. ~15 methods across 3 files:
+- SaveContributions, LoadAllContributions, ClearContributions
+- InitCombinerEditTables, AddPendingEdit, ApprovePendingEdit, etc.
+- SavePublishInstruction, LoadPublishInstructions, etc.
+
+Note: SaveContributions is used as a callback
+(PersistContributions). After conversion, wrap in closure:
+```go
+zd.MP.PersistContributions = func(z, s string, c ...) error {
+    return SaveContributions(kdb, z, s, c)
+}
+```
+
+The db files are then copied to tdns-mp with the
+standalone function signatures.
+
+### Step 8: Verify
+
+- All tdns binaries build
+- mpcombiner + mpcli build
+- Lab test: combiner receives updates, processes them,
+  sends confirmations
+
+## Complexity Assessment
+
+**Higher than signer** due to:
+- More files (13 vs 4)
+- combiner_chunk.go is complex (1700 lines, policy logic)
+- Database persistence files interact closely with KeyDB
+- ~13 methods need converting from receiver to standalone
+
+**Simpler than expected** because:
+- Only 2 wrappers needed (shared callers)
+- ~13 methods are combiner-only → convert directly
+- KeyDB methods already exported
+- Same proven pattern as signer
+
+## Risk
+
+**Medium-low.** More files but no new patterns. The method
+conversion (b) changes tdns code but the callers are in
+the same files being migrated, so it's self-contained.
+
+## Estimated Effort
+
+- Method conversions in tdns: ~1 hour (13 methods)
+- Copy + prefix: ~2 hours (13 files, mechanical)
+- 2 wrappers: ~10 min
+- Startup wiring: ~30 min
+- AppType guards: ~30 min
+- Testing: ~30 min
+
+Total: ~4-5 hours

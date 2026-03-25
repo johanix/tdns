@@ -11,6 +11,27 @@ import (
 	"github.com/johanix/tdns-transport/v2/transport"
 )
 
+// ZoneDataCombineWithLocalChanges wraps the CombineWithLocalChanges method
+// for use by tdns-mp (will become standalone there).
+func ZoneDataCombineWithLocalChanges(zd *ZoneData) (bool, error) {
+	return zd.CombineWithLocalChanges()
+}
+
+// ZoneDataRebuildCombinerData wraps the unexported rebuildCombinerData method.
+func ZoneDataRebuildCombinerData(zd *ZoneData) {
+	zd.rebuildCombinerData()
+}
+
+// ZoneDataSnapshotUpstreamData wraps the unexported snapshotUpstreamData method.
+func ZoneDataSnapshotUpstreamData(zd *ZoneData) {
+	zd.snapshotUpstreamData()
+}
+
+// ZoneDataInjectSignatureTXT wraps the InjectSignatureTXT method.
+func ZoneDataInjectSignatureTXT(zd *ZoneData, conf *MultiProviderConf) bool {
+	return InjectSignatureTXT(zd, conf)
+}
+
 // ZoneDataWeAreASigner wraps the unexported weAreASigner method.
 func ZoneDataWeAreASigner(zd *ZoneData) (bool, error) {
 	return zd.weAreASigner()

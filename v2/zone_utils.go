@@ -555,7 +555,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 		}
 
 		// Inject combiner signature TXT if configured
-		if zd.InjectSignatureTXT(Conf.MultiProvider) {
+		if InjectSignatureTXT(zd, Conf.MultiProvider) {
 			lg.Debug("signature TXT injected", "zone", zd.ZoneName)
 		}
 	}

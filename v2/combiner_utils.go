@@ -180,7 +180,7 @@ func (zd *ZoneData) mergeWithUpstream(owner string, rrtype uint16, agentRRset co
 // A local change must not delete or modify an RR contributed by a remote agent,
 // and vice versa. The per-agent storage in AgentContributions already provides
 // structural isolation; policy enforcement needs to happen at the RR level.
-func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRset) (bool, error) {
+func AddCombinerData(zd *ZoneData, senderID string, data map[string][]core.RRset) (bool, error) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
 
@@ -257,7 +257,7 @@ func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRse
 	}
 
 	// Inject combiner signature TXT if configured
-	if zd.InjectSignatureTXT(Conf.MultiProvider) {
+	if InjectSignatureTXT(zd, Conf.MultiProvider) {
 		zd.Logger.Printf("AddCombinerData: Zone %q: Signature TXT injected", zd.ZoneName)
 	}
 
@@ -336,7 +336,7 @@ func (zd *ZoneData) rebuildCombinerData() {
 }
 
 // GetCombinerData retrieves all local combiner data for the zone
-func (zd *ZoneData) GetCombinerData() (map[string][]core.RRset, error) {
+func GetCombinerData(zd *ZoneData) (map[string][]core.RRset, error) {
 	if zd.MP == nil || zd.MP.CombinerData == nil {
 		return nil, fmt.Errorf("no local data exists for zone %s", zd.ZoneName)
 	}
@@ -367,7 +367,7 @@ func (zd *ZoneData) GetCombinerData() (map[string][]core.RRset, error) {
 // AddCombinerDataNG adds or updates local RRsets for the zone from a specific agent.
 // The input map keys are owner names and values are slices of RR strings.
 // senderID identifies the contributing agent (use "" for CLI-originated data).
-func (zd *ZoneData) AddCombinerDataNG(senderID string, data map[string][]string) (bool, error) {
+func AddCombinerDataNG(zd *ZoneData, senderID string, data map[string][]string) (bool, error) {
 	// Convert string RRs to dns.RR objects and group them into RRsets
 	rrsetData := make(map[string][]core.RRset)
 	for owner, rrStrings := range data {
@@ -400,11 +400,11 @@ func (zd *ZoneData) AddCombinerDataNG(senderID string, data map[string][]string)
 	}
 
 	// Use the existing AddCombinerData method to store the data
-	return zd.AddCombinerData(senderID, rrsetData)
+	return AddCombinerData(zd, senderID, rrsetData)
 }
 
 // GetCombinerDataNG returns the combiner data in string format suitable for JSON marshaling
-func (zd *ZoneData) GetCombinerDataNG() map[string][]RRsetString {
+func GetCombinerDataNG(zd *ZoneData) map[string][]RRsetString {
 	responseData := make(map[string][]RRsetString)
 
 	if zd.MP == nil || zd.MP.CombinerData == nil {
@@ -453,7 +453,7 @@ func (zd *ZoneData) GetCombinerDataNG() map[string][]RRsetString {
 // Input: senderID identifies the agent, data maps owner → RR strings (ClassINET format).
 // Returns the list of RR strings that were actually removed. If an RR was already
 // absent, it is not included in the returned list (true no-op detection).
-func (zd *ZoneData) RemoveCombinerDataNG(senderID string, data map[string][]string) ([]string, error) {
+func RemoveCombinerDataNG(zd *ZoneData, senderID string, data map[string][]string) ([]string, error) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
 
@@ -544,9 +544,9 @@ func (zd *ZoneData) RemoveCombinerDataNG(senderID string, data map[string][]stri
 	}
 
 	// Clean up rrtypes with no remaining agent contributions
-	zd.cleanupRemovedRRtypes(data)
+	cleanupRemovedRRtypes(zd, data)
 
-	if zd.InjectSignatureTXT(Conf.MultiProvider) {
+	if InjectSignatureTXT(zd, Conf.MultiProvider) {
 		zd.Logger.Printf("RemoveCombinerDataNG: Zone %q: Signature TXT injected", zd.ZoneName)
 	}
 
@@ -556,7 +556,7 @@ func (zd *ZoneData) RemoveCombinerDataNG(senderID string, data map[string][]stri
 // RemoveCombinerDataByRRtype removes all RRs of a given type from an agent's contributions
 // for a specific owner. Used for ClassANY delete semantics.
 // Returns the list of RR strings that were removed.
-func (zd *ZoneData) RemoveCombinerDataByRRtype(senderID string, owner string, rrtype uint16) ([]string, error) {
+func RemoveCombinerDataByRRtype(zd *ZoneData, senderID string, owner string, rrtype uint16) ([]string, error) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
 
@@ -620,9 +620,9 @@ func (zd *ZoneData) RemoveCombinerDataByRRtype(senderID string, owner string, rr
 	}
 
 	// Clean up if this rrtype has no remaining contributions from any agent
-	zd.cleanupRemovedRRtype(owner, rrtype)
+	cleanupRemovedRRtype(zd, owner, rrtype)
 
-	if zd.InjectSignatureTXT(Conf.MultiProvider) {
+	if InjectSignatureTXT(zd, Conf.MultiProvider) {
 		zd.Logger.Printf("RemoveCombinerDataByRRtype: Zone %q: Signature TXT injected", zd.ZoneName)
 	}
 
@@ -633,14 +633,14 @@ func (zd *ZoneData) RemoveCombinerDataByRRtype(senderID string, owner string, rr
 // specific owner+rrtype with a new set of RRs. Returns the lists of actually
 // added and removed RR strings, plus whether any change occurred.
 // Used for "replace" operation semantics at the combiner level.
-func (zd *ZoneData) ReplaceCombinerDataByRRtype(senderID, owner string, rrtype uint16, newRRs []dns.RR) (applied []string, removed []string, changed bool, err error) {
+func ReplaceCombinerDataByRRtype(zd *ZoneData, senderID, owner string, rrtype uint16, newRRs []dns.RR) (applied []string, removed []string, changed bool, err error) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
 
-	return zd.replaceCombinerDataByRRtypeLocked(senderID, owner, rrtype, newRRs)
+	return replaceCombinerDataByRRtypeLocked(zd, senderID, owner, rrtype, newRRs)
 }
 
-func (zd *ZoneData) replaceCombinerDataByRRtypeLocked(senderID, owner string, rrtype uint16, newRRs []dns.RR) (applied []string, removed []string, changed bool, err error) {
+func replaceCombinerDataByRRtypeLocked(zd *ZoneData, senderID, owner string, rrtype uint16, newRRs []dns.RR) (applied []string, removed []string, changed bool, err error) {
 	if senderID == "" {
 		senderID = "local"
 	}
@@ -740,9 +740,9 @@ func (zd *ZoneData) replaceCombinerDataByRRtypeLocked(senderID, owner string, rr
 	}
 
 	// Clean up if no contributions remain for this rrtype
-	zd.cleanupRemovedRRtype(owner, rrtype)
+	cleanupRemovedRRtype(zd, owner, rrtype)
 
-	if zd.InjectSignatureTXT(Conf.MultiProvider) {
+	if InjectSignatureTXT(zd, Conf.MultiProvider) {
 		zd.Logger.Printf("ReplaceCombinerDataByRRtype: Zone %q: Signature TXT injected", zd.ZoneName)
 	}
 
@@ -752,7 +752,7 @@ func (zd *ZoneData) replaceCombinerDataByRRtypeLocked(senderID, owner string, rr
 // InjectSignatureTXT adds a combiner signature TXT record to the zone data.
 // The record is placed at "hsync-signature.{zone}" to avoid conflicts with apex TXT records.
 // Returns true if the signature was injected.
-func (zd *ZoneData) InjectSignatureTXT(conf *MultiProviderConf) bool {
+func InjectSignatureTXT(zd *ZoneData, conf *MultiProviderConf) bool {
 	if conf == nil || !conf.CombinerOptions[CombinerOptAddSignature] || conf.Signature == "" {
 		return false
 	}
@@ -836,7 +836,7 @@ func (zd *ZoneData) snapshotUpstreamData() {
 
 // restoreUpstreamRRset restores an rrtype from UpstreamData back into the zone.
 // Used when all agent contributions for a mandatory rrtype (e.g. NS) are removed.
-func (zd *ZoneData) restoreUpstreamRRset(owner string, rrtype uint16) {
+func restoreUpstreamRRset(zd *ZoneData, owner string, rrtype uint16) {
 	if zd.MP.UpstreamData == nil {
 		zd.Logger.Printf("restoreUpstreamRRset: Zone %q: No upstream data, cannot restore %s",
 			zd.ZoneName, dns.TypeToString[rrtype])
@@ -859,21 +859,21 @@ func (zd *ZoneData) restoreUpstreamRRset(owner string, rrtype uint16) {
 
 // cleanupRemovedRRtypes checks each owner+rrtype in data for remaining agent contributions.
 // If no contributions remain: for NS at the apex, restore from upstream; otherwise delete from zone.
-func (zd *ZoneData) cleanupRemovedRRtypes(data map[string][]string) {
+func cleanupRemovedRRtypes(zd *ZoneData, data map[string][]string) {
 	for owner, rrStrings := range data {
 		for _, rrStr := range rrStrings {
 			rr, err := dns.NewRR(rrStr)
 			if err != nil {
 				continue
 			}
-			zd.cleanupRemovedRRtype(owner, rr.Header().Rrtype)
+			cleanupRemovedRRtype(zd, owner, rr.Header().Rrtype)
 		}
 	}
 }
 
 // cleanupRemovedRRtype checks if a single owner+rrtype still has agent contributions.
 // If not: for NS at the apex, restore from upstream; otherwise delete from zone data.
-func (zd *ZoneData) cleanupRemovedRRtype(owner string, rrtype uint16) {
+func cleanupRemovedRRtype(zd *ZoneData, owner string, rrtype uint16) {
 	stillExists := false
 	if zd.MP.CombinerData != nil {
 		if od, ok := zd.MP.CombinerData.Get(owner); ok {
@@ -886,7 +886,7 @@ func (zd *ZoneData) cleanupRemovedRRtype(owner string, rrtype uint16) {
 		return
 	}
 	if rrtype == dns.TypeNS && owner == zd.ZoneName {
-		zd.restoreUpstreamRRset(owner, rrtype)
+		restoreUpstreamRRset(zd, owner, rrtype)
 	} else {
 		if od, ok := zd.Data.Get(owner); ok {
 			od.RRtypes.Delete(rrtype)
@@ -910,7 +910,7 @@ func combinerReapplyContributions(zone string, kdb *KeyDB) (string, error) {
 	var parts []string
 
 	// 1. Reload AgentContributions from the CombinerContributions snapshot.
-	allContribs, err := kdb.LoadAllContributions()
+	allContribs, err := LoadAllContributions(kdb)
 	if err != nil {
 		return "", fmt.Errorf("failed to load contributions: %w", err)
 	}
@@ -932,7 +932,7 @@ func combinerReapplyContributions(zone string, kdb *KeyDB) (string, error) {
 
 	// 2. For provider zones: re-apply _signal KEY records from publish instructions.
 	if isProvider {
-		allInstr, err := kdb.LoadAllPublishInstructions()
+		allInstr, err := LoadAllPublishInstructions(kdb)
 		if err != nil {
 			zd.mu.Unlock()
 			return "", fmt.Errorf("failed to load publish instructions: %w", err)
@@ -958,7 +958,7 @@ func combinerReapplyContributions(zone string, kdb *KeyDB) (string, error) {
 						rr.Header().Name = ownerName
 						parsedRRs = append(parsedRRs, rr)
 					}
-					_, _, changed, replErr := zd.replaceCombinerDataByRRtypeLocked(senderID, ownerName, dns.TypeKEY, parsedRRs)
+					_, _, changed, replErr := replaceCombinerDataByRRtypeLocked(zd, senderID, ownerName, dns.TypeKEY, parsedRRs)
 					if replErr != nil {
 						lgCombiner.Warn("reapply: failed to replace _signal KEY", "sender", senderID, "owner", ownerName, "err", replErr)
 					} else if changed {
@@ -974,7 +974,7 @@ func combinerReapplyContributions(zone string, kdb *KeyDB) (string, error) {
 
 	// 3. For MP zones: re-apply at-apex KEY from publish instructions.
 	if !isProvider {
-		allInstr, err := kdb.LoadAllPublishInstructions()
+		allInstr, err := LoadAllPublishInstructions(kdb)
 		if err != nil {
 			zd.mu.Unlock()
 			return "", fmt.Errorf("failed to load publish instructions: %w", err)
@@ -992,7 +992,7 @@ func combinerReapplyContributions(zone string, kdb *KeyDB) (string, error) {
 					}
 					parsedRRs = append(parsedRRs, rr)
 				}
-				_, _, changed, replErr := zd.replaceCombinerDataByRRtypeLocked(senderID, zone, dns.TypeKEY, parsedRRs)
+				_, _, changed, replErr := replaceCombinerDataByRRtypeLocked(zd, senderID, zone, dns.TypeKEY, parsedRRs)
 				if replErr != nil {
 					lgCombiner.Warn("reapply: failed to replace at-apex KEY", "sender", senderID, "err", replErr)
 				} else if changed {

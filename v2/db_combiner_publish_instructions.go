@@ -38,7 +38,7 @@ func (s *StoredPublishInstruction) ToPublishInstruction() *core.PublishInstructi
 }
 
 // SavePublishInstruction upserts a publish instruction for (zone, senderID).
-func (kdb *KeyDB) SavePublishInstruction(zone, senderID string, instr *core.PublishInstruction, publishedNS []string) error {
+func SavePublishInstruction(kdb *KeyDB, zone, senderID string, instr *core.PublishInstruction, publishedNS []string) error {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
@@ -76,7 +76,7 @@ func (kdb *KeyDB) SavePublishInstruction(zone, senderID string, instr *core.Publ
 }
 
 // GetPublishInstruction returns the stored instruction for (zone, senderID), or nil.
-func (kdb *KeyDB) GetPublishInstruction(zone, senderID string) (*StoredPublishInstruction, error) {
+func GetPublishInstruction(kdb *KeyDB, zone, senderID string) (*StoredPublishInstruction, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
@@ -111,7 +111,7 @@ func (kdb *KeyDB) GetPublishInstruction(zone, senderID string) (*StoredPublishIn
 }
 
 // DeletePublishInstruction removes the stored instruction for (zone, senderID).
-func (kdb *KeyDB) DeletePublishInstruction(zone, senderID string) error {
+func DeletePublishInstruction(kdb *KeyDB, zone, senderID string) error {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
@@ -123,7 +123,7 @@ func (kdb *KeyDB) DeletePublishInstruction(zone, senderID string) error {
 }
 
 // LoadAllPublishInstructions loads all stored instructions, keyed by zone then senderID.
-func (kdb *KeyDB) LoadAllPublishInstructions() (map[string]map[string]*StoredPublishInstruction, error) {
+func LoadAllPublishInstructions(kdb *KeyDB) (map[string]map[string]*StoredPublishInstruction, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
