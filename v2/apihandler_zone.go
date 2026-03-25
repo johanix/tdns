@@ -196,7 +196,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 
 				info := MPZoneInfo{}
 
-				// Collect options from both zd.Options and zd.MPdata.Options
+				// Collect options from both zd.Options and zd.MP.MPdata.Options
 				seen := make(map[ZoneOption]bool)
 				for opt, val := range zd.Options {
 					if val {
@@ -204,8 +204,8 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 						seen[opt] = true
 					}
 				}
-				if zd.MPdata != nil {
-					for opt, val := range zd.MPdata.Options {
+				if zd.MP != nil && zd.MP.MPdata != nil {
+					for opt, val := range zd.MP.MPdata.Options {
 						if val && !seen[opt] {
 							info.Options = append(info.Options, opt)
 						}

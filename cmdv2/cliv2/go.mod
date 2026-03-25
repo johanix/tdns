@@ -3,14 +3,12 @@ module tdns-cliv2
 go 1.25.2
 
 replace (
+	github.com/johanix/tdns-transport/v2 => ../../../tdns-transport/v2
 	github.com/johanix/tdns/v2 => ../../v2
 	github.com/johanix/tdns/v2/cache => ../../v2/cache
 	github.com/johanix/tdns/v2/cli => ../../v2/cli
 	github.com/johanix/tdns/v2/core => ../../v2/core
-	github.com/johanix/tdns/v2/crypto => ../../v2/crypto
 	github.com/johanix/tdns/v2/edns0 => ../../v2/edns0
-	github.com/johanix/tdns/v2/hpke => ../../v2/hpke
-	github.com/johanix/tdns/v2/jose => ../../v2/jose
 )
 
 require (
@@ -24,7 +22,6 @@ require (
 require (
 	github.com/c-bata/go-prompt v0.2.6 // indirect
 	github.com/chzyer/readline v0.0.0-20180603132655-2972be24d48e // indirect
-	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.3 // indirect
@@ -36,10 +33,9 @@ require (
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/johanix/tdns-transport/v2 v2.0.0-00010101000000-000000000000 // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
-	github.com/johanix/tdns/v2/crypto v0.0.0-20260125163255-f23369628cc7 // indirect
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000 // indirect
-	github.com/johanix/tdns/v2/hpke v0.0.0-00010101000000-000000000000 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect
@@ -49,7 +45,6 @@ require (
 	github.com/mattn/go-tty v0.0.3 // indirect
 	github.com/miekg/dns v1.1.70 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
-	github.com/orcaman/concurrent-map/v2 v2.0.1 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
 	github.com/pkg/term v1.2.0-beta.2 // indirect
 	github.com/quic-go/quic-go v0.58.0 // indirect
@@ -63,7 +58,6 @@ require (
 	github.com/twotwotwo/sorts v0.0.0-20160814051341-bf5c1f2b8553 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/crypto v0.46.0 // indirect
-	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
 	golang.org/x/mod v0.31.0 // indirect
 	golang.org/x/net v0.48.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect

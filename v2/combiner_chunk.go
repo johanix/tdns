@@ -22,7 +22,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johanix/tdns/v2/agent/transport"
+	"github.com/johanix/tdns-transport/v2/transport"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
@@ -117,7 +117,7 @@ func (cs *CombinerState) ChunkHandler() *transport.ChunkNotifyHandler {
 }
 
 // ProcessUpdate delegates to the standalone CombinerProcessUpdate.
-func (cs *CombinerState) ProcessUpdate(req *CombinerSyncRequest, localAgents map[string]bool, kdb *KeyDB, tm *TransportManager) *CombinerSyncResponse {
+func (cs *CombinerState) ProcessUpdate(req *CombinerSyncRequest, localAgents map[string]bool, kdb *KeyDB, tm *MPTransportBridge) *CombinerSyncResponse {
 	return CombinerProcessUpdate(req, cs.ProtectedNamespaces, localAgents, kdb, tm)
 }
 
@@ -249,7 +249,7 @@ func checkMPauthorization(zd *ZoneData) error {
 	if !zd.Options[OptMultiProvider] {
 		return fmt.Errorf("zone %q: contributions rejected — zone is not configured as a multi-provider zone (OptMultiProvider not set)", zd.ZoneName)
 	}
-	if zd.MPdata == nil {
+	if zd.MP == nil || zd.MP.MPdata == nil {
 		// MPdata is nil despite OptMultiProvider being set. This means one of
 		// guards 2-4 failed during zone refresh. Provide a specific explanation.
 		// Re-run the checks to produce a precise message.
@@ -275,7 +275,7 @@ func checkMPauthorization(zd *ZoneData) error {
 	return nil
 }
 
-func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []string, localAgents map[string]bool, kdb *KeyDB, tm *TransportManager) *CombinerSyncResponse {
+func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []string, localAgents map[string]bool, kdb *KeyDB, tm *MPTransportBridge) *CombinerSyncResponse {
 	// Count total records for logging
 	totalRecords := 0
 	for _, rrs := range req.Records {
@@ -378,7 +378,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 // combinerNotifyDelegationChange publishes CDS/CSYNC as needed and sends a
 // STATUS-UPDATE notification to the local agent that delivered the update.
 // Runs as a goroutine — fire-and-forget from the combiner's perspective.
-func combinerNotifyDelegationChange(tm *TransportManager, senderID, zonename string, zd *ZoneData, nsChanged, kskChanged bool) {
+func combinerNotifyDelegationChange(tm *MPTransportBridge, senderID, zonename string, zd *ZoneData, nsChanged, kskChanged bool) {
 	// Determine if the zone is signed by checking HSYNCPARAM signers
 	zoneSigned := false
 	apex, err := zd.GetOwner(zd.ZoneName)
@@ -479,7 +479,7 @@ func combinerNotifyDelegationChange(tm *TransportManager, senderID, zonename str
 
 // sendDelegationStatusUpdate sends a STATUS-UPDATE message to the agent
 // via the DNSTransport fire-and-forget NOTIFY(CHUNK) mechanism.
-func sendDelegationStatusUpdate(tm *TransportManager, agentID, zonename, subtype string, nsRecords, dsRecords []string) {
+func sendDelegationStatusUpdate(tm *MPTransportBridge, agentID, zonename, subtype string, nsRecords, dsRecords []string) {
 	if tm == nil || tm.DNSTransport == nil {
 		lgCombiner.Warn("sendDelegationStatusUpdate: no DNSTransport, cannot notify agent", "zone", zonename, "subtype", subtype)
 		return
@@ -708,7 +708,7 @@ func findProviderZoneForOwner(ownerName string) string {
 
 // getAgentNSTargets returns the NS target names from an agent's contributions for a zone.
 func getAgentNSTargets(zd *ZoneData, senderID, zone string) []string {
-	agentData, ok := zd.AgentContributions[senderID]
+	agentData, ok := zd.MP.AgentContributions[senderID]
 	if !ok {
 		return nil
 	}
@@ -825,7 +825,7 @@ func applyPendingSignalKeys(zd *ZoneData, kdb *KeyDB) {
 // already has a contribution for the given zone/rrtype. Returns the sender ID
 // and the RRs, or ("", nil) if no other sender has this rrtype.
 func findExistingContribution(zd *ZoneData, owner string, rrtype uint16, excludeSender string) (string, []dns.RR) {
-	for senderID, zones := range zd.AgentContributions {
+	for senderID, zones := range zd.MP.AgentContributions {
 		if senderID == excludeSender {
 			continue
 		}
@@ -1045,7 +1045,7 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 				appliedRecords = append(appliedRecords, applied...)
 			} else if len(parsedRRs) > 0 {
 				// No-op replace: report what's actually stored at the combiner.
-				if stored, ok := zd.AgentContributions[req.SenderID][zonename][rrtype]; ok {
+				if stored, ok := zd.MP.AgentContributions[req.SenderID][zonename][rrtype]; ok {
 					for _, rr := range stored.RRs {
 						appliedRecords = append(appliedRecords, rr.String())
 					}
@@ -1221,8 +1221,8 @@ func isNoOpOperations(zd *ZoneData, senderID string, ops []core.RROperation) boo
 		case "replace":
 			// Get agent's current contributions for this rrtype
 			var existingRRs []dns.RR
-			if zd.AgentContributions != nil {
-				if agentData, ok := zd.AgentContributions[senderID]; ok {
+			if zd.MP.AgentContributions != nil {
+				if agentData, ok := zd.MP.AgentContributions[senderID]; ok {
 					if ownerMap, ok := agentData[zonename]; ok {
 						if rrset, ok := ownerMap[rrtype]; ok {
 							existingRRs = rrset.RRs
@@ -1326,14 +1326,14 @@ func rrExistsInZone(zd *ZoneData, owner string, rrtype uint16, rr dns.RR) bool {
 	}
 
 	// Check CombinerData
-	if zd.CombinerData == nil {
+	if zd.MP.CombinerData == nil {
 		lgCombiner.Info("rrExistsInZone: CombinerData is nil", "zone", zd.ZoneName)
 	} else {
-		ownerData, ownerExists := zd.CombinerData.Get(owner)
+		ownerData, ownerExists := zd.MP.CombinerData.Get(owner)
 		if !ownerExists {
 			// Dump all CombinerData keys for diagnostics
 			var cdOwners []string
-			for item := range zd.CombinerData.IterBuffered() {
+			for item := range zd.MP.CombinerData.IterBuffered() {
 				cdOwners = append(cdOwners, item.Key)
 			}
 			lgCombiner.Info("rrExistsInZone: owner not in CombinerData",
@@ -1376,8 +1376,8 @@ func rrTypeExistsInZone(zd *ZoneData, owner string, rrtype uint16) bool {
 	if err == nil && existing != nil && len(existing.RRs) > 0 {
 		return true
 	}
-	if zd.CombinerData != nil {
-		if ownerData, ok := zd.CombinerData.Get(owner); ok {
+	if zd.MP.CombinerData != nil {
+		if ownerData, ok := zd.MP.CombinerData.Get(owner); ok {
 			if cdRRset, ok := ownerData.RRtypes.Get(rrtype); ok && len(cdRRset.RRs) > 0 {
 				return true
 			}

@@ -19,8 +19,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/johanix/tdns/v2/core"
-	"github.com/johanix/tdns/v2/crypto"
-	josecrypto "github.com/johanix/tdns/v2/crypto/jose"
+	"github.com/johanix/tdns-transport/v2/crypto"
+	josecrypto "github.com/johanix/tdns-transport/v2/crypto/jose"
 )
 
 var JwtCmd = &cobra.Command{

@@ -42,7 +42,7 @@ func (ar *AgentRegistry) StartInfraBeatLoop(ctx context.Context) {
 // sendInfraBeats iterates AgentRegistry and sends a beat to every infra peer
 // (combiner, signer) that has at least one transport ready.
 func (ar *AgentRegistry) sendInfraBeats() {
-	if ar.TransportManager == nil {
+	if ar.MPTransport == nil {
 		return
 	}
 
@@ -76,7 +76,7 @@ func (ar *AgentRegistry) sendInfraBeats() {
 			}
 			agent.mu.RUnlock()
 
-			resp, err := ar.TransportManager.SendBeatWithFallback(ctx, agent, sequence)
+			resp, err := ar.MPTransport.SendBeatWithFallback(ctx, agent, sequence)
 			if err != nil {
 				lgAgent.Warn("infra beat failed", "peer", agent.Identity, "err", err)
 				return

@@ -13,7 +13,7 @@ import (
 	"slices"
 	"time"
 
-	"github.com/johanix/tdns/v2/agent/transport"
+	"github.com/johanix/tdns-transport/v2/transport"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -438,7 +438,7 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 				lgAgent.Info("remote agent is now KNOWN, stopping retry loop", "agent", remoteid)
 
 				if ar.TransportManager != nil {
-					ar.TransportManager.OnAgentDiscoveryComplete(agent)
+					ar.MPTransport.OnAgentDiscoveryComplete(agent)
 				}
 
 				// If we're in known state and have a zone, try to send hello
@@ -575,9 +575,9 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 	}
 
 	// Only discover transports we ourselves support.
-	if ar.TransportManager != nil {
-		agent.DnsMethod = ar.TransportManager.isTransportSupported("dns")
-		agent.ApiMethod = ar.TransportManager.isTransportSupported("api")
+	if ar.MPTransport != nil {
+		agent.DnsMethod = ar.MPTransport.isTransportSupported("dns")
+		agent.ApiMethod = ar.MPTransport.isTransportSupported("api")
 	} else {
 		agent.DnsMethod = true
 	}
@@ -648,8 +648,8 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, d
 	}
 
 	// Register discovered agent
-	if ar.TransportManager != nil {
-		err := ar.TransportManager.RegisterDiscoveredAgent(result)
+	if ar.MPTransport != nil {
+		err := ar.MPTransport.RegisterDiscoveredAgent(result)
 		if err != nil {
 			agent.mu.Lock()
 			agent.ApiDetails.LatestError = err.Error()

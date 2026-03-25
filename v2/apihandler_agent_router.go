@@ -10,7 +10,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/johanix/tdns/v2/agent/transport"
+	"github.com/johanix/tdns-transport/v2/transport"
 )
 
 // handleRouterList returns a list of all registered handlers grouped by message type.

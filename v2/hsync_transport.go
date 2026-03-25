@@ -18,7 +18,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johanix/tdns/v2/agent/transport"
+	"github.com/johanix/tdns-transport/v2/transport"
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
@@ -36,34 +36,16 @@ func generatePingNonce() string {
 	return hex.EncodeToString(b)
 }
 
-// TransportManager manages multiple transports for agent communication.
-type TransportManager struct {
-	// APITransport is the HTTPS-based transport
-	APITransport *transport.APITransport
+// MPTransportBridge manages multiple transports for agent communication.
+// MPTransportBridge aggregates MP-specific transport state and methods.
+// It holds a reference to the generic transport.TransportManager and
+// adds multi-provider functionality (message routing, authorization,
+// agent discovery, DNSKEY propagation, reliable delivery wrappers).
+type MPTransportBridge struct {
+	*transport.TransportManager // generic (fields promoted via embedding)
 
-	// DNSTransport is the DNS NOTIFY-based transport
-	DNSTransport *transport.DNSTransport
-
-	// ChunkHandler handles incoming NOTIFY(CHUNK) messages
-	ChunkHandler *transport.ChunkNotifyHandler
-
-	// Router handles DNS message routing and middleware
-	Router *transport.DNSMessageRouter
-
-	// PeerRegistry tracks all known peers
-	PeerRegistry *transport.PeerRegistry
-
-	// LocalID is our agent identity
-	LocalID string
-
-	// ControlZone for DNS transport
-	ControlZone string
-
-	// AgentRegistry for integration with existing code
 	agentRegistry *AgentRegistry
-
-	// MsgQs for routing messages to hsyncengine
-	msgQs *MsgQs
+	msgQs         *MsgQs
 
 	// SupportedMechanisms lists active transports ("api", "dns")
 	SupportedMechanisms []string
@@ -75,9 +57,6 @@ type TransportManager struct {
 	signerID string
 	// signerAddress is the DNS address (host:port) of the local signer.
 	signerAddress string
-
-	// reliableQueue handles retry-until-confirmed delivery for outgoing sync messages.
-	reliableQueue *ReliableMessageQueue
 
 	// pendingDnskeyPropagations tracks DNSKEY distributions awaiting confirmation from all remote agents.
 	// Key: distributionID. When all expected agents confirm, KEYSTATE "propagated" is sent to signer.
@@ -100,7 +79,7 @@ type TransportManager struct {
 	keystateRfiState map[string]chan *KeystateInventoryMsg // key: zone name
 }
 
-func (tm *TransportManager) setKeystateRfi(zone string, ch chan *KeystateInventoryMsg) {
+func (tm *MPTransportBridge) setKeystateRfi(zone string, ch chan *KeystateInventoryMsg) {
 	tm.keystateRfiMu.Lock()
 	defer tm.keystateRfiMu.Unlock()
 	if tm.keystateRfiState == nil {
@@ -109,21 +88,35 @@ func (tm *TransportManager) setKeystateRfi(zone string, ch chan *KeystateInvento
 	tm.keystateRfiState[zone] = ch
 }
 
-func (tm *TransportManager) deleteKeystateRfi(zone string) {
+func (tm *MPTransportBridge) deleteKeystateRfi(zone string) {
 	tm.keystateRfiMu.Lock()
 	defer tm.keystateRfiMu.Unlock()
 	delete(tm.keystateRfiState, zone)
 }
 
-func (tm *TransportManager) getKeystateRfi(zone string) (chan *KeystateInventoryMsg, bool) {
+// isTransportReady returns true if the transport details indicate a reachable agent.
+func isTransportReady(details *AgentDetails) bool {
+	if details == nil {
+		return false
+	}
+	switch details.State {
+	case AgentStateOperational, AgentStateIntroduced, AgentStateLegacy,
+		AgentStateDegraded, AgentStateInterrupted:
+		return true
+	default:
+		return false
+	}
+}
+
+func (tm *MPTransportBridge) getKeystateRfi(zone string) (chan *KeystateInventoryMsg, bool) {
 	tm.keystateRfiMu.Lock()
 	defer tm.keystateRfiMu.Unlock()
 	ch, ok := tm.keystateRfiState[zone]
 	return ch, ok
 }
 
-// TransportManagerConfig holds configuration for creating a TransportManager.
-type TransportManagerConfig struct {
+// MPTransportBridgeConfig holds configuration for creating a MPTransportBridge.
+type MPTransportBridgeConfig struct {
 	LocalID       string
 	ControlZone   string
 	APITimeout    time.Duration
@@ -181,8 +174,8 @@ type TransportManagerConfig struct {
 	ClientKeyFile  string
 }
 
-// NewTransportManager creates a new TransportManager with both API and DNS transports.
-func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
+// NewTransportManager creates a new MPTransportBridge with both API and DNS transports.
+func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 	// Default to both transports if not specified (backward compatibility for tests)
 	// Production configs MUST specify supported_mechanisms explicitly (validated at config load)
 	supportedMechanisms := cfg.SupportedMechanisms
@@ -191,11 +184,25 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 		supportedMechanisms = []string{"api", "dns"}
 	}
 
-	tm := &TransportManager{
-		LocalID:                   cfg.LocalID,
-		ControlZone:               cfg.ControlZone,
-		PeerRegistry:              transport.NewPeerRegistry(),
-		Router:                    transport.NewDNSMessageRouter(),
+	tm := &MPTransportBridge{
+		TransportManager: &transport.TransportManager{
+			PeerRegistry: transport.NewPeerRegistry(),
+			Router:       transport.NewDNSMessageRouter(),
+			ReliableQueue: transport.NewReliableMessageQueue(&transport.ReliableMessageQueueConfig{
+				IsRecipientReady: func(recipientID string) bool {
+					if cfg.AgentRegistry == nil {
+						return true
+					}
+					agent, exists := cfg.AgentRegistry.S.Get(AgentId(recipientID))
+					if !exists {
+						return false
+					}
+					return isTransportReady(agent.DnsDetails) || isTransportReady(agent.ApiDetails)
+				},
+			}),
+			LocalID:     cfg.LocalID,
+			ControlZone: cfg.ControlZone,
+		},
 		agentRegistry:             cfg.AgentRegistry,
 		msgQs:                     cfg.MsgQs,
 		SupportedMechanisms:       supportedMechanisms,
@@ -206,13 +213,6 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 		authorizedPeers:           cfg.AuthorizedPeers,
 		messageRetention:          cfg.MessageRetention,
 		getImrEngine:              cfg.GetImrEngine,
-	}
-
-	// Create reliable message queue for outgoing sync messages (agent only — requires AgentRegistry)
-	if cfg.AgentRegistry != nil {
-		tm.reliableQueue = NewReliableMessageQueue(&ReliableMessageQueueConfig{
-			AgentRegistry: cfg.AgentRegistry,
-		})
 	}
 
 	// Always create API client transport — it's a pure HTTP client with no server-side
@@ -325,8 +325,8 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 
 			// Stop retrying on any definitive answer (success, failure, or rejected).
 			// Only keep retrying for transient states (pending, partial).
-			if tm.reliableQueue != nil && (status == transport.ConfirmSuccess || status == transport.ConfirmFailed || status == transport.ConfirmRejected) {
-				tm.reliableQueue.MarkConfirmed(distributionID, senderID)
+			if tm.ReliableQueue != nil && (status == transport.ConfirmSuccess || status == transport.ConfirmFailed || status == transport.ConfirmRejected) {
+				tm.ReliableQueue.MarkConfirmed(distributionID, senderID)
 			}
 
 			// Phase 6: Check if this confirmation is for a pending DNSKEY propagation
@@ -415,7 +415,7 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 			TransportManager:             tm,
 			PeerRegistry:                 tm.PeerRegistry,
 			PayloadCrypto:                cfg.PayloadCrypto,
-			IncomingChan:                 tm.ChunkHandler.IncomingChan,
+			IncomingChan:                 nil, // routing via RouteToCallback, not IncomingChan
 			TriggerDiscoveryOnMissingKey: true,
 			AllowUnencrypted:             false,
 			VerboseStats:                 false, // Set to true for verbose statistics logging
@@ -436,7 +436,7 @@ func NewTransportManager(cfg *TransportManagerConfig) *TransportManager {
 }
 
 // isTransportSupported checks if a transport mechanism is enabled in configuration.
-func (tm *TransportManager) isTransportSupported(mechanism string) bool {
+func (tm *MPTransportBridge) isTransportSupported(mechanism string) bool {
 	if len(tm.SupportedMechanisms) == 0 {
 		return true // Default: all transports supported
 	}
@@ -450,7 +450,7 @@ func (tm *TransportManager) isTransportSupported(mechanism string) bool {
 
 // RegisterChunkNotifyHandler registers the CHUNK NOTIFY handler with tdns.
 // This should be called during agent initialization.
-func (tm *TransportManager) RegisterChunkNotifyHandler() error {
+func (tm *MPTransportBridge) RegisterChunkNotifyHandler() error {
 	if tm.ChunkHandler == nil {
 		return fmt.Errorf("DNS transport not configured (no control zone)")
 	}
@@ -470,33 +470,31 @@ func (tm *TransportManager) RegisterChunkNotifyHandler() error {
 
 // StartIncomingMessageRouter starts a goroutine that routes incoming DNS messages
 // to the appropriate hsyncengine channels.
-func (tm *TransportManager) StartIncomingMessageRouter(ctx context.Context) {
+// ctx is intentionally unused: kept in the signature for API stability and future use.
+func (tm *MPTransportBridge) StartIncomingMessageRouter(ctx context.Context) {
 	if tm.ChunkHandler == nil {
 		lgTransport.Info("DNS transport not configured, skipping incoming message router")
 		return
 	}
 
-	go func() {
-		lgTransport.Info("starting incoming DNS message router")
-		for {
-			select {
-			case <-ctx.Done():
-				lgTransport.Info("incoming message router stopped")
-				return
+	// Register RouteToCallback middleware on the Router.
+	// When a message arrives via CHUNK NOTIFY, the Router runs the handler
+	// chain (auth, crypto, parse) and then calls our callback with the
+	// parsed IncomingMessage. The callback dispatches to typed MsgQs
+	// channels based on message type.
+	//
+	// This replaces the old pattern of reading from a single IncomingChan
+	// in a dedicated goroutine. Each message type now fans out directly
+	// to its own channel without a shared bottleneck.
+	tm.Router.Use(transport.RouteToCallback(func(msg *transport.IncomingMessage) {
+		tm.routeIncomingMessage(msg)
+	}))
 
-			case msg, ok := <-tm.ChunkHandler.IncomingChan:
-				if !ok {
-					lgTransport.Info("incoming message channel closed, stopping router")
-					return
-				}
-				tm.routeIncomingMessage(msg)
-			}
-		}
-	}()
+	lgTransport.Info("incoming message router registered via RouteToCallback")
 }
 
 // routeIncomingMessage routes an incoming DNS message to the appropriate hsyncengine channel.
-func (tm *TransportManager) routeIncomingMessage(msg *transport.IncomingMessage) {
+func (tm *MPTransportBridge) routeIncomingMessage(msg *transport.IncomingMessage) {
 	lgTransport.Debug("routing message", "type", msg.Type, "sender", msg.SenderID)
 
 	switch msg.Type {
@@ -520,13 +518,15 @@ func (tm *TransportManager) routeIncomingMessage(msg *transport.IncomingMessage)
 		tm.routeRelocateMessage(msg)
 	case "status-update":
 		tm.routeStatusUpdateMessage(msg)
+	case "confirm":
+		// Already handled by Router's HandleConfirmation handler — nothing to do here
 	default:
 		lgTransport.Warn("unknown message type", "type", msg.Type)
 	}
 }
 
 // routeHelloMessage routes a hello message to the hello channel.
-func (tm *TransportManager) routeHelloMessage(msg *transport.IncomingMessage) {
+func (tm *MPTransportBridge) routeHelloMessage(msg *transport.IncomingMessage) {
 	payload, err := transport.ParseHelloPayload(msg.Payload)
 	if err != nil {
 		lgTransport.Error("failed to parse hello payload", "err", err)
@@ -602,7 +602,7 @@ func (tm *TransportManager) routeHelloMessage(msg *transport.IncomingMessage) {
 }
 
 // routeBeatMessage routes a beat message to the heartbeat channel.
-func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
+func (tm *MPTransportBridge) routeBeatMessage(msg *transport.IncomingMessage) {
 	payload, err := transport.ParseBeatPayload(msg.Payload)
 	if err != nil {
 		lgTransport.Error("failed to parse beat payload", "err", err)
@@ -694,7 +694,7 @@ func (tm *TransportManager) routeBeatMessage(msg *transport.IncomingMessage) {
 // routePingMessage updates peer liveness and routes to MsgQs.Ping.
 // The DNS response was already sent synchronously by SendResponseMiddleware;
 // this routing is for peer liveness tracking and counting.
-func (tm *TransportManager) routePingMessage(msg *transport.IncomingMessage) {
+func (tm *MPTransportBridge) routePingMessage(msg *transport.IncomingMessage) {
 	senderID := msg.SenderID
 	lgTransport.Debug("processing ping", "sender", senderID)
 
@@ -722,7 +722,7 @@ func (tm *TransportManager) routePingMessage(msg *transport.IncomingMessage) {
 }
 
 // routeSyncMessage routes a sync message to the message channel.
-func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
+func (tm *MPTransportBridge) routeSyncMessage(msg *transport.IncomingMessage) {
 	payload, err := transport.ParseSyncPayload(msg.Payload)
 	if err != nil {
 		lgTransport.Error("failed to parse sync payload", "err", err)
@@ -838,7 +838,7 @@ func (tm *TransportManager) routeSyncMessage(msg *transport.IncomingMessage) {
 // routeKeystateMessage routes an incoming KEYSTATE message.
 // For "inventory" signals, delivers the full key inventory to MsgQs.KeystateInventory
 // so RequestAndWaitForKeyInventory can pick it up.
-func (tm *TransportManager) routeKeystateMessage(msg *transport.IncomingMessage) {
+func (tm *MPTransportBridge) routeKeystateMessage(msg *transport.IncomingMessage) {
 	var payload transport.DnsKeystatePayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		lgTransport.Error("failed to parse keystate payload", "err", err)
@@ -919,7 +919,7 @@ func (tm *TransportManager) routeKeystateMessage(msg *transport.IncomingMessage)
 // routeEditsMessage routes an incoming EDITS message from the combiner.
 // Delivers the contributions to MsgQs.EditsResponse so RequestAndWaitForEdits can pick it up.
 // Modeled on routeKeystateMessage.
-func (tm *TransportManager) routeEditsMessage(msg *transport.IncomingMessage) {
+func (tm *MPTransportBridge) routeEditsMessage(msg *transport.IncomingMessage) {
 	var payload transport.DnsEditsPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		lgTransport.Error("failed to parse edits payload", "err", err)
@@ -950,7 +950,7 @@ func (tm *TransportManager) routeEditsMessage(msg *transport.IncomingMessage) {
 
 // routeConfigMessage routes an incoming CONFIG response message from a peer agent.
 // Delivers the config data to MsgQs.ConfigResponse so RequestAndWaitForConfig can pick it up.
-func (tm *TransportManager) routeConfigMessage(msg *transport.IncomingMessage) {
+func (tm *MPTransportBridge) routeConfigMessage(msg *transport.IncomingMessage) {
 	var payload transport.DnsConfigPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		lgTransport.Error("failed to parse config payload", "err", err)
@@ -983,7 +983,7 @@ func (tm *TransportManager) routeConfigMessage(msg *transport.IncomingMessage) {
 // sendConfigToAgent gathers config data for the given subtype and sends it as a separate
 // CONFIG message back to the requesting agent. Called asynchronously from MsgHandler when
 // an RFI CONFIG is received.
-func sendConfigToAgent(tm *TransportManager, ar *AgentRegistry, requesterID string, zone string, subtype string, configData map[string]string) {
+func sendConfigToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID string, zone string, subtype string, configData map[string]string) {
 	if tm == nil || tm.DNSTransport == nil {
 		lgTransport.Warn("sendConfigToAgent: no DNSTransport available", "requester", requesterID)
 		return
@@ -1021,7 +1021,7 @@ func sendConfigToAgent(tm *TransportManager, ar *AgentRegistry, requesterID stri
 
 // routeAuditMessage routes an incoming AUDIT response message from a peer agent.
 // Delivers the audit data to MsgQs.AuditResponse so RequestAndWaitForAudit can pick it up.
-func (tm *TransportManager) routeAuditMessage(msg *transport.IncomingMessage) {
+func (tm *MPTransportBridge) routeAuditMessage(msg *transport.IncomingMessage) {
 	var payload transport.DnsAuditPayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		lgTransport.Error("failed to parse audit payload", "err", err)
@@ -1052,7 +1052,7 @@ func (tm *TransportManager) routeAuditMessage(msg *transport.IncomingMessage) {
 
 // routeStatusUpdateMessage routes an incoming STATUS-UPDATE notification.
 // Delivers to MsgQs.StatusUpdate for processing by the role-specific message handler.
-func (tm *TransportManager) routeStatusUpdateMessage(msg *transport.IncomingMessage) {
+func (tm *MPTransportBridge) routeStatusUpdateMessage(msg *transport.IncomingMessage) {
 	var payload transport.DnsStatusUpdatePayload
 	if err := json.Unmarshal(msg.Payload, &payload); err != nil {
 		lgTransport.Error("failed to parse status-update payload", "err", err)
@@ -1088,7 +1088,7 @@ func (tm *TransportManager) routeStatusUpdateMessage(msg *transport.IncomingMess
 // sendAuditToAgent gathers audit data and sends it as a separate AUDIT message
 // back to the requesting agent. Called asynchronously from MsgHandler when
 // an RFI AUDIT is received.
-func sendAuditToAgent(tm *TransportManager, ar *AgentRegistry, requesterID string, zone string, auditData interface{}) {
+func sendAuditToAgent(tm *MPTransportBridge, ar *AgentRegistry, requesterID string, zone string, auditData interface{}) {
 	if tm == nil || tm.DNSTransport == nil {
 		lgTransport.Warn("sendAuditToAgent: no DNSTransport available", "requester", requesterID)
 		return
@@ -1124,7 +1124,7 @@ func sendAuditToAgent(tm *TransportManager, ar *AgentRegistry, requesterID strin
 }
 
 // routeRelocateMessage handles a relocate request.
-func (tm *TransportManager) routeRelocateMessage(msg *transport.IncomingMessage) {
+func (tm *MPTransportBridge) routeRelocateMessage(msg *transport.IncomingMessage) {
 	payload, err := transport.ParseRelocatePayload(msg.Payload)
 	if err != nil {
 		lgTransport.Error("failed to parse relocate payload", "err", err)
@@ -1152,7 +1152,7 @@ func (tm *TransportManager) routeRelocateMessage(msg *transport.IncomingMessage)
 }
 
 // sendSyncConfirmation sends a confirmation for a received sync message.
-func (tm *TransportManager) sendSyncConfirmation(msg *transport.IncomingMessage, payload *transport.DnsSyncPayload) {
+func (tm *MPTransportBridge) sendSyncConfirmation(msg *transport.IncomingMessage, payload *transport.DnsSyncPayload) {
 	if tm.DNSTransport == nil {
 		return
 	}
@@ -1188,7 +1188,7 @@ func (tm *TransportManager) sendSyncConfirmation(msg *transport.IncomingMessage,
 // sendImmediateConfirmation sends a "pending" confirmation back to the originating agent
 // to indicate that the sync was received and is being processed. This is the first of two
 // NOTIFYs in the two-phase remote confirmation protocol (Phase 5).
-func (tm *TransportManager) sendImmediateConfirmation(payload *transport.DnsSyncPayload) {
+func (tm *MPTransportBridge) sendImmediateConfirmation(payload *transport.DnsSyncPayload) {
 	if tm.DNSTransport == nil {
 		return
 	}
@@ -1228,7 +1228,7 @@ func (tm *TransportManager) sendImmediateConfirmation(payload *transport.DnsSync
 // sendRemoteConfirmation sends the final confirmation NOTIFY back to the originating agent
 // after the remote agent's combiner has confirmed the sync. This is the second of two
 // NOTIFYs in the two-phase remote confirmation protocol (Phase 7).
-func (tm *TransportManager) sendRemoteConfirmation(detail *RemoteConfirmationDetail) {
+func (tm *MPTransportBridge) sendRemoteConfirmation(detail *RemoteConfirmationDetail) {
 	if tm.DNSTransport == nil {
 		return
 	}
@@ -1280,7 +1280,7 @@ func (tm *TransportManager) sendRemoteConfirmation(detail *RemoteConfirmationDet
 }
 
 // SelectTransport selects the appropriate transport for communicating with a peer.
-func (tm *TransportManager) SelectTransport(peer *transport.Peer) transport.Transport {
+func (tm *MPTransportBridge) SelectTransport(peer *transport.Peer) transport.Transport {
 	// Check peer's preferred transport
 	switch peer.PreferredTransport {
 	case "DNS":
@@ -1305,7 +1305,7 @@ func (tm *TransportManager) SelectTransport(peer *transport.Peer) transport.Tran
 }
 
 // SendWithFallback sends a message using the preferred transport, falling back if it fails.
-func (tm *TransportManager) SendSyncWithFallback(ctx context.Context, peer *transport.Peer, req *transport.SyncRequest) (*transport.SyncResponse, error) {
+func (tm *MPTransportBridge) SendSyncWithFallback(ctx context.Context, peer *transport.Peer, req *transport.SyncRequest) (*transport.SyncResponse, error) {
 	// Try primary transport
 	primary := tm.SelectTransport(peer)
 	if primary != nil {
@@ -1333,7 +1333,7 @@ func (tm *TransportManager) SendSyncWithFallback(ctx context.Context, peer *tran
 }
 
 // SyncPeerFromAgent creates or updates a transport.Peer from an existing Agent.
-func (tm *TransportManager) SyncPeerFromAgent(agent *Agent) *transport.Peer {
+func (tm *MPTransportBridge) SyncPeerFromAgent(agent *Agent) *transport.Peer {
 	peer := tm.PeerRegistry.GetOrCreate(string(agent.Identity))
 
 	// Sync API details
@@ -1368,7 +1368,7 @@ func (tm *TransportManager) SyncPeerFromAgent(agent *Agent) *transport.Peer {
 }
 
 // agentStateToTransportState converts AgentState to transport.PeerState.
-func (tm *TransportManager) agentStateToTransportState(state AgentState) transport.PeerState {
+func (tm *MPTransportBridge) agentStateToTransportState(state AgentState) transport.PeerState {
 	switch state {
 	case AgentStateNeeded:
 		return transport.PeerStateNeeded
@@ -1392,7 +1392,7 @@ func (tm *TransportManager) agentStateToTransportState(state AgentState) transpo
 // SendHelloWithFallback sends a Hello handshake to a peer with transport fallback (legacy name).
 // UPDATED: Now sends Hello on ALL supported transports independently when both are configured.
 // Returns success if ANY transport succeeds. Updates per-transport state in Agent struct.
-func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Agent, sharedZones []string) (*transport.HelloResponse, error) {
+func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *Agent, sharedZones []string) (*transport.HelloResponse, error) {
 	peer := tm.SyncPeerFromAgent(agent)
 
 	req := &transport.HelloRequest{
@@ -1490,7 +1490,7 @@ func (tm *TransportManager) SendHelloWithFallback(ctx context.Context, agent *Ag
 }
 
 // SendPing sends a ping to a peer, preferring API transport when available.
-func (tm *TransportManager) SendPing(ctx context.Context, peer *transport.Peer) (*transport.PingResponse, error) {
+func (tm *MPTransportBridge) SendPing(ctx context.Context, peer *transport.Peer) (*transport.PingResponse, error) {
 	req := &transport.PingRequest{
 		SenderID:  tm.LocalID,
 		Nonce:     generatePingNonce(),
@@ -1509,7 +1509,7 @@ func (tm *TransportManager) SendPing(ctx context.Context, peer *transport.Peer) 
 // SendBeatWithFallback sends a Beat heartbeat to a peer (legacy name).
 // UPDATED: Now sends Beat on ALL supported transports independently when both are configured.
 // Returns success if ANY transport succeeds. Updates per-transport LastContactTime in Agent struct.
-func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Agent, sequence uint64) (*transport.BeatResponse, error) {
+func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Agent, sequence uint64) (*transport.BeatResponse, error) {
 	peer := tm.SyncPeerFromAgent(agent)
 
 	// Build gossip for this peer
@@ -1622,7 +1622,7 @@ func (tm *TransportManager) SendBeatWithFallback(ctx context.Context, agent *Age
 
 // OnAgentDiscoveryComplete is called when agent discovery completes.
 // It syncs the Agent to a transport.Peer and sets preferred transport.
-func (tm *TransportManager) OnAgentDiscoveryComplete(agent *Agent) {
+func (tm *MPTransportBridge) OnAgentDiscoveryComplete(agent *Agent) {
 	peer := tm.SyncPeerFromAgent(agent)
 
 	// Set preferred transport based on what's available
@@ -1645,7 +1645,7 @@ func (tm *TransportManager) OnAgentDiscoveryComplete(agent *Agent) {
 }
 
 // GetPreferredTransportName returns the preferred transport name for an agent.
-func (tm *TransportManager) GetPreferredTransportName(agent *Agent) string {
+func (tm *MPTransportBridge) GetPreferredTransportName(agent *Agent) string {
 	if agent.ApiMethod && agent.DnsMethod {
 		return "API" // Prefer API when both available
 	} else if agent.ApiMethod {
@@ -1657,103 +1657,91 @@ func (tm *TransportManager) GetPreferredTransportName(agent *Agent) string {
 }
 
 // HasDNSTransport returns true if DNS transport is available for an agent.
-func (tm *TransportManager) HasDNSTransport(agent *Agent) bool {
+func (tm *MPTransportBridge) HasDNSTransport(agent *Agent) bool {
 	return tm.DNSTransport != nil && agent.DnsMethod
 }
 
 // HasAPITransport returns true if API transport is available for an agent.
-func (tm *TransportManager) HasAPITransport(agent *Agent) bool {
+func (tm *MPTransportBridge) HasAPITransport(agent *Agent) bool {
 	return tm.APITransport != nil && agent.ApiMethod
 }
 
 // --- Reliable message queue integration ---
 
 // StartReliableQueue wires up the sendFunc and starts the queue's background worker.
-// Must be called after TransportManager is fully initialized (transports, combiner peer, etc.).
-func (tm *TransportManager) StartReliableQueue(ctx context.Context) {
-	if tm.reliableQueue == nil {
+// Must be called after MPTransportBridge is fully initialized (transports, combiner peer, etc.).
+func (tm *MPTransportBridge) StartReliableQueue(ctx context.Context) {
+	if tm.ReliableQueue == nil {
 		lgTransport.Info("no reliable queue configured, skipping")
 		return
 	}
 
-	// Wire sendFunc: the queue calls this to actually deliver a message.
-	tm.reliableQueue.SetSendFunc(func(ctx context.Context, msg *OutgoingMessage) error {
-		return tm.deliverMessage(ctx, msg)
+	// Wire sendFunc: adapts generic transport.OutgoingMessage to MP delivery logic.
+	tm.TransportManager.StartReliableQueue(ctx, func(ctx context.Context, msg *transport.OutgoingMessage) error {
+		return tm.deliverGenericMessage(ctx, msg)
 	})
-
-	go tm.reliableQueue.Start(ctx)
-	lgTransport.Info("reliable message queue started")
 }
 
-// deliverMessage is the sendFunc implementation. It converts an OutgoingMessage
-// into the appropriate transport format and sends it.
-func (tm *TransportManager) deliverMessage(ctx context.Context, msg *OutgoingMessage) error {
-	switch msg.RecipientType {
-	case "combiner":
-		return tm.deliverToCombiner(ctx, msg)
-	case "agent":
-		return tm.deliverToAgent(ctx, msg)
-	default:
-		return fmt.Errorf("unknown recipient type: %s", msg.RecipientType)
+// deliverGenericMessage is the sendFunc for the generic RMQ.
+// It adapts a transport.OutgoingMessage to the existing MP delivery logic.
+func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *transport.OutgoingMessage) error {
+	update, ok := msg.Payload.(*ZoneUpdate)
+	if !ok {
+		lgTransport.Warn("deliverGenericMessage: payload is not *ZoneUpdate", "recipient", msg.RecipientID, "payloadType", fmt.Sprintf("%T", msg.Payload))
 	}
-}
 
-// deliverToCombiner sends a sync message to the combiner via the transport layer.
-// On success, forwards per-RR confirmation detail to the SynchedDataEngine.
-func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *OutgoingMessage) error {
 	if tm.agentRegistry == nil {
 		return fmt.Errorf("no agent registry")
 	}
 
-	combiner, exists := tm.agentRegistry.S.Get(msg.RecipientID)
+	agent, exists := tm.agentRegistry.S.Get(AgentId(msg.RecipientID))
 	if !exists {
-		return fmt.Errorf("combiner %q not found in AgentRegistry", msg.RecipientID)
+		return fmt.Errorf("recipient %q not found in AgentRegistry", msg.RecipientID)
 	}
 
-	// Build transport peer and sync request
-	peer := tm.SyncPeerFromAgent(combiner)
+	peer := tm.SyncPeerFromAgent(agent)
+	isCombiner := AgentId(msg.RecipientID) == tm.combinerID
 
-	// Use the original source agent ID so the combiner can attribute records correctly.
-	// This preserves per-agent isolation in the combiner's AgentContributions.
+	// Build sync request
 	senderID := tm.LocalID
-	if msg.Update != nil && msg.Update.AgentId != "" {
-		senderID = string(msg.Update.AgentId)
+	messageType := "sync"
+	if isCombiner {
+		messageType = "update"
+		if update != nil && update.AgentId != "" {
+			senderID = string(update.AgentId)
+		}
 	}
 
-	zoneClass := ""
-	if msg.Update != nil {
-		zoneClass = msg.Update.ZoneClass
-	}
 	syncReq := &transport.SyncRequest{
 		SenderID:       senderID,
-		Zone:           string(msg.Zone),
+		Zone:           msg.Zone,
 		Timestamp:      msg.CreatedAt,
 		DistributionID: msg.DistributionID,
 		Nonce:          msg.Nonce,
-		MessageType:    "update",
-		ZoneClass:      zoneClass,
+		MessageType:    messageType,
 	}
-	if msg.Update != nil {
-		syncReq.Operations = msg.Update.Operations
-		if msg.Update.Publish != nil {
-			syncReq.Publish = msg.Update.Publish
+	if update != nil {
+		syncReq.Operations = update.Operations
+		if isCombiner {
+			syncReq.ZoneClass = update.ZoneClass
+			if update.Publish != nil {
+				syncReq.Publish = update.Publish
+			}
 		}
 	}
 
 	syncResp, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
 
-	// Forward per-RR detail from inline confirmation to SynchedDataEngine.
-	// PENDING status is forwarded too so the per-recipient tracking records
-	// that the combiner received the message (even before final confirmation).
-	if syncResp != nil && tm.msgQs != nil && tm.msgQs.Confirmation != nil {
+	// Forward per-RR detail from inline confirmation to SynchedDataEngine (combiner only)
+	if isCombiner && syncResp != nil && tm.msgQs != nil && tm.msgQs.Confirmation != nil {
 		var rejItems []RejectedItemInfo
 		for _, ri := range syncResp.RejectedItems {
 			rejItems = append(rejItems, RejectedItemInfo{Record: ri.Record, Reason: ri.Reason})
 		}
 		detail := &ConfirmationDetail{
 			DistributionID: msg.DistributionID,
-			Zone:           msg.Zone,
-			Source:         string(msg.RecipientID),
+			Zone:           ZoneName(msg.Zone),
+			Source:         msg.RecipientID,
 			Status:         syncResp.Status.String(),
 			Message:        syncResp.Message,
 			AppliedRecords: syncResp.AppliedRecords,
@@ -1772,60 +1760,28 @@ func (tm *TransportManager) deliverToCombiner(ctx context.Context, msg *Outgoing
 	return err
 }
 
-// deliverToAgent sends a sync message to a remote agent via the transport layer.
-func (tm *TransportManager) deliverToAgent(ctx context.Context, msg *OutgoingMessage) error {
-	if tm.agentRegistry == nil {
-		return fmt.Errorf("no agent registry")
-	}
-
-	agent, exists := tm.agentRegistry.S.Get(msg.RecipientID)
-	if !exists {
-		return fmt.Errorf("agent %q not found in AgentRegistry", msg.RecipientID)
-	}
-
-	peer := tm.SyncPeerFromAgent(agent)
-
-	syncReq := &transport.SyncRequest{
-		SenderID:       tm.LocalID,
-		Zone:           string(msg.Zone),
-		Timestamp:      msg.CreatedAt,
-		DistributionID: msg.DistributionID,
-		Nonce:          msg.Nonce,
-		MessageType:    "sync",
-	}
-	if msg.Update != nil {
-		syncReq.Operations = msg.Update.Operations
-	}
-
-	_, err := tm.SendSyncWithFallback(ctx, peer, syncReq)
-	return err
-}
-
 // EnqueueForCombiner enqueues a zone update for reliable delivery to the combiner.
 // Called by SynchedDataEngine when a zone update needs to reach the combiner.
 // If distID is non-empty, it is used as the distribution ID; otherwise a new one is generated.
 // Returns the distributionID for tracking and any error.
-func (tm *TransportManager) EnqueueForCombiner(zone ZoneName, update *ZoneUpdate, distID string) (string, error) {
+func (tm *MPTransportBridge) EnqueueForCombiner(zone ZoneName, update *ZoneUpdate, distID string) (string, error) {
 	combinerID, err := tm.getCombinerID()
 	if err != nil {
 		return "", fmt.Errorf("EnqueueForCombiner: %w", err)
 	}
 
 	if distID == "" {
-		distID = GenerateQueueDistributionID()
+		distID = transport.GenerateDistributionID()
 	}
-	msg := &OutgoingMessage{
+	msg := &transport.OutgoingMessage{
 		DistributionID: distID,
-		RecipientID:    combinerID,
-		RecipientType:  "combiner",
-		Zone:           zone,
-		Update:         update,
-		Priority:       PriorityHigh,
-		CreatedAt:      time.Now(),
-		ExpiresAt:      time.Now().Add(tm.reliableQueue.expirationTimeout),
+		RecipientID:    string(combinerID),
+		Zone:           string(zone),
+		Payload:        update,
+		Priority:       transport.PriorityHigh,
 	}
 
-	return distID, tm.reliableQueue.Enqueue(msg)
+	return distID, tm.ReliableQueue.Enqueue(msg)
 }
 
 // EnqueueForZoneAgents enqueues a zone update for reliable delivery to all
@@ -1833,7 +1789,7 @@ func (tm *TransportManager) EnqueueForCombiner(zone ZoneName, update *ZoneUpdate
 // Called by SynchedDataEngine when a locally-originated update needs to
 // reach all peer agents. Uses the same distID for all agents so the
 // originating agent can correlate confirmations from combiner and agents.
-func (tm *TransportManager) EnqueueForZoneAgents(zone ZoneName, update *ZoneUpdate, distID string) error {
+func (tm *MPTransportBridge) EnqueueForZoneAgents(zone ZoneName, update *ZoneUpdate, distID string) error {
 	agents, err := tm.getAllAgentsForZone(zone)
 	if err != nil {
 		return fmt.Errorf("EnqueueForZoneAgents: %w", err)
@@ -1846,18 +1802,15 @@ func (tm *TransportManager) EnqueueForZoneAgents(zone ZoneName, update *ZoneUpda
 
 	var enqueueErrors []string
 	for _, agentID := range agents {
-		msg := &OutgoingMessage{
+		msg := &transport.OutgoingMessage{
 			DistributionID: distID,
-			RecipientID:    agentID,
-			RecipientType:  "agent",
-			Zone:           zone,
-			Update:         update,
-			Priority:       PriorityNormal,
-			CreatedAt:      time.Now(),
-			ExpiresAt:      time.Now().Add(tm.reliableQueue.expirationTimeout),
+			RecipientID:    string(agentID),
+			Zone:           string(zone),
+			Payload:        update,
+			Priority:       transport.PriorityNormal,
 		}
 
-		if err := tm.reliableQueue.Enqueue(msg); err != nil {
+		if err := tm.ReliableQueue.Enqueue(msg); err != nil {
 			enqueueErrors = append(enqueueErrors, fmt.Sprintf("%s: %v", agentID, err))
 		}
 	}
@@ -1872,23 +1825,20 @@ func (tm *TransportManager) EnqueueForZoneAgents(zone ZoneName, update *ZoneUpda
 
 // EnqueueForSpecificAgent enqueues a zone update for a single agent.
 // Used by "resync-targeted" to respond only to the requesting agent.
-func (tm *TransportManager) EnqueueForSpecificAgent(zone ZoneName, agentID AgentId, update *ZoneUpdate, distID string) error {
-	if tm.reliableQueue == nil {
+func (tm *MPTransportBridge) EnqueueForSpecificAgent(zone ZoneName, agentID AgentId, update *ZoneUpdate, distID string) error {
+	if tm.ReliableQueue == nil {
 		return fmt.Errorf("EnqueueForSpecificAgent: reliable queue not configured")
 	}
 
-	msg := &OutgoingMessage{
+	msg := &transport.OutgoingMessage{
 		DistributionID: distID,
-		RecipientID:    agentID,
-		RecipientType:  "agent",
-		Zone:           zone,
-		Update:         update,
-		Priority:       PriorityNormal,
-		CreatedAt:      time.Now(),
-		ExpiresAt:      time.Now().Add(tm.reliableQueue.expirationTimeout),
+		RecipientID:    string(agentID),
+		Zone:           string(zone),
+		Payload:        update,
+		Priority:       transport.PriorityNormal,
 	}
 
-	if err := tm.reliableQueue.Enqueue(msg); err != nil {
+	if err := tm.ReliableQueue.Enqueue(msg); err != nil {
 		return fmt.Errorf("EnqueueForSpecificAgent: %s: %w", agentID, err)
 	}
 
@@ -1897,34 +1847,34 @@ func (tm *TransportManager) EnqueueForSpecificAgent(zone ZoneName, agentID Agent
 }
 
 // GetQueueStats returns statistics from the reliable message queue.
-func (tm *TransportManager) GetQueueStats() QueueStats {
-	if tm.reliableQueue == nil {
-		return QueueStats{}
+func (tm *MPTransportBridge) GetQueueStats() transport.QueueStats {
+	if tm.ReliableQueue == nil {
+		return transport.QueueStats{}
 	}
-	return tm.reliableQueue.GetStats()
+	return tm.ReliableQueue.GetStats()
 }
 
 // GetQueuePendingMessages returns a snapshot of all pending messages in the queue.
-func (tm *TransportManager) GetQueuePendingMessages() []PendingMessageInfo {
-	if tm.reliableQueue == nil {
+func (tm *MPTransportBridge) GetQueuePendingMessages() []transport.PendingMessageInfo {
+	if tm.ReliableQueue == nil {
 		return nil
 	}
-	return tm.reliableQueue.GetPendingMessages()
+	return tm.ReliableQueue.GetPendingMessages()
 }
 
 // MarkDeliveryConfirmed marks a queued message as confirmed by the recipient.
 // senderID is the identity of the confirming party (= the original message recipient).
-func (tm *TransportManager) MarkDeliveryConfirmed(distributionID string, senderID string) bool {
-	if tm.reliableQueue == nil {
+func (tm *MPTransportBridge) MarkDeliveryConfirmed(distributionID string, senderID string) bool {
+	if tm.ReliableQueue == nil {
 		return false
 	}
-	return tm.reliableQueue.MarkConfirmed(distributionID, senderID)
+	return tm.ReliableQueue.MarkConfirmed(distributionID, senderID)
 }
 
 // --- Helper methods ---
 
 // getCombinerID returns the combiner's AgentId, set at construction time from config.
-func (tm *TransportManager) getCombinerID() (AgentId, error) {
+func (tm *MPTransportBridge) getCombinerID() (AgentId, error) {
 	if tm.combinerID != "" {
 		return tm.combinerID, nil
 	}
@@ -1933,7 +1883,7 @@ func (tm *TransportManager) getCombinerID() (AgentId, error) {
 
 // getAllAgentsForZone returns the AgentIds of all remote agents for a zone.
 // Uses AgentRegistry.GetZoneAgentData() which reads the HSYNC RRset.
-func (tm *TransportManager) getAllAgentsForZone(zone ZoneName) ([]AgentId, error) {
+func (tm *MPTransportBridge) getAllAgentsForZone(zone ZoneName) ([]AgentId, error) {
 	if tm.agentRegistry == nil {
 		return nil, fmt.Errorf("no agent registry")
 	}
@@ -1956,7 +1906,7 @@ func (tm *TransportManager) getAllAgentsForZone(zone ZoneName) ([]AgentId, error
 // populate TrackedRR.ExpectedRecipients so that ProcessConfirmation knows who
 // must confirm before transitioning Pending → Accepted.
 // If skipCombiner is true, the combiner is excluded from the list.
-func (tm *TransportManager) GetDistributionRecipients(zone ZoneName, skipCombiner bool) []string {
+func (tm *MPTransportBridge) GetDistributionRecipients(zone ZoneName, skipCombiner bool) []string {
 	var recipients []string
 
 	// Add combiner unless skipped
@@ -2009,7 +1959,7 @@ type PendingDnskeyPropagation struct {
 
 // TrackDnskeyPropagation registers a DNSKEY distribution for confirmation tracking.
 // Called by SynchedDataEngine after enqueueing DNSKEY changes for remote agents.
-func (tm *TransportManager) TrackDnskeyPropagation(zone ZoneName, distID string, keyTags []uint16, agents []AgentId) {
+func (tm *MPTransportBridge) TrackDnskeyPropagation(zone ZoneName, distID string, keyTags []uint16, agents []AgentId) {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
 
@@ -2033,7 +1983,7 @@ func (tm *TransportManager) TrackDnskeyPropagation(zone ZoneName, distID string,
 // If so, marks the agent as confirmed. When all agents have confirmed, sends KEYSTATE
 // "propagated" to the signer. If any agent rejects, sends KEYSTATE "rejected".
 // Returns true if this confirmation was for a DNSKEY propagation (handled here).
-func (tm *TransportManager) ProcessDnskeyConfirmation(distID string, source string, status string, rejectedItems []RejectedItemInfo) bool {
+func (tm *MPTransportBridge) ProcessDnskeyConfirmation(distID string, source string, status string, rejectedItems []RejectedItemInfo) bool {
 	tm.dnskeyPropMu.Lock()
 	defer tm.dnskeyPropMu.Unlock()
 
@@ -2095,7 +2045,7 @@ func (tm *TransportManager) ProcessDnskeyConfirmation(distID string, source stri
 
 // sendKeystateToSigner sends a KEYSTATE message to the local signer.
 // signal is "propagated", "rejected", or "removed".
-func (tm *TransportManager) sendKeystateToSigner(zone ZoneName, keyTags []uint16, signal string, message string) {
+func (tm *MPTransportBridge) sendKeystateToSigner(zone ZoneName, keyTags []uint16, signal string, message string) {
 	if tm.signerID == "" || tm.signerAddress == "" {
 		lgTransport.Warn("no signer configured, cannot send KEYSTATE", "zone", zone, "signerID", tm.signerID, "signerAddress", tm.signerAddress, "signal", signal)
 		return
@@ -2155,7 +2105,7 @@ func parseHostPort(addr string, defaultPort uint16) (string, uint16) {
 
 // sendRfiToSigner sends an RFI message to the signer (e.g. RFI KEYSTATE to request inventory).
 // Returns the ACK from the signer. The actual data comes back as a separate KEYSTATE message.
-func (tm *TransportManager) sendRfiToSigner(zone string, rfiType string) error {
+func (tm *MPTransportBridge) sendRfiToSigner(zone string, rfiType string) error {
 	if tm.signerID == "" || tm.signerAddress == "" {
 		return fmt.Errorf("no signer configured (signerID=%q, signerAddress=%q)", tm.signerID, tm.signerAddress)
 	}
@@ -2191,7 +2141,7 @@ func (tm *TransportManager) sendRfiToSigner(zone string, rfiType string) error {
 
 // sendRfiToCombiner sends an RFI message to the combiner (e.g. RFI EDITS to request contributions).
 // Modeled on sendRfiToSigner. Uses agentRegistry for peer lookup (same as deliverToCombiner).
-func (tm *TransportManager) sendRfiToCombiner(zone string, rfiType string) error {
+func (tm *MPTransportBridge) sendRfiToCombiner(zone string, rfiType string) error {
 	if tm.agentRegistry == nil {
 		return fmt.Errorf("no agent registry")
 	}

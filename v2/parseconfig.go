@@ -265,7 +265,8 @@ func (conf *Config) ParseConfig(reload bool) error {
 
 	// Initialize DnssecPolicies if needed
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent:
+	case AppTypeAuth, AppTypeAgent,
+		AppTypeMPSigner, AppTypeMPAgent:
 		if conf.Internal.DnssecPolicies == nil {
 			conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
 		}
@@ -331,7 +332,8 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner:
+	case AppTypeAuth, AppTypeAgent, AppTypeCombiner,
+		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner:
 		conf.parseAuthOptions()
 	}
 
@@ -342,7 +344,8 @@ func (conf *Config) ParseConfig(reload bool) error {
 
 	// XXX: Hmm. Should not initialize KeyDB on reload?
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner:
+	case AppTypeAuth, AppTypeAgent, AppTypeCombiner,
+		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner:
 		if !reload { // || kdb == nil {
 			err = conf.InitializeKeyDB()
 			if err != nil {
@@ -411,7 +414,8 @@ func (conf *Config) InitializeKeyDB() error {
 		return fmt.Errorf("database file path %q is a symlink (not allowed)", dbFile)
 	}
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner:
+	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner,
+		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner:
 
 		// Create DB file and parent directory if missing (auto-initialize on first run).
 		if _, err := os.Stat(dbFile); os.IsNotExist(err) {
@@ -681,7 +685,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		}
 
 		// Apply static options via copy-on-write to avoid racing with
-		// concurrent readers of zdp.Options / zdp.MPdata.Options.
+		// concurrent readers of zdp.Options / zdp.MP.MPdata.Options.
 		// Build from fresh parsed options only; on reload this clears
 		// options that were removed from the config file.
 		newOpts := make(map[ZoneOption]bool, len(options))
@@ -689,11 +693,13 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			newOpts[opt] = val
 		}
 
+		zdp.mu.Lock()
 		var newMPdata *MPdata
 		if options[OptMultiProvider] {
-			if zdp.MPdata != nil {
+			zdp.EnsureMP()
+			if zdp.MP.MPdata != nil {
 				// Copy existing MPdata, build fresh MP Options map
-				cp := *zdp.MPdata
+				cp := *zdp.MP.MPdata
 				newMPdata = &cp
 				newMPdata.Options = map[ZoneOption]bool{OptMultiProvider: true}
 			} else {
@@ -702,13 +708,12 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 				}
 			}
 		}
-
-		zdp.mu.Lock()
 		zdp.Options = newOpts
 		if newMPdata != nil {
-			zdp.MPdata = newMPdata
-		} else if !options[OptMultiProvider] {
-			zdp.MPdata = nil
+			zdp.EnsureMP()
+			zdp.MP.MPdata = newMPdata
+		} else if !options[OptMultiProvider] && zdp.MP != nil {
+			zdp.MP.MPdata = nil
 		}
 		zdp.mu.Unlock()
 
@@ -734,7 +739,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			// By this point, FetchFromUpstream has examined the HSYNC RRset and
 			// may have set OptInlineSigning dynamically. Only sign if it did.
 			// Future: other MP-specific post-load setup goes here.
-			if options[OptMultiProvider] && Globals.App.Type == AppTypeAuth {
+			if options[OptMultiProvider] && (Globals.App.Type == AppTypeAuth || Globals.App.Type == AppTypeMPSigner) {
 				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
 					if zd.Options[OptInlineSigning] {
 						if err := zd.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
@@ -830,7 +835,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			// publish the KEY locally — it must send it to the combiner.
 			if options[OptMultiProvider] {
 				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
-					tm := conf.Internal.TransportManager
+					tm := conf.Internal.MPTransport
 					kdb := conf.Internal.KeyDB
 					if tm == nil || kdb == nil || !zd.Options[OptDelSyncChild] {
 						return
@@ -868,7 +873,8 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		}
 
 		switch Globals.App.Type {
-		case AppTypeAuth, AppTypeAgent, AppTypeCombiner:
+		case AppTypeAuth, AppTypeAgent, AppTypeCombiner,
+			AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner:
 			if conf.Internal.RefreshZoneCh == nil {
 				lgConfig.Error("refresh channel is not configured, zones will not be refreshed, terminating")
 				return nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")

@@ -1485,7 +1485,7 @@ func (lem *LeaderElectionManager) GetParentSyncStatus(zone ZoneName, zd *ZoneDat
 
 // PublishKeyToCombiner sends a KEY RR to the combiner as a REPLACE operation.
 // Used by MP zones where the combiner manages the zone apex.
-func PublishKeyToCombiner(zone ZoneName, keyRR dns.RR, tm *TransportManager) (string, error) {
+func PublishKeyToCombiner(zone ZoneName, keyRR dns.RR, tm *MPTransportBridge) (string, error) {
 	update := &ZoneUpdate{
 		Zone: zone,
 		Operations: []core.RROperation{{

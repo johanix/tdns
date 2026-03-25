@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johanix/tdns-transport/v2/transport"
 	cache "github.com/johanix/tdns/v2/cache"
 )
 
@@ -474,57 +475,74 @@ type DynamicCatalogMemberConf struct {
 	Remove  string `yaml:"remove" mapstructure:"remove" validate:"omitempty,oneof=auto manual"`         // "auto" or "manual" - Whether to remove zones when deleted from catalog
 }
 
-type InternalConf struct {
-	CfgFile               string //
-	DebugMode             bool   // if true, may activate dangerous tests
-	ZonesCfgFile          string //
-	CertData              string // PEM encoded certificate
-	KeyData               string // PEM encoded key
-	KeyDB                 *KeyDB
-	AllZones              []string
-	DnssecPolicies        map[string]DnssecPolicy
-	StopCh                chan struct{}
-	APIStopCh             chan struct{}
-	StopOnce              sync.Once
-	RefreshZoneCh         chan ZoneRefresher
-	BumpZoneCh            chan BumperData
-	ValidatorCh           chan ValidatorRequest
-	RecursorCh            chan ImrRequest
-	ScannerQ              chan ScanRequest
-	UpdateQ               chan UpdateRequest
-	DeferredUpdateQ       chan DeferredUpdate
-	DnsUpdateQ            chan DnsUpdateRequest
-	DnsNotifyQ            chan DnsNotifyRequest
-	DnsQueryQ             chan DnsQueryRequest           // Optional: if nil, queries use direct call to QueryResponder
-	QueryHandlers         map[uint16][]QueryHandlerFunc  // qtype -> list of handlers (registered via RegisterQueryHandler)
-	QueryHandlersMutex    sync.RWMutex                   // protects QueryHandlers map
-	NotifyHandlers        map[uint16][]NotifyHandlerFunc // qtype -> list of handlers (registered via RegisterNotifyHandler, 0 = all NOTIFYs)
-	NotifyHandlersMutex   sync.RWMutex                   // protects NotifyHandlers map
-	UpdateHandlers        []UpdateHandlerRegistration    // UPDATE handlers (registered via RegisterUpdateHandler)
-	UpdateHandlersMutex   sync.RWMutex                   // protects UpdateHandlers slice
-	DelegationSyncQ       chan DelegationSyncRequest
-	MusicSyncQ            chan MusicSyncRequest
-	NotifyQ               chan NotifyRequest
-	AuthQueryQ            chan AuthQueryRequest
-	ResignQ               chan *ZoneData // the names of zones that should be kept re-signed should be sent into this channel
+// InternalDnsConf holds DNS-specific internal state: channels, handlers,
+// caches, and engine references. Stays in tdns after repo split.
+type InternalDnsConf struct {
+	CfgFile             string //
+	DebugMode           bool   // if true, may activate dangerous tests
+	ZonesCfgFile        string //
+	CertData            string // PEM encoded certificate
+	KeyData             string // PEM encoded key
+	KeyDB               *KeyDB
+	AllZones            []string
+	DnssecPolicies      map[string]DnssecPolicy
+	StopCh              chan struct{}
+	APIStopCh           chan struct{}
+	StopOnce            sync.Once
+	RefreshZoneCh       chan ZoneRefresher
+	BumpZoneCh          chan BumperData
+	ValidatorCh         chan ValidatorRequest
+	RecursorCh          chan ImrRequest
+	ScannerQ            chan ScanRequest
+	UpdateQ             chan UpdateRequest
+	DeferredUpdateQ     chan DeferredUpdate
+	DnsUpdateQ          chan DnsUpdateRequest
+	DnsNotifyQ          chan DnsNotifyRequest
+	DnsQueryQ           chan DnsQueryRequest           // Optional: if nil, queries use direct call to QueryResponder
+	QueryHandlers       map[uint16][]QueryHandlerFunc  // qtype -> list of handlers (registered via RegisterQueryHandler)
+	QueryHandlersMutex  sync.RWMutex                   // protects QueryHandlers map
+	NotifyHandlers      map[uint16][]NotifyHandlerFunc // qtype -> list of handlers (registered via RegisterNotifyHandler, 0 = all NOTIFYs)
+	NotifyHandlersMutex sync.RWMutex                   // protects NotifyHandlers map
+	UpdateHandlers      []UpdateHandlerRegistration    // UPDATE handlers (registered via RegisterUpdateHandler)
+	UpdateHandlersMutex sync.RWMutex                   // protects UpdateHandlers slice
+	DelegationSyncQ     chan DelegationSyncRequest
+	MusicSyncQ          chan MusicSyncRequest
+	NotifyQ             chan NotifyRequest
+	AuthQueryQ          chan AuthQueryRequest
+	ResignQ             chan *ZoneData     // the names of zones that should be kept re-signed should be sent into this channel
+	RRsetCache          *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
+	ImrEngine           *Imr
+	Scanner             *Scanner // Scanner instance for async job tracking
+}
+
+// InternalMpConf holds multi-provider internal state: transport,
+// agent registry, combiner state, message channels. Moves to
+// tdns-mp after repo split.
+type InternalMpConf struct {
 	SyncQ                 chan SyncRequest
 	MsgQs                 *MsgQs // aggregated channels for agent communication
 	SyncStatusQ           chan SyncStatus
 	AgentRegistry         *AgentRegistry
 	ZoneDataRepo          *ZoneDataRepo
-	RRsetCache            *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
-	ImrEngine             *Imr
-	KdcDB                 interface{}            // *kdc.KdcDB - using interface{} to avoid circular import
-	KdcConf               interface{}            // *kdc.KdcConf - using interface{} to avoid circular import
-	KrsDB                 interface{}            // *krs.KrsDB - using interface{} to avoid circular import
-	KrsConf               interface{}            // *krs.KrsConf - using interface{} to avoid circular import
-	Scanner               *Scanner               // Scanner instance for async job tracking
-	CombinerState         *CombinerState         // Combiner business logic state (error journal, protected namespaces)
-	TransportManager      *TransportManager      // Multi-transport (API + DNS) for agent/combiner/signer; nil if transport not initialized
-	LeaderElectionManager *LeaderElectionManager // Per-zone leader election for delegation sync; nil if not agent
-	ChunkPayloadStore     ChunkPayloadStore      // Optional: for query-mode CHUNK (agent); keyed by qname; set when agent chunk_mode is "query"
-	MPZoneNames           []string               // Zone names with OptMultiProvider, collected at parse time for SDE hydration
-	DistributionCache     *DistributionCache     // In-memory cache of distributions (agent/combiner)
+	CombinerState         *CombinerState              // Combiner business logic state (error journal, protected namespaces)
+	TransportManager      *transport.TransportManager // Generic transport (Router, PeerRegistry, DNS/API transports, RMQ)
+	MPTransport           *MPTransportBridge          // MP-specific transport bridge (authorization, discovery, enqueue, DNSKEY tracking)
+	LeaderElectionManager *LeaderElectionManager      // Per-zone leader election for delegation sync; nil if not agent
+	ChunkPayloadStore     ChunkPayloadStore           // Optional: for query-mode CHUNK (agent); keyed by qname; set when agent chunk_mode is "query"
+	MPZoneNames           []string                    // Zone names with OptMultiProvider, collected at parse time for SDE hydration
+	DistributionCache     *DistributionCache          // In-memory cache of distributions (agent/combiner)
+	KdcDB                 interface{}                 // *kdc.KdcDB - using interface{} to avoid circular import
+	KdcConf               interface{}                 // *kdc.KdcConf - using interface{} to avoid circular import
+	KrsDB                 interface{}                 // *krs.KrsDB - using interface{} to avoid circular import
+	KrsConf               interface{}                 // *krs.KrsConf - using interface{} to avoid circular import
+}
+
+// InternalConf embeds both DNS and MP internal configuration.
+// Field promotion means all existing access sites continue to
+// work unchanged.
+type InternalConf struct {
+	InternalDnsConf
+	InternalMpConf
 }
 
 type MsgQs struct {

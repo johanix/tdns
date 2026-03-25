@@ -54,8 +54,11 @@ func GetProviderZoneRRtypes(zone string) map[uint16]bool {
 
 // Returns true if the zone data was modified.
 func (zd *ZoneData) CombineWithLocalChanges() (bool, error) {
+	if zd.MP == nil {
+		return false, nil
+	}
 	modified := false
-	if zd.CombinerData == nil {
+	if zd.MP.CombinerData == nil {
 		zd.Logger.Printf("CombineWithLocalChanges: Zone %s: No combiner data to apply", zd.ZoneName)
 		return false, nil
 	}
@@ -74,7 +77,7 @@ func (zd *ZoneData) CombineWithLocalChanges() (bool, error) {
 		}
 
 		// Iterate over all owners in the CombinerData
-		for item := range zd.CombinerData.IterBuffered() {
+		for item := range zd.MP.CombinerData.IterBuffered() {
 			ownerName := item.Key
 			newOwnerData := item.Val
 
@@ -139,8 +142,8 @@ func (zd *ZoneData) mergeWithUpstream(owner string, rrtype uint16, agentRRset co
 	}
 
 	// Start with upstream baseline if available
-	if zd.UpstreamData != nil {
-		if upstreamOd, ok := zd.UpstreamData.Get(owner); ok {
+	if zd.MP.UpstreamData != nil {
+		if upstreamOd, ok := zd.MP.UpstreamData.Get(owner); ok {
 			if baselineRRset, exists := upstreamOd.RRtypes.Get(rrtype); exists {
 				merged.RRs = make([]dns.RR, len(baselineRRset.RRs))
 				copy(merged.RRs, baselineRRset.RRs)
@@ -181,11 +184,12 @@ func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRse
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
 
-	if zd.CombinerData == nil {
-		zd.CombinerData = core.NewCmap[OwnerData]()
+	zd.EnsureMP()
+	if zd.MP.CombinerData == nil {
+		zd.MP.CombinerData = core.NewCmap[OwnerData]()
 	}
-	if zd.AgentContributions == nil {
-		zd.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
+	if zd.MP.AgentContributions == nil {
+		zd.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
 	}
 
 	if senderID == "" {
@@ -193,8 +197,8 @@ func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRse
 	}
 
 	// Initialize per-agent map if needed
-	if zd.AgentContributions[senderID] == nil {
-		zd.AgentContributions[senderID] = make(map[string]map[uint16]core.RRset)
+	if zd.MP.AgentContributions[senderID] == nil {
+		zd.MP.AgentContributions[senderID] = make(map[string]map[uint16]core.RRset)
 	}
 
 	// Merge this agent's contributions into existing data (accumulate, don't replace).
@@ -202,18 +206,18 @@ func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRse
 	// contribution from the same agent rather than overwriting.
 	changed := false
 	for owner, rrsets := range data {
-		if zd.AgentContributions[senderID][owner] == nil {
-			zd.AgentContributions[senderID][owner] = make(map[uint16]core.RRset)
+		if zd.MP.AgentContributions[senderID][owner] == nil {
+			zd.MP.AgentContributions[senderID][owner] = make(map[uint16]core.RRset)
 		}
 		for _, rrset := range rrsets {
 			if len(rrset.RRs) == 0 {
 				continue
 			}
 			rrtype := rrset.RRs[0].Header().Rrtype
-			existing, ok := zd.AgentContributions[senderID][owner][rrtype]
+			existing, ok := zd.MP.AgentContributions[senderID][owner][rrtype]
 			if !ok {
 				// First contribution for this agent/owner/rrtype
-				zd.AgentContributions[senderID][owner][rrtype] = rrset
+				zd.MP.AgentContributions[senderID][owner][rrtype] = rrset
 				changed = true
 			} else {
 				// Merge: add new RRs (deduplicated) into the existing contribution
@@ -224,7 +228,7 @@ func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRse
 						changed = true
 					}
 				}
-				zd.AgentContributions[senderID][owner][rrtype] = existing
+				zd.MP.AgentContributions[senderID][owner][rrtype] = existing
 			}
 		}
 	}
@@ -237,8 +241,8 @@ func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRse
 	zd.rebuildCombinerData()
 
 	// Persist this agent's contributions to the snapshot table
-	if zd.PersistContributions != nil {
-		if err := zd.PersistContributions(zd.ZoneName, senderID, zd.AgentContributions[senderID]); err != nil {
+	if zd.MP.PersistContributions != nil {
+		if err := zd.MP.PersistContributions(zd.ZoneName, senderID, zd.MP.AgentContributions[senderID]); err != nil {
 			zd.Logger.Printf("AddCombinerData: Zone %q: failed to persist contributions for %s: %v", zd.ZoneName, senderID, err)
 			return changed, fmt.Errorf("persist contributions: %w", err)
 		}
@@ -264,8 +268,11 @@ func (zd *ZoneData) AddCombinerData(senderID string, data map[string][]core.RRse
 // For each owner/rrtype, RRs from all agents are combined into a single RRset,
 // with deduplication based on the string representation of each RR.
 func (zd *ZoneData) rebuildCombinerData() {
-	if zd.CombinerData == nil {
-		zd.CombinerData = core.NewCmap[OwnerData]()
+	if zd.MP == nil {
+		return
+	}
+	if zd.MP.CombinerData == nil {
+		zd.MP.CombinerData = core.NewCmap[OwnerData]()
 	}
 
 	// Collect all RRs per owner per rrtype from all agents
@@ -273,7 +280,7 @@ func (zd *ZoneData) rebuildCombinerData() {
 	type ownerRRtypes map[uint16][]dns.RR
 	merged := make(map[string]ownerRRtypes)
 
-	for agentID, ownerMap := range zd.AgentContributions {
+	for agentID, ownerMap := range zd.MP.AgentContributions {
 		for owner, rrtypeMap := range ownerMap {
 			if merged[owner] == nil {
 				merged[owner] = make(ownerRRtypes)
@@ -290,7 +297,7 @@ func (zd *ZoneData) rebuildCombinerData() {
 
 	// Build deduplicated CombinerData from merged contributions
 	// Clear existing CombinerData
-	zd.CombinerData = core.NewCmap[OwnerData]()
+	zd.MP.CombinerData = core.NewCmap[OwnerData]()
 
 	for owner, rrtypeRRs := range merged {
 		ownerData := OwnerData{
@@ -314,7 +321,7 @@ func (zd *ZoneData) rebuildCombinerData() {
 				RRs:    dedupRRs,
 			})
 		}
-		zd.CombinerData.Set(owner, ownerData)
+		zd.MP.CombinerData.Set(owner, ownerData)
 	}
 
 	if zd.Debug {
@@ -322,7 +329,7 @@ func (zd *ZoneData) rebuildCombinerData() {
 		for owner, rrtypeRRs := range merged {
 			for rrtype, rrs := range rrtypeRRs {
 				zd.Logger.Printf("rebuildCombinerData: Zone %s: merged %s for %q: %d RRs from %d agents",
-					zd.ZoneName, dns.TypeToString[rrtype], owner, len(rrs), len(zd.AgentContributions))
+					zd.ZoneName, dns.TypeToString[rrtype], owner, len(rrs), len(zd.MP.AgentContributions))
 			}
 		}
 	}
@@ -330,14 +337,14 @@ func (zd *ZoneData) rebuildCombinerData() {
 
 // GetCombinerData retrieves all local combiner data for the zone
 func (zd *ZoneData) GetCombinerData() (map[string][]core.RRset, error) {
-	if zd.CombinerData == nil {
+	if zd.MP == nil || zd.MP.CombinerData == nil {
 		return nil, fmt.Errorf("no local data exists for zone %s", zd.ZoneName)
 	}
 
 	result := make(map[string][]core.RRset)
 
 	// Iterate over all owners in CombinerData
-	for item := range zd.CombinerData.IterBuffered() {
+	for item := range zd.MP.CombinerData.IterBuffered() {
 		owner := item.Key
 		ownerData := item.Val
 
@@ -400,11 +407,11 @@ func (zd *ZoneData) AddCombinerDataNG(senderID string, data map[string][]string)
 func (zd *ZoneData) GetCombinerDataNG() map[string][]RRsetString {
 	responseData := make(map[string][]RRsetString)
 
-	if zd.CombinerData == nil {
+	if zd.MP == nil || zd.MP.CombinerData == nil {
 		return responseData
 	}
 
-	for owner, ownerData := range zd.CombinerData.Items() {
+	for owner, ownerData := range zd.MP.CombinerData.Items() {
 		var rrsets []RRsetString
 		if ownerData.RRtypes != nil {
 			for _, rrtype := range ownerData.RRtypes.Keys() {
@@ -450,7 +457,7 @@ func (zd *ZoneData) RemoveCombinerDataNG(senderID string, data map[string][]stri
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
 
-	if zd.AgentContributions == nil {
+	if zd.MP == nil || zd.MP.AgentContributions == nil {
 		return nil, nil
 	}
 
@@ -458,7 +465,7 @@ func (zd *ZoneData) RemoveCombinerDataNG(senderID string, data map[string][]stri
 		senderID = "local"
 	}
 
-	agentData, ok := zd.AgentContributions[senderID]
+	agentData, ok := zd.MP.AgentContributions[senderID]
 	if !ok {
 		return nil, nil
 	}
@@ -521,8 +528,8 @@ func (zd *ZoneData) RemoveCombinerDataNG(senderID string, data map[string][]stri
 	zd.rebuildCombinerData()
 
 	// Persist this agent's contributions to the snapshot table
-	if zd.PersistContributions != nil {
-		if err := zd.PersistContributions(zd.ZoneName, senderID, zd.AgentContributions[senderID]); err != nil {
+	if zd.MP.PersistContributions != nil {
+		if err := zd.MP.PersistContributions(zd.ZoneName, senderID, zd.MP.AgentContributions[senderID]); err != nil {
 			zd.Logger.Printf("RemoveCombinerDataNG: Zone %q: failed to persist contributions for %s: %v", zd.ZoneName, senderID, err)
 			return removedRecords, fmt.Errorf("persist contributions: %w", err)
 		}
@@ -553,17 +560,21 @@ func (zd *ZoneData) RemoveCombinerDataByRRtype(senderID string, owner string, rr
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
 
+	if zd.MP == nil {
+		return nil, nil
+	}
+
 	if senderID == "" {
 		senderID = "local"
 	}
 
 	var removedRecords []string
 
-	if zd.AgentContributions == nil {
+	if zd.MP.AgentContributions == nil {
 		return removedRecords, nil
 	}
 
-	agentData, ok := zd.AgentContributions[senderID]
+	agentData, ok := zd.MP.AgentContributions[senderID]
 	if !ok {
 		return removedRecords, nil
 	}
@@ -593,8 +604,8 @@ func (zd *ZoneData) RemoveCombinerDataByRRtype(senderID string, owner string, rr
 	zd.rebuildCombinerData()
 
 	// Persist this agent's contributions to the snapshot table
-	if zd.PersistContributions != nil {
-		if err := zd.PersistContributions(zd.ZoneName, senderID, zd.AgentContributions[senderID]); err != nil {
+	if zd.MP.PersistContributions != nil {
+		if err := zd.MP.PersistContributions(zd.ZoneName, senderID, zd.MP.AgentContributions[senderID]); err != nil {
 			zd.Logger.Printf("RemoveCombinerDataByRRtype: Zone %q: failed to persist contributions for %s: %v", zd.ZoneName, senderID, err)
 			return removedRecords, fmt.Errorf("persist contributions: %w", err)
 		}
@@ -634,17 +645,18 @@ func (zd *ZoneData) replaceCombinerDataByRRtypeLocked(senderID, owner string, rr
 		senderID = "local"
 	}
 
-	if zd.AgentContributions == nil {
-		zd.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
+	zd.EnsureMP()
+	if zd.MP.AgentContributions == nil {
+		zd.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
 	}
-	if zd.AgentContributions[senderID] == nil {
-		zd.AgentContributions[senderID] = make(map[string]map[uint16]core.RRset)
+	if zd.MP.AgentContributions[senderID] == nil {
+		zd.MP.AgentContributions[senderID] = make(map[string]map[uint16]core.RRset)
 	}
-	if zd.AgentContributions[senderID][owner] == nil {
-		zd.AgentContributions[senderID][owner] = make(map[uint16]core.RRset)
+	if zd.MP.AgentContributions[senderID][owner] == nil {
+		zd.MP.AgentContributions[senderID][owner] = make(map[uint16]core.RRset)
 	}
 
-	oldRRset, hadOld := zd.AgentContributions[senderID][owner][rrtype]
+	oldRRset, hadOld := zd.MP.AgentContributions[senderID][owner][rrtype]
 
 	// Empty replacement set = delete entire RRset for this agent/owner/rrtype
 	if len(newRRs) == 0 {
@@ -652,9 +664,9 @@ func (zd *ZoneData) replaceCombinerDataByRRtypeLocked(senderID, owner string, rr
 			for _, rr := range oldRRset.RRs {
 				removed = append(removed, rr.String())
 			}
-			delete(zd.AgentContributions[senderID][owner], rrtype)
-			if len(zd.AgentContributions[senderID][owner]) == 0 {
-				delete(zd.AgentContributions[senderID], owner)
+			delete(zd.MP.AgentContributions[senderID][owner], rrtype)
+			if len(zd.MP.AgentContributions[senderID][owner]) == 0 {
+				delete(zd.MP.AgentContributions[senderID], owner)
 			}
 			changed = true
 		}
@@ -703,17 +715,17 @@ func (zd *ZoneData) replaceCombinerDataByRRtypeLocked(senderID, owner string, rr
 			return
 		}
 
-		zd.AgentContributions[senderID][owner][rrtype] = newSet
+		zd.MP.AgentContributions[senderID][owner][rrtype] = newSet
 	}
 
 	// Rebuild merged CombinerData and apply to zone
-	if zd.CombinerData == nil {
-		zd.CombinerData = core.NewCmap[OwnerData]()
+	if zd.MP.CombinerData == nil {
+		zd.MP.CombinerData = core.NewCmap[OwnerData]()
 	}
 	zd.rebuildCombinerData()
 
-	if zd.PersistContributions != nil {
-		if err = zd.PersistContributions(zd.ZoneName, senderID, zd.AgentContributions[senderID]); err != nil {
+	if zd.MP.PersistContributions != nil {
+		if err = zd.MP.PersistContributions(zd.ZoneName, senderID, zd.MP.AgentContributions[senderID]); err != nil {
 			zd.Logger.Printf("ReplaceCombinerDataByRRtype: Zone %q: failed to persist contributions for %s: %v", zd.ZoneName, senderID, err)
 		}
 	}
@@ -796,7 +808,8 @@ func (zd *ZoneData) InjectSignatureTXT(conf *MultiProviderConf) bool {
 // from zd.Data into zd.UpstreamData. Called after zone load/refresh, before
 // CombineWithLocalChanges applies agent contributions.
 func (zd *ZoneData) snapshotUpstreamData() {
-	zd.UpstreamData = core.NewCmap[OwnerData]()
+	zd.EnsureMP()
+	zd.MP.UpstreamData = core.NewCmap[OwnerData]()
 
 	// Only snapshot the apex owner (agent contributions only apply at apex)
 	if apexOd, ok := zd.Data.Get(zd.ZoneName); ok {
@@ -817,19 +830,19 @@ func (zd *ZoneData) snapshotUpstreamData() {
 				})
 			}
 		}
-		zd.UpstreamData.Set(zd.ZoneName, snapshotOd)
+		zd.MP.UpstreamData.Set(zd.ZoneName, snapshotOd)
 	}
 }
 
 // restoreUpstreamRRset restores an rrtype from UpstreamData back into the zone.
 // Used when all agent contributions for a mandatory rrtype (e.g. NS) are removed.
 func (zd *ZoneData) restoreUpstreamRRset(owner string, rrtype uint16) {
-	if zd.UpstreamData == nil {
+	if zd.MP.UpstreamData == nil {
 		zd.Logger.Printf("restoreUpstreamRRset: Zone %q: No upstream data, cannot restore %s",
 			zd.ZoneName, dns.TypeToString[rrtype])
 		return
 	}
-	if od, ok := zd.UpstreamData.Get(owner); ok {
+	if od, ok := zd.MP.UpstreamData.Get(owner); ok {
 		if rrset, exists := od.RRtypes.Get(rrtype); exists {
 			if zoneOd, ok := zd.Data.Get(owner); ok {
 				zoneOd.RRtypes.Set(rrtype, rrset)
@@ -862,8 +875,8 @@ func (zd *ZoneData) cleanupRemovedRRtypes(data map[string][]string) {
 // If not: for NS at the apex, restore from upstream; otherwise delete from zone data.
 func (zd *ZoneData) cleanupRemovedRRtype(owner string, rrtype uint16) {
 	stillExists := false
-	if zd.CombinerData != nil {
-		if od, ok := zd.CombinerData.Get(owner); ok {
+	if zd.MP.CombinerData != nil {
+		if od, ok := zd.MP.CombinerData.Get(owner); ok {
 			if _, exists := od.RRtypes.Get(rrtype); exists {
 				stillExists = true
 			}
@@ -903,15 +916,16 @@ func combinerReapplyContributions(zone string, kdb *KeyDB) (string, error) {
 	}
 
 	zd.mu.Lock()
+	zd.EnsureMP()
 	if zoneContribs, ok := allContribs[zone]; ok {
-		zd.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
+		zd.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
 		for senderID, ownerMap := range zoneContribs {
-			zd.AgentContributions[senderID] = ownerMap
+			zd.MP.AgentContributions[senderID] = ownerMap
 		}
 		zd.rebuildCombinerData()
 		parts = append(parts, fmt.Sprintf("loaded contributions from %d agent(s)", len(zoneContribs)))
 	} else {
-		zd.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
+		zd.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
 		zd.rebuildCombinerData()
 		parts = append(parts, "no contributions in snapshot")
 	}

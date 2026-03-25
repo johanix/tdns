@@ -14,8 +14,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/johanix/tdns/v2/crypto"
-	"github.com/johanix/tdns/v2/crypto/jose"
+	"github.com/johanix/tdns-transport/v2/crypto"
+	"github.com/johanix/tdns-transport/v2/crypto/jose"
 	"gopkg.in/yaml.v3"
 )
 

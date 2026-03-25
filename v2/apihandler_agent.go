@@ -16,7 +16,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/johanix/tdns/v2/agent/transport"
+	"github.com/johanix/tdns-transport/v2/transport"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
@@ -452,7 +452,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 
 			// Check authorization before discovery (DNS-38)
 			if conf.Internal.AgentRegistry.TransportManager != nil {
-				authorized, reason := conf.Internal.AgentRegistry.TransportManager.IsPeerAuthorized(string(amp.AgentId), string(amp.Zone))
+				authorized, reason := conf.Internal.AgentRegistry.MPTransport.IsPeerAuthorized(string(amp.AgentId), string(amp.Zone))
 				if !authorized {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("agent %q is not authorized (not in agent.authorized_peers config or HSYNC): %s", amp.AgentId, reason)
@@ -1388,9 +1388,9 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 					resp.ErrorMsg = fmt.Sprintf("zone %q not found", zone)
 					return
 				}
-				if zd.CombinerData != nil {
+				if zd.MP != nil && zd.MP.CombinerData != nil {
 					zoneData := make(map[string]map[string][]string)
-					for item := range zd.CombinerData.IterBuffered() {
+					for item := range zd.MP.CombinerData.IterBuffered() {
 						ownerName := item.Key
 						ownerData := item.Val
 						rrTypeData := make(map[string][]string)
@@ -1409,9 +1409,9 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			} else {
 				// All zones
 				for _, zd := range Zones.Items() {
-					if zd.CombinerData != nil {
+					if zd.MP != nil && zd.MP.CombinerData != nil {
 						zoneData := make(map[string]map[string][]string)
-						for item := range zd.CombinerData.IterBuffered() {
+						for item := range zd.MP.CombinerData.IterBuffered() {
 							ownerName := item.Key
 							ownerData := item.Val
 							rrTypeData := make(map[string][]string)
@@ -1475,7 +1475,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			}
 
 			// Convert agent to transport peer
-			peer := conf.Internal.TransportManager.SyncPeerFromAgent(agent)
+			peer := conf.Internal.MPTransport.SyncPeerFromAgent(agent)
 
 			// Create sync request
 			syncReq := &transport.SyncRequest{
@@ -1491,7 +1491,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 
 			// Send sync with fallback
 			ctx := context.Background()
-			syncResp, err := conf.Internal.TransportManager.SendSyncWithFallback(ctx, peer, syncReq)
+			syncResp, err := conf.Internal.MPTransport.SendSyncWithFallback(ctx, peer, syncReq)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("sync failed: %v", err)
@@ -1516,8 +1516,8 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				return
 			}
 
-			stats := conf.Internal.TransportManager.GetQueueStats()
-			pending := conf.Internal.TransportManager.GetQueuePendingMessages()
+			stats := conf.Internal.MPTransport.GetQueueStats()
+			pending := conf.Internal.MPTransport.GetQueuePendingMessages()
 
 			resp.Data = map[string]interface{}{
 				"stats":    stats,

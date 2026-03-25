@@ -250,7 +250,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	zd.RepopulateDynamicRRs(dynamicRRs)
 
 	// Recompute multi-provider membership and signing state after every refresh.
-	// This must run for all app types (agent, combiner, signer) so that zd.MPdata
+	// This must run for all app types (agent, combiner, signer) so that zd.MP.MPdata
 	// is always up-to-date with the zone owner's HSYNC3+HSYNCPARAM declarations.
 	if zd.Options[OptMultiProvider] {
 		zd.populateMPdata()
@@ -258,9 +258,9 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 
 	// For multi-provider zones on the signer: use cached MPdata to
 	// dynamically enable/disable inline-signing and detect multi-signer mode.
-	if zd.MPdata != nil && Globals.App.Type == AppTypeAuth {
-		shouldSign := zd.MPdata.WeAreSigner
-		otherSigners := zd.MPdata.OtherSigners
+	if zd.MP != nil && zd.MP.MPdata != nil && Globals.App.Type == AppTypeAuth {
+		shouldSign := zd.MP.MPdata.WeAreSigner
+		otherSigners := zd.MP.MPdata.OtherSigners
 		if shouldSign && !zd.Options[OptInlineSigning] {
 			lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", zd.ZoneName)
 			zd.Options[OptInlineSigning] = true
@@ -445,9 +445,9 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 
 	// For multi-provider zones on the signer: use cached MPdata to
 	// dynamically enable/disable inline-signing and detect multi-signer mode.
-	if zd.MPdata != nil && Globals.App.Type == AppTypeAuth {
-		shouldSign := zd.MPdata.WeAreSigner
-		otherSigners := zd.MPdata.OtherSigners
+	if zd.MP != nil && zd.MP.MPdata != nil && Globals.App.Type == AppTypeAuth {
+		shouldSign := zd.MP.MPdata.WeAreSigner
+		otherSigners := zd.MP.MPdata.OtherSigners
 		if shouldSign && !zd.Options[OptInlineSigning] {
 			lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", zd.ZoneName)
 			zd.Options[OptInlineSigning] = true

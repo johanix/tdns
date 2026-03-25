@@ -532,7 +532,7 @@ func StartRegisteredEngines(ctx context.Context) {
 		name := reg.Name
 		engine := reg.Engine
 		lg.Info("StartRegisteredEngines: starting engine", "name", name)
-		startEngine(&Globals.App, name, func() error {
+		StartEngine(&Globals.App, name, func() error {
 			return engine(ctx)
 		})
 	}

@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/johanix/tdns/v2/agent/transport"
+	"github.com/johanix/tdns-transport/v2/transport"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
@@ -30,7 +30,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 		return
 	}
 
-	tm := conf.Internal.TransportManager
+	tm := conf.Internal.MPTransport
 	var peerRegistry *transport.PeerRegistry
 	if tm != nil {
 		peerRegistry = tm.PeerRegistry
@@ -115,7 +115,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				lgCombiner.Info("RFI received", "type", msg.RfiType, "sender", senderID, "zone", zone)
 				switch msg.RfiType {
 				case "EDITS":
-					go sendEditsToAgent(conf, tm, senderID, zone)
+					go sendEditsToAgent(ctx, conf, tm, senderID, zone)
 				default:
 					lgCombiner.Warn("unknown RFI type, ignoring", "type", msg.RfiType, "sender", senderID)
 				}
@@ -276,7 +276,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 
 // combinerSendConfirmation sends the detailed SYNC confirmation back to the originating agent.
 // Uses the same DNSTransport.Confirm() mechanism as sendRemoteConfirmation in hsync_transport.go.
-func combinerSendConfirmation(tm *TransportManager, senderID string, resp *CombinerSyncResponse) {
+func combinerSendConfirmation(tm *MPTransportBridge, senderID string, resp *CombinerSyncResponse) {
 	if tm == nil || tm.DNSTransport == nil {
 		lgCombiner.Warn("cannot send confirmation, no DNSTransport", "sender", senderID, "distrib", resp.DistributionID)
 		return
@@ -348,7 +348,7 @@ func rrStringsToOwnerMap(rrStrings []string) map[string][]string {
 // them back via DNSTransport.Edits(). Called asynchronously from CombinerMsgHandler
 // when an RFI EDITS is received.
 // Modeled on sendKeystateInventoryToAgent in signer_msg_handler.go.
-func sendEditsToAgent(conf *Config, tm *TransportManager, agentID string, zone string) {
+func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, agentID string, zone string) {
 	zd, exists := Zones.Get(dns.Fqdn(zone))
 	if !exists {
 		lgCombiner.Warn("RFI EDITS: zone not found", "zone", zone, "agent", agentID)
@@ -357,9 +357,22 @@ func sendEditsToAgent(conf *Config, tm *TransportManager, agentID string, zone s
 
 	// Copy AgentContributions under lock, then convert outside the lock
 	zd.mu.Lock()
-	contribsCopy := make(map[string]map[string]map[uint16]core.RRset, len(zd.AgentContributions))
-	for aid, ownerMap := range zd.AgentContributions {
-		contribsCopy[aid] = ownerMap
+	var contribsCopy map[string]map[string]map[uint16]core.RRset
+	if zd.MP == nil {
+		contribsCopy = make(map[string]map[string]map[uint16]core.RRset)
+	} else {
+		contribsCopy = make(map[string]map[string]map[uint16]core.RRset, len(zd.MP.AgentContributions))
+		for aid, ownerMap := range zd.MP.AgentContributions {
+			newOwnerMap := make(map[string]map[uint16]core.RRset, len(ownerMap))
+			for owner, rrtypeMap := range ownerMap {
+				newRRtypeMap := make(map[uint16]core.RRset, len(rrtypeMap))
+				for rrtype, rrset := range rrtypeMap {
+					newRRtypeMap[rrtype] = rrset
+				}
+				newOwnerMap[owner] = newRRtypeMap
+			}
+			contribsCopy[aid] = newOwnerMap
+		}
 	}
 	zd.mu.Unlock()
 
@@ -391,7 +404,7 @@ func sendEditsToAgent(conf *Config, tm *TransportManager, agentID string, zone s
 		Timestamp:    time.Now(),
 	}
 
-	sendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	resp, err := tm.DNSTransport.Edits(sendCtx, peer, req)
