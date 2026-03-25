@@ -19,5 +19,8 @@ func ZoneDataWeAreASigner(zd *ZoneData) (bool, error) {
 // CombinerStateSetChunkHandler wraps setting the unexported
 // chunkHandler field on CombinerState.
 func CombinerStateSetChunkHandler(cs *CombinerState, handler *transport.ChunkNotifyHandler) {
+	if cs == nil {
+		return
+	}
 	cs.chunkHandler = handler
 }

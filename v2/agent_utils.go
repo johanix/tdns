@@ -575,7 +575,7 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 	}
 
 	// Only discover transports we ourselves support.
-	if ar.TransportManager != nil {
+	if ar.MPTransport != nil {
 		agent.DnsMethod = ar.MPTransport.isTransportSupported("dns")
 		agent.ApiMethod = ar.MPTransport.isTransportSupported("api")
 	} else {
@@ -648,7 +648,7 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, d
 	}
 
 	// Register discovered agent
-	if ar.TransportManager != nil {
+	if ar.MPTransport != nil {
 		err := ar.MPTransport.RegisterDiscoveredAgent(result)
 		if err != nil {
 			agent.mu.Lock()

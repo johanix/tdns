@@ -739,7 +739,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			// By this point, FetchFromUpstream has examined the HSYNC RRset and
 			// may have set OptInlineSigning dynamically. Only sign if it did.
 			// Future: other MP-specific post-load setup goes here.
-			if options[OptMultiProvider] && Globals.App.Type == AppTypeAuth {
+			if options[OptMultiProvider] && (Globals.App.Type == AppTypeAuth || Globals.App.Type == AppTypeMPSigner) {
 				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
 					if zd.Options[OptInlineSigning] {
 						if err := zd.SetupZoneSigning(conf.Internal.ResignQ); err != nil {

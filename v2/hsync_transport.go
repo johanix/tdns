@@ -470,6 +470,7 @@ func (tm *MPTransportBridge) RegisterChunkNotifyHandler() error {
 
 // StartIncomingMessageRouter starts a goroutine that routes incoming DNS messages
 // to the appropriate hsyncengine channels.
+// ctx is intentionally unused: kept in the signature for API stability and future use.
 func (tm *MPTransportBridge) StartIncomingMessageRouter(ctx context.Context) {
 	if tm.ChunkHandler == nil {
 		lgTransport.Info("DNS transport not configured, skipping incoming message router")
@@ -1684,7 +1685,10 @@ func (tm *MPTransportBridge) StartReliableQueue(ctx context.Context) {
 // deliverGenericMessage is the sendFunc for the generic RMQ.
 // It adapts a transport.OutgoingMessage to the existing MP delivery logic.
 func (tm *MPTransportBridge) deliverGenericMessage(ctx context.Context, msg *transport.OutgoingMessage) error {
-	update, _ := msg.Payload.(*ZoneUpdate) // nil if payload isn't a ZoneUpdate
+	update, ok := msg.Payload.(*ZoneUpdate)
+	if !ok {
+		lgTransport.Warn("deliverGenericMessage: payload is not *ZoneUpdate", "recipient", msg.RecipientID, "payloadType", fmt.Sprintf("%T", msg.Payload))
+	}
 
 	if tm.agentRegistry == nil {
 		return fmt.Errorf("no agent registry")

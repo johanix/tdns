@@ -560,6 +560,10 @@ func (zd *ZoneData) RemoveCombinerDataByRRtype(senderID string, owner string, rr
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
 
+	if zd.MP == nil {
+		return nil, nil
+	}
+
 	if senderID == "" {
 		senderID = "local"
 	}
@@ -912,6 +916,7 @@ func combinerReapplyContributions(zone string, kdb *KeyDB) (string, error) {
 	}
 
 	zd.mu.Lock()
+	zd.EnsureMP()
 	if zoneContribs, ok := allContribs[zone]; ok {
 		zd.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
 		for senderID, ownerMap := range zoneContribs {

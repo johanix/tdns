@@ -199,7 +199,7 @@ func (ar *AgentRegistry) FastBeatAttempts(ctx context.Context, agent *Agent) {
 
 		lgAgent.Debug("fast beat attempt", "attempt", attempt, "maxAttempts", fastAttempts, "agent", agent.Identity)
 
-		if ar.TransportManager != nil {
+		if ar.MPTransport != nil {
 			beatCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			agent.mu.RLock()
 			sequence := uint64(agent.ApiDetails.SentBeats)
@@ -254,7 +254,7 @@ func (ar *AgentRegistry) SingleHello(agent *Agent, zone ZoneName) {
 	lgAgent.Debug("sending HELLO", "agent", agent.Identity, "zone", zone)
 
 	// Use TransportManager for independent multi-transport handling
-	if ar.TransportManager != nil {
+	if ar.MPTransport != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
 		defer cancel()
 		sharedZones := ar.sharedZonesForAgent(agent)

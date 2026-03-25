@@ -115,7 +115,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 				lgCombiner.Info("RFI received", "type", msg.RfiType, "sender", senderID, "zone", zone)
 				switch msg.RfiType {
 				case "EDITS":
-					go sendEditsToAgent(conf, tm, senderID, zone)
+					go sendEditsToAgent(ctx, conf, tm, senderID, zone)
 				default:
 					lgCombiner.Warn("unknown RFI type, ignoring", "type", msg.RfiType, "sender", senderID)
 				}
@@ -348,7 +348,7 @@ func rrStringsToOwnerMap(rrStrings []string) map[string][]string {
 // them back via DNSTransport.Edits(). Called asynchronously from CombinerMsgHandler
 // when an RFI EDITS is received.
 // Modeled on sendKeystateInventoryToAgent in signer_msg_handler.go.
-func sendEditsToAgent(conf *Config, tm *MPTransportBridge, agentID string, zone string) {
+func sendEditsToAgent(ctx context.Context, conf *Config, tm *MPTransportBridge, agentID string, zone string) {
 	zd, exists := Zones.Get(dns.Fqdn(zone))
 	if !exists {
 		lgCombiner.Warn("RFI EDITS: zone not found", "zone", zone, "agent", agentID)
@@ -363,7 +363,15 @@ func sendEditsToAgent(conf *Config, tm *MPTransportBridge, agentID string, zone 
 	} else {
 		contribsCopy = make(map[string]map[string]map[uint16]core.RRset, len(zd.MP.AgentContributions))
 		for aid, ownerMap := range zd.MP.AgentContributions {
-			contribsCopy[aid] = ownerMap
+			newOwnerMap := make(map[string]map[uint16]core.RRset, len(ownerMap))
+			for owner, rrtypeMap := range ownerMap {
+				newRRtypeMap := make(map[uint16]core.RRset, len(rrtypeMap))
+				for rrtype, rrset := range rrtypeMap {
+					newRRtypeMap[rrtype] = rrset
+				}
+				newOwnerMap[owner] = newRRtypeMap
+			}
+			contribsCopy[aid] = newOwnerMap
 		}
 	}
 	zd.mu.Unlock()
@@ -396,7 +404,7 @@ func sendEditsToAgent(conf *Config, tm *MPTransportBridge, agentID string, zone 
 		Timestamp:    time.Now(),
 	}
 
-	sendCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	sendCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 
 	resp, err := tm.DNSTransport.Edits(sendCtx, peer, req)

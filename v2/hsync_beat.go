@@ -81,7 +81,7 @@ func (ar *AgentRegistry) SendHeartbeats() {
 			var beatAck bool
 			var beatMsg string
 
-			if ar.TransportManager != nil {
+			if ar.MPTransport != nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 				sequence := uint64(0)

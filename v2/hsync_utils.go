@@ -219,6 +219,7 @@ func (zd *ZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) {
 		newLocalKeys = append(newLocalKeys, rr)
 	}
 
+	zd.EnsureMP()
 	oldLocalKeys := zd.MP.LocalDNSKEYs
 
 	// Handle initial case (no previous local keys)
