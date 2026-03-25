@@ -114,18 +114,26 @@ snapshotUpstreamData, mergeWithUpstream
 
 All 6 tdns binaries build clean.
 
-### Step 2: Add AppTypeMPCombiner guards in tdns
+### Step 2: Add AppTypeMPCombiner guards — DONE
 
-Add `AppTypeMPCombiner` to AppType guards:
-- apirouters.go (combiner API endpoints)
-- parseconfig.go (any combiner-specific parsing)
-- main_initfuncs.go: skip MP engines in StartCombiner
-  when AppType == AppTypeMPCombiner
+AppTypeMPCombiner already defined in enums.go. Guards added:
 
-Watch for AppType guards we missed with the signer —
-let crashes guide us.
+- **apirouters.go**: Distribution cache init + combiner API
+  endpoints now include AppTypeMPCombiner
+- **main_initfuncs.go**: MainInit switch: MPCombiner hits
+  empty `default:` case (same pattern as MPSigner — all
+  MP wiring done by tdns-mp).
+  StartCombiner: MP engines (IncomingMessageRouter,
+  CombinerMsgHandler, CombinerSyncRouter) skipped for
+  AppTypeMPCombiner.
+- **zone_utils.go**: 7 AppTypeCombiner checks updated to
+  include MPCombiner (HSYNC/DNSKEY change detection,
+  snapshotUpstreamData, CombineWithLocalChanges, etc.)
+- **parseconfig.go**: expectedRole map includes MPCombiner
+- **keys_cmd.go**: JOSE key path + usage message
+- **parseoptions.go**: mp-manual-approval validation
 
-Verify: all 6 tdns binaries build.
+All 6 tdns binaries build clean.
 
 ### Step 3: Copy combiner files to tdns-mp
 

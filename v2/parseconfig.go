@@ -219,9 +219,10 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// Validate multi-provider.role matches the application type
 	if conf.MultiProvider != nil {
 		expectedRole := map[AppType]string{
-			AppTypeAuth:     "signer",
-			AppTypeCombiner: "combiner",
-			AppTypeAgent:    "agent",
+			AppTypeAuth:       "signer",
+			AppTypeCombiner:   "combiner",
+			AppTypeMPCombiner: "combiner",
+			AppTypeAgent:      "agent",
 		}
 		if expected, ok := expectedRole[Globals.App.Type]; ok {
 			if conf.MultiProvider.Role != expected {

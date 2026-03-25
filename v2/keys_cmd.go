@@ -144,7 +144,7 @@ func getKeysPrivKeyPath(conf *Config, appType AppType) string {
 			return conf.MultiProvider.LongTermJosePrivKey
 		}
 		return ""
-	case AppTypeCombiner:
+	case AppTypeCombiner, AppTypeMPCombiner:
 		if conf.MultiProvider != nil {
 			return conf.MultiProvider.LongTermJosePrivKey
 		}
@@ -156,7 +156,7 @@ func getKeysPrivKeyPath(conf *Config, appType AppType) string {
 
 func printKeysUsage(appType AppType) {
 	name := "tdns-agent"
-	if appType == AppTypeCombiner {
+	if appType == AppTypeCombiner || appType == AppTypeMPCombiner {
 		name = "tdns-combiner"
 	}
 	fmt.Fprintf(os.Stderr, "Usage: %s keys generate [-output path]\n", name)

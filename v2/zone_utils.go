@@ -182,7 +182,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	var hss *HsyncStatus
 	var dskeyStatus *DnskeyStatus
 	switch Globals.App.Type {
-	case AppTypeAgent, AppTypeCombiner, AppTypeAuth:
+	case AppTypeAgent, AppTypeCombiner, AppTypeMPCombiner, AppTypeAuth:
 		hsyncchanged, hss, err = zd.HsyncChanged(&new_zd)
 		if err != nil {
 			lg.Error("HsyncChanged failed", "zone", zd.ZoneName, "err", err)
@@ -241,7 +241,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	zd.mu.Unlock()
 
 	// Snapshot upstream data for combiner NS fallback (before CombineWithLocalChanges)
-	if Globals.App.Type == AppTypeCombiner {
+	if Globals.App.Type == AppTypeCombiner || Globals.App.Type == AppTypeMPCombiner {
 		zd.snapshotUpstreamData()
 	}
 
@@ -365,7 +365,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	var hss *HsyncStatus
 	var dskeyStatusUpstream *DnskeyStatus
 	switch Globals.App.Type {
-	case AppTypeAgent, AppTypeCombiner, AppTypeAuth:
+	case AppTypeAgent, AppTypeCombiner, AppTypeMPCombiner, AppTypeAuth:
 		hsyncchanged, hss, err = zd.HsyncChanged(&new_zd)
 		if err != nil {
 			lg.Error("HsyncChanged failed", "zone", zd.ZoneName, "err", err)
@@ -430,7 +430,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	zd.mu.Unlock()
 
 	// Snapshot upstream data for combiner NS fallback (before CombineWithLocalChanges)
-	if Globals.App.Type == AppTypeCombiner {
+	if Globals.App.Type == AppTypeCombiner || Globals.App.Type == AppTypeMPCombiner {
 		zd.snapshotUpstreamData()
 	}
 
@@ -507,7 +507,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 					NewDnskeys: newkeys,
 				}
 			}
-		case AppTypeCombiner:
+		case AppTypeCombiner, AppTypeMPCombiner:
 			// A combiner doesn't need to act on DNSKEY changes. But for now we log it to verify the code path.
 			lg.Debug("incoming DNSKEYs have changed, no action needed for combiner", "zone", zd.ZoneName)
 		}
@@ -523,7 +523,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 				ZoneData:   zd,
 				SyncStatus: hss,
 			}
-		case AppTypeCombiner:
+		case AppTypeCombiner, AppTypeMPCombiner:
 			matched, _, _ := zd.matchHsyncProvider(ourHsyncIdentities())
 			if matched && !zd.Options[OptMPDisallowEdits] {
 				lg.Info("HSYNC RRset confirms we are a listed provider and signer, enabling allow-edits", "zone", zd.ZoneName)
@@ -541,7 +541,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	lg.Debug("FetchFromUpstream: checking combine status", "zone", zd.ZoneName, "appType", AppTypeToString[Globals.App.Type], "allowEdits", zd.Options[OptAllowEdits])
 	// XXX: Current thinking: the OptCombiner option is dynamically set for a zone given the combination of
 	//      (a) it contains a HSYNC RRset and (b) appname is "combiner".
-	if Globals.App.Type == AppTypeCombiner && zd.Options[OptAllowEdits] {
+	if (Globals.App.Type == AppTypeCombiner || Globals.App.Type == AppTypeMPCombiner) && zd.Options[OptAllowEdits] {
 		lg.Info("combining with local changes", "zone", zd.ZoneName)
 		success, err := zd.CombineWithLocalChanges()
 		if err != nil {

@@ -745,24 +745,27 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 	StartEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
 	StartEngineNoError(&Globals.App, "RefreshEngine", func() { RefreshEngine(ctx, conf) })
 	StartEngine(&Globals.App, "Notifier", func() error { return Notifier(ctx, conf.Internal.NotifyQ) })
-	// Start incoming message router for beat/hello processing
-	if conf.Internal.TransportManager != nil {
-		conf.Internal.MPTransport.StartIncomingMessageRouter(ctx)
-		lgConfig.Info("combiner incoming message router started")
+	// MP combiner engines — skipped for AppTypeMPCombiner (tdns-mp provides its own)
+	if Globals.App.Type != AppTypeMPCombiner {
+		// Start incoming message router for beat/hello processing
+		if conf.Internal.TransportManager != nil {
+			conf.Internal.MPTransport.StartIncomingMessageRouter(ctx)
+			lgConfig.Info("combiner incoming message router started")
+		}
+		// Start combiner message handler for beat/hello/sync consumption from MsgQs
+		var protectedNS []string
+		var errJournal *ErrorJournal
+		if conf.Internal.CombinerState != nil {
+			protectedNS = conf.Internal.CombinerState.ProtectedNamespaces
+			errJournal = conf.Internal.CombinerState.ErrorJournal
+		}
+		StartEngineNoError(&Globals.App, "CombinerMsgHandler",
+			func() { CombinerMsgHandler(ctx, conf, conf.Internal.MsgQs, protectedNS, errJournal) })
 	}
-	// Start combiner message handler for beat/hello/sync consumption from MsgQs
-	var protectedNS []string
-	var errJournal *ErrorJournal
-	if conf.Internal.CombinerState != nil {
-		protectedNS = conf.Internal.CombinerState.ProtectedNamespaces
-		errJournal = conf.Internal.CombinerState.ErrorJournal
-	}
-	StartEngineNoError(&Globals.App, "CombinerMsgHandler",
-		func() { CombinerMsgHandler(ctx, conf, conf.Internal.MsgQs, protectedNS, errJournal) })
 	StartEngine(&Globals.App, "NotifyHandler", func() error { return NotifyHandler(ctx, conf) })
 	StartEngine(&Globals.App, "DnsEngine", func() error { return DnsEngine(ctx, conf) })
 	// Start combiner sync API router (for agent→combiner HELLO/BEAT/PING over HTTPS)
-	if conf.MultiProvider != nil && len(conf.MultiProvider.SyncApi.Addresses.Listen) > 0 {
+	if Globals.App.Type != AppTypeMPCombiner && conf.MultiProvider != nil && len(conf.MultiProvider.SyncApi.Addresses.Listen) > 0 {
 		combinerSyncRtr, err := conf.SetupCombinerSyncRouter(ctx)
 		if err != nil {
 			lgConfig.Error("failed to set up combiner sync router", "err", err)
