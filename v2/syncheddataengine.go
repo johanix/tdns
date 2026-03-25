@@ -328,7 +328,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 	//
 	// Uses conf.Internal.MPZoneNames (collected at parse time) instead of
 	// scanning Zones.IterBuffered() -- avoids race with RefreshEngine.
-	tm := conf.Internal.TransportManager
+	tm := conf.Internal.MPTransport
 	hasCombiner := tm != nil && tm.combinerID != ""
 	hasSigner := tm != nil && tm.signerID != ""
 
@@ -418,7 +418,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 						resp.Msg = msg
 					}
 					if change {
-						tm := conf.Internal.TransportManager
+						tm := conf.Internal.MPTransport
 						if tm != nil && synchedDataUpdate.Update != nil {
 							// Generate a single shared distID for combiner + all agents
 							distID := transport.GenerateDistributionID()
@@ -589,7 +589,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 							lgEngine.Info("remote update applied, enqueuing for combiner", "zone", synchedDataUpdate.Zone)
 						}
 
-						tm := conf.Internal.TransportManager
+						tm := conf.Internal.MPTransport
 						if !remoteSkipCombiner && tm != nil && synchedDataUpdate.Update != nil {
 							// Remote update: only enqueue for combiner (not back to agents).
 							// The combiner deduplicates KEY/CDS contributions: local agent
@@ -850,7 +850,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					sdcmd.Response <- &SynchedDataCmdResponse{Error: true, ErrorMsg: "zone is required for resync"}
 					continue
 				}
-				tm := conf.Internal.TransportManager
+				tm := conf.Internal.MPTransport
 				if tm == nil {
 					sdcmd.Response <- &SynchedDataCmdResponse{Error: true, ErrorMsg: "TransportManager not available"}
 					continue
@@ -1007,7 +1007,7 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 					sdcmd.Response <- &SynchedDataCmdResponse{Error: true, ErrorMsg: "zone and target agent are required for resync-targeted"}
 					continue
 				}
-				tm := conf.Internal.TransportManager
+				tm := conf.Internal.MPTransport
 				if tm == nil {
 					sdcmd.Response <- &SynchedDataCmdResponse{Error: true, ErrorMsg: "TransportManager not available"}
 					continue

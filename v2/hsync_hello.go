@@ -204,7 +204,7 @@ func (ar *AgentRegistry) FastBeatAttempts(ctx context.Context, agent *Agent) {
 			agent.mu.RLock()
 			sequence := uint64(agent.ApiDetails.SentBeats)
 			agent.mu.RUnlock()
-			beatResp, err := ar.TransportManager.SendBeatWithFallback(beatCtx, agent, sequence)
+			beatResp, err := ar.MPTransport.SendBeatWithFallback(beatCtx, agent, sequence)
 			cancel()
 
 			if err == nil && beatResp != nil && beatResp.Ack {
@@ -260,7 +260,7 @@ func (ar *AgentRegistry) SingleHello(agent *Agent, zone ZoneName) {
 		sharedZones := ar.sharedZonesForAgent(agent)
 		// SendHelloWithFallback now handles both transports independently
 		// and updates ApiDetails.State and DnsDetails.State separately
-		_, err := ar.TransportManager.SendHelloWithFallback(ctx, agent, sharedZones)
+		_, err := ar.MPTransport.SendHelloWithFallback(ctx, agent, sharedZones)
 		if err != nil {
 			lgAgent.Warn("HELLO failed on all transports", "agent", agent.Identity, "err", err)
 		} else {

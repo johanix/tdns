@@ -31,7 +31,7 @@ import (
 // Returns:
 //   - authorized: true if agent is authorized
 //   - reason: human-readable explanation of authorization decision
-func (tm *TransportManager) IsPeerAuthorized(senderID string, zone string) (bool, string) {
+func (tm *MPTransportBridge) IsPeerAuthorized(senderID string, zone string) (bool, string) {
 	// Check 1: Authorization via role-specific configured peers
 	// The AuthorizedPeers callback is injected at config time by each role.
 	if tm.isAuthorizedPeer(senderID) {
@@ -75,7 +75,7 @@ func (tm *TransportManager) IsPeerAuthorized(senderID string, zone string) (bool
 // This replaces the former isConfiguredPeer + isInAuthorizedPeers methods which
 // hardcoded role-specific Conf checks. Now any role (agent, combiner, signer, kdc, krs)
 // provides its own callback returning the list of authorized peer identities.
-func (tm *TransportManager) isAuthorizedPeer(senderID string) bool {
+func (tm *MPTransportBridge) isAuthorizedPeer(senderID string) bool {
 	if tm.authorizedPeers == nil {
 		return false
 	}
@@ -93,7 +93,7 @@ func (tm *TransportManager) isAuthorizedPeer(senderID string) bool {
 // indicating operational need to communicate for this zone.
 //
 // This mirrors the logic in EvaluateHello() from hsync_hello.go:160-211.
-func (tm *TransportManager) isInHSYNC(senderID string, zone string) (bool, string) {
+func (tm *MPTransportBridge) isInHSYNC(senderID string, zone string) (bool, string) {
 	if zone == "" {
 		return false, "empty zone name"
 	}
@@ -143,7 +143,7 @@ func (tm *TransportManager) isInHSYNC(senderID string, zone string) (bool, strin
 // isInHSYNCAnyZone checks if senderID is in the HSYNC3 RRset for ANY zone we share.
 // This is used for zone-agnostic authorization (e.g., heartbeats, general peer communication).
 // Returns true and the first matching zone name if found.
-func (tm *TransportManager) isInHSYNCAnyZone(senderID string) (bool, string) {
+func (tm *MPTransportBridge) isInHSYNCAnyZone(senderID string) (bool, string) {
 	// Iterate through all zones we know about
 	for _, zoneName := range Zones.Keys() {
 		zd, exists := Zones.Get(zoneName)

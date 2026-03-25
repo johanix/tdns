@@ -306,242 +306,100 @@ for _, agentID := range getZoneAgents(zone) {
 
 ## Implementation Steps
 
-### Step 1: Move RMQ to tdns-transport
+### Step 1: Move RMQ to tdns-transport — DONE
 
-- Copy reliable_message_queue.go to
-  tdns-transport/v2/transport/
-- Change package to `transport`
-- Replace AgentRegistry with IsRecipientReady callback
-- Genericize OutgoingMessage (remove MP-specific fields)
-- Add DeliveryPolicy enum
-- Update tdns to import RMQ from tdns-transport
-- Verify tdns builds
+Genericized RMQ with `interface{}` payload,
+`IsRecipientReady` callback. In tdns-transport.
 
-### Step 2: Create generic TransportManager
+### Step 2: Create generic TransportManager — DONE
 
-- New file: tdns-transport/v2/transport/manager.go
-- TransportManagerConfig with all callbacks
-- Constructor creates transports, PeerRegistry, Router,
-  ChunkHandler, RMQ — wires them together
-- SelectTransport, SendPing
-- RegisterChunkNotifyHandler with registration callback
-- Enqueue wraps RMQ
-- Verify tdns-transport builds
+`transport/manager.go` in tdns-transport. Orchestration
+only, not per-packet.
 
-### Step 3: Replace IncomingChan with callback middleware
+### Step 3: RouteToCallback middleware — DONE
 
-The current flow: handlers store IncomingMessage in
-ctx.Data, then RouteToMsgHandler middleware pushes to
-a single IncomingChan. The application reads IncomingChan
-in one goroutine and re-dispatches by type.
+Added alongside existing RouteToMsgHandler. Lab-tested:
+incoming messages fan out directly, no IncomingChan
+bottleneck.
 
-The fix: add RouteToCallback middleware that takes a
-func(*IncomingMessage) instead of a channel. The
-application provides the callback, which does per-type
-fan-out directly (push to typed channels).
+### Step 4a-f: Refactor tdns to use generic TM — DONE
 
-Concrete changes:
-- Add RouteToCallback(fn func(*IncomingMessage))
-  MiddlewareFunc alongside existing RouteToMsgHandler
-- Keep RouteToMsgHandler for backwards compatibility
-- Remove IncomingChan from RouterConfig (application
-  uses RouteToCallback instead)
-- ChunkNotifyHandler.IncomingChan becomes optional
-  (nil if application uses callback pattern)
-- Handlers (HandleBeat, HandleSync etc.) stay unchanged —
-  they parse and store in ctx.Data, middleware routes
-- Verify tdns-transport builds + exercise binary
+- 4a: Local TM embeds `*transport.TransportManager`
+- 4b: Construction creates generic TM inside wrapper
+- 4c: RouteToCallback replaces IncomingChan goroutine
+  (lab-tested: all message types work)
+- 4d+4e+4f: Enqueue/StartReliableQueue use generic RMQ,
+  local reliable_message_queue.go deleted
 
-### Step 4: Refactor tdns to use generic TM
+### Step 4g: Delete wrapper — IN PROGRESS
 
-Migration strategy: **temporary wrapper** (option b).
-The local TransportManager becomes a wrapper that embeds
-the generic `*transport.TransportManager`. Callers are
-migrated one by one. Wrapper is deleted when done.
+The local `TransportManager` in hsync_transport.go is a
+temporary wrapper embedding `*transport.TransportManager`.
+It must be replaced with an `MPTransportBridge` struct
+that aggregates MP-specific state and methods.
 
-Caller analysis (28 files reference TransportManager):
-- 12 access `.Router` (field)
-- 8 access `.PeerRegistry` (field)
-- 4 access `.DNSTransport` (field)
-- 3 call `.SendBeatWithFallback` (MP method)
-- 3 call `.SendPing` (generic method)
-- 3 call `.SendSyncWithFallback` (generic method)
-- 3 call `.SyncPeerFromAgent` (MP method)
-- 3 call `.IsPeerAuthorized` (MP method)
-- 3 call `.StartIncomingMessageRouter` (MP method)
-- 2 call `.DiscoverAndRegisterAgent` (MP method)
-- Other methods: 1-2 callers each
+**Caller analysis** (28 files reference TransportManager):
+- 19 files access only generic fields (Router, PeerRegistry,
+  DNSTransport) — change to `*transport.TransportManager`,
+  zero method changes needed
+- 9 files call MP methods — change to MPTransportBridge
 
-#### Sub-step 4a: Create wrapper
+**The 9 files calling MP methods:**
+- agent_utils.go
+- apihandler_agent.go
+- apihandler_agent_distrib.go
+- hsync_beat.go
+- hsync_hello.go
+- hsync_infra_beat.go
+- hsync_transport.go
+- hsyncengine.go
+- main_initfuncs.go
 
-In `hsync_transport.go`, restructure TransportManager
-to embed the generic TM:
+**Sub-steps:**
 
-```go
-type TransportManager struct {
-    *transport.TransportManager // generic (fields promoted)
-    // MP-specific state
-    agentRegistry *AgentRegistry
-    msgQs         *MsgQs
-    combinerID    AgentId
-    signerID      string
-    signerAddress string
-    // ... other MP fields
-}
-```
+4g.1: Create `MPTransportBridge` struct in
+hsync_transport.go. Holds MP state (agentRegistry,
+msgQs, combinerID, signerID, pendingDnskeyPropagations,
+authorizedPeers, messageRetention, getImrEngine,
+keystateRfiState) and a `*transport.TransportManager`
+reference.
 
-Because embedding promotes fields, existing callers
-that access `tm.Router`, `tm.PeerRegistry`, `tm.DNSTransport`
-continue to work without changes — they resolve to
-the embedded generic TM's fields.
+4g.2: Move all MP methods from the local TransportManager
+wrapper to MPTransportBridge. The methods keep the same
+names and signatures — only the receiver type changes.
 
-`Config.Internal.TransportManager` type unchanged
-(still `*TransportManager`, the local type).
+4g.3: Add `MPTransport *MPTransportBridge` field to
+`InternalMpConf` in config.go.
 
-**Checkpoint**: all 6 binaries build.
+4g.4: Change `Config.Internal.TransportManager` type
+from `*TransportManager` (local wrapper) to
+`*transport.TransportManager` (generic).
 
-#### Sub-step 4b: Migrate construction
+4g.5: Update the 9 MP caller files:
+`conf.Internal.TransportManager.SomeMP()` →
+`conf.Internal.MPTransport.SomeMP()`
 
-In `main_initfuncs.go`, change NewTransportManager calls
-to create the generic TM inside the wrapper:
+The 19 files accessing only generic fields (Router,
+PeerRegistry, DNSTransport) need no changes — these
+fields exist on `*transport.TransportManager`.
 
-```go
-genericTM := transport.NewTransportManager(
-    &transport.TransportManagerConfig{
-        LocalID:     identity,
-        ControlZone: controlZone,
-        // ... transport config
-        IsPeerAuthorized: func(s, z string) (bool, string) {
-            return mpTM.IsPeerAuthorized(s, z)
-        },
-        IsRecipientReady: func(id string) bool {
-            return mpTM.isRecipientReady(id)
-        },
-        // ... other callbacks
-    })
+4g.6: Delete the local `TransportManager` type and
+`NewTransportManager` constructor. Update
+main_initfuncs.go to create `*transport.TransportManager`
+directly and populate `MPTransportBridge` separately.
 
-mpTM := &TransportManager{
-    TransportManager: genericTM,
-    agentRegistry:    agentRegistry,
-    msgQs:            msgQs,
-    combinerID:       combinerID,
-    // ...
-}
-conf.Internal.TransportManager = mpTM
-```
+4g.7: Build all 6 tdns binaries + tdns-mp binaries.
+Lab test.
 
-Three construction sites: agent (line ~352), signer
-(line ~432), combiner (line ~578).
+### Step 5: Verify end-to-end
 
-**Checkpoint**: all 6 binaries build.
-
-#### Sub-step 4c: Switch to RouteToCallback
-
-Replace `StartIncomingMessageRouter` (which reads
-IncomingChan and re-dispatches by type in one goroutine)
-with Router handler registration + RouteToCallback.
-
-The ~548 lines of route* methods become registration
-functions that register Router handlers. Each handler
-pushes to the appropriate MsgQs channel:
-
-```go
-func (tm *TransportManager) registerMPHandlers() {
-    tm.Router.Use(transport.RouteToCallback(
-        func(msg *transport.IncomingMessage) {
-            tm.routeToTypedChannel(msg)
-        }))
-}
-
-func (tm *TransportManager) routeToTypedChannel(
-    msg *transport.IncomingMessage) {
-    switch msg.Type {
-    case "beat":
-        // parse + push to msgQs.Beat
-    case "sync", "update":
-        // parse + push to msgQs.Msg
-    case "hello":
-        // parse + push to msgQs.Hello
-    // etc.
-    }
-}
-```
-
-Note: routeToTypedChannel does the SAME dispatch as
-the current routeIncomingMessage — the logic doesn't
-change, only the entry point (callback vs goroutine
-reading IncomingChan).
-
-**Checkpoint**: all 6 binaries build + lab test.
-This is the highest-risk sub-step (threading change).
-
-#### Sub-step 4d: Switch Enqueue methods
-
-Replace EnqueueForCombiner/Agent/SpecificAgent with
-calls to the generic TM's Enqueue:
-
-```go
-func (tm *TransportManager) EnqueueForCombiner(
-    zone ZoneName, update *ZoneUpdate, distID string,
-) (string, error) {
-    msg := &transport.OutgoingMessage{
-        RecipientID:    string(tm.combinerID),
-        Zone:           string(zone),
-        Payload:        update, // interface{}
-        Priority:       transport.PriorityHigh,
-        DistributionID: distID,
-    }
-    return "", tm.TransportManager.Enqueue(msg)
-}
-```
-
-These remain as convenience methods on the local TM
-for now. Callers (5 files) don't change.
-
-**Checkpoint**: all 6 binaries build.
-
-#### Sub-step 4e: Switch reliable queue startup
-
-Replace StartReliableQueue to use generic TM's method:
-
-```go
-func (tm *TransportManager) StartReliableQueue(
-    ctx context.Context) {
-    tm.TransportManager.StartReliableQueue(ctx,
-        func(ctx context.Context,
-            msg *transport.OutgoingMessage) error {
-            return tm.deliverMessage(ctx, msg)
-        })
-}
-```
-
-The deliverMessage sendFunc stays as MP code — it does
-the combiner/agent dispatch and transport selection.
-
-**Checkpoint**: all 6 binaries build.
-
-#### Sub-step 4f: Delete local RMQ
-
-Remove reliable_message_queue.go from tdns (now
-imported from tdns-transport). Remove local type
-definitions (MessageState, OutgoingMessage, etc.)
-that are now in transport package.
-
-**Checkpoint**: all 6 binaries build.
-
-#### Sub-step 4g: Delete wrapper (deferred)
-
-Once all MP methods are converted to standalone
-functions or are clearly MP-only (not called via
-the generic TM interface):
-- Change Config.Internal.TransportManager type to
-  *transport.TransportManager
-- Move MP state to a separate MPTransportBridge struct
-- Update all 28 caller files
-- Delete local TransportManager type
-
-This can be deferred to a later session — the wrapper
-is functional and doesn't block anything.
+- tdns-transport/v2: builds, tests pass, exercise binary
+  updated and passes
+- tdns/cmdv2: all 6 binaries build
+- tdns-mp: mpsigner + mpcli build
+- Deploy to lab: full multi-provider scenario works
+  (agent<->combiner<->signer communication, gossip,
+  DNSKEY propagation, reliable delivery with confirmation)
 
 ### Step 5: Verify end-to-end
 
@@ -554,158 +412,43 @@ is functional and doesn't block anything.
 
 ## Critical Files
 
-**tdns-transport** (new/modified):
-- `v2/transport/manager.go` — NEW: generic TransportManager
-- `v2/transport/reliable_message_queue.go` — MOVED+refactored
-- `v2/transport/chunk_notify_handler.go` — remove IncomingChan
-- `v2/transport/handler.go` — handlers become optional/removed
-- `v2/cmd/transport-exercise/main.go` — update for new API
+**tdns-transport** (done):
+- `v2/transport/manager.go` — generic TransportManager
+- `v2/transport/reliable_message_queue.go` — generic RMQ
+- `v2/transport/handlers.go` — RouteToCallback middleware
 
-**tdns** (modified):
-- `v2/hsync_transport.go` — MP wiring uses generic TM
-- `v2/main_initfuncs.go` — creates generic TM, registers
-  MP handlers on Router, provides callbacks
-- `v2/config.go` — TransportManager type changes to
-  *transport.TransportManager
+**tdns** (steps 4a-f done, 4g in progress):
+- `v2/hsync_transport.go` — local TM wrapper (to be
+  replaced by MPTransportBridge in 4g)
+- `v2/main_initfuncs.go` — creates TM, registers handlers
+- `v2/config.go` — TransportManager type changes in 4g
 
-## Open Question: PeerRegistry
+**PeerRegistry**: stays generic in tdns-transport.
+Agent→Peer conversion, HSYNC authorization, agent
+discovery are application logic in tdns.
 
-PeerRegistry is currently in tdns-transport and is generic.
-MP code adds layers on top:
-- Agent -> Peer conversion (SyncPeerFromAgent)
-- HSYNC-based authorization (isInHSYNC)
-- Agent discovery (DiscoverAndRegisterAgent)
+## Complexity Assessment (for remaining step 4g)
 
-**Decision**: all of this is application logic, stays in
-tdns. PeerRegistry provides generic CRUD. Application
-populates it with discovered/configured peers.
-
-## Complexity Assessment
-
-### Scope by numbers
+### Scope
 
 | Metric | Count |
 |---|---|
-| hsync_transport.go (TM + MP wiring) | 2229 lines |
-| reliable_message_queue.go | 559 lines |
-| Files referencing TransportManager | 28 |
-| Files referencing MsgQs | 10 |
-| Files referencing Enqueue* methods | 5 |
-| Files referencing Send*WithFallback | 11 |
-| Files referencing IncomingChan | 3 |
-| TM initialization code in main_initfuncs | ~109 lines |
-| route* methods (MP dispatch) | ~548 lines |
-| Existing tdns-transport infrastructure | 2513 lines |
+| Files accessing generic TM fields only | 19 (no changes) |
+| Files calling MP methods | 9 (update callers) |
+| MP state fields to move | ~10 |
+| MP methods to move | ~37 |
+| New struct | MPTransportBridge |
+| New config field | InternalMpConf.MPTransport |
 
-### What changes where
+### Risk: LOW
 
-**tdns-transport** (new code):
-- `transport/manager.go` — NEW, ~200-300 lines. Generic TM
-  struct, constructor, SelectTransport, Enqueue,
-  RegisterChunkNotifyHandler, StartReliableQueue. This is
-  new code but straightforward — it wires existing
-  components that are already in the package.
-- `transport/reliable_message_queue.go` — MOVED from tdns,
-  ~559 lines. Needs genericizing: replace AgentRegistry
-  with callback, genericize OutgoingMessage. ~50-100 lines
-  of actual changes within the file.
-- `transport/chunk_notify_handler.go` — MODIFY, remove
-  IncomingChan (~20 lines). Handlers push directly to
-  Router instead of channel.
-- `transport/handler.go` + `transport/handlers.go` — MODIFY.
-  Default handlers may be removed or made optional. The
-  application registers its own. ~100 lines affected.
+The wrapper already works. 4g is a mechanical rename:
+- Move MP state/methods from local TM to MPTransportBridge
+- Change config type
+- Update 9 files' MP method calls
 
-Estimated new/changed in tdns-transport: **~500-700 lines**
-
-**tdns** (refactored code):
-- `hsync_transport.go` — HEAVY REFACTOR. Currently 2229
-  lines. The ~8 generic methods move to tdns-transport.
-  The ~548 lines of route* methods stay but are rewritten
-  as Router handler registrations. The ~37 MP-specific
-  methods stay. Net effect: file shrinks significantly
-  (~800-1000 lines removed, ~200 lines rewritten).
-- `main_initfuncs.go` — MODERATE. ~109 lines of TM setup
-  rewritten to create generic TM + register MP handlers.
-  Same amount of code, different structure.
-- `config.go` — SMALL. TransportManager type changes,
-  MsgQs struct eventually replaced. ~20 lines.
-- 25 other files — SMALL each. Import path changes,
-  possibly method call adjustments. ~1-5 lines per file.
-
-Estimated changed in tdns: **~1200-1500 lines**
-
-**Total estimated change**: ~1700-2200 lines across both
-repos.
-
-### Overall complexity: MEDIUM-HIGH
-
-The refactoring is significant but well-bounded:
-- The generic TM is small (just orchestration)
-- RMQ genericization is mechanical (replace types)
-- The route* methods → Router handlers is a rewrite but
-  the logic doesn't change, only where it lives
-- The 28 files referencing TM mostly need minor updates
-
-### Risk Analysis
-
-**High risk:**
-- **IncomingChan removal (Step 3)** — this changes the
-  threading model. Today all incoming messages serialize
-  through one goroutine. After: each handler runs in the
-  DNS server goroutine and pushes to its own channel.
-  Risk: handlers must be non-blocking (channel push only).
-  If a channel is full, the handler blocks the DNS server.
-  Mitigation: buffered channels + log warnings on near-full.
-
-- **RMQ genericization (Step 1)** — the current RMQ has
-  tight coupling to AgentRegistry for isRecipientReady.
-  The callback replacement must preserve the exact same
-  readiness semantics or messages may be sent to peers
-  that aren't ready.
-  Mitigation: the callback returns bool, same as today.
-  Test with lab deployment.
-
-**Medium risk:**
-- **MsgQs removal** — 10 files reference MsgQs. Each
-  consumer (HsyncEngine, CombinerMsgHandler, etc.) needs
-  to accept channels as parameters instead of reading
-  from a global struct.
-  Mitigation: straightforward refactor, one consumer at a
-  time.
-
-- **Confirmation flow** — today, confirmations arrive via
-  IncomingChan and are routed through routeSyncMessage to
-  RMQ.MarkConfirmed. After the change, the Router handler
-  for "confirm" must call RMQ.MarkConfirmed directly. The
-  path changes but the logic is the same.
-  Mitigation: trace the confirmation flow carefully.
-
-**Low risk:**
-- **Generic TM creation (Step 2)** — new code, no existing
-  behavior to break. Just wires existing components.
-
-- **Import path changes** — mechanical, compiler-driven.
-
-- **main_initfuncs.go rewrite** — same logic, different
-  structure. The TM config fields map 1:1 to the new
-  callbacks.
-
-### Risk mitigation strategy
-
-1. **Step-by-step with builds after each step.** Never
-   change more than one concept at a time.
-2. **Step 1 (RMQ) is the safest start** — move + genericize
-   one file, verify build.
-3. **Step 3 (IncomingChan removal) is the riskiest** — do
-   this last, after TM and RMQ are working. Can be deferred
-   if it causes problems (keep IncomingChan as temporary
-   bridge).
-4. **Lab test after Step 4** — full multi-provider scenario
-   before declaring success.
-5. **Fallback**: the tdns monolith on the `repo-split-phase0-1`
-   branch still builds and runs. If the refactoring goes
-   sideways, revert to that.
+No logic changes. No threading changes. No new behavior.
+Build after each sub-step. Lab test at the end.
 
 ## Verification
 

@@ -835,7 +835,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			// publish the KEY locally — it must send it to the combiner.
 			if options[OptMultiProvider] {
 				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
-					tm := conf.Internal.TransportManager
+					tm := conf.Internal.MPTransport
 					kdb := conf.Internal.KeyDB
 					if tm == nil || kdb == nil || !zd.Options[OptDelSyncChild] {
 						return

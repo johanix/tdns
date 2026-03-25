@@ -279,7 +279,7 @@ func filterLocalDNSKEYs(rrset *core.RRset, remoteKeyTags map[uint16]bool) []dns.
 func (zd *ZoneData) RequestAndWaitForKeyInventory(ctx context.Context) {
 	zd.SetKeystateTime(time.Now())
 
-	tm := Conf.Internal.TransportManager
+	tm := Conf.Internal.MPTransport
 	if tm == nil {
 		zd.SetKeystateOK(false)
 		zd.SetKeystateError("no TransportManager available")
@@ -364,7 +364,7 @@ func (zd *ZoneData) RequestAndWaitForKeyInventory(ctx context.Context) {
 //
 // Modeled on RequestAndWaitForKeyInventory.
 func (zd *ZoneData) RequestAndWaitForEdits(ctx context.Context) {
-	tm := Conf.Internal.TransportManager
+	tm := Conf.Internal.MPTransport
 	if tm == nil {
 		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no TransportManager available", zd.ZoneName)
 		return

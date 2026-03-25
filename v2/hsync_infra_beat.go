@@ -76,7 +76,7 @@ func (ar *AgentRegistry) sendInfraBeats() {
 			}
 			agent.mu.RUnlock()
 
-			resp, err := ar.TransportManager.SendBeatWithFallback(ctx, agent, sequence)
+			resp, err := ar.MPTransport.SendBeatWithFallback(ctx, agent, sequence)
 			if err != nil {
 				lgAgent.Warn("infra beat failed", "peer", agent.Identity, "err", err)
 				return

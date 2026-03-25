@@ -183,7 +183,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 				}
 			}
 
-			tm := conf.Internal.TransportManager
+			tm := conf.Internal.MPTransport
 			apiLocalAgents := make(map[string]bool)
 			if conf.MultiProvider != nil {
 				for _, a := range conf.MultiProvider.Agents {
@@ -260,7 +260,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			if confirmTarget == "" {
 				confirmTarget = rec.SenderID
 			}
-			tm := conf.Internal.TransportManager
+			tm := conf.Internal.MPTransport
 			if tm != nil {
 				combinerSendConfirmation(tm, confirmTarget, syncResp)
 			}
@@ -518,7 +518,7 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			resp.Msg = fmt.Sprintf("Combiner data retrieved for %d zone(s)", len(combinerData))
 
 		case "agent-ping":
-			tm := conf.Internal.TransportManager
+			tm := conf.Internal.MPTransport
 			if tm == nil {
 				resp.Error = true
 				resp.ErrorMsg = "TransportManager not initialized"
@@ -553,7 +553,7 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 				pingResp.ResponderID, pingResp.Nonce)
 
 		case "agent-resync":
-			tm := conf.Internal.TransportManager
+			tm := conf.Internal.MPTransport
 			if tm == nil {
 				resp.Error = true
 				resp.ErrorMsg = "TransportManager not initialized"

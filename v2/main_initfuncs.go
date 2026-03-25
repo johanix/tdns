@@ -352,7 +352,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			signerAddress = conf.MultiProvider.Signer.Address
 			lgConfig.Info("signer peer configured", "identity", signerID, "address", signerAddress)
 		}
-		tm := NewTransportManager(&TransportManagerConfig{
+		tm := NewMPTransportBridge(&MPTransportBridgeConfig{
 			LocalID:                    dns.Fqdn(conf.MultiProvider.Identity),
 			ControlZone:                dns.Fqdn(controlZone),
 			APITimeout:                 10 * time.Second,
@@ -390,8 +390,10 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			ClientCertFile: conf.MultiProvider.Api.CertFile,
 			ClientKeyFile:  conf.MultiProvider.Api.KeyFile,
 		})
-		conf.Internal.TransportManager = tm
-		conf.Internal.AgentRegistry.TransportManager = tm
+		conf.Internal.TransportManager = tm.TransportManager
+		conf.Internal.MPTransport = tm
+		conf.Internal.AgentRegistry.TransportManager = tm.TransportManager
+		conf.Internal.AgentRegistry.MPTransport = tm
 		lgConfig.Info("TransportManager created", "controlZone", controlZone, "chunkMode", chunkMode)
 		// Register peer agents from static config
 		if err := registerPeerAgents(conf, tm); err != nil {
@@ -432,7 +434,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 				chunkMode = "edns0"
 			}
 			controlZone := dns.Fqdn(mp.Identity)
-			tm := NewTransportManager(&TransportManagerConfig{
+			tm := NewMPTransportBridge(&MPTransportBridgeConfig{
 				LocalID:             dns.Fqdn(mp.Identity),
 				ControlZone:         controlZone,
 				APITimeout:          10 * time.Second,
@@ -453,7 +455,8 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 					return peers
 				},
 			})
-			conf.Internal.TransportManager = tm
+			conf.Internal.TransportManager = tm.TransportManager
+			conf.Internal.MPTransport = tm
 			lgConfig.Info("signer TransportManager created", "identity", dns.Fqdn(mp.Identity), "chunkMode", chunkMode)
 			// Create SecurePayloadWrapper for decrypting incoming CHUNK payloads
 			var signerSecureWrapper *transport.SecurePayloadWrapper
@@ -579,7 +582,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			if chunkMode == "" {
 				chunkMode = "edns0"
 			}
-			tm := NewTransportManager(&TransportManagerConfig{
+			tm := NewMPTransportBridge(&MPTransportBridgeConfig{
 				LocalID:             dns.Fqdn(conf.MultiProvider.Identity),
 				ControlZone:         dns.Fqdn(conf.MultiProvider.Identity),
 				DNSTimeout:          5 * time.Second,
@@ -600,7 +603,8 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 					return peers
 				},
 			})
-			conf.Internal.TransportManager = tm
+			conf.Internal.TransportManager = tm.TransportManager
+			conf.Internal.MPTransport = tm
 			// Register combiner agent peers in TransportManager's PeerRegistry
 			for _, agentConf := range conf.MultiProvider.Agents {
 				if agentConf.Identity == "" {
@@ -740,7 +744,7 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 	StartEngine(&Globals.App, "Notifier", func() error { return Notifier(ctx, conf.Internal.NotifyQ) })
 	// Start incoming message router for beat/hello processing
 	if conf.Internal.TransportManager != nil {
-		conf.Internal.TransportManager.StartIncomingMessageRouter(ctx)
+		conf.Internal.MPTransport.StartIncomingMessageRouter(ctx)
 		lgConfig.Info("combiner incoming message router started")
 	}
 	// Start combiner message handler for beat/hello/sync consumption from MsgQs
@@ -821,7 +825,7 @@ func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error 
 	// MP signer engines — skipped for AppTypeMPSigner (tdns-mp provides its own)
 	if Globals.App.Type != AppTypeMPSigner {
 		if conf.Internal.TransportManager != nil {
-			conf.Internal.TransportManager.StartIncomingMessageRouter(ctx)
+			conf.Internal.MPTransport.StartIncomingMessageRouter(ctx)
 			lgConfig.Info("signer incoming message router started")
 		}
 		StartEngineNoError(&Globals.App, "SignerMsgHandler",
@@ -863,10 +867,10 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	StartEngine(&Globals.App, "Notifier", func() error { return Notifier(ctx, conf.Internal.NotifyQ) })
 	// Register CHUNK NOTIFY handler and start incoming DNS message router (must be before NotifyHandler)
 	if conf.Internal.TransportManager != nil {
-		if err := conf.Internal.TransportManager.RegisterChunkNotifyHandler(); err != nil {
+		if err := conf.Internal.MPTransport.RegisterChunkNotifyHandler(); err != nil {
 			lgConfig.Error("failed to register CHUNK NOTIFY handler", "err", err)
 		} else {
-			conf.Internal.TransportManager.StartIncomingMessageRouter(ctx)
+			conf.Internal.MPTransport.StartIncomingMessageRouter(ctx)
 		}
 	}
 	// Initialize combiner as a virtual peer so HsyncEngine can manage heartbeats
@@ -879,7 +883,7 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	}
 	// Start the reliable message queue (must be after combiner peer initialization)
 	if conf.Internal.TransportManager != nil {
-		conf.Internal.TransportManager.StartReliableQueue(ctx)
+		conf.Internal.MPTransport.StartReliableQueue(ctx)
 	}
 	// Leader election manager for coordinated parent delegation sync (DDNS)
 	leaderTTL := viper.GetDuration("delegationsync.leader-election-ttl")
@@ -973,7 +977,7 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	// When the local agent wins leader election: ensure we have a SIG(0) key,
 	// then publish KEY to combiner and sync to remote agents.
 	// Flow: check DSYNC → check local keystore → ask peers via RFI CONFIG → generate if nobody has it → publish.
-	tm := conf.Internal.TransportManager
+	tm := conf.Internal.MPTransport
 	lem.SetOnLeaderElected(func(zone ZoneName) error {
 		zd, ok := Zones.Get(string(zone))
 		if !ok || zd == nil {
@@ -1310,7 +1314,7 @@ func initCombinerCrypto(conf *Config) (*transport.SecurePayloadWrapper, error) {
 //
 // DNS-39: Peer addresses come from DNS discovery, not static config.
 // The old agent.peers map with embedded addresses is no longer supported.
-func registerPeerAgents(conf *Config, tm *TransportManager) error {
+func registerPeerAgents(conf *Config, tm *MPTransportBridge) error {
 	if conf.MultiProvider == nil {
 		return nil // No agent config
 	}

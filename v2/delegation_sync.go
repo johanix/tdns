@@ -197,7 +197,7 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 // notifyPeersParentSyncDone sends STATUS-UPDATE("parentsync-done") to all
 // remote agents for the zone. Called after a successful parent delegation sync.
 func notifyPeersParentSyncDone(conf *Config, zonename string, result string, msg string) {
-	tm := conf.Internal.TransportManager
+	tm := conf.Internal.MPTransport
 	if tm == nil || tm.DNSTransport == nil {
 		lgDns.Debug("notifyPeersParentSyncDone: no TransportManager, skipping peer notification", "zone", zonename)
 		return

@@ -13,8 +13,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/johanix/tdns-transport/v2/transport"
 	"github.com/johanix/tdns-transport/v2/crypto/jose"
+	"github.com/johanix/tdns-transport/v2/transport"
 )
 
 // initSignerCrypto initializes PayloadCrypto for the signer from MultiProviderConf.

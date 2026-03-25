@@ -144,7 +144,7 @@ func DiscoverAgent(ctx context.Context, imr *Imr, identity string) *AgentDiscove
 }
 
 // RegisterDiscoveredAgent adds a discovered agent to the PeerRegistry and optionally to AgentRegistry.
-func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult) error {
+func (tm *MPTransportBridge) RegisterDiscoveredAgent(result *AgentDiscoveryResult) error {
 	if result.Error != nil {
 		return fmt.Errorf("cannot register agent with discovery error: %w", result.Error)
 	}
@@ -345,7 +345,7 @@ func (tm *TransportManager) RegisterDiscoveredAgent(result *AgentDiscoveryResult
 }
 
 // DiscoverAndRegisterAgent performs discovery and registration in one step.
-func (tm *TransportManager) DiscoverAndRegisterAgent(ctx context.Context, identity string) error {
+func (tm *MPTransportBridge) DiscoverAndRegisterAgent(ctx context.Context, identity string) error {
 	lgAgent.Info("starting discovery for agent", "identity", identity)
 
 	// Get IMR engine via injected callback (late-binding: IMR starts asynchronously)

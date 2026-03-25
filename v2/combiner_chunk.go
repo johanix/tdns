@@ -117,7 +117,7 @@ func (cs *CombinerState) ChunkHandler() *transport.ChunkNotifyHandler {
 }
 
 // ProcessUpdate delegates to the standalone CombinerProcessUpdate.
-func (cs *CombinerState) ProcessUpdate(req *CombinerSyncRequest, localAgents map[string]bool, kdb *KeyDB, tm *TransportManager) *CombinerSyncResponse {
+func (cs *CombinerState) ProcessUpdate(req *CombinerSyncRequest, localAgents map[string]bool, kdb *KeyDB, tm *MPTransportBridge) *CombinerSyncResponse {
 	return CombinerProcessUpdate(req, cs.ProtectedNamespaces, localAgents, kdb, tm)
 }
 
@@ -275,7 +275,7 @@ func checkMPauthorization(zd *ZoneData) error {
 	return nil
 }
 
-func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []string, localAgents map[string]bool, kdb *KeyDB, tm *TransportManager) *CombinerSyncResponse {
+func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []string, localAgents map[string]bool, kdb *KeyDB, tm *MPTransportBridge) *CombinerSyncResponse {
 	// Count total records for logging
 	totalRecords := 0
 	for _, rrs := range req.Records {
@@ -378,7 +378,7 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 // combinerNotifyDelegationChange publishes CDS/CSYNC as needed and sends a
 // STATUS-UPDATE notification to the local agent that delivered the update.
 // Runs as a goroutine — fire-and-forget from the combiner's perspective.
-func combinerNotifyDelegationChange(tm *TransportManager, senderID, zonename string, zd *ZoneData, nsChanged, kskChanged bool) {
+func combinerNotifyDelegationChange(tm *MPTransportBridge, senderID, zonename string, zd *ZoneData, nsChanged, kskChanged bool) {
 	// Determine if the zone is signed by checking HSYNCPARAM signers
 	zoneSigned := false
 	apex, err := zd.GetOwner(zd.ZoneName)
@@ -479,7 +479,7 @@ func combinerNotifyDelegationChange(tm *TransportManager, senderID, zonename str
 
 // sendDelegationStatusUpdate sends a STATUS-UPDATE message to the agent
 // via the DNSTransport fire-and-forget NOTIFY(CHUNK) mechanism.
-func sendDelegationStatusUpdate(tm *TransportManager, agentID, zonename, subtype string, nsRecords, dsRecords []string) {
+func sendDelegationStatusUpdate(tm *MPTransportBridge, agentID, zonename, subtype string, nsRecords, dsRecords []string) {
 	if tm == nil || tm.DNSTransport == nil {
 		lgCombiner.Warn("sendDelegationStatusUpdate: no DNSTransport, cannot notify agent", "zone", zonename, "subtype", subtype)
 		return

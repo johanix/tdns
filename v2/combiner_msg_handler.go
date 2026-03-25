@@ -30,7 +30,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 		return
 	}
 
-	tm := conf.Internal.TransportManager
+	tm := conf.Internal.MPTransport
 	var peerRegistry *transport.PeerRegistry
 	if tm != nil {
 		peerRegistry = tm.PeerRegistry
@@ -276,7 +276,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 
 // combinerSendConfirmation sends the detailed SYNC confirmation back to the originating agent.
 // Uses the same DNSTransport.Confirm() mechanism as sendRemoteConfirmation in hsync_transport.go.
-func combinerSendConfirmation(tm *TransportManager, senderID string, resp *CombinerSyncResponse) {
+func combinerSendConfirmation(tm *MPTransportBridge, senderID string, resp *CombinerSyncResponse) {
 	if tm == nil || tm.DNSTransport == nil {
 		lgCombiner.Warn("cannot send confirmation, no DNSTransport", "sender", senderID, "distrib", resp.DistributionID)
 		return
@@ -348,7 +348,7 @@ func rrStringsToOwnerMap(rrStrings []string) map[string][]string {
 // them back via DNSTransport.Edits(). Called asynchronously from CombinerMsgHandler
 // when an RFI EDITS is received.
 // Modeled on sendKeystateInventoryToAgent in signer_msg_handler.go.
-func sendEditsToAgent(conf *Config, tm *TransportManager, agentID string, zone string) {
+func sendEditsToAgent(conf *Config, tm *MPTransportBridge, agentID string, zone string) {
 	zd, exists := Zones.Get(dns.Fqdn(zone))
 	if !exists {
 		lgCombiner.Warn("RFI EDITS: zone not found", "zone", zone, "agent", agentID)

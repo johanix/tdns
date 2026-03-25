@@ -506,7 +506,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			// Remote agent wants audit data for this zone.
 			// Two-phase: gather audit data, then send as separate AUDIT message.
 			lgEngine.Info("RFI AUDIT request", "from", ampp.OriginatorID, "zone", ampp.Zone)
-			tm := ar.TransportManager
+			tm := ar.MPTransport
 			if tm == nil {
 				lgEngine.Error("RFI AUDIT: TransportManager not available", "zone", ampp.Zone, "originator", ampp.OriginatorID)
 				resp.Error = true
@@ -659,7 +659,7 @@ func (ar *AgentRegistry) MsgHandler(ampp *AgentMsgPostPlus, synchedDataUpdateQ c
 			}
 
 			// Send config data back as a separate CONFIG message (two-phase pattern).
-			tm := ar.TransportManager
+			tm := ar.MPTransport
 			if tm == nil {
 				lgEngine.Error("RFI CONFIG: TransportManager not available", "zone", ampp.Zone, "originator", ampp.OriginatorID)
 				resp.Error = true
@@ -766,7 +766,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 
 			if ar.TransportManager != nil {
 				ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-				peer := ar.TransportManager.SyncPeerFromAgent(agent)
+				peer := ar.MPTransport.SyncPeerFromAgent(agent)
 				syncReq := &agenttransport.SyncRequest{
 					SenderID:    ar.LocalAgent.Identity,
 					Zone:        string(msg.Zone),
@@ -775,7 +775,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 					Timestamp:   time.Now(),
 					MessageType: "sync",
 				}
-				syncResp, err := ar.TransportManager.SendSyncWithFallback(ctx, peer, syncReq)
+				syncResp, err := ar.MPTransport.SendSyncWithFallback(ctx, peer, syncReq)
 				cancel()
 				if err != nil {
 					syncErr = err
@@ -1020,7 +1020,7 @@ func (ar *AgentRegistry) CommandHandler(msg *AgentMgmtPostPlus, synchedDataUpdat
 func (ar *AgentRegistry) sendRfiToAgent(agent *Agent, msg *AgentMsgPost) (*AgentMsgResponse, error) {
 	// Try DNS transport first via TransportManager (primary transport)
 	if ar.TransportManager != nil {
-		peer := ar.TransportManager.SyncPeerFromAgent(agent)
+		peer := ar.MPTransport.SyncPeerFromAgent(agent)
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
@@ -1034,7 +1034,7 @@ func (ar *AgentRegistry) sendRfiToAgent(agent *Agent, msg *AgentMsgPost) (*Agent
 			RfiSubtype:  msg.RfiSubtype,
 		}
 
-		syncResp, err := ar.TransportManager.SendSyncWithFallback(ctx, peer, syncReq)
+		syncResp, err := ar.MPTransport.SendSyncWithFallback(ctx, peer, syncReq)
 		if err == nil {
 			return &AgentMsgResponse{
 				Status: string(syncResp.Status),

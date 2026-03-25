@@ -90,7 +90,7 @@ func (ar *AgentRegistry) SendHeartbeats() {
 					sequence = uint64(agent.ApiDetails.SentBeats)
 				}
 				agent.mu.RUnlock()
-				beatResp, beatErr := ar.TransportManager.SendBeatWithFallback(ctx, agent, sequence)
+				beatResp, beatErr := ar.MPTransport.SendBeatWithFallback(ctx, agent, sequence)
 				err = beatErr
 				if beatResp != nil {
 					beatAck = beatResp.Ack

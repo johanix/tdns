@@ -464,7 +464,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 					if !ok {
 						// DNS-42: Authorization check BEFORE discovery
 						// Prevents DoS attack via discovery amplification
-						authorized, reason := conf.Internal.TransportManager.IsPeerAuthorized(toFqdn, "")
+						authorized, reason := conf.Internal.MPTransport.IsPeerAuthorized(toFqdn, "")
 						if !authorized {
 							resp.Error = true
 							resp.ErrorMsg = fmt.Sprintf("peer %q is not authorized", req.To)
@@ -477,7 +477,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 						discoveryCtx, discoveryCancel := context.WithTimeout(r.Context(), 10*time.Second)
 						defer discoveryCancel()
 
-						discErr := conf.Internal.TransportManager.DiscoverAndRegisterAgent(discoveryCtx, toFqdn)
+						discErr := conf.Internal.MPTransport.DiscoverAndRegisterAgent(discoveryCtx, toFqdn)
 						if discErr != nil {
 							resp.Error = true
 							resp.ErrorMsg = fmt.Sprintf("peer %q not found and discovery failed", req.To)
@@ -537,7 +537,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 
 			// DNS-42: Authorization check BEFORE discovery
 			// Prevents DoS attack via discovery amplification
-			authorized, reason := conf.Internal.TransportManager.IsPeerAuthorized(agentFqdn, "")
+			authorized, reason := conf.Internal.MPTransport.IsPeerAuthorized(agentFqdn, "")
 			if !authorized {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("agent %q is not authorized", agentId)
@@ -550,7 +550,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 			discoveryCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 			defer cancel()
 
-			err := conf.Internal.TransportManager.DiscoverAndRegisterAgent(discoveryCtx, agentFqdn)
+			err := conf.Internal.MPTransport.DiscoverAndRegisterAgent(discoveryCtx, agentFqdn)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = "discovery failed"

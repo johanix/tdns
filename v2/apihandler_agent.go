@@ -452,7 +452,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 
 			// Check authorization before discovery (DNS-38)
 			if conf.Internal.AgentRegistry.TransportManager != nil {
-				authorized, reason := conf.Internal.AgentRegistry.TransportManager.IsPeerAuthorized(string(amp.AgentId), string(amp.Zone))
+				authorized, reason := conf.Internal.AgentRegistry.MPTransport.IsPeerAuthorized(string(amp.AgentId), string(amp.Zone))
 				if !authorized {
 					resp.Error = true
 					resp.ErrorMsg = fmt.Sprintf("agent %q is not authorized (not in agent.authorized_peers config or HSYNC): %s", amp.AgentId, reason)
@@ -1475,7 +1475,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			}
 
 			// Convert agent to transport peer
-			peer := conf.Internal.TransportManager.SyncPeerFromAgent(agent)
+			peer := conf.Internal.MPTransport.SyncPeerFromAgent(agent)
 
 			// Create sync request
 			syncReq := &transport.SyncRequest{
@@ -1491,7 +1491,7 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 
 			// Send sync with fallback
 			ctx := context.Background()
-			syncResp, err := conf.Internal.TransportManager.SendSyncWithFallback(ctx, peer, syncReq)
+			syncResp, err := conf.Internal.MPTransport.SendSyncWithFallback(ctx, peer, syncReq)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("sync failed: %v", err)
@@ -1516,8 +1516,8 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 				return
 			}
 
-			stats := conf.Internal.TransportManager.GetQueueStats()
-			pending := conf.Internal.TransportManager.GetQueuePendingMessages()
+			stats := conf.Internal.MPTransport.GetQueueStats()
+			pending := conf.Internal.MPTransport.GetQueuePendingMessages()
 
 			resp.Data = map[string]interface{}{
 				"stats":    stats,

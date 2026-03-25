@@ -28,7 +28,7 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 		return
 	}
 
-	tm := conf.Internal.TransportManager
+	tm := conf.Internal.MPTransport
 	var peerRegistry *transport.PeerRegistry
 	if tm != nil {
 		peerRegistry = tm.PeerRegistry
@@ -152,7 +152,7 @@ func pushKeystateInventoryToAllAgents(conf *Config, zone string) {
 	if conf.MultiProvider == nil || len(conf.MultiProvider.Agents) == 0 {
 		return
 	}
-	tm := conf.Internal.TransportManager
+	tm := conf.Internal.MPTransport
 	if tm == nil {
 		lgSigner.Warn("pushKeystateInventoryToAllAgents: no TransportManager", "zone", zone)
 		return
@@ -169,7 +169,7 @@ func pushKeystateInventoryToAllAgents(conf *Config, zone string) {
 
 // sendKeystateInventoryToAgent queries KeyDB for all keys in the zone and sends
 // a complete KEYSTATE inventory message back to the requesting agent.
-func sendKeystateInventoryToAgent(conf *Config, tm *TransportManager, agentID string, zone string) error {
+func sendKeystateInventoryToAgent(conf *Config, tm *MPTransportBridge, agentID string, zone string) error {
 	kdb := conf.Internal.KeyDB
 	if kdb == nil {
 		return fmt.Errorf("KeyDB not available")

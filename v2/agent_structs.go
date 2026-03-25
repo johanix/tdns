@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/johanix/tdns-transport/v2/transport"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
@@ -166,10 +167,11 @@ type AgentRegistry struct {
 	LocalAgent            *MultiProviderConf // our own identity
 	LocateInterval        int                // seconds to wait between locating agents (until success)
 	helloContexts         map[AgentId]context.CancelFunc
-	TransportManager      *TransportManager      // optional; when set, Hello/Beat/Sync use transport fallback (API → DNS)
-	LeaderElectionManager *LeaderElectionManager // optional; when set, election messages are processed
-	ProviderGroupManager  *ProviderGroupManager  // optional; manages provider group computation
-	GossipStateTable      *GossipStateTable      // optional; gossip protocol state
+	TransportManager      *transport.TransportManager // Generic transport (Router, PeerRegistry, etc.)
+	MPTransport           *MPTransportBridge          // MP transport bridge (authorization, discovery, enqueue, beats, hellos)
+	LeaderElectionManager *LeaderElectionManager      // optional; when set, election messages are processed
+	ProviderGroupManager  *ProviderGroupManager       // optional; manages provider group computation
+	GossipStateTable      *GossipStateTable           // optional; gossip protocol state
 }
 
 // AgentBeatPost is defined in core package to avoid circular dependencies.
