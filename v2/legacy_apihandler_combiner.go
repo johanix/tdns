@@ -549,8 +549,8 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 				return
 			}
 
-			resp.Msg = fmt.Sprintf("ping ok: %s echoed nonce %s",
-				pingResp.ResponderID, pingResp.Nonce)
+			resp.Msg = fmt.Sprintf("ping ok: %s echoed nonce %s rtt=%s",
+				pingResp.ResponderID, pingResp.Nonce, pingResp.RTT.Round(time.Microsecond))
 
 		case "agent-resync":
 			tm := conf.Internal.MPTransport
