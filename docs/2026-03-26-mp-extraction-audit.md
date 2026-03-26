@@ -77,6 +77,38 @@ Moves when agent extracted.
 CombineWithLocalChanges() has non-legacy caller in
 zone_utils.go. Stays as method. Wrapper used by tdns-mp.
 
+## Implementation Progress (2026-03-26)
+
+### Done
+
+- **Unused wrappers deleted**: ZoneDataRebuildCombinerData,
+  ZoneDataSnapshotUpstreamData, ZoneDataInjectSignatureTXT
+  removed from wrappers.go.
+- **Type aliases**: 10 combiner types + 2 signer types
+  aliased in tdns-mp/v2/types.go. CLI types aliased in
+  tdns-mp/v2/cli/types.go. Callers updated to use local
+  names (no `tdns.` prefix).
+- **InitCombinerCrypto + StripKeyFileComments**: Copied
+  to tdns-mp/v2/combiner_crypto.go. Callers in main_init
+  and signer_transport updated to use local versions.
+- **GetProviderZoneRRtypes/AllowedLocalRRtypes**: Fixed
+  4 call sites in combiner_chunk.go to use local copies.
+- **KeyDB signer methods**: 7 methods converted to
+  standalone in tdns (keystore.go): GetDnssecKeysByState,
+  UpdateDnssecKeyState, GenerateAndStageKey,
+  GetKeyInventory, SetPropagationConfirmed,
+  TransitionMpdistToPublished, TransitionMpremoveToRemoved.
+  tdns-mp callers updated to `tdns.Method(kdb, ...)`.
+- **InitCombinerEditTables**: Converted to standalone
+  in tdns (db_schema_hsync.go). tdns-mp caller updated.
+
+### Still TODO
+
+- Copy KeyDB signer methods to tdns-mp as local functions
+  (currently calling `tdns.Method`; should be local like
+  combiner functions are).
+- CombinerOptAddSignature: copy to tdns-mp.
+
 ## Context
 
 After extracting the signer and combiner to tdns-mp, this

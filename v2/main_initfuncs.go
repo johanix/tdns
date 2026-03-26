@@ -528,7 +528,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			}
 			// Initialize only the combiner edit tables (not the full HSYNC schema)
 			if conf.Internal.KeyDB != nil {
-				if err := conf.Internal.KeyDB.InitCombinerEditTables(); err != nil {
+				if err := InitCombinerEditTables(conf.Internal.KeyDB); err != nil {
 					return fmt.Errorf("InitCombinerEditTables: %w", err)
 				}
 				lgConfig.Info("combiner edit tables initialized")

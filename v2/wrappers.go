@@ -18,21 +18,6 @@ func ZoneDataCombineWithLocalChanges(zd *ZoneData) (bool, error) {
 	return zd.CombineWithLocalChanges()
 }
 
-// ZoneDataRebuildCombinerData wraps RebuildCombinerData for API symmetry.
-func ZoneDataRebuildCombinerData(zd *ZoneData) {
-	RebuildCombinerData(zd)
-}
-
-// ZoneDataSnapshotUpstreamData wraps the unexported snapshotUpstreamData method.
-func ZoneDataSnapshotUpstreamData(zd *ZoneData) {
-	zd.snapshotUpstreamData()
-}
-
-// ZoneDataInjectSignatureTXT wraps the InjectSignatureTXT method.
-func ZoneDataInjectSignatureTXT(zd *ZoneData, conf *MultiProviderConf) bool {
-	return InjectSignatureTXT(zd, conf)
-}
-
 // ZoneDataWeAreASigner wraps the unexported weAreASigner method.
 func ZoneDataWeAreASigner(zd *ZoneData) (bool, error) {
 	return zd.weAreASigner()
