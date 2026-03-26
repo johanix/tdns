@@ -1,7 +1,81 @@
 # MP Extraction Audit: What tdns-mp Still References in tdns
 
 Date: 2026-03-26
-Status: Analysis complete
+Status: Analysis complete, reviewed and corrected
+
+## Revised Conclusions (after review)
+
+### Types: copy to tdns-mp now
+
+**Combiner API types** (no non-legacy consumers in tdns):
+- CombinerPost, CombinerResponse
+- CombinerEditPost, CombinerEditResponse
+- CombinerDebugPost, CombinerDebugResponse
+- CombinerDistribPost, CombinerDistribResponse
+
+**Combiner message types** (no non-legacy consumers):
+- CombinerSyncRequest, CombinerSyncResponse
+- RejectedItem, CombinerSyncRequestPlus
+- StoredPublishInstruction
+
+**Edit record types** (definition in structs.go, consumers
+are legacy-only):
+- PendingEditRecord, ApprovedEditRecord, RejectedEditRecord
+
+**Signer types** (copy to tdns-mp):
+- KeyInventoryItem, DnssecKeyWithTimestamps
+
+**CombinerState**: used by agent too (in-process updates
+via apihandler_transaction.go). Stays in tdns. Moves
+when agent is extracted.
+
+**RRsetString**: shared (apihandler_funcs.go, api_structs.go).
+Stays in tdns.
+
+**DistributionCache/Summary**: stays for now, moves when
+agent is extracted.
+
+### Functions: copy to tdns-mp now
+
+- InitCombinerCrypto (combiner-specific crypto)
+- StripKeyFileComments (trivial utility, used by signer)
+- Fix: use local GetProviderZoneRRtypes consistently
+
+### KeyDB signer methods: convert + copy
+
+These are called from tdns-mp signer code. Convert from
+receiver methods to standalone functions, copy to tdns-mp:
+- GetDnssecKeysByState, UpdateDnssecKeyState
+- GenerateAndStageKey, GetKeyInventory
+- SetPropagationConfirmed
+- TransitionMpdistToPublished, TransitionMpremoveToRemoved
+
+Also for combiner:
+- InitCombinerEditTables
+
+### Wrappers: cleanup
+
+**Delete** (not used by tdns-mp at all):
+- ZoneDataSnapshotUpstreamData
+- ZoneDataInjectSignatureTXT
+- ZoneDataRebuildCombinerData
+
+**Keep** (used by tdns-mp):
+- ZoneDataCombineWithLocalChanges (zone_utils.go caller)
+- ZoneDataWeAreASigner (signer key_state_worker.go)
+- ZoneDataMatchHsyncProvider (combiner combiner_chunk.go)
+- ZoneDataSynthesizeCdsRRs (combiner combiner_chunk.go)
+- OurHsyncIdentities (combiner combiner_chunk.go)
+- CombinerStateSetChunkHandler (both signer + combiner)
+
+### ZoneData methods: EnsureMP stays for now
+
+EnsureMP() has non-legacy callers (parseconfig.go,
+hsync_utils.go, main_initfuncs.go). Stays as method.
+Moves when agent extracted.
+
+CombineWithLocalChanges() has non-legacy caller in
+zone_utils.go. Stays as method. Wrapper used by tdns-mp.
 
 ## Context
 
