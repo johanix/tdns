@@ -40,7 +40,7 @@ func getClientKeyFromParent(parent string) string {
 	}
 }
 
-func getApiClient(parent string, dieOnError bool) (*tdns.ApiClient, error) {
+func GetApiClient(parent string, dieOnError bool) (*tdns.ApiClient, error) {
 	clientKey := getClientKeyFromParent(parent)
 	if clientKey == "" {
 		if dieOnError {
@@ -92,12 +92,12 @@ func getApiDetailsByClientKey(clientKey string) map[string]interface{} {
 	return nil
 }
 
-// getCommandContext takes the current command name and returns both the immediate parent
+// GetCommandContext takes the current command name and returns both the immediate parent
 // and the full command chain from os.Args
 //
 // This is a workaround, as cobra is not able to get the correct parent command name when
 // using the same command for different parents.
-func getCommandContext(cmdName string) (parent string, chain []string) {
+func GetCommandContext(cmdName string) (parent string, chain []string) {
 	args := os.Args[1:] // Skip program name
 	for i, arg := range args {
 		if arg == cmdName {
@@ -107,13 +107,13 @@ func getCommandContext(cmdName string) (parent string, chain []string) {
 				parent = "server" // Default to "server" for backward compatibility
 			}
 			if tdns.Globals.Debug {
-				// fmt.Printf("getCommandContext: parent: %s, chain: %v\n", parent, args[:i+1])
+				// fmt.Printf("GetCommandContext: parent: %s, chain: %v\n", parent, args[:i+1])
 			}
 			return parent, args[:i+1]
 		}
 	}
 	if tdns.Globals.Debug {
-		fmt.Printf("getCommandContext: default case, parent: %s, chain: %v\n", parent, args)
+		fmt.Printf("GetCommandContext: default case, parent: %s, chain: %v\n", parent, args)
 	}
 	return "server", nil // Default case if command not found (shouldn't happen)
 }
@@ -122,14 +122,14 @@ var PingCmd = &cobra.Command{
 	Use:   "ping",
 	Short: "Send an API ping request and present the response",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := getCommandContext("ping")
+		prefixcmd, _ := GetCommandContext("ping")
 		// fmt.Printf("Actual parent: %s, Full chain: %v\n", parent, chain)
 
 		if len(args) != 0 {
 			log.Fatal("ping must have no arguments")
 		}
 
-		api, err := getApiClient(prefixcmd, true)
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}

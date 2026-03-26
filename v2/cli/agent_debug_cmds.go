@@ -587,8 +587,8 @@ var DebugAgentQueueStatusCmd = &cobra.Command{
 		}
 
 		_, buf, err := func() (*tdns.AgentMgmtResponse, []byte, error) {
-			prefixcmd, _ := getCommandContext("debug")
-			api, err := getApiClient(prefixcmd, true)
+			prefixcmd, _ := GetCommandContext("debug")
+			api, err := GetApiClient(prefixcmd, true)
 			if err != nil {
 				log.Fatalf("Error getting API client: %v", err)
 			}
@@ -784,7 +784,7 @@ func truncatePubKey(keyrr string) string {
 }
 
 func SendAgentDebugCmd(req tdns.AgentMgmtPost, printJson bool) (*tdns.AgentMgmtResponse, error) {
-	api, err := getApiClient("agent", true)
+	api, err := GetApiClient("agent", true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}

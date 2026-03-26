@@ -126,7 +126,7 @@ func sortedKeys[T any](m map[string]T) []string {
 
 func SendCombinerDebugCmd(req tdns.CombinerDebugPost) (*tdns.CombinerDebugResponse, error) {
 	// Always use the combiner API client — this command only talks to the combiner.
-	api, err := getApiClient("combiner", true)
+	api, err := GetApiClient("combiner", true)
 	if err != nil {
 		return nil, fmt.Errorf("error getting API client: %w", err)
 	}

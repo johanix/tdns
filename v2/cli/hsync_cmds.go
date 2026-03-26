@@ -47,9 +47,9 @@ var hsyncZoneStatusCmd = &cobra.Command{
 	Short: "Show HSYNC status for a zone",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
-		parent, _ := getCommandContext("hsync")
+		parent, _ := GetCommandContext("hsync")
 
-		api, err := getApiClient(parent, true)
+		api, err := GetApiClient(parent, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -142,8 +142,8 @@ var hsyncLocateCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 
-		prefixcmd, _ := getCommandContext("hsync")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("hsync")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}

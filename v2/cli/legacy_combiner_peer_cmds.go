@@ -33,7 +33,7 @@ Example:
   tdns-cliv2 combiner peer list
   tdns-cliv2 combiner peer list --verbose`,
 	Run: func(cmd *cobra.Command, args []string) {
-		listDistribPeers(cmd, "combiner")
+		ListDistribPeers(cmd, "combiner")
 	},
 }
 

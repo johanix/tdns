@@ -111,8 +111,8 @@ func init() {
 }
 
 func Sig0TrustMgmt(subcommand string) error {
-	prefixcmd, _ := getCommandContext("truststore")
-	api, _ := getApiClient(prefixcmd, true)
+	prefixcmd, _ := GetCommandContext("truststore")
+	api, _ := GetApiClient(prefixcmd, true)
 
 	tr, err := SendTruststore(api, tdns.TruststorePost{
 		Command:    "child-sig0-mgmt",
