@@ -98,16 +98,15 @@ zone_utils.go. Stays as method. Wrapper used by tdns-mp.
   UpdateDnssecKeyState, GenerateAndStageKey,
   GetKeyInventory, SetPropagationConfirmed,
   TransitionMpdistToPublished, TransitionMpremoveToRemoved.
-  tdns-mp callers updated to `tdns.Method(kdb, ...)`.
+  Copied as local functions in tdns-mp/v2/signer_keydb.go.
+  Callers updated to use local versions.
 - **InitCombinerEditTables**: Converted to standalone
-  in tdns (db_schema_hsync.go). tdns-mp caller updated.
+  in tdns (db_schema_hsync.go). Copied as local function
+  in tdns-mp/v2/combiner_db_schema.go.
+- **CombinerOptAddSignature**: Aliased in types.go,
+  callers updated.
 
-### Still TODO
-
-- Copy KeyDB signer methods to tdns-mp as local functions
-  (currently calling `tdns.Method`; should be local like
-  combiner functions are).
-- CombinerOptAddSignature: copy to tdns-mp.
+### All immediate actions complete.
 
 ## Context
 
