@@ -164,3 +164,71 @@ The router registration API doesn't change.
 Not urgent. The current architecture works. Address when
 doing the agent extraction or during a dedicated cleanup
 pass.
+
+## 3. Separate Combiner Persistence from Editing
+
+### Problem
+
+The combiner currently conflates two distinct roles:
+
+1. **Persistence**: store agent contributions so they
+   survive restarts and can be recovered via resync.
+2. **Editing**: apply stored contributions to the live
+   zone (CombineWithLocalChanges).
+
+Today these are tightly coupled — data is rejected at
+receipt time based on editing policy (e.g. DNSKEYs from
+non-signers, mp-disallow-edits zones). This means:
+
+- Rejected data is lost (not persisted for recovery).
+- A zone transitioning from unsigned→signed has no
+  pre-existing DNSKEY contributions to apply.
+- An mp-disallow-edits combiner cannot serve as a
+  persistence backup for other combiners.
+- Empty REPLACE cleanup requires the combiner to accept
+  data it currently rejects.
+
+### Proposed Solution
+
+**Accept all contributions from authorized agents for
+persistence. Apply editing policy only when building
+the live zone.**
+
+Receipt path (always accept):
+- Agent sends contribution → combiner stores in
+  AgentContributions + persists to DB. No policy
+  checks beyond basic authorization.
+
+Edit path (apply policy):
+- `CombineWithLocalChanges` filters contributions
+  before applying to zone data:
+  - Skip DNSKEYs from non-signers
+  - Skip all edits for mp-disallow-edits zones
+  - Apply RRtype whitelist (AllowedLocalRRtypes)
+
+This separates "what we know" (persistence) from
+"what we do" (editing).
+
+### Benefits
+
+- Resync always succeeds (persistence is unconditional)
+- Empty REPLACE works naturally (clears persistent store)
+- Zone role changes take effect immediately (policy is
+  evaluated at edit time, not receipt time)
+- Combiner can serve as persistence backup regardless
+  of local signing role
+
+### Impact on Current Code
+
+- Remove `checkDNSKEYPolicy` from `combinerProcessOperations`
+  (receipt path)
+- Add equivalent filtering in `CombineWithLocalChanges`
+  (edit path)
+- Remove mp-disallow-edits rejection in receipt path
+- Keep authorization checks (only authorized agents may
+  contribute)
+
+### Priority
+
+Medium. Implement alongside the empty REPLACE work
+(item 1) since both affect the same code paths.
