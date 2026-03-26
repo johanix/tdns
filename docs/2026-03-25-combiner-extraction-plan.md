@@ -1,7 +1,7 @@
 # Combiner Extraction to tdns-mp
 
 Date: 2026-03-25
-Status: PLANNING
+Status: DONE (lab-tested 2026-03-26)
 Prerequisite: Signer extraction complete, 4g done
 
 ## Context
@@ -183,17 +183,22 @@ CombinerMsgHandler, CombinerSyncRouter).
 Sets `AppTypeMPCombiner`, calls `MainInit` →
 `StartMPCombiner`. Binary builds (26MB).
 
-### Step 7: Wire CLI commands
+### Step 7: Wire CLI commands — DONE
 
-Add combiner CLI commands to mpcli's `shared_cmds.go`.
-Copy combiner CLI files to tdns-mp/v2/cli/.
+4 combiner CLI files copied to tdns-mp/v2/cli/.
+mpcli shared_cmds.go updated to use mpcli.CombinerCmd
+(from tdns-mp) instead of cli.CombinerCmd (from tdns).
+Exported GetApiClient, GetCommandContext, ListDistribPeers
+directly in tdns/v2/cli (renamed from unexported).
+Original files renamed to legacy_*.go in tdns.
 
-### Step 8: Verify
+### Step 8: Verify — DONE
 
-- All tdns binaries build
+- All 6 tdns binaries build
 - mpcombiner + mpsigner + mpcli build
-- Lab test: combiner receives updates, processes them,
-  sends confirmations
+- Lab test: combiner receives CHUNK NOTIFYs, processes
+  operations, applies changes, sends confirmations.
+- Fix applied: combiner role doesn't require mp.Active.
 
 Two categories of receiver functions on tdns types:
 
