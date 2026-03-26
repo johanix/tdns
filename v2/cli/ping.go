@@ -21,6 +21,8 @@ func getClientKeyFromParent(parent string) string {
 	switch parent {
 	case "auth", "server":
 		return "tdns-auth"
+	case "signer":
+		return "tdns-mpsigner"
 	case "combiner":
 		return "tdns-combiner"
 	case "msa":
