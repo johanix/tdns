@@ -919,23 +919,17 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 			continue
 		}
 
-		// Defense-in-depth: reject DNSKEY operations for unsigned zones
+		// DNSKEY policy: only signers may contribute DNSKEYs
 		if rrtype == dns.TypeDNSKEY && !isProvider {
-			apex, err := zd.GetOwner(zd.ZoneName)
-			if err == nil && apex != nil {
-				if hpRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM); exists && len(hpRRset.RRs) > 0 {
-					if prr, ok := hpRRset.RRs[0].(*dns.PrivateRR); ok {
-						if hp, ok := prr.Data.(*core.HSYNCPARAM); ok && len(hp.GetSigners()) == 0 {
-							for _, rec := range op.Records {
-								rejectedItems = append(rejectedItems, RejectedItem{
-									Record: rec,
-									Reason: "DNSKEY not allowed in unsigned zone (no signers in HSYNCPARAM)",
-								})
-							}
-							continue
-						}
-					}
+			reject, reason := checkDNSKEYPolicy(zd, req.SenderID)
+			if reject {
+				for _, rec := range op.Records {
+					rejectedItems = append(rejectedItems, RejectedItem{
+						Record: rec,
+						Reason: reason,
+					})
 				}
+				continue
 			}
 		}
 
@@ -1645,6 +1639,60 @@ func determineSyncType(update *ZoneUpdate) string {
 }
 
 // --- Policy check functions ---
+
+// checkDNSKEYPolicy checks whether a sender is allowed to contribute DNSKEYs.
+// Returns (reject bool, reason string). Rejects if:
+// - the zone has no HSYNCPARAM (no signer information)
+// - the zone has no signers listed
+// - the sender is not listed as a signer
+func checkDNSKEYPolicy(zd *ZoneData, senderID string) (bool, string) {
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil || apex == nil {
+		return true, "DNSKEY rejected: cannot inspect zone apex"
+	}
+
+	hpRRset, hpExists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
+	if !hpExists || len(hpRRset.RRs) == 0 {
+		return true, "DNSKEY rejected: no HSYNCPARAM in zone (cannot determine signers)"
+	}
+	prr, ok := hpRRset.RRs[0].(*dns.PrivateRR)
+	if !ok {
+		return true, "DNSKEY rejected: HSYNCPARAM parse error"
+	}
+	hp, ok := prr.Data.(*core.HSYNCPARAM)
+	if !ok {
+		return true, "DNSKEY rejected: HSYNCPARAM type error"
+	}
+	signers := hp.GetSigners()
+	if len(signers) == 0 {
+		return true, "DNSKEY not allowed in unsigned zone (no signers in HSYNCPARAM)"
+	}
+
+	h3RRset, h3exists := apex.RRtypes.Get(core.TypeHSYNC3)
+	if !h3exists || len(h3RRset.RRs) == 0 {
+		return true, "DNSKEY rejected: no HSYNC3 records (cannot resolve sender to label)"
+	}
+	senderLabel := ""
+	for _, rr := range h3RRset.RRs {
+		if prr, ok := rr.(*dns.PrivateRR); ok {
+			if h3, ok := prr.Data.(*core.HSYNC3); ok {
+				if h3.Identity == senderID {
+					senderLabel = h3.Label
+					break
+				}
+			}
+		}
+	}
+	if senderLabel == "" {
+		return true, fmt.Sprintf("DNSKEY rejected: sender %s not found in zone HSYNC3 records", senderID)
+	}
+
+	if !hp.IsSignerLabel(senderLabel) {
+		return true, fmt.Sprintf("DNSKEY rejected: sender %s (label %q) is not a signer (signers: %v)", senderID, senderLabel, signers)
+	}
+
+	return false, ""
+}
 
 // checkContentPolicy applies content-based policy checks to a parsed RR.
 // Returns empty string if accepted, or a rejection reason.
