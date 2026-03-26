@@ -328,7 +328,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 		case "reapply":
 			zone := dns.Fqdn(cp.Zone)
-			msg, err := combinerReapplyContributions(zone, kdb)
+			msg, err := CombinerReapplyContributions(zone, kdb)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -385,7 +385,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 							if zd.MP != nil {
 								zd.MP.AgentContributions = nil
 							}
-							zd.rebuildCombinerData()
+							RebuildCombinerData(zd)
 							zd.mu.Unlock()
 						}
 					} else {
@@ -394,7 +394,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 							if zd.MP != nil {
 								zd.MP.AgentContributions = nil
 							}
-							zd.rebuildCombinerData()
+							RebuildCombinerData(zd)
 							zd.mu.Unlock()
 						}
 					}

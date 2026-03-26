@@ -9,6 +9,7 @@ package tdns
 
 import (
 	"github.com/johanix/tdns-transport/v2/transport"
+	"github.com/miekg/dns"
 )
 
 // ZoneDataCombineWithLocalChanges wraps the CombineWithLocalChanges method
@@ -17,9 +18,9 @@ func ZoneDataCombineWithLocalChanges(zd *ZoneData) (bool, error) {
 	return zd.CombineWithLocalChanges()
 }
 
-// ZoneDataRebuildCombinerData wraps the unexported rebuildCombinerData method.
+// ZoneDataRebuildCombinerData wraps RebuildCombinerData for API symmetry.
 func ZoneDataRebuildCombinerData(zd *ZoneData) {
-	zd.rebuildCombinerData()
+	RebuildCombinerData(zd)
 }
 
 // ZoneDataSnapshotUpstreamData wraps the unexported snapshotUpstreamData method.
@@ -44,4 +45,19 @@ func CombinerStateSetChunkHandler(cs *CombinerState, handler *transport.ChunkNot
 		return
 	}
 	cs.chunkHandler = handler
+}
+
+// OurHsyncIdentities wraps the unexported ourHsyncIdentities function.
+func OurHsyncIdentities() []string {
+	return ourHsyncIdentities()
+}
+
+// ZoneDataMatchHsyncProvider wraps the unexported matchHsyncProvider method.
+func ZoneDataMatchHsyncProvider(zd *ZoneData, ourIdentities []string) (bool, string, error) {
+	return zd.matchHsyncProvider(ourIdentities)
+}
+
+// ZoneDataSynthesizeCdsRRs wraps the unexported synthesizeCdsRRs method.
+func ZoneDataSynthesizeCdsRRs(zd *ZoneData) ([]dns.RR, error) {
+	return zd.synthesizeCdsRRs()
 }

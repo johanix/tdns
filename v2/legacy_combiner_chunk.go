@@ -123,8 +123,8 @@ func (cs *CombinerState) ProcessUpdate(req *CombinerSyncRequest, localAgents map
 
 // --- Standalone business logic functions ---
 
-// recordCombinerError records an error in the ErrorJournal if available.
-func recordCombinerError(journal *ErrorJournal, distID, sender, messageType, errMsg, qname string) {
+// RecordCombinerError records an error in the ErrorJournal if available.
+func RecordCombinerError(journal *ErrorJournal, distID, sender, messageType, errMsg, qname string) {
 	if journal == nil {
 		return
 	}
@@ -1206,10 +1206,10 @@ func isNoOpUpdate(zd *ZoneData, senderID string, records map[string][]string) bo
 	return true
 }
 
-// isNoOpOperations checks whether explicit Operations would cause any actual change.
+// IsNoOpOperations checks whether explicit Operations would cause any actual change.
 // For replace: compares the replacement set against the agent's current contributions.
 // For add: checks if all RRs already exist. For delete: checks if all RRs are already absent.
-func isNoOpOperations(zd *ZoneData, senderID string, ops []core.RROperation) bool {
+func IsNoOpOperations(zd *ZoneData, senderID string, ops []core.RROperation) bool {
 	zonename := zd.ZoneName
 	for _, op := range ops {
 		rrtype, ok := dns.StringToType[op.RRtype]
@@ -1292,7 +1292,7 @@ func isNoOpOperations(zd *ZoneData, senderID string, ops []core.RROperation) boo
 		}
 	}
 
-	lgCombiner.Info("isNoOpOperations: all operations are no-ops",
+	lgCombiner.Info("IsNoOpOperations: all operations are no-ops",
 		"sender", senderID, "zone", zd.ZoneName)
 	return true
 }

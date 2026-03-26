@@ -150,7 +150,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			// edit pending for operator review — unless it's a no-op.
 			if zd, exists := Zones.Get(dns.Fqdn(zone)); exists && zd.Options[OptMPManualApproval] {
 				// Check for no-op
-				noOp := isNoOpOperations(zd, senderID, msg.Operations)
+				noOp := IsNoOpOperations(zd, senderID, msg.Operations)
 				if noOp {
 					lgCombiner.Debug("no-op edit, auto-confirming", "zone", zone, "editID", editID, "sender", senderID)
 					// Clean up the pending edit (move to approved as no-op)
@@ -223,7 +223,7 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			}
 			if resp.Status == "error" {
 				lgCombiner.Error("update failed", "sender", senderID, "zone", zone, "distrib", msg.DistributionID, "reason", resp.Message)
-				recordCombinerError(errorJournal, msg.DistributionID, senderID, "update", resp.Message, "")
+				RecordCombinerError(errorJournal, msg.DistributionID, senderID, "update", resp.Message, "")
 			}
 
 			// Split results into approved and rejected record maps and persist.

@@ -238,7 +238,7 @@ func AddCombinerData(zd *ZoneData, senderID string, data map[string][]core.RRset
 	}
 
 	// Rebuild CombinerData by merging contributions from ALL agents
-	zd.rebuildCombinerData()
+	RebuildCombinerData(zd)
 
 	// Persist this agent's contributions to the snapshot table
 	if zd.MP.PersistContributions != nil {
@@ -267,7 +267,7 @@ func AddCombinerData(zd *ZoneData, senderID string, data map[string][]core.RRset
 // rebuildCombinerData merges all per-agent contributions into CombinerData.
 // For each owner/rrtype, RRs from all agents are combined into a single RRset,
 // with deduplication based on the string representation of each RR.
-func (zd *ZoneData) rebuildCombinerData() {
+func RebuildCombinerData(zd *ZoneData) {
 	if zd.MP == nil {
 		return
 	}
@@ -525,7 +525,7 @@ func RemoveCombinerDataNG(zd *ZoneData, senderID string, data map[string][]strin
 	}
 
 	// Rebuild merged CombinerData and apply to zone
-	zd.rebuildCombinerData()
+	RebuildCombinerData(zd)
 
 	// Persist this agent's contributions to the snapshot table
 	if zd.MP.PersistContributions != nil {
@@ -601,7 +601,7 @@ func RemoveCombinerDataByRRtype(zd *ZoneData, senderID string, owner string, rrt
 	}
 
 	// Rebuild merged CombinerData and apply to zone
-	zd.rebuildCombinerData()
+	RebuildCombinerData(zd)
 
 	// Persist this agent's contributions to the snapshot table
 	if zd.MP.PersistContributions != nil {
@@ -722,7 +722,7 @@ func replaceCombinerDataByRRtypeLocked(zd *ZoneData, senderID, owner string, rrt
 	if zd.MP.CombinerData == nil {
 		zd.MP.CombinerData = core.NewCmap[OwnerData]()
 	}
-	zd.rebuildCombinerData()
+	RebuildCombinerData(zd)
 
 	if zd.MP.PersistContributions != nil {
 		if err = zd.MP.PersistContributions(zd.ZoneName, senderID, zd.MP.AgentContributions[senderID]); err != nil {
@@ -897,10 +897,10 @@ func cleanupRemovedRRtype(zd *ZoneData, owner string, rrtype uint16) {
 	}
 }
 
-// combinerReapplyContributions reloads contributions from the database and
+// CombinerReapplyContributions reloads contributions from the database and
 // re-applies them to zone data. Works for both MP zones (contributions snapshot)
 // and provider zones (contributions + publish instructions).
-func combinerReapplyContributions(zone string, kdb *KeyDB) (string, error) {
+func CombinerReapplyContributions(zone string, kdb *KeyDB) (string, error) {
 	zd, ok := Zones.Get(zone)
 	if !ok {
 		return "", fmt.Errorf("zone %q not found", zone)
@@ -922,11 +922,11 @@ func combinerReapplyContributions(zone string, kdb *KeyDB) (string, error) {
 		for senderID, ownerMap := range zoneContribs {
 			zd.MP.AgentContributions[senderID] = ownerMap
 		}
-		zd.rebuildCombinerData()
+		RebuildCombinerData(zd)
 		parts = append(parts, fmt.Sprintf("loaded contributions from %d agent(s)", len(zoneContribs)))
 	} else {
 		zd.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
-		zd.rebuildCombinerData()
+		RebuildCombinerData(zd)
 		parts = append(parts, "no contributions in snapshot")
 	}
 

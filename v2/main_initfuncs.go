@@ -719,7 +719,7 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 						for senderID, ownerMap := range zoneContribs {
 							zd.MP.AgentContributions[senderID] = ownerMap
 						}
-						zd.rebuildCombinerData()
+						RebuildCombinerData(zd)
 						lgConfig.Info("hydrated AgentContributions from snapshot",
 							"zone", zd.ZoneName, "agents", len(zoneContribs))
 					}
