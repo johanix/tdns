@@ -135,52 +135,53 @@ AppTypeMPCombiner already defined in enums.go. Guards added:
 
 All 6 tdns binaries build clean.
 
-### Step 3: Copy combiner files to tdns-mp
+### Step 3: Copy combiner files to tdns-mp — DONE
 
-Copy ~12 files. Change `package tdns` → `package tdnsmp`.
-For each file:
-- Add `tdns "github.com/johanix/tdns/v2"` import
-- Prefix tdns types with `tdns.`
-- Standalone functions (from step 1) need `tdns.` prefix
+8 files copied with package conversion:
+- combiner_utils.go, combiner_chunk.go,
+  combiner_msg_handler.go (core logic)
+- db_combiner_contributions.go, db_combiner_edits.go,
+  db_combiner_publish_instructions.go (persistence)
+- apihandler_combiner.go,
+  apihandler_combiner_distrib.go (HTTP API)
 
-Special handling for combiner_chunk.go:
-- Do NOT copy CombinerState type (stays in tdns)
-- Do NOT copy RegisterSignerChunkHandler (already
-  in tdns-mp)
-- Copy RegisterCombinerChunkHandler and combiner-specific
-  functions
+All combiner functions call each other locally in
+tdns-mp. Only infrastructure types (ZoneData, KeyDB,
+Zones, Conf) use `tdns.` prefix. Type aliases for
+cross-package types (CombinerSyncRequest, etc.).
 
-### Step 4: Create StartMPCombiner()
+Original files renamed to `legacy_*.go` in tdns —
+remain for legacy tdns-combinerv2 binary.
 
-Same pattern as StartMPSigner:
-- `conf.Config.StartCombiner()` for DNS engines
-  (MP engines skipped for AppTypeMPCombiner)
-- Then start MP engines from tdns-mp:
-  - StartIncomingMessageRouter
-  - CombinerMsgHandler
-  - OnFirstLoad callbacks for contribution hydration
+Functions exported in tdns for tdns-mp access:
+IsNoOpOperations, RecordCombinerError,
+CombinerReapplyContributions, ListKnownPeers,
+RebuildCombinerData, InitCombinerCrypto.
+Wrappers added: OurHsyncIdentities,
+ZoneDataMatchHsyncProvider, ZoneDataSynthesizeCdsRRs.
 
-OnFirstLoad note: callbacks are closures registered
-during startup, executed by RefreshEngine. They capture
-tdns-mp functions in the closure, so cross-package
-access works naturally.
+### Step 4: Create StartMPCombiner() — DONE
 
-### Step 5: Create MainInit combiner path
+`start_combiner.go`: registers OnFirstLoad callbacks
+(PersistContributions, contribution hydration,
+signal key re-application), then calls
+`conf.Config.StartCombiner()` for DNS engines,
+then starts MP engines (IncomingMessageRouter,
+CombinerMsgHandler, CombinerSyncRouter).
 
-Add combiner init to tdns-mp's MainInit (alongside
-existing signer init):
-- InitCombinerEditTables (via `tdns.KeyDB` method)
-- Combiner crypto init
-- RegisterCombinerChunkHandler (from tdns-mp)
-- Create MPTransportBridge
-- Register agent peers
-- Wire combiner router
+### Step 5: Create MainInit combiner path — DONE
 
-### Step 6: Create mpcombiner binary
+`MainInit` restructured to branch on `mp.Role`:
+- `"signer"` → `initMPSigner` (existing code)
+- `"combiner"` → `initMPCombiner` (new): edit tables,
+  crypto, RegisterCombinerChunkHandler, TM, peers,
+  combiner router.
 
-`cmd/mpcombiner/main.go`:
-- Sets `AppTypeMPCombiner`
-- Calls `conf.MainInit()` → `conf.StartMPCombiner()`
+### Step 6: Create mpcombiner binary — DONE
+
+`cmd/mpcombiner/`: main.go, Makefile, go.mod.
+Sets `AppTypeMPCombiner`, calls `MainInit` →
+`StartMPCombiner`. Binary builds (26MB).
 
 ### Step 7: Wire CLI commands
 

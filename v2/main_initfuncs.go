@@ -545,7 +545,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			var secureWrapper *transport.SecurePayloadWrapper
 			if strings.TrimSpace(conf.MultiProvider.LongTermJosePrivKey) != "" {
 				var err error
-				secureWrapper, err = initCombinerCrypto(conf)
+				secureWrapper, err = InitCombinerCrypto(conf)
 				if err != nil {
 					return fmt.Errorf("failed to initialize combiner crypto: %w", err)
 				}
@@ -1247,7 +1247,7 @@ func initPayloadCrypto(conf *Config) (*transport.PayloadCrypto, error) {
 
 // initCombinerCrypto initializes crypto for the combiner to decrypt agent payloads.
 // Returns a SecurePayloadWrapper configured with the combiner's private key and agent's public key.
-func initCombinerCrypto(conf *Config) (*transport.SecurePayloadWrapper, error) {
+func InitCombinerCrypto(conf *Config) (*transport.SecurePayloadWrapper, error) {
 	// Use the JOSE backend
 	backend := jose.NewBackend()
 	// Load combiner's private key (trim path so trailing whitespace/newlines from config do not cause "file not found")
