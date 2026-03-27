@@ -344,7 +344,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			}
 			clearAll := len(tables) == 0
 
-			zone := cp.Zone
+			zone := dns.Fqdn(cp.Zone)
 			var parts []string
 			var errs []error
 

@@ -9,7 +9,9 @@
 package tdns
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -87,7 +89,10 @@ func GetPublishInstruction(kdb *KeyDB, zone, senderID string) (*StoredPublishIns
 		FROM CombinerPublishInstructions WHERE zone = ? AND sender_id = ?`,
 		zone, senderID).Scan(&keyJSON, &cdsJSON, &locJSON, &nsJSON, &updatedAt)
 	if err != nil {
-		return nil, nil // not found is not an error
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("GetPublishInstruction: query: %w", err)
 	}
 
 	s := &StoredPublishInstruction{

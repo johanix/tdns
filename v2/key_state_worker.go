@@ -250,10 +250,18 @@ func maintainStandbyKeysForType(kdb *KeyDB, zoneName string, alg uint8, keytype 
 	}
 
 	// Check pipeline: don't generate if published or mpdist keys exist for this type
-	publishedKeys, _ := GetDnssecKeysByState(kdb, zoneName, DnskeyStatePublished)
+	publishedKeys, err := GetDnssecKeysByState(kdb, zoneName, DnskeyStatePublished)
+	if err != nil {
+		lgSigner.Error("KeyStateWorker: error getting published keys", "zone", zoneName, "keytype", keytype, "err", err)
+		return
+	}
 	publishedCount := countKeysByFlags(publishedKeys, expectedFlags)
 
-	mpdistKeys, _ := GetDnssecKeysByState(kdb, zoneName, DnskeyStateMpdist)
+	mpdistKeys, err := GetDnssecKeysByState(kdb, zoneName, DnskeyStateMpdist)
+	if err != nil {
+		lgSigner.Error("KeyStateWorker: error getting mpdist keys", "zone", zoneName, "keytype", keytype, "err", err)
+		return
+	}
 	mpdistCount := countKeysByFlags(mpdistKeys, expectedFlags)
 
 	if publishedCount > 0 || mpdistCount > 0 {

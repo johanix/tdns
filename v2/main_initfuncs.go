@@ -387,6 +387,8 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 				return conf.MultiProvider.Dns.MessageRetention.GetRetentionForMessageType(operation)
 			},
 			GetImrEngine:   func() *Imr { return conf.Internal.ImrEngine },
+			GetZone:        Zones.Get,
+			GetZoneNames:   Zones.Keys,
 			ClientCertFile: conf.MultiProvider.Api.CertFile,
 			ClientKeyFile:  conf.MultiProvider.Api.KeyFile,
 		})
@@ -1309,9 +1311,10 @@ func InitCombinerCrypto(conf *Config) (*transport.SecurePayloadWrapper, error) {
 			return nil, fmt.Errorf("failed to parse agent public key for %s: %w", agent.Identity, err)
 		}
 		// Register agent with its identity as the peer key ID
-		pc.AddPeerKey(agent.Identity, agentVerifyKey)
-		pc.AddPeerVerificationKey(agent.Identity, agentVerifyKey)
-		lgConfig.Info("loaded public key for agent", "agent", agent.Identity, "path", agentPubKeyPath)
+		peerID := dns.Fqdn(strings.TrimSpace(agent.Identity))
+		pc.AddPeerKey(peerID, agentVerifyKey)
+		pc.AddPeerVerificationKey(peerID, agentVerifyKey)
+		lgConfig.Info("loaded public key for agent", "agent", peerID, "path", agentPubKeyPath)
 	}
 	return transport.NewSecurePayloadWrapper(pc), nil
 }

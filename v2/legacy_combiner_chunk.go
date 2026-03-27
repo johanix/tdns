@@ -379,6 +379,10 @@ func CombinerProcessUpdate(req *CombinerSyncRequest, protectedNamespaces []strin
 // STATUS-UPDATE notification to the local agent that delivered the update.
 // Runs as a goroutine — fire-and-forget from the combiner's perspective.
 func combinerNotifyDelegationChange(tm *MPTransportBridge, senderID, zonename string, zd *ZoneData, nsChanged, kskChanged bool) {
+	if tm == nil {
+		lgCombiner.Warn("combinerNotifyDelegationChange: no transport, skipping", "zone", zonename)
+		return
+	}
 	// Determine if the zone is signed by checking HSYNCPARAM signers
 	zoneSigned := false
 	apex, err := zd.GetOwner(zd.ZoneName)
@@ -1053,7 +1057,8 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 		case "add":
 			addRecords := make(map[string][]string)
 			for _, rr := range parsedRRs {
-				addRecords[zonename] = append(addRecords[zonename], rr.String())
+				owner := rr.Header().Name
+				addRecords[owner] = append(addRecords[owner], rr.String())
 			}
 			if len(addRecords) > 0 {
 				addChanged, err := AddCombinerDataNG(zd, req.SenderID, addRecords)
@@ -1076,7 +1081,8 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 		case "delete":
 			delRecords := make(map[string][]string)
 			for _, rr := range parsedRRs {
-				delRecords[zonename] = append(delRecords[zonename], rr.String())
+				owner := rr.Header().Name
+				delRecords[owner] = append(delRecords[owner], rr.String())
 			}
 			if len(delRecords) > 0 {
 				removed, err := RemoveCombinerDataNG(zd, req.SenderID, delRecords)

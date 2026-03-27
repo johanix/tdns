@@ -759,7 +759,7 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 	return &dk, err
 }
 
-func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, newstate string) error {
+func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, newstate string) (err error) {
 	const getDnskeySql = `
     SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
 	const updateDnskeyStateSql = `
@@ -774,7 +774,9 @@ func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, news
 		if err != nil {
 			tx.Rollback()
 		} else {
-			tx.Commit()
+			if commitErr := tx.Commit(); commitErr != nil {
+				err = fmt.Errorf("commit failed: %w", commitErr)
+			}
 		}
 	}()
 
@@ -1097,7 +1099,7 @@ func GetDnssecKeysByState(kdb *KeyDB, zone string, state string) ([]DnssecKeyWit
 // appropriate lifecycle timestamp. When transitioning to "published", sets
 // published_at. When transitioning to "retired", sets retired_at.
 // Invalidates the cache for both old and new states.
-func UpdateDnssecKeyState(kdb *KeyDB, zonename string, keyid uint16, newstate string) error {
+func UpdateDnssecKeyState(kdb *KeyDB, zonename string, keyid uint16, newstate string) (err error) {
 	tx, err := kdb.Begin("UpdateDnssecKeyState")
 	if err != nil {
 		return fmt.Errorf("error beginning transaction: %v", err)
@@ -1107,7 +1109,9 @@ func UpdateDnssecKeyState(kdb *KeyDB, zonename string, keyid uint16, newstate st
 		if err != nil {
 			tx.Rollback()
 		} else {
-			tx.Commit()
+			if commitErr := tx.Commit(); commitErr != nil {
+				err = fmt.Errorf("commit failed: %w", commitErr)
+			}
 		}
 	}()
 
