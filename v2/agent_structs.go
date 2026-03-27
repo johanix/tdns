@@ -67,7 +67,7 @@ var AgentMsgToString = core.AgentMsgToString
 
 type Agent struct {
 	Identity      AgentId
-	mu            sync.RWMutex
+	Mu            sync.RWMutex
 	InitialZone   ZoneName
 	ApiDetails    *AgentDetails
 	DnsDetails    *AgentDetails

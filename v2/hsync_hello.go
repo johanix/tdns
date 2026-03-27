@@ -139,8 +139,8 @@ func (ar *AgentRegistry) HelloRetrierNG(ctx context.Context, agent *Agent) {
 
 // agentNeedsHello returns true if any transport is still in KNOWN state.
 func (ar *AgentRegistry) agentNeedsHello(agent *Agent) bool {
-	agent.mu.RLock()
-	defer agent.mu.RUnlock()
+	agent.Mu.RLock()
+	defer agent.Mu.RUnlock()
 	apiNeeds := agent.ApiMethod && agent.ApiDetails.State == AgentStateKnown
 	dnsNeeds := agent.DnsMethod && agent.DnsDetails.State == AgentStateKnown
 	return apiNeeds || dnsNeeds
@@ -169,8 +169,8 @@ func (ar *AgentRegistry) FastBeatAttempts(ctx context.Context, agent *Agent) {
 
 	// Check if any transport is INTRODUCED (needs beat to reach OPERATIONAL)
 	needsBeat := func() bool {
-		agent.mu.RLock()
-		defer agent.mu.RUnlock()
+		agent.Mu.RLock()
+		defer agent.Mu.RUnlock()
 		apiIntro := agent.ApiMethod && agent.ApiDetails.State == AgentStateIntroduced
 		dnsIntro := agent.DnsMethod && agent.DnsDetails.State == AgentStateIntroduced
 		return apiIntro || dnsIntro
@@ -201,14 +201,14 @@ func (ar *AgentRegistry) FastBeatAttempts(ctx context.Context, agent *Agent) {
 
 		if ar.MPTransport != nil {
 			beatCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			agent.mu.RLock()
+			agent.Mu.RLock()
 			sequence := uint64(agent.ApiDetails.SentBeats)
-			agent.mu.RUnlock()
+			agent.Mu.RUnlock()
 			beatResp, err := ar.MPTransport.SendBeatWithFallback(beatCtx, agent, sequence)
 			cancel()
 
 			if err == nil && beatResp != nil && beatResp.Ack {
-				agent.mu.Lock()
+				agent.Mu.Lock()
 				agent.ApiDetails.State = AgentStateOperational
 				agent.ApiDetails.LatestSBeat = time.Now()
 				agent.ApiDetails.SentBeats++
@@ -235,7 +235,7 @@ func (ar *AgentRegistry) FastBeatAttempts(ctx context.Context, agent *Agent) {
 					agent.DeferredTasks = remaining
 				}
 				ar.S.Set(agent.Identity, agent)
-				agent.mu.Unlock()
+				agent.Mu.Unlock()
 				lgAgent.Info("agent reached OPERATIONAL", "agent", agent.Identity)
 				return
 			}
@@ -277,7 +277,7 @@ func (ar *AgentRegistry) SingleHello(agent *Agent, zone ZoneName) {
 		YourIdentity: agent.Identity,
 		Zone:         zone,
 	})
-	agent.mu.Lock()
+	agent.Mu.Lock()
 	switch {
 	case err != nil:
 		lgAgent.Error("error sending HELLO", "agent", agent.Identity, "err", err)
@@ -299,7 +299,7 @@ func (ar *AgentRegistry) SingleHello(agent *Agent, zone ZoneName) {
 		agent.ApiDetails.LatestError = ""
 	}
 	ar.S.Set(agent.Identity, agent)
-	agent.mu.Unlock()
+	agent.Mu.Unlock()
 }
 
 func (ar *AgentRegistry) EvaluateHello(ahp *AgentHelloPost) (bool, string, error) {

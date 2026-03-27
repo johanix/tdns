@@ -977,7 +977,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				return
 			}
 
-			agent.mu.Lock()
+			agent.Mu.Lock()
 			if agent.ApiDetails != nil {
 				agent.ApiDetails.State = AgentStateNeeded
 				agent.ApiDetails.DiscoveryFailures = 0
@@ -989,7 +989,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				agent.DnsDetails.LatestError = ""
 			}
 			agent.State = AgentStateNeeded
-			agent.mu.Unlock()
+			agent.Mu.Unlock()
 
 			// Trigger immediate re-discovery
 			if imr != nil {

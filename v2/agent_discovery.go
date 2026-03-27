@@ -43,14 +43,14 @@ type AgentDiscoveryResult struct {
 func DiscoverAgentAPI(ctx context.Context, imr *Imr, identity string, result *AgentDiscoveryResult) {
 	identity = dns.Fqdn(identity)
 
-	apiUri, apiHost, apiPort, err := imr.lookupAgentAPIEndpoint(ctx, identity)
+	apiUri, apiHost, apiPort, err := imr.LookupAgentAPIEndpoint(ctx, identity)
 	if err == nil {
 		result.APIUri = apiUri
 		result.Port = apiPort
 
 		// Look up SVCB at api.<identity> to get IP addresses
 		apiServiceName := "api." + identity
-		addresses, err := imr.lookupServiceAddresses(ctx, apiServiceName)
+		addresses, err := imr.LookupServiceAddresses(ctx, apiServiceName)
 		if err == nil {
 			result.APIAddresses = addresses
 		} else {
@@ -59,7 +59,7 @@ func DiscoverAgentAPI(ctx context.Context, imr *Imr, identity string, result *Ag
 		}
 
 		// Look up TLSA at _<port>._tcp.api.<identity> for TLS verification
-		tlsaRR, err := imr.lookupAgentTLSA(ctx, apiServiceName, apiPort)
+		tlsaRR, err := imr.LookupAgentTLSA(ctx, apiServiceName, apiPort)
 		if err == nil {
 			result.TLSA = tlsaRR
 		} else {
@@ -82,13 +82,13 @@ func DiscoverAgentAPI(ctx context.Context, imr *Imr, identity string, result *Ag
 func DiscoverAgentDNS(ctx context.Context, imr *Imr, identity string, result *AgentDiscoveryResult) {
 	identity = dns.Fqdn(identity)
 
-	dnsUri, dnsHost, dnsPort, err := imr.lookupAgentDNSEndpoint(ctx, identity)
+	dnsUri, dnsHost, dnsPort, err := imr.LookupAgentDNSEndpoint(ctx, identity)
 	if err == nil {
 		result.DNSUri = dnsUri
 
 		// Look up SVCB at dns.<identity> to get IP addresses
 		dnsServiceName := "dns." + identity
-		addresses, err := imr.lookupServiceAddresses(ctx, dnsServiceName)
+		addresses, err := imr.LookupServiceAddresses(ctx, dnsServiceName)
 		if err == nil {
 			result.DNSAddresses = addresses
 		} else {
@@ -97,7 +97,7 @@ func DiscoverAgentDNS(ctx context.Context, imr *Imr, identity string, result *Ag
 		}
 
 		// Look up JWK at dns.<identity> for JOSE/HPKE public key
-		jwkData, publicKey, algorithm, err := imr.lookupAgentJWK(ctx, identity)
+		jwkData, publicKey, algorithm, err := imr.LookupAgentJWK(ctx, identity)
 		if err == nil {
 			result.JWKData = jwkData
 			result.PublicKey = publicKey
@@ -107,7 +107,7 @@ func DiscoverAgentDNS(ctx context.Context, imr *Imr, identity string, result *Ag
 			lgAgent.Warn("JWK lookup failed", "identity", identity, "err", err)
 
 			// Fallback to KEY record for legacy support
-			keyRR, err := imr.lookupAgentKEY(ctx, identity)
+			keyRR, err := imr.LookupAgentKEY(ctx, identity)
 			if err == nil {
 				result.LegacyKeyRR = keyRR
 				lgAgent.Info("using legacy KEY record", "identity", identity, "algorithm", keyRR.Algorithm)

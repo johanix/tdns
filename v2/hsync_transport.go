@@ -75,6 +75,12 @@ type MPTransportBridge struct {
 	// Uses a closure because ImrEngine starts asynchronously after TM creation.
 	getImrEngine func() *Imr
 
+	// getZone returns zone data by name. Injected to avoid coupling to global Zones.
+	// Used by HSYNC3-based authorization in agent_authorization.go.
+	getZone func(name string) (*ZoneData, bool)
+	// getZoneNames returns all known zone names. Same purpose as getZone.
+	getZoneNames func() []string
+
 	keystateRfiMu    sync.Mutex
 	keystateRfiState map[string]chan *KeystateInventoryMsg // key: zone name
 }
@@ -167,6 +173,12 @@ type MPTransportBridgeConfig struct {
 	// Only the agent needs this; combiner/signer/external apps pass nil.
 	GetImrEngine func() *Imr
 
+	// GetZone returns zone data by name. Injected to decouple from global Zones.
+	// Only needed by roles that use HSYNC3-based authorization (agent).
+	GetZone func(name string) (*ZoneData, bool)
+	// GetZoneNames returns all known zone names.
+	GetZoneNames func() []string
+
 	// ClientCertFile and ClientKeyFile are the TLS client certificate presented when
 	// connecting to peers' sync API servers. Required when peers enforce mutual TLS
 	// (e.g. combiner/signer sync routers verify client cert against agent's TLSA record).
@@ -213,6 +225,8 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 		authorizedPeers:           cfg.AuthorizedPeers,
 		messageRetention:          cfg.MessageRetention,
 		getImrEngine:              cfg.GetImrEngine,
+		getZone:                   cfg.GetZone,
+		getZoneNames:              cfg.GetZoneNames,
 	}
 
 	// Always create API client transport — it's a pure HTTP client with no server-side
@@ -1411,7 +1425,7 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 	// Skip if already INTRODUCED or OPERATIONAL — no point sending Hello to an already-established transport.
 	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" && agent.ApiDetails.State == AgentStateKnown {
 		apiResp, apiErr = tm.APITransport.Hello(ctx, peer, req)
-		agent.mu.Lock()
+		agent.Mu.Lock()
 		if apiErr != nil {
 			lgConnRetry.Warn("API Hello failed", "peer", peer.ID, "err", apiErr)
 			agent.ApiDetails.LatestError = apiErr.Error()
@@ -1432,14 +1446,14 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 			agent.ApiDetails.LastContactTime = time.Now()
 			agent.ApiDetails.LatestError = ""
 		}
-		agent.mu.Unlock()
+		agent.Mu.Unlock()
 	}
 
 	// Try DNS transport if supported and actually needs Hello (state == KNOWN).
 	// Skip if already INTRODUCED or OPERATIONAL — no point sending Hello to an already-established transport.
 	if tm.DNSTransport != nil && agent.DnsMethod && tm.isTransportSupported("dns") && agent.DnsDetails.State == AgentStateKnown {
 		dnsResp, dnsErr = tm.DNSTransport.Hello(ctx, peer, req)
-		agent.mu.Lock()
+		agent.Mu.Lock()
 		if dnsErr != nil {
 			lgConnRetry.Warn("DNS Hello failed", "peer", peer.ID, "err", dnsErr)
 			agent.DnsDetails.LatestError = dnsErr.Error()
@@ -1460,7 +1474,7 @@ func (tm *MPTransportBridge) SendHelloWithFallback(ctx context.Context, agent *A
 			agent.DnsDetails.LastContactTime = time.Now()
 			agent.DnsDetails.LatestError = ""
 		}
-		agent.mu.Unlock()
+		agent.Mu.Unlock()
 	}
 
 	// Return success if ANY transport succeeded this call.
@@ -1539,7 +1553,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 	if tm.APITransport != nil && tm.isTransportSupported("api") && agent.ApiMethod && agent.ApiDetails != nil && agent.ApiDetails.BaseUri != "" {
 		if agent.ApiDetails.State == AgentStateOperational || agent.ApiDetails.State == AgentStateIntroduced || agent.ApiDetails.State == AgentStateLegacy {
 			apiResp, apiErr = tm.APITransport.Beat(ctx, peer, req)
-			agent.mu.Lock()
+			agent.Mu.Lock()
 			if apiErr != nil {
 				lgConnRetry.Debug("API Beat failed", "peer", peer.ID, "err", apiErr)
 				agent.ApiDetails.LatestError = apiErr.Error()
@@ -1556,7 +1570,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 				agent.ApiDetails.ReceivedBeats++
 				agent.ApiDetails.LatestError = ""
 			}
-			agent.mu.Unlock()
+			agent.Mu.Unlock()
 		}
 	}
 
@@ -1564,7 +1578,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 	if tm.DNSTransport != nil && agent.DnsMethod && tm.isTransportSupported("dns") {
 		if agent.DnsDetails.State == AgentStateOperational || agent.DnsDetails.State == AgentStateIntroduced || agent.DnsDetails.State == AgentStateLegacy {
 			dnsResp, dnsErr = tm.DNSTransport.Beat(ctx, peer, req)
-			agent.mu.Lock()
+			agent.Mu.Lock()
 			if dnsErr != nil {
 				lgConnRetry.Debug("DNS Beat failed", "peer", peer.ID, "err", dnsErr)
 				agent.DnsDetails.LatestError = dnsErr.Error()
@@ -1583,7 +1597,7 @@ func (tm *MPTransportBridge) SendBeatWithFallback(ctx context.Context, agent *Ag
 				agent.DnsDetails.ReceivedBeats++
 				agent.DnsDetails.LatestError = ""
 			}
-			agent.mu.Unlock()
+			agent.Mu.Unlock()
 		}
 	}
 

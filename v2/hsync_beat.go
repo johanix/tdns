@@ -13,11 +13,11 @@ func (ar *AgentRegistry) HeartbeatHandler(report *AgentMsgReport) {
 	case AgentMsgBeat:
 		lgAgent.Debug("received BEAT", "from", report.Identity)
 		if agent, exists := ar.S.Get(report.Identity); exists {
-			agent.mu.Lock()
+			agent.Mu.Lock()
 			agent.ApiDetails.LatestRBeat = time.Now()
 			agent.ApiDetails.ReceivedBeats++
 			agent.ApiDetails.BeatInterval = report.BeatInterval
-			agent.mu.Unlock()
+			agent.Mu.Unlock()
 		}
 
 		// Process gossip from API beat (DNS beats process gossip in routeBeatMessage)
@@ -85,11 +85,11 @@ func (ar *AgentRegistry) SendHeartbeats() {
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 				sequence := uint64(0)
-				agent.mu.RLock()
+				agent.Mu.RLock()
 				if agent.ApiDetails.SentBeats > 0 {
 					sequence = uint64(agent.ApiDetails.SentBeats)
 				}
-				agent.mu.RUnlock()
+				agent.Mu.RUnlock()
 				beatResp, beatErr := ar.MPTransport.SendBeatWithFallback(ctx, agent, sequence)
 				err = beatErr
 				if beatResp != nil {
@@ -110,7 +110,7 @@ func (ar *AgentRegistry) SendHeartbeats() {
 				}
 			}
 
-			agent.mu.Lock()
+			agent.Mu.Lock()
 			switch {
 			case err != nil:
 				lgAgent.Warn("error sending heartbeat", "agent", agent.Identity, "err", err)
@@ -151,7 +151,7 @@ func (ar *AgentRegistry) SendHeartbeats() {
 			}
 			agent.CheckState(ar.LocalAgent.Remote.BeatInterval)
 			ar.S.Set(agent.Identity, agent)
-			agent.mu.Unlock()
+			agent.Mu.Unlock()
 		}(a)
 	}
 }
