@@ -325,7 +325,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 
 		case "peer-list":
 			// List all known peers with working keys
-			peers := listKnownPeers(conf)
+			peers := ListKnownPeers(conf)
 			resp.Msg = fmt.Sprintf("Found %d peer(s) with working keys", len(peers))
 
 			// Convert to generic map for JSON serialization
@@ -630,8 +630,8 @@ func StartDistributionGC(cache *DistributionCache, interval time.Duration, stopC
 	}()
 }
 
-// listKnownPeers returns all peers that have working keys established
-func listKnownPeers(conf *Config) []PeerInfo {
+// ListKnownPeers returns all peers that have working keys established
+func ListKnownPeers(conf *Config) []PeerInfo {
 	var peers []PeerInfo
 
 	// For combiners: list all configured agents

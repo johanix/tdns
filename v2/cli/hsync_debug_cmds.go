@@ -147,8 +147,8 @@ var hsyncPeerStatusCmd = &cobra.Command{
 	Long: `Display the status of HSYNC peers stored in the database.
 Shows peer state, transport details, and heartbeat statistics.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		parent, _ := getCommandContext("hsync")
-		api, err := getApiClient(parent, true)
+		parent, _ := GetCommandContext("hsync")
+		api, err := GetApiClient(parent, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -235,8 +235,8 @@ var hsyncSyncOpsCmd = &cobra.Command{
 	Long: `Display sync operations tracked in the database.
 Shows operation details, status, and timestamps.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		parent, _ := getCommandContext("hsync")
-		api, err := getApiClient(parent, true)
+		parent, _ := GetCommandContext("hsync")
+		api, err := GetApiClient(parent, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -298,8 +298,8 @@ var hsyncConfirmQueryCmd = &cobra.Command{
 	Short: "Query HSYNC confirmations",
 	Long:  `Display confirmation records for sync operations.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		parent, _ := getCommandContext("hsync")
-		api, err := getApiClient(parent, true)
+		parent, _ := GetCommandContext("hsync")
+		api, err := GetApiClient(parent, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -360,8 +360,8 @@ var hsyncTransportEventsCmd = &cobra.Command{
 	Short: "Show HSYNC transport events",
 	Long:  `Display recent transport events for debugging connectivity issues.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		parent, _ := getCommandContext("hsync")
-		api, err := getApiClient(parent, true)
+		parent, _ := GetCommandContext("hsync")
+		api, err := GetApiClient(parent, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -425,8 +425,8 @@ var hsyncMetricsCmd = &cobra.Command{
 	Short: "Show HSYNC operational metrics",
 	Long:  `Display aggregated operational metrics for HSYNC operations.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		parent, _ := getCommandContext("hsync")
-		api, err := getApiClient(parent, true)
+		parent, _ := GetCommandContext("hsync")
+		api, err := GetApiClient(parent, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -494,8 +494,8 @@ This is useful for testing DNS transport without full sync operations.`,
 			log.Fatalf("Error: --peer is required")
 		}
 
-		parent, _ := getCommandContext("debug")
-		api, err := getApiClient(parent, true)
+		parent, _ := GetCommandContext("debug")
+		api, err := GetApiClient(parent, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -531,8 +531,8 @@ var DebugHsyncChunkRecvCmd = &cobra.Command{
 	Short: "Show recently received CHUNKs",
 	Long:  `Display CHUNK messages received via DNS transport.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		parent, _ := getCommandContext("debug")
-		api, err := getApiClient(parent, true)
+		parent, _ := GetCommandContext("debug")
+		api, err := GetApiClient(parent, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -566,8 +566,8 @@ var DebugHsyncInitDbCmd = &cobra.Command{
 	Short: "Initialize HSYNC database tables",
 	Long:  `Create or verify the HSYNC database tables exist.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		parent, _ := getCommandContext("debug")
-		api, err := getApiClient(parent, true)
+		parent, _ := GetCommandContext("debug")
+		api, err := GetApiClient(parent, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}

@@ -528,7 +528,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			}
 			// Initialize only the combiner edit tables (not the full HSYNC schema)
 			if conf.Internal.KeyDB != nil {
-				if err := conf.Internal.KeyDB.InitCombinerEditTables(); err != nil {
+				if err := InitCombinerEditTables(conf.Internal.KeyDB); err != nil {
 					return fmt.Errorf("InitCombinerEditTables: %w", err)
 				}
 				lgConfig.Info("combiner edit tables initialized")
@@ -545,7 +545,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			var secureWrapper *transport.SecurePayloadWrapper
 			if strings.TrimSpace(conf.MultiProvider.LongTermJosePrivKey) != "" {
 				var err error
-				secureWrapper, err = initCombinerCrypto(conf)
+				secureWrapper, err = InitCombinerCrypto(conf)
 				if err != nil {
 					return fmt.Errorf("failed to initialize combiner crypto: %w", err)
 				}
@@ -701,12 +701,15 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 
 				// Set PersistContributions callback
 				if zd.MP.PersistContributions == nil && zd.KeyDB != nil {
-					zd.MP.PersistContributions = zd.KeyDB.SaveContributions
+					kdb := zd.KeyDB
+					zd.MP.PersistContributions = func(zone, senderID string, contribs map[string]map[uint16]core.RRset) error {
+						return SaveContributions(kdb, zone, senderID, contribs)
+					}
 					lgConfig.Info("PersistContributions callback set", "zone", zd.ZoneName)
 				}
 				// Hydrate AgentContributions from persistent storage
 				if zd.MP.AgentContributions == nil && zd.KeyDB != nil {
-					allContribs, err := zd.KeyDB.LoadAllContributions()
+					allContribs, err := LoadAllContributions(zd.KeyDB)
 					if err != nil {
 						lgConfig.Error("failed to load contributions snapshot", "zone", zd.ZoneName, "err", err)
 						return
@@ -716,7 +719,7 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 						for senderID, ownerMap := range zoneContribs {
 							zd.MP.AgentContributions[senderID] = ownerMap
 						}
-						zd.rebuildCombinerData()
+						RebuildCombinerData(zd)
 						lgConfig.Info("hydrated AgentContributions from snapshot",
 							"zone", zd.ZoneName, "agents", len(zoneContribs))
 					}
@@ -742,24 +745,27 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 	StartEngine(&Globals.App, "APIdispatcher", func() error { return APIdispatcher(conf, apirouter, conf.Internal.APIStopCh) })
 	StartEngineNoError(&Globals.App, "RefreshEngine", func() { RefreshEngine(ctx, conf) })
 	StartEngine(&Globals.App, "Notifier", func() error { return Notifier(ctx, conf.Internal.NotifyQ) })
-	// Start incoming message router for beat/hello processing
-	if conf.Internal.TransportManager != nil {
-		conf.Internal.MPTransport.StartIncomingMessageRouter(ctx)
-		lgConfig.Info("combiner incoming message router started")
+	// MP combiner engines — skipped for AppTypeMPCombiner (tdns-mp provides its own)
+	if Globals.App.Type != AppTypeMPCombiner {
+		// Start incoming message router for beat/hello processing
+		if conf.Internal.TransportManager != nil {
+			conf.Internal.MPTransport.StartIncomingMessageRouter(ctx)
+			lgConfig.Info("combiner incoming message router started")
+		}
+		// Start combiner message handler for beat/hello/sync consumption from MsgQs
+		var protectedNS []string
+		var errJournal *ErrorJournal
+		if conf.Internal.CombinerState != nil {
+			protectedNS = conf.Internal.CombinerState.ProtectedNamespaces
+			errJournal = conf.Internal.CombinerState.ErrorJournal
+		}
+		StartEngineNoError(&Globals.App, "CombinerMsgHandler",
+			func() { CombinerMsgHandler(ctx, conf, conf.Internal.MsgQs, protectedNS, errJournal) })
 	}
-	// Start combiner message handler for beat/hello/sync consumption from MsgQs
-	var protectedNS []string
-	var errJournal *ErrorJournal
-	if conf.Internal.CombinerState != nil {
-		protectedNS = conf.Internal.CombinerState.ProtectedNamespaces
-		errJournal = conf.Internal.CombinerState.ErrorJournal
-	}
-	StartEngineNoError(&Globals.App, "CombinerMsgHandler",
-		func() { CombinerMsgHandler(ctx, conf, conf.Internal.MsgQs, protectedNS, errJournal) })
 	StartEngine(&Globals.App, "NotifyHandler", func() error { return NotifyHandler(ctx, conf) })
 	StartEngine(&Globals.App, "DnsEngine", func() error { return DnsEngine(ctx, conf) })
 	// Start combiner sync API router (for agent→combiner HELLO/BEAT/PING over HTTPS)
-	if conf.MultiProvider != nil && len(conf.MultiProvider.SyncApi.Addresses.Listen) > 0 {
+	if Globals.App.Type != AppTypeMPCombiner && conf.MultiProvider != nil && len(conf.MultiProvider.SyncApi.Addresses.Listen) > 0 {
 		combinerSyncRtr, err := conf.SetupCombinerSyncRouter(ctx)
 		if err != nil {
 			lgConfig.Error("failed to set up combiner sync router", "err", err)
@@ -1241,7 +1247,7 @@ func initPayloadCrypto(conf *Config) (*transport.PayloadCrypto, error) {
 
 // initCombinerCrypto initializes crypto for the combiner to decrypt agent payloads.
 // Returns a SecurePayloadWrapper configured with the combiner's private key and agent's public key.
-func initCombinerCrypto(conf *Config) (*transport.SecurePayloadWrapper, error) {
+func InitCombinerCrypto(conf *Config) (*transport.SecurePayloadWrapper, error) {
 	// Use the JOSE backend
 	backend := jose.NewBackend()
 	// Load combiner's private key (trim path so trailing whitespace/newlines from config do not cause "file not found")

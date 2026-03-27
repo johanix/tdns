@@ -38,8 +38,8 @@ var agentLocalConfigCmd = &cobra.Command{
 	Use:   "config",
 	Short: "Show details of the local agent config",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := getCommandContext("local")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("local")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -149,7 +149,7 @@ Displays both API and DNS transports independently with their current state.
 This shows all peers regardless of transport type - both API (TLS) and DNS (JOSE) transports
 are displayed as separate entries to show their independent states.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		listDistribPeers(cmd, "agent")
+		ListDistribPeers(cmd, "agent")
 	},
 }
 
@@ -333,8 +333,8 @@ func init() {
 }
 
 func SendAgentMgmtCmd(req *tdns.AgentMgmtPost, prefix string) (*tdns.AgentMgmtResponse, error) {
-	prefixcmd, _ := getCommandContext(prefix)
-	api, err := getApiClient(prefixcmd, true)
+	prefixcmd, _ := GetCommandContext(prefix)
+	api, err := GetApiClient(prefixcmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -402,8 +402,8 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 
 // listPeerZones shows shared zones for each peer agent
 func listPeerZones(cmd *cobra.Command, component string) {
-	prefixcmd, _ := getCommandContext("peer")
-	api, err := getApiClient(prefixcmd, true)
+	prefixcmd, _ := GetCommandContext("peer")
+	api, err := GetApiClient(prefixcmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -467,8 +467,8 @@ func listPeerZones(cmd *cobra.Command, component string) {
 
 // listAgentsForZone shows which peer agents share a specific zone
 func listAgentsForZone(cmd *cobra.Command, component string, zoneName string) {
-	prefixcmd, _ := getCommandContext("peer")
-	api, err := getApiClient(prefixcmd, true)
+	prefixcmd, _ := GetCommandContext("peer")
+	api, err := GetApiClient(prefixcmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}

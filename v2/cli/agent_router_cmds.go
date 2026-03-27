@@ -33,8 +33,8 @@ Shows handler names, priorities, and basic statistics.
 Example:
   tdns-cli agent router list`,
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixCmd, _ := getCommandContext("router")
-		api, err := getApiClient(prefixCmd, true)
+		prefixCmd, _ := GetCommandContext("router")
+		api, err := GetApiClient(prefixCmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -120,8 +120,8 @@ var agentRouterDescribeCmd = &cobra.Command{
 Example:
   tdns-cli agent router describe`,
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixCmd, _ := getCommandContext("router")
-		api, err := getApiClient(prefixCmd, true)
+		prefixCmd, _ := GetCommandContext("router")
+		api, err := GetApiClient(prefixCmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -165,8 +165,8 @@ var agentRouterMetricsCmd = &cobra.Command{
 Example:
   tdns-cli agent router metrics`,
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixCmd, _ := getCommandContext("router")
-		api, err := getApiClient(prefixCmd, true)
+		prefixCmd, _ := GetCommandContext("router")
+		api, err := GetApiClient(prefixCmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -226,8 +226,8 @@ This is primarily useful for programmatic inspection of the router state.
 Example:
   tdns-cli agent router walk`,
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixCmd, _ := getCommandContext("router")
-		api, err := getApiClient(prefixCmd, true)
+		prefixCmd, _ := GetCommandContext("router")
+		api, err := GetApiClient(prefixCmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -301,8 +301,8 @@ This is primarily useful for testing or after troubleshooting.
 Example:
   tdns-cli agent router reset`,
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixCmd, _ := getCommandContext("router")
-		api, err := getApiClient(prefixCmd, true)
+		prefixCmd, _ := GetCommandContext("router")
+		api, err := GetApiClient(prefixCmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}

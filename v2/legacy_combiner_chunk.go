@@ -123,8 +123,8 @@ func (cs *CombinerState) ProcessUpdate(req *CombinerSyncRequest, localAgents map
 
 // --- Standalone business logic functions ---
 
-// recordCombinerError records an error in the ErrorJournal if available.
-func recordCombinerError(journal *ErrorJournal, distID, sender, messageType, errMsg, qname string) {
+// RecordCombinerError records an error in the ErrorJournal if available.
+func RecordCombinerError(journal *ErrorJournal, distID, sender, messageType, errMsg, qname string) {
 	if journal == nil {
 		return
 	}
@@ -412,7 +412,7 @@ func combinerNotifyDelegationChange(tm *MPTransportBridge, senderID, zonename st
 				Class:  dns.ClassINET,
 				Ttl:    120,
 			}
-			_, _, csyncChanged, err := zd.ReplaceCombinerDataByRRtype(tm.LocalID, zonename, dns.TypeCSYNC, []dns.RR{csync})
+			_, _, csyncChanged, err := ReplaceCombinerDataByRRtype(zd, tm.LocalID, zonename, dns.TypeCSYNC, []dns.RR{csync})
 			if err != nil {
 				lgCombiner.Error("combinerNotifyDelegationChange: CSYNC replace failed", "zone", zonename, "err", err)
 			} else {
@@ -426,7 +426,7 @@ func combinerNotifyDelegationChange(tm *MPTransportBridge, senderID, zonename st
 		if err != nil {
 			lgCombiner.Error("combinerNotifyDelegationChange: CDS synthesis failed", "zone", zonename, "err", err)
 		} else if len(cdsRRs) > 0 {
-			_, _, cdsChanged, err := zd.ReplaceCombinerDataByRRtype(tm.LocalID, zonename, dns.TypeCDS, cdsRRs)
+			_, _, cdsChanged, err := ReplaceCombinerDataByRRtype(zd, tm.LocalID, zonename, dns.TypeCDS, cdsRRs)
 			if err != nil {
 				lgCombiner.Error("combinerNotifyDelegationChange: CDS replace failed", "zone", zonename, "err", err)
 			} else {
@@ -524,13 +524,13 @@ func combinerApplyPublishInstruction(req *CombinerSyncRequest, zd *ZoneData, kdb
 	// Load previously stored instruction (if any)
 	var storedInstr *StoredPublishInstruction
 	if kdb != nil {
-		storedInstr, _ = kdb.GetPublishInstruction(zone, senderID)
+		storedInstr, _ = GetPublishInstruction(kdb, zone, senderID)
 	}
 
 	// Retract: empty Locations means remove all published KEYs
 	if len(instr.Locations) == 0 {
 		// Remove apex KEY
-		zd.ReplaceCombinerDataByRRtype(senderID, zone, dns.TypeKEY, nil)
+		ReplaceCombinerDataByRRtype(zd, senderID, zone, dns.TypeKEY, nil)
 		// Remove all _signal KEYs
 		if storedInstr != nil {
 			for _, ns := range storedInstr.PublishedNS {
@@ -538,7 +538,7 @@ func combinerApplyPublishInstruction(req *CombinerSyncRequest, zd *ZoneData, kdb
 			}
 		}
 		if kdb != nil {
-			kdb.DeletePublishInstruction(zone, senderID)
+			DeletePublishInstruction(kdb, zone, senderID)
 		}
 		lgCombiner.Info("publish instruction retracted", "zone", zone, "sender", senderID)
 		return
@@ -560,10 +560,10 @@ func combinerApplyPublishInstruction(req *CombinerSyncRequest, zd *ZoneData, kdb
 			}
 			parsedRRs = append(parsedRRs, rr)
 		}
-		zd.ReplaceCombinerDataByRRtype(senderID, zone, dns.TypeKEY, parsedRRs)
+		ReplaceCombinerDataByRRtype(zd, senderID, zone, dns.TypeKEY, parsedRRs)
 	} else if storedInstr != nil && containsString(storedInstr.Locations, "at-apex") {
 		// Was at-apex before, now removed
-		zd.ReplaceCombinerDataByRRtype(senderID, zone, dns.TypeKEY, nil)
+		ReplaceCombinerDataByRRtype(zd, senderID, zone, dns.TypeKEY, nil)
 	}
 
 	// Handle at-ns
@@ -598,7 +598,7 @@ func combinerApplyPublishInstruction(req *CombinerSyncRequest, zd *ZoneData, kdb
 
 	// Persist
 	if kdb != nil {
-		if err := kdb.SavePublishInstruction(zone, senderID, instr, publishedNS); err != nil {
+		if err := SavePublishInstruction(kdb, zone, senderID, instr, publishedNS); err != nil {
 			lgCombiner.Error("failed to save publish instruction", "zone", zone, "sender", senderID, "err", err)
 		}
 	}
@@ -613,7 +613,7 @@ func combinerResyncSignalKeys(senderID, zone string, zd *ZoneData, kdb *KeyDB) {
 	if kdb == nil {
 		return
 	}
-	storedInstr, err := kdb.GetPublishInstruction(zone, senderID)
+	storedInstr, err := GetPublishInstruction(kdb, zone, senderID)
 	if err != nil || storedInstr == nil {
 		return
 	}
@@ -641,7 +641,7 @@ func combinerResyncSignalKeys(senderID, zone string, zd *ZoneData, kdb *KeyDB) {
 
 	if changed {
 		instr := storedInstr.ToPublishInstruction()
-		if err := kdb.SavePublishInstruction(zone, senderID, instr, currentNS); err != nil {
+		if err := SavePublishInstruction(kdb, zone, senderID, instr, currentNS); err != nil {
 			lgCombiner.Error("failed to update published NS after resync", "zone", zone, "sender", senderID, "err", err)
 		}
 		lgCombiner.Info("signal keys resynced after NS change", "zone", zone, "sender", senderID, "publishedNS", currentNS)
@@ -678,7 +678,7 @@ func publishSignalKeyToProvider(childZone, nsTarget, senderID string, keyRRs []s
 		parsedRRs = append(parsedRRs, rr)
 	}
 
-	_, _, changed, err := zd.ReplaceCombinerDataByRRtype(senderID, ownerName, dns.TypeKEY, parsedRRs)
+	_, _, changed, err := ReplaceCombinerDataByRRtype(zd, senderID, ownerName, dns.TypeKEY, parsedRRs)
 	if err != nil {
 		lgCombiner.Error("failed to apply _signal KEY to provider zone", "zone", providerZone, "owner", ownerName, "err", err)
 		return
@@ -752,7 +752,7 @@ func buildPendingSignalKeys(kdb *KeyDB) {
 		pendingSignalKeys.entries = make(map[string][]signalKeyEntry)
 		return
 	}
-	allInstr, err := kdb.LoadAllPublishInstructions()
+	allInstr, err := LoadAllPublishInstructions(kdb)
 	if err != nil {
 		lgCombiner.Error("failed to load publish instructions for startup re-apply", "err", err)
 		pendingSignalKeys.entries = make(map[string][]signalKeyEntry)
@@ -810,7 +810,7 @@ func applyPendingSignalKeys(zd *ZoneData, kdb *KeyDB) {
 			rr.Header().Name = entry.OwnerName
 			parsedRRs = append(parsedRRs, rr)
 		}
-		_, _, changed, err := zd.ReplaceCombinerDataByRRtype(entry.SenderID, entry.OwnerName, dns.TypeKEY, parsedRRs)
+		_, _, changed, err := ReplaceCombinerDataByRRtype(zd, entry.SenderID, entry.OwnerName, dns.TypeKEY, parsedRRs)
 		if err != nil {
 			lgCombiner.Error("startup re-apply: failed to apply _signal KEY", "zone", zd.ZoneName, "owner", entry.OwnerName, "err", err)
 			continue
@@ -919,23 +919,17 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 			continue
 		}
 
-		// Defense-in-depth: reject DNSKEY operations for unsigned zones
+		// DNSKEY policy: only signers may contribute DNSKEYs
 		if rrtype == dns.TypeDNSKEY && !isProvider {
-			apex, err := zd.GetOwner(zd.ZoneName)
-			if err == nil && apex != nil {
-				if hpRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM); exists && len(hpRRset.RRs) > 0 {
-					if prr, ok := hpRRset.RRs[0].(*dns.PrivateRR); ok {
-						if hp, ok := prr.Data.(*core.HSYNCPARAM); ok && len(hp.GetSigners()) == 0 {
-							for _, rec := range op.Records {
-								rejectedItems = append(rejectedItems, RejectedItem{
-									Record: rec,
-									Reason: "DNSKEY not allowed in unsigned zone (no signers in HSYNCPARAM)",
-								})
-							}
-							continue
-						}
-					}
+			reject, reason := checkDNSKEYPolicy(zd, req.SenderID)
+			if reject {
+				for _, rec := range op.Records {
+					rejectedItems = append(rejectedItems, RejectedItem{
+						Record: rec,
+						Reason: reason,
+					})
 				}
+				continue
 			}
 		}
 
@@ -1022,14 +1016,14 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 							// Remote had it first, local now claims — re-attribute to local
 							lgCombiner.Info("dedup: re-attributing contribution from remote to local",
 								"rrtype", op.RRtype, "zone", zonename, "from", existingSender, "to", req.SenderID)
-							zd.ReplaceCombinerDataByRRtype(existingSender, zonename, rrtype, nil) // remove from remote
+							ReplaceCombinerDataByRRtype(zd, existingSender, zonename, rrtype, nil) // remove from remote
 							// fall through to normal replace, which will store under local sender
 						}
 					}
 				}
 			}
 
-			applied, removed, changed, err := zd.ReplaceCombinerDataByRRtype(req.SenderID, zonename, rrtype, parsedRRs)
+			applied, removed, changed, err := ReplaceCombinerDataByRRtype(zd, req.SenderID, zonename, rrtype, parsedRRs)
 			if err != nil {
 				lgCombiner.Error("REPLACE operation failed", "err", err)
 				rejectedItems = append(rejectedItems, RejectedItem{
@@ -1062,7 +1056,7 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 				addRecords[zonename] = append(addRecords[zonename], rr.String())
 			}
 			if len(addRecords) > 0 {
-				addChanged, err := zd.AddCombinerDataNG(req.SenderID, addRecords)
+				addChanged, err := AddCombinerDataNG(zd, req.SenderID, addRecords)
 				if err != nil {
 					lgCombiner.Error("ADD operation failed", "err", err)
 					rejectedItems = append(rejectedItems, RejectedItem{
@@ -1085,7 +1079,7 @@ func combinerProcessOperations(req *CombinerSyncRequest, zd *ZoneData, zonename 
 				delRecords[zonename] = append(delRecords[zonename], rr.String())
 			}
 			if len(delRecords) > 0 {
-				removed, err := zd.RemoveCombinerDataNG(req.SenderID, delRecords)
+				removed, err := RemoveCombinerDataNG(zd, req.SenderID, delRecords)
 				if err != nil {
 					lgCombiner.Error("DELETE operation failed", "err", err)
 					rejectedItems = append(rejectedItems, RejectedItem{
@@ -1206,10 +1200,10 @@ func isNoOpUpdate(zd *ZoneData, senderID string, records map[string][]string) bo
 	return true
 }
 
-// isNoOpOperations checks whether explicit Operations would cause any actual change.
+// IsNoOpOperations checks whether explicit Operations would cause any actual change.
 // For replace: compares the replacement set against the agent's current contributions.
 // For add: checks if all RRs already exist. For delete: checks if all RRs are already absent.
-func isNoOpOperations(zd *ZoneData, senderID string, ops []core.RROperation) bool {
+func IsNoOpOperations(zd *ZoneData, senderID string, ops []core.RROperation) bool {
 	zonename := zd.ZoneName
 	for _, op := range ops {
 		rrtype, ok := dns.StringToType[op.RRtype]
@@ -1292,7 +1286,7 @@ func isNoOpOperations(zd *ZoneData, senderID string, ops []core.RROperation) boo
 		}
 	}
 
-	lgCombiner.Info("isNoOpOperations: all operations are no-ops",
+	lgCombiner.Info("IsNoOpOperations: all operations are no-ops",
 		"sender", senderID, "zone", zd.ZoneName)
 	return true
 }
@@ -1645,6 +1639,60 @@ func determineSyncType(update *ZoneUpdate) string {
 }
 
 // --- Policy check functions ---
+
+// checkDNSKEYPolicy checks whether a sender is allowed to contribute DNSKEYs.
+// Returns (reject bool, reason string). Rejects if:
+// - the zone has no HSYNCPARAM (no signer information)
+// - the zone has no signers listed
+// - the sender is not listed as a signer
+func checkDNSKEYPolicy(zd *ZoneData, senderID string) (bool, string) {
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil || apex == nil {
+		return true, "DNSKEY rejected: cannot inspect zone apex"
+	}
+
+	hpRRset, hpExists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
+	if !hpExists || len(hpRRset.RRs) == 0 {
+		return true, "DNSKEY rejected: no HSYNCPARAM in zone (cannot determine signers)"
+	}
+	prr, ok := hpRRset.RRs[0].(*dns.PrivateRR)
+	if !ok {
+		return true, "DNSKEY rejected: HSYNCPARAM parse error"
+	}
+	hp, ok := prr.Data.(*core.HSYNCPARAM)
+	if !ok {
+		return true, "DNSKEY rejected: HSYNCPARAM type error"
+	}
+	signers := hp.GetSigners()
+	if len(signers) == 0 {
+		return true, "DNSKEY not allowed in unsigned zone (no signers in HSYNCPARAM)"
+	}
+
+	h3RRset, h3exists := apex.RRtypes.Get(core.TypeHSYNC3)
+	if !h3exists || len(h3RRset.RRs) == 0 {
+		return true, "DNSKEY rejected: no HSYNC3 records (cannot resolve sender to label)"
+	}
+	senderLabel := ""
+	for _, rr := range h3RRset.RRs {
+		if prr, ok := rr.(*dns.PrivateRR); ok {
+			if h3, ok := prr.Data.(*core.HSYNC3); ok {
+				if h3.Identity == senderID {
+					senderLabel = h3.Label
+					break
+				}
+			}
+		}
+	}
+	if senderLabel == "" {
+		return true, fmt.Sprintf("DNSKEY rejected: sender %s not found in zone HSYNC3 records", senderID)
+	}
+
+	if !hp.IsSignerLabel(senderLabel) {
+		return true, fmt.Sprintf("DNSKEY rejected: sender %s (label %q) is not a signer (signers: %v)", senderID, senderLabel, signers)
+	}
+
+	return false, ""
+}
 
 // checkContentPolicy applies content-based policy checks to a parsed RR.
 // Returns empty string if accepted, or a rejection reason.

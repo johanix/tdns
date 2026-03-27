@@ -62,7 +62,7 @@ var agentDistribPeersCmd = &cobra.Command{
 	Short: "List all known peer agents with working keys",
 	Long:  "Show all recipient agents that this agent has established keys with and can send distributions to.",
 	Run: func(cmd *cobra.Command, args []string) {
-		listDistribPeers(cmd, "agent")
+		ListDistribPeers(cmd, "agent")
 	},
 }
 
@@ -80,7 +80,7 @@ var combinerDistribPeersCmd = &cobra.Command{
 	Short: "List all known peer agents with working keys",
 	Long:  "Show all recipient agents that this combiner has established keys with and can send distributions to.",
 	Run: func(cmd *cobra.Command, args []string) {
-		listDistribPeers(cmd, "combiner")
+		ListDistribPeers(cmd, "combiner")
 	},
 }
 
@@ -95,8 +95,8 @@ var agentDistribOpCmd = &cobra.Command{
 }
 
 func listDistributions(cmd *cobra.Command, component string) {
-	prefixcmd, _ := getCommandContext("distrib")
-	api, err := getApiClient(prefixcmd, true)
+	prefixcmd, _ := GetCommandContext("distrib")
+	api, err := GetApiClient(prefixcmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -300,8 +300,8 @@ func displayDistributions(summaries []interface{}, verbose bool, api *tdns.ApiCl
 func purgeDistributions(cmd *cobra.Command, component string) {
 	force, _ := cmd.Flags().GetBool("force")
 
-	prefixcmd, _ := getCommandContext("distrib")
-	api, err := getApiClient(prefixcmd, true)
+	prefixcmd, _ := GetCommandContext("distrib")
+	api, err := GetApiClient(prefixcmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -333,7 +333,7 @@ func purgeDistributions(cmd *cobra.Command, component string) {
 }
 
 func runDistribOp(cmd *cobra.Command, operation string) {
-	prefixcmd, _ := getCommandContext("distrib")
+	prefixcmd, _ := GetCommandContext("distrib")
 	if prefixcmd != "agent" {
 		log.Fatalf("distrib op must be run under agent (e.g. tdns-cliv2 agent distrib op ping --to combiner)")
 	}
@@ -341,7 +341,7 @@ func runDistribOp(cmd *cobra.Command, operation string) {
 	if err != nil || to == "" {
 		log.Fatalf("--to is required (e.g. --to combiner or --to agent.delta.dnslab.)")
 	}
-	api, err := getApiClient(prefixcmd, true)
+	api, err := GetApiClient(prefixcmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -386,15 +386,15 @@ func runDistribOp(cmd *cobra.Command, operation string) {
 	}
 }
 
-func listDistribPeers(cmd *cobra.Command, component string) {
+func ListDistribPeers(cmd *cobra.Command, component string) {
 	// Determine parent command to select the right API client.
 	// Called from "agent peer list" (parent of "peer" = "agent") or
 	// "agent distrib peers" / "combiner distrib peers" (parent of "distrib" = component).
-	prefixcmd, _ := getCommandContext("peer")
+	prefixcmd, _ := GetCommandContext("peer")
 	if prefixcmd == "server" {
-		prefixcmd, _ = getCommandContext("distrib")
+		prefixcmd, _ = GetCommandContext("distrib")
 	}
-	api, err := getApiClient(prefixcmd, true)
+	api, err := GetApiClient(prefixcmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -791,8 +791,8 @@ Example:
 }
 
 func runAgentDiscover(agentIdentity string) {
-	prefixcmd, _ := getCommandContext("distrib")
-	api, err := getApiClient(prefixcmd, true)
+	prefixcmd, _ := GetCommandContext("distrib")
+	api, err := GetApiClient(prefixcmd, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}

@@ -31,8 +31,8 @@ var agentZoneListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List configured zones",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
@@ -62,8 +62,8 @@ var agentZoneMPListCmd = &cobra.Command{
 	Use:   "mplist",
 	Short: "List multi-provider zones with HSYNCPARAM details",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
@@ -89,8 +89,8 @@ var agentZoneReloadCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
@@ -118,8 +118,8 @@ var agentZoneWriteCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
@@ -184,8 +184,8 @@ var agentZoneDsyncStatusCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
@@ -233,8 +233,8 @@ var agentZoneDsyncBootstrapCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename", "algorithm")
 
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
@@ -265,8 +265,8 @@ var agentZoneDsyncRollKeyCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename", "algorithm", "rollaction")
 
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
@@ -298,8 +298,8 @@ var agentZoneDsyncPublishCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
@@ -328,8 +328,8 @@ var agentZoneDsyncUnpublishCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
@@ -400,8 +400,8 @@ Examples:
 			req.Data = map[string]interface{}{"force": true}
 		}
 
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -474,8 +474,8 @@ Examples:
 			req.Data = map[string]interface{}{"force": true}
 		}
 
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}

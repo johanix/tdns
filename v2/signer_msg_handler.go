@@ -100,16 +100,16 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 
 			switch sigMsg.Signal {
 			case "propagated":
-				if err := kdb.SetPropagationConfirmed(sigMsg.Zone, sigMsg.KeyTag); err != nil {
+				if err := SetPropagationConfirmed(kdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
 					lgSigner.Error("SetPropagationConfirmed failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
 					continue
 				}
 				// For MP zones: transition mpdist -> published (no-op if key is not in mpdist)
-				if err := kdb.TransitionMpdistToPublished(sigMsg.Zone, sigMsg.KeyTag); err != nil {
+				if err := TransitionMpdistToPublished(kdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
 					lgSigner.Error("mpdist->published transition failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
 				}
 				// For MP zones: transition mpremove -> removed (no-op if key is not in mpremove)
-				if err := kdb.TransitionMpremoveToRemoved(sigMsg.Zone, sigMsg.KeyTag); err != nil {
+				if err := TransitionMpremoveToRemoved(kdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
 					lgSigner.Error("mpremove->removed transition failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
 				}
 				triggerResign(conf, sigMsg.Zone)
@@ -182,7 +182,7 @@ func sendKeystateInventoryToAgent(conf *Config, tm *MPTransportBridge, agentID s
 		lgSigner.Debug("not a signer for zone, sending empty inventory", "zone", zone)
 	} else {
 		var err error
-		items, err = kdb.GetKeyInventory(zone)
+		items, err = GetKeyInventory(kdb, zone)
 		if err != nil {
 			return fmt.Errorf("GetKeyInventory failed: %w", err)
 		}

@@ -23,8 +23,8 @@ var configReloadCmd = &cobra.Command{
 	Use:   "reload",
 	Short: "Send config reload command to tdns-auth",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := getCommandContext("config")
-		api, _ := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("config")
+		api, _ := GetApiClient(prefixcmd, true)
 
 		resp, err := SendConfigCommand(api, tdns.ConfigPost{
 			Command: "reload",
@@ -49,8 +49,8 @@ var configReloadZonesCmd = &cobra.Command{
 	Use:   "reload-zones",
 	Short: "Send reload-zones command to tdns-auth",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := getCommandContext("config")
-		api, _ := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("config")
+		api, _ := GetApiClient(prefixcmd, true)
 
 		resp, err := SendConfigCommand(api, tdns.ConfigPost{
 			Command: "reload-zones",
@@ -75,8 +75,8 @@ var configStatusCmd = &cobra.Command{
 	Use:   "status",
 	Short: "Send config status command to tdns-auth",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := getCommandContext("config")
-		api, _ := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("config")
+		api, _ := GetApiClient(prefixcmd, true)
 
 		resp, err := SendConfigCommand(api, tdns.ConfigPost{
 			Command: "status",

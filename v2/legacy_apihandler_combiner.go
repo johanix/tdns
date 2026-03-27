@@ -50,7 +50,7 @@ func APIcombiner(app *AppDetails, refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB
 
 		switch cp.Command {
 		case "add":
-			_, err := zd.AddCombinerDataNG("", cp.Data)
+			_, err := AddCombinerDataNG(zd, "", cp.Data)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -64,7 +64,7 @@ func APIcombiner(app *AppDetails, refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB
 				return
 			}
 
-			resp.Data = zd.GetCombinerDataNG()
+			resp.Data = GetCombinerDataNG(zd)
 			resp.Msg = fmt.Sprintf("Local data for zone %s", cp.Zone)
 
 		case "remove":
@@ -135,7 +135,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 		switch cp.Command {
 		case "list":
 			zone := dns.Fqdn(cp.Zone)
-			pending, err := kdb.ListPendingEdits(zone)
+			pending, err := ListPendingEdits(kdb, zone)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("failed to list pending edits: %v", err)
@@ -151,7 +151,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 				return
 			}
 
-			rec, err := kdb.ApprovePendingEdit(cp.EditID)
+			rec, err := ApprovePendingEdit(kdb, cp.EditID)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("failed to approve edit #%d: %v", cp.EditID, err)
@@ -228,7 +228,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 				return
 			}
 
-			rec, err := kdb.RejectPendingEdit(cp.EditID, cp.Reason)
+			rec, err := RejectPendingEdit(kdb, cp.EditID, cp.Reason)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("failed to reject edit #%d: %v", cp.EditID, err)
@@ -269,7 +269,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 		case "list-approved":
 			zone := dns.Fqdn(cp.Zone)
-			approved, err := kdb.ListApprovedEdits(zone)
+			approved, err := ListApprovedEdits(kdb, zone)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("failed to list approved edits: %v", err)
@@ -280,7 +280,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 		case "list-rejected":
 			zone := dns.Fqdn(cp.Zone)
-			rejected, err := kdb.ListRejectedEdits(zone)
+			rejected, err := ListRejectedEdits(kdb, zone)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("failed to list rejected edits: %v", err)
@@ -328,7 +328,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 
 		case "reapply":
 			zone := dns.Fqdn(cp.Zone)
-			msg, err := combinerReapplyContributions(zone, kdb)
+			msg, err := CombinerReapplyContributions(zone, kdb)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -349,7 +349,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			var errs []error
 
 			if clearAll || tables["pending"] {
-				n, err := kdb.ClearPendingEdits(zone)
+				n, err := ClearPendingEdits(kdb, zone)
 				if err != nil {
 					errs = append(errs, fmt.Errorf("pending: %w", err))
 				} else {
@@ -357,7 +357,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 				}
 			}
 			if clearAll || tables["approved"] {
-				n, err := kdb.ClearApprovedEdits(zone)
+				n, err := ClearApprovedEdits(kdb, zone)
 				if err != nil {
 					errs = append(errs, fmt.Errorf("approved: %w", err))
 				} else {
@@ -365,7 +365,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 				}
 			}
 			if clearAll || tables["rejected"] {
-				n, err := kdb.ClearRejectedEdits(zone)
+				n, err := ClearRejectedEdits(kdb, zone)
 				if err != nil {
 					errs = append(errs, fmt.Errorf("rejected: %w", err))
 				} else {
@@ -373,7 +373,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 				}
 			}
 			if clearAll || tables["current"] {
-				n, err := kdb.ClearContributions(zone)
+				n, err := ClearContributions(kdb, zone)
 				if err != nil {
 					errs = append(errs, fmt.Errorf("contributions: %w", err))
 				} else {
@@ -385,7 +385,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 							if zd.MP != nil {
 								zd.MP.AgentContributions = nil
 							}
-							zd.rebuildCombinerData()
+							RebuildCombinerData(zd)
 							zd.mu.Unlock()
 						}
 					} else {
@@ -394,7 +394,7 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 							if zd.MP != nil {
 								zd.MP.AgentContributions = nil
 							}
-							zd.rebuildCombinerData()
+							RebuildCombinerData(zd)
 							zd.mu.Unlock()
 						}
 					}
@@ -549,8 +549,8 @@ func APIcombinerDebug(conf *Config) func(w http.ResponseWriter, r *http.Request)
 				return
 			}
 
-			resp.Msg = fmt.Sprintf("ping ok: %s echoed nonce %s",
-				pingResp.ResponderID, pingResp.Nonce)
+			resp.Msg = fmt.Sprintf("ping ok: %s echoed nonce %s rtt=%s",
+				pingResp.ResponderID, pingResp.Nonce, pingResp.RTT.Round(time.Microsecond))
 
 		case "agent-resync":
 			tm := conf.Internal.MPTransport

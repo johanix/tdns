@@ -29,8 +29,8 @@ var combinerZoneListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List configured zones",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
@@ -60,8 +60,8 @@ var combinerZoneMPListCmd = &cobra.Command{
 	Use:   "mplist",
 	Short: "List multi-provider zones with HSYNCPARAM details",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
@@ -363,7 +363,7 @@ var combinerZoneEditsClearCmd = &cobra.Command{
 
 // SendCombinerEditCmd sends a combiner edit management request to the combiner API.
 func SendCombinerEditCmd(req tdns.CombinerEditPost) (*tdns.CombinerEditResponse, error) {
-	api, err := getApiClient("combiner", true)
+	api, err := GetApiClient("combiner", true)
 	if err != nil {
 		return nil, fmt.Errorf("error getting API client: %w", err)
 	}
@@ -421,7 +421,7 @@ var combinerZoneReloadCmd = &cobra.Command{
 	Short: "Request re-loading a zone on the combiner",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
-		api, err := getApiClient("combiner", true)
+		api, err := GetApiClient("combiner", true)
 		if err != nil {
 			log.Fatalf("Error getting API client for combiner: %v", err)
 		}
@@ -447,7 +447,7 @@ var combinerZoneBumpCmd = &cobra.Command{
 	Short: "Bump SOA serial for a zone on the combiner",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
-		api, err := getApiClient("combiner", true)
+		api, err := GetApiClient("combiner", true)
 		if err != nil {
 			log.Fatalf("Error getting API client for combiner: %v", err)
 		}

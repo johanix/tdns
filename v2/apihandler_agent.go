@@ -110,7 +110,7 @@ func doPeerPing(conf *Config, peerID string, useAPI bool) *AgentMgmtResponse {
 		resp.ErrorMsg = fmt.Sprintf("peer %s did not acknowledge (responder: %s)", peerID, pingResp.ResponderID)
 		return resp
 	}
-	resp.Msg = fmt.Sprintf("ping ok (dns transport): %s echoed nonce %s", pingResp.ResponderID, pingResp.Nonce)
+	resp.Msg = fmt.Sprintf("ping ok (dns transport): %s echoed nonce %s rtt=%s", pingResp.ResponderID, pingResp.Nonce, pingResp.RTT.Round(time.Microsecond))
 	return resp
 }
 

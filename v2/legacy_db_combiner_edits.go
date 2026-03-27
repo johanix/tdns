@@ -49,7 +49,7 @@ type RejectedEditRecord struct {
 }
 
 // NextEditID returns the next available edit ID across all three tables.
-func (kdb *KeyDB) NextEditID() (int, error) {
+func NextEditID(kdb *KeyDB) (int, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
@@ -74,7 +74,7 @@ func (kdb *KeyDB) NextEditID() (int, error) {
 }
 
 // SavePendingEdit inserts a new pending edit.
-func (kdb *KeyDB) SavePendingEdit(rec *PendingEditRecord) error {
+func SavePendingEdit(kdb *KeyDB, rec *PendingEditRecord) error {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
@@ -91,7 +91,7 @@ func (kdb *KeyDB) SavePendingEdit(rec *PendingEditRecord) error {
 }
 
 // ListPendingEdits returns all pending edits for a zone.
-func (kdb *KeyDB) ListPendingEdits(zone string) ([]*PendingEditRecord, error) {
+func ListPendingEdits(kdb *KeyDB, zone string) ([]*PendingEditRecord, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
@@ -122,7 +122,7 @@ func (kdb *KeyDB) ListPendingEdits(zone string) ([]*PendingEditRecord, error) {
 }
 
 // GetPendingEdit retrieves a single pending edit by edit_id.
-func (kdb *KeyDB) GetPendingEdit(editID int) (*PendingEditRecord, error) {
+func GetPendingEdit(kdb *KeyDB, editID int) (*PendingEditRecord, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
@@ -150,7 +150,7 @@ func (kdb *KeyDB) GetPendingEdit(editID int) (*PendingEditRecord, error) {
 
 // ApprovePendingEdit moves a pending edit to the approved table.
 // Returns the original pending edit data for processing.
-func (kdb *KeyDB) ApprovePendingEdit(editID int) (*PendingEditRecord, error) {
+func ApprovePendingEdit(kdb *KeyDB, editID int) (*PendingEditRecord, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
@@ -206,7 +206,7 @@ func (kdb *KeyDB) ApprovePendingEdit(editID int) (*PendingEditRecord, error) {
 
 // RejectPendingEdit moves a pending edit to the rejected table with a reason.
 // Returns the original pending edit data for sending rejection confirmation.
-func (kdb *KeyDB) RejectPendingEdit(editID int, reason string) (*PendingEditRecord, error) {
+func RejectPendingEdit(kdb *KeyDB, editID int, reason string) (*PendingEditRecord, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
@@ -267,7 +267,7 @@ func (kdb *KeyDB) RejectPendingEdit(editID int, reason string) (*PendingEditReco
 // approvedRecords: owner→[]rrstring for records that were applied or removed
 // rejectedRecords: owner→[]rrstring for records that were rejected
 // reason: rejection reason (used for all rejected records)
-func (kdb *KeyDB) ResolvePendingEdit(editID int, approvedRecords, rejectedRecords map[string][]string, reason string) error {
+func ResolvePendingEdit(kdb *KeyDB, editID int, approvedRecords, rejectedRecords map[string][]string, reason string) error {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
@@ -352,7 +352,7 @@ func (kdb *KeyDB) ResolvePendingEdit(editID int, approvedRecords, rejectedRecord
 }
 
 // ListRejectedEdits returns all rejected edits for a zone.
-func (kdb *KeyDB) ListRejectedEdits(zone string) ([]*RejectedEditRecord, error) {
+func ListRejectedEdits(kdb *KeyDB, zone string) ([]*RejectedEditRecord, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
@@ -385,7 +385,7 @@ func (kdb *KeyDB) ListRejectedEdits(zone string) ([]*RejectedEditRecord, error) 
 
 // ListApprovedEdits returns all approved edits, optionally filtered by zone.
 // If zone is empty, returns all approved edits across all zones.
-func (kdb *KeyDB) ListApprovedEdits(zone string) ([]*ApprovedEditRecord, error) {
+func ListApprovedEdits(kdb *KeyDB, zone string) ([]*ApprovedEditRecord, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
@@ -428,7 +428,7 @@ func (kdb *KeyDB) ListApprovedEdits(zone string) ([]*ApprovedEditRecord, error) 
 
 // ClearPendingEdits deletes rows from CombinerPendingEdits.
 // If zone is empty, all rows are deleted; otherwise only rows for that zone.
-func (kdb *KeyDB) ClearPendingEdits(zone string) (int64, error) {
+func ClearPendingEdits(kdb *KeyDB, zone string) (int64, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
@@ -447,7 +447,7 @@ func (kdb *KeyDB) ClearPendingEdits(zone string) (int64, error) {
 
 // ClearApprovedEdits deletes rows from CombinerApprovedEdits.
 // If zone is empty, all rows are deleted; otherwise only rows for that zone.
-func (kdb *KeyDB) ClearApprovedEdits(zone string) (int64, error) {
+func ClearApprovedEdits(kdb *KeyDB, zone string) (int64, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
@@ -466,7 +466,7 @@ func (kdb *KeyDB) ClearApprovedEdits(zone string) (int64, error) {
 
 // ClearRejectedEdits deletes rows from CombinerRejectedEdits.
 // If zone is empty, all rows are deleted; otherwise only rows for that zone.
-func (kdb *KeyDB) ClearRejectedEdits(zone string) (int64, error) {
+func ClearRejectedEdits(kdb *KeyDB, zone string) (int64, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
@@ -485,7 +485,7 @@ func (kdb *KeyDB) ClearRejectedEdits(zone string) (int64, error) {
 
 // ClearContributions deletes rows from CombinerContributions.
 // If zone is empty, all rows are deleted; otherwise only rows for that zone.
-func (kdb *KeyDB) ClearContributions(zone string) (int64, error) {
+func ClearContributions(kdb *KeyDB, zone string) (int64, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
