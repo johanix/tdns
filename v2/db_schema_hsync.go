@@ -397,7 +397,7 @@ func (kdb *KeyDB) InitHsyncTables() error {
 
 // InitCombinerEditTables initializes only the combiner edit tables.
 // Call this on combiner startup — avoids creating agent-only HSYNC tables.
-func (kdb *KeyDB) InitCombinerEditTables() error {
+func InitCombinerEditTables(kdb *KeyDB) error {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 

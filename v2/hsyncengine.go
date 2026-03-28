@@ -253,10 +253,10 @@ func (ar *AgentRegistry) retryPendingDiscoveries() {
 	// Find all agents in NEEDED state
 	neededCount := 0
 	for _, agent := range ar.S.Items() {
-		agent.mu.RLock()
+		agent.Mu.RLock()
 		apiNeeded := agent.ApiMethod && agent.ApiDetails.State == AgentStateNeeded
 		dnsNeeded := agent.DnsMethod && agent.DnsDetails.State == AgentStateNeeded
-		agent.mu.RUnlock()
+		agent.Mu.RUnlock()
 
 		if !apiNeeded && !dnsNeeded {
 			continue

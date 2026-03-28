@@ -69,12 +69,12 @@ func (ar *AgentRegistry) sendInfraBeats() {
 			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 
-			agent.mu.RLock()
+			agent.Mu.RLock()
 			var sequence uint64
 			if agent.DnsDetails.SentBeats > 0 {
 				sequence = uint64(agent.DnsDetails.SentBeats)
 			}
-			agent.mu.RUnlock()
+			agent.Mu.RUnlock()
 
 			resp, err := ar.MPTransport.SendBeatWithFallback(ctx, agent, sequence)
 			if err != nil {
@@ -82,14 +82,14 @@ func (ar *AgentRegistry) sendInfraBeats() {
 				return
 			}
 
-			agent.mu.Lock()
+			agent.Mu.Lock()
 			if resp != nil && resp.Ack {
 				lgAgent.Debug("infra beat acknowledged", "peer", agent.Identity, "state", resp.State)
 				agent.DnsDetails.SentBeats++
 				agent.DnsDetails.LatestSBeat = time.Now()
 				agent.DnsDetails.LatestError = ""
 			}
-			agent.mu.Unlock()
+			agent.Mu.Unlock()
 		}(a)
 	}
 }

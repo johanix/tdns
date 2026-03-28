@@ -259,7 +259,7 @@ func showQueueStatusForZone(zone string) {
 		Command: "queue-status",
 	}
 
-	api, err := getApiClient("agent", true)
+	api, err := GetApiClient("agent", true)
 	if err != nil {
 		log.Printf("Warning: could not get API client for queue status: %v", err)
 		return

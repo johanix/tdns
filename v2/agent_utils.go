@@ -31,8 +31,8 @@ func (ar *AgentRegistry) AddZoneToAgent(identity AgentId, zone ZoneName) {
 		return
 	}
 
-	agent.mu.Lock()
-	defer agent.mu.Unlock()
+	agent.Mu.Lock()
+	defer agent.Mu.Unlock()
 
 	if agent.Zones == nil {
 		agent.Zones = make(map[ZoneName]bool)
@@ -47,11 +47,11 @@ func (ar *AgentRegistry) AddZoneToAgent(identity AgentId, zone ZoneName) {
 func (ar *AgentRegistry) GetAgentsForZone(zone ZoneName) []*Agent {
 	var agents []*Agent
 	for _, agent := range ar.S.Items() {
-		agent.mu.RLock()
+		agent.Mu.RLock()
 		if _, exists := agent.Zones[zone]; exists {
 			agents = append(agents, agent)
 		}
-		agent.mu.RUnlock()
+		agent.Mu.RUnlock()
 	}
 	return agents
 }
@@ -60,8 +60,8 @@ func (ar *AgentRegistry) GetAgentsForZone(zone ZoneName) []*Agent {
 // OPERATIONAL and LEGACY states based on zone count.
 // This should be called after HSYNC changes to keep agent state synchronized with zone membership.
 func (ar *AgentRegistry) RecomputeSharedZonesAndSyncState(agent *Agent) {
-	agent.mu.Lock()
-	defer agent.mu.Unlock()
+	agent.Mu.Lock()
+	defer agent.Mu.Unlock()
 
 	zoneCount := len(agent.Zones)
 	oldState := agent.State
@@ -190,12 +190,12 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 		LastState:  time.Now(),
 	}
 
-	agent.mu.Lock()
+	agent.Mu.Lock()
 	agent.ApiDetails.State = AgentStateNeeded
 	agent.DnsDetails.State = AgentStateNeeded
 	agent.ApiDetails.ContactInfo = "none"
 	agent.DnsDetails.ContactInfo = "none"
-	agent.mu.Unlock()
+	agent.Mu.Unlock()
 
 	ar.S.Set(remoteid, agent)
 
@@ -224,9 +224,9 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 			// var targetName string
 
 			// Only look up URI if we don't have it
-			agent.mu.RLock()
+			agent.Mu.RLock()
 			tmpniluri := agent.ApiDetails.UriRR == nil
-			agent.mu.RUnlock()
+			agent.Mu.RUnlock()
 			if tmpniluri {
 				go func() {
 					qname := string("_https._tcp." + remoteid)
@@ -244,19 +244,19 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 					for _, rr := range rrset.RRs {
 						if u, ok := rr.(*dns.URI); ok {
 							lgAgent.Debug("URI record found", "record", u.String())
-							agent.mu.Lock()
+							agent.Mu.Lock()
 							agent.ApiDetails.UriRR = u
 							agent.ApiDetails.BaseUri = u.Target
 							agent.ApiDetails.ContactInfo = "partial"
-							agent.mu.Unlock()
+							agent.Mu.Unlock()
 						}
 					}
 				}()
 			}
 
-			agent.mu.RLock()
+			agent.Mu.RLock()
 			tmpniluri = agent.DnsDetails.UriRR == nil
-			agent.mu.RUnlock()
+			agent.Mu.RUnlock()
 			if tmpniluri {
 				go func() {
 					qname := string("_dns._tcp." + remoteid)
@@ -274,21 +274,21 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 					for _, rr := range rrset.RRs {
 						if u, ok := rr.(*dns.URI); ok {
 							lgAgent.Debug("URI record found", "agent", agent.Identity, "record", u.String())
-							agent.mu.Lock()
+							agent.Mu.Lock()
 							agent.DnsDetails.UriRR = u
 							agent.DnsDetails.BaseUri = u.Target
 							agent.DnsDetails.ContactInfo = "partial"
-							agent.mu.Unlock()
+							agent.Mu.Unlock()
 						}
 					}
 				}()
 			}
 
 			// Only proceed with SVCB if we have URI
-			agent.mu.RLock()
+			agent.Mu.RLock()
 			tmpniluri = agent.ApiDetails.UriRR == nil
 			tmpaddrs := agent.ApiDetails.Addrs
-			agent.mu.RUnlock()
+			agent.Mu.RUnlock()
 			if tmpniluri && len(tmpaddrs) == 0 {
 				go func() {
 					_, addrs, port, targetName, err := FetchSVCB(agent.ApiDetails.BaseUri, resolvers, timeout, retries)
@@ -297,19 +297,19 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 						return
 					}
 
-					agent.mu.Lock()
+					agent.Mu.Lock()
 					agent.ApiDetails.Addrs = addrs
 					agent.ApiDetails.Port = port
 					agent.ApiDetails.Host = targetName
 					// agent.ApiDetails.SvcbRR = svcbrr // the svcb is hard to marshal into json
-					agent.mu.Unlock()
+					agent.Mu.Unlock()
 				}()
 			}
 
-			agent.mu.RLock()
+			agent.Mu.RLock()
 			tmpniluri = agent.DnsDetails.UriRR == nil
 			tmpaddrs = agent.DnsDetails.Addrs
-			agent.mu.RUnlock()
+			agent.Mu.RUnlock()
 			if tmpniluri && len(tmpaddrs) == 0 {
 				go func() {
 					_, addrs, port, targetName, err := FetchSVCB(agent.DnsDetails.BaseUri, resolvers, timeout, retries)
@@ -318,22 +318,22 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 						return
 					}
 
-					agent.mu.Lock()
+					agent.Mu.Lock()
 					agent.DnsDetails.Addrs = addrs
 					agent.DnsDetails.Port = port
 					agent.DnsDetails.Host = targetName
 					// agent.DnsDetails.SvcbRR = svcbrr // the svcb is hard to marshal into json
-					agent.mu.Unlock()
+					agent.Mu.Unlock()
 				}()
 			}
 
 			// Only proceed with KEY if we have the target name
 			// TODO: Migrate to JWK lookup using lookupAgentJWK() from agent_discovery_common.go
 			// This is a legacy fallback mechanism - new code should use JWK records
-			agent.mu.RLock()
+			agent.Mu.RLock()
 			tmpnilkey := agent.DnsDetails.KeyRR == nil
 			tmphost := agent.DnsDetails.Host
-			agent.mu.RUnlock()
+			agent.Mu.RUnlock()
 			if tmpnilkey && tmphost != "" {
 				go func() {
 					// Look up KEY (legacy)
@@ -351,21 +351,21 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 					for _, rr := range rrset.RRs {
 						if k, ok := rr.(*dns.KEY); ok {
 							lgAgent.Debug("KEY record found", "agent", agent.Identity, "record", k.String())
-							agent.mu.Lock()
+							agent.Mu.Lock()
 							agent.DnsDetails.KeyRR = k
 							agent.DnsMethod = true
-							agent.mu.Unlock()
+							agent.Mu.Unlock()
 						}
 					}
 				}()
 			}
 
 			// Only proceed with TLSA if we have the target name
-			agent.mu.RLock()
+			agent.Mu.RLock()
 			tmpniltlsa := agent.ApiDetails.TlsaRR == nil
 			tmpport := agent.ApiDetails.Port
 			tmphost = agent.ApiDetails.Host
-			agent.mu.RUnlock()
+			agent.Mu.RUnlock()
 			if tmpniltlsa && tmphost != "" {
 				go func() {
 					// Look up TLSA
@@ -384,17 +384,17 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 					for _, rr := range rrset.RRs {
 						if t, ok := rr.(*dns.TLSA); ok {
 							lgAgent.Debug("TLSA record found", "agent", agent.Identity, "record", t.String())
-							agent.mu.Lock()
+							agent.Mu.Lock()
 							agent.ApiDetails.TlsaRR = t
 							agent.ApiMethod = true
-							agent.mu.Unlock()
+							agent.Mu.Unlock()
 						}
 					}
 				}()
 			}
 
 			// Check if API transport details are complete
-			agent.mu.Lock()
+			agent.Mu.Lock()
 
 			if agent.ApiDetails.UriRR != nil && agent.ApiDetails.TlsaRR != nil && len(agent.ApiDetails.Addrs) > 0 {
 				agent.ApiDetails.ContactInfo = "complete"
@@ -409,26 +409,26 @@ func (ar *AgentRegistry) LocateAgent(remoteid AgentId, zonename ZoneName, deferr
 				agent.DnsMethod = true
 				lgAgent.Info("DNS transport details complete", "agent", remoteid)
 			}
-			agent.mu.Unlock()
+			agent.Mu.Unlock()
 
 			// Update agent state based on available methods
-			agent.mu.RLock()
+			agent.Mu.RLock()
 			tmpstate := agent.ApiDetails.State
-			agent.mu.RUnlock()
+			agent.Mu.RUnlock()
 			if tmpstate == AgentStateKnown {
-				agent.mu.Lock()
+				agent.Mu.Lock()
 				agent.State = AgentStateKnown
 				agent.LastState = time.Now()
-				agent.mu.Unlock()
+				agent.Mu.Unlock()
 
 				err := agent.NewAgentSyncApiClient(ar.LocalAgent)
 				if err != nil {
 					lgAgent.Error("failed to create API client", "agent", remoteid, "err", err)
-					agent.mu.Lock()
+					agent.Mu.Lock()
 					agent.State = AgentStateError
 					agent.ErrorMsg = fmt.Sprintf("error creating API client: %v", err)
 					agent.LastState = time.Now()
-					agent.mu.Unlock()
+					agent.Mu.Unlock()
 				} else if agent.Api != nil {
 					agent.Api.ApiClient.Debug = false // disable debug logging for API client
 				}
@@ -625,12 +625,12 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, d
 
 	// Check if we got anything useful from the transports we discovered
 	if result.APIUri == "" && result.DNSUri == "" {
-		agent.mu.Lock()
+		agent.Mu.Lock()
 		agent.ApiDetails.DiscoveryFailures++
 		failures := agent.ApiDetails.DiscoveryFailures
 		agent.ApiDetails.LatestError = "no contact endpoints found"
 		agent.ApiDetails.LatestErrorTime = time.Now()
-		agent.mu.Unlock()
+		agent.Mu.Unlock()
 
 		if failures >= discoveryFailureFlushThreshold && imr.Cache != nil {
 			identity := string(agent.Identity)
@@ -638,9 +638,9 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, d
 			if err == nil && removed > 0 {
 				lgAgent.Info("flushed IMR cache for stuck discovery", "agent", agent.Identity, "removed", removed, "after_failures", failures)
 			}
-			agent.mu.Lock()
+			agent.Mu.Lock()
 			agent.ApiDetails.DiscoveryFailures = 0
-			agent.mu.Unlock()
+			agent.Mu.Unlock()
 		} else {
 			lgAgent.Warn("discovery failed, will retry", "agent", agent.Identity, "reason", "no contact endpoints found", "failures", failures)
 		}
@@ -651,19 +651,19 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, d
 	if ar.MPTransport != nil {
 		err := ar.MPTransport.RegisterDiscoveredAgent(result)
 		if err != nil {
-			agent.mu.Lock()
+			agent.Mu.Lock()
 			agent.ApiDetails.LatestError = err.Error()
 			agent.ApiDetails.LatestErrorTime = time.Now()
-			agent.mu.Unlock()
+			agent.Mu.Unlock()
 			lgAgent.Warn("registration failed, will retry", "agent", agent.Identity, "err", err)
 			return
 		}
 	}
 
 	// SUCCESS: Discovery complete. Contact info updated.
-	agent.mu.Lock()
+	agent.Mu.Lock()
 	agent.ApiDetails.DiscoveryFailures = 0
-	agent.mu.Unlock()
+	agent.Mu.Unlock()
 
 	lgAgent.Info("discovery successful", "agent", agent.Identity,
 		"apiState", AgentStateToString[agent.ApiDetails.State],
@@ -676,12 +676,12 @@ func (ar *AgentRegistry) attemptDiscovery(agent *Agent, imr *Imr, discoverAPI, d
 	// On re-discovery, a transport may already be OPERATIONAL (preserved by
 	// RegisterDiscoveredAgent). That's fine — it means Hello already succeeded.
 	// We only start HelloRetrierNG if a transport is exactly at KNOWN.
-	agent.mu.RLock()
+	agent.Mu.RLock()
 	apiUseful := agent.ApiMethod && agent.ApiDetails.State >= AgentStateKnown
 	dnsUseful := agent.DnsMethod && agent.DnsDetails.State >= AgentStateKnown
 	apiNeedsHello := agent.ApiMethod && agent.ApiDetails.State == AgentStateKnown
 	dnsNeedsHello := agent.DnsMethod && agent.DnsDetails.State == AgentStateKnown
-	agent.mu.RUnlock()
+	agent.Mu.RUnlock()
 
 	if !apiUseful && !dnsUseful {
 		lgAgent.Debug("no transports at KNOWN or beyond, skipping HelloRetrierNG", "agent", agent.Identity)
@@ -1033,9 +1033,9 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 					// Remote agent was removed, update registry
 					lgAgent.Info("agent no longer in HSYNC3 RRset, cleaning up", "zone", zonename, "agent", hsync3.Identity)
 					if agent, exists := ar.S.Get(AgentId(hsync3.Identity)); exists {
-						agent.mu.Lock()
+						agent.Mu.Lock()
 						delete(agent.Zones, zonename)
-						agent.mu.Unlock()
+						agent.Mu.Unlock()
 						ar.RemoveRemoteAgent(zonename, AgentId(hsync3.Identity))
 					}
 				}

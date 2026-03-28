@@ -98,8 +98,12 @@ func (tm *MPTransportBridge) isInHSYNC(senderID string, zone string) (bool, stri
 		return false, "empty zone name"
 	}
 
+	if tm.getZone == nil {
+		return false, "no zone accessor configured"
+	}
+
 	// Check if we have this zone
-	zd, exists := Zones.Get(zone)
+	zd, exists := tm.getZone(zone)
 	if !exists {
 		return false, fmt.Sprintf("we don't know about zone %q", zone)
 	}
@@ -144,9 +148,13 @@ func (tm *MPTransportBridge) isInHSYNC(senderID string, zone string) (bool, stri
 // This is used for zone-agnostic authorization (e.g., heartbeats, general peer communication).
 // Returns true and the first matching zone name if found.
 func (tm *MPTransportBridge) isInHSYNCAnyZone(senderID string) (bool, string) {
+	if tm.getZoneNames == nil || tm.getZone == nil {
+		return false, ""
+	}
+
 	// Iterate through all zones we know about
-	for _, zoneName := range Zones.Keys() {
-		zd, exists := Zones.Get(zoneName)
+	for _, zoneName := range tm.getZoneNames() {
+		zd, exists := tm.getZone(zoneName)
 		if !exists {
 			continue
 		}

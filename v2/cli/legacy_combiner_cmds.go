@@ -76,9 +76,9 @@ func readZoneFile(filename string) (map[string][]string, error) {
 
 // Helper function to execute a combiner API request
 func executeCombinerRequest(cmdName, zone, command string, data map[string][]string) (*tdns.CombinerResponse, error) {
-	parent, _ := getCommandContext(cmdName)
+	parent, _ := GetCommandContext(cmdName)
 
-	api, err := getApiClient(parent, true)
+	api, err := GetApiClient(parent, true)
 	if err != nil {
 		return nil, fmt.Errorf("error getting API client: %w", err)
 	}

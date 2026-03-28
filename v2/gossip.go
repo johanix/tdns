@@ -350,9 +350,9 @@ func (gst *GossipStateTable) RefreshLocalStates(ar *AgentRegistry, pgm *Provider
 				peerStates[member] = AgentStateToString[AgentStateNeeded]
 				continue
 			}
-			agent.mu.RLock()
+			agent.Mu.RLock()
 			state := agent.EffectiveState()
-			agent.mu.RUnlock()
+			agent.Mu.RUnlock()
 			peerStates[member] = AgentStateToString[state]
 		}
 

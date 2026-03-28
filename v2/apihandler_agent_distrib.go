@@ -325,7 +325,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 
 		case "peer-list":
 			// List all known peers with working keys
-			peers := listKnownPeers(conf)
+			peers := ListKnownPeers(conf)
 			resp.Msg = fmt.Sprintf("Found %d peer(s) with working keys", len(peers))
 
 			// Convert to generic map for JSON serialization
@@ -630,8 +630,8 @@ func StartDistributionGC(cache *DistributionCache, interval time.Duration, stopC
 	}()
 }
 
-// listKnownPeers returns all peers that have working keys established
-func listKnownPeers(conf *Config) []PeerInfo {
+// ListKnownPeers returns all peers that have working keys established
+func ListKnownPeers(conf *Config) []PeerInfo {
 	var peers []PeerInfo
 
 	// For combiners: list all configured agents
@@ -942,7 +942,7 @@ func listPeerSharedZones(conf *Config) []interface{} {
 
 	// Use callback-based iterator to avoid holding shard locks during processing
 	conf.Internal.AgentRegistry.S.IterCb(func(agentID AgentId, agent *Agent) {
-		agent.mu.RLock()
+		agent.Mu.RLock()
 		identity := agent.Identity
 		state := agent.State
 
@@ -954,7 +954,7 @@ func listPeerSharedZones(conf *Config) []interface{} {
 				combinerID = "combiner" // Default identity
 			}
 			if dns.Fqdn(string(identity)) == dns.Fqdn(combinerID) {
-				agent.mu.RUnlock()
+				agent.Mu.RUnlock()
 				return
 			}
 		}
@@ -964,7 +964,7 @@ func listPeerSharedZones(conf *Config) []interface{} {
 		for zoneName := range agent.Zones {
 			zoneNames = append(zoneNames, zoneName)
 		}
-		agent.mu.RUnlock()
+		agent.Mu.RUnlock()
 
 		// Build zone list with SOA serials (AFTER releasing lock)
 		zoneDetails := make([]map[string]interface{}, 0, len(zoneNames))
@@ -1004,10 +1004,10 @@ func listAgentsForZone(conf *Config, zoneName string) []string {
 
 	// Use callback-based iterator to avoid holding shard locks during processing
 	conf.Internal.AgentRegistry.S.IterCb(func(agentID AgentId, agent *Agent) {
-		agent.mu.RLock()
+		agent.Mu.RLock()
 		hasZone := agent.Zones[ZoneName(zoneName)]
 		identity := agent.Identity
-		agent.mu.RUnlock()
+		agent.Mu.RUnlock()
 
 		// Skip combiner - it's a virtual peer for monitoring, not a real agent peer
 		// Check against configured combiner identity (may be "combiner" or a specific FQDN)

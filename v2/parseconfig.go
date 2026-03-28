@@ -219,9 +219,10 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// Validate multi-provider.role matches the application type
 	if conf.MultiProvider != nil {
 		expectedRole := map[AppType]string{
-			AppTypeAuth:     "signer",
-			AppTypeCombiner: "combiner",
-			AppTypeAgent:    "agent",
+			AppTypeAuth:       "signer",
+			AppTypeCombiner:   "combiner",
+			AppTypeMPCombiner: "combiner",
+			AppTypeAgent:      "agent",
 		}
 		if expected, ok := expectedRole[Globals.App.Type]; ok {
 			if conf.MultiProvider.Role != expected {
@@ -718,6 +719,14 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		zdp.mu.Unlock()
 
 		invokeOptionHandlers(zname, options)
+
+		// Register MP refresh callbacks for zones that need MP analysis.
+		// Only register once (on first load, not reload). The callbacks
+		// persist for the lifetime of the zone.
+		if zdp.FirstZoneLoad && options[OptMultiProvider] {
+			zdp.OnZonePreRefresh = append(zdp.OnZonePreRefresh, MPPreRefresh)
+			zdp.OnZonePostRefresh = append(zdp.OnZonePostRefresh, MPPostRefresh)
+		}
 
 		if zdp.FirstZoneLoad {
 			lgConfig.Info("considering OnFirstLoad callbacks", "zone", zname,

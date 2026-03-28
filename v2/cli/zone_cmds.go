@@ -28,8 +28,8 @@ var zoneReloadCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
@@ -64,8 +64,8 @@ var zoneSignCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
@@ -92,8 +92,8 @@ var zoneWriteCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
@@ -120,8 +120,8 @@ var zoneNsecGenerateCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
@@ -147,8 +147,8 @@ var zoneNsecShowCmd = &cobra.Command{
 	Short: "Show the NSEC chain for a zone",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
@@ -179,8 +179,8 @@ var zoneFreezeCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
 
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
@@ -206,8 +206,8 @@ var zoneThawCmd = &cobra.Command{
 	Short: "Thaw a zone (i.e. accept DDNS updates to the zone data again)",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("childzone")
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
@@ -238,8 +238,8 @@ var zoneListCmd = &cobra.Command{
 	Short: "List configured zones",
 	Run: func(cmd *cobra.Command, args []string) {
 
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
@@ -271,8 +271,8 @@ var zoneMPListCmd = &cobra.Command{
 	Use:   "mplist",
 	Short: "List multi-provider zones with HSYNCPARAM details",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}
@@ -293,8 +293,8 @@ var zoneSerialBumpCmd = &cobra.Command{
 	Use:   "bump",
 	Short: "Bump SOA serial and epoch (if any) in tdns-auth version of zone",
 	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := getCommandContext("zone")
-		api, err := getApiClient(prefixcmd, true)
+		prefixcmd, _ := GetCommandContext("zone")
+		api, err := GetApiClient(prefixcmd, true)
 		if err != nil {
 			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
 		}

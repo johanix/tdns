@@ -543,6 +543,11 @@ type InternalMpConf struct {
 type InternalConf struct {
 	InternalDnsConf
 	InternalMpConf
+
+	// PostParseZonesHook is called after ParseZones completes during
+	// reload (SIGHUP or "config reload-zones"). Set by MP apps to
+	// register tdns-mp callbacks on newly added zones.
+	PostParseZonesHook func()
 }
 
 type MsgQs struct {
@@ -678,6 +683,11 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 
 	lgConfig.Info("ReloadZones: zones after reloading", "zones", zonelist)
 	Globals.App.ServerConfigTime = time.Now()
+
+	if conf.Internal.PostParseZonesHook != nil {
+		conf.Internal.PostParseZonesHook()
+	}
+
 	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v", prezones, zonelist), err
 }
 

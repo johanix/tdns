@@ -320,8 +320,8 @@ func Sig0KeyMgmt(cmd string) error {
 		SubCommand: cmd,
 	}
 
-	prefixcmd, _ := getCommandContext("keystore")
-	api, _ := getApiClient(prefixcmd, true)
+	prefixcmd, _ := GetCommandContext("keystore")
+	api, _ := GetApiClient(prefixcmd, true)
 	switch cmd {
 	case "list":
 		// no action
@@ -423,8 +423,8 @@ func DnssecKeyMgmt(cmd string) error {
 		SubCommand: cmd,
 	}
 
-	prefixcmd, _ := getCommandContext("keystore")
-	api, _ := getApiClient(prefixcmd, true)
+	prefixcmd, _ := GetCommandContext("keystore")
+	api, _ := GetApiClient(prefixcmd, true)
 
 	switch cmd {
 	case "list":
@@ -559,8 +559,8 @@ func DnssecKeyMgmt(cmd string) error {
 }
 
 func DnssecGenDS() error {
-	prefixcmd, _ := getCommandContext("keystore")
-	api, err := getApiClient(prefixcmd, true)
+	prefixcmd, _ := GetCommandContext("keystore")
+	api, err := GetApiClient(prefixcmd, true)
 	if err != nil {
 		return fmt.Errorf("failed to get API client: %w", err)
 	}

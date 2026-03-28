@@ -110,7 +110,7 @@ func doPeerPing(conf *Config, peerID string, useAPI bool) *AgentMgmtResponse {
 		resp.ErrorMsg = fmt.Sprintf("peer %s did not acknowledge (responder: %s)", peerID, pingResp.ResponderID)
 		return resp
 	}
-	resp.Msg = fmt.Sprintf("ping ok (dns transport): %s echoed nonce %s", pingResp.ResponderID, pingResp.Nonce)
+	resp.Msg = fmt.Sprintf("ping ok (dns transport): %s echoed nonce %s rtt=%s", pingResp.ResponderID, pingResp.Nonce, pingResp.RTT.Round(time.Microsecond))
 	return resp
 }
 
@@ -782,7 +782,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				return
 			}
 			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
-			keyState, extra, err := queryParentKeyStateDetailed(kdb, imr, string(amp.Zone), keyid)
+			keyState, extra, err := QueryParentKeyStateDetailed(kdb, imr, string(amp.Zone), keyid)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("KeyState inquiry failed: %v", err)
@@ -817,7 +817,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
 			algorithm := sak.Keys[0].KeyRR.Algorithm
-			go conf.parentSyncAfterKeyPublication(amp.Zone, string(amp.Zone), keyid, algorithm)
+			go conf.ParentSyncAfterKeyPublication(amp.Zone, string(amp.Zone), keyid, algorithm)
 			resp.Msg = fmt.Sprintf("Bootstrap triggered for zone %s (keyid %d), running async", amp.Zone, keyid)
 
 		case "imr-query":
@@ -977,7 +977,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				return
 			}
 
-			agent.mu.Lock()
+			agent.Mu.Lock()
 			if agent.ApiDetails != nil {
 				agent.ApiDetails.State = AgentStateNeeded
 				agent.ApiDetails.DiscoveryFailures = 0
@@ -989,7 +989,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				agent.DnsDetails.LatestError = ""
 			}
 			agent.State = AgentStateNeeded
-			agent.mu.Unlock()
+			agent.Mu.Unlock()
 
 			// Trigger immediate re-discovery
 			if imr != nil {

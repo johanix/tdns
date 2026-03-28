@@ -346,8 +346,10 @@ func (conf *Config) SynchedDataEngine(ctx context.Context, msgQs *MsgQs) {
 				lgEngine.Info("startup hydration: requesting edits from combiner", "zone", zname)
 				zd.RequestAndWaitForEdits(ctx)
 			}
-			if hasSigner {
-				lgEngine.Info("startup hydration: requesting key inventory from signer", "zone", zname)
+			weAreSigner := zd.MP != nil && zd.MP.MPdata != nil && zd.MP.MPdata.WeAreSigner
+			notASigner := zd.MP != nil && zd.MP.MPdata != nil && !zd.MP.MPdata.WeAreSigner
+			if hasSigner && !notASigner {
+				lgEngine.Info("startup hydration: requesting key inventory from signer", "zone", zname, "weAreSigner", weAreSigner)
 				zd.RequestAndWaitForKeyInventory(ctx)
 
 				changed, ds, err := zd.LocalDnskeysFromKeystate()

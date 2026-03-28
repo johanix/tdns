@@ -107,7 +107,7 @@ func (conf *Config) APIcombinerDistrib(cache *DistributionCache) func(w http.Res
 
 		case "peer-list":
 			// List all known peers with working keys
-			peers := listKnownPeers(conf)
+			peers := ListKnownPeers(conf)
 			resp.Msg = fmt.Sprintf("Found %d peer(s) with working keys", len(peers))
 
 			// Convert to generic map for JSON serialization

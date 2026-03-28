@@ -17,7 +17,7 @@ import (
 
 // SaveContributions replaces all rows for (zone, senderID) with the current
 // contributions. Runs in a transaction: DELETE old rows, INSERT new rows.
-func (kdb *KeyDB) SaveContributions(zone, senderID string, contributions map[string]map[uint16]core.RRset) error {
+func SaveContributions(kdb *KeyDB, zone, senderID string, contributions map[string]map[uint16]core.RRset) error {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
@@ -59,7 +59,7 @@ func (kdb *KeyDB) SaveContributions(zone, senderID string, contributions map[str
 // LoadAllContributions loads the entire CombinerContributions table and returns
 // it structured as zone → senderID → owner → rrtype → RRset.
 // Used at startup to hydrate AgentContributions for all combiner zones.
-func (kdb *KeyDB) LoadAllContributions() (map[string]map[string]map[string]map[uint16]core.RRset, error) {
+func LoadAllContributions(kdb *KeyDB) (map[string]map[string]map[string]map[uint16]core.RRset, error) {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 
@@ -106,7 +106,7 @@ func (kdb *KeyDB) LoadAllContributions() (map[string]map[string]map[string]map[u
 }
 
 // DeleteContributions removes all rows for a specific agent/zone pair.
-func (kdb *KeyDB) DeleteContributions(zone, senderID string) error {
+func DeleteContributions(kdb *KeyDB, zone, senderID string) error {
 	kdb.mu.Lock()
 	defer kdb.mu.Unlock()
 

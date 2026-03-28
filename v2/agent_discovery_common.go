@@ -17,14 +17,14 @@ import (
 	"github.com/miekg/dns"
 )
 
-// lookupAgentJWK looks up JWK record for an agent identity using the IMR engine.
+// LookupAgentJWK looks up JWK record for an agent identity using the IMR engine.
 // Returns: (jwk-data, public-key, algorithm, error)
 //
 // The JWK record contains a base64url-encoded JSON Web Key per RFC 7517.
 // This function decodes the JWK to a crypto.PublicKey for immediate use.
 //
 // The JWK record is published at dns.<identity> following DNS transport naming conventions.
-func (imr *Imr) lookupAgentJWK(ctx context.Context, identity string) (string, crypto.PublicKey, string, error) {
+func (imr *Imr) LookupAgentJWK(ctx context.Context, identity string) (string, crypto.PublicKey, string, error) {
 	identity = dns.Fqdn(identity)
 
 	// JWK records are published at dns.<identity> (with DNS transport records)
@@ -71,9 +71,9 @@ func (imr *Imr) lookupAgentJWK(ctx context.Context, identity string) (string, cr
 	return "", nil, "", fmt.Errorf("no valid JWK record found at %s", jwkQname)
 }
 
-// lookupAgentKEY looks up KEY record for an agent identity (legacy fallback) using the IMR engine.
+// LookupAgentKEY looks up KEY record for an agent identity (legacy fallback) using the IMR engine.
 // Returns: (key-rr, error)
-func (imr *Imr) lookupAgentKEY(ctx context.Context, identity string) (*dns.KEY, error) {
+func (imr *Imr) LookupAgentKEY(ctx context.Context, identity string) (*dns.KEY, error) {
 	identity = dns.Fqdn(identity)
 
 	lgAgent.Debug("looking up KEY (legacy fallback)", "identity", identity)
@@ -101,10 +101,10 @@ func (imr *Imr) lookupAgentKEY(ctx context.Context, identity string) (*dns.KEY, 
 	return nil, fmt.Errorf("no valid KEY record found for %s", identity)
 }
 
-// lookupAgentAPIEndpoint looks up the API endpoint URI for an agent using the IMR engine.
+// LookupAgentAPIEndpoint looks up the API endpoint URI for an agent using the IMR engine.
 // Queries: _https._tcp.<identity> URI
 // Returns: (uri, host, port, error)
-func (imr *Imr) lookupAgentAPIEndpoint(ctx context.Context, identity string) (string, string, uint16, error) {
+func (imr *Imr) LookupAgentAPIEndpoint(ctx context.Context, identity string) (string, string, uint16, error) {
 	identity = dns.Fqdn(identity)
 
 	apiQname := "_https._tcp." + identity
@@ -148,10 +148,10 @@ func (imr *Imr) lookupAgentAPIEndpoint(ctx context.Context, identity string) (st
 	return "", "", 0, fmt.Errorf("no valid API URI record found at %s", apiQname)
 }
 
-// lookupAgentDNSEndpoint looks up the DNS endpoint URI for an agent (optional) using the IMR engine.
+// LookupAgentDNSEndpoint looks up the DNS endpoint URI for an agent (optional) using the IMR engine.
 // Queries: _dns._tcp.<identity> URI
 // Returns: (uri, host, port, error)
-func (imr *Imr) lookupAgentDNSEndpoint(ctx context.Context, identity string) (string, string, uint16, error) {
+func (imr *Imr) LookupAgentDNSEndpoint(ctx context.Context, identity string) (string, string, uint16, error) {
 	identity = dns.Fqdn(identity)
 
 	dnsQname := "_dns._tcp." + identity
@@ -195,10 +195,10 @@ func (imr *Imr) lookupAgentDNSEndpoint(ctx context.Context, identity string) (st
 	return "", "", 0, fmt.Errorf("no valid DNS URI record found at %s", dnsQname)
 }
 
-// lookupAgentTLSA looks up TLSA record for an agent's HTTPS service using the IMR engine.
+// LookupAgentTLSA looks up TLSA record for an agent's HTTPS service using the IMR engine.
 // Queries: _<port>._tcp.<identity> TLSA
 // Returns: (tlsa-rr, error)
-func (imr *Imr) lookupAgentTLSA(ctx context.Context, identity string, port uint16) (*dns.TLSA, error) {
+func (imr *Imr) LookupAgentTLSA(ctx context.Context, identity string, port uint16) (*dns.TLSA, error) {
 	identity = dns.Fqdn(identity)
 
 	tlsaQname := fmt.Sprintf("_%d._tcp.%s", port, identity)
@@ -232,10 +232,10 @@ func (imr *Imr) lookupAgentTLSA(ctx context.Context, identity string, port uint1
 	return nil, fmt.Errorf("no valid TLSA record found at %s", tlsaQname)
 }
 
-// lookupServiceAddresses looks up SVCB record for a service name using the IMR engine.
+// LookupServiceAddresses looks up SVCB record for a service name using the IMR engine.
 // Queries SVCB at the service name (e.g., dns.<identity> or api.<identity>).
 // Returns: (addresses, error) - addresses extracted from ipv4hint and ipv6hint parameters
-func (imr *Imr) lookupServiceAddresses(ctx context.Context, serviceName string) ([]string, error) {
+func (imr *Imr) LookupServiceAddresses(ctx context.Context, serviceName string) ([]string, error) {
 	serviceName = dns.Fqdn(serviceName)
 
 	var addresses []string
