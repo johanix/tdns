@@ -95,10 +95,11 @@ callback and initialization code.
 
 ## Category 2: Unconverted Receiver Method Calls
 
-### 2.1 — `zd.LocalDnskeysFromKeystate()` in hsyncengine.go
+### 2.1 — `zd.LocalDnskeysFromKeystate()` in hsyncengine.go — FIXED
 
 - **File**: `tdns-mp/v2/hsyncengine.go:167`
 - **Severity**: HIGH (compile error or wrong function called)
+- **Status**: FIXED. Changed to `LocalDnskeysFromKeystate(zd)`.
 - **Description**:
   `changed, ds, err := zd.LocalDnskeysFromKeystate()` — calls the
   method on `*tdns.ZoneData` (the tdns version), not the free
@@ -185,33 +186,32 @@ callback and initialization code.
 
 ## Category 4: Incomplete Functionality
 
-### 4.1 — Leader Election Not Implemented
+### 4.1 — Leader Election Not Implemented — FIXED
 
 - **File**: `tdns-mp/v2/start_agent.go:67-73`
 - **Severity**: HIGH
-- **Description**: The entire leader election manager setup is
-  replaced with a TODO log message. Missing:
-  - `NewLeaderElectionManager` creation
-  - `SetOperationalPeersFunc` wiring
-  - `SetConfiguredPeersFunc` wiring
-  - `SetProviderGroupManager` attachment
-  - `OnFirstLoad` callbacks for per-zone leader elections
-  - `SetOnLeaderElected` callback (triggers SIG(0) key gen, KEY
-    publication, DSYNC bootstrap)
-- **Impact**: Delegation sync and SIG(0) key management completely
-  non-functional in mpagent.
-- **Dependencies**: All necessary support code
-  (`parentsync_leader.go`, `gossip.go`, `provider_groups.go`) is
-  already copied to tdns-mp. The functions exist locally. This is
-  purely a wiring task.
-- **Blockers**: `parentSyncAfterKeyPublication` is unexported in
-  tdns (see 4.2). `PrepareKeyCache` is unexported in tdns
-  (see 4.3).
+- **Status**: FIXED. Full leader election block implemented in
+  `start_agent.go`: LEM creation, operational/configured peers
+  callbacks, provider group manager wiring, OnFirstLoad callbacks
+  for per-zone elections, and `SetOnLeaderElected` callback with
+  complete SIG(0) key lifecycle (check local → ask peers → generate
+  → publish to combiner + agents → bootstrap with parent).
+- **Description**: The entire leader election manager setup was
+  replaced with a TODO log message.
+- **Impact**: Delegation sync and SIG(0) key management now
+  functional in mpagent.
+- **Blockers**: Resolved — 4.2 (exports) and 4.3 (non-issue).
 
-### 4.2 — `parentSyncAfterKeyPublication` Unavailable
+### 4.2 — `parentSyncAfterKeyPublication` Unavailable — FIXED (tdns side)
 
 - **File**: `tdns-mp/v2/apihandler_agent.go:798`
 - **Severity**: HIGH (blocked functionality)
+- **Status**: FIXED (tdns side). All 6 functions in
+  `parentsync_bootstrap.go` exported: `ParentSyncAfterKeyPublication`,
+  `QueryParentKeyState`, `QueryParentKeyStateDetailed`,
+  `UpdateParentState`, `BootstrapWithParent`,
+  `ZoneHasParentSyncAgent`. tdns callers updated. tdns-mp can now
+  call `conf.Config.ParentSyncAfterKeyPublication(...)`.
 - **Description**: TODO comment:
   "parentSyncAfterKeyPublication is unexported in tdns — export it
   or move the implementation to tdns-mp." The
@@ -225,12 +225,14 @@ callback and initialization code.
 
 - **File**: `tdns-mp/v2/parentsync_leader.go:1092`
 - **Severity**: HIGH (blocked functionality)
+- **Status**: NOT A BUG. `PrepareKeyCache` is already exported
+  (capitalized) in `tdns/v2/readkey.go`. The original audit was
+  incorrect — `tdns.PrepareKeyCache()` is callable from tdns-mp.
 - **Description**: `importSig0KeyFromPeer` calls
-  `tdns.PrepareKeyCache()` which is unexported. This function is
-  part of the leader election flow — when a new leader is elected,
-  it needs to import SIG(0) keys from peers.
-- **Fix**: Either export `PrepareKeyCache` in tdns, or reimplement
-  locally.
+  `tdns.PrepareKeyCache()` which was reported as unexported. This
+  function is part of the leader election flow — when a new leader
+  is elected, it needs to import SIG(0) keys from peers.
+- **Fix**: None needed.
 
 ### 4.4 — Combiner Remove Operation Not Implemented
 

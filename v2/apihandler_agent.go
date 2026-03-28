@@ -782,7 +782,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 				return
 			}
 			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
-			keyState, extra, err := queryParentKeyStateDetailed(kdb, imr, string(amp.Zone), keyid)
+			keyState, extra, err := QueryParentKeyStateDetailed(kdb, imr, string(amp.Zone), keyid)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("KeyState inquiry failed: %v", err)
@@ -817,7 +817,7 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
 			algorithm := sak.Keys[0].KeyRR.Algorithm
-			go conf.parentSyncAfterKeyPublication(amp.Zone, string(amp.Zone), keyid, algorithm)
+			go conf.ParentSyncAfterKeyPublication(amp.Zone, string(amp.Zone), keyid, algorithm)
 			resp.Msg = fmt.Sprintf("Bootstrap triggered for zone %s (keyid %d), running async", amp.Zone, keyid)
 
 		case "imr-query":

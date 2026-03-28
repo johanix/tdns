@@ -1121,7 +1121,7 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 		if zd.Options[OptDelSyncChild] {
 			keyid := uint16(sak.Keys[0].KeyRR.KeyTag())
 			algorithm := sak.Keys[0].KeyRR.Algorithm
-			go conf.parentSyncAfterKeyPublication(zone, keyName, keyid, algorithm)
+			go conf.ParentSyncAfterKeyPublication(zone, keyName, keyid, algorithm)
 		}
 
 		return nil
