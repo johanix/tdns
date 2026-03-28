@@ -402,18 +402,16 @@ callback and initialization code.
   The duplication disappears when MP code is removed from tdns
   (ParseZones will no longer register the tdns callbacks).
 
-### 9.2 — SIGHUP Adds Zones With tdns Callbacks Only
+### 9.2 — SIGHUP Adds Zones With tdns Callbacks Only — FIXED
 
 - **Severity**: MEDIUM
-- **Description**: On config reload (SIGHUP), `ParseZones` registers
-  tdns's `MPPreRefresh`/`MPPostRefresh` for **new** zones. Existing
-  zones keep whatever callbacks they had from first load. Since the
-  initial callbacks are also the tdns versions (not tdns-mp
-  versions), this is consistently wrong but not a regression on
-  reload.
-- **Fix**: Implement a post-reload hook that replaces callbacks on
-  new zones with tdns-mp closures. Or: require full restart to add
-  new MP zones (acceptable for current deployment model).
+- **Status**: FIXED. Added `PostParseZonesHook` callback field to
+  `tdns.InternalConf`. Called at end of `ReloadZoneConfig()` (which
+  covers both SIGHUP and CLI `config reload-zones`). MP binaries'
+  SIGHUP handlers changed from `ParseZones` to `ReloadZoneConfig`.
+  `RegisterMPRefreshCallbacks()` method uses a `refreshRegistered`
+  map to skip zones that already have closures, preventing
+  accumulation on repeated reloads.
 
 ### 9.3 — OnFirstLoad Callbacks Correctly Use Local Functions
 
