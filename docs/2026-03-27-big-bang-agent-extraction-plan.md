@@ -339,106 +339,91 @@ The refresh cycle (FetchFromUpstream, FetchFromFile in
 zone_utils.go) calls 13+ MP-analysis functions that are
 moving to tdns-mp. Since tdns cannot import tdns-mp
 (circular dependency), these calls must be replaced with
-registered callbacks before the big bang.
+a registered callback before the big bang.
 
 ### The Problem
 
 FetchFromUpstream lines 350-561 contain:
-- Pre-flip analysis: DelegationDataChangedNG, HsyncChanged,
+- Analysis: DelegationDataChangedNG, HsyncChanged,
   DnskeysChangedNG, LocalDnskeysChanged,
   LocalDnskeysFromKeystate, RequestAndWaitForKeyInventory
-- Post-flip actions: snapshotUpstreamData, populateMPdata,
+- Actions: snapshotUpstreamData, populateMPdata,
   matchHsyncProvider, CombineWithLocalChanges,
   InjectSignatureTXT, SyncQ/DelegationSyncQ sends
 
 FetchFromFile has the same pattern (lines 169-313).
 
-All of these are MP-specific code that should not remain
+All of this is MP-specific code that should not remain
 in tdns core.
 
-### Two Callbacks Required
+### Design: Single Pre-Flip Callback
 
-**Why not one:** The agent's RequestAndWaitForKeyInventory
-is a blocking RPC to the signer that MUST complete before
-the hard flip. Pre-flip analysis produces change-detection
-results (delchanged, hsyncchanged, dnskeyschanged + their
-status structs) that post-flip actions consume. These
-cannot be re-derived after the flip.
-
-### Callback 1: OnPreZoneFlip
+One callback, registered on ZoneData, called BEFORE the
+hard flip. Receives both old (current, still served) and
+new (incoming, not yet served) zone data:
 
 ```go
-// Registered on ZoneData, called before the hard flip.
-// Receives both old and new zone data.
-// Returns analysis results consumed by post-flip callback.
-OnPreZoneFlip func(old_zd, new_zd *ZoneData) *ZoneFlipAnalysis
+OnZoneRefresh func(zd, new_zd *ZoneData)
 ```
 
-Where `ZoneFlipAnalysis` is:
-```go
-type ZoneFlipAnalysis struct {
-    DelegationChanged bool
-    DelegationStatus  *DelegationSyncStatus
-    HsyncChanged      bool
-    HsyncStatus       *HsyncStatus
-    DnskeyChanged     bool
-    DnskeyStatus      *DnskeyStatus
-}
-```
+The callback runs before the hard flip for two reasons:
 
-This callback replaces all pre-flip analysis code:
-- DelegationDataChangedNG (delegation change detection)
-- HsyncChanged (HSYNC RR change detection)
-- DnskeysChangedNG / LocalDnskeysChanged (DNSKEY changes)
-- LocalDnskeysFromKeystate (agent KEYSTATE analysis)
-- RequestAndWaitForKeyInventory (agent blocking RPC)
+1. **Access to both versions.** The callback can compare
+   old vs new for HSYNC/DNSKEY/delegation changes without
+   needing temporary storage of old data.
 
-### Callback 2: OnPostZoneFlip
+2. **No race condition.** The combiner must add its
+   contributions (CombineWithLocalChanges,
+   InjectSignatureTXT) to new_zd BEFORE the flip
+   publishes it. If the callback ran after the flip, the
+   new zone would be served briefly without combiner
+   data — a race condition.
 
-```go
-// Registered on ZoneData, called after the hard flip.
-// Receives updated zone data + pre-flip analysis results.
-OnPostZoneFlip func(zd *ZoneData, analysis *ZoneFlipAnalysis)
-```
+The callback does everything:
+- **Analyze**: compare zd (old) vs new_zd (new) for
+  delegation, HSYNC, DNSKEY changes
+- **Modify**: add combiner contributions, inject
+  signature TXT, populate MP data, set MP options —
+  all applied to new_zd before it goes live
+- **Act**: send to SyncQ, DelegationSyncQ, trigger RFIs,
+  RequestAndWaitForKeyInventory
 
-This callback replaces all post-flip MP actions:
-- snapshotUpstreamData (combiner upstream snapshot)
-- populateMPdata (MP membership/signing state)
-- Signer inline-signing decisions
-- Delegation sync queue send (if DelegationChanged)
-- DNSKEY sync routing (if DnskeyChanged)
-- HSYNC sync routing (if HsyncChanged)
-- matchHsyncProvider + allow-edits logic (combiner)
-- CombineWithLocalChanges + InjectSignatureTXT (combiner)
+When the callback returns, new_zd is fully prepared. The
+hard flip then publishes the complete zone atomically.
 
 ### After Callback Injection
 
 zone_utils.go FetchFromUpstream becomes:
 ```
 // ... zone transfer, serial check ...
-var analysis *ZoneFlipAnalysis
-if zd.OnPreZoneFlip != nil {
-    analysis = zd.OnPreZoneFlip(zd, &new_zd)
+if zd.OnZoneRefresh != nil {
+    zd.OnZoneRefresh(zd, &new_zd)
 }
-// ... hard flip (unchanged) ...
-if zd.OnPostZoneFlip != nil {
-    zd.OnPostZoneFlip(zd, analysis)
-}
+// ... hard flip (publishes fully-prepared new_zd) ...
 // ... persist serial, notify ...
 ```
 
 FetchFromFile uses the same pattern.
 
+No new fields on *ZoneData for temporary old-version
+storage. No intermediate analysis struct. Just two
+parameters to one callback.
+
 ### Implementation Note
 
 The callback injection is a change to tdns (zone_utils.go
-and structs.go for the callback fields). This is the ONE
-exception to the "no tdns changes" rule — it's a
+and structs.go for the OnZoneRefresh field). This is the
+ONE exception to the "no tdns changes" rule — it's a
 prerequisite structural change that enables the extraction.
-The callbacks are registered by tdns-mp at init time
-(in StartMPAgent, StartMPCombiner, StartMPSigner).
 
-The tdns-agent binary registers the same callbacks from
+The callback is registered by tdns-mp at init time (in
+OnFirstLoad callbacks, similar to PersistContributions).
+Each role registers its own implementation:
+- Agent: full analysis + sync routing + RFIs
+- Combiner: analysis + contributions + allow-edits
+- Signer: analysis + signing decisions
+
+The tdns-agent binary registers the same callback from
 its own code (the functions stay in tdns too).
 
 ## Execution Steps
