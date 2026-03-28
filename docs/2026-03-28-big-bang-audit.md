@@ -26,36 +26,30 @@ callback and initialization code.
 
 ## Category 1: Residual `tdns.Conf.Internal.*` References
 
-### 1.1 — `tdns.Conf.Internal.ImrEngine` in hsyncengine.go
+### 1.1 — `tdns.Conf.Internal.ImrEngine` in hsyncengine.go — FIXED
 
 - **File**: `tdns-mp/v2/hsyncengine.go:217`
 - **Severity**: HIGH
-- **Description**: `imr := tdns.Conf.Internal.ImrEngine` — direct
-  access to the tdns global. For mpagent,
-  `tdns.Conf.Internal.ImrEngine` works because tdns's `MainInit`
-  sets it unconditionally for all app types. However, this bypasses
-  the injected config pattern. The MPTransportBridge already has a
-  `getImrEngine` closure that does the same thing safely.
-- **Fix**: Replace with
-  `imr := conf.InternalMp.MPTransport.GetImrEngine()` or
-  equivalent closure call already wired in `main_init.go:454`.
+- **Status**: FIXED. Uses `ar.MPTransport.getImrEngine()` closure.
 
-### 1.2 — `tdns.Conf.Internal.ImrEngine` in agent_utils.go
+### 1.2 — `tdns.Conf.Internal.ImrEngine` in agent_utils.go — FIXED
 
 - **File**: `tdns-mp/v2/agent_utils.go:551`
 - **Severity**: HIGH
-- **Description**:
-  `if imr := tdns.Conf.Internal.ImrEngine; imr != nil {` — same
-  pattern. Bypasses injected config, creates hidden coupling to tdns
-  global state.
-- **Fix**: Pass ImrEngine through the function's existing parameters
-  or access via the MPTransportBridge closure.
+- **Status**: FIXED. Uses `ar.MPTransport.getImrEngine()` closure.
+  No `tdns.Conf.Internal.*` references remain in tdns-mp.
 
-### 1.3 — `tdns.Conf.MultiProvider` in combiner_utils.go (4 sites)
+### 1.3 — `tdns.Conf.MultiProvider` in combiner_utils.go (4 sites) — ACCEPTED
 
 - **File**: `tdns-mp/v2/combiner_utils.go:143`, `:361`, `:437`,
   `:557`
 - **Severity**: MEDIUM
+- **Status**: ACCEPTED. These are in free functions deep in the
+  combiner data pipeline. Threading `mp` would require changing
+  6+ function signatures for no runtime benefit (config is always
+  the global singleton). The 4 remaining `tdns.Conf.MultiProvider`
+  references are the only `tdns.Conf.*` references left in
+  tdns-mp.
 - **Description**:
   `InjectSignatureTXT(zd, tdns.Conf.MultiProvider)` — reads
   MultiProvider config from the tdns global rather than from the
@@ -68,28 +62,21 @@ callback and initialization code.
 - **Fix**: Convert these to methods on `*Config`, or pass the
   MultiProvider config as a parameter.
 
-### 1.4 — `tdns.Conf.MultiProvider` in hsync_utils.go (6 sites)
+### 1.4 — `tdns.Conf.MultiProvider` in hsync_utils.go (6 sites) — FIXED
 
 - **File**: `tdns-mp/v2/hsync_utils.go:586-594`, `:1057`
 - **Severity**: MEDIUM
-- **Description**: `ourHsyncIdentities()` reads
-  `tdns.Conf.MultiProvider.Role`, `.Identity`, `.Agents` directly
-  from the global. `MPPreRefresh` at line 1057 calls
-  `tdns.InjectSignatureTXT(new_zd, tdns.Conf.MultiProvider)`. Same
-  anti-pattern as 1.3.
-- **Fix**: Thread `conf` through these functions or pass
-  MultiProvider as a parameter.
+- **Status**: FIXED. Added `mp *tdns.MultiProviderConf` parameter
+  to `ourHsyncIdentities`, `populateMPdata`, `weAreASigner`, and
+  `MPPreRefresh`. All callers updated. Closures in start_*.go
+  capture `mp` from `conf.Config.MultiProvider`.
 
-### 1.5 — `tdns.Conf.MultiProvider` in agent_setup.go
+### 1.5 — `tdns.Conf.MultiProvider` in agent_setup.go — FIXED
 
 - **File**: `tdns-mp/v2/agent_setup.go:384`
 - **Severity**: MEDIUM
-- **Description**:
-  `privKeyPath := strings.TrimSpace(tdns.Conf.MultiProvider.LongTermJosePrivKey)`
-  in `AgentJWKKeyPrep()`. This is a method on `*Config` so it
-  could use `conf.Config.MultiProvider` instead.
-- **Fix**: Replace `tdns.Conf.MultiProvider` with
-  `conf.Config.MultiProvider`.
+- **Status**: FIXED. Added `mp` parameter to `AgentJWKKeyPrep`.
+  Caller passes `conf.Config.MultiProvider`.
 
 ---
 
@@ -149,10 +136,12 @@ callback and initialization code.
 - **Risk**: If any code path accidentally calls the tdns version
   instead of the local copy, it will hang.
 
-### 3.3 — MPPreRefresh/MPPostRefresh Signature Mismatch
+### 3.3 — MPPreRefresh/MPPostRefresh Signature Mismatch — FIXED
 
 - **File**: `tdns-mp/v2/hsync_utils.go:942`, `:1070`
-- **Severity**: MEDIUM (currently not registered, so no crash)
+- **Severity**: MEDIUM
+- **Status**: FIXED by 9.1. Closures in start_*.go capture extra
+  parameters and call the local versions.
 - **Description**: The tdns-mp versions take extra parameters:
   `MPPreRefresh(zd, new_zd *tdns.ZoneData, tm *MPTransportBridge, msgQs *MsgQs)`
   (4 params) vs callback signature
@@ -456,9 +445,11 @@ callback and initialization code.
   `AppTypeMPAgent/Signer/Combiner`. Short-term: document the
   dual-instance pattern.
 
-### 10.2 — Channel-Shared Types Must Remain Aliases
+### 10.2 — Channel-Shared Types Must Remain Aliases — DOCUMENTED
 
 - **Severity**: MEDIUM (constraint, not bug)
+- **Status**: DOCUMENTED. Comment added to `sde_types.go`
+  explaining the constraint and why these must stay as aliases.
 - **Description**: `SyncRequest`, `SyncResponse`, `SyncStatus`,
   `HsyncStatus`, `DnskeyStatus` are aliases to tdns types. They
   **must** remain aliases because they're used in channels shared
@@ -484,10 +475,11 @@ callback and initialization code.
 - **Description**: Confirmed: tdns has zero imports of tdns-mp.
   Unidirectional dependency is clean and sustainable.
 
-### 10.5 — Missing dns.Fqdn() Normalization in CLI
+### 10.5 — Missing dns.Fqdn() Normalization in CLI — FIXED
 
 - **File**: `tdns-mp/v2/cli/combiner_edits_cmds.go:460`
 - **Severity**: MEDIUM
+- **Status**: FIXED. Wrapped with `dns.Fqdn()`.
 - **Description**: `combinerZoneBumpCmd` passes
   `tdns.Globals.Zonename` without `dns.Fqdn()` normalization.
   Other commands in the same file correctly normalize.
