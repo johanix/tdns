@@ -687,6 +687,18 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 	// Attach OnFirstLoad callbacks to zone stubs created by ParseZones.
 	// Stubs already exist in Zones with FirstZoneLoad=true.
 	kdb := conf.Internal.KeyDB
+
+	// Pre-load all contributions once (instead of per-zone in each OnFirstLoad).
+	var allContribs map[string]map[string]map[string]map[uint16]core.RRset
+	if kdb != nil {
+		var err error
+		allContribs, err = LoadAllContributions(kdb)
+		if err != nil {
+			lgConfig.Error("StartCombiner: failed to pre-load contributions snapshot", "err", err)
+			// Continue — individual zones will just skip hydration
+		}
+	}
+
 	for _, zoneName := range conf.Internal.AllZones {
 		zd, exists := Zones.Get(zoneName)
 		if !exists {
@@ -709,13 +721,8 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 					}
 					lgConfig.Info("PersistContributions callback set", "zone", zd.ZoneName)
 				}
-				// Hydrate AgentContributions from persistent storage
-				if zd.MP.AgentContributions == nil && zd.KeyDB != nil {
-					allContribs, err := LoadAllContributions(zd.KeyDB)
-					if err != nil {
-						lgConfig.Error("failed to load contributions snapshot", "zone", zd.ZoneName, "err", err)
-						return
-					}
+				// Hydrate AgentContributions from pre-loaded snapshot
+				if zd.MP.AgentContributions == nil && allContribs != nil {
 					if zoneContribs, ok := allContribs[zd.ZoneName]; ok {
 						zd.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
 						for senderID, ownerMap := range zoneContribs {

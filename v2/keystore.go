@@ -844,26 +844,24 @@ func GenerateAndStageKey(kdb *KeyDB, zone, creator string, alg uint8, keytype st
 // TransitionMpdistToPublished transitions a key from mpdist to published state.
 // Called when the signer receives a "propagated" KEYSTATE signal from the agent,
 // indicating all remote providers have confirmed the key.
-// If the key is not in mpdist state, this is a no-op (returns nil).
+// Uses a conditional UPDATE to avoid TOCTOU races. No-op if the key is not
+// in mpdist state (returns nil).
 func TransitionMpdistToPublished(kdb *KeyDB, zonename string, keyid uint16) error {
-	// Check current state — only transition if in mpdist
-	var currentState string
-	err := kdb.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&currentState)
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := kdb.Exec(`UPDATE DnssecKeyStore SET state=?, published_at=? WHERE zonename=? AND keyid=? AND state=?`,
+		DnskeyStatePublished, now, zonename, keyid, DnskeyStateMpdist)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil // Key not found, no-op
-		}
-		return fmt.Errorf("TransitionMpdistToPublished: query failed: %w", err)
+		return fmt.Errorf("TransitionMpdistToPublished: %w", err)
 	}
-
-	if currentState != DnskeyStateMpdist {
-		lgSigner.Debug("TransitionMpdistToPublished: key not in mpdist, no-op", "zone", zonename, "keyid", keyid, "state", currentState)
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		lgSigner.Debug("TransitionMpdistToPublished: key not in mpdist (or not found), no-op", "zone", zonename, "keyid", keyid)
 		return nil
 	}
 
-	if err := UpdateDnssecKeyState(kdb, zonename, keyid, DnskeyStatePublished); err != nil {
-		return fmt.Errorf("TransitionMpdistToPublished: %w", err)
-	}
+	// Invalidate caches for both old and new states
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+DnskeyStateMpdist)
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+DnskeyStatePublished)
 
 	lgSigner.Info("key transitioned mpdist->published", "zone", zonename, "keyid", keyid)
 	return nil
@@ -872,25 +870,23 @@ func TransitionMpdistToPublished(kdb *KeyDB, zonename string, keyid uint16) erro
 // TransitionMpremoveToRemoved transitions a key from mpremove to removed state.
 // Called when the signer receives a "propagated" KEYSTATE signal from the agent,
 // indicating all remote providers have confirmed the key removal.
-// If the key is not in mpremove state, this is a no-op (returns nil).
+// Uses a conditional UPDATE to avoid TOCTOU races. No-op if the key is not
+// in mpremove state (returns nil).
 func TransitionMpremoveToRemoved(kdb *KeyDB, zonename string, keyid uint16) error {
-	var currentState string
-	err := kdb.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&currentState)
+	res, err := kdb.Exec(`UPDATE DnssecKeyStore SET state=? WHERE zonename=? AND keyid=? AND state=?`,
+		DnskeyStateRemoved, zonename, keyid, DnskeyStateMpremove)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil
-		}
-		return fmt.Errorf("TransitionMpremoveToRemoved: query failed: %w", err)
+		return fmt.Errorf("TransitionMpremoveToRemoved: %w", err)
 	}
-
-	if currentState != DnskeyStateMpremove {
-		lgSigner.Debug("TransitionMpremoveToRemoved: key not in mpremove, no-op", "zone", zonename, "keyid", keyid, "state", currentState)
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		lgSigner.Debug("TransitionMpremoveToRemoved: key not in mpremove (or not found), no-op", "zone", zonename, "keyid", keyid)
 		return nil
 	}
 
-	if err := UpdateDnssecKeyState(kdb, zonename, keyid, DnskeyStateRemoved); err != nil {
-		return fmt.Errorf("TransitionMpremoveToRemoved: %w", err)
-	}
+	// Invalidate caches for both old and new states
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+DnskeyStateMpremove)
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+DnskeyStateRemoved)
 
 	lgSigner.Info("key transitioned mpremove->removed", "zone", zonename, "keyid", keyid)
 	return nil
