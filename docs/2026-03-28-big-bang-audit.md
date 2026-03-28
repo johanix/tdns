@@ -357,34 +357,59 @@ callback and initialization code.
 
 ## Category 9: Callback Registration
 
-### 9.1 — PreRefresh/PostRefresh Callbacks NOT Using tdns-mp Versions
+### 9.1 — PreRefresh/PostRefresh Callbacks NOT Using tdns-mp Versions — FIXED
 
-- **File**: `tdns-mp/v2/start_agent.go`, `start_combiner.go`
+- **File**: `tdns-mp/v2/start_agent.go`, `start_combiner.go`,
+  `start_signer.go`
 - **Severity**: HIGH
+- **Status**: FIXED. All three start files now append tdns-mp
+  closures (capturing `tm` and `msgQs`) to
+  `OnZonePreRefresh`/`OnZonePostRefresh` for all MP zones, placed
+  before the respective engine startup calls.
 - **Description**: `ParseZones` (in tdns) registers the **tdns
   versions** of `MPPreRefresh`/`MPPostRefresh` as callbacks on
   `OnZonePreRefresh`/`OnZonePostRefresh` (`parseconfig.go:727-728`).
   The tdns-mp versions have different signatures (extra `tm`,
-  `msgQs` params) and are **never registered**. For mpagent, the
-  tdns callbacks fire and use `tdns.Conf.Internal.MsgQs` and tdns
-  globals — which partially works (the tdns-created MsgQs exists
-  but isn't consumed by anyone in the MP binary).
-- **Impact**: Pre/post refresh analysis and queue sends use the
-  wrong MsgQs instance. The tdns SyncQ send in MPPostRefresh
-  writes to `zd.SyncQ` which IS shared (same channel), so sync
-  messages do get through. But any code in MPPreRefresh that uses
-  `Conf.Internal.MsgQs` for RFI requests will hang.
-- **Fix**: In `start_agent.go` (or `start_combiner.go`), after
-  ParseZones, replace the tdns callbacks with closures that call
-  the tdns-mp versions:
+  `msgQs` params) and are **never registered**. For all MP apps
+  (mpagent, mpcombiner, mpsigner), the tdns callbacks fire and
+  use `tdns.Conf.Internal.MPTransport` (nil — no dual-write) and
+  `tdns.Conf.Internal.MsgQs` (a separate, unconsumed instance).
+- **Impact**: The tdns MPPreRefresh callback partially works: zone
+  analysis (HsyncChanged, DnskeysChangedNG, populateMPdata) runs
+  fine since these are methods on `*tdns.ZoneData`. Queue sends in
+  MPPostRefresh write to `zd.SyncQ` which IS shared, so HSYNC
+  updates reach HsyncEngine. But KEYSTATE RFI
+  (`RequestAndWaitForKeyInventory`) uses
+  `Conf.Internal.MPTransport` (nil) and fails silently.
+- **Fix**: In ALL three MP app startup files (`start_agent.go`,
+  `start_combiner.go`, `start_signer.go`), ADD tdns-mp closures
+  to the OnZonePreRefresh/OnZonePostRefresh slices. Do NOT replace
+  the existing tdns callbacks — they will go away when MP code is
+  removed from tdns. The tdns-mp closures handle all MP concerns
+  with proper access to the local transport bridge and MsgQs.
 
   ```go
-  zd.OnZonePreRefresh = []func(zd, new_zd *tdns.ZoneData){
+  zd.OnZonePreRefresh = append(zd.OnZonePreRefresh,
       func(zd, new_zd *tdns.ZoneData) {
           MPPreRefresh(zd, new_zd, tm, msgQs)
-      },
-  }
+      })
+  zd.OnZonePostRefresh = append(zd.OnZonePostRefresh,
+      func(zd *tdns.ZoneData) {
+          MPPostRefresh(zd, tm, msgQs)
+      })
   ```
+
+  **Duplicate execution is acceptable**: all three message types
+  consumed by HsyncEngine are idempotent:
+  - HSYNC-UPDATE → `UpdateAgents` rebuilds state from current
+    HSYNC3 data; `MarkAgentAsNeeded` is a no-op for existing agents
+  - SYNC-DNSKEY-RRSET → SDE's `markAddPending` checks existing
+    state; re-adding an ACCEPTED RR is a no-op
+  - Delegation sync → DDNS UPDATEs to parent are idempotent
+    (adding existing NS/DS records is a no-op)
+
+  The duplication disappears when MP code is removed from tdns
+  (ParseZones will no longer register the tdns callbacks).
 
 ### 9.2 — SIGHUP Adds Zones With tdns Callbacks Only
 
