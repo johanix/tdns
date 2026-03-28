@@ -166,55 +166,14 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	zd.mu.Unlock()
 	new_zd.Ready = true
 
-	// Detect whether the delegation data has changed.
-	// zd.Logger.Printf("FetchFromFile: Zone %s: delegation sync is enabled", zd.ZoneName)
-	var delchanged bool
-	var dss DelegationSyncStatus
-	if zd.Options[OptDelSyncChild] {
-		delchanged, dss, err = zd.DelegationDataChangedNG(&new_zd)
-		if err != nil {
-			lg.Error("DelegationDataChanged failed", "zone", zd.ZoneName, "err", err)
-			return false, err
-		}
+	// Pre-refresh callbacks: analysis of old vs new zone data + modification of new_zd.
+	// MP roles (agent, combiner, signer) register callbacks to detect HSYNC/DNSKEY/delegation
+	// changes, add combiner contributions, populate MP data, etc. — all before the hard flip.
+	for _, cb := range zd.OnZonePreRefresh {
+		cb(zd, &new_zd)
 	}
 
-	var hsyncchanged, keyschanged bool
-	var hss *HsyncStatus
-	var dskeyStatus *DnskeyStatus
-	switch Globals.App.Type {
-	case AppTypeAgent, AppTypeCombiner, AppTypeMPCombiner, AppTypeAuth:
-		hsyncchanged, hss, err = zd.HsyncChanged(&new_zd)
-		if err != nil {
-			lg.Error("HsyncChanged failed", "zone", zd.ZoneName, "err", err)
-			// return false, err
-		}
-		keyschanged, err = zd.DnskeysChangedNG(&new_zd)
-		if err != nil {
-			lg.Error("DnskeysChanged failed", "zone", zd.ZoneName, "err", err)
-			// return false, err
-		}
-		// For multi-provider zones, also compute local DNSKEY adds/removes
-		// (must be done before zone data swap below)
-		if keyschanged && zd.Options[OptMultiProvider] {
-			if Globals.App.Type == AppTypeAgent {
-				// KEYSTATE is the sole source of truth for local vs foreign DNSKEYs.
-				zd.RequestAndWaitForKeyInventory(context.Background())
-				_, dskeyStatus, err = zd.LocalDnskeysFromKeystate()
-				if err != nil {
-					lg.Error("LocalDnskeysFromKeystate failed", "zone", zd.ZoneName, "err", err)
-				}
-				if dskeyStatus == nil {
-					keyschanged = false
-				}
-			} else {
-				_, dskeyStatus, err = zd.LocalDnskeysChanged(&new_zd)
-				if err != nil {
-					lg.Error("LocalDnskeysChanged failed", "zone", zd.ZoneName, "err", err)
-				}
-			}
-		}
-	}
-
+	// Hard flip: update served zone data atomically.
 	zd.mu.Lock()
 	zd.Owners = new_zd.Owners
 	zd.OwnerIndex = new_zd.OwnerIndex
@@ -222,8 +181,6 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	if zd.FirstZoneLoad {
 		zd.CurrentSerial = new_zd.CurrentSerial
 		zd.FirstZoneLoad = false
-		// Don't persist on first load — the persisted serial (if any) will be
-		// restored in initialLoadZone and must not be overwritten here.
 	} else {
 		zd.CurrentSerial++
 		if zd.KeyDB != nil && zd.KeyDB.Options[AuthOptPersistOutboundSerial] != "" {
@@ -240,77 +197,13 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	zd.Ready = true
 	zd.mu.Unlock()
 
-	// Snapshot upstream data for combiner NS fallback (before CombineWithLocalChanges)
-	if Globals.App.Type == AppTypeCombiner || Globals.App.Type == AppTypeMPCombiner {
-		zd.snapshotUpstreamData()
-	}
-
 	// Repopulate all dynamically generated RRs after zone refresh
 	// (they may have been lost if not present in the zone file)
 	zd.RepopulateDynamicRRs(dynamicRRs)
 
-	// Recompute multi-provider membership and signing state after every refresh.
-	// This must run for all app types (agent, combiner, signer) so that zd.MP.MPdata
-	// is always up-to-date with the zone owner's HSYNC3+HSYNCPARAM declarations.
-	if zd.Options[OptMultiProvider] {
-		zd.populateMPdata()
-	}
-
-	// For multi-provider zones on the signer: use cached MPdata to
-	// dynamically enable/disable inline-signing and detect multi-signer mode.
-	if zd.MP != nil && zd.MP.MPdata != nil && Globals.App.Type == AppTypeAuth {
-		shouldSign := zd.MP.MPdata.WeAreSigner
-		otherSigners := zd.MP.MPdata.OtherSigners
-		if shouldSign && !zd.Options[OptInlineSigning] {
-			lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", zd.ZoneName)
-			zd.Options[OptInlineSigning] = true
-		} else if !shouldSign && zd.Options[OptInlineSigning] {
-			lg.Info("HSYNC SIGN=false, disabling inline-signing", "zone", zd.ZoneName)
-			zd.Options[OptInlineSigning] = false
-		}
-		isMS := shouldSign && otherSigners > 0
-		if isMS && !zd.Options[OptMultiSigner] {
-			lg.Info("multi-signer mode detected", "zone", zd.ZoneName, "otherSigners", otherSigners)
-			zd.Options[OptMultiSigner] = true
-		} else if !isMS && zd.Options[OptMultiSigner] {
-			lg.Info("no longer multi-signer", "zone", zd.ZoneName)
-			zd.Options[OptMultiSigner] = false
-		}
-	}
-
-	// If the delegation has changed, send an update to the DelegationSyncEngine
-	if zd.Options[OptDelSyncChild] && delchanged {
-		lg.Info("delegation data has changed, sending update to DelegationSyncEngine", "zone", zd.ZoneName)
-		zd.DelegationSyncQ <- DelegationSyncRequest{
-			Command:    "SYNC-DELEGATION",
-			ZoneName:   zd.ZoneName,
-			ZoneData:   zd,
-			SyncStatus: dss,
-		}
-	}
-
-	// If this is a multi-signer zone, check for changes to the HSYNC and DNSKEY RRsets; notify HsyncEngine
-	if zd.Options[OptMultiProvider] {
-		if keyschanged {
-			lg.Info("DNSKEY RRset has changed, sending update to HsyncEngine", "zone", zd.ZoneName)
-			zd.SyncQ <- SyncRequest{
-				Command:      "SYNC-DNSKEY-RRSET",
-				ZoneName:     ZoneName(zd.ZoneName),
-				ZoneData:     zd,
-				DnskeyStatus: dskeyStatus,
-			}
-		}
-
-		if hsyncchanged {
-			lg.Info("HSYNC RRset has changed, sending update to HsyncEngine", "zone", zd.ZoneName)
-
-			zd.SyncQ <- SyncRequest{
-				Command:    "HSYNC-UPDATE",
-				ZoneName:   ZoneName(zd.ZoneName),
-				ZoneData:   zd,
-				SyncStatus: hss,
-			}
-		}
+	// Post-refresh callbacks: queue sends and notifications that need the live zone pointer.
+	for _, cb := range zd.OnZonePostRefresh {
+		cb(zd)
 	}
 
 	return true, nil
@@ -349,61 +242,12 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 
 	new_zd.Ready = true
 
-	// Detect whether the delegation data has changed.
-	// zd.Logger.Printf("FetchFromUpstream: Zone %s: delegation sync is enabled", zd.ZoneName)
-	var delchanged bool
-	var dss DelegationSyncStatus
-	if zd.Options[OptDelSyncChild] {
-		delchanged, dss, err = zd.DelegationDataChangedNG(&new_zd)
-		if err != nil {
-			lg.Error("DelegationDataChanged failed", "zone", zd.ZoneName, "err", err)
-			// return false, err
-		}
+	// Pre-refresh callbacks: analysis of old vs new zone data + modification of new_zd.
+	for _, cb := range zd.OnZonePreRefresh {
+		cb(zd, &new_zd)
 	}
 
-	var hsyncchanged, dnskeyschanged bool
-	var hss *HsyncStatus
-	var dskeyStatusUpstream *DnskeyStatus
-	switch Globals.App.Type {
-	case AppTypeAgent, AppTypeCombiner, AppTypeMPCombiner, AppTypeAuth:
-		hsyncchanged, hss, err = zd.HsyncChanged(&new_zd)
-		if err != nil {
-			lg.Error("HsyncChanged failed", "zone", zd.ZoneName, "err", err)
-			// return false, err
-		}
-		lg.Debug("FetchFromUpstream: HsyncChanged result", "zone", zd.ZoneName, "changed", hsyncchanged)
-		dnskeyschanged, err = zd.DnskeysChangedNG(&new_zd)
-		if err != nil {
-			lg.Error("DnskeysChangedNG failed", "zone", zd.ZoneName, "err", err)
-			// return false, err
-		}
-		// For multi-provider zones, compute local DNSKEY adds/removes before zone swap
-		if dnskeyschanged && zd.Options[OptMultiProvider] {
-			if Globals.App.Type == AppTypeAgent {
-				// KEYSTATE is the sole source of truth for local vs foreign DNSKEYs.
-				// Request inventory from signer, then derive local keys from it.
-				zd.RequestAndWaitForKeyInventory(context.Background())
-				_, dskeyStatusUpstream, err = zd.LocalDnskeysFromKeystate()
-				if err != nil {
-					lg.Error("LocalDnskeysFromKeystate failed", "zone", zd.ZoneName, "err", err)
-				}
-				if dskeyStatusUpstream == nil {
-					// KEYSTATE unavailable — suppress SYNC-DNSKEY-RRSET.
-					// No DNSKEYs enter SDE until KEYSTATE succeeds.
-					dnskeyschanged = false
-				}
-			} else {
-				// Non-agent roles (combiner, signer) use the zone transfer path
-				_, dskeyStatusUpstream, err = zd.LocalDnskeysChanged(&new_zd)
-				if err != nil {
-					lg.Error("LocalDnskeysChanged failed", "zone", zd.ZoneName, "err", err)
-				}
-			}
-		}
-	default:
-		// Do nothing
-	}
-
+	// Hard flip: update served zone data atomically.
 	zd.mu.Lock()
 	zd.Owners = new_zd.Owners
 	zd.OwnerIndex = new_zd.OwnerIndex
@@ -411,8 +255,6 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	if zd.FirstZoneLoad {
 		zd.CurrentSerial = new_zd.CurrentSerial
 		zd.FirstZoneLoad = false
-		// Don't persist on first load — the persisted serial (if any) will be
-		// restored in initialLoadZone and must not be overwritten here.
 	} else {
 		zd.CurrentSerial++
 		if zd.KeyDB != nil && zd.KeyDB.Options[AuthOptPersistOutboundSerial] != "" {
@@ -429,135 +271,13 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	zd.Ready = true
 	zd.mu.Unlock()
 
-	// Snapshot upstream data for combiner NS fallback (before CombineWithLocalChanges)
-	if Globals.App.Type == AppTypeCombiner || Globals.App.Type == AppTypeMPCombiner {
-		zd.snapshotUpstreamData()
-	}
-
 	// Repopulate all dynamically generated RRs after zone refresh
 	// (they may have been lost if not present in the transferred zone)
 	zd.RepopulateDynamicRRs(dynamicRRs)
 
-	// Recompute multi-provider membership and signing state after every zone transfer.
-	if zd.Options[OptMultiProvider] {
-		zd.populateMPdata()
-	}
-
-	// For multi-provider zones on the signer: use cached MPdata to
-	// dynamically enable/disable inline-signing and detect multi-signer mode.
-	if zd.MP != nil && zd.MP.MPdata != nil && Globals.App.Type == AppTypeAuth {
-		shouldSign := zd.MP.MPdata.WeAreSigner
-		otherSigners := zd.MP.MPdata.OtherSigners
-		if shouldSign && !zd.Options[OptInlineSigning] {
-			lg.Info("HSYNC SIGN=true, enabling inline-signing", "zone", zd.ZoneName)
-			zd.Options[OptInlineSigning] = true
-		} else if !shouldSign && zd.Options[OptInlineSigning] {
-			lg.Info("HSYNC SIGN=false, disabling inline-signing", "zone", zd.ZoneName)
-			zd.Options[OptInlineSigning] = false
-		}
-		isMS := shouldSign && otherSigners > 0
-		if isMS && !zd.Options[OptMultiSigner] {
-			lg.Info("multi-signer mode detected", "zone", zd.ZoneName, "otherSigners", otherSigners)
-			zd.Options[OptMultiSigner] = true
-		} else if !isMS && zd.Options[OptMultiSigner] {
-			lg.Info("no longer multi-signer", "zone", zd.ZoneName)
-			zd.Options[OptMultiSigner] = false
-		}
-	}
-
-	// Can only test for differences between old and new zone data if the zone data is ready.
-	if delchanged && zd.Options[OptDelSyncChild] {
-		lg.Info("delegation data has changed, sending update to DelegationSyncEngine", "zone", zd.ZoneName)
-		zd.DelegationSyncQ <- DelegationSyncRequest{
-			Command:    "SYNC-DELEGATION",
-			ZoneName:   zd.ZoneName,
-			ZoneData:   zd,
-			SyncStatus: dss,
-		}
-	}
-
-	if dnskeyschanged {
-		switch Globals.App.Type {
-		case AppTypeAgent:
-			if zd.Options[OptMultiProvider] {
-				// Multi-provider: send to HsyncEngine for distribution to remote agents
-				lg.Info("local DNSKEYs changed, sending to HsyncEngine for remote agent distribution", "zone", zd.ZoneName)
-				zd.SyncQ <- SyncRequest{
-					Command:      "SYNC-DNSKEY-RRSET",
-					ZoneName:     ZoneName(zd.ZoneName),
-					ZoneData:     zd,
-					DnskeyStatus: dskeyStatusUpstream,
-				}
-			} else {
-				// Legacy path: send to DelegationSyncher
-				lg.Info("DNSSEC keys have changed, sending update to DelegationSyncEngine", "zone", zd.ZoneName)
-				oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
-				if err != nil {
-					lg.Error("GetRRset failed", "zone", zd.ZoneName, "rrtype", dns.TypeDNSKEY, "err", err)
-				}
-				newkeys, err := new_zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
-				if err != nil {
-					lg.Error("GetRRset failed", "zone", zd.ZoneName, "rrtype", dns.TypeDNSKEY, "err", err)
-				}
-				zd.MusicSyncQ <- MusicSyncRequest{
-					Command:    "SYNC-DNSKEY-RRSET",
-					ZoneName:   zd.ZoneName,
-					ZoneData:   zd,
-					OldDnskeys: oldkeys,
-					NewDnskeys: newkeys,
-				}
-			}
-		case AppTypeCombiner, AppTypeMPCombiner:
-			// A combiner doesn't need to act on DNSKEY changes. But for now we log it to verify the code path.
-			lg.Debug("incoming DNSKEYs have changed, no action needed for combiner", "zone", zd.ZoneName)
-		}
-	}
-
-	if hsyncchanged {
-		switch Globals.App.Type {
-		case AppTypeAgent:
-			lg.Info("HSYNC RRset has changed, sending update to HsyncEngine", "zone", zd.ZoneName)
-			zd.SyncQ <- SyncRequest{
-				Command:    "HSYNC-UPDATE",
-				ZoneName:   ZoneName(zd.ZoneName),
-				ZoneData:   zd,
-				SyncStatus: hss,
-			}
-		case AppTypeCombiner, AppTypeMPCombiner:
-			matched, _, _ := zd.matchHsyncProvider(ourHsyncIdentities())
-			if matched && !zd.Options[OptMPDisallowEdits] {
-				lg.Info("HSYNC RRset confirms we are a listed provider and signer, enabling allow-edits", "zone", zd.ZoneName)
-				zd.Options[OptAllowEdits] = true
-			} else if matched && zd.Options[OptMPDisallowEdits] {
-				lg.Info("HSYNC RRset confirms we are a listed provider but not a signer, edits disallowed", "zone", zd.ZoneName)
-				zd.Options[OptAllowEdits] = false
-			} else {
-				lg.Info("HSYNC RRset does not list us as a provider, disabling allow-edits", "zone", zd.ZoneName)
-				zd.Options[OptAllowEdits] = false
-			}
-		}
-	}
-
-	lg.Debug("FetchFromUpstream: checking combine status", "zone", zd.ZoneName, "appType", AppTypeToString[Globals.App.Type], "allowEdits", zd.Options[OptAllowEdits])
-	// XXX: Current thinking: the OptCombiner option is dynamically set for a zone given the combination of
-	//      (a) it contains a HSYNC RRset and (b) appname is "combiner".
-	if (Globals.App.Type == AppTypeCombiner || Globals.App.Type == AppTypeMPCombiner) && zd.Options[OptAllowEdits] {
-		lg.Info("combining with local changes", "zone", zd.ZoneName)
-		success, err := zd.CombineWithLocalChanges()
-		if err != nil {
-			lg.Error("CombineWithLocalChanges failed", "zone", zd.ZoneName, "err", err)
-			return false, err
-		}
-		if success {
-			lg.Info("local changes applied, sending to downstreams", "zone", zd.ZoneName)
-		} else {
-			lg.Debug("local changes not applied, not sending to downstreams", "zone", zd.ZoneName)
-		}
-
-		// Inject combiner signature TXT if configured
-		if InjectSignatureTXT(zd, Conf.MultiProvider) {
-			lg.Debug("signature TXT injected", "zone", zd.ZoneName)
-		}
+	// Post-refresh callbacks: queue sends and notifications that need the live zone pointer.
+	for _, cb := range zd.OnZonePostRefresh {
+		cb(zd)
 	}
 
 	if viper.GetBool("service.debug") {
