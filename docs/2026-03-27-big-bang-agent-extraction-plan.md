@@ -363,7 +363,7 @@ hard flip. Receives both old (current, still served) and
 new (incoming, not yet served) zone data:
 
 ```go
-OnZoneRefresh func(zd, new_zd *ZoneData)
+OnZoneRefresh []func(zd, new_zd *ZoneData)
 ```
 
 The callback runs before the hard flip for two reasons:
@@ -396,8 +396,8 @@ hard flip then publishes the complete zone atomically.
 zone_utils.go FetchFromUpstream becomes:
 ```
 // ... zone transfer, serial check ...
-if zd.OnZoneRefresh != nil {
-    zd.OnZoneRefresh(zd, &new_zd)
+for _, cb := range zd.OnZoneRefresh {
+    cb(zd, &new_zd)
 }
 // ... hard flip (publishes fully-prepared new_zd) ...
 // ... persist serial, notify ...
