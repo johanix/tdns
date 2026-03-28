@@ -6,9 +6,24 @@ Depends on: Steps 1, 2b-2d, 3a-3b complete
 
 ## Overview
 
-Move all agent code (~10,000 lines, 14 files, ~76 types,
+Move all agent code (~10,000 lines, 13 files, ~76 types,
 ~183 functions) from tdns/v2/ to tdns-mp/v2/ in a single
 coordinated operation. No changes to tdns — copy only.
+(One exception: callback injection in zone_utils.go, see
+Prerequisite section.)
+
+## Completed Prerequisites
+
+These steps from earlier planning docs are DONE:
+- Step 1: MPTransportBridge copied to tdns-mp (3 files)
+- Step 2b: tdnsmp.InternalMpConf created with all fields
+- Step 2c: All tdns-mp files use conf.InternalMp.*
+- Step 2d: Local MPTransportBridge struct active (no alias)
+- Step 3a: initMPAgent created in main_init.go
+- Step 3b: StartMPAgent + mpagent binary created
+- agent_discovery.go already copied (Step 1)
+- agent_authorization.go already copied (Step 1)
+- hsync_transport.go already copied (Step 1)
 
 ## Constraints
 
@@ -28,24 +43,27 @@ coordinated operation. No changes to tdns — copy only.
    is defined in tdns/v2/structs.go (core infrastructure)
    and has no agent-specific methods.
 
-## Files to Copy (14 files)
+## Files to Copy (13 files)
 
-| File | Lines | Types defined | Methods | Free funcs |
-|------|-------|---------------|---------|------------|
-| agent_structs.go | 471 | 28 | 2 | 0 |
-| agent_policy.go | 503 | 0 | 4 | 0 |
-| agent_utils.go | 1134 | 1 | 15 | 2 |
-| agent_setup.go | 564 | 0 | 5(STAYS) + 1(MOVING) | 0 |
-| agent_discovery_common.go | 289 | 0 | 6(STAYS) | 0 |
-| hsync_beat.go | 237 | 0 | 2 | 2(on *Agent) |
-| hsync_hello.go | 377 | 0 | 9 | 1(on *Agent) |
-| hsync_infra_beat.go | 95 | 0 | 2 | 0 |
-| hsyncengine.go | 1131 | 4 | 7 | 2 |
-| hsync_utils.go | 909 | 2 | 12(STAYS) | 2 |
-| syncheddataengine.go | 1578 | 17 | 18 + 1(STAYS) | 2 |
-| gossip.go | 368 | 4 | 9 | 1 |
-| provider_groups.go | 275 | 3 | 7 | 2 |
-| parentsync_leader.go | 1498 | 4 | 37 | 2 |
+NOTE: agent_discovery_common.go is NOT copied. Its 6
+methods on *Imr are already exported in tdns and callable
+cross-package from the existing tdns-mp agent_discovery.go.
+
+| File | Lines | Types | Config coupling |
+|------|-------|-------|-----------------|
+| agent_structs.go | 471 | 28 | none |
+| agent_policy.go | 503 | 0 | none |
+| agent_utils.go | 1134 | 1 | light (6 refs) |
+| agent_setup.go | 564 | 0 | heavy (48 refs) |
+| hsync_beat.go | 237 | 0 | none |
+| hsync_hello.go | 377 | 0 | none |
+| hsync_infra_beat.go | 95 | 0 | none |
+| hsyncengine.go | 1131 | 4 | light (3 refs) |
+| hsync_utils.go | 909 | 2 | moderate (12 refs) |
+| syncheddataengine.go | 1578 | 17 | moderate (12 refs) |
+| gossip.go | 368 | 4 | none |
+| provider_groups.go | 275 | 3 | none |
+| parentsync_leader.go | 1498 | 4 | light (3 refs) |
 
 ## Types to Move (become real structs, replace aliases)
 
@@ -106,10 +124,35 @@ coordinated operation. No changes to tdns — copy only.
 - ChunkPayloadStore
 
 ### Types that STAY as aliases
+
+**Permanently (no methods, pervasive, or defined elsewhere):**
 - AgentId (= tdns.AgentId) — pervasive, no methods
 - ZoneName (= tdns.ZoneName) — pervasive, no methods
+- ZoneUpdate (= tdns.ZoneUpdate) — used in core DNS
 - OwnerData (= tdns.OwnerData) — defined in structs.go
 - AgentMsg (= core.AgentMsg) — defined in core package
+- KeyInventoryItem — signer type
+- DnssecKeyWithTimestamps — signer type
+- CombinerState — used by signer/combiner code
+
+**Temporarily (until dual-writes removed):**
+- MsgQs — dual-written in main_init.go initMPAgent
+- AgentRegistry — dual-written in main_init.go initMPAgent
+- DistributionCache — dual-written in main_init.go
+
+These three must remain aliases while main_init.go
+dual-writes `conf.Config.Internal.X = conf.InternalMp.X`.
+The dual-writes exist so tdns code (HsyncEngine, SDE)
+can access the MP state. Once HsyncEngine and SDE become
+methods on *tdnsmp.Config (Step 8) and read from
+conf.InternalMp directly, the dual-writes are removed
+and these aliases can become real types.
+
+**Consequence for Step 1:** Do NOT move MsgQs,
+AgentRegistry, or DistributionCache type definitions yet.
+Move all other agent_structs.go types. The struct
+definitions for these three move in a follow-up step
+after Step 8 removes the dual-writes.
 
 ## ZoneUpdate: Special Case
 
@@ -124,103 +167,115 @@ references it as `tdns.ZoneUpdate` or via alias.
 
 ## Functions Requiring Receiver Conversion
 
-These are methods on types that STAY in tdns. When copied
-to tdns-mp, the receiver must become a normal parameter.
+Methods on types that STAY in tdns need conversion when
+copied to tdns-mp. Two conversion strategies:
 
-### Methods on *Config (5 functions, in agent_setup.go)
+### Strategy A: *tdns.Config → *tdnsmp.Config receiver
+
+Methods on `*tdns.Config` become methods on `*Config`
+(tdnsmp). This is the preferred approach because
+`*tdnsmp.Config` embeds `*tdns.Config` — so all DNS
+fields are accessible via `conf.Config.Internal.*` and
+all MP fields via `conf.InternalMp.*`. No parameter
+plumbing needed.
+
+### Strategy B: *tdns.ZoneData → free function
+
+Methods on `*tdns.ZoneData` must become free functions
+(tdnsmp.Config does not embed ZoneData). The ZoneData
+pointer becomes an explicit first parameter.
+
+### Methods on *Config → *tdnsmp.Config (Strategy A)
+
+**From agent_setup.go (5 functions):**
 ```
 (conf *Config) SetupAgent(all_zones)
-  → SetupAgent(conf *tdns.Config, all_zones []string)
-  Callers: main_init.go (tdns-mp), main_initfuncs.go (tdns)
+  → (conf *Config) SetupAgent(all_zones)  [tdnsmp.Config]
+  Callers: main_init.go (tdns-mp)
 
 (conf *Config) SetupAgentAutoZone(zonename)
-  → SetupAgentAutoZone(conf *tdns.Config, zonename string)
+  → (conf *Config) SetupAgentAutoZone(zonename)
   Callers: within SetupAgent only
 
 (conf *Config) publishApiTransport(zd)
-  → publishApiTransport(conf *tdns.Config, zd *tdns.ZoneData)
+  → (conf *Config) publishApiTransport(zd *tdns.ZoneData)
   Callers: within SetupAgent only
 
 (conf *Config) publishDnsTransport(zd)
-  → publishDnsTransport(conf *tdns.Config, zd *tdns.ZoneData)
+  → (conf *Config) publishDnsTransport(zd *tdns.ZoneData)
   Callers: within SetupAgent only
 ```
 
-### Methods on *Config (1 function, syncheddataengine.go)
+**From syncheddataengine.go (1 function):**
 ```
 (conf *Config) SynchedDataEngine(ctx, msgQs)
-  → SynchedDataEngine(conf *tdns.Config, ctx, msgQs *MsgQs)
-  Callers: start_agent.go (tdns-mp), main_initfuncs.go (tdns)
+  → (conf *Config) SynchedDataEngine(ctx, msgQs *MsgQs)
+  Callers: start_agent.go (tdns-mp)
 ```
 
-### Methods on *Config (1 function, agent_utils.go)
+**From agent_utils.go (1 function):**
 ```
 (conf *Config) NewAgentRegistry()
-  → NewAgentRegistry(conf *tdns.Config)
-  Callers: main_init.go (tdns-mp), main_initfuncs.go (tdns)
+  → (conf *Config) NewAgentRegistry()
+  Callers: main_init.go (tdns-mp)
 ```
 
-### Methods on *ZoneData (12 functions, in hsync_utils.go)
+**From hsyncengine.go (1 free function → method):**
+```
+HsyncEngine(ctx, conf *Config, msgQs *MsgQs)
+  → (conf *Config) HsyncEngine(ctx, msgQs *MsgQs)
+  Callers: start_agent.go (tdns-mp)
+```
+
+Inside these functions:
+- `conf.MultiProvider` → `conf.Config.MultiProvider`
+- `conf.Internal.KeyDB` → `conf.Config.Internal.KeyDB`
+- `conf.Internal.MPTransport` → `conf.InternalMp.MPTransport`
+- `conf.Internal.AgentRegistry` → `conf.InternalMp.AgentRegistry`
+- `conf.Internal.MsgQs` → `conf.InternalMp.MsgQs`
+- Other DNS fields via `conf.Config.Internal.*`
+
+### Methods on *ZoneData → free functions (Strategy B)
+
+**From hsync_utils.go (12 functions):**
 ```
 (zd *ZoneData) HsyncChanged(newzd)
-  → HsyncChanged(zd, newzd *tdns.ZoneData)
-  Callers: hsyncengine.go (SyncRequestHandler)
-
+  → HsyncChanged(zd, newzd *tdns.ZoneData) (bool, ...)
 (zd *ZoneData) LocalDnskeysChanged(newzd)
-  → LocalDnskeysChanged(zd, newzd *tdns.ZoneData)
-  Callers: hsyncengine.go
-
+  → LocalDnskeysChanged(zd, newzd *tdns.ZoneData) (bool, ...)
 (zd *ZoneData) LocalDnskeysFromKeystate()
-  → LocalDnskeysFromKeystate(zd *tdns.ZoneData)
-  Callers: hsyncengine.go
-
+  → LocalDnskeysFromKeystate(zd *tdns.ZoneData) (bool, ...)
 (zd *ZoneData) RequestAndWaitForKeyInventory(ctx)
   → RequestAndWaitForKeyInventory(zd *tdns.ZoneData, ctx)
-  Callers: syncheddataengine.go
-
 (zd *ZoneData) RequestAndWaitForEdits(ctx)
   → RequestAndWaitForEdits(zd *tdns.ZoneData, ctx)
-  Callers: syncheddataengine.go
-
 (zd *ZoneData) applyEditsToSDE(agentRecords)
   → applyEditsToSDE(zd *tdns.ZoneData, agentRecords)
-  Callers: hsync_utils.go (within RequestAndWaitForEdits)
-
 (zd *ZoneData) buildRemoteDNSKEYsFromTags(foreignKeyTags)
   → buildRemoteDNSKEYsFromTags(zd *tdns.ZoneData, ...)
-  Callers: hsync_utils.go (internal)
-
 (zd *ZoneData) ValidateHsyncRRset()
-  → ValidateHsyncRRset(zd *tdns.ZoneData)
-  Callers: hsync_hello.go (EvaluateHello)
-
+  → ValidateHsyncRRset(zd *tdns.ZoneData) (bool, error)
 (zd *ZoneData) matchHsyncProvider(ourIdentities)
   → matchHsyncProvider(zd *tdns.ZoneData, ourIdentities)
-  Callers: hsync_utils.go (populateMPdata)
-
 (zd *ZoneData) analyzeHsyncSigners(ourIdentities, label)
   → analyzeHsyncSigners(zd *tdns.ZoneData, ...)
-  Callers: hsync_utils.go (populateMPdata)
-
 (zd *ZoneData) populateMPdata()
   → populateMPdata(zd *tdns.ZoneData)
-  Callers: hsync_utils.go, hsyncengine.go
-
 (zd *ZoneData) weAreASigner()
-  → weAreASigner(zd *tdns.ZoneData)
-  Callers: hsync_utils.go (populateMPdata)
+  → weAreASigner(zd *tdns.ZoneData) (bool, error)
 ```
+Callers are all in moving files (hsyncengine.go,
+syncheddataengine.go, hsync_hello.go, hsync_utils.go).
+Change `zd.Foo()` → `Foo(zd)` at each call site.
 
-### Methods on *ZoneData (2 functions, in agent_setup.go)
+**From agent_setup.go (2 functions):**
 ```
 (zd *ZoneData) AgentSig0KeyPrep(name, kdb)
   → AgentSig0KeyPrep(zd *tdns.ZoneData, name, kdb)
-  Callers: agent_setup.go (publishDnsTransport)
-
 (zd *ZoneData) AgentJWKKeyPrep(publishname, kdb)
   → AgentJWKKeyPrep(zd *tdns.ZoneData, publishname, kdb)
-  Callers: agent_setup.go (publishDnsTransport)
 ```
+Callers: within agent_setup.go only (publishDnsTransport).
 
 ### Methods on *Imr (6 functions, agent_discovery_common.go)
 
@@ -271,12 +326,120 @@ local copies instead.
 
 | tdns-mp file | Current call | After move |
 |-------------|-------------|------------|
-| start_agent.go:77 | tdns.HsyncEngine() | HsyncEngine() |
-| start_agent.go:80 | ar.StartInfraBeatLoop() | (already correct) |
-| start_agent.go:83 | ar.DiscoveryRetrierNG() | (already correct) |
-| start_agent.go:87 | conf.Config.SynchedDataEngine() | SynchedDataEngine(conf.Config, ...) |
-| main_init.go:343 | conf.Config.NewAgentRegistry() | NewAgentRegistry(conf.Config) |
-| main_init.go:336 | conf.Config.SetupAgent() | SetupAgent(conf.Config, ...) |
+| start_agent.go | tdns.HsyncEngine(ctx, conf.Config, ...) | conf.HsyncEngine(ctx, ...) |
+| start_agent.go | ar.StartInfraBeatLoop(ctx) | (already correct — method on MOVING type) |
+| start_agent.go | ar.DiscoveryRetrierNG(ctx) | (already correct — method on MOVING type) |
+| start_agent.go | conf.Config.SynchedDataEngine(ctx, ...) | conf.SynchedDataEngine(ctx, ...) |
+| main_init.go | conf.Config.NewAgentRegistry() | conf.NewAgentRegistry() |
+| main_init.go | conf.Config.SetupAgent(zones) | conf.SetupAgent(zones) |
+
+## Prerequisite: Refresh Cycle Callback Injection
+
+The refresh cycle (FetchFromUpstream, FetchFromFile in
+zone_utils.go) calls 13+ MP-analysis functions that are
+moving to tdns-mp. Since tdns cannot import tdns-mp
+(circular dependency), these calls must be replaced with
+registered callbacks before the big bang.
+
+### The Problem
+
+FetchFromUpstream lines 350-561 contain:
+- Pre-flip analysis: DelegationDataChangedNG, HsyncChanged,
+  DnskeysChangedNG, LocalDnskeysChanged,
+  LocalDnskeysFromKeystate, RequestAndWaitForKeyInventory
+- Post-flip actions: snapshotUpstreamData, populateMPdata,
+  matchHsyncProvider, CombineWithLocalChanges,
+  InjectSignatureTXT, SyncQ/DelegationSyncQ sends
+
+FetchFromFile has the same pattern (lines 169-313).
+
+All of these are MP-specific code that should not remain
+in tdns core.
+
+### Two Callbacks Required
+
+**Why not one:** The agent's RequestAndWaitForKeyInventory
+is a blocking RPC to the signer that MUST complete before
+the hard flip. Pre-flip analysis produces change-detection
+results (delchanged, hsyncchanged, dnskeyschanged + their
+status structs) that post-flip actions consume. These
+cannot be re-derived after the flip.
+
+### Callback 1: OnPreZoneFlip
+
+```go
+// Registered on ZoneData, called before the hard flip.
+// Receives both old and new zone data.
+// Returns analysis results consumed by post-flip callback.
+OnPreZoneFlip func(old_zd, new_zd *ZoneData) *ZoneFlipAnalysis
+```
+
+Where `ZoneFlipAnalysis` is:
+```go
+type ZoneFlipAnalysis struct {
+    DelegationChanged bool
+    DelegationStatus  *DelegationSyncStatus
+    HsyncChanged      bool
+    HsyncStatus       *HsyncStatus
+    DnskeyChanged     bool
+    DnskeyStatus      *DnskeyStatus
+}
+```
+
+This callback replaces all pre-flip analysis code:
+- DelegationDataChangedNG (delegation change detection)
+- HsyncChanged (HSYNC RR change detection)
+- DnskeysChangedNG / LocalDnskeysChanged (DNSKEY changes)
+- LocalDnskeysFromKeystate (agent KEYSTATE analysis)
+- RequestAndWaitForKeyInventory (agent blocking RPC)
+
+### Callback 2: OnPostZoneFlip
+
+```go
+// Registered on ZoneData, called after the hard flip.
+// Receives updated zone data + pre-flip analysis results.
+OnPostZoneFlip func(zd *ZoneData, analysis *ZoneFlipAnalysis)
+```
+
+This callback replaces all post-flip MP actions:
+- snapshotUpstreamData (combiner upstream snapshot)
+- populateMPdata (MP membership/signing state)
+- Signer inline-signing decisions
+- Delegation sync queue send (if DelegationChanged)
+- DNSKEY sync routing (if DnskeyChanged)
+- HSYNC sync routing (if HsyncChanged)
+- matchHsyncProvider + allow-edits logic (combiner)
+- CombineWithLocalChanges + InjectSignatureTXT (combiner)
+
+### After Callback Injection
+
+zone_utils.go FetchFromUpstream becomes:
+```
+// ... zone transfer, serial check ...
+var analysis *ZoneFlipAnalysis
+if zd.OnPreZoneFlip != nil {
+    analysis = zd.OnPreZoneFlip(zd, &new_zd)
+}
+// ... hard flip (unchanged) ...
+if zd.OnPostZoneFlip != nil {
+    zd.OnPostZoneFlip(zd, analysis)
+}
+// ... persist serial, notify ...
+```
+
+FetchFromFile uses the same pattern.
+
+### Implementation Note
+
+The callback injection is a change to tdns (zone_utils.go
+and structs.go for the callback fields). This is the ONE
+exception to the "no tdns changes" rule — it's a
+prerequisite structural change that enables the extraction.
+The callbacks are registered by tdns-mp at init time
+(in StartMPAgent, StartMPCombiner, StartMPSigner).
+
+The tdns-agent binary registers the same callbacks from
+its own code (the functions stay in tdns too).
 
 ## Execution Steps
 
@@ -435,11 +598,10 @@ Also copy the 2 free functions:
 
 Copy these files:
 - hsyncengine.go
-  - HsyncEngine: free function, takes *tdns.Config
-  - Convert SynchedDataEngine receiver to free function
+  - HsyncEngine: becomes method on *tdnsmp.Config
   - Multiple methods on *AgentRegistry (MOVING, ok)
 - syncheddataengine.go
-  - Convert SynchedDataEngine(*Config) → free function
+  - SynchedDataEngine: becomes method on *tdnsmp.Config
   - All ZoneDataRepo methods (MOVING, ok)
   - AgentId.String(), ZoneName.String() — skip (stay as
     aliases, methods defined in tdns)
@@ -449,20 +611,21 @@ Copy these files:
   - GetParentSyncStatus takes *ZoneData, *KeyDB, *Imr
     (STAYS types — passed as params, ok)
 - agent_setup.go
-  - Convert 5 methods on *Config → free functions
-  - Convert 2 methods on *ZoneData → free functions
-  - Heavy config references — use conf.* via parameter
+  - 5 methods on *tdns.Config → methods on *tdnsmp.Config
+  - 2 methods on *ZoneData → free functions
+  - Config references: conf.MultiProvider becomes
+    conf.Config.MultiProvider, conf.Internal.KeyDB becomes
+    conf.Config.Internal.KeyDB, conf.Internal.MPTransport
+    becomes conf.InternalMp.MPTransport
 
 **Open dependencies after this step:**
-- HsyncEngine takes *tdns.Config — reads conf.Internal.*
-  for DNS fields AND conf.Internal.* for MP fields. The
-  MP field reads need to change to use InternalMp once
-  HsyncEngine lives in tdns-mp. But since HsyncEngine
-  receives *tdns.Config (not *tdnsmp.Config), it can't
-  access InternalMp. Solution: change HsyncEngine to
-  take *Config (tdnsmp) — but then the tdns copy breaks.
-  Alternative: pass MsgQs, AgentRegistry etc. as explicit
-  parameters instead of extracting from conf.
+- HsyncEngine and SynchedDataEngine are now methods on
+  *tdnsmp.Config. They access DNS fields via
+  conf.Config.Internal.* and MP fields via
+  conf.InternalMp.*. No parameter redesign needed.
+- start_agent.go callers update:
+  `tdns.HsyncEngine(ctx, conf.Config, ...)` becomes
+  `conf.HsyncEngine(ctx, ...)`
 
 ### Step 9: Update existing tdns-mp files
 
@@ -482,22 +645,46 @@ Build tdns-mp. Fix compile errors. Expected categories:
 
 ## Risk Assessment
 
-### HIGH RISK: HsyncEngine config access
-HsyncEngine reads MP fields from *tdns.Config. After
-moving to tdns-mp, it should read from *tdnsmp.Config.
-But it's a free function called from both tdns and
-tdns-mp. Needs careful parameter redesign.
+### RESOLVED: HsyncEngine / SynchedDataEngine config access
+Previously HIGH risk. Resolved by making these methods on
+`*tdnsmp.Config` instead of free functions. The receiver
+gives access to both DNS fields (`conf.Config.Internal.*`)
+and MP fields (`conf.InternalMp.*`). Same approach applies
+to agent_setup.go functions.
+
+### MEDIUM RISK: Type definition completeness
+When copying struct definitions from tdns, every field
+type must resolve in tdns-mp. Types like `ApiClient`,
+`RRTypeStore`, `MultiProviderConf` must be accessible
+(via `tdns.` prefix or alias). Missing any field type
+causes a compile error. Mitigation: copy struct
+definitions exactly, verify every field type.
 
 ### MEDIUM RISK: ZoneUpdate type
 ZoneUpdate is defined in syncheddataengine.go but used
 in core DNS. Must stay as alias. Verify no methods on
 ZoneUpdate exist in the moving files.
 
+### MEDIUM RISK: MsgQs channel type coherence
+MsgQs channels use types that are moving (AgentMsgReport,
+AgentMsgPostPlus, etc.). As long as these types remain
+aliases during Step 1-4 of the execution, the channels
+work across packages. When types become real structs
+(removing aliases), any tdns code reading channels from
+a tdns-mp-created MsgQs gets type mismatches. This is
+acceptable — the mpagent binary uses tdns-mp types
+throughout; the tdns-agent binary uses tdns types.
+
 ### MEDIUM RISK: Duplicate type issue
 When we remove a type alias and add a real struct, any
 code that was using the alias seamlessly may break if
 the real struct has different field visibility or layout.
 Must copy struct definitions EXACTLY.
+
+### LOW RISK: *ZoneData receiver conversions
+14 methods on *ZoneData become free functions. Callers
+all in moving files — change `zd.Foo()` → `Foo(zd)`.
+Mechanical, low risk. Tedious but straightforward.
 
 ### LOW RISK: agent_discovery_common.go
 Decided to SKIP — methods stay on *tdns.Imr. Already
