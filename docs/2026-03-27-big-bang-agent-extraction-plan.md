@@ -356,74 +356,87 @@ FetchFromFile has the same pattern (lines 169-313).
 All of this is MP-specific code that should not remain
 in tdns core.
 
-### Design: Single Pre-Flip Callback
+### Design: Two Callbacks (Pre-Flip + Post-Flip)
 
-One callback, registered on ZoneData, called BEFORE the
-hard flip. Receives both old (current, still served) and
-new (incoming, not yet served) zone data:
+Two callback slices on ZoneData:
 
 ```go
-OnZoneRefresh []func(zd, new_zd *ZoneData)
+OnZonePreRefresh  []func(zd, new_zd *ZoneData)
+OnZonePostRefresh []func(zd *ZoneData)
 ```
 
-The callback runs before the hard flip for two reasons:
+**OnZonePreRefresh** runs BEFORE the hard flip. Receives
+both old (`zd`, current, still served) and new (`new_zd`,
+incoming, not yet served). This callback:
 
-1. **Access to both versions.** The callback can compare
-   old vs new for HSYNC/DNSKEY/delegation changes without
-   needing temporary storage of old data.
+- **Analyzes**: compares zd (old) vs new_zd (new) for
+  delegation, HSYNC, DNSKEY changes. Stores results in
+  `zd.MP` (persists across flip; Options map is shared
+  between zd and new_zd so changes are visible on both).
+- **Modifies new_zd**: adds combiner contributions
+  (CombineWithLocalChanges), injects signature TXT,
+  snapshots upstream data, populates MP data — all
+  applied to new_zd before it goes live.
+- **Agent RFIs**: RequestAndWaitForKeyInventory and
+  LocalDnskeysFromKeystate run here (have access to
+  both zone versions).
 
-2. **No race condition.** The combiner must add its
-   contributions (CombineWithLocalChanges,
-   InjectSignatureTXT) to new_zd BEFORE the flip
-   publishes it. If the callback ran after the flip, the
-   new zone would be served briefly without combiner
-   data — a race condition.
+When OnZonePreRefresh returns, new_zd is fully prepared.
+The hard flip publishes the complete zone atomically.
+No race condition — the zone is never served without
+combiner contributions.
 
-The callback does everything:
-- **Analyze**: compare zd (old) vs new_zd (new) for
-  delegation, HSYNC, DNSKEY changes
-- **Modify**: add combiner contributions, inject
-  signature TXT, populate MP data, set MP options —
-  all applied to new_zd before it goes live
-- **Act**: send to SyncQ, DelegationSyncQ, trigger RFIs,
-  RequestAndWaitForKeyInventory
+**OnZonePostRefresh** runs AFTER the hard flip. Receives
+`zd` (now serving new data). This callback:
 
-When the callback returns, new_zd is fully prepared. The
-hard flip then publishes the complete zone atomically.
+- **Queue sends**: SyncQ, DelegationSyncQ, MusicSyncQ —
+  these must happen after the flip because consumers
+  read `req.ZoneData` which must point to the live zone.
+- **Any action that needs the live zone pointer**: e.g.,
+  delegation sync sends `zd` as `ZoneData` in the
+  request struct.
+
+The split is clean:
+- Pre: analysis + modification of new_zd
+- Post: notifications + queue sends
 
 ### After Callback Injection
 
 zone_utils.go FetchFromUpstream becomes:
 ```
 // ... zone transfer, serial check ...
-for _, cb := range zd.OnZoneRefresh {
+for _, cb := range zd.OnZonePreRefresh {
     cb(zd, &new_zd)
 }
 // ... hard flip (publishes fully-prepared new_zd) ...
+// ... RepopulateDynamicRRs (core DNS, stays here) ...
+for _, cb := range zd.OnZonePostRefresh {
+    cb(zd)
+}
 // ... persist serial, notify ...
 ```
 
 FetchFromFile uses the same pattern.
 
-No new fields on *ZoneData for temporary old-version
-storage. No intermediate analysis struct. Just two
-parameters to one callback.
+Note: RepopulateDynamicRRs is core DNS (re-adds dynamic
+RRs lost in zone transfer). It stays in zone_utils.go
+between the flip and the post-refresh callbacks.
 
 ### Implementation Note
 
 The callback injection is a change to tdns (zone_utils.go
-and structs.go for the OnZoneRefresh field). This is the
+and structs.go for the two callback fields). This is the
 ONE exception to the "no tdns changes" rule — it's a
 prerequisite structural change that enables the extraction.
 
-The callback is registered by tdns-mp at init time (in
-OnFirstLoad callbacks, similar to PersistContributions).
-Each role registers its own implementation:
-- Agent: full analysis + sync routing + RFIs
-- Combiner: analysis + contributions + allow-edits
-- Signer: analysis + signing decisions
+Callbacks are registered by tdns-mp at init time (in
+OnFirstLoad, similar to PersistContributions). Each role
+registers its own pre and post implementations:
+- Agent: pre=analysis+RFIs, post=SyncQ+DelegationSyncQ
+- Combiner: pre=analysis+contributions, post=queue sends
+- Signer: pre=analysis+signing decisions, post=queue sends
 
-The tdns-agent binary registers the same callback from
+The tdns-agent binary registers the same callbacks from
 its own code (the functions stay in tdns too).
 
 ## Execution Steps
