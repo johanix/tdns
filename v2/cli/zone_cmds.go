@@ -21,36 +21,36 @@ import (
 var zoneReloadCmd = &cobra.Command{
 	Use:   "reload",
 	Short: "Request re-loading a zone",
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Printf("Reloading zone: %v\n", args)
-		if tdns.Globals.Zonename == "" {
-			fmt.Printf("Error: zone name not specified. Terminating.\n")
-			os.Exit(1)
-		}
+	Run:   func(cmd *cobra.Command, args []string) { RunZoneReload("auth", args) },
+}
 
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
-		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
-		}
+func RunZoneReload(parent string, args []string) {
+	if tdns.Globals.Zonename == "" {
+		fmt.Printf("Error: zone name not specified. Terminating.\n")
+		os.Exit(1)
+	}
 
-		resp, err := SendZoneCommand(api, tdns.ZonePost{
-			Command: "reload",
-			Zone:    dns.Fqdn(tdns.Globals.Zonename),
-			Force:   force,
-			Wait:    showError,
-			Timeout: errorTimeout,
-		})
+	api, err := GetApiClient(parent, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", parent, err)
+	}
 
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", resp.AppName, err.Error())
-			os.Exit(1)
-		}
+	resp, err := SendZoneCommand(api, tdns.ZonePost{
+		Command: "reload",
+		Zone:    dns.Fqdn(tdns.Globals.Zonename),
+		Force:   force,
+		Wait:    showError,
+		Timeout: errorTimeout,
+	})
 
-		if resp.Msg != "" {
-			fmt.Printf("%s\n", resp.Msg)
-		}
-	},
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", resp.AppName, err.Error())
+		os.Exit(1)
+	}
+
+	if resp.Msg != "" {
+		fmt.Printf("%s\n", resp.Msg)
+	}
 }
 
 var zoneNsecCmd = &cobra.Command{
@@ -89,29 +89,30 @@ var zoneSignCmd = &cobra.Command{
 var zoneWriteCmd = &cobra.Command{
 	Use:   "write",
 	Short: "Write a zone to disk",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("childzone")
+	Run:   func(cmd *cobra.Command, args []string) { RunZoneWrite("auth", args) },
+}
 
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
-		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
-		}
+func RunZoneWrite(parent string, args []string) {
+	PrepArgs("childzone")
 
-		cr, err := SendZoneCommand(api, tdns.ZonePost{
-			Command: "write-zone",
-			Zone:    tdns.Globals.Zonename,
-			Force:   force,
-		})
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-			os.Exit(1)
-		}
+	api, err := GetApiClient(parent, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", parent, err)
+	}
 
-		if cr.Msg != "" {
-			fmt.Printf("%s\n", cr.Msg)
-		}
-	},
+	cr, err := SendZoneCommand(api, tdns.ZonePost{
+		Command: "write-zone",
+		Zone:    tdns.Globals.Zonename,
+		Force:   force,
+	})
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		os.Exit(1)
+	}
+
+	if cr.Msg != "" {
+		fmt.Printf("%s\n", cr.Msg)
+	}
 }
 
 var zoneNsecGenerateCmd = &cobra.Command{
@@ -236,84 +237,59 @@ var ZoneCmd = &cobra.Command{
 var zoneListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List configured zones",
-	Run: func(cmd *cobra.Command, args []string) {
-
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
-		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
-		}
-
-		// fmt.Printf("zoneListCmd: prefix: %q, api: %v\n", prefixcmd, api)
-
-		cr, err := SendZoneCommand(api, tdns.ZonePost{
-			Command: "list-zones",
-		})
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-			os.Exit(1)
-		}
-
-		if cr.Msg != "" {
-			fmt.Printf("%s\n", cr.Msg)
-		}
-
-		switch tdns.Globals.Verbose {
-		case true:
-			VerboseListZone(cr)
-		case false:
-			ListZones(cr)
-		}
-	},
+	Run:   func(cmd *cobra.Command, args []string) { RunZoneList("auth", args) },
 }
 
 var zoneMPListCmd = &cobra.Command{
 	Use:   "mplist",
 	Short: "List multi-provider zones with HSYNCPARAM details",
-	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
-		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
-		}
+	Run:   func(cmd *cobra.Command, args []string) { RunZoneMPList("auth", args) },
+}
 
-		cr, err := SendZoneCommand(api, tdns.ZonePost{
-			Command: "list-mp-zones",
-		})
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-			os.Exit(1)
-		}
+func RunZoneMPList(parent string, args []string) {
+	api, err := GetApiClient(parent, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", parent, err)
+	}
 
-		ListMPZones(cr)
-	},
+	cr, err := SendZoneCommand(api, tdns.ZonePost{
+		Command: "list-mp-zones",
+	})
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		os.Exit(1)
+	}
+
+	ListMPZones(cr)
 }
 
 var zoneSerialBumpCmd = &cobra.Command{
 	Use:   "bump",
 	Short: "Bump SOA serial and epoch (if any) in tdns-auth version of zone",
-	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
-		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
-		}
+	Run:   func(cmd *cobra.Command, args []string) { RunZoneBump("auth", args) },
+}
 
-		PrepArgs("childzone")
-		resp, err := SendZoneCommand(api, tdns.ZonePost{
-			Command: "bump",
-			Zone:    tdns.Globals.Zonename,
-		})
+func RunZoneBump(parent string, args []string) {
+	PrepArgs("childzone")
 
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", resp.AppName, err.Error())
-			os.Exit(1)
-		}
+	api, err := GetApiClient(parent, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", parent, err)
+	}
 
-		if resp.Msg != "" {
-			fmt.Printf("%s\n", resp.Msg)
-		}
-	},
+	resp, err := SendZoneCommand(api, tdns.ZonePost{
+		Command: "bump",
+		Zone:    tdns.Globals.Zonename,
+	})
+
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", resp.AppName, err.Error())
+		os.Exit(1)
+	}
+
+	if resp.Msg != "" {
+		fmt.Printf("%s\n", resp.Msg)
+	}
 }
 
 func init() {

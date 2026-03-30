@@ -28,54 +28,13 @@ var combinerZoneCmd = &cobra.Command{
 var combinerZoneListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List configured zones",
-	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
-		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
-		}
-
-		cr, err := SendZoneCommand(api, tdns.ZonePost{
-			Command: "list-zones",
-		})
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-			log.Fatalf("Error: %v", err)
-		}
-
-		if cr.Msg != "" {
-			fmt.Printf("%s\n", cr.Msg)
-		}
-
-		switch tdns.Globals.Verbose {
-		case true:
-			VerboseListZone(cr)
-		case false:
-			ListZones(cr)
-		}
-	},
+	Run:   func(cmd *cobra.Command, args []string) { RunZoneList("combiner", args) },
 }
 
 var combinerZoneMPListCmd = &cobra.Command{
 	Use:   "mplist",
 	Short: "List multi-provider zones with HSYNCPARAM details",
-	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
-		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
-		}
-
-		cr, err := SendZoneCommand(api, tdns.ZonePost{
-			Command: "list-mp-zones",
-		})
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-			log.Fatalf("Error: %v", err)
-		}
-
-		ListMPZones(cr)
-	},
+	Run:   func(cmd *cobra.Command, args []string) { RunZoneMPList("combiner", args) },
 }
 
 var combinerZoneEditsCmd = &cobra.Command{
@@ -419,52 +378,13 @@ var combinerZoneEditsReapplyCmd = &cobra.Command{
 var combinerZoneReloadCmd = &cobra.Command{
 	Use:   "reload",
 	Short: "Request re-loading a zone on the combiner",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
-		api, err := GetApiClient("combiner", true)
-		if err != nil {
-			log.Fatalf("Error getting API client for combiner: %v", err)
-		}
-
-		cr, err := SendZoneCommand(api, tdns.ZonePost{
-			Command: "reload",
-			Zone:    dns.Fqdn(tdns.Globals.Zonename),
-			Force:   force,
-		})
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-			log.Fatalf("Error: %v", err)
-		}
-
-		if cr.Msg != "" {
-			fmt.Printf("%s\n", cr.Msg)
-		}
-	},
+	Run:   func(cmd *cobra.Command, args []string) { RunZoneReload("combiner", args) },
 }
 
 var combinerZoneBumpCmd = &cobra.Command{
 	Use:   "bump",
 	Short: "Bump SOA serial for a zone on the combiner",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
-		api, err := GetApiClient("combiner", true)
-		if err != nil {
-			log.Fatalf("Error getting API client for combiner: %v", err)
-		}
-
-		cr, err := SendZoneCommand(api, tdns.ZonePost{
-			Command: "bump",
-			Zone:    tdns.Globals.Zonename,
-		})
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-			log.Fatalf("Error: %v", err)
-		}
-
-		if cr.Msg != "" {
-			fmt.Printf("%s\n", cr.Msg)
-		}
-	},
+	Run:   func(cmd *cobra.Command, args []string) { RunZoneBump("combiner", args) },
 }
 
 func init() {

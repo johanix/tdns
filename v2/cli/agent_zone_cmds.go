@@ -62,83 +62,19 @@ func RunZoneList(parent string, args []string) {
 var agentZoneMPListCmd = &cobra.Command{
 	Use:   "mplist",
 	Short: "List multi-provider zones with HSYNCPARAM details",
-	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
-		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
-		}
-
-		cr, err := SendZoneCommand(api, tdns.ZonePost{
-			Command: "list-mp-zones",
-		})
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-			os.Exit(1)
-		}
-
-		ListMPZones(cr)
-	},
+	Run:   func(cmd *cobra.Command, args []string) { RunZoneMPList("agent", args) },
 }
 
 var agentZoneReloadCmd = &cobra.Command{
 	Use:   "reload",
 	Short: "Request re-loading a zone",
-	Run: func(cmd *cobra.Command, args []string) {
-		if tdns.Globals.Zonename == "" {
-			fmt.Printf("Error: zone name not specified. Terminating.\n")
-			os.Exit(1)
-		}
-
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
-		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
-		}
-
-		resp, err := SendZoneCommand(api, tdns.ZonePost{
-			Command: "reload",
-			Zone:    dns.Fqdn(tdns.Globals.Zonename),
-			Force:   force,
-		})
-
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", resp.AppName, err.Error())
-			os.Exit(1)
-		}
-
-		if resp.Msg != "" {
-			fmt.Printf("%s\n", resp.Msg)
-		}
-	},
+	Run:   func(cmd *cobra.Command, args []string) { RunZoneReload("agent", args) },
 }
 
 var agentZoneWriteCmd = &cobra.Command{
 	Use:   "write",
 	Short: "Write a zone to disk",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("childzone")
-
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
-		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
-		}
-
-		cr, err := SendZoneCommand(api, tdns.ZonePost{
-			Command: "write-zone",
-			Zone:    tdns.Globals.Zonename,
-			Force:   force,
-		})
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-			os.Exit(1)
-		}
-
-		if cr.Msg != "" {
-			fmt.Printf("%s\n", cr.Msg)
-		}
-	},
+	Run:   func(cmd *cobra.Command, args []string) { RunZoneWrite("agent", args) },
 }
 
 var agentZoneUpdateCmd = &cobra.Command{
