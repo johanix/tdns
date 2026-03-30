@@ -29,12 +29,9 @@ func init() {
 	cli.AgentCmd.AddCommand(cli.DebugCmd)
 	cli.CombinerCmd.AddCommand(cli.DebugCmd)
 
-	// From ../tdns/cli/keystore_cmds.go:
-	rootCmd.AddCommand(cli.KeystoreCmd)
+	// Keystore and truststore are under AuthCmd and AgentCmd
+	// (wired in cli/auth_cmds.go init). Agent also gets them:
 	cli.AgentCmd.AddCommand(cli.KeystoreCmd)
-
-	// From ../tdns/cli/truststore_cmds.go:
-	rootCmd.AddCommand(cli.TruststoreCmd)
 	cli.AgentCmd.AddCommand(cli.TruststoreCmd)
 
 	// From ../tdns/cli/dsync_cmds.go:

@@ -18,4 +18,6 @@ func init() {
 	AuthCmd.AddCommand(PingCmd)
 	AuthCmd.AddCommand(DaemonCmd)
 	AuthCmd.AddCommand(ZoneCmd)
+	AuthCmd.AddCommand(KeystoreCmd)
+	AuthCmd.AddCommand(TruststoreCmd)
 }
