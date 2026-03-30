@@ -67,10 +67,9 @@ func init() {
 	cli.AgentCmd.AddCommand(cli.KeysCmd)
 	cli.CombinerCmd.AddCommand(cli.KeysCmd)
 
-	// From ../tdns/cli/zone_cmds.go:
-	rootCmd.AddCommand(cli.ZoneCmd)
-	cli.CombinerCmd.AddCommand(cli.ZoneCmd)
-	// Agent uses AgentZoneCmd (wired in cli/agent_zone_cmds.go) instead of the shared ZoneCmd
+	// ZoneCmd is now under AuthCmd (wired in cli/auth_cmds.go init).
+	// Agent uses AgentZoneCmd (wired in cli/agent_zone_cmds.go).
+	// Combiner uses combinerZoneCmd (wired in cli/legacy_combiner_edits_cmds.go).
 
 	// From ../tdns/cli/base32_cmds.go
 	rootCmd.AddCommand(cli.Base32Cmd)
