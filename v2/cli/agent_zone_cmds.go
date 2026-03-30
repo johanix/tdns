@@ -30,32 +30,33 @@ var AgentZoneCmd = &cobra.Command{
 var agentZoneListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List configured zones",
-	Run: func(cmd *cobra.Command, args []string) {
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
-		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
-		}
+	Run:   func(cmd *cobra.Command, args []string) { RunZoneList("agent", args) },
+}
 
-		cr, err := SendZoneCommand(api, tdns.ZonePost{
-			Command: "list-zones",
-		})
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-			os.Exit(1)
-		}
+func RunZoneList(parent string, args []string) {
+	api, err := GetApiClient(parent, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", parent, err)
+	}
 
-		if cr.Msg != "" {
-			fmt.Printf("%s\n", cr.Msg)
-		}
+	cr, err := SendZoneCommand(api, tdns.ZonePost{
+		Command: "list-zones",
+	})
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		os.Exit(1)
+	}
 
-		switch tdns.Globals.Verbose {
-		case true:
-			VerboseListZone(cr)
-		case false:
-			ListZones(cr)
-		}
-	},
+	if cr.Msg != "" {
+		fmt.Printf("%s\n", cr.Msg)
+	}
+
+	switch tdns.Globals.Verbose {
+	case true:
+		VerboseListZone(cr)
+	case false:
+		ListZones(cr)
+	}
 }
 
 var agentZoneMPListCmd = &cobra.Command{
