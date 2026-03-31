@@ -192,7 +192,7 @@ Examples:
 
 		if amr.Error {
 			fmt.Fprintf(cmd.ErrOrStderr(), "Error: %s\n", amr.ErrorMsg)
-			return
+			os.Exit(1)
 		}
 		fmt.Println(amr.Msg)
 	},
@@ -364,7 +364,7 @@ func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 		return fmt.Errorf("error: invalid DNS record (did not parse): %v", err)
 	}
 
-	if !strings.HasSuffix(rr.Header().Name, zonename) {
+	if !strings.HasSuffix(strings.ToLower(rr.Header().Name), strings.ToLower(zonename)) {
 		return fmt.Errorf("DNS record name %q is not part of zone %q",
 			rr.Header().Name, zonename)
 	}

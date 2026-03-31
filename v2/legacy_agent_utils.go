@@ -32,14 +32,12 @@ func (ar *AgentRegistry) AddZoneToAgent(identity AgentId, zone ZoneName) {
 	}
 
 	agent.Mu.Lock()
-	defer agent.Mu.Unlock()
-
 	if agent.Zones == nil {
 		agent.Zones = make(map[ZoneName]bool)
 	}
 	agent.Zones[zone] = true
+	agent.Mu.Unlock()
 
-	// Update remoteAgents map
 	ar.AddRemoteAgent(zone, agent)
 	ar.S.Set(identity, agent)
 }
@@ -555,7 +553,9 @@ func (ar *AgentRegistry) MarkAgentAsNeeded(remoteid AgentId, zonename ZoneName, 
 			ar.AddZoneToAgent(remoteid, zonename)
 		}
 		if deferredTask != nil {
+			agent.Mu.Lock()
 			agent.DeferredTasks = append(agent.DeferredTasks, *deferredTask)
+			agent.Mu.Unlock()
 			ar.S.Set(remoteid, agent)
 		}
 		lgAgent.Debug("agent already exists", "agent", remoteid,
@@ -1079,7 +1079,9 @@ func (ar *AgentRegistry) UpdateAgents(ourId AgentId, req SyncRequest, zonename Z
 
 // XXX: The DeferredAgentTask functions are not yet fully thought out (and not in use yet).
 func (agent *Agent) AddDeferredAgentTask(task *DeferredAgentTask) {
+	agent.Mu.Lock()
 	agent.DeferredTasks = append(agent.DeferredTasks, *task)
+	agent.Mu.Unlock()
 }
 
 func (agent *Agent) CreateOperationalAgentTask(action func() (bool, error), desc string) *DeferredAgentTask {
@@ -1106,7 +1108,6 @@ func (agent *Agent) CreateAgentUpstreamRFI() *DeferredAgentTask {
 }
 
 func (agent *Agent) MarshalJSON() ([]byte, error) {
-	// Create a temporary struct without non-JSON-friendly fields
 	type AgentJSON struct {
 		Identity    AgentId
 		InitialZone ZoneName
@@ -1118,16 +1119,22 @@ func (agent *Agent) MarshalJSON() ([]byte, error) {
 		ErrorMsg    string
 	}
 
+	agent.Mu.RLock()
+	zones := make(map[ZoneName]bool, len(agent.Zones))
+	for k, v := range agent.Zones {
+		zones[k] = v
+	}
 	aj := AgentJSON{
 		Identity:    agent.Identity,
 		InitialZone: agent.InitialZone,
 		ApiMethod:   agent.ApiMethod,
 		DnsMethod:   agent.DnsMethod,
-		Zones:       agent.Zones,
+		Zones:       zones,
 		State:       agent.State,
 		LastState:   agent.LastState,
 		ErrorMsg:    agent.ErrorMsg,
 	}
+	agent.Mu.RUnlock()
 
 	lgAgent.Debug("using local agent MarshalJSON", "agent", agent.Identity)
 	return json.Marshal(aj)

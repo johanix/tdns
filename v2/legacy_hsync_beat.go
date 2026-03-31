@@ -128,30 +128,37 @@ func (ar *AgentRegistry) SendHeartbeats() {
 				agent.ApiDetails.LatestSBeat = time.Now()
 				agent.ApiDetails.LatestError = ""
 				agent.ApiDetails.SentBeats++
-				if len(agent.DeferredTasks) > 0 {
-					lgAgent.Info("agent has deferred tasks, executing", "agent", agent.Identity, "count", len(agent.DeferredTasks))
-					var remainingTasks []DeferredAgentTask
-					for _, task := range agent.DeferredTasks {
-						if task.Precondition() {
-							ok, err := task.Action()
-							if err != nil {
-								lgAgent.Error("deferred task failed", "task", task.Desc, "err", err)
-								remainingTasks = append(remainingTasks, task)
-							} else if ok {
-								lgAgent.Info("deferred task executed successfully", "task", task.Desc)
-							} else {
-								remainingTasks = append(remainingTasks, task)
-							}
-						} else {
-							remainingTasks = append(remainingTasks, task)
-						}
-					}
-					agent.DeferredTasks = remainingTasks
-				}
 			}
+			tasks := agent.DeferredTasks
+			agent.DeferredTasks = nil
 			agent.CheckState(ar.LocalAgent.Remote.BeatInterval)
 			ar.S.Set(agent.Identity, agent)
 			agent.Mu.Unlock()
+
+			if len(tasks) > 0 {
+				lgAgent.Info("agent has deferred tasks, executing", "agent", agent.Identity, "count", len(tasks))
+				var remaining []DeferredAgentTask
+				for _, task := range tasks {
+					if task.Precondition() {
+						ok, err := task.Action()
+						if err != nil {
+							lgAgent.Error("deferred task failed", "task", task.Desc, "err", err)
+							remaining = append(remaining, task)
+						} else if ok {
+							lgAgent.Info("deferred task executed successfully", "task", task.Desc)
+						} else {
+							remaining = append(remaining, task)
+						}
+					} else {
+						remaining = append(remaining, task)
+					}
+				}
+				if len(remaining) > 0 {
+					agent.Mu.Lock()
+					agent.DeferredTasks = append(agent.DeferredTasks, remaining...)
+					agent.Mu.Unlock()
+				}
+			}
 		}(a)
 	}
 }

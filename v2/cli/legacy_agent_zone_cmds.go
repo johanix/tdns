@@ -397,7 +397,7 @@ Examples:
 				dns.TypeToString[rr.Header().Rrtype], strings.Join(allowed, ", "))
 		}
 
-		if dns.Fqdn(rr.Header().Name) != dns.Fqdn(tdns.Globals.Zonename) {
+		if !strings.EqualFold(dns.Fqdn(rr.Header().Name), dns.Fqdn(tdns.Globals.Zonename)) {
 			log.Fatalf("Error: Record owner (%s) must match zone (%s)", rr.Header().Name, tdns.Globals.Zonename)
 		}
 

@@ -26,7 +26,7 @@ func (ar *AgentRegistry) StartInfraBeatLoop(ctx context.Context) {
 	defer ticker.Stop()
 
 	// Send an initial beat immediately so we don't wait a full interval on startup.
-	ar.sendInfraBeats()
+	ar.sendInfraBeats(ctx)
 
 	for {
 		select {
@@ -34,14 +34,14 @@ func (ar *AgentRegistry) StartInfraBeatLoop(ctx context.Context) {
 			lgAgent.Info("infra beat loop stopped")
 			return
 		case <-ticker.C:
-			ar.sendInfraBeats()
+			ar.sendInfraBeats(ctx)
 		}
 	}
 }
 
 // sendInfraBeats iterates AgentRegistry and sends a beat to every infra peer
 // (combiner, signer) that has at least one transport ready.
-func (ar *AgentRegistry) sendInfraBeats() {
+func (ar *AgentRegistry) sendInfraBeats(parentCtx context.Context) {
 	if ar.MPTransport == nil {
 		return
 	}
@@ -51,8 +51,10 @@ func (ar *AgentRegistry) sendInfraBeats() {
 			continue
 		}
 
+		a.Mu.RLock()
 		dnsState := a.DnsDetails.State
 		apiState := a.ApiDetails.State
+		a.Mu.RUnlock()
 
 		dnsReady := dnsState == AgentStateOperational || dnsState == AgentStateIntroduced ||
 			dnsState == AgentStateLegacy || dnsState == AgentStateDegraded || dnsState == AgentStateInterrupted
@@ -65,8 +67,8 @@ func (ar *AgentRegistry) sendInfraBeats() {
 			continue
 		}
 
-		go func(agent *Agent) {
-			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		go func(agent *Agent, dnsReady, apiReady bool) {
+			ctx, cancel := context.WithTimeout(parentCtx, 15*time.Second)
 			defer cancel()
 
 			agent.Mu.RLock()
@@ -82,14 +84,26 @@ func (ar *AgentRegistry) sendInfraBeats() {
 				return
 			}
 
+			// SendBeatWithFallback already updates per-transport received-side
+			// counters (ReceivedBeats, LatestRBeat, State) inside itself. Here we
+			// only track sent-side counters, conditional on which transport was
+			// actually attempted so an API-only beat doesn't corrupt DnsDetails.
 			agent.Mu.Lock()
 			if resp != nil && resp.Ack {
 				lgAgent.Debug("infra beat acknowledged", "peer", agent.Identity, "state", resp.State)
-				agent.DnsDetails.SentBeats++
-				agent.DnsDetails.LatestSBeat = time.Now()
-				agent.DnsDetails.LatestError = ""
+				now := time.Now()
+				if dnsReady {
+					agent.DnsDetails.SentBeats++
+					agent.DnsDetails.LatestSBeat = now
+					agent.DnsDetails.LatestError = ""
+				}
+				if apiReady {
+					agent.ApiDetails.SentBeats++
+					agent.ApiDetails.LatestSBeat = now
+					agent.ApiDetails.LatestError = ""
+				}
 			}
 			agent.Mu.Unlock()
-		}(a)
+		}(a, dnsReady, apiReady)
 	}
 }

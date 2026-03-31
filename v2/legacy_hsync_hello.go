@@ -213,11 +213,15 @@ func (ar *AgentRegistry) FastBeatAttempts(ctx context.Context, agent *Agent) {
 				agent.ApiDetails.LatestSBeat = time.Now()
 				agent.ApiDetails.SentBeats++
 				agent.ApiDetails.LatestError = ""
-				// Execute deferred tasks on first successful beat
-				if len(agent.DeferredTasks) > 0 {
-					lgAgent.Info("executing deferred tasks after fast beat", "agent", agent.Identity, "count", len(agent.DeferredTasks))
+				tasks := agent.DeferredTasks
+				agent.DeferredTasks = nil
+				ar.S.Set(agent.Identity, agent)
+				agent.Mu.Unlock()
+
+				if len(tasks) > 0 {
+					lgAgent.Info("executing deferred tasks after fast beat", "agent", agent.Identity, "count", len(tasks))
 					var remaining []DeferredAgentTask
-					for _, task := range agent.DeferredTasks {
+					for _, task := range tasks {
 						if task.Precondition() {
 							ok, taskErr := task.Action()
 							if taskErr != nil {
@@ -232,10 +236,12 @@ func (ar *AgentRegistry) FastBeatAttempts(ctx context.Context, agent *Agent) {
 							remaining = append(remaining, task)
 						}
 					}
-					agent.DeferredTasks = remaining
+					if len(remaining) > 0 {
+						agent.Mu.Lock()
+						agent.DeferredTasks = append(agent.DeferredTasks, remaining...)
+						agent.Mu.Unlock()
+					}
 				}
-				ar.S.Set(agent.Identity, agent)
-				agent.Mu.Unlock()
 				lgAgent.Info("agent reached OPERATIONAL", "agent", agent.Identity)
 				return
 			}

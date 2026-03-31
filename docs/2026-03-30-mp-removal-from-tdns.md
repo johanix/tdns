@@ -84,45 +84,49 @@ imports `tdns/v2` as a library and layers MP on top.
 
 ### 3.1 Files to DELETE entirely (PURE-MP)
 
-**v2/ root** (20 files):
-- `agent_authorization.go`
-- `agent_discovery.go`
-- `agent_discovery_common.go`
-- `agent_policy.go`
-- `agent_setup.go`
-- `agent_structs.go`
-- `agent_utils.go`
-- `combiner_peer.go`
-- `gossip.go`
-- `hsync_beat.go`
-- `hsync_hello.go`
-- `hsync_infra_beat.go`
-- `hsync_transport.go`
-- `hsyncengine.go`
-- `hsync_utils.go`
+All pure-MP files have been renamed with the `legacy_` prefix to
+make them visually distinct from active code. They will be deleted
+when MP extraction testing is complete.
+
+**v2/ root** (28 files, all `legacy_`-prefixed):
+- `legacy_agent_authorization.go`
+- `legacy_agent_discovery.go`
+- `legacy_agent_discovery_common.go`
+- `legacy_agent_policy.go`
+- `legacy_agent_setup.go`
+- `legacy_agent_structs.go`
+- `legacy_agent_utils.go`
 - `legacy_apihandler_combiner.go`
 - `legacy_apihandler_combiner_distrib.go`
 - `legacy_combiner_chunk.go`
 - `legacy_combiner_msg_handler.go`
+- `legacy_combiner_peer.go`
 - `legacy_combiner_utils.go`
 - `legacy_db_combiner_contributions.go`
 - `legacy_db_combiner_edits.go`
 - `legacy_db_combiner_publish_instructions.go`
-- `provider_groups.go`
-- `signer_msg_handler.go`
-- `signer_peer.go`
-- `signer_transport.go`
-- `syncheddataengine.go`
+- `legacy_gossip.go`
+- `legacy_hsync_beat.go`
+- `legacy_hsync_hello.go`
+- `legacy_hsync_infra_beat.go`
+- `legacy_hsync_transport.go`
+- `legacy_hsync_utils.go`
+- `legacy_hsyncengine.go`
+- `legacy_provider_groups.go`
+- `legacy_signer_msg_handler.go`
+- `legacy_signer_peer.go`
+- `legacy_signer_transport.go`
+- `legacy_syncheddataengine.go`
 
-**v2/cli/** (12 files):
-- `agent_cmds.go`
-- `agent_debug_cmds.go`
-- `agent_edits_cmds.go`
-- `agent_gossip_cmds.go`
-- `agent_imr_cmds.go`
-- `agent_router_cmds.go`
-- `agent_router_cmds_test.go`
-- `agent_zone_cmds.go`
+**v2/cli/** (12 files, all `legacy_`-prefixed):
+- `legacy_agent_cmds.go`
+- `legacy_agent_debug_cmds.go`
+- `legacy_agent_edits_cmds.go`
+- `legacy_agent_gossip_cmds.go`
+- `legacy_agent_imr_cmds.go`
+- `legacy_agent_router_cmds.go`
+- `legacy_agent_router_cmds_test.go`
+- `legacy_agent_zone_cmds.go`
 - `legacy_combiner_cmds.go`
 - `legacy_combiner_debug_cmds.go`
 - `legacy_combiner_edits_cmds.go`
@@ -264,10 +268,10 @@ references):
 - `legacy_combiner_utils.go`
 - `legacy_combiner_msg_handler.go`
 - `legacy_combiner_chunk.go`
-- `combiner_peer.go`
-- `signer_peer.go`
-- `signer_transport.go`
-- `signer_msg_handler.go`
+- `legacy_combiner_peer.go`
+- `legacy_signer_peer.go`
+- `legacy_signer_transport.go`
+- `legacy_signer_msg_handler.go`
 - `cli/legacy_combiner_cmds.go`
 - `cli/legacy_combiner_debug_cmds.go`
 - `cli/legacy_combiner_edits_cmds.go`
@@ -280,34 +284,34 @@ After deletion, fix any remaining references in mixed files
 
 **Step 2.2**: Delete agent MP leaf files (called only from
 hsyncengine/hsync_transport):
-- `agent_authorization.go`
-- `agent_discovery.go`
-- `agent_discovery_common.go`
-- `agent_policy.go`
-- `agent_setup.go`
-- `gossip.go`
-- `provider_groups.go`
-- `hsync_beat.go`
-- `hsync_hello.go`
-- `hsync_infra_beat.go`
+- `legacy_agent_authorization.go`
+- `legacy_agent_discovery.go`
+- `legacy_agent_discovery_common.go`
+- `legacy_agent_policy.go`
+- `legacy_agent_setup.go`
+- `legacy_gossip.go`
+- `legacy_provider_groups.go`
+- `legacy_hsync_beat.go`
+- `legacy_hsync_hello.go`
+- `legacy_hsync_infra_beat.go`
 
 **Step 2.3**: Delete agent MP core files:
-- `hsync_utils.go`
-- `hsyncengine.go`
-- `hsync_transport.go` (MPTransportBridge — the big one)
-- `syncheddataengine.go`
-- `agent_structs.go`
-- `agent_utils.go`
+- `legacy_hsync_utils.go`
+- `legacy_hsyncengine.go`
+- `legacy_hsync_transport.go` (MPTransportBridge — the big one)
+- `legacy_syncheddataengine.go`
+- `legacy_agent_structs.go`
+- `legacy_agent_utils.go`
 
 **Step 2.4**: Delete agent MP CLI files:
-- `cli/agent_cmds.go`
-- `cli/agent_debug_cmds.go`
-- `cli/agent_edits_cmds.go`
-- `cli/agent_gossip_cmds.go`
-- `cli/agent_imr_cmds.go`
-- `cli/agent_router_cmds.go`
-- `cli/agent_router_cmds_test.go`
-- `cli/agent_zone_cmds.go`
+- `cli/legacy_agent_cmds.go`
+- `cli/legacy_agent_debug_cmds.go`
+- `cli/legacy_agent_edits_cmds.go`
+- `cli/legacy_agent_gossip_cmds.go`
+- `cli/legacy_agent_imr_cmds.go`
+- `cli/legacy_agent_router_cmds.go`
+- `cli/legacy_agent_router_cmds_test.go`
+- `cli/legacy_agent_zone_cmds.go`
 
 **Build check**: Will NOT compile yet — mixed files still
 reference deleted types/functions. This is expected.

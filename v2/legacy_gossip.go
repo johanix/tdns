@@ -104,7 +104,13 @@ func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
 	for id, remote := range msg.Members {
 		local, exists := gst.States[groupHash][id]
 		if !exists || remote.Timestamp.After(local.Timestamp) {
-			gst.States[groupHash][id] = remote
+			cp := *remote
+			cp.PeerStates = make(map[string]string, len(remote.PeerStates))
+			for pk, pv := range remote.PeerStates {
+				cp.PeerStates[pk] = pv
+			}
+			cp.Zones = append([]string(nil), remote.Zones...)
+			gst.States[groupHash][id] = &cp
 		}
 	}
 
@@ -142,20 +148,20 @@ func (gst *GossipStateTable) MergeGossip(msg *GossipMessage) {
 // BuildGossipForPeer builds gossip messages for all groups shared with a peer.
 // If a LeaderElectionManager is provided, group election state is included.
 func (gst *GossipStateTable) BuildGossipForPeer(peerID string, pgm *ProviderGroupManager, lem ...*LeaderElectionManager) []GossipMessage {
-	gst.mu.RLock()
-	defer gst.mu.RUnlock()
-
 	if pgm == nil {
 		return nil
 	}
 
-	var messages []GossipMessage
+	type groupInfo struct {
+		hash         string
+		members      []string
+		nameProposal *GroupNameProposal
+	}
 
+	// Acquire pgm.mu first, copy needed data, release.
 	pgm.mu.RLock()
-	defer pgm.mu.RUnlock()
-
+	groups := make([]groupInfo, 0, len(pgm.Groups))
 	for hash, pg := range pgm.Groups {
-		// Check if both we and the peer are members of this group
 		localInGroup := false
 		peerInGroup := false
 		for _, member := range pg.Members {
@@ -173,43 +179,64 @@ func (gst *GossipStateTable) BuildGossipForPeer(peerID string, pgm *ProviderGrou
 				"localInGroup", localInGroup, "peerInGroup", peerInGroup)
 			continue
 		}
+		gi := groupInfo{hash: hash, members: append([]string(nil), pg.Members...)}
+		if pg.NameProposal != nil {
+			np := *pg.NameProposal
+			gi.nameProposal = &np
+		}
+		groups = append(groups, gi)
+	}
+	pgm.mu.RUnlock()
 
+	// Now acquire gst.mu to build messages.
+	gst.mu.RLock()
+	defer gst.mu.RUnlock()
+
+	var messages []GossipMessage
+
+	for _, gi := range groups {
 		msg := GossipMessage{
-			GroupHash: hash,
+			GroupHash: gi.hash,
 			Members:   make(map[string]*MemberState),
 		}
 
-		// Include all member states we know about for this group
-		if groupStates, ok := gst.States[hash]; ok {
+		// Deep copy all member states for this group
+		if groupStates, ok := gst.States[gi.hash]; ok {
 			for id, state := range groupStates {
-				msg.Members[id] = state
+				cp := *state
+				cp.PeerStates = make(map[string]string, len(state.PeerStates))
+				for pk, pv := range state.PeerStates {
+					cp.PeerStates[pk] = pv
+				}
+				cp.Zones = append([]string(nil), state.Zones...)
+				msg.Members[id] = &cp
 			}
 		}
 
 		// Include election state — prefer live state from LeaderElectionManager
 		electionIncluded := false
 		if len(lem) > 0 && lem[0] != nil {
-			es := lem[0].GetGroupElectionState(hash)
+			es := lem[0].GetGroupElectionState(gi.hash)
 			if es.Term > 0 {
 				msg.Election = es
 				electionIncluded = true
 			}
 		}
 		if !electionIncluded {
-			if el, ok := gst.Elections[hash]; ok {
+			if el, ok := gst.Elections[gi.hash]; ok {
 				msg.Election = *el
 			}
 		}
 
 		// Include best group name proposal
-		if name, ok := gst.Names[hash]; ok {
+		if name, ok := gst.Names[gi.hash]; ok {
 			msg.GroupName = *name
-		} else if pg.NameProposal != nil {
-			msg.GroupName = *pg.NameProposal
+		} else if gi.nameProposal != nil {
+			msg.GroupName = *gi.nameProposal
 		}
 
 		lgGossip.Debug("BuildGossipForPeer: including group",
-			"group", hash[:8], "peerID", peerID, "memberStates", len(msg.Members))
+			"group", gi.hash[:8], "peerID", peerID, "memberStates", len(msg.Members))
 		messages = append(messages, msg)
 	}
 

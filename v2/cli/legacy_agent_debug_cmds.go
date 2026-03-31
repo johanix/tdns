@@ -802,6 +802,10 @@ func SendAgentDebugCmd(req tdns.AgentMgmtPost, printJson bool) (*tdns.AgentMgmtR
 	}
 
 	if printJson {
+		if amr.Error {
+			fmt.Fprintf(os.Stderr, "API error: %s\n", amr.ErrorMsg)
+			os.Exit(1)
+		}
 		var prettyJSON bytes.Buffer
 		err = json.Indent(&prettyJSON, buf, "", "  ")
 		if err != nil {
