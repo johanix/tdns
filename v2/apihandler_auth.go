@@ -156,14 +156,14 @@ func APIauthDistrib(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 					peerMaps[i]["port"] = addr.Port
 					peerMaps[i]["addresses"] = []string{addr.Host}
 				}
-				lastUsed, _, _, _, _, _, _, pingSent, pingRecv, totalSent, totalRecv := peer.Stats.GetDetailedStats()
-				peerMaps[i]["distrib_sent"] = int(totalSent)
-				peerMaps[i]["ping_sent"] = pingSent
-				peerMaps[i]["ping_received"] = pingRecv
-				peerMaps[i]["total_sent"] = totalSent
-				peerMaps[i]["total_received"] = totalRecv
-				if !lastUsed.IsZero() {
-					peerMaps[i]["last_used"] = lastUsed.Format(time.RFC3339)
+				s := peer.Stats.GetDetailedStats()
+				peerMaps[i]["distrib_sent"] = int(s.TotalSent)
+				peerMaps[i]["ping_sent"] = s.PingSent
+				peerMaps[i]["ping_received"] = s.PingReceived
+				peerMaps[i]["total_sent"] = s.TotalSent
+				peerMaps[i]["total_received"] = s.TotalReceived
+				if !s.LastUsed.IsZero() {
+					peerMaps[i]["last_used"] = s.LastUsed.Format(time.RFC3339)
 				}
 			}
 

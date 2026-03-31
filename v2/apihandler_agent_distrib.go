@@ -728,22 +728,22 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					// Get statistics from PeerRegistry if available
 					if conf.Internal.TransportManager != nil {
 						if peer, ok := conf.Internal.TransportManager.PeerRegistry.Get(agentIDFqdn); ok {
-							lastUsed, helloSent, helloRecv, beatSent, beatRecv, syncSent, syncRecv, pingSent, pingRecv, totalSent, totalRecv := peer.Stats.GetDetailedStats()
-							peerInfo.HelloSent = helloSent
-							peerInfo.HelloReceived = helloRecv
-							peerInfo.BeatSent = beatSent
-							peerInfo.BeatReceived = beatRecv
-							peerInfo.SyncSent = syncSent
-							peerInfo.SyncReceived = syncRecv
-							peerInfo.PingSent = pingSent
-							peerInfo.PingReceived = pingRecv
-							peerInfo.TotalSent = totalSent
-							peerInfo.TotalReceived = totalRecv
-							peerInfo.DistribSent = int(totalRecv) // Backward compat
-							if !lastUsed.IsZero() {
-								peerInfo.LastUsed = lastUsed
+							s := peer.Stats.GetDetailedStats()
+							peerInfo.HelloSent = s.HelloSent
+							peerInfo.HelloReceived = s.HelloReceived
+							peerInfo.BeatSent = s.BeatSent
+							peerInfo.BeatReceived = s.BeatReceived
+							peerInfo.SyncSent = s.SyncSent
+							peerInfo.SyncReceived = s.SyncReceived
+							peerInfo.PingSent = s.PingSent
+							peerInfo.PingReceived = s.PingReceived
+							peerInfo.TotalSent = s.TotalSent
+							peerInfo.TotalReceived = s.TotalReceived
+							peerInfo.DistribSent = int(s.TotalReceived) // Backward compat
+							if !s.LastUsed.IsZero() {
+								peerInfo.LastUsed = s.LastUsed
 							}
-							lgApi.Debug("peer stats", "peer", agentIDFqdn, "lastUsed", lastUsed.Format("15:04:05"), "sent", totalSent, "received", totalRecv)
+							lgApi.Debug("peer stats", "peer", agentIDFqdn, "lastUsed", s.LastUsed.Format("15:04:05"), "sent", s.TotalSent, "received", s.TotalReceived)
 						} else {
 							lgApi.Debug("peer not found in PeerRegistry", "peer", agentIDFqdn)
 						}
@@ -788,22 +788,22 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					// Get statistics from PeerRegistry if available
 					if conf.Internal.TransportManager != nil {
 						if peer, ok := conf.Internal.TransportManager.PeerRegistry.Get(agentIDFqdn); ok {
-							lastUsed, helloSent, helloRecv, beatSent, beatRecv, syncSent, syncRecv, pingSent, pingRecv, totalSent, totalRecv := peer.Stats.GetDetailedStats()
-							peerInfo.HelloSent = helloSent
-							peerInfo.HelloReceived = helloRecv
-							peerInfo.BeatSent = beatSent
-							peerInfo.BeatReceived = beatRecv
-							peerInfo.SyncSent = syncSent
-							peerInfo.SyncReceived = syncRecv
-							peerInfo.PingSent = pingSent
-							peerInfo.PingReceived = pingRecv
-							peerInfo.TotalSent = totalSent
-							peerInfo.TotalReceived = totalRecv
-							peerInfo.DistribSent = int(totalRecv) // Backward compat
-							if !lastUsed.IsZero() {
-								peerInfo.LastUsed = lastUsed
+							s := peer.Stats.GetDetailedStats()
+							peerInfo.HelloSent = s.HelloSent
+							peerInfo.HelloReceived = s.HelloReceived
+							peerInfo.BeatSent = s.BeatSent
+							peerInfo.BeatReceived = s.BeatReceived
+							peerInfo.SyncSent = s.SyncSent
+							peerInfo.SyncReceived = s.SyncReceived
+							peerInfo.PingSent = s.PingSent
+							peerInfo.PingReceived = s.PingReceived
+							peerInfo.TotalSent = s.TotalSent
+							peerInfo.TotalReceived = s.TotalReceived
+							peerInfo.DistribSent = int(s.TotalReceived) // Backward compat
+							if !s.LastUsed.IsZero() {
+								peerInfo.LastUsed = s.LastUsed
 							}
-							lgApi.Debug("peer stats", "peer", agentIDFqdn, "lastUsed", lastUsed.Format("15:04:05"), "sent", totalSent, "received", totalRecv)
+							lgApi.Debug("peer stats", "peer", agentIDFqdn, "lastUsed", s.LastUsed.Format("15:04:05"), "sent", s.TotalSent, "received", s.TotalReceived)
 						} else {
 							lgApi.Debug("peer not found in PeerRegistry", "peer", agentIDFqdn)
 						}
@@ -843,22 +843,22 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 				// Get statistics from PeerRegistry if available (peer may be known but not fully discovered)
 				if conf.Internal.TransportManager != nil {
 					if peer, ok := conf.Internal.TransportManager.PeerRegistry.Get(peerIDFqdn); ok {
-						lastUsed, helloSent, helloRecv, beatSent, beatRecv, syncSent, syncRecv, pingSent, pingRecv, totalSent, totalRecv := peer.Stats.GetDetailedStats()
-						peerInfo.HelloSent = helloSent
-						peerInfo.HelloReceived = helloRecv
-						peerInfo.BeatSent = beatSent
-						peerInfo.BeatReceived = beatRecv
-						peerInfo.SyncSent = syncSent
-						peerInfo.SyncReceived = syncRecv
-						peerInfo.PingSent = pingSent
-						peerInfo.PingReceived = pingRecv
-						peerInfo.TotalSent = totalSent
-						peerInfo.TotalReceived = totalRecv
-						peerInfo.DistribSent = int(totalRecv) // Backward compat
-						if !lastUsed.IsZero() {
-							peerInfo.LastUsed = lastUsed
+						s := peer.Stats.GetDetailedStats()
+						peerInfo.HelloSent = s.HelloSent
+						peerInfo.HelloReceived = s.HelloReceived
+						peerInfo.BeatSent = s.BeatSent
+						peerInfo.BeatReceived = s.BeatReceived
+						peerInfo.SyncSent = s.SyncSent
+						peerInfo.SyncReceived = s.SyncReceived
+						peerInfo.PingSent = s.PingSent
+						peerInfo.PingReceived = s.PingReceived
+						peerInfo.TotalSent = s.TotalSent
+						peerInfo.TotalReceived = s.TotalReceived
+						peerInfo.DistribSent = int(s.TotalReceived) // Backward compat
+						if !s.LastUsed.IsZero() {
+							peerInfo.LastUsed = s.LastUsed
 						}
-						lgApi.Debug("config-only peer stats", "peer", peerIDFqdn, "lastUsed", lastUsed.Format("15:04:05"), "sent", totalSent, "received", totalRecv)
+						lgApi.Debug("config-only peer stats", "peer", peerIDFqdn, "lastUsed", s.LastUsed.Format("15:04:05"), "sent", s.TotalSent, "received", s.TotalReceived)
 					}
 				}
 				peers = append(peers, peerInfo)
@@ -884,15 +884,15 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 
 			if !alreadyListed {
 				// Get detailed stats
-				lastUsed, helloSent, helloRecv, beatSent, beatRecv, syncSent, syncRecv, pingSent, pingRecv, totalSent, totalRecv := peer.Stats.GetDetailedStats()
+				s := peer.Stats.GetDetailedStats()
 
 				// Determine state from statistics
 				state := "UNKNOWN"
-				if totalRecv > 0 || totalSent > 0 {
+				if s.TotalReceived > 0 || s.TotalSent > 0 {
 					// If we have any communication, it's at least contacted
-					if beatRecv > 0 || beatSent > 0 {
+					if s.BeatReceived > 0 || s.BeatSent > 0 {
 						state = "CONTACTED" // Has exchanged heartbeats
-					} else if helloRecv > 0 || helloSent > 0 {
+					} else if s.HelloReceived > 0 || s.HelloSent > 0 {
 						state = "HELLO" // Has exchanged hello messages
 					} else {
 						state = "CONTACTED" // Other communication
@@ -907,24 +907,24 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					CryptoType:    "-",
 					State:         state,
 					ContactInfo:   "peer registry only",
-					HelloSent:     helloSent,
-					HelloReceived: helloRecv,
-					BeatSent:      beatSent,
-					BeatReceived:  beatRecv,
-					SyncSent:      syncSent,
-					SyncReceived:  syncRecv,
-					PingSent:      pingSent,
-					PingReceived:  pingRecv,
-					TotalSent:     totalSent,
-					TotalReceived: totalRecv,
-					DistribSent:   int(totalRecv), // Backward compat
+					HelloSent:     s.HelloSent,
+					HelloReceived: s.HelloReceived,
+					BeatSent:      s.BeatSent,
+					BeatReceived:  s.BeatReceived,
+					SyncSent:      s.SyncSent,
+					SyncReceived:  s.SyncReceived,
+					PingSent:      s.PingSent,
+					PingReceived:  s.PingReceived,
+					TotalSent:     s.TotalSent,
+					TotalReceived: s.TotalReceived,
+					DistribSent:   int(s.TotalReceived), // Backward compat
 				}
-				if !lastUsed.IsZero() {
-					peerInfo.LastUsed = lastUsed
+				if !s.LastUsed.IsZero() {
+					peerInfo.LastUsed = s.LastUsed
 				}
 
 				peers = append(peers, peerInfo)
-				lgApi.Debug("added peer from PeerRegistry only", "peer", peerID, "state", state, "sent", totalSent, "received", totalRecv)
+				lgApi.Debug("added peer from PeerRegistry only", "peer", peerID, "state", state, "sent", s.TotalSent, "received", s.TotalReceived)
 			}
 		}
 	}
