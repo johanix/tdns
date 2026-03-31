@@ -702,9 +702,10 @@ type CombinerResponse struct {
 }
 
 type CombinerDebugPost struct {
-	Command string `json:"command"`
-	Zone    string `json:"zone,omitempty"`
-	AgentID string `json:"agent_id,omitempty"` // For agent-targeted commands (e.g. agent-ping)
+	Command string                 `json:"command"`
+	Zone    string                 `json:"zone,omitempty"`
+	AgentID string                 `json:"agent_id,omitempty"`
+	Data    map[string]interface{} `json:"data,omitempty"`
 }
 
 // CombinerEditPost represents a CLI request for managing pending/rejected edits.
@@ -735,6 +736,7 @@ type CombinerDebugResponse struct {
 	Error              bool                                                 `json:"error"`
 	ErrorMsg           string                                               `json:"error_msg,omitempty"`
 	Msg                string                                               `json:"msg,omitempty"`
+	Data               interface{}                                          `json:"data,omitempty"`
 	CombinerData       map[string]map[string]map[string][]string            `json:"combiner_data,omitempty"`       // zone → owner → rrtype → []rr
 	AgentContributions map[string]map[string]map[string]map[string][]string `json:"agent_contributions,omitempty"` // zone → agent → owner → rrtype → []rr
 }
