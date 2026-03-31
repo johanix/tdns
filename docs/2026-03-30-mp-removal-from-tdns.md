@@ -88,7 +88,7 @@ All pure-MP files have been renamed with the `legacy_` prefix to
 make them visually distinct from active code. They will be deleted
 when MP extraction testing is complete.
 
-**v2/ root** (28 files, all `legacy_`-prefixed):
+**v2/ root** (31 files, all `legacy_`-prefixed):
 - `legacy_agent_authorization.go`
 - `legacy_agent_discovery.go`
 - `legacy_agent_discovery_common.go`
@@ -96,8 +96,11 @@ when MP extraction testing is complete.
 - `legacy_agent_setup.go`
 - `legacy_agent_structs.go`
 - `legacy_agent_utils.go`
+- `legacy_apihandler_agent_router.go`
+- `legacy_apihandler_auth.go`
 - `legacy_apihandler_combiner.go`
 - `legacy_apihandler_combiner_distrib.go`
+- `legacy_apihandler_multisigner.go`
 - `legacy_combiner_chunk.go`
 - `legacy_combiner_msg_handler.go`
 - `legacy_combiner_peer.go`
@@ -258,13 +261,16 @@ just verify auth+agent targets build).
 
 Delete files in dependency order — leaves before branches.
 
-**Step 2.1**: Delete combiner-specific files (no non-combiner
-references):
+**Step 2.1**: Delete combiner/signer-specific and pure-MP API
+handler files (no non-MP references):
 - `legacy_db_combiner_contributions.go`
 - `legacy_db_combiner_edits.go`
 - `legacy_db_combiner_publish_instructions.go`
 - `legacy_apihandler_combiner.go`
 - `legacy_apihandler_combiner_distrib.go`
+- `legacy_apihandler_agent_router.go`
+- `legacy_apihandler_auth.go`
+- `legacy_apihandler_multisigner.go`
 - `legacy_combiner_utils.go`
 - `legacy_combiner_msg_handler.go`
 - `legacy_combiner_chunk.go`
@@ -479,9 +485,9 @@ either:
 
 | Category | Files | Rough Lines |
 |----------|-------|-------------|
-| Delete entirely | ~40 files | ~15,000 lines |
+| Delete entirely | ~43 files | ~16,000 lines |
 | Edit (remove MP sections) | ~25 files | ~3,000 lines removed |
-| **Total removal** | **~65 files** | **~18,000 lines** |
+| **Total removal** | **~68 files** | **~19,000 lines** |
 
 ## 8. Post-Removal State
 
