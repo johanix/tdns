@@ -4,11 +4,41 @@
 package core
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 
 	"github.com/miekg/dns"
 )
+
+// IsDuplicate checks if two RRs are duplicates, excluding TTL.
+// Wraps dns.IsDuplicate but fixes PrivateRR comparison: miekg/dns
+// PrivateRR.isDuplicate always returns false, so we compare by
+// wire format instead.
+func IsDuplicate(r1, r2 dns.RR) bool {
+	p1, ok1 := r1.(*dns.PrivateRR)
+	p2, ok2 := r2.(*dns.PrivateRR)
+	if ok1 && ok2 {
+		// Both are PrivateRR — compare header (type + name) and RDATA
+		if r1.Header().Rrtype != r2.Header().Rrtype {
+			return false
+		}
+		if !dns.IsSubDomain(r1.Header().Name, r2.Header().Name) ||
+			!dns.IsSubDomain(r2.Header().Name, r1.Header().Name) {
+			return false
+		}
+		// Compare RDATA by packing to wire format
+		buf1 := make([]byte, p1.Data.Len())
+		buf2 := make([]byte, p2.Data.Len())
+		n1, err1 := p1.Data.Pack(buf1)
+		n2, err2 := p2.Data.Pack(buf2)
+		if err1 != nil || err2 != nil || n1 != n2 {
+			return false
+		}
+		return bytes.Equal(buf1[:n1], buf2[:n2])
+	}
+	return dns.IsDuplicate(r1, r2)
+}
 
 // RRsetDiffer compares old and new DNS resource record slices for a given RR type in a zone, ignoring RRSIG records.
 // It returns: a boolean that is true if the RRsets differ, a slice of records present in newrrs but not in oldrrs (adds), and a slice of records present in oldrrs but not in newrrs (removes).
@@ -40,7 +70,7 @@ func RRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log.Lo
 		}
 		match = false
 		for _, nrr := range newrrs {
-			if dns.IsDuplicate(orr, nrr) {
+			if IsDuplicate(orr, nrr) {
 				match = true
 				break
 			}
@@ -59,7 +89,7 @@ func RRsetDiffer(zone string, newrrs, oldrrs []dns.RR, rrtype uint16, lg *log.Lo
 		}
 		match = false
 		for _, orr := range oldrrs {
-			if dns.IsDuplicate(nrr, orr) {
+			if IsDuplicate(nrr, orr) {
 				match = true
 				break
 			}
@@ -121,7 +151,7 @@ func (rrset *RRset) RRsetDiffer(newrrset *RRset, lg *log.Logger, verbose, debug 
 		}
 		match = false
 		for _, nrr := range newrrs {
-			if dns.IsDuplicate(orr, nrr) {
+			if IsDuplicate(orr, nrr) {
 				match = true
 				break
 			}
@@ -140,7 +170,7 @@ func (rrset *RRset) RRsetDiffer(newrrset *RRset, lg *log.Logger, verbose, debug 
 		}
 		match = false
 		for _, orr := range oldrrs {
-			if dns.IsDuplicate(nrr, orr) {
+			if IsDuplicate(nrr, orr) {
 				match = true
 				break
 			}
@@ -231,7 +261,7 @@ func (rrset *RRset) RemoveRR(rr dns.RR, verbose, debug bool) {
 		if debug {
 			log.Printf("RemoveRR: Comparing:\n%s\n%s\n", r.String(), rr.String())
 		}
-		if dns.IsDuplicate(r, rr) {
+		if IsDuplicate(r, rr) {
 			rrset.RRs = append(rrset.RRs[:i], rrset.RRs[i+1:]...)
 			rrset.RRSIGs = []dns.RR{}
 			log.Printf("RemoveRR: *REMOVED* '%s' from RRset %s %s", rr.String(), rrset.Name, dns.TypeToString[rr.Header().Rrtype])
@@ -243,7 +273,7 @@ func (rrset *RRset) RemoveRR(rr dns.RR, verbose, debug bool) {
 // Add adds a RR to the RRset if it is not already present.
 func (rrset *RRset) Add(rr dns.RR) {
 	for _, rr2 := range rrset.RRs {
-		if dns.IsDuplicate(rr, rr2) {
+		if IsDuplicate(rr, rr2) {
 			// log.Printf("rrset.Add: RR already present: %s", rr.String())
 			return
 		}
@@ -255,7 +285,7 @@ func (rrset *RRset) Add(rr dns.RR) {
 // Delete deletes a RR from the RRset if it is present.
 func (rrset *RRset) Delete(rr dns.RR) {
 	for i, rr2 := range rrset.RRs {
-		if dns.IsDuplicate(rr, rr2) {
+		if IsDuplicate(rr, rr2) {
 			// log.Printf("rrset.Delete: Found RR: %s in RRset\n%v", rr.String(), rrset.RRs)
 			rrset.RRs = append(rrset.RRs[:i], rrset.RRs[i+1:]...)
 			return

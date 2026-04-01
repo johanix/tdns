@@ -48,10 +48,7 @@ var keystoreSig0AddCmd = &cobra.Command{
 containing either the private or the public SIG(0) key and the name of the zone.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("filename", "childzone")
-		err := Sig0KeyMgmt("add")
-		if err != nil {
-			fmt.Printf("Error from Sig0KeyMgmt(): %v\n", err)
-		}
+		Sig0KeyMgmt("add")
 	},
 }
 
@@ -60,10 +57,7 @@ var keystoreSig0ImportCmd = &cobra.Command{
 	Short: "Add a new SIG(0) key pair to the keystore",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("filename", "childzone")
-		err := Sig0KeyMgmt("import")
-		if err != nil {
-			fmt.Printf("Error from Sig0KeyMgmt(): %v\n", err)
-		}
+		Sig0KeyMgmt("import")
 	},
 }
 
@@ -72,10 +66,7 @@ var keystoreSig0GenerateCmd = &cobra.Command{
 	Short: "Generate a new SIG(0) key pair and add it to the keystore",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename", "algorithm", "state")
-		err := Sig0KeyMgmt("generate")
-		if err != nil {
-			fmt.Printf("Error from Sig0KeyMgmt(): %v\n", err)
-		}
+		Sig0KeyMgmt("generate")
 	},
 }
 
@@ -83,10 +74,7 @@ var keystoreSig0ListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all SIG(0) key pairs in the keystore",
 	Run: func(cmd *cobra.Command, args []string) {
-		err := Sig0KeyMgmt("list")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-		}
+		Sig0KeyMgmt("list")
 	},
 }
 
@@ -95,11 +83,7 @@ var keystoreSig0DeleteCmd = &cobra.Command{
 	Short: "Delete SIG(0) key pair from TDNSD keystore",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("keyid", "childzone")
-
-		err := Sig0KeyMgmt("delete")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-		}
+		Sig0KeyMgmt("delete")
 	},
 }
 
@@ -108,11 +92,7 @@ var keystoreSig0SetStateCmd = &cobra.Command{
 	Short: "Set the state of and existing SIG(0) key pair in the TDNSD keystore",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("keyid", "zonename", "state")
-
-		err := Sig0KeyMgmt("setstate")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-		}
+		Sig0KeyMgmt("setstate")
 	},
 }
 
@@ -131,10 +111,7 @@ var keystoreDnssecAddCmd = &cobra.Command{
 containing either the private or the public SIG(0) key and the name of the zone.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("filename", "zonename")
-		err := DnssecKeyMgmt("add")
-		if err != nil {
-			fmt.Printf("Error from DnssecKeyMgmt(): %v\n", err)
-		}
+		DnssecKeyMgmt("add")
 	},
 }
 
@@ -143,10 +120,7 @@ var keystoreDnssecImportCmd = &cobra.Command{
 	Short: "Add a new DNSSEC key pair to the keystore",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("filename", "zonename")
-		err := DnssecKeyMgmt("import")
-		if err != nil {
-			fmt.Printf("Error from DnssecKeyMgmt(): %v\n", err)
-		}
+		DnssecKeyMgmt("import")
 	},
 }
 
@@ -155,10 +129,7 @@ var keystoreDnssecGenerateCmd = &cobra.Command{
 	Short: "Generate a new DNSSEC key pair and add it to the keystore",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename", "algorithm", "keytype", "state")
-		err := DnssecKeyMgmt("generate")
-		if err != nil {
-			fmt.Printf("Error from DnssecKeyMgmt(): %v\n", err)
-		}
+		DnssecKeyMgmt("generate")
 	},
 }
 
@@ -166,10 +137,7 @@ var keystoreDnssecListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all DNSSEC key pairs in the keystore",
 	Run: func(cmd *cobra.Command, args []string) {
-		err := DnssecKeyMgmt("list")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-		}
+		DnssecKeyMgmt("list")
 	},
 }
 
@@ -178,11 +146,7 @@ var keystoreDnssecDeleteCmd = &cobra.Command{
 	Short: "Delete DNSSEC key pair from TDNSD keystore",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("keyid", "zonename")
-
-		err := DnssecKeyMgmt("delete")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-		}
+		DnssecKeyMgmt("delete")
 	},
 }
 
@@ -191,11 +155,7 @@ var keystoreDnssecSetStateCmd = &cobra.Command{
 	Short: "Set the state of and existing DNSSEC key pair in the TDNSD keystore",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("keyid", "zonename", "state")
-
-		err := DnssecKeyMgmt("setstate")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-		}
+		DnssecKeyMgmt("setstate")
 	},
 }
 
@@ -209,11 +169,7 @@ var keystoreDnssecGenDSCmd = &cobra.Command{
 			fmt.Printf("Error: keyid must be between 0 and 65535, got %d\n", keyid)
 			os.Exit(1)
 		}
-		err := DnssecGenDS()
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
-		}
+		DnssecGenDS()
 	},
 }
 
@@ -222,12 +178,7 @@ var keystoreDnssecRolloverCmd = &cobra.Command{
 	Short: "Perform a manual DNSSEC key rollover (standby→active, active→retired)",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
-
-		err := DnssecKeyMgmt("rollover")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
-		}
+		DnssecKeyMgmt("rollover")
 	},
 }
 
@@ -250,11 +201,7 @@ var keystoreDnssecClearCmd = &cobra.Command{
 			}
 		}
 
-		err := DnssecKeyMgmt("clear")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-			os.Exit(1)
-		}
+		DnssecKeyMgmt("clear")
 	},
 }
 
@@ -314,14 +261,17 @@ func init() {
 	keystoreDnssecClearCmd.MarkFlagRequired("zone")
 }
 
-func Sig0KeyMgmt(cmd string) error {
+func Sig0KeyMgmt(cmd string) {
 	data := tdns.KeystorePost{
 		Command:    "sig0-mgmt",
 		SubCommand: cmd,
 	}
 
-	prefixcmd, _ := getCommandContext("keystore")
-	api, _ := getApiClient(prefixcmd, true)
+	prefixcmd, _ := GetCommandContext("keystore")
+	api, err := GetApiClient(prefixcmd, true)
+	if err != nil {
+		log.Fatalf("Error creating API client: %v", err)
+	}
 	switch cmd {
 	case "list":
 		// no action
@@ -413,18 +363,19 @@ func Sig0KeyMgmt(cmd string) error {
 			fmt.Printf("%s\n", tr.Msg)
 		}
 	}
-
-	return nil
 }
 
-func DnssecKeyMgmt(cmd string) error {
+func DnssecKeyMgmt(cmd string) {
 	data := tdns.KeystorePost{
 		Command:    "dnssec-mgmt",
 		SubCommand: cmd,
 	}
 
-	prefixcmd, _ := getCommandContext("keystore")
-	api, _ := getApiClient(prefixcmd, true)
+	prefixcmd, _ := GetCommandContext("keystore")
+	api, err := GetApiClient(prefixcmd, true)
+	if err != nil {
+		log.Fatalf("Error creating API client: %v", err)
+	}
 
 	switch cmd {
 	case "list":
@@ -555,14 +506,13 @@ func DnssecKeyMgmt(cmd string) error {
 		}
 	}
 
-	return nil
 }
 
-func DnssecGenDS() error {
-	prefixcmd, _ := getCommandContext("keystore")
-	api, err := getApiClient(prefixcmd, true)
+func DnssecGenDS() {
+	prefixcmd, _ := GetCommandContext("keystore")
+	api, err := GetApiClient(prefixcmd, true)
 	if err != nil {
-		return fmt.Errorf("failed to get API client: %w", err)
+		log.Fatalf("Error: failed to get API client: %v", err)
 	}
 
 	// First, list all DNSSEC keys to find the ones for our zone
@@ -573,22 +523,22 @@ func DnssecGenDS() error {
 
 	tr, err := SendKeystoreCmd(api, data)
 	if err != nil {
-		return fmt.Errorf("error listing DNSSEC keys: %v", err)
+		log.Fatalf("Error listing DNSSEC keys: %v", err)
 	}
 
 	if tr.Error {
-		return fmt.Errorf("error from keystore: %s", tr.ErrorMsg)
+		log.Fatalf("Error from keystore: %s", tr.ErrorMsg)
 	}
 
 	if len(tr.Dnskeys) == 0 {
 		fmt.Printf("No DNSSEC keys found in keystore\n")
-		return nil
+		return
 	}
 
 	zone := dns.Fqdn(tdns.Globals.Zonename)
 	trimmed := strings.TrimSuffix(zone, ".")
 	if trimmed == "" {
-		return fmt.Errorf("cannot generate DS for root zone")
+		log.Fatalf("Error: cannot generate DS for root zone")
 	}
 
 	// Filter keys for the specified zone and optionally keyid
@@ -642,7 +592,7 @@ func DnssecGenDS() error {
 			fmt.Printf("No KSK (Key Signing Key) found for zone %s\n", zone)
 			fmt.Println("KSKs are identified by having the SEP (Secure Entry Point) bit set (flags & 0x0001 != 0)")
 		}
-		return nil
+		return
 	}
 
 	fmt.Printf("Found %d KSK(s) for zone %s\n\n", len(ksks), zone)
@@ -684,7 +634,6 @@ func DnssecGenDS() error {
 		}
 	}
 
-	return nil
 }
 
 func SendKeystoreCmd(api *tdns.ApiClient, data tdns.KeystorePost) (tdns.KeystoreResponse, error) {

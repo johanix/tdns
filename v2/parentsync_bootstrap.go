@@ -13,7 +13,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// parentSyncAfterKeyPublication is called asynchronously after onLeaderElected
+// ParentSyncAfterKeyPublication is called asynchronously after onLeaderElected
 // publishes the SIG(0) KEY to the combiner. It queries the parent via KeyState
 // EDNS(0) to determine if bootstrap is needed, and if so, sends the bootstrap
 // UPDATE.
@@ -25,7 +25,7 @@ import (
 //  4. KeyStateUnknown → bootstrap
 //  5. KeyStateBootstrapAutoOngoing → poll
 //  6. Query failure → retry with backoff
-func (conf *Config) parentSyncAfterKeyPublication(zone ZoneName, keyName string, keyid uint16, algorithm uint8) {
+func (conf *Config) ParentSyncAfterKeyPublication(zone ZoneName, keyName string, keyid uint16, algorithm uint8) {
 	kdb := conf.Internal.KeyDB
 	lem := conf.Internal.LeaderElectionManager
 
@@ -36,23 +36,23 @@ func (conf *Config) parentSyncAfterKeyPublication(zone ZoneName, keyName string,
 		if imr != nil {
 			break
 		}
-		lgElect.Info("parentSyncAfterKeyPublication: waiting for IMR engine", "zone", zone, "attempt", i+1)
+		lgElect.Info("ParentSyncAfterKeyPublication: waiting for IMR engine", "zone", zone, "attempt", i+1)
 		time.Sleep(2 * time.Second)
 	}
 	if imr == nil {
-		lgElect.Error("parentSyncAfterKeyPublication: IMR engine not available after waiting", "zone", zone)
+		lgElect.Error("ParentSyncAfterKeyPublication: IMR engine not available after waiting", "zone", zone)
 		return
 	}
 
 	// Only the leader should bootstrap.
 	if lem != nil && !lem.IsLeader(zone) {
-		lgElect.Info("parentSyncAfterKeyPublication: not the leader, skipping", "zone", zone)
+		lgElect.Info("ParentSyncAfterKeyPublication: not the leader, skipping", "zone", zone)
 		return
 	}
 
 	// Check HSYNCPARAM parentsync=agent.
-	if !zoneHasParentSyncAgent(zone) {
-		lgElect.Info("parentSyncAfterKeyPublication: parentsync is not 'agent', skipping", "zone", zone)
+	if !ZoneHasParentSyncAgent(zone) {
+		lgElect.Info("ParentSyncAfterKeyPublication: parentsync is not 'agent', skipping", "zone", zone)
 		return
 	}
 
@@ -64,13 +64,13 @@ func (conf *Config) parentSyncAfterKeyPublication(zone ZoneName, keyName string,
 	for attempt := 1; attempt <= maxRetries; attempt++ {
 		// Re-check leadership before each attempt.
 		if lem != nil && !lem.IsLeader(zone) {
-			lgElect.Info("parentSyncAfterKeyPublication: lost leadership, aborting", "zone", zone)
+			lgElect.Info("ParentSyncAfterKeyPublication: lost leadership, aborting", "zone", zone)
 			return
 		}
 
-		keyState, err := queryParentKeyState(kdb, imr, keyName, keyid)
+		keyState, err := QueryParentKeyState(kdb, imr, keyName, keyid)
 		if err != nil {
-			lgElect.Warn("parentSyncAfterKeyPublication: KeyState inquiry failed",
+			lgElect.Warn("ParentSyncAfterKeyPublication: KeyState inquiry failed",
 				"zone", zone, "attempt", attempt, "err", err)
 			time.Sleep(delay)
 			delay *= 2
@@ -79,9 +79,9 @@ func (conf *Config) parentSyncAfterKeyPublication(zone ZoneName, keyName string,
 
 		switch keyState {
 		case edns0.KeyStateTrusted:
-			lgElect.Info("parentSyncAfterKeyPublication: parent trusts our key",
+			lgElect.Info("ParentSyncAfterKeyPublication: parent trusts our key",
 				"zone", zone, "keyid", keyid)
-			updateParentState(kdb, keyName, keyid, keyState)
+			UpdateParentState(kdb, keyName, keyid, keyState)
 
 			// Post-bootstrap: verify delegation data is in sync with parent.
 			// Enqueue EXPLICIT-SYNC-DELEGATION which queries the parent and
@@ -89,14 +89,14 @@ func (conf *Config) parentSyncAfterKeyPublication(zone ZoneName, keyName string,
 			if delsyncq := conf.Internal.DelegationSyncQ; delsyncq != nil {
 				zd, exists := Zones.Get(string(zone))
 				if exists {
-					lgElect.Info("parentSyncAfterKeyPublication: enqueuing post-bootstrap delegation verification", "zone", zone)
+					lgElect.Info("ParentSyncAfterKeyPublication: enqueuing post-bootstrap delegation verification", "zone", zone)
 					delsyncq <- DelegationSyncRequest{
 						Command:  "EXPLICIT-SYNC-DELEGATION",
 						ZoneName: string(zone),
 						ZoneData: zd,
 					}
 				} else {
-					lgElect.Warn("parentSyncAfterKeyPublication: zone not found, skipping delegation verification", "zone", zone)
+					lgElect.Warn("ParentSyncAfterKeyPublication: zone not found, skipping delegation verification", "zone", zone)
 				}
 			}
 			return
@@ -104,22 +104,22 @@ func (conf *Config) parentSyncAfterKeyPublication(zone ZoneName, keyName string,
 		case edns0.KeyStateUnknown:
 			if bootstrapped {
 				// Already sent bootstrap, parent hasn't processed it yet — keep polling
-				lgElect.Info("parentSyncAfterKeyPublication: parent still unknown after bootstrap, polling",
+				lgElect.Info("ParentSyncAfterKeyPublication: parent still unknown after bootstrap, polling",
 					"zone", zone, "keyid", keyid, "attempt", attempt)
 				time.Sleep(delay)
 				delay *= 2
 				continue
 			}
-			lgElect.Info("parentSyncAfterKeyPublication: parent does not know our key, bootstrapping",
+			lgElect.Info("ParentSyncAfterKeyPublication: parent does not know our key, bootstrapping",
 				"zone", zone, "keyid", keyid)
-			updateParentState(kdb, keyName, keyid, keyState)
-			err := bootstrapWithParent(zone, keyName, algorithm)
+			UpdateParentState(kdb, keyName, keyid, keyState)
+			err := BootstrapWithParent(zone, keyName, algorithm)
 			if err != nil {
-				lgElect.Error("parentSyncAfterKeyPublication: bootstrap failed",
+				lgElect.Error("ParentSyncAfterKeyPublication: bootstrap failed",
 					"zone", zone, "err", err)
 				return
 			}
-			lgElect.Info("parentSyncAfterKeyPublication: bootstrap UPDATE sent to parent, will poll for trust",
+			lgElect.Info("ParentSyncAfterKeyPublication: bootstrap UPDATE sent to parent, will poll for trust",
 				"zone", zone, "keyid", keyid)
 			bootstrapped = true
 			time.Sleep(delay)
@@ -127,28 +127,28 @@ func (conf *Config) parentSyncAfterKeyPublication(zone ZoneName, keyName string,
 			continue
 
 		case edns0.KeyStateBootstrapAutoOngoing:
-			lgElect.Info("parentSyncAfterKeyPublication: parent is verifying key, will poll",
+			lgElect.Info("ParentSyncAfterKeyPublication: parent is verifying key, will poll",
 				"zone", zone, "keyid", keyid, "attempt", attempt)
-			updateParentState(kdb, keyName, keyid, keyState)
+			UpdateParentState(kdb, keyName, keyid, keyState)
 			time.Sleep(delay)
 			delay *= 2
 			continue
 
 		default:
-			lgElect.Info("parentSyncAfterKeyPublication: parent returned unexpected state",
+			lgElect.Info("ParentSyncAfterKeyPublication: parent returned unexpected state",
 				"zone", zone, "keyid", keyid, "state", keyState)
-			updateParentState(kdb, keyName, keyid, keyState)
+			UpdateParentState(kdb, keyName, keyid, keyState)
 			return
 		}
 	}
 
-	lgElect.Warn("parentSyncAfterKeyPublication: exhausted retries",
+	lgElect.Warn("ParentSyncAfterKeyPublication: exhausted retries",
 		"zone", zone, "keyid", keyid)
 }
 
-// queryParentKeyState sends a KeyState EDNS(0) inquiry to the parent and
+// QueryParentKeyState sends a KeyState EDNS(0) inquiry to the parent and
 // returns the parent's reported state for the key.
-func queryParentKeyState(kdb *KeyDB, imr *Imr, keyName string, keyid uint16) (uint8, error) {
+func QueryParentKeyState(kdb *KeyDB, imr *Imr, keyName string, keyid uint16) (uint8, error) {
 	ctx := context.Background()
 
 	dsyncTarget, err := imr.LookupDSYNCTarget(ctx, keyName, dns.TypeANY, core.SchemeUpdate)
@@ -203,9 +203,9 @@ func queryParentKeyState(kdb *KeyDB, imr *Imr, keyName string, keyid uint16) (ui
 	return keystate.KeyState, nil
 }
 
-// queryParentKeyStateDetailed is like queryParentKeyState but also returns the
+// QueryParentKeyStateDetailed is like QueryParentKeyState but also returns the
 // ExtraText from the KeyState response, for display purposes.
-func queryParentKeyStateDetailed(kdb *KeyDB, imr *Imr, keyName string, keyid uint16) (uint8, string, error) {
+func QueryParentKeyStateDetailed(kdb *KeyDB, imr *Imr, keyName string, keyid uint16) (uint8, string, error) {
 	ctx := context.Background()
 
 	dsyncTarget, err := imr.LookupDSYNCTarget(ctx, keyName, dns.TypeANY, core.SchemeUpdate)
@@ -260,11 +260,11 @@ func queryParentKeyStateDetailed(kdb *KeyDB, imr *Imr, keyName string, keyid uin
 	return keystate.KeyState, keystate.ExtraText, nil
 }
 
-// updateParentState persists the parent's KeyState response in the local keystore.
-func updateParentState(kdb *KeyDB, keyName string, keyid uint16, parentState uint8) {
-	tx, err := kdb.Begin("updateParentState")
+// UpdateParentState persists the parent's KeyState response in the local keystore.
+func UpdateParentState(kdb *KeyDB, keyName string, keyid uint16, parentState uint8) {
+	tx, err := kdb.Begin("UpdateParentState")
 	if err != nil {
-		lgElect.Error("updateParentState: failed to begin transaction", "err", err)
+		lgElect.Error("UpdateParentState: failed to begin transaction", "err", err)
 		return
 	}
 
@@ -278,25 +278,25 @@ func updateParentState(kdb *KeyDB, keyName string, keyid uint16, parentState uin
 
 	_, err = kdb.Sig0KeyMgmt(tx, kp)
 	if err != nil {
-		lgElect.Error("updateParentState: failed to update parent state", "err", err)
+		lgElect.Error("UpdateParentState: failed to update parent state", "err", err)
 		tx.Rollback()
 		return
 	}
 
 	if err := tx.Commit(); err != nil {
-		lgElect.Error("updateParentState: failed to commit", "err", err)
+		lgElect.Error("UpdateParentState: failed to commit", "err", err)
 	}
 }
 
-// bootstrapWithParent sends a self-signed UPDATE to the parent to bootstrap
+// BootstrapWithParent sends a self-signed UPDATE to the parent to bootstrap
 // trust for the child's SIG(0) key.
-func bootstrapWithParent(zone ZoneName, keyName string, algorithm uint8) error {
-	lgElect.Info("bootstrapWithParent: starting", "zone", zone, "keyName", keyName, "algorithm", algorithm)
+func BootstrapWithParent(zone ZoneName, keyName string, algorithm uint8) error {
+	lgElect.Info("BootstrapWithParent: starting", "zone", zone, "keyName", keyName, "algorithm", algorithm)
 
 	// Try Zones map first, then FindZone (label-walking).
 	zd, ok := Zones.Get(keyName)
 	if !ok || zd == nil {
-		lgElect.Debug("bootstrapWithParent: zone not in Zones map, trying FindZone", "keyName", keyName)
+		lgElect.Debug("BootstrapWithParent: zone not in Zones map, trying FindZone", "keyName", keyName)
 		zd, _ = FindZone(keyName)
 	}
 	if zd == nil {
@@ -309,13 +309,13 @@ func bootstrapWithParent(zone ZoneName, keyName string, algorithm uint8) error {
 		return fmt.Errorf("BootstrapSig0KeyWithParent: %s: %v", msg, err)
 	}
 
-	lgElect.Info("bootstrapWithParent: success", "zone", zone, "result", msg, "updateResult", ur)
+	lgElect.Info("BootstrapWithParent: success", "zone", zone, "result", msg, "updateResult", ur)
 	return nil
 }
 
-// zoneHasParentSyncAgent checks whether the zone's HSYNCPARAM record has
+// ZoneHasParentSyncAgent checks whether the zone's HSYNCPARAM record has
 // parentsync=agent. Returns false if HSYNCPARAM is absent or parentsync=owner.
-func zoneHasParentSyncAgent(zone ZoneName) bool {
+func ZoneHasParentSyncAgent(zone ZoneName) bool {
 	zd, ok := Zones.Get(string(zone))
 	if !ok || zd == nil {
 		return false

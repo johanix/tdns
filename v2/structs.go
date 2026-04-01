@@ -104,6 +104,21 @@ type ZoneMPExtension struct {
 	KeystateOK    bool      // true after successful KEYSTATE exchange
 	KeystateError string    // error message from last failed attempt (empty on success)
 	KeystateTime  time.Time // time of last KEYSTATE attempt
+
+	// RefreshAnalysis holds pre-refresh analysis results for post-refresh callbacks.
+	// Set by OnZonePreRefresh, consumed by OnZonePostRefresh, cleared after use.
+	RefreshAnalysis *ZoneRefreshAnalysis
+}
+
+// ZoneRefreshAnalysis carries analysis results from OnZonePreRefresh
+// to OnZonePostRefresh. Set before the hard flip, consumed after.
+type ZoneRefreshAnalysis struct {
+	DelegationChanged bool
+	DelegationStatus  DelegationSyncStatus
+	HsyncChanged      bool
+	HsyncStatus       *HsyncStatus
+	DnskeyChanged     bool
+	DnskeyStatus      *DnskeyStatus
 }
 
 type ZoneData struct {
@@ -164,6 +179,18 @@ type ZoneData struct {
 	// Apps register these before RefreshEngine starts, and RefreshEngine clears the slice
 	// after executing them. Protected by zd.mu.
 	OnFirstLoad []func(*ZoneData)
+
+	// OnZonePreRefresh callbacks run BEFORE the hard flip in FetchFromFile/FetchFromUpstream.
+	// They receive both old (zd, current, still served) and new (new_zd, incoming, not yet served)
+	// zone data. Used for: analysis (compare old vs new for HSYNC/DNSKEY/delegation changes),
+	// modification of new_zd (combiner contributions, signature TXT, MP data population),
+	// and agent RFIs (RequestAndWaitForKeyInventory). Options map is shared between zd and new_zd.
+	OnZonePreRefresh []func(zd, new_zd *ZoneData)
+
+	// OnZonePostRefresh callbacks run AFTER the hard flip (and after RepopulateDynamicRRs).
+	// They receive zd which now serves the new data. Used for: queue sends (SyncQ,
+	// DelegationSyncQ) that need the live zone pointer, and any post-flip notifications.
+	OnZonePostRefresh []func(zd *ZoneData)
 }
 
 // Thread-safe accessors for fields accessed from multiple goroutines.
@@ -675,9 +702,10 @@ type CombinerResponse struct {
 }
 
 type CombinerDebugPost struct {
-	Command string `json:"command"`
-	Zone    string `json:"zone,omitempty"`
-	AgentID string `json:"agent_id,omitempty"` // For agent-targeted commands (e.g. agent-ping)
+	Command string                 `json:"command"`
+	Zone    string                 `json:"zone,omitempty"`
+	AgentID string                 `json:"agent_id,omitempty"`
+	Data    map[string]interface{} `json:"data,omitempty"`
 }
 
 // CombinerEditPost represents a CLI request for managing pending/rejected edits.
@@ -708,6 +736,7 @@ type CombinerDebugResponse struct {
 	Error              bool                                                 `json:"error"`
 	ErrorMsg           string                                               `json:"error_msg,omitempty"`
 	Msg                string                                               `json:"msg,omitempty"`
+	Data               interface{}                                          `json:"data,omitempty"`
 	CombinerData       map[string]map[string]map[string][]string            `json:"combiner_data,omitempty"`       // zone → owner → rrtype → []rr
 	AgentContributions map[string]map[string]map[string]map[string][]string `json:"agent_contributions,omitempty"` // zone → agent → owner → rrtype → []rr
 }

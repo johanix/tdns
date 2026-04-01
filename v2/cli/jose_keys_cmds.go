@@ -48,7 +48,7 @@ func init() {
 }
 
 func runKeysCommand(cmd *cobra.Command, subcommand string, args []string) {
-	parent, _ := getCommandContext("keys")
+	parent, _ := GetCommandContext("keys")
 	if parent != "agent" && parent != "combiner" {
 		log.Fatalf("keys must be run under agent or combiner (e.g. tdns-cli agent keys %s)", subcommand)
 	}

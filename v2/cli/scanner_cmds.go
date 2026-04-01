@@ -35,7 +35,7 @@ var ScanCdsCmd = &cobra.Command{
 	Args:  cobra.MinimumNArgs(0),
 	Run: func(cmd *cobra.Command, args []string) {
 		// Get API client for scanner
-		api, err := getApiClient("scanner", true)
+		api, err := GetApiClient("scanner", true)
 		if err != nil {
 			log.Fatalf("Error getting API client for scanner: %v", err)
 		}
@@ -126,7 +126,7 @@ var StatusCmd = &cobra.Command{
 	Args:  cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		// Get API client for scanner
-		api, err := getApiClient("scanner", true)
+		api, err := GetApiClient("scanner", true)
 		if err != nil {
 			log.Fatalf("Error getting API client for scanner: %v", err)
 		}
@@ -244,7 +244,7 @@ var ResultsCmd = &cobra.Command{
 	Args:  cobra.ExactArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		// Get API client for scanner
-		api, err := getApiClient("scanner", true)
+		api, err := GetApiClient("scanner", true)
 		if err != nil {
 			log.Fatalf("Error getting API client for scanner: %v", err)
 		}
@@ -342,7 +342,7 @@ var DeleteCmd = &cobra.Command{
 	Args:  cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		// Get API client for scanner
-		api, err := getApiClient("scanner", true)
+		api, err := GetApiClient("scanner", true)
 		if err != nil {
 			log.Fatalf("Error getting API client for scanner: %v", err)
 		}

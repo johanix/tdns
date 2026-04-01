@@ -36,7 +36,7 @@ Example:
   tdns-cliv2 auth peer list
   tdns-cliv2 auth peer list --verbose`,
 	Run: func(cmd *cobra.Command, args []string) {
-		listDistribPeers(cmd, "auth")
+		ListDistribPeers(cmd, "auth")
 	},
 }
 
@@ -101,7 +101,7 @@ func init() {
 
 // SendAuthPeerCmd sends a peer command to the auth server's /auth/peer endpoint.
 func SendAuthPeerCmd(req tdns.AuthPeerPost) (*tdns.AuthPeerResponse, error) {
-	api, err := getApiClient("auth", true)
+	api, err := GetApiClient("auth", true)
 	if err != nil {
 		return nil, fmt.Errorf("error getting API client: %w", err)
 	}

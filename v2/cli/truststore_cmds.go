@@ -44,10 +44,7 @@ var truststoreSig0AddCmd = &cobra.Command{
 	Short: "Add a new SIG(0) public key to the truststore",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("src", "child")
-		err := Sig0TrustMgmt("add")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-		}
+		Sig0TrustMgmt("add")
 	},
 }
 
@@ -56,10 +53,7 @@ var truststoreSig0DeleteCmd = &cobra.Command{
 	Short: "Delete a SIG(0) public key from the truststore",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("child")
-		err := Sig0TrustMgmt("delete")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-		}
+		Sig0TrustMgmt("delete")
 	},
 }
 
@@ -67,10 +61,7 @@ var truststoreSig0ListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all child SIG(0) public key in the keystore",
 	Run: func(cmd *cobra.Command, args []string) {
-		err := Sig0TrustMgmt("list")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-		}
+		Sig0TrustMgmt("list")
 	},
 }
 
@@ -79,10 +70,7 @@ var truststoreSig0TrustCmd = &cobra.Command{
 	Short: "Declare a child SIG(0) public key in the keystore as trusted",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("keyid", "child")
-		err := Sig0TrustMgmt("trust")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-		}
+		Sig0TrustMgmt("trust")
 	},
 }
 var truststoreSig0UntrustCmd = &cobra.Command{
@@ -90,10 +78,7 @@ var truststoreSig0UntrustCmd = &cobra.Command{
 	Short: "Declare a child SIG(0) public key in the keystore as untrusted",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("keyid", "child")
-		err := Sig0TrustMgmt("untrust")
-		if err != nil {
-			fmt.Printf("Error: %v\n", err)
-		}
+		Sig0TrustMgmt("untrust")
 	},
 }
 
@@ -110,9 +95,13 @@ func init() {
 	truststoreSig0AddCmd.PersistentFlags().StringVarP(&childSig0Src, "src", "s", "", "Source for SIG(0) public key, a file name or 'dns'")
 }
 
-func Sig0TrustMgmt(subcommand string) error {
-	prefixcmd, _ := getCommandContext("truststore")
-	api, _ := getApiClient(prefixcmd, true)
+func Sig0TrustMgmt(subcommand string) {
+	prefixcmd, _ := GetCommandContext("truststore")
+	api, err := GetApiClient(prefixcmd, true)
+	if err != nil {
+		fmt.Printf("Error creating API client: %v\n", err)
+		os.Exit(1)
+	}
 
 	tr, err := SendTruststore(api, tdns.TruststorePost{
 		Command:    "child-sig0-mgmt",
@@ -148,7 +137,7 @@ func Sig0TrustMgmt(subcommand string) error {
 			fmt.Printf("%s\n", columnize.SimpleFormat(out))
 		}
 
-		return nil
+		return
 	}
 
 	if subcommand == "add" {
@@ -204,7 +193,6 @@ func Sig0TrustMgmt(subcommand string) error {
 	} else {
 		fmt.Printf("%s\n", tr.Msg)
 	}
-	return nil
 }
 
 func SendTruststore(api *tdns.ApiClient, data tdns.TruststorePost) (tdns.TruststoreResponse, error) {

@@ -759,7 +759,7 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 	return &dk, err
 }
 
-func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, newstate string) error {
+func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, newstate string) (err error) {
 	const getDnskeySql = `
     SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
 	const updateDnskeyStateSql = `
@@ -774,7 +774,9 @@ func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, news
 		if err != nil {
 			tx.Rollback()
 		} else {
-			tx.Commit()
+			if commitErr := tx.Commit(); commitErr != nil {
+				err = fmt.Errorf("commit failed: %w", commitErr)
+			}
 		}
 	}()
 
@@ -807,8 +809,9 @@ func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, news
 		return fmt.Errorf("no rows updated, key with keyid %d in zone %s might not be in state %s", keyid, zonename, oldstate)
 	}
 
-	// Delete the cached data
+	// Delete cached data for both old and new states
 	delete(kdb.KeystoreDnskeyCache, zonename+"+"+oldstate)
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+newstate)
 
 	return nil
 }
@@ -816,7 +819,7 @@ func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, news
 // GenerateAndStageKey generates a new DNSSEC key and stages it for the key pipeline.
 // For multi-provider zones (isMultiProvider=true): created → mpdist (awaits remote confirmation)
 // For normal zones: created → published (sets published_at, enters time-based pipeline)
-func (kdb *KeyDB) GenerateAndStageKey(zone, creator string, alg uint8, keytype string, isMultiProvider bool) (uint16, error) {
+func GenerateAndStageKey(kdb *KeyDB, zone, creator string, alg uint8, keytype string, isMultiProvider bool) (uint16, error) {
 	pkc, _, err := kdb.GenerateKeypair(zone, creator, DnskeyStateCreated, dns.TypeDNSKEY, alg, keytype, nil)
 	if err != nil {
 		return 0, fmt.Errorf("GenerateAndStageKey: key generation failed: %w", err)
@@ -831,7 +834,7 @@ func (kdb *KeyDB) GenerateAndStageKey(zone, creator string, alg uint8, keytype s
 		targetState = DnskeyStatePublished
 	}
 
-	if err := kdb.UpdateDnssecKeyState(zone, keyid, targetState); err != nil {
+	if err := UpdateDnssecKeyState(kdb, zone, keyid, targetState); err != nil {
 		return 0, fmt.Errorf("GenerateAndStageKey: state transition to %s failed: %w", targetState, err)
 	}
 
@@ -842,26 +845,24 @@ func (kdb *KeyDB) GenerateAndStageKey(zone, creator string, alg uint8, keytype s
 // TransitionMpdistToPublished transitions a key from mpdist to published state.
 // Called when the signer receives a "propagated" KEYSTATE signal from the agent,
 // indicating all remote providers have confirmed the key.
-// If the key is not in mpdist state, this is a no-op (returns nil).
-func (kdb *KeyDB) TransitionMpdistToPublished(zonename string, keyid uint16) error {
-	// Check current state — only transition if in mpdist
-	var currentState string
-	err := kdb.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&currentState)
+// Uses a conditional UPDATE to avoid TOCTOU races. No-op if the key is not
+// in mpdist state (returns nil).
+func TransitionMpdistToPublished(kdb *KeyDB, zonename string, keyid uint16) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	res, err := kdb.Exec(`UPDATE DnssecKeyStore SET state=?, published_at=? WHERE zonename=? AND keyid=? AND state=?`,
+		DnskeyStatePublished, now, zonename, keyid, DnskeyStateMpdist)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil // Key not found, no-op
-		}
-		return fmt.Errorf("TransitionMpdistToPublished: query failed: %w", err)
+		return fmt.Errorf("TransitionMpdistToPublished: %w", err)
 	}
-
-	if currentState != DnskeyStateMpdist {
-		lgSigner.Debug("TransitionMpdistToPublished: key not in mpdist, no-op", "zone", zonename, "keyid", keyid, "state", currentState)
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		lgSigner.Debug("TransitionMpdistToPublished: key not in mpdist (or not found), no-op", "zone", zonename, "keyid", keyid)
 		return nil
 	}
 
-	if err := kdb.UpdateDnssecKeyState(zonename, keyid, DnskeyStatePublished); err != nil {
-		return fmt.Errorf("TransitionMpdistToPublished: %w", err)
-	}
+	// Invalidate caches for both old and new states
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+DnskeyStateMpdist)
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+DnskeyStatePublished)
 
 	lgSigner.Info("key transitioned mpdist->published", "zone", zonename, "keyid", keyid)
 	return nil
@@ -870,25 +871,23 @@ func (kdb *KeyDB) TransitionMpdistToPublished(zonename string, keyid uint16) err
 // TransitionMpremoveToRemoved transitions a key from mpremove to removed state.
 // Called when the signer receives a "propagated" KEYSTATE signal from the agent,
 // indicating all remote providers have confirmed the key removal.
-// If the key is not in mpremove state, this is a no-op (returns nil).
-func (kdb *KeyDB) TransitionMpremoveToRemoved(zonename string, keyid uint16) error {
-	var currentState string
-	err := kdb.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&currentState)
+// Uses a conditional UPDATE to avoid TOCTOU races. No-op if the key is not
+// in mpremove state (returns nil).
+func TransitionMpremoveToRemoved(kdb *KeyDB, zonename string, keyid uint16) error {
+	res, err := kdb.Exec(`UPDATE DnssecKeyStore SET state=? WHERE zonename=? AND keyid=? AND state=?`,
+		DnskeyStateRemoved, zonename, keyid, DnskeyStateMpremove)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			return nil
-		}
-		return fmt.Errorf("TransitionMpremoveToRemoved: query failed: %w", err)
+		return fmt.Errorf("TransitionMpremoveToRemoved: %w", err)
 	}
-
-	if currentState != DnskeyStateMpremove {
-		lgSigner.Debug("TransitionMpremoveToRemoved: key not in mpremove, no-op", "zone", zonename, "keyid", keyid, "state", currentState)
+	rows, _ := res.RowsAffected()
+	if rows == 0 {
+		lgSigner.Debug("TransitionMpremoveToRemoved: key not in mpremove (or not found), no-op", "zone", zonename, "keyid", keyid)
 		return nil
 	}
 
-	if err := kdb.UpdateDnssecKeyState(zonename, keyid, DnskeyStateRemoved); err != nil {
-		return fmt.Errorf("TransitionMpremoveToRemoved: %w", err)
-	}
+	// Invalidate caches for both old and new states
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+DnskeyStateMpremove)
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+DnskeyStateRemoved)
 
 	lgSigner.Info("key transitioned mpremove->removed", "zone", zonename, "keyid", keyid)
 	return nil
@@ -896,7 +895,7 @@ func (kdb *KeyDB) TransitionMpremoveToRemoved(zonename string, keyid uint16) err
 
 // SetPropagationConfirmed marks a DNSKEY as propagation-confirmed in the keystore.
 // Called when the agent sends KEYSTATE "propagated" to the signer.
-func (kdb *KeyDB) SetPropagationConfirmed(zonename string, keyid uint16) error {
+func SetPropagationConfirmed(kdb *KeyDB, zonename string, keyid uint16) error {
 	const updateSql = `UPDATE DnssecKeyStore SET propagation_confirmed=1, propagation_confirmed_at=? WHERE zonename=? AND keyid=?`
 
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -981,7 +980,7 @@ type KeyInventoryItem struct {
 // GetKeyInventory returns the complete DNSKEY inventory for a zone — all keys
 // across all states. Used by the signer to respond to RFI KEYSTATE requests.
 // Returns lightweight entries (keytag, algorithm, flags, state, keyrr) without private keys.
-func (kdb *KeyDB) GetKeyInventory(zonename string) ([]KeyInventoryItem, error) {
+func GetKeyInventory(kdb *KeyDB, zonename string) ([]KeyInventoryItem, error) {
 	const inventorySql = `SELECT keyid, flags, algorithm, state, COALESCE(keyrr, '') FROM DnssecKeyStore WHERE zonename=?`
 
 	rows, err := kdb.Query(inventorySql, zonename)
@@ -1033,7 +1032,7 @@ type DnssecKeyWithTimestamps struct {
 
 // GetDnssecKeysByState returns all DNSSEC keys in a given state, with lifecycle timestamps.
 // If zone is empty, returns keys across all zones.
-func (kdb *KeyDB) GetDnssecKeysByState(zone string, state string) ([]DnssecKeyWithTimestamps, error) {
+func GetDnssecKeysByState(kdb *KeyDB, zone string, state string) ([]DnssecKeyWithTimestamps, error) {
 	var query string
 	var args []interface{}
 
@@ -1097,7 +1096,7 @@ func (kdb *KeyDB) GetDnssecKeysByState(zone string, state string) ([]DnssecKeyWi
 // appropriate lifecycle timestamp. When transitioning to "published", sets
 // published_at. When transitioning to "retired", sets retired_at.
 // Invalidates the cache for both old and new states.
-func (kdb *KeyDB) UpdateDnssecKeyState(zonename string, keyid uint16, newstate string) error {
+func UpdateDnssecKeyState(kdb *KeyDB, zonename string, keyid uint16, newstate string) (err error) {
 	tx, err := kdb.Begin("UpdateDnssecKeyState")
 	if err != nil {
 		return fmt.Errorf("error beginning transaction: %v", err)
@@ -1107,7 +1106,9 @@ func (kdb *KeyDB) UpdateDnssecKeyState(zonename string, keyid uint16, newstate s
 		if err != nil {
 			tx.Rollback()
 		} else {
-			tx.Commit()
+			if commitErr := tx.Commit(); commitErr != nil {
+				err = fmt.Errorf("commit failed: %w", commitErr)
+			}
 		}
 	}()
 
@@ -1170,7 +1171,7 @@ func (kdb *KeyDB) RolloverKey(zonename string, keytype string, tx *Tx) (uint16, 
 	}
 
 	// Get active keys of this type
-	activeKeys, err := kdb.GetDnssecKeysByState(zonename, DnskeyStateActive)
+	activeKeys, err := GetDnssecKeysByState(kdb, zonename, DnskeyStateActive)
 	if err != nil {
 		return 0, 0, fmt.Errorf("error getting active keys: %w", err)
 	}
@@ -1187,7 +1188,7 @@ func (kdb *KeyDB) RolloverKey(zonename string, keytype string, tx *Tx) (uint16, 
 	}
 
 	// Get standby keys of this type
-	standbyKeys, err := kdb.GetDnssecKeysByState(zonename, DnskeyStateStandby)
+	standbyKeys, err := GetDnssecKeysByState(kdb, zonename, DnskeyStateStandby)
 	if err != nil {
 		return 0, 0, fmt.Errorf("error getting standby keys: %w", err)
 	}

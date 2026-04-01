@@ -18,9 +18,9 @@ import (
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 
-	"github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns-transport/v2/crypto"
 	josecrypto "github.com/johanix/tdns-transport/v2/crypto/jose"
+	"github.com/johanix/tdns/v2/core"
 )
 
 var JwtCmd = &cobra.Command{
@@ -326,17 +326,17 @@ func tryRawCHUNK(input []byte) ([]byte, *chunkInfo, error) {
 }
 
 type inspectionResult struct {
-	ChunkInfo       *chunkInfo                `json:"chunk_info,omitempty"`
-	JWTStructure    string                     `json:"jwt_structure"`
-	JWSHeader       map[string]interface{}     `json:"jws_header,omitempty"`
-	JWSVerified     *bool                      `json:"jws_verified,omitempty"`
-	JWSError        string                     `json:"jws_error,omitempty"`
-	JWEHeader       map[string]interface{}     `json:"jwe_header,omitempty"`
-	JWEDecrypted    *bool                      `json:"jwe_decrypted,omitempty"`
-	JWEError        string                     `json:"jwe_error,omitempty"`
-	PlaintextLength *int                       `json:"plaintext_length,omitempty"`
-	Manifest        map[string]interface{}     `json:"manifest,omitempty"`
-	Operations      []map[string]interface{}   `json:"operations,omitempty"`
+	ChunkInfo       *chunkInfo               `json:"chunk_info,omitempty"`
+	JWTStructure    string                   `json:"jwt_structure"`
+	JWSHeader       map[string]interface{}   `json:"jws_header,omitempty"`
+	JWSVerified     *bool                    `json:"jws_verified,omitempty"`
+	JWSError        string                   `json:"jws_error,omitempty"`
+	JWEHeader       map[string]interface{}   `json:"jwe_header,omitempty"`
+	JWEDecrypted    *bool                    `json:"jwe_decrypted,omitempty"`
+	JWEError        string                   `json:"jwe_error,omitempty"`
+	PlaintextLength *int                     `json:"plaintext_length,omitempty"`
+	Manifest        map[string]interface{}   `json:"manifest,omitempty"`
+	Operations      []map[string]interface{} `json:"operations,omitempty"`
 }
 
 func inspectJWT(jwt []byte, chunkInfo *chunkInfo, verify bool, verifyKeyFile string, decrypt bool, decryptKeyFile string, backendName string, verbose bool) (*inspectionResult, error) {

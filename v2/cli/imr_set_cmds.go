@@ -59,7 +59,7 @@ Examples:
 			fmt.Printf("Error: Unable to get server %s\n", setServerName)
 			return
 		}
-		
+
 		// Check if server actually exists (has been seen before)
 		if len(server.GetAddrs()) == 0 && server.GetSrc() == "unknown" {
 			fmt.Printf("Error: Server %s not found in cache (never seen)\n", setServerName)
