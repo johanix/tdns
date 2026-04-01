@@ -344,7 +344,12 @@ func APIcombinerEdits(conf *Config) func(w http.ResponseWriter, r *http.Request)
 			}
 			clearAll := len(tables) == 0
 
-			zone := dns.Fqdn(cp.Zone)
+			// Preserve empty string as "all zones" sentinel — dns.Fqdn("") returns "."
+			// which would break the Clear* functions that use "" to mean "delete all".
+			zone := cp.Zone
+			if zone != "" {
+				zone = dns.Fqdn(zone)
+			}
 			var parts []string
 			var errs []error
 

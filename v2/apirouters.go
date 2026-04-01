@@ -248,9 +248,9 @@ func (conf *Config) SetupAgentSyncRouter(ctx context.Context) (*mux.Router, erro
 				return
 			}
 
-			// agent.Mu.Lock()
+			agent.Mu.RLock()
 			tlsaRR := agent.ApiDetails.TlsaRR
-			// agent.Mu.Unlock()
+			agent.Mu.RUnlock()
 			if tlsaRR == nil {
 				lgApi.Warn("no TLSA record available for client", "clientId", clientId)
 				http.Error(w, "AgentSyncApi: Unauthorized", http.StatusUnauthorized)

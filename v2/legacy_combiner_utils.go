@@ -264,9 +264,10 @@ func AddCombinerData(zd *ZoneData, senderID string, data map[string][]core.RRset
 	return true, nil
 }
 
-// rebuildCombinerData merges all per-agent contributions into CombinerData.
+// RebuildCombinerData merges all per-agent contributions into CombinerData.
 // For each owner/rrtype, RRs from all agents are combined into a single RRset,
 // with deduplication based on the string representation of each RR.
+// Caller must hold zd.mu.
 func RebuildCombinerData(zd *ZoneData) {
 	if zd.MP == nil {
 		return

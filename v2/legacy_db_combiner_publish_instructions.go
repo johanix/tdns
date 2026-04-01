@@ -151,10 +151,18 @@ func LoadAllPublishInstructions(kdb *KeyDB) (map[string]map[string]*StoredPublis
 			SenderID:  senderID,
 			UpdatedAt: time.Unix(updatedAt, 0),
 		}
-		_ = json.Unmarshal([]byte(keyJSON), &s.KEYRRs)
-		_ = json.Unmarshal([]byte(cdsJSON), &s.CDSRRs)
-		_ = json.Unmarshal([]byte(locJSON), &s.Locations)
-		_ = json.Unmarshal([]byte(nsJSON), &s.PublishedNS)
+		if err := json.Unmarshal([]byte(keyJSON), &s.KEYRRs); err != nil {
+			return nil, fmt.Errorf("LoadAllPublishInstructions: zone=%s senderID=%s decode KEYRRs: %w", zone, senderID, err)
+		}
+		if err := json.Unmarshal([]byte(cdsJSON), &s.CDSRRs); err != nil {
+			return nil, fmt.Errorf("LoadAllPublishInstructions: zone=%s senderID=%s decode CDSRRs: %w", zone, senderID, err)
+		}
+		if err := json.Unmarshal([]byte(locJSON), &s.Locations); err != nil {
+			return nil, fmt.Errorf("LoadAllPublishInstructions: zone=%s senderID=%s decode Locations: %w", zone, senderID, err)
+		}
+		if err := json.Unmarshal([]byte(nsJSON), &s.PublishedNS); err != nil {
+			return nil, fmt.Errorf("LoadAllPublishInstructions: zone=%s senderID=%s decode PublishedNS: %w", zone, senderID, err)
+		}
 
 		if result[zone] == nil {
 			result[zone] = make(map[string]*StoredPublishInstruction)

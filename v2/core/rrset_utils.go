@@ -4,6 +4,7 @@
 package core
 
 import (
+	"bytes"
 	"fmt"
 	"log"
 
@@ -34,12 +35,7 @@ func IsDuplicate(r1, r2 dns.RR) bool {
 		if err1 != nil || err2 != nil || n1 != n2 {
 			return false
 		}
-		for i := 0; i < n1; i++ {
-			if buf1[i] != buf2[i] {
-				return false
-			}
-		}
-		return true
+		return bytes.Equal(buf1[:n1], buf2[:n2])
 	}
 	return dns.IsDuplicate(r1, r2)
 }

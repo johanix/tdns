@@ -12,6 +12,7 @@ import (
 	"crypto"
 	"fmt"
 	"net/url"
+	"strconv"
 
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -135,8 +136,11 @@ func (imr *Imr) LookupAgentAPIEndpoint(ctx context.Context, identity string) (st
 			host := parsed.Hostname()
 			port := uint16(443) // default HTTPS port
 			if parsed.Port() != "" {
-				var p int
-				fmt.Sscanf(parsed.Port(), "%d", &p)
+				p, err := strconv.Atoi(parsed.Port())
+				if err != nil || p < 1 || p > 65535 {
+					lgAgent.Warn("invalid port in API URI, skipping", "uri", uriRR.Target, "port", parsed.Port())
+					continue
+				}
 				port = uint16(p)
 			}
 
@@ -182,8 +186,11 @@ func (imr *Imr) LookupAgentDNSEndpoint(ctx context.Context, identity string) (st
 			host := parsed.Hostname()
 			port := uint16(53) // default DNS port
 			if parsed.Port() != "" {
-				var p int
-				fmt.Sscanf(parsed.Port(), "%d", &p)
+				p, err := strconv.Atoi(parsed.Port())
+				if err != nil || p < 1 || p > 65535 {
+					lgAgent.Warn("invalid port in DNS URI, skipping", "uri", uriRR.Target, "port", parsed.Port())
+					continue
+				}
 				port = uint16(p)
 			}
 

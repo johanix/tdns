@@ -644,7 +644,6 @@ func (conf *Config) ReloadConfig() (string, error) {
 
 func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 	confMu.Lock()
-	defer confMu.Unlock()
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -661,6 +660,7 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 	conf.Internal.MPZoneNames = nil             // reset before re-collection by option handler
 	zonelist, err := conf.ParseZones(ctx, true) // true: reload, not initial parsing
 	if err != nil {
+		confMu.Unlock()
 		lgConfig.Error("ReloadZoneConfig: error parsing zones", "err", err)
 		return "", fmt.Errorf("ReloadZoneConfig: %w", err)
 	}
@@ -684,8 +684,13 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 	lgConfig.Info("ReloadZones: zones after reloading", "zones", zonelist)
 	Globals.App.ServerConfigTime = time.Now()
 
-	if conf.Internal.PostParseZonesHook != nil {
-		conf.Internal.PostParseZonesHook()
+	// Capture hook reference before releasing lock to avoid deadlock
+	// if the hook re-enters config paths.
+	hook := conf.Internal.PostParseZonesHook
+	confMu.Unlock()
+
+	if hook != nil {
+		hook()
 	}
 
 	return fmt.Sprintf("Zones reloaded. Before: %v, After: %v", prezones, zonelist), err

@@ -724,11 +724,13 @@ func (conf *Config) StartCombiner(ctx context.Context, apirouter *mux.Router) er
 				// Hydrate AgentContributions from pre-loaded snapshot
 				if zd.MP.AgentContributions == nil && allContribs != nil {
 					if zoneContribs, ok := allContribs[zd.ZoneName]; ok {
+						zd.mu.Lock()
 						zd.MP.AgentContributions = make(map[string]map[string]map[uint16]core.RRset)
 						for senderID, ownerMap := range zoneContribs {
 							zd.MP.AgentContributions[senderID] = ownerMap
 						}
 						RebuildCombinerData(zd)
+						zd.mu.Unlock()
 						lgConfig.Info("hydrated AgentContributions from snapshot",
 							"zone", zd.ZoneName, "agents", len(zoneContribs))
 					}

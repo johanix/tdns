@@ -809,8 +809,9 @@ func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, news
 		return fmt.Errorf("no rows updated, key with keyid %d in zone %s might not be in state %s", keyid, zonename, oldstate)
 	}
 
-	// Delete the cached data
+	// Delete cached data for both old and new states
 	delete(kdb.KeystoreDnskeyCache, zonename+"+"+oldstate)
+	delete(kdb.KeystoreDnskeyCache, zonename+"+"+newstate)
 
 	return nil
 }

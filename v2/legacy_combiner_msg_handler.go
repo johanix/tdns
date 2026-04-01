@@ -129,7 +129,11 @@ func CombinerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs,
 			// Persist all incoming edits to CombinerPendingEdits first.
 			var editID int
 			if kdb != nil {
-				editID, _ = NextEditID(kdb)
+				var editErr error
+				editID, editErr = NextEditID(kdb)
+				if editErr != nil {
+					lgCombiner.Error("NextEditID failed, skipping edit persistence", "zone", zone, "err", editErr)
+				}
 				rec := &PendingEditRecord{
 					EditID:         editID,
 					Zone:           zone,

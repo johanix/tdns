@@ -590,7 +590,7 @@ var DebugAgentQueueStatusCmd = &cobra.Command{
 			prefixcmd, _ := GetCommandContext("debug")
 			api, err := GetApiClient(prefixcmd, true)
 			if err != nil {
-				log.Fatalf("Error getting API client: %v", err)
+				return nil, nil, fmt.Errorf("error getting API client: %w", err)
 			}
 			_, buf, err := api.RequestNG("POST", "/agent/debug", req, true)
 			return nil, buf, err

@@ -268,7 +268,10 @@ func Sig0KeyMgmt(cmd string) {
 	}
 
 	prefixcmd, _ := GetCommandContext("keystore")
-	api, _ := GetApiClient(prefixcmd, true)
+	api, err := GetApiClient(prefixcmd, true)
+	if err != nil {
+		log.Fatalf("Error creating API client: %v", err)
+	}
 	switch cmd {
 	case "list":
 		// no action
@@ -369,7 +372,10 @@ func DnssecKeyMgmt(cmd string) {
 	}
 
 	prefixcmd, _ := GetCommandContext("keystore")
-	api, _ := GetApiClient(prefixcmd, true)
+	api, err := GetApiClient(prefixcmd, true)
+	if err != nil {
+		log.Fatalf("Error creating API client: %v", err)
+	}
 
 	switch cmd {
 	case "list":

@@ -951,7 +951,7 @@ func MPPreRefresh(zd, new_zd *ZoneData) {
 			case AppTypeAgent, AppTypeMPAgent:
 				// KEYSTATE is the sole source of truth for local vs foreign DNSKEYs.
 				zd.RequestAndWaitForKeyInventory(context.Background())
-				_, analysis.DnskeyStatus, err = zd.LocalDnskeysFromKeystate()
+				dnskeyschanged, analysis.DnskeyStatus, err = zd.LocalDnskeysFromKeystate()
 				if err != nil {
 					lg.Error("LocalDnskeysFromKeystate failed", "zone", zd.ZoneName, "err", err)
 				}
@@ -959,7 +959,7 @@ func MPPreRefresh(zd, new_zd *ZoneData) {
 					dnskeyschanged = false
 				}
 			default:
-				_, analysis.DnskeyStatus, err = zd.LocalDnskeysChanged(new_zd)
+				dnskeyschanged, analysis.DnskeyStatus, err = zd.LocalDnskeysChanged(new_zd)
 				if err != nil {
 					lg.Error("LocalDnskeysChanged failed", "zone", zd.ZoneName, "err", err)
 				}
@@ -1025,6 +1025,16 @@ func MPPreRefresh(zd, new_zd *ZoneData) {
 		}
 
 		if new_zd.Options[OptAllowEdits] {
+			// Copy accumulated contributions from old zd to new_zd so
+			// CombineWithLocalChanges can rebuild combined zone data.
+			new_zd.EnsureMP()
+			if zd.MP.AgentContributions != nil {
+				new_zd.MP.AgentContributions = zd.MP.AgentContributions
+			}
+			if zd.MP.CombinerData != nil {
+				new_zd.MP.CombinerData = zd.MP.CombinerData
+			}
+
 			lg.Info("combining with local changes", "zone", zd.ZoneName)
 			success, err := new_zd.CombineWithLocalChanges()
 			if err != nil {
