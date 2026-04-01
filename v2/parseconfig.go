@@ -267,7 +267,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// Initialize DnssecPolicies if needed
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent,
-		AppTypeMPSigner, AppTypeMPAgent:
+		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPAuditor:
 		if conf.Internal.DnssecPolicies == nil {
 			conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
 		}
@@ -334,7 +334,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeCombiner,
-		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner:
+		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
 		conf.parseAuthOptions()
 	}
 
@@ -346,7 +346,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// XXX: Hmm. Should not initialize KeyDB on reload?
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeCombiner,
-		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner:
+		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
 		if !reload { // || kdb == nil {
 			err = conf.InitializeKeyDB()
 			if err != nil {
@@ -416,7 +416,7 @@ func (conf *Config) InitializeKeyDB() error {
 	}
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner,
-		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner:
+		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
 
 		// Create DB file and parent directory if missing (auto-initialize on first run).
 		if _, err := os.Stat(dbFile); os.IsNotExist(err) {
@@ -883,7 +883,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 
 		switch Globals.App.Type {
 		case AppTypeAuth, AppTypeAgent, AppTypeCombiner,
-			AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner:
+			AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
 			if conf.Internal.RefreshZoneCh == nil {
 				lgConfig.Error("refresh channel is not configured, zones will not be refreshed, terminating")
 				return nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
