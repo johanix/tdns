@@ -173,6 +173,7 @@ const (
 	AppTypeMPSigner   // MP signer (tdns-mp): DNS infra from tdns, MP wiring from tdns-mp
 	AppTypeMPAgent    // MP agent (tdns-mp): DNS infra from tdns, MP wiring from tdns-mp
 	AppTypeMPCombiner // MP combiner (tdns-mp): DNS infra from tdns, MP wiring from tdns-mp
+	AppTypeMPAuditor  // MP auditor (tdns-mp): read-only observer, no zone contributions
 )
 
 var AppTypeToString = map[AppType]string{
@@ -189,6 +190,7 @@ var AppTypeToString = map[AppType]string{
 	AppTypeMPSigner:   "mpsigner",
 	AppTypeMPAgent:    "mpagent",
 	AppTypeMPCombiner: "mpcombiner",
+	AppTypeMPAuditor:  "mpauditor",
 }
 
 var StringToAppType = map[string]AppType{
@@ -205,6 +207,7 @@ var StringToAppType = map[string]AppType{
 	"mpsigner":   AppTypeMPSigner,
 	"mpagent":    AppTypeMPAgent,
 	"mpcombiner": AppTypeMPCombiner,
+	"mpauditor":  AppTypeMPAuditor,
 }
 
 type ErrorType uint8

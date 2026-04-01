@@ -107,7 +107,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	}
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner, AppTypeReporter, AppTypeKdc, AppTypeKrs,
-		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner:
+		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
 		flag.StringVar(&conf.Internal.CfgFile, "config", defaultcfg, "config file path")
 		flag.BoolVarP(&Globals.Debug, "debug", "", false, "run in debug mode (may activate dangerous tests)")
 		flag.BoolVarP(&Globals.Verbose, "verbose", "v", false, "Verbose mode")
@@ -121,7 +121,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	lgConfig.Debug("MainInit starting", "defaultcfg", defaultcfg, "cfgfile", conf.Internal.CfgFile)
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeImr, AppTypeScanner, AppTypeReporter, AppTypeCli, AppTypeKdc, AppTypeKrs,
-		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner:
+		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
 		fmt.Printf("*** TDNS %s version %s mode of operation: %q (verbose: %t, debug: %t)\n",
 			Globals.App.Name, Globals.App.Version, AppTypeToString[Globals.App.Type], Globals.Verbose, Globals.Debug)
 	default:
@@ -140,7 +140,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	fmt.Printf("Logging to file: %s\n", logfile)
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner,
-		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner:
+		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
 		// Note that AppTypeAuth and AppTypeAgent fall through into here as well.
 		kdb := conf.Internal.KeyDB
 		if kdb == nil {

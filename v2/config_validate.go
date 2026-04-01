@@ -48,7 +48,7 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 	case AppTypeReporter:
 		configsections["apiserver"] = config.ApiServer
 	case AppTypeAuth, AppTypeAgent, AppTypeCombiner,
-		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner:
+		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
 		configsections["service"] = config.Service
 		configsections["db"] = config.Db
 		configsections["apiserver"] = config.ApiServer
@@ -329,7 +329,7 @@ func ValidateDatabaseFile(config *Config) error {
 	// Only validate for app types that require a database
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner,
-		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner:
+		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
 		dbFile := strings.TrimSpace(config.Db.File)
 		if dbFile == "" {
 			return fmt.Errorf("db.file is required but not set (must be specified in config)")
