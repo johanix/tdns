@@ -29,6 +29,8 @@ func getClientKeyFromParent(parent string) string {
 		return "tdns-msa"
 	case "agent":
 		return "tdns-agent"
+	case "auditor":
+		return "tdns-mpauditor"
 	case "scanner":
 		return "tdns-scanner"
 	case "imr":
