@@ -6,14 +6,14 @@ Related: `2026-03-26-architectural-improvements.md` (section 2)
 
 ## Problem
 
-Every MP role (agent, combiner, signer, auditor) needs the
-same communication infrastructure: peer discovery, hello
-exchange, heartbeats, gossip, provider groups. Today this
-machinery lives in the agent's `HsyncEngine` — a monolithic
-goroutine that mixes generic comms with agent-specific logic
-(sync handling, leader election, resync, SDE interaction).
+Every application using the DNS transport needs the same
+communication infrastructure: peer discovery, hello
+exchange, heartbeats, gossip. Today this machinery lives
+in the MP agent's `HsyncEngine` — a monolithic goroutine
+that mixes generic comms with agent-specific logic (sync
+handling, leader election, resync, SDE interaction).
 
-Other roles get partial reimplementations:
+Other MP roles get partial reimplementations:
 
 - **Combiner/signer**: `InfraBeatLoop` for heartbeats to
   the combiner, but no outbound peer beats, no gossip, no
@@ -23,15 +23,21 @@ Other roles get partial reimplementations:
   delegation to registry, gossip, API routes — each as a
   separate fix.
 
-This creates two problems:
+Future non-MP applications (KDC, KRS, and others) will
+need the same infrastructure. If the comms layer only
+exists as agent internals in tdns-mp, every new application
+reimplements discovery, hello, heartbeat, and gossip from
+scratch.
 
-1. **Fragile**: adding a new role means discovering which
-   pieces of agent machinery to wire in, one crash at a
-   time.
-2. **Divergent**: each role's partial implementation drifts
-   from the agent's, creating subtle behavioral differences
-   (e.g. auditor not sending gossip state despite receiving
-   it).
+This creates three problems:
+
+1. **Fragile**: adding a new role or application means
+   discovering which pieces of agent machinery to wire in,
+   one failure at a time.
+2. **Divergent**: each partial implementation drifts from
+   the original, creating subtle behavioral differences.
+3. **Not reusable**: applications outside tdns-mp cannot
+   use the comms infrastructure at all.
 
 ## Relationship to Transport Layer Cleanup
 
@@ -40,230 +46,295 @@ proposes moving application-level message handlers
 (`HandleBeat`, `HandleHello`, `HandleSync`, etc.) out of
 `tdns-transport` and into the application layer.
 
-This project is the complement: once handlers move out of
-`tdns-transport`, they need a home. The generic comms layer
-is that home — it sits between the transport layer (chunk
-assembly, crypto, routing) and the role-specific engines
-(SDE, combiner persistence, signer key state, auditor event
-log).
+This project refines that proposal: the handlers should
+not simply move to the application — they should be split
+into two categories:
 
-The two projects should be done together or in sequence:
+- **Generic comms handlers** (PING, HELLO, BEAT, gossip):
+  stay in `tdns-transport` as part of the comms layer.
+  Every application needs these.
+- **Application-specific handlers** (SYNC, UPDATE, RFI,
+  CONFIRM, KEYSTATE): move to the application layer
+  (tdns-mp for MP apps, other repos for other apps).
 
-1. Move handlers out of `tdns-transport` → into tdns-mp
-2. Split the handlers into generic (comms layer) vs
-   role-specific (role engines)
+The two projects are one project done right.
 
-## Proposed Architecture
+## Two Levels of Interface in tdns-transport
+
+`tdns-transport` should provide two levels of abstraction:
+
+### Level 1: Raw Transport
+
+What exists today. CHUNK assembly/disassembly, sent via
+NOTIFY+EDNS(0) options or in response to queries. Crypto
+(encrypt/decrypt/sign/verify). DNS message router with
+middleware chain. Peer registry with transport selection.
+
+An application using only Level 1 must implement its own
+discovery, its own hello/heartbeat protocol, its own peer
+lifecycle management. This is appropriate for applications
+with fundamentally different communication patterns.
+
+### Level 2: Comms Layer
+
+Built on top of Level 1. Provides managed peer
+communication: discovery, hello exchange, heartbeats,
+gossip, peer groups. An application using Level 2 gets
+working peer-to-peer communication by providing
+configuration and optional callbacks.
+
+Most applications should use Level 2. Level 1 is the
+escape hatch for applications that need raw control.
 
 ```
 ┌─────────────────────────────────────────────────┐
-│  Role-specific engines                          │
-│  (agent: SDE, sync, resync, leader election)    │
-│  (combiner: persistence, chunk processing)      │
-│  (signer: key state, signing)                   │
-│  (auditor: event log, observations)             │
+│  Application (tdns-mp, kdc, krs, ...)           │
+│  - Role-specific message handlers               │
+│  - Application logic                            │
+│  - OnMessage callback for app-specific messages │
 ├─────────────────────────────────────────────────┤
-│  Generic comms layer  (new)                     │
-│  - Peer discovery (DNS: HSYNC3, JWK, URI, SVCB) │
-│  - Hello exchange (introduce, INTRODUCED state) │
+│  tdns-transport: Level 2 — Comms Layer          │
+│  - Peer discovery (DNS: identity zone lookup)   │
+│  - Hello exchange (peer introduction)           │
 │  - Heartbeat ticker (periodic BEATs)            │
 │  - Gossip state exchange (NxN matrix in BEATs)  │
-│  - Provider group computation                   │
-│  - Peer registry management                     │
-│  - Management API routes (peer list/ping/gossip)│
-│  - Message consumption (Beat/Hello/Ping from    │
-│    MsgQs, delegating to registry handlers)      │
+│  - Peer group computation                       │
+│  - Peer lifecycle management                    │
+│  - PING handler (built-in)                      │
+│  - HELLO handler (built-in)                     │
+│  - BEAT handler (built-in, with gossip)         │
 ├─────────────────────────────────────────────────┤
-│  tdns-transport                                 │
-│  - DNSMessageRouter (generic routing)           │
-│  - Middleware (auth, crypto, stats, logging)     │
+│  tdns-transport: Level 1 — Raw Transport        │
+│  - DNSMessageRouter + middleware                │
 │  - Chunk assembly/disassembly                   │
-│  - Peer registry and transport selection        │
-│  - SendBeat/SendHello/SendSync (wire protocol)  │
+│  - Crypto (JOSE encrypt/decrypt/sign/verify)    │
+│  - Peer registry + transport selection          │
+│  - Wire protocol (SendBeat/SendHello/SendSync)  │
 └─────────────────────────────────────────────────┘
 ```
 
-## What Lives in the Comms Layer
+## Interface Design Challenges
 
-### Functions (extracted from HsyncEngine + agent setup)
+The comms layer must be generic enough for different
+applications while allowing application-specific behavior.
+Key design questions:
 
-**From `hsyncengine.go`:**
-- Heartbeat ticker (`HBticker` + `SendHeartbeats()`)
-- Beat consumption (`HeartbeatHandler`)
-- Hello consumption (`HelloHandler`)
-- Gossip state refresh (`RefreshLocalStates`)
+### 1. What does the comms layer own vs delegate?
 
-**From `agent_discovery.go` / `agent_utils.go`:**
-- `DiscoverAndRegisterAgent`
-- `DiscoveryRetrierNG`
-- `HelloRetrierNG`
+**Comms layer owns autonomously:**
+- Discovery: DNS lookup of identity zones (URI, JWK,
+  SVCB records), peer registration
+- Hello exchange: send HELLO on discovery, process
+  incoming HELLO, transition peer to INTRODUCED
+- Heartbeats: periodic BEAT to all introduced peers,
+  process incoming BEATs, detect peer liveness
+- Gossip: state matrix exchange in BEAT payloads,
+  merge received state, detect group operational status
+- Peer groups: compute groups from shared membership,
+  track group health
+- Ping: respond to PING with PONG (already in transport)
 
-**From `hsync_hello.go`:**
-- `SingleHello`
-- `HelloRetrier` / `HelloRetrierNG`
+**Application provides via callbacks:**
+- `OnMessage(msg)`: receive application-specific messages
+  (sync, update, rfi, confirm, keystate) that the comms
+  layer does not handle
+- `OnGroupOperational(group)`: notification when a peer
+  group reaches mutual OPERATIONAL state
+- `OnGroupDegraded(group)`: notification when a group
+  loses a member
+- `OnPeerDiscovered(peer)`: optional hook for application-
+  specific setup after discovery (e.g. register SIG(0)
+  keys)
+- `AuthorizePeer(identity) bool`: policy check before
+  accepting a peer (application decides who is allowed)
 
-**From `hsync_beat.go`:**
-- `SendHeartbeats`
-- `SendSingleBeat`
+### 2. Gossip: required or optional?
 
-**From `hsync_infra_beat.go`:**
-- `StartInfraBeatLoop` (beats to combiner/signer)
-
-**From `provider_groups.go`:**
-- `ProviderGroupManager`
-- Group computation from HSYNC3 data
-
-**From `gossip.go` / `gossip_types.go`:**
-- `GossipStateTable`
-- State merge, group operational detection
-
-**From `apihandler_agent.go` (subset):**
-- `peer-ping`, `peer-apiping`
-- `hsync-peer-status`
-- `gossip-group-list`, `gossip-group-state`
-- `discover`, `peer-reset`
-- `router-list`, `router-describe`, `router-metrics`
-- `imr-query`, `imr-flush`, `imr-reset`, `imr-show`
-
-**From `apihandler_agent_routes.go` (subset):**
-- `/agent/distrib` (peer list)
-
-### Functions That Stay Role-Specific
-
-**Agent only:**
-- `SyncRequestHandler`
-- `MsgHandler` (sync/update processing)
-- `CommandHandler` (resync, send-rfi, etc.)
-- Leader election wiring (`OnGroupOperational` callback)
-- `SynchedDataEngine`
-- `HsyncEngine` residual (sync ticker, SDE interaction)
-
-**Combiner only:**
-- `CombinerMsgHandler`
-- Chunk processing, contribution persistence
-
-**Signer only:**
-- `SignerMsgHandler`
-- Key state worker
-
-**Auditor only:**
-- `AuditorMsgHandler` (event logging, observation)
-- Audit state tracking
-
-## API: How Roles Use the Comms Layer
+Not every application needs NxN gossip state exchange.
+A simple two-party protocol (e.g. KDC talking to KRS)
+does not need gossip. The comms layer should support
+gossip as an opt-in feature:
 
 ```go
-// CommsEngine encapsulates generic MP communication.
-type CommsEngine struct {
-    Registry          *AgentRegistry
-    Transport         *MPTransportBridge
-    GossipStateTable  *GossipStateTable
-    ProviderGroups    *ProviderGroupManager
-    MsgQs             *MsgQs
+type CommsConfig struct {
+    Identity        string
+    DiscoveryZones  []string       // zones to discover peers from
+    BeatInterval    time.Duration
+    EnableGossip    bool           // opt-in
+    Callbacks       CommsCallbacks
 }
-
-// StartComms launches all generic comms goroutines.
-// The onMessage callback receives messages that the comms
-// layer does not handle (sync, update, rfi, confirm, etc.)
-// and routes them to the role-specific engine.
-func (ce *CommsEngine) Start(ctx context.Context) {
-    // Discovery retrier
-    // Hello retrier (for newly discovered peers)
-    // Heartbeat ticker (periodic SendHeartbeats)
-    // Infra beat loop (combiner/signer heartbeats)
-    // Beat/Hello/Ping consumer (from MsgQs, delegates
-    //   to registry HeartbeatHandler/HelloHandler)
-    // Gossip state refresh
-}
-
-// RegisterCommsAPIRoutes adds peer/gossip/debug routes.
-func (ce *CommsEngine) RegisterAPIRoutes(sr *mux.Router)
 ```
 
-Each role's startup becomes:
+When gossip is disabled, BEATs are still sent (for
+liveness detection) but carry no gossip payload.
+
+### 3. Discovery: how does the application specify peers?
+
+Today, MP agents discover peers by reading HSYNC3 records
+from zone data. This is MP-specific. Other applications
+may discover peers differently (configuration file, SRV
+records, hardcoded list, etc.).
+
+The comms layer should accept a peer source interface:
 
 ```go
-// Agent
-comms := NewCommsEngine(registry, transport, msgQs)
-comms.Start(ctx)
-comms.RegisterAPIRoutes(apiRouter)
-// Then start agent-specific engines:
-go SynchedDataEngine(ctx, msgQs)
-go HsyncEngineLite(ctx, msgQs)  // sync ticker only
-
-// Auditor
-comms := NewCommsEngine(registry, transport, msgQs)
-comms.Start(ctx)
-comms.RegisterAPIRoutes(apiRouter)
-// Then start auditor-specific engines:
-go AuditorMsgHandler(ctx, msgQs, stateManager)
+type PeerSource interface {
+    // ListPeers returns identities to discover.
+    // Called periodically by the discovery retrier.
+    ListPeers() []string
+}
 ```
 
-## Where Does the Comms Layer Live?
+For MP applications, `ListPeers` reads HSYNC3 from zone
+data. For KDC/KRS, it reads from config. The comms layer
+doesn't care where the list comes from.
 
-In `tdns-mp/v2/`. It uses types from `tdns-transport`
-(PeerRegistry, TransportManager) but contains application-
-level logic (gossip semantics, provider groups, management
-API handlers) that doesn't belong in the transport library.
+### 4. Message routing: who registers handlers?
 
-After the transport handler migration (section 2 of the
-architectural improvements doc), the dependency chain is:
+The comms layer registers handlers for PING, HELLO, and
+BEAT on the router. The application registers handlers
+for its own message types (SYNC, UPDATE, etc.).
 
+The router is shared — both the comms layer and the
+application register on the same `DNSMessageRouter`.
+Registration order doesn't matter (message types are
+distinct).
+
+```go
+// Comms layer registers:
+router.Register("ping", comms.handlePing)
+router.Register("hello", comms.handleHello)
+router.Register("beat", comms.handleBeat)
+
+// Application registers:
+router.Register("sync", app.handleSync)
+router.Register("update", app.handleUpdate)
+router.Register("keystate", app.handleKeystate)
 ```
-tdns-transport: wire protocol, crypto, routing
-    ↑
-tdns-mp comms layer: discovery, gossip, groups, mgmt API
-    ↑
-tdns-mp role engines: agent/combiner/signer/auditor
+
+### 5. Management API: who provides it?
+
+Peer list, peer ping, gossip group status — these are
+comms-layer concerns. The comms layer should provide
+HTTP handler functions that the application mounts on
+its API router:
+
+```go
+comms.RegisterManagementAPI(apiRouter)
+// Registers:
+//   POST /comms/peers     — list peers
+//   POST /comms/ping      — ping a peer
+//   POST /comms/gossip    — gossip state
+//   POST /comms/groups    — peer groups
+//   POST /comms/discover  — trigger discovery
 ```
+
+The URL prefix (`/comms/` vs `/agent/`) is configurable
+or chosen by the application.
+
+## What Moves Where
+
+### Into tdns-transport comms layer (Level 2)
+
+**From tdns-mp:**
+- `AgentRegistry` (peer tracking, state management)
+- `DiscoverAndRegisterAgent` / `DiscoveryRetrierNG`
+- `HelloRetrierNG` / `SingleHello`
+- `SendHeartbeats` / `SendSingleBeat`
+- `HeartbeatHandler` / `HelloHandler`
+- `InfraBeatLoop`
+- `GossipStateTable` (state merge, refresh)
+- `ProviderGroupManager` (group computation)
+- Management API handlers (peer list, ping, gossip)
+
+**Already in tdns-transport (stays):**
+- `HandlePing`
+- `PeerRegistry`
+- `TransportManager`
+- `DNSMessageRouter`
+- `ChunkNotifyHandler`
+- Middleware chain
+- Crypto
+
+### Stays in application layer (tdns-mp)
+
+- `HandleSync` / `HandleUpdate`
+- `HandleConfirm`
+- `HandleRfi`
+- `HandleKeystate`
+- `HandleEdits`
+- Router initialization functions (`InitializeAgentRouter`,
+  `InitializeCombinerRouter`, etc.) — these register
+  application-specific handlers
+- `SynchedDataEngine`, `HsyncEngine` (agent)
+- `CombinerMsgHandler` (combiner)
+- `SignerMsgHandler` (signer)
+- `AuditorMsgHandler` (auditor)
+- Leader election
+- All role-specific API handlers
 
 ## Implementation Phases
 
-### Phase 1: Extract CommsEngine struct
+### Phase 1: Define the interface
 
-Create `comms_engine.go` with the `CommsEngine` struct.
-Move the heartbeat ticker, beat/hello consumption, and
-discovery retrier into `CommsEngine.Start()`. All roles
-call `CommsEngine.Start()` instead of wiring individually.
+Design `CommsConfig`, `CommsCallbacks`, `PeerSource`,
+and the `CommsEngine` type in `tdns-transport`. Write
+the interface with documentation but no implementation.
+Review with all known use cases (MP agent, combiner,
+signer, auditor, KDC, KRS).
+
+This is the critical phase. Getting the interface right
+determines whether the comms layer is genuinely reusable
+or just a relocation of MP-specific code.
+
+### Phase 2: Extract into tdns-transport
+
+Move discovery, hello, heartbeat, gossip, and peer
+management code from tdns-mp into tdns-transport behind
+the defined interface. Refactor tdns-mp roles to use
+`CommsEngine` instead of direct wiring.
 
 No behavioral change — purely structural extraction.
 
-### Phase 2: Move management API routes
-
-Extract peer/gossip/debug/IMR API cases from `APIagent`
-into `CommsEngine.RegisterAPIRoutes()`. The agent's
-`APIagent` handler retains only agent-specific commands
-(resync, send-rfi, parentsync, etc.).
-
-### Phase 3: Migrate transport handlers
+### Phase 3: Move application handlers out of transport
 
 Per section 2 of architectural improvements: move
-`HandleBeat`, `HandleHello`, `HandleConfirm`, etc. from
-`tdns-transport` into `tdns-mp`. The comms layer registers
-them on the router during `Start()`.
+`HandleBeat`, `HandleHello`, `HandleSync`, etc. out of
+their current locations in tdns-transport. The comms
+handlers (`HandleBeat`, `HandleHello`) move into the
+Level 2 comms layer (still in tdns-transport). The
+application handlers (`HandleSync`, `HandleUpdate`,
+etc.) move to tdns-mp.
 
 ### Phase 4: Slim down HsyncEngine
 
-`HsyncEngine` becomes a thin role-specific engine that
-handles only agent concerns: sync ticker, SDE interaction,
-leader election callbacks. All comms are delegated to
+`HsyncEngine` becomes a thin agent-specific engine
+handling only sync ticker, SDE interaction, and leader
+election callbacks. All comms are delegated to
 `CommsEngine`.
+
+### Phase 5: Adopt in non-MP applications
+
+KDC, KRS, and future applications use Level 2 directly
+with their own `PeerSource` and `CommsCallbacks`.
+Validates that the interface is genuinely generic.
 
 ## Complexity
 
-Medium-high. Lots of code movement, many call sites. But
-the pieces are already self-contained functions — the
-extraction is largely mechanical, not algorithmic.
+High. This is a cross-repo refactoring touching
+tdns-transport, tdns-mp, and eventually other application
+repos. The interface design (Phase 1) is the hardest part
+— code movement is mechanical once the interface is right.
 
-The risk is in the wiring: getting the goroutine lifecycle,
-channel ownership, and initialization order right across
-four roles. Phase 1 (extract without behavioral change)
-mitigates this by validating the structure before changing
-behavior.
+The risk is designing an interface that looks generic but
+is secretly shaped by MP assumptions. Phase 5 (non-MP
+adoption) is the real test.
 
 ## Priority
 
 After mpauditor-1 and combiner-persistence-sep-1 merge.
-The auditor works with its current ad-hoc wiring, and the
-combiner/signer have their existing partial implementations.
-This is a quality-of-life improvement, not a blocker.
+The auditor works with its current ad-hoc wiring, and
+other roles have their existing partial implementations.
+
+Phase 1 (interface design) can start as a document
+exercise at any time — it doesn't require code changes.
