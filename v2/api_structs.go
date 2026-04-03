@@ -152,11 +152,18 @@ type ConfigResponse struct {
 	Time            time.Time
 	DnsEngine       DnsEngineConf
 	ApiServer       ApiServerConf
+	WebServer       WebServerConf `json:"web_server,omitempty"`
 	Identities      []string
 	CombinerOptions map[CombinerOption]bool
 	Msg             string
 	Error           bool
 	ErrorMsg        string
+}
+
+// WebServerConf describes a built-in web dashboard listener.
+type WebServerConf struct {
+	Enabled   bool     `json:"enabled"`
+	Addresses []string `json:"addresses,omitempty"`
 }
 
 type DelegationPost struct {

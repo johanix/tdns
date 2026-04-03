@@ -14,6 +14,7 @@ import (
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
+	"github.com/spf13/viper"
 )
 
 func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
@@ -270,6 +271,16 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.Identities = conf.Service.Identities
 			if conf.MultiProvider != nil {
 				resp.CombinerOptions = conf.MultiProvider.CombinerOptions
+			}
+			if viper.GetBool("audit.web.enabled") {
+				addrs := viper.GetStringSlice("audit.web.addresses")
+				if len(addrs) == 0 {
+					addrs = []string{"127.0.0.1:8099"}
+				}
+				resp.WebServer = WebServerConf{
+					Enabled:   true,
+					Addresses: addrs,
+				}
 			}
 			resp.Msg = fmt.Sprintf("%s: Configuration is ok, boot time: %s, last config reload: %s",
 				Globals.App.Name, Globals.App.ServerBootTime.Format(TimeLayout), Globals.App.ServerConfigTime.Format(TimeLayout))

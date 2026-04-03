@@ -159,6 +159,9 @@ var configStatusCmd = &cobra.Command{
 			} else {
 				fmt.Printf("ApiServer: api key is not set\n")
 			}
+			if resp.WebServer.Enabled {
+				fmt.Printf("WebServer: listening on %v\n", resp.WebServer.Addresses)
+			}
 		}
 
 		if resp.Msg != "" {
