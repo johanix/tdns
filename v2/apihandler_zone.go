@@ -212,22 +212,9 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 					}
 				}
 
-				// Extract HSYNCPARAM and HSYNC3 data from zone apex
+				// Extract HSYNCPARAM data from zone apex
 				apex, err := zd.GetOwner(zd.ZoneName)
 				if err == nil && apex != nil {
-					// HSYNC3: provider labels
-					hsync3RRset, exists := apex.RRtypes.Get(core.TypeHSYNC3)
-					if exists {
-						for _, rr := range hsync3RRset.RRs {
-							if prr, ok := rr.(*dns.PrivateRR); ok {
-								if h3, ok := prr.Data.(*core.HSYNC3); ok {
-									info.Providers = append(info.Providers, strings.TrimSuffix(h3.Label, "."))
-								}
-							}
-						}
-					}
-
-					// HSYNCPARAM: nsmgmt, parentsync, signers, suffix
 					hsyncparamRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
 					if exists && len(hsyncparamRRset.RRs) > 0 {
 						if prr, ok := hsyncparamRRset.RRs[0].(*dns.PrivateRR); ok {
@@ -244,7 +231,9 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 								default:
 									info.ParentSync = "owner"
 								}
+								info.Servers = hp.GetServers()
 								info.Signers = hp.GetSigners()
+								info.Auditors = hp.GetAuditors()
 								info.Suffix = hp.GetSuffix()
 							}
 						}
@@ -257,11 +246,14 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				if info.ParentSync == "" {
 					info.ParentSync = "owner"
 				}
+				if info.Servers == nil {
+					info.Servers = []string{}
+				}
 				if info.Signers == nil {
 					info.Signers = []string{}
 				}
-				if info.Providers == nil {
-					info.Providers = []string{}
+				if info.Auditors == nil {
+					info.Auditors = []string{}
 				}
 
 				mpZones[zname] = info
