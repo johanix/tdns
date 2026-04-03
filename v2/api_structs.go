@@ -112,8 +112,9 @@ type ZoneResponse struct {
 
 // MPZoneInfo carries multi-provider zone details for the mplist command.
 type MPZoneInfo struct {
-	Providers  []string     `json:"providers"`
+	Servers    []string     `json:"servers"`
 	Signers    []string     `json:"signers"`
+	Auditors   []string     `json:"auditors"`
 	NSmgmt     string       `json:"nsmgmt"`
 	ParentSync string       `json:"parentsync"`
 	Suffix     string       `json:"suffix,omitempty"`
