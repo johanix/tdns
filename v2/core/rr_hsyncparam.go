@@ -18,16 +18,17 @@ import (
 //   owner TTL CLASS HSYNCPARAM key1="val1" key2="val2" ...
 //
 // Example:
-//   example.com. 3600 IN HSYNCPARAM nsmgmt="agent" parentsync="agent" audit="yes" signers="netnod,cloudflare"
+//   example.com. 3600 IN HSYNCPARAM nsmgmt="agent" servers="alpha,echo" signers="alpha" auditors="audit"
 //
 // Known keys:
 //   nsmgmt="owner|agent"                  - who manages the NS RRset
 //   parentsync="owner|agent"              - who handles parent synchronisation
-//   audit="yes|no"                        - whether audit is enabled
+//   servers="label1,label2,..."           - comma-separated list of data-contributing provider labels
 //   signers="label1,label2,..."           - comma-separated list of signer labels
 //   pubkey                                - flag: providers publish SIG(0) KEY in zone
 //   pubcds                                - flag: providers publish CDS/CDNSKEY in zone
 //   suffix="label"                        - DNS label under which providers may add NS+glue
+//   auditors="label1,label2,..."          - comma-separated list of auditor labels
 
 func init() {
 	RegisterHsyncparamRR()
@@ -39,22 +40,24 @@ type HSYNCPARAMKey uint16
 const (
 	HSYNCPARAM_NSMGMT     HSYNCPARAMKey = 0
 	HSYNCPARAM_PARENTSYNC HSYNCPARAMKey = 1
-	HSYNCPARAM_AUDIT      HSYNCPARAMKey = 2
+	HSYNCPARAM_SERVERS    HSYNCPARAMKey = 2
 	HSYNCPARAM_SIGNERS    HSYNCPARAMKey = 3
 	HSYNCPARAM_PUBKEY     HSYNCPARAMKey = 4
 	HSYNCPARAM_PUBCDS     HSYNCPARAMKey = 5
 	HSYNCPARAM_SUFFIX     HSYNCPARAMKey = 6
+	HSYNCPARAM_AUDITORS   HSYNCPARAMKey = 7
 	hsyncparam_RESERVED   HSYNCPARAMKey = 65535
 )
 
 var hsyncparamKeyToStringMap = map[HSYNCPARAMKey]string{
 	HSYNCPARAM_NSMGMT:     "nsmgmt",
 	HSYNCPARAM_PARENTSYNC: "parentsync",
-	HSYNCPARAM_AUDIT:      "audit",
+	HSYNCPARAM_SERVERS:    "servers",
 	HSYNCPARAM_SIGNERS:    "signers",
 	HSYNCPARAM_PUBKEY:     "pubkey",
 	HSYNCPARAM_PUBCDS:     "pubcds",
 	HSYNCPARAM_SUFFIX:     "suffix",
+	HSYNCPARAM_AUDITORS:   "auditors",
 }
 
 var hsyncparamStringToKeyMap = reverseHSYNCPARAMKeyMap(hsyncparamKeyToStringMap)
@@ -140,8 +143,8 @@ func makeHSYNCPARAMKeyValue(key HSYNCPARAMKey) HSYNCPARAMKeyValue {
 		return new(HSYNCPARAMNSmgmt)
 	case HSYNCPARAM_PARENTSYNC:
 		return new(HSYNCPARAMParentSync)
-	case HSYNCPARAM_AUDIT:
-		return new(HSYNCPARAMAudit)
+	case HSYNCPARAM_SERVERS:
+		return new(HSYNCPARAMServers)
 	case HSYNCPARAM_SIGNERS:
 		return new(HSYNCPARAMSigners)
 	case HSYNCPARAM_PUBKEY:
@@ -150,6 +153,8 @@ func makeHSYNCPARAMKeyValue(key HSYNCPARAMKey) HSYNCPARAMKeyValue {
 		return &HSYNCPARAMFlag{code: HSYNCPARAM_PUBCDS}
 	case HSYNCPARAM_SUFFIX:
 		return new(HSYNCPARAMSuffix)
+	case HSYNCPARAM_AUDITORS:
+		return new(HSYNCPARAMAuditors)
 	case hsyncparam_RESERVED:
 		return nil
 	default:
@@ -338,14 +343,24 @@ func (h *HSYNCPARAM) GetParentSync() uint8 {
 	return HsyncParentSyncOwner
 }
 
-// GetAudit returns the audit value, defaulting to 0 (no).
-func (h *HSYNCPARAM) GetAudit() uint8 {
+// GetServers returns the servers list, defaulting to empty.
+func (h *HSYNCPARAM) GetServers() []string {
 	for _, kv := range h.Value {
-		if v, ok := kv.(*HSYNCPARAMAudit); ok {
-			return v.Value
+		if v, ok := kv.(*HSYNCPARAMServers); ok {
+			return v.Servers
 		}
 	}
-	return 0
+	return []string{}
+}
+
+// IsServerLabel checks if the given label is listed in the servers.
+func (h *HSYNCPARAM) IsServerLabel(label string) bool {
+	for _, s := range h.GetServers() {
+		if s == label {
+			return true
+		}
+	}
+	return false
 }
 
 // GetSigners returns the signers list, defaulting to empty.
@@ -396,6 +411,26 @@ func (h *HSYNCPARAM) GetSuffix() string {
 		}
 	}
 	return ""
+}
+
+// GetAuditors returns the auditors list, defaulting to empty.
+func (h *HSYNCPARAM) GetAuditors() []string {
+	for _, kv := range h.Value {
+		if v, ok := kv.(*HSYNCPARAMAuditors); ok {
+			return v.Auditors
+		}
+	}
+	return []string{}
+}
+
+// IsAuditorLabel checks if the given label is listed in the auditors.
+func (h *HSYNCPARAM) IsAuditorLabel(label string) bool {
+	for _, s := range h.GetAuditors() {
+		if s == label {
+			return true
+		}
+	}
+	return false
 }
 
 // --- HSYNCPARAMNSmgmt: uint8 key=value for NS management mode ---
@@ -485,47 +520,55 @@ func (s *HSYNCPARAMParentSync) copy() HSYNCPARAMKeyValue {
 	return &HSYNCPARAMParentSync{Value: s.Value}
 }
 
-// --- HSYNCPARAMAudit: uint8 key=value for audit flag ---
+// --- HSYNCPARAMServers: comma-separated list of data-contributing provider labels ---
 
-type HSYNCPARAMAudit struct {
-	Value uint8
+type HSYNCPARAMServers struct {
+	Servers []string
 }
 
-func (*HSYNCPARAMAudit) Key() HSYNCPARAMKey { return HSYNCPARAM_AUDIT }
+func (*HSYNCPARAMServers) Key() HSYNCPARAMKey { return HSYNCPARAM_SERVERS }
 
-func (s *HSYNCPARAMAudit) String() string {
-	if s.Value == 1 {
-		return "yes"
+func (s *HSYNCPARAMServers) String() string {
+	return strings.Join(s.Servers, ",")
+}
+
+func (s *HSYNCPARAMServers) pack() ([]byte, error) {
+	return []byte(strings.Join(s.Servers, ",")), nil
+}
+
+func (s *HSYNCPARAMServers) unpack(b []byte) error {
+	if len(b) == 0 {
+		s.Servers = []string{}
+		return nil
 	}
-	return "no"
-}
-
-func (s *HSYNCPARAMAudit) pack() ([]byte, error) {
-	return []byte{s.Value}, nil
-}
-
-func (s *HSYNCPARAMAudit) unpack(b []byte) error {
-	if len(b) != 1 {
-		return errors.New("dns: hsyncparam audit: value length is not 1")
-	}
-	s.Value = b[0]
+	s.Servers = strings.Split(string(b), ",")
 	return nil
 }
 
-func (s *HSYNCPARAMAudit) parse(b string) error {
-	switch strings.ToLower(b) {
-	case "yes":
-		s.Value = 1
-	case "no":
-		s.Value = 0
-	default:
-		return fmt.Errorf("dns: hsyncparam audit: unknown value %q (expected \"yes\" or \"no\")", b)
+func (s *HSYNCPARAMServers) parse(b string) error {
+	if b == "" {
+		s.Servers = []string{}
+		return nil
 	}
+	parts := strings.Split(b, ",")
+	servers := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			servers = append(servers, p)
+		}
+	}
+	s.Servers = servers
 	return nil
 }
 
-func (s *HSYNCPARAMAudit) len() int                 { return 1 }
-func (s *HSYNCPARAMAudit) copy() HSYNCPARAMKeyValue { return &HSYNCPARAMAudit{Value: s.Value} }
+func (s *HSYNCPARAMServers) len() int {
+	return len(strings.Join(s.Servers, ","))
+}
+
+func (s *HSYNCPARAMServers) copy() HSYNCPARAMKeyValue {
+	return &HSYNCPARAMServers{Servers: cloneSlice(s.Servers)}
+}
 
 // --- HSYNCPARAMSigners: comma-separated list of signer labels ---
 
@@ -629,6 +672,56 @@ func isValidDNSLabel(s string) bool {
 		}
 	}
 	return true
+}
+
+// --- HSYNCPARAMAuditors: comma-separated list of auditor labels ---
+
+type HSYNCPARAMAuditors struct {
+	Auditors []string
+}
+
+func (*HSYNCPARAMAuditors) Key() HSYNCPARAMKey { return HSYNCPARAM_AUDITORS }
+
+func (s *HSYNCPARAMAuditors) String() string {
+	return strings.Join(s.Auditors, ",")
+}
+
+func (s *HSYNCPARAMAuditors) pack() ([]byte, error) {
+	return []byte(strings.Join(s.Auditors, ",")), nil
+}
+
+func (s *HSYNCPARAMAuditors) unpack(b []byte) error {
+	if len(b) == 0 {
+		s.Auditors = []string{}
+		return nil
+	}
+	s.Auditors = strings.Split(string(b), ",")
+	return nil
+}
+
+func (s *HSYNCPARAMAuditors) parse(b string) error {
+	if b == "" {
+		s.Auditors = []string{}
+		return nil
+	}
+	parts := strings.Split(b, ",")
+	auditors := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			auditors = append(auditors, p)
+		}
+	}
+	s.Auditors = auditors
+	return nil
+}
+
+func (s *HSYNCPARAMAuditors) len() int {
+	return len(strings.Join(s.Auditors, ","))
+}
+
+func (s *HSYNCPARAMAuditors) copy() HSYNCPARAMKeyValue {
+	return &HSYNCPARAMAuditors{Auditors: cloneSlice(s.Auditors)}
 }
 
 // --- HSYNCPARAMFlag: boolean key (presence = true, no value) ---

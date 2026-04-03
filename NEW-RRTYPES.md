@@ -44,14 +44,19 @@ Known keys:
 
   nsmgmt="owner|agent"          - who manages the NS RRset
   parentsync="owner|agent"      - who handles parent synchronisation
-                                  (the mechanism is announced by the parent via DSYNC)
-  audit="yes|no"                - whether audit is enabled
-  signers="label1,label2,..."   - comma-separated list of signer labels
+                                  (the mechanism is announced by the
+                                  parent via DSYNC)
+  servers="label1,label2,..."   - data-contributing provider labels
+  signers="label1,label2,..."   - signer labels
+  pubkey                        - flag: providers publish SIG(0) KEY
+  pubcds                        - flag: providers publish CDS/CDNSKEY
+  suffix="label"                - DNS label for provider NS+glue
+  auditors="label1,label2,..."  - observer-only auditor labels
 
 Example:
 
 ```
-example.com. 3600 IN HSYNCPARAM nsmgmt="agent" parentsync="agent" audit="yes" signers="netnod,cloudflare"
+example.com. 3600 IN HSYNCPARAM nsmgmt="agent" servers="alpha,echo" signers="alpha" auditors="audit"
 ```
 
 Wire format: each key=value pair is encoded as 2 bytes key code + 2 bytes
