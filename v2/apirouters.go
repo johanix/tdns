@@ -75,7 +75,7 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 
 	// Initialize distribution cache if needed (for agent/combiner)
 	if conf.Internal.DistributionCache == nil {
-		if Globals.App.Type == AppTypeAgent || Globals.App.Type == AppTypeCombiner || Globals.App.Type == AppTypeMPCombiner {
+		if Globals.App.Type == AppTypeAgent || Globals.App.Type == AppTypeCombiner {
 			conf.Internal.DistributionCache = NewDistributionCache()
 			// Start background GC to purge old distributions every minute
 			StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute, conf.Internal.StopCh)
@@ -128,13 +128,8 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 		sr.HandleFunc("/scanner/status", APIscannerStatus(conf)).Methods("GET")
 		sr.HandleFunc("/scanner/delete", APIscannerDelete(conf)).Methods("DELETE")
 	}
-	if Globals.App.Type == AppTypeCombiner || Globals.App.Type == AppTypeMPCombiner {
-		sr.HandleFunc("/combiner", APIcombiner(&Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
-		sr.HandleFunc("/combiner/distrib", conf.APIcombinerDistrib(conf.Internal.DistributionCache)).Methods("POST")
-		sr.HandleFunc("/combiner/transaction", conf.APIcombinerTransaction()).Methods("POST")
-		sr.HandleFunc("/combiner/debug", APIcombinerDebug(conf)).Methods("POST")
-		sr.HandleFunc("/combiner/edits", APIcombinerEdits(conf)).Methods("POST")
-	}
+	// Combiner API routes removed — combiner only exists in tdns-mp now.
+	// Routes are registered by tdns-mp via SetupMPCombinerRoutes.
 
 	if Globals.App.Type == AppTypeKdc {
 		// KDC API routes are set up in kdc.StartKdc() to avoid circular imports
