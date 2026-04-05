@@ -12,22 +12,6 @@ import (
 	"time"
 )
 
-// CombinerDistribPost represents a request to the combiner distrib API
-type CombinerDistribPost struct {
-	Command string `json:"command"` // "list", "purge"
-	Force   bool   `json:"force,omitempty"`
-}
-
-// CombinerDistribResponse represents a response from the combiner distrib API
-type CombinerDistribResponse struct {
-	Time          time.Time              `json:"time"`
-	Error         bool                   `json:"error,omitempty"`
-	ErrorMsg      string                 `json:"error_msg,omitempty"`
-	Msg           string                 `json:"msg,omitempty"`
-	Summaries     []*DistributionSummary `json:"summaries,omitempty"`
-	Distributions []string               `json:"distributions,omitempty"` // For backward compatibility
-}
-
 func (conf *Config) APIcombinerDistrib(cache *DistributionCache) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)

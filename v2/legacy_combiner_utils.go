@@ -12,27 +12,6 @@ import (
 	"github.com/miekg/dns"
 )
 
-// Named presets for allowed RRtypes. Hardcoded for safety.
-// "apex-combiner": manages DNSKEY, CDS, CSYNC, NS, KEY at the zone apex.
-// "delegation-combiner": (future) manages NS, DS, GLUE at delegation points.
-var AllowedRRtypePresets = map[string]map[uint16]bool{
-	"apex-combiner": {
-		dns.TypeDNSKEY: true,
-		dns.TypeCDS:    true,
-		dns.TypeCSYNC:  true,
-		dns.TypeNS:     true,
-		dns.TypeKEY:    true,
-	},
-	// "delegation-combiner": { dns.TypeNS: true, dns.TypeDS: true, ... },
-}
-
-// AllowedLocalRRtypes is the active preset. Default: "apex-combiner".
-var AllowedLocalRRtypes = AllowedRRtypePresets["apex-combiner"]
-
-// providerZoneRRtypes caches the parsed allowed-RRtype map for each provider zone.
-// Populated during config parsing via RegisterProviderZoneRRtypes.
-var providerZoneRRtypes = map[string]map[uint16]bool{}
-
 // RegisterProviderZoneRRtypes parses a ProviderZoneConf and registers its allowed
 // RRtype map for use by the combiner policy engine.
 func RegisterProviderZoneRRtypes(pz ProviderZoneConf) {

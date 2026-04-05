@@ -17,31 +17,6 @@ import (
 var lgEngine = Logger("engine")
 var lgConnRetryEngine = Logger("conn-retry")
 
-type SyncRequest struct {
-	Command      string
-	ZoneName     ZoneName
-	ZoneData     *ZoneData
-	SyncStatus   *HsyncStatus
-	OldDnskeys   *core.RRset
-	NewDnskeys   *core.RRset
-	DnskeyStatus *DnskeyStatus // Local DNSKEY adds/removes (Phase 5)
-	Response     chan SyncResponse
-}
-
-type SyncResponse struct {
-	Status   bool
-	Error    bool
-	ErrorMsg string
-	Msg      string
-}
-
-type SyncStatus struct {
-	Identity AgentId
-	Agents   map[AgentId]*Agent
-	Error    bool
-	Response chan SyncStatus
-}
-
 // Define task struct for deferred operations
 type DeferredTask struct {
 	Action      string

@@ -72,15 +72,6 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 	return differ, &hss, nil
 }
 
-// DnskeyStatus holds the result of DNSKEY change detection (local keys only).
-type DnskeyStatus struct {
-	Time             time.Time
-	ZoneName         string
-	LocalAdds        []dns.RR // Local DNSKEYs added since last check
-	LocalRemoves     []dns.RR // Local DNSKEYs removed since last check
-	CurrentLocalKeys []dns.RR // Complete current set of local DNSKEYs (for replace operations)
-}
-
 // LocalDnskeysChanged compares old and new DNSKEY RRsets, filtering out
 // known remote DNSKEYs, and returns whether local DNSKEYs changed.
 // Modeled on HsyncChanged() but operates on dns.TypeDNSKEY.
