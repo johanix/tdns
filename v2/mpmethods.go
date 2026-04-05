@@ -612,3 +612,31 @@ func (s RRState) String() string {
 		return "unknown"
 	}
 }
+
+func NewAgentRepo() (*AgentRepo, error) {
+	return &AgentRepo{
+		Data: core.NewStringer[AgentId, *OwnerData](),
+	}, nil
+}
+
+func NewZoneDataRepo() (*ZoneDataRepo, error) {
+	return &ZoneDataRepo{
+		Repo:     core.NewStringer[ZoneName, *AgentRepo](),
+		Tracking: make(map[ZoneName]map[AgentId]map[uint16]*TrackedRRset),
+	}, nil
+}
+
+// allRecipientsConfirmed returns true if every expected recipient has sent a
+// non-pending confirmation. If ExpectedRecipients is empty, returns true.
+func allRecipientsConfirmed(tr *TrackedRR) bool {
+	if len(tr.ExpectedRecipients) == 0 {
+		return true
+	}
+	for _, r := range tr.ExpectedRecipients {
+		c, ok := tr.Confirmations[r]
+		if !ok || c.Status == "pending" {
+			return false
+		}
+	}
+	return true
+}
