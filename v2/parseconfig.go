@@ -220,7 +220,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 	if conf.MultiProvider != nil {
 		expectedRole := map[AppType]string{
 			AppTypeAuth:       "signer",
-			AppTypeCombiner:   "combiner",
+			//AppTypeCombiner:   "combiner",
 			AppTypeMPCombiner: "combiner",
 			AppTypeAgent:      "agent",
 		}
@@ -758,43 +758,8 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 				})
 			}
 
-			// MP delegation sync callback: for MP zones, check HSYNCPARAM for
-			// parentsync=agent. If set, enable delegation sync and call SetupZoneSync.
-			// Only if our identity is listed in the zone's HSYNC3 records.
-			if options[OptMultiProvider] {
-				delegationSyncQ := conf.Internal.DelegationSyncQ
-				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
-					if zd.Options[OptDelSyncChild] {
-						return // already set via static config, handled by callback below
-					}
-					// Verify that our identity is listed in HSYNC3 before setting any options.
-					matched, _, _ := zd.matchHsyncProvider(ourHsyncIdentities())
-					if !matched {
-						return
-					}
-					apex, err := zd.GetOwner(zd.ZoneName)
-					if err != nil || apex == nil {
-						return
-					}
-					hsyncparamRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
-					if !exists || len(hsyncparamRRset.RRs) == 0 {
-						return
-					}
-					if prr, ok := hsyncparamRRset.RRs[0].(*dns.PrivateRR); ok {
-						if hsyncparam, ok := prr.Data.(*core.HSYNCPARAM); ok {
-							if hsyncparam.GetParentSync() == core.HsyncParentSyncAgent {
-								lgConfig.Info("HSYNCPARAM parentsync=agent, enabling delegation sync",
-									"zone", zd.ZoneName)
-								zd.Options[OptDelSyncChild] = true
-								if err := zd.SetupZoneSync(delegationSyncQ); err != nil {
-									lgConfig.Error("SetupZoneSync failed in MP OnFirstLoad",
-										"zone", zd.ZoneName, "error", err)
-								}
-							}
-						}
-					}
-				})
-			}
+			// MP delegation sync OnFirstLoad removed — handled by tdns-mp
+			// start_agent.go (parentsync=agent detection from HSYNCPARAM).
 
 			// Delegation sync callback: set up DSYNC publication (parent) or
 			// delegation sync monitoring (child) after zone is loaded.
@@ -1393,10 +1358,8 @@ func (conf *Config) normalizeConfigIdentities() {
 			for i, ns := range conf.MultiProvider.ProtectedNamespaces {
 				conf.MultiProvider.ProtectedNamespaces[i] = dns.Fqdn(ns)
 			}
-			for i := range conf.MultiProvider.ProviderZones {
-				conf.MultiProvider.ProviderZones[i].Zone = dns.Fqdn(conf.MultiProvider.ProviderZones[i].Zone)
-				RegisterProviderZoneRRtypes(conf.MultiProvider.ProviderZones[i])
-			}
+			// Provider zone RR type registration removed — handled
+			// by tdns-mp initMPCombiner.
 		}
 	}
 }
