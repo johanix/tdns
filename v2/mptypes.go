@@ -703,7 +703,7 @@ type CombinerState struct {
 
 	// chunkHandler is the underlying ChunkNotifyHandler (internal wiring).
 	// Access is via SetRouter/SetGetPeerAddress/SetSecureWrapper.
-	chunkHandler *transport.ChunkNotifyHandler
+	ChunkNotifyHandler *transport.ChunkNotifyHandler
 }
 
 // --- from legacy_combiner_utils.go ---

@@ -29,7 +29,7 @@ func CombinerStateSetChunkHandler(cs *CombinerState, handler *transport.ChunkNot
 	if cs == nil {
 		return
 	}
-	cs.chunkHandler = handler
+	cs.ChunkNotifyHandler = handler
 }
 
 // OurHsyncIdentities wraps the unexported ourHsyncIdentities function.

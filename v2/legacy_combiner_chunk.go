@@ -54,7 +54,7 @@ func detectDelegationChanges(resp *CombinerSyncResponse) (nsChanged, kskChanged 
 
 // ChunkHandler returns the underlying ChunkNotifyHandler for wiring into TransportManager.
 func (cs *CombinerState) ChunkHandler() *transport.ChunkNotifyHandler {
-	return cs.chunkHandler
+	return cs.ChunkNotifyHandler
 }
 
 // ProcessUpdate delegates to the standalone CombinerProcessUpdate.
@@ -1397,7 +1397,7 @@ func RegisterCombinerChunkHandler(localID string, secureWrapper *transport.Secur
 	}
 
 	// Store handler reference in state so main_initfuncs can set Router after initialization
-	state.chunkHandler = handler
+	state.ChunkNotifyHandler = handler
 
 	return state, nil
 }
@@ -1432,7 +1432,7 @@ func RegisterSignerChunkHandler(localID string, secureWrapper *transport.SecureP
 		return nil, err
 	}
 
-	state.chunkHandler = handler
+	state.ChunkNotifyHandler = handler
 
 	return state, nil
 }
@@ -1440,22 +1440,22 @@ func RegisterSignerChunkHandler(localID string, secureWrapper *transport.SecureP
 // SetRouter sets the router on the underlying ChunkNotifyHandler.
 // Called from main_initfuncs.go after the router is initialized.
 func (cs *CombinerState) SetRouter(router *transport.DNSMessageRouter) {
-	if cs.chunkHandler != nil {
-		cs.chunkHandler.Router = router
+	if cs.ChunkNotifyHandler != nil {
+		cs.ChunkNotifyHandler.Router = router
 	}
 }
 
 // SetSecureWrapper sets the secure wrapper on the underlying ChunkNotifyHandler.
 func (cs *CombinerState) SetSecureWrapper(sw *transport.SecurePayloadWrapper) {
-	if cs.chunkHandler != nil {
-		cs.chunkHandler.SecureWrapper = sw
+	if cs.ChunkNotifyHandler != nil {
+		cs.ChunkNotifyHandler.SecureWrapper = sw
 	}
 }
 
 // SetGetPeerAddress sets the GetPeerAddress callback on the underlying ChunkNotifyHandler.
 func (cs *CombinerState) SetGetPeerAddress(fn func(senderID string) (address string, ok bool)) {
-	if cs.chunkHandler != nil {
-		cs.chunkHandler.GetPeerAddress = fn
+	if cs.ChunkNotifyHandler != nil {
+		cs.ChunkNotifyHandler.GetPeerAddress = fn
 	}
 }
 
