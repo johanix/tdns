@@ -47,7 +47,7 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 		configsections["imrengine"] = config.Imr
 	case AppTypeReporter:
 		configsections["apiserver"] = config.ApiServer
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner,
+	case AppTypeAuth, AppTypeAgent, // AppTypeCombiner,
 		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
 		configsections["service"] = config.Service
 		configsections["db"] = config.Db
@@ -328,7 +328,7 @@ func ValidateCryptoFiles(config *Config) error {
 func ValidateDatabaseFile(config *Config) error {
 	// Only validate for app types that require a database
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner,
+	case AppTypeAuth, AppTypeAgent, AppTypeScanner, // AppTypeCombiner,
 		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
 		dbFile := strings.TrimSpace(config.Db.File)
 		if dbFile == "" {

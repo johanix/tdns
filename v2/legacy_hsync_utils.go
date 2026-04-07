@@ -924,7 +924,7 @@ func MPPreRefresh(zd, new_zd *ZoneData) {
 
 	// HSYNC and DNSKEY change detection
 	switch Globals.App.Type {
-	case AppTypeAgent, AppTypeMPAgent, AppTypeCombiner, AppTypeMPCombiner, AppTypeAuth, AppTypeMPSigner:
+	case AppTypeAgent, AppTypeMPAgent, AppTypeMPCombiner, AppTypeAuth, AppTypeMPSigner:
 		var err error
 		analysis.HsyncChanged, analysis.HsyncStatus, err = zd.HsyncChanged(new_zd)
 		if err != nil {
@@ -961,7 +961,7 @@ func MPPreRefresh(zd, new_zd *ZoneData) {
 
 	// Combiner: snapshot upstream data before applying contributions to new_zd
 	switch Globals.App.Type {
-	case AppTypeCombiner, AppTypeMPCombiner:
+	case AppTypeMPCombiner:
 		new_zd.snapshotUpstreamData()
 	}
 
@@ -1000,7 +1000,7 @@ func MPPreRefresh(zd, new_zd *ZoneData) {
 
 	// Combiner: HSYNC match check and combine with local changes on new_zd.
 	switch Globals.App.Type {
-	case AppTypeCombiner, AppTypeMPCombiner:
+	case AppTypeMPCombiner:
 		if analysis.HsyncChanged {
 			matched, _, _ := new_zd.matchHsyncProvider(ourHsyncIdentities())
 			if matched && !new_zd.Options[OptMPDisallowEdits] {
@@ -1093,7 +1093,7 @@ func MPPostRefresh(zd *ZoneData) {
 					NewDnskeys: oldkeys, // post-flip, old=new; legacy path approximation
 				}
 			}
-		case AppTypeCombiner, AppTypeMPCombiner:
+		case AppTypeMPCombiner:
 			lg.Debug("incoming DNSKEYs have changed, no action needed for combiner", "zone", zd.ZoneName)
 		}
 	}

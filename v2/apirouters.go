@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"time"
 
 	"github.com/gorilla/mux"
 )
@@ -74,6 +73,7 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 	kdb := conf.Internal.KeyDB
 
 	// Initialize distribution cache if needed (for agent/combiner)
+    /*
 	if conf.Internal.DistributionCache == nil {
 		if Globals.App.Type == AppTypeAgent || Globals.App.Type == AppTypeCombiner {
 			conf.Internal.DistributionCache = NewDistributionCache()
@@ -82,6 +82,7 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 			lgApi.Info("initialized distribution cache with automatic cleanup")
 		}
 	}
+	*/
 
 	rtr := mux.NewRouter().StrictSlash(true)
 	apikey := conf.ApiServer.ApiKey.Value()

@@ -333,7 +333,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner,
+	case AppTypeAuth, AppTypeAgent, // AppTypeCombiner,
 		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
 		conf.parseAuthOptions()
 	}
@@ -345,7 +345,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 
 	// XXX: Hmm. Should not initialize KeyDB on reload?
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner,
+	case AppTypeAuth, AppTypeAgent, // AppTypeCombiner,
 		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
 		if !reload { // || kdb == nil {
 			err = conf.InitializeKeyDB()
@@ -415,7 +415,7 @@ func (conf *Config) InitializeKeyDB() error {
 		return fmt.Errorf("database file path %q is a symlink (not allowed)", dbFile)
 	}
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner,
+	case AppTypeAuth, AppTypeAgent, AppTypeScanner, // AppTypeCombiner,
 		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
 
 		// Create DB file and parent directory if missing (auto-initialize on first run).
@@ -847,7 +847,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		}
 
 		switch Globals.App.Type {
-		case AppTypeAuth, AppTypeAgent, AppTypeCombiner,
+		case AppTypeAuth, AppTypeAgent, // AppTypeCombiner,
 			AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
 			if conf.Internal.RefreshZoneCh == nil {
 				lgConfig.Error("refresh channel is not configured, zones will not be refreshed, terminating")

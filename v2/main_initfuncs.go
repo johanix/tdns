@@ -106,7 +106,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		}
 	}
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner, AppTypeReporter, AppTypeKdc, AppTypeKrs,
+	case AppTypeAuth, AppTypeAgent, AppTypeScanner, AppTypeReporter, AppTypeKdc, AppTypeKrs,
 		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
 		flag.StringVar(&conf.Internal.CfgFile, "config", defaultcfg, "config file path")
 		flag.BoolVarP(&Globals.Debug, "debug", "", false, "run in debug mode (may activate dangerous tests)")
@@ -120,7 +120,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	}
 	lgConfig.Debug("MainInit starting", "defaultcfg", defaultcfg, "cfgfile", conf.Internal.CfgFile)
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeImr, AppTypeScanner, AppTypeReporter, AppTypeCli, AppTypeKdc, AppTypeKrs,
+	case AppTypeAuth, AppTypeAgent, AppTypeImr, AppTypeScanner, AppTypeReporter, AppTypeCli, AppTypeKdc, AppTypeKrs,
 		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
 		fmt.Printf("*** TDNS %s version %s mode of operation: %q (verbose: %t, debug: %t)\n",
 			Globals.App.Name, Globals.App.Version, AppTypeToString[Globals.App.Type], Globals.Verbose, Globals.Debug)
@@ -139,7 +139,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	}
 	fmt.Printf("Logging to file: %s\n", logfile)
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner,
+	case AppTypeAuth, AppTypeAgent, AppTypeScanner,
 		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
 		// Note that AppTypeAuth and AppTypeAgent fall through into here as well.
 		kdb := conf.Internal.KeyDB
@@ -264,6 +264,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		}
 	}
 	switch Globals.App.Type {
+		/*
 	case AppTypeAgent:
 		if conf.MultiProvider == nil {
 			return fmt.Errorf("agent config block is required for agent app type")
@@ -401,7 +402,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		if err := registerPeerAgents(conf, tm); err != nil {
 			return fmt.Errorf("failed to register peer agents: %w", err)
 		}
-	case AppTypeAuth, AppTypeCombiner:
+		*/
+	case AppTypeAuth:
+		/*
 		// Auth: initialize TransportManager for multi-provider DNSSEC (only when multi-provider.active)
 		if Globals.App.Type == AppTypeAuth && conf.MultiProvider != nil && conf.MultiProvider.Active {
 			mp := conf.MultiProvider
@@ -524,6 +527,8 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 				lgConfig.Info("registered agent peer", "peer", peerID, "address", agentConf.Address)
 			}
 		}
+		*/
+		/*
 		if Globals.App.Type == AppTypeCombiner {
 			if conf.MultiProvider == nil {
 				return fmt.Errorf("multi-provider config block is required for combiner app type")
@@ -675,6 +680,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 				lgConfig.Info("combiner signature TXT enabled")
 			}
 		}
+			*/
 	default:
 		// ... existing auth/agent/combiner setup ...
 	}

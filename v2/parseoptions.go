@@ -345,7 +345,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 		case OptMPManualApproval:
 			// Only valid on the combiner — controls whether incoming UPDATEs
 			// from agents require manual approval before being applied.
-			if Globals.App.Type != AppTypeCombiner && Globals.App.Type != AppTypeMPCombiner {
+			if Globals.App.Type != AppTypeMPCombiner {
 				lg.Error("mp-manual-approval is only valid on the combiner, ignoring", "zone", zname)
 				if zd != nil {
 					zd.SetError(ConfigError, "mp-manual-approval is only valid on combiner zones")
