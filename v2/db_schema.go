@@ -85,6 +85,14 @@ published_at              TEXT DEFAULT '',
 retired_at                TEXT DEFAULT '',
 UNIQUE (zonename, keyid)
 )`,
+
+	// OutgoingSerials persists the outgoing SOA serial per zone.
+	// Prevents serial regression on restart (which causes signers to ignore NOTIFYs).
+	"OutgoingSerials": `CREATE TABLE IF NOT EXISTS 'OutgoingSerials' (
+		zone       TEXT NOT NULL PRIMARY KEY,
+		serial     INTEGER NOT NULL,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`,
 }
 
 // Note that there is no DNSSEC TrustStore, because whatever DNSSEC keys we have

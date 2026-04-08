@@ -73,15 +73,15 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 	kdb := conf.Internal.KeyDB
 
 	// Initialize distribution cache if needed (for agent/combiner)
-    /*
-	if conf.Internal.DistributionCache == nil {
-		if Globals.App.Type == AppTypeAgent || Globals.App.Type == AppTypeCombiner {
-			conf.Internal.DistributionCache = NewDistributionCache()
-			// Start background GC to purge old distributions every minute
-			StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute, conf.Internal.StopCh)
-			lgApi.Info("initialized distribution cache with automatic cleanup")
+	/*
+		if conf.Internal.DistributionCache == nil {
+			if Globals.App.Type == AppTypeAgent || Globals.App.Type == AppTypeCombiner {
+				conf.Internal.DistributionCache = NewDistributionCache()
+				// Start background GC to purge old distributions every minute
+				StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute, conf.Internal.StopCh)
+				lgApi.Info("initialized distribution cache with automatic cleanup")
+			}
 		}
-	}
 	*/
 
 	rtr := mux.NewRouter().StrictSlash(true)
@@ -101,8 +101,7 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 	sr.HandleFunc("/catalog", APICatalog(&Globals.App)).Methods("POST")
 	sr.HandleFunc("/debug", APIdebug(conf)).Methods("POST")
 
-	if Globals.App.Type == AppTypeAuth || Globals.App.Type == AppTypeAgent ||
-		Globals.App.Type == AppTypeMPSigner || Globals.App.Type == AppTypeMPAgent || Globals.App.Type == AppTypeMPAuditor {
+	if Globals.App.Type == AppTypeAuth || Globals.App.Type == AppTypeAgent {
 		sr.HandleFunc("/keystore", kdb.APIkeystore(conf)).Methods("POST")
 		sr.HandleFunc("/truststore", kdb.APItruststore()).Methods("POST")
 		sr.HandleFunc("/zone/dsync", APIzoneDsync(ctx, &Globals.App, conf.Internal.RefreshZoneCh, kdb)).Methods("POST")

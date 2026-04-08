@@ -139,12 +139,7 @@ func runKeysShow(conf *Config, appType AppType, backend crypto.Backend, args []s
 
 func getKeysPrivKeyPath(conf *Config, appType AppType) string {
 	switch appType {
-	case AppTypeAgent:
-		if conf.MultiProvider != nil {
-			return conf.MultiProvider.LongTermJosePrivKey
-		}
-		return ""
-	case AppTypeMPCombiner:
+	case AppTypeAgent, AppTypeMPAgent, AppTypeMPSigner, AppTypeMPCombiner:
 		if conf.MultiProvider != nil {
 			return conf.MultiProvider.LongTermJosePrivKey
 		}
@@ -155,9 +150,16 @@ func getKeysPrivKeyPath(conf *Config, appType AppType) string {
 }
 
 func printKeysUsage(appType AppType) {
-	name := "tdns-agent"
-	if appType == AppTypeMPCombiner {
+	var name string
+	switch appType {
+	case AppTypeMPCombiner:
 		name = "tdns-combiner"
+	case AppTypeMPAgent:
+		name = "tdns-mpagent"
+	case AppTypeMPSigner:
+		name = "tdns-mpsigner"
+	default:
+		name = "tdns-agent"
 	}
 	fmt.Fprintf(os.Stderr, "Usage: %s keys generate [-output path]\n", name)
 	fmt.Fprintf(os.Stderr, "       %s keys show\n", name)

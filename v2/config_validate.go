@@ -86,9 +86,12 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 		return fmt.Errorf("Config \"%s\" agent.supported_mechanisms validation failed: %v", cfgfile, err)
 	}
 
-	// Validate database file is set for apps that require it
-	if err := ValidateDatabaseFile(&config); err != nil {
-		return fmt.Errorf("Config \"%s\" database validation failed: %v", cfgfile, err)
+	// Validate database file is set for tdns apps that require it
+	switch Globals.App.Type {
+	case AppTypeAuth, AppTypeAgent, AppTypeScanner:
+		if err := ValidateDatabaseFile(&config); err != nil {
+			return fmt.Errorf("Config \"%s\" database validation failed: %v", cfgfile, err)
+		}
 	}
 
 	return nil
@@ -323,21 +326,17 @@ func ValidateCryptoFiles(config *Config) error {
 	return nil
 }
 
-// ValidateDatabaseFile validates that the database file path is set for apps that require it.
+// ValidateDatabaseFile validates that the database file path is set.
 // If db.file is unset or empty, this function returns an error (hard fail).
+// Callers decide whether to call this based on app type.
 func ValidateDatabaseFile(config *Config) error {
-	// Only validate for app types that require a database
-	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeScanner, // AppTypeCombiner,
-		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
-		dbFile := strings.TrimSpace(config.Db.File)
-		if dbFile == "" {
-			return fmt.Errorf("db.file is required but not set (must be specified in config)")
-		}
-		// Also check if it's just "." (which filepath.Clean("") returns)
-		if dbFile == "." {
-			return fmt.Errorf("db.file is unset (got '.' from empty path); must specify a valid database file path")
-		}
+	dbFile := strings.TrimSpace(config.Db.File)
+	if dbFile == "" {
+		return fmt.Errorf("db.file is required but not set (must be specified in config)")
+	}
+	// Also check if it's just "." (which filepath.Clean("") returns)
+	if dbFile == "." {
+		return fmt.Errorf("db.file is unset (got '.' from empty path); must specify a valid database file path")
 	}
 	return nil
 }

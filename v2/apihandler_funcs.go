@@ -316,6 +316,12 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 			resp.ErrorMsg = msg
 			return
 		}
+		if delsyncq == nil {
+			resp.Error = true
+			resp.ErrorMsg = "delegation sync not available"
+			return
+		}
+
 		respch := make(chan DelegationSyncStatus, 1)
 
 		syncreq := DelegationSyncRequest{

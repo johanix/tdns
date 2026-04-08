@@ -219,7 +219,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// Validate multi-provider.role matches the application type
 	if conf.MultiProvider != nil {
 		expectedRole := map[AppType]string{
-			AppTypeAuth:       "signer",
+			AppTypeAuth: "signer",
 			//AppTypeCombiner:   "combiner",
 			AppTypeMPCombiner: "combiner",
 			AppTypeAgent:      "agent",
@@ -266,8 +266,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 
 	// Initialize DnssecPolicies if needed
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent,
-		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPAuditor:
+	case AppTypeAuth, AppTypeAgent:
 		if conf.Internal.DnssecPolicies == nil {
 			conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
 		}
@@ -290,7 +289,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 		// If no "default" policy in config, use built-in default (e.g. for agent autozone).
 		// An explicit dnssecpolicies.default in YAML overrides this.
 		if _, exists := conf.Internal.DnssecPolicies["default"]; !exists {
-			conf.Internal.DnssecPolicies["default"] = builtinDefaultDnssecPolicy()
+			conf.Internal.DnssecPolicies["default"] = BuiltinDefaultDnssecPolicy()
 		}
 	}
 
@@ -333,9 +332,8 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, // AppTypeCombiner,
-		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
-		conf.parseAuthOptions()
+	case AppTypeAuth, AppTypeAgent:
+		conf.ParseAuthOptions()
 	}
 
 	conf.parseMultiProviderOptions()
@@ -345,9 +343,8 @@ func (conf *Config) ParseConfig(reload bool) error {
 
 	// XXX: Hmm. Should not initialize KeyDB on reload?
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, // AppTypeCombiner,
-		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
-		if !reload { // || kdb == nil {
+	case AppTypeAuth, AppTypeAgent:
+		if !reload {
 			err = conf.InitializeKeyDB()
 			if err != nil {
 				return err
@@ -414,38 +411,31 @@ func (conf *Config) InitializeKeyDB() error {
 	if info, err := os.Lstat(dbFile); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("database file path %q is a symlink (not allowed)", dbFile)
 	}
-	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeScanner, // AppTypeCombiner,
-		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
-
-		// Create DB file and parent directory if missing (auto-initialize on first run).
-		if _, err := os.Stat(dbFile); os.IsNotExist(err) {
-			lgConfig.Info("TDNS DB file does not exist, creating", "file", dbFile)
-			dir := filepath.Dir(dbFile)
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				return fmt.Errorf("ParseConfig: failed to create DB directory %s: %v", dir, err)
-			}
-			if err := os.WriteFile(dbFile, nil, 0664); err != nil {
-				return fmt.Errorf("ParseConfig: failed to create TDNS DB file %s: %v", dbFile, err)
-			}
+	// Create DB file and parent directory if missing (auto-initialize on first run).
+	if _, err := os.Stat(dbFile); os.IsNotExist(err) {
+		lgConfig.Info("TDNS DB file does not exist, creating", "file", dbFile)
+		dir := filepath.Dir(dbFile)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("ParseConfig: failed to create DB directory %s: %v", dir, err)
 		}
-		kdb, err := NewKeyDB(dbFile, false, conf.DnsEngine.Options)
-		if err != nil {
-			return fmt.Errorf("error from NewKeyDB: %v", err)
+		if err := os.WriteFile(dbFile, nil, 0664); err != nil {
+			return fmt.Errorf("ParseConfig: failed to create TDNS DB file %s: %v", dbFile, err)
 		}
-		conf.Internal.KeyDB = kdb
-
-		// Ensure OutgoingSerials table exists for persist-outbound-serial option
-		if kdb.Options[AuthOptPersistOutboundSerial] != "" {
-			schema := HsyncTables["OutgoingSerials"]
-			if _, err := kdb.DB.Exec(schema); err != nil {
-				return fmt.Errorf("failed to create OutgoingSerials table: %w", err)
-			}
-		}
-
-	default:
-		// do nothing for tdns-imr, tdns-cli
 	}
+	kdb, err := NewKeyDB(dbFile, false, conf.DnsEngine.Options)
+	if err != nil {
+		return fmt.Errorf("error from NewKeyDB: %v", err)
+	}
+	conf.Internal.KeyDB = kdb
+
+	// Ensure OutgoingSerials table exists for persist-outbound-serial option
+	if kdb.Options[AuthOptPersistOutboundSerial] != "" {
+		schema := DefaultTables["OutgoingSerials"]
+		if _, err := kdb.DB.Exec(schema); err != nil {
+			return fmt.Errorf("failed to create OutgoingSerials table: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -1070,7 +1060,7 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 // builtinDefaultDnssecPolicy returns the built-in "default" DNSSEC policy used when
 // no dnssecpolicies.default is defined in config (e.g. for agent autozone). An explicit
 // dnssecpolicies.default in YAML overrides this. No automatic key rollovers.
-func builtinDefaultDnssecPolicy() DnssecPolicy {
+func BuiltinDefaultDnssecPolicy() DnssecPolicy {
 	return DnssecPolicy{
 		Name:      "default",
 		Algorithm: dns.ED25519,

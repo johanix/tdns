@@ -72,7 +72,7 @@ func (conf *Config) parseImrOptions() {
 	conf.Imr.Options = clean
 }
 
-func (conf *Config) parseAuthOptions() {
+func (conf *Config) ParseAuthOptions() {
 	raw := conf.DnsEngine.OptionsStrs
 	clean := make(map[AuthOption]string)
 
