@@ -59,12 +59,6 @@ func RunZoneList(parent string, args []string) {
 	}
 }
 
-var agentZoneMPListCmd = &cobra.Command{
-	Use:   "mplist",
-	Short: "List multi-provider zones with HSYNCPARAM details",
-	Run:   func(cmd *cobra.Command, args []string) { RunZoneMPList("agent", args) },
-}
-
 var agentZoneReloadCmd = &cobra.Command{
 	Use:   "reload",
 	Short: "Request re-loading a zone",
@@ -461,7 +455,7 @@ func init() {
 	AgentCmd.AddCommand(AgentZoneCmd)
 
 	// Zone subcommands relevant to the agent
-	AgentZoneCmd.AddCommand(agentZoneListCmd, agentZoneMPListCmd, agentZoneReloadCmd, agentZoneWriteCmd)
+	AgentZoneCmd.AddCommand(agentZoneListCmd, agentZoneReloadCmd, agentZoneWriteCmd)
 	AgentZoneCmd.AddCommand(agentZoneUpdateCmd, agentZoneReadFakeCmd)
 	AgentZoneCmd.AddCommand(agentZoneDsyncCmd)
 
