@@ -26,11 +26,10 @@ var syncTransport, syncIdentity, TheAgentId string
 
 func init() {
 	AgentCmd.AddCommand(hsyncCmd)
-	hsyncCmd.AddCommand(hsyncZoneStatusCmd, hsyncAgentStatusCmd)
+	hsyncCmd.AddCommand(hsyncAgentStatusCmd)
 	hsyncCmd.AddCommand(hsyncLocateCmd)
 	hsyncCmd.AddCommand(hsyncSendHelloCmd)
 
-	hsyncZoneStatusCmd.Flags().StringVarP(&syncTransport, "transport", "T", "", "Transport to show, default both api and dns")
 	hsyncAgentStatusCmd.Flags().StringVarP(&syncTransport, "transport", "T", "", "Transport to show, default both api and dns")
 	hsyncAgentStatusCmd.Flags().StringVarP(&TheAgentId, "agentid", "", "", "Remote agent identity to show")
 	hsyncSendHelloCmd.Flags().StringVarP(&syncIdentity, "id", "I", "", "Identity to claim in the send hello")
@@ -40,63 +39,6 @@ var hsyncCmd = &cobra.Command{
 	Use:   "hsync",
 	Short: "HSYNC related commands",
 	Long:  `Commands related to HSYNC operations.`,
-}
-
-var hsyncZoneStatusCmd = &cobra.Command{
-	Use:   "zonestatus",
-	Short: "Show HSYNC status for a zone",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
-		parent, _ := GetCommandContext("hsync")
-
-		api, err := GetApiClient(parent, true)
-		if err != nil {
-			log.Fatalf("Error getting API client: %v", err)
-		}
-
-		req := tdns.AgentMgmtPost{
-			Command: "hsync-zonestatus",
-			Zone:    tdns.ZoneName(tdns.Globals.Zonename),
-		}
-
-		_, buf, err := api.RequestNG("POST", "/agent", req, true)
-		if err != nil {
-			log.Fatalf("API request failed: %v", err)
-		}
-
-		var resp tdns.AgentMgmtResponse
-		if err := json.Unmarshal(buf, &resp); err != nil {
-			log.Fatalf("Failed to parse response: %v", err)
-		}
-
-		if resp.Error {
-			log.Fatalf("API error: %s", resp.ErrorMsg)
-		}
-
-		PrintHsyncRRs(tdns.AgentId(resp.Identity), resp.HsyncRRs)
-
-		if tdns.Globals.Verbose {
-			fmt.Printf("\nZone Agent Data:\n")
-			fmt.Printf("  My Upstream: %s\n", resp.ZoneAgentData.MyUpstream)
-			fmt.Printf("  My Downstreams: %v\n", resp.ZoneAgentData.MyDownstreams)
-		}
-
-		if len(resp.ZoneAgentData.Agents) > 0 {
-			fmt.Printf("\n%s Remote Agents:\n", tdns.Globals.Zonename)
-			for _, agent := range resp.ZoneAgentData.Agents {
-				if agent.Identity == resp.Identity {
-					continue
-				}
-				err := PrintAgent(agent, true)
-				if err != nil {
-					log.Printf("Error printing agent: %v", err)
-				}
-				fmt.Println()
-			}
-		} else {
-			fmt.Printf("\nNo remote agents for zone %q found in the AgentRegistry\n", tdns.Globals.Zonename)
-		}
-	},
 }
 
 var hsyncAgentStatusCmd = &cobra.Command{
