@@ -264,33 +264,31 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return fmt.Errorf("error reading processed config: %v", err)
 	}
 
-	// Initialize DnssecPolicies if needed
-	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent:
-		if conf.Internal.DnssecPolicies == nil {
-			conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
+	// Initialize DnssecPolicies unconditionally. ParseZones (called later
+	// from MainInit) validates zone dnssec_policy references against this
+	// map, so it must be populated before ParseZones runs — for all apps,
+	// not just tdns-native ones.
+	if conf.Internal.DnssecPolicies == nil {
+		conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
+	}
+	for name, dp := range conf.DnssecPolicies {
+		tmp := DnssecPolicy{
+			Name:      name,
+			Algorithm: dns.StringToAlgorithm[strings.ToUpper(dp.Algorithm)],
+			KSK:       GenKeyLifetime(dp.KSK.Lifetime, dp.KSK.SigValidity),
+			ZSK:       GenKeyLifetime(dp.ZSK.Lifetime, dp.ZSK.SigValidity),
+			CSK:       GenKeyLifetime(dp.CSK.Lifetime, dp.CSK.SigValidity),
 		}
-
-		for name, dp := range conf.DnssecPolicies {
-			tmp := DnssecPolicy{
-				Name:      name,
-				Algorithm: dns.StringToAlgorithm[strings.ToUpper(dp.Algorithm)],
-				KSK:       GenKeyLifetime(dp.KSK.Lifetime, dp.KSK.SigValidity),
-				ZSK:       GenKeyLifetime(dp.ZSK.Lifetime, dp.ZSK.SigValidity),
-				CSK:       GenKeyLifetime(dp.CSK.Lifetime, dp.CSK.SigValidity),
-			}
-			if tmp.Algorithm == 0 {
-				lgConfig.Error("DNSSEC policy has unknown algorithm, ignored", "policy", name, "algorithm", dp.Algorithm)
-				continue
-			}
-			conf.Internal.DnssecPolicies[name] = tmp
+		if tmp.Algorithm == 0 {
+			lgConfig.Error("DNSSEC policy has unknown algorithm, ignored", "policy", name, "algorithm", dp.Algorithm)
+			continue
 		}
-
-		// If no "default" policy in config, use built-in default (e.g. for agent autozone).
-		// An explicit dnssecpolicies.default in YAML overrides this.
-		if _, exists := conf.Internal.DnssecPolicies["default"]; !exists {
-			conf.Internal.DnssecPolicies["default"] = BuiltinDefaultDnssecPolicy()
-		}
+		conf.Internal.DnssecPolicies[name] = tmp
+	}
+	// If no "default" policy in config, use built-in default (e.g. for agent autozone).
+	// An explicit dnssecpolicies.default in YAML overrides this.
+	if _, exists := conf.Internal.DnssecPolicies["default"]; !exists {
+		conf.Internal.DnssecPolicies["default"] = BuiltinDefaultDnssecPolicy()
 	}
 
 	// Populate ConfigGroupConfig.Name from map keys after parsing CatalogConf
