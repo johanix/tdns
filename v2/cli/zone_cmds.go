@@ -10,7 +10,6 @@ import (
 	"log"
 	"os"
 	"sort"
-	"strings"
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
