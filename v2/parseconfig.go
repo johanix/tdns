@@ -708,14 +708,6 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 
 		invokeOptionHandlers(zname, options)
 
-		// Register MP refresh callbacks for zones that need MP analysis.
-		// Only register once (on first load, not reload). The callbacks
-		// persist for the lifetime of the zone.
-		if zdp.FirstZoneLoad && options[OptMultiProvider] {
-			zdp.OnZonePreRefresh = append(zdp.OnZonePreRefresh, MPPreRefresh)
-			zdp.OnZonePostRefresh = append(zdp.OnZonePostRefresh, MPPostRefresh)
-		}
-
 		if zdp.FirstZoneLoad {
 			lgConfig.Info("considering OnFirstLoad callbacks", "zone", zname,
 				"online-signing", options[OptOnlineSigning],
