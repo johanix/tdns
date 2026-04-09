@@ -23,9 +23,9 @@ import (
 )
 
 // doPeerPing pings any known peer via DNS CHUNK or API.
-// Role-agnostic: works for agent, auth/signer, or any role with a TransportManager.
-// The peer must be in the PeerRegistry or have static config (combiner, signer, multi-provider agent).
-// useAPI true = HTTPS API ping; false = CHUNK-based DNS ping.
+// Role-agnostic helper retained in tdns for use by the
+// distrib op ping --to combiner legacy path (apihandler_agent_distrib.go).
+// The MP /peer endpoint uses the tdns-mp copy of this function.
 func doPeerPing(conf *Config, peerID string, useAPI bool) *AgentMgmtResponse {
 	resp := &AgentMgmtResponse{
 		Time: time.Now(),
@@ -114,8 +114,8 @@ func doPeerPing(conf *Config, peerID string, useAPI bool) *AgentMgmtResponse {
 	return resp
 }
 
-// lookupStaticPeer checks all static peer configurations (agent-side: combiner, signer;
-// signer-side: multi-provider.agent) and returns a temporary Peer if found. Returns nil if not found.
+// lookupStaticPeer checks all static peer configurations and returns a temporary
+// Peer if found. Retained alongside doPeerPing for the legacy distrib op path.
 func (conf *Config) lookupStaticPeer(peerID string) *transport.Peer {
 	// Agent-side: combiner
 	if conf.MultiProvider != nil && conf.MultiProvider.Role == "agent" && conf.MultiProvider.Combiner != nil &&
@@ -194,9 +194,9 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 		var zd *ZoneData
 		var exist bool
 		noZoneCommands := map[string]bool{
-			"config": true, "hsync-agentstatus": true, "peer-ping": true, "peer-apiping": true,
+			"config": true, "hsync-agentstatus": true,
 			"discover": true, "hsync-locate": true,
-			"imr-query": true, "imr-flush": true, "imr-reset": true, "imr-show": true, "peer-reset": true,
+			"imr-query": true, "imr-flush": true, "imr-reset": true, "imr-show": true,
 		}
 		if !noZoneCommands[amp.Command] {
 			amp.Zone = ZoneName(dns.Fqdn(string(amp.Zone)))
@@ -218,28 +218,6 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 			resp.AgentConfig.Api.CertData = ""
 			resp.AgentConfig.Api.KeyData = ""
-
-		case "peer-ping":
-			if amp.AgentId == "" {
-				resp.Error = true
-				resp.ErrorMsg = "agent_id is required for peer-ping"
-				return
-			}
-			pingResp := doPeerPing(conf, string(amp.AgentId), false)
-			resp.Error = pingResp.Error
-			resp.ErrorMsg = pingResp.ErrorMsg
-			resp.Msg = pingResp.Msg
-
-		case "peer-apiping":
-			if amp.AgentId == "" {
-				resp.Error = true
-				resp.ErrorMsg = "agent_id is required for peer-apiping"
-				return
-			}
-			pingResp := doPeerPing(conf, string(amp.AgentId), true)
-			resp.Error = pingResp.Error
-			resp.ErrorMsg = pingResp.ErrorMsg
-			resp.Msg = pingResp.Msg
 
 		case "update-local-zonedata":
 			lgApi.Debug("update-local-zonedata", "addedRRs", amp.AddedRRs, "removedRRs", amp.RemovedRRs)
@@ -755,58 +733,6 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			}
 			resp.Data = entries
 			resp.Msg = fmt.Sprintf("Found %d cache entries for identity %s", len(entries), identity)
-
-		case "peer-reset":
-			if amp.AgentId == "" {
-				resp.Error = true
-				resp.ErrorMsg = "agent_id (--id) is required"
-				return
-			}
-			amp.AgentId = AgentId(dns.Fqdn(string(amp.AgentId)))
-
-			ar := conf.Internal.AgentRegistry
-			if ar == nil {
-				resp.Error = true
-				resp.ErrorMsg = "agent registry not available"
-				return
-			}
-
-			// Flush IMR cache for this identity's discovery names
-			imr := Globals.ImrEngine
-			flushed := 0
-			if imr != nil && imr.Cache != nil {
-				removed, _ := imr.Cache.FlushDomain(string(amp.AgentId), false)
-				flushed = removed
-			}
-
-			// Reset agent to NEEDED state and restart discovery
-			agent, exists := ar.S.Get(amp.AgentId)
-			if !exists {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("agent %q not found in registry", amp.AgentId)
-				return
-			}
-
-			agent.Mu.Lock()
-			if agent.ApiDetails != nil {
-				agent.ApiDetails.State = AgentStateNeeded
-				agent.ApiDetails.DiscoveryFailures = 0
-				agent.ApiDetails.LatestError = ""
-			}
-			if agent.DnsDetails != nil {
-				agent.DnsDetails.State = AgentStateNeeded
-				agent.DnsDetails.DiscoveryFailures = 0
-				agent.DnsDetails.LatestError = ""
-			}
-			agent.State = AgentStateNeeded
-			agent.Mu.Unlock()
-
-			// Trigger immediate re-discovery
-			if imr != nil {
-				go ar.attemptDiscovery(agent, imr, agent.ApiMethod, agent.DnsMethod)
-			}
-
-			resp.Msg = fmt.Sprintf("Reset agent %s to NEEDED state (flushed %d cache entries), discovery restarted", amp.AgentId, flushed)
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown agent command: %s", amp.Command)

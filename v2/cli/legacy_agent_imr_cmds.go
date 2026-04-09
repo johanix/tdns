@@ -155,34 +155,6 @@ var agentImrShowCmd = &cobra.Command{
 	},
 }
 
-var peerResetID string
-
-var agentPeerResetCmd = &cobra.Command{
-	Use:   "reset",
-	Short: "Reset peer to NEEDED state, flush cache, restart discovery",
-	Long: `Reset a peer agent to initial NEEDED state. Flushes all IMR cache
-entries for the peer's discovery names and restarts discovery from scratch.
-Use this when a peer is stuck in UNKNOWN or KNOWN state.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		if peerResetID == "" {
-			log.Fatal("--id flag is required")
-		}
-
-		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
-			Command: "peer-reset",
-			AgentId: tdns.AgentId(peerResetID),
-		}, "peer")
-		if err != nil {
-			log.Fatalf("Request failed: %v", err)
-		}
-		if amr.Error {
-			fmt.Fprintf(os.Stderr, "Error: %s\n", amr.ErrorMsg)
-			os.Exit(1)
-		}
-		fmt.Println(amr.Msg)
-	},
-}
-
 func init() {
 	// IMR commands under "agent imr"
 	AgentCmd.AddCommand(agentImrCmd)
@@ -192,8 +164,4 @@ func init() {
 	agentImrCmd.AddCommand(agentImrShowCmd)
 
 	agentImrShowCmd.Flags().StringVar(&imrShowID, "id", "", "Agent identity to show cache entries for (required)")
-
-	// Peer reset command under existing "agent peer"
-	agentPeerCmd.AddCommand(agentPeerResetCmd)
-	agentPeerResetCmd.Flags().StringVar(&peerResetID, "id", "", "Peer identity to reset (required)")
 }

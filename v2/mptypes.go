@@ -794,20 +794,6 @@ type CombinerDistribResponse struct {
 	Distributions []string               `json:"distributions,omitempty"` // For backward compatibility
 }
 
-// AuthPeerPost is the request body for /auth/peer.
-type AuthPeerPost struct {
-	Command string `json:"command"`
-	PeerID  string `json:"peer_id,omitempty"`
-}
-
-// AuthPeerResponse is the response body for /auth/peer.
-type AuthPeerResponse struct {
-	Time     time.Time `json:"time"`
-	Error    bool      `json:"error"`
-	ErrorMsg string    `json:"error_msg,omitempty"`
-	Msg      string    `json:"msg,omitempty"`
-}
-
 // AuthDistribPost is the request body for /auth/distrib.
 type AuthDistribPost struct {
 	Command string `json:"command"`
