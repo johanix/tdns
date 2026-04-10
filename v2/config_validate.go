@@ -47,8 +47,7 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 		configsections["imrengine"] = config.Imr
 	case AppTypeReporter:
 		configsections["apiserver"] = config.ApiServer
-	case AppTypeAuth, AppTypeAgent, // AppTypeCombiner,
-		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
+	case AppTypeAuth, AppTypeAgent:
 		configsections["service"] = config.Service
 		configsections["db"] = config.Db
 		configsections["apiserver"] = config.ApiServer
