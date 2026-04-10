@@ -1,201 +1,193 @@
 # Legacy File Dependency Analysis — tdns/v2/legacy_*.go
 
-**Date**: 2026-04-09
-**Scope**: All 19 `tdns/v2/legacy_*.go` files
-**Goal**: Identify which legacy files can be deleted and which still have
-live, non-legacy callers inside `tdns/v2/`.
+**Date**: 2026-04-09, updated 2026-04-10
+**Scope**: All `tdns/v2/legacy_*.go` files (19 original + 4 newly
+renamed)
+**Goal**: Identify which legacy files can be deleted and which still
+have non-legacy callers that must be cleaned up first. A file is
+"legacy" if its *content* belongs in tdns-mp, not tdns — regardless
+of whether non-legacy tdns code currently references it.
 
 ## Method
 
-1. Extracted all top-level exported symbols from each `legacy_*.go` file.
-2. Grepped the entire `tdns-project/` tree (tdns, tdns-mp, tdns-apps) for
-   references to each symbol.
+1. Extracted all exported symbols from each `legacy_*.go` file.
+2. Grepped the entire `tdns-project/` tree for references.
 3. Classified each reference as:
    - **Self-reference**: within another `legacy_*.go` file (does not
-     prevent deletion as long as the whole legacy cluster goes together).
+     prevent deletion).
    - **Live v2 non-legacy reference**: from a non-legacy file in
-     `tdns/v2/`. This is what keeps a legacy file alive.
-   - **Commented-out reference**: inside a `/* ... */` block or after
-     `//`. Does not count.
-   - **tdns-mp/v2 reference**: `tdns-mp/v2/` imports `tdns/v2` as
-     `tdns "github.com/johanix/tdns/v2"`, but in practice tdns-mp/v2
-     defines its own parallel copies of nearly every symbol in question.
-     References from tdns-mp therefore resolve to the local tdns-mp copy,
-     not the legacy tdns copy, and do **not** keep tdns/v2 legacy files
-     alive.
+     `tdns/v2/`. These are *tendrils* — MP-specific call sites in
+     non-legacy code that must be cleaned up before deletion.
+   - **Commented-out reference**: inside `/* */` or `//`. Does not
+     count.
+   - **tdns-mp/v2 reference**: tdns-mp defines its own parallel
+     copies; these references don't keep tdns legacy files alive.
 
-Critical lesson: an initial grep-only pass produced a longer
-"NOT DELETABLE" list. Several of those references turned out to be
-inside commented-out `/* */` blocks in `main_initfuncs.go`, and several
-others were from `tdns-mp/v2/` where a local copy of the symbol exists.
-Both classes must be filtered out to get the true picture.
+Critical lessons from the analysis:
+- Grep hits in `main_initfuncs.go` were often inside `/* */` blocks.
+- tdns-mp/v2 has local copies of almost every symbol — references
+  from there resolve to the local copy.
+- A file is legacy based on whether its *content* belongs in tdns-mp,
+  not on whether it has zero callers. Non-legacy callers are tendrils
+  to clean up, not proof of belonging.
 
 ## Parallel copies in tdns-mp/v2
 
-The following symbols exist both in `tdns/v2/legacy_*.go` and as local
-definitions in `tdns-mp/v2/`. tdns-mp callers resolve to the local copy:
+The following symbols exist both in `tdns/v2/legacy_*.go` and as
+local definitions in `tdns-mp/v2/`:
 
-| Symbol                         | tdns-mp/v2 definition               |
-|--------------------------------|-------------------------------------|
-| `GetProviderZoneRRtypes`       | `combiner_utils.go:52`              |
-| `RegisterProviderZoneRRtypes`  | `combiner_utils.go:39`              |
-| `GetCombinerData`              | `combiner_utils.go:151`             |
-| `GetCombinerDataNG`            | `combiner_utils.go:219`             |
-| `NewMPTransportBridge`         | `hsync_transport.go:191`            |
-| `MPTransportBridge` (type)     | `hsync_transport.go:45`             |
-| `MPTransportBridgeConfig`      | `hsync_transport.go:126`            |
-| `ProviderGroupManager` (type)  | `gossip_types.go:84`                |
-| `NewProviderGroupManager`      | `provider_groups.go:22`             |
-| `NewGossipStateTable`          | `gossip.go:40`                      |
-| `LoadAllContributions`         | `db_combiner_contributions.go:63`   |
-| `RequestAndWaitForConfig`      | `hsync_utils.go:414`                |
-| `RequestAndWaitForAudit`       | `hsync_utils.go:455`                |
-| `MPPreRefresh`                 | `hsync_utils.go:1005` (diff sig)    |
-| `MPPostRefresh`                | `hsync_utils.go:1141` (diff sig)    |
+| Symbol                         | tdns-mp/v2 definition             |
+|--------------------------------|-----------------------------------|
+| `GetProviderZoneRRtypes`       | `combiner_utils.go:52`            |
+| `RegisterProviderZoneRRtypes`  | `combiner_utils.go:39`            |
+| `GetCombinerData`              | `combiner_utils.go:151`           |
+| `GetCombinerDataNG`            | `combiner_utils.go:219`           |
+| `NewMPTransportBridge`         | `hsync_transport.go:191`          |
+| `MPTransportBridge` (type)     | `hsync_transport.go:45`           |
+| `MPTransportBridgeConfig`      | `hsync_transport.go:126`          |
+| `ProviderGroupManager` (type)  | `gossip_types.go:84`              |
+| `NewProviderGroupManager`      | `provider_groups.go:22`           |
+| `NewGossipStateTable`          | `gossip.go:40`                    |
+| `LoadAllContributions`         | `db_combiner_contributions.go:63` |
+| `RequestAndWaitForConfig`      | `hsync_utils.go:414`              |
+| `RequestAndWaitForAudit`       | `hsync_utils.go:455`              |
+| `MPPreRefresh`                 | `hsync_utils.go:1005` (diff sig)  |
+| `MPPostRefresh`                | `hsync_utils.go:1141` (diff sig)  |
 
-Note the signature fork on `MPPreRefresh`/`MPPostRefresh`:
+## NOT YET DELETABLE (4 files)
 
-```go
-// tdns/v2 legacy_hsync_utils.go:912
-func MPPreRefresh(zd, new_zd *ZoneData)
+These files contain MP-only content that *should* be removed from
+tdns, but non-legacy tdns/v2 files still reference their symbols.
+Each reference is a tendril that must be cleaned up (removed, guarded
+behind an interface, or moved to tdns-mp) before the file can be
+deleted.
 
-// tdns-mp/v2 hsync_utils.go:1005
-func MPPreRefresh(zd, new_zd *tdns.ZoneData,
-                  tm *MPTransportBridge,
-                  msgQs *MsgQs,
-                  mp *tdns.MultiProviderConf)
-```
+### legacy_hsync_transport.go — `MPTransportBridge`
 
-`tdns/v2/parseconfig.go` previously registered the 2-arg legacy signature,
-but recent work removed that registration (see re-verification below).
+| Symbol | File:Line | Category |
+|---|---|---|
+| `MPTransportBridge` (type) | config.go:529 | struct field |
+| `MPTransportBridge` (type) | mptypes.go:150 | struct field |
+| `MPTransportBridge` (type) | main_initfuncs.go:505 | func param |
+| `IsPeerAuthorized` | apihandler_agent.go:399 | call |
+| `SendPing` | apihandler_agent.go:102 | call |
+| `SyncPeerFromAgent` | apihandler_agent.go:1083 | call |
+| `SendSyncWithFallback` | apihandler_agent.go:1099 | call |
+| `GetQueueStats` | apihandler_agent.go:1124 | call |
+| `GetQueuePendingMessages` | apihandler_agent.go:1125 | call |
+| `EnqueueForCombiner` | parseconfig.go:782 | call |
+| `getAllAgentsForZone` | delegation_sync.go:206 | call (private) |
+| `PeerRegistry` (embedded) | delegation_sync.go:218 | field access |
+| `PeerRegistry` (embedded) | apihandler_agent.go:43 | field access |
+| `DNSTransport` (embedded) | delegation_sync.go:201,236 | field access |
+| `LocalID` (embedded) | apihandler_agent.go:41 | field access |
 
-## NOT DELETABLE (2 files)
+### legacy_provider_groups.go — `ProviderGroupManager`
 
-These files have at least one live reference from a non-legacy file in
-`tdns/v2/`. This list reflects a re-verification pass on 2026-04-09
-after recent refactoring.
+| Symbol | File:Line | Category |
+|---|---|---|
+| `ProviderGroupManager` (type) | mptypes.go:152 | struct field |
+| `ProviderGroupManager` | apihandler_agent.go:537 | nil check |
+| `GetGroupForZone` | apihandler_agent.go:538 | call |
+| `ProviderGroup` fields | apihandler_agent.go:540 | field access |
 
-### legacy_hsync_transport.go
+### legacy_parentsync_leader.go — `LeaderElectionManager`
 
-The type `MPTransportBridge` is used as a struct field and function
-parameter in several non-legacy files. The constructor
-`NewMPTransportBridge` and `MPTransportBridgeConfig` are no longer
-called from non-legacy tdns/v2 code — only the type itself keeps this
-file alive.
+| Symbol | File:Line | Category |
+|---|---|---|
+| `LeaderElectionManager` (type) | config.go:530 | struct field |
+| `LeaderElectionManager` (type) | mptypes.go:151 | struct field |
+| `LeaderElectionManager` | apihandler_agent.go:518,529,589 | field access |
+| `GetParentSyncStatus` | apihandler_agent.go:524 | call |
+| `ParentSyncStatus` (type) | apihandler_agent.go:524 | type ref |
+| `StartGroupElection` | apihandler_agent.go:540 | call |
+| `StartElection` | apihandler_agent.go:556 | call |
+| `IsLeader` | apihandler_agent.go:595 | call |
+| `IsLeader` | parentsync_bootstrap.go:48,66 | call |
+| `IsLeader` | delegation_sync.go:87,128 | call |
+| `configuredPeers` | apihandler_agent.go:546 | call (private) |
+| `operationalPeersFunc` | apihandler_agent.go:548,549 | field access |
 
-| Symbol                    | Live caller                         |
-|---------------------------|-------------------------------------|
-| `MPTransportBridge` (type)| `config.go:529` (`Config.MPTransport`) |
-|                           | `mptypes.go:150` (`AgentRegistry.MPTransport`) |
-|                           | `main_initfuncs.go:505` (`registerPeerAgents` param) |
-|                           | `parentsync_leader.go:1488` (`PublishKeyToCombiner` param) |
+### legacy_apihandler_agent_distrib.go — `DistributionCache`
 
-Status change from first pass: `main_initfuncs.go:345` (which was the
-sole cited live caller of `NewMPTransportBridge`) is no longer the
-reason this file stays. Multiple additional type-level references were
-found.
+| Symbol | File:Line | Category |
+|---|---|---|
+| `DistributionCache` (type) | config.go:533 | struct field |
+| `DistributionCache` (type) | apihandler_transaction.go:57 | func param |
+| `DistributionCache` | apirouters.go:116,117 | field access |
+| `DistributionSummary` (type) | mptypes.go:793 | struct field |
 
-### legacy_provider_groups.go
+### Tendril summary by non-legacy file
 
-The type `ProviderGroupManager` is used in non-legacy code.
-`NewProviderGroupManager` is not called from non-legacy tdns/v2.
+The non-legacy files that need cleanup, sorted by density:
 
-| Symbol                        | Live caller                      |
-|-------------------------------|----------------------------------|
-| `ProviderGroupManager` (type) | `apihandler_agent.go:537-538` (`.GetGroupForZone()` call) |
-|                               | `mptypes.go:152` (`AgentRegistry` field) |
-|                               | `parentsync_leader.go:54` (`LeaderElectionManager` field) |
-|                               | `parentsync_leader.go:70` (`SetProviderGroupManager` param) |
-
-Status change from first pass: two additional live call sites in
-`parentsync_leader.go` were found.
+| Non-legacy file | Legacy files touched |
+|---|---|
+| apihandler_agent.go | all 4 |
+| config.go | 3 (transport, leader, distrib) |
+| mptypes.go | all 4 |
+| delegation_sync.go | 2 (transport, leader) |
+| parseconfig.go | 1 (transport) |
+| parentsync_bootstrap.go | 1 (leader) |
+| apirouters.go | 1 (distrib) |
+| apihandler_transaction.go | 1 (distrib) |
+| main_initfuncs.go | 1 (transport) |
 
 ## DELETABLE (17 files)
 
 All exported symbols are either unreferenced or only referenced from
-other `legacy_*.go` files, commented-out code, or tdns-mp/v2 (where a
-local copy exists).
+other `legacy_*.go` files, commented-out code, or tdns-mp/v2 (where
+a local copy exists).
 
- 1. `legacy_agent_authorization.go`            — only methods on `MPTransportBridge`
- 2. `legacy_agent_discovery.go`                — superseded by tdns-mp/v2
- 3. `legacy_agent_discovery_common.go`         — only called by `legacy_agent_discovery.go`
- 4. `legacy_agent_setup.go`                    — no live callers
- 5. `legacy_agent_structs.go`                  — empty (package decl only)
- 6. `legacy_agent_utils.go`                    — no live callers
- 7. `legacy_combiner_chunk.go`                 — all callers in `/* */` blocks in `main_initfuncs.go`
- 8. `legacy_combiner_utils.go`                 — all callers in `/* */` blocks; tdns-mp has local copies
- 9. `legacy_db_combiner_contributions.go`      — all callers in `/* */` blocks; tdns-mp has local copy
-10. `legacy_db_combiner_edits.go`              — no live callers
-11. `legacy_db_combiner_publish_instructions.go` — no live callers
-12. `legacy_gossip.go`                         — tdns-mp has local copy; no live tdns/v2 callers
-13. `legacy_hsync_beat.go`                     — superseded by tdns-mp/v2
-14. `legacy_hsync_hello.go`                    — superseded by tdns-mp/v2
-15. `legacy_hsync_utils.go`                    — parseconfig.go no longer registers `MPPreRefresh`/`MPPostRefresh`; only reference is a comment in `zone_utils.go:747`
-16. `legacy_hsyncengine.go`                    — superseded
-17. `legacy_signer_msg_handler.go`             — superseded by tdns-mp/v2
+ 1. `legacy_agent_authorization.go`     — methods on `MPTransportBridge`
+ 2. `legacy_agent_discovery.go`         — superseded by tdns-mp/v2
+ 3. `legacy_agent_discovery_common.go`  — only called by above
+ 4. `legacy_agent_setup.go`             — no live callers
+ 5. `legacy_agent_structs.go`           — empty (package decl only)
+ 6. `legacy_agent_utils.go`             — no live callers
+ 7. `legacy_chunk_query_handler.go`     — no live callers
+ 8. `legacy_chunk_store.go`             — only config.go field decl
+    (never instantiated)
+ 9. `legacy_combiner_chunk.go`          — callers in `/* */` blocks
+10. `legacy_combiner_utils.go`          — callers in `/* */` blocks
+11. `legacy_db_combiner_contributions.go` — callers in `/* */` blocks
+12. `legacy_db_combiner_edits.go`       — no live callers
+13. `legacy_db_combiner_publish_instructions.go` — no live callers
+14. `legacy_gossip.go`                  — tdns-mp has local copy
+15. `legacy_hsync_beat.go`              — superseded by tdns-mp/v2
+16. `legacy_hsync_hello.go`             — superseded by tdns-mp/v2
+17. `legacy_hsync_utils.go`             — parseconfig.go no longer
+    registers callbacks
+18. `legacy_hsyncengine.go`             — superseded
+19. `legacy_signer_msg_handler.go`      — superseded by tdns-mp/v2
 
-### Files reclassified during verification pass
-
-These three were initially flagged NOT DELETABLE because of grep hits in
-`main_initfuncs.go`. Manual inspection showed all hits were inside
-`/* */` blocks:
-
-- `legacy_combiner_chunk.go`:
-  `RegisterCombinerChunkHandler` @ `main_initfuncs.go:556` (inside
-  `/* */` lines 520–672),
-  `RegisterSignerChunkHandler` @ `main_initfuncs.go:461` (inside
-  `/* */` lines 396–519).
-- `legacy_combiner_utils.go`:
-  `GetProviderZoneRRtypes` @ `main_initfuncs.go:746` (inside `/* */`
-  lines 680–792).
-- `legacy_db_combiner_contributions.go`:
-  `SaveContributions` @ `main_initfuncs.go:716`,
-  `LoadAllContributions` @ `main_initfuncs.go:691` (both inside `/* */`
-  lines 680–792).
+Note: `legacy_chunk_store.go` defines `ChunkPayloadStore` which
+appears as a struct field in `config.go:531`, but the field is never
+instantiated or used in any live tdns/v2 code path. It can be deleted
+together with the config field.
 
 ## Caveats before deletion
 
-1. **Method receivers not verified.** This analysis looked at top-level
-   exported symbols. It did not verify whether live code calls methods
-   defined in these files on types like `*MPTransportBridge` or
-   `*AgentRegistry`. For example, `legacy_agent_authorization.go` only
-   defines methods on `*MPTransportBridge`; deleting the file removes
-   those methods. Before deleting any file whose classification is
-   "only methods on X", run a method-name grep against non-legacy code.
+1. **Incremental deletion and build between each.** Delete one file
+   at a time, then run `cd tdns/cmdv2 && GOROOT=/opt/local/lib/go make`
+   before moving on.
 
-2. **Incremental deletion and build between each.** Delete one file at
-   a time, then run `cd tdns/cmdv2 && GOROOT=/opt/local/lib/go make`
-   before moving on. The build will catch anything the grep analysis
-   missed (e.g. interface satisfaction, init-time registration, method
-   calls via interface).
+2. **Start with the safest.** `legacy_agent_structs.go` is empty.
 
-3. **Start with the safest.** `legacy_agent_structs.go` is empty —
-   remove it first as a dry run of the process.
+3. **Files with methods on live types.** Some deletable files define
+   methods on `*MPTransportBridge` (e.g. `legacy_agent_authorization.go`).
+   Since `MPTransportBridge` is still live in tdns/v2, verify that
+   no non-legacy code calls those methods before deleting.
 
-4. ~~`legacy_hsync_utils.go` is the blocker for `parseconfig.go`
-   cleanup.~~ Resolved by the 2026-04-09 re-verification: the
-   `MPPreRefresh`/`MPPostRefresh` callbacks are no longer registered
-   from `parseconfig.go`, and `RequestAndWaitForConfig`/`RequestAndWaitForAudit`
-   have no live callers in non-legacy tdns/v2. The file is now deletable.
+## Change log
 
-## Re-verification (2026-04-09)
-
-A second-pass re-check of the three files originally flagged NOT
-DELETABLE produced one status change and expanded the caller lists
-for the other two:
-
-- **`legacy_hsync_utils.go`: NOT DELETABLE → DELETABLE.** Recent work
-  removed the `MPPreRefresh`/`MPPostRefresh` callback registrations
-  from `parseconfig.go`. `zone_utils.go:747` still mentions these
-  functions, but only inside a comment explaining that the work moved
-  to tdns-mp.
-- **`legacy_hsync_transport.go`: still NOT DELETABLE** — but for
-  different reasons than the first pass identified. The constructor
-  `NewMPTransportBridge` is no longer called from non-legacy tdns/v2
-  code. What keeps the file alive is the type `MPTransportBridge`
-  itself, used in four live sites (see table above).
-- **`legacy_provider_groups.go`: still NOT DELETABLE** — two
-  additional live callers in `parentsync_leader.go` were found that
-  the first pass missed.
-
-Final count: **2 files NOT DELETABLE, 17 files DELETABLE.**
+- **2026-04-09**: Initial analysis of 19 legacy files. 3 NOT DELETABLE,
+  16 DELETABLE.
+- **2026-04-09 re-verification**: `legacy_hsync_utils.go` moved to
+  DELETABLE (parseconfig.go no longer registers callbacks). Count:
+  2 NOT DELETABLE, 17 DELETABLE.
+- **2026-04-10**: Four additional files renamed to `legacy_`:
+  `chunk_query_handler.go`, `chunk_store.go`, `parentsync_leader.go`,
+  `apihandler_agent_distrib.go`. All contain MP-only content. Full
+  tendril inventory produced for the 4 NOT YET DELETABLE files.
+  Count: 4 NOT YET DELETABLE (with tendrils), 19 DELETABLE.
