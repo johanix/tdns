@@ -548,6 +548,11 @@ type InternalConf struct {
 	// reload (SIGHUP or "config reload-zones"). Set by MP apps to
 	// register tdns-mp callbacks on newly added zones.
 	PostParseZonesHook func()
+
+	// PostValidateConfigHook is called at the end of ValidateConfig.
+	// Set by MP apps (before calling parent MainInit) to run
+	// MP-specific config validators alongside the built-in ones.
+	PostValidateConfigHook func(conf *Config) error
 }
 
 type MsgQs struct {

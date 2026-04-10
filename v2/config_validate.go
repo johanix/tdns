@@ -95,6 +95,13 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 		}
 	}
 
+	// Run external validators registered by MP apps (tdns-mp).
+	if config.Internal.PostValidateConfigHook != nil {
+		if err := config.Internal.PostValidateConfigHook(&config); err != nil {
+			return fmt.Errorf("Config \"%s\" post-validation hook failed: %v", cfgfile, err)
+		}
+	}
+
 	return nil
 }
 
