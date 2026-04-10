@@ -14,9 +14,23 @@ import "sync"
 //   - options: all parsed options for this zone (read-only)
 type ZoneOptionHandler func(zname string, options map[ZoneOption]bool)
 
+// ZoneOptionValidator is a callback invoked during parseZoneOptions
+// when a specific zone option is encountered. Unlike handlers,
+// validators run *during* the switch (not after) and can reject
+// the option.
+//
+// Return true to accept the option, false to reject it.
+// On rejection, the validator should call zd.SetError() to
+// record a ConfigError explaining the rejection. The caller
+// will skip this option and continue parsing the rest.
+type ZoneOptionValidator func(conf *Config, zname string, zd *ZoneData, options map[ZoneOption]bool) bool
+
 var (
 	optionHandlersMu sync.Mutex
 	optionHandlers   = make(map[ZoneOption][]ZoneOptionHandler)
+
+	optionValidatorsMu sync.Mutex
+	optionValidators   = make(map[ZoneOption]ZoneOptionValidator)
 )
 
 // RegisterZoneOptionHandler registers a callback for a zone option.
@@ -26,6 +40,38 @@ func RegisterZoneOptionHandler(opt ZoneOption, handler ZoneOptionHandler) {
 	optionHandlersMu.Lock()
 	defer optionHandlersMu.Unlock()
 	optionHandlers[opt] = append(optionHandlers[opt], handler)
+}
+
+// RegisterZoneOptionValidator registers a validator for a zone option.
+// Only one validator per option is supported; a second registration
+// for the same option replaces the first.
+//
+// Validators run during parseZoneOptions (inside the switch) and
+// can reject the option by returning false. They should call
+// zd.SetError(ConfigError, ...) to record the reason for rejection.
+//
+// Register validators before ParseZones runs (e.g. from MainInit
+// before calling the parent MainInit).
+func RegisterZoneOptionValidator(opt ZoneOption, validator ZoneOptionValidator) {
+	optionValidatorsMu.Lock()
+	defer optionValidatorsMu.Unlock()
+	optionValidators[opt] = validator
+}
+
+// invokeOptionValidator calls the registered validator for a zone
+// option, if one exists. Returns:
+//   - (true, true)  — validator exists and accepted the option
+//   - (true, false) — validator exists and rejected the option
+//   - (false, _)    — no validator registered; caller should run
+//     its own fallback validation logic
+func invokeOptionValidator(opt ZoneOption, conf *Config, zname string, zd *ZoneData, options map[ZoneOption]bool) (handled, accepted bool) {
+	optionValidatorsMu.Lock()
+	validator, ok := optionValidators[opt]
+	optionValidatorsMu.Unlock()
+	if !ok {
+		return false, false
+	}
+	return true, validator(conf, zname, zd, options)
 }
 
 // invokeOptionHandlers calls all registered handlers for the given
