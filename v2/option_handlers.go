@@ -59,19 +59,18 @@ func RegisterZoneOptionValidator(opt ZoneOption, validator ZoneOptionValidator) 
 }
 
 // invokeOptionValidator calls the registered validator for a zone
-// option, if one exists. Returns:
-//   - (true, true)  — validator exists and accepted the option
-//   - (true, false) — validator exists and rejected the option
-//   - (false, _)    — no validator registered; caller should run
-//     its own fallback validation logic
-func invokeOptionValidator(opt ZoneOption, conf *Config, zname string, zd *ZoneData, options map[ZoneOption]bool) (handled, accepted bool) {
+// option, if one exists. Returns true if the option is accepted
+// (either because no validator is registered, or the validator
+// returned true). Returns false only if a registered validator
+// explicitly rejected the option.
+func invokeOptionValidator(opt ZoneOption, conf *Config, zname string, zd *ZoneData, options map[ZoneOption]bool) bool {
 	optionValidatorsMu.Lock()
 	validator, ok := optionValidators[opt]
 	optionValidatorsMu.Unlock()
 	if !ok {
-		return false, false
+		return true // no validator registered, accept by default
 	}
-	return true, validator(conf, zname, zd, options)
+	return validator(conf, zname, zd, options)
 }
 
 // invokeOptionHandlers calls all registered handlers for the given
