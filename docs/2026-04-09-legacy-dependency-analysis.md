@@ -1,7 +1,7 @@
 # Legacy File Dependency Analysis — tdns/v2/legacy_*.go
 
 **Date**: 2026-04-09, updated 2026-04-10
-**Scope**: All `tdns/v2/legacy_*.go` files (19 original + 4 newly
+**Scope**: All `tdns/v2/legacy_*.go` files (19 original + 5 newly
 renamed)
 **Goal**: Identify which legacy files can be deleted and which still
 have non-legacy callers that must be cleaned up first. A file is
@@ -54,7 +54,7 @@ local definitions in `tdns-mp/v2/`:
 | `MPPreRefresh`                 | `hsync_utils.go:1005` (diff sig)  |
 | `MPPostRefresh`                | `hsync_utils.go:1141` (diff sig)  |
 
-## NOT YET DELETABLE (4 files)
+## NOT YET DELETABLE (5 files)
 
 These files contain MP-only content that *should* be removed from
 tdns, but non-legacy tdns/v2 files still reference their symbols.
@@ -113,9 +113,17 @@ deleted.
 | Symbol | File:Line | Category |
 |---|---|---|
 | `DistributionCache` (type) | config.go:533 | struct field |
-| `DistributionCache` (type) | apihandler_transaction.go:57 | func param |
-| `DistributionCache` | apirouters.go:116,117 | field access |
+| `DistributionCache` | apirouters.go:116 | field access |
 | `DistributionSummary` (type) | mptypes.go:793 | struct field |
+
+Note: `apihandler_transaction.go` was itself renamed to legacy (see
+below), so its reference no longer counts.
+
+### legacy_apihandler_transaction.go — `APIagentTransaction`
+
+| Symbol | File:Line | Category |
+|---|---|---|
+| `APIagentTransaction` | apirouters.go:117 | call |
 
 ### Tendril summary by non-legacy file
 
@@ -123,17 +131,16 @@ The non-legacy files that need cleanup, sorted by density:
 
 | Non-legacy file | Legacy files touched |
 |---|---|
-| apihandler_agent.go | all 4 |
+| apihandler_agent.go | 4 (transport, groups, leader, distrib) |
 | config.go | 3 (transport, leader, distrib) |
-| mptypes.go | all 4 |
+| mptypes.go | 4 (transport, groups, leader, distrib) |
 | delegation_sync.go | 2 (transport, leader) |
+| apirouters.go | 2 (distrib, transaction) |
 | parseconfig.go | 1 (transport) |
 | parentsync_bootstrap.go | 1 (leader) |
-| apirouters.go | 1 (distrib) |
-| apihandler_transaction.go | 1 (distrib) |
 | main_initfuncs.go | 1 (transport) |
 
-## DELETABLE (17 files)
+## DELETABLE (19 files)
 
 All exported symbols are either unreferenced or only referenced from
 other `legacy_*.go` files, commented-out code, or tdns-mp/v2 (where
@@ -186,8 +193,9 @@ together with the config field.
 - **2026-04-09 re-verification**: `legacy_hsync_utils.go` moved to
   DELETABLE (parseconfig.go no longer registers callbacks). Count:
   2 NOT DELETABLE, 17 DELETABLE.
-- **2026-04-10**: Four additional files renamed to `legacy_`:
+- **2026-04-10**: Five additional files renamed to `legacy_`:
   `chunk_query_handler.go`, `chunk_store.go`, `parentsync_leader.go`,
-  `apihandler_agent_distrib.go`. All contain MP-only content. Full
-  tendril inventory produced for the 4 NOT YET DELETABLE files.
-  Count: 4 NOT YET DELETABLE (with tendrils), 19 DELETABLE.
+  `apihandler_agent_distrib.go`, `apihandler_transaction.go`. All
+  contain MP-only content. Full tendril inventory produced for the
+  5 NOT YET DELETABLE files.
+  Count: 5 NOT YET DELETABLE (with tendrils), 19 DELETABLE.
