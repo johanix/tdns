@@ -8,7 +8,6 @@ import (
 	"strings"
 
 	"github.com/go-playground/validator/v10"
-	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
 
@@ -69,21 +68,6 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 
 	if _, err := ValidateBySection(&config, configsections, cfgfile); err != nil {
 		return fmt.Errorf("Config \"%s\" is missing required attributes:\n%v", cfgfile, err)
-	}
-
-	// Validate crypto key files if configured
-	if err := ValidateCryptoFiles(&config); err != nil {
-		return fmt.Errorf("Config \"%s\" crypto validation failed: %v", cfgfile, err)
-	}
-
-	// Validate agent.nameservers if configured (FQDN, outside autozone)
-	if err := ValidateAgentNameservers(&config); err != nil {
-		return fmt.Errorf("Config \"%s\" agent.local.nameservers validation failed: %v", cfgfile, err)
-	}
-
-	// Validate agent.supported_mechanisms if agent is configured
-	if err := ValidateAgentSupportedMechanisms(&config); err != nil {
-		return fmt.Errorf("Config \"%s\" agent.supported_mechanisms validation failed: %v", cfgfile, err)
 	}
 
 	// Validate database file is set for tdns apps that require it
@@ -220,146 +204,14 @@ func ValidateConfigWithCustomValidator(v *viper.Viper, cfgfile string) error {
 	return nil
 }
 
-// ValidateAgentNameservers ensures agent.local.nameservers are non-empty and outside the agent autozone (no glue).
-// Each entry is normalized to FQDN (dns.Fqdn) in place so the config never carries non-FQDN names.
-func ValidateAgentNameservers(config *Config) error {
-	if config.MultiProvider == nil || config.MultiProvider.Role != "agent" || len(config.MultiProvider.Local.Nameservers) == 0 {
-		return nil
-	}
-	zoneFqdn := dns.Fqdn(config.MultiProvider.Identity)
-	for i, ns := range config.MultiProvider.Local.Nameservers {
-		ns = strings.TrimSpace(ns)
-		if ns == "" {
-			return fmt.Errorf("agent.local.nameservers: empty entry")
-		}
-		nsFqdn := dns.Fqdn(ns)
-		if nsFqdn == "." {
-			return fmt.Errorf("agent.local.nameservers: empty entry")
-		}
-		if dns.IsSubDomain(zoneFqdn, nsFqdn) {
-			return fmt.Errorf("agent.local.nameservers: %q is inside the agent autozone %q (glue not supported)", nsFqdn, config.MultiProvider.Identity)
-		}
-		config.MultiProvider.Local.Nameservers[i] = nsFqdn
-	}
-	return nil
-}
-
-// ValidateAgentSupportedMechanisms validates agent.supported_mechanisms configuration.
-// Requirements:
-// - Must be non-empty (agent needs at least one communication mechanism)
-// - Can only contain "api" and/or "dns" (case-insensitive)
-// - Default if omitted: ["api", "dns"]
-func ValidateAgentSupportedMechanisms(config *Config) error {
-	if config.MultiProvider == nil || config.MultiProvider.Role != "agent" {
-		return nil
-	}
-
-	mechanisms := config.MultiProvider.SupportedMechanisms
-
-	// If empty, will default to both transports in NewTransportManager
-	// But we enforce explicit configuration - empty list is an error
-	if len(mechanisms) == 0 {
-		return fmt.Errorf("agent.supported_mechanisms cannot be empty - agent requires at least one transport mechanism (valid: \"api\", \"dns\")")
-	}
-
-	// Validate each mechanism and normalize to lowercase
-	validMechanisms := map[string]bool{"api": true, "dns": true}
-	seen := make(map[string]bool)
-
-	for i, m := range mechanisms {
-		m = strings.ToLower(strings.TrimSpace(m))
-		if m == "" {
-			return fmt.Errorf("agent.supported_mechanisms: empty entry at index %d", i)
-		}
-		if !validMechanisms[m] {
-			return fmt.Errorf("agent.supported_mechanisms: invalid value %q at index %d (valid: \"api\", \"dns\")", mechanisms[i], i)
-		}
-		if seen[m] {
-			return fmt.Errorf("agent.supported_mechanisms: duplicate value %q", m)
-		}
-		seen[m] = true
-		// Normalize to lowercase in place
-		config.MultiProvider.SupportedMechanisms[i] = m
-	}
-
-	return nil
-}
-
-// ValidateCryptoFiles validates that configured crypto key files exist and are readable.
-// This is called during config validation to provide early feedback about missing files.
-func ValidateCryptoFiles(config *Config) error {
-	// Validate agent crypto files if configured (paths are trimmed inside validateFileExists)
-	if config.MultiProvider != nil && config.MultiProvider.Role == "agent" && strings.TrimSpace(config.MultiProvider.LongTermJosePrivKey) != "" {
-		if err := validateFileExists(config.MultiProvider.LongTermJosePrivKey, "agent private key"); err != nil {
-			return err
-		}
-
-		// Check combiner public key if configured
-		if config.MultiProvider.Combiner != nil && strings.TrimSpace(config.MultiProvider.Combiner.LongTermJosePubKey) != "" {
-			if err := validateFileExists(config.MultiProvider.Combiner.LongTermJosePubKey, "combiner public key (multi-provider.combiner)"); err != nil {
-				return err
-			}
-		}
-
-		// Check peer agent public keys if configured
-		if config.MultiProvider.Peers != nil {
-			for peerID, peerConf := range config.MultiProvider.Peers {
-				if strings.TrimSpace(peerConf.LongTermJosePubKey) != "" {
-					if err := validateFileExists(peerConf.LongTermJosePubKey, fmt.Sprintf("peer agent %s public key", peerID)); err != nil {
-						return err
-					}
-				}
-			}
-		}
-	}
-
-	// Validate combiner crypto files if configured
-	if config.MultiProvider != nil && config.MultiProvider.Role == "combiner" && strings.TrimSpace(config.MultiProvider.LongTermJosePrivKey) != "" {
-		if err := validateFileExists(config.MultiProvider.LongTermJosePrivKey, "combiner private key"); err != nil {
-			return err
-		}
-
-		// Check agent public keys for all configured agents
-		for _, agent := range config.MultiProvider.Agents {
-			if strings.TrimSpace(agent.LongTermJosePubKey) != "" {
-				label := fmt.Sprintf("agent public key (multi-provider.agents[%s])", agent.Identity)
-				if err := validateFileExists(agent.LongTermJosePubKey, label); err != nil {
-					return err
-				}
-			}
-		}
-	}
-
-	return nil
-}
-
-// ValidateDatabaseFile validates that the database file path is set.
-// If db.file is unset or empty, this function returns an error (hard fail).
-// Callers decide whether to call this based on app type.
+// ValidateDatabaseFile checks that db.file is set to a non-empty path.
 func ValidateDatabaseFile(config *Config) error {
 	dbFile := strings.TrimSpace(config.Db.File)
 	if dbFile == "" {
 		return fmt.Errorf("db.file is required but not set (must be specified in config)")
 	}
-	// Also check if it's just "." (which filepath.Clean("") returns)
 	if dbFile == "." {
 		return fmt.Errorf("db.file is unset (got '.' from empty path); must specify a valid database file path")
-	}
-	return nil
-}
-
-// validateFileExists checks if a file exists and is readable.
-// Path is trimmed so that config values with accidental trailing whitespace or newlines are handled correctly.
-func validateFileExists(path, description string) error {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return fmt.Errorf("%s path is empty", description)
-	}
-	if _, err := os.Stat(path); err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("%s file does not exist: %q", description, path)
-		}
-		return fmt.Errorf("cannot access %s file %q: %w", description, path, err)
 	}
 	return nil
 }
