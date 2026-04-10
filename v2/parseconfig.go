@@ -683,27 +683,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		}
 
 		zdp.mu.Lock()
-		var newMPdata *MPdata
-		if options[OptMultiProvider] {
-			zdp.EnsureMP()
-			if zdp.MP.MPdata != nil {
-				// Copy existing MPdata, build fresh MP Options map
-				cp := *zdp.MP.MPdata
-				newMPdata = &cp
-				newMPdata.Options = map[ZoneOption]bool{OptMultiProvider: true}
-			} else {
-				newMPdata = &MPdata{
-					Options: map[ZoneOption]bool{OptMultiProvider: true},
-				}
-			}
-		}
 		zdp.Options = newOpts
-		if newMPdata != nil {
-			zdp.EnsureMP()
-			zdp.MP.MPdata = newMPdata
-		} else if !options[OptMultiProvider] && zdp.MP != nil {
-			zdp.MP.MPdata = nil
-		}
 		zdp.mu.Unlock()
 
 		invokeOptionHandlers(zname, options)
