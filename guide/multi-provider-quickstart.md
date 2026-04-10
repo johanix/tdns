@@ -47,23 +47,62 @@ There are three primary prerequisites:
 
 1. A zone from which the agent identity may be delegated.
 2. A "customer zone" to test with.
-3. A public IP address from which to provide service on
-   various ports.
+3. A public IP address (referred to as `PUBADDRESS`
+   throughout this guide) from which to provide service
+   on various ports.
 
 ### 2.1 The Agent's Parent Zone
 
+Each provider's agent has a DNS identity (published in the
+customer zone's HSYNC3 record). Remote agents discover each
+other by looking up DNS records under this identity name:
+
+- A **URI** record describing where the agent listens.
+- An **SVCB** record with additional agent details.
+- A **JWK** record containing the agent's public
+  encryption key.
+
+The agent generates, publishes, and DNSSEC-signs all of
+these records automatically into its own zone. However,
+for remote agents to look up this information (a process
+called "agent discovery"), the agent's zone must be
+delegated in the public DNS namespace.
+
 Assume that the "test provider" controls the domain name
-"somewhere.example." and that it is possible to delegate the
-zone "agent.somewhere.example." to the multi-provider agent
+"alpha.example." and that it is possible to delegate the
+zone "agent.alpha.example." to the multi-provider agent
 (and/or its secondaries).
 
-The zone "agent.somewhere.example." should be delegated to the
-intended auth servers for this zone. The secondaries (if any)
-should be configured to listen to NOTIFIES from and request
-zone transfers from PUBADDRESS:8054 (or whatever port is
-configured for the agent).
+The zone "agent.alpha.example." should be delegated to the
+intended auth servers for this zone. The secondaries (if
+any) should be configured to listen to NOTIFYs from and
+request zone transfers from PUBADDRESS:8054 (or whatever
+port is configured for the agent).
 
-### 2.2 The Customer Zone
+### 2.2 HSYNC3 and HSYNCPARAM Records
+
+Agent discovery is initiated when a local agent and a
+remote agent are both present in the same HSYNC3 RRset
+for a customer zone. The HSYNC3 record defines the
+*identity* of an entity (typically a DNS provider). It
+does not say anything about what *role* that entity has
+been assigned by the customer.
+
+The HSYNCPARAM record defines the roles for each entity
+listed in the HSYNC3 records. There must be exactly one
+HSYNCPARAM record per zone; multiple HSYNCPARAM records
+in the same zone is not allowed. The roles that may be
+specified in the HSYNCPARAM are:
+
+- **servers** -- providers that serve the zone via
+  authoritative nameservers
+- **signers** -- providers that sign the zone
+- **nsmgmt** -- who is responsible for managing the NS
+  RRset for the zone
+- **parentsync** -- who is responsible for synchronizing
+  delegation information with the parent zone
+
+### 2.3 The Customer Zone
 
 You need a zone published on the Internet from a separate host.
 This is the zone that TDNS will manage across multiple
@@ -83,47 +122,47 @@ The address of this server is referred to as `ZONESERVER`
 below -- it must be a different host from where TDNS runs
 (otherwise the zone can only be served to one provider).
 
-Example zone file for `example.mp.`:
+Example zone file for `customer.zone.`:
 
 ```
-$ORIGIN example.mp.
+$ORIGIN customer.zone.
 $TTL 3600
 
-@   SOA  ns1.example.mp. hostmaster.example.mp. (
-         2026031901  ; serial
-         3600        ; refresh
-         900         ; retry
-         604800      ; expire
-         300         ; minimum
-         )
+customer.zone.   SOA  ns1.customer.zone. hostmaster.customer.zone. (
+                      2026031901  ; serial
+                      3600        ; refresh
+                      900         ; retry
+                      604800      ; expire
+                      300         ; minimum
+                      )
 
 ; Nameservers -- one per provider
-    NS   ns1.example.mp.
-    NS   ns2.beta-provider.net.
+customer.zone.        NS   ns1.customer.zone.
+customer.zone.        NS   ns2.bravo.example.
 
 ; Glue for our own NS
-ns1 A    PUBADDRESS
+ns1.customer.zone.    A    PUBADDRESS
 
 ; Multi-provider coordination records
 ; HSYNC3: one record per provider
 ;   Format: owner HSYNC3 state label identity upstream
-    HSYNC3  ON  alpha  agent.somewhere.example.  .
-    HSYNC3  ON  beta   agent.beta-provider.net.  .
+customer.zone.        HSYNC3  ON  alpha  agent.alpha.example.  .
+customer.zone.        HSYNC3  ON  bravo  agent.bravo.example.  .
 
 ; HSYNCPARAM: zone-wide multi-provider policy
-    HSYNCPARAM  nsmgmt="agent" signers="alpha,beta"
+customer.zone.        HSYNCPARAM  servers="alpha,bravo" nsmgmt="agent" signers="alpha,bravo"
 
 ; Example content
-www  A    PUBADDRESS
-mail A    PUBADDRESS
-@    MX   10 mail.example.mp.
+www.customer.zone.    A    PUBADDRESS
+mail.customer.zone.   A    PUBADDRESS
+customer.zone.        MX   10 mail.customer.zone.
 ```
 
 Configure your authoritative server to allow zone transfers
 to your combiner's public address and send NOTIFY to it on
 port 8055.
 
-### 2.3 Placeholders
+### 2.4 Placeholders
 
 The configuration files below use these placeholders:
 
@@ -179,11 +218,29 @@ TLS certificates (for management API endpoints):
 
 ```sh
 cd /etc/tdns/certs
-openssl req -x509 -newkey rsa:2048 -nodes \
-   -keyout tdns.key -out tdns.crt -days 3650 \
-   -subj "/CN=tdns" \
-   -addext "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:PUBADDRESS"
+tdns/utils/gen-cert.sh
+# When prompted:
+#   Name: tdns
+#   DNS names: localhost
+#   IP addresses: 127.0.0.1,PUBADDRESS
 ```
+
+Multi-provider synchronization requires both private
+(encrypted) and authenticated (signed) communication
+between agents. While DNSSEC provides authentication,
+it does not provide encryption. For this reason DNS
+multi-provider uses JSON Web Keys (JWKs, RFC 7517)
+which support both operations. The experimental JWK
+DNS record type is a direct representation of the
+standard JWK format as defined in RFC 7517.
+
+Communication between roles (agent to agent, agent to
+combiner, etc.) uses another experimental DNS record
+type, CHUNK. A CHUNK record carries a JWS(JWE(JWT))
+in JOSE terms: a signed (JWS, RFC 7515) and encrypted
+(JWE, RFC 7516) payload in JOSE standard format (JWT,
+RFC 7519). See also RFC 7518 (JWA) for the underlying
+algorithm definitions.
 
 JOSE keypairs (for securing CHUNK transport between services):
 
@@ -211,11 +268,11 @@ include:
 
 multi-provider:
    role:         combiner
-   identity:     combiner.somewhere.example.
+   identity:     combiner.alpha.example.
    long_term_jose_priv_key: /etc/tdns/keys/combiner.jose.private
    agents:
-      - identity: agent.somewhere.example.
-        address:  127.0.0.1:8054
+      - identity: agent.alpha.example.
+        address:  PUBADDRESS:8054
         long_term_jose_pub_key: /etc/tdns/keys/agent.jose.pub
 
 apiserver:
@@ -255,7 +312,7 @@ templates:
      notify:    [ PUBADDRESS:8053 ]
 
 zones:
-   - name:      example.mp.
+   - name:      customer.zone.
      template:  mp-combiner
 ```
 
@@ -272,17 +329,12 @@ include:
 multi-provider:
    role:         signer
    active:       true
-   identity:     signer.somewhere.example.
+   identity:     signer.alpha.example.
    long_term_jose_priv_key: /etc/tdns/keys/signer.jose.private
    agents:
-      - address:  127.0.0.1:8054
-        identity: agent.somewhere.example.
+      - address:  PUBADDRESS:8054
+        identity: agent.alpha.example.
         long_term_jose_pub_key: /etc/tdns/keys/agent.jose.pub
-   sync_api:
-      addresses:
-         listen: [ 127.0.0.1:8073 ]
-      cert_file: /etc/tdns/certs/tdns.crt
-      key_file:  /etc/tdns/certs/tdns.key
 
 service:
    name:       TDNS-SIGNER
@@ -346,7 +398,7 @@ templates:
      dnssecpolicy: default
 
 zones:
-   - name:      example.mp.
+   - name:      customer.zone.
      template:  mp-signing
 ```
 
@@ -360,18 +412,18 @@ include:
 
 multi-provider:
    role:         agent
-   identity:     agent.somewhere.example.
+   identity:     agent.alpha.example.
    supported_mechanisms: [ dns ]
    long_term_jose_priv_key: /etc/tdns/keys/agent.jose.private
    combiner:
-      address:   127.0.0.1:8055
+      address:   PUBADDRESS:8055
       long_term_jose_pub_key: /etc/tdns/keys/combiner.jose.pub
    signer:
-      address:   127.0.0.1:8053
+      address:   PUBADDRESS:8053
       long_term_jose_pub_key: /etc/tdns/keys/signer.jose.pub
    local:
       notify:    [ PUBSECONDARY ]
-      nameservers: [ ns1.somewhere.example. ]
+      nameservers: [ ns1.alpha.example. ]
    remote:
       LocateInterval: 60
       BeatInterval:   30
@@ -419,12 +471,12 @@ common:
 templates:
    - name:      mp-secondary
      type:      secondary
-     primary:   127.0.0.1:8055
+     primary:   PUBADDRESS:8055
      store:     map
      options:   [ multi-provider ]
 
 zones:
-   - name:      example.mp.
+   - name:      customer.zone.
      template:  mp-secondary
 ```
 
@@ -456,8 +508,10 @@ log:
 
 ## 5. Running the Servers
 
-Start in this order: combiner first (it receives the zone
-transfer), then signer (signs it), then agent (coordinates).
+All three services must be running before the agent will
+receive the customer zone. Once the zone arrives, the
+agent analyzes its HSYNC3 and HSYNCPARAM records and
+initiates discovery of remote agents.
 
 ```sh
 # Terminal 1: Combiner
@@ -476,13 +530,13 @@ tdns-agentv2 --config /etc/tdns/tdns-agent.yaml
 
 ```sh
 # Query the combiner for the zone
-dig @127.0.0.1 -p 8055 example.mp. SOA
+dig @127.0.0.1 -p 8055 customer.zone. SOA
 
 # Query the signer (should have DNSSEC signatures)
-dig @127.0.0.1 -p 8053 example.mp. SOA +dnssec
+dig @127.0.0.1 -p 8053 customer.zone. SOA +dnssec
 
 # Query the agent
-dig @127.0.0.1 -p 8054 example.mp. SOA
+dig @127.0.0.1 -p 8054 customer.zone. SOA
 ```
 
 ### 6.2 Check HSYNC3 and HSYNCPARAM records
@@ -492,10 +546,10 @@ Use `dogv2` (not dig) to examine HSYNC3 and HSYNCPARAM records
 
 ```sh
 # HSYNC3 records (type code 65285)
-dogv2 @127.0.0.1:8055 example.mp. HSYNC3
+dogv2 @127.0.0.1:8055 customer.zone. HSYNC3
 
 # HSYNCPARAM record (type code 65286)
-dogv2 @127.0.0.1:8055 example.mp. HSYNCPARAM
+dogv2 @127.0.0.1:8055 customer.zone. HSYNCPARAM
 ```
 
 ### 6.3 Check agent status
@@ -503,8 +557,8 @@ dogv2 @127.0.0.1:8055 example.mp. HSYNCPARAM
 ```sh
 # Zone list
 tdns-cliv2 agent zone list
-agent.somewhere.example.  primary    MapZone  false  false  [allow-updates automatic-zone online-signing]
-example.mp.               secondary  MapZone  false  false  [delegation-sync-child multi-provider]
+agent.alpha.example.  primary    MapZone  false  false  [allow-updates automatic-zone online-signing]
+customer.zone.        secondary  MapZone  false  false  [delegation-sync-child multi-provider]
 
 # Peer discovery status
 tdns-cliv2 agent peer list
