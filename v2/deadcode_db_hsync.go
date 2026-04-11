@@ -1,6 +1,9 @@
+//go:build ignore
+
 /*
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  *
+ * DEAD CODE — migrated to tdns-mp/v2/db_hsync.go (HsyncDB methods).
  * Data access layer for HSYNC database tables.
  * Provides CRUD operations for peers, sync operations, and confirmations.
  */

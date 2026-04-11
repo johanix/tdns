@@ -1,6 +1,9 @@
+//go:build ignore
+
 /*
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  *
+ * DEAD CODE — migrated to tdns-mp/v2/db_schema_hsync.go (HsyncDB methods).
  * Database schema for HSYNC (multi-provider DNSSEC coordination).
  * Provides persistent storage for:
  * - Peer information (discovered agents, addresses, keys)

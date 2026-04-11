@@ -930,20 +930,6 @@ func (conf *Config) APIagentDebug() func(w http.ResponseWriter, r *http.Request)
 			resp.Msg = "CHUNK receive log not yet implemented - requires message logging"
 			resp.Status = "ok"
 
-		case "hsync-init-db":
-			if conf.Internal.KeyDB == nil {
-				resp.Error = true
-				resp.ErrorMsg = "KeyDB not available"
-				return
-			}
-			if err := conf.Internal.KeyDB.InitHsyncTables(); err != nil {
-				resp.Error = true
-				resp.ErrorMsg = fmt.Sprintf("InitHsyncTables failed: %v", err)
-				return
-			}
-			resp.Msg = "HSYNC database tables initialized successfully"
-			resp.Status = "ok"
-
 		case "hsync-sync-state":
 			// Show sync state for a zone
 			if amp.Zone == "" {
