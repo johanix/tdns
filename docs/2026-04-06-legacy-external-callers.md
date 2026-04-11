@@ -78,6 +78,16 @@ discover, etc.). tdns-mp has its own copy. This file
 should be deletable once the `AppTypeAgent` guard in
 `apirouters.go` no longer registers its routes.
 
+**Update (2026-04-11)**: Only `config`, `send-notify`,
+and `update-local-zonedata` are truly core commands.
+Commands previously assumed core (`resync`, `send-rfi`,
+`dump-agentregistry`, `dump-zonedatarepo`,
+`show-key-inventory`, `queue-status`) are MP-only and
+must migrate to tdns-mp or be deleted from tdns.
+Additionally, `hsync-chunk-send`, `hsync-chunk-recv`,
+`show-combiner-data`, `send-sync-to` are obsolete and
+should be deleted (with corresponding CLI commands).
+
 ### apihandler_agent_distrib.go (MP code, should move)
 
 | Line | Legacy symbol | Legacy file |
