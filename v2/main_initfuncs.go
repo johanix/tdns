@@ -189,8 +189,6 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	conf.Internal.APIStopCh = make(chan struct{}) // Used for shutdown coordination
 	conf.Internal.BumpZoneCh = make(chan BumperData, 10)
 	conf.Internal.DelegationSyncQ = make(chan DelegationSyncRequest, 10)
-	conf.Internal.SyncQ = make(chan SyncRequest, 10)
-	conf.Internal.MusicSyncQ = make(chan MusicSyncRequest, 10)
 	conf.Internal.RefreshZoneCh = make(chan ZoneRefresher, max(10, len(conf.Zones)))
 	conf.Internal.NotifyQ = make(chan NotifyRequest, 10)
 	conf.Internal.ValidatorCh = make(chan ValidatorRequest, 10)
@@ -202,24 +200,6 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	conf.Internal.AuthQueryQ = make(chan AuthQueryRequest, 100)
 	// Only used by tdns-auth
 	conf.Internal.ResignQ = make(chan *ZoneData, 10)
-	// Create MsgQs unconditionally (even if not used by this app type)
-	conf.Internal.MsgQs = &MsgQs{
-		Hello:             make(chan *AgentMsgReport, 100),
-		Beat:              make(chan *AgentMsgReport, 100),
-		Ping:              make(chan *AgentMsgReport, 100),
-		Msg:               make(chan *AgentMsgPostPlus, 100),
-		Command:           make(chan *AgentMgmtPostPlus, 100),
-		DebugCommand:      make(chan *AgentMgmtPostPlus, 100),
-		SynchedDataUpdate: make(chan *SynchedDataUpdate, 100),
-		SynchedDataCmd:    make(chan *SynchedDataCmd, 100),
-		Confirmation:      make(chan *ConfirmationDetail, 100),
-		KeystateInventory: make(chan *KeystateInventoryMsg, 10),
-		KeystateSignal:    make(chan *KeystateSignalMsg, 10),
-		EditsResponse:     make(chan *EditsResponseMsg, 10),
-		ConfigResponse:    make(chan *ConfigResponseMsg, 10),
-		AuditResponse:     make(chan *AuditResponseMsg, 10),
-		StatusUpdate:      make(chan *StatusUpdateMsg, 10),
-	}
 	// Create KeyDB channels if KeyDB exists
 	if conf.Internal.KeyDB != nil {
 		kdb := conf.Internal.KeyDB
@@ -232,14 +212,12 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	//	log.Printf("*** MainInit: 5 ***")
 	// }
 	// Parse all configured zones
-	conf.Internal.MPZoneNames = nil
 	all_zones, err := conf.ParseZones(ctx, false) // false = initial load, not reload
 	if err != nil {
 		return fmt.Errorf("error parsing zones: %v", err)
 	}
 	// Provide the complete zone list to engines that need cross-zone post-initialization
 	conf.Internal.AllZones = all_zones
-	lgConfig.Info("multi-provider zones from config", "count", len(conf.Internal.MPZoneNames), "zones", conf.Internal.MPZoneNames)
 	// Load dynamic zones from dynamic config file (if configured and included)
 	// This must happen after ParseZones so that main config zones take precedence
 	if conf.DynamicZones.ConfigFile != "" {

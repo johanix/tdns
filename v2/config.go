@@ -506,7 +506,6 @@ type InternalDnsConf struct {
 	UpdateHandlers      []UpdateHandlerRegistration    // UPDATE handlers (registered via RegisterUpdateHandler)
 	UpdateHandlersMutex sync.RWMutex                   // protects UpdateHandlers slice
 	DelegationSyncQ     chan DelegationSyncRequest
-	MusicSyncQ          chan MusicSyncRequest
 	NotifyQ             chan NotifyRequest
 	AuthQueryQ          chan AuthQueryRequest
 	ResignQ             chan *ZoneData     // the names of zones that should be kept re-signed should be sent into this channel
@@ -662,7 +661,6 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 	prezones := Zones.Keys()
 	lgConfig.Info("ReloadZones: zones prior to reloading", "zones", prezones)
 	// XXX: This is wrong. We must get the zones config file from outside (to enamble things like MUSIC to use a different config file)
-	conf.Internal.MPZoneNames = nil             // reset before re-collection by option handler
 	zonelist, err := conf.ParseZones(ctx, true) // true: reload, not initial parsing
 	if err != nil {
 		confMu.Unlock()

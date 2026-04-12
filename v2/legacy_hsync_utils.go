@@ -1077,21 +1077,6 @@ func MPPostRefresh(zd *ZoneData) {
 					ZoneData:     zd,
 					DnskeyStatus: analysis.DnskeyStatus,
 				}
-			} else if zd.MusicSyncQ != nil {
-				lg.Info("DNSSEC keys have changed, sending to DelegationSyncEngine", "zone", zd.ZoneName)
-				oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
-				if err != nil {
-					lg.Error("GetRRset failed", "zone", zd.ZoneName, "rrtype", dns.TypeDNSKEY, "err", err)
-				}
-				// Note: after the flip, zd has the new data. For old keys we'd
-				// need the pre-flip data, but the legacy MusicSync path is rarely used.
-				zd.MusicSyncQ <- MusicSyncRequest{
-					Command:    "SYNC-DNSKEY-RRSET",
-					ZoneName:   zd.ZoneName,
-					ZoneData:   zd,
-					OldDnskeys: oldkeys,
-					NewDnskeys: oldkeys, // post-flip, old=new; legacy path approximation
-				}
 			}
 		case AppTypeMPCombiner:
 			lg.Debug("incoming DNSKEYs have changed, no action needed for combiner", "zone", zd.ZoneName)

@@ -147,7 +147,6 @@ type ZoneData struct {
 	Downstreams        []string // secondaries that we notify
 	Zonefile           string
 	DelegationSyncQ    chan DelegationSyncRequest
-	MusicSyncQ         chan MusicSyncRequest // Multi-signer (communication between music-sidecars)
 	Parent             string                // name of parentzone (if filled in)
 	ParentNS           []string              // names of parent nameservers
 	ParentServers      []string              // addresses of parent nameservers

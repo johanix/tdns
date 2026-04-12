@@ -223,8 +223,6 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.DnssecPolicy = &dp
 							zd.MultiSigner = &msc
 							zd.DelegationSyncQ = conf.Internal.DelegationSyncQ
-							zd.MusicSyncQ = conf.Internal.MusicSyncQ
-							zd.SyncQ = conf.Internal.SyncQ
 							zd.KeyDB = conf.Internal.KeyDB
 							zd.Data = core.NewCmap[OwnerData]()
 							zd.mu.Unlock()
@@ -486,8 +484,6 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						DnssecPolicy:    &dp,
 						MultiSigner:     &msc,
 						DelegationSyncQ: conf.Internal.DelegationSyncQ,
-						MusicSyncQ:      conf.Internal.MusicSyncQ,
-						SyncQ:           conf.Internal.SyncQ,
 						Data:            core.NewCmap[OwnerData](),
 						KeyDB:           conf.Internal.KeyDB,
 						FirstZoneLoad:   true,
