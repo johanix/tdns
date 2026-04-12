@@ -19,7 +19,7 @@ import (
 // algorithm per RFC 8624.
 // synthesizeCdsRRs creates CDS records from the current KSK DNSKEYs in the zone.
 // Returns the CDS RRs without publishing them — caller decides how to apply.
-func (zd *ZoneData) synthesizeCdsRRs() ([]dns.RR, error) {
+func (zd *ZoneData) SynthesizeCdsRRs() ([]dns.RR, error) {
 	apex, err := zd.GetOwner(zd.ZoneName)
 	if err != nil {
 		return nil, fmt.Errorf("synthesizeCdsRRs: cannot get apex for zone %s: %v", zd.ZoneName, err)
@@ -58,7 +58,7 @@ func (zd *ZoneData) synthesizeCdsRRs() ([]dns.RR, error) {
 }
 
 func (zd *ZoneData) PublishCdsRRs() error {
-	cdsRRs, err := zd.synthesizeCdsRRs()
+	cdsRRs, err := zd.SynthesizeCdsRRs()
 	if err != nil {
 		return err
 	}

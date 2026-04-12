@@ -367,7 +367,7 @@ func combinerNotifyDelegationChange(tm *MPTransportBridge, senderID, zonename st
 		}
 	}
 	if kskChanged {
-		cdsRRs, err := zd.synthesizeCdsRRs()
+		cdsRRs, err := zd.SynthesizeCdsRRs()
 		if err != nil {
 			lgCombiner.Error("combinerNotifyDelegationChange: CDS synthesis failed", "zone", zonename, "err", err)
 		} else if len(cdsRRs) > 0 {
