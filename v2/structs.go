@@ -158,7 +158,6 @@ type ZoneData struct {
 	MultiSigner        *MultiSignerConf
 	KeyDB              *KeyDB
 	AppType            AppType
-	SyncQ              chan SyncRequest
 	Error              bool        // zone is broken and cannot be used
 	ErrorType          ErrorType   // "config" | "refresh" | "notify" | "update"
 	ErrorMsg           string      // reason for the error (if known)

@@ -1065,37 +1065,15 @@ func MPPostRefresh(zd *ZoneData) {
 		}
 	}
 
-	// DNSKEY change routing
+	// DNSKEY change routing — moved to tdns-mp MPPostRefresh
 	if analysis.DnskeyChanged {
 		switch Globals.App.Type {
-		case AppTypeAgent, AppTypeMPAgent:
-			if zd.Options[OptMultiProvider] {
-				lg.Info("local DNSKEYs changed, sending to HsyncEngine", "zone", zd.ZoneName)
-				zd.SyncQ <- SyncRequest{
-					Command:      "SYNC-DNSKEY-RRSET",
-					ZoneName:     ZoneName(zd.ZoneName),
-					ZoneData:     zd,
-					DnskeyStatus: analysis.DnskeyStatus,
-				}
-			}
 		case AppTypeMPCombiner:
 			lg.Debug("incoming DNSKEYs have changed, no action needed for combiner", "zone", zd.ZoneName)
 		}
 	}
 
-	// HSYNC change routing
-	if analysis.HsyncChanged {
-		switch Globals.App.Type {
-		case AppTypeAgent, AppTypeMPAgent:
-			lg.Info("HSYNC RRset has changed, sending update to HsyncEngine", "zone", zd.ZoneName)
-			zd.SyncQ <- SyncRequest{
-				Command:    "HSYNC-UPDATE",
-				ZoneName:   ZoneName(zd.ZoneName),
-				ZoneData:   zd,
-				SyncStatus: analysis.HsyncStatus,
-			}
-		}
-		// Combiner HSYNC handling (allow-edits, CombineWithLocalChanges)
-		// is done in MPPreRefresh on new_zd before the flip.
-	}
+	// HSYNC change routing — moved to tdns-mp MPPostRefresh
+	// Combiner HSYNC handling (allow-edits, CombineWithLocalChanges)
+	// is done in MPPreRefresh on new_zd before the flip.
 }
