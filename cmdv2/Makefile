@@ -1,7 +1,14 @@
-.PHONY: all v2 clean install install-dirs check-root tarball
+.PHONY: all v2 version clean install install-dirs check-root tarball
 
 # all apps in this directory
 all: v2
+
+version:
+	$(MAKE) -C ./authv2/ version
+	$(MAKE) -C ./cliv2/ version
+	$(MAKE) -C ./agentv2/ version
+	$(MAKE) -C ./imrv2/ version
+	$(MAKE) -C ./dogv2/ version
 
 # experimental version of major apps
 v2:
@@ -42,5 +49,3 @@ TAR_CONTENTS:=bin/tdns-cliv2 bin/dogv2 \
 
 tarball: install
 	cd /usr/local && tar -czf $(TARFILE) $(TAR_CONTENTS)
-
-include ../utils/Makefile.common
