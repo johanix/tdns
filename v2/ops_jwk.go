@@ -10,6 +10,7 @@ package tdns
 import (
 	"crypto"
 	"fmt"
+	"time"
 
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -99,12 +100,17 @@ func (zd *ZoneData) PublishJWKRR(owner string, publicKey crypto.PublicKey, use s
 		InternalUpdate: true, // Internal update, bypass external validation
 	}
 
+	qlen := len(zd.KeyDB.UpdateQ)
+	if qlen > cap(zd.KeyDB.UpdateQ)*3/4 {
+		lgHandler.Warn("PublishJWKRR: UpdateQ near capacity", "len", qlen, "cap", cap(zd.KeyDB.UpdateQ))
+	}
+
 	select {
 	case zd.KeyDB.UpdateQ <- updateRequest:
 		lgHandler.Info("PublishJWKRR: successfully queued JWK record", "owner", owner, "algorithm", algorithm, "use", useInfo)
 		return nil
-	default:
-		return fmt.Errorf("PublishJWKRR: failed to send update request (channel full)")
+	case <-time.After(10 * time.Second):
+		return fmt.Errorf("PublishJWKRR: timed out sending update request (UpdateQ full for 10s)")
 	}
 }
 

@@ -223,7 +223,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// Create KeyDB channels if KeyDB exists
 	if conf.Internal.KeyDB != nil {
 		kdb := conf.Internal.KeyDB
-		kdb.UpdateQ = make(chan UpdateRequest, 10)
+		kdb.UpdateQ = make(chan UpdateRequest, 50)
 		conf.Internal.UpdateQ = kdb.UpdateQ
 		kdb.DeferredUpdateQ = make(chan DeferredUpdate, 10)
 		conf.Internal.DeferredUpdateQ = kdb.DeferredUpdateQ
