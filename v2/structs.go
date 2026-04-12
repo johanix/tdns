@@ -789,3 +789,5 @@ type TsigDetails struct {
 	Algorithm string `validate:"required" yaml:"algorithm"`
 	Secret    string `validate:"required" yaml:"secret"`
 }
+
+type ZoneName string

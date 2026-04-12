@@ -503,8 +503,6 @@ type ZoneUpdate struct {
 
 type AgentId string
 
-type ZoneName string
-
 type ZoneDataRepo struct {
 	// Repo map[ZoneName]ZoneRepo // map[zonename]ZoneRepo
 	Repo core.ConcurrentMap[ZoneName, *AgentRepo] // map[zonename]ZoneRepo

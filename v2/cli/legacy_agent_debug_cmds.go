@@ -215,10 +215,8 @@ var DebugAgentDumpAgentRegistryCmd = &cobra.Command{
 			}
 			fmt.Printf("Agent registry contains %d agents: %v\n", len(agentNames), agentNames)
 			for _, agent := range amr.AgentRegistry.RegularS {
-				err := PrintAgent(agent, false)
-				if err != nil {
-					log.Printf("Error printing agent: %v", err)
-				}
+				fmt.Printf("Remote agent %q: state: %s\n",
+					agent.Identity, tdns.AgentStateToString[agent.State])
 				fmt.Println()
 			}
 		} else {

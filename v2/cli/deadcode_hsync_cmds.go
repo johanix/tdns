@@ -1,3 +1,5 @@
+//go:build ignore
+
 /*
  * Copyright (c) 2025 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  */
