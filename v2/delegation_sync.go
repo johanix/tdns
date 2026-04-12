@@ -8,10 +8,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
-	"github.com/johanix/tdns-transport/v2/transport"
-	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -82,14 +79,6 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 					"a_removes", len(dss.ARemoves), "a_adds", len(dss.AAdds),
 					"aaaa_removes", len(dss.AAAARemoves), "aaaa_adds", len(dss.AAAAAdds))
 
-				// Only the elected leader sends DDNS to the parent
-				if lem := conf.Internal.LeaderElectionManager; lem != nil {
-					if !lem.IsLeader(ZoneName(ds.ZoneName)) {
-						lgDns.Info("DelegationSyncher: not the delegation sync leader, skipping DDNS", "zone", ds.ZoneName)
-						continue
-					}
-				}
-
 				zd := ds.ZoneData
 				if zd.Parent == "" || zd.Parent == "." {
 					zd.Parent, err = imr().ParentZone(zd.ZoneName)
@@ -106,8 +95,6 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				}
 				ds.SyncStatus.UpdateResult = ur
 				lgDns.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", ds.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
-				// Notify peer agents that parent sync is done
-				go notifyPeersParentSyncDone(conf, ds.ZoneName, dns.RcodeToString[int(rcode)], msg)
 
 			case "EXPLICIT-SYNC-DELEGATION":
 				lgDns.Info("DelegationSyncher: request for explicit delegation sync", "zone", ds.ZoneName)
@@ -121,18 +108,6 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 						ds.Response <- syncstate
 					}
 					continue
-				}
-
-				// Only the elected leader sends DDNS to the parent
-				if lem := conf.Internal.LeaderElectionManager; lem != nil {
-					if !lem.IsLeader(ZoneName(ds.ZoneName)) {
-						lgDns.Info("DelegationSyncher: not the delegation sync leader, skipping DDNS", "zone", ds.ZoneName)
-						syncstate.Msg = "not the delegation sync leader, skipping DDNS"
-						if ds.Response != nil {
-							ds.Response <- syncstate
-						}
-						continue
-					}
 				}
 
 				if syncstate.InSync {
@@ -153,8 +128,6 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 					syncstate.UpdateResult = ur
 				} else {
 					lgDns.Info("DelegationSyncher: SyncZoneDelegation completed", "zone", ds.ZoneName, "msg", msg, "rcode", dns.RcodeToString[int(rcode)])
-					// Notify peer agents that parent sync is done
-					go notifyPeersParentSyncDone(conf, ds.ZoneName, dns.RcodeToString[int(rcode)], msg)
 				}
 				syncstate.Msg = msg
 				syncstate.Rcode = rcode
@@ -191,55 +164,6 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				lgDns.Warn("DelegationSyncher: unknown command, ignoring", "zone", ds.ZoneName, "command", ds.Command)
 			}
 		}
-	}
-}
-
-// notifyPeersParentSyncDone sends STATUS-UPDATE("parentsync-done") to all
-// remote agents for the zone. Called after a successful parent delegation sync.
-func notifyPeersParentSyncDone(conf *Config, zonename string, result string, msg string) {
-	tm := conf.Internal.MPTransport
-	if tm == nil || tm.DNSTransport == nil {
-		lgDns.Debug("notifyPeersParentSyncDone: no TransportManager, skipping peer notification", "zone", zonename)
-		return
-	}
-
-	agents, err := tm.getAllAgentsForZone(ZoneName(zonename))
-	if err != nil {
-		lgDns.Warn("notifyPeersParentSyncDone: failed to get agents for zone", "zone", zonename, "err", err)
-		return
-	}
-
-	if len(agents) == 0 {
-		lgDns.Debug("notifyPeersParentSyncDone: no remote agents for zone", "zone", zonename)
-		return
-	}
-
-	for _, agentID := range agents {
-		peer, exists := tm.PeerRegistry.Get(string(agentID))
-		if !exists {
-			lgDns.Debug("notifyPeersParentSyncDone: agent not in peer registry, skipping", "agent", agentID, "zone", zonename)
-			continue
-		}
-
-		post := &core.StatusUpdatePost{
-			Zone:    zonename,
-			SubType: "parentsync-done",
-			Result:  result,
-			Msg:     msg,
-			Time:    time.Now(),
-		}
-
-		go func(p *transport.Peer, id AgentId) {
-			sendCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-
-			err := tm.DNSTransport.SendStatusUpdate(sendCtx, p, post)
-			if err != nil {
-				lgDns.Warn("notifyPeersParentSyncDone: failed to send", "agent", id, "zone", zonename, "err", err)
-			} else {
-				lgDns.Info("notifyPeersParentSyncDone: sent", "agent", id, "zone", zonename)
-			}
-		}(peer, agentID)
 	}
 }
 
