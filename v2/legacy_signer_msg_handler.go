@@ -28,7 +28,7 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 		return
 	}
 
-	tm := conf.Internal.MPTransport
+	var tm *MPTransportBridge // deadcode: field removed from InternalConf
 	var peerRegistry *transport.PeerRegistry
 	if tm != nil {
 		peerRegistry = tm.PeerRegistry
@@ -152,7 +152,7 @@ func pushKeystateInventoryToAllAgents(conf *Config, zone string) {
 	if conf.MultiProvider == nil || len(conf.MultiProvider.Agents) == 0 {
 		return
 	}
-	tm := conf.Internal.MPTransport
+	var tm *MPTransportBridge // deadcode: field removed from InternalConf
 	if tm == nil {
 		lgSigner.Warn("pushKeystateInventoryToAllAgents: no TransportManager", "zone", zone)
 		return

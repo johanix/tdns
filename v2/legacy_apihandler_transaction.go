@@ -111,7 +111,7 @@ func (conf *Config) APIagentTransaction(cache *DistributionCache) func(w http.Re
 
 		case "open-incoming":
 			// Query PendingRemoteConfirms on the agent side
-			zdr := conf.Internal.ZoneDataRepo
+			var zdr *ZoneDataRepo // deadcode: field removed from InternalConf
 			if zdr == nil {
 				resp.Error = true
 				resp.ErrorMsg = "ZoneDataRepo not configured"
@@ -178,7 +178,7 @@ func (conf *Config) APIcombinerTransaction() func(w http.ResponseWriter, r *http
 			}
 		}()
 
-		combinerState := conf.Internal.CombinerState
+		var combinerState *CombinerState // deadcode: field removed from InternalConf
 		if combinerState == nil || combinerState.ErrorJournal == nil {
 			resp.Error = true
 			resp.ErrorMsg = "Combiner state or error journal not configured"

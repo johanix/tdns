@@ -536,12 +536,10 @@ type InternalMpConf struct {
 	KrsConf               interface{}                 // *krs.KrsConf - using interface{} to avoid circular import
 }
 
-// InternalConf embeds both DNS and MP internal configuration.
-// Field promotion means all existing access sites continue to
-// work unchanged.
+// InternalConf holds DNS-internal state (channels, engine references).
+// MP state has moved to tdns-mp's own InternalMpConf.
 type InternalConf struct {
 	InternalDnsConf
-	InternalMpConf
 
 	// PostParseZonesHook is called after ParseZones completes during
 	// reload (SIGHUP or "config reload-zones"). Set by MP apps to

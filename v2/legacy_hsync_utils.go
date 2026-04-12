@@ -271,7 +271,7 @@ func filterLocalDNSKEYs(rrset *core.RRset, remoteKeyTags map[uint16]bool) []dns.
 func (zd *ZoneData) RequestAndWaitForKeyInventory(ctx context.Context) {
 	zd.SetKeystateTime(time.Now())
 
-	tm := Conf.Internal.MPTransport
+	var tm *MPTransportBridge // deadcode: field removed from InternalConf
 	if tm == nil {
 		zd.SetKeystateOK(false)
 		zd.SetKeystateError("no TransportManager available")
@@ -356,13 +356,13 @@ func (zd *ZoneData) RequestAndWaitForKeyInventory(ctx context.Context) {
 //
 // Modeled on RequestAndWaitForKeyInventory.
 func (zd *ZoneData) RequestAndWaitForEdits(ctx context.Context) {
-	tm := Conf.Internal.MPTransport
+	var tm *MPTransportBridge // deadcode: field removed from InternalConf
 	if tm == nil {
 		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no TransportManager available", zd.ZoneName)
 		return
 	}
 
-	msgQs := Conf.Internal.MsgQs
+	var msgQs *MsgQs // deadcode: field removed from InternalConf
 	if msgQs == nil || msgQs.EditsResponse == nil {
 		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no EditsResponse channel available", zd.ZoneName)
 		return
@@ -411,7 +411,7 @@ func (zd *ZoneData) RequestAndWaitForEdits(ctx context.Context) {
 // RequestAndWaitForConfig sends an RFI CONFIG to a peer agent and waits for the config
 // response on MsgQs.ConfigResponse. Returns the config data or nil on timeout/error.
 func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subtype string) *ConfigResponseMsg {
-	msgQs := Conf.Internal.MsgQs
+	var msgQs *MsgQs // deadcode: field removed from InternalConf
 	if msgQs == nil || msgQs.ConfigResponse == nil {
 		lgEngine.Warn("RequestAndWaitForConfig: no ConfigResponse channel available")
 		return nil
@@ -453,7 +453,7 @@ func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subty
 // RequestAndWaitForAudit sends an RFI AUDIT to a peer agent and waits for the audit
 // response on MsgQs.AuditResponse. Returns the audit data or nil on timeout/error.
 func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string) *AuditResponseMsg {
-	msgQs := Conf.Internal.MsgQs
+	var msgQs *MsgQs // deadcode: field removed from InternalConf
 	if msgQs == nil || msgQs.AuditResponse == nil {
 		lgEngine.Warn("RequestAndWaitForAudit: no AuditResponse channel available")
 		return nil
@@ -500,7 +500,7 @@ func (zd *ZoneData) applyEditsToSDE(agentRecords map[string]map[string][]string)
 		return
 	}
 
-	zdr := Conf.Internal.ZoneDataRepo
+	var zdr *ZoneDataRepo // deadcode: field removed from InternalConf
 	if zdr == nil {
 		zd.Logger.Printf("applyEditsToSDE: zone %s: no ZoneDataRepo available", zd.ZoneName)
 		return
