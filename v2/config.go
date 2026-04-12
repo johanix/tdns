@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johanix/tdns-transport/v2/transport"
 	cache "github.com/johanix/tdns/v2/cache"
 )
 
@@ -512,28 +511,6 @@ type InternalDnsConf struct {
 	RRsetCache          *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
 	ImrEngine           *Imr
 	Scanner             *Scanner // Scanner instance for async job tracking
-}
-
-// InternalMpConf holds multi-provider internal state: transport,
-// agent registry, combiner state, message channels. Moves to
-// tdns-mp after repo split.
-type InternalMpConf struct {
-	SyncQ                 chan SyncRequest
-	MsgQs                 *MsgQs // aggregated channels for agent communication
-	SyncStatusQ           chan SyncStatus
-	AgentRegistry         *AgentRegistry
-	ZoneDataRepo          *ZoneDataRepo
-	CombinerState         *CombinerState              // Combiner business logic state (error journal, protected namespaces)
-	TransportManager      *transport.TransportManager // Generic transport (Router, PeerRegistry, DNS/API transports, RMQ)
-	MPTransport           *MPTransportBridge          // MP-specific transport bridge (authorization, discovery, enqueue, DNSKEY tracking)
-	LeaderElectionManager *LeaderElectionManager      // Per-zone leader election for delegation sync; nil if not agent
-	ChunkPayloadStore     ChunkPayloadStore           // Optional: for query-mode CHUNK (agent); keyed by qname; set when agent chunk_mode is "query"
-	MPZoneNames           []string                    // Zone names with OptMultiProvider, collected at parse time for SDE hydration
-	DistributionCache     *DistributionCache          // In-memory cache of distributions (agent/combiner)
-	KdcDB                 interface{}                 // *kdc.KdcDB - using interface{} to avoid circular import
-	KdcConf               interface{}                 // *kdc.KdcConf - using interface{} to avoid circular import
-	KrsDB                 interface{}                 // *krs.KrsDB - using interface{} to avoid circular import
-	KrsConf               interface{}                 // *krs.KrsConf - using interface{} to avoid circular import
 }
 
 // InternalConf holds DNS-internal state (channels, engine references).
