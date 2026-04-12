@@ -72,18 +72,6 @@ func (conf *Config) SetupSimpleAPIRouter(ctx context.Context) (*mux.Router, erro
 func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 	kdb := conf.Internal.KeyDB
 
-	// Initialize distribution cache if needed (for agent/combiner)
-	/*
-		if conf.Internal.DistributionCache == nil {
-			if Globals.App.Type == AppTypeAgent || Globals.App.Type == AppTypeCombiner {
-				conf.Internal.DistributionCache = NewDistributionCache()
-				// Start background GC to purge old distributions every minute
-				StartDistributionGC(conf.Internal.DistributionCache, 1*time.Minute, conf.Internal.StopCh)
-				lgApi.Info("initialized distribution cache with automatic cleanup")
-			}
-		}
-	*/
-
 	rtr := mux.NewRouter().StrictSlash(true)
 	apikey := conf.ApiServer.ApiKey.Value()
 	if apikey == "" {

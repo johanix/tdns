@@ -17,7 +17,6 @@ import (
 	"strings"
 	"time"
 
-	core "github.com/johanix/tdns/v2/core"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/mitchellh/mapstructure"
@@ -746,47 +745,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 
 			// Leader election OnFirstLoad is registered in StartAgent() (not here)
 			// because LeaderElectionManager doesn't exist until StartAgent runs.
-
-			// MP zone KEY publication: send SIG(0) KEY to combiner as REPLACE operation.
-			// For MP zones, the combiner manages the zone apex, so the agent cannot
-			// publish the KEY locally — it must send it to the combiner.
-			if options[OptMultiProvider] {
-				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
-					tm := conf.Internal.MPTransport
-					kdb := conf.Internal.KeyDB
-					if tm == nil || kdb == nil || !zd.Options[OptDelSyncChild] {
-						return
-					}
-					targetName := DsyncUpdateTargetName(zd.ZoneName)
-					if targetName == "" {
-						targetName = zd.ZoneName
-					}
-					sak, err := kdb.GetSig0Keys(targetName, Sig0StateActive)
-					if err != nil || len(sak.Keys) == 0 {
-						lgConfig.Debug("MP KEY publication: no active SIG(0) key", "zone", zd.ZoneName)
-						return
-					}
-					keyRR := &sak.Keys[0].KeyRR
-					zu := &ZoneUpdate{
-						Zone: ZoneName(zd.ZoneName),
-						Operations: []core.RROperation{{
-							Operation: "replace",
-							RRtype:    "KEY",
-							Records:   []string{keyRR.String()},
-						}},
-						Publish: &core.PublishInstruction{
-							KEYRRs:    []string{keyRR.String()},
-							Locations: []string{"at-apex", "at-ns"},
-						},
-					}
-					distID, err := tm.EnqueueForCombiner(ZoneName(zd.ZoneName), zu, "")
-					if err != nil {
-						lgConfig.Error("MP KEY publication: failed to send KEY to combiner", "zone", zd.ZoneName, "err", err)
-					} else {
-						lgConfig.Info("MP KEY publication: KEY + PublishInstruction sent to combiner", "zone", zd.ZoneName, "distID", distID)
-					}
-				})
-			}
+			// MP zone KEY publication is registered in tdns-mp's StartAgent.
 		}
 
 		switch Globals.App.Type {
