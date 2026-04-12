@@ -447,11 +447,10 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 			switch opName {
 			case "ping":
 				if toIdentity == "combiner" {
-					useAPI := strings.TrimSpace(strings.ToLower(req.PingTransport)) == "api"
-					pingResp := doPeerPing(conf, dns.Fqdn(req.To), useAPI)
-					resp.Error = pingResp.Error
-					resp.ErrorMsg = pingResp.ErrorMsg
-					resp.Msg = pingResp.Msg
+					_ = strings.TrimSpace(strings.ToLower(req.PingTransport))
+					// doPeerPing moved to tdns-mp
+					resp.Error = true
+					resp.ErrorMsg = "doPeerPing: function moved to tdns-mp"
 				} else {
 					// Ping to peer agent: same mechanism as combiner (SendPing); lookup peer by FQDN identity
 					if conf.Internal.TransportManager == nil {
