@@ -507,6 +507,7 @@ func (zd *ZoneData) applyEditsToSDE(agentRecords map[string]map[string][]string)
 	}
 
 	added := 0
+/*
 	for agentID, ownerMap := range agentRecords {
 		for _, rrStrings := range ownerMap {
 			for _, rrStr := range rrStrings {
@@ -515,11 +516,12 @@ func (zd *ZoneData) applyEditsToSDE(agentRecords map[string]map[string][]string)
 					zd.Logger.Printf("applyEditsToSDE: zone %s: failed to parse RR %q: %v", zd.ZoneName, rrStr, err)
 					continue
 				}
-				zdr.AddConfirmedRR(ZoneName(zd.ZoneName), AgentId(agentID), rr)
+				// 20260412 johani removed: zdr.AddConfirmedRR(ZoneName(zd.ZoneName), AgentId(agentID), rr)
 				added++
 			}
 		}
 	}
+*/
 
 	zd.Logger.Printf("applyEditsToSDE: zone %s: applied %d confirmed RRs from %d agents", zd.ZoneName, added, len(agentRecords))
 }

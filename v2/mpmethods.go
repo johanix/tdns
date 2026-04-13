@@ -8,12 +8,7 @@
 package tdns
 
 import (
-	"fmt"
-	"strings"
-	"time"
-
 	core "github.com/johanix/tdns/v2/core"
-	"github.com/miekg/dns"
 )
 
 // --- Agent methods ---
@@ -65,7 +60,7 @@ func (ar *AgentRepo) Set(agentId AgentId, ownerData *OwnerData) {
 }
 
 // --- ZoneDataRepo methods ---
-
+/*
 func (zdr *ZoneDataRepo) Get(zone ZoneName) (*AgentRepo, bool) {
 	return zdr.Repo.Get(zone)
 }
@@ -138,6 +133,7 @@ func (zdr *ZoneDataRepo) removeTracking(zone ZoneName, agent AgentId, rrtype uin
 		delete(zdr.Tracking[zone][agent], rrtype)
 	}
 }
+
 
 // removeTrackedRR removes a specific tracked RR by its string representation (used on ClassNONE deletion).
 func (zdr *ZoneDataRepo) removeTrackedRR(zone ZoneName, agent AgentId, rrtype uint16, rrStr string) {
@@ -593,6 +589,7 @@ func (zdr *ZoneDataRepo) deleteRRFromRepo(zone ZoneName, agent AgentId, rrtype u
 	curRRset.Delete(rr)
 	nod.RRtypes.Set(rrtype, curRRset)
 }
+*/
 
 // --- RRState methods ---
 
