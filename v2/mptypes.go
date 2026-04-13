@@ -671,6 +671,7 @@ type CombinerSyncResponse struct {
 	AppliedRecords []string       // RRs that were successfully applied (additions)
 	RemovedRecords []string       // RRs that were successfully removed (deletions)
 	RejectedItems  []RejectedItem // Items that were rejected with reasons
+	IgnoredRecords []string       // RRs persisted but not applied (role-based filter)
 	Timestamp      time.Time      // When the response was created
 	DataChanged    bool           // True when zone data was actually mutated (not idempotent re-apply)
 }

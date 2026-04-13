@@ -334,7 +334,7 @@ func NewMPTransportBridge(cfg *MPTransportBridgeConfig) *MPTransportBridge {
 
 		// Wire confirmation callback for reliable message queue and per-RR tracking
 		tm.ChunkHandler.OnConfirmationReceived = func(distributionID string, senderID string, status transport.ConfirmStatus,
-			zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, truncated bool, nonce string) {
+			zone string, applied []string, removed []string, rejected []transport.RejectedItemDTO, ignored []string, truncated bool, nonce string) {
 			lgTransport.Debug("confirmation received", "distributionID", distributionID, "sender", senderID, "nonce", nonce)
 
 			// Stop retrying on any definitive answer (success, failure, or rejected).
