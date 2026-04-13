@@ -8,12 +8,12 @@ on the same machine, using distinct ports.
 
 | Service    | Binary            | Role     | DNS port | Mgmt API port |
 |------------|-------------------|----------|----------|---------------|
-| Agent      | tdns-agentv2      | agent    | 8054     | 8074          |
-| Combiner   | tdns-combinerv2   | combiner | 8055     | 8075          |
-| Signer     | tdns-authv2       | signer   | 8053, 53 | 8073          |
-| IMR        | tdns-imrv2        | resolver | --       | --            |
-| CLI        | tdns-cliv2        | tool     | --       | --            |
-| dog        | dogv2             | tool     | --       | --            |
+| Agent      | tdns-mpagent      | agent    | 8054     | 8074          |
+| Combiner   | tdns-mpcombiner   | combiner | 8055     | 8075          |
+| Signer     | tdns-mpsigner       | signer   | 8053, 53 | 8073          |
+| IMR        | tdns-mpimr        | resolver | --       | --            |
+| CLI        | tdns-mpcli        | tool     | --       | --            |
+| dog        | dog             | tool     | --       | --            |
 
 The signer should also listen on port 53 so it can interact
 with other authoritative nameservers for zone transfers etc.
@@ -182,24 +182,29 @@ sed -i 's/ZONESERVER/203.0.113.10/g' /etc/tdns/*.yaml
 
 ## 3. Building and Installation
 
+The code is split across three repositories that must be
+cloned next to each other (the build uses `go.mod`
+`replace` directives that reference sibling directories).
+
 ```sh
-# Clone
+# Clone all three repos into the same parent directory
 git clone https://github.com/johanix/tdns.git
-cd tdns
+git clone https://github.com/johanix/tdns-transport.git
+git clone https://github.com/johanix/tdns-mp.git
 
 # Build (requires Go 1.22+)
-cd cmdv2
+cd tdns-mp/cmd
 make
 
 # Install (as root)
 sudo make install
 # Installs:
-#   /usr/local/bin/tdns-cliv2
-#   /usr/local/bin/dogv2
-#   /usr/local/libexec/tdns-agentv2
-#   /usr/local/libexec/tdns-combinerv2
-#   /usr/local/libexec/tdns-authv2
-#   /usr/local/libexec/tdns-imrv2
+#   /usr/local/bin/tdns-mpcli
+#   /usr/local/bin/dog
+#   /usr/local/libexec/tdns-mpagent
+#   /usr/local/libexec/tdns-mpcombiner
+#   /usr/local/libexec/tdns-mpsigner
+#   /usr/local/libexec/tdns-mpimr
 ```
 
 Create the directory structure:
@@ -245,26 +250,26 @@ algorithm definitions.
 JOSE keypairs (for securing CHUNK transport between services):
 
 ```sh
-tdns-cliv2 keys generate --jose \
+tdns-mpcli keys generate --jose \
    --jose-outfile /etc/tdns/keys/agent.jose.private \
    --jose-pubfile /etc/tdns/keys/agent.jose.pub
 
-tdns-cliv2 keys generate --jose \
+tdns-mpcli keys generate --jose \
    --jose-outfile /etc/tdns/keys/combiner.jose.private \
    --jose-pubfile /etc/tdns/keys/combiner.jose.pub
 
-tdns-cliv2 keys generate --jose \
+tdns-mpcli keys generate --jose \
    --jose-outfile /etc/tdns/keys/signer.jose.private \
    --jose-pubfile /etc/tdns/keys/signer.jose.pub
 ```
 
 ### 4.2 Combiner Configuration
 
-`/etc/tdns/tdns-combiner.yaml`:
+`/etc/tdns/tdns-mpcombiner.yaml`:
 
 ```yaml
 include:
-   - /etc/tdns/combiner-zones.yaml
+   - /etc/tdns/mpcombiner-zones.yaml
 
 multi-provider:
    role:         combiner
@@ -290,17 +295,17 @@ dnsengine:
    transports: [ do53 ]
 
 db:
-   file: /var/lib/tdns/tdns-combiner.db
+   file: /var/lib/tdns/tdns-mpcombiner.db
 
 log:
-   file:  /var/log/tdns/tdns-combiner.log
+   file:  /var/log/tdns/tdns-mpcombiner.log
    level: info
 
 common:
-   command: /usr/local/libexec/tdns-combinerv2
+   command: /usr/local/libexec/tdns-mpcombiner
 ```
 
-`/etc/tdns/combiner-zones.yaml`:
+`/etc/tdns/mpcombiner-zones.yaml`:
 
 ```yaml
 templates:
@@ -318,13 +323,13 @@ zones:
 
 ### 4.3 Signer Configuration
 
-The signer is `tdns-authv2` running with `role: signer`.
+The signer is a separate instance of `tdns-mpsigner`.
 
-`/etc/tdns/tdns-signer.yaml`:
+`/etc/tdns/tdns-mpsigner.yaml`:
 
 ```yaml
 include:
-   - /etc/tdns/signer-zones.yaml
+   - /etc/tdns/mpsigner-zones.yaml
 
 multi-provider:
    role:         signer
@@ -374,18 +379,18 @@ kasp:
    standby_ksk_count: 0
 
 db:
-   file: /var/lib/tdns/tdns-signer.db
+   file: /var/lib/tdns/tdns-mpsigner.db
 
 log:
-   file:  /var/log/tdns/tdns-signer.log
+   file:  /var/log/tdns/tdns-mpsigner.log
    level: info
 
 common:
    servername: tdns-signer
-   command:    /usr/local/libexec/tdns-authv2
+   command:    /usr/local/libexec/tdns-mpsigner
 ```
 
-`/etc/tdns/signer-zones.yaml`:
+`/etc/tdns/mpsigner-zones.yaml`:
 
 ```yaml
 templates:
@@ -404,11 +409,11 @@ zones:
 
 ### 4.4 Agent Configuration
 
-`/etc/tdns/tdns-agent.yaml`:
+`/etc/tdns/tdns-mpagent.yaml`:
 
 ```yaml
 include:
-   - /etc/tdns/agent-zones.yaml
+   - /etc/tdns/mpagent-zones.yaml
 
 multi-provider:
    role:         agent
@@ -448,7 +453,7 @@ apiserver:
    keyfile:    /etc/tdns/certs/tdns.key
 
 db:
-   file: /var/lib/tdns/tdns-agent.db
+   file: /var/lib/tdns/tdns-mpagent.db
 
 imrengine:
    active:      true
@@ -457,15 +462,15 @@ imrengine:
    require_dnssec_validation: false
 
 log:
-   file:  /var/log/tdns/tdns-agent.log
+   file:  /var/log/tdns/tdns-mpagent.log
    level: info
 
 common:
    servername: tdns-agent
-   command:    /usr/local/libexec/tdns-agentv2
+   command:    /usr/local/libexec/tdns-mpagent
 ```
 
-`/etc/tdns/agent-zones.yaml`:
+`/etc/tdns/mpagent-zones.yaml`:
 
 ```yaml
 templates:
@@ -482,7 +487,7 @@ zones:
 
 ### 4.5 CLI Configuration
 
-`/etc/tdns/tdns-cli.yaml`:
+`/etc/tdns/tdns-mpcli.yaml`:
 
 ```yaml
 apiservers:
@@ -490,19 +495,22 @@ apiservers:
      baseurl:   https://127.0.0.1:8074/api/v1
      apikey:    change-this-api-key
      authmethod: X-API-Key
+     command:   /usr/local/libexec/tdns-mpagent
 
    - name:      tdns-combiner
      baseurl:   https://127.0.0.1:8075/api/v1
      apikey:    change-this-api-key
      authmethod: X-API-Key
+     command:   /usr/local/libexec/tdns-mpcombiner
 
-   - name:      tdns-server
+   - name:      tdns-signer
      baseurl:   https://127.0.0.1:8073/api/v1
      apikey:    change-this-api-key
      authmethod: X-API-Key
+     command:   /usr/local/libexec/tdns-mpsigner
 
 log:
-   file:  /var/log/tdns/tdns-cli.log
+   file:  /var/log/tdns/tdns-mpcli.log
    level: info
 ```
 
@@ -515,13 +523,13 @@ initiates discovery of remote agents.
 
 ```sh
 # Terminal 1: Combiner
-tdns-combinerv2 --config /etc/tdns/tdns-combiner.yaml
+tdns-mpcombiner --config /etc/tdns/tdns-mpcombiner.yaml
 
 # Terminal 2: Signer
-tdns-authv2 --config /etc/tdns/tdns-signer.yaml
+tdns-mpsigner --config /etc/tdns/tdns-mpsigner.yaml
 
 # Terminal 3: Agent
-tdns-agentv2 --config /etc/tdns/tdns-agent.yaml
+tdns-mpagent --config /etc/tdns/tdns-mpagent.yaml
 ```
 
 ## 6. Testing
@@ -541,28 +549,28 @@ dig @127.0.0.1 -p 8054 customer.zone. SOA
 
 ### 6.2 Check HSYNC3 and HSYNCPARAM records
 
-Use `dogv2` (not dig) to examine HSYNC3 and HSYNCPARAM records
+Use `dog` (not dig) to examine HSYNC3 and HSYNCPARAM records
 -- dig cannot decode the private RR type RDATA:
 
 ```sh
 # HSYNC3 records (type code 65285)
-dogv2 @127.0.0.1:8055 customer.zone. HSYNC3
+dog @127.0.0.1:8055 customer.zone. HSYNC3
 
 # HSYNCPARAM record (type code 65286)
-dogv2 @127.0.0.1:8055 customer.zone. HSYNCPARAM
+dog @127.0.0.1:8055 customer.zone. HSYNCPARAM
 ```
 
 ### 6.3 Check agent status
 
 ```sh
 # Zone list
-tdns-cliv2 agent zone list
+tdns-mpcli agent zone list
 agent.alpha.example.  primary    MapZone  false  false  [allow-updates automatic-zone online-signing]
 customer.zone.        secondary  MapZone  false  false  [delegation-sync-child multi-provider]
 
 # Peer discovery status
-tdns-cliv2 agent peer list
+tdns-mpcli agent peer list
 
 # Gossip state (if multiple providers configured)
-tdns-cliv2 agent gossip group list
+tdns-mpcli agent gossip group list
 ```
