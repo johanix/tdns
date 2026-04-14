@@ -27,6 +27,7 @@ type DeferredTask struct {
 	LastAttempt time.Time
 }
 
+/*
 func HsyncEngine(ctx context.Context, conf *Config, msgQs *MsgQs) {
 	ourId := AgentId(conf.MultiProvider.Identity)
 
@@ -194,6 +195,7 @@ func HsyncEngine(ctx context.Context, conf *Config, msgQs *MsgQs) {
 		}
 	}
 }
+*/
 
 // DiscoveryRetrierNG continuously attempts to discover agents in NEEDED state.
 // It runs in its own goroutine with a configurable retry interval and only
