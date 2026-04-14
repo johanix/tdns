@@ -64,10 +64,9 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 				continue
 			}
 
-			if _, exist := ZonesToKeepSigned[zd.ZoneName]; exist {
-				continue
+			if _, exist := ZonesToKeepSigned[zd.ZoneName]; !exist {
+				lgSigner.Info("adding zone to re-sign list", "zone", zd.ZoneName)
 			}
-			lgSigner.Info("adding zone to re-sign list", "zone", zd.ZoneName)
 			ZonesToKeepSigned[zd.ZoneName] = zd
 
 		case <-ticker.C:
