@@ -1,9 +1,8 @@
 VERSION=`cat ../../VERSION`
-BRANCH:=`git rev-parse --abbrev-ref HEAD`
-COMMIT:=`git describe --dirty=+WiP --always`
+BRANCH:=`git rev-parse --abbrev-ref HEAD 2>/dev/null || echo nogit`
+COMMIT:=`git describe --dirty=+WiP --always 2>/dev/null || echo unknown`
 APPDATE=`date +"%Y-%m-%d-%H:%M"`
 
-# GOFLAGS:=-v -ldflags "-X app.version=$(VERSION)-$(BRANCH)-$(COMMIT)"
 GOFLAGS:=-v
 
 GOOS ?= $(shell uname -s | tr A-Z a-z)
@@ -14,15 +13,14 @@ ${PROG}: build
 
 all: $(PROG)
 
-# version.go:	../../VERSION Makefile
-# 	/bin/sh ../../utils/make-version.sh $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
+version:
+	/bin/sh ../../utils/make-version.sh $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
 
 build:
-	/bin/sh ../../utils/make-version.sh $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
+	@test -f version.go || /bin/sh ../../utils/make-version.sh "unknown" "unknown" $(PROG)
 	$(GO) build $(GOFLAGS) -o ${PROG}
 
 netbsd:
-	/bin/sh ../../utils/make-version.sh $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
 	GOOS=netbsd GOARCH=amd64 $(GO) build $(GOFLAGS) -o ${PROG}.netbsd
 
 # johaniaws: Sync local tdns source to remote AWS environment.
@@ -69,4 +67,4 @@ lint:
 	gosec ./...
 	golangci-lint run
 
-.PHONY: build clean
+.PHONY: build version clean

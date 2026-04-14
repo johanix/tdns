@@ -264,12 +264,12 @@ but also at special `_signal` owner names under each NS
 target that falls within a provider zone:
 
 ```
-_signal.child.example.com.ns1.alpha.example.net.  KEY  ...
+_sig0key.child.example.com._signal.ns1.alpha.example.net.  KEY  ...
 ```
 
 This allows the parent to discover the child's SIG(0) key
 by looking at the NS targets -- each provider's nameserver
-advertises the key under a well-known name.
+advertises the key under a well-known `_signal` name.
 
 ### 3.2 Combiner Provider Zone Management
 

@@ -31,12 +31,6 @@ var combinerZoneListCmd = &cobra.Command{
 	Run:   func(cmd *cobra.Command, args []string) { RunZoneList("combiner", args) },
 }
 
-var combinerZoneMPListCmd = &cobra.Command{
-	Use:   "mplist",
-	Short: "List multi-provider zones with HSYNCPARAM details",
-	Run:   func(cmd *cobra.Command, args []string) { RunZoneMPList("combiner", args) },
-}
-
 var combinerZoneEditsCmd = &cobra.Command{
 	Use:   "edits",
 	Short: "Manage pending, approved and rejected edits",
@@ -389,7 +383,7 @@ var combinerZoneBumpCmd = &cobra.Command{
 
 func init() {
 	CombinerCmd.AddCommand(combinerZoneCmd)
-	combinerZoneCmd.AddCommand(combinerZoneListCmd, combinerZoneMPListCmd)
+	combinerZoneCmd.AddCommand(combinerZoneListCmd)
 	combinerZoneCmd.AddCommand(combinerZoneBumpCmd)
 	combinerZoneCmd.AddCommand(combinerZoneReloadCmd)
 	combinerZoneCmd.AddCommand(combinerZoneEditsCmd)

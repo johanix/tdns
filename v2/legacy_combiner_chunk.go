@@ -29,48 +29,6 @@ import (
 
 var lgCombiner = Logger("combiner")
 
-// CombinerSyncRequest represents a sync request to the combiner.
-// Uses the same data structure as CombinerPost.Data for transport neutrality.
-type CombinerSyncRequest struct {
-	SenderID       string                   // Identity of the sending agent
-	DeliveredBy    string                   // Identity of the agent that delivered this to the combiner
-	Zone           string                   // Zone being updated
-	ZoneClass      string                   // "mp" (default) or "provider"
-	SyncType       string                   // Type of sync: "NS", "DNSKEY", "CDS", "CSYNC", "GLUE"
-	Records        map[string][]string      // RR strings grouped by owner name (same as CombinerPost.Data)
-	Operations     []core.RROperation       // Explicit operations (takes precedence over Records)
-	Publish        *core.PublishInstruction // KEY/CDS publication instruction
-	Serial         uint32                   // Zone serial (optional)
-	DistributionID string                   // Distribution ID for tracking
-	Timestamp      time.Time                // When the request was created
-}
-
-// CombinerSyncResponse represents a confirmation from the combiner.
-type CombinerSyncResponse struct {
-	DistributionID string         // Echoed from request
-	Zone           string         // Zone that was updated
-	Nonce          string         // Echoed nonce from the incoming sync/update message
-	Status         string         // "ok", "partial", "error"
-	Message        string         // Human-readable message
-	AppliedRecords []string       // RRs that were successfully applied (additions)
-	RemovedRecords []string       // RRs that were successfully removed (deletions)
-	RejectedItems  []RejectedItem // Items that were rejected with reasons
-	Timestamp      time.Time      // When the response was created
-	DataChanged    bool           // True when zone data was actually mutated (not idempotent re-apply)
-}
-
-// RejectedItem describes an RR that was rejected and why.
-type RejectedItem struct {
-	Record string // The RR string
-	Reason string // Why it was rejected
-}
-
-// CombinerSyncRequestPlus includes a response channel for async processing.
-type CombinerSyncRequestPlus struct {
-	Request  *CombinerSyncRequest
-	Response chan *CombinerSyncResponse
-}
-
 // detectDelegationChanges inspects a CombinerSyncResponse for changes
 // to NS records or KSK DNSKEYs (flags=257, SEP bit). These changes
 // require parent delegation synchronization.
@@ -94,26 +52,9 @@ func detectDelegationChanges(resp *CombinerSyncResponse) (nsChanged, kskChanged 
 	return
 }
 
-// CombinerState holds combiner-specific state that outlives individual CHUNK messages.
-// Used by CLI commands (error journal queries) and in-process SendToCombiner.
-// Transport routing is handled by the unified ChunkNotifyHandler.
-type CombinerState struct {
-	// ErrorJournal records errors during CHUNK NOTIFY processing for operational diagnostics.
-	// Queried via "transaction errors" CLI commands. If nil, errors are only logged.
-	ErrorJournal *ErrorJournal
-
-	// ProtectedNamespaces: domain suffixes belonging to this provider.
-	// NS records from remote agents whose targets fall within these namespaces are rejected.
-	ProtectedNamespaces []string
-
-	// chunkHandler is the underlying ChunkNotifyHandler (internal wiring).
-	// Access is via SetRouter/SetGetPeerAddress/SetSecureWrapper.
-	chunkHandler *transport.ChunkNotifyHandler
-}
-
 // ChunkHandler returns the underlying ChunkNotifyHandler for wiring into TransportManager.
 func (cs *CombinerState) ChunkHandler() *transport.ChunkNotifyHandler {
-	return cs.chunkHandler
+	return cs.ChunkNotifyHandler
 }
 
 // ProcessUpdate delegates to the standalone CombinerProcessUpdate.
@@ -426,7 +367,7 @@ func combinerNotifyDelegationChange(tm *MPTransportBridge, senderID, zonename st
 		}
 	}
 	if kskChanged {
-		cdsRRs, err := zd.synthesizeCdsRRs()
+		cdsRRs, err := zd.SynthesizeCdsRRs()
 		if err != nil {
 			lgCombiner.Error("combinerNotifyDelegationChange: CDS synthesis failed", "zone", zonename, "err", err)
 		} else if len(cdsRRs) > 0 {
@@ -1456,7 +1397,7 @@ func RegisterCombinerChunkHandler(localID string, secureWrapper *transport.Secur
 	}
 
 	// Store handler reference in state so main_initfuncs can set Router after initialization
-	state.chunkHandler = handler
+	state.ChunkNotifyHandler = handler
 
 	return state, nil
 }
@@ -1491,7 +1432,7 @@ func RegisterSignerChunkHandler(localID string, secureWrapper *transport.SecureP
 		return nil, err
 	}
 
-	state.chunkHandler = handler
+	state.ChunkNotifyHandler = handler
 
 	return state, nil
 }
@@ -1499,22 +1440,22 @@ func RegisterSignerChunkHandler(localID string, secureWrapper *transport.SecureP
 // SetRouter sets the router on the underlying ChunkNotifyHandler.
 // Called from main_initfuncs.go after the router is initialized.
 func (cs *CombinerState) SetRouter(router *transport.DNSMessageRouter) {
-	if cs.chunkHandler != nil {
-		cs.chunkHandler.Router = router
+	if cs.ChunkNotifyHandler != nil {
+		cs.ChunkNotifyHandler.Router = router
 	}
 }
 
 // SetSecureWrapper sets the secure wrapper on the underlying ChunkNotifyHandler.
 func (cs *CombinerState) SetSecureWrapper(sw *transport.SecurePayloadWrapper) {
-	if cs.chunkHandler != nil {
-		cs.chunkHandler.SecureWrapper = sw
+	if cs.ChunkNotifyHandler != nil {
+		cs.ChunkNotifyHandler.SecureWrapper = sw
 	}
 }
 
 // SetGetPeerAddress sets the GetPeerAddress callback on the underlying ChunkNotifyHandler.
 func (cs *CombinerState) SetGetPeerAddress(fn func(senderID string) (address string, ok bool)) {
-	if cs.chunkHandler != nil {
-		cs.chunkHandler.GetPeerAddress = fn
+	if cs.ChunkNotifyHandler != nil {
+		cs.ChunkNotifyHandler.GetPeerAddress = fn
 	}
 }
 

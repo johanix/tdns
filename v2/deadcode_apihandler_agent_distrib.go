@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/johanix/tdns-transport/v2/transport"
 	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
@@ -214,6 +215,10 @@ type AgentDistribResponse struct {
 }
 
 func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.ResponseWriter, r *http.Request) {
+	// deadcode: these fields were removed from InternalConf (now in InternalMpConf)
+	var leaderElectionManager *LeaderElectionManager
+	var transportManager *transport.TransportManager
+	var mpTransport *MPTransportBridge
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var req AgentDistribPost
@@ -383,10 +388,10 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 
 			// Add leader election status per zone
 			var leaderInfo []map[string]interface{}
-			if conf.Internal.LeaderElectionManager != nil {
+			if leaderElectionManager != nil {
 				// Active leaders
 				activeLeaderZones := make(map[string]bool)
-				for _, ls := range conf.Internal.LeaderElectionManager.GetAllLeaders() {
+				for _, ls := range leaderElectionManager.GetAllLeaders() {
 					activeLeaderZones[string(ls.Zone)] = true
 					leaderInfo = append(leaderInfo, map[string]interface{}{
 						"zone":     string(ls.Zone),
@@ -399,7 +404,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 				}
 
 				// Pending elections (deferred during startup)
-				for _, zone := range conf.Internal.LeaderElectionManager.GetPendingElections() {
+				for _, zone := range leaderElectionManager.GetPendingElections() {
 					if !activeLeaderZones[string(zone)] {
 						leaderInfo = append(leaderInfo, map[string]interface{}{
 							"zone":   string(zone),
@@ -447,24 +452,23 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 			switch opName {
 			case "ping":
 				if toIdentity == "combiner" {
-					useAPI := strings.TrimSpace(strings.ToLower(req.PingTransport)) == "api"
-					pingResp := doPeerPing(conf, dns.Fqdn(req.To), useAPI)
-					resp.Error = pingResp.Error
-					resp.ErrorMsg = pingResp.ErrorMsg
-					resp.Msg = pingResp.Msg
+					_ = strings.TrimSpace(strings.ToLower(req.PingTransport))
+					// doPeerPing moved to tdns-mp
+					resp.Error = true
+					resp.ErrorMsg = "doPeerPing: function moved to tdns-mp"
 				} else {
 					// Ping to peer agent: same mechanism as combiner (SendPing); lookup peer by FQDN identity
-					if conf.Internal.TransportManager == nil {
+					if transportManager == nil {
 						resp.Error = true
 						resp.ErrorMsg = "TransportManager not configured"
 						return
 					}
 					toFqdn := dns.Fqdn(req.To)
-					peer, ok := conf.Internal.TransportManager.PeerRegistry.Get(toFqdn)
+					peer, ok := transportManager.PeerRegistry.Get(toFqdn)
 					if !ok {
 						// DNS-42: Authorization check BEFORE discovery
 						// Prevents DoS attack via discovery amplification
-						authorized, reason := conf.Internal.MPTransport.IsPeerAuthorized(toFqdn, "")
+						authorized, reason := mpTransport.IsPeerAuthorized(toFqdn, "")
 						if !authorized {
 							resp.Error = true
 							resp.ErrorMsg = fmt.Sprintf("peer %q is not authorized", req.To)
@@ -477,7 +481,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 						discoveryCtx, discoveryCancel := context.WithTimeout(r.Context(), 10*time.Second)
 						defer discoveryCancel()
 
-						discErr := conf.Internal.MPTransport.DiscoverAndRegisterAgent(discoveryCtx, toFqdn)
+						discErr := mpTransport.DiscoverAndRegisterAgent(discoveryCtx, toFqdn)
 						if discErr != nil {
 							resp.Error = true
 							resp.ErrorMsg = fmt.Sprintf("peer %q not found and discovery failed", req.To)
@@ -486,7 +490,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 						}
 
 						// Try to get peer again after discovery
-						peer, ok = conf.Internal.TransportManager.PeerRegistry.Get(toFqdn)
+						peer, ok = transportManager.PeerRegistry.Get(toFqdn)
 						if !ok {
 							resp.Error = true
 							resp.ErrorMsg = fmt.Sprintf("peer %q discovered but not registered properly", req.To)
@@ -501,7 +505,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 					}
 					ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 					defer cancel()
-					pingResp, err := conf.Internal.TransportManager.SendPing(ctx, peer)
+					pingResp, err := transportManager.SendPing(ctx, peer)
 					if err != nil {
 						resp.Error = true
 						resp.ErrorMsg = fmt.Sprintf("ping failed: %v", err)
@@ -526,7 +530,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 				resp.ErrorMsg = "agent_id is required for discover command"
 				return
 			}
-			if conf.Internal.TransportManager == nil {
+			if transportManager == nil {
 				resp.Error = true
 				resp.ErrorMsg = "TransportManager not configured"
 				return
@@ -537,7 +541,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 
 			// DNS-42: Authorization check BEFORE discovery
 			// Prevents DoS attack via discovery amplification
-			authorized, reason := conf.Internal.MPTransport.IsPeerAuthorized(agentFqdn, "")
+			authorized, reason := mpTransport.IsPeerAuthorized(agentFqdn, "")
 			if !authorized {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("agent %q is not authorized", agentId)
@@ -550,7 +554,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 			discoveryCtx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 			defer cancel()
 
-			err := conf.Internal.MPTransport.DiscoverAndRegisterAgent(discoveryCtx, agentFqdn)
+			err := mpTransport.DiscoverAndRegisterAgent(discoveryCtx, agentFqdn)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = "discovery failed"
@@ -559,7 +563,7 @@ func (conf *Config) APIagentDistrib(cache *DistributionCache) func(w http.Respon
 			}
 
 			// Get the peer to return discovery information
-			peer, ok := conf.Internal.TransportManager.PeerRegistry.Get(dns.Fqdn(agentId))
+			peer, ok := transportManager.PeerRegistry.Get(dns.Fqdn(agentId))
 			if !ok {
 				resp.Error = true
 				resp.ErrorMsg = "agent discovered but not found in registry"
@@ -632,6 +636,10 @@ func StartDistributionGC(cache *DistributionCache, interval time.Duration, stopC
 
 // ListKnownPeers returns all peers that have working keys established
 func ListKnownPeers(conf *Config) []PeerInfo {
+	// deadcode: these fields were removed from InternalConf (now in InternalMpConf)
+	var transportManager *transport.TransportManager
+	var agentRegistry *AgentRegistry
+
 	var peers []PeerInfo
 
 	// For combiners: list all configured agents
@@ -664,8 +672,8 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 	for _, p := range peers {
 		seen[p.PeerID+":"+p.Transport] = true
 	}
-	if conf.Internal.AgentRegistry != nil {
-		ar := conf.Internal.AgentRegistry
+	if agentRegistry != nil {
+		ar := agentRegistry
 
 		// Use callback-based iterator to avoid channel/deadlock issues
 		ar.S.IterCb(func(agentID AgentId, agent *Agent) {
@@ -726,8 +734,8 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						peerInfo.LastUsed = agent.ApiDetails.HelloTime
 					}
 					// Get statistics from PeerRegistry if available
-					if conf.Internal.TransportManager != nil {
-						if peer, ok := conf.Internal.TransportManager.PeerRegistry.Get(agentIDFqdn); ok {
+					if transportManager != nil {
+						if peer, ok := transportManager.PeerRegistry.Get(agentIDFqdn); ok {
 							s := peer.Stats.GetDetailedStats()
 							peerInfo.HelloSent = s.HelloSent
 							peerInfo.HelloReceived = s.HelloReceived
@@ -786,8 +794,8 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 						peerInfo.LastUsed = agent.DnsDetails.HelloTime
 					}
 					// Get statistics from PeerRegistry if available
-					if conf.Internal.TransportManager != nil {
-						if peer, ok := conf.Internal.TransportManager.PeerRegistry.Get(agentIDFqdn); ok {
+					if transportManager != nil {
+						if peer, ok := transportManager.PeerRegistry.Get(agentIDFqdn); ok {
 							s := peer.Stats.GetDetailedStats()
 							peerInfo.HelloSent = s.HelloSent
 							peerInfo.HelloReceived = s.HelloReceived
@@ -841,8 +849,8 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 					DistribSent: 0, // Will be updated from PeerRegistry if peer exists
 				}
 				// Get statistics from PeerRegistry if available (peer may be known but not fully discovered)
-				if conf.Internal.TransportManager != nil {
-					if peer, ok := conf.Internal.TransportManager.PeerRegistry.Get(peerIDFqdn); ok {
+				if transportManager != nil {
+					if peer, ok := transportManager.PeerRegistry.Get(peerIDFqdn); ok {
 						s := peer.Stats.GetDetailedStats()
 						peerInfo.HelloSent = s.HelloSent
 						peerInfo.HelloReceived = s.HelloReceived
@@ -868,8 +876,8 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 
 	// Add all peers from PeerRegistry that we haven't listed yet
 	// This includes peers that sent unsolicited Hello messages or were contacted but not in AgentRegistry
-	if conf.Internal.TransportManager != nil {
-		allPeersFromRegistry := conf.Internal.TransportManager.PeerRegistry.All()
+	if transportManager != nil {
+		allPeersFromRegistry := transportManager.PeerRegistry.All()
 		for _, peer := range allPeersFromRegistry {
 			peerID := peer.ID
 
@@ -934,14 +942,17 @@ func ListKnownPeers(conf *Config) []PeerInfo {
 
 // listPeerSharedZones returns shared zones for each peer agent
 func listPeerSharedZones(conf *Config) []interface{} {
+	// deadcode: AgentRegistry was removed from InternalConf (now in InternalMpConf)
+	var agentRegistry *AgentRegistry
+
 	data := make([]interface{}, 0)
 
-	if conf.Internal.AgentRegistry == nil {
+	if agentRegistry == nil {
 		return data
 	}
 
 	// Use callback-based iterator to avoid holding shard locks during processing
-	conf.Internal.AgentRegistry.S.IterCb(func(agentID AgentId, agent *Agent) {
+	agentRegistry.S.IterCb(func(agentID AgentId, agent *Agent) {
 		agent.Mu.RLock()
 		identity := agent.Identity
 		state := agent.State
@@ -996,14 +1007,17 @@ func listPeerSharedZones(conf *Config) []interface{} {
 
 // listAgentsForZone returns peer agents that share a specific zone
 func listAgentsForZone(conf *Config, zoneName string) []string {
+	// deadcode: AgentRegistry was removed from InternalConf (now in InternalMpConf)
+	var agentRegistry *AgentRegistry
+
 	agents := make([]string, 0)
 
-	if conf.Internal.AgentRegistry == nil {
+	if agentRegistry == nil {
 		return agents
 	}
 
 	// Use callback-based iterator to avoid holding shard locks during processing
-	conf.Internal.AgentRegistry.S.IterCb(func(agentID AgentId, agent *Agent) {
+	agentRegistry.S.IterCb(func(agentID AgentId, agent *Agent) {
 		agent.Mu.RLock()
 		hasZone := agent.Zones[ZoneName(zoneName)]
 		identity := agent.Identity

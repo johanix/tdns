@@ -72,15 +72,6 @@ func (zd *ZoneData) HsyncChanged(newzd *ZoneData) (bool, *HsyncStatus, error) {
 	return differ, &hss, nil
 }
 
-// DnskeyStatus holds the result of DNSKEY change detection (local keys only).
-type DnskeyStatus struct {
-	Time             time.Time
-	ZoneName         string
-	LocalAdds        []dns.RR // Local DNSKEYs added since last check
-	LocalRemoves     []dns.RR // Local DNSKEYs removed since last check
-	CurrentLocalKeys []dns.RR // Complete current set of local DNSKEYs (for replace operations)
-}
-
 // LocalDnskeysChanged compares old and new DNSKEY RRsets, filtering out
 // known remote DNSKEYs, and returns whether local DNSKEYs changed.
 // Modeled on HsyncChanged() but operates on dns.TypeDNSKEY.
@@ -280,7 +271,7 @@ func filterLocalDNSKEYs(rrset *core.RRset, remoteKeyTags map[uint16]bool) []dns.
 func (zd *ZoneData) RequestAndWaitForKeyInventory(ctx context.Context) {
 	zd.SetKeystateTime(time.Now())
 
-	tm := Conf.Internal.MPTransport
+	var tm *MPTransportBridge // deadcode: field removed from InternalConf
 	if tm == nil {
 		zd.SetKeystateOK(false)
 		zd.SetKeystateError("no TransportManager available")
@@ -365,13 +356,13 @@ func (zd *ZoneData) RequestAndWaitForKeyInventory(ctx context.Context) {
 //
 // Modeled on RequestAndWaitForKeyInventory.
 func (zd *ZoneData) RequestAndWaitForEdits(ctx context.Context) {
-	tm := Conf.Internal.MPTransport
+	var tm *MPTransportBridge // deadcode: field removed from InternalConf
 	if tm == nil {
 		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no TransportManager available", zd.ZoneName)
 		return
 	}
 
-	msgQs := Conf.Internal.MsgQs
+	var msgQs *MsgQs // deadcode: field removed from InternalConf
 	if msgQs == nil || msgQs.EditsResponse == nil {
 		zd.Logger.Printf("RequestAndWaitForEdits: zone %s: no EditsResponse channel available", zd.ZoneName)
 		return
@@ -420,7 +411,7 @@ func (zd *ZoneData) RequestAndWaitForEdits(ctx context.Context) {
 // RequestAndWaitForConfig sends an RFI CONFIG to a peer agent and waits for the config
 // response on MsgQs.ConfigResponse. Returns the config data or nil on timeout/error.
 func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subtype string) *ConfigResponseMsg {
-	msgQs := Conf.Internal.MsgQs
+	var msgQs *MsgQs // deadcode: field removed from InternalConf
 	if msgQs == nil || msgQs.ConfigResponse == nil {
 		lgEngine.Warn("RequestAndWaitForConfig: no ConfigResponse channel available")
 		return nil
@@ -462,7 +453,7 @@ func RequestAndWaitForConfig(ar *AgentRegistry, agent *Agent, zone string, subty
 // RequestAndWaitForAudit sends an RFI AUDIT to a peer agent and waits for the audit
 // response on MsgQs.AuditResponse. Returns the audit data or nil on timeout/error.
 func RequestAndWaitForAudit(ar *AgentRegistry, agent *Agent, zone string) *AuditResponseMsg {
-	msgQs := Conf.Internal.MsgQs
+	var msgQs *MsgQs // deadcode: field removed from InternalConf
 	if msgQs == nil || msgQs.AuditResponse == nil {
 		lgEngine.Warn("RequestAndWaitForAudit: no AuditResponse channel available")
 		return nil
@@ -509,13 +500,14 @@ func (zd *ZoneData) applyEditsToSDE(agentRecords map[string]map[string][]string)
 		return
 	}
 
-	zdr := Conf.Internal.ZoneDataRepo
+	var zdr *ZoneDataRepo // deadcode: field removed from InternalConf
 	if zdr == nil {
 		zd.Logger.Printf("applyEditsToSDE: zone %s: no ZoneDataRepo available", zd.ZoneName)
 		return
 	}
 
 	added := 0
+/*
 	for agentID, ownerMap := range agentRecords {
 		for _, rrStrings := range ownerMap {
 			for _, rrStr := range rrStrings {
@@ -524,11 +516,12 @@ func (zd *ZoneData) applyEditsToSDE(agentRecords map[string]map[string][]string)
 					zd.Logger.Printf("applyEditsToSDE: zone %s: failed to parse RR %q: %v", zd.ZoneName, rrStr, err)
 					continue
 				}
-				zdr.AddConfirmedRR(ZoneName(zd.ZoneName), AgentId(agentID), rr)
+				// 20260412 johani removed: zdr.AddConfirmedRR(ZoneName(zd.ZoneName), AgentId(agentID), rr)
 				added++
 			}
 		}
 	}
+*/
 
 	zd.Logger.Printf("applyEditsToSDE: zone %s: applied %d confirmed RRs from %d agents", zd.ZoneName, added, len(agentRecords))
 }
@@ -933,7 +926,7 @@ func MPPreRefresh(zd, new_zd *ZoneData) {
 
 	// HSYNC and DNSKEY change detection
 	switch Globals.App.Type {
-	case AppTypeAgent, AppTypeMPAgent, AppTypeCombiner, AppTypeMPCombiner, AppTypeAuth, AppTypeMPSigner:
+	case AppTypeAgent, AppTypeMPAgent, AppTypeMPCombiner, AppTypeAuth, AppTypeMPSigner:
 		var err error
 		analysis.HsyncChanged, analysis.HsyncStatus, err = zd.HsyncChanged(new_zd)
 		if err != nil {
@@ -970,7 +963,7 @@ func MPPreRefresh(zd, new_zd *ZoneData) {
 
 	// Combiner: snapshot upstream data before applying contributions to new_zd
 	switch Globals.App.Type {
-	case AppTypeCombiner, AppTypeMPCombiner:
+	case AppTypeMPCombiner:
 		new_zd.snapshotUpstreamData()
 	}
 
@@ -1009,7 +1002,7 @@ func MPPreRefresh(zd, new_zd *ZoneData) {
 
 	// Combiner: HSYNC match check and combine with local changes on new_zd.
 	switch Globals.App.Type {
-	case AppTypeCombiner, AppTypeMPCombiner:
+	case AppTypeMPCombiner:
 		if analysis.HsyncChanged {
 			matched, _, _ := new_zd.matchHsyncProvider(ourHsyncIdentities())
 			if matched && !new_zd.Options[OptMPDisallowEdits] {
@@ -1074,52 +1067,15 @@ func MPPostRefresh(zd *ZoneData) {
 		}
 	}
 
-	// DNSKEY change routing
+	// DNSKEY change routing — moved to tdns-mp MPPostRefresh
 	if analysis.DnskeyChanged {
 		switch Globals.App.Type {
-		case AppTypeAgent, AppTypeMPAgent:
-			if zd.Options[OptMultiProvider] {
-				lg.Info("local DNSKEYs changed, sending to HsyncEngine", "zone", zd.ZoneName)
-				zd.SyncQ <- SyncRequest{
-					Command:      "SYNC-DNSKEY-RRSET",
-					ZoneName:     ZoneName(zd.ZoneName),
-					ZoneData:     zd,
-					DnskeyStatus: analysis.DnskeyStatus,
-				}
-			} else if zd.MusicSyncQ != nil {
-				lg.Info("DNSSEC keys have changed, sending to DelegationSyncEngine", "zone", zd.ZoneName)
-				oldkeys, err := zd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
-				if err != nil {
-					lg.Error("GetRRset failed", "zone", zd.ZoneName, "rrtype", dns.TypeDNSKEY, "err", err)
-				}
-				// Note: after the flip, zd has the new data. For old keys we'd
-				// need the pre-flip data, but the legacy MusicSync path is rarely used.
-				zd.MusicSyncQ <- MusicSyncRequest{
-					Command:    "SYNC-DNSKEY-RRSET",
-					ZoneName:   zd.ZoneName,
-					ZoneData:   zd,
-					OldDnskeys: oldkeys,
-					NewDnskeys: oldkeys, // post-flip, old=new; legacy path approximation
-				}
-			}
-		case AppTypeCombiner, AppTypeMPCombiner:
+		case AppTypeMPCombiner:
 			lg.Debug("incoming DNSKEYs have changed, no action needed for combiner", "zone", zd.ZoneName)
 		}
 	}
 
-	// HSYNC change routing
-	if analysis.HsyncChanged {
-		switch Globals.App.Type {
-		case AppTypeAgent, AppTypeMPAgent:
-			lg.Info("HSYNC RRset has changed, sending update to HsyncEngine", "zone", zd.ZoneName)
-			zd.SyncQ <- SyncRequest{
-				Command:    "HSYNC-UPDATE",
-				ZoneName:   ZoneName(zd.ZoneName),
-				ZoneData:   zd,
-				SyncStatus: analysis.HsyncStatus,
-			}
-		}
-		// Combiner HSYNC handling (allow-edits, CombineWithLocalChanges)
-		// is done in MPPreRefresh on new_zd before the flip.
-	}
+	// HSYNC change routing — moved to tdns-mp MPPostRefresh
+	// Combiner HSYNC handling (allow-edits, CombineWithLocalChanges)
+	// is done in MPPreRefresh on new_zd before the flip.
 }

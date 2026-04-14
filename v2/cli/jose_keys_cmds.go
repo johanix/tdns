@@ -75,7 +75,7 @@ func runKeysCommand(cmd *cobra.Command, subcommand string, args []string) {
 
 	appType := tdns.AppTypeAgent
 	if parent == "combiner" {
-		appType = tdns.AppTypeCombiner
+		appType = tdns.AppTypeMPCombiner
 	}
 
 	runArgs := []string{subcommand}

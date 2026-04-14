@@ -64,20 +64,18 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 				continue
 			}
 
-			if _, exist := ZonesToKeepSigned[zd.ZoneName]; exist {
-				continue
+			if _, exist := ZonesToKeepSigned[zd.ZoneName]; !exist {
+				lgSigner.Info("adding zone to re-sign list", "zone", zd.ZoneName)
 			}
-			lgSigner.Info("adding zone to re-sign list", "zone", zd.ZoneName)
 			ZonesToKeepSigned[zd.ZoneName] = zd
 
 		case <-ticker.C:
 			for _, zd := range ZonesToKeepSigned {
-				// Skip multi-provider zones where our HSYNC says NOSIGN
-				if zd.Options[OptMultiProvider] {
-					shouldSign, _ := zd.weAreASigner()
-					if !shouldSign {
-						continue
-					}
+				// Skip zones where signing has been disabled since
+				// they were added to the list. MP zones can toggle
+				// OptInlineSigning dynamically based on HSYNC analysis.
+				if !zd.Options[OptInlineSigning] && !zd.Options[OptOnlineSigning] {
+					continue
 				}
 				lgSigner.Debug("re-signing zone", "zone", zd.ZoneName)
 				newrrsigs, err := zd.SignZone(zd.KeyDB, false)

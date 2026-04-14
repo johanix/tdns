@@ -4,6 +4,38 @@
  * KeyStateWorker: background goroutine for automatic DNSSEC key state transitions.
  * Handles time-based transitions (published→standby, retired→removed) and
  * maintains the configured number of standby keys per zone.
+ *
+ * =====================================================================
+ * NOT YET WIRED INTO TDNS-AUTH
+ * =====================================================================
+ *
+ * As of 2026-04-09 this file is NOT registered by any tdns engine and
+ * has zero callers inside tdns/v2/. tdns-mp has its own live copy at
+ * tdns-mp/v2/key_state_worker.go which is started by
+ * tdns-mp/v2/start_signer.go for the mpsigner role.
+ *
+ * The intent is that this file should eventually be wired into
+ * tdns-auth (StartAuth) so that a plain tdns-auth signer also gets
+ * automatic key state transitions and standby key maintenance. That
+ * wiring is deferred until the tdns-auth key management logic is
+ * revisited more broadly; doing it in isolation risks making choices
+ * that turn out to be wrong once the larger picture is reconsidered.
+ *
+ * When that work is picked up:
+ *   - Register KeyStateWorker from StartAuth (gated positively on
+ *     AppTypeAuth; do NOT use a negative !AppTypeMPSigner check).
+ *   - Decide whether tdns and tdns-mp should share this file or keep
+ *     diverging copies. Right now they are near-identical.
+ *   - Review the OptMultiProvider branches at lines ~181/213/224.
+ *     These are zone-option checks (not AppTypeMP* branches) and are
+ *     legitimate, but they reference DnskeyStateMpremove and
+ *     pushKeystateInventoryToAllAgents which are MP concepts that
+ *     tdns-auth doesn't need. A plain tdns-auth signer can probably
+ *     ignore these branches entirely.
+ *
+ * Until then, this file is preserved as the reference implementation.
+ * Do not delete it; it will be needed when tdns-auth key management
+ * is revisited.
  */
 
 package tdns

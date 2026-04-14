@@ -49,7 +49,6 @@ func (conf *Config) SetupAgentAutoZone(zonename string) (*ZoneData, error) {
 		return nil, fmt.Errorf("SetupAgentAutoZone: failed to create minimal auto zone for agent identity %q: %v", zonename, err)
 	}
 	zd.Options[OptAllowUpdates] = true
-	zd.SyncQ = conf.Internal.SyncQ
 
 	// Check for local notify configuration and set downstream targets
 	if len(conf.MultiProvider.Local.Notify) > 0 {

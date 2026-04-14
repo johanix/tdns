@@ -10,7 +10,6 @@ import (
 	"log"
 	"os"
 	"sort"
-	"strings"
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
@@ -240,29 +239,6 @@ var zoneListCmd = &cobra.Command{
 	Run:   func(cmd *cobra.Command, args []string) { RunZoneList("auth", args) },
 }
 
-var zoneMPListCmd = &cobra.Command{
-	Use:   "mplist",
-	Short: "List multi-provider zones with HSYNCPARAM details",
-	Run:   func(cmd *cobra.Command, args []string) { RunZoneMPList("auth", args) },
-}
-
-func RunZoneMPList(parent string, args []string) {
-	api, err := GetApiClient(parent, true)
-	if err != nil {
-		log.Fatalf("Error getting API client for %s: %v", parent, err)
-	}
-
-	cr, err := SendZoneCommand(api, tdns.ZonePost{
-		Command: "list-mp-zones",
-	})
-	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-		os.Exit(1)
-	}
-
-	ListMPZones(cr)
-}
-
 var zoneSerialBumpCmd = &cobra.Command{
 	Use:   "bump",
 	Short: "Bump SOA serial and epoch (if any) in tdns-auth version of zone",
@@ -293,7 +269,7 @@ func RunZoneBump(parent string, args []string) {
 }
 
 func init() {
-	ZoneCmd.AddCommand(zoneListCmd, zoneMPListCmd, zoneNsecCmd, zoneSignCmd, zoneReloadCmd, zoneSerialBumpCmd)
+	ZoneCmd.AddCommand(zoneListCmd, zoneNsecCmd, zoneSignCmd, zoneReloadCmd, zoneSerialBumpCmd)
 	ZoneCmd.AddCommand(zoneWriteCmd, zoneFreezeCmd, zoneThawCmd)
 
 	zoneNsecCmd.AddCommand(zoneNsecGenerateCmd, zoneNsecShowCmd)
@@ -379,49 +355,6 @@ func ListZones(cr tdns.ZoneResponse) {
 	})
 	out = append(out, zoneLines...)
 	fmt.Printf("%s\n", columnize.SimpleFormat(out))
-}
-
-// ListMPZones displays multi-provider zone details in tabular format.
-func ListMPZones(cr tdns.ZoneResponse) {
-	if len(cr.MPZones) == 0 {
-		fmt.Println("No multi-provider zones configured")
-		return
-	}
-
-	var out []string
-	out = append(out, "Zone|Servers|Signers|Auditors|NSmgmt|ParentSync|Suffix|Options")
-
-	var znames []string
-	for zname := range cr.MPZones {
-		znames = append(znames, zname)
-	}
-	sort.Strings(znames)
-
-	for _, zname := range znames {
-		info := cr.MPZones[zname]
-		servers := strings.Join(info.Servers, ",")
-		if servers == "" {
-			servers = "(none)"
-		}
-		signers := strings.Join(info.Signers, ",")
-		if signers == "" {
-			signers = "(none)"
-		}
-		auditors := strings.Join(info.Auditors, ",")
-		if auditors == "" {
-			auditors = "(none)"
-		}
-		opts := []string{}
-		for _, opt := range info.Options {
-			opts = append(opts, tdns.ZoneOptionToString[opt])
-		}
-		sort.Strings(opts)
-		optStr := "[" + strings.Join(opts, " ") + "]"
-		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s",
-			zname, servers, signers, auditors, info.NSmgmt, info.ParentSync, info.Suffix, optStr))
-	}
-
-	fmt.Println(columnize.SimpleFormat(out))
 }
 
 func VerboseListZone(cr tdns.ZoneResponse) {

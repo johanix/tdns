@@ -153,51 +153,6 @@ are displayed as separate entries to show their independent states.`,
 	},
 }
 
-var (
-	peerPingID  string
-	peerPingDns bool
-	peerPingApi bool
-)
-
-var agentPeerPingCmd = &cobra.Command{
-	Use:   "ping",
-	Short: "Ping a peer (agent or combiner) via DNS CHUNK or API",
-	Long: `Send a ping to a peer and report the result.
-The --id flag specifies the peer identity (e.g. agent.beta.dnslab. or combiner.dnslab.).
-Default transport is DNS CHUNK; use --api for HTTPS API ping.
-
-Examples:
-  tdns-cliv2 agent peer ping --id agent.beta.dnslab.
-  tdns-cliv2 agent peer ping --id combiner.dnslab. --api`,
-	Run: func(cmd *cobra.Command, args []string) {
-		if peerPingID == "" {
-			log.Fatalf("--id flag is required")
-		}
-		if peerPingDns && peerPingApi {
-			log.Fatalf("use either --dns or --api, not both")
-		}
-
-		agentCmd := "peer-ping"
-		if peerPingApi {
-			agentCmd = "peer-apiping"
-		}
-
-		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
-			Command: agentCmd,
-			AgentId: tdns.AgentId(peerPingID),
-		}, "peer")
-		if err != nil {
-			log.Fatalf("Request failed: %v", err)
-		}
-
-		if amr.Error {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Error: %s\n", amr.ErrorMsg)
-			os.Exit(1)
-		}
-		fmt.Println(amr.Msg)
-	},
-}
-
 var agentPeerZonesCmd = &cobra.Command{
 	Use:   "zones",
 	Short: "List shared zones for each peer agent",
@@ -309,7 +264,6 @@ func init() {
 
 	// Add subcommands under "agent peer"
 	agentPeerCmd.AddCommand(agentPeerListCmd)
-	agentPeerCmd.AddCommand(agentPeerPingCmd)
 	agentPeerCmd.AddCommand(agentPeerZonesCmd)
 	agentPeerCmd.AddCommand(agentPeerZoneCmd)
 	agentPeerCmd.AddCommand(agentPeerResyncCmd)
@@ -322,9 +276,6 @@ func init() {
 	// agentLocalZoneDataCmd.PersistentFlags().StringVarP(&localRRtype, "rrtype", "R", "", "RR type to add")
 	agentLocalZoneDataCmd.PersistentFlags().StringVarP(&dnsRecord, "RR", "", "", "DNS record to add")
 	agentPeerListCmd.Flags().BoolP("verbose", "v", false, "Verbose output (show full details)")
-	agentPeerPingCmd.Flags().StringVar(&peerPingID, "id", "", "Peer identity to ping (required)")
-	agentPeerPingCmd.Flags().BoolVar(&peerPingDns, "dns", false, "Use DNS CHUNK ping (default)")
-	agentPeerPingCmd.Flags().BoolVar(&peerPingApi, "api", false, "Use HTTPS API ping")
 	agentPeerZoneCmd.Flags().StringP("zone", "z", "", "Zone name to list agents for (required)")
 
 	agentPeerResyncCmd.Flags().BoolVar(&resyncPush, "push", false, "Re-send local data to combiner and peers")

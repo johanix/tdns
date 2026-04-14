@@ -328,6 +328,11 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 		switch dp.Command {
 		// Find out whether delegation is in sync or not and report on details
 		case "status":
+			if delsyncq == nil {
+				resp.Error = true
+				resp.ErrorMsg = "delegation sync not available"
+				return
+			}
 			lgApi.Debug("delegation status inquiry", "zone", dp.Zone)
 			syncreq.Command = "DELEGATION-STATUS"
 
@@ -344,6 +349,11 @@ func APIdelegation(delsyncq chan DelegationSyncRequest) func(w http.ResponseWrit
 
 		// Find out whether delegation is in sync or not and if not then fix it
 		case "sync":
+			if delsyncq == nil {
+				resp.Error = true
+				resp.ErrorMsg = "delegation sync not available"
+				return
+			}
 			lgApi.Info("checking and syncing delegation data", "zone", dp.Zone)
 			syncreq.Command = "EXPLICIT-SYNC-DELEGATION"
 

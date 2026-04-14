@@ -10,7 +10,6 @@ import (
 	"net/http"
 	"time"
 
-	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -42,12 +41,12 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 		}()
 
 		zd, exist := Zones.Get(zp.Zone)
-		if !exist && zp.Command != "list-zones" && zp.Command != "list-mp-zones" {
+		if !exist && zp.Command != "list-zones" {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", zp.Zone)
 			return
 		}
-		if zd == nil && zp.Command != "list-zones" && zp.Command != "list-mp-zones" {
+		if zd == nil && zp.Command != "list-zones" {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Zone %s: zone data is nil", zp.Zone)
 			return
@@ -183,81 +182,6 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				zones[zname] = zconf
 			}
 			resp.Zones = zones
-
-		case "list-mp-zones":
-			mpZones := map[string]MPZoneInfo{}
-			for item := range Zones.IterBuffered() {
-				zname := item.Key
-				zd := item.Val
-				if !zd.Options[OptMultiProvider] {
-					continue
-				}
-
-				info := MPZoneInfo{}
-
-				// Collect options from both zd.Options and zd.MP.MPdata.Options
-				seen := make(map[ZoneOption]bool)
-				for opt, val := range zd.Options {
-					if val {
-						info.Options = append(info.Options, opt)
-						seen[opt] = true
-					}
-				}
-				if zd.MP != nil && zd.MP.MPdata != nil {
-					for opt, val := range zd.MP.MPdata.Options {
-						if val && !seen[opt] {
-							info.Options = append(info.Options, opt)
-						}
-					}
-				}
-
-				// Extract HSYNCPARAM data from zone apex
-				apex, err := zd.GetOwner(zd.ZoneName)
-				if err == nil && apex != nil {
-					hsyncparamRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
-					if exists && len(hsyncparamRRset.RRs) > 0 {
-						if prr, ok := hsyncparamRRset.RRs[0].(*dns.PrivateRR); ok {
-							if hp, ok := prr.Data.(*core.HSYNCPARAM); ok {
-								switch hp.GetNSmgmt() {
-								case core.HsyncNSmgmtAGENT:
-									info.NSmgmt = "agent"
-								default:
-									info.NSmgmt = "owner"
-								}
-								switch hp.GetParentSync() {
-								case core.HsyncParentSyncAgent:
-									info.ParentSync = "agent"
-								default:
-									info.ParentSync = "owner"
-								}
-								info.Servers = hp.GetServers()
-								info.Signers = hp.GetSigners()
-								info.Auditors = hp.GetAuditors()
-								info.Suffix = hp.GetSuffix()
-							}
-						}
-					}
-				}
-
-				if info.NSmgmt == "" {
-					info.NSmgmt = "owner"
-				}
-				if info.ParentSync == "" {
-					info.ParentSync = "owner"
-				}
-				if info.Servers == nil {
-					info.Servers = []string{}
-				}
-				if info.Signers == nil {
-					info.Signers = []string{}
-				}
-				if info.Auditors == nil {
-					info.Auditors = []string{}
-				}
-
-				mpZones[zname] = info
-			}
-			resp.MPZones = mpZones
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown zone command: %s", zp.Command)

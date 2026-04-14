@@ -743,30 +743,8 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	wantsSync := zd.Options[OptDelSyncParent] || zd.Options[OptDelSyncChild]
 
-	// Check HSYNCPARAM for parentsync=agent, which means the providers
-	// coordinate parent sync via leader election.
-	// Only if our identity is listed in the zone's HSYNC3 records.
-	if !zd.Options[OptDelSyncChild] && Globals.App.Type == AppTypeAgent {
-		matched, _, _ := zd.matchHsyncProvider(ourHsyncIdentities())
-		if matched {
-			apex, err := zd.GetOwner(zd.ZoneName)
-			if err == nil && apex != nil {
-				hsyncparamRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
-				if exists && len(hsyncparamRRset.RRs) > 0 {
-					if prr, ok := hsyncparamRRset.RRs[0].(*dns.PrivateRR); ok {
-						if hsyncparam, ok := prr.Data.(*core.HSYNCPARAM); ok {
-							if hsyncparam.GetParentSync() == core.HsyncParentSyncAgent {
-								lg.Info("SetupZoneSync: HSYNCPARAM parentsync=agent, enabling delegation sync",
-									"zone", zd.ZoneName)
-								zd.Options[OptDelSyncChild] = true
-								wantsSync = true
-							}
-						}
-					}
-				}
-			}
-		}
-	}
+	// Dynamic parentsync=agent detection removed — handled by tdns-mp
+	// MPPostRefresh (hsync_utils.go) and OnFirstLoad (start_agent.go).
 
 	if !wantsSync {
 		lg.Debug("SetupZoneSync: zone does not require delegation sync", "zone", zd.ZoneName)

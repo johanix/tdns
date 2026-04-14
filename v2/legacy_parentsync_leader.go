@@ -101,6 +101,7 @@ func (lem *LeaderElectionManager) SetOnLeaderElected(f func(zone ZoneName) error
 	lem.onLeaderElected = f
 }
 
+
 // StartGroupElection initiates a leader election for a provider group.
 // The election is broadcast using one of the group's zones as the RFI channel.
 // The winner becomes leader for ALL zones in the group.
@@ -927,6 +928,7 @@ func (lem *LeaderElectionManager) handleCall(zone ZoneName, senderID AgentId, re
 		lgElect.Error("failed to broadcast ELECT-VOTE", "zone", zone, "err", err)
 	}
 }
+
 
 func (lem *LeaderElectionManager) handleVote(zone ZoneName, senderID AgentId, records map[string][]string) {
 	term := parseUint64(records, "_term")

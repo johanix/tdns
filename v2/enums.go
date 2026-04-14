@@ -162,7 +162,7 @@ type AppType uint8
 const (
 	AppTypeAuth AppType = iota + 1
 	AppTypeAgent
-	AppTypeCombiner
+	// AppTypeCombiner
 	AppTypeImr // simplified recursor
 	AppTypeCli
 	AppTypeReporter
@@ -179,7 +179,7 @@ const (
 var AppTypeToString = map[AppType]string{
 	AppTypeAuth:       "auth",
 	AppTypeAgent:      "agent",
-	AppTypeCombiner:   "combiner",
+	//AppTypeCombiner:   "combiner",
 	AppTypeImr:        "imr",
 	AppTypeCli:        "cli",
 	AppTypeReporter:   "reporter",
@@ -196,7 +196,7 @@ var AppTypeToString = map[AppType]string{
 var StringToAppType = map[string]AppType{
 	"auth":       AppTypeAuth,
 	"agent":      AppTypeAgent,
-	"combiner":   AppTypeCombiner,
+	//"combiner":   AppTypeCombiner,
 	"imr":        AppTypeImr,
 	"cli":        AppTypeCli,
 	"reporter":   AppTypeReporter,

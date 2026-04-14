@@ -72,7 +72,7 @@ func (conf *Config) parseImrOptions() {
 	conf.Imr.Options = clean
 }
 
-func (conf *Config) parseAuthOptions() {
+func (conf *Config) ParseAuthOptions() {
 	raw := conf.DnsEngine.OptionsStrs
 	clean := make(map[AuthOption]string)
 
@@ -254,13 +254,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			}
 
 		case OptMultiProvider:
-			// On the signer (AppTypeAuth), require server-level multi-provider config.
-			// On agents, the zone option alone is sufficient — the HSYNC RRset is the authority.
-			if Globals.App.Type == AppTypeAuth && (conf.MultiProvider == nil || !conf.MultiProvider.Active) {
-				lg.Error("option requires multi-provider.active in server config", "zone", zname, "option", ZoneOptionToString[opt])
-				if zd != nil {
-					zd.SetError(ConfigError, "option %s requires multi-provider.active: true in server config", ZoneOptionToString[opt])
-				}
+			if !invokeOptionValidator(opt, conf, zname, zd, options) {
 				continue
 			}
 			options[opt] = true
@@ -343,13 +337,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			lg.Debug("catalog member auto-delete enabled", "zone", zname)
 
 		case OptMPManualApproval:
-			// Only valid on the combiner — controls whether incoming UPDATEs
-			// from agents require manual approval before being applied.
-			if Globals.App.Type != AppTypeCombiner && Globals.App.Type != AppTypeMPCombiner {
-				lg.Error("mp-manual-approval is only valid on the combiner, ignoring", "zone", zname)
-				if zd != nil {
-					zd.SetError(ConfigError, "mp-manual-approval is only valid on combiner zones")
-				}
+			if !invokeOptionValidator(opt, conf, zname, zd, options) {
 				continue
 			}
 			options[opt] = true

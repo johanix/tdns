@@ -14,7 +14,7 @@ replace (
 require (
 	github.com/c-bata/go-prompt v0.2.6
 	github.com/chzyer/readline v0.0.0-20180603132655-2972be24d48e
-	github.com/go-jose/go-jose/v4 v4.1.3
+	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/go-playground/validator/v10 v10.22.1
 	github.com/gookit/goutil v0.6.15
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000

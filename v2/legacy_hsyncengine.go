@@ -17,31 +17,6 @@ import (
 var lgEngine = Logger("engine")
 var lgConnRetryEngine = Logger("conn-retry")
 
-type SyncRequest struct {
-	Command      string
-	ZoneName     ZoneName
-	ZoneData     *ZoneData
-	SyncStatus   *HsyncStatus
-	OldDnskeys   *core.RRset
-	NewDnskeys   *core.RRset
-	DnskeyStatus *DnskeyStatus // Local DNSKEY adds/removes (Phase 5)
-	Response     chan SyncResponse
-}
-
-type SyncResponse struct {
-	Status   bool
-	Error    bool
-	ErrorMsg string
-	Msg      string
-}
-
-type SyncStatus struct {
-	Identity AgentId
-	Agents   map[AgentId]*Agent
-	Error    bool
-	Response chan SyncStatus
-}
-
 // Define task struct for deferred operations
 type DeferredTask struct {
 	Action      string
@@ -61,12 +36,13 @@ func HsyncEngine(ctx context.Context, conf *Config, msgQs *MsgQs) {
 	commandQ := msgQs.Command
 	debugCommandQ := msgQs.DebugCommand
 	synchedDataUpdateQ := msgQs.SynchedDataUpdate
-	registry := conf.Internal.AgentRegistry
+	var registry *AgentRegistry                  // deadcode: field removed from InternalConf
+	var lem0 *LeaderElectionManager              // deadcode: field removed from InternalConf
 	registry.LocalAgent.Identity = string(ourId) // Make sure registry knows our identity
 
 	if registry.GossipStateTable != nil {
 		registry.GossipStateTable.SetOnGroupOperational(func(groupHash string) {
-			lem := conf.Internal.LeaderElectionManager
+			lem := lem0
 			pgm := registry.ProviderGroupManager
 			if lem == nil || pgm == nil {
 				return
@@ -97,13 +73,13 @@ func HsyncEngine(ctx context.Context, conf *Config, msgQs *MsgQs) {
 		})
 		registry.GossipStateTable.SetOnGroupDegraded(func(groupHash string) {
 			lgEngine.Info("OnGroupDegraded: invalidating group leader", "group", groupHash[:8])
-			lem := conf.Internal.LeaderElectionManager
+			lem := lem0
 			if lem != nil {
 				lem.InvalidateGroupLeader(groupHash)
 			}
 		})
 		registry.GossipStateTable.SetOnElectionUpdate(func(groupHash string, state GroupElectionState) {
-			lem := conf.Internal.LeaderElectionManager
+			lem := lem0
 			if lem != nil {
 				lem.ApplyGossipElection(groupHash, state)
 			}
@@ -111,12 +87,12 @@ func HsyncEngine(ctx context.Context, conf *Config, msgQs *MsgQs) {
 	}
 
 	var syncitem SyncRequest
-	syncQ := conf.Internal.SyncQ
+	var syncQ chan SyncRequest                  // deadcode: field removed from InternalConf
+	var syncStatusQ = make(chan SyncStatus, 10) // deadcode: field removed from InternalConf
 
 	var msgReport *AgentMsgReport
 	var mgmtPost *AgentMgmtPostPlus
 	var msgPost *AgentMsgPostPlus
-	conf.Internal.SyncStatusQ = make(chan SyncStatus, 10)
 
 	// Configure intervals
 	heartbeatInterval := configureInterval("agent.remote.beatinterval", 15, 1800)
@@ -153,7 +129,7 @@ func HsyncEngine(ctx context.Context, conf *Config, msgQs *MsgQs) {
 		case <-HBticker.C:
 			registry.SendHeartbeats()
 
-		case req := <-conf.Internal.SyncStatusQ:
+		case req := <-syncStatusQ:
 			registry.HandleStatusRequest(req)
 
 		case statusMsg := <-msgQs.StatusUpdate:
@@ -164,7 +140,7 @@ func HsyncEngine(ctx context.Context, conf *Config, msgQs *MsgQs) {
 			switch statusMsg.SubType {
 			case "ns-changed", "ksk-changed":
 				// Only the leader agent should sync delegation with parent
-				lem := conf.Internal.LeaderElectionManager
+				lem := lem0
 				if lem != nil && !lem.IsLeader(ZoneName(statusMsg.Zone)) {
 					lgEngine.Info("STATUS-UPDATE: not the delegation sync leader, ignoring", "zone", statusMsg.Zone, "subtype", statusMsg.SubType)
 					break

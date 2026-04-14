@@ -14,40 +14,6 @@ import (
 	"time"
 )
 
-// PendingEditRecord represents a row in the CombinerPendingEdits table.
-type PendingEditRecord struct {
-	EditID         int                 `json:"edit_id"`
-	Zone           string              `json:"zone"`
-	SenderID       string              `json:"sender_id"`
-	DeliveredBy    string              `json:"delivered_by"`
-	DistributionID string              `json:"distribution_id"`
-	Records        map[string][]string `json:"records"`
-	ReceivedAt     time.Time           `json:"received_at"`
-}
-
-// ApprovedEditRecord represents a row in the CombinerApprovedEdits table.
-type ApprovedEditRecord struct {
-	EditID         int                 `json:"edit_id"`
-	Zone           string              `json:"zone"`
-	SenderID       string              `json:"sender_id"`
-	DistributionID string              `json:"distribution_id"`
-	Records        map[string][]string `json:"records"`
-	ReceivedAt     time.Time           `json:"received_at"`
-	ApprovedAt     time.Time           `json:"approved_at"`
-}
-
-// RejectedEditRecord represents a row in the CombinerRejectedEdits table.
-type RejectedEditRecord struct {
-	EditID         int                 `json:"edit_id"`
-	Zone           string              `json:"zone"`
-	SenderID       string              `json:"sender_id"`
-	DistributionID string              `json:"distribution_id"`
-	Records        map[string][]string `json:"records"`
-	ReceivedAt     time.Time           `json:"received_at"`
-	RejectedAt     time.Time           `json:"rejected_at"`
-	Reason         string              `json:"reason"`
-}
-
 // NextEditID returns the next available edit ID across all three tables.
 func NextEditID(kdb *KeyDB) (int, error) {
 	kdb.mu.Lock()

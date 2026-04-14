@@ -27,7 +27,6 @@ import (
 //  6. Query failure → retry with backoff
 func (conf *Config) ParentSyncAfterKeyPublication(zone ZoneName, keyName string, keyid uint16, algorithm uint8) {
 	kdb := conf.Internal.KeyDB
-	lem := conf.Internal.LeaderElectionManager
 
 	// Wait for IMR to become available (it starts asynchronously).
 	var imr *Imr
@@ -44,12 +43,6 @@ func (conf *Config) ParentSyncAfterKeyPublication(zone ZoneName, keyName string,
 		return
 	}
 
-	// Only the leader should bootstrap.
-	if lem != nil && !lem.IsLeader(zone) {
-		lgElect.Info("ParentSyncAfterKeyPublication: not the leader, skipping", "zone", zone)
-		return
-	}
-
 	// Check HSYNCPARAM parentsync=agent.
 	if !ZoneHasParentSyncAgent(zone) {
 		lgElect.Info("ParentSyncAfterKeyPublication: parentsync is not 'agent', skipping", "zone", zone)
@@ -62,11 +55,6 @@ func (conf *Config) ParentSyncAfterKeyPublication(zone ZoneName, keyName string,
 	bootstrapped := false
 
 	for attempt := 1; attempt <= maxRetries; attempt++ {
-		// Re-check leadership before each attempt.
-		if lem != nil && !lem.IsLeader(zone) {
-			lgElect.Info("ParentSyncAfterKeyPublication: lost leadership, aborting", "zone", zone)
-			return
-		}
 
 		keyState, err := QueryParentKeyState(kdb, imr, keyName, keyid)
 		if err != nil {

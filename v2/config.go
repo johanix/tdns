@@ -11,7 +11,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/johanix/tdns-transport/v2/transport"
 	cache "github.com/johanix/tdns/v2/cache"
 )
 
@@ -506,7 +505,6 @@ type InternalDnsConf struct {
 	UpdateHandlers      []UpdateHandlerRegistration    // UPDATE handlers (registered via RegisterUpdateHandler)
 	UpdateHandlersMutex sync.RWMutex                   // protects UpdateHandlers slice
 	DelegationSyncQ     chan DelegationSyncRequest
-	MusicSyncQ          chan MusicSyncRequest
 	NotifyQ             chan NotifyRequest
 	AuthQueryQ          chan AuthQueryRequest
 	ResignQ             chan *ZoneData     // the names of zones that should be kept re-signed should be sent into this channel
@@ -515,39 +513,20 @@ type InternalDnsConf struct {
 	Scanner             *Scanner // Scanner instance for async job tracking
 }
 
-// InternalMpConf holds multi-provider internal state: transport,
-// agent registry, combiner state, message channels. Moves to
-// tdns-mp after repo split.
-type InternalMpConf struct {
-	SyncQ                 chan SyncRequest
-	MsgQs                 *MsgQs // aggregated channels for agent communication
-	SyncStatusQ           chan SyncStatus
-	AgentRegistry         *AgentRegistry
-	ZoneDataRepo          *ZoneDataRepo
-	CombinerState         *CombinerState              // Combiner business logic state (error journal, protected namespaces)
-	TransportManager      *transport.TransportManager // Generic transport (Router, PeerRegistry, DNS/API transports, RMQ)
-	MPTransport           *MPTransportBridge          // MP-specific transport bridge (authorization, discovery, enqueue, DNSKEY tracking)
-	LeaderElectionManager *LeaderElectionManager      // Per-zone leader election for delegation sync; nil if not agent
-	ChunkPayloadStore     ChunkPayloadStore           // Optional: for query-mode CHUNK (agent); keyed by qname; set when agent chunk_mode is "query"
-	MPZoneNames           []string                    // Zone names with OptMultiProvider, collected at parse time for SDE hydration
-	DistributionCache     *DistributionCache          // In-memory cache of distributions (agent/combiner)
-	KdcDB                 interface{}                 // *kdc.KdcDB - using interface{} to avoid circular import
-	KdcConf               interface{}                 // *kdc.KdcConf - using interface{} to avoid circular import
-	KrsDB                 interface{}                 // *krs.KrsDB - using interface{} to avoid circular import
-	KrsConf               interface{}                 // *krs.KrsConf - using interface{} to avoid circular import
-}
-
-// InternalConf embeds both DNS and MP internal configuration.
-// Field promotion means all existing access sites continue to
-// work unchanged.
+// InternalConf holds DNS-internal state (channels, engine references).
+// MP state has moved to tdns-mp's own InternalMpConf.
 type InternalConf struct {
 	InternalDnsConf
-	InternalMpConf
 
 	// PostParseZonesHook is called after ParseZones completes during
 	// reload (SIGHUP or "config reload-zones"). Set by MP apps to
 	// register tdns-mp callbacks on newly added zones.
 	PostParseZonesHook func()
+
+	// PostValidateConfigHook is called at the end of ValidateConfig.
+	// Set by MP apps (before calling parent MainInit) to run
+	// MP-specific config validators alongside the built-in ones.
+	PostValidateConfigHook func(conf *Config) error
 }
 
 type MsgQs struct {
@@ -657,7 +636,6 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 	prezones := Zones.Keys()
 	lgConfig.Info("ReloadZones: zones prior to reloading", "zones", prezones)
 	// XXX: This is wrong. We must get the zones config file from outside (to enamble things like MUSIC to use a different config file)
-	conf.Internal.MPZoneNames = nil             // reset before re-collection by option handler
 	zonelist, err := conf.ParseZones(ctx, true) // true: reload, not initial parsing
 	if err != nil {
 		confMu.Unlock()

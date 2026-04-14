@@ -147,10 +147,9 @@ type ZoneData struct {
 	Downstreams        []string // secondaries that we notify
 	Zonefile           string
 	DelegationSyncQ    chan DelegationSyncRequest
-	MusicSyncQ         chan MusicSyncRequest // Multi-signer (communication between music-sidecars)
-	Parent             string                // name of parentzone (if filled in)
-	ParentNS           []string              // names of parent nameservers
-	ParentServers      []string              // addresses of parent nameservers
+	Parent             string   // name of parentzone (if filled in)
+	ParentNS           []string // names of parent nameservers
+	ParentServers      []string // addresses of parent nameservers
 	Children           map[string]*ChildDelegationData
 	DelegationBackend  DelegationBackend // parent-side: backend for storing child delegation data
 	Options            map[ZoneOption]bool
@@ -159,7 +158,6 @@ type ZoneData struct {
 	MultiSigner        *MultiSignerConf
 	KeyDB              *KeyDB
 	AppType            AppType
-	SyncQ              chan SyncRequest
 	Error              bool        // zone is broken and cannot be used
 	ErrorType          ErrorType   // "config" | "refresh" | "notify" | "update"
 	ErrorMsg           string      // reason for the error (if known)
@@ -191,80 +189,6 @@ type ZoneData struct {
 	// They receive zd which now serves the new data. Used for: queue sends (SyncQ,
 	// DelegationSyncQ) that need the live zone pointer, and any post-flip notifications.
 	OnZonePostRefresh []func(zd *ZoneData)
-}
-
-// Thread-safe accessors for fields accessed from multiple goroutines.
-
-func (zd *ZoneData) GetLastKeyInventory() *KeyInventorySnapshot {
-	zd.mu.Lock()
-	defer zd.mu.Unlock()
-	if zd.MP == nil {
-		return nil
-	}
-	return zd.MP.LastKeyInventory
-}
-
-func (zd *ZoneData) SetLastKeyInventory(inv *KeyInventorySnapshot) {
-	zd.mu.Lock()
-	defer zd.mu.Unlock()
-	zd.EnsureMP()
-	zd.MP.LastKeyInventory = inv
-}
-
-func (zd *ZoneData) GetKeystateOK() bool {
-	zd.mu.Lock()
-	defer zd.mu.Unlock()
-	if zd.MP == nil {
-		return false
-	}
-	return zd.MP.KeystateOK
-}
-
-func (zd *ZoneData) SetKeystateOK(ok bool) {
-	zd.mu.Lock()
-	defer zd.mu.Unlock()
-	zd.EnsureMP()
-	zd.MP.KeystateOK = ok
-}
-
-func (zd *ZoneData) GetKeystateError() string {
-	zd.mu.Lock()
-	defer zd.mu.Unlock()
-	if zd.MP == nil {
-		return ""
-	}
-	return zd.MP.KeystateError
-}
-
-func (zd *ZoneData) SetKeystateError(err string) {
-	zd.mu.Lock()
-	defer zd.mu.Unlock()
-	zd.EnsureMP()
-	zd.MP.KeystateError = err
-}
-
-func (zd *ZoneData) GetKeystateTime() time.Time {
-	zd.mu.Lock()
-	defer zd.mu.Unlock()
-	if zd.MP == nil {
-		return time.Time{}
-	}
-	return zd.MP.KeystateTime
-}
-
-func (zd *ZoneData) SetKeystateTime(t time.Time) {
-	zd.mu.Lock()
-	defer zd.mu.Unlock()
-	zd.EnsureMP()
-	zd.MP.KeystateTime = t
-}
-
-// EnsureMP initializes the MP extension if nil. Must be called
-// with zd.mu held or before concurrent access begins.
-func (zd *ZoneData) EnsureMP() {
-	if zd.MP == nil {
-		zd.MP = &ZoneMPExtension{}
-	}
 }
 
 // Lock and Unlock expose the mutex for code that moves to
@@ -789,3 +713,5 @@ type TsigDetails struct {
 	Algorithm string `validate:"required" yaml:"algorithm"`
 	Secret    string `validate:"required" yaml:"secret"`
 }
+
+type ZoneName string

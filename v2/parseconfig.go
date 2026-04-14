@@ -17,7 +17,6 @@ import (
 	"strings"
 	"time"
 
-	core "github.com/johanix/tdns/v2/core"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/miekg/dns"
 	"github.com/mitchellh/mapstructure"
@@ -219,8 +218,8 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// Validate multi-provider.role matches the application type
 	if conf.MultiProvider != nil {
 		expectedRole := map[AppType]string{
-			AppTypeAuth:       "signer",
-			AppTypeCombiner:   "combiner",
+			AppTypeAuth: "signer",
+			//AppTypeCombiner:   "combiner",
 			AppTypeMPCombiner: "combiner",
 			AppTypeAgent:      "agent",
 		}
@@ -264,34 +263,31 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return fmt.Errorf("error reading processed config: %v", err)
 	}
 
-	// Initialize DnssecPolicies if needed
-	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent,
-		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPAuditor:
-		if conf.Internal.DnssecPolicies == nil {
-			conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
+	// Initialize DnssecPolicies unconditionally. ParseZones (called later
+	// from MainInit) validates zone dnssec_policy references against this
+	// map, so it must be populated before ParseZones runs — for all apps,
+	// not just tdns-native ones.
+	if conf.Internal.DnssecPolicies == nil {
+		conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
+	}
+	for name, dp := range conf.DnssecPolicies {
+		tmp := DnssecPolicy{
+			Name:      name,
+			Algorithm: dns.StringToAlgorithm[strings.ToUpper(dp.Algorithm)],
+			KSK:       GenKeyLifetime(dp.KSK.Lifetime, dp.KSK.SigValidity),
+			ZSK:       GenKeyLifetime(dp.ZSK.Lifetime, dp.ZSK.SigValidity),
+			CSK:       GenKeyLifetime(dp.CSK.Lifetime, dp.CSK.SigValidity),
 		}
-
-		for name, dp := range conf.DnssecPolicies {
-			tmp := DnssecPolicy{
-				Name:      name,
-				Algorithm: dns.StringToAlgorithm[strings.ToUpper(dp.Algorithm)],
-				KSK:       GenKeyLifetime(dp.KSK.Lifetime, dp.KSK.SigValidity),
-				ZSK:       GenKeyLifetime(dp.ZSK.Lifetime, dp.ZSK.SigValidity),
-				CSK:       GenKeyLifetime(dp.CSK.Lifetime, dp.CSK.SigValidity),
-			}
-			if tmp.Algorithm == 0 {
-				lgConfig.Error("DNSSEC policy has unknown algorithm, ignored", "policy", name, "algorithm", dp.Algorithm)
-				continue
-			}
-			conf.Internal.DnssecPolicies[name] = tmp
+		if tmp.Algorithm == 0 {
+			lgConfig.Error("DNSSEC policy has unknown algorithm, ignored", "policy", name, "algorithm", dp.Algorithm)
+			continue
 		}
-
-		// If no "default" policy in config, use built-in default (e.g. for agent autozone).
-		// An explicit dnssecpolicies.default in YAML overrides this.
-		if _, exists := conf.Internal.DnssecPolicies["default"]; !exists {
-			conf.Internal.DnssecPolicies["default"] = builtinDefaultDnssecPolicy()
-		}
+		conf.Internal.DnssecPolicies[name] = tmp
+	}
+	// If no "default" policy in config, use built-in default (e.g. for agent autozone).
+	// An explicit dnssecpolicies.default in YAML overrides this.
+	if _, exists := conf.Internal.DnssecPolicies["default"]; !exists {
+		conf.Internal.DnssecPolicies["default"] = BuiltinDefaultDnssecPolicy()
 	}
 
 	// Populate ConfigGroupConfig.Name from map keys after parsing CatalogConf
@@ -333,9 +329,8 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner,
-		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
-		conf.parseAuthOptions()
+	case AppTypeAuth, AppTypeAgent:
+		conf.ParseAuthOptions()
 	}
 
 	conf.parseMultiProviderOptions()
@@ -345,9 +340,8 @@ func (conf *Config) ParseConfig(reload bool) error {
 
 	// XXX: Hmm. Should not initialize KeyDB on reload?
 	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner,
-		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
-		if !reload { // || kdb == nil {
+	case AppTypeAuth, AppTypeAgent:
+		if !reload {
 			err = conf.InitializeKeyDB()
 			if err != nil {
 				return err
@@ -414,38 +408,31 @@ func (conf *Config) InitializeKeyDB() error {
 	if info, err := os.Lstat(dbFile); err == nil && info.Mode()&os.ModeSymlink != 0 {
 		return fmt.Errorf("database file path %q is a symlink (not allowed)", dbFile)
 	}
-	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeCombiner, AppTypeScanner,
-		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
-
-		// Create DB file and parent directory if missing (auto-initialize on first run).
-		if _, err := os.Stat(dbFile); os.IsNotExist(err) {
-			lgConfig.Info("TDNS DB file does not exist, creating", "file", dbFile)
-			dir := filepath.Dir(dbFile)
-			if err := os.MkdirAll(dir, 0755); err != nil {
-				return fmt.Errorf("ParseConfig: failed to create DB directory %s: %v", dir, err)
-			}
-			if err := os.WriteFile(dbFile, nil, 0664); err != nil {
-				return fmt.Errorf("ParseConfig: failed to create TDNS DB file %s: %v", dbFile, err)
-			}
+	// Create DB file and parent directory if missing (auto-initialize on first run).
+	if _, err := os.Stat(dbFile); os.IsNotExist(err) {
+		lgConfig.Info("TDNS DB file does not exist, creating", "file", dbFile)
+		dir := filepath.Dir(dbFile)
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return fmt.Errorf("ParseConfig: failed to create DB directory %s: %v", dir, err)
 		}
-		kdb, err := NewKeyDB(dbFile, false, conf.DnsEngine.Options)
-		if err != nil {
-			return fmt.Errorf("error from NewKeyDB: %v", err)
+		if err := os.WriteFile(dbFile, nil, 0664); err != nil {
+			return fmt.Errorf("ParseConfig: failed to create TDNS DB file %s: %v", dbFile, err)
 		}
-		conf.Internal.KeyDB = kdb
-
-		// Ensure OutgoingSerials table exists for persist-outbound-serial option
-		if kdb.Options[AuthOptPersistOutboundSerial] != "" {
-			schema := HsyncTables["OutgoingSerials"]
-			if _, err := kdb.DB.Exec(schema); err != nil {
-				return fmt.Errorf("failed to create OutgoingSerials table: %w", err)
-			}
-		}
-
-	default:
-		// do nothing for tdns-imr, tdns-cli
 	}
+	kdb, err := NewKeyDB(dbFile, false, conf.DnsEngine.Options)
+	if err != nil {
+		return fmt.Errorf("error from NewKeyDB: %v", err)
+	}
+	conf.Internal.KeyDB = kdb
+
+	// Ensure OutgoingSerials table exists for persist-outbound-serial option
+	if kdb.Options[AuthOptPersistOutboundSerial] != "" {
+		schema := DefaultTables["OutgoingSerials"]
+		if _, err := kdb.DB.Exec(schema); err != nil {
+			return fmt.Errorf("failed to create OutgoingSerials table: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -695,38 +682,10 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		}
 
 		zdp.mu.Lock()
-		var newMPdata *MPdata
-		if options[OptMultiProvider] {
-			zdp.EnsureMP()
-			if zdp.MP.MPdata != nil {
-				// Copy existing MPdata, build fresh MP Options map
-				cp := *zdp.MP.MPdata
-				newMPdata = &cp
-				newMPdata.Options = map[ZoneOption]bool{OptMultiProvider: true}
-			} else {
-				newMPdata = &MPdata{
-					Options: map[ZoneOption]bool{OptMultiProvider: true},
-				}
-			}
-		}
 		zdp.Options = newOpts
-		if newMPdata != nil {
-			zdp.EnsureMP()
-			zdp.MP.MPdata = newMPdata
-		} else if !options[OptMultiProvider] && zdp.MP != nil {
-			zdp.MP.MPdata = nil
-		}
 		zdp.mu.Unlock()
 
 		invokeOptionHandlers(zname, options)
-
-		// Register MP refresh callbacks for zones that need MP analysis.
-		// Only register once (on first load, not reload). The callbacks
-		// persist for the lifetime of the zone.
-		if zdp.FirstZoneLoad && options[OptMultiProvider] {
-			zdp.OnZonePreRefresh = append(zdp.OnZonePreRefresh, MPPreRefresh)
-			zdp.OnZonePostRefresh = append(zdp.OnZonePostRefresh, MPPostRefresh)
-		}
 
 		if zdp.FirstZoneLoad {
 			lgConfig.Info("considering OnFirstLoad callbacks", "zone", zname,
@@ -740,58 +699,6 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
 					if err := zd.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
 						lgConfig.Error("SetupZoneSigning failed in OnFirstLoad", "zone", zd.ZoneName, "error", err)
-					}
-				})
-			}
-
-			// Multi-provider post-load callback: for auth servers serving MP zones.
-			// By this point, FetchFromUpstream has examined the HSYNC RRset and
-			// may have set OptInlineSigning dynamically. Only sign if it did.
-			// Future: other MP-specific post-load setup goes here.
-			if options[OptMultiProvider] && (Globals.App.Type == AppTypeAuth || Globals.App.Type == AppTypeMPSigner) {
-				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
-					if zd.Options[OptInlineSigning] {
-						if err := zd.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
-							lgConfig.Error("SetupZoneSigning failed in MP OnFirstLoad", "zone", zd.ZoneName, "error", err)
-						}
-					}
-				})
-			}
-
-			// MP delegation sync callback: for MP zones, check HSYNCPARAM for
-			// parentsync=agent. If set, enable delegation sync and call SetupZoneSync.
-			// Only if our identity is listed in the zone's HSYNC3 records.
-			if options[OptMultiProvider] {
-				delegationSyncQ := conf.Internal.DelegationSyncQ
-				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
-					if zd.Options[OptDelSyncChild] {
-						return // already set via static config, handled by callback below
-					}
-					// Verify that our identity is listed in HSYNC3 before setting any options.
-					matched, _, _ := zd.matchHsyncProvider(ourHsyncIdentities())
-					if !matched {
-						return
-					}
-					apex, err := zd.GetOwner(zd.ZoneName)
-					if err != nil || apex == nil {
-						return
-					}
-					hsyncparamRRset, exists := apex.RRtypes.Get(core.TypeHSYNCPARAM)
-					if !exists || len(hsyncparamRRset.RRs) == 0 {
-						return
-					}
-					if prr, ok := hsyncparamRRset.RRs[0].(*dns.PrivateRR); ok {
-						if hsyncparam, ok := prr.Data.(*core.HSYNCPARAM); ok {
-							if hsyncparam.GetParentSync() == core.HsyncParentSyncAgent {
-								lgConfig.Info("HSYNCPARAM parentsync=agent, enabling delegation sync",
-									"zone", zd.ZoneName)
-								zd.Options[OptDelSyncChild] = true
-								if err := zd.SetupZoneSync(delegationSyncQ); err != nil {
-									lgConfig.Error("SetupZoneSync failed in MP OnFirstLoad",
-										"zone", zd.ZoneName, "error", err)
-								}
-							}
-						}
 					}
 				})
 			}
@@ -838,51 +745,11 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 
 			// Leader election OnFirstLoad is registered in StartAgent() (not here)
 			// because LeaderElectionManager doesn't exist until StartAgent runs.
-
-			// MP zone KEY publication: send SIG(0) KEY to combiner as REPLACE operation.
-			// For MP zones, the combiner manages the zone apex, so the agent cannot
-			// publish the KEY locally — it must send it to the combiner.
-			if options[OptMultiProvider] {
-				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
-					tm := conf.Internal.MPTransport
-					kdb := conf.Internal.KeyDB
-					if tm == nil || kdb == nil || !zd.Options[OptDelSyncChild] {
-						return
-					}
-					targetName := DsyncUpdateTargetName(zd.ZoneName)
-					if targetName == "" {
-						targetName = zd.ZoneName
-					}
-					sak, err := kdb.GetSig0Keys(targetName, Sig0StateActive)
-					if err != nil || len(sak.Keys) == 0 {
-						lgConfig.Debug("MP KEY publication: no active SIG(0) key", "zone", zd.ZoneName)
-						return
-					}
-					keyRR := &sak.Keys[0].KeyRR
-					zu := &ZoneUpdate{
-						Zone: ZoneName(zd.ZoneName),
-						Operations: []core.RROperation{{
-							Operation: "replace",
-							RRtype:    "KEY",
-							Records:   []string{keyRR.String()},
-						}},
-						Publish: &core.PublishInstruction{
-							KEYRRs:    []string{keyRR.String()},
-							Locations: []string{"at-apex", "at-ns"},
-						},
-					}
-					distID, err := tm.EnqueueForCombiner(ZoneName(zd.ZoneName), zu, "")
-					if err != nil {
-						lgConfig.Error("MP KEY publication: failed to send KEY to combiner", "zone", zd.ZoneName, "err", err)
-					} else {
-						lgConfig.Info("MP KEY publication: KEY + PublishInstruction sent to combiner", "zone", zd.ZoneName, "distID", distID)
-					}
-				})
-			}
+			// MP zone KEY publication is registered in tdns-mp's StartAgent.
 		}
 
 		switch Globals.App.Type {
-		case AppTypeAuth, AppTypeAgent, AppTypeCombiner,
+		case AppTypeAuth, AppTypeAgent, // AppTypeCombiner,
 			AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
 			if conf.Internal.RefreshZoneCh == nil {
 				lgConfig.Error("refresh channel is not configured, zones will not be refreshed, terminating")
@@ -1105,7 +972,7 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 // builtinDefaultDnssecPolicy returns the built-in "default" DNSSEC policy used when
 // no dnssecpolicies.default is defined in config (e.g. for agent autozone). An explicit
 // dnssecpolicies.default in YAML overrides this. No automatic key rollovers.
-func builtinDefaultDnssecPolicy() DnssecPolicy {
+func BuiltinDefaultDnssecPolicy() DnssecPolicy {
 	return DnssecPolicy{
 		Name:      "default",
 		Algorithm: dns.ED25519,
@@ -1393,10 +1260,8 @@ func (conf *Config) normalizeConfigIdentities() {
 			for i, ns := range conf.MultiProvider.ProtectedNamespaces {
 				conf.MultiProvider.ProtectedNamespaces[i] = dns.Fqdn(ns)
 			}
-			for i := range conf.MultiProvider.ProviderZones {
-				conf.MultiProvider.ProviderZones[i].Zone = dns.Fqdn(conf.MultiProvider.ProviderZones[i].Zone)
-				RegisterProviderZoneRRtypes(conf.MultiProvider.ProviderZones[i])
-			}
+			// Provider zone RR type registration removed — handled
+			// by tdns-mp initMPCombiner.
 		}
 	}
 }
