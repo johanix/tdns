@@ -8,8 +8,84 @@
 package tdns
 
 import (
+	"time"
+
 	core "github.com/johanix/tdns/v2/core"
 )
+
+// --- ZoneData MP accessors (moved from structs.go) ---
+
+func (zd *ZoneData) GetLastKeyInventory() *KeyInventorySnapshot {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	if zd.MP == nil {
+		return nil
+	}
+	return zd.MP.LastKeyInventory
+}
+
+func (zd *ZoneData) SetLastKeyInventory(inv *KeyInventorySnapshot) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.EnsureMP()
+	zd.MP.LastKeyInventory = inv
+}
+
+func (zd *ZoneData) GetKeystateOK() bool {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	if zd.MP == nil {
+		return false
+	}
+	return zd.MP.KeystateOK
+}
+
+func (zd *ZoneData) SetKeystateOK(ok bool) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.EnsureMP()
+	zd.MP.KeystateOK = ok
+}
+
+func (zd *ZoneData) GetKeystateError() string {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	if zd.MP == nil {
+		return ""
+	}
+	return zd.MP.KeystateError
+}
+
+func (zd *ZoneData) SetKeystateError(err string) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.EnsureMP()
+	zd.MP.KeystateError = err
+}
+
+func (zd *ZoneData) GetKeystateTime() time.Time {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	if zd.MP == nil {
+		return time.Time{}
+	}
+	return zd.MP.KeystateTime
+}
+
+func (zd *ZoneData) SetKeystateTime(t time.Time) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.EnsureMP()
+	zd.MP.KeystateTime = t
+}
+
+// EnsureMP initializes the MP extension if nil. Must be called
+// with zd.mu held or before concurrent access begins.
+func (zd *ZoneData) EnsureMP() {
+	if zd.MP == nil {
+		zd.MP = &ZoneMPExtension{}
+	}
+}
 
 // --- Agent methods ---
 
