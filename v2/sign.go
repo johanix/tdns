@@ -98,7 +98,7 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 
 	if dak == nil {
 		// Ensure active keys exist (will generate if needed)
-		dak, err = zd.ensureActiveDnssecKeys(zd.KeyDB)
+		dak, err = zd.EnsureActiveDnssecKeys(zd.KeyDB)
 		if err != nil {
 			lgSigner.Error("failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "err", err)
 			return false, err
@@ -191,14 +191,14 @@ func (zd *ZoneData) refreshActiveDnssecKeys(kdb *KeyDB, context string) (*Dnssec
 	return dak, nil
 }
 
-// ensureActiveDnssecKeys ensures that a zone has active DNSSEC keys.
+// EnsureActiveDnssecKeys ensures that a zone has active DNSSEC keys.
 // If no active keys exist, it will:
 // 1. Try to promote published keys to active (if available)
 // 2. Generate new KSK and ZSK keys if needed
 // Returns the active DNSSEC keys or an error if key generation fails.
-func (zd *ZoneData) ensureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
+func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
-		return nil, fmt.Errorf("ensureActiveDnssecKeys: zone %s does not allow signing (neither online-signing nor inline-signing)", zd.ZoneName)
+		return nil, fmt.Errorf("EnsureActiveDnssecKeys: zone %s does not allow signing (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
 
 	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
@@ -293,7 +293,7 @@ func (zd *ZoneData) ensureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 		delete(kdb.KeystoreDnskeyCache, zd.ZoneName+"+"+DnskeyStateActive)
 		_, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "KSK", nil)
 		if err != nil {
-			return nil, fmt.Errorf("ensureActiveDnssecKeys: failed to generate KSK for zone %s: %v", zd.ZoneName, err)
+			return nil, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate KSK for zone %s: %v", zd.ZoneName, err)
 		}
 		lgSigner.Info("generated KSK", "msg", msg)
 		// Invalidate cache and re-fetch active keys after KSK generation
@@ -317,7 +317,7 @@ func (zd *ZoneData) ensureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 		delete(kdb.KeystoreDnskeyCache, zd.ZoneName+"+"+DnskeyStateActive)
 		_, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "ZSK", nil)
 		if err != nil {
-			return nil, fmt.Errorf("ensureActiveDnssecKeys: failed to generate ZSK for zone %s: %v", zd.ZoneName, err)
+			return nil, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate ZSK for zone %s: %v", zd.ZoneName, err)
 		}
 		lgSigner.Info("generated ZSK", "msg", msg)
 		// Invalidate cache and re-fetch active keys after ZSK generation
@@ -328,7 +328,7 @@ func (zd *ZoneData) ensureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 	}
 
 	if len(dak.KSKs) == 0 {
-		return nil, fmt.Errorf("ensureActiveDnssecKeys: failed to generate active KSK for zone %s", zd.ZoneName)
+		return nil, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate active KSK for zone %s", zd.ZoneName)
 	}
 
 	// Ensure we have fresh data before publishing (invalidate cache and re-fetch)
@@ -390,7 +390,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 	}
 
 	// Ensure active DNSSEC keys exist (will generate if needed)
-	dak, err := zd.ensureActiveDnssecKeys(kdb)
+	dak, err := zd.EnsureActiveDnssecKeys(kdb)
 	if err != nil {
 		lgSigner.Error("failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "err", err)
 		return 0, err

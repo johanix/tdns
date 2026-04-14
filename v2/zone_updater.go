@@ -610,13 +610,13 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 	if err != nil && (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && (err != nil || dak == nil || len(dak.KSKs) == 0) {
 		lg.Debug("ApplyZoneUpdateToZoneData: GetDnssecKeys failed, attempting to ensure keys exist", "zone", zd.ZoneName)
 		// Try to ensure active keys exist (will generate if needed)
-		dak, err = zd.ensureActiveDnssecKeys(kdb)
+		dak, err = zd.EnsureActiveDnssecKeys(kdb)
 		if err != nil {
 			lg.Error("ApplyZoneUpdateToZoneData: failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "error", err)
 			return false, err
 		}
 		if dak == nil || len(dak.KSKs) == 0 {
-			lg.Error("ApplyZoneUpdateToZoneData: still no active KSKs after ensureActiveDnssecKeys", "zone", zd.ZoneName)
+			lg.Error("ApplyZoneUpdateToZoneData: still no active KSKs after EnsureActiveDnssecKeys", "zone", zd.ZoneName)
 			return false, fmt.Errorf("zone %s has no active KSKs and online-signing is enabled. zone update is rejected", zd.ZoneName)
 		}
 	}
