@@ -80,31 +80,13 @@ SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (
 		return err
 	}
 
-	// Multi-signer mode 4: merge remote DNSKEYs from other providers.
-	// Per RFC 8901, each signer includes all signers' DNSKEYs in the RRset.
-	remoteDNSKEYs := zd.GetRemoteDNSKEYs()
-	if len(remoteDNSKEYs) > 0 {
-		for _, rk := range remoteDNSKEYs {
-			// Deduplicate: only add if not already present
-			dup := false
-			for _, pk := range publishkeys {
-				if dns.IsDuplicate(rk, pk) {
-					dup = true
-					break
-				}
-			}
-			if !dup {
-				publishkeys = append(publishkeys, rk)
-			}
-		}
-		zd.Logger.Printf("PublishDnskeyRRs: merged remote DNSKEYs (multi-signer mode 4), total keys: %d", len(publishkeys))
-	}
+	// Remote DNSKEY merge for multi-signer (mode 4) is handled by
+	// mpzd.PublishDnskeyRRs() in tdns-mp. This version is mode 1 only.
 
 	zd.Logger.Printf("PublishDnskeyRRs: publishkeys (all): %v", publishkeys)
 
 	// Build the DNSKEY RRset: replace the zone's DNSKEY RRset entirely with
-	// publishkeys (local + keystore published/retired/foreign + remote).
-	// This ensures stale keys from incoming zones are stripped.
+	// publishkeys (local + keystore published/retired/foreign).
 	dnskeys := core.RRset{
 		RRs: publishkeys,
 	}

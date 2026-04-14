@@ -355,39 +355,8 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 		return 0, fmt.Errorf("SignZone: zone %s should not be signed here (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
 
-	// Four-mode DNSKEY handling for multi-provider zones:
-	//   Mode 1: Normal (no multi-provider) — strip incoming DNSKEYs, replace with local
-	//   Mode 2: Multi-provider, single-signer, we ARE the signer — strip and replace
-	//   Mode 3: Multi-provider, we are NOT a signer — pure pass-through, no signing
-	//   Mode 4: Multi-provider, multi-signer — merge remote DNSKEYs with local
-	if zd.Options[OptMultiProvider] {
-		shouldSign, err := zd.weAreASigner()
-		if err != nil {
-			lgSigner.Warn("error checking HSYNC Sign field, proceeding with signing", "zone", zd.ZoneName, "err", err)
-		} else if !shouldSign {
-			// Mode 3: pass-through
-			lgSigner.Info("HSYNC Sign=NOSIGN, skipping signing (mode 3: pass-through)", "zone", zd.ZoneName)
-			return 0, nil
-		}
-
-		// Check if multi-signer (mode 4) or single-signer (mode 2).
-		// OptMultiSigner was set during zone refresh by analyzeHsyncSigners().
-		if zd.Options[OptMultiSigner] {
-			// Mode 4: extract remote DNSKEYs from the current zone data before
-			// PublishDnskeyRRs overwrites the DNSKEY RRset with local keys only.
-			if err := zd.extractRemoteDNSKEYs(kdb); err != nil {
-				lgSigner.Warn("error extracting remote DNSKEYs, proceeding without", "zone", zd.ZoneName, "err", err)
-			}
-			lgSigner.Info("multi-signer mode (mode 4)", "zone", zd.ZoneName, "remote_dnskeys", len(zd.GetRemoteDNSKEYs()))
-		} else {
-			// Mode 2: single-signer, we sign — strip and replace (same as mode 1)
-			zd.SetRemoteDNSKEYs(nil)
-			lgSigner.Info("single-signer multi-provider mode (mode 2), strip and replace", "zone", zd.ZoneName)
-		}
-	} else {
-		// Mode 1: normal signing — no remote DNSKEYs
-		zd.SetRemoteDNSKEYs(nil)
-	}
+	// Single-signer signing (mode 1). Multi-provider signing
+	// (modes 2-4) is handled by mpzd.SignZone() in tdns-mp.
 
 	// Ensure active DNSSEC keys exist (will generate if needed)
 	dak, err := zd.EnsureActiveDnssecKeys(kdb)
