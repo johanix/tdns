@@ -528,7 +528,7 @@ type InternalConf struct {
 	// MP-specific config validators alongside the built-in ones.
 	PostValidateConfigHook func(conf *Config) error
 }
-
+/*
 type MsgQs struct {
 	Hello chan *AgentMsgReport // incoming /hello from other agents
 	Beat  chan *AgentMsgReport // incoming /beat from other agents
@@ -609,7 +609,7 @@ type StatusUpdateMsg struct {
 	Result    string
 	Msg       string
 }
-
+*/
 func (conf *Config) ReloadConfig() (string, error) {
 	confMu.Lock()
 	defer confMu.Unlock()

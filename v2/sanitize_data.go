@@ -5,8 +5,6 @@ import (
 	"reflect"
 	"strings"
 	"time"
-
-	core "github.com/johanix/tdns/v2/core"
 )
 
 // canBeNil returns true if the given reflect.Value can be nil
@@ -46,38 +44,6 @@ func deepCopyAndSanitize(v interface{}) interface{} {
 	}
 
 	// log.Printf("deepCopyAndSanitize: type of v: %T", v)
-
-	// Check if the value is a cmap.ConcurrentMap
-	// if cm, ok := v.(ConcurrentMap[interface{}, interface{}]); ok {
-	if strings.Contains(reflect.TypeOf(v).String(), "ConcurrentMap") {
-		lg.Debug("deepCopyAndSanitize: ConcurrentMap found")
-		// Convert to a regular map for serialization
-		// regularMap := make(map[interface{}]interface{})
-		cMap := core.NewStringer[AgentId, *Agent]()
-		if cm, ok := v.(core.ConcurrentMap[AgentId, *Agent]); ok {
-			lg.Debug("deepCopyAndSanitize: ConcurrentMap", "numShards", cm.NumShards())
-			if cm.NumShards() == 0 {
-				lg.Debug("deepCopyAndSanitize: ConcurrentMap: num shards=0, returning empty map")
-				return cMap
-			}
-			// log.Printf("deepCopyAndSanitize: ConcurrentMap: %d keys: %v", len(cm.Keys()), cm.Keys())
-			for item := range cm.IterBuffered() {
-				// Recursively sanitize each value
-				// log.Printf("deepCopyAndSanitize: ConcurrentMap: copying item: %v (type %T)", item.Key, item)
-				if foo, ok := deepCopyAndSanitize(item.Val).(*Agent); ok {
-					cMap.Set(item.Key, foo)
-				}
-			}
-		} else {
-			lg.Warn("deepCopyAndSanitize: ConcurrentMap: not a ConcurrentMap[AgentId,*Agent]")
-		}
-		// log.Printf("deepCopyAndSanitize: ConcurrentMap, len(m.shards)=%d", cm.NumShards())
-		// for item := range cm.IterBuffered() {
-		// 	// Recursively sanitize each value
-		// 	regularMap[item.Key] = deepCopyAndSanitize(item.Val)
-		// }
-		return cMap
-	}
 
 	if _, ok := v.(time.Time); ok {
 		return v
