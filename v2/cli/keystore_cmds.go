@@ -462,8 +462,12 @@ func DnssecKeyMgmt(cmd string) {
 			fmt.Printf("Known DNSSEC key pairs:\n")
 			for k, v := range tr.Dnskeys {
 				tmp := strings.Split(k, "::")
+				state := v.State
+				if state == "foreign" {
+					state = "[foreign]"
+				}
 				entries = append(entries, dnssecListEntry{
-					zone: tmp[0], state: v.State, keyid: tmp[1],
+					zone: tmp[0], state: state, keyid: tmp[1],
 					flags: v.Flags, alg: v.Algorithm, keystr: v.Keystr,
 				})
 			}
