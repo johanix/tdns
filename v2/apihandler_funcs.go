@@ -77,7 +77,6 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 			// Trigger re-sign and inventory push after state-changing operations
 			if err == nil && (kp.SubCommand == "rollover" || kp.SubCommand == "delete" || kp.SubCommand == "setstate" || kp.SubCommand == "clear") {
 				triggerResign(conf, kp.Zone)
-				// 20260415 johani pushKeystateInventoryToAllAgents(conf, kp.Zone)
 			}
 
 		default:

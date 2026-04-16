@@ -863,9 +863,9 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 				publishkeys = append(publishkeys, dns.RR(&zsk.DnskeyRR))
 			}
 
-			// Also include published/retired/foreign keys from database
+			// Also include published/retired keys from database
 			const fetchZoneDnskeysSql = `
-SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='published' OR state='retired' OR state='foreign')`
+SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='published' OR state='retired')`
 			rows, err := zd.KeyDB.Query(fetchZoneDnskeysSql, zd.ZoneName)
 			if err != nil {
 				lg.Error("CollectDynamicRRs: failed to query DNSKEYs", "zone", zd.ZoneName, "err", err)

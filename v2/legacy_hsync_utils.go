@@ -193,7 +193,7 @@ func (zd *ZoneData) LocalDnskeysFromKeystate() (bool, *DnskeyStatus, error) {
 	var newLocalKeys []dns.RR
 	for _, entry := range inv.Inventory {
 		switch entry.State {
-		case DnskeyStateForeign, DnskeyStateCreated, DnskeyStateMpremove, DnskeyStateRemoved:
+		case "foreign", DnskeyStateCreated, "mpremove", DnskeyStateRemoved:
 			continue
 		}
 		if entry.KeyRR == "" {
@@ -322,7 +322,7 @@ func (zd *ZoneData) RequestAndWaitForKeyInventory(ctx context.Context) {
 		// Build set of foreign key tags from the inventory
 		foreignKeyTags := make(map[uint16]bool)
 		for _, entry := range inv.Inventory {
-			if entry.State == DnskeyStateForeign {
+			if entry.State == "foreign" {
 				foreignKeyTags[entry.KeyTag] = true
 			}
 		}

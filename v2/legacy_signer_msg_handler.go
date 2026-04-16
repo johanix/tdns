@@ -100,19 +100,7 @@ func SignerMsgHandler(ctx context.Context, conf *Config, msgQs *MsgQs) {
 
 			switch sigMsg.Signal {
 			case "propagated":
-				if err := SetPropagationConfirmed(kdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
-					lgSigner.Error("SetPropagationConfirmed failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
-					continue
-				}
-				// For MP zones: transition mpdist -> published (no-op if key is not in mpdist)
-				if err := TransitionMpdistToPublished(kdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
-					lgSigner.Error("mpdist->published transition failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
-				}
-				// For MP zones: transition mpremove -> removed (no-op if key is not in mpremove)
-				if err := TransitionMpremoveToRemoved(kdb, sigMsg.Zone, sigMsg.KeyTag); err != nil {
-					lgSigner.Error("mpremove->removed transition failed", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "err", err)
-				}
-				triggerResign(conf, sigMsg.Zone)
+				lgSigner.Info("KEYSTATE propagated ignored on tdns legacy signer (handled by tdns-mp)", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag)
 			case "rejected":
 				lgSigner.Warn("KEYSTATE rejection received", "zone", sigMsg.Zone, "keyTag", sigMsg.KeyTag, "reason", sigMsg.Message)
 			default:
