@@ -487,6 +487,14 @@ func (zd *ZoneData) GenerateNsecChain(kdb *KeyDB) error {
 		lgSigner.Error("failed to get DNSSEC active keys for NSEC chain", "zone", zd.ZoneName, "err", err)
 		return err
 	}
+	return zd.GenerateNsecChainWithDak(dak)
+}
+
+// GenerateNsecChainWithDak builds or refreshes the NSEC chain using the given active DNSSEC keys.
+func (zd *ZoneData) GenerateNsecChainWithDak(dak *DnssecKeys) error {
+	if !zd.Options[OptAllowUpdates] && !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+		return fmt.Errorf("GenerateNsecChainWithDak: zone %s is not allowed to be updated or signed", zd.ZoneName)
+	}
 
 	//	MaybeSignRRset := func(rrset RRset, zone string, kdb *KeyDB) RRset {
 	//		if zd.Options["online-signing"] && len(dak.ZSKs) > 0 {
