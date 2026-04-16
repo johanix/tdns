@@ -406,6 +406,15 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		return &resp, err
 
 	case "setstate":
+		allowed := map[string]bool{
+			DnskeyStateCreated: true, DnskeyStatePublished: true, DnskeyStateStandby: true,
+			DnskeyStateActive: true, DnskeyStateRetired: true, DnskeyStateRemoved: true,
+		}
+		if !allowed[kp.State] {
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("invalid dnssec state %q", kp.State)
+			return &resp, fmt.Errorf("invalid dnssec state %q", kp.State)
+		}
 		res, err = tx.Exec(setStateDnskeySql, kp.State, kp.Keyname, kp.Keyid)
 		if err != nil {
 			lgSigner.Error("failed to set DNSKEY state", "err", err)

@@ -467,15 +467,9 @@ func DnssecKeyMgmt(cmd string) {
 					flags: v.Flags, alg: v.Algorithm, keystr: v.Keystr,
 				})
 			}
-			// Sort: by zone, then foreign keys last, then by state, then by keyid
 			sort.Slice(entries, func(i, j int) bool {
 				if entries[i].zone != entries[j].zone {
 					return entries[i].zone < entries[j].zone
-				}
-				iForeign := entries[i].state == "foreign"
-				jForeign := entries[j].state == "foreign"
-				if iForeign != jForeign {
-					return jForeign // foreign sorts last
 				}
 				if entries[i].state != entries[j].state {
 					return entries[i].state < entries[j].state
@@ -484,12 +478,8 @@ func DnssecKeyMgmt(cmd string) {
 			})
 			var out []string
 			for _, e := range entries {
-				displayState := e.state
-				if displayState == "foreign" {
-					displayState = "[foreign]"
-				}
 				out = append(out, fmt.Sprintf("%s|%s|%s|%d|%s|%.50s...\n",
-					e.zone, displayState, e.keyid, e.flags, e.alg, e.keystr))
+					e.zone, e.state, e.keyid, e.flags, e.alg, e.keystr))
 			}
 			if tdns.Globals.ShowHeaders {
 				out = append([]string{"Signer|State|KeyID|Flags|Algorithm|DNSKEY Record"}, out...)
