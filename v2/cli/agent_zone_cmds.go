@@ -4,12 +4,10 @@
 package cli
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
 	"sort"
-	"strings"
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
@@ -258,7 +256,7 @@ var agentZoneDsyncUnpublishCmd = &cobra.Command{
 }
 
 // --- New addrr/delrr commands ---
-
+/*
 var agentZoneAddRRCmd = &cobra.Command{
 	Use:   "addrr",
 	Short: "Add a resource record to a zone and sync with peers and combiner",
@@ -417,10 +415,10 @@ func allowedRRtypeNames() []string {
 	sort.Strings(names)
 	return names
 }
-
 // --- Local variables for flags ---
 
 var agentZoneRR string
+*/
 var agentRollaction string
 
 // --- init ---
@@ -434,7 +432,7 @@ func init() {
 	AgentZoneCmd.AddCommand(agentZoneDsyncCmd)
 
 	// New addrr/delrr commands
-	AgentZoneCmd.AddCommand(agentZoneAddRRCmd, agentZoneDelRRCmd)
+	// 20260415 johani: AgentZoneCmd.AddCommand(agentZoneAddRRCmd, agentZoneDelRRCmd)
 
 	// Dsync subcommands
 	agentZoneDsyncCmd.AddCommand(agentZoneDsyncStatusCmd, agentZoneDsyncBootstrapCmd,
@@ -451,10 +449,10 @@ func init() {
 	agentZoneListCmd.Flags().BoolVarP(&shownotify, "notify", "N", false, "Show zone downstream notify addresses")
 	agentZoneListCmd.Flags().BoolVarP(&showprimary, "primary", "P", false, "Show zone primary nameserver")
 
-	agentZoneAddRRCmd.Flags().StringVarP(&agentZoneRR, "rr", "", "", "DNS record to add")
-	agentZoneAddRRCmd.Flags().Bool("force", false, "Bypass dedup check and always send transaction")
-	agentZoneDelRRCmd.Flags().StringVarP(&agentZoneRR, "rr", "", "", "DNS record to delete")
-	agentZoneDelRRCmd.Flags().Bool("force", false, "Bypass dedup check and always send transaction")
+	// 20260415 johani: agentZoneAddRRCmd.Flags().StringVarP(&agentZoneRR, "rr", "", "", "DNS record to add")
+	// 20260415 johani: agentZoneAddRRCmd.Flags().Bool("force", false, "Bypass dedup check and always send transaction")
+	// 20260415 johani: agentZoneDelRRCmd.Flags().StringVarP(&agentZoneRR, "rr", "", "", "DNS record to delete")
+	// 20260415 johani: agentZoneDelRRCmd.Flags().Bool("force", false, "Bypass dedup check and always send transaction")
 
 	agentZoneDsyncRollKeyCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519", "Algorithm to use for the new SIG(0) key")
 	agentZoneDsyncBootstrapCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519", "Algorithm to use for the new SIG(0) key")

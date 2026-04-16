@@ -147,10 +147,10 @@ type AgentRegistry struct {
 	LocateInterval        int                // seconds to wait between locating agents (until success)
 	helloContexts         map[AgentId]context.CancelFunc
 	TransportManager      *transport.TransportManager // Generic transport (Router, PeerRegistry, etc.)
-	MPTransport           *MPTransportBridge          // MP transport bridge (authorization, discovery, enqueue, beats, hellos)
-	LeaderElectionManager *LeaderElectionManager      // optional; when set, election messages are processed
-	ProviderGroupManager  *ProviderGroupManager       // optional; manages provider group computation
-	GossipStateTable      *GossipStateTable           // optional; gossip protocol state
+	// 20260415 johani: MPTransport           *MPTransportBridge          // MP transport bridge (authorization, discovery, enqueue, beats, hellos)
+	// 20260415 johani: LeaderElectionManager *LeaderElectionManager      // optional; when set, election messages are processed
+	// 20260415 johani: ProviderGroupManager  *ProviderGroupManager       // optional; manages provider group computation
+	// 20260415 johani: GossipStateTable      *GossipStateTable           // optional; gossip protocol state
 }
 
 // AgentBeatPost is defined in core package to avoid circular dependencies.
@@ -162,7 +162,7 @@ type AgentBeatPost struct {
 	MyBeatInterval uint32   // intended, in seconds
 	Zones          []string // Zones that we share with the remote agent
 	Time           time.Time
-	Gossip         []GossipMessage `json:"Gossip,omitempty"`
+	// 20260415 johani: Gossip         []GossipMessage `json:"Gossip,omitempty"`
 }
 
 // AgentBeatResponse is defined in core package to avoid circular dependencies.
@@ -331,7 +331,7 @@ type AgentMgmtResponse struct {
 	Status         string
 	Time           time.Time
 	Agents         []*Agent // used for hsync-agentstatus
-	ZoneAgentData  *ZoneAgentData
+	// 20260415 johani: ZoneAgentData  *ZoneAgentData
 	HsyncRRs       []string
 	AgentConfig    MultiProviderConf
 	RfiType        string
@@ -789,7 +789,7 @@ type CombinerDistribResponse struct {
 	Error         bool                   `json:"error,omitempty"`
 	ErrorMsg      string                 `json:"error_msg,omitempty"`
 	Msg           string                 `json:"msg,omitempty"`
-	Summaries     []*DistributionSummary `json:"summaries,omitempty"`
+	// 20260415 johani: Summaries     []*DistributionSummary `json:"summaries,omitempty"`
 	Distributions []string               `json:"distributions,omitempty"` // For backward compatibility
 }
 

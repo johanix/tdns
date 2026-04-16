@@ -481,6 +481,7 @@ func InitCombinerCrypto(conf *Config) (*transport.SecurePayloadWrapper, error) {
 //
 // DNS-39: Peer addresses come from DNS discovery, not static config.
 // The old agent.peers map with embedded addresses is no longer supported.
+/* 20260415 johani
 func registerPeerAgents(conf *Config, tm *MPTransportBridge) error {
 	if conf.MultiProvider == nil {
 		return nil // No agent config
@@ -493,3 +494,4 @@ func registerPeerAgents(conf *Config, tm *MPTransportBridge) error {
 	}
 	return nil
 }
+*/
