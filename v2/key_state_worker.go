@@ -186,6 +186,12 @@ func maintainStandbyKeys(conf *Config, kdb *KeyDB, standbyZskCount, standbyKskCo
 			continue
 		}
 
+		// MP zones have their own key state worker and their own
+		// keystore table (MPDnssecKeyStore). Skip them here.
+		if zd.Options[OptMultiProvider] {
+			continue
+		}
+
 		if zd.DnssecPolicy == nil {
 			continue
 		}
