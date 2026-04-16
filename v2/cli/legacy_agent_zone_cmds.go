@@ -33,32 +33,6 @@ var agentZoneListCmd = &cobra.Command{
 	Run:   func(cmd *cobra.Command, args []string) { RunZoneList("agent", args) },
 }
 
-func RunZoneList(parent string, args []string) {
-	api, err := GetApiClient(parent, true)
-	if err != nil {
-		log.Fatalf("Error getting API client for %s: %v", parent, err)
-	}
-
-	cr, err := SendZoneCommand(api, tdns.ZonePost{
-		Command: "list-zones",
-	})
-	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-		os.Exit(1)
-	}
-
-	if cr.Msg != "" {
-		fmt.Printf("%s\n", cr.Msg)
-	}
-
-	switch tdns.Globals.Verbose {
-	case true:
-		VerboseListZone(cr)
-	case false:
-		ListZones(cr)
-	}
-}
-
 var agentZoneReloadCmd = &cobra.Command{
 	Use:   "reload",
 	Short: "Request re-loading a zone",

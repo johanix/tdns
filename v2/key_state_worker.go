@@ -209,11 +209,12 @@ func transitionRetiredToRemoved(conf *Config, kdb *KeyDB, now time.Time, propaga
 
 		// Check if this is a multi-provider zone
 		targetState := DnskeyStateRemoved
+/* 20260415 johani
 		zd, exists := Zones.Get(key.ZoneName)
 		if exists && zd.Options[OptMultiProvider] {
 			targetState = DnskeyStateMpremove
 		}
-
+*/
 		lgSigner.Info("KeyStateWorker: transitioning retired→"+targetState, "zone", key.ZoneName, "keyid", key.KeyTag, "elapsed", elapsed.Truncate(time.Second))
 		if err := UpdateDnssecKeyState(kdb, key.ZoneName, key.KeyTag, targetState); err != nil {
 			lgSigner.Error("KeyStateWorker: retired→"+targetState+" failed", "zone", key.ZoneName, "keyid", key.KeyTag, "err", err)
@@ -224,9 +225,11 @@ func transitionRetiredToRemoved(conf *Config, kdb *KeyDB, now time.Time, propaga
 
 		// For MP zones, push updated inventory to all agents so they
 		// learn about the key removal and distribute it to remote agents.
+		/* 20260415 johani
 		if targetState == DnskeyStateMpremove {
 			pushKeystateInventoryToAllAgents(conf, key.ZoneName)
 		}
+		*/
 	}
 }
 
@@ -242,12 +245,14 @@ func maintainStandbyKeys(conf *Config, kdb *KeyDB, standbyZskCount, standbyKskCo
 		}
 
 		// Skip multi-provider zones where we are not a signer
+		/* 20260415 johani
 		if zd.Options[OptMultiProvider] {
 			shouldSign, _ := zd.weAreASigner()
 			if !shouldSign {
 				continue
 			}
 		}
+		*/
 
 		if zd.DnssecPolicy == nil {
 			continue

@@ -283,28 +283,6 @@ func init() {
 	agentPeerResyncCmd.Flags().BoolVar(&resyncFull, "full", false, "Both push and pull (default)")
 }
 
-func SendAgentMgmtCmd(req *tdns.AgentMgmtPost, prefix string) (*tdns.AgentMgmtResponse, error) {
-	prefixcmd, _ := GetCommandContext(prefix)
-	api, err := GetApiClient(prefixcmd, true)
-	if err != nil {
-		log.Fatalf("Error getting API client: %v", err)
-	}
-
-	// api.Debug = true
-
-	_, buf, err := api.RequestNG("POST", "/agent", req, true)
-	if err != nil {
-		return nil, fmt.Errorf("API request failed: %v", err)
-	}
-
-	var amr tdns.AgentMgmtResponse
-	if err := json.Unmarshal(buf, &amr); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %v", err)
-	}
-
-	return &amr, nil
-}
-
 func VerifyAndSendLocalDNSRecord(zonename, dnsRecord, cmd string) error {
 	if dnsRecord == "" {
 		return fmt.Errorf("error: DNS record is required")
