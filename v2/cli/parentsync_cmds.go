@@ -20,7 +20,7 @@ func SendAgentMgmtCmd(req *tdns.AgentMgmtPost, prefix string) (*tdns.AgentMgmtRe
 	prefixcmd, _ := GetCommandContext(prefix)
 	api, err := GetApiClient(prefixcmd, true)
 	if err != nil {
-		log.Fatalf("Error getting API client: %v", err)
+		return nil, fmt.Errorf("getting API client: %w", err)
 	}
 
 	_, buf, err := api.RequestNG("POST", "/agent", req, true)

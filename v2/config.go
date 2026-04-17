@@ -528,88 +528,12 @@ type InternalConf struct {
 	// MP-specific config validators alongside the built-in ones.
 	PostValidateConfigHook func(conf *Config) error
 }
-/*
-type MsgQs struct {
-	Hello chan *AgentMsgReport // incoming /hello from other agents
-	Beat  chan *AgentMsgReport // incoming /beat from other agents
-	Ping  chan *AgentMsgReport // incoming /ping from other agents
-	// Msg               chan *AgentMsgReport    // incoming /msg from other agents
-	Msg               chan *AgentMsgPostPlus     // incoming /msg from other agents
-	Command           chan *AgentMgmtPostPlus    // local commands TO the agent, usually for passing on to other agents
-	DebugCommand      chan *AgentMgmtPostPlus    // local commands TO the agent, usually for passing on to other agents
-	SynchedDataUpdate chan *SynchedDataUpdate    // incoming combiner updates
-	SynchedDataCmd    chan *SynchedDataCmd       // local commands TO the combiner
-	Confirmation      chan *ConfirmationDetail   // combiner confirmation feedback
-	KeystateInventory chan *KeystateInventoryMsg // incoming KEYSTATE inventory from signer
-	KeystateSignal    chan *KeystateSignalMsg    // incoming KEYSTATE signals (propagated/rejected) from agent to signer
-	EditsResponse     chan *EditsResponseMsg     // incoming EDITS response from combiner
-	ConfigResponse    chan *ConfigResponseMsg    // incoming CONFIG response from peer agent
-	AuditResponse     chan *AuditResponseMsg     // incoming AUDIT response from peer agent
-	StatusUpdate      chan *StatusUpdateMsg      // incoming STATUS-UPDATE notifications
 
-	// OnRemoteConfirmationReady is called when this agent (acting as a remote agent)
-	// receives a combiner confirmation for a sync that originated from another agent.
-	// The callback sends the final confirmation NOTIFY back to the originating agent.
-	OnRemoteConfirmationReady func(detail *RemoteConfirmationDetail)
-}
-
-// KeystateInventoryMsg carries a complete KEYSTATE inventory from signer to agent.
-// Delivered via MsgQs.KeystateInventory channel.
-type KeystateInventoryMsg struct {
-	SenderID  string
-	Zone      string
-	Inventory []KeyInventoryItem
-}
-
-// KeystateSignalMsg carries a per-key KEYSTATE signal from agent to signer.
-// Delivered via MsgQs.KeystateSignal channel.
-// Signals: "propagated" (all remote providers confirmed), "rejected" (some provider rejected).
-type KeystateSignalMsg struct {
-	SenderID string
-	Zone     string
-	KeyTag   uint16
-	Signal   string // "propagated", "rejected", "removed"
-	Message  string
-}
-
-// EditsResponseMsg carries an agent's contributions from combiner back to the agent.
-// Delivered via MsgQs.EditsResponse channel. Modeled on KeystateInventoryMsg.
-type EditsResponseMsg struct {
-	SenderID     string
-	Zone         string
-	AgentRecords map[string]map[string][]string // agentID → owner → []RR strings
-}
-
-// ConfigResponseMsg carries config data from a peer agent back to the requester.
-// Delivered via MsgQs.ConfigResponse channel.
-type ConfigResponseMsg struct {
-	SenderID   string
-	Zone       string
-	Subtype    string            // "upstream", "downstream", "sig0key"
-	ConfigData map[string]string // Key-value config data
-}
-
-// AuditResponseMsg carries audit data from a peer agent back to the requester.
-// Delivered via MsgQs.AuditResponse channel.
-type AuditResponseMsg struct {
-	SenderID  string
-	Zone      string
-	AuditData interface{} // Zone data repo snapshot (placeholder)
-}
-
-// StatusUpdateMsg carries a status-update notification.
-// Delivered via MsgQs.StatusUpdate channel.
-// Subtypes: "ns-changed", "ksk-changed", "parentsync-done".
-type StatusUpdateMsg struct {
-	SenderID  string
-	Zone      string
-	SubType   string
-	NSRecords []string
-	DSRecords []string
-	Result    string
-	Msg       string
-}
-*/
+// NOTE: MsgQs and its associated message types (KeystateInventoryMsg,
+// KeystateSignalMsg, EditsResponseMsg, ConfigResponseMsg,
+// AuditResponseMsg, StatusUpdateMsg) live in tdns-mp/v2/config.go.
+// They are MP-only and were removed from tdns during the tdns-mp
+// extraction.
 func (conf *Config) ReloadConfig() (string, error) {
 	confMu.Lock()
 	defer confMu.Unlock()

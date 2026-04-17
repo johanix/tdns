@@ -469,19 +469,8 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 
 		// Inline state update using the existing tx (calling UpdateDnssecKeyState
 		// would try to Begin a second transaction and deadlock).
-		now := time.Now().UTC().Format(time.RFC3339)
-		var updateRes sql.Result
-		switch targetState {
-		case DnskeyStatePublished:
-			updateRes, err = tx.Exec(`UPDATE DnssecKeyStore SET state=?, published_at=? WHERE zonename=? AND keyid=?`,
-				targetState, now, kp.Zone, kp.Keyid)
-		case DnskeyStateRetired:
-			updateRes, err = tx.Exec(`UPDATE DnssecKeyStore SET state=?, retired_at=? WHERE zonename=? AND keyid=?`,
-				targetState, now, kp.Zone, kp.Keyid)
-		default:
-			updateRes, err = tx.Exec(`UPDATE DnssecKeyStore SET state=? WHERE zonename=? AND keyid=?`,
-				targetState, kp.Zone, kp.Keyid)
-		}
+		updateRes, err := tx.Exec(`UPDATE DnssecKeyStore SET state=? WHERE zonename=? AND keyid=?`,
+			targetState, kp.Zone, kp.Keyid)
 		if err != nil {
 			lgSigner.Error("failed to transition DNSKEY for delete", "err", err)
 			return &resp, err

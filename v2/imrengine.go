@@ -174,10 +174,13 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 		lgImr.Info("ImrEngine starting")
 	}
 
-	// Initialize the Imr if not already done (e.g. by a prior InitImrEngine call)
+	// Initialize the Imr if not already done (e.g. by a prior InitImrEngine call).
+	// Propagate the init error to the engine supervisor rather than calling
+	// Shutdowner here — that would leave conf.Internal.ImrEngine nil and the
+	// dereference below would panic.
 	if conf.Internal.ImrEngine == nil {
 		if err := conf.InitImrEngine(quiet); err != nil {
-			Shutdowner(conf, fmt.Sprintf("ImrEngine: %v", err))
+			return fmt.Errorf("ImrEngine: InitImrEngine failed: %w", err)
 		}
 	}
 	imr := conf.Internal.ImrEngine
