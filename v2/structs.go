@@ -47,14 +47,11 @@ const (
 	Sig0StateActive      string = "active"
 	Sig0StateRetired     string = "retired"
 	DnskeyStateCreated   string = "created"
-	DnskeyStateMpdist    string = "mpdist"   // multi-provider distribution: awaiting confirmation from all providers
-	DnskeyStateMpremove  string = "mpremove" // multi-provider removal: awaiting confirmation from all providers
 	DnskeyStatePublished string = "published"
 	DnskeyStateStandby   string = "standby"
 	DnskeyStateActive    string = "active"
 	DnskeyStateRetired   string = "retired"
 	DnskeyStateRemoved   string = "removed"
-	DnskeyStateForeign   string = "foreign"
 )
 
 // MPdata caches multi-provider membership and signing state for a zone.
@@ -64,59 +61,24 @@ const (
 //
 // NOTE: This is an MP type that lives in tdns (not tdns-mp) because it is
 // a field of ZoneMPExtension, which is a field of ZoneData.
+/*
 type MPdata struct {
-	WeAreProvider bool                // At least one of our agent identities matches an HSYNC3 Identity
-	OurLabel      string              // Our provider label from the matching HSYNC3 record
-	WeAreSigner   bool                // Our label appears in HSYNCPARAM signers (or zone is unsigned)
-	OtherSigners  int                 // Count of other signers in HSYNCPARAM
-	ZoneSigned    bool                // HSYNCPARAM signers= is non-empty (zone uses multi-signer)
-	Options       map[ZoneOption]bool // MP-specific options (future: migrate from zd.Options)
+       WeAreProvider bool                // At least one of our agent identities matches an HSYNC3 Identity
+       OurLabel      string              // Our provider label from the matching HSYNC3 record
+       WeAreSigner   bool                // Our label appears in HSYNCPARAM signers (or zone is unsigned)
+       OtherSigners  int                 // Count of other signers in HSYNCPARAM
+       ZoneSigned    bool                // HSYNCPARAM signers= is non-empty (zone uses multi-signer)
+       Options       map[ZoneOption]bool // MP-specific options (future: migrate from zd.Options)
 }
-
-// ZoneMPExtension holds multi-provider state for a zone. Access via zd.MP.
-//
-// NOTE: This is an MP type that lives in tdns (not tdns-mp) because it is
-// a field of ZoneData. tdns-mp code accesses these fields via zd.MP.
-type ZoneMPExtension struct {
-	CombinerData *core.ConcurrentMap[string, OwnerData]
-	UpstreamData *core.ConcurrentMap[string, OwnerData] // Original upstream apex data (combiner NS fallback)
-	MPdata       *MPdata                                // Multi-provider membership/signing state; nil = not MP
-	// AgentContributions stores per-agent contributions for the combiner.
-	// Key: agentID (e.g. "agent.alpha.dnslab."), Value: map[owner]map[rrtype]core.RRset
-	// When merging, all agents' contributions for the same owner/rrtype are combined
-	// into a single RRset in CombinerData.
-	AgentContributions map[string]map[string]map[uint16]core.RRset
-	// PersistContributions is set by the combiner at init time to persist an agent's
-	// contributions to the snapshot table after every write. Non-combiner apps leave it nil.
-	// Args: zone, senderID, agent's contributions (owner → rrtype → RRset).
-	PersistContributions func(string, string, map[string]map[uint16]core.RRset) error
-
-	// LastKeyInventory stores the most recent KEYSTATE inventory received from the signer.
-	// Used for diagnostics (CLI show-key-inventory command).
-	LastKeyInventory *KeyInventorySnapshot
-
-	// LocalDNSKEYs holds DNSKEY RRs that the signer classifies as local (not foreign).
-	// Derived from KEYSTATE inventory. Used to compute adds/removes on DNSKEY updates.
-	LocalDNSKEYs []dns.RR
-
-	// KEYSTATE health tracking — we depend on KEYSTATE for DNSKEY classification.
-	// Failure is an error condition that must be visible to the operator.
-	KeystateOK    bool      // true after successful KEYSTATE exchange
-	KeystateError string    // error message from last failed attempt (empty on success)
-	KeystateTime  time.Time // time of last KEYSTATE attempt
-
-	// RefreshAnalysis holds pre-refresh analysis results for post-refresh callbacks.
-	// Set by OnZonePreRefresh, consumed by OnZonePostRefresh, cleared after use.
-	RefreshAnalysis *ZoneRefreshAnalysis
-}
+*/
 
 // ZoneRefreshAnalysis carries analysis results from OnZonePreRefresh
 // to OnZonePostRefresh. Set before the hard flip, consumed after.
 type ZoneRefreshAnalysis struct {
 	DelegationChanged bool
 	DelegationStatus  DelegationSyncStatus
-	HsyncChanged      bool
-	HsyncStatus       *HsyncStatus
+//	HsyncChanged      bool
+//	HsyncStatus       *HsyncStatus
 	DnskeyChanged     bool
 	DnskeyStatus      *DnskeyStatus
 }
@@ -131,7 +93,7 @@ type ZoneData struct {
 	ApexLen    int
 	//	RRs            RRArray
 	Data  *core.ConcurrentMap[string, OwnerData]
-	MP    *ZoneMPExtension // Multi-provider state; nil for non-MP zones
+	// 20260415 johani: MP    *ZoneMPExtension // Multi-provider state; nil for non-MP zones
 	Ready bool             // true if zd.Data has been populated (from file or upstream)
 
 	XfrType string // axfr | ixfr
@@ -171,7 +133,7 @@ type ZoneData struct {
 	// These are DNSKEYs found in the incoming zone that do not match keys in our
 	// local keystore. They are preserved across resignings and merged into the
 	// DNSKEY RRset during PublishDnskeyRRs().
-	RemoteDNSKEYs []dns.RR
+	// RemoteDNSKEYs []dns.RR
 
 	// OnFirstLoad holds one-shot callbacks executed after the zone's first successful load.
 	// Apps register these before RefreshEngine starts, and RefreshEngine clears the slice
@@ -195,28 +157,6 @@ type ZoneData struct {
 // tdns-mp and can no longer access the unexported zd.mu.
 func (zd *ZoneData) Lock()   { zd.mu.Lock() }
 func (zd *ZoneData) Unlock() { zd.mu.Unlock() }
-
-func (zd *ZoneData) GetRemoteDNSKEYs() []dns.RR {
-	zd.mu.Lock()
-	defer zd.mu.Unlock()
-	return zd.RemoteDNSKEYs
-}
-
-func (zd *ZoneData) SetRemoteDNSKEYs(keys []dns.RR) {
-	zd.mu.Lock()
-	defer zd.mu.Unlock()
-	zd.RemoteDNSKEYs = keys
-}
-
-// KeyInventorySnapshot stores a complete key inventory received from the signer.
-//
-// NOTE: MP type in tdns because it is a field of ZoneMPExtension.
-type KeyInventorySnapshot struct {
-	SenderID  string
-	Zone      string
-	Inventory []KeyInventoryItem
-	Received  time.Time
-}
 
 // ZoneConf represents the external config for a zone; it contains no zone data
 type ZoneConf struct {
@@ -611,76 +551,6 @@ type RRsetString struct {
 	RRSIGs []string `json:"rrsigs,omitempty"`
 }
 
-type CombinerPost struct {
-	Command string              `json:"command"` // add, list, remove
-	Zone    string              `json:"zone"`    // zone name
-	Data    map[string][]string `json:"data"`    // The RRs as strings, indexed by owner name
-}
-
-type CombinerResponse struct {
-	Time     time.Time                `json:"time"`
-	Error    bool                     `json:"error"`
-	ErrorMsg string                   `json:"error_msg,omitempty"`
-	Msg      string                   `json:"msg,omitempty"`
-	Data     map[string][]RRsetString `json:"data,omitempty"`
-}
-
-type CombinerDebugPost struct {
-	Command string                 `json:"command"`
-	Zone    string                 `json:"zone,omitempty"`
-	AgentID string                 `json:"agent_id,omitempty"`
-	Data    map[string]interface{} `json:"data,omitempty"`
-}
-
-// CombinerEditPost represents a CLI request for managing pending/rejected edits.
-type CombinerEditPost struct {
-	Command string   `json:"command"` // "list", "list-approved", "list-rejected", "approve", "reject", "clear"
-	Zone    string   `json:"zone"`
-	EditID  int      `json:"edit_id,omitempty"`
-	Reason  string   `json:"reason,omitempty"`
-	Tables  []string `json:"tables,omitempty"` // for "clear": which tables to clear; empty = all
-}
-
-// CombinerEditResponse is the response for edit management commands.
-type CombinerEditResponse struct {
-	Time     time.Time                      `json:"time"`
-	Error    bool                           `json:"error"`
-	ErrorMsg string                         `json:"error_msg,omitempty"`
-	Msg      string                         `json:"msg,omitempty"`
-	Pending  []*PendingEditRecord           `json:"pending,omitempty"`
-	Approved []*ApprovedEditRecord          `json:"approved,omitempty"`
-	Rejected []*RejectedEditRecord          `json:"rejected,omitempty"`
-	Current  map[string]map[string][]string `json:"current,omitempty"` // agent → rrtype → []rr
-}
-
-// CombinerDebugResponse returns both the merged CombinerData and the per-agent
-// AgentContributions breakdown.
-type CombinerDebugResponse struct {
-	Time               time.Time                                            `json:"time"`
-	Error              bool                                                 `json:"error"`
-	ErrorMsg           string                                               `json:"error_msg,omitempty"`
-	Msg                string                                               `json:"msg,omitempty"`
-	Data               interface{}                                          `json:"data,omitempty"`
-	CombinerData       map[string]map[string]map[string][]string            `json:"combiner_data,omitempty"`       // zone → owner → rrtype → []rr
-	AgentContributions map[string]map[string]map[string]map[string][]string `json:"agent_contributions,omitempty"` // zone → agent → owner → rrtype → []rr
-}
-
-// type AgentPost struct {
-//	Command string `json:"command"`
-//	Zone    string `json:"zone"`
-//	AgentId string `json:"agent_id"`
-// }
-
-// type AgentResponse struct {
-//	Identity string
-//	Time     time.Time
-//	Error    bool
-//	ErrorMsg string
-//	Msg      string
-//	HsyncRRs []string // Keep the HSYNC RRset for reference
-//	Agents   []*Agent // The actual agents involved in the zone
-// }
-
 type VerificationInfo struct {
 	KeyName        string
 	Key            string
@@ -715,3 +585,46 @@ type TsigDetails struct {
 }
 
 type ZoneName string
+
+type AgentId string
+
+func (id AgentId) String() string {
+	return string(id)
+}
+
+// AgentMgmt{Post,Response} are used in the mgmt API
+type AgentMgmtPost struct {
+	Command     string `json:"command"`
+	Zone        ZoneName `json:"zone"`
+	AgentId     AgentId  `json:"agent_id"`
+	RRType      uint16
+	RR          string
+	RRs         []string
+	AddedRRs    []string // for update-local-zonedata
+	RemovedRRs  []string // for update-local-zonedata
+	Upstream    AgentId
+	Downstream  AgentId
+	Data        map[string]interface{} `json:"data,omitempty"` // Generic data field for custom parameters
+	Response    chan *AgentMgmtResponse
+}
+
+type AgentMgmtResponse struct {
+	Identity       AgentId
+	Status         string
+	Time           time.Time
+	AgentConfig    MultiProviderConf
+	Msg            string
+	Error          bool
+	ErrorMsg       string
+	Data           interface{} `json:"data,omitempty"` // Generic data field for custom responses
+}
+
+// DnskeyStatus holds the result of DNSKEY change detection (local keys only).
+// 20260415 johani: somewhat unclear if we still need this.
+type DnskeyStatus struct {
+	Time             time.Time
+	ZoneName         string
+	LocalAdds        []dns.RR // Local DNSKEYs added since last check
+	LocalRemoves     []dns.RR // Local DNSKEYs removed since last check
+	CurrentLocalKeys []dns.RR // Complete current set of local DNSKEYs (for replace operations)
+}

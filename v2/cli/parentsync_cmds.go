@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -14,6 +15,26 @@ import (
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
 )
+
+func SendAgentMgmtCmd(req *tdns.AgentMgmtPost, prefix string) (*tdns.AgentMgmtResponse, error) {
+	prefixcmd, _ := GetCommandContext(prefix)
+	api, err := GetApiClient(prefixcmd, true)
+	if err != nil {
+		return nil, fmt.Errorf("getting API client: %w", err)
+	}
+
+	_, buf, err := api.RequestNG("POST", "/agent", req, true)
+	if err != nil {
+		return nil, fmt.Errorf("API request failed: %v", err)
+	}
+
+	var amr tdns.AgentMgmtResponse
+	if err := json.Unmarshal(buf, &amr); err != nil {
+		return nil, fmt.Errorf("failed to parse response: %v", err)
+	}
+
+	return &amr, nil
+}
 
 var agentParentSyncCmd = &cobra.Command{
 	Use:   "parentsync",

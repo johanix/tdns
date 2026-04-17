@@ -95,26 +95,21 @@ func (kdb *KeyDB) SendSig0KeyUpdate(ctx context.Context, childpri, parpri string
 	return nil
 }
 
-// Generate a new private/public key pair of the right algorithm and the right rrtype and store in
-// the KeyStore. Return the key as a pkc
-
-// XXX: FIXME: This is not yet ready to generate DNSSEC keys, because in the DNSSEC case we also need the
-//
-//	flags field, which is not yet set here.
-func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, alg uint8, keytype string, tx *Tx) (*PrivateKeyCache, string, error) {
+// GenerateKeyMaterial builds private/public key material for KEY or DNSKEY without touching the DB.
+func GenerateKeyMaterial(owner string, rrtype uint16, alg uint8, keytype string) (*PrivateKeyCache, error) {
 	if _, exist := dns.AlgorithmToString[alg]; !exist {
-		return nil, "", fmt.Errorf("GenerateKeypair: Error: unknown algorithm: %d", alg)
+		return nil, fmt.Errorf("GenerateKeyMaterial: Error: unknown algorithm: %d", alg)
 	}
 
 	if rrtype == dns.TypeDNSKEY && !slices.Contains([]string{"ZSK", "KSK", "CSK"}, keytype) {
-		return nil, "", fmt.Errorf("generateKeypair: error: unknown key type: %s", keytype)
+		return nil, fmt.Errorf("GenerateKeyMaterial: error: unknown key type: %s", keytype)
 	}
 
 	var privkey crypto.PrivateKey
 	var err error
 
 	if rrtype != dns.TypeKEY && rrtype != dns.TypeDNSKEY {
-		return nil, "", fmt.Errorf("error: rrtype must be KEY or DNSKEY")
+		return nil, fmt.Errorf("error: rrtype must be KEY or DNSKEY")
 	}
 
 	var pkc *PrivateKeyCache
@@ -127,7 +122,7 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 	mode = strings.ToLower(mode)
 	if mode == "" {
 		mode = "internal"
-		lgDns.Info("GenerateKeypair: no mode specified, using default", "configKey", "resignerengine.keygen.mode", "mode", mode)
+		lgDns.Info("GenerateKeyMaterial: no mode specified, using default", "configKey", "resignerengine.keygen.mode", "mode", mode)
 	}
 
 	var bits int
@@ -159,7 +154,7 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 			}
 			nkey.(*dns.DNSKEY).Protocol = 3
 		default:
-			return nil, "", fmt.Errorf("error: rrtype must be KEY or DNSKEY")
+			return nil, fmt.Errorf("error: rrtype must be KEY or DNSKEY")
 		}
 
 		nkey.Header().Name = owner
@@ -169,18 +164,15 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 
 		switch rrtype {
 		case dns.TypeKEY:
-			lgDns.Debug("GenerateKeypair: generating KEY", "flags", nkey.(*dns.KEY).Flags)
+			lgDns.Debug("GenerateKeyMaterial: generating KEY", "flags", nkey.(*dns.KEY).Flags)
 			privkey, err = nkey.(*dns.KEY).Generate(bits)
 		case dns.TypeDNSKEY:
-			lgDns.Debug("GenerateKeypair: generating DNSKEY", "flags", nkey.(*dns.DNSKEY).Flags)
+			lgDns.Debug("GenerateKeyMaterial: generating DNSKEY", "flags", nkey.(*dns.DNSKEY).Flags)
 			privkey, err = nkey.(*dns.DNSKEY).Generate(bits)
 		}
 		if err != nil {
-			return nil, "", fmt.Errorf("error from nkey.Generate: %v", err)
+			return nil, fmt.Errorf("error from nkey.Generate: %v", err)
 		}
-
-		// kbasename := fmt.Sprintf("K%s+%03d+%03d", owner, nkey.Algorithm, nkey.KeyTag())
-		// log.Printf("Key basename: %s", kbasename)
 
 		var pk crypto.PrivateKey
 		switch privkey := privkey.(type) {
@@ -191,29 +183,25 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 		case *ecdsa.PrivateKey:
 			pk = privkey
 		default:
-			return nil, "", fmt.Errorf("error: unknown private key type: %T", privkey)
+			return nil, fmt.Errorf("error: unknown private key type: %T", privkey)
 		}
 
-		// Convert private key to PKCS#8 PEM format for storage
 		privkeyPEM, err := PrivateKeyToPEM(pk)
 		if err != nil {
-			return nil, "", fmt.Errorf("error from PrivateKeyToPEM: %v", err)
+			return nil, fmt.Errorf("error from PrivateKeyToPEM: %v", err)
 		}
 
-		// PrepareKeyCache now accepts PEM format directly
 		pkc, err = PrepareKeyCache(privkeyPEM, nkey.String())
 		if err != nil {
-			return nil, "", fmt.Errorf("error from PrepareKeyCache: %v", err)
+			return nil, fmt.Errorf("error from PrepareKeyCache: %v", err)
 		}
 
-		// Replace PrivateKey field with PEM format for storage (PrepareKeyCache converts PEM to BIND
-		// for the PrivateKey field, but we want to store PEM in the database)
 		pkc.PrivateKey = privkeyPEM
 
 	case "external":
 		keygenprog := viper.GetString("delegationsync.child.update.keygen.generator")
 		if keygenprog == "" {
-			return nil, "", fmt.Errorf("error: key generator program not specified (keygenprog=%s, modekey=%s)", keygenprog, modekey)
+			return nil, fmt.Errorf("error: key generator program not specified (keygenprog=%s, modekey=%s)", keygenprog, modekey)
 		}
 
 		algstr := dns.AlgorithmToString[alg]
@@ -234,12 +222,11 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 		command := exec.Command(cmdsl[0], cmdsl[1:]...)
 		out, err := command.CombinedOutput()
 		if err != nil {
-			lgDns.Error("GenerateKeypair: error from external keygen", "cmd", cmdsl, "err", err)
+			lgDns.Error("GenerateKeyMaterial: error from external keygen", "cmd", cmdsl, "err", err)
 		}
 
 		var keyname, keyfile string
 
-		// log.Printf("out: %s", out)
 		for _, l := range strings.Split(string(out), "\n") {
 			if len(l) != 0 {
 				elems := strings.Fields(l)
@@ -247,29 +234,40 @@ func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, a
 					keyname = elems[0]
 					keyfile = fmt.Sprintf("%s/%s.private", keydir, keyname)
 					keyfile = filepath.Clean(keyfile)
-					// fmt.Printf("Generated key is in file %s\n", keyfile)
 				}
 			}
 		}
 
 		pkc, err = ReadPrivateKey(keyfile)
 		if err != nil {
-			return nil, "", err
-		} else {
-			// log.Printf("Generated %s key files %s/%s.{key,private} successfully imported. May be deleted.", dns.TypeToString[rrtype], keydir, keyname)
-			// Delete the generated key files
-			err = os.Remove(fmt.Sprintf("%s/%s.private", keydir, keyname))
-			if err != nil {
-				lgDns.Warn("GenerateKeypair: error deleting private key file", "err", err)
-			}
-			err = os.Remove(fmt.Sprintf("%s/%s.key", keydir, keyname))
-			if err != nil {
-				lgDns.Warn("GenerateKeypair: error deleting public key file", "err", err)
-			}
+			return nil, err
+		}
+		err = os.Remove(fmt.Sprintf("%s/%s.private", keydir, keyname))
+		if err != nil {
+			lgDns.Warn("GenerateKeyMaterial: error deleting private key file", "err", err)
+		}
+		err = os.Remove(fmt.Sprintf("%s/%s.key", keydir, keyname))
+		if err != nil {
+			lgDns.Warn("GenerateKeyMaterial: error deleting public key file", "err", err)
 		}
 
 	default:
-		return nil, "", fmt.Errorf("error: unknown keygen mode: \"%s\" (modekey=%s)", mode, modekey)
+		return nil, fmt.Errorf("error: unknown keygen mode: \"%s\" (modekey=%s)", mode, modekey)
+	}
+
+	return pkc, nil
+}
+
+// Generate a new private/public key pair of the right algorithm and the right rrtype and store in
+// the KeyStore. Return the key as a pkc
+
+// XXX: FIXME: This is not yet ready to generate DNSSEC keys, because in the DNSSEC case we also need the
+//
+//	flags field, which is not yet set here.
+func (kdb *KeyDB) GenerateKeypair(owner, creator, state string, rrtype uint16, alg uint8, keytype string, tx *Tx) (*PrivateKeyCache, string, error) {
+	pkc, err := GenerateKeyMaterial(owner, rrtype, alg, keytype)
+	if err != nil {
+		return nil, "", err
 	}
 
 	const (

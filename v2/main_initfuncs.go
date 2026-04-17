@@ -7,25 +7,20 @@ import (
 	// "flag"
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"runtime/debug"
-	"strconv"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/johanix/tdns-transport/v2/crypto/jose"
-	"github.com/johanix/tdns-transport/v2/transport"
 	_ "github.com/mattn/go-sqlite3"
-	"github.com/miekg/dns"
 	flag "github.com/spf13/pflag"
 	"github.com/spf13/viper"
 )
 
 var engineWg sync.WaitGroup
 
+/*
 // buildChunkQueryEndpoint returns "host:port" for the agent's DNS service so the receiver of a NOTIFY(CHUNK) knows where to send the CHUNK query. Prefers Publish so the combiner can reach the agent.
 func buildChunkQueryEndpoint(conf *Config) string {
 	if conf.MultiProvider == nil {
@@ -52,6 +47,7 @@ func buildChunkQueryEndpoint(conf *Config) string {
 	}
 	return net.JoinHostPort(host, strconv.Itoa(int(port)))
 }
+	*/
 
 // startEngine wraps engine functions in a goroutine with error handling.
 // It logs errors if the engine function returns an error, preventing silent failures.
@@ -278,6 +274,7 @@ func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error 
 	StartEngine(&Globals.App, "NotifyHandler", func() error { return NotifyHandler(ctx, conf) })
 	StartEngine(&Globals.App, "DnsEngine", func() error { return DnsEngine(ctx, conf) })
 	StartEngineNoError(&Globals.App, "ResignerEngine", func() { ResignerEngine(ctx, conf.Internal.ResignQ) })
+	StartEngine(&Globals.App, "KeyStateWorker", func() error { return KeyStateWorker(ctx, conf) })
 
 	return nil
 }
@@ -327,168 +324,4 @@ func Shutdowner(conf *Config, msg string) {
 	lgConfig.Info("all engines finished", "app", Globals.App.Name)
 	time.Sleep(200 * time.Millisecond)
 	os.Exit(0)
-}
-
-// initPayloadCrypto initializes PayloadCrypto from the agent config.
-// Loads the local JOSE private key and the combiner's public key (if configured).
-func initPayloadCrypto(conf *Config) (*transport.PayloadCrypto, error) {
-	if conf.MultiProvider == nil {
-		return nil, fmt.Errorf("agent config is not set")
-	}
-	// Use JOSE backend for key operations
-	backend := jose.NewBackend()
-	// Load local private key (trim path so trailing whitespace/newlines from config do not cause "file not found")
-	privKeyPath := strings.TrimSpace(conf.MultiProvider.LongTermJosePrivKey)
-	privKeyData, err := os.ReadFile(privKeyPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("private key file not found: %q: %w", privKeyPath, err)
-		}
-		return nil, fmt.Errorf("read private key %q: %w", privKeyPath, err)
-	}
-	privKeyData = StripKeyFileComments(privKeyData)
-	privKey, err := backend.ParsePrivateKey(privKeyData)
-	if err != nil {
-		return nil, fmt.Errorf("parse private key: %w", err)
-	}
-	// Derive public key from private key
-	joseBackend, ok := backend.(*jose.Backend)
-	if !ok {
-		return nil, fmt.Errorf("backend is not JOSE")
-	}
-	pubKey, err := joseBackend.PublicFromPrivate(privKey)
-	if err != nil {
-		return nil, fmt.Errorf("derive public key: %w", err)
-	}
-	// Create PayloadCrypto instance
-	pc, err := transport.NewPayloadCrypto(&transport.PayloadCryptoConfig{
-		Backend: backend,
-		Enabled: true,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("create PayloadCrypto: %w", err)
-	}
-	// Set local keys
-	pc.SetLocalKeys(privKey, pubKey)
-	lgConfig.Info("loaded local JOSE key", "path", privKeyPath)
-	// Load combiner's public key if configured
-	if conf.MultiProvider.Combiner != nil && strings.TrimSpace(conf.MultiProvider.Combiner.LongTermJosePubKey) != "" {
-		combinerPubKeyPath := strings.TrimSpace(conf.MultiProvider.Combiner.LongTermJosePubKey)
-		combinerPubKeyData, err := os.ReadFile(combinerPubKeyPath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				lgConfig.Warn("combiner public key file not found, encryption disabled", "path", combinerPubKeyPath, "err", err)
-			} else {
-				lgConfig.Warn("failed to read combiner public key, encryption disabled", "path", combinerPubKeyPath, "err", err)
-			}
-		} else {
-			combinerPubKeyData = StripKeyFileComments(combinerPubKeyData)
-			combinerPubKey, err := backend.ParsePublicKey(combinerPubKeyData)
-			if err != nil {
-				lgConfig.Warn("failed to parse combiner public key, encryption disabled", "err", err)
-			} else {
-				// Add combiner as peer for both encryption and verification
-				pc.AddPeerKey("combiner", combinerPubKey)
-				pc.AddPeerVerificationKey("combiner", combinerPubKey)
-				lgConfig.Info("loaded combiner public key", "path", combinerPubKeyPath)
-			}
-		}
-	}
-	// DNS-39: Peer keys come from DNS discovery, not config files
-	// Old agent.peers map with embedded keys is no longer supported
-	if len(conf.MultiProvider.AuthorizedPeers) > 0 {
-		lgConfig.Info("using agent.authorized_peers, peer keys will be discovered via DNS")
-	} else {
-		lgConfig.Info("no agent.authorized_peers configured, no peer crypto available")
-	}
-	return pc, nil
-}
-
-// initCombinerCrypto initializes crypto for the combiner to decrypt agent payloads.
-// Returns a SecurePayloadWrapper configured with the combiner's private key and agent's public key.
-func InitCombinerCrypto(conf *Config) (*transport.SecurePayloadWrapper, error) {
-	// Use the JOSE backend
-	backend := jose.NewBackend()
-	// Load combiner's private key (trim path so trailing whitespace/newlines from config do not cause "file not found")
-	privKeyPath := strings.TrimSpace(conf.MultiProvider.LongTermJosePrivKey)
-	privKeyData, err := os.ReadFile(privKeyPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("combiner private key file not found: %q: %w", privKeyPath, err)
-		}
-		return nil, fmt.Errorf("failed to read combiner private key %q: %w", privKeyPath, err)
-	}
-	privKeyData = StripKeyFileComments(privKeyData)
-	localPrivKey, err := backend.ParsePrivateKey(privKeyData)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse combiner private key: %w", err)
-	}
-	lgConfig.Info("loaded combiner private key", "path", privKeyPath)
-	// Derive public key from private key
-	joseBackend, ok := backend.(*jose.Backend)
-	if !ok {
-		return nil, fmt.Errorf("backend is not JOSE")
-	}
-	localPubKey, err := joseBackend.PublicFromPrivate(localPrivKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to derive public key: %w", err)
-	}
-	// Create PayloadCrypto instance using the generic transport infrastructure
-	pc, err := transport.NewPayloadCrypto(&transport.PayloadCryptoConfig{
-		Backend: backend,
-		Enabled: true,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to create PayloadCrypto: %w", err)
-	}
-	// Set local keys for decryption
-	pc.SetLocalKeys(localPrivKey, localPubKey)
-	// Load public keys for all configured agents
-	if len(conf.MultiProvider.Agents) == 0 {
-		return nil, fmt.Errorf("multi-provider.agents not configured (need at least one agent)")
-	}
-	for _, agent := range conf.MultiProvider.Agents {
-		if strings.TrimSpace(agent.Identity) == "" {
-			return nil, fmt.Errorf("multi-provider.agents: agent entry missing required identity field")
-		}
-		if strings.TrimSpace(agent.LongTermJosePubKey) == "" {
-			return nil, fmt.Errorf("multi-provider.agents[%s]: long_term_jose_pub_key not configured", agent.Identity)
-		}
-		agentPubKeyPath := strings.TrimSpace(agent.LongTermJosePubKey)
-		agentPubKeyData, err := os.ReadFile(agentPubKeyPath)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil, fmt.Errorf("agent public key file not found for %s: %q: %w", agent.Identity, agentPubKeyPath, err)
-			}
-			return nil, fmt.Errorf("failed to read agent public key for %s: %q: %w", agent.Identity, agentPubKeyPath, err)
-		}
-		agentPubKeyData = StripKeyFileComments(agentPubKeyData)
-		agentVerifyKey, err := backend.ParsePublicKey(agentPubKeyData)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse agent public key for %s: %w", agent.Identity, err)
-		}
-		// Register agent with its identity as the peer key ID
-		peerID := dns.Fqdn(strings.TrimSpace(agent.Identity))
-		pc.AddPeerKey(peerID, agentVerifyKey)
-		pc.AddPeerVerificationKey(peerID, agentVerifyKey)
-		lgConfig.Info("loaded public key for agent", "agent", peerID, "path", agentPubKeyPath)
-	}
-	return transport.NewSecurePayloadWrapper(pc), nil
-}
-
-// registerPeerAgents registers peer agents from the static config into the TransportManager.
-//
-// DNS-39: Peer addresses come from DNS discovery, not static config.
-// The old agent.peers map with embedded addresses is no longer supported.
-func registerPeerAgents(conf *Config, tm *MPTransportBridge) error {
-	if conf.MultiProvider == nil {
-		return nil // No agent config
-	}
-	// DNS-39: All peer addresses come from DNS discovery
-	if len(conf.MultiProvider.AuthorizedPeers) > 0 {
-		lgConfig.Info("using agent.authorized_peers, peer addresses will be discovered via DNS")
-	} else {
-		lgConfig.Info("no agent.authorized_peers configured, no peers available")
-	}
-	return nil
 }

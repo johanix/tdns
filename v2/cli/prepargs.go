@@ -204,13 +204,14 @@ func PrepArgs(args ...interface{}) {
 				os.Exit(1)
 			}
 
+/* 20260415 johani
 		case "identity":
 			if myIdentity == "" {
 				fmt.Printf("Error: agent id not specified using --id flag\n")
 				os.Exit(1)
 			}
 			tdns.Globals.AgentId = tdns.AgentId(dns.Fqdn(myIdentity))
-
+*/
 		case "service":
 			var serviceName string
 			if cmd != nil {

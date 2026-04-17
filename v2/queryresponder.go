@@ -163,13 +163,13 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 	if zoneDak == nil || len(zoneDak.ZSKs) == 0 {
 		// No active keys found - try to ensure they exist (promote published or generate new)
 		lgHandler.Warn("no active ZSKs, attempting to ensure keys exist", "zone", zd.ZoneName)
-		zoneDak, err = zd.ensureActiveDnssecKeys(kdb)
+		zoneDak, err = zd.EnsureActiveDnssecKeys(kdb)
 		if err != nil {
 			lgHandler.Error("failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "err", err)
 			return rrset, err
 		}
 		if zoneDak == nil || len(zoneDak.ZSKs) == 0 {
-			lgHandler.Error("still no ZSKs available after ensureActiveDnssecKeys", "zone", zd.ZoneName)
+			lgHandler.Error("still no ZSKs available after EnsureActiveDnssecKeys", "zone", zd.ZoneName)
 			return rrset, fmt.Errorf("no ZSKs available for zone %s", zd.ZoneName)
 		}
 	}

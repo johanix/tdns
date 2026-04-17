@@ -4,38 +4,6 @@
  * KeyStateWorker: background goroutine for automatic DNSSEC key state transitions.
  * Handles time-based transitions (published→standby, retired→removed) and
  * maintains the configured number of standby keys per zone.
- *
- * =====================================================================
- * NOT YET WIRED INTO TDNS-AUTH
- * =====================================================================
- *
- * As of 2026-04-09 this file is NOT registered by any tdns engine and
- * has zero callers inside tdns/v2/. tdns-mp has its own live copy at
- * tdns-mp/v2/key_state_worker.go which is started by
- * tdns-mp/v2/start_signer.go for the mpsigner role.
- *
- * The intent is that this file should eventually be wired into
- * tdns-auth (StartAuth) so that a plain tdns-auth signer also gets
- * automatic key state transitions and standby key maintenance. That
- * wiring is deferred until the tdns-auth key management logic is
- * revisited more broadly; doing it in isolation risks making choices
- * that turn out to be wrong once the larger picture is reconsidered.
- *
- * When that work is picked up:
- *   - Register KeyStateWorker from StartAuth (gated positively on
- *     AppTypeAuth; do NOT use a negative !AppTypeMPSigner check).
- *   - Decide whether tdns and tdns-mp should share this file or keep
- *     diverging copies. Right now they are near-identical.
- *   - Review the OptMultiProvider branches at lines ~181/213/224.
- *     These are zone-option checks (not AppTypeMP* branches) and are
- *     legitimate, but they reference DnskeyStateMpremove and
- *     pushKeystateInventoryToAllAgents which are MP concepts that
- *     tdns-auth doesn't need. A plain tdns-auth signer can probably
- *     ignore these branches entirely.
- *
- * Until then, this file is preserved as the reference implementation.
- * Do not delete it; it will be needed when tdns-auth key management
- * is revisited.
  */
 
 package tdns
@@ -121,13 +89,10 @@ func KeyStateWorker(ctx context.Context, conf *Config) error {
 func checkAndTransitionKeys(conf *Config, kdb *KeyDB, propagationDelay time.Duration, standbyZskCount, standbyKskCount int) {
 	now := time.Now()
 
-	// (1) Check published → standby transitions
 	transitionPublishedToStandby(conf, kdb, now, propagationDelay)
 
-	// (2) Check retired → removed transitions
 	transitionRetiredToRemoved(conf, kdb, now, propagationDelay)
 
-	// (3) Maintain standby key count per zone
 	maintainStandbyKeys(conf, kdb, standbyZskCount, standbyKskCount)
 }
 
@@ -146,13 +111,11 @@ func transitionPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propa
 			continue
 		}
 
-		// Reject far-future timestamps (clock skew or data corruption)
 		if key.PublishedAt.After(now.Add(5 * time.Minute)) {
 			lgSigner.Warn("KeyStateWorker: published_at timestamp is in the future, skipping", "zone", key.ZoneName, "keyid", key.KeyTag, "published_at", key.PublishedAt)
 			continue
 		}
 
-		// Reject unreasonably old timestamps (>10 years suggests data corruption)
 		if now.Sub(*key.PublishedAt) > 10*365*24*time.Hour {
 			lgSigner.Warn("KeyStateWorker: published_at timestamp is unreasonably old (>10 years), skipping", "zone", key.ZoneName, "keyid", key.KeyTag, "published_at", key.PublishedAt)
 			continue
@@ -175,8 +138,6 @@ func transitionPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propa
 
 // transitionRetiredToRemoved transitions keys that have been in "retired"
 // state long enough for all RRSIGs made with them to expire from caches.
-// For MP zones, keys transition to "mpremove" (awaiting agent confirmation)
-// instead of directly to "removed".
 func transitionRetiredToRemoved(conf *Config, kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
 	keys, err := GetDnssecKeysByState(kdb, "", DnskeyStateRetired)
 	if err != nil {
@@ -190,13 +151,11 @@ func transitionRetiredToRemoved(conf *Config, kdb *KeyDB, now time.Time, propaga
 			continue
 		}
 
-		// Reject far-future timestamps (clock skew or data corruption)
 		if key.RetiredAt.After(now.Add(5 * time.Minute)) {
 			lgSigner.Warn("KeyStateWorker: retired_at timestamp is in the future, skipping", "zone", key.ZoneName, "keyid", key.KeyTag, "retired_at", key.RetiredAt)
 			continue
 		}
 
-		// Reject unreasonably old timestamps (>10 years suggests data corruption)
 		if now.Sub(*key.RetiredAt) > 10*365*24*time.Hour {
 			lgSigner.Warn("KeyStateWorker: retired_at timestamp is unreasonably old (>10 years), skipping", "zone", key.ZoneName, "keyid", key.KeyTag, "retired_at", key.RetiredAt)
 			continue
@@ -207,69 +166,49 @@ func transitionRetiredToRemoved(conf *Config, kdb *KeyDB, now time.Time, propaga
 			continue
 		}
 
-		// Check if this is a multi-provider zone
 		targetState := DnskeyStateRemoved
-		zd, exists := Zones.Get(key.ZoneName)
-		if exists && zd.Options[OptMultiProvider] {
-			targetState = DnskeyStateMpremove
-		}
-
-		lgSigner.Info("KeyStateWorker: transitioning retired→"+targetState, "zone", key.ZoneName, "keyid", key.KeyTag, "elapsed", elapsed.Truncate(time.Second))
+		lgSigner.Info("KeyStateWorker: transitioning retired→removed", "zone", key.ZoneName, "keyid", key.KeyTag, "elapsed", elapsed.Truncate(time.Second))
 		if err := UpdateDnssecKeyState(kdb, key.ZoneName, key.KeyTag, targetState); err != nil {
-			lgSigner.Error("KeyStateWorker: retired→"+targetState+" failed", "zone", key.ZoneName, "keyid", key.KeyTag, "err", err)
+			lgSigner.Error("KeyStateWorker: retired→removed failed", "zone", key.ZoneName, "keyid", key.KeyTag, "err", err)
 			continue
 		}
 
 		triggerResign(conf, key.ZoneName)
-
-		// For MP zones, push updated inventory to all agents so they
-		// learn about the key removal and distribute it to remote agents.
-		if targetState == DnskeyStateMpremove {
-			pushKeystateInventoryToAllAgents(conf, key.ZoneName)
-		}
 	}
 }
 
 // maintainStandbyKeys ensures each signing zone has the configured number of
 // standby keys for both ZSKs and KSKs. If a zone has fewer standby keys than
-// required and no keys are in the pipeline (published or mpdist), new keys
-// are generated via GenerateAndStageKey.
+// required and no keys are in the published pipeline, new keys are generated.
 func maintainStandbyKeys(conf *Config, kdb *KeyDB, standbyZskCount, standbyKskCount int) {
 	for zoneName, zd := range Zones.Items() {
-		// Only process zones that do signing
 		if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 			continue
 		}
 
-		// Skip multi-provider zones where we are not a signer
+		// MP zones have their own key state worker and their own
+		// keystore table (MPDnssecKeyStore). Skip them here.
 		if zd.Options[OptMultiProvider] {
-			shouldSign, _ := zd.weAreASigner()
-			if !shouldSign {
-				continue
-			}
+			continue
 		}
 
 		if zd.DnssecPolicy == nil {
 			continue
 		}
 
-		isMP := zd.Options[OptMultiProvider]
 		alg := zd.DnssecPolicy.Algorithm
 
-		// Maintain ZSK standby count
-		maintainStandbyKeysForType(kdb, zoneName, alg, "ZSK", 256, isMP, standbyZskCount)
+		maintainStandbyKeysForType(kdb, zoneName, alg, "ZSK", 256, standbyZskCount)
 
-		// Maintain KSK standby count (0 means don't maintain)
 		if standbyKskCount > 0 {
-			maintainStandbyKeysForType(kdb, zoneName, alg, "KSK", 257, isMP, standbyKskCount)
+			maintainStandbyKeysForType(kdb, zoneName, alg, "KSK", 257, standbyKskCount)
 		}
 	}
 }
 
 // maintainStandbyKeysForType checks and maintains standby key count for a
 // specific key type (ZSK or KSK) in a zone.
-func maintainStandbyKeysForType(kdb *KeyDB, zoneName string, alg uint8, keytype string, expectedFlags uint16, isMP bool, standbyKeyCount int) {
-	// Count standby keys of this type
+func maintainStandbyKeysForType(kdb *KeyDB, zoneName string, alg uint8, keytype string, expectedFlags uint16, standbyKeyCount int) {
 	standbyKeys, err := GetDnssecKeysByState(kdb, zoneName, DnskeyStateStandby)
 	if err != nil {
 		lgSigner.Error("KeyStateWorker: error getting standby keys", "zone", zoneName, "keytype", keytype, "err", err)
@@ -278,10 +217,9 @@ func maintainStandbyKeysForType(kdb *KeyDB, zoneName string, alg uint8, keytype 
 	standbyCount := countKeysByFlags(standbyKeys, expectedFlags)
 
 	if standbyCount >= standbyKeyCount {
-		return // Already have enough
+		return
 	}
 
-	// Check pipeline: don't generate if published or mpdist keys exist for this type
 	publishedKeys, err := GetDnssecKeysByState(kdb, zoneName, DnskeyStatePublished)
 	if err != nil {
 		lgSigner.Error("KeyStateWorker: error getting published keys", "zone", zoneName, "keytype", keytype, "err", err)
@@ -289,15 +227,8 @@ func maintainStandbyKeysForType(kdb *KeyDB, zoneName string, alg uint8, keytype 
 	}
 	publishedCount := countKeysByFlags(publishedKeys, expectedFlags)
 
-	mpdistKeys, err := GetDnssecKeysByState(kdb, zoneName, DnskeyStateMpdist)
-	if err != nil {
-		lgSigner.Error("KeyStateWorker: error getting mpdist keys", "zone", zoneName, "keytype", keytype, "err", err)
-		return
-	}
-	mpdistCount := countKeysByFlags(mpdistKeys, expectedFlags)
-
-	if publishedCount > 0 || mpdistCount > 0 {
-		lgSigner.Debug("KeyStateWorker: keys in pipeline, not generating", "zone", zoneName, "keytype", keytype, "published", publishedCount, "mpdist", mpdistCount)
+	if publishedCount > 0 {
+		lgSigner.Debug("KeyStateWorker: keys in pipeline, not generating", "zone", zoneName, "keytype", keytype, "published", publishedCount)
 		return
 	}
 
@@ -305,12 +236,12 @@ func maintainStandbyKeysForType(kdb *KeyDB, zoneName string, alg uint8, keytype 
 	lgSigner.Info("KeyStateWorker: generating standby keys", "zone", zoneName, "keytype", keytype, "have", standbyCount, "need", standbyKeyCount, "generating", needed)
 
 	for i := 0; i < needed; i++ {
-		keyid, err := GenerateAndStageKey(kdb, zoneName, "key-state-worker", alg, keytype, isMP)
+		keyid, err := GenerateAndStageKey(kdb, zoneName, "key-state-worker", alg, keytype)
 		if err != nil {
 			lgSigner.Error("KeyStateWorker: key generation failed", "zone", zoneName, "keytype", keytype, "err", err)
 			break
 		}
-		lgSigner.Info("KeyStateWorker: generated key", "zone", zoneName, "keytype", keytype, "keyid", keyid, "mp", isMP)
+		lgSigner.Info("KeyStateWorker: generated key", "zone", zoneName, "keytype", keytype, "keyid", keyid)
 	}
 }
 

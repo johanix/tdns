@@ -181,7 +181,7 @@ var PingCmd = &cobra.Command{
 }
 
 func init() {
-	CombinerCmd.AddCommand(PingCmd)
+	// 20260415 johani: CombinerCmd.AddCommand(PingCmd)
 	AgentCmd.AddCommand(PingCmd)
 	// ScannerCmd.AddCommand will be called from scanner_cmds.go init()
 }

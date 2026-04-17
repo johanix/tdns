@@ -58,35 +58,25 @@ type ImrResponse struct {
 // all dancing recursive server. It is just intended to get the job done for the particular cases
 // that we need to support.
 
-func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
-	var recursorch = conf.Internal.RecursorCh
-
-	// IMR is active by default unless explicitly set to false
-	isActive := conf.Imr.Active == nil || *conf.Imr.Active
-
-	if !isActive {
-		lgImr.Warn("ImrEngine is NOT active (imrengine.active explicitly set to false)")
-		for {
-			select {
-			case <-ctx.Done():
-				lgImr.Info("terminating (inactive mode, context cancelled)")
-				return nil
-			case rrq, ok := <-recursorch:
-				if !ok {
-					return nil
-				}
-				lgImr.Warn("not active but got a request", "qname", rrq.Qname)
-				continue // ensure that we keep reading to keep the channel open
-			}
-		}
-	} else {
-		lgImr.Info("ImrEngine starting")
-	}
-
+// InitImrEngine creates and initializes the Imr (cache, stubs, debug logging)
+// and wires it into conf.Internal.ImrEngine and Globals.ImrEngine. This is
+// safe to call synchronously before other engines start, guaranteeing that the
+// Imr is available by the time transport bridges and agent registries are created.
+//
+// Apps that need the IMR available early (e.g. mpagent) call this before
+// StartEngine("ImrEngine", ...). Apps that don't need early availability can
+// just call ImrEngine() which calls InitImrEngine() internally if needed.
+//
+// IMPORTANT: tdns-mp depends on this split. The mpagent calls InitImrEngine()
+// synchronously at startup so that conf.Internal.ImrEngine is guaranteed
+// non-nil before transport bridges and agent registries are created. Without
+// this, the *tdnsmp.Imr embedding wraps a nil *tdns.Imr and promoted method
+// calls panic. Do not fold InitImrEngine back into ImrEngine without updating
+// tdns-mp/v2/start_agent.go.
+func (conf *Config) InitImrEngine(quiet bool) error {
 	// 1. Create the cache
-	var err error
 	rrcache := cache.NewRRsetCache(log.Default(), conf.Imr.Verbose, conf.Imr.Debug)
-	rrcache.Quiet = quiet // Set quiet flag early, before any logging
+	rrcache.Quiet = quiet
 
 	conf.Internal.RRsetCache = rrcache
 	requireDnssec := true // default: enforce DNSSEC validation
@@ -95,12 +85,12 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 	}
 	imr := &Imr{
 		Cache:                   rrcache,
-		DnskeyCache:             rrcache.DnskeyCache, // Use the same DnskeyCache instance as the cache
+		DnskeyCache:             rrcache.DnskeyCache,
 		Options:                 conf.Imr.Options,
-		LineWidth:               130, // default line width for truncating long lines in logging and output
+		LineWidth:               130,
 		Verbose:                 conf.Imr.Verbose,
 		Debug:                   conf.Imr.Debug,
-		Quiet:                   quiet, // Set quiet flag early, before any logging
+		Quiet:                   quiet,
 		RequireDnssecValidation: requireDnssec,
 	}
 
@@ -136,9 +126,9 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 	}
 
 	if !rrcache.IsPrimed() {
-		err = rrcache.PrimeWithHints(conf.Imr.RootHints, imr.IterativeDNSQueryFetcher())
+		err := rrcache.PrimeWithHints(conf.Imr.RootHints, imr.IterativeDNSQueryFetcher())
 		if err != nil {
-			Shutdowner(conf, fmt.Sprintf("ImrEngine: failed to initialize RecursorCache w/ root hints: %v", err))
+			return fmt.Errorf("failed to initialize RecursorCache w/ root hints: %v", err)
 		}
 		if len(conf.Imr.Stubs) > 0 {
 			for _, stub := range conf.Imr.Stubs {
@@ -153,11 +143,47 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 		}
 	}
 
-	// Make the IMR available to other engines before trust anchor initialization,
-	// which may block on network queries (e.g. root DNSKEY validation).
 	conf.Internal.ImrEngine = imr
 	Globals.ImrEngine = imr
-	lgImr.Info("ImrEngine available (pre-trust-anchor)")
+	lgImr.Info("InitImrEngine: IMR initialized and available")
+	return nil
+}
+
+func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
+	var recursorch = conf.Internal.RecursorCh
+
+	// IMR is active by default unless explicitly set to false
+	isActive := conf.Imr.Active == nil || *conf.Imr.Active
+
+	if !isActive {
+		lgImr.Warn("ImrEngine is NOT active (imrengine.active explicitly set to false)")
+		for {
+			select {
+			case <-ctx.Done():
+				lgImr.Info("terminating (inactive mode, context cancelled)")
+				return nil
+			case rrq, ok := <-recursorch:
+				if !ok {
+					return nil
+				}
+				lgImr.Warn("not active but got a request", "qname", rrq.Qname)
+				continue // ensure that we keep reading to keep the channel open
+			}
+		}
+	} else {
+		lgImr.Info("ImrEngine starting")
+	}
+
+	// Initialize the Imr if not already done (e.g. by a prior InitImrEngine call).
+	// Propagate the init error to the engine supervisor rather than calling
+	// Shutdowner here — that would leave conf.Internal.ImrEngine nil and the
+	// dereference below would panic.
+	if conf.Internal.ImrEngine == nil {
+		if err := conf.InitImrEngine(quiet); err != nil {
+			return fmt.Errorf("ImrEngine: InitImrEngine failed: %w", err)
+		}
+	}
+	imr := conf.Internal.ImrEngine
 
 	// Initialize trust anchors (DS/DNSKEY) and validate root (.) DNSKEY and NS
 	if err := imr.initializeImrTrustAnchors(ctx, conf); err != nil {

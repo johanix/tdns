@@ -3,12 +3,13 @@ module github.com/johanix/tdns/v2/cli
 go 1.25.2
 
 replace (
+	//	github.com/johanix/tdns/v2/hpke => ../hpke
+	github.com/johanix/tdns-transport/v2 => ../../../tdns-transport/v2
 	github.com/johanix/tdns/v2 => ../
 	github.com/johanix/tdns/v2/cache => ../cache
 	github.com/johanix/tdns/v2/core => ../core
-	github.com/johanix/tdns/v2/crypto => ../crypto
+	//	github.com/johanix/tdns/v2/crypto => ../crypto
 	github.com/johanix/tdns/v2/edns0 => ../edns0
-	github.com/johanix/tdns/v2/hpke => ../hpke
 )
 
 require (
@@ -17,10 +18,10 @@ require (
 	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/go-playground/validator/v10 v10.22.1
 	github.com/gookit/goutil v0.6.15
+	github.com/johanix/tdns-transport/v2 v2.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f
 	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39
-	github.com/johanix/tdns/v2/crypto v0.0.0-20260125163255-f23369628cc7
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000
 	github.com/miekg/dns v1.1.70
 	github.com/ryanuber/columnize v2.1.2+incompatible
@@ -48,7 +49,6 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.16 // indirect
 	github.com/mattn/go-tty v0.0.3 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
-	github.com/orcaman/concurrent-map/v2 v2.0.1 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
 	github.com/pkg/term v1.2.0-beta.2 // indirect
 	github.com/quic-go/quic-go v0.58.0 // indirect
@@ -61,7 +61,6 @@ require (
 	github.com/twotwotwo/sorts v0.0.0-20160814051341-bf5c1f2b8553 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	golang.org/x/crypto v0.46.0 // indirect
-	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
 	golang.org/x/mod v0.31.0 // indirect
 	golang.org/x/net v0.48.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
