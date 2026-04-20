@@ -142,6 +142,7 @@ type ConfigResponse struct {
 	ApiServer       ApiServerConf
 	Identities      []string
 	CombinerOptions map[CombinerOption]bool
+	DBFile          string
 	Msg             string
 	Error           bool
 	ErrorMsg        string

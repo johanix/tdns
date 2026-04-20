@@ -182,6 +182,35 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		txSuccess = true
 		return &resp, err
 
+	case "export":
+		const getOneSig0KeySql = `
+SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
+		row := tx.QueryRow(getOneSig0KeySql, kp.Zone, kp.Keyid)
+		var zonename, state, algorithm, creator, privatekey, keyrrstr string
+		var keyid int
+		err := row.Scan(&zonename, &state, &keyid, &algorithm, &creator, &privatekey, &keyrrstr)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("SIG(0) key for zone %q keyid %d not found", kp.Zone, kp.Keyid)
+				return &resp, nil
+			}
+			return &resp, fmt.Errorf("error from row.Scan(): %v", err)
+		}
+		mapkey := fmt.Sprintf("%s::%d", zonename, keyid)
+		resp.Sig0keys = map[string]Sig0Key{
+			mapkey: {
+				Name:       zonename,
+				State:      state,
+				Keyid:      uint16(keyid),
+				Algorithm:  algorithm,
+				Creator:    creator,
+				PrivateKey: privatekey, // unredacted: export intentionally surfaces it
+				Keystr:     keyrrstr,
+			},
+		}
+		resp.Msg = fmt.Sprintf("Exported SIG(0) key %s keyid %d", zonename, keyid)
+
 	case "setstate":
 		res, err = tx.Exec(setStateSig0KeySql, kp.State, kp.Keyname, kp.Keyid)
 		if err != nil {
