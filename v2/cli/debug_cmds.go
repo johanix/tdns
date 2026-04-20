@@ -240,7 +240,8 @@ func init() {
 	DebugCmd.PersistentFlags().StringVarP(&debugQtype, "qtype", "", "", "qtype of rrset to examine")
 
 	defalg := viper.GetString("delegationsync.child.update.keygen.algorithm")
-	debugSig0Cmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", defalg, "algorithm to use for SIG(0)")
+	debugSig0Cmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", defalg,
+		sig0AlgorithmsHelp("Algorithm to use for SIG(0)"))
 	debugSig0Cmd.PersistentFlags().StringVarP(&tdns.Globals.Rrtype, "rrtype", "r", "", "rrtype to use for SIG(0)")
 }
 

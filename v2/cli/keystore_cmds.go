@@ -241,7 +241,8 @@ func init() {
 	keystoreSig0SetStateCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
 	keystoreSig0SetStateCmd.Flags().StringVarP(&NewState, "state", "", "", "New state of key (created|published|active|retired)")
 	keystoreSig0GenerateCmd.Flags().StringVarP(&NewState, "state", "", "", "Inital key state (created|published|active|retired)")
-	keystoreSig0GenerateCmd.Flags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519", "Algorithm to use for key generation (default: ED25519)")
+	keystoreSig0GenerateCmd.Flags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
+		sig0AlgorithmsHelp("Algorithm to use for SIG(0) key generation"))
 	keystoreSig0GenerateCmd.MarkFlagRequired("state")
 
 	keystoreSig0ExportCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone the key belongs to")
@@ -263,7 +264,8 @@ func init() {
 	keystoreDnssecSetStateCmd.Flags().StringVarP(&NewState, "state", "", "", "New statei of key")
 	keystoreDnssecGenerateCmd.Flags().StringVarP(&keytype, "keytype", "", "", "Key type to generate (KSK|ZSK|CSK)")
 	keystoreDnssecGenerateCmd.Flags().StringVarP(&NewState, "state", "", "", "Inital key state (created|published|active|retired)")
-	keystoreDnssecGenerateCmd.Flags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519", "Algorithm to use for key generation (default: ED25519)")
+	keystoreDnssecGenerateCmd.Flags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
+		dnssecAlgorithmsHelp("Algorithm to use for DNSSEC key generation"))
 	keystoreDnssecGenerateCmd.MarkFlagRequired("keytype")
 	keystoreDnssecGenerateCmd.MarkFlagRequired("state")
 	// keystoreDnssecGenerateCmd.MarkFlagRequired("algorithm") // XXX: marking it as required defeats the default value
