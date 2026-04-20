@@ -79,23 +79,37 @@ The zone to update is mandatory to specify on the command line with the --zone f
 	},
 }
 
-// init registers update-related Cobra subcommands and binds their command-line flags.
-// It wires the child, zone, and top-level update create commands and defines flags for
-// zone, parent, signer, server, and keyfile.
+// AttachUpdateCreateFlags adds the three flags common to every
+// "update create" entry point — --signer, --server, --key — to cmd,
+// bound to the package-level vars CreateUpdate reads. Use this from
+// every leaf create command (including cross-package ones in
+// tdns-mp/v2/cli) so the signer name, target server, and keyfile can
+// always be overridden from the CLI.
+func AttachUpdateCreateFlags(cmd *cobra.Command) {
+	cmd.Flags().StringVarP(&signer, "signer", "", "",
+		"Name of signer (key used to sign the update; defaults to --zone)")
+	cmd.Flags().StringVarP(&server, "server", "S", "",
+		"Server to send the update to (addr:port)")
+	cmd.Flags().StringVarP(&keyfile, "key", "K", "",
+		"SIG(0) keyfile to use for signing (.private/.key basename)")
+}
+
+// init registers update-related Cobra subcommands and binds their
+// command-line flags.
 func init() {
 	ChildCmd.AddCommand(childUpdateCmd)
 	childUpdateCmd.AddCommand(childUpdateCreateCmd)
 	childUpdateCreateCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
 	childUpdateCreateCmd.Flags().StringVarP(&tdns.Globals.ParentZone, "parent", "P", "", "Parent zone to send update to")
+	AttachUpdateCreateFlags(childUpdateCreateCmd)
 
 	ZoneCmd.AddCommand(zoneUpdateCmd)
 	zoneUpdateCmd.AddCommand(zoneUpdateCreateCmd)
 	zoneUpdateCreateCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
+	AttachUpdateCreateFlags(zoneUpdateCreateCmd)
 
 	UpdateCmd.AddCommand(updateCreateCmd)
-	updateCreateCmd.Flags().StringVarP(&signer, "signer", "", "", "Name of signer (i.e. key used to sign update)")
-	updateCreateCmd.Flags().StringVarP(&server, "server", "S", "", "Server to send update to (in addr:port format)")
-	updateCreateCmd.Flags().StringVarP(&keyfile, "key", "K", "", "SIG(0) keyfile to use for signing the update")
+	AttachUpdateCreateFlags(updateCreateCmd)
 }
 
 // CreateUpdate starts an interactive CLI for composing, signing, and sending DNS UPDATEs.
@@ -133,20 +147,22 @@ func CreateUpdate(updateType string) {
 
 	if keyfile != "" {
 		pkc, err := tdns.ReadPrivateKey(keyfile)
-		if err != nil {
+		switch {
+		case err != nil:
 			fmt.Printf("Error reading SIG(0) key file '%s': %v\n", keyfile, err)
-			signing = true
-		}
-		if pkc.KeyType != dns.TypeKEY {
-			fmt.Printf("Keyfile did not contain a SIG(0) key\n")
-			signing = true
-		}
-		if signing {
-			fmt.Printf("Using keyfile %s\n", keyfile)
+		case pkc == nil:
+			fmt.Printf("Keyfile '%s' yielded no key\n", keyfile)
+		case pkc.KeyType != dns.TypeKEY:
+			fmt.Printf("Keyfile '%s' did not contain a SIG(0) key\n", keyfile)
+		default:
+			fmt.Printf("Using keyfile %s (signer=%s, keyid=%d)\n",
+				keyfile, pkc.KeyRR.Header().Name, pkc.KeyRR.KeyTag())
 			sak = &tdns.Sig0ActiveKeys{
 				Keys: []*tdns.PrivateKeyCache{pkc},
 			}
-		} else {
+			signing = true
+		}
+		if !signing {
 			fmt.Printf("Warning: no SIG(0) signing of update messages possible.\n")
 		}
 	} else {

@@ -441,6 +441,7 @@ func init() {
 	// Update subcommands
 	agentZoneUpdateCmd.AddCommand(agentZoneUpdateCreateCmd)
 	agentZoneUpdateCreateCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
+	AttachUpdateCreateFlags(agentZoneUpdateCreateCmd)
 
 	// Flags
 	AgentZoneCmd.PersistentFlags().BoolVarP(&force, "force", "F", false, "force operation")
