@@ -130,7 +130,7 @@ func CreateUpdate(updateType string) {
 		os.Exit(1)
 	}
 
-	var adds, removes []dns.RR
+	var adds, removes, delRRsets []dns.RR
 
 	var ttl int = 60
 	var op, rrstr, port string
@@ -177,7 +177,7 @@ func CreateUpdate(updateType string) {
 		fmt.Printf("Update will be sent to zone %s\n", zone)
 	}
 
-	var ops = []string{"zone", "add", "del", "show", "send", "sign", "set-ttl", "server", "quit"}
+	var ops = []string{"zone", "add", "del", "replace", "show", "send", "sign", "set-ttl", "server", "quit"}
 	fmt.Printf("Defined operations are: %v\n", ops)
 
 	var msgSigned bool = false
@@ -191,7 +191,7 @@ func CreateUpdate(updateType string) {
 			fmt.Println("Target zone not set, please set it first")
 			return nil, fmt.Errorf("target zone not set")
 		}
-		if len(adds) == 0 && len(removes) == 0 {
+		if len(adds) == 0 && len(removes) == 0 && len(delRRsets) == 0 {
 			fmt.Println("No records to send, please add or delete some records first")
 			return nil, fmt.Errorf("no records to send")
 		}
@@ -199,6 +199,9 @@ func CreateUpdate(updateType string) {
 		if err != nil {
 			fmt.Printf("Error creating update: %v\n", err)
 			return nil, fmt.Errorf("error creating update: %v", err)
+		}
+		if len(delRRsets) > 0 {
+			updateMsg.RemoveRRset(delRRsets)
 		}
 
 		if keyfile != "" {
@@ -313,6 +316,60 @@ cmdloop:
 				}
 			}
 
+		case "replace":
+			if zone == "." {
+				fmt.Println("Target zone not set, please set it first")
+				continue
+			}
+			owner := tdns.TtyQuestion("Owner name of RRset to replace", "", true)
+			if strings.ToUpper(owner) == "QUIT" {
+				break cmdloop
+			}
+			owner = dns.Fqdn(owner)
+
+			typestr := tdns.TtyQuestion("RR type", "A", true)
+			rrtype, ok := dns.StringToType[strings.ToUpper(typestr)]
+			if !ok {
+				fmt.Printf("Unknown RR type: %s\n", typestr)
+				continue
+			}
+
+			// Queue the §2.5.2 delete-RRset. Only Name+Rrtype are read by
+			// m.RemoveRRset — it emits a CLASS ANY / empty-rdata record.
+			delRRsets = append(delRRsets,
+				&dns.ANY{Hdr: dns.RR_Header{Name: owner, Rrtype: rrtype}})
+			fmt.Printf("Queued DEL-RRSET for %s %s\n",
+				owner, dns.TypeToString[rrtype])
+
+			fmt.Println("Enter replacement records (blank line to finish):")
+			for {
+				rrstr = tdns.TtyQuestion("Record", "", false)
+				if rrstr == "" {
+					break
+				}
+				if strings.ToUpper(rrstr) == "QUIT" {
+					break cmdloop
+				}
+				rr, err := dns.NewRR(rrstr)
+				if err != nil {
+					fmt.Printf("Error parsing RR: %v\n", err)
+					continue
+				}
+				if rr.Header().Name != owner {
+					fmt.Printf("Warning: record owner %q differs from RRset owner %q\n",
+						rr.Header().Name, owner)
+				}
+				if rr.Header().Rrtype != rrtype {
+					fmt.Printf("Warning: record type %s differs from RRset type %s\n",
+						dns.TypeToString[rr.Header().Rrtype],
+						dns.TypeToString[rrtype])
+				}
+				if ttl > 0 {
+					rr.Header().Ttl = uint32(ttl)
+				}
+				adds = append(adds, rr)
+			}
+
 		case "show":
 			if zone == "." {
 				fmt.Println("Target zone not set, please set it first")
@@ -326,13 +383,23 @@ cmdloop:
 				for _, rr := range removes {
 					out = append(out, fmt.Sprintf("DEL|%s", rr.String()))
 				}
+				for _, rr := range delRRsets {
+					h := rr.Header()
+					out = append(out, fmt.Sprintf("DEL-RRSET|%s %s",
+						h.Name, dns.TypeToString[h.Rrtype]))
+				}
 				fmt.Println(columnize.SimpleFormat(out))
 
 				tdns.Globals.Debug = true
-				_, err := tdns.CreateUpdate(zone, adds, removes)
+				preview, err := tdns.CreateUpdate(zone, adds, removes)
 				if err != nil {
 					fmt.Printf("Error creating update: %v\n", err)
+					tdns.Globals.Debug = false
 					continue
+				}
+				if len(delRRsets) > 0 {
+					preview.RemoveRRset(delRRsets)
+					fmt.Printf("With DEL-RRSET attached:\n%s\n", preview.String())
 				}
 				tdns.Globals.Debug = false
 			} else {
@@ -388,6 +455,7 @@ cmdloop:
 
 			adds = []dns.RR{}
 			removes = []dns.RR{}
+			delRRsets = []dns.RR{}
 			msg = nil
 			msgSigned = false
 		}
