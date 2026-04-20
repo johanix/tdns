@@ -9,15 +9,64 @@ import (
 	"crypto/ed25519"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/asn1"
 	"encoding/pem"
 
 	"fmt"
 	"os"
 	"strings"
 
+	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/miekg/dns"
 	"gopkg.in/yaml.v3"
 )
+
+// oidMLDSA44 is the NIST OID for ML-DSA-44 (FIPS 204), per
+// CIRCL's mldsa44.Scheme().Oid().
+var oidMLDSA44 = asn1.ObjectIdentifier{2, 16, 840, 1, 101, 3, 4, 3, 17}
+
+// mldsa44PKCS8 is a minimal PKCS#8 PrivateKeyInfo (RFC 5958) for an
+// ML-DSA-44 key. The privateKey OCTET STRING holds CIRCL's 2560-byte
+// packed key (expanded form, no inner wrapping). This is a demo-
+// profile choice until draft-ietf-lamps-dilithium-certificates lands.
+type mldsa44PKCS8 struct {
+	Version    int
+	Algo       mldsa44AlgoID
+	PrivateKey []byte
+}
+
+type mldsa44AlgoID struct {
+	Algorithm  asn1.ObjectIdentifier
+	Parameters asn1.RawValue `asn1:"optional"`
+}
+
+func marshalMLDSA44PKCS8(sk *mldsa44.PrivateKey) ([]byte, error) {
+	skBytes, err := sk.MarshalBinary()
+	if err != nil {
+		return nil, err
+	}
+	return asn1.Marshal(mldsa44PKCS8{
+		Version:    0,
+		Algo:       mldsa44AlgoID{Algorithm: oidMLDSA44},
+		PrivateKey: skBytes,
+	})
+}
+
+func parseMLDSA44PKCS8(der []byte) (*mldsa44.PrivateKey, error) {
+	var p mldsa44PKCS8
+	if _, err := asn1.Unmarshal(der, &p); err != nil {
+		return nil, err
+	}
+	if !p.Algo.Algorithm.Equal(oidMLDSA44) {
+		return nil, fmt.Errorf("PKCS#8 algorithm OID is %v, not ML-DSA-44",
+			p.Algo.Algorithm)
+	}
+	sk := new(mldsa44.PrivateKey)
+	if err := sk.UnmarshalBinary(p.PrivateKey); err != nil {
+		return nil, fmt.Errorf("ML-DSA-44 private key decode: %v", err)
+	}
+	return sk, nil
+}
 
 // StripKeyFileComments removes lines that are empty or start with '#' (after trim),
 // so JWK/key files with comment headers (e.g. KDC/KRS-style) parse as valid JSON.
@@ -325,6 +374,8 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 		pkc.CS = pkc.K.(ed25519.PrivateKey)
 	case dns.ECDSAP256SHA256, dns.ECDSAP384SHA384:
 		pkc.CS = pkc.K.(*ecdsa.PrivateKey)
+	case dns.MLDSA44:
+		pkc.CS = pkc.K.(*mldsa44.PrivateKey)
 	default:
 		return nil, fmt.Errorf("error: no support for algorithm %s yet", dns.AlgorithmToString[pkc.Algorithm])
 	}
@@ -346,8 +397,14 @@ func PrivateKeyToPEM(privkey crypto.PrivateKey) (string, error) {
 		return "", fmt.Errorf("private key is nil")
 	}
 
-	// Marshal the private key to PKCS#8 DER format
-	derBytes, err := x509.MarshalPKCS8PrivateKey(privkey)
+	var derBytes []byte
+	var err error
+	switch sk := privkey.(type) {
+	case *mldsa44.PrivateKey:
+		derBytes, err = marshalMLDSA44PKCS8(sk)
+	default:
+		derBytes, err = x509.MarshalPKCS8PrivateKey(privkey)
+	}
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal private key to PKCS#8: %v", err)
 	}
@@ -382,7 +439,15 @@ func PEMToPrivateKey(pemData string) (crypto.PrivateKey, error) {
 		return nil, fmt.Errorf("PEM block type is %q, expected \"PRIVATE KEY\"", block.Type)
 	}
 
-	// Parse PKCS#8 private key
+	// Peek at the AlgorithmIdentifier OID to route algorithms
+	// that x509.ParsePKCS8PrivateKey doesn't know (e.g. ML-DSA-44).
+	var peek mldsa44PKCS8
+	if _, err := asn1.Unmarshal(block.Bytes, &peek); err == nil &&
+		peek.Algo.Algorithm.Equal(oidMLDSA44) {
+		return parseMLDSA44PKCS8(block.Bytes)
+	}
+
+	// Parse PKCS#8 private key (stdlib-supported algorithms).
 	privkey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse PKCS#8 private key: %v", err)
