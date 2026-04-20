@@ -10,6 +10,7 @@ replace (
 )
 
 require (
+	github.com/cloudflare/circl v1.6.3
 	github.com/go-playground/validator/v10 v10.22.1
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
@@ -29,7 +30,6 @@ require (
 )
 
 require (
-	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect

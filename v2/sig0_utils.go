@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/cloudflare/circl/sign/mldsa/mldsa44"
 	"github.com/gookit/goutil/dump"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -181,6 +182,8 @@ func GenerateKeyMaterial(owner string, rrtype uint16, alg uint8, keytype string)
 		case ed25519.PrivateKey:
 			pk = privkey
 		case *ecdsa.PrivateKey:
+			pk = privkey
+		case *mldsa44.PrivateKey:
 			pk = privkey
 		default:
 			return nil, fmt.Errorf("error: unknown private key type: %T", privkey)
