@@ -201,7 +201,13 @@ func CreateUpdate(updateType string) {
 			return nil, fmt.Errorf("error creating update: %v", err)
 		}
 		if len(delRRsets) > 0 {
+			// §2.5.2 deletes must precede adds in the Update section,
+			// otherwise the receiver applies them last and wipes the
+			// records we just inserted (RFC 2136 processes in order).
+			saved := updateMsg.Ns
+			updateMsg.Ns = nil
 			updateMsg.RemoveRRset(delRRsets)
+			updateMsg.Ns = append(updateMsg.Ns, saved...)
 		}
 
 		if keyfile != "" {
@@ -398,7 +404,10 @@ cmdloop:
 					continue
 				}
 				if len(delRRsets) > 0 {
+					saved := preview.Ns
+					preview.Ns = nil
 					preview.RemoveRRset(delRRsets)
+					preview.Ns = append(preview.Ns, saved...)
 					fmt.Printf("With DEL-RRSET attached:\n%s\n", preview.String())
 				}
 				tdns.Globals.Debug = false
