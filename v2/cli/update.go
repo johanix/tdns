@@ -327,17 +327,31 @@ cmdloop:
 				fmt.Println("Target zone not set, please set it first")
 				continue
 			}
-			owner := tdns.TtyQuestion("Owner name of RRset to replace", "", true)
-			if strings.ToUpper(owner) == "QUIT" {
+			input := tdns.TtyQuestion("Owner name of RRset to replace (e.g. 'foo.bar. NS')", "", true)
+			if strings.ToUpper(input) == "QUIT" {
 				break cmdloop
 			}
-			owner = dns.Fqdn(owner)
 
-			typestr := tdns.TtyQuestion("RR type", "A", true)
-			rrtype, ok := dns.StringToType[strings.ToUpper(typestr)]
-			if !ok {
-				fmt.Printf("Unknown RR type: %s\n", typestr)
-				continue
+			// Accept either a bare owner name or an RR-style prefix
+			// like "foo.bar. IN NS" — first token is owner, scan the
+			// rest for a type, skip class/TTL tokens.
+			fields := strings.Fields(input)
+			owner := dns.Fqdn(fields[0])
+			var rrtype uint16
+			for _, tok := range fields[1:] {
+				if t, ok := dns.StringToType[strings.ToUpper(tok)]; ok {
+					rrtype = t
+					break
+				}
+			}
+			if rrtype == 0 {
+				typestr := tdns.TtyQuestion("RR type", "A", true)
+				t, ok := dns.StringToType[strings.ToUpper(typestr)]
+				if !ok {
+					fmt.Printf("Unknown RR type: %s\n", typestr)
+					continue
+				}
+				rrtype = t
 			}
 
 			// Queue the §2.5.2 delete-RRset. Only Name+Rrtype are read by
