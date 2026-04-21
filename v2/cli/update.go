@@ -130,10 +130,42 @@ func CreateUpdate(updateType string) {
 		os.Exit(1)
 	}
 
-	var adds, removes, delRRsets []dns.RR
+	// Single ordered list of update actions. RFC 2136 processes the
+	// Update section in order on the receiver, so we must preserve the
+	// exact entry sequence — separate add/del/del-rrset slices would
+	// reshuffle them.
+	type updateAction struct {
+		op string // "add" | "del" | "del-rrset"
+		rr dns.RR
+	}
+	var actions []updateAction
 
 	var ttl int = 60
 	var op, rrstr, port string
+
+	// buildUpdate assembles a *dns.Msg from the ordered actions list
+	// using the library helpers (Insert/Remove/RemoveRRset) one record
+	// at a time, so each one gets the correct class/rdata treatment
+	// without losing entry order.
+	buildUpdate := func() (*dns.Msg, error) {
+		if zone == "" || zone == "." {
+			return nil, fmt.Errorf("zone not set")
+		}
+		m := new(dns.Msg)
+		m.SetUpdate(zone)
+		for _, a := range actions {
+			switch a.op {
+			case "add":
+				m.Insert([]dns.RR{a.rr})
+			case "del":
+				m.Remove([]dns.RR{a.rr})
+			case "del-rrset":
+				m.RemoveRRset([]dns.RR{a.rr})
+			}
+		}
+		m.SetEdns0(1232, true)
+		return m, nil
+	}
 
 	zone = dns.Fqdn(tdns.Globals.Zonename)
 	if signer == "" {
@@ -191,23 +223,14 @@ func CreateUpdate(updateType string) {
 			fmt.Println("Target zone not set, please set it first")
 			return nil, fmt.Errorf("target zone not set")
 		}
-		if len(adds) == 0 && len(removes) == 0 && len(delRRsets) == 0 {
+		if len(actions) == 0 {
 			fmt.Println("No records to send, please add or delete some records first")
 			return nil, fmt.Errorf("no records to send")
 		}
-		updateMsg, err := tdns.CreateUpdate(zone, adds, removes)
+		updateMsg, err := buildUpdate()
 		if err != nil {
 			fmt.Printf("Error creating update: %v\n", err)
 			return nil, fmt.Errorf("error creating update: %v", err)
-		}
-		if len(delRRsets) > 0 {
-			// §2.5.2 deletes must precede adds in the Update section,
-			// otherwise the receiver applies them last and wipes the
-			// records we just inserted (RFC 2136 processes in order).
-			saved := updateMsg.Ns
-			updateMsg.Ns = nil
-			updateMsg.RemoveRRset(delRRsets)
-			updateMsg.Ns = append(updateMsg.Ns, saved...)
 		}
 
 		if keyfile != "" {
@@ -296,30 +319,17 @@ cmdloop:
 				rr.Header().Ttl = uint32(ttl)
 			}
 
-			if op == "add" {
-				duplicate := false
-				for _, arr := range adds {
-					if dns.IsDuplicate(rr, arr) {
-						fmt.Printf("Record already added: %s\n", rrstr)
-						duplicate = true
-						break
-					}
+			wantOp := op // "add" or "del"
+			duplicate := false
+			for _, a := range actions {
+				if a.op == wantOp && dns.IsDuplicate(rr, a.rr) {
+					fmt.Printf("Record already %sed: %s\n", wantOp, rrstr)
+					duplicate = true
+					break
 				}
-				if !duplicate {
-					adds = append(adds, rr)
-				}
-			} else {
-				duplicate := false
-				for _, rrr := range removes {
-					if dns.IsDuplicate(rr, rrr) {
-						fmt.Printf("Record already removed: %s\n", rrstr)
-						duplicate = true
-						break
-					}
-				}
-				if !duplicate {
-					removes = append(removes, rr)
-				}
+			}
+			if !duplicate {
+				actions = append(actions, updateAction{op: wantOp, rr: rr})
 			}
 
 		case "replace":
@@ -354,10 +364,13 @@ cmdloop:
 				rrtype = t
 			}
 
-			// Queue the §2.5.2 delete-RRset. Only Name+Rrtype are read by
-			// m.RemoveRRset — it emits a CLASS ANY / empty-rdata record.
-			delRRsets = append(delRRsets,
-				&dns.ANY{Hdr: dns.RR_Header{Name: owner, Rrtype: rrtype}})
+			// Queue the §2.5.2 delete-RRset first, then the replacement
+			// adds, in entry order. m.RemoveRRset only reads Name+Rrtype
+			// from the placeholder.
+			actions = append(actions, updateAction{
+				op: "del-rrset",
+				rr: &dns.ANY{Hdr: dns.RR_Header{Name: owner, Rrtype: rrtype}},
+			})
 			fmt.Printf("Queued DEL-RRSET for %s %s\n",
 				owner, dns.TypeToString[rrtype])
 
@@ -387,7 +400,7 @@ cmdloop:
 				if ttl > 0 {
 					rr.Header().Ttl = uint32(ttl)
 				}
-				adds = append(adds, rr)
+				actions = append(actions, updateAction{op: "add", rr: rr})
 			}
 
 		case "show":
@@ -397,34 +410,26 @@ cmdloop:
 			}
 			if msg == nil {
 				var out = []string{"Operation|Record"}
-				for _, rr := range adds {
-					out = append(out, fmt.Sprintf("ADD|%s", rr.String()))
-				}
-				for _, rr := range removes {
-					out = append(out, fmt.Sprintf("DEL|%s", rr.String()))
-				}
-				for _, rr := range delRRsets {
-					h := rr.Header()
-					out = append(out, fmt.Sprintf("DEL-RRSET|%s %s",
-						h.Name, dns.TypeToString[h.Rrtype]))
+				for _, a := range actions {
+					switch a.op {
+					case "add":
+						out = append(out, fmt.Sprintf("ADD|%s", a.rr.String()))
+					case "del":
+						out = append(out, fmt.Sprintf("DEL|%s", a.rr.String()))
+					case "del-rrset":
+						h := a.rr.Header()
+						out = append(out, fmt.Sprintf("DEL-RRSET|%s %s",
+							h.Name, dns.TypeToString[h.Rrtype]))
+					}
 				}
 				fmt.Println(columnize.SimpleFormat(out))
 
-				tdns.Globals.Debug = true
-				preview, err := tdns.CreateUpdate(zone, adds, removes)
+				preview, err := buildUpdate()
 				if err != nil {
 					fmt.Printf("Error creating update: %v\n", err)
-					tdns.Globals.Debug = false
 					continue
 				}
-				if len(delRRsets) > 0 {
-					saved := preview.Ns
-					preview.Ns = nil
-					preview.RemoveRRset(delRRsets)
-					preview.Ns = append(preview.Ns, saved...)
-					fmt.Printf("With DEL-RRSET attached:\n%s\n", preview.String())
-				}
-				tdns.Globals.Debug = false
+				fmt.Printf("Update message:\n%s\n", preview.String())
 			} else {
 				fmt.Printf("Update message:\n%s\n", msg.String())
 			}
@@ -476,9 +481,7 @@ cmdloop:
 			PrintUpdateResult(ur)
 			fmt.Printf("Update sent, rcode: %d (%s)\n", rcode, dns.RcodeToString[rcode])
 
-			adds = []dns.RR{}
-			removes = []dns.RR{}
-			delRRsets = []dns.RR{}
+			actions = nil
 			msg = nil
 			msgSigned = false
 		}
