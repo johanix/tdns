@@ -12,7 +12,9 @@ import (
 	"bufio"
 	"fmt"
 	"io"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/miekg/dns"
@@ -117,14 +119,22 @@ func AbsDir(s string) error {
 	return nil
 }
 
-// HostPort requires "host:port".
+// HostPort requires "host:port" and rejects out-of-range ports.
+// Accepts IPv6 literals in [::1]:853 form via net.SplitHostPort.
 func HostPort(s string) error {
 	if err := NonEmpty("host:port")(s); err != nil {
 		return err
 	}
-	parts := strings.Split(s, ":")
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return fmt.Errorf("expected host:port")
+	host, port, err := net.SplitHostPort(s)
+	if err != nil {
+		return fmt.Errorf("expected host:port: %w", err)
+	}
+	if host == "" {
+		return fmt.Errorf("expected host:port (empty host)")
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("invalid port %q (must be 1–65535)", port)
 	}
 	return nil
 }

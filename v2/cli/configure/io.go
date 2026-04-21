@@ -99,6 +99,14 @@ func atomicWrite(path, content string) (backup string, err error) {
 	}
 
 	if err = os.Rename(tmpName, path); err != nil {
+		// Best-effort restore of the original file so a failed
+		// write does not leave the path empty.
+		if backup != "" {
+			if restoreErr := os.Rename(backup, path); restoreErr != nil {
+				return backup, fmt.Errorf("rename %s → %s: %w (also failed to restore from %s: %v)", tmpName, path, err, backup, restoreErr)
+			}
+			backup = ""
+		}
 		return backup, fmt.Errorf("rename %s → %s: %w", tmpName, path, err)
 	}
 	return backup, nil

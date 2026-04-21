@@ -100,10 +100,14 @@ func run(spec Spec, w io.Writer, in *bufio.Reader) error {
 
 	changes := make([]FileChange, 0, len(spec.Paths))
 	for _, path := range spec.Paths {
+		newTxt, ok := rendered[path]
+		if !ok {
+			return fmt.Errorf("RenderAll did not produce content for %s; a missing-key here would silently clobber the existing file with empty YAML", path)
+		}
 		changes = append(changes, FileChange{
 			Path:   path,
 			OldTxt: existing[path],
-			NewTxt: rendered[path],
+			NewTxt: newTxt,
 		})
 	}
 

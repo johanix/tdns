@@ -56,10 +56,26 @@ func EnsureApiKey(current string) (string, error) {
 func EnsureJoseKeypair(privPath string) (pubPath, keyID string, generated bool, err error) {
 	pubPath = DerivePubPath(privPath)
 
-	if _, statErr := os.Stat(privPath); statErr == nil {
+	privExists, err := fileExists(privPath)
+	if err != nil {
+		return "", "", false, fmt.Errorf("stat %s: %w", privPath, err)
+	}
+	pubExists, err := fileExists(pubPath)
+	if err != nil {
+		return "", "", false, fmt.Errorf("stat %s: %w", pubPath, err)
+	}
+	switch {
+	case privExists && pubExists:
 		return pubPath, "", false, nil
-	} else if !os.IsNotExist(statErr) {
-		return "", "", false, fmt.Errorf("stat %s: %w", privPath, statErr)
+	case privExists && !pubExists:
+		// Orphaned priv from a previous partial failure. Refuse to
+		// silently proceed — the caller should either delete the
+		// priv to force regeneration or recover the pub manually
+		// from the priv (we don't do that here to avoid touching
+		// an existing private key).
+		return "", "", false, fmt.Errorf("%s exists but matching pub %s is missing; remove priv to regenerate, or restore pub from backup", privPath, pubPath)
+	case !privExists && pubExists:
+		return "", "", false, fmt.Errorf("%s exists but matching priv %s is missing; remove pub to regenerate", pubPath, privPath)
 	}
 
 	if err := os.MkdirAll(filepath.Dir(privPath), 0o700); err != nil {
@@ -118,9 +134,27 @@ func EnsureJoseKeypair(privPath string) (pubPath, keyID string, generated bool, 
 	}
 
 	if err := os.WriteFile(pubPath, append(pubPretty, '\n'), 0o644); err != nil {
+		// Best-effort cleanup of the orphan priv so a retry can
+		// generate both. We prefer this to leaving a half-written
+		// pair that would fail the priv/pub consistency check.
+		_ = os.Remove(privPath)
 		return "", "", false, fmt.Errorf("write %s: %w", pubPath, err)
 	}
 	return pubPath, keyID, true, nil
+}
+
+// fileExists reports whether a path points to a regular file.
+// (Does not distinguish files from directories; the configurator
+// paths are always file paths.)
+func fileExists(p string) (bool, error) {
+	_, err := os.Stat(p)
+	if err == nil {
+		return true, nil
+	}
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	return false, err
 }
 
 // DerivePubPath turns "…/foo.jose.priv.json" into
@@ -168,10 +202,21 @@ func zero(b []byte) {
 //
 // Requires `openssl` on PATH. Non-interactive.
 func EnsureTLSCert(certPath, keyPath, identity, listenHostPort string) (generated bool, err error) {
-	if _, statErr := os.Stat(certPath); statErr == nil {
+	certExists, err := fileExists(certPath)
+	if err != nil {
+		return false, fmt.Errorf("stat %s: %w", certPath, err)
+	}
+	keyExists, err := fileExists(keyPath)
+	if err != nil {
+		return false, fmt.Errorf("stat %s: %w", keyPath, err)
+	}
+	switch {
+	case certExists && keyExists:
 		return false, nil
-	} else if !os.IsNotExist(statErr) {
-		return false, fmt.Errorf("stat %s: %w", certPath, statErr)
+	case certExists && !keyExists:
+		return false, fmt.Errorf("%s exists but matching key %s is missing; refusing to overwrite", certPath, keyPath)
+	case !certExists && keyExists:
+		return false, fmt.Errorf("%s exists but matching cert %s is missing; refusing to overwrite", keyPath, certPath)
 	}
 
 	if _, err := exec.LookPath("openssl"); err != nil {
@@ -188,9 +233,16 @@ func EnsureTLSCert(certPath, keyPath, identity, listenHostPort string) (generate
 		host = ""
 	}
 
-	dnsNames := dedup([]string{cn, "localhost"})
-	ips := dedup(trimEmpty([]string{host, "127.0.0.1"}))
-	san := buildSAN(dnsNames, ips)
+	dnsNames := []string{cn, "localhost"}
+	ips := []string{"127.0.0.1"}
+	if host != "" {
+		if net.ParseIP(host) != nil {
+			ips = append(ips, host)
+		} else {
+			dnsNames = append(dnsNames, host)
+		}
+	}
+	san := buildSAN(dedup(dnsNames), dedup(ips))
 
 	for _, p := range []string{certPath, keyPath} {
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
@@ -273,12 +325,3 @@ func dedup(in []string) []string {
 	return out
 }
 
-func trimEmpty(in []string) []string {
-	out := make([]string, 0, len(in))
-	for _, s := range in {
-		if strings.TrimSpace(s) != "" {
-			out = append(out, s)
-		}
-	}
-	return out
-}

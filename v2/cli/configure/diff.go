@@ -104,11 +104,29 @@ func confirmApply(w io.Writer, in *bufio.Reader, changes []FileChange) bool {
 	if err != nil && line == "" {
 		return false
 	}
+	// Deliberately case-sensitive. A typed-confirmation gate is
+	// meant to force intentionality; "YES" is the kind of thing a
+	// shell autocomplete or paste buffer can produce by accident,
+	// so we require the exact lowercase literal.
 	return strings.TrimSpace(line) == "yes"
 }
 
 // applyChanges writes each pending change using atomicWrite.
 // Returns the list of backup paths created (for reporting).
+//
+// No rollback on partial failure. atomicWrite is atomic per file
+// (rename(2)), but this function walks the slice sequentially —
+// if the 3rd of 4 writes fails, the first two are already on
+// disk. We deliberately do not try to undo them, because:
+//
+//   - The user has seen the full diff and confirmed the intent.
+//   - Backups of every replaced file are still on disk (.bak.<ts>).
+//   - Automatic rollback would have to handle the case where a
+//     restore itself fails, giving worse failure modes than "stop
+//     and let the operator look at the backups."
+//
+// Callers should report the returned error and point at the
+// backup paths for recovery.
 func applyChanges(w io.Writer, changes []FileChange) ([]string, error) {
 	var backups []string
 	for _, c := range changes {

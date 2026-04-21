@@ -36,6 +36,15 @@ type LiveTarget struct {
 // isAlive returns true if the API at t.BaseURL accepts a ping
 // signed with t.APIKey. All errors (connection refused, timeout,
 // auth failure) are treated as "not alive".
+//
+// Uses "insecure" TLS on purpose: in a bootstrap context the
+// server's cert is commonly self-signed (this very tool may have
+// generated it on a prior run) and we have no trust store yet.
+// The goal here is a liveness probe, not authentication — a
+// responsive apikey-accepting HTTPS endpoint is all we need to
+// gate the rewrite. Switching this to verified TLS would require
+// the operator to thread a rootCA path through config bootstrap,
+// which defeats the purpose of an interactive bootstrap tool.
 func (t LiveTarget) isAlive() bool {
 	if !t.HasConfig || t.BaseURL == "" || t.APIKey == "" {
 		return false
