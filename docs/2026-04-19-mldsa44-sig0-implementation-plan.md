@@ -1,7 +1,105 @@
 # ML-DSA-44 SIG(0) Support: Implementation Plan
 
-Date: 2026-04-19
-Status: Planning
+Date: 2026-04-19 (plan) / 2026-04-20 (implementation complete)
+Status: **Implemented (prototype)**
+
+## Implementation Summary
+
+The plan below has been fully implemented.  End-to-end
+verification on the NetBSD test lab (2026-04-20):
+
+1. `keystore sig0 generate --algorithm MLDSA44` created a key in
+   the agent's keystore as a PKCS#8 PEM block.
+2. `keystore sig0 export` wrote the BIND-convention `.private` +
+   `.key` pair to disk.
+3. `agent zone update create --signer foo.bar. --key …` composed
+   an UPDATE interactively, signed it with the ML-DSA-44 SIG(0)
+   key, and sent it to the receiver.
+4. Receiver (tdns agent at `ns1.dnslab`) validated the SIG(0)
+   against the pre-loaded TrustStore (`mldsa44.Verify` in the
+   fork), policy approved, direct backend mutated the live zone,
+   AXFR reflected the change.
+
+### What landed
+
+- **Fork** `johanix/dns` branch `mldsa44-sig0`
+  (commit `6dbf3c7c`): algorithm 199 `MLDSA44`, `AlgorithmToString`
+  + `AlgorithmToHash` entries, keygen, `sign()` pass-through,
+  `SIG.Verify` case, BIND-format private-key IO,
+  `publicKeyMLDSA44()`, `setPublicKeyMLDSA44()`,
+  compile-time `crypto.Signer` assertion, `TestSIG0` loop plus
+  `TestMLDSA44PrivateKeyRoundTrip`, `TestMLDSA44PublicKeyLength`,
+  `TestMLDSA44UpdateRoundTrip`.
+- **tdns** `johanix/tdns` branch `mldsa44-sig0-fork`
+  (through commit `ca79c80`): `replace` directive pinning
+  miekg/dns at the fork pseudo-version in all 11 v2/cmdv2 go.mod
+  files; hand-rolled PKCS#8 encoder/decoder for ML-DSA-44 using
+  the FIPS 204 OID `2.16.840.1.101.3.4.3.17`
+  (stdlib `x509.MarshalPKCS8PrivateKey` does not know the
+  algorithm as of Go 1.25); type-switch case for
+  `*mldsa44.PrivateKey` in `GenerateKeyMaterial`; algorithm-switch
+  case in `PrepareKeyCache`; new `keystore sig0 export` CLI
+  command writing BIND-convention files consumable by
+  `tdns.ReadPrivateKey`; `config status -v` surfacing `db.file`;
+  centralised `AttachUpdateCreateFlags` helper adding
+  `--signer`/`--key`/`--server` to every `update create` entry
+  point; fix for inverted-logic nil-pointer panic in
+  `CreateUpdate`'s keyfile branch; CLI help now lists supported
+  algorithms per-context (SIG(0) vs DNSSEC).
+- **tdns-mp** `johanix/tdns-mp` branch `mldsa44-sig0-fork`:
+  `replace` directive pinning miekg/dns at the fork across all
+  five v2 + cmd go.mod files.
+
+### TCP enforcement in the sender
+
+Implemented generically in `SendUpdate()`
+(`tdns/v2/childsync_utils.go`): if the packed UPDATE message
+exceeds 1232 bytes (the advertised EDNS UDP buffer), the
+client switches to TCP.  This is size-based rather than
+algorithm-specific, so any UPDATE sender in either tdns or
+tdns-mp that uses the library `SendUpdate` gets the right
+transport automatically — including the CLI (`update create`),
+delegation sync, SIG(0) bootstrap, and SIG(0) rollover paths.
+
+### Deviation from the plan
+
+The plan asserted that tdns was fully algorithm-agnostic and
+needed no code changes.  That was wrong.  The PKCS#8 PEM path
+(`readkey.go`) uses `x509.MarshalPKCS8PrivateKey`, which has no
+built-in ML-DSA support in Go 1.25; hand-rolled PKCS#8
+marshal/unmarshal using the FIPS 204 OID had to be added.
+Additionally, the type switch in `GenerateKeyMaterial` and the
+algorithm switch in `PrepareKeyCache` each needed a new case for
+`*mldsa44.PrivateKey`.  Net tdns-side change: ~170 lines of
+added code.
+
+### Remaining operational followups
+
+These do not block the prototype but should be tracked:
+
+- **Pre-published DS pool mechanism.**  The sliding-window DS
+  pool described in
+  `draft-johani-dnsop-dnssec-rapid-rollover` is not yet
+  implemented in tdns.  Adding it is the next substantive piece
+  of work.  Requires pool-depth config, child-side rotation
+  scheduler, parent-side UPDATE composition (remove
+  `DS_n` + append `DS_{n+k}`).
+- **Self-signed bootstrap test.**  Test 11 below was deferred
+  during the prototype; the live test used a pre-loaded
+  TrustStore.  Worth closing the loop on that path with a
+  separate test.
+- **Linear issue.**  No Linear tracking issue created yet; worth
+  doing once the IETF draft solidifies enough to give the
+  overall project a shape.
+- **IETF draft prose on TCP-mandatory.**  Already captured in
+  `draft-johani-dnsop-dnssec-rapid-rollover`; no change needed
+  in `draft-ietf-dnsop-delegation-mgmt-via-ddns` if the
+  TCP-mandatory wording lives in the new draft.
+
+---
+
+The remainder of this document preserves the plan as written on
+2026-04-19 for historical reference.
 
 ## Motivation
 
@@ -323,10 +421,16 @@ will use for DS-rollover UPDATEs, not a synthetic harness.
 
 ## Open items
 
-- Confirm CIRCL `mldsa44.PrivateKey` satisfies
-  `crypto.Signer` with `HashFunc() == 0` semantics.
-  (Compile-time check during impl.)
-- Confirm CIRCL returns raw 2420-byte signature, not DER.
-  (First sign/verify test.)
-- Linear project for tracking. Create after review of this
-  doc.
+All items from the original plan are resolved (see the
+Implementation Summary above).  For completeness:
+
+- CIRCL `mldsa44.PrivateKey` satisfies `crypto.Signer` with
+  `HashFunc() == 0` semantics. **Confirmed** via compile-time
+  assertion.
+- CIRCL returns a raw 2420-byte signature, not DER. **Confirmed**
+  by the first sign/verify test — no marshal/unmarshal shim
+  required.
+- Linear project for tracking. **Still pending** — deferred until
+  the `draft-johani-dnsop-dnssec-rapid-rollover` Internet-Draft
+  solidifies and the broader body of work has a shape worth
+  tracking as one project.
