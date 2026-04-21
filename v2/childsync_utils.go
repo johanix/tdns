@@ -56,12 +56,25 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResul
 	var edeCode uint16
 	var edeMessage string
 
+	// If the packed message exceeds the EDNS UDP buffer we advertise
+	// (1232), use TCP. dns.Exchange is hardcoded UDP and does not fall
+	// back on truncation, so a too-large UPDATE just times out — common
+	// with ML-DSA-44 SIG(0), where the signature alone is ~2.4 KB.
+	const udpSafeLimit = 1232
+	useTCP := msg.Len() > udpSafeLimit
+	client := &dns.Client{}
+	if useTCP {
+		client.Net = "tcp"
+	}
+
 	for _, dst := range addrs {
-		lgDns.Debug("sending DNS UPDATE", "zone", zonename, "dst", dst)
+		lgDns.Debug("sending DNS UPDATE", "zone", zonename, "dst", dst,
+			"net", map[bool]string{true: "tcp", false: "udp"}[useTCP],
+			"size", msg.Len())
 
 		lgDns.Debug("sending update message", "msg", msg.String())
 
-		res, err := dns.Exchange(msg, dst)
+		res, _, err := client.Exchange(msg, dst)
 		if err != nil {
 			lgDns.Warn("error from dns.Exchange, trying next address", "dst", dst, "err", err)
 			ur.TargetStatus[dst] = TargetUpdateStatus{
