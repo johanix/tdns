@@ -20,84 +20,83 @@ import (
 
 var childSig0Src string
 
-var TruststoreCmd = &cobra.Command{
-	Use:   "truststore",
-	Short: "Prefix command to access different features of tdns-auth truststore",
-	Long: `The TDNS-AUTH truststore is where SIG(0) public keys for child zones are kept.
+// NewTruststoreCmd returns a fresh "truststore" command tree bound to
+// the given role. The nested sig0 subtree and its children/flags are
+// built inline so every attachment point gets unique *cobra.Command
+// instances.
+func NewTruststoreCmd(role string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "truststore",
+		Short: "Prefix command to access different features of the truststore",
+		Long: `The truststore is where SIG(0) public keys for child zones are kept.
 The CLI contains functions for listing trusted SIG(0) keys, adding and
 deleting child keys as well as changing the trust state of individual keys.`,
-	//		Run: func(cmd *cobra.Command, args []string) {
-	//			fmt.Println("truststore called. This is likely a mistake, sub command needed")
-	//	},
+	}
+	c.AddCommand(newTruststoreSig0Cmd(role))
+	return c
 }
 
-var truststoreSig0Cmd = &cobra.Command{
-	Use:   "sig0",
-	Short: "Prefix command, only usable via sub-commands",
-	//	Run: func(cmd *cobra.Command, args []string) {
-	//		fmt.Println("childsig0 called")
-	//	},
+func newTruststoreSig0Cmd(role string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "sig0",
+		Short: "Prefix command, only usable via sub-commands",
+	}
+	c.PersistentFlags().StringVarP(&tdns.Globals.Zonename, "child", "c", "", "Name of child SIG(0) key")
+
+	add := &cobra.Command{
+		Use:   "add",
+		Short: "Add a new SIG(0) public key to the truststore",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("src", "child")
+			sig0TrustMgmt(role, "add")
+		},
+	}
+	add.PersistentFlags().StringVarP(&childSig0Src, "src", "s", "", "Source for SIG(0) public key, a file name or 'dns'")
+
+	del := &cobra.Command{
+		Use:   "delete",
+		Short: "Delete a SIG(0) public key from the truststore",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("child")
+			sig0TrustMgmt(role, "delete")
+		},
+	}
+	del.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
+
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List all child SIG(0) public key in the keystore",
+		Run: func(cmd *cobra.Command, args []string) {
+			sig0TrustMgmt(role, "list")
+		},
+	}
+
+	trust := &cobra.Command{
+		Use:   "trust",
+		Short: "Declare a child SIG(0) public key in the keystore as trusted",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("keyid", "child")
+			sig0TrustMgmt(role, "trust")
+		},
+	}
+	trust.PersistentFlags().IntVarP(&keyid, "keyid", "", 0, "Keyid of child SIG(0) key to change trust for")
+
+	untrust := &cobra.Command{
+		Use:   "untrust",
+		Short: "Declare a child SIG(0) public key in the keystore as untrusted",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("keyid", "child")
+			sig0TrustMgmt(role, "untrust")
+		},
+	}
+	untrust.PersistentFlags().IntVarP(&keyid, "keyid", "", 0, "Keyid of child SIG(0) key to change trust for")
+
+	c.AddCommand(add, del, list, trust, untrust)
+	return c
 }
 
-var truststoreSig0AddCmd = &cobra.Command{
-	Use:   "add",
-	Short: "Add a new SIG(0) public key to the truststore",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("src", "child")
-		Sig0TrustMgmt("add")
-	},
-}
-
-var truststoreSig0DeleteCmd = &cobra.Command{
-	Use:   "delete",
-	Short: "Delete a SIG(0) public key from the truststore",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("child")
-		Sig0TrustMgmt("delete")
-	},
-}
-
-var truststoreSig0ListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List all child SIG(0) public key in the keystore",
-	Run: func(cmd *cobra.Command, args []string) {
-		Sig0TrustMgmt("list")
-	},
-}
-
-var truststoreSig0TrustCmd = &cobra.Command{
-	Use:   "trust",
-	Short: "Declare a child SIG(0) public key in the keystore as trusted",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("keyid", "child")
-		Sig0TrustMgmt("trust")
-	},
-}
-var truststoreSig0UntrustCmd = &cobra.Command{
-	Use:   "untrust",
-	Short: "Declare a child SIG(0) public key in the keystore as untrusted",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("keyid", "child")
-		Sig0TrustMgmt("untrust")
-	},
-}
-
-func init() {
-	TruststoreCmd.AddCommand(truststoreSig0Cmd)
-
-	truststoreSig0Cmd.AddCommand(truststoreSig0AddCmd, truststoreSig0DeleteCmd, truststoreSig0ListCmd,
-		truststoreSig0TrustCmd, truststoreSig0UntrustCmd)
-
-	truststoreSig0DeleteCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
-	truststoreSig0TrustCmd.PersistentFlags().IntVarP(&keyid, "keyid", "", 0, "Keyid of child SIG(0) key to change trust for")
-	truststoreSig0UntrustCmd.PersistentFlags().IntVarP(&keyid, "keyid", "", 0, "Keyid of child SIG(0) key to change trust for")
-	truststoreSig0Cmd.PersistentFlags().StringVarP(&tdns.Globals.Zonename, "child", "c", "", "Name of child SIG(0) key")
-	truststoreSig0AddCmd.PersistentFlags().StringVarP(&childSig0Src, "src", "s", "", "Source for SIG(0) public key, a file name or 'dns'")
-}
-
-func Sig0TrustMgmt(subcommand string) {
-	prefixcmd, _ := GetCommandContext("truststore")
-	api, err := GetApiClient(prefixcmd, true)
+func sig0TrustMgmt(role, subcommand string) {
+	api, err := GetApiClient(role, true)
 	if err != nil {
 		fmt.Printf("Error creating API client: %v\n", err)
 		os.Exit(1)
