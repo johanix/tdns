@@ -111,37 +111,16 @@ If `**tdns.Globals.ApiClients**` coupling becomes painful, extract a small share
 
 ## Implementation status (branch `cli-cobra-role-refactor`)
 
-Feature branch committed in both repos. Baseline: ~60 `GetCommandContext` call sites across `tdns/v2/cli` + `tdns-mp/v2/cli`. Current: ~26 live call sites remain (plus 4 in `deadcode_*_cmds.go` that carry `//go:build ignore` and don't compile).
+**Complete.** Zero `GetCommandContext` references in code across both repos. Baseline was ~60 call sites across `tdns/v2/cli` + `tdns-mp/v2/cli`; all now eliminated. Both `tdns/cmdv2` and `tdns-mp/cmd` build green.
 
-**Done (builds green in both repos):**
+Summary of what landed:
 
-- `PingCmd` → `NewPingCmd(role)` factory. All 8 attachment sites updated (auth, agent, imr, scanner in tdns; root "server" default in tdns-cli; signer, combiner, agent in mpcli). Flags moved into the factory; the stale `daemon_cmds.go` flag setup was deleted.
-- `KeysCmd` → `NewKeysCmd(role)` factory. Role threaded through `runKeysCommand`; 3 attachment sites updated (agent in tdns-cli; combiner + agent in mpcli).
-- `catalog_cmds.go` — 13 sites hardcoded to `"server"` (only attached under rootCmd in cliv2).
-- `distrib_cmds.go` — 6 sites removed. Helpers already took a `component` string that is the role; `runDistribOp` / `runAgentDiscover` hardcoded to `"agent"` (single-parent).
-- `transaction_cmds.go` — 3 sites removed. Helpers use the `component` parameter; combiner-only commands hardcoded to `"combiner"`.
-- `parentsync_cmds.go` — 2 direct `GetCommandContext("parentsync")` sites hardcoded to `"agent"` (parentsync is agent-only today). **The `SendAgentMgmtCmd(prefix)` site is deliberately untouched** — that's the non-mechanical rewrite tracked below.
-- `agent_zone_cmds.go` in both repos — 7 + 9 sites hardcoded to `"agent"` (AgentZoneCmd is agent-only in both tdns-cli and mpcli).
-- `combiner_edits_cmds.go` — 2 sites hardcoded to `"combiner"`.
-- `signer_cmds.go` — 1 site hardcoded to `"signer"`.
+- **Factories** — `PingCmd`, `KeysCmd`, `ZoneCmd`, `DaemonCmd`, `ConfigCmd`, `KeystoreCmd`, `TruststoreCmd` all converted to `NewXxxCmd(role [, extras…])`. Each attachment site (auth, agent, imr, scanner, server, signer, combiner, agent-under-mpcli) gets its own fresh `*cobra.Command` with role bound by closure. Nested shared-var subtrees (dsync, sig0, dnssec subcommands, etc.) were rebuilt inline inside their factories so child command pointers are also unique per attachment.
+- **Single-parent sites hardcoded** — `catalog` (13 → `"server"`), `distrib` (6, via `component` param), `transaction` (3), `parentsync` (2 → `"agent"`), `agent_zone_cmds` in both repos (16 → `"agent"`), `combiner_edits` (2 → `"combiner"`), `signer_cmds` (1 → `"signer"`).
+- **Helper cleanups** — `SendAgentMgmtCmd` (in both repos, independent implementations) lost its `prefix` parameter; role hardcoded to `"agent"` inside. `SendAgentHsyncCommand` same shape. `executeCombinerRequest` lost its `cmdName` parameter; role hardcoded to `"combiner"` inside. `DebugAgentQueueStatusCmd` hardcoded to `"agent"`.
+- **Latent bug fixed in passing** — `mpcli signer zone {reload,write,list,bump}` previously hit the *auth* daemon because the four Run bodies in the old `zone_cmds.go` hardcoded `"auth"`. The `NewZoneCmd("signer")` factory now routes them correctly.
+- **File migration** — `distrib_cmds.go` and `transaction_cmds.go` moved from `tdns/v2/cli` to `tdns-mp/v2/cli` (their endpoints are served exclusively by tdns-mp daemons; the tdns-cli wiring was dead).
+- **Dead code removal** — `GetCommandContext` function deleted from `ping.go`. `deadcode_hsync_cmds.go` and `deadcode_hsync_debug_cmds.go` deleted. `getClientKeyFromParent` and `getApiDetailsByClientKey` retained — still used by daemon / keys helpers for `apiservers[].config_file` / `apiservers[].command` lookup.
 
-**Not done — multi-parent commands that still need factory treatment:**
-
-Each of these `*Cmd` pointers is attached under 2+ Cobra parents (tdns-cli `root` / `AgentCmd` / `AuthCmd`, plus mpcli `SignerCmd` / `CombinerCmd` / `AgentCmd` in various combinations). Mechanical hardcoding is **unsafe** because the correct role genuinely differs per attachment. Each needs a `NewXxxCmd(role)` factory (and, where the subcommands are also shared package vars, those need to be created inside the factory too):
-
-- `tdns/v2/cli/zone_cmds.go` (5 sites) — `ZoneCmd` attached under `AuthCmd` (role `"auth"`) and `mpcli.SignerCmd` (role `"signer"`).
-- `tdns/v2/cli/daemon_cmds.go` (6 sites) — `DaemonCmd` attached under root, `AgentCmd` (tdns-cli), and `SignerCmd` / `CombinerCmd` / `AgentCmd` (mpcli). Sub-commands (`DaemonRestartCmd`, etc.) are shared package vars.
-- `tdns/v2/cli/config_cmds.go` (3 sites) — `ConfigCmd` attached under root + `AgentCmd` (tdns-cli), and three trees in mpcli.
-- `tdns/v2/cli/keystore_cmds.go` (3 sites) — `KeystoreCmd` attached under `AuthCmd` + `AgentCmd` (tdns-cli) and `SignerCmd` + `AgentCmd` (mpcli). Plus nested subcommand tree (`truststoreSig0Cmd` / children) is shared package vars — whole tree needs to move into the factory.
-- `tdns/v2/cli/truststore_cmds.go` (1 site) — same shape as keystore (`Sig0TrustMgmt` helper, nested `truststoreSig0Cmd` subtree).
-- `tdns-mp/v2/cli/agent_debug_cmds.go` (1 site, `DebugAgentQueueStatusCmd`) — attached via `DebugAgentCmd` under `tdnscli.DebugCmd`, which is multi-parent. Hits `/agent/debug`, so role might always be `"agent"` — **needs confirmation** before hardcoding.
-
-**Not done — non-mechanical (watch-item) rewrites:**
-
-- `tdns/v2/cli/parentsync_cmds.go` `SendAgentMgmtCmd(prefix string)` — the one marker-string site in tdns. All current callers pass `"parentsync"`; intended role is `"agent"`. Change signature to `SendAgentMgmtCmd(req, role string)` and audit callers.
-- `tdns-mp/v2/cli/agent_cmds.go` — 4 sites including a **second, independent** `SendAgentMgmtCmd` definition in this package (not the tdns one). Callers pass `"local"`, `"peer"`, or a variable `prefix`. Each caller needs per-site role analysis.
-- `tdns-mp/v2/cli/hsync_cmds.go` — 1 site, `prefix` variable into tdns-mp's local `SendAgentMgmtCmd`.
-- `tdns-mp/v2/cli/combiner_cmds.go` `executeCombinerRequest(cmdName)` — same pattern (argv marker, not role). Plan doc suggests `GetApiClient("combiner", true)` or threading the client in.
-
-**Phase 5 (remove `GetCommandContext`) cannot land until all of the above are done.** The function itself is still defined and referenced from the remaining 26 live call sites.
+**Not verified** — Phase 6 smoke-test matrix (`ping`, `zone list`, combiner zone/data, signer `zone mplist`, mpcli router/peer/gossip) has not been run on a real lab. Builds are green but runtime behaviour needs lab testing before declaring the refactor shipped.
 
