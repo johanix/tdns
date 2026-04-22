@@ -84,13 +84,9 @@ func init() {
 	// From ../tdns/cli/jwt_cmds.go:
 	rootCmd.AddCommand(cli.JwtCmd)
 
-	// From ../tdns/cli/distrib_cmds.go:
-	cli.AgentCmd.AddCommand(cli.AgentDistribCmd)
-	//	cli.CombinerCmd.AddCommand(cli.CombinerDistribCmd)
-
-	// From ../tdns/cli/transaction_cmds.go:
-	cli.AgentCmd.AddCommand(cli.AgentTransactionCmd)
-	//	cli.CombinerCmd.AddCommand(cli.CombinerTransactionCmd)
+	// distrib_cmds.go and transaction_cmds.go live in tdns-mp/v2/cli;
+	// their endpoints are only served by mp daemons, so they are wired
+	// in from mpcli, not here.
 
 	rootCmd.AddCommand(cli.VersionCmd)
 }
