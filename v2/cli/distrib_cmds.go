@@ -95,8 +95,7 @@ var agentDistribOpCmd = &cobra.Command{
 }
 
 func listDistributions(cmd *cobra.Command, component string) {
-	prefixcmd, _ := GetCommandContext("distrib")
-	api, err := GetApiClient(prefixcmd, true)
+	api, err := GetApiClient(component, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -300,8 +299,7 @@ func displayDistributions(summaries []interface{}, verbose bool, api *tdns.ApiCl
 func purgeDistributions(cmd *cobra.Command, component string) {
 	force, _ := cmd.Flags().GetBool("force")
 
-	prefixcmd, _ := GetCommandContext("distrib")
-	api, err := GetApiClient(prefixcmd, true)
+	api, err := GetApiClient(component, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -333,15 +331,12 @@ func purgeDistributions(cmd *cobra.Command, component string) {
 }
 
 func runDistribOp(cmd *cobra.Command, operation string) {
-	prefixcmd, _ := GetCommandContext("distrib")
-	if prefixcmd != "agent" {
-		log.Fatalf("distrib op must be run under agent (e.g. tdns-cliv2 agent distrib op ping --to combiner)")
-	}
+	// agentDistribOpCmd is only registered under AgentDistribCmd; role is fixed.
 	to, err := cmd.Flags().GetString("to")
 	if err != nil || to == "" {
 		log.Fatalf("--to is required (e.g. --to combiner or --to agent.delta.dnslab.)")
 	}
-	api, err := GetApiClient(prefixcmd, true)
+	api, err := GetApiClient("agent", true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -387,14 +382,9 @@ func runDistribOp(cmd *cobra.Command, operation string) {
 }
 
 func ListDistribPeers(cmd *cobra.Command, component string) {
-	// Determine parent command to select the right API client.
-	// Called from "agent peer list" (parent of "peer" = "agent") or
-	// "agent distrib peers" / "combiner distrib peers" (parent of "distrib" = component).
-	prefixcmd, _ := GetCommandContext("peer")
-	if prefixcmd == "server" {
-		prefixcmd, _ = GetCommandContext("distrib")
-	}
-	api, err := GetApiClient(prefixcmd, true)
+	// component ("agent" | "combiner") is both the role for the API client
+	// and the URL-path segment for the endpoint below.
+	api, err := GetApiClient(component, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -791,8 +781,8 @@ Example:
 }
 
 func runAgentDiscover(agentIdentity string) {
-	prefixcmd, _ := GetCommandContext("distrib")
-	api, err := GetApiClient(prefixcmd, true)
+	// agentDistribDiscoverCmd is only registered under AgentDistribCmd; role is fixed.
+	api, err := GetApiClient("agent", true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
