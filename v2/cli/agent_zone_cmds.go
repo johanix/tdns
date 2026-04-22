@@ -87,10 +87,10 @@ var agentZoneDsyncStatusCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
+		// AgentZoneCmd is only attached under AgentCmd → role "agent".
+		api, err := GetApiClient("agent", true)
 		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+			log.Fatalf("Error getting API client: %v", err)
 		}
 
 		resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
@@ -136,10 +136,10 @@ var agentZoneDsyncBootstrapCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename", "algorithm")
 
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
+		// AgentZoneCmd is only attached under AgentCmd → role "agent".
+		api, err := GetApiClient("agent", true)
 		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+			log.Fatalf("Error getting API client: %v", err)
 		}
 
 		resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
@@ -168,10 +168,10 @@ var agentZoneDsyncRollKeyCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename", "algorithm", "rollaction")
 
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
+		// AgentZoneCmd is only attached under AgentCmd → role "agent".
+		api, err := GetApiClient("agent", true)
 		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+			log.Fatalf("Error getting API client: %v", err)
 		}
 
 		resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
@@ -201,10 +201,10 @@ var agentZoneDsyncPublishCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
+		// AgentZoneCmd is only attached under AgentCmd → role "agent".
+		api, err := GetApiClient("agent", true)
 		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+			log.Fatalf("Error getting API client: %v", err)
 		}
 
 		resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
@@ -231,10 +231,10 @@ var agentZoneDsyncUnpublishCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
+		// AgentZoneCmd is only attached under AgentCmd → role "agent".
+		api, err := GetApiClient("agent", true)
 		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+			log.Fatalf("Error getting API client: %v", err)
 		}
 
 		resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
@@ -303,8 +303,8 @@ Examples:
 			req.Data = map[string]interface{}{"force": true}
 		}
 
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
+		// AgentZoneCmd is only attached under AgentCmd → role "agent".
+		api, err := GetApiClient("agent", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -377,8 +377,8 @@ Examples:
 			req.Data = map[string]interface{}{"force": true}
 		}
 
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
+		// AgentZoneCmd is only attached under AgentCmd → role "agent".
+		api, err := GetApiClient("agent", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
