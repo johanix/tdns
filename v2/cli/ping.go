@@ -96,32 +96,6 @@ func getApiDetailsByClientKey(clientKey string) map[string]interface{} {
 	return nil
 }
 
-// GetCommandContext takes the current command name and returns both the immediate parent
-// and the full command chain from os.Args
-//
-// This is a workaround, as cobra is not able to get the correct parent command name when
-// using the same command for different parents.
-func GetCommandContext(cmdName string) (parent string, chain []string) {
-	args := os.Args[1:] // Skip program name
-	for i, arg := range args {
-		if arg == cmdName {
-			if i > 0 {
-				parent = args[i-1]
-			} else {
-				parent = "server" // Default to "server" for backward compatibility
-			}
-			if tdns.Globals.Debug {
-				// fmt.Printf("GetCommandContext: parent: %s, chain: %v\n", parent, args[:i+1])
-			}
-			return parent, args[:i+1]
-		}
-	}
-	if tdns.Globals.Debug {
-		fmt.Printf("GetCommandContext: default case, parent: %s, chain: %v\n", parent, args)
-	}
-	return "server", nil // Default case if command not found (shouldn't happen)
-}
-
 // NewPingCmd returns a fresh ping *cobra.Command bound to the given role.
 // Each attachment site must create its own command (Cobra does not allow
 // the same *cobra.Command under multiple parents). The role string is the
