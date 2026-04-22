@@ -17,10 +17,151 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var zoneReloadCmd = &cobra.Command{
-	Use:   "reload",
-	Short: "Request re-loading a zone",
-	Run:   func(cmd *cobra.Command, args []string) { RunZoneReload("auth", args) },
+// NewZoneCmd returns a fresh "zone" command tree bound to the given
+// role. Additional subcommands may be attached via extras — used by
+// tdns-mp to inject signer-specific mplist under the signer's tree.
+func NewZoneCmd(role string, extras ...*cobra.Command) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "zone",
+		Short: "Prefix command, not usable by itself",
+	}
+	c.PersistentFlags().BoolVarP(&force, "force", "F", false, "force operation")
+
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List configured zones",
+		Run:   func(cmd *cobra.Command, args []string) { RunZoneList(role, args) },
+	}
+	list.Flags().BoolVarP(&showfile, "file", "f", false, "Show zone input file")
+	list.Flags().BoolVarP(&shownotify, "notify", "N", false, "Show zone downstream notify addresses")
+	list.Flags().BoolVarP(&showprimary, "primary", "P", false, "Show zone primary nameserver")
+
+	reload := &cobra.Command{
+		Use:   "reload",
+		Short: "Request re-loading a zone",
+		Run:   func(cmd *cobra.Command, args []string) { RunZoneReload(role, args) },
+	}
+	reload.Flags().BoolVarP(&showError, "error", "e", false, "wait for reload to complete and report any parse errors")
+	reload.Flags().StringVar(&errorTimeout, "timeout", "10s", "how long to wait for reload when --error is set (e.g. 10s, 2m)")
+
+	sign := &cobra.Command{
+		Use:   "sign",
+		Short: "Request signing of a zone",
+		Run: func(cmd *cobra.Command, args []string) {
+			runZoneSimpleCmd(role, "sign-zone", true)
+		},
+	}
+
+	write := &cobra.Command{
+		Use:   "write",
+		Short: "Write a zone to disk",
+		Run:   func(cmd *cobra.Command, args []string) { RunZoneWrite(role, args) },
+	}
+
+	freeze := &cobra.Command{
+		Use:   "freeze",
+		Short: "Freeze a zone (i.e. stop accepting DDNS updates to the zone data)",
+		Run: func(cmd *cobra.Command, args []string) {
+			runZoneSimpleCmd(role, "freeze", true)
+		},
+	}
+
+	thaw := &cobra.Command{
+		Use:   "thaw",
+		Short: "Thaw a zone (i.e. accept DDNS updates to the zone data again)",
+		Run: func(cmd *cobra.Command, args []string) {
+			runZoneSimpleCmd(role, "thaw", true)
+		},
+	}
+
+	bump := &cobra.Command{
+		Use:   "bump",
+		Short: "Bump SOA serial and epoch (if any) in tdns-auth version of zone",
+		Run:   func(cmd *cobra.Command, args []string) { RunZoneBump(role, args) },
+	}
+
+	nsec := &cobra.Command{
+		Use:   "nsec",
+		Short: "Prefix command, not usable by itself",
+	}
+	nsecGenerate := &cobra.Command{
+		Use:   "generate",
+		Short: "Generate NSEC records for a zone",
+		Run: func(cmd *cobra.Command, args []string) {
+			runZoneSimpleCmd(role, "generate-nsec", true)
+		},
+	}
+	nsecShow := &cobra.Command{
+		Use:   "show",
+		Short: "Show the NSEC chain for a zone",
+		Run: func(cmd *cobra.Command, args []string) {
+			runZoneShowNsec(role)
+		},
+	}
+	nsec.AddCommand(nsecGenerate, nsecShow)
+
+	c.AddCommand(list, nsec, sign, reload, bump, write, freeze, thaw)
+	// Role-independent extras attached to every zone tree. Each is built
+	// fresh so the command pointer is unique per NewZoneCmd invocation.
+	c.AddCommand(newZoneReadFakeCmd(), newZoneUpdateCmd(), newZoneDsyncCmd())
+	for _, e := range extras {
+		c.AddCommand(e)
+	}
+	return c
+}
+
+// runZoneSimpleCmd runs a ZonePost command that requires PrepArgs("childzone")
+// and only reports resp.Msg on success. Used by sign, freeze, thaw, generate-nsec.
+func runZoneSimpleCmd(role, command string, prepChildzone bool) {
+	if prepChildzone {
+		PrepArgs("childzone")
+	}
+
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", role, err)
+	}
+
+	cr, err := SendZoneCommand(api, tdns.ZonePost{
+		Command: command,
+		Zone:    tdns.Globals.Zonename,
+		Force:   force,
+	})
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		os.Exit(1)
+	}
+
+	if cr.Msg != "" {
+		fmt.Printf("%s\n", cr.Msg)
+	}
+}
+
+func runZoneShowNsec(role string) {
+	PrepArgs("childzone")
+
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", role, err)
+	}
+
+	cr, err := SendZoneCommand(api, tdns.ZonePost{
+		Command: "show-nsec-chain",
+		Zone:    tdns.Globals.Zonename,
+		Force:   force,
+	})
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		os.Exit(1)
+	}
+
+	if cr.Msg != "" {
+		fmt.Printf("%s\n", cr.Msg)
+	}
+	fmt.Printf("NSEC chain for zone \"%s\":\n", cr.Zone)
+	for _, name := range cr.Names {
+		fmt.Printf("%s\n", name)
+	}
 }
 
 func RunZoneReload(parent string, args []string) {
@@ -52,45 +193,6 @@ func RunZoneReload(parent string, args []string) {
 	}
 }
 
-var zoneNsecCmd = &cobra.Command{
-	Use:   "nsec",
-	Short: "Prefix command, not usable by itself",
-}
-
-var zoneSignCmd = &cobra.Command{
-	Use:   "sign",
-	Short: "Request signing of a zone",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("childzone")
-
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
-		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
-		}
-
-		cr, err := SendZoneCommand(api, tdns.ZonePost{
-			Command: "sign-zone",
-			Zone:    tdns.Globals.Zonename,
-			Force:   force,
-		})
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-			os.Exit(1)
-		}
-
-		if cr.Msg != "" {
-			fmt.Printf("%s\n", cr.Msg)
-		}
-	},
-}
-
-var zoneWriteCmd = &cobra.Command{
-	Use:   "write",
-	Short: "Write a zone to disk",
-	Run:   func(cmd *cobra.Command, args []string) { RunZoneWrite("auth", args) },
-}
-
 func RunZoneWrite(parent string, args []string) {
 	PrepArgs("childzone")
 
@@ -112,131 +214,6 @@ func RunZoneWrite(parent string, args []string) {
 	if cr.Msg != "" {
 		fmt.Printf("%s\n", cr.Msg)
 	}
-}
-
-var zoneNsecGenerateCmd = &cobra.Command{
-	Use:   "generate",
-	Short: "Generate NSEC records for a zone",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("childzone")
-
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
-		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
-		}
-
-		cr, err := SendZoneCommand(api, tdns.ZonePost{
-			Command: "generate-nsec",
-			Zone:    tdns.Globals.Zonename,
-			Force:   force,
-		})
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-			os.Exit(1)
-		}
-
-		if cr.Msg != "" {
-			fmt.Printf("%s\n", cr.Msg)
-		}
-	},
-}
-
-var zoneNsecShowCmd = &cobra.Command{
-	Use:   "show",
-	Short: "Show the NSEC chain for a zone",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("childzone")
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
-		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
-		}
-
-		cr, err := SendZoneCommand(api, tdns.ZonePost{
-			Command: "show-nsec-chain",
-			Zone:    tdns.Globals.Zonename,
-			Force:   force,
-		})
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-			os.Exit(1)
-		}
-
-		if cr.Msg != "" {
-			fmt.Printf("%s\n", cr.Msg)
-		}
-		fmt.Printf("NSEC chain for zone \"%s\":\n", cr.Zone)
-		for _, name := range cr.Names {
-			fmt.Printf("%s\n", name)
-		}
-	},
-}
-
-var zoneFreezeCmd = &cobra.Command{
-	Use:   "freeze",
-	Short: "Freeze a zone (i.e. stop accepting DDNS updates to the zone data)",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("childzone")
-
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
-		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
-		}
-
-		cr, err := SendZoneCommand(api, tdns.ZonePost{
-			Command: "freeze",
-			Zone:    tdns.Globals.Zonename,
-			Force:   force,
-		})
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-			os.Exit(1)
-		}
-
-		if cr.Msg != "" {
-			fmt.Printf("%s\n", cr.Msg)
-		}
-	},
-}
-
-var zoneThawCmd = &cobra.Command{
-	Use:   "thaw",
-	Short: "Thaw a zone (i.e. accept DDNS updates to the zone data again)",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("childzone")
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
-		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
-		}
-
-		cr, err := SendZoneCommand(api, tdns.ZonePost{
-			Command: "thaw",
-			Zone:    tdns.Globals.Zonename,
-			Force:   force,
-		})
-		if err != nil {
-			fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
-			os.Exit(1)
-		}
-
-		if cr.Msg != "" {
-			fmt.Printf("%s\n", cr.Msg)
-		}
-	},
-}
-
-var ZoneCmd = &cobra.Command{
-	Use:   "zone",
-	Short: "Prefix command, not usable by itself",
-}
-
-var zoneListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List configured zones",
-	Run:   func(cmd *cobra.Command, args []string) { RunZoneList("auth", args) },
 }
 
 func RunZoneList(parent string, args []string) {
@@ -265,12 +242,6 @@ func RunZoneList(parent string, args []string) {
 	}
 }
 
-var zoneSerialBumpCmd = &cobra.Command{
-	Use:   "bump",
-	Short: "Bump SOA serial and epoch (if any) in tdns-auth version of zone",
-	Run:   func(cmd *cobra.Command, args []string) { RunZoneBump("auth", args) },
-}
-
 func RunZoneBump(parent string, args []string) {
 	PrepArgs("childzone")
 
@@ -292,21 +263,6 @@ func RunZoneBump(parent string, args []string) {
 	if resp.Msg != "" {
 		fmt.Printf("%s\n", resp.Msg)
 	}
-}
-
-func init() {
-	ZoneCmd.AddCommand(zoneListCmd, zoneNsecCmd, zoneSignCmd, zoneReloadCmd, zoneSerialBumpCmd)
-	ZoneCmd.AddCommand(zoneWriteCmd, zoneFreezeCmd, zoneThawCmd)
-
-	zoneNsecCmd.AddCommand(zoneNsecGenerateCmd, zoneNsecShowCmd)
-
-	ZoneCmd.PersistentFlags().BoolVarP(&force, "force", "F", false, "force operation")
-	zoneReloadCmd.Flags().BoolVarP(&showError, "error", "e", false, "wait for reload to complete and report any parse errors")
-	zoneReloadCmd.Flags().StringVar(&errorTimeout, "timeout", "10s", "how long to wait for reload when --error is set (e.g. 10s, 2m)")
-
-	zoneListCmd.Flags().BoolVarP(&showfile, "file", "f", false, "Show zone input file")
-	zoneListCmd.Flags().BoolVarP(&shownotify, "notify", "N", false, "Show zone downstream notify addresses")
-	zoneListCmd.Flags().BoolVarP(&showprimary, "primary", "P", false, "Show zone primary nameserver")
 }
 
 func SendZoneCommand(api *tdns.ApiClient, data tdns.ZonePost) (tdns.ZoneResponse, error) {

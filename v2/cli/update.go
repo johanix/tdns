@@ -59,38 +59,40 @@ var updateCreateCmd = &cobra.Command{
 	},
 }
 
-var zoneUpdateCmd = &cobra.Command{
-	Use:   "update",
-	Short: "Create and ultimately send a DNS UPDATE msg for zone auth data",
-}
-
-var zoneUpdateCreateCmd = &cobra.Command{
-	Use:   "create",
-	Short: "Create and ultimately send a DNS UPDATE msg for zone auth data",
-	Long: `Will query for details about the DNS UPDATE via (add|del|show|set-ttl) commands.
-When the message is complete it may be signed and sent by the 'send' command. After a 
+// newZoneUpdateCmd returns a fresh "zone update create" subtree.
+// DNS UPDATE construction is role-independent (talks to tdns.Globals.Api
+// directly), so this is called unconditionally from NewZoneCmd for
+// every role.
+func newZoneUpdateCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "update",
+		Short: "Create and ultimately send a DNS UPDATE msg for zone auth data",
+	}
+	create := &cobra.Command{
+		Use:   "create",
+		Short: "Create and ultimately send a DNS UPDATE msg for zone auth data",
+		Long: `Will query for details about the DNS UPDATE via (add|del|show|set-ttl) commands.
+When the message is complete it may be signed and sent by the 'send' command. After a
 message has been send the loop will start again with a new, empty message to create.
 Loop ends on the command "QUIT"
 
 The zone to update is mandatory to specify on the command line with the --zone flag.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
-		CreateUpdate("zone")
-	},
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename")
+			CreateUpdate("zone")
+		},
+	}
+	create.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
+	c.AddCommand(create)
+	return c
 }
 
 // init registers update-related Cobra subcommands and binds their command-line flags.
-// It wires the child, zone, and top-level update create commands and defines flags for
-// zone, parent, signer, server, and keyfile.
 func init() {
 	ChildCmd.AddCommand(childUpdateCmd)
 	childUpdateCmd.AddCommand(childUpdateCreateCmd)
 	childUpdateCreateCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
 	childUpdateCreateCmd.Flags().StringVarP(&tdns.Globals.ParentZone, "parent", "P", "", "Parent zone to send update to")
-
-	ZoneCmd.AddCommand(zoneUpdateCmd)
-	zoneUpdateCmd.AddCommand(zoneUpdateCreateCmd)
-	zoneUpdateCreateCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
 
 	UpdateCmd.AddCommand(updateCreateCmd)
 	updateCreateCmd.Flags().StringVarP(&signer, "signer", "", "", "Name of signer (i.e. key used to sign update)")

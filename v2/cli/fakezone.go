@@ -15,20 +15,20 @@ import (
 	// "github.com/DNSSEC-Provisioning/music/signer"
 )
 
-var zoneReadFake = &cobra.Command{
-	Use:   "readfake",
-	Short: "Create a fake zone from a compiled in string",
-	Run: func(cmd *cobra.Command, args []string) {
-		err := ReadZoneData(dns.Fqdn(tdns.Globals.Zonename))
-		if err != nil {
-			log.Fatalf("Error: %v", err)
-		}
-	},
-}
-
-func init() {
-	ZoneCmd.AddCommand(zoneReadFake)
-	// zoneReadFake.PersistentFlags().StringVarP(&tdns.Globals.Zonename, "zonename", "z", "", "Zone name to read")
+// newZoneReadFakeCmd returns a fresh "readfake" subcommand.
+// It's a local dev utility (no API call), attached to every
+// zone tree via NewZoneCmd.
+func newZoneReadFakeCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "readfake",
+		Short: "Create a fake zone from a compiled in string",
+		Run: func(cmd *cobra.Command, args []string) {
+			err := ReadZoneData(dns.Fqdn(tdns.Globals.Zonename))
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+		},
+	}
 }
 
 func ReadZoneData(zonename string) error {
