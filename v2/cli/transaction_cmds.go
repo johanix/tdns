@@ -84,8 +84,7 @@ var combinerTransactionErrorDetailsCmd = &cobra.Command{
 // --- Implementation ---
 
 func showOpenTransactions(cmd *cobra.Command, component, command string) {
-	prefixcmd, _ := GetCommandContext("transaction")
-	api, err := GetApiClient(prefixcmd, true)
+	api, err := GetApiClient(component, true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -162,8 +161,8 @@ func showOpenTransactions(cmd *cobra.Command, component, command string) {
 }
 
 func showTransactionErrors(cmd *cobra.Command) {
-	prefixcmd, _ := GetCommandContext("transaction")
-	api, err := GetApiClient(prefixcmd, true)
+	// Only invoked from combinerTransactionErrorsCmd under CombinerTransactionCmd.
+	api, err := GetApiClient("combiner", true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}
@@ -225,8 +224,8 @@ func showTransactionErrors(cmd *cobra.Command) {
 }
 
 func showTransactionErrorDetails(cmd *cobra.Command) {
-	prefixcmd, _ := GetCommandContext("transaction")
-	api, err := GetApiClient(prefixcmd, true)
+	// Only invoked from combinerTransactionErrorDetailsCmd under CombinerTransactionCmd.
+	api, err := GetApiClient("combiner", true)
 	if err != nil {
 		log.Fatalf("Error getting API client: %v", err)
 	}

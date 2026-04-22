@@ -312,8 +312,8 @@ var agentParentSyncDeltaCmd = &cobra.Command{
 	Short: "Compute delta between parent delegation data and child zone data",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
-		prefixcmd, _ := GetCommandContext("parentsync")
-		api, err := GetApiClient(prefixcmd, true)
+		// parentsync is agent-only today.
+		api, err := GetApiClient("agent", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -377,8 +377,8 @@ var agentParentSyncSyncCmd = &cobra.Command{
 	Short: "Sync delegation data in parent zone via DDNS UPDATE",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
-		prefixcmd, _ := GetCommandContext("parentsync")
-		api, err := GetApiClient(prefixcmd, true)
+		// parentsync is agent-only today.
+		api, err := GetApiClient("agent", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
