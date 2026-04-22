@@ -16,9 +16,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func SendAgentMgmtCmd(req *tdns.AgentMgmtPost, prefix string) (*tdns.AgentMgmtResponse, error) {
-	prefixcmd, _ := GetCommandContext(prefix)
-	api, err := GetApiClient(prefixcmd, true)
+// SendAgentMgmtCmd POSTs an AgentMgmtPost to the agent daemon's /agent
+// endpoint. Every caller in this package talks to the agent, so the
+// role is fixed rather than inferred from the Cobra tree.
+func SendAgentMgmtCmd(req *tdns.AgentMgmtPost) (*tdns.AgentMgmtResponse, error) {
+	api, err := GetApiClient("agent", true)
 	if err != nil {
 		return nil, fmt.Errorf("getting API client: %w", err)
 	}
@@ -51,7 +53,7 @@ var agentParentSyncStatusCmd = &cobra.Command{
 		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
 			Command: "parentsync-status",
 			Zone:    tdns.ZoneName(zone),
-		}, "parentsync")
+		})
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
@@ -79,7 +81,7 @@ var agentParentSyncBootstrapCmd = &cobra.Command{
 		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
 			Command: "parentsync-bootstrap",
 			Zone:    tdns.ZoneName(zone),
-		}, "parentsync")
+		})
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
@@ -106,7 +108,7 @@ var agentParentSyncInquireUpdateCmd = &cobra.Command{
 		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
 			Command: "parentsync-inquire",
 			Zone:    tdns.ZoneName(zone),
-		}, "parentsync")
+		})
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}
@@ -149,7 +151,7 @@ var agentParentSyncElectionCmd = &cobra.Command{
 		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
 			Command: "parentsync-election",
 			Zone:    tdns.ZoneName(zone),
-		}, "parentsync")
+		})
 		if err != nil {
 			log.Fatalf("Error: %v", err)
 		}

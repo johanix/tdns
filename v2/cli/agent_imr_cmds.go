@@ -33,7 +33,7 @@ var agentImrQueryCmd = &cobra.Command{
 				"qname": qname,
 				"qtype": qtype,
 			},
-		}, "imr")
+		})
 		if err != nil {
 			log.Fatalf("Request failed: %v", err)
 		}
@@ -75,7 +75,7 @@ var agentImrFlushCmd = &cobra.Command{
 			Data: map[string]interface{}{
 				"qname": qname,
 			},
-		}, "imr")
+		})
 		if err != nil {
 			log.Fatalf("Request failed: %v", err)
 		}
@@ -93,7 +93,7 @@ var agentImrResetCmd = &cobra.Command{
 	Run: func(cmd *cobra.Command, args []string) {
 		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
 			Command: "imr-reset",
-		}, "imr")
+		})
 		if err != nil {
 			log.Fatalf("Request failed: %v", err)
 		}
@@ -118,7 +118,7 @@ var agentImrShowCmd = &cobra.Command{
 		amr, err := SendAgentMgmtCmd(&tdns.AgentMgmtPost{
 			Command: "imr-show",
 			AgentId: tdns.AgentId(imrShowID),
-		}, "imr")
+		})
 		if err != nil {
 			log.Fatalf("Request failed: %v", err)
 		}
