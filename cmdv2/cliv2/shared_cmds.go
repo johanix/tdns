@@ -18,9 +18,8 @@ func init() {
 	// From ../tdns/cli/report.go:
 	rootCmd.AddCommand(cli.ReportCmd)
 
-	rootCmd.AddCommand(cli.DaemonCmd)
-	cli.AgentCmd.AddCommand(cli.DaemonCmd)
-	//	cli.CombinerCmd.AddCommand(cli.DaemonCmd)
+	rootCmd.AddCommand(cli.NewDaemonCmd("server"))
+	cli.AgentCmd.AddCommand(cli.NewDaemonCmd("agent"))
 
 	// From ../tdns/cli/ddns_cmds.go:
 	rootCmd.AddCommand(cli.DdnsCmd, cli.DelCmd)
@@ -39,9 +38,8 @@ func init() {
 	rootCmd.AddCommand(cli.DsyncDiscoveryCmd)
 
 	// From ../tdns/cli/config_cmds.go:
-	rootCmd.AddCommand(cli.ConfigCmd)
-	//	cli.CombinerCmd.AddCommand(cli.ConfigCmd)
-	cli.AgentCmd.AddCommand(cli.ConfigCmd)
+	rootCmd.AddCommand(cli.NewConfigCmd("server"))
+	cli.AgentCmd.AddCommand(cli.NewConfigCmd("agent"))
 
 	// From ../tdns/cli/generate_cmds.go:
 	rootCmd.AddCommand(cli.GenerateCmd)

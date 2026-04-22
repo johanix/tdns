@@ -508,7 +508,7 @@ func init() {
 	// Add all IMR subcommands to ImrCmd
 	ImrCmd.AddCommand(ImrQueryCmd, ImrZoneCmd, ImrStatsCmd, ImrShowCmd, ImrFlushCmd, ImrSetCmd)
 
-	// Add ping and daemon commands to ImrCmd (NewPingCmd/DaemonCmd are defined elsewhere)
+	// Add ping and daemon commands to ImrCmd (NewPingCmd/NewDaemonCmd are defined elsewhere)
 	ImrCmd.AddCommand(NewPingCmd("imr"))
-	ImrCmd.AddCommand(DaemonCmd)
+	ImrCmd.AddCommand(NewDaemonCmd("imr"))
 }
