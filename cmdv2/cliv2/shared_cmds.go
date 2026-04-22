@@ -62,8 +62,8 @@ func init() {
 	rootCmd.AddCommand(cli.RootKeysCmd)
 
 	// From ../tdns/cli/jose_keys_cmds.go: agent/combiner keys (generate, show) — under agent/combiner, uses config
-	cli.AgentCmd.AddCommand(cli.KeysCmd)
-	//	cli.CombinerCmd.AddCommand(cli.KeysCmd)
+	cli.AgentCmd.AddCommand(cli.NewKeysCmd("agent"))
+	//	cli.CombinerCmd.AddCommand(cli.NewKeysCmd("combiner"))
 
 	// ZoneCmd is now under AuthCmd (wired in cli/auth_cmds.go init).
 	// Agent uses AgentZoneCmd (wired in cli/agent_zone_cmds.go).
