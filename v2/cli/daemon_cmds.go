@@ -247,6 +247,4 @@ func init() {
 	DaemonRestartCmd.Flags().StringVarP(&clearLogFile, "clear", "", "",
 		"Truncate the specified log file before starting")
 
-	PingCmd.Flags().IntVarP(&tdns.Globals.PingCount, "count", "c", 0, "#pings to send")
-	PingCmd.Flags().BoolVarP(&newapi, "newapi", "n", false, "use new api client")
 }

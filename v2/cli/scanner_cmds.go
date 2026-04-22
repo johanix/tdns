@@ -410,8 +410,8 @@ func init() {
 	// Add delete command to scanner
 	ScannerCmd.AddCommand(DeleteCmd)
 
-	// Add ping to scanner (PingCmd is defined in ping.go)
-	ScannerCmd.AddCommand(PingCmd)
+	// Add ping to scanner (NewPingCmd is defined in ping.go)
+	ScannerCmd.AddCommand(NewPingCmd("scanner"))
 
 	// Add daemon commands to scanner (DaemonCmd is defined in start_cmds.go)
 	ScannerCmd.AddCommand(DaemonCmd)

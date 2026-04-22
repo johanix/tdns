@@ -12,14 +12,15 @@ func init() {
 	rootCmd.AddCommand(cli.DbCmd)
 
 	// From ../tdns/cli/start_cmds.go:
-	rootCmd.AddCommand(cli.PingCmd)
+	// Root-level ping preserves the historic "server" default (tdns-auth client).
+	rootCmd.AddCommand(cli.NewPingCmd("server"))
 
 	// From ../tdns/cli/report.go:
 	rootCmd.AddCommand(cli.ReportCmd)
 
 	rootCmd.AddCommand(cli.DaemonCmd)
 	cli.AgentCmd.AddCommand(cli.DaemonCmd)
-//	cli.CombinerCmd.AddCommand(cli.DaemonCmd)
+	//	cli.CombinerCmd.AddCommand(cli.DaemonCmd)
 
 	// From ../tdns/cli/ddns_cmds.go:
 	rootCmd.AddCommand(cli.DdnsCmd, cli.DelCmd)
@@ -27,7 +28,7 @@ func init() {
 	// From ../tdns/cli/debug_cmds.go:
 	rootCmd.AddCommand(cli.DebugCmd)
 	cli.AgentCmd.AddCommand(cli.DebugCmd)
-//	cli.CombinerCmd.AddCommand(cli.DebugCmd)
+	//	cli.CombinerCmd.AddCommand(cli.DebugCmd)
 
 	// Keystore and truststore are under AuthCmd and AgentCmd
 	// (wired in cli/auth_cmds.go init). Agent also gets them:
@@ -39,7 +40,7 @@ func init() {
 
 	// From ../tdns/cli/config_cmds.go:
 	rootCmd.AddCommand(cli.ConfigCmd)
-//	cli.CombinerCmd.AddCommand(cli.ConfigCmd)
+	//	cli.CombinerCmd.AddCommand(cli.ConfigCmd)
 	cli.AgentCmd.AddCommand(cli.ConfigCmd)
 
 	// From ../tdns/cli/generate_cmds.go:
@@ -52,7 +53,7 @@ func init() {
 	rootCmd.AddCommand(cli.StopCmd)
 
 	// From ../tdns/cli/combiner_cmds.go:
-//	rootCmd.AddCommand(cli.CombinerCmd)
+	//	rootCmd.AddCommand(cli.CombinerCmd)
 
 	// From ../tdns/cli/agent_cmds.go:
 	rootCmd.AddCommand(cli.AgentCmd)
@@ -62,7 +63,7 @@ func init() {
 
 	// From ../tdns/cli/jose_keys_cmds.go: agent/combiner keys (generate, show) — under agent/combiner, uses config
 	cli.AgentCmd.AddCommand(cli.KeysCmd)
-//	cli.CombinerCmd.AddCommand(cli.KeysCmd)
+	//	cli.CombinerCmd.AddCommand(cli.KeysCmd)
 
 	// ZoneCmd is now under AuthCmd (wired in cli/auth_cmds.go init).
 	// Agent uses AgentZoneCmd (wired in cli/agent_zone_cmds.go).
@@ -85,11 +86,11 @@ func init() {
 
 	// From ../tdns/cli/distrib_cmds.go:
 	cli.AgentCmd.AddCommand(cli.AgentDistribCmd)
-//	cli.CombinerCmd.AddCommand(cli.CombinerDistribCmd)
+	//	cli.CombinerCmd.AddCommand(cli.CombinerDistribCmd)
 
 	// From ../tdns/cli/transaction_cmds.go:
 	cli.AgentCmd.AddCommand(cli.AgentTransactionCmd)
-//	cli.CombinerCmd.AddCommand(cli.CombinerTransactionCmd)
+	//	cli.CombinerCmd.AddCommand(cli.CombinerTransactionCmd)
 
 	rootCmd.AddCommand(cli.VersionCmd)
 }

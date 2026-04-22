@@ -14,8 +14,8 @@ var AuthCmd = &cobra.Command{
 }
 
 func init() {
-	// Add ping and daemon commands to AuthCmd (PingCmd and DaemonCmd are defined elsewhere)
-	AuthCmd.AddCommand(PingCmd)
+	// Add ping and daemon commands to AuthCmd (NewPingCmd/DaemonCmd are defined elsewhere)
+	AuthCmd.AddCommand(NewPingCmd("auth"))
 	AuthCmd.AddCommand(DaemonCmd)
 	AuthCmd.AddCommand(ZoneCmd)
 	AuthCmd.AddCommand(KeystoreCmd)
