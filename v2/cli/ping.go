@@ -12,94 +12,12 @@ import (
 
 	"github.com/johanix/tdns/v2"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
 )
-
-// getClientKeyFromParent maps a parent command name to its corresponding clientKey.
-// Returns empty string if parent is unknown.
-func getClientKeyFromParent(parent string) string {
-	switch parent {
-	case "auth", "server":
-		return "tdns-auth"
-	case "signer":
-		return "tdns-mpsigner"
-	case "combiner":
-		return "tdns-combiner"
-	case "msa":
-		return "tdns-msa"
-	case "agent":
-		return "tdns-agent"
-	case "auditor":
-		return "tdns-mpauditor"
-	case "scanner":
-		return "tdns-scanner"
-	case "imr":
-		return "tdns-imr"
-	case "kdc":
-		return "tdns-kdc"
-	case "krs":
-		return "tdns-krs"
-	default:
-		return ""
-	}
-}
-
-func GetApiClient(parent string, dieOnError bool) (*tdns.ApiClient, error) {
-	clientKey := getClientKeyFromParent(parent)
-	if clientKey == "" {
-		if dieOnError {
-			log.Fatalf("Unknown parent command: %s", parent)
-		}
-		return nil, fmt.Errorf("unknown parent command: %s", parent)
-	}
-
-	client := tdns.Globals.ApiClients[clientKey]
-	if client == nil {
-		if dieOnError {
-			keys := make([]string, 0, len(tdns.Globals.ApiClients))
-			for k := range tdns.Globals.ApiClients {
-				keys = append(keys, k)
-			}
-			log.Fatalf("No API client found for %s (have clients for: %v)", clientKey, keys)
-		}
-		return nil, fmt.Errorf("no API client found for %s", clientKey)
-	}
-
-	if tdns.Globals.Debug {
-		fmt.Printf("Using API client for %q:\nBaseUrl: %s\n", clientKey, client.BaseUrl)
-	}
-	return client, nil
-}
-
-// getApiDetailsByClientKey retrieves the ApiDetails configuration for a given clientKey
-// by looking it up in the CLI config via viper.
-func getApiDetailsByClientKey(clientKey string) map[string]interface{} {
-	apiservers := viper.Get("apiservers")
-	if apiservers == nil {
-		return nil
-	}
-
-	servers, ok := apiservers.([]interface{})
-	if !ok {
-		return nil
-	}
-
-	for _, server := range servers {
-		serverMap, ok := server.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if name, ok := serverMap["name"].(string); ok && name == clientKey {
-			return serverMap
-		}
-	}
-	return nil
-}
 
 // NewPingCmd returns a fresh ping *cobra.Command bound to the given role.
 // Each attachment site must create its own command (Cobra does not allow
-// the same *cobra.Command under multiple parents). The role string is the
-// key understood by GetApiClient / getClientKeyFromParent.
+// the same *cobra.Command under multiple parents). The role string is
+// the registry key from RegisterRole.
 func NewPingCmd(role string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "ping",

@@ -40,8 +40,8 @@ var catalogCreateCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// CatalogCmd is only registered under rootCmd in cliv2 → role "server".
-		api, err := GetApiClient("server", true)
+		// CatalogCmd is only registered under rootCmd in cliv2 → role "auth".
+		api, err := GetApiClient("auth", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -77,8 +77,8 @@ var catalogDeleteCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// CatalogCmd is only registered under rootCmd in cliv2 → role "server".
-		api, err := GetApiClient("server", true)
+		// CatalogCmd is only registered under rootCmd in cliv2 → role "auth".
+		api, err := GetApiClient("auth", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -120,8 +120,8 @@ var catalogZoneAddCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// CatalogCmd is only registered under rootCmd in cliv2 → role "server".
-		api, err := GetApiClient("server", true)
+		// CatalogCmd is only registered under rootCmd in cliv2 → role "auth".
+		api, err := GetApiClient("auth", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -159,8 +159,8 @@ var catalogZoneDeleteCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// CatalogCmd is only registered under rootCmd in cliv2 → role "server".
-		api, err := GetApiClient("server", true)
+		// CatalogCmd is only registered under rootCmd in cliv2 → role "auth".
+		api, err := GetApiClient("auth", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -197,8 +197,8 @@ var catalogZoneListCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// CatalogCmd is only registered under rootCmd in cliv2 → role "server".
-		api, err := GetApiClient("server", true)
+		// CatalogCmd is only registered under rootCmd in cliv2 → role "auth".
+		api, err := GetApiClient("auth", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -271,8 +271,8 @@ var catalogGroupAddCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// CatalogCmd is only registered under rootCmd in cliv2 → role "server".
-		api, err := GetApiClient("server", true)
+		// CatalogCmd is only registered under rootCmd in cliv2 → role "auth".
+		api, err := GetApiClient("auth", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -309,8 +309,8 @@ var catalogGroupDeleteCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// CatalogCmd is only registered under rootCmd in cliv2 → role "server".
-		api, err := GetApiClient("server", true)
+		// CatalogCmd is only registered under rootCmd in cliv2 → role "auth".
+		api, err := GetApiClient("auth", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -347,8 +347,8 @@ var catalogGroupListCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// CatalogCmd is only registered under rootCmd in cliv2 → role "server".
-		api, err := GetApiClient("server", true)
+		// CatalogCmd is only registered under rootCmd in cliv2 → role "auth".
+		api, err := GetApiClient("auth", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -398,8 +398,8 @@ var catalogZoneGroupAddCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// CatalogCmd is only registered under rootCmd in cliv2 → role "server".
-		api, err := GetApiClient("server", true)
+		// CatalogCmd is only registered under rootCmd in cliv2 → role "auth".
+		api, err := GetApiClient("auth", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -437,8 +437,8 @@ var catalogZoneGroupDeleteCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// CatalogCmd is only registered under rootCmd in cliv2 → role "server".
-		api, err := GetApiClient("server", true)
+		// CatalogCmd is only registered under rootCmd in cliv2 → role "auth".
+		api, err := GetApiClient("auth", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -575,8 +575,8 @@ var catalogNotifyAddCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// CatalogCmd is only registered under rootCmd in cliv2 → role "server".
-		api, err := GetApiClient("server", true)
+		// CatalogCmd is only registered under rootCmd in cliv2 → role "auth".
+		api, err := GetApiClient("auth", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -613,8 +613,8 @@ var catalogNotifyRemoveCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// CatalogCmd is only registered under rootCmd in cliv2 → role "server".
-		api, err := GetApiClient("server", true)
+		// CatalogCmd is only registered under rootCmd in cliv2 → role "auth".
+		api, err := GetApiClient("auth", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -651,8 +651,8 @@ var catalogNotifyListCmd = &cobra.Command{
 			os.Exit(1)
 		}
 
-		// CatalogCmd is only registered under rootCmd in cliv2 → role "server".
-		api, err := GetApiClient("server", true)
+		// CatalogCmd is only registered under rootCmd in cliv2 → role "auth".
+		api, err := GetApiClient("auth", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}

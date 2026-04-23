@@ -104,10 +104,8 @@ Right now this doesn't do much, but later on various services will be able to re
 				clientKey = "tdns-auth" // fallback for unknown roles
 			}
 			daemonCommand := ""
-			if apiDetails := getApiDetailsByClientKey(clientKey); apiDetails != nil {
-				if cmdStr, ok := apiDetails["command"].(string); ok && cmdStr != "" {
-					daemonCommand = cmdStr
-				}
+			if ad := getApiDetailsByClientKey(clientKey); ad != nil {
+				daemonCommand = ad.Command
 			}
 
 			// Extract flags to pass to daemon (--config, --debug, -v, etc.)
@@ -160,10 +158,8 @@ Right now this doesn't do much, but later on various services will be able to re
 				clientKey = "tdns-auth" // fallback for unknown roles
 			}
 			daemonCommand := ""
-			if apiDetails := getApiDetailsByClientKey(clientKey); apiDetails != nil {
-				if cmdStr, ok := apiDetails["command"].(string); ok && cmdStr != "" {
-					daemonCommand = cmdStr
-				}
+			if ad := getApiDetailsByClientKey(clientKey); ad != nil {
+				daemonCommand = ad.Command
 			}
 
 			// Fallback to viper for backward compatibility

@@ -42,7 +42,11 @@ var delStatusCmd = &cobra.Command{
 			scheme = uint8(val)
 		}
 
-		dr, err := SendDelegationCmd(tdns.Globals.Api, tdns.DelegationPost{
+		api, err := GetApiClient("auth", true)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+		dr, err := SendDelegationCmd(api, tdns.DelegationPost{
 			Command: "status",
 			Zone:    tdns.Globals.Zonename,
 		})
@@ -104,7 +108,11 @@ var delSyncCmd = &cobra.Command{
 			scheme = uint8(val)
 		}
 
-		dr, err := SendDelegationCmd(tdns.Globals.Api, tdns.DelegationPost{
+		api, err := GetApiClient("auth", true)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+		dr, err := SendDelegationCmd(api, tdns.DelegationPost{
 			Command: "sync",
 			Scheme:  scheme,
 			Zone:    tdns.Globals.Zonename,
@@ -189,7 +197,11 @@ var delExportCmd = &cobra.Command{
 			scheme = uint8(val)
 		}
 
-		dr, err := SendDelegationCmd(tdns.Globals.Api, tdns.DelegationPost{
+		api, err := GetApiClient("auth", true)
+		if err != nil {
+			log.Fatalf("Error: %v", err)
+		}
+		dr, err := SendDelegationCmd(api, tdns.DelegationPost{
 			Command: "export",
 			Zone:    tdns.Globals.Zonename,
 			Outfile: outfile,

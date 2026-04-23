@@ -12,22 +12,21 @@ func init() {
 	rootCmd.AddCommand(cli.DbCmd)
 
 	// From ../tdns/cli/start_cmds.go:
-	// Root-level ping preserves the historic "server" default (tdns-auth client).
-	rootCmd.AddCommand(cli.NewPingCmd("server"))
+	// Root-level ping targets the auth daemon.
+	rootCmd.AddCommand(cli.NewPingCmd("auth"))
 
 	// From ../tdns/cli/report.go:
 	rootCmd.AddCommand(cli.ReportCmd)
 
-	rootCmd.AddCommand(cli.NewDaemonCmd("server"))
+	rootCmd.AddCommand(cli.NewDaemonCmd("auth"))
 	cli.AgentCmd.AddCommand(cli.NewDaemonCmd("agent"))
 
 	// From ../tdns/cli/ddns_cmds.go:
 	rootCmd.AddCommand(cli.DdnsCmd, cli.DelCmd)
 
 	// From ../tdns/cli/debug_cmds.go:
-	rootCmd.AddCommand(cli.DebugCmd)
-	cli.AgentCmd.AddCommand(cli.DebugCmd)
-	//	cli.CombinerCmd.AddCommand(cli.DebugCmd)
+	rootCmd.AddCommand(cli.NewDebugCmd("auth"))
+	cli.AgentCmd.AddCommand(cli.NewDebugCmd("agent"))
 
 	// Keystore and truststore are under AuthCmd and AgentCmd
 	// (wired in cli/auth_cmds.go init). Agent also gets them:
@@ -38,7 +37,7 @@ func init() {
 	rootCmd.AddCommand(cli.DsyncDiscoveryCmd)
 
 	// From ../tdns/cli/config_cmds.go:
-	rootCmd.AddCommand(cli.NewConfigCmd("server"))
+	rootCmd.AddCommand(cli.NewConfigCmd("auth"))
 	cli.AgentCmd.AddCommand(cli.NewConfigCmd("agent"))
 
 	// From ../tdns/cli/generate_cmds.go:
@@ -48,7 +47,7 @@ func init() {
 	rootCmd.AddCommand(cli.NotifyCmd)
 
 	// From ../tdns/cli/commands.go:
-	rootCmd.AddCommand(cli.StopCmd)
+	rootCmd.AddCommand(cli.NewStopCmd("auth"))
 
 	// From ../tdns/cli/combiner_cmds.go:
 	//	rootCmd.AddCommand(cli.CombinerCmd)

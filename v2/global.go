@@ -21,8 +21,17 @@ type GlobalStuff struct {
 	AgentId     AgentId
 	ParentZone  string
 	Sig0Keyfile string
+	// Api is the legacy single-ApiClient convenience slot. Nothing in
+	// tdns/v2 itself reads it any more; the tdns/v2/cli factories all
+	// resolve clients via cli.GetApiClient(role, …) against ApiClients
+	// below. The field is kept as a shim for external consumers that
+	// have not yet migrated:
+	//   - tdns-es/es/cli (es_cmds.go, cmd/es-cli/main.go)
+	//   - tdns-nm/cmd/{kdc-cli,krs-cli}/main.go, tdns-nm/tnm/cli
+	//   - tdns/music/ (music cli commands — legacy)
+	// Delete once those are converted to cli.GetApiClient.
 	Api         *ApiClient
-	ApiClients  map[string]*ApiClient // tdns-cli has multiple clients
+	ApiClients  map[string]*ApiClient
 	PingCount   int
 	Slurp       bool
 	Algorithm   string
