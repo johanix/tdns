@@ -415,6 +415,13 @@ func writeSig0ExportFiles(sk tdns.Sig0Key, outdir string) error {
 	base := fmt.Sprintf("K%s+%03d+%05d", sk.Name, algNum, sk.Keyid)
 	privPath := filepath.Join(outdir, base+".private")
 	keyPath := filepath.Join(outdir, base+".key")
+	for _, p := range []string{privPath, keyPath} {
+		if _, err := os.Stat(p); err == nil {
+			return fmt.Errorf("refusing to overwrite existing file %s (move or delete it first)", p)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("stat %s: %v", p, err)
+		}
+	}
 	if err := os.WriteFile(privPath, []byte(sk.PrivateKey), 0600); err != nil {
 		return fmt.Errorf("write %s: %v", privPath, err)
 	}
