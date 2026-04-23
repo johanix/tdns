@@ -20,8 +20,7 @@ import (
 var rollaction string
 
 // newZoneDsyncCmd returns a fresh "dsync" subtree bound to the given
-// role. Each Run closure resolves its ApiClient via GetApiClient(role)
-// instead of bypassing to tdns.Globals.Api.
+// role. Each Run closure resolves its ApiClient via GetApiClient(role).
 func newZoneDsyncCmd(role string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "dsync",

@@ -59,7 +59,6 @@ func init() {
 	// daemons' roles (signer/combiner/agent→mpagent in tdns-mp,
 	// scanner in tdns-apps, kdc/krs in tdns-nm, …).
 	RegisterRole("auth", "tdns-auth")
-	RegisterRole("server", "tdns-auth") // root-level default
 	RegisterRole("imr", "tdns-imr")
 	RegisterRole("agent", "tdns-agent")
 }
@@ -76,10 +75,9 @@ var apiConfig *CliConf
 // lookups.
 //
 // Unlike the previous per-binary implementations, this does *not*
-// require a client named "tdns-auth". tdns.Globals.Api is set from
-// the "tdns-auth" client only if one happens to be configured;
-// callers that still use Globals.Api directly will fail at use-time
-// if it's nil.
+// require a client named "tdns-auth". Callers resolve their ApiClient
+// via GetApiClient(role, …) and get a use-time failure if the role
+// they need isn't configured.
 func InitApiClients(c *CliConf) error {
 	if c == nil {
 		return fmt.Errorf("InitApiClients: nil CliConf")
@@ -107,10 +105,11 @@ func InitApiClients(c *CliConf) error {
 		fmt.Printf("\n")
 	}
 
-	// Legacy convenience: tdns.Globals.Api still used directly by some
-	// CLI handlers (commands.go, debug_cmds.go, ddns_cmds.go,
-	// zone_dsync_cmds.go — tracked for cleanup). Point it at the
-	// tdns-auth client when available; leave nil otherwise.
+	// Shim: tdns.Globals.Api is still used by external packages
+	// (tdns-es, tdns-nm, tdns/music). Point it at the tdns-auth client
+	// when available so those keep working. Nothing inside tdns/v2/cli
+	// reads it any more; the shim can go away once the external
+	// consumers migrate to GetApiClient(role, …).
 	if authClient, ok := tdns.Globals.ApiClients["tdns-auth"]; ok {
 		tdns.Globals.Api = authClient
 	}

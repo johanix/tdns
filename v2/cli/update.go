@@ -60,9 +60,10 @@ var updateCreateCmd = &cobra.Command{
 }
 
 // newZoneUpdateCmd returns a fresh "zone update create" subtree.
-// DNS UPDATE construction is role-independent (talks to tdns.Globals.Api
-// directly), so this is called unconditionally from NewZoneCmd for
-// every role.
+// DNS UPDATE construction is role-independent (the interactive CLI
+// sends UPDATEs directly to a target DNS server specified via --server
+// rather than through an ApiClient), so this is called unconditionally
+// from NewZoneCmd for every role.
 func newZoneUpdateCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "update",
