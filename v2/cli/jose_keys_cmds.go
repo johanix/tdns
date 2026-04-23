@@ -59,11 +59,8 @@ func runKeysCommand(role string, cmd *cobra.Command, subcommand string, args []s
 	serverConfigPath := keysServerConfig
 	if serverConfigPath == "" {
 		clientKey := getClientKeyFromParent(role)
-		details := getApiDetailsByClientKey(clientKey)
-		if details != nil {
-			if cf, ok := details["config_file"].(string); ok && cf != "" {
-				serverConfigPath = cf
-			}
+		if ad := getApiDetailsByClientKey(clientKey); ad != nil && ad.ConfigFile != "" {
+			serverConfigPath = ad.ConfigFile
 		}
 	}
 	if serverConfigPath == "" {

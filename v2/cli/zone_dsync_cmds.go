@@ -19,11 +19,10 @@ import (
 
 var rollaction string
 
-// newZoneDsyncCmd returns a fresh "dsync" subtree. DSYNC operations
-// talk to tdns.Globals.Api directly (not via GetApiClient), so they
-// are role-independent; the subtree is attached to every zone tree
-// via NewZoneCmd.
-func newZoneDsyncCmd() *cobra.Command {
+// newZoneDsyncCmd returns a fresh "dsync" subtree bound to the given
+// role. Each Run closure resolves its ApiClient via GetApiClient(role)
+// instead of bypassing to tdns.Globals.Api.
+func newZoneDsyncCmd(role string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "dsync",
 		Short: "Prefix command, not useable by itself",
@@ -35,7 +34,11 @@ func newZoneDsyncCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("zonename")
 
-			resp, err := SendDsyncCommand(tdns.Globals.Api, tdns.ZoneDsyncPost{
+			api, err := GetApiClient(role, true)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+			resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
 				Command: "status",
 				Zone:    dns.Fqdn(tdns.Globals.Zonename),
 			})
@@ -78,7 +81,11 @@ func newZoneDsyncCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("zonename", "algorithm")
 
-			resp, err := SendDsyncCommand(tdns.Globals.Api, tdns.ZoneDsyncPost{
+			api, err := GetApiClient(role, true)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+			resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
 				Command:   "bootstrap-sig0-key",
 				Zone:      dns.Fqdn(tdns.Globals.Zonename),
 				Algorithm: dns.StringToAlgorithm[tdns.Globals.Algorithm],
@@ -106,7 +113,11 @@ func newZoneDsyncCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("zonename", "algorithm", "rollaction")
 
-			resp, err := SendDsyncCommand(tdns.Globals.Api, tdns.ZoneDsyncPost{
+			api, err := GetApiClient(role, true)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+			resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
 				Command:   "roll-sig0-key",
 				Zone:      dns.Fqdn(tdns.Globals.Zonename),
 				Algorithm: dns.StringToAlgorithm[tdns.Globals.Algorithm],
@@ -137,7 +148,11 @@ func newZoneDsyncCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("zonename")
 
-			resp, err := SendDsyncCommand(tdns.Globals.Api, tdns.ZoneDsyncPost{
+			api, err := GetApiClient(role, true)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+			resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
 				Command: "publish-dsync-rrset",
 				Zone:    dns.Fqdn(tdns.Globals.Zonename),
 			})
@@ -161,7 +176,11 @@ func newZoneDsyncCmd() *cobra.Command {
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("zonename")
 
-			resp, err := SendDsyncCommand(tdns.Globals.Api, tdns.ZoneDsyncPost{
+			api, err := GetApiClient(role, true)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+			resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
 				Command: "unpublish-dsync-rrset",
 				Zone:    dns.Fqdn(tdns.Globals.Zonename),
 			})
