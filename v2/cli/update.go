@@ -59,24 +59,34 @@ var updateCreateCmd = &cobra.Command{
 	},
 }
 
-var zoneUpdateCmd = &cobra.Command{
-	Use:   "update",
-	Short: "Create and ultimately send a DNS UPDATE msg for zone auth data",
-}
-
-var zoneUpdateCreateCmd = &cobra.Command{
-	Use:   "create",
-	Short: "Create and ultimately send a DNS UPDATE msg for zone auth data",
-	Long: `Will query for details about the DNS UPDATE via (add|del|show|set-ttl) commands.
-When the message is complete it may be signed and sent by the 'send' command. After a 
+// newZoneUpdateCmd returns a fresh "zone update create" subtree.
+// DNS UPDATE construction is role-independent (the interactive CLI
+// sends UPDATEs directly to a target DNS server specified via --server
+// rather than through an ApiClient), so this is called unconditionally
+// from NewZoneCmd for every role.
+func newZoneUpdateCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "update",
+		Short: "Create and ultimately send a DNS UPDATE msg for zone auth data",
+	}
+	create := &cobra.Command{
+		Use:   "create",
+		Short: "Create and ultimately send a DNS UPDATE msg for zone auth data",
+		Long: `Will query for details about the DNS UPDATE via (add|del|show|set-ttl) commands.
+When the message is complete it may be signed and sent by the 'send' command. After a
 message has been send the loop will start again with a new, empty message to create.
 Loop ends on the command "QUIT"
 
 The zone to update is mandatory to specify on the command line with the --zone flag.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
-		CreateUpdate("zone")
-	},
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename")
+			CreateUpdate("zone")
+		},
+	}
+	create.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
+	AttachUpdateCreateFlags(create)
+	c.AddCommand(create)
+	return c
 }
 
 // AttachUpdateCreateFlags adds the three flags common to every
@@ -102,11 +112,6 @@ func init() {
 	childUpdateCreateCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
 	childUpdateCreateCmd.Flags().StringVarP(&tdns.Globals.ParentZone, "parent", "P", "", "Parent zone to send update to")
 	AttachUpdateCreateFlags(childUpdateCreateCmd)
-
-	ZoneCmd.AddCommand(zoneUpdateCmd)
-	zoneUpdateCmd.AddCommand(zoneUpdateCreateCmd)
-	zoneUpdateCreateCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
-	AttachUpdateCreateFlags(zoneUpdateCreateCmd)
 
 	UpdateCmd.AddCommand(updateCreateCmd)
 	AttachUpdateCreateFlags(updateCreateCmd)

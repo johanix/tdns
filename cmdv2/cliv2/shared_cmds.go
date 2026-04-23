@@ -12,35 +12,33 @@ func init() {
 	rootCmd.AddCommand(cli.DbCmd)
 
 	// From ../tdns/cli/start_cmds.go:
-	rootCmd.AddCommand(cli.PingCmd)
+	// Root-level ping targets the auth daemon.
+	rootCmd.AddCommand(cli.NewPingCmd("auth"))
 
 	// From ../tdns/cli/report.go:
 	rootCmd.AddCommand(cli.ReportCmd)
 
-	rootCmd.AddCommand(cli.DaemonCmd)
-	cli.AgentCmd.AddCommand(cli.DaemonCmd)
-//	cli.CombinerCmd.AddCommand(cli.DaemonCmd)
+	rootCmd.AddCommand(cli.NewDaemonCmd("auth"))
+	cli.AgentCmd.AddCommand(cli.NewDaemonCmd("agent"))
 
 	// From ../tdns/cli/ddns_cmds.go:
 	rootCmd.AddCommand(cli.DdnsCmd, cli.DelCmd)
 
 	// From ../tdns/cli/debug_cmds.go:
-	rootCmd.AddCommand(cli.DebugCmd)
-	cli.AgentCmd.AddCommand(cli.DebugCmd)
-//	cli.CombinerCmd.AddCommand(cli.DebugCmd)
+	rootCmd.AddCommand(cli.NewDebugCmd("auth"))
+	cli.AgentCmd.AddCommand(cli.NewDebugCmd("agent"))
 
 	// Keystore and truststore are under AuthCmd and AgentCmd
 	// (wired in cli/auth_cmds.go init). Agent also gets them:
-	cli.AgentCmd.AddCommand(cli.KeystoreCmd)
-	cli.AgentCmd.AddCommand(cli.TruststoreCmd)
+	cli.AgentCmd.AddCommand(cli.NewKeystoreCmd("agent"))
+	cli.AgentCmd.AddCommand(cli.NewTruststoreCmd("agent"))
 
 	// From ../tdns/cli/dsync_cmds.go:
 	rootCmd.AddCommand(cli.DsyncDiscoveryCmd)
 
 	// From ../tdns/cli/config_cmds.go:
-	rootCmd.AddCommand(cli.ConfigCmd)
-//	cli.CombinerCmd.AddCommand(cli.ConfigCmd)
-	cli.AgentCmd.AddCommand(cli.ConfigCmd)
+	rootCmd.AddCommand(cli.NewConfigCmd("auth"))
+	cli.AgentCmd.AddCommand(cli.NewConfigCmd("agent"))
 
 	// From ../tdns/cli/generate_cmds.go:
 	rootCmd.AddCommand(cli.GenerateCmd)
@@ -49,10 +47,10 @@ func init() {
 	rootCmd.AddCommand(cli.NotifyCmd)
 
 	// From ../tdns/cli/commands.go:
-	rootCmd.AddCommand(cli.StopCmd)
+	rootCmd.AddCommand(cli.NewStopCmd("auth"))
 
 	// From ../tdns/cli/combiner_cmds.go:
-//	rootCmd.AddCommand(cli.CombinerCmd)
+	//	rootCmd.AddCommand(cli.CombinerCmd)
 
 	// From ../tdns/cli/agent_cmds.go:
 	rootCmd.AddCommand(cli.AgentCmd)
@@ -61,8 +59,8 @@ func init() {
 	rootCmd.AddCommand(cli.RootKeysCmd)
 
 	// From ../tdns/cli/jose_keys_cmds.go: agent/combiner keys (generate, show) — under agent/combiner, uses config
-	cli.AgentCmd.AddCommand(cli.KeysCmd)
-//	cli.CombinerCmd.AddCommand(cli.KeysCmd)
+	cli.AgentCmd.AddCommand(cli.NewKeysCmd("agent"))
+	//	cli.CombinerCmd.AddCommand(cli.NewKeysCmd("combiner"))
 
 	// ZoneCmd is now under AuthCmd (wired in cli/auth_cmds.go init).
 	// Agent uses AgentZoneCmd (wired in cli/agent_zone_cmds.go).
@@ -83,13 +81,9 @@ func init() {
 	// From ../tdns/cli/jwt_cmds.go:
 	rootCmd.AddCommand(cli.JwtCmd)
 
-	// From ../tdns/cli/distrib_cmds.go:
-	cli.AgentCmd.AddCommand(cli.AgentDistribCmd)
-//	cli.CombinerCmd.AddCommand(cli.CombinerDistribCmd)
-
-	// From ../tdns/cli/transaction_cmds.go:
-	cli.AgentCmd.AddCommand(cli.AgentTransactionCmd)
-//	cli.CombinerCmd.AddCommand(cli.CombinerTransactionCmd)
+	// distrib_cmds.go and transaction_cmds.go live in tdns-mp/v2/cli;
+	// their endpoints are only served by mp daemons, so they are wired
+	// in from mpcli, not here.
 
 	rootCmd.AddCommand(cli.VersionCmd)
 }

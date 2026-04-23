@@ -23,274 +23,275 @@ import (
 var keyid int
 var NewState, filename, keytype, outdir string
 
-var KeystoreCmd = &cobra.Command{
-	Use:   "keystore",
-	Short: "Prefix command to access different features of tdns-auth truststore",
-	Long: `The TDNS-AUTH keystore is where SIG(0) key pairs for zones are kept.
-The CLI contains functions for listing SIG(0) key pairs, adding and
-deleting keys.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("keystore called. This is likely a mistake, sub command needed")
-	},
+// NewKeystoreCmd returns a fresh "keystore" command tree bound to the
+// given role. The subtree (sig0 + dnssec branches with their children
+// and flags) is built inline so every attachment point gets unique
+// *cobra.Command instances.
+func NewKeystoreCmd(role string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "keystore",
+		Short: "Prefix command to access different features of the keystore",
+		Long: `The keystore holds SIG(0) and DNSSEC key pairs.
+The CLI contains functions for listing, adding, deleting, and
+changing the state of keys.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println("keystore called. This is likely a mistake, sub command needed")
+		},
+	}
+
+	c.AddCommand(newKeystoreSig0Cmd(role), newKeystoreDnssecCmd(role))
+	return c
 }
 
-var keystoreSig0Cmd = &cobra.Command{
-	Use:   "sig0",
-	Short: "Prefix command, only usable via sub-commands",
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("keystore sig0 called (but NYI)")
-	},
-}
+func newKeystoreSig0Cmd(role string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "sig0",
+		Short: "Prefix command, only usable via sub-commands",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println("keystore sig0 called (but NYI)")
+		},
+	}
 
-var keystoreSig0AddCmd = &cobra.Command{
-	Use:   "add",
-	Short: "Add a new SIG(0) key pair to the keystore",
-	Long: `Add a new SIG(0) key pair to the keystore. Required arguments are the name of the file
+	add := &cobra.Command{
+		Use:   "add",
+		Short: "Add a new SIG(0) key pair to the keystore",
+		Long: `Add a new SIG(0) key pair to the keystore. Required arguments are the name of the file
 containing either the private or the public SIG(0) key and the name of the zone.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("filename", "childzone")
-		Sig0KeyMgmt("add")
-	},
-}
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("filename", "childzone")
+			sig0KeyMgmt(role, "add")
+		},
+	}
+	add.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
+	add.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add SIG(0) key for")
+	add.MarkFlagRequired("file")
+	add.MarkFlagRequired("zone")
 
-var keystoreSig0ImportCmd = &cobra.Command{
-	Use:   "import",
-	Short: "Add a new SIG(0) key pair to the keystore",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("filename", "childzone")
-		Sig0KeyMgmt("import")
-	},
-}
+	importCmd := &cobra.Command{
+		Use:   "import",
+		Short: "Add a new SIG(0) key pair to the keystore",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("filename", "childzone")
+			sig0KeyMgmt(role, "import")
+		},
+	}
+	importCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
+	importCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to import SIG(0) key for")
+	importCmd.MarkFlagRequired("file")
+	importCmd.MarkFlagRequired("zone")
 
-var keystoreSig0GenerateCmd = &cobra.Command{
-	Use:   "generate",
-	Short: "Generate a new SIG(0) key pair and add it to the keystore",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename", "algorithm", "state")
-		Sig0KeyMgmt("generate")
-	},
-}
+	generate := &cobra.Command{
+		Use:   "generate",
+		Short: "Generate a new SIG(0) key pair and add it to the keystore",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename", "algorithm", "state")
+			sig0KeyMgmt(role, "generate")
+		},
+	}
+	generate.Flags().StringVarP(&NewState, "state", "", "", "Inital key state (created|published|active|retired)")
+	generate.Flags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
+		sig0AlgorithmsHelp("Algorithm to use for SIG(0) key generation"))
+	generate.MarkFlagRequired("state")
 
-var keystoreSig0ListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List all SIG(0) key pairs in the keystore",
-	Run: func(cmd *cobra.Command, args []string) {
-		Sig0KeyMgmt("list")
-	},
-}
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List all SIG(0) key pairs in the keystore",
+		Run: func(cmd *cobra.Command, args []string) {
+			sig0KeyMgmt(role, "list")
+		},
+	}
 
-var keystoreSig0ExportCmd = &cobra.Command{
-	Use:   "export",
-	Short: "Export a SIG(0) key pair from the keystore as BIND-style .private/.key files",
-	Long: `Write the SIG(0) key pair for (zone, keyid) to two files in BIND filename
+	export := &cobra.Command{
+		Use:   "export",
+		Short: "Export a SIG(0) key pair from the keystore as BIND-style .private/.key files",
+		Long: `Write the SIG(0) key pair for (zone, keyid) to two files in BIND filename
 convention: K<zone>+<alg-num>+<keyid>.private (PKCS#8 PEM) and .key (zone-file
 KEY RR). The resulting pair is directly consumable by commands accepting
 --key <basename.private>.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename", "keyid")
-		Sig0KeyMgmt("export")
-	},
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename", "keyid")
+			sig0KeyMgmt(role, "export")
+		},
+	}
+	export.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone the key belongs to")
+	export.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to export")
+	export.Flags().StringVarP(&outdir, "outdir", "o", ".", "Directory to write .private and .key files to")
+	export.MarkFlagRequired("zone")
+	export.MarkFlagRequired("keyid")
+
+	delete := &cobra.Command{
+		Use:   "delete",
+		Short: "Delete SIG(0) key pair from TDNSD keystore",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("keyid", "childzone")
+			sig0KeyMgmt(role, "delete")
+		},
+	}
+	delete.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
+
+	setstate := &cobra.Command{
+		Use:   "setstate",
+		Short: "Set the state of and existing SIG(0) key pair in the TDNSD keystore",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("keyid", "zonename", "state")
+			sig0KeyMgmt(role, "setstate")
+		},
+	}
+	setstate.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
+	setstate.Flags().StringVarP(&NewState, "state", "", "", "New state of key (created|published|active|retired)")
+
+	c.AddCommand(add, importCmd, generate, list, export, delete, setstate)
+	return c
 }
 
-var keystoreSig0DeleteCmd = &cobra.Command{
-	Use:   "delete",
-	Short: "Delete SIG(0) key pair from TDNSD keystore",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("keyid", "childzone")
-		Sig0KeyMgmt("delete")
-	},
-}
+func newKeystoreDnssecCmd(role string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "dnssec",
+		Short: "Prefix command, only usable via sub-commands",
+		Run: func(cmd *cobra.Command, args []string) {
+			fmt.Println("keystore dnssec called (this is an empty prefix command)")
+		},
+	}
 
-var keystoreSig0SetStateCmd = &cobra.Command{
-	Use:   "setstate",
-	Short: "Set the state of and existing SIG(0) key pair in the TDNSD keystore",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("keyid", "zonename", "state")
-		Sig0KeyMgmt("setstate")
-	},
-}
-
-var keystoreDnssecCmd = &cobra.Command{
-	Use:   "dnssec",
-	Short: "Prefix command, only usable via sub-commands",
-	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("keystore dnssec called (this is an empty prefix command)")
-	},
-}
-
-var keystoreDnssecAddCmd = &cobra.Command{
-	Use:   "add",
-	Short: "Add a new DNSSEC key pair to the keystore",
-	Long: `Add a new SIG(0) key pair to the keystore. Required arguments are the name of the file
+	add := &cobra.Command{
+		Use:   "add",
+		Short: "Add a new DNSSEC key pair to the keystore",
+		Long: `Add a new SIG(0) key pair to the keystore. Required arguments are the name of the file
 containing either the private or the public SIG(0) key and the name of the zone.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("filename", "zonename")
-		DnssecKeyMgmt("add")
-	},
-}
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("filename", "zonename")
+			dnssecKeyMgmt(role, "add")
+		},
+	}
+	add.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
+	add.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add DNSSEC key for")
+	add.MarkFlagRequired("file")
+	add.MarkFlagRequired("zone")
 
-var keystoreDnssecImportCmd = &cobra.Command{
-	Use:   "import",
-	Short: "Add a new DNSSEC key pair to the keystore",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("filename", "zonename")
-		DnssecKeyMgmt("import")
-	},
-}
+	importCmd := &cobra.Command{
+		Use:   "import",
+		Short: "Add a new DNSSEC key pair to the keystore",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("filename", "zonename")
+			dnssecKeyMgmt(role, "import")
+		},
+	}
+	importCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
+	importCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to import DNSSEC key for")
+	importCmd.MarkFlagRequired("file")
+	importCmd.MarkFlagRequired("zone")
 
-var keystoreDnssecGenerateCmd = &cobra.Command{
-	Use:   "generate",
-	Short: "Generate a new DNSSEC key pair and add it to the keystore",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename", "algorithm", "keytype", "state")
-		DnssecKeyMgmt("generate")
-	},
-}
-
-var keystoreDnssecListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List all DNSSEC key pairs in the keystore",
-	Run: func(cmd *cobra.Command, args []string) {
-		DnssecKeyMgmt("list")
-	},
-}
-
-var keystoreDnssecDeleteCmd = &cobra.Command{
-	Use:   "delete",
-	Short: "Delete DNSSEC key pair from TDNSD keystore",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("keyid", "zonename")
-		DnssecKeyMgmt("delete")
-	},
-}
-
-var keystoreDnssecSetStateCmd = &cobra.Command{
-	Use:   "setstate",
-	Short: "Set the state of and existing DNSSEC key pair in the TDNSD keystore",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("keyid", "zonename", "state")
-		DnssecKeyMgmt("setstate")
-	},
-}
-
-var keystoreDnssecGenDSCmd = &cobra.Command{
-	Use:   "gen-ds",
-	Short: "Generate DS records for a zone's KSK(s) from the keystore",
-	Long:  `Generate DS (Delegation Signer) records for a zone's KSK (Key Signing Key) DNSKEY records stored in the keystore. The command queries the keystore for DNSKEY records for the specified zone, filters for KSKs (keys with the SEP bit set), and generates DS records using SHA-256 and SHA-384 digest algorithms. If --keyid is not specified, DS records are generated for all KSKs in the zone.`,
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
-		if keyid < 0 || keyid > 65535 {
-			fmt.Printf("Error: keyid must be between 0 and 65535, got %d\n", keyid)
-			os.Exit(1)
-		}
-		DnssecGenDS()
-	},
-}
-
-var keystoreDnssecRolloverCmd = &cobra.Command{
-	Use:   "rollover",
-	Short: "Perform a manual DNSSEC key rollover (standby→active, active→retired)",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
-		DnssecKeyMgmt("rollover")
-	},
-}
-
-var keystoreDnssecClearCmd = &cobra.Command{
-	Use:   "clear",
-	Short: "Permanently delete all DNSSEC keys for a zone (KeyStateWorker will regenerate as needed)",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
-		zone := tdns.Globals.Zonename
-		force, _ := cmd.Flags().GetBool("force")
-
-		if !force {
-			fmt.Printf("This will immediately permanently delete all DNSSEC keys for zone %s. Proceed? [y/N]: ", zone)
-			var response string
-			fmt.Scanln(&response)
-			response = strings.ToLower(strings.TrimSpace(response))
-			if response != "y" && response != "yes" {
-				fmt.Println("Cancelled.")
-				return
-			}
-		}
-
-		DnssecKeyMgmt("clear")
-	},
-}
-
-func init() {
-	// rootCmd.AddCommand(KeystoreCmd)
-	KeystoreCmd.AddCommand(keystoreSig0Cmd, keystoreDnssecCmd)
-
-	keystoreSig0Cmd.AddCommand(keystoreSig0AddCmd, keystoreSig0ImportCmd, keystoreSig0GenerateCmd)
-	keystoreSig0Cmd.AddCommand(keystoreSig0ListCmd, keystoreSig0ExportCmd, keystoreSig0DeleteCmd, keystoreSig0SetStateCmd)
-
-	keystoreDnssecCmd.AddCommand(keystoreDnssecAddCmd, keystoreDnssecImportCmd, keystoreDnssecGenerateCmd)
-	keystoreDnssecCmd.AddCommand(keystoreDnssecListCmd, keystoreDnssecDeleteCmd, keystoreDnssecSetStateCmd, keystoreDnssecGenDSCmd, keystoreDnssecRolloverCmd, keystoreDnssecClearCmd)
-
-	keystoreSig0AddCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
-	keystoreSig0AddCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add SIG(0) key for")
-	keystoreSig0ImportCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
-	keystoreSig0ImportCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to import SIG(0) key for")
-	keystoreSig0ImportCmd.MarkFlagRequired("file")
-	keystoreSig0AddCmd.MarkFlagRequired("file")
-	keystoreSig0AddCmd.MarkFlagRequired("zone")
-	keystoreSig0ImportCmd.MarkFlagRequired("zone")
-	keystoreSig0DeleteCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
-	keystoreSig0SetStateCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
-	keystoreSig0SetStateCmd.Flags().StringVarP(&NewState, "state", "", "", "New state of key (created|published|active|retired)")
-	keystoreSig0GenerateCmd.Flags().StringVarP(&NewState, "state", "", "", "Inital key state (created|published|active|retired)")
-	keystoreSig0GenerateCmd.Flags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
-		sig0AlgorithmsHelp("Algorithm to use for SIG(0) key generation"))
-	keystoreSig0GenerateCmd.MarkFlagRequired("state")
-
-	keystoreSig0ExportCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone the key belongs to")
-	keystoreSig0ExportCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to export")
-	keystoreSig0ExportCmd.Flags().StringVarP(&outdir, "outdir", "o", ".", "Directory to write .private and .key files to")
-	keystoreSig0ExportCmd.MarkFlagRequired("zone")
-	keystoreSig0ExportCmd.MarkFlagRequired("keyid")
-
-	keystoreDnssecAddCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
-	keystoreDnssecAddCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add DNSSEC key for")
-	keystoreDnssecImportCmd.Flags().StringVarP(&filename, "file", "f", "", "Name of file containing either pub or priv SIG(0) data")
-	keystoreDnssecImportCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to import DNSSEC key for")
-	keystoreDnssecImportCmd.MarkFlagRequired("file")
-	keystoreDnssecAddCmd.MarkFlagRequired("file")
-	keystoreDnssecAddCmd.MarkFlagRequired("zone")
-	keystoreDnssecImportCmd.MarkFlagRequired("zone")
-	keystoreDnssecDeleteCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
-	keystoreDnssecSetStateCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
-	keystoreDnssecSetStateCmd.Flags().StringVarP(&NewState, "state", "", "", "New statei of key")
-	keystoreDnssecGenerateCmd.Flags().StringVarP(&keytype, "keytype", "", "", "Key type to generate (KSK|ZSK|CSK)")
-	keystoreDnssecGenerateCmd.Flags().StringVarP(&NewState, "state", "", "", "Inital key state (created|published|active|retired)")
-	keystoreDnssecGenerateCmd.Flags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
+	generate := &cobra.Command{
+		Use:   "generate",
+		Short: "Generate a new DNSSEC key pair and add it to the keystore",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename", "algorithm", "keytype", "state")
+			dnssecKeyMgmt(role, "generate")
+		},
+	}
+	generate.Flags().StringVarP(&keytype, "keytype", "", "", "Key type to generate (KSK|ZSK|CSK)")
+	generate.Flags().StringVarP(&NewState, "state", "", "", "Inital key state (created|published|active|retired)")
+	generate.Flags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
 		dnssecAlgorithmsHelp("Algorithm to use for DNSSEC key generation"))
-	keystoreDnssecGenerateCmd.MarkFlagRequired("keytype")
-	keystoreDnssecGenerateCmd.MarkFlagRequired("state")
-	// keystoreDnssecGenerateCmd.MarkFlagRequired("algorithm") // XXX: marking it as required defeats the default value
+	generate.MarkFlagRequired("keytype")
+	generate.MarkFlagRequired("state")
+	// generate.MarkFlagRequired("algorithm") // XXX: marking it as required defeats the default value
 
-	keystoreDnssecGenDSCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to generate DS records for")
-	keystoreDnssecGenDSCmd.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of specific KSK to generate DS for (optional, if not specified, generates for all KSKs)")
-	keystoreDnssecGenDSCmd.MarkFlagRequired("zone")
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List all DNSSEC key pairs in the keystore",
+		Run: func(cmd *cobra.Command, args []string) {
+			dnssecKeyMgmt(role, "list")
+		},
+	}
 
-	keystoreDnssecRolloverCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to perform rollover for")
-	keystoreDnssecRolloverCmd.Flags().StringVarP(&keytype, "keytype", "", "ZSK", "Key type to roll over (ZSK|KSK)")
-	keystoreDnssecRolloverCmd.MarkFlagRequired("zone")
+	delete := &cobra.Command{
+		Use:   "delete",
+		Short: "Delete DNSSEC key pair from TDNSD keystore",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("keyid", "zonename")
+			dnssecKeyMgmt(role, "delete")
+		},
+	}
+	delete.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
 
-	keystoreDnssecClearCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to clear all DNSSEC keys for")
-	keystoreDnssecClearCmd.Flags().Bool("force", false, "Skip confirmation prompt")
-	keystoreDnssecClearCmd.MarkFlagRequired("zone")
+	setstate := &cobra.Command{
+		Use:   "setstate",
+		Short: "Set the state of and existing DNSSEC key pair in the TDNSD keystore",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("keyid", "zonename", "state")
+			dnssecKeyMgmt(role, "setstate")
+		},
+	}
+	setstate.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
+	setstate.Flags().StringVarP(&NewState, "state", "", "", "New statei of key")
+
+	genDS := &cobra.Command{
+		Use:   "gen-ds",
+		Short: "Generate DS records for a zone's KSK(s) from the keystore",
+		Long:  `Generate DS (Delegation Signer) records for a zone's KSK (Key Signing Key) DNSKEY records stored in the keystore. The command queries the keystore for DNSKEY records for the specified zone, filters for KSKs (keys with the SEP bit set), and generates DS records using SHA-256 and SHA-384 digest algorithms. If --keyid is not specified, DS records are generated for all KSKs in the zone.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename")
+			if keyid < 0 || keyid > 65535 {
+				fmt.Printf("Error: keyid must be between 0 and 65535, got %d\n", keyid)
+				os.Exit(1)
+			}
+			dnssecGenDS(role)
+		},
+	}
+	genDS.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to generate DS records for")
+	genDS.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of specific KSK to generate DS for (optional, if not specified, generates for all KSKs)")
+	genDS.MarkFlagRequired("zone")
+
+	rollover := &cobra.Command{
+		Use:   "rollover",
+		Short: "Perform a manual DNSSEC key rollover (standby→active, active→retired)",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename")
+			dnssecKeyMgmt(role, "rollover")
+		},
+	}
+	rollover.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to perform rollover for")
+	rollover.Flags().StringVarP(&keytype, "keytype", "", "ZSK", "Key type to roll over (ZSK|KSK)")
+	rollover.MarkFlagRequired("zone")
+
+	clear := &cobra.Command{
+		Use:   "clear",
+		Short: "Permanently delete all DNSSEC keys for a zone (KeyStateWorker will regenerate as needed)",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename")
+			zone := tdns.Globals.Zonename
+			force, _ := cmd.Flags().GetBool("force")
+
+			if !force {
+				fmt.Printf("This will immediately permanently delete all DNSSEC keys for zone %s. Proceed? [y/N]: ", zone)
+				var response string
+				fmt.Scanln(&response)
+				response = strings.ToLower(strings.TrimSpace(response))
+				if response != "y" && response != "yes" {
+					fmt.Println("Cancelled.")
+					return
+				}
+			}
+
+			dnssecKeyMgmt(role, "clear")
+		},
+	}
+	clear.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to clear all DNSSEC keys for")
+	clear.Flags().Bool("force", false, "Skip confirmation prompt")
+	clear.MarkFlagRequired("zone")
+
+	c.AddCommand(add, importCmd, generate, list, delete, setstate, genDS, rollover, clear)
+	return c
 }
 
-func Sig0KeyMgmt(cmd string) {
+func sig0KeyMgmt(role, cmd string) {
 	data := tdns.KeystorePost{
 		Command:    "sig0-mgmt",
 		SubCommand: cmd,
 	}
 
-	prefixcmd, _ := GetCommandContext("keystore")
-	api, err := GetApiClient(prefixcmd, true)
+	api, err := GetApiClient(role, true)
 	if err != nil {
 		log.Fatalf("Error creating API client: %v", err)
 	}
@@ -315,7 +316,10 @@ func Sig0KeyMgmt(cmd string) {
 					pkc.KeyRR.Header().Name, tdns.Globals.Zonename)
 			}
 
-			log.Printf("[tdns-cli]pkc.K: %s, pkc.PrivateKey: %s", pkc.K, pkc.PrivateKey)
+			// Do not log pkc.PrivateKey or pkc.K — they are raw private
+			// key material. Log only non-sensitive metadata.
+			log.Printf("[tdns-cli] SIG(0) key loaded: name=%s keyid=%d alg=%d",
+				pkc.KeyRR.Header().Name, pkc.KeyRR.KeyTag(), pkc.KeyRR.Algorithm)
 
 			data = tdns.KeystorePost{
 				Command:         "sig0-mgmt",
@@ -347,7 +351,7 @@ func Sig0KeyMgmt(cmd string) {
 	}
 
 	if tdns.Globals.Debug {
-		log.Printf("Sig0KeyMgmt: calling SendKeystoreCmd with data=%v", data)
+		log.Printf("sig0KeyMgmt: calling SendKeystoreCmd with data=%v", data)
 	}
 
 	tr, err := SendKeystoreCmd(api, data)
@@ -437,14 +441,13 @@ func writeSig0ExportFiles(sk tdns.Sig0Key, outdir string) error {
 	return nil
 }
 
-func DnssecKeyMgmt(cmd string) {
+func dnssecKeyMgmt(role, cmd string) {
 	data := tdns.KeystorePost{
 		Command:    "dnssec-mgmt",
 		SubCommand: cmd,
 	}
 
-	prefixcmd, _ := GetCommandContext("keystore")
-	api, err := GetApiClient(prefixcmd, true)
+	api, err := GetApiClient(role, true)
 	if err != nil {
 		log.Fatalf("Error creating API client: %v", err)
 	}
@@ -578,9 +581,8 @@ func DnssecKeyMgmt(cmd string) {
 
 }
 
-func DnssecGenDS() {
-	prefixcmd, _ := GetCommandContext("keystore")
-	api, err := GetApiClient(prefixcmd, true)
+func dnssecGenDS(role string) {
+	api, err := GetApiClient(role, true)
 	if err != nil {
 		log.Fatalf("Error: failed to get API client: %v", err)
 	}

@@ -17,167 +17,188 @@ import (
 	"github.com/spf13/cobra"
 )
 
-var zoneDsyncCmd = &cobra.Command{
-	Use:   "dsync",
-	Short: "Prefix command, not useable by itself",
-}
-
-var zoneDsyncStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Send dsync status command to tdns-auth",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
-
-		resp, err := SendDsyncCommand(tdns.Globals.Api, tdns.ZoneDsyncPost{
-			Command: "status",
-			Zone:    dns.Fqdn(tdns.Globals.Zonename),
-		})
-
-		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
-			os.Exit(1)
-		}
-		if resp.Error {
-			fmt.Printf("Error from tdns-auth: %s\n", resp.ErrorMsg)
-			os.Exit(1)
-		}
-
-		if resp.Msg != "" {
-			fmt.Printf("%s\n", resp.Msg)
-		}
-		out := []string{}
-		for key, status := range resp.Functions {
-			out = append(out, fmt.Sprintf("%s|%s", key, status))
-		}
-
-		sort.Strings(out)
-		if tdns.Globals.ShowHeaders {
-			out = append([]string{"Function|Status"}, out...)
-		}
-
-		fmt.Printf("%s\n", columnize.SimpleFormat(out))
-		if len(resp.Todo) > 0 {
-			fmt.Printf("\nTODO:\n")
-			for _, todo := range resp.Todo {
-				fmt.Printf("--> %s\n", todo)
-			}
-		}
-	},
-}
-
-var zoneDsyncBootstrapCmd = &cobra.Command{
-	Use:   "bootstrap-sig0-key",
-	Short: "Send dsync bootstrap command to tdns-auth",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename", "algorithm")
-
-		resp, err := SendDsyncCommand(tdns.Globals.Api, tdns.ZoneDsyncPost{
-			Command:   "bootstrap-sig0-key",
-			Zone:      dns.Fqdn(tdns.Globals.Zonename),
-			Algorithm: dns.StringToAlgorithm[tdns.Globals.Algorithm],
-		})
-		PrintUpdateResult(resp.UpdateResult)
-		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
-			os.Exit(1)
-		}
-		if resp.Error {
-			fmt.Printf("Error from tdns-auth: %s\n", resp.ErrorMsg)
-			os.Exit(1)
-		}
-		if resp.Msg != "" {
-			fmt.Printf("%s\n", resp.Msg)
-		}
-	},
-}
-
 var rollaction string
 
-var zoneDsyncRollKeyCmd = &cobra.Command{
-	Use:   "roll-sig0-key",
-	Short: "Send dsync rollover command to tdns-auth",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename", "algorithm", "rollaction")
+// newZoneDsyncCmd returns a fresh "dsync" subtree bound to the given
+// role. Each Run closure resolves its ApiClient via GetApiClient(role).
+func newZoneDsyncCmd(role string) *cobra.Command {
+	c := &cobra.Command{
+		Use:   "dsync",
+		Short: "Prefix command, not useable by itself",
+	}
 
-		resp, err := SendDsyncCommand(tdns.Globals.Api, tdns.ZoneDsyncPost{
-			Command:   "roll-sig0-key",
-			Zone:      dns.Fqdn(tdns.Globals.Zonename),
-			Algorithm: dns.StringToAlgorithm[tdns.Globals.Algorithm],
-			Action:    rollaction,
-		})
-		PrintUpdateResult(resp.UpdateResult)
-		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
-			os.Exit(1)
-		}
-		if resp.Error {
-			fmt.Printf("Error from tdns-auth: %s\n", resp.ErrorMsg)
-			os.Exit(1)
-		}
-		if resp.Msg != "" {
-			fmt.Printf("%s\n", resp.Msg)
-		}
-	},
-}
+	status := &cobra.Command{
+		Use:   "status",
+		Short: "Send dsync status command",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename")
 
-var zoneDsyncPublishCmd = &cobra.Command{
-	Use:   "publish",
-	Short: "Send dsync publish-dsync-rrset command to tdns-auth",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
+			api, err := GetApiClient(role, true)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+			resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
+				Command: "status",
+				Zone:    dns.Fqdn(tdns.Globals.Zonename),
+			})
 
-		resp, err := SendDsyncCommand(tdns.Globals.Api, tdns.ZoneDsyncPost{
-			Command: "publish-dsync-rrset",
-			Zone:    dns.Fqdn(tdns.Globals.Zonename),
-		})
-		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
-			os.Exit(1)
-		}
-		if resp.Error {
-			fmt.Printf("Error from tdns-auth: %s\n", resp.ErrorMsg)
-			os.Exit(1)
-		}
-		if resp.Msg != "" {
-			fmt.Printf("%s\n", resp.Msg)
-		}
-	},
-}
+			if err != nil {
+				fmt.Printf("Error: %s\n", err.Error())
+				os.Exit(1)
+			}
+			if resp.Error {
+				fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
+				os.Exit(1)
+			}
 
-var zoneDsyncUnpublishCmd = &cobra.Command{
-	Use:   "unpublish",
-	Short: "Send dsync unpublish-dsync-rrset command to tdns-auth",
-	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename")
+			if resp.Msg != "" {
+				fmt.Printf("%s\n", resp.Msg)
+			}
+			out := []string{}
+			for key, s := range resp.Functions {
+				out = append(out, fmt.Sprintf("%s|%s", key, s))
+			}
 
-		resp, err := SendDsyncCommand(tdns.Globals.Api, tdns.ZoneDsyncPost{
-			Command: "unpublish-dsync-rrset",
-			Zone:    dns.Fqdn(tdns.Globals.Zonename),
-		})
-		if err != nil {
-			fmt.Printf("Error: %s\n", err.Error())
-			os.Exit(1)
-		}
-		if resp.Error {
-			fmt.Printf("Error from tdns-auth: %s\n", resp.ErrorMsg)
-			os.Exit(1)
-		}
-		if resp.Msg != "" {
-			fmt.Printf("%s\n", resp.Msg)
-		}
-	},
-}
+			sort.Strings(out)
+			if tdns.Globals.ShowHeaders {
+				out = append([]string{"Function|Status"}, out...)
+			}
 
-func init() {
-	ZoneCmd.AddCommand(zoneDsyncCmd)
-	zoneDsyncCmd.AddCommand(zoneDsyncStatusCmd, zoneDsyncBootstrapCmd, zoneDsyncRollKeyCmd, zoneDsyncPublishCmd, zoneDsyncUnpublishCmd)
+			fmt.Printf("%s\n", columnize.SimpleFormat(out))
+			if len(resp.Todo) > 0 {
+				fmt.Printf("\nTODO:\n")
+				for _, todo := range resp.Todo {
+					fmt.Printf("--> %s\n", todo)
+				}
+			}
+		},
+	}
 
-	zoneDsyncRollKeyCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
+	bootstrap := &cobra.Command{
+		Use:   "bootstrap-sig0-key",
+		Short: "Send dsync bootstrap command",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename", "algorithm")
+
+			api, err := GetApiClient(role, true)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+			resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
+				Command:   "bootstrap-sig0-key",
+				Zone:      dns.Fqdn(tdns.Globals.Zonename),
+				Algorithm: dns.StringToAlgorithm[tdns.Globals.Algorithm],
+			})
+			PrintUpdateResult(resp.UpdateResult)
+			if err != nil {
+				fmt.Printf("Error: %s\n", err.Error())
+				os.Exit(1)
+			}
+			if resp.Error {
+				fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
+				os.Exit(1)
+			}
+			if resp.Msg != "" {
+				fmt.Printf("%s\n", resp.Msg)
+			}
+		},
+	}
+	bootstrap.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
 		sig0AlgorithmsHelp("Algorithm for the new SIG(0) key"))
-	zoneDsyncBootstrapCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
+
+	rollKey := &cobra.Command{
+		Use:   "roll-sig0-key",
+		Short: "Send dsync rollover command",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename", "algorithm", "rollaction")
+
+			api, err := GetApiClient(role, true)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+			resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
+				Command:   "roll-sig0-key",
+				Zone:      dns.Fqdn(tdns.Globals.Zonename),
+				Algorithm: dns.StringToAlgorithm[tdns.Globals.Algorithm],
+				Action:    rollaction,
+			})
+			PrintUpdateResult(resp.UpdateResult)
+			if err != nil {
+				fmt.Printf("Error: %s\n", err.Error())
+				os.Exit(1)
+			}
+			if resp.Error {
+				fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
+				os.Exit(1)
+			}
+			if resp.Msg != "" {
+				fmt.Printf("%s\n", resp.Msg)
+			}
+		},
+	}
+	rollKey.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
 		sig0AlgorithmsHelp("Algorithm for the new SIG(0) key"))
-	zoneDsyncRollKeyCmd.PersistentFlags().StringVarP(&rollaction, "rollaction", "r", "complete", "[debug] Phase of the rollover to perform: complete, add, remove, update-local")
-	zoneDsyncRollKeyCmd.PersistentFlags().MarkHidden("rollaction")
+	rollKey.PersistentFlags().StringVarP(&rollaction, "rollaction", "r", "complete", "[debug] Phase of the rollover to perform: complete, add, remove, update-local")
+	rollKey.PersistentFlags().MarkHidden("rollaction")
+
+	publish := &cobra.Command{
+		Use:   "publish",
+		Short: "Send dsync publish-dsync-rrset command",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename")
+
+			api, err := GetApiClient(role, true)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+			resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
+				Command: "publish-dsync-rrset",
+				Zone:    dns.Fqdn(tdns.Globals.Zonename),
+			})
+			if err != nil {
+				fmt.Printf("Error: %s\n", err.Error())
+				os.Exit(1)
+			}
+			if resp.Error {
+				fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
+				os.Exit(1)
+			}
+			if resp.Msg != "" {
+				fmt.Printf("%s\n", resp.Msg)
+			}
+		},
+	}
+
+	unpublish := &cobra.Command{
+		Use:   "unpublish",
+		Short: "Send dsync unpublish-dsync-rrset command",
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename")
+
+			api, err := GetApiClient(role, true)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+			resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
+				Command: "unpublish-dsync-rrset",
+				Zone:    dns.Fqdn(tdns.Globals.Zonename),
+			})
+			if err != nil {
+				fmt.Printf("Error: %s\n", err.Error())
+				os.Exit(1)
+			}
+			if resp.Error {
+				fmt.Printf("Error from server: %s\n", resp.ErrorMsg)
+				os.Exit(1)
+			}
+			if resp.Msg != "" {
+				fmt.Printf("%s\n", resp.Msg)
+			}
+		},
+	}
+
+	c.AddCommand(status, bootstrap, rollKey, publish, unpublish)
+	return c
 }
 
 func SendDsyncCommand(api *tdns.ApiClient, data tdns.ZoneDsyncPost) (tdns.ZoneDsyncResponse, error) {
@@ -201,7 +222,7 @@ func SendDsyncCommand(api *tdns.ApiClient, data tdns.ZoneDsyncPost) (tdns.ZoneDs
 	}
 
 	if cr.Error {
-		return cr, fmt.Errorf("error from tdns-auth: %s", cr.ErrorMsg)
+		return cr, fmt.Errorf("error from server: %s", cr.ErrorMsg)
 	}
 
 	return cr, nil

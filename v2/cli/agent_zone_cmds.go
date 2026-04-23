@@ -83,14 +83,14 @@ var agentZoneDsyncCmd = &cobra.Command{
 
 var agentZoneDsyncStatusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Send dsync status command to tdns-auth",
+	Short: "Send dsync status command to the agent",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
+		// AgentZoneCmd is only attached under AgentCmd → role "agent".
+		api, err := GetApiClient("agent", true)
 		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+			log.Fatalf("Error getting API client: %v", err)
 		}
 
 		resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
@@ -103,7 +103,7 @@ var agentZoneDsyncStatusCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if resp.Error {
-			fmt.Printf("Error from tdns-auth: %s\n", resp.ErrorMsg)
+			fmt.Printf("Error from agent: %s\n", resp.ErrorMsg)
 			os.Exit(1)
 		}
 
@@ -132,14 +132,14 @@ var agentZoneDsyncStatusCmd = &cobra.Command{
 
 var agentZoneDsyncBootstrapCmd = &cobra.Command{
 	Use:   "bootstrap-sig0-key",
-	Short: "Send dsync bootstrap command to tdns-auth",
+	Short: "Send dsync bootstrap command to the agent",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename", "algorithm")
 
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
+		// AgentZoneCmd is only attached under AgentCmd → role "agent".
+		api, err := GetApiClient("agent", true)
 		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+			log.Fatalf("Error getting API client: %v", err)
 		}
 
 		resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
@@ -153,7 +153,7 @@ var agentZoneDsyncBootstrapCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if resp.Error {
-			fmt.Printf("Error from tdns-auth: %s\n", resp.ErrorMsg)
+			fmt.Printf("Error from agent: %s\n", resp.ErrorMsg)
 			os.Exit(1)
 		}
 		if resp.Msg != "" {
@@ -164,14 +164,14 @@ var agentZoneDsyncBootstrapCmd = &cobra.Command{
 
 var agentZoneDsyncRollKeyCmd = &cobra.Command{
 	Use:   "roll-sig0-key",
-	Short: "Send dsync rollover command to tdns-auth",
+	Short: "Send dsync rollover command to the agent",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename", "algorithm", "rollaction")
 
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
+		// AgentZoneCmd is only attached under AgentCmd → role "agent".
+		api, err := GetApiClient("agent", true)
 		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+			log.Fatalf("Error getting API client: %v", err)
 		}
 
 		resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
@@ -186,7 +186,7 @@ var agentZoneDsyncRollKeyCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if resp.Error {
-			fmt.Printf("Error from tdns-auth: %s\n", resp.ErrorMsg)
+			fmt.Printf("Error from agent: %s\n", resp.ErrorMsg)
 			os.Exit(1)
 		}
 		if resp.Msg != "" {
@@ -197,14 +197,14 @@ var agentZoneDsyncRollKeyCmd = &cobra.Command{
 
 var agentZoneDsyncPublishCmd = &cobra.Command{
 	Use:   "publish",
-	Short: "Send dsync publish-dsync-rrset command to tdns-auth",
+	Short: "Send dsync publish-dsync-rrset command to the agent",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
+		// AgentZoneCmd is only attached under AgentCmd → role "agent".
+		api, err := GetApiClient("agent", true)
 		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+			log.Fatalf("Error getting API client: %v", err)
 		}
 
 		resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
@@ -216,7 +216,7 @@ var agentZoneDsyncPublishCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if resp.Error {
-			fmt.Printf("Error from tdns-auth: %s\n", resp.ErrorMsg)
+			fmt.Printf("Error from agent: %s\n", resp.ErrorMsg)
 			os.Exit(1)
 		}
 		if resp.Msg != "" {
@@ -227,14 +227,14 @@ var agentZoneDsyncPublishCmd = &cobra.Command{
 
 var agentZoneDsyncUnpublishCmd = &cobra.Command{
 	Use:   "unpublish",
-	Short: "Send dsync unpublish-dsync-rrset command to tdns-auth",
+	Short: "Send dsync unpublish-dsync-rrset command to the agent",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
+		// AgentZoneCmd is only attached under AgentCmd → role "agent".
+		api, err := GetApiClient("agent", true)
 		if err != nil {
-			log.Fatalf("Error getting API client for %s: %v", prefixcmd, err)
+			log.Fatalf("Error getting API client: %v", err)
 		}
 
 		resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
@@ -246,7 +246,7 @@ var agentZoneDsyncUnpublishCmd = &cobra.Command{
 			os.Exit(1)
 		}
 		if resp.Error {
-			fmt.Printf("Error from tdns-auth: %s\n", resp.ErrorMsg)
+			fmt.Printf("Error from agent: %s\n", resp.ErrorMsg)
 			os.Exit(1)
 		}
 		if resp.Msg != "" {
@@ -303,8 +303,8 @@ Examples:
 			req.Data = map[string]interface{}{"force": true}
 		}
 
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
+		// AgentZoneCmd is only attached under AgentCmd → role "agent".
+		api, err := GetApiClient("agent", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
@@ -377,8 +377,8 @@ Examples:
 			req.Data = map[string]interface{}{"force": true}
 		}
 
-		prefixcmd, _ := GetCommandContext("zone")
-		api, err := GetApiClient(prefixcmd, true)
+		// AgentZoneCmd is only attached under AgentCmd → role "agent".
+		api, err := GetApiClient("agent", true)
 		if err != nil {
 			log.Fatalf("Error getting API client: %v", err)
 		}
