@@ -441,6 +441,7 @@ func init() {
 	// Update subcommands
 	agentZoneUpdateCmd.AddCommand(agentZoneUpdateCreateCmd)
 	agentZoneUpdateCreateCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
+	AttachUpdateCreateFlags(agentZoneUpdateCreateCmd)
 
 	// Flags
 	AgentZoneCmd.PersistentFlags().BoolVarP(&force, "force", "F", false, "force operation")
@@ -454,8 +455,10 @@ func init() {
 	// 20260415 johani: agentZoneDelRRCmd.Flags().StringVarP(&agentZoneRR, "rr", "", "", "DNS record to delete")
 	// 20260415 johani: agentZoneDelRRCmd.Flags().Bool("force", false, "Bypass dedup check and always send transaction")
 
-	agentZoneDsyncRollKeyCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519", "Algorithm to use for the new SIG(0) key")
-	agentZoneDsyncBootstrapCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519", "Algorithm to use for the new SIG(0) key")
+	agentZoneDsyncRollKeyCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
+		sig0AlgorithmsHelp("Algorithm for the new SIG(0) key"))
+	agentZoneDsyncBootstrapCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
+		sig0AlgorithmsHelp("Algorithm for the new SIG(0) key"))
 	agentZoneDsyncRollKeyCmd.PersistentFlags().StringVarP(&agentRollaction, "rollaction", "r", "complete", "[debug] Phase of the rollover to perform: complete, add, remove, update-local")
 	agentZoneDsyncRollKeyCmd.PersistentFlags().MarkHidden("rollaction")
 }

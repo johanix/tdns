@@ -159,6 +159,11 @@ var configStatusCmd = &cobra.Command{
 			} else {
 				fmt.Printf("ApiServer: api key is not set\n")
 			}
+			if resp.DBFile != "" {
+				fmt.Printf("DB: %s\n", resp.DBFile)
+			} else {
+				fmt.Printf("DB: not configured\n")
+			}
 		}
 
 		if resp.Msg != "" {
