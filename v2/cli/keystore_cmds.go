@@ -316,7 +316,10 @@ func sig0KeyMgmt(role, cmd string) {
 					pkc.KeyRR.Header().Name, tdns.Globals.Zonename)
 			}
 
-			log.Printf("[tdns-cli]pkc.K: %s, pkc.PrivateKey: %s", pkc.K, pkc.PrivateKey)
+			// Do not log pkc.PrivateKey or pkc.K — they are raw private
+			// key material. Log only non-sensitive metadata.
+			log.Printf("[tdns-cli] SIG(0) key loaded: name=%s keyid=%d alg=%d",
+				pkc.KeyRR.Header().Name, pkc.KeyRR.KeyTag(), pkc.KeyRR.Algorithm)
 
 			data = tdns.KeystorePost{
 				Command:         "sig0-mgmt",

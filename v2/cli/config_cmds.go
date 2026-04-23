@@ -127,7 +127,14 @@ func runConfigCmd(role, command string, showVerboseStatus bool) {
 		}
 		if resp.ApiServer.ApiKey.Value() != "" {
 			ak := resp.ApiServer.ApiKey.Value()
-			fmt.Printf("ApiServer: api key (%d characters): %s***%s\n", len(ak), ak[:3], ak[len(ak)-3:])
+			// Reveal 3 chars at each end only when the key is long
+			// enough that the reveal doesn't expose the whole secret
+			// (>= 8 chars). Shorter keys are fully masked.
+			if len(ak) >= 8 {
+				fmt.Printf("ApiServer: api key (%d characters): %s***%s\n", len(ak), ak[:3], ak[len(ak)-3:])
+			} else {
+				fmt.Printf("ApiServer: api key (%d characters): ***\n", len(ak))
+			}
 		} else {
 			fmt.Printf("ApiServer: api key is not set\n")
 		}
