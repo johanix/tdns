@@ -56,11 +56,16 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResul
 	var edeCode uint16
 	var edeMessage string
 
-	// If the packed message exceeds the EDNS UDP buffer we advertise
-	// (1232), use TCP. dns.Exchange is hardcoded UDP and does not fall
-	// back on truncation, so a too-large UPDATE just times out — common
-	// with ML-DSA-44 SIG(0), where the signature alone is ~2.4 KB.
-	const udpSafeLimit = 1232
+	// If the packed message exceeds the EDNS UDP buffer advertised on
+	// the message's OPT RR, use TCP. dns.Exchange is hardcoded UDP and
+	// does not fall back on truncation, so a too-large UPDATE just
+	// times out — common with ML-DSA-44 SIG(0), where the signature
+	// alone is ~2.4 KB. Fall back to 1232 (EDNS "safe" default) if the
+	// caller didn't attach an OPT.
+	udpSafeLimit := 1232
+	if opt := msg.IsEdns0(); opt != nil {
+		udpSafeLimit = int(opt.UDPSize())
+	}
 	useTCP := msg.Len() > udpSafeLimit
 	client := &dns.Client{}
 	if useTCP {
