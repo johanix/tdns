@@ -48,7 +48,7 @@ func NewZoneCmd(role string, extras ...*cobra.Command) *cobra.Command {
 		Use:   "sign",
 		Short: "Request signing of a zone",
 		Run: func(cmd *cobra.Command, args []string) {
-			runZoneSimpleCmd(role, "sign-zone", true)
+			runZoneSimpleCmd(role, "sign-zone")
 		},
 	}
 
@@ -62,7 +62,7 @@ func NewZoneCmd(role string, extras ...*cobra.Command) *cobra.Command {
 		Use:   "freeze",
 		Short: "Freeze a zone (i.e. stop accepting DDNS updates to the zone data)",
 		Run: func(cmd *cobra.Command, args []string) {
-			runZoneSimpleCmd(role, "freeze", true)
+			runZoneSimpleCmd(role, "freeze")
 		},
 	}
 
@@ -70,7 +70,7 @@ func NewZoneCmd(role string, extras ...*cobra.Command) *cobra.Command {
 		Use:   "thaw",
 		Short: "Thaw a zone (i.e. accept DDNS updates to the zone data again)",
 		Run: func(cmd *cobra.Command, args []string) {
-			runZoneSimpleCmd(role, "thaw", true)
+			runZoneSimpleCmd(role, "thaw")
 		},
 	}
 
@@ -88,7 +88,7 @@ func NewZoneCmd(role string, extras ...*cobra.Command) *cobra.Command {
 		Use:   "generate",
 		Short: "Generate NSEC records for a zone",
 		Run: func(cmd *cobra.Command, args []string) {
-			runZoneSimpleCmd(role, "generate-nsec", true)
+			runZoneSimpleCmd(role, "generate-nsec")
 		},
 	}
 	nsecShow := &cobra.Command{
@@ -110,12 +110,10 @@ func NewZoneCmd(role string, extras ...*cobra.Command) *cobra.Command {
 	return c
 }
 
-// runZoneSimpleCmd runs a ZonePost command that requires PrepArgs("childzone")
+// runZoneSimpleCmd runs a ZonePost command after PrepArgs("childzone")
 // and only reports resp.Msg on success. Used by sign, freeze, thaw, generate-nsec.
-func runZoneSimpleCmd(role, command string, prepChildzone bool) {
-	if prepChildzone {
-		PrepArgs("childzone")
-	}
+func runZoneSimpleCmd(role, command string) {
+	PrepArgs("childzone")
 
 	api, err := GetApiClient(role, true)
 	if err != nil {
