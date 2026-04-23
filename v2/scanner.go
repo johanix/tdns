@@ -467,6 +467,15 @@ func (imr *Imr) findEnclosingZoneNS(ctx context.Context, qname string, lg *log.L
 // compares the responses, and returns a representative RRset and whether all NS were in sync.
 // Returns: (responseRRset, allInSync, error)
 func (scanner *Scanner) queryAllNSAndCompare(ctx context.Context, qname string, qtype uint16, nsRRset *core.RRset, imr *Imr, lg *log.Logger) (*core.RRset, bool, error) {
+	// IMR may be disabled or the generalized-NOTIFY path may have
+	// reached the scanner before the IMR singleton was initialized;
+	// without this guard the subsequent imr.ImrQuery(...) call
+	// dereferences a nil *Imr and panics the tdns-authv2 process
+	// from inside a server handler goroutine, killing the daemon on
+	// otherwise-accepted NOTIFY(CDS/CSYNC) traffic.
+	if imr == nil {
+		return nil, false, fmt.Errorf("queryAllNSAndCompare: IMR is not initialized; cannot compare child NS data")
+	}
 	// Extract nameserver names from NS RRset
 	var nsNames []string
 	for _, rr := range nsRRset.RRs {
