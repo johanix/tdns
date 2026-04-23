@@ -346,6 +346,10 @@ cmdloop:
 			// like "foo.bar. IN NS" — first token is owner, scan the
 			// rest for a type, skip class/TTL tokens.
 			fields := strings.Fields(input)
+			if len(fields) == 0 {
+				fmt.Println("No owner name provided")
+				continue
+			}
 			owner := dns.Fqdn(fields[0])
 			var rrtype uint16
 			for _, tok := range fields[1:] {
