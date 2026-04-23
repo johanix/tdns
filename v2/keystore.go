@@ -183,9 +183,7 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		return &resp, err
 
 	case "export":
-		const getOneSig0KeySql = `
-SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AND keyid=?`
-		row := tx.QueryRow(getOneSig0KeySql, kp.Zone, kp.Keyid)
+		row := tx.QueryRow(getSig0KeySql, kp.Zone, kp.Keyid)
 		var zonename, state, algorithm, creator, privatekey, keyrrstr string
 		var keyid int
 		err := row.Scan(&zonename, &state, &keyid, &algorithm, &creator, &privatekey, &keyrrstr)
