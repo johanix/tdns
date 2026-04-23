@@ -382,6 +382,7 @@ cmdloop:
 			for {
 				rrstr = tdns.TtyQuestion("Record", "", false)
 				if rrstr == "" {
+					fmt.Println("[empty input, end of replacement additions]")
 					break
 				}
 				if strings.ToUpper(rrstr) == "QUIT" {
