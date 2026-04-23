@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -20,7 +21,7 @@ import (
 
 // var filename string
 var keyid int
-var NewState, filename, keytype string
+var NewState, filename, keytype, outdir string
 
 // NewKeystoreCmd returns a fresh "keystore" command tree bound to the
 // given role. The subtree (sig0 + dnssec branches with their children
@@ -88,7 +89,8 @@ containing either the private or the public SIG(0) key and the name of the zone.
 		},
 	}
 	generate.Flags().StringVarP(&NewState, "state", "", "", "Inital key state (created|published|active|retired)")
-	generate.Flags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519", "Algorithm to use for key generation (default: ED25519)")
+	generate.Flags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
+		sig0AlgorithmsHelp("Algorithm to use for SIG(0) key generation"))
 	generate.MarkFlagRequired("state")
 
 	list := &cobra.Command{
@@ -98,6 +100,24 @@ containing either the private or the public SIG(0) key and the name of the zone.
 			sig0KeyMgmt(role, "list")
 		},
 	}
+
+	export := &cobra.Command{
+		Use:   "export",
+		Short: "Export a SIG(0) key pair from the keystore as BIND-style .private/.key files",
+		Long: `Write the SIG(0) key pair for (zone, keyid) to two files in BIND filename
+convention: K<zone>+<alg-num>+<keyid>.private (PKCS#8 PEM) and .key (zone-file
+KEY RR). The resulting pair is directly consumable by commands accepting
+--key <basename.private>.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename", "keyid")
+			sig0KeyMgmt(role, "export")
+		},
+	}
+	export.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone the key belongs to")
+	export.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to export")
+	export.Flags().StringVarP(&outdir, "outdir", "o", ".", "Directory to write .private and .key files to")
+	export.MarkFlagRequired("zone")
+	export.MarkFlagRequired("keyid")
 
 	delete := &cobra.Command{
 		Use:   "delete",
@@ -120,7 +140,7 @@ containing either the private or the public SIG(0) key and the name of the zone.
 	setstate.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
 	setstate.Flags().StringVarP(&NewState, "state", "", "", "New state of key (created|published|active|retired)")
 
-	c.AddCommand(add, importCmd, generate, list, delete, setstate)
+	c.AddCommand(add, importCmd, generate, list, export, delete, setstate)
 	return c
 }
 
@@ -171,7 +191,8 @@ containing either the private or the public SIG(0) key and the name of the zone.
 	}
 	generate.Flags().StringVarP(&keytype, "keytype", "", "", "Key type to generate (KSK|ZSK|CSK)")
 	generate.Flags().StringVarP(&NewState, "state", "", "", "Inital key state (created|published|active|retired)")
-	generate.Flags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519", "Algorithm to use for key generation (default: ED25519)")
+	generate.Flags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
+		dnssecAlgorithmsHelp("Algorithm to use for DNSSEC key generation"))
 	generate.MarkFlagRequired("keytype")
 	generate.MarkFlagRequired("state")
 	// generate.MarkFlagRequired("algorithm") // XXX: marking it as required defeats the default value
@@ -312,7 +333,7 @@ func sig0KeyMgmt(role, cmd string) {
 		data.Algorithm = dns.StringToAlgorithm[tdns.Globals.Algorithm]
 		data.State = NewState
 
-	case "delete", "setstate":
+	case "delete", "setstate", "export":
 		data.Keyid = uint16(keyid)
 		data.Zone = tdns.Globals.Zonename
 		data.Keyname = tdns.Globals.Zonename
@@ -364,7 +385,57 @@ func sig0KeyMgmt(role, cmd string) {
 		if tr.Msg != "" {
 			fmt.Printf("%s\n", tr.Msg)
 		}
+
+	case "export":
+		if len(tr.Sig0keys) == 0 {
+			fmt.Printf("No key returned for zone %s keyid %d\n",
+				tdns.Globals.Zonename, keyid)
+			os.Exit(1)
+		}
+		for _, v := range tr.Sig0keys {
+			if err := writeSig0ExportFiles(v, outdir); err != nil {
+				fmt.Printf("Error writing key files: %v\n", err)
+				os.Exit(1)
+			}
+		}
+		if tr.Msg != "" {
+			fmt.Printf("%s\n", tr.Msg)
+		}
 	}
+}
+
+// writeSig0ExportFiles writes a SIG(0) key pair to two BIND-style files
+// in outdir: K<zone>+<alg>+<keyid>.private (PKCS#8 PEM as stored in the
+// keystore) and .key (zone-file KEY RR text). The resulting basename is
+// directly consumable by tdns.ReadPrivateKey.
+func writeSig0ExportFiles(sk tdns.Sig0Key, outdir string) error {
+	algNum, ok := dns.StringToAlgorithm[strings.ToUpper(sk.Algorithm)]
+	if !ok {
+		return fmt.Errorf("unknown algorithm %q in exported key", sk.Algorithm)
+	}
+	base := fmt.Sprintf("K%s+%03d+%05d", sk.Name, algNum, sk.Keyid)
+	privPath := filepath.Join(outdir, base+".private")
+	keyPath := filepath.Join(outdir, base+".key")
+	for _, p := range []string{privPath, keyPath} {
+		if _, err := os.Stat(p); err == nil {
+			return fmt.Errorf("refusing to overwrite existing file %s (move or delete it first)", p)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("stat %s: %v", p, err)
+		}
+	}
+	if err := os.WriteFile(privPath, []byte(sk.PrivateKey), 0600); err != nil {
+		return fmt.Errorf("write %s: %v", privPath, err)
+	}
+	keyRR := sk.Keystr
+	if !strings.HasSuffix(keyRR, "\n") {
+		keyRR += "\n"
+	}
+	if err := os.WriteFile(keyPath, []byte(keyRR), 0644); err != nil {
+		return fmt.Errorf("write %s: %v", keyPath, err)
+	}
+	fmt.Printf("Wrote %s\n", privPath)
+	fmt.Printf("Wrote %s\n", keyPath)
+	return nil
 }
 
 func dnssecKeyMgmt(role, cmd string) {

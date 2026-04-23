@@ -97,7 +97,8 @@ func newZoneDsyncCmd() *cobra.Command {
 			}
 		},
 	}
-	bootstrap.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519", "Algorithm to use for the new SIG(0) key")
+	bootstrap.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
+		sig0AlgorithmsHelp("Algorithm for the new SIG(0) key"))
 
 	rollKey := &cobra.Command{
 		Use:   "roll-sig0-key",
@@ -125,7 +126,8 @@ func newZoneDsyncCmd() *cobra.Command {
 			}
 		},
 	}
-	rollKey.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519", "Algorithm to use for the new SIG(0) key")
+	rollKey.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
+		sig0AlgorithmsHelp("Algorithm for the new SIG(0) key"))
 	rollKey.PersistentFlags().StringVarP(&rollaction, "rollaction", "r", "complete", "[debug] Phase of the rollover to perform: complete, add, remove, update-local")
 	rollKey.PersistentFlags().MarkHidden("rollaction")
 

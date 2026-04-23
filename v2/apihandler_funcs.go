@@ -267,6 +267,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.DnsEngine = conf.DnsEngine
 			resp.ApiServer = conf.ApiServer
 			resp.Identities = conf.Service.Identities
+			resp.DBFile = conf.Db.File
 			if conf.MultiProvider != nil {
 				resp.CombinerOptions = conf.MultiProvider.CombinerOptions
 			}

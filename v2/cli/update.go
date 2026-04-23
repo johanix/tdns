@@ -83,21 +83,37 @@ The zone to update is mandatory to specify on the command line with the --zone f
 		},
 	}
 	create.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
+	AttachUpdateCreateFlags(create)
 	c.AddCommand(create)
 	return c
 }
 
-// init registers update-related Cobra subcommands and binds their command-line flags.
+// AttachUpdateCreateFlags adds the three flags common to every
+// "update create" entry point — --signer, --server, --key — to cmd,
+// bound to the package-level vars CreateUpdate reads. Use this from
+// every leaf create command (including cross-package ones in
+// tdns-mp/v2/cli) so the signer name, target server, and keyfile can
+// always be overridden from the CLI.
+func AttachUpdateCreateFlags(cmd *cobra.Command) {
+	cmd.Flags().StringVarP(&signer, "signer", "", "",
+		"Name of signer (key used to sign the update; defaults to --zone)")
+	cmd.Flags().StringVarP(&server, "server", "S", "",
+		"Server to send the update to (addr:port)")
+	cmd.Flags().StringVarP(&keyfile, "key", "K", "",
+		"SIG(0) keyfile to use for signing (.private/.key basename)")
+}
+
+// init registers update-related Cobra subcommands and binds their
+// command-line flags.
 func init() {
 	ChildCmd.AddCommand(childUpdateCmd)
 	childUpdateCmd.AddCommand(childUpdateCreateCmd)
 	childUpdateCreateCmd.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
 	childUpdateCreateCmd.Flags().StringVarP(&tdns.Globals.ParentZone, "parent", "P", "", "Parent zone to send update to")
+	AttachUpdateCreateFlags(childUpdateCreateCmd)
 
 	UpdateCmd.AddCommand(updateCreateCmd)
-	updateCreateCmd.Flags().StringVarP(&signer, "signer", "", "", "Name of signer (i.e. key used to sign update)")
-	updateCreateCmd.Flags().StringVarP(&server, "server", "S", "", "Server to send update to (in addr:port format)")
-	updateCreateCmd.Flags().StringVarP(&keyfile, "key", "K", "", "SIG(0) keyfile to use for signing the update")
+	AttachUpdateCreateFlags(updateCreateCmd)
 }
 
 // CreateUpdate starts an interactive CLI for composing, signing, and sending DNS UPDATEs.
@@ -118,10 +134,42 @@ func CreateUpdate(updateType string) {
 		os.Exit(1)
 	}
 
-	var adds, removes []dns.RR
+	// Single ordered list of update actions. RFC 2136 processes the
+	// Update section in order on the receiver, so we must preserve the
+	// exact entry sequence — separate add/del/del-rrset slices would
+	// reshuffle them.
+	type updateAction struct {
+		op string // "add" | "del" | "del-rrset"
+		rr dns.RR
+	}
+	var actions []updateAction
 
 	var ttl int = 60
 	var op, rrstr, port string
+
+	// buildUpdate assembles a *dns.Msg from the ordered actions list
+	// using the library helpers (Insert/Remove/RemoveRRset) one record
+	// at a time, so each one gets the correct class/rdata treatment
+	// without losing entry order.
+	buildUpdate := func() (*dns.Msg, error) {
+		if zone == "" || zone == "." {
+			return nil, fmt.Errorf("zone not set")
+		}
+		m := new(dns.Msg)
+		m.SetUpdate(zone)
+		for _, a := range actions {
+			switch a.op {
+			case "add":
+				m.Insert([]dns.RR{a.rr})
+			case "del":
+				m.Remove([]dns.RR{a.rr})
+			case "del-rrset":
+				m.RemoveRRset([]dns.RR{a.rr})
+			}
+		}
+		m.SetEdns0(1232, true)
+		return m, nil
+	}
 
 	zone = dns.Fqdn(tdns.Globals.Zonename)
 	if signer == "" {
@@ -135,20 +183,22 @@ func CreateUpdate(updateType string) {
 
 	if keyfile != "" {
 		pkc, err := tdns.ReadPrivateKey(keyfile)
-		if err != nil {
+		switch {
+		case err != nil:
 			fmt.Printf("Error reading SIG(0) key file '%s': %v\n", keyfile, err)
-			signing = true
-		}
-		if pkc.KeyType != dns.TypeKEY {
-			fmt.Printf("Keyfile did not contain a SIG(0) key\n")
-			signing = true
-		}
-		if signing {
-			fmt.Printf("Using keyfile %s\n", keyfile)
+		case pkc == nil:
+			fmt.Printf("Keyfile '%s' yielded no key\n", keyfile)
+		case pkc.KeyType != dns.TypeKEY:
+			fmt.Printf("Keyfile '%s' did not contain a SIG(0) key\n", keyfile)
+		default:
+			fmt.Printf("Using keyfile %s (signer=%s, keyid=%d)\n",
+				keyfile, pkc.KeyRR.Header().Name, pkc.KeyRR.KeyTag())
 			sak = &tdns.Sig0ActiveKeys{
 				Keys: []*tdns.PrivateKeyCache{pkc},
 			}
-		} else {
+			signing = true
+		}
+		if !signing {
 			fmt.Printf("Warning: no SIG(0) signing of update messages possible.\n")
 		}
 	} else {
@@ -163,7 +213,7 @@ func CreateUpdate(updateType string) {
 		fmt.Printf("Update will be sent to zone %s\n", zone)
 	}
 
-	var ops = []string{"zone", "add", "del", "show", "send", "sign", "set-ttl", "server", "quit"}
+	var ops = []string{"zone", "add", "del", "replace", "show", "send", "sign", "set-ttl", "server", "quit"}
 	fmt.Printf("Defined operations are: %v\n", ops)
 
 	var msgSigned bool = false
@@ -177,11 +227,11 @@ func CreateUpdate(updateType string) {
 			fmt.Println("Target zone not set, please set it first")
 			return nil, fmt.Errorf("target zone not set")
 		}
-		if len(adds) == 0 && len(removes) == 0 {
+		if len(actions) == 0 {
 			fmt.Println("No records to send, please add or delete some records first")
 			return nil, fmt.Errorf("no records to send")
 		}
-		updateMsg, err := tdns.CreateUpdate(zone, adds, removes)
+		updateMsg, err := buildUpdate()
 		if err != nil {
 			fmt.Printf("Error creating update: %v\n", err)
 			return nil, fmt.Errorf("error creating update: %v", err)
@@ -273,30 +323,93 @@ cmdloop:
 				rr.Header().Ttl = uint32(ttl)
 			}
 
-			if op == "add" {
-				duplicate := false
-				for _, arr := range adds {
-					if dns.IsDuplicate(rr, arr) {
-						fmt.Printf("Record already added: %s\n", rrstr)
-						duplicate = true
-						break
-					}
+			wantOp := op // "add" or "del"
+			duplicate := false
+			for _, a := range actions {
+				if a.op == wantOp && dns.IsDuplicate(rr, a.rr) {
+					fmt.Printf("Record already %sed: %s\n", wantOp, rrstr)
+					duplicate = true
+					break
 				}
-				if !duplicate {
-					adds = append(adds, rr)
+			}
+			if !duplicate {
+				actions = append(actions, updateAction{op: wantOp, rr: rr})
+			}
+
+		case "replace":
+			if zone == "." {
+				fmt.Println("Target zone not set, please set it first")
+				continue
+			}
+			input := tdns.TtyQuestion("Owner name of RRset to replace (e.g. 'foo.bar. NS')", "", true)
+			if strings.ToUpper(input) == "QUIT" {
+				break cmdloop
+			}
+
+			// Accept either a bare owner name or an RR-style prefix
+			// like "foo.bar. IN NS" — first token is owner, scan the
+			// rest for a type, skip class/TTL tokens.
+			fields := strings.Fields(input)
+			if len(fields) == 0 {
+				fmt.Println("No owner name provided")
+				continue
+			}
+			owner := dns.Fqdn(fields[0])
+			var rrtype uint16
+			for _, tok := range fields[1:] {
+				if t, ok := dns.StringToType[strings.ToUpper(tok)]; ok {
+					rrtype = t
+					break
 				}
-			} else {
-				duplicate := false
-				for _, rrr := range removes {
-					if dns.IsDuplicate(rr, rrr) {
-						fmt.Printf("Record already removed: %s\n", rrstr)
-						duplicate = true
-						break
-					}
+			}
+			if rrtype == 0 {
+				typestr := tdns.TtyQuestion("RR type", "A", true)
+				t, ok := dns.StringToType[strings.ToUpper(typestr)]
+				if !ok {
+					fmt.Printf("Unknown RR type: %s\n", typestr)
+					continue
 				}
-				if !duplicate {
-					removes = append(removes, rr)
+				rrtype = t
+			}
+
+			// Queue the §2.5.2 delete-RRset first, then the replacement
+			// adds, in entry order. m.RemoveRRset only reads Name+Rrtype
+			// from the placeholder.
+			actions = append(actions, updateAction{
+				op: "del-rrset",
+				rr: &dns.ANY{Hdr: dns.RR_Header{Name: owner, Rrtype: rrtype}},
+			})
+			fmt.Printf("Queued DEL-RRSET for %s %s\n",
+				owner, dns.TypeToString[rrtype])
+
+			fmt.Println("Enter replacement records (blank line to finish):")
+			for {
+				rrstr = tdns.TtyQuestion("Record", "", false)
+				if rrstr == "" {
+					fmt.Println("[empty input, end of replacement additions]")
+					break
 				}
+				if strings.ToUpper(rrstr) == "QUIT" {
+					break cmdloop
+				}
+				rr, err := dns.NewRR(rrstr)
+				if err != nil {
+					fmt.Printf("Error parsing RR: %v\n", err)
+					continue
+				}
+				if rr.Header().Name != owner {
+					fmt.Printf("Warning: record owner %q differs from RRset owner %q\n",
+						rr.Header().Name, owner)
+				}
+				if rr.Header().Rrtype != rrtype {
+					fmt.Printf("Warning: record type %s differs from RRset type %s\n",
+						dns.TypeToString[rr.Header().Rrtype],
+						dns.TypeToString[rrtype])
+				}
+				if ttl > 0 {
+					rr.Header().Ttl = uint32(ttl)
+				}
+				actions = append(actions, updateAction{op: "add", rr: rr})
 			}
 
 		case "show":
@@ -306,21 +419,26 @@ cmdloop:
 			}
 			if msg == nil {
 				var out = []string{"Operation|Record"}
-				for _, rr := range adds {
-					out = append(out, fmt.Sprintf("ADD|%s", rr.String()))
-				}
-				for _, rr := range removes {
-					out = append(out, fmt.Sprintf("DEL|%s", rr.String()))
+				for _, a := range actions {
+					switch a.op {
+					case "add":
+						out = append(out, fmt.Sprintf("ADD|%s", a.rr.String()))
+					case "del":
+						out = append(out, fmt.Sprintf("DEL|%s", a.rr.String()))
+					case "del-rrset":
+						h := a.rr.Header()
+						out = append(out, fmt.Sprintf("DEL-RRSET|%s %s",
+							h.Name, dns.TypeToString[h.Rrtype]))
+					}
 				}
 				fmt.Println(columnize.SimpleFormat(out))
 
-				tdns.Globals.Debug = true
-				_, err := tdns.CreateUpdate(zone, adds, removes)
+				preview, err := buildUpdate()
 				if err != nil {
 					fmt.Printf("Error creating update: %v\n", err)
 					continue
 				}
-				tdns.Globals.Debug = false
+				fmt.Printf("Update message:\n%s\n", preview.String())
 			} else {
 				fmt.Printf("Update message:\n%s\n", msg.String())
 			}
@@ -372,8 +490,7 @@ cmdloop:
 			PrintUpdateResult(ur)
 			fmt.Printf("Update sent, rcode: %d (%s)\n", rcode, dns.RcodeToString[rcode])
 
-			adds = []dns.RR{}
-			removes = []dns.RR{}
+			actions = nil
 			msg = nil
 			msgSigned = false
 		}

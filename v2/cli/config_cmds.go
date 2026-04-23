@@ -108,6 +108,11 @@ func runConfigCmd(role, command string, showVerboseStatus bool) {
 				}
 				fmt.Printf("  %s\n", optName)
 			}
+			if resp.DBFile != "" {
+				fmt.Printf("DB: %s\n", resp.DBFile)
+			} else {
+				fmt.Printf("DB: not configured\n")
+			}
 		}
 		if len(resp.Identities) > 0 {
 			fmt.Printf("Identities: %v\n", resp.Identities)

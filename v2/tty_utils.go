@@ -25,8 +25,8 @@ func TtyQuestion(query, oldval string, force bool) string {
 		fmt.Printf("%s [%s]: ", query, oldval)
 		text, _ := reader.ReadString('\n')
 		if text == "\n" {
-			fmt.Printf("[empty response, keeping previous value]\n")
 			if oldval != "" {
+				fmt.Printf("[empty response, keeping previous value]\n")
 				return oldval // all ok
 			} else if force {
 				fmt.Printf("[error: previous value was empty string, not allowed]\n")
