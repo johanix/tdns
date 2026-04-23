@@ -14,7 +14,6 @@ import (
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.Request) {
@@ -268,7 +267,7 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.DnsEngine = conf.DnsEngine
 			resp.ApiServer = conf.ApiServer
 			resp.Identities = conf.Service.Identities
-			resp.DBFile = viper.GetString("db.file")
+			resp.DBFile = conf.Db.File
 			if conf.MultiProvider != nil {
 				resp.CombinerOptions = conf.MultiProvider.CombinerOptions
 			}
