@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -77,6 +78,10 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 
 	switch phase {
 	case rolloverPhaseIdle:
+		// §8.8 idle branch: steady-state pipeline maintenance. Arm the
+		// push phase if the target DS RRset differs from what we have
+		// submitted. Arming is the single advance on this tick — the
+		// actual push happens on the next tick under pending-parent-push.
 		ds, low, high, idxOK, err := ComputeTargetDSSetForZone(kdb, zone, uint8(dns.SHA256))
 		if err != nil {
 			return err
@@ -88,6 +93,9 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 			lgSigner.Info("rollover: arming DS push", "zone", zone)
 		}
 	case rolloverPhasePendingParentPush:
+		// §8.8: send DS UPDATE. Arming the observe phase counts as the
+		// advance; the actual parent DS query happens on the next tick
+		// under pending-parent-observe.
 		if imr == nil {
 			lgSigner.Warn("rollover: ImrEngine nil, cannot DS push", "zone", zone)
 			return nil
@@ -103,9 +111,20 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 			lgSigner.Warn("rollover: DS push non-NOERROR", "zone", zone, "rcode", dns.RcodeToString[res.Rcode])
 			return nil
 		}
+		// Schedule the first parent-agent DS query: wait confirm-initial-wait
+		// from now, then exponential backoff starting at confirm-initial-wait.
+		initial := pol.Rollover.ConfirmInitialWait
+		if initial <= 0 {
+			initial = defaultConfirmInitialWait
+		}
+		nextPoll := now.Add(initial)
+		if err := setObserveSchedule(kdb, zone, now, nextPoll, int(initial.Seconds())); err != nil {
+			lgSigner.Warn("rollover: set observe schedule", "zone", zone, "err", err)
+		}
 		if err := SetRolloverPhase(kdb, zone, rolloverPhasePendingParentObserve); err != nil {
 			return err
 		}
+		lgSigner.Info("rollover: DS UPDATE accepted, arming observe", "zone", zone, "first_poll_at", nextPoll.Format(time.RFC3339))
 	case rolloverPhasePendingParentObserve:
 		agent := pol.Rollover.ParentAgent
 		if agent == "" {
@@ -117,64 +136,213 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 			return err
 		}
 		if len(expected) == 0 {
+			// Steady state with no expected DS set; nothing to observe.
+			_ = clearObserveSchedule(kdb, zone)
 			if err := SetRolloverPhase(kdb, zone, rolloverPhaseIdle); err != nil {
 				return err
 			}
 			return nil
 		}
+
+		// Enforce the §7.2 poll schedule: honor next-poll-at; hard-fail
+		// past confirm-timeout.
+		timeout := pol.Rollover.ConfirmTimeout
+		if timeout <= 0 {
+			timeout = defaultConfirmTimeout
+		}
+		pollMax := pol.Rollover.ConfirmPollMax
+		if pollMax <= 0 {
+			pollMax = defaultConfirmPollMax
+		}
+		if t, ok := parseOptionalTime(row.ObserveStartedAt); ok {
+			if now.Sub(t) >= timeout {
+				if err := observeHardFail(kdb, zone, low, high, timeout); err != nil {
+					return err
+				}
+				lgSigner.Error("rollover: DS observation timed out; keys marked with last_rollover_error", "zone", zone, "started_at", t.Format(time.RFC3339), "timeout", timeout)
+				return nil
+			}
+		}
+		if t, ok := parseOptionalTime(row.ObserveNextPollAt); ok {
+			if now.Before(t) {
+				// Backoff not yet elapsed; skip this tick.
+				return nil
+			}
+		}
+
 		obs, err := QueryParentAgentDS(ctx, zone, agent)
 		if err != nil {
 			lgSigner.Debug("rollover: parent-agent DS query failed", "zone", zone, "err", err)
+			scheduleNextObservePoll(kdb, zone, row, now, pollMax)
 			return nil
 		}
 		if !ObservedDSSetMatchesExpected(obs, expected) {
+			scheduleNextObservePoll(kdb, zone, row, now, pollMax)
 			return nil
 		}
 		if !idxOK {
 			lgSigner.Warn("rollover: DS observed but rollover_index incomplete for all KSK rows; cannot advance created→ds-published", "zone", zone)
+			_ = clearObserveSchedule(kdb, zone)
 			if err := SetRolloverPhase(kdb, zone, rolloverPhaseIdle); err != nil {
 				return err
 			}
 			return nil
 		}
-		if err := saveLastDSConfirmedRange(kdb, zone, low, high); err != nil {
-			return fmt.Errorf("rollover: save confirmed range: %w", err)
-		}
-		created, err := GetDnssecKeysByState(kdb, zone, DnskeyStateCreated)
+
+		// §9.4: wrap the confirmed-range write, the created→ds-published
+		// state transitions, the ds_observed_at timestamps, the
+		// observe-schedule clear, and the phase reset to idle in a
+		// single transaction.
+		advanced, err := confirmDSAndAdvanceCreatedKeysTx(kdb, zone, low, high, now)
 		if err != nil {
-			return err
+			return fmt.Errorf("rollover: confirm DS and advance keys: %w", err)
 		}
-		for i := range created {
-			k := &created[i]
-			if k.Flags&dns.SEP == 0 {
-				continue
-			}
-			ri, ok, err := RolloverIndexForKey(kdb, zone, k.KeyTag)
-			if err != nil {
-				return err
-			}
-			if !ok || ri < low || ri > high {
-				continue
-			}
-			if err := UpdateDnssecKeyState(kdb, zone, k.KeyTag, DnskeyStateDsPublished); err != nil {
-				lgSigner.Warn("rollover: created→ds-published failed", "zone", zone, "keyid", k.KeyTag, "err", err)
-				continue
-			}
-			if err := setRolloverKeyDsObservedAt(kdb, zone, k.KeyTag, now); err != nil {
-				lgSigner.Warn("rollover: ds_observed_at", "zone", zone, "keyid", k.KeyTag, "err", err)
-			}
+		if advanced > 0 {
 			triggerResign(conf, zone)
 		}
-		if err := SetRolloverPhase(kdb, zone, rolloverPhaseIdle); err != nil {
-			return err
-		}
-		lgSigner.Info("rollover: parent DS observed, advanced created keys", "zone", zone)
+		lgSigner.Info("rollover: parent DS observed, advanced created keys", "zone", zone, "advanced", advanced)
 	default:
 		if err := SetRolloverPhase(kdb, zone, rolloverPhaseIdle); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// confirmDSAndAdvanceCreatedKeysTx performs all post-observation state writes
+// in a single transaction: persist last_ds_confirmed_*, advance every created
+// SEP key whose rollover_index falls inside [low, high] to ds-published, stamp
+// ds_observed_at on each, clear the observe schedule, and reset rollover_phase
+// to idle. Returns the number of keys advanced. §9.4 two-store consistency.
+func confirmDSAndAdvanceCreatedKeysTx(kdb *KeyDB, zone string, low, high int, now time.Time) (int, error) {
+	tx, err := kdb.Begin("confirmDSAndAdvanceCreatedKeysTx")
+	if err != nil {
+		return 0, fmt.Errorf("begin: %w", err)
+	}
+	commit := false
+	defer func() {
+		if !commit {
+			tx.Rollback()
+		}
+	}()
+
+	if err := saveLastDSConfirmedRangeTx(tx, zone, low, high); err != nil {
+		return 0, fmt.Errorf("save confirmed range: %w", err)
+	}
+
+	created, err := GetDnssecKeysByState(kdb, zone, DnskeyStateCreated)
+	if err != nil {
+		return 0, fmt.Errorf("list created keys: %w", err)
+	}
+
+	advanced := 0
+	for i := range created {
+		k := &created[i]
+		if k.Flags&dns.SEP == 0 {
+			continue
+		}
+		var ri sql.NullInt64
+		err := tx.QueryRow(`SELECT rollover_index FROM RolloverKeyState WHERE zone = ? AND keyid = ?`, zone, int(k.KeyTag)).Scan(&ri)
+		if err == sql.ErrNoRows || !ri.Valid {
+			continue
+		}
+		if err != nil {
+			return 0, fmt.Errorf("rollover_index lookup: %w", err)
+		}
+		idx := int(ri.Int64)
+		if idx < low || idx > high {
+			continue
+		}
+		if err := UpdateDnssecKeyStateTx(tx, kdb, zone, k.KeyTag, DnskeyStateDsPublished); err != nil {
+			return 0, fmt.Errorf("created→ds-published for keyid %d: %w", k.KeyTag, err)
+		}
+		if err := setRolloverKeyDsObservedAtTx(tx, zone, k.KeyTag, now); err != nil {
+			return 0, fmt.Errorf("ds_observed_at for keyid %d: %w", k.KeyTag, err)
+		}
+		advanced++
+	}
+
+	// Clear the observe-schedule fields and reset the phase, all inside
+	// the same TX as the state advances.
+	if _, err := tx.Exec(`UPDATE RolloverZoneState
+SET observe_started_at = NULL,
+    observe_next_poll_at = NULL,
+    observe_backoff_seconds = NULL
+WHERE zone = ?`, zone); err != nil {
+		return 0, fmt.Errorf("clear observe schedule: %w", err)
+	}
+	if err := setRolloverPhaseTx(tx, zone, rolloverPhaseIdle); err != nil {
+		return 0, fmt.Errorf("reset phase: %w", err)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+	commit = true
+	return advanced, nil
+}
+
+// observeHardFail records last_rollover_error on every SEP key currently in
+// state=created that was waiting on confirmation of the [low, high] range,
+// then resets the zone to idle. No TX needed: this is a diagnostic write
+// path and idempotent retry on the next tick is safe.
+func observeHardFail(kdb *KeyDB, zone string, low, high int, timeout time.Duration) error {
+	msg := fmt.Sprintf("DS observation timeout (%s): parent never published expected DS RRset", timeout)
+	if low <= high {
+		created, err := GetDnssecKeysByState(kdb, zone, DnskeyStateCreated)
+		if err == nil {
+			for i := range created {
+				k := &created[i]
+				if k.Flags&dns.SEP == 0 {
+					continue
+				}
+				ri, ok, _ := RolloverIndexForKey(kdb, zone, k.KeyTag)
+				if !ok || ri < low || ri > high {
+					continue
+				}
+				_ = setLastRolloverError(kdb, zone, k.KeyTag, msg)
+			}
+		}
+	}
+	_ = clearObserveSchedule(kdb, zone)
+	return SetRolloverPhase(kdb, zone, rolloverPhaseIdle)
+}
+
+// scheduleNextObservePoll advances the backoff interval for the next parent
+// DS query. Doubles the current backoff up to pollMax. Updates
+// observe_next_poll_at and observe_backoff_seconds.
+func scheduleNextObservePoll(kdb *KeyDB, zone string, row *RolloverZoneRow, now time.Time, pollMax time.Duration) {
+	cur := time.Duration(0)
+	if row != nil && row.ObserveBackoffSecs.Valid {
+		cur = time.Duration(row.ObserveBackoffSecs.Int64) * time.Second
+	}
+	next := cur * 2
+	if next <= 0 {
+		next = 2 * time.Second
+	}
+	if next > pollMax {
+		next = pollMax
+	}
+	started := time.Time{}
+	if row != nil {
+		if t, ok := parseOptionalTime(row.ObserveStartedAt); ok {
+			started = t
+		}
+	}
+	if err := setObserveSchedule(kdb, zone, started, now.Add(next), int(next.Seconds())); err != nil {
+		lgSigner.Warn("rollover: set next observe poll", "zone", zone, "err", err)
+	}
+}
+
+func parseOptionalTime(s sql.NullString) (time.Time, bool) {
+	if !s.Valid {
+		return time.Time{}, false
+	}
+	t, err := time.Parse(time.RFC3339, s.String)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
 }
 
 // TransitionRolloverKskDsPublishedToStandby moves SEP keys from ds-published to standby after propagation delay.

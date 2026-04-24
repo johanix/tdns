@@ -16,6 +16,9 @@ type RolloverZoneRow struct {
 	LastConfirmedHigh  sql.NullInt64
 	RolloverPhase      string
 	RolloverInProgress bool
+	ObserveStartedAt   sql.NullString
+	ObserveNextPollAt  sql.NullString
+	ObserveBackoffSecs sql.NullInt64
 }
 
 func EnsureRolloverZoneRow(kdb *KeyDB, zone string) error {
@@ -37,7 +40,8 @@ func LoadRolloverZoneRow(kdb *KeyDB, zone string) (*RolloverZoneRow, error) {
 SELECT zone,
        last_ds_submitted_index_low, last_ds_submitted_index_high,
        last_ds_confirmed_index_low, last_ds_confirmed_index_high,
-       rollover_phase, rollover_in_progress
+       rollover_phase, rollover_in_progress,
+       observe_started_at, observe_next_poll_at, observe_backoff_seconds
 FROM RolloverZoneState WHERE zone = ?`
 	var r RolloverZoneRow
 	var inProg int
@@ -46,6 +50,7 @@ FROM RolloverZoneState WHERE zone = ?`
 		&r.LastSubmittedLow, &r.LastSubmittedHigh,
 		&r.LastConfirmedLow, &r.LastConfirmedHigh,
 		&r.RolloverPhase, &inProg,
+		&r.ObserveStartedAt, &r.ObserveNextPollAt, &r.ObserveBackoffSecs,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -127,6 +132,67 @@ func nextRolloverIndexTx(tx *Tx, zone string) (int, error) {
 func setRolloverKeyDsObservedAt(kdb *KeyDB, zone string, keyid uint16, at time.Time) error {
 	s := at.UTC().Format(time.RFC3339)
 	_, err := kdb.DB.Exec(`UPDATE RolloverKeyState SET ds_observed_at = ? WHERE zone = ? AND keyid = ?`, s, zone, int(keyid))
+	return err
+}
+
+// setRolloverPhaseTx updates the zone's rollover_phase on an existing TX.
+// The caller is responsible for row existence (EnsureRolloverZoneRow).
+func setRolloverPhaseTx(tx *Tx, zone, phase string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := tx.Exec(`UPDATE RolloverZoneState SET rollover_phase = ?, rollover_phase_at = ? WHERE zone = ?`, phase, now, zone)
+	return err
+}
+
+// saveLastDSConfirmedRangeTx persists the confirmed DS index range on an existing TX.
+func saveLastDSConfirmedRangeTx(tx *Tx, zone string, low, high int) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := tx.Exec(`UPDATE RolloverZoneState
+SET last_ds_confirmed_index_low = ?,
+    last_ds_confirmed_index_high = ?,
+    last_ds_confirmed_at = ?
+WHERE zone = ?`, low, high, now, zone)
+	return err
+}
+
+// setRolloverKeyDsObservedAtTx stamps ds_observed_at for one key on an existing TX.
+func setRolloverKeyDsObservedAtTx(tx *Tx, zone string, keyid uint16, at time.Time) error {
+	s := at.UTC().Format(time.RFC3339)
+	_, err := tx.Exec(`UPDATE RolloverKeyState SET ds_observed_at = ? WHERE zone = ? AND keyid = ?`, s, zone, int(keyid))
+	return err
+}
+
+// setObserveSchedule persists the observe-phase backoff state (start time, next
+// poll time, current backoff interval in seconds). Zero startedAt clears the
+// start marker (used when leaving the observe phase).
+func setObserveSchedule(kdb *KeyDB, zone string, startedAt time.Time, nextPollAt time.Time, backoffSecs int) error {
+	var started, next sql.NullString
+	if !startedAt.IsZero() {
+		started = sql.NullString{String: startedAt.UTC().Format(time.RFC3339), Valid: true}
+	}
+	if !nextPollAt.IsZero() {
+		next = sql.NullString{String: nextPollAt.UTC().Format(time.RFC3339), Valid: true}
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState
+SET observe_started_at = ?,
+    observe_next_poll_at = ?,
+    observe_backoff_seconds = ?
+WHERE zone = ?`, started, next, sql.NullInt64{Int64: int64(backoffSecs), Valid: backoffSecs > 0}, zone)
+	return err
+}
+
+// clearObserveSchedule clears all three observe-phase fields.
+func clearObserveSchedule(kdb *KeyDB, zone string) error {
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState
+SET observe_started_at = NULL,
+    observe_next_poll_at = NULL,
+    observe_backoff_seconds = NULL
+WHERE zone = ?`, zone)
+	return err
+}
+
+// setLastRolloverError stamps last_rollover_error on one key.
+func setLastRolloverError(kdb *KeyDB, zone string, keyid uint16, msg string) error {
+	_, err := kdb.DB.Exec(`UPDATE RolloverKeyState SET last_rollover_error = ? WHERE zone = ? AND keyid = ?`, msg, zone, int(keyid))
 	return err
 }
 

@@ -994,9 +994,15 @@ func UpdateDnssecKeyState(kdb *KeyDB, zonename string, keyid uint16, newstate st
 		}
 	}()
 
-	// Get the current state so we can invalidate the right cache entry
+	return UpdateDnssecKeyStateTx(tx, kdb, zonename, keyid, newstate)
+}
+
+// UpdateDnssecKeyStateTx updates a DNSKEY's state on an existing transaction.
+// Used by callers that need to wrap the state change together with other
+// rollover bookkeeping in a single TX (§9.4 two-store consistency).
+func UpdateDnssecKeyStateTx(tx *Tx, kdb *KeyDB, zonename string, keyid uint16, newstate string) error {
 	var oldstate string
-	err = tx.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&oldstate)
+	err := tx.QueryRow(`SELECT state FROM DnssecKeyStore WHERE zonename=? AND keyid=?`, zonename, keyid).Scan(&oldstate)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return fmt.Errorf("key with keyid %d not found in zone %s", keyid, zonename)
@@ -1025,8 +1031,7 @@ func UpdateDnssecKeyState(kdb *KeyDB, zonename string, keyid uint16, newstate st
 
 	rowsAffected, _ := res.RowsAffected()
 	if rowsAffected == 0 {
-		err = fmt.Errorf("no rows updated for key %d in zone %s", keyid, zonename)
-		return err
+		return fmt.Errorf("no rows updated for key %d in zone %s", keyid, zonename)
 	}
 
 	// Invalidate caches for both old and new states

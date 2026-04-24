@@ -114,7 +114,10 @@ UNIQUE (zonename, keyid)
 		rollover_in_progress           INTEGER NOT NULL DEFAULT 0,
 		next_rollover_index            INTEGER NOT NULL DEFAULT 0,
 		manual_rollover_requested_at   TEXT,
-		manual_rollover_earliest         TEXT
+		manual_rollover_earliest       TEXT,
+		observe_started_at             TEXT,
+		observe_next_poll_at           TEXT,
+		observe_backoff_seconds        INTEGER
 	)`,
 }
 
