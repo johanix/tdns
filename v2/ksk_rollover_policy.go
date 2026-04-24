@@ -3,6 +3,7 @@ package tdns
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"strings"
 	"time"
@@ -27,6 +28,7 @@ const (
 type RolloverPolicy struct {
 	Method             RolloverMethod
 	NumDS              int
+	ParentAgent        string
 	ConfirmInitialWait time.Duration
 	ConfirmPollMax     time.Duration
 	ConfirmTimeout     time.Duration
@@ -71,6 +73,7 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 	switch m {
 	case RolloverMethodNone:
 		out.Rollover.NumDS = 0
+		out.Rollover.ParentAgent = ""
 		out.Rollover.ConfirmInitialWait = 0
 		out.Rollover.ConfirmPollMax = 0
 		out.Rollover.ConfirmTimeout = 0
@@ -87,6 +90,11 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 		if err := fillRolloverDurations(policyName, conf, out); err != nil {
 			return err
 		}
+		agent, err := parseParentAgent(policyName, conf.Rollover.ParentAgent)
+		if err != nil {
+			return err
+		}
+		out.Rollover.ParentAgent = agent
 		dsync := true
 		if conf.Rollover.DsyncRequired != nil {
 			dsync = *conf.Rollover.DsyncRequired
@@ -104,6 +112,11 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 		if err := fillRolloverDurations(policyName, conf, out); err != nil {
 			return err
 		}
+		agent, err := parseParentAgent(policyName, conf.Rollover.ParentAgent)
+		if err != nil {
+			return err
+		}
+		out.Rollover.ParentAgent = agent
 		dsync := true
 		if conf.Rollover.DsyncRequired != nil {
 			dsync = *conf.Rollover.DsyncRequired
@@ -184,6 +197,32 @@ func fillRolloverDurations(policyName string, conf *DnssecPolicyConf, out *Dnsse
 		return fmt.Errorf("dnssec policy %q: %w", policyName, err)
 	}
 	return nil
+}
+
+// parseParentAgent normalizes rollover.parent-agent to host:port (default port 53).
+// NormalizeParentAgentAddr parses rollover.parent-agent or CLI --parent-agent into host:port (default port 53).
+func NormalizeParentAgentAddr(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("empty parent-agent address")
+	}
+	host, port, err := net.SplitHostPort(raw)
+	if err == nil {
+		return net.JoinHostPort(host, port), nil
+	}
+	return net.JoinHostPort(raw, "53"), nil
+}
+
+func parseParentAgent(policyName, raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", fmt.Errorf("dnssec policy %q: rollover.parent-agent is required when rollover.method is multi-ds or double-signature", policyName)
+	}
+	a, err := NormalizeParentAgentAddr(raw)
+	if err != nil {
+		return "", fmt.Errorf("dnssec policy %q: rollover.parent-agent: %w", policyName, err)
+	}
+	return a, nil
 }
 
 func warnDnssecPolicyCoupling(policyName string, out *DnssecPolicy, conf *DnssecPolicyConf) {

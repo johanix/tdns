@@ -230,6 +230,7 @@ type UpdatePolicyDetail struct {
 type DnssecPolicyRolloverConf struct {
 	Method             string `yaml:"method" mapstructure:"method"`
 	NumDS              int    `yaml:"num-ds" mapstructure:"num-ds"`
+	ParentAgent        string `yaml:"parent-agent" mapstructure:"parent-agent"`
 	ConfirmInitialWait string `yaml:"confirm-initial-wait" mapstructure:"confirm-initial-wait"`
 	ConfirmPollMax     string `yaml:"confirm-poll-max" mapstructure:"confirm-poll-max"`
 	ConfirmTimeout     string `yaml:"confirm-timeout" mapstructure:"confirm-timeout"`
