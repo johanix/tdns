@@ -49,7 +49,7 @@ func PrepArgs(args ...interface{}) {
 		}
 	}
 
-	DefinedDnskeyStates := []string{"created", "mpdist", "mpremove", "published", "standby", "active", "retired", "removed", "foreign"}
+	DefinedDnskeyStates := []string{"created", "mpdist", "mpremove", "published", "ds-published", "standby", "active", "retired", "removed", "foreign"}
 	DefinedDnskeyTypes := []string{"KSK", "ZSK", "CSK"}
 	// DefinedAlgorithms := []string{"RSASHA256", "RSASHA512", "ED25519", "ECDSAP256SHA256", "ECDSAP384SHA384"}
 
@@ -204,14 +204,14 @@ func PrepArgs(args ...interface{}) {
 				os.Exit(1)
 			}
 
-/* 20260415 johani
-		case "identity":
-			if myIdentity == "" {
-				fmt.Printf("Error: agent id not specified using --id flag\n")
-				os.Exit(1)
-			}
-			tdns.Globals.AgentId = tdns.AgentId(dns.Fqdn(myIdentity))
-*/
+			/* 20260415 johani
+			case "identity":
+				if myIdentity == "" {
+					fmt.Printf("Error: agent id not specified using --id flag\n")
+					os.Exit(1)
+				}
+				tdns.Globals.AgentId = tdns.AgentId(dns.Fqdn(myIdentity))
+			*/
 		case "service":
 			var serviceName string
 			if cmd != nil {

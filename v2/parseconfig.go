@@ -271,15 +271,20 @@ func (conf *Config) ParseConfig(reload bool) error {
 		conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
 	}
 	for name, dp := range conf.DnssecPolicies {
+		dpLocal := dp
 		tmp := DnssecPolicy{
 			Name:      name,
-			Algorithm: dns.StringToAlgorithm[strings.ToUpper(dp.Algorithm)],
-			KSK:       GenKeyLifetime(dp.KSK.Lifetime, dp.KSK.SigValidity),
-			ZSK:       GenKeyLifetime(dp.ZSK.Lifetime, dp.ZSK.SigValidity),
-			CSK:       GenKeyLifetime(dp.CSK.Lifetime, dp.CSK.SigValidity),
+			Algorithm: dns.StringToAlgorithm[strings.ToUpper(dpLocal.Algorithm)],
+			KSK:       GenKeyLifetime(dpLocal.KSK.Lifetime, dpLocal.KSK.SigValidity),
+			ZSK:       GenKeyLifetime(dpLocal.ZSK.Lifetime, dpLocal.ZSK.SigValidity),
+			CSK:       GenKeyLifetime(dpLocal.CSK.Lifetime, dpLocal.CSK.SigValidity),
 		}
 		if tmp.Algorithm == 0 {
-			lgConfig.Error("DNSSEC policy has unknown algorithm, ignored", "policy", name, "algorithm", dp.Algorithm)
+			lgConfig.Error("DNSSEC policy has unknown algorithm, ignored", "policy", name, "algorithm", dpLocal.Algorithm)
+			continue
+		}
+		if err := FinishDnssecPolicy(name, &dpLocal, &tmp); err != nil {
+			lgConfig.Error("DNSSEC policy invalid, ignored", "policy", name, "err", err)
 			continue
 		}
 		conf.Internal.DnssecPolicies[name] = tmp
@@ -976,6 +981,7 @@ func BuiltinDefaultDnssecPolicy() DnssecPolicy {
 	return DnssecPolicy{
 		Name:      "default",
 		Algorithm: dns.ED25519,
+		Mode:      DnssecPolicyModeKSKZSK,
 		KSK:       GenKeyLifetime("forever", "168h"),
 		ZSK:       GenKeyLifetime("forever", "2h"),
 		CSK:       GenKeyLifetime("none", "168h"),

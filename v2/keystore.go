@@ -434,8 +434,8 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 
 	case "setstate":
 		allowed := map[string]bool{
-			DnskeyStateCreated: true, DnskeyStatePublished: true, DnskeyStateStandby: true,
-			DnskeyStateActive: true, DnskeyStateRetired: true, DnskeyStateRemoved: true,
+			DnskeyStateCreated: true, DnskeyStatePublished: true, DnskeyStateDsPublished: true,
+			DnskeyStateStandby: true, DnskeyStateActive: true, DnskeyStateRetired: true, DnskeyStateRemoved: true,
 		}
 		if !allowed[kp.State] {
 			resp.Error = true
