@@ -281,7 +281,7 @@ containing either the private or the public SIG(0) key and the name of the zone.
 	clear.Flags().Bool("force", false, "Skip confirmation prompt")
 	clear.MarkFlagRequired("zone")
 
-	c.AddCommand(add, importCmd, generate, list, delete, setstate, genDS, rollover, clear, newKeystoreDnssecPolicyCmd(role))
+	c.AddCommand(add, importCmd, generate, list, delete, setstate, genDS, rollover, clear, newKeystoreDnssecPolicyCmd(role), newKeystoreDnssecDsPushCmd(role))
 	return c
 }
 
