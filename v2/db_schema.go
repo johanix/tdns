@@ -64,7 +64,7 @@ UNIQUE (zonename, keyid)
 
 	// The DnssecKeyStore should contain both the private and public DNSSEC keys for
 	// each zone that we're managing signing for.
-	// State: created, published, standby, active, retired, removed.
+	// State: created, published, ds-published, standby, active, retired, removed.
 	"DnssecKeyStore": `CREATE TABLE IF NOT EXISTS 'DnssecKeyStore' (
 id		  INTEGER PRIMARY KEY,
 zonename	  TEXT,
@@ -87,6 +87,34 @@ UNIQUE (zonename, keyid)
 		zone       TEXT NOT NULL PRIMARY KEY,
 		serial     INTEGER NOT NULL,
 		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`,
+
+	"RolloverKeyState": `CREATE TABLE IF NOT EXISTS 'RolloverKeyState' (
+		zone                 TEXT NOT NULL,
+		keyid                INTEGER NOT NULL,
+		rollover_index       INTEGER NOT NULL,
+		rollover_method      TEXT,
+		rollover_state_at    TEXT,
+		ds_submitted_at      TEXT,
+		ds_observed_at         TEXT,
+		last_rollover_error    TEXT,
+		PRIMARY KEY (zone, keyid)
+	)`,
+
+	"RolloverZoneState": `CREATE TABLE IF NOT EXISTS 'RolloverZoneState' (
+		zone                           TEXT NOT NULL PRIMARY KEY,
+		last_ds_submitted_index_low    INTEGER,
+		last_ds_submitted_index_high    INTEGER,
+		last_ds_submitted_at           TEXT,
+		last_ds_confirmed_index_low    INTEGER,
+		last_ds_confirmed_index_high    INTEGER,
+		last_ds_confirmed_at           TEXT,
+		rollover_phase                 TEXT NOT NULL DEFAULT 'idle',
+		rollover_phase_at              TEXT,
+		rollover_in_progress           INTEGER NOT NULL DEFAULT 0,
+		next_rollover_index            INTEGER NOT NULL DEFAULT 0,
+		manual_rollover_requested_at   TEXT,
+		manual_rollover_earliest         TEXT
 	)`,
 }
 
