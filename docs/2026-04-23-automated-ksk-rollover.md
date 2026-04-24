@@ -714,8 +714,10 @@ dnssec-policies:
       num-ds:         3                 # size of DS RRset at parent
                                         # (multi-ds only): current +
                                         # N-1 future KSKs pre-published
+      parent-agent:   "192.0.2.1:53"    # addr:port; DS confirmation (§7);
+                                        # required for multi-ds / double-signature
       confirm-initial-wait: 2s          # wait after UPDATE NOERROR
-                                        # before first DS-at-parent query
+                                        # before first parent-agent DS query
       confirm-poll-max:     60s         # cap on exponential-backoff
                                         # interval between DS polls
       confirm-timeout:      1h          # overall timeout; hard-fail after
