@@ -1,7 +1,8 @@
 # Design Spec: Automated KSK Rollover in tdns-auth
 
-**Status**: Draft
-**Date**: 2026-04-23
+**Status**: Draft (Phases **1** and **2** implemented in `tdns/v2`; worker
+integration and parent DS confirmation remain future phases.)
+**Date**: 2026-04-23 (implementation status note: 2026-04-24)
 **Scope**: tdns-auth (single-signer). Non-MP zones only.
 **Related**: `2026-03-07-delegation-sync-refresh-plan.md` (delegation
 sync + KeyState EDNS(0), landed), `2026-03-14-signal-key-publication.md`
@@ -28,11 +29,15 @@ library. It can already:
 What is *not* yet implemented is the orchestration that ties these
 pieces together into a fully automated KSK rollover:
 
-- no schedule/policy for *when* a KSK should roll
+- no schedule/policy for *when* a KSK should roll (policy types and
+  validation exist; the rollover worker does not consume them yet)
 - no automated `active → retired` transition for KSKs (only ZSKs
   transition cleanly today, because ZSKs don't need parent
   coordination)
-- no automated DS push to parent on KSK change
+- no **worker-driven** automated DS push yet; the library can build the
+  target DS set, construct the whole-RRset UPDATE, and send it
+  (`PushWholeDSRRset`, Phase 2), and the CLI exposes `keystore dnssec
+  ds-push` for manual operation
 - no automated confirmation by the child that the parent has
   published the new DS records before retiring the old KSK
 - no parameter coupling — the timing constants in `KaspConf`
@@ -962,6 +967,12 @@ caught at the observation step, not the submission step.
 
 ### 6.2 Flow
 
+**Phase 2 note:** `PushWholeDSRRset` implements steps 3–7 (and parent
+resolution) for manual/CLI use; the worker-driven loop (steps 1, 8–9)
+awaits Phase 4. DSYNC is resolved via `Imr.LookupDSYNCTarget` (UPDATE
+scheme; tries `TypeDS` then `TypeANY`), which wraps the same discovery
+machinery as `DsyncDiscovery` in `dsync_lookup.go`.
+
 1. Worker determines a state transition would change the target DS
    RRset for zone Z.
 2. DSYNC lookup: reuse `DsyncDiscovery(ctx, Z)` from
@@ -978,7 +989,9 @@ caught at the observation step, not the submission step.
 6. `SendUpdate(msg, Z, parentTargets)` — existing helper. Parse
    rcode + EDE for diagnostics.
 7. On NOERROR: update `last_ds_submitted_index_range_*` and
-   `last_ds_submitted_at` on `RolloverZoneState`. Keys retain
+   `last_ds_submitted_at` on `RolloverZoneState` when the submitted DS
+   set's rollover indices are fully known (Phase 2 skips the write if any
+   KSK in the set lacks `RolloverKeyState.rollover_index`). Keys retain
    their current state — NOERROR means "parent accepted the
    UPDATE," NOT "parent has published." State advances require
    observation (§7).
@@ -1000,12 +1013,23 @@ caught at the observation step, not the submission step.
 ### 6.4 What changes in which call
 
 - `SyncZoneDelegationViaUpdate` stays as-is for NS/glue.
-- New function `PushDSRRset(zd, dsSet []dns.RR) error` in a new file
-  `ksk_rollover_ds_push.go` (or folded into `childsync_utils.go` if
-  the size stays small). Does steps 2–6. Returns structured result
-  for the worker.
-- New helper `ComputeTargetDSSet(zd, kdb) []dns.RR` that walks the
-  keystore and produces the DS RRset the parent should have per §6.1.
+- **`v2/ksk_rollover_ds_push.go`** (Phase 2):
+  - `BuildChildWholeDSUpdate(parent, child, newDS)` — whole-RRset UPDATE
+    (DEL ANY DS at the child owner, then INSERT `newDS`).
+  - `ComputeTargetDSSetForZone(kdb, childZone, digest uint8)` — walks
+    `DnssecKeyStore` for SEP keys in states `ds-published`, `standby`,
+    `published`, `active`, `retired`; joins `RolloverKeyState` for
+    `rollover_index` when present. Returns the DS RRset, optional
+    index low/high, and whether every row had a rollover index (used
+    to decide whether `last_ds_submitted_index_*` may be updated).
+  - `PushWholeDSRRset(ctx, zd, kdb, imr)` — resolves parent (`zd.Parent`
+    or `Imr.ParentZone`), DSYNC UPDATE target (`LookupDSYNCTarget`, DS
+    then ANY scheme), SIG(0)-signs via `SignMsg`, `SendUpdate`. On
+    NOERROR and known index range, persists `last_ds_submitted_*` on
+    `RolloverZoneState`. Digest is SHA-256 only in this phase.
+- **`v2/cli/ksk_rollover_cli.go`**: `keystore dnssec ds-push` with
+  `--dry-run` for operator testing before the worker calls
+  `PushWholeDSRRset`.
 
 ## 7. Parent Confirmation via DS Query at Parent Agent
 
@@ -1797,26 +1821,26 @@ confirm latency, UPDATE rcodes.
 
 Each phase is independently shippable and testable. Phases 2 and
 3 have no dependency on each other and can be implemented in
-parallel by two developers once Phase 1 lands.
+parallel; both are unblocked now that Phase 1 has landed.
 
 Per-phase summary (complexity is qualitative; LOC is order-of-magnitude):
 
-| Phase | Complexity | New LOC | Existing LOC touched | Days |
-| ----- | ---------- | ------- | -------------------- | ---- |
-| 1. Policy config + schema       | Low      | ~400    | ~55   | 1–2 |
-| 2. DS push                      | Medium   | ~350    | 0     | 2–3 |
-| 3. Parent-agent DS poll         | Low-med  | ~300    | 0     | 2   |
-| 4. Rollover worker + FSM + phase machine + clamp trigger | High | ~1150 | ~5 | 3–4 |
-| 5. Import                       | Medium   | ~250    | 0     | 1–2 |
-| 6. Rapid-rollover validation    | Low (test work) | ~300 (tests) | 0 | 1–2 |
-| 7. Docs & samples               | Low      | 0       | 0     | 1   |
-| CSK signing-path edits          | Medium (scattered) | 0 | ~50 | 1 |
-| **Total**                       |          | **~2800** | **~120** | **12–18** |
+| Phase | Complexity | New LOC | Existing LOC touched | Days | Status |
+| ----- | ---------- | ------- | -------------------- | ---- | ------ |
+| 1. Policy config + schema       | Low      | ~400    | ~55   | 1–2 | **Done** |
+| 2. DS push                      | Medium   | ~350    | 0     | 2–3 | **Done** |
+| 3. Parent-agent DS poll         | Low-med  | ~300    | 0     | 2   | Pending |
+| 4. Rollover worker + FSM + phase machine + clamp trigger | High | ~1150 | ~5 | 3–4 | Pending |
+| 5. Import                       | Medium   | ~250    | 0     | 1–2 | Pending |
+| 6. Rapid-rollover validation    | Low (test work) | ~300 (tests) | 0 | 1–2 | Pending |
+| 7. Docs & samples               | Low      | 0       | 0     | 1   | Pending |
+| CSK signing-path edits          | Medium (scattered) | 0 | ~50 | 1 | Pending |
+| **Total**                       |          | **~2800** | **~120** | **12–18** | |
 
 Complexity drivers per phase are called out in the phase
 descriptions below.
 
-### Phase 1 — Policy config + schema (1–2 days, **Low** complexity)
+### Phase 1 — Policy config + schema (1–2 days, **Low** complexity) — **landed**
 
 Complexity: Low. Pure data-shape work. Clamping function is
 arithmetic with unit tests; the only conceptual subtlety is
@@ -1838,30 +1862,39 @@ Work:
 - Schema migration (§9)
 - CLI: `policy validate` command (new file
   `v2/cli/ksk_rollover_cli.go`)
+- Wiring (not an exhaustive list): `v2/structs.go` (`DnssecPolicy`
+  extensions), `v2/parseconfig.go` (`FinishDnssecPolicy`),
+  `v2/keystore.go` (`ds-published` allowed in `setstate`),
+  `v2/cli/prepargs.go`, `v2/cli/keystore_cmds.go`
 
-### Phase 2 — DS push (2–3 days, **Medium** complexity) [parallel with Phase 3]
+### Phase 2 — DS push (2–3 days, **Medium** complexity) [parallel with Phase 3] — **landed**
 
-Complexity: Medium. Reuses `CreateChildUpdate` and `SendUpdate`
-from tdns-v2 for the wire work, so no new DNS-UPDATE machinery.
-Subtleties: whole-RRset vs. diff semantics (straightforward once
-decided, §6.1); DS digest computation from stored DNSKEYs;
-populating `last_ds_submitted_*` atomically on NOERROR while
-leaving key state untouched (the §6.1 two-range invariant);
-per-zone rollover_index assignment. Integration test with a live
-parent is the main effort.
+Complexity: Medium. Reuses `SendUpdate`, DSYNC resolution
+(`LookupDSYNCTarget`), and SIG(0) signing (`SignMsg`) from tdns-v2;
+UPDATE body construction is new (`BuildChildWholeDSUpdate`). Whole-RRset
+semantics (§6.1), DS digest from stored DNSKEYs, and updating
+`last_ds_submitted_*` on NOERROR only when every contributing KSK row has
+a non-null `rollover_index` (LEFT JOIN to `RolloverKeyState`); otherwise
+the submitted range is not written, so uninitialized indices do not
+fake a submission checkpoint. **Still open:** worker
+integration; integration test against a live test parent; digest
+algorithms beyond SHA-256 (§6.3).
 
 Files:
-- `v2/ksk_rollover_ds_push.go` — new `PushDSRRset` + target-set
-  computation (§6)
-- `v2/cli/ksk_rollover_cli.go` — add `ds-push` CLI subcommand for
-  manual end-to-end testing before the worker drives it
+- `v2/ksk_rollover_ds_push.go` — `BuildChildWholeDSUpdate`,
+  `ComputeTargetDSSetForZone`, `PushWholeDSRRset` (§6, §6.4)
+- `v2/ksk_rollover_ds_push_test.go` — unit test for UPDATE shape
+- `v2/cli/ksk_rollover_cli.go` — `keystore dnssec ds-push` (`--dry-run`)
+- `v2/cli/keystore_cmds.go` — registers the subcommand
 
-Work:
-- `PushDSRRset(zd, dsSet []dns.RR) error` (§6.4)
-- `ComputeTargetDSSet(zd, kdb) []dns.RR` (§6.4)
-- `last_ds_submitted_index_*` persistence via `RolloverZoneState`
-  (NOTE: NOT `last_ds_confirmed_*` — confirmation is Phase 3's job)
-- Unit + integration tests with a test parent
+Work (as implemented):
+- `PushWholeDSRRset(ctx, zd, kdb, imr)` returning `KSKDSPushResult`
+- `ComputeTargetDSSetForZone(kdb, childZone, digest)` (SHA-256 in code
+  today)
+- `last_ds_submitted_index_*` + `last_ds_submitted_at` on NOERROR when
+  index range is known (NOT `last_ds_confirmed_*` — Phase 3)
+- **Remaining:** call site from rollover worker; integration test with
+  a test parent
 
 ### Phase 3 — Parent-agent DS-poll client (2 days, **Low-Medium** complexity) [parallel with Phase 2]
 
