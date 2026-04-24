@@ -1,7 +1,7 @@
 # Design Spec: Automated KSK Rollover in tdns-auth
 
-**Status**: Draft (Phases **1** and **2** implemented in `tdns/v2`; worker
-integration and parent DS confirmation remain future phases.)
+**Status**: Draft (Phases **1–3** library + CLI in `tdns/v2`; rollover
+worker integration remains future work.)
 **Date**: 2026-04-23 (implementation status note: 2026-04-24)
 **Scope**: tdns-auth (single-signer). Non-MP zones only.
 **Related**: `2026-03-07-delegation-sync-refresh-plan.md` (delegation
@@ -38,8 +38,9 @@ pieces together into a fully automated KSK rollover:
   target DS set, construct the whole-RRset UPDATE, and send it
   (`PushWholeDSRRset`, Phase 2), and the CLI exposes `keystore dnssec
   ds-push` for manual operation
-- no automated confirmation by the child that the parent has
-  published the new DS records before retiring the old KSK
+- no **worker-driven** confirmation yet; Phase 3 adds `PollParentDSUntilMatch`
+  and `keystore dnssec query-parent` against a **configured** `rollover.parent-agent`
+  (addr:port), not wired into `KeyStateWorker`
 - no parameter coupling — the timing constants in `KaspConf`
   (`propagation_delay`) and in `DnssecPolicy` (`SigValidity`) are
   independent of each other and independent of key lifetime
@@ -48,8 +49,9 @@ The goal of this project is to close those gaps and enable rapid KSK
 rollover as an experimental capability — rolling KSKs weekly, daily,
 or faster — which in turn requires the timing parameters to be
 coupled rather than individually configured. For v1, parent-side
-DS confirmation uses a DS-query-at-parent-NS pattern (§7); using
-KeyState EDNS(0) for confirmation is deferred to future work (§16).
+DS confirmation uses a DS query to a **configured parent-agent**
+(§7); using KeyState EDNS(0) for confirmation is deferred to future
+work (§16).
 
 ## 2. Goals and Non-Goals
 
@@ -63,9 +65,11 @@ KeyState EDNS(0) for confirmation is deferred to future work (§16).
   old and new KSK)
 - Automatic DS push to parent via SIG(0)-signed DNS UPDATE, with
   DSYNC-discovered target
-- Automatic confirmation of parent DS publication via DS query at
-  parent NS (BIND9-style "parent-agent" pattern). KeyState EDNS(0)
-  as a confirmation channel is deferred to future work (§16).
+- Automatic confirmation of parent DS publication via DS query to a
+  **configured parent-agent** (`rollover.parent-agent`, addr:port;
+  BIND9-style "parent agent" as an operator-placed observer, not DNS
+  discovery of parent authoritative servers). KeyState EDNS(0) as a
+  confirmation channel is deferred to future work (§16).
 - Per-zone policy that supports **rapid cadence** (days or less) by
   coupling dependent timing parameters to a single driver (key
   lifetime or cadence)
@@ -175,8 +179,8 @@ Key-state flow (per KSK):
 - **created**: key material generated and stored in keystore; DNSKEY
   not at the apex; DS not yet in the DS RRset pushed to parent
 - **ds-published**: parent has **accepted and published** the DS
-  (confirmed by observing the expected DS RRset at any parent NS;
-  see §7). DS-propagation delay counter now runs from this point.
+  (confirmed by observing the expected DS RRset via the configured
+  parent-agent; §7). DS-propagation delay counter now runs from this point.
   DNSKEY still NOT at the apex.
 - **standby**: DS has been cached long enough to be safely used as a
   validation trust anchor (DS propagation delay elapsed). DNSKEY
@@ -215,7 +219,7 @@ there must always be exactly one active KSK:
       as part of the RRset of size num-ds.
   T1: child sends DS RRset to parent including DS-new.
   T2: parent accepts and publishes DS-new
-      (confirmation by observing DS RRset at parent NS; §7)
+      (confirmation by observing DS RRset via parent-agent; §7)
       → state: ds-published. DS-propagation delay begins.
   T3: parent's DS for KSK-new has been cached long enough to be safe
       → state: standby.
@@ -295,7 +299,7 @@ state *names* but the ordering differs:
 - `created`: key material generated; DNSKEY not at apex; DS not yet
   in the DS RRset pushed to parent
 - `ds-published`: parent has accepted and published the DS
-  (confirmed by observing DS RRset at any parent NS; §7)
+  (confirmed by observing DS RRset via configured parent-agent; §7)
 - `standby`: DS-propagation delay elapsed; DS safe for validators
 - `published`: DNSKEY now at the apex
   (held for ~zero time in multi-DS before transitioning to `active`)
@@ -490,7 +494,7 @@ second:
 6. Send the DS UPDATE to the parent.
 7. On NOERROR: update `last_ds_submitted_index_range_*` and
    `last_ds_submitted_at` on `RolloverZoneState`.
-8. Poll parent NS for the expected DS RRset (§7). On observation:
+8. Poll parent-agent for the expected DS RRset (§7). On observation:
    update `last_ds_confirmed_index_range_*` and
    `last_ds_confirmed_at`. The successor key advances
    `created → ds-published`. KSK_old's DS being removed is
@@ -515,7 +519,7 @@ Ordering — parent-side first:
 4. On NOERROR: update `last_ds_submitted_index_range_*` (§6.1).
    The key's state does NOT yet advance — NOERROR means the parent
    accepted the UPDATE, not that publication is observable.
-5. Poll parent NS for the expected DS RRset (§7). On first
+5. Poll parent-agent for the expected DS RRset (§7). On first
    observation: update `last_ds_confirmed_index_range_*` and
    `ds_observed_at` on the key; state advances
    `created → ds-published`.
@@ -942,7 +946,7 @@ basis of "we sent it" rather than "parent has it"):
   accepted, no need to re-send.
 - `last_ds_confirmed_index_range_low/high` + `last_ds_confirmed_at`
   — updated when the expected DS RRset is actually observed at any
-  parent NS (§7). Drives all **key-state transitions that depend
+  parent-agent (§7). Drives all **key-state transitions that depend
   on parent publication**: `created → ds-published`, removals
   being gated on old DS no longer observed.
 
@@ -995,7 +999,8 @@ machinery as `DsyncDiscovery` in `dsync_lookup.go`.
    their current state — NOERROR means "parent accepted the
    UPDATE," NOT "parent has published." State advances require
    observation (§7).
-8. Schedule DS-at-parent poll (§7.2). On successful observation,
+8. Schedule DS confirmation poll (§7.2) against the configured
+   `rollover.parent-agent`. On successful observation,
    update `last_ds_confirmed_index_range_*` and
    `last_ds_confirmed_at`; any KSK newly added to the set
    transitions `created → ds-published`.
@@ -1030,6 +1035,9 @@ machinery as `DsyncDiscovery` in `dsync_lookup.go`.
 - **`v2/cli/ksk_rollover_cli.go`**: `keystore dnssec ds-push` with
   `--dry-run` for operator testing before the worker calls
   `PushWholeDSRRset`.
+- **`v2/ksk_rollover_parent_poll.go`** (Phase 3): `QueryParentAgentDS`,
+  `ObservedDSSetMatchesExpected`, `PollParentDSUntilMatch`; CLI
+  `keystore dnssec query-parent` (`--once`, optional `--parent-agent`).
 
 ## 7. Parent Confirmation via DS Query at Parent Agent
 
@@ -1044,24 +1052,45 @@ project; we therefore adopt a simpler approach modeled on BIND9's
 "parent-agent" pattern. KeyState EDNS(0) confirmation remains a
 future optimization (§16).
 
+### 7.0 Configuration (normative for v1)
+
+DS confirmation does **not** discover parent authoritative servers from
+the DNS (e.g. it does **not** use the NS RRset at the delegation owner
+name in the parent zone — that set points at the **child's**
+nameservers, not at hosts that necessarily serve the parent's copy of
+`Z DS`).
+
+Instead, the operator configures **`rollover.parent-agent`** on the
+dnssec policy: a single **`host:port`** (UDP/TCP port; default **53** if
+omitted) naming a **parent-side agent** — any endpoint that answers
+authoritatively or proxy-like for **`Z DS`** the way the operator
+expects to observe parent publication (often co-located with or in
+front of the parent's signer). Required when `rollover.method` is
+`multi-ds` or `double-signature`.
+
+**Future improvement:** optional automatic discovery of suitable parent
+targets, implemented by reusing the **built-in IMR** (recursive engine)
+to resolve and query parent-side data — not by embedding a separate
+recursive resolver in the rollover code. Until then, v1 is
+**static-config only**.
+
 ### 7.1 Model: parent-agent DS query
 
-The "parent agent" for zone Z is any parent NS — the set of NS
-records at the delegation point. Confirmation works by querying
-parent NS for `Z. DS` and matching the answer against the expected
-DS indices (§6.1).
+The configured parent-agent is queried for **`Z. DS`** over **TCP**
+(§7.5). The answer is matched against the expected DS RRset from the
+keystore (§6.1, §7.5), not against DSYNC or UPDATE return payloads alone.
 
-The child considers the parent to have **published** a change when
-any parent NS returns the expected DS RRset. This is conservative
-in favor of the validation-chain invariant: if any parent NS has
-the new data, at least some validators can chain through it, and
-by the time propagation completes all validators can.
+The child treats the parent publication as **observed** when the
+response from the parent-agent **matches** the expected set (§7.5).
+If multiple agents are configured in a future revision, **any** agent
+returning a match would be sufficient (same "any witness wins" idea as
+before, but applied to configured endpoints rather than inferred parent
+NS).
 
-"Observed at any parent NS" only starts the DS propagation clock.
-Advancing from `ds-published → standby` still requires waiting
-`DS_TTL + margin` past the observation time, so validators that
-may have cached the old RRset before publication have had time to
-expire it.
+"Observed" starts the DS propagation clock. Advancing from
+`ds-published → standby` still requires waiting `DS_TTL + margin` past
+the observation time, so validators that may have cached the old
+RRset before publication have had time to expire it.
 
 ### 7.2 Poll schedule
 
@@ -1070,10 +1099,11 @@ After the DS UPDATE returns NOERROR:
 1. **Initial wait**: `confirm-initial-wait` (default 2s). Gives the
    parent's signer/publisher time to push the change to its own
    secondaries before the first query.
-2. **First query**: query all parent NS in parallel for `Z. DS`.
-3. **Match**: if any response contains the expected DS RRset
-   (indices match §6.1's `current_ds_index_range`), record the
-   "first observed at parent" timestamp and advance to step 5.
+2. **First query**: send **`Z DS`** (TCP) to the configured
+   `rollover.parent-agent`. (Phase 3 implementation: one agent; a later
+   revision may query several configured agents in parallel.)
+3. **Match**: if the response contains the expected DS RRset (§7.5),
+   record the "first observed at parent" timestamp and advance to step 5.
 4. **Backoff**: if no match, wait 2 × previous interval and retry.
    Cap at `confirm-poll-max` (default 60s). Continue until overall
    elapsed time reaches `confirm-timeout` (default 1h).
@@ -1095,10 +1125,10 @@ Example backoff: 2s, 4s, 8s, 16s, 32s, 60s, 60s, 60s … until
   this is a hard-fail — the parent has accepted the UPDATE
   (NOERROR) but never published; something is structurally wrong
   and automatic retry would mask it.
-- **Parallel NS divergence**: if different parent NS return
-  different DS RRsets, treat any NS seeing the expected set as
-  sufficient (per §7.1). Log the divergence for operator
-  visibility; do not require consensus.
+- **Divergent witnesses** (future, if multiple parent-agents are
+  configured): if different agents return different DS RRsets, treat
+  any agent returning the expected set as sufficient. Log divergence;
+  do not require consensus.
 
 ### 7.4 Relationship to removals
 
@@ -1107,7 +1137,7 @@ and its DS dropped out of the target set) follows the same
 confirmation pattern:
 
 - Expected post-push DS RRset is the new `current_ds_index_range`.
-- "Observed" means any parent NS returns a DS RRset matching the
+- "Observed" means the parent-agent returns a DS RRset matching the
   new set by the algorithm in §7.5 below.
 - The zone's persisted `last_ds_confirmed_index_range_*` is
   advanced only when observed.
@@ -1122,9 +1152,9 @@ keytag-equality. The following algorithm MUST be used:
 
 **Inputs:**
 - `expected` = set of DS records computed from the target
-  `current_ds_index_range` (§6.1) via `ComputeTargetDSSet`.
+  `current_ds_index_range` (§6.1) via `ComputeTargetDSSetForZone`.
 - `observed` = set of DS records in the ANSWER section of the
-  parent's response (for `Z. DS` query, owner name = Z).
+  parent-agent's response (for `Z. DS` query, owner name = Z).
 
 **Canonical form of a DS record** (for comparison):
 ```
@@ -1146,7 +1176,7 @@ observed MATCHES expected IFF:
 ```
 
 Informally:
-1. Every DS we expect must be present in the parent's response
+1. Every DS we expect must be present in the parent-agent's response
    (exact canonical match).
 2. Every DS in the response whose keytag belongs to *our* managed
    keys must be one we expected. (This catches a parent that has
@@ -1168,7 +1198,7 @@ digest_type, digest) tuple must match independently.
   evaluate truncated responses.
 
 **DNSSEC validation:**
-- DS responses from parent NS are not independently validated by
+- DS responses from the parent-agent are not independently validated by
   the child (we do not require the child to be a validator). The
   child trusts its DNS stack's recursive resolver if queries are
   sent there, or trusts the direct authoritative response if
@@ -1433,7 +1463,7 @@ See §15, resolution 6.
 ticks after an import, it probes the parent to populate the
 submitted and confirmed index ranges on the zone row:
 
-1. Query parent NS (as in §7) for `Z. DS`, using the match
+1. Query parent-agent (as in §7) for `Z. DS`, using the match
    algorithm in §7.5.
 2. Match observed DS records against imported keys' rollover
    indices (by keytag + algorithm + digest).
@@ -1505,7 +1535,7 @@ rollover_phase ∈ {
   pending-parent-push,     // child done; DS RRset needs to be
                            // sent to parent
   pending-parent-observe,  // UPDATE sent NOERROR; polling for
-                           // DS at parent NS (§7)
+                           // DS via parent-agent (§7)
   pending-child-withdraw,  // parent confirmed; ready to withdraw
                            // retired DNSKEY from apex
 }
@@ -1807,7 +1837,7 @@ Two symmetric commands share a common computation
   with fields: `zone`, `rollover_index`, `keyid`, `flags`,
   `old_state`, `new_state`, `method`, `elapsed`
 - UPDATE send outcomes include rcode + EDE
-- DS-at-parent poll outcomes include the NS queried, whether the
+- Parent-agent DS poll outcomes include the agent address, whether the
   expected set was observed, and the attempt number
 - Manual-override requests and cancellations log `who`, `when`,
   `t_earliest`, and the gating factors
@@ -1829,7 +1859,7 @@ Per-phase summary (complexity is qualitative; LOC is order-of-magnitude):
 | ----- | ---------- | ------- | -------------------- | ---- | ------ |
 | 1. Policy config + schema       | Low      | ~400    | ~55   | 1–2 | **Done** |
 | 2. DS push                      | Medium   | ~350    | 0     | 2–3 | **Done** |
-| 3. Parent-agent DS poll         | Low-med  | ~300    | 0     | 2   | Pending |
+| 3. Parent-agent DS poll         | Low-med  | ~300    | 0     | 2   | **Done** |
 | 4. Rollover worker + FSM + phase machine + clamp trigger | High | ~1150 | ~5 | 3–4 | Pending |
 | 5. Import                       | Medium   | ~250    | 0     | 1–2 | Pending |
 | 6. Rapid-rollover validation    | Low (test work) | ~300 (tests) | 0 | 1–2 | Pending |
@@ -1896,27 +1926,31 @@ Work (as implemented):
 - **Remaining:** call site from rollover worker; integration test with
   a test parent
 
-### Phase 3 — Parent-agent DS-poll client (2 days, **Low-Medium** complexity) [parallel with Phase 2]
+### Phase 3 — Parent-agent DS-poll client (2 days, **Low-Medium** complexity) [parallel with Phase 2] — **landed**
 
-Complexity: Low-medium. Straightforward DNS query code plus
-exponential backoff. Subtleties: NS-set discovery, parallel
-querying with "any match wins" (§7.1), parent-NS divergence
-logging, overall timeout bookkeeping, DS-match algorithm (§7.5)
-including foreign-DS tolerance and multiple-digest-per-key. No
-state machine. Unit tests with mock resolvers are easy;
-integration test with a slow parent needs a test harness.
+Complexity: Low-medium. TCP query to a **configured** `rollover.parent-agent`
+(addr:port; no DNS discovery of parent servers in v1). Exponential backoff
+between attempts; DS match per §7.5 (`ObservedDSSetMatchesExpected`). No
+state machine in this phase. **Future:** multiple agents and/or IMR-based
+discovery (§7.0).
 
 Files:
-- `v2/ksk_rollover_parent_poll.go` — new `QueryParentDS` + backoff
-  scheduler
-- `v2/cli/ksk_rollover_cli.go` — add `query-parent` CLI subcommand
+- `v2/structs.go` — `rollover.parent-agent` on `DnssecPolicyRolloverConf`
+- `v2/ksk_rollover_policy.go` — parse/validate parent-agent; required for
+  `multi-ds` / `double-signature`; `NormalizeParentAgentAddr`
+- `v2/ksk_rollover_parent_poll.go` — `QueryParentAgentDS`, `ObservedDSSetMatchesExpected`,
+  `PollParentDSUntilMatch`
+- `v2/ksk_rollover_parent_poll_test.go` — match + address normalization tests
+- `v2/cli/ksk_rollover_cli.go` — `keystore dnssec query-parent` (`--once`,
+  `--parent-agent` override)
+- `v2/cli/keystore_cmds.go` — registers subcommand
 
-Work:
-- `QueryParentDS(z, expected_index_range) (observed bool, firstAt
-  time.Time, err error)` (§7)
-- Exponential-backoff scheduler (2s → 60s, cap at
-  `confirm-timeout`)
-- Parallel NS query; match on expected DS index range
+Work (as implemented):
+- Poll timings from `RolloverPolicy` (`confirm-initial-wait`, `confirm-poll-max`,
+  `confirm-timeout`), with safe defaults if unset (CLI-only `rollover.method: none`
+  paths use `--parent-agent` plus defaults)
+- **Remaining:** worker integration; `last_ds_confirmed_*` persistence;
+  integration test with a live agent
 
 ### Phase 4 — Rollover worker + FSM (3–4 days, **High** complexity) [depends on 1, 2, 3]
 
@@ -2314,9 +2348,9 @@ All open questions from earlier drafts are resolved:
   DS-poll path can be short-circuited: the parent actively reports
   publication state rather than the child observing DS records.
   Benefits: precise "DS publication started" timestamp (reducing
-  the conservative DS_TTL + margin wait); lower query load on
-  parent NS. Integration point: replace `QueryParentDS` in
-  `ksk_rollover_parent_poll.go` with `QueryParentKeyState`, keep
+  the conservative DS_TTL + margin wait); lower query load on the
+  parent-agent. Integration point: replace the parent-agent DS poll
+  in `ksk_rollover_parent_poll.go` with `QueryParentKeyState`, keep
   the DS-poll path as a fallback.
 - **Algorithm rollover.** Out of scope here. Future work involves
   publishing DNSKEYs under two algorithms concurrently, with two
