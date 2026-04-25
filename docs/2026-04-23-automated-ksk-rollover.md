@@ -1,9 +1,10 @@
 # Design Spec: Automated KSK Rollover in tdns-auth
 
-**Status**: Draft (Phases **1–3** and **4A** in `tdns/v2`; **4B** is
-remaining scope — full §8.8 FSM, `atomic_rollover`, clamp trigger,
-double-signature worker path, rollover CLI, etc.)
-**Date**: 2026-04-23 (implementation status note: 2026-04-24)
+**Status**: Draft (Phases **1–3** and **4A** in `tdns/v2`; **4B
+(scheduled rollover backbone)**, **4C (manual-ASAP CLI)**, **4D
+(clamp wiring)**, and **4E (double-signature worker branch)** are
+remaining scope — see §11 Phase breakdown.)
+**Date**: 2026-04-23 (implementation status note: 2026-04-25)
 **Scope**: tdns-auth (single-signer). Non-MP zones only.
 **Related**: `2026-03-07-delegation-sync-refresh-plan.md` (delegation
 sync + KeyState EDNS(0), landed), `2026-03-14-signal-key-publication.md`
@@ -875,7 +876,7 @@ re-sign trigger cadence.
 - ✅ SOA MINIMUM — clamped along with all other TTLs
 - ⚠ **RRSIG re-sign cadence**: the signer must re-sign often enough
   that clamped RRSIG validity values are actually reflected in
-  published RRSIGs. Phase 4B adds a new helper
+  published RRSIGs. Phase 4D adds a new helper
   `ComputeNextClampBoundary(z, now)` returning the next time any
   clamped value would change by more than a minor threshold
   (e.g. TTL halves, RRSIG validity drops below currently-published
@@ -974,10 +975,12 @@ caught at the observation step, not the submission step.
 
 **Phase 2 note:** `PushWholeDSRRset` implements steps 3–7 (and parent
 resolution) for manual/CLI use; Phase 4A wires the worker-driven multi-DS
-loop (steps 1, 8–9). Phase 4B adds the full §8.8 FSM, clamp wake-ups, and
-double-signature paths. DSYNC is resolved via `Imr.LookupDSYNCTarget` (UPDATE
-scheme; tries `TypeDS` then `TypeANY`), which wraps the same discovery
-machinery as `DsyncDiscovery` in `dsync_lookup.go`.
+loop (steps 1, 8–9). Phase 4B adds the remaining §8.8 phases
+(`pending-child-publish`, `pending-child-withdraw`) and `atomic_rollover`;
+Phase 4D adds clamp wake-ups; Phase 4E adds the double-signature path.
+DSYNC is resolved via `Imr.LookupDSYNCTarget` (UPDATE scheme; tries
+`TypeDS` then `TypeANY`), which wraps the same discovery machinery as
+`DsyncDiscovery` in `dsync_lookup.go`.
 
 1. Worker determines a state transition would change the target DS
    RRset for zone Z.
@@ -1852,8 +1855,10 @@ confirm latency, UPDATE rcodes.
 ## 11. Implementation Phases
 
 Each phase is independently shippable and testable. Phases 2 and
-3 have no dependency on each other and can be implemented in
-parallel; both are unblocked now that Phase 1 has landed.
+3 had no dependency on each other and could have been implemented
+in parallel; both landed alongside 4A. Phase 4 has been
+broken down into 4A (landed) and 4B–4E; see §11 "Phase 4
+breakdown" below for the dependency graph and recommended order.
 
 Per-phase summary (complexity is qualitative; LOC is order-of-magnitude):
 
@@ -1862,13 +1867,16 @@ Per-phase summary (complexity is qualitative; LOC is order-of-magnitude):
 | 1. Policy config + schema       | Low      | ~400    | ~55   | 1–2 | **Done** |
 | 2. DS push                      | Medium   | ~350    | 0     | 2–3 | **Done** |
 | 3. Parent-agent DS poll         | Low-med  | ~300    | 0     | 2   | **Done** |
-| 4A. Rollover worker (multi-ds pipeline + DS push/observe) | Med–High | ~500 | ~5 | 1–2 | **Done** |
-| 4B. Rollover worker (full FSM, atomic rollover, clamp, double-sig path, CLI) | High | ~650 | ~5 | 2–3 | Pending |
+| 4A. Rollover worker (multi-ds pipeline + DS push/observe)     | Med–High | ~500 | ~5  | 1–2 | **Done** |
+| 4B. Scheduled rollover backbone (`atomic_rollover` + child phases + scheduled trigger) | High     | ~400 | ~5  | 2–3 | Pending |
+| 4C. Manual-ASAP CLI + status (`when` / `asap` / `cancel` / `status` / `reset`)  | Medium   | ~250 | 0   | 1   | Pending |
+| 4D. Clamp wiring (signer reads clamping policy + ResignQ wake-ups)             | High     | ~200 | ~50 | 1–2 | Pending |
+| 4E. Double-signature worker branch                                              | Medium   | ~250 | 0   | 1–2 | Pending |
 | 5. Import                       | Medium   | ~250    | 0     | 1–2 | Pending |
 | 6. Rapid-rollover validation    | Low (test work) | ~300 (tests) | 0 | 1–2 | Pending |
 | 7. Docs & samples               | Low      | 0       | 0     | 1   | Pending |
 | CSK signing-path edits          | Medium (scattered) | 0 | ~50 | 1 | Pending |
-| **Total**                       |          | **~2800** | **~120** | **12–18** | |
+| **Total**                       |          | **~3000** | **~170** | **14–21** | |
 
 Complexity drivers per phase are called out in the phase
 descriptions below.
@@ -1961,16 +1969,20 @@ Work (as implemented):
 `num-ds` pipeline full, push the whole DS RRset when the submitted index range
 lags the computed range (requires every contributing KSK to have
 `RolloverKeyState.rollover_index`), observe at the configured **parent-agent**
-(one TCP query per worker tick in observe phase; exponential backoff remains
-the CLI `query-parent` path without `--once`), persist `last_ds_confirmed_*`,
+with §7.2 exponential backoff and `confirm-timeout` hard-fail (review fix
+landed alongside 4A; see §13 commit notes), persist `last_ds_confirmed_*`,
 advance `created → ds-published`, then `ds-published → standby` after
 `kasp.propagation_delay`, and **bootstrap** `standby → active` when no active
 KSK exists.
 
-**Explicitly out of scope for 4A:** `atomic_rollover`, scheduled/manual-ASAP
-rollover timing, `ComputeEarliestRollover`, double-signature worker branch,
-remaining §8.8 phases (`pending-child-publish`, `pending-child-withdraw`),
-clamp-trigger resigns, rollover operator CLI (§10.2). Those are **Phase 4B**.
+**Explicitly out of scope for 4A** (now mapped to specific later phases):
+`atomic_rollover`, scheduled rollover trigger (`rollover_due` time-based),
+remaining §8.8 phases `pending-child-publish` / `pending-child-withdraw`,
+`rollover_in_progress` set/clear discipline → **Phase 4B**.
+`ComputeEarliestRollover`, manual-ASAP and `rollover when` / `asap` /
+`cancel` / `status` / `reset` CLI → **Phase 4C**.
+Clamp-trigger resigns and signer-side clamping → **Phase 4D**.
+Double-signature worker branch → **Phase 4E**.
 
 Files:
 - `v2/ksk_rollover_zone_state.go` — `RolloverZoneRow`, phase + confirmed DS SQL
@@ -1980,26 +1992,196 @@ Files:
   maintenance and `published→standby` for SEP keys when `rollover.method: multi-ds`
 - `v2/ksk_rollover_ds_push.go` — `ComputeTargetDSSetForZone` includes `created` (§6.1)
 
-### Phase 4B — Rollover worker: full FSM + atomic rollover + clamp + CLI (2–3 days, **High**) — **pending**
+### Phase 4 breakdown (4B–4E)
 
-**Scope:** Completes the Phase 4B checklist from the spec — per-key
-FSMs (multi-ds + double-signature), `atomic_rollover(z)` with exactly-one-active
-KSK invariant, full §8.8 ε-sequencing (`pending-child-publish` / `pending-child-withdraw`),
-`rollover_due` / `ComputeEarliestRollover` / manual-ASAP (§8.5), clamp-boundary
-wake-ups (`ComputeNextClampBoundary`, §5.3), double-signature worker path,
-transactional consistency (§9.4), and rollover CLI (`when`, `asap`, `cancel`,
-`status`, §10.2). Optional: align worker observe phase with §7.2 backoff using
-persisted poll state instead of one query per tick.
+The original Phase 4 has been broken into five sub-phases. 4A landed
+the multi-ds pipeline pre-publication path. The remaining work is
+split into four independently shippable phases — 4B, 4C, 4D, 4E —
+ordered by value and by dependency. 4B is the only one strictly
+required to make automated KSK rollover *cycle* end-to-end. 4C–4E
+are additive improvements on top of 4B.
 
-Planned files (indicative; names may fold or split during implementation):
-- `v2/ksk_rollover_fsm.go` — per-key state advances per method
-- `v2/ksk_rollover_atomic.go` — `atomic_rollover(z)`
-- `v2/ksk_rollover_earliest.go` — `ComputeEarliestRollover(z)` (§8.5)
-- `v2/ksk_rollover_clamp_trigger.go` — clamp boundary → `ResignQ`
-- `v2/cli/…` — rollover subcommands (§10.2)
+```
+   4A (done) ──▶ 4B (scheduled rollover backbone) ──▶ 5 (import)
+                    │                                   │
+                    ├──▶ 4C (manual-ASAP CLI)           ▼
+                    │                                  6 (rapid-rollover validation)
+                    ├──▶ 4D (clamp wiring)              │
+                    │                                   ▼
+                    └──▶ 4E (double-signature)         7 (docs & samples)
+```
 
-**Dependency:** 4B builds on **4A** (reuses `RolloverAutomatedTick` / zone phase
-machinery and extends it).
+Recommended order: 4B first (unlocks Phase 6 testing), then 4C
+(operator handle), then 4D (rapid-cadence safety net), then 4E
+(only if double-signature is needed — multi-DS is the path under
+stress for rapid-rollover experimentation).
+
+### Phase 4B — Scheduled rollover backbone (2–3 days, **High** complexity) — **pending**
+
+**Goal:** A KSK whose `active_at + ksk.lifetime` has elapsed
+transitions to `retired`, the next standby SEP key becomes active,
+and after `margin` the retired key reaches `removed` with the DS
+RRset re-pushed to the parent. End-to-end, automatic, restart-safe.
+This is what closes the rollover loop that 4A's pipeline opens.
+
+**Scope:**
+- `atomic_rollover(z)` (§3.4 invariant: exactly one active KSK)
+- `pending-child-publish` and `pending-child-withdraw` phases (the
+  two §8.8 phases 4A skipped)
+- Scheduled `rollover_due()` trigger (no manual-ASAP yet — that's 4C)
+- `rollover_in_progress` flag set/clear discipline (§15.6)
+
+**Files:**
+- `v2/ksk_rollover_atomic.go` (new) — `atomic_rollover(z)`, all in
+  one TX:
+  - select KSK_old (the active SEP) and KSK_new (oldest standby SEP)
+  - `KSK_old: active → retired`
+  - `KSK_new: standby → published → active` (collapsed for
+    multi-ds; multi-step for double-signature later in 4E)
+  - set `RolloverZoneState.rollover_in_progress = TRUE`
+  - set `rollover_phase = pending-child-publish`
+  - trigger re-sign of DNSKEY + apex
+- `v2/ksk_rollover_automated.go` (extend) — two new phase cases:
+  - `pending-child-publish`: for v1, advance after a fixed wait of
+    `kasp.propagation_delay` from `rollover_phase_at`. Future work
+    can replace this with actual secondary-observation. Transitions
+    to `pending-parent-push`.
+  - `pending-child-withdraw`: for any KSK in `retired` past
+    `margin`, advance to `removed` in a single TX. When all retired
+    keys for the zone have reached `removed`: clear
+    `rollover_in_progress`, recompute target DS set (foreign-DS
+    drops out), re-arm the push if the set changed, transition to
+    `idle`.
+- Extension to existing tick: `rollover_due()` checks
+  `now - active_ksk.active_at > policy.ksk.lifetime`
+  AND `rollover_in_progress == FALSE`
+  AND a `standby` SEP key exists. On true, calls `atomic_rollover`.
+
+**Routing change:** `confirmDSAndAdvanceCreatedKeysTx` (existing 4A
+path) currently always returns the zone to `idle`. After 4B it
+must route to `pending-child-withdraw` if `rollover_in_progress`
+is set, else `idle`. One-line edit; the helper already does the
+work in a single TX.
+
+**Out of scope for 4B:**
+- `ComputeEarliestRollover` / manual-ASAP / `rollover when` /
+  `rollover asap` / `rollover cancel` (4C)
+- Clamp wiring; published TTLs/RRSIGs unchanged from operator
+  config (4D)
+- Double-signature method; `RolloverAutomatedTick` continues to
+  early-return on `method: double-signature` (4E)
+- Real child-secondary observation (post-4 future work)
+
+**Tests:**
+- End-to-end scheduled rollover on the 4A test lab with
+  `ksk.lifetime: 5m` so it fires fast.
+- Two consecutive scheduled rollovers without the pipeline running
+  dry (KSK_n → KSK_n+1 → KSK_n+2). Proves `rollover_in_progress`
+  cycles cleanly and pipeline-fill keeps up.
+- Restart mid-`pending-child-withdraw` resumes correctly.
+- Restart mid-`atomic_rollover` (i.e. crash inside the TX): no
+  partial state visible.
+
+**Why 4B first:** without it, the system can do a one-time
+pipeline fill but cannot cycle. Phase 6 (rapid-rollover validation)
+cannot start until `atomic_rollover` exists.
+
+### Phase 4C — Manual-ASAP CLI + status/reset (1 day, **Medium**) — **pending**
+
+**Goal:** Give operators a real handle on the system. They can ask
+"when is the earliest a rollover could fire?" without changing
+state, schedule a rollover at that time, cancel a pending request,
+inspect zone state, and clear hard-fail errors.
+
+**Scope:**
+- `ComputeEarliestRollover(z)` returning
+  `(t_earliest, gates, fromIdx, toIdx, err)` per §8.5
+- Five new CLI subcommands under `tdns zone keystore dnssec
+  rollover`:
+  - `when --zone=Z` (no state change)
+  - `asap --zone=Z` (sets `manual_rollover_*` columns)
+  - `cancel --zone=Z`
+  - `status --zone=Z` (per-key state, rollover_index, phase, last
+    error, observe schedule)
+  - `reset --zone=Z --keyid=N` (clears `last_rollover_error`)
+
+**Files:**
+- `v2/ksk_rollover_earliest.go` (new) — `ComputeEarliestRollover`
+- `v2/cli/ksk_rollover_cli.go` (extend) — five subcommands
+
+**Dependency:** Builds on 4B's `rollover_due` (manual-ASAP is just
+another way for `rollover_due` to return true). Additive only — no
+FSM changes.
+
+**Why 4C second:** smallest possible add that surfaces operational
+issues. Running 4B for a few days will produce stuck rollovers,
+operator-visible errors, etc. The status and reset CLIs are how
+those get diagnosed. Manual-ASAP gives a way to test 4B's
+machinery on demand without waiting for `ksk.lifetime` to elapse.
+
+### Phase 4D — Clamp wiring (1–2 days, **High** complexity) — **pending**
+
+**Goal:** Make `clamping.enabled: true` actually affect the TTL and
+RRSIG-validity values the signer publishes. This is the only
+sub-phase that touches the signing path.
+
+**Scope:**
+- `ComputeNextClampBoundary(z, now)` — returns the next time any
+  clamped value would change by more than a small threshold (TTL
+  halves, RRSIG validity drops below currently published value)
+- Wake-up: rollover tick computes the next boundary for each zone
+  with `clamping.enabled` and pushes the zone onto `ResignQ` when
+  `boundary <= now`
+- Signer-path edit: when emitting RRSIGs and serializing TTLs in
+  the signing path, consult the policy's `clamping.enabled`,
+  `clamping.margin`, and `R = T_next_roll - T_now`, then apply
+  `min(configured_ttl, R + margin)` to TTLs and the analogous
+  rule to RRSIG validity
+
+**Files:**
+- `v2/ksk_rollover_clamp_trigger.go` (new) —
+  `ComputeNextClampBoundary` and the ResignQ push helper
+- Signer edits (`v2/sign.go` and adjacent; finalized during
+  implementation): clamping-aware TTL and RRSIG-validity
+  computation. Estimated ~50 LOC across 2–3 files.
+
+**Dependency:** 4B (so a `T_next_roll` value exists for the
+clamping formula to consume). Independent of 4C and 4E.
+
+**Why 4D third:** it touches signer code and surfaces the "which
+TTL where, which RRSIG validity where" questions that are easier
+to answer once you've watched scheduled rollovers run for a few
+cycles. Premature clamping is an operational footgun. If
+rapid-rollover experimentation is the immediate driver, this moves
+ahead of 4E (which is what's currently planned).
+
+### Phase 4E — Double-signature worker branch (1–2 days, **Medium**) — **pending**
+
+**Goal:** Fill in `RolloverAutomatedTick`'s currently-empty
+`method: double-signature` branch with the §3.3 ordering.
+
+**Scope:**
+- New worker branch that mirrors 4A+4B's multi-ds path with the
+  double-signature state ordering: `created → published →
+  ds-published → standby → active → retired → removed`
+- DS push happens *after* DNSKEY publish (not before, as in
+  multi-ds)
+- `atomic_rollover` for double-signature has a real, non-zero
+  `published → standby → active` window (whereas multi-ds
+  collapses these)
+
+**Files:**
+- `v2/ksk_rollover_automated.go` (extend) — second method branch
+- Possibly `v2/ksk_rollover_fsm.go` if the two methods share enough
+  to factor out a transition table; otherwise inline
+
+**Dependency:** 4B (atomic_rollover, child-phase machinery).
+Independent of 4C and 4D.
+
+**Why 4E last:** nobody is asking for double-signature, and
+rapid-rollover experimentation is a multi-DS use case. Multi-DS
+is the path that needs polish first. Reorder 4D and 4E if
+operational priority changes.
 
 ### Phase 5 — Import (1–2 days, **Medium** complexity) [depends on 4B; probe semantics align with full worker]
 
@@ -2068,8 +2250,8 @@ operator reset; in worst case a state inconsistency between
 keystore and parent.
 Mitigation: transactional state updates (DB row + timestamp in
 same TX as the action that caused the transition); Phase 4B explicit
-kill-restart-verify test; CLI `rollover reset` as operator
-recovery path.
+kill-restart-verify test; `rollover reset` CLI (Phase 4C) as
+operator recovery path.
 
 **R3. Atomic rollover not actually atomic.** [Medium] `atomic_rollover(z)`
 (§8.5) must transition KSK_n: active→retired and KSK_{n+1}:

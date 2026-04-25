@@ -114,12 +114,12 @@ dnssec-policies:
 ```
 
 Note on `lifetime: 24h`: 4A does not yet run scheduled
-`atomic_rollover` (that's 4B), so the lifetime value is recorded
+`atomic_rollover` (that's Phase 4B), so the lifetime value is recorded
 but does not drive behavior yet.
 
 Note on `clamping`: the parser accepts these fields, but 4A does
 not yet wire clamping into the signing path. `clamping.enabled:
-true` is safe to set now and will take effect when 4B lands
+true` is safe to set now and will take effect when Phase 4D lands
 `ComputeNextClampBoundary`.
 
 Also adjust the global `KaspConf` so the `ds-published → standby`
@@ -201,7 +201,7 @@ the child zone is signed by this KSK.
 **7. Steady state.** Nothing further happens in 4A. The pipeline
 has three KSKs: one active, two standby (or in whichever mix the
 propagation timer produced). Advancing the active KSK to retired
-and bringing the next standby into active is 4B's `atomic_rollover`
+and bringing the next standby into active is Phase 4B's `atomic_rollover`
 and is NOT exercised here.
 
 ## 6. Database Inspection
@@ -319,8 +319,9 @@ Expected:
   an error.
 - Worker keeps retrying — this is a hard-fail class per §3.8 R4
   in the design, but 4A's implementation treats it as a transient
-  retry. Worth noting and possibly flagging for 4B's hard-fail
-  handling.
+  retry. Worth noting and possibly flagging for Phase 4B's hard-fail
+  handling (the precondition matrix in design-doc §3.8 says this
+  should be a hard-fail; 4A treats it as a transient retry).
 
 ### 7.5 Foreign DS at parent
 
@@ -386,27 +387,28 @@ Be explicit about scope so you don't spend time looking for
 behavior that isn't there yet.
 
 - **Scheduled rollover.** `rollover_due()` time-based trigger is
-  4B. The KSK `lifetime` value in policy is persisted but not
-  acted on.
-- **`atomic_rollover(z)`.** There is no automatic `active →
-  retired` transition in 4A. The bootstrap promotion is the only
-  `standby → active` path; once a KSK is active, it stays active.
+  Phase 4B. The KSK `lifetime` value in policy is persisted but
+  not acted on.
+- **`atomic_rollover(z)`.** Phase 4B. There is no automatic
+  `active → retired` transition in 4A. The bootstrap promotion is
+  the only `standby → active` path; once a KSK is active, it
+  stays active.
 - **`pending-child-publish` / `pending-child-withdraw` phases.**
-  4A implements only `idle`, `pending-parent-push`, and
-  `pending-parent-observe`. The full §8.8 five-phase machine is
-  4B.
+  Phase 4B. 4A implements only `idle`, `pending-parent-push`, and
+  `pending-parent-observe`. The full §8.8 five-phase machine is 4B.
+- **`rollover_in_progress` flag.** Phase 4B. The column exists,
+  but 4A never sets or clears it. Import-during-rollover protection
+  (§15.6) is therefore not active yet.
 - **Manual-ASAP CLI** (`rollover when`, `rollover asap`, `rollover
-  cancel`). These commands do not exist yet.
-- **Clamping effect on published RRSIGs and TTLs.** The `clamping`
-  policy subtree parses cleanly, but no code consults it. Observe:
-  clamping-enabled zones still publish the operator-configured
-  TTLs and RRSIG validity verbatim.
-- **Double-signature method.** `method: double-signature` is
-  valid config but `RolloverAutomatedTick` early-returns on it.
-  4B adds the double-signature worker branch.
-- **`rollover_in_progress` flag.** The column exists, but 4A never
-  sets or clears it. Import-during-rollover protection (§15.6)
-  is therefore not active yet.
+  cancel`). Phase 4C. Also `rollover status` and `rollover reset`
+  are 4C.
+- **`ComputeEarliestRollover`.** Phase 4C.
+- **Clamping effect on published RRSIGs and TTLs.** Phase 4D. The
+  `clamping` policy subtree parses cleanly, but no code consults
+  it yet. Clamping-enabled zones still publish the operator-
+  configured TTLs and RRSIG validity verbatim.
+- **Double-signature method.** Phase 4E. `method: double-signature`
+  is valid config but `RolloverAutomatedTick` early-returns on it.
 - **Import workflow.** Phase 5. `rollover import` CLI does not
   exist.
 
@@ -451,9 +453,12 @@ If 4A holds up under this matrix:
   variants, multi-digest-per-keytag) that the Phase 4A review
   flagged and consider adding unit tests.
 - Document any parent behaviors you observed that the design did
-  not anticipate — those are candidates for 4B scope adjustment.
-- Decide whether to start on 4B (full FSM, `atomic_rollover`,
-  manual-ASAP, clamp trigger, CLI) or let 4A soak.
+  not anticipate — those are candidates for Phase 4B scope adjustment.
+- Decide whether to start on Phase 4B (scheduled rollover backbone:
+  `atomic_rollover` + child-side phases + scheduled trigger), or
+  let 4A soak. Subsequent sub-phases (4C manual-ASAP CLI, 4D clamp
+  wiring, 4E double-signature) build on 4B; see design doc §11
+  "Phase 4 breakdown" for ordering and dependencies.
 
 If 4A breaks:
 
