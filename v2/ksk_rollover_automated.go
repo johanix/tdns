@@ -11,8 +11,10 @@ import (
 
 const (
 	rolloverPhaseIdle                 = "idle"
+	rolloverPhasePendingChildPublish  = "pending-child-publish"
 	rolloverPhasePendingParentPush    = "pending-parent-push"
 	rolloverPhasePendingParentObserve = "pending-parent-observe"
+	rolloverPhasePendingChildWithdraw = "pending-child-withdraw"
 )
 
 func kskIndexPushNeeded(row *RolloverZoneRow, low, high int, indexOK bool, haveDS bool) bool {
@@ -30,7 +32,8 @@ func kskIndexPushNeeded(row *RolloverZoneRow, low, high int, indexOK bool, haveD
 
 // RolloverAutomatedTick runs one slice of automated KSK rollover for multi-ds (pipeline fill,
 // DS push / observe phase machine). double-signature is not implemented yet.
-func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *Imr, zd *ZoneData, now time.Time) error {
+// propagationDelay is the kasp.propagation_delay used by pending-child-publish.
+func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *Imr, zd *ZoneData, propagationDelay time.Duration, now time.Time) error {
 	if zd == nil || zd.DnssecPolicy == nil {
 		return nil
 	}
@@ -76,6 +79,30 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		phase = rolloverPhaseIdle
 	}
 
+	// rollover_due (§8.1): when no rollover is in progress, the active KSK
+	// has lived past policy.ksk.lifetime, and a standby SEP exists, fire
+	// AtomicRollover. The tick then re-loads phase and continues; the new
+	// pending-child-publish phase will be handled below if reached this
+	// pass, or on the next tick.
+	if phase == rolloverPhaseIdle && !row.RolloverInProgress {
+		due, err := rolloverDue(kdb, zone, pol, now)
+		if err != nil {
+			lgSigner.Warn("rollover: rollover_due check failed", "zone", zone, "err", err)
+		} else if due {
+			if _, _, err := AtomicRollover(conf, kdb, zone); err != nil {
+				lgSigner.Warn("rollover: AtomicRollover failed", "zone", zone, "err", err)
+			} else {
+				row, err = LoadRolloverZoneRow(kdb, zone)
+				if err != nil {
+					return err
+				}
+				if row != nil {
+					phase = row.RolloverPhase
+				}
+			}
+		}
+	}
+
 	switch phase {
 	case rolloverPhaseIdle:
 		// §8.8 idle branch: steady-state pipeline maintenance. Arm the
@@ -92,6 +119,21 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 			}
 			lgSigner.Info("rollover: arming DS push", "zone", zone)
 		}
+	case rolloverPhasePendingChildPublish:
+		// §8.8: wait kasp.propagation_delay from rollover_phase_at, then
+		// arm the DS push. Real child-secondary observation is post-4
+		// future work; here we use a fixed wait.
+		if t, ok := parseOptionalTime(row.RolloverPhaseAt); ok {
+			if now.Sub(t) < propagationDelay {
+				return nil
+			}
+		} else {
+			lgSigner.Warn("rollover: pending-child-publish without rollover_phase_at; arming push immediately", "zone", zone)
+		}
+		if err := SetRolloverPhase(kdb, zone, rolloverPhasePendingParentPush); err != nil {
+			return err
+		}
+		lgSigner.Info("rollover: pending-child-publish elapsed, arming DS push", "zone", zone)
 	case rolloverPhasePendingParentPush:
 		// §8.8: send DS UPDATE. Arming the observe phase counts as the
 		// advance; the actual parent DS query happens on the next tick
@@ -201,6 +243,64 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 			triggerResign(conf, zone)
 		}
 		lgSigner.Info("rollover: parent DS observed, advanced created keys", "zone", zone, "advanced", advanced)
+	case rolloverPhasePendingChildWithdraw:
+		// §8.8: wait effective_margin = max(policy.clamping.margin,
+		// max_observed_ttl) from each retired SEP key's retired_at, then
+		// advance to removed. When all retired SEP keys for the zone have
+		// reached removed, clear rollover_in_progress and return the zone
+		// to idle. The next idle tick re-evaluates the DS set and arms a
+		// fresh push if the set changed (foreign-DS dropped out).
+		eff, err := effectiveMarginForZone(kdb, zone, pol)
+		if err != nil {
+			lgSigner.Warn("rollover: effective margin lookup failed", "zone", zone, "err", err)
+			return nil
+		}
+		retired, err := GetDnssecKeysByState(kdb, zone, DnskeyStateRetired)
+		if err != nil {
+			return fmt.Errorf("list retired keys: %w", err)
+		}
+		var sepRetired []DnssecKeyWithTimestamps
+		for i := range retired {
+			if retired[i].Flags&dns.SEP != 0 {
+				sepRetired = append(sepRetired, retired[i])
+			}
+		}
+		if len(sepRetired) == 0 {
+			// All retired SEP keys are gone (or there were none) — wrap up.
+			if err := completeRolloverWithdraw(conf, kdb, zone); err != nil {
+				return err
+			}
+			return nil
+		}
+		stillWaiting := 0
+		advanced := 0
+		for i := range sepRetired {
+			k := &sepRetired[i]
+			if k.RetiredAt == nil {
+				lgSigner.Warn("rollover: retired SEP key has no retired_at; cannot advance", "zone", zone, "keyid", k.KeyTag)
+				stillWaiting++
+				continue
+			}
+			if now.Sub(*k.RetiredAt) < eff {
+				stillWaiting++
+				continue
+			}
+			if err := UpdateDnssecKeyState(kdb, zone, k.KeyTag, DnskeyStateRemoved); err != nil {
+				lgSigner.Error("rollover: retired→removed failed", "zone", zone, "keyid", k.KeyTag, "err", err)
+				stillWaiting++
+				continue
+			}
+			lgSigner.Info("rollover: retired→removed (pending-child-withdraw)", "zone", zone, "keyid", k.KeyTag, "effective_margin", eff)
+			advanced++
+		}
+		if advanced > 0 {
+			triggerResign(conf, zone)
+		}
+		if stillWaiting == 0 {
+			if err := completeRolloverWithdraw(conf, kdb, zone); err != nil {
+				return err
+			}
+		}
 	default:
 		if err := SetRolloverPhase(kdb, zone, rolloverPhaseIdle); err != nil {
 			return err
@@ -372,6 +472,9 @@ func TransitionRolloverKskDsPublishedToStandby(conf *Config, kdb *KeyDB, now tim
 			lgSigner.Error("rollover: ds-published→standby failed", "zone", k.ZoneName, "keyid", k.KeyTag, "err", err)
 			continue
 		}
+		if err := setRolloverKeyStandbyAt(kdb, k.ZoneName, k.KeyTag, now); err != nil {
+			lgSigner.Warn("rollover: standby_at stamp failed", "zone", k.ZoneName, "keyid", k.KeyTag, "err", err)
+		}
 		lgSigner.Info("rollover: ds-published→standby", "zone", k.ZoneName, "keyid", k.KeyTag)
 		triggerResign(conf, k.ZoneName)
 	}
@@ -410,11 +513,15 @@ func PromoteStandbyKskIfNoActive(conf *Config, kdb *KeyDB, zone string) {
 		lgSigner.Error("rollover: standby→active (bootstrap) failed", "zone", zone, "keyid", best.KeyTag, "err", err)
 		return
 	}
+	if _, err := kdb.DB.Exec(`UPDATE RolloverKeyState SET active_at = ? WHERE zone = ? AND keyid = ?`,
+		time.Now().UTC().Format(time.RFC3339), zone, int(best.KeyTag)); err != nil {
+		lgSigner.Warn("rollover: active_at stamp failed (bootstrap)", "zone", zone, "keyid", best.KeyTag, "err", err)
+	}
 	lgSigner.Info("rollover: promoted standby KSK to active (no active KSK)", "zone", zone, "keyid", best.KeyTag)
 	triggerResign(conf, zone)
 }
 
-func rolloverAutomatedForAllZones(ctx context.Context, conf *Config, kdb *KeyDB, now time.Time) {
+func rolloverAutomatedForAllZones(ctx context.Context, conf *Config, kdb *KeyDB, propagationDelay time.Duration, now time.Time) {
 	imr := conf.Internal.ImrEngine
 	for _, zd := range Zones.Items() {
 		if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
@@ -426,10 +533,111 @@ func rolloverAutomatedForAllZones(ctx context.Context, conf *Config, kdb *KeyDB,
 		if zd.DnssecPolicy == nil {
 			continue
 		}
-		if err := RolloverAutomatedTick(ctx, conf, kdb, imr, zd, now); err != nil {
+		if err := RolloverAutomatedTick(ctx, conf, kdb, imr, zd, propagationDelay, now); err != nil {
 			lgSigner.Error("rollover: tick error", "zone", zd.ZoneName, "err", err)
 		}
 	}
+}
+
+// rolloverDue returns true when the zone should fire AtomicRollover: the
+// active SEP KSK has lived past policy.ksk.lifetime, no rollover is currently
+// in progress (caller-checked), and at least one standby SEP key exists. A
+// zero-or-unset KSK lifetime means "never expires" — return false.
+func rolloverDue(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Time) (bool, error) {
+	if pol == nil {
+		return false, nil
+	}
+	if pol.KSK.Lifetime == 0 {
+		return false, nil
+	}
+	lifetime := time.Duration(pol.KSK.Lifetime) * time.Second
+
+	// Find the active SEP key.
+	active, err := GetDnssecKeysByState(kdb, zone, DnskeyStateActive)
+	if err != nil {
+		return false, fmt.Errorf("list active keys: %w", err)
+	}
+	var activeKid uint16
+	for i := range active {
+		if active[i].Flags&dns.SEP != 0 {
+			activeKid = active[i].KeyTag
+			break
+		}
+	}
+	if activeKid == 0 {
+		return false, nil
+	}
+	at, err := rolloverKeyActiveAt(kdb, zone, activeKid)
+	if err != nil {
+		return false, fmt.Errorf("active_at lookup: %w", err)
+	}
+	if at == nil {
+		// No timestamp yet (e.g. legacy zone): cannot fire scheduled rollover.
+		return false, nil
+	}
+	if now.Sub(*at) < lifetime {
+		return false, nil
+	}
+
+	// At least one standby SEP key must exist.
+	standby, err := GetDnssecKeysByState(kdb, zone, DnskeyStateStandby)
+	if err != nil {
+		return false, fmt.Errorf("list standby keys: %w", err)
+	}
+	for i := range standby {
+		if standby[i].Flags&dns.SEP != 0 {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// effectiveMarginForZone returns max(policy.clamping.margin, max_observed_ttl)
+// for the zone. Used by pending-child-withdraw to bound the wait by both the
+// configured margin and the longest-lived RRSIG that could still be cached at
+// resolvers. max_observed_ttl is whatever the most recent SignZone pass
+// recorded; 0 if the zone has not yet completed a sign pass.
+func effectiveMarginForZone(kdb *KeyDB, zone string, pol *DnssecPolicy) (time.Duration, error) {
+	margin := pol.Clamping.Margin
+	maxTTL, err := LoadZoneSigningMaxTTL(kdb, zone)
+	if err != nil {
+		return margin, err
+	}
+	ttlDur := time.Duration(maxTTL) * time.Second
+	if ttlDur > margin {
+		return ttlDur, nil
+	}
+	return margin, nil
+}
+
+// completeRolloverWithdraw is called when the last retired SEP key has been
+// removed: clear rollover_in_progress and return the zone to idle. The next
+// idle tick re-evaluates the DS set and arms a fresh push if needed (the
+// retired key's DS dropping out is the typical trigger).
+func completeRolloverWithdraw(conf *Config, kdb *KeyDB, zone string) error {
+	tx, err := kdb.Begin("completeRolloverWithdraw")
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	commit := false
+	defer func() {
+		if !commit {
+			tx.Rollback()
+		}
+	}()
+	if err := setRolloverInProgressTx(tx, zone, false); err != nil {
+		return fmt.Errorf("clear rollover_in_progress: %w", err)
+	}
+	if err := setRolloverPhaseTx(tx, zone, rolloverPhaseIdle); err != nil {
+		return fmt.Errorf("reset phase: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	commit = true
+	lgSigner.Info("rollover: pending-child-withdraw complete; zone returned to idle", "zone", zone)
+	triggerResign(conf, zone)
+	return nil
 }
 
 func promoteStandbyKskBootstrapAll(conf *Config, kdb *KeyDB) {

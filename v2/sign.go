@@ -402,6 +402,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 	lgSigner.Debug("zone delegations", "zone", zd.ZoneName, "delegations", delegations)
 
 	var signed, zoneResigned bool
+	var maxObservedTTL uint32
 	for _, name := range names {
 		// log.Printf("SignZone: signing RRsets under name %s", name)
 		owner, err := zd.GetOwner(name)
@@ -419,6 +420,11 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 			}
 			if rrt == dns.TypeNS && name != zd.ZoneName {
 				continue // dont' sign delegations
+			}
+			if len(rrset.RRs) > 0 {
+				if t := rrset.RRs[0].Header().Ttl; t > maxObservedTTL {
+					maxObservedTTL = t
+				}
 			}
 			// XXX: What is the best way to identify that an RR is a glue record?
 			var wasglue bool
@@ -453,6 +459,13 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 			lgSigner.Error("failed to bump SOA serial", "zone", zd.ZoneName, "err", err)
 			return 0, err
 		}
+	}
+
+	// Persist the highest RRset TTL seen this pass. Used by the rollover
+	// worker's pending-child-withdraw phase to compute effective_margin.
+	// Reset per pass: a TTL reduction takes effect after one full cycle.
+	if err := UpsertZoneSigningMaxTTL(kdb, zd.ZoneName, maxObservedTTL); err != nil {
+		lgSigner.Warn("SignZone: persist max_observed_ttl", "zone", zd.ZoneName, "err", err)
 	}
 
 	return newrrsigs, nil

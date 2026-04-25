@@ -91,7 +91,7 @@ func KeyStateWorker(ctx context.Context, conf *Config) error {
 func checkAndTransitionKeys(ctx context.Context, conf *Config, kdb *KeyDB, propagationDelay time.Duration, standbyZskCount, standbyKskCount int) {
 	now := time.Now()
 
-	rolloverAutomatedForAllZones(ctx, conf, kdb, now)
+	rolloverAutomatedForAllZones(ctx, conf, kdb, propagationDelay, now)
 	TransitionRolloverKskDsPublishedToStandby(conf, kdb, now, propagationDelay)
 	promoteStandbyKskBootstrapAll(conf, kdb)
 

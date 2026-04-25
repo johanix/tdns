@@ -191,6 +191,160 @@ WHERE zone = ?`, zone)
 	return err
 }
 
+// setRolloverKeyStandbyAtTx stamps standby_at for one key on an existing TX.
+// Called when a SEP key transitions published → standby in a rollover-managed
+// zone; drives the oldest-standby selection in AtomicRollover.
+func setRolloverKeyStandbyAtTx(tx *Tx, zone string, keyid uint16, at time.Time) error {
+	s := at.UTC().Format(time.RFC3339)
+	_, err := tx.Exec(`UPDATE RolloverKeyState SET standby_at = ? WHERE zone = ? AND keyid = ?`, s, zone, int(keyid))
+	return err
+}
+
+// setRolloverKeyActiveAtTx stamps active_at for one key on an existing TX.
+// Called when a SEP key transitions standby → active (or the collapsed
+// published → active in multi-ds AtomicRollover); drives the rollover_due
+// check.
+func setRolloverKeyActiveAtTx(tx *Tx, zone string, keyid uint16, at time.Time) error {
+	s := at.UTC().Format(time.RFC3339)
+	_, err := tx.Exec(`UPDATE RolloverKeyState SET active_at = ? WHERE zone = ? AND keyid = ?`, s, zone, int(keyid))
+	return err
+}
+
+// setRolloverKeyStandbyAt is the non-TX variant for callers outside of
+// AtomicRollover (e.g. TransitionRolloverKskDsPublishedToStandby's
+// per-key loop).
+func setRolloverKeyStandbyAt(kdb *KeyDB, zone string, keyid uint16, at time.Time) error {
+	s := at.UTC().Format(time.RFC3339)
+	_, err := kdb.DB.Exec(`UPDATE RolloverKeyState SET standby_at = ? WHERE zone = ? AND keyid = ?`, s, zone, int(keyid))
+	return err
+}
+
+// setRolloverInProgressTx flips RolloverZoneState.rollover_in_progress on an
+// existing TX. Set TRUE inside AtomicRollover; cleared when the last retired
+// SEP key in the zone reaches removed at the end of pending-child-withdraw.
+func setRolloverInProgressTx(tx *Tx, zone string, inProgress bool) error {
+	v := 0
+	if inProgress {
+		v = 1
+	}
+	_, err := tx.Exec(`UPDATE RolloverZoneState SET rollover_in_progress = ? WHERE zone = ?`, v, zone)
+	return err
+}
+
+// getRolloverInProgressTx reads rollover_in_progress on an existing TX. Used
+// by confirmDSAndAdvanceCreatedKeysTx to route the post-observe phase write
+// to either pending-child-withdraw (if a rollover is in flight) or idle.
+func getRolloverInProgressTx(tx *Tx, zone string) (bool, error) {
+	var v int
+	err := tx.QueryRow(`SELECT rollover_in_progress FROM RolloverZoneState WHERE zone = ?`, zone).Scan(&v)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return v != 0, nil
+}
+
+// rolloverKeyActiveAt returns the active_at timestamp for one key, or nil if
+// unset. Used by rollover_due to determine whether the active KSK has lived
+// past policy.ksk.lifetime.
+func rolloverKeyActiveAt(kdb *KeyDB, zone string, keyid uint16) (*time.Time, error) {
+	var s sql.NullString
+	err := kdb.DB.QueryRow(`SELECT active_at FROM RolloverKeyState WHERE zone = ? AND keyid = ?`, zone, int(keyid)).Scan(&s)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !s.Valid || strings.TrimSpace(s.String) == "" {
+		return nil, nil
+	}
+	t, err := time.Parse(time.RFC3339, strings.TrimSpace(s.String))
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// listRolloverStandbyKeysTx returns (keyid, standby_at) for all SEP keys in
+// state=standby for the zone, ordered by standby_at (NULLs last) then keyid.
+// Used by AtomicRollover to pick the oldest standby for promotion.
+func listRolloverStandbyKeysTx(tx *Tx, zone string) ([]struct {
+	KeyID     uint16
+	StandbyAt sql.NullString
+}, error) {
+	rows, err := tx.Query(`
+SELECT d.keyid, r.standby_at
+FROM DnssecKeyStore d
+LEFT JOIN RolloverKeyState r ON r.zone = d.zonename AND r.keyid = d.keyid
+WHERE d.zonename = ? AND d.state = ? AND (d.flags & 1) = 1
+ORDER BY (r.standby_at IS NULL OR r.standby_at = '') ASC, r.standby_at ASC, d.keyid ASC`,
+		zone, DnskeyStateStandby)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []struct {
+		KeyID     uint16
+		StandbyAt sql.NullString
+	}
+	for rows.Next() {
+		var kid int
+		var sa sql.NullString
+		if err := rows.Scan(&kid, &sa); err != nil {
+			return nil, err
+		}
+		out = append(out, struct {
+			KeyID     uint16
+			StandbyAt sql.NullString
+		}{KeyID: uint16(kid), StandbyAt: sa})
+	}
+	return out, rows.Err()
+}
+
+// UpsertZoneSigningMaxTTL records the maximum RRset TTL observed during a
+// full zone-sign pass. Called at end-of-pass from SignZone. The value is
+// reset (not accumulated) per pass so a TTL reduction in the zone takes
+// effect after one complete sign cycle. Read by the rollover worker's
+// pending-child-withdraw phase to bound wait time by the longest-lived
+// RRSIG that could still be cached at resolvers.
+func UpsertZoneSigningMaxTTL(kdb *KeyDB, zone string, maxTTL uint32) error {
+	zone = strings.TrimSpace(zone)
+	if zone == "" {
+		return fmt.Errorf("UpsertZoneSigningMaxTTL: empty zone")
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	const q = `
+INSERT INTO ZoneSigningState (zone, max_observed_ttl, updated_at)
+VALUES (?, ?, ?)
+ON CONFLICT(zone) DO UPDATE SET
+  max_observed_ttl = excluded.max_observed_ttl,
+  updated_at = excluded.updated_at`
+	_, err := kdb.DB.Exec(q, zone, int64(maxTTL), now)
+	return err
+}
+
+// LoadZoneSigningMaxTTL returns the most recently persisted max_observed_ttl
+// for the zone, or 0 if no row exists yet (e.g. zone has never completed a
+// full sign pass since the column was introduced).
+func LoadZoneSigningMaxTTL(kdb *KeyDB, zone string) (uint32, error) {
+	zone = strings.TrimSpace(zone)
+	var v sql.NullInt64
+	err := kdb.DB.QueryRow(`SELECT max_observed_ttl FROM ZoneSigningState WHERE zone = ?`, zone).Scan(&v)
+	if err == sql.ErrNoRows {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if !v.Valid {
+		return 0, nil
+	}
+	return uint32(v.Int64), nil
+}
+
 // setLastRolloverError stamps last_rollover_error on one key.
 func setLastRolloverError(kdb *KeyDB, zone string, keyid uint16, msg string) error {
 	_, err := kdb.DB.Exec(`UPDATE RolloverKeyState SET last_rollover_error = ? WHERE zone = ? AND keyid = ?`, msg, zone, int(keyid))
