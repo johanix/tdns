@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -79,19 +80,24 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		phase = rolloverPhaseIdle
 	}
 
-	// rollover_due (§8.1): when no rollover is in progress, the active KSK
-	// has lived past policy.ksk.lifetime, and a standby SEP exists, fire
-	// AtomicRollover. The tick then re-loads phase and continues; the new
-	// pending-child-publish phase will be handled below if reached this
-	// pass, or on the next tick.
+	// rollover_due (§8.1): when no rollover is in progress and either the
+	// scheduled lifetime has elapsed OR a manual-ASAP request has reached
+	// its computed earliest time, fire AtomicRollover. The tick then
+	// re-loads phase and continues; the new pending-child-publish phase
+	// will be handled below if reached this pass, or on the next tick.
 	if phase == rolloverPhaseIdle && !row.RolloverInProgress {
-		due, err := rolloverDue(kdb, zone, pol, now)
+		due, manual, err := rolloverDue(kdb, zone, pol, row, now)
 		if err != nil {
 			lgSigner.Warn("rollover: rollover_due check failed", "zone", zone, "err", err)
 		} else if due {
 			if _, _, err := AtomicRollover(conf, kdb, zone); err != nil {
 				lgSigner.Warn("rollover: AtomicRollover failed", "zone", zone, "err", err)
 			} else {
+				if manual {
+					if err := ClearManualRolloverRequest(kdb, zone); err != nil {
+						lgSigner.Warn("rollover: clear manual_rollover_* failed", "zone", zone, "err", err)
+					}
+				}
 				row, err = LoadRolloverZoneRow(kdb, zone)
 				if err != nil {
 					return err
@@ -551,23 +557,58 @@ func rolloverAutomatedForAllZones(ctx context.Context, conf *Config, kdb *KeyDB,
 	}
 }
 
-// rolloverDue returns true when the zone should fire AtomicRollover: the
-// active SEP KSK has lived past policy.ksk.lifetime, no rollover is currently
-// in progress (caller-checked), and at least one standby SEP key exists. A
-// zero-or-unset KSK lifetime means "never expires" — return false.
-func rolloverDue(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Time) (bool, error) {
-	if pol == nil {
-		return false, nil
+// rolloverDue returns (due, manual, err). due == true means the zone should
+// fire AtomicRollover this tick. manual == true means the trigger was a
+// manual-ASAP request (callers must clear manual_rollover_* on success).
+//
+// Two independent triggers, OR'd:
+//
+//  1. Scheduled: active SEP KSK has lived past policy.ksk.lifetime.
+//  2. Manual:    operator set manual_rollover_earliest <= now via `rollover asap`.
+//
+// Both require: no rollover in progress (caller-checked) and a standby SEP
+// key exists.
+func rolloverDue(kdb *KeyDB, zone string, pol *DnssecPolicy, row *RolloverZoneRow, now time.Time) (due bool, manual bool, err error) {
+	if pol == nil || row == nil {
+		return false, false, nil
 	}
+
+	// At least one standby SEP key must exist for either trigger.
+	standby, err := GetDnssecKeysByState(kdb, zone, DnskeyStateStandby)
+	if err != nil {
+		return false, false, fmt.Errorf("list standby keys: %w", err)
+	}
+	haveStandby := false
+	for i := range standby {
+		if standby[i].Flags&dns.SEP != 0 {
+			haveStandby = true
+			break
+		}
+	}
+	if !haveStandby {
+		return false, false, nil
+	}
+
+	// Manual-ASAP: take precedence so operator action is honored even when
+	// scheduled would also fire.
+	if row.ManualRolloverEarliest.Valid && strings.TrimSpace(row.ManualRolloverEarliest.String) != "" {
+		if t, e := time.Parse(time.RFC3339, strings.TrimSpace(row.ManualRolloverEarliest.String)); e == nil {
+			if !now.Before(t) {
+				return true, true, nil
+			}
+		} else {
+			lgSigner.Warn("rollover: invalid manual_rollover_earliest", "zone", zone, "value", row.ManualRolloverEarliest.String, "err", e)
+		}
+	}
+
+	// Scheduled: KSK.Lifetime == 0 means "never expires."
 	if pol.KSK.Lifetime == 0 {
-		return false, nil
+		return false, false, nil
 	}
 	lifetime := time.Duration(pol.KSK.Lifetime) * time.Second
-
-	// Find the active SEP key.
 	active, err := GetDnssecKeysByState(kdb, zone, DnskeyStateActive)
 	if err != nil {
-		return false, fmt.Errorf("list active keys: %w", err)
+		return false, false, fmt.Errorf("list active keys: %w", err)
 	}
 	var activeKid uint16
 	for i := range active {
@@ -577,31 +618,19 @@ func rolloverDue(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Time) (boo
 		}
 	}
 	if activeKid == 0 {
-		return false, nil
+		return false, false, nil
 	}
 	at, err := rolloverKeyActiveAt(kdb, zone, activeKid)
 	if err != nil {
-		return false, fmt.Errorf("active_at lookup: %w", err)
+		return false, false, fmt.Errorf("active_at lookup: %w", err)
 	}
 	if at == nil {
-		// No timestamp yet (e.g. legacy zone): cannot fire scheduled rollover.
-		return false, nil
+		return false, false, nil
 	}
-	if now.Sub(*at) < lifetime {
-		return false, nil
+	if now.Sub(*at) >= lifetime {
+		return true, false, nil
 	}
-
-	// At least one standby SEP key must exist.
-	standby, err := GetDnssecKeysByState(kdb, zone, DnskeyStateStandby)
-	if err != nil {
-		return false, fmt.Errorf("list standby keys: %w", err)
-	}
-	for i := range standby {
-		if standby[i].Flags&dns.SEP != 0 {
-			return true, nil
-		}
-	}
-	return false, nil
+	return false, false, nil
 }
 
 // effectiveMarginForZone returns max(policy.clamping.margin, max_observed_ttl)

@@ -9,17 +9,19 @@ import (
 
 // RolloverZoneRow is persisted rollover coordination for one zone (RolloverZoneState).
 type RolloverZoneRow struct {
-	Zone               string
-	LastSubmittedLow   sql.NullInt64
-	LastSubmittedHigh  sql.NullInt64
-	LastConfirmedLow   sql.NullInt64
-	LastConfirmedHigh  sql.NullInt64
-	RolloverPhase      string
-	RolloverPhaseAt    sql.NullString
-	RolloverInProgress bool
-	ObserveStartedAt   sql.NullString
-	ObserveNextPollAt  sql.NullString
-	ObserveBackoffSecs sql.NullInt64
+	Zone                      string
+	LastSubmittedLow          sql.NullInt64
+	LastSubmittedHigh         sql.NullInt64
+	LastConfirmedLow          sql.NullInt64
+	LastConfirmedHigh         sql.NullInt64
+	RolloverPhase             string
+	RolloverPhaseAt           sql.NullString
+	RolloverInProgress        bool
+	ManualRolloverRequestedAt sql.NullString
+	ManualRolloverEarliest    sql.NullString
+	ObserveStartedAt          sql.NullString
+	ObserveNextPollAt         sql.NullString
+	ObserveBackoffSecs        sql.NullInt64
 }
 
 func EnsureRolloverZoneRow(kdb *KeyDB, zone string) error {
@@ -42,6 +44,7 @@ SELECT zone,
        last_ds_submitted_index_low, last_ds_submitted_index_high,
        last_ds_confirmed_index_low, last_ds_confirmed_index_high,
        rollover_phase, rollover_phase_at, rollover_in_progress,
+       manual_rollover_requested_at, manual_rollover_earliest,
        observe_started_at, observe_next_poll_at, observe_backoff_seconds
 FROM RolloverZoneState WHERE zone = ?`
 	var r RolloverZoneRow
@@ -51,6 +54,7 @@ FROM RolloverZoneState WHERE zone = ?`
 		&r.LastSubmittedLow, &r.LastSubmittedHigh,
 		&r.LastConfirmedLow, &r.LastConfirmedHigh,
 		&r.RolloverPhase, &r.RolloverPhaseAt, &inProg,
+		&r.ManualRolloverRequestedAt, &r.ManualRolloverEarliest,
 		&r.ObserveStartedAt, &r.ObserveNextPollAt, &r.ObserveBackoffSecs,
 	)
 	if err == sql.ErrNoRows {
@@ -348,6 +352,58 @@ func LoadZoneSigningMaxTTL(kdb *KeyDB, zone string) (uint32, error) {
 // setLastRolloverError stamps last_rollover_error on one key.
 func setLastRolloverError(kdb *KeyDB, zone string, keyid uint16, msg string) error {
 	_, err := kdb.DB.Exec(`UPDATE RolloverKeyState SET last_rollover_error = ? WHERE zone = ? AND keyid = ?`, msg, zone, int(keyid))
+	return err
+}
+
+// ClearLastRolloverError zeroes last_rollover_error for one key. Used by the
+// `rollover reset` CLI to unstick a hard-failed key after operator action.
+func ClearLastRolloverError(kdb *KeyDB, zone string, keyid uint16) error {
+	res, err := kdb.DB.Exec(`UPDATE RolloverKeyState SET last_rollover_error = NULL WHERE zone = ? AND keyid = ?`, zone, int(keyid))
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("no RolloverKeyState row for zone %s keyid %d", zone, keyid)
+	}
+	return nil
+}
+
+// SetManualRolloverRequest stamps manual_rollover_requested_at = now and
+// manual_rollover_earliest = earliest. Called by `rollover asap` after
+// ComputeEarliestRollover succeeds.
+func SetManualRolloverRequest(kdb *KeyDB, zone string, requestedAt, earliest time.Time) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState
+SET manual_rollover_requested_at = ?,
+    manual_rollover_earliest = ?
+WHERE zone = ?`,
+		requestedAt.UTC().Format(time.RFC3339),
+		earliest.UTC().Format(time.RFC3339),
+		zone)
+	return err
+}
+
+// ClearManualRolloverRequest nulls both manual_rollover_* columns. Called by
+// `rollover cancel` and after a manual-ASAP rollover fires.
+func ClearManualRolloverRequest(kdb *KeyDB, zone string) error {
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState
+SET manual_rollover_requested_at = NULL,
+    manual_rollover_earliest = NULL
+WHERE zone = ?`, zone)
+	return err
+}
+
+// clearManualRolloverRequestTx is the in-TX variant used inside the rollover
+// fire path so the manual_* clear and the AtomicRollover state writes commit
+// atomically.
+func clearManualRolloverRequestTx(tx *Tx, zone string) error {
+	_, err := tx.Exec(`UPDATE RolloverZoneState
+SET manual_rollover_requested_at = NULL,
+    manual_rollover_earliest = NULL
+WHERE zone = ?`, zone)
 	return err
 }
 
