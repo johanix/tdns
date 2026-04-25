@@ -67,6 +67,14 @@ type ImrResponse struct {
 // StartEngine("ImrEngine", ...). Apps that don't need early availability can
 // just call ImrEngine() which calls InitImrEngine() internally if needed.
 //
+// Idempotent: if conf.Internal.ImrEngine is already set, returns nil without
+// touching any state. The IMR is a process singleton by intent — its priming
+// cache, root hints, and validation state are expensive to construct and
+// would diverge between two instances. The guard at the top of this function
+// makes that singleton property hold by construction, regardless of which
+// application initialises the IMR or in what order. First-init wins; the
+// `quiet` parameter on subsequent calls is ignored.
+//
 // IMPORTANT: tdns-mp depends on this split. The mpagent calls InitImrEngine()
 // synchronously at startup so that conf.Internal.ImrEngine is guaranteed
 // non-nil before transport bridges and agent registries are created. Without
@@ -74,6 +82,13 @@ type ImrResponse struct {
 // calls panic. Do not fold InitImrEngine back into ImrEngine without updating
 // tdns-mp/v2/start_agent.go.
 func (conf *Config) InitImrEngine(quiet bool) error {
+	// Idempotency guard: IMR is a process singleton. Subsequent calls are
+	// no-ops; first-init wins.
+	if conf.Internal.ImrEngine != nil {
+		lgImr.Debug("InitImrEngine: already initialized, returning existing instance")
+		return nil
+	}
+
 	// 1. Create the cache
 	rrcache := cache.NewRRsetCache(log.Default(), conf.Imr.Verbose, conf.Imr.Debug)
 	rrcache.Quiet = quiet
