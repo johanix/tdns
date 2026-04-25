@@ -157,6 +157,18 @@ func transitionRetiredToRemoved(conf *Config, kdb *KeyDB, now time.Time, propaga
 	}
 
 	for _, key := range keys {
+		// 4B guard: SEP keys in rollover-managed zones are owned by the
+		// rollover worker's pending-child-withdraw phase, which uses
+		// effective_margin (not propagationDelay) and sequences the
+		// retired→removed transition with a follow-up DS push. Skip them
+		// here. ZSKs and SEP keys in non-rollover zones still flow
+		// through this generic path.
+		if key.Flags&dns.SEP != 0 {
+			if zd, ok := Zones.Get(key.ZoneName); ok && zd.DnssecPolicy != nil && zd.DnssecPolicy.Rollover.Method != RolloverMethodNone {
+				continue
+			}
+		}
+
 		if key.RetiredAt == nil {
 			lgSigner.Warn("KeyStateWorker: retired key has no retired_at timestamp, skipping", "zone", key.ZoneName, "keyid", key.KeyTag)
 			continue

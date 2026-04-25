@@ -371,7 +371,19 @@ SET observe_started_at = NULL,
 WHERE zone = ?`, zone); err != nil {
 		return 0, fmt.Errorf("clear observe schedule: %w", err)
 	}
-	if err := setRolloverPhaseTx(tx, zone, rolloverPhaseIdle); err != nil {
+	// 4B routing: if a rollover is in progress (set by AtomicRollover),
+	// the post-observe path leads to pending-child-withdraw, not idle.
+	// Read rollover_in_progress inside this same TX so the read and the
+	// phase write are atomic.
+	inProgress, err := getRolloverInProgressTx(tx, zone)
+	if err != nil {
+		return 0, fmt.Errorf("read rollover_in_progress: %w", err)
+	}
+	nextPhase := rolloverPhaseIdle
+	if inProgress {
+		nextPhase = rolloverPhasePendingChildWithdraw
+	}
+	if err := setRolloverPhaseTx(tx, zone, nextPhase); err != nil {
 		return 0, fmt.Errorf("reset phase: %w", err)
 	}
 
