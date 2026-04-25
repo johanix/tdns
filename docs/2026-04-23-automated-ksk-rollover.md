@@ -2182,18 +2182,25 @@ scope for 4B.)
 pipeline fill but cannot cycle. Phase 6 (rapid-rollover validation)
 cannot start until `AtomicRollover` exists.
 
-### Phase 4C — Manual-ASAP CLI + status/reset (1 day, **Medium**) — **pending**
+### Phase 4C — Manual-ASAP CLI + status/reset (1 day, **Medium**) — **landed**
 
 **Goal:** Give operators a real handle on the system. They can ask
 "when is the earliest a rollover could fire?" without changing
 state, schedule a rollover at that time, cancel a pending request,
 inspect zone state, and clear hard-fail errors.
 
+**CLI tree decision (2026-04-25):** the existing
+`tdns zone keystore dnssec rollover` is a leaf command (legacy
+manual swap via API). Rather than repurpose it as a parent — which
+would be a small breaking CLI change — the five new subcommands
+live under a sibling parent `auto-rollover`. Revisit later if the
+two surfaces should merge.
+
 **Scope:**
 - `ComputeEarliestRollover(z)` returning
   `(t_earliest, gates, fromIdx, toIdx, err)` per §8.5
 - Five new CLI subcommands under `tdns zone keystore dnssec
-  rollover`:
+  auto-rollover`:
   - `when --zone=Z` (no state change)
   - `asap --zone=Z` (sets `manual_rollover_*` columns)
   - `cancel --zone=Z`
@@ -2203,11 +2210,24 @@ inspect zone state, and clear hard-fail errors.
 
 **Files:**
 - `v2/ksk_rollover_earliest.go` (new) — `ComputeEarliestRollover`
-- `v2/cli/ksk_rollover_cli.go` (extend) — five subcommands
+- `v2/cli/ksk_rollover_cli.go` (extend) — five subcommands +
+  `newAutoRolloverCmd` parent
+
+**v1 conservatism in `ComputeEarliestRollover`:**
+- `max-ttl-expiry` uses `ZoneSigningState.max_observed_ttl`
+  (already persisted by 4B's sign-loop tracker).
+- `max-rrsig-validity` uses the policy's largest `SigValidity`
+  across KSK/ZSK/CSK as a conservative upper bound on
+  currently-published validity. Future work: track observed
+  validity in `ZoneSigningState` alongside `max_observed_ttl`.
+- `ds-ready` is satisfied at `now` because the selected next-KSK
+  is in `standby` by `AtomicRollover`'s selection rule, which
+  implies "DS observed + propagation already elapsed."
 
 **Dependency:** Builds on 4B's `rollover_due` (manual-ASAP is just
 another way for `rollover_due` to return true). Additive only — no
-FSM changes.
+FSM changes. Manual-ASAP takes precedence over scheduled when
+both fire on the same tick, so operator action is always honored.
 
 **Why 4C second:** smallest possible add that surfaces operational
 issues. Running 4B for a few days will produce stuck rollovers,

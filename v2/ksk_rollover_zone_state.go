@@ -355,6 +355,24 @@ func setLastRolloverError(kdb *KeyDB, zone string, keyid uint16, msg string) err
 	return err
 }
 
+// LoadLastRolloverError returns last_rollover_error for one key (empty
+// string if unset or the row doesn't exist). Used by the `auto-rollover
+// status` CLI for read-only inspection.
+func LoadLastRolloverError(kdb *KeyDB, zone string, keyid uint16) (string, error) {
+	var s sql.NullString
+	err := kdb.DB.QueryRow(`SELECT last_rollover_error FROM RolloverKeyState WHERE zone = ? AND keyid = ?`, zone, int(keyid)).Scan(&s)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	if !s.Valid {
+		return "", nil
+	}
+	return s.String, nil
+}
+
 // ClearLastRolloverError zeroes last_rollover_error for one key. Used by the
 // `rollover reset` CLI to unstick a hard-failed key after operator action.
 func ClearLastRolloverError(kdb *KeyDB, zone string, keyid uint16) error {
