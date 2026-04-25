@@ -15,6 +15,7 @@ type RolloverZoneRow struct {
 	LastConfirmedLow   sql.NullInt64
 	LastConfirmedHigh  sql.NullInt64
 	RolloverPhase      string
+	RolloverPhaseAt    sql.NullString
 	RolloverInProgress bool
 	ObserveStartedAt   sql.NullString
 	ObserveNextPollAt  sql.NullString
@@ -40,7 +41,7 @@ func LoadRolloverZoneRow(kdb *KeyDB, zone string) (*RolloverZoneRow, error) {
 SELECT zone,
        last_ds_submitted_index_low, last_ds_submitted_index_high,
        last_ds_confirmed_index_low, last_ds_confirmed_index_high,
-       rollover_phase, rollover_in_progress,
+       rollover_phase, rollover_phase_at, rollover_in_progress,
        observe_started_at, observe_next_poll_at, observe_backoff_seconds
 FROM RolloverZoneState WHERE zone = ?`
 	var r RolloverZoneRow
@@ -49,7 +50,7 @@ FROM RolloverZoneState WHERE zone = ?`
 		&r.Zone,
 		&r.LastSubmittedLow, &r.LastSubmittedHigh,
 		&r.LastConfirmedLow, &r.LastConfirmedHigh,
-		&r.RolloverPhase, &inProg,
+		&r.RolloverPhase, &r.RolloverPhaseAt, &inProg,
 		&r.ObserveStartedAt, &r.ObserveNextPollAt, &r.ObserveBackoffSecs,
 	)
 	if err == sql.ErrNoRows {

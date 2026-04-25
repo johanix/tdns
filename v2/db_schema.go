@@ -96,8 +96,10 @@ UNIQUE (zonename, keyid)
 		rollover_method      TEXT,
 		rollover_state_at    TEXT,
 		ds_submitted_at      TEXT,
-		ds_observed_at         TEXT,
-		last_rollover_error    TEXT,
+		ds_observed_at       TEXT,
+		standby_at           TEXT,
+		active_at            TEXT,
+		last_rollover_error  TEXT,
 		PRIMARY KEY (zone, keyid)
 	)`,
 
@@ -118,6 +120,18 @@ UNIQUE (zonename, keyid)
 		observe_started_at             TEXT,
 		observe_next_poll_at           TEXT,
 		observe_backoff_seconds        INTEGER
+	)`,
+
+	// ZoneSigningState holds per-zone signing-loop state. max_observed_ttl
+	// is the maximum RRset TTL seen during the most recent full zone-sign
+	// pass; written once at end-of-pass. Used by the rollover worker's
+	// pending-child-withdraw phase to compute effective_margin =
+	// max(policy.clamping.margin, max_observed_ttl), bounding the wait by
+	// the longest-lived RRSIG that could still be cached at resolvers.
+	"ZoneSigningState": `CREATE TABLE IF NOT EXISTS 'ZoneSigningState' (
+		zone              TEXT NOT NULL PRIMARY KEY,
+		max_observed_ttl  INTEGER NOT NULL DEFAULT 0,
+		updated_at        TEXT
 	)`,
 }
 

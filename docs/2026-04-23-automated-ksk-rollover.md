@@ -1690,10 +1690,19 @@ CREATE TABLE IF NOT EXISTS RolloverKeyState (
     rollover_state_at    TIMESTAMP,           -- most recent state transition
     ds_submitted_at      TIMESTAMP,           -- last DS push containing this key
     ds_observed_at       TIMESTAMP,           -- first DS observation at parent
+    standby_at           TIMESTAMP,           -- 4B: stamped on published → standby
+    active_at            TIMESTAMP,           -- 4B: stamped on standby → active
     last_rollover_error  TEXT,
     PRIMARY KEY (zone, keyid)
 );
 ```
+
+`standby_at` and `active_at` live in `RolloverKeyState` rather than
+`DnssecKeyStore` because they are only meaningful for keys under
+rollover management. `DnssecKeyStore` already carries
+`published_at` and `retired_at` (added in 4A and earlier work);
+those stay where they are since they are stamped unconditionally
+on the matching state transition regardless of rollover status.
 
 Rows are created when the rollover worker first touches a key
 (e.g. on generation or import) and deleted when the key reaches
@@ -1786,6 +1795,40 @@ The same rule applies to `RolloverZoneState` updates that
 accompany key-state changes: DS submission/observation ranges are
 updated in the same transaction as the key-state advances that
 depend on them.
+
+### 9.5 New table: `ZoneSigningState` (4B)
+
+Per-zone signing-loop state. Currently holds only the maximum RRset
+TTL observed during the most recent full zone-sign pass; future
+fields can be added without disturbing rollover or keystore
+schemas.
+
+```
+CREATE TABLE IF NOT EXISTS ZoneSigningState (
+    zone              TEXT PRIMARY KEY,
+    max_observed_ttl  INTEGER NOT NULL DEFAULT 0,
+    updated_at        TIMESTAMP
+);
+```
+
+Why a separate table rather than a column on `RolloverZoneState`:
+`max_observed_ttl` is updated on every full zone-sign pass,
+regardless of whether the zone is under rollover management.
+Putting it in `RolloverZoneState` would force a row to exist for
+every signed zone, defeating the "rollover state only for
+mid-rollover zones" property. Keeping signing-loop state and
+rollover-pipeline state in separate tables also matches the
+extractability principle in §14.
+
+Write cadence: the sign loop tracks the max TTL in memory during
+the pass and persists once at end-of-pass. A TTL reduction takes
+effect after one complete sign cycle.
+
+Read cadence: `pending-child-withdraw` reads `max_observed_ttl`
+when computing `effective_margin = max(policy.clamping.margin,
+max_observed_ttl)`. Because `AtomicRollover` triggers a re-sign
+that completes well before the wait expires, the value read is
+the post-rollover one.
 
 ## 10. CLI and Observability
 
@@ -2020,48 +2063,99 @@ stress for rapid-rollover experimentation).
 
 **Goal:** A KSK whose `active_at + ksk.lifetime` has elapsed
 transitions to `retired`, the next standby SEP key becomes active,
-and after `margin` the retired key reaches `removed` with the DS
-RRset re-pushed to the parent. End-to-end, automatic, restart-safe.
-This is what closes the rollover loop that 4A's pipeline opens.
+and after `effective_margin` the retired key reaches `removed`
+with the DS RRset re-pushed to the parent. End-to-end, automatic,
+restart-safe. This is what closes the rollover loop that 4A's
+pipeline opens.
 
 **Scope:**
-- `atomic_rollover(z)` (§3.4 invariant: exactly one active KSK)
+- `AtomicRollover(z)` (§3.4 invariant: exactly one active KSK)
 - `pending-child-publish` and `pending-child-withdraw` phases (the
   two §8.8 phases 4A skipped)
 - Scheduled `rollover_due()` trigger (no manual-ASAP yet — that's 4C)
 - `rollover_in_progress` flag set/clear discipline (§15.6)
+- New `RolloverKeyState.active_at` / `standby_at` columns and the
+  per-key stamping helpers
+- New per-zone `ZoneSigningState` table tracking
+  `max_observed_ttl`, written once per full sign pass
 
 **Files:**
-- `v2/ksk_rollover_atomic.go` (new) — `atomic_rollover(z)`, all in
+- `v2/ksk_rollover_atomic.go` (new) — `AtomicRollover(z)`, all in
   one TX:
-  - select KSK_old (the active SEP) and KSK_new (oldest standby SEP)
+  - select KSK_old (the active SEP) and KSK_new (standby SEP with
+    oldest `standby_at`; tie-break by `rollover_index`)
   - `KSK_old: active → retired`
   - `KSK_new: standby → published → active` (collapsed for
     multi-ds; multi-step for double-signature later in 4E)
   - set `RolloverZoneState.rollover_in_progress = TRUE`
   - set `rollover_phase = pending-child-publish`
+  - stamp `active_at` on KSK_new in `RolloverKeyState`
   - trigger re-sign of DNSKEY + apex
 - `v2/ksk_rollover_automated.go` (extend) — two new phase cases:
-  - `pending-child-publish`: for v1, advance after a fixed wait of
+  - `pending-child-publish`: advance after a fixed wait of
     `kasp.propagation_delay` from `rollover_phase_at`. Future work
     can replace this with actual secondary-observation. Transitions
     to `pending-parent-push`.
   - `pending-child-withdraw`: for any KSK in `retired` past
-    `margin`, advance to `removed` in a single TX. When all retired
-    keys for the zone have reached `removed`: clear
-    `rollover_in_progress`, recompute target DS set (foreign-DS
-    drops out), re-arm the push if the set changed, transition to
-    `idle`.
+    `effective_margin = max(policy.clamping.margin, max_observed_ttl)`,
+    advance to `removed` in a single TX. When all retired keys for
+    the zone have reached `removed`: clear `rollover_in_progress`,
+    recompute target DS set (foreign-DS drops out), re-arm the push
+    if the set changed, transition to `idle`.
 - Extension to existing tick: `rollover_due()` checks
   `now - active_ksk.active_at > policy.ksk.lifetime`
   AND `rollover_in_progress == FALSE`
-  AND a `standby` SEP key exists. On true, calls `atomic_rollover`.
+  AND a `standby` SEP key exists. On true, calls `AtomicRollover`.
+- `v2/sign.go` (extend) — sign loop tracks the maximum RRset TTL
+  seen during the current full zone-sign pass (in-memory); at
+  end-of-pass, persists the value to `ZoneSigningState`. Reset
+  per pass so a TTL reduction takes effect after one cycle.
 
 **Routing change:** `confirmDSAndAdvanceCreatedKeysTx` (existing 4A
 path) currently always returns the zone to `idle`. After 4B it
 must route to `pending-child-withdraw` if `rollover_in_progress`
-is set, else `idle`. One-line edit; the helper already does the
-work in a single TX.
+is set, else `idle`. The decision reads `rollover_in_progress`
+inside the same TX (via a new `getRolloverInProgressTx` helper)
+so the read and the phase write are atomic.
+
+**Guards added in 4B:**
+- `transitionRetiredToRemoved` (in `key_state_worker.go`) skips any
+  SEP key when `zone.policy.rollover.method != none`. The rollover
+  worker's `pending-child-withdraw` owns SEP `retired → removed`
+  for rollover-managed zones; the generic worker continues to own
+  ZSK `retired → removed` and SEP transitions for non-rollover
+  zones.
+
+**Schema additions (in §9):**
+- `RolloverKeyState.active_at TEXT` — stamped on
+  `standby → active` (or `published → active` collapsed
+  transition).
+- `RolloverKeyState.standby_at TEXT` — stamped on `published →
+  standby`. Drives oldest-standby selection in `AtomicRollover`.
+- New table `ZoneSigningState (zone PK, max_observed_ttl INTEGER,
+  updated_at TEXT)` — one row per signed zone, written at
+  end-of-zone-sign-pass.
+- `LoadRolloverZoneRow` extended to load `rollover_phase_at` (the
+  column already exists; only the load query and `RolloverZoneRow`
+  struct field are missing).
+
+**Margin discussion (resolved 2026-04-25):**
+`policy.clamping.margin` is a required config field; config
+validation fails closed if absent. `clamping.enabled: false` does
+not zero `margin`, but the operator-configured `margin` may be
+shorter than the longest-TTL RRset in the zone — meaning a
+recently-signed RRSIG over a high-TTL RRset could still be cached
+at resolvers when a retired KSK is removed. To bound this safely
+without requiring operators to manually align `margin` with their
+TTLs, the sign loop tracks the maximum RRset TTL observed during
+each full zone-sign pass and persists it as `max_observed_ttl`.
+The `pending-child-withdraw` hold time is then
+`effective_margin = max(policy.clamping.margin, max_observed_ttl)`,
+which conservatively waits out the longest-lived RRSIG that was
+issued before the rollover began. Reset per pass: a TTL reduction
+takes effect after one full sign cycle. (Future work: also wait
+out the longest RRSIG `Expiration - Inception` window. Out of
+scope for 4B.)
 
 **Out of scope for 4B:**
 - `ComputeEarliestRollover` / manual-ASAP / `rollover when` /
@@ -2079,12 +2173,14 @@ work in a single TX.
   dry (KSK_n → KSK_n+1 → KSK_n+2). Proves `rollover_in_progress`
   cycles cleanly and pipeline-fill keeps up.
 - Restart mid-`pending-child-withdraw` resumes correctly.
-- Restart mid-`atomic_rollover` (i.e. crash inside the TX): no
+- Restart mid-`AtomicRollover` (i.e. crash inside the TX): no
   partial state visible.
+- Zone with high-TTL RRset and short `margin`: confirm
+  `effective_margin` clamps to the TTL, not `margin`.
 
 **Why 4B first:** without it, the system can do a one-time
 pipeline fill but cannot cycle. Phase 6 (rapid-rollover validation)
-cannot start until `atomic_rollover` exists.
+cannot start until `AtomicRollover` exists.
 
 ### Phase 4C — Manual-ASAP CLI + status/reset (1 day, **Medium**) — **pending**
 
