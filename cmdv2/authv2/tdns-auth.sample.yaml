@@ -7,63 +7,63 @@
 #   - dynamic-zones.yaml:         Auto-generated dynamic zones (created by server)
 #
 include:
-                        - auth-templates.sample.yaml    # Zone templates (rename to .yaml when deploying)
-                        - auth-zones.sample.yaml        # Zone declarations (rename to .yaml when deploying)
-                        - /var/lib/tdns/dynamic-zones.yaml  # Dynamic zones (auto-managed, don't edit manually)
+   - auth-templates.sample.yaml          # Zone templates (rename to .yaml when deploying)
+   - auth-zones.sample.yaml              # Zone declarations (rename to .yaml when deploying)
+   - /var/lib/tdns/dynamic-zones.yaml    # Dynamic zones (auto-managed, don't edit manually)
 
 service:
-                        name:              TDNS-AUTH
-                        identities:        [ ns.axfr.net., nsa.johani.org., foo.com. ]
-                        verbose:           true
-                        debug:             true    # writes processed zone to disk
-                        refresh:           true
-                        maxrefresh:        1800    # seconds. Cap refresh counter to max this
-                        reset_soa_serial:  false   # replace inbound SOA serial with unixtime.
-                        
-                        transport:
-                           type:    svcb              # svcb | tsync | none; default is none
-                           signal:  "doq:20,dot:10"   # comma sep list of doq,dot,doh and do53 with amount of total traffic ok
+   name:              TDNS-AUTH
+   identities:        [ ns.axfr.net., nsa.johani.org., foo.com. ]
+   verbose:           true
+   debug:             true     # writes processed zone to disk
+   refresh:           true
+   maxrefresh:        1800     # seconds. Cap refresh counter to max this
+   reset_soa_serial:  false    # replace inbound SOA serial with unixtime.
+
+   transport:
+      type:    svcb               # svcb | tsync | none; default is none
+      signal:  "doq:20,dot:10"    # comma-sep list of doq,dot,doh,do53 with traffic share
 
 dnsengine:
-                        addresses:    [ 127.0.0.1:5354, '[::1]:5354' ]
-                        transports:   [ doq, dot, doh ]
-                        ports:
-                           do53:  [ 53 ]
-                           doq:   [ 853 ]
-                           dot:   [ 853 ]
-                           doh:   [ 443 ]
-                        certfile:  /etc/tdns/certs/servers/localhost..crt
-                        keyfile:   /etc/tdns/certs/servers/localhost..key
+   addresses:    [ 127.0.0.1:5354, '[::1]:5354' ]
+   transports:   [ doq, dot, doh ]
+   ports:
+      do53:  [ 53 ]
+      doq:   [ 853 ]
+      dot:   [ 853 ]
+      doh:   [ 443 ]
+   certfile:  /etc/tdns/certs/servers/localhost..crt
+   keyfile:   /etc/tdns/certs/servers/localhost..key
 
 resignerengine:
-                        interval:  300    # seconds between runs. Reasonable value is likely ~3600
-                        keygen:
-                           mode:       internal    # internal | external
-                           generator:  /usr/sbin/dnssec-keygen
+   interval:  300    # seconds between runs. Reasonable value is likely ~3600
+   keygen:
+      mode:       internal    # internal | external
+      generator:  /usr/sbin/dnssec-keygen
 
 imrengine:
-                        active:              true    # true | false, default is true
-                        root-hints:          /etc/tdns/root.hints    # optional, default is compiled-in hints
-                        trust-anchor-file:   /etc/tdns/root.key      # not optional, no DNSSEC validation without this
+   active:             true                    # true | false, default is true
+   root-hints:         /etc/tdns/root.hints    # optional, default is compiled-in hints
+   trust-anchor-file:  /etc/tdns/root.key      # not optional, no DNSSEC validation without this
 
 apiserver:
-                        addresses:  [ 127.0.0.1:8989 ]
-                        apikey:     winter-is-coming-santa-stuck-in-chimney
-                        certfile:   /etc/tdns/certs/servers/localhost..crt
-                        keyfile:    /etc/tdns/certs/servers/localhost..key
+   addresses:  [ 127.0.0.1:8989 ]
+   apikey:     winter-is-coming-santa-stuck-in-chimney
+   certfile:   /etc/tdns/certs/servers/localhost..crt
+   keyfile:    /etc/tdns/certs/servers/localhost..key
 
 server:
-                        id:        ooga booga boo
-                        version:   tdns-server {version}
-                        hostname:  there-is-no-place-like-127.0.0.1
+   id:        ooga booga boo
+   version:   tdns-server {version}
+   hostname:  there-is-no-place-like-127.0.0.1
 
-childsync:          # What to do when we are the child
-                        schemes:          [ update ]    # , notify ] # this child will use either
-                        update-ns:        true
-                        update-a:         true
-                        update-aaaa:      true
-                        sync-on-boot:     false
-                        syncwithparent:   true
+childsync:                 # What to do when we are the child
+   schemes:         [ update ]    # , notify ] # this child will use either
+   update-ns:       true
+   update-a:        true
+   update-aaaa:     true
+   sync-on-boot:    false
+   syncwithparent:  true
 
 # Named delegation backends for parent zones that receive child UPDATEs.
 # Predefined: "db" and "direct" (no config needed).
@@ -73,51 +73,51 @@ childsync:          # What to do when we are the child
 #     directory:  /var/lib/tdns/delegations/dnslab
 
 delegationsync:
-                        parent:
-                           # in parent zones, we support these schemes, and will publish DSYNC RRs
-                           # if allowed to:
-                           schemes:  [ notify, update ]
-                           notify:
-                              types:      [ CDS, CSYNC ]
-                              port:       5354                         # MUST be a port the dnsengine listens on
-                              target:     notifications.{ZONENAME}     # {ZONENAME} will be expanded at run-time
-                              addresses:  [ 127.0.0.1, '::1' ]         # There must be no port and also no '[]' around v6 addresses here
-                           update:
-                              types:      [ ANY ]
-                              port:       5354                         # MUST be a port the dnsengine listens on
-                              target:     updates.{ZONENAME}
-                              addresses:  [ 127.0.0.1, '::1' ]
-                              keygen:
-                                 mode:       internal    # internal | external
-                                 generator:  /opt/local/bin/dnssec-keygen
-                                 algorithm:  ED25519
+   parent:
+      # in parent zones, we support these schemes, and will publish DSYNC RRs
+      # if allowed to:
+      schemes:  [ notify, update ]
+      notify:
+         types:      [ CDS, CSYNC ]
+         port:       5354                      # MUST be a port the dnsengine listens on
+         target:     notifications.{ZONENAME}  # {ZONENAME} expanded at run-time
+         addresses:  [ 127.0.0.1, '::1' ]      # no port and no '[]' around v6 here
+      update:
+         types:      [ ANY ]
+         port:       5354                      # MUST be a port the dnsengine listens on
+         target:     updates.{ZONENAME}
+         addresses:  [ 127.0.0.1, '::1' ]
+         keygen:
+            mode:       internal               # internal | external
+            generator:  /opt/local/bin/dnssec-keygen
+            algorithm:  ED25519
 
-                        child:
-                           # in child zones, we will attempt the following schemes, if the parent
-                           # supports them and we're allowed to modify the child zone if needed
-                           # (adding CDS, CSYNC, KEY RRs, re-signing, etc):
-                           schemes:  [ notify, update ]
-                           update:
-                              keygen:
-                                 mode:       internal    # internal | external
-                                 generator:  /opt/local/bin/dnssec-keygen
-                                 algorithm:  ED25519
+   child:
+      # in child zones, we attempt the following schemes, if the parent supports
+      # them and we're allowed to modify the child zone (adding CDS, CSYNC, KEY
+      # RRs, re-signing, etc):
+      schemes:  [ notify, update ]
+      update:
+         keygen:
+            mode:       internal               # internal | external
+            generator:  /opt/local/bin/dnssec-keygen
+            algorithm:  ED25519
 
 scanner:
-                        interval:  30    # seconds between periodic scan runs
-                        options:   [ no-dnssec-validation ]
-                        # options: [ at-apex ]           # RFC 8078 opportunistic onboarding
-                        # options: [ at-ns ]             # RFC 9615 signaling name verification
-                        # options: [ no-dnssec-validation ]  # accept CDS without DNSSEC (lab only)
-                        at-apex:
-                           checks:    1     # consecutive all-NS checks before accepting (default: 1)
-                           interval:  300   # seconds between checks (default: 300)
+   interval:  30                        # seconds between periodic scan runs
+   options:   [ no-dnssec-validation ]
+   # options: [ at-apex ]                  # RFC 8078 opportunistic onboarding
+   # options: [ at-ns ]                    # RFC 9615 signaling name verification
+   # options: [ no-dnssec-validation ]     # accept CDS without DNSSEC (lab only)
+   at-apex:
+      checks:    1     # consecutive all-NS checks before accepting (default: 1)
+      interval:  300   # seconds between checks (default: 300)
 
 keybootstrap:
-                        consistent-lookup:
-                           iterations:   3
-                           interval:     60     # seconds between lookups
-                           nameservers:  all    # one | all
+   consistent-lookup:
+      iterations:   3
+      interval:     60     # seconds between lookups
+      nameservers:  all    # one | all
 
 # DNSSEC policies. Each policy is referenced from a zone's `dnssec-policy:`
 # field. The rollover, ttls, and clamping subtrees are optional; omitting
@@ -125,8 +125,8 @@ keybootstrap:
 #
 # Rollover (Phase 4 of the automated KSK rollover plan):
 #   method: none | multi-ds | double-signature
-#     - none           — no rollover; KSKs stay active forever
-#     - multi-ds       — RFC 7583 §3.3.3 generalized; preferred
+#     - none             — no rollover; KSKs stay active forever
+#     - multi-ds         — RFC 7583 §3.3.3 generalized; preferred
 #     - double-signature — RFC 7583 §3.3.1; not yet implemented (4E)
 #   num-ds: pipeline depth for multi-ds (default 3)
 #   parent-agent: host:port of the parent's authoritative agent that
@@ -145,242 +145,194 @@ keybootstrap:
 #     K decrements stepwise from K_max = ksk.lifetime / margin down to
 #     1 in the final margin window, resetting to K_max post-rollover.
 #   margin: REQUIRED when enabled: true. Both the floor TTL near
-#     rollover and the retired-KSK hold time. Default reasonable
+#     rollover and the retired-KSK hold time. A reasonable default
 #     value is 1h. No silent default — config parse fails closed if
 #     omitted.
 #
 # Multiple policies may coexist; each zone references one.
 dnssecpolicies:
-                        # Static KSK, no automated rollover. Useful for zones
-                        # whose operators want manual control over key cycles.
-                        default:
-                           algorithm:  ED25519
-                           ksk:
-                              lifetime:     forever
-                              sigvalidity:  168h    # 24*7h = 1 week
-                           zsk:
-                              lifetime:     forever
-                              sigvalidity:  2h
-                           csk:
-                              lifetime:     none
-                              sigvalidity:  168h
-                           # rollover: omitted → method: none (static keys)
-                           # clamping: omitted → disabled (no TTL clamping)
+   # Static KSK, no automated rollover. Useful for zones whose operators
+   # want manual control over key cycles.
+   default:
+      algorithm:  ED25519
+      ksk:
+         lifetime:     forever
+         sigvalidity:  168h     # 24*7h = 1 week
+      zsk:
+         lifetime:     forever
+         sigvalidity:  2h
+      csk:
+         lifetime:     none
+         sigvalidity:  168h
+      # rollover: omitted → method: none (static keys)
+      # clamping: omitted → disabled (no TTL clamping)
 
-                        # Rapid-cadence policy with automated KSK rollover.
-                        # Suitable for testing / experimentation.
-                        fastroll:
-                           algorithm:  ED25519
-                           ksk:
-                              lifetime:     48h
-                              sigvalidity:  168h    # exceed lifetime so RRSIGs
-                                                    # outlive the key cycle
-                           zsk:
-                              lifetime:     12h
-                              sigvalidity:  2h
-                           csk:
-                              lifetime:     none
-                              sigvalidity:  168h
-                           rollover:
-                              method:        multi-ds
-                              num-ds:        3                  # pipeline depth
-                              parent-agent:  127.0.0.1:5354     # parent's agent for DS observation
-                              confirm-initial-wait: 2s
-                              confirm-poll-max:     60s
-                              confirm-timeout:      1h
-                           ttls:
-                              dnskey:  2h     # operator-configured DNSKEY TTL
-                           clamping:
-                              enabled: true   # K-step TTL clamping near rollover
-                              margin:  1h     # REQUIRED when enabled: true
-                                              # — floor TTL near rollover
-                                              # — retired-KSK hold time
+   # Rapid-cadence policy with automated KSK rollover. Suitable for
+   # testing / experimentation.
+   fastroll:
+      algorithm:  ED25519
+      ksk:
+         lifetime:     48h
+         sigvalidity:  168h     # exceed lifetime so RRSIGs outlive the key cycle
+      zsk:
+         lifetime:     12h
+         sigvalidity:  2h
+      csk:
+         lifetime:     none
+         sigvalidity:  168h
+      rollover:
+         method:                multi-ds
+         num-ds:                3                  # pipeline depth
+         parent-agent:          127.0.0.1:5354     # parent's agent for DS observation
+         confirm-initial-wait:  2s
+         confirm-poll-max:      60s
+         confirm-timeout:       1h
+      ttls:
+         dnskey:  2h            # operator-configured DNSKEY TTL
+      clamping:
+         enabled:  true         # K-step TTL clamping near rollover
+         margin:   1h           # REQUIRED when enabled: true
+                                # — floor TTL near rollover
+                                # — retired-KSK hold time
 
 # Key and Signing Policy (KASP)
-# Controls the KeyStateWorker's automatic key state transitions and standby key maintenance.
-# The KeyStateWorker runs periodically to:
+# Controls the KeyStateWorker's automatic key state transitions and standby
+# key maintenance. The KeyStateWorker runs periodically to:
 #   - Transition published keys to standby after propagation_delay
 #   - Transition retired keys to removed after propagation_delay
 #   - Generate new standby keys when count drops below configured thresholds
 kasp:
-                        propagation_delay:  1h     # Wait time before published→standby and retired→removed
-                                                   # transitions for non-rollover zones. Also used by the
-                                                   # rollover worker's pending-child-publish phase.
-                        check_interval:     1m     # How often the KeyStateWorker runs its checks
-                        standby_zsk_count:  1      # Number of standby ZSKs to maintain per zone (0 = no standby)
-                        standby_ksk_count:  0      # Number of standby KSKs to maintain per zone (0 = no standby).
-                                                   # NOTE: For zones with rollover.method != none, the rollover
-                                                   # pipeline-fill (Phase 4A) generates KSKs up to rollover.num-ds
-                                                   # automatically; standby_ksk_count is independent of that.
-
-# Multi-provider DNSSEC configuration (RFC 8901)
-# Unified config block for all three MP roles: agent, combiner, signer.
-# The "role:" field determines which role-specific fields are relevant.
-#
-# Prerequisites:
-#   - Zones participating must have options: [multi-provider]
-#   - The local agent (tdns-agent) must be running and reachable
-#   - JOSE keypairs generated for secure CHUNK transport (optional but recommended)
-#
-multi-provider:
-                        role:      signer
-                        active:    true
-                        identity:  signer1.dnslab.org.    # Signer's FQDN identity for transport protocol
-                        long_term_jose_priv_key:  /etc/tdns/keys/signer1.jose.priv.json
-                        chunk_mode:  edns0                # edns0 | query (default: edns0)
-
-                        # Agent peers: how the signer reaches its co-located agent(s)
-                        agents:
-                           - address:               127.0.0.1:5359    # Agent's DNS listen address (host:port)
-                             identity:              agent.alpha.dnslab.org.   # Agent's FQDN identity
-                             long_term_jose_pub_key:  /etc/tdns/keys/agent-alpha.jose.pub.json
-
-                        # Sync API server for inbound HELLO/BEAT/PING from agents over HTTPS
-                        sync_api:
-                           addresses:
-                              listen:    [ 127.0.0.1:8991 ]
-                           cert_file:   /etc/tdns/certs/servers/localhost..crt
-                           key_file:    /etc/tdns/certs/servers/localhost..key
-
-multisigner:
-                        mstest:
-                           controller:
-                              notify:
-                                 target:          music.{ZONENAME}
-                                 addresses:       [ 127.0.0.1, '::1' ]    # must be no '[]' around v6 addresses here.
-                                 port:            "5355"
-                                 publish-dsync:   false    # in a multi-signer sidecar setup, the zone should typically not publish any DSYNC DNSKEY RR
-                              api:
-                                 baseurl:     http://127.0.0.1:8990/api/v1
-                                 apikey:      lets-make-some-noise
-                                 authmethod:  X-API-Key
-                                 usetls:      true
-                        broken:
-                           controller:
-                              notify:
-                                 address:  127..0.0.1
-                              api:
-                                 baseurl:  foo://bar.se/
+   propagation_delay:  1h     # Wait time before published→standby and retired→removed
+                              # transitions for non-rollover zones. Also used by the
+                              # rollover worker's pending-child-publish phase.
+   check_interval:     1m     # How often the KeyStateWorker runs its checks
+   standby_zsk_count:  1      # Number of standby ZSKs to maintain per zone (0 = no standby)
+   standby_ksk_count:  0      # Number of standby KSKs to maintain per zone (0 = no standby).
+                              # NOTE: For zones with rollover.method != none, the rollover
+                              # pipeline-fill (Phase 4A) generates KSKs up to rollover.num-ds
+                              # automatically; standby_ksk_count is independent of that.
 
 # Catalog zone configuration (RFC 9432)
-# Required if any zone has the 'catalog-zone' option enabled
+# Required if any zone has the 'catalog-zone' option enabled.
 #
-# Catalog zones allow centralized management of zone membership across multiple servers.
-# Member zones can be automatically configured on secondary servers based on catalog content.
+# Catalog zones allow centralized management of zone membership across multiple
+# servers. Member zones can be automatically configured on secondary servers
+# based on catalog content.
 #
 # Per-catalog-zone control:
 #   Use 'catalog-member-auto-create' option on catalog zones to enable auto-configuration
 #   Use 'catalog-member-auto-delete' option on catalog zones to enable auto-deletion
 #
 catalog:
-                        # Group type prefixes (REQUIRED - defines which groups have special semantics)
-                        # These prefixes identify group types in catalog zones and trigger special behavior
-                        # Use "none" to disable a group type (no special semantics, all groups are ordinary)
-                        #
-                        # Example catalog zone record format:
-                        #   group.{uniqueid}.zones.{catalog}.  IN TXT  "{groupname}"
-                        #
-                        # Group types:
-                        #   - Config groups:  Used for auto-configuration (contain transfer settings)
-                        #   - Signing groups: Used for documentation/grouping (no auto-config semantics)
-                        #   - Service groups: General-purpose groups (no special semantics)
-                        #
-                        group_prefixes:
-                           config:   "config"    # Prefix for config/transfer groups (e.g., "configKdc", "configEdge")
-                                                 # Groups starting with this prefix define transfer settings
-                                                 # Only ONE config group allowed per member zone
-                           signing:  "sign"      # Prefix for signing groups (e.g., "signEdge", "signKdc")
-                                                 # Groups starting with this prefix indicate signing responsibility
-                                                 # Only ONE signing group allowed per member zone
-                        
-                        # Config groups define zone transfer settings for auto-configuration
-                        # When a catalog zone has 'catalog-member-auto-create' option enabled,
-                        # member zones with config groups are automatically configured using these settings
-                        #
-                        # Only ONE config group allowed per member zone (enforced if prefix != "none")
-                        config_groups:
-                           kdc:                  # Group name (will match "configkdc" in catalog zone)
-                              upstream:  "127.0.0.1:5353"    # Where to AXFR member zones from (REQUIRED)
-                              tsig_key:  ""                  # Optional TSIG key name for authentication
-                              store:     map                 # Zone store type: map (default), slice, or xfr
-                                                             # - map:   Default, general-purpose (recommended)
-                                                             # - slice: Experimental (may be faster/use less memory)
-                                                             # - xfr:   Zone transfer only (AXFR, NO normal queries)
-                              options:   []                  # Optional zone options to apply to member zones
-                                                             # Example: ["delegation-sync-child"]
+   # Group type prefixes (REQUIRED - defines which groups have special semantics)
+   # These prefixes identify group types in catalog zones and trigger special behavior.
+   # Use "none" to disable a group type (no special semantics, all groups are ordinary).
+   #
+   # Example catalog zone record format:
+   #   group.{uniqueid}.zones.{catalog}.  IN TXT  "{groupname}"
+   #
+   # Group types:
+   #   - Config groups:  Used for auto-configuration (contain transfer settings)
+   #   - Signing groups: Used for documentation/grouping (no auto-config semantics)
+   #   - Service groups: General-purpose groups (no special semantics)
+   #
+   group_prefixes:
+      config:   "config"    # Prefix for config/transfer groups (e.g., "configKdc", "configEdge")
+                            # Groups starting with this prefix define transfer settings
+                            # Only ONE config group allowed per member zone
+      signing:  "sign"      # Prefix for signing groups (e.g., "signEdge", "signKdc")
+                            # Groups starting with this prefix indicate signing responsibility
+                            # Only ONE signing group allowed per member zone
 
-                           edge:                 # Group name (will match "configedge" in catalog zone)
-                              upstream:  "192.0.2.1:5353"
-                              tsig_key:  ""
-                              store:     map                 # Default storage (recommended)
-                              options:   []
+   # Config groups define zone transfer settings for auto-configuration.
+   # When a catalog zone has 'catalog-member-auto-create' option enabled,
+   # member zones with config groups are automatically configured using
+   # these settings.
+   #
+   # Only ONE config group allowed per member zone (enforced if prefix != "none")
+   config_groups:
+      kdc:                          # Group name (matches "configkdc" in catalog zone)
+         upstream:  "127.0.0.1:5353"   # Where to AXFR member zones from (REQUIRED)
+         tsig_key:  ""                 # Optional TSIG key name for authentication
+         store:     map                # Zone store type: map (default), slice, or xfr
+                                       # - map:   Default, general-purpose (recommended)
+                                       # - slice: Experimental (may be faster/use less memory)
+                                       # - xfr:   Zone transfer only (AXFR, NO normal queries)
+         options:   []                 # Optional zone options to apply to member zones
+                                       # Example: ["delegation-sync-child"]
 
-                        # Signing groups (documentation/informational only, not used for auto-configuration)
-                        # These groups can be used to indicate which signing infrastructure is responsible
-                        # for a zone, but they don't trigger any automatic configuration
-                        #
-                        # Only ONE signing group allowed per member zone (enforced if prefix != "none")
-                        signing_groups:
-                           edge_zsk:             # Group name (will match "signedge_zsk" in catalog zone)
-                              description:  "Edge signing with ZSK only"
-                           kdc:                  # Group name (will match "signkdc" in catalog zone)
-                              description:  "Central signing at KDC"
+      edge:                         # Group name (matches "configedge" in catalog zone)
+         upstream:  "192.0.2.1:5353"
+         tsig_key:  ""
+         store:     map                # Default storage (recommended)
+         options:   []
 
-# Dynamic zones persistence configuration
-# This section controls persistence for dynamically configured zones
-# (catalog zones, catalog member zones, and API-created zones)
+   # Signing groups (documentation/informational only, not used for auto-configuration).
+   # These groups can be used to indicate which signing infrastructure is
+   # responsible for a zone, but they don't trigger any automatic configuration.
+   #
+   # Only ONE signing group allowed per member zone (enforced if prefix != "none")
+   signing_groups:
+      edge_zsk:                     # Group name (matches "signedge_zsk" in catalog zone)
+         description:  "Edge signing with ZSK only"
+      kdc:                          # Group name (matches "signkdc" in catalog zone)
+         description:  "Central signing at KDC"
+
+# Dynamic zones persistence configuration.
+# Controls persistence for dynamically configured zones (catalog zones,
+# catalog member zones, and API-created zones).
 dynamiczones:
-                        # Absolute path to YAML file where dynamic zone configs are stored
-                        # This file should be included in the 'include:' section above
-                        # Server must have write access to this file
-                        configfile:     /var/lib/tdns/dynamic-zones.yaml
-                        
-                        # Absolute path to directory where zone files are written
-                        # Server must have write access to this directory
-                        zonedirectory:  /var/lib/tdns/zones
-                        
-                        # Configuration for catalog zones (primary catalog zone publishers)
-                        catalog_zones:
-                           allowed:  true          # Whether dynamic creation of catalog zones is allowed
-                           storage:  persistent    # "memory" or "persistent" - default: "memory"
-                        
-                        # Configuration for catalog member zones (secondary zones from catalog)
-                        catalog_members:
-                           allowed:  true          # Whether catalog member zones are allowed
-                           storage:  persistent    # "memory" or "persistent" - default: "memory"
-                        
-                        # Configuration for direct API-created zones (future feature)
-                        dynamic:
-                           allowed:  false    # Whether direct API-created zones are allowed (default: false)
-                           storage:  memory   # "memory" or "persistent" - default: "memory"
+   # Absolute path to YAML file where dynamic zone configs are stored.
+   # This file should be included in the 'include:' section above.
+   # Server must have write access to this file.
+   configfile:     /var/lib/tdns/dynamic-zones.yaml
+
+   # Absolute path to directory where zone files are written.
+   # Server must have write access to this directory.
+   zonedirectory:  /var/lib/tdns/zones
+
+   # Configuration for catalog zones (primary catalog zone publishers)
+   catalog_zones:
+      allowed:  true             # Whether dynamic creation of catalog zones is allowed
+      storage:  persistent       # "memory" or "persistent" - default: "memory"
+
+   # Configuration for catalog member zones (secondary zones from catalog)
+   catalog_members:
+      allowed:  true             # Whether catalog member zones are allowed
+      storage:  persistent       # "memory" or "persistent" - default: "memory"
+
+   # Configuration for direct API-created zones (future feature)
+   dynamic:
+      allowed:  false            # Whether direct API-created zones are allowed (default: false)
+      storage:  memory           # "memory" or "persistent" - default: "memory"
 
 db:
-                        file:  /var/lib/tdns/tdns-auth.db
+   file:  /var/lib/tdns/tdns-auth.db
 
 log:
-                        file:  /var/log/axfr.net/tdns-auth.log
-                        level: info     # default level: debug|info|warn|error
-                        # subsystems:   # per-subsystem level overrides
-                        #   dns: debug
+   file:   /var/log/axfr.net/tdns-auth.log
+   level:  info     # default level: debug|info|warn|error
+   # subsystems:    # per-subsystem level overrides
+   #   dns:  debug
 
 common:
-                        servername:  tdns-auth
-                        command:     /usr/local/libexec/tdns-auth
+   servername:  tdns-auth
+   command:     /usr/local/libexec/tdns-auth
 
-# This is where registrars are declared, including where they want notifications/updates.
-# There is a mapping from child zones (per parent zone) to these registrars and that will
-# (should) cause a runtime generation of a suitable DSYNC RRset in response to queries for
-# child._dsync.parent. DSYNC
+# Registrars are declared here, including where they want notifications/updates.
+# There is a mapping from child zones (per parent zone) to these registrars and
+# that will (should) cause a runtime generation of a suitable DSYNC RRset in
+# response to queries for child._dsync.parent. DSYNC
 registrars:
-                        ooga-reg:
-                           - child._dsync.parent.   IN DSYNC CDS   NOTIFY 5354 notifications.ooga-reg.axfr.net.
-                           - child._dsync.parent.   IN DSYNC CSYNC NOTIFY 5354 notifications.ooga-reg.axfr.net.
-                           - child._dsync.parent.   IN DSYNC ANY   UPDATE 5354 updates.ooga-reg.axfr.net.
-                        booga-reg:
-                           - child._dsync.parent.   IN DSYNC CDS   NOTIFY 5354 notifications.booga-reg.axfr.net.
-                           - child._dsync.parent.   IN DSYNC CSYNC NOTIFY 5354 notifications.booga-reg.axfr.net.
-                           - child._dsync.parent.   IN DSYNC ANY   UPDATE 5354 notifications.booga-reg.axfr.net.
-                        mooga-reg:
-                           - child._dsync.parent.   IN DSYNC CDS   NOTIFY 5354 notifications.mooga-reg.axfr.net.
-                           - child._dsync.parent.   IN DSYNC CSYNC NOTIFY 5354 notifications.mooga-reg.axfr.net.
-                           - child._dsync.parent.   IN DSYNC ANY   UPDATE 5354 notifications.mooga-reg.axfr.net.
+   ooga-reg:
+      - child._dsync.parent.   IN DSYNC CDS    NOTIFY 5354 notifications.ooga-reg.axfr.net.
+      - child._dsync.parent.   IN DSYNC CSYNC  NOTIFY 5354 notifications.ooga-reg.axfr.net.
+      - child._dsync.parent.   IN DSYNC ANY    UPDATE 5354 updates.ooga-reg.axfr.net.
+   booga-reg:
+      - child._dsync.parent.   IN DSYNC CDS    NOTIFY 5354 notifications.booga-reg.axfr.net.
+      - child._dsync.parent.   IN DSYNC CSYNC  NOTIFY 5354 notifications.booga-reg.axfr.net.
+      - child._dsync.parent.   IN DSYNC ANY    UPDATE 5354 notifications.booga-reg.axfr.net.
+   mooga-reg:
+      - child._dsync.parent.   IN DSYNC CDS    NOTIFY 5354 notifications.mooga-reg.axfr.net.
+      - child._dsync.parent.   IN DSYNC CSYNC  NOTIFY 5354 notifications.mooga-reg.axfr.net.
+      - child._dsync.parent.   IN DSYNC ANY    UPDATE 5354 notifications.mooga-reg.axfr.net.
