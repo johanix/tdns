@@ -2059,7 +2059,7 @@ Recommended order: 4B first (unlocks Phase 6 testing), then 4C
 (only if double-signature is needed — multi-DS is the path under
 stress for rapid-rollover experimentation).
 
-### Phase 4B — Scheduled rollover backbone (2–3 days, **High** complexity) — **pending**
+### Phase 4B — Scheduled rollover backbone (2–3 days, **High** complexity) — **landed**
 
 **Goal:** A KSK whose `active_at + ksk.lifetime` has elapsed
 transitions to `retired`, the next standby SEP key becomes active,
