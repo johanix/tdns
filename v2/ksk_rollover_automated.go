@@ -51,6 +51,16 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		return err
 	}
 
+	// Self-heal: if the zone's active SEP KSK was minted by
+	// EnsureActiveDnssecKeys before RegisterBootstrapActiveKSK was wired
+	// in (or before active_at existed in the schema), the
+	// RolloverKeyState row may be missing or have no active_at. Without
+	// active_at, rolloverDue and tNextRoll both fail. Stamp it now using
+	// "first observation" semantics — not perfectly accurate (the key may
+	// have been active for hours/days already) but recoverable: a
+	// scheduled rollover from today is better than no rollover ever.
+	healBootstrapActiveAt(kdb, zone, pol)
+
 	// 4D K-step TTL clamp: detect step boundaries and bump SOA serial so
 	// secondaries pull AXFR with the new clamp ceiling. No-op for zones
 	// with clamping.enabled: false.
@@ -684,6 +694,34 @@ func completeRolloverWithdraw(conf *Config, kdb *KeyDB, zone string) error {
 	lgSigner.Info("rollover: pending-child-withdraw complete; zone returned to idle", "zone", zone)
 	triggerResign(conf, zone)
 	return nil
+}
+
+// healBootstrapActiveAt is a self-heal pass: if the zone has an active SEP
+// KSK with no RolloverKeyState row or no active_at timestamp, register it
+// now so rolloverDue and tNextRoll work. Best-effort — silent on errors.
+func healBootstrapActiveAt(kdb *KeyDB, zone string, pol *DnssecPolicy) {
+	if pol == nil || pol.Rollover.Method == RolloverMethodNone {
+		return
+	}
+	active, err := GetDnssecKeysByState(kdb, zone, DnskeyStateActive)
+	if err != nil {
+		return
+	}
+	for i := range active {
+		k := &active[i]
+		if k.Flags&dns.SEP == 0 {
+			continue
+		}
+		at, err := rolloverKeyActiveAt(kdb, zone, k.KeyTag)
+		if err == nil && at != nil {
+			continue // already healed
+		}
+		if err := RegisterBootstrapActiveKSK(kdb, zone, k.KeyTag, pol.Rollover.Method, pol.Algorithm); err != nil {
+			lgSigner.Warn("rollover: heal bootstrap active_at failed", "zone", zone, "keyid", k.KeyTag, "err", err)
+			continue
+		}
+		lgSigner.Info("rollover: healed bootstrap active_at for KSK", "zone", zone, "keyid", k.KeyTag)
+	}
 }
 
 func promoteStandbyKskBootstrapAll(conf *Config, kdb *KeyDB) {

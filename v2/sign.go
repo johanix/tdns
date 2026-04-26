@@ -291,11 +291,17 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 	if len(dak.KSKs) == 0 {
 		// Invalidate cache before generating to ensure fresh data
 		delete(kdb.KeystoreDnskeyCache, zd.ZoneName+"+"+DnskeyStateActive)
-		_, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "KSK", nil)
+		pkc, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "KSK", nil)
 		if err != nil {
 			return nil, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate KSK for zone %s: %v", zd.ZoneName, err)
 		}
 		lgSigner.Info("generated KSK", "msg", msg)
+		// Bootstrap KSK landed straight in active. Register in
+		// RolloverKeyState so rolloverDue and the K-step clamp scheduler
+		// can find an active_at timestamp. No-op for non-rollover zones.
+		if err := RegisterBootstrapActiveKSK(kdb, zd.ZoneName, pkc.KeyId, zd.DnssecPolicy.Rollover.Method, zd.DnssecPolicy.Algorithm); err != nil {
+			lgSigner.Warn("rollover: register bootstrap KSK failed", "zone", zd.ZoneName, "keyid", pkc.KeyId, "err", err)
+		}
 		// Invalidate cache and re-fetch active keys after KSK generation
 		dak, err = zd.refreshActiveDnssecKeys(kdb, "after KSK generation")
 		if err != nil {
