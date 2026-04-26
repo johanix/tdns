@@ -506,6 +506,17 @@ cmdloop:
 			}
 
 			fmt.Printf("Sending update to %s\n", server)
+			// Diagnostic: pack the signed message right here and print
+			// length + first32 hex. Helps compare with tcpdump on the
+			// wire and with the parent's "ValidateUpdate: packed message"
+			// log when chasing SIG(0) verification mismatches.
+			if buf, packErr := msg.Pack(); packErr == nil {
+				fmt.Printf("DEBUG: msg.Pack() pre-send buflen=%d first32=%x\n",
+					len(buf), buf[:min(32, len(buf))])
+			} else {
+				fmt.Printf("DEBUG: msg.Pack() pre-send failed: %v\n", packErr)
+			}
+			fmt.Printf("DEBUG: msg.Len() pre-send=%d\n", msg.Len())
 			dump.P(msg)
 			rcode, ur, err := tdns.SendUpdate(msg, zone, []string{server})
 			if err != nil {
