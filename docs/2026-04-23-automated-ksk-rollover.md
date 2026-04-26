@@ -760,17 +760,17 @@ method doesn't support deeper pre-publication because it implies
 publishing the corresponding DNSKEYs, defeating the Shor's Clock
 benefit).
 
-### 5.2 Zone-owner TTLs and RRSIG validity, clamped on approach to rollover
+### 5.2 Zone-owner TTLs, clamped on approach to rollover (K-step design)
 
-TTLs and RRSIG validity are **policy choices of the zone owner**, not
-values derived from the KSK lifetime. One zone owner may choose
-`dnskey-ttl: 2h`, another `12h`; both are valid steady-state choices
-and the signer publishes the zone-owner value at steady state.
+TTLs are **policy choices of the zone owner**, not values derived
+from the KSK lifetime. One zone owner may choose `dnskey-ttl: 2h`,
+another `12h`; both are valid steady-state choices and the signer
+publishes the zone-owner value at steady state.
 
 What the signer does own is **clamping near a rollover**: as the
-next rollover approaches, the operator's chosen TTL and RRSIG
-validity values are clamped so that records published just before
-the rollover will have drained from caches shortly after it.
+next rollover approaches, the operator's chosen TTL is stepped
+down so that no cached record outlives the retired-KSK hold
+window.
 
 Single tunable — `margin`:
 
@@ -778,85 +778,195 @@ Single tunable — `margin`:
   after rollover, we want all cached data that depends on the old
   KSK to be flushed within `margin`, at which point the retired KSK
   transitions `retired → removed`.
-- `margin` subsumes what earlier drafts of this document called
-  "overlap," "safety margin," and "`_min` floor." They are the
-  same value: the TTL of the last record published before the
-  rollover, and equivalently the minimum TTL/RRSIG-validity floor
-  used during clamping.
+- `margin` is also the minimum clamped TTL — the TTL on records
+  served in the final hour before rollover.
 
-Default: `margin: 15m`. Strong reason to keep short under CRQC
-threat model; longer values delay `retired → removed`.
+Default: `margin: 1h`. Reasonable: 24h is too long (delays
+`retired → removed` by a day), 5m is too short (clamp granularity
+indistinguishable from clock skew, requires a step every 5
+minutes near the rollover).
 
-Clamping rule. Let `R = T_next_roll - T_now`, where `T_next_roll`
-is always the time of the **next** scheduled rollover. At the
-moment a rollover fires, `R` resets: `T_next_roll` advances by
-`ksk.lifetime`, and `R` jumps from ≈0 back to `ksk.lifetime`. `R`
-is never negative.
+#### K-step clamp
 
-At each signing event, the signer publishes records with:
+Define `T_roll` = time of the next scheduled rollover, and
+`T_remove = T_roll + margin` = time at which the retired KSK
+transitions `retired → removed`. The clamp uses an integer
+multiplier `K` that decreases stepwise as `T_roll` approaches:
 
 ```
-  dnskey_ttl_used = min(dnskey_ttl, R + margin)
-  sig_validity_used = min(sig_validity, R + margin)
+  ttl_served = min(rrset.UnclampedTTL, K * margin)
 ```
 
-and similarly for other clamped parameters (see §5.3). The clamp is
-bounded below by `margin` (the floor): records published at
-`R = 0` get TTL = `margin`.
+`K` is determined by `R = T_roll - T_now`:
 
-- Steady state (R large): clamp inactive; operator values used
-  verbatim. Weekend-safe.
-- Approaching rollover (R small): clamp drives TTL and RRSIG
-  validity down; the last records signed before rollover carry
-  TTL ≈ `margin` and RRSIG validity ≈ `margin`.
-- At rollover (R = 0): newly signed records carry TTL = `margin`.
-- `margin` after rollover: all pre-rollover cached data has
-  expired; KSK_n transitions `retired → removed`.
+| Time window                          | K   | ceiling  |
+|--------------------------------------|-----|----------|
+| `R >= K_max·margin` (steady state)   | K_max | K_max·margin |
+| `R ∈ [(K_max−1)·margin, K_max·margin)` | K_max−1 | (K_max−1)·margin |
+| ...                                  | ... | ... |
+| `R ∈ [margin, 2·margin)`              | 2 | 2·margin |
+| `R ∈ [0, margin)` (final hour)       | 1 | margin |
+| post-rollover (`R` resets)            | K_max | K_max·margin |
 
-Implementation notes:
+`K_max` is policy-derived: `K_max = ksk.lifetime / margin`. For
+a zone with `ksk.lifetime: 30d` and `margin: 1h`, `K_max = 720`.
+The clamp is therefore inactive throughout most of the cycle (the
+operator's TTL is below the ceiling) and kicks in only when
+`R < K_max·margin`. For shorter `ksk.lifetime`, `K_max` is smaller
+and the clamp activates earlier.
 
-- Re-signing frequency must be high enough to observe the clamp as
-  it tightens. If the signer only re-signs every N hours but the
-  clamp is driving RRSIG validity down to 30 minutes in the final
-  hour, the published RRset may still carry a stale long value.
-  Trigger re-sign on `next-clamp-boundary` in addition to the usual
-  re-sign threshold.
-- DS TTL is set by the parent, not the child; `ds_ttl_used` is the
-  child's **expectation** of what the parent has published. If the
-  parent's observed DS TTL is larger than the clamp, the worker logs
-  a warning and uses the observed value for its timing math.
-- Clamping is optional and can be disabled (`clamping.enabled:
-  false`) for zones that want fixed TTLs at the cost of a longer
-  retired window.
+#### Why this is safe
+
+The construction guarantees that no record served at any time
+between two adjacent K-step boundaries can remain cached past
+`T_remove`. Worst case: a record served the instant before a step
+from `K_old` to `K_new` carries TTL `≤ K_old·margin`. The next step
+fires `margin` later. After the worst-case cached interval
+expires, `(K_old − K_new)·margin = margin` later (since steps
+decrement by 1), the record is gone. Telescoping all the way down,
+records served in the final `margin` window expire by `T_remove`.
+
+#### Why no synchronized expiry spike
+
+Records cached by resolvers at random times across the
+`(K_old·margin)` window each carry TTL = `K_old·margin` at insert
+time and expire `K_old·margin` later. Insert times are
+distributed across the resolver population by query arrival
+patterns, so expiry times are likewise smeared. No global
+"refresh-now" spike at `T_remove`. Jitter is provided by the
+distribution of resolver query times — no per-RRset hash needed.
+
+#### How the clamp propagates
+
+Clamping is applied by mutating the served TTL on every RR in the
+RRset in zone state. The original operator-configured TTL is
+preserved on the RRset itself in a new field, `UnclampedTTL`,
+unambiguously "ours" (not to be confused with the RRSIG's
+`OrigTtl` field).
+
+The clamp runs **inside `SignRRset`, before the RRSIG is
+generated**, gated by a new `*ClampParams` argument:
+
+```go
+type ClampParams struct {
+    K      int            // current K-step value
+    Margin time.Duration  // policy.clamping.margin
+}
+
+func (zd *ZoneData) SignRRset(rrset *core.RRset, name string,
+    dak *DnssecKeys, force bool, clamp *ClampParams) (bool, error) {
+
+    // ... existing setup ...
+
+    if clamp != nil {
+        if rrset.UnclampedTTL == 0 {
+            rrset.UnclampedTTL = rrset.RRs[0].Header().Ttl
+        }
+        target := min(rrset.UnclampedTTL,
+            uint32(clamp.Margin.Seconds()) * uint32(clamp.K))
+        for i := range rrset.RRs {
+            rrset.RRs[i].Header().Ttl = target
+        }
+    }
+
+    // ... existing signing logic, which will produce
+    //     RRSIG.OrigTtl = clamped TTL (matches served TTL) ...
+}
+```
+
+`clamp == nil` means the zone has `clamping.enabled: false` (or
+the rollover scheduler hasn't supplied a value); `SignRRset`
+behaves exactly as before in that case.
+
+Because the clamp runs before signing, **the RRSIG covers the
+clamped TTL**, not `UnclampedTTL`. This keeps served TTL and
+RRSIG.OrigTtl consistent (no "primary serves TTL <
+RRSIG.OrigTtl" oddity for inspectors). The operator-configured
+TTL is recovered from `rrset.UnclampedTTL`, not from the RRSIG.
+
+The local query responder remains unmodified: it serves whatever
+TTL is in zone state, which is now the clamped value. Outbound
+zone transfer carries the same clamped TTL, so secondary servers
+also serve the clamped value without needing any clamping logic
+of their own. **No primary-to-secondary signaling protocol is
+required.**
+
+#### Lifecycle of `UnclampedTTL`
+
+- **Set**: on the first sign pass that finds `UnclampedTTL == 0`
+  on a clamping zone, capture the current header TTL (the
+  operator-configured value, or whatever was published in the
+  zone before the field existed).
+- **Read**: every subsequent sign pass uses `UnclampedTTL` as the
+  upper bound on the clamp formula.
+- **Reset**: only on whole-RRset replacement — inbound zone
+  transfer or zone reload, both of which replace the OwnerData
+  and zero out the new field for free. **No explicit reset at
+  `T_roll`.** The clamp formula `min(UnclampedTTL, K·margin)`
+  with K resetting to K_max already restores the served TTL to
+  the operator value (since `UnclampedTTL ≤ K_max·margin` by
+  config).
+
+The only failure mode: operator changes the configured TTL via
+config edit without a reload. The clamp will then ceiling at the
+old operator value indefinitely. Solution: a zone reload (which
+replaces OwnerData) is the supported way to change TTL in
+config — same primitive as for any other zone-state change.
+
+#### SOA bumping at K-step boundaries
+
+A K-step lowers TTLs in primary zone state but doesn't itself
+trigger zone transfer. To propagate the new TTLs to secondaries
+within `margin`, the rollover worker bumps the SOA serial at each
+step boundary. The SOA bump:
+
+- triggers a re-sign of the SOA RRset (cheap)
+- triggers outbound NOTIFY to secondaries
+- triggers AXFR pulls (tdns-auth currently doesn't emit IXFR; full
+  zone transfer carries every clamped TTL)
+
+#### RRSIG validity is independent
+
+RRSIG validity is a separate concern from TTL clamping. The
+signer's invariant is that RRSIG validity ≥ `R + margin` so
+signatures don't expire during the rollover hold window. With
+operator-configured RRSIG validity (`SigValidity`) typically much
+larger than `margin`, this is satisfied automatically; a config
+check at parse time can warn if `sig-validity < ksk.lifetime`.
+
+#### Disabling clamping
+
+Clamping is optional (`clamping.enabled: false`). When disabled,
+the worker falls back to 4B's `effective_margin = max(margin,
+max_observed_ttl)` for the `pending-child-withdraw` hold time.
+Zones that want fixed TTLs accept a longer retired window in
+exchange.
 
 Constraints validated at config parse (warn, not reject):
 
-- `dnskey-ttl ≤ ksk.lifetime / 4` — at least a few TTL windows per
-  key lifetime, so the clamp has somewhere to ramp from
-- `sig-validity ≤ ksk.lifetime` — RRSIGs should not outlive the key
-  that signed them
 - `margin ≥ 60s` — below one minute, clamp granularity is
   indistinguishable from clock skew
+- `sig-validity ≥ ksk.lifetime` — RRSIGs should outlive the key
+  cycle so the validity invariant holds without aggressive
+  resigning
 
-YAML sketch (replaces both the `ttls:` and `ramping:` blocks of the
-previous draft):
+YAML sketch:
 
 ```yaml
     ttls:
       dnskey:       2h       # zone-owner choice, steady-state value
-      # ds-expected is observed from parent, not set here
     rrsig:
       ksk-validity:  14d
       zsk-validity:  7d
     clamping:
-      enabled:      true     # clamp TTLs and RRSIG validity as R→0
-      margin:       15m      # floor AND retired-KSK hold time
+      enabled:      true     # K-step TTL clamping near rollover
+      margin:       1h       # floor TTL AND retired-KSK hold time
 ```
 
-Clamping scope is resolved in §15.4: when `clamping.enabled: true`,
-clamping applies **uniformly to every RRset signed or published**
-by the zone — DNSKEY, DS-expectation, NSEC/NSEC3, SOA MINIMUM, and
-every other TTL and RRSIG validity. No per-type exception list.
+Clamping scope (§15.4): when `clamping.enabled: true`, clamping
+applies **uniformly to every RRset in zone state** — DNSKEY,
+NSEC/NSEC3, SOA MINIMUM, NS, A/AAAA, and every other TTL. No
+per-type exception list.
 
 ### 5.3 Coupled parameters: list
 
@@ -2235,41 +2345,97 @@ operator-visible errors, etc. The status and reset CLIs are how
 those get diagnosed. Manual-ASAP gives a way to test 4B's
 machinery on demand without waiting for `ksk.lifetime` to elapse.
 
-### Phase 4D — Clamp wiring (1–2 days, **High** complexity) — **pending**
+### Phase 4D — K-step TTL clamping (1 day, **Medium** complexity) — **pending**
 
-**Goal:** Make `clamping.enabled: true` actually affect the TTL and
-RRSIG-validity values the signer publishes. This is the only
-sub-phase that touches the signing path.
+**Goal:** Make `clamping.enabled: true` step the served TTL of
+every RRset down to `K * margin` as `T_roll` approaches, and reset
+to `K_max * margin` immediately after rollover. No primary-to-
+secondary signaling required; clamping happens by mutating zone
+state, propagated via normal AXFR.
 
-**Scope:**
-- `ComputeNextClampBoundary(z, now)` — returns the next time any
-  clamped value would change by more than a small threshold (TTL
-  halves, RRSIG validity drops below currently published value)
-- Wake-up: rollover tick computes the next boundary for each zone
-  with `clamping.enabled` and pushes the zone onto `ResignQ` when
-  `boundary <= now`
-- Signer-path edit: when emitting RRSIGs and serializing TTLs in
-  the signing path, consult the policy's `clamping.enabled`,
-  `clamping.margin`, and `R = T_next_roll - T_now`, then apply
-  `min(configured_ttl, R + margin)` to TTLs and the analogous
-  rule to RRSIG validity
+**Scope (see §5.2 for the design and safety/jitter arguments):**
+- `currentClampK(zone, now) -> int` — derives `K` from `T_roll`,
+  `margin`, and `K_max = ksk.lifetime / margin`. Single source of
+  truth, read by the K-step scheduler and by the wrapper that
+  builds `*ClampParams` for `SignRRset`.
+- `tNextRoll(zone, now)` helper — returns the time of the next
+  scheduled rollover, taking into account scheduled (`active_at +
+  ksk.lifetime`), manual-ASAP (`manual_rollover_earliest`), and
+  mid-rollover (returns sentinel meaning "clamp inactive"). Same
+  source of truth used by `rolloverDue` and
+  `ComputeEarliestRollover`.
+- New `core.RRset.UnclampedTTL uint32` field. Sentinel 0 = "never
+  clamped." Reset only on whole-RRset replacement (inbound zone
+  transfer / zone reload).
+- New `tdns.ClampParams{K int, Margin time.Duration}` argument
+  threaded into `SignRRset`. `nil` for non-clamping zones — no
+  behavior change. Touches every `SignRRset` call site; most
+  pass `nil`. The `SignZone` path (for clamping zones) builds a
+  `*ClampParams` once per pass and passes it to every
+  `SignRRset` invocation in that pass.
+- TTL mutation block at the top of `SignRRset`: when `clamp !=
+  nil`, capture `UnclampedTTL` on first encounter, then set every
+  `rrset.RRs[i].Header().Ttl = min(UnclampedTTL, K * margin)`.
+  Existing RRSIG-generation logic then runs against the clamped
+  header TTL; `RRSIG.OrigTtl` ends up matching the served TTL.
+- K-step scheduler: rollover tick computes the next K-step
+  boundary per zone with `clamping.enabled`, bumps SOA serial when
+  reached. SOA bump triggers re-sign of the SOA RRset + NOTIFY +
+  AXFR.
+- Telemetry: per-zone log on K change (one line per step), counter
+  for clamped-vs-unclamped TTL decisions, invariant log if RRSIG
+  validity ever drops below `R + margin` (warn, don't refuse to
+  sign).
 
 **Files:**
-- `v2/ksk_rollover_clamp_trigger.go` (new) —
-  `ComputeNextClampBoundary` and the ResignQ push helper
-- Signer edits (`v2/sign.go` and adjacent; finalized during
-  implementation): clamping-aware TTL and RRSIG-validity
-  computation. Estimated ~50 LOC across 2–3 files.
+- `v2/ksk_rollover_clamp.go` (new) — `currentClampK`, `tNextRoll`,
+  K-step scheduler, telemetry, `ClampParams` type.
+- `v2/sign.go` (extend) — TTL mutation block at the top of
+  `SignRRset`; sign-time validity invariant check.
+- `core/rrset.go` (or wherever `core.RRset` lives) — add
+  `UnclampedTTL uint32` field.
+- All `SignRRset` callers — pass `nil` for `clamp` unless on the
+  K-step-clamping path. Most of the diff is mechanical.
 
-**Dependency:** 4B (so a `T_next_roll` value exists for the
-clamping formula to consume). Independent of 4C and 4E.
+**Behavior summary:**
+- Clamp inside `SignRRset`, before the RRSIG is generated. The
+  RRSIG's `OrigTtl` covers the clamped TTL (matches served TTL).
+- Local query responder and zone-transfer paths are unmodified;
+  they serve whatever TTL is in zone state, which is now the
+  clamped value.
+- `rrset.UnclampedTTL` preserves the operator-configured TTL
+  across K steps; reset only on whole-RRset replacement (inbound
+  zone transfer / zone reload).
+- SOA bump at each K-step boundary triggers AXFR to secondaries.
+  Other RRsets converge to the new clamp ceiling on their next
+  natural re-sign (driven by RRSIG validity windows, unchanged).
+- No new protocol surface, no responder modifications, no
+  per-RRset jitter math (jitter falls out of resolver query
+  arrival distribution).
 
-**Why 4D third:** it touches signer code and surfaces the "which
-TTL where, which RRSIG validity where" questions that are easier
-to answer once you've watched scheduled rollovers run for a few
-cycles. Premature clamping is an operational footgun. If
-rapid-rollover experimentation is the immediate driver, this moves
-ahead of 4E (which is what's currently planned).
+**Dependency:** 4B (so a `T_roll` value exists for the K
+formula). Independent of 4C and 4E.
+
+**Out of scope for 4D:**
+- IXFR support (tdns-auth currently emits AXFR only; orthogonal).
+- Query-time TTL clamping at the responder (not needed; the zone
+  state itself carries the clamped TTL).
+- Signaling protocol to inform secondaries of `T_roll` (not
+  needed; AXFR carries the clamped TTLs).
+- Per-RRset jitter math.
+- RRSIG-validity clamping (RRSIG validity is independent of TTL;
+  enforced at config-parse warn level rather than runtime clamp).
+
+**Why 4D third:** the design is self-contained and the diff is
+small, but it touches `SignRRset` and the rollover scheduler.
+Running 4B for a few cycles first surfaces any latent bugs in
+`T_roll` computation before we add a second consumer of it.
+
+**Telemetry from commit 1:**
+- `INFO clamp K-step: zone=Z K=4→3 T_roll=... now=...`
+- `WARN clamp invariant: zone=Z keyid=K validity=V R+margin=X`
+  (sign-time invariant)
+- counter: clamped vs unclamped TTL decisions per zone per hour
 
 ### Phase 4E — Double-signature worker branch (1–2 days, **Medium**) — **pending**
 
