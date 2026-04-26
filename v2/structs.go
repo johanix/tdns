@@ -173,10 +173,10 @@ type ZoneConf struct {
 	Frozen            bool         // true if zone is frozen; not a config param
 	Dirty             bool         // true if zone has been modified; not a config param
 	UpdatePolicy      UpdatePolicyConf
-	DelegationBackend string `yaml:"delegation-backend" mapstructure:"delegation-backend"` // named backend for child delegation data
-	DnssecPolicy      string
-	Template          string
-	MultiSigner       string
+	DelegationBackend string    `yaml:"delegation-backend" mapstructure:"delegation-backend"` // named backend for child delegation data
+	DnssecPolicy      string    `yaml:"dnssec_policy" mapstructure:"dnssec_policy"`
+	Template          string    `yaml:"template" mapstructure:"template"`
+	MultiSigner       string    `yaml:"multi_signer" mapstructure:"multi_signer"`
 	Error             bool      // zone is broken and cannot be used
 	ErrorType         ErrorType // "config" | "refresh" | "agent" | "DNSSEC"
 	ErrorMsg          string    // reason for the error (if known)
@@ -191,10 +191,10 @@ type TemplateConf struct {
 	Store        string
 	Primary      string // upstream, for secondary zones
 	Notify       []string
-	OptionsStrs  []string `yaml:"options"`
+	OptionsStrs  []string `yaml:"options" mapstructure:"options"`
 	UpdatePolicy UpdatePolicyConf
-	DnssecPolicy string
-	MultiSigner  string
+	DnssecPolicy string `yaml:"dnssec_policy" mapstructure:"dnssec_policy"`
+	MultiSigner  string `yaml:"multi_signer" mapstructure:"multi_signer"`
 }
 
 type UpdatePolicyConf struct {
