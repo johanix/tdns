@@ -51,6 +51,11 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		return err
 	}
 
+	// 4D K-step TTL clamp: detect step boundaries and bump SOA serial so
+	// secondaries pull AXFR with the new clamp ceiling. No-op for zones
+	// with clamping.enabled: false.
+	kStepScheduler(zd, kdb, pol, now)
+
 	num := pol.Rollover.NumDS
 	for {
 		n, err := CountKskInRolloverPipeline(kdb, zone)

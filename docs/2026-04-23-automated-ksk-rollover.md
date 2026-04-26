@@ -2345,7 +2345,7 @@ operator-visible errors, etc. The status and reset CLIs are how
 those get diagnosed. Manual-ASAP gives a way to test 4B's
 machinery on demand without waiting for `ksk.lifetime` to elapse.
 
-### Phase 4D — K-step TTL clamping (1 day, **Medium** complexity) — **pending**
+### Phase 4D — K-step TTL clamping (1 day, **Medium** complexity) — **landed**
 
 **Goal:** Make `clamping.enabled: true` step the served TTL of
 every RRset down to `K * margin` as `T_roll` approaches, and reset

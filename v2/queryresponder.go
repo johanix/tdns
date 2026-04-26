@@ -174,7 +174,7 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 		}
 	}
 	lgHandler.Debug("signing RRset", "name", name, "rrtype", dns.TypeToString[rrset.RRtype], "zone", zd.ZoneName, "zskCount", len(zoneDak.ZSKs))
-	_, err = zd.SignRRset(&rrset, name, zoneDak, false)
+	_, err = zd.SignRRset(&rrset, name, zoneDak, false, nil)
 	if err != nil {
 		lgHandler.Error("error signing RRset", "name", name, "err", err)
 		return rrset, err

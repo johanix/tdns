@@ -88,7 +88,17 @@ func SignMsg(m dns.Msg, signer string, sak *Sig0ActiveKeys) (*dns.Msg, error) {
 	return &m, nil
 }
 
-func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, force bool) (bool, error) {
+// SignRRset signs an RRset with the zone's active KSK or ZSK keys, regenerating
+// any RRSIGs that NeedsResigning indicates are stale. When clamp != nil
+// (zone has clamping.enabled and a rollover is scheduled), the RR header
+// TTLs are first clamped to min(rrset.UnclampedTTL, K * margin) and then
+// signed — so the resulting RRSIG.OrigTtl matches the served TTL. See §5.2
+// of the automated KSK rollover design.
+//
+// clamp == nil disables clamping entirely (no behavior change from the
+// pre-4D signature). Most callers pass nil; SignZone builds a *ClampParams
+// once per pass for clamping zones and threads it down.
+func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, force bool, clamp *ClampParams) (bool, error) {
 
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return false, fmt.Errorf("SignRRset: zone %s does not allow signing (neither online-signing nor inline-signing)", zd.ZoneName)
@@ -113,6 +123,11 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 		return false, fmt.Errorf("SignRRsetNG: rrset has no RRs")
 	}
 
+	// 4D K-step clamp: rewrite RR header TTLs in place before signing so
+	// the RRSIG covers the clamped TTL. Captures rrset.UnclampedTTL on
+	// first encounter; no-op when clamp == nil.
+	applyClampToRRset(rrset, clamp)
+
 	var signingkeys []*PrivateKeyCache
 
 	if rrset.RRs[0].Header().Rrtype == dns.TypeDNSKEY {
@@ -122,6 +137,7 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 	}
 
 	resigned := false
+	now := time.Now().UTC()
 
 	for _, key := range signingkeys {
 		shouldSign := true
@@ -145,14 +161,18 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 			}
 			rrsig.KeyTag = key.DnskeyRR.KeyTag()
 			rrsig.Algorithm = key.DnskeyRR.Algorithm
-			rrsig.Inception, rrsig.Expiration = sigLifetime(time.Now().UTC(), 3600*24*30) // 30 days
-			rrsig.SignerName = zd.ZoneName                                                // name
+			rrsig.Inception, rrsig.Expiration = sigLifetime(now, 3600*24*30) // 30 days
+			rrsig.SignerName = zd.ZoneName                                   // name
 
 			err := rrsig.Sign(key.CS, rrset.RRs)
 			if err != nil {
 				lgSigner.Error("rrsig.Sign failed", "name", name, "err", err)
 				return false, err
 			}
+
+			// 4D clamp invariant: warn if validity would expire before the
+			// retired-key hold window completes. Doesn't refuse to sign.
+			checkValidityInvariant(zd.ZoneName, rrsig, clamp, now)
 
 			rrset.RRSIGs = append(rrset.RRSIGs, rrsig)
 			resigned = true
@@ -355,8 +375,20 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 		}
 	}
 
+	// 4D K-step TTL clamp: build ClampParams once per pass so every RRset
+	// signed in this pass observes the same K. nil for non-clamping zones
+	// (or zones with no scheduled rollover, mid-rollover, etc.).
+	var clamp *ClampParams
+	if zd.DnssecPolicy != nil {
+		clamp, err = ClampParamsForZone(kdb, zd.ZoneName, zd.DnssecPolicy, time.Now())
+		if err != nil {
+			lgSigner.Warn("SignZone: ClampParamsForZone failed; signing without clamp", "zone", zd.ZoneName, "err", err)
+			clamp = nil
+		}
+	}
+
 	MaybeSignRRset := func(rrset core.RRset, zone string) (core.RRset, bool) {
-		resigned, err := zd.SignRRset(&rrset, zone, dak, force)
+		resigned, err := zd.SignRRset(&rrset, zone, dak, force, clamp)
 		if err != nil {
 			lgSigner.Error("failed to sign RRset", "name", rrset.RRs[0].Header().Name, "rrtype", dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], "zone", zd.ZoneName)
 		}

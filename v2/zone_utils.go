@@ -666,7 +666,7 @@ func (zd *ZoneData) BumpSerialOnly() (BumperResponse, error) {
 		apex.RRtypes.Set(dns.TypeSOA, soaRRset)
 
 		rrset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
-		_, err = zd.SignRRset(&rrset, zd.ZoneName, nil, true) // true = force signing, as we know the SOA has changed
+		_, err = zd.SignRRset(&rrset, zd.ZoneName, nil, true, nil) // true = force signing, as we know the SOA has changed
 		if err != nil {
 			lg.Error("BumpSerialOnly: failed to sign SOA RRset", "zone", zd.ZoneName, "err", err)
 			return resp, err
