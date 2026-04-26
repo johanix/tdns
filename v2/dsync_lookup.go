@@ -330,12 +330,32 @@ func (imr *Imr) LookupDSYNCTarget(ctx context.Context, childzone string, dtype u
 
 	lgDns.Debug("looked up published DSYNC update target", "zone", childzone, "qname", dsync_res.Qname, "dsync", dsync.String())
 
-	addrs, err = net.DefaultResolver.LookupHost(ctx, dsync.Target)
-	if err != nil {
-		return nil, fmt.Errorf("lookup DSYNC target %q: %w", dsync.Target, err)
+	// Resolve A/AAAA for the DSYNC target via the internal IMR (not the
+	// stdlib resolver, which would consult /etc/resolv.conf).
+	target := dns.Fqdn(dsync.Target)
+	for _, qtype := range []uint16{dns.TypeA, dns.TypeAAAA} {
+		resp, qerr := imr.ImrQuery(ctx, target, qtype, dns.ClassINET, nil)
+		if qerr != nil {
+			lgDns.Debug("IMR address lookup failed", "target", target, "qtype", dns.TypeToString[qtype], "err", qerr)
+			continue
+		}
+		if resp.Error || resp.RRset == nil {
+			continue
+		}
+		for _, rr := range resp.RRset.RRs {
+			switch v := rr.(type) {
+			case *dns.A:
+				addrs = append(addrs, v.A.String())
+			case *dns.AAAA:
+				addrs = append(addrs, v.AAAA.String())
+			}
+		}
+	}
+	if len(addrs) == 0 {
+		return nil, fmt.Errorf("lookup DSYNC target %q: no A or AAAA records via IMR", target)
 	}
 
-	lgDns.Debug("resolved DSYNC target addresses", "target", dsync.Target, "addrs", addrs)
+	lgDns.Debug("resolved DSYNC target addresses", "target", target, "addrs", addrs)
 
 	for _, a := range addrs {
 		dsynctarget.Addresses = append(dsynctarget.Addresses, net.JoinHostPort(a, strconv.Itoa(int(dsync.Port))))
