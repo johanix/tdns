@@ -23,6 +23,51 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		extraTypes = append(extraTypes, fmt.Sprintf("%s(%d)", dns.TypeToString[rr.Header().Rrtype], rr.Header().Rrtype))
 	}
 	lgDns.Info("ValidateUpdate: message details", "compress", r.Compress, "id", r.Id, "extra_count", len(r.Extra), "extra_types", extraTypes, "ns_count", len(r.Ns), "question", len(r.Question), "answer", len(r.Answer))
+
+	// SIG(0) verification has to run over the wire bytes of the message
+	// as it was signed. miekg/dns gives us the parsed *dns.Msg and we
+	// re-pack it to obtain those bytes. This round-trip is supposed to
+	// be the identity, but it isn't for §2.5.2 delete-RRset records
+	// (RFC 2136): an Update RR with class ANY and rdlength 0.
+	//
+	// On unpack, miekg looks at the type byte and constructs the typed
+	// RR (e.g. *dns.DS, *dns.A, *dns.RRSIG) with all rdata fields at
+	// their zero values, then short-circuits via noRdata(h) before
+	// calling rr.unpack(). The resulting struct has empty fields. So
+	// far so good — except that on re-pack, miekg's per-type pack()
+	// unconditionally serializes the fixed-size scalar fields. For
+	// example *dns.DS.pack writes KeyTag (2) + Algorithm (1) +
+	// DigestType (1) + Digest (variable, 0 bytes when empty) = 4 bytes
+	// of phantom rdata. The repack ends up 4 bytes longer than the
+	// wire, the SIG hash is computed over the wrong bytes, and
+	// signature verification fails with "dns: bad signature".
+	//
+	// Types whose rdata is a single domain name (NS, CNAME, PTR, MX,
+	// SOA, ...) escape this because packDomainName special-cases the
+	// empty string at msg.go:211 — comment there literally says "Ok,
+	// for instance when dealing with update RR without any rdata."
+	// That handling was added for delete-RRset records but only covers
+	// the domain-name field. Types with fixed scalar fields (DS,
+	// DNSKEY, A, AAAA, RRSIG, SVCB, ...) all repack with phantom rdata.
+	//
+	// We believe this is a bug in miekg/dns. The fix should be either
+	// (a) on unpack, return a *dns.ANY for any RR with rdlength==0, or
+	// (b) make every per-type pack() honor "empty struct → empty
+	// rdata" the way packDomainName already does. Until that lands
+	// upstream, we patch the parsed message here: any §2.5.2 record
+	// (class ANY, rdlength 0) is replaced with a *dns.ANY placeholder
+	// before re-pack. *dns.ANY's pack() correctly writes 0 bytes,
+	// so the repack matches the wire and SIG verification succeeds.
+	for i, rr := range r.Ns {
+		if rr == nil {
+			continue
+		}
+		h := rr.Header()
+		if h.Class == dns.ClassANY && h.Rdlength == 0 {
+			r.Ns[i] = &dns.ANY{Hdr: *h}
+		}
+	}
+
 	msgbuf, err := r.Pack()
 	if err != nil {
 		lgDns.Error("ValidateUpdate: error from msg.Pack()", "err", err)
