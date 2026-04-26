@@ -119,7 +119,40 @@ keybootstrap:
                            interval:     60     # seconds between lookups
                            nameservers:  all    # one | all
 
+# DNSSEC policies. Each policy is referenced from a zone's `dnssec-policy:`
+# field. The rollover, ttls, and clamping subtrees are optional; omitting
+# them gives a static-key policy with no automated rollover.
+#
+# Rollover (Phase 4 of the automated KSK rollover plan):
+#   method: none | multi-ds | double-signature
+#     - none           — no rollover; KSKs stay active forever
+#     - multi-ds       — RFC 7583 §3.3.3 generalized; preferred
+#     - double-signature — RFC 7583 §3.3.1; not yet implemented (4E)
+#   num-ds: pipeline depth for multi-ds (default 3)
+#   parent-agent: host:port of the parent's authoritative agent that
+#     responds to DS queries. REQUIRED when method != none. Used to
+#     observe DS publication after a push.
+#   confirm-initial-wait / confirm-poll-max / confirm-timeout: timing
+#     for the parent-DS observation backoff loop.
+#
+# TTLs:
+#   dnskey: zone-owner choice for the DNSKEY RRset TTL at steady state.
+#
+# Clamping (Phase 4D K-step TTL clamping; §5.2 of the design doc):
+#   enabled: when true, the signer clamps every served TTL to
+#     min(operator_ttl, K * margin) as the next rollover approaches,
+#     so that no cached record outlives the retired-KSK hold window.
+#     K decrements stepwise from K_max = ksk.lifetime / margin down to
+#     1 in the final margin window, resetting to K_max post-rollover.
+#   margin: REQUIRED when enabled: true. Both the floor TTL near
+#     rollover and the retired-KSK hold time. Default reasonable
+#     value is 1h. No silent default — config parse fails closed if
+#     omitted.
+#
+# Multiple policies may coexist; each zone references one.
 dnssecpolicies:
+                        # Static KSK, no automated rollover. Useful for zones
+                        # whose operators want manual control over key cycles.
                         default:
                            algorithm:  ED25519
                            ksk:
@@ -131,18 +164,37 @@ dnssecpolicies:
                            csk:
                               lifetime:     none
                               sigvalidity:  168h
+                           # rollover: omitted → method: none (static keys)
+                           # clamping: omitted → disabled (no TTL clamping)
 
+                        # Rapid-cadence policy with automated KSK rollover.
+                        # Suitable for testing / experimentation.
                         fastroll:
                            algorithm:  ED25519
                            ksk:
                               lifetime:     48h
-                              sigvalidity:  5h
+                              sigvalidity:  168h    # exceed lifetime so RRSIGs
+                                                    # outlive the key cycle
                            zsk:
                               lifetime:     12h
                               sigvalidity:  2h
                            csk:
                               lifetime:     none
                               sigvalidity:  168h
+                           rollover:
+                              method:        multi-ds
+                              num-ds:        3                  # pipeline depth
+                              parent-agent:  127.0.0.1:5354     # parent's agent for DS observation
+                              confirm-initial-wait: 2s
+                              confirm-poll-max:     60s
+                              confirm-timeout:      1h
+                           ttls:
+                              dnskey:  2h     # operator-configured DNSKEY TTL
+                           clamping:
+                              enabled: true   # K-step TTL clamping near rollover
+                              margin:  1h     # REQUIRED when enabled: true
+                                              # — floor TTL near rollover
+                                              # — retired-KSK hold time
 
 # Key and Signing Policy (KASP)
 # Controls the KeyStateWorker's automatic key state transitions and standby key maintenance.
@@ -151,10 +203,15 @@ dnssecpolicies:
 #   - Transition retired keys to removed after propagation_delay
 #   - Generate new standby keys when count drops below configured thresholds
 kasp:
-                        propagation_delay:  1h     # Wait time before published→standby and retired→removed transitions
+                        propagation_delay:  1h     # Wait time before published→standby and retired→removed
+                                                   # transitions for non-rollover zones. Also used by the
+                                                   # rollover worker's pending-child-publish phase.
                         check_interval:     1m     # How often the KeyStateWorker runs its checks
                         standby_zsk_count:  1      # Number of standby ZSKs to maintain per zone (0 = no standby)
-                        standby_ksk_count:  0      # Number of standby KSKs to maintain per zone (0 = no standby)
+                        standby_ksk_count:  0      # Number of standby KSKs to maintain per zone (0 = no standby).
+                                                   # NOTE: For zones with rollover.method != none, the rollover
+                                                   # pipeline-fill (Phase 4A) generates KSKs up to rollover.num-ds
+                                                   # automatically; standby_ksk_count is independent of that.
 
 # Multi-provider DNSSEC configuration (RFC 8901)
 # Unified config block for all three MP roles: agent, combiner, signer.

@@ -137,20 +137,27 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 
 	out.Clamping.Enabled = conf.Clamping.Enabled
 	if out.Clamping.Enabled {
+		// 4D: when clamping is enabled, margin is required. It is both the
+		// floor TTL near rollover and the retired-KSK hold time, and it
+		// has no safe default — too short and the clamp is finer than
+		// clock skew, too long and rollovers stall. Fail closed at parse.
 		marginStr := strings.TrimSpace(conf.Clamping.Margin)
 		if marginStr == "" {
-			out.Clamping.Margin = defaultClampingMargin
-		} else {
-			d, err := time.ParseDuration(marginStr)
-			if err != nil {
-				return fmt.Errorf("dnssec policy %q: clamping.margin: %w", policyName, err)
-			}
-			if d < 0 {
-				return fmt.Errorf("dnssec policy %q: clamping.margin must be non-negative", policyName)
-			}
-			out.Clamping.Margin = d
+			return fmt.Errorf("dnssec policy %q: clamping.margin is required when clamping.enabled: true", policyName)
 		}
+		d, err := time.ParseDuration(marginStr)
+		if err != nil {
+			return fmt.Errorf("dnssec policy %q: clamping.margin: %w", policyName, err)
+		}
+		if d <= 0 {
+			return fmt.Errorf("dnssec policy %q: clamping.margin must be positive", policyName)
+		}
+		out.Clamping.Margin = d
 	} else {
+		// clamping.enabled: false (or omitted): policy is valid; margin is
+		// not required and defaults to 0. The rollover worker will fall
+		// back to effective_margin = max(0, max_observed_ttl) for the
+		// retired-KSK hold time.
 		out.Clamping.Margin = 0
 	}
 
