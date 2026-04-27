@@ -18,6 +18,17 @@ import (
 
 // XXX: This should perhaps not be a method of ZoneData, but rather of KeyDB.
 func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
+	// Fail closed by default. Each branch that successfully verifies a
+	// signature lifts ValidationRcode to RcodeSuccess (or another specific
+	// rcode such as RcodeBadTime for "verified but outside validity
+	// window"). RcodeFormatError early-returns overwrite this for
+	// structural problems. Without this default, an UPDATE that arrives
+	// with a SIG(0) signature but no key successfully verifies it would
+	// land at the function's end with the zero-valued ValidationRcode
+	// (RcodeSuccess), causing the responder to return NOERROR for an
+	// update it actually rejected.
+	us.ValidationRcode = dns.RcodeBadSig
+
 	var extraTypes []string
 	for _, rr := range r.Extra {
 		extraTypes = append(extraTypes, fmt.Sprintf("%s(%d)", dns.TypeToString[rr.Header().Rrtype], rr.Header().Rrtype))
