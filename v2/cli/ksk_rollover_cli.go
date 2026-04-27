@@ -698,6 +698,8 @@ func printKSKRolloverStatus(kdb *tdns.KeyDB, z string, pol *tdns.DnssecPolicy, v
 		hasError   bool
 	}
 	var rows []keyRow
+	var removedHidden int
+	const removedCap = 3
 	states := []string{
 		tdns.DnskeyStateCreated,
 		tdns.DnskeyStateDsPublished,
@@ -733,6 +735,8 @@ func printKSKRolloverStatus(kdb *tdns.KeyDB, z string, pol *tdns.DnssecPolicy, v
 		// Within "removed", sort by active_seq desc so the most-recently-
 		// retired key is at the top of the removed block; keys without an
 		// active_seq (seq < 0, never promoted to active) sink to the bottom.
+		// Then cap to removedCap rows so the table doesn't grow unboundedly
+		// over many rollover cycles.
 		if st == tdns.DnskeyStateRemoved {
 			sort.SliceStable(stateRows, func(i, j int) bool {
 				si, sj := stateRows[i].seq, stateRows[j].seq
@@ -741,6 +745,10 @@ func printKSKRolloverStatus(kdb *tdns.KeyDB, z string, pol *tdns.DnssecPolicy, v
 				}
 				return si > sj
 			})
+			if len(stateRows) > removedCap {
+				removedHidden = len(stateRows) - removedCap
+				stateRows = stateRows[:removedCap]
+			}
 		}
 		rows = append(rows, stateRows...)
 	}
@@ -767,6 +775,9 @@ func printKSKRolloverStatus(kdb *tdns.KeyDB, z string, pol *tdns.DnssecPolicy, v
 		}
 		fmt.Printf("  %-10s  %-5d    %-13s   %-9s   %-24s   %s\n",
 			seqStr, r.keyid, r.state, kskPublishedSummary(r.state), sinceStr, errCol)
+	}
+	if removedHidden > 0 {
+		fmt.Printf("  ... %d older removed key(s) not shown\n", removedHidden)
 	}
 }
 
