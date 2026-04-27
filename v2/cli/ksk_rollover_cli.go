@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -712,6 +713,7 @@ func printKSKRolloverStatus(kdb *tdns.KeyDB, z string, pol *tdns.DnssecPolicy, v
 			fmt.Printf("  (list keys %s failed: %v)\n", st, err)
 			return
 		}
+		stateRows := make([]keyRow, 0, len(keys))
 		for i := range keys {
 			k := &keys[i]
 			if k.Flags&dns.SEP == 0 {
@@ -719,7 +721,7 @@ func printKSKRolloverStatus(kdb *tdns.KeyDB, z string, pol *tdns.DnssecPolicy, v
 			}
 			seq, _ := tdns.RolloverKeyActiveSeq(kdb, z, k.KeyTag)
 			errStr, _ := tdns.LoadLastRolloverError(kdb, z, k.KeyTag)
-			rows = append(rows, keyRow{
+			stateRows = append(stateRows, keyRow{
 				keyid:      k.KeyTag,
 				state:      st,
 				seq:        seq,
@@ -728,6 +730,19 @@ func printKSKRolloverStatus(kdb *tdns.KeyDB, z string, pol *tdns.DnssecPolicy, v
 				hasError:   errStr != "",
 			})
 		}
+		// Within "removed", sort by active_seq desc so the most-recently-
+		// retired key is at the top of the removed block; keys without an
+		// active_seq (seq < 0, never promoted to active) sink to the bottom.
+		if st == tdns.DnskeyStateRemoved {
+			sort.SliceStable(stateRows, func(i, j int) bool {
+				si, sj := stateRows[i].seq, stateRows[j].seq
+				if (si < 0) != (sj < 0) {
+					return si >= 0 // rows with a seq come first
+				}
+				return si > sj
+			})
+		}
+		rows = append(rows, stateRows...)
 	}
 	if len(rows) == 0 {
 		fmt.Println()
