@@ -139,6 +139,30 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 	resigned := false
 	now := time.Now().UTC()
 
+	// Drop any RRSIG whose signing key is no longer in our active key set.
+	// This happens after a KSK rollover: the previously-active key is now
+	// retired (or removed) and we no longer want its RRSIG covering the
+	// DNSKEY RRset (or any other RRset signed by KSKs/ZSKs). Without this,
+	// stale RRSIGs by retired keys hang around until their validity
+	// expires — long after the keys themselves leave the zone.
+	activeKeyTags := make(map[uint16]bool, len(signingkeys))
+	for _, key := range signingkeys {
+		activeKeyTags[key.DnskeyRR.KeyTag()] = true
+	}
+	filtered := rrset.RRSIGs[:0]
+	for _, sig := range rrset.RRSIGs {
+		s, ok := sig.(*dns.RRSIG)
+		if !ok || activeKeyTags[s.KeyTag] {
+			filtered = append(filtered, sig)
+			continue
+		}
+		lgSigner.Debug("dropping RRSIG by non-active key",
+			"name", s.Header().Name, "rrtype", dns.TypeToString[s.TypeCovered],
+			"keytag", s.KeyTag)
+		resigned = true // we changed the rrset.RRSIGs; flag as updated
+	}
+	rrset.RRSIGs = filtered
+
 	for _, key := range signingkeys {
 		shouldSign := true
 		for idx, oldsig := range rrset.RRSIGs {

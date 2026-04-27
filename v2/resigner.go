@@ -26,28 +26,42 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 	ticker := time.NewTicker(time.Duration(interval) * time.Second)
 	defer ticker.Stop()
 
-	if !viper.GetBool("service.resign") {
-		lgSigner.Info("ResignerEngine is NOT active, zones updated only on Notifies")
-		for {
-			select {
-			case <-ctx.Done():
-				lgSigner.Info("ResignerEngine terminating (inactive mode)")
-				return
-			case _, ok := <-zoneresignch:
-				if !ok {
-					return
-				}
-				// ensure that we keep reading to keep the channel open
-				continue
-			}
-		}
+	// service.resign controls only the *periodic* re-sign ticker that
+	// keeps RRSIG validity fresh. Explicit one-shot resign requests
+	// arriving on zoneresignch (from triggerResign, e.g. after an
+	// AtomicRollover or other key-state change) are always honored,
+	// regardless of this setting — otherwise rollovers can leave
+	// the DNSKEY RRset signed by a key that's no longer active.
+	periodic := viper.GetBool("service.resign")
+	if !periodic {
+		lgSigner.Info("ResignerEngine: periodic mode OFF; explicit triggerResign requests still honored")
 	} else {
 		lgSigner.Info("ResignerEngine starting", "interval_sec", interval)
 	}
 
 	ZonesToKeepSigned := make(map[string]*ZoneData)
-	//	var zr ZoneRefresher // We're reusing the ZoneRefresher struct also for the resigner
-	// var zone string
+
+	// resignNow performs an immediate force re-sign of zd. Used when
+	// triggerResign fires (key-state change, etc.) — we can't wait for
+	// the periodic ticker because (a) ticker may be disabled, and
+	// (b) even if enabled, NeedsResigning short-circuits when validity
+	// is healthy, which is exactly the case after a rollover when the
+	// existing RRSIGs are perfectly valid but signed by the wrong key.
+	resignNow := func(zd *ZoneData) {
+		if zd == nil {
+			return
+		}
+		if !zd.Options[OptInlineSigning] && !zd.Options[OptOnlineSigning] {
+			return
+		}
+		lgSigner.Debug("triggerResign: forcing zone re-sign", "zone", zd.ZoneName)
+		newrrsigs, err := zd.SignZone(zd.KeyDB, true) // force=true
+		if err != nil {
+			lgSigner.Error("triggerResign: zone re-sign failed", "zone", zd.ZoneName, "err", err)
+			return
+		}
+		lgSigner.Info("triggerResign: zone re-signed", "zone", zd.ZoneName, "new_rrsigs", newrrsigs)
+	}
 
 	for {
 		select {
@@ -64,12 +78,24 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 				continue
 			}
 
-			if _, exist := ZonesToKeepSigned[zd.ZoneName]; !exist {
-				lgSigner.Info("adding zone to re-sign list", "zone", zd.ZoneName)
+			// Always force-resign right now — that's the whole point
+			// of the channel: an explicit "this zone needs new RRSIGs"
+			// signal that should not wait for the next ticker.
+			resignNow(zd)
+
+			// Also keep the zone on the watchlist for the periodic
+			// re-sign ticker (only effective when periodic mode is on).
+			if periodic {
+				if _, exist := ZonesToKeepSigned[zd.ZoneName]; !exist {
+					lgSigner.Info("adding zone to re-sign list", "zone", zd.ZoneName)
+				}
+				ZonesToKeepSigned[zd.ZoneName] = zd
 			}
-			ZonesToKeepSigned[zd.ZoneName] = zd
 
 		case <-ticker.C:
+			if !periodic {
+				continue
+			}
 			for _, zd := range ZonesToKeepSigned {
 				// Skip zones where signing has been disabled since
 				// they were added to the list. MP zones can toggle
@@ -77,12 +103,12 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 				if !zd.Options[OptInlineSigning] && !zd.Options[OptOnlineSigning] {
 					continue
 				}
-				lgSigner.Debug("re-signing zone", "zone", zd.ZoneName)
+				lgSigner.Debug("re-signing zone (periodic)", "zone", zd.ZoneName)
 				newrrsigs, err := zd.SignZone(zd.KeyDB, false)
 				if err != nil {
 					lgSigner.Error("failed to re-sign zone", "zone", zd.ZoneName, "err", err)
 				}
-				lgSigner.Info("zone re-signed", "zone", zd.ZoneName, "new_rrsigs", newrrsigs)
+				lgSigner.Info("zone re-signed (periodic)", "zone", zd.ZoneName, "new_rrsigs", newrrsigs)
 			}
 		}
 	}
