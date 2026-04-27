@@ -118,6 +118,7 @@ type ZoneData struct {
 	Options            map[ZoneOption]bool
 	UpdatePolicy       UpdatePolicy
 	DnssecPolicy       *DnssecPolicy
+	DnssecPolicyName   string // name of currently-applied policy; used to detect config-reload-driven changes
 	MultiSigner        *MultiSignerConf
 	KeyDB              *KeyDB
 	AppType            AppType

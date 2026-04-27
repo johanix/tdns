@@ -223,6 +223,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.Options = zr.Options
 							zd.UpdatePolicy = zr.UpdatePolicy
 							zd.DnssecPolicy = &dp
+							zd.DnssecPolicyName = zr.DnssecPolicy
 							zd.MultiSigner = &msc
 							zd.DelegationSyncQ = conf.Internal.DelegationSyncQ
 							zd.KeyDB = conf.Internal.KeyDB
@@ -309,12 +310,15 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							}
 							zd.ZoneType = zr.ZoneType
 						}
-						// Lookup DNSSEC policy and MultiSigner from config (same as new zone creation)
+						// Lookup DNSSEC policy and MultiSigner from config (same as new zone creation).
+						// Compare by name (not pointer): conf.Internal.DnssecPolicies stores
+						// values, so &dp is a fresh address every refresh tick.
 						var dnssecPolicyChanged bool
 						if zr.DnssecPolicy != "" {
 							if dp, exists := conf.Internal.DnssecPolicies[zr.DnssecPolicy]; exists {
-								if zd.DnssecPolicy != &dp {
+								if zd.DnssecPolicyName != zr.DnssecPolicy {
 									zd.DnssecPolicy = &dp
+									zd.DnssecPolicyName = zr.DnssecPolicy
 									dnssecPolicyChanged = true
 								}
 							} else {
@@ -486,21 +490,22 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					dp := conf.Internal.DnssecPolicies[zr.DnssecPolicy]
 					msc := conf.MultiSigner[zr.MultiSigner]
 					zd := &ZoneData{
-						ZoneName:        zone,
-						ZoneStore:       zr.ZoneStore,
-						Logger:          log.Default(),
-						Upstream:        NormalizeAddress(zr.Primary),
-						Downstreams:     NormalizeAddresses(zr.Notify),
-						Zonefile:        zr.Zonefile,
-						ZoneType:        zr.ZoneType,
-						Options:         zr.Options,
-						UpdatePolicy:    zr.UpdatePolicy,
-						DnssecPolicy:    &dp,
-						MultiSigner:     &msc,
-						DelegationSyncQ: conf.Internal.DelegationSyncQ,
-						Data:            core.NewCmap[OwnerData](),
-						KeyDB:           conf.Internal.KeyDB,
-						FirstZoneLoad:   true,
+						ZoneName:         zone,
+						ZoneStore:        zr.ZoneStore,
+						Logger:           log.Default(),
+						Upstream:         NormalizeAddress(zr.Primary),
+						Downstreams:      NormalizeAddresses(zr.Notify),
+						Zonefile:         zr.Zonefile,
+						ZoneType:         zr.ZoneType,
+						Options:          zr.Options,
+						UpdatePolicy:     zr.UpdatePolicy,
+						DnssecPolicy:     &dp,
+						DnssecPolicyName: zr.DnssecPolicy,
+						MultiSigner:      &msc,
+						DelegationSyncQ:  conf.Internal.DelegationSyncQ,
+						Data:             core.NewCmap[OwnerData](),
+						KeyDB:            conf.Internal.KeyDB,
+						FirstZoneLoad:    true,
 					}
 
 					Zones.Set(zone, zd)
