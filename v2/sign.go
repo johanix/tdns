@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -18,6 +19,21 @@ import (
 
 // sig0TTL is the TTL used for SIG(0) records in signed messages.
 const sig0TTL uint32 = 300
+
+// signerStaleRRSIGsDropped counts how many RRSIGs SignRRset has dropped
+// because their signing key was no longer in the active key set. The
+// counter is intended to surface key-state-related events: outside of
+// rollovers it should stay flat; a non-zero rate means SOMETHING changed
+// the active set and the stale-RRSIG cleanup is doing its job. Read via
+// SignerStaleRRSIGsDropped().
+var signerStaleRRSIGsDropped uint64
+
+// SignerStaleRRSIGsDropped returns a snapshot of the stale-RRSIG-drop
+// counter. Used by tests and a future observability surface; per-zone
+// breakdown can be added later if needed.
+func SignerStaleRRSIGsDropped() uint64 {
+	return atomic.LoadUint64(&signerStaleRRSIGsDropped)
+}
 
 // cryptoRandIntn returns a random int in [0, n) using crypto/rand.
 func cryptoRandIntn(n int) int {
@@ -145,6 +161,11 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 	// DNSKEY RRset (or any other RRset signed by KSKs/ZSKs). Without this,
 	// stale RRSIGs by retired keys hang around until their validity
 	// expires — long after the keys themselves leave the zone.
+	//
+	// Logged at INFO level (not Debug) and metered so operators can see
+	// in production logs when this fires. Outside of rollover events the
+	// counter should stay flat; a non-zero rate would indicate an
+	// unexpected key-state change worth investigating.
 	activeKeyTags := make(map[uint16]bool, len(signingkeys))
 	for _, key := range signingkeys {
 		activeKeyTags[key.DnskeyRR.KeyTag()] = true
@@ -156,9 +177,13 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 			filtered = append(filtered, sig)
 			continue
 		}
-		lgSigner.Debug("dropping RRSIG by non-active key",
-			"name", s.Header().Name, "rrtype", dns.TypeToString[s.TypeCovered],
-			"keytag", s.KeyTag)
+		atomic.AddUint64(&signerStaleRRSIGsDropped, 1)
+		lgSigner.Info("dropping RRSIG by non-active key",
+			"zone", zd.ZoneName,
+			"name", s.Header().Name,
+			"rrtype", dns.TypeToString[s.TypeCovered],
+			"keytag", s.KeyTag,
+			"reason", "key no longer in active set (post-rollover or manual state change)")
 		resigned = true // we changed the rrset.RRSIGs; flag as updated
 	}
 	rrset.RRSIGs = filtered
