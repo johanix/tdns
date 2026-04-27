@@ -380,6 +380,14 @@ func confirmDSAndAdvanceCreatedKeysTx(kdb *KeyDB, zone string, low, high int, no
 		if err := setRolloverKeyDsObservedAtTx(tx, zone, k.KeyTag, now); err != nil {
 			return 0, fmt.Errorf("ds_observed_at for keyid %d: %w", k.KeyTag, err)
 		}
+		// A successful DS observation invalidates any prior
+		// last_rollover_error (e.g. from a previous DS-observation
+		// timeout that has since been resolved). The key is
+		// progressing again; the stale error would only confuse
+		// operators reading auto-rollover status output.
+		if _, err := tx.Exec(`UPDATE RolloverKeyState SET last_rollover_error = NULL WHERE zone = ? AND keyid = ?`, zone, int(k.KeyTag)); err != nil {
+			return 0, fmt.Errorf("clear last_rollover_error for keyid %d: %w", k.KeyTag, err)
+		}
 		advanced++
 	}
 

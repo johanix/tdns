@@ -79,19 +79,6 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResul
 
 		lgDns.Debug("sending update message", "msg", msg.String())
 
-		// 4D debug: pack the message exactly here and log the bytes.
-		// client.Exchange does its own pack internally; comparing this
-		// pack's length and first32 against (1) SignMsg's "after signing"
-		// and (2) tcpdump on the wire pinpoints whether mutation
-		// happens before or inside client.Exchange.
-		if buf, packErr := msg.Pack(); packErr == nil {
-			lgDns.Debug("sending update wire bytes (pre-Exchange pack)",
-				"buflen", len(buf),
-				"first32", fmt.Sprintf("%x", buf[:min(32, len(buf))]))
-		} else {
-			lgDns.Warn("sending update wire bytes: pack failed", "err", packErr)
-		}
-
 		res, _, err := client.Exchange(msg, dst)
 		if err != nil {
 			lgDns.Warn("error from dns.Exchange, trying next address", "dst", dst, "err", err)
