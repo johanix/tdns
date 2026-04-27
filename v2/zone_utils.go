@@ -183,7 +183,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 		zd.FirstZoneLoad = false
 	} else {
 		zd.CurrentSerial++
-		if zd.KeyDB != nil && zd.KeyDB.Options[AuthOptPersistOutboundSerial] != "" {
+		if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial == OutboundSoaSerialPersist {
 			if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
 				lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
 			}
@@ -257,7 +257,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 		zd.FirstZoneLoad = false
 	} else {
 		zd.CurrentSerial++
-		if zd.KeyDB != nil && zd.KeyDB.Options[AuthOptPersistOutboundSerial] != "" {
+		if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial == OutboundSoaSerialPersist {
 			if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
 				lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
 			}
@@ -650,7 +650,7 @@ func (zd *ZoneData) BumpSerialOnly() (BumperResponse, error) {
 	resp.OldSerial = zd.CurrentSerial
 	zd.CurrentSerial++
 	resp.NewSerial = zd.CurrentSerial
-	if zd.KeyDB != nil && zd.KeyDB.Options[AuthOptPersistOutboundSerial] != "" {
+	if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial == OutboundSoaSerialPersist {
 		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
 			lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
 		}

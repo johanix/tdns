@@ -18,7 +18,6 @@ service:
    debug:             true     # writes processed zone to disk
    refresh:           true
    maxrefresh:        1800     # seconds. Cap refresh counter to max this
-   reset_soa_serial:  false    # replace inbound SOA serial with unixtime.
 
    transport:
       type:    svcb               # svcb | tsync | none; default is none
@@ -34,6 +33,17 @@ dnsengine:
       doh:   [ 443 ]
    certfile:  /etc/tdns/certs/servers/localhost..crt
    keyfile:   /etc/tdns/certs/servers/localhost..key
+   # outbound_soa_serial controls the SOA serial advertised to secondaries:
+   #   keep      — outbound = inbound serial (default; current behavior)
+   #   unixtime  — outbound = time.Now().Unix() at zone load
+   #   persist   — outbound = previously-saved outbound serial (DB-backed).
+   #               Every BumpSerial writes the new value back. On clean
+   #               restart with no zone change, the serial stays put, so
+   #               secondaries don't see a regression and don't trigger
+   #               an unnecessary AXFR. Recommended for primaries with
+   #               BIND/Knot/etc. secondaries where serial-regression on
+   #               restart would otherwise cause sync confusion.
+   # outbound_soa_serial:  persist
 
 resignerengine:
    interval:  300    # seconds between runs. Reasonable value is likely ~3600

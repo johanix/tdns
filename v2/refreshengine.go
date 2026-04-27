@@ -41,7 +41,7 @@ type RefreshCounter struct {
 // Called for both newly-created zones and pre-registered zone stubs.
 func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefresher, conf *Config,
 	refreshCounters *core.ConcurrentMap[string, *RefreshCounter],
-	tryPostpass func(string), resetSoaSerial bool) (bool, error) {
+	tryPostpass func(string)) (bool, error) {
 
 	updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force, conf)
 	if err != nil {
@@ -114,18 +114,22 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		if zd.Error && zd.ErrorType == RefreshError {
 			zd.SetError(NoError, "")
 		}
-		if resetSoaSerial {
-			zd.CurrentSerial = uint32(time.Now().Unix())
-			lgEngine.Info("zone updated from upstream, resetting serial to unixtime",
-				"zone", zone, "serial", zd.CurrentSerial)
-		}
-		if zd.KeyDB != nil && zd.KeyDB.Options[AuthOptPersistOutboundSerial] != "" {
-			if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > 0 {
-				if saved != zd.CurrentSerial {
-					lgEngine.Info("restored persisted outgoing serial",
-						"zone", zone, "incoming", zd.CurrentSerial, "persisted", saved)
+		// Apply outbound_soa_serial mode for the serial we'll advertise
+		// to secondaries.
+		if zd.KeyDB != nil {
+			switch zd.KeyDB.OutboundSoaSerial {
+			case OutboundSoaSerialUnixtime:
+				zd.CurrentSerial = uint32(time.Now().Unix())
+				lgEngine.Info("zone loaded; outbound_soa_serial=unixtime",
+					"zone", zone, "serial", zd.CurrentSerial)
+			case OutboundSoaSerialPersist:
+				if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > 0 {
+					if saved != zd.CurrentSerial {
+						lgEngine.Info("zone loaded; outbound_soa_serial=persist (restored saved serial)",
+							"zone", zone, "incoming", zd.CurrentSerial, "persisted", saved)
+					}
+					zd.CurrentSerial = saved
 				}
-				zd.CurrentSerial = saved
 			}
 		}
 		zd.NotifyDownstreams()
@@ -175,8 +179,6 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 	}
 
 	var zone string
-
-	resetSoaSerial := viper.GetBool("service.reset_soa_serial")
 
 	for {
 		select {
@@ -229,7 +231,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 
 						if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,
-							tryPostpass, resetSoaSerial); err != nil {
+							tryPostpass); err != nil {
 							lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
 							zd.SetError(RefreshError, "refresh error: %v", err)
 							zd.LatestError = time.Now()
@@ -492,7 +494,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					Zones.Set(zone, zd)
 
 					if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,
-						tryPostpass, resetSoaSerial); err != nil {
+						tryPostpass); err != nil {
 						lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
 						zd.SetError(RefreshError, "refresh error: %v", err)
 						zd.LatestError = time.Now()
@@ -538,7 +540,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						lgEngine.Info("retrying initial load for zone", "zone", zone)
 						zd.SetError(NoError, "") // clear error to allow load
 						if _, err := initialLoadZone(ctx, zd, zone, ZoneRefresher{Name: zone, Force: true}, conf,
-							refreshCounters, tryPostpass, resetSoaSerial); err != nil {
+							refreshCounters, tryPostpass); err != nil {
 							lgEngine.Error("initial load retry failed", "zone", zone, "error", err)
 							zd.SetError(RefreshError, "refresh error: %v", err)
 							zd.LatestError = time.Now()
@@ -558,9 +560,18 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						if zd.Error && zd.ErrorType == RefreshError {
 							zd.SetError(NoError, "")
 						}
-						if resetSoaSerial {
-							zd.CurrentSerial = uint32(time.Now().Unix())
-							lgEngine.Info("zone updated from upstream, resetting serial to unixtime", "zone", zone, "serial", zd.CurrentSerial)
+						// Apply outbound_soa_serial mode after upstream refresh.
+						if zd.KeyDB != nil {
+							switch zd.KeyDB.OutboundSoaSerial {
+							case OutboundSoaSerialUnixtime:
+								zd.CurrentSerial = uint32(time.Now().Unix())
+								lgEngine.Info("zone updated from upstream; outbound_soa_serial=unixtime",
+									"zone", zone, "serial", zd.CurrentSerial)
+							case OutboundSoaSerialPersist:
+								if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > 0 {
+									zd.CurrentSerial = saved
+								}
+							}
 						}
 
 						// Re-sign zone after refresh (upstream data has no RRSIGs)

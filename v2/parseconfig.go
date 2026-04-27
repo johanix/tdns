@@ -430,8 +430,17 @@ func (conf *Config) InitializeKeyDB() error {
 	}
 	conf.Internal.KeyDB = kdb
 
-	// Ensure OutgoingSerials table exists for persist-outbound-serial option
-	if kdb.Options[AuthOptPersistOutboundSerial] != "" {
+	// Resolve outbound_soa_serial mode: default to "keep" when unset.
+	// Validation (oneof=keep|unixtime|persist) is enforced by the struct
+	// tag at config-validate time.
+	mode := strings.TrimSpace(strings.ToLower(conf.DnsEngine.OutboundSoaSerial))
+	if mode == "" {
+		mode = OutboundSoaSerialKeep
+	}
+	kdb.OutboundSoaSerial = mode
+
+	// Ensure OutgoingSerials table exists for persist mode.
+	if mode == OutboundSoaSerialPersist {
 		schema := DefaultTables["OutgoingSerials"]
 		if _, err := kdb.DB.Exec(schema); err != nil {
 			return fmt.Errorf("failed to create OutgoingSerials table: %w", err)

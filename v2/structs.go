@@ -568,6 +568,11 @@ type KeyDB struct {
 	DeferredUpdateQ     chan DeferredUpdate
 	KeyBootstrapperQ    chan KeyBootstrapperRequest
 	Options             map[AuthOption]string
+	// OutboundSoaSerial is the resolved mode for outbound SOA serials:
+	// OutboundSoaSerialKeep / OutboundSoaSerialUnixtime / OutboundSoaSerialPersist.
+	// Sourced from DnsEngineConf.OutboundSoaSerial at parse, defaulted to
+	// OutboundSoaSerialKeep if unset.
+	OutboundSoaSerial string
 }
 
 // Lock and Unlock expose the mutex for code that moves to
