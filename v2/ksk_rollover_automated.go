@@ -554,9 +554,26 @@ func PromoteStandbyKskIfNoActive(conf *Config, kdb *KeyDB, zone string) {
 		lgSigner.Error("rollover: standby→active (bootstrap) failed", "zone", zone, "keyid", best.KeyTag, "err", err)
 		return
 	}
-	if _, err := kdb.DB.Exec(`UPDATE RolloverKeyState SET active_at = ? WHERE zone = ? AND keyid = ?`,
-		time.Now().UTC().Format(time.RFC3339), zone, int(best.KeyTag)); err != nil {
-		lgSigner.Warn("rollover: active_at stamp failed (bootstrap)", "zone", zone, "keyid", best.KeyTag, "err", err)
+	// Stamp active_at and assign the next active_seq atomically.
+	tx, err := kdb.Begin("PromoteStandbyKskIfNoActive")
+	if err != nil {
+		lgSigner.Warn("rollover: bootstrap promote stamp tx begin failed", "zone", zone, "err", err)
+	} else {
+		commit := false
+		if err := setRolloverKeyActiveAtTx(tx, zone, best.KeyTag, time.Now().UTC()); err != nil {
+			lgSigner.Warn("rollover: active_at stamp failed (bootstrap)", "zone", zone, "keyid", best.KeyTag, "err", err)
+		} else if seq, err := nextActiveSeqTx(tx, zone); err != nil {
+			lgSigner.Warn("rollover: next active_seq failed (bootstrap)", "zone", zone, "err", err)
+		} else if err := setRolloverKeyActiveSeqTx(tx, zone, best.KeyTag, seq); err != nil {
+			lgSigner.Warn("rollover: active_seq stamp failed (bootstrap)", "zone", zone, "keyid", best.KeyTag, "err", err)
+		} else if err := tx.Commit(); err != nil {
+			lgSigner.Warn("rollover: bootstrap promote stamp tx commit failed", "zone", zone, "err", err)
+		} else {
+			commit = true
+		}
+		if !commit {
+			tx.Rollback()
+		}
 	}
 	lgSigner.Info("rollover: promoted standby KSK to active (no active KSK)", "zone", zone, "keyid", best.KeyTag)
 	triggerResign(conf, zone)

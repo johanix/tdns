@@ -95,12 +95,21 @@ func AtomicRollover(conf *Config, kdb *KeyDB, zone string) (oldKid, newKid uint1
 
 	// standby → active. UpdateDnssecKeyStateTx does not stamp active_at on
 	// DnssecKeyStore (no such column there). active_at lives in
-	// RolloverKeyState (4B); stamp it explicitly.
+	// RolloverKeyState (4B); stamp it explicitly. Also assign the next
+	// per-zone active_seq — the operator-facing "n-th active KSK in this
+	// zone's history" counter.
 	if err := UpdateDnssecKeyStateTx(tx, kdb, zone, newKid, DnskeyStateActive); err != nil {
 		return 0, 0, fmt.Errorf("standby→active (keyid %d): %w", newKid, err)
 	}
 	if err := setRolloverKeyActiveAtTx(tx, zone, newKid, now); err != nil {
 		return 0, 0, fmt.Errorf("active_at (keyid %d): %w", newKid, err)
+	}
+	seq, err := nextActiveSeqTx(tx, zone)
+	if err != nil {
+		return 0, 0, fmt.Errorf("next active_seq: %w", err)
+	}
+	if err := setRolloverKeyActiveSeqTx(tx, zone, newKid, seq); err != nil {
+		return 0, 0, fmt.Errorf("active_seq (keyid %d): %w", newKid, err)
 	}
 	if err := stampRolloverStateAtTx(tx, zone, newKid, now); err != nil {
 		return 0, 0, fmt.Errorf("rollover_state_at (keyid %d): %w", newKid, err)

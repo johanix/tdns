@@ -214,6 +214,53 @@ func setRolloverKeyActiveAtTx(tx *Tx, zone string, keyid uint16, at time.Time) e
 	return err
 }
 
+// nextActiveSeqTx returns the next per-zone active_seq value: MAX(active_seq) + 1
+// for the zone, or 0 if no key has ever been active. Used at standby→active
+// transitions (AtomicRollover, PromoteStandbyKskIfNoActive) to stamp the
+// "n-th active KSK in this zone's history" counter.
+//
+// active_seq is the operator-facing rollover counter: keys are numbered in
+// the order they first became active. Distinct from rollover_index, which
+// tracks RolloverKeyState insertion order and is used by the DS-pipeline
+// plumbing.
+func nextActiveSeqTx(tx *Tx, zone string) (int, error) {
+	var max sql.NullInt64
+	err := tx.QueryRow(`SELECT MAX(active_seq) FROM RolloverKeyState WHERE zone = ?`, zone).Scan(&max)
+	if err != nil {
+		return 0, err
+	}
+	if !max.Valid {
+		return 0, nil
+	}
+	return int(max.Int64) + 1, nil
+}
+
+// setRolloverKeyActiveSeqTx stamps active_seq for one key on an existing TX.
+// Called immediately after standby→active in AtomicRollover and the bootstrap
+// path. Idempotent: if active_seq is already set, this overwrites.
+func setRolloverKeyActiveSeqTx(tx *Tx, zone string, keyid uint16, seq int) error {
+	_, err := tx.Exec(`UPDATE RolloverKeyState SET active_seq = ? WHERE zone = ? AND keyid = ?`, seq, zone, int(keyid))
+	return err
+}
+
+// RolloverKeyActiveSeq returns the active_seq for one key, or (-1, nil) if
+// the key has never been active (the column is NULL). Used by the
+// auto-rollover status CLI for read-only display.
+func RolloverKeyActiveSeq(kdb *KeyDB, zone string, keyid uint16) (int, error) {
+	var v sql.NullInt64
+	err := kdb.DB.QueryRow(`SELECT active_seq FROM RolloverKeyState WHERE zone = ? AND keyid = ?`, zone, int(keyid)).Scan(&v)
+	if err == sql.ErrNoRows {
+		return -1, nil
+	}
+	if err != nil {
+		return -1, err
+	}
+	if !v.Valid {
+		return -1, nil
+	}
+	return int(v.Int64), nil
+}
+
 // setRolloverKeyStandbyAt is the non-TX variant for callers outside of
 // AtomicRollover (e.g. TransitionRolloverKskDsPublishedToStandby's
 // per-key loop).

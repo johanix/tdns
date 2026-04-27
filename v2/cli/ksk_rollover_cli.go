@@ -443,13 +443,13 @@ last_rollover_error for every SEP key under rollover management.`,
 					if k.Flags&dns.SEP == 0 {
 						continue
 					}
-					ri, riOK, _ := tdns.RolloverIndexForKey(kdb, z, k.KeyTag)
-					riStr := "-"
-					if riOK {
-						riStr = fmt.Sprintf("%d", ri)
+					seq, _ := tdns.RolloverKeyActiveSeq(kdb, z, k.KeyTag)
+					seqStr := "-"
+					if seq >= 0 {
+						seqStr = fmt.Sprintf("%d", seq)
 					}
 					errStr, _ := tdns.LoadLastRolloverError(kdb, z, k.KeyTag)
-					line := fmt.Sprintf("  keyid=%-5d state=%-13s rollover_index=%s", k.KeyTag, st, riStr)
+					line := fmt.Sprintf("  keyid=%-5d state=%-13s active_seq=%s", k.KeyTag, st, seqStr)
 					if errStr != "" {
 						line += fmt.Sprintf("  last_error=%q", errStr)
 					}

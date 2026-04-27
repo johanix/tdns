@@ -99,6 +99,7 @@ UNIQUE (zonename, keyid)
 		ds_observed_at       TEXT,
 		standby_at           TEXT,
 		active_at            TEXT,
+		active_seq           INTEGER,
 		last_rollover_error  TEXT,
 		PRIMARY KEY (zone, keyid)
 	)`,

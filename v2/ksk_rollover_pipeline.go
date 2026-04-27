@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"database/sql"
 	"fmt"
 	"time"
 
@@ -90,6 +91,28 @@ func RegisterBootstrapActiveKSK(kdb *KeyDB, zone string, keyid uint16, method Ro
 	now := time.Now().UTC()
 	if err := setRolloverKeyActiveAtTx(tx, zone, keyid, now); err != nil {
 		return fmt.Errorf("stamp active_at: %w", err)
+	}
+
+	// Assign next per-zone active_seq if not already set. The bootstrap
+	// KSK is by definition the first key to be active in this zone, so
+	// nextActiveSeqTx returns 0 when no other key has ever been active.
+	// On subsequent calls (idempotent re-stamp on a key that already had
+	// active_seq), we leave the existing value alone — the operator-
+	// facing counter is "n-th time this key became active," and re-stamps
+	// don't represent new activations.
+	var existingSeq sql.NullInt64
+	if err := tx.QueryRow(`SELECT active_seq FROM RolloverKeyState WHERE zone = ? AND keyid = ?`,
+		zone, int(keyid)).Scan(&existingSeq); err != nil {
+		return fmt.Errorf("read active_seq: %w", err)
+	}
+	if !existingSeq.Valid {
+		seq, err := nextActiveSeqTx(tx, zone)
+		if err != nil {
+			return fmt.Errorf("next active_seq: %w", err)
+		}
+		if err := setRolloverKeyActiveSeqTx(tx, zone, keyid, seq); err != nil {
+			return fmt.Errorf("stamp active_seq: %w", err)
+		}
 	}
 
 	if err := tx.Commit(); err != nil {
