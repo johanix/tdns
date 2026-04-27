@@ -502,7 +502,7 @@ func TransitionRolloverKskDsPublishedToStandby(conf *Config, kdb *KeyDB, now tim
 		if !ok || zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method != RolloverMethodMultiDS {
 			continue
 		}
-		dsAt, err := rolloverKeyDsObservedAt(kdb, k.ZoneName, k.KeyTag)
+		dsAt, err := RolloverKeyDsObservedAt(kdb, k.ZoneName, k.KeyTag)
 		if err != nil || dsAt == nil {
 			continue
 		}
@@ -660,7 +660,7 @@ func rolloverDue(kdb *KeyDB, zone string, pol *DnssecPolicy, row *RolloverZoneRo
 	if activeKid == 0 {
 		return false, false, nil
 	}
-	at, err := rolloverKeyActiveAt(kdb, zone, activeKid)
+	at, err := RolloverKeyActiveAt(kdb, zone, activeKid)
 	if err != nil {
 		return false, false, fmt.Errorf("active_at lookup: %w", err)
 	}
@@ -671,6 +671,12 @@ func rolloverDue(kdb *KeyDB, zone string, pol *DnssecPolicy, row *RolloverZoneRo
 		return true, false, nil
 	}
 	return false, false, nil
+}
+
+// EffectiveMarginForZone is the exported alias used by the auto-rollover
+// status CLI to estimate the next pending-child-withdraw transition.
+func EffectiveMarginForZone(kdb *KeyDB, zone string, pol *DnssecPolicy) (time.Duration, error) {
+	return effectiveMarginForZone(kdb, zone, pol)
 }
 
 // effectiveMarginForZone returns max(policy.clamping.margin, max_observed_ttl)
@@ -744,7 +750,7 @@ func healBootstrapActiveAt(kdb *KeyDB, zone string, pol *DnssecPolicy) {
 		if k.Flags&dns.SEP == 0 {
 			continue
 		}
-		at, atErr := rolloverKeyActiveAt(kdb, zone, k.KeyTag)
+		at, atErr := RolloverKeyActiveAt(kdb, zone, k.KeyTag)
 		seq, seqErr := RolloverKeyActiveSeq(kdb, zone, k.KeyTag)
 		needHeal := atErr != nil || at == nil || seqErr != nil || seq < 0
 		if !needHeal {

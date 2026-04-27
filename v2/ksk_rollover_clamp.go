@@ -92,7 +92,7 @@ func tNextRoll(kdb *KeyDB, zone string, pol *DnssecPolicy) (time.Time, bool, err
 	if activeKid == 0 {
 		return time.Time{}, false, nil
 	}
-	at, err := rolloverKeyActiveAt(kdb, zone, activeKid)
+	at, err := RolloverKeyActiveAt(kdb, zone, activeKid)
 	if err != nil {
 		return time.Time{}, false, err
 	}

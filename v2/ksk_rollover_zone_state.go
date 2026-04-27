@@ -297,12 +297,37 @@ func getRolloverInProgressTx(tx *Tx, zone string) (bool, error) {
 	return v != 0, nil
 }
 
-// rolloverKeyActiveAt returns the active_at timestamp for one key, or nil if
+// RolloverKeyActiveAt returns the active_at timestamp for one key, or nil if
 // unset. Used by rollover_due to determine whether the active KSK has lived
-// past policy.ksk.lifetime.
-func rolloverKeyActiveAt(kdb *KeyDB, zone string, keyid uint16) (*time.Time, error) {
+// past policy.ksk.lifetime, and by the auto-rollover status CLI.
+func RolloverKeyActiveAt(kdb *KeyDB, zone string, keyid uint16) (*time.Time, error) {
+	return readKeyTimestamp(kdb, zone, keyid, "active_at")
+}
+
+// RolloverKeyStandbyAt returns the standby_at timestamp, or nil if unset.
+func RolloverKeyStandbyAt(kdb *KeyDB, zone string, keyid uint16) (*time.Time, error) {
+	return readKeyTimestamp(kdb, zone, keyid, "standby_at")
+}
+
+// RolloverKeyDsObservedAt returns the ds_observed_at timestamp, or nil if unset.
+func RolloverKeyDsObservedAt(kdb *KeyDB, zone string, keyid uint16) (*time.Time, error) {
+	return readKeyTimestamp(kdb, zone, keyid, "ds_observed_at")
+}
+
+// RolloverKeyStateAt returns the rollover_state_at timestamp, or nil if unset.
+// This is the most recent transition time recorded by the rollover machinery
+// for this key — useful as a fallback "current state since" reading.
+func RolloverKeyStateAt(kdb *KeyDB, zone string, keyid uint16) (*time.Time, error) {
+	return readKeyTimestamp(kdb, zone, keyid, "rollover_state_at")
+}
+
+// readKeyTimestamp is the shared body for the per-column timestamp readers.
+// Returns (nil, nil) for missing rows / NULL / empty / unparseable values.
+func readKeyTimestamp(kdb *KeyDB, zone string, keyid uint16, col string) (*time.Time, error) {
 	var s sql.NullString
-	err := kdb.DB.QueryRow(`SELECT active_at FROM RolloverKeyState WHERE zone = ? AND keyid = ?`, zone, int(keyid)).Scan(&s)
+	err := kdb.DB.QueryRow(
+		"SELECT "+col+" FROM RolloverKeyState WHERE zone = ? AND keyid = ?",
+		zone, int(keyid)).Scan(&s)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
