@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"os"
@@ -441,11 +442,11 @@ zone row. Has no effect on rollovers that have already fired or on scheduled
 }
 
 func newAutoRolloverStatusCmd() *cobra.Command {
-	var verbose bool
+	var verbose, showKSK, showZSK, showCSK bool
 	c := &cobra.Command{
 		Use:   "status",
 		Short: "Print rollover state for a zone (KSK and ZSK)",
-		Long: `Prints all rollover state for the zone in two sections:
+		Long: `Prints rollover state for the zone in per-key-type sections:
 
   KSK rollover state:
     phase, in_progress, manual schedule (if any), observe-poll
@@ -457,11 +458,21 @@ func newAutoRolloverStatusCmd() *cobra.Command {
     Currently informational — the rollover worker only manages KSKs.
     Lists all ZSK keys with state and timestamps for diagnostic use.
 
+By default both KSK and ZSK sections are shown. Use --ksk, --zsk,
+and/or --csk to restrict output to specific key types.
+
 Use -v / --verbose to show full last_error text and additional
 debug fields.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs(cmd, "zonename")
 			tdns.Globals.App.Type = tdns.AppTypeCli
+
+			// Default (no filter flag set) shows KSK + ZSK; CSK only when
+			// explicitly requested.
+			if !showKSK && !showZSK && !showCSK {
+				showKSK = true
+				showZSK = true
+			}
 
 			kdb, z, pol, err := openKeystoreForCli()
 			if err != nil {
@@ -469,22 +480,39 @@ debug fields.`,
 			}
 			defer kdb.DB.Close()
 
-			fmt.Printf("zone %s\n", z)
 			if pol != nil {
 				kskLifetime := time.Duration(pol.KSK.Lifetime) * time.Second
 				margin := pol.Clamping.Margin
 				fmt.Printf("policy: %s (algorithm: %s, ksk.lifetime: %s, clamping.margin: %s)\n",
 					pol.Name, dns.AlgorithmToString[pol.Algorithm], kskLifetime, margin)
+				fmt.Println()
 			}
-			fmt.Println()
 
-			printKSKRolloverStatus(kdb, z, pol, verbose)
-			fmt.Println()
-			printZSKRolloverStatus(kdb, z, verbose)
+			first := true
+			if showKSK {
+				printKSKRolloverStatus(kdb, z, pol, verbose)
+				first = false
+			}
+			if showZSK {
+				if !first {
+					fmt.Println()
+				}
+				printZSKRolloverStatus(kdb, z, verbose)
+				first = false
+			}
+			if showCSK {
+				if !first {
+					fmt.Println()
+				}
+				printCSKRolloverStatus(kdb, z, verbose)
+			}
 		},
 	}
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
 	c.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show full last_error text and additional debug fields")
+	c.Flags().BoolVar(&showKSK, "ksk", false, "Include KSK section (default: KSK+ZSK shown when no key-type flag given)")
+	c.Flags().BoolVar(&showZSK, "zsk", false, "Include ZSK section (default: KSK+ZSK shown when no key-type flag given)")
+	c.Flags().BoolVar(&showCSK, "csk", false, "Include CSK section")
 	_ = c.MarkFlagRequired("zone")
 	return c
 }
@@ -629,7 +657,7 @@ func stateSinceFor(kdb *tdns.KeyDB, z string, k *tdns.DnssecKeyWithTimestamps) t
 // printKSKRolloverStatus prints the KSK section of auto-rollover status:
 // rollover-zone-row fields, then a table of SEP keys grouped by state.
 func printKSKRolloverStatus(kdb *tdns.KeyDB, z string, pol *tdns.DnssecPolicy, verbose bool) {
-	fmt.Println("KSK rollover state:")
+	fmt.Printf("KSK rollover state for zone %s:\n", z)
 	row, err := tdns.LoadRolloverZoneRow(kdb, z)
 	if err != nil {
 		fmt.Printf("  (load rollover zone row failed: %v)\n", err)
@@ -641,7 +669,7 @@ func printKSKRolloverStatus(kdb *tdns.KeyDB, z string, pol *tdns.DnssecPolicy, v
 		fmt.Printf("  phase             %s\n", row.RolloverPhase)
 		fmt.Printf("  in_progress       %v\n", row.RolloverInProgress)
 		if row.RolloverPhaseAt.Valid {
-			fmt.Printf("  phase_at          %s\n", formatTimeWithDeltaStr(row.RolloverPhaseAt.String))
+			fmt.Printf("  entered_phase     %s\n", formatTimeWithDeltaStr(row.RolloverPhaseAt.String))
 		}
 		if next := estimateNextKSKTransition(kdb, z, pol, row); next != "" {
 			fmt.Printf("  next_transition   %s\n", next)
@@ -650,11 +678,17 @@ func printKSKRolloverStatus(kdb *tdns.KeyDB, z string, pol *tdns.DnssecPolicy, v
 			fmt.Printf("  manual_requested  %s\n", formatTimeWithDeltaStr(row.ManualRolloverRequestedAt.String))
 			fmt.Printf("  manual_earliest   %s\n", formatTimeWithDeltaStr(row.ManualRolloverEarliest.String))
 		}
-		if row.LastSubmittedLow.Valid && row.LastSubmittedHigh.Valid {
-			fmt.Printf("  ds_submitted      [%d, %d]\n", row.LastSubmittedLow.Int64, row.LastSubmittedHigh.Int64)
-		}
-		if row.LastConfirmedLow.Valid && row.LastConfirmedHigh.Valid {
-			fmt.Printf("  ds_confirmed      [%d, %d]\n", row.LastConfirmedLow.Int64, row.LastConfirmedHigh.Int64)
+		// DS submitted/confirmed ranges are persistent in the DB and never
+		// cleared, so they're stale outside of an active push/observe round.
+		// Only show them while a push is being prepared or a confirmation is
+		// in flight; otherwise the per-key table is the authoritative view.
+		if row.RolloverPhase == "pending-parent-push" || row.RolloverPhase == "pending-parent-observe" {
+			subKids := keyidsForRange(kdb, z, row.LastSubmittedLow, row.LastSubmittedHigh)
+			confKids := keyidsForRange(kdb, z, row.LastConfirmedLow, row.LastConfirmedHigh)
+			if subKids != "" || confKids != "" {
+				fmt.Printf("  DS range:         submitted to parent: %s confirmed: %s\n",
+					orDash(subKids), orDash(confKids))
+			}
 		}
 		if row.ObserveStartedAt.Valid {
 			fmt.Printf("  observe_started   %s\n", formatTimeWithDeltaStr(row.ObserveStartedAt.String))
@@ -809,7 +843,7 @@ func kskPublishedSummary(state string) string {
 // printZSKRolloverStatus prints the ZSK section. Currently informational
 // only — the rollover worker doesn't manage ZSKs.
 func printZSKRolloverStatus(kdb *tdns.KeyDB, z string, verbose bool) {
-	fmt.Println("ZSK rollover state:")
+	fmt.Printf("ZSK rollover state for zone %s:\n", z)
 	fmt.Println("  no rollovers ongoing (automated ZSK rollover not implemented)")
 
 	type keyRow struct {
@@ -858,6 +892,43 @@ func printZSKRolloverStatus(kdb *tdns.KeyDB, z string, verbose bool) {
 		fmt.Printf("  %-5d    %-13s   %s\n", r.keyid, r.state, pub)
 	}
 	_ = verbose // reserved for future per-ZSK detail
+}
+
+// keyidsForRange formats the keyids whose rollover_index falls in [lo, hi]
+// as a comma-separated bracketed list, e.g. "[20655, 26803, 61725]". Returns
+// "" when the range is unset or the lookup fails.
+func keyidsForRange(kdb *tdns.KeyDB, z string, lo, hi sql.NullInt64) string {
+	if !lo.Valid || !hi.Valid {
+		return ""
+	}
+	kids, err := tdns.RolloverKeyidsByIndexRange(kdb, z, lo.Int64, hi.Int64)
+	if err != nil || len(kids) == 0 {
+		return ""
+	}
+	parts := make([]string, len(kids))
+	for i, k := range kids {
+		parts[i] = fmt.Sprintf("%d", k)
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+func orDash(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// printCSKRolloverStatus prints the CSK section. Currently informational
+// only — automated CSK rollover is not implemented and CSK mode shares the
+// SEP flag with KSK so individual keys are not distinguishable here without
+// policy-mode context.
+func printCSKRolloverStatus(kdb *tdns.KeyDB, z string, verbose bool) {
+	fmt.Printf("CSK rollover state for zone %s:\n", z)
+	fmt.Println("  no rollovers ongoing (automated CSK rollover not implemented)")
+	_ = kdb
+	_ = z
+	_ = verbose
 }
 
 func newAutoRolloverResetCmd() *cobra.Command {

@@ -261,6 +261,29 @@ func RolloverKeyActiveSeq(kdb *KeyDB, zone string, keyid uint16) (int, error) {
 	return int(v.Int64), nil
 }
 
+// RolloverKeyidsByIndexRange returns the keyids whose rollover_index lies in
+// [low, high] (inclusive), ordered by rollover_index ascending. Used by the
+// auto-rollover status CLI to translate the submitted/confirmed index ranges
+// into operator-meaningful keyids that match the per-key table.
+func RolloverKeyidsByIndexRange(kdb *KeyDB, zone string, low, high int64) ([]uint16, error) {
+	rows, err := kdb.DB.Query(
+		`SELECT keyid FROM RolloverKeyState WHERE zone = ? AND rollover_index BETWEEN ? AND ? ORDER BY rollover_index ASC`,
+		zone, low, high)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []uint16
+	for rows.Next() {
+		var k int
+		if err := rows.Scan(&k); err != nil {
+			return nil, err
+		}
+		out = append(out, uint16(k))
+	}
+	return out, rows.Err()
+}
+
 // setRolloverKeyStandbyAt is the non-TX variant for callers outside of
 // AtomicRollover (e.g. TransitionRolloverKskDsPublishedToStandby's
 // per-key loop).
