@@ -787,10 +787,10 @@ func printKSKRolloverStatus(kdb *tdns.KeyDB, z string, pol *tdns.DnssecPolicy, v
 //
 //	created       — key generated, not yet pushed anywhere → "none"
 //	ds-published  — DS pushed to parent and observed; DNSKEY not yet at apex → "DS"
-//	published     — DNSKEY at apex; DS at parent → "DS+KEY"
-//	standby       — DNSKEY at apex; DS at parent (idle in pipeline) → "DS+KEY"
-//	active        — DNSKEY at apex; DS at parent; signing the zone → "DS+KEY"
-//	retired       — DNSKEY at apex; DS still at parent until pending-child-withdraw → "DS+KEY"
+//	published     — DNSKEY at apex; DS at parent → "DS+DNSKEY"
+//	standby       — DNSKEY at apex; DS at parent (idle in pipeline) → "DS+DNSKEY"
+//	active        — DNSKEY at apex; DS at parent; signing the zone → "DS+DNSKEY"
+//	retired       — DNSKEY at apex; DS still at parent until pending-child-withdraw → "DS+DNSKEY"
 //	removed       — DNSKEY removed; DS removed → "none"
 func kskPublishedSummary(state string) string {
 	switch state {
@@ -800,7 +800,7 @@ func kskPublishedSummary(state string) string {
 		return "DS"
 	case tdns.DnskeyStatePublished, tdns.DnskeyStateStandby,
 		tdns.DnskeyStateActive, tdns.DnskeyStateRetired:
-		return "DS+KEY"
+		return "DS+DNSKEY"
 	default:
 		return "?"
 	}
