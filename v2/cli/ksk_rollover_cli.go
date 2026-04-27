@@ -678,17 +678,16 @@ func printKSKRolloverStatus(kdb *tdns.KeyDB, z string, pol *tdns.DnssecPolicy, v
 			fmt.Printf("  manual_requested  %s\n", formatTimeWithDeltaStr(row.ManualRolloverRequestedAt.String))
 			fmt.Printf("  manual_earliest   %s\n", formatTimeWithDeltaStr(row.ManualRolloverEarliest.String))
 		}
-		// DS submitted/confirmed ranges are persistent in the DB and never
-		// cleared, so they're stale outside of an active push/observe round.
-		// Only show them while a push is being prepared or a confirmation is
-		// in flight; otherwise the per-key table is the authoritative view.
-		if row.RolloverPhase == "pending-parent-push" || row.RolloverPhase == "pending-parent-observe" {
-			subKids := keyidsForRange(kdb, z, row.LastSubmittedLow, row.LastSubmittedHigh)
-			confKids := keyidsForRange(kdb, z, row.LastConfirmedLow, row.LastConfirmedHigh)
-			if subKids != "" || confKids != "" {
-				fmt.Printf("  DS range:         submitted to parent: %s confirmed: %s\n",
-					orDash(subKids), orDash(confKids))
-			}
+		// DS submitted/confirmed are translated to keyids so the line
+		// reconciles with the per-key table below. Values describe the most
+		// recent push/observe round — current in idle (those keys' DS RRs
+		// are still at the parent), briefly stale in the window between
+		// AtomicRollover and the next push fires.
+		subKids := keyidsForRange(kdb, z, row.LastSubmittedLow, row.LastSubmittedHigh)
+		confKids := keyidsForRange(kdb, z, row.LastConfirmedLow, row.LastConfirmedHigh)
+		if subKids != "" || confKids != "" {
+			fmt.Printf("  DS range:         submitted to parent: %s confirmed: %s\n",
+				orDash(subKids), orDash(confKids))
 		}
 		if row.ObserveStartedAt.Valid {
 			fmt.Printf("  observe_started   %s\n", formatTimeWithDeltaStr(row.ObserveStartedAt.String))
