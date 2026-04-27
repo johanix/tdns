@@ -3,6 +3,7 @@ package tdns
 import (
 	"database/sql"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -89,8 +90,21 @@ func RegisterBootstrapActiveKSK(kdb *KeyDB, zone string, keyid uint16, method Ro
 	}
 
 	now := time.Now().UTC()
-	if err := setRolloverKeyActiveAtTx(tx, zone, keyid, now); err != nil {
-		return fmt.Errorf("stamp active_at: %w", err)
+
+	// Stamp active_at only if currently NULL. Each restart re-runs the
+	// heal pass, but the active_at timestamp must reflect the actual
+	// activation time — overwriting with now() on every restart would
+	// continuously push T_roll = active_at + ksk.lifetime forward by the
+	// time-since-last-restart, breaking the scheduled rollover trigger.
+	var existingActiveAt sql.NullString
+	if err := tx.QueryRow(`SELECT active_at FROM RolloverKeyState WHERE zone = ? AND keyid = ?`,
+		zone, int(keyid)).Scan(&existingActiveAt); err != nil {
+		return fmt.Errorf("read active_at: %w", err)
+	}
+	if !existingActiveAt.Valid || strings.TrimSpace(existingActiveAt.String) == "" {
+		if err := setRolloverKeyActiveAtTx(tx, zone, keyid, now); err != nil {
+			return fmt.Errorf("stamp active_at: %w", err)
+		}
 	}
 
 	// Assign next per-zone active_seq if not already set. The bootstrap
