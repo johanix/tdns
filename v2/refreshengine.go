@@ -310,9 +310,13 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.ZoneType = zr.ZoneType
 						}
 						// Lookup DNSSEC policy and MultiSigner from config (same as new zone creation)
+						var dnssecPolicyChanged bool
 						if zr.DnssecPolicy != "" {
 							if dp, exists := conf.Internal.DnssecPolicies[zr.DnssecPolicy]; exists {
-								zd.DnssecPolicy = &dp
+								if zd.DnssecPolicy != &dp {
+									zd.DnssecPolicy = &dp
+									dnssecPolicyChanged = true
+								}
 							} else {
 								lgEngine.Warn("DNSSEC policy not found, keeping existing", "policy", zr.DnssecPolicy, "zone", zone)
 							}
@@ -325,6 +329,14 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							}
 						}
 						zd.mu.Unlock()
+
+						// Force a re-sign so clamping picks up the new policy
+						// (e.g. ttls.max_served change) and max_observed_ttl
+						// converges on the next sign pass instead of waiting
+						// for a key-state event.
+						if dnssecPolicyChanged {
+							triggerResign(conf, zone)
+						}
 						lgEngine.Debug("updated configuration for zone", "zone", zone, "notify", zd.Downstreams, "upstream", zd.Upstream, "zonefile", zd.Zonefile, "store", ZoneStoreToString[zd.ZoneStore])
 
 						// Update or create refreshCounter with current config values

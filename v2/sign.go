@@ -508,11 +508,6 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 			if rrt == dns.TypeNS && name != zd.ZoneName {
 				continue // dont' sign delegations
 			}
-			if len(rrset.RRs) > 0 {
-				if t := rrset.RRs[0].Header().Ttl; t > maxObservedTTL {
-					maxObservedTTL = t
-				}
-			}
 			// XXX: What is the best way to identify that an RR is a glue record?
 			var wasglue bool
 			if rrt == dns.TypeA || rrt == dns.TypeAAAA {
@@ -530,6 +525,17 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 			}
 			rrset, signed = MaybeSignRRset(rrset, zd.ZoneName)
 			owner.RRtypes.Set(rrt, rrset)
+
+			// Record TTL after clamping. applyClampToRRset (called from
+			// SignRRset) rewrites headers to min(UnclampedTTL, K*margin,
+			// MaxServedTTL); capturing here makes max_observed_ttl reflect
+			// what's actually served, so effective_margin converges on the
+			// first sign pass after a policy change instead of the second.
+			if len(rrset.RRs) > 0 {
+				if t := rrset.RRs[0].Header().Ttl; t > maxObservedTTL {
+					maxObservedTTL = t
+				}
+			}
 
 			if signed {
 				zoneResigned = true
