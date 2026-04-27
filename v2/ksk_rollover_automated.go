@@ -722,8 +722,15 @@ func completeRolloverWithdraw(conf *Config, kdb *KeyDB, zone string) error {
 }
 
 // healBootstrapActiveAt is a self-heal pass: if the zone has an active SEP
-// KSK with no RolloverKeyState row or no active_at timestamp, register it
-// now so rolloverDue and tNextRoll work. Best-effort — silent on errors.
+// KSK with no RolloverKeyState row, no active_at timestamp, OR no active_seq,
+// register/backfill it now so rolloverDue, tNextRoll, and the operator-
+// facing active_seq counter all work. Best-effort — silent on errors.
+//
+// active_seq backfill is necessary for active SEP keys promoted by an older
+// binary that didn't yet stamp active_seq at AtomicRollover. The row exists
+// and active_at is set, but active_seq is NULL. RegisterBootstrapActiveKSK
+// is idempotent and only stamps active_seq when it is currently NULL, so
+// calling it on already-healed keys is a no-op.
 func healBootstrapActiveAt(kdb *KeyDB, zone string, pol *DnssecPolicy) {
 	if pol == nil || pol.Rollover.Method == RolloverMethodNone {
 		return
@@ -737,15 +744,18 @@ func healBootstrapActiveAt(kdb *KeyDB, zone string, pol *DnssecPolicy) {
 		if k.Flags&dns.SEP == 0 {
 			continue
 		}
-		at, err := rolloverKeyActiveAt(kdb, zone, k.KeyTag)
-		if err == nil && at != nil {
-			continue // already healed
-		}
-		if err := RegisterBootstrapActiveKSK(kdb, zone, k.KeyTag, pol.Rollover.Method, pol.Algorithm); err != nil {
-			lgSigner.Warn("rollover: heal bootstrap active_at failed", "zone", zone, "keyid", k.KeyTag, "err", err)
+		at, atErr := rolloverKeyActiveAt(kdb, zone, k.KeyTag)
+		seq, seqErr := RolloverKeyActiveSeq(kdb, zone, k.KeyTag)
+		needHeal := atErr != nil || at == nil || seqErr != nil || seq < 0
+		if !needHeal {
 			continue
 		}
-		lgSigner.Info("rollover: healed bootstrap active_at for KSK", "zone", zone, "keyid", k.KeyTag)
+		if err := RegisterBootstrapActiveKSK(kdb, zone, k.KeyTag, pol.Rollover.Method, pol.Algorithm); err != nil {
+			lgSigner.Warn("rollover: heal active SEP KSK state failed", "zone", zone, "keyid", k.KeyTag, "err", err)
+			continue
+		}
+		lgSigner.Info("rollover: healed active SEP KSK state", "zone", zone, "keyid", k.KeyTag,
+			"had_active_at", at != nil, "had_active_seq", seq >= 0)
 	}
 }
 
