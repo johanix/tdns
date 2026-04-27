@@ -572,8 +572,8 @@ func printKSKRolloverStatus(kdb *tdns.KeyDB, z string, verbose bool) {
 		return
 	}
 	fmt.Println()
-	fmt.Println("  active_seq  keyid    state           last_error")
-	fmt.Println("  ----------  -----    -------------   ----------")
+	fmt.Println("  active_seq  keyid    state           published   last_error")
+	fmt.Println("  ----------  -----    -------------   ---------   ----------")
 	for _, r := range rows {
 		seqStr := "-"
 		if r.seq >= 0 {
@@ -583,7 +583,33 @@ func printKSKRolloverStatus(kdb *tdns.KeyDB, z string, verbose bool) {
 		if r.hasError {
 			errCol = truncate(r.errStr, 40, verbose)
 		}
-		fmt.Printf("  %-10s  %-5d    %-13s   %s\n", seqStr, r.keyid, r.state, errCol)
+		fmt.Printf("  %-10s  %-5d    %-13s   %-9s   %s\n",
+			seqStr, r.keyid, r.state, kskPublishedSummary(r.state), errCol)
+	}
+}
+
+// kskPublishedSummary returns a short label describing what's published in
+// DNS for a KSK in the given state, derived from the rollover state machine
+// (RFC 7583 §3.3.3 / §3.4 of the design doc).
+//
+//	created       — key generated, not yet pushed anywhere → "none"
+//	ds-published  — DS pushed to parent and observed; DNSKEY not yet at apex → "DS"
+//	published     — DNSKEY at apex; DS at parent → "DS+KEY"
+//	standby       — DNSKEY at apex; DS at parent (idle in pipeline) → "DS+KEY"
+//	active        — DNSKEY at apex; DS at parent; signing the zone → "DS+KEY"
+//	retired       — DNSKEY at apex; DS still at parent until pending-child-withdraw → "DS+KEY"
+//	removed       — DNSKEY removed; DS removed → "none"
+func kskPublishedSummary(state string) string {
+	switch state {
+	case tdns.DnskeyStateCreated, tdns.DnskeyStateRemoved:
+		return "none"
+	case tdns.DnskeyStateDsPublished:
+		return "DS"
+	case tdns.DnskeyStatePublished, tdns.DnskeyStateStandby,
+		tdns.DnskeyStateActive, tdns.DnskeyStateRetired:
+		return "DS+KEY"
+	default:
+		return "?"
 	}
 }
 
