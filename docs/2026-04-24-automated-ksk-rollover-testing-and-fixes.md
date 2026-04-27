@@ -394,15 +394,53 @@ delay `WriteMsg` until the final disposition is known.
 ### 3.3 Proper fix in miekg-dns fork
 
 The §2.5.2 delete-RRset workaround in `ValidateUpdate` (commit
-`6e884ee`) is a tdns-side bandage. The real fix is in
-miekg/dns: either (a) `UnpackRRWithHeader` returns `*dns.ANY` for
-any rdlength=0 record, or (b) every per-type `pack()` honors
-"empty struct → 0-byte rdata" symmetrically with the noRdata
-unpack short-circuit. Option (b) probably cleaner; needs a careful
-audit of every per-type pack().
+`6e884ee`) is a tdns-side bandage. The real fix lives in the
+unpack path of miekg/dns.
 
-After the upstream fix lands, the workaround in
-`tdns/v2/sig0_validate.go` should be reverted.
+**Fork patch landed** (2026-04-27): commit `8da19b0b` on branch
+`mldsa44-sig0` in the local `miekg-dns/` checkout. Approach
+(a)-scoped: `UnpackRRWithHeader` returns `*dns.ANY` for any
+CLASS=ANY+Rdlength=0+TYPE≠ANY record. This matches what
+`Msg.RemoveRRset` already produces on the construction side and
+what §2.5.3 (CLASS=ANY, TYPE=ANY) already does via
+`TypeToRR[TypeANY]=ANY`. No per-type `pack()` audit needed.
+
+Why option (a) over (b): a naive packRR-side "skip rr.pack() when
+Rdlength==0" breaks user-constructed RRs (e.g. `&dns.DS{KeyTag: ...}`
+with the zero-value Rdlength), since the framework currently
+recalculates Rdlength from the bytes pack writes. A per-type
+"empty struct → 0 bytes" check is also fragile — DS with
+KeyTag=0/Alg=0/DigestType=0 looks identical to a delete-RRset
+placeholder. The unpack-path fix avoids both pitfalls.
+
+Regression test: `TestRemoveRRsetDSSIG0RoundTrip` in
+`update_delete_test.go`. Confirmed to fail without the patch
+(returns `*dns.DS` instead of `*ANY`) and pass with it. The
+pre-existing `TestRemoveRRsetSIG0RoundTrip` uses TypeA, which is
+bug-immune because `packDataA` short-circuits on `len(IP)==0`.
+
+**Mainline tdns kept unchanged.** The workaround in
+[tdns/v2/sig0_validate.go](../v2/sig0_validate.go) stays so that
+consumers building against upstream miekg/dns don't need the fork.
+With the fork patch in place the workaround becomes a
+self-replacement no-op (the loop replaces a `*dns.ANY` with another
+`*dns.ANY{Hdr: same}`).
+
+**Verification recipe** (run on testbed against patched fork):
+1. `cd tdns/v2 && go mod edit -replace=github.com/miekg/dns=../../miekg-dns`
+2. Comment out the §2.5.2 replacement loop in `sig0_validate.go`.
+3. Run the bravo.dnslab. testbed: send a DDNS UPDATE containing a
+   §2.5.2 delete-RRset over a typed-RR placeholder (DS works; A
+   doesn't because TypeA is bug-immune). Confirm SIG(0) verification
+   passes on the parent.
+4. Restore both: revert the `replace` and uncomment the workaround.
+
+**Revert criterion** (when ready, future work):
+- Upstream PR submitted to `github.com/miekg/dns` (TODO).
+- Upstream fix merged and released as miekg/dns ≥ vX.Y.Z.
+- Bump minimum miekg/dns in `tdns/v2/go.mod` (and any other
+  modules that touch SIG(0) of UPDATE messages).
+- Delete the workaround loop in `sig0_validate.go`.
 
 ### 3.4 CLI tooling for rollover phase manipulation
 

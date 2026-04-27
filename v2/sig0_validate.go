@@ -61,11 +61,19 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 	// the domain-name field. Types with fixed scalar fields (DS,
 	// DNSKEY, A, AAAA, RRSIG, SVCB, ...) all repack with phantom rdata.
 	//
-	// We believe this is a bug in miekg/dns. The fix should be either
-	// (a) on unpack, return a *dns.ANY for any RR with rdlength==0, or
-	// (b) make every per-type pack() honor "empty struct → empty
-	// rdata" the way packDomainName already does. Until that lands
-	// upstream, we patch the parsed message here: any §2.5.2 record
+	// We believe this is a bug in miekg/dns. The local fork carries a
+	// fix on the unpack path (commit 8da19b0b on branch mldsa44-sig0):
+	// CLASS=ANY+Rdlength=0 records now return *dns.ANY directly from
+	// UnpackRRWithHeader, matching what high-level RemoveRRset already
+	// produces and what §2.5.3 (CLASS=ANY+TYPE=ANY) already does. With
+	// that patch this loop is a self-replacement no-op.
+	//
+	// We keep the workaround in mainline tdns so consumers building
+	// against unpatched upstream miekg/dns don't need the fork. Remove
+	// when the fix lands upstream and minimum miekg/dns ≥ vX.Y.Z is
+	// pinned in go.mod.
+	//
+	// Until then we patch the parsed message here: any §2.5.2 record
 	// (class ANY, rdlength 0) is replaced with a *dns.ANY placeholder
 	// before re-pack. *dns.ANY's pack() correctly writes 0 bytes,
 	// so the repack matches the wire and SIG verification succeeds.
