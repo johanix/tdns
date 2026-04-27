@@ -664,6 +664,15 @@ func printKSKRolloverStatus(kdb *tdns.KeyDB, z string, pol *tdns.DnssecPolicy, v
 				fmt.Printf("  observe_backoff   %ds\n", row.ObserveBackoffSecs.Int64)
 			}
 		}
+		if pol != nil {
+			maxTTL, err := tdns.LoadZoneSigningMaxTTL(kdb, z)
+			if err == nil {
+				margin := pol.Clamping.Margin
+				eff := max(time.Duration(maxTTL)*time.Second, margin)
+				fmt.Printf("  max_observed_ttl  %ds\n", maxTTL)
+				fmt.Printf("  effective_margin  %s  (max of clamping.margin=%s and max_observed_ttl)\n", eff, margin)
+			}
+		}
 	}
 
 	if verbose {
