@@ -198,7 +198,18 @@ dnssecpolicies:
          confirm-poll-max:      60s
          confirm-timeout:       1h
       ttls:
-         dnskey:  2h            # operator-configured DNSKEY TTL
+         dnskey:      2h            # operator-configured DNSKEY TTL
+         # max_served: 5m           # OPTIONAL steady-state ceiling on every served
+                                    # TTL in the zone. Set to enforce low TTLs on
+                                    # zones whose source data has high TTLs that
+                                    # the operator can't directly edit (e.g.
+                                    # inbound zone transfers, provisioning systems
+                                    # that publish 1h+ TTLs). When set, SignRRset
+                                    # writes min(operator_ttl, max_served) to
+                                    # every RR header TTL and the RRSIG covers
+                                    # the clamped value. Composes with K-step
+                                    # rollover clamping: effective ceiling is
+                                    # min(K*margin, max_served). Must be >= 60s.
       clamping:
          enabled:  true         # K-step TTL clamping near rollover
          margin:   1h           # REQUIRED when enabled: true

@@ -10,18 +10,25 @@ import (
 	"github.com/miekg/dns"
 )
 
-// ClampParams carries the current K-step clamp values into SignRRset. nil
-// means clamping is inactive for this sign pass (zone has
-// clamping.enabled: false, no rollover scheduled, or mid-rollover).
+// ClampParams carries the current TTL-clamp inputs into SignRRset. A non-nil
+// value means at least one clamp is active for this sign pass:
 //
-// SignRRset reads ClampParams.K and ClampParams.Margin and replaces every
-// RR header TTL with min(rrset.UnclampedTTL, K * margin) before generating
-// the RRSIG. The operator-configured TTL is preserved on the RRset itself
-// in core.RRset.UnclampedTTL.
+//   - K-step rollover clamp (K, Margin, TRoll): active near a scheduled
+//     rollover; ceiling = K * Margin.
+//   - Steady-state TTL ceiling (MaxServedTTL): always-on cap from policy
+//     ttls.max_served; ceiling = MaxServedTTL.
+//
+// SignRRset takes the minimum of (UnclampedTTL, K*Margin if K>0,
+// MaxServedTTL if >0) and writes that to every RR header TTL before
+// generating the RRSIG.
+//
+// nil means no clamp at all (zone has clamping.enabled: false AND no
+// max_served set AND no rollover scheduled).
 type ClampParams struct {
-	K      int
-	Margin time.Duration
-	TRoll  time.Time // for the validity invariant check
+	K            int
+	Margin       time.Duration
+	TRoll        time.Time // for the validity invariant check
+	MaxServedTTL uint32    // 0 = no steady-state ceiling
 }
 
 // CeilingTTL returns the K * margin ceiling in seconds.
@@ -144,24 +151,45 @@ func currentClampK(pol *DnssecPolicy, tRoll, now time.Time) int {
 }
 
 // ClampParamsForZone builds a *ClampParams for the zone at `now`, or nil
-// if clamping is currently inactive. Called by SignZone before each sign
-// pass on a clamping zone.
+// if no clamp is active (neither rollover K-step nor steady-state max_served).
+// Called by SignZone before each sign pass on a clamping zone.
 func ClampParamsForZone(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Time) (*ClampParams, error) {
-	if pol == nil || !pol.Clamping.Enabled || pol.Clamping.Margin <= 0 {
+	if pol == nil {
 		return nil, nil
 	}
-	tRoll, ok, err := tNextRoll(kdb, zone, pol)
-	if err != nil {
-		return nil, err
+	maxServed := pol.TTLS.MaxServed
+
+	// No K-step clamp by default. Only set if rollover machinery is
+	// active for this zone.
+	var k int
+	var margin time.Duration
+	var tRoll time.Time
+	if pol.Clamping.Enabled && pol.Clamping.Margin > 0 {
+		t, ok, err := tNextRoll(kdb, zone, pol)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			kk := currentClampK(pol, t, now)
+			if kk > 0 {
+				k = kk
+				margin = pol.Clamping.Margin
+				tRoll = t
+			}
+		}
 	}
-	if !ok {
+
+	// If neither clamp source is active, return nil so SignRRset takes
+	// the no-op fast path.
+	if k <= 0 && maxServed == 0 {
 		return nil, nil
 	}
-	k := currentClampK(pol, tRoll, now)
-	if k <= 0 {
-		return nil, nil
-	}
-	return &ClampParams{K: k, Margin: pol.Clamping.Margin, TRoll: tRoll}, nil
+	return &ClampParams{
+		K:            k,
+		Margin:       margin,
+		TRoll:        tRoll,
+		MaxServedTTL: maxServed,
+	}, nil
 }
 
 // clampLastK persists the last-observed K per zone in memory. Used by the
@@ -252,17 +280,32 @@ func ClampMetrics() (steps, clamped, unclamped, violations uint64) {
 
 // applyClampToRRset is called from SignRRset before generating the RRSIG
 // when clamp != nil. Captures UnclampedTTL on first encounter, then
-// rewrites every RR header TTL to min(UnclampedTTL, K * margin).
+// rewrites every RR header TTL to:
+//
+//	min(UnclampedTTL, K*margin if K>0, MaxServedTTL if >0)
+//
+// The K*margin source is the rollover-time K-step clamp; the MaxServedTTL
+// source is the steady-state policy ttls.max_served ceiling. Either, both,
+// or neither may be in effect.
 func applyClampToRRset(rrset *core.RRset, clamp *ClampParams) {
 	if clamp == nil || len(rrset.RRs) == 0 {
 		atomic.AddUint64(&clampDecisionsUnclamped, 1)
 		return
 	}
-	ceiling := clamp.CeilingTTL()
-	if ceiling == 0 {
+
+	// Compute the effective ceiling from whichever clamp sources are active.
+	var ceiling uint32 = ^uint32(0) // "no ceiling" sentinel
+	if c := clamp.CeilingTTL(); c > 0 && c < ceiling {
+		ceiling = c
+	}
+	if clamp.MaxServedTTL > 0 && clamp.MaxServedTTL < ceiling {
+		ceiling = clamp.MaxServedTTL
+	}
+	if ceiling == ^uint32(0) {
 		atomic.AddUint64(&clampDecisionsUnclamped, 1)
 		return
 	}
+
 	if rrset.UnclampedTTL == 0 {
 		rrset.UnclampedTTL = rrset.RRs[0].Header().Ttl
 	}

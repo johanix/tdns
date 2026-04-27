@@ -239,7 +239,8 @@ type DnssecPolicyRolloverConf struct {
 
 // DnssecPolicyTtlsConf is the YAML `ttls:` subtree under a DNSSEC policy.
 type DnssecPolicyTtlsConf struct {
-	DNSKEY string `yaml:"dnskey" mapstructure:"dnskey"`
+	DNSKEY    string `yaml:"dnskey" mapstructure:"dnskey"`
+	MaxServed string `yaml:"max_served" mapstructure:"max_served"`
 }
 
 // DnssecPolicyClampingConf is the YAML `clamping:` subtree under a DNSSEC policy.
@@ -295,6 +296,13 @@ type DnssecPolicy struct {
 // DnssecPolicyTTLS holds steady-state TTL hints from policy (seconds). Zero means unset.
 type DnssecPolicyTTLS struct {
 	DNSKEY uint32
+	// MaxServed is a steady-state ceiling on the TTL of every RRset served
+	// by this zone. When non-zero, SignRRset clamps Header().Ttl down to
+	// min(operator_ttl, MaxServed) regardless of rollover proximity. Use
+	// to enforce low TTLs on zones whose source data has high TTLs that
+	// the operator can't directly edit (e.g. inbound zone transfers).
+	// Zero means no ceiling. Validation: must be >= 60s when set.
+	MaxServed uint32
 }
 
 type Ixfr struct {
