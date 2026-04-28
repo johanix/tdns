@@ -965,7 +965,47 @@ tick.`,
 	return c
 }
 
-// newAutoRolloverCmd returns the parent command holding the five Phase 4C
+func newAutoRolloverUnstickCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "unstick",
+		Short: "Re-arm a stuck rollover by clearing the submitted DS range and per-key errors",
+		Long: `Nulls last_ds_submitted_index_low/high on the zone's RolloverZoneState row
+and clears last_rollover_error on every RolloverKeyState row for the zone,
+inside a single transaction.
+
+Use after diagnosing and fixing whatever stalled the rollover. The typical
+case: a parent silently rejected a DS UPDATE, the observe phase timed out
+into idle, but last_ds_submitted_* was left populated — so kskIndexPushNeeded
+sees the target DS set as unchanged from what was last submitted and never
+re-arms pending-parent-push. Unstick drops the submitted range so the next
+idle tick re-arms the push, and clears stale per-key errors so status output
+isn't misleading.
+
+Differs from 'reset' (which clears last_rollover_error for one keyid only
+and leaves the submitted range alone).`,
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs(cmd, "zonename")
+			tdns.Globals.App.Type = tdns.AppTypeCli
+
+			kdb, z, _, err := openKeystoreForCli()
+			if err != nil {
+				cliFatalf("error: %v", err)
+			}
+			defer kdb.DB.Close()
+
+			cleared, err := tdns.UnstickRollover(kdb, z)
+			if err != nil {
+				cliFatalf("error: unstick: %v", err)
+			}
+			fmt.Printf("unstuck zone %s (cleared submitted DS range; cleared last_rollover_error on %d key(s))\n", z, cleared)
+		},
+	}
+	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
+	_ = c.MarkFlagRequired("zone")
+	return c
+}
+
+// newAutoRolloverCmd returns the parent command holding the auto-rollover
 // subcommands. Sits alongside the legacy `rollover` (manual swap via API)
 // rather than replacing it.
 func newAutoRolloverCmd(_ string) *cobra.Command {
@@ -974,11 +1014,12 @@ func newAutoRolloverCmd(_ string) *cobra.Command {
 		Short: "Manage and inspect automated KSK rollover (scheduled + manual-ASAP)",
 		Long: `Subcommands operate on local keystore state for a zone:
 
-  when    — compute the earliest safe rollover moment (no state change)
-  asap    — schedule a manual rollover at that earliest moment
-  cancel  — clear a pending manual rollover request
-  status  — print phase + per-key state for the zone
-  reset   — clear last_rollover_error on one key after operator action`,
+  when     — compute the earliest safe rollover moment (no state change)
+  asap     — schedule a manual rollover at that earliest moment
+  cancel   — clear a pending manual rollover request
+  status   — print phase + per-key state for the zone
+  reset    — clear last_rollover_error on one key after operator action
+  unstick  — clear submitted DS range + all per-key errors to re-arm a stalled rollover`,
 	}
 	c.AddCommand(
 		newAutoRolloverWhenCmd(),
@@ -986,6 +1027,7 @@ func newAutoRolloverCmd(_ string) *cobra.Command {
 		newAutoRolloverCancelCmd(),
 		newAutoRolloverStatusCmd(),
 		newAutoRolloverResetCmd(),
+		newAutoRolloverUnstickCmd(),
 	)
 	return c
 }
