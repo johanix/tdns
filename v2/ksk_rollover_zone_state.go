@@ -482,6 +482,51 @@ func ClearLastRolloverError(kdb *KeyDB, zone string, keyid uint16) error {
 	return nil
 }
 
+// UnstickRollover clears the persisted DS-submitted range on the zone row and
+// last_rollover_error on every key row for the zone, in a single transaction.
+// Returns the number of key rows whose last_rollover_error was cleared.
+//
+// Why: observeHardFail leaves last_ds_submitted_index_low/high populated when
+// it returns the zone to idle. The idle branch's kskIndexPushNeeded then sees
+// the target DS set unchanged from what was last submitted and never re-arms
+// a push, leaving the zone permanently stuck even after the operator has
+// fixed whatever caused the original observation timeout. UnstickRollover is
+// the operator nudge: drop the submitted range so the next idle tick re-arms
+// pending-parent-push, and clear stale per-key errors so status output isn't
+// misleading.
+func UnstickRollover(kdb *KeyDB, zone string) (int, error) {
+	zone = strings.TrimSpace(zone)
+	if zone == "" {
+		return 0, fmt.Errorf("UnstickRollover: empty zone")
+	}
+	tx, err := kdb.Begin("UnstickRollover")
+	if err != nil {
+		return 0, fmt.Errorf("begin: %w", err)
+	}
+	commit := false
+	defer func() {
+		if !commit {
+			tx.Rollback()
+		}
+	}()
+	if _, err := tx.Exec(`UPDATE RolloverZoneState
+SET last_ds_submitted_index_low = NULL,
+    last_ds_submitted_index_high = NULL
+WHERE zone = ?`, zone); err != nil {
+		return 0, fmt.Errorf("clear submitted range: %w", err)
+	}
+	res, err := tx.Exec(`UPDATE RolloverKeyState SET last_rollover_error = NULL WHERE zone = ? AND last_rollover_error IS NOT NULL`, zone)
+	if err != nil {
+		return 0, fmt.Errorf("clear last_rollover_error: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit: %w", err)
+	}
+	commit = true
+	return int(n), nil
+}
+
 // SetManualRolloverRequest stamps manual_rollover_requested_at = now and
 // manual_rollover_earliest = earliest. Called by `rollover asap` after
 // ComputeEarliestRollover succeeds.
