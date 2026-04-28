@@ -10,10 +10,12 @@ authoritative and recursive DNS service.
 2. **DNS Transport Signaling** -- Enabling resolvers to
    discover and use encrypted transports (DoT, DoQ, DoH)
    when communicating with authoritative servers.
-3. **Experimental Record Types** -- DSYNC, HSYNC3,
-   HSYNCPARAM, DELEG, TSYNC.
-4. **Multi-Signer DNSSEC** -- Multiple providers signing the
-   same zone (a special case of multi-provider).
+3. **Experimental Record Types** -- DSYNC, DELEG, TSYNC, and
+   the records that tdns defines as infrastructure for other
+   components (HSYNC3, HSYNCPARAM, JWK, CHUNK).
+
+For multi-provider DNSSEC see the
+[tdns-mp Guide](../../tdns-mp/guide/README.md).
 
 
 ## 1. Automatic Delegation Synchronization
@@ -47,10 +49,11 @@ TDNS supports two synchronization schemes:
 
 Both tdns-auth (as parent primary) and tdns-agent (as child
 agent) implement their respective roles. See the
-[Multi-Provider Advanced Topics](multi-provider-advanced.md)
+[Multi-Provider Advanced Topics](../../tdns-mp/guide/multi-provider-advanced.md)
 document, sections 1 and 2, for configuration details
 including DSYNC publication, delegation backends, and key
-bootstrap.
+bootstrap. Those sections are written in a multi-provider
+context but apply equally to the single-provider tdns-agent.
 
 
 ## 2. DNS Transport Signaling
@@ -196,24 +199,18 @@ TDNS implements several record types beyond the standard set.
 The dog tool (`dogv2`) can query and display all of them
 natively -- dig cannot decode the private-use types.
 
+Some of these record types are defined and parsed in tdns
+but used only as infrastructure by other components -- most
+notably tdns-mp (for multi-provider coordination) and
+tdns-transport (for the JOSE-based message transport). They
+are listed below for completeness; tdns itself does not act
+on their semantics.
+
 ### DSYNC (RFC 9859)
 
 Delegation synchronization record. Published by the parent
 to advertise synchronization schemes for child zones. Now
 standardized; see section 1 above.
-
-### HSYNC3 (type 65285)
-
-Per-provider identity record for multi-provider coordination.
-One record per provider in the zone. See the
-[Multi-Provider QuickStart](multi-provider-quickstart.md)
-appendix for format details.
-
-### HSYNCPARAM (type 65286)
-
-Zone-wide multi-provider policy record. Carries key=value
-pairs controlling NS management, parent sync, signer
-authorization, etc.
 
 ### DELEG
 
@@ -226,17 +223,36 @@ DELEG records, and receiving them via zone transfer.
 Experimental transport signaling record. See section 2.4
 above.
 
+### HSYNC3 (type 65285)
 
-## 4. Multi-Signer DNSSEC
+Per-provider identity record for multi-provider coordination.
+One record per provider in the zone. Defined and parsed in
+tdns; used by [tdns-mp](../../tdns-mp/guide/README.md) to
+discover peer agents and compute provider groups.
 
-Multi-signer (RFC 8901) is a special case of multi-provider
-where more than one provider signs the zone. This requires
-synchronization of the DNSKEY RRset across all providers so
-that each provider's signatures can be validated using keys
-published by any provider.
+### HSYNCPARAM (type 65286)
 
-TDNS handles multi-signer as part of its general
-multi-provider framework. The same mechanisms -- agent-to-agent
-gossip, combiner zone merging, and KEYSTATE signaling -- are
-used. See the [Multi-Provider Advanced Topics](multi-provider-advanced.md)
-document for the full architecture.
+Zone-wide multi-provider policy record. Carries key=value
+pairs controlling NS management, parent sync, signer
+authorization, etc. Defined and parsed in tdns; used by
+[tdns-mp](../../tdns-mp/guide/README.md).
+
+### JWK
+
+JSON Web Key record (a direct DNS representation of RFC 7517
+JWKs), used to publish the public encryption keys of agents
+and other multi-provider components. Defined and parsed in
+tdns; used by [tdns-mp](../../tdns-mp/guide/README.md) for
+agent discovery and by
+[tdns-transport](../../tdns-transport/) for the keys that
+secure CHUNK payloads.
+
+### CHUNK
+
+Experimental record type that carries JWS(JWE(JWT)) payloads
+in JOSE format -- a signed (RFC 7515) and encrypted
+(RFC 7516) JWT (RFC 7519). Defined and parsed in tdns; the
+actual transport implementation lives in
+[tdns-transport](../../tdns-transport/) and the protocol
+that uses it is implemented in
+[tdns-mp](../../tdns-mp/guide/README.md).
