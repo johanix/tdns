@@ -139,6 +139,29 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 		return false, fmt.Errorf("SignRRsetNG: rrset has no RRs")
 	}
 
+	// Snapshot TTLs and the RRSIGs slice before any in-place mutation,
+	// so we can roll back on error. Without this, an error path (clamp
+	// + stale-RRSIG drop already done, then rrsig.Sign fails) would
+	// leave the caller storing a half-mutated RRset back into the zone.
+	origTTLs := make([]uint32, len(rrset.RRs))
+	for i := range rrset.RRs {
+		origTTLs[i] = rrset.RRs[i].Header().Ttl
+	}
+	origUnclampedTTL := rrset.UnclampedTTL
+	origRRSIGs := make([]dns.RR, len(rrset.RRSIGs))
+	copy(origRRSIGs, rrset.RRSIGs)
+	signOK := false
+	defer func() {
+		if signOK {
+			return
+		}
+		for i := range rrset.RRs {
+			rrset.RRs[i].Header().Ttl = origTTLs[i]
+		}
+		rrset.UnclampedTTL = origUnclampedTTL
+		rrset.RRSIGs = origRRSIGs
+	}()
+
 	// 4D K-step clamp: rewrite RR header TTLs in place before signing so
 	// the RRSIG covers the clamped TTL. Captures rrset.UnclampedTTL on
 	// first encounter; no-op when clamp == nil.
@@ -228,6 +251,7 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 		}
 	}
 
+	signOK = true
 	return resigned, nil
 }
 
