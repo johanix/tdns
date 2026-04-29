@@ -12,6 +12,7 @@ import (
 
 	"github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
+	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 )
@@ -649,30 +650,6 @@ func dashKeyidsBracket(s string) string {
 	return s
 }
 
-// printDSKeyidRangeLine prints the legacy single-line DS range summary.
-func printDSKeyidRangeLine(s *tdns.RolloverStatus, verbose bool) {
-	if s.Submitted == nil && s.Confirmed == nil {
-		return
-	}
-	sub := formatKeyidBracketList(s.SubmittedKeyIDs)
-	conf := formatKeyidBracketList(s.ConfirmedKeyIDs)
-	fmt.Printf("  DS range:         submitted to parent: %s confirmed: %s\n",
-		dashKeyidsBracket(sub), dashKeyidsBracket(conf))
-	if !verbose {
-		return
-	}
-	var parts []string
-	if s.Submitted != nil {
-		parts = append(parts, fmt.Sprintf("submitted rollover_index [%d, %d]", s.Submitted.Low, s.Submitted.High))
-	}
-	if s.Confirmed != nil {
-		parts = append(parts, fmt.Sprintf("confirmed rollover_index [%d, %d]", s.Confirmed.Low, s.Confirmed.High))
-	}
-	if len(parts) > 0 {
-		fmt.Printf("                      %s\n", strings.Join(parts, "  "))
-	}
-}
-
 // renderRolloverStatus prints a *RolloverStatus per the design spec
 // in 2026-04-29-rollover-overhaul.md. Same renderer regardless of
 // whether the struct came from the API or from local computation.
@@ -684,73 +661,8 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 
 	if showKSK {
 		fmt.Printf("KSK rollover state for zone %s:\n", s.Zone)
-
-		headlinePhrase := headlinePhraseFor(s.Headline, s.Phase)
-		fmt.Printf("  status            %s — %s\n", s.Headline, headlinePhrase)
-		if s.Phase != "" && s.Phase != "idle" {
-			fmt.Printf("  phase             %s\n", s.Phase)
-		}
-
-		if s.AttemptMax > 0 {
-			switch s.Headline {
-			case "ACTIVE":
-				if s.AttemptIndex > 0 {
-					fmt.Printf("  attempts          %d / %d in current group\n", s.AttemptIndex, s.AttemptMax)
-				}
-			case "SOFTFAIL":
-				fmt.Printf("  attempts          initial flurry (%d/%d) failed; in long-term mode\n", s.HardfailCount, s.AttemptMax)
-			}
-		}
-
-		if s.LastUpdate != "" {
-			fmt.Printf("  last UPDATE       %s\n", formatRolloverTime(s.LastUpdate))
-		}
-		if s.Policy != nil && s.Policy.DsPublishDelay != "" {
-			fmt.Printf("  ds-publish-delay  %s\n", s.Policy.DsPublishDelay)
-		}
-		if s.ExpectedBy != "" {
-			fmt.Printf("  expected by       %s\n", formatRolloverTime(s.ExpectedBy))
-		}
-		if s.AttemptTimeout != "" {
-			fmt.Printf("  attempt timeout   %s\n", formatRolloverTime(s.AttemptTimeout))
-		}
-
-		if s.LastSoftfailAt != "" {
-			fmt.Printf("  last failure      %s\n", formatRolloverTime(s.LastSoftfailAt))
-			if s.LastSoftfailCat != "" {
-				fmt.Printf("                    category: %s\n", s.LastSoftfailCat)
-			}
-			if s.LastSoftfailDetail != "" {
-				detail := s.LastSoftfailDetail
-				if !verbose && len(detail) > 80 {
-					detail = detail[:77] + "..."
-				}
-				fmt.Printf("                    detail:   %s\n", detail)
-			}
-		}
-		if s.NextPushAt != "" {
-			fmt.Printf("  next probe        %s\n", formatRolloverTime(s.NextPushAt))
-		}
-
-		if s.LastPoll != "" {
-			fmt.Printf("  last poll         %s — DS not yet observed\n", formatRolloverTime(s.LastPoll))
-		}
-		if s.NextPoll != "" {
-			fmt.Printf("  next poll         %s\n", formatRolloverTime(s.NextPoll))
-		}
-
-		if s.Hint != "" {
-			fmt.Printf("  hint              %s\n", s.Hint)
-			if s.Headline == "SOFTFAIL" {
-				fmt.Printf("                    use 'auto-rollover unstick --zone %s' to skip the wait and probe now\n", s.Zone)
-			}
-		}
-
-		if s.LastSuccess != "" {
-			fmt.Printf("  last success      %s\n", formatRolloverTime(s.LastSuccess))
-		}
-
-		printDSKeyidRangeLine(s, verbose)
+		printStateTable(s)
+		printStateNotes(s, verbose)
 
 		if len(s.KSKs) > 0 {
 			fmt.Println()
@@ -787,15 +699,137 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 	}
 }
 
-// printRolloverKeyTable prints KSK or ZSK rows in the historical
-// auto-rollover status column layout.
+// printStateTable renders the principal state info as a two-column
+// table (label/value | label/value) via ryanuber/columnize. Left
+// column tracks the current attempt; right column tracks history and
+// polling activity. Conditional fields collapse cleanly — empty
+// cells just leave that row's slot blank.
+func printStateTable(s *tdns.RolloverStatus) {
+	type kv struct{ label, value string }
+	var left, right []kv
+
+	// Left column: attempt context.
+	left = append(left, kv{"status:", s.Headline + " — " + headlinePhraseFor(s.Headline, s.Phase)})
+	if s.Phase != "" && s.Phase != "idle" {
+		left = append(left, kv{"phase:", s.Phase})
+	}
+	if s.AttemptMax > 0 {
+		switch s.Headline {
+		case "ACTIVE":
+			if s.AttemptIndex > 0 {
+				left = append(left, kv{"attempts:", fmt.Sprintf("%d / %d in current group", s.AttemptIndex, s.AttemptMax)})
+			}
+		case "SOFTFAIL":
+			left = append(left, kv{"attempts:", fmt.Sprintf("initial flurry (%d/%d) failed; in long-term mode", s.HardfailCount, s.AttemptMax)})
+		}
+	}
+	if s.LastUpdate != "" {
+		left = append(left, kv{"last UPDATE:", formatRolloverTime(s.LastUpdate)})
+	}
+	if s.Policy != nil && s.Policy.DsPublishDelay != "" {
+		left = append(left, kv{"ds-publish-delay:", s.Policy.DsPublishDelay})
+	}
+	if s.ExpectedBy != "" {
+		left = append(left, kv{"expected by:", formatRolloverTime(s.ExpectedBy)})
+	}
+	if s.AttemptTimeout != "" {
+		left = append(left, kv{"attempt timeout:", formatRolloverTime(s.AttemptTimeout)})
+	}
+
+	// Right column: history & polling.
+	if s.LastSuccess != "" {
+		right = append(right, kv{"last success:", formatRolloverTime(s.LastSuccess)})
+	}
+	if s.LastPoll != "" {
+		right = append(right, kv{"last poll:", formatRolloverTime(s.LastPoll)})
+	}
+	if s.NextPoll != "" {
+		right = append(right, kv{"next poll:", formatRolloverTime(s.NextPoll)})
+	}
+	if s.NextPushAt != "" {
+		right = append(right, kv{"next probe:", formatRolloverTime(s.NextPushAt)})
+	}
+	if s.LastSoftfailAt != "" {
+		right = append(right, kv{"last failure:", formatRolloverTime(s.LastSoftfailAt)})
+	}
+	if s.Submitted != nil {
+		right = append(right, kv{"DS submitted:", dashKeyidsBracket(formatKeyidBracketList(s.SubmittedKeyIDs))})
+	}
+	if s.Confirmed != nil {
+		right = append(right, kv{"DS confirmed:", dashKeyidsBracket(formatKeyidBracketList(s.ConfirmedKeyIDs))})
+	}
+
+	// Zip into 4-cell rows. Use a non-breaking-ish placeholder for
+	// empty cells so columnize's column-width computation still
+	// produces aligned output.
+	n := len(left)
+	if len(right) > n {
+		n = len(right)
+	}
+	rows := make([]string, 0, n)
+	for i := 0; i < n; i++ {
+		var ll, lv, rl, rv string
+		if i < len(left) {
+			ll, lv = left[i].label, left[i].value
+		}
+		if i < len(right) {
+			rl, rv = right[i].label, right[i].value
+		}
+		rows = append(rows, fmt.Sprintf("%s|%s|%s|%s", ll, lv, rl, rv))
+	}
+	formatted := columnize.SimpleFormat(rows)
+	for _, line := range strings.Split(formatted, "\n") {
+		fmt.Printf("  %s\n", line)
+	}
+}
+
+// printStateNotes renders multi-line / full-width annotations below
+// the two-column state table: hint, last-failure detail, optional
+// rollover_index range in verbose mode, optional unstick suggestion
+// in SOFTFAIL.
+func printStateNotes(s *tdns.RolloverStatus, verbose bool) {
+	if s.Hint != "" {
+		fmt.Printf("  hint:             %s\n", s.Hint)
+		if s.Headline == "SOFTFAIL" {
+			fmt.Printf("                    use 'auto-rollover unstick --zone %s' to skip the wait and probe now\n", s.Zone)
+		}
+	}
+	if s.LastSoftfailCat != "" || s.LastSoftfailDetail != "" {
+		if s.LastSoftfailCat != "" {
+			fmt.Printf("  failure category: %s\n", s.LastSoftfailCat)
+		}
+		if s.LastSoftfailDetail != "" {
+			detail := s.LastSoftfailDetail
+			if !verbose && len(detail) > 80 {
+				detail = detail[:77] + "..."
+			}
+			fmt.Printf("  failure detail:   %s\n", detail)
+		}
+	}
+	if verbose {
+		var parts []string
+		if s.Submitted != nil {
+			parts = append(parts, fmt.Sprintf("submitted rollover_index [%d, %d]", s.Submitted.Low, s.Submitted.High))
+		}
+		if s.Confirmed != nil {
+			parts = append(parts, fmt.Sprintf("confirmed rollover_index [%d, %d]", s.Confirmed.Low, s.Confirmed.High))
+		}
+		if len(parts) > 0 {
+			fmt.Printf("  ranges:           %s\n", strings.Join(parts, "  "))
+		}
+	}
+}
+
+// printRolloverKeyTable prints KSK or ZSK rows via columnize. Header
+// row + separator row + data rows; columnize handles column-width
+// alignment so we don't have to maintain padding-format strings.
 func printRolloverKeyTable(keys []tdns.RolloverKeyEntry, verbose bool, kskTable bool) {
 	if len(keys) == 0 {
 		return
 	}
+	var rows []string
 	if kskTable {
-		fmt.Println("  active_seq  keyid    state           published   state_since                last_error")
-		fmt.Println("  ----------  -----    -------------   ---------   ------------------------   ----------")
+		rows = append(rows, "active_seq|keyid|state|published|state_since|last_error")
 		for _, k := range keys {
 			seqStr := "-"
 			if k.ActiveSeq != nil {
@@ -815,21 +849,24 @@ func printRolloverKeyTable(keys []tdns.RolloverKeyEntry, verbose bool, kskTable 
 			if pub == "" {
 				pub = "?"
 			}
-			fmt.Printf("  %-10s  %-5d    %-13s   %-9s   %-24s   %s\n",
-				seqStr, k.KeyID, k.State, pub, sinceStr, errCol)
+			rows = append(rows, fmt.Sprintf("%s|%d|%s|%s|%s|%s",
+				seqStr, k.KeyID, k.State, pub, sinceStr, errCol))
 		}
-		return
-	}
-	fmt.Println("  keyid    state           published_at")
-	fmt.Println("  -----    -------------   ------------")
-	for _, k := range keys {
-		pub := "-"
-		if k.Published != "" {
-			if t, err := time.Parse(time.RFC3339, k.Published); err == nil {
-				pub = formatTimeWithDelta(t)
+	} else {
+		rows = append(rows, "keyid|state|published_at")
+		for _, k := range keys {
+			pub := "-"
+			if k.Published != "" {
+				if t, err := time.Parse(time.RFC3339, k.Published); err == nil {
+					pub = formatTimeWithDelta(t)
+				}
 			}
+			rows = append(rows, fmt.Sprintf("%d|%s|%s", k.KeyID, k.State, pub))
 		}
-		fmt.Printf("  %-5d    %-13s   %s\n", k.KeyID, k.State, pub)
+	}
+	formatted := columnize.SimpleFormat(rows)
+	for _, line := range strings.Split(formatted, "\n") {
+		fmt.Printf("  %s\n", line)
 	}
 }
 
