@@ -22,6 +22,23 @@ type RolloverZoneRow struct {
 	ObserveStartedAt          sql.NullString
 	ObserveNextPollAt         sql.NullString
 	ObserveBackoffSecs        sql.NullInt64
+
+	// Softfail state machine (added in rollover-overhaul phase 2).
+	// HardfailCount counts attempts in the current group (resets to 0
+	// only on successful confirmation, never on entering softfail).
+	// NextPushAt is the wallclock time at which the next push attempt
+	// is allowed; NULL means push allowed immediately. The other
+	// LastSoftfail* fields preserve diagnostic context for the most
+	// recent failure across daemon restarts so status output can
+	// render it.
+	HardfailCount        int
+	NextPushAt           sql.NullString
+	LastSoftfailAt       sql.NullString
+	LastSoftfailCategory sql.NullString
+	LastSoftfailDetail   sql.NullString
+	LastSuccessAt        sql.NullString
+	LastAttemptStartedAt sql.NullString
+	LastPollAt           sql.NullString
 }
 
 func EnsureRolloverZoneRow(kdb *KeyDB, zone string) error {
@@ -45,7 +62,10 @@ SELECT zone,
        last_ds_confirmed_index_low, last_ds_confirmed_index_high,
        rollover_phase, rollover_phase_at, rollover_in_progress,
        manual_rollover_requested_at, manual_rollover_earliest,
-       observe_started_at, observe_next_poll_at, observe_backoff_seconds
+       observe_started_at, observe_next_poll_at, observe_backoff_seconds,
+       hardfail_count, next_push_at,
+       last_softfail_at, last_softfail_category, last_softfail_detail,
+       last_success_at, last_attempt_started_at, last_poll_at
 FROM RolloverZoneState WHERE zone = ?`
 	var r RolloverZoneRow
 	var inProg int
@@ -56,6 +76,9 @@ FROM RolloverZoneState WHERE zone = ?`
 		&r.RolloverPhase, &r.RolloverPhaseAt, &inProg,
 		&r.ManualRolloverRequestedAt, &r.ManualRolloverEarliest,
 		&r.ObserveStartedAt, &r.ObserveNextPollAt, &r.ObserveBackoffSecs,
+		&r.HardfailCount, &r.NextPushAt,
+		&r.LastSoftfailAt, &r.LastSoftfailCategory, &r.LastSoftfailDetail,
+		&r.LastSuccessAt, &r.LastAttemptStartedAt, &r.LastPollAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -562,5 +585,105 @@ func clearManualRolloverRequestTx(tx *Tx, zone string) error {
 SET manual_rollover_requested_at = NULL,
     manual_rollover_earliest = NULL
 WHERE zone = ?`, zone)
+	return err
+}
+
+func rolloverKeyDsObservedAt(kdb *KeyDB, zone string, keyid uint16) (*time.Time, error) {
+	var dsObs sql.NullString
+	err := kdb.DB.QueryRow(`SELECT ds_observed_at FROM RolloverKeyState WHERE zone = ? AND keyid = ?`, zone, int(keyid)).Scan(&dsObs)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if !dsObs.Valid || strings.TrimSpace(dsObs.String) == "" {
+		return nil, nil
+	}
+	t, err := time.Parse(time.RFC3339, strings.TrimSpace(dsObs.String))
+	if err != nil {
+		return nil, err
+	}
+	return &t, nil
+}
+
+// Softfail-state accessors (added in rollover-overhaul phase 2).
+// These are wired into the tick loop in phase 5 (softfail counter
+// logic); for now they are unused but tested by build.
+
+// setSoftfail records a single failed attempt: timestamps it, stores
+// the failure category and human-readable detail, and stamps
+// next_push_at if the caller has already decided to enter softfail.
+// next_push_at == zero time clears that field (immediate retry).
+//
+// Caller is responsible for taking the per-zone rollover lock
+// (AcquireRolloverLock) before invoking this; the lock guarantees
+// these writes are not interleaved with the rollover tick's reads.
+func setSoftfail(kdb *KeyDB, zone, category, detail string, at time.Time, nextPushAt time.Time) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	atStr := at.UTC().Format(time.RFC3339)
+	var nextPush sql.NullString
+	if !nextPushAt.IsZero() {
+		nextPush = sql.NullString{String: nextPushAt.UTC().Format(time.RFC3339), Valid: true}
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState
+SET last_softfail_at = ?,
+    last_softfail_category = ?,
+    last_softfail_detail = ?,
+    next_push_at = ?
+WHERE zone = ?`, atStr, category, detail, nextPush, zone)
+	return err
+}
+
+// incrementHardfailCount atomically bumps the per-zone failed-attempt
+// counter. Returns the new value. Resets to 0 only via
+// resetHardfailCount or on successful confirmation.
+func incrementHardfailCount(kdb *KeyDB, zone string) (int, error) {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return 0, err
+	}
+	if _, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET hardfail_count = hardfail_count + 1 WHERE zone = ?`, zone); err != nil {
+		return 0, err
+	}
+	var n int
+	if err := kdb.DB.QueryRow(`SELECT hardfail_count FROM RolloverZoneState WHERE zone = ?`, zone).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// resetHardfailCount sets the per-zone counter back to 0. Called from
+// the success path on confirmed observation.
+func resetHardfailCount(kdb *KeyDB, zone string) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET hardfail_count = 0 WHERE zone = ?`, zone)
+	return err
+}
+
+// setLastSuccess stamps the wallclock time of the most recent
+// successful confirmation (target DS == observed DS at the parent).
+// Status output renders this as "last success" so an operator can
+// see how long ago the zone was last in-sync.
+func setLastSuccess(kdb *KeyDB, zone string, at time.Time) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET last_success_at = ? WHERE zone = ?`, at.UTC().Format(time.RFC3339), zone)
+	return err
+}
+
+// setLastPoll stamps the wallclock time of the most recent
+// parent-DS observation poll. Updated on every poll regardless of
+// whether DS was observed; status output renders this as "last poll"
+// so an operator can confirm the engine is actively checking.
+func setLastPoll(kdb *KeyDB, zone string, at time.Time) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET last_poll_at = ? WHERE zone = ?`, at.UTC().Format(time.RFC3339), zone)
 	return err
 }

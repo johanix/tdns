@@ -120,7 +120,15 @@ UNIQUE (zonename, keyid)
 		manual_rollover_earliest       TEXT,
 		observe_started_at             TEXT,
 		observe_next_poll_at           TEXT,
-		observe_backoff_seconds        INTEGER
+		observe_backoff_seconds        INTEGER,
+		hardfail_count                 INTEGER NOT NULL DEFAULT 0,
+		next_push_at                   TEXT,
+		last_softfail_at               TEXT,
+		last_softfail_category         TEXT,
+		last_softfail_detail           TEXT,
+		last_success_at                TEXT,
+		last_attempt_started_at        TEXT,
+		last_poll_at                   TEXT
 	)`,
 
 	// ZoneSigningState holds per-zone signing-loop state. max_observed_ttl

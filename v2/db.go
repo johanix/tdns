@@ -123,6 +123,16 @@ func dbMigrateSchema(db *sql.DB) {
 		{"DnssecKeyStore", "published_at", "ALTER TABLE DnssecKeyStore ADD COLUMN published_at TEXT DEFAULT ''"},
 		{"DnssecKeyStore", "retired_at", "ALTER TABLE DnssecKeyStore ADD COLUMN retired_at TEXT DEFAULT ''"},
 		{"Sig0KeyStore", "parent_state", "ALTER TABLE Sig0KeyStore ADD COLUMN parent_state INTEGER DEFAULT 0"},
+		// Rollover overhaul phase 2: softfail-state columns on RolloverZoneState.
+		// All NULL/0-default so existing testbed rows remain valid post-migration.
+		{"RolloverZoneState", "hardfail_count", "ALTER TABLE RolloverZoneState ADD COLUMN hardfail_count INTEGER NOT NULL DEFAULT 0"},
+		{"RolloverZoneState", "next_push_at", "ALTER TABLE RolloverZoneState ADD COLUMN next_push_at TEXT"},
+		{"RolloverZoneState", "last_softfail_at", "ALTER TABLE RolloverZoneState ADD COLUMN last_softfail_at TEXT"},
+		{"RolloverZoneState", "last_softfail_category", "ALTER TABLE RolloverZoneState ADD COLUMN last_softfail_category TEXT"},
+		{"RolloverZoneState", "last_softfail_detail", "ALTER TABLE RolloverZoneState ADD COLUMN last_softfail_detail TEXT"},
+		{"RolloverZoneState", "last_success_at", "ALTER TABLE RolloverZoneState ADD COLUMN last_success_at TEXT"},
+		{"RolloverZoneState", "last_attempt_started_at", "ALTER TABLE RolloverZoneState ADD COLUMN last_attempt_started_at TEXT"},
+		{"RolloverZoneState", "last_poll_at", "ALTER TABLE RolloverZoneState ADD COLUMN last_poll_at TEXT"},
 	}
 
 	for _, m := range migrations {
