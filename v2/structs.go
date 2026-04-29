@@ -236,6 +236,17 @@ type DnssecPolicyRolloverConf struct {
 	ConfirmPollMax     string `yaml:"confirm-poll-max" mapstructure:"confirm-poll-max"`
 	ConfirmTimeout     string `yaml:"confirm-timeout" mapstructure:"confirm-timeout"`
 	DsyncRequired      *bool  `yaml:"dsync-required" mapstructure:"dsync-required"`
+
+	// Softfail state machine (rollover-overhaul). DsPublishDelay is
+	// the primary new timing knob: parent's expected publication
+	// cadence between "we sent UPDATE, got NOERROR" and "DS RRset
+	// observable on the parent." Defaults derive from this for
+	// healthy direct-publish parents (5m) up to batched registries
+	// (1h, 24h). MaxAttemptsBeforeBackoff is the size of the initial
+	// flurry; SoftfailDelay is the long-term-mode probe interval.
+	DsPublishDelay           string `yaml:"ds-publish-delay" mapstructure:"ds-publish-delay"`
+	MaxAttemptsBeforeBackoff int    `yaml:"max-attempts-before-backoff" mapstructure:"max-attempts-before-backoff"`
+	SoftfailDelay            string `yaml:"softfail-delay" mapstructure:"softfail-delay"`
 }
 
 // DnssecPolicyTtlsConf is the YAML `ttls:` subtree under a DNSSEC policy.
