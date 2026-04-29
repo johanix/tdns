@@ -96,6 +96,42 @@ principles:
 - Auto-detecting `ds-publish-delay` from observation. Nice-to-
   have but error-prone — operator declares it.
 
+## Constraint: testbed continuity
+
+Project-wide policy is normally "no user base, no backwards
+compat." For this work there is a narrow but firm exception: two
+testbeds are running long-term frequent rollovers against the
+current code. They must continue to work across the upgrade. Stop
+daemon → install new binary → start daemon → resume should be
+sufficient for the operator. Specifically:
+
+- **DB schema migration is mandatory.** Existing rows on
+  `RolloverZoneState`, `RolloverKeyState`, and `DnssecKeyStore`
+  must survive the upgrade with their data preserved. New columns
+  must be added via the existing `dbMigrateSchema` mechanism in
+  [db.go:117](tdns/v2/db.go:117) — `ALTER TABLE ADD COLUMN` with
+  `dbColumnExists` idempotency check.
+- **In-flight rollovers must finish coherently.** A testbed that
+  is mid-observe (phase=`pending-parent-observe`) when stopped
+  must, after upgrade, continue from that phase and reach a
+  sensible conclusion under the new logic. No phase-name
+  mismatches, no orphaned state.
+- **Config file YAML is NOT covered by this constraint.** The
+  testbed operators are the developers themselves. They update
+  YAML manually after the upgrade if they want to use the new
+  `ds-publish-delay` / `max-attempts-before-backoff` /
+  `softfail-delay` knobs. Until they do, defaults apply.
+
+The schema additions in this doc are all NULL-or-zero-default
+columns, which is benign for existing rows (no breaking change).
+The single behavioral wrinkle is that Phase 2 alone (the gate
+fix without Phase 4's softfail backoff) makes the engine retry
+forever with no rate limit. For a testbed where the parent
+periodically misbehaves, that's a regression. So Phase 2 and
+Phase 4 should land **in the same release** to a testbed —
+not Phase 2 in isolation. (Phase 2 alone is fine to *commit*; it
+just shouldn't ship to a testbed without Phase 4 close behind.)
+
 ## Configuration: three knobs, the rest is derived
 
 ```yaml
@@ -603,13 +639,25 @@ zone" command.
 
 ### Phase 1 — schema + data model
 
-1. Add new columns to `RolloverZoneState` schema.
-2. Extend `RolloverZoneRow` struct.
-3. Update `LoadRolloverZoneRow` to read the new columns.
-4. Add accessor functions: `setSoftfail`,
+1. Add migration entries to the `migrations` slice in
+   `dbMigrateSchema` ([db.go:117](tdns/v2/db.go:117)). One entry
+   per new column, each `ALTER TABLE RolloverZoneState ADD COLUMN`
+   with a NULL-safe default. The `dbColumnExists` check makes
+   each entry idempotent — running migrations on a DB that has
+   already been migrated is a no-op.
+2. Update the canonical `CREATE TABLE RolloverZoneState` in
+   `db_schema.go` to include the new columns, so fresh DBs get
+   them at table-creation time without going through the
+   migration code path.
+3. Extend `RolloverZoneRow` struct in `ksk_rollover_zone_state.go`.
+4. Update `LoadRolloverZoneRow` to read the new columns.
+5. Add accessor functions: `setSoftfail`,
    `incrementHardfailCount`, `resetHardfailCount`,
    `setLastSuccess`, `setLastPoll`.
-5. Build (no behavior change yet).
+6. Build (no behavior change yet — pure additive schema).
+7. Verify by pointing the binary at a copy of a testbed's
+   `RolloverZoneState` table and confirming all existing rows
+   load cleanly with NULL/0 in the new columns.
 
 ### Phase 2 — kskIndexPushNeeded reformulation
 
@@ -721,19 +769,14 @@ This phase is independent of phases 1-7 and can land in parallel.
    compatible order: the CLI/API doc's Phase 1 (lock) before
    this doc's Phase 4.
 
-2. **Schema migration.** Adding columns requires the codebase's
-   existing migration mechanism. The fast-roller branches are
-   pre-production, so this is tractable; lab signers will need
-   explicit migration.
-
-3. **Forever-loop log volume on truly-broken parents.** With
+2. **Forever-loop log volume on truly-broken parents.** With
    default config, a permanently broken parent generates ~25
    log lines per day per zone forever. For an environment with
    many zones this scales into thousands. Mitigation: the
    monitoring metric is the primary alerting signal, not log
    greps.
 
-4. **Operator override for slow parents that don't know their
+3. **Operator override for slow parents that don't know their
    own delay.** If an operator misconfigures `ds-publish-delay`
    too low (e.g. 5m for a parent that actually takes 1h), every
    rollover will declare softfail at minute 30 even when
