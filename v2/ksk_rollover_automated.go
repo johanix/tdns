@@ -18,6 +18,18 @@ const (
 	rolloverPhasePendingChildWithdraw = "pending-child-withdraw"
 )
 
+// kskIndexPushNeeded answers "should we push a fresh DS UPDATE to the
+// parent right now?" by comparing the engine-computed target DS index
+// range to what the parent has actually published.
+//
+// The comparison is against LastConfirmed* (parent reality) rather
+// than LastSubmitted* (our local "I tried"). The two diverge whenever
+// a previous attempt got rcode NOERROR back but the DS never actually
+// appeared on the parent — silent policy reject, broken update→publish
+// pipeline at the parent, etc. Comparing against LastSubmitted* in
+// that situation says "we already tried this, nothing to do" and the
+// zone gets stuck. Comparing against LastConfirmed* says "the parent
+// still doesn't have it, push again."
 func kskIndexPushNeeded(row *RolloverZoneRow, low, high int, indexOK bool, haveDS bool) bool {
 	if !haveDS {
 		return false
@@ -25,10 +37,10 @@ func kskIndexPushNeeded(row *RolloverZoneRow, low, high int, indexOK bool, haveD
 	if !indexOK {
 		return false
 	}
-	if row == nil || !row.LastSubmittedLow.Valid || !row.LastSubmittedHigh.Valid {
+	if row == nil || !row.LastConfirmedLow.Valid || !row.LastConfirmedHigh.Valid {
 		return true
 	}
-	return int(row.LastSubmittedLow.Int64) != low || int(row.LastSubmittedHigh.Int64) != high
+	return int(row.LastConfirmedLow.Int64) != low || int(row.LastConfirmedHigh.Int64) != high
 }
 
 // RolloverAutomatedTick runs one slice of automated KSK rollover for multi-ds (pipeline fill,
