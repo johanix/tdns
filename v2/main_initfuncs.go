@@ -47,7 +47,7 @@ func buildChunkQueryEndpoint(conf *Config) string {
 	}
 	return net.JoinHostPort(host, strconv.Itoa(int(port)))
 }
-	*/
+*/
 
 // startEngine wraps engine functions in a goroutine with error handling.
 // It logs errors if the engine function returns an error, preventing silent failures.
@@ -118,8 +118,13 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeImr, AppTypeScanner, AppTypeReporter, AppTypeCli, AppTypeKdc, AppTypeKrs,
 		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
-		fmt.Printf("*** TDNS %s version %s mode of operation: %q (verbose: %t, debug: %t)\n",
-			Globals.App.Name, Globals.App.Version, AppTypeToString[Globals.App.Type], Globals.Verbose, Globals.Debug)
+		// Long-running daemons keep the startup banner. CLI prints it
+		// only when -v / --verbose is set; otherwise the banner clutters
+		// every short command invocation.
+		if Globals.App.Type != AppTypeCli || Globals.Verbose {
+			fmt.Printf("*** TDNS %s version %s mode of operation: %q (verbose: %t, debug: %t)\n",
+				Globals.App.Name, Globals.App.Version, AppTypeToString[Globals.App.Type], Globals.Verbose, Globals.Debug)
+		}
 	default:
 		return fmt.Errorf("*** TDNS %s: Error: unknown mode of operation: %q",
 			Globals.App.Name, Globals.App.Type)
@@ -133,7 +138,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	if err != nil {
 		return fmt.Errorf("error setting up logging: %v", err)
 	}
-	fmt.Printf("Logging to file: %s\n", logfile)
+	if Globals.App.Type != AppTypeCli || Globals.Verbose {
+		fmt.Printf("Logging to file: %s\n", logfile)
+	}
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeScanner:
 		kdb := conf.Internal.KeyDB
@@ -150,7 +157,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	if err != nil {
 		return fmt.Errorf("error validating TDNS globals: %v", err)
 	}
-	fmt.Printf("TDNS %s version %s starting.\n", Globals.App.Name, Globals.App.Version)
+	if Globals.App.Type != AppTypeCli || Globals.Verbose {
+		fmt.Printf("TDNS %s version %s starting.\n", Globals.App.Name, Globals.App.Version)
+	}
 	// Initialize QueryHandlers map for registration API
 	conf.Internal.QueryHandlers = make(map[uint16][]QueryHandlerFunc)
 	// Copy any handlers registered before MainInit (from global storage)

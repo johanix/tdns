@@ -298,7 +298,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 						"ns", nsName)
 					lgDns.Debug("CreateTransportSignalRRs(SVCB): SVCB", "svcb", tmp.String())
 
-					if _, err := zd.SignRRset(zd.TransportSignal, "", nil, false); err != nil {
+					if _, err := zd.SignRRset(zd.TransportSignal, "", nil, false, nil); err != nil {
 						lgDns.Debug("CreateTransportSignalRRs(SVCB): error signing SVCB", "owner", "_dns."+nsName, "err", err)
 					}
 					// Add into zone data
@@ -428,7 +428,7 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config) error {
 					"ns", nsName,
 					"rr", trr.String())
 				// Sign TSYNC if online signing is enabled; QueryResponder will include RRSIGs when present
-				if _, err := zd.SignRRset(zd.TransportSignal, "", nil, false); err != nil {
+				if _, err := zd.SignRRset(zd.TransportSignal, "", nil, false, nil); err != nil {
 					lgDns.Debug("createTransportSignalTSYNC: error signing TSYNC", "owner", "_dns."+nsName, "err", err)
 				}
 				return nil

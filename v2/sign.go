@@ -9,6 +9,7 @@ import (
 	"math/big"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -18,6 +19,21 @@ import (
 
 // sig0TTL is the TTL used for SIG(0) records in signed messages.
 const sig0TTL uint32 = 300
+
+// signerStaleRRSIGsDropped counts how many RRSIGs SignRRset has dropped
+// because their signing key was no longer in the active key set. The
+// counter is intended to surface key-state-related events: outside of
+// rollovers it should stay flat; a non-zero rate means SOMETHING changed
+// the active set and the stale-RRSIG cleanup is doing its job. Read via
+// SignerStaleRRSIGsDropped().
+var signerStaleRRSIGsDropped uint64
+
+// SignerStaleRRSIGsDropped returns a snapshot of the stale-RRSIG-drop
+// counter. Used by tests and a future observability surface; per-zone
+// breakdown can be added later if needed.
+func SignerStaleRRSIGsDropped() uint64 {
+	return atomic.LoadUint64(&signerStaleRRSIGsDropped)
+}
 
 // cryptoRandIntn returns a random int in [0, n) using crypto/rand.
 func cryptoRandIntn(n int) int {
@@ -88,7 +104,17 @@ func SignMsg(m dns.Msg, signer string, sak *Sig0ActiveKeys) (*dns.Msg, error) {
 	return &m, nil
 }
 
-func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, force bool) (bool, error) {
+// SignRRset signs an RRset with the zone's active KSK or ZSK keys, regenerating
+// any RRSIGs that NeedsResigning indicates are stale. When clamp != nil
+// (zone has clamping.enabled and a rollover is scheduled), the RR header
+// TTLs are first clamped to min(rrset.UnclampedTTL, K * margin) and then
+// signed — so the resulting RRSIG.OrigTtl matches the served TTL. See §5.2
+// of the automated KSK rollover design.
+//
+// clamp == nil disables clamping entirely (no behavior change from the
+// pre-4D signature). Most callers pass nil; SignZone builds a *ClampParams
+// once per pass for clamping zones and threads it down.
+func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, force bool, clamp *ClampParams) (bool, error) {
 
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return false, fmt.Errorf("SignRRset: zone %s does not allow signing (neither online-signing nor inline-signing)", zd.ZoneName)
@@ -113,6 +139,34 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 		return false, fmt.Errorf("SignRRsetNG: rrset has no RRs")
 	}
 
+	// Snapshot TTLs and the RRSIGs slice before any in-place mutation,
+	// so we can roll back on error. Without this, an error path (clamp
+	// + stale-RRSIG drop already done, then rrsig.Sign fails) would
+	// leave the caller storing a half-mutated RRset back into the zone.
+	origTTLs := make([]uint32, len(rrset.RRs))
+	for i := range rrset.RRs {
+		origTTLs[i] = rrset.RRs[i].Header().Ttl
+	}
+	origUnclampedTTL := rrset.UnclampedTTL
+	origRRSIGs := make([]dns.RR, len(rrset.RRSIGs))
+	copy(origRRSIGs, rrset.RRSIGs)
+	signOK := false
+	defer func() {
+		if signOK {
+			return
+		}
+		for i := range rrset.RRs {
+			rrset.RRs[i].Header().Ttl = origTTLs[i]
+		}
+		rrset.UnclampedTTL = origUnclampedTTL
+		rrset.RRSIGs = origRRSIGs
+	}()
+
+	// 4D K-step clamp: rewrite RR header TTLs in place before signing so
+	// the RRSIG covers the clamped TTL. Captures rrset.UnclampedTTL on
+	// first encounter; no-op when clamp == nil.
+	applyClampToRRset(rrset, clamp)
+
 	var signingkeys []*PrivateKeyCache
 
 	if rrset.RRs[0].Header().Rrtype == dns.TypeDNSKEY {
@@ -122,6 +176,40 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 	}
 
 	resigned := false
+	now := time.Now().UTC()
+
+	// Drop any RRSIG whose signing key is no longer in our active key set.
+	// This happens after a KSK rollover: the previously-active key is now
+	// retired (or removed) and we no longer want its RRSIG covering the
+	// DNSKEY RRset (or any other RRset signed by KSKs/ZSKs). Without this,
+	// stale RRSIGs by retired keys hang around until their validity
+	// expires — long after the keys themselves leave the zone.
+	//
+	// Logged at INFO level (not Debug) and metered so operators can see
+	// in production logs when this fires. Outside of rollover events the
+	// counter should stay flat; a non-zero rate would indicate an
+	// unexpected key-state change worth investigating.
+	activeKeyTags := make(map[uint16]bool, len(signingkeys))
+	for _, key := range signingkeys {
+		activeKeyTags[key.DnskeyRR.KeyTag()] = true
+	}
+	filtered := rrset.RRSIGs[:0]
+	for _, sig := range rrset.RRSIGs {
+		s, ok := sig.(*dns.RRSIG)
+		if !ok || activeKeyTags[s.KeyTag] {
+			filtered = append(filtered, sig)
+			continue
+		}
+		atomic.AddUint64(&signerStaleRRSIGsDropped, 1)
+		lgSigner.Info("dropping RRSIG by non-active key",
+			"zone", zd.ZoneName,
+			"name", s.Header().Name,
+			"rrtype", dns.TypeToString[s.TypeCovered],
+			"keytag", s.KeyTag,
+			"reason", "key no longer in active set (post-rollover or manual state change)")
+		resigned = true // we changed the rrset.RRSIGs; flag as updated
+	}
+	rrset.RRSIGs = filtered
 
 	for _, key := range signingkeys {
 		shouldSign := true
@@ -145,8 +233,8 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 			}
 			rrsig.KeyTag = key.DnskeyRR.KeyTag()
 			rrsig.Algorithm = key.DnskeyRR.Algorithm
-			rrsig.Inception, rrsig.Expiration = sigLifetime(time.Now().UTC(), 3600*24*30) // 30 days
-			rrsig.SignerName = zd.ZoneName                                                // name
+			rrsig.Inception, rrsig.Expiration = sigLifetime(now, 3600*24*30) // 30 days
+			rrsig.SignerName = zd.ZoneName                                   // name
 
 			err := rrsig.Sign(key.CS, rrset.RRs)
 			if err != nil {
@@ -154,11 +242,16 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 				return false, err
 			}
 
+			// 4D clamp invariant: warn if validity would expire before the
+			// retired-key hold window completes. Doesn't refuse to sign.
+			checkValidityInvariant(zd.ZoneName, rrsig, clamp, now)
+
 			rrset.RRSIGs = append(rrset.RRSIGs, rrsig)
 			resigned = true
 		}
 	}
 
+	signOK = true
 	return resigned, nil
 }
 
@@ -271,11 +364,17 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 	if len(dak.KSKs) == 0 {
 		// Invalidate cache before generating to ensure fresh data
 		delete(kdb.KeystoreDnskeyCache, zd.ZoneName+"+"+DnskeyStateActive)
-		_, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "KSK", nil)
+		pkc, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "KSK", nil)
 		if err != nil {
 			return nil, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate KSK for zone %s: %v", zd.ZoneName, err)
 		}
 		lgSigner.Info("generated KSK", "msg", msg)
+		// Bootstrap KSK landed straight in active. Register in
+		// RolloverKeyState so rolloverDue and the K-step clamp scheduler
+		// can find an active_at timestamp. No-op for non-rollover zones.
+		if err := RegisterBootstrapActiveKSK(kdb, zd.ZoneName, pkc.KeyId, zd.DnssecPolicy.Rollover.Method, zd.DnssecPolicy.Algorithm); err != nil {
+			return nil, fmt.Errorf("EnsureActiveDnssecKeys: register bootstrap KSK for zone %s keyid %d: %w", zd.ZoneName, pkc.KeyId, err)
+		}
 		// Invalidate cache and re-fetch active keys after KSK generation
 		dak, err = zd.refreshActiveDnssecKeys(kdb, "after KSK generation")
 		if err != nil {
@@ -355,8 +454,24 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 		}
 	}
 
+	// 4D K-step TTL clamp: build ClampParams once per pass so every RRset
+	// signed in this pass observes the same K. nil for non-clamping zones
+	// (or zones with no scheduled rollover, mid-rollover, etc.).
+	//
+	// On error we refuse to sign rather than silently fall back to
+	// unclamped signing — the whole point of the clamp is the rollover
+	// safety window, and publishing TTLs outside it defeats the design.
+	var clamp *ClampParams
+	if zd.DnssecPolicy != nil {
+		clamp, err = ClampParamsForZone(kdb, zd.ZoneName, zd.DnssecPolicy, time.Now())
+		if err != nil {
+			lgSigner.Error("SignZone: ClampParamsForZone failed; refusing to sign", "zone", zd.ZoneName, "err", err)
+			return 0, fmt.Errorf("SignZone: ClampParamsForZone for zone %s: %w", zd.ZoneName, err)
+		}
+	}
+
 	MaybeSignRRset := func(rrset core.RRset, zone string) (core.RRset, bool) {
-		resigned, err := zd.SignRRset(&rrset, zone, dak, force)
+		resigned, err := zd.SignRRset(&rrset, zone, dak, force, clamp)
 		if err != nil {
 			lgSigner.Error("failed to sign RRset", "name", rrset.RRs[0].Header().Name, "rrtype", dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)], "zone", zd.ZoneName)
 		}
@@ -402,6 +517,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 	lgSigner.Debug("zone delegations", "zone", zd.ZoneName, "delegations", delegations)
 
 	var signed, zoneResigned bool
+	var maxObservedTTL uint32
 	for _, name := range names {
 		// log.Printf("SignZone: signing RRsets under name %s", name)
 		owner, err := zd.GetOwner(name)
@@ -438,6 +554,17 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 			rrset, signed = MaybeSignRRset(rrset, zd.ZoneName)
 			owner.RRtypes.Set(rrt, rrset)
 
+			// Record TTL after clamping. applyClampToRRset (called from
+			// SignRRset) rewrites headers to min(UnclampedTTL, K*margin,
+			// MaxServedTTL); capturing here makes max_observed_ttl reflect
+			// what's actually served, so effective_margin converges on the
+			// first sign pass after a policy change instead of the second.
+			if len(rrset.RRs) > 0 {
+				if t := rrset.RRs[0].Header().Ttl; t > maxObservedTTL {
+					maxObservedTTL = t
+				}
+			}
+
 			if signed {
 				zoneResigned = true
 			}
@@ -453,6 +580,13 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 			lgSigner.Error("failed to bump SOA serial", "zone", zd.ZoneName, "err", err)
 			return 0, err
 		}
+	}
+
+	// Persist the highest RRset TTL seen this pass. Used by the rollover
+	// worker's pending-child-withdraw phase to compute effective_margin.
+	// Reset per pass: a TTL reduction takes effect after one full cycle.
+	if err := UpsertZoneSigningMaxTTL(kdb, zd.ZoneName, maxObservedTTL); err != nil {
+		lgSigner.Warn("SignZone: persist max_observed_ttl", "zone", zd.ZoneName, "err", err)
 	}
 
 	return newrrsigs, nil

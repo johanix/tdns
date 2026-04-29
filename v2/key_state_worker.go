@@ -11,6 +11,8 @@ package tdns
 import (
 	"context"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 const (
@@ -77,7 +79,7 @@ func KeyStateWorker(ctx context.Context, conf *Config) error {
 			lgSigner.Info("KeyStateWorker stopping")
 			return nil
 		case <-ticker.C:
-			checkAndTransitionKeys(conf, kdb, propagationDelay, standbyZskCount, standbyKskCount)
+			checkAndTransitionKeys(ctx, conf, kdb, propagationDelay, standbyZskCount, standbyKskCount)
 		}
 	}
 }
@@ -86,8 +88,12 @@ func KeyStateWorker(ctx context.Context, conf *Config) error {
 // 1. published → standby (time-based)
 // 2. retired → removed (time-based)
 // 3. maintain standby key count (generate new keys as needed)
-func checkAndTransitionKeys(conf *Config, kdb *KeyDB, propagationDelay time.Duration, standbyZskCount, standbyKskCount int) {
+func checkAndTransitionKeys(ctx context.Context, conf *Config, kdb *KeyDB, propagationDelay time.Duration, standbyZskCount, standbyKskCount int) {
 	now := time.Now()
+
+	rolloverAutomatedForAllZones(ctx, conf, kdb, propagationDelay, now)
+	TransitionRolloverKskDsPublishedToStandby(conf, kdb, now, propagationDelay)
+	promoteStandbyKskBootstrapAll(conf, kdb)
 
 	transitionPublishedToStandby(conf, kdb, now, propagationDelay)
 
@@ -106,6 +112,11 @@ func transitionPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propa
 	}
 
 	for _, key := range keys {
+		if key.Flags&dns.SEP != 0 {
+			if zd, ok := Zones.Get(key.ZoneName); ok && zd.DnssecPolicy != nil && zd.DnssecPolicy.Rollover.Method == RolloverMethodMultiDS {
+				continue
+			}
+		}
 		if key.PublishedAt == nil {
 			lgSigner.Warn("KeyStateWorker: published key has no published_at timestamp, skipping", "zone", key.ZoneName, "keyid", key.KeyTag)
 			continue
@@ -146,6 +157,18 @@ func transitionRetiredToRemoved(conf *Config, kdb *KeyDB, now time.Time, propaga
 	}
 
 	for _, key := range keys {
+		// 4B guard: SEP keys in rollover-managed zones are owned by the
+		// rollover worker's pending-child-withdraw phase, which uses
+		// effective_margin (not propagationDelay) and sequences the
+		// retired→removed transition with a follow-up DS push. Skip them
+		// here. ZSKs and SEP keys in non-rollover zones still flow
+		// through this generic path.
+		if key.Flags&dns.SEP != 0 {
+			if zd, ok := Zones.Get(key.ZoneName); ok && zd.DnssecPolicy != nil && zd.DnssecPolicy.Rollover.Method != RolloverMethodNone {
+				continue
+			}
+		}
+
 		if key.RetiredAt == nil {
 			lgSigner.Warn("KeyStateWorker: retired key has no retired_at timestamp, skipping", "zone", key.ZoneName, "keyid", key.KeyTag)
 			continue
@@ -200,7 +223,7 @@ func maintainStandbyKeys(conf *Config, kdb *KeyDB, standbyZskCount, standbyKskCo
 
 		maintainStandbyKeysForType(kdb, zoneName, alg, "ZSK", 256, standbyZskCount)
 
-		if standbyKskCount > 0 {
+		if standbyKskCount > 0 && (zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method == RolloverMethodNone) {
 			maintainStandbyKeysForType(kdb, zoneName, alg, "KSK", 257, standbyKskCount)
 		}
 	}

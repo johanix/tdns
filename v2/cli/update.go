@@ -34,14 +34,14 @@ var childUpdateCreateCmd = &cobra.Command{
 	Use:   "create",
 	Short: "Create and ultimately send a DNS UPDATE msg for a child zone to the parent zone",
 	Long: `Will query for details about the DNS UPDATE via (add|del|show|set-ttl) commands.
-When the message is complete it may be signed and sent by the 'send' command. After a 
+When the message is complete it may be signed and sent by the 'send' command. After a
 message has been send the loop will start again with a new, empty message to create.
 Loop ends on the command "QUIT"
 
 The zone to update is mandatory to specify on the command line with the --zone flag.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
-		CreateUpdate("child")
+		CreateUpdate("auth", "child")
 	},
 }
 
@@ -55,16 +55,17 @@ var updateCreateCmd = &cobra.Command{
 	Short: "[OBE] Create and ultimately send a DNS UPDATE msg for zone auth data",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
-		CreateUpdate("foo")
+		CreateUpdate("auth", "foo")
 	},
 }
 
-// newZoneUpdateCmd returns a fresh "zone update create" subtree.
-// DNS UPDATE construction is role-independent (the interactive CLI
-// sends UPDATEs directly to a target DNS server specified via --server
-// rather than through an ApiClient), so this is called unconditionally
-// from NewZoneCmd for every role.
-func newZoneUpdateCmd() *cobra.Command {
+// newZoneUpdateCmd returns a fresh "zone update create" subtree under the
+// given role. DNS UPDATE construction is role-independent (the interactive
+// CLI sends UPDATEs directly to a target DNS server specified via --server
+// rather than through an ApiClient), but the role is needed to look up the
+// configured server's DB path via the /config status API when the local
+// viper "db.file" is unset.
+func newZoneUpdateCmd(role string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "update",
 		Short: "Create and ultimately send a DNS UPDATE msg for zone auth data",
@@ -80,7 +81,7 @@ Loop ends on the command "QUIT"
 The zone to update is mandatory to specify on the command line with the --zone flag.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("zonename")
-			CreateUpdate("zone")
+			CreateUpdate(role, "zone")
 		},
 	}
 	create.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
@@ -125,13 +126,36 @@ func init() {
 // The function updates package-level globals such as `zone`, `signer`, and `server` as needed.
 // It may call os.Exit on fatal initialization or signing errors.
 //
+// role is the api-client role used to discover the server's keystore path
+// when the local "db.file" config setting is unset (e.g. "auth", "agent",
+// "combiner"). The role's /config status response carries the DBFile field
+// added by commit d03f360.
+//
 // The updateType parameter selects the operational context used to initialize the interactive
 // session (for example "child" or "zone") and does not affect the format of the DNS UPDATE
 // messages produced.
-func CreateUpdate(updateType string) {
-	kdb, err := tdns.NewKeyDB(viper.GetString("db.file"), false, nil)
+func CreateUpdate(role, updateType string) {
+	dbFile := viper.GetString("db.file")
+	if dbFile == "" {
+		// Local viper has no db.file (typical when the CLI's config does
+		// not duplicate the server's keystore path). Fall back to the
+		// configured server's reported DBFile via /config status.
+		api, err := GetApiClient(role, false)
+		if err == nil {
+			resp, err := SendConfigCommand(api, tdns.ConfigPost{Command: "status"})
+			if err == nil && resp.DBFile != "" {
+				dbFile = resp.DBFile
+				if tdns.Globals.Verbose {
+					fmt.Printf("Using DB file from %s server config: %s\n", role, dbFile)
+				}
+			}
+		}
+	}
+	kdb, err := tdns.NewKeyDB(dbFile, false, nil)
 	if err != nil {
 		fmt.Printf("Error from NewKeyDB(): %v\n", err)
+		fmt.Printf("Hint: set 'db: file: <path>' in the CLI config, or ensure the configured\n")
+		fmt.Printf("      %s server's /config status returns a non-empty DBFile.\n", role)
 		os.Exit(1)
 	}
 

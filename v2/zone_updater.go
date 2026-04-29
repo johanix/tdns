@@ -687,7 +687,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 			if len(rrset.RRs) == 0 {
 				owner.RRtypes.Delete(rrtype)
 			} else {
-				_, err := zd.SignRRset(&rrset, ownerName, dak, true)
+				_, err := zd.SignRRset(&rrset, ownerName, dak, true, nil)
 				if err != nil {
 					lg.Error("ApplyZoneUpdateToZoneData: signing failed after RR removal", "rrtype", rrtypestr, "owner", ownerName, "error", err)
 					// Continue anyway - the record is still added, just not signed
@@ -726,7 +726,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 			lg.Debug("ApplyZoneUpdateToZoneData: adding RR", "rrtype", rrtypestr, "rr", rrcopy.String())
 			rrset.RRs = append(rrset.RRs, rrcopy)
 			// rrset.RRSIGs = []dns.RR{} // XXX: The RRset changed, so any old RRSIGs are now invalid.
-			_, err = zd.SignRRset(&rrset, ownerName, dak, true)
+			_, err = zd.SignRRset(&rrset, ownerName, dak, true, nil)
 			if err != nil {
 				lg.Error("ApplyZoneUpdateToZoneData: signing failed after RR add", "rrtype", rrtypestr, "owner", ownerName, "error", err)
 				// Continue anyway - the record is still added, just not signed

@@ -263,23 +263,27 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return fmt.Errorf("error reading processed config: %v", err)
 	}
 
-	// Initialize DnssecPolicies unconditionally. ParseZones (called later
-	// from MainInit) validates zone dnssec_policy references against this
-	// map, so it must be populated before ParseZones runs — for all apps,
-	// not just tdns-native ones.
-	if conf.Internal.DnssecPolicies == nil {
-		conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
-	}
+	// Rebuild DnssecPolicies on every parse. On reload, removed or
+	// rejected policies must not survive from the previous config.
+	// ParseZones (called later from MainInit) validates zone
+	// dnssec_policy references against this map, so it must be populated
+	// before ParseZones runs — for all apps, not just tdns-native ones.
+	conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
 	for name, dp := range conf.DnssecPolicies {
+		dpLocal := dp
 		tmp := DnssecPolicy{
 			Name:      name,
-			Algorithm: dns.StringToAlgorithm[strings.ToUpper(dp.Algorithm)],
-			KSK:       GenKeyLifetime(dp.KSK.Lifetime, dp.KSK.SigValidity),
-			ZSK:       GenKeyLifetime(dp.ZSK.Lifetime, dp.ZSK.SigValidity),
-			CSK:       GenKeyLifetime(dp.CSK.Lifetime, dp.CSK.SigValidity),
+			Algorithm: dns.StringToAlgorithm[strings.ToUpper(dpLocal.Algorithm)],
+			KSK:       GenKeyLifetime(dpLocal.KSK.Lifetime, dpLocal.KSK.SigValidity),
+			ZSK:       GenKeyLifetime(dpLocal.ZSK.Lifetime, dpLocal.ZSK.SigValidity),
+			CSK:       GenKeyLifetime(dpLocal.CSK.Lifetime, dpLocal.CSK.SigValidity),
 		}
 		if tmp.Algorithm == 0 {
-			lgConfig.Error("DNSSEC policy has unknown algorithm, ignored", "policy", name, "algorithm", dp.Algorithm)
+			lgConfig.Error("DNSSEC policy has unknown algorithm, ignored", "policy", name, "algorithm", dpLocal.Algorithm)
+			continue
+		}
+		if err := FinishDnssecPolicy(name, &dpLocal, &tmp); err != nil {
+			lgConfig.Error("DNSSEC policy invalid, ignored", "policy", name, "err", err)
 			continue
 		}
 		conf.Internal.DnssecPolicies[name] = tmp
@@ -338,12 +342,18 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// KDC and KRS configuration parsing has been moved to tdns-nm
 	// See kdc.ParseKdcConfigFromFile() and krs.ParseKrsConfigFromFile()
 
-	// XXX: Hmm. Should not initialize KeyDB on reload?
+	// On first start: build the KeyDB. On reload: keep the existing
+	// KeyDB but re-apply outbound_soa_serial so a config edit takes
+	// effect without a full restart.
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent:
 		if !reload {
 			err = conf.InitializeKeyDB()
 			if err != nil {
+				return err
+			}
+		} else if conf.Internal.KeyDB != nil {
+			if err := applyOutboundSoaSerial(conf.Internal.KeyDB, conf.DnsEngine.OutboundSoaSerial); err != nil {
 				return err
 			}
 		}
@@ -425,14 +435,33 @@ func (conf *Config) InitializeKeyDB() error {
 	}
 	conf.Internal.KeyDB = kdb
 
-	// Ensure OutgoingSerials table exists for persist-outbound-serial option
-	if kdb.Options[AuthOptPersistOutboundSerial] != "" {
+	if err := applyOutboundSoaSerial(kdb, conf.DnsEngine.OutboundSoaSerial); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// applyOutboundSoaSerial resolves the configured outbound_soa_serial mode
+// onto the KeyDB and ensures the persist-mode table exists. Called from
+// InitializeKeyDB on first start AND from the reload path in ParseConfig
+// so a config edit that flips dnsengine.outbound_soa_serial takes effect
+// without a full restart.
+func applyOutboundSoaSerial(kdb *KeyDB, raw string) error {
+	// Default to "keep" when unset. Validation (oneof=keep|unixtime|persist)
+	// is enforced by the struct tag at config-validate time.
+	mode := strings.TrimSpace(strings.ToLower(raw))
+	if mode == "" {
+		mode = OutboundSoaSerialKeep
+	}
+	kdb.OutboundSoaSerial = mode
+
+	if mode == OutboundSoaSerialPersist {
 		schema := DefaultTables["OutgoingSerials"]
 		if _, err := kdb.DB.Exec(schema); err != nil {
 			return fmt.Errorf("failed to create OutgoingSerials table: %w", err)
 		}
 	}
-
 	return nil
 }
 
@@ -976,6 +1005,7 @@ func BuiltinDefaultDnssecPolicy() DnssecPolicy {
 	return DnssecPolicy{
 		Name:      "default",
 		Algorithm: dns.ED25519,
+		Mode:      DnssecPolicyModeKSKZSK,
 		KSK:       GenKeyLifetime("forever", "168h"),
 		ZSK:       GenKeyLifetime("forever", "2h"),
 		CSK:       GenKeyLifetime("none", "168h"),

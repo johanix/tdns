@@ -251,6 +251,16 @@ type DnsEngineConf struct {
 	Transports  []string              `yaml:"transports" validate:"required,min=1,dive,oneof=do53 dot doh doq"` // "do53", "dot", "doh", "doq"
 	OptionsStrs []string              `yaml:"options" mapstructure:"options"`
 	Options     map[AuthOption]string `yaml:"-" mapstructure:"-"`
+	// OutboundSoaSerial controls the SOA serial advertised on outbound zone
+	// transfers and NOTIFYs. One of:
+	//   keep     — outbound = inbound serial (default; current behavior).
+	//   unixtime — outbound = time.Now().Unix() at parse.
+	//   persist  — outbound = previously-saved outbound serial (from the
+	//              OutgoingSerials DB table). Every BumpSerial writes the
+	//              new value back. On clean restart with no zone change,
+	//              the serial stays put — secondaries don't see a regression
+	//              and don't trigger an unnecessary AXFR.
+	OutboundSoaSerial string `yaml:"outbound_soa_serial,omitempty" mapstructure:"outbound_soa_serial" validate:"omitempty,oneof=keep unixtime persist"`
 }
 
 type ImrEngineConf struct {

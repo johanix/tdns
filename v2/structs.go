@@ -42,16 +42,17 @@ var ZoneTypeToString = map[ZoneType]string{
 }
 
 const (
-	Sig0StateCreated     string = "created"
-	Sig0StatePublished   string = "published"
-	Sig0StateActive      string = "active"
-	Sig0StateRetired     string = "retired"
-	DnskeyStateCreated   string = "created"
-	DnskeyStatePublished string = "published"
-	DnskeyStateStandby   string = "standby"
-	DnskeyStateActive    string = "active"
-	DnskeyStateRetired   string = "retired"
-	DnskeyStateRemoved   string = "removed"
+	Sig0StateCreated       string = "created"
+	Sig0StatePublished     string = "published"
+	Sig0StateActive        string = "active"
+	Sig0StateRetired       string = "retired"
+	DnskeyStateCreated     string = "created"
+	DnskeyStatePublished   string = "published"
+	DnskeyStateDsPublished string = "ds-published"
+	DnskeyStateStandby     string = "standby"
+	DnskeyStateActive      string = "active"
+	DnskeyStateRetired     string = "retired"
+	DnskeyStateRemoved     string = "removed"
 )
 
 // MPdata caches multi-provider membership and signing state for a zone.
@@ -77,10 +78,10 @@ type MPdata struct {
 type ZoneRefreshAnalysis struct {
 	DelegationChanged bool
 	DelegationStatus  DelegationSyncStatus
-//	HsyncChanged      bool
-//	HsyncStatus       *HsyncStatus
-	DnskeyChanged     bool
-	DnskeyStatus      *DnskeyStatus
+	//	HsyncChanged      bool
+	//	HsyncStatus       *HsyncStatus
+	DnskeyChanged bool
+	DnskeyStatus  *DnskeyStatus
 }
 
 type ZoneData struct {
@@ -92,9 +93,9 @@ type ZoneData struct {
 	OwnerIndex *core.ConcurrentMap[string, int]
 	ApexLen    int
 	//	RRs            RRArray
-	Data  *core.ConcurrentMap[string, OwnerData]
+	Data *core.ConcurrentMap[string, OwnerData]
 	// 20260415 johani: MP    *ZoneMPExtension // Multi-provider state; nil for non-MP zones
-	Ready bool             // true if zd.Data has been populated (from file or upstream)
+	Ready bool // true if zd.Data has been populated (from file or upstream)
 
 	XfrType string // axfr | ixfr
 	Logger  *log.Logger
@@ -117,6 +118,7 @@ type ZoneData struct {
 	Options            map[ZoneOption]bool
 	UpdatePolicy       UpdatePolicy
 	DnssecPolicy       *DnssecPolicy
+	DnssecPolicyName   string // name of currently-applied policy; used to detect config-reload-driven changes
 	MultiSigner        *MultiSignerConf
 	KeyDB              *KeyDB
 	AppType            AppType
@@ -172,10 +174,10 @@ type ZoneConf struct {
 	Frozen            bool         // true if zone is frozen; not a config param
 	Dirty             bool         // true if zone has been modified; not a config param
 	UpdatePolicy      UpdatePolicyConf
-	DelegationBackend string `yaml:"delegation-backend" mapstructure:"delegation-backend"` // named backend for child delegation data
-	DnssecPolicy      string
-	Template          string
-	MultiSigner       string
+	DelegationBackend string    `yaml:"delegation-backend" mapstructure:"delegation-backend"` // named backend for child delegation data
+	DnssecPolicy      string    `yaml:"dnssecpolicy" mapstructure:"dnssecpolicy"`
+	Template          string    `yaml:"template" mapstructure:"template"`
+	MultiSigner       string    `yaml:"multisigner" mapstructure:"multisigner"`
 	Error             bool      // zone is broken and cannot be used
 	ErrorType         ErrorType // "config" | "refresh" | "agent" | "DNSSEC"
 	ErrorMsg          string    // reason for the error (if known)
@@ -190,10 +192,10 @@ type TemplateConf struct {
 	Store        string
 	Primary      string // upstream, for secondary zones
 	Notify       []string
-	OptionsStrs  []string `yaml:"options"`
+	OptionsStrs  []string `yaml:"options" mapstructure:"options"`
 	UpdatePolicy UpdatePolicyConf
-	DnssecPolicy string
-	MultiSigner  string
+	DnssecPolicy string `yaml:"dnssecpolicy" mapstructure:"dnssecpolicy"`
+	MultiSigner  string `yaml:"multisigner" mapstructure:"multisigner"`
 }
 
 type UpdatePolicyConf struct {
@@ -225,10 +227,34 @@ type UpdatePolicyDetail struct {
 	TTL          uint32
 }
 
+// DnssecPolicyRolloverConf is the YAML `rollover:` subtree (KSK automated rollover; Phase 1+).
+type DnssecPolicyRolloverConf struct {
+	Method             string `yaml:"method" mapstructure:"method"`
+	NumDS              int    `yaml:"num-ds" mapstructure:"num-ds"`
+	ParentAgent        string `yaml:"parent-agent" mapstructure:"parent-agent"`
+	ConfirmInitialWait string `yaml:"confirm-initial-wait" mapstructure:"confirm-initial-wait"`
+	ConfirmPollMax     string `yaml:"confirm-poll-max" mapstructure:"confirm-poll-max"`
+	ConfirmTimeout     string `yaml:"confirm-timeout" mapstructure:"confirm-timeout"`
+	DsyncRequired      *bool  `yaml:"dsync-required" mapstructure:"dsync-required"`
+}
+
+// DnssecPolicyTtlsConf is the YAML `ttls:` subtree under a DNSSEC policy.
+type DnssecPolicyTtlsConf struct {
+	DNSKEY    string `yaml:"dnskey" mapstructure:"dnskey"`
+	MaxServed string `yaml:"max_served" mapstructure:"max_served"`
+}
+
+// DnssecPolicyClampingConf is the YAML `clamping:` subtree under a DNSSEC policy.
+type DnssecPolicyClampingConf struct {
+	Enabled bool   `yaml:"enabled" mapstructure:"enabled"`
+	Margin  string `yaml:"margin" mapstructure:"margin"`
+}
+
 // DnssecPolicyConf should match the configuration
 type DnssecPolicyConf struct {
 	Name      string
 	Algorithm string
+	Mode      string `yaml:"mode" mapstructure:"mode"`
 
 	KSK struct {
 		Lifetime    string
@@ -242,6 +268,10 @@ type DnssecPolicyConf struct {
 		Lifetime    string
 		SigValidity string
 	}
+
+	Rollover DnssecPolicyRolloverConf `yaml:"rollover" mapstructure:"rollover"`
+	Ttls     DnssecPolicyTtlsConf     `yaml:"ttls" mapstructure:"ttls"`
+	Clamping DnssecPolicyClampingConf `yaml:"clamping" mapstructure:"clamping"`
 }
 
 type KeyLifetime struct {
@@ -253,10 +283,27 @@ type KeyLifetime struct {
 type DnssecPolicy struct {
 	Name      string
 	Algorithm uint8
+	Mode      string
 
 	KSK KeyLifetime
 	ZSK KeyLifetime
 	CSK KeyLifetime
+
+	Rollover RolloverPolicy
+	TTLS     DnssecPolicyTTLS
+	Clamping ClampingPolicy
+}
+
+// DnssecPolicyTTLS holds steady-state TTL hints from policy (seconds). Zero means unset.
+type DnssecPolicyTTLS struct {
+	DNSKEY uint32
+	// MaxServed is a steady-state ceiling on the TTL of every RRset served
+	// by this zone. When non-zero, SignRRset clamps Header().Ttl down to
+	// min(operator_ttl, MaxServed) regardless of rollover proximity. Use
+	// to enforce low TTLs on zones whose source data has high TTLs that
+	// the operator can't directly edit (e.g. inbound zone transfers).
+	// Zero means no ceiling. Validation: must be >= 60s when set.
+	MaxServed uint32
 }
 
 type Ixfr struct {
@@ -530,6 +577,11 @@ type KeyDB struct {
 	DeferredUpdateQ     chan DeferredUpdate
 	KeyBootstrapperQ    chan KeyBootstrapperRequest
 	Options             map[AuthOption]string
+	// OutboundSoaSerial is the resolved mode for outbound SOA serials:
+	// OutboundSoaSerialKeep / OutboundSoaSerialUnixtime / OutboundSoaSerialPersist.
+	// Sourced from DnsEngineConf.OutboundSoaSerial at parse, defaulted to
+	// OutboundSoaSerialKeep if unset.
+	OutboundSoaSerial string
 }
 
 // Lock and Unlock expose the mutex for code that moves to
@@ -594,29 +646,29 @@ func (id AgentId) String() string {
 
 // AgentMgmt{Post,Response} are used in the mgmt API
 type AgentMgmtPost struct {
-	Command     string `json:"command"`
-	Zone        ZoneName `json:"zone"`
-	AgentId     AgentId  `json:"agent_id"`
-	RRType      uint16
-	RR          string
-	RRs         []string
-	AddedRRs    []string // for update-local-zonedata
-	RemovedRRs  []string // for update-local-zonedata
-	Upstream    AgentId
-	Downstream  AgentId
-	Data        map[string]interface{} `json:"data,omitempty"` // Generic data field for custom parameters
-	Response    chan *AgentMgmtResponse
+	Command    string   `json:"command"`
+	Zone       ZoneName `json:"zone"`
+	AgentId    AgentId  `json:"agent_id"`
+	RRType     uint16
+	RR         string
+	RRs        []string
+	AddedRRs   []string // for update-local-zonedata
+	RemovedRRs []string // for update-local-zonedata
+	Upstream   AgentId
+	Downstream AgentId
+	Data       map[string]interface{} `json:"data,omitempty"` // Generic data field for custom parameters
+	Response   chan *AgentMgmtResponse
 }
 
 type AgentMgmtResponse struct {
-	Identity       AgentId
-	Status         string
-	Time           time.Time
-	AgentConfig    MultiProviderConf
-	Msg            string
-	Error          bool
-	ErrorMsg       string
-	Data           interface{} `json:"data,omitempty"` // Generic data field for custom responses
+	Identity    AgentId
+	Status      string
+	Time        time.Time
+	AgentConfig MultiProviderConf
+	Msg         string
+	Error       bool
+	ErrorMsg    string
+	Data        interface{} `json:"data,omitempty"` // Generic data field for custom responses
 }
 
 // DnskeyStatus holds the result of DNSKEY change detection (local keys only).

@@ -174,7 +174,7 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 		}
 	}
 	lgHandler.Debug("signing RRset", "name", name, "rrtype", dns.TypeToString[rrset.RRtype], "zone", zd.ZoneName, "zskCount", len(zoneDak.ZSKs))
-	_, err = zd.SignRRset(&rrset, name, zoneDak, false)
+	_, err = zd.SignRRset(&rrset, name, zoneDak, false, nil)
 	if err != nil {
 		lgHandler.Error("error signing RRset", "name", name, "err", err)
 		return rrset, err
@@ -183,11 +183,61 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 	return rrset, nil
 }
 
-// handleDSQuery handles DS queries by finding the parent zone and returning DS records.
+// handleDSQuery handles DS queries.
+//
+// Two cases need to be distinguished by the relationship between qname and
+// the zone we matched on:
+//
+//  1. qname is a strict child of zd.ZoneName (e.g. zd is "dnslab.", qname is
+//     "bravo.dnslab."). We ARE the parent. Serve the DS RRset directly from
+//     our own zone tree at qname.
+//
+//  2. qname == zd.ZoneName (DS-at-our-apex query). We are the child. Walk
+//     up via imr.ParentZone() to find a parent zone we host, and serve DS
+//     from there. If we don't host the parent, return a SOA-only response
+//     authoritative for our own zone with EDE/CDE for guidance.
+//
+// Pre-fix behavior was always case (2), which broke DS queries against the
+// parent zone for any child name — the responder walked one zone too far up
+// and failed to find DS data that was correctly present in the parent zone.
 func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string, apex *OwnerData,
 	msgoptions *edns0.MsgOptions, kdb *KeyDB, dak *DnssecKeys, imr *Imr,
 	signFunc func(core.RRset, string) (core.RRset, error)) error {
-	lgHandler.Debug("QueryResponder: DS query, trying to find parent zone", "qname", qname)
+
+	// Case 1: qname is a strict child of zd.ZoneName — we are the parent.
+	if qname != zd.ZoneName && dns.IsSubDomain(zd.ZoneName, qname) {
+		lgHandler.Debug("QueryResponder: DS query, serving from parent zone (this zone)",
+			"qname", qname, "zone", zd.ZoneName)
+		// Make sure apex RRsets are signed (SOA in authority for negative
+		// answers; DNSKEY/etc as needed by signApexRRsets).
+		if err := zd.signApexRRsets(apex, msgoptions, kdb, nil); err != nil {
+			lgHandler.Error("failed to sign parent apex RRsets for DS query", "err", err)
+			if msgoptions.DO {
+				m.MsgHdr.Rcode = dns.RcodeServerFailure
+				w.WriteMsg(m)
+				return fmt.Errorf("failed to sign parent apex RRsets for DS query: %v", err)
+			}
+		}
+		m.MsgHdr.Rcode = dns.RcodeSuccess
+		dsRRset, err := zd.GetRRset(qname, dns.TypeDS)
+		if err != nil {
+			lgHandler.Error("failed to get DS record", "qname", qname)
+		}
+		if dsRRset != nil && len(dsRRset.RRs) > 0 {
+			m.Answer = append(m.Answer, dsRRset.RRs...)
+			if msgoptions.DO {
+				m.Answer = append(m.Answer, dsRRset.RRSIGs...)
+			}
+		}
+		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
+		w.WriteMsg(m)
+		return nil
+	}
+
+	// Case 2: qname == zd.ZoneName — DS-at-apex query. Walk up to find a
+	// parent zone we host.
+	lgHandler.Debug("QueryResponder: DS-at-apex query, looking up parent zone",
+		"qname", qname, "zone", zd.ZoneName)
 	parent, err := imr.ParentZone(zd.ZoneName)
 	if err != nil {
 		lgHandler.Error("failed to find parent zone for DS query", "qname", qname)
@@ -226,9 +276,11 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 	if err != nil {
 		lgHandler.Error("failed to get DS record", "qname", qname)
 	}
-	m.Answer = append(m.Answer, dsRRset.RRs...)
-	if msgoptions.DO {
-		m.Answer = append(m.Answer, dsRRset.RRSIGs...)
+	if dsRRset != nil && len(dsRRset.RRs) > 0 {
+		m.Answer = append(m.Answer, dsRRset.RRs...)
+		if msgoptions.DO {
+			m.Answer = append(m.Answer, dsRRset.RRSIGs...)
+		}
 	}
 	m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
 	w.WriteMsg(m)

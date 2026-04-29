@@ -223,7 +223,7 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	// Re-sign SOA after serial update (the RRSIG covers the serial)
 	if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
 		soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
-		if signed, err := zd.SignRRset(&soaRRset, zd.ZoneName, nil, true); err != nil {
+		if signed, err := zd.SignRRset(&soaRRset, zd.ZoneName, nil, true, nil); err != nil {
 			zd.Logger.Printf("ZoneTransferOut: failed to re-sign SOA: %v", err)
 		} else if signed {
 			apex.RRtypes.Set(dns.TypeSOA, soaRRset)

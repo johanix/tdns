@@ -119,11 +119,6 @@ func (conf *Config) ParseAuthOptions() {
 				lg.Warn("Auth option has invalid value, defaulting", "option", key, "value", optval, "allowed", UpdateModeDelta, "default", UpdateModeDelta)
 				clean[authOpt] = UpdateModeDelta
 			}
-		case AuthOptPersistOutboundSerial:
-			if optval != "" {
-				lg.Warn("Auth option does not accept a value, ignoring provided value", "option", key, "value", optval)
-			}
-			clean[authOpt] = "true"
 		default:
 			clean[authOpt] = optval
 		}

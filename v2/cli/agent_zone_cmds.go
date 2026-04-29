@@ -59,7 +59,7 @@ Loop ends on the command "QUIT"
 The zone to update is mandatory to specify on the command line with the --zone flag.`,
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
-		CreateUpdate("zone")
+		CreateUpdate("agent", "zone")
 	},
 }
 

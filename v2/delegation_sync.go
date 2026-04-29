@@ -505,7 +505,7 @@ func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyR
 			//				log.Printf("SyncZoneDelegationViaNotify: failed to get dnssec key for zone %s", zd.ZoneName)
 			//			} else {
 			//			if len(dak.ZSKs) > 0 {
-			_, err := zd.SignRRset(&rrset, zd.ZoneName, nil, true) // Let's force signing
+			_, err := zd.SignRRset(&rrset, zd.ZoneName, nil, true, nil) // Let's force signing
 			if err != nil {
 				lgDns.Error("error signing CSYNC RRset", "zone", zd.ZoneName, "err", err)
 			} else {

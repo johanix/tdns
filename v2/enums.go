@@ -120,18 +120,22 @@ type AuthOption uint8
 
 const (
 	AuthOptParentUpdate AuthOption = iota + 1
-	AuthOptPersistOutboundSerial
 )
 
 var AuthOptionToString = map[AuthOption]string{
-	AuthOptParentUpdate:          "parent-update",
-	AuthOptPersistOutboundSerial: "persist-outbound-serial",
+	AuthOptParentUpdate: "parent-update",
 }
 
 var StringToAuthOption = map[string]AuthOption{
-	"parent-update":           AuthOptParentUpdate,
-	"persist-outbound-serial": AuthOptPersistOutboundSerial,
+	"parent-update": AuthOptParentUpdate,
 }
+
+// outbound_soa_serial mode values for DnsEngine.OutboundSoaSerial.
+const (
+	OutboundSoaSerialKeep     = "keep"     // outbound = inbound serial (default)
+	OutboundSoaSerialUnixtime = "unixtime" // outbound = time.Now().Unix()
+	OutboundSoaSerialPersist  = "persist"  // outbound = previous outbound serial; bumps written to OutgoingSerials
+)
 
 type CombinerOption uint8
 
@@ -177,8 +181,8 @@ const (
 )
 
 var AppTypeToString = map[AppType]string{
-	AppTypeAuth:       "auth",
-	AppTypeAgent:      "agent",
+	AppTypeAuth:  "auth",
+	AppTypeAgent: "agent",
 	//AppTypeCombiner:   "combiner",
 	AppTypeImr:        "imr",
 	AppTypeCli:        "cli",
@@ -194,8 +198,8 @@ var AppTypeToString = map[AppType]string{
 }
 
 var StringToAppType = map[string]AppType{
-	"auth":       AppTypeAuth,
-	"agent":      AppTypeAgent,
+	"auth":  AppTypeAuth,
+	"agent": AppTypeAgent,
 	//"combiner":   AppTypeCombiner,
 	"imr":        AppTypeImr,
 	"cli":        AppTypeCli,

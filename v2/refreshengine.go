@@ -41,7 +41,7 @@ type RefreshCounter struct {
 // Called for both newly-created zones and pre-registered zone stubs.
 func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefresher, conf *Config,
 	refreshCounters *core.ConcurrentMap[string, *RefreshCounter],
-	tryPostpass func(string), resetSoaSerial bool) (bool, error) {
+	tryPostpass func(string)) (bool, error) {
 
 	updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, zr.Force, conf)
 	if err != nil {
@@ -114,18 +114,31 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		if zd.Error && zd.ErrorType == RefreshError {
 			zd.SetError(NoError, "")
 		}
-		if resetSoaSerial {
-			zd.CurrentSerial = uint32(time.Now().Unix())
-			lgEngine.Info("zone updated from upstream, resetting serial to unixtime",
-				"zone", zone, "serial", zd.CurrentSerial)
-		}
-		if zd.KeyDB != nil && zd.KeyDB.Options[AuthOptPersistOutboundSerial] != "" {
-			if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > 0 {
-				if saved != zd.CurrentSerial {
-					lgEngine.Info("restored persisted outgoing serial",
+		// Apply outbound_soa_serial mode for the serial we'll advertise
+		// to secondaries.
+		if zd.KeyDB != nil {
+			serialChanged := false
+			switch zd.KeyDB.OutboundSoaSerial {
+			case OutboundSoaSerialUnixtime:
+				zd.CurrentSerial = uint32(time.Now().Unix())
+				lgEngine.Info("zone loaded; outbound_soa_serial=unixtime",
+					"zone", zone, "serial", zd.CurrentSerial)
+				serialChanged = true
+			case OutboundSoaSerialPersist:
+				// Only restore the persisted serial when it is *ahead* of
+				// the freshly loaded inbound serial. If upstream advanced
+				// while we were down, the inbound serial is the one to
+				// honour — moving zd.CurrentSerial backwards would break
+				// secondaries.
+				if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > zd.CurrentSerial {
+					lgEngine.Info("zone loaded; outbound_soa_serial=persist (restored saved serial)",
 						"zone", zone, "incoming", zd.CurrentSerial, "persisted", saved)
+					zd.CurrentSerial = saved
+					serialChanged = true
 				}
-				zd.CurrentSerial = saved
+			}
+			if serialChanged {
+				setApexSOASerial(zd)
 			}
 		}
 		zd.NotifyDownstreams()
@@ -176,8 +189,6 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 
 	var zone string
 
-	resetSoaSerial := viper.GetBool("service.reset_soa_serial")
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -221,6 +232,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.Options = zr.Options
 							zd.UpdatePolicy = zr.UpdatePolicy
 							zd.DnssecPolicy = &dp
+							zd.DnssecPolicyName = zr.DnssecPolicy
 							zd.MultiSigner = &msc
 							zd.DelegationSyncQ = conf.Internal.DelegationSyncQ
 							zd.KeyDB = conf.Internal.KeyDB
@@ -229,7 +241,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 
 						if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,
-							tryPostpass, resetSoaSerial); err != nil {
+							tryPostpass); err != nil {
 							lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
 							zd.SetError(RefreshError, "refresh error: %v", err)
 							zd.LatestError = time.Now()
@@ -307,10 +319,17 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							}
 							zd.ZoneType = zr.ZoneType
 						}
-						// Lookup DNSSEC policy and MultiSigner from config (same as new zone creation)
+						// Lookup DNSSEC policy and MultiSigner from config (same as new zone creation).
+						// Compare by name (not pointer): conf.Internal.DnssecPolicies stores
+						// values, so &dp is a fresh address every refresh tick.
+						var dnssecPolicyChanged bool
 						if zr.DnssecPolicy != "" {
 							if dp, exists := conf.Internal.DnssecPolicies[zr.DnssecPolicy]; exists {
-								zd.DnssecPolicy = &dp
+								if zd.DnssecPolicyName != zr.DnssecPolicy {
+									zd.DnssecPolicy = &dp
+									zd.DnssecPolicyName = zr.DnssecPolicy
+									dnssecPolicyChanged = true
+								}
 							} else {
 								lgEngine.Warn("DNSSEC policy not found, keeping existing", "policy", zr.DnssecPolicy, "zone", zone)
 							}
@@ -323,6 +342,14 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							}
 						}
 						zd.mu.Unlock()
+
+						// Force a re-sign so clamping picks up the new policy
+						// (e.g. ttls.max_served change) and max_observed_ttl
+						// converges on the next sign pass instead of waiting
+						// for a key-state event.
+						if dnssecPolicyChanged {
+							triggerResign(conf, zone)
+						}
 						lgEngine.Debug("updated configuration for zone", "zone", zone, "notify", zd.Downstreams, "upstream", zd.Upstream, "zonefile", zd.Zonefile, "store", ZoneStoreToString[zd.ZoneStore])
 
 						// Update or create refreshCounter with current config values
@@ -472,27 +499,28 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					dp := conf.Internal.DnssecPolicies[zr.DnssecPolicy]
 					msc := conf.MultiSigner[zr.MultiSigner]
 					zd := &ZoneData{
-						ZoneName:        zone,
-						ZoneStore:       zr.ZoneStore,
-						Logger:          log.Default(),
-						Upstream:        NormalizeAddress(zr.Primary),
-						Downstreams:     NormalizeAddresses(zr.Notify),
-						Zonefile:        zr.Zonefile,
-						ZoneType:        zr.ZoneType,
-						Options:         zr.Options,
-						UpdatePolicy:    zr.UpdatePolicy,
-						DnssecPolicy:    &dp,
-						MultiSigner:     &msc,
-						DelegationSyncQ: conf.Internal.DelegationSyncQ,
-						Data:            core.NewCmap[OwnerData](),
-						KeyDB:           conf.Internal.KeyDB,
-						FirstZoneLoad:   true,
+						ZoneName:         zone,
+						ZoneStore:        zr.ZoneStore,
+						Logger:           log.Default(),
+						Upstream:         NormalizeAddress(zr.Primary),
+						Downstreams:      NormalizeAddresses(zr.Notify),
+						Zonefile:         zr.Zonefile,
+						ZoneType:         zr.ZoneType,
+						Options:          zr.Options,
+						UpdatePolicy:     zr.UpdatePolicy,
+						DnssecPolicy:     &dp,
+						DnssecPolicyName: zr.DnssecPolicy,
+						MultiSigner:      &msc,
+						DelegationSyncQ:  conf.Internal.DelegationSyncQ,
+						Data:             core.NewCmap[OwnerData](),
+						KeyDB:            conf.Internal.KeyDB,
+						FirstZoneLoad:    true,
 					}
 
 					Zones.Set(zone, zd)
 
 					if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,
-						tryPostpass, resetSoaSerial); err != nil {
+						tryPostpass); err != nil {
 						lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
 						zd.SetError(RefreshError, "refresh error: %v", err)
 						zd.LatestError = time.Now()
@@ -538,7 +566,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						lgEngine.Info("retrying initial load for zone", "zone", zone)
 						zd.SetError(NoError, "") // clear error to allow load
 						if _, err := initialLoadZone(ctx, zd, zone, ZoneRefresher{Name: zone, Force: true}, conf,
-							refreshCounters, tryPostpass, resetSoaSerial); err != nil {
+							refreshCounters, tryPostpass); err != nil {
 							lgEngine.Error("initial load retry failed", "zone", zone, "error", err)
 							zd.SetError(RefreshError, "refresh error: %v", err)
 							zd.LatestError = time.Now()
@@ -558,9 +586,28 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						if zd.Error && zd.ErrorType == RefreshError {
 							zd.SetError(NoError, "")
 						}
-						if resetSoaSerial {
-							zd.CurrentSerial = uint32(time.Now().Unix())
-							lgEngine.Info("zone updated from upstream, resetting serial to unixtime", "zone", zone, "serial", zd.CurrentSerial)
+						// Apply outbound_soa_serial mode after upstream refresh.
+						if zd.KeyDB != nil {
+							serialChanged := false
+							switch zd.KeyDB.OutboundSoaSerial {
+							case OutboundSoaSerialUnixtime:
+								zd.CurrentSerial = uint32(time.Now().Unix())
+								lgEngine.Info("zone updated from upstream; outbound_soa_serial=unixtime",
+									"zone", zone, "serial", zd.CurrentSerial)
+								serialChanged = true
+							case OutboundSoaSerialPersist:
+								// Only restore if the persisted serial is
+								// ahead of the just-refreshed inbound
+								// serial. See the matching note in the
+								// initial-load branch above.
+								if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > zd.CurrentSerial {
+									zd.CurrentSerial = saved
+									serialChanged = true
+								}
+							}
+							if serialChanged {
+								setApexSOASerial(zd)
+							}
 						}
 
 						// Re-sign zone after refresh (upstream data has no RRSIGs)

@@ -103,7 +103,7 @@ func NewZoneCmd(role string, extras ...*cobra.Command) *cobra.Command {
 	c.AddCommand(list, nsec, sign, reload, bump, write, freeze, thaw)
 	// Role-independent extras attached to every zone tree. Each is built
 	// fresh so the command pointer is unique per NewZoneCmd invocation.
-	c.AddCommand(newZoneReadFakeCmd(), newZoneUpdateCmd(), newZoneDsyncCmd(role))
+	c.AddCommand(newZoneReadFakeCmd(), newZoneUpdateCmd(role), newZoneDsyncCmd(role))
 	for _, e := range extras {
 		c.AddCommand(e)
 	}
