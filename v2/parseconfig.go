@@ -263,13 +263,12 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return fmt.Errorf("error reading processed config: %v", err)
 	}
 
-	// Initialize DnssecPolicies unconditionally. ParseZones (called later
-	// from MainInit) validates zone dnssec_policy references against this
-	// map, so it must be populated before ParseZones runs — for all apps,
-	// not just tdns-native ones.
-	if conf.Internal.DnssecPolicies == nil {
-		conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
-	}
+	// Rebuild DnssecPolicies on every parse. On reload, removed or
+	// rejected policies must not survive from the previous config.
+	// ParseZones (called later from MainInit) validates zone
+	// dnssec_policy references against this map, so it must be populated
+	// before ParseZones runs — for all apps, not just tdns-native ones.
+	conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
 	for name, dp := range conf.DnssecPolicies {
 		dpLocal := dp
 		tmp := DnssecPolicy{
