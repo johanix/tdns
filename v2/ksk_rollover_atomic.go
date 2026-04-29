@@ -57,6 +57,16 @@ func AtomicRollover(conf *Config, kdb *KeyDB, zone string) (oldKid, newKid uint1
 
 	now := time.Now().UTC()
 
+	// Re-check rollover_in_progress inside the TX so two concurrent callers
+	// can't both promote: the second one will see TRUE here and bail.
+	inProgress, err := getRolloverInProgressTx(tx, zone)
+	if err != nil {
+		return 0, 0, fmt.Errorf("read rollover_in_progress: %w", err)
+	}
+	if inProgress {
+		return 0, 0, fmt.Errorf("AtomicRollover: zone %s already has a rollover in progress", zone)
+	}
+
 	// Pick KSK_old: the (single) active SEP key for the zone.
 	oldKid, err = pickActiveSEPTx(tx, zone)
 	if err != nil {
