@@ -707,3 +707,54 @@ func setNextPushAt(kdb *KeyDB, zone string, at time.Time) error {
 	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET next_push_at = ? WHERE zone = ?`, s, zone)
 	return err
 }
+
+// StateSinceForDnssecKey returns the best-effort wall time when the key
+// entered its current lifecycle state, for operator-facing status.
+func StateSinceForDnssecKey(kdb *KeyDB, zone string, k *DnssecKeyWithTimestamps) time.Time {
+	switch k.State {
+	case DnskeyStatePublished:
+		if k.PublishedAt != nil {
+			return *k.PublishedAt
+		}
+	case DnskeyStateRetired:
+		if k.RetiredAt != nil {
+			return *k.RetiredAt
+		}
+	case DnskeyStateActive:
+		at, err := RolloverKeyActiveAt(kdb, zone, k.KeyTag)
+		if err == nil && at != nil {
+			return *at
+		}
+	case DnskeyStateStandby:
+		t, err := RolloverKeyStandbyAt(kdb, zone, k.KeyTag)
+		if err == nil && t != nil {
+			return *t
+		}
+	case DnskeyStateDsPublished:
+		t, err := RolloverKeyDsObservedAt(kdb, zone, k.KeyTag)
+		if err == nil && t != nil {
+			return *t
+		}
+	}
+	t, err := RolloverKeyStateAt(kdb, zone, k.KeyTag)
+	if err == nil && t != nil {
+		return *t
+	}
+	return time.Time{}
+}
+
+// DnskeyRolloverPublishLabel returns a short label for what DNS
+// publication this key state implies (auto-rollover status table).
+func DnskeyRolloverPublishLabel(state string) string {
+	switch state {
+	case DnskeyStateCreated, DnskeyStateRemoved:
+		return "none"
+	case DnskeyStateDsPublished:
+		return "DS"
+	case DnskeyStatePublished, DnskeyStateStandby,
+		DnskeyStateActive, DnskeyStateRetired:
+		return "DS+DNSKEY"
+	default:
+		return "?"
+	}
+}

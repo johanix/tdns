@@ -1,8 +1,8 @@
 package tdns
 
 import (
-	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -49,8 +49,10 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.
 		out.Policy = policySummary(pol)
 	}
 
-	out.KSKs = loadRolloverKeyEntries(kdb, zone, true)
-	out.ZSKs = loadRolloverKeyEntries(kdb, zone, false)
+	var hiddenRemoved int
+	out.KSKs, hiddenRemoved = loadRolloverKeyEntries(kdb, zone, true)
+	out.HiddenRemovedKskCount = hiddenRemoved
+	out.ZSKs, _ = loadRolloverKeyEntries(kdb, zone, false)
 
 	return out, nil
 }
@@ -237,17 +239,28 @@ func policySummary(pol *DnssecPolicy) *PolicySummary {
 	return out
 }
 
+// rolloverStatusRemovedDisplayCap limits how many SEP keys in state
+// "removed" appear in RolloverStatus.KSKs (most recent by active_seq
+// first). Matches historical auto-rollover status CLI behavior.
+const rolloverStatusRemovedDisplayCap = 3
+
 // loadRolloverKeyEntries returns one RolloverKeyEntry per DNSSEC key
 // for the zone, filtered by SEP flag. SEP keys go in KSKs; non-SEP in
 // ZSKs. State, KeyID, and lifecycle timestamps come from
 // DnssecKeyStore; ActiveSeq and LastRolloverErr come from
 // RolloverKeyState.
-func loadRolloverKeyEntries(kdb *KeyDB, zone string, wantSEP bool) []RolloverKeyEntry {
+//
+// For SEP keys in "removed", only the first rolloverStatusRemovedDisplayCap
+// rows after sorting by active_seq (descending; keys without seq sink to
+// the bottom) are returned. The second return value is how many additional
+// removed SEP keys were omitted (0 when wantSEP is false).
+func loadRolloverKeyEntries(kdb *KeyDB, zone string, wantSEP bool) ([]RolloverKeyEntry, int) {
 	out := []RolloverKeyEntry{}
+	hiddenRemoved := 0
 	states := []string{
 		DnskeyStateCreated,
-		DnskeyStatePublished,
 		DnskeyStateDsPublished,
+		DnskeyStatePublished,
 		DnskeyStateStandby,
 		DnskeyStateActive,
 		DnskeyStateRetired,
@@ -258,43 +271,61 @@ func loadRolloverKeyEntries(kdb *KeyDB, zone string, wantSEP bool) []RolloverKey
 		if err != nil {
 			continue
 		}
+		var batch []RolloverKeyEntry
 		for i := range keys {
 			k := &keys[i]
 			isSEP := k.Flags&dns.SEP != 0
 			if isSEP != wantSEP {
 				continue
 			}
-			entry := RolloverKeyEntry{
-				KeyID: k.KeyTag,
-				State: k.State,
-			}
-			if k.PublishedAt != nil && !k.PublishedAt.IsZero() {
-				entry.Published = k.PublishedAt.UTC().Format(time.RFC3339)
-			}
-			// active_seq lookup, and last_rollover_error if any.
-			if seq, ok := rolloverActiveSeq(kdb, zone, k.KeyTag); ok {
-				v := seq
-				entry.ActiveSeq = &v
-			}
-			if msg, _ := LoadLastRolloverError(kdb, zone, k.KeyTag); msg != "" {
-				entry.LastRolloverErr = msg
-			}
-			out = append(out, entry)
+			batch = append(batch, rolloverKeyEntryFromKeystoreKey(kdb, zone, k, wantSEP))
 		}
+		if st == DnskeyStateRemoved && wantSEP {
+			sort.SliceStable(batch, func(i, j int) bool {
+				si := rolloverActiveSeqSortKey(batch[i].ActiveSeq)
+				sj := rolloverActiveSeqSortKey(batch[j].ActiveSeq)
+				if (si < 0) != (sj < 0) {
+					return si >= 0
+				}
+				return si > sj
+			})
+			if len(batch) > rolloverStatusRemovedDisplayCap {
+				hiddenRemoved = len(batch) - rolloverStatusRemovedDisplayCap
+				batch = batch[:rolloverStatusRemovedDisplayCap]
+			}
+		}
+		out = append(out, batch...)
 	}
-	return out
+	return out, hiddenRemoved
 }
 
-// rolloverActiveSeq reads active_seq from RolloverKeyState. Returns
-// (0, false) if the row doesn't exist or the column is NULL.
-func rolloverActiveSeq(kdb *KeyDB, zone string, keyid uint16) (int, bool) {
-	var v sql.NullInt64
-	row := kdb.DB.QueryRow(`SELECT active_seq FROM RolloverKeyState WHERE zone = ? AND keyid = ?`, zone, int(keyid))
-	if err := row.Scan(&v); err != nil {
-		return 0, false
+func rolloverActiveSeqSortKey(p *int) int {
+	if p == nil {
+		return -1
 	}
-	if !v.Valid {
-		return 0, false
+	return *p
+}
+
+func rolloverKeyEntryFromKeystoreKey(kdb *KeyDB, zone string, k *DnssecKeyWithTimestamps, wantSEP bool) RolloverKeyEntry {
+	entry := RolloverKeyEntry{
+		KeyID: k.KeyTag,
+		State: k.State,
 	}
-	return int(v.Int64), true
+	if wantSEP {
+		entry.Published = DnskeyRolloverPublishLabel(k.State)
+	} else if k.PublishedAt != nil && !k.PublishedAt.IsZero() {
+		entry.Published = k.PublishedAt.UTC().Format(time.RFC3339)
+	}
+	if ts := StateSinceForDnssecKey(kdb, zone, k); !ts.IsZero() {
+		entry.StateSince = ts.UTC().Format(time.RFC3339)
+	}
+	seq, err := RolloverKeyActiveSeq(kdb, zone, k.KeyTag)
+	if err == nil && seq >= 0 {
+		v := seq
+		entry.ActiveSeq = &v
+	}
+	if msg, _ := LoadLastRolloverError(kdb, zone, k.KeyTag); msg != "" {
+		entry.LastRolloverErr = msg
+	}
+	return entry
 }

@@ -69,7 +69,11 @@ type RolloverStatus struct {
 	// rendering deferred — current code only lists, no special
 	// handling.
 	KSKs []RolloverKeyEntry `json:"ksks"`
-	ZSKs []RolloverKeyEntry `json:"zsks"`
+	// HiddenRemovedKskCount is how many additional SEP keys in state
+	// "removed" were omitted from KSKs after the display cap (sorted
+	// by active_seq, most recent first).
+	HiddenRemovedKskCount int                `json:"hiddenRemovedKskCount,omitempty"`
+	ZSKs                  []RolloverKeyEntry `json:"zsks"`
 
 	// Policy summary. Verbose mode shows this; compact mode hides it.
 	Policy *PolicySummary `json:"policy,omitempty"`
@@ -85,11 +89,13 @@ type DSRange struct {
 // RolloverKeyEntry is one row of the per-key table in a status
 // response.
 type RolloverKeyEntry struct {
-	KeyID           uint16 `json:"keyid"`
-	ActiveSeq       *int   `json:"activeSeq,omitempty"`
-	State           string `json:"state"`
-	Published       string `json:"published,omitempty"`  // a brief tag like "DS+DNSKEY" or "none"
-	StateSince      string `json:"stateSince,omitempty"` // RFC3339; rollover_state_at when known
+	KeyID     uint16 `json:"keyid"`
+	ActiveSeq *int   `json:"activeSeq,omitempty"`
+	State     string `json:"state"`
+	// Published: KSK — short publish label (none / DS / DS+DNSKEY).
+	// ZSK — RFC3339 wall time of published_at when set (operator column published_at).
+	Published       string `json:"published,omitempty"`
+	StateSince      string `json:"stateSince,omitempty"` // RFC3339
 	LastRolloverErr string `json:"lastRolloverError,omitempty"`
 }
 

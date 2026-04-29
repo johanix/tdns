@@ -2,13 +2,11 @@ package cli
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
-	"sort"
 	"strings"
 	"time"
 
@@ -710,12 +708,18 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose bool) {
 	if len(s.KSKs) > 0 {
 		fmt.Println()
 		fmt.Println("  KSKs:")
-		printRolloverKeyTable(s.KSKs, verbose)
+		printRolloverKeyTable(s.KSKs, verbose, true)
+		if s.HiddenRemovedKskCount > 0 {
+			fmt.Printf("  ... %d older removed key(s) not shown\n", s.HiddenRemovedKskCount)
+		}
 	}
+
+	fmt.Println()
+	fmt.Printf("ZSK rollover state for zone %s:\n", s.Zone)
+	fmt.Println("  no rollovers ongoing (automated ZSK rollover not implemented)")
 	if len(s.ZSKs) > 0 {
 		fmt.Println()
-		fmt.Println("  ZSKs:")
-		printRolloverKeyTable(s.ZSKs, verbose)
+		printRolloverKeyTable(s.ZSKs, verbose, false)
 	}
 
 	// Policy summary in verbose mode.
@@ -734,24 +738,49 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose bool) {
 	}
 }
 
-// printRolloverKeyTable renders a list of RolloverKeyEntry as a
-// simple aligned table.
-func printRolloverKeyTable(keys []tdns.RolloverKeyEntry, verbose bool) {
+// printRolloverKeyTable prints KSK or ZSK rows in the historical
+// auto-rollover status column layout.
+func printRolloverKeyTable(keys []tdns.RolloverKeyEntry, verbose bool, kskTable bool) {
+	if len(keys) == 0 {
+		return
+	}
+	if kskTable {
+		fmt.Println("  active_seq  keyid    state           published   state_since                last_error")
+		fmt.Println("  ----------  -----    -------------   ---------   ------------------------   ----------")
+		for _, k := range keys {
+			seqStr := "-"
+			if k.ActiveSeq != nil {
+				seqStr = fmt.Sprintf("%d", *k.ActiveSeq)
+			}
+			sinceStr := "-"
+			if k.StateSince != "" {
+				if t, err := time.Parse(time.RFC3339, k.StateSince); err == nil {
+					sinceStr = formatTimeWithDelta(t)
+				}
+			}
+			errCol := ""
+			if k.LastRolloverErr != "" {
+				errCol = truncate(k.LastRolloverErr, 40, verbose)
+			}
+			pub := k.Published
+			if pub == "" {
+				pub = "?"
+			}
+			fmt.Printf("  %-10s  %-5d    %-13s   %-9s   %-24s   %s\n",
+				seqStr, k.KeyID, k.State, pub, sinceStr, errCol)
+		}
+		return
+	}
+	fmt.Println("  keyid    state           published_at")
+	fmt.Println("  -----    -------------   ------------")
 	for _, k := range keys {
-		seq := "-"
-		if k.ActiveSeq != nil {
-			seq = fmt.Sprintf("%d", *k.ActiveSeq)
+		pub := "-"
+		if k.Published != "" {
+			if t, err := time.Parse(time.RFC3339, k.Published); err == nil {
+				pub = formatTimeWithDelta(t)
+			}
 		}
-		errStr := k.LastRolloverErr
-		if !verbose && len(errStr) > 40 {
-			errStr = errStr[:37] + "..."
-		}
-		stateSince := ""
-		if k.StateSince != "" {
-			stateSince = formatRolloverTime(k.StateSince)
-		}
-		fmt.Printf("    keyid=%-5d  seq=%-3s  state=%-13s  state_since=%-30s  %s\n",
-			k.KeyID, seq, k.State, stateSince, errStr)
+		fmt.Printf("  %-5d    %-13s   %s\n", k.KeyID, k.State, pub)
 	}
 }
 
@@ -817,405 +846,6 @@ func formatRolloverTimeAbsolute(s string) string {
 		return s
 	}
 	return t.UTC().Format("15:04:05 UTC (Mon Jan 2 2006)")
-}
-
-// kskFSMSequence describes the multi-ds rollover phase sequence for verbose
-// output. Static text since the FSM itself is fixed.
-var kskFSMSequence = []struct{ phase, desc string }{
-	{"idle", "steady state; rolloverDue checks active_at + ksk.lifetime"},
-	{"pending-child-publish", "wait kasp.propagation_delay for new DNSKEY to reach secondaries"},
-	{"pending-parent-push", "send DS UPDATE to parent (one tick)"},
-	{"pending-parent-observe", "poll parent for DS RRset until match or confirm-timeout"},
-	{"pending-child-withdraw", "wait effective_margin for each retired key, then retired→removed"},
-}
-
-// estimateNextKSKTransition returns a best-effort string describing when the
-// current phase is expected to advance. Returns "" if we can't compute it
-// (e.g. phase=idle without a known active_at, or unfamiliar phase).
-func estimateNextKSKTransition(kdb *tdns.KeyDB, z string, pol *tdns.DnssecPolicy, row *tdns.RolloverZoneRow) string {
-	if pol == nil || row == nil {
-		return ""
-	}
-	switch row.RolloverPhase {
-	case "idle":
-		if pol.KSK.Lifetime == 0 {
-			return "never (ksk.lifetime: 0)"
-		}
-		// Find the active SEP KSK and use its active_at + ksk.lifetime.
-		active, err := tdns.GetDnssecKeysByState(kdb, z, tdns.DnskeyStateActive)
-		if err != nil {
-			return ""
-		}
-		for _, k := range active {
-			if k.Flags&dns.SEP == 0 {
-				continue
-			}
-			at, err := tdns.RolloverKeyActiveAt(kdb, z, k.KeyTag)
-			if err != nil || at == nil {
-				continue
-			}
-			due := at.Add(time.Duration(pol.KSK.Lifetime) * time.Second)
-			return fmt.Sprintf("%s — rolloverDue → AtomicRollover", formatTimeWithDelta(due))
-		}
-		return ""
-	case "pending-child-publish":
-		// Advances after kasp.propagation_delay from phase_at.
-		t, ok := parsePhaseAt(row)
-		if !ok {
-			return ""
-		}
-		// kasp.propagation_delay is in the runtime config; we don't have
-		// it here. Best we can do: name the trigger.
-		return fmt.Sprintf("after kasp.propagation_delay from %s → pending-parent-push", formatTimeWithDelta(t))
-	case "pending-parent-push":
-		return "next tick → pending-parent-observe (DS UPDATE sent)"
-	case "pending-parent-observe":
-		if row.ObserveNextPollAt.Valid {
-			return fmt.Sprintf("next poll at %s → advance when DS RRset matches at parent",
-				formatTimeWithDeltaStr(row.ObserveNextPollAt.String))
-		}
-		return "advances when DS RRset is observed at parent"
-	case "pending-child-withdraw":
-		// effective_margin from each retired SEP key's retired_at. Show
-		// the soonest expected retired→removed time.
-		eff, err := tdns.EffectiveMarginForZone(kdb, z, pol)
-		if err != nil {
-			return ""
-		}
-		retired, err := tdns.GetDnssecKeysByState(kdb, z, tdns.DnskeyStateRetired)
-		if err != nil {
-			return ""
-		}
-		var soonest time.Time
-		for _, k := range retired {
-			if k.Flags&dns.SEP == 0 || k.RetiredAt == nil {
-				continue
-			}
-			due := k.RetiredAt.Add(eff)
-			if soonest.IsZero() || due.Before(soonest) {
-				soonest = due
-			}
-		}
-		if soonest.IsZero() {
-			return fmt.Sprintf("(no retired SEP keys with retired_at; effective_margin=%s)", eff)
-		}
-		return fmt.Sprintf("%s — soonest retired→removed (effective_margin=%s)",
-			formatTimeWithDelta(soonest), eff)
-	}
-	return ""
-}
-
-func parsePhaseAt(row *tdns.RolloverZoneRow) (time.Time, bool) {
-	if row == nil || !row.RolloverPhaseAt.Valid {
-		return time.Time{}, false
-	}
-	t, err := time.Parse(time.RFC3339, strings.TrimSpace(row.RolloverPhaseAt.String))
-	if err != nil {
-		return time.Time{}, false
-	}
-	return t, true
-}
-
-// stateSinceFor returns the timestamp at which the given key entered its
-// current state, picking the most appropriate column in
-// RolloverKeyState/DnssecKeyStore. Returns the zero time if no useful
-// timestamp is available.
-func stateSinceFor(kdb *tdns.KeyDB, z string, k *tdns.DnssecKeyWithTimestamps) time.Time {
-	switch k.State {
-	case tdns.DnskeyStatePublished:
-		if k.PublishedAt != nil {
-			return *k.PublishedAt
-		}
-	case tdns.DnskeyStateRetired:
-		if k.RetiredAt != nil {
-			return *k.RetiredAt
-		}
-	case tdns.DnskeyStateActive:
-		at, err := tdns.RolloverKeyActiveAt(kdb, z, k.KeyTag)
-		if err == nil && at != nil {
-			return *at
-		}
-	case tdns.DnskeyStateStandby:
-		t, err := tdns.RolloverKeyStandbyAt(kdb, z, k.KeyTag)
-		if err == nil && t != nil {
-			return *t
-		}
-	case tdns.DnskeyStateDsPublished:
-		t, err := tdns.RolloverKeyDsObservedAt(kdb, z, k.KeyTag)
-		if err == nil && t != nil {
-			return *t
-		}
-	}
-	// Fallback: rollover_state_at (RolloverKeyState row's last-update).
-	t, err := tdns.RolloverKeyStateAt(kdb, z, k.KeyTag)
-	if err == nil && t != nil {
-		return *t
-	}
-	return time.Time{}
-}
-
-// printKSKRolloverStatus prints the KSK section of auto-rollover status:
-// rollover-zone-row fields, then a table of SEP keys grouped by state.
-func printKSKRolloverStatus(kdb *tdns.KeyDB, z string, pol *tdns.DnssecPolicy, verbose bool) {
-	fmt.Printf("KSK rollover state for zone %s:\n", z)
-	row, err := tdns.LoadRolloverZoneRow(kdb, z)
-	if err != nil {
-		fmt.Printf("  (load rollover zone row failed: %v)\n", err)
-		return
-	}
-	if row == nil {
-		fmt.Println("  no rollovers ongoing (zone not yet touched by the rollover worker)")
-	} else {
-		fmt.Printf("  phase             %s\n", row.RolloverPhase)
-		fmt.Printf("  in_progress       %v\n", row.RolloverInProgress)
-		if row.RolloverPhaseAt.Valid {
-			fmt.Printf("  entered_phase     %s\n", formatTimeWithDeltaStr(row.RolloverPhaseAt.String))
-		}
-		if next := estimateNextKSKTransition(kdb, z, pol, row); next != "" {
-			fmt.Printf("  next_transition   %s\n", next)
-		}
-		if row.ManualRolloverEarliest.Valid {
-			fmt.Printf("  manual_requested  %s\n", formatTimeWithDeltaStr(row.ManualRolloverRequestedAt.String))
-			fmt.Printf("  manual_earliest   %s\n", formatTimeWithDeltaStr(row.ManualRolloverEarliest.String))
-		}
-		// DS submitted/confirmed are translated to keyids so the line
-		// reconciles with the per-key table below. Values describe the most
-		// recent push/observe round — current in idle (those keys' DS RRs
-		// are still at the parent), briefly stale in the window between
-		// AtomicRollover and the next push fires.
-		subKids := keyidsForRange(kdb, z, row.LastSubmittedLow, row.LastSubmittedHigh)
-		confKids := keyidsForRange(kdb, z, row.LastConfirmedLow, row.LastConfirmedHigh)
-		if subKids != "" || confKids != "" {
-			fmt.Printf("  DS range:         submitted to parent: %s confirmed: %s\n",
-				orDash(subKids), orDash(confKids))
-		}
-		if row.ObserveStartedAt.Valid {
-			fmt.Printf("  observe_started   %s\n", formatTimeWithDeltaStr(row.ObserveStartedAt.String))
-			if row.ObserveNextPollAt.Valid {
-				fmt.Printf("  next_poll         %s\n", formatTimeWithDeltaStr(row.ObserveNextPollAt.String))
-			}
-			if row.ObserveBackoffSecs.Valid {
-				fmt.Printf("  observe_backoff   %ds\n", row.ObserveBackoffSecs.Int64)
-			}
-		}
-		if pol != nil {
-			maxTTL, err := tdns.LoadZoneSigningMaxTTL(kdb, z)
-			if err == nil {
-				margin := pol.Clamping.Margin
-				eff := max(time.Duration(maxTTL)*time.Second, margin)
-				fmt.Printf("  max_observed_ttl  %ds\n", maxTTL)
-				fmt.Printf("  effective_margin  %s  (max of clamping.margin=%s and max_observed_ttl)\n", eff, margin)
-			}
-		}
-	}
-
-	if verbose {
-		fmt.Println()
-		fmt.Println("  phase sequence (multi-ds rollover):")
-		for _, p := range kskFSMSequence {
-			marker := "  "
-			if row != nil && p.phase == row.RolloverPhase {
-				marker = "→ "
-			}
-			fmt.Printf("    %s%-22s  %s\n", marker, p.phase, p.desc)
-		}
-	}
-
-	// Per-key table.
-	type keyRow struct {
-		keyid      uint16
-		state      string
-		seq        int
-		stateSince time.Time
-		errStr     string
-		hasError   bool
-	}
-	var rows []keyRow
-	var removedHidden int
-	const removedCap = 3
-	states := []string{
-		tdns.DnskeyStateCreated,
-		tdns.DnskeyStateDsPublished,
-		tdns.DnskeyStatePublished,
-		tdns.DnskeyStateStandby,
-		tdns.DnskeyStateActive,
-		tdns.DnskeyStateRetired,
-		tdns.DnskeyStateRemoved,
-	}
-	for _, st := range states {
-		keys, err := tdns.GetDnssecKeysByState(kdb, z, st)
-		if err != nil {
-			fmt.Printf("  (list keys %s failed: %v)\n", st, err)
-			return
-		}
-		stateRows := make([]keyRow, 0, len(keys))
-		for i := range keys {
-			k := &keys[i]
-			if k.Flags&dns.SEP == 0 {
-				continue
-			}
-			seq, _ := tdns.RolloverKeyActiveSeq(kdb, z, k.KeyTag)
-			errStr, _ := tdns.LoadLastRolloverError(kdb, z, k.KeyTag)
-			stateRows = append(stateRows, keyRow{
-				keyid:      k.KeyTag,
-				state:      st,
-				seq:        seq,
-				stateSince: stateSinceFor(kdb, z, k),
-				errStr:     errStr,
-				hasError:   errStr != "",
-			})
-		}
-		// Within "removed", sort by active_seq desc so the most-recently-
-		// retired key is at the top of the removed block; keys without an
-		// active_seq (seq < 0, never promoted to active) sink to the bottom.
-		// Then cap to removedCap rows so the table doesn't grow unboundedly
-		// over many rollover cycles.
-		if st == tdns.DnskeyStateRemoved {
-			sort.SliceStable(stateRows, func(i, j int) bool {
-				si, sj := stateRows[i].seq, stateRows[j].seq
-				if (si < 0) != (sj < 0) {
-					return si >= 0 // rows with a seq come first
-				}
-				return si > sj
-			})
-			if len(stateRows) > removedCap {
-				removedHidden = len(stateRows) - removedCap
-				stateRows = stateRows[:removedCap]
-			}
-		}
-		rows = append(rows, stateRows...)
-	}
-	if len(rows) == 0 {
-		fmt.Println()
-		fmt.Println("  (no KSKs)")
-		return
-	}
-	fmt.Println()
-	fmt.Println("  active_seq  keyid    state           published   state_since                last_error")
-	fmt.Println("  ----------  -----    -------------   ---------   ------------------------   ----------")
-	for _, r := range rows {
-		seqStr := "-"
-		if r.seq >= 0 {
-			seqStr = fmt.Sprintf("%d", r.seq)
-		}
-		sinceStr := "-"
-		if !r.stateSince.IsZero() {
-			sinceStr = formatTimeWithDelta(r.stateSince)
-		}
-		errCol := ""
-		if r.hasError {
-			errCol = truncate(r.errStr, 40, verbose)
-		}
-		fmt.Printf("  %-10s  %-5d    %-13s   %-9s   %-24s   %s\n",
-			seqStr, r.keyid, r.state, kskPublishedSummary(r.state), sinceStr, errCol)
-	}
-	if removedHidden > 0 {
-		fmt.Printf("  ... %d older removed key(s) not shown\n", removedHidden)
-	}
-}
-
-// kskPublishedSummary returns a short label describing what's published in
-// DNS for a KSK in the given state, derived from the rollover state machine
-// (RFC 7583 §3.3.3 / §3.4 of the design doc).
-//
-//	created       — key generated, not yet pushed anywhere → "none"
-//	ds-published  — DS pushed to parent and observed; DNSKEY not yet at apex → "DS"
-//	published     — DNSKEY at apex; DS at parent → "DS+DNSKEY"
-//	standby       — DNSKEY at apex; DS at parent (idle in pipeline) → "DS+DNSKEY"
-//	active        — DNSKEY at apex; DS at parent; signing the zone → "DS+DNSKEY"
-//	retired       — DNSKEY at apex; DS still at parent until pending-child-withdraw → "DS+DNSKEY"
-//	removed       — DNSKEY removed; DS removed → "none"
-func kskPublishedSummary(state string) string {
-	switch state {
-	case tdns.DnskeyStateCreated, tdns.DnskeyStateRemoved:
-		return "none"
-	case tdns.DnskeyStateDsPublished:
-		return "DS"
-	case tdns.DnskeyStatePublished, tdns.DnskeyStateStandby,
-		tdns.DnskeyStateActive, tdns.DnskeyStateRetired:
-		return "DS+DNSKEY"
-	default:
-		return "?"
-	}
-}
-
-// printZSKRolloverStatus prints the ZSK section. Currently informational
-// only — the rollover worker doesn't manage ZSKs.
-func printZSKRolloverStatus(kdb *tdns.KeyDB, z string, verbose bool) {
-	fmt.Printf("ZSK rollover state for zone %s:\n", z)
-	fmt.Println("  no rollovers ongoing (automated ZSK rollover not implemented)")
-
-	type keyRow struct {
-		keyid       uint16
-		state       string
-		publishedAt *time.Time
-	}
-	var rows []keyRow
-	states := []string{
-		tdns.DnskeyStatePublished,
-		tdns.DnskeyStateStandby,
-		tdns.DnskeyStateActive,
-		tdns.DnskeyStateRetired,
-		tdns.DnskeyStateRemoved,
-	}
-	for _, st := range states {
-		keys, err := tdns.GetDnssecKeysByState(kdb, z, st)
-		if err != nil {
-			fmt.Printf("  (list keys %s failed: %v)\n", st, err)
-			return
-		}
-		for i := range keys {
-			k := &keys[i]
-			// ZSK = 256, KSK = 257; we want the non-SEP keys here.
-			if k.Flags&dns.SEP != 0 {
-				continue
-			}
-			rows = append(rows, keyRow{
-				keyid:       k.KeyTag,
-				state:       st,
-				publishedAt: k.PublishedAt,
-			})
-		}
-	}
-	if len(rows) == 0 {
-		return
-	}
-	fmt.Println()
-	fmt.Println("  keyid    state           published_at")
-	fmt.Println("  -----    -------------   ------------")
-	for _, r := range rows {
-		pub := "-"
-		if r.publishedAt != nil {
-			pub = formatTimeWithDelta(*r.publishedAt)
-		}
-		fmt.Printf("  %-5d    %-13s   %s\n", r.keyid, r.state, pub)
-	}
-	_ = verbose // reserved for future per-ZSK detail
-}
-
-// keyidsForRange formats the keyids whose rollover_index falls in [lo, hi]
-// as a comma-separated bracketed list, e.g. "[20655, 26803, 61725]". Returns
-// "" when the range is unset or the lookup fails.
-func keyidsForRange(kdb *tdns.KeyDB, z string, lo, hi sql.NullInt64) string {
-	if !lo.Valid || !hi.Valid {
-		return ""
-	}
-	kids, err := tdns.RolloverKeyidsByIndexRange(kdb, z, lo.Int64, hi.Int64)
-	if err != nil || len(kids) == 0 {
-		return ""
-	}
-	parts := make([]string, len(kids))
-	for i, k := range kids {
-		parts[i] = fmt.Sprintf("%d", k)
-	}
-	return "[" + strings.Join(parts, ", ") + "]"
-}
-
-func orDash(s string) string {
-	if s == "" {
-		return "-"
-	}
-	return s
 }
 
 // printCSKRolloverStatus prints the CSK section. Currently informational
