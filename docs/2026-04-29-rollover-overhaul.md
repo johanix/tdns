@@ -3,7 +3,7 @@
 Author: Johan / Claude
 Date: 2026-04-29
 Status: implementation in progress on branch `rollover-overhaul`
-        (phases 1–8 done; phase 9 next; 10–12 untouched)
+        (phases 1–9 done; phase 10 next; 11–12 untouched)
 
 This document supersedes:
 
@@ -850,8 +850,8 @@ Status as of 2026-04-29:
 | 6     | config wiring                               | `af6a863`    | done (out of order; phase 5 needs the knobs) |
 | 7     | narrowed `unstick` (function-only)          | `42345de`    | done     |
 | 8     | RolloverStatus struct + compute             | `99095f6`    | done     |
-| 9     | read endpoints + CLI conversion             | —            | next     |
-| 10    | write endpoints + CLI conversion            | —            |          |
+| 9     | read endpoints + CLI conversion             | `0215580`    | done     |
+| 10    | write endpoints + CLI conversion            | —            | next     |
 | 11    | parent-side EDE (parallel)                  | —            |          |
 | 12    | cleanup                                     | —            |          |
 
@@ -980,7 +980,7 @@ hardcoded constants and policy reads.
 3. Implement `ComputeRolloverWhen` similarly — wraps existing
    `ComputeEarliestRollover`.
 
-### Phase 9 — read endpoints + CLI conversion  (NEXT)
+### Phase 9 — read endpoints + CLI conversion  (DONE — `0215580`)
 
 1. Add `apihandler_rollover.go` with `/rollover/status` (GET),
    `/rollover/when` (GET) handlers calling Phase 8 functions.
@@ -993,7 +993,7 @@ hardcoded constants and policy reads.
 After Phase 9, the painful "no DNSSEC policy" CLI failure mode
 from the 2026-04-28 debug session is gone in default mode.
 
-### Phase 10 — write endpoints + CLI conversion
+### Phase 10 — write endpoints + CLI conversion  (NEXT)
 
 1. Implement `/rollover/asap` (POST), `/rollover/cancel` (POST),
    `/rollover/reset` (POST), `/rollover/unstick` (POST). Each
