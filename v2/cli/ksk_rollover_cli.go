@@ -3,8 +3,10 @@ package cli
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"sort"
 	"strings"
@@ -324,53 +326,115 @@ func openKeystoreForCli() (*tdns.KeyDB, string, *tdns.DnssecPolicy, error) {
 }
 
 func newAutoRolloverWhenCmd() *cobra.Command {
+	var offline bool
 	c := &cobra.Command{
 		Use:   "when",
 		Short: "Compute the earliest moment a KSK rollover could safely fire (no state change)",
-		Long: `Reads the local keystore and dnssec policy for the zone, computes
-ComputeEarliestRollover (§8.5), and prints the result. Side-effect free; does
-not request a rollover. Use 'auto-rollover asap' to actually schedule one.`,
+		Long: `Asks the running daemon to compute ComputeEarliestRollover (§8.5) and
+prints the result. Side-effect free; does not request a rollover. Use
+'auto-rollover asap' to actually schedule one.
+
+Default mode talks to the daemon's API server (no daemon config needed
+on the CLI host). Use --offline to compute locally against the keystore
+file when the daemon is down — this requires --config with the daemon's
+config file so the CLI can find db.file and the zone's policy.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs(cmd, "zonename")
 			tdns.Globals.App.Type = tdns.AppTypeCli
+			z := dns.Fqdn(tdns.Globals.Zonename)
 
-			kdb, z, pol, err := openKeystoreForCli()
-			if err != nil {
-				cliFatalf("error: %v", err)
+			if offline {
+				runWhenOffline(z)
+				return
 			}
-			defer kdb.DB.Close()
-			if pol == nil {
-				cliFatalf("error: no DNSSEC policy for zone %s (dnssecpolicy in zone config)", z)
-			}
-
-			res, err := tdns.ComputeEarliestRollover(kdb, z, pol, time.Now())
-			if err != nil {
-				// Surface the rejection reason from ComputeEarliestRollover
-				// (e.g. "rollover already in progress for this zone") on
-				// stderr so the operator sees it.
-				row, rerr := tdns.LoadRolloverZoneRow(kdb, z)
-				suffix := ""
-				if rerr == nil && row != nil && row.RolloverInProgress {
-					phaseAt := ""
-					if row.RolloverPhaseAt.Valid {
-						phaseAt = " " + formatTimeWithDeltaStr(row.RolloverPhaseAt.String)
-					}
-					suffix = fmt.Sprintf(" (phase=%s%s)", row.RolloverPhase, phaseAt)
-				}
-				cliFatalf("cannot schedule for zone %s: %v%s", z, err, suffix)
-			}
-			fmt.Printf("zone %s — earliest scheduled rollover\n", z)
-			fmt.Printf("  earliest          %s\n", formatTimeWithDelta(res.Earliest))
-			fmt.Printf("  from_active_seq   %d  →  to_active_seq   %d\n", res.FromIdx, res.ToIdx)
-			fmt.Println("  gates:")
-			for _, g := range res.Gates {
-				fmt.Printf("    %-20s %s\n", g.Name, formatTimeWithDelta(g.At))
-			}
+			runWhenOnline(z)
 		},
 	}
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
+	c.Flags().BoolVar(&offline, "offline", false, "Compute locally against keystore file (postmortem use; daemon is down)")
 	_ = c.MarkFlagRequired("zone")
 	return c
+}
+
+// runWhenOnline is the default path: GET /api/v1/rollover/when via
+// the configured API client. No daemon config loaded on the CLI host.
+func runWhenOnline(z string) {
+	api, err := GetApiClient("auth", true)
+	if err != nil {
+		cliFatalf("error getting API client: %v", err)
+	}
+	endpoint := "/rollover/when?zone=" + z
+	status, body, err := api.RequestNG("GET", endpoint, nil, true)
+	if err != nil {
+		cliFatalf("error calling rollover/when: %v", err)
+	}
+	if status == http.StatusBadRequest {
+		// Operationally-expected rejection (no policy, rollover in
+		// progress, etc.). Body is the explanation.
+		cliFatalf("cannot schedule for zone %s: %s", z, strings.TrimSpace(string(body)))
+	}
+	if status != http.StatusOK {
+		cliFatalf("unexpected status %d from rollover/when: %s", status, string(body))
+	}
+	var resp tdns.RolloverWhenResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		cliFatalf("error parsing rollover/when response: %v", err)
+	}
+	renderRolloverWhen(&resp)
+}
+
+// runWhenOffline preserves the legacy direct-DB path for postmortem
+// use when the daemon is down.
+func runWhenOffline(z string) {
+	kdb, _, pol, err := openKeystoreForCli()
+	if err != nil {
+		cliFatalf("error: %v", err)
+	}
+	defer kdb.DB.Close()
+	if pol == nil {
+		cliFatalf("error: no DNSSEC policy for zone %s (dnssecpolicy in zone config)", z)
+	}
+
+	res, err := tdns.ComputeEarliestRollover(kdb, z, pol, time.Now())
+	if err != nil {
+		row, rerr := tdns.LoadRolloverZoneRow(kdb, z)
+		suffix := ""
+		if rerr == nil && row != nil && row.RolloverInProgress {
+			phaseAt := ""
+			if row.RolloverPhaseAt.Valid {
+				phaseAt = " " + formatTimeWithDeltaStr(row.RolloverPhaseAt.String)
+			}
+			suffix = fmt.Sprintf(" (phase=%s%s)", row.RolloverPhase, phaseAt)
+		}
+		cliFatalf("cannot schedule for zone %s: %v%s", z, err, suffix)
+	}
+
+	resp := &tdns.RolloverWhenResponse{
+		Zone:     z,
+		Earliest: res.Earliest.UTC().Format(time.RFC3339),
+		FromIdx:  res.FromIdx,
+		ToIdx:    res.ToIdx,
+		Gates:    make([]tdns.RolloverWhenGateEntry, 0, len(res.Gates)),
+	}
+	for _, g := range res.Gates {
+		resp.Gates = append(resp.Gates, tdns.RolloverWhenGateEntry{
+			Name: g.Name,
+			At:   g.At.UTC().Format(time.RFC3339),
+		})
+	}
+	renderRolloverWhen(resp)
+}
+
+func renderRolloverWhen(resp *tdns.RolloverWhenResponse) {
+	fmt.Printf("zone %s — earliest scheduled rollover\n", resp.Zone)
+	fmt.Printf("  earliest          %s\n", formatRolloverTime(resp.Earliest))
+	fmt.Printf("  from_active_seq   %d  →  to_active_seq   %d\n", resp.FromIdx, resp.ToIdx)
+	if len(resp.Gates) > 0 {
+		fmt.Println("  gates:")
+		for _, g := range resp.Gates {
+			fmt.Printf("    %-20s %s\n", g.Name, formatRolloverTime(g.At))
+		}
+	}
 }
 
 func newAutoRolloverAsapCmd() *cobra.Command {
@@ -442,79 +506,279 @@ zone row. Has no effect on rollovers that have already fired or on scheduled
 }
 
 func newAutoRolloverStatusCmd() *cobra.Command {
-	var verbose, showKSK, showZSK, showCSK bool
+	var verbose, offline bool
 	c := &cobra.Command{
 		Use:   "status",
 		Short: "Print rollover state for a zone (KSK and ZSK)",
-		Long: `Prints rollover state for the zone in per-key-type sections:
+		Long: `Prints rollover state for the zone with an OK / ACTIVE / SOFTFAIL
+headline and per-key tables for KSKs and ZSKs.
 
-  KSK rollover state:
-    phase, in_progress, manual schedule (if any), observe-poll
-    backoff (if any), DS submitted/confirmed index ranges, and
-    a table of every SEP key with state, active_seq, and any
-    last_rollover_error (truncated to 40 chars without -v).
+Default mode talks to the daemon's API server (no daemon config needed
+on the CLI host). Use --offline to render against the keystore file
+when the daemon is down — that requires --config with the daemon's
+config file so the CLI can find db.file and the zone's policy.
 
-  ZSK rollover state:
-    Currently informational — the rollover worker only manages KSKs.
-    Lists all ZSK keys with state and timestamps for diagnostic use.
-
-By default both KSK and ZSK sections are shown. Use --ksk, --zsk,
-and/or --csk to restrict output to specific key types.
-
-Use -v / --verbose to show full last_error text and additional
-debug fields.`,
+Use -v / --verbose to show full last_error text and the policy summary.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs(cmd, "zonename")
 			tdns.Globals.App.Type = tdns.AppTypeCli
+			z := dns.Fqdn(tdns.Globals.Zonename)
 
-			// Default (no filter flag set) shows KSK + ZSK; CSK only when
-			// explicitly requested.
-			if !showKSK && !showZSK && !showCSK {
-				showKSK = true
-				showZSK = true
+			var s *tdns.RolloverStatus
+			if offline {
+				s = fetchRolloverStatusOffline(z)
+			} else {
+				s = fetchRolloverStatusOnline(z)
 			}
-
-			kdb, z, pol, err := openKeystoreForCli()
-			if err != nil {
-				cliFatalf("error: %v", err)
-			}
-			defer kdb.DB.Close()
-
-			if pol != nil {
-				kskLifetime := time.Duration(pol.KSK.Lifetime) * time.Second
-				margin := pol.Clamping.Margin
-				fmt.Printf("policy: %s (algorithm: %s, ksk.lifetime: %s, clamping.margin: %s)\n",
-					pol.Name, dns.AlgorithmToString[pol.Algorithm], kskLifetime, margin)
-				fmt.Println()
-			}
-
-			first := true
-			if showKSK {
-				printKSKRolloverStatus(kdb, z, pol, verbose)
-				first = false
-			}
-			if showZSK {
-				if !first {
-					fmt.Println()
-				}
-				printZSKRolloverStatus(kdb, z, verbose)
-				first = false
-			}
-			if showCSK {
-				if !first {
-					fmt.Println()
-				}
-				printCSKRolloverStatus(kdb, z, verbose)
-			}
+			renderRolloverStatus(s, verbose)
 		},
 	}
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
-	c.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show full last_error text and additional debug fields")
-	c.Flags().BoolVar(&showKSK, "ksk", false, "Include KSK section (default: KSK+ZSK shown when no key-type flag given)")
-	c.Flags().BoolVar(&showZSK, "zsk", false, "Include ZSK section (default: KSK+ZSK shown when no key-type flag given)")
-	c.Flags().BoolVar(&showCSK, "csk", false, "Include CSK section")
+	c.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show full last_error text and policy summary")
+	c.Flags().BoolVar(&offline, "offline", false, "Render against keystore file (postmortem use; daemon is down)")
 	_ = c.MarkFlagRequired("zone")
 	return c
+}
+
+// fetchRolloverStatusOnline is the default path: GET
+// /api/v1/rollover/status via the configured API client. No daemon
+// config loaded on the CLI host.
+func fetchRolloverStatusOnline(z string) *tdns.RolloverStatus {
+	api, err := GetApiClient("auth", true)
+	if err != nil {
+		cliFatalf("error getting API client: %v", err)
+	}
+	endpoint := "/rollover/status?zone=" + z
+	status, body, err := api.RequestNG("GET", endpoint, nil, true)
+	if err != nil {
+		cliFatalf("error calling rollover/status: %v", err)
+	}
+	if status != http.StatusOK {
+		cliFatalf("unexpected status %d from rollover/status: %s", status, strings.TrimSpace(string(body)))
+	}
+	var s tdns.RolloverStatus
+	if err := json.Unmarshal(body, &s); err != nil {
+		cliFatalf("error parsing rollover/status response: %v", err)
+	}
+	return &s
+}
+
+// fetchRolloverStatusOffline preserves a direct-DB code path for
+// postmortem use. Reuses ComputeRolloverStatus so the renderer sees
+// the same struct shape as in online mode — output stays consistent.
+func fetchRolloverStatusOffline(z string) *tdns.RolloverStatus {
+	kdb, _, pol, err := openKeystoreForCli()
+	if err != nil {
+		cliFatalf("error: %v", err)
+	}
+	defer kdb.DB.Close()
+	s, err := tdns.ComputeRolloverStatus(kdb, z, pol, time.Now())
+	if err != nil {
+		cliFatalf("error: %v", err)
+	}
+	return s
+}
+
+// renderRolloverStatus prints a *RolloverStatus per the design spec
+// in 2026-04-29-rollover-overhaul.md. Same renderer regardless of
+// whether the struct came from the API or from local computation.
+func renderRolloverStatus(s *tdns.RolloverStatus, verbose bool) {
+	if s == nil {
+		return
+	}
+	// First line: server's wallclock at response time. Reference
+	// frame for the relative-time annotations on every other field.
+	fmt.Printf("Current time:     %s\n", formatRolloverTimeAbsolute(s.CurrentTime))
+
+	fmt.Printf("KSK rollover state for zone %s:\n", s.Zone)
+
+	headlinePhrase := headlinePhraseFor(s.Headline, s.Phase)
+	fmt.Printf("  status            %s — %s\n", s.Headline, headlinePhrase)
+	if s.Phase != "" && s.Phase != "idle" {
+		fmt.Printf("  phase             %s\n", s.Phase)
+	}
+
+	if s.AttemptMax > 0 {
+		switch s.Headline {
+		case "ACTIVE":
+			if s.AttemptIndex > 0 {
+				fmt.Printf("  attempts          %d / %d in current group\n", s.AttemptIndex, s.AttemptMax)
+			}
+		case "SOFTFAIL":
+			fmt.Printf("  attempts          initial flurry (%d/%d) failed; in long-term mode\n", s.HardfailCount, s.AttemptMax)
+		}
+	}
+
+	// Anchor timestamps for ACTIVE attempts.
+	if s.LastUpdate != "" {
+		fmt.Printf("  last UPDATE       %s\n", formatRolloverTime(s.LastUpdate))
+	}
+	if s.Policy != nil && s.Policy.DsPublishDelay != "" {
+		fmt.Printf("  ds-publish-delay  %s\n", s.Policy.DsPublishDelay)
+	}
+	if s.ExpectedBy != "" {
+		fmt.Printf("  expected by       %s\n", formatRolloverTime(s.ExpectedBy))
+	}
+	if s.AttemptTimeout != "" {
+		fmt.Printf("  attempt timeout   %s\n", formatRolloverTime(s.AttemptTimeout))
+	}
+
+	// Softfail block.
+	if s.LastSoftfailAt != "" {
+		fmt.Printf("  last failure      %s\n", formatRolloverTime(s.LastSoftfailAt))
+		if s.LastSoftfailCat != "" {
+			fmt.Printf("                    category: %s\n", s.LastSoftfailCat)
+		}
+		if s.LastSoftfailDetail != "" {
+			detail := s.LastSoftfailDetail
+			if !verbose && len(detail) > 80 {
+				detail = detail[:77] + "..."
+			}
+			fmt.Printf("                    detail:   %s\n", detail)
+		}
+	}
+	if s.NextPushAt != "" {
+		fmt.Printf("  next probe        %s\n", formatRolloverTime(s.NextPushAt))
+	}
+
+	// Polling activity.
+	if s.LastPoll != "" {
+		fmt.Printf("  last poll         %s — DS not yet observed\n", formatRolloverTime(s.LastPoll))
+	}
+	if s.NextPoll != "" {
+		fmt.Printf("  next poll         %s\n", formatRolloverTime(s.NextPoll))
+	}
+
+	if s.Hint != "" {
+		fmt.Printf("  hint              %s\n", s.Hint)
+		if s.Headline == "SOFTFAIL" {
+			fmt.Printf("                    use 'auto-rollover unstick --zone %s' to skip the wait and probe now\n", s.Zone)
+		}
+	}
+
+	if s.LastSuccess != "" {
+		fmt.Printf("  last success      %s\n", formatRolloverTime(s.LastSuccess))
+	}
+
+	// DS index ranges (diagnostic).
+	if s.Submitted != nil {
+		fmt.Printf("  DS submitted      [%d, %d]\n", s.Submitted.Low, s.Submitted.High)
+	}
+	if s.Confirmed != nil {
+		fmt.Printf("  DS confirmed      [%d, %d]\n", s.Confirmed.Low, s.Confirmed.High)
+	}
+
+	// Per-key tables.
+	if len(s.KSKs) > 0 {
+		fmt.Println()
+		fmt.Println("  KSKs:")
+		printRolloverKeyTable(s.KSKs, verbose)
+	}
+	if len(s.ZSKs) > 0 {
+		fmt.Println()
+		fmt.Println("  ZSKs:")
+		printRolloverKeyTable(s.ZSKs, verbose)
+	}
+
+	// Policy summary in verbose mode.
+	if verbose && s.Policy != nil {
+		fmt.Println()
+		fmt.Println("  policy:")
+		fmt.Printf("    name                         %s\n", s.Policy.Name)
+		fmt.Printf("    algorithm                    %s\n", s.Policy.Algorithm)
+		fmt.Printf("    ksk.lifetime                 %s\n", s.Policy.KskLifetime)
+		fmt.Printf("    rollover.ds-publish-delay    %s\n", s.Policy.DsPublishDelay)
+		fmt.Printf("    rollover.max-attempts        %d\n", s.Policy.MaxAttemptsBeforeBackoff)
+		fmt.Printf("    rollover.softfail-delay      %s\n", s.Policy.SoftfailDelay)
+		if s.Policy.ClampingMargin != "" {
+			fmt.Printf("    clamping.margin              %s\n", s.Policy.ClampingMargin)
+		}
+	}
+}
+
+// printRolloverKeyTable renders a list of RolloverKeyEntry as a
+// simple aligned table.
+func printRolloverKeyTable(keys []tdns.RolloverKeyEntry, verbose bool) {
+	for _, k := range keys {
+		seq := "-"
+		if k.ActiveSeq != nil {
+			seq = fmt.Sprintf("%d", *k.ActiveSeq)
+		}
+		errStr := k.LastRolloverErr
+		if !verbose && len(errStr) > 40 {
+			errStr = errStr[:37] + "..."
+		}
+		stateSince := ""
+		if k.StateSince != "" {
+			stateSince = formatRolloverTime(k.StateSince)
+		}
+		fmt.Printf("    keyid=%-5d  seq=%-3s  state=%-13s  state_since=%-30s  %s\n",
+			k.KeyID, seq, k.State, stateSince, errStr)
+	}
+}
+
+// headlinePhraseFor returns the phrase appended after the headline
+// word to give the operator a human-readable summary of the state.
+func headlinePhraseFor(headline, phase string) string {
+	switch headline {
+	case "OK":
+		return "idle, in sync with parent"
+	case "SOFTFAIL":
+		return "in long-term retry mode"
+	case "ACTIVE":
+		switch phase {
+		case "pending-parent-push":
+			return "pushing DS to parent"
+		case "pending-parent-observe":
+			return "observing parent for DS publication"
+		case "pending-child-publish":
+			return "waiting for propagation to child secondaries"
+		case "pending-child-withdraw":
+			return "waiting for retired keys to expire"
+		default:
+			return "in flight"
+		}
+	}
+	return ""
+}
+
+// formatRolloverTime renders an RFC3339 timestamp as
+// "HH:MM:SS UTC (Δ ago)" for past times or
+// "HH:MM:SS UTC (in Δ)" for future times. Returns "-" for empty.
+func formatRolloverTime(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "-"
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return s
+	}
+	delta := time.Until(t).Truncate(time.Second)
+	formatted := t.UTC().Format("15:04:05") + " UTC"
+	switch {
+	case delta == 0:
+		return formatted
+	case delta > 0:
+		return fmt.Sprintf("%s (in %s)", formatted, delta)
+	default:
+		return fmt.Sprintf("%s (%s ago)", formatted, -delta)
+	}
+}
+
+// formatRolloverTimeAbsolute is like formatRolloverTime but adds the
+// date for the always-first "Current time" line — gives the operator
+// a full reference-frame anchor when reading the rest of the output.
+func formatRolloverTimeAbsolute(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "-"
+	}
+	t, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		return s
+	}
+	return t.UTC().Format("15:04:05 UTC (Mon Jan 2 2006)")
 }
 
 // kskFSMSequence describes the multi-ds rollover phase sequence for verbose
