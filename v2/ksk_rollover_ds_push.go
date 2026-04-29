@@ -32,7 +32,7 @@ func BuildChildWholeDSUpdate(parent, child string, newDS []dns.RR) (*dns.Msg, er
 	m.SetUpdate(parent)
 
 	rrDS := new(dns.DS)
-	rrDS.Hdr = dns.RR_Header{Name: child, Rrtype: dns.TypeDS, Class: dns.ClassANY, Ttl: 3600}
+	rrDS.Hdr = dns.RR_Header{Name: child, Rrtype: dns.TypeDS, Class: dns.ClassANY, Ttl: 0}
 	m.RemoveRRset([]dns.RR{rrDS})
 
 	if len(newDS) > 0 {

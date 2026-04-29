@@ -564,22 +564,3 @@ SET manual_rollover_requested_at = NULL,
 WHERE zone = ?`, zone)
 	return err
 }
-
-func rolloverKeyDsObservedAt(kdb *KeyDB, zone string, keyid uint16) (*time.Time, error) {
-	var dsObs sql.NullString
-	err := kdb.DB.QueryRow(`SELECT ds_observed_at FROM RolloverKeyState WHERE zone = ? AND keyid = ?`, zone, int(keyid)).Scan(&dsObs)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	if !dsObs.Valid || strings.TrimSpace(dsObs.String) == "" {
-		return nil, nil
-	}
-	t, err := time.Parse(time.RFC3339, strings.TrimSpace(dsObs.String))
-	if err != nil {
-		return nil, err
-	}
-	return &t, nil
-}

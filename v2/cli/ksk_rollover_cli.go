@@ -534,7 +534,6 @@ func estimateNextKSKTransition(kdb *tdns.KeyDB, z string, pol *tdns.DnssecPolicy
 	if pol == nil || row == nil {
 		return ""
 	}
-	now := time.Now()
 	switch row.RolloverPhase {
 	case "idle":
 		if pol.KSK.Lifetime == 0 {
@@ -598,7 +597,6 @@ func estimateNextKSKTransition(kdb *tdns.KeyDB, z string, pol *tdns.DnssecPolicy
 		if soonest.IsZero() {
 			return fmt.Sprintf("(no retired SEP keys with retired_at; effective_margin=%s)", eff)
 		}
-		_ = now
 		return fmt.Sprintf("%s — soonest retired→removed (effective_margin=%s)",
 			formatTimeWithDelta(soonest), eff)
 	}

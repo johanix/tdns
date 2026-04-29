@@ -189,7 +189,7 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 		out.TTLS.MaxServed = uint32(d.Seconds())
 	}
 
-	warnDnssecPolicyCoupling(policyName, out, conf)
+	warnDnssecPolicyCoupling(policyName, out)
 	return nil
 }
 
@@ -234,7 +234,6 @@ func fillRolloverDurations(policyName string, conf *DnssecPolicyConf, out *Dnsse
 	return nil
 }
 
-// parseParentAgent normalizes rollover.parent-agent to host:port (default port 53).
 // NormalizeParentAgentAddr parses rollover.parent-agent or CLI --parent-agent into host:port (default port 53).
 func NormalizeParentAgentAddr(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
@@ -260,7 +259,7 @@ func parseParentAgent(policyName, raw string) (string, error) {
 	return a, nil
 }
 
-func warnDnssecPolicyCoupling(policyName string, out *DnssecPolicy, conf *DnssecPolicyConf) {
+func warnDnssecPolicyCoupling(policyName string, out *DnssecPolicy) {
 	kskL := time.Duration(out.KSK.Lifetime) * time.Second
 	sigV := time.Duration(out.KSK.SigValidity) * time.Second
 	if kskL > 0 && out.TTLS.DNSKEY > 0 {
@@ -278,7 +277,6 @@ func warnDnssecPolicyCoupling(policyName string, out *DnssecPolicy, conf *Dnssec
 		lgConfig.Warn("dnssec policy: clamping.margin below 60s (spec guidance for skew)",
 			"policy", policyName, "margin", out.Clamping.Margin.String())
 	}
-	_ = conf
 }
 
 // dnssecPoliciesYAML is the top-level shape for `tdns zone keystore dnssec policy validate --file`.
