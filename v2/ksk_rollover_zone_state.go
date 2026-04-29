@@ -505,49 +505,36 @@ func ClearLastRolloverError(kdb *KeyDB, zone string, keyid uint16) error {
 	return nil
 }
 
-// UnstickRollover clears the persisted DS-submitted range on the zone row and
-// last_rollover_error on every key row for the zone, in a single transaction.
-// Returns the number of key rows whose last_rollover_error was cleared.
+// UnstickRollover clears next_push_at on the zone row so the next
+// rollover tick fires a probe UPDATE immediately instead of waiting
+// out the remainder of the softfail-delay window. The narrow operator
+// override for "I just fixed the parent and want to retry now."
 //
-// Why: observeHardFail leaves last_ds_submitted_index_low/high populated when
-// it returns the zone to idle. The idle branch's kskIndexPushNeeded then sees
-// the target DS set unchanged from what was last submitted and never re-arms
-// a push, leaving the zone permanently stuck even after the operator has
-// fixed whatever caused the original observation timeout. UnstickRollover is
-// the operator nudge: drop the submitted range so the next idle tick re-arms
-// pending-parent-push, and clear stale per-key errors so status output isn't
-// misleading.
-func UnstickRollover(kdb *KeyDB, zone string) (int, error) {
+// Hardfail_count and last_softfail_* are preserved for diagnostic
+// continuity. The probe's outcome on the next tick takes care of the
+// counter — a successful confirmed observation resets it; a failed
+// probe rolls next_push_at forward by one softfail_delay window.
+//
+// Operationally optional after rollover-overhaul: the engine polls
+// the parent continuously regardless of softfail-delay, so a parent
+// fix is auto-detected within confirm-poll-max even without unstick.
+// Use unstick only to skip the wait when you know the fix is in.
+//
+// Acquires the per-zone rollover lock to serialize against the tick
+// (no-op when called from the CLI process — locks are process-local).
+func UnstickRollover(kdb *KeyDB, zone string) error {
 	zone = strings.TrimSpace(zone)
 	if zone == "" {
-		return 0, fmt.Errorf("UnstickRollover: empty zone")
+		return fmt.Errorf("UnstickRollover: empty zone")
 	}
-	tx, err := kdb.Begin("UnstickRollover")
-	if err != nil {
-		return 0, fmt.Errorf("begin: %w", err)
+	lock := AcquireRolloverLock(zone)
+	lock.Lock()
+	defer lock.Unlock()
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
 	}
-	commit := false
-	defer func() {
-		if !commit {
-			tx.Rollback()
-		}
-	}()
-	if _, err := tx.Exec(`UPDATE RolloverZoneState
-SET last_ds_submitted_index_low = NULL,
-    last_ds_submitted_index_high = NULL
-WHERE zone = ?`, zone); err != nil {
-		return 0, fmt.Errorf("clear submitted range: %w", err)
-	}
-	res, err := tx.Exec(`UPDATE RolloverKeyState SET last_rollover_error = NULL WHERE zone = ? AND last_rollover_error IS NOT NULL`, zone)
-	if err != nil {
-		return 0, fmt.Errorf("clear last_rollover_error: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit: %w", err)
-	}
-	commit = true
-	return int(n), nil
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET next_push_at = NULL WHERE zone = ?`, zone)
+	return err
 }
 
 // SetManualRolloverRequest stamps manual_rollover_requested_at = now and

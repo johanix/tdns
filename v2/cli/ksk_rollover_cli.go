@@ -966,21 +966,23 @@ tick.`,
 func newAutoRolloverUnstickCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "unstick",
-		Short: "Re-arm a stuck rollover by clearing the submitted DS range and per-key errors",
-		Long: `Nulls last_ds_submitted_index_low/high on the zone's RolloverZoneState row
-and clears last_rollover_error on every RolloverKeyState row for the zone,
-inside a single transaction.
+		Short: "Skip the softfail-delay and probe the parent on the next tick",
+		Long: `Clears next_push_at on the zone row so the rollover engine fires a probe
+UPDATE on its very next tick instead of waiting out the rest of the
+softfail-delay window. The narrow operator override for "I just fixed the
+parent and want to retry now."
 
-Use after diagnosing and fixing whatever stalled the rollover. The typical
-case: a parent silently rejected a DS UPDATE, the observe phase timed out
-into idle, but last_ds_submitted_* was left populated — so kskIndexPushNeeded
-sees the target DS set as unchanged from what was last submitted and never
-re-arms pending-parent-push. Unstick drops the submitted range so the next
-idle tick re-arms the push, and clears stale per-key errors so status output
-isn't misleading.
+This is operationally optional. The engine polls the parent continuously
+regardless of softfail-delay, so a parent fix is auto-detected within
+confirm-poll-max even without 'unstick'. Use 'unstick' only when you know
+the fix is in place AND want to skip the wait.
 
-Differs from 'reset' (which clears last_rollover_error for one keyid only
-and leaves the submitted range alone).`,
+Hardfail_count and last_softfail_* are preserved so status output still
+shows the most recent failure context. The counter resets to 0 on the
+next successful confirmed observation (which the post-unstick probe will
+trigger if the parent is genuinely fixed).
+
+Differs from 'reset' (which clears last_rollover_error for one keyid).`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs(cmd, "zonename")
 			tdns.Globals.App.Type = tdns.AppTypeCli
@@ -991,11 +993,10 @@ and leaves the submitted range alone).`,
 			}
 			defer kdb.DB.Close()
 
-			cleared, err := tdns.UnstickRollover(kdb, z)
-			if err != nil {
+			if err := tdns.UnstickRollover(kdb, z); err != nil {
 				cliFatalf("error: unstick: %v", err)
 			}
-			fmt.Printf("unstuck zone %s (cleared submitted DS range; cleared last_rollover_error on %d key(s))\n", z, cleared)
+			fmt.Printf("unstuck zone %s — next tick will probe the parent (softfail-delay skipped)\n", z)
 		},
 	}
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
@@ -1017,7 +1018,7 @@ func newAutoRolloverCmd(_ string) *cobra.Command {
   cancel   — clear a pending manual rollover request
   status   — print phase + per-key state for the zone
   reset    — clear last_rollover_error on one key after operator action
-  unstick  — clear submitted DS range + all per-key errors to re-arm a stalled rollover`,
+  unstick  — skip the softfail-delay and probe the parent on the next tick`,
 	}
 	c.AddCommand(
 		newAutoRolloverWhenCmd(),
