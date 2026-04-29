@@ -852,7 +852,7 @@ Status as of 2026-04-29:
 | 8     | RolloverStatus struct + compute             | `99095f6`    | done     |
 | 9     | read endpoints + CLI conversion             | `0215580`    | done     |
 | 10    | write endpoints + CLI conversion            | `2d46d8b`    | done (lockfile guard deferred to phase 12) |
-| 11    | parent-side EDE (parallel)                  | (see body)   | done (incl. SIG(0) validation EDEs) |
+| 11    | parent-side EDE (parallel)                  | `0859ed5`    | done (incl. SIG(0) validation EDEs) |
 | 12    | cleanup                                     | —            | next     |
 
 Tangential fix landed alongside on `fast-roller-1`: `825cee8`
@@ -1006,7 +1006,7 @@ from the 2026-04-28 debug session is gone in default mode.
    writers from running while a daemon holds the sqlite file
    open.
 
-### Phase 11 — parent-side EDE (parallel)  (DONE — pending hash)
+### Phase 11 — parent-side EDE (parallel)  (DONE — `0859ed5`)
 
 Independent of phases 1-10. Can land any time after Phase 1.
 
