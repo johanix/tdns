@@ -33,14 +33,20 @@ var (
 // AcquireRolloverLock returns the per-zone mutex for zone, creating it on
 // first call. Caller must Lock and Unlock; nothing here calls those for
 // you. The returned pointer is stable across calls for the same zone.
+//
+// The lookup key is canonicalized (lowercased, trailing dot stripped)
+// so "Example.COM.", "example.com.", and "example.com" all resolve to
+// the same mutex. Today every caller passes dns.Fqdn(...) output and
+// hits the same form, but defense in depth is cheap.
 func AcquireRolloverLock(zone string) *sync.Mutex {
-	zone = strings.TrimSpace(zone)
+	key := strings.ToLower(strings.TrimSpace(zone))
+	key = strings.TrimSuffix(key, ".")
 	rolloverLocksMu.Lock()
 	defer rolloverLocksMu.Unlock()
-	m, ok := rolloverLocks[zone]
+	m, ok := rolloverLocks[key]
 	if !ok {
 		m = &sync.Mutex{}
-		rolloverLocks[zone] = m
+		rolloverLocks[key] = m
 	}
 	return m
 }

@@ -627,15 +627,20 @@ WHERE zone = ?`, atStr, category, detail, nextPush, zone)
 // incrementHardfailCount atomically bumps the per-zone failed-attempt
 // counter. Returns the new value. Resets to 0 only via
 // resetHardfailCount or on successful confirmation.
+//
+// Single UPDATE...RETURNING avoids the older UPDATE-then-SELECT
+// pattern; SQLite ≥ 3.35 (March 2021) supports RETURNING, far older
+// than anything we'd build against. Callers hold the per-zone lock
+// regardless, so atomicity isn't load-bearing here — RETURNING is
+// purely a simplification.
 func incrementHardfailCount(kdb *KeyDB, zone string) (int, error) {
 	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
 		return 0, err
 	}
-	if _, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET hardfail_count = hardfail_count + 1 WHERE zone = ?`, zone); err != nil {
-		return 0, err
-	}
 	var n int
-	if err := kdb.DB.QueryRow(`SELECT hardfail_count FROM RolloverZoneState WHERE zone = ?`, zone).Scan(&n); err != nil {
+	if err := kdb.DB.QueryRow(
+		`UPDATE RolloverZoneState SET hardfail_count = hardfail_count + 1 WHERE zone = ? RETURNING hardfail_count`,
+		zone).Scan(&n); err != nil {
 		return 0, err
 	}
 	return n, nil

@@ -509,8 +509,13 @@ type BumperResponse struct {
 // A Signer is a struct where we keep track of the signer name and keyid
 // for a DNS UPDATE message.
 type Sig0UpdateSigner struct {
-	Name      string   // from the SIG
-	KeyId     uint16   // from the SIG
+	Name  string // from the SIG
+	KeyId uint16 // from the SIG
+	// Sig is the specific *dns.SIG RR this signer was discovered
+	// from. Verification must use this signature, not whatever was
+	// last parsed in the outer loop — multi-signature UPDATEs would
+	// otherwise classify against the wrong SIG.
+	Sig       *dns.SIG
 	Sig0Key   *Sig0Key // a key that matches the signer name and keyid
 	Validated bool     // true if this key validated the update
 }

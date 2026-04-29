@@ -291,6 +291,11 @@ func loadRolloverKeyEntries(kdb *KeyDB, zone string, wantSEP bool) ([]RolloverKe
 	for _, st := range states {
 		keys, err := GetDnssecKeysByState(kdb, zone, st)
 		if err != nil {
+			// Partial status is better than no status; log and skip
+			// this state so the operator at least sees an entry in
+			// the daemon log instead of the keystore failure being
+			// silently swallowed.
+			lgSigner.Debug("loadRolloverKeyEntries: GetDnssecKeysByState failed", "zone", zone, "state", st, "err", err)
 			continue
 		}
 		var batch []RolloverKeyEntry

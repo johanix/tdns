@@ -56,6 +56,12 @@ func ClearRolloverDaemonSentinel(kdb *KeyDB) error {
 //
 // Returns (0, "", "", false) when no sentinel row, when the
 // recorded PID has gone away (ESRCH), or on any DB error.
+//
+// Unix-only: the syscall.Signal(0) probe is the standard Unix
+// liveness check. TDNS targets NetBSD / Linux / macOS; Windows is
+// not on the supported-platform list. If Windows support is ever
+// needed, split the probe into a *_unix.go / *_windows.go pair via
+// build tags and add a Windows-appropriate liveness check.
 func LiveRolloverDaemon(kdb *KeyDB) (pid int, appname, startedAt string, alive bool) {
 	if kdb == nil {
 		return 0, "", "", false

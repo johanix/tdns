@@ -38,8 +38,12 @@ func main() {
 	// crash leaves the row stale, which the CLI's kill -0 check
 	// handles correctly.
 	if conf.Internal.KeyDB != nil {
+		// Sentinel write must succeed: it's the gate that lets CLI
+		// --offline writers detect a live daemon and refuse to race
+		// the rollover tick. Failing to write it means that gate is
+		// silently disabled, so we treat it as a startup error.
 		if err := tdns.WriteRolloverDaemonSentinel(conf.Internal.KeyDB); err != nil {
-			log.Printf("warning: could not write daemon sentinel: %v", err)
+			tdns.Shutdowner(conf, fmt.Sprintf("error writing rollover daemon sentinel: %v", err))
 		}
 		defer tdns.ClearRolloverDaemonSentinel(conf.Internal.KeyDB)
 	}

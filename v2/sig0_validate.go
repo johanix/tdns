@@ -143,7 +143,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		if err == nil && sig0key != nil {
 			lgDns.Info("ValidateUpdate: SIG(0) key found in TrustStore",
 				"signer", signername, "keyid", keyid, "validated", sig0key.Validated, "trusted", sig0key.Trusted)
-			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig0Key: sig0key})
+			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig: sig, Sig0Key: sig0key})
 			continue // key found
 		} else {
 			lgDns.Debug("ValidateUpdate: SIG(0) key NOT found in TrustStore", "signer", signername, "keyid", keyid)
@@ -170,7 +170,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 						sig0key.Key = *key
 						sig0key.PublishedInDNS = true
 						sig0key.Source = "child-key-upload"
-						us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig0Key: sig0key})
+						us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig: sig, Sig0Key: sig0key})
 						us.Data = "key"
 						us.Type = "TRUSTSTORE-UPDATE"
 						continue // key found
@@ -179,7 +179,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 			}
 
 			sig0key.PublishedInDNS = true
-			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig0Key: sig0key})
+			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig: sig, Sig0Key: sig0key})
 			continue // key found
 		} else {
 			lgDns.Debug("ValidateUpdate: SIG(0) key NOT found via DNS lookup", "signer", signername, "keyid", keyid)
@@ -199,7 +199,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 				Key:    *tmp,
 				Source: "child-key-upload",
 			}
-			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig0Key: sig0key})
+			us.Signers = append(us.Signers, Sig0UpdateSigner{Name: signername, KeyId: keyid, Sig: sig, Sig0Key: sig0key})
 			us.Data = "key"
 			us.Type = "TRUSTSTORE-UPDATE"
 			lgDns.Info("ValidateUpdate: update is a self-signed KEY upload", "signer", signername, "keyid", keyid)
@@ -215,8 +215,18 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 	// verify correctly.
 
 	for _, signer := range us.Signers {
+		// Use the per-signer SIG, not the outer sig variable (which
+		// holds whichever SIG was last parsed in the discovery loop
+		// above). For a single-signature UPDATE this is the same
+		// pointer, but for multi-signature UPDATEs the discovery
+		// loop iterated multiple SIG RRs and would have left the
+		// outer sig pointing at the last one.
+		ssig := signer.Sig
+		if ssig == nil {
+			continue
+		}
 		keyrr := signer.Sig0Key.Key
-		err = sig.Verify(&keyrr, msgbuf)
+		err = ssig.Verify(&keyrr, msgbuf)
 		if err != nil {
 			// This key failed to validate the update. Categorize the
 			// failure: if NOW is outside the signature's validity
@@ -228,19 +238,19 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 			// rollover overhaul: surface this as a specific rcode +
 			// EDE so the child operator can diagnose clock skew
 			// without parent-side log access.
-			if !cache.WithinValidityPeriod(sig.Inception, sig.Expiration, time.Now().UTC()) {
+			if !cache.WithinValidityPeriod(ssig.Inception, ssig.Expiration, time.Now().UTC()) {
 				us.ValidationRcode = dns.RcodeBadTime
 				us.RejectionEDE = edns0.EDESig0BadTime
 			} else if us.RejectionEDE == 0 {
 				us.RejectionEDE = edns0.EDESig0BadSignature
 			}
 			lgDns.Warn("ValidateUpdate: signature verification failed", "signer", signer.Name, "keyid", signer.KeyId, "err", err)
-			lgDns.Debug("ValidateUpdate: timing details", "currentTime", time.Now(), "inception", sig.Inception, "expiration", sig.Expiration)
+			lgDns.Debug("ValidateUpdate: timing details", "currentTime", time.Now(), "inception", ssig.Inception, "expiration", ssig.Expiration)
 			continue
 		}
 
 		// Ok, we have a signature that validated.
-		if !cache.WithinValidityPeriod(sig.Inception, sig.Expiration, time.Now().UTC()) {
+		if !cache.WithinValidityPeriod(ssig.Inception, ssig.Expiration, time.Now().UTC()) {
 			lgDns.Warn("ValidateUpdate: signature NOT within validity period", "signer", signer.Name, "keyid", signer.KeyId)
 			us.ValidationRcode = dns.RcodeBadTime
 			us.RejectionEDE = edns0.EDESig0BadTime
