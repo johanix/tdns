@@ -3,7 +3,7 @@
 Author: Johan / Claude
 Date: 2026-04-29
 Status: implementation in progress on branch `rollover-overhaul`
-        (phases 1–4 + 6 done; phase 5 next; 7–12 untouched)
+        (phases 1–6 done; phase 7 next; 8–12 untouched)
 
 This document supersedes:
 
@@ -846,9 +846,9 @@ Status as of 2026-04-29:
 | 2     | schema additions                            | `155d21c`    | done     |
 | 3     | kskIndexPushNeeded reformulation            | `6b09dd4`    | done     |
 | 4     | failure categorization                      | `f4ab81b`    | done     |
-| 5     | softfail phase + counter logic              | —            | next     |
+| 5     | softfail phase + counter logic              | `a6d2288`    | done     |
 | 6     | config wiring                               | `af6a863`    | done (out of order; phase 5 needs the knobs) |
-| 7     | narrowed `unstick` (function-only)          | —            |          |
+| 7     | narrowed `unstick` (function-only)          | —            | next     |
 | 8     | RolloverStatus struct + compute             | —            |          |
 | 9     | read endpoints + CLI conversion             | —            |          |
 | 10    | write endpoints + CLI conversion            | —            |          |
@@ -915,7 +915,7 @@ NOT deploy to a testbed without Phase 5 close behind.
 4. `observeHardFail` calls `setSoftfail` with
    `parent-publish-failure` on observe timeout.
 
-### Phase 5 — softfail phase + counter logic  (NEXT)
+### Phase 5 — softfail phase + counter logic  (DONE — `a6d2288`)
 
 1. Add `rolloverPhasePushSoftfail = "parent-push-softfail"`.
 2. Wire transitions:
@@ -963,7 +963,7 @@ hardcoded constants and policy reads.
    - `confirm-timeout < ds-publish-delay`
    - `softfail-delay < ds-publish-delay`
 
-### Phase 7 — narrowed `unstick` (function-only)
+### Phase 7 — narrowed `unstick` (function-only)  (NEXT)
 
 1. Reimplement `UnstickRollover` to clear `next_push_at` only.
 2. CLI help text update — narrowed role.
@@ -1020,13 +1020,33 @@ Independent of phases 1-10. Can land any time after Phase 1.
 
 ### Phase 12 — cleanup
 
-1. Remove `observeHardFail` (semantics no longer apply).
+1. Remove `observeHardFail` (semantics no longer apply; the body
+   is now a thin wrapper over `handleAttemptFailed`). Inline the
+   per-key `last_rollover_error` stamp at the call site and drop
+   the function. Rename `handleAttemptFailed` if it ends up the
+   sole remaining helper.
 2. Remove unused `last_rollover_error` write paths if any.
 3. Audit `LastSubmitted*` references; demote to diagnostic-only.
 4. Audit `openKeystoreForCli` callers. Anything outside
    `--offline` paths should be gone.
 5. Verify the `[WARN/config] no config file specified` warning
    no longer fires in default CLI mode.
+6. **Unit tests for the tick handler across all phase states.**
+   The phase 5 commit added the new `parent-push-softfail` handler
+   and rewired the failure decision through `handleAttemptFailed`,
+   but tick-level test coverage is still thin — only the
+   `kskIndexPushNeeded` truth table is unit-tested. Build out a
+   table-driven test harness that, for each phase
+   (idle, pending-child-publish, pending-parent-push,
+   pending-parent-observe, parent-push-softfail,
+   pending-child-withdraw), seeds a fake `KeyDB` row, drives one
+   `RolloverAutomatedTick` call, and asserts the resulting state
+   transitions and counter/timestamp side effects. The harness
+   needs a fake/mock `*KeyDB` (or sqlite-in-memory) plus a way to
+   stub `PushWholeDSRRset` / `QueryParentAgentDS` so the test
+   doesn't actually hit the network. This is a non-trivial
+   test-infrastructure investment — the right time to make it is
+   after the state machine has stabilized, which is here.
 
 ## Risks / open questions
 
