@@ -2,7 +2,8 @@
 
 Author: Johan / Claude
 Date: 2026-04-29
-Status: draft (no implementation work yet)
+Status: implementation in progress on branch `rollover-overhaul`
+        (phases 1–4 + 6 done; phase 5 next; 7–12 untouched)
 
 This document supersedes:
 
@@ -833,11 +834,33 @@ diagnostic continuity.
 
 ## Implementation phases
 
-Each phase = one or two commits. Cherry-pickable from
-`fast-roller-1` (where the merged work happens) onto
-`fast-roller-mldsa44` once the full series is complete.
+Each phase = one or two commits. Implementation happens on
+`rollover-overhaul` branched off `fast-roller-1`. Cherry-pickable
+onto `fast-roller-mldsa44` once the full series is complete.
 
-### Phase 1 — per-zone lock infrastructure
+Status as of 2026-04-29:
+
+| Phase | Title                                       | Commit       | State    |
+|-------|---------------------------------------------|--------------|----------|
+| 1     | per-zone lock infrastructure                | `54dc96d`    | done     |
+| 2     | schema additions                            | `155d21c`    | done     |
+| 3     | kskIndexPushNeeded reformulation            | `6b09dd4`    | done     |
+| 4     | failure categorization                      | `f4ab81b`    | done     |
+| 5     | softfail phase + counter logic              | —            | next     |
+| 6     | config wiring                               | `af6a863`    | done (out of order; phase 5 needs the knobs) |
+| 7     | narrowed `unstick` (function-only)          | —            |          |
+| 8     | RolloverStatus struct + compute             | —            |          |
+| 9     | read endpoints + CLI conversion             | —            |          |
+| 10    | write endpoints + CLI conversion            | —            |          |
+| 11    | parent-side EDE (parallel)                  | —            |          |
+| 12    | cleanup                                     | —            |          |
+
+Tangential fix landed alongside on `fast-roller-1`: `825cee8`
+implemented the missing `ClampedDuration` helper that was blocking
+test compilation in v2 (commit a5467e1 had added the test but not
+the helper). Merged into `rollover-overhaul` via `b06a13b`.
+
+### Phase 1 — per-zone lock infrastructure  (DONE — `54dc96d`)
 
 1. Add `rollover_lock.go` with the per-zone mutex registry.
 2. `RolloverAutomatedTick` takes the lock at the top of per-zone
@@ -845,10 +868,10 @@ Each phase = one or two commits. Cherry-pickable from
 3. Build (no behavior change yet — there are no API handlers to
    contend with the tick).
 
-Tiny phase; could be one commit. Goes first because everything
-later assumes the lock exists.
+Tiny phase; one commit. Goes first because everything later
+assumes the lock exists.
 
-### Phase 2 — schema additions
+### Phase 2 — schema additions  (DONE — `155d21c`)
 
 1. Add migration entries to the `migrations` slice in
    `dbMigrateSchema` ([db.go:117](tdns/v2/db.go:117)). One entry
@@ -867,28 +890,32 @@ later assumes the lock exists.
    that all existing rows load cleanly with NULL/0 in the new
    columns.
 
-### Phase 3 — kskIndexPushNeeded reformulation
+### Phase 3 — kskIndexPushNeeded reformulation  (DONE — `6b09dd4`)
 
 1. Change the gate to compare against `LastConfirmed*` instead of
    `LastSubmitted*`.
-2. Add focused unit test.
+2. Add focused unit test (9 cases incl. the regression case).
 3. After this phase: stuck zones recover, but engine retries
    forever with no rate limit. Phase 5 adds the backoff.
 
 Independently shippable as a pure correctness fix, but should
 NOT deploy to a testbed without Phase 5 close behind.
 
-### Phase 4 — failure categorization
+### Phase 4 — failure categorization  (DONE — `f4ab81b`)
 
 1. Define `RolloverFailureCategory` enum (string consts:
    `child-config`, `transport`, `parent-rejected`,
-   `parent-publish-failure`).
-2. Each push-failure path in `RolloverAutomatedTick` and
-   `PushWholeDSRRset` records category + detail via
-   `setSoftfail`.
-3. `observeHardFail` records `parent-publish-failure`.
+   `parent-publish-failure`) in `ksk_rollover_categories.go`.
+2. `KSKDSPushResult` gets a `Category` field; `PushWholeDSRRset`
+   sets it at every error path.
+3. Tick's pending-parent-push branch consumes the category and
+   calls `setSoftfail(category, detail, now, zero)`. zero
+   `next_push_at` means "no delay imposed yet" — phase 5 sets
+   non-zero values when entering long-term mode.
+4. `observeHardFail` calls `setSoftfail` with
+   `parent-publish-failure` on observe timeout.
 
-### Phase 5 — softfail phase + counter logic
+### Phase 5 — softfail phase + counter logic  (NEXT)
 
 1. Add `rolloverPhasePushSoftfail = "parent-push-softfail"`.
 2. Wire transitions:
@@ -911,21 +938,30 @@ NOT deploy to a testbed without Phase 5 close behind.
 
 Uses Phase 1 lock.
 
-### Phase 6 — config wiring
+### Phase 6 — config wiring  (DONE — `af6a863`)
 
-1. Add `DsPublishDelay`, `MaxAttemptsBeforeBackoff`,
-   `SoftfailDelay` to `RolloverPolicy`.
-2. YAML parsing.
-3. Defaults: `DefaultDsPublishDelay = 5*time.Minute`,
-   `DefaultMaxAttemptsBeforeBackoff = 5`,
-   `DefaultSoftfailDelay = time.Hour`.
-4. Compute derived values:
-   `attemptTimeout = dsPublishDelay × 12 / 10`,
-   `pollMax = clamp(dsPublishDelay/10, 30s, 5m)`.
-5. Validation:
-   - `max-attempts-before-backoff >= 1`
-   - `softfail-delay >= ds-publish-delay`
-   - explicit `attempt-timeout` (if set) `>= ds-publish-delay`
+Done before Phase 5 because Phase 5 needs the policy fields to
+exist before it can read them; otherwise we'd churn between
+hardcoded constants and policy reads.
+
+1. Three new YAML fields on `DnssecPolicyRolloverConf`:
+   `ds-publish-delay`, `max-attempts-before-backoff`,
+   `softfail-delay`.
+2. Three matching fields on `RolloverPolicy`.
+3. Defaults: `defaultDsPublishDelay = 5*time.Minute`,
+   `defaultMaxAttemptsBeforeBackoff = 5`,
+   `defaultSoftfailDelayMinimum = time.Hour`.
+4. Three derivation helpers in `ksk_rollover_policy.go`:
+   `derivedPollMax(d) = clamp(d/10, 30s, 5m)`,
+   `derivedAttemptTimeout(d) = d × 1.2`,
+   `derivedSoftfailDelay(d) = max(1h, d)`.
+   `confirm-poll-max` and `confirm-timeout` defaults now derive
+   from `ds-publish-delay` instead of being fixed; existing YAMLs
+   that pin them explicitly still win.
+5. Cross-field validation rejects:
+   - `max-attempts-before-backoff < 1`
+   - `confirm-timeout < ds-publish-delay`
+   - `softfail-delay < ds-publish-delay`
 
 ### Phase 7 — narrowed `unstick` (function-only)
 
