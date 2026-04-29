@@ -3,7 +3,7 @@
 Author: Johan / Claude
 Date: 2026-04-29
 Status: implementation in progress on branch `rollover-overhaul`
-        (phases 1–6 done; phase 7 next; 8–12 untouched)
+        (phases 1–7 done; phase 8 next; 9–12 untouched)
 
 This document supersedes:
 
@@ -848,8 +848,8 @@ Status as of 2026-04-29:
 | 4     | failure categorization                      | `f4ab81b`    | done     |
 | 5     | softfail phase + counter logic              | `a6d2288`    | done     |
 | 6     | config wiring                               | `af6a863`    | done (out of order; phase 5 needs the knobs) |
-| 7     | narrowed `unstick` (function-only)          | —            | next     |
-| 8     | RolloverStatus struct + compute             | —            |          |
+| 7     | narrowed `unstick` (function-only)          | `42345de`    | done     |
+| 8     | RolloverStatus struct + compute             | —            | next     |
 | 9     | read endpoints + CLI conversion             | —            |          |
 | 10    | write endpoints + CLI conversion            | —            |          |
 | 11    | parent-side EDE (parallel)                  | —            |          |
@@ -963,12 +963,12 @@ hardcoded constants and policy reads.
    - `confirm-timeout < ds-publish-delay`
    - `softfail-delay < ds-publish-delay`
 
-### Phase 7 — narrowed `unstick` (function-only)  (NEXT)
+### Phase 7 — narrowed `unstick` (function-only)  (DONE — `42345de`)
 
 1. Reimplement `UnstickRollover` to clear `next_push_at` only.
 2. CLI help text update — narrowed role.
 
-### Phase 8 — RolloverStatus struct + ComputeRolloverStatus
+### Phase 8 — RolloverStatus struct + ComputeRolloverStatus  (NEXT)
 
 1. Add `messages_rollover.go` with `RolloverStatus`, `DSRange`,
    `RolloverKeyEntry`, `PolicySummary`, request structs for each
