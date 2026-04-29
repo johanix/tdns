@@ -303,6 +303,11 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		}
 		_ = resetHardfailCount(kdb, zone)
 		_ = setLastSuccess(kdb, zone, now)
+		// Clear last_attempt_started_at: the attempt window closed
+		// successfully, so its expected-by / attempt-timeout deadlines
+		// are no longer meaningful. Status output uses the absence of
+		// this timestamp to suppress stale window lines.
+		_ = setLastAttemptStarted(kdb, zone, time.Time{})
 		if advanced > 0 {
 			triggerResign(conf, zone)
 		}
@@ -356,6 +361,7 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 				}
 				_ = resetHardfailCount(kdb, zone)
 				_ = setLastSuccess(kdb, zone, now)
+				_ = setLastAttemptStarted(kdb, zone, time.Time{})
 				if advanced > 0 {
 					triggerResign(conf, zone)
 				}

@@ -73,6 +73,25 @@ func KeyStateWorker(ctx context.Context, conf *Config) error {
 
 	lgSigner.Info("KeyStateWorker started", "propagation_delay", propagationDelay, "standby_zsk_count", standbyZskCount, "standby_ksk_count", standbyKskCount, "check_interval", checkInterval)
 
+	// Cross-check: any rollover policy whose attempt-timeout (=
+	// confirm-timeout, derived from ds-publish-delay × 1.2 by default)
+	// is shorter than 2 × check_interval will starve observe polling
+	// — the next observe-tick lands past the attempt-timeout cliff
+	// before any poll runs. Warn at startup so the operator catches
+	// the misconfiguration without first losing a rollover cycle.
+	for name, pol := range conf.Internal.DnssecPolicies {
+		if pol.Rollover.Method != RolloverMethodMultiDS && pol.Rollover.Method != RolloverMethodDoubleSignature {
+			continue
+		}
+		if pol.Rollover.ConfirmTimeout > 0 && pol.Rollover.ConfirmTimeout < 2*checkInterval {
+			lgSigner.Warn("rollover: kasp.check_interval too coarse for policy attempt-timeout; observe polling will be starved",
+				"policy", name,
+				"attempt_timeout", pol.Rollover.ConfirmTimeout,
+				"check_interval", checkInterval,
+				"remedy", "lower kasp.check_interval (must be < attempt-timeout / 2) or raise rollover.ds-publish-delay")
+		}
+	}
+
 	for {
 		select {
 		case <-ctx.Done():

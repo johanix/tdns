@@ -682,12 +682,18 @@ func setLastPoll(kdb *KeyDB, zone string, at time.Time) error {
 //
 // Set every time a push is initiated, regardless of outcome — failed
 // attempts also count, and the operator wants to see when we last
-// tried.
+// tried. Cleared on confirmed success (call with time.Time{}) so
+// status output doesn't render stale "expected by" / "attempt
+// timeout" lines from a closed window.
 func setLastAttemptStarted(kdb *KeyDB, zone string, at time.Time) error {
 	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
 		return err
 	}
-	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET last_attempt_started_at = ? WHERE zone = ?`, at.UTC().Format(time.RFC3339), zone)
+	var s sql.NullString
+	if !at.IsZero() {
+		s = sql.NullString{String: at.UTC().Format(time.RFC3339), Valid: true}
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET last_attempt_started_at = ? WHERE zone = ?`, s, zone)
 	return err
 }
 
