@@ -197,6 +197,7 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 			handleAttemptFailed(kdb, zone, pol, SoftfailChildConfig, "ImrEngine nil, cannot DS push", now)
 			return nil
 		}
+		_ = setLastAttemptStarted(kdb, zone, now)
 		pushCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		res, err := PushWholeDSRRset(pushCtx, zd, kdb, imr)
 		cancel()
@@ -383,6 +384,7 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 			_ = setSoftfail(kdb, zone, SoftfailChildConfig, "ImrEngine nil, cannot softfail probe", now, nextPush)
 			return nil
 		}
+		_ = setLastAttemptStarted(kdb, zone, now)
 		pushCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		res, perr := PushWholeDSRRset(pushCtx, zd, kdb, imr)
 		cancel()

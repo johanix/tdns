@@ -675,6 +675,22 @@ func setLastPoll(kdb *KeyDB, zone string, at time.Time) error {
 	return err
 }
 
+// setLastAttemptStarted stamps the wallclock time of the most recent
+// push attempt's start. Status output renders this as "last UPDATE"
+// and uses it as the anchor for ExpectedBy = lastUpdate +
+// ds-publish-delay and AttemptTimeout = lastUpdate + confirm-timeout.
+//
+// Set every time a push is initiated, regardless of outcome — failed
+// attempts also count, and the operator wants to see when we last
+// tried.
+func setLastAttemptStarted(kdb *KeyDB, zone string, at time.Time) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET last_attempt_started_at = ? WHERE zone = ?`, at.UTC().Format(time.RFC3339), zone)
+	return err
+}
+
 // setNextPushAt updates next_push_at without touching last_softfail_*.
 // Used by the parent-push-softfail probe path which rolls
 // next_push_at forward by softfail_delay regardless of probe outcome
