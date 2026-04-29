@@ -60,6 +60,32 @@ func formatTimeWithDeltaStr(s string) string {
 	return formatTimeWithDelta(t)
 }
 
+// refuseIfDaemonAlive checks the keystore's daemon-sentinel row and
+// terminates the CLI if a live daemon process is detected, unless
+// --force is set. Used by --offline writers (reset, unstick) to
+// prevent operators from racing the rollover tick with direct DB
+// writes when the daemon is actually still running.
+func refuseIfDaemonAlive(kdb *tdns.KeyDB, force bool) {
+	pid, appname, started, alive := tdns.LiveRolloverDaemon(kdb)
+	if !alive {
+		return
+	}
+	name := appname
+	if name == "" {
+		name = "daemon"
+	}
+	if force {
+		fmt.Fprintf(os.Stderr, "warning: %s (pid %d, started %s) appears to be running; --force overrides the daemon-alive check\n", name, pid, started)
+		return
+	}
+	cliFatalf(`error: %s (pid %d) appears to be running on this keystore.
+  started: %s
+Refusing --offline write to avoid racing the rollover tick.
+Stop the daemon and retry, or pass --force to override (you must ensure
+the daemon is genuinely stopped first; --force on a live daemon will
+produce non-deterministic state).`, name, pid, started)
+}
+
 // truncate trims s to maxLen characters, appending "..." if truncated.
 // When verbose is true, returns s unchanged.
 func truncate(s string, maxLen int, verbose bool) string {
@@ -1206,7 +1232,7 @@ func printCSKRolloverStatus(kdb *tdns.KeyDB, z string, verbose bool) {
 
 func newAutoRolloverResetCmd() *cobra.Command {
 	var keyid int
-	var offline bool
+	var offline, force bool
 	c := &cobra.Command{
 		Use:   "reset",
 		Short: "Clear last_rollover_error for one key (after operator intervention)",
@@ -1215,9 +1241,11 @@ key's RolloverKeyState row. Use after diagnosing and fixing a
 hard-failed rollover so status output isn't misleading.
 
 Default mode talks to the daemon's API server. Use --offline to write
-directly to the keystore file when the daemon is down (postmortem use;
-the operator is responsible for ensuring the daemon is genuinely
-stopped — there is no lockfile guard yet).`,
+directly to the keystore file when the daemon is down (postmortem
+use). The CLI checks the daemon-sentinel row in the keystore and
+refuses to run --offline if it sees a live daemon process; pass
+--force to override (you must ensure the daemon is genuinely
+stopped first).`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs(cmd, "zonename")
 			tdns.Globals.App.Type = tdns.AppTypeCli
@@ -1233,6 +1261,7 @@ stopped — there is no lockfile guard yet).`,
 					cliFatalf("error: %v", err)
 				}
 				defer kdb.DB.Close()
+				refuseIfDaemonAlive(kdb, force)
 				if err := tdns.ClearLastRolloverError(kdb, z, uint16(keyid)); err != nil {
 					cliFatalf("error: clear last_rollover_error: %v", err)
 				}
@@ -1261,13 +1290,14 @@ stopped — there is no lockfile guard yet).`,
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
 	c.Flags().IntVar(&keyid, "keyid", 0, "Key ID to reset (RFC 4034 keytag)")
 	c.Flags().BoolVar(&offline, "offline", false, "Write directly to keystore file (postmortem use; daemon is down)")
+	c.Flags().BoolVar(&force, "force", false, "With --offline: override the daemon-alive check")
 	_ = c.MarkFlagRequired("zone")
 	_ = c.MarkFlagRequired("keyid")
 	return c
 }
 
 func newAutoRolloverUnstickCmd() *cobra.Command {
-	var offline bool
+	var offline, force bool
 	c := &cobra.Command{
 		Use:   "unstick",
 		Short: "Skip the softfail-delay and probe the parent on the next tick",
@@ -1301,6 +1331,7 @@ Differs from 'reset' (which clears last_rollover_error for one keyid).`,
 					cliFatalf("error: %v", err)
 				}
 				defer kdb.DB.Close()
+				refuseIfDaemonAlive(kdb, force)
 				if err := tdns.UnstickRollover(kdb, z); err != nil {
 					cliFatalf("error: unstick: %v", err)
 				}
@@ -1325,6 +1356,7 @@ Differs from 'reset' (which clears last_rollover_error for one keyid).`,
 	}
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
 	c.Flags().BoolVar(&offline, "offline", false, "Write directly to keystore file (postmortem use; daemon is down)")
+	c.Flags().BoolVar(&force, "force", false, "With --offline: override the daemon-alive check")
 	_ = c.MarkFlagRequired("zone")
 	return c
 }

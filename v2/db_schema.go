@@ -142,6 +142,20 @@ UNIQUE (zonename, keyid)
 		max_observed_ttl  INTEGER NOT NULL DEFAULT 0,
 		updated_at        TEXT
 	)`,
+
+	// RolloverDaemonSentinel is a single-row table written by the auth
+	// daemon on startup with its PID and start time. CLI --offline
+	// writers (rollover-overhaul phase 12b) read this and refuse to
+	// run if the recorded PID is still alive — racing the rollover
+	// tick from outside the daemon process produces non-deterministic
+	// state. Stale rows (PID gone) are treated as "no daemon";
+	// cleanup on graceful shutdown is best-effort.
+	"RolloverDaemonSentinel": `CREATE TABLE IF NOT EXISTS 'RolloverDaemonSentinel' (
+		id         INTEGER PRIMARY KEY,
+		pid        INTEGER NOT NULL,
+		started_at TEXT NOT NULL,
+		appname    TEXT
+	)`,
 }
 
 // Note that there is no DNSSEC TrustStore, because whatever DNSSEC keys we have

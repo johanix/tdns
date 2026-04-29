@@ -32,6 +32,18 @@ func main() {
 		tdns.Shutdowner(conf, fmt.Sprintf("Error initializing TDNS: %v", err))
 	}
 
+	// Write the rollover-daemon sentinel so CLI --offline writers
+	// can detect we're alive and refuse to race the rollover tick.
+	// Best-effort cleanup on graceful shutdown via defer; SIGKILL or
+	// crash leaves the row stale, which the CLI's kill -0 check
+	// handles correctly.
+	if conf.Internal.KeyDB != nil {
+		if err := tdns.WriteRolloverDaemonSentinel(conf.Internal.KeyDB); err != nil {
+			log.Printf("warning: could not write daemon sentinel: %v", err)
+		}
+		defer tdns.ClearRolloverDaemonSentinel(conf.Internal.KeyDB)
+	}
+
 	apirouter, err := conf.SetupAPIRouter(ctx)
 	if err != nil {
 		tdns.Shutdowner(conf, fmt.Sprintf("Error setting up API router: %v", err))
