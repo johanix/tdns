@@ -123,11 +123,14 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 				lgEngine.Info("zone loaded; outbound_soa_serial=unixtime",
 					"zone", zone, "serial", zd.CurrentSerial)
 			case OutboundSoaSerialPersist:
-				if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > 0 {
-					if saved != zd.CurrentSerial {
-						lgEngine.Info("zone loaded; outbound_soa_serial=persist (restored saved serial)",
-							"zone", zone, "incoming", zd.CurrentSerial, "persisted", saved)
-					}
+				// Only restore the persisted serial when it is *ahead* of
+				// the freshly loaded inbound serial. If upstream advanced
+				// while we were down, the inbound serial is the one to
+				// honour — moving zd.CurrentSerial backwards would break
+				// secondaries.
+				if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > zd.CurrentSerial {
+					lgEngine.Info("zone loaded; outbound_soa_serial=persist (restored saved serial)",
+						"zone", zone, "incoming", zd.CurrentSerial, "persisted", saved)
 					zd.CurrentSerial = saved
 				}
 			}
@@ -585,7 +588,11 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								lgEngine.Info("zone updated from upstream; outbound_soa_serial=unixtime",
 									"zone", zone, "serial", zd.CurrentSerial)
 							case OutboundSoaSerialPersist:
-								if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > 0 {
+								// Only restore if the persisted serial is
+								// ahead of the just-refreshed inbound
+								// serial. See the matching note in the
+								// initial-load branch above.
+								if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > zd.CurrentSerial {
 									zd.CurrentSerial = saved
 								}
 							}
