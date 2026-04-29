@@ -261,9 +261,7 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		}
 		if t, ok := parseOptionalTime(row.ObserveStartedAt); ok {
 			if now.Sub(t) >= timeout {
-				if err := observeHardFail(kdb, zone, low, high, timeout, pol); err != nil {
-					return err
-				}
+				recordObserveTimeout(kdb, zone, low, high, timeout, pol)
 				lgSigner.Error("rollover: DS observation timed out; keys marked with last_rollover_error", "zone", zone, "started_at", t.Format(time.RFC3339), "timeout", timeout)
 				return nil
 			}
@@ -573,18 +571,16 @@ WHERE zone = ?`, zone); err != nil {
 	return advanced, nil
 }
 
-// observeAttemptTimedOut records last_rollover_error on every SEP key
-// in state=created that was waiting on confirmation of the [low, high]
-// range, then increments the hardfail counter and either restarts the
-// push (mid-flurry) or transitions to parent-push-softfail (max
-// reached). Replaces the older "always-give-up-and-go-idle" semantics:
-// the engine never permanently abandons a rollover, just shifts to a
-// long-term retry cadence on persistent parent-side problems.
+// recordObserveTimeout stamps a per-key last_rollover_error on every
+// SEP key in state=created that was waiting on confirmation of the
+// [low, high] range, then delegates to handleAttemptFailed to
+// increment the hardfail counter and decide whether to retry
+// immediately or enter parent-push-softfail.
 //
-// (Function name historically observeHardFail; kept until phase 9
-// cleanup. The "hard" framing no longer applies — observe timeouts
-// are recoverable now.)
-func observeHardFail(kdb *KeyDB, zone string, low, high int, timeout time.Duration, pol *DnssecPolicy) error {
+// Per-key stamping is purely diagnostic — status output renders the
+// most recent error per key. The actual phase decision happens in
+// handleAttemptFailed.
+func recordObserveTimeout(kdb *KeyDB, zone string, low, high int, timeout time.Duration, pol *DnssecPolicy) {
 	msg := fmt.Sprintf("DS observation timeout (%s): parent never published expected DS RRset", timeout)
 	if low <= high {
 		created, err := GetDnssecKeysByState(kdb, zone, DnskeyStateCreated)
@@ -603,7 +599,6 @@ func observeHardFail(kdb *KeyDB, zone string, low, high int, timeout time.Durati
 		}
 	}
 	handleAttemptFailed(kdb, zone, pol, SoftfailParentPublishFailure, msg, time.Now())
-	return nil
 }
 
 // handleAttemptFailed is the shared decision point for any failed
