@@ -308,6 +308,9 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		// are no longer meaningful. Status output uses the absence of
 		// this timestamp to suppress stale window lines.
 		_ = setLastAttemptStarted(kdb, zone, time.Time{})
+		// Clear last_softfail_*: the previous softfail event is no
+		// longer informative now that we're back in sync.
+		_ = clearLastSoftfail(kdb, zone)
 		if advanced > 0 {
 			triggerResign(conf, zone)
 		}
@@ -362,6 +365,7 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 				_ = resetHardfailCount(kdb, zone)
 				_ = setLastSuccess(kdb, zone, now)
 				_ = setLastAttemptStarted(kdb, zone, time.Time{})
+				_ = clearLastSoftfail(kdb, zone)
 				if advanced > 0 {
 					triggerResign(conf, zone)
 				}

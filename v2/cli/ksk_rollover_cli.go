@@ -708,7 +708,7 @@ func printStateTable(s *tdns.RolloverStatus) {
 	type kv struct{ label, value string }
 	var left, right []kv
 
-	// Left column: attempt context.
+	// Left column: this zone's current intent + DS state.
 	left = append(left, kv{"status:", s.Headline + " — " + headlinePhraseFor(s.Headline, s.Phase)})
 	if s.Phase != "" && s.Phase != "idle" {
 		left = append(left, kv{"phase:", s.Phase})
@@ -726,17 +726,23 @@ func printStateTable(s *tdns.RolloverStatus) {
 	if s.LastUpdate != "" {
 		left = append(left, kv{"last UPDATE:", formatRolloverTime(s.LastUpdate)})
 	}
-	if s.Policy != nil && s.Policy.DsPublishDelay != "" {
-		left = append(left, kv{"ds-publish-delay:", s.Policy.DsPublishDelay})
-	}
 	if s.ExpectedBy != "" {
 		left = append(left, kv{"expected by:", formatRolloverTime(s.ExpectedBy)})
 	}
 	if s.AttemptTimeout != "" {
 		left = append(left, kv{"attempt timeout:", formatRolloverTime(s.AttemptTimeout)})
 	}
+	if s.Submitted != nil {
+		left = append(left, kv{"DS submitted:", dashKeyidsBracket(formatKeyidBracketList(s.SubmittedKeyIDs))})
+	}
+	if s.Confirmed != nil {
+		left = append(left, kv{"DS confirmed:", dashKeyidsBracket(formatKeyidBracketList(s.ConfirmedKeyIDs))})
+	}
 
-	// Right column: history & polling.
+	// Right column: timing config + history & polling.
+	if s.Policy != nil && s.Policy.DsPublishDelay != "" {
+		right = append(right, kv{"ds-publish-delay:", s.Policy.DsPublishDelay})
+	}
 	if s.LastSuccess != "" {
 		right = append(right, kv{"last success:", formatRolloverTime(s.LastSuccess)})
 	}
@@ -751,12 +757,6 @@ func printStateTable(s *tdns.RolloverStatus) {
 	}
 	if s.LastSoftfailAt != "" {
 		right = append(right, kv{"last failure:", formatRolloverTime(s.LastSoftfailAt)})
-	}
-	if s.Submitted != nil {
-		right = append(right, kv{"DS submitted:", dashKeyidsBracket(formatKeyidBracketList(s.SubmittedKeyIDs))})
-	}
-	if s.Confirmed != nil {
-		right = append(right, kv{"DS confirmed:", dashKeyidsBracket(formatKeyidBracketList(s.ConfirmedKeyIDs))})
 	}
 
 	// Zip into 4-cell rows. Use a non-breaking-ish placeholder for

@@ -697,6 +697,26 @@ func setLastAttemptStarted(kdb *KeyDB, zone string, at time.Time) error {
 	return err
 }
 
+// clearLastSoftfail nulls the last_softfail_* trio so status output
+// stops showing a past softfail event after the engine has recovered.
+// Called from confirmed-success paths alongside resetHardfailCount /
+// setLastSuccess / setLastAttemptStarted. The engine doesn't have a
+// "permanent failure" state post-overhaul (it always retries), so
+// once we're back in sync the previous softfail's category and
+// detail are no longer operationally informative — they describe a
+// window that has closed favorably.
+func clearLastSoftfail(kdb *KeyDB, zone string) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState
+SET last_softfail_at = NULL,
+    last_softfail_category = NULL,
+    last_softfail_detail = NULL
+WHERE zone = ?`, zone)
+	return err
+}
+
 // setNextPushAt updates next_push_at without touching last_softfail_*.
 // Used by the parent-push-softfail probe path which rolls
 // next_push_at forward by softfail_delay regardless of probe outcome
