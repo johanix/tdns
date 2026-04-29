@@ -26,32 +26,6 @@ func runTransportSignalPostpass(conf *Config) {
 	}
 }
 
-// rewriteApexSOASerial updates the in-memory apex SOA RDATA to match
-// zd.CurrentSerial. Call this immediately after overriding CurrentSerial
-// in unixtime/persist modes so SOA queries, AXFR/IXFR responses, and the
-// imminent NotifyDownstreams() advertise the new serial. The next
-// signing pass will refresh the SOA RRSIG; we don't sign here because
-// callers run a zone-wide SetupZoneSigning shortly after.
-func rewriteApexSOASerial(zd *ZoneData) {
-	if zd == nil {
-		return
-	}
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil || apex == nil {
-		return
-	}
-	soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
-	if len(soaRRset.RRs) == 0 {
-		return
-	}
-	soa, ok := soaRRset.RRs[0].(*dns.SOA)
-	if !ok {
-		return
-	}
-	soa.Serial = zd.CurrentSerial
-	apex.RRtypes.Set(dns.TypeSOA, soaRRset)
-}
-
 type RefreshCounter struct {
 	Name           string
 	SOARefresh     uint32
@@ -164,7 +138,7 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 				}
 			}
 			if serialChanged {
-				rewriteApexSOASerial(zd)
+				setApexSOASerial(zd)
 			}
 		}
 		zd.NotifyDownstreams()
@@ -632,7 +606,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								}
 							}
 							if serialChanged {
-								rewriteApexSOASerial(zd)
+								setApexSOASerial(zd)
 							}
 						}
 

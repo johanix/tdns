@@ -637,11 +637,60 @@ func FindZoneNG(qname string) *ZoneData {
 	return nil
 }
 
-// BumpSerialOnly increments the SOA serial and updates the SOA RR,
-// but does not notify downstreams. Use when the caller will handle
-// notification separately or when notification is not appropriate
-// (e.g. inside a NOTIFY handler where triggering downstream NOTIFYs
-// could cause side effects).
+// nextOutboundSerial returns the next SOA serial that should be advertised
+// to downstreams given zd.CurrentSerial and the configured outbound_soa_serial
+// mode:
+//   - "" / "keep" / "persist": prev + 1 (legacy behaviour; "persist" only
+//     differs in that the resulting serial is also written to OutgoingSerials)
+//   - "unixtime": time.Now().Unix(), unless that would not advance the serial
+//     (e.g. multiple bumps within the same wallclock second), in which case
+//     fall back to prev + 1 to preserve monotonicity.
+func nextOutboundSerial(zd *ZoneData) uint32 {
+	mode := ""
+	if zd.KeyDB != nil {
+		mode = zd.KeyDB.OutboundSoaSerial
+	}
+	if mode == OutboundSoaSerialUnixtime {
+		s := uint32(time.Now().Unix())
+		if s > zd.CurrentSerial {
+			return s
+		}
+	}
+	return zd.CurrentSerial + 1
+}
+
+// setApexSOASerial rewrites the in-memory apex SOA RDATA so its Serial field
+// matches zd.CurrentSerial. Caller must hold zd.mu (or be in a context where
+// no concurrent reader/writer can observe the zone). Returns true if the SOA
+// RR was found and updated, false otherwise (zone not loaded, no apex, no
+// SOA RRset).
+func setApexSOASerial(zd *ZoneData) bool {
+	if zd == nil {
+		return false
+	}
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil || apex == nil {
+		return false
+	}
+	soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+	if len(soaRRset.RRs) == 0 {
+		return false
+	}
+	soa, ok := soaRRset.RRs[0].(*dns.SOA)
+	if !ok {
+		return false
+	}
+	soa.Serial = zd.CurrentSerial
+	apex.RRtypes.Set(dns.TypeSOA, soaRRset)
+	return true
+}
+
+// BumpSerialOnly advances the SOA serial per the configured
+// outbound_soa_serial mode and rewrites the apex SOA RR (and its
+// RRSIG, when the zone is signed). Does not notify downstreams.
+// Use when the caller will handle notification separately or when
+// notification is not appropriate (e.g. inside a NOTIFY handler
+// where triggering downstream NOTIFYs could cause side effects).
 func (zd *ZoneData) BumpSerialOnly() (BumperResponse, error) {
 	resp := BumperResponse{
 		Zone: zd.ZoneName,
@@ -652,7 +701,7 @@ func (zd *ZoneData) BumpSerialOnly() (BumperResponse, error) {
 	defer zd.mu.Unlock()
 
 	resp.OldSerial = zd.CurrentSerial
-	zd.CurrentSerial++
+	zd.CurrentSerial = nextOutboundSerial(zd)
 	resp.NewSerial = zd.CurrentSerial
 	if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial == OutboundSoaSerialPersist {
 		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
@@ -660,16 +709,17 @@ func (zd *ZoneData) BumpSerialOnly() (BumperResponse, error) {
 			return resp, fmt.Errorf("persist outgoing serial for zone %s: %w", zd.ZoneName, err)
 		}
 	}
+	if !setApexSOASerial(zd) {
+		// No apex SOA to rewrite: nothing more to do (caller may be
+		// bumping serial on a not-yet-loaded zone).
+		return resp, nil
+	}
 	if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
 		apex, err := zd.GetOwner(zd.ZoneName)
 		if err != nil {
 			lg.Error("GetOwner failed", "zone", zd.ZoneName, "err", err)
 			return resp, err
 		}
-		soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
-		soaRRset.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
-		apex.RRtypes.Set(dns.TypeSOA, soaRRset)
-
 		rrset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
 		_, err = zd.SignRRset(&rrset, zd.ZoneName, nil, true, nil) // true = force signing, as we know the SOA has changed
 		if err != nil {
