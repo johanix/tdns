@@ -349,7 +349,7 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 		// RolloverKeyState so rolloverDue and the K-step clamp scheduler
 		// can find an active_at timestamp. No-op for non-rollover zones.
 		if err := RegisterBootstrapActiveKSK(kdb, zd.ZoneName, pkc.KeyId, zd.DnssecPolicy.Rollover.Method, zd.DnssecPolicy.Algorithm); err != nil {
-			lgSigner.Warn("rollover: register bootstrap KSK failed", "zone", zd.ZoneName, "keyid", pkc.KeyId, "err", err)
+			return nil, fmt.Errorf("EnsureActiveDnssecKeys: register bootstrap KSK for zone %s keyid %d: %w", zd.ZoneName, pkc.KeyId, err)
 		}
 		// Invalidate cache and re-fetch active keys after KSK generation
 		dak, err = zd.refreshActiveDnssecKeys(kdb, "after KSK generation")
@@ -433,12 +433,16 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 	// 4D K-step TTL clamp: build ClampParams once per pass so every RRset
 	// signed in this pass observes the same K. nil for non-clamping zones
 	// (or zones with no scheduled rollover, mid-rollover, etc.).
+	//
+	// On error we refuse to sign rather than silently fall back to
+	// unclamped signing — the whole point of the clamp is the rollover
+	// safety window, and publishing TTLs outside it defeats the design.
 	var clamp *ClampParams
 	if zd.DnssecPolicy != nil {
 		clamp, err = ClampParamsForZone(kdb, zd.ZoneName, zd.DnssecPolicy, time.Now())
 		if err != nil {
-			lgSigner.Warn("SignZone: ClampParamsForZone failed; signing without clamp", "zone", zd.ZoneName, "err", err)
-			clamp = nil
+			lgSigner.Error("SignZone: ClampParamsForZone failed; refusing to sign", "zone", zd.ZoneName, "err", err)
+			return 0, fmt.Errorf("SignZone: ClampParamsForZone for zone %s: %w", zd.ZoneName, err)
 		}
 	}
 
