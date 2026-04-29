@@ -3,7 +3,7 @@
 Author: Johan / Claude
 Date: 2026-04-29
 Status: implementation in progress on branch `rollover-overhaul`
-        (phases 1–10 done; phase 11 next; phase 12 cleanup at end)
+        (phases 1–11 done; phase 12 cleanup is the only thing left)
 
 This document supersedes:
 
@@ -852,8 +852,8 @@ Status as of 2026-04-29:
 | 8     | RolloverStatus struct + compute             | `99095f6`    | done     |
 | 9     | read endpoints + CLI conversion             | `0215580`    | done     |
 | 10    | write endpoints + CLI conversion            | `2d46d8b`    | done (lockfile guard deferred to phase 12) |
-| 11    | parent-side EDE (parallel)                  | —            | next     |
-| 12    | cleanup                                     | —            |          |
+| 11    | parent-side EDE (parallel)                  | (see body)   | done (incl. SIG(0) validation EDEs) |
+| 12    | cleanup                                     | —            | next     |
 
 Tangential fix landed alongside on `fast-roller-1`: `825cee8`
 implemented the missing `ClampedDuration` helper that was blocking
@@ -1006,7 +1006,7 @@ from the 2026-04-28 debug session is gone in default mode.
    writers from running while a daemon holds the sqlite file
    open.
 
-### Phase 11 — parent-side EDE (parallel)  (NEXT)
+### Phase 11 — parent-side EDE (parallel)  (DONE — pending hash)
 
 Independent of phases 1-10. Can land any time after Phase 1.
 
@@ -1018,7 +1018,7 @@ Independent of phases 1-10. Can land any time after Phase 1.
    and `ApproveChildUpdate`.
 5. Targeted test: a policy-rejected UPDATE returns REFUSED + EDE.
 
-### Phase 12 — cleanup
+### Phase 12 — cleanup  (NEXT)
 
 1. Remove `observeHardFail` (semantics no longer apply; the body
    is now a thin wrapper over `handleAttemptFailed`). Inline the

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/johanix/tdns/v2/cache"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 	// "github.com/gookit/goutil/dump"
 )
@@ -91,12 +92,14 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 	if err != nil {
 		lgDns.Error("ValidateUpdate: error from msg.Pack()", "err", err)
 		us.ValidationRcode = dns.RcodeFormatError
+		us.RejectionEDE = edns0.EDESig0FormatError
 		return err
 	}
 	lgDns.Info("ValidateUpdate: packed message", "buflen", len(msgbuf), "first32", fmt.Sprintf("%x", msgbuf[:min(32, len(msgbuf))]))
 
 	if len(r.Extra) == 0 { // there is no signature on the update
 		us.ValidationRcode = dns.RcodeFormatError
+		us.RejectionEDE = edns0.EDESig0FormatError
 		us.Validated = false
 		us.ValidatedByTrustedKey = false
 		return fmt.Errorf("update has no signature")
@@ -215,7 +218,22 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		keyrr := signer.Sig0Key.Key
 		err = sig.Verify(&keyrr, msgbuf)
 		if err != nil {
-			// This key failed to validate the update. Try the next key.
+			// This key failed to validate the update. Categorize the
+			// failure: if NOW is outside the signature's validity
+			// window, the most likely cause is clock skew between
+			// the signer and verifier — that's BADTIME, not BADSIG.
+			// Detecting it here (rather than via fragile string
+			// matching on miekg/dns's "dns: bad time" error string)
+			// is robust to library version changes. Phase 11 of the
+			// rollover overhaul: surface this as a specific rcode +
+			// EDE so the child operator can diagnose clock skew
+			// without parent-side log access.
+			if !cache.WithinValidityPeriod(sig.Inception, sig.Expiration, time.Now().UTC()) {
+				us.ValidationRcode = dns.RcodeBadTime
+				us.RejectionEDE = edns0.EDESig0BadTime
+			} else if us.RejectionEDE == 0 {
+				us.RejectionEDE = edns0.EDESig0BadSignature
+			}
 			lgDns.Warn("ValidateUpdate: signature verification failed", "signer", signer.Name, "keyid", signer.KeyId, "err", err)
 			lgDns.Debug("ValidateUpdate: timing details", "currentTime", time.Now(), "inception", sig.Inception, "expiration", sig.Expiration)
 			continue
@@ -225,6 +243,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		if !cache.WithinValidityPeriod(sig.Inception, sig.Expiration, time.Now().UTC()) {
 			lgDns.Warn("ValidateUpdate: signature NOT within validity period", "signer", signer.Name, "keyid", signer.KeyId)
 			us.ValidationRcode = dns.RcodeBadTime
+			us.RejectionEDE = edns0.EDESig0BadTime
 			// This key validated the signature, but the signature is not within its validity period.
 			// Try the next key.
 			continue
@@ -234,6 +253,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		lgDns.Info("ValidateUpdate: signature within validity period", "signer", signer.Name, "keyid", signer.KeyId)
 		lgDns.Info("ValidateUpdate: update validated by known and validated key")
 		us.ValidationRcode = dns.RcodeSuccess
+		us.RejectionEDE = 0 // success — clear any prior key's failure EDE
 		us.Validated = true // Now at least one key has validated the update
 		us.SignerName = signer.Name
 		signer.Validated = true
@@ -272,6 +292,7 @@ func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 	// If we get here then the update is not signed by any trusted, or DNSSEC validated key. Nor
 	// is it self-signed.
 	us.ValidationRcode = dns.RcodeBadKey
+	us.RejectionEDE = edns0.EDESig0KeyKnownButNotTrusted
 	return fmt.Errorf("update is signed by %s (keyid %d) which is neither a trusted SIG(0) key nor a DNSSEC validated key", us.Signers[0].Name, us.Signers[0].KeyId)
 }
 

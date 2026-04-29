@@ -534,10 +534,17 @@ type UpdateStatus struct {
 	SafetyChecked         bool               // true if the update has been safety checked
 	PolicyChecked         bool               // true if the update has been policy checked
 	Approved              bool               // true if the update has been approved
-	Msg                   string
-	Error                 bool
-	ErrorMsg              string
-	Status                bool
+	// RejectionEDE is the specific EDE code that describes why the
+	// update was rejected, set by ApproveUpdate (or by ValidateUpdate
+	// for the validation-failure paths). The responder reads this
+	// when constructing the wire response and attaches the EDE so the
+	// child operator can diagnose without parent-side log access.
+	// Zero means "no specific reason recorded."
+	RejectionEDE uint16
+	Msg          string
+	Error        bool
+	ErrorMsg     string
+	Status       bool
 }
 
 type NotifyStatus struct {
