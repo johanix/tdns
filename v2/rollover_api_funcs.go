@@ -54,7 +54,29 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.
 	out.HiddenRemovedKskCount = hiddenRemoved
 	out.ZSKs, _ = loadRolloverKeyEntries(kdb, zone, false)
 
+	if err := populateDSKeyidsForStatus(kdb, zone, out); err != nil {
+		return nil, fmt.Errorf("ComputeRolloverStatus: %w", err)
+	}
+
 	return out, nil
+}
+
+func populateDSKeyidsForStatus(kdb *KeyDB, zone string, out *RolloverStatus) error {
+	if out.Submitted != nil {
+		ids, err := RolloverKeyidsByIndexRange(kdb, zone, int64(out.Submitted.Low), int64(out.Submitted.High))
+		if err != nil {
+			return fmt.Errorf("submitted keyids: %w", err)
+		}
+		out.SubmittedKeyIDs = ids
+	}
+	if out.Confirmed != nil {
+		ids, err := RolloverKeyidsByIndexRange(kdb, zone, int64(out.Confirmed.Low), int64(out.Confirmed.High))
+		if err != nil {
+			return fmt.Errorf("confirmed keyids: %w", err)
+		}
+		out.ConfirmedKeyIDs = ids
+	}
+	return nil
 }
 
 // ComputeRolloverWhen wraps ComputeEarliestRollover into wire-friendly

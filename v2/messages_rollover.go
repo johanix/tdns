@@ -30,11 +30,16 @@ type RolloverStatus struct {
 	// softfail to guide the operator's reading of the timing fields.
 	Hint string `json:"hint,omitempty"`
 
-	// Submitted/confirmed DS index ranges. Submitted is diagnostic-
-	// only after rollover-overhaul phase 3; Confirmed is the gate
-	// input to kskIndexPushNeeded.
+	// Submitted/confirmed hold inclusive [low, high] rollover_index
+	// spans persisted from the last parent DS push / observation
+	// (SQL BETWEEN semantics — every integer in the interval).
 	Submitted *DSRange `json:"submitted,omitempty"`
 	Confirmed *DSRange `json:"confirmed,omitempty"`
+	// SubmittedKeyIDs / ConfirmedKeyIDs list SEP keyids whose
+	// rollover_index lies in Submitted / Confirmed (same reconciliation
+	// as the per-key table; verifiable at the parent).
+	SubmittedKeyIDs []uint16 `json:"submittedKeyids,omitempty"`
+	ConfirmedKeyIDs []uint16 `json:"confirmedKeyids,omitempty"`
 
 	// Manual-rollover schedule (asap/cancel CLI flow).
 	ManualRequestedAt string `json:"manualRequestedAt,omitempty"`
@@ -79,8 +84,8 @@ type RolloverStatus struct {
 	Policy *PolicySummary `json:"policy,omitempty"`
 }
 
-// DSRange is a [low, high] range over rollover_index values used to
-// describe submitted and confirmed DS RRset windows.
+// DSRange is an inclusive integer [low, high] rollover_index interval
+// (endpoints included).
 type DSRange struct {
 	Low  int `json:"low"`
 	High int `json:"high"`

@@ -542,7 +542,7 @@ manual_rollover_* row isn't being read by anything).`,
 }
 
 func newAutoRolloverStatusCmd() *cobra.Command {
-	var verbose, offline bool
+	var verbose, offline, kskOnly, zskOnly bool
 	c := &cobra.Command{
 		Use:   "status",
 		Short: "Print rollover state for a zone (KSK and ZSK)",
@@ -554,11 +554,24 @@ on the CLI host). Use --offline to render against the keystore file
 when the daemon is down — that requires --config with the daemon's
 config file so the CLI can find db.file and the zone's policy.
 
-Use -v / --verbose to show full last_error text and the policy summary.`,
+Use --ksk or --zsk to print only the KSK block or only the ZSK block
+(the two flags are mutually exclusive).
+
+The DS range line lists SEP keyids (same numbering as the KSK table and
+as DS digest key tags at the parent).
+
+Use -v / --verbose to show rollover_index spans behind the keyid lists
+and the policy summary.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs(cmd, "zonename")
 			tdns.Globals.App.Type = tdns.AppTypeCli
 			z := dns.Fqdn(tdns.Globals.Zonename)
+
+			if kskOnly && zskOnly {
+				cliFatalf("flags --ksk and --zsk are mutually exclusive")
+			}
+			showKSK := !zskOnly
+			showZSK := !kskOnly
 
 			var s *tdns.RolloverStatus
 			if offline {
@@ -566,12 +579,14 @@ Use -v / --verbose to show full last_error text and the policy summary.`,
 			} else {
 				s = fetchRolloverStatusOnline(z)
 			}
-			renderRolloverStatus(s, verbose)
+			renderRolloverStatus(s, verbose, showKSK, showZSK)
 		},
 	}
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
 	c.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show full last_error text and policy summary")
 	c.Flags().BoolVar(&offline, "offline", false, "Render against keystore file (postmortem use; daemon is down)")
+	c.Flags().BoolVar(&kskOnly, "ksk", false, "Print only the KSK rollover section (omit ZSK)")
+	c.Flags().BoolVar(&zskOnly, "zsk", false, "Print only the ZSK rollover section (omit KSK)")
 	_ = c.MarkFlagRequired("zone")
 	return c
 }
@@ -615,115 +630,149 @@ func fetchRolloverStatusOffline(z string) *tdns.RolloverStatus {
 	return s
 }
 
+// formatKeyidBracketList renders keyids like "[10773, 41502, 13007]".
+func formatKeyidBracketList(ids []uint16) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = fmt.Sprintf("%d", id)
+	}
+	return "[" + strings.Join(parts, ", ") + "]"
+}
+
+func dashKeyidsBracket(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// printDSKeyidRangeLine prints the legacy single-line DS range summary.
+func printDSKeyidRangeLine(s *tdns.RolloverStatus, verbose bool) {
+	if s.Submitted == nil && s.Confirmed == nil {
+		return
+	}
+	sub := formatKeyidBracketList(s.SubmittedKeyIDs)
+	conf := formatKeyidBracketList(s.ConfirmedKeyIDs)
+	fmt.Printf("  DS range:         submitted to parent: %s confirmed: %s\n",
+		dashKeyidsBracket(sub), dashKeyidsBracket(conf))
+	if !verbose {
+		return
+	}
+	var parts []string
+	if s.Submitted != nil {
+		parts = append(parts, fmt.Sprintf("submitted rollover_index [%d, %d]", s.Submitted.Low, s.Submitted.High))
+	}
+	if s.Confirmed != nil {
+		parts = append(parts, fmt.Sprintf("confirmed rollover_index [%d, %d]", s.Confirmed.Low, s.Confirmed.High))
+	}
+	if len(parts) > 0 {
+		fmt.Printf("                      %s\n", strings.Join(parts, "  "))
+	}
+}
+
 // renderRolloverStatus prints a *RolloverStatus per the design spec
 // in 2026-04-29-rollover-overhaul.md. Same renderer regardless of
 // whether the struct came from the API or from local computation.
-func renderRolloverStatus(s *tdns.RolloverStatus, verbose bool) {
+func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool) {
 	if s == nil {
 		return
 	}
-	// First line: server's wallclock at response time. Reference
-	// frame for the relative-time annotations on every other field.
 	fmt.Printf("Current time:     %s\n", formatRolloverTimeAbsolute(s.CurrentTime))
 
-	fmt.Printf("KSK rollover state for zone %s:\n", s.Zone)
+	if showKSK {
+		fmt.Printf("KSK rollover state for zone %s:\n", s.Zone)
 
-	headlinePhrase := headlinePhraseFor(s.Headline, s.Phase)
-	fmt.Printf("  status            %s — %s\n", s.Headline, headlinePhrase)
-	if s.Phase != "" && s.Phase != "idle" {
-		fmt.Printf("  phase             %s\n", s.Phase)
-	}
+		headlinePhrase := headlinePhraseFor(s.Headline, s.Phase)
+		fmt.Printf("  status            %s — %s\n", s.Headline, headlinePhrase)
+		if s.Phase != "" && s.Phase != "idle" {
+			fmt.Printf("  phase             %s\n", s.Phase)
+		}
 
-	if s.AttemptMax > 0 {
-		switch s.Headline {
-		case "ACTIVE":
-			if s.AttemptIndex > 0 {
-				fmt.Printf("  attempts          %d / %d in current group\n", s.AttemptIndex, s.AttemptMax)
+		if s.AttemptMax > 0 {
+			switch s.Headline {
+			case "ACTIVE":
+				if s.AttemptIndex > 0 {
+					fmt.Printf("  attempts          %d / %d in current group\n", s.AttemptIndex, s.AttemptMax)
+				}
+			case "SOFTFAIL":
+				fmt.Printf("  attempts          initial flurry (%d/%d) failed; in long-term mode\n", s.HardfailCount, s.AttemptMax)
 			}
-		case "SOFTFAIL":
-			fmt.Printf("  attempts          initial flurry (%d/%d) failed; in long-term mode\n", s.HardfailCount, s.AttemptMax)
 		}
-	}
 
-	// Anchor timestamps for ACTIVE attempts.
-	if s.LastUpdate != "" {
-		fmt.Printf("  last UPDATE       %s\n", formatRolloverTime(s.LastUpdate))
-	}
-	if s.Policy != nil && s.Policy.DsPublishDelay != "" {
-		fmt.Printf("  ds-publish-delay  %s\n", s.Policy.DsPublishDelay)
-	}
-	if s.ExpectedBy != "" {
-		fmt.Printf("  expected by       %s\n", formatRolloverTime(s.ExpectedBy))
-	}
-	if s.AttemptTimeout != "" {
-		fmt.Printf("  attempt timeout   %s\n", formatRolloverTime(s.AttemptTimeout))
-	}
-
-	// Softfail block.
-	if s.LastSoftfailAt != "" {
-		fmt.Printf("  last failure      %s\n", formatRolloverTime(s.LastSoftfailAt))
-		if s.LastSoftfailCat != "" {
-			fmt.Printf("                    category: %s\n", s.LastSoftfailCat)
+		if s.LastUpdate != "" {
+			fmt.Printf("  last UPDATE       %s\n", formatRolloverTime(s.LastUpdate))
 		}
-		if s.LastSoftfailDetail != "" {
-			detail := s.LastSoftfailDetail
-			if !verbose && len(detail) > 80 {
-				detail = detail[:77] + "..."
+		if s.Policy != nil && s.Policy.DsPublishDelay != "" {
+			fmt.Printf("  ds-publish-delay  %s\n", s.Policy.DsPublishDelay)
+		}
+		if s.ExpectedBy != "" {
+			fmt.Printf("  expected by       %s\n", formatRolloverTime(s.ExpectedBy))
+		}
+		if s.AttemptTimeout != "" {
+			fmt.Printf("  attempt timeout   %s\n", formatRolloverTime(s.AttemptTimeout))
+		}
+
+		if s.LastSoftfailAt != "" {
+			fmt.Printf("  last failure      %s\n", formatRolloverTime(s.LastSoftfailAt))
+			if s.LastSoftfailCat != "" {
+				fmt.Printf("                    category: %s\n", s.LastSoftfailCat)
 			}
-			fmt.Printf("                    detail:   %s\n", detail)
+			if s.LastSoftfailDetail != "" {
+				detail := s.LastSoftfailDetail
+				if !verbose && len(detail) > 80 {
+					detail = detail[:77] + "..."
+				}
+				fmt.Printf("                    detail:   %s\n", detail)
+			}
+		}
+		if s.NextPushAt != "" {
+			fmt.Printf("  next probe        %s\n", formatRolloverTime(s.NextPushAt))
+		}
+
+		if s.LastPoll != "" {
+			fmt.Printf("  last poll         %s — DS not yet observed\n", formatRolloverTime(s.LastPoll))
+		}
+		if s.NextPoll != "" {
+			fmt.Printf("  next poll         %s\n", formatRolloverTime(s.NextPoll))
+		}
+
+		if s.Hint != "" {
+			fmt.Printf("  hint              %s\n", s.Hint)
+			if s.Headline == "SOFTFAIL" {
+				fmt.Printf("                    use 'auto-rollover unstick --zone %s' to skip the wait and probe now\n", s.Zone)
+			}
+		}
+
+		if s.LastSuccess != "" {
+			fmt.Printf("  last success      %s\n", formatRolloverTime(s.LastSuccess))
+		}
+
+		printDSKeyidRangeLine(s, verbose)
+
+		if len(s.KSKs) > 0 {
+			fmt.Println()
+			fmt.Println("  KSKs:")
+			printRolloverKeyTable(s.KSKs, verbose, true)
+			if s.HiddenRemovedKskCount > 0 {
+				fmt.Printf("  ... %d older removed key(s) not shown\n", s.HiddenRemovedKskCount)
+			}
 		}
 	}
-	if s.NextPushAt != "" {
-		fmt.Printf("  next probe        %s\n", formatRolloverTime(s.NextPushAt))
-	}
 
-	// Polling activity.
-	if s.LastPoll != "" {
-		fmt.Printf("  last poll         %s — DS not yet observed\n", formatRolloverTime(s.LastPoll))
-	}
-	if s.NextPoll != "" {
-		fmt.Printf("  next poll         %s\n", formatRolloverTime(s.NextPoll))
-	}
-
-	if s.Hint != "" {
-		fmt.Printf("  hint              %s\n", s.Hint)
-		if s.Headline == "SOFTFAIL" {
-			fmt.Printf("                    use 'auto-rollover unstick --zone %s' to skip the wait and probe now\n", s.Zone)
-		}
-	}
-
-	if s.LastSuccess != "" {
-		fmt.Printf("  last success      %s\n", formatRolloverTime(s.LastSuccess))
-	}
-
-	// DS index ranges (diagnostic).
-	if s.Submitted != nil {
-		fmt.Printf("  DS submitted      [%d, %d]\n", s.Submitted.Low, s.Submitted.High)
-	}
-	if s.Confirmed != nil {
-		fmt.Printf("  DS confirmed      [%d, %d]\n", s.Confirmed.Low, s.Confirmed.High)
-	}
-
-	// Per-key tables.
-	if len(s.KSKs) > 0 {
+	if showZSK {
 		fmt.Println()
-		fmt.Println("  KSKs:")
-		printRolloverKeyTable(s.KSKs, verbose, true)
-		if s.HiddenRemovedKskCount > 0 {
-			fmt.Printf("  ... %d older removed key(s) not shown\n", s.HiddenRemovedKskCount)
+		fmt.Printf("ZSK rollover state for zone %s:\n", s.Zone)
+		fmt.Println("  no rollovers ongoing (automated ZSK rollover not implemented)")
+		if len(s.ZSKs) > 0 {
+			fmt.Println()
+			printRolloverKeyTable(s.ZSKs, verbose, false)
 		}
 	}
 
-	fmt.Println()
-	fmt.Printf("ZSK rollover state for zone %s:\n", s.Zone)
-	fmt.Println("  no rollovers ongoing (automated ZSK rollover not implemented)")
-	if len(s.ZSKs) > 0 {
-		fmt.Println()
-		printRolloverKeyTable(s.ZSKs, verbose, false)
-	}
-
-	// Policy summary in verbose mode.
-	if verbose && s.Policy != nil {
+	if verbose && s.Policy != nil && showKSK {
 		fmt.Println()
 		fmt.Println("  policy:")
 		fmt.Printf("    name                         %s\n", s.Policy.Name)
