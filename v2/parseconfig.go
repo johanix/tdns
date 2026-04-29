@@ -343,12 +343,18 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// KDC and KRS configuration parsing has been moved to tdns-nm
 	// See kdc.ParseKdcConfigFromFile() and krs.ParseKrsConfigFromFile()
 
-	// XXX: Hmm. Should not initialize KeyDB on reload?
+	// On first start: build the KeyDB. On reload: keep the existing
+	// KeyDB but re-apply outbound_soa_serial so a config edit takes
+	// effect without a full restart.
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent:
 		if !reload {
 			err = conf.InitializeKeyDB()
 			if err != nil {
+				return err
+			}
+		} else if conf.Internal.KeyDB != nil {
+			if err := applyOutboundSoaSerial(conf.Internal.KeyDB, conf.DnsEngine.OutboundSoaSerial); err != nil {
 				return err
 			}
 		}
@@ -430,23 +436,33 @@ func (conf *Config) InitializeKeyDB() error {
 	}
 	conf.Internal.KeyDB = kdb
 
-	// Resolve outbound_soa_serial mode: default to "keep" when unset.
-	// Validation (oneof=keep|unixtime|persist) is enforced by the struct
-	// tag at config-validate time.
-	mode := strings.TrimSpace(strings.ToLower(conf.DnsEngine.OutboundSoaSerial))
+	if err := applyOutboundSoaSerial(kdb, conf.DnsEngine.OutboundSoaSerial); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// applyOutboundSoaSerial resolves the configured outbound_soa_serial mode
+// onto the KeyDB and ensures the persist-mode table exists. Called from
+// InitializeKeyDB on first start AND from the reload path in ParseConfig
+// so a config edit that flips dnsengine.outbound_soa_serial takes effect
+// without a full restart.
+func applyOutboundSoaSerial(kdb *KeyDB, raw string) error {
+	// Default to "keep" when unset. Validation (oneof=keep|unixtime|persist)
+	// is enforced by the struct tag at config-validate time.
+	mode := strings.TrimSpace(strings.ToLower(raw))
 	if mode == "" {
 		mode = OutboundSoaSerialKeep
 	}
 	kdb.OutboundSoaSerial = mode
 
-	// Ensure OutgoingSerials table exists for persist mode.
 	if mode == OutboundSoaSerialPersist {
 		schema := DefaultTables["OutgoingSerials"]
 		if _, err := kdb.DB.Exec(schema); err != nil {
 			return fmt.Errorf("failed to create OutgoingSerials table: %w", err)
 		}
 	}
-
 	return nil
 }
 
