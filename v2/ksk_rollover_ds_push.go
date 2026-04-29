@@ -11,9 +11,14 @@ import (
 )
 
 // KSKDSPushResult is the outcome of PushWholeDSRRset (rcode and wire diagnostics).
+// Category is empty on success (rcode NOERROR + persisted submitted range);
+// otherwise it is one of the SoftfailXxx constants from
+// ksk_rollover_categories.go and the engine's caller uses it to record a
+// softfail event via setSoftfail.
 type KSKDSPushResult struct {
 	Rcode        int
 	UpdateResult UpdateResult
+	Category     string
 }
 
 // BuildChildWholeDSUpdate builds a DNS UPDATE for the parent zone that replaces the
@@ -143,6 +148,7 @@ ORDER BY COALESCE(r.rollover_index, 2147483646) ASC, k.keyid ASC`
 func PushWholeDSRRset(ctx context.Context, zd *ZoneData, kdb *KeyDB, imr *Imr) (KSKDSPushResult, error) {
 	var out KSKDSPushResult
 	if zd == nil || kdb == nil || imr == nil {
+		out.Category = SoftfailChildConfig
 		return out, fmt.Errorf("PushWholeDSRRset: nil argument")
 	}
 	child := dns.Fqdn(zd.ZoneName)
@@ -151,6 +157,7 @@ func PushWholeDSRRset(ctx context.Context, zd *ZoneData, kdb *KeyDB, imr *Imr) (
 		var err error
 		parent, err = imr.ParentZone(child)
 		if err != nil {
+			out.Category = SoftfailTransport
 			return out, fmt.Errorf("PushWholeDSRRset: parent zone: %w", err)
 		}
 		parent = dns.Fqdn(parent)
@@ -158,27 +165,33 @@ func PushWholeDSRRset(ctx context.Context, zd *ZoneData, kdb *KeyDB, imr *Imr) (
 
 	dsSet, low, high, idxOK, err := ComputeTargetDSSetForZone(kdb, child, uint8(dns.SHA256))
 	if err != nil {
+		out.Category = SoftfailChildConfig
 		return out, err
 	}
 	if len(dsSet) == 0 {
+		out.Category = SoftfailChildConfig
 		return out, fmt.Errorf("PushWholeDSRRset: no DS records to publish for zone %s", child)
 	}
 
 	msg, err := BuildChildWholeDSUpdate(parent, child, dsSet)
 	if err != nil {
+		out.Category = SoftfailChildConfig
 		return out, err
 	}
 
 	sak, err := kdb.GetSig0Keys(child, Sig0StateActive)
 	if err != nil {
+		out.Category = SoftfailChildConfig
 		return out, fmt.Errorf("PushWholeDSRRset: GetSig0Keys: %w", err)
 	}
 	if len(sak.Keys) == 0 {
+		out.Category = SoftfailChildConfig
 		return out, fmt.Errorf("PushWholeDSRRset: no active SIG(0) key for zone %s", child)
 	}
 
 	smsg, err := SignMsg(*msg, child, sak)
 	if err != nil {
+		out.Category = SoftfailChildConfig
 		return out, fmt.Errorf("PushWholeDSRRset: SignMsg: %w", err)
 	}
 
@@ -186,6 +199,7 @@ func PushWholeDSRRset(ctx context.Context, zd *ZoneData, kdb *KeyDB, imr *Imr) (
 	if err != nil {
 		dsyncTarget, err = imr.LookupDSYNCTarget(ctx, child, dns.TypeANY, core.SchemeUpdate)
 		if err != nil {
+			out.Category = SoftfailTransport
 			return out, fmt.Errorf("PushWholeDSRRset: DSYNC target: %w", err)
 		}
 	}
@@ -194,14 +208,20 @@ func PushWholeDSRRset(ctx context.Context, zd *ZoneData, kdb *KeyDB, imr *Imr) (
 	out.Rcode = rcode
 	out.UpdateResult = ur
 	if err != nil {
+		// SendUpdate's err is a network-layer failure: i/o timeout,
+		// no route to host, conn refused, etc. Rcode-level rejections
+		// from the parent come back via rcode without err.
+		out.Category = SoftfailTransport
 		return out, err
 	}
 	if rcode != dns.RcodeSuccess {
+		out.Category = SoftfailParentRejected
 		return out, nil
 	}
 
 	if idxOK {
 		if err := saveLastDSSubmittedRange(kdb, child, low, high); err != nil {
+			out.Category = SoftfailChildConfig
 			return out, fmt.Errorf("PushWholeDSRRset: persist submitted range: %w", err)
 		}
 	} else {

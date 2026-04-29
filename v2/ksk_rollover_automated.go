@@ -181,17 +181,25 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		// under pending-parent-observe.
 		if imr == nil {
 			lgSigner.Warn("rollover: ImrEngine nil, cannot DS push", "zone", zone)
+			_ = setSoftfail(kdb, zone, SoftfailChildConfig, "ImrEngine nil, cannot DS push", now, time.Time{})
 			return nil
 		}
 		pushCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		res, err := PushWholeDSRRset(pushCtx, zd, kdb, imr)
 		cancel()
 		if err != nil {
-			lgSigner.Warn("rollover: DS push failed", "zone", zone, "err", err)
+			lgSigner.Warn("rollover: DS push failed", "zone", zone, "err", err, "category", res.Category)
+			cat := res.Category
+			if cat == "" {
+				cat = SoftfailTransport
+			}
+			_ = setSoftfail(kdb, zone, cat, err.Error(), now, time.Time{})
 			return nil
 		}
 		if res.Rcode != dns.RcodeSuccess {
 			lgSigner.Warn("rollover: DS push non-NOERROR", "zone", zone, "rcode", dns.RcodeToString[res.Rcode])
+			detail := fmt.Sprintf("rcode=%s", dns.RcodeToString[res.Rcode])
+			_ = setSoftfail(kdb, zone, SoftfailParentRejected, detail, now, time.Time{})
 			return nil
 		}
 		// Schedule the first parent-agent DS query: wait confirm-initial-wait
@@ -447,6 +455,11 @@ WHERE zone = ?`, zone); err != nil {
 // state=created that was waiting on confirmation of the [low, high] range,
 // then resets the zone to idle. No TX needed: this is a diagnostic write
 // path and idempotent retry on the next tick is safe.
+//
+// Records a parent-publish-failure softfail event so status output
+// can render the cause and timestamp. Phase 5 will repurpose this
+// function further (counter increment + softfail-delay scheduling);
+// for now it just adds the categorization.
 func observeHardFail(kdb *KeyDB, zone string, low, high int, timeout time.Duration) error {
 	msg := fmt.Sprintf("DS observation timeout (%s): parent never published expected DS RRset", timeout)
 	if low <= high {
@@ -465,6 +478,7 @@ func observeHardFail(kdb *KeyDB, zone string, low, high int, timeout time.Durati
 			}
 		}
 	}
+	_ = setSoftfail(kdb, zone, SoftfailParentPublishFailure, msg, time.Now(), time.Time{})
 	_ = clearObserveSchedule(kdb, zone)
 	return SetRolloverPhase(kdb, zone, rolloverPhaseIdle)
 }
