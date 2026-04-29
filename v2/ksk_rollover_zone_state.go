@@ -687,3 +687,20 @@ func setLastPoll(kdb *KeyDB, zone string, at time.Time) error {
 	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET last_poll_at = ? WHERE zone = ?`, at.UTC().Format(time.RFC3339), zone)
 	return err
 }
+
+// setNextPushAt updates next_push_at without touching last_softfail_*.
+// Used by the parent-push-softfail probe path which rolls
+// next_push_at forward by softfail_delay regardless of probe outcome
+// but preserves the previous softfail's category and detail for
+// status display continuity.
+func setNextPushAt(kdb *KeyDB, zone string, at time.Time) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	var s sql.NullString
+	if !at.IsZero() {
+		s = sql.NullString{String: at.UTC().Format(time.RFC3339), Valid: true}
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET next_push_at = ? WHERE zone = ?`, s, zone)
+	return err
+}

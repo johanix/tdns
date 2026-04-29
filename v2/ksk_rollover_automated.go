@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math/rand"
 	"strings"
 	"time"
 
@@ -15,8 +16,20 @@ const (
 	rolloverPhasePendingChildPublish  = "pending-child-publish"
 	rolloverPhasePendingParentPush    = "pending-parent-push"
 	rolloverPhasePendingParentObserve = "pending-parent-observe"
+	rolloverPhasePushSoftfail         = "parent-push-softfail"
 	rolloverPhasePendingChildWithdraw = "pending-child-withdraw"
 )
+
+// jitterUpTo returns a random duration in [-d, +d]. Used to spread
+// next_push_at across zones sharing a parent so that a parent outage
+// doesn't cause every child zone's softfail probe to fire on the same
+// hour boundary.
+func jitterUpTo(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int63n(int64(2*d))) - d
+}
 
 // kskIndexPushNeeded answers "should we push a fresh DS UPDATE to the
 // parent right now?" by comparing the engine-computed target DS index
@@ -181,25 +194,25 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		// under pending-parent-observe.
 		if imr == nil {
 			lgSigner.Warn("rollover: ImrEngine nil, cannot DS push", "zone", zone)
-			_ = setSoftfail(kdb, zone, SoftfailChildConfig, "ImrEngine nil, cannot DS push", now, time.Time{})
+			handleAttemptFailed(kdb, zone, pol, SoftfailChildConfig, "ImrEngine nil, cannot DS push", now)
 			return nil
 		}
 		pushCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		res, err := PushWholeDSRRset(pushCtx, zd, kdb, imr)
 		cancel()
 		if err != nil {
-			lgSigner.Warn("rollover: DS push failed", "zone", zone, "err", err, "category", res.Category)
 			cat := res.Category
 			if cat == "" {
 				cat = SoftfailTransport
 			}
-			_ = setSoftfail(kdb, zone, cat, err.Error(), now, time.Time{})
+			lgSigner.Warn("rollover: DS push failed", "zone", zone, "err", err, "category", cat)
+			handleAttemptFailed(kdb, zone, pol, cat, err.Error(), now)
 			return nil
 		}
 		if res.Rcode != dns.RcodeSuccess {
 			lgSigner.Warn("rollover: DS push non-NOERROR", "zone", zone, "rcode", dns.RcodeToString[res.Rcode])
 			detail := fmt.Sprintf("rcode=%s", dns.RcodeToString[res.Rcode])
-			_ = setSoftfail(kdb, zone, SoftfailParentRejected, detail, now, time.Time{})
+			handleAttemptFailed(kdb, zone, pol, SoftfailParentRejected, detail, now)
 			return nil
 		}
 		// Schedule the first parent-agent DS query: wait confirm-initial-wait
@@ -247,7 +260,7 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		}
 		if t, ok := parseOptionalTime(row.ObserveStartedAt); ok {
 			if now.Sub(t) >= timeout {
-				if err := observeHardFail(kdb, zone, low, high, timeout); err != nil {
+				if err := observeHardFail(kdb, zone, low, high, timeout, pol); err != nil {
 					return err
 				}
 				lgSigner.Error("rollover: DS observation timed out; keys marked with last_rollover_error", "zone", zone, "started_at", t.Format(time.RFC3339), "timeout", timeout)
@@ -262,6 +275,7 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		}
 
 		obs, err := QueryParentAgentDS(ctx, zone, agent)
+		_ = setLastPoll(kdb, zone, now)
 		if err != nil {
 			lgSigner.Debug("rollover: parent-agent DS query failed", "zone", zone, "err", err)
 			scheduleNextObservePoll(kdb, zone, row, now, pollMax)
@@ -288,10 +302,116 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		if err != nil {
 			return fmt.Errorf("rollover: confirm DS and advance keys: %w", err)
 		}
+		_ = resetHardfailCount(kdb, zone)
+		_ = setLastSuccess(kdb, zone, now)
 		if advanced > 0 {
 			triggerResign(conf, zone)
 		}
 		lgSigner.Info("rollover: parent DS observed, advanced created keys", "zone", zone, "advanced", advanced)
+	case rolloverPhasePushSoftfail:
+		// Long-term mode after the initial flurry exhausted. Two
+		// concurrent activities run on every tick:
+		//
+		//   1. Observe-poll continues at confirm-poll-max cadence so a
+		//      parent fix is auto-detected without requiring a probe.
+		//      On confirmed observation, the engine transitions
+		//      directly to the advance-keys path — skipping the next
+		//      probe entirely.
+		//   2. Once next_push_at elapses, send ONE probe UPDATE and
+		//      schedule the next probe softfail_delay later (with
+		//      ±5min jitter to spread thundering-herd against a
+		//      shared parent). Probe failures keep the engine in this
+		//      phase; we do NOT enter pending-parent-push as a fresh
+		//      attempt group.
+		expected, low, high, idxOK, err := ComputeTargetDSSetForZone(kdb, zone, uint8(dns.SHA256))
+		if err != nil {
+			return err
+		}
+		if len(expected) == 0 {
+			// Steady state — nothing to confirm. Return to idle.
+			_ = clearObserveSchedule(kdb, zone)
+			return SetRolloverPhase(kdb, zone, rolloverPhaseIdle)
+		}
+		pollMax := pol.Rollover.ConfirmPollMax
+		if pollMax <= 0 {
+			pollMax = derivedPollMax(pol.Rollover.DsPublishDelay)
+		}
+		// (a) Observe-poll, if scheduled.
+		pollDue := true
+		if t, ok := parseOptionalTime(row.ObserveNextPollAt); ok && now.Before(t) {
+			pollDue = false
+		}
+		agent := pol.Rollover.ParentAgent
+		if pollDue && agent != "" {
+			obs, qerr := QueryParentAgentDS(ctx, zone, agent)
+			_ = setLastPoll(kdb, zone, now)
+			if qerr == nil && ObservedDSSetMatchesExpected(obs, expected) {
+				if !idxOK {
+					lgSigner.Warn("rollover: DS observed during softfail but rollover_index incomplete; cannot advance", "zone", zone)
+					_ = clearObserveSchedule(kdb, zone)
+					return SetRolloverPhase(kdb, zone, rolloverPhaseIdle)
+				}
+				advanced, terr := confirmDSAndAdvanceCreatedKeysTx(kdb, zone, low, high, now)
+				if terr != nil {
+					return fmt.Errorf("rollover: confirm DS and advance keys: %w", terr)
+				}
+				_ = resetHardfailCount(kdb, zone)
+				_ = setLastSuccess(kdb, zone, now)
+				if advanced > 0 {
+					triggerResign(conf, zone)
+				}
+				lgSigner.Info("rollover: parent recovered during softfail polling, advancing keys", "zone", zone, "advanced", advanced)
+				return nil
+			}
+			scheduleNextObservePoll(kdb, zone, row, now, pollMax)
+		}
+		// (b) Probe UPDATE side. Fire only if next_push_at elapsed.
+		nextPushDue := false
+		if t, ok := parseOptionalTime(row.NextPushAt); !ok || !now.Before(t) {
+			nextPushDue = true
+		}
+		if !nextPushDue {
+			return nil
+		}
+		softfailDelay := pol.Rollover.SoftfailDelay
+		if softfailDelay <= 0 {
+			softfailDelay = derivedSoftfailDelay(pol.Rollover.DsPublishDelay)
+		}
+		nextPush := now.Add(softfailDelay).Add(jitterUpTo(5 * time.Minute))
+		if imr == nil {
+			lgSigner.Warn("rollover: ImrEngine nil, cannot softfail probe", "zone", zone)
+			_ = setSoftfail(kdb, zone, SoftfailChildConfig, "ImrEngine nil, cannot softfail probe", now, nextPush)
+			return nil
+		}
+		pushCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		res, perr := PushWholeDSRRset(pushCtx, zd, kdb, imr)
+		cancel()
+		if perr != nil {
+			cat := res.Category
+			if cat == "" {
+				cat = SoftfailTransport
+			}
+			lgSigner.Warn("rollover: softfail probe push failed", "zone", zone, "category", cat, "err", perr)
+			_ = setSoftfail(kdb, zone, cat, perr.Error(), now, nextPush)
+			return nil
+		}
+		if res.Rcode != dns.RcodeSuccess {
+			detail := fmt.Sprintf("rcode=%s", dns.RcodeToString[res.Rcode])
+			lgSigner.Warn("rollover: softfail probe push non-NOERROR", "zone", zone, "rcode", dns.RcodeToString[res.Rcode])
+			_ = setSoftfail(kdb, zone, SoftfailParentRejected, detail, now, nextPush)
+			return nil
+		}
+		// Probe accepted at the wire. Restart observe to pick up DS
+		// when it appears; bump next_push_at without overwriting the
+		// most recent softfail context.
+		initial := pol.Rollover.ConfirmInitialWait
+		if initial <= 0 {
+			initial = defaultConfirmInitialWait
+		}
+		nextPoll := now.Add(initial)
+		_ = setObserveSchedule(kdb, zone, now, nextPoll, int(initial.Seconds()))
+		_ = setNextPushAt(kdb, zone, nextPush)
+		lgSigner.Info("rollover: softfail probe accepted, observing", "zone", zone, "first_poll_at", nextPoll.Format(time.RFC3339), "next_probe_at", nextPush.Format(time.RFC3339))
 	case rolloverPhasePendingChildWithdraw:
 		// §8.8: wait effective_margin = max(policy.clamping.margin,
 		// max_observed_ttl) from each retired SEP key's retired_at, then
@@ -451,16 +571,18 @@ WHERE zone = ?`, zone); err != nil {
 	return advanced, nil
 }
 
-// observeHardFail records last_rollover_error on every SEP key currently in
-// state=created that was waiting on confirmation of the [low, high] range,
-// then resets the zone to idle. No TX needed: this is a diagnostic write
-// path and idempotent retry on the next tick is safe.
+// observeAttemptTimedOut records last_rollover_error on every SEP key
+// in state=created that was waiting on confirmation of the [low, high]
+// range, then increments the hardfail counter and either restarts the
+// push (mid-flurry) or transitions to parent-push-softfail (max
+// reached). Replaces the older "always-give-up-and-go-idle" semantics:
+// the engine never permanently abandons a rollover, just shifts to a
+// long-term retry cadence on persistent parent-side problems.
 //
-// Records a parent-publish-failure softfail event so status output
-// can render the cause and timestamp. Phase 5 will repurpose this
-// function further (counter increment + softfail-delay scheduling);
-// for now it just adds the categorization.
-func observeHardFail(kdb *KeyDB, zone string, low, high int, timeout time.Duration) error {
+// (Function name historically observeHardFail; kept until phase 9
+// cleanup. The "hard" framing no longer applies — observe timeouts
+// are recoverable now.)
+func observeHardFail(kdb *KeyDB, zone string, low, high int, timeout time.Duration, pol *DnssecPolicy) error {
 	msg := fmt.Sprintf("DS observation timeout (%s): parent never published expected DS RRset", timeout)
 	if low <= high {
 		created, err := GetDnssecKeysByState(kdb, zone, DnskeyStateCreated)
@@ -478,9 +600,70 @@ func observeHardFail(kdb *KeyDB, zone string, low, high int, timeout time.Durati
 			}
 		}
 	}
-	_ = setSoftfail(kdb, zone, SoftfailParentPublishFailure, msg, time.Now(), time.Time{})
+	handleAttemptFailed(kdb, zone, pol, SoftfailParentPublishFailure, msg, time.Now())
+	return nil
+}
+
+// handleAttemptFailed is the shared decision point for any failed
+// rollover attempt — push error, push non-NOERROR, observe timeout.
+// Increments the hardfail counter and decides the next phase:
+//
+//   - count < max-attempts-before-backoff → stay in / return to
+//     pending-parent-push (retry on the very next tick).
+//   - count >= max-attempts-before-backoff → enter parent-push-softfail
+//     (long-term mode; one probe per softfail-delay forever).
+//
+// Records the failure category and detail in either case so status
+// output can show what went wrong. Errors from the underlying writes
+// are logged but not propagated — the caller's tick-level error path
+// is for things that prevent the engine from advancing at all.
+func handleAttemptFailed(kdb *KeyDB, zone string, pol *DnssecPolicy, category, detail string, now time.Time) {
+	n, err := incrementHardfailCount(kdb, zone)
+	if err != nil {
+		lgSigner.Warn("rollover: increment hardfail_count failed", "zone", zone, "err", err)
+		return
+	}
+	maxAttempts := defaultMaxAttemptsBeforeBackoff
+	var softfailDelay time.Duration
+	if pol != nil {
+		if pol.Rollover.MaxAttemptsBeforeBackoff > 0 {
+			maxAttempts = pol.Rollover.MaxAttemptsBeforeBackoff
+		}
+		softfailDelay = pol.Rollover.SoftfailDelay
+		if softfailDelay <= 0 {
+			softfailDelay = derivedSoftfailDelay(pol.Rollover.DsPublishDelay)
+		}
+	} else {
+		softfailDelay = defaultSoftfailDelayMinimum
+	}
+	if n >= maxAttempts {
+		nextPush := now.Add(softfailDelay).Add(jitterUpTo(5 * time.Minute))
+		if err := setSoftfail(kdb, zone, category, detail, now, nextPush); err != nil {
+			lgSigner.Warn("rollover: setSoftfail (entering softfail) failed", "zone", zone, "err", err)
+		}
+		// Leave observe schedule in place — polling continues during
+		// softfail-delay, which is what gives the engine its
+		// auto-recovery property when the operator fixes the parent.
+		if err := SetRolloverPhase(kdb, zone, rolloverPhasePushSoftfail); err != nil {
+			lgSigner.Warn("rollover: set phase parent-push-softfail failed", "zone", zone, "err", err)
+		}
+		lgSigner.Warn("rollover: initial flurry exhausted, entering softfail long-term mode",
+			"zone", zone, "attempts", n, "category", category, "next_probe_at", nextPush.Format(time.RFC3339))
+		return
+	}
+	// Mid-flurry retry: clear observe schedule (the failed attempt's
+	// observe state is irrelevant; the next push starts fresh) and
+	// transition back to pending-parent-push so the next tick sends
+	// a fresh UPDATE.
+	if err := setSoftfail(kdb, zone, category, detail, now, time.Time{}); err != nil {
+		lgSigner.Warn("rollover: setSoftfail (mid-flurry) failed", "zone", zone, "err", err)
+	}
 	_ = clearObserveSchedule(kdb, zone)
-	return SetRolloverPhase(kdb, zone, rolloverPhaseIdle)
+	if err := SetRolloverPhase(kdb, zone, rolloverPhasePendingParentPush); err != nil {
+		lgSigner.Warn("rollover: set phase pending-parent-push failed", "zone", zone, "err", err)
+	}
+	lgSigner.Warn("rollover: parent push failed, retrying immediately",
+		"zone", zone, "attempt", n, "max_attempts", maxAttempts, "category", category)
 }
 
 // scheduleNextObservePoll advances the backoff interval for the next parent
