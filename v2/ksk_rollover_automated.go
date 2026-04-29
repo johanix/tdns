@@ -47,6 +47,14 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 	}
 
 	zone := dns.Fqdn(zd.ZoneName)
+
+	// Serialize against API mutating handlers (asap, cancel, reset,
+	// unstick). Held for the duration of one tick's per-zone work so
+	// a CLI-driven write cannot interleave with a phase advance.
+	lock := AcquireRolloverLock(zone)
+	lock.Lock()
+	defer lock.Unlock()
+
 	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
 		return err
 	}
