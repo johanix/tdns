@@ -26,6 +26,32 @@ func runTransportSignalPostpass(conf *Config) {
 	}
 }
 
+// rewriteApexSOASerial updates the in-memory apex SOA RDATA to match
+// zd.CurrentSerial. Call this immediately after overriding CurrentSerial
+// in unixtime/persist modes so SOA queries, AXFR/IXFR responses, and the
+// imminent NotifyDownstreams() advertise the new serial. The next
+// signing pass will refresh the SOA RRSIG; we don't sign here because
+// callers run a zone-wide SetupZoneSigning shortly after.
+func rewriteApexSOASerial(zd *ZoneData) {
+	if zd == nil {
+		return
+	}
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil || apex == nil {
+		return
+	}
+	soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+	if len(soaRRset.RRs) == 0 {
+		return
+	}
+	soa, ok := soaRRset.RRs[0].(*dns.SOA)
+	if !ok {
+		return
+	}
+	soa.Serial = zd.CurrentSerial
+	apex.RRtypes.Set(dns.TypeSOA, soaRRset)
+}
+
 type RefreshCounter struct {
 	Name           string
 	SOARefresh     uint32
@@ -117,11 +143,13 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		// Apply outbound_soa_serial mode for the serial we'll advertise
 		// to secondaries.
 		if zd.KeyDB != nil {
+			serialChanged := false
 			switch zd.KeyDB.OutboundSoaSerial {
 			case OutboundSoaSerialUnixtime:
 				zd.CurrentSerial = uint32(time.Now().Unix())
 				lgEngine.Info("zone loaded; outbound_soa_serial=unixtime",
 					"zone", zone, "serial", zd.CurrentSerial)
+				serialChanged = true
 			case OutboundSoaSerialPersist:
 				// Only restore the persisted serial when it is *ahead* of
 				// the freshly loaded inbound serial. If upstream advanced
@@ -132,7 +160,11 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 					lgEngine.Info("zone loaded; outbound_soa_serial=persist (restored saved serial)",
 						"zone", zone, "incoming", zd.CurrentSerial, "persisted", saved)
 					zd.CurrentSerial = saved
+					serialChanged = true
 				}
+			}
+			if serialChanged {
+				rewriteApexSOASerial(zd)
 			}
 		}
 		zd.NotifyDownstreams()
@@ -582,11 +614,13 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 						// Apply outbound_soa_serial mode after upstream refresh.
 						if zd.KeyDB != nil {
+							serialChanged := false
 							switch zd.KeyDB.OutboundSoaSerial {
 							case OutboundSoaSerialUnixtime:
 								zd.CurrentSerial = uint32(time.Now().Unix())
 								lgEngine.Info("zone updated from upstream; outbound_soa_serial=unixtime",
 									"zone", zone, "serial", zd.CurrentSerial)
+								serialChanged = true
 							case OutboundSoaSerialPersist:
 								// Only restore if the persisted serial is
 								// ahead of the just-refreshed inbound
@@ -594,7 +628,11 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								// initial-load branch above.
 								if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > zd.CurrentSerial {
 									zd.CurrentSerial = saved
+									serialChanged = true
 								}
+							}
+							if serialChanged {
+								rewriteApexSOASerial(zd)
 							}
 						}
 
