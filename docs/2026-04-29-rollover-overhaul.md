@@ -851,7 +851,7 @@ Status as of 2026-04-29:
 | 7     | narrowed `unstick` (function-only)          | `42345de`    | done     |
 | 8     | RolloverStatus struct + compute             | `99095f6`    | done     |
 | 9     | read endpoints + CLI conversion             | `0215580`    | done     |
-| 10    | write endpoints + CLI conversion            | (see body)   | done (lockfile guard deferred to phase 12) |
+| 10    | write endpoints + CLI conversion            | `2d46d8b`    | done (lockfile guard deferred to phase 12) |
 | 11    | parent-side EDE (parallel)                  | —            | next     |
 | 12    | cleanup                                     | —            |          |
 
@@ -993,7 +993,7 @@ hardcoded constants and policy reads.
 After Phase 9, the painful "no DNSSEC policy" CLI failure mode
 from the 2026-04-28 debug session is gone in default mode.
 
-### Phase 10 — write endpoints + CLI conversion  (DONE — pending hash on commit)
+### Phase 10 — write endpoints + CLI conversion  (DONE — `2d46d8b`)
 
 1. Implement `/rollover/asap` (POST), `/rollover/cancel` (POST),
    `/rollover/reset` (POST), `/rollover/unstick` (POST). Each
