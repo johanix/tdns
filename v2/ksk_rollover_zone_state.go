@@ -520,16 +520,16 @@ func ClearLastRolloverError(kdb *KeyDB, zone string, keyid uint16) error {
 // fix is auto-detected within confirm-poll-max even without unstick.
 // Use unstick only to skip the wait when you know the fix is in.
 //
-// Acquires the per-zone rollover lock to serialize against the tick
-// (no-op when called from the CLI process — locks are process-local).
+// Caller is responsible for the per-zone rollover lock. API
+// handlers take the lock at handler-level (see apihandler_rollover.go);
+// CLI --offline writers don't lock (postmortem use, daemon assumed
+// down). Function-level locking would deadlock with composite
+// handlers like asap that need the lock around compute+set.
 func UnstickRollover(kdb *KeyDB, zone string) error {
 	zone = strings.TrimSpace(zone)
 	if zone == "" {
 		return fmt.Errorf("UnstickRollover: empty zone")
 	}
-	lock := AcquireRolloverLock(zone)
-	lock.Lock()
-	defer lock.Unlock()
 	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
 		return err
 	}

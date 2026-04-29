@@ -441,35 +441,40 @@ func newAutoRolloverAsapCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "asap",
 		Short: "Schedule a manual KSK rollover at the earliest safe moment",
-		Long: `Computes ComputeEarliestRollover; on success, persists
-manual_rollover_requested_at = now and manual_rollover_earliest = t_earliest
-on the zone row. The rollover worker fires AtomicRollover when t_earliest is
-reached. Rejects the request if a rollover is already in progress or the
-pipeline has no standby SEP key.`,
+		Long: `Asks the daemon to compute ComputeEarliestRollover and persist
+manual_rollover_* on the zone row. The rollover worker fires
+AtomicRollover when t_earliest is reached. Rejects the request if a
+rollover is already in progress or the pipeline has no standby SEP key.
+
+Online-only: scheduling against a stopped daemon is meaningless
+(the manual_rollover_* row would never be read).`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs(cmd, "zonename")
 			tdns.Globals.App.Type = tdns.AppTypeCli
+			z := dns.Fqdn(tdns.Globals.Zonename)
 
-			kdb, z, pol, err := openKeystoreForCli()
+			api, err := GetApiClient("auth", true)
 			if err != nil {
-				cliFatalf("error: %v", err)
+				cliFatalf("error getting API client: %v", err)
 			}
-			defer kdb.DB.Close()
-			if pol == nil {
-				cliFatalf("error: no DNSSEC policy for zone %s (dnssecpolicy in zone config)", z)
-			}
-
-			now := time.Now()
-			res, err := tdns.ComputeEarliestRollover(kdb, z, pol, now)
+			status, body, err := api.RequestNG("POST", "/rollover/asap",
+				tdns.RolloverAsapRequest{Zone: z}, true)
 			if err != nil {
-				cliFatalf("cannot schedule for zone %s: %v", z, err)
+				cliFatalf("error calling rollover/asap: %v", err)
 			}
-			if err := tdns.SetManualRolloverRequest(kdb, z, now, res.Earliest); err != nil {
-				cliFatalf("error: persist manual_rollover_*: %v", err)
+			if status == http.StatusBadRequest {
+				cliFatalf("cannot schedule for zone %s: %s", z, strings.TrimSpace(string(body)))
 			}
-			fmt.Printf("scheduled manual rollover for zone %s\n", z)
-			fmt.Printf("  earliest          %s\n", formatTimeWithDelta(res.Earliest))
-			fmt.Printf("  from_active_seq   %d  →  to_active_seq   %d\n", res.FromIdx, res.ToIdx)
+			if status != http.StatusOK {
+				cliFatalf("unexpected status %d from rollover/asap: %s", status, strings.TrimSpace(string(body)))
+			}
+			var resp tdns.RolloverAsapResponse
+			if err := json.Unmarshal(body, &resp); err != nil {
+				cliFatalf("error parsing rollover/asap response: %v", err)
+			}
+			fmt.Printf("scheduled manual rollover for zone %s\n", resp.Zone)
+			fmt.Printf("  earliest          %s\n", formatRolloverTime(resp.Earliest))
+			fmt.Printf("  from_active_seq   %d  →  to_active_seq   %d\n", resp.FromIdx, resp.ToIdx)
 		},
 	}
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
@@ -481,21 +486,28 @@ func newAutoRolloverCancelCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "cancel",
 		Short: "Cancel a pending manual KSK rollover request",
-		Long: `Clears manual_rollover_requested_at and manual_rollover_earliest on the
-zone row. Has no effect on rollovers that have already fired or on scheduled
-(lifetime-driven) rollovers.`,
+		Long: `Asks the daemon to clear manual_rollover_requested_at and
+manual_rollover_earliest on the zone row. Has no effect on rollovers
+that have already fired or on scheduled (lifetime-driven) rollovers.
+
+Online-only: cancelling against a stopped daemon is meaningless (the
+manual_rollover_* row isn't being read by anything).`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs(cmd, "zonename")
 			tdns.Globals.App.Type = tdns.AppTypeCli
+			z := dns.Fqdn(tdns.Globals.Zonename)
 
-			kdb, z, _, err := openKeystoreForCli()
+			api, err := GetApiClient("auth", true)
 			if err != nil {
-				cliFatalf("error: %v", err)
+				cliFatalf("error getting API client: %v", err)
 			}
-			defer kdb.DB.Close()
-
-			if err := tdns.ClearManualRolloverRequest(kdb, z); err != nil {
-				cliFatalf("error: clear manual_rollover_*: %v", err)
+			status, body, err := api.RequestNG("POST", "/rollover/cancel",
+				tdns.RolloverCancelRequest{Zone: z}, true)
+			if err != nil {
+				cliFatalf("error calling rollover/cancel: %v", err)
+			}
+			if status != http.StatusOK {
+				cliFatalf("unexpected status %d from rollover/cancel: %s", status, strings.TrimSpace(string(body)))
 			}
 			fmt.Printf("cleared manual rollover request for zone %s\n", z)
 		},
@@ -1194,76 +1206,125 @@ func printCSKRolloverStatus(kdb *tdns.KeyDB, z string, verbose bool) {
 
 func newAutoRolloverResetCmd() *cobra.Command {
 	var keyid int
+	var offline bool
 	c := &cobra.Command{
 		Use:   "reset",
 		Short: "Clear last_rollover_error for one key (after operator intervention)",
-		Long: `Clears the last_rollover_error column on a single key's RolloverKeyState
-row. Use after diagnosing and fixing a hard-failed rollover (e.g. parent-agent
-DS observation timeout) so the worker can resume normal handling on the next
-tick.`,
+		Long: `Asks the daemon to clear the last_rollover_error column on a single
+key's RolloverKeyState row. Use after diagnosing and fixing a
+hard-failed rollover so status output isn't misleading.
+
+Default mode talks to the daemon's API server. Use --offline to write
+directly to the keystore file when the daemon is down (postmortem use;
+the operator is responsible for ensuring the daemon is genuinely
+stopped — there is no lockfile guard yet).`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs(cmd, "zonename")
 			tdns.Globals.App.Type = tdns.AppTypeCli
+			z := dns.Fqdn(tdns.Globals.Zonename)
 
 			if keyid <= 0 || keyid > 0xFFFF {
 				cliFatalf("error: --keyid must be in 1..65535, got %d", keyid)
 			}
-			kdb, z, _, err := openKeystoreForCli()
-			if err != nil {
-				cliFatalf("error: %v", err)
-			}
-			defer kdb.DB.Close()
 
-			if err := tdns.ClearLastRolloverError(kdb, z, uint16(keyid)); err != nil {
-				cliFatalf("error: clear last_rollover_error: %v", err)
+			if offline {
+				kdb, _, _, err := openKeystoreForCli()
+				if err != nil {
+					cliFatalf("error: %v", err)
+				}
+				defer kdb.DB.Close()
+				if err := tdns.ClearLastRolloverError(kdb, z, uint16(keyid)); err != nil {
+					cliFatalf("error: clear last_rollover_error: %v", err)
+				}
+				fmt.Printf("cleared last_rollover_error for zone %s keyid %d (offline)\n", z, keyid)
+				return
+			}
+
+			api, err := GetApiClient("auth", true)
+			if err != nil {
+				cliFatalf("error getting API client: %v", err)
+			}
+			status, body, err := api.RequestNG("POST", "/rollover/reset",
+				tdns.RolloverResetRequest{Zone: z, KeyID: uint16(keyid)}, true)
+			if err != nil {
+				cliFatalf("error calling rollover/reset: %v", err)
+			}
+			if status == http.StatusBadRequest {
+				cliFatalf("rollover/reset rejected for zone %s keyid %d: %s", z, keyid, strings.TrimSpace(string(body)))
+			}
+			if status != http.StatusOK {
+				cliFatalf("unexpected status %d from rollover/reset: %s", status, strings.TrimSpace(string(body)))
 			}
 			fmt.Printf("cleared last_rollover_error for zone %s keyid %d\n", z, keyid)
 		},
 	}
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
 	c.Flags().IntVar(&keyid, "keyid", 0, "Key ID to reset (RFC 4034 keytag)")
+	c.Flags().BoolVar(&offline, "offline", false, "Write directly to keystore file (postmortem use; daemon is down)")
 	_ = c.MarkFlagRequired("zone")
 	_ = c.MarkFlagRequired("keyid")
 	return c
 }
 
 func newAutoRolloverUnstickCmd() *cobra.Command {
+	var offline bool
 	c := &cobra.Command{
 		Use:   "unstick",
 		Short: "Skip the softfail-delay and probe the parent on the next tick",
-		Long: `Clears next_push_at on the zone row so the rollover engine fires a probe
-UPDATE on its very next tick instead of waiting out the rest of the
-softfail-delay window. The narrow operator override for "I just fixed the
-parent and want to retry now."
+		Long: `Asks the daemon to clear next_push_at on the zone row so the
+rollover engine fires a probe UPDATE on its very next tick instead of
+waiting out the rest of the softfail-delay window. Operator override
+for "I just fixed the parent and want to retry now."
 
-This is operationally optional. The engine polls the parent continuously
+Operationally optional: the engine polls the parent continuously
 regardless of softfail-delay, so a parent fix is auto-detected within
-confirm-poll-max even without 'unstick'. Use 'unstick' only when you know
-the fix is in place AND want to skip the wait.
+confirm-poll-max even without 'unstick'. Use only to skip the wait.
 
-Hardfail_count and last_softfail_* are preserved so status output still
-shows the most recent failure context. The counter resets to 0 on the
-next successful confirmed observation (which the post-unstick probe will
-trigger if the parent is genuinely fixed).
+Default mode talks to the daemon's API server. Use --offline to write
+directly to the keystore file when the daemon is down (postmortem
+use; the operator is responsible for ensuring the daemon is genuinely
+stopped — there is no lockfile guard yet).
+
+Hardfail_count and last_softfail_* are preserved so status output
+still shows the most recent failure context. The counter resets to 0
+on the next successful confirmed observation.
 
 Differs from 'reset' (which clears last_rollover_error for one keyid).`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs(cmd, "zonename")
 			tdns.Globals.App.Type = tdns.AppTypeCli
+			z := dns.Fqdn(tdns.Globals.Zonename)
 
-			kdb, z, _, err := openKeystoreForCli()
-			if err != nil {
-				cliFatalf("error: %v", err)
+			if offline {
+				kdb, _, _, err := openKeystoreForCli()
+				if err != nil {
+					cliFatalf("error: %v", err)
+				}
+				defer kdb.DB.Close()
+				if err := tdns.UnstickRollover(kdb, z); err != nil {
+					cliFatalf("error: unstick: %v", err)
+				}
+				fmt.Printf("unstuck zone %s (offline) — next tick will probe the parent (softfail-delay skipped)\n", z)
+				return
 			}
-			defer kdb.DB.Close()
 
-			if err := tdns.UnstickRollover(kdb, z); err != nil {
-				cliFatalf("error: unstick: %v", err)
+			api, err := GetApiClient("auth", true)
+			if err != nil {
+				cliFatalf("error getting API client: %v", err)
+			}
+			status, body, err := api.RequestNG("POST", "/rollover/unstick",
+				tdns.RolloverUnstickRequest{Zone: z}, true)
+			if err != nil {
+				cliFatalf("error calling rollover/unstick: %v", err)
+			}
+			if status != http.StatusOK {
+				cliFatalf("unexpected status %d from rollover/unstick: %s", status, strings.TrimSpace(string(body)))
 			}
 			fmt.Printf("unstuck zone %s — next tick will probe the parent (softfail-delay skipped)\n", z)
 		},
 	}
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
+	c.Flags().BoolVar(&offline, "offline", false, "Write directly to keystore file (postmortem use; daemon is down)")
 	_ = c.MarkFlagRequired("zone")
 	return c
 }

@@ -3,7 +3,7 @@
 Author: Johan / Claude
 Date: 2026-04-29
 Status: implementation in progress on branch `rollover-overhaul`
-        (phases 1–9 done; phase 10 next; 11–12 untouched)
+        (phases 1–10 done; phase 11 next; phase 12 cleanup at end)
 
 This document supersedes:
 
@@ -851,8 +851,8 @@ Status as of 2026-04-29:
 | 7     | narrowed `unstick` (function-only)          | `42345de`    | done     |
 | 8     | RolloverStatus struct + compute             | `99095f6`    | done     |
 | 9     | read endpoints + CLI conversion             | `0215580`    | done     |
-| 10    | write endpoints + CLI conversion            | —            | next     |
-| 11    | parent-side EDE (parallel)                  | —            |          |
+| 10    | write endpoints + CLI conversion            | (see body)   | done (lockfile guard deferred to phase 12) |
+| 11    | parent-side EDE (parallel)                  | —            | next     |
 | 12    | cleanup                                     | —            |          |
 
 Tangential fix landed alongside on `fast-roller-1`: `825cee8`
@@ -993,7 +993,7 @@ hardcoded constants and policy reads.
 After Phase 9, the painful "no DNSSEC policy" CLI failure mode
 from the 2026-04-28 debug session is gone in default mode.
 
-### Phase 10 — write endpoints + CLI conversion  (NEXT)
+### Phase 10 — write endpoints + CLI conversion  (DONE — pending hash on commit)
 
 1. Implement `/rollover/asap` (POST), `/rollover/cancel` (POST),
    `/rollover/reset` (POST), `/rollover/unstick` (POST). Each
@@ -1006,7 +1006,7 @@ from the 2026-04-28 debug session is gone in default mode.
    writers from running while a daemon holds the sqlite file
    open.
 
-### Phase 11 — parent-side EDE (parallel)
+### Phase 11 — parent-side EDE (parallel)  (NEXT)
 
 Independent of phases 1-10. Can land any time after Phase 1.
 
@@ -1031,7 +1031,19 @@ Independent of phases 1-10. Can land any time after Phase 1.
    `--offline` paths should be gone.
 5. Verify the `[WARN/config] no config file specified` warning
    no longer fires in default CLI mode.
-6. **Unit tests for the tick handler across all phase states.**
+6. **Lockfile/sentinel guard for `--offline` writers.** Phase 10
+   shipped the API mutating endpoints + CLI conversions but did
+   *not* add the guard that prevents `--offline` writers from
+   running while a daemon process is alive (the doc's Phase 10
+   item 4). Today the operator is told in CLI help text to ensure
+   the daemon is stopped, but nothing enforces it. Concrete plan:
+   on daemon startup, write a sentinel row to a small meta table
+   carrying daemon PID and start_time. On `--offline` writer
+   invocation, read the sentinel and `kill -0` the PID; if alive,
+   refuse with `--offline --force` available as an explicit
+   override. Until this lands, `--offline` writers are footguny
+   when run against a live daemon.
+7. **Unit tests for the tick handler across all phase states.**
    The phase 5 commit added the new `parent-push-softfail` handler
    and rewired the failure decision through `handleAttemptFailed`,
    but tick-level test coverage is still thin — only the
