@@ -842,25 +842,27 @@ Status as of 2026-04-29:
 
 | Phase | Title                                       | Commit       | State    |
 |-------|---------------------------------------------|--------------|----------|
-| 1     | per-zone lock infrastructure                | `54dc96d`    | done     |
-| 2     | schema additions                            | `155d21c`    | done     |
-| 3     | kskIndexPushNeeded reformulation            | `6b09dd4`    | done     |
-| 4     | failure categorization                      | `f4ab81b`    | done     |
-| 5     | softfail phase + counter logic              | `a6d2288`    | done     |
-| 6     | config wiring                               | `af6a863`    | done (out of order; phase 5 needs the knobs) |
-| 7     | narrowed `unstick` (function-only)          | `42345de`    | done     |
-| 8     | RolloverStatus struct + compute             | `99095f6`    | done     |
-| 9     | read endpoints + CLI conversion             | `0215580`    | done     |
-| 10    | write endpoints + CLI conversion            | `2d46d8b`    | done (lockfile guard deferred to phase 12) |
-| 11    | parent-side EDE (parallel)                  | `0859ed5`    | done (incl. SIG(0) validation EDEs) |
+| 1     | per-zone lock infrastructure                | `4e69b00`    | done     |
+| 2     | schema additions                            | `47dfb26`    | done     |
+| 3     | kskIndexPushNeeded reformulation            | `f39bd91`    | done     |
+| 4     | failure categorization                      | `a1fa133`    | done     |
+| 5     | softfail phase + counter logic              | `ffe106e`    | done     |
+| 6     | config wiring                               | `3f1af45`    | done (out of order; phase 5 needs the knobs) |
+| 7     | narrowed `unstick` (function-only)          | `41eb9a7`    | done     |
+| 8     | RolloverStatus struct + compute             | `9394bc7`    | done     |
+| 9     | read endpoints + CLI conversion             | `2b57aa6`    | done     |
+| 10    | write endpoints + CLI conversion            | `c2231fd`    | done (lockfile guard deferred to phase 12) |
+| 11    | parent-side EDE (parallel)                  | `82e666b`    | done (incl. SIG(0) validation EDEs) |
 | 12    | cleanup                                     | —            | next     |
 
-Tangential fix landed alongside on `fast-roller-1`: `825cee8`
-implemented the missing `ClampedDuration` helper that was blocking
-test compilation in v2 (commit a5467e1 had added the test but not
-the helper). Merged into `rollover-overhaul` via `b06a13b`.
+Tangential fix landed alongside on `fast-roller-1` and merged to
+main: `825cee8` implemented the missing `ClampedDuration` helper
+that was blocking test compilation in v2 (commit a5467e1 had added
+the test but not the helper). After the fast-roller-1 → main merge
+landed (commit `279a53c`), this branch was rebased onto main; the
+phase commit hashes above reflect the post-rebase state.
 
-### Phase 1 — per-zone lock infrastructure  (DONE — `54dc96d`)
+### Phase 1 — per-zone lock infrastructure  (DONE — `4e69b00`)
 
 1. Add `rollover_lock.go` with the per-zone mutex registry.
 2. `RolloverAutomatedTick` takes the lock at the top of per-zone
@@ -871,7 +873,7 @@ the helper). Merged into `rollover-overhaul` via `b06a13b`.
 Tiny phase; one commit. Goes first because everything later
 assumes the lock exists.
 
-### Phase 2 — schema additions  (DONE — `155d21c`)
+### Phase 2 — schema additions  (DONE — `47dfb26`)
 
 1. Add migration entries to the `migrations` slice in
    `dbMigrateSchema` ([db.go:117](tdns/v2/db.go:117)). One entry
@@ -890,7 +892,7 @@ assumes the lock exists.
    that all existing rows load cleanly with NULL/0 in the new
    columns.
 
-### Phase 3 — kskIndexPushNeeded reformulation  (DONE — `6b09dd4`)
+### Phase 3 — kskIndexPushNeeded reformulation  (DONE — `f39bd91`)
 
 1. Change the gate to compare against `LastConfirmed*` instead of
    `LastSubmitted*`.
@@ -901,7 +903,7 @@ assumes the lock exists.
 Independently shippable as a pure correctness fix, but should
 NOT deploy to a testbed without Phase 5 close behind.
 
-### Phase 4 — failure categorization  (DONE — `f4ab81b`)
+### Phase 4 — failure categorization  (DONE — `a1fa133`)
 
 1. Define `RolloverFailureCategory` enum (string consts:
    `child-config`, `transport`, `parent-rejected`,
@@ -915,7 +917,7 @@ NOT deploy to a testbed without Phase 5 close behind.
 4. `observeHardFail` calls `setSoftfail` with
    `parent-publish-failure` on observe timeout.
 
-### Phase 5 — softfail phase + counter logic  (DONE — `a6d2288`)
+### Phase 5 — softfail phase + counter logic  (DONE — `ffe106e`)
 
 1. Add `rolloverPhasePushSoftfail = "parent-push-softfail"`.
 2. Wire transitions:
@@ -938,7 +940,7 @@ NOT deploy to a testbed without Phase 5 close behind.
 
 Uses Phase 1 lock.
 
-### Phase 6 — config wiring  (DONE — `af6a863`)
+### Phase 6 — config wiring  (DONE — `3f1af45`)
 
 Done before Phase 5 because Phase 5 needs the policy fields to
 exist before it can read them; otherwise we'd churn between
@@ -963,12 +965,12 @@ hardcoded constants and policy reads.
    - `confirm-timeout < ds-publish-delay`
    - `softfail-delay < ds-publish-delay`
 
-### Phase 7 — narrowed `unstick` (function-only)  (DONE — `42345de`)
+### Phase 7 — narrowed `unstick` (function-only)  (DONE — `41eb9a7`)
 
 1. Reimplement `UnstickRollover` to clear `next_push_at` only.
 2. CLI help text update — narrowed role.
 
-### Phase 8 — RolloverStatus struct + ComputeRolloverStatus  (DONE — `99095f6`)
+### Phase 8 — RolloverStatus struct + ComputeRolloverStatus  (DONE — `9394bc7`)
 
 1. Add `messages_rollover.go` with `RolloverStatus`, `DSRange`,
    `RolloverKeyEntry`, `PolicySummary`, request structs for each
@@ -980,7 +982,7 @@ hardcoded constants and policy reads.
 3. Implement `ComputeRolloverWhen` similarly — wraps existing
    `ComputeEarliestRollover`.
 
-### Phase 9 — read endpoints + CLI conversion  (DONE — `0215580`)
+### Phase 9 — read endpoints + CLI conversion  (DONE — `2b57aa6`)
 
 1. Add `apihandler_rollover.go` with `/rollover/status` (GET),
    `/rollover/when` (GET) handlers calling Phase 8 functions.
@@ -993,7 +995,7 @@ hardcoded constants and policy reads.
 After Phase 9, the painful "no DNSSEC policy" CLI failure mode
 from the 2026-04-28 debug session is gone in default mode.
 
-### Phase 10 — write endpoints + CLI conversion  (DONE — `2d46d8b`)
+### Phase 10 — write endpoints + CLI conversion  (DONE — `c2231fd`)
 
 1. Implement `/rollover/asap` (POST), `/rollover/cancel` (POST),
    `/rollover/reset` (POST), `/rollover/unstick` (POST). Each
@@ -1006,7 +1008,7 @@ from the 2026-04-28 debug session is gone in default mode.
    writers from running while a daemon holds the sqlite file
    open.
 
-### Phase 11 — parent-side EDE (parallel)  (DONE — `0859ed5`)
+### Phase 11 — parent-side EDE (parallel)  (DONE — `82e666b`)
 
 Independent of phases 1-10. Can land any time after Phase 1.
 
