@@ -185,7 +185,9 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 		zd.CurrentSerial++
 		if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial == OutboundSoaSerialPersist {
 			if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
+				zd.mu.Unlock()
 				lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
+				return false, fmt.Errorf("persist outgoing serial for zone %s: %w", zd.ZoneName, err)
 			}
 		}
 	}
@@ -259,7 +261,9 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 		zd.CurrentSerial++
 		if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial == OutboundSoaSerialPersist {
 			if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
+				zd.mu.Unlock()
 				lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
+				return false, fmt.Errorf("persist outgoing serial for zone %s: %w", zd.ZoneName, err)
 			}
 		}
 	}
@@ -653,6 +657,7 @@ func (zd *ZoneData) BumpSerialOnly() (BumperResponse, error) {
 	if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial == OutboundSoaSerialPersist {
 		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
 			lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
+			return resp, fmt.Errorf("persist outgoing serial for zone %s: %w", zd.ZoneName, err)
 		}
 	}
 	if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
