@@ -100,15 +100,22 @@ categories the engine can distinguish:
 | `child-config`         | No active SIG(0) key for zone; no DS records to publish; ParentZone unresolvable | Fix child keystore / zone config         |
 | `transport`            | "no route to host"; i/o timeout; connection refused; DSYNC lookup empty; DNS resolution of UPDATE target fails | Network reachability / parent endpoint   |
 | `parent-rejected`      | rcode REFUSED / NOTAUTH / FORMERR / SERVFAIL on UPDATE response (with EDE if attached) | Fix parent (policy, delegation, allow-list) |
-| `parent-silent-reject` | rcode NOERROR but observe phase times out — DS never appeared on parent         | Almost always parent policy bug          |
+| `parent-publish-failure` | rcode NOERROR but observe phase times out — DS never appeared on parent         | Investigate parent's update→publish path |
 
-The fourth category — `parent-silent-reject` — is the case that bit
-us during the 2026-04-28 fast-roller debugging session. It is
-distinct from `parent-rejected` because the parent affirmatively
-*said yes* and only later behavior contradicts that response. From
-the operator's perspective: "the parent has a bug, or its policy
-silently drops updates it should reject explicitly." Almost always
-this is a missing EDE on the parent side (see Phase 5 below).
+The fourth category — `parent-publish-failure` — is the case that
+bit us during the 2026-04-28 fast-roller debugging session. It is
+distinct from `parent-rejected` because the parent's NOERROR
+response is a wire-protocol commitment that the update was
+accepted: a parent that wants to refuse the update is required to
+return REFUSED (or some other negative rcode), not NOERROR. So if
+we get NOERROR back and the DS never appears, the failure is
+between the parent's accept and the parent's publication of the
+updated RRset — *not* a hidden rejection. The cause might be a
+broken parent-side update→publish pipeline, an internal queue
+that dropped the change, an inconsistent provisioning chain, or a
+parent-side policy bug that should have produced REFUSED but
+didn't (see Phase 8 below — fixing that bug on tdns's parent side
+is part of this work).
 
 A single counter (`hardfail_count`) tracks failures of any category.
 The category metadata is for operator visibility — *why* each
@@ -177,7 +184,7 @@ New columns on `RolloverZoneState`:
 hardfail_count          INTEGER DEFAULT 0,
 next_push_at            TEXT,                  -- RFC3339 UTC, NULL = push allowed now
 last_softfail_at        TEXT,                  -- RFC3339 UTC
-last_softfail_category  TEXT,                  -- 'child-config' | 'transport' | 'parent-rejected' | 'parent-silent-reject'
+last_softfail_category  TEXT,                  -- 'child-config' | 'transport' | 'parent-rejected' | 'parent-publish-failure'
 last_softfail_detail    TEXT,                  -- human-readable: "rcode=REFUSED EDE=18 'prohibited'" or "i/o timeout to 77.72.230.63:53"
 last_success_at         TEXT,                  -- RFC3339 UTC, last time confirmed DS == target
 ```
@@ -337,7 +344,7 @@ KSK rollover state for zone cpt.p.axfr.net.:
   phase             parent-push-softfail
   attempts          0 / 5 in next group; previous group: 5 / 5 failed
   last failure      13:43:21 UTC (47m12s ago)
-                    category: parent-silent-reject
+                    category: parent-publish-failure
                     detail:   rcode=NOERROR but observe timed out after 1h —
                               parent did not publish expected DS RRset
   next attempt      14:43:21 UTC (in 47m48s)
@@ -374,7 +381,7 @@ ops.
 For monitoring, a Prometheus-style metric:
 
 ```
-tdns_rollover_softfail_zones_total{category="parent-silent-reject"}  1
+tdns_rollover_softfail_zones_total{category="parent-publish-failure"}  1
 tdns_rollover_softfail_attempts_total{zone="cpt.p.axfr.net."}        7
 ```
 
@@ -399,7 +406,7 @@ runs. When approval rejects the update later (line 313+), the
 response has already been written with rcode NOERROR (because
 validation succeeded) and no EDE attached. The child sees
 "accepted" on the wire but never sees the DS appear — the
-`parent-silent-reject` case.
+`parent-publish-failure` case.
 
 The fix:
 
@@ -416,13 +423,13 @@ The fix:
 
 With those changes, every UPDATE rejection arrives at the child
 with a specific EDE message, the child records it as
-`parent-rejected` (not `parent-silent-reject`), and the operator on
+`parent-rejected` (not `parent-publish-failure`), and the operator on
 the child side knows exactly which knob on the parent needs
 attention.
 
 This work is parallel to the child-side state-machine redesign and
 should land roughly together — otherwise `parent-rejected` will
-keep collapsing into `parent-silent-reject` for every policy-
+keep collapsing into `parent-publish-failure` for every policy-
 rejected update, and the categorization becomes useless.
 
 ## Narrowed role of `auto-rollover unstick`
@@ -478,10 +485,10 @@ zone" command.
 
 1. Define `RolloverFailureCategory` enum (string consts:
    `child-config`, `transport`, `parent-rejected`,
-   `parent-silent-reject`).
+   `parent-publish-failure`).
 2. Each push-failure path in `RolloverAutomatedTick` and
    `PushWholeDSRRset` records category + detail via `setSoftfail`.
-3. `observeHardFail` records `parent-silent-reject`.
+3. `observeHardFail` records `parent-publish-failure`.
 
 ### Phase 4 — softfail phase + counter logic
 
