@@ -204,6 +204,14 @@ func PushWholeDSRRset(ctx context.Context, zd *ZoneData, kdb *KeyDB, imr *Imr) (
 		if err := saveLastDSSubmittedRange(kdb, child, low, high); err != nil {
 			return out, fmt.Errorf("PushWholeDSRRset: persist submitted range: %w", err)
 		}
+	} else {
+		// Contributors didn't all have authoritative rollover_index
+		// values, so this push has no meaningful range to record.
+		// Clear any stale range from a prior push instead of leaving
+		// stale persisted columns that describe an older submission.
+		if err := clearLastDSSubmittedRange(kdb, child); err != nil {
+			return out, fmt.Errorf("PushWholeDSRRset: clear stale submitted range: %w", err)
+		}
 	}
 	return out, nil
 }
@@ -218,5 +226,20 @@ ON CONFLICT(zone) DO UPDATE SET
   last_ds_submitted_at = excluded.last_ds_submitted_at`
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := kdb.DB.Exec(q, zone, low, high, now)
+	return err
+}
+
+// clearLastDSSubmittedRange wipes the persisted submitted-range columns
+// when a successful push had incomplete rollover_index contributors,
+// so subsequent range-based decisions and operator status output don't
+// keep showing values from an older submission.
+func clearLastDSSubmittedRange(kdb *KeyDB, zone string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	const q = `UPDATE RolloverZoneState
+SET last_ds_submitted_index_low = NULL,
+    last_ds_submitted_index_high = NULL,
+    last_ds_submitted_at = ?
+WHERE zone = ?`
+	_, err := kdb.DB.Exec(q, now, zone)
 	return err
 }
