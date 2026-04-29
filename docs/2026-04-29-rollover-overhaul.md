@@ -3,7 +3,7 @@
 Author: Johan / Claude
 Date: 2026-04-29
 Status: implementation in progress on branch `rollover-overhaul`
-        (phases 1–7 done; phase 8 next; 9–12 untouched)
+        (phases 1–8 done; phase 9 next; 10–12 untouched)
 
 This document supersedes:
 
@@ -849,8 +849,8 @@ Status as of 2026-04-29:
 | 5     | softfail phase + counter logic              | `a6d2288`    | done     |
 | 6     | config wiring                               | `af6a863`    | done (out of order; phase 5 needs the knobs) |
 | 7     | narrowed `unstick` (function-only)          | `42345de`    | done     |
-| 8     | RolloverStatus struct + compute             | —            | next     |
-| 9     | read endpoints + CLI conversion             | —            |          |
+| 8     | RolloverStatus struct + compute             | `99095f6`    | done     |
+| 9     | read endpoints + CLI conversion             | —            | next     |
 | 10    | write endpoints + CLI conversion            | —            |          |
 | 11    | parent-side EDE (parallel)                  | —            |          |
 | 12    | cleanup                                     | —            |          |
@@ -968,7 +968,7 @@ hardcoded constants and policy reads.
 1. Reimplement `UnstickRollover` to clear `next_push_at` only.
 2. CLI help text update — narrowed role.
 
-### Phase 8 — RolloverStatus struct + ComputeRolloverStatus  (NEXT)
+### Phase 8 — RolloverStatus struct + ComputeRolloverStatus  (DONE — `99095f6`)
 
 1. Add `messages_rollover.go` with `RolloverStatus`, `DSRange`,
    `RolloverKeyEntry`, `PolicySummary`, request structs for each
@@ -980,7 +980,7 @@ hardcoded constants and policy reads.
 3. Implement `ComputeRolloverWhen` similarly — wraps existing
    `ComputeEarliestRollover`.
 
-### Phase 9 — read endpoints + CLI conversion
+### Phase 9 — read endpoints + CLI conversion  (NEXT)
 
 1. Add `apihandler_rollover.go` with `/rollover/status` (GET),
    `/rollover/when` (GET) handlers calling Phase 8 functions.
