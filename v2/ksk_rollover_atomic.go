@@ -197,7 +197,11 @@ func pickStandbyForPromotion(tx *Tx, zone string, standbys []struct {
 			return s.KeyID, nil
 		}
 	}
-	// All NULL: tie-break by rollover_index then keytag.
+	// All NULL: tie-break by rollover_index then keytag. Skip any
+	// standby that has no RolloverKeyState row at all — promoting one
+	// of those would leave the new active KSK with no active_at /
+	// active_seq / rollover_state_at because the post-promotion writes
+	// are UPDATE-only and would silently no-op on a missing row.
 	type cand struct {
 		kid uint16
 		idx int
@@ -207,7 +211,10 @@ func pickStandbyForPromotion(tx *Tx, zone string, standbys []struct {
 		var ri sql.NullInt64
 		err := tx.QueryRow(`SELECT rollover_index FROM RolloverKeyState WHERE zone = ? AND keyid = ?`,
 			zone, int(s.KeyID)).Scan(&ri)
-		if err != nil && err != sql.ErrNoRows {
+		if err == sql.ErrNoRows {
+			continue
+		}
+		if err != nil {
 			return 0, err
 		}
 		idx := -1
@@ -215,6 +222,9 @@ func pickStandbyForPromotion(tx *Tx, zone string, standbys []struct {
 			idx = int(ri.Int64)
 		}
 		cands = append(cands, cand{kid: s.KeyID, idx: idx})
+	}
+	if len(cands) == 0 {
+		return 0, nil
 	}
 	best := cands[0]
 	for _, c := range cands[1:] {
