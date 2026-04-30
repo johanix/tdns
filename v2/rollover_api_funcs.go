@@ -189,12 +189,19 @@ func populateAttemptTiming(out *RolloverStatus, row *RolloverZoneRow, pol *Dnsse
 	}
 	out.AttemptMax = pol.Rollover.MaxAttemptsBeforeBackoff
 	// AttemptIndex is the operator-facing 1-based number for the
-	// current group of N attempts. During the initial flurry,
-	// hardfail_count after attempt n shows as n (incremented at
-	// failure), so the running attempt is hardfail_count+1.
-	// During softfail the counter is at-or-above max and the index
-	// is no longer meaningful; surface 0 there.
-	if out.Phase != rolloverPhasePushSoftfail && row != nil {
+	// current attempt within an active push/observe cycle. Outside
+	// an active cycle (idle, softfail, child-publish/withdraw) it
+	// is 0 — the contract documented on RolloverStatus.
+	//
+	// Detection: an active attempt has both an active parent-side
+	// phase AND a non-NULL last_attempt_started_at (cleared on
+	// success in phase 12c-1). Either condition alone isn't enough:
+	// idle has neither, but a freshly-confirmed zone briefly has a
+	// stale parent-push phase queued for the next tick before
+	// last_attempt_started_at gets cleared.
+	if row != nil && row.LastAttemptStartedAt.Valid &&
+		(out.Phase == rolloverPhasePendingParentPush ||
+			out.Phase == rolloverPhasePendingParentObserve) {
 		if row.HardfailCount < out.AttemptMax {
 			out.AttemptIndex = row.HardfailCount + 1
 		}
@@ -347,11 +354,18 @@ func rolloverKeyEntryFromKeystoreKey(kdb *KeyDB, zone string, k *DnssecKeyWithTi
 		entry.StateSince = ts.UTC().Format(time.RFC3339)
 	}
 	seq, err := RolloverKeyActiveSeq(kdb, zone, k.KeyTag)
-	if err == nil && seq >= 0 {
+	if err != nil {
+		// Don't fail the whole status response over one key's lookup
+		// — partial status is still useful — but log so the failure
+		// isn't invisible.
+		lgSigner.Debug("rolloverKeyEntryFromKeystoreKey: RolloverKeyActiveSeq failed", "zone", zone, "keyid", k.KeyTag, "err", err)
+	} else if seq >= 0 {
 		v := seq
 		entry.ActiveSeq = &v
 	}
-	if msg, _ := LoadLastRolloverError(kdb, zone, k.KeyTag); msg != "" {
+	if msg, err := LoadLastRolloverError(kdb, zone, k.KeyTag); err != nil {
+		lgSigner.Debug("rolloverKeyEntryFromKeystoreKey: LoadLastRolloverError failed", "zone", zone, "keyid", k.KeyTag, "err", err)
+	} else if msg != "" {
 		entry.LastRolloverErr = msg
 	}
 	return entry

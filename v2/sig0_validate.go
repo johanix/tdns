@@ -214,7 +214,13 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 	// SIG validating the update. Now we must iterate over the keys to see if any of them actually
 	// verify correctly.
 
-	for _, signer := range us.Signers {
+	// Iterate by index so signer.Validated writes back into the
+	// slice (the previous range-over-value form mutated a copy).
+	// Break on first success so a later failing signer can't
+	// overwrite ValidationRcode / RejectionEDE / Validated and
+	// leave the status struct internally inconsistent.
+	for i := range us.Signers {
+		signer := &us.Signers[i]
 		// Use the per-signer SIG, not the outer sig variable (which
 		// holds whichever SIG was last parsed in the discovery loop
 		// above). For a single-signature UPDATE this is the same
@@ -259,7 +265,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 			continue
 		}
 
-		// Signature is valid and within its validity period
+		// Signature is valid and within its validity period.
 		lgDns.Info("ValidateUpdate: signature within validity period", "signer", signer.Name, "keyid", signer.KeyId)
 		lgDns.Info("ValidateUpdate: update validated by known and validated key")
 		us.ValidationRcode = dns.RcodeSuccess
@@ -267,7 +273,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		us.Validated = true // Now at least one key has validated the update
 		us.SignerName = signer.Name
 		signer.Validated = true
-		continue
+		break
 	}
 
 	// When we get here then we have tried to validate all signatures and the result is in
