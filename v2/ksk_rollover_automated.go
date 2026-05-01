@@ -350,6 +350,10 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		// Clear last_softfail_*: the previous softfail event is no
 		// longer informative now that we're back in sync.
 		_ = clearLastSoftfail(kdb, zone)
+		// Trigger 1 — confirmed observation: if NOTIFY-pushed CDS is
+		// still on the wire (last_published_cds_index_low/high
+		// non-NULL), unpublish it now per RFC 7344 §4.1. Best-effort.
+		cleanupCdsAfterConfirm(zd, kdb)
 		if advanced > 0 {
 			triggerResign(conf, zone)
 		}
@@ -405,6 +409,8 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 				_ = setLastSuccess(kdb, zone, now)
 				_ = setLastAttemptStarted(kdb, zone, time.Time{})
 				_ = clearLastSoftfail(kdb, zone)
+				// Trigger 1 — confirmed observation, softfail-recovery path.
+				cleanupCdsAfterConfirm(zd, kdb)
 				if advanced > 0 {
 					triggerResign(conf, zone)
 				}

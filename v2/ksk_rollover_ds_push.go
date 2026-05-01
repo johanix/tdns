@@ -208,6 +208,11 @@ func PushDSRRsetForRollover(ctx context.Context, deps RolloverEngineDeps) (KSKDS
 
 	choices, err := pickRolloverSchemes(ctx, deps.Zone, deps.Imr, deps.Policy)
 	if err != nil {
+		// Trigger 2 cleanup (err branch): if we still own a CDS RRset
+		// and the parent has lost the ability to consume it, unpublish
+		// best-effort. Otherwise CDS sits orphaned for the duration of
+		// the parent-side outage.
+		cleanupCdsAfterConfirm(deps.Zone, deps.KDB)
 		// "No usable scheme" maps to child-config:waiting-for-parent
 		// in Phase 6. Phase 4 emits SoftfailChildConfig — the
 		// subcategorization commit will introduce the new constant
@@ -216,6 +221,14 @@ func PushDSRRsetForRollover(ctx context.Context, deps RolloverEngineDeps) (KSKDS
 			Category: SoftfailChildConfig,
 			Detail:   "pickRolloverSchemes: " + err.Error(),
 		}, fmt.Errorf("PushDSRRsetForRollover: %w", err)
+	}
+
+	// Trigger 2 cleanup (UPDATE-only branch): if the chosen schemes
+	// don't include NOTIFY but we currently own a CDS RRset, that CDS
+	// will not be republished by this attempt. Unpublish before
+	// dispatch so it doesn't sit stale through the rollover.
+	if !schemesContainNotify(choices) {
+		cleanupCdsAfterConfirm(deps.Zone, deps.KDB)
 	}
 
 	results := make([]pathResultLite, len(choices))
@@ -316,6 +329,20 @@ type pathResultLite struct {
 	scheme string
 	res    KSKDSPushResult
 	err    error
+}
+
+// schemesContainNotify reports whether any chosen scheme is NOTIFY.
+// Used by the dispatcher's Trigger 2 cleanup decision: when NOTIFY
+// is not in the dispatch set, any CDS the engine previously published
+// will not be re-published this attempt and should be cleaned up
+// preemptively.
+func schemesContainNotify(choices []schemeChoice) bool {
+	for _, c := range choices {
+		if c.Scheme == core.SchemeNotify {
+			return true
+		}
+	}
+	return false
 }
 
 // mergeFailureCategory picks the more-actionable of two failure
