@@ -48,15 +48,15 @@ func pushDSRRsetViaNotify(ctx context.Context, deps RolloverEngineDeps, target *
 	kdb := deps.KDB
 	notifyq := deps.NotifyQ
 	if zd == nil || kdb == nil {
-		out.Category = SoftfailChildConfig
+		out.Category = SoftfailChildConfigLocalError
 		return out, fmt.Errorf("pushDSRRsetViaNotify: nil argument")
 	}
 	if target == nil || len(target.Addresses) == 0 {
-		out.Category = SoftfailChildConfig
+		out.Category = SoftfailChildConfigLocalError
 		return out, fmt.Errorf("pushDSRRsetViaNotify: no NOTIFY target addresses")
 	}
 	if notifyq == nil {
-		out.Category = SoftfailChildConfig
+		out.Category = SoftfailChildConfigLocalError
 		return out, fmt.Errorf("pushDSRRsetViaNotify: NotifyQ not configured")
 	}
 
@@ -64,11 +64,11 @@ func pushDSRRsetViaNotify(ctx context.Context, deps RolloverEngineDeps, target *
 
 	cdsSet, low, high, idxOK, err := ComputeTargetCDSSetForZone(kdb, child)
 	if err != nil {
-		out.Category = SoftfailChildConfig
+		out.Category = SoftfailChildConfigLocalError
 		return out, err
 	}
 	if len(cdsSet) == 0 {
-		out.Category = SoftfailChildConfig
+		out.Category = SoftfailChildConfigLocalError
 		return out, fmt.Errorf("pushDSRRsetViaNotify: no CDS records to publish for zone %s", child)
 	}
 
@@ -88,7 +88,7 @@ func pushDSRRsetViaNotify(ctx context.Context, deps RolloverEngineDeps, target *
 	actions = append(actions, cdsSet...)
 
 	if kdb.UpdateQ == nil {
-		out.Category = SoftfailChildConfig
+		out.Category = SoftfailChildConfigLocalError
 		return out, fmt.Errorf("pushDSRRsetViaNotify: kdb.UpdateQ nil")
 	}
 	select {
@@ -99,10 +99,10 @@ func pushDSRRsetViaNotify(ctx context.Context, deps RolloverEngineDeps, target *
 		InternalUpdate: true,
 	}:
 	case <-time.After(5 * time.Second):
-		out.Category = SoftfailChildConfig
+		out.Category = SoftfailChildConfigLocalError
 		return out, fmt.Errorf("pushDSRRsetViaNotify: UpdateQ full for 5s, skipping")
 	case <-ctx.Done():
-		out.Category = SoftfailChildConfig
+		out.Category = SoftfailChildConfigLocalError
 		return out, ctx.Err()
 	}
 
@@ -112,14 +112,14 @@ func pushDSRRsetViaNotify(ctx context.Context, deps RolloverEngineDeps, target *
 	// we don't orphan CDS.
 	if idxOK {
 		if err := setPublishedCdsRange(kdb, child, low, high); err != nil {
-			out.Category = SoftfailChildConfig
+			out.Category = SoftfailChildConfigLocalError
 			return out, fmt.Errorf("pushDSRRsetViaNotify: persist CDS range: %w", err)
 		}
 	} else {
 		// No authoritative range to record. Clear any stale range so a
 		// subsequent cleanup pass doesn't compare against an old set.
 		if err := clearPublishedCdsRange(kdb, child); err != nil {
-			out.Category = SoftfailChildConfig
+			out.Category = SoftfailChildConfigLocalError
 			return out, fmt.Errorf("pushDSRRsetViaNotify: clear CDS range: %w", err)
 		}
 	}

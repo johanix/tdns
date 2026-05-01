@@ -213,12 +213,12 @@ func PushDSRRsetForRollover(ctx context.Context, deps RolloverEngineDeps) (KSKDS
 		// best-effort. Otherwise CDS sits orphaned for the duration of
 		// the parent-side outage.
 		cleanupCdsAfterConfirm(deps.Zone, deps.KDB)
-		// "No usable scheme" maps to child-config:waiting-for-parent
-		// in Phase 6. Phase 4 emits SoftfailChildConfig — the
-		// subcategorization commit will introduce the new constant
-		// and update this site to use it.
+		// "No usable scheme" → child-config:waiting-for-parent. The
+		// tick handler caps backoff at 1h and never increments
+		// hardfail_count for this subcategory — recovery is automatic
+		// when the parent restores DSYNC advertisement.
 		return KSKDSPushResult{
-			Category: SoftfailChildConfig,
+			Category: SoftfailChildConfigWaitingForParent,
 			Detail:   "pickRolloverSchemes: " + err.Error(),
 		}, fmt.Errorf("PushDSRRsetForRollover: %w", err)
 	}
@@ -245,7 +245,7 @@ func PushDSRRsetForRollover(ctx context.Context, deps RolloverEngineDeps) (KSKDS
 			results[0] = pathResultLite{scheme: "NOTIFY", res: res, err: perr}
 		default:
 			return KSKDSPushResult{
-				Category: SoftfailChildConfig,
+				Category: SoftfailChildConfigLocalError,
 				Detail:   fmt.Sprintf("unknown scheme %d", ch.Scheme),
 			}, fmt.Errorf("PushDSRRsetForRollover: unknown scheme %d", ch.Scheme)
 		}
@@ -267,7 +267,7 @@ func PushDSRRsetForRollover(ctx context.Context, deps RolloverEngineDeps) (KSKDS
 				default:
 					results[i] = pathResultLite{
 						scheme: schemeName(ch.Scheme),
-						res:    KSKDSPushResult{Category: SoftfailChildConfig, Detail: fmt.Sprintf("unknown scheme %d", ch.Scheme)},
+						res:    KSKDSPushResult{Category: SoftfailChildConfigLocalError, Detail: fmt.Sprintf("unknown scheme %d", ch.Scheme)},
 						err:    fmt.Errorf("unknown scheme %d", ch.Scheme),
 					}
 				}
@@ -346,8 +346,13 @@ func schemesContainNotify(choices []schemeChoice) bool {
 }
 
 // mergeFailureCategory picks the more-actionable of two failure
-// categories. Order: parent-rejected > transport > child-config.
+// categories. Order: parent-rejected > transport > child-config:*.
 // Empty strings are treated as least-actionable.
+//
+// child-config subcategories (waiting-for-parent, local-error) and
+// the bare child-config string all rank equally at level 1; the
+// dispatcher's per-path categories are passed through to the tick
+// handler which decides on backoff strategy from the subcategory.
 func mergeFailureCategory(a, b string) string {
 	rank := func(s string) int {
 		switch s {
@@ -355,7 +360,9 @@ func mergeFailureCategory(a, b string) string {
 			return 3
 		case SoftfailTransport:
 			return 2
-		case SoftfailChildConfig:
+		case SoftfailChildConfig,
+			SoftfailChildConfigLocalError,
+			SoftfailChildConfigWaitingForParent:
 			return 1
 		default:
 			return 0
@@ -378,7 +385,7 @@ func pushDSRRsetViaUpdate(ctx context.Context, deps RolloverEngineDeps) (KSKDSPu
 	kdb := deps.KDB
 	imr := deps.Imr
 	if zd == nil || kdb == nil || imr == nil {
-		out.Category = SoftfailChildConfig
+		out.Category = SoftfailChildConfigLocalError
 		return out, fmt.Errorf("pushDSRRsetViaUpdate: nil argument")
 	}
 	child := dns.Fqdn(zd.ZoneName)
@@ -395,33 +402,33 @@ func pushDSRRsetViaUpdate(ctx context.Context, deps RolloverEngineDeps) (KSKDSPu
 
 	dsSet, low, high, idxOK, err := ComputeTargetDSSetForZone(kdb, child, uint8(dns.SHA256))
 	if err != nil {
-		out.Category = SoftfailChildConfig
+		out.Category = SoftfailChildConfigLocalError
 		return out, err
 	}
 	if len(dsSet) == 0 {
-		out.Category = SoftfailChildConfig
+		out.Category = SoftfailChildConfigLocalError
 		return out, fmt.Errorf("pushDSRRsetViaUpdate: no DS records to publish for zone %s", child)
 	}
 
 	msg, err := BuildChildWholeDSUpdate(parent, child, dsSet)
 	if err != nil {
-		out.Category = SoftfailChildConfig
+		out.Category = SoftfailChildConfigLocalError
 		return out, err
 	}
 
 	sak, err := kdb.GetSig0Keys(child, Sig0StateActive)
 	if err != nil {
-		out.Category = SoftfailChildConfig
+		out.Category = SoftfailChildConfigLocalError
 		return out, fmt.Errorf("pushDSRRsetViaUpdate: GetSig0Keys: %w", err)
 	}
 	if len(sak.Keys) == 0 {
-		out.Category = SoftfailChildConfig
+		out.Category = SoftfailChildConfigLocalError
 		return out, fmt.Errorf("pushDSRRsetViaUpdate: no active SIG(0) key for zone %s", child)
 	}
 
 	smsg, err := SignMsg(*msg, child, sak)
 	if err != nil {
-		out.Category = SoftfailChildConfig
+		out.Category = SoftfailChildConfigLocalError
 		return out, fmt.Errorf("pushDSRRsetViaUpdate: SignMsg: %w", err)
 	}
 
@@ -451,7 +458,7 @@ func pushDSRRsetViaUpdate(ctx context.Context, deps RolloverEngineDeps) (KSKDSPu
 
 	if idxOK {
 		if err := saveLastDSSubmittedRange(kdb, child, low, high); err != nil {
-			out.Category = SoftfailChildConfig
+			out.Category = SoftfailChildConfigLocalError
 			return out, fmt.Errorf("pushDSRRsetViaUpdate: persist submitted range: %w", err)
 		}
 	} else {

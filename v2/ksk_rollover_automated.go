@@ -222,7 +222,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		// under pending-parent-observe.
 		if imr == nil {
 			lgSigner.Warn("rollover: ImrEngine nil, cannot DS push", "zone", zone)
-			handleAttemptFailed(kdb, zone, pol, SoftfailChildConfig, "ImrEngine nil, cannot DS push", now)
+			handleAttemptFailed(kdb, zone, pol, SoftfailChildConfigLocalError, "ImrEngine nil, cannot DS push", now)
 			return nil
 		}
 		_ = setLastAttemptStarted(kdb, zone, now)
@@ -434,7 +434,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		nextPush := now.Add(softfailDelay).Add(jitterUpTo(5 * time.Minute))
 		if imr == nil {
 			lgSigner.Warn("rollover: ImrEngine nil, cannot softfail probe", "zone", zone)
-			_ = setSoftfail(kdb, zone, SoftfailChildConfig, "ImrEngine nil, cannot softfail probe", now, nextPush)
+			_ = setSoftfail(kdb, zone, SoftfailChildConfigLocalError, "ImrEngine nil, cannot softfail probe", now, nextPush)
 			return nil
 		}
 		_ = setLastAttemptStarted(kdb, zone, now)
@@ -450,8 +450,15 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 			if res.Detail != "" {
 				detail = res.Detail
 			}
+			// child-config:waiting-for-parent: cap softfail-delay at 1h
+			// to keep the probe cadence reasonable when the parent is
+			// indefinitely unreachable.
+			probeNext := nextPush
+			if cat == SoftfailChildConfigWaitingForParent {
+				probeNext = now.Add(waitingForParentDelay(pol)).Add(jitterUpTo(5 * time.Minute))
+			}
 			lgSigner.Warn("rollover: softfail probe push failed", "zone", zone, "category", cat, "err", perr, "detail", detail)
-			_ = setSoftfail(kdb, zone, cat, detail, now, nextPush)
+			_ = setSoftfail(kdb, zone, cat, detail, now, probeNext)
 			return nil
 		}
 		if res.Rcode != dns.RcodeSuccess {
@@ -708,6 +715,26 @@ func recordObserveTimeout(kdb *KeyDB, zone string, low, high int, timeout time.D
 	handleAttemptFailed(kdb, zone, pol, SoftfailParentPublishFailure, msg, now)
 }
 
+// waitingForParentDelay returns the capped softfail-delay used by
+// child-config:waiting-for-parent. Falls back to the policy's
+// SoftfailDelay (or defaults) but never exceeds waitingForParentBackoffCap.
+// Pure helper, table-tested.
+func waitingForParentDelay(pol *DnssecPolicy) time.Duration {
+	var softfailDelay time.Duration
+	if pol != nil {
+		softfailDelay = pol.Rollover.SoftfailDelay
+		if softfailDelay <= 0 {
+			softfailDelay = derivedSoftfailDelay(pol.Rollover.DsPublishDelay)
+		}
+	} else {
+		softfailDelay = defaultSoftfailDelayMinimum
+	}
+	if softfailDelay > waitingForParentBackoffCap {
+		softfailDelay = waitingForParentBackoffCap
+	}
+	return softfailDelay
+}
+
 // handleAttemptFailed is the shared decision point for any failed
 // rollover attempt — push error, push non-NOERROR, observe timeout.
 // Increments the hardfail counter and decides the next phase:
@@ -717,11 +744,34 @@ func recordObserveTimeout(kdb *KeyDB, zone string, low, high int, timeout time.D
 //   - count >= max-attempts-before-backoff → enter parent-push-softfail
 //     (long-term mode; one probe per softfail-delay forever).
 //
+// Special-case: child-config:waiting-for-parent never increments
+// hardfail_count and always enters softfail mode immediately with the
+// backoff capped at 1h. The parent has lost the ability to consume
+// our push entirely (no usable DSYNC scheme advertised); there is
+// nothing on the child side that retrying-faster would help. The
+// engine probes forever at the 1h cap until DSYNC reappears, at which
+// point the next probe succeeds and resetHardfailCount + clearLastSoftfail
+// run via the confirmed-observation path.
+//
 // Records the failure category and detail in either case so status
 // output can show what went wrong. Errors from the underlying writes
 // are logged but not propagated — the caller's tick-level error path
 // is for things that prevent the engine from advancing at all.
 func handleAttemptFailed(kdb *KeyDB, zone string, pol *DnssecPolicy, category, detail string, now time.Time) {
+	if category == SoftfailChildConfigWaitingForParent {
+		// Indefinite softfail with 1h cap; do NOT increment hardfail_count.
+		softfailDelay := waitingForParentDelay(pol)
+		nextPush := now.Add(softfailDelay).Add(jitterUpTo(5 * time.Minute))
+		if err := setSoftfail(kdb, zone, category, detail, now, nextPush); err != nil {
+			lgSigner.Warn("rollover: setSoftfail (waiting-for-parent) failed", "zone", zone, "err", err)
+		}
+		if err := SetRolloverPhase(kdb, zone, rolloverPhasePushSoftfail); err != nil {
+			lgSigner.Warn("rollover: set phase parent-push-softfail (waiting-for-parent) failed", "zone", zone, "err", err)
+		}
+		lgSigner.Warn("rollover: parent advertises no usable DSYNC scheme; halting until restored",
+			"zone", zone, "category", category, "next_probe_at", nextPush.Format(time.RFC3339))
+		return
+	}
 	n, err := incrementHardfailCount(kdb, zone)
 	if err != nil {
 		lgSigner.Warn("rollover: increment hardfail_count failed", "zone", zone, "err", err)
