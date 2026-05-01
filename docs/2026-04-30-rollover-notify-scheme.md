@@ -313,13 +313,13 @@ type Imr struct {
 ```
 
 Constructed via `&Imr{conf.Config.Internal.ImrEngine}` (see
-[tdns-mp/v2/delegation_sync.go:25](tdns-mp/v2/delegation_sync.go:25)
+[tdns-mp/v2/delegation_sync.go:26](tdns-mp/v2/delegation_sync.go:26)
 and [tdns-mp/v2/apihandler_agent.go:530](tdns-mp/v2/apihandler_agent.go:530)).
 The wrapper exists so tdns-mp can add MP-local methods later;
 today it just promotes `*tdns.Imr` methods unchanged
 (`DsyncDiscovery` at [tdns/v2/dsync_lookup.go:83](tdns/v2/dsync_lookup.go:83)
 is already used at
-[tdns-mp/v2/parentsync_leader.go:1211](tdns-mp/v2/parentsync_leader.go:1211)).
+[tdns-mp/v2/parentsync_leader.go:1309](tdns-mp/v2/parentsync_leader.go:1309)).
 
 For rollover deps, tdns-mp passes `conf.Config.Internal.ImrEngine`
 directly (the underlying `*tdns.Imr`), bypassing the wrapper —
