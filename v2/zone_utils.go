@@ -918,9 +918,15 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 				publishkeys = append(publishkeys, dns.RR(&zsk.DnskeyRR))
 			}
 
-			// Also include published/retired keys from database
+			// Also include published/standby/retired keys from database.
+			// Must match PublishDnskeyRRs's own SQL (ops_dnskey.go) — both
+			// build the same DNSKEY RRset, just at different points in the
+			// zone lifecycle (this snapshot for refresh-survival, the
+			// other for sign-time RRset construction). If the two
+			// disagree, refresh-then-sign briefly serves a different
+			// RRset than steady-state.
 			const fetchZoneDnskeysSql = `
-SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='published' OR state='retired')`
+SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='published' OR state='standby' OR state='retired')`
 			rows, err := zd.KeyDB.Query(fetchZoneDnskeysSql, zd.ZoneName)
 			if err != nil {
 				lg.Error("CollectDynamicRRs: failed to query DNSKEYs", "zone", zd.ZoneName, "err", err)
