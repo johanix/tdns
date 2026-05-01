@@ -234,15 +234,25 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 			if cat == "" {
 				cat = SoftfailTransport
 			}
-			lgSigner.Warn("rollover: DS push failed", "zone", zone, "err", err, "category", cat)
-			handleAttemptFailed(kdb, zone, pol, cat, err.Error(), now)
+			detail := err.Error()
+			if res.Detail != "" {
+				detail = res.Detail
+			}
+			lgSigner.Warn("rollover: DS push failed", "zone", zone, "err", err, "category", cat, "detail", detail)
+			handleAttemptFailed(kdb, zone, pol, cat, detail, now)
 			return nil
 		}
 		if res.Rcode != dns.RcodeSuccess {
 			lgSigner.Warn("rollover: DS push non-NOERROR", "zone", zone, "rcode", dns.RcodeToString[res.Rcode])
 			detail := fmt.Sprintf("rcode=%s", dns.RcodeToString[res.Rcode])
+			if res.Detail != "" {
+				detail = res.Detail
+			}
 			handleAttemptFailed(kdb, zone, pol, SoftfailParentRejected, detail, now)
 			return nil
+		}
+		if res.Scheme != "" {
+			_ = setLastAttemptScheme(kdb, zone, res.Scheme)
 		}
 		// Schedule the first parent-agent DS query: wait confirm-initial-wait
 		// from now, then exponential backoff starting at confirm-initial-wait.
@@ -430,15 +440,25 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 			if cat == "" {
 				cat = SoftfailTransport
 			}
-			lgSigner.Warn("rollover: softfail probe push failed", "zone", zone, "category", cat, "err", perr)
-			_ = setSoftfail(kdb, zone, cat, perr.Error(), now, nextPush)
+			detail := perr.Error()
+			if res.Detail != "" {
+				detail = res.Detail
+			}
+			lgSigner.Warn("rollover: softfail probe push failed", "zone", zone, "category", cat, "err", perr, "detail", detail)
+			_ = setSoftfail(kdb, zone, cat, detail, now, nextPush)
 			return nil
 		}
 		if res.Rcode != dns.RcodeSuccess {
 			detail := fmt.Sprintf("rcode=%s", dns.RcodeToString[res.Rcode])
-			lgSigner.Warn("rollover: softfail probe push non-NOERROR", "zone", zone, "rcode", dns.RcodeToString[res.Rcode])
+			if res.Detail != "" {
+				detail = res.Detail
+			}
+			lgSigner.Warn("rollover: softfail probe push non-NOERROR", "zone", zone, "rcode", dns.RcodeToString[res.Rcode], "detail", detail)
 			_ = setSoftfail(kdb, zone, SoftfailParentRejected, detail, now, nextPush)
 			return nil
+		}
+		if res.Scheme != "" {
+			_ = setLastAttemptScheme(kdb, zone, res.Scheme)
 		}
 		// Probe accepted at the wire. Restart observe to pick up DS
 		// when it appears; bump next_push_at without overwriting the

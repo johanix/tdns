@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
+	"sync"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -15,10 +17,21 @@ import (
 // otherwise it is one of the SoftfailXxx constants from
 // ksk_rollover_categories.go and the engine's caller uses it to record a
 // softfail event via setSoftfail.
+//
+// Scheme reflects which scheme(s) actually completed at the wire level
+// for this attempt. Comma-joined when a parallel send had at least one
+// path return NOERROR ("UPDATE", "NOTIFY", or "UPDATE,NOTIFY").
+// Persisted to RolloverZoneState.last_attempt_scheme for status display.
+//
+// Detail concatenates per-path diagnostics from failures (rcode, EDE,
+// transport error). Read by status output to render the cause of a
+// parent-rejected or transport softfail.
 type KSKDSPushResult struct {
 	Rcode        int
 	UpdateResult UpdateResult
 	Category     string
+	Scheme       string
+	Detail       string
 }
 
 // BuildChildWholeDSUpdate builds a DNS UPDATE for the parent zone that replaces the
@@ -162,16 +175,169 @@ func ComputeTargetDSSetForZone(kdb *KeyDB, childZone string, digest uint8) (ds [
 }
 
 // PushDSRRsetForRollover is the public dispatcher entry point for the
-// rollover engine's DS push. It picks one or more push schemes from the
-// parent's DSYNC advertisement and the policy's dsync-scheme-preference
-// (Phase 3), dispatches per-scheme push functions in parallel where
-// applicable (Phase 4), and aggregates per-path wire-level results.
+// rollover engine's DS push. It consults the parent's DSYNC RRset and
+// the policy's dsync-scheme-preference, dispatches one or more
+// per-scheme push functions (in parallel when "auto" matches both
+// schemes), and aggregates per-path wire-level results.
 //
-// Phase 1 shape: scheme selection is not yet implemented; the
-// dispatcher always delegates to pushDSRRsetViaUpdate. Phase 4 will
-// extend this with NOTIFY-side and parallel paths.
+// Aggregation rules:
+//   - Any path returned NOERROR → push succeeds. Scheme is
+//     comma-joined for the paths that returned NOERROR.
+//   - All paths failed → push fails. Category is the most-actionable:
+//     parent-rejected > transport > child-config:local-error.
+//     Detail concatenates per-path diagnostics.
+//   - "no usable scheme" from pickRolloverSchemes (parent advertises
+//     nothing the policy will accept) → child-config:waiting-for-parent
+//     (Phase 6) without dispatching any path. Recovery is automatic
+//     when the parent restores DSYNC advertisement.
+//
+// Single-scheme degenerate case: when only one scheme runs, the
+// aggregate is just that path's result; no special-case path.
+//
+// Note: when the policy has no DsyncSchemePreference set (e.g. the
+// CLI offline ds-push call constructs deps without policy on a stub
+// zd), the dispatcher falls through to the legacy UPDATE-only path
+// to preserve existing CLI behavior.
 func PushDSRRsetForRollover(ctx context.Context, deps RolloverEngineDeps) (KSKDSPushResult, error) {
-	return pushDSRRsetViaUpdate(ctx, deps)
+	if deps.Policy == nil {
+		return pushDSRRsetViaUpdate(ctx, deps)
+	}
+	if deps.Imr == nil {
+		return pushDSRRsetViaUpdate(ctx, deps)
+	}
+
+	choices, err := pickRolloverSchemes(ctx, deps.Zone, deps.Imr, deps.Policy)
+	if err != nil {
+		// "No usable scheme" maps to child-config:waiting-for-parent
+		// in Phase 6. Phase 4 emits SoftfailChildConfig — the
+		// subcategorization commit will introduce the new constant
+		// and update this site to use it.
+		return KSKDSPushResult{
+			Category: SoftfailChildConfig,
+			Detail:   "pickRolloverSchemes: " + err.Error(),
+		}, fmt.Errorf("PushDSRRsetForRollover: %w", err)
+	}
+
+	results := make([]pathResultLite, len(choices))
+
+	if len(choices) == 1 {
+		// Single-path degenerate case: avoid goroutine overhead.
+		ch := choices[0]
+		switch ch.Scheme {
+		case core.SchemeUpdate:
+			res, perr := pushDSRRsetViaUpdate(ctx, deps)
+			results[0] = pathResultLite{scheme: "UPDATE", res: res, err: perr}
+		case core.SchemeNotify:
+			res, perr := pushDSRRsetViaNotify(ctx, deps, ch.Target)
+			results[0] = pathResultLite{scheme: "NOTIFY", res: res, err: perr}
+		default:
+			return KSKDSPushResult{
+				Category: SoftfailChildConfig,
+				Detail:   fmt.Sprintf("unknown scheme %d", ch.Scheme),
+			}, fmt.Errorf("PushDSRRsetForRollover: unknown scheme %d", ch.Scheme)
+		}
+	} else {
+		// Parallel: one goroutine per scheme. Each writes its slot in
+		// the pre-allocated results slice; no shared mutation.
+		var wg sync.WaitGroup
+		for i, ch := range choices {
+			wg.Add(1)
+			go func(i int, ch schemeChoice) {
+				defer wg.Done()
+				switch ch.Scheme {
+				case core.SchemeUpdate:
+					res, perr := pushDSRRsetViaUpdate(ctx, deps)
+					results[i] = pathResultLite{scheme: "UPDATE", res: res, err: perr}
+				case core.SchemeNotify:
+					res, perr := pushDSRRsetViaNotify(ctx, deps, ch.Target)
+					results[i] = pathResultLite{scheme: "NOTIFY", res: res, err: perr}
+				default:
+					results[i] = pathResultLite{
+						scheme: schemeName(ch.Scheme),
+						res:    KSKDSPushResult{Category: SoftfailChildConfig, Detail: fmt.Sprintf("unknown scheme %d", ch.Scheme)},
+						err:    fmt.Errorf("unknown scheme %d", ch.Scheme),
+					}
+				}
+			}(i, ch)
+		}
+		wg.Wait()
+	}
+
+	return aggregateRolloverPushResults(results), nil
+}
+
+// aggregateRolloverPushResults applies the dispatcher's any-success-wins
+// policy to the per-path results and returns the engine-functional
+// aggregate KSKDSPushResult. Helper kept separate for clarity (and so
+// future tests can drive it directly without spinning up Imr/UpdateQ).
+func aggregateRolloverPushResults(results []pathResultLite) KSKDSPushResult {
+	var ok []string
+	var failParts []string
+	failedCat := ""
+	failedRcode := 0
+	for _, r := range results {
+		if r.err == nil && r.res.Rcode == dns.RcodeSuccess {
+			ok = append(ok, r.scheme)
+			continue
+		}
+		// Failed path. Aggregate its diagnostics + category.
+		detail := r.scheme + ":"
+		if r.res.Detail != "" {
+			detail += " " + r.res.Detail
+		} else if r.err != nil {
+			detail += " " + r.err.Error()
+		} else if r.res.Rcode != 0 {
+			detail += " rcode=" + dns.RcodeToString[r.res.Rcode]
+		}
+		failParts = append(failParts, detail)
+		// Most-actionable category wins.
+		failedCat = mergeFailureCategory(failedCat, r.res.Category)
+		if r.res.Rcode != 0 && failedRcode == 0 {
+			failedRcode = r.res.Rcode
+		}
+	}
+	if len(ok) > 0 {
+		return KSKDSPushResult{
+			Rcode:  dns.RcodeSuccess,
+			Scheme: strings.Join(ok, ","),
+			Detail: strings.Join(failParts, " | "),
+		}
+	}
+	return KSKDSPushResult{
+		Rcode:    failedRcode,
+		Category: failedCat,
+		Detail:   strings.Join(failParts, " | "),
+	}
+}
+
+// pathResultLite is the trimmed shape aggregateRolloverPushResults
+// consumes — just the scheme name and the per-path result.
+type pathResultLite struct {
+	scheme string
+	res    KSKDSPushResult
+	err    error
+}
+
+// mergeFailureCategory picks the more-actionable of two failure
+// categories. Order: parent-rejected > transport > child-config.
+// Empty strings are treated as least-actionable.
+func mergeFailureCategory(a, b string) string {
+	rank := func(s string) int {
+		switch s {
+		case SoftfailParentRejected:
+			return 3
+		case SoftfailTransport:
+			return 2
+		case SoftfailChildConfig:
+			return 1
+		default:
+			return 0
+		}
+	}
+	if rank(b) > rank(a) {
+		return b
+	}
+	return a
 }
 
 // pushDSRRsetViaUpdate computes the target DS RRset from the keystore, builds a
@@ -270,7 +436,53 @@ func pushDSRRsetViaUpdate(ctx context.Context, deps RolloverEngineDeps) (KSKDSPu
 			return out, fmt.Errorf("pushDSRRsetViaUpdate: clear stale submitted range: %w", err)
 		}
 	}
+	out.Scheme = "UPDATE"
 	return out, nil
+}
+
+// ComputeTargetCDSSetForZone returns the CDS RRset that mirrors the
+// rollover engine's target DS set, derived from the same KSK rows
+// that ComputeTargetDSSetForZone uses. Both functions share
+// loadTargetKSKsForRollover so an UPDATE-pushed DS RRset and a
+// NOTIFY-pushed CDS RRset always describe the same set of keys.
+// Digest is SHA-256 only in this phase. CDS owner names use child
+// as FQDN; TTL is 120s to match ops_cds.go.
+//
+// indexLow/indexHigh / indexRangeKnown are the engine's claim of
+// CDS-RRset ownership for cleanup-time comparison
+// (RolloverZoneState.last_published_cds_index_low/high). The same
+// caveat as ComputeTargetDSSetForZone applies: indexRangeKnown is
+// false when not every contributing key has a RolloverKeyState row,
+// in which case the caller must not persist the range.
+func ComputeTargetCDSSetForZone(kdb *KeyDB, childZone string) (cds []dns.RR, indexLow, indexHigh int, indexRangeKnown bool, err error) {
+	childZone = dns.Fqdn(childZone)
+	rows, low, high, idxOK, err := loadTargetKSKsForRollover(kdb, childZone)
+	if err != nil {
+		return nil, 0, 0, false, err
+	}
+	for _, row := range rows {
+		rr, err := dns.NewRR(row.keyrr)
+		if err != nil {
+			return nil, 0, 0, false, fmt.Errorf("ComputeTargetCDSSetForZone: parse DNSKEY keyid=%d: %w", row.keyid, err)
+		}
+		dk, ok := rr.(*dns.DNSKEY)
+		if !ok {
+			return nil, 0, 0, false, fmt.Errorf("ComputeTargetCDSSetForZone: keyid %d is not DNSKEY", row.keyid)
+		}
+		ds := dk.ToDS(uint8(dns.SHA256))
+		if ds == nil {
+			return nil, 0, 0, false, fmt.Errorf("ComputeTargetCDSSetForZone: ToDS failed for keyid %d", row.keyid)
+		}
+		c := &dns.CDS{DS: *ds}
+		c.Hdr = dns.RR_Header{
+			Name:   childZone,
+			Rrtype: dns.TypeCDS,
+			Class:  dns.ClassINET,
+			Ttl:    120,
+		}
+		cds = append(cds, c)
+	}
+	return cds, low, high, idxOK, nil
 }
 
 func saveLastDSSubmittedRange(kdb *KeyDB, zone string, low, high int) error {

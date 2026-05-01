@@ -25,6 +25,14 @@ type NotifyResponse struct {
 	Rcode    int
 	Error    bool
 	ErrorMsg string
+	// EDE carries any Extended DNS Errors returned by the parent's
+	// NOTIFY response. On any-success-wins overall outcome, EDE is
+	// populated from the first NOERROR target's response (typically
+	// empty). On overall failure, EDE is populated from the most
+	// recent failing target's response. The rollover engine's
+	// parent-rejected category surfaces these for operator
+	// diagnostics.
+	EDE []dns.EDNS0_EDE
 }
 
 // XXX: The whole point with the NotifierEngine is to be able to control the max rate of send notifications per
@@ -47,11 +55,21 @@ func Notifier(ctx context.Context, notifyreqQ chan NotifyRequest) error {
 
 			lgDns.Info("NotifierEngine: will notify downstreams", "zone", zd.ZoneName)
 
-			zd.SendNotify(nr.RRtype, nr.Targets)
+			rcode, ede, sendErr := zd.SendNotify(nr.RRtype, nr.Targets)
 
 			if nr.Response != nil {
+				resp := NotifyResponse{
+					Rcode: rcode,
+					EDE:   ede,
+				}
+				if sendErr != nil {
+					resp.Error = true
+					resp.ErrorMsg = sendErr.Error()
+				} else {
+					resp.Msg = "OK"
+				}
 				select {
-				case nr.Response <- NotifyResponse{Msg: "OK", Rcode: dns.RcodeSuccess, Error: false, ErrorMsg: ""}:
+				case nr.Response <- resp:
 				case <-ctx.Done():
 					lgDns.Warn("NotifierEngine: context cancelled while sending NOTIFY response", "zone", zd.ZoneName)
 					return nil
@@ -61,9 +79,18 @@ func Notifier(ctx context.Context, notifyreqQ chan NotifyRequest) error {
 	}
 }
 
-func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
+// SendNotify sends NOTIFY to every target and aggregates with
+// any-success-wins semantics. On a successful overall outcome (at
+// least one target NOERROR), the returned rcode is NOERROR and EDE
+// is populated from the first NOERROR target's response (typically
+// empty). On overall failure, the returned rcode is the rcode of the
+// most recent failing target's response (or SERVFAIL with err if
+// every target's transport failed) and EDE comes from that target's
+// response. err is non-nil only when no target produced a usable
+// response at all (transport-level failure across the board).
+func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, []dns.EDNS0_EDE, error) {
 	if zd.ZoneName == "." {
-		return dns.RcodeServerFailure, fmt.Errorf("zone %q: error: zone name not specified. Ignoring notify request", zd.ZoneName)
+		return dns.RcodeServerFailure, nil, fmt.Errorf("zone %q: error: zone name not specified. Ignoring notify request", zd.ZoneName)
 	}
 
 	var err error
@@ -72,18 +99,18 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 	case dns.TypeSOA:
 		// Here we only need the downstreams
 		if len(zd.Downstreams) == 0 {
-			return dns.RcodeServerFailure, fmt.Errorf("zone %q: error: no downstreams. Ignoring notify request", zd.ZoneName)
+			return dns.RcodeServerFailure, nil, fmt.Errorf("zone %q: error: no downstreams. Ignoring notify request", zd.ZoneName)
 		}
 
 	case dns.TypeCSYNC, dns.TypeCDS:
 		// Here we need the parent notify receiver addresses
 		if zd.Parent == "." {
 			if Globals.ImrEngine == nil {
-				return dns.RcodeServerFailure, fmt.Errorf("zone %q: error: ImrEngine not active. Ignoring notify request", zd.ZoneName)
+				return dns.RcodeServerFailure, nil, fmt.Errorf("zone %q: error: ImrEngine not active. Ignoring notify request", zd.ZoneName)
 			}
 			zd.Parent, err = Globals.ImrEngine.ParentZone(zd.ZoneName)
 			if err != nil {
-				return dns.RcodeServerFailure, fmt.Errorf("zone %q: error: failure locating parent zone name. Ignoring notify request", zd.ZoneName)
+				return dns.RcodeServerFailure, nil, fmt.Errorf("zone %q: error: failure locating parent zone name. Ignoring notify request", zd.ZoneName)
 			}
 		}
 
@@ -99,6 +126,11 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 	c.Timeout = 5 * time.Second
 
 	successCount := 0
+	var firstSuccessEDE []dns.EDNS0_EDE
+	var lastFailRcode int
+	var lastFailEDE []dns.EDNS0_EDE
+	haveLastFailRcode := false
+
 	for _, dst := range targets {
 		lgDns.Info("NOTIFY: sending", "type", dns.TypeToString[ntype], "zone", zd.ZoneName, "target", dst)
 
@@ -110,23 +142,54 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, error) {
 
 		lgDns.Debug("sending NOTIFY message", "msg", m.String())
 
-		res, _, err := c.Exchange(m, dst)
-		if err != nil {
-			lgDns.Warn("NOTIFY: dns.Exchange failed, trying next target", "target", dst, "type", dns.TypeToString[ntype], "err", err)
+		res, _, exErr := c.Exchange(m, dst)
+		if exErr != nil {
+			lgDns.Warn("NOTIFY: dns.Exchange failed, trying next target", "target", dst, "type", dns.TypeToString[ntype], "err", exErr)
 			continue
 		}
 
+		ede := extractEDEFromMsg(res)
+
 		if res.Rcode != dns.RcodeSuccess {
 			lgDns.Warn("NOTIFY: bad rcode from target", "target", dst, "rcode", dns.RcodeToString[res.Rcode])
+			lastFailRcode = res.Rcode
+			lastFailEDE = ede
+			haveLastFailRcode = true
 		} else {
 			lgDns.Debug("NOTIFY: got NOERROR back", "target", dst)
+			if successCount == 0 {
+				firstSuccessEDE = ede
+			}
 			successCount++
 			// Continue to send NOTIFYs to all targets, don't return early
 		}
 	}
 	if successCount == 0 {
-		return dns.RcodeServerFailure, fmt.Errorf("error: no response from any NOTIFY target to NOTIFY(%q)", dns.TypeToString[ntype])
+		if haveLastFailRcode {
+			return lastFailRcode, lastFailEDE, fmt.Errorf("error: no NOERROR from any NOTIFY target to NOTIFY(%q)", dns.TypeToString[ntype])
+		}
+		return dns.RcodeServerFailure, nil, fmt.Errorf("error: no response from any NOTIFY target to NOTIFY(%q)", dns.TypeToString[ntype])
 	}
 	lgDns.Info("NOTIFY: successfully sent", "type", dns.TypeToString[ntype], "zone", zd.ZoneName, "succeeded", successCount, "total", len(targets))
-	return dns.RcodeSuccess, nil
+	return dns.RcodeSuccess, firstSuccessEDE, nil
+}
+
+// extractEDEFromMsg pulls every EDNS0_EDE option out of a DNS message's
+// OPT record and returns them as typed values. Returns nil when the
+// message has no OPT or no EDEs.
+func extractEDEFromMsg(msg *dns.Msg) []dns.EDNS0_EDE {
+	if msg == nil {
+		return nil
+	}
+	opt := msg.IsEdns0()
+	if opt == nil {
+		return nil
+	}
+	var out []dns.EDNS0_EDE
+	for _, o := range opt.Option {
+		if e, ok := o.(*dns.EDNS0_EDE); ok && e != nil {
+			out = append(out, *e)
+		}
+	}
+	return out
 }
