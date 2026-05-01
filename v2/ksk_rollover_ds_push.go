@@ -285,7 +285,24 @@ func PushDSRRsetForRollover(ctx context.Context, deps RolloverEngineDeps) (KSKDS
 		wg.Wait()
 	}
 
-	return aggregateRolloverPushResults(results), nil
+	agg := aggregateRolloverPushResults(results)
+	if agg.Scheme == "" {
+		// Every dispatched path failed. The aggregate carries
+		// category + detail; surface it as a non-nil error so the
+		// tick handler's err branch fires. Without this, a pure
+		// transport failure (no per-path Rcode) leaves agg.Rcode = 0
+		// which equals dns.RcodeSuccess, and the tick would treat
+		// the failed push as successful.
+		msg := agg.Detail
+		if msg == "" {
+			msg = agg.Category
+		}
+		if msg == "" {
+			msg = "all push paths failed"
+		}
+		return agg, fmt.Errorf("PushDSRRsetForRollover: %s", msg)
+	}
+	return agg, nil
 }
 
 // aggregateRolloverPushResults applies the dispatcher's any-success-wins
