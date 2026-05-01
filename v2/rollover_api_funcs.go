@@ -248,6 +248,9 @@ func populateFromZoneRow(out *RolloverStatus, row *RolloverZoneRow) {
 		out.LastUpdate = row.LastAttemptStartedAt.String
 		out.LastAttemptStarted = row.LastAttemptStartedAt.String
 	}
+	if row.LastAttemptScheme.Valid {
+		out.LastAttemptScheme = row.LastAttemptScheme.String
+	}
 
 	out.HardfailCount = row.HardfailCount
 	if row.NextPushAt.Valid {
@@ -332,6 +335,14 @@ func headlineForPhase(phase string) string {
 func hintForState(phase string, row *RolloverZoneRow, pol *DnssecPolicy, now time.Time) string {
 	switch phase {
 	case rolloverPhasePushSoftfail:
+		// child-config:waiting-for-parent has a different operational
+		// shape: polling continues but the parent has lost the ability
+		// to consume our push entirely. Operator action is on the
+		// parent side (advertise DSYNC), not the child side.
+		if row != nil && row.LastSoftfailCategory.Valid &&
+			row.LastSoftfailCategory.String == SoftfailChildConfigWaitingForParent {
+			return "waiting for parent to advertise a usable DSYNC scheme — auto-recovers when restored"
+		}
 		return "parent fix will be auto-detected — polling never stops"
 	case rolloverPhasePendingParentObserve:
 		if row == nil || pol == nil || !row.LastAttemptStartedAt.Valid {

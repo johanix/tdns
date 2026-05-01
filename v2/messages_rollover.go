@@ -45,6 +45,13 @@ type RolloverStatus struct {
 	ManualRequestedAt string `json:"manualRequestedAt,omitempty"`
 	ManualEarliest    string `json:"manualEarliest,omitempty"`
 
+	// LastAttemptScheme records which scheme(s) the most recent push
+	// attempt used at the wire level. Diagnostic only — the engine
+	// never decides anything from it. Values: "UPDATE", "NOTIFY", or
+	// "UPDATE,NOTIFY" when a parallel send had at least one path
+	// return NOERROR. Empty when no push attempt has succeeded yet.
+	LastAttemptScheme string `json:"lastAttemptScheme,omitempty"`
+
 	// Active attempt timing. Populated when an attempt is in flight
 	// (pending-parent-push, pending-parent-observe) or when a
 	// softfail probe has been sent.

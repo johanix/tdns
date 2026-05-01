@@ -768,7 +768,11 @@ func printStateTable(s *tdns.RolloverStatus) {
 		}
 	}
 	if s.LastUpdate != "" {
-		left = append(left, kv{"last UPDATE:", formatRolloverTime(s.LastUpdate)})
+		v := formatRolloverTime(s.LastUpdate)
+		if s.LastAttemptScheme != "" {
+			v = fmt.Sprintf("%s via %s", v, s.LastAttemptScheme)
+		}
+		left = append(left, kv{"last push:", v})
 	}
 	if s.ExpectedBy != "" {
 		left = append(left, kv{"expected by:", formatRolloverTime(s.ExpectedBy)})
