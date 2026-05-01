@@ -99,7 +99,10 @@ func ComputeRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Ti
 	if zone == "." || zone == "" {
 		return nil, fmt.Errorf("ComputeRolloverWhen: empty zone")
 	}
-	out := &RolloverWhenResponse{Zone: zone}
+	out := &RolloverWhenResponse{
+		Zone:        zone,
+		CurrentTime: now.UTC().Format(time.RFC3339),
+	}
 
 	if pol == nil {
 		out.Note = "zone has no DNSSEC policy"

@@ -427,19 +427,36 @@ func runWhenOffline(z string) {
 // time. During in-progress rollovers, both lines reflect projected
 // times for the rollover after the current one completes.
 func renderRolloverWhen(resp *tdns.RolloverWhenResponse) {
-	header := fmt.Sprintf("zone %s — rollover schedule", resp.Zone)
-	if resp.InProgress {
-		header += "  (current rollover in progress; times below project the rollover after it completes)"
+	currentTime := formatRolloverTimeAbsolute(resp.CurrentTime)
+	if currentTime == "-" {
+		// Fallback when daemon didn't supply CurrentTime (legacy
+		// daemon, offline path, etc.) — use local now so the header
+		// still has the operator anchor.
+		currentTime = time.Now().UTC().Format("15:04:05 UTC (Mon Jan 2 2006)")
 	}
-	fmt.Println(header)
+	fmt.Printf("KSK rollover schedule for zone %s  Current time: %s\n", resp.Zone, currentTime)
+	if resp.InProgress {
+		fmt.Println("  (current rollover in progress; times below project the rollover after it completes)")
+	}
 
 	keyidPair := ""
 	if resp.FromKeyID != 0 || resp.ToKeyID != 0 {
-		keyidPair = fmt.Sprintf("  from active keyid %d to %d", resp.FromKeyID, resp.ToKeyID)
+		keyidPair = fmt.Sprintf("from active keyid %d to %d", resp.FromKeyID, resp.ToKeyID)
 	}
 
-	fmt.Printf("  next scheduled       %s%s\n", whenTimeOrPlaceholder(resp.NextScheduled), keyidPair)
-	fmt.Printf("  earliest possible    %s%s\n", whenTimeOrPlaceholder(resp.EarliestPossible), keyidPair)
+	// Pad the time-with-delta to a fixed width so the keyid columns
+	// land on the same column for both lines, regardless of whether
+	// either time is "(now)" or "(in 3h17m)".
+	const timeColWidth = 38
+	nextStr := whenTimeOrPlaceholder(resp.NextScheduled)
+	earliestStr := whenTimeOrPlaceholder(resp.EarliestPossible)
+
+	fmt.Printf("  next scheduled       %-*s  %s\n", timeColWidth, nextStr, keyidPair)
+	earliestLine := fmt.Sprintf("  earliest possible    %-*s  %s", timeColWidth, earliestStr, keyidPair)
+	if resp.EarliestPossible != "" && !resp.InProgress {
+		earliestLine += "  (request via \"asap\" cmd)"
+	}
+	fmt.Println(earliestLine)
 
 	if resp.Note != "" {
 		fmt.Printf("  note: %s\n", resp.Note)
@@ -657,10 +674,16 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 	if s == nil {
 		return
 	}
-	fmt.Printf("Current time:     %s\n", formatRolloverTimeAbsolute(s.CurrentTime))
+	currentTime := formatRolloverTimeAbsolute(s.CurrentTime)
+
+	// Track whether the current-time anchor has been printed yet, so
+	// it lands on the first section header (KSK if shown, else ZSK)
+	// without duplicating across sections.
+	currentTimePrinted := false
 
 	if showKSK {
-		fmt.Printf("KSK rollover state for zone %s:\n", s.Zone)
+		fmt.Printf("KSK rollover state for zone %s  Current time: %s\n", s.Zone, currentTime)
+		currentTimePrinted = true
 		printStateTable(s)
 		printStateNotes(s, verbose)
 
@@ -676,7 +699,12 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 
 	if showZSK {
 		fmt.Println()
-		fmt.Printf("ZSK rollover state for zone %s:\n", s.Zone)
+		if currentTimePrinted {
+			fmt.Printf("ZSK rollover state for zone %s\n", s.Zone)
+		} else {
+			fmt.Printf("ZSK rollover state for zone %s  Current time: %s\n", s.Zone, currentTime)
+			currentTimePrinted = true
+		}
 		fmt.Println("  no rollovers ongoing (automated ZSK rollover not implemented)")
 		if len(s.ZSKs) > 0 {
 			fmt.Println()
@@ -922,7 +950,7 @@ func formatRolloverTime(s string) string {
 
 	switch {
 	case delta == 0:
-		return formatted
+		return fmt.Sprintf("%s (now)", formatted)
 	case delta > 0:
 		return fmt.Sprintf("%s (in %s)", formatted, delta)
 	default:

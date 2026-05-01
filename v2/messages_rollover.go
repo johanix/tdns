@@ -128,6 +128,7 @@ type PolicySummary struct {
 // reflect projection rather than current schedule.
 type RolloverWhenResponse struct {
 	Zone             string                  `json:"zone"`
+	CurrentTime      string                  `json:"currentTime,omitempty"`      // RFC3339 UTC, server's wallclock
 	NextScheduled    string                  `json:"nextScheduled,omitempty"`    // RFC3339 UTC
 	EarliestPossible string                  `json:"earliestPossible,omitempty"` // RFC3339 UTC
 	FromKeyID        uint16                  `json:"fromKeyId,omitempty"`
