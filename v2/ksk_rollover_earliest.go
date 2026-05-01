@@ -17,8 +17,14 @@ type EarliestRolloverGate struct {
 }
 
 // EarliestRolloverResult is the output of ComputeEarliestRollover.
+// FromKID/ToKID identify the active SEP KSK and its scheduled standby
+// successor by keyid; FromIdx/ToIdx are the corresponding rollover_index
+// values, retained for callers that persist scheduling state under that
+// identifier.
 type EarliestRolloverResult struct {
 	Earliest time.Time
+	FromKID  uint16
+	ToKID    uint16
 	FromIdx  int
 	ToIdx    int
 	Gates    []EarliestRolloverGate
@@ -35,8 +41,12 @@ type EarliestRolloverResult struct {
 //   - ds_ready_at = 0 if next_ksk is in standby, else
 //     next_ksk.ds_observed_at + ds_ttl + margin
 //
-// Returns an error if a rollover cannot be scheduled (rollover already in
-// progress, no active KSK, or no standby SEP key).
+// Returns an error if a rollover cannot be scheduled (no active KSK, or
+// no standby SEP key). Does NOT refuse based on RolloverInProgress:
+// callers that need to gate on that (e.g. APIRolloverAsap) must check
+// separately. ComputeRolloverWhen handles the in-progress case via
+// projection rather than refusal so the operator can still see when the
+// next rollover after the current one is scheduled.
 //
 // Why no max-rrsig-validity gate: the operationally-relevant cache-flush
 // bound for "all validators have fresh DNSKEY state" is min(TTL,
@@ -63,14 +73,6 @@ func ComputeEarliestRollover(kdb *KeyDB, zone string, pol *DnssecPolicy, now tim
 	}
 	if pol.Rollover.Method == RolloverMethodNone {
 		return nil, fmt.Errorf("zone %s: rollover method is none", zone)
-	}
-
-	row, err := LoadRolloverZoneRow(kdb, zone)
-	if err != nil {
-		return nil, fmt.Errorf("load rollover zone row: %w", err)
-	}
-	if row != nil && row.RolloverInProgress {
-		return nil, fmt.Errorf("zone %s: rollover already in progress", zone)
 	}
 
 	// Active SEP KSK.
@@ -139,6 +141,8 @@ func ComputeEarliestRollover(kdb *KeyDB, zone string, pol *DnssecPolicy, now tim
 
 	return &EarliestRolloverResult{
 		Earliest: earliest,
+		FromKID:  fromKid,
+		ToKID:    standbyKid,
 		FromIdx:  fromIdx,
 		ToIdx:    toIdx,
 		Gates:    gates,

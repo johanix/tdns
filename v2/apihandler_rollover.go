@@ -74,6 +74,16 @@ func APIRolloverAsap(conf *Config) func(w http.ResponseWriter, r *http.Request) 
 		lock.Lock()
 		defer lock.Unlock()
 
+		// asap is a write operation; refuse cleanly if a rollover is
+		// already underway. ComputeEarliestRollover itself does not
+		// gate on this (so that ComputeRolloverWhen can project past
+		// the in-progress rollover); the gate belongs at the
+		// write-side caller.
+		if row, err := LoadRolloverZoneRow(kdb, zone); err == nil && row != nil && row.RolloverInProgress {
+			http.Error(w, fmt.Sprintf("zone %s: rollover already in progress", zone), http.StatusBadRequest)
+			return
+		}
+
 		now := time.Now()
 		res, err := ComputeEarliestRollover(kdb, zone, pol, now)
 		if err != nil {
@@ -89,8 +99,8 @@ func APIRolloverAsap(conf *Config) func(w http.ResponseWriter, r *http.Request) 
 			Zone:        zone,
 			RequestedAt: now.UTC().Format(time.RFC3339),
 			Earliest:    res.Earliest.UTC().Format(time.RFC3339),
-			FromIdx:     res.FromIdx,
-			ToIdx:       res.ToIdx,
+			FromKeyID:   res.FromKID,
+			ToKeyID:     res.ToKID,
 		})
 	}
 }
@@ -214,9 +224,11 @@ func resolveRolloverWriteRequest(conf *Config, w http.ResponseWriter, rawZone st
 }
 
 // APIRolloverWhen handles GET /api/v1/rollover/when?zone=<fqdn>.
-// Wraps ComputeEarliestRollover into wire-friendly types. Returns
-// 400 when the zone has no DnssecPolicy attached (since "when can
-// the next rollover safely fire" is undefined without one).
+// Returns 200 with a structured RolloverWhenResponse in all
+// operationally-normal cases. Soft conditions (no DNSSEC policy, no
+// standby pipeline, rollover already in progress) are reflected in
+// out.Note rather than as HTTP errors so the CLI can render them
+// alongside the available scheduling info.
 func APIRolloverWhen(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -237,16 +249,13 @@ func APIRolloverWhen(conf *Config) func(w http.ResponseWriter, r *http.Request) 
 		if zd, ok := Zones.Get(zone); ok && zd != nil {
 			pol = zd.DnssecPolicy
 		}
-		if pol == nil {
-			http.Error(w, "zone has no DNSSEC policy", http.StatusBadRequest)
-			return
-		}
+		// pol == nil is OK; ComputeRolloverWhen reflects it in Note.
 
 		out, err := ComputeRolloverWhen(kdb, zone, pol, time.Now())
 		if err != nil {
-			// Errors here are usually operationally-expected (e.g.
-			// "rollover already in progress" — no successor key yet).
-			// Return 200 with the message so the CLI can render it.
+			// Hard errors only (empty zone etc.). Operational
+			// soft-errors (no policy, no successor, in-progress)
+			// are reflected in out.Note with HTTP 200.
 			lgApi.Debug("rollover/when: ComputeRolloverWhen returned error", "zone", zone, "err", err)
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return

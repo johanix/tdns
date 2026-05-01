@@ -79,34 +79,66 @@ func populateDSKeyidsForStatus(kdb *KeyDB, zone string, out *RolloverStatus) err
 	return nil
 }
 
-// ComputeRolloverWhen wraps ComputeEarliestRollover into wire-friendly
-// types. Returns the earliest moment a rollover can safely fire plus
-// the gates that produced the result.
+// ComputeRolloverWhen returns both the policy-driven scheduled rollover
+// time (active_at + KSK.Lifetime, via tNextRoll) and the gate-driven
+// earliest-possible time (max-ttl-expiry / ds-ready, via
+// ComputeEarliestRollover). The two answer different operator
+// questions: "when will the rollover fire" vs "if I needed to roll
+// unscheduled, when's the soonest it could fire."
+//
+// Soft errors (no DNSSEC policy, no standby pipeline, etc.) are
+// surfaced via Note rather than as a top-level error so the API
+// returns 200 and the CLI can render the explanation cleanly.
+//
+// During an in-progress rollover, NextScheduled and EarliestPossible
+// are projections of the rollover after the current one completes
+// (assumed to land approximately now); InProgress=true marks the
+// projection so the operator knows the times are approximate.
 func ComputeRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Time) (*RolloverWhenResponse, error) {
 	zone = dns.Fqdn(strings.TrimSpace(zone))
 	if zone == "." || zone == "" {
 		return nil, fmt.Errorf("ComputeRolloverWhen: empty zone")
 	}
+	out := &RolloverWhenResponse{Zone: zone}
+
 	if pol == nil {
-		return nil, fmt.Errorf("ComputeRolloverWhen: zone %s has no DNSSEC policy", zone)
+		out.Note = "zone has no DNSSEC policy"
+		return out, nil
 	}
-	res, err := ComputeEarliestRollover(kdb, zone, pol, now)
-	if err != nil {
-		return nil, err
+
+	// In-progress: compute projections rather than refusing.
+	if row, err := LoadRolloverZoneRow(kdb, zone); err == nil && row != nil && row.RolloverInProgress {
+		out.InProgress = true
+		out.Note = "current rollover in progress; times below project the rollover after it completes"
+		if pol.KSK.Lifetime > 0 {
+			projected := now.Add(time.Duration(pol.KSK.Lifetime) * time.Second).UTC().Format(time.RFC3339)
+			out.NextScheduled = projected
+			out.EarliestPossible = projected
+		}
+		return out, nil
 	}
-	out := &RolloverWhenResponse{
-		Zone:     zone,
-		Earliest: res.Earliest.UTC().Format(time.RFC3339),
-		FromIdx:  res.FromIdx,
-		ToIdx:    res.ToIdx,
-		Gates:    make([]RolloverWhenGateEntry, 0, len(res.Gates)),
+
+	// Earliest possible — gate-driven.
+	if res, err := ComputeEarliestRollover(kdb, zone, pol, now); err != nil {
+		out.Note = err.Error()
+	} else {
+		out.EarliestPossible = res.Earliest.UTC().Format(time.RFC3339)
+		out.FromKeyID = res.FromKID
+		out.ToKeyID = res.ToKID
+		out.Gates = make([]RolloverWhenGateEntry, 0, len(res.Gates))
+		for _, g := range res.Gates {
+			out.Gates = append(out.Gates, RolloverWhenGateEntry{
+				Name: g.Name,
+				At:   g.At.UTC().Format(time.RFC3339),
+			})
+		}
 	}
-	for _, g := range res.Gates {
-		out.Gates = append(out.Gates, RolloverWhenGateEntry{
-			Name: g.Name,
-			At:   g.At.UTC().Format(time.RFC3339),
-		})
+
+	// Next scheduled — policy-driven (active_at + KSK.Lifetime).
+	if t, ok, err := tNextRoll(kdb, zone, pol); err == nil && ok {
+		out.NextScheduled = t.UTC().Format(time.RFC3339)
 	}
+
 	return out, nil
 }
 

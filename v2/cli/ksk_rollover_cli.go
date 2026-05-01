@@ -391,19 +391,16 @@ func runWhenOnline(z string) {
 	endpoint := "/rollover/when?zone=" + z
 	status, body, err := api.RequestNG("GET", endpoint, nil, true)
 	if err != nil {
-		cliFatalf("error calling rollover/when: %v", err)
-	}
-	if status == http.StatusBadRequest {
-		// Operationally-expected rejection (no policy, rollover in
-		// progress, etc.). Body is the explanation.
-		cliFatalf("cannot schedule for zone %s: %s", z, strings.TrimSpace(string(body)))
+		cliFatalf("error contacting daemon: %v", err)
 	}
 	if status != http.StatusOK {
-		cliFatalf("unexpected status %d from rollover/when: %s", status, string(body))
+		// Daemon returned a hard error (zone empty, keystore missing,
+		// etc.). Render just the body — no URL, no HTTP code.
+		cliFatalf("%s", strings.TrimSpace(string(body)))
 	}
 	var resp tdns.RolloverWhenResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
-		cliFatalf("error parsing rollover/when response: %v", err)
+		cliFatalf("error parsing daemon response: %v", err)
 	}
 	renderRolloverWhen(&resp)
 }
@@ -416,50 +413,54 @@ func runWhenOffline(z string) {
 		cliFatalf("error: %v", err)
 	}
 	defer kdb.DB.Close()
-	if pol == nil {
-		cliFatalf("error: no DNSSEC policy for zone %s (dnssecpolicy in zone config)", z)
-	}
 
-	res, err := tdns.ComputeEarliestRollover(kdb, z, pol, time.Now())
+	resp, err := tdns.ComputeRolloverWhen(kdb, z, pol, time.Now())
 	if err != nil {
-		row, rerr := tdns.LoadRolloverZoneRow(kdb, z)
-		suffix := ""
-		if rerr == nil && row != nil && row.RolloverInProgress {
-			phaseAt := ""
-			if row.RolloverPhaseAt.Valid {
-				phaseAt = " " + formatTimeWithDeltaStr(row.RolloverPhaseAt.String)
-			}
-			suffix = fmt.Sprintf(" (phase=%s%s)", row.RolloverPhase, phaseAt)
-		}
-		cliFatalf("cannot schedule for zone %s: %v%s", z, err, suffix)
-	}
-
-	resp := &tdns.RolloverWhenResponse{
-		Zone:     z,
-		Earliest: res.Earliest.UTC().Format(time.RFC3339),
-		FromIdx:  res.FromIdx,
-		ToIdx:    res.ToIdx,
-		Gates:    make([]tdns.RolloverWhenGateEntry, 0, len(res.Gates)),
-	}
-	for _, g := range res.Gates {
-		resp.Gates = append(resp.Gates, tdns.RolloverWhenGateEntry{
-			Name: g.Name,
-			At:   g.At.UTC().Format(time.RFC3339),
-		})
+		cliFatalf("%s", err.Error())
 	}
 	renderRolloverWhen(resp)
 }
 
+// renderRolloverWhen prints the dual-line schedule view. NextScheduled
+// is the policy-driven rollover time (active_at + KSK.Lifetime);
+// EarliestPossible is the gate-driven earliest the engine would
+// permit. They share the same from→to keyids; the difference is the
+// time. During in-progress rollovers, both lines reflect projected
+// times for the rollover after the current one completes.
 func renderRolloverWhen(resp *tdns.RolloverWhenResponse) {
-	fmt.Printf("zone %s — earliest scheduled rollover\n", resp.Zone)
-	fmt.Printf("  earliest          %s\n", formatRolloverTime(resp.Earliest))
-	fmt.Printf("  from_active_seq   %d  →  to_active_seq   %d\n", resp.FromIdx, resp.ToIdx)
+	header := fmt.Sprintf("zone %s — rollover schedule", resp.Zone)
+	if resp.InProgress {
+		header += "  (current rollover in progress; times below project the rollover after it completes)"
+	}
+	fmt.Println(header)
+
+	keyidPair := ""
+	if resp.FromKeyID != 0 || resp.ToKeyID != 0 {
+		keyidPair = fmt.Sprintf("  from active keyid %d to %d", resp.FromKeyID, resp.ToKeyID)
+	}
+
+	fmt.Printf("  next scheduled       %s%s\n", whenTimeOrPlaceholder(resp.NextScheduled), keyidPair)
+	fmt.Printf("  earliest possible    %s%s\n", whenTimeOrPlaceholder(resp.EarliestPossible), keyidPair)
+
+	if resp.Note != "" {
+		fmt.Printf("  note: %s\n", resp.Note)
+	}
+
 	if len(resp.Gates) > 0 {
-		fmt.Println("  gates:")
+		fmt.Println("  gates (earliest possible):")
 		for _, g := range resp.Gates {
 			fmt.Printf("    %-20s %s\n", g.Name, formatRolloverTime(g.At))
 		}
 	}
+}
+
+// whenTimeOrPlaceholder formats t for the schedule lines. Empty input
+// renders as "(not available)" so the column line still aligns.
+func whenTimeOrPlaceholder(t string) string {
+	if t == "" {
+		return "(not available)"
+	}
+	return formatRolloverTime(t)
 }
 
 func newAutoRolloverAsapCmd() *cobra.Command {
@@ -499,7 +500,7 @@ Online-only: scheduling against a stopped daemon is meaningless
 			}
 			fmt.Printf("scheduled manual rollover for zone %s\n", resp.Zone)
 			fmt.Printf("  earliest          %s\n", formatRolloverTime(resp.Earliest))
-			fmt.Printf("  from_active_seq   %d  →  to_active_seq   %d\n", resp.FromIdx, resp.ToIdx)
+			fmt.Printf("  from active keyid %d to %d\n", resp.FromKeyID, resp.ToKeyID)
 		},
 	}
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
@@ -896,8 +897,10 @@ func headlinePhraseFor(headline, phase string) string {
 }
 
 // formatRolloverTime renders an RFC3339 timestamp as
-// "HH:MM:SS UTC (Δ ago)" for past times or
-// "HH:MM:SS UTC (in Δ)" for future times. Returns "-" for empty.
+// "HH:MM:SS UTC (Δ ago/in Δ)" for times on today's UTC date, or
+// "Mon Jan 2 HH:MM:SS UTC (...)" when the date differs from today.
+// Returns "-" for empty input. The date prefix avoids the "08:57
+// today? yesterday? next week?" ambiguity for far-out times.
 func formatRolloverTime(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -907,8 +910,17 @@ func formatRolloverTime(s string) string {
 	if err != nil {
 		return s
 	}
+	now := time.Now().UTC()
+	tu := t.UTC()
 	delta := time.Until(t).Truncate(time.Second)
-	formatted := t.UTC().Format("15:04:05") + " UTC"
+
+	var formatted string
+	if tu.Year() == now.Year() && tu.YearDay() == now.YearDay() {
+		formatted = tu.Format("15:04:05") + " UTC"
+	} else {
+		formatted = tu.Format("Mon Jan 2 15:04:05") + " UTC"
+	}
+
 	switch {
 	case delta == 0:
 		return formatted

@@ -117,13 +117,24 @@ type PolicySummary struct {
 }
 
 // RolloverWhenResponse is returned by GET /api/v1/rollover/when.
-// Wraps EarliestRolloverResult into wire-friendly types.
+// Carries both the policy-driven scheduled rollover time and the
+// gate-driven earliest-possible time. Either may be empty when not
+// applicable (e.g. zone has no rollover policy, or
+// ComputeEarliestRollover returned a soft error reflected in Note).
+//
+// During in-progress rollovers, NextScheduled and EarliestPossible
+// are projections of the rollover after the current one completes;
+// InProgress=true is the operator-facing signal that the times
+// reflect projection rather than current schedule.
 type RolloverWhenResponse struct {
-	Zone     string                  `json:"zone"`
-	Earliest string                  `json:"earliest"` // RFC3339 UTC
-	FromIdx  int                     `json:"fromIdx"`
-	ToIdx    int                     `json:"toIdx"`
-	Gates    []RolloverWhenGateEntry `json:"gates"`
+	Zone             string                  `json:"zone"`
+	NextScheduled    string                  `json:"nextScheduled,omitempty"`    // RFC3339 UTC
+	EarliestPossible string                  `json:"earliestPossible,omitempty"` // RFC3339 UTC
+	FromKeyID        uint16                  `json:"fromKeyId,omitempty"`
+	ToKeyID          uint16                  `json:"toKeyId,omitempty"`
+	InProgress       bool                    `json:"inProgress,omitempty"`
+	Note             string                  `json:"note,omitempty"`
+	Gates            []RolloverWhenGateEntry `json:"gates,omitempty"`
 }
 
 // RolloverWhenGateEntry mirrors one EarliestRolloverGate as wire JSON.
@@ -133,7 +144,7 @@ type RolloverWhenGateEntry struct {
 }
 
 // Request/response types for POST /api/v1/rollover/asap. Returns the
-// computed Earliest moment plus the from/to index pair for the
+// computed Earliest moment plus the from/to keyid pair for the
 // scheduled rollover.
 type RolloverAsapRequest struct {
 	Zone string `json:"zone"`
@@ -143,8 +154,8 @@ type RolloverAsapResponse struct {
 	Zone        string `json:"zone"`
 	RequestedAt string `json:"requestedAt"`
 	Earliest    string `json:"earliest"`
-	FromIdx     int    `json:"fromIdx"`
-	ToIdx       int    `json:"toIdx"`
+	FromKeyID   uint16 `json:"fromKeyId"`
+	ToKeyID     uint16 `json:"toKeyId"`
 }
 
 // Request/response types for POST /api/v1/rollover/cancel.
