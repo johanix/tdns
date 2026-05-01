@@ -128,7 +128,10 @@ UNIQUE (zonename, keyid)
 		last_softfail_detail           TEXT,
 		last_success_at                TEXT,
 		last_attempt_started_at        TEXT,
-		last_poll_at                   TEXT
+		last_poll_at                   TEXT,
+		last_attempt_scheme            TEXT,
+		last_published_cds_index_low   INTEGER,
+		last_published_cds_index_high  INTEGER
 	)`,
 
 	// ZoneSigningState holds per-zone signing-loop state. max_observed_ttl

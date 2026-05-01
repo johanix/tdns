@@ -39,6 +39,16 @@ type RolloverZoneRow struct {
 	LastSuccessAt        sql.NullString
 	LastAttemptStartedAt sql.NullString
 	LastPollAt           sql.NullString
+
+	// NOTIFY-scheme phase 2 fields. LastAttemptScheme is diagnostic-only
+	// ("UPDATE", "NOTIFY", or "UPDATE,NOTIFY" when a parallel send had
+	// at least one wire-level NOERROR). LastPublishedCdsIndexLow/High
+	// are engine-functional: a non-NULL pair asserts ownership of the
+	// current child-apex CDS RRset for compare-on-cleanup matching.
+	// Cleared when cleanupCdsAfterConfirm queues the unpublish.
+	LastAttemptScheme         sql.NullString
+	LastPublishedCdsIndexLow  sql.NullInt64
+	LastPublishedCdsIndexHigh sql.NullInt64
 }
 
 func EnsureRolloverZoneRow(kdb *KeyDB, zone string) error {
@@ -65,7 +75,8 @@ SELECT zone,
        observe_started_at, observe_next_poll_at, observe_backoff_seconds,
        hardfail_count, next_push_at,
        last_softfail_at, last_softfail_category, last_softfail_detail,
-       last_success_at, last_attempt_started_at, last_poll_at
+       last_success_at, last_attempt_started_at, last_poll_at,
+       last_attempt_scheme, last_published_cds_index_low, last_published_cds_index_high
 FROM RolloverZoneState WHERE zone = ?`
 	var r RolloverZoneRow
 	var inProg int
@@ -79,6 +90,7 @@ FROM RolloverZoneState WHERE zone = ?`
 		&r.HardfailCount, &r.NextPushAt,
 		&r.LastSoftfailAt, &r.LastSoftfailCategory, &r.LastSoftfailDetail,
 		&r.LastSuccessAt, &r.LastAttemptStartedAt, &r.LastPollAt,
+		&r.LastAttemptScheme, &r.LastPublishedCdsIndexLow, &r.LastPublishedCdsIndexHigh,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -718,6 +730,56 @@ func clearLastSoftfail(kdb *KeyDB, zone string) error {
 SET last_softfail_at = NULL,
     last_softfail_category = NULL,
     last_softfail_detail = NULL
+WHERE zone = ?`, zone)
+	return err
+}
+
+// setLastAttemptScheme records the scheme(s) used by the most recent
+// push attempt that completed at the wire level. Diagnostic-only —
+// status output reads this; the engine never decides anything from it.
+// Comma-joined when a parallel send had at least one wire-level NOERROR.
+func setLastAttemptScheme(kdb *KeyDB, zone, scheme string) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	var s sql.NullString
+	if scheme != "" {
+		s = sql.NullString{String: scheme, Valid: true}
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET last_attempt_scheme = ? WHERE zone = ?`, s, zone)
+	return err
+}
+
+// setPublishedCdsRange asserts ownership of the current child-apex CDS
+// RRset by recording the rollover-index range of the keys that backed
+// the engine's most recent CDS publish. Set after a successful NOTIFY
+// publish-and-sign transaction. The range is read at cleanup time by
+// cleanupCdsAfterConfirm to verify that the on-wire CDS still matches
+// what we wrote (compare-on-cleanup), so that a third-party CDS write
+// in the interim is not unpublished by us.
+func setPublishedCdsRange(kdb *KeyDB, zone string, low, high int) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState
+SET last_published_cds_index_low = ?,
+    last_published_cds_index_high = ?
+WHERE zone = ?`, low, high, zone)
+	return err
+}
+
+// clearPublishedCdsRange releases the engine's CDS-ownership marker.
+// Called after cleanupCdsAfterConfirm has unpublished the CDS RRset
+// (or has decided not to because the on-wire CDS no longer matches).
+// NULL means "we own no CDS at the apex" or "another caller owns
+// whatever CDS is currently published."
+func clearPublishedCdsRange(kdb *KeyDB, zone string) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState
+SET last_published_cds_index_low = NULL,
+    last_published_cds_index_high = NULL
 WHERE zone = ?`, zone)
 	return err
 }

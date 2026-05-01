@@ -133,6 +133,15 @@ func dbMigrateSchema(db *sql.DB) {
 		{"RolloverZoneState", "last_success_at", "ALTER TABLE RolloverZoneState ADD COLUMN last_success_at TEXT"},
 		{"RolloverZoneState", "last_attempt_started_at", "ALTER TABLE RolloverZoneState ADD COLUMN last_attempt_started_at TEXT"},
 		{"RolloverZoneState", "last_poll_at", "ALTER TABLE RolloverZoneState ADD COLUMN last_poll_at TEXT"},
+		// Rollover NOTIFY-scheme phase 2: scheme + CDS-cleanup ownership.
+		// last_attempt_scheme is diagnostic-only ("UPDATE", "NOTIFY", or
+		// "UPDATE,NOTIFY" when a parallel send had at least one wire-level
+		// NOERROR). last_published_cds_index_low/high are engine-functional:
+		// a non-NULL pair asserts ownership of the current child-apex CDS
+		// RRset for cleanup-time comparison.
+		{"RolloverZoneState", "last_attempt_scheme", "ALTER TABLE RolloverZoneState ADD COLUMN last_attempt_scheme TEXT"},
+		{"RolloverZoneState", "last_published_cds_index_low", "ALTER TABLE RolloverZoneState ADD COLUMN last_published_cds_index_low INTEGER"},
+		{"RolloverZoneState", "last_published_cds_index_high", "ALTER TABLE RolloverZoneState ADD COLUMN last_published_cds_index_high INTEGER"},
 	}
 
 	for _, m := range migrations {
