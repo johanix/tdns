@@ -10,7 +10,7 @@ import (
 )
 
 // EarliestRolloverGate names a constraint that contributed to t_earliest.
-// One of: "now", "max-ttl-expiry", "max-rrsig-validity", "ds-ready".
+// One of: "now", "max-ttl-expiry", "ds-ready".
 type EarliestRolloverGate struct {
 	Name string
 	At   time.Time
@@ -25,30 +25,34 @@ type EarliestRolloverResult struct {
 }
 
 // ComputeEarliestRollover returns the earliest moment a rollover can safely
-// fire for the zone, the rollover_index of the active KSK and its scheduled
-// successor, and the constraints that produced the result. Side-effect free.
+// fire for the zone, the active KSK and its scheduled successor, and the
+// constraints that produced the result. Side-effect free.
 //
-// Per §8.5:
-//
-//	t_earliest = max(now, max_ttl_expiry, max_sig_expiry, ds_ready_at)
+//	t_earliest = max(now, max_ttl_expiry, ds_ready_at)
 //
 // where:
 //   - max_ttl_expiry = now + max_published_ttl_in_zone(z) - margin
-//   - max_sig_expiry = now + max_published_rrsig_validity(z) - margin
 //   - ds_ready_at = 0 if next_ksk is in standby, else
 //     next_ksk.ds_observed_at + ds_ttl + margin
 //
 // Returns an error if a rollover cannot be scheduled (rollover already in
 // progress, no active KSK, or no standby SEP key).
 //
-// Implementation notes for v1:
-//   - max_published_rrsig_validity uses the policy's max SigValidity across
-//     KSK/ZSK/CSK as a conservative upper bound on currently published RRSIG
-//     validity. A future enhancement could track observed validity in
-//     ZoneSigningState alongside max_observed_ttl.
-//   - ds_ready_at uses next_ksk's standby state as the "ready now" signal.
-//     The non-standby branch is exercised by manual-ASAP only when the
-//     pipeline isn't fully primed yet, which the gate set will surface.
+// Why no max-rrsig-validity gate: the operationally-relevant cache-flush
+// bound for "all validators have fresh DNSKEY state" is min(TTL,
+// remaining-RRSIG-validity), which is bounded above by TTL whenever
+// TTL <= SigValidity (the typical regime — zones publish TTLs of hours
+// while SigValidity is days to weeks). Adding RRSIG validity as an
+// independent gate is therefore over-conservative; the TTL gate alone
+// is the right bound. If the unusual TTL > SigValidity regime ever
+// becomes operationally relevant, tracking observed RRSIG signing time
+// (currently absent — only max_observed_ttl is tracked) will let us
+// compute the tighter "remaining-validity" bound. Until then, the
+// design assumes TTL <= SigValidity.
+//
+// ds_ready_at uses next_ksk's standby state as the "ready now" signal.
+// The non-standby branch is exercised by manual-ASAP only when the
+// pipeline isn't fully primed yet, which the gate set will surface.
 func ComputeEarliestRollover(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Time) (*EarliestRolloverResult, error) {
 	zone = dns.Fqdn(strings.TrimSpace(zone))
 	if zone == "" {
@@ -117,15 +121,6 @@ func ComputeEarliestRollover(kdb *KeyDB, zone string, pol *DnssecPolicy, now tim
 		gates = append(gates, EarliestRolloverGate{Name: "max-ttl-expiry", At: maxTTLExpiry})
 	}
 
-	// Constraint: max published RRSIG validity must expire. v1 uses the
-	// policy's largest SigValidity across KSK/ZSK/CSK as a conservative
-	// upper bound on currently-published validity.
-	maxSigDur := maxPublishedRRSIGValidity(pol)
-	maxSigExpiry := now.Add(maxSigDur - margin)
-	if maxSigDur > 0 {
-		gates = append(gates, EarliestRolloverGate{Name: "max-rrsig-validity", At: maxSigExpiry})
-	}
-
 	// Constraint: standby KSK is fully published / DS observed at parent.
 	// Standby state implies "DS observed + propagation already elapsed";
 	// for non-standby successors (not reached in v1's selection), we'd need
@@ -180,21 +175,4 @@ ORDER BY (r.standby_at IS NULL OR r.standby_at = '') ASC,
 		return 0, err
 	}
 	return uint16(kid), nil
-}
-
-// maxPublishedRRSIGValidity returns the maximum SigValidity across the
-// policy's KSK/ZSK/CSK lifetimes. Used as a conservative upper bound on
-// currently-published RRSIG validity for ComputeEarliestRollover.
-func maxPublishedRRSIGValidity(pol *DnssecPolicy) time.Duration {
-	var max uint32
-	if pol.KSK.SigValidity > max {
-		max = pol.KSK.SigValidity
-	}
-	if pol.ZSK.SigValidity > max {
-		max = pol.ZSK.SigValidity
-	}
-	if pol.CSK.SigValidity > max {
-		max = pol.CSK.SigValidity
-	}
-	return time.Duration(max) * time.Second
 }
