@@ -22,6 +22,13 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   -- Delegation sync, DNS transport signaling, experimental
   record types.
 
+- [Rapid Automated KSK Rollover](rapid-key-rollover.md)
+  -- Operator how-to for configuring tdns to perform automated
+  KSK rollovers on any cadence, from seconds-apart for testbeds
+  to monthly for stable production. Covers the three-knob mental
+  model (TTLs, KSK lifetime, RRSIG validity), how each maps to
+  configuration parameters, and concrete example configs.
+
 - Future Work (coming soon)
   -- IXFR support, TSIG authentication, scanner integration
   for parent-side delegation sync.

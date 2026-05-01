@@ -236,6 +236,17 @@ type DnssecPolicyRolloverConf struct {
 	ConfirmPollMax     string `yaml:"confirm-poll-max" mapstructure:"confirm-poll-max"`
 	ConfirmTimeout     string `yaml:"confirm-timeout" mapstructure:"confirm-timeout"`
 	DsyncRequired      *bool  `yaml:"dsync-required" mapstructure:"dsync-required"`
+
+	// Softfail state machine (rollover-overhaul). DsPublishDelay is
+	// the primary new timing knob: parent's expected publication
+	// cadence between "we sent UPDATE, got NOERROR" and "DS RRset
+	// observable on the parent." Defaults derive from this for
+	// healthy direct-publish parents (5m) up to batched registries
+	// (1h, 24h). MaxAttemptsBeforeBackoff is the size of the initial
+	// flurry; SoftfailDelay is the long-term-mode probe interval.
+	DsPublishDelay           string `yaml:"ds-publish-delay" mapstructure:"ds-publish-delay"`
+	MaxAttemptsBeforeBackoff int    `yaml:"max-attempts-before-backoff" mapstructure:"max-attempts-before-backoff"`
+	SoftfailDelay            string `yaml:"softfail-delay" mapstructure:"softfail-delay"`
 }
 
 // DnssecPolicyTtlsConf is the YAML `ttls:` subtree under a DNSSEC policy.
@@ -498,8 +509,13 @@ type BumperResponse struct {
 // A Signer is a struct where we keep track of the signer name and keyid
 // for a DNS UPDATE message.
 type Sig0UpdateSigner struct {
-	Name      string   // from the SIG
-	KeyId     uint16   // from the SIG
+	Name  string // from the SIG
+	KeyId uint16 // from the SIG
+	// Sig is the specific *dns.SIG RR this signer was discovered
+	// from. Verification must use this signature, not whatever was
+	// last parsed in the outer loop — multi-signature UPDATEs would
+	// otherwise classify against the wrong SIG.
+	Sig       *dns.SIG
 	Sig0Key   *Sig0Key // a key that matches the signer name and keyid
 	Validated bool     // true if this key validated the update
 }
@@ -523,10 +539,17 @@ type UpdateStatus struct {
 	SafetyChecked         bool               // true if the update has been safety checked
 	PolicyChecked         bool               // true if the update has been policy checked
 	Approved              bool               // true if the update has been approved
-	Msg                   string
-	Error                 bool
-	ErrorMsg              string
-	Status                bool
+	// RejectionEDE is the specific EDE code that describes why the
+	// update was rejected, set by ApproveUpdate (or by ValidateUpdate
+	// for the validation-failure paths). The responder reads this
+	// when constructing the wire response and attaches the EDE so the
+	// child operator can diagnose without parent-side log access.
+	// Zero means "no specific reason recorded."
+	RejectionEDE uint16
+	Msg          string
+	Error        bool
+	ErrorMsg     string
+	Status       bool
 }
 
 type NotifyStatus struct {

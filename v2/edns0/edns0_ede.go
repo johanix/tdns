@@ -29,24 +29,50 @@ const (
 	EDECDSScannerNotImplemented
 	EDECSyncScannerNotImplemented
 	EDEPrivacyRequestedUnavailable // Privacy requested but only unencrypted transport available
+
+	// SIG(0) validation-failure detail codes (rollover-overhaul phase 11).
+	// These let the parent tell the child WHY a signed UPDATE was
+	// rejected on the wire. Today's parent returns a bare BadSig
+	// rcode with no EDE; the child can't tell clock skew apart from
+	// algorithm mismatch apart from genuinely-broken signature.
+	EDESig0BadTime      // SIG(0) signature outside validity window (clock skew, stale signature, etc.)
+	EDESig0BadSignature // SIG(0) verification failed for non-time reasons (algorithm, key bytes, packed-msg mismatch)
+	EDESig0FormatError  // SIG(0) message structure invalid (no signature, no question section, etc.)
+
+	// Approval-policy rejection detail codes (rollover-overhaul
+	// phase 11). The parent's update-policy rejected the message
+	// even though the signature validated. EDEZoneUpdatesNotAllowed
+	// already exists for the zone-wide opt-out; these cover the
+	// per-record cases.
+	EDEZoneUpdateRRtypeNotAllowed       // RR type not in update-policy.<scope>.rrtypes
+	EDEZoneUpdateOwnerOutsidePolicy     // owner name violates self/selfsub policy
+	EDEZoneUpdateChildUpdatesNotAllowed // OptAllowChildUpdates is false for this zone
 )
 
 var EDECodeToString = map[uint16]string{
 	EDEDNSSECBogus:                 "DNSSEC Bogus", // RFC 8914
-	EDESig0KeyNotKnown:            "SIG(0) key not known",
-	EDESig0KeyKnownButNotTrusted:  "SIG(0) key known, but not yet trusted",
-	EDEDelegationSyncNotSupported: "Delegation sync via DNS UPDATE is not supported",
-	EDEZoneFrozen:                 "Zone is frozen, updates not currently possible",
-	EDEZoneNotFound:               "Zone not found",
-	EDEZoneUpdatesNotAllowed:      "Zone does not allow DNS UPDATE",
-	EDEMPZoneXfrFailure:           "Zone XFR between providers failed",
-	EDEMPParentSyncFailure:        "Parent sync by provider failed",
-	EDEReportOptionNotFound:       "Expected Report option not found",
-	EDETsigRequired:               "TSIG required",
-	EDETsigValidationFailure:      "TSIG validation failure",
-	EDECDSScannerNotImplemented:   "CDS scanner not implemented",
-	EDECSyncScannerNotImplemented: "CSYNC scanner not implemented",
+	EDESig0KeyNotKnown:             "SIG(0) key not known",
+	EDESig0KeyKnownButNotTrusted:   "SIG(0) key known, but not yet trusted",
+	EDEDelegationSyncNotSupported:  "Delegation sync via DNS UPDATE is not supported",
+	EDEZoneFrozen:                  "Zone is frozen, updates not currently possible",
+	EDEZoneNotFound:                "Zone not found",
+	EDEZoneUpdatesNotAllowed:       "Zone does not allow DNS UPDATE",
+	EDEMPZoneXfrFailure:            "Zone XFR between providers failed",
+	EDEMPParentSyncFailure:         "Parent sync by provider failed",
+	EDEReportOptionNotFound:        "Expected Report option not found",
+	EDETsigRequired:                "TSIG required",
+	EDETsigValidationFailure:       "TSIG validation failure",
+	EDECDSScannerNotImplemented:    "CDS scanner not implemented",
+	EDECSyncScannerNotImplemented:  "CSYNC scanner not implemented",
 	EDEPrivacyRequestedUnavailable: "Privacy requested but only unencrypted transport available",
+
+	EDESig0BadTime:      "SIG(0) signature outside validity window (likely clock skew between signer and verifier)",
+	EDESig0BadSignature: "SIG(0) signature verification failed",
+	EDESig0FormatError:  "UPDATE message structure invalid",
+
+	EDEZoneUpdateRRtypeNotAllowed:       "RR type not permitted by update policy",
+	EDEZoneUpdateOwnerOutsidePolicy:     "owner name outside update policy scope",
+	EDEZoneUpdateChildUpdatesNotAllowed: "child updates are not allowed for this zone",
 }
 
 // AttachEDEToResponse attaches an Extended DNS Error (EDE) option to the DNS response

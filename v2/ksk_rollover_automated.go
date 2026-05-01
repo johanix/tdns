@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math/rand"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,9 +17,33 @@ const (
 	rolloverPhasePendingChildPublish  = "pending-child-publish"
 	rolloverPhasePendingParentPush    = "pending-parent-push"
 	rolloverPhasePendingParentObserve = "pending-parent-observe"
+	rolloverPhasePushSoftfail         = "parent-push-softfail"
 	rolloverPhasePendingChildWithdraw = "pending-child-withdraw"
 )
 
+// jitterUpTo returns a random duration in [-d, +d]. Used to spread
+// next_push_at across zones sharing a parent so that a parent outage
+// doesn't cause every child zone's softfail probe to fire on the same
+// hour boundary.
+func jitterUpTo(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	return time.Duration(rand.Int63n(int64(2*d))) - d
+}
+
+// kskIndexPushNeeded answers "should we push a fresh DS UPDATE to the
+// parent right now?" by comparing the engine-computed target DS index
+// range to what the parent has actually published.
+//
+// The comparison is against LastConfirmed* (parent reality) rather
+// than LastSubmitted* (our local "I tried"). The two diverge whenever
+// a previous attempt got rcode NOERROR back but the DS never actually
+// appeared on the parent — silent policy reject, broken update→publish
+// pipeline at the parent, etc. Comparing against LastSubmitted* in
+// that situation says "we already tried this, nothing to do" and the
+// zone gets stuck. Comparing against LastConfirmed* says "the parent
+// still doesn't have it, push again."
 func kskIndexPushNeeded(row *RolloverZoneRow, low, high int, indexOK bool, haveDS bool) bool {
 	if !haveDS {
 		return false
@@ -25,10 +51,10 @@ func kskIndexPushNeeded(row *RolloverZoneRow, low, high int, indexOK bool, haveD
 	if !indexOK {
 		return false
 	}
-	if row == nil || !row.LastSubmittedLow.Valid || !row.LastSubmittedHigh.Valid {
+	if row == nil || !row.LastConfirmedLow.Valid || !row.LastConfirmedHigh.Valid {
 		return true
 	}
-	return int(row.LastSubmittedLow.Int64) != low || int(row.LastSubmittedHigh.Int64) != high
+	return int(row.LastConfirmedLow.Int64) != low || int(row.LastConfirmedHigh.Int64) != high
 }
 
 // RolloverAutomatedTick runs one slice of automated KSK rollover for multi-ds (pipeline fill,
@@ -47,6 +73,14 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 	}
 
 	zone := dns.Fqdn(zd.ZoneName)
+
+	// Serialize against API mutating handlers (asap, cancel, reset,
+	// unstick). Held for the duration of one tick's per-zone work so
+	// a CLI-driven write cannot interleave with a phase advance.
+	lock := AcquireRolloverLock(zone)
+	lock.Lock()
+	defer lock.Unlock()
+
 	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
 		return err
 	}
@@ -161,17 +195,26 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		// under pending-parent-observe.
 		if imr == nil {
 			lgSigner.Warn("rollover: ImrEngine nil, cannot DS push", "zone", zone)
+			handleAttemptFailed(kdb, zone, pol, SoftfailChildConfig, "ImrEngine nil, cannot DS push", now)
 			return nil
 		}
+		_ = setLastAttemptStarted(kdb, zone, now)
 		pushCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
 		res, err := PushWholeDSRRset(pushCtx, zd, kdb, imr)
 		cancel()
 		if err != nil {
-			lgSigner.Warn("rollover: DS push failed", "zone", zone, "err", err)
+			cat := res.Category
+			if cat == "" {
+				cat = SoftfailTransport
+			}
+			lgSigner.Warn("rollover: DS push failed", "zone", zone, "err", err, "category", cat)
+			handleAttemptFailed(kdb, zone, pol, cat, err.Error(), now)
 			return nil
 		}
 		if res.Rcode != dns.RcodeSuccess {
 			lgSigner.Warn("rollover: DS push non-NOERROR", "zone", zone, "rcode", dns.RcodeToString[res.Rcode])
+			detail := fmt.Sprintf("rcode=%s", dns.RcodeToString[res.Rcode])
+			handleAttemptFailed(kdb, zone, pol, SoftfailParentRejected, detail, now)
 			return nil
 		}
 		// Schedule the first parent-agent DS query: wait confirm-initial-wait
@@ -219,9 +262,7 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		}
 		if t, ok := parseOptionalTime(row.ObserveStartedAt); ok {
 			if now.Sub(t) >= timeout {
-				if err := observeHardFail(kdb, zone, low, high, timeout); err != nil {
-					return err
-				}
+				recordObserveTimeout(kdb, zone, low, high, timeout, pol, now)
 				lgSigner.Error("rollover: DS observation timed out; keys marked with last_rollover_error", "zone", zone, "started_at", t.Format(time.RFC3339), "timeout", timeout)
 				return nil
 			}
@@ -234,6 +275,7 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		}
 
 		obs, err := QueryParentAgentDS(ctx, zone, agent)
+		_ = setLastPoll(kdb, zone, now)
 		if err != nil {
 			lgSigner.Debug("rollover: parent-agent DS query failed", "zone", zone, "err", err)
 			scheduleNextObservePoll(kdb, zone, row, now, pollMax)
@@ -260,10 +302,127 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		if err != nil {
 			return fmt.Errorf("rollover: confirm DS and advance keys: %w", err)
 		}
+		_ = resetHardfailCount(kdb, zone)
+		_ = setLastSuccess(kdb, zone, now)
+		// Clear last_attempt_started_at: the attempt window closed
+		// successfully, so its expected-by / attempt-timeout deadlines
+		// are no longer meaningful. Status output uses the absence of
+		// this timestamp to suppress stale window lines.
+		_ = setLastAttemptStarted(kdb, zone, time.Time{})
+		// Clear last_softfail_*: the previous softfail event is no
+		// longer informative now that we're back in sync.
+		_ = clearLastSoftfail(kdb, zone)
 		if advanced > 0 {
 			triggerResign(conf, zone)
 		}
 		lgSigner.Info("rollover: parent DS observed, advanced created keys", "zone", zone, "advanced", advanced)
+	case rolloverPhasePushSoftfail:
+		// Long-term mode after the initial flurry exhausted. Two
+		// concurrent activities run on every tick:
+		//
+		//   1. Observe-poll continues at confirm-poll-max cadence so a
+		//      parent fix is auto-detected without requiring a probe.
+		//      On confirmed observation, the engine transitions
+		//      directly to the advance-keys path — skipping the next
+		//      probe entirely.
+		//   2. Once next_push_at elapses, send ONE probe UPDATE and
+		//      schedule the next probe softfail_delay later (with
+		//      ±5min jitter to spread thundering-herd against a
+		//      shared parent). Probe failures keep the engine in this
+		//      phase; we do NOT enter pending-parent-push as a fresh
+		//      attempt group.
+		expected, low, high, idxOK, err := ComputeTargetDSSetForZone(kdb, zone, uint8(dns.SHA256))
+		if err != nil {
+			return err
+		}
+		if len(expected) == 0 {
+			// Steady state — nothing to confirm. Return to idle.
+			_ = clearObserveSchedule(kdb, zone)
+			return SetRolloverPhase(kdb, zone, rolloverPhaseIdle)
+		}
+		pollMax := pol.Rollover.ConfirmPollMax
+		if pollMax <= 0 {
+			pollMax = derivedPollMax(pol.Rollover.DsPublishDelay)
+		}
+		// (a) Observe-poll, if scheduled.
+		pollDue := true
+		if t, ok := parseOptionalTime(row.ObserveNextPollAt); ok && now.Before(t) {
+			pollDue = false
+		}
+		agent := pol.Rollover.ParentAgent
+		if pollDue && agent != "" {
+			obs, qerr := QueryParentAgentDS(ctx, zone, agent)
+			_ = setLastPoll(kdb, zone, now)
+			if qerr == nil && ObservedDSSetMatchesExpected(obs, expected) {
+				if !idxOK {
+					lgSigner.Warn("rollover: DS observed during softfail but rollover_index incomplete; cannot advance", "zone", zone)
+					_ = clearObserveSchedule(kdb, zone)
+					return SetRolloverPhase(kdb, zone, rolloverPhaseIdle)
+				}
+				advanced, terr := confirmDSAndAdvanceCreatedKeysTx(kdb, zone, low, high, now)
+				if terr != nil {
+					return fmt.Errorf("rollover: confirm DS and advance keys: %w", terr)
+				}
+				_ = resetHardfailCount(kdb, zone)
+				_ = setLastSuccess(kdb, zone, now)
+				_ = setLastAttemptStarted(kdb, zone, time.Time{})
+				_ = clearLastSoftfail(kdb, zone)
+				if advanced > 0 {
+					triggerResign(conf, zone)
+				}
+				lgSigner.Info("rollover: parent recovered during softfail polling, advancing keys", "zone", zone, "advanced", advanced)
+				return nil
+			}
+			scheduleNextObservePoll(kdb, zone, row, now, pollMax)
+		}
+		// (b) Probe UPDATE side. Fire only if next_push_at elapsed.
+		nextPushDue := false
+		if t, ok := parseOptionalTime(row.NextPushAt); !ok || !now.Before(t) {
+			nextPushDue = true
+		}
+		if !nextPushDue {
+			return nil
+		}
+		softfailDelay := pol.Rollover.SoftfailDelay
+		if softfailDelay <= 0 {
+			softfailDelay = derivedSoftfailDelay(pol.Rollover.DsPublishDelay)
+		}
+		nextPush := now.Add(softfailDelay).Add(jitterUpTo(5 * time.Minute))
+		if imr == nil {
+			lgSigner.Warn("rollover: ImrEngine nil, cannot softfail probe", "zone", zone)
+			_ = setSoftfail(kdb, zone, SoftfailChildConfig, "ImrEngine nil, cannot softfail probe", now, nextPush)
+			return nil
+		}
+		_ = setLastAttemptStarted(kdb, zone, now)
+		pushCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+		res, perr := PushWholeDSRRset(pushCtx, zd, kdb, imr)
+		cancel()
+		if perr != nil {
+			cat := res.Category
+			if cat == "" {
+				cat = SoftfailTransport
+			}
+			lgSigner.Warn("rollover: softfail probe push failed", "zone", zone, "category", cat, "err", perr)
+			_ = setSoftfail(kdb, zone, cat, perr.Error(), now, nextPush)
+			return nil
+		}
+		if res.Rcode != dns.RcodeSuccess {
+			detail := fmt.Sprintf("rcode=%s", dns.RcodeToString[res.Rcode])
+			lgSigner.Warn("rollover: softfail probe push non-NOERROR", "zone", zone, "rcode", dns.RcodeToString[res.Rcode])
+			_ = setSoftfail(kdb, zone, SoftfailParentRejected, detail, now, nextPush)
+			return nil
+		}
+		// Probe accepted at the wire. Restart observe to pick up DS
+		// when it appears; bump next_push_at without overwriting the
+		// most recent softfail context.
+		initial := pol.Rollover.ConfirmInitialWait
+		if initial <= 0 {
+			initial = defaultConfirmInitialWait
+		}
+		nextPoll := now.Add(initial)
+		_ = setObserveSchedule(kdb, zone, now, nextPoll, int(initial.Seconds()))
+		_ = setNextPushAt(kdb, zone, nextPush)
+		lgSigner.Info("rollover: softfail probe accepted, observing", "zone", zone, "first_poll_at", nextPoll.Format(time.RFC3339), "next_probe_at", nextPush.Format(time.RFC3339))
 	case rolloverPhasePendingChildWithdraw:
 		// §8.8: wait effective_margin = max(policy.clamping.margin,
 		// max_observed_ttl) from each retired SEP key's retired_at, then
@@ -423,11 +582,16 @@ WHERE zone = ?`, zone); err != nil {
 	return advanced, nil
 }
 
-// observeHardFail records last_rollover_error on every SEP key currently in
-// state=created that was waiting on confirmation of the [low, high] range,
-// then resets the zone to idle. No TX needed: this is a diagnostic write
-// path and idempotent retry on the next tick is safe.
-func observeHardFail(kdb *KeyDB, zone string, low, high int, timeout time.Duration) error {
+// recordObserveTimeout stamps a per-key last_rollover_error on every
+// SEP key in state=created that was waiting on confirmation of the
+// [low, high] range, then delegates to handleAttemptFailed to
+// increment the hardfail counter and decide whether to retry
+// immediately or enter parent-push-softfail.
+//
+// Per-key stamping is purely diagnostic — status output renders the
+// most recent error per key. The actual phase decision happens in
+// handleAttemptFailed.
+func recordObserveTimeout(kdb *KeyDB, zone string, low, high int, timeout time.Duration, pol *DnssecPolicy, now time.Time) {
 	msg := fmt.Sprintf("DS observation timeout (%s): parent never published expected DS RRset", timeout)
 	if low <= high {
 		created, err := GetDnssecKeysByState(kdb, zone, DnskeyStateCreated)
@@ -445,8 +609,69 @@ func observeHardFail(kdb *KeyDB, zone string, low, high int, timeout time.Durati
 			}
 		}
 	}
+	handleAttemptFailed(kdb, zone, pol, SoftfailParentPublishFailure, msg, now)
+}
+
+// handleAttemptFailed is the shared decision point for any failed
+// rollover attempt — push error, push non-NOERROR, observe timeout.
+// Increments the hardfail counter and decides the next phase:
+//
+//   - count < max-attempts-before-backoff → stay in / return to
+//     pending-parent-push (retry on the very next tick).
+//   - count >= max-attempts-before-backoff → enter parent-push-softfail
+//     (long-term mode; one probe per softfail-delay forever).
+//
+// Records the failure category and detail in either case so status
+// output can show what went wrong. Errors from the underlying writes
+// are logged but not propagated — the caller's tick-level error path
+// is for things that prevent the engine from advancing at all.
+func handleAttemptFailed(kdb *KeyDB, zone string, pol *DnssecPolicy, category, detail string, now time.Time) {
+	n, err := incrementHardfailCount(kdb, zone)
+	if err != nil {
+		lgSigner.Warn("rollover: increment hardfail_count failed", "zone", zone, "err", err)
+		return
+	}
+	maxAttempts := defaultMaxAttemptsBeforeBackoff
+	var softfailDelay time.Duration
+	if pol != nil {
+		if pol.Rollover.MaxAttemptsBeforeBackoff > 0 {
+			maxAttempts = pol.Rollover.MaxAttemptsBeforeBackoff
+		}
+		softfailDelay = pol.Rollover.SoftfailDelay
+		if softfailDelay <= 0 {
+			softfailDelay = derivedSoftfailDelay(pol.Rollover.DsPublishDelay)
+		}
+	} else {
+		softfailDelay = defaultSoftfailDelayMinimum
+	}
+	if n >= maxAttempts {
+		nextPush := now.Add(softfailDelay).Add(jitterUpTo(5 * time.Minute))
+		if err := setSoftfail(kdb, zone, category, detail, now, nextPush); err != nil {
+			lgSigner.Warn("rollover: setSoftfail (entering softfail) failed", "zone", zone, "err", err)
+		}
+		// Leave observe schedule in place — polling continues during
+		// softfail-delay, which is what gives the engine its
+		// auto-recovery property when the operator fixes the parent.
+		if err := SetRolloverPhase(kdb, zone, rolloverPhasePushSoftfail); err != nil {
+			lgSigner.Warn("rollover: set phase parent-push-softfail failed", "zone", zone, "err", err)
+		}
+		lgSigner.Warn("rollover: initial flurry exhausted, entering softfail long-term mode",
+			"zone", zone, "attempts", n, "category", category, "next_probe_at", nextPush.Format(time.RFC3339))
+		return
+	}
+	// Mid-flurry retry: clear observe schedule (the failed attempt's
+	// observe state is irrelevant; the next push starts fresh) and
+	// transition back to pending-parent-push so the next tick sends
+	// a fresh UPDATE.
+	if err := setSoftfail(kdb, zone, category, detail, now, time.Time{}); err != nil {
+		lgSigner.Warn("rollover: setSoftfail (mid-flurry) failed", "zone", zone, "err", err)
+	}
 	_ = clearObserveSchedule(kdb, zone)
-	return SetRolloverPhase(kdb, zone, rolloverPhaseIdle)
+	if err := SetRolloverPhase(kdb, zone, rolloverPhasePendingParentPush); err != nil {
+		lgSigner.Warn("rollover: set phase pending-parent-push failed", "zone", zone, "err", err)
+	}
+	lgSigner.Warn("rollover: parent push failed, retrying immediately",
+		"zone", zone, "attempt", n, "max_attempts", maxAttempts, "category", category)
 }
 
 // scheduleNextObservePoll advances the backoff interval for the next parent
@@ -486,38 +711,121 @@ func parseOptionalTime(s sql.NullString) (time.Time, bool) {
 	return t, true
 }
 
-// TransitionRolloverKskDsPublishedToStandby moves SEP keys from ds-published to standby after propagation delay.
+// TransitionRolloverKskDsPublishedToStandby advances each SEP key from
+// ds-published to standby exactly when its DNSKEY needs to be in the
+// served zone for cache-flush safety: T_publish_i = T_roll_i -
+// propagationDelay, where T_roll_i = active.active_at + i × KSK.Lifetime
+// and i is the key's position in the promotion queue (1 = next-up).
+//
+// Why not "advance after DS has been observed for propagationDelay
+// seconds": that rule unconditionally advances every ds-published key
+// shortly after its DS is seen at the parent, which puts the DNSKEY for
+// every standby into the zone. For multi-DS the operational intent is
+// to keep DNSKEY material *out* of the zone for keys whose rollover is
+// far in the future — DS hashes are post-quantum-opaque, but DNSKEYs
+// reveal the public key. Pre-publication only has to satisfy the
+// cache-flush invariant for the immediately-upcoming rollover; for keys
+// further out, leave them in ds-published until their own T_publish
+// comes around.
+//
+// Corner case: when propagationDelay > KSK.Lifetime, T_publish_i for a
+// key that's i slots out can land before T_publish_{i-1}'s rollover
+// fires, meaning multiple standbys may need DNSKEYs simultaneously.
+// The per-promotion-position computation handles this correctly —
+// each key is governed by its own T_publish.
 func TransitionRolloverKskDsPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
 	keys, err := GetDnssecKeysByState(kdb, "", DnskeyStateDsPublished)
 	if err != nil {
 		lgSigner.Error("rollover: list ds-published keys", "err", err)
 		return
 	}
+
+	// Group ds-published SEP keys by zone.
+	byZone := map[string][]*DnssecKeyWithTimestamps{}
 	for i := range keys {
 		k := &keys[i]
 		if k.Flags&dns.SEP == 0 {
 			continue
 		}
-		zd, ok := Zones.Get(k.ZoneName)
+		byZone[k.ZoneName] = append(byZone[k.ZoneName], k)
+	}
+
+	for zoneName, dsPubs := range byZone {
+		zd, ok := Zones.Get(zoneName)
 		if !ok || zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method != RolloverMethodMultiDS {
 			continue
 		}
-		dsAt, err := RolloverKeyDsObservedAt(kdb, k.ZoneName, k.KeyTag)
-		if err != nil || dsAt == nil {
+		pol := zd.DnssecPolicy
+		if pol.KSK.Lifetime == 0 {
 			continue
 		}
-		if now.Sub(*dsAt) < propagationDelay {
+
+		// Anchor T_roll on the active KSK's active_at.
+		active, err := GetDnssecKeysByState(kdb, zoneName, DnskeyStateActive)
+		if err != nil {
 			continue
 		}
-		if err := UpdateDnssecKeyState(kdb, k.ZoneName, k.KeyTag, DnskeyStateStandby); err != nil {
-			lgSigner.Error("rollover: ds-published→standby failed", "zone", k.ZoneName, "keyid", k.KeyTag, "err", err)
+		var activeKid uint16
+		for i := range active {
+			if active[i].Flags&dns.SEP != 0 {
+				activeKid = active[i].KeyTag
+				break
+			}
+		}
+		if activeKid == 0 {
 			continue
 		}
-		if err := setRolloverKeyStandbyAt(kdb, k.ZoneName, k.KeyTag, now); err != nil {
-			lgSigner.Warn("rollover: standby_at stamp failed", "zone", k.ZoneName, "keyid", k.KeyTag, "err", err)
+		activeAt, err := RolloverKeyActiveAt(kdb, zoneName, activeKid)
+		if err != nil || activeAt == nil {
+			continue
 		}
-		lgSigner.Info("rollover: ds-published→standby", "zone", k.ZoneName, "keyid", k.KeyTag)
-		triggerResign(conf, k.ZoneName)
+
+		// Sort ds-published keys by ds_observed_at ascending — this is
+		// the promotion order (oldest = next up). Keys with no
+		// ds_observed_at (shouldn't happen for state=ds-published, but
+		// be defensive) sort to the back.
+		sort.SliceStable(dsPubs, func(a, b int) bool {
+			ta, _ := RolloverKeyDsObservedAt(kdb, zoneName, dsPubs[a].KeyTag)
+			tb, _ := RolloverKeyDsObservedAt(kdb, zoneName, dsPubs[b].KeyTag)
+			if ta == nil && tb == nil {
+				return dsPubs[a].KeyTag < dsPubs[b].KeyTag
+			}
+			if ta == nil {
+				return false
+			}
+			if tb == nil {
+				return true
+			}
+			return ta.Before(*tb)
+		})
+
+		lifetime := time.Duration(pol.KSK.Lifetime) * time.Second
+		for i, k := range dsPubs {
+			// Promotion position: i=0 is the next-up (slot 1),
+			// i=1 is after that (slot 2), etc.
+			tRoll := activeAt.Add(time.Duration(i+1) * lifetime)
+			tPublish := tRoll.Add(-propagationDelay)
+			if now.Before(tPublish) {
+				// Sorted by promotion order; later keys have
+				// strictly later tPublish (by exactly `lifetime`).
+				// Nothing more to do for this zone this tick.
+				break
+			}
+			if err := UpdateDnssecKeyState(kdb, zoneName, k.KeyTag, DnskeyStateStandby); err != nil {
+				lgSigner.Error("rollover: ds-published→standby failed",
+					"zone", zoneName, "keyid", k.KeyTag, "err", err)
+				continue
+			}
+			if err := setRolloverKeyStandbyAt(kdb, zoneName, k.KeyTag, now); err != nil {
+				lgSigner.Warn("rollover: standby_at stamp failed",
+					"zone", zoneName, "keyid", k.KeyTag, "err", err)
+			}
+			lgSigner.Info("rollover: ds-published→standby",
+				"zone", zoneName, "keyid", k.KeyTag,
+				"slot", i+1, "t_roll", tRoll.UTC().Format(time.RFC3339),
+				"t_publish", tPublish.UTC().Format(time.RFC3339))
+			triggerResign(conf, zoneName)
+		}
 	}
 }
 

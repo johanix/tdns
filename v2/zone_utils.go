@@ -918,10 +918,11 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 				publishkeys = append(publishkeys, dns.RR(&zsk.DnskeyRR))
 			}
 
-			// Also include published/retired keys from database
-			const fetchZoneDnskeysSql = `
-SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='published' OR state='retired')`
-			rows, err := zd.KeyDB.Query(fetchZoneDnskeysSql, zd.ZoneName)
+			// Use the shared FetchZoneDnskeysSql (ops_dnskey.go) so
+			// the snapshot here exactly matches PublishDnskeyRRs's
+			// served RRset. Centralizing the predicate prevents the
+			// two from drifting apart again.
+			rows, err := zd.KeyDB.Query(FetchZoneDnskeysSql, zd.ZoneName)
 			if err != nil {
 				lg.Error("CollectDynamicRRs: failed to query DNSKEYs", "zone", zd.ZoneName, "err", err)
 			} else {
@@ -938,6 +939,9 @@ SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (
 					} else {
 						lg.Error("CollectDynamicRRs: failed to parse DNSKEY RR", "keyrr", keyrr, "zone", zd.ZoneName, "err", err)
 					}
+				}
+				if err := rows.Err(); err != nil {
+					lg.Error("CollectDynamicRRs: DNSKEY row iteration failed", "zone", zd.ZoneName, "err", err)
 				}
 			}
 

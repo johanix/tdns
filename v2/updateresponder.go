@@ -298,32 +298,51 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	//	log.Printf("UpdateResponder: isdel=%v ValidateAndTrustUpdate returned rcode=%d, validated=%t, trusted=%t, signername=%s",
 	//		isdel, rcode, validated, trusted, signername)
 	lgHandler.Info("update status", "type", dur.Status.Type, "rcode", dur.Status.ValidationRcode, "validated", dur.Status.Validated, "trusted", dur.Status.ValidatedByTrustedKey, "signer", dur.Status.SignerName)
-	// send response
-	m = m.SetRcode(m, int(dur.Status.ValidationRcode))
-	w.WriteMsg(m)
 
 	if dur.Status.ValidationRcode != dns.RcodeSuccess {
 		lgHandler.Error("error verifying DNS UPDATE, most likely ignoring contents")
-		// Let's not return here, this could be an unvalidated key upload.
+		// Don't return here — this might be an unvalidated key upload
+		// that ApproveUpdate accepts despite the validation failure.
+		// The final rcode and EDE are decided after ApproveUpdate
+		// returns (see below).
 	}
-
-	// dump.P(dur.Status.Type)
 
 	// rcode from validation is input to ApproveUpdate only to enable the possibility of upload of unvalidated keys
 	approved, updatezone, err := zd.ApproveUpdate(zone, dur.Status, r)
-	// err := zd.ApproveUpdate(zone, r, dur.Status)
 	dur.Status.Approved = approved
-	// XXX: FIXME:
-	// dur.Status.UpdateZone = updatezone
 	if !updatezone {
 		dur.Status.Type = "TRUSTSTORE-UPDATE"
 	}
 	if err != nil {
 		lgHandler.Error("error from ApproveUpdate, ignoring update", "err", err)
+		// Even on internal error, send a response with the validation
+		// rcode + EDE so the child sees something coherent.
+		m = m.SetRcode(m, int(dur.Status.ValidationRcode))
+		if dur.Status.RejectionEDE != 0 {
+			edns0.AttachEDEToResponse(m, dur.Status.RejectionEDE)
+		}
+		w.WriteMsg(m)
 		return err
 	}
 
-	// dump.P(dur.Status.Type)
+	// Decide the final wire rcode + EDE based on the combined
+	// validation + approval outcome, then write the response.
+	// Rollover-overhaul phase 11 moved this from before ApproveUpdate
+	// to after it: the previous order made policy-rejected updates
+	// look like NOERROR-but-don't-publish to the child, which the
+	// rollover engine had no way to distinguish from a true publish-
+	// pipeline failure on the parent side.
+	finalRcode := int(dur.Status.ValidationRcode)
+	if !dur.Status.Approved && dur.Status.ValidationRcode == dns.RcodeSuccess {
+		// Validation succeeded but approval rejected — REFUSED is the
+		// right wire rcode (NOERROR would be a wire-protocol lie).
+		finalRcode = dns.RcodeRefused
+	}
+	m = m.SetRcode(m, finalRcode)
+	if dur.Status.RejectionEDE != 0 {
+		edns0.AttachEDEToResponse(m, dur.Status.RejectionEDE)
+	}
+	w.WriteMsg(m)
 
 	if !dur.Status.Approved {
 		lgHandler.Warn("ApproveUpdate rejected the update, ignored")
@@ -444,18 +463,23 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		// Past the unvalidated key upload; from here update MUST be validated
 		if (us.ValidationRcode != dns.RcodeSuccess || !us.Validated) && !unvalidatedKeyUpload {
 			us.Approved = false
+			if us.RejectionEDE == 0 {
+				us.RejectionEDE = edns0.EDESig0BadSignature
+			}
 			lgHandler.Warn("update rejected: signature did not validate")
 			return false, false, nil
 		}
 
 		if !us.ValidatedByTrustedKey && !unvalidatedKeyUpload {
 			us.Approved = false
+			us.RejectionEDE = edns0.EDESig0KeyKnownButNotTrusted
 			lgHandler.Warn("update rejected: signature validated but key not trusted")
 			return false, false, nil
 		}
 
 		if !zd.UpdatePolicy.Child.RRtypes[rrtype] {
 			us.Approved = false
+			us.RejectionEDE = edns0.EDEZoneUpdateRRtypeNotAllowed
 			lgHandler.Warn("update rejected: unapproved RR type", "rrtype", dns.TypeToString[rr.Header().Rrtype])
 			return false, false, nil
 		}
@@ -464,6 +488,7 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		case "selfsub":
 			if !strings.HasSuffix(rr.Header().Name, us.SignerName) {
 				us.Approved = false
+				us.RejectionEDE = edns0.EDEZoneUpdateOwnerOutsidePolicy
 				lgHandler.Warn("update rejected: owner name outside selfsub tree", "owner", rr.Header().Name, "signer", us.SignerName)
 				return false, false, nil
 			}
@@ -471,11 +496,13 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 		case "self":
 			if rr.Header().Name != us.SignerName {
 				us.Approved = false
+				us.RejectionEDE = edns0.EDEZoneUpdateOwnerOutsidePolicy
 				lgHandler.Warn("update rejected: owner name differs from signer name violating self policy", "owner", rr.Header().Name, "signer", us.SignerName)
 				return false, false, nil
 			}
 		default:
 			us.Approved = false
+			us.RejectionEDE = edns0.EDEZoneUpdatesNotAllowed
 			lgHandler.Warn("unknown policy type", "policyType", zd.UpdatePolicy.Child.Type)
 			return false, false, nil
 		}
@@ -501,12 +528,19 @@ func (zd *ZoneData) ApproveAuthUpdate(zone string, us *UpdateStatus, r *dns.Msg)
 
 	if us.ValidationRcode != dns.RcodeSuccess || !us.Validated {
 		us.Approved = false
+		// Don't overwrite a more specific RejectionEDE set during
+		// validation (e.g. EDESig0BadTime) — fall back only if no
+		// validation EDE was recorded.
+		if us.RejectionEDE == 0 {
+			us.RejectionEDE = edns0.EDESig0BadSignature
+		}
 		lgHandler.Warn("auth update rejected: signature did not validate")
 		return false, false, nil
 	}
 
 	if !us.ValidatedByTrustedKey {
 		us.Approved = false
+		us.RejectionEDE = edns0.EDESig0KeyKnownButNotTrusted
 		lgHandler.Warn("auth update rejected: signature validated but key not trusted")
 		return false, false, nil
 	}
@@ -526,6 +560,7 @@ func (zd *ZoneData) ApproveAuthUpdate(zone string, us *UpdateStatus, r *dns.Msg)
 
 		if !zd.UpdatePolicy.Zone.RRtypes[rrtype] {
 			us.Approved = false
+			us.RejectionEDE = edns0.EDEZoneUpdateRRtypeNotAllowed
 			lgHandler.Warn("auth update rejected: unapproved RR type", "rrtype", dns.TypeToString[rr.Header().Rrtype])
 			return false, false, nil
 		}
@@ -534,6 +569,7 @@ func (zd *ZoneData) ApproveAuthUpdate(zone string, us *UpdateStatus, r *dns.Msg)
 		case "selfsub":
 			if !strings.HasSuffix(rr.Header().Name, us.SignerName) {
 				us.Approved = false
+				us.RejectionEDE = edns0.EDEZoneUpdateOwnerOutsidePolicy
 				lgHandler.Warn("auth update rejected: owner name outside selfsub tree", "owner", rr.Header().Name, "signer", us.SignerName)
 				return false, false, nil
 			}
@@ -541,17 +577,20 @@ func (zd *ZoneData) ApproveAuthUpdate(zone string, us *UpdateStatus, r *dns.Msg)
 		case "self":
 			if rr.Header().Name != us.SignerName {
 				us.Approved = false
+				us.RejectionEDE = edns0.EDEZoneUpdateOwnerOutsidePolicy
 				lgHandler.Warn("auth update rejected: owner name differs from signer name violating self policy", "owner", rr.Header().Name, "signer", us.SignerName)
 				return false, false, nil
 			}
 
 		case "none":
 			us.Approved = false
+			us.RejectionEDE = edns0.EDEZoneUpdatesNotAllowed
 			lgHandler.Warn("auth update rejected: policy type none disallows all updates")
 			return false, false, nil
 
 		default:
 			us.Approved = false
+			us.RejectionEDE = edns0.EDEZoneUpdatesNotAllowed
 			lgHandler.Warn("unknown policy type", "policyType", zd.UpdatePolicy.Zone.Type)
 			return false, false, nil
 		}
