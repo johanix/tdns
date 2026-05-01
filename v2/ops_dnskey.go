@@ -10,6 +10,19 @@ import (
 	"github.com/miekg/dns"
 )
 
+// FetchZoneDnskeysSql is the canonical SQL for "DNSKEYs that belong in
+// the served zone DNSKEY RRset, as built from the keystore." Both
+// PublishDnskeyRRs (sign-time RRset construction) and CollectDynamicRRs
+// (refresh-time snapshot) must use this exact predicate so the two
+// build identical sets — divergence between them would produce a
+// brief window after refresh where standby DNSKEYs disappear from
+// the served RRset until the next SignZone call.
+//
+// The set is `published` ∪ `standby` ∪ `retired`. Active keys are
+// fetched separately via GetDnssecKeys(..., DnskeyStateActive).
+const FetchZoneDnskeysSql = `
+SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='published' OR state='standby' OR state='retired')`
+
 func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {
 	if !zd.Options[OptAllowUpdates] && !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return fmt.Errorf("zone %s does not allow updates or signing", zd.ZoneName)
@@ -43,12 +56,7 @@ func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {
 	zd.Logger.Printf("PublishDnskeyRRs: there are %d active KSKs and %d active ZSKs", len(dak.KSKs), len(dak.ZSKs))
 	zd.Logger.Printf("PublishDnskeyRRs: publishkeys (active): %v", publishkeys)
 
-	const (
-		fetchZoneDnskeysSql = `
-SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND (state='published' OR state='standby' OR state='retired')`
-	)
-
-	rows, err := zd.KeyDB.Query(fetchZoneDnskeysSql, zd.ZoneName)
+	rows, err := zd.KeyDB.Query(FetchZoneDnskeysSql, zd.ZoneName)
 	if err != nil {
 		lgHandler.Error("PublishDnskeyRRs: error querying DNSKEY store", "zone", zd.ZoneName, "err", err)
 		return err

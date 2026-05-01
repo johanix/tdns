@@ -262,7 +262,7 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		}
 		if t, ok := parseOptionalTime(row.ObserveStartedAt); ok {
 			if now.Sub(t) >= timeout {
-				recordObserveTimeout(kdb, zone, low, high, timeout, pol)
+				recordObserveTimeout(kdb, zone, low, high, timeout, pol, now)
 				lgSigner.Error("rollover: DS observation timed out; keys marked with last_rollover_error", "zone", zone, "started_at", t.Format(time.RFC3339), "timeout", timeout)
 				return nil
 			}
@@ -591,7 +591,7 @@ WHERE zone = ?`, zone); err != nil {
 // Per-key stamping is purely diagnostic — status output renders the
 // most recent error per key. The actual phase decision happens in
 // handleAttemptFailed.
-func recordObserveTimeout(kdb *KeyDB, zone string, low, high int, timeout time.Duration, pol *DnssecPolicy) {
+func recordObserveTimeout(kdb *KeyDB, zone string, low, high int, timeout time.Duration, pol *DnssecPolicy, now time.Time) {
 	msg := fmt.Sprintf("DS observation timeout (%s): parent never published expected DS RRset", timeout)
 	if low <= high {
 		created, err := GetDnssecKeysByState(kdb, zone, DnskeyStateCreated)
@@ -609,7 +609,7 @@ func recordObserveTimeout(kdb *KeyDB, zone string, low, high int, timeout time.D
 			}
 		}
 	}
-	handleAttemptFailed(kdb, zone, pol, SoftfailParentPublishFailure, msg, time.Now())
+	handleAttemptFailed(kdb, zone, pol, SoftfailParentPublishFailure, msg, now)
 }
 
 // handleAttemptFailed is the shared decision point for any failed
