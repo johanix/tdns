@@ -493,6 +493,7 @@ func pushDSRRsetViaUpdate(ctx context.Context, deps RolloverEngineDeps) (KSKDSPu
 		// Clear any stale range from a prior push instead of leaving
 		// stale persisted columns that describe an older submission.
 		if err := clearLastDSSubmittedRange(kdb, child); err != nil {
+			out.Category = SoftfailChildConfigLocalError
 			return out, fmt.Errorf("pushDSRRsetViaUpdate: clear stale submitted range: %w", err)
 		}
 	}
