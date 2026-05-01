@@ -441,15 +441,19 @@ func renderRolloverWhen(resp *tdns.RolloverWhenResponse) {
 
 	keyidPair := ""
 	if resp.FromKeyID != 0 || resp.ToKeyID != 0 {
-		keyidPair = fmt.Sprintf("from active keyid %d to %d", resp.FromKeyID, resp.ToKeyID)
+		keyidPair = fmt.Sprintf("active keyid %d --> %d", resp.FromKeyID, resp.ToKeyID)
 	}
 
-	// Pad the time-with-delta to a fixed width so the keyid columns
-	// land on the same column for both lines, regardless of whether
-	// either time is "(now)" or "(in 3h17m)".
-	const timeColWidth = 38
+	// Pad the time-with-delta to the wider of the two time strings.
+	// This keeps the keyid columns aligned between the two lines
+	// without bloating to a worst-case width that would push the
+	// keyid info too far right for the typical case.
 	nextStr := whenTimeOrPlaceholder(resp.NextScheduled)
 	earliestStr := whenTimeOrPlaceholder(resp.EarliestPossible)
+	timeColWidth := len(nextStr)
+	if len(earliestStr) > timeColWidth {
+		timeColWidth = len(earliestStr)
+	}
 
 	fmt.Printf("  next scheduled       %-*s  %s\n", timeColWidth, nextStr, keyidPair)
 	earliestLine := fmt.Sprintf("  earliest possible    %-*s  %s", timeColWidth, earliestStr, keyidPair)
