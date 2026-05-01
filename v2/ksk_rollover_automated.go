@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"math/rand"
+	"sort"
 	"strings"
 	"time"
 
@@ -710,38 +711,121 @@ func parseOptionalTime(s sql.NullString) (time.Time, bool) {
 	return t, true
 }
 
-// TransitionRolloverKskDsPublishedToStandby moves SEP keys from ds-published to standby after propagation delay.
+// TransitionRolloverKskDsPublishedToStandby advances each SEP key from
+// ds-published to standby exactly when its DNSKEY needs to be in the
+// served zone for cache-flush safety: T_publish_i = T_roll_i -
+// propagationDelay, where T_roll_i = active.active_at + i × KSK.Lifetime
+// and i is the key's position in the promotion queue (1 = next-up).
+//
+// Why not "advance after DS has been observed for propagationDelay
+// seconds": that rule unconditionally advances every ds-published key
+// shortly after its DS is seen at the parent, which puts the DNSKEY for
+// every standby into the zone. For multi-DS the operational intent is
+// to keep DNSKEY material *out* of the zone for keys whose rollover is
+// far in the future — DS hashes are post-quantum-opaque, but DNSKEYs
+// reveal the public key. Pre-publication only has to satisfy the
+// cache-flush invariant for the immediately-upcoming rollover; for keys
+// further out, leave them in ds-published until their own T_publish
+// comes around.
+//
+// Corner case: when propagationDelay > KSK.Lifetime, T_publish_i for a
+// key that's i slots out can land before T_publish_{i-1}'s rollover
+// fires, meaning multiple standbys may need DNSKEYs simultaneously.
+// The per-promotion-position computation handles this correctly —
+// each key is governed by its own T_publish.
 func TransitionRolloverKskDsPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
 	keys, err := GetDnssecKeysByState(kdb, "", DnskeyStateDsPublished)
 	if err != nil {
 		lgSigner.Error("rollover: list ds-published keys", "err", err)
 		return
 	}
+
+	// Group ds-published SEP keys by zone.
+	byZone := map[string][]*DnssecKeyWithTimestamps{}
 	for i := range keys {
 		k := &keys[i]
 		if k.Flags&dns.SEP == 0 {
 			continue
 		}
-		zd, ok := Zones.Get(k.ZoneName)
+		byZone[k.ZoneName] = append(byZone[k.ZoneName], k)
+	}
+
+	for zoneName, dsPubs := range byZone {
+		zd, ok := Zones.Get(zoneName)
 		if !ok || zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method != RolloverMethodMultiDS {
 			continue
 		}
-		dsAt, err := RolloverKeyDsObservedAt(kdb, k.ZoneName, k.KeyTag)
-		if err != nil || dsAt == nil {
+		pol := zd.DnssecPolicy
+		if pol.KSK.Lifetime == 0 {
 			continue
 		}
-		if now.Sub(*dsAt) < propagationDelay {
+
+		// Anchor T_roll on the active KSK's active_at.
+		active, err := GetDnssecKeysByState(kdb, zoneName, DnskeyStateActive)
+		if err != nil {
 			continue
 		}
-		if err := UpdateDnssecKeyState(kdb, k.ZoneName, k.KeyTag, DnskeyStateStandby); err != nil {
-			lgSigner.Error("rollover: ds-published→standby failed", "zone", k.ZoneName, "keyid", k.KeyTag, "err", err)
+		var activeKid uint16
+		for i := range active {
+			if active[i].Flags&dns.SEP != 0 {
+				activeKid = active[i].KeyTag
+				break
+			}
+		}
+		if activeKid == 0 {
 			continue
 		}
-		if err := setRolloverKeyStandbyAt(kdb, k.ZoneName, k.KeyTag, now); err != nil {
-			lgSigner.Warn("rollover: standby_at stamp failed", "zone", k.ZoneName, "keyid", k.KeyTag, "err", err)
+		activeAt, err := RolloverKeyActiveAt(kdb, zoneName, activeKid)
+		if err != nil || activeAt == nil {
+			continue
 		}
-		lgSigner.Info("rollover: ds-published→standby", "zone", k.ZoneName, "keyid", k.KeyTag)
-		triggerResign(conf, k.ZoneName)
+
+		// Sort ds-published keys by ds_observed_at ascending — this is
+		// the promotion order (oldest = next up). Keys with no
+		// ds_observed_at (shouldn't happen for state=ds-published, but
+		// be defensive) sort to the back.
+		sort.SliceStable(dsPubs, func(a, b int) bool {
+			ta, _ := RolloverKeyDsObservedAt(kdb, zoneName, dsPubs[a].KeyTag)
+			tb, _ := RolloverKeyDsObservedAt(kdb, zoneName, dsPubs[b].KeyTag)
+			if ta == nil && tb == nil {
+				return dsPubs[a].KeyTag < dsPubs[b].KeyTag
+			}
+			if ta == nil {
+				return false
+			}
+			if tb == nil {
+				return true
+			}
+			return ta.Before(*tb)
+		})
+
+		lifetime := time.Duration(pol.KSK.Lifetime) * time.Second
+		for i, k := range dsPubs {
+			// Promotion position: i=0 is the next-up (slot 1),
+			// i=1 is after that (slot 2), etc.
+			tRoll := activeAt.Add(time.Duration(i+1) * lifetime)
+			tPublish := tRoll.Add(-propagationDelay)
+			if now.Before(tPublish) {
+				// Sorted by promotion order; later keys have
+				// strictly later tPublish (by exactly `lifetime`).
+				// Nothing more to do for this zone this tick.
+				break
+			}
+			if err := UpdateDnssecKeyState(kdb, zoneName, k.KeyTag, DnskeyStateStandby); err != nil {
+				lgSigner.Error("rollover: ds-published→standby failed",
+					"zone", zoneName, "keyid", k.KeyTag, "err", err)
+				continue
+			}
+			if err := setRolloverKeyStandbyAt(kdb, zoneName, k.KeyTag, now); err != nil {
+				lgSigner.Warn("rollover: standby_at stamp failed",
+					"zone", zoneName, "keyid", k.KeyTag, "err", err)
+			}
+			lgSigner.Info("rollover: ds-published→standby",
+				"zone", zoneName, "keyid", k.KeyTag,
+				"slot", i+1, "t_roll", tRoll.UTC().Format(time.RFC3339),
+				"t_publish", tPublish.UTC().Format(time.RFC3339))
+			triggerResign(conf, zoneName)
+		}
 	}
 }
 
