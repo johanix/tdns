@@ -1067,8 +1067,9 @@ confirm-poll-max even without 'unstick'. Use only to skip the wait.
 
 Default mode talks to the daemon's API server. Use --offline to write
 directly to the keystore file when the daemon is down (postmortem
-use; the operator is responsible for ensuring the daemon is genuinely
-stopped — there is no lockfile guard yet).
+use). The CLI checks the daemon sentinel via refuseIfDaemonAlive
+and refuses to run if a live daemon is detected; --force overrides
+the check for cases where the sentinel is stale.
 
 Hardfail_count and last_softfail_* are preserved so status output
 still shows the most recent failure context. The counter resets to 0

@@ -78,8 +78,16 @@ func APIRolloverAsap(conf *Config) func(w http.ResponseWriter, r *http.Request) 
 		// already underway. ComputeEarliestRollover itself does not
 		// gate on this (so that ComputeRolloverWhen can project past
 		// the in-progress rollover); the gate belongs at the
-		// write-side caller.
-		if row, err := LoadRolloverZoneRow(kdb, zone); err == nil && row != nil && row.RolloverInProgress {
+		// write-side caller. Fail closed on DB read error: scheduling
+		// without knowing current state could schedule on top of an
+		// in-flight rollover.
+		row, err := LoadRolloverZoneRow(kdb, zone)
+		if err != nil {
+			lgApi.Warn("rollover/asap: LoadRolloverZoneRow failed", "zone", zone, "err", err)
+			http.Error(w, "failed to read rollover state", http.StatusInternalServerError)
+			return
+		}
+		if row != nil && row.RolloverInProgress {
 			http.Error(w, fmt.Sprintf("zone %s: rollover already in progress", zone), http.StatusBadRequest)
 			return
 		}
