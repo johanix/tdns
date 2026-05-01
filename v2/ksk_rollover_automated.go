@@ -231,6 +231,7 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 			return err
 		}
 		lgSigner.Info("rollover: DS UPDATE accepted, arming observe", "zone", zone, "first_poll_at", nextPoll.Format(time.RFC3339))
+		scheduleFastObservePoll(ctx, conf, kdb, imr, zd, propagationDelay, initial)
 	case rolloverPhasePendingParentObserve:
 		agent := pol.Rollover.ParentAgent
 		if agent == "" {
@@ -423,6 +424,7 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		_ = setObserveSchedule(kdb, zone, now, nextPoll, int(initial.Seconds()))
 		_ = setNextPushAt(kdb, zone, nextPush)
 		lgSigner.Info("rollover: softfail probe accepted, observing", "zone", zone, "first_poll_at", nextPoll.Format(time.RFC3339), "next_probe_at", nextPush.Format(time.RFC3339))
+		scheduleFastObservePoll(ctx, conf, kdb, imr, zd, propagationDelay, initial)
 	case rolloverPhasePendingChildWithdraw:
 		// §8.8: wait effective_margin = max(policy.clamping.margin,
 		// max_observed_ttl) from each retired SEP key's retired_at, then
@@ -580,6 +582,44 @@ WHERE zone = ?`, zone); err != nil {
 	}
 	commit = true
 	return advanced, nil
+}
+
+// scheduleFastObservePoll spawns a one-shot goroutine that fires the
+// observe-phase poll exactly initial-wait after a successful UPDATE,
+// independent of the worker tick cadence. Without this, the first
+// parent-DS query is gated on the next KeyStateWorker tick, which can
+// be up to kasp.check_interval seconds away — and if that exceeds
+// attempt-timeout (= ds-publish-delay × 1.2 by default), the engine
+// declares the attempt timed out before any poll has ever fired.
+//
+// The goroutine waits initial-wait seconds, then re-runs
+// RolloverAutomatedTick for the same zone. RolloverAutomatedTick
+// acquires the per-zone lock internally, so concurrent tick + fast-poll
+// serialize cleanly. Daemon shutdown via ctx.Done() aborts the goroutine.
+//
+// Restart safety: if the daemon restarts while the goroutine is
+// sleeping, the goroutine is gone but the DB state still carries
+// observe_started_at + observe_next_poll_at. The next worker tick
+// after restart picks up where this left off (at the cost of being
+// bounded by check_interval — same as the pre-fix behavior). No state
+// is lost; just slower recovery.
+func scheduleFastObservePoll(ctx context.Context, conf *Config, kdb *KeyDB, imr *Imr, zd *ZoneData, propagationDelay, initial time.Duration) {
+	if initial <= 0 {
+		initial = defaultConfirmInitialWait
+	}
+	zone := zd.ZoneName
+	go func() {
+		timer := time.NewTimer(initial)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+		}
+		if err := RolloverAutomatedTick(ctx, conf, kdb, imr, zd, propagationDelay, time.Now()); err != nil {
+			lgSigner.Debug("rollover: fast-poll tick error", "zone", zone, "err", err)
+		}
+	}()
 }
 
 // recordObserveTimeout stamps a per-key last_rollover_error on every

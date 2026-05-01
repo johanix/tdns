@@ -19,7 +19,15 @@ import (
 // pol may be nil for zones that don't have a DNSSEC policy attached;
 // the function still returns a valid struct (Headline=OK, no policy
 // summary, no derived timing fields).
-func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Time) (*RolloverStatus, error) {
+//
+// checkInterval is kasp.check_interval (0 means "unknown / not
+// applicable"). Used purely to populate the Warnings field by
+// re-running the same kasp.check_interval / attempt-timeout
+// invariant check that key_state_worker logs at startup. Surfacing
+// it on every status query catches the case where the operator
+// edited the YAML but didn't restart, or where rollover-driven
+// behaviour has drifted from initial configuration.
+func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInterval time.Duration, now time.Time) (*RolloverStatus, error) {
 	zone = dns.Fqdn(strings.TrimSpace(zone))
 	if zone == "." || zone == "" {
 		return nil, fmt.Errorf("ComputeRolloverStatus: empty zone")
@@ -58,7 +66,65 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.
 		return nil, fmt.Errorf("ComputeRolloverStatus: %w", err)
 	}
 
+	applyInFlightPublicationLabels(out)
+	populateRolloverWarnings(out, pol, checkInterval)
+
 	return out, nil
+}
+
+// applyInFlightPublicationLabels overrides the Published column for
+// SEP keys that are mid-publication: the engine has submitted DS for
+// them to the parent (so they appear in SubmittedKeyIDs) but has not
+// yet confirmed publication (not in ConfirmedKeyIDs). Without this,
+// such keys display "none" — matching their local state but not the
+// engine's intent or the parent's actual DS RRset, which the operator
+// can verify via dig.
+//
+// Status remains advisory: a key labeled "DS pending" might already
+// be at the parent (engine just hasn't polled yet) or might be still
+// in flight. The "DS confirmed" line and last-poll timestamp give the
+// operator the freshness context to disambiguate.
+func applyInFlightPublicationLabels(out *RolloverStatus) {
+	if len(out.SubmittedKeyIDs) == 0 {
+		return
+	}
+	confirmed := make(map[uint16]bool, len(out.ConfirmedKeyIDs))
+	for _, k := range out.ConfirmedKeyIDs {
+		confirmed[k] = true
+	}
+	submitted := make(map[uint16]bool, len(out.SubmittedKeyIDs))
+	for _, k := range out.SubmittedKeyIDs {
+		submitted[k] = true
+	}
+	for i := range out.KSKs {
+		k := &out.KSKs[i]
+		if k.State != DnskeyStateCreated {
+			continue
+		}
+		if submitted[k.KeyID] && !confirmed[k.KeyID] {
+			k.Published = "DS pending"
+		}
+	}
+}
+
+// populateRolloverWarnings re-runs the cross-config invariant check
+// that key_state_worker.go logs once at daemon startup, surfacing it
+// on every status query. The most operationally consequential one
+// today: kasp.check_interval must be < attempt-timeout / 2, otherwise
+// observe-poll cadence is starved and rollover attempts deterministically
+// time out before any poll fires.
+func populateRolloverWarnings(out *RolloverStatus, pol *DnssecPolicy, checkInterval time.Duration) {
+	if pol == nil || checkInterval <= 0 {
+		return
+	}
+	if pol.Rollover.Method != RolloverMethodMultiDS && pol.Rollover.Method != RolloverMethodDoubleSignature {
+		return
+	}
+	if pol.Rollover.ConfirmTimeout > 0 && pol.Rollover.ConfirmTimeout < 2*checkInterval {
+		out.Warnings = append(out.Warnings,
+			fmt.Sprintf("kasp.check_interval (%s) is too coarse for attempt-timeout (%s); observe polling will be starved — lower kasp.check_interval to < attempt-timeout/2 or raise rollover.ds-publish-delay",
+				checkInterval, pol.Rollover.ConfirmTimeout))
+	}
 }
 
 func populateDSKeyidsForStatus(kdb *KeyDB, zone string, out *RolloverStatus) error {
