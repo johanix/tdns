@@ -33,6 +33,15 @@ type RolloverPolicy struct {
 	ConfirmPollMax     time.Duration
 	ConfirmTimeout     time.Duration
 	DsyncRequired      bool
+
+	// Softfail state machine (rollover-overhaul). DsPublishDelay
+	// drives the defaults of ConfirmPollMax and ConfirmTimeout when
+	// those are not set explicitly: poll-max = clamp(delay/10, 30s,
+	// 5m), timeout = delay × 1.2. Operator declares one number,
+	// engine picks reasonable cadences for the rest.
+	DsPublishDelay           time.Duration
+	MaxAttemptsBeforeBackoff int
+	SoftfailDelay            time.Duration
 }
 
 type ClampingPolicy struct {
@@ -41,12 +50,55 @@ type ClampingPolicy struct {
 }
 
 const (
-	defaultConfirmInitialWait = 2 * time.Second
-	defaultConfirmPollMax     = 60 * time.Second
-	defaultConfirmTimeout     = time.Hour
-	defaultMultiDSNumDS       = 3
-	defaultClampingMargin     = 15 * time.Minute
+	defaultConfirmInitialWait       = 2 * time.Second
+	defaultConfirmPollMax           = 60 * time.Second
+	defaultConfirmTimeout           = time.Hour
+	defaultMultiDSNumDS             = 3
+	defaultClampingMargin           = 15 * time.Minute
+	defaultDsPublishDelay           = 5 * time.Minute
+	defaultMaxAttemptsBeforeBackoff = 5
+	defaultSoftfailDelayMinimum     = time.Hour
 )
+
+// derivedPollMax returns clamp(dsDelay/10, 30s, 5m). Used as the
+// default for ConfirmPollMax when YAML doesn't set it explicitly:
+// polling faster than dsDelay/10 brings no new information from a
+// parent that publishes on a slower cycle.
+func derivedPollMax(dsDelay time.Duration) time.Duration {
+	if dsDelay <= 0 {
+		return 30 * time.Second
+	}
+	v := dsDelay / 10
+	if v < 30*time.Second {
+		return 30 * time.Second
+	}
+	if v > 5*time.Minute {
+		return 5 * time.Minute
+	}
+	return v
+}
+
+// derivedAttemptTimeout returns dsDelay × 1.2 — the per-attempt
+// observation budget before declaring this attempt failed. The 20%
+// safety margin lets a parent that's just barely outside its normal
+// cycle still confirm before we give up on the attempt.
+func derivedAttemptTimeout(dsDelay time.Duration) time.Duration {
+	if dsDelay <= 0 {
+		return time.Hour
+	}
+	return dsDelay * 12 / 10
+}
+
+// derivedSoftfailDelay returns max(1h, dsDelay). The long-term-mode
+// probe interval should never be shorter than the parent's natural
+// publish cycle: probing more often than the parent can possibly
+// publish wastes UPDATEs.
+func derivedSoftfailDelay(dsDelay time.Duration) time.Duration {
+	if dsDelay > defaultSoftfailDelayMinimum {
+		return dsDelay
+	}
+	return defaultSoftfailDelayMinimum
+}
 
 // FinishDnssecPolicy fills Mode, Rollover, TTLS, and Clamping on out from conf and KSK/ZSK lifetimes.
 // out must already carry Name, Algorithm, KSK, ZSK, CSK from the caller.
@@ -78,6 +130,9 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 		out.Rollover.ConfirmPollMax = 0
 		out.Rollover.ConfirmTimeout = 0
 		out.Rollover.DsyncRequired = false
+		out.Rollover.DsPublishDelay = 0
+		out.Rollover.MaxAttemptsBeforeBackoff = 0
+		out.Rollover.SoftfailDelay = 0
 	case RolloverMethodMultiDS:
 		n := conf.Rollover.NumDS
 		if n == 0 {
@@ -189,7 +244,7 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 		out.TTLS.MaxServed = uint32(d.Seconds())
 	}
 
-	warnDnssecPolicyCoupling(policyName, out, conf)
+	warnDnssecPolicyCoupling(policyName, out)
 	return nil
 }
 
@@ -222,19 +277,48 @@ func fillRolloverDurations(policyName string, conf *DnssecPolicyConf, out *Dnsse
 		return d, nil
 	}
 	var err error
+	// Parse ds-publish-delay first; the others derive from it when
+	// YAML doesn't set them explicitly.
+	if out.Rollover.DsPublishDelay, err = parseDur("ds-publish-delay", conf.Rollover.DsPublishDelay, defaultDsPublishDelay); err != nil {
+		return fmt.Errorf("dnssec policy %q: %w", policyName, err)
+	}
 	if out.Rollover.ConfirmInitialWait, err = parseDur("confirm-initial-wait", conf.Rollover.ConfirmInitialWait, defaultConfirmInitialWait); err != nil {
 		return fmt.Errorf("dnssec policy %q: %w", policyName, err)
 	}
-	if out.Rollover.ConfirmPollMax, err = parseDur("confirm-poll-max", conf.Rollover.ConfirmPollMax, defaultConfirmPollMax); err != nil {
+	if out.Rollover.ConfirmPollMax, err = parseDur("confirm-poll-max", conf.Rollover.ConfirmPollMax, derivedPollMax(out.Rollover.DsPublishDelay)); err != nil {
 		return fmt.Errorf("dnssec policy %q: %w", policyName, err)
 	}
-	if out.Rollover.ConfirmTimeout, err = parseDur("confirm-timeout", conf.Rollover.ConfirmTimeout, defaultConfirmTimeout); err != nil {
+	if out.Rollover.ConfirmTimeout, err = parseDur("confirm-timeout", conf.Rollover.ConfirmTimeout, derivedAttemptTimeout(out.Rollover.DsPublishDelay)); err != nil {
 		return fmt.Errorf("dnssec policy %q: %w", policyName, err)
+	}
+	if out.Rollover.SoftfailDelay, err = parseDur("softfail-delay", conf.Rollover.SoftfailDelay, derivedSoftfailDelay(out.Rollover.DsPublishDelay)); err != nil {
+		return fmt.Errorf("dnssec policy %q: %w", policyName, err)
+	}
+	out.Rollover.MaxAttemptsBeforeBackoff = conf.Rollover.MaxAttemptsBeforeBackoff
+	if out.Rollover.MaxAttemptsBeforeBackoff == 0 {
+		out.Rollover.MaxAttemptsBeforeBackoff = defaultMaxAttemptsBeforeBackoff
+	}
+
+	// Cross-field validation. These constraints catch configurations
+	// that would behave nonsensically: a per-attempt timeout shorter
+	// than the parent's expected publish cycle would always declare
+	// failure on a healthy parent; a softfail-delay shorter than the
+	// per-attempt timeout means the long-term-mode probe interval is
+	// shorter than a single attempt window.
+	if out.Rollover.MaxAttemptsBeforeBackoff < 1 {
+		return fmt.Errorf("dnssec policy %q: rollover.max-attempts-before-backoff must be >= 1", policyName)
+	}
+	if out.Rollover.ConfirmTimeout < out.Rollover.DsPublishDelay {
+		return fmt.Errorf("dnssec policy %q: rollover.confirm-timeout (%s) must be >= rollover.ds-publish-delay (%s)",
+			policyName, out.Rollover.ConfirmTimeout, out.Rollover.DsPublishDelay)
+	}
+	if out.Rollover.SoftfailDelay < out.Rollover.DsPublishDelay {
+		return fmt.Errorf("dnssec policy %q: rollover.softfail-delay (%s) must be >= rollover.ds-publish-delay (%s)",
+			policyName, out.Rollover.SoftfailDelay, out.Rollover.DsPublishDelay)
 	}
 	return nil
 }
 
-// parseParentAgent normalizes rollover.parent-agent to host:port (default port 53).
 // NormalizeParentAgentAddr parses rollover.parent-agent or CLI --parent-agent into host:port (default port 53).
 func NormalizeParentAgentAddr(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
@@ -260,7 +344,7 @@ func parseParentAgent(policyName, raw string) (string, error) {
 	return a, nil
 }
 
-func warnDnssecPolicyCoupling(policyName string, out *DnssecPolicy, conf *DnssecPolicyConf) {
+func warnDnssecPolicyCoupling(policyName string, out *DnssecPolicy) {
 	kskL := time.Duration(out.KSK.Lifetime) * time.Second
 	sigV := time.Duration(out.KSK.SigValidity) * time.Second
 	if kskL > 0 && out.TTLS.DNSKEY > 0 {
@@ -278,7 +362,6 @@ func warnDnssecPolicyCoupling(policyName string, out *DnssecPolicy, conf *Dnssec
 		lgConfig.Warn("dnssec policy: clamping.margin below 60s (spec guidance for skew)",
 			"policy", policyName, "margin", out.Clamping.Margin.String())
 	}
-	_ = conf
 }
 
 // dnssecPoliciesYAML is the top-level shape for `tdns zone keystore dnssec policy validate --file`.

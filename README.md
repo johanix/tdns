@@ -6,16 +6,18 @@ several applications built on those libraries.
 The applications include an authoritative nameserver
 (tdns-auth), a recursive nameserver (tdns-imr), a dig-like
 query tool with support for experimental record types (dog),
-a management CLI (tdns-cli), and specialized servers for
-multi-provider DNSSEC coordination (tdns-agent, tdns-combiner).
+a management CLI (tdns-cli), and a single-provider agent
+(tdns-agent) for delegation synchronization.
+
+For multi-provider DNSSEC coordination (RFC 8901), see the
+companion [tdns-mp](../tdns-mp/) repository, which builds on
+the libraries in this repository.
 
 ## Key Features
 
 - DNSSEC online signing with automatic key management
 - Automatic delegation synchronization via DNS UPDATE (RFC 9859)
-- Multi-provider DNSSEC (RFC 8901) with agent-to-agent gossip,
-  leader election, and zone combiner
-- Experimental record types: DSYNC, HSYNC3, HSYNCPARAM, DELEG
+- Experimental record types: DSYNC, DELEG, TSYNC
 - Modern DNS transports: DoT, DoH, DoQ (in addition to Do53)
 - DNS transport signaling between auth servers and resolvers
 - DNS Catalog Zones (RFC 9432)
@@ -27,13 +29,12 @@ See the [TDNS Guide](guide/README.md):
 
 - [TDNS Applications](guide/applications.md) -- overview of
   all applications with links to detailed docs
-- [Multi-Provider QuickStart](guide/multi-provider-quickstart.md)
-  -- single-host setup guide
-- [Multi-Provider Advanced Topics](guide/multi-provider-advanced.md)
-  -- delegation sync, provider zones, gossip, elections
 - [Special Features and Extensions](guide/special-features.md)
   -- delegation sync, transport signaling, experimental RR types
 - Future Work (coming soon)
+
+For multi-provider DNSSEC, see the
+[tdns-mp Guide](../tdns-mp/guide/README.md).
 
 ## Building
 
@@ -45,9 +46,7 @@ sudo make install
 
 Requires Go 1.22+.
 
-# General TDNS Features:
-
-# Running agent in Docker
+# Running in Docker
 
 ## Building the image:
 

@@ -10,6 +10,20 @@ import (
 	"github.com/miekg/dns"
 )
 
+// ClampedDuration returns min(configured, R+margin) per automated KSK
+// rollover spec §5.2. If configured or margin is zero, configured is
+// returned unchanged (caller disables clamp or omits policy).
+func ClampedDuration(configured, R, margin time.Duration) time.Duration {
+	if configured <= 0 || margin <= 0 {
+		return configured
+	}
+	cap := R + margin
+	if configured < cap {
+		return configured
+	}
+	return cap
+}
+
 // ClampParams carries the current TTL-clamp inputs into SignRRset. A non-nil
 // value means at least one clamp is active for this sign pass:
 //

@@ -120,7 +120,15 @@ UNIQUE (zonename, keyid)
 		manual_rollover_earliest       TEXT,
 		observe_started_at             TEXT,
 		observe_next_poll_at           TEXT,
-		observe_backoff_seconds        INTEGER
+		observe_backoff_seconds        INTEGER,
+		hardfail_count                 INTEGER NOT NULL DEFAULT 0,
+		next_push_at                   TEXT,
+		last_softfail_at               TEXT,
+		last_softfail_category         TEXT,
+		last_softfail_detail           TEXT,
+		last_success_at                TEXT,
+		last_attempt_started_at        TEXT,
+		last_poll_at                   TEXT
 	)`,
 
 	// ZoneSigningState holds per-zone signing-loop state. max_observed_ttl
@@ -133,6 +141,20 @@ UNIQUE (zonename, keyid)
 		zone              TEXT NOT NULL PRIMARY KEY,
 		max_observed_ttl  INTEGER NOT NULL DEFAULT 0,
 		updated_at        TEXT
+	)`,
+
+	// RolloverDaemonSentinel is a single-row table written by the auth
+	// daemon on startup with its PID and start time. CLI --offline
+	// writers (rollover-overhaul phase 12b) read this and refuse to
+	// run if the recorded PID is still alive — racing the rollover
+	// tick from outside the daemon process produces non-deterministic
+	// state. Stale rows (PID gone) are treated as "no daemon";
+	// cleanup on graceful shutdown is best-effort.
+	"RolloverDaemonSentinel": `CREATE TABLE IF NOT EXISTS 'RolloverDaemonSentinel' (
+		id         INTEGER PRIMARY KEY,
+		pid        INTEGER NOT NULL,
+		started_at TEXT NOT NULL,
+		appname    TEXT
 	)`,
 }
 

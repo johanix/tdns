@@ -117,19 +117,28 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		// Apply outbound_soa_serial mode for the serial we'll advertise
 		// to secondaries.
 		if zd.KeyDB != nil {
+			serialChanged := false
 			switch zd.KeyDB.OutboundSoaSerial {
 			case OutboundSoaSerialUnixtime:
 				zd.CurrentSerial = uint32(time.Now().Unix())
 				lgEngine.Info("zone loaded; outbound_soa_serial=unixtime",
 					"zone", zone, "serial", zd.CurrentSerial)
+				serialChanged = true
 			case OutboundSoaSerialPersist:
-				if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > 0 {
-					if saved != zd.CurrentSerial {
-						lgEngine.Info("zone loaded; outbound_soa_serial=persist (restored saved serial)",
-							"zone", zone, "incoming", zd.CurrentSerial, "persisted", saved)
-					}
+				// Only restore the persisted serial when it is *ahead* of
+				// the freshly loaded inbound serial. If upstream advanced
+				// while we were down, the inbound serial is the one to
+				// honour — moving zd.CurrentSerial backwards would break
+				// secondaries.
+				if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > zd.CurrentSerial {
+					lgEngine.Info("zone loaded; outbound_soa_serial=persist (restored saved serial)",
+						"zone", zone, "incoming", zd.CurrentSerial, "persisted", saved)
 					zd.CurrentSerial = saved
+					serialChanged = true
 				}
+			}
+			if serialChanged {
+				setApexSOASerial(zd)
 			}
 		}
 		zd.NotifyDownstreams()
@@ -579,15 +588,25 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 						// Apply outbound_soa_serial mode after upstream refresh.
 						if zd.KeyDB != nil {
+							serialChanged := false
 							switch zd.KeyDB.OutboundSoaSerial {
 							case OutboundSoaSerialUnixtime:
 								zd.CurrentSerial = uint32(time.Now().Unix())
 								lgEngine.Info("zone updated from upstream; outbound_soa_serial=unixtime",
 									"zone", zone, "serial", zd.CurrentSerial)
+								serialChanged = true
 							case OutboundSoaSerialPersist:
-								if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > 0 {
+								// Only restore if the persisted serial is
+								// ahead of the just-refreshed inbound
+								// serial. See the matching note in the
+								// initial-load branch above.
+								if saved, err := zd.KeyDB.LoadOutgoingSerial(zone); err == nil && saved > zd.CurrentSerial {
 									zd.CurrentSerial = saved
+									serialChanged = true
 								}
+							}
+							if serialChanged {
+								setApexSOASerial(zd)
 							}
 						}
 

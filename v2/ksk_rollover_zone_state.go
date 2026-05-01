@@ -22,6 +22,23 @@ type RolloverZoneRow struct {
 	ObserveStartedAt          sql.NullString
 	ObserveNextPollAt         sql.NullString
 	ObserveBackoffSecs        sql.NullInt64
+
+	// Softfail state machine (added in rollover-overhaul phase 2).
+	// HardfailCount counts attempts in the current group (resets to 0
+	// only on successful confirmation, never on entering softfail).
+	// NextPushAt is the wallclock time at which the next push attempt
+	// is allowed; NULL means push allowed immediately. The other
+	// LastSoftfail* fields preserve diagnostic context for the most
+	// recent failure across daemon restarts so status output can
+	// render it.
+	HardfailCount        int
+	NextPushAt           sql.NullString
+	LastSoftfailAt       sql.NullString
+	LastSoftfailCategory sql.NullString
+	LastSoftfailDetail   sql.NullString
+	LastSuccessAt        sql.NullString
+	LastAttemptStartedAt sql.NullString
+	LastPollAt           sql.NullString
 }
 
 func EnsureRolloverZoneRow(kdb *KeyDB, zone string) error {
@@ -45,7 +62,10 @@ SELECT zone,
        last_ds_confirmed_index_low, last_ds_confirmed_index_high,
        rollover_phase, rollover_phase_at, rollover_in_progress,
        manual_rollover_requested_at, manual_rollover_earliest,
-       observe_started_at, observe_next_poll_at, observe_backoff_seconds
+       observe_started_at, observe_next_poll_at, observe_backoff_seconds,
+       hardfail_count, next_push_at,
+       last_softfail_at, last_softfail_category, last_softfail_detail,
+       last_success_at, last_attempt_started_at, last_poll_at
 FROM RolloverZoneState WHERE zone = ?`
 	var r RolloverZoneRow
 	var inProg int
@@ -56,6 +76,9 @@ FROM RolloverZoneState WHERE zone = ?`
 		&r.RolloverPhase, &r.RolloverPhaseAt, &inProg,
 		&r.ManualRolloverRequestedAt, &r.ManualRolloverEarliest,
 		&r.ObserveStartedAt, &r.ObserveNextPollAt, &r.ObserveBackoffSecs,
+		&r.HardfailCount, &r.NextPushAt,
+		&r.LastSoftfailAt, &r.LastSoftfailCategory, &r.LastSoftfailDetail,
+		&r.LastSuccessAt, &r.LastAttemptStartedAt, &r.LastPollAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -482,49 +505,36 @@ func ClearLastRolloverError(kdb *KeyDB, zone string, keyid uint16) error {
 	return nil
 }
 
-// UnstickRollover clears the persisted DS-submitted range on the zone row and
-// last_rollover_error on every key row for the zone, in a single transaction.
-// Returns the number of key rows whose last_rollover_error was cleared.
+// UnstickRollover clears next_push_at on the zone row so the next
+// rollover tick fires a probe UPDATE immediately instead of waiting
+// out the remainder of the softfail-delay window. The narrow operator
+// override for "I just fixed the parent and want to retry now."
 //
-// Why: observeHardFail leaves last_ds_submitted_index_low/high populated when
-// it returns the zone to idle. The idle branch's kskIndexPushNeeded then sees
-// the target DS set unchanged from what was last submitted and never re-arms
-// a push, leaving the zone permanently stuck even after the operator has
-// fixed whatever caused the original observation timeout. UnstickRollover is
-// the operator nudge: drop the submitted range so the next idle tick re-arms
-// pending-parent-push, and clear stale per-key errors so status output isn't
-// misleading.
-func UnstickRollover(kdb *KeyDB, zone string) (int, error) {
+// Hardfail_count and last_softfail_* are preserved for diagnostic
+// continuity. The probe's outcome on the next tick takes care of the
+// counter — a successful confirmed observation resets it; a failed
+// probe rolls next_push_at forward by one softfail_delay window.
+//
+// Operationally optional after rollover-overhaul: the engine polls
+// the parent continuously regardless of softfail-delay, so a parent
+// fix is auto-detected within confirm-poll-max even without unstick.
+// Use unstick only to skip the wait when you know the fix is in.
+//
+// Caller is responsible for the per-zone rollover lock. API
+// handlers take the lock at handler-level (see apihandler_rollover.go);
+// CLI --offline writers don't lock (postmortem use, daemon assumed
+// down). Function-level locking would deadlock with composite
+// handlers like asap that need the lock around compute+set.
+func UnstickRollover(kdb *KeyDB, zone string) error {
 	zone = strings.TrimSpace(zone)
 	if zone == "" {
-		return 0, fmt.Errorf("UnstickRollover: empty zone")
+		return fmt.Errorf("UnstickRollover: empty zone")
 	}
-	tx, err := kdb.Begin("UnstickRollover")
-	if err != nil {
-		return 0, fmt.Errorf("begin: %w", err)
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
 	}
-	commit := false
-	defer func() {
-		if !commit {
-			tx.Rollback()
-		}
-	}()
-	if _, err := tx.Exec(`UPDATE RolloverZoneState
-SET last_ds_submitted_index_low = NULL,
-    last_ds_submitted_index_high = NULL
-WHERE zone = ?`, zone); err != nil {
-		return 0, fmt.Errorf("clear submitted range: %w", err)
-	}
-	res, err := tx.Exec(`UPDATE RolloverKeyState SET last_rollover_error = NULL WHERE zone = ? AND last_rollover_error IS NOT NULL`, zone)
-	if err != nil {
-		return 0, fmt.Errorf("clear last_rollover_error: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit: %w", err)
-	}
-	commit = true
-	return int(n), nil
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET next_push_at = NULL WHERE zone = ?`, zone)
+	return err
 }
 
 // SetManualRolloverRequest stamps manual_rollover_requested_at = now and
@@ -582,4 +592,200 @@ func rolloverKeyDsObservedAt(kdb *KeyDB, zone string, keyid uint16) (*time.Time,
 		return nil, err
 	}
 	return &t, nil
+}
+
+// Softfail-state accessors (added in rollover-overhaul phase 2).
+// These are wired into the tick loop in phase 5 (softfail counter
+// logic); for now they are unused but tested by build.
+
+// setSoftfail records a single failed attempt: timestamps it, stores
+// the failure category and human-readable detail, and stamps
+// next_push_at if the caller has already decided to enter softfail.
+// next_push_at == zero time clears that field (immediate retry).
+//
+// Caller is responsible for taking the per-zone rollover lock
+// (AcquireRolloverLock) before invoking this; the lock guarantees
+// these writes are not interleaved with the rollover tick's reads.
+func setSoftfail(kdb *KeyDB, zone, category, detail string, at time.Time, nextPushAt time.Time) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	atStr := at.UTC().Format(time.RFC3339)
+	var nextPush sql.NullString
+	if !nextPushAt.IsZero() {
+		nextPush = sql.NullString{String: nextPushAt.UTC().Format(time.RFC3339), Valid: true}
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState
+SET last_softfail_at = ?,
+    last_softfail_category = ?,
+    last_softfail_detail = ?,
+    next_push_at = ?
+WHERE zone = ?`, atStr, category, detail, nextPush, zone)
+	return err
+}
+
+// incrementHardfailCount atomically bumps the per-zone failed-attempt
+// counter. Returns the new value. Resets to 0 only via
+// resetHardfailCount or on successful confirmation.
+//
+// Single UPDATE...RETURNING avoids the older UPDATE-then-SELECT
+// pattern; SQLite ≥ 3.35 (March 2021) supports RETURNING, far older
+// than anything we'd build against. Callers hold the per-zone lock
+// regardless, so atomicity isn't load-bearing here — RETURNING is
+// purely a simplification.
+func incrementHardfailCount(kdb *KeyDB, zone string) (int, error) {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return 0, err
+	}
+	var n int
+	if err := kdb.DB.QueryRow(
+		`UPDATE RolloverZoneState SET hardfail_count = hardfail_count + 1 WHERE zone = ? RETURNING hardfail_count`,
+		zone).Scan(&n); err != nil {
+		return 0, err
+	}
+	return n, nil
+}
+
+// resetHardfailCount sets the per-zone counter back to 0. Called from
+// the success path on confirmed observation.
+func resetHardfailCount(kdb *KeyDB, zone string) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET hardfail_count = 0 WHERE zone = ?`, zone)
+	return err
+}
+
+// setLastSuccess stamps the wallclock time of the most recent
+// successful confirmation (target DS == observed DS at the parent).
+// Status output renders this as "last success" so an operator can
+// see how long ago the zone was last in-sync.
+func setLastSuccess(kdb *KeyDB, zone string, at time.Time) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET last_success_at = ? WHERE zone = ?`, at.UTC().Format(time.RFC3339), zone)
+	return err
+}
+
+// setLastPoll stamps the wallclock time of the most recent
+// parent-DS observation poll. Updated on every poll regardless of
+// whether DS was observed; status output renders this as "last poll"
+// so an operator can confirm the engine is actively checking.
+func setLastPoll(kdb *KeyDB, zone string, at time.Time) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET last_poll_at = ? WHERE zone = ?`, at.UTC().Format(time.RFC3339), zone)
+	return err
+}
+
+// setLastAttemptStarted stamps the wallclock time of the most recent
+// push attempt's start. Status output renders this as "last UPDATE"
+// and uses it as the anchor for ExpectedBy = lastUpdate +
+// ds-publish-delay and AttemptTimeout = lastUpdate + confirm-timeout.
+//
+// Set every time a push is initiated, regardless of outcome — failed
+// attempts also count, and the operator wants to see when we last
+// tried. Cleared on confirmed success (call with time.Time{}) so
+// status output doesn't render stale "expected by" / "attempt
+// timeout" lines from a closed window.
+func setLastAttemptStarted(kdb *KeyDB, zone string, at time.Time) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	var s sql.NullString
+	if !at.IsZero() {
+		s = sql.NullString{String: at.UTC().Format(time.RFC3339), Valid: true}
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET last_attempt_started_at = ? WHERE zone = ?`, s, zone)
+	return err
+}
+
+// clearLastSoftfail nulls the last_softfail_* trio so status output
+// stops showing a past softfail event after the engine has recovered.
+// Called from confirmed-success paths alongside resetHardfailCount /
+// setLastSuccess / setLastAttemptStarted. The engine doesn't have a
+// "permanent failure" state post-overhaul (it always retries), so
+// once we're back in sync the previous softfail's category and
+// detail are no longer operationally informative — they describe a
+// window that has closed favorably.
+func clearLastSoftfail(kdb *KeyDB, zone string) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState
+SET last_softfail_at = NULL,
+    last_softfail_category = NULL,
+    last_softfail_detail = NULL
+WHERE zone = ?`, zone)
+	return err
+}
+
+// setNextPushAt updates next_push_at without touching last_softfail_*.
+// Used by the parent-push-softfail probe path which rolls
+// next_push_at forward by softfail_delay regardless of probe outcome
+// but preserves the previous softfail's category and detail for
+// status display continuity.
+func setNextPushAt(kdb *KeyDB, zone string, at time.Time) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	var s sql.NullString
+	if !at.IsZero() {
+		s = sql.NullString{String: at.UTC().Format(time.RFC3339), Valid: true}
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET next_push_at = ? WHERE zone = ?`, s, zone)
+	return err
+}
+
+// StateSinceForDnssecKey returns the best-effort wall time when the key
+// entered its current lifecycle state, for operator-facing status.
+func StateSinceForDnssecKey(kdb *KeyDB, zone string, k *DnssecKeyWithTimestamps) time.Time {
+	switch k.State {
+	case DnskeyStatePublished:
+		if k.PublishedAt != nil {
+			return *k.PublishedAt
+		}
+	case DnskeyStateRetired:
+		if k.RetiredAt != nil {
+			return *k.RetiredAt
+		}
+	case DnskeyStateActive:
+		at, err := RolloverKeyActiveAt(kdb, zone, k.KeyTag)
+		if err == nil && at != nil {
+			return *at
+		}
+	case DnskeyStateStandby:
+		t, err := RolloverKeyStandbyAt(kdb, zone, k.KeyTag)
+		if err == nil && t != nil {
+			return *t
+		}
+	case DnskeyStateDsPublished:
+		t, err := RolloverKeyDsObservedAt(kdb, zone, k.KeyTag)
+		if err == nil && t != nil {
+			return *t
+		}
+	}
+	t, err := RolloverKeyStateAt(kdb, zone, k.KeyTag)
+	if err == nil && t != nil {
+		return *t
+	}
+	return time.Time{}
+}
+
+// DnskeyRolloverPublishLabel returns a short label for what DNS
+// publication this key state implies (auto-rollover status table).
+func DnskeyRolloverPublishLabel(state string) string {
+	switch state {
+	case DnskeyStateCreated, DnskeyStateRemoved:
+		return "none"
+	case DnskeyStateDsPublished:
+		return "DS"
+	case DnskeyStatePublished, DnskeyStateStandby,
+		DnskeyStateActive, DnskeyStateRetired:
+		return "DS+DNSKEY"
+	default:
+		return "?"
+	}
 }

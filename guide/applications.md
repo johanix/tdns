@@ -5,11 +5,15 @@ TDNS includes several applications built on the TDNS Go library.
 | Application     | Binary            | Description                              |
 |-----------------|-------------------|------------------------------------------|
 | tdns-auth       | tdns-authv2       | Authoritative DNS nameserver             |
-| tdns-agent      | tdns-agentv2      | Multi-provider coordination agent        |
-| tdns-combiner   | tdns-combinerv2   | Zone combiner for multi-provider setups  |
+| tdns-agent      | tdns-agentv2      | Single-provider delegation-sync agent    |
 | tdns-imr        | tdns-imrv2        | Recursive DNS nameserver (IMR)           |
 | tdns-cli        | tdns-cliv2        | Management CLI for all TDNS services     |
 | dog             | dogv2             | DNS query tool with extended RR support  |
+
+For the multi-provider applications (tdns-mpagent,
+tdns-mpcombiner, tdns-mpsigner, tdns-mpcli), see the
+[tdns-mp Applications](../../tdns-mp/guide/applications.md)
+document.
 
 ## tdns-auth -- Authoritative Nameserver
 
@@ -19,30 +23,17 @@ signed dynamic updates, delegation synchronization (both
 parent and child roles), DNS catalog zones (RFC 9432),
 dynamic zone management via REST API, and zone templates.
 
-Also serves as the DNSSEC signer in multi-provider setups
-(configured with `multi-provider.role: signer`).
-
 [Full documentation](app-tdns-auth.md)
 
-## tdns-agent -- Multi-Provider Agent
+## tdns-agent -- Delegation-Sync Agent
 
-A secondary-only server that coordinates multi-provider
-DNSSEC operations. Watches HSYNC3 records to discover and
-communicate with remote agents, synchronizes NS, DNSKEY,
-CDS and CSYNC RRsets across providers, and detects changes
-to delegation information for parent synchronization.
+A secondary-only server that detects changes to a child
+zone's delegation data (NS, glue, DS) and synchronizes
+those changes with the parent zone via generalized NOTIFY
+or SIG(0)-signed DNS UPDATE, as advertised by the parent's
+DSYNC RRset.
 
-[Full documentation](app-tdns-agent.md)
-
-## tdns-combiner -- Zone Combiner
-
-A single-purpose service that receives a zone via inbound
-zone transfer (from the zone owner's authoritative server),
-replaces the four apex RRsets (NS, DNSKEY, CDS, CSYNC) with
-data received from the agent, and publishes the combined
-zone via outbound zone transfer to the signer.
-
-[Full documentation](app-tdns-combiner.md)
+[Full documentation](app-agent.md) (coming soon)
 
 ## tdns-imr -- Recursive Nameserver
 
@@ -55,11 +46,11 @@ interactive CLI for manual queries and cache inspection.
 
 ## tdns-cli -- Management CLI
 
-A CLI tool to interact with all TDNS services via their
-REST APIs. Sub-commands cover zone management (signing,
-NSEC chains, reload), DNS UPDATE composition, keystore
-and truststore management, generalized NOTIFY, DSYNC
-inspection, agent status, gossip state, and more.
+A CLI tool to interact with TDNS services via their REST
+APIs. Sub-commands cover zone management (signing, NSEC
+chains, reload), DNS UPDATE composition, keystore and
+truststore management, generalized NOTIFY, and DSYNC
+inspection.
 
 [Full documentation](app-tdns-cli.md)
 
@@ -67,7 +58,7 @@ inspection, agent status, gossip state, and more.
 
 A DNS query tool similar to dig, with native support for
 additional record types that TDNS implements (DSYNC, DELEG,
-HSYNC3, HSYNCPARAM, SVCB, and others). CLI syntax is as
-close to dig as possible.
+TSYNC, SVCB, and others). CLI syntax is as close to dig as
+possible.
 
 [Full documentation](app-dog.md)

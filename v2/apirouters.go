@@ -96,6 +96,19 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 		sr.HandleFunc("/delegation", APIdelegation(conf.Internal.DelegationSyncQ)).Methods("POST")
 	}
 
+	// Rollover read + write endpoints (rollover-overhaul phases 9 +
+	// 10). Only the auth daemon hosts these — the rollover tick
+	// runs there. Mutating handlers acquire the per-zone rollover
+	// lock so they serialize against the tick.
+	if Globals.App.Type == AppTypeAuth {
+		sr.HandleFunc("/rollover/status", APIRolloverStatus(conf)).Methods("GET")
+		sr.HandleFunc("/rollover/when", APIRolloverWhen(conf)).Methods("GET")
+		sr.HandleFunc("/rollover/asap", APIRolloverAsap(conf)).Methods("POST")
+		sr.HandleFunc("/rollover/cancel", APIRolloverCancel(conf)).Methods("POST")
+		sr.HandleFunc("/rollover/reset", APIRolloverReset(conf)).Methods("POST")
+		sr.HandleFunc("/rollover/unstick", APIRolloverUnstick(conf)).Methods("POST")
+	}
+
 	// Auth peer routes removed — peer management is MP-only.
 	// For tdns-mp signer, routes are registered via SetupMPSignerRoutes.
 
