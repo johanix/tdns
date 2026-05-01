@@ -130,12 +130,19 @@ func newKeystoreDnssecDsPushCmd(_ string) *cobra.Command {
 
 	c := &cobra.Command{
 		Use:   "ds-push",
-		Short: "Compute DS RRset from keystore and push whole RRset to parent via SIG(0) UPDATE",
+		Short: "Compute DS RRset from keystore and push to parent (UPDATE-only in this offline mode)",
 		Long: `Loads tdns config (same as other CLI commands using -c), opens the local keystore DB,
-resolves parent + DSYNC UPDATE target, builds a whole-DS replacement UPDATE, signs with the
-zone's active SIG(0) key, and sends it. Requires imrengine in config.
+and pushes the whole DS RRset to the parent. Requires imrengine in config.
 
-Use --dry-run to print the DS set and UPDATE without sending.`,
+Offline mode: this CLI invocation builds a stub *ZoneData with no rollover policy
+attached, so PushDSRRsetForRollover falls through to the legacy single-scheme
+UPDATE path (whole-DS replacement, signed with the zone's active SIG(0) key).
+The auto / prefer-* / force-* dsync-scheme-preference values are honored only
+inside the daemon's rollover engine, where the policy is loaded from
+dnssecpolicies. To exercise NOTIFY pushes, run the daemon and let
+RolloverAutomatedTick drive the push.
+
+Use --dry-run to print the DS set and the UPDATE without sending.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs(cmd, "zonename")
 			ctx := context.Background()

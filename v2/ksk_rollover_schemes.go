@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"strconv"
@@ -9,6 +10,15 @@ import (
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
+
+// errNoUsableScheme is the sentinel returned by pickRolloverSchemes
+// when the parent advertises no DSYNC scheme this rollover policy can
+// use. The dispatcher checks for this with errors.Is and translates
+// it into child-config:waiting-for-parent (1h-capped softfail, never
+// hardfails). Other errors from pickRolloverSchemes — DSYNC
+// discovery transport failure, nil argument, etc. — are NOT
+// "waiting for parent" and stay in their own categories.
+var errNoUsableScheme = errors.New("parent advertises no rollover-usable DSYNC scheme")
 
 // schemeChoice is one (scheme, target) pair the rollover engine
 // intends to dispatch a push to. pickRolloverSchemes returns a slice
@@ -93,12 +103,26 @@ func pickRolloverSchemes(ctx context.Context, zd *ZoneData, imr *Imr, pol *Dnsse
 		}
 		target, terr := resolveDsyncTarget(ctx, imr, rr)
 		if terr != nil {
-			return nil, fmt.Errorf("resolve DSYNC %s target: %w", schemeName(scheme), terr)
+			// Per-scheme address-resolution failure: skip this
+			// scheme and let the survivors carry the rollover. With
+			// "auto" against a both-advertising parent, this means
+			// one broken DSYNC target doesn't block the other from
+			// firing. Logged at WARN so an operator can see it; if
+			// every scheme fails resolution the len(out) == 0 check
+			// below returns the aggregated "no usable scheme" error.
+			lgSigner.Warn("rollover: DSYNC target resolution failed, skipping scheme",
+				"zone", zd.ZoneName, "scheme", schemeName(scheme), "err", terr)
+			continue
 		}
 		out = append(out, schemeChoice{Scheme: scheme, Target: target})
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("pickRolloverSchemes: no DSYNC targets resolvable for zone %s", zd.ZoneName)
+		// Every advertised scheme's target failed address resolution.
+		// Treated as waiting-for-parent: parent's DSYNC target
+		// hostnames don't resolve (DNS misconfig at the parent), and
+		// the recovery model is the same — wait for the parent to fix
+		// it. Wrap the sentinel so the dispatcher takes that path.
+		return nil, fmt.Errorf("pickRolloverSchemes: no DSYNC targets resolvable for zone %s: %w", zd.ZoneName, errNoUsableScheme)
 	}
 	return out, nil
 }
@@ -111,9 +135,16 @@ func pickRolloverSchemes(ctx context.Context, zd *ZoneData, imr *Imr, pol *Dnsse
 // Pulled out of pickRolloverSchemes so it can be exhaustively
 // table-tested without standing up an Imr or a parent zone.
 //
-// "no usable scheme" is signaled by a non-nil error; the caller
-// (dispatcher) translates this into child-config:waiting-for-parent
-// (Phase 6).
+// Errors:
+//   - "no usable scheme advertised" cases (auto/prefer-* with neither
+//     advertised; force-X with X not advertised) wrap errNoUsableScheme.
+//     The dispatcher translates these to child-config:waiting-for-parent
+//     (1h cap, never hardfails). Force-X-not-advertised is included per
+//     design doc Risks #5: "force is force; recover automatically when
+//     parent starts advertising the forced scheme."
+//   - "invalid preference value" is a config error (operator typo),
+//     not a parent issue; returned with no sentinel and dispatched as
+//     child-config:local-error.
 func decideRolloverSchemes(updateAdvertised, notifyAdvertised bool, preference string) ([]core.DsyncScheme, error) {
 	pref := preference
 	if pref == "" {
@@ -129,7 +160,7 @@ func decideRolloverSchemes(updateAdvertised, notifyAdvertised bool, preference s
 		case notifyAdvertised:
 			return []core.DsyncScheme{core.SchemeNotify}, nil
 		default:
-			return nil, fmt.Errorf("parent advertises no rollover-usable DSYNC scheme")
+			return nil, errNoUsableScheme
 		}
 	case DsyncSchemePreferencePreferUpdate:
 		switch {
@@ -138,7 +169,7 @@ func decideRolloverSchemes(updateAdvertised, notifyAdvertised bool, preference s
 		case notifyAdvertised:
 			return []core.DsyncScheme{core.SchemeNotify}, nil
 		default:
-			return nil, fmt.Errorf("parent advertises no rollover-usable DSYNC scheme")
+			return nil, errNoUsableScheme
 		}
 	case DsyncSchemePreferencePreferNotify:
 		switch {
@@ -147,19 +178,22 @@ func decideRolloverSchemes(updateAdvertised, notifyAdvertised bool, preference s
 		case updateAdvertised:
 			return []core.DsyncScheme{core.SchemeUpdate}, nil
 		default:
-			return nil, fmt.Errorf("parent advertises no rollover-usable DSYNC scheme")
+			return nil, errNoUsableScheme
 		}
 	case DsyncSchemePreferenceForceUpdate:
 		if !updateAdvertised {
-			return nil, fmt.Errorf("policy pins force-update but parent does not advertise UPDATE")
+			return nil, fmt.Errorf("policy pins force-update but parent does not advertise UPDATE: %w", errNoUsableScheme)
 		}
 		return []core.DsyncScheme{core.SchemeUpdate}, nil
 	case DsyncSchemePreferenceForceNotify:
 		if !notifyAdvertised {
-			return nil, fmt.Errorf("policy pins force-notify but parent does not advertise NOTIFY for CDS/ANY")
+			return nil, fmt.Errorf("policy pins force-notify but parent does not advertise NOTIFY for CDS/ANY: %w", errNoUsableScheme)
 		}
 		return []core.DsyncScheme{core.SchemeNotify}, nil
 	default:
+		// Invalid preference is a config error, NOT a parent issue.
+		// No sentinel wrap → dispatcher categorizes as
+		// child-config:local-error (operator must fix the YAML).
 		return nil, fmt.Errorf("invalid dsync-scheme-preference %q", preference)
 	}
 }

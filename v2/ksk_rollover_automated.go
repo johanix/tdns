@@ -671,6 +671,15 @@ func scheduleFastObservePoll(ctx context.Context, deps RolloverEngineDeps, initi
 		return
 	}
 	zone := deps.Zone.ZoneName
+	// rolloverAutomatedForAllZones injects deps.Now as a closure that
+	// returns the tick's frozen `now`. After the goroutine sleeps for
+	// `initial`, that frozen time is stale — the tick handler would
+	// see observe_next_poll_at as still in the future and skip the
+	// poll. Reset Now to nil so the rerun's RolloverAutomatedTick
+	// falls back to its time.Now() default. Copy deps so this
+	// goroutine's mutation doesn't race the caller.
+	fastDeps := deps
+	fastDeps.Now = nil
 	go func() {
 		timer := time.NewTimer(initial)
 		defer timer.Stop()
@@ -679,7 +688,7 @@ func scheduleFastObservePoll(ctx context.Context, deps RolloverEngineDeps, initi
 			return
 		case <-timer.C:
 		}
-		if err := RolloverAutomatedTick(ctx, deps); err != nil {
+		if err := RolloverAutomatedTick(ctx, fastDeps); err != nil {
 			lgSigner.Debug("rollover: fast-poll tick error", "zone", zone, "err", err)
 		}
 	}()

@@ -166,8 +166,17 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, []dns.EDNS0
 	}
 	if successCount == 0 {
 		if haveLastFailRcode {
-			return lastFailRcode, lastFailEDE, fmt.Errorf("error: no NOERROR from any NOTIFY target to NOTIFY(%q)", dns.TypeToString[ntype])
+			// Parent replied — just with a non-NOERROR rcode. Return
+			// the rcode/EDE without an error: this is "parent
+			// rejected" (parent-rejected category), not "transport
+			// failed". The caller categorises from the rcode and
+			// EDE; making this an error would force the rollover
+			// engine into the transport bucket and lose the EDE
+			// context that's the whole point of Phase 4 plumbing.
+			return lastFailRcode, lastFailEDE, nil
 		}
+		// No response from any target at all → genuine transport
+		// failure. err is non-nil only on this branch.
 		return dns.RcodeServerFailure, nil, fmt.Errorf("error: no response from any NOTIFY target to NOTIFY(%q)", dns.TypeToString[ntype])
 	}
 	lgDns.Info("NOTIFY: successfully sent", "type", dns.TypeToString[ntype], "zone", zd.ZoneName, "succeeded", successCount, "total", len(targets))

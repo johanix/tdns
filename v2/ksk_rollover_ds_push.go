@@ -3,6 +3,7 @@ package tdns
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -213,12 +214,20 @@ func PushDSRRsetForRollover(ctx context.Context, deps RolloverEngineDeps) (KSKDS
 		// best-effort. Otherwise CDS sits orphaned for the duration of
 		// the parent-side outage.
 		cleanupCdsAfterConfirm(deps.Zone, deps.KDB)
-		// "No usable scheme" → child-config:waiting-for-parent. The
-		// tick handler caps backoff at 1h and never increments
-		// hardfail_count for this subcategory — recovery is automatic
-		// when the parent restores DSYNC advertisement.
+		// Two error shapes from pickRolloverSchemes:
+		//   - errNoUsableScheme (and force-X-not-advertised wraps of
+		//     it) → child-config:waiting-for-parent. 1h-cap backoff,
+		//     never hardfails, auto-recovers when DSYNC matches.
+		//   - everything else (DSYNC discovery transport failure,
+		//     invalid preference, nil arg, ...) → child-config:
+		//     local-error. Existing softfail bookkeeping; operator
+		//     intervention typically required.
+		cat := SoftfailChildConfigLocalError
+		if errors.Is(err, errNoUsableScheme) {
+			cat = SoftfailChildConfigWaitingForParent
+		}
 		return KSKDSPushResult{
-			Category: SoftfailChildConfigWaitingForParent,
+			Category: cat,
 			Detail:   "pickRolloverSchemes: " + err.Error(),
 		}, fmt.Errorf("PushDSRRsetForRollover: %w", err)
 	}

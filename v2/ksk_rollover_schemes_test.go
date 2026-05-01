@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -73,6 +74,42 @@ func TestDecideRolloverSchemes(t *testing.T) {
 			}
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDecideRolloverSchemesSentinel verifies that "no usable scheme"
+// outcomes wrap errNoUsableScheme (so the dispatcher can route them
+// to child-config:waiting-for-parent via errors.Is) while config-error
+// outcomes (invalid preference) do NOT wrap it (so they route to
+// child-config:local-error).
+func TestDecideRolloverSchemesSentinel(t *testing.T) {
+	tests := []struct {
+		name              string
+		update            bool
+		notify            bool
+		preference        string
+		wantWrapsSentinel bool
+	}{
+		{"auto/none wraps", false, false, DsyncSchemePreferenceAuto, true},
+		{"prefer-update/none wraps", false, false, DsyncSchemePreferencePreferUpdate, true},
+		{"prefer-notify/none wraps", false, false, DsyncSchemePreferencePreferNotify, true},
+		{"force-update/none wraps", false, false, DsyncSchemePreferenceForceUpdate, true},
+		{"force-update/notify-only wraps", false, true, DsyncSchemePreferenceForceUpdate, true},
+		{"force-notify/none wraps", false, false, DsyncSchemePreferenceForceNotify, true},
+		{"force-notify/update-only wraps", true, false, DsyncSchemePreferenceForceNotify, true},
+		{"unknown-pref does NOT wrap", true, true, "weird", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := decideRolloverSchemes(tt.update, tt.notify, tt.preference)
+			if err == nil {
+				t.Fatalf("want error, got nil")
+			}
+			gotWraps := errors.Is(err, errNoUsableScheme)
+			if gotWraps != tt.wantWrapsSentinel {
+				t.Fatalf("errors.Is(err, errNoUsableScheme) = %v, want %v (err=%v)", gotWraps, tt.wantWrapsSentinel, err)
 			}
 		})
 	}

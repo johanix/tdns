@@ -155,9 +155,13 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 
 	switch ntype {
 	case dns.TypeSOA, dns.TypeDNSKEY:
-		// For SOA and DNSKEY, target the zone for qname itself
-		var found bool
-		zd, found = FindZone(qname)
+		// For SOA and DNSKEY, target the zone for qname itself.
+		// FindZone walks up from qname so it can return a containing
+		// zone for an interior name (e.g. host.example.com. resolves
+		// to example.com.). NOTIFY(SOA)/NOTIFY(DNSKEY) for an
+		// interior name is not a valid request — refuse it rather
+		// than silently refreshing the containing zone.
+		zd, _ = FindZone(qname)
 		if zd == nil {
 			lgHandler.Warn("received NOTIFY for unknown zone, ignoring", "type", dns.TypeToString[ntype], "zone", qname)
 			m.SetRcode(dnr.Msg, dns.RcodeRefused)
@@ -166,11 +170,23 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 			dnr.ResponseWriter.WriteMsg(m)
 			return nil
 		}
-		if !found && zd.IsChildDelegation(qname) {
-			lgHandler.Warn("received NOTIFY for child delegation, ignoring", "type", dns.TypeToString[ntype], "qname", qname)
+		if !strings.EqualFold(dns.Fqdn(zd.ZoneName), dns.Fqdn(qname)) {
+			// FindZone returned a containing zone, not an exact
+			// zone match. Could be a child delegation point or a
+			// plain interior name; either way we don't accept the
+			// NOTIFY against the containing zone.
+			if zd.IsChildDelegation(qname) {
+				lgHandler.Warn("received NOTIFY for child delegation, ignoring", "type", dns.TypeToString[ntype], "qname", qname)
+				m.SetRcode(dnr.Msg, dns.RcodeRefused)
+				edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyTargetNotChildDelegation,
+					fmt.Sprintf("%s is a child delegation, not authoritative on this server", qname), false)
+				dnr.ResponseWriter.WriteMsg(m)
+				return nil
+			}
+			lgHandler.Warn("received NOTIFY for interior name in zone, ignoring", "type", dns.TypeToString[ntype], "qname", qname, "zone", zd.ZoneName)
 			m.SetRcode(dnr.Msg, dns.RcodeRefused)
-			edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyTargetNotChildDelegation,
-				fmt.Sprintf("%s is a child delegation, not authoritative on this server", qname), false)
+			edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyParentNotAuthoritative,
+				fmt.Sprintf("%s is not a zone apex on this server (containing zone %s)", qname, zd.ZoneName), false)
 			dnr.ResponseWriter.WriteMsg(m)
 			return nil
 		}

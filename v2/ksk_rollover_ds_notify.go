@@ -47,6 +47,7 @@ func pushDSRRsetViaNotify(ctx context.Context, deps RolloverEngineDeps, target *
 	zd := deps.Zone
 	kdb := deps.KDB
 	notifyq := deps.NotifyQ
+	updateq := deps.InternalUpdateQ
 	if zd == nil || kdb == nil {
 		out.Category = SoftfailChildConfigLocalError
 		return out, fmt.Errorf("pushDSRRsetViaNotify: nil argument")
@@ -58,6 +59,10 @@ func pushDSRRsetViaNotify(ctx context.Context, deps RolloverEngineDeps, target *
 	if notifyq == nil {
 		out.Category = SoftfailChildConfigLocalError
 		return out, fmt.Errorf("pushDSRRsetViaNotify: NotifyQ not configured")
+	}
+	if updateq == nil {
+		out.Category = SoftfailChildConfigLocalError
+		return out, fmt.Errorf("pushDSRRsetViaNotify: InternalUpdateQ not configured")
 	}
 
 	child := dns.Fqdn(zd.ZoneName)
@@ -87,12 +92,8 @@ func pushDSRRsetViaNotify(ctx context.Context, deps RolloverEngineDeps, target *
 	actions = append(actions, antiCds)
 	actions = append(actions, cdsSet...)
 
-	if kdb.UpdateQ == nil {
-		out.Category = SoftfailChildConfigLocalError
-		return out, fmt.Errorf("pushDSRRsetViaNotify: kdb.UpdateQ nil")
-	}
 	select {
-	case kdb.UpdateQ <- UpdateRequest{
+	case updateq <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       child,
 		Actions:        actions,
@@ -100,7 +101,7 @@ func pushDSRRsetViaNotify(ctx context.Context, deps RolloverEngineDeps, target *
 	}:
 	case <-time.After(5 * time.Second):
 		out.Category = SoftfailChildConfigLocalError
-		return out, fmt.Errorf("pushDSRRsetViaNotify: UpdateQ full for 5s, skipping")
+		return out, fmt.Errorf("pushDSRRsetViaNotify: InternalUpdateQ full for 5s, skipping")
 	case <-ctx.Done():
 		out.Category = SoftfailChildConfigLocalError
 		return out, ctx.Err()
@@ -152,16 +153,12 @@ func pushDSRRsetViaNotify(ctx context.Context, deps RolloverEngineDeps, target *
 
 	out.Rcode = resp.Rcode
 	if resp.Error {
-		// SendNotify returned with no NOERROR target. If the parent
-		// produced a non-NOERROR rcode at least once, that's
-		// parent-rejected; otherwise transport.
-		if resp.Rcode != 0 && resp.Rcode != dns.RcodeSuccess {
-			out.Category = SoftfailParentRejected
-			out.Detail = formatNotifyDetail(resp)
-		} else {
-			out.Category = SoftfailTransport
-			out.Detail = formatNotifyDetail(resp)
-		}
+		// resp.Error is set only on actual transport failure
+		// (no target produced a usable response). Parent-rejected
+		// rcodes come back via the resp.Rcode != NOERROR branch
+		// below with resp.Error == false.
+		out.Category = SoftfailTransport
+		out.Detail = formatNotifyDetail(resp)
 		return out, fmt.Errorf("pushDSRRsetViaNotify: %s", resp.ErrorMsg)
 	}
 	if resp.Rcode != dns.RcodeSuccess {
