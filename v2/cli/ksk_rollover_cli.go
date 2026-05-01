@@ -389,14 +389,13 @@ func runWhenOnline(z string) {
 		cliFatalf("error getting API client: %v", err)
 	}
 	endpoint := "/rollover/when?zone=" + z
-	status, body, err := api.RequestNG("GET", endpoint, nil, true)
+	// "when" is observational; the daemon always returns 200 with a
+	// structured response (any caveats land in resp.Note). Non-2xx
+	// here would mean network-level failure, in which case the API
+	// client's dieOnError path is the right thing.
+	_, body, err := api.RequestNG("GET", endpoint, nil, true)
 	if err != nil {
 		cliFatalf("error contacting daemon: %v", err)
-	}
-	if status != http.StatusOK {
-		// Daemon returned a hard error (zone empty, keystore missing,
-		// etc.). Render just the body — no URL, no HTTP code.
-		cliFatalf("%s", strings.TrimSpace(string(body)))
 	}
 	var resp tdns.RolloverWhenResponse
 	if err := json.Unmarshal(body, &resp); err != nil {

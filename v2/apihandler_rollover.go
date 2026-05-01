@@ -224,24 +224,34 @@ func resolveRolloverWriteRequest(conf *Config, w http.ResponseWriter, rawZone st
 }
 
 // APIRolloverWhen handles GET /api/v1/rollover/when?zone=<fqdn>.
-// Returns 200 with a structured RolloverWhenResponse in all
-// operationally-normal cases. Soft conditions (no DNSSEC policy, no
-// standby pipeline, rollover already in progress) are reflected in
-// out.Note rather than as HTTP errors so the CLI can render them
-// alongside the available scheduling info.
+// Always returns 200 with a structured RolloverWhenResponse. "When
+// is the next rollover" is a read-only observational question that
+// is meaningful in every state — including missing zone parameter,
+// no DNSSEC policy, no standby pipeline, daemon not fully
+// initialized, or a rollover already in progress. All such
+// conditions are reflected in out.Note alongside whatever scheduling
+// info is available; the CLI renders them as informational text
+// rather than failing with an HTTP error.
+//
+// The only thing this handler treats as a wire-level failure is the
+// network/transport itself, which the API client surfaces.
 func APIRolloverWhen(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
+
 		zone := strings.TrimSpace(r.URL.Query().Get("zone"))
 		if zone == "" {
-			http.Error(w, "missing zone parameter", http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(RolloverWhenResponse{Note: "missing zone parameter"})
 			return
 		}
 		zone = dns.Fqdn(zone)
 
 		kdb := conf.Internal.KeyDB
 		if kdb == nil {
-			http.Error(w, "keystore not initialized", http.StatusServiceUnavailable)
+			_ = json.NewEncoder(w).Encode(RolloverWhenResponse{
+				Zone: zone,
+				Note: "keystore not initialized on this daemon",
+			})
 			return
 		}
 
@@ -249,15 +259,14 @@ func APIRolloverWhen(conf *Config) func(w http.ResponseWriter, r *http.Request) 
 		if zd, ok := Zones.Get(zone); ok && zd != nil {
 			pol = zd.DnssecPolicy
 		}
-		// pol == nil is OK; ComputeRolloverWhen reflects it in Note.
 
 		out, err := ComputeRolloverWhen(kdb, zone, pol, time.Now())
 		if err != nil {
-			// Hard errors only (empty zone etc.). Operational
-			// soft-errors (no policy, no successor, in-progress)
-			// are reflected in out.Note with HTTP 200.
+			// ComputeRolloverWhen only returns top-level errors for
+			// empty zone (already handled above). Defensive: surface
+			// any remaining case as a Note rather than HTTP error.
 			lgApi.Debug("rollover/when: ComputeRolloverWhen returned error", "zone", zone, "err", err)
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			_ = json.NewEncoder(w).Encode(RolloverWhenResponse{Zone: zone, Note: err.Error()})
 			return
 		}
 		_ = json.NewEncoder(w).Encode(out)
