@@ -82,6 +82,13 @@ type RolloverStatus struct {
 
 	// Policy summary. Verbose mode shows this; compact mode hides it.
 	Policy *PolicySummary `json:"policy,omitempty"`
+
+	// Warnings carry runtime configuration concerns the engine wants
+	// to surface to the operator on every status query — currently
+	// the kasp.check_interval / attempt-timeout coupling check, but
+	// designed to grow as more cross-config invariants are caught.
+	// Empty slice means no warnings; rendered below the hint line.
+	Warnings []string `json:"warnings,omitempty"`
 }
 
 // DSRange is an inclusive integer [low, high] rollover_index interval

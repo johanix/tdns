@@ -43,7 +43,20 @@ func APIRolloverStatus(conf *Config) func(w http.ResponseWriter, r *http.Request
 			pol = zd.DnssecPolicy
 		}
 
-		out, err := ComputeRolloverStatus(kdb, zone, pol, time.Now())
+		// Surface the kasp.check_interval / attempt-timeout invariant
+		// in every status response. Uses the parsed kasp.check_interval
+		// the same way KeyStateWorker does at startup.
+		var checkInterval time.Duration
+		if conf.Kasp.CheckInterval != "" {
+			if d, err := time.ParseDuration(conf.Kasp.CheckInterval); err == nil && d > 0 {
+				checkInterval = d
+			}
+		}
+		if checkInterval == 0 {
+			checkInterval = time.Minute // defaultCheckInterval
+		}
+
+		out, err := ComputeRolloverStatus(kdb, zone, pol, checkInterval, time.Now())
 		if err != nil {
 			lgApi.Warn("rollover/status: ComputeRolloverStatus failed", "zone", zone, "err", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)

@@ -645,7 +645,12 @@ func fetchRolloverStatusOffline(z string) *tdns.RolloverStatus {
 		cliFatalf("error: %v", err)
 	}
 	defer kdb.DB.Close()
-	s, err := tdns.ComputeRolloverStatus(kdb, z, pol, time.Now())
+	// Offline path: the daemon isn't running, so we can't query its
+	// kasp.check_interval. Pass 0, which suppresses the warning —
+	// surfacing it requires daemon-runtime context, and the operator
+	// running offline-mode is doing postmortem analysis where the
+	// warning would be noise.
+	s, err := tdns.ComputeRolloverStatus(kdb, z, pol, 0, time.Now())
 	if err != nil {
 		cliFatalf("error: %v", err)
 	}
@@ -825,6 +830,9 @@ func printStateNotes(s *tdns.RolloverStatus, verbose bool) {
 		if s.Headline == "SOFTFAIL" {
 			fmt.Printf("                    use 'auto-rollover unstick --zone %s' to skip the wait and probe now\n", s.Zone)
 		}
+	}
+	for _, w := range s.Warnings {
+		fmt.Printf("  WARNING:          %s\n", w)
 	}
 	if s.LastSoftfailCat != "" || s.LastSoftfailDetail != "" {
 		if s.LastSoftfailCat != "" {
