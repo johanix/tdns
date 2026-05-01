@@ -2,8 +2,10 @@
 
 Author: Johan / Claude
 Date: 2026-04-30
-Status: planning — no code yet
-Branch: TBD (off `rollover-overhaul` once that lands)
+Status: implemented (phases 1–8, 10) on branch `rollover-notify-scheme`;
+        phase 9 (tick-handler test harness) deferred to separate PR;
+        phase 1a (tdns-mp wiring) deferred per original scope.
+Branch: `rollover-notify-scheme` (off `main` at bf01076a — PR #208 merge)
 
 Follow-up to the rollover overhaul (`2026-04-29-rollover-overhaul.md`).
 That work fixed the softfail state machine, parent-side EDE, and the
@@ -11,6 +13,75 @@ CLI-via-API rewrite. It did not touch one cross-cutting limitation:
 the rollover engine pushes DS via DNS UPDATE only. Parents that
 advertise the NOTIFY scheme in DSYNC are unreachable for automated
 KSK rollover.
+
+## Implementation status (2026-05-01)
+
+Phases 1–8 and Phase 10 (this section) are implemented on branch
+`rollover-notify-scheme`. Phases 9 (tick-handler test harness) and
+1a (tdns-mp KeyStateWorker wiring) are deferred to separate PRs.
+
+**Divergences from this design**, recorded for the next reader:
+
+1. **Phase 1 — `RolloverEngineDeps.Conf` retained.** The doc's
+   "no globals" goal targets the implicit dependencies of the
+   push path itself (Imr, DnssecPolicies, lock acquirer, logger).
+   Several existing helpers called from inside the tick
+   (`AtomicRollover`, `triggerResign`, `completeRolloverWithdraw`,
+   `scheduleFastObservePoll`) take `*Config` directly today and
+   were not in scope for Phase 1. `RolloverEngineDeps` therefore
+   carries a passthrough `Conf *Config`. tdns-mp will pass
+   `*tdns.Config` through this field unchanged. Refactoring those
+   helpers off `*Config` is independent follow-up work.
+
+2. **Phase 1 — `InternalUpdateQ` field type.** Doc said
+   `chan *ZoneUpdate`; codebase uses `chan UpdateRequest` (the
+   `kdb.UpdateQ` type). Implementation followed the codebase.
+
+3. **Phase 1 — third `PushWholeDSRRset` call site.** The CLI
+   `auto-rollover ds-push --offline` command at
+   `cli/ksk_rollover_cli.go:194` was a third caller of
+   `PushWholeDSRRset` not enumerated in the doc. Updated to
+   construct `RolloverEngineDeps` and call
+   `PushDSRRsetForRollover` (which falls through to the
+   single-scheme UPDATE path when no policy is attached).
+
+4. **Phase 4 — publish-and-sign is best-effort, not transactional.**
+   The doc Step 3 specifies `(publish CDS, sign CDS RRset, re-sign
+   apex NSEC)` as a single transaction with explicit rollback on
+   sign failure. The codebase's existing CDS-publish primitive
+   (`PublishCdsRRs` in `ops_cds.go`) is asynchronous fire-and-forget
+   via `kdb.UpdateQ`; sign and NSEC re-sign happen in the resigner
+   pipeline downstream, not synchronously with the publish. Adding
+   the synchronous transaction would require widening the publish
+   API across the codebase (`PublishCdsRRs`, `PublishCsyncRR`, …)
+   — out of scope for this branch. `pushDSRRsetViaNotify` uses the
+   same async-queue shape with a 5s send-side timeout to detect
+   immediate queue-full failures. The rollback path is therefore
+   unreachable in this design; revisit when the publish/sign sync
+   refactor happens.
+
+5. **Phase 5 — Trigger 3 (terminal hardfail) is a no-op hook.**
+   The post-overhaul state machine has no terminal-hardfail state;
+   softfail mode probes indefinitely with category-driven backoff
+   instead. The cleanup helper (`cleanupCdsAfterHardfail` in
+   `ksk_rollover_cds_cleanup.go`) exists with `//nolint:unused`
+   so a future commit that introduces terminal hardfail can call
+   it without re-discovering the cleanup logic. Triggers 1 and 2
+   are fully wired.
+
+6. **Phase 9 deferred.** The tick-handler test harness was the
+   largest single phase by far. Per the user's authorization
+   rules, deferred to a separate PR. The harness has reuse value
+   beyond NOTIFY support; building it as standalone test
+   infrastructure makes more sense than bundling it into the
+   feature branch. Pure-helper unit tests for
+   `decideRolloverSchemes` (22 cases) and `waitingForParentDelay`
+   (5 cases) cover the high-value decision logic in this branch.
+
+7. **Phase 1a deferred (per original scope).** Wiring tdns-mp's
+   `KeyStateWorker` to invoke the rollover push was explicitly
+   out of scope for this branch. The Phase 1 extraction makes
+   Phase 1a a small follow-up.
 
 > **Phase numbering note.** Phase numbers in this document (1–9) are
 > local to this work. References to "Phase 11" or "Phase 12" are to

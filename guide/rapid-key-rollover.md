@@ -401,6 +401,7 @@ level of the daemon config):
 | `rollover.ds-publish-delay` | no | `5m` | Parent's expected DS publication latency |
 | `rollover.max-attempts-before-backoff` | no | `5` | Softfail threshold |
 | `rollover.softfail-delay` | no | derived (≥ 1h, ≥ ds-publish-delay) | Long-term-mode probe interval |
+| `rollover.dsync-scheme-preference` | no | `auto` | DSYNC scheme to use for DS push (see §6.4) |
 | `rollover.confirm-initial-wait` | no | `2s` | First-poll delay after UPDATE |
 | `rollover.confirm-poll-max` | no | derived (clamped 30s..5m) | Maximum DS-poll cadence |
 | `rollover.confirm-timeout` | no | derived (`ds-publish-delay × 1.2`) | Per-attempt observation budget |
@@ -453,7 +454,52 @@ delay)`) from this, so getting it roughly right matters more
 than getting it exactly right.
 
 
-### 6.3 The `clamping` choice
+### 6.3 The `rollover.dsync-scheme-preference` choice
+
+This knob controls which DSYNC scheme(s) the rollover engine
+uses to push the DS update to the parent. The parent advertises
+its supported schemes via DSYNC RRs at `_dsync.<parent>`; this
+knob decides what to do when the parent advertises more than
+one, or when the operator wants to pin a specific scheme.
+
+| Value | Both adv. | One adv. | Neither |
+|-------|-----------|----------|---------|
+| `auto` (default) | parallel UPDATE + NOTIFY | the advertised one | wait |
+| `prefer-update` | UPDATE only | the advertised one | wait |
+| `prefer-notify` | NOTIFY only | the advertised one | wait |
+| `force-update` | UPDATE only | UPDATE only or wait | wait |
+| `force-notify` | NOTIFY only | NOTIFY only or wait | wait |
+
+"wait" = `child-config:waiting-for-parent` softfail, capped at
+1h backoff, never hardfails, auto-recovers when DSYNC reappears.
+
+`auto` is the right default for almost every operator: when the
+parent advertises both UPDATE and NOTIFY for CDS, the engine
+sends both in parallel. Either path NOERROR is enough to enter
+the observe phase. The cost is one extra UDP NOTIFY per attempt
+on a parent that advertises both; the benefit is that an
+"advertised but broken" scheme on one path doesn't block the
+rollover when the other works.
+
+`prefer-*` values give explicit single-scheme behaviour on a
+both-advertising parent — useful for log hygiene or when
+debugging one path. `force-*` values are for testbeds and
+adversarial-testing: if the parent doesn't advertise the
+forced scheme, the engine refuses to fall through to the other
+one (you asked for `force`, you got `force`).
+
+NOTIFY async-rejection asymmetry: parent-side ProcessCDSNotify
+runs *after* the NOTIFY ACK is sent. CDS validation failures,
+RFC 9615 signaling check failures, and RFC 8078 bootstrap
+policy refusals at the parent therefore surface as
+`parent-publish-failure` from the child's POV — not as
+`parent-rejected`, even when the underlying cause is a
+parent-side rejection. To diagnose, consult the parent-side
+scanner logs. (UPDATE pushes are synchronous and do surface
+parent rejections as `parent-rejected` with EDE detail.)
+
+
+### 6.4 The `clamping` choice
 
 When clamping is enabled, the engine progressively lowers TTLs
 near a scheduled rollover so that cached data flushes faster as
@@ -551,15 +597,21 @@ The engine does *not* handle automatically:
 
 ## 9. When something goes wrong
 
-The four failure categories the engine recognizes:
+The failure categories the engine recognizes:
 
-- **child-config**: something on your side is wrong (sign
-  failure, no DS to publish, parent zone not resolvable).
-  Operator must fix; the engine will retry indefinitely with a
-  capped backoff if the failure is "no usable scheme advertised
-  at parent" (this auto-recovers when the parent comes back).
-  Other child-config flavours go to hardfail after
-  `max-attempts-before-backoff` consecutive failures.
+- **child-config:waiting-for-parent**: the parent advertises no
+  DSYNC scheme this rollover policy can use (either no DSYNC at
+  all, or `force-*` policy and the forced scheme isn't
+  advertised). The engine halts but probes forever with backoff
+  capped at 1h, never increments the hardfail counter, and
+  auto-recovers when the parent restores DSYNC advertisement.
+  No operator action required on the child side.
+
+- **child-config:local-error**: something on your side is wrong
+  (no SIG(0) key, no DS to publish, parent zone not resolvable,
+  CDS publish-and-sign queue failure). Goes to softfail after
+  `max-attempts-before-backoff` consecutive failures. Operator
+  intervention typically required.
 
 - **transport**: network-level failure to reach the parent
   (timeout, connection refused). The engine retries.
@@ -567,11 +619,17 @@ The four failure categories the engine recognizes:
 - **parent-rejected**: the parent acknowledged the request but
   responded with REFUSED, NOTAUTH, FORMERR, or SERVFAIL. The
   daemon's logs include EDE codes when the parent supplies them
-  — these are the most operationally-actionable errors.
+  — these are the most operationally-actionable errors. For
+  NOTIFY pushes, the new `EDENotifyDsyncSchemeNotAdvertised`
+  EDE catches misconfigured children on the very first push.
 
 - **parent-publish-failure**: the parent acknowledged but the
   DS RRset never appeared in the parent zone. The engine
-  retries.
+  retries. NOTE: on a NOTIFY-advertising parent, async CDS
+  validation failures inside the parent's scanner surface here
+  rather than as parent-rejected (NOTIFY ACK is sent before the
+  scan runs). Consult the parent-side scanner logs to
+  disambiguate parent-internal causes.
 
 For investigations, start by reading the daemon logs and the
 output of `auto-rollover status`. The status output identifies
@@ -588,8 +646,8 @@ happened. The `last_softfail_*` fields tell you when and why.
   bookkeeping.
 - **NOTIFY-scheme push path:** the design at
   `tdns/docs/2026-04-30-rollover-notify-scheme.md` documents
-  the upcoming work for parents that advertise NOTIFY-based
-  DSYNC instead of UPDATE-based DSYNC.
+  the parallel UPDATE+NOTIFY DS-push model and the
+  `dsync-scheme-preference` knob (§6.3 above).
 - **Multi-provider DNSSEC:** see the tdns-mp guide
   (`tdns-mp/guide/`) for KSK rollover in multi-provider
   deployments. The single-provider guidance here applies; the
