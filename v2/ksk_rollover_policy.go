@@ -42,7 +42,21 @@ type RolloverPolicy struct {
 	DsPublishDelay           time.Duration
 	MaxAttemptsBeforeBackoff int
 	SoftfailDelay            time.Duration
+
+	// DsyncSchemePreference is one of the DsyncSchemePreference*
+	// constants below. Default is DsyncSchemePreferenceAuto.
+	DsyncSchemePreference string
 }
+
+// DSYNC scheme preference values for RolloverPolicy.DsyncSchemePreference.
+const (
+	DsyncSchemePreferenceAuto         = "auto"
+	DsyncSchemePreferencePreferUpdate = "prefer-update"
+	DsyncSchemePreferencePreferNotify = "prefer-notify"
+	DsyncSchemePreferenceForceUpdate  = "force-update"
+	DsyncSchemePreferenceForceNotify  = "force-notify"
+	defaultDsyncSchemePreference      = DsyncSchemePreferenceAuto
+)
 
 type ClampingPolicy struct {
 	Enabled bool
@@ -133,6 +147,7 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 		out.Rollover.DsPublishDelay = 0
 		out.Rollover.MaxAttemptsBeforeBackoff = 0
 		out.Rollover.SoftfailDelay = 0
+		out.Rollover.DsyncSchemePreference = ""
 	case RolloverMethodMultiDS:
 		n := conf.Rollover.NumDS
 		if n == 0 {
@@ -297,6 +312,21 @@ func fillRolloverDurations(policyName string, conf *DnssecPolicyConf, out *Dnsse
 	out.Rollover.MaxAttemptsBeforeBackoff = conf.Rollover.MaxAttemptsBeforeBackoff
 	if out.Rollover.MaxAttemptsBeforeBackoff == 0 {
 		out.Rollover.MaxAttemptsBeforeBackoff = defaultMaxAttemptsBeforeBackoff
+	}
+
+	pref := strings.TrimSpace(strings.ToLower(conf.Rollover.DsyncSchemePreference))
+	switch pref {
+	case "":
+		out.Rollover.DsyncSchemePreference = defaultDsyncSchemePreference
+	case DsyncSchemePreferenceAuto,
+		DsyncSchemePreferencePreferUpdate,
+		DsyncSchemePreferencePreferNotify,
+		DsyncSchemePreferenceForceUpdate,
+		DsyncSchemePreferenceForceNotify:
+		out.Rollover.DsyncSchemePreference = pref
+	default:
+		return fmt.Errorf("dnssec policy %q: rollover.dsync-scheme-preference %q invalid (want auto, prefer-update, prefer-notify, force-update, or force-notify)",
+			policyName, conf.Rollover.DsyncSchemePreference)
 	}
 
 	// Cross-field validation. These constraints catch configurations
