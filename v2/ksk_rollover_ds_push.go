@@ -10,7 +10,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// KSKDSPushResult is the outcome of PushWholeDSRRset (rcode and wire diagnostics).
+// KSKDSPushResult is the outcome of PushDSRRsetForRollover (rcode and wire diagnostics).
 // Category is empty on success (rcode NOERROR + persisted submitted range);
 // otherwise it is one of the SoftfailXxx constants from
 // ksk_rollover_categories.go and the engine's caller uses it to record a
@@ -54,14 +54,19 @@ type kskForDSRow struct {
 	ri    sql.NullInt64
 }
 
-// ComputeTargetDSSetForZone returns the DS RRset the parent should publish for this child,
-// per §6.1: one DS per KSK (SEP) in states created, ds-published, standby, published, active, retired
-// (created included for multi-DS pre-publish DS at parent).
-// Digest is SHA-256 only in this phase. DS owner names use child as FQDN.
-// indexLow/indexHigh are min/max rollover_index when every contributing key has a
-// RolloverKeyState row; otherwise indexRangeKnown is false and callers must not treat
-// the indices as authoritative for RolloverZoneState.
-func ComputeTargetDSSetForZone(kdb *KeyDB, childZone string, digest uint8) (ds []dns.RR, indexLow, indexHigh int, indexRangeKnown bool, err error) {
+// loadTargetKSKsForRollover is the canonical SQL query for "the keys
+// belonging in the rollover-target DS RRset." Per §6.1: one row per
+// KSK (SEP) in states created, ds-published, standby, published,
+// active, retired (created is included for multi-DS pre-publish DS at
+// the parent). Two callers wrap it: ComputeTargetDSSetForZone (for DS)
+// and ComputeTargetCDSSetForZone (for CDS, see Phase 4). Both must
+// derive their target set from the same key rows; if they diverged, a
+// NOTIFY-pushed CDS would not match the UPDATE-pushed DS.
+//
+// indexLow/indexHigh are min/max rollover_index when every contributing
+// key has a RolloverKeyState row; otherwise indexRangeKnown is false
+// and callers must not treat the indices as authoritative.
+func loadTargetKSKsForRollover(kdb *KeyDB, childZone string) (rows []kskForDSRow, indexLow, indexHigh int, indexRangeKnown bool, err error) {
 	childZone = dns.Fqdn(childZone)
 	const q = `
 SELECT k.keyid, k.flags, k.keyrr, r.rollover_index
@@ -71,40 +76,70 @@ WHERE k.zonename = ? AND k.state IN ('created','ds-published','standby','publish
   AND (CAST(k.flags AS INTEGER) & ?) != 0
 ORDER BY COALESCE(r.rollover_index, 2147483646) ASC, k.keyid ASC`
 
-	rows, err := kdb.Query(q, childZone, int(dns.SEP))
+	sqlRows, err := kdb.Query(q, childZone, int(dns.SEP))
 	if err != nil {
-		return nil, 0, 0, false, fmt.Errorf("ComputeTargetDSSetForZone: %w", err)
+		return nil, 0, 0, false, fmt.Errorf("loadTargetKSKsForRollover: %w", err)
 	}
-	defer rows.Close()
+	defer sqlRows.Close()
 
-	var rowsOut []kskForDSRow
-	for rows.Next() {
+	for sqlRows.Next() {
 		var keyid, flags int
 		var keyrr string
 		var ri sql.NullInt64
-		if err := rows.Scan(&keyid, &flags, &keyrr, &ri); err != nil {
-			return nil, 0, 0, false, fmt.Errorf("ComputeTargetDSSetForZone scan: %w", err)
+		if err := sqlRows.Scan(&keyid, &flags, &keyrr, &ri); err != nil {
+			return nil, 0, 0, false, fmt.Errorf("loadTargetKSKsForRollover scan: %w", err)
 		}
-		rowsOut = append(rowsOut, kskForDSRow{
+		rows = append(rows, kskForDSRow{
 			keyid: uint16(keyid),
 			flags: uint16(flags),
 			keyrr: keyrr,
 			ri:    ri,
 		})
 	}
-	if err := rows.Err(); err != nil {
+	if err := sqlRows.Err(); err != nil {
 		return nil, 0, 0, false, err
 	}
 
-	indexRangeKnown = len(rowsOut) > 0
-	for _, row := range rowsOut {
+	indexRangeKnown = len(rows) > 0
+	for _, row := range rows {
 		if !row.ri.Valid {
 			indexRangeKnown = false
 			break
 		}
 	}
 
-	for _, row := range rowsOut {
+	if indexRangeKnown {
+		for i, row := range rows {
+			v := int(row.ri.Int64)
+			if i == 0 {
+				indexLow, indexHigh = v, v
+			} else {
+				if v < indexLow {
+					indexLow = v
+				}
+				if v > indexHigh {
+					indexHigh = v
+				}
+			}
+		}
+	}
+	return rows, indexLow, indexHigh, indexRangeKnown, nil
+}
+
+// ComputeTargetDSSetForZone returns the DS RRset the parent should publish for this child,
+// per §6.1: one DS per KSK (SEP) in states created, ds-published, standby, published, active, retired
+// (created included for multi-DS pre-publish DS at parent).
+// Digest is SHA-256 only in this phase. DS owner names use child as FQDN.
+// indexLow/indexHigh are min/max rollover_index when every contributing key has a
+// RolloverKeyState row; otherwise indexRangeKnown is false and callers must not treat
+// the indices as authoritative for RolloverZoneState.
+func ComputeTargetDSSetForZone(kdb *KeyDB, childZone string, digest uint8) (ds []dns.RR, indexLow, indexHigh int, indexRangeKnown bool, err error) {
+	childZone = dns.Fqdn(childZone)
+	rows, low, high, idxOK, err := loadTargetKSKsForRollover(kdb, childZone)
+	if err != nil {
+		return nil, 0, 0, false, err
+	}
+	for _, row := range rows {
 		rr, err := dns.NewRR(row.keyrr)
 		if err != nil {
 			return nil, 0, 0, false, fmt.Errorf("ComputeTargetDSSetForZone: parse DNSKEY keyid=%d: %w", row.keyid, err)
@@ -123,33 +158,35 @@ ORDER BY COALESCE(r.rollover_index, 2147483646) ASC, k.keyid ASC`
 		}
 		ds = append(ds, dsRR)
 	}
-
-	if indexRangeKnown {
-		for i, row := range rowsOut {
-			v := int(row.ri.Int64)
-			if i == 0 {
-				indexLow, indexHigh = v, v
-			} else {
-				if v < indexLow {
-					indexLow = v
-				}
-				if v > indexHigh {
-					indexHigh = v
-				}
-			}
-		}
-	}
-	return ds, indexLow, indexHigh, indexRangeKnown, nil
+	return ds, low, high, idxOK, nil
 }
 
-// PushWholeDSRRset computes the target DS RRset from the keystore, builds a whole-RRset
-// replacement UPDATE to the parent, signs with the child's active SIG(0) key, and sends it.
-// On rcode NOERROR, updates last_ds_submitted_index_* when indexRangeKnown from ComputeTargetDSSetForZone.
-func PushWholeDSRRset(ctx context.Context, zd *ZoneData, kdb *KeyDB, imr *Imr) (KSKDSPushResult, error) {
+// PushDSRRsetForRollover is the public dispatcher entry point for the
+// rollover engine's DS push. It picks one or more push schemes from the
+// parent's DSYNC advertisement and the policy's dsync-scheme-preference
+// (Phase 3), dispatches per-scheme push functions in parallel where
+// applicable (Phase 4), and aggregates per-path wire-level results.
+//
+// Phase 1 shape: scheme selection is not yet implemented; the
+// dispatcher always delegates to pushDSRRsetViaUpdate. Phase 4 will
+// extend this with NOTIFY-side and parallel paths.
+func PushDSRRsetForRollover(ctx context.Context, deps RolloverEngineDeps) (KSKDSPushResult, error) {
+	return pushDSRRsetViaUpdate(ctx, deps)
+}
+
+// pushDSRRsetViaUpdate computes the target DS RRset from the keystore, builds a
+// whole-RRset replacement UPDATE to the parent, signs with the child's active
+// SIG(0) key, and sends it. On rcode NOERROR, updates
+// last_ds_submitted_index_* when indexRangeKnown from
+// ComputeTargetDSSetForZone.
+func pushDSRRsetViaUpdate(ctx context.Context, deps RolloverEngineDeps) (KSKDSPushResult, error) {
 	var out KSKDSPushResult
+	zd := deps.Zone
+	kdb := deps.KDB
+	imr := deps.Imr
 	if zd == nil || kdb == nil || imr == nil {
 		out.Category = SoftfailChildConfig
-		return out, fmt.Errorf("PushWholeDSRRset: nil argument")
+		return out, fmt.Errorf("pushDSRRsetViaUpdate: nil argument")
 	}
 	child := dns.Fqdn(zd.ZoneName)
 	parent := dns.Fqdn(zd.Parent)
@@ -158,7 +195,7 @@ func PushWholeDSRRset(ctx context.Context, zd *ZoneData, kdb *KeyDB, imr *Imr) (
 		parent, err = imr.ParentZone(child)
 		if err != nil {
 			out.Category = SoftfailTransport
-			return out, fmt.Errorf("PushWholeDSRRset: parent zone: %w", err)
+			return out, fmt.Errorf("pushDSRRsetViaUpdate: parent zone: %w", err)
 		}
 		parent = dns.Fqdn(parent)
 	}
@@ -170,7 +207,7 @@ func PushWholeDSRRset(ctx context.Context, zd *ZoneData, kdb *KeyDB, imr *Imr) (
 	}
 	if len(dsSet) == 0 {
 		out.Category = SoftfailChildConfig
-		return out, fmt.Errorf("PushWholeDSRRset: no DS records to publish for zone %s", child)
+		return out, fmt.Errorf("pushDSRRsetViaUpdate: no DS records to publish for zone %s", child)
 	}
 
 	msg, err := BuildChildWholeDSUpdate(parent, child, dsSet)
@@ -182,17 +219,17 @@ func PushWholeDSRRset(ctx context.Context, zd *ZoneData, kdb *KeyDB, imr *Imr) (
 	sak, err := kdb.GetSig0Keys(child, Sig0StateActive)
 	if err != nil {
 		out.Category = SoftfailChildConfig
-		return out, fmt.Errorf("PushWholeDSRRset: GetSig0Keys: %w", err)
+		return out, fmt.Errorf("pushDSRRsetViaUpdate: GetSig0Keys: %w", err)
 	}
 	if len(sak.Keys) == 0 {
 		out.Category = SoftfailChildConfig
-		return out, fmt.Errorf("PushWholeDSRRset: no active SIG(0) key for zone %s", child)
+		return out, fmt.Errorf("pushDSRRsetViaUpdate: no active SIG(0) key for zone %s", child)
 	}
 
 	smsg, err := SignMsg(*msg, child, sak)
 	if err != nil {
 		out.Category = SoftfailChildConfig
-		return out, fmt.Errorf("PushWholeDSRRset: SignMsg: %w", err)
+		return out, fmt.Errorf("pushDSRRsetViaUpdate: SignMsg: %w", err)
 	}
 
 	dsyncTarget, err := imr.LookupDSYNCTarget(ctx, child, dns.TypeDS, core.SchemeUpdate)
@@ -200,7 +237,7 @@ func PushWholeDSRRset(ctx context.Context, zd *ZoneData, kdb *KeyDB, imr *Imr) (
 		dsyncTarget, err = imr.LookupDSYNCTarget(ctx, child, dns.TypeANY, core.SchemeUpdate)
 		if err != nil {
 			out.Category = SoftfailTransport
-			return out, fmt.Errorf("PushWholeDSRRset: DSYNC target: %w", err)
+			return out, fmt.Errorf("pushDSRRsetViaUpdate: DSYNC target: %w", err)
 		}
 	}
 
@@ -222,7 +259,7 @@ func PushWholeDSRRset(ctx context.Context, zd *ZoneData, kdb *KeyDB, imr *Imr) (
 	if idxOK {
 		if err := saveLastDSSubmittedRange(kdb, child, low, high); err != nil {
 			out.Category = SoftfailChildConfig
-			return out, fmt.Errorf("PushWholeDSRRset: persist submitted range: %w", err)
+			return out, fmt.Errorf("pushDSRRsetViaUpdate: persist submitted range: %w", err)
 		}
 	} else {
 		// Contributors didn't all have authoritative rollover_index
@@ -230,7 +267,7 @@ func PushWholeDSRRset(ctx context.Context, zd *ZoneData, kdb *KeyDB, imr *Imr) (
 		// Clear any stale range from a prior push instead of leaving
 		// stale persisted columns that describe an older submission.
 		if err := clearLastDSSubmittedRange(kdb, child); err != nil {
-			return out, fmt.Errorf("PushWholeDSRRset: clear stale submitted range: %w", err)
+			return out, fmt.Errorf("pushDSRRsetViaUpdate: clear stale submitted range: %w", err)
 		}
 	}
 	return out, nil

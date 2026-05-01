@@ -59,12 +59,20 @@ func kskIndexPushNeeded(row *RolloverZoneRow, low, high int, indexOK bool, haveD
 
 // RolloverAutomatedTick runs one slice of automated KSK rollover for multi-ds (pipeline fill,
 // DS push / observe phase machine). double-signature is not implemented yet.
-// propagationDelay is the kasp.propagation_delay used by pending-child-publish.
-func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *Imr, zd *ZoneData, propagationDelay time.Duration, now time.Time) error {
-	if zd == nil || zd.DnssecPolicy == nil {
+//
+// All dependencies are passed via RolloverEngineDeps so the engine has no
+// implicit globals. The orchestrator (KeyStateWorker) iterates its zones,
+// builds deps for each, and calls this. deps.PropagationDelay is the
+// kasp.propagation_delay used by pending-child-publish.
+func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
+	zd := deps.Zone
+	if zd == nil {
 		return nil
 	}
-	pol := zd.DnssecPolicy
+	pol := deps.Policy
+	if pol == nil {
+		return nil
+	}
 	if pol.Rollover.Method == RolloverMethodNone {
 		return nil
 	}
@@ -72,14 +80,33 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		return nil
 	}
 
+	conf := deps.Conf
+	kdb := deps.KDB
+	imr := deps.Imr
+	propagationDelay := deps.PropagationDelay
+	now := time.Now()
+	if deps.Now != nil {
+		now = deps.Now()
+	}
+
 	zone := dns.Fqdn(zd.ZoneName)
 
 	// Serialize against API mutating handlers (asap, cancel, reset,
 	// unstick). Held for the duration of one tick's per-zone work so
 	// a CLI-driven write cannot interleave with a phase advance.
-	lock := AcquireRolloverLock(zone)
-	lock.Lock()
-	defer lock.Unlock()
+	acquire := deps.AcquireLock
+	if acquire == nil {
+		acquire = defaultAcquireRolloverLock
+	}
+	release, err := acquire(zone)
+	if err != nil {
+		// Soft acquisition failure (e.g. tdns-mp's leader-aware
+		// acquirer returning ErrNotLeader for a zone owned by
+		// another provider). Skip this cycle without escalating.
+		lgSigner.Debug("rollover: lock acquisition skipped", "zone", zone, "err", err)
+		return nil
+	}
+	defer release()
 
 	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
 		return err
@@ -200,7 +227,7 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		}
 		_ = setLastAttemptStarted(kdb, zone, now)
 		pushCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-		res, err := PushWholeDSRRset(pushCtx, zd, kdb, imr)
+		res, err := PushDSRRsetForRollover(pushCtx, deps)
 		cancel()
 		if err != nil {
 			cat := res.Category
@@ -231,7 +258,7 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 			return err
 		}
 		lgSigner.Info("rollover: DS UPDATE accepted, arming observe", "zone", zone, "first_poll_at", nextPoll.Format(time.RFC3339))
-		scheduleFastObservePoll(ctx, conf, kdb, imr, zd, propagationDelay, initial)
+		scheduleFastObservePoll(ctx, deps, initial)
 	case rolloverPhasePendingParentObserve:
 		agent := pol.Rollover.ParentAgent
 		if agent == "" {
@@ -396,7 +423,7 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		}
 		_ = setLastAttemptStarted(kdb, zone, now)
 		pushCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-		res, perr := PushWholeDSRRset(pushCtx, zd, kdb, imr)
+		res, perr := PushDSRRsetForRollover(pushCtx, deps)
 		cancel()
 		if perr != nil {
 			cat := res.Category
@@ -424,7 +451,7 @@ func RolloverAutomatedTick(ctx context.Context, conf *Config, kdb *KeyDB, imr *I
 		_ = setObserveSchedule(kdb, zone, now, nextPoll, int(initial.Seconds()))
 		_ = setNextPushAt(kdb, zone, nextPush)
 		lgSigner.Info("rollover: softfail probe accepted, observing", "zone", zone, "first_poll_at", nextPoll.Format(time.RFC3339), "next_probe_at", nextPush.Format(time.RFC3339))
-		scheduleFastObservePoll(ctx, conf, kdb, imr, zd, propagationDelay, initial)
+		scheduleFastObservePoll(ctx, deps, initial)
 	case rolloverPhasePendingChildWithdraw:
 		// §8.8: wait effective_margin = max(policy.clamping.margin,
 		// max_observed_ttl) from each retired SEP key's retired_at, then
@@ -603,11 +630,14 @@ WHERE zone = ?`, zone); err != nil {
 // after restart picks up where this left off (at the cost of being
 // bounded by check_interval — same as the pre-fix behavior). No state
 // is lost; just slower recovery.
-func scheduleFastObservePoll(ctx context.Context, conf *Config, kdb *KeyDB, imr *Imr, zd *ZoneData, propagationDelay, initial time.Duration) {
+func scheduleFastObservePoll(ctx context.Context, deps RolloverEngineDeps, initial time.Duration) {
 	if initial <= 0 {
 		initial = defaultConfirmInitialWait
 	}
-	zone := zd.ZoneName
+	if deps.Zone == nil {
+		return
+	}
+	zone := deps.Zone.ZoneName
 	go func() {
 		timer := time.NewTimer(initial)
 		defer timer.Stop()
@@ -616,7 +646,7 @@ func scheduleFastObservePoll(ctx context.Context, conf *Config, kdb *KeyDB, imr 
 			return
 		case <-timer.C:
 		}
-		if err := RolloverAutomatedTick(ctx, conf, kdb, imr, zd, propagationDelay, time.Now()); err != nil {
+		if err := RolloverAutomatedTick(ctx, deps); err != nil {
 			lgSigner.Debug("rollover: fast-poll tick error", "zone", zone, "err", err)
 		}
 	}()
@@ -929,6 +959,7 @@ func PromoteStandbyKskIfNoActive(conf *Config, kdb *KeyDB, zone string) {
 
 func rolloverAutomatedForAllZones(ctx context.Context, conf *Config, kdb *KeyDB, propagationDelay time.Duration, now time.Time) {
 	imr := conf.Internal.ImrEngine
+	nowFn := func() time.Time { return now }
 	for _, zd := range Zones.Items() {
 		if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 			continue
@@ -939,7 +970,28 @@ func rolloverAutomatedForAllZones(ctx context.Context, conf *Config, kdb *KeyDB,
 		if zd.DnssecPolicy == nil {
 			continue
 		}
-		if err := RolloverAutomatedTick(ctx, conf, kdb, imr, zd, propagationDelay, now); err != nil {
+		var notifyq chan NotifyRequest
+		if conf.Internal.NotifyQ != nil {
+			notifyq = conf.Internal.NotifyQ
+		}
+		var updateq chan UpdateRequest
+		if kdb != nil {
+			updateq = kdb.UpdateQ
+		}
+		deps := RolloverEngineDeps{
+			Conf:             conf,
+			KDB:              kdb,
+			Zone:             zd,
+			Imr:              imr,
+			NotifyQ:          notifyq,
+			InternalUpdateQ:  updateq,
+			Policy:           zd.DnssecPolicy,
+			AcquireLock:      defaultAcquireRolloverLock,
+			Logger:           lgSigner,
+			PropagationDelay: propagationDelay,
+			Now:              nowFn,
+		}
+		if err := RolloverAutomatedTick(ctx, deps); err != nil {
 			lgSigner.Error("rollover: tick error", "zone", zd.ZoneName, "err", err)
 		}
 	}

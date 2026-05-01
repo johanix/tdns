@@ -191,7 +191,14 @@ Use --dry-run to print the DS set and UPDATE without sending.`,
 				return
 			}
 
-			res, err := tdns.PushWholeDSRRset(ctx, zd, kdb, imr)
+			deps := tdns.RolloverEngineDeps{
+				Conf:   &Conf,
+				KDB:    kdb,
+				Zone:   zd,
+				Imr:    imr,
+				Policy: zd.DnssecPolicy,
+			}
+			res, err := tdns.PushDSRRsetForRollover(ctx, deps)
 			if err != nil {
 				log.Fatalf("ds-push: %v", err)
 			}
