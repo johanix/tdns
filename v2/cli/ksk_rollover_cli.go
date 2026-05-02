@@ -787,22 +787,21 @@ func printStateTable(s *tdns.RolloverStatus) {
 	if s.AttemptTimeout != "" {
 		left = append(left, kv{"attempt timeout:", formatRolloverTime(s.AttemptTimeout)})
 	}
-	// Per-scheme lines: separate "DS UPDATE" (the UPDATE-pushed DS
-	// RRset claim) from "CDS published" (the CDS RRset on the child
-	// apex via NOTIFY) from "DS observed" (what the engine has seen
-	// at the parent). Each line is conditional:
+	// Per-scheme lines:
 	//   - DS UPDATE: rendered when Submitted is set AND the most
 	//     recent push attempt used UPDATE (LastAttemptScheme contains
-	//     "UPDATE").
-	//   - CDS published: rendered ONLY when CdsPublished is set —
-	//     which itself requires both engine ownership (RolloverZoneState
-	//     last_published_cds_index_*) AND apex CDS RRset present.
-	//     If the engine claims CDS but the apex is empty, this line
-	//     is suppressed so operators don't mis-read "CDS published"
-	//     when nothing is on the wire.
-	//   - DS observed: rendered when Confirmed is set. Renamed from
-	//     "DS confirmed:" — "observed" matches the parent-poll
-	//     terminology used elsewhere in status.
+	//     "UPDATE"). Timestamp is the dispatcher's send time
+	//     (LastUpdate = last_attempt_started_at; parallel dispatch
+	//     fires both legs from the same instant, so a per-scheme
+	//     send timestamp is artificial).
+	//   - CDS published: rendered when the engine has ever
+	//     successfully published CDS via NOTIFY (sparse
+	//     RolloverCdsPublication row). Survives Trigger-1 cleanup;
+	//     it's a historical fact, not a current-state claim.
+	//   - DS observed: rendered when ObservedKeyIDs is set —
+	//     i.e. the engine has done at least one parent-agent poll
+	//     that returned a usable answer. Reflects the latest poll's
+	//     answer, not the latest confirmed match.
 	updateUsed := strings.Contains(s.LastAttemptScheme, "UPDATE")
 	if s.Submitted != nil && updateUsed {
 		v := dashKeyidsBracket(formatKeyidBracketList(s.SubmittedKeyIDs))
@@ -816,31 +815,34 @@ func printStateTable(s *tdns.RolloverStatus) {
 		// line shape so existing testbeds don't lose status info.
 		left = append(left, kv{"DS UPDATE:", dashKeyidsBracket(formatKeyidBracketList(s.SubmittedKeyIDs))})
 	}
-	if s.CdsPublished != nil {
-		v := dashKeyidsBracket(formatKeyidBracketList(s.CdsPublishedKeyIDs))
-		v = fmt.Sprintf("%s NOTIFY(CDS)", v)
-		if s.LastUpdate != "" {
-			v = fmt.Sprintf("%s sent %s", v, formatRolloverTime(s.LastUpdate))
+	if len(s.CdsPublishedKeyIDs) > 0 {
+		v := formatKeyidBracketList(s.CdsPublishedKeyIDs)
+		if s.CdsPublishedAt != "" {
+			v = fmt.Sprintf("%s sent %s", v, formatRolloverTime(s.CdsPublishedAt))
 		}
 		left = append(left, kv{"CDS published:", v})
 	}
-	if s.Confirmed != nil {
-		v := dashKeyidsBracket(formatKeyidBracketList(s.ConfirmedKeyIDs))
-		if s.LastSuccess != "" {
-			v = fmt.Sprintf("%s observed %s", v, formatRolloverTime(s.LastSuccess))
+	if len(s.ObservedKeyIDs) > 0 {
+		v := formatKeyidBracketList(s.ObservedKeyIDs)
+		if s.ObservedAt != "" {
+			v = fmt.Sprintf("%s observed %s", v, formatRolloverTime(s.ObservedAt))
 		}
 		left = append(left, kv{"DS observed:", v})
+	} else if s.Confirmed != nil {
+		// Pre-existing-row fallback: zone has confirmed history but
+		// no last_ds_observed_keyids column populated yet (e.g. row
+		// from a daemon that pre-dates this commit). Show what we
+		// have so the line doesn't disappear post-upgrade.
+		left = append(left, kv{"DS observed:", dashKeyidsBracket(formatKeyidBracketList(s.ConfirmedKeyIDs))})
 	}
 
-	// Right column: timing config + history & polling.
+	// Right column: timing config + scheduling. Dropped:
+	//   - "last success" — same instant as DS observed <time> when
+	//     populated; redundant.
+	//   - "last poll"    — same instant as DS observed <time> by
+	//     construction (every poll updates last_ds_observed_*).
 	if s.Policy != nil && s.Policy.DsPublishDelay != "" {
 		right = append(right, kv{"ds-publish-delay:", s.Policy.DsPublishDelay})
-	}
-	if s.LastSuccess != "" {
-		right = append(right, kv{"last success:", formatRolloverTime(s.LastSuccess)})
-	}
-	if s.LastPoll != "" {
-		right = append(right, kv{"last poll:", formatRolloverTime(s.LastPoll)})
 	}
 	if s.NextPoll != "" {
 		right = append(right, kv{"next poll:", formatRolloverTime(s.NextPoll)})

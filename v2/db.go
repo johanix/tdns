@@ -142,6 +142,16 @@ func dbMigrateSchema(db *sql.DB) {
 		{"RolloverZoneState", "last_attempt_scheme", "ALTER TABLE RolloverZoneState ADD COLUMN last_attempt_scheme TEXT"},
 		{"RolloverZoneState", "last_published_cds_index_low", "ALTER TABLE RolloverZoneState ADD COLUMN last_published_cds_index_low INTEGER"},
 		{"RolloverZoneState", "last_published_cds_index_high", "ALTER TABLE RolloverZoneState ADD COLUMN last_published_cds_index_high INTEGER"},
+		// Last-observed DS RRset from the parent-agent poll. Stored as
+		// CSV-of-keyids (NOT a rollover_index range) so a polled answer
+		// can include keyids that have no RolloverKeyState row (parent
+		// has stale DS for a key the child has already removed, for
+		// example). Updated on every successful poll regardless of
+		// whether the polled set matches the engine's expected set;
+		// the operator's "DS observed" status line shows the latest
+		// poll rather than the latest confirmed match.
+		{"RolloverZoneState", "last_ds_observed_keyids", "ALTER TABLE RolloverZoneState ADD COLUMN last_ds_observed_keyids TEXT"},
+		{"RolloverZoneState", "last_ds_observed_at", "ALTER TABLE RolloverZoneState ADD COLUMN last_ds_observed_at TEXT"},
 	}
 
 	for _, m := range migrations {

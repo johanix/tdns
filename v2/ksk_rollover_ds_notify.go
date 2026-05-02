@@ -175,8 +175,37 @@ func pushDSRRsetViaNotify(ctx context.Context, deps RolloverEngineDeps, target *
 		out.Detail = formatNotifyDetail(resp)
 		return out, nil
 	}
+	// NOTIFY(CDS) acknowledged at the wire. Persist the publication
+	// fact (keyids + timestamp) to the sparse RolloverCdsPublication
+	// table. This survives Trigger-1 cleanup so the operator's
+	// "CDS published [keyids] sent <time>" status line still
+	// reflects the most recent publication after the rollover has
+	// completed and the ownership marker is cleared.
+	keyids := cdsKeyids(cdsSet)
+	if err := setCdsPublication(kdb, child, keyids, time.Now().UTC()); err != nil {
+		// Best-effort: a write failure here doesn't undo the on-wire
+		// publication. Log and continue.
+		lgRollover.Warn("pushDSRRsetViaNotify: setCdsPublication failed",
+			"zone", child, "err", err)
+	} else {
+		lgRollover.Debug("pushDSRRsetViaNotify: CDS publication recorded",
+			"zone", child, "keyids", keyids)
+	}
 	out.Scheme = "NOTIFY"
 	return out, nil
+}
+
+// cdsKeyids extracts the SEP keyid from each CDS RR in the slice.
+// Skips entries that aren't *dns.CDS (defensive; ComputeTargetCDSSetForZone
+// only ever returns CDS RRs but the type assertion is cheap).
+func cdsKeyids(cdsSet []dns.RR) []uint16 {
+	out := make([]uint16, 0, len(cdsSet))
+	for _, rr := range cdsSet {
+		if c, ok := rr.(*dns.CDS); ok {
+			out = append(out, c.DS.KeyTag)
+		}
+	}
+	return out
 }
 
 // formatNotifyDetail renders a NotifyResponse's diagnostic info as

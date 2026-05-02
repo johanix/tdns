@@ -131,7 +131,9 @@ UNIQUE (zonename, keyid)
 		last_poll_at                   TEXT,
 		last_attempt_scheme            TEXT,
 		last_published_cds_index_low   INTEGER,
-		last_published_cds_index_high  INTEGER
+		last_published_cds_index_high  INTEGER,
+		last_ds_observed_keyids        TEXT,
+		last_ds_observed_at            TEXT
 	)`,
 
 	// ZoneSigningState holds per-zone signing-loop state. max_observed_ttl
@@ -144,6 +146,27 @@ UNIQUE (zonename, keyid)
 		zone              TEXT NOT NULL PRIMARY KEY,
 		max_observed_ttl  INTEGER NOT NULL DEFAULT 0,
 		updated_at        TEXT
+	)`,
+
+	// RolloverCdsPublication records the most recent successful CDS
+	// publication via the NOTIFY-scheme rollover push path. Sparse —
+	// only zones that have actually run a NOTIFY publish-and-sign at
+	// least once appear here. Distinct from
+	// RolloverZoneState.last_published_cds_index_*, which is the
+	// cleanup-time ownership marker (cleared by Trigger-1 cleanup).
+	// These columns preserve historical fact across cleanup so the
+	// operator can still see "CDS was published [keyids] at <time>"
+	// in status output after the rollover has completed.
+	//
+	// Storage shape: keyids is a comma-separated list (e.g.
+	// "12345,56789,43215") rendered straight to status output. Range
+	// encoding (low/high index pair) was rejected: it loses keyid
+	// identity if the engine ever publishes a non-contiguous
+	// sequence and is harder to read in operator-facing tools.
+	"RolloverCdsPublication": `CREATE TABLE IF NOT EXISTS 'RolloverCdsPublication' (
+		zone           TEXT NOT NULL PRIMARY KEY,
+		keyids         TEXT NOT NULL,
+		published_at   TEXT NOT NULL
 	)`,
 
 	// RolloverDaemonSentinel is a single-row table written by the auth

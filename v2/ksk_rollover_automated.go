@@ -338,6 +338,10 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 			scheduleNextObservePoll(kdb, zone, row, now, pollMax)
 			return nil
 		}
+		// Persist the polled keyid set + timestamp regardless of
+		// whether it matches expected. The "DS observed" status line
+		// shows the latest poll, not the latest confirmed match.
+		_ = setLastDsObserved(kdb, zone, dsKeyids(obs), now)
 		if !ObservedDSSetMatchesExpected(obs, expected) {
 			scheduleNextObservePoll(kdb, zone, row, now, pollMax)
 			return nil
@@ -414,6 +418,12 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		if pollDue && agent != "" {
 			obs, qerr := QueryParentAgentDS(ctx, zone, agent)
 			_ = setLastPoll(kdb, zone, now)
+			if qerr == nil {
+				// Persist the polled keyid set + timestamp regardless
+				// of match status; the "DS observed" status line
+				// reflects the latest poll, not the latest confirm.
+				_ = setLastDsObserved(kdb, zone, dsKeyids(obs), now)
+			}
 			if qerr == nil && ObservedDSSetMatchesExpected(obs, expected) {
 				if !idxOK {
 					lgSigner.Warn("rollover: DS observed during softfail but rollover_index incomplete; cannot advance", "zone", zone)
@@ -872,6 +882,20 @@ func scheduleNextObservePoll(kdb *KeyDB, zone string, row *RolloverZoneRow, now 
 	if err := setObserveSchedule(kdb, zone, started, now.Add(next), int(next.Seconds())); err != nil {
 		lgSigner.Warn("rollover: set next observe poll", "zone", zone, "err", err)
 	}
+}
+
+// dsKeyids extracts the KeyTag from each DS RR in the slice. Used by
+// the observe-poll path to persist the last observed keyid set
+// (last_ds_observed_keyids on RolloverZoneState) regardless of
+// whether it matches expected.
+func dsKeyids(rrs []dns.RR) []uint16 {
+	out := make([]uint16, 0, len(rrs))
+	for _, rr := range rrs {
+		if ds, ok := rr.(*dns.DS); ok {
+			out = append(out, ds.KeyTag)
+		}
+	}
+	return out
 }
 
 func parseOptionalTime(s sql.NullString) (time.Time, bool) {

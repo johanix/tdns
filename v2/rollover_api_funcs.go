@@ -49,22 +49,26 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInte
 		populateFromZoneRow(out, row)
 	}
 
-	// CdsPublished is populated only when the engine claims ownership
-	// AND the apex CDS RRset is actually on disk. Without the
-	// apex-presence guard, a CDS that got wiped by zone refresh
-	// (CollectDynamicRRs allowlist gap) would still show in status
-	// as "CDS published" — misleading the operator into thinking
-	// the parent has something to scan when it does not.
-	if row != nil && row.LastPublishedCdsIndexLow.Valid && row.LastPublishedCdsIndexHigh.Valid {
-		if zd, ok := Zones.Get(zone); ok && zd != nil {
-			if owner, _ := zd.GetOwner(zd.ZoneName); owner != nil {
-				if rs, exists := owner.RRtypes.Get(dns.TypeCDS); exists && len(rs.RRs) > 0 {
-					out.CdsPublished = &DSRange{
-						Low:  int(row.LastPublishedCdsIndexLow.Int64),
-						High: int(row.LastPublishedCdsIndexHigh.Int64),
-					}
-				}
-			}
+	// CdsPublishedKeyIDs / CdsPublishedAt: historical fact — what
+	// CDS RRset did the engine publish at the child apex via
+	// NOTIFY(CDS), and when. Sourced from the sparse
+	// RolloverCdsPublication table; survives Trigger-1 cleanup
+	// (the cleanup-time ownership marker on RolloverZoneState is a
+	// separate concern). The line shows up in status as long as
+	// the most recent NOTIFY publication completed successfully,
+	// regardless of whether the apex CDS RRset is still on disk.
+	if ids, at, perr := loadCdsPublication(kdb, zone); perr == nil && len(ids) > 0 {
+		out.CdsPublishedKeyIDs = ids
+		out.CdsPublishedAt = at
+	} else if perr != nil {
+		lgRollover.Debug("ComputeRolloverStatus: loadCdsPublication failed", "zone", zone, "err", perr)
+	}
+
+	// ObservedKeyIDs / ObservedAt: latest parent-agent poll result.
+	if row != nil && row.LastDsObservedKeyids.Valid {
+		out.ObservedKeyIDs = parseDsObservedKeyids(row.LastDsObservedKeyids.String)
+		if row.LastDsObservedAt.Valid {
+			out.ObservedAt = row.LastDsObservedAt.String
 		}
 	}
 
@@ -160,13 +164,6 @@ func populateDSKeyidsForStatus(kdb *KeyDB, zone string, out *RolloverStatus) err
 			return fmt.Errorf("confirmed keyids: %w", err)
 		}
 		out.ConfirmedKeyIDs = ids
-	}
-	if out.CdsPublished != nil {
-		ids, err := RolloverKeyidsByIndexRange(kdb, zone, int64(out.CdsPublished.Low), int64(out.CdsPublished.High))
-		if err != nil {
-			return fmt.Errorf("cds-published keyids: %w", err)
-		}
-		out.CdsPublishedKeyIDs = ids
 	}
 	return nil
 }

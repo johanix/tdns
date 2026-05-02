@@ -41,16 +41,25 @@ type RolloverStatus struct {
 	SubmittedKeyIDs []uint16 `json:"submittedKeyids,omitempty"`
 	ConfirmedKeyIDs []uint16 `json:"confirmedKeyids,omitempty"`
 
-	// CdsPublished holds the rollover_index range of the keys
-	// backing the CDS RRset the engine has published at the child
-	// apex via NOTIFY(CDS). Populated ONLY when both
-	// last_published_cds_index_low/high are non-NULL AND the apex
-	// CDS RRset is actually present on the wire — the second check
-	// guards against a misleading "CDS published" status line when
-	// the engine claims ownership but the on-disk CDS has been
-	// wiped. CdsPublishedKeyIDs are the SEP keyids in that range.
-	CdsPublished       *DSRange `json:"cdsPublished,omitempty"`
+	// CdsPublishedKeyIDs is the SEP keyids of the CDS RRset that the
+	// engine published at the child apex via NOTIFY(CDS) in its most
+	// recent successful publish-and-NOTIFY. Sourced from the sparse
+	// RolloverCdsPublication table — the row persists across
+	// Trigger-1 cleanup so the operator can still see "CDS was
+	// published [keyids] sent <CdsPublishedAt>" after the rollover
+	// has completed and the engine no longer owns the apex CDS.
+	// Empty/nil for zones that never ran a NOTIFY publish.
 	CdsPublishedKeyIDs []uint16 `json:"cdsPublishedKeyids,omitempty"`
+	CdsPublishedAt     string   `json:"cdsPublishedAt,omitempty"` // RFC3339
+
+	// ObservedKeyIDs is the SEP keyids returned by the most recent
+	// QueryParentAgentDS poll, regardless of whether the polled set
+	// matched the engine's expected DS set. Refreshed on every
+	// successful poll; used by the operator's "DS observed" line to
+	// show the latest poll rather than the latest confirmed match.
+	// ObservedAt is the wallclock timestamp of that poll.
+	ObservedKeyIDs []uint16 `json:"observedKeyids,omitempty"`
+	ObservedAt     string   `json:"observedAt,omitempty"` // RFC3339
 
 	// Manual-rollover schedule (asap/cancel CLI flow).
 	ManualRequestedAt string `json:"manualRequestedAt,omitempty"`
