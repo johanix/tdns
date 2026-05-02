@@ -107,7 +107,7 @@ The only real lower bound on cadence is operational: how often
 are you willing to be paged for things that go wrong? Faster
 cadence means more rollovers per week means more chances for
 something to break in a way that needs human attention. We
-discuss this in section 5.
+discuss this in section 6.
 
 
 ### 2.3 RRSIG validity governs outage survival
@@ -182,9 +182,336 @@ custom work. The default tdns earliest-rollover gate is just
 `now + max_ttl + margin`.
 
 
-## 4. Worked examples
+## 4. Timing equations and cache-flush invariants
 
-Three illustrative scenarios with concrete values.
+This section is the **canonical reference** for the rollover
+engine's timing math. Implementation must match the equations
+here. If code disagrees, this section wins or the disagreement is
+filed as a design issue.
+
+The earlier "cache-flush analysis" (§3) gives the intuition; this
+section makes it rigorous.
+
+### 4.1 Notation
+
+Throughout: `T_X` denotes a **timestamp** (a moment in wall time);
+plain `X` denotes a **duration** (a difference between two
+timestamps). Equations mix the two; durations always add to or
+subtract from timestamps to yield timestamps.
+
+`KSK_n` denotes the n-th KSK in the rollover pipeline. `T_roll_n`
+is the moment KSK_n becomes active and starts signing the zone's
+RRSIG-over-DNSKEY (and therefore the entire chain of trust).
+
+### 4.2 Parameters
+
+Every duration the timing math depends on, with the config knob
+or observation that supplies its value.
+
+| Symbol | Type | Source | What it represents |
+|--------|------|--------|--------------------|
+| `parent_prop` | duration | operator estimate via `rollover.ds-publish-delay` | Parent-side primary→secondary AXFR/IXFR + parent registry-pipeline latency. Time between "child sent UPDATE / NOTIFY accepted by parent" and "parent's secondaries serve the new DS RRset." |
+| `DS_TTL` | duration | **observable** in DS responses (every DS poll carries the TTL field) | TTL of the DS RRset at the parent. Bounds how long resolvers cache the old DS after parent publishes a new one. |
+| `child_prop` | duration | `kasp.propagation_delay` | Child-side primary→secondary propagation. Time between "child primary publishes new DNSKEY RRset" and "all child secondaries serve it." |
+| `DNSKEY_TTL` | duration | derived: `min(ttls.dnskey, ttls.max_served)` clamped further by K-step clamping near rollover | TTL of the DNSKEY RRset as actually served to validators. Bounds how long resolvers cache the old DNSKEY RRset after the child publishes a new one. |
+| `T_roll_n` | timestamp | `T_roll_n = active.active_at + KSK.lifetime` (steady-state cadence) | Moment KSK_n becomes the active signer. |
+| `T_DS_pub_n` | timestamp | observed from parent DS query (= when DS for KSK_n first appears at parent) | Moment parent's primary publishes DS for KSK_n. |
+| `T_DNSKEY_pub_n` | timestamp | engine-controlled: ds-published → standby transition for KSK_n | Moment child's primary publishes DNSKEY_n in the served DNSKEY RRset. |
+
+### 4.3 The two cache-flush invariants
+
+For KSK_n to take over signing safely at `T_roll_n`, two
+independent cache-flush conditions must hold.
+
+**Invariant DS** — every validator must have DS_n in its cache by
+`T_roll_n`. A validator that queried just before parent's
+secondaries had DS_n caches the old DS for `DS_TTL` more. So:
+
+```
+T_DS_pub_n + parent_prop + DS_TTL  ≤  T_roll_n
+```
+
+Equivalently, the latest DS_n can be published at parent and still
+satisfy the invariant:
+
+```
+T_DS_pub_n  ≤  T_roll_n − parent_prop − DS_TTL
+```
+
+**Invariant DNSKEY** — every validator must have DNSKEY_n in its
+cache by `T_roll_n`. Same reasoning on the child side:
+
+```
+T_DNSKEY_pub_n + child_prop + DNSKEY_TTL  ≤  T_roll_n
+```
+
+Equivalently:
+
+```
+T_DNSKEY_pub_n  ≤  T_roll_n − child_prop − DNSKEY_TTL
+```
+
+The two invariants are independent because they govern different
+caches: DS lives at the parent and is cached on the way down the
+delegation chain; DNSKEY lives at the child and is cached when
+validators look up the chain. Both must be in place at `T_roll_n`.
+
+### 4.4 DS-side: structurally satisfied by multi-DS pipeline depth
+
+In multi-DS rollover, parent pre-publishes DS for several
+upcoming KSKs. With pipeline depth `N = rollover.num-ds`, the DS
+for KSK_n is at the parent from at least N rollover lifetimes
+before `T_roll_n`. So:
+
+```
+T_DS_pub_n  ≈  T_roll_n − N × KSK.lifetime    (steady state)
+```
+
+For any reasonable parent (`parent_prop + DS_TTL` measured in
+minutes) and any reasonable rollover cadence
+(`KSK.lifetime` ≥ minutes), the constraint
+`parent_prop + DS_TTL  <  N × KSK.lifetime` is comfortably
+satisfied. **The engine does not enforce this invariant directly;
+the multi-DS pipeline depth gives it for free.**
+
+The exception is fresh key generation when the pipeline is being
+filled (zone bootstrap, or after a hardfail-and-recovery). The
+engine fills the pipeline as fast as the parent allows; if the
+parent is slow enough that DS for a freshly-generated key isn't
+visible by `T_roll_n − parent_prop − DS_TTL`, the engine will
+either delay the rollover (`T_roll_n` shifts forward) or, in
+multi-DS, fall back to KSK_{n-1} from a prior pipeline slot. This
+is operator-tunable via `rollover.num-ds` (deeper pipeline = more
+buffer).
+
+### 4.5 DNSKEY-side: precise engine equation for ds-published → standby
+
+The child controls `T_DNSKEY_pub_n` directly: it's the moment the
+rollover engine advances KSK_n from state `ds-published` to
+`standby`, at which point the DNSKEY enters the served DNSKEY
+RRset.
+
+To minimize DNSKEY exposure (the post-quantum motivation for
+keeping unrevealed keys at DS-only), the engine should advance
+**as late as the invariant permits**:
+
+```
+T_DNSKEY_pub_n  =  T_roll_n − child_prop − DNSKEY_TTL
+```
+
+Equivalently, the engine's transition rule:
+
+> Advance KSK_n from `ds-published` to `standby` at time
+> `T_roll_n − child_prop − DNSKEY_TTL`.
+
+This is the canonical formula. Any code that implements
+ds-published → standby must use it.
+
+### 4.6 Effective DNSKEY_TTL: the clamping caveat
+
+The DNSKEY_TTL parameter is the TTL **as served to validators at
+the moment they cache the response**, not the TTL the operator
+configured.
+
+Three knobs collapse into the served TTL:
+
+1. **`ttls.dnskey`** — operator's intended DNSKEY TTL (e.g. 2h).
+2. **`ttls.max_served`** — zone-wide TTL ceiling. The serving
+   layer clamps any RRset's TTL down to this on-the-wire. So the
+   served DNSKEY TTL is `min(ttls.dnskey, ttls.max_served)`.
+3. **K-step clamping near rollover** — when clamping is enabled,
+   TTLs progressively reduce to `clamping.margin` as `T_roll_n`
+   approaches. A validator that queries during the clamping
+   window caches an even shorter TTL.
+
+For the cache-flush invariant the engine must use the **largest
+TTL a validator might have cached just before `T_DNSKEY_pub_n`**.
+That's `min(ttls.dnskey, ttls.max_served)` when clamping has not
+yet kicked in for the upcoming rollover. K-step clamping
+shortens this further but is conservative (not relied on by the
+invariant).
+
+So the operator-facing rule:
+
+```
+DNSKEY_TTL  =  min(ttls.dnskey, ttls.max_served)
+```
+
+If `ttls.max_served` is set (recommended for any zone with
+auto-rollover), it's the value that matters.
+
+### 4.7 Parent-side parameters: observable, not unknown
+
+Yesterday's framing of "parent-side timing as an unknown gap" was
+incorrect. Both `parent_prop` and `DS_TTL` have well-defined
+sources:
+
+- **`parent_prop` ≈ `rollover.ds-publish-delay`.** The operator
+  estimates parent-side latency as the `ds-publish-delay` config
+  knob and tunes it per parent based on observed behaviour.
+  `ds-publish-delay = 30s` for direct-publish parents,
+  `ds-publish-delay = 1h` for batched registries, and so on. The
+  engine's existing usage of `ds-publish-delay` as the
+  observation budget is consistent with this interpretation.
+
+- **`DS_TTL` is observable.** Every DS RRset response from the
+  parent (or its secondaries) carries the TTL in the wire format.
+  The engine can extract and remember it on each successful poll.
+  Until the engine consumes this observation explicitly, callers
+  that need `DS_TTL` for safety bounds can use `ds-publish-delay`
+  itself as an upper-bound proxy (since
+  `parent_prop + DS_TTL ≤ 2 × ds-publish-delay` in any
+  operator-tuned configuration).
+
+The protocol gap is narrower than it might appear: today's DNS
+UPDATE doesn't carry a TTL hint from child to parent, so the
+parent sets `DS_TTL` unilaterally based on its own policy. That's
+fine for the engine because it observes the value rather than
+declaring it.
+
+### 4.8 Worked example: the testbed config
+
+Concrete numbers from the `fastroll` policy:
+
+```
+KSK.lifetime         = 10m
+rollover.ds-publish-delay = 30s
+kasp.propagation_delay    = 1m
+ttls.dnskey          = 2h
+ttls.max_served      = 5m
+clamping.margin      = 5m
+rollover.num-ds      = 3
+```
+
+Derived parameters:
+
+```
+parent_prop  = ds-publish-delay  = 30s
+child_prop   = kasp.propagation_delay  = 1m
+DNSKEY_TTL   = min(ttls.dnskey, ttls.max_served)  = min(2h, 5m)  = 5m
+DS_TTL       = (observed from DS responses; assume ≈ parent's policy = 5m for this testbed)
+```
+
+For a rollover from KSK_n to KSK_n+1 with active KSK_n stamped at
+`active_at = 09:11:41`:
+
+```
+T_roll_{n+1}     = active_at + KSK.lifetime  = 09:21:41
+
+T_DNSKEY_pub_{n+1}  = T_roll_{n+1} − child_prop − DNSKEY_TTL
+                    = 09:21:41 − 1m − 5m
+                    = 09:15:41
+```
+
+So KSK_{n+1}'s DNSKEY enters the served zone at `09:15:41` — six
+minutes before the rollover. Pipeline keys further out
+(`KSK_{n+2}`) follow the same formula with `T_roll_{n+2} =
+T_roll_{n+1} + KSK.lifetime`, putting their `T_DNSKEY_pub` 10
+minutes later.
+
+For the example status snapshot from the testbed (taken at
+`09:19:16`, 8 minutes after `active_at`):
+
+```
+KSK_{n+1}  T_DNSKEY_pub  =  09:15:41   (3m35s in the past)
+                        →  should already be in `standby` state
+                           with DNSKEY served
+
+KSK_{n+2}  T_DNSKEY_pub  =  09:25:41   (6m25s in the future)
+                        →  correctly held in `ds-published` state
+```
+
+If the testbed shows KSK_{n+1} still in `ds-published` at
+`09:19:16`, the engine's transition formula disagrees with this
+section — either the engine is using a different formula (bug)
+or its check cadence skipped past the transition moment without
+acting (cadence bug, separate concern).
+
+### 4.9 Visual timeline
+
+A single key's path through the pipeline, annotated with the
+cache-flush windows:
+
+```
+KSK_n state:
+
+   created → ds-published ─────────────────── standby ──── active ──── retired ── removed
+             ▲                                ▲           ▲                       ▲
+             T_DS_pub_n                       T_DNSKEY_   T_roll_n                end of life
+             (parent publishes DS)            pub_n
+                                              (child publishes DNSKEY)
+
+DS-side cache-flush window (parent → validator):
+
+             T_DS_pub_n        +     parent_prop     +     DS_TTL              ≤  T_roll_n
+             |                                                                |
+             └────────── all validators have new DS by here ──────────────────┘
+
+DNSKEY-side cache-flush window (child → validator):
+
+                                              T_DNSKEY_pub_n    +    child_prop  +  DNSKEY_TTL  ≤  T_roll_n
+                                              |                                                  |
+                                              └─── all validators have new DNSKEY by here ──────┘
+```
+
+The DS window is much wider than the DNSKEY window in steady
+state, because multi-DS pre-publishes DS several rollovers in
+advance. The DNSKEY window is exactly `child_prop + DNSKEY_TTL`
+by construction (engine times the transition to make it so).
+
+Multi-key view, showing the multi-DS pipeline at one moment:
+
+```
+                                                                        T_roll_n
+                                                                        ▼
+KSK_{n-1}:    ── active ── retired ── removed →
+KSK_n:        ─────── standby ─────── active ──→
+KSK_{n+1}:    ─ ds-published ─────── standby ──→
+KSK_{n+2}:    ─ ds-published ───────────────── ds-published ─→
+                                              ▲
+                                       T_DNSKEY_pub_{n+1}
+                                       = T_roll_n − child_prop − DNSKEY_TTL
+
+State of the served DNSKEY RRset right before T_roll_n:
+   ─ KSK_{n-1}  (retired, signing for grace period)
+   ─ KSK_n      (active, signing)
+   ─ KSK_{n+1}  (standby; DNSKEY revealed since T_DNSKEY_pub_{n+1})
+   (KSK_{n+2}'s DNSKEY is NOT in the zone — still ds-published)
+
+State of the parent's DS RRset:
+   ─ DS for KSK_n
+   ─ DS for KSK_{n+1}
+   ─ DS for KSK_{n+2}
+```
+
+`KSK_{n+2}`'s DNSKEY remains hidden from the zone for a full
+rollover lifetime more — this is the post-quantum benefit of
+delaying ds-published → standby until the cache-flush invariant
+forces it.
+
+### 4.10 Verification rule
+
+This section is the **canonical reference** for the engine's
+timing behaviour. Any code change that affects:
+
+- when DS is submitted to the parent
+- when ds-published → standby fires
+- when standby → active fires
+- the relationship between any two of the timestamps `T_DS_pub`,
+  `T_DNSKEY_pub`, `T_roll`
+
+must be verified against the equations in §4.3, §4.5, and §4.7.
+If code computes `T_DNSKEY_pub` differently from §4.5's formula,
+the code is wrong. If a refactor would change the semantics,
+update this section first (in a design doc), then update the
+code, then update the operator guide to match.
+
+If the engine starts using a parameter not in §4.2's table, that
+parameter must be added to the table. Implicit parameters are
+the source of all the timing bugs we have hit so far.
+
+
+## 5. Worked examples
 
 
 ### 4.1 The 10-minute testbed
@@ -340,7 +667,7 @@ absence." That's reasonable but not necessary — the engine
 re-signs continuously, not on the rollover schedule.
 
 
-## 5. Operational considerations for fast cadences
+## 6. Operational considerations for fast cadences
 
 Fast rollover cadences are operationally sound — the engine
 keeps the zone validating throughout — but they have real costs
@@ -373,7 +700,7 @@ machinery itself does not impose a lower bound — you can roll
 every minute if you really want — but you should not.
 
 
-## 6. Required configuration parameters
+## 7. Required configuration parameters
 
 Per-zone configuration:
 
@@ -478,7 +805,7 @@ Set it to something well above clock-skew tolerance (60 seconds
 minimum, 15 minutes typical for production).
 
 
-## 7. Validation and verification
+## 8. Validation and verification
 
 Once the policy is configured, validate the YAML before
 restarting the daemon:
@@ -516,7 +843,7 @@ margin. Both are correct answers to different operator
 questions.
 
 
-## 8. What the engine handles automatically vs. what needs you
+## 9. What the engine handles automatically vs. what needs you
 
 The engine handles:
 
@@ -549,7 +876,7 @@ The engine does *not* handle automatically:
   engine does not currently roll ZSKs automatically.
 
 
-## 9. When something goes wrong
+## 10. When something goes wrong
 
 The four failure categories the engine recognizes:
 
@@ -580,7 +907,7 @@ softfail/hardfail counters tell you how many attempts have
 happened. The `last_softfail_*` fields tell you when and why.
 
 
-## 10. Further reading
+## 11. Further reading
 
 - **Design background:** the rollover-overhaul plan at
   `tdns/docs/2026-04-29-rollover-overhaul.md` documents the
