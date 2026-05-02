@@ -130,12 +130,19 @@ func newKeystoreDnssecDsPushCmd(_ string) *cobra.Command {
 
 	c := &cobra.Command{
 		Use:   "ds-push",
-		Short: "Compute DS RRset from keystore and push whole RRset to parent via SIG(0) UPDATE",
+		Short: "Compute DS RRset from keystore and push to parent (UPDATE-only in this offline mode)",
 		Long: `Loads tdns config (same as other CLI commands using -c), opens the local keystore DB,
-resolves parent + DSYNC UPDATE target, builds a whole-DS replacement UPDATE, signs with the
-zone's active SIG(0) key, and sends it. Requires imrengine in config.
+and pushes the whole DS RRset to the parent. Requires imrengine in config.
 
-Use --dry-run to print the DS set and UPDATE without sending.`,
+Offline mode: this CLI invocation builds a stub *ZoneData with no rollover policy
+attached, so PushDSRRsetForRollover falls through to the legacy single-scheme
+UPDATE path (whole-DS replacement, signed with the zone's active SIG(0) key).
+The auto / prefer-* / force-* dsync-scheme-preference values are honored only
+inside the daemon's rollover engine, where the policy is loaded from
+dnssecpolicies. To exercise NOTIFY pushes, run the daemon and let
+RolloverAutomatedTick drive the push.
+
+Use --dry-run to print the DS set and the UPDATE without sending.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs(cmd, "zonename")
 			ctx := context.Background()
@@ -191,7 +198,14 @@ Use --dry-run to print the DS set and UPDATE without sending.`,
 				return
 			}
 
-			res, err := tdns.PushWholeDSRRset(ctx, zd, kdb, imr)
+			deps := tdns.RolloverEngineDeps{
+				Conf:   &Conf,
+				KDB:    kdb,
+				Zone:   zd,
+				Imr:    imr,
+				Policy: zd.DnssecPolicy,
+			}
+			res, err := tdns.PushDSRRsetForRollover(ctx, deps)
 			if err != nil {
 				log.Fatalf("ds-push: %v", err)
 			}
@@ -761,7 +775,11 @@ func printStateTable(s *tdns.RolloverStatus) {
 		}
 	}
 	if s.LastUpdate != "" {
-		left = append(left, kv{"last UPDATE:", formatRolloverTime(s.LastUpdate)})
+		v := formatRolloverTime(s.LastUpdate)
+		if s.LastAttemptScheme != "" {
+			v = fmt.Sprintf("%s via %s", v, s.LastAttemptScheme)
+		}
+		left = append(left, kv{"last push:", v})
 	}
 	if s.ExpectedBy != "" {
 		left = append(left, kv{"expected by:", formatRolloverTime(s.ExpectedBy)})
@@ -769,22 +787,62 @@ func printStateTable(s *tdns.RolloverStatus) {
 	if s.AttemptTimeout != "" {
 		left = append(left, kv{"attempt timeout:", formatRolloverTime(s.AttemptTimeout)})
 	}
-	if s.Submitted != nil {
-		left = append(left, kv{"DS submitted:", dashKeyidsBracket(formatKeyidBracketList(s.SubmittedKeyIDs))})
+	// Per-scheme lines:
+	//   - DS UPDATE: rendered when Submitted is set AND the most
+	//     recent push attempt used UPDATE (LastAttemptScheme contains
+	//     "UPDATE"). Timestamp is the dispatcher's send time
+	//     (LastUpdate = last_attempt_started_at; parallel dispatch
+	//     fires both legs from the same instant, so a per-scheme
+	//     send timestamp is artificial).
+	//   - CDS published: rendered when the engine has ever
+	//     successfully published CDS via NOTIFY (sparse
+	//     RolloverCdsPublication row). Survives Trigger-1 cleanup;
+	//     it's a historical fact, not a current-state claim.
+	//   - DS observed: rendered when ObservedKeyIDs is set —
+	//     i.e. the engine has done at least one parent-agent poll
+	//     that returned a usable answer. Reflects the latest poll's
+	//     answer, not the latest confirmed match.
+	updateUsed := strings.Contains(s.LastAttemptScheme, "UPDATE")
+	if s.Submitted != nil && updateUsed {
+		v := dashKeyidsBracket(formatKeyidBracketList(s.SubmittedKeyIDs))
+		if s.LastUpdate != "" {
+			v = fmt.Sprintf("%s sent %s", v, formatRolloverTime(s.LastUpdate))
+		}
+		left = append(left, kv{"DS UPDATE:", v})
+	} else if s.Submitted != nil {
+		// Fallback: no scheme info recorded but we have a submitted
+		// range from a pre-NOTIFY-scheme rollover. Render the legacy
+		// line shape so existing testbeds don't lose status info.
+		left = append(left, kv{"DS UPDATE:", dashKeyidsBracket(formatKeyidBracketList(s.SubmittedKeyIDs))})
 	}
-	if s.Confirmed != nil {
-		left = append(left, kv{"DS confirmed:", dashKeyidsBracket(formatKeyidBracketList(s.ConfirmedKeyIDs))})
+	if len(s.CdsPublishedKeyIDs) > 0 {
+		v := formatKeyidBracketList(s.CdsPublishedKeyIDs)
+		if s.CdsPublishedAt != "" {
+			v = fmt.Sprintf("%s sent %s", v, formatRolloverTime(s.CdsPublishedAt))
+		}
+		left = append(left, kv{"CDS published:", v})
+	}
+	if len(s.ObservedKeyIDs) > 0 {
+		v := formatKeyidBracketList(s.ObservedKeyIDs)
+		if s.ObservedAt != "" {
+			v = fmt.Sprintf("%s observed %s", v, formatRolloverTime(s.ObservedAt))
+		}
+		left = append(left, kv{"DS observed:", v})
+	} else if s.Confirmed != nil {
+		// Pre-existing-row fallback: zone has confirmed history but
+		// no last_ds_observed_keyids column populated yet (e.g. row
+		// from a daemon that pre-dates this commit). Show what we
+		// have so the line doesn't disappear post-upgrade.
+		left = append(left, kv{"DS observed:", dashKeyidsBracket(formatKeyidBracketList(s.ConfirmedKeyIDs))})
 	}
 
-	// Right column: timing config + history & polling.
+	// Right column: timing config + scheduling. Dropped:
+	//   - "last success" — same instant as DS observed <time> when
+	//     populated; redundant.
+	//   - "last poll"    — same instant as DS observed <time> by
+	//     construction (every poll updates last_ds_observed_*).
 	if s.Policy != nil && s.Policy.DsPublishDelay != "" {
 		right = append(right, kv{"ds-publish-delay:", s.Policy.DsPublishDelay})
-	}
-	if s.LastSuccess != "" {
-		right = append(right, kv{"last success:", formatRolloverTime(s.LastSuccess)})
-	}
-	if s.LastPoll != "" {
-		right = append(right, kv{"last poll:", formatRolloverTime(s.LastPoll)})
 	}
 	if s.NextPoll != "" {
 		right = append(right, kv{"next poll:", formatRolloverTime(s.NextPoll)})

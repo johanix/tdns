@@ -636,6 +636,23 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 		rrtype := rr.Header().Rrtype
 		rrtypestr := dns.TypeToString[rrtype]
 
+		// CDS-publication observability: trace the apex CDS RRset's
+		// lifecycle through the update path so we can see whether the
+		// engine's queued publish is landing on disk and surviving.
+		if rrtype == dns.TypeCDS {
+			before := 0
+			if owner, _ := zd.GetOwner(ownerName); owner != nil {
+				if rs, ok := owner.RRtypes.Get(dns.TypeCDS); ok {
+					before = len(rs.RRs)
+				}
+			}
+			lgRollover.Debug("zone-update CDS action received",
+				"zone", zd.ZoneName, "owner", ownerName,
+				"class", dns.ClassToString[class],
+				"apex_cds_rrs_before", before,
+				"internal_update", ur.InternalUpdate)
+		}
+
 		rrcopy := dns.Copy(rr)
 		rrcopy.Header().Ttl = zd.UpdatePolicy.Zone.TTL
 		rrcopy.Header().Class = dns.ClassINET
@@ -706,6 +723,10 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 			updated = true
 			// zd.Options["dirty"] = true
 			lg.Debug("ApplyZoneUpdateToZoneData: Remove RRset", "rr", rr.String())
+			if rrtype == dns.TypeCDS {
+				lgRollover.Debug("zone-update CDS RRset deleted (ClassANY)",
+					"zone", zd.ZoneName, "owner", ownerName)
+			}
 			continue
 
 		case dns.ClassINET:
@@ -738,6 +759,12 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 		owner.RRtypes.Set(rrtype, rrset)
 		updated = true
 		// zd.Options["dirty"] = true
+		if rrtype == dns.TypeCDS {
+			lgRollover.Debug("zone-update CDS add committed",
+				"zone", zd.ZoneName, "owner", ownerName,
+				"apex_cds_rrs_after", len(rrset.RRs),
+				"rrsigs", len(rrset.RRSIGs))
+		}
 		continue
 	}
 

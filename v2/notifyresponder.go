@@ -6,11 +6,54 @@ package tdns
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"sync"
 
+	core "github.com/johanix/tdns/v2/core"
+	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
+
+// advertisesDsyncNotify reports whether the parent zone's local DSYNC
+// RRset advertises NOTIFY for the given RRtype. ANY-typed DSYNC RRs
+// match every qtype. The DSYNC owner is "_dsync.<zone>" — same lookup
+// that ops_dsync.go uses. In-memory zone read; no DNS round-trip.
+//
+// Returns false if the zone has no DSYNC RRset, no NOTIFY-scheme RR,
+// or no RR matching the qtype. The NOTIFY responder uses this to gate
+// incoming NOTIFY(CDS)/NOTIFY(CSYNC) before kicking off the async
+// scan: a child mis-configured to send NOTIFY at a parent that
+// advertises only UPDATE (or only NOTIFY for the other RRtype) gets
+// REFUSED + EDENotifyDsyncSchemeNotAdvertised on the first attempt
+// instead of a generic parent-publish-failure after attempt-timeout.
+func (zd *ZoneData) advertisesDsyncNotify(qtype uint16) bool {
+	owner, err := zd.GetOwner("_dsync." + zd.ZoneName)
+	if err != nil || owner == nil {
+		return false
+	}
+	rrset := owner.RRtypes.GetOnlyRRSet(core.TypeDSYNC)
+	if rrset.RRs == nil {
+		return false
+	}
+	for _, rr := range rrset.RRs {
+		prr, ok := rr.(*dns.PrivateRR)
+		if !ok {
+			continue
+		}
+		ds, ok := prr.Data.(*core.DSYNC)
+		if !ok {
+			continue
+		}
+		if ds.Scheme != core.SchemeNotify {
+			continue
+		}
+		if ds.Type == qtype || ds.Type == dns.TypeANY {
+			return true
+		}
+	}
+	return false
+}
 
 // NotifyHandlerWithCallback consumes DnsNotifyRequest messages from the DnsNotifyQ channel
 // and calls the provided handler function. This allows custom NOTIFY handlers
@@ -112,18 +155,38 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 
 	switch ntype {
 	case dns.TypeSOA, dns.TypeDNSKEY:
-		// For SOA and DNSKEY, target the zone for qname itself
-		var found bool
-		zd, found = FindZone(qname)
+		// For SOA and DNSKEY, target the zone for qname itself.
+		// FindZone walks up from qname so it can return a containing
+		// zone for an interior name (e.g. host.example.com. resolves
+		// to example.com.). NOTIFY(SOA)/NOTIFY(DNSKEY) for an
+		// interior name is not a valid request — refuse it rather
+		// than silently refreshing the containing zone.
+		zd, _ = FindZone(qname)
 		if zd == nil {
 			lgHandler.Warn("received NOTIFY for unknown zone, ignoring", "type", dns.TypeToString[ntype], "zone", qname)
 			m.SetRcode(dnr.Msg, dns.RcodeRefused)
+			edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyParentNotAuthoritative,
+				fmt.Sprintf("server is not authoritative for %s", qname), false)
 			dnr.ResponseWriter.WriteMsg(m)
 			return nil
 		}
-		if !found && zd.IsChildDelegation(qname) {
-			lgHandler.Warn("received NOTIFY for child delegation, ignoring", "type", dns.TypeToString[ntype], "qname", qname)
+		if !strings.EqualFold(dns.Fqdn(zd.ZoneName), dns.Fqdn(qname)) {
+			// FindZone returned a containing zone, not an exact
+			// zone match. Could be a child delegation point or a
+			// plain interior name; either way we don't accept the
+			// NOTIFY against the containing zone.
+			if zd.IsChildDelegation(qname) {
+				lgHandler.Warn("received NOTIFY for child delegation, ignoring", "type", dns.TypeToString[ntype], "qname", qname)
+				m.SetRcode(dnr.Msg, dns.RcodeRefused)
+				edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyTargetNotChildDelegation,
+					fmt.Sprintf("%s is a child delegation, not authoritative on this server", qname), false)
+				dnr.ResponseWriter.WriteMsg(m)
+				return nil
+			}
+			lgHandler.Warn("received NOTIFY for interior name in zone, ignoring", "type", dns.TypeToString[ntype], "qname", qname, "zone", zd.ZoneName)
 			m.SetRcode(dnr.Msg, dns.RcodeRefused)
+			edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyParentNotAuthoritative,
+				fmt.Sprintf("%s is not a zone apex on this server (containing zone %s)", qname, zd.ZoneName), false)
 			dnr.ResponseWriter.WriteMsg(m)
 			return nil
 		}
@@ -136,6 +199,8 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 		if len(labels) < 2 || labels[1] == "" {
 			lgHandler.Warn("NOTIFY(CDS/CSYNC) qname has no parent", "qname", qname)
 			m.SetRcode(dnr.Msg, dns.RcodeRefused)
+			edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyTargetNotChildDelegation,
+				fmt.Sprintf("%s has no parent label", qname), false)
 			dnr.ResponseWriter.WriteMsg(m)
 			return nil
 		}
@@ -143,12 +208,30 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 		if zd == nil {
 			lgHandler.Warn("parent zone not authoritative, refusing NOTIFY", "type", dns.TypeToString[ntype], "qname", qname)
 			m.SetRcode(dnr.Msg, dns.RcodeNotAuth)
+			edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyParentNotAuthoritative,
+				fmt.Sprintf("server is not authoritative for parent of %s", qname), false)
 			dnr.ResponseWriter.WriteMsg(m)
 			return nil
 		}
 		if !zd.IsChildDelegation(qname) {
 			lgHandler.Warn("qname is not a child delegation in parent zone", "type", dns.TypeToString[ntype], "qname", qname, "parent", zd.ZoneName)
 			m.SetRcode(dnr.Msg, dns.RcodeRefused)
+			edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyTargetNotChildDelegation,
+				fmt.Sprintf("%s is not a child delegation of %s", qname, zd.ZoneName), false)
+			dnr.ResponseWriter.WriteMsg(m)
+			return nil
+		}
+		// DSYNC scheme gate: refuse NOTIFY for an RRtype the parent
+		// does not advertise NOTIFY for. Catches misconfigured
+		// children on the very first push instead of after
+		// attempt-timeout. In-memory zone read; no DNS round-trip.
+		if !zd.advertisesDsyncNotify(ntype) {
+			lgHandler.Warn("parent does not advertise NOTIFY for type, refusing",
+				"type", dns.TypeToString[ntype], "parent", zd.ZoneName, "qname", qname)
+			m.SetRcode(dnr.Msg, dns.RcodeRefused)
+			edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyDsyncSchemeNotAdvertised,
+				fmt.Sprintf("parent zone %s does not advertise NOTIFY for type %s; ignoring",
+					zd.ZoneName, dns.TypeToString[ntype]), false)
 			dnr.ResponseWriter.WriteMsg(m)
 			return nil
 		}
@@ -157,6 +240,8 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 	default:
 		lgHandler.Warn("unknown NOTIFY type", "type", dns.TypeToString[ntype])
 		m.SetRcode(dnr.Msg, dns.RcodeRefused)
+		edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyUnknownType,
+			fmt.Sprintf("NOTIFY for type %s not supported", dns.TypeToString[ntype]), false)
 		dnr.ResponseWriter.WriteMsg(m)
 		return nil
 	}
@@ -165,6 +250,8 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 	if zd.Error && zd.ErrorType != RefreshError {
 		lgHandler.Error("zone in error state, refusing NOTIFY", "type", dns.TypeToString[ntype], "qname", qname, "zone", targetZoneName, "errorMsg", zd.ErrorMsg)
 		m.SetRcode(dnr.Msg, dns.RcodeServerFailure)
+		edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyZoneInErrorState,
+			fmt.Sprintf("zone %s in error state: %s", targetZoneName, zd.ErrorMsg), false)
 		dnr.ResponseWriter.WriteMsg(m)
 		return nil
 	}

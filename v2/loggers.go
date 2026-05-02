@@ -1,6 +1,6 @@
 package tdns
 
-import(
+import (
 	"log/slog"
 )
 
@@ -14,3 +14,4 @@ var lgConnRetryEngine = Logger("conn-retry")
 var lgElect = Logger("elect")
 var lgProviderGroup = Logger("provider-group")
 var lgSigner = Logger("signer")
+var lgRollover = Logger("rollover")

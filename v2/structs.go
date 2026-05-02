@@ -247,6 +247,20 @@ type DnssecPolicyRolloverConf struct {
 	DsPublishDelay           string `yaml:"ds-publish-delay" mapstructure:"ds-publish-delay"`
 	MaxAttemptsBeforeBackoff int    `yaml:"max-attempts-before-backoff" mapstructure:"max-attempts-before-backoff"`
 	SoftfailDelay            string `yaml:"softfail-delay" mapstructure:"softfail-delay"`
+
+	// DsyncSchemePreference controls which DSYNC scheme(s) the rollover
+	// engine attempts when pushing DS to the parent. Values:
+	//   - "auto" (default): single advertised scheme is used; if the
+	//     parent advertises both UPDATE and NOTIFY for CDS, both are
+	//     dispatched in parallel and any wire-level NOERROR wins.
+	//   - "prefer-update", "prefer-notify": single-scheme behavior on
+	//     a both-advertising parent, falling through to the only
+	//     advertised scheme on a one-advertising parent.
+	//   - "force-update", "force-notify": only the named scheme is
+	//     attempted; if the parent does not advertise it, the engine
+	//     halts in child-config:waiting-for-parent until the parent
+	//     starts advertising it.
+	DsyncSchemePreference string `yaml:"dsync-scheme-preference" mapstructure:"dsync-scheme-preference"`
 }
 
 // DnssecPolicyTtlsConf is the YAML `ttls:` subtree under a DNSSEC policy.

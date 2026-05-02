@@ -49,6 +49,29 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInte
 		populateFromZoneRow(out, row)
 	}
 
+	// CdsPublishedKeyIDs / CdsPublishedAt: historical fact — what
+	// CDS RRset did the engine publish at the child apex via
+	// NOTIFY(CDS), and when. Sourced from the sparse
+	// RolloverCdsPublication table; survives Trigger-1 cleanup
+	// (the cleanup-time ownership marker on RolloverZoneState is a
+	// separate concern). The line shows up in status as long as
+	// the most recent NOTIFY publication completed successfully,
+	// regardless of whether the apex CDS RRset is still on disk.
+	if ids, at, perr := loadCdsPublication(kdb, zone); perr == nil && len(ids) > 0 {
+		out.CdsPublishedKeyIDs = ids
+		out.CdsPublishedAt = at
+	} else if perr != nil {
+		lgRollover.Debug("ComputeRolloverStatus: loadCdsPublication failed", "zone", zone, "err", perr)
+	}
+
+	// ObservedKeyIDs / ObservedAt: latest parent-agent poll result.
+	if row != nil && row.LastDsObservedKeyids.Valid {
+		out.ObservedKeyIDs = parseDsObservedKeyids(row.LastDsObservedKeyids.String)
+		if row.LastDsObservedAt.Valid {
+			out.ObservedAt = row.LastDsObservedAt.String
+		}
+	}
+
 	out.Headline = headlineForPhase(out.Phase)
 	out.Hint = hintForState(out.Phase, row, pol, now)
 
@@ -248,6 +271,9 @@ func populateFromZoneRow(out *RolloverStatus, row *RolloverZoneRow) {
 		out.LastUpdate = row.LastAttemptStartedAt.String
 		out.LastAttemptStarted = row.LastAttemptStartedAt.String
 	}
+	if row.LastAttemptScheme.Valid {
+		out.LastAttemptScheme = row.LastAttemptScheme.String
+	}
 
 	out.HardfailCount = row.HardfailCount
 	if row.NextPushAt.Valid {
@@ -332,6 +358,14 @@ func headlineForPhase(phase string) string {
 func hintForState(phase string, row *RolloverZoneRow, pol *DnssecPolicy, now time.Time) string {
 	switch phase {
 	case rolloverPhasePushSoftfail:
+		// child-config:waiting-for-parent has a different operational
+		// shape: polling continues but the parent has lost the ability
+		// to consume our push entirely. Operator action is on the
+		// parent side (advertise DSYNC), not the child side.
+		if row != nil && row.LastSoftfailCategory.Valid &&
+			row.LastSoftfailCategory.String == SoftfailChildConfigWaitingForParent {
+			return "waiting for parent to advertise a usable DSYNC scheme — auto-recovers when restored"
+		}
 		return "parent fix will be auto-detected — polling never stops"
 	case rolloverPhasePendingParentObserve:
 		if row == nil || pol == nil || !row.LastAttemptStartedAt.Valid {

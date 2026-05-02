@@ -39,6 +39,26 @@ type RolloverZoneRow struct {
 	LastSuccessAt        sql.NullString
 	LastAttemptStartedAt sql.NullString
 	LastPollAt           sql.NullString
+
+	// NOTIFY-scheme phase 2 fields. LastAttemptScheme is diagnostic-only
+	// ("UPDATE", "NOTIFY", or "UPDATE,NOTIFY" when a parallel send had
+	// at least one wire-level NOERROR). LastPublishedCdsIndexLow/High
+	// are engine-functional: a non-NULL pair asserts ownership of the
+	// current child-apex CDS RRset for compare-on-cleanup matching.
+	// Cleared when cleanupCdsAfterConfirm queues the unpublish.
+	LastAttemptScheme         sql.NullString
+	LastPublishedCdsIndexLow  sql.NullInt64
+	LastPublishedCdsIndexHigh sql.NullInt64
+
+	// LastDsObservedKeyids is the CSV of SEP keyids returned by the
+	// most recent QueryParentAgentDS call, regardless of whether the
+	// returned set matched the engine's expected set. Updated on
+	// every successful poll. Format: "12345,56789,43215". The
+	// operator's "DS observed" status line is sourced from this so
+	// it tracks the latest poll rather than the latest confirmed
+	// match. LastDsObservedAt is the wallclock of that poll.
+	LastDsObservedKeyids sql.NullString
+	LastDsObservedAt     sql.NullString
 }
 
 func EnsureRolloverZoneRow(kdb *KeyDB, zone string) error {
@@ -65,7 +85,9 @@ SELECT zone,
        observe_started_at, observe_next_poll_at, observe_backoff_seconds,
        hardfail_count, next_push_at,
        last_softfail_at, last_softfail_category, last_softfail_detail,
-       last_success_at, last_attempt_started_at, last_poll_at
+       last_success_at, last_attempt_started_at, last_poll_at,
+       last_attempt_scheme, last_published_cds_index_low, last_published_cds_index_high,
+       last_ds_observed_keyids, last_ds_observed_at
 FROM RolloverZoneState WHERE zone = ?`
 	var r RolloverZoneRow
 	var inProg int
@@ -79,6 +101,8 @@ FROM RolloverZoneState WHERE zone = ?`
 		&r.HardfailCount, &r.NextPushAt,
 		&r.LastSoftfailAt, &r.LastSoftfailCategory, &r.LastSoftfailDetail,
 		&r.LastSuccessAt, &r.LastAttemptStartedAt, &r.LastPollAt,
+		&r.LastAttemptScheme, &r.LastPublishedCdsIndexLow, &r.LastPublishedCdsIndexHigh,
+		&r.LastDsObservedKeyids, &r.LastDsObservedAt,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -720,6 +744,158 @@ SET last_softfail_at = NULL,
     last_softfail_detail = NULL
 WHERE zone = ?`, zone)
 	return err
+}
+
+// setLastAttemptScheme records the scheme(s) used by the most recent
+// push attempt that completed at the wire level. Diagnostic-only —
+// status output reads this; the engine never decides anything from it.
+// Comma-joined when a parallel send had at least one wire-level NOERROR.
+func setLastAttemptScheme(kdb *KeyDB, zone, scheme string) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	var s sql.NullString
+	if scheme != "" {
+		s = sql.NullString{String: scheme, Valid: true}
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET last_attempt_scheme = ? WHERE zone = ?`, s, zone)
+	return err
+}
+
+// setPublishedCdsRange asserts ownership of the current child-apex CDS
+// RRset by recording the rollover-index range of the keys that backed
+// the engine's most recent CDS publish. Set after a successful NOTIFY
+// publish-and-sign transaction. The range is read at cleanup time by
+// cleanupCdsAfterConfirm to verify that the on-wire CDS still matches
+// what we wrote (compare-on-cleanup), so that a third-party CDS write
+// in the interim is not unpublished by us.
+func setPublishedCdsRange(kdb *KeyDB, zone string, low, high int) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState
+SET last_published_cds_index_low = ?,
+    last_published_cds_index_high = ?
+WHERE zone = ?`, low, high, zone)
+	return err
+}
+
+// clearPublishedCdsRange releases the engine's CDS-ownership marker.
+// Called after cleanupCdsAfterConfirm has unpublished the CDS RRset
+// (or has decided not to because the on-wire CDS no longer matches).
+// NULL means "we own no CDS at the apex" or "another caller owns
+// whatever CDS is currently published."
+func clearPublishedCdsRange(kdb *KeyDB, zone string) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState
+SET last_published_cds_index_low = NULL,
+    last_published_cds_index_high = NULL
+WHERE zone = ?`, zone)
+	return err
+}
+
+// setCdsPublication records a successful CDS publish-and-NOTIFY into
+// the sparse RolloverCdsPublication table. Distinct from
+// setPublishedCdsRange (the cleanup-time ownership marker on
+// RolloverZoneState that gets cleared after Trigger-1 cleanup);
+// these columns preserve the historical fact across cleanup so the
+// operator can still see "CDS was published [keyids] at <time>" in
+// status output after the rollover has completed.
+//
+// keyids are persisted as a comma-separated list of decimal keyids
+// (e.g. "12345,56789,43215"); status output renders them straight.
+// Only zones that ever ran a NOTIFY publish-and-sign appear in the
+// table, so dense single-provider deployments and UPDATE-only
+// testbeds carry no row here.
+func setCdsPublication(kdb *KeyDB, zone string, keyids []uint16, at time.Time) error {
+	parts := make([]string, 0, len(keyids))
+	for _, k := range keyids {
+		parts = append(parts, fmt.Sprintf("%d", k))
+	}
+	csv := strings.Join(parts, ",")
+	const q = `
+INSERT INTO RolloverCdsPublication (zone, keyids, published_at)
+VALUES (?, ?, ?)
+ON CONFLICT(zone) DO UPDATE SET
+  keyids = excluded.keyids,
+  published_at = excluded.published_at`
+	_, err := kdb.DB.Exec(q, zone, csv, at.UTC().Format(time.RFC3339))
+	return err
+}
+
+// loadCdsPublication returns the most recent successful CDS publication
+// recorded for zone, or (nil, "") when no row exists. The returned
+// keyids slice is a parsed copy of the persisted CSV; parse errors
+// are silently skipped (a malformed CSV stops returning whatever
+// keyids parse correctly up to that point).
+func loadCdsPublication(kdb *KeyDB, zone string) (keyids []uint16, at string, err error) {
+	var csv, atStr string
+	row := kdb.DB.QueryRow(`SELECT keyids, published_at FROM RolloverCdsPublication WHERE zone = ?`, zone)
+	if scanErr := row.Scan(&csv, &atStr); scanErr != nil {
+		if scanErr == sql.ErrNoRows {
+			return nil, "", nil
+		}
+		return nil, "", scanErr
+	}
+	for _, s := range strings.Split(csv, ",") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		var v uint16
+		if _, scanErr := fmt.Sscanf(s, "%d", &v); scanErr != nil {
+			continue
+		}
+		keyids = append(keyids, v)
+	}
+	return keyids, atStr, nil
+}
+
+// setLastDsObserved records the SEP keyids returned by the most
+// recent QueryParentAgentDS call, with the wallclock of the poll.
+// Updated on every successful poll regardless of whether the
+// returned set matches the engine's expected set; the operator's
+// "DS observed" status line shows the latest poll. CSV format
+// matches setCdsPublication. Persists onto RolloverZoneState (every
+// rollover-managed zone polls; not sparse).
+func setLastDsObserved(kdb *KeyDB, zone string, keyids []uint16, at time.Time) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	parts := make([]string, 0, len(keyids))
+	for _, k := range keyids {
+		parts = append(parts, fmt.Sprintf("%d", k))
+	}
+	csv := strings.Join(parts, ",")
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState
+SET last_ds_observed_keyids = ?,
+    last_ds_observed_at = ?
+WHERE zone = ?`, csv, at.UTC().Format(time.RFC3339), zone)
+	return err
+}
+
+// parseDsObservedKeyids parses a CSV-of-keyids stored in
+// RolloverZoneState.last_ds_observed_keyids. Same forgiving parser
+// as loadCdsPublication.
+func parseDsObservedKeyids(csv string) []uint16 {
+	if csv == "" {
+		return nil
+	}
+	var out []uint16
+	for _, s := range strings.Split(csv, ",") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		var v uint16
+		if _, err := fmt.Sscanf(s, "%d", &v); err != nil {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
 }
 
 // setNextPushAt updates next_push_at without touching last_softfail_*.
