@@ -156,6 +156,25 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		phase = rolloverPhaseIdle
 	}
 
+	// CDS-publication observability: when the engine claims ownership
+	// of an apex CDS RRset (last_published_cds_index_low/high non-NULL),
+	// log whether the CDS is actually present at the apex on this tick.
+	// Mismatch indicates a refresh-time wipe between pushes — the
+	// engine will re-publish on the next attempt but the operator
+	// sees the churn in zone-update warnings.
+	if row.LastPublishedCdsIndexLow.Valid && row.LastPublishedCdsIndexHigh.Valid {
+		apexCdsRRs := 0
+		if owner, _ := zd.GetOwner(zd.ZoneName); owner != nil {
+			if rs, ok := owner.RRtypes.Get(dns.TypeCDS); ok {
+				apexCdsRRs = len(rs.RRs)
+			}
+		}
+		lgRollover.Debug("tick: CDS ownership marker set, observing apex",
+			"zone", zone, "apex_cds_rrs", apexCdsRRs,
+			"index_low", row.LastPublishedCdsIndexLow.Int64,
+			"index_high", row.LastPublishedCdsIndexHigh.Int64)
+	}
+
 	// rollover_due (§8.1): when no rollover is in progress and either the
 	// scheduled lifetime has elapsed OR a manual-ASAP request has reached
 	// its computed earliest time, fire AtomicRollover. The tick then

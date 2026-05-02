@@ -92,6 +92,9 @@ func pushDSRRsetViaNotify(ctx context.Context, deps RolloverEngineDeps, target *
 	actions = append(actions, antiCds)
 	actions = append(actions, cdsSet...)
 
+	lgRollover.Debug("pushDSRRsetViaNotify: queueing CDS publish",
+		"zone", child, "cds_count", len(cdsSet), "actions", len(actions),
+		"index_low", low, "index_high", high, "index_known", idxOK)
 	select {
 	case updateq <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
@@ -99,6 +102,8 @@ func pushDSRRsetViaNotify(ctx context.Context, deps RolloverEngineDeps, target *
 		Actions:        actions,
 		InternalUpdate: true,
 	}:
+		lgRollover.Debug("pushDSRRsetViaNotify: CDS publish enqueued on InternalUpdateQ",
+			"zone", child)
 	case <-time.After(5 * time.Second):
 		out.Category = SoftfailChildConfigLocalError
 		return out, fmt.Errorf("pushDSRRsetViaNotify: InternalUpdateQ full for 5s, skipping")
@@ -116,6 +121,8 @@ func pushDSRRsetViaNotify(ctx context.Context, deps RolloverEngineDeps, target *
 			out.Category = SoftfailChildConfigLocalError
 			return out, fmt.Errorf("pushDSRRsetViaNotify: persist CDS range: %w", err)
 		}
+		lgRollover.Debug("pushDSRRsetViaNotify: CDS ownership marker stored",
+			"zone", child, "index_low", low, "index_high", high)
 	} else {
 		// No authoritative range to record. Clear any stale range so a
 		// subsequent cleanup pass doesn't compare against an old set.
@@ -123,6 +130,8 @@ func pushDSRRsetViaNotify(ctx context.Context, deps RolloverEngineDeps, target *
 			out.Category = SoftfailChildConfigLocalError
 			return out, fmt.Errorf("pushDSRRsetViaNotify: clear CDS range: %w", err)
 		}
+		lgRollover.Debug("pushDSRRsetViaNotify: CDS ownership marker cleared (index range incomplete)",
+			"zone", child)
 	}
 
 	// Send NOTIFY(CDS) and wait for the per-target aggregate response.
