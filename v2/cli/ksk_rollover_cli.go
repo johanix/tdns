@@ -787,11 +787,49 @@ func printStateTable(s *tdns.RolloverStatus) {
 	if s.AttemptTimeout != "" {
 		left = append(left, kv{"attempt timeout:", formatRolloverTime(s.AttemptTimeout)})
 	}
-	if s.Submitted != nil {
-		left = append(left, kv{"DS submitted:", dashKeyidsBracket(formatKeyidBracketList(s.SubmittedKeyIDs))})
+	// Per-scheme lines: separate "DS UPDATE" (the UPDATE-pushed DS
+	// RRset claim) from "CDS published" (the CDS RRset on the child
+	// apex via NOTIFY) from "DS observed" (what the engine has seen
+	// at the parent). Each line is conditional:
+	//   - DS UPDATE: rendered when Submitted is set AND the most
+	//     recent push attempt used UPDATE (LastAttemptScheme contains
+	//     "UPDATE").
+	//   - CDS published: rendered ONLY when CdsPublished is set —
+	//     which itself requires both engine ownership (RolloverZoneState
+	//     last_published_cds_index_*) AND apex CDS RRset present.
+	//     If the engine claims CDS but the apex is empty, this line
+	//     is suppressed so operators don't mis-read "CDS published"
+	//     when nothing is on the wire.
+	//   - DS observed: rendered when Confirmed is set. Renamed from
+	//     "DS confirmed:" — "observed" matches the parent-poll
+	//     terminology used elsewhere in status.
+	updateUsed := strings.Contains(s.LastAttemptScheme, "UPDATE")
+	if s.Submitted != nil && updateUsed {
+		v := dashKeyidsBracket(formatKeyidBracketList(s.SubmittedKeyIDs))
+		if s.LastUpdate != "" {
+			v = fmt.Sprintf("%s sent %s", v, formatRolloverTime(s.LastUpdate))
+		}
+		left = append(left, kv{"DS UPDATE:", v})
+	} else if s.Submitted != nil {
+		// Fallback: no scheme info recorded but we have a submitted
+		// range from a pre-NOTIFY-scheme rollover. Render the legacy
+		// line shape so existing testbeds don't lose status info.
+		left = append(left, kv{"DS UPDATE:", dashKeyidsBracket(formatKeyidBracketList(s.SubmittedKeyIDs))})
+	}
+	if s.CdsPublished != nil {
+		v := dashKeyidsBracket(formatKeyidBracketList(s.CdsPublishedKeyIDs))
+		v = fmt.Sprintf("%s NOTIFY(CDS)", v)
+		if s.LastUpdate != "" {
+			v = fmt.Sprintf("%s sent %s", v, formatRolloverTime(s.LastUpdate))
+		}
+		left = append(left, kv{"CDS published:", v})
 	}
 	if s.Confirmed != nil {
-		left = append(left, kv{"DS confirmed:", dashKeyidsBracket(formatKeyidBracketList(s.ConfirmedKeyIDs))})
+		v := dashKeyidsBracket(formatKeyidBracketList(s.ConfirmedKeyIDs))
+		if s.LastSuccess != "" {
+			v = fmt.Sprintf("%s observed %s", v, formatRolloverTime(s.LastSuccess))
+		}
+		left = append(left, kv{"DS observed:", v})
 	}
 
 	// Right column: timing config + history & polling.

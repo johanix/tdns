@@ -41,6 +41,17 @@ type RolloverStatus struct {
 	SubmittedKeyIDs []uint16 `json:"submittedKeyids,omitempty"`
 	ConfirmedKeyIDs []uint16 `json:"confirmedKeyids,omitempty"`
 
+	// CdsPublished holds the rollover_index range of the keys
+	// backing the CDS RRset the engine has published at the child
+	// apex via NOTIFY(CDS). Populated ONLY when both
+	// last_published_cds_index_low/high are non-NULL AND the apex
+	// CDS RRset is actually present on the wire — the second check
+	// guards against a misleading "CDS published" status line when
+	// the engine claims ownership but the on-disk CDS has been
+	// wiped. CdsPublishedKeyIDs are the SEP keyids in that range.
+	CdsPublished       *DSRange `json:"cdsPublished,omitempty"`
+	CdsPublishedKeyIDs []uint16 `json:"cdsPublishedKeyids,omitempty"`
+
 	// Manual-rollover schedule (asap/cancel CLI flow).
 	ManualRequestedAt string `json:"manualRequestedAt,omitempty"`
 	ManualEarliest    string `json:"manualEarliest,omitempty"`

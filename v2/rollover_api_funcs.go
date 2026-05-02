@@ -49,6 +49,25 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInte
 		populateFromZoneRow(out, row)
 	}
 
+	// CdsPublished is populated only when the engine claims ownership
+	// AND the apex CDS RRset is actually on disk. Without the
+	// apex-presence guard, a CDS that got wiped by zone refresh
+	// (CollectDynamicRRs allowlist gap) would still show in status
+	// as "CDS published" — misleading the operator into thinking
+	// the parent has something to scan when it does not.
+	if row != nil && row.LastPublishedCdsIndexLow.Valid && row.LastPublishedCdsIndexHigh.Valid {
+		if zd, ok := Zones.Get(zone); ok && zd != nil {
+			if owner, _ := zd.GetOwner(zd.ZoneName); owner != nil {
+				if rs, exists := owner.RRtypes.Get(dns.TypeCDS); exists && len(rs.RRs) > 0 {
+					out.CdsPublished = &DSRange{
+						Low:  int(row.LastPublishedCdsIndexLow.Int64),
+						High: int(row.LastPublishedCdsIndexHigh.Int64),
+					}
+				}
+			}
+		}
+	}
+
 	out.Headline = headlineForPhase(out.Phase)
 	out.Hint = hintForState(out.Phase, row, pol, now)
 
@@ -141,6 +160,13 @@ func populateDSKeyidsForStatus(kdb *KeyDB, zone string, out *RolloverStatus) err
 			return fmt.Errorf("confirmed keyids: %w", err)
 		}
 		out.ConfirmedKeyIDs = ids
+	}
+	if out.CdsPublished != nil {
+		ids, err := RolloverKeyidsByIndexRange(kdb, zone, int64(out.CdsPublished.Low), int64(out.CdsPublished.High))
+		if err != nil {
+			return fmt.Errorf("cds-published keyids: %w", err)
+		}
+		out.CdsPublishedKeyIDs = ids
 	}
 	return nil
 }
