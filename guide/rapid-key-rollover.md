@@ -214,7 +214,9 @@ or observation that supplies its value.
 | `DS_TTL` | duration | **observable** in DS responses (every DS poll carries the TTL field) | TTL of the DS RRset at the parent. Bounds how long resolvers cache the old DS after parent publishes a new one. |
 | `child_prop` | duration | `kasp.propagation_delay` | Child-side primary→secondary propagation. Time between "child primary publishes new DNSKEY RRset" and "all child secondaries serve it." |
 | `DNSKEY_TTL` | duration | derived: `min(ttls.dnskey, ttls.max_served)` clamped further by K-step clamping near rollover | TTL of the DNSKEY RRset as actually served to validators. Bounds how long resolvers cache the old DNSKEY RRset after the child publishes a new one. |
-| `T_roll_n` | timestamp | `T_roll_n = active.active_at + KSK.lifetime` (steady-state cadence) | Moment KSK_n becomes the active signer. |
+| `KSK_lifetime` | duration | `ksk.lifetime` config knob | Rollover cadence — the policy-driven interval between successive KSK activations. Steady-state: `T_roll_n − T_roll_{n−1} = KSK_lifetime`. |
+| `N` | dimensionless | `rollover.num-ds` config knob | Multi-DS pipeline depth — how many DS records the engine maintains at the parent simultaneously (active + N−1 future). |
+| `T_roll_n` | timestamp | `T_roll_n = T_roll_{n−1} + KSK_lifetime` (steady-state cadence; bootstrap defines `T_roll_1` independently) | Moment KSK_n becomes the active signer. |
 | `T_DS_pub_n` | timestamp | observed from parent DS query (= when DS for KSK_n first appears at parent) | Moment parent's primary publishes DS for KSK_n. |
 | `T_DNSKEY_pub_n` | timestamp | engine-controlled: ds-published → standby transition for KSK_n | Moment child's primary publishes DNSKEY_n in the served DNSKEY RRset. |
 
@@ -223,9 +225,15 @@ or observation that supplies its value.
 For KSK_n to take over signing safely at `T_roll_n`, two
 independent cache-flush conditions must hold.
 
-**Invariant DS** — every validator must have DS_n in its cache by
-`T_roll_n`. A validator that queried just before parent's
-secondaries had DS_n caches the old DS for `DS_TTL` more. So:
+**Invariant DS** — *if* a validator has the parent's DS RRset in
+its cache at `T_roll_n`, that cached RRset must contain DS_n.
+Validators with no cached DS are fine: they fetch fresh on the
+next need and get DS_n. The dangerous case is a validator with a
+stale cache entry that excludes DS_n; for that to be impossible
+at `T_roll_n`, every cache entry created before DS_n landed at
+the parent's secondaries must have expired by `T_roll_n`. The
+worst case is a validator that fetched DS just before secondaries
+had DS_n; its cache lasts `DS_TTL` more. So:
 
 ```
 T_DS_pub_n + parent_prop + DS_TTL  ≤  T_roll_n
@@ -238,8 +246,9 @@ satisfy the invariant:
 T_DS_pub_n  ≤  T_roll_n − parent_prop − DS_TTL
 ```
 
-**Invariant DNSKEY** — every validator must have DNSKEY_n in its
-cache by `T_roll_n`. Same reasoning on the child side:
+**Invariant DNSKEY** — *if* a validator has the child's DNSKEY
+RRset in its cache at `T_roll_n`, that cached RRset must contain
+DNSKEY_n. Same reasoning on the child side:
 
 ```
 T_DNSKEY_pub_n + child_prop + DNSKEY_TTL  ≤  T_roll_n
@@ -258,31 +267,56 @@ validators look up the chain. Both must be in place at `T_roll_n`.
 
 ### 4.4 DS-side: structurally satisfied by multi-DS pipeline depth
 
-In multi-DS rollover, parent pre-publishes DS for several
-upcoming KSKs. With pipeline depth `N = rollover.num-ds`, the DS
-for KSK_n is at the parent from at least N rollover lifetimes
-before `T_roll_n`. So:
+In multi-DS rollover, the parent holds DS records for the active
+key plus the next N−1 keys in the pipeline (with `N` =
+`rollover.num-ds`). Concretely, at moment `T_roll_n` the parent's
+DS RRset contains DS records for KSK_n, KSK_{n+1}, …,
+KSK_{n+N−1}.
+
+Going backwards: DS_n was added to the parent's DS RRset at the
+moment KSK_n entered the pipeline as the (N−1)-th future slot —
+i.e., when KSK_{n−(N−1)} became active. So:
 
 ```
-T_DS_pub_n  ≈  T_roll_n − N × KSK.lifetime    (steady state)
+T_DS_pub_n  ≤  T_roll_{n−(N−1)}  =  T_roll_n − (N − 1) × KSK_lifetime
 ```
 
-For any reasonable parent (`parent_prop + DS_TTL` measured in
-minutes) and any reasonable rollover cadence
-(`KSK.lifetime` ≥ minutes), the constraint
-`parent_prop + DS_TTL  <  N × KSK.lifetime` is comfortably
-satisfied. **The engine does not enforce this invariant directly;
-the multi-DS pipeline depth gives it for free.**
+This is the time at which the *engine commits to publishing* DS_n
+at the parent. The actual moment DS_n appears at parent's
+secondaries is later by some delay — bounded above by
+`parent_prop` — but for the inequality below the upper bound on
+`T_DS_pub_n` is what matters.
 
-The exception is fresh key generation when the pipeline is being
-filled (zone bootstrap, or after a hardfail-and-recovery). The
-engine fills the pipeline as fast as the parent allows; if the
-parent is slow enough that DS for a freshly-generated key isn't
-visible by `T_roll_n − parent_prop − DS_TTL`, the engine will
-either delay the rollover (`T_roll_n` shifts forward) or, in
-multi-DS, fall back to KSK_{n-1} from a prior pipeline slot. This
-is operator-tunable via `rollover.num-ds` (deeper pipeline = more
-buffer).
+Plugging into Invariant DS:
+
+```
+T_DS_pub_n + parent_prop + DS_TTL  ≤  T_roll_n
+↑
+substitute upper bound:
+T_roll_n − (N − 1) × KSK_lifetime + parent_prop + DS_TTL  ≤  T_roll_n
+                                  ⇕
+                  parent_prop + DS_TTL  ≤  (N − 1) × KSK_lifetime
+```
+
+So the multi-DS pipeline depth N gives the engine `(N−1) ×
+KSK_lifetime` of buffer for DS-side propagation. As long as
+`parent_prop + DS_TTL < (N−1) × KSK_lifetime` the invariant is
+**structurally satisfied** — no engine-time computation needed,
+no per-rollover scheduling involved.
+
+For the testbed config (N=3, KSK_lifetime=10m, parent_prop≈30s,
+DS_TTL≈5m): `(N−1) × KSK_lifetime = 20m`, `parent_prop + DS_TTL =
+5m30s`. The invariant has 14m30s of headroom every rollover.
+
+**Key consequence:** the engine doesn't need to schedule DS
+publication carefully; the pipeline-fill logic (generate a new
+key when ds-published count drops below N−1) provides the
+required lead time as a side effect. The engine *does* need to
+ensure pipeline-fill keeps up — if a parent is slow enough that
+new DS records aren't observed within reasonable time, the
+pipeline can drain, and `T_DS_pub_n` slides closer to `T_roll_n`.
+Operator tuning: deepen the pipeline (`rollover.num-ds`) for
+slow parents.
 
 ### 4.5 DNSKEY-side: precise engine equation for ds-published → standby
 
