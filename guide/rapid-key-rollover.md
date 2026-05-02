@@ -215,6 +215,7 @@ or observation that supplies its value.
 | `child_prop` | duration | `kasp.propagation_delay` | Child-side primary→secondary propagation. Time between "child primary publishes new DNSKEY RRset" and "all child secondaries serve it." |
 | `DNSKEY_TTL` | duration | derived: `min(ttls.dnskey, ttls.max_served)` clamped further by K-step clamping near rollover | TTL of the DNSKEY RRset as actually served to validators. Bounds how long resolvers cache the old DNSKEY RRset after the child publishes a new one. |
 | `KSK_lifetime` | duration | `ksk.lifetime` config knob | Rollover cadence — the policy-driven interval between successive KSK activations. Steady-state: `T_roll_n − T_roll_{n−1} = KSK_lifetime`. |
+| `retirement_period` | duration | `effective_margin = max(clamping.margin, max_observed_TTL)` in current engine | The hold time between a KSK transitioning to retired (at T_roll_n) and being removed (at T_roll_n + retirement_period). During the retirement period the key's DNSKEY is still in the zone but the engine no longer signs new things with it. Sized so that all cached RRSIGs by the retiring key have flushed by the time it's removed (see §4.5.1). |
 | `N` | dimensionless | `rollover.num-ds` config knob | Multi-DS pipeline depth — how many DS records the engine maintains at the parent simultaneously (active + N−1 future). |
 | `T_roll_n` | timestamp | `T_roll_n = T_roll_{n−1} + KSK_lifetime` (steady-state cadence; bootstrap defines `T_roll_1` independently) | Moment KSK_n becomes the active signer. |
 | `T_DS_pub_n` | timestamp | observed from parent DS query (= when DS for KSK_n first appears at parent) | Moment parent's primary publishes DS for KSK_n. |
@@ -236,14 +237,14 @@ worst case is a validator that fetched DS just before secondaries
 had DS_n; its cache lasts `DS_TTL` more. So:
 
 ```
-T_DS_pub_n + parent_prop + DS_TTL  ≤  T_roll_n
+T_DS_pub_n + parent_prop + DS_TTL  ≤  T_roll_n               (E1)
 ```
 
 Equivalently, the latest DS_n can be published at parent and still
 satisfy the invariant:
 
 ```
-T_DS_pub_n  ≤  T_roll_n − parent_prop − DS_TTL
+T_DS_pub_n  ≤  T_roll_n − parent_prop − DS_TTL               (E2)
 ```
 
 **Invariant DNSKEY** — *if* a validator has the child's DNSKEY
@@ -251,13 +252,13 @@ RRset in its cache at `T_roll_n`, that cached RRset must contain
 DNSKEY_n. Same reasoning on the child side:
 
 ```
-T_DNSKEY_pub_n + child_prop + DNSKEY_TTL  ≤  T_roll_n
+T_DNSKEY_pub_n + child_prop + DNSKEY_TTL  ≤  T_roll_n        (E3)
 ```
 
 Equivalently:
 
 ```
-T_DNSKEY_pub_n  ≤  T_roll_n − child_prop − DNSKEY_TTL
+T_DNSKEY_pub_n  ≤  T_roll_n − child_prop − DNSKEY_TTL        (E4)
 ```
 
 The two invariants are independent because they govern different
@@ -265,60 +266,247 @@ caches: DS lives at the parent and is cached on the way down the
 delegation chain; DNSKEY lives at the child and is cached when
 validators look up the chain. Both must be in place at `T_roll_n`.
 
-### 4.4 DS-side: structurally satisfied by multi-DS pipeline depth
+### 4.4 DS-side: the parent-DS-RRset contract
 
-In multi-DS rollover, the parent holds DS records for the active
-key plus the next N−1 keys in the pipeline (with `N` =
-`rollover.num-ds`). Concretely, at moment `T_roll_n` the parent's
-DS RRset contains DS records for KSK_n, KSK_{n+1}, …,
-KSK_{n+N−1}.
+The multi-DS scheme is best stated as a contract on the parent's
+DS RRset rather than a derived property of the engine's internal
+state.
 
-Going backwards: DS_n was added to the parent's DS RRset at the
-moment KSK_n entered the pipeline as the (N−1)-th future slot —
-i.e., when KSK_{n−(N−1)} became active. So:
+**Contract.** The parent's DS RRset *always* contains exactly
+`N` records (`N` = `rollover.num-ds`). Never fewer, never more.
 
+The composition cycles between two states:
+
+**State A — "retiring":** during the retirement period after a
+rollover, the parent holds:
 ```
-T_DS_pub_n  ≤  T_roll_{n−(N−1)}  =  T_roll_n − (N − 1) × KSK_lifetime
-```
-
-This is the time at which the *engine commits to publishing* DS_n
-at the parent. The actual moment DS_n appears at parent's
-secondaries is later by some delay — bounded above by
-`parent_prop` — but for the inequality below the upper bound on
-`T_DS_pub_n` is what matters.
-
-Plugging into Invariant DS:
-
-```
-T_DS_pub_n + parent_prop + DS_TTL  ≤  T_roll_n
-↑
-substitute upper bound:
-T_roll_n − (N − 1) × KSK_lifetime + parent_prop + DS_TTL  ≤  T_roll_n
-                                  ⇕
-                  parent_prop + DS_TTL  ≤  (N − 1) × KSK_lifetime
+{ DS_{n−1},  DS_n,  DS_{n+1},  ...,  DS_{n+N−2} }
+   ↑           ↑         ↑                     ↑
+   retiring   active    future_1 …          future_{N−2}
 ```
 
-So the multi-DS pipeline depth N gives the engine `(N−1) ×
-KSK_lifetime` of buffer for DS-side propagation. As long as
-`parent_prop + DS_TTL < (N−1) × KSK_lifetime` the invariant is
-**structurally satisfied** — no engine-time computation needed,
-no per-rollover scheduling involved.
+**State B — "post-retirement":** after the just-rolled-out key has
+been removed locally (its retirement period elapsed), the parent
+holds:
+```
+{ DS_n,   DS_{n+1},   DS_{n+2},  ...,  DS_{n+N−1} }
+   ↑         ↑                                  ↑
+   active   future_1                       future_{N−1}
+```
 
-For the testbed config (N=3, KSK_lifetime=10m, parent_prop≈30s,
-DS_TTL≈5m): `(N−1) × KSK_lifetime = 20m`, `parent_prop + DS_TTL =
-5m30s`. The invariant has 14m30s of headroom every rollover.
+Total in both states: N records. The transition from State A to
+State B is always **simultaneous** — the same DNS UPDATE drops
+DS_{n−1} and adds DS_{n+N−1}, which keeps the parent's RRset at
+exactly N records throughout (no transient state with N−1 or N+1).
 
-**Key consequence:** the engine doesn't need to schedule DS
-publication carefully; the pipeline-fill logic (generate a new
-key when ds-published count drops below N−1) provides the
-required lead time as a side effect. The engine *does* need to
-ensure pipeline-fill keeps up — if a parent is slow enough that
-new DS records aren't observed within reasonable time, the
-pipeline can drain, and `T_DS_pub_n` slides closer to `T_roll_n`.
-Operator tuning: deepen the pipeline (`rollover.num-ds`) for
-slow parents.
+**State A** holds for the retirement period (typically a few minutes
+to a few hours, depending on `clamping.margin` /
+`max_observed_TTL`). **State B** holds for the rest of the
+rollover lifetime (`KSK_lifetime − retirement_period`, the
+overwhelming majority of normal operation).
 
-### 4.5 DNSKEY-side: precise engine equation for ds-published → standby
+For N=3, the smallest interesting case:
+- State A: `{DS_{n−1}, DS_n, DS_{n+1}}` — one retiring key's DS,
+  one active, one future.
+- State B: `{DS_n, DS_{n+1}, DS_{n+2}}` — no retiring key's DS,
+  active plus two future.
+
+The DNSKEY RRset in the *child* zone does not have a strict
+"always N" contract — when the engine holds a future KSK in
+ds-published state (DNSKEY not yet revealed; see §4.7), the
+DNSKEY RRset shrinks even though the DS RRset stays at N. The
+DS-side contract holds even while the DNSKEY-side composition
+varies, because DS records are post-quantum-opaque and the
+cost of an extra DS record at the parent is negligible.
+
+### 4.5 Maintaining the contract: events and atomicity
+
+Four engine actions are involved in keeping the parent's DS
+RRset compliant with the contract:
+
+**(a) Rollover fires at `T_roll_n`.** KSK_{n−1} → retired,
+KSK_n → active in the *child* zone via `AtomicRollover`.
+**Parent DS RRset is unchanged.** The composition simply gets
+relabeled — what was the "active" slot (DS_{n−1}) is now the
+"retiring" slot, and what was "future_1" (DS_n) is now "active."
+The parent's primary, secondaries, and validator caches see no
+change.
+
+**(b) Retirement period elapses; KSK_{n−1} → removed.** This is the
+critical event. The child-side action happens first: remove
+DNSKEY_{n−1} from the served DNSKEY RRset and re-sign the RRset
+with the new active KSK_n.
+
+*After* DNSKEY_{n−1} has been removed from the child DNSKEY
+RRset, two parent-side operations must happen in a single
+atomic DNS UPDATE:
+
+  - Remove DS_{n−1} from the parent's RRset.
+  - Add DS_{n+N−1} (the next pre-publication slot).
+
+Both go in the same wire-level transaction. After this, the
+parent transitions from State A to State B. The contract is
+preserved throughout: at every instant, the parent serves
+exactly N DS records.
+
+**Comments:**
+
+- **No additional wait between local removal and parent update
+  is needed.** The retirement period was sized precisely to
+  ensure that by `T_remove_{n−1}` no cached RRSIG anywhere
+  references KSK_{n−1} (see §4.5.1 for the sizing constraint).
+  Validators that still have a stale DNSKEY RRset cached (with
+  KSK_{n−1} included in the key set) are harmless: no RRSIG
+  points at KSK_{n−1} as its signer, so no validation chain
+  leans on DS_{n−1}.
+
+- **Trigger.** The local retired → removed state transition of
+  KSK_{n−1}, owned by the child-side rollover engine. The
+  retirement period that gates this transition is the
+  `effective_margin = max(clamping.margin, max_observed_TTL)`
+  of the child zone — sized so that the §4.5.1 invariant holds.
+
+- **Why removing DS_{n−1} promptly matters.** DS_{n−1}
+  authenticates a key the operator has decided to roll away
+  from. That key may be weakened, suspect, or actually
+  compromised — it could be exactly *why* the operator is
+  rolling. Leaving DS_{n−1} at the parent longer than the
+  retirement period requires extends the window during which
+  an attacker holding the old key material can still produce
+  validatable responses. The retired → removed transition is
+  the right trigger; nothing else is.
+
+#### 4.5.1 What `retirement_period` must guarantee
+
+The "no extra wait needed" argument above relies on a precise
+sizing constraint for the `retirement_period`:
+
+```
+retirement_period  ≥  min(DNSKEY_TTL, KSK.SigValidity)       (E5)
+```
+
+where `KSK.SigValidity` is the RRSIG validity period for KSK
+signatures over the DNSKEY RRset. Why this bound:
+
+A validator that cached the DNSKEY response just before
+`T_roll_n` holds a response whose effective lifetime in cache is
+`min(DNSKEY_TTL, RRSIG_remaining_validity_at_cache_time)`.
+Worst case: the RRSIG was signed just before being fetched, so
+its remaining validity equals the full `KSK.SigValidity`. Cache
+lifetime in that worst case = `min(DNSKEY_TTL, KSK.SigValidity)`.
+
+For all such cached responses (and therefore all cached RRSIGs
+by KSK_{n−1}) to have flushed from validator caches by
+`T_remove_{n−1}`, the retirement period must be at least this
+duration.
+
+For the testbed: `min(DNSKEY_TTL, KSK.SigValidity) =
+min(5m, 20m) = 5m`. The configured `effective_margin =
+max(clamping.margin, max_observed_TTL) = max(5m, 5m) = 5m`.
+The constraint is met exactly.
+
+The current engine's `effective_margin` formula generally
+satisfies this constraint because `max_observed_TTL ≥
+DNSKEY_TTL ≥ min(DNSKEY_TTL, KSK.SigValidity)`. But the
+constraint should be made an explicit policy-validation check
+at config-load time: if an operator sets `KSK.SigValidity <
+clamping.margin` AND `KSK.SigValidity < max_observed_TTL`, the
+sizing rule still holds, but for the wrong reason. The
+operator-facing rule is best stated as the explicit inequality
+above.
+
+**(c) Pipeline maintenance.** The engine continuously generates
+new KSKs and submits their DS to the parent so that future slots
+are filled when (b) needs to add DS_{n+N−1}. This generation is
+decoupled from the rollover schedule — keys are generated
+whenever the local pipeline-fill logic notices a slot needs
+filling.
+
+**(d) Bootstrap and recovery.** First time the engine sees a
+zone, or after a hardfail-and-recovery, the contract may not
+hold (parent has fewer than N records). The engine fills the
+pipeline as fast as the parent's `parent_prop + DS_TTL` allows.
+During this fill, the contract's "always exactly N" claim is
+relaxed; once the pipeline is full it holds again.
+
+### 4.6 DS-side: when does DS_n land at the parent?
+
+To validate Invariant DS (E1), we need `T_DS_pub_n` — the moment
+DS_n first appeared in the parent's RRset.
+
+**The simple framing:** `DS_n is published at the same atomic
+operation that removes DS_{n−N}` (the State A → State B
+transition described in §4.5(b)). That operation happens at:
+
+```
+T_DS_pub_n  =  T_roll_{n−N+1} + retirement_period            (E6)
+```
+
+Where `T_roll_{n−N+1}` is the moment KSK_{n−N+1} became active.
+(If you prefer to think in "rollovers ago": the State A → State
+B transition that publishes DS_n is the one immediately
+following the (N−1)-rollovers-ago activation.)
+
+Substituting `T_roll_{n−N+1} = T_roll_n − (N − 1) × KSK_lifetime`:
+
+```
+T_DS_pub_n  =  T_roll_n − (N − 1) × KSK_lifetime + retirement_period   (E7)
+```
+
+Lead time before `T_roll_n`:
+
+```
+lead_DS  =  T_roll_n − T_DS_pub_n
+         =  (N − 1) × KSK_lifetime − retirement_period       (E8)
+```
+
+For Invariant DS (E1) to hold:
+
+```
+(N − 1) × KSK_lifetime − retirement_period  ≥  parent_prop + DS_TTL   (E9)
+```
+
+Equivalently, the operational constraint on the rollover cadence:
+
+```
+(N − 1) × KSK_lifetime  ≥  retirement_period + parent_prop + DS_TTL   (E10)
+```
+
+**Interpretation.** The multi-DS pipeline depth `N` gives the
+engine `(N − 1)` rollover cycles of buffer for DS-side
+propagation. Subtract the retirement period (during which the new
+"future" slot doesn't yet exist at the parent), and what
+remains must accommodate `parent_prop + DS_TTL`. Choose `N`,
+`KSK_lifetime`, `retirement_period`, and the parent's `DS_TTL`
+such that E10 holds; the rest is automatic.
+
+**For the testbed config.** N=3, KSK_lifetime=10m,
+retirement_period=5m (`clamping.margin`), parent_prop≈30s, DS_TTL≈5m:
+
+```
+(N − 1) × KSK_lifetime  =  2 × 10m  =  20m
+retirement_period + parent_prop + DS_TTL  =  5m + 30s + 5m  =  10m30s
+20m ≥ 10m30s     ✓     (9m30s of headroom)
+```
+
+The testbed is comfortably within its DS-side budget. E10 becomes
+interesting at smaller `N` (e.g. would-be N=2 multi-DS would have
+`(N − 1) × KSK_lifetime = 10m` against the 10m30s requirement —
+fail), or with much faster cadences (`KSK_lifetime = 2m` against
+the same requirement — fail unless `N` is raised).
+
+**Production rule of thumb.** For comfortable margins, pick:
+
+```
+N  ≥  ⌈(retirement_period + parent_prop + DS_TTL) / KSK_lifetime⌉ + 1   (E11)
+```
+
+For typical production values (retirement_period=8h, parent_prop=5m,
+DS_TTL=1h, KSK_lifetime=7d): RHS of E11 = ⌈9h5m / 168h⌉ + 1 =
+1 + 1 = 2. So even N=2 works comfortably for slow cadences. The
+default N=3 gives substantial margin.
+
+### 4.7 DNSKEY-side: precise engine equation for ds-published → standby
 
 The child controls `T_DNSKEY_pub_n` directly: it's the moment the
 rollover engine advances KSK_n from state `ds-published` to
@@ -330,7 +518,7 @@ keeping unrevealed keys at DS-only), the engine should advance
 **as late as the invariant permits**:
 
 ```
-T_DNSKEY_pub_n  =  T_roll_n − child_prop − DNSKEY_TTL
+T_DNSKEY_pub_n  =  T_roll_n − child_prop − DNSKEY_TTL        (E12)
 ```
 
 Equivalently, the engine's transition rule:
@@ -338,10 +526,10 @@ Equivalently, the engine's transition rule:
 > Advance KSK_n from `ds-published` to `standby` at time
 > `T_roll_n − child_prop − DNSKEY_TTL`.
 
-This is the canonical formula. Any code that implements
+E12 is the canonical formula. Any code that implements
 ds-published → standby must use it.
 
-### 4.6 Effective DNSKEY_TTL: the clamping caveat
+### 4.8 Effective DNSKEY_TTL: the clamping caveat
 
 The DNSKEY_TTL parameter is the TTL **as served to validators at
 the moment they cache the response**, not the TTL the operator
@@ -368,13 +556,13 @@ invariant).
 So the operator-facing rule:
 
 ```
-DNSKEY_TTL  =  min(ttls.dnskey, ttls.max_served)
+DNSKEY_TTL  =  min(ttls.dnskey, ttls.max_served)             (E13)
 ```
 
 If `ttls.max_served` is set (recommended for any zone with
 auto-rollover), it's the value that matters.
 
-### 4.7 Parent-side parameters: observable, not unknown
+### 4.9 Parent-side parameters: observable, not unknown
 
 Yesterday's framing of "parent-side timing as an unknown gap" was
 incorrect. Both `parent_prop` and `DS_TTL` have well-defined
@@ -403,7 +591,7 @@ parent sets `DS_TTL` unilaterally based on its own policy. That's
 fine for the engine because it observes the value rather than
 declaring it.
 
-### 4.8 Worked example: the testbed config
+### 4.10 Worked example: the testbed config
 
 Concrete numbers from the `fastroll` policy:
 
@@ -461,7 +649,7 @@ section — either the engine is using a different formula (bug)
 or its check cadence skipped past the transition moment without
 acting (cadence bug, separate concern).
 
-### 4.9 Visual timeline
+### 4.11 Visual timeline
 
 A single key's path through the pipeline, annotated with the
 cache-flush windows:
@@ -493,37 +681,72 @@ state, because multi-DS pre-publishes DS several rollovers in
 advance. The DNSKEY window is exactly `child_prop + DNSKEY_TTL`
 by construction (engine times the transition to make it so).
 
-Multi-key view, showing the multi-DS pipeline at one moment:
+Multi-key view of the multi-DS pipeline (N=3), shown as two
+snapshots: just before `T_roll_n` (rollover about to fire) and
+just after `T_roll_n + retirement_period` (State A → State B
+transition just completed):
 
 ```
-                                                                        T_roll_n
-                                                                        ▼
-KSK_{n-1}:    ── active ── retired ── removed →
-KSK_n:        ─────── standby ─────── active ──→
-KSK_{n+1}:    ─ ds-published ─────── standby ──→
-KSK_{n+2}:    ─ ds-published ───────────────── ds-published ─→
-                                              ▲
-                                       T_DNSKEY_pub_{n+1}
-                                       = T_roll_n − child_prop − DNSKEY_TTL
+KSK_{n-2}:    ─ retired ─ removed ──────────────→
+KSK_{n-1}:    ─ standby ─── active ─── retired ── removed ────────→
+KSK_n:        ─ ds-published ────────── standby ─── active ────────────→
+KSK_{n+1}:    ─ ds-published ────────────────────── ds-published ─── standby ──→
+KSK_{n+2}:    ─ created ─────────────── ds-published ─────────────────────→
+                                       ▲          ▲                ▲
+                                  T_roll_n     +retirement      T_DNSKEY_pub_{n+1}
+                                                _period         = T_roll_{n+1} − child_prop − DNSKEY_TTL
 
-State of the served DNSKEY RRset right before T_roll_n:
-   ─ KSK_{n-1}  (retired, signing for grace period)
-   ─ KSK_n      (active, signing)
-   ─ KSK_{n+1}  (standby; DNSKEY revealed since T_DNSKEY_pub_{n+1})
-   (KSK_{n+2}'s DNSKEY is NOT in the zone — still ds-published)
+Snapshot 1 — right BEFORE T_roll_n (KSK_{n-1} still active):
 
-State of the parent's DS RRset:
-   ─ DS for KSK_n
-   ─ DS for KSK_{n+1}
-   ─ DS for KSK_{n+2}
+   Served DNSKEY RRset (child):
+      ─ KSK_{n-2}   (retired, signing has stopped, DNSKEY still in zone)
+      ─ KSK_{n-1}   (active, signing)
+      ─ KSK_n       (standby; DNSKEY revealed since T_DNSKEY_pub_n)
+      (KSK_{n+1}, KSK_{n+2}: still ds-published — DNSKEYs hidden)
+
+   Parent DS RRset (State B_{n-1}):  N = 3 records
+      ─ DS for KSK_{n-1}   (active)
+      ─ DS for KSK_n       (future_1)
+      ─ DS for KSK_{n+1}   (future_2)
+
+Snapshot 2 — right AFTER T_roll_n + retirement_period
+                (KSK_{n-1} just removed; State A → State B transition):
+
+   Served DNSKEY RRset (child):
+      ─ KSK_n       (active, signing — became active at T_roll_n)
+      ─ KSK_{n+1}   (standby; DNSKEY not yet revealed if T_DNSKEY_pub_{n+1}
+                     hasn't elapsed yet — see Snapshot 1's KSK_n case)
+      (KSK_{n-1}: removed at T_roll_n + retirement_period; DNSKEY gone)
+
+   Parent DS RRset (State B_n):  N = 3 records
+      ─ DS for KSK_n       (active)
+      ─ DS for KSK_{n+1}   (future_1)
+      ─ DS for KSK_{n+2}   (future_2; just added in the atomic remove+add
+                            with the State A → State B transition)
 ```
 
-`KSK_{n+2}`'s DNSKEY remains hidden from the zone for a full
-rollover lifetime more — this is the post-quantum benefit of
-delaying ds-published → standby until the cache-flush invariant
-forces it.
+Between the two snapshots, several things shift simultaneously
+or in close sequence:
 
-### 4.10 Verification rule
+- **At T_roll_n:** child-side `AtomicRollover` swaps KSK_{n-1}
+  → retired and KSK_n → active. Parent DS RRset unchanged.
+- **At T_roll_n + retirement_period:** KSK_{n-1} → removed in
+  the child (DNSKEY gone), DNSKEY RRset re-signed by KSK_n, and
+  in a single DNS UPDATE to the parent: drop DS_{n-1}, add
+  DS_{n+2}. Parent transitions State A_n → State B_n.
+- **Later, at T_DNSKEY_pub_{n+1} = T_roll_{n+1} − child_prop −
+  DNSKEY_TTL:** KSK_{n+1}'s DNSKEY enters the zone (ds-published
+  → standby).
+
+`KSK_{n+2}` remains in `ds-published` (DNSKEY hidden) until its
+own T_DNSKEY_pub_{n+2}, which is one rollover lifetime past
+T_DNSKEY_pub_{n+1}. This is the post-quantum benefit of
+delaying ds-published → standby until E12 forces it: at any
+moment, only the active key's DNSKEY plus (at most) one
+imminently-promoted standby's DNSKEY is exposed. Future keys
+remain DS-only.
+
+### 4.12 Verification rule
 
 This section is the **canonical reference** for the engine's
 timing behaviour. Any code change that affects:
@@ -534,11 +757,18 @@ timing behaviour. Any code change that affects:
 - the relationship between any two of the timestamps `T_DS_pub`,
   `T_DNSKEY_pub`, `T_roll`
 
-must be verified against the equations in §4.3, §4.5, and §4.7.
-If code computes `T_DNSKEY_pub` differently from §4.5's formula,
-the code is wrong. If a refactor would change the semantics,
-update this section first (in a design doc), then update the
-code, then update the operator guide to match.
+must be verified against equations E1–E13. Specifically:
+
+- The two cache-flush invariants: E1 (DS-side) and E3 (DNSKEY-side).
+- The retirement-period sizing: E5.
+- The DS-side derived constraints: E6, E7, E8, E9, E10, E11.
+- The DNSKEY-side engine equation: E12.
+- The effective DNSKEY_TTL definition: E13.
+
+If code computes `T_DNSKEY_pub` differently from E12, the code is
+wrong. If a refactor would change the semantics, update this
+section first (in a design doc), then update the code, then
+update the operator guide to match.
 
 If the engine starts using a parameter not in §4.2's table, that
 parameter must be added to the table. Implicit parameters are
@@ -548,7 +778,7 @@ the source of all the timing bugs we have hit so far.
 ## 5. Worked examples
 
 
-### 4.1 The 10-minute testbed
+### 5.1 The 10-minute testbed
 
 You're running a multi-provider DNSSEC testbed and want to
 exercise the rollover machinery as fast as practical. You can
@@ -601,7 +831,7 @@ production — the short RRSIG validity means the zone will go
 bogus within an hour of any signing-engine hiccup.
 
 
-### 4.2 Production with weekly cadence
+### 5.2 Production with weekly cadence
 
 You run a real zone, want to roll weekly to demonstrate
 operational confidence in the rollover machinery, and need to
@@ -656,7 +886,7 @@ Adjust `ksk.lifetime` if you want a different cadence; the rest
 of the parameters scale with operational reality, not cadence.
 
 
-### 4.3 Production with monthly cadence
+### 5.3 Production with monthly cadence
 
 Same operational reality but you want a more conservative
 rollover rhythm — perhaps to align with monthly maintenance
