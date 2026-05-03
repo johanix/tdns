@@ -434,6 +434,25 @@ func runWhenOffline(z string) {
 	renderRolloverWhen(resp)
 }
 
+// printRolloverPolicyErrors emits the operator-facing header lines that
+// appear at the top of every auto-rollover output when the zone has
+// active rollover-policy violations. Returns true if anything was
+// printed.
+func printRolloverPolicyErrors(errs []string) bool {
+	if len(errs) == 0 {
+		return false
+	}
+	if len(errs) == 1 {
+		fmt.Printf("automated rollovers not possible due to: %s\n", errs[0])
+	} else {
+		fmt.Println("automated rollovers not possible due to:")
+		for _, e := range errs {
+			fmt.Printf("  - %s\n", e)
+		}
+	}
+	return true
+}
+
 // renderRolloverWhen prints the dual-line schedule view. NextScheduled
 // is the policy-driven rollover time (active_at + KSK.Lifetime);
 // EarliestPossible is the gate-driven earliest the engine would
@@ -441,6 +460,13 @@ func runWhenOffline(z string) {
 // time. During in-progress rollovers, both lines reflect projected
 // times for the rollover after the current one completes.
 func renderRolloverWhen(resp *tdns.RolloverWhenResponse) {
+	if printRolloverPolicyErrors(resp.PolicyErrors) {
+		// Schedule output is meaningless while the policy is violated.
+		// Suppress remaining lines except the bare zone header so the
+		// operator still sees which zone they queried.
+		fmt.Printf("KSK rollover schedule for zone %s: blocked\n", resp.Zone)
+		return
+	}
 	currentTime := formatRolloverTimeAbsolute(resp.CurrentTime)
 	if currentTime == "-" {
 		// Fallback when daemon didn't supply CurrentTime (legacy
@@ -696,6 +722,14 @@ func dashKeyidsBracket(s string) string {
 func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool) {
 	if s == nil {
 		return
+	}
+	if len(s.PolicyErrors) > 0 {
+		printRolloverPolicyErrors(s.PolicyErrors)
+		// Status output continues below — operators still want to see
+		// per-key state and recent attempts even while rollover is
+		// blocked. The header just makes it clear the engine isn't
+		// going to advance the pipeline until the violation clears.
+		fmt.Println()
 	}
 	currentTime := formatRolloverTimeAbsolute(s.CurrentTime)
 

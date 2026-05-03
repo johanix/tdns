@@ -222,24 +222,110 @@ const (
 	RefreshError
 	AgentError
 	DnssecError
+	RolloverPolicyViolation
 )
 
 var ErrorTypeToString = map[ErrorType]string{
-	ConfigError:  "config",
-	RefreshError: "refresh",
-	AgentError:   "agent",
-	DnssecError:  "DNSSEC",
+	ConfigError:             "config",
+	RefreshError:            "refresh",
+	AgentError:              "agent",
+	DnssecError:             "DNSSEC",
+	RolloverPolicyViolation: "rollover-policy",
 }
 
+// errorTypeReportOrder defines the deterministic order in which the
+// derived single-error fields (zd.ErrorType, zd.ErrorMsg) report a
+// category when multiple errors coexist. Earlier in this list wins.
+// The order reflects severity: ConfigError (zone unusable) before
+// RefreshError (data may be stale) before per-feature blockers.
+var errorTypeReportOrder = []ErrorType{
+	ConfigError,
+	RefreshError,
+	AgentError,
+	DnssecError,
+	RolloverPolicyViolation,
+}
+
+// ZoneError is one entry in the per-zone error registry. Use SetError
+// to upsert and ClearError to remove.
+type ZoneError struct {
+	Type ErrorType
+	Msg  string
+}
+
+// SetError upserts an error of the given type. Calling SetError(NoError, "")
+// clears every error currently set on the zone (back-compat with the prior
+// single-error API). Other errors of different types are not affected when
+// upserting a specific category.
+//
+// Derived fields (zd.Error, zd.ErrorType, zd.ErrorMsg) are recomputed
+// after every change. zd.ErrorType reports the highest-priority active
+// category per errorTypeReportOrder.
 func (zd *ZoneData) SetError(errtype ErrorType, errmsg string, args ...interface{}) {
 	if errtype == NoError {
+		zd.Errors = nil
+	} else {
+		if zd.Errors == nil {
+			zd.Errors = map[ErrorType]ZoneError{}
+		}
+		zd.Errors[errtype] = ZoneError{Type: errtype, Msg: fmt.Sprintf(errmsg, args...)}
+	}
+	zd.recomputeDerivedErrorFields()
+	Zones.Set(zd.ZoneName, zd)
+}
+
+// ClearError removes one error category. ClearError(NoError) clears
+// every error.
+func (zd *ZoneData) ClearError(errtype ErrorType) {
+	if errtype == NoError {
+		zd.Errors = nil
+	} else if zd.Errors != nil {
+		delete(zd.Errors, errtype)
+		if len(zd.Errors) == 0 {
+			zd.Errors = nil
+		}
+	}
+	zd.recomputeDerivedErrorFields()
+	Zones.Set(zd.ZoneName, zd)
+}
+
+// HasError returns true if the zone has an active error of the given type.
+func (zd *ZoneData) HasError(errtype ErrorType) bool {
+	if zd.Errors == nil {
+		return false
+	}
+	_, ok := zd.Errors[errtype]
+	return ok
+}
+
+// ErrorList returns a snapshot of every active error on the zone, in
+// errorTypeReportOrder. Returns nil if no errors are set.
+func (zd *ZoneData) ErrorList() []ZoneError {
+	if len(zd.Errors) == 0 {
+		return nil
+	}
+	out := make([]ZoneError, 0, len(zd.Errors))
+	for _, t := range errorTypeReportOrder {
+		if e, ok := zd.Errors[t]; ok {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
+func (zd *ZoneData) recomputeDerivedErrorFields() {
+	if len(zd.Errors) == 0 {
 		zd.Error = false
 		zd.ErrorType = NoError
 		zd.ErrorMsg = ""
-	} else {
-		zd.Error = true
-		zd.ErrorType = errtype
-		zd.ErrorMsg = fmt.Sprintf(errmsg, args...)
+		return
 	}
-	Zones.Set(zd.ZoneName, zd)
+	zd.Error = true
+	for _, t := range errorTypeReportOrder {
+		if e, ok := zd.Errors[t]; ok {
+			zd.ErrorType = t
+			zd.ErrorMsg = e.Msg
+			return
+		}
+	}
 }

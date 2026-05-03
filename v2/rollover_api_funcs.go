@@ -91,8 +91,26 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInte
 
 	applyInFlightPublicationLabels(out)
 	populateRolloverWarnings(out, pol, checkInterval)
+	populateRolloverPolicyErrors(out, zone)
 
 	return out, nil
+}
+
+// populateRolloverPolicyErrors copies any active RolloverPolicyViolation
+// entries from the live ZoneData into RolloverStatus.PolicyErrors. The
+// CLI uses this slice to gate output of /auto-rollover status, when, and
+// asap. Empty when the zone is not registered in Zones (offline-mode
+// lookups) or when no rollover-policy violations are active.
+func populateRolloverPolicyErrors(out *RolloverStatus, zone string) {
+	zd, ok := Zones.Get(zone)
+	if !ok || zd == nil {
+		return
+	}
+	for _, e := range zd.ErrorList() {
+		if e.Type == RolloverPolicyViolation {
+			out.PolicyErrors = append(out.PolicyErrors, e.Msg)
+		}
+	}
 }
 
 // applyInFlightPublicationLabels overrides the Published column for
@@ -231,7 +249,21 @@ func ComputeRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Ti
 		out.NextScheduled = t.UTC().Format(time.RFC3339)
 	}
 
+	populateRolloverWhenPolicyErrors(out, zone)
+
 	return out, nil
+}
+
+func populateRolloverWhenPolicyErrors(out *RolloverWhenResponse, zone string) {
+	zd, ok := Zones.Get(zone)
+	if !ok || zd == nil {
+		return
+	}
+	for _, e := range zd.ErrorList() {
+		if e.Type == RolloverPolicyViolation {
+			out.PolicyErrors = append(out.PolicyErrors, e.Msg)
+		}
+	}
 }
 
 // populateFromZoneRow copies fields from the persisted row into the

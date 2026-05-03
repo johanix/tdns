@@ -100,31 +100,38 @@ type ZoneData struct {
 	XfrType string // axfr | ixfr
 	Logger  *log.Logger
 	// ZoneFile           string // TODO: Remove this
-	IncomingSerial     uint32 // SOA serial that we got from upstream
-	CurrentSerial      uint32 // SOA serial after local bumping
-	FirstZoneLoad      bool   // true until first zone data has been loaded
-	Verbose            bool
-	Debug              bool
-	IxfrChain          []Ixfr
-	Upstream           string   // primary from where zone is xfrred
-	Downstreams        []string // secondaries that we notify
-	Zonefile           string
-	DelegationSyncQ    chan DelegationSyncRequest
-	Parent             string   // name of parentzone (if filled in)
-	ParentNS           []string // names of parent nameservers
-	ParentServers      []string // addresses of parent nameservers
-	Children           map[string]*ChildDelegationData
-	DelegationBackend  DelegationBackend // parent-side: backend for storing child delegation data
-	Options            map[ZoneOption]bool
-	UpdatePolicy       UpdatePolicy
-	DnssecPolicy       *DnssecPolicy
-	DnssecPolicyName   string // name of currently-applied policy; used to detect config-reload-driven changes
-	MultiSigner        *MultiSignerConf
-	KeyDB              *KeyDB
-	AppType            AppType
-	Error              bool        // zone is broken and cannot be used
-	ErrorType          ErrorType   // "config" | "refresh" | "notify" | "update"
-	ErrorMsg           string      // reason for the error (if known)
+	IncomingSerial    uint32 // SOA serial that we got from upstream
+	CurrentSerial     uint32 // SOA serial after local bumping
+	FirstZoneLoad     bool   // true until first zone data has been loaded
+	Verbose           bool
+	Debug             bool
+	IxfrChain         []Ixfr
+	Upstream          string   // primary from where zone is xfrred
+	Downstreams       []string // secondaries that we notify
+	Zonefile          string
+	DelegationSyncQ   chan DelegationSyncRequest
+	Parent            string   // name of parentzone (if filled in)
+	ParentNS          []string // names of parent nameservers
+	ParentServers     []string // addresses of parent nameservers
+	Children          map[string]*ChildDelegationData
+	DelegationBackend DelegationBackend // parent-side: backend for storing child delegation data
+	Options           map[ZoneOption]bool
+	UpdatePolicy      UpdatePolicy
+	DnssecPolicy      *DnssecPolicy
+	DnssecPolicyName  string // name of currently-applied policy; used to detect config-reload-driven changes
+	MultiSigner       *MultiSignerConf
+	KeyDB             *KeyDB
+	AppType           AppType
+	// Errors holds all active error conditions on this zone. Use SetError /
+	// ClearError to mutate; HasError / ErrorList to inspect.
+	// The fields below (Error, ErrorType, ErrorMsg) are derived from
+	// Errors and kept in sync by SetError / ClearError. Existing call
+	// sites that read those single-error fields continue to work; new
+	// code can iterate ErrorList() for the full set.
+	Errors             map[ErrorType]ZoneError
+	Error              bool        // derived: len(Errors) > 0
+	ErrorType          ErrorType   // derived: highest-priority error type, see errorTypeReportOrder
+	ErrorMsg           string      // derived: msg of the type reported in ErrorType
 	LatestError        time.Time   // time of latest error
 	RefreshCount       int         // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
 	LatestRefresh      time.Time   // time of latest successful refresh

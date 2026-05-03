@@ -116,6 +116,13 @@ type RolloverStatus struct {
 	// designed to grow as more cross-config invariants are caught.
 	// Empty slice means no warnings; rendered below the hint line.
 	Warnings []string `json:"warnings,omitempty"`
+
+	// PolicyErrors carries any active RolloverPolicyViolation entries
+	// from zd.Errors — config-time spec invariant violations (E5/E10)
+	// or runtime parent-config blockers. When non-empty, automated
+	// rollovers are gated for this zone; the CLI prepends a
+	// "automated rollovers not possible due to: <msg>" header.
+	PolicyErrors []string `json:"policyErrors,omitempty"`
 }
 
 // DSRange is an inclusive integer [low, high] rollover_index interval
@@ -170,6 +177,10 @@ type RolloverWhenResponse struct {
 	InProgress       bool                    `json:"inProgress,omitempty"`
 	Note             string                  `json:"note,omitempty"`
 	Gates            []RolloverWhenGateEntry `json:"gates,omitempty"`
+	// PolicyErrors carries active rollover-policy violations on the
+	// zone. When non-empty, automated rollovers are blocked and the
+	// CLI suppresses the computed times in favor of the error header.
+	PolicyErrors []string `json:"policyErrors,omitempty"`
 }
 
 // RolloverWhenGateEntry mirrors one EarliestRolloverGate as wire JSON.
