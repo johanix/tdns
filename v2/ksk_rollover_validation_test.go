@@ -1,0 +1,245 @@
+package tdns
+
+import (
+	"testing"
+	"time"
+)
+
+// TestCheckE5 exercises the §4.5.1 retirement_period bound check.
+// E5: retirement_period ≥ min(DNSKEY_TTL, KSK.SigValidity).
+func TestCheckE5(t *testing.T) {
+	tests := []struct {
+		name      string
+		pol       *DnssecPolicy
+		wantEmpty bool
+	}{
+		{
+			name: "clamping disabled -> skipped",
+			pol: func() *DnssecPolicy {
+				p := &DnssecPolicy{}
+				p.Clamping.Enabled = false
+				p.TTLS.DNSKEY = 300
+				p.KSK.SigValidity = 60
+				return p
+			}(),
+			wantEmpty: true,
+		},
+		{
+			name: "clamping enabled, margin satisfies floor -> ok",
+			pol: func() *DnssecPolicy {
+				p := &DnssecPolicy{}
+				p.Clamping.Enabled = true
+				p.Clamping.Margin = 5 * time.Minute
+				p.TTLS.DNSKEY = 300         // 5m
+				p.KSK.SigValidity = 60 * 60 // 1h
+				return p
+			}(),
+			wantEmpty: true,
+		},
+		{
+			name: "clamping enabled, margin below floor -> violation",
+			pol: func() *DnssecPolicy {
+				p := &DnssecPolicy{}
+				p.Clamping.Enabled = true
+				p.Clamping.Margin = 1 * time.Minute
+				p.TTLS.DNSKEY = 300         // 5m -> floor
+				p.KSK.SigValidity = 60 * 60 // 1h
+				return p
+			}(),
+			wantEmpty: false,
+		},
+		{
+			name: "clamping enabled, no TTL hints -> skipped",
+			pol: func() *DnssecPolicy {
+				p := &DnssecPolicy{}
+				p.Clamping.Enabled = true
+				p.Clamping.Margin = 1 * time.Minute
+				return p
+			}(),
+			wantEmpty: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := checkE5(tc.pol)
+			if tc.wantEmpty && got != "" {
+				t.Errorf("expected empty, got %q", got)
+			}
+			if !tc.wantEmpty && got == "" {
+				t.Errorf("expected violation, got empty")
+			}
+		})
+	}
+}
+
+// TestCheckE10 exercises the cadence-vs-cache-flush invariant.
+// E10: (N − 1) × KSK.Lifetime ≥ retirement_period + parent_prop + DS_TTL.
+func TestCheckE10(t *testing.T) {
+	tests := []struct {
+		name      string
+		pol       *DnssecPolicy
+		dsTTL     time.Duration
+		wantEmpty bool
+	}{
+		{
+			name: "N<2 -> skipped",
+			pol: func() *DnssecPolicy {
+				p := &DnssecPolicy{}
+				p.Rollover.NumDS = 1
+				p.KSK.Lifetime = 10 * 60
+				return p
+			}(),
+			dsTTL:     5 * time.Minute,
+			wantEmpty: true,
+		},
+		{
+			name: "comfortable headroom -> ok",
+			pol: func() *DnssecPolicy {
+				p := &DnssecPolicy{}
+				p.Rollover.NumDS = 3
+				p.KSK.Lifetime = 60 * 60 // 1h, so (N-1)*L = 2h
+				p.Clamping.Margin = 5 * time.Minute
+				p.Rollover.DsPublishDelay = 5 * time.Minute
+				return p
+			}(),
+			dsTTL:     5 * time.Minute,
+			wantEmpty: true,
+		},
+		{
+			name: "tight cadence -> violation",
+			pol: func() *DnssecPolicy {
+				p := &DnssecPolicy{}
+				p.Rollover.NumDS = 2
+				p.KSK.Lifetime = 60 // 1m, so (N-1)*L = 1m
+				p.Clamping.Margin = 5 * time.Minute
+				p.Rollover.DsPublishDelay = 5 * time.Minute
+				return p
+			}(),
+			dsTTL:     5 * time.Minute,
+			wantEmpty: false,
+		},
+		{
+			name: "force-notify adds parent-cds-poll-estimate",
+			pol: func() *DnssecPolicy {
+				p := &DnssecPolicy{}
+				p.Rollover.NumDS = 3
+				p.KSK.Lifetime = 10 * 60 // 10m, (N-1)*L = 20m
+				p.Clamping.Margin = 5 * time.Minute
+				p.Rollover.DsPublishDelay = 5 * time.Minute
+				p.Rollover.DsyncSchemePreference = DsyncSchemePreferenceForceNotify
+				p.Rollover.ParentCdsPollEstimate = 12 * time.Minute
+				return p
+			}(),
+			dsTTL: 5 * time.Minute,
+			// 5 + (5+12) + 5 = 27m > 20m -> violation
+			wantEmpty: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := checkE10(tc.pol, tc.dsTTL)
+			if tc.wantEmpty && got != "" {
+				t.Errorf("expected empty, got %q", got)
+			}
+			if !tc.wantEmpty && got == "" {
+				t.Errorf("expected violation, got empty")
+			}
+		})
+	}
+}
+
+// TestResolveDSTTL confirms the resolution priority: override > observation > none.
+func TestResolveDSTTL(t *testing.T) {
+	policy := func(override uint32) *DnssecPolicy {
+		p := &DnssecPolicy{}
+		p.TTLS.DS = override
+		return p
+	}
+	zone := func(observed uint32) *ZoneData {
+		return &ZoneData{ParentDSTTLObserved: observed}
+	}
+
+	tests := []struct {
+		name    string
+		zd      *ZoneData
+		pol     *DnssecPolicy
+		wantTTL time.Duration
+		wantOK  bool
+	}{
+		{
+			name:    "override only",
+			zd:      zone(0),
+			pol:     policy(900),
+			wantTTL: 900 * time.Second,
+			wantOK:  true,
+		},
+		{
+			name:    "observation only",
+			zd:      zone(300),
+			pol:     policy(0),
+			wantTTL: 300 * time.Second,
+			wantOK:  true,
+		},
+		{
+			name:    "override wins over observation",
+			zd:      zone(300),
+			pol:     policy(900),
+			wantTTL: 900 * time.Second,
+			wantOK:  true,
+		},
+		{
+			name:    "neither set -> not ok",
+			zd:      zone(0),
+			pol:     policy(0),
+			wantTTL: 0,
+			wantOK:  false,
+		},
+		{
+			name:    "nil zone, override only",
+			zd:      nil,
+			pol:     policy(600),
+			wantTTL: 600 * time.Second,
+			wantOK:  true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			ttl, ok := resolveDSTTL(tc.zd, tc.pol)
+			if ttl != tc.wantTTL {
+				t.Errorf("ttl: got %v, want %v", ttl, tc.wantTTL)
+			}
+			if ok != tc.wantOK {
+				t.Errorf("ok: got %v, want %v", ok, tc.wantOK)
+			}
+		})
+	}
+}
+
+// TestCheckE11 confirms the rule-of-thumb headroom warning fires only
+// at <25% headroom and that comfortable margins pass silently.
+func TestCheckE11(t *testing.T) {
+	tightHeadroom := func() *DnssecPolicy {
+		p := &DnssecPolicy{}
+		p.Rollover.NumDS = 2
+		p.KSK.Lifetime = 21 * 60 // 21m, (N-1)*L = 21m
+		p.Clamping.Margin = 5 * time.Minute
+		p.Rollover.DsPublishDelay = 5 * time.Minute
+		return p
+	}()
+	// required = 5 + 5 + 10 = 20m. available = 21m. ratio = 21/20 = 1.05 < 1.25 -> warn.
+	if got := checkE11(tightHeadroom, 10*time.Minute); got == "" {
+		t.Error("expected E11 warning at <25% headroom, got empty")
+	}
+
+	comfortable := func() *DnssecPolicy {
+		p := &DnssecPolicy{}
+		p.Rollover.NumDS = 3
+		p.KSK.Lifetime = 60 * 60 // 1h, (N-1)*L = 2h
+		p.Clamping.Margin = 5 * time.Minute
+		p.Rollover.DsPublishDelay = 5 * time.Minute
+		return p
+	}()
+	if got := checkE11(comfortable, 5*time.Minute); got != "" {
+		t.Errorf("expected silence at comfortable margin, got %q", got)
+	}
+}
