@@ -984,86 +984,113 @@ func TransitionRolloverKskDsPublishedToStandby(conf *Config, kdb *KeyDB, now tim
 		if pol.KSK.Lifetime == 0 {
 			continue
 		}
+		deps := RolloverEngineDeps{
+			Conf:             conf,
+			KDB:              kdb,
+			Zone:             zd,
+			Policy:           pol,
+			Logger:           lgSigner,
+			PropagationDelay: propagationDelay,
+			Now:              func() time.Time { return now },
+		}
+		transitionDsPublishedToStandbyForZone(deps, dsPubs)
+	}
+}
 
-		// Resolve the served DNSKEY TTL for E12. Defer this zone if no
-		// TTL is yet knowable — the condition clears after the first
-		// SignZone populates max_observed_ttl.
-		dnskeyTTL, ok := effectiveServedDnskeyTTL(kdb, zoneName, pol)
-		if !ok {
-			lgSigner.Debug("rollover: deferring ds-published→standby; DNSKEY TTL not yet observable",
-				"zone", zoneName)
+// transitionDsPublishedToStandbyForZone applies the E12 ds-published→
+// standby promotion for one zone. Per-zone counterpart of
+// TransitionRolloverKskDsPublishedToStandby. Both share the per-zone
+// logic but the global wrapper batches GetDnssecKeysByState across all
+// zones (cheaper than N queries). tdns-mp can call this directly when
+// it has a single zone in hand.
+//
+// dsPubs is the pre-filtered list of ds-published SEP keys for the
+// zone. deps must have KDB, Zone, Policy, Logger, PropagationDelay,
+// and Now populated.
+func transitionDsPublishedToStandbyForZone(deps RolloverEngineDeps, dsPubs []*DnssecKeyWithTimestamps) {
+	zoneName := deps.Zone.ZoneName
+	pol := deps.Policy
+	kdb := deps.KDB
+	now := deps.Now()
+
+	// Resolve the served DNSKEY TTL for E12. Defer this zone if no
+	// TTL is yet knowable — the condition clears after the first
+	// SignZone populates max_observed_ttl.
+	dnskeyTTL, ok := effectiveServedDnskeyTTL(kdb, zoneName, pol)
+	if !ok {
+		deps.Logger.Debug("rollover: deferring ds-published→standby; DNSKEY TTL not yet observable",
+			"zone", zoneName)
+		return
+	}
+
+	// Anchor T_roll on the active KSK's active_at.
+	active, err := GetDnssecKeysByState(kdb, zoneName, DnskeyStateActive)
+	if err != nil {
+		return
+	}
+	var activeKid uint16
+	for i := range active {
+		if active[i].Flags&dns.SEP != 0 {
+			activeKid = active[i].KeyTag
+			break
+		}
+	}
+	if activeKid == 0 {
+		return
+	}
+	activeAt, err := RolloverKeyActiveAt(kdb, zoneName, activeKid)
+	if err != nil || activeAt == nil {
+		return
+	}
+
+	// Sort ds-published keys by ds_observed_at ascending — this is
+	// the promotion order (oldest = next up). Keys with no
+	// ds_observed_at (shouldn't happen for state=ds-published, but
+	// be defensive) sort to the back.
+	sort.SliceStable(dsPubs, func(a, b int) bool {
+		ta, _ := RolloverKeyDsObservedAt(kdb, zoneName, dsPubs[a].KeyTag)
+		tb, _ := RolloverKeyDsObservedAt(kdb, zoneName, dsPubs[b].KeyTag)
+		if ta == nil && tb == nil {
+			return dsPubs[a].KeyTag < dsPubs[b].KeyTag
+		}
+		if ta == nil {
+			return false
+		}
+		if tb == nil {
+			return true
+		}
+		return ta.Before(*tb)
+	})
+
+	lifetime := time.Duration(pol.KSK.Lifetime) * time.Second
+	for i, k := range dsPubs {
+		// Promotion position: i=0 is the next-up (slot 1),
+		// i=1 is after that (slot 2), etc.
+		tRoll := activeAt.Add(time.Duration(i+1) * lifetime)
+		// E12: T_publish = T_roll − child_prop − DNSKEY_TTL.
+		tPublish := tRoll.Add(-(deps.PropagationDelay + dnskeyTTL))
+		if now.Before(tPublish) {
+			// Sorted by promotion order; later keys have
+			// strictly later tPublish (by exactly `lifetime`).
+			// Nothing more to do for this zone this tick.
+			break
+		}
+		if err := UpdateDnssecKeyState(kdb, zoneName, k.KeyTag, DnskeyStateStandby); err != nil {
+			deps.Logger.Error("rollover: ds-published→standby failed",
+				"zone", zoneName, "keyid", k.KeyTag, "err", err)
 			continue
 		}
-
-		// Anchor T_roll on the active KSK's active_at.
-		active, err := GetDnssecKeysByState(kdb, zoneName, DnskeyStateActive)
-		if err != nil {
-			continue
+		if err := setRolloverKeyStandbyAt(kdb, zoneName, k.KeyTag, now); err != nil {
+			deps.Logger.Warn("rollover: standby_at stamp failed",
+				"zone", zoneName, "keyid", k.KeyTag, "err", err)
 		}
-		var activeKid uint16
-		for i := range active {
-			if active[i].Flags&dns.SEP != 0 {
-				activeKid = active[i].KeyTag
-				break
-			}
-		}
-		if activeKid == 0 {
-			continue
-		}
-		activeAt, err := RolloverKeyActiveAt(kdb, zoneName, activeKid)
-		if err != nil || activeAt == nil {
-			continue
-		}
-
-		// Sort ds-published keys by ds_observed_at ascending — this is
-		// the promotion order (oldest = next up). Keys with no
-		// ds_observed_at (shouldn't happen for state=ds-published, but
-		// be defensive) sort to the back.
-		sort.SliceStable(dsPubs, func(a, b int) bool {
-			ta, _ := RolloverKeyDsObservedAt(kdb, zoneName, dsPubs[a].KeyTag)
-			tb, _ := RolloverKeyDsObservedAt(kdb, zoneName, dsPubs[b].KeyTag)
-			if ta == nil && tb == nil {
-				return dsPubs[a].KeyTag < dsPubs[b].KeyTag
-			}
-			if ta == nil {
-				return false
-			}
-			if tb == nil {
-				return true
-			}
-			return ta.Before(*tb)
-		})
-
-		lifetime := time.Duration(pol.KSK.Lifetime) * time.Second
-		for i, k := range dsPubs {
-			// Promotion position: i=0 is the next-up (slot 1),
-			// i=1 is after that (slot 2), etc.
-			tRoll := activeAt.Add(time.Duration(i+1) * lifetime)
-			// E12: T_publish = T_roll − child_prop − DNSKEY_TTL.
-			tPublish := tRoll.Add(-(propagationDelay + dnskeyTTL))
-			if now.Before(tPublish) {
-				// Sorted by promotion order; later keys have
-				// strictly later tPublish (by exactly `lifetime`).
-				// Nothing more to do for this zone this tick.
-				break
-			}
-			if err := UpdateDnssecKeyState(kdb, zoneName, k.KeyTag, DnskeyStateStandby); err != nil {
-				lgSigner.Error("rollover: ds-published→standby failed",
-					"zone", zoneName, "keyid", k.KeyTag, "err", err)
-				continue
-			}
-			if err := setRolloverKeyStandbyAt(kdb, zoneName, k.KeyTag, now); err != nil {
-				lgSigner.Warn("rollover: standby_at stamp failed",
-					"zone", zoneName, "keyid", k.KeyTag, "err", err)
-			}
-			lgSigner.Info("rollover: ds-published→standby",
-				"zone", zoneName, "keyid", k.KeyTag,
-				"slot", i+1, "t_roll", tRoll.UTC().Format(time.RFC3339),
-				"t_publish", tPublish.UTC().Format(time.RFC3339),
-				"dnskey_ttl", dnskeyTTL.String(),
-				"child_prop", propagationDelay.String())
-			triggerResign(conf, zoneName)
-		}
+		deps.Logger.Info("rollover: ds-published→standby",
+			"zone", zoneName, "keyid", k.KeyTag,
+			"slot", i+1, "t_roll", tRoll.UTC().Format(time.RFC3339),
+			"t_publish", tPublish.UTC().Format(time.RFC3339),
+			"dnskey_ttl", dnskeyTTL.String(),
+			"child_prop", deps.PropagationDelay.String())
+		triggerResign(deps.Conf, zoneName)
 	}
 }
 
