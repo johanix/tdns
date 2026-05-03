@@ -273,6 +273,19 @@ type DnssecPolicyRolloverConf struct {
 	//     halts in child-config:waiting-for-parent until the parent
 	//     starts advertising it.
 	DsyncSchemePreference string `yaml:"dsync-scheme-preference" mapstructure:"dsync-scheme-preference"`
+
+	// ParentCdsPollEstimate is an operator estimate of how long the
+	// parent waits between "child published CDS at apex" and "parent's
+	// DS RRset reflects the new CDS." Used by the E10 cache-flush
+	// invariant check when NOTIFY is the only viable scheme: in that
+	// case, parent_prop bundles a child-NOTIFY-to-parent-fetch hop on
+	// top of the standard DS UPDATE timeline, so ds-publish-delay alone
+	// understates the lead-time budget.
+	//
+	// Default 1m. Generalized NOTIFY exists to make parent CDS fetches
+	// near-instant; parents that batch CDS polls should set a larger
+	// value here.
+	ParentCdsPollEstimate string `yaml:"parent-cds-poll-estimate" mapstructure:"parent-cds-poll-estimate"`
 }
 
 // DnssecPolicyTtlsConf is the YAML `ttls:` subtree under a DNSSEC policy.

@@ -46,6 +46,11 @@ type RolloverPolicy struct {
 	// DsyncSchemePreference is one of the DsyncSchemePreference*
 	// constants below. Default is DsyncSchemePreferenceAuto.
 	DsyncSchemePreference string
+
+	// ParentCdsPollEstimate is the operator's estimate of parent CDS
+	// fetch latency. Used by E10 when NOTIFY is the sole viable scheme.
+	// Defaults to 1m. See DnssecPolicyRolloverConf.ParentCdsPollEstimate.
+	ParentCdsPollEstimate time.Duration
 }
 
 // DSYNC scheme preference values for RolloverPolicy.DsyncSchemePreference.
@@ -72,6 +77,7 @@ const (
 	defaultDsPublishDelay           = 5 * time.Minute
 	defaultMaxAttemptsBeforeBackoff = 5
 	defaultSoftfailDelayMinimum     = time.Hour
+	defaultParentCdsPollEstimate    = time.Minute
 )
 
 // derivedPollMax returns clamp(dsDelay/10, 30s, 5m). Used as the
@@ -320,6 +326,9 @@ func fillRolloverDurations(policyName string, conf *DnssecPolicyConf, out *Dnsse
 	if out.Rollover.SoftfailDelay, err = parseDur("softfail-delay", conf.Rollover.SoftfailDelay, derivedSoftfailDelay(out.Rollover.DsPublishDelay)); err != nil {
 		return fmt.Errorf("dnssec policy %q: %w", policyName, err)
 	}
+	if out.Rollover.ParentCdsPollEstimate, err = parseDur("parent-cds-poll-estimate", conf.Rollover.ParentCdsPollEstimate, defaultParentCdsPollEstimate); err != nil {
+		return fmt.Errorf("dnssec policy %q: %w", policyName, err)
+	}
 	out.Rollover.MaxAttemptsBeforeBackoff = conf.Rollover.MaxAttemptsBeforeBackoff
 	if out.Rollover.MaxAttemptsBeforeBackoff == 0 {
 		out.Rollover.MaxAttemptsBeforeBackoff = defaultMaxAttemptsBeforeBackoff
@@ -402,6 +411,18 @@ func warnDnssecPolicyCoupling(policyName string, out *DnssecPolicy) {
 	if out.Clamping.Enabled && out.Clamping.Margin > 0 && out.Clamping.Margin < 60*time.Second {
 		lgConfig.Warn("dnssec policy: clamping.margin below 60s (spec guidance for skew)",
 			"policy", policyName, "margin", out.Clamping.Margin.String())
+	}
+
+	// W6: when force-notify is set, the rollover engine never falls back
+	// to DNS UPDATE — the parent's CDS-fetch latency directly bounds
+	// T_DS_pub_n. Surface the operator's parent-cds-poll-estimate at
+	// load time so they can spot a surprising default before the first
+	// rollover fires.
+	if out.Rollover.DsyncSchemePreference == DsyncSchemePreferenceForceNotify {
+		lgConfig.Info("dnssec policy: force-notify selected; parent-cds-poll-estimate folded into E10 lead-time budget",
+			"policy", policyName,
+			"parent_cds_poll_estimate", out.Rollover.ParentCdsPollEstimate.String(),
+			"ds_publish_delay", out.Rollover.DsPublishDelay.String())
 	}
 }
 

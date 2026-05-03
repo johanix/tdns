@@ -114,7 +114,10 @@ func checkE5(pol *DnssecPolicy) string {
 //
 // retirement_period at config-load is clamping.margin (the operator-
 // controllable lower bound; effective_margin only ever grows this).
-// parent_prop is approximated by rollover.ds-publish-delay (§4.9).
+// parent_prop is approximated by rollover.ds-publish-delay (§4.9), plus
+// rollover.parent-cds-poll-estimate when force-notify is the chosen
+// scheme — under NOTIFY-only the parent has to fetch CDS before
+// updating its DS RRset, which adds latency on top of ds-publish-delay.
 // DS_TTL is the resolved value from resolveDSTTL.
 func checkE10(pol *DnssecPolicy, dsTTL time.Duration) string {
 	n := pol.Rollover.NumDS
@@ -127,6 +130,9 @@ func checkE10(pol *DnssecPolicy, dsTTL time.Duration) string {
 	}
 	retirement := pol.Clamping.Margin
 	parentProp := pol.Rollover.DsPublishDelay
+	if pol.Rollover.DsyncSchemePreference == DsyncSchemePreferenceForceNotify {
+		parentProp += pol.Rollover.ParentCdsPollEstimate
+	}
 	required := retirement + parentProp + dsTTL
 	available := time.Duration(n-1) * kskLifetime
 	if available >= required {
@@ -154,7 +160,11 @@ func checkE11(pol *DnssecPolicy, dsTTL time.Duration) string {
 	if kskLifetime <= 0 {
 		return ""
 	}
-	required := pol.Clamping.Margin + pol.Rollover.DsPublishDelay + dsTTL
+	parentProp := pol.Rollover.DsPublishDelay
+	if pol.Rollover.DsyncSchemePreference == DsyncSchemePreferenceForceNotify {
+		parentProp += pol.Rollover.ParentCdsPollEstimate
+	}
+	required := pol.Clamping.Margin + parentProp + dsTTL
 	if required <= 0 {
 		return ""
 	}
