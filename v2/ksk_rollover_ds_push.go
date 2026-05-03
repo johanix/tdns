@@ -225,12 +225,30 @@ func PushDSRRsetForRollover(ctx context.Context, deps RolloverEngineDeps) (KSKDS
 		cat := SoftfailChildConfigLocalError
 		if errors.Is(err, errNoUsableScheme) {
 			cat = SoftfailChildConfigWaitingForParent
+			// W4: surface the parent-config blocker on the zone so it
+			// shows up in zone list / auto-rollover status / when /
+			// asap immediately, not after waiting for an operator to
+			// notice via metrics. The engine continues to retry on
+			// every tick — the error is purely a visibility signal,
+			// cleared on the next successful pickRolloverSchemes.
+			pref := deps.Policy.Rollover.DsyncSchemePreference
+			if pref == "" {
+				pref = defaultDsyncSchemePreference
+			}
+			deps.Zone.SetError(RolloverParentBlocker,
+				"parent advertises no DSYNC scheme matching policy preference %q; rollover blocked",
+				pref)
 		}
 		return KSKDSPushResult{
 			Category: cat,
 			Detail:   "pickRolloverSchemes: " + err.Error(),
 		}, fmt.Errorf("PushDSRRsetForRollover: %w", err)
 	}
+
+	// W4: a successful pickRolloverSchemes means the waiting-for-parent
+	// blocker (if any) is now stale. Clear that category specifically;
+	// W2's RolloverPolicyViolation is independent and stays.
+	deps.Zone.ClearError(RolloverParentBlocker)
 
 	// Trigger 2 cleanup (UPDATE-only branch): if the chosen schemes
 	// don't include NOTIFY but we currently own a CDS RRset, that CDS

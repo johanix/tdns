@@ -96,21 +96,31 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInte
 	return out, nil
 }
 
-// populateRolloverPolicyErrors copies any active RolloverPolicyViolation
-// entries from the live ZoneData into RolloverStatus.PolicyErrors. The
-// CLI uses this slice to gate output of /auto-rollover status, when, and
+// populateRolloverPolicyErrors copies any active rollover-gating error
+// entries (RolloverPolicyViolation from W2, RolloverParentBlocker from
+// W4) from the live ZoneData into RolloverStatus.PolicyErrors. The CLI
+// uses this slice to gate output of /auto-rollover status, when, and
 // asap. Empty when the zone is not registered in Zones (offline-mode
-// lookups) or when no rollover-policy violations are active.
+// lookups) or when no rollover-gating errors are active.
 func populateRolloverPolicyErrors(out *RolloverStatus, zone string) {
 	zd, ok := Zones.Get(zone)
 	if !ok || zd == nil {
 		return
 	}
 	for _, e := range zd.ErrorList() {
-		if e.Type == RolloverPolicyViolation {
+		if isRolloverGatingError(e.Type) {
 			out.PolicyErrors = append(out.PolicyErrors, e.Msg)
 		}
 	}
+}
+
+func isRolloverGatingError(t ErrorType) bool {
+	for _, g := range rolloverGatingErrors {
+		if t == g {
+			return true
+		}
+	}
+	return false
 }
 
 // applyInFlightPublicationLabels overrides the Published column for
@@ -260,7 +270,7 @@ func populateRolloverWhenPolicyErrors(out *RolloverWhenResponse, zone string) {
 		return
 	}
 	for _, e := range zd.ErrorList() {
-		if e.Type == RolloverPolicyViolation {
+		if isRolloverGatingError(e.Type) {
 			out.PolicyErrors = append(out.PolicyErrors, e.Msg)
 		}
 	}

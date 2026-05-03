@@ -222,7 +222,17 @@ const (
 	RefreshError
 	AgentError
 	DnssecError
+	// RolloverPolicyViolation: cache-flush invariant or policy-cadence
+	// violation (E5/E10/E11) detected from policy + observed parent
+	// state. Set / cleared by W2's EvaluateRolloverPolicyInvariants.
 	RolloverPolicyViolation
+	// RolloverParentBlocker: parent's published DSYNC RRset does not
+	// advertise a scheme matching the zone's
+	// rollover.dsync-scheme-preference. Set immediately on
+	// errNoUsableScheme; cleared on the next successful
+	// pickRolloverSchemes. The engine keeps retrying — this is a
+	// visibility signal, not a hardfail.
+	RolloverParentBlocker
 )
 
 var ErrorTypeToString = map[ErrorType]string{
@@ -231,6 +241,7 @@ var ErrorTypeToString = map[ErrorType]string{
 	AgentError:              "agent",
 	DnssecError:             "DNSSEC",
 	RolloverPolicyViolation: "rollover-policy",
+	RolloverParentBlocker:   "rollover-parent-blocker",
 }
 
 // errorTypeReportOrder defines the deterministic order in which the
@@ -244,6 +255,17 @@ var errorTypeReportOrder = []ErrorType{
 	AgentError,
 	DnssecError,
 	RolloverPolicyViolation,
+	RolloverParentBlocker,
+}
+
+// rolloverGatingErrors are the error categories that block automated
+// rollover progression (the auto-rollover CLI surfaces them as
+// "automated rollovers not possible due to: ..." and refuses to
+// schedule manual rollovers via asap). Both W2 (policy invariant
+// violations) and W4 (parent DSYNC blockers) gate.
+var rolloverGatingErrors = []ErrorType{
+	RolloverPolicyViolation,
+	RolloverParentBlocker,
 }
 
 // ZoneError is one entry in the per-zone error registry. Use SetError
