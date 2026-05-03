@@ -918,9 +918,29 @@ func parseOptionalTime(s sql.NullString) (time.Time, bool) {
 
 // TransitionRolloverKskDsPublishedToStandby advances each SEP key from
 // ds-published to standby exactly when its DNSKEY needs to be in the
-// served zone for cache-flush safety: T_publish_i = T_roll_i -
-// propagationDelay, where T_roll_i = active.active_at + i × KSK.Lifetime
-// and i is the key's position in the promotion queue (1 = next-up).
+// served zone for cache-flush safety, per spec §4.7:
+//
+//	T_publish_i = T_roll_i − child_prop − DNSKEY_TTL
+//
+// where T_roll_i = active.active_at + i × KSK.Lifetime, child_prop is
+// kasp.propagation_delay (the configured estimate of how long it takes
+// the new RRset to reach all child secondaries), and DNSKEY_TTL is the
+// served-wire TTL of the DNSKEY RRset. The − DNSKEY_TTL term is what
+// guarantees the cache-flush invariant E3:
+//
+//	T_DNSKEY_pub_n + child_prop + DNSKEY_TTL ≤ T_roll_n
+//
+// without it, validators that fetched the DNSKEY RRset in the last
+// DNSKEY_TTL window before T_roll_n carry a stale cache across
+// T_roll_n and reject RRSIG_n.
+//
+// DNSKEY_TTL is resolved per-zone via effectiveServedDnskeyTTL:
+// min(pol.TTLS.DNSKEY, pol.TTLS.MaxServed) when both set, otherwise
+// the one set value, otherwise the observed max_observed_ttl from the
+// keystore. When none are known (zone has never been signed yet and
+// policy has no TTL hints), the engine defers this transition to the
+// next tick — the condition clears as soon as the first SignZone
+// populates max_observed_ttl.
 //
 // Why not "advance after DS has been observed for propagationDelay
 // seconds": that rule unconditionally advances every ds-published key
@@ -933,11 +953,11 @@ func parseOptionalTime(s sql.NullString) (time.Time, bool) {
 // further out, leave them in ds-published until their own T_publish
 // comes around.
 //
-// Corner case: when propagationDelay > KSK.Lifetime, T_publish_i for a
-// key that's i slots out can land before T_publish_{i-1}'s rollover
-// fires, meaning multiple standbys may need DNSKEYs simultaneously.
-// The per-promotion-position computation handles this correctly —
-// each key is governed by its own T_publish.
+// Corner case: when propagationDelay+dnskey_ttl > KSK.Lifetime,
+// T_publish_i for a key that's i slots out can land before
+// T_publish_{i-1}'s rollover fires, meaning multiple standbys may need
+// DNSKEYs simultaneously. The per-promotion-position computation
+// handles this correctly — each key is governed by its own T_publish.
 func TransitionRolloverKskDsPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
 	keys, err := GetDnssecKeysByState(kdb, "", DnskeyStateDsPublished)
 	if err != nil {
@@ -962,6 +982,16 @@ func TransitionRolloverKskDsPublishedToStandby(conf *Config, kdb *KeyDB, now tim
 		}
 		pol := zd.DnssecPolicy
 		if pol.KSK.Lifetime == 0 {
+			continue
+		}
+
+		// Resolve the served DNSKEY TTL for E12. Defer this zone if no
+		// TTL is yet knowable — the condition clears after the first
+		// SignZone populates max_observed_ttl.
+		dnskeyTTL, ok := effectiveServedDnskeyTTL(kdb, zoneName, pol)
+		if !ok {
+			lgSigner.Debug("rollover: deferring ds-published→standby; DNSKEY TTL not yet observable",
+				"zone", zoneName)
 			continue
 		}
 
@@ -1009,7 +1039,8 @@ func TransitionRolloverKskDsPublishedToStandby(conf *Config, kdb *KeyDB, now tim
 			// Promotion position: i=0 is the next-up (slot 1),
 			// i=1 is after that (slot 2), etc.
 			tRoll := activeAt.Add(time.Duration(i+1) * lifetime)
-			tPublish := tRoll.Add(-propagationDelay)
+			// E12: T_publish = T_roll − child_prop − DNSKEY_TTL.
+			tPublish := tRoll.Add(-(propagationDelay + dnskeyTTL))
 			if now.Before(tPublish) {
 				// Sorted by promotion order; later keys have
 				// strictly later tPublish (by exactly `lifetime`).
@@ -1028,10 +1059,50 @@ func TransitionRolloverKskDsPublishedToStandby(conf *Config, kdb *KeyDB, now tim
 			lgSigner.Info("rollover: ds-published→standby",
 				"zone", zoneName, "keyid", k.KeyTag,
 				"slot", i+1, "t_roll", tRoll.UTC().Format(time.RFC3339),
-				"t_publish", tPublish.UTC().Format(time.RFC3339))
+				"t_publish", tPublish.UTC().Format(time.RFC3339),
+				"dnskey_ttl", dnskeyTTL.String(),
+				"child_prop", propagationDelay.String())
 			triggerResign(conf, zoneName)
 		}
 	}
+}
+
+// effectiveServedDnskeyTTL returns the DNSKEY TTL the engine should
+// subtract from T_roll for E12 (T_publish = T_roll − child_prop −
+// DNSKEY_TTL). Resolution order:
+//
+//  1. min(pol.TTLS.DNSKEY, pol.TTLS.MaxServed) when both are set
+//     (the served wire TTL — E13 form).
+//  2. The single one set, when only one is set.
+//  3. LoadZoneSigningMaxTTL — the value observed from served RRset
+//     headers in the most recent SignZone pass.
+//
+// Returns (0, false) when none of these is positive: the zone has no
+// TTL hints in policy and has never been signed. Caller defers the
+// transition; condition clears after first SignZone.
+func effectiveServedDnskeyTTL(kdb *KeyDB, zone string, pol *DnssecPolicy) (time.Duration, bool) {
+	dnskey := pol.TTLS.DNSKEY
+	maxServed := pol.TTLS.MaxServed
+	var seconds uint32
+	switch {
+	case dnskey > 0 && maxServed > 0:
+		if dnskey < maxServed {
+			seconds = dnskey
+		} else {
+			seconds = maxServed
+		}
+	case dnskey > 0:
+		seconds = dnskey
+	case maxServed > 0:
+		seconds = maxServed
+	default:
+		obs, err := LoadZoneSigningMaxTTL(kdb, zone)
+		if err != nil || obs == 0 {
+			return 0, false
+		}
+		seconds = obs
+	}
+	return time.Duration(seconds) * time.Second, true
 }
 
 // PromoteStandbyKskIfNoActive activates one standby KSK when the zone has none (bootstrap).
