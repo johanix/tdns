@@ -231,6 +231,17 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 		out.Clamping.Margin = 0
 	}
 
+	if s := strings.TrimSpace(conf.Ttls.DS); s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("dnssec policy %q: ttls.ds: %w", policyName, err)
+		}
+		if d < 0 {
+			return fmt.Errorf("dnssec policy %q: ttls.ds must be non-negative", policyName)
+		}
+		out.TTLS.DS = uint32(d.Seconds())
+	}
+
 	// max_served must be parsed AFTER clamping so the cross-check against
 	// clamping.margin sees the resolved margin value.
 	if s := strings.TrimSpace(conf.Ttls.MaxServed); s != "" {

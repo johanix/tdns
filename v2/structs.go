@@ -128,16 +128,21 @@ type ZoneData struct {
 	// Errors and kept in sync by SetError / ClearError. Existing call
 	// sites that read those single-error fields continue to work; new
 	// code can iterate ErrorList() for the full set.
-	Errors             map[ErrorType]ZoneError
-	Error              bool        // derived: len(Errors) > 0
-	ErrorType          ErrorType   // derived: highest-priority error type, see errorTypeReportOrder
-	ErrorMsg           string      // derived: msg of the type reported in ErrorType
-	LatestError        time.Time   // time of latest error
-	RefreshCount       int         // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
-	LatestRefresh      time.Time   // time of latest successful refresh
-	SourceCatalog      string      // if auto-configured, which catalog zone created this zone
-	TransportSignal    *core.RRset // transport signal RRset (SVCB or TSYNC)
-	AddTransportSignal bool        // whether to attach TransportSignal in responses
+	Errors        map[ErrorType]ZoneError
+	Error         bool      // derived: len(Errors) > 0
+	ErrorType     ErrorType // derived: highest-priority error type, see errorTypeReportOrder
+	ErrorMsg      string    // derived: msg of the type reported in ErrorType
+	LatestError   time.Time // time of latest error
+	RefreshCount  int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
+	LatestRefresh time.Time // time of latest successful refresh
+	SourceCatalog string    // if auto-configured, which catalog zone created this zone
+	// ParentDSTTLObserved is the most recent TTL observed on the parent's
+	// DS RRset (seconds). Refreshed by every successful QueryParentAgentDS
+	// call. Zero means "not yet observed" — the E10 cache-flush invariant
+	// check defers until either this value or DnssecPolicy.TTLS.DS is set.
+	ParentDSTTLObserved uint32
+	TransportSignal     *core.RRset // transport signal RRset (SVCB or TSYNC)
+	AddTransportSignal  bool        // whether to attach TransportSignal in responses
 	// RemoteDNSKEYs holds DNSKEY RRs from other signers (multi-signer mode 4).
 	// These are DNSKEYs found in the incoming zone that do not match keys in our
 	// local keystore. They are preserved across resignings and merged into the
@@ -274,6 +279,14 @@ type DnssecPolicyRolloverConf struct {
 type DnssecPolicyTtlsConf struct {
 	DNSKEY    string `yaml:"dnskey" mapstructure:"dnskey"`
 	MaxServed string `yaml:"max_served" mapstructure:"max_served"`
+	// DS is an optional override for the parent's DS RRset TTL when the
+	// engine cannot observe it (parent unreachable at zone init, testbed
+	// determinism, registries that gate DS queries). Used by the E10
+	// cache-flush invariant check: (N − 1) × KSK.Lifetime ≥
+	// retirement_period + parent_prop + DS_TTL. When unset, the engine
+	// defers E10 validation until the first successful
+	// QueryParentAgentDS observation supplies the live TTL.
+	DS string `yaml:"ds" mapstructure:"ds"`
 }
 
 // DnssecPolicyClampingConf is the YAML `clamping:` subtree under a DNSSEC policy.
@@ -336,6 +349,11 @@ type DnssecPolicyTTLS struct {
 	// the operator can't directly edit (e.g. inbound zone transfers).
 	// Zero means no ceiling. Validation: must be >= 60s when set.
 	MaxServed uint32
+	// DS is the operator-provided override for the parent's DS RRset TTL.
+	// Zero means "observe at runtime" — the engine queries the parent
+	// agent and stores the observed TTL on zd.ParentDSTTLObserved. Used
+	// by the E10 invariant check.
+	DS uint32
 }
 
 type Ixfr struct {

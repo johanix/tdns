@@ -338,6 +338,10 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 			scheduleNextObservePoll(kdb, zone, row, now, pollMax)
 			return nil
 		}
+		// W2: refresh observed parent DS TTL and re-evaluate cache-flush
+		// invariants on every successful poll. Pure piggyback — this is
+		// a DS query the engine was already doing.
+		recordParentDSTTLObservation(zone, pol, obs)
 		// Persist the polled keyid set + timestamp regardless of
 		// whether it matches expected. The "DS observed" status line
 		// shows the latest poll, not the latest confirmed match.
@@ -419,6 +423,9 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 			obs, qerr := QueryParentAgentDS(ctx, zone, agent)
 			_ = setLastPoll(kdb, zone, now)
 			if qerr == nil {
+				// W2: refresh observed parent DS TTL + re-evaluate
+				// cache-flush invariants on every successful poll.
+				recordParentDSTTLObservation(zone, pol, obs)
 				// Persist the polled keyid set + timestamp regardless
 				// of match status; the "DS observed" status line
 				// reflects the latest poll, not the latest confirm.

@@ -732,6 +732,19 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 				})
 			}
 
+			// Rollover policy validation callback: at first zone load,
+			// run E5 immediately (it doesn't need the parent's DS TTL),
+			// then issue an asynchronous parent-DS query so E10/E11 can
+			// run as soon as the observation comes back. This is W2 of
+			// the rollover-timing-fixes plan.
+			zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
+				if zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method == RolloverMethodNone {
+					return
+				}
+				EvaluateRolloverPolicyInvariants(zd, zd.DnssecPolicy)
+				go ObserveParentDSTTL(context.Background(), zd, zd.DnssecPolicy)
+			})
+
 			// Delegation sync callback: set up DSYNC publication (parent) or
 			// delegation sync monitoring (child) after zone is loaded.
 			if options[OptDelSyncParent] || options[OptDelSyncChild] {
