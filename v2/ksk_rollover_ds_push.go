@@ -147,6 +147,60 @@ ORDER BY COALESCE(r.rollover_index, 2147483646) ASC, k.keyid ASC`
 // indexLow/indexHigh are min/max rollover_index when every contributing key has a
 // RolloverKeyState row; otherwise indexRangeKnown is false and callers must not treat
 // the indices as authoritative for RolloverZoneState.
+// dsSetFromSnapshot derives DS RRset from a precomputed key-row
+// snapshot. Used by W5 to ensure UPDATE and NOTIFY paths describe
+// identical sets in auto-mode parallel dispatch.
+func dsSetFromSnapshot(snap *RolloverTargetKeySnapshot, childZone string, digest uint8) ([]dns.RR, int, int, bool, error) {
+	childZone = dns.Fqdn(childZone)
+	out := make([]dns.RR, 0, len(snap.Rows))
+	for _, row := range snap.Rows {
+		rr, err := dns.NewRR(row.keyrr)
+		if err != nil {
+			return nil, 0, 0, false, fmt.Errorf("dsSetFromSnapshot: parse DNSKEY keyid=%d: %w", row.keyid, err)
+		}
+		dk, ok := rr.(*dns.DNSKEY)
+		if !ok {
+			return nil, 0, 0, false, fmt.Errorf("dsSetFromSnapshot: keyid %d is not DNSKEY", row.keyid)
+		}
+		ds := dk.ToDS(digest)
+		if ds == nil {
+			return nil, 0, 0, false, fmt.Errorf("dsSetFromSnapshot: ToDS failed for keyid %d", row.keyid)
+		}
+		ds.Hdr.Name = childZone
+		out = append(out, ds)
+	}
+	return out, snap.IndexLow, snap.IndexHigh, snap.IndexRangeKnown, nil
+}
+
+// cdsSetFromSnapshot is the CDS counterpart of dsSetFromSnapshot.
+func cdsSetFromSnapshot(snap *RolloverTargetKeySnapshot, childZone string) ([]dns.RR, int, int, bool, error) {
+	childZone = dns.Fqdn(childZone)
+	out := make([]dns.RR, 0, len(snap.Rows))
+	for _, row := range snap.Rows {
+		rr, err := dns.NewRR(row.keyrr)
+		if err != nil {
+			return nil, 0, 0, false, fmt.Errorf("cdsSetFromSnapshot: parse DNSKEY keyid=%d: %w", row.keyid, err)
+		}
+		dk, ok := rr.(*dns.DNSKEY)
+		if !ok {
+			return nil, 0, 0, false, fmt.Errorf("cdsSetFromSnapshot: keyid %d is not DNSKEY", row.keyid)
+		}
+		ds := dk.ToDS(uint8(dns.SHA256))
+		if ds == nil {
+			return nil, 0, 0, false, fmt.Errorf("cdsSetFromSnapshot: ToDS failed for keyid %d", row.keyid)
+		}
+		c := &dns.CDS{DS: *ds}
+		c.Hdr = dns.RR_Header{
+			Name:   childZone,
+			Rrtype: dns.TypeCDS,
+			Class:  dns.ClassINET,
+			Ttl:    120,
+		}
+		out = append(out, c)
+	}
+	return out, snap.IndexLow, snap.IndexHigh, snap.IndexRangeKnown, nil
+}
+
 func ComputeTargetDSSetForZone(kdb *KeyDB, childZone string, digest uint8) (ds []dns.RR, indexLow, indexHigh int, indexRangeKnown bool, err error) {
 	childZone = dns.Fqdn(childZone)
 	rows, low, high, idxOK, err := loadTargetKSKsForRollover(kdb, childZone)
@@ -200,6 +254,24 @@ func ComputeTargetDSSetForZone(kdb *KeyDB, childZone string, digest uint8) (ds [
 // zd), the dispatcher falls through to the legacy UPDATE-only path
 // to preserve existing CLI behavior.
 func PushDSRRsetForRollover(ctx context.Context, deps RolloverEngineDeps) (KSKDSPushResult, error) {
+	// W5: take a single snapshot of the rollover-target key rows up
+	// front and share it across both UPDATE and NOTIFY paths. Removes
+	// the auto-mode race where two parallel goroutines could re-derive
+	// from a keystore mid-state-transition and write divergent sets to
+	// the parent.
+	if deps.TargetKeySnapshot == nil && deps.KDB != nil && deps.Zone != nil {
+		zone := dns.Fqdn(deps.Zone.ZoneName)
+		rows, low, high, idxOK, lerr := loadTargetKSKsForRollover(deps.KDB, zone)
+		if lerr == nil {
+			deps.TargetKeySnapshot = &RolloverTargetKeySnapshot{
+				Rows:            rows,
+				IndexLow:        low,
+				IndexHigh:       high,
+				IndexRangeKnown: idxOK,
+			}
+		}
+	}
+
 	if deps.Policy == nil {
 		return pushDSRRsetViaUpdate(ctx, deps)
 	}
@@ -444,7 +516,18 @@ func pushDSRRsetViaUpdate(ctx context.Context, deps RolloverEngineDeps) (KSKDSPu
 		parent = dns.Fqdn(parent)
 	}
 
-	dsSet, low, high, idxOK, err := ComputeTargetDSSetForZone(kdb, child, uint8(dns.SHA256))
+	var (
+		dsSet []dns.RR
+		low   int
+		high  int
+		idxOK bool
+		err   error
+	)
+	if deps.TargetKeySnapshot != nil {
+		dsSet, low, high, idxOK, err = dsSetFromSnapshot(deps.TargetKeySnapshot, child, uint8(dns.SHA256))
+	} else {
+		dsSet, low, high, idxOK, err = ComputeTargetDSSetForZone(kdb, child, uint8(dns.SHA256))
+	}
 	if err != nil {
 		out.Category = SoftfailChildConfigLocalError
 		return out, err

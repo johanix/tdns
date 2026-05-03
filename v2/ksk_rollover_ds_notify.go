@@ -67,7 +67,18 @@ func pushDSRRsetViaNotify(ctx context.Context, deps RolloverEngineDeps, target *
 
 	child := dns.Fqdn(zd.ZoneName)
 
-	cdsSet, low, high, idxOK, err := ComputeTargetCDSSetForZone(kdb, child)
+	var (
+		cdsSet []dns.RR
+		low    int
+		high   int
+		idxOK  bool
+		err    error
+	)
+	if deps.TargetKeySnapshot != nil {
+		cdsSet, low, high, idxOK, err = cdsSetFromSnapshot(deps.TargetKeySnapshot, child)
+	} else {
+		cdsSet, low, high, idxOK, err = ComputeTargetCDSSetForZone(kdb, child)
+	}
 	if err != nil {
 		out.Category = SoftfailChildConfigLocalError
 		return out, err
