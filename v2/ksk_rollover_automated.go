@@ -1062,7 +1062,7 @@ func transitionDsPublishedToStandbyForZone(deps RolloverEngineDeps, dsPubs []*Dn
 
 	// Slot offset: the number of SEP keys *already* in the standby
 	// state for this zone. Each of those occupies one of the next
-	// promotion slots (slot 1 = oldest standby_at = next-up); a
+	// promotion slots (slot 1 = oldest published_at = next-up); a
 	// ds-published key promoting to standby joins the queue *after*
 	// them.
 	//
@@ -1136,8 +1136,8 @@ func transitionDsPublishedToStandbyForZone(deps RolloverEngineDeps, dsPubs []*Dn
 				"zone", zoneName, "keyid", k.KeyTag, "err", err)
 			continue
 		}
-		if err := setRolloverKeyStandbyAt(kdb, zoneName, k.KeyTag, now); err != nil {
-			deps.Logger.Warn("rollover: standby_at stamp failed",
+		if err := setRolloverKeyPublishedAt(kdb, zoneName, k.KeyTag, now); err != nil {
+			deps.Logger.Warn("rollover: published_at stamp failed",
 				"zone", zoneName, "keyid", k.KeyTag, "err", err)
 		}
 		deps.Logger.Info("rollover: ds-published→standby",

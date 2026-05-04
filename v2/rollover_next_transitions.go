@@ -73,7 +73,7 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 	})
 
 	// Slot ordering for standby keys. AtomicRollover picks oldest
-	// standby_at first; renderer mirrors that selection.
+	// published_at first; renderer mirrors that selection.
 	standbyKids := []uint16{}
 	for _, e := range out.KSKs {
 		if e.State == DnskeyStateStandby {
@@ -81,8 +81,12 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 		}
 	}
 	sort.SliceStable(standbyKids, func(a, b int) bool {
-		ta, _ := RolloverKeyStandbyAt(kdb, zone, standbyKids[a])
-		tb, _ := RolloverKeyStandbyAt(kdb, zone, standbyKids[b])
+		// Order by published_at — the moment the DNSKEY entered the
+		// served zone. C18 will add a separate genuine-standby
+		// timestamp; until then published_at is the oldest-equals-
+		// next-up signal.
+		ta, _ := RolloverKeyPublishedAt(kdb, zone, standbyKids[a])
+		tb, _ := RolloverKeyPublishedAt(kdb, zone, standbyKids[b])
 		if ta == nil && tb == nil {
 			return standbyKids[a] < standbyKids[b]
 		}

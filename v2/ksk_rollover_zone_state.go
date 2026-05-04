@@ -277,12 +277,17 @@ WHERE zone = ?`, zone)
 	return err
 }
 
-// setRolloverKeyStandbyAtTx stamps standby_at for one key on an existing TX.
-// Called when a SEP key transitions published → standby in a rollover-managed
-// zone; drives the oldest-standby selection in AtomicRollover.
-func setRolloverKeyStandbyAtTx(tx *Tx, zone string, keyid uint16, at time.Time) error {
+// setRolloverKeyPublishedAtTx stamps published_at for one key on an
+// existing TX. Called when a SEP key transitions ds-published → "DNSKEY
+// in zone" — what the engine currently calls the "standby" state, which
+// the in-flight state-machine split (C16-C18 commit series) splits into
+// "published" + "standby." This commit (C17) renames the column and
+// the call sites; the state string remains "standby" until C18 adds
+// the genuine-propagated transition. Drives the oldest-standby
+// selection in AtomicRollover via published_at ordering.
+func setRolloverKeyPublishedAtTx(tx *Tx, zone string, keyid uint16, at time.Time) error {
 	s := at.UTC().Format(time.RFC3339)
-	_, err := tx.Exec(`UPDATE RolloverKeyState SET standby_at = ? WHERE zone = ? AND keyid = ?`, s, zone, int(keyid))
+	_, err := tx.Exec(`UPDATE RolloverKeyState SET published_at = ? WHERE zone = ? AND keyid = ?`, s, zone, int(keyid))
 	return err
 }
 
@@ -366,12 +371,13 @@ func RolloverKeyidsByIndexRange(kdb *KeyDB, zone string, low, high int64) ([]uin
 	return out, rows.Err()
 }
 
-// setRolloverKeyStandbyAt is the non-TX variant for callers outside of
-// AtomicRollover (e.g. TransitionRolloverKskDsPublishedToStandby's
-// per-key loop).
-func setRolloverKeyStandbyAt(kdb *KeyDB, zone string, keyid uint16, at time.Time) error {
+// setRolloverKeyPublishedAt is the non-TX variant for callers outside
+// of AtomicRollover (e.g. TransitionRolloverKskDsPublishedToStandby's
+// per-key loop). Stamps published_at — the moment the engine moved
+// the DNSKEY into the served zone.
+func setRolloverKeyPublishedAt(kdb *KeyDB, zone string, keyid uint16, at time.Time) error {
 	s := at.UTC().Format(time.RFC3339)
-	_, err := kdb.DB.Exec(`UPDATE RolloverKeyState SET standby_at = ? WHERE zone = ? AND keyid = ?`, s, zone, int(keyid))
+	_, err := kdb.DB.Exec(`UPDATE RolloverKeyState SET published_at = ? WHERE zone = ? AND keyid = ?`, s, zone, int(keyid))
 	return err
 }
 
@@ -409,9 +415,10 @@ func RolloverKeyActiveAt(kdb *KeyDB, zone string, keyid uint16) (*time.Time, err
 	return readKeyTimestamp(kdb, zone, keyid, "active_at")
 }
 
-// RolloverKeyStandbyAt returns the standby_at timestamp, or nil if unset.
-func RolloverKeyStandbyAt(kdb *KeyDB, zone string, keyid uint16) (*time.Time, error) {
-	return readKeyTimestamp(kdb, zone, keyid, "standby_at")
+// RolloverKeyPublishedAt returns the published_at timestamp (DNSKEY-
+// in-zone since), or nil if unset.
+func RolloverKeyPublishedAt(kdb *KeyDB, zone string, keyid uint16) (*time.Time, error) {
+	return readKeyTimestamp(kdb, zone, keyid, "published_at")
 }
 
 // RolloverKeyDsObservedAt returns the ds_observed_at timestamp, or nil if unset.
@@ -449,38 +456,41 @@ func readKeyTimestamp(kdb *KeyDB, zone string, keyid uint16, col string) (*time.
 	return &t, nil
 }
 
-// listRolloverStandbyKeysTx returns (keyid, standby_at) for all SEP keys in
-// state=standby for the zone, ordered by standby_at (NULLs last) then keyid.
-// Used by AtomicRollover to pick the oldest standby for promotion.
+// listRolloverStandbyKeysTx returns (keyid, published_at) for all SEP
+// keys in state=standby for the zone, ordered by published_at (NULLs
+// last) then keyid. Used by AtomicRollover to pick the oldest standby
+// for promotion. The struct field is named PublishedAt to match the
+// underlying column (renamed from standby_at in C16); promotion
+// semantics are unchanged: oldest DNSKEY-in-zone moment wins.
 func listRolloverStandbyKeysTx(tx *Tx, zone string) ([]struct {
-	KeyID     uint16
-	StandbyAt sql.NullString
+	KeyID       uint16
+	PublishedAt sql.NullString
 }, error) {
 	rows, err := tx.Query(`
-SELECT d.keyid, r.standby_at
+SELECT d.keyid, r.published_at
 FROM DnssecKeyStore d
 LEFT JOIN RolloverKeyState r ON r.zone = d.zonename AND r.keyid = d.keyid
 WHERE d.zonename = ? AND d.state = ? AND (d.flags & 1) = 1
-ORDER BY (r.standby_at IS NULL OR r.standby_at = '') ASC, r.standby_at ASC, d.keyid ASC`,
+ORDER BY (r.published_at IS NULL OR r.published_at = '') ASC, r.published_at ASC, d.keyid ASC`,
 		zone, DnskeyStateStandby)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []struct {
-		KeyID     uint16
-		StandbyAt sql.NullString
+		KeyID       uint16
+		PublishedAt sql.NullString
 	}
 	for rows.Next() {
 		var kid int
-		var sa sql.NullString
-		if err := rows.Scan(&kid, &sa); err != nil {
+		var pa sql.NullString
+		if err := rows.Scan(&kid, &pa); err != nil {
 			return nil, err
 		}
 		out = append(out, struct {
-			KeyID     uint16
-			StandbyAt sql.NullString
-		}{KeyID: uint16(kid), StandbyAt: sa})
+			KeyID       uint16
+			PublishedAt sql.NullString
+		}{KeyID: uint16(kid), PublishedAt: pa})
 	}
 	return out, rows.Err()
 }
@@ -959,7 +969,12 @@ func StateSinceForDnssecKey(kdb *KeyDB, zone string, k *DnssecKeyWithTimestamps)
 			return *at
 		}
 	case DnskeyStateStandby:
-		t, err := RolloverKeyStandbyAt(kdb, zone, k.KeyTag)
+		// Pre-C18 the engine moved keys directly ds-published →
+		// "standby" and the only timestamp available was what we now
+		// call published_at. C18 adds a separate genuine-standby
+		// transition that will set a distinct standby_at column;
+		// until then read published_at.
+		t, err := RolloverKeyPublishedAt(kdb, zone, k.KeyTag)
 		if err == nil && t != nil {
 			return *t
 		}

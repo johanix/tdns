@@ -275,17 +275,23 @@ func diagnoseEarliestBlocker(kdb *KeyDB, zone string, activeKid uint16) *Earlies
 }
 
 // pickEarliestStandbySEP returns the keyid of the standby SEP key that
-// AtomicRollover would promote: oldest standby_at, tie-break by
+// AtomicRollover would promote: oldest published_at, tie-break by
 // rollover_index ascending then keytag ascending. Returns 0 if no standby
 // SEP key exists.
+//
+// published_at (added in C16) replaces what the old single-state code
+// called standby_at: the moment the engine moved the DNSKEY into the
+// served zone. C18 adds a genuine "standby" transition with its own
+// timestamp; until then "oldest published_at" remains the right
+// promotion-order signal.
 func pickEarliestStandbySEP(kdb *KeyDB, zone string) (uint16, error) {
 	rows, err := kdb.DB.Query(`
-SELECT d.keyid, r.standby_at, r.rollover_index
+SELECT d.keyid, r.published_at, r.rollover_index
 FROM DnssecKeyStore d
 LEFT JOIN RolloverKeyState r ON r.zone = d.zonename AND r.keyid = d.keyid
 WHERE d.zonename = ? AND d.state = ? AND (d.flags & 1) = 1
-ORDER BY (r.standby_at IS NULL OR r.standby_at = '') ASC,
-         r.standby_at ASC,
+ORDER BY (r.published_at IS NULL OR r.published_at = '') ASC,
+         r.published_at ASC,
          (r.rollover_index IS NULL) ASC,
          r.rollover_index ASC,
          d.keyid ASC`,
