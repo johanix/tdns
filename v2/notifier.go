@@ -55,7 +55,7 @@ func Notifier(ctx context.Context, notifyreqQ chan NotifyRequest) error {
 
 			lgDns.Info("NotifierEngine: will notify downstreams", "zone", zd.ZoneName)
 
-			rcode, ede, sendErr := zd.SendNotify(nr.RRtype, nr.Targets)
+			rcode, ede, sendErr := zd.SendNotify(ctx, nr.RRtype, nr.Targets)
 
 			if nr.Response != nil {
 				resp := NotifyResponse{
@@ -88,7 +88,11 @@ func Notifier(ctx context.Context, notifyreqQ chan NotifyRequest) error {
 // every target's transport failed) and EDE comes from that target's
 // response. err is non-nil only when no target produced a usable
 // response at all (transport-level failure across the board).
-func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, []dns.EDNS0_EDE, error) {
+//
+// ctx cancels in-flight per-target sends. On daemon shutdown, the
+// caller cancels ctx and the per-target loop exits at the next
+// iteration boundary or via ExchangeContext returning early.
+func (zd *ZoneData) SendNotify(ctx context.Context, ntype uint16, targets []string) (int, []dns.EDNS0_EDE, error) {
 	if zd.ZoneName == "." {
 		return dns.RcodeServerFailure, nil, fmt.Errorf("zone %q: error: zone name not specified. Ignoring notify request", zd.ZoneName)
 	}
@@ -132,6 +136,12 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, []dns.EDNS0
 	haveLastFailRcode := false
 
 	for _, dst := range targets {
+		// Honor cancellation between targets so daemon shutdown
+		// doesn't block for len(targets)*Timeout.
+		if err := ctx.Err(); err != nil {
+			lgDns.Warn("NOTIFY: context cancelled, aborting remaining targets", "zone", zd.ZoneName, "remaining", len(targets), "err", err)
+			break
+		}
 		lgDns.Info("NOTIFY: sending", "type", dns.TypeToString[ntype], "zone", zd.ZoneName, "target", dst)
 
 		m := new(dns.Msg)
@@ -142,7 +152,7 @@ func (zd *ZoneData) SendNotify(ntype uint16, targets []string) (int, []dns.EDNS0
 
 		lgDns.Debug("sending NOTIFY message", "msg", m.String())
 
-		res, _, exErr := c.Exchange(m, dst)
+		res, _, exErr := c.ExchangeContext(ctx, m, dst)
 		if exErr != nil {
 			lgDns.Warn("NOTIFY: dns.Exchange failed, trying next target", "target", dst, "type", dns.TypeToString[ntype], "err", exErr)
 			continue
