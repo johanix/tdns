@@ -118,14 +118,10 @@ func dbSetupTables(db *sql.DB) bool {
 // Each block must be idempotent: re-running on an already-migrated
 // database is a no-op.
 func dbMigrateData(db *sql.DB) {
-	// Copy old standby_at values to the new published_at column for
-	// any RolloverKeyState row where published_at hasn't been set
-	// yet. The old single-state code stamped standby_at when the
-	// engine moved a key into the served zone DNSKEY RRset — what
-	// the new state machine calls "published_at." Subsequent commits
-	// in the same series rename code references and add a separate
-	// transition to set the new (genuine-propagated) standby_at;
-	// this commit is purely additive and safe to run on its own.
+	// C16: copy old standby_at values to the new published_at column.
+	// The old single-state code stamped standby_at when the engine
+	// moved a key into the served zone DNSKEY RRset — what the new
+	// state machine calls published_at.
 	if dbColumnExists(db, "RolloverKeyState", "published_at") {
 		_, err := db.Exec(`UPDATE RolloverKeyState
 SET published_at = standby_at
@@ -133,6 +129,33 @@ WHERE published_at IS NULL AND standby_at IS NOT NULL AND standby_at != ''`)
 		if err != nil {
 			lgConfig.Error("data migration: copy standby_at to published_at failed", "err", err)
 		}
+	}
+
+	// C18: rename existing SEP keys in the old "standby" state to the
+	// new "published" state. The old code reached the "standby" string
+	// at T_publish (DNSKEY just entered zone, propagation incomplete).
+	// The new state machine names that "published" and adds a separate
+	// "standby" string for genuine propagated-standby. After this
+	// migration, the new TransitionRolloverKskPublishedToStandby will
+	// pick up these keys on the next tick and promote them to the new
+	// "standby" once their propagation gate elapses.
+	//
+	// Idempotence: gated on standby_at being NULL — once the new
+	// genuine-standby transition has stamped standby_at on a key, we
+	// know it has been through the new state machine and shouldn't be
+	// retroactively renamed.
+	//
+	// SEP-only: ZSK "published" semantics are unchanged.
+	_, err := db.Exec(`UPDATE DnssecKeyStore
+SET state = 'published'
+WHERE state = 'standby' AND (CAST(flags AS INTEGER) & 1) = 1
+  AND zonename || '|' || keyid IN (
+    SELECT zone || '|' || keyid
+    FROM RolloverKeyState
+    WHERE standby_at IS NULL OR standby_at = ''
+  )`)
+	if err != nil {
+		lgConfig.Error("data migration: rename old standby SEP keys to published failed", "err", err)
 	}
 }
 

@@ -72,23 +72,22 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 		return dsPubsRolloverIndexLess(kdb, zone, dsPubKids[a], dsPubKids[b])
 	})
 
-	// Slot ordering for standby keys. AtomicRollover picks oldest
-	// published_at first; renderer mirrors that selection.
-	standbyKids := []uint16{}
+	// Slot ordering for keys whose DNSKEY is in the served zone —
+	// both published (propagation incomplete) and standby (genuine,
+	// propagated). AtomicRollover and the published→standby
+	// transition both order by published_at, so combining them into
+	// one queue gives the renderer the canonical promotion order.
+	dnskeyInZoneKids := []uint16{}
 	for _, e := range out.KSKs {
-		if e.State == DnskeyStateStandby {
-			standbyKids = append(standbyKids, e.KeyID)
+		if e.State == DnskeyStatePublished || e.State == DnskeyStateStandby {
+			dnskeyInZoneKids = append(dnskeyInZoneKids, e.KeyID)
 		}
 	}
-	sort.SliceStable(standbyKids, func(a, b int) bool {
-		// Order by published_at — the moment the DNSKEY entered the
-		// served zone. C18 will add a separate genuine-standby
-		// timestamp; until then published_at is the oldest-equals-
-		// next-up signal.
-		ta, _ := RolloverKeyPublishedAt(kdb, zone, standbyKids[a])
-		tb, _ := RolloverKeyPublishedAt(kdb, zone, standbyKids[b])
+	sort.SliceStable(dnskeyInZoneKids, func(a, b int) bool {
+		ta, _ := RolloverKeyPublishedAt(kdb, zone, dnskeyInZoneKids[a])
+		tb, _ := RolloverKeyPublishedAt(kdb, zone, dnskeyInZoneKids[b])
 		if ta == nil && tb == nil {
-			return standbyKids[a] < standbyKids[b]
+			return dnskeyInZoneKids[a] < dnskeyInZoneKids[b]
 		}
 		if ta == nil {
 			return false
@@ -99,7 +98,7 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 		if !ta.Equal(*tb) {
 			return ta.Before(*tb)
 		}
-		return standbyKids[a] < standbyKids[b]
+		return dnskeyInZoneKids[a] < dnskeyInZoneKids[b]
 	})
 
 	// E12 served DNSKEY TTL for the ds-published → standby formula.
@@ -134,15 +133,17 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 				break
 			}
 			// Slot accounting: ds-published keys queue *after* any
-			// existing standby keys (each standby occupies one of
-			// the next promotion slots). Match the engine's
-			// transitionDsPublishedToStandbyForZone slot calculation
-			// so renderer and engine agree.
+			// keys whose DNSKEY is already in the zone (published
+			// or genuine-standby). Each of those occupies one of
+			// the next promotion slots; the new ds-published
+			// promotion joins after them. Match the engine's
+			// transitionDsPublishedToPublishedForZone slot
+			// calculation so renderer and engine agree.
 			pos := slotFromKid(dsPubKids, e.KeyID) // 1-based within ds-published
 			if pos == 0 {
 				break
 			}
-			slot := len(standbyKids) + pos
+			slot := len(dnskeyInZoneKids) + pos
 			tRoll := activeAt.Add(time.Duration(slot) * lifetime)
 			tPublish := tRoll.Add(-(propagationDelay + dnskeyTTL))
 			e.NextTransitionAt = tPublish.UTC().Format(time.RFC3339)
@@ -159,7 +160,7 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 				e.NextTransitionNote = "no active key — bootstrap pending"
 				break
 			}
-			slot := slotFromKid(standbyKids, e.KeyID) // 1-based; 1 = next-up
+			slot := slotFromKid(dnskeyInZoneKids, e.KeyID) // 1-based; 1 = next-up
 			if slot == 0 {
 				break
 			}
@@ -197,15 +198,39 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 			// Terminal. Leave fields empty.
 
 		case DnskeyStatePublished:
-			// ZSK lifecycle path; not exercised on KSKs here. The
-			// generic transition is published → standby after
-			// propagationDelay.
+			// KSK published → standby fires when both:
+			//   T_published + child_prop + DNSKEY_TTL ≤ now
+			//   T_ds_observed + parent_prop + DS_TTL ≤ now
+			//
+			// Pick the later of the two for the "Expected at"
+			// column. ZSK keys also use this state but for them the
+			// child-side gate is the only one (no DS); the same
+			// computation gives the right answer (no T_ds_observed
+			// → DS gate evaluates to zero time).
 			e.NextTransition = "published → standby"
-			if propagationDelay > 0 {
-				if ts, ok := parseRFC3339(e.StateSince); ok {
-					e.NextTransitionAt = ts.Add(propagationDelay).UTC().Format(time.RFC3339)
+			ts, ok := parseRFC3339(e.StateSince)
+			if !ok {
+				e.NextTransitionNote = "awaiting published_at"
+				break
+			}
+			var dnskeyReady time.Time
+			if dnskeyTTLKnown {
+				dnskeyReady = ts.Add(propagationDelay + dnskeyTTL)
+			} else {
+				dnskeyReady = ts.Add(propagationDelay)
+			}
+			latest := dnskeyReady
+			if zd, ok := Zones.Get(zone); ok && zd != nil {
+				if dsTTL, dsTTLKnown := resolveDSTTL(zd, pol); dsTTLKnown {
+					if dsObs, err := RolloverKeyDsObservedAt(kdb, zone, e.KeyID); err == nil && dsObs != nil {
+						dsReady := dsObs.Add(pol.Rollover.DsPublishDelay + dsTTL)
+						if dsReady.After(latest) {
+							latest = dsReady
+						}
+					}
 				}
 			}
+			e.NextTransitionAt = latest.UTC().Format(time.RFC3339)
 		}
 	}
 

@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // RolloverZoneRow is persisted rollover coordination for one zone (RolloverZoneState).
@@ -372,13 +374,30 @@ func RolloverKeyidsByIndexRange(kdb *KeyDB, zone string, low, high int64) ([]uin
 }
 
 // setRolloverKeyPublishedAt is the non-TX variant for callers outside
-// of AtomicRollover (e.g. TransitionRolloverKskDsPublishedToStandby's
+// of AtomicRollover (e.g. TransitionRolloverKskDsPublishedToPublished's
 // per-key loop). Stamps published_at — the moment the engine moved
 // the DNSKEY into the served zone.
 func setRolloverKeyPublishedAt(kdb *KeyDB, zone string, keyid uint16, at time.Time) error {
 	s := at.UTC().Format(time.RFC3339)
 	_, err := kdb.DB.Exec(`UPDATE RolloverKeyState SET published_at = ? WHERE zone = ? AND keyid = ?`, s, zone, int(keyid))
 	return err
+}
+
+// setRolloverKeyStandbyAt stamps standby_at — the moment the engine
+// confirmed propagation complete and moved the key from the
+// "published" state to the genuine "standby" (ready) state. Set by
+// TransitionRolloverKskPublishedToStandby on every key that crosses
+// the propagation gate.
+func setRolloverKeyStandbyAt(kdb *KeyDB, zone string, keyid uint16, at time.Time) error {
+	s := at.UTC().Format(time.RFC3339)
+	_, err := kdb.DB.Exec(`UPDATE RolloverKeyState SET standby_at = ? WHERE zone = ? AND keyid = ?`, s, zone, int(keyid))
+	return err
+}
+
+// RolloverKeyStandbyAt returns the standby_at timestamp (when the key
+// reached the genuine propagated-standby state), or nil if unset.
+func RolloverKeyStandbyAt(kdb *KeyDB, zone string, keyid uint16) (*time.Time, error) {
+	return readKeyTimestamp(kdb, zone, keyid, "standby_at")
 }
 
 // setRolloverInProgressTx flips RolloverZoneState.rollover_in_progress on an
@@ -956,6 +975,17 @@ func setNextPushAt(kdb *KeyDB, zone string, at time.Time) error {
 func StateSinceForDnssecKey(kdb *KeyDB, zone string, k *DnssecKeyWithTimestamps) time.Time {
 	switch k.State {
 	case DnskeyStatePublished:
+		// For KSKs (multi-DS pipeline) the rollover engine stamps
+		// RolloverKeyState.published_at when moving the DNSKEY into
+		// the served zone. ZSKs use DnssecKeyStore.published_at via
+		// the simpler transitionPublishedToStandby. Try the rollover
+		// timestamp first, fall through to the keystore one.
+		if k.Flags&dns.SEP != 0 {
+			t, err := RolloverKeyPublishedAt(kdb, zone, k.KeyTag)
+			if err == nil && t != nil {
+				return *t
+			}
+		}
 		if k.PublishedAt != nil {
 			return *k.PublishedAt
 		}
@@ -969,13 +999,18 @@ func StateSinceForDnssecKey(kdb *KeyDB, zone string, k *DnssecKeyWithTimestamps)
 			return *at
 		}
 	case DnskeyStateStandby:
-		// Pre-C18 the engine moved keys directly ds-published →
-		// "standby" and the only timestamp available was what we now
-		// call published_at. C18 adds a separate genuine-standby
-		// transition that will set a distinct standby_at column;
-		// until then read published_at.
-		t, err := RolloverKeyPublishedAt(kdb, zone, k.KeyTag)
+		// Genuine standby (post-C18): the key reached propagated-
+		// standby state. RolloverKeyState.standby_at is the
+		// transition moment.
+		t, err := RolloverKeyStandbyAt(kdb, zone, k.KeyTag)
 		if err == nil && t != nil {
+			return *t
+		}
+		// Fallback for keys that came from the pre-C18 schema
+		// where standby_at wasn't set yet on the key (the C18
+		// data migration moved them to "published" instead, but
+		// be defensive against any "standby" key that escaped).
+		if t, err := RolloverKeyPublishedAt(kdb, zone, k.KeyTag); err == nil && t != nil {
 			return *t
 		}
 	case DnskeyStateDsPublished:

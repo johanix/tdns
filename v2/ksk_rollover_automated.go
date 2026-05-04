@@ -930,23 +930,25 @@ func parseOptionalTime(s sql.NullString) (time.Time, bool) {
 	return t, true
 }
 
-// TransitionRolloverKskDsPublishedToStandby advances each SEP key from
-// ds-published to standby exactly when its DNSKEY needs to be in the
-// served zone for cache-flush safety, per spec §4.7:
+// TransitionRolloverKskDsPublishedToPublished advances each SEP key
+// from ds-published to published — the state in which the DNSKEY is
+// in the served zone but propagation is not yet complete. The
+// transition fires at T_publish per spec §4.7:
 //
 //	T_publish_i = T_roll_i − child_prop − DNSKEY_TTL
 //
 // where T_roll_i = active.active_at + i × KSK.Lifetime, child_prop is
 // kasp.propagation_delay (the configured estimate of how long it takes
 // the new RRset to reach all child secondaries), and DNSKEY_TTL is the
-// served-wire TTL of the DNSKEY RRset. The − DNSKEY_TTL term is what
-// guarantees the cache-flush invariant E3:
+// served-wire TTL of the DNSKEY RRset. The − DNSKEY_TTL term guarantees
+// the cache-flush invariant E3:
 //
 //	T_DNSKEY_pub_n + child_prop + DNSKEY_TTL ≤ T_roll_n
 //
-// without it, validators that fetched the DNSKEY RRset in the last
-// DNSKEY_TTL window before T_roll_n carry a stale cache across
-// T_roll_n and reject RRSIG_n.
+// Subsequent transition: published → standby fires once propagation is
+// confirmed complete (max(T_published+child_prop+DNSKEY_TTL,
+// T_ds_observed+parent_prop+DS_TTL) ≤ now), driven by
+// transitionPublishedToStandbyForZone.
 //
 // DNSKEY_TTL is resolved per-zone via effectiveServedDnskeyTTL:
 // min(pol.TTLS.DNSKEY, pol.TTLS.MaxServed) when both set, otherwise
@@ -959,20 +961,20 @@ func parseOptionalTime(s sql.NullString) (time.Time, bool) {
 // Why not "advance after DS has been observed for propagationDelay
 // seconds": that rule unconditionally advances every ds-published key
 // shortly after its DS is seen at the parent, which puts the DNSKEY for
-// every standby into the zone. For multi-DS the operational intent is
-// to keep DNSKEY material *out* of the zone for keys whose rollover is
-// far in the future — DS hashes are post-quantum-opaque, but DNSKEYs
-// reveal the public key. Pre-publication only has to satisfy the
-// cache-flush invariant for the immediately-upcoming rollover; for keys
-// further out, leave them in ds-published until their own T_publish
-// comes around.
+// every published into the zone. For multi-DS the operational intent
+// is to keep DNSKEY material *out* of the zone for keys whose rollover
+// is far in the future — DS hashes are post-quantum-opaque, but
+// DNSKEYs reveal the public key. Pre-publication only has to satisfy
+// the cache-flush invariant for the immediately-upcoming rollover; for
+// keys further out, leave them in ds-published until their own
+// T_publish comes around.
 //
 // Corner case: when propagationDelay+dnskey_ttl > KSK.Lifetime,
 // T_publish_i for a key that's i slots out can land before
-// T_publish_{i-1}'s rollover fires, meaning multiple standbys may need
+// T_publish_{i-1}'s rollover fires, meaning multiple keys may need
 // DNSKEYs simultaneously. The per-promotion-position computation
 // handles this correctly — each key is governed by its own T_publish.
-func TransitionRolloverKskDsPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
+func TransitionRolloverKskDsPublishedToPublished(conf *Config, kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
 	keys, err := GetDnssecKeysByState(kdb, "", DnskeyStateDsPublished)
 	if err != nil {
 		lgSigner.Error("rollover: list ds-published keys", "err", err)
@@ -1007,13 +1009,13 @@ func TransitionRolloverKskDsPublishedToStandby(conf *Config, kdb *KeyDB, now tim
 			PropagationDelay: propagationDelay,
 			Now:              func() time.Time { return now },
 		}
-		transitionDsPublishedToStandbyForZone(deps, dsPubs)
+		transitionDsPublishedToPublishedForZone(deps, dsPubs)
 	}
 }
 
-// transitionDsPublishedToStandbyForZone applies the E12 ds-published→
-// standby promotion for one zone. Per-zone counterpart of
-// TransitionRolloverKskDsPublishedToStandby. Both share the per-zone
+// transitionDsPublishedToPublishedForZone applies the E12 ds-published→
+// published promotion for one zone. Per-zone counterpart of
+// TransitionRolloverKskDsPublishedToPublished. Both share the per-zone
 // logic but the global wrapper batches GetDnssecKeysByState across all
 // zones (cheaper than N queries). tdns-mp can call this directly when
 // it has a single zone in hand.
@@ -1021,7 +1023,7 @@ func TransitionRolloverKskDsPublishedToStandby(conf *Config, kdb *KeyDB, now tim
 // dsPubs is the pre-filtered list of ds-published SEP keys for the
 // zone. deps must have KDB, Zone, Policy, Logger, PropagationDelay,
 // and Now populated.
-func transitionDsPublishedToStandbyForZone(deps RolloverEngineDeps, dsPubs []*DnssecKeyWithTimestamps) {
+func transitionDsPublishedToPublishedForZone(deps RolloverEngineDeps, dsPubs []*DnssecKeyWithTimestamps) {
 	if deps.Zone.HasAutoRolloverImpactingError() {
 		return
 	}
@@ -1075,9 +1077,9 @@ func transitionDsPublishedToStandbyForZone(deps RolloverEngineDeps, dsPubs []*Dn
 	// minutes before its actual rollover. Operational consequence:
 	// quantum-opacity goal violated; DNSKEY public key visible in
 	// the zone way ahead of need.
-	standbyCount, err := countStandbySEPKeys(kdb, zoneName)
+	standbyCount, err := countDnskeyInZoneSEPKeys(kdb, zoneName)
 	if err != nil {
-		deps.Logger.Warn("rollover: countStandbySEPKeys failed; defaulting to 0",
+		deps.Logger.Warn("rollover: countDnskeyInZoneSEPKeys failed; defaulting to 0",
 			"zone", zoneName, "err", err)
 		standbyCount = 0
 	}
@@ -1131,8 +1133,8 @@ func transitionDsPublishedToStandbyForZone(deps RolloverEngineDeps, dsPubs []*Dn
 			// Nothing more to do for this zone this tick.
 			break
 		}
-		if err := UpdateDnssecKeyState(kdb, zoneName, k.KeyTag, DnskeyStateStandby); err != nil {
-			deps.Logger.Error("rollover: ds-published→standby failed",
+		if err := UpdateDnssecKeyState(kdb, zoneName, k.KeyTag, DnskeyStatePublished); err != nil {
+			deps.Logger.Error("rollover: ds-published→published failed",
 				"zone", zoneName, "keyid", k.KeyTag, "err", err)
 			continue
 		}
@@ -1140,10 +1142,10 @@ func transitionDsPublishedToStandbyForZone(deps RolloverEngineDeps, dsPubs []*Dn
 			deps.Logger.Warn("rollover: published_at stamp failed",
 				"zone", zoneName, "keyid", k.KeyTag, "err", err)
 		}
-		deps.Logger.Info("rollover: ds-published→standby",
+		deps.Logger.Info("rollover: ds-published→published",
 			"zone", zoneName, "keyid", k.KeyTag,
 			"slot", slot,
-			"standby_offset", standbyCount,
+			"in_zone_offset", standbyCount,
 			"t_roll", tRoll.UTC().Format(time.RFC3339),
 			"t_publish", tPublish.UTC().Format(time.RFC3339),
 			"dnskey_ttl", dnskeyTTL.String(),
@@ -1158,20 +1160,155 @@ func transitionDsPublishedToStandbyForZone(deps RolloverEngineDeps, dsPubs []*Dn
 	}
 }
 
-// countStandbySEPKeys returns the number of SEP keys currently in
-// standby state for zone. Used by transitionDsPublishedToStandbyForZone
-// to compute the slot offset for ds-published keys: a ds-published
-// key promoting to standby joins the queue *after* the existing
-// standby keys, not at slot 1.
-func countStandbySEPKeys(kdb *KeyDB, zone string) (int, error) {
-	keys, err := GetDnssecKeysByState(kdb, zone, DnskeyStateStandby)
+// TransitionRolloverKskPublishedToStandby advances each SEP key from
+// the "published" state (DNSKEY in zone, propagation incomplete) to
+// the genuine "standby" state (propagation confirmed complete, ready
+// for AtomicRollover). The transition fires when *both* of:
+//
+//	now ≥ T_published + child_prop + DNSKEY_TTL    (DNSKEY propagated)
+//	now ≥ T_ds_observed + parent_prop + DS_TTL     (DS propagated)
+//
+// — the second clause covers the rare case where the parent's DS RRset
+// reached its observed state more recently than the child's DNSKEY.
+// In typical pipelines T_published ≫ T_ds_observed, so the DNSKEY
+// gate dominates.
+//
+// Stamps standby_at on success — the moment the engine confirmed
+// propagation. AtomicRollover gates standby→active on
+// standby_at + rollover.standby_time (a configurable pause; see
+// C19).
+//
+// Operator note: this transition gives the engine a state where it
+// has done all the cache-flush waiting and the key is genuinely ready
+// to fire. asap can then queue an AtomicRollover at standby_at + 0
+// without violating cache-flush invariants.
+func TransitionRolloverKskPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
+	keys, err := GetDnssecKeysByState(kdb, "", DnskeyStatePublished)
 	if err != nil {
-		return 0, err
+		lgSigner.Error("rollover: list published keys", "err", err)
+		return
 	}
-	n := 0
+	byZone := map[string][]*DnssecKeyWithTimestamps{}
 	for i := range keys {
-		if keys[i].Flags&dns.SEP != 0 {
-			n++
+		k := &keys[i]
+		// SEP-only — published is also used for ZSKs but the new
+		// genuine-standby semantic only applies to KSKs (multi-DS
+		// rollover pipeline). ZSK published → standby uses the
+		// transitionPublishedToStandby (non-rollover) path.
+		if k.Flags&dns.SEP == 0 {
+			continue
+		}
+		byZone[k.ZoneName] = append(byZone[k.ZoneName], k)
+	}
+	for zoneName, pubs := range byZone {
+		zd, ok := Zones.Get(zoneName)
+		if !ok || zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method != RolloverMethodMultiDS {
+			continue
+		}
+		pol := zd.DnssecPolicy
+		deps := RolloverEngineDeps{
+			Conf:             conf,
+			KDB:              kdb,
+			Zone:             zd,
+			Policy:           pol,
+			Logger:           lgSigner,
+			PropagationDelay: propagationDelay,
+			Now:              func() time.Time { return now },
+		}
+		transitionPublishedToStandbyForZone(deps, pubs)
+	}
+}
+
+// transitionPublishedToStandbyForZone is the per-zone counterpart of
+// TransitionRolloverKskPublishedToStandby. tdns-mp can call this
+// directly when it has a single zone in hand.
+func transitionPublishedToStandbyForZone(deps RolloverEngineDeps, pubs []*DnssecKeyWithTimestamps) {
+	if deps.Zone.HasAutoRolloverImpactingError() {
+		return
+	}
+	zoneName := deps.Zone.ZoneName
+	pol := deps.Policy
+	kdb := deps.KDB
+	now := deps.Now()
+
+	dnskeyTTL, dnskeyTTLKnown := effectiveServedDnskeyTTL(kdb, zoneName, pol)
+	if !dnskeyTTLKnown {
+		// Same defer-this-tick treatment as the prior transition.
+		// Without a DNSKEY TTL we can't compute the propagation gate.
+		deps.Logger.Debug("rollover: deferring published→standby; DNSKEY TTL not yet observable",
+			"zone", zoneName)
+		return
+	}
+	dsTTL, dsTTLKnown := resolveDSTTL(deps.Zone, pol)
+	parentProp := pol.Rollover.DsPublishDelay
+
+	promoted := false
+	for _, k := range pubs {
+		// child-side gate: T_published + child_prop + DNSKEY_TTL ≤ now.
+		tPublished, err := RolloverKeyPublishedAt(kdb, zoneName, k.KeyTag)
+		if err != nil || tPublished == nil {
+			deps.Logger.Debug("rollover: published→standby skipped; no published_at",
+				"zone", zoneName, "keyid", k.KeyTag)
+			continue
+		}
+		dnskeyReadyAt := tPublished.Add(deps.PropagationDelay + dnskeyTTL)
+		if now.Before(dnskeyReadyAt) {
+			continue
+		}
+		// parent-side gate: T_ds_observed + parent_prop + DS_TTL ≤ now.
+		// When DS_TTL is unknown the engine has no observation; defer.
+		// When parent_prop or DS_TTL is zero (e.g. policy missing or
+		// pre-observation), the DNSKEY gate dominates and we proceed.
+		if dsTTLKnown {
+			tDsObs, err := RolloverKeyDsObservedAt(kdb, zoneName, k.KeyTag)
+			if err == nil && tDsObs != nil {
+				dsReadyAt := tDsObs.Add(parentProp + dsTTL)
+				if now.Before(dsReadyAt) {
+					continue
+				}
+			}
+		}
+
+		if err := UpdateDnssecKeyState(kdb, zoneName, k.KeyTag, DnskeyStateStandby); err != nil {
+			deps.Logger.Error("rollover: published→standby failed",
+				"zone", zoneName, "keyid", k.KeyTag, "err", err)
+			continue
+		}
+		if err := setRolloverKeyStandbyAt(kdb, zoneName, k.KeyTag, now); err != nil {
+			deps.Logger.Warn("rollover: standby_at stamp failed",
+				"zone", zoneName, "keyid", k.KeyTag, "err", err)
+		}
+		deps.Logger.Info("rollover: published→standby",
+			"zone", zoneName, "keyid", k.KeyTag,
+			"published_at", tPublished.UTC().Format(time.RFC3339),
+			"dnskey_ready_at", dnskeyReadyAt.UTC().Format(time.RFC3339),
+			"dnskey_ttl", dnskeyTTL.String(),
+			"child_prop", deps.PropagationDelay.String())
+		promoted = true
+	}
+	if promoted {
+		triggerResign(deps.Conf, zoneName)
+	}
+}
+
+// countDnskeyInZoneSEPKeys returns the number of SEP keys whose DNSKEY
+// is currently in the served zone — that is, keys in either of the
+// "published" or "standby" states (post-C18 split). Used by
+// transitionDsPublishedToPublishedForZone to compute the slot offset
+// for ds-published keys: a ds-published key promoting joins the
+// rollover queue *after* the keys whose DNSKEYs are already in the
+// zone, not at slot 1.
+func countDnskeyInZoneSEPKeys(kdb *KeyDB, zone string) (int, error) {
+	n := 0
+	for _, st := range []string{DnskeyStatePublished, DnskeyStateStandby} {
+		keys, err := GetDnssecKeysByState(kdb, zone, st)
+		if err != nil {
+			return 0, err
+		}
+		for i := range keys {
+			if keys[i].Flags&dns.SEP != 0 {
+				n++
+			}
 		}
 	}
 	return n, nil
