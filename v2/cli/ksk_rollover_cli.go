@@ -906,11 +906,17 @@ func printStateTable(s *tdns.RolloverStatus) {
 	}
 	var schemeRows []schemeRow
 
-	updateUsed := strings.Contains(s.LastAttemptScheme, "UPDATE")
 	switch {
 	case s.ParentAdvertisesUpdateKnown && !s.ParentAdvertisesUpdate:
 		schemeRows = append(schemeRows, schemeRow{"DS UPDATE:", "Parent has no DSYNC UPDATE support", ""})
-	case s.Submitted != nil && updateUsed:
+	case s.Submitted != nil:
+		// Submitted is the engine's most recent submitted DS RRset.
+		// Render the timestamp from LastUpdate (= last_attempt_started_at)
+		// regardless of whether the most recent attempt's wire scheme
+		// was UPDATE, NOTIFY, or both — the operator's question is
+		// "when did we last ask the parent for this set," and the
+		// scheme breakdown is shown by LastAttemptScheme on the
+		// "last push:" line.
 		t := ""
 		if s.LastUpdate != "" {
 			t = "sent " + formatRolloverTime(s.LastUpdate)
@@ -920,17 +926,8 @@ func printStateTable(s *tdns.RolloverStatus) {
 			dashKeyidsBracket(formatKeyidBracketList(s.SubmittedKeyIDs)),
 			t,
 		})
-	case s.Submitted != nil:
-		// Fallback: no scheme info recorded but we have a submitted
-		// range from a pre-NOTIFY-scheme rollover.
-		schemeRows = append(schemeRows, schemeRow{
-			"DS UPDATE:",
-			dashKeyidsBracket(formatKeyidBracketList(s.SubmittedKeyIDs)),
-			"",
-		})
 	case s.ParentAdvertisesUpdateKnown && s.ParentAdvertisesUpdate:
-		// Parent advertises UPDATE but engine hasn't pushed via this
-		// scheme yet (or hasn't recorded the attempt scheme).
+		// Parent advertises UPDATE but engine hasn't pushed yet.
 		schemeRows = append(schemeRows, schemeRow{"DS UPDATE:", "[no UPDATE sent yet]", ""})
 	}
 
@@ -956,12 +953,16 @@ func printStateTable(s *tdns.RolloverStatus) {
 	// An empty observed keyid list with a recent ObservedAt means the
 	// parent just lost DS — the renderer must not hide that behind
 	// stale confirmed data.
+	//
+	// "seen" rather than "observed" so the verb width matches "sent"
+	// on the DS UPDATE / CDS published lines: post-bracket timestamps
+	// then align column-for-column, not just keyid-for-keyid.
 	switch {
 	case s.ObservedAt != "":
 		schemeRows = append(schemeRows, schemeRow{
 			"DS observed:",
 			dashKeyidsBracket(formatKeyidBracketList(s.ObservedKeyIDs)),
-			"observed " + formatRolloverTime(s.ObservedAt),
+			"seen " + formatRolloverTime(s.ObservedAt),
 		})
 	case s.Confirmed != nil:
 		// Pre-existing-row fallback (daemon pre-dates the observe-poll
