@@ -105,23 +105,21 @@ func APIRolloverAsap(conf *Config) func(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 
-		// Refuse if the zone has active rollover-gating errors (W2
-		// policy invariant violations or W4 parent-DSYNC blockers).
-		// asap is a write that would queue a rollover the engine then
-		// can't safely advance past — cleaner to refuse here so the
-		// operator gets an immediate, actionable error rather than a
-		// scheduled rollover that silently never fires.
-		if zd, ok := Zones.Get(zone); ok && zd != nil {
+		// Refuse if the zone has an auto-rollover-impacting error:
+		// hard policy violation (E5/E10) or parent-DSYNC blocker.
+		// Warnings are NOT a refusal cause — the operator can asap
+		// past a headroom warning. Commit 4 will narrow this further
+		// to Case 1 (no DS at parent) so the operator can also asap
+		// past a Case 2 cache-flush wait.
+		if zd, ok := Zones.Get(zone); ok && zd != nil && zd.HasAutoRolloverImpactingError() {
 			msgs := []string{}
 			for _, e := range zd.ErrorList() {
-				if isRolloverGatingError(e.Type) {
+				if isAutoRolloverImpactingError(e.Type) {
 					msgs = append(msgs, e.Msg)
 				}
 			}
-			if len(msgs) > 0 {
-				http.Error(w, fmt.Sprintf("zone %s: rollover blocked: %s", zone, strings.Join(msgs, "; ")), http.StatusBadRequest)
-				return
-			}
+			http.Error(w, fmt.Sprintf("zone %s: rollover blocked: %s", zone, strings.Join(msgs, "; ")), http.StatusBadRequest)
+			return
 		}
 
 		now := time.Now()

@@ -80,6 +80,16 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		return nil
 	}
 
+	// Refuse to advance keys when the zone has an auto-rollover-
+	// impacting error: a hard policy violation (E5/E10) means rolling
+	// would demonstrably break cache-flush invariants; a parent-DSYNC
+	// blocker means no DS push is possible. Manual auto-rollover asap
+	// has its own gate (refuses on Case 1 — no DS at parent — but
+	// allows operator override otherwise).
+	if zd.HasAutoRolloverImpactingError() {
+		return nil
+	}
+
 	conf := deps.Conf
 	kdb := deps.KDB
 	imr := deps.Imr
@@ -1008,6 +1018,9 @@ func TransitionRolloverKskDsPublishedToStandby(conf *Config, kdb *KeyDB, now tim
 // zone. deps must have KDB, Zone, Policy, Logger, PropagationDelay,
 // and Now populated.
 func transitionDsPublishedToStandbyForZone(deps RolloverEngineDeps, dsPubs []*DnssecKeyWithTimestamps) {
+	if deps.Zone.HasAutoRolloverImpactingError() {
+		return
+	}
 	zoneName := deps.Zone.ZoneName
 	pol := deps.Policy
 	kdb := deps.KDB

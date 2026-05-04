@@ -128,7 +128,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		return nil // didn't find any zone for that qname
 	}
 
-	if zd.Error {
+	if zd.HasServiceImpactingError() {
 		lgHandler.Error("zone in error state", "qname", qname, "errorType", ErrorTypeToString[zd.ErrorType], "errorMsg", zd.ErrorMsg)
 		m.SetRcode(r, dns.RcodeServerFailure)
 		edns0.AttachEDEToResponse(m, edns0.EDEZoneNotFound)

@@ -222,16 +222,27 @@ const (
 	RefreshError
 	AgentError
 	DnssecError
-	// RolloverPolicyViolation: cache-flush invariant or policy-cadence
-	// violation (E5/E10/E11) detected from policy + observed parent
-	// state. Set / cleared by W2's EvaluateRolloverPolicyInvariants.
+	// RolloverPolicyViolation: hard cache-flush invariant violation
+	// (E5/E10) detected from policy + observed parent state. The
+	// rollover engine refuses to advance keys for the affected zone:
+	// continuing would demonstrably violate cache-flush invariants
+	// and could break validation for fractions of users during the
+	// rollover window. Operator must fix the policy. Manual override
+	// via auto-rollover asap is also blocked for Case 1 (DS not at
+	// parent) but allowed for Case 2 (operator-acknowledged
+	// cache-flush bypass).
 	RolloverPolicyViolation
+	// RolloverPolicyWarning: rule-of-thumb violation (E11) — the
+	// policy passes the hard invariants but has minimal headroom.
+	// Engine keeps rolling; this is visibility-only.
+	RolloverPolicyWarning
 	// RolloverParentBlocker: parent's published DSYNC RRset does not
 	// advertise a scheme matching the zone's
 	// rollover.dsync-scheme-preference. Set immediately on
 	// errNoUsableScheme; cleared on the next successful
 	// pickRolloverSchemes. The engine keeps retrying — this is a
-	// visibility signal, not a hardfail.
+	// visibility signal, not a hardfail. Auto-rollover progression
+	// gates here because no scheme means no DS push is possible.
 	RolloverParentBlocker
 )
 
@@ -241,6 +252,7 @@ var ErrorTypeToString = map[ErrorType]string{
 	AgentError:              "agent",
 	DnssecError:             "DNSSEC",
 	RolloverPolicyViolation: "rollover-policy",
+	RolloverPolicyWarning:   "rollover-policy-warning",
 	RolloverParentBlocker:   "rollover-parent-blocker",
 }
 
@@ -256,16 +268,38 @@ var errorTypeReportOrder = []ErrorType{
 	DnssecError,
 	RolloverPolicyViolation,
 	RolloverParentBlocker,
+	RolloverPolicyWarning,
 }
 
-// rolloverGatingErrors are the error categories that block automated
-// rollover progression (the auto-rollover CLI surfaces them as
-// "automated rollovers not possible due to: ..." and refuses to
-// schedule manual rollovers via asap). Both W2 (policy invariant
-// violations) and W4 (parent DSYNC blockers) gate.
+// rolloverGatingErrors are categories that the auto-rollover CLI
+// surfaces in its status header. RolloverPolicyWarning is included so
+// operators see headroom warnings, but the engine keeps rolling for
+// warnings (see autoRolloverImpactingErrors).
 var rolloverGatingErrors = []ErrorType{
 	RolloverPolicyViolation,
 	RolloverParentBlocker,
+	RolloverPolicyWarning,
+}
+
+// autoRolloverImpactingErrors are categories that gate the automated
+// rollover engine itself: when present, RolloverAutomatedTick and
+// related per-zone state-machine entry points refuse to advance.
+// Excludes RolloverPolicyWarning — that's visibility-only and the
+// engine keeps rolling.
+var autoRolloverImpactingErrors = []ErrorType{
+	RolloverPolicyViolation,
+	RolloverParentBlocker,
+}
+
+// serviceImpactingErrors are categories that make the zone unable to
+// serve correctly: a NOTIFY/UPDATE/query handler should refuse with
+// SERVFAIL. RefreshError and the rollover-* categories never block
+// serving — a zone with stale data or an unsafe upcoming rollover is
+// still authoritative for its current contents.
+var serviceImpactingErrors = []ErrorType{
+	ConfigError,
+	AgentError,
+	DnssecError,
 }
 
 // ZoneError is one entry in the per-zone error registry. Use SetError
@@ -354,6 +388,45 @@ outer:
 			}
 		}
 		return true
+	}
+	return false
+}
+
+// HasServiceImpactingError reports whether the zone is in a state that
+// makes it incapable of serving correctly. Today: ConfigError,
+// AgentError, DnssecError. RefreshError and the rollover-* categories
+// never block serving — a zone with stale data or an unsafe upcoming
+// rollover is still authoritative for its current contents.
+//
+// NOTIFY/UPDATE/query handlers use this to decide whether to refuse
+// with SERVFAIL.
+func (zd *ZoneData) HasServiceImpactingError() bool {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	for _, t := range serviceImpactingErrors {
+		if _, ok := zd.Errors[t]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// HasAutoRolloverImpactingError reports whether the automated rollover
+// engine should refuse to advance keys for this zone. Today:
+// RolloverPolicyViolation (hard E5/E10 violations) and
+// RolloverParentBlocker. RolloverPolicyWarning does NOT trigger this —
+// warnings let the engine keep rolling.
+//
+// Per-zone rollover-engine entry points (RolloverAutomatedTick,
+// transitionDsPublishedToStandbyForZone) call this and return early
+// when true.
+func (zd *ZoneData) HasAutoRolloverImpactingError() bool {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	for _, t := range autoRolloverImpactingErrors {
+		if _, ok := zd.Errors[t]; ok {
+			return true
+		}
 	}
 	return false
 }

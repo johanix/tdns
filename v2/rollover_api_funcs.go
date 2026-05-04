@@ -129,6 +129,18 @@ func isRolloverGatingError(t ErrorType) bool {
 	return false
 }
 
+// isAutoRolloverImpactingError reports whether an error of this type
+// gates the automated rollover engine (and refuses asap). Subset of
+// rolloverGatingErrors that excludes RolloverPolicyWarning.
+func isAutoRolloverImpactingError(t ErrorType) bool {
+	for _, g := range autoRolloverImpactingErrors {
+		if t == g {
+			return true
+		}
+	}
+	return false
+}
+
 // applyInFlightPublicationLabels overrides the Published column for
 // SEP keys that are mid-publication: the engine has submitted DS for
 // them to the parent (so they appear in SubmittedKeyIDs) but has not

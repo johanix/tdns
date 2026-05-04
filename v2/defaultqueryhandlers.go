@@ -93,13 +93,13 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 	}
 
 	if zd, ok := Zones.Get(qname); ok {
-		// SERVFAIL when any non-RefreshError category is set, OR when
-		// only RefreshError is set but the zone hasn't been
-		// successfully refreshed even once (no data to serve).
-		// HasErrorOtherThan handles multi-error cases where e.g. a
-		// rollover-policy violation coexists with a transient refresh
-		// issue.
-		if zd.HasErrorOtherThan(RefreshError) ||
+		// SERVFAIL when the zone has a service-impacting error
+		// (config / agent / DNSSEC), OR when only RefreshError is set
+		// but the zone has never successfully refreshed (no data to
+		// serve). Rollover-* errors do NOT trigger SERVFAIL: an
+		// unsafe upcoming rollover doesn't invalidate the currently
+		// served zone contents.
+		if zd.HasServiceImpactingError() ||
 			(zd.HasError(RefreshError) && zd.RefreshCount == 0) {
 			lgHandler.Warn("zone in error state", "qname", qname, "errorType", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
 			m := new(dns.Msg)
@@ -153,7 +153,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 		qname = strings.ToLower(qname)
 	}
 
-	if zd.HasErrorOtherThan(RefreshError) {
+	if zd.HasServiceImpactingError() {
 		lgHandler.Warn("zone in error state", "qname", qname, "zone", zd.ZoneName, "errorType", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeServerFailure)

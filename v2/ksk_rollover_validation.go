@@ -38,27 +38,36 @@ func EvaluateRolloverPolicyInvariants(zd *ZoneData, pol *DnssecPolicy) {
 		return
 	}
 
-	var msgs []string
+	// Hard violations (E5, E10) → RolloverPolicyViolation. Engine
+	// stops rolling for the affected zone.
+	// Rule-of-thumb (E11) → RolloverPolicyWarning. Engine keeps
+	// rolling; operator-visible only.
+	var violations, warnings []string
 
 	if m := checkE5(pol); m != "" {
-		msgs = append(msgs, m)
+		violations = append(violations, m)
 	}
 
 	dsTTL, dsTTLKnown := resolveDSTTL(zd, pol)
 	if dsTTLKnown {
 		if m := checkE10(pol, dsTTL); m != "" {
-			msgs = append(msgs, m)
+			violations = append(violations, m)
 		}
 		if m := checkE11(pol, dsTTL); m != "" {
-			msgs = append(msgs, m)
+			warnings = append(warnings, m)
 		}
 	}
 
-	if len(msgs) == 0 {
+	if len(violations) == 0 {
 		zd.ClearError(RolloverPolicyViolation)
-		return
+	} else {
+		zd.SetError(RolloverPolicyViolation, "%s", strings.Join(violations, "; "))
 	}
-	zd.SetError(RolloverPolicyViolation, "%s", strings.Join(msgs, "; "))
+	if len(warnings) == 0 {
+		zd.ClearError(RolloverPolicyWarning)
+	} else {
+		zd.SetError(RolloverPolicyWarning, "%s", strings.Join(warnings, "; "))
+	}
 }
 
 // resolveDSTTL returns the DS TTL the engine should use for E10/E11.
