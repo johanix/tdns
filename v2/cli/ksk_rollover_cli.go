@@ -45,6 +45,22 @@ func formatTimeWithDelta(t time.Time) string {
 	return fmt.Sprintf("%02d:%02d:%02d (%s %s)", t.Hour(), t.Minute(), t.Second(), delta, suffix)
 }
 
+// injectEstimatedTag rewrites a "HH:MM:SS (Δ ago)" / "HH:MM:SS (Δ ahead)"
+// time-with-delta string so the parenthetical reads "(Δ, estimated)".
+// Drops the "ahead"/"ago" suffix for projected entries — the
+// "estimated" tag is what matters and the column space is at a
+// premium. Defensive: if the input doesn't match the expected shape,
+// append " (estimated)" instead.
+func injectEstimatedTag(timeWithDelta string) string {
+	if i := strings.LastIndex(timeWithDelta, " ago)"); i >= 0 {
+		return timeWithDelta[:i] + ", estimated)"
+	}
+	if i := strings.LastIndex(timeWithDelta, " ahead)"); i >= 0 {
+		return timeWithDelta[:i] + ", estimated)"
+	}
+	return timeWithDelta + " (estimated)"
+}
+
 // formatTimeWithDeltaStr is the SQL-NullString variant: parses RFC3339 from
 // the DB and formats. Returns "-" for empty/invalid values.
 func formatTimeWithDeltaStr(s string) string {
@@ -1165,6 +1181,12 @@ func printRolloverKeyTable(keys []tdns.RolloverKeyEntry, verbose bool, kskTable 
 			if k.NextTransitionAt != "" {
 				if t, err := time.Parse(time.RFC3339, k.NextTransitionAt); err == nil {
 					expectedCol = formatTimeWithDelta(t)
+					if k.NextTransitionEstimate {
+						// Mark projected times so the operator knows
+						// the schedule shifts when prior rollovers
+						// fire (asap, parent failure, etc).
+						expectedCol = injectEstimatedTag(expectedCol)
+					}
 				}
 			} else if k.NextTransitionNote != "" {
 				// No concrete time, but engine has a qualifier.

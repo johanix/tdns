@@ -150,7 +150,10 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 			tActivate := activeAt.Add(time.Duration(slot) * lifetime)
 			e.NextTransitionAt = tActivate.UTC().Format(time.RFC3339)
 			if slot > 1 {
-				e.NextTransitionNote = "projected — depends on prior rollovers"
+				// Projected: depends on the next-up standby promoting
+				// first. An asap shifts the schedule. Short tag so
+				// the column doesn't wrap.
+				e.NextTransitionEstimate = true
 			}
 
 		case DnskeyStateActive:

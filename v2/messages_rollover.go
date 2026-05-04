@@ -176,6 +176,12 @@ type RolloverKeyEntry struct {
 	NextTransition     string `json:"nextTransition,omitempty"`
 	NextTransitionAt   string `json:"nextTransitionAt,omitempty"`
 	NextTransitionNote string `json:"nextTransitionNote,omitempty"`
+
+	// NextTransitionEstimate marks NextTransitionAt as projected
+	// rather than confirmed — set when the time depends on prior
+	// rollovers in the pipeline completing first (e.g. standby keys
+	// in slot 2+). Renderer appends "estimated" to the time delta.
+	NextTransitionEstimate bool `json:"nextTransitionEstimate,omitempty"`
 }
 
 // PolicySummary is the slice of DnssecPolicy operators want to see
