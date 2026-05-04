@@ -219,7 +219,8 @@ or observation that supplies its value.
 | `N` | dimensionless | `rollover.num-ds` config knob | Multi-DS pipeline depth — how many DS records the engine maintains at the parent simultaneously (active + N−1 future). |
 | `T_roll_n` | timestamp | `T_roll_n = T_roll_{n−1} + KSK_lifetime` (steady-state cadence; bootstrap defines `T_roll_1` independently) | Moment KSK_n becomes the active signer. |
 | `T_DS_pub_n` | timestamp | observed from parent DS query (= when DS for KSK_n first appears at parent) | Moment parent's primary publishes DS for KSK_n. |
-| `T_DNSKEY_pub_n` | timestamp | engine-controlled: ds-published → standby transition for KSK_n | Moment child's primary publishes DNSKEY_n in the served DNSKEY RRset. |
+| `T_DNSKEY_pub_n` | timestamp | engine-controlled: ds-published → published transition for KSK_n | Moment child's primary publishes DNSKEY_n in the served DNSKEY RRset. |
+| `standby_time` | duration | `rollover.standby_time` config knob (default 1m) | Pause between when KSK_n reaches the genuine `standby` state (propagation complete, ready) and when AtomicRollover fires standby→active. Operator observability window; `auto-rollover asap` bypasses it. |
 
 ### 4.3 The two cache-flush invariants
 
@@ -524,28 +525,51 @@ DS_TTL=1h, KSK_lifetime=7d): RHS of E11 = ⌈9h5m / 168h⌉ + 1 =
 1 + 1 = 2. So even N=2 works comfortably for slow cadences. The
 default N=3 gives substantial margin.
 
-### 4.7 DNSKEY-side: precise engine equation for ds-published → standby
+### 4.7 DNSKEY-side: precise engine equations and the state split
 
 The child controls `T_DNSKEY_pub_n` directly: it's the moment the
-rollover engine advances KSK_n from state `ds-published` to
-`standby`, at which point the DNSKEY enters the served DNSKEY
-RRset.
+rollover engine advances KSK_n into the state where its DNSKEY
+enters the served DNSKEY RRset.
 
 To minimize DNSKEY exposure (the post-quantum motivation for
-keeping unrevealed keys at DS-only), the engine should advance
-**as late as the invariant permits**:
+keeping unrevealed keys at DS-only), the engine advances **as
+late as the invariant permits**:
 
 ```
 T_DNSKEY_pub_n  =  T_roll_n − child_prop − DNSKEY_TTL        (E12)
 ```
 
-Equivalently, the engine's transition rule:
+The engine implements three distinct moments around `T_roll_n`,
+each with its own state transition:
 
-> Advance KSK_n from `ds-published` to `standby` at time
-> `T_roll_n − child_prop − DNSKEY_TTL`.
+1. **ds-published → published** at `T_DNSKEY_pub_n` (E12 above).
+   DNSKEY enters the served zone but caches still hold pre-publish
+   responses; KSK_n is *not* yet usable for signing.
+
+2. **published → standby** at
+   `max(T_DNSKEY_pub_n + child_prop + DNSKEY_TTL,
+        T_DS_pub_n + parent_prop + DS_TTL)`.
+   Both child-side and parent-side propagation have completed; the
+   key is genuinely ready. The engine stamps `standby_at` on the
+   key at this moment.
+
+3. **standby → active** at `standby_at + standby_time`, where
+   `standby_time` is an operator-configured pause
+   (`rollover.standby_time`, default 1m). The pause gives the
+   operator a window to abort the natural-cadence rollover post-
+   propagation. `auto-rollover asap` bypasses this pause; `asap`
+   is exactly an operator override of the natural cadence, and
+   the pause is part of that natural cadence.
+
+Why split "DNSKEY in zone" into two states (`published` and
+`standby`)? Because the operational meaning differs: a `published`
+key is in flight (caches may still reject signatures by it); a
+`standby` key has flushed all stale state and can fire on operator
+command. Collapsing them obscures whether the engine has done its
+cache-flush waiting or not.
 
 E12 is the canonical formula. Any code that implements
-ds-published → standby must use it.
+ds-published → published must use it.
 
 ### 4.8 Effective DNSKEY_TTL: the clamping caveat
 
@@ -675,11 +699,13 @@ cache-flush windows:
 ```
 KSK_n state:
 
-   created → ds-published ─────────────────── standby ──── active ──── retired ── removed
-             ▲                                ▲           ▲                       ▲
-             T_DS_pub_n                       T_DNSKEY_   T_roll_n                end of life
-             (parent publishes DS)            pub_n
-                                              (child publishes DNSKEY)
+   created → ds-published ─── published ── standby ── active ──── retired ── removed
+             ▲                 ▲            ▲          ▲                       ▲
+             T_DS_pub_n        T_DNSKEY_    propagation T_roll_n                end of life
+             (parent           pub_n        complete    (= standby_at +
+              publishes DS)    (child       (engine     standby_time;
+                               publishes    stamps      asap bypasses
+                               DNSKEY)      standby_at) the pause)
 
 DS-side cache-flush window (parent → validator):
 
@@ -770,8 +796,12 @@ This section is the **canonical reference** for the engine's
 timing behaviour. Any code change that affects:
 
 - when DS is submitted to the parent
-- when ds-published → standby fires
-- when standby → active fires
+- when ds-published → published fires (i.e., when DNSKEY enters
+  the served zone — E12)
+- when published → standby fires (when both child-side and
+  parent-side propagation have completed)
+- when standby → active fires (= standby_at + standby_time, with
+  asap bypassing the pause)
 - the relationship between any two of the timestamps `T_DS_pub`,
   `T_DNSKEY_pub`, `T_roll`
 
