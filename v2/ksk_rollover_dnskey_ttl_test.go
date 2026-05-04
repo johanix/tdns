@@ -78,6 +78,11 @@ func TestNotifyTimeoutFromPolicy(t *testing.T) {
 			want: 30 * time.Second,
 		},
 		{
+			name: "non-nil policy, zero estimate -> 30s floor",
+			pol:  &DnssecPolicy{}, // ParentCdsPollEstimate is zero
+			want: 30 * time.Second,
+		},
+		{
 			name: "default 1m -> 2m",
 			pol: func() *DnssecPolicy {
 				p := &DnssecPolicy{}

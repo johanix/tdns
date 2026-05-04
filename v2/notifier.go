@@ -135,11 +135,11 @@ func (zd *ZoneData) SendNotify(ctx context.Context, ntype uint16, targets []stri
 	var lastFailEDE []dns.EDNS0_EDE
 	haveLastFailRcode := false
 
-	for _, dst := range targets {
+	for i, dst := range targets {
 		// Honor cancellation between targets so daemon shutdown
 		// doesn't block for len(targets)*Timeout.
 		if err := ctx.Err(); err != nil {
-			lgDns.Warn("NOTIFY: context cancelled, aborting remaining targets", "zone", zd.ZoneName, "remaining", len(targets), "err", err)
+			lgDns.Warn("NOTIFY: context cancelled, aborting remaining targets", "zone", zd.ZoneName, "remaining", len(targets)-i, "err", err)
 			break
 		}
 		lgDns.Info("NOTIFY: sending", "type", dns.TypeToString[ntype], "zone", zd.ZoneName, "target", dst)
