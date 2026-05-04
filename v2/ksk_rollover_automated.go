@@ -379,11 +379,13 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		}
 		_ = resetHardfailCount(kdb, zone)
 		_ = setLastSuccess(kdb, zone, now)
-		// Clear last_attempt_started_at: the attempt window closed
-		// successfully, so its expected-by / attempt-timeout deadlines
-		// are no longer meaningful. Status output uses the absence of
-		// this timestamp to suppress stale window lines.
-		_ = setLastAttemptStarted(kdb, zone, time.Time{})
+		// last_attempt_started_at is *not* cleared on success. The
+		// timestamp is the operator-facing "DS UPDATE: sent <time>"
+		// in all states (in-flight, idle, softfail). The renderer
+		// gates expected-by / attempt-timeout / attempt-index on
+		// phase being an active push/observe phase, not on the
+		// presence of LastAttemptStartedAt — so leaving the column
+		// populated doesn't surface stale window lines in idle.
 		// Clear last_softfail_*: the previous softfail event is no
 		// longer informative now that we're back in sync.
 		_ = clearLastSoftfail(kdb, zone)
@@ -453,7 +455,9 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 				}
 				_ = resetHardfailCount(kdb, zone)
 				_ = setLastSuccess(kdb, zone, now)
-				_ = setLastAttemptStarted(kdb, zone, time.Time{})
+				// last_attempt_started_at is preserved on success —
+				// it's the operator-facing "DS UPDATE: sent <time>".
+				// See the matching block in pendingParentObserve.
 				_ = clearLastSoftfail(kdb, zone)
 				// Trigger 1 — confirmed observation, softfail-recovery path.
 				cleanupCdsAfterConfirm(zd, kdb)

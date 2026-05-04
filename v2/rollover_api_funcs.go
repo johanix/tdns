@@ -404,8 +404,17 @@ func populateFromZoneRow(out *RolloverStatus, row *RolloverZoneRow) {
 // populateAttemptTiming computes ExpectedBy and AttemptTimeout from
 // LastUpdate + policy durations, and AttemptIndex/AttemptMax from the
 // counter and policy. Only meaningful with a policy attached.
+//
+// Window-line gating: ExpectedBy and AttemptTimeout are deadlines
+// relative to an in-flight attempt; they're meaningless in idle.
+// Gate on the phase being an active push/observe phase, not on
+// LastAttemptStartedAt's presence — the timestamp is preserved across
+// confirmation so the DS UPDATE status line can render "sent <time>"
+// in idle, but the deadline lines must still be suppressed there.
 func populateAttemptTiming(out *RolloverStatus, row *RolloverZoneRow, pol *DnssecPolicy) {
-	if row != nil && row.LastAttemptStartedAt.Valid {
+	inFlight := out.Phase == rolloverPhasePendingParentPush ||
+		out.Phase == rolloverPhasePendingParentObserve
+	if inFlight && row != nil && row.LastAttemptStartedAt.Valid {
 		if t, err := time.Parse(time.RFC3339, row.LastAttemptStartedAt.String); err == nil {
 			if pol.Rollover.DsPublishDelay > 0 {
 				out.ExpectedBy = t.Add(pol.Rollover.DsPublishDelay).UTC().Format(time.RFC3339)
@@ -420,16 +429,7 @@ func populateAttemptTiming(out *RolloverStatus, row *RolloverZoneRow, pol *Dnsse
 	// current attempt within an active push/observe cycle. Outside
 	// an active cycle (idle, softfail, child-publish/withdraw) it
 	// is 0 — the contract documented on RolloverStatus.
-	//
-	// Detection: an active attempt has both an active parent-side
-	// phase AND a non-NULL last_attempt_started_at (cleared on
-	// success in phase 12c-1). Either condition alone isn't enough:
-	// idle has neither, but a freshly-confirmed zone briefly has a
-	// stale parent-push phase queued for the next tick before
-	// last_attempt_started_at gets cleared.
-	if row != nil && row.LastAttemptStartedAt.Valid &&
-		(out.Phase == rolloverPhasePendingParentPush ||
-			out.Phase == rolloverPhasePendingParentObserve) {
+	if inFlight && row != nil && row.LastAttemptStartedAt.Valid {
 		if row.HardfailCount < out.AttemptMax {
 			out.AttemptIndex = row.HardfailCount + 1
 		}
