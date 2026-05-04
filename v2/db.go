@@ -109,7 +109,54 @@ func dbSetupTables(db *sql.DB) bool {
 	}
 
 	dbMigrateSchema(db)
+	dbMigrateData(db)
 	return false
+}
+
+// dbMigrateData performs one-shot data-shape migrations that need to
+// run after dbMigrateSchema has ensured the column shape is correct.
+// Each block must be idempotent: re-running on an already-migrated
+// database is a no-op.
+func dbMigrateData(db *sql.DB) {
+	// C16: copy old standby_at values to the new published_at column.
+	// The old single-state code stamped standby_at when the engine
+	// moved a key into the served zone DNSKEY RRset — what the new
+	// state machine calls published_at.
+	if dbColumnExists(db, "RolloverKeyState", "published_at") {
+		_, err := db.Exec(`UPDATE RolloverKeyState
+SET published_at = standby_at
+WHERE published_at IS NULL AND standby_at IS NOT NULL AND standby_at != ''`)
+		if err != nil {
+			lgConfig.Error("data migration: copy standby_at to published_at failed", "err", err)
+		}
+	}
+
+	// C18: rename existing SEP keys in the old "standby" state to the
+	// new "published" state. The old code reached the "standby" string
+	// at T_publish (DNSKEY just entered zone, propagation incomplete).
+	// The new state machine names that "published" and adds a separate
+	// "standby" string for genuine propagated-standby. After this
+	// migration, the new TransitionRolloverKskPublishedToStandby will
+	// pick up these keys on the next tick and promote them to the new
+	// "standby" once their propagation gate elapses.
+	//
+	// Idempotence: gated on standby_at being NULL — once the new
+	// genuine-standby transition has stamped standby_at on a key, we
+	// know it has been through the new state machine and shouldn't be
+	// retroactively renamed.
+	//
+	// SEP-only: ZSK "published" semantics are unchanged.
+	_, err := db.Exec(`UPDATE DnssecKeyStore
+SET state = 'published'
+WHERE state = 'standby' AND (CAST(flags AS INTEGER) & 1) = 1
+  AND zonename || '|' || keyid IN (
+    SELECT zone || '|' || keyid
+    FROM RolloverKeyState
+    WHERE standby_at IS NULL OR standby_at = ''
+  )`)
+	if err != nil {
+		lgConfig.Error("data migration: rename old standby SEP keys to published failed", "err", err)
+	}
 }
 
 // dbMigrateSchema adds columns that may be missing from tables created by older schema versions.
@@ -133,6 +180,46 @@ func dbMigrateSchema(db *sql.DB) {
 		{"RolloverZoneState", "last_success_at", "ALTER TABLE RolloverZoneState ADD COLUMN last_success_at TEXT"},
 		{"RolloverZoneState", "last_attempt_started_at", "ALTER TABLE RolloverZoneState ADD COLUMN last_attempt_started_at TEXT"},
 		{"RolloverZoneState", "last_poll_at", "ALTER TABLE RolloverZoneState ADD COLUMN last_poll_at TEXT"},
+		// Rollover NOTIFY-scheme phase 2: scheme + CDS-cleanup ownership.
+		// last_attempt_scheme is diagnostic-only ("UPDATE", "NOTIFY", or
+		// "UPDATE,NOTIFY" when a parallel send had at least one wire-level
+		// NOERROR). last_published_cds_index_low/high are engine-functional:
+		// a non-NULL pair asserts ownership of the current child-apex CDS
+		// RRset for cleanup-time comparison.
+		{"RolloverZoneState", "last_attempt_scheme", "ALTER TABLE RolloverZoneState ADD COLUMN last_attempt_scheme TEXT"},
+		{"RolloverZoneState", "last_published_cds_index_low", "ALTER TABLE RolloverZoneState ADD COLUMN last_published_cds_index_low INTEGER"},
+		{"RolloverZoneState", "last_published_cds_index_high", "ALTER TABLE RolloverZoneState ADD COLUMN last_published_cds_index_high INTEGER"},
+		// Last-observed DS RRset from the parent-agent poll. Stored as
+		// CSV-of-keyids (NOT a rollover_index range) so a polled answer
+		// can include keyids that have no RolloverKeyState row (parent
+		// has stale DS for a key the child has already removed, for
+		// example). Updated on every successful poll regardless of
+		// whether the polled set matches the engine's expected set;
+		// the operator's "DS observed" status line shows the latest
+		// poll rather than the latest confirmed match.
+		{"RolloverZoneState", "last_ds_observed_keyids", "ALTER TABLE RolloverZoneState ADD COLUMN last_ds_observed_keyids TEXT"},
+		{"RolloverZoneState", "last_ds_observed_at", "ALTER TABLE RolloverZoneState ADD COLUMN last_ds_observed_at TEXT"},
+		// Parent's DSYNC RRset advertisement state, snapshotted on every
+		// pickRolloverSchemes call (i.e. every push attempt). NULL means
+		// "never observed yet"; 0/1 reflect the most recent observation.
+		// Used by the auto-rollover status renderer to distinguish
+		// "parent doesn't advertise this scheme" from "engine hasn't
+		// pushed via this scheme yet".
+		{"RolloverZoneState", "parent_advertises_update", "ALTER TABLE RolloverZoneState ADD COLUMN parent_advertises_update INTEGER"},
+		{"RolloverZoneState", "parent_advertises_notify", "ALTER TABLE RolloverZoneState ADD COLUMN parent_advertises_notify INTEGER"},
+		// Split of the old "standby" state into "published" (DNSKEY in
+		// zone, propagation incomplete) + "standby" (propagation
+		// complete, ready for AtomicRollover). published_at carries
+		// the moment the DNSKEY entered the served zone — what the
+		// old single-state code stored in standby_at.
+		//
+		// Migration of existing data is handled separately in
+		// migrateOldStandbyToPublished (called after the column add)
+		// because it requires both copying timestamp values and
+		// updating state strings on DnssecKeyStore. Doing that here
+		// would mix DDL-style migrations (idempotent column adds) with
+		// data-shape migrations (one-shot state transitions).
+		{"RolloverKeyState", "published_at", "ALTER TABLE RolloverKeyState ADD COLUMN published_at TEXT"},
 	}
 
 	for _, m := range migrations {
@@ -218,6 +305,7 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 	dbSetupTables(db)
 	return &KeyDB{
 		DB:                  db,
+		DBFile:              dbfile,
 		KeystoreSig0Cache:   make(map[string]*Sig0ActiveKeys),
 		TruststoreSig0Cache: NewSig0StoreT(),
 		KeystoreDnskeyCache: make(map[string]*DnssecKeys),

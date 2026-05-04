@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // RolloverZoneRow is persisted rollover coordination for one zone (RolloverZoneState).
@@ -39,6 +41,59 @@ type RolloverZoneRow struct {
 	LastSuccessAt        sql.NullString
 	LastAttemptStartedAt sql.NullString
 	LastPollAt           sql.NullString
+
+	// NOTIFY-scheme phase 2 fields. LastAttemptScheme is diagnostic-only
+	// ("UPDATE", "NOTIFY", or "UPDATE,NOTIFY" when a parallel send had
+	// at least one wire-level NOERROR). LastPublishedCdsIndexLow/High
+	// are engine-functional: a non-NULL pair asserts ownership of the
+	// current child-apex CDS RRset for compare-on-cleanup matching.
+	// Cleared when cleanupCdsAfterConfirm queues the unpublish.
+	LastAttemptScheme         sql.NullString
+	LastPublishedCdsIndexLow  sql.NullInt64
+	LastPublishedCdsIndexHigh sql.NullInt64
+
+	// LastDsObservedKeyids is the CSV of SEP keyids returned by the
+	// most recent QueryParentAgentDS call, regardless of whether the
+	// returned set matched the engine's expected set. Updated on
+	// every successful poll. Format: "12345,56789,43215". The
+	// operator's "DS observed" status line is sourced from this so
+	// it tracks the latest poll rather than the latest confirmed
+	// match. LastDsObservedAt is the wallclock of that poll.
+	LastDsObservedKeyids sql.NullString
+	LastDsObservedAt     sql.NullString
+
+	// ParentAdvertisesUpdate / ParentAdvertisesNotify are the most
+	// recent DSYNC RRset observation snapshotted by
+	// pickRolloverSchemes. NULL = never observed; valid 0/1 reflect
+	// whether the parent advertises that scheme. Renderer reads
+	// these to distinguish "parent doesn't advertise this scheme"
+	// from "engine hasn't pushed via this scheme yet".
+	ParentAdvertisesUpdate sql.NullBool
+	ParentAdvertisesNotify sql.NullBool
+}
+
+// setParentDsyncAdvertised snapshots the parent's DSYNC RRset
+// advertisement state observed by the most recent
+// pickRolloverSchemes call. Used by status output to distinguish
+// "parent doesn't advertise this scheme" from "engine hasn't pushed
+// via this scheme yet". Best-effort; a write failure does not
+// affect push semantics.
+func setParentDsyncAdvertised(kdb *KeyDB, zone string, hasUpdate, hasNotify bool) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	hu, hn := 0, 0
+	if hasUpdate {
+		hu = 1
+	}
+	if hasNotify {
+		hn = 1
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState
+SET parent_advertises_update = ?,
+    parent_advertises_notify = ?
+WHERE zone = ?`, hu, hn, zone)
+	return err
 }
 
 func EnsureRolloverZoneRow(kdb *KeyDB, zone string) error {
@@ -65,7 +120,10 @@ SELECT zone,
        observe_started_at, observe_next_poll_at, observe_backoff_seconds,
        hardfail_count, next_push_at,
        last_softfail_at, last_softfail_category, last_softfail_detail,
-       last_success_at, last_attempt_started_at, last_poll_at
+       last_success_at, last_attempt_started_at, last_poll_at,
+       last_attempt_scheme, last_published_cds_index_low, last_published_cds_index_high,
+       last_ds_observed_keyids, last_ds_observed_at,
+       parent_advertises_update, parent_advertises_notify
 FROM RolloverZoneState WHERE zone = ?`
 	var r RolloverZoneRow
 	var inProg int
@@ -79,6 +137,9 @@ FROM RolloverZoneState WHERE zone = ?`
 		&r.HardfailCount, &r.NextPushAt,
 		&r.LastSoftfailAt, &r.LastSoftfailCategory, &r.LastSoftfailDetail,
 		&r.LastSuccessAt, &r.LastAttemptStartedAt, &r.LastPollAt,
+		&r.LastAttemptScheme, &r.LastPublishedCdsIndexLow, &r.LastPublishedCdsIndexHigh,
+		&r.LastDsObservedKeyids, &r.LastDsObservedAt,
+		&r.ParentAdvertisesUpdate, &r.ParentAdvertisesNotify,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -218,12 +279,17 @@ WHERE zone = ?`, zone)
 	return err
 }
 
-// setRolloverKeyStandbyAtTx stamps standby_at for one key on an existing TX.
-// Called when a SEP key transitions published → standby in a rollover-managed
-// zone; drives the oldest-standby selection in AtomicRollover.
-func setRolloverKeyStandbyAtTx(tx *Tx, zone string, keyid uint16, at time.Time) error {
+// setRolloverKeyPublishedAtTx stamps published_at for one key on an
+// existing TX. Called when a SEP key transitions ds-published → "DNSKEY
+// in zone" — what the engine currently calls the "standby" state, which
+// the in-flight state-machine split (C16-C18 commit series) splits into
+// "published" + "standby." This commit (C17) renames the column and
+// the call sites; the state string remains "standby" until C18 adds
+// the genuine-propagated transition. Drives the oldest-standby
+// selection in AtomicRollover via published_at ordering.
+func setRolloverKeyPublishedAtTx(tx *Tx, zone string, keyid uint16, at time.Time) error {
 	s := at.UTC().Format(time.RFC3339)
-	_, err := tx.Exec(`UPDATE RolloverKeyState SET standby_at = ? WHERE zone = ? AND keyid = ?`, s, zone, int(keyid))
+	_, err := tx.Exec(`UPDATE RolloverKeyState SET published_at = ? WHERE zone = ? AND keyid = ?`, s, zone, int(keyid))
 	return err
 }
 
@@ -307,13 +373,31 @@ func RolloverKeyidsByIndexRange(kdb *KeyDB, zone string, low, high int64) ([]uin
 	return out, rows.Err()
 }
 
-// setRolloverKeyStandbyAt is the non-TX variant for callers outside of
-// AtomicRollover (e.g. TransitionRolloverKskDsPublishedToStandby's
-// per-key loop).
+// setRolloverKeyPublishedAt is the non-TX variant for callers outside
+// of AtomicRollover (e.g. TransitionRolloverKskDsPublishedToPublished's
+// per-key loop). Stamps published_at — the moment the engine moved
+// the DNSKEY into the served zone.
+func setRolloverKeyPublishedAt(kdb *KeyDB, zone string, keyid uint16, at time.Time) error {
+	s := at.UTC().Format(time.RFC3339)
+	_, err := kdb.DB.Exec(`UPDATE RolloverKeyState SET published_at = ? WHERE zone = ? AND keyid = ?`, s, zone, int(keyid))
+	return err
+}
+
+// setRolloverKeyStandbyAt stamps standby_at — the moment the engine
+// confirmed propagation complete and moved the key from the
+// "published" state to the genuine "standby" (ready) state. Set by
+// TransitionRolloverKskPublishedToStandby on every key that crosses
+// the propagation gate.
 func setRolloverKeyStandbyAt(kdb *KeyDB, zone string, keyid uint16, at time.Time) error {
 	s := at.UTC().Format(time.RFC3339)
 	_, err := kdb.DB.Exec(`UPDATE RolloverKeyState SET standby_at = ? WHERE zone = ? AND keyid = ?`, s, zone, int(keyid))
 	return err
+}
+
+// RolloverKeyStandbyAt returns the standby_at timestamp (when the key
+// reached the genuine propagated-standby state), or nil if unset.
+func RolloverKeyStandbyAt(kdb *KeyDB, zone string, keyid uint16) (*time.Time, error) {
+	return readKeyTimestamp(kdb, zone, keyid, "standby_at")
 }
 
 // setRolloverInProgressTx flips RolloverZoneState.rollover_in_progress on an
@@ -350,9 +434,10 @@ func RolloverKeyActiveAt(kdb *KeyDB, zone string, keyid uint16) (*time.Time, err
 	return readKeyTimestamp(kdb, zone, keyid, "active_at")
 }
 
-// RolloverKeyStandbyAt returns the standby_at timestamp, or nil if unset.
-func RolloverKeyStandbyAt(kdb *KeyDB, zone string, keyid uint16) (*time.Time, error) {
-	return readKeyTimestamp(kdb, zone, keyid, "standby_at")
+// RolloverKeyPublishedAt returns the published_at timestamp (DNSKEY-
+// in-zone since), or nil if unset.
+func RolloverKeyPublishedAt(kdb *KeyDB, zone string, keyid uint16) (*time.Time, error) {
+	return readKeyTimestamp(kdb, zone, keyid, "published_at")
 }
 
 // RolloverKeyDsObservedAt returns the ds_observed_at timestamp, or nil if unset.
@@ -390,38 +475,41 @@ func readKeyTimestamp(kdb *KeyDB, zone string, keyid uint16, col string) (*time.
 	return &t, nil
 }
 
-// listRolloverStandbyKeysTx returns (keyid, standby_at) for all SEP keys in
-// state=standby for the zone, ordered by standby_at (NULLs last) then keyid.
-// Used by AtomicRollover to pick the oldest standby for promotion.
+// listRolloverStandbyKeysTx returns (keyid, published_at) for all SEP
+// keys in state=standby for the zone, ordered by published_at (NULLs
+// last) then keyid. Used by AtomicRollover to pick the oldest standby
+// for promotion. The struct field is named PublishedAt to match the
+// underlying column (renamed from standby_at in C16); promotion
+// semantics are unchanged: oldest DNSKEY-in-zone moment wins.
 func listRolloverStandbyKeysTx(tx *Tx, zone string) ([]struct {
-	KeyID     uint16
-	StandbyAt sql.NullString
+	KeyID       uint16
+	PublishedAt sql.NullString
 }, error) {
 	rows, err := tx.Query(`
-SELECT d.keyid, r.standby_at
+SELECT d.keyid, r.published_at
 FROM DnssecKeyStore d
 LEFT JOIN RolloverKeyState r ON r.zone = d.zonename AND r.keyid = d.keyid
 WHERE d.zonename = ? AND d.state = ? AND (d.flags & 1) = 1
-ORDER BY (r.standby_at IS NULL OR r.standby_at = '') ASC, r.standby_at ASC, d.keyid ASC`,
+ORDER BY (r.published_at IS NULL OR r.published_at = '') ASC, r.published_at ASC, d.keyid ASC`,
 		zone, DnskeyStateStandby)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []struct {
-		KeyID     uint16
-		StandbyAt sql.NullString
+		KeyID       uint16
+		PublishedAt sql.NullString
 	}
 	for rows.Next() {
 		var kid int
-		var sa sql.NullString
-		if err := rows.Scan(&kid, &sa); err != nil {
+		var pa sql.NullString
+		if err := rows.Scan(&kid, &pa); err != nil {
 			return nil, err
 		}
 		out = append(out, struct {
-			KeyID     uint16
-			StandbyAt sql.NullString
-		}{KeyID: uint16(kid), StandbyAt: sa})
+			KeyID       uint16
+			PublishedAt sql.NullString
+		}{KeyID: uint16(kid), PublishedAt: pa})
 	}
 	return out, rows.Err()
 }
@@ -722,6 +810,149 @@ WHERE zone = ?`, zone)
 	return err
 }
 
+// setLastAttemptScheme records the scheme(s) used by the most recent
+// push attempt that completed at the wire level. Diagnostic-only —
+// status output reads this; the engine never decides anything from it.
+// Comma-joined when a parallel send had at least one wire-level NOERROR.
+func setLastAttemptScheme(kdb *KeyDB, zone, scheme string) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	var s sql.NullString
+	if scheme != "" {
+		s = sql.NullString{String: scheme, Valid: true}
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState SET last_attempt_scheme = ? WHERE zone = ?`, s, zone)
+	return err
+}
+
+// setPublishedCdsRange asserts ownership of the current child-apex CDS
+// RRset by recording the rollover-index range of the keys that backed
+// the engine's most recent CDS publish. Set after a successful NOTIFY
+// publish-and-sign transaction. The range is read at cleanup time by
+// cleanupCdsAfterConfirm to verify that the on-wire CDS still matches
+// what we wrote (compare-on-cleanup), so that a third-party CDS write
+// in the interim is not unpublished by us.
+func setPublishedCdsRange(kdb *KeyDB, zone string, low, high int) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState
+SET last_published_cds_index_low = ?,
+    last_published_cds_index_high = ?
+WHERE zone = ?`, low, high, zone)
+	return err
+}
+
+// clearPublishedCdsRange releases the engine's CDS-ownership marker.
+// Called after cleanupCdsAfterConfirm has unpublished the CDS RRset
+// (or has decided not to because the on-wire CDS no longer matches).
+// NULL means "we own no CDS at the apex" or "another caller owns
+// whatever CDS is currently published."
+func clearPublishedCdsRange(kdb *KeyDB, zone string) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState
+SET last_published_cds_index_low = NULL,
+    last_published_cds_index_high = NULL
+WHERE zone = ?`, zone)
+	return err
+}
+
+// setCdsPublication records a successful CDS publish-and-NOTIFY into
+// the sparse RolloverCdsPublication table. Distinct from
+// setPublishedCdsRange (the cleanup-time ownership marker on
+// RolloverZoneState that gets cleared after Trigger-1 cleanup);
+// these columns preserve the historical fact across cleanup so the
+// operator can still see "CDS was published [keyids] at <time>" in
+// status output after the rollover has completed.
+//
+// keyids are persisted as a comma-separated list of decimal keyids
+// (e.g. "12345,56789,43215"); status output renders them straight.
+// Only zones that ever ran a NOTIFY publish-and-sign appear in the
+// table, so dense single-provider deployments and UPDATE-only
+// testbeds carry no row here.
+func setCdsPublication(kdb *KeyDB, zone string, keyids []uint16, at time.Time) error {
+	parts := make([]string, 0, len(keyids))
+	for _, k := range keyids {
+		parts = append(parts, fmt.Sprintf("%d", k))
+	}
+	csv := strings.Join(parts, ",")
+	const q = `
+INSERT INTO RolloverCdsPublication (zone, keyids, published_at)
+VALUES (?, ?, ?)
+ON CONFLICT(zone) DO UPDATE SET
+  keyids = excluded.keyids,
+  published_at = excluded.published_at`
+	_, err := kdb.DB.Exec(q, zone, csv, at.UTC().Format(time.RFC3339))
+	return err
+}
+
+// loadCdsPublication returns the most recent successful CDS publication
+// recorded for zone, or (nil, "") when no row exists. The returned
+// keyids slice is a parsed copy of the persisted CSV; parse errors
+// are silently skipped (a malformed CSV stops returning whatever
+// keyids parse correctly up to that point).
+func loadCdsPublication(kdb *KeyDB, zone string) (keyids []uint16, at string, err error) {
+	var csv, atStr string
+	row := kdb.DB.QueryRow(`SELECT keyids, published_at FROM RolloverCdsPublication WHERE zone = ?`, zone)
+	if scanErr := row.Scan(&csv, &atStr); scanErr != nil {
+		if scanErr == sql.ErrNoRows {
+			return nil, "", nil
+		}
+		return nil, "", scanErr
+	}
+	return parseDsObservedKeyids(csv), atStr, nil
+}
+
+// setLastDsObserved records the SEP keyids returned by the most
+// recent QueryParentAgentDS call, with the wallclock of the poll.
+// Updated on every successful poll regardless of whether the
+// returned set matches the engine's expected set; the operator's
+// "DS observed" status line shows the latest poll. CSV format
+// matches setCdsPublication. Persists onto RolloverZoneState (every
+// rollover-managed zone polls; not sparse).
+func setLastDsObserved(kdb *KeyDB, zone string, keyids []uint16, at time.Time) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	parts := make([]string, 0, len(keyids))
+	for _, k := range keyids {
+		parts = append(parts, fmt.Sprintf("%d", k))
+	}
+	csv := strings.Join(parts, ",")
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState
+SET last_ds_observed_keyids = ?,
+    last_ds_observed_at = ?
+WHERE zone = ?`, csv, at.UTC().Format(time.RFC3339), zone)
+	return err
+}
+
+// parseDsObservedKeyids parses a forgiving CSV-of-keyids — used by
+// both RolloverZoneState.last_ds_observed_keyids and
+// RolloverCdsPublication.keyids (via loadCdsPublication). Empty
+// fields and unparseable tokens are skipped silently; partial parse
+// returns whatever the prefix yielded.
+func parseDsObservedKeyids(csv string) []uint16 {
+	if csv == "" {
+		return nil
+	}
+	var out []uint16
+	for _, s := range strings.Split(csv, ",") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		var v uint16
+		if _, err := fmt.Sscanf(s, "%d", &v); err != nil {
+			continue
+		}
+		out = append(out, v)
+	}
+	return out
+}
+
 // setNextPushAt updates next_push_at without touching last_softfail_*.
 // Used by the parent-push-softfail probe path which rolls
 // next_push_at forward by softfail_delay regardless of probe outcome
@@ -744,6 +975,17 @@ func setNextPushAt(kdb *KeyDB, zone string, at time.Time) error {
 func StateSinceForDnssecKey(kdb *KeyDB, zone string, k *DnssecKeyWithTimestamps) time.Time {
 	switch k.State {
 	case DnskeyStatePublished:
+		// For KSKs (multi-DS pipeline) the rollover engine stamps
+		// RolloverKeyState.published_at when moving the DNSKEY into
+		// the served zone. ZSKs use DnssecKeyStore.published_at via
+		// the simpler transitionPublishedToStandby. Try the rollover
+		// timestamp first, fall through to the keystore one.
+		if k.Flags&dns.SEP != 0 {
+			t, err := RolloverKeyPublishedAt(kdb, zone, k.KeyTag)
+			if err == nil && t != nil {
+				return *t
+			}
+		}
 		if k.PublishedAt != nil {
 			return *k.PublishedAt
 		}
@@ -757,8 +999,18 @@ func StateSinceForDnssecKey(kdb *KeyDB, zone string, k *DnssecKeyWithTimestamps)
 			return *at
 		}
 	case DnskeyStateStandby:
+		// Genuine standby (post-C18): the key reached propagated-
+		// standby state. RolloverKeyState.standby_at is the
+		// transition moment.
 		t, err := RolloverKeyStandbyAt(kdb, zone, k.KeyTag)
 		if err == nil && t != nil {
+			return *t
+		}
+		// Fallback for keys that came from the pre-C18 schema
+		// where standby_at wasn't set yet on the key (the C18
+		// data migration moved them to "published" instead, but
+		// be defensive against any "standby" key that escaped).
+		if t, err := RolloverKeyPublishedAt(kdb, zone, k.KeyTag); err == nil && t != nil {
 			return *t
 		}
 	case DnskeyStateDsPublished:

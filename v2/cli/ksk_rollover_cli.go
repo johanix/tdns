@@ -45,6 +45,22 @@ func formatTimeWithDelta(t time.Time) string {
 	return fmt.Sprintf("%02d:%02d:%02d (%s %s)", t.Hour(), t.Minute(), t.Second(), delta, suffix)
 }
 
+// injectEstimatedTag rewrites a "HH:MM:SS (Δ ago)" / "HH:MM:SS (Δ ahead)"
+// time-with-delta string so the parenthetical reads "(Δ, estimated)".
+// Drops the "ahead"/"ago" suffix for projected entries — the
+// "estimated" tag is what matters and the column space is at a
+// premium. Defensive: if the input doesn't match the expected shape,
+// append " (estimated)" instead.
+func injectEstimatedTag(timeWithDelta string) string {
+	if i := strings.LastIndex(timeWithDelta, " ago)"); i >= 0 {
+		return timeWithDelta[:i] + ", estimated)"
+	}
+	if i := strings.LastIndex(timeWithDelta, " ahead)"); i >= 0 {
+		return timeWithDelta[:i] + ", estimated)"
+	}
+	return timeWithDelta + " (estimated)"
+}
+
 // formatTimeWithDeltaStr is the SQL-NullString variant: parses RFC3339 from
 // the DB and formats. Returns "-" for empty/invalid values.
 func formatTimeWithDeltaStr(s string) string {
@@ -130,12 +146,19 @@ func newKeystoreDnssecDsPushCmd(_ string) *cobra.Command {
 
 	c := &cobra.Command{
 		Use:   "ds-push",
-		Short: "Compute DS RRset from keystore and push whole RRset to parent via SIG(0) UPDATE",
+		Short: "Compute DS RRset from keystore and push to parent (UPDATE-only in this offline mode)",
 		Long: `Loads tdns config (same as other CLI commands using -c), opens the local keystore DB,
-resolves parent + DSYNC UPDATE target, builds a whole-DS replacement UPDATE, signs with the
-zone's active SIG(0) key, and sends it. Requires imrengine in config.
+and pushes the whole DS RRset to the parent. Requires imrengine in config.
 
-Use --dry-run to print the DS set and UPDATE without sending.`,
+Offline mode: this CLI invocation builds a stub *ZoneData with no rollover policy
+attached, so PushDSRRsetForRollover falls through to the legacy single-scheme
+UPDATE path (whole-DS replacement, signed with the zone's active SIG(0) key).
+The auto / prefer-* / force-* dsync-scheme-preference values are honored only
+inside the daemon's rollover engine, where the policy is loaded from
+dnssecpolicies. To exercise NOTIFY pushes, run the daemon and let
+RolloverAutomatedTick drive the push.
+
+Use --dry-run to print the DS set and the UPDATE without sending.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs(cmd, "zonename")
 			ctx := context.Background()
@@ -168,7 +191,14 @@ Use --dry-run to print the DS set and UPDATE without sending.`,
 
 			z := dns.Fqdn(tdns.Globals.Zonename)
 			zd := &tdns.ZoneData{ZoneName: z}
-			zd.DnssecPolicy = dnssecPolicyForZone(&Conf, z)
+			// Intentionally leave zd.DnssecPolicy nil. The dispatcher
+			// (PushDSRRsetForRollover) gates DSYNC scheme selection on
+			// a non-nil policy and falls through to the legacy
+			// UPDATE-only path when policy is nil. Attaching the policy
+			// here would let an operator running the offline CLI on
+			// auto/prefer-notify silently take the NOTIFY path,
+			// contradicting the "UPDATE-only offline mode" contract
+			// documented above.
 
 			if dryRun {
 				dsSet, low, high, idxOK, err := tdns.ComputeTargetDSSetForZone(kdb, z, uint8(dns.SHA256))
@@ -191,7 +221,16 @@ Use --dry-run to print the DS set and UPDATE without sending.`,
 				return
 			}
 
-			res, err := tdns.PushWholeDSRRset(ctx, zd, kdb, imr)
+			deps := tdns.RolloverEngineDeps{
+				Conf: &Conf,
+				KDB:  kdb,
+				Zone: zd,
+				Imr:  imr,
+				// Policy: nil is deliberate — see comment above where
+				// zd is constructed. Forces the dispatcher onto the
+				// legacy UPDATE-only path.
+			}
+			res, err := tdns.PushDSRRsetForRollover(ctx, deps)
 			if err != nil {
 				log.Fatalf("ds-push: %v", err)
 			}
@@ -420,6 +459,45 @@ func runWhenOffline(z string) {
 	renderRolloverWhen(resp)
 }
 
+// printRolloverPolicyErrors emits the operator-facing header lines for
+// hard rollover-engine-blocking conditions (E5/E10/parent-DSYNC).
+// Returns true if anything was printed. The "Error:" prefix signals
+// that the engine has stopped advancing keys.
+func printRolloverPolicyErrors(errs []string) bool {
+	if len(errs) == 0 {
+		return false
+	}
+	if len(errs) == 1 {
+		fmt.Printf("Error: rollover stopped: %s\n", errs[0])
+	} else {
+		fmt.Println("Error: rollover stopped:")
+		for _, e := range errs {
+			fmt.Printf("  - %s\n", e)
+		}
+	}
+	return true
+}
+
+// printRolloverPolicyWarnings emits the operator-facing header lines
+// for rule-of-thumb concerns (E11). Engine keeps rolling; the
+// "Warning:" prefix tells the operator the policy is outside
+// recommended params but the rollover is still being attempted.
+// Returns true if anything was printed.
+func printRolloverPolicyWarnings(warns []string) bool {
+	if len(warns) == 0 {
+		return false
+	}
+	if len(warns) == 1 {
+		fmt.Printf("Warning: rollover-policy: %s\n", warns[0])
+	} else {
+		fmt.Println("Warning: rollover-policy:")
+		for _, w := range warns {
+			fmt.Printf("  - %s\n", w)
+		}
+	}
+	return true
+}
+
 // renderRolloverWhen prints the dual-line schedule view. NextScheduled
 // is the policy-driven rollover time (active_at + KSK.Lifetime);
 // EarliestPossible is the gate-driven earliest the engine would
@@ -427,6 +505,35 @@ func runWhenOffline(z string) {
 // time. During in-progress rollovers, both lines reflect projected
 // times for the rollover after the current one completes.
 func renderRolloverWhen(resp *tdns.RolloverWhenResponse) {
+	if printRolloverPolicyErrors(resp.PolicyErrors) {
+		// Schedule output is meaningless while the policy is violated.
+		// Suppress remaining lines except the bare zone header so the
+		// operator still sees which zone they queried.
+		fmt.Printf("KSK rollover schedule for zone %s: blocked\n", resp.Zone)
+		return
+	}
+	// Warnings don't block — render schedule below the warning header.
+	printRolloverPolicyWarnings(resp.PolicyWarnings)
+
+	// Case 1 / waiting-for-parent: render the structured blocker
+	// instead of the schedule view. The schedule has no meaningful
+	// EarliestPossible in this state.
+	if resp.Status == "waiting-for-parent" && resp.Blocker != nil {
+		fmt.Printf("KSK rollover for zone %s: not currently possible.\n", resp.Zone)
+		fmt.Printf("  Reason: %s\n", resp.Blocker.Reason)
+		if resp.Blocker.Cause != "" {
+			fmt.Printf("  Cause:  %s\n", resp.Blocker.Cause)
+		}
+		if resp.Blocker.Detail != "" {
+			fmt.Printf("  Detail: %s\n", resp.Blocker.Detail)
+		}
+		if resp.FromKeyID != 0 {
+			fmt.Printf("  Active keyid: %d\n", resp.FromKeyID)
+		}
+		fmt.Println("  Time until possible: unknown")
+		return
+	}
+
 	currentTime := formatRolloverTimeAbsolute(resp.CurrentTime)
 	if currentTime == "-" {
 		// Fallback when daemon didn't supply CurrentTime (legacy
@@ -564,7 +671,7 @@ manual_rollover_* row isn't being read by anything).`,
 }
 
 func newAutoRolloverStatusCmd() *cobra.Command {
-	var verbose, offline, kskOnly, zskOnly bool
+	var verbose, offline bool
 	c := &cobra.Command{
 		Use:   "status",
 		Short: "Print rollover state for a zone (KSK and ZSK)",
@@ -577,7 +684,9 @@ when the daemon is down — that requires --config with the daemon's
 config file so the CLI can find db.file and the zone's policy.
 
 Use --ksk or --zsk to print only the KSK block or only the ZSK block
-(the two flags are mutually exclusive).
+(the two flags are mutually exclusive). These flags are inherited
+from the auto-rollover parent and accepted by every subcommand for
+consistency.
 
 The DS range line lists SEP keyids (same numbering as the KSK table and
 as DS digest key tags at the parent).
@@ -589,11 +698,11 @@ and the policy summary.`,
 			tdns.Globals.App.Type = tdns.AppTypeCli
 			z := dns.Fqdn(tdns.Globals.Zonename)
 
-			if kskOnly && zskOnly {
+			if autoRolloverFlags.kskOnly && autoRolloverFlags.zskOnly {
 				cliFatalf("flags --ksk and --zsk are mutually exclusive")
 			}
-			showKSK := !zskOnly
-			showZSK := !kskOnly
+			showKSK := !autoRolloverFlags.zskOnly
+			showZSK := !autoRolloverFlags.kskOnly
 
 			var s *tdns.RolloverStatus
 			if offline {
@@ -607,8 +716,6 @@ and the policy summary.`,
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
 	c.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show full last_error text and policy summary")
 	c.Flags().BoolVar(&offline, "offline", false, "Render against keystore file (postmortem use; daemon is down)")
-	c.Flags().BoolVar(&kskOnly, "ksk", false, "Print only the KSK rollover section (omit ZSK)")
-	c.Flags().BoolVar(&zskOnly, "zsk", false, "Print only the ZSK rollover section (omit KSK)")
 	_ = c.MarkFlagRequired("zone")
 	return c
 }
@@ -645,7 +752,17 @@ func fetchRolloverStatusOffline(z string) *tdns.RolloverStatus {
 		cliFatalf("error: %v", err)
 	}
 	defer kdb.DB.Close()
-	s, err := tdns.ComputeRolloverStatus(kdb, z, pol, time.Now())
+	// Offline path: the daemon isn't running, so we can't query its
+	// kasp.check_interval. Pass 0, which suppresses the warning —
+	// surfacing it requires daemon-runtime context, and the operator
+	// running offline-mode is doing postmortem analysis where the
+	// warning would be noise.
+	// Offline mode: no daemon-runtime kasp config in scope. Pass
+	// 0 for both check_interval and propagation_delay; the
+	// renderer treats unknown propagation_delay as "skip the
+	// ds-published timing math" which is the right thing for
+	// postmortem use anyway.
+	s, err := tdns.ComputeRolloverStatus(kdb, z, pol, 0, 0, time.Now())
 	if err != nil {
 		cliFatalf("error: %v", err)
 	}
@@ -677,6 +794,21 @@ func dashKeyidsBracket(s string) string {
 func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool) {
 	if s == nil {
 		return
+	}
+	headerPrinted := false
+	if len(s.PolicyErrors) > 0 {
+		printRolloverPolicyErrors(s.PolicyErrors)
+		headerPrinted = true
+	}
+	if len(s.PolicyWarnings) > 0 {
+		printRolloverPolicyWarnings(s.PolicyWarnings)
+		headerPrinted = true
+	}
+	if headerPrinted {
+		// Status output continues below — operators still want to see
+		// per-key state and recent attempts. The header makes the
+		// rollover-engine state explicit before the rest of the report.
+		fmt.Println()
 	}
 	currentTime := formatRolloverTimeAbsolute(s.CurrentTime)
 
@@ -716,6 +848,13 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 		}
 	}
 
+	// Errors section: aggregate per-key errors across both tables
+	// into a single tail-end block. The per-row "last_error" column
+	// was wasted space (almost always empty, and when set it's set
+	// for one or two keys); a dedicated section reads better and
+	// gives the message room to breathe.
+	printRolloverKeyErrors(s, showKSK, showZSK, verbose)
+
 	if verbose && s.Policy != nil && showKSK {
 		fmt.Println()
 		fmt.Println("  policy:")
@@ -752,11 +891,25 @@ func printStateTable(s *tdns.RolloverStatus) {
 				left = append(left, kv{"attempts:", fmt.Sprintf("%d / %d in current group", s.AttemptIndex, s.AttemptMax)})
 			}
 		case "SOFTFAIL":
-			left = append(left, kv{"attempts:", fmt.Sprintf("initial flurry (%d/%d) failed; in long-term mode", s.HardfailCount, s.AttemptMax)})
+			// child-config:waiting-for-parent intentionally never
+			// increments HardfailCount (the engine just waits for
+			// the parent to publish DSYNC). Rendering the generic
+			// "initial flurry (0/N) failed" line in that state
+			// reads as a counter bug; show a parent-blocker-specific
+			// summary instead.
+			if s.LastSoftfailCat == tdns.SoftfailChildConfigWaitingForParent {
+				left = append(left, kv{"attempts:", "blocked by parent (no usable DSYNC scheme advertised)"})
+			} else {
+				left = append(left, kv{"attempts:", fmt.Sprintf("initial flurry (%d/%d) failed; in long-term mode", s.HardfailCount, s.AttemptMax)})
+			}
 		}
 	}
 	if s.LastUpdate != "" {
-		left = append(left, kv{"last UPDATE:", formatRolloverTime(s.LastUpdate)})
+		v := formatRolloverTime(s.LastUpdate)
+		if s.LastAttemptScheme != "" {
+			v = fmt.Sprintf("%s via %s", v, s.LastAttemptScheme)
+		}
+		left = append(left, kv{"last push:", v})
 	}
 	if s.ExpectedBy != "" {
 		left = append(left, kv{"expected by:", formatRolloverTime(s.ExpectedBy)})
@@ -764,22 +917,123 @@ func printStateTable(s *tdns.RolloverStatus) {
 	if s.AttemptTimeout != "" {
 		left = append(left, kv{"attempt timeout:", formatRolloverTime(s.AttemptTimeout)})
 	}
-	if s.Submitted != nil {
-		left = append(left, kv{"DS submitted:", dashKeyidsBracket(formatKeyidBracketList(s.SubmittedKeyIDs))})
+	// Per-scheme lines: DS UPDATE / CDS published / DS observed.
+	// Each is rendered as (kidPart [+timePart]). The bracket parts
+	// are pre-padded to a common width across the three lines so
+	// timestamps align vertically — easier to scan during incidents.
+	//
+	// State semantics for the bracket part:
+	//   - parent advertises the scheme + engine has pushed → keyid list
+	//   - parent advertises the scheme + no push yet      → "[no UPDATE sent yet]" / "[no CDS RRset published yet]"
+	//   - parent doesn't advertise the scheme             → "Parent has no DSYNC UPDATE/NOTIFY CDS support"
+	//   - parent advertisement state unknown              → render legacy line shape
+	type schemeRow struct {
+		label    string
+		kidPart  string
+		timePart string
 	}
-	if s.Confirmed != nil {
-		left = append(left, kv{"DS confirmed:", dashKeyidsBracket(formatKeyidBracketList(s.ConfirmedKeyIDs))})
+	var schemeRows []schemeRow
+
+	switch {
+	case s.ParentAdvertisesUpdateKnown && !s.ParentAdvertisesUpdate:
+		schemeRows = append(schemeRows, schemeRow{"DS UPDATE:", "Parent has no DSYNC UPDATE support", ""})
+	case s.Submitted != nil:
+		// Submitted is the engine's most recent submitted DS RRset.
+		// Render the timestamp from LastUpdate (= last_attempt_started_at)
+		// regardless of whether the most recent attempt's wire scheme
+		// was UPDATE, NOTIFY, or both — the operator's question is
+		// "when did we last ask the parent for this set," and the
+		// scheme breakdown is shown by LastAttemptScheme on the
+		// "last push:" line.
+		t := ""
+		if s.LastUpdate != "" {
+			t = "sent " + formatRolloverTime(s.LastUpdate)
+		}
+		schemeRows = append(schemeRows, schemeRow{
+			"DS UPDATE:",
+			dashKeyidsBracket(formatKeyidBracketList(s.SubmittedKeyIDs)),
+			t,
+		})
+	case s.ParentAdvertisesUpdateKnown && s.ParentAdvertisesUpdate:
+		// Parent advertises UPDATE but engine hasn't pushed yet.
+		schemeRows = append(schemeRows, schemeRow{"DS UPDATE:", "[no UPDATE sent yet]", ""})
 	}
 
-	// Right column: timing config + history & polling.
+	switch {
+	case s.ParentAdvertisesNotifyKnown && !s.ParentAdvertisesNotify:
+		schemeRows = append(schemeRows, schemeRow{"CDS published:", "Parent has no DSYNC NOTIFY CDS support", ""})
+	case len(s.CdsPublishedKeyIDs) > 0:
+		t := ""
+		if s.CdsPublishedAt != "" {
+			t = "sent " + formatRolloverTime(s.CdsPublishedAt)
+		}
+		schemeRows = append(schemeRows, schemeRow{
+			"CDS published:",
+			formatKeyidBracketList(s.CdsPublishedKeyIDs),
+			t,
+		})
+	case s.ParentAdvertisesNotifyKnown && s.ParentAdvertisesNotify:
+		schemeRows = append(schemeRows, schemeRow{"CDS published:", "[no CDS RRset published yet]", ""})
+	}
+
+	// DS observed line. Use ObservedAt (the timestamp of the latest
+	// successful poll) as the presence bit, NOT len(ObservedKeyIDs).
+	// An empty observed keyid list with a recent ObservedAt means the
+	// parent just lost DS — the renderer must not hide that behind
+	// stale confirmed data.
+	//
+	// "seen" rather than "observed" so the verb width matches "sent"
+	// on the DS UPDATE / CDS published lines: post-bracket timestamps
+	// then align column-for-column, not just keyid-for-keyid.
+	switch {
+	case s.ObservedAt != "":
+		schemeRows = append(schemeRows, schemeRow{
+			"DS observed:",
+			dashKeyidsBracket(formatKeyidBracketList(s.ObservedKeyIDs)),
+			"seen " + formatRolloverTime(s.ObservedAt),
+		})
+	case s.Confirmed != nil:
+		// Pre-existing-row fallback (daemon pre-dates the observe-poll
+		// persistence work).
+		schemeRows = append(schemeRows, schemeRow{
+			"DS observed:",
+			dashKeyidsBracket(formatKeyidBracketList(s.ConfirmedKeyIDs)),
+			"",
+		})
+	}
+
+	// Compute max width of the bracket part across the three rows so
+	// timestamps align vertically. Apply only when at least one row
+	// has a timePart — single-column rows don't need padding.
+	maxKidWidth := 0
+	hasAnyTime := false
+	for _, r := range schemeRows {
+		if r.timePart != "" {
+			hasAnyTime = true
+		}
+		if len(r.kidPart) > maxKidWidth {
+			maxKidWidth = len(r.kidPart)
+		}
+	}
+	for _, r := range schemeRows {
+		v := r.kidPart
+		if r.timePart != "" {
+			pad := ""
+			if hasAnyTime && len(r.kidPart) < maxKidWidth {
+				pad = strings.Repeat(" ", maxKidWidth-len(r.kidPart))
+			}
+			v = fmt.Sprintf("%s%s  %s", r.kidPart, pad, r.timePart)
+		}
+		left = append(left, kv{r.label, v})
+	}
+
+	// Right column: timing config + scheduling. Dropped:
+	//   - "last success" — same instant as DS observed <time> when
+	//     populated; redundant.
+	//   - "last poll"    — same instant as DS observed <time> by
+	//     construction (every poll updates last_ds_observed_*).
 	if s.Policy != nil && s.Policy.DsPublishDelay != "" {
 		right = append(right, kv{"ds-publish-delay:", s.Policy.DsPublishDelay})
-	}
-	if s.LastSuccess != "" {
-		right = append(right, kv{"last success:", formatRolloverTime(s.LastSuccess)})
-	}
-	if s.LastPoll != "" {
-		right = append(right, kv{"last poll:", formatRolloverTime(s.LastPoll)})
 	}
 	if s.NextPoll != "" {
 		right = append(right, kv{"next poll:", formatRolloverTime(s.NextPoll)})
@@ -826,6 +1080,9 @@ func printStateNotes(s *tdns.RolloverStatus, verbose bool) {
 			fmt.Printf("                    use 'auto-rollover unstick --zone %s' to skip the wait and probe now\n", s.Zone)
 		}
 	}
+	for _, w := range s.Warnings {
+		fmt.Printf("  WARNING:          %s\n", w)
+	}
 	if s.LastSoftfailCat != "" || s.LastSoftfailDetail != "" {
 		if s.LastSoftfailCat != "" {
 			fmt.Printf("  failure category: %s\n", s.LastSoftfailCat)
@@ -852,6 +1109,45 @@ func printStateNotes(s *tdns.RolloverStatus, verbose bool) {
 	}
 }
 
+// printRolloverKeyErrors emits a tail-end "Errors:" section listing
+// any per-key error messages, one per line. Skipped entirely when
+// no key has an error. Replaces the per-row "last_error" column,
+// which was almost always empty and column-truncated when set.
+func printRolloverKeyErrors(s *tdns.RolloverStatus, showKSK, showZSK, verbose bool) {
+	type entry struct {
+		section string
+		keyid   uint16
+		msg     string
+	}
+	var rows []entry
+	if showKSK {
+		for _, k := range s.KSKs {
+			if k.LastRolloverErr != "" {
+				rows = append(rows, entry{"KSK", k.KeyID, k.LastRolloverErr})
+			}
+		}
+	}
+	if showZSK {
+		for _, k := range s.ZSKs {
+			if k.LastRolloverErr != "" {
+				rows = append(rows, entry{"ZSK", k.KeyID, k.LastRolloverErr})
+			}
+		}
+	}
+	if len(rows) == 0 {
+		return
+	}
+	fmt.Println()
+	fmt.Println("  Errors:")
+	for _, r := range rows {
+		msg := r.msg
+		if !verbose {
+			msg = truncate(msg, 100, false)
+		}
+		fmt.Printf("    %s keyid %d: %s\n", r.section, r.keyid, msg)
+	}
+}
+
 // printRolloverKeyTable prints KSK or ZSK rows via columnize. Header
 // row + separator row + data rows; columnize handles column-width
 // alignment so we don't have to maintain padding-format strings.
@@ -861,7 +1157,7 @@ func printRolloverKeyTable(keys []tdns.RolloverKeyEntry, verbose bool, kskTable 
 	}
 	var rows []string
 	if kskTable {
-		rows = append(rows, "active_seq|keyid|state|published|state_since|last_error")
+		rows = append(rows, "active_seq|keyid|state|published|state_since|next_transition|expected_at")
 		for _, k := range keys {
 			seqStr := "-"
 			if k.ActiveSeq != nil {
@@ -873,16 +1169,41 @@ func printRolloverKeyTable(keys []tdns.RolloverKeyEntry, verbose bool, kskTable 
 					sinceStr = formatTimeWithDelta(t)
 				}
 			}
-			errCol := ""
-			if k.LastRolloverErr != "" {
-				errCol = truncate(k.LastRolloverErr, 40, verbose)
-			}
 			pub := k.Published
 			if pub == "" {
 				pub = "?"
 			}
-			rows = append(rows, fmt.Sprintf("%s|%d|%s|%s|%s|%s",
-				seqStr, k.KeyID, k.State, pub, sinceStr, errCol))
+			nextCol := k.NextTransition
+			if nextCol == "" {
+				nextCol = "-"
+			}
+			expectedCol := "-"
+			if k.NextTransitionAt != "" {
+				if t, err := time.Parse(time.RFC3339, k.NextTransitionAt); err == nil {
+					expectedCol = formatTimeWithDelta(t)
+					if k.NextTransitionEstimate {
+						// Mark projected times so the operator knows
+						// the schedule shifts when prior rollovers
+						// fire (asap, parent failure, etc).
+						expectedCol = injectEstimatedTag(expectedCol)
+					}
+				}
+			} else if k.NextTransitionNote != "" {
+				// No concrete time, but engine has a qualifier.
+				expectedCol = k.NextTransitionNote
+			}
+			// Synthetic "future key" row: render keyid as "-----"
+			// and state_since as "-" (state isn't a real database
+			// state yet). The next_transition / expected_at carry
+			// the operator-facing info: when the engine will
+			// generate the next key.
+			keyidStr := fmt.Sprintf("%d", k.KeyID)
+			if k.IsSynthetic {
+				keyidStr = "-----"
+				sinceStr = "-"
+			}
+			rows = append(rows, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s",
+				seqStr, keyidStr, k.State, pub, sinceStr, nextCol, expectedCol))
 		}
 	} else {
 		rows = append(rows, "keyid|state|published_at")
@@ -1121,6 +1442,16 @@ Differs from 'reset' (which clears last_rollover_error for one keyid).`,
 	return c
 }
 
+// autoRolloverFlags holds the --ksk / --zsk filter flags so they can
+// be registered as persistent flags on the auto-rollover parent and
+// inherited by all subcommands. Only `status` and `when` use them
+// today; others accept the flags as no-ops so an operator can copy a
+// command line between subcommands without "unknown flag" errors.
+var autoRolloverFlags struct {
+	kskOnly bool
+	zskOnly bool
+}
+
 // newAutoRolloverCmd returns the parent command holding the auto-rollover
 // subcommands. Sits alongside the legacy `rollover` (manual swap via API)
 // rather than replacing it.
@@ -1130,13 +1461,21 @@ func newAutoRolloverCmd(_ string) *cobra.Command {
 		Short: "Manage and inspect automated KSK rollover (scheduled + manual-ASAP)",
 		Long: `Subcommands operate on local keystore state for a zone:
 
-  when     — compute the earliest safe rollover moment (no state change)
-  asap     — schedule a manual rollover at that earliest moment
-  cancel   — clear a pending manual rollover request
-  status   — print phase + per-key state for the zone
-  reset    — clear last_rollover_error on one key after operator action
-  unstick  — skip the softfail-delay and probe the parent on the next tick`,
+  when      — compute the earliest safe rollover moment (no state change)
+  asap      — schedule a manual rollover at that earliest moment
+  cancel    — clear a pending manual rollover request
+  status    — print phase + per-key state for the zone
+  reset     — clear last_rollover_error on one key after operator action
+  unstick   — skip the softfail-delay and probe the parent on the next tick
+  validate  — re-parse policy from YAML and report which §4 invariants pass/fail`,
 	}
+	// Persistent --ksk / --zsk filter flags inherited by every
+	// subcommand. Most subcommands ignore them; status and when use
+	// them to suppress KSK or ZSK rendering.
+	c.PersistentFlags().BoolVar(&autoRolloverFlags.kskOnly, "ksk", false,
+		"Render only the KSK section (status / when); ignored by other subcommands")
+	c.PersistentFlags().BoolVar(&autoRolloverFlags.zskOnly, "zsk", false,
+		"Render only the ZSK section (status / when); ignored by other subcommands")
 	c.AddCommand(
 		newAutoRolloverWhenCmd(),
 		newAutoRolloverAsapCmd(),
@@ -1144,6 +1483,7 @@ func newAutoRolloverCmd(_ string) *cobra.Command {
 		newAutoRolloverStatusCmd(),
 		newAutoRolloverResetCmd(),
 		newAutoRolloverUnstickCmd(),
+		newAutoRolloverValidateCmd(),
 	)
 	return c
 }

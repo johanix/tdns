@@ -1116,6 +1116,24 @@ func (zd *ZoneData) RepopulateDynamicRRs(dynamicRRs []*core.RRset) {
 	}
 
 	lg.Info("RepopulateDynamicRRs: repopulated dynamic RRsets", "count", len(dynamicRRs), "zone", zd.ZoneName)
+
+	// CDS-publication observability: report whether the apex CDS RRset
+	// survived this refresh. CDS is currently NOT on the
+	// CollectDynamicRRs allowlist, so any CDS the rollover engine
+	// queued via pushDSRRsetViaNotify is wiped here unless the source
+	// zone file re-asserts it. The rollover engine's CDS-ownership
+	// marker (RolloverZoneState.last_published_cds_index_low/high)
+	// outlives the refresh, so the next push will re-publish — but
+	// with a churn cycle visible in zone-update logs as
+	// "no RRset for owner" warnings.
+	apexCdsRRs := 0
+	if owner, _ := zd.GetOwner(zd.ZoneName); owner != nil {
+		if rs, ok := owner.RRtypes.Get(dns.TypeCDS); ok {
+			apexCdsRRs = len(rs.RRs)
+		}
+	}
+	lgRollover.Debug("post-refresh apex CDS observation",
+		"zone", zd.ZoneName, "apex_cds_rrs", apexCdsRRs)
 }
 
 func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
