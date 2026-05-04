@@ -655,7 +655,7 @@ manual_rollover_* row isn't being read by anything).`,
 }
 
 func newAutoRolloverStatusCmd() *cobra.Command {
-	var verbose, offline, kskOnly, zskOnly bool
+	var verbose, offline bool
 	c := &cobra.Command{
 		Use:   "status",
 		Short: "Print rollover state for a zone (KSK and ZSK)",
@@ -668,7 +668,9 @@ when the daemon is down — that requires --config with the daemon's
 config file so the CLI can find db.file and the zone's policy.
 
 Use --ksk or --zsk to print only the KSK block or only the ZSK block
-(the two flags are mutually exclusive).
+(the two flags are mutually exclusive). These flags are inherited
+from the auto-rollover parent and accepted by every subcommand for
+consistency.
 
 The DS range line lists SEP keyids (same numbering as the KSK table and
 as DS digest key tags at the parent).
@@ -680,11 +682,11 @@ and the policy summary.`,
 			tdns.Globals.App.Type = tdns.AppTypeCli
 			z := dns.Fqdn(tdns.Globals.Zonename)
 
-			if kskOnly && zskOnly {
+			if autoRolloverFlags.kskOnly && autoRolloverFlags.zskOnly {
 				cliFatalf("flags --ksk and --zsk are mutually exclusive")
 			}
-			showKSK := !zskOnly
-			showZSK := !kskOnly
+			showKSK := !autoRolloverFlags.zskOnly
+			showZSK := !autoRolloverFlags.kskOnly
 
 			var s *tdns.RolloverStatus
 			if offline {
@@ -698,8 +700,6 @@ and the policy summary.`,
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
 	c.Flags().BoolVarP(&verbose, "verbose", "v", false, "Show full last_error text and policy summary")
 	c.Flags().BoolVar(&offline, "offline", false, "Render against keystore file (postmortem use; daemon is down)")
-	c.Flags().BoolVar(&kskOnly, "ksk", false, "Print only the KSK rollover section (omit ZSK)")
-	c.Flags().BoolVar(&zskOnly, "zsk", false, "Print only the ZSK rollover section (omit KSK)")
 	_ = c.MarkFlagRequired("zone")
 	return c
 }
@@ -889,57 +889,113 @@ func printStateTable(s *tdns.RolloverStatus) {
 	if s.AttemptTimeout != "" {
 		left = append(left, kv{"attempt timeout:", formatRolloverTime(s.AttemptTimeout)})
 	}
-	// Per-scheme lines:
-	//   - DS UPDATE: rendered when Submitted is set AND the most
-	//     recent push attempt used UPDATE (LastAttemptScheme contains
-	//     "UPDATE"). Timestamp is the dispatcher's send time
-	//     (LastUpdate = last_attempt_started_at; parallel dispatch
-	//     fires both legs from the same instant, so a per-scheme
-	//     send timestamp is artificial).
-	//   - CDS published: rendered when the engine has ever
-	//     successfully published CDS via NOTIFY (sparse
-	//     RolloverCdsPublication row). Survives Trigger-1 cleanup;
-	//     it's a historical fact, not a current-state claim.
-	//   - DS observed: rendered when ObservedKeyIDs is set —
-	//     i.e. the engine has done at least one parent-agent poll
-	//     that returned a usable answer. Reflects the latest poll's
-	//     answer, not the latest confirmed match.
+	// Per-scheme lines: DS UPDATE / CDS published / DS observed.
+	// Each is rendered as (kidPart [+timePart]). The bracket parts
+	// are pre-padded to a common width across the three lines so
+	// timestamps align vertically — easier to scan during incidents.
+	//
+	// State semantics for the bracket part:
+	//   - parent advertises the scheme + engine has pushed → keyid list
+	//   - parent advertises the scheme + no push yet      → "[no UPDATE sent yet]" / "[no CDS RRset published yet]"
+	//   - parent doesn't advertise the scheme             → "Parent has no DSYNC UPDATE/NOTIFY CDS support"
+	//   - parent advertisement state unknown              → render legacy line shape
+	type schemeRow struct {
+		label    string
+		kidPart  string
+		timePart string
+	}
+	var schemeRows []schemeRow
+
 	updateUsed := strings.Contains(s.LastAttemptScheme, "UPDATE")
-	if s.Submitted != nil && updateUsed {
-		v := dashKeyidsBracket(formatKeyidBracketList(s.SubmittedKeyIDs))
+	switch {
+	case s.ParentAdvertisesUpdateKnown && !s.ParentAdvertisesUpdate:
+		schemeRows = append(schemeRows, schemeRow{"DS UPDATE:", "Parent has no DSYNC UPDATE support", ""})
+	case s.Submitted != nil && updateUsed:
+		t := ""
 		if s.LastUpdate != "" {
-			v = fmt.Sprintf("%s sent %s", v, formatRolloverTime(s.LastUpdate))
+			t = "sent " + formatRolloverTime(s.LastUpdate)
 		}
-		left = append(left, kv{"DS UPDATE:", v})
-	} else if s.Submitted != nil {
+		schemeRows = append(schemeRows, schemeRow{
+			"DS UPDATE:",
+			dashKeyidsBracket(formatKeyidBracketList(s.SubmittedKeyIDs)),
+			t,
+		})
+	case s.Submitted != nil:
 		// Fallback: no scheme info recorded but we have a submitted
-		// range from a pre-NOTIFY-scheme rollover. Render the legacy
-		// line shape so existing testbeds don't lose status info.
-		left = append(left, kv{"DS UPDATE:", dashKeyidsBracket(formatKeyidBracketList(s.SubmittedKeyIDs))})
+		// range from a pre-NOTIFY-scheme rollover.
+		schemeRows = append(schemeRows, schemeRow{
+			"DS UPDATE:",
+			dashKeyidsBracket(formatKeyidBracketList(s.SubmittedKeyIDs)),
+			"",
+		})
+	case s.ParentAdvertisesUpdateKnown && s.ParentAdvertisesUpdate:
+		// Parent advertises UPDATE but engine hasn't pushed via this
+		// scheme yet (or hasn't recorded the attempt scheme).
+		schemeRows = append(schemeRows, schemeRow{"DS UPDATE:", "[no UPDATE sent yet]", ""})
 	}
-	if len(s.CdsPublishedKeyIDs) > 0 {
-		v := formatKeyidBracketList(s.CdsPublishedKeyIDs)
+
+	switch {
+	case s.ParentAdvertisesNotifyKnown && !s.ParentAdvertisesNotify:
+		schemeRows = append(schemeRows, schemeRow{"CDS published:", "Parent has no DSYNC NOTIFY CDS support", ""})
+	case len(s.CdsPublishedKeyIDs) > 0:
+		t := ""
 		if s.CdsPublishedAt != "" {
-			v = fmt.Sprintf("%s sent %s", v, formatRolloverTime(s.CdsPublishedAt))
+			t = "sent " + formatRolloverTime(s.CdsPublishedAt)
 		}
-		left = append(left, kv{"CDS published:", v})
+		schemeRows = append(schemeRows, schemeRow{
+			"CDS published:",
+			formatKeyidBracketList(s.CdsPublishedKeyIDs),
+			t,
+		})
+	case s.ParentAdvertisesNotifyKnown && s.ParentAdvertisesNotify:
+		schemeRows = append(schemeRows, schemeRow{"CDS published:", "[no CDS RRset published yet]", ""})
 	}
-	// Use ObservedAt (the timestamp of the latest successful poll) as
-	// the presence bit, NOT len(ObservedKeyIDs). The poll path stores
-	// an empty keyid list when the parent legitimately has no DS
-	// records — falling back to ConfirmedKeyIDs in that case would
-	// hide a real "DS just disappeared" event behind stale confirmed
-	// data and mislead operators reading status during an incident.
-	if s.ObservedAt != "" {
-		v := dashKeyidsBracket(formatKeyidBracketList(s.ObservedKeyIDs))
-		v = fmt.Sprintf("%s observed %s", v, formatRolloverTime(s.ObservedAt))
-		left = append(left, kv{"DS observed:", v})
-	} else if s.Confirmed != nil {
-		// Pre-existing-row fallback: zone has confirmed history but
-		// no last_ds_observed_* columns populated yet (e.g. row from
-		// a daemon that pre-dates the observe-poll persistence work).
-		// Show what we have so the line doesn't disappear post-upgrade.
-		left = append(left, kv{"DS observed:", dashKeyidsBracket(formatKeyidBracketList(s.ConfirmedKeyIDs))})
+
+	// DS observed line. Use ObservedAt (the timestamp of the latest
+	// successful poll) as the presence bit, NOT len(ObservedKeyIDs).
+	// An empty observed keyid list with a recent ObservedAt means the
+	// parent just lost DS — the renderer must not hide that behind
+	// stale confirmed data.
+	switch {
+	case s.ObservedAt != "":
+		schemeRows = append(schemeRows, schemeRow{
+			"DS observed:",
+			dashKeyidsBracket(formatKeyidBracketList(s.ObservedKeyIDs)),
+			"observed " + formatRolloverTime(s.ObservedAt),
+		})
+	case s.Confirmed != nil:
+		// Pre-existing-row fallback (daemon pre-dates the observe-poll
+		// persistence work).
+		schemeRows = append(schemeRows, schemeRow{
+			"DS observed:",
+			dashKeyidsBracket(formatKeyidBracketList(s.ConfirmedKeyIDs)),
+			"",
+		})
+	}
+
+	// Compute max width of the bracket part across the three rows so
+	// timestamps align vertically. Apply only when at least one row
+	// has a timePart — single-column rows don't need padding.
+	maxKidWidth := 0
+	hasAnyTime := false
+	for _, r := range schemeRows {
+		if r.timePart != "" {
+			hasAnyTime = true
+		}
+		if len(r.kidPart) > maxKidWidth {
+			maxKidWidth = len(r.kidPart)
+		}
+	}
+	for _, r := range schemeRows {
+		v := r.kidPart
+		if r.timePart != "" {
+			pad := ""
+			if hasAnyTime && len(r.kidPart) < maxKidWidth {
+				pad = strings.Repeat(" ", maxKidWidth-len(r.kidPart))
+			}
+			v = fmt.Sprintf("%s%s  %s", r.kidPart, pad, r.timePart)
+		}
+		left = append(left, kv{r.label, v})
 	}
 
 	// Right column: timing config + scheduling. Dropped:
@@ -1293,6 +1349,16 @@ Differs from 'reset' (which clears last_rollover_error for one keyid).`,
 	return c
 }
 
+// autoRolloverFlags holds the --ksk / --zsk filter flags so they can
+// be registered as persistent flags on the auto-rollover parent and
+// inherited by all subcommands. Only `status` and `when` use them
+// today; others accept the flags as no-ops so an operator can copy a
+// command line between subcommands without "unknown flag" errors.
+var autoRolloverFlags struct {
+	kskOnly bool
+	zskOnly bool
+}
+
 // newAutoRolloverCmd returns the parent command holding the auto-rollover
 // subcommands. Sits alongside the legacy `rollover` (manual swap via API)
 // rather than replacing it.
@@ -1310,6 +1376,13 @@ func newAutoRolloverCmd(_ string) *cobra.Command {
   unstick   — skip the softfail-delay and probe the parent on the next tick
   validate  — re-parse policy from YAML and report which §4 invariants pass/fail`,
 	}
+	// Persistent --ksk / --zsk filter flags inherited by every
+	// subcommand. Most subcommands ignore them; status and when use
+	// them to suppress KSK or ZSK rendering.
+	c.PersistentFlags().BoolVar(&autoRolloverFlags.kskOnly, "ksk", false,
+		"Render only the KSK section (status / when); ignored by other subcommands")
+	c.PersistentFlags().BoolVar(&autoRolloverFlags.zskOnly, "zsk", false,
+		"Render only the ZSK section (status / when); ignored by other subcommands")
 	c.AddCommand(
 		newAutoRolloverWhenCmd(),
 		newAutoRolloverAsapCmd(),

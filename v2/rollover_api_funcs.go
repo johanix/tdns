@@ -390,6 +390,15 @@ func populateFromZoneRow(out *RolloverStatus, row *RolloverZoneRow) {
 	if row.LastSuccessAt.Valid {
 		out.LastSuccess = row.LastSuccessAt.String
 	}
+
+	if row.ParentAdvertisesUpdate.Valid {
+		out.ParentAdvertisesUpdateKnown = true
+		out.ParentAdvertisesUpdate = row.ParentAdvertisesUpdate.Bool
+	}
+	if row.ParentAdvertisesNotify.Valid {
+		out.ParentAdvertisesNotifyKnown = true
+		out.ParentAdvertisesNotify = row.ParentAdvertisesNotify.Bool
+	}
 }
 
 // populateAttemptTiming computes ExpectedBy and AttemptTimeout from

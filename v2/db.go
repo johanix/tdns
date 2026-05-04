@@ -152,6 +152,14 @@ func dbMigrateSchema(db *sql.DB) {
 		// poll rather than the latest confirmed match.
 		{"RolloverZoneState", "last_ds_observed_keyids", "ALTER TABLE RolloverZoneState ADD COLUMN last_ds_observed_keyids TEXT"},
 		{"RolloverZoneState", "last_ds_observed_at", "ALTER TABLE RolloverZoneState ADD COLUMN last_ds_observed_at TEXT"},
+		// Parent's DSYNC RRset advertisement state, snapshotted on every
+		// pickRolloverSchemes call (i.e. every push attempt). NULL means
+		// "never observed yet"; 0/1 reflect the most recent observation.
+		// Used by the auto-rollover status renderer to distinguish
+		// "parent doesn't advertise this scheme" from "engine hasn't
+		// pushed via this scheme yet".
+		{"RolloverZoneState", "parent_advertises_update", "ALTER TABLE RolloverZoneState ADD COLUMN parent_advertises_update INTEGER"},
+		{"RolloverZoneState", "parent_advertises_notify", "ALTER TABLE RolloverZoneState ADD COLUMN parent_advertises_notify INTEGER"},
 	}
 
 	for _, m := range migrations {

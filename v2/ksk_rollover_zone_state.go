@@ -59,6 +59,39 @@ type RolloverZoneRow struct {
 	// match. LastDsObservedAt is the wallclock of that poll.
 	LastDsObservedKeyids sql.NullString
 	LastDsObservedAt     sql.NullString
+
+	// ParentAdvertisesUpdate / ParentAdvertisesNotify are the most
+	// recent DSYNC RRset observation snapshotted by
+	// pickRolloverSchemes. NULL = never observed; valid 0/1 reflect
+	// whether the parent advertises that scheme. Renderer reads
+	// these to distinguish "parent doesn't advertise this scheme"
+	// from "engine hasn't pushed via this scheme yet".
+	ParentAdvertisesUpdate sql.NullBool
+	ParentAdvertisesNotify sql.NullBool
+}
+
+// setParentDsyncAdvertised snapshots the parent's DSYNC RRset
+// advertisement state observed by the most recent
+// pickRolloverSchemes call. Used by status output to distinguish
+// "parent doesn't advertise this scheme" from "engine hasn't pushed
+// via this scheme yet". Best-effort; a write failure does not
+// affect push semantics.
+func setParentDsyncAdvertised(kdb *KeyDB, zone string, hasUpdate, hasNotify bool) error {
+	if err := EnsureRolloverZoneRow(kdb, zone); err != nil {
+		return err
+	}
+	hu, hn := 0, 0
+	if hasUpdate {
+		hu = 1
+	}
+	if hasNotify {
+		hn = 1
+	}
+	_, err := kdb.DB.Exec(`UPDATE RolloverZoneState
+SET parent_advertises_update = ?,
+    parent_advertises_notify = ?
+WHERE zone = ?`, hu, hn, zone)
+	return err
 }
 
 func EnsureRolloverZoneRow(kdb *KeyDB, zone string) error {
@@ -87,7 +120,8 @@ SELECT zone,
        last_softfail_at, last_softfail_category, last_softfail_detail,
        last_success_at, last_attempt_started_at, last_poll_at,
        last_attempt_scheme, last_published_cds_index_low, last_published_cds_index_high,
-       last_ds_observed_keyids, last_ds_observed_at
+       last_ds_observed_keyids, last_ds_observed_at,
+       parent_advertises_update, parent_advertises_notify
 FROM RolloverZoneState WHERE zone = ?`
 	var r RolloverZoneRow
 	var inProg int
@@ -103,6 +137,7 @@ FROM RolloverZoneState WHERE zone = ?`
 		&r.LastSuccessAt, &r.LastAttemptStartedAt, &r.LastPollAt,
 		&r.LastAttemptScheme, &r.LastPublishedCdsIndexLow, &r.LastPublishedCdsIndexHigh,
 		&r.LastDsObservedKeyids, &r.LastDsObservedAt,
+		&r.ParentAdvertisesUpdate, &r.ParentAdvertisesNotify,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil

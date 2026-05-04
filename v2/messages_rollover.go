@@ -72,6 +72,20 @@ type RolloverStatus struct {
 	// return NOERROR. Empty when no push attempt has succeeded yet.
 	LastAttemptScheme string `json:"lastAttemptScheme,omitempty"`
 
+	// ParentAdvertisesUpdate / ParentAdvertisesNotify reflect the
+	// most recent observation of the parent's DSYNC RRset, captured
+	// by pickRolloverSchemes on every push attempt. Tri-state via
+	// the *Known fields: when *Known is false, the engine has not
+	// yet observed the parent's DSYNC RRset (zone never had a push
+	// attempt); when true, the bool reflects whether that scheme is
+	// advertised. Status renderer uses these to distinguish "parent
+	// doesn't advertise this scheme" from "engine hasn't pushed via
+	// this scheme yet".
+	ParentAdvertisesUpdate      bool `json:"parentAdvertisesUpdate,omitempty"`
+	ParentAdvertisesUpdateKnown bool `json:"parentAdvertisesUpdateKnown,omitempty"`
+	ParentAdvertisesNotify      bool `json:"parentAdvertisesNotify,omitempty"`
+	ParentAdvertisesNotifyKnown bool `json:"parentAdvertisesNotifyKnown,omitempty"`
+
 	// Active attempt timing. Populated when an attempt is in flight
 	// (pending-parent-push, pending-parent-observe) or when a
 	// softfail probe has been sent.

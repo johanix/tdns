@@ -287,7 +287,14 @@ func PushDSRRsetForRollover(ctx context.Context, deps RolloverEngineDeps) (KSKDS
 		return pushDSRRsetViaUpdate(ctx, deps)
 	}
 
-	choices, err := pickRolloverSchemes(ctx, deps.Zone, deps.Imr, deps.Policy)
+	choices, parentUpdate, parentNotify, err := pickRolloverSchemes(ctx, deps.Zone, deps.Imr, deps.Policy)
+	// Persist what we observed in the parent's DSYNC RRset so status
+	// output can distinguish "parent doesn't advertise this scheme"
+	// from "engine hasn't pushed via this scheme yet". Best-effort —
+	// a failed write doesn't change push semantics.
+	if deps.KDB != nil {
+		_ = setParentDsyncAdvertised(deps.KDB, deps.Zone.ZoneName, parentUpdate, parentNotify)
+	}
 	if err != nil {
 		// Trigger 2 cleanup (err branch): if we still own a CDS RRset
 		// and the parent has lost the ability to consume it, unpublish

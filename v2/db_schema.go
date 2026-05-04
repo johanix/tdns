@@ -133,7 +133,9 @@ UNIQUE (zonename, keyid)
 		last_published_cds_index_low   INTEGER,
 		last_published_cds_index_high  INTEGER,
 		last_ds_observed_keyids        TEXT,
-		last_ds_observed_at            TEXT
+		last_ds_observed_at            TEXT,
+		parent_advertises_update       INTEGER,
+		parent_advertises_notify       INTEGER
 	)`,
 
 	// ZoneSigningState holds per-zone signing-loop state. max_observed_ttl

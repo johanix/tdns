@@ -52,14 +52,20 @@ type schemeChoice struct {
 //
 // Filter rule for UPDATE: any UPDATE-scheme DSYNC RR (UPDATE
 // advertisements are RRtype-agnostic by spec).
-func pickRolloverSchemes(ctx context.Context, zd *ZoneData, imr *Imr, pol *DnssecPolicy) ([]schemeChoice, error) {
+//
+// The boolean returns (updateAdvertised, notifyAdvertised) reflect
+// what the parent's DSYNC RRset itself contains, independent of the
+// policy's scheme preference. Dispatcher persists these so status
+// output can distinguish "parent doesn't advertise this scheme" from
+// "engine hasn't pushed via this scheme yet".
+func pickRolloverSchemes(ctx context.Context, zd *ZoneData, imr *Imr, pol *DnssecPolicy) ([]schemeChoice, bool, bool, error) {
 	if zd == nil || imr == nil || pol == nil {
-		return nil, fmt.Errorf("pickRolloverSchemes: nil argument")
+		return nil, false, false, fmt.Errorf("pickRolloverSchemes: nil argument")
 	}
 
 	dsync, err := imr.DsyncDiscovery(ctx, zd.ZoneName, Globals.Verbose)
 	if err != nil {
-		return nil, fmt.Errorf("DsyncDiscovery: %w", err)
+		return nil, false, false, fmt.Errorf("DsyncDiscovery: %w", err)
 	}
 
 	var updateRR, notifyRR *core.DSYNC
@@ -81,10 +87,12 @@ func pickRolloverSchemes(ctx context.Context, zd *ZoneData, imr *Imr, pol *Dnsse
 			}
 		}
 	}
+	updateAdvertised := updateRR != nil
+	notifyAdvertised := notifyRR != nil
 
-	want, derr := decideRolloverSchemes(updateRR != nil, notifyRR != nil, pol.Rollover.DsyncSchemePreference)
+	want, derr := decideRolloverSchemes(updateAdvertised, notifyAdvertised, pol.Rollover.DsyncSchemePreference)
 	if derr != nil {
-		return nil, fmt.Errorf("zone %s: %w", zd.ZoneName, derr)
+		return nil, updateAdvertised, notifyAdvertised, fmt.Errorf("zone %s: %w", zd.ZoneName, derr)
 	}
 
 	out := make([]schemeChoice, 0, len(want))
@@ -122,9 +130,9 @@ func pickRolloverSchemes(ctx context.Context, zd *ZoneData, imr *Imr, pol *Dnsse
 		// hostnames don't resolve (DNS misconfig at the parent), and
 		// the recovery model is the same — wait for the parent to fix
 		// it. Wrap the sentinel so the dispatcher takes that path.
-		return nil, fmt.Errorf("pickRolloverSchemes: no DSYNC targets resolvable for zone %s: %w", zd.ZoneName, errNoUsableScheme)
+		return nil, updateAdvertised, notifyAdvertised, fmt.Errorf("pickRolloverSchemes: no DSYNC targets resolvable for zone %s: %w", zd.ZoneName, errNoUsableScheme)
 	}
-	return out, nil
+	return out, updateAdvertised, notifyAdvertised, nil
 }
 
 // decideRolloverSchemes is the pure decision function: given which
