@@ -195,33 +195,17 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 			// active → retired and standby → active fire as a
 			// single atomic event (AtomicRollover). The actual
 			// fire time is max(active_at + lifetime,
-			// standby_at + standby_time) — same gate as the
-			// rolloverDue check. Without taking standby_time into
-			// account, the renderer shows a "(N ago)" projection
-			// that confuses operators when the natural T_roll has
-			// passed but the engine is still waiting on the pause.
+			// projected_standby_at + standby_time) where
+			// projected_standby_at is the eventual genuine-standby
+			// moment of the next-up key — possibly itself a
+			// projection if that key is currently in published or
+			// ds-published.
 			tRetire := activeAt.Add(lifetime)
-			// Find the next-up genuine standby key (mirrors
-			// pickEarliestStandbySEP — state=standby, oldest
-			// published_at first).
-			for _, kid := range dnskeyInZoneKids {
-				inStandby := false
-				for _, ke := range out.KSKs {
-					if ke.KeyID == kid && ke.State == DnskeyStateStandby {
-						inStandby = true
-						break
-					}
+			if t, ok := projectedNextUpStandbyAt(out, kdb, zone, pol, lifetime, dnskeyTTLKnown, dnskeyTTL, propagationDelay, now, dnskeyInZoneKids, dsPubKids); ok {
+				gated := t.Add(pol.Rollover.StandbyTime)
+				if gated.After(tRetire) {
+					tRetire = gated
 				}
-				if !inStandby {
-					continue
-				}
-				if standbyAt, err := RolloverKeyStandbyAt(kdb, zone, kid); err == nil && standbyAt != nil {
-					gated := standbyAt.Add(pol.Rollover.StandbyTime)
-					if gated.After(tRetire) {
-						tRetire = gated
-					}
-				}
-				break
 			}
 			e.NextTransitionAt = tRetire.UTC().Format(time.RFC3339)
 
@@ -322,6 +306,124 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 			}, out.KSKs...)
 		}
 	}
+}
+
+// projectedNextUpStandbyAt returns the projected moment when the
+// next-up SEP key will reach the genuine standby state. Promotion
+// order:
+//
+//  1. A key already in standby — return its actual standby_at.
+//  2. The oldest-published_at key in published — project to
+//     max(T_published + child_prop + DNSKEY_TTL,
+//     T_ds_observed + parent_prop + DS_TTL).
+//  3. The oldest-ds_observed_at key in ds-published — project to
+//     now + child_prop + DNSKEY_TTL (engine hasn't moved DNSKEY
+//     into zone yet; assume immediate publish for the projection)
+//     unioned with the DS-side gate above.
+//
+// Returns (zero, false) when no candidate exists or the math is
+// indeterminate (missing TTL data).
+//
+// Used by the active→retired projection so that the "next rollover"
+// time agrees with the next-up key's actual readiness path. Without
+// chaining through these states, the active row could project a time
+// earlier than the next-up key can possibly be ready.
+func projectedNextUpStandbyAt(out *RolloverStatus, kdb *KeyDB, zone string, pol *DnssecPolicy, lifetime time.Duration, dnskeyTTLKnown bool, dnskeyTTL time.Duration, propagationDelay time.Duration, now time.Time, dnskeyInZoneKids []uint16, dsPubKids []uint16) (time.Time, bool) {
+	// 1. Already in genuine standby.
+	for _, kid := range dnskeyInZoneKids {
+		state := ""
+		for _, ke := range out.KSKs {
+			if ke.KeyID == kid {
+				state = ke.State
+				break
+			}
+		}
+		if state != DnskeyStateStandby {
+			continue
+		}
+		if t, err := RolloverKeyStandbyAt(kdb, zone, kid); err == nil && t != nil {
+			return *t, true
+		}
+	}
+
+	// 2. Published — project to max(child-side, parent-side) gate.
+	for _, kid := range dnskeyInZoneKids {
+		state := ""
+		for _, ke := range out.KSKs {
+			if ke.KeyID == kid {
+				state = ke.State
+				break
+			}
+		}
+		if state != DnskeyStatePublished {
+			continue
+		}
+		if !dnskeyTTLKnown {
+			return time.Time{}, false
+		}
+		tPub, err := RolloverKeyPublishedAt(kdb, zone, kid)
+		if err != nil || tPub == nil {
+			continue
+		}
+		latest := tPub.Add(propagationDelay + dnskeyTTL)
+		if zd, ok := Zones.Get(zone); ok && zd != nil {
+			if dsTTL, dsTTLKnown := resolveDSTTL(zd, pol); dsTTLKnown {
+				if tDsObs, err := RolloverKeyDsObservedAt(kdb, zone, kid); err == nil && tDsObs != nil {
+					dsReady := tDsObs.Add(pol.Rollover.DsPublishDelay + dsTTL)
+					if dsReady.After(latest) {
+						latest = dsReady
+					}
+				}
+			}
+		}
+		return latest, true
+	}
+
+	// 3. ds-published — project assuming "publish now" plus
+	// propagation. This is the operator-override (asap) timeline,
+	// not the natural cadence. For the active→retired projection
+	// we want the natural cadence, which means: when would the
+	// engine *naturally* publish this key? The engine fires
+	// ds-published→published at T_publish_i = T_roll_i - child_prop
+	// - DNSKEY_TTL where T_roll_i = active_at + slot * lifetime.
+	// Then propagation takes another child_prop + DNSKEY_TTL. Net:
+	// T_standby = T_roll_i. So the natural-cadence published_at
+	// projection collapses to the slot's T_roll.
+	if len(dsPubKids) > 0 && dnskeyTTLKnown {
+		// dsPubKids[0] is the next-up ds-published key (caller
+		// sorted by ds_observed_at). Its slot number includes any
+		// published+standby keys ahead of it — but section 1+2
+		// above already returned for those, so when we get here
+		// dnskeyInZoneKids is empty in steady state. Slot accounting
+		// uses len(dnskeyInZoneKids) as the offset to be safe in
+		// any transient state.
+		activeAt := findActiveAt(out, kdb, zone)
+		if activeAt == nil {
+			return time.Time{}, false
+		}
+		offset := len(dnskeyInZoneKids)
+		slot := offset + 1
+		tRoll := activeAt.Add(time.Duration(slot) * lifetime)
+		return tRoll, true
+	}
+
+	return time.Time{}, false
+}
+
+// findActiveAt is a small helper that returns the active KSK's
+// active_at, or nil when no active key exists.
+func findActiveAt(out *RolloverStatus, kdb *KeyDB, zone string) *time.Time {
+	for _, e := range out.KSKs {
+		if e.State != DnskeyStateActive {
+			continue
+		}
+		t, err := RolloverKeyActiveAt(kdb, zone, e.KeyID)
+		if err == nil && t != nil {
+			return t
+		}
+		break
+	}
+	return nil
 }
 
 // slotFromKid returns the 1-based slot index of kid in ordered.
