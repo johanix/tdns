@@ -167,6 +167,14 @@ func dsSetFromSnapshot(snap *RolloverTargetKeySnapshot, childZone string, digest
 			return nil, 0, 0, false, fmt.Errorf("dsSetFromSnapshot: ToDS failed for keyid %d", row.keyid)
 		}
 		ds.Hdr.Name = childZone
+		// Match ComputeTargetDSSetForZone's TTL fixup: when the parsed
+		// DNSKEY had no TTL (or ToDS produced a TTL=0 header), use the
+		// 3600s legacy default. Without this the snapshot path emitted
+		// TTL=0 DS records while the non-snapshot path emitted 3600,
+		// defeating W5's "same set on both paths" guarantee.
+		if ds.Hdr.Ttl == 0 {
+			ds.Hdr.Ttl = 3600
+		}
 		out = append(out, ds)
 	}
 	return out, snap.IndexLow, snap.IndexHigh, snap.IndexRangeKnown, nil
