@@ -839,18 +839,7 @@ func loadCdsPublication(kdb *KeyDB, zone string) (keyids []uint16, at string, er
 		}
 		return nil, "", scanErr
 	}
-	for _, s := range strings.Split(csv, ",") {
-		s = strings.TrimSpace(s)
-		if s == "" {
-			continue
-		}
-		var v uint16
-		if _, scanErr := fmt.Sscanf(s, "%d", &v); scanErr != nil {
-			continue
-		}
-		keyids = append(keyids, v)
-	}
-	return keyids, atStr, nil
+	return parseDsObservedKeyids(csv), atStr, nil
 }
 
 // setLastDsObserved records the SEP keyids returned by the most
@@ -876,9 +865,11 @@ WHERE zone = ?`, csv, at.UTC().Format(time.RFC3339), zone)
 	return err
 }
 
-// parseDsObservedKeyids parses a CSV-of-keyids stored in
-// RolloverZoneState.last_ds_observed_keyids. Same forgiving parser
-// as loadCdsPublication.
+// parseDsObservedKeyids parses a forgiving CSV-of-keyids — used by
+// both RolloverZoneState.last_ds_observed_keyids and
+// RolloverCdsPublication.keyids (via loadCdsPublication). Empty
+// fields and unparseable tokens are skipped silently; partial parse
+// returns whatever the prefix yielded.
 func parseDsObservedKeyids(csv string) []uint16 {
 	if csv == "" {
 		return nil
