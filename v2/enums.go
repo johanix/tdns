@@ -283,7 +283,13 @@ type ZoneError struct {
 // Derived fields (zd.Error, zd.ErrorType, zd.ErrorMsg) are recomputed
 // after every change. zd.ErrorType reports the highest-priority active
 // category per errorTypeReportOrder.
+//
+// Holds zd.mu for the duration so the registry mutation, derived-field
+// recomputation, and Zones.Set are atomic against any concurrent
+// HasError/ErrorList reader.
 func (zd *ZoneData) SetError(errtype ErrorType, errmsg string, args ...interface{}) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
 	if errtype == NoError {
 		zd.Errors = nil
 	} else {
@@ -292,13 +298,15 @@ func (zd *ZoneData) SetError(errtype ErrorType, errmsg string, args ...interface
 		}
 		zd.Errors[errtype] = ZoneError{Type: errtype, Msg: fmt.Sprintf(errmsg, args...)}
 	}
-	zd.recomputeDerivedErrorFields()
+	zd.recomputeDerivedErrorFieldsLocked()
 	Zones.Set(zd.ZoneName, zd)
 }
 
 // ClearError removes one error category. ClearError(NoError) clears
 // every error.
 func (zd *ZoneData) ClearError(errtype ErrorType) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
 	if errtype == NoError {
 		zd.Errors = nil
 	} else if zd.Errors != nil {
@@ -307,12 +315,14 @@ func (zd *ZoneData) ClearError(errtype ErrorType) {
 			zd.Errors = nil
 		}
 	}
-	zd.recomputeDerivedErrorFields()
+	zd.recomputeDerivedErrorFieldsLocked()
 	Zones.Set(zd.ZoneName, zd)
 }
 
 // HasError returns true if the zone has an active error of the given type.
 func (zd *ZoneData) HasError(errtype ErrorType) bool {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
 	if zd.Errors == nil {
 		return false
 	}
@@ -321,8 +331,11 @@ func (zd *ZoneData) HasError(errtype ErrorType) bool {
 }
 
 // ErrorList returns a snapshot of every active error on the zone, in
-// errorTypeReportOrder. Returns nil if no errors are set.
+// errorTypeReportOrder. Returns nil if no errors are set. The returned
+// slice is a fresh copy — safe to retain after the call returns.
 func (zd *ZoneData) ErrorList() []ZoneError {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
 	if len(zd.Errors) == 0 {
 		return nil
 	}
@@ -335,7 +348,9 @@ func (zd *ZoneData) ErrorList() []ZoneError {
 	return out
 }
 
-func (zd *ZoneData) recomputeDerivedErrorFields() {
+// recomputeDerivedErrorFieldsLocked refreshes zd.Error / zd.ErrorType /
+// zd.ErrorMsg from zd.Errors. Caller must hold zd.mu.
+func (zd *ZoneData) recomputeDerivedErrorFieldsLocked() {
 	if len(zd.Errors) == 0 {
 		zd.Error = false
 		zd.ErrorType = NoError
