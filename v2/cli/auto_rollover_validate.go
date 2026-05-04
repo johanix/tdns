@@ -152,7 +152,10 @@ func loadPolicyFromYAMLFile(path, policyName string) (*tdns.DnssecPolicy, error)
 			policyName, path, strings.Join(known, ", "))
 	}
 	pc.Name = policyName
-	out, err := tdns.ParseDnssecPolicyConf(policyName, &pc)
+	// Quiet variant suppresses the daemon-style logger calls inside
+	// FinishDnssecPolicy; structured warnings are rendered by the
+	// validate report via tdns.CollectDnssecPolicyCouplingWarnings.
+	out, err := tdns.ParseDnssecPolicyConfQuiet(policyName, &pc)
 	if err != nil {
 		return nil, fmt.Errorf("parse policy: %w", err)
 	}
@@ -178,9 +181,23 @@ func renderValidateReport(cfgPath, zone, policyName string, pol *tdns.DnssecPoli
 		pol.Rollover.ParentCdsPollEstimate)
 	fmt.Printf("DS TTL for validation: %s\n", dsTTLSrc)
 	fmt.Println()
-	fmt.Println("Cache-flush invariants:")
 
 	var failed, warned int
+
+	// Rule-of-thumb coupling concerns (rapid-rollover patterns,
+	// sig-validity vs lifetime, clamping-margin floor). These aren't
+	// §4 cache-flush invariants but warrant operator attention.
+	couplingWarnings := tdns.CollectDnssecPolicyCouplingWarnings(pol)
+	if len(couplingWarnings) > 0 {
+		fmt.Println("Policy coupling warnings:")
+		for _, w := range couplingWarnings {
+			fmt.Printf("  WARN  %s\n", w)
+			warned++
+		}
+		fmt.Println()
+	}
+
+	fmt.Println("Cache-flush invariants:")
 
 	// E5
 	r := tdns.CheckE5(pol)

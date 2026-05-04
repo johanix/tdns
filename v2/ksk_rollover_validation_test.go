@@ -37,6 +37,36 @@ func TestCheckE5(t *testing.T) {
 			wantEmpty: true,
 		},
 		{
+			// Rapid-rollover pattern: long configured TTL clamped low.
+			// E5 must use the SERVED TTL = min(2h, 5m) = 5m, not 2h.
+			name: "long ttls.dnskey clamped by max_served -> uses served TTL -> pass",
+			pol: func() *DnssecPolicy {
+				p := &DnssecPolicy{}
+				p.Clamping.Enabled = true
+				p.Clamping.Margin = 5 * time.Minute
+				p.TTLS.DNSKEY = 7200        // 2h configured
+				p.TTLS.MaxServed = 300      // 5m clamp
+				p.KSK.SigValidity = 20 * 60 // 20m
+				return p
+			}(),
+			wantEmpty: true,
+		},
+		{
+			// Same shape but with a low margin: should fail because
+			// served TTL = 5m and margin = 1m < 5m.
+			name: "rapid-rollover pattern, margin below served TTL -> violation",
+			pol: func() *DnssecPolicy {
+				p := &DnssecPolicy{}
+				p.Clamping.Enabled = true
+				p.Clamping.Margin = 1 * time.Minute
+				p.TTLS.DNSKEY = 7200
+				p.TTLS.MaxServed = 300
+				p.KSK.SigValidity = 20 * 60
+				return p
+			}(),
+			wantEmpty: false,
+		},
+		{
 			name: "clamping enabled, margin below floor -> violation",
 			pol: func() *DnssecPolicy {
 				p := &DnssecPolicy{}

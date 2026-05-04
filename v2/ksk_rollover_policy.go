@@ -394,30 +394,49 @@ func parseParentAgent(policyName, raw string) (string, error) {
 	return a, nil
 }
 
-func warnDnssecPolicyCoupling(policyName string, out *DnssecPolicy) {
+// CollectDnssecPolicyCouplingWarnings returns rule-of-thumb concerns
+// about a parsed policy that aren't §4 cache-flush invariants but
+// still merit operator attention. Pure function — no side effects.
+// Used by the `auto-rollover validate` CLI to fold them into its
+// structured report alongside E5/E10/E11 results. The daemon path
+// calls warnDnssecPolicyCoupling (logger wrapper) at config load.
+func CollectDnssecPolicyCouplingWarnings(out *DnssecPolicy) []string {
+	var warnings []string
 	kskL := time.Duration(out.KSK.Lifetime) * time.Second
 	sigV := time.Duration(out.KSK.SigValidity) * time.Second
 	if kskL > 0 && out.TTLS.DNSKEY > 0 {
 		maxTTL := time.Duration(out.TTLS.DNSKEY) * time.Second
 		if maxTTL > kskL/4 {
-			lgConfig.Warn("dnssec policy: ttls.dnskey exceeds ksk.lifetime/4 (rapid rollover coupling)",
-				"policy", policyName, "dnskey_ttl", maxTTL.String(), "ksk_lifetime", kskL.String())
+			warnings = append(warnings,
+				fmt.Sprintf("ttls.dnskey (%s) exceeds ksk.lifetime/4 (%s) — rapid rollover coupling",
+					maxTTL, kskL/4))
 		}
 	}
 	if kskL > 0 && sigV > kskL {
-		lgConfig.Warn("dnssec policy: ksk.sig-validity exceeds ksk.lifetime",
-			"policy", policyName, "sig_validity", sigV.String(), "ksk_lifetime", kskL.String())
+		warnings = append(warnings,
+			fmt.Sprintf("ksk.sig-validity (%s) exceeds ksk.lifetime (%s)", sigV, kskL))
 	}
 	if out.Clamping.Enabled && out.Clamping.Margin > 0 && out.Clamping.Margin < 60*time.Second {
-		lgConfig.Warn("dnssec policy: clamping.margin below 60s (spec guidance for skew)",
-			"policy", policyName, "margin", out.Clamping.Margin.String())
+		warnings = append(warnings,
+			fmt.Sprintf("clamping.margin (%s) below 60s spec guidance for clock skew",
+				out.Clamping.Margin))
+	}
+	return warnings
+}
+
+func warnDnssecPolicyCoupling(policyName string, out *DnssecPolicy) {
+	if out.suppressLoadWarnings {
+		return
+	}
+	for _, w := range CollectDnssecPolicyCouplingWarnings(out) {
+		lgConfig.Warn("dnssec policy: "+w, "policy", policyName)
 	}
 
 	// W6: when force-notify is set, the rollover engine never falls back
 	// to DNS UPDATE — the parent's CDS-fetch latency directly bounds
 	// T_DS_pub_n. Surface the operator's parent-cds-poll-estimate at
 	// load time so they can spot a surprising default before the first
-	// rollover fires.
+	// rollover fires. INFO not WARN; not folded into the validate report.
 	if out.Rollover.DsyncSchemePreference == DsyncSchemePreferenceForceNotify {
 		lgConfig.Info("dnssec policy: force-notify selected; parent-cds-poll-estimate folded into E10 lead-time budget",
 			"policy", policyName,
@@ -435,7 +454,26 @@ type dnssecPoliciesYAML struct {
 // runtime DnssecPolicy. Same logic as ValidateDnssecPoliciesFromFile's
 // per-policy block; exposed for the `auto-rollover validate` CLI which
 // needs to re-parse one policy from an offline YAML.
+//
+// Side-effect note: this calls FinishDnssecPolicy → warnDnssecPolicyCoupling
+// which logs via lgConfig. Callers that want to suppress those logs
+// (e.g. the validate CLI) should use ParseDnssecPolicyConfQuiet instead.
 func ParseDnssecPolicyConf(name string, dp *DnssecPolicyConf) (*DnssecPolicy, error) {
+	return parseDnssecPolicyConfImpl(name, dp, false)
+}
+
+// ParseDnssecPolicyConfQuiet is the silent counterpart of
+// ParseDnssecPolicyConf: it skips the warnDnssecPolicyCoupling
+// log calls so a CLI tool can re-parse the daemon's policy without
+// the user seeing logger lines that the daemon already emitted at
+// startup. The caller can call CollectDnssecPolicyCouplingWarnings
+// on the returned policy to render the same warnings as structured
+// output.
+func ParseDnssecPolicyConfQuiet(name string, dp *DnssecPolicyConf) (*DnssecPolicy, error) {
+	return parseDnssecPolicyConfImpl(name, dp, true)
+}
+
+func parseDnssecPolicyConfImpl(name string, dp *DnssecPolicyConf, quiet bool) (*DnssecPolicy, error) {
 	dp.Name = name
 	alg := dns.StringToAlgorithm[strings.TrimSpace(strings.ToUpper(dp.Algorithm))]
 	if alg == 0 {
@@ -447,6 +485,14 @@ func ParseDnssecPolicyConf(name string, dp *DnssecPolicyConf) (*DnssecPolicy, er
 		KSK:       GenKeyLifetime(dp.KSK.Lifetime, dp.KSK.SigValidity),
 		ZSK:       GenKeyLifetime(dp.ZSK.Lifetime, dp.ZSK.SigValidity),
 		CSK:       GenKeyLifetime(dp.CSK.Lifetime, dp.CSK.SigValidity),
+	}
+	if quiet {
+		// Mark the policy so FinishDnssecPolicy / warnDnssecPolicyCoupling
+		// suppress their lgConfig.Warn/Info calls for this parse.
+		// CLI tools (validate) read the same warnings via
+		// CollectDnssecPolicyCouplingWarnings and render them as
+		// structured output instead of logger noise.
+		out.suppressLoadWarnings = true
 	}
 	if err := FinishDnssecPolicy(name, dp, out); err != nil {
 		return nil, err

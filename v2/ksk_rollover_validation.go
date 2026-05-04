@@ -104,14 +104,21 @@ func CheckE5(pol *DnssecPolicy) InvariantResult                       { return c
 func CheckE10(pol *DnssecPolicy, dsTTL time.Duration) InvariantResult { return checkE10(pol, dsTTL) }
 func CheckE11(pol *DnssecPolicy, dsTTL time.Duration) InvariantResult { return checkE11(pol, dsTTL) }
 
-// checkE5: retirement_period ≥ min(DNSKEY_TTL, KSK.SigValidity).
+// checkE5: retirement_period ≥ min(DNSKEY_TTL, KSK.SigValidity), per
+// spec §4.5.1. DNSKEY_TTL here is the **served** TTL (E13 form,
+// min(ttls.dnskey, ttls.max_served)), NOT the operator-configured
+// ttls.dnskey alone — validators can only cache DNSKEY for as long
+// as the served TTL says. Sizing E5 against the unclamped
+// ttls.dnskey would punish operators who use a high configured TTL
+// with a clamping-driven low served TTL (the rapid-rollover pattern:
+// long RRSIG validity for weekend safety + short served TTL for
+// rollover cadence).
 //
 // retirement_period is implemented as effective_margin =
-// max(clamping.margin, max_observed_ttl) — see effectiveMarginForZone.
-// The lower bound at config-load time is clamping.margin (when
-// clamping is enabled); max_observed_ttl can only push it higher. So
-// E5 is satisfied iff clamping.margin >= min(DNSKEY_TTL, sig-validity)
-// when clamping is enabled.
+// max(clamping.margin, max_observed_ttl). The lower bound at
+// config-load time is clamping.margin; max_observed_ttl can only
+// push it higher. So E5 is satisfied iff clamping.margin ≥
+// min(servedDnskeyTTL, sig-validity) when clamping is enabled.
 //
 // When clamping is disabled, retirement_period defaults to the
 // observed TTL alone, which is post-clamp — implicit E5 satisfaction
@@ -121,7 +128,7 @@ func checkE5(pol *DnssecPolicy) InvariantResult {
 	if !pol.Clamping.Enabled || pol.Clamping.Margin <= 0 {
 		return InvariantResult{}
 	}
-	dnskeyTTL := time.Duration(pol.TTLS.DNSKEY) * time.Second
+	dnskeyTTL := configuredServedDnskeyTTL(pol)
 	sigVal := time.Duration(pol.KSK.SigValidity) * time.Second
 	if dnskeyTTL == 0 && sigVal == 0 {
 		return InvariantResult{}
@@ -134,12 +141,42 @@ func checkE5(pol *DnssecPolicy) InvariantResult {
 		return InvariantResult{}
 	}
 	return InvariantResult{
-		Message: fmt.Sprintf("E5: clamping.margin (%s) < min(ttls.dnskey, ksk.sig-validity) (%s); "+
+		Message: fmt.Sprintf("E5: clamping.margin (%s) < min(served DNSKEY_TTL, ksk.sig-validity) (%s); "+
 			"retirement period too short to flush DNSKEY/RRSIG caches before next rollover",
 			pol.Clamping.Margin, floor),
-		Suggestion: fmt.Sprintf("Raise clamping.margin to ≥ %s, OR lower max(ttls.dnskey, ksk.sig-validity) to ≤ %s.",
+		Suggestion: fmt.Sprintf("Raise clamping.margin to ≥ %s, OR lower min(ttls.dnskey, ttls.max_served) and/or ksk.sig-validity so their min is ≤ %s.",
 			floor, pol.Clamping.Margin),
 	}
+}
+
+// configuredServedDnskeyTTL returns the served DNSKEY TTL derivable
+// from policy alone (no runtime keystore observation). Used by E5
+// at config-load time. Resolution order matches the wire-shape spec
+// in §4.8 / E13:
+//
+//   - both ttls.dnskey and ttls.max_served set → min of the two
+//   - only one set → that one
+//   - neither set → 0 (caller treats as "skip")
+//
+// effectiveServedDnskeyTTL (in ksk_rollover_automated.go) is the
+// runtime variant: same resolution + LoadZoneSigningMaxTTL fallback.
+// They share intent; we keep two helpers because the runtime caller
+// has a kdb and zone, the config-time caller doesn't.
+func configuredServedDnskeyTTL(pol *DnssecPolicy) time.Duration {
+	dnskey := pol.TTLS.DNSKEY
+	maxServed := pol.TTLS.MaxServed
+	switch {
+	case dnskey > 0 && maxServed > 0:
+		if dnskey < maxServed {
+			return time.Duration(dnskey) * time.Second
+		}
+		return time.Duration(maxServed) * time.Second
+	case dnskey > 0:
+		return time.Duration(dnskey) * time.Second
+	case maxServed > 0:
+		return time.Duration(maxServed) * time.Second
+	}
+	return 0
 }
 
 // checkE10: (N − 1) × KSK.Lifetime ≥ retirement_period + parent_prop + DS_TTL.

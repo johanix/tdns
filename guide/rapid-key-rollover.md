@@ -385,8 +385,15 @@ sizing constraint for the `retirement_period`:
 retirement_period  ≥  min(DNSKEY_TTL, KSK.SigValidity)       (E5)
 ```
 
-where `KSK.SigValidity` is the RRSIG validity period for KSK
-signatures over the DNSKEY RRset. Why this bound:
+where `DNSKEY_TTL` is the **served** DNSKEY TTL per §4.8 / E13
+(`min(ttls.dnskey, ttls.max_served)`), not the operator-configured
+`ttls.dnskey` alone. This matters operationally: it lets operators
+run long RRSIG validities (7–10 days for weekend safety) alongside
+short served TTLs (1–2h, clamped lower near rollover) for rapid
+rollover cadence. Sized against the served TTL, E5 reflects what
+validators can actually cache.
+
+Why this bound:
 
 A validator that cached the DNSKEY response just before
 `T_roll_n` holds a response whose effective lifetime in cache is
@@ -400,20 +407,16 @@ by KSK_{n−1}) to have flushed from validator caches by
 `T_remove_{n−1}`, the retirement period must be at least this
 duration.
 
-For the testbed: `min(DNSKEY_TTL, KSK.SigValidity) =
-min(5m, 20m) = 5m`. The configured `effective_margin =
-max(clamping.margin, max_observed_TTL) = max(5m, 5m) = 5m`.
-The constraint is met exactly.
+For the testbed: served `DNSKEY_TTL = min(2h, 5m) = 5m`,
+`KSK.SigValidity = 20m`, so `min(DNSKEY_TTL, KSK.SigValidity) =
+5m`. With `effective_margin = max(clamping.margin,
+max_observed_TTL) = max(5m, 5m) = 5m`, the constraint is met
+exactly.
 
-The current engine's `effective_margin` formula generally
-satisfies this constraint because `max_observed_TTL ≥
-DNSKEY_TTL ≥ min(DNSKEY_TTL, KSK.SigValidity)`. But the
-constraint should be made an explicit policy-validation check
-at config-load time: if an operator sets `KSK.SigValidity <
-clamping.margin` AND `KSK.SigValidity < max_observed_TTL`, the
-sizing rule still holds, but for the wrong reason. The
-operator-facing rule is best stated as the explicit inequality
-above.
+E5 is checked at policy-load against `clamping.margin` — the
+operator-controllable lower bound on `effective_margin`. The
+runtime `max_observed_TTL` can only push it higher, so passing
+the load-time check is sufficient.
 
 **(c) Pipeline maintenance.** The engine continuously generates
 new KSKs and submits their DS to the parent so that future slots

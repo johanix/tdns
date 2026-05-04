@@ -350,6 +350,12 @@ type DnssecPolicy struct {
 	Rollover RolloverPolicy
 	TTLS     DnssecPolicyTTLS
 	Clamping ClampingPolicy
+
+	// suppressLoadWarnings is set by ParseDnssecPolicyConfQuiet so
+	// CLI tools that re-parse a daemon's policy don't duplicate the
+	// daemon's startup log lines. Internal flag — not serialized,
+	// not part of the policy semantics.
+	suppressLoadWarnings bool
 }
 
 // DnssecPolicyTTLS holds steady-state TTL hints from policy (seconds). Zero means unset.
