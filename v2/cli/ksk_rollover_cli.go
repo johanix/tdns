@@ -741,7 +741,12 @@ func fetchRolloverStatusOffline(z string) *tdns.RolloverStatus {
 	// surfacing it requires daemon-runtime context, and the operator
 	// running offline-mode is doing postmortem analysis where the
 	// warning would be noise.
-	s, err := tdns.ComputeRolloverStatus(kdb, z, pol, 0, time.Now())
+	// Offline mode: no daemon-runtime kasp config in scope. Pass
+	// 0 for both check_interval and propagation_delay; the
+	// renderer treats unknown propagation_delay as "skip the
+	// ds-published timing math" which is the right thing for
+	// postmortem use anyway.
+	s, err := tdns.ComputeRolloverStatus(kdb, z, pol, 0, 0, time.Now())
 	if err != nil {
 		cliFatalf("error: %v", err)
 	}
@@ -826,6 +831,13 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 			printRolloverKeyTable(s.ZSKs, verbose, false)
 		}
 	}
+
+	// Errors section: aggregate per-key errors across both tables
+	// into a single tail-end block. The per-row "last_error" column
+	// was wasted space (almost always empty, and when set it's set
+	// for one or two keys); a dedicated section reads better and
+	// gives the message room to breathe.
+	printRolloverKeyErrors(s, showKSK, showZSK, verbose)
 
 	if verbose && s.Policy != nil && showKSK {
 		fmt.Println()
@@ -1081,6 +1093,45 @@ func printStateNotes(s *tdns.RolloverStatus, verbose bool) {
 	}
 }
 
+// printRolloverKeyErrors emits a tail-end "Errors:" section listing
+// any per-key error messages, one per line. Skipped entirely when
+// no key has an error. Replaces the per-row "last_error" column,
+// which was almost always empty and column-truncated when set.
+func printRolloverKeyErrors(s *tdns.RolloverStatus, showKSK, showZSK, verbose bool) {
+	type entry struct {
+		section string
+		keyid   uint16
+		msg     string
+	}
+	var rows []entry
+	if showKSK {
+		for _, k := range s.KSKs {
+			if k.LastRolloverErr != "" {
+				rows = append(rows, entry{"KSK", k.KeyID, k.LastRolloverErr})
+			}
+		}
+	}
+	if showZSK {
+		for _, k := range s.ZSKs {
+			if k.LastRolloverErr != "" {
+				rows = append(rows, entry{"ZSK", k.KeyID, k.LastRolloverErr})
+			}
+		}
+	}
+	if len(rows) == 0 {
+		return
+	}
+	fmt.Println()
+	fmt.Println("  Errors:")
+	for _, r := range rows {
+		msg := r.msg
+		if !verbose {
+			msg = truncate(msg, 100, false)
+		}
+		fmt.Printf("    %s keyid %d: %s\n", r.section, r.keyid, msg)
+	}
+}
+
 // printRolloverKeyTable prints KSK or ZSK rows via columnize. Header
 // row + separator row + data rows; columnize handles column-width
 // alignment so we don't have to maintain padding-format strings.
@@ -1090,7 +1141,7 @@ func printRolloverKeyTable(keys []tdns.RolloverKeyEntry, verbose bool, kskTable 
 	}
 	var rows []string
 	if kskTable {
-		rows = append(rows, "active_seq|keyid|state|published|state_since|last_error")
+		rows = append(rows, "active_seq|keyid|state|published|state_since|next_transition|expected_at")
 		for _, k := range keys {
 			seqStr := "-"
 			if k.ActiveSeq != nil {
@@ -1102,16 +1153,25 @@ func printRolloverKeyTable(keys []tdns.RolloverKeyEntry, verbose bool, kskTable 
 					sinceStr = formatTimeWithDelta(t)
 				}
 			}
-			errCol := ""
-			if k.LastRolloverErr != "" {
-				errCol = truncate(k.LastRolloverErr, 40, verbose)
-			}
 			pub := k.Published
 			if pub == "" {
 				pub = "?"
 			}
-			rows = append(rows, fmt.Sprintf("%s|%d|%s|%s|%s|%s",
-				seqStr, k.KeyID, k.State, pub, sinceStr, errCol))
+			nextCol := k.NextTransition
+			if nextCol == "" {
+				nextCol = "-"
+			}
+			expectedCol := "-"
+			if k.NextTransitionAt != "" {
+				if t, err := time.Parse(time.RFC3339, k.NextTransitionAt); err == nil {
+					expectedCol = formatTimeWithDelta(t)
+				}
+			} else if k.NextTransitionNote != "" {
+				// No concrete time, but engine has a qualifier.
+				expectedCol = k.NextTransitionNote
+			}
+			rows = append(rows, fmt.Sprintf("%s|%d|%s|%s|%s|%s|%s",
+				seqStr, k.KeyID, k.State, pub, sinceStr, nextCol, expectedCol))
 		}
 	} else {
 		rows = append(rows, "keyid|state|published_at")

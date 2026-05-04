@@ -55,8 +55,19 @@ func APIRolloverStatus(conf *Config) func(w http.ResponseWriter, r *http.Request
 		if checkInterval == 0 {
 			checkInterval = time.Minute // defaultCheckInterval
 		}
+		// kasp.propagation_delay drives the ds-published → standby
+		// timing computed in populateNextTransitions.
+		var propagationDelay time.Duration
+		if conf.Kasp.PropagationDelay != "" {
+			if d, err := time.ParseDuration(conf.Kasp.PropagationDelay); err == nil && d > 0 {
+				propagationDelay = d
+			}
+		}
+		if propagationDelay == 0 {
+			propagationDelay = time.Hour // defaultPropagationDelay
+		}
 
-		out, err := ComputeRolloverStatus(kdb, zone, pol, checkInterval, time.Now())
+		out, err := ComputeRolloverStatus(kdb, zone, pol, checkInterval, propagationDelay, time.Now())
 		if err != nil {
 			lgApi.Warn("rollover/status: ComputeRolloverStatus failed", "zone", zone, "err", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)

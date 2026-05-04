@@ -160,6 +160,22 @@ type RolloverKeyEntry struct {
 	Published       string `json:"published,omitempty"`
 	StateSince      string `json:"stateSince,omitempty"` // RFC3339
 	LastRolloverErr string `json:"lastRolloverError,omitempty"`
+
+	// NextTransition / NextTransitionAt describe what the engine
+	// expects to do with this key next, with a best-effort wallclock.
+	// Empty for terminal states (removed) and for transitions that
+	// can't be timed yet (e.g. created → ds-published, which waits
+	// on parent observation). NextTransitionAt is RFC3339 when set;
+	// when unset, NextTransitionNote may carry a short qualifier
+	// like "after parent observes DS".
+	//
+	// These fields reflect the engine's current intent, not a
+	// guaranteed schedule — an operator-issued asap, a parent
+	// outage, or a policy reload can shift them. The renderer's job
+	// is to show the engine's plan as of "now."
+	NextTransition     string `json:"nextTransition,omitempty"`
+	NextTransitionAt   string `json:"nextTransitionAt,omitempty"`
+	NextTransitionNote string `json:"nextTransitionNote,omitempty"`
 }
 
 // PolicySummary is the slice of DnssecPolicy operators want to see

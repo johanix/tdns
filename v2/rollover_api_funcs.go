@@ -27,7 +27,7 @@ import (
 // it on every status query catches the case where the operator
 // edited the YAML but didn't restart, or where rollover-driven
 // behaviour has drifted from initial configuration.
-func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInterval time.Duration, now time.Time) (*RolloverStatus, error) {
+func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInterval, propagationDelay time.Duration, now time.Time) (*RolloverStatus, error) {
 	zone = dns.Fqdn(strings.TrimSpace(zone))
 	if zone == "." || zone == "" {
 		return nil, fmt.Errorf("ComputeRolloverStatus: empty zone")
@@ -92,6 +92,7 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInte
 	applyInFlightPublicationLabels(out)
 	populateRolloverWarnings(out, pol, checkInterval)
 	populateRolloverPolicyErrors(out, zone)
+	populateNextTransitions(out, kdb, zone, pol, propagationDelay, now)
 
 	return out, nil
 }
