@@ -1506,7 +1506,9 @@ func rolloverDue(kdb *KeyDB, zone string, pol *DnssecPolicy, row *RolloverZoneRo
 	}
 
 	// Manual-ASAP: take precedence so operator action is honored even when
-	// scheduled would also fire.
+	// scheduled would also fire. Bypasses the standby_time pause: an
+	// operator running asap is overriding the natural-cadence rollover,
+	// and the pause is part of that natural cadence.
 	if row.ManualRolloverEarliest.Valid && strings.TrimSpace(row.ManualRolloverEarliest.String) != "" {
 		if t, e := time.Parse(time.RFC3339, strings.TrimSpace(row.ManualRolloverEarliest.String)); e == nil {
 			if !now.Before(t) {
@@ -1543,10 +1545,35 @@ func rolloverDue(kdb *KeyDB, zone string, pol *DnssecPolicy, row *RolloverZoneRo
 	if at == nil {
 		return false, false, nil
 	}
-	if now.Sub(*at) >= lifetime {
-		return true, false, nil
+	if now.Sub(*at) < lifetime {
+		return false, false, nil
 	}
-	return false, false, nil
+	// Natural cadence has elapsed. Gate on the next-up standby having
+	// been in genuine-standby for at least standby_time.
+	//
+	// pickEarliestStandbySEP picks the next-up standby by oldest
+	// published_at (= AtomicRollover's selection). Read its
+	// standby_at — set by transitionPublishedToStandbyForZone — and
+	// require standby_at + standby_time ≤ now.
+	//
+	// Defensive: a standby key with NULL standby_at is one that hasn't
+	// been through the new transition yet (e.g. legacy data not yet
+	// migrated). In that case, fall back to the lifetime check alone
+	// — same behavior as before C19.
+	standbyKid, err := pickEarliestStandbySEP(kdb, zone)
+	if err != nil {
+		return false, false, fmt.Errorf("pick standby: %w", err)
+	}
+	if standbyKid != 0 {
+		standbyAt, err := RolloverKeyStandbyAt(kdb, zone, standbyKid)
+		if err == nil && standbyAt != nil {
+			pause := pol.Rollover.StandbyTime
+			if pause > 0 && now.Before(standbyAt.Add(pause)) {
+				return false, false, nil
+			}
+		}
+	}
+	return true, false, nil
 }
 
 // EffectiveMarginForZone is the exported alias used by the auto-rollover

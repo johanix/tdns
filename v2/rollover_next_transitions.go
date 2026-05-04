@@ -164,7 +164,21 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 			if slot == 0 {
 				break
 			}
+			// For slot 1 (the next-up standby), the rollover fires at
+			// max(active_at + lifetime, standby_at + standby_time) —
+			// the rolloverDue gate. For deeper slots, project natural
+			// cadence (active_at + slot*lifetime) and mark as
+			// estimated; the standby_time pause for those keys
+			// applies to a *future* rollover that hasn't started.
 			tActivate := activeAt.Add(time.Duration(slot) * lifetime)
+			if slot == 1 {
+				if standbyAt, err := RolloverKeyStandbyAt(kdb, zone, e.KeyID); err == nil && standbyAt != nil {
+					gated := standbyAt.Add(pol.Rollover.StandbyTime)
+					if gated.After(tActivate) {
+						tActivate = gated
+					}
+				}
+			}
 			e.NextTransitionAt = tActivate.UTC().Format(time.RFC3339)
 			if slot > 1 {
 				// Projected: depends on the next-up standby promoting

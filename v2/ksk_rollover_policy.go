@@ -51,6 +51,10 @@ type RolloverPolicy struct {
 	// fetch latency. Used by E10 when NOTIFY is the sole viable scheme.
 	// Defaults to 1m. See DnssecPolicyRolloverConf.ParentCdsPollEstimate.
 	ParentCdsPollEstimate time.Duration
+
+	// StandbyTime is the pause between standby and active states.
+	// Defaults to 1m. See DnssecPolicyRolloverConf.StandbyTime.
+	StandbyTime time.Duration
 }
 
 // DSYNC scheme preference values for RolloverPolicy.DsyncSchemePreference.
@@ -78,6 +82,7 @@ const (
 	defaultMaxAttemptsBeforeBackoff = 5
 	defaultSoftfailDelayMinimum     = time.Hour
 	defaultParentCdsPollEstimate    = time.Minute
+	defaultStandbyTime              = time.Minute
 )
 
 // derivedPollMax returns clamp(dsDelay/10, 30s, 5m). Used as the
@@ -327,6 +332,9 @@ func fillRolloverDurations(policyName string, conf *DnssecPolicyConf, out *Dnsse
 		return fmt.Errorf("dnssec policy %q: %w", policyName, err)
 	}
 	if out.Rollover.ParentCdsPollEstimate, err = parseDur("parent-cds-poll-estimate", conf.Rollover.ParentCdsPollEstimate, defaultParentCdsPollEstimate); err != nil {
+		return fmt.Errorf("dnssec policy %q: %w", policyName, err)
+	}
+	if out.Rollover.StandbyTime, err = parseDur("standby-time", conf.Rollover.StandbyTime, defaultStandbyTime); err != nil {
 		return fmt.Errorf("dnssec policy %q: %w", policyName, err)
 	}
 	out.Rollover.MaxAttemptsBeforeBackoff = conf.Rollover.MaxAttemptsBeforeBackoff

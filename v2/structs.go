@@ -286,6 +286,20 @@ type DnssecPolicyRolloverConf struct {
 	// near-instant; parents that batch CDS polls should set a larger
 	// value here.
 	ParentCdsPollEstimate string `yaml:"parent-cds-poll-estimate" mapstructure:"parent-cds-poll-estimate"`
+
+	// StandbyTime is the operator-configured pause between when a key
+	// reaches the genuine "standby" state (propagation complete, ready
+	// for AtomicRollover) and when the engine actually fires the
+	// rollover. Default 1m. Production deployments may want 15m or
+	// longer for operator observability — gives the operator a window
+	// to abort the natural-cadence rollover if something looks wrong
+	// post-publish.
+	//
+	// auto-rollover asap explicitly bypasses this pause: an operator
+	// running asap is overriding the natural cadence, and the pause
+	// is part of that natural cadence. asap fires AtomicRollover at
+	// max(standby_at, now), not at standby_at + standby_time.
+	StandbyTime string `yaml:"standby-time" mapstructure:"standby-time"`
 }
 
 // DnssecPolicyTtlsConf is the YAML `ttls:` subtree under a DNSSEC policy.
