@@ -856,17 +856,21 @@ func printStateTable(s *tdns.RolloverStatus) {
 		}
 		left = append(left, kv{"CDS published:", v})
 	}
-	if len(s.ObservedKeyIDs) > 0 {
-		v := formatKeyidBracketList(s.ObservedKeyIDs)
-		if s.ObservedAt != "" {
-			v = fmt.Sprintf("%s observed %s", v, formatRolloverTime(s.ObservedAt))
-		}
+	// Use ObservedAt (the timestamp of the latest successful poll) as
+	// the presence bit, NOT len(ObservedKeyIDs). The poll path stores
+	// an empty keyid list when the parent legitimately has no DS
+	// records — falling back to ConfirmedKeyIDs in that case would
+	// hide a real "DS just disappeared" event behind stale confirmed
+	// data and mislead operators reading status during an incident.
+	if s.ObservedAt != "" {
+		v := dashKeyidsBracket(formatKeyidBracketList(s.ObservedKeyIDs))
+		v = fmt.Sprintf("%s observed %s", v, formatRolloverTime(s.ObservedAt))
 		left = append(left, kv{"DS observed:", v})
 	} else if s.Confirmed != nil {
 		// Pre-existing-row fallback: zone has confirmed history but
-		// no last_ds_observed_keyids column populated yet (e.g. row
-		// from a daemon that pre-dates this commit). Show what we
-		// have so the line doesn't disappear post-upgrade.
+		// no last_ds_observed_* columns populated yet (e.g. row from
+		// a daemon that pre-dates the observe-poll persistence work).
+		// Show what we have so the line doesn't disappear post-upgrade.
 		left = append(left, kv{"DS observed:", dashKeyidsBracket(formatKeyidBracketList(s.ConfirmedKeyIDs))})
 	}
 
