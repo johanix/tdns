@@ -136,13 +136,15 @@ func RegisterBootstrapActiveKSK(kdb *KeyDB, zone string, keyid uint16, method Ro
 	return nil
 }
 
-// CountKskInRolloverPipeline counts SEP keys in pre-terminal rollover pipeline states.
-func CountKskInRolloverPipeline(kdb *KeyDB, zone string) (int, error) {
+// CountKskWithDSAtParent returns the count of SEP keys whose DS belongs in
+// the parent's DS RRset — sized against rollover.num_ds. Excludes 'created'
+// (DS push in flight, not yet observed at parent) and terminal 'removed'.
+func CountKskWithDSAtParent(kdb *KeyDB, zone string) (int, error) {
 	zone = dns.Fqdn(zone)
 	const q = `
 SELECT COUNT(*) FROM DnssecKeyStore
 WHERE zonename = ? AND (CAST(flags AS INTEGER) & ?) != 0
-  AND state IN ('created','ds-published','standby','published','active','retired')`
+  AND state IN ('ds-published','published','standby','active','retired')`
 	var n int
 	err := kdb.DB.QueryRow(q, zone, int(dns.SEP)).Scan(&n)
 	return n, err

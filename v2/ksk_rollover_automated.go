@@ -139,7 +139,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 
 	num := pol.Rollover.NumDS
 	for {
-		n, err := CountKskInRolloverPipeline(kdb, zone)
+		n, err := CountKskWithDSAtParent(kdb, zone)
 		if err != nil {
 			return err
 		}

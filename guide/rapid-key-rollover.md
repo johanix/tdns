@@ -216,7 +216,7 @@ or observation that supplies its value.
 | `DNSKEY_TTL` | duration | derived: `min(ttls.dnskey, ttls.max_served)` clamped further by K-step clamping near rollover | TTL of the DNSKEY RRset as actually served to validators. Bounds how long resolvers cache the old DNSKEY RRset after the child publishes a new one. |
 | `KSK_lifetime` | duration | `ksk.lifetime` config knob | Rollover cadence — the policy-driven interval between successive KSK activations. Steady-state: `T_roll_n − T_roll_{n−1} = KSK_lifetime`. |
 | `retirement_period` | duration | `effective_margin = max(clamping.margin, max_observed_TTL)` in current engine | The hold time between a KSK transitioning to retired (at T_roll_n) and being removed (at T_roll_n + retirement_period). During the retirement period the key's DNSKEY is still in the zone but the engine no longer signs new things with it. Sized so that all cached RRSIGs by the retiring key have flushed by the time it's removed (see §4.5.1). |
-| `N` | dimensionless | `rollover.num-ds` config knob | Multi-DS pipeline depth — how many DS records the engine maintains at the parent simultaneously (active + N−1 future). |
+| `N` | dimensionless | `rollover.num-ds` config knob | Number of DS records the engine maintains at the parent simultaneously (active + N−1 future). Internal pipeline depth is `N + 1`: the extra key sits in `created` with its DS push in flight to the parent and joins the N-at-parent set once the parent observes it. |
 | `T_roll_n` | timestamp | `T_roll_n = T_roll_{n−1} + KSK_lifetime` (steady-state cadence; bootstrap defines `T_roll_1` independently) | Moment KSK_n becomes the active signer. |
 | `T_DS_pub_n` | timestamp | observed from parent DS query (= when DS for KSK_n first appears at parent) | Moment parent's primary publishes DS for KSK_n. |
 | `T_DNSKEY_pub_n` | timestamp | engine-controlled: ds-published → published transition for KSK_n | Moment child's primary publishes DNSKEY_n in the served DNSKEY RRset. |
@@ -275,6 +275,15 @@ state.
 
 **Contract.** The parent's DS RRset *always* contains exactly
 `N` records (`N` = `rollover.num-ds`). Never fewer, never more.
+
+`N` counts DS records *at the parent*, not keys in the engine's
+internal pipeline. In steady state the engine holds one additional
+KSK in `created` whose DS push is in flight to the parent — it
+joins the N-at-parent set the moment the parent's primary
+publishes its DS, at which point the next pipeline-fill tick
+generates the *next* `created` key. Internal pipeline depth is
+therefore `N + 1`, but the contract on the parent's RRset remains
+exactly `N`.
 
 The composition cycles between two states:
 
