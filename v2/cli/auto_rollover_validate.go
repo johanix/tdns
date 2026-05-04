@@ -219,10 +219,11 @@ func renderValidateReport(cfgPath, zone, policyName string, pol *tdns.DnssecPoli
 		fmt.Sprintf("%d", pol.TTLS.DNSKEY),
 		fmt.Sprintf("%d", pol.TTLS.MaxServed),
 		fmt.Sprintf("%d", pol.TTLS.DS))
-	fmt.Printf("Cadence: ds-publish-delay=%s scheme-pref=%s parent-cds-poll-estimate=%s\n",
+	fmt.Printf("Cadence: ds-publish-delay=%s scheme-pref=%s parent-cds-poll-estimate=%s standby-time=%s\n",
 		pol.Rollover.DsPublishDelay,
 		pol.Rollover.DsyncSchemePreference,
-		pol.Rollover.ParentCdsPollEstimate)
+		pol.Rollover.ParentCdsPollEstimate,
+		pol.Rollover.StandbyTime)
 	fmt.Printf("DS TTL for validation: %s\n", dsTTLSrc)
 	fmt.Println()
 

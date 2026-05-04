@@ -103,7 +103,7 @@ func TestCheckE5(t *testing.T) {
 }
 
 // TestCheckE10 exercises the cadence-vs-cache-flush invariant.
-// E10: (N − 1) × KSK.Lifetime ≥ retirement_period + parent_prop + DS_TTL.
+// E10: (N − 1) × KSK.Lifetime ≥ retirement_period + parent_prop + DS_TTL + standby_time.
 func TestCheckE10(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -161,7 +161,24 @@ func TestCheckE10(t *testing.T) {
 				return p
 			}(),
 			dsTTL: 5 * time.Minute,
-			// 5 + (5+12) + 5 = 27m > 20m -> violation
+			// 5 + (5+12) + 5 + 0 = 27m > 20m -> violation
+			wantEmpty: false,
+		},
+		{
+			// standby_time eats into the available cadence budget.
+			// Without standby_time: 5+1+5 = 11m vs 20m -> ok.
+			// With standby_time=10m: required = 21m > 20m -> violation.
+			name: "standby_time pushes required over the cadence budget",
+			pol: func() *DnssecPolicy {
+				p := &DnssecPolicy{}
+				p.Rollover.NumDS = 3
+				p.KSK.Lifetime = 10 * 60 // (N-1)*L = 20m
+				p.Clamping.Margin = 5 * time.Minute
+				p.Rollover.DsPublishDelay = 1 * time.Minute
+				p.Rollover.StandbyTime = 10 * time.Minute
+				return p
+			}(),
+			dsTTL:     5 * time.Minute,
 			wantEmpty: false,
 		},
 	}
@@ -271,5 +288,23 @@ func TestCheckE11(t *testing.T) {
 	}()
 	if got := checkE11(comfortable, 5*time.Minute); got.Failed() {
 		t.Errorf("expected silence at comfortable margin, got %q", got.Message)
+	}
+
+	// standby_time inflates required just like the other terms.
+	// Without standby_time: required = 5 + 5 + 5 = 15m, available = 2h
+	// -> ratio 8 > 1.25 (silent). With standby_time = 1h: required = 75m,
+	// available = 2h -> ratio 1.6 > 1.25 (still silent). Bump to 1h30m
+	// -> required = 105m, available = 120m, ratio = 1.143 < 1.25 (warn).
+	standbyTight := func() *DnssecPolicy {
+		p := &DnssecPolicy{}
+		p.Rollover.NumDS = 3
+		p.KSK.Lifetime = 60 * 60
+		p.Clamping.Margin = 5 * time.Minute
+		p.Rollover.DsPublishDelay = 5 * time.Minute
+		p.Rollover.StandbyTime = 90 * time.Minute
+		return p
+	}()
+	if got := checkE11(standbyTight, 5*time.Minute); !got.Failed() {
+		t.Error("expected E11 warning when standby_time consumes headroom, got pass")
 	}
 }

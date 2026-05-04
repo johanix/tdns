@@ -206,7 +206,7 @@ func configuredServedDnskeyTTL(pol *DnssecPolicy) time.Duration {
 	return 0
 }
 
-// checkE10: (N − 1) × KSK.Lifetime ≥ retirement_period + parent_prop + DS_TTL.
+// checkE10: (N − 1) × KSK.Lifetime ≥ retirement_period + parent_prop + DS_TTL + standby_time.
 //
 // retirement_period at config-load is clamping.margin (the operator-
 // controllable lower bound; effective_margin only ever grows this).
@@ -214,7 +214,10 @@ func configuredServedDnskeyTTL(pol *DnssecPolicy) time.Duration {
 // rollover.parent-cds-poll-estimate when force-notify is the chosen
 // scheme — under NOTIFY-only the parent has to fetch CDS before
 // updating its DS RRset, which adds latency on top of ds-publish-delay.
-// DS_TTL is the resolved value from resolveDSTTL.
+// DS_TTL is the resolved value from resolveDSTTL. standby_time is the
+// configured pause between published→standby (cache-flush done) and
+// standby→active (AtomicRollover); it eats into the same lead-time
+// budget, so the cadence has to fit it too.
 func checkE10(pol *DnssecPolicy, dsTTL time.Duration) InvariantResult {
 	n := pol.Rollover.NumDS
 	if n < 2 {
@@ -229,7 +232,8 @@ func checkE10(pol *DnssecPolicy, dsTTL time.Duration) InvariantResult {
 	if pol.Rollover.DsyncSchemePreference == DsyncSchemePreferenceForceNotify {
 		parentProp += pol.Rollover.ParentCdsPollEstimate
 	}
-	required := retirement + parentProp + dsTTL
+	standbyTime := pol.Rollover.StandbyTime
+	required := retirement + parentProp + dsTTL + standbyTime
 	available := time.Duration(n-1) * kskLifetime
 	if available >= required {
 		return InvariantResult{}
@@ -237,11 +241,11 @@ func checkE10(pol *DnssecPolicy, dsTTL time.Duration) InvariantResult {
 	// Cheapest single-knob fix: raise N to make available ≥ required.
 	requiredN := int(required/kskLifetime) + 2 // ceil(required/L)+1
 	return InvariantResult{
-		Message: fmt.Sprintf("E10: (N-1)*KSK.Lifetime (%s = %d * %s) < retirement_period + parent_prop + DS_TTL "+
-			"(%s = %s + %s + %s); parent DS replacement too late before next rollover",
+		Message: fmt.Sprintf("E10: (N-1)*KSK.Lifetime (%s = %d * %s) < retirement_period + parent_prop + DS_TTL + standby_time "+
+			"(%s = %s + %s + %s + %s); parent DS replacement too late before next rollover",
 			available, n-1, kskLifetime,
-			required, retirement, parentProp, dsTTL),
-		Suggestion: fmt.Sprintf("Raise rollover.num-ds to ≥ %d, OR raise ksk.lifetime, OR lower clamping.margin/rollover.ds-publish-delay/ttls.ds.",
+			required, retirement, parentProp, dsTTL, standbyTime),
+		Suggestion: fmt.Sprintf("Raise rollover.num-ds to ≥ %d, OR raise ksk.lifetime, OR lower clamping.margin/rollover.ds-publish-delay/ttls.ds/rollover.standby-time.",
 			requiredN),
 	}
 }
@@ -266,7 +270,7 @@ func checkE11(pol *DnssecPolicy, dsTTL time.Duration) InvariantResult {
 	if pol.Rollover.DsyncSchemePreference == DsyncSchemePreferenceForceNotify {
 		parentProp += pol.Rollover.ParentCdsPollEstimate
 	}
-	required := pol.Clamping.Margin + parentProp + dsTTL
+	required := pol.Clamping.Margin + parentProp + dsTTL + pol.Rollover.StandbyTime
 	if required <= 0 {
 		return InvariantResult{}
 	}

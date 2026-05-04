@@ -192,6 +192,72 @@ filed as a design issue.
 The earlier "cache-flush analysis" (§3) gives the intuition; this
 section makes it rigorous.
 
+### 4.0 Key states
+
+A KSK in the rollover pipeline moves through seven states. Each
+state has a defined entry condition (the prerequisite for the
+transition that creates it) and a defined exit condition (what
+allows the engine to advance the key to the next state).
+
+**`created`.** Fresh keypair has been generated and its DS pushed
+to the parent (via DNS UPDATE or CDS publication). DNSKEY is *not*
+in the served zone; only the parent has been informed. The engine
+is awaiting parent-side observation of the DS.
+*Exit:* parent's DS RRset includes the key's DS record.
+
+**`ds-published`.** Parent has been observed to serve the DS for
+this key. DNSKEY is still not in the served child zone — the
+engine deliberately holds it back to minimize DNSKEY exposure (see
+§4.7). Parent-side propagation (`parent_prop + DS_TTL`) starts
+from the moment of observation.
+*Exit:* the engine reaches `T_DNSKEY_pub_n = T_roll_n − child_prop
+− DNSKEY_TTL` (E12); time to put DNSKEY in the served zone.
+
+**`published`.** DNSKEY is now in the served child zone but
+caches may still hold pre-publish responses, so the key is *not*
+yet usable for signing. Both child-side
+(`T_published + child_prop + DNSKEY_TTL`) and parent-side
+(`T_DS_observed + parent_prop + DS_TTL`) cache-flush gates are
+running.
+*Exit:* both gates have elapsed — caches everywhere now serve
+RRsets that include this key.
+
+**`standby`.** Cache-flush is complete; the key is genuinely
+ready and could be made active *immediately*. The state exists so
+the engine can hold the key for a configurable pause before
+AtomicRollover, giving the operator a window to abort the
+natural-cadence rollover. **Any pause in `standby` is a policy
+choice (`rollover.standby_time`, default 1m), not a safety
+requirement** — published→standby→active with `standby_time = 0`
+is a perfectly safe rollover. `auto-rollover asap` bypasses the
+pause entirely; the cache-flush gates that gated published→standby
+remain in force and cannot be bypassed.
+*Exit:* `standby_at + standby_time` reached, OR operator triggers
+asap.
+
+**`active`.** The key is the zone's signing KSK. AtomicRollover
+fired: the previously-active KSK transitioned to `retired` in the
+same operation that promoted this one. From now until its own
+retirement, this key signs the DNSKEY RRset and (transitively)
+the entire chain of trust below the zone.
+*Exit:* `T_roll_{n+1}` reached — the next-up standby key gets
+promoted, this key transitions to `retired`.
+
+**`retired`.** The key is no longer signing new things, but its
+DNSKEY remains in the zone and its DS remains at the parent.
+Cached RRSIGs and DS responses still in flight may reference this
+key; we wait the `retirement_period` (= `effective_margin`) so
+they can drain.
+*Exit:* `retired_at + effective_margin` reached. The DNSKEY is
+removed from the served zone, and the same atomic parent UPDATE
+that drops this key's DS adds the next future slot's DS — keeping
+the parent's DS RRset at exactly N (§4.4).
+
+**`removed`.** Terminal. DNSKEY is out of the zone; DS is out of
+the parent. The key's lifecycle is complete. Rows in this state
+are kept for audit/history and excluded from `num_ds`-against-
+parent counts.
+
 ### 4.1 Notation
 
 Throughout: `T_X` denotes a **timestamp** (a moment in wall time);
@@ -476,35 +542,38 @@ lead_DS  =  T_roll_n − T_DS_pub_n
 For Invariant DS (E1) to hold:
 
 ```
-(N − 1) × KSK_lifetime − retirement_period  ≥  parent_prop + DS_TTL   (E9)
+(N − 1) × KSK_lifetime − retirement_period  ≥  parent_prop + DS_TTL + standby_time   (E9)
 ```
 
 Equivalently, the operational constraint on the rollover cadence:
 
 ```
-(N − 1) × KSK_lifetime  ≥  retirement_period + parent_prop + DS_TTL   (E10)
+(N − 1) × KSK_lifetime  ≥  retirement_period + parent_prop + DS_TTL + standby_time   (E10)
 ```
 
 **Interpretation.** The multi-DS pipeline depth `N` gives the
 engine `(N − 1)` rollover cycles of buffer for DS-side
 propagation. Subtract the retirement period (during which the new
 "future" slot doesn't yet exist at the parent), and what
-remains must accommodate `parent_prop + DS_TTL`. Choose `N`,
-`KSK_lifetime`, `retirement_period`, and the parent's `DS_TTL`
+remains must accommodate `parent_prop + DS_TTL` plus any operator-
+configured `standby_time` pause between cache-flush completion and
+AtomicRollover (see §4.7). Choose `N`, `KSK_lifetime`,
+`retirement_period`, `standby_time`, and the parent's `DS_TTL`
 such that E10 holds; the rest is automatic.
 
 **For the testbed config.** N=3, KSK_lifetime=10m,
-retirement_period=5m (`clamping.margin`), parent_prop≈30s, DS_TTL≈5m:
+retirement_period=5m (`clamping.margin`), parent_prop≈30s,
+DS_TTL≈5m, standby_time=1m:
 
 ```
 (N − 1) × KSK_lifetime  =  2 × 10m  =  20m
-retirement_period + parent_prop + DS_TTL  =  5m + 30s + 5m  =  10m30s
-20m ≥ 10m30s     ✓     (9m30s of headroom)
+retirement_period + parent_prop + DS_TTL + standby_time  =  5m + 30s + 5m + 1m  =  11m30s
+20m ≥ 11m30s     ✓     (8m30s of headroom)
 ```
 
 The testbed is comfortably within its DS-side budget. E10 becomes
 interesting at smaller `N` (e.g. would-be N=2 multi-DS would have
-`(N − 1) × KSK_lifetime = 10m` against the 10m30s requirement —
+`(N − 1) × KSK_lifetime = 10m` against the 11m30s requirement —
 fail), or with much faster cadences (`KSK_lifetime = 2m` against
 the same requirement — fail unless `N` is raised).
 

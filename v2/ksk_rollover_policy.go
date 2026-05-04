@@ -411,7 +411,6 @@ func parseParentAgent(policyName, raw string) (string, error) {
 func CollectDnssecPolicyCouplingWarnings(out *DnssecPolicy) []string {
 	var warnings []string
 	kskL := time.Duration(out.KSK.Lifetime) * time.Second
-	sigV := time.Duration(out.KSK.SigValidity) * time.Second
 	if kskL > 0 && out.TTLS.DNSKEY > 0 {
 		maxTTL := time.Duration(out.TTLS.DNSKEY) * time.Second
 		if maxTTL > kskL/4 {
@@ -419,10 +418,6 @@ func CollectDnssecPolicyCouplingWarnings(out *DnssecPolicy) []string {
 				fmt.Sprintf("ttls.dnskey (%s) exceeds ksk.lifetime/4 (%s) — rapid rollover coupling",
 					maxTTL, kskL/4))
 		}
-	}
-	if kskL > 0 && sigV > kskL {
-		warnings = append(warnings,
-			fmt.Sprintf("ksk.sig-validity (%s) exceeds ksk.lifetime (%s)", sigV, kskL))
 	}
 	if out.Clamping.Enabled && out.Clamping.Margin > 0 && out.Clamping.Margin < 60*time.Second {
 		warnings = append(warnings,
