@@ -96,28 +96,36 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInte
 	return out, nil
 }
 
-// collectRolloverGatingErrorMessages returns the messages of any active
-// rollover-gating error categories (RolloverPolicyViolation from W2,
-// RolloverParentBlocker from W4) on the given zone. Returns nil when
-// the zone is not registered in Zones (offline-mode lookups) or when no
-// rollover-gating errors are active. Used by the API populators that
-// fill RolloverStatus.PolicyErrors and RolloverWhenResponse.PolicyErrors.
-func collectRolloverGatingErrorMessages(zone string) []string {
+// collectRolloverGatingErrorMessages returns active rollover-gating
+// errors on the given zone, partitioned by severity:
+//
+//   - errors: hard engine-blocking conditions (RolloverPolicyViolation,
+//     RolloverParentBlocker). Engine refuses to advance keys.
+//   - warnings: rule-of-thumb concerns (RolloverPolicyWarning).
+//     Engine keeps rolling.
+//
+// Returns (nil, nil) when the zone is not registered in Zones
+// (offline-mode lookups) or when no rollover-gating errors are active.
+func collectRolloverGatingErrorMessages(zone string) (errors, warnings []string) {
 	zd, ok := Zones.Get(zone)
 	if !ok || zd == nil {
-		return nil
+		return nil, nil
 	}
-	var msgs []string
 	for _, e := range zd.ErrorList() {
-		if isRolloverGatingError(e.Type) {
-			msgs = append(msgs, e.Msg)
+		switch {
+		case e.Type == RolloverPolicyWarning:
+			warnings = append(warnings, e.Msg)
+		case isRolloverGatingError(e.Type):
+			errors = append(errors, e.Msg)
 		}
 	}
-	return msgs
+	return errors, warnings
 }
 
 func populateRolloverPolicyErrors(out *RolloverStatus, zone string) {
-	out.PolicyErrors = append(out.PolicyErrors, collectRolloverGatingErrorMessages(zone)...)
+	errs, warns := collectRolloverGatingErrorMessages(zone)
+	out.PolicyErrors = append(out.PolicyErrors, errs...)
+	out.PolicyWarnings = append(out.PolicyWarnings, warns...)
 }
 
 func isRolloverGatingError(t ErrorType) bool {
@@ -283,7 +291,9 @@ func ComputeRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Ti
 }
 
 func populateRolloverWhenPolicyErrors(out *RolloverWhenResponse, zone string) {
-	out.PolicyErrors = append(out.PolicyErrors, collectRolloverGatingErrorMessages(zone)...)
+	errs, warns := collectRolloverGatingErrorMessages(zone)
+	out.PolicyErrors = append(out.PolicyErrors, errs...)
+	out.PolicyWarnings = append(out.PolicyWarnings, warns...)
 }
 
 // populateFromZoneRow copies fields from the persisted row into the

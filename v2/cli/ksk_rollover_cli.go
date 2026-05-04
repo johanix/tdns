@@ -443,20 +443,40 @@ func runWhenOffline(z string) {
 	renderRolloverWhen(resp)
 }
 
-// printRolloverPolicyErrors emits the operator-facing header lines that
-// appear at the top of every auto-rollover output when the zone has
-// active rollover-policy violations. Returns true if anything was
-// printed.
+// printRolloverPolicyErrors emits the operator-facing header lines for
+// hard rollover-engine-blocking conditions (E5/E10/parent-DSYNC).
+// Returns true if anything was printed. The "Error:" prefix signals
+// that the engine has stopped advancing keys.
 func printRolloverPolicyErrors(errs []string) bool {
 	if len(errs) == 0 {
 		return false
 	}
 	if len(errs) == 1 {
-		fmt.Printf("automated rollovers not possible due to: %s\n", errs[0])
+		fmt.Printf("Error: rollover stopped: %s\n", errs[0])
 	} else {
-		fmt.Println("automated rollovers not possible due to:")
+		fmt.Println("Error: rollover stopped:")
 		for _, e := range errs {
 			fmt.Printf("  - %s\n", e)
+		}
+	}
+	return true
+}
+
+// printRolloverPolicyWarnings emits the operator-facing header lines
+// for rule-of-thumb concerns (E11). Engine keeps rolling; the
+// "Warning:" prefix tells the operator the policy is outside
+// recommended params but the rollover is still being attempted.
+// Returns true if anything was printed.
+func printRolloverPolicyWarnings(warns []string) bool {
+	if len(warns) == 0 {
+		return false
+	}
+	if len(warns) == 1 {
+		fmt.Printf("Warning: rollover-policy: %s\n", warns[0])
+	} else {
+		fmt.Println("Warning: rollover-policy:")
+		for _, w := range warns {
+			fmt.Printf("  - %s\n", w)
 		}
 	}
 	return true
@@ -476,6 +496,8 @@ func renderRolloverWhen(resp *tdns.RolloverWhenResponse) {
 		fmt.Printf("KSK rollover schedule for zone %s: blocked\n", resp.Zone)
 		return
 	}
+	// Warnings don't block — render schedule below the warning header.
+	printRolloverPolicyWarnings(resp.PolicyWarnings)
 	currentTime := formatRolloverTimeAbsolute(resp.CurrentTime)
 	if currentTime == "-" {
 		// Fallback when daemon didn't supply CurrentTime (legacy
@@ -732,12 +754,19 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 	if s == nil {
 		return
 	}
+	headerPrinted := false
 	if len(s.PolicyErrors) > 0 {
 		printRolloverPolicyErrors(s.PolicyErrors)
+		headerPrinted = true
+	}
+	if len(s.PolicyWarnings) > 0 {
+		printRolloverPolicyWarnings(s.PolicyWarnings)
+		headerPrinted = true
+	}
+	if headerPrinted {
 		// Status output continues below — operators still want to see
-		// per-key state and recent attempts even while rollover is
-		// blocked. The header just makes it clear the engine isn't
-		// going to advance the pipeline until the violation clears.
+		// per-key state and recent attempts. The header makes the
+		// rollover-engine state explicit before the rest of the report.
 		fmt.Println()
 	}
 	currentTime := formatRolloverTimeAbsolute(s.CurrentTime)

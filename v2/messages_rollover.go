@@ -117,12 +117,15 @@ type RolloverStatus struct {
 	// Empty slice means no warnings; rendered below the hint line.
 	Warnings []string `json:"warnings,omitempty"`
 
-	// PolicyErrors carries any active RolloverPolicyViolation entries
-	// from zd.Errors — config-time spec invariant violations (E5/E10)
-	// or runtime parent-config blockers. When non-empty, automated
-	// rollovers are gated for this zone; the CLI prepends a
-	// "automated rollovers not possible due to: <msg>" header.
+	// PolicyErrors carries hard rollover-engine-blocking conditions:
+	// E5/E10 invariant violations and parent-DSYNC blockers. When
+	// non-empty, the engine refuses to advance keys; the CLI prepends
+	// an "Error: automated rollovers stopped" header.
 	PolicyErrors []string `json:"policyErrors,omitempty"`
+	// PolicyWarnings carries E11 rule-of-thumb concerns: the engine
+	// keeps rolling, but the policy has minimal headroom. The CLI
+	// prepends a "Warning: rollover-policy" header when non-empty.
+	PolicyWarnings []string `json:"policyWarnings,omitempty"`
 }
 
 // DSRange is an inclusive integer [low, high] rollover_index interval
@@ -177,10 +180,11 @@ type RolloverWhenResponse struct {
 	InProgress       bool                    `json:"inProgress,omitempty"`
 	Note             string                  `json:"note,omitempty"`
 	Gates            []RolloverWhenGateEntry `json:"gates,omitempty"`
-	// PolicyErrors carries active rollover-policy violations on the
-	// zone. When non-empty, automated rollovers are blocked and the
-	// CLI suppresses the computed times in favor of the error header.
-	PolicyErrors []string `json:"policyErrors,omitempty"`
+	// PolicyErrors carries hard rollover-engine-blocking conditions
+	// (engine stops). PolicyWarnings carries rule-of-thumb concerns
+	// (engine keeps rolling). Same split as RolloverStatus.
+	PolicyErrors   []string `json:"policyErrors,omitempty"`
+	PolicyWarnings []string `json:"policyWarnings,omitempty"`
 }
 
 // RolloverWhenGateEntry mirrors one EarliestRolloverGate as wire JSON.
