@@ -123,7 +123,11 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 			e.NextTransitionNote = "after parent observes DS"
 
 		case DnskeyStateDsPublished:
-			e.NextTransition = "ds-published → standby"
+			// Post-C18 the engine fires ds-published → published
+			// (DNSKEY enters served zone but propagation still in
+			// flight). The published → standby transition follows
+			// later — see the published case below for that gate.
+			e.NextTransition = "ds-published → published"
 			if activeAt == nil {
 				e.NextTransitionNote = "no active key — bootstrap pending"
 				break
