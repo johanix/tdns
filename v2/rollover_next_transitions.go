@@ -282,10 +282,20 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 	//     for the cycle after this one).
 	//
 	// The expected_at timestamp is when the engine will notice the
-	// pipeline is short and generate. That happens immediately after
-	// the next rollover fires (current standby promotes to active,
-	// pipeline depth drops by one). So expected_at = T_roll of the
-	// current active key.
+	// pipeline is short and generate. CountKskInRolloverPipeline
+	// counts {created, ds-published, standby, published, active,
+	// retired} — so the count only drops when a retired key
+	// transitions to removed. Pipeline-fill (and thus the next
+	// "→ created" event) happens at the soonest such transition:
+	//
+	//   1. Any SEP key currently in retired:
+	//        projected removal = retired_at + effective_margin.
+	//   2. No retired keys yet:
+	//        the active key has to retire first
+	//        (= projected next-rollover time), then live through
+	//        the retirement window.
+	//
+	// Take the min over candidates.
 	if pol.Rollover.Method == RolloverMethodMultiDS && activeAt != nil && pol.Rollover.NumDS > 0 {
 		inPipeline := 0
 		for _, e := range out.KSKs {
@@ -296,20 +306,65 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 			}
 		}
 		if inPipeline >= pol.Rollover.NumDS {
-			tNext := activeAt.Add(lifetime)
-			out.KSKs = append([]RolloverKeyEntry{
-				{
-					KeyID:                  0, // sentinel for "synthetic"
-					IsSynthetic:            true,
-					State:                  "-",
-					Published:              "none",
-					NextTransition:         "→ created",
-					NextTransitionAt:       tNext.UTC().Format(time.RFC3339),
-					NextTransitionEstimate: true,
-				},
-			}, out.KSKs...)
+			soonestRemoval := projectedSoonestRemoval(out, kdb, zone, pol, lifetime, margin, dnskeyTTLKnown, dnskeyTTL, propagationDelay, now, activeAt, dnskeyInZoneKids, dsPubKids)
+			if !soonestRemoval.IsZero() {
+				out.KSKs = append([]RolloverKeyEntry{
+					{
+						KeyID:                  0, // sentinel for "synthetic"
+						IsSynthetic:            true,
+						State:                  "-",
+						Published:              "none",
+						NextTransition:         "→ created",
+						NextTransitionAt:       soonestRemoval.UTC().Format(time.RFC3339),
+						NextTransitionEstimate: true,
+					},
+				}, out.KSKs...)
+			}
 		}
 	}
+}
+
+// projectedSoonestRemoval returns the soonest moment a SEP key
+// currently in {active, retired} will reach the removed state — and
+// thereby drop the pipeline count below N, triggering the engine's
+// pipeline-fill (= "→ created" event). Returns zero time if no
+// candidate exists.
+func projectedSoonestRemoval(out *RolloverStatus, kdb *KeyDB, zone string, pol *DnssecPolicy, lifetime, margin time.Duration, dnskeyTTLKnown bool, dnskeyTTL, propagationDelay time.Duration, now time.Time, activeAt *time.Time, dnskeyInZoneKids []uint16, dsPubKids []uint16) time.Time {
+	var best time.Time
+	consider := func(t time.Time) {
+		if t.IsZero() {
+			return
+		}
+		if best.IsZero() || t.Before(best) {
+			best = t
+		}
+	}
+	// Existing retired keys: each will be removed at retired_at +
+	// effective_margin (StateSinceForDnssecKey-style). The renderer
+	// already populated e.StateSince for the row; use that.
+	for _, e := range out.KSKs {
+		if e.State != DnskeyStateRetired {
+			continue
+		}
+		if ts, ok := parseRFC3339(e.StateSince); ok {
+			consider(ts.Add(margin))
+		}
+	}
+	// No retired key yet: the active key has to retire first.
+	// active→retired fires at max(active_at+lifetime, projected
+	// standby_at + standby_time) — same gate as the active row's
+	// expected_at.
+	if activeAt != nil {
+		tRetire := activeAt.Add(lifetime)
+		if t, ok := projectedNextUpStandbyAt(out, kdb, zone, pol, lifetime, dnskeyTTLKnown, dnskeyTTL, propagationDelay, now, dnskeyInZoneKids, dsPubKids); ok {
+			gated := t.Add(pol.Rollover.StandbyTime)
+			if gated.After(tRetire) {
+				tRetire = gated
+			}
+		}
+		consider(tRetire.Add(margin))
+	}
+	return best
 }
 
 // projectedNextUpStandbyAt returns the projected moment when the
