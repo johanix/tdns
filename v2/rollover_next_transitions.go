@@ -192,7 +192,37 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 			if activeAt == nil {
 				break
 			}
+			// active → retired and standby → active fire as a
+			// single atomic event (AtomicRollover). The actual
+			// fire time is max(active_at + lifetime,
+			// standby_at + standby_time) — same gate as the
+			// rolloverDue check. Without taking standby_time into
+			// account, the renderer shows a "(N ago)" projection
+			// that confuses operators when the natural T_roll has
+			// passed but the engine is still waiting on the pause.
 			tRetire := activeAt.Add(lifetime)
+			// Find the next-up genuine standby key (mirrors
+			// pickEarliestStandbySEP — state=standby, oldest
+			// published_at first).
+			for _, kid := range dnskeyInZoneKids {
+				inStandby := false
+				for _, ke := range out.KSKs {
+					if ke.KeyID == kid && ke.State == DnskeyStateStandby {
+						inStandby = true
+						break
+					}
+				}
+				if !inStandby {
+					continue
+				}
+				if standbyAt, err := RolloverKeyStandbyAt(kdb, zone, kid); err == nil && standbyAt != nil {
+					gated := standbyAt.Add(pol.Rollover.StandbyTime)
+					if gated.After(tRetire) {
+						tRetire = gated
+					}
+				}
+				break
+			}
 			e.NextTransitionAt = tRetire.UTC().Format(time.RFC3339)
 
 		case DnskeyStateRetired:
