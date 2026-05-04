@@ -330,6 +330,34 @@ func (zd *ZoneData) HasError(errtype ErrorType) bool {
 	return ok
 }
 
+// HasErrorOtherThan returns true if the zone has any active error not
+// in the allow list. Used by NOTIFY/query handlers that want "the zone
+// is broken in some way that matters here" — they tolerate
+// RefreshError (data may be stale but is still served) but reject
+// every other category.
+//
+// With the multi-error registry, checking only the derived
+// zd.ErrorType is wrong: the dominant category by errorTypeReportOrder
+// can be RefreshError while a RolloverPolicyViolation also exists, and
+// the handler would then accept a request on a rollover-blocked zone.
+func (zd *ZoneData) HasErrorOtherThan(allowed ...ErrorType) bool {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	if len(zd.Errors) == 0 {
+		return false
+	}
+outer:
+	for t := range zd.Errors {
+		for _, a := range allowed {
+			if t == a {
+				continue outer
+			}
+		}
+		return true
+	}
+	return false
+}
+
 // ErrorList returns a snapshot of every active error on the zone, in
 // errorTypeReportOrder. Returns nil if no errors are set. The returned
 // slice is a fresh copy — safe to retain after the call returns.

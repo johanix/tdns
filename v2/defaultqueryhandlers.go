@@ -93,14 +93,19 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 	}
 
 	if zd, ok := Zones.Get(qname); ok {
-		if zd.Error {
-			if zd.ErrorType != RefreshError || zd.RefreshCount == 0 {
-				lgHandler.Warn("zone in error state", "qname", qname, "errorType", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
-				m := new(dns.Msg)
-				m.SetRcode(r, dns.RcodeServerFailure)
-				w.WriteMsg(m)
-				return nil
-			}
+		// SERVFAIL when any non-RefreshError category is set, OR when
+		// only RefreshError is set but the zone hasn't been
+		// successfully refreshed even once (no data to serve).
+		// HasErrorOtherThan handles multi-error cases where e.g. a
+		// rollover-policy violation coexists with a transient refresh
+		// issue.
+		if zd.HasErrorOtherThan(RefreshError) ||
+			(zd.HasError(RefreshError) && zd.RefreshCount == 0) {
+			lgHandler.Warn("zone in error state", "qname", qname, "errorType", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
+			m := new(dns.Msg)
+			m.SetRcode(r, dns.RcodeServerFailure)
+			w.WriteMsg(m)
+			return nil
 		}
 
 		lgHandler.Debug("query for known zone", "qname", qname)
@@ -148,7 +153,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 		qname = strings.ToLower(qname)
 	}
 
-	if zd.Error && zd.ErrorType != RefreshError {
+	if zd.HasErrorOtherThan(RefreshError) {
 		lgHandler.Warn("zone in error state", "qname", qname, "zone", zd.ZoneName, "errorType", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
 		m := new(dns.Msg)
 		m.SetRcode(r, dns.RcodeServerFailure)

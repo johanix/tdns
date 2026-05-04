@@ -82,6 +82,42 @@ func TestDerivedErrorFieldsBackCompat(t *testing.T) {
 	}
 }
 
+// TestHasErrorOtherThan covers the multi-error gating helper used by
+// notifyresponder / defaultqueryhandlers to avoid masking a
+// rollover-policy error behind RefreshError winning the derived-field
+// priority.
+func TestHasErrorOtherThan(t *testing.T) {
+	zd := &ZoneData{ZoneName: "test.example."}
+
+	if zd.HasErrorOtherThan(RefreshError) {
+		t.Fatal("clean zone: HasErrorOtherThan should be false")
+	}
+
+	zd.SetError(RefreshError, "stale data")
+	if zd.HasErrorOtherThan(RefreshError) {
+		t.Fatal("only RefreshError set: HasErrorOtherThan(RefreshError) should be false")
+	}
+
+	zd.SetError(RolloverPolicyViolation, "E10")
+	if !zd.HasErrorOtherThan(RefreshError) {
+		t.Fatal("RolloverPolicyViolation alongside RefreshError: HasErrorOtherThan(RefreshError) should be true")
+	}
+
+	zd.ClearError(RolloverPolicyViolation)
+	if zd.HasErrorOtherThan(RefreshError) {
+		t.Fatal("after clearing RolloverPolicyViolation: HasErrorOtherThan(RefreshError) should be false again")
+	}
+
+	// Multi-arg allow list.
+	zd.SetError(ConfigError, "bad config")
+	if zd.HasErrorOtherThan(RefreshError, ConfigError) {
+		t.Fatal("RefreshError+ConfigError both allowed: HasErrorOtherThan should be false")
+	}
+	if !zd.HasErrorOtherThan(RefreshError) {
+		t.Fatal("ConfigError not in allow list: HasErrorOtherThan should be true")
+	}
+}
+
 // TestErrorListOrder confirms ErrorList returns categories in
 // errorTypeReportOrder so consumers (CLI, status JSON) get a stable
 // order.

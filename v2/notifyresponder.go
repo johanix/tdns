@@ -246,8 +246,14 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 		return nil
 	}
 
-	// Validate that the target zone is not in an error state
-	if zd.Error && zd.ErrorType != RefreshError {
+	// Validate that the target zone is not in an error state. RefreshError
+	// is the one category that doesn't disqualify NOTIFY (the zone may be
+	// stale but is still served). Any other active category — including
+	// rollover-policy violations and parent-DSYNC blockers that might
+	// coexist with a refresh issue — does. Use the multi-error registry
+	// so e.g. RolloverPolicyViolation isn't masked by RefreshError winning
+	// the derived-field priority.
+	if zd.HasErrorOtherThan(RefreshError) {
 		lgHandler.Error("zone in error state, refusing NOTIFY", "type", dns.TypeToString[ntype], "qname", qname, "zone", targetZoneName, "errorMsg", zd.ErrorMsg)
 		m.SetRcode(dnr.Msg, dns.RcodeServerFailure)
 		edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyZoneInErrorState,
