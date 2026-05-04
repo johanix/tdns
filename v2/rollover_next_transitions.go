@@ -240,9 +240,9 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 				{
 					KeyID:                  0, // sentinel for "synthetic"
 					IsSynthetic:            true,
-					State:                  "(future)",
+					State:                  "-",
 					Published:              "none",
-					NextTransition:         "(future) → created",
+					NextTransition:         "→ created",
 					NextTransitionAt:       tNext.UTC().Format(time.RFC3339),
 					NextTransitionEstimate: true,
 				},
