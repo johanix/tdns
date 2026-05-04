@@ -1060,8 +1060,31 @@ func transitionDsPublishedToStandbyForZone(deps RolloverEngineDeps, dsPubs []*Dn
 		return
 	}
 
+	// Slot offset: the number of SEP keys *already* in the standby
+	// state for this zone. Each of those occupies one of the next
+	// promotion slots (slot 1 = oldest standby_at = next-up); a
+	// ds-published key promoting to standby joins the queue *after*
+	// them.
+	//
+	// Without this offset the loop below assigns slot=i+1 starting
+	// from 1 for any ds-published key, which is correct only when
+	// no standby SEP keys exist. With existing standbys the slot
+	// number is off by exactly the standby count — making T_roll
+	// (and therefore T_publish) compute against the wrong rollover
+	// cycle and promoting the DNSKEY into the served zone many
+	// minutes before its actual rollover. Operational consequence:
+	// quantum-opacity goal violated; DNSKEY public key visible in
+	// the zone way ahead of need.
+	standbyCount, err := countStandbySEPKeys(kdb, zoneName)
+	if err != nil {
+		deps.Logger.Warn("rollover: countStandbySEPKeys failed; defaulting to 0",
+			"zone", zoneName, "err", err)
+		standbyCount = 0
+	}
+
 	// Sort ds-published keys by ds_observed_at ascending — this is
-	// the promotion order (oldest = next up).
+	// the promotion order within the ds-published cohort (oldest =
+	// next up).
 	//
 	// Tie-break: confirmDSAndAdvanceCreatedKeysTx() stamps the same
 	// ds_observed_at on every key advanced in one confirmation
@@ -1094,9 +1117,12 @@ func transitionDsPublishedToStandbyForZone(deps RolloverEngineDeps, dsPubs []*Dn
 	lifetime := time.Duration(pol.KSK.Lifetime) * time.Second
 	promoted := false
 	for i, k := range dsPubs {
-		// Promotion position: i=0 is the next-up (slot 1),
-		// i=1 is after that (slot 2), etc.
-		tRoll := activeAt.Add(time.Duration(i+1) * lifetime)
+		// Promotion position. i=0 is the first ds-published key
+		// (oldest ds_observed_at). Its rollover slot is
+		// standbyCount+1: standby keys 1..standbyCount activate
+		// first, this key activates after them.
+		slot := standbyCount + i + 1
+		tRoll := activeAt.Add(time.Duration(slot) * lifetime)
 		// E12: T_publish = T_roll − child_prop − DNSKEY_TTL.
 		tPublish := tRoll.Add(-(deps.PropagationDelay + dnskeyTTL))
 		if now.Before(tPublish) {
@@ -1116,7 +1142,9 @@ func transitionDsPublishedToStandbyForZone(deps RolloverEngineDeps, dsPubs []*Dn
 		}
 		deps.Logger.Info("rollover: ds-published→standby",
 			"zone", zoneName, "keyid", k.KeyTag,
-			"slot", i+1, "t_roll", tRoll.UTC().Format(time.RFC3339),
+			"slot", slot,
+			"standby_offset", standbyCount,
+			"t_roll", tRoll.UTC().Format(time.RFC3339),
 			"t_publish", tPublish.UTC().Format(time.RFC3339),
 			"dnskey_ttl", dnskeyTTL.String(),
 			"child_prop", deps.PropagationDelay.String())
@@ -1128,6 +1156,25 @@ func transitionDsPublishedToStandbyForZone(deps RolloverEngineDeps, dsPubs []*Dn
 		// jobs for the same zone state change.
 		triggerResign(deps.Conf, zoneName)
 	}
+}
+
+// countStandbySEPKeys returns the number of SEP keys currently in
+// standby state for zone. Used by transitionDsPublishedToStandbyForZone
+// to compute the slot offset for ds-published keys: a ds-published
+// key promoting to standby joins the queue *after* the existing
+// standby keys, not at slot 1.
+func countStandbySEPKeys(kdb *KeyDB, zone string) (int, error) {
+	keys, err := GetDnssecKeysByState(kdb, zone, DnskeyStateStandby)
+	if err != nil {
+		return 0, err
+	}
+	n := 0
+	for i := range keys {
+		if keys[i].Flags&dns.SEP != 0 {
+			n++
+		}
+	}
+	return n, nil
 }
 
 // dsPubsRolloverIndexLess compares two ds-published SEP keys by

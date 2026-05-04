@@ -129,13 +129,25 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 				e.NextTransitionNote = "after first SignZone records DNSKEY TTL"
 				break
 			}
-			slot := slotFromKid(dsPubKids, e.KeyID) // 1-based
-			if slot == 0 {
+			// Slot accounting: ds-published keys queue *after* any
+			// existing standby keys (each standby occupies one of
+			// the next promotion slots). Match the engine's
+			// transitionDsPublishedToStandbyForZone slot calculation
+			// so renderer and engine agree.
+			pos := slotFromKid(dsPubKids, e.KeyID) // 1-based within ds-published
+			if pos == 0 {
 				break
 			}
+			slot := len(standbyKids) + pos
 			tRoll := activeAt.Add(time.Duration(slot) * lifetime)
 			tPublish := tRoll.Add(-(propagationDelay + dnskeyTTL))
 			e.NextTransitionAt = tPublish.UTC().Format(time.RFC3339)
+			if pos > 1 {
+				// ds-published key behind another ds-published key:
+				// its T_publish depends on the prior key's promotion
+				// completing first. Shifts on asap. Mark as projected.
+				e.NextTransitionEstimate = true
+			}
 
 		case DnskeyStateStandby:
 			e.NextTransition = "standby → active"
