@@ -62,11 +62,11 @@ func TestCheckE5(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got := checkE5(tc.pol)
-			if tc.wantEmpty && got != "" {
-				t.Errorf("expected empty, got %q", got)
+			if tc.wantEmpty && got.Failed() {
+				t.Errorf("expected pass, got %q", got.Message)
 			}
-			if !tc.wantEmpty && got == "" {
-				t.Errorf("expected violation, got empty")
+			if !tc.wantEmpty && !got.Failed() {
+				t.Errorf("expected violation, got pass")
 			}
 		})
 	}
@@ -138,11 +138,11 @@ func TestCheckE10(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			got := checkE10(tc.pol, tc.dsTTL)
-			if tc.wantEmpty && got != "" {
-				t.Errorf("expected empty, got %q", got)
+			if tc.wantEmpty && got.Failed() {
+				t.Errorf("expected pass, got %q", got.Message)
 			}
-			if !tc.wantEmpty && got == "" {
-				t.Errorf("expected violation, got empty")
+			if !tc.wantEmpty && !got.Failed() {
+				t.Errorf("expected violation, got pass")
 			}
 		})
 	}
@@ -227,8 +227,8 @@ func TestCheckE11(t *testing.T) {
 		return p
 	}()
 	// required = 5 + 5 + 10 = 20m. available = 21m. ratio = 21/20 = 1.05 < 1.25 -> warn.
-	if got := checkE11(tightHeadroom, 10*time.Minute); got == "" {
-		t.Error("expected E11 warning at <25% headroom, got empty")
+	if got := checkE11(tightHeadroom, 10*time.Minute); !got.Failed() {
+		t.Error("expected E11 warning at <25% headroom, got pass")
 	}
 
 	comfortable := func() *DnssecPolicy {
@@ -239,7 +239,7 @@ func TestCheckE11(t *testing.T) {
 		p.Rollover.DsPublishDelay = 5 * time.Minute
 		return p
 	}()
-	if got := checkE11(comfortable, 5*time.Minute); got != "" {
-		t.Errorf("expected silence at comfortable margin, got %q", got)
+	if got := checkE11(comfortable, 5*time.Minute); got.Failed() {
+		t.Errorf("expected silence at comfortable margin, got %q", got.Message)
 	}
 }

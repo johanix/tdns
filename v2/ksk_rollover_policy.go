@@ -431,6 +431,29 @@ type dnssecPoliciesYAML struct {
 	DnssecPolicies map[string]DnssecPolicyConf `yaml:"dnssecpolicies"`
 }
 
+// ParseDnssecPolicyConf parses a single DnssecPolicyConf into the
+// runtime DnssecPolicy. Same logic as ValidateDnssecPoliciesFromFile's
+// per-policy block; exposed for the `auto-rollover validate` CLI which
+// needs to re-parse one policy from an offline YAML.
+func ParseDnssecPolicyConf(name string, dp *DnssecPolicyConf) (*DnssecPolicy, error) {
+	dp.Name = name
+	alg := dns.StringToAlgorithm[strings.TrimSpace(strings.ToUpper(dp.Algorithm))]
+	if alg == 0 {
+		return nil, fmt.Errorf("policy %q: unknown algorithm %q", name, dp.Algorithm)
+	}
+	out := &DnssecPolicy{
+		Name:      name,
+		Algorithm: alg,
+		KSK:       GenKeyLifetime(dp.KSK.Lifetime, dp.KSK.SigValidity),
+		ZSK:       GenKeyLifetime(dp.ZSK.Lifetime, dp.ZSK.SigValidity),
+		CSK:       GenKeyLifetime(dp.CSK.Lifetime, dp.CSK.SigValidity),
+	}
+	if err := FinishDnssecPolicy(name, dp, out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ValidateDnssecPoliciesFromFile parses a YAML file with a top-level dnssecpolicies: map
 // and validates every policy the same way as runtime config loading.
 func ValidateDnssecPoliciesFromFile(path string) error {

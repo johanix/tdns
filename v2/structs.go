@@ -641,8 +641,9 @@ type DnssecKeys struct {
 }
 
 type KeyDB struct {
-	DB *sql.DB
-	mu sync.Mutex
+	DB     *sql.DB
+	DBFile string // sqlite file path, recorded by NewKeyDB
+	mu     sync.Mutex
 	// Sig0Cache   map[string]*Sig0KeyCache
 	KeystoreSig0Cache   map[string]*Sig0ActiveKeys
 	TruststoreSig0Cache *Sig0StoreT            // was *Sig0StoreT

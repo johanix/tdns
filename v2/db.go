@@ -237,6 +237,7 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 	dbSetupTables(db)
 	return &KeyDB{
 		DB:                  db,
+		DBFile:              dbfile,
 		KeystoreSig0Cache:   make(map[string]*Sig0ActiveKeys),
 		TruststoreSig0Cache: NewSig0StoreT(),
 		KeystoreDnskeyCache: make(map[string]*DnssecKeys),

@@ -239,3 +239,19 @@ type RolloverUnstickResponse struct {
 	Zone    string `json:"zone"`
 	Cleared bool   `json:"cleared"`
 }
+
+// ConfigPathsResponse is returned by GET /api/v1/config/paths. Tells
+// the CLI where the daemon's config + keystore live so commands like
+// `auto-rollover validate` can re-parse the same YAML the daemon is
+// running. Per-zone PolicyName is supplied via a separate query param
+// so the same response shape can be reused for multiple validation
+// flows in the future.
+type ConfigPathsResponse struct {
+	ConfigFile string `json:"configFile"` // main YAML
+	DBFile     string `json:"dbFile"`     // sqlite keystore
+	// PolicyName is the dnssecpolicy attached to the zone named in
+	// ?zone=. Empty when ?zone= is not provided or the zone has no
+	// rollover policy. CLI uses this to pick which dnssecpolicies
+	// block to validate.
+	PolicyName string `json:"policyName,omitempty"`
+}

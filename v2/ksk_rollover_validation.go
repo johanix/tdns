@@ -44,17 +44,17 @@ func EvaluateRolloverPolicyInvariants(zd *ZoneData, pol *DnssecPolicy) {
 	// rolling; operator-visible only.
 	var violations, warnings []string
 
-	if m := checkE5(pol); m != "" {
-		violations = append(violations, m)
+	if r := checkE5(pol); r.Failed() {
+		violations = append(violations, r.Message)
 	}
 
 	dsTTL, dsTTLKnown := resolveDSTTL(zd, pol)
 	if dsTTLKnown {
-		if m := checkE10(pol, dsTTL); m != "" {
-			violations = append(violations, m)
+		if r := checkE10(pol, dsTTL); r.Failed() {
+			violations = append(violations, r.Message)
 		}
-		if m := checkE11(pol, dsTTL); m != "" {
-			warnings = append(warnings, m)
+		if r := checkE11(pol, dsTTL); r.Failed() {
+			warnings = append(warnings, r.Message)
 		}
 	}
 
@@ -85,6 +85,25 @@ func resolveDSTTL(zd *ZoneData, pol *DnssecPolicy) (time.Duration, bool) {
 	return 0, false
 }
 
+// InvariantResult is the output of one §4 invariant check. Empty
+// Message means "this invariant passes (or is not applicable)" — the
+// runtime path uses the message-or-empty contract directly. Suggestion
+// is operator-actionable remediation text used by `auto-rollover
+// validate`; the runtime path discards it.
+type InvariantResult struct {
+	Message    string
+	Suggestion string
+}
+
+func (r InvariantResult) Failed() bool { return r.Message != "" }
+
+// Public wrappers for the §4 invariant checks. Used by the
+// `auto-rollover validate` CLI command (in package tdns/cli) which
+// needs to run the same checks against an offline-parsed policy.
+func CheckE5(pol *DnssecPolicy) InvariantResult                       { return checkE5(pol) }
+func CheckE10(pol *DnssecPolicy, dsTTL time.Duration) InvariantResult { return checkE10(pol, dsTTL) }
+func CheckE11(pol *DnssecPolicy, dsTTL time.Duration) InvariantResult { return checkE11(pol, dsTTL) }
+
 // checkE5: retirement_period ≥ min(DNSKEY_TTL, KSK.SigValidity).
 //
 // retirement_period is implemented as effective_margin =
@@ -98,25 +117,29 @@ func resolveDSTTL(zd *ZoneData, pol *DnssecPolicy) (time.Duration, bool) {
 // observed TTL alone, which is post-clamp — implicit E5 satisfaction
 // when the operator has set non-zero TTLs in policy. Skip the check
 // in that case to avoid false positives at startup.
-func checkE5(pol *DnssecPolicy) string {
+func checkE5(pol *DnssecPolicy) InvariantResult {
 	if !pol.Clamping.Enabled || pol.Clamping.Margin <= 0 {
-		return ""
+		return InvariantResult{}
 	}
 	dnskeyTTL := time.Duration(pol.TTLS.DNSKEY) * time.Second
 	sigVal := time.Duration(pol.KSK.SigValidity) * time.Second
 	if dnskeyTTL == 0 && sigVal == 0 {
-		return ""
+		return InvariantResult{}
 	}
 	floor := dnskeyTTL
 	if sigVal > 0 && (floor == 0 || sigVal < floor) {
 		floor = sigVal
 	}
 	if pol.Clamping.Margin >= floor {
-		return ""
+		return InvariantResult{}
 	}
-	return fmt.Sprintf("E5: clamping.margin (%s) < min(ttls.dnskey, ksk.sig-validity) (%s); "+
-		"retirement period too short to flush DNSKEY/RRSIG caches before next rollover",
-		pol.Clamping.Margin, floor)
+	return InvariantResult{
+		Message: fmt.Sprintf("E5: clamping.margin (%s) < min(ttls.dnskey, ksk.sig-validity) (%s); "+
+			"retirement period too short to flush DNSKEY/RRSIG caches before next rollover",
+			pol.Clamping.Margin, floor),
+		Suggestion: fmt.Sprintf("Raise clamping.margin to ≥ %s, OR lower max(ttls.dnskey, ksk.sig-validity) to ≤ %s.",
+			floor, pol.Clamping.Margin),
+	}
 }
 
 // checkE10: (N − 1) × KSK.Lifetime ≥ retirement_period + parent_prop + DS_TTL.
@@ -128,14 +151,14 @@ func checkE5(pol *DnssecPolicy) string {
 // scheme — under NOTIFY-only the parent has to fetch CDS before
 // updating its DS RRset, which adds latency on top of ds-publish-delay.
 // DS_TTL is the resolved value from resolveDSTTL.
-func checkE10(pol *DnssecPolicy, dsTTL time.Duration) string {
+func checkE10(pol *DnssecPolicy, dsTTL time.Duration) InvariantResult {
 	n := pol.Rollover.NumDS
 	if n < 2 {
-		return ""
+		return InvariantResult{}
 	}
 	kskLifetime := time.Duration(pol.KSK.Lifetime) * time.Second
 	if kskLifetime <= 0 {
-		return ""
+		return InvariantResult{}
 	}
 	retirement := pol.Clamping.Margin
 	parentProp := pol.Rollover.DsPublishDelay
@@ -145,12 +168,18 @@ func checkE10(pol *DnssecPolicy, dsTTL time.Duration) string {
 	required := retirement + parentProp + dsTTL
 	available := time.Duration(n-1) * kskLifetime
 	if available >= required {
-		return ""
+		return InvariantResult{}
 	}
-	return fmt.Sprintf("E10: (N-1)*KSK.Lifetime (%s = %d * %s) < retirement_period + parent_prop + DS_TTL "+
-		"(%s = %s + %s + %s); parent DS replacement too late before next rollover",
-		available, n-1, kskLifetime,
-		required, retirement, parentProp, dsTTL)
+	// Cheapest single-knob fix: raise N to make available ≥ required.
+	requiredN := int(required/kskLifetime) + 2 // ceil(required/L)+1
+	return InvariantResult{
+		Message: fmt.Sprintf("E10: (N-1)*KSK.Lifetime (%s = %d * %s) < retirement_period + parent_prop + DS_TTL "+
+			"(%s = %s + %s + %s); parent DS replacement too late before next rollover",
+			available, n-1, kskLifetime,
+			required, retirement, parentProp, dsTTL),
+		Suggestion: fmt.Sprintf("Raise rollover.num-ds to ≥ %d, OR raise ksk.lifetime, OR lower clamping.margin/rollover.ds-publish-delay/ttls.ds.",
+			requiredN),
+	}
 }
 
 // checkE11: production rule of thumb — N should comfortably exceed
@@ -160,14 +189,14 @@ func checkE10(pol *DnssecPolicy, dsTTL time.Duration) string {
 // We flag when the ratio of available to required lead time is below
 // 1.25 (i.e., less than 25% headroom). Exact threshold is somewhat
 // arbitrary; the spec doesn't pin a number.
-func checkE11(pol *DnssecPolicy, dsTTL time.Duration) string {
+func checkE11(pol *DnssecPolicy, dsTTL time.Duration) InvariantResult {
 	n := pol.Rollover.NumDS
 	if n < 2 {
-		return ""
+		return InvariantResult{}
 	}
 	kskLifetime := time.Duration(pol.KSK.Lifetime) * time.Second
 	if kskLifetime <= 0 {
-		return ""
+		return InvariantResult{}
 	}
 	parentProp := pol.Rollover.DsPublishDelay
 	if pol.Rollover.DsyncSchemePreference == DsyncSchemePreferenceForceNotify {
@@ -175,16 +204,19 @@ func checkE11(pol *DnssecPolicy, dsTTL time.Duration) string {
 	}
 	required := pol.Clamping.Margin + parentProp + dsTTL
 	if required <= 0 {
-		return ""
+		return InvariantResult{}
 	}
 	available := time.Duration(n-1) * kskLifetime
 	if available*4 >= required*5 {
 		// At least 25% headroom — comfortable.
-		return ""
+		return InvariantResult{}
 	}
-	return fmt.Sprintf("E11: N=%d gives only %s of lead time vs %s required (less than 25%% headroom); "+
-		"consider raising rollover.num-ds or KSK.lifetime",
-		n, available, required)
+	return InvariantResult{
+		Message: fmt.Sprintf("E11: N=%d gives only %s of lead time vs %s required (less than 25%% headroom); "+
+			"consider raising rollover.num-ds or KSK.lifetime",
+			n, available, required),
+		Suggestion: "Raise rollover.num-ds by 1 or extend ksk.lifetime to gain headroom against transient delays.",
+	}
 }
 
 // ObserveParentDSTTL queries the parent agent for the zone's DS RRset

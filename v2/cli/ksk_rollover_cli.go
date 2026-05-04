@@ -1272,12 +1272,13 @@ func newAutoRolloverCmd(_ string) *cobra.Command {
 		Short: "Manage and inspect automated KSK rollover (scheduled + manual-ASAP)",
 		Long: `Subcommands operate on local keystore state for a zone:
 
-  when     — compute the earliest safe rollover moment (no state change)
-  asap     — schedule a manual rollover at that earliest moment
-  cancel   — clear a pending manual rollover request
-  status   — print phase + per-key state for the zone
-  reset    — clear last_rollover_error on one key after operator action
-  unstick  — skip the softfail-delay and probe the parent on the next tick`,
+  when      — compute the earliest safe rollover moment (no state change)
+  asap      — schedule a manual rollover at that earliest moment
+  cancel    — clear a pending manual rollover request
+  status    — print phase + per-key state for the zone
+  reset     — clear last_rollover_error on one key after operator action
+  unstick   — skip the softfail-delay and probe the parent on the next tick
+  validate  — re-parse policy from YAML and report which §4 invariants pass/fail`,
 	}
 	c.AddCommand(
 		newAutoRolloverWhenCmd(),
@@ -1286,6 +1287,7 @@ func newAutoRolloverCmd(_ string) *cobra.Command {
 		newAutoRolloverStatusCmd(),
 		newAutoRolloverResetCmd(),
 		newAutoRolloverUnstickCmd(),
+		newAutoRolloverValidateCmd(),
 	)
 	return c
 }
