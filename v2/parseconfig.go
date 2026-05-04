@@ -742,7 +742,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 					return
 				}
 				EvaluateRolloverPolicyInvariants(zd, zd.DnssecPolicy)
-				go ObserveParentDSTTL(context.Background(), zd, zd.DnssecPolicy)
+				// Use the ParseZones ctx so the parent-DS observation
+				// goroutine cancels on daemon shutdown.
+				go ObserveParentDSTTL(ctx, zd, zd.DnssecPolicy)
 			})
 
 			// Delegation sync callback: set up DSYNC publication (parent) or
