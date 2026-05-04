@@ -109,7 +109,31 @@ func dbSetupTables(db *sql.DB) bool {
 	}
 
 	dbMigrateSchema(db)
+	dbMigrateData(db)
 	return false
+}
+
+// dbMigrateData performs one-shot data-shape migrations that need to
+// run after dbMigrateSchema has ensured the column shape is correct.
+// Each block must be idempotent: re-running on an already-migrated
+// database is a no-op.
+func dbMigrateData(db *sql.DB) {
+	// Copy old standby_at values to the new published_at column for
+	// any RolloverKeyState row where published_at hasn't been set
+	// yet. The old single-state code stamped standby_at when the
+	// engine moved a key into the served zone DNSKEY RRset — what
+	// the new state machine calls "published_at." Subsequent commits
+	// in the same series rename code references and add a separate
+	// transition to set the new (genuine-propagated) standby_at;
+	// this commit is purely additive and safe to run on its own.
+	if dbColumnExists(db, "RolloverKeyState", "published_at") {
+		_, err := db.Exec(`UPDATE RolloverKeyState
+SET published_at = standby_at
+WHERE published_at IS NULL AND standby_at IS NOT NULL AND standby_at != ''`)
+		if err != nil {
+			lgConfig.Error("data migration: copy standby_at to published_at failed", "err", err)
+		}
+	}
 }
 
 // dbMigrateSchema adds columns that may be missing from tables created by older schema versions.
@@ -160,6 +184,19 @@ func dbMigrateSchema(db *sql.DB) {
 		// pushed via this scheme yet".
 		{"RolloverZoneState", "parent_advertises_update", "ALTER TABLE RolloverZoneState ADD COLUMN parent_advertises_update INTEGER"},
 		{"RolloverZoneState", "parent_advertises_notify", "ALTER TABLE RolloverZoneState ADD COLUMN parent_advertises_notify INTEGER"},
+		// Split of the old "standby" state into "published" (DNSKEY in
+		// zone, propagation incomplete) + "standby" (propagation
+		// complete, ready for AtomicRollover). published_at carries
+		// the moment the DNSKEY entered the served zone — what the
+		// old single-state code stored in standby_at.
+		//
+		// Migration of existing data is handled separately in
+		// migrateOldStandbyToPublished (called after the column add)
+		// because it requires both copying timestamp values and
+		// updating state strings on DnssecKeyStore. Doing that here
+		// would mix DDL-style migrations (idempotent column adds) with
+		// data-shape migrations (one-shot state transitions).
+		{"RolloverKeyState", "published_at", "ALTER TABLE RolloverKeyState ADD COLUMN published_at TEXT"},
 	}
 
 	for _, m := range migrations {

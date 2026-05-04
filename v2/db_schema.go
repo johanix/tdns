@@ -97,6 +97,7 @@ UNIQUE (zonename, keyid)
 		rollover_state_at    TEXT,
 		ds_submitted_at      TEXT,
 		ds_observed_at       TEXT,
+		published_at         TEXT,
 		standby_at           TEXT,
 		active_at            TEXT,
 		active_seq           INTEGER,
