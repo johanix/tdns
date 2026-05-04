@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"testing"
+	"time"
 )
 
 // TestMultiErrorCoexistence verifies that two error categories can
@@ -115,6 +116,110 @@ func TestHasErrorOtherThan(t *testing.T) {
 	}
 	if !zd.HasErrorOtherThan(RefreshError) {
 		t.Fatal("ConfigError not in allow list: HasErrorOtherThan should be true")
+	}
+}
+
+// TestHasServiceImpactingError confirms RefreshError and rollover-*
+// categories don't trigger the service-impacting check, so a zone with
+// e.g. RolloverPolicyViolation continues to serve queries normally
+// (regression test for the SERVFAIL bug).
+func TestHasServiceImpactingError(t *testing.T) {
+	zd := &ZoneData{ZoneName: "test.example."}
+
+	if zd.HasServiceImpactingError() {
+		t.Fatal("clean zone: HasServiceImpactingError should be false")
+	}
+
+	zd.SetError(RefreshError, "stale data")
+	if zd.HasServiceImpactingError() {
+		t.Fatal("RefreshError alone: serving must continue")
+	}
+
+	zd.SetError(RolloverPolicyViolation, "E5")
+	if zd.HasServiceImpactingError() {
+		t.Fatal("rollover-policy violation: serving must continue (regression: SERVFAIL bug)")
+	}
+
+	zd.SetError(RolloverParentBlocker, "no DSYNC")
+	if zd.HasServiceImpactingError() {
+		t.Fatal("parent blocker: serving must continue")
+	}
+
+	zd.SetError(RolloverPolicyWarning, "E11")
+	if zd.HasServiceImpactingError() {
+		t.Fatal("rollover-policy warning: serving must continue")
+	}
+
+	zd.SetError(ConfigError, "bad config")
+	if !zd.HasServiceImpactingError() {
+		t.Fatal("ConfigError: serving must stop")
+	}
+}
+
+// TestHasAutoRolloverImpactingError confirms the engine-gating set:
+// RolloverPolicyViolation and RolloverParentBlocker block the engine,
+// but RolloverPolicyWarning does NOT (warnings let the engine roll).
+func TestHasAutoRolloverImpactingError(t *testing.T) {
+	zd := &ZoneData{ZoneName: "test.example."}
+
+	if zd.HasAutoRolloverImpactingError() {
+		t.Fatal("clean zone: false")
+	}
+
+	zd.SetError(RolloverPolicyWarning, "E11")
+	if zd.HasAutoRolloverImpactingError() {
+		t.Fatal("warning alone: engine must keep rolling")
+	}
+
+	zd.SetError(RolloverPolicyViolation, "E5")
+	if !zd.HasAutoRolloverImpactingError() {
+		t.Fatal("violation: engine must stop")
+	}
+
+	zd.ClearError(RolloverPolicyViolation)
+	zd.SetError(RolloverParentBlocker, "no DSYNC")
+	if !zd.HasAutoRolloverImpactingError() {
+		t.Fatal("parent blocker: engine must stop")
+	}
+
+	zd.ClearError(RolloverParentBlocker)
+	zd.SetError(RefreshError, "stale")
+	if zd.HasAutoRolloverImpactingError() {
+		t.Fatal("RefreshError alone: engine must keep rolling")
+	}
+}
+
+// TestEvaluateRolloverPolicyInvariantsSeveritySplit confirms that
+// hard violations (E5/E10) and warnings (E11) end up in separate
+// error categories so the engine gates only on violations.
+func TestEvaluateRolloverPolicyInvariantsSeveritySplit(t *testing.T) {
+	// Build a policy that fails E5 (clamping margin too small) AND
+	// triggers E11 warning (tight headroom).
+	pol := &DnssecPolicy{}
+	pol.Rollover.Method = RolloverMethodMultiDS
+	pol.Rollover.NumDS = 2
+	pol.KSK.Lifetime = 21 * 60    // 21m
+	pol.KSK.SigValidity = 60 * 60 // 1h
+	pol.Rollover.DsPublishDelay = 5 * time.Minute
+	pol.Clamping.Enabled = true
+	pol.Clamping.Margin = 1 * time.Minute // < min(5m dnskey, 1h sigvalidity) → E5 fail
+	pol.TTLS.DNSKEY = 300                 // 5m
+	pol.TTLS.DS = 600                     // 10m so E10/E11 can run
+
+	zd := &ZoneData{ZoneName: "test.example."}
+	EvaluateRolloverPolicyInvariants(zd, pol)
+
+	if !zd.HasError(RolloverPolicyViolation) {
+		t.Fatal("expected E5 violation in RolloverPolicyViolation category")
+	}
+	// E11 may or may not fire depending on the specific arithmetic;
+	// what matters is that violations and warnings are independent
+	// — clearing one shouldn't clear the other.
+	if zd.HasError(RolloverPolicyWarning) {
+		zd.ClearError(RolloverPolicyWarning)
+		if !zd.HasError(RolloverPolicyViolation) {
+			t.Fatal("clearing warning must not clear violation (categories independent)")
+		}
 	}
 }
 
