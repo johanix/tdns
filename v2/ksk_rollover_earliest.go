@@ -16,6 +16,38 @@ type EarliestRolloverGate struct {
 	At   time.Time
 }
 
+// EarliestRolloverStatus distinguishes the two operationally distinct
+// "rollover not yet" cases plus the ready and policy-blocked states:
+//
+//   - Ready: rollover can be queued at Earliest (Case 2 cache-flush
+//     wait already factored in). asap honors the operator override
+//     and queues; CLI shows the gate list.
+//   - WaitingForParent (Case 1): no usable standby SEP key — DS for
+//     the next key isn't observed at the parent yet, so promotion
+//     can't happen at any time. Engine cannot satisfy asap;
+//     refuse with the blocker diagnostic.
+//   - PolicyBlocked: zone has an auto-rollover-impacting error
+//     (E5/E10 violation or RolloverParentBlocker); engine
+//     intentionally suspended.
+type EarliestRolloverStatus int
+
+const (
+	EarliestStatusReady EarliestRolloverStatus = iota
+	EarliestStatusWaitingForParent
+	EarliestStatusPolicyBlocked
+)
+
+// EarliestRolloverBlocker explains why Earliest is unavailable when
+// status != Ready. KeyID is the active key the engine wants to roll
+// FROM (when meaningful); ToHint identifies the next-up key target
+// (or 0 when no candidate exists). Detail is human-readable.
+type EarliestRolloverBlocker struct {
+	Reason string // e.g. "no standby SEP key in pipeline"
+	Cause  string // sub-cause from RolloverZoneRow (last_softfail_*, etc.)
+	KeyID  uint16 // active key (0 when not meaningful)
+	Detail string // free-form additional info
+}
+
 // EarliestRolloverResult is the output of ComputeEarliestRollover.
 // FromKID/ToKID identify the active SEP KSK and its scheduled standby
 // successor by keyid; FromIdx/ToIdx are the corresponding rollover_index
@@ -28,6 +60,8 @@ type EarliestRolloverResult struct {
 	FromIdx  int
 	ToIdx    int
 	Gates    []EarliestRolloverGate
+	Status   EarliestRolloverStatus
+	Blocker  *EarliestRolloverBlocker
 }
 
 // ComputeEarliestRollover returns the earliest moment a rollover can safely
@@ -75,6 +109,27 @@ func ComputeEarliestRollover(kdb *KeyDB, zone string, pol *DnssecPolicy, now tim
 		return nil, fmt.Errorf("zone %s: rollover method is none", zone)
 	}
 
+	// Policy-blocked first: caller wants the engine status BEFORE the
+	// "is the pipeline ready" question, since policy errors mean we
+	// shouldn't be rolling at all. ComputeEarliestRollover is read-only;
+	// the engine's rollover ticks have their own gate
+	// (HasAutoRolloverImpactingError early-return).
+	if zd, ok := Zones.Get(zone); ok && zd != nil && zd.HasAutoRolloverImpactingError() {
+		var blocker EarliestRolloverBlocker
+		blocker.Reason = "automated rollover suspended by policy violation"
+		var msgs []string
+		for _, e := range zd.ErrorList() {
+			if isAutoRolloverImpactingError(e.Type) {
+				msgs = append(msgs, e.Msg)
+			}
+		}
+		blocker.Detail = strings.Join(msgs, "; ")
+		return &EarliestRolloverResult{
+			Status:  EarliestStatusPolicyBlocked,
+			Blocker: &blocker,
+		}, nil
+	}
+
 	// Active SEP KSK.
 	active, err := GetDnssecKeysByState(kdb, zone, DnskeyStateActive)
 	if err != nil {
@@ -96,12 +151,24 @@ func ComputeEarliestRollover(kdb *KeyDB, zone string, pol *DnssecPolicy, now tim
 	}
 
 	// Next SEP KSK: oldest standby (matches AtomicRollover's selection).
+	// Standby state = DS observed at parent + propagation elapsed, so
+	// having one means we're in Case 2 (cache-flush wait) by
+	// construction. No standby = Case 1 (parent DS not ready).
 	standbyKid, err := pickEarliestStandbySEP(kdb, zone)
 	if err != nil {
 		return nil, fmt.Errorf("pick standby: %w", err)
 	}
 	if standbyKid == 0 {
-		return nil, fmt.Errorf("zone %s: no standby SEP key (pipeline not ready)", zone)
+		// Case 1: no standby SEP. Engine cannot promote any key.
+		// Build a structured blocker from RolloverZoneRow so the
+		// operator sees *why* the parent's DS isn't ready.
+		blocker := diagnoseEarliestBlocker(kdb, zone, fromKid)
+		return &EarliestRolloverResult{
+			FromKID: fromKid,
+			FromIdx: fromIdx,
+			Status:  EarliestStatusWaitingForParent,
+			Blocker: blocker,
+		}, nil
 	}
 	toIdx, _, err := RolloverIndexForKey(kdb, zone, standbyKid)
 	if err != nil {
@@ -146,7 +213,49 @@ func ComputeEarliestRollover(kdb *KeyDB, zone string, pol *DnssecPolicy, now tim
 		FromIdx:  fromIdx,
 		ToIdx:    toIdx,
 		Gates:    gates,
+		Status:   EarliestStatusReady,
 	}, nil
+}
+
+// diagnoseEarliestBlocker reads RolloverZoneRow softfail / observe
+// state to explain why no standby SEP key is available. Returns a
+// best-effort populated blocker — never nil, since the caller has
+// already determined Case 1.
+func diagnoseEarliestBlocker(kdb *KeyDB, zone string, activeKid uint16) *EarliestRolloverBlocker {
+	out := &EarliestRolloverBlocker{
+		Reason: "no standby SEP key in pipeline (parent DS for upcoming key not yet observed)",
+		KeyID:  activeKid,
+	}
+	row, err := LoadRolloverZoneRow(kdb, zone)
+	if err != nil || row == nil {
+		out.Cause = "no rollover-zone state recorded yet"
+		return out
+	}
+	if row.LastSoftfailCategory.Valid && row.LastSoftfailCategory.String != "" {
+		cause := row.LastSoftfailCategory.String
+		switch cause {
+		case "child-config:waiting-for-parent":
+			out.Cause = "parent advertises no DSYNC scheme matching policy"
+		case "transport":
+			out.Cause = "parent unreachable (last attempt: transport failure)"
+		case "parent-rejected":
+			out.Cause = "parent rejected last DS push (parent-rejected)"
+		case "child-config:local-error":
+			out.Cause = "child-side configuration error preventing DS push"
+		default:
+			out.Cause = fmt.Sprintf("last softfail category: %s", cause)
+		}
+		if row.LastSoftfailDetail.Valid && row.LastSoftfailDetail.String != "" {
+			out.Detail = row.LastSoftfailDetail.String
+		}
+		return out
+	}
+	if row.NextPushAt.Valid && row.NextPushAt.String != "" {
+		out.Cause = fmt.Sprintf("DS push pending; next attempt %s", row.NextPushAt.String)
+		return out
+	}
+	out.Cause = "DS push not yet attempted in current pipeline window"
+	return out
 }
 
 // pickEarliestStandbySEP returns the keyid of the standby SEP key that

@@ -105,27 +105,30 @@ func APIRolloverAsap(conf *Config) func(w http.ResponseWriter, r *http.Request) 
 			return
 		}
 
-		// Refuse if the zone has an auto-rollover-impacting error:
-		// hard policy violation (E5/E10) or parent-DSYNC blocker.
-		// Warnings are NOT a refusal cause — the operator can asap
-		// past a headroom warning. Commit 4 will narrow this further
-		// to Case 1 (no DS at parent) so the operator can also asap
-		// past a Case 2 cache-flush wait.
-		if zd, ok := Zones.Get(zone); ok && zd != nil && zd.HasAutoRolloverImpactingError() {
-			msgs := []string{}
-			for _, e := range zd.ErrorList() {
-				if isAutoRolloverImpactingError(e.Type) {
-					msgs = append(msgs, e.Msg)
-				}
-			}
-			http.Error(w, fmt.Sprintf("zone %s: rollover blocked: %s", zone, strings.Join(msgs, "; ")), http.StatusBadRequest)
-			return
-		}
-
 		now := time.Now()
 		res, err := ComputeEarliestRollover(kdb, zone, pol, now)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// Refuse on Case 1 (parent DS not ready) or PolicyBlocked
+		// (E5/E10 violation). Both surface a structured blocker
+		// diagnostic. Only Status == Ready means we queue:
+		// EarliestStatusReady is Case 2 (DS at parent, awaiting
+		// cache-flush) and the operator override applies — asap
+		// schedules at res.Earliest as before.
+		if res.Status != EarliestStatusReady {
+			detail := "rollover not currently possible"
+			if res.Blocker != nil {
+				detail = res.Blocker.Reason
+				if res.Blocker.Cause != "" {
+					detail = fmt.Sprintf("%s: %s", detail, res.Blocker.Cause)
+				}
+				if res.Blocker.Detail != "" {
+					detail = fmt.Sprintf("%s (%s)", detail, res.Blocker.Detail)
+				}
+			}
+			http.Error(w, fmt.Sprintf("zone %s: %s", zone, detail), http.StatusBadRequest)
 			return
 		}
 		if err := SetManualRolloverRequest(kdb, zone, now, res.Earliest); err != nil {

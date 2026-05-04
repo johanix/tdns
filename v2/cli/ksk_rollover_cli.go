@@ -498,6 +498,26 @@ func renderRolloverWhen(resp *tdns.RolloverWhenResponse) {
 	}
 	// Warnings don't block — render schedule below the warning header.
 	printRolloverPolicyWarnings(resp.PolicyWarnings)
+
+	// Case 1 / waiting-for-parent: render the structured blocker
+	// instead of the schedule view. The schedule has no meaningful
+	// EarliestPossible in this state.
+	if resp.Status == "waiting-for-parent" && resp.Blocker != nil {
+		fmt.Printf("KSK rollover for zone %s: not currently possible.\n", resp.Zone)
+		fmt.Printf("  Reason: %s\n", resp.Blocker.Reason)
+		if resp.Blocker.Cause != "" {
+			fmt.Printf("  Cause:  %s\n", resp.Blocker.Cause)
+		}
+		if resp.Blocker.Detail != "" {
+			fmt.Printf("  Detail: %s\n", resp.Blocker.Detail)
+		}
+		if resp.FromKeyID != 0 {
+			fmt.Printf("  Active keyid: %d\n", resp.FromKeyID)
+		}
+		fmt.Println("  Time until possible: unknown")
+		return
+	}
+
 	currentTime := formatRolloverTimeAbsolute(resp.CurrentTime)
 	if currentTime == "-" {
 		// Fallback when daemon didn't supply CurrentTime (legacy

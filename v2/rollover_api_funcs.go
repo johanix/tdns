@@ -149,6 +149,20 @@ func isAutoRolloverImpactingError(t ErrorType) bool {
 	return false
 }
 
+// earliestStatusToString maps the EarliestRolloverStatus enum to the
+// JSON wire string used by RolloverWhenResponse.Status / similar.
+func earliestStatusToString(s EarliestRolloverStatus) string {
+	switch s {
+	case EarliestStatusReady:
+		return "ready"
+	case EarliestStatusWaitingForParent:
+		return "waiting-for-parent"
+	case EarliestStatusPolicyBlocked:
+		return "policy-blocked"
+	}
+	return "unknown"
+}
+
 // applyInFlightPublicationLabels overrides the Published column for
 // SEP keys that are mid-publication: the engine has submitted DS for
 // them to the parent (so they appear in SubmittedKeyIDs) but has not
@@ -268,15 +282,26 @@ func ComputeRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Ti
 	if res, err := ComputeEarliestRollover(kdb, zone, pol, now); err != nil {
 		out.Note = err.Error()
 	} else {
-		out.EarliestPossible = res.Earliest.UTC().Format(time.RFC3339)
 		out.FromKeyID = res.FromKID
 		out.ToKeyID = res.ToKID
-		out.Gates = make([]RolloverWhenGateEntry, 0, len(res.Gates))
-		for _, g := range res.Gates {
-			out.Gates = append(out.Gates, RolloverWhenGateEntry{
-				Name: g.Name,
-				At:   g.At.UTC().Format(time.RFC3339),
-			})
+		out.Status = earliestStatusToString(res.Status)
+		if res.Blocker != nil {
+			out.Blocker = &RolloverBlockerEntry{
+				Reason: res.Blocker.Reason,
+				Cause:  res.Blocker.Cause,
+				KeyID:  res.Blocker.KeyID,
+				Detail: res.Blocker.Detail,
+			}
+		}
+		if res.Status == EarliestStatusReady {
+			out.EarliestPossible = res.Earliest.UTC().Format(time.RFC3339)
+			out.Gates = make([]RolloverWhenGateEntry, 0, len(res.Gates))
+			for _, g := range res.Gates {
+				out.Gates = append(out.Gates, RolloverWhenGateEntry{
+					Name: g.Name,
+					At:   g.At.UTC().Format(time.RFC3339),
+				})
+			}
 		}
 	}
 

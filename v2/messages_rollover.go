@@ -185,6 +185,20 @@ type RolloverWhenResponse struct {
 	// (engine keeps rolling). Same split as RolloverStatus.
 	PolicyErrors   []string `json:"policyErrors,omitempty"`
 	PolicyWarnings []string `json:"policyWarnings,omitempty"`
+	// Status / Blocker distinguish Case 1 (parent DS not at parent
+	// — engine cannot promote, no ETA) from Case 2 (DS observed,
+	// awaiting cache-flush — Earliest is set). Status values:
+	// "ready", "waiting-for-parent", "policy-blocked".
+	Status  string                `json:"status,omitempty"`
+	Blocker *RolloverBlockerEntry `json:"blocker,omitempty"`
+}
+
+// RolloverBlockerEntry mirrors EarliestRolloverBlocker as wire JSON.
+type RolloverBlockerEntry struct {
+	Reason string `json:"reason"`
+	Cause  string `json:"cause,omitempty"`
+	KeyID  uint16 `json:"keyid,omitempty"`
+	Detail string `json:"detail,omitempty"`
 }
 
 // RolloverWhenGateEntry mirrors one EarliestRolloverGate as wire JSON.
