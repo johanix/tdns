@@ -64,6 +64,56 @@ func TestEffectiveServedDnskeyTTLPolicyOnly(t *testing.T) {
 	}
 }
 
+// TestNotifyTimeoutFromPolicy covers the W6/P10 derivation of NOTIFY
+// round-trip timeout from rollover.parent-cds-poll-estimate.
+func TestNotifyTimeoutFromPolicy(t *testing.T) {
+	tests := []struct {
+		name string
+		pol  *DnssecPolicy
+		want time.Duration
+	}{
+		{
+			name: "nil policy -> 30s floor",
+			pol:  nil,
+			want: 30 * time.Second,
+		},
+		{
+			name: "default 1m -> 2m",
+			pol: func() *DnssecPolicy {
+				p := &DnssecPolicy{}
+				p.Rollover.ParentCdsPollEstimate = time.Minute
+				return p
+			}(),
+			want: 2 * time.Minute,
+		},
+		{
+			name: "very short estimate -> 30s floor wins",
+			pol: func() *DnssecPolicy {
+				p := &DnssecPolicy{}
+				p.Rollover.ParentCdsPollEstimate = 5 * time.Second
+				return p
+			}(),
+			want: 30 * time.Second,
+		},
+		{
+			name: "long estimate scales 2x",
+			pol: func() *DnssecPolicy {
+				p := &DnssecPolicy{}
+				p.Rollover.ParentCdsPollEstimate = 10 * time.Minute
+				return p
+			}(),
+			want: 20 * time.Minute,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := notifyTimeoutFromPolicy(tc.pol); got != tc.want {
+				t.Errorf("got %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestE12FormulaDocumentsCorrectMath asserts the §4.7 formula in
 // arithmetic — the cache-flush invariant E3 holds iff
 // T_publish + child_prop + DNSKEY_TTL <= T_roll. We compute T_publish

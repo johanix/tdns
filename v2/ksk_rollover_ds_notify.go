@@ -154,7 +154,13 @@ func pushDSRRsetViaNotify(ctx context.Context, deps RolloverEngineDeps, target *
 		Targets:  target.Addresses,
 		Response: respCh,
 	}
-	notifyCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Bound the NOTIFY round-trip. Derive from the operator's
+	// parent-cds-poll-estimate (W6) when set: max(30s, 2 ×
+	// parentCdsPollEstimate) gives a 30s floor for healthy parents
+	// and scales up for parents that batch CDS polls. Falls back to
+	// 30s when policy is nil (legacy CLI offline call sites).
+	notifyTimeout := notifyTimeoutFromPolicy(deps.Policy)
+	notifyCtx, cancel := context.WithTimeout(ctx, notifyTimeout)
 	defer cancel()
 	select {
 	case notifyq <- req:
@@ -241,4 +247,22 @@ func formatNotifyDetail(resp NotifyResponse) string {
 		return ""
 	}
 	return strings.Join(parts, " ")
+}
+
+// notifyTimeoutFromPolicy returns the NOTIFY round-trip timeout for
+// pushDSRRsetViaNotify. Floor 30s (covers healthy parents that fetch
+// CDS within seconds), scales up to 2 × parent-cds-poll-estimate for
+// parents that batch their CDS polls (registries with multi-minute
+// poll cycles). Returns 30s when pol is nil (legacy CLI call sites).
+func notifyTimeoutFromPolicy(pol *DnssecPolicy) time.Duration {
+	const floor = 30 * time.Second
+	if pol == nil {
+		return floor
+	}
+	if est := pol.Rollover.ParentCdsPollEstimate; est > 0 {
+		if scaled := est * 2; scaled > floor {
+			return scaled
+		}
+	}
+	return floor
 }
