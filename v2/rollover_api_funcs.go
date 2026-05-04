@@ -96,22 +96,28 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInte
 	return out, nil
 }
 
-// populateRolloverPolicyErrors copies any active rollover-gating error
-// entries (RolloverPolicyViolation from W2, RolloverParentBlocker from
-// W4) from the live ZoneData into RolloverStatus.PolicyErrors. The CLI
-// uses this slice to gate output of /auto-rollover status, when, and
-// asap. Empty when the zone is not registered in Zones (offline-mode
-// lookups) or when no rollover-gating errors are active.
-func populateRolloverPolicyErrors(out *RolloverStatus, zone string) {
+// collectRolloverGatingErrorMessages returns the messages of any active
+// rollover-gating error categories (RolloverPolicyViolation from W2,
+// RolloverParentBlocker from W4) on the given zone. Returns nil when
+// the zone is not registered in Zones (offline-mode lookups) or when no
+// rollover-gating errors are active. Used by the API populators that
+// fill RolloverStatus.PolicyErrors and RolloverWhenResponse.PolicyErrors.
+func collectRolloverGatingErrorMessages(zone string) []string {
 	zd, ok := Zones.Get(zone)
 	if !ok || zd == nil {
-		return
+		return nil
 	}
+	var msgs []string
 	for _, e := range zd.ErrorList() {
 		if isRolloverGatingError(e.Type) {
-			out.PolicyErrors = append(out.PolicyErrors, e.Msg)
+			msgs = append(msgs, e.Msg)
 		}
 	}
+	return msgs
+}
+
+func populateRolloverPolicyErrors(out *RolloverStatus, zone string) {
+	out.PolicyErrors = append(out.PolicyErrors, collectRolloverGatingErrorMessages(zone)...)
 }
 
 func isRolloverGatingError(t ErrorType) bool {
@@ -265,15 +271,7 @@ func ComputeRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Ti
 }
 
 func populateRolloverWhenPolicyErrors(out *RolloverWhenResponse, zone string) {
-	zd, ok := Zones.Get(zone)
-	if !ok || zd == nil {
-		return
-	}
-	for _, e := range zd.ErrorList() {
-		if isRolloverGatingError(e.Type) {
-			out.PolicyErrors = append(out.PolicyErrors, e.Msg)
-		}
-	}
+	out.PolicyErrors = append(out.PolicyErrors, collectRolloverGatingErrorMessages(zone)...)
 }
 
 // populateFromZoneRow copies fields from the persisted row into the
