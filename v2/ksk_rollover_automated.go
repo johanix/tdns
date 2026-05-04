@@ -144,12 +144,24 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 	//   - Total pipeline below cap?   (safety against unbounded growth
 	//     when DS publication is stalled — every tick would otherwise
 	//     create a new 'created' key that never advances)
+	//
+	// Circuit breaker: if total ever exceeds 2 * (num_ds + 1), refuse to
+	// generate regardless of intent. The cap above prevents unbounded
+	// growth on a single tick; this layer catches a future bug that bypasses
+	// or weakens the cap. CRIT log so the operator sees it before the
+	// next status query.
 	num := pol.Rollover.NumDS
 	maxPipeline := num + 1
+	circuitBreakerCeiling := 2 * maxPipeline
 	for {
 		total, err := CountKskInPipeline(kdb, zone)
 		if err != nil {
 			return err
+		}
+		if total > circuitBreakerCeiling {
+			lgSigner.Error("rollover: pipeline-fill circuit breaker tripped — total exceeds 2*(num_ds+1); refusing to generate; investigate stuck pipeline",
+				"zone", zone, "total", total, "ceiling", circuitBreakerCeiling, "num_ds", num)
+			break
 		}
 		if total >= maxPipeline {
 			break

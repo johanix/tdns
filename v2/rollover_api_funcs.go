@@ -205,17 +205,69 @@ func applyInFlightPublicationLabels(out *RolloverStatus) {
 // today: kasp.check_interval must be < attempt-timeout / 2, otherwise
 // observe-poll cadence is starved and rollover attempts deterministically
 // time out before any poll fires.
+//
+// Also surfaces three trip-wires that catch engine pathologies the
+// operator would otherwise have to notice from log volume or the size
+// of status output:
+//
+//   - Pipeline depth above num_ds + 2 (cap is num_ds + 1; 2 above signals
+//     a breach the engine should have prevented).
+//   - CDS RRset above 10 keyids (parent-side stale-data accumulation, or
+//     a runaway-style failure caught by the cap but with stale data still
+//     visible).
+//   - Time since last successful rollover above 2 × KSK.Lifetime (engine
+//     cannot make progress on this zone for a multi-cycle stretch).
 func populateRolloverWarnings(out *RolloverStatus, pol *DnssecPolicy, checkInterval time.Duration) {
-	if pol == nil || checkInterval <= 0 {
+	if pol == nil {
 		return
 	}
 	if pol.Rollover.Method != RolloverMethodMultiDS && pol.Rollover.Method != RolloverMethodDoubleSignature {
 		return
 	}
-	if pol.Rollover.ConfirmTimeout > 0 && pol.Rollover.ConfirmTimeout < 2*checkInterval {
+	if checkInterval > 0 && pol.Rollover.ConfirmTimeout > 0 && pol.Rollover.ConfirmTimeout < 2*checkInterval {
 		out.Warnings = append(out.Warnings,
 			fmt.Sprintf("kasp.check_interval (%s) is too coarse for attempt-timeout (%s); observe polling will be starved — lower kasp.check_interval to < attempt-timeout/2 or raise rollover.ds-publish-delay",
 				checkInterval, pol.Rollover.ConfirmTimeout))
+	}
+	if pol.Rollover.NumDS > 0 {
+		nonTerminal := 0
+		for _, e := range out.KSKs {
+			if e.State != "" && e.State != DnskeyStateRemoved {
+				nonTerminal++
+			}
+		}
+		if nonTerminal > pol.Rollover.NumDS+2 {
+			out.Warnings = append(out.Warnings,
+				fmt.Sprintf("pipeline depth (%d non-terminal KSKs) exceeds num_ds+2 (%d) — engine cap is num_ds+1; investigate stuck pipeline (parent-publication softfail, DS-observation timeout)",
+					nonTerminal, pol.Rollover.NumDS+2))
+		}
+	}
+	if len(out.CdsPublishedKeyIDs) > 10 {
+		out.Warnings = append(out.Warnings,
+			fmt.Sprintf("CDS RRset published with %d records — should normally be ≤ num_ds+1; check for stale CDS publications or accumulated parent-side state",
+				len(out.CdsPublishedKeyIDs)))
+	}
+	if pol.KSK.Lifetime > 0 {
+		lifetime := time.Duration(pol.KSK.Lifetime) * time.Second
+		var latestActive time.Time
+		for _, e := range out.KSKs {
+			if e.State != DnskeyStateActive {
+				continue
+			}
+			if t, ok := parseRFC3339(e.StateSince); ok {
+				if t.After(latestActive) {
+					latestActive = t
+				}
+			}
+		}
+		if !latestActive.IsZero() {
+			elapsed := time.Since(latestActive)
+			if elapsed > 2*lifetime {
+				out.Warnings = append(out.Warnings,
+					fmt.Sprintf("active KSK age (%s) exceeds 2 × KSK.Lifetime (%s) — rollover engine is not advancing this zone",
+						elapsed.Truncate(time.Second), 2*lifetime))
+			}
+		}
 	}
 }
 
