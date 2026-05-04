@@ -261,6 +261,12 @@ func ComputeRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Ti
 		CurrentTime: now.UTC().Format(time.RFC3339),
 	}
 
+	// PolicyErrors / PolicyWarnings must be populated for *every*
+	// return path — the operator most needs to see active blockers
+	// when the rollover state is degenerate (no policy, in-progress,
+	// etc). Defer the populator to the end of the function.
+	defer populateRolloverWhenPolicyErrors(out, zone)
+
 	if pol == nil {
 		out.Note = "zone has no DNSSEC policy"
 		return out, nil
@@ -310,8 +316,7 @@ func ComputeRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Ti
 		out.NextScheduled = t.UTC().Format(time.RFC3339)
 	}
 
-	populateRolloverWhenPolicyErrors(out, zone)
-
+	// PolicyErrors/Warnings populated by the deferred call above.
 	return out, nil
 }
 

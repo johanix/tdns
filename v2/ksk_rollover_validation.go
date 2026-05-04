@@ -38,24 +38,51 @@ func EvaluateRolloverPolicyInvariants(zd *ZoneData, pol *DnssecPolicy) {
 		return
 	}
 
-	// Hard violations (E5, E10) → RolloverPolicyViolation. Engine
-	// stops rolling for the affected zone.
-	// Rule-of-thumb (E11) → RolloverPolicyWarning. Engine keeps
-	// rolling; operator-visible only.
-	var violations, warnings []string
+	// Two severities, one combined error category each:
+	//   - RolloverPolicyViolation: E5 (hard) and E10 (hard).
+	//   - RolloverPolicyWarning: E11 (rule of thumb).
+	//
+	// E5 is config-only (no DS_TTL needed); E10/E11 require a
+	// resolved DS_TTL. When DS_TTL is unknown (parent unreachable
+	// at zone init, no ttls.ds override, no prior observation),
+	// we can only freshly evaluate E5 — so we must NOT clobber any
+	// prior E10/E11 state. Strategy:
+	//
+	//   * Always evaluate E5 immediately.
+	//   * If DS_TTL known: evaluate all three, write the combined
+	//     fresh state for both categories.
+	//   * If DS_TTL unknown: write a refreshed E5-only state on
+	//     the violation category, but *only if the E5 result has
+	//     toggled* — otherwise leave the category alone so any
+	//     prior E10 message is preserved. The warning category is
+	//     left entirely alone.
+	e5 := checkE5(pol)
+	dsTTL, dsTTLKnown := resolveDSTTL(zd, pol)
 
-	if r := checkE5(pol); r.Failed() {
-		violations = append(violations, r.Message)
+	if !dsTTLKnown {
+		// Best-effort E5-only update. We can clear the violation
+		// only if E5 passes AND the prior message (if any) was
+		// E5-only. We don't have provenance, so the safe choice is:
+		// only modify the category when E5 is currently failing
+		// (set fresh E5 message) — never clear, since clearing
+		// might drop a prior E10 we can't re-confirm. Same for
+		// warnings: leave alone.
+		if e5.Failed() {
+			zd.SetError(RolloverPolicyViolation, "%s", e5.Message)
+		}
+		// else: leave both categories alone.
+		return
 	}
 
-	dsTTL, dsTTLKnown := resolveDSTTL(zd, pol)
-	if dsTTLKnown {
-		if r := checkE10(pol, dsTTL); r.Failed() {
-			violations = append(violations, r.Message)
-		}
-		if r := checkE11(pol, dsTTL); r.Failed() {
-			warnings = append(warnings, r.Message)
-		}
+	var violations, warnings []string
+	if e5.Failed() {
+		violations = append(violations, e5.Message)
+	}
+	if r := checkE10(pol, dsTTL); r.Failed() {
+		violations = append(violations, r.Message)
+	}
+	if r := checkE11(pol, dsTTL); r.Failed() {
+		warnings = append(warnings, r.Message)
 	}
 
 	if len(violations) == 0 {
@@ -313,10 +340,21 @@ func recordParentDSTTLObservation(zone string, pol *DnssecPolicy, rrs []dns.RR) 
 }
 
 // minDSTTL returns the smallest TTL among DS RRs in rrs (seconds).
-// Zero if no DS records found. Using min keeps the validator
-// pessimistic — caches that hold the longest-TTL record dominate
-// invalidation latency, but the smallest TTL bounds when the *first*
-// validator might re-fetch.
+// Zero if no DS records found.
+//
+// Why min and not max: a compliant parent emits one TTL across the
+// entire DS RRset (RFC 1035 §3.2.1: all records of an RRset share
+// the same TTL), so min == max in the common case. For a
+// non-compliant parent emitting mixed TTLs, RFC 2181 §5.2 requires
+// resolvers to treat the RRset as a single unit and not break it up;
+// the only sane behavior is to evict the whole RRset on the smallest
+// TTL (a cache cannot keep individual records past their stated
+// expiration). So validator caches in practice flush the entire DS
+// RRset at min(TTLs), making min — not max — the actual upper bound
+// on cache retention. Using max would over-pessimize E10/E11 lead
+// times based on a TTL the cache will never actually honor.
+//
+// See guide/rapid-key-rollover.md §4.6 for the same discussion.
 func minDSTTL(rrs []dns.RR) uint32 {
 	var min uint32
 	for _, rr := range rrs {

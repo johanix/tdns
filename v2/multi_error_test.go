@@ -223,6 +223,55 @@ func TestEvaluateRolloverPolicyInvariantsSeveritySplit(t *testing.T) {
 	}
 }
 
+// TestEvaluateRolloverPolicyInvariantsPreservesStateWhenDSTTLUnknown
+// regression-tests the bug CodeRabbit flagged: a transient parent-DS
+// observation miss must not clobber a prior E10 violation. Re-running
+// the evaluator with no resolvable DS_TTL should leave existing E10
+// state on the zone instead of silently clearing it.
+func TestEvaluateRolloverPolicyInvariantsPreservesStateWhenDSTTLUnknown(t *testing.T) {
+	pol := &DnssecPolicy{}
+	pol.Rollover.Method = RolloverMethodMultiDS
+	pol.Rollover.NumDS = 2
+	pol.KSK.Lifetime = 60 // 1m, deliberately tight to fail E10
+	pol.KSK.SigValidity = 60 * 60
+	pol.Rollover.DsPublishDelay = 5 * time.Minute
+	pol.Clamping.Enabled = true
+	pol.Clamping.Margin = 5 * time.Minute
+	pol.TTLS.DNSKEY = 300
+	pol.TTLS.MaxServed = 300
+	pol.TTLS.DS = 600 // Known DS TTL — first eval can run E10.
+
+	zd := &ZoneData{ZoneName: "test.example."}
+	EvaluateRolloverPolicyInvariants(zd, pol)
+	if !zd.HasError(RolloverPolicyViolation) {
+		t.Fatal("first eval (DS_TTL known): expected E10 violation")
+	}
+	priorMsg := ""
+	for _, e := range zd.ErrorList() {
+		if e.Type == RolloverPolicyViolation {
+			priorMsg = e.Msg
+		}
+	}
+
+	// Now simulate parent observation gone — clear the DS override
+	// AND the observed value. Re-evaluate.
+	pol.TTLS.DS = 0
+	zd.ParentDSTTLObserved = 0
+	EvaluateRolloverPolicyInvariants(zd, pol)
+	if !zd.HasError(RolloverPolicyViolation) {
+		t.Fatal("DS_TTL became unknown: prior E10 violation must be preserved")
+	}
+	gotMsg := ""
+	for _, e := range zd.ErrorList() {
+		if e.Type == RolloverPolicyViolation {
+			gotMsg = e.Msg
+		}
+	}
+	if gotMsg != priorMsg {
+		t.Errorf("E10 message changed when DS_TTL became unknown: was %q, now %q", priorMsg, gotMsg)
+	}
+}
+
 // TestErrorListOrder confirms ErrorList returns categories in
 // errorTypeReportOrder so consumers (CLI, status JSON) get a stable
 // order.

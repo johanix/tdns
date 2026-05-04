@@ -128,7 +128,11 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		return nil // didn't find any zone for that qname
 	}
 
-	if zd.HasServiceImpactingError() {
+	// Refuse UPDATE on a service-impacting error OR before the first
+	// successful refresh: a zone with RefreshCount==0 has no
+	// authoritative data to update yet. Mirrors the same first-load
+	// guard in defaultqueryhandlers.go.
+	if zd.HasServiceImpactingError() || (zd.HasError(RefreshError) && zd.RefreshCount == 0) {
 		lgHandler.Error("zone in error state", "qname", qname, "errorType", ErrorTypeToString[zd.ErrorType], "errorMsg", zd.ErrorMsg)
 		m.SetRcode(r, dns.RcodeServerFailure)
 		edns0.AttachEDEToResponse(m, edns0.EDEZoneNotFound)

@@ -1057,14 +1057,23 @@ func transitionDsPublishedToStandbyForZone(deps RolloverEngineDeps, dsPubs []*Dn
 	}
 
 	// Sort ds-published keys by ds_observed_at ascending — this is
-	// the promotion order (oldest = next up). Keys with no
-	// ds_observed_at (shouldn't happen for state=ds-published, but
-	// be defensive) sort to the back.
+	// the promotion order (oldest = next up).
+	//
+	// Tie-break: confirmDSAndAdvanceCreatedKeysTx() stamps the same
+	// ds_observed_at on every key advanced in one confirmation
+	// batch, so keys often share a timestamp. Order ties by
+	// rollover_index ascending — that's the canonical rollover
+	// sequence; earlier index promotes first. Final fallback to
+	// KeyTag is defensive (shouldn't happen for keys with assigned
+	// rollover_index).
+	//
+	// Keys with no ds_observed_at (shouldn't happen for
+	// state=ds-published, but be defensive) sort to the back.
 	sort.SliceStable(dsPubs, func(a, b int) bool {
 		ta, _ := RolloverKeyDsObservedAt(kdb, zoneName, dsPubs[a].KeyTag)
 		tb, _ := RolloverKeyDsObservedAt(kdb, zoneName, dsPubs[b].KeyTag)
 		if ta == nil && tb == nil {
-			return dsPubs[a].KeyTag < dsPubs[b].KeyTag
+			return dsPubsRolloverIndexLess(kdb, zoneName, dsPubs[a].KeyTag, dsPubs[b].KeyTag)
 		}
 		if ta == nil {
 			return false
@@ -1072,10 +1081,14 @@ func transitionDsPublishedToStandbyForZone(deps RolloverEngineDeps, dsPubs []*Dn
 		if tb == nil {
 			return true
 		}
-		return ta.Before(*tb)
+		if !ta.Equal(*tb) {
+			return ta.Before(*tb)
+		}
+		return dsPubsRolloverIndexLess(kdb, zoneName, dsPubs[a].KeyTag, dsPubs[b].KeyTag)
 	})
 
 	lifetime := time.Duration(pol.KSK.Lifetime) * time.Second
+	promoted := false
 	for i, k := range dsPubs {
 		// Promotion position: i=0 is the next-up (slot 1),
 		// i=1 is after that (slot 2), etc.
@@ -1103,7 +1116,36 @@ func transitionDsPublishedToStandbyForZone(deps RolloverEngineDeps, dsPubs []*Dn
 			"t_publish", tPublish.UTC().Format(time.RFC3339),
 			"dnskey_ttl", dnskeyTTL.String(),
 			"child_prop", deps.PropagationDelay.String())
+		promoted = true
+	}
+	if promoted {
+		// One resign covers the whole batch — multiple per-key
+		// triggerResign calls would just enqueue duplicate sign
+		// jobs for the same zone state change.
 		triggerResign(deps.Conf, zoneName)
+	}
+}
+
+// dsPubsRolloverIndexLess compares two ds-published SEP keys by
+// rollover_index ascending, falling back to KeyTag when the index
+// can't be resolved. Helper for the ds-published→standby promotion
+// sort (ties on ds_observed_at).
+func dsPubsRolloverIndexLess(kdb *KeyDB, zone string, a, b uint16) bool {
+	ia, aOK, _ := RolloverIndexForKey(kdb, zone, a)
+	ib, bOK, _ := RolloverIndexForKey(kdb, zone, b)
+	switch {
+	case aOK && bOK:
+		if ia != ib {
+			return ia < ib
+		}
+		return a < b
+	case aOK:
+		// b has no index — sort it to the back.
+		return true
+	case bOK:
+		return false
+	default:
+		return a < b
 	}
 }
 

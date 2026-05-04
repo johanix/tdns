@@ -498,6 +498,21 @@ interesting at smaller `N` (e.g. would-be N=2 multi-DS would have
 fail), or with much faster cadences (`KSK_lifetime = 2m` against
 the same requirement — fail unless `N` is raised).
 
+**Note on DS_TTL.** The engine resolves `DS_TTL` by observing the
+parent's DS RRset (or via a `ttls.ds` policy override). When
+multiple DS records appear in one RRset, the engine uses the
+**minimum** TTL across them, not the maximum. RFC 1035 §3.2.1
+requires all records of an RRset to share the same TTL, so for any
+compliant parent `min == max` and the choice is academic. For a
+non-compliant parent emitting mixed TTLs, RFC 2181 §5.2 requires
+resolvers to treat the RRset as a single unit — the only sane cache
+behavior is to evict the whole RRset on the smallest TTL, since a
+cache cannot keep individual records past their stated expiration
+nor split the RRset. So validator caches in practice flush the DS
+RRset at `min(TTLs)`, which makes `min` the actual upper bound on
+cache retention. Using `max` would over-pessimize E10/E11 lead times
+based on a TTL the cache will never honor.
+
 **Production rule of thumb.** For comfortable margins, pick:
 
 ```

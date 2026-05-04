@@ -116,12 +116,28 @@ func ComputeEarliestRollover(kdb *KeyDB, zone string, pol *DnssecPolicy, now tim
 	// (HasAutoRolloverImpactingError early-return).
 	if zd, ok := Zones.Get(zone); ok && zd != nil && zd.HasAutoRolloverImpactingError() {
 		var blocker EarliestRolloverBlocker
-		blocker.Reason = "automated rollover suspended by policy violation"
 		var msgs []string
+		hasParentBlocker := false
+		hasPolicyViolation := false
 		for _, e := range zd.ErrorList() {
-			if isAutoRolloverImpactingError(e.Type) {
-				msgs = append(msgs, e.Msg)
+			if !isAutoRolloverImpactingError(e.Type) {
+				continue
 			}
+			msgs = append(msgs, e.Msg)
+			switch e.Type {
+			case RolloverParentBlocker:
+				hasParentBlocker = true
+			case RolloverPolicyViolation:
+				hasPolicyViolation = true
+			}
+		}
+		switch {
+		case hasParentBlocker && hasPolicyViolation:
+			blocker.Reason = "automated rollover suspended by parent blocker and policy violation"
+		case hasParentBlocker:
+			blocker.Reason = "automated rollover suspended by parent blocker"
+		default:
+			blocker.Reason = "automated rollover suspended by policy violation"
 		}
 		blocker.Detail = strings.Join(msgs, "; ")
 		return &EarliestRolloverResult{

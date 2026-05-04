@@ -68,7 +68,11 @@ so).`,
 			cfgPath := serverConfig
 			polName := policyName
 			if cfgPath == "" {
-				// Online: ask the daemon.
+				// Online: ask the daemon for the config-file path
+				// and (best-effort) the zone's policy name. The
+				// daemon's policy name takes precedence over an
+				// inferred-from-YAML lookup; explicit --policy still
+				// overrides both.
 				api, err := GetApiClient("auth", true)
 				if err != nil {
 					cliFatalf("error getting API client: %v", err)
@@ -89,14 +93,16 @@ so).`,
 					polName = resp.PolicyName
 				}
 			}
-			if polName == "" {
-				cliFatalf("zone %s has no rollover policy attached (and --policy was not supplied)", z)
-			}
 
-			pol, err := loadPolicyFromYAMLFile(cfgPath, polName)
+			// loadPolicyFromYAMLFile will infer the policy name from
+			// the zones: block when polName is empty (offline mode
+			// without --policy). Errors out cleanly if no mapping
+			// exists.
+			pol, resolvedPol, err := loadPolicyFromYAMLFile(cfgPath, z, polName)
 			if err != nil {
-				cliFatalf("loading policy %q from %s: %v", polName, cfgPath, err)
+				cliFatalf("%v", err)
 			}
+			polName = resolvedPol
 
 			var dsTTL time.Duration
 			var dsTTLSrc string
@@ -105,6 +111,9 @@ so).`,
 				d, err := time.ParseDuration(parentDSTTL)
 				if err != nil {
 					cliFatalf("invalid --parent-ds-ttl: %v", err)
+				}
+				if d <= 0 {
+					cliFatalf("invalid --parent-ds-ttl: must be > 0 (got %s)", d)
 				}
 				dsTTL = d
 				dsTTLSrc = fmt.Sprintf("--parent-ds-ttl %s", parentDSTTL)
@@ -127,39 +136,74 @@ so).`,
 }
 
 // minimalConfigForValidate is the subset of the daemon YAML the
-// validate command needs. Reuses tdns.DnssecPolicyConf so the parse
-// path is identical to the daemon's.
+// validate command needs. Reuses tdns.DnssecPolicyConf and the
+// zone→policy mapping so the offline path can infer the policy
+// from the zone when --policy isn't supplied.
 type minimalConfigForValidate struct {
 	DnssecPolicies map[string]tdns.DnssecPolicyConf `yaml:"dnssecpolicies"`
+	Zones          []minimalZoneEntry               `yaml:"zones"`
 }
 
-func loadPolicyFromYAMLFile(path, policyName string) (*tdns.DnssecPolicy, error) {
+// minimalZoneEntry mirrors just the fields of tdns.ZoneConf that the
+// validate command reads. Independent declaration so a new field on
+// ZoneConf doesn't change the validate parse surface unexpectedly.
+type minimalZoneEntry struct {
+	Name         string `yaml:"name"`
+	DnssecPolicy string `yaml:"dnssecpolicy"`
+}
+
+// inferPolicyForZone looks up the dnssecpolicy attached to the named
+// zone in raw.Zones. Returns "" if the zone isn't listed or has no
+// policy. Comparison is case-insensitive on the FQDN form.
+func inferPolicyForZone(raw *minimalConfigForValidate, zone string) string {
+	zone = strings.ToLower(strings.TrimSuffix(zone, "."))
+	for _, z := range raw.Zones {
+		if strings.ToLower(strings.TrimSuffix(z.Name, ".")) == zone {
+			return z.DnssecPolicy
+		}
+	}
+	return ""
+}
+
+// loadPolicyFromYAMLFile parses cfgPath, resolves the policy name
+// (preferring the explicit name if non-empty, otherwise inferring
+// from the zone→policy mapping in zones:), and returns the parsed
+// runtime DnssecPolicy. Returns the resolved policy name as the
+// second return so the caller can render it.
+func loadPolicyFromYAMLFile(path, zone, policyName string) (*tdns.DnssecPolicy, string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", path, err)
+		return nil, "", fmt.Errorf("read %s: %w", path, err)
 	}
 	var raw minimalConfigForValidate
 	if err := yaml.Unmarshal(data, &raw); err != nil {
-		return nil, fmt.Errorf("parse %s: %w", path, err)
+		return nil, "", fmt.Errorf("parse %s: %w", path, err)
 	}
-	pc, ok := raw.DnssecPolicies[policyName]
+	resolved := policyName
+	if resolved == "" {
+		resolved = inferPolicyForZone(&raw, zone)
+	}
+	if resolved == "" {
+		return nil, "", fmt.Errorf("zone %s has no dnssecpolicy in %s and --policy was not supplied", zone, path)
+	}
+	pc, ok := raw.DnssecPolicies[resolved]
 	if !ok {
 		known := make([]string, 0, len(raw.DnssecPolicies))
 		for n := range raw.DnssecPolicies {
 			known = append(known, n)
 		}
-		return nil, fmt.Errorf("dnssecpolicies.%s not found in %s (have: %s)",
-			policyName, path, strings.Join(known, ", "))
+		return nil, "", fmt.Errorf("dnssecpolicies.%s not found in %s (have: %s)",
+			resolved, path, strings.Join(known, ", "))
 	}
-	pc.Name = policyName
+	pc.Name = resolved
 	// Quiet variant suppresses the daemon-style logger calls inside
 	// FinishDnssecPolicy; structured warnings are rendered by the
 	// validate report via tdns.CollectDnssecPolicyCouplingWarnings.
-	out, err := tdns.ParseDnssecPolicyConfQuiet(policyName, &pc)
+	out, err := tdns.ParseDnssecPolicyConfQuiet(resolved, &pc)
 	if err != nil {
-		return nil, fmt.Errorf("parse policy: %w", err)
+		return nil, "", fmt.Errorf("parse policy: %w", err)
 	}
-	return out, nil
+	return out, resolved, nil
 }
 
 func renderValidateReport(cfgPath, zone, policyName string, pol *tdns.DnssecPolicy, dsTTL time.Duration, dsTTLSrc string) {

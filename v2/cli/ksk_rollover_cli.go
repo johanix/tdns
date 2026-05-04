@@ -863,7 +863,17 @@ func printStateTable(s *tdns.RolloverStatus) {
 				left = append(left, kv{"attempts:", fmt.Sprintf("%d / %d in current group", s.AttemptIndex, s.AttemptMax)})
 			}
 		case "SOFTFAIL":
-			left = append(left, kv{"attempts:", fmt.Sprintf("initial flurry (%d/%d) failed; in long-term mode", s.HardfailCount, s.AttemptMax)})
+			// child-config:waiting-for-parent intentionally never
+			// increments HardfailCount (the engine just waits for
+			// the parent to publish DSYNC). Rendering the generic
+			// "initial flurry (0/N) failed" line in that state
+			// reads as a counter bug; show a parent-blocker-specific
+			// summary instead.
+			if s.LastSoftfailCat == tdns.SoftfailChildConfigWaitingForParent {
+				left = append(left, kv{"attempts:", "blocked by parent (no usable DSYNC scheme advertised)"})
+			} else {
+				left = append(left, kv{"attempts:", fmt.Sprintf("initial flurry (%d/%d) failed; in long-term mode", s.HardfailCount, s.AttemptMax)})
+			}
 		}
 	}
 	if s.LastUpdate != "" {
