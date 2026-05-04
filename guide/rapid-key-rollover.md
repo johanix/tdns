@@ -205,6 +205,12 @@ in the served zone; only the parent has been informed. The engine
 is awaiting parent-side observation of the DS.
 *Exit:* parent's DS RRset includes the key's DS record.
 
+The pipeline holds at most one `created` key at a time. The engine
+enforces this as a hard cap (`num_ds + 1` total pipeline depth) so
+that a stalled parent-publication path can't drive unbounded key
+generation: a second `created` key would not help — both would queue
+behind the same DS push.
+
 **`ds-published`.** Parent has been observed to serve the DS for
 this key. DNSKEY is still not in the served child zone — the
 engine deliberately holds it back to minimize DNSKEY exposure (see

@@ -149,3 +149,19 @@ WHERE zonename = ? AND (CAST(flags AS INTEGER) & ?) != 0
 	err := kdb.DB.QueryRow(q, zone, int(dns.SEP)).Scan(&n)
 	return n, err
 }
+
+// CountKskInPipeline returns the count of SEP keys in any non-terminal
+// rollover state — including 'created'. Used as a hard cap on
+// pipeline-fill so that a stalled DS-publication path (where 'created'
+// keys never advance to 'ds-published') cannot drive the engine to
+// generate keys without bound. Steady-state cap is num_ds + 1.
+func CountKskInPipeline(kdb *KeyDB, zone string) (int, error) {
+	zone = dns.Fqdn(zone)
+	const q = `
+SELECT COUNT(*) FROM DnssecKeyStore
+WHERE zonename = ? AND (CAST(flags AS INTEGER) & ?) != 0
+  AND state IN ('created','ds-published','published','standby','active','retired')`
+	var n int
+	err := kdb.DB.QueryRow(q, zone, int(dns.SEP)).Scan(&n)
+	return n, err
+}

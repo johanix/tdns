@@ -137,8 +137,23 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 	// with clamping.enabled: false.
 	kStepScheduler(zd, kdb, pol, now)
 
+	// Pipeline-fill: maintain num_ds DS records at the parent, plus one
+	// 'created' key in flight (total cap num_ds + 1). The two checks gate
+	// generation independently:
+	//   - DS-at-parent below target?  (intent of pipeline-fill)
+	//   - Total pipeline below cap?   (safety against unbounded growth
+	//     when DS publication is stalled — every tick would otherwise
+	//     create a new 'created' key that never advances)
 	num := pol.Rollover.NumDS
+	maxPipeline := num + 1
 	for {
+		total, err := CountKskInPipeline(kdb, zone)
+		if err != nil {
+			return err
+		}
+		if total >= maxPipeline {
+			break
+		}
 		n, err := CountKskWithDSAtParent(kdb, zone)
 		if err != nil {
 			return err
