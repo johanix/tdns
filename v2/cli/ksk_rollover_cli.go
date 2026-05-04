@@ -175,7 +175,14 @@ Use --dry-run to print the DS set and the UPDATE without sending.`,
 
 			z := dns.Fqdn(tdns.Globals.Zonename)
 			zd := &tdns.ZoneData{ZoneName: z}
-			zd.DnssecPolicy = dnssecPolicyForZone(&Conf, z)
+			// Intentionally leave zd.DnssecPolicy nil. The dispatcher
+			// (PushDSRRsetForRollover) gates DSYNC scheme selection on
+			// a non-nil policy and falls through to the legacy
+			// UPDATE-only path when policy is nil. Attaching the policy
+			// here would let an operator running the offline CLI on
+			// auto/prefer-notify silently take the NOTIFY path,
+			// contradicting the "UPDATE-only offline mode" contract
+			// documented above.
 
 			if dryRun {
 				dsSet, low, high, idxOK, err := tdns.ComputeTargetDSSetForZone(kdb, z, uint8(dns.SHA256))
@@ -199,11 +206,13 @@ Use --dry-run to print the DS set and the UPDATE without sending.`,
 			}
 
 			deps := tdns.RolloverEngineDeps{
-				Conf:   &Conf,
-				KDB:    kdb,
-				Zone:   zd,
-				Imr:    imr,
-				Policy: zd.DnssecPolicy,
+				Conf: &Conf,
+				KDB:  kdb,
+				Zone: zd,
+				Imr:  imr,
+				// Policy: nil is deliberate — see comment above where
+				// zd is constructed. Forces the dispatcher onto the
+				// legacy UPDATE-only path.
 			}
 			res, err := tdns.PushDSRRsetForRollover(ctx, deps)
 			if err != nil {
