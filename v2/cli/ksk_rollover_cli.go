@@ -1192,8 +1192,18 @@ func printRolloverKeyTable(keys []tdns.RolloverKeyEntry, verbose bool, kskTable 
 				// No concrete time, but engine has a qualifier.
 				expectedCol = k.NextTransitionNote
 			}
-			rows = append(rows, fmt.Sprintf("%s|%d|%s|%s|%s|%s|%s",
-				seqStr, k.KeyID, k.State, pub, sinceStr, nextCol, expectedCol))
+			// Synthetic "future key" row: render keyid as "-----"
+			// and state_since as "-" (state isn't a real database
+			// state yet). The next_transition / expected_at carry
+			// the operator-facing info: when the engine will
+			// generate the next key.
+			keyidStr := fmt.Sprintf("%d", k.KeyID)
+			if k.IsSynthetic {
+				keyidStr = "-----"
+				sinceStr = "-"
+			}
+			rows = append(rows, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s",
+				seqStr, keyidStr, k.State, pub, sinceStr, nextCol, expectedCol))
 		}
 	} else {
 		rows = append(rows, "keyid|state|published_at")

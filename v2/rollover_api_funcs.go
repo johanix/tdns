@@ -508,7 +508,7 @@ func policySummary(pol *DnssecPolicy) *PolicySummary {
 // rolloverStatusRemovedDisplayCap limits how many SEP keys in state
 // "removed" appear in RolloverStatus.KSKs (most recent by active_seq
 // first). Matches historical auto-rollover status CLI behavior.
-const rolloverStatusRemovedDisplayCap = 3
+const rolloverStatusRemovedDisplayCap = 2
 
 // loadRolloverKeyEntries returns one RolloverKeyEntry per DNSSEC key
 // for the zone, filtered by SEP flag. SEP keys go in KSKs; non-SEP in

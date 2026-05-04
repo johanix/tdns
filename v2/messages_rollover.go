@@ -182,6 +182,14 @@ type RolloverKeyEntry struct {
 	// rollovers in the pipeline completing first (e.g. standby keys
 	// in slot 2+). Renderer appends "estimated" to the time delta.
 	NextTransitionEstimate bool `json:"nextTransitionEstimate,omitempty"`
+
+	// IsSynthetic flags a row that does not correspond to a real
+	// keystore entry. Used for the "future key" row at the top of
+	// the KSK table — a visual cue that the engine will generate
+	// one more KSK on the next pipeline-fill tick. Renderer shows
+	// the KeyID as "-----" (any non-zero numeric would mislead) and
+	// suppresses fields that don't apply to a future-key projection.
+	IsSynthetic bool `json:"isSynthetic,omitempty"`
 }
 
 // PolicySummary is the slice of DnssecPolicy operators want to see

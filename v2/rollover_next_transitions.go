@@ -204,6 +204,51 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 			}
 		}
 	}
+
+	// Synthetic "future key" row: a visual cue that the engine will
+	// generate one more KSK on the next pipeline-fill tick. Inserted
+	// at the front of the KSK list (sorted top = latest-to-roll).
+	// Has IsSynthetic=true so the renderer can distinguish it from
+	// real keystore entries (renders the keyid as "-----" rather
+	// than a number).
+	//
+	// Conditions:
+	//   - rollover.method = multi-ds (only multi-DS pipeline-fills
+	//     to a target N; double-signature has no continuous fill).
+	//   - active key present (otherwise we have no anchor).
+	//   - count of in-pipeline SEP keys ≥ NumDS (we're at parent's
+	//     desired set; the next thing the engine does is generate
+	//     for the cycle after this one).
+	//
+	// The expected_at timestamp is when the engine will notice the
+	// pipeline is short and generate. That happens immediately after
+	// the next rollover fires (current standby promotes to active,
+	// pipeline depth drops by one). So expected_at = T_roll of the
+	// current active key.
+	if pol.Rollover.Method == RolloverMethodMultiDS && activeAt != nil && pol.Rollover.NumDS > 0 {
+		inPipeline := 0
+		for _, e := range out.KSKs {
+			switch e.State {
+			case DnskeyStateCreated, DnskeyStateDsPublished, DnskeyStateStandby,
+				DnskeyStatePublished, DnskeyStateActive, DnskeyStateRetired:
+				inPipeline++
+			}
+		}
+		if inPipeline >= pol.Rollover.NumDS {
+			tNext := activeAt.Add(lifetime)
+			out.KSKs = append([]RolloverKeyEntry{
+				{
+					KeyID:                  0, // sentinel for "synthetic"
+					IsSynthetic:            true,
+					State:                  "(future)",
+					Published:              "none",
+					NextTransition:         "(future) → created",
+					NextTransitionAt:       tNext.UTC().Format(time.RFC3339),
+					NextTransitionEstimate: true,
+				},
+			}, out.KSKs...)
+		}
+	}
 }
 
 // slotFromKid returns the 1-based slot index of kid in ordered.
