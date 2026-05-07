@@ -47,15 +47,6 @@ func SprintUpdates(actions []dns.RR) string {
 	return buf
 }
 
-type DeferredUpdate struct {
-	Cmd          string
-	ZoneName     string
-	AddTime      time.Time
-	Description  string
-	PreCondition func() bool
-	Action       func() error
-}
-
 // logUpdateActions logs each RR in an update at Info level with
 // ADDED/DELETED prefix based on the RR class.
 func logUpdateActions(updateType string, actions []dns.RR) {
@@ -281,95 +272,6 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				lg.Error("ZoneUpdater: unknown command, ignoring", "cmd", ur.Cmd)
 			}
 			lg.Info("ZoneUpdater: update request completed", "type", ur.Cmd)
-		}
-	}
-}
-
-func (kdb *KeyDB) DeferredUpdaterEngine(ctx context.Context) error {
-	deferredq := kdb.DeferredUpdateQ
-
-	var deferredUpdates []DeferredUpdate
-
-	var runQueueTicker = time.NewTicker(10 * time.Second)
-
-	lg.Info("DeferredUpdater starting")
-	defer runQueueTicker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			lg.Info("DeferredUpdater: context cancelled")
-			lg.Info("DeferredUpdater: terminating")
-			return nil
-		case du, ok := <-deferredq:
-			if !ok {
-				lg.Info("DeferredUpdater: deferredq closed")
-				lg.Info("DeferredUpdater: terminating")
-				return nil
-			}
-			lg.Debug("DeferredUpdater received update request")
-			if du.Cmd == "PING" {
-				lg.Debug("DeferredUpdater: PING received, PONG!")
-				continue
-			}
-			_, ok = Zones.Get(du.ZoneName)
-			if !ok && du.Cmd != "DEFERRED-UPDATE" {
-				lg.Warn("DeferredUpdater: unknown zone in update request, ignoring", "cmd", du.Cmd, "zone", du.ZoneName)
-				lg.Debug("DeferredUpdater: known zones", "zones", Zones.Keys())
-				continue
-			}
-
-			switch du.Cmd {
-			case "DEFERRED-UPDATE":
-				// If the PreCondition is true, we execute the Action immediately, otherwise we defer execution an add it to the deferredUpdates queue.
-				if du.PreCondition() {
-					lg.Debug("DeferredUpdater: precondition true, executing immediately", "description", du.Description)
-					err := du.Action()
-					if err != nil {
-						lg.Error("DeferredUpdater: deferred update action failed", "description", du.Description, "error", err)
-					}
-				} else {
-					lg.Debug("DeferredUpdater: precondition false, deferring execution", "description", du.Description)
-					du := DeferredUpdate{
-						Description:  du.Description,
-						PreCondition: du.PreCondition,
-						Action:       du.Action,
-						AddTime:      time.Now(),
-					}
-					deferredUpdates = append(deferredUpdates, du)
-				}
-				continue
-
-			default:
-				lg.Error("DeferredUpdater: unknown command, ignoring", "cmd", du.Cmd)
-			}
-			lg.Info("DeferredUpdater: update request completed", "type", du.Cmd)
-
-		case <-runQueueTicker.C:
-			if len(deferredUpdates) == 0 {
-				continue
-			}
-
-			lg.Debug("DeferredUpdater: running deferred updates queue", "items", len(deferredUpdates))
-			for i := 0; i < len(deferredUpdates); {
-				du := deferredUpdates[i]
-				lg.Debug("DeferredUpdater: running deferred update", "description", du.Description)
-				ok := du.PreCondition()
-				if ok {
-					lg.Debug("DeferredUpdater: precondition true, executing", "description", du.Description)
-					err := du.Action()
-					if err != nil {
-						lg.Error("DeferredUpdater: deferred update action failed", "description", du.Description, "error", err)
-						i++
-					} else {
-						lg.Info("DeferredUpdater: deferred update executed successfully", "description", du.Description)
-						// Remove the item from deferredUpdates queue
-						deferredUpdates = append(deferredUpdates[:i], deferredUpdates[i+1:]...)
-					}
-				} else {
-					lg.Debug("DeferredUpdater: precondition failed, skipping", "description", du.Description)
-					i++
-				}
-			}
 		}
 	}
 }
