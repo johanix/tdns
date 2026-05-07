@@ -670,7 +670,6 @@ type KeyDB struct {
 	KeystoreDnskeyCache map[string]*DnssecKeys // map[zonename]*DnssecActiveKeys
 	Ctx                 string
 	UpdateQ             chan UpdateRequest
-	DeferredUpdateQ     chan DeferredUpdate
 	KeyBootstrapperQ    chan KeyBootstrapperRequest
 	Options             map[AuthOption]string
 	// OutboundSoaSerial is the resolved mode for outbound SOA serials:

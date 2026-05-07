@@ -504,7 +504,6 @@ type InternalDnsConf struct {
 	RecursorCh          chan ImrRequest
 	ScannerQ            chan ScanRequest
 	UpdateQ             chan UpdateRequest
-	DeferredUpdateQ     chan DeferredUpdate
 	DnsUpdateQ          chan DnsUpdateRequest
 	DnsNotifyQ          chan DnsNotifyRequest
 	DnsQueryQ           chan DnsQueryRequest           // Optional: if nil, queries use direct call to QueryResponder
