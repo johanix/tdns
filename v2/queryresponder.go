@@ -224,6 +224,12 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 			lgHandler.Error("failed to get DS record", "qname", qname)
 		}
 		if dsRRset != nil && len(dsRRset.RRs) > 0 {
+			signed, err := signFunc(*dsRRset, qname)
+			if err != nil {
+				lgHandler.Error("failed to sign DS RRset", "qname", qname, "err", err)
+			} else {
+				dsRRset = &signed
+			}
 			m.Answer = append(m.Answer, dsRRset.RRs...)
 			if msgoptions.DO {
 				m.Answer = append(m.Answer, dsRRset.RRSIGs...)
@@ -277,6 +283,15 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 		lgHandler.Error("failed to get DS record", "qname", qname)
 	}
 	if dsRRset != nil && len(dsRRset.RRs) > 0 {
+		// Use parent zone's signing context (signFunc closes over the
+		// original zd; route through signRRsetForZone on the parent we
+		// just switched to).
+		signed, err := zd.signRRsetForZone(*dsRRset, qname, msgoptions, kdb, nil)
+		if err != nil {
+			lgHandler.Error("failed to sign DS RRset", "qname", qname, "err", err)
+		} else {
+			dsRRset = &signed
+		}
 		m.Answer = append(m.Answer, dsRRset.RRs...)
 		if msgoptions.DO {
 			m.Answer = append(m.Answer, dsRRset.RRSIGs...)
