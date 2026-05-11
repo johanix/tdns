@@ -57,7 +57,7 @@ func main() {
 	go music.MusicSyncEngine(&mconf, tconf.Internal.StopCh)
 
 	// ParseZones will read zone configs from the file specified in tconf.Internal.ZonesCfgFile
-	all_zones, err := tconf.ParseZones(ctx, false) // false = !reload, initial config
+	all_zones, _, err := tconf.ParseZones(ctx, false) // false = !reload, initial config
 	if err != nil {
 		tdns.Shutdowner(&tconf, fmt.Sprintf("Error parsing zones: %v", err))
 	}

@@ -128,7 +128,7 @@ func initConfig() {
 }
 
 // initImr initializes the application, prepares configuration, sets up the IMR API router, and starts the IMR service.
-// 
+//
 // It receives a context that should be cancelled on SIGINT or SIGTERM (handled in main), calls cli.Conf.MainInit with the default IMR config file, and aborts via tdns.Shutdowner on initialization errors. It installs a SIGHUP watcher that triggers cli.Conf.ParseZones to reload zones, logs reload errors, and then creates the API router with cli.Conf.SetupSimpleAPIRouter. Finally it starts the IMR via cli.Conf.StartImr and invokes tdns.Shutdowner on any fatal startup errors.
 func initImr() {
 	// Get context from cobra command context
@@ -137,7 +137,7 @@ func initImr() {
 		// Fallback if context is not set (should not happen with ExecuteContext)
 		appCtx = context.Background()
 	}
-	
+
 	// Create a cancel function for MainLoop by wrapping the context
 	// This allows MainLoop to cancel the context when APIStopCh is closed
 	var cancel context.CancelFunc
@@ -167,7 +167,7 @@ func initImr() {
 			case <-ctx.Done():
 				return
 			case <-hup:
-				if _, err := cli.Conf.ParseZones(ctx, true); err != nil {
+				if _, _, err := cli.Conf.ParseZones(ctx, true); err != nil {
 					log.Printf("SIGHUP reload failed: %v", err)
 				}
 			}

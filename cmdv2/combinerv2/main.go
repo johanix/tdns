@@ -20,7 +20,7 @@ func main() {
 	tdns.Globals.App.Version = appVersion
 	tdns.Globals.App.Name = appName
 	tdns.Globals.App.Date = appDate
-	
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -45,7 +45,7 @@ func main() {
 			case <-ctx.Done():
 				return
 			case <-hup:
-				if _, err := conf.ParseZones(ctx, true); err != nil {
+				if _, _, err := conf.ParseZones(ctx, true); err != nil {
 					log.Printf("SIGHUP reload failed: %v", err)
 				}
 			}
