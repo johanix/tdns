@@ -16,8 +16,11 @@ service:
    identities:        [ ns.axfr.net., nsa.johani.org., foo.com. ]
    verbose:           true
    debug:             true     # writes processed zone to disk
-   refresh:           true
-   maxrefresh:        1800     # seconds. Cap refresh counter to max this
+   # Optional clamps on the SOA Refresh value used for secondary
+   # zones. Both default in code (min 60s, max 8h) when unset.
+   # Primaries are not affected (they reload from file on SIGHUP).
+   # minrefresh:      60       # seconds, floor for SOA Refresh
+   # maxrefresh:      1800     # seconds, ceiling for SOA Refresh
 
    transport:
       type:    svcb               # svcb | tsync | none; default is none

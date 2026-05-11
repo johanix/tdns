@@ -154,7 +154,6 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 
 	// var refreshCounters = make(map[string]*RefreshCounter, 5)
 	var refreshCounters = core.NewCmap[*RefreshCounter]()
-	var ticker *time.Ticker
 
 	// Build expected zone set from config for a robust post-initialization barrier
 	expected := map[string]struct{}{}
@@ -170,22 +169,8 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 		}
 	}
 
-	if !viper.GetBool("service.refresh") {
-		lgEngine.Info("refresh engine not active, will accept zone definitions but skip periodic refreshes")
-		for {
-			select {
-			case <-ctx.Done():
-				lgEngine.Info("terminating (inactive mode)", "reason", "context cancelled")
-				return
-			case <-zonerefch:
-			}
-			// ensure that we keep reading to keep the channel open
-			continue
-		}
-	} else {
-		ticker = time.NewTicker(1 * time.Second)
-		lgEngine.Info("refresh engine starting")
-	}
+	ticker := time.NewTicker(1 * time.Second)
+	lgEngine.Info("refresh engine starting")
 
 	var zone string
 
@@ -696,21 +681,45 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 	}
 }
 
+// Compile-time bounds applied when service.minrefresh / service.maxrefresh
+// are not configured. They protect against pathological SOA Refresh values
+// (e.g. a 1-second refresh from a misconfigured upstream, or a 30-day SOA
+// that effectively disables secondary refreshes).
+const (
+	defaultMinRefresh uint32 = 60       // 1 minute
+	defaultMaxRefresh uint32 = 8 * 3600 // 8 hours
+)
+
 func FindSoaRefresh(zd *ZoneData) (uint32, error) {
 	var refresh uint32
 	soa, _ := zd.GetSOA()
 	if soa != nil {
 		refresh = soa.Refresh
 	}
-	// Is there a max refresh counter configured, then use it.
-	maxrefresh := uint32(viper.GetInt("service.maxrefresh"))
-	if maxrefresh != 0 && maxrefresh < refresh {
+
+	// Primaries reload from file on SIGHUP; refresh just controls how
+	// often we re-stat. 24h is plenty.
+	if zd.ZoneType == Primary {
+		return 86400, nil
+	}
+
+	// Use signed-int reads + a positive-value gate so a negative
+	// value in the config falls back to the default rather than
+	// wrapping to ~4 billion seconds via the uint32 cast.
+	maxrefresh := defaultMaxRefresh
+	if cfg := viper.GetInt("service.maxrefresh"); cfg > 0 {
+		maxrefresh = uint32(cfg)
+	}
+	if maxrefresh < refresh {
 		refresh = maxrefresh
 	}
 
-	// not refreshing from file all the time. use reload
-	if zd.ZoneType == Primary {
-		refresh = 86400 // 24h
+	minrefresh := defaultMinRefresh
+	if cfg := viper.GetInt("service.minrefresh"); cfg > 0 {
+		minrefresh = uint32(cfg)
+	}
+	if minrefresh > refresh {
+		refresh = minrefresh
 	}
 	return refresh, nil
 }
