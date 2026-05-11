@@ -818,7 +818,11 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				UpdatePolicy: policy,
 				DnssecPolicy: zconf.DnssecPolicy,
 			}
-			conf.Internal.RefreshZoneCh <- zr
+			select {
+			case conf.Internal.RefreshZoneCh <- zr:
+			case <-ctx.Done():
+				return all_zones, broken_zones, ctx.Err()
+			}
 		}
 	}
 
