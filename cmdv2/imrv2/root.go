@@ -167,7 +167,7 @@ func initImr() {
 			case <-ctx.Done():
 				return
 			case <-hup:
-				if _, _, err := cli.Conf.ParseZones(ctx, true); err != nil {
+				if _, err := cli.Conf.ReloadZoneConfig(ctx); err != nil {
 					log.Printf("SIGHUP reload failed: %v", err)
 				}
 			}
