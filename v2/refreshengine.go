@@ -703,17 +703,20 @@ func FindSoaRefresh(zd *ZoneData) (uint32, error) {
 		return 86400, nil
 	}
 
-	maxrefresh := uint32(viper.GetInt("service.maxrefresh"))
-	if maxrefresh == 0 {
-		maxrefresh = defaultMaxRefresh
+	// Use signed-int reads + a positive-value gate so a negative
+	// value in the config falls back to the default rather than
+	// wrapping to ~4 billion seconds via the uint32 cast.
+	maxrefresh := defaultMaxRefresh
+	if cfg := viper.GetInt("service.maxrefresh"); cfg > 0 {
+		maxrefresh = uint32(cfg)
 	}
 	if maxrefresh < refresh {
 		refresh = maxrefresh
 	}
 
-	minrefresh := uint32(viper.GetInt("service.minrefresh"))
-	if minrefresh == 0 {
-		minrefresh = defaultMinRefresh
+	minrefresh := defaultMinRefresh
+	if cfg := viper.GetInt("service.minrefresh"); cfg > 0 {
+		minrefresh = uint32(cfg)
 	}
 	if minrefresh > refresh {
 		refresh = minrefresh
