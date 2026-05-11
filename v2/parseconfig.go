@@ -466,14 +466,22 @@ func applyOutboundSoaSerial(kdb *KeyDB, raw string) error {
 }
 
 // func ParseZones(zones map[string]tdns.ZoneConf, zrch chan tdns.ZoneRefresher) error {
-func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, error) {
+//
+// Returns (allZones, brokenZones, err). allZones lists zones whose
+// config parsed cleanly and were queued for refresh. brokenZones lists
+// zones whose config had a fatal error; these are still registered in
+// the Zones map with the error attached so they remain visible to the
+// zone-list API and survive reload-diffs, but are not sent to the
+// RefreshEngine.
+func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []string, error) {
 	if len(conf.Zones) == 0 {
 		lgConfig.Info("no authoritative zones defined")
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	lgConfig.Debug("parsing authoritative zones", "count", len(conf.Zones))
 	var all_zones []string
+	var broken_zones []string
 
 	// Process each zone configuration
 	for i := range conf.Zones {
@@ -481,21 +489,36 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		zname := dns.Fqdn(zconf.Name)
 		zconf.Name = zname
 
-		zd := ZoneData{
-			ZoneName: zname,
-			Zonefile: zconf.Zonefile,
+		// Get-or-create the registry entry up front so SetError calls
+		// during validation attach to the actual zone object, not a
+		// throwaway stack value. On reload, clear any prior error so a
+		// previously-broken zone can become healthy without restart.
+		zd, exists := Zones.Get(zname)
+		if !exists {
+			zd = &ZoneData{
+				ZoneName:      zname,
+				Logger:        log.Default(),
+				FirstZoneLoad: true,
+			}
+			Zones.Set(zname, zd)
+		}
+		zd.Zonefile = zconf.Zonefile
+		if zd.Error {
+			zd.SetError(NoError, "")
 		}
 
 		// M46: Validate zone name length (DNS max is 255 octets)
 		if len(zname) > 255 {
 			lgConfig.Error("zone name too long, ignoring", "zone", zname)
 			zd.SetError(ConfigError, "zone name too long: %q", zname)
+			broken_zones = append(broken_zones, zname)
 			continue
 		}
 
 		if strings.Contains(zconf.Name, "..") || strings.Contains(zconf.Name, "//") {
 			lgConfig.Error("zone name contains invalid characters, ignoring", "zone", zconf.Name)
 			zd.SetError(ConfigError, "zone name contains invalid characters: %q", zconf.Name)
+			broken_zones = append(broken_zones, zname)
 			continue
 		}
 
@@ -504,16 +527,16 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			if tmpl, exist := Templates[zconf.Template]; exist {
 				updated, err := ExpandTemplate(*zconf, &tmpl, Globals.App.Type)
 				if err != nil {
-					fmt.Printf("Error expanding template %s for zone %s. Aborting.\n", zconf.Template, zname)
-					// return nil, err
+					lgConfig.Error("template expansion failed, zone in error state", "zone", zname, "template", zconf.Template, "err", err)
 					zd.SetError(ConfigError, "template expansion error: %q: %v", zconf.Template, err)
+					broken_zones = append(broken_zones, zname)
 					continue
 				}
 				*zconf = updated
-				//fmt.Printf("Success expanding template %s for zone %s.\n", zconf.Template, zname)
 			} else {
+				lgConfig.Error("zone refers to undefined template, zone in error state", "zone", zname, "template", zconf.Template)
 				zd.SetError(ConfigError, "template %q does not exist", zconf.Template)
-				fmt.Printf("Zone %q refers to the non-existing template %q. Ignored.\n", zname, zconf.Template)
+				broken_zones = append(broken_zones, zname)
 				continue
 			}
 		}
@@ -542,8 +565,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		case "secondary":
 			zonetype = Secondary
 			if zconf.Primary == "" {
-				lgConfig.Error("secondary zone has no primary configured, ignored", "zone", zname)
+				lgConfig.Error("secondary zone has no primary configured, zone in error state", "zone", zname)
 				zd.SetError(ConfigError, "secondary zone but has no primary (upstream) configured")
+				broken_zones = append(broken_zones, zname)
 				continue
 			}
 
@@ -555,8 +579,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			}
 
 		default:
-			lgConfig.Error("unknown zone type, ignored", "zone", zname, "type", zconf.Type)
+			lgConfig.Error("unknown zone type, zone in error state", "zone", zname, "type", zconf.Type)
 			zd.SetError(ConfigError, "unknown zone type: %s", zconf.Type)
+			broken_zones = append(broken_zones, zname)
 			continue
 		}
 
@@ -577,7 +602,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			lgConfig.Info("DNSSEC policy accepted", "zone", zname, "policy", zconf.DnssecPolicy)
 		}
 
-		options := parseZoneOptions(conf, zname, zconf, &zd)
+		options := parseZoneOptions(conf, zname, zconf, zd)
 		var outopts []string
 		for o, val := range options {
 			if val {
@@ -597,12 +622,11 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			// these are also ok, but imply that no updates are allowed
 			options[OptAllowChildUpdates] = false
 		default:
-			lgConfig.Error("zone has unknown child update policy type, ignored", "zone", zname, "type", zconf.UpdatePolicy.Child.Type)
+			lgConfig.Error("zone has unknown child update policy type, zone in error state", "zone", zname, "type", zconf.UpdatePolicy.Child.Type)
 			zd.SetError(ConfigError, "unknown child update policy type: %s", zconf.UpdatePolicy.Child.Type)
+			broken_zones = append(broken_zones, zname)
 			continue
 		}
-
-		// log.Printf("*** ParseZones: 1")
 
 		switch zconf.UpdatePolicy.Zone.Type {
 		case "selfsub", "self":
@@ -611,8 +635,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			// these are also ok, but imply that no updates are allowed
 			options[OptAllowUpdates] = false
 		default:
-			lgConfig.Error("zone has unknown update policy type, ignored", "zone", zname, "type", zconf.UpdatePolicy.Zone.Type)
+			lgConfig.Error("zone has unknown update policy type, zone in error state", "zone", zname, "type", zconf.UpdatePolicy.Zone.Type)
 			zd.SetError(ConfigError, "unknown update policy type: %s", zconf.UpdatePolicy.Zone.Type)
+			broken_zones = append(broken_zones, zname)
 			continue
 		}
 
@@ -662,12 +687,16 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 
 		if Globals.App.Type == AppTypeAgent && zconf.Type == "primary" {
 			if conf.MultiProvider == nil {
+				lgConfig.Error("agent has primary zone but multi-provider config is missing, zone in error state", "zone", zname)
 				zd.SetError(ConfigError, "agent has primary zone %q but multi-provider config is missing", zname)
+				broken_zones = append(broken_zones, zname)
 				continue
 			}
 			// Agent only supports primary zone if it matches its identity
 			if zname != conf.MultiProvider.Identity {
+				lgConfig.Error("primary zone does not match agent identity, zone in error state", "zone", zname, "identity", conf.MultiProvider.Identity)
 				zd.SetError(AgentError, "primary zone does not match agent identity (%q)", conf.MultiProvider.Identity)
+				broken_zones = append(broken_zones, zname)
 				continue
 			} else {
 				// For agent's own zone, ensure required options are set
@@ -682,24 +711,17 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 		var zones = make(map[string]interface{}, 1)
 		zones["zone:"+zname] = zconf
 		if errmsg, err := ValidateBySection(conf, zones, "foobar"); err != nil {
-			lgConfig.Error("zone validation failed", "zone", zname, "detail", errmsg)
+			lgConfig.Error("zone validation failed, zone in error state", "zone", zname, "detail", errmsg)
 			zd.SetError(ConfigError, "config validation: %v", err)
+			broken_zones = append(broken_zones, zname)
 			continue
 		}
 
 		all_zones = append(all_zones, zname)
 
-		// Get existing zd or create a minimal stub.
-		// On SIGHUP reload, zones already exist — reuse them.
-		zdp, exists := Zones.Get(zname)
-		if !exists {
-			zdp = &ZoneData{
-				ZoneName:      zname,
-				Logger:        log.Default(),
-				FirstZoneLoad: true,
-			}
-			Zones.Set(zname, zdp)
-		}
+		// The registry entry (zd) was created up front; rebind to zdp
+		// here for the remaining post-parse setup that uses zdp.
+		zdp := zd
 
 		// Apply static options via copy-on-write to avoid racing with
 		// concurrent readers of zdp.Options / zdp.MP.MPdata.Options.
@@ -782,7 +804,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 			AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
 			if conf.Internal.RefreshZoneCh == nil {
 				lgConfig.Error("refresh channel is not configured, zones will not be refreshed, terminating")
-				return nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
+				return nil, nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
 			}
 			zr := ZoneRefresher{
 				Name:         zname,
@@ -796,14 +818,18 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, erro
 				UpdatePolicy: policy,
 				DnssecPolicy: zconf.DnssecPolicy,
 			}
-			conf.Internal.RefreshZoneCh <- zr
+			select {
+			case conf.Internal.RefreshZoneCh <- zr:
+			case <-ctx.Done():
+				return all_zones, broken_zones, ctx.Err()
+			}
 		}
 	}
 
-	lgConfig.Info("zones parsed and refreshing", "count", len(all_zones), "zones", all_zones, "queued", len(conf.Internal.RefreshZoneCh))
+	lgConfig.Info("zones parsed and refreshing", "count", len(all_zones), "zones", all_zones, "broken", broken_zones, "queued", len(conf.Internal.RefreshZoneCh))
 
 	lgConfig.Debug("ParseZones complete")
-	return all_zones, nil
+	return all_zones, broken_zones, nil
 }
 
 func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, error) {
