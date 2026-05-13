@@ -227,6 +227,11 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 			signed, err := signFunc(*dsRRset, qname)
 			if err != nil {
 				lgHandler.Error("failed to sign DS RRset", "qname", qname, "err", err)
+				if msgoptions.DO {
+					m.MsgHdr.Rcode = dns.RcodeServerFailure
+					w.WriteMsg(m)
+					return fmt.Errorf("failed to sign DS RRset for %s: %v", qname, err)
+				}
 			} else {
 				dsRRset = &signed
 			}
@@ -289,6 +294,11 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 		signed, err := zd.signRRsetForZone(*dsRRset, qname, msgoptions, kdb, nil)
 		if err != nil {
 			lgHandler.Error("failed to sign DS RRset", "qname", qname, "err", err)
+			if msgoptions.DO {
+				m.MsgHdr.Rcode = dns.RcodeServerFailure
+				w.WriteMsg(m)
+				return fmt.Errorf("failed to sign DS RRset for %s: %v", qname, err)
+			}
 		} else {
 			dsRRset = &signed
 		}

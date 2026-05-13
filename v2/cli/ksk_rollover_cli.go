@@ -1076,7 +1076,7 @@ func printStateTable(s *tdns.RolloverStatus) {
 func printStateNotes(s *tdns.RolloverStatus, verbose bool) {
 	if s.Hint != "" {
 		fmt.Printf("  hint:             %s\n", s.Hint)
-		if s.Headline == "SOFTFAIL" {
+		if s.Headline == "SOFTFAIL" && s.LastSoftfailCat != tdns.SoftfailChildConfigWaitingForParent {
 			fmt.Printf("                    use 'auto-rollover unstick --zone %s' to skip the wait and probe now\n", s.Zone)
 		}
 	}
