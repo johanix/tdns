@@ -12,7 +12,7 @@ replace (
 )
 
 require (
-	github.com/johanix/dnssec-algorithms v0.0.0-20260513152342-a07f00996eac
+	github.com/johanix/dnssec-algorithms v0.0.0-20260513175752-1a6e6b2d579e
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/cli v0.0.0-00010101000000-000000000000
 	github.com/spf13/cobra v1.8.1
@@ -47,6 +47,7 @@ require (
 	github.com/mattn/go-tty v0.0.3 // indirect
 	github.com/miekg/dns v1.1.70 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
+	github.com/open-quantum-safe/liboqs-go v0.0.0-20260310140033-75451133b94a // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
 	github.com/pkg/term v1.2.0-beta.2 // indirect
 	github.com/quic-go/quic-go v0.58.0 // indirect

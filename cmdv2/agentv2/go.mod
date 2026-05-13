@@ -11,7 +11,7 @@ replace (
 )
 
 require (
-	github.com/johanix/dnssec-algorithms v0.0.0-20260513152342-a07f00996eac
+	github.com/johanix/dnssec-algorithms v0.0.0-20260513175752-1a6e6b2d579e
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
 	github.com/mattn/go-sqlite3 v1.14.16
 )
@@ -36,6 +36,7 @@ require (
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/miekg/dns v1.1.70 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
+	github.com/open-quantum-safe/liboqs-go v0.0.0-20260310140033-75451133b94a // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
 	github.com/quic-go/quic-go v0.58.0 // indirect
 	github.com/spf13/afero v1.9.5 // indirect
