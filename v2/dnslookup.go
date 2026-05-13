@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"hash/fnv"
 	"log"
@@ -12,6 +13,7 @@ import (
 	"slices"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	edns0 "github.com/johanix/tdns/v2/edns0"
@@ -21,6 +23,27 @@ import (
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
+
+// isTransientNetErr reports whether err is a transient network error worth
+// retrying against the same server address: i/o timeout, connection refused,
+// connection reset, or EAGAIN. Authoritative response codes (REFUSED, SERVFAIL,
+// NOTAUTH) come back as successful Exchange calls with a non-zero Rcode — they
+// are NOT errors here and are handled in the caller's per-zone backoff path.
+func isTransientNetErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var ne net.Error
+	if errors.As(err, &ne) && ne.Timeout() {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.EAGAIN) {
+		return true
+	}
+	return false
+}
 
 var lgDns = Logger("dns")
 
@@ -1619,15 +1642,79 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 			return nil, t, 0, err
 		}
 	}
-	r, _, err := c.Exchange(m, addr, Globals.Debug && !imr.Quiet)
+
+	// Per-address retry: a single dropped UDP packet (common on AWS) must not
+	// cause IterativeDNSQuery to abandon an address — especially when the
+	// delegation has only one NS, in which case there is no "next server" to
+	// fall back to. Up to 3 attempts (1 + 2 retries) with short backoff. UDP
+	// timeouts also trigger a single forced-TCP attempt before giving up.
+	// ctx.Done() short-circuits everywhere so the overall query deadline still
+	// bounds total wall time.
+	const maxAttempts = 3
+	backoffs := []time.Duration{50 * time.Millisecond, 150 * time.Millisecond}
+	var (
+		r       *dns.Msg
+		lastErr error
+	)
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return nil, t, 0, ctx.Err()
+			case <-time.After(backoffs[attempt-1]):
+			}
+		}
+		r, _, err = c.Exchange(m, addr, Globals.Debug && !imr.Quiet)
+		if err == nil {
+			break
+		}
+		if !isTransientNetErr(err) {
+			// Non-transient (e.g. config/protocol error) — no point retrying.
+			lastErr = err
+			break
+		}
+		lastErr = err
+		if Globals.Debug {
+			lgDns.Debug("tryServer: transient error, will retry",
+				"attempt", attempt+1,
+				"max", maxAttempts,
+				"addr", addr,
+				"qname", qname,
+				"qtype", dns.TypeToString[qtype],
+				"error", err)
+		}
+	}
+
+	// UDP timeout fallback: if Do53 still failed after all UDP retries with a
+	// transient error, take one shot over TCP against the same address before
+	// declaring this address dead. (DoT/DoH/DoQ are already TCP/QUIC-based.)
+	if err != nil && t == core.TransportDo53 && c.DNSClientTCP != nil && isTransientNetErr(err) {
+		select {
+		case <-ctx.Done():
+			return nil, t, 0, ctx.Err()
+		default:
+		}
+		if Globals.Debug {
+			lgDns.Debug("tryServer: UDP retries exhausted, attempting TCP fallback",
+				"addr", addr, "qname", qname, "qtype", dns.TypeToString[qtype])
+		}
+		tcpAddr := net.JoinHostPort(addr, c.Port)
+		tr, _, terr := c.DNSClientTCP.Exchange(m, tcpAddr)
+		if terr == nil && tr != nil {
+			r, err = tr, nil
+		} else if terr != nil {
+			lastErr = terr
+		}
+	}
+
 	if err != nil {
 		lgDns.Error("*** tryServer: query \" \" sent to returned error",
 			"qname", qname,
 			"s", dns.TypeToString[qtype],
 			"addr", addr,
-			"error", err)
-		server.RecordAddressFailure(addr, err)
-		return nil, t, 0, err
+			"error", lastErr)
+		server.RecordAddressFailure(addr, lastErr)
+		return nil, t, 0, lastErr
 	}
 	if r != nil {
 		server.RecordAddressSuccess(addr)
@@ -1640,7 +1727,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 				"addr", addr)
 		}
 	}
-	return r, t, 0, err
+	return r, t, 0, nil
 }
 
 // applyTransportSignalToServer parses a colon-separated transport string and applies it to the given server.
