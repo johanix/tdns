@@ -64,8 +64,11 @@ service:
    name:		TDNS-AGENT
    verbose:		true
    debug:		true   # writes processed zone to disk
-   refresh:		true
-   maxrefresh:		1800    # seconds. Cap refresh counter to max this
+   # Optional clamps on the SOA Refresh value used for secondary
+   # zones. Both default in code (min 60s, max 8h) when unset.
+   # Primaries are not affected (they reload from file on SIGHUP).
+   # minrefresh:		60      # seconds, floor for SOA Refresh
+   # maxrefresh:		1800    # seconds, ceiling for SOA Refresh
 
 dnsengine:
    addresses:		[ 127.0.0.1:5357, '[::1]:5357']

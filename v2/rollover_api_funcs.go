@@ -90,7 +90,7 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInte
 	}
 
 	applyInFlightPublicationLabels(out)
-	populateRolloverWarnings(out, pol, checkInterval)
+	populateRolloverWarnings(out, pol, checkInterval, now)
 	populateRolloverPolicyErrors(out, zone)
 	populateNextTransitions(out, kdb, zone, pol, propagationDelay, now)
 
@@ -217,7 +217,7 @@ func applyInFlightPublicationLabels(out *RolloverStatus) {
 //     visible).
 //   - Time since last successful rollover above 2 × KSK.Lifetime (engine
 //     cannot make progress on this zone for a multi-cycle stretch).
-func populateRolloverWarnings(out *RolloverStatus, pol *DnssecPolicy, checkInterval time.Duration) {
+func populateRolloverWarnings(out *RolloverStatus, pol *DnssecPolicy, checkInterval time.Duration, now time.Time) {
 	if pol == nil {
 		return
 	}
@@ -261,7 +261,7 @@ func populateRolloverWarnings(out *RolloverStatus, pol *DnssecPolicy, checkInter
 			}
 		}
 		if !latestActive.IsZero() {
-			elapsed := time.Since(latestActive)
+			elapsed := now.Sub(latestActive)
 			if elapsed > 2*lifetime {
 				out.Warnings = append(out.Warnings,
 					fmt.Sprintf("active KSK age (%s) exceeds 2 × KSK.Lifetime (%s) — rollover engine is not advancing this zone",

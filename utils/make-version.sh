@@ -4,7 +4,7 @@ appdate=$2
 prog=$3
 
 versioned_progs="tdns-agent tdns-agentv2 tdns-auth tdns-authv2 \
-		 tdns-combiner tdns-combinerv2 tdns-cli tdns-cliv2 \
+		 tdns-combiner tdns-cli tdns-cliv2 \
 		 dog dogv2 tdns-imr tdns-imrv2 tdns-reporter tdns-scanner"
 
 case " $versioned_progs " in

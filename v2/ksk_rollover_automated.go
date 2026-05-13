@@ -1001,7 +1001,10 @@ func parseOptionalTime(s sql.NullString) (time.Time, bool) {
 // T_publish_{i-1}'s rollover fires, meaning multiple keys may need
 // DNSKEYs simultaneously. The per-promotion-position computation
 // handles this correctly — each key is governed by its own T_publish.
-func TransitionRolloverKskDsPublishedToPublished(conf *Config, kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
+func TransitionRolloverKskDsPublishedToPublished(ctx context.Context, conf *Config, kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
+	if err := ctx.Err(); err != nil {
+		return
+	}
 	keys, err := GetDnssecKeysByState(kdb, "", DnskeyStateDsPublished)
 	if err != nil {
 		lgSigner.Error("rollover: list ds-published keys", "err", err)
@@ -1019,6 +1022,9 @@ func TransitionRolloverKskDsPublishedToPublished(conf *Config, kdb *KeyDB, now t
 	}
 
 	for zoneName, dsPubs := range byZone {
+		if err := ctx.Err(); err != nil {
+			return
+		}
 		zd, ok := Zones.Get(zoneName)
 		if !ok || zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method != RolloverMethodMultiDS {
 			continue
@@ -1209,7 +1215,10 @@ func transitionDsPublishedToPublishedForZone(deps RolloverEngineDeps, dsPubs []*
 // has done all the cache-flush waiting and the key is genuinely ready
 // to fire. asap can then queue an AtomicRollover at standby_at + 0
 // without violating cache-flush invariants.
-func TransitionRolloverKskPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
+func TransitionRolloverKskPublishedToStandby(ctx context.Context, conf *Config, kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
+	if err := ctx.Err(); err != nil {
+		return
+	}
 	keys, err := GetDnssecKeysByState(kdb, "", DnskeyStatePublished)
 	if err != nil {
 		lgSigner.Error("rollover: list published keys", "err", err)
@@ -1228,6 +1237,9 @@ func TransitionRolloverKskPublishedToStandby(conf *Config, kdb *KeyDB, now time.
 		byZone[k.ZoneName] = append(byZone[k.ZoneName], k)
 	}
 	for zoneName, pubs := range byZone {
+		if err := ctx.Err(); err != nil {
+			return
+		}
 		zd, ok := Zones.Get(zoneName)
 		if !ok || zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method != RolloverMethodMultiDS {
 			continue
@@ -1283,17 +1295,25 @@ func transitionPublishedToStandbyForZone(deps RolloverEngineDeps, pubs []*Dnssec
 			continue
 		}
 		// parent-side gate: T_ds_observed + parent_prop + DS_TTL ≤ now.
-		// When DS_TTL is unknown the engine has no observation; defer.
-		// When parent_prop or DS_TTL is zero (e.g. policy missing or
-		// pre-observation), the DNSKEY gate dominates and we proceed.
-		if dsTTLKnown {
-			tDsObs, err := RolloverKeyDsObservedAt(kdb, zoneName, k.KeyTag)
-			if err == nil && tDsObs != nil {
-				dsReadyAt := tDsObs.Add(parentProp + dsTTL)
-				if now.Before(dsReadyAt) {
-					continue
-				}
-			}
+		// Cache-flush invariant E1 requires the full parent-side window
+		// has elapsed before promoting. If DS_TTL is unknown, or no DS
+		// observation has been recorded yet, defer — promoting on the
+		// DNSKEY gate alone would risk validators still holding the
+		// stale parent DS RRset.
+		if !dsTTLKnown {
+			deps.Logger.Debug("rollover: deferring published→standby; DS TTL not yet observable",
+				"zone", zoneName, "keyid", k.KeyTag)
+			continue
+		}
+		tDsObs, err := RolloverKeyDsObservedAt(kdb, zoneName, k.KeyTag)
+		if err != nil || tDsObs == nil {
+			deps.Logger.Debug("rollover: deferring published→standby; no DS observation yet",
+				"zone", zoneName, "keyid", k.KeyTag, "err", err)
+			continue
+		}
+		dsReadyAt := tDsObs.Add(parentProp + dsTTL)
+		if now.Before(dsReadyAt) {
+			continue
 		}
 
 		if err := UpdateDnssecKeyState(kdb, zoneName, k.KeyTag, DnskeyStateStandby); err != nil {

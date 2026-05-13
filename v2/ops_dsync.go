@@ -249,15 +249,6 @@ func DsyncUpdateTargetName(zonename string) string {
 	return dns.Fqdn(strings.Replace(tpl, "{ZONENAME}", replacer, 1))
 }
 
-// ZoneIsReady returns a function that can be used as a PreCondition for a DeferredUpdate.
-// The returned function will return true if the zone exists and is ready, otherwise false.
-func ZoneIsReady(zonename string) func() bool {
-	return func() bool {
-		_, ok := Zones.Get(zonename)
-		return ok
-	}
-}
-
 func (zd *ZoneData) UnpublishDsyncRRs() error {
 	// Create a string representation of an empty DSYNC record for deletion
 	dsync_str := fmt.Sprintf("_dsync.%s 0 IN DSYNC \"NOTIFY\" 53 1.2.3.4", zd.ZoneName)

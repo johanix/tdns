@@ -504,7 +504,6 @@ type InternalDnsConf struct {
 	RecursorCh          chan ImrRequest
 	ScannerQ            chan ScanRequest
 	UpdateQ             chan UpdateRequest
-	DeferredUpdateQ     chan DeferredUpdate
 	DnsUpdateQ          chan DnsUpdateRequest
 	DnsNotifyQ          chan DnsNotifyRequest
 	DnsQueryQ           chan DnsQueryRequest           // Optional: if nil, queries use direct call to QueryResponder
@@ -570,7 +569,7 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 	prezones := Zones.Keys()
 	lgConfig.Info("ReloadZones: zones prior to reloading", "zones", prezones)
 	// XXX: This is wrong. We must get the zones config file from outside (to enamble things like MUSIC to use a different config file)
-	zonelist, err := conf.ParseZones(ctx, true) // true: reload, not initial parsing
+	zonelist, brokenlist, err := conf.ParseZones(ctx, true) // true: reload, not initial parsing
 	if err != nil {
 		confMu.Unlock()
 		lgConfig.Error("ReloadZoneConfig: error parsing zones", "err", err)
@@ -578,22 +577,23 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 	}
 
 	for _, zname := range prezones {
-		if !slices.Contains(zonelist, zname) {
-			zd, exists := Zones.Get(zname)
-			if !exists {
-				lgConfig.Warn("ReloadZoneConfig: zone not in config and also not in zone list", "zone", zname)
-				continue
-			}
-			if zd.Options[OptAutomaticZone] {
-				lgConfig.Info("ReloadZoneConfig: zone is automatic, not removing from zone list", "zone", zname)
-				continue
-			}
-			lgConfig.Info("ReloadZoneConfig: zone no longer in config, removing from zone list", "zone", zname)
-			Zones.Remove(zname)
+		if slices.Contains(zonelist, zname) || slices.Contains(brokenlist, zname) {
+			continue
 		}
+		zd, exists := Zones.Get(zname)
+		if !exists {
+			lgConfig.Warn("ReloadZoneConfig: zone not in config and also not in zone list", "zone", zname)
+			continue
+		}
+		if zd.Options[OptAutomaticZone] {
+			lgConfig.Info("ReloadZoneConfig: zone is automatic, not removing from zone list", "zone", zname)
+			continue
+		}
+		lgConfig.Info("ReloadZoneConfig: zone no longer in config, removing from zone list", "zone", zname)
+		Zones.Remove(zname)
 	}
 
-	lgConfig.Info("ReloadZones: zones after reloading", "zones", zonelist)
+	lgConfig.Info("ReloadZones: zones after reloading", "zones", zonelist, "broken", brokenlist)
 	Globals.App.ServerConfigTime = time.Now()
 
 	// Capture hook reference before releasing lock to avoid deadlock

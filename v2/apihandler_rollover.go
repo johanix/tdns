@@ -131,9 +131,15 @@ func APIRolloverAsap(conf *Config) func(w http.ResponseWriter, r *http.Request) 
 		if res.Status != EarliestStatusReady {
 			detail := "rollover not currently possible"
 			if res.Blocker != nil {
-				detail = res.Blocker.Reason
+				parts := make([]string, 0, 2)
+				if res.Blocker.Reason != "" {
+					parts = append(parts, res.Blocker.Reason)
+				}
 				if res.Blocker.Cause != "" {
-					detail = fmt.Sprintf("%s: %s", detail, res.Blocker.Cause)
+					parts = append(parts, res.Blocker.Cause)
+				}
+				if len(parts) > 0 {
+					detail = strings.Join(parts, ": ")
 				}
 				if res.Blocker.Detail != "" {
 					detail = fmt.Sprintf("%s (%s)", detail, res.Blocker.Detail)

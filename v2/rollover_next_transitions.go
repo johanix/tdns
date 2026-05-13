@@ -245,22 +245,34 @@ func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *
 				e.NextTransitionNote = "awaiting published_at"
 				break
 			}
-			var dnskeyReady time.Time
-			if dnskeyTTLKnown {
-				dnskeyReady = ts.Add(propagationDelay + dnskeyTTL)
-			} else {
-				dnskeyReady = ts.Add(propagationDelay)
+			if !dnskeyTTLKnown {
+				e.NextTransitionNote = "awaiting DNSKEY TTL observation"
+				break
 			}
+			dnskeyReady := ts.Add(propagationDelay + dnskeyTTL)
+			// Parent-side gate. Both DS TTL and a recorded DS
+			// observation are required — the transition won't fire
+			// until both are present (see
+			// transitionPublishedToStandbyForZone).
+			zd, ok := Zones.Get(zone)
+			if !ok || zd == nil {
+				e.NextTransitionNote = "awaiting zone data"
+				break
+			}
+			dsTTL, dsTTLKnown := resolveDSTTL(zd, pol)
+			if !dsTTLKnown {
+				e.NextTransitionNote = "awaiting DS TTL observation"
+				break
+			}
+			dsObs, err := RolloverKeyDsObservedAt(kdb, zone, e.KeyID)
+			if err != nil || dsObs == nil {
+				e.NextTransitionNote = "awaiting DS observation at parent"
+				break
+			}
+			dsReady := dsObs.Add(pol.Rollover.DsPublishDelay + dsTTL)
 			latest := dnskeyReady
-			if zd, ok := Zones.Get(zone); ok && zd != nil {
-				if dsTTL, dsTTLKnown := resolveDSTTL(zd, pol); dsTTLKnown {
-					if dsObs, err := RolloverKeyDsObservedAt(kdb, zone, e.KeyID); err == nil && dsObs != nil {
-						dsReady := dsObs.Add(pol.Rollover.DsPublishDelay + dsTTL)
-						if dsReady.After(latest) {
-							latest = dsReady
-						}
-					}
-				}
+			if dsReady.After(latest) {
+				latest = dsReady
 			}
 			e.NextTransitionAt = latest.UTC().Format(time.RFC3339)
 		}

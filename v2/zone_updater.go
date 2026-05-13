@@ -47,15 +47,6 @@ func SprintUpdates(actions []dns.RR) string {
 	return buf
 }
 
-type DeferredUpdate struct {
-	Cmd          string
-	ZoneName     string
-	AddTime      time.Time
-	Description  string
-	PreCondition func() bool
-	Action       func() error
-}
-
 // logUpdateActions logs each RR in an update at Info level with
 // ADDED/DELETED prefix based on the RR class.
 func logUpdateActions(updateType string, actions []dns.RR) {
@@ -285,95 +276,6 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 	}
 }
 
-func (kdb *KeyDB) DeferredUpdaterEngine(ctx context.Context) error {
-	deferredq := kdb.DeferredUpdateQ
-
-	var deferredUpdates []DeferredUpdate
-
-	var runQueueTicker = time.NewTicker(10 * time.Second)
-
-	lg.Info("DeferredUpdater starting")
-	defer runQueueTicker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			lg.Info("DeferredUpdater: context cancelled")
-			lg.Info("DeferredUpdater: terminating")
-			return nil
-		case du, ok := <-deferredq:
-			if !ok {
-				lg.Info("DeferredUpdater: deferredq closed")
-				lg.Info("DeferredUpdater: terminating")
-				return nil
-			}
-			lg.Debug("DeferredUpdater received update request")
-			if du.Cmd == "PING" {
-				lg.Debug("DeferredUpdater: PING received, PONG!")
-				continue
-			}
-			_, ok = Zones.Get(du.ZoneName)
-			if !ok && du.Cmd != "DEFERRED-UPDATE" {
-				lg.Warn("DeferredUpdater: unknown zone in update request, ignoring", "cmd", du.Cmd, "zone", du.ZoneName)
-				lg.Debug("DeferredUpdater: known zones", "zones", Zones.Keys())
-				continue
-			}
-
-			switch du.Cmd {
-			case "DEFERRED-UPDATE":
-				// If the PreCondition is true, we execute the Action immediately, otherwise we defer execution an add it to the deferredUpdates queue.
-				if du.PreCondition() {
-					lg.Debug("DeferredUpdater: precondition true, executing immediately", "description", du.Description)
-					err := du.Action()
-					if err != nil {
-						lg.Error("DeferredUpdater: deferred update action failed", "description", du.Description, "error", err)
-					}
-				} else {
-					lg.Debug("DeferredUpdater: precondition false, deferring execution", "description", du.Description)
-					du := DeferredUpdate{
-						Description:  du.Description,
-						PreCondition: du.PreCondition,
-						Action:       du.Action,
-						AddTime:      time.Now(),
-					}
-					deferredUpdates = append(deferredUpdates, du)
-				}
-				continue
-
-			default:
-				lg.Error("DeferredUpdater: unknown command, ignoring", "cmd", du.Cmd)
-			}
-			lg.Info("DeferredUpdater: update request completed", "type", du.Cmd)
-
-		case <-runQueueTicker.C:
-			if len(deferredUpdates) == 0 {
-				continue
-			}
-
-			lg.Debug("DeferredUpdater: running deferred updates queue", "items", len(deferredUpdates))
-			for i := 0; i < len(deferredUpdates); {
-				du := deferredUpdates[i]
-				lg.Debug("DeferredUpdater: running deferred update", "description", du.Description)
-				ok := du.PreCondition()
-				if ok {
-					lg.Debug("DeferredUpdater: precondition true, executing", "description", du.Description)
-					err := du.Action()
-					if err != nil {
-						lg.Error("DeferredUpdater: deferred update action failed", "description", du.Description, "error", err)
-						i++
-					} else {
-						lg.Info("DeferredUpdater: deferred update executed successfully", "description", du.Description)
-						// Remove the item from deferredUpdates queue
-						deferredUpdates = append(deferredUpdates[:i], deferredUpdates[i+1:]...)
-					}
-				} else {
-					lg.Debug("DeferredUpdater: precondition failed, skipping", "description", du.Description)
-					i++
-				}
-			}
-		}
-	}
-}
-
 // 1. Sort actions so that all removes come first.
 // 2. To delete an RRset, only owner + rrtype is needed
 // 3. To delete an exact RR we need owner, rrtype and the rr.String(). Problem is if
@@ -484,13 +386,33 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 
 	lg.Debug("ApplyChildUpdateToZoneData", "request", fmt.Sprintf("%+v", ur))
 
+	// If this zone is signed, fetch active keys up front so we can re-sign
+	// modified delegation RRsets (notably DS, which is authoritative parent
+	// data and MUST carry a fresh RRSIG).
+	var dak *DnssecKeys
+	if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
+		var err error
+		dak, err = kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+		if err != nil || dak == nil || len(dak.ZSKs) == 0 {
+			dak, err = zd.EnsureActiveDnssecKeys(kdb)
+			if err != nil {
+				lg.Error("ApplyChildUpdateToZoneData: failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "error", err)
+				return false, err
+			}
+			if dak == nil || len(dak.ZSKs) == 0 {
+				return false, fmt.Errorf("zone %s has no active ZSKs and signing is enabled. child update is rejected", zd.ZoneName)
+			}
+		}
+	}
+
+	var updated bool
 	zd.mu.Lock()
 	defer func() {
 		zd.mu.Unlock()
-		zd.BumpSerial()
+		if updated {
+			zd.BumpSerial()
+		}
 	}()
-
-	var updated bool
 
 	for _, rr := range ur.Actions {
 		class := rr.Header().Class
@@ -550,6 +472,15 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 			if len(rrset.RRs) == 0 {
 				owner.RRtypes.Delete(rrtype)
 			} else {
+				// RFC 4035 §2.2: at a delegation point, only DS is
+				// authoritative parent data and gets an RRSIG. NS and
+				// glue (A/AAAA) MUST NOT be signed at the parent.
+				if dak != nil && rrtype == dns.TypeDS {
+					_, err := zd.SignRRset(&rrset, ownerName, dak, true, nil)
+					if err != nil {
+						lg.Error("ApplyChildUpdateToZoneData: signing failed after RR removal", "rrtype", rrtypestr, "owner", ownerName, "error", err)
+					}
+				}
 				owner.RRtypes.Set(rrtype, rrset)
 			}
 			updated = true
@@ -584,15 +515,19 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 			lg.Debug("ApplyChildUpdateToZoneData: adding RR", "rrtype", rrtypestr, "rr", rrcopy.String())
 			rrset.RRs = append(rrset.RRs, rrcopy)
 			rrset.RRSIGs = []dns.RR{}
+			// RFC 4035 §2.2: only DS gets an RRSIG at a delegation
+			// point. NS and glue (A/AAAA) MUST NOT be signed at the
+			// parent.
+			if dak != nil && rrtype == dns.TypeDS {
+				_, err := zd.SignRRset(&rrset, ownerName, dak, true, nil)
+				if err != nil {
+					lg.Error("ApplyChildUpdateToZoneData: signing failed after RR add", "rrtype", rrtypestr, "owner", ownerName, "error", err)
+				}
+			}
+			owner.RRtypes.Set(rrtype, rrset)
 			updated = true
 			zd.Options[OptDirty] = true
 		}
-		owner.RRtypes.Set(rrtype, rrset)
-		// log.Printf("ApplyUpdateToZoneData: Add %s with RR=%s", rrtypestr, rrcopy.String())
-		// log.Printf("ApplyUpdateToZoneData: %s[%s]=%v", owner.Name, rrtypestr, owner.RRtypes[rrtype])
-		// dump.P(owner.RRtypes[rrtype])
-		updated = true
-		// zd.Options["dirty"] = true
 		continue
 	}
 
@@ -626,7 +561,9 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 	zd.mu.Lock()
 	defer func() {
 		zd.mu.Unlock()
-		zd.BumpSerial()
+		if updated {
+			zd.BumpSerial()
+		}
 	}()
 
 	lg.Debug("ApplyZoneUpdateToZoneData: processing actions", "zone", zd.ZoneName, "count", len(ur.Actions))
@@ -752,18 +689,14 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 				lg.Error("ApplyZoneUpdateToZoneData: signing failed after RR add", "rrtype", rrtypestr, "owner", ownerName, "error", err)
 				// Continue anyway - the record is still added, just not signed
 			}
+			owner.RRtypes.Set(rrtype, rrset)
 			updated = true
-			// zd.Options["dirty"] = true
-		}
-
-		owner.RRtypes.Set(rrtype, rrset)
-		updated = true
-		// zd.Options["dirty"] = true
-		if rrtype == dns.TypeCDS {
-			lgRollover.Debug("zone-update CDS add committed",
-				"zone", zd.ZoneName, "owner", ownerName,
-				"apex_cds_rrs_after", len(rrset.RRs),
-				"rrsigs", len(rrset.RRSIGs))
+			if rrtype == dns.TypeCDS {
+				lgRollover.Debug("zone-update CDS add committed",
+					"zone", zd.ZoneName, "owner", ownerName,
+					"apex_cds_rrs_after", len(rrset.RRs),
+					"rrsigs", len(rrset.RRSIGs))
+			}
 		}
 		continue
 	}

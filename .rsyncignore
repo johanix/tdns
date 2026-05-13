@@ -31,8 +31,6 @@ cmdv2/authv2/tdns-authv2
 cmdv2/authv2/tdns-authv2.netbsd
 cmdv2/cliv2/tdns-cliv2
 cmdv2/cliv2/tdns-cliv2.netbsd
-cmdv2/combinerv2/tdns-combinerv2
-cmdv2/combinerv2/tdns-combinerv2.netbsd
 cmdv2/dogv2/dogv2
 cmdv2/dogv2/dogv2.netbsd
 cmdv2/imrv2/tdns-imrv2
