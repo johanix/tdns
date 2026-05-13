@@ -18,6 +18,7 @@ import (
 	// Per-binary choice — tdns/v2 itself stays free of third-party
 	// crypto deps; each application opts in here.
 	_ "github.com/johanix/dnssec-algorithms/mldsa44"
+	_ "github.com/johanix/dnssec-algorithms/slhdsa128s"
 
 	tdns "github.com/johanix/tdns/v2"
 )

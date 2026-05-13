@@ -12,7 +12,7 @@ replace (
 )
 
 require (
-	github.com/johanix/dnssec-algorithms v0.0.0-20260513135759-676b5158decd
+	github.com/johanix/dnssec-algorithms v0.0.0-20260513152342-a07f00996eac
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/cli v0.0.0-00010101000000-000000000000
 	github.com/spf13/cobra v1.8.1
