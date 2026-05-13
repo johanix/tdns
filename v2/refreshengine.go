@@ -266,7 +266,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 					} else {
 						// EXISTING ZONE: already loaded, normal refresh path.
-						if zd.Error && zd.ErrorType != RefreshError {
+						if zd.HasServiceImpactingError() {
 							lgEngine.Warn("zone in error state", "zone", zone, "errortype", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
 							resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s is in %s error state: %s", zone, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
 							if zr.Response != nil {
@@ -558,7 +558,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					lgEngine.Debug("refreshing zone due to refresh counter", "zone", zone)
 					// log.Printf("Len(Zones) = %d", len(Zones))
 					zd, _ := Zones.Get(zone)
-					if zd.Error && zd.ErrorType != RefreshError {
+					if zd.HasServiceImpactingError() {
 						lgEngine.Warn("zone in error state, not refreshing", "zone", zone, "errortype", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
 						continue
 					}
