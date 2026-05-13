@@ -101,8 +101,9 @@ func (zd *ZoneData) LoadDynamicZoneFile(zoneDirectory string) (bool, uint32, err
 		return false, 0, fmt.Errorf("zone file corrupted: %v", err)
 	}
 
-	// Clear any previous error state on successful load
-	zd.SetError(NoError, "")
+	// Successful load clears ConfigError specifically. Other categories
+	// (rollover-policy, refresh, etc.) are independent and survive.
+	zd.ClearError(ConfigError)
 
 	lg.Info("loaded zone file", "zone", zd.ZoneName, "path", zoneFilePath, "serial", serial)
 	return updated, serial, nil

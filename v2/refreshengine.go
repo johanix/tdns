@@ -111,9 +111,10 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 	if updated {
 		zd.LatestRefresh = time.Now()
 		zd.RefreshCount++
-		if zd.Error && zd.ErrorType == RefreshError {
-			zd.SetError(NoError, "")
-		}
+		// Successful refresh clears RefreshError specifically — other
+		// error categories (rollover policy, parent DSYNC blockers,
+		// config errors) are independent and must survive.
+		zd.ClearError(RefreshError)
 		// Apply outbound_soa_serial mode for the serial we'll advertise
 		// to secondaries.
 		if zd.KeyDB != nil {
@@ -250,7 +251,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 					} else {
 						// EXISTING ZONE: already loaded, normal refresh path.
-						if zd.Error && zd.ErrorType != RefreshError {
+						if zd.HasServiceImpactingError() {
 							lgEngine.Warn("zone in error state", "zone", zone, "errortype", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
 							resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s is in %s error state: %s", zone, ErrorTypeToString[zd.ErrorType], zd.ErrorMsg)
 							if zr.Response != nil {
@@ -380,10 +381,12 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 									}
 								}
 							} else {
-								// Clear any previous error state after successful refresh
-								if zd.Error {
-									lgEngine.Info("zone refresh succeeded, clearing error state", "zone", zone, "errortype", ErrorTypeToString[zd.ErrorType])
-									zd.SetError(NoError, "")
+								// Clear refresh-specific error state after successful refresh.
+								// Other categories (rollover-policy, parent-DSYNC, config) are
+								// independent and survive a successful refresh.
+								if zd.HasError(RefreshError) {
+									lgEngine.Info("zone refresh succeeded, clearing RefreshError", "zone", zone)
+									zd.ClearError(RefreshError)
 								}
 								// No error from refresh - zone data is valid
 								if updated {
@@ -540,7 +543,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					lgEngine.Debug("refreshing zone due to refresh counter", "zone", zone)
 					// log.Printf("Len(Zones) = %d", len(Zones))
 					zd, _ := Zones.Get(zone)
-					if zd.Error && zd.ErrorType != RefreshError {
+					if zd.HasServiceImpactingError() {
 						lgEngine.Warn("zone in error state, not refreshing", "zone", zone, "errortype", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
 						continue
 					}
@@ -549,7 +552,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// to get the full treatment (callbacks, signing, sync setup).
 					if zd.FirstZoneLoad {
 						lgEngine.Info("retrying initial load for zone", "zone", zone)
-						zd.SetError(NoError, "") // clear error to allow load
+						// Clear RefreshError to allow the retry. Other categories
+						// (rollover-policy, config) are independent and survive.
+						zd.ClearError(RefreshError)
 						if _, err := initialLoadZone(ctx, zd, zone, ZoneRefresher{Name: zone, Force: true}, conf,
 							refreshCounters, tryPostpass); err != nil {
 							lgEngine.Error("initial load retry failed", "zone", zone, "error", err)
@@ -567,10 +572,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						zd.SetError(RefreshError, "refresh error: %v", err)
 						zd.LatestError = time.Now()
 					} else if updated {
-						// Clear error state on successful refresh
-						if zd.Error && zd.ErrorType == RefreshError {
-							zd.SetError(NoError, "")
-						}
+						// Successful refresh clears RefreshError. Other categories
+						// (rollover-policy, parent-DSYNC, config) survive.
+						zd.ClearError(RefreshError)
 						// Apply outbound_soa_serial mode after upstream refresh.
 						if zd.KeyDB != nil {
 							serialChanged := false

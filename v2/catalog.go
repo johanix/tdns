@@ -311,11 +311,13 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 
 	if !autoConfigureEnabled {
 		lg.Info("CATALOG: auto-configure disabled, catalog provides metadata only", "catalog", update.CatalogZone, "members", len(update.MemberZones))
-		// Clear error state if no validation errors were found (validation still runs to catch missing groups)
-		if errorCount == 0 && catalogExists && catalogZd.Error && catalogZd.ErrorType == ConfigError {
+		// Clear ConfigError specifically when validation now passes.
+		// Other categories (rollover-policy, refresh, etc.) are
+		// independent and survive this clear.
+		if errorCount == 0 && catalogExists && catalogZd.HasError(ConfigError) {
 			if strings.Contains(catalogZd.ErrorMsg, "Member zone") || strings.Contains(catalogZd.ErrorMsg, "references group") {
-				lg.Info("CATALOG: all member zone configurations now valid, clearing previous error state")
-				catalogZd.SetError(NoError, "")
+				lg.Info("CATALOG: all member zone configurations now valid, clearing ConfigError")
+				catalogZd.ClearError(ConfigError)
 			}
 		}
 		return nil
@@ -445,12 +447,12 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 
 	lg.Info("CATALOG: AutoConfigureZonesFromCatalog: completed", "processed", processedCount, "configured", configuredCount, "skipped", skippedCount, "errors", errorCount)
 
-	// Clear error state if no errors were found and zone was previously in error
-	if errorCount == 0 && catalogExists && catalogZd.Error && catalogZd.ErrorType == ConfigError {
-		// Check if the error was catalog-related (contains "Member zone" or "references group")
+	// Clear ConfigError specifically when validation now passes.
+	// Other categories (rollover-policy, refresh, etc.) survive.
+	if errorCount == 0 && catalogExists && catalogZd.HasError(ConfigError) {
 		if strings.Contains(catalogZd.ErrorMsg, "Member zone") || strings.Contains(catalogZd.ErrorMsg, "references group") {
-			lg.Info("CATALOG: all member zone configurations now valid, clearing previous error state")
-			catalogZd.SetError(NoError, "")
+			lg.Info("CATALOG: all member zone configurations now valid, clearing ConfigError")
+			catalogZd.ClearError(ConfigError)
 		}
 	}
 

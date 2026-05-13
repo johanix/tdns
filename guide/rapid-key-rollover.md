@@ -192,6 +192,78 @@ filed as a design issue.
 The earlier "cache-flush analysis" (§3) gives the intuition; this
 section makes it rigorous.
 
+### 4.0 Key states
+
+A KSK in the rollover pipeline moves through seven states. Each
+state has a defined entry condition (the prerequisite for the
+transition that creates it) and a defined exit condition (what
+allows the engine to advance the key to the next state).
+
+**`created`.** Fresh keypair has been generated and its DS pushed
+to the parent (via DNS UPDATE or CDS publication). DNSKEY is *not*
+in the served zone; only the parent has been informed. The engine
+is awaiting parent-side observation of the DS.
+*Exit:* parent's DS RRset includes the key's DS record.
+
+The pipeline holds at most one `created` key at a time. The engine
+enforces this as a hard cap (`num_ds + 1` total pipeline depth) so
+that a stalled parent-publication path can't drive unbounded key
+generation: a second `created` key would not help — both would queue
+behind the same DS push.
+
+**`ds-published`.** Parent has been observed to serve the DS for
+this key. DNSKEY is still not in the served child zone — the
+engine deliberately holds it back to minimize DNSKEY exposure (see
+§4.7). Parent-side propagation (`parent_prop + DS_TTL`) starts
+from the moment of observation.
+*Exit:* the engine reaches `T_DNSKEY_pub_n = T_roll_n − child_prop
+− DNSKEY_TTL` (E12); time to put DNSKEY in the served zone.
+
+**`published`.** DNSKEY is now in the served child zone but
+caches may still hold pre-publish responses, so the key is *not*
+yet usable for signing. Both child-side
+(`T_published + child_prop + DNSKEY_TTL`) and parent-side
+(`T_DS_observed + parent_prop + DS_TTL`) cache-flush gates are
+running.
+*Exit:* both gates have elapsed — caches everywhere now serve
+RRsets that include this key.
+
+**`standby`.** Cache-flush is complete; the key is genuinely
+ready and could be made active *immediately*. The state exists so
+the engine can hold the key for a configurable pause before
+AtomicRollover, giving the operator a window to abort the
+natural-cadence rollover. **Any pause in `standby` is a policy
+choice (`rollover.standby_time`, default 1m), not a safety
+requirement** — published→standby→active with `standby_time = 0`
+is a perfectly safe rollover. `auto-rollover asap` bypasses the
+pause entirely; the cache-flush gates that gated published→standby
+remain in force and cannot be bypassed.
+*Exit:* `standby_at + standby_time` reached, OR operator triggers
+asap.
+
+**`active`.** The key is the zone's signing KSK. AtomicRollover
+fired: the previously-active KSK transitioned to `retired` in the
+same operation that promoted this one. From now until its own
+retirement, this key signs the DNSKEY RRset and (transitively)
+the entire chain of trust below the zone.
+*Exit:* `T_roll_{n+1}` reached — the next-up standby key gets
+promoted, this key transitions to `retired`.
+
+**`retired`.** The key is no longer signing new things, but its
+DNSKEY remains in the zone and its DS remains at the parent.
+Cached RRSIGs and DS responses still in flight may reference this
+key; we wait the `retirement_period` (= `effective_margin`) so
+they can drain.
+*Exit:* `retired_at + effective_margin` reached. The DNSKEY is
+removed from the served zone, and the same atomic parent UPDATE
+that drops this key's DS adds the next future slot's DS — keeping
+the parent's DS RRset at exactly N (§4.4).
+
+**`removed`.** Terminal. DNSKEY is out of the zone; DS is out of
+the parent. The key's lifecycle is complete. Rows in this state
+are kept for audit/history and excluded from `num_ds`-against-
+parent counts.
+
 ### 4.1 Notation
 
 Throughout: `T_X` denotes a **timestamp** (a moment in wall time);
@@ -216,10 +288,11 @@ or observation that supplies its value.
 | `DNSKEY_TTL` | duration | derived: `min(ttls.dnskey, ttls.max_served)` clamped further by K-step clamping near rollover | TTL of the DNSKEY RRset as actually served to validators. Bounds how long resolvers cache the old DNSKEY RRset after the child publishes a new one. |
 | `KSK_lifetime` | duration | `ksk.lifetime` config knob | Rollover cadence — the policy-driven interval between successive KSK activations. Steady-state: `T_roll_n − T_roll_{n−1} = KSK_lifetime`. |
 | `retirement_period` | duration | `effective_margin = max(clamping.margin, max_observed_TTL)` in current engine | The hold time between a KSK transitioning to retired (at T_roll_n) and being removed (at T_roll_n + retirement_period). During the retirement period the key's DNSKEY is still in the zone but the engine no longer signs new things with it. Sized so that all cached RRSIGs by the retiring key have flushed by the time it's removed (see §4.5.1). |
-| `N` | dimensionless | `rollover.num-ds` config knob | Multi-DS pipeline depth — how many DS records the engine maintains at the parent simultaneously (active + N−1 future). |
+| `N` | dimensionless | `rollover.num-ds` config knob | Number of DS records the engine maintains at the parent simultaneously (active + N−1 future). Internal pipeline depth is `N + 1`: the extra key sits in `created` with its DS push in flight to the parent and joins the N-at-parent set once the parent observes it. |
 | `T_roll_n` | timestamp | `T_roll_n = T_roll_{n−1} + KSK_lifetime` (steady-state cadence; bootstrap defines `T_roll_1` independently) | Moment KSK_n becomes the active signer. |
 | `T_DS_pub_n` | timestamp | observed from parent DS query (= when DS for KSK_n first appears at parent) | Moment parent's primary publishes DS for KSK_n. |
-| `T_DNSKEY_pub_n` | timestamp | engine-controlled: ds-published → standby transition for KSK_n | Moment child's primary publishes DNSKEY_n in the served DNSKEY RRset. |
+| `T_DNSKEY_pub_n` | timestamp | engine-controlled: ds-published → published transition for KSK_n | Moment child's primary publishes DNSKEY_n in the served DNSKEY RRset. |
+| `standby_time` | duration | `rollover.standby_time` config knob (default 1m) | Pause between when KSK_n reaches the genuine `standby` state (propagation complete, ready) and when AtomicRollover fires standby→active. Operator observability window; `auto-rollover asap` bypasses it. |
 
 ### 4.3 The two cache-flush invariants
 
@@ -274,6 +347,15 @@ state.
 
 **Contract.** The parent's DS RRset *always* contains exactly
 `N` records (`N` = `rollover.num-ds`). Never fewer, never more.
+
+`N` counts DS records *at the parent*, not keys in the engine's
+internal pipeline. In steady state the engine holds one additional
+KSK in `created` whose DS push is in flight to the parent — it
+joins the N-at-parent set the moment the parent's primary
+publishes its DS, at which point the next pipeline-fill tick
+generates the *next* `created` key. Internal pipeline depth is
+therefore `N + 1`, but the contract on the parent's RRset remains
+exactly `N`.
 
 The composition cycles between two states:
 
@@ -385,8 +467,15 @@ sizing constraint for the `retirement_period`:
 retirement_period  ≥  min(DNSKEY_TTL, KSK.SigValidity)       (E5)
 ```
 
-where `KSK.SigValidity` is the RRSIG validity period for KSK
-signatures over the DNSKEY RRset. Why this bound:
+where `DNSKEY_TTL` is the **served** DNSKEY TTL per §4.8 / E13
+(`min(ttls.dnskey, ttls.max_served)`), not the operator-configured
+`ttls.dnskey` alone. This matters operationally: it lets operators
+run long RRSIG validities (7–10 days for weekend safety) alongside
+short served TTLs (1–2h, clamped lower near rollover) for rapid
+rollover cadence. Sized against the served TTL, E5 reflects what
+validators can actually cache.
+
+Why this bound:
 
 A validator that cached the DNSKEY response just before
 `T_roll_n` holds a response whose effective lifetime in cache is
@@ -400,20 +489,16 @@ by KSK_{n−1}) to have flushed from validator caches by
 `T_remove_{n−1}`, the retirement period must be at least this
 duration.
 
-For the testbed: `min(DNSKEY_TTL, KSK.SigValidity) =
-min(5m, 20m) = 5m`. The configured `effective_margin =
-max(clamping.margin, max_observed_TTL) = max(5m, 5m) = 5m`.
-The constraint is met exactly.
+For the testbed: served `DNSKEY_TTL = min(2h, 5m) = 5m`,
+`KSK.SigValidity = 20m`, so `min(DNSKEY_TTL, KSK.SigValidity) =
+5m`. With `effective_margin = max(clamping.margin,
+max_observed_TTL) = max(5m, 5m) = 5m`, the constraint is met
+exactly.
 
-The current engine's `effective_margin` formula generally
-satisfies this constraint because `max_observed_TTL ≥
-DNSKEY_TTL ≥ min(DNSKEY_TTL, KSK.SigValidity)`. But the
-constraint should be made an explicit policy-validation check
-at config-load time: if an operator sets `KSK.SigValidity <
-clamping.margin` AND `KSK.SigValidity < max_observed_TTL`, the
-sizing rule still holds, but for the wrong reason. The
-operator-facing rule is best stated as the explicit inequality
-above.
+E5 is checked at policy-load against `clamping.margin` — the
+operator-controllable lower bound on `effective_margin`. The
+runtime `max_observed_TTL` can only push it higher, so passing
+the load-time check is sufficient.
 
 **(c) Pipeline maintenance.** The engine continuously generates
 new KSKs and submits their DS to the parent so that future slots
@@ -463,37 +548,55 @@ lead_DS  =  T_roll_n − T_DS_pub_n
 For Invariant DS (E1) to hold:
 
 ```
-(N − 1) × KSK_lifetime − retirement_period  ≥  parent_prop + DS_TTL   (E9)
+(N − 1) × KSK_lifetime − retirement_period  ≥  parent_prop + DS_TTL + standby_time   (E9)
 ```
 
 Equivalently, the operational constraint on the rollover cadence:
 
 ```
-(N − 1) × KSK_lifetime  ≥  retirement_period + parent_prop + DS_TTL   (E10)
+(N − 1) × KSK_lifetime  ≥  retirement_period + parent_prop + DS_TTL + standby_time   (E10)
 ```
 
 **Interpretation.** The multi-DS pipeline depth `N` gives the
 engine `(N − 1)` rollover cycles of buffer for DS-side
 propagation. Subtract the retirement period (during which the new
 "future" slot doesn't yet exist at the parent), and what
-remains must accommodate `parent_prop + DS_TTL`. Choose `N`,
-`KSK_lifetime`, `retirement_period`, and the parent's `DS_TTL`
+remains must accommodate `parent_prop + DS_TTL` plus any operator-
+configured `standby_time` pause between cache-flush completion and
+AtomicRollover (see §4.7). Choose `N`, `KSK_lifetime`,
+`retirement_period`, `standby_time`, and the parent's `DS_TTL`
 such that E10 holds; the rest is automatic.
 
 **For the testbed config.** N=3, KSK_lifetime=10m,
-retirement_period=5m (`clamping.margin`), parent_prop≈30s, DS_TTL≈5m:
+retirement_period=5m (`clamping.margin`), parent_prop≈30s,
+DS_TTL≈5m, standby_time=1m:
 
 ```
 (N − 1) × KSK_lifetime  =  2 × 10m  =  20m
-retirement_period + parent_prop + DS_TTL  =  5m + 30s + 5m  =  10m30s
-20m ≥ 10m30s     ✓     (9m30s of headroom)
+retirement_period + parent_prop + DS_TTL + standby_time  =  5m + 30s + 5m + 1m  =  11m30s
+20m ≥ 11m30s     ✓     (8m30s of headroom)
 ```
 
 The testbed is comfortably within its DS-side budget. E10 becomes
 interesting at smaller `N` (e.g. would-be N=2 multi-DS would have
-`(N − 1) × KSK_lifetime = 10m` against the 10m30s requirement —
+`(N − 1) × KSK_lifetime = 10m` against the 11m30s requirement —
 fail), or with much faster cadences (`KSK_lifetime = 2m` against
 the same requirement — fail unless `N` is raised).
+
+**Note on DS_TTL.** The engine resolves `DS_TTL` by observing the
+parent's DS RRset (or via a `ttls.ds` policy override). When
+multiple DS records appear in one RRset, the engine uses the
+**minimum** TTL across them, not the maximum. RFC 1035 §3.2.1
+requires all records of an RRset to share the same TTL, so for any
+compliant parent `min == max` and the choice is academic. For a
+non-compliant parent emitting mixed TTLs, RFC 2181 §5.2 requires
+resolvers to treat the RRset as a single unit — the only sane cache
+behavior is to evict the whole RRset on the smallest TTL, since a
+cache cannot keep individual records past their stated expiration
+nor split the RRset. So validator caches in practice flush the DS
+RRset at `min(TTLs)`, which makes `min` the actual upper bound on
+cache retention. Using `max` would over-pessimize E10/E11 lead times
+based on a TTL the cache will never honor.
 
 **Production rule of thumb.** For comfortable margins, pick:
 
@@ -506,28 +609,51 @@ DS_TTL=1h, KSK_lifetime=7d): RHS of E11 = ⌈9h5m / 168h⌉ + 1 =
 1 + 1 = 2. So even N=2 works comfortably for slow cadences. The
 default N=3 gives substantial margin.
 
-### 4.7 DNSKEY-side: precise engine equation for ds-published → standby
+### 4.7 DNSKEY-side: precise engine equations and the state split
 
 The child controls `T_DNSKEY_pub_n` directly: it's the moment the
-rollover engine advances KSK_n from state `ds-published` to
-`standby`, at which point the DNSKEY enters the served DNSKEY
-RRset.
+rollover engine advances KSK_n into the state where its DNSKEY
+enters the served DNSKEY RRset.
 
 To minimize DNSKEY exposure (the post-quantum motivation for
-keeping unrevealed keys at DS-only), the engine should advance
-**as late as the invariant permits**:
+keeping unrevealed keys at DS-only), the engine advances **as
+late as the invariant permits**:
 
 ```
 T_DNSKEY_pub_n  =  T_roll_n − child_prop − DNSKEY_TTL        (E12)
 ```
 
-Equivalently, the engine's transition rule:
+The engine implements three distinct moments around `T_roll_n`,
+each with its own state transition:
 
-> Advance KSK_n from `ds-published` to `standby` at time
-> `T_roll_n − child_prop − DNSKEY_TTL`.
+1. **ds-published → published** at `T_DNSKEY_pub_n` (E12 above).
+   DNSKEY enters the served zone but caches still hold pre-publish
+   responses; KSK_n is *not* yet usable for signing.
+
+2. **published → standby** at
+   `max(T_DNSKEY_pub_n + child_prop + DNSKEY_TTL,
+        T_DS_pub_n + parent_prop + DS_TTL)`.
+   Both child-side and parent-side propagation have completed; the
+   key is genuinely ready. The engine stamps `standby_at` on the
+   key at this moment.
+
+3. **standby → active** at `standby_at + standby_time`, where
+   `standby_time` is an operator-configured pause
+   (`rollover.standby_time`, default 1m). The pause gives the
+   operator a window to abort the natural-cadence rollover post-
+   propagation. `auto-rollover asap` bypasses this pause; `asap`
+   is exactly an operator override of the natural cadence, and
+   the pause is part of that natural cadence.
+
+Why split "DNSKEY in zone" into two states (`published` and
+`standby`)? Because the operational meaning differs: a `published`
+key is in flight (caches may still reject signatures by it); a
+`standby` key has flushed all stale state and can fire on operator
+command. Collapsing them obscures whether the engine has done its
+cache-flush waiting or not.
 
 E12 is the canonical formula. Any code that implements
-ds-published → standby must use it.
+ds-published → published must use it.
 
 ### 4.8 Effective DNSKEY_TTL: the clamping caveat
 
@@ -657,11 +783,13 @@ cache-flush windows:
 ```
 KSK_n state:
 
-   created → ds-published ─────────────────── standby ──── active ──── retired ── removed
-             ▲                                ▲           ▲                       ▲
-             T_DS_pub_n                       T_DNSKEY_   T_roll_n                end of life
-             (parent publishes DS)            pub_n
-                                              (child publishes DNSKEY)
+   created → ds-published ─── published ── standby ── active ──── retired ── removed
+             ▲                 ▲            ▲          ▲                       ▲
+             T_DS_pub_n        T_DNSKEY_    propagation T_roll_n                end of life
+             (parent           pub_n        complete    (= standby_at +
+              publishes DS)    (child       (engine     standby_time;
+                               publishes    stamps      asap bypasses
+                               DNSKEY)      standby_at) the pause)
 
 DS-side cache-flush window (parent → validator):
 
@@ -752,8 +880,12 @@ This section is the **canonical reference** for the engine's
 timing behaviour. Any code change that affects:
 
 - when DS is submitted to the parent
-- when ds-published → standby fires
-- when standby → active fires
+- when ds-published → published fires (i.e., when DNSKEY enters
+  the served zone — E12)
+- when published → standby fires (when both child-side and
+  parent-side propagation have completed)
+- when standby → active fires (= standby_at + standby_time, with
+  asap bypassing the pause)
 - the relationship between any two of the timestamps `T_DS_pub`,
   `T_DNSKEY_pub`, `T_roll`
 
@@ -992,6 +1124,7 @@ level of the daemon config):
 | `rollover.ds-publish-delay` | no | `5m` | Parent's expected DS publication latency |
 | `rollover.max-attempts-before-backoff` | no | `5` | Softfail threshold |
 | `rollover.softfail-delay` | no | derived (≥ 1h, ≥ ds-publish-delay) | Long-term-mode probe interval |
+| `rollover.dsync-scheme-preference` | no | `auto` | DSYNC scheme to use for DS push (see §6.4) |
 | `rollover.confirm-initial-wait` | no | `2s` | First-poll delay after UPDATE |
 | `rollover.confirm-poll-max` | no | derived (clamped 30s..5m) | Maximum DS-poll cadence |
 | `rollover.confirm-timeout` | no | derived (`ds-publish-delay × 1.2`) | Per-attempt observation budget |
@@ -1044,7 +1177,52 @@ delay)`) from this, so getting it roughly right matters more
 than getting it exactly right.
 
 
-### 6.3 The `clamping` choice
+### 6.3 The `rollover.dsync-scheme-preference` choice
+
+This knob controls which DSYNC scheme(s) the rollover engine
+uses to push the DS update to the parent. The parent advertises
+its supported schemes via DSYNC RRs at `_dsync.<parent>`; this
+knob decides what to do when the parent advertises more than
+one, or when the operator wants to pin a specific scheme.
+
+| Value | Both adv. | One adv. | Neither |
+|-------|-----------|----------|---------|
+| `auto` (default) | parallel UPDATE + NOTIFY | the advertised one | wait |
+| `prefer-update` | UPDATE only | the advertised one | wait |
+| `prefer-notify` | NOTIFY only | the advertised one | wait |
+| `force-update` | UPDATE only | UPDATE only or wait | wait |
+| `force-notify` | NOTIFY only | NOTIFY only or wait | wait |
+
+"wait" = `child-config:waiting-for-parent` softfail, capped at
+1h backoff, never hardfails, auto-recovers when DSYNC reappears.
+
+`auto` is the right default for almost every operator: when the
+parent advertises both UPDATE and NOTIFY for CDS, the engine
+sends both in parallel. Either path NOERROR is enough to enter
+the observe phase. The cost is one extra UDP NOTIFY per attempt
+on a parent that advertises both; the benefit is that an
+"advertised but broken" scheme on one path doesn't block the
+rollover when the other works.
+
+`prefer-*` values give explicit single-scheme behaviour on a
+both-advertising parent — useful for log hygiene or when
+debugging one path. `force-*` values are for testbeds and
+adversarial-testing: if the parent doesn't advertise the
+forced scheme, the engine refuses to fall through to the other
+one (you asked for `force`, you got `force`).
+
+NOTIFY async-rejection asymmetry: parent-side ProcessCDSNotify
+runs *after* the NOTIFY ACK is sent. CDS validation failures,
+RFC 9615 signaling check failures, and RFC 8078 bootstrap
+policy refusals at the parent therefore surface as
+`parent-publish-failure` from the child's POV — not as
+`parent-rejected`, even when the underlying cause is a
+parent-side rejection. To diagnose, consult the parent-side
+scanner logs. (UPDATE pushes are synchronous and do surface
+parent rejections as `parent-rejected` with EDE detail.)
+
+
+### 6.4 The `clamping` choice
 
 When clamping is enabled, the engine progressively lowers TTLs
 near a scheduled rollover so that cached data flushes faster as
@@ -1142,15 +1320,21 @@ The engine does *not* handle automatically:
 
 ## 10. When something goes wrong
 
-The four failure categories the engine recognizes:
+The failure categories the engine recognizes:
 
-- **child-config**: something on your side is wrong (sign
-  failure, no DS to publish, parent zone not resolvable).
-  Operator must fix; the engine will retry indefinitely with a
-  capped backoff if the failure is "no usable scheme advertised
-  at parent" (this auto-recovers when the parent comes back).
-  Other child-config flavours go to hardfail after
-  `max-attempts-before-backoff` consecutive failures.
+- **child-config:waiting-for-parent**: the parent advertises no
+  DSYNC scheme this rollover policy can use (either no DSYNC at
+  all, or `force-*` policy and the forced scheme isn't
+  advertised). The engine halts but probes forever with backoff
+  capped at 1h, never increments the hardfail counter, and
+  auto-recovers when the parent restores DSYNC advertisement.
+  No operator action required on the child side.
+
+- **child-config:local-error**: something on your side is wrong
+  (no SIG(0) key, no DS to publish, parent zone not resolvable,
+  CDS publish-and-sign queue failure). Goes to softfail after
+  `max-attempts-before-backoff` consecutive failures. Operator
+  intervention typically required.
 
 - **transport**: network-level failure to reach the parent
   (timeout, connection refused). The engine retries.
@@ -1158,11 +1342,17 @@ The four failure categories the engine recognizes:
 - **parent-rejected**: the parent acknowledged the request but
   responded with REFUSED, NOTAUTH, FORMERR, or SERVFAIL. The
   daemon's logs include EDE codes when the parent supplies them
-  — these are the most operationally-actionable errors.
+  — these are the most operationally-actionable errors. For
+  NOTIFY pushes, the new `EDENotifyDsyncSchemeNotAdvertised`
+  EDE catches misconfigured children on the very first push.
 
 - **parent-publish-failure**: the parent acknowledged but the
   DS RRset never appeared in the parent zone. The engine
-  retries.
+  retries. NOTE: on a NOTIFY-advertising parent, async CDS
+  validation failures inside the parent's scanner surface here
+  rather than as parent-rejected (NOTIFY ACK is sent before the
+  scan runs). Consult the parent-side scanner logs to
+  disambiguate parent-internal causes.
 
 For investigations, start by reading the daemon logs and the
 output of `auto-rollover status`. The status output identifies
@@ -1179,8 +1369,8 @@ happened. The `last_softfail_*` fields tell you when and why.
   bookkeeping.
 - **NOTIFY-scheme push path:** the design at
   `tdns/docs/2026-04-30-rollover-notify-scheme.md` documents
-  the upcoming work for parents that advertise NOTIFY-based
-  DSYNC instead of UPDATE-based DSYNC.
+  the parallel UPDATE+NOTIFY DS-push model and the
+  `dsync-scheme-preference` knob (§6.3 above).
 - **Multi-provider DNSSEC:** see the tdns-mp guide
   (`tdns-mp/guide/`) for KSK rollover in multi-provider
   deployments. The single-provider guidance here applies; the

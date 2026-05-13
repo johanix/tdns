@@ -1120,3 +1120,15 @@ phases 1-10 and 11. Each phase one or two commits.
 
 When complete, merge `rollover-overhaul` to `fast-roller-1`,
 then cherry-pick the merged sequence onto `fast-roller-mldsa44`.
+
+## Follow-up: NOTIFY-scheme push path
+
+The work in this document is UPDATE-only on the child side. The
+follow-up at [`2026-04-30-rollover-notify-scheme.md`](2026-04-30-rollover-notify-scheme.md)
+adds NOTIFY(CDS) as a second DS-push path with parallel dispatch
+under the new `auto` policy default. That work also splits the
+`child-config` category into `:waiting-for-parent` (1h-capped
+softfail, never hardfails) and `:local-error` (existing softfail
+path), and adds parent-side EDE attachment for NOTIFY rejections
+mirroring this document's Phase 11. Phase 9 of that work
+(tick-handler test harness) is deferred to a separate PR.

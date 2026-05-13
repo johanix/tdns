@@ -111,7 +111,8 @@ func checkAndTransitionKeys(ctx context.Context, conf *Config, kdb *KeyDB, propa
 	now := time.Now()
 
 	rolloverAutomatedForAllZones(ctx, conf, kdb, propagationDelay, now)
-	TransitionRolloverKskDsPublishedToStandby(conf, kdb, now, propagationDelay)
+	TransitionRolloverKskDsPublishedToPublished(ctx, conf, kdb, now, propagationDelay)
+	TransitionRolloverKskPublishedToStandby(ctx, conf, kdb, now, propagationDelay)
 	promoteStandbyKskBootstrapAll(conf, kdb)
 
 	transitionPublishedToStandby(conf, kdb, now, propagationDelay)

@@ -100,37 +100,49 @@ type ZoneData struct {
 	XfrType string // axfr | ixfr
 	Logger  *log.Logger
 	// ZoneFile           string // TODO: Remove this
-	IncomingSerial     uint32 // SOA serial that we got from upstream
-	CurrentSerial      uint32 // SOA serial after local bumping
-	FirstZoneLoad      bool   // true until first zone data has been loaded
-	Verbose            bool
-	Debug              bool
-	IxfrChain          []Ixfr
-	Upstream           string   // primary from where zone is xfrred
-	Downstreams        []string // secondaries that we notify
-	Zonefile           string
-	DelegationSyncQ    chan DelegationSyncRequest
-	Parent             string   // name of parentzone (if filled in)
-	ParentNS           []string // names of parent nameservers
-	ParentServers      []string // addresses of parent nameservers
-	Children           map[string]*ChildDelegationData
-	DelegationBackend  DelegationBackend // parent-side: backend for storing child delegation data
-	Options            map[ZoneOption]bool
-	UpdatePolicy       UpdatePolicy
-	DnssecPolicy       *DnssecPolicy
-	DnssecPolicyName   string // name of currently-applied policy; used to detect config-reload-driven changes
-	MultiSigner        *MultiSignerConf
-	KeyDB              *KeyDB
-	AppType            AppType
-	Error              bool        // zone is broken and cannot be used
-	ErrorType          ErrorType   // "config" | "refresh" | "notify" | "update"
-	ErrorMsg           string      // reason for the error (if known)
-	LatestError        time.Time   // time of latest error
-	RefreshCount       int         // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
-	LatestRefresh      time.Time   // time of latest successful refresh
-	SourceCatalog      string      // if auto-configured, which catalog zone created this zone
-	TransportSignal    *core.RRset // transport signal RRset (SVCB or TSYNC)
-	AddTransportSignal bool        // whether to attach TransportSignal in responses
+	IncomingSerial    uint32 // SOA serial that we got from upstream
+	CurrentSerial     uint32 // SOA serial after local bumping
+	FirstZoneLoad     bool   // true until first zone data has been loaded
+	Verbose           bool
+	Debug             bool
+	IxfrChain         []Ixfr
+	Upstream          string   // primary from where zone is xfrred
+	Downstreams       []string // secondaries that we notify
+	Zonefile          string
+	DelegationSyncQ   chan DelegationSyncRequest
+	Parent            string   // name of parentzone (if filled in)
+	ParentNS          []string // names of parent nameservers
+	ParentServers     []string // addresses of parent nameservers
+	Children          map[string]*ChildDelegationData
+	DelegationBackend DelegationBackend // parent-side: backend for storing child delegation data
+	Options           map[ZoneOption]bool
+	UpdatePolicy      UpdatePolicy
+	DnssecPolicy      *DnssecPolicy
+	DnssecPolicyName  string // name of currently-applied policy; used to detect config-reload-driven changes
+	MultiSigner       *MultiSignerConf
+	KeyDB             *KeyDB
+	AppType           AppType
+	// Errors holds all active error conditions on this zone. Use SetError /
+	// ClearError to mutate; HasError / ErrorList to inspect.
+	// The fields below (Error, ErrorType, ErrorMsg) are derived from
+	// Errors and kept in sync by SetError / ClearError. Existing call
+	// sites that read those single-error fields continue to work; new
+	// code can iterate ErrorList() for the full set.
+	Errors        map[ErrorType]ZoneError
+	Error         bool      // derived: len(Errors) > 0
+	ErrorType     ErrorType // derived: highest-priority error type, see errorTypeReportOrder
+	ErrorMsg      string    // derived: msg of the type reported in ErrorType
+	LatestError   time.Time // time of latest error
+	RefreshCount  int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
+	LatestRefresh time.Time // time of latest successful refresh
+	SourceCatalog string    // if auto-configured, which catalog zone created this zone
+	// ParentDSTTLObserved is the most recent TTL observed on the parent's
+	// DS RRset (seconds). Refreshed by every successful QueryParentAgentDS
+	// call. Zero means "not yet observed" — the E10 cache-flush invariant
+	// check defers until either this value or DnssecPolicy.TTLS.DS is set.
+	ParentDSTTLObserved uint32
+	TransportSignal     *core.RRset // transport signal RRset (SVCB or TSYNC)
+	AddTransportSignal  bool        // whether to attach TransportSignal in responses
 	// RemoteDNSKEYs holds DNSKEY RRs from other signers (multi-signer mode 4).
 	// These are DNSKEYs found in the incoming zone that do not match keys in our
 	// local keystore. They are preserved across resignings and merged into the
@@ -247,12 +259,61 @@ type DnssecPolicyRolloverConf struct {
 	DsPublishDelay           string `yaml:"ds-publish-delay" mapstructure:"ds-publish-delay"`
 	MaxAttemptsBeforeBackoff int    `yaml:"max-attempts-before-backoff" mapstructure:"max-attempts-before-backoff"`
 	SoftfailDelay            string `yaml:"softfail-delay" mapstructure:"softfail-delay"`
+
+	// DsyncSchemePreference controls which DSYNC scheme(s) the rollover
+	// engine attempts when pushing DS to the parent. Values:
+	//   - "auto" (default): single advertised scheme is used; if the
+	//     parent advertises both UPDATE and NOTIFY for CDS, both are
+	//     dispatched in parallel and any wire-level NOERROR wins.
+	//   - "prefer-update", "prefer-notify": single-scheme behavior on
+	//     a both-advertising parent, falling through to the only
+	//     advertised scheme on a one-advertising parent.
+	//   - "force-update", "force-notify": only the named scheme is
+	//     attempted; if the parent does not advertise it, the engine
+	//     halts in child-config:waiting-for-parent until the parent
+	//     starts advertising it.
+	DsyncSchemePreference string `yaml:"dsync-scheme-preference" mapstructure:"dsync-scheme-preference"`
+
+	// ParentCdsPollEstimate is an operator estimate of how long the
+	// parent waits between "child published CDS at apex" and "parent's
+	// DS RRset reflects the new CDS." Used by the E10 cache-flush
+	// invariant check when NOTIFY is the only viable scheme: in that
+	// case, parent_prop bundles a child-NOTIFY-to-parent-fetch hop on
+	// top of the standard DS UPDATE timeline, so ds-publish-delay alone
+	// understates the lead-time budget.
+	//
+	// Default 1m. Generalized NOTIFY exists to make parent CDS fetches
+	// near-instant; parents that batch CDS polls should set a larger
+	// value here.
+	ParentCdsPollEstimate string `yaml:"parent-cds-poll-estimate" mapstructure:"parent-cds-poll-estimate"`
+
+	// StandbyTime is the operator-configured pause between when a key
+	// reaches the genuine "standby" state (propagation complete, ready
+	// for AtomicRollover) and when the engine actually fires the
+	// rollover. Default 1m. Production deployments may want 15m or
+	// longer for operator observability — gives the operator a window
+	// to abort the natural-cadence rollover if something looks wrong
+	// post-publish.
+	//
+	// auto-rollover asap explicitly bypasses this pause: an operator
+	// running asap is overriding the natural cadence, and the pause
+	// is part of that natural cadence. asap fires AtomicRollover at
+	// max(standby_at, now), not at standby_at + standby_time.
+	StandbyTime string `yaml:"standby-time" mapstructure:"standby-time"`
 }
 
 // DnssecPolicyTtlsConf is the YAML `ttls:` subtree under a DNSSEC policy.
 type DnssecPolicyTtlsConf struct {
 	DNSKEY    string `yaml:"dnskey" mapstructure:"dnskey"`
 	MaxServed string `yaml:"max_served" mapstructure:"max_served"`
+	// DS is an optional override for the parent's DS RRset TTL when the
+	// engine cannot observe it (parent unreachable at zone init, testbed
+	// determinism, registries that gate DS queries). Used by the E10
+	// cache-flush invariant check: (N − 1) × KSK.Lifetime ≥
+	// retirement_period + parent_prop + DS_TTL. When unset, the engine
+	// defers E10 validation until the first successful
+	// QueryParentAgentDS observation supplies the live TTL.
+	DS string `yaml:"ds" mapstructure:"ds"`
 }
 
 // DnssecPolicyClampingConf is the YAML `clamping:` subtree under a DNSSEC policy.
@@ -303,6 +364,12 @@ type DnssecPolicy struct {
 	Rollover RolloverPolicy
 	TTLS     DnssecPolicyTTLS
 	Clamping ClampingPolicy
+
+	// suppressLoadWarnings is set by ParseDnssecPolicyConfQuiet so
+	// CLI tools that re-parse a daemon's policy don't duplicate the
+	// daemon's startup log lines. Internal flag — not serialized,
+	// not part of the policy semantics.
+	suppressLoadWarnings bool
 }
 
 // DnssecPolicyTTLS holds steady-state TTL hints from policy (seconds). Zero means unset.
@@ -315,6 +382,11 @@ type DnssecPolicyTTLS struct {
 	// the operator can't directly edit (e.g. inbound zone transfers).
 	// Zero means no ceiling. Validation: must be >= 60s when set.
 	MaxServed uint32
+	// DS is the operator-provided override for the parent's DS RRset TTL.
+	// Zero means "observe at runtime" — the engine queries the parent
+	// agent and stores the observed TTL on zd.ParentDSTTLObserved. Used
+	// by the E10 invariant check.
+	DS uint32
 }
 
 type Ixfr struct {
@@ -589,8 +661,9 @@ type DnssecKeys struct {
 }
 
 type KeyDB struct {
-	DB *sql.DB
-	mu sync.Mutex
+	DB     *sql.DB
+	DBFile string // sqlite file path, recorded by NewKeyDB
+	mu     sync.Mutex
 	// Sig0Cache   map[string]*Sig0KeyCache
 	KeystoreSig0Cache   map[string]*Sig0ActiveKeys
 	TruststoreSig0Cache *Sig0StoreT            // was *Sig0StoreT

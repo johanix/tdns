@@ -386,13 +386,33 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 
 	lg.Debug("ApplyChildUpdateToZoneData", "request", fmt.Sprintf("%+v", ur))
 
+	// If this zone is signed, fetch active keys up front so we can re-sign
+	// modified delegation RRsets (notably DS, which is authoritative parent
+	// data and MUST carry a fresh RRSIG).
+	var dak *DnssecKeys
+	if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
+		var err error
+		dak, err = kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+		if err != nil || dak == nil || len(dak.ZSKs) == 0 {
+			dak, err = zd.EnsureActiveDnssecKeys(kdb)
+			if err != nil {
+				lg.Error("ApplyChildUpdateToZoneData: failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "error", err)
+				return false, err
+			}
+			if dak == nil || len(dak.ZSKs) == 0 {
+				return false, fmt.Errorf("zone %s has no active ZSKs and signing is enabled. child update is rejected", zd.ZoneName)
+			}
+		}
+	}
+
+	var updated bool
 	zd.mu.Lock()
 	defer func() {
 		zd.mu.Unlock()
-		zd.BumpSerial()
+		if updated {
+			zd.BumpSerial()
+		}
 	}()
-
-	var updated bool
 
 	for _, rr := range ur.Actions {
 		class := rr.Header().Class
@@ -452,6 +472,15 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 			if len(rrset.RRs) == 0 {
 				owner.RRtypes.Delete(rrtype)
 			} else {
+				// RFC 4035 §2.2: at a delegation point, only DS is
+				// authoritative parent data and gets an RRSIG. NS and
+				// glue (A/AAAA) MUST NOT be signed at the parent.
+				if dak != nil && rrtype == dns.TypeDS {
+					_, err := zd.SignRRset(&rrset, ownerName, dak, true, nil)
+					if err != nil {
+						lg.Error("ApplyChildUpdateToZoneData: signing failed after RR removal", "rrtype", rrtypestr, "owner", ownerName, "error", err)
+					}
+				}
 				owner.RRtypes.Set(rrtype, rrset)
 			}
 			updated = true
@@ -486,15 +515,19 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 			lg.Debug("ApplyChildUpdateToZoneData: adding RR", "rrtype", rrtypestr, "rr", rrcopy.String())
 			rrset.RRs = append(rrset.RRs, rrcopy)
 			rrset.RRSIGs = []dns.RR{}
+			// RFC 4035 §2.2: only DS gets an RRSIG at a delegation
+			// point. NS and glue (A/AAAA) MUST NOT be signed at the
+			// parent.
+			if dak != nil && rrtype == dns.TypeDS {
+				_, err := zd.SignRRset(&rrset, ownerName, dak, true, nil)
+				if err != nil {
+					lg.Error("ApplyChildUpdateToZoneData: signing failed after RR add", "rrtype", rrtypestr, "owner", ownerName, "error", err)
+				}
+			}
+			owner.RRtypes.Set(rrtype, rrset)
 			updated = true
 			zd.Options[OptDirty] = true
 		}
-		owner.RRtypes.Set(rrtype, rrset)
-		// log.Printf("ApplyUpdateToZoneData: Add %s with RR=%s", rrtypestr, rrcopy.String())
-		// log.Printf("ApplyUpdateToZoneData: %s[%s]=%v", owner.Name, rrtypestr, owner.RRtypes[rrtype])
-		// dump.P(owner.RRtypes[rrtype])
-		updated = true
-		// zd.Options["dirty"] = true
 		continue
 	}
 
@@ -528,7 +561,9 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 	zd.mu.Lock()
 	defer func() {
 		zd.mu.Unlock()
-		zd.BumpSerial()
+		if updated {
+			zd.BumpSerial()
+		}
 	}()
 
 	lg.Debug("ApplyZoneUpdateToZoneData: processing actions", "zone", zd.ZoneName, "count", len(ur.Actions))
@@ -537,6 +572,23 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 		ownerName := rr.Header().Name
 		rrtype := rr.Header().Rrtype
 		rrtypestr := dns.TypeToString[rrtype]
+
+		// CDS-publication observability: trace the apex CDS RRset's
+		// lifecycle through the update path so we can see whether the
+		// engine's queued publish is landing on disk and surviving.
+		if rrtype == dns.TypeCDS {
+			before := 0
+			if owner, _ := zd.GetOwner(ownerName); owner != nil {
+				if rs, ok := owner.RRtypes.Get(dns.TypeCDS); ok {
+					before = len(rs.RRs)
+				}
+			}
+			lgRollover.Debug("zone-update CDS action received",
+				"zone", zd.ZoneName, "owner", ownerName,
+				"class", dns.ClassToString[class],
+				"apex_cds_rrs_before", before,
+				"internal_update", ur.InternalUpdate)
+		}
 
 		rrcopy := dns.Copy(rr)
 		rrcopy.Header().Ttl = zd.UpdatePolicy.Zone.TTL
@@ -608,6 +660,10 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 			updated = true
 			// zd.Options["dirty"] = true
 			lg.Debug("ApplyZoneUpdateToZoneData: Remove RRset", "rr", rr.String())
+			if rrtype == dns.TypeCDS {
+				lgRollover.Debug("zone-update CDS RRset deleted (ClassANY)",
+					"zone", zd.ZoneName, "owner", ownerName)
+			}
 			continue
 
 		case dns.ClassINET:
@@ -633,13 +689,15 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 				lg.Error("ApplyZoneUpdateToZoneData: signing failed after RR add", "rrtype", rrtypestr, "owner", ownerName, "error", err)
 				// Continue anyway - the record is still added, just not signed
 			}
+			owner.RRtypes.Set(rrtype, rrset)
 			updated = true
-			// zd.Options["dirty"] = true
+			if rrtype == dns.TypeCDS {
+				lgRollover.Debug("zone-update CDS add committed",
+					"zone", zd.ZoneName, "owner", ownerName,
+					"apex_cds_rrs_after", len(rrset.RRs),
+					"rrsigs", len(rrset.RRSIGs))
+			}
 		}
-
-		owner.RRtypes.Set(rrtype, rrset)
-		updated = true
-		// zd.Options["dirty"] = true
 		continue
 	}
 

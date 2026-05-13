@@ -19,7 +19,7 @@ import (
 //
 // Atomically:
 //   - selects KSK_old (the active SEP)
-//   - selects KSK_new (standby SEP with oldest standby_at; tie-break by
+//   - selects KSK_new (standby SEP with oldest published_at; tie-break by
 //     rollover_index, then by keytag)
 //   - KSK_old: active → retired (DnssecKeyStore: state, retired_at;
 //     RolloverKeyState: rollover_state_at)
@@ -76,7 +76,7 @@ func AtomicRollover(conf *Config, kdb *KeyDB, zone string) (oldKid, newKid uint1
 		return 0, 0, fmt.Errorf("AtomicRollover: zone %s has no active KSK", zone)
 	}
 
-	// Pick KSK_new: SEP key in standby with oldest standby_at, tie-break
+	// Pick KSK_new: SEP key in standby with oldest published_at, tie-break
 	// rollover_index then keytag. Excludes KSK_old (which is in active,
 	// not standby — but be defensive).
 	standbys, err := listRolloverStandbyKeysTx(tx, zone)
@@ -178,22 +178,27 @@ WHERE zonename = ? AND state = ? AND (flags & 1) = 1`,
 	return found[0], nil
 }
 
-// pickStandbyForPromotion picks the standby SEP key with the oldest standby_at;
-// ties are broken by rollover_index ascending, then keytag ascending. Returns 0
-// if the standby list is empty.
+// pickStandbyForPromotion picks the standby SEP key with the oldest
+// published_at; ties are broken by rollover_index ascending, then
+// keytag ascending. Returns 0 if the standby list is empty.
+//
+// published_at (C16 rename of the old standby_at) is the moment the
+// engine moved the DNSKEY into the served zone. AtomicRollover promotes
+// the oldest such key — equivalent semantic to the pre-rename code.
 func pickStandbyForPromotion(tx *Tx, zone string, standbys []struct {
-	KeyID     uint16
-	StandbyAt sql.NullString
+	KeyID       uint16
+	PublishedAt sql.NullString
 }) (uint16, error) {
 	if len(standbys) == 0 {
 		return 0, nil
 	}
-	// listRolloverStandbyKeysTx already orders NULL/empty standby_at last,
-	// then standby_at ascending, then keyid ascending. The first non-null
-	// row is our oldest. If all standby_at are null/empty (legacy keys),
-	// fall back to lowest rollover_index, then lowest keytag.
+	// listRolloverStandbyKeysTx already orders NULL/empty published_at
+	// last, then published_at ascending, then keyid ascending. The
+	// first non-null row is our oldest. If all published_at are
+	// null/empty (legacy keys), fall back to lowest rollover_index,
+	// then lowest keytag.
 	for _, s := range standbys {
-		if s.StandbyAt.Valid && strings.TrimSpace(s.StandbyAt.String) != "" {
+		if s.PublishedAt.Valid && strings.TrimSpace(s.PublishedAt.String) != "" {
 			return s.KeyID, nil
 		}
 	}

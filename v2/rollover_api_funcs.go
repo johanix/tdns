@@ -27,7 +27,7 @@ import (
 // it on every status query catches the case where the operator
 // edited the YAML but didn't restart, or where rollover-driven
 // behaviour has drifted from initial configuration.
-func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInterval time.Duration, now time.Time) (*RolloverStatus, error) {
+func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInterval, propagationDelay time.Duration, now time.Time) (*RolloverStatus, error) {
 	zone = dns.Fqdn(strings.TrimSpace(zone))
 	if zone == "." || zone == "" {
 		return nil, fmt.Errorf("ComputeRolloverStatus: empty zone")
@@ -49,6 +49,29 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInte
 		populateFromZoneRow(out, row)
 	}
 
+	// CdsPublishedKeyIDs / CdsPublishedAt: historical fact — what
+	// CDS RRset did the engine publish at the child apex via
+	// NOTIFY(CDS), and when. Sourced from the sparse
+	// RolloverCdsPublication table; survives Trigger-1 cleanup
+	// (the cleanup-time ownership marker on RolloverZoneState is a
+	// separate concern). The line shows up in status as long as
+	// the most recent NOTIFY publication completed successfully,
+	// regardless of whether the apex CDS RRset is still on disk.
+	if ids, at, perr := loadCdsPublication(kdb, zone); perr == nil && len(ids) > 0 {
+		out.CdsPublishedKeyIDs = ids
+		out.CdsPublishedAt = at
+	} else if perr != nil {
+		lgRollover.Debug("ComputeRolloverStatus: loadCdsPublication failed", "zone", zone, "err", perr)
+	}
+
+	// ObservedKeyIDs / ObservedAt: latest parent-agent poll result.
+	if row != nil && row.LastDsObservedKeyids.Valid {
+		out.ObservedKeyIDs = parseDsObservedKeyids(row.LastDsObservedKeyids.String)
+		if row.LastDsObservedAt.Valid {
+			out.ObservedAt = row.LastDsObservedAt.String
+		}
+	}
+
 	out.Headline = headlineForPhase(out.Phase)
 	out.Hint = hintForState(out.Phase, row, pol, now)
 
@@ -67,9 +90,78 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInte
 	}
 
 	applyInFlightPublicationLabels(out)
-	populateRolloverWarnings(out, pol, checkInterval)
+	populateRolloverWarnings(out, pol, checkInterval, now)
+	populateRolloverPolicyErrors(out, zone)
+	populateNextTransitions(out, kdb, zone, pol, propagationDelay, now)
 
 	return out, nil
+}
+
+// collectRolloverGatingErrorMessages returns active rollover-gating
+// errors on the given zone, partitioned by severity:
+//
+//   - errors: hard engine-blocking conditions (RolloverPolicyViolation,
+//     RolloverParentBlocker). Engine refuses to advance keys.
+//   - warnings: rule-of-thumb concerns (RolloverPolicyWarning).
+//     Engine keeps rolling.
+//
+// Returns (nil, nil) when the zone is not registered in Zones
+// (offline-mode lookups) or when no rollover-gating errors are active.
+func collectRolloverGatingErrorMessages(zone string) (errors, warnings []string) {
+	zd, ok := Zones.Get(zone)
+	if !ok || zd == nil {
+		return nil, nil
+	}
+	for _, e := range zd.ErrorList() {
+		switch {
+		case e.Type == RolloverPolicyWarning:
+			warnings = append(warnings, e.Msg)
+		case isRolloverGatingError(e.Type):
+			errors = append(errors, e.Msg)
+		}
+	}
+	return errors, warnings
+}
+
+func populateRolloverPolicyErrors(out *RolloverStatus, zone string) {
+	errs, warns := collectRolloverGatingErrorMessages(zone)
+	out.PolicyErrors = append(out.PolicyErrors, errs...)
+	out.PolicyWarnings = append(out.PolicyWarnings, warns...)
+}
+
+func isRolloverGatingError(t ErrorType) bool {
+	for _, g := range rolloverGatingErrors {
+		if t == g {
+			return true
+		}
+	}
+	return false
+}
+
+// isAutoRolloverImpactingError reports whether an error of this type
+// gates the automated rollover engine (and refuses asap). Subset of
+// rolloverGatingErrors that excludes RolloverPolicyWarning.
+func isAutoRolloverImpactingError(t ErrorType) bool {
+	for _, g := range autoRolloverImpactingErrors {
+		if t == g {
+			return true
+		}
+	}
+	return false
+}
+
+// earliestStatusToString maps the EarliestRolloverStatus enum to the
+// JSON wire string used by RolloverWhenResponse.Status / similar.
+func earliestStatusToString(s EarliestRolloverStatus) string {
+	switch s {
+	case EarliestStatusReady:
+		return "ready"
+	case EarliestStatusWaitingForParent:
+		return "waiting-for-parent"
+	case EarliestStatusPolicyBlocked:
+		return "policy-blocked"
+	}
+	return "unknown"
 }
 
 // applyInFlightPublicationLabels overrides the Published column for
@@ -113,17 +205,69 @@ func applyInFlightPublicationLabels(out *RolloverStatus) {
 // today: kasp.check_interval must be < attempt-timeout / 2, otherwise
 // observe-poll cadence is starved and rollover attempts deterministically
 // time out before any poll fires.
-func populateRolloverWarnings(out *RolloverStatus, pol *DnssecPolicy, checkInterval time.Duration) {
-	if pol == nil || checkInterval <= 0 {
+//
+// Also surfaces three trip-wires that catch engine pathologies the
+// operator would otherwise have to notice from log volume or the size
+// of status output:
+//
+//   - Pipeline depth above num_ds + 2 (cap is num_ds + 1; 2 above signals
+//     a breach the engine should have prevented).
+//   - CDS RRset above 10 keyids (parent-side stale-data accumulation, or
+//     a runaway-style failure caught by the cap but with stale data still
+//     visible).
+//   - Time since last successful rollover above 2 × KSK.Lifetime (engine
+//     cannot make progress on this zone for a multi-cycle stretch).
+func populateRolloverWarnings(out *RolloverStatus, pol *DnssecPolicy, checkInterval time.Duration, now time.Time) {
+	if pol == nil {
 		return
 	}
 	if pol.Rollover.Method != RolloverMethodMultiDS && pol.Rollover.Method != RolloverMethodDoubleSignature {
 		return
 	}
-	if pol.Rollover.ConfirmTimeout > 0 && pol.Rollover.ConfirmTimeout < 2*checkInterval {
+	if checkInterval > 0 && pol.Rollover.ConfirmTimeout > 0 && pol.Rollover.ConfirmTimeout < 2*checkInterval {
 		out.Warnings = append(out.Warnings,
 			fmt.Sprintf("kasp.check_interval (%s) is too coarse for attempt-timeout (%s); observe polling will be starved — lower kasp.check_interval to < attempt-timeout/2 or raise rollover.ds-publish-delay",
 				checkInterval, pol.Rollover.ConfirmTimeout))
+	}
+	if pol.Rollover.NumDS > 0 {
+		nonTerminal := 0
+		for _, e := range out.KSKs {
+			if e.State != "" && e.State != DnskeyStateRemoved {
+				nonTerminal++
+			}
+		}
+		if nonTerminal > pol.Rollover.NumDS+2 {
+			out.Warnings = append(out.Warnings,
+				fmt.Sprintf("pipeline depth (%d non-terminal KSKs) exceeds num_ds+2 (%d) — engine cap is num_ds+1; investigate stuck pipeline (parent-publication softfail, DS-observation timeout)",
+					nonTerminal, pol.Rollover.NumDS+2))
+		}
+	}
+	if len(out.CdsPublishedKeyIDs) > 10 {
+		out.Warnings = append(out.Warnings,
+			fmt.Sprintf("CDS RRset published with %d records — should normally be ≤ num_ds+1; check for stale CDS publications or accumulated parent-side state",
+				len(out.CdsPublishedKeyIDs)))
+	}
+	if pol.KSK.Lifetime > 0 {
+		lifetime := time.Duration(pol.KSK.Lifetime) * time.Second
+		var latestActive time.Time
+		for _, e := range out.KSKs {
+			if e.State != DnskeyStateActive {
+				continue
+			}
+			if t, ok := parseRFC3339(e.StateSince); ok {
+				if t.After(latestActive) {
+					latestActive = t
+				}
+			}
+		}
+		if !latestActive.IsZero() {
+			elapsed := now.Sub(latestActive)
+			if elapsed > 2*lifetime {
+				out.Warnings = append(out.Warnings,
+					fmt.Sprintf("active KSK age (%s) exceeds 2 × KSK.Lifetime (%s) — rollover engine is not advancing this zone",
+						elapsed.Truncate(time.Second), 2*lifetime))
+			}
+		}
 	}
 }
 
@@ -170,6 +314,12 @@ func ComputeRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Ti
 		CurrentTime: now.UTC().Format(time.RFC3339),
 	}
 
+	// PolicyErrors / PolicyWarnings must be populated for *every*
+	// return path — the operator most needs to see active blockers
+	// when the rollover state is degenerate (no policy, in-progress,
+	// etc). Defer the populator to the end of the function.
+	defer populateRolloverWhenPolicyErrors(out, zone)
+
 	if pol == nil {
 		out.Note = "zone has no DNSSEC policy"
 		return out, nil
@@ -191,15 +341,26 @@ func ComputeRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Ti
 	if res, err := ComputeEarliestRollover(kdb, zone, pol, now); err != nil {
 		out.Note = err.Error()
 	} else {
-		out.EarliestPossible = res.Earliest.UTC().Format(time.RFC3339)
 		out.FromKeyID = res.FromKID
 		out.ToKeyID = res.ToKID
-		out.Gates = make([]RolloverWhenGateEntry, 0, len(res.Gates))
-		for _, g := range res.Gates {
-			out.Gates = append(out.Gates, RolloverWhenGateEntry{
-				Name: g.Name,
-				At:   g.At.UTC().Format(time.RFC3339),
-			})
+		out.Status = earliestStatusToString(res.Status)
+		if res.Blocker != nil {
+			out.Blocker = &RolloverBlockerEntry{
+				Reason: res.Blocker.Reason,
+				Cause:  res.Blocker.Cause,
+				KeyID:  res.Blocker.KeyID,
+				Detail: res.Blocker.Detail,
+			}
+		}
+		if res.Status == EarliestStatusReady {
+			out.EarliestPossible = res.Earliest.UTC().Format(time.RFC3339)
+			out.Gates = make([]RolloverWhenGateEntry, 0, len(res.Gates))
+			for _, g := range res.Gates {
+				out.Gates = append(out.Gates, RolloverWhenGateEntry{
+					Name: g.Name,
+					At:   g.At.UTC().Format(time.RFC3339),
+				})
+			}
 		}
 	}
 
@@ -208,7 +369,14 @@ func ComputeRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Ti
 		out.NextScheduled = t.UTC().Format(time.RFC3339)
 	}
 
+	// PolicyErrors/Warnings populated by the deferred call above.
 	return out, nil
+}
+
+func populateRolloverWhenPolicyErrors(out *RolloverWhenResponse, zone string) {
+	errs, warns := collectRolloverGatingErrorMessages(zone)
+	out.PolicyErrors = append(out.PolicyErrors, errs...)
+	out.PolicyWarnings = append(out.PolicyWarnings, warns...)
 }
 
 // populateFromZoneRow copies fields from the persisted row into the
@@ -248,6 +416,9 @@ func populateFromZoneRow(out *RolloverStatus, row *RolloverZoneRow) {
 		out.LastUpdate = row.LastAttemptStartedAt.String
 		out.LastAttemptStarted = row.LastAttemptStartedAt.String
 	}
+	if row.LastAttemptScheme.Valid {
+		out.LastAttemptScheme = row.LastAttemptScheme.String
+	}
 
 	out.HardfailCount = row.HardfailCount
 	if row.NextPushAt.Valid {
@@ -272,13 +443,31 @@ func populateFromZoneRow(out *RolloverStatus, row *RolloverZoneRow) {
 	if row.LastSuccessAt.Valid {
 		out.LastSuccess = row.LastSuccessAt.String
 	}
+
+	if row.ParentAdvertisesUpdate.Valid {
+		out.ParentAdvertisesUpdateKnown = true
+		out.ParentAdvertisesUpdate = row.ParentAdvertisesUpdate.Bool
+	}
+	if row.ParentAdvertisesNotify.Valid {
+		out.ParentAdvertisesNotifyKnown = true
+		out.ParentAdvertisesNotify = row.ParentAdvertisesNotify.Bool
+	}
 }
 
 // populateAttemptTiming computes ExpectedBy and AttemptTimeout from
 // LastUpdate + policy durations, and AttemptIndex/AttemptMax from the
 // counter and policy. Only meaningful with a policy attached.
+//
+// Window-line gating: ExpectedBy and AttemptTimeout are deadlines
+// relative to an in-flight attempt; they're meaningless in idle.
+// Gate on the phase being an active push/observe phase, not on
+// LastAttemptStartedAt's presence — the timestamp is preserved across
+// confirmation so the DS UPDATE status line can render "sent <time>"
+// in idle, but the deadline lines must still be suppressed there.
 func populateAttemptTiming(out *RolloverStatus, row *RolloverZoneRow, pol *DnssecPolicy) {
-	if row != nil && row.LastAttemptStartedAt.Valid {
+	inFlight := out.Phase == rolloverPhasePendingParentPush ||
+		out.Phase == rolloverPhasePendingParentObserve
+	if inFlight && row != nil && row.LastAttemptStartedAt.Valid {
 		if t, err := time.Parse(time.RFC3339, row.LastAttemptStartedAt.String); err == nil {
 			if pol.Rollover.DsPublishDelay > 0 {
 				out.ExpectedBy = t.Add(pol.Rollover.DsPublishDelay).UTC().Format(time.RFC3339)
@@ -293,16 +482,7 @@ func populateAttemptTiming(out *RolloverStatus, row *RolloverZoneRow, pol *Dnsse
 	// current attempt within an active push/observe cycle. Outside
 	// an active cycle (idle, softfail, child-publish/withdraw) it
 	// is 0 — the contract documented on RolloverStatus.
-	//
-	// Detection: an active attempt has both an active parent-side
-	// phase AND a non-NULL last_attempt_started_at (cleared on
-	// success in phase 12c-1). Either condition alone isn't enough:
-	// idle has neither, but a freshly-confirmed zone briefly has a
-	// stale parent-push phase queued for the next tick before
-	// last_attempt_started_at gets cleared.
-	if row != nil && row.LastAttemptStartedAt.Valid &&
-		(out.Phase == rolloverPhasePendingParentPush ||
-			out.Phase == rolloverPhasePendingParentObserve) {
+	if inFlight && row != nil && row.LastAttemptStartedAt.Valid {
 		if row.HardfailCount < out.AttemptMax {
 			out.AttemptIndex = row.HardfailCount + 1
 		}
@@ -332,6 +512,14 @@ func headlineForPhase(phase string) string {
 func hintForState(phase string, row *RolloverZoneRow, pol *DnssecPolicy, now time.Time) string {
 	switch phase {
 	case rolloverPhasePushSoftfail:
+		// child-config:waiting-for-parent has a different operational
+		// shape: polling continues but the parent has lost the ability
+		// to consume our push entirely. Operator action is on the
+		// parent side (advertise DSYNC), not the child side.
+		if row != nil && row.LastSoftfailCategory.Valid &&
+			row.LastSoftfailCategory.String == SoftfailChildConfigWaitingForParent {
+			return "waiting for parent to advertise a usable DSYNC scheme — auto-recovers when restored"
+		}
 		return "parent fix will be auto-detected — polling never stops"
 	case rolloverPhasePendingParentObserve:
 		if row == nil || pol == nil || !row.LastAttemptStartedAt.Valid {
@@ -372,7 +560,7 @@ func policySummary(pol *DnssecPolicy) *PolicySummary {
 // rolloverStatusRemovedDisplayCap limits how many SEP keys in state
 // "removed" appear in RolloverStatus.KSKs (most recent by active_seq
 // first). Matches historical auto-rollover status CLI behavior.
-const rolloverStatusRemovedDisplayCap = 3
+const rolloverStatusRemovedDisplayCap = 2
 
 // loadRolloverKeyEntries returns one RolloverKeyEntry per DNSSEC key
 // for the zone, filtered by SEP flag. SEP keys go in KSKs; non-SEP in

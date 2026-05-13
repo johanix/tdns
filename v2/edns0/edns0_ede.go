@@ -47,6 +47,23 @@ const (
 	EDEZoneUpdateRRtypeNotAllowed       // RR type not in update-policy.<scope>.rrtypes
 	EDEZoneUpdateOwnerOutsidePolicy     // owner name violates self/selfsub policy
 	EDEZoneUpdateChildUpdatesNotAllowed // OptAllowChildUpdates is false for this zone
+
+	// NOTIFY-side synchronous-rejection detail codes (rollover NOTIFY
+	// scheme phase 8). Mirror the UPDATE-side EDEZoneUpdate* codes:
+	// the parent's NotifyResponder rejects with REFUSED/NOTAUTH/etc.
+	// and attaches one of these so the child rollover engine's
+	// parent-rejected category renders an actionable diagnostic.
+	//
+	// EDENotifyDsyncSchemeNotAdvertised is the most operationally
+	// important: a child mis-pointed at a parent that doesn't
+	// advertise NOTIFY for the RRtype gets an immediate, precise
+	// diagnostic instead of waiting attempt-timeout for a generic
+	// parent-publish-failure.
+	EDENotifyDsyncSchemeNotAdvertised // parent does not advertise NOTIFY for this RRtype
+	EDENotifyTargetNotChildDelegation // qname is not a child delegation in receiving parent zone
+	EDENotifyParentNotAuthoritative   // parent zone not authoritative on this server
+	EDENotifyZoneInErrorState         // target zone in error state
+	EDENotifyUnknownType              // unsupported NOTIFY RRtype
 )
 
 var EDECodeToString = map[uint16]string{
@@ -73,6 +90,12 @@ var EDECodeToString = map[uint16]string{
 	EDEZoneUpdateRRtypeNotAllowed:       "RR type not permitted by update policy",
 	EDEZoneUpdateOwnerOutsidePolicy:     "owner name outside update policy scope",
 	EDEZoneUpdateChildUpdatesNotAllowed: "child updates are not allowed for this zone",
+
+	EDENotifyDsyncSchemeNotAdvertised: "parent does not advertise NOTIFY for this RRtype",
+	EDENotifyTargetNotChildDelegation: "qname is not a child delegation in this parent zone",
+	EDENotifyParentNotAuthoritative:   "this server is not authoritative for the parent zone",
+	EDENotifyZoneInErrorState:         "target zone is in error state",
+	EDENotifyUnknownType:              "unsupported NOTIFY RRtype",
 }
 
 // AttachEDEToResponse attaches an Extended DNS Error (EDE) option to the DNS response

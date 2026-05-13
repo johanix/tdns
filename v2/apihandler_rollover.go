@@ -55,8 +55,19 @@ func APIRolloverStatus(conf *Config) func(w http.ResponseWriter, r *http.Request
 		if checkInterval == 0 {
 			checkInterval = time.Minute // defaultCheckInterval
 		}
+		// kasp.propagation_delay drives the ds-published → standby
+		// timing computed in populateNextTransitions.
+		var propagationDelay time.Duration
+		if conf.Kasp.PropagationDelay != "" {
+			if d, err := time.ParseDuration(conf.Kasp.PropagationDelay); err == nil && d > 0 {
+				propagationDelay = d
+			}
+		}
+		if propagationDelay == 0 {
+			propagationDelay = time.Hour // defaultPropagationDelay
+		}
 
-		out, err := ComputeRolloverStatus(kdb, zone, pol, checkInterval, time.Now())
+		out, err := ComputeRolloverStatus(kdb, zone, pol, checkInterval, propagationDelay, time.Now())
 		if err != nil {
 			lgApi.Warn("rollover/status: ComputeRolloverStatus failed", "zone", zone, "err", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -109,6 +120,32 @@ func APIRolloverAsap(conf *Config) func(w http.ResponseWriter, r *http.Request) 
 		res, err := ComputeEarliestRollover(kdb, zone, pol, now)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		// Refuse on Case 1 (parent DS not ready) or PolicyBlocked
+		// (E5/E10 violation). Both surface a structured blocker
+		// diagnostic. Only Status == Ready means we queue:
+		// EarliestStatusReady is Case 2 (DS at parent, awaiting
+		// cache-flush) and the operator override applies — asap
+		// schedules at res.Earliest as before.
+		if res.Status != EarliestStatusReady {
+			detail := "rollover not currently possible"
+			if res.Blocker != nil {
+				parts := make([]string, 0, 2)
+				if res.Blocker.Reason != "" {
+					parts = append(parts, res.Blocker.Reason)
+				}
+				if res.Blocker.Cause != "" {
+					parts = append(parts, res.Blocker.Cause)
+				}
+				if len(parts) > 0 {
+					detail = strings.Join(parts, ": ")
+				}
+				if res.Blocker.Detail != "" {
+					detail = fmt.Sprintf("%s (%s)", detail, res.Blocker.Detail)
+				}
+			}
+			http.Error(w, fmt.Sprintf("zone %s: %s", zone, detail), http.StatusBadRequest)
 			return
 		}
 		if err := SetManualRolloverRequest(kdb, zone, now, res.Earliest); err != nil {
