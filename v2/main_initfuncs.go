@@ -215,7 +215,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	//	log.Printf("*** MainInit: 5 ***")
 	// }
 	// Parse all configured zones
-	all_zones, err := conf.ParseZones(ctx, false) // false = initial load, not reload
+	all_zones, _, err := conf.ParseZones(ctx, false) // false = initial load, not reload
 	if err != nil {
 		return fmt.Errorf("error parsing zones: %v", err)
 	}

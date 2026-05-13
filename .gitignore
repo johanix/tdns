@@ -25,7 +25,6 @@ cmdv2/cliv2/tdns-cliv2
 cmdv2/dogv2/dogv2
 cmdv2/imrv2/tdns-imrv2
 cmdv2/agentv2/tdns-agentv2
-cmdv2/combinerv2/tdns-combinerv2
 
 # old stuff; going away:
 sidecar/music-sidecar
