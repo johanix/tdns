@@ -28,11 +28,11 @@ require (
 	github.com/spf13/cobra v1.8.1
 	github.com/spf13/viper v1.16.0
 	golang.org/x/term v0.41.0
+	gopkg.in/yaml.v3 v3.0.1
 	zgo.at/acidtab v1.1.0
 )
 
 require (
-	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
@@ -41,6 +41,7 @@ require (
 	github.com/gorilla/mux v1.8.1 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
+	github.com/johanix/dnssec-algorithms v0.0.0-20260513135759-676b5158decd // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/mattn/go-colorable v0.1.12 // indirect
@@ -69,9 +70,8 @@ require (
 	golang.org/x/tools v0.43.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
 	zgo.at/runewidth v0.1.0 // indirect
 	zgo.at/termtext v1.5.0 // indirect
 )
 
-replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260419094240-6dbf3c7c5cda
+replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260513105419-747cbcbc3ac8

@@ -37,6 +37,7 @@ require (
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/gookit/color v1.5.4 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
+	github.com/johanix/dnssec-algorithms v0.0.0-20260513135759-676b5158decd // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
@@ -57,4 +58,8 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
 
-replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260419094240-6dbf3c7c5cda
+// Pinned at johanix/dns:algorithm-registry tip — provides the
+// pluggable Algorithm interface. ML-DSA-44 itself lives out-of-tree
+// in github.com/johanix/dnssec-algorithms/mldsa44 and is wired in by
+// blank import from each binary's main package.
+replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260513105419-747cbcbc3ac8

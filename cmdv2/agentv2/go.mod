@@ -11,6 +11,7 @@ replace (
 )
 
 require (
+	github.com/johanix/dnssec-algorithms v0.0.0-20260513135759-676b5158decd
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
 	github.com/mattn/go-sqlite3 v1.14.16
 )
@@ -57,4 +58,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260419094240-6dbf3c7c5cda
+replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260513105419-747cbcbc3ac8
