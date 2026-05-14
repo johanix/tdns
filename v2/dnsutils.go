@@ -439,8 +439,10 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string
 
 		if firstSoaSeen && !checkedForUnchanged {
 			checkedForUnchanged = true
-			apex, _ := zd.Data.Get(zd.ZoneName)
-			//dump.P(apex)
+			apex, ok := zd.Data.Get(zd.ZoneName)
+			if !ok || apex.RRtypes == nil {
+				return false, 0, fmt.Errorf("zone %s: zonefile contains no records for the configured apex; parsed apexes: [%s] (likely wrong zonefile path or stale file content)", zd.ZoneName, strings.Join(zd.Data.Keys(), ", "))
+			}
 			soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0].(*dns.SOA)
 			zd.Logger.Printf("ParseZoneFromReader: %s: old incoming serial: %d new SOA serial: %d",
 				zd.ZoneName, zd.IncomingSerial, soa.Serial)
@@ -469,9 +471,9 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string
 		return false, 0, err
 	}
 
-	apex, _ := zd.Data.Get(zd.ZoneName)
-	if err != nil {
-		return false, 0, fmt.Errorf("ParseZoneFromReader: Zone %s: Error: failed to get zone apex %v", zd.ZoneName, err)
+	apex, ok := zd.Data.Get(zd.ZoneName)
+	if !ok || apex.RRtypes == nil {
+		return false, 0, fmt.Errorf("zone %s: zonefile contains no records for the configured apex; parsed apexes: [%s] (likely wrong zonefile path or stale file content)", zd.ZoneName, strings.Join(zd.Data.Keys(), ", "))
 	}
 
 	soa_rrset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
