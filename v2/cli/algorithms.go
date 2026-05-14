@@ -6,6 +6,8 @@ package cli
 import (
 	"slices"
 	"strings"
+
+	"github.com/miekg/dns"
 )
 
 // isKnownAlgorithm reports whether name (already upper-cased)
@@ -19,6 +21,33 @@ import (
 func isKnownAlgorithm(name string) bool {
 	return slices.Contains(SupportedSig0Algorithms, name) ||
 		slices.Contains(SupportedDnssecAlgorithms, name)
+}
+
+// pqAlgorithmNumbers maps the PQ algorithm name strings to their
+// DNSSEC algorithm numbers (Unassigned IANA codepoints, see the
+// dnssec-algorithms repo). dns.StringToAlgorithm only knows about
+// built-in algorithms unless the corresponding dnssec-algorithms
+// subpackage has been blank-imported; cliv2 deliberately does not
+// blank-import them, so the CLI keeps its own static map here for
+// constructing API requests that target the PQ algorithms.
+var pqAlgorithmNumbers = map[string]uint8{
+	"MLDSA44":     199,
+	"SLHDSA128S":  200,
+	"FALCON512":   201,
+	"MAYO1":       202,
+	"SNOVA24_5_4": 203,
+}
+
+// AlgorithmNumber returns the DNSSEC algorithm number for name
+// (already upper-cased). Returns 0 if name is unknown.
+func AlgorithmNumber(name string) uint8 {
+	if num, ok := dns.StringToAlgorithm[name]; ok {
+		return num
+	}
+	if num, ok := pqAlgorithmNumbers[name]; ok {
+		return num
+	}
+	return 0
 }
 
 // SupportedSig0Algorithms lists the DNSSEC algorithm names tdns
