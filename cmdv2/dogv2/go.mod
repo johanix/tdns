@@ -12,7 +12,7 @@ replace (
 )
 
 require (
-	github.com/johanix/dnssec-algorithms v0.0.0-20260513175752-1a6e6b2d579e
+	github.com/johanix/dnssec-algorithms v0.0.0-20260514132718-bdc8c86bf5d1
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000
@@ -61,4 +61,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260513105419-747cbcbc3ac8
+replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260514084135-a4e41a4bc6e2
