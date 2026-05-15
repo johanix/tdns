@@ -46,14 +46,26 @@ func ExecuteContext(ctx context.Context) {
 	cobra.CheckErr(rootCmd.ExecuteContext(ctx))
 }
 
-// isRootKeysCommand returns true if cmd is the root-level "keys" (e.g. keys generate).
-// Those commands do not require config or API. Root has Use "tdns-cli".
+// isRootKeysCommand returns true if cmd is the no-config "keys" subtree
+// (e.g. keys generate). Those commands do not require config or API.
+// Two accepted ancestries:
+//   - legacy: tdns-cli keys ...
+//   - current: tdns-cli util keys ...   (moved under 'util' in the
+//     CLI restructure; same no-config semantics).
 func isRootKeysCommand(cmd *cobra.Command) bool {
 	for c := cmd; c != nil; c = c.Parent() {
-		if c.Name() == "keys" {
-			p := c.Parent()
-			return p != nil && p.Name() == "tdns-cli"
+		if c.Name() != "keys" {
+			continue
 		}
+		p := c.Parent()
+		if p == nil {
+			return false
+		}
+		if p.Name() == "tdns-cli" {
+			return true
+		}
+		gp := p.Parent()
+		return p.Name() == "util" && gp != nil && gp.Name() == "tdns-cli"
 	}
 	return false
 }

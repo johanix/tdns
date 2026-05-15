@@ -36,19 +36,19 @@ func NewDbCmd(parent string) *cobra.Command {
 				log.Fatalf("Error: TDNS DB file not specified in config nor on command line")
 			}
 
-			if _, err := os.Stat(dbFile); err == nil {
-				fmt.Printf("Warning: TDNS DB file '%s' already exists.\n", dbFile)
-				return
-			} else if !os.IsNotExist(err) {
-				log.Fatalf("Error checking TDNS DB file '%s': %v", dbFile, err)
-			}
-
 			parentDir := filepath.Dir(dbFile)
 			if _, err := os.Stat(parentDir); os.IsNotExist(err) {
 				log.Fatalf("Error: Parent directory '%s' does not exist", parentDir)
 			}
-			file, err := os.OpenFile(dbFile, os.O_CREATE|os.O_RDWR, 0600)
+			// O_EXCL makes creation atomic: if another process raced us,
+			// open returns ErrExist and we report "already exists"
+			// instead of silently treating a foreign file as ours.
+			file, err := os.OpenFile(dbFile, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0600)
 			if err != nil {
+				if os.IsExist(err) {
+					fmt.Printf("Warning: TDNS DB file '%s' already exists.\n", dbFile)
+					return
+				}
 				log.Fatalf("Error creating TDNS DB file '%s': %v", dbFile, err)
 			}
 			defer file.Close()
