@@ -333,7 +333,7 @@ func sig0KeyMgmt(role, cmd string) {
 	case "generate":
 		data.Zone = tdns.Globals.Zonename
 		data.Keyname = tdns.Globals.Zonename // It should be possible to generate SIG(0) keys for other names than zone names.
-		data.Algorithm = AlgorithmNumber(tdns.Globals.Algorithm)
+		data.Algorithm = MustAlgorithmNumber(tdns.Globals.Algorithm)
 		data.State = NewState
 
 	case "delete", "setstate", "export":
@@ -412,7 +412,7 @@ func sig0KeyMgmt(role, cmd string) {
 // keystore) and .key (zone-file KEY RR text). The resulting basename is
 // directly consumable by tdns.ReadPrivateKey.
 func writeSig0ExportFiles(sk tdns.Sig0Key, outdir string) error {
-	algNum, ok := dns.StringToAlgorithm[strings.ToUpper(sk.Algorithm)]
+	algNum, ok := AlgorithmNumber(strings.ToUpper(sk.Algorithm))
 	if !ok {
 		return fmt.Errorf("unknown algorithm %q in exported key", sk.Algorithm)
 	}
@@ -486,7 +486,7 @@ func dnssecKeyMgmt(role, cmd string) {
 
 	case "generate":
 		data.Zone = tdns.Globals.Zonename
-		data.Algorithm = AlgorithmNumber(tdns.Globals.Algorithm)
+		data.Algorithm = MustAlgorithmNumber(tdns.Globals.Algorithm)
 		data.KeyType = keytype // "KSK|ZSK|CSK"
 		data.State = NewState
 

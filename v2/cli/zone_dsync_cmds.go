@@ -87,7 +87,7 @@ func newZoneDsyncCmd(role string) *cobra.Command {
 			resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
 				Command:   "bootstrap-sig0-key",
 				Zone:      dns.Fqdn(tdns.Globals.Zonename),
-				Algorithm: dns.StringToAlgorithm[tdns.Globals.Algorithm],
+				Algorithm: MustAlgorithmNumber(tdns.Globals.Algorithm),
 			})
 			PrintUpdateResult(resp.UpdateResult)
 			if err != nil {
@@ -119,7 +119,7 @@ func newZoneDsyncCmd(role string) *cobra.Command {
 			resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
 				Command:   "roll-sig0-key",
 				Zone:      dns.Fqdn(tdns.Globals.Zonename),
-				Algorithm: dns.StringToAlgorithm[tdns.Globals.Algorithm],
+				Algorithm: MustAlgorithmNumber(tdns.Globals.Algorithm),
 				Action:    rollaction,
 			})
 			PrintUpdateResult(resp.UpdateResult)

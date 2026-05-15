@@ -12,7 +12,7 @@ replace (
 )
 
 require (
-	github.com/johanix/dnssec-algorithms v0.0.0-20260514132718-bdc8c86bf5d1
+	github.com/johanix/dnssec-algorithms v0.0.0-20260515092703-423a9a3a4bf5
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/cli v0.0.0-00010101000000-000000000000
 	github.com/spf13/cobra v1.8.1
@@ -76,4 +76,4 @@ require (
 	zgo.at/termtext v1.5.0 // indirect
 )
 
-replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260514084135-a4e41a4bc6e2
+replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260515091838-3300006a8466

@@ -14,17 +14,26 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
-	// Side-effect imports: register out-of-tree DNSSEC algorithms.
-	// Per-binary choice — tdns/v2 itself stays free of third-party
-	// crypto deps; each application opts in here.
-	_ "github.com/johanix/dnssec-algorithms/falcon512"
-	_ "github.com/johanix/dnssec-algorithms/mayo1"
-	_ "github.com/johanix/dnssec-algorithms/mldsa44"
-	_ "github.com/johanix/dnssec-algorithms/slhdsa128s"
-	_ "github.com/johanix/dnssec-algorithms/snova24_5_4"
+	"github.com/johanix/dnssec-algorithms/falcon512"
+	"github.com/johanix/dnssec-algorithms/mayo1"
+	"github.com/johanix/dnssec-algorithms/mldsa44"
+	"github.com/johanix/dnssec-algorithms/slhdsa128s"
+	"github.com/johanix/dnssec-algorithms/snova24_5_4"
 
 	tdns "github.com/johanix/tdns/v2"
+	algs "github.com/johanix/tdns/v2/algorithms"
 )
+
+// Register out-of-tree DNSSEC algorithms. Per-binary choice — tdns/v2
+// itself stays free of third-party crypto deps; each application
+// decides what to import and at which codepoints to register them.
+func init() {
+	algs.Register(199, mldsa44.New(),     algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.Register(200, slhdsa128s.New(),  algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.Register(201, falcon512.New(),   algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.Register(202, mayo1.New(),       algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.Register(203, snova24_5_4.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+}
 
 func main() {
 	tdns.Globals.App.Type = tdns.AppTypeAgent

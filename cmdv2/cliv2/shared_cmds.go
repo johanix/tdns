@@ -28,8 +28,12 @@ func init() {
 	rootCmd.AddCommand(cli.NewDebugCmd("auth"))
 	cli.AgentCmd.AddCommand(cli.NewDebugCmd("agent"))
 
-	// Keystore and truststore are under AuthCmd and AgentCmd
-	// (wired in cli/auth_cmds.go init). Agent also gets them:
+	// Keystore and truststore are wired here (not in v2/cli's
+	// auth_cmds.go init) so the algorithm list embedded in their
+	// --help text reflects the PQ algorithms this binary registered
+	// in its own init() above.
+	cli.AuthCmd.AddCommand(cli.NewKeystoreCmd("auth"))
+	cli.AuthCmd.AddCommand(cli.NewTruststoreCmd("auth"))
 	cli.AgentCmd.AddCommand(cli.NewKeystoreCmd("agent"))
 	cli.AgentCmd.AddCommand(cli.NewTruststoreCmd("agent"))
 

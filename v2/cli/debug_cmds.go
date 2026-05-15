@@ -63,7 +63,7 @@ func NewDebugCmd(role string, extras ...*cobra.Command) *cobra.Command {
 			}
 
 			rrtype := dns.StringToType[strings.ToUpper(tdns.Globals.Rrtype)]
-			algorithm := dns.StringToAlgorithm[strings.ToUpper(tdns.Globals.Algorithm)]
+			algorithm := MustAlgorithmNumber(strings.ToUpper(tdns.Globals.Algorithm))
 
 			fmt.Printf("Calling generate sig0 with zone: %s algorithm: %s rrtype: %s\n",
 				tdns.Globals.Zonename, tdns.Globals.Algorithm, tdns.Globals.Rrtype)

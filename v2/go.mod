@@ -10,10 +10,10 @@ replace (
 )
 
 require (
-	github.com/cloudflare/circl v1.6.3
 	github.com/go-playground/validator/v10 v10.22.1
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
+	github.com/johanix/dnssec-algorithms v0.0.0-20260513135759-676b5158decd
 	github.com/johanix/tdns-transport/v2 v2.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f
 	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39
@@ -37,7 +37,6 @@ require (
 	github.com/go-playground/universal-translator v0.18.1 // indirect
 	github.com/gookit/color v1.5.4 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
-	github.com/johanix/dnssec-algorithms v0.0.0-20260513135759-676b5158decd // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
@@ -62,4 +61,4 @@ require (
 // pluggable Algorithm interface. ML-DSA-44 itself lives out-of-tree
 // in github.com/johanix/dnssec-algorithms/mldsa44 and is wired in by
 // blank import from each binary's main package.
-replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260514084135-a4e41a4bc6e2
+replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260515091838-3300006a8466
