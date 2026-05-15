@@ -38,10 +38,14 @@ func (b *DirectDelegationBackend) ApplyChildUpdate(parentZone string, ur UpdateR
 	}
 	msg, werr := b.zd.WriteZone(true, false)
 	if werr != nil {
+		// Propagate the persistence failure. The in-memory state did
+		// receive the update, but the zonefile didn't — and if the
+		// daemon restarts before the next successful update lands, the
+		// change is lost on reload and the scanner will rediscover the
+		// "missing" delegation and re-accumulate. Surface the error
+		// upstream so operators see it and can act.
 		lg.Warn("DirectDelegationBackend: failed to persist zone after CHILD-UPDATE", "zone", b.zd.ZoneName, "file", b.zd.Zonefile, "error", werr)
-		// Don't propagate — the in-memory state is correct; the next
-		// successful CHILD-UPDATE (or explicit zone write) will catch up.
-		return nil
+		return fmt.Errorf("persist zone after CHILD-UPDATE: %w", werr)
 	}
 	lg.Info("DirectDelegationBackend: persisted zone after CHILD-UPDATE", "zone", b.zd.ZoneName, "msg", msg)
 	return nil

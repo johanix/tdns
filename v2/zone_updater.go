@@ -108,20 +108,30 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				// in-memory zone state behind the scanner's back.
 				lg.Debug("ZoneUpdater: CHILD-UPDATE request", "zone", ur.ZoneName, "actions", len(ur.Actions))
 				lg.Debug("ZoneUpdater: CHILD-UPDATE actions detail", "actions", SprintUpdates(ur.Actions))
-				if !zd.Options[OptAllowChildUpdates] {
+				// Snapshot the two fields parseconfig.go mutates under
+				// zd.mu during config reload (Options + DelegationBackend).
+				// Reading them independently without the lock would let a
+				// concurrent reload flip one between checks, producing a
+				// spurious "invariant violation" ERROR.
+				zd.mu.Lock()
+				allowChildUpdates := zd.Options[OptAllowChildUpdates]
+				backend := zd.DelegationBackend
+				zd.mu.Unlock()
+
+				if !allowChildUpdates {
 					lg.Warn("ZoneUpdater: zone does not allow child updates, dropping CHILD-UPDATE", "zone", ur.ZoneName)
 					continue
 				}
-				if zd.DelegationBackend == nil {
+				if backend == nil {
 					lg.Error("ZoneUpdater: zone allows child updates but has no DelegationBackend, dropping CHILD-UPDATE (invariant violation)", "zone", ur.ZoneName)
 					continue
 				}
-				if err := zd.DelegationBackend.ApplyChildUpdate(ur.ZoneName, ur); err != nil {
+				if err := backend.ApplyChildUpdate(ur.ZoneName, ur); err != nil {
 					lg.Error("ZoneUpdater: DelegationBackend.ApplyChildUpdate failed",
-						"backend", zd.DelegationBackend.Name(), "error", err)
+						"backend", backend.Name(), "error", err)
 				} else {
 					lg.Info("ZoneUpdater: CHILD-UPDATE applied",
-						"zone", ur.ZoneName, "backend", zd.DelegationBackend.Name())
+						"zone", ur.ZoneName, "backend", backend.Name())
 					// OptDirty is managed by the backend: 'direct' sets
 					// then clears it via WriteZone after persisting; DB-
 					// and zonefile-backends don't touch in-memory zone
