@@ -1,4 +1,4 @@
-PROG:=tdns-agentv2
+PROG:=tdns-agent
 
 GOOS ?= $(shell uname -s | tr A-Z a-z)
 GO:=CGO_ENABLED=1 go

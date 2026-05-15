@@ -1,4 +1,4 @@
-module tdns-authv2
+module tdns-auth
 
 go 1.25.2
 

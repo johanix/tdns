@@ -1,4 +1,4 @@
-module tdns-agentv2
+module tdns-agent
 
 go 1.25.2
 

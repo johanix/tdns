@@ -1,4 +1,4 @@
-PROG:=tdns-imrv2
+PROG:=tdns-imr
 
 GOOS ?= $(shell uname -s | tr A-Z a-z)
 # We need CGO because we now need sqlite also in tdns-cli

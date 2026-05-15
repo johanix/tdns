@@ -28,7 +28,7 @@ import (
 var RootKeysCmd = &cobra.Command{
 	Use:   "keys",
 	Short: "Generate long-term keypairs for agent/combiner (JOSE)",
-	Long: `Generate JOSE keypairs used by tdns-agentv2 and tdns-mpcombiner for
+	Long: `Generate JOSE keypairs used by tdns-agent and tdns-mpcombiner for
 authenticated NOTIFY(CHUNK) and API traffic. Use one keypair per party:
   - Agent:  agent.jose.private (+ optional agent.jose.pub for combiner config)
   - Combiner: combiner.jose.private (+ optional combiner.jose.pub for agent config)
@@ -112,7 +112,7 @@ func runRootKeysGenerate(cmd *cobra.Command, args []string) {
 # Generated: %s
 # KeyID: %s
 # Algorithm: P-256 (ECDH-ES + ECDSA)
-# Used by tdns-agentv2 / tdns-mpcombiner for NOTIFY(CHUNK) and API auth.
+# Used by tdns-agent / tdns-mpcombiner for NOTIFY(CHUNK) and API auth.
 #
 # WARNING: This is a PRIVATE KEY. Keep it secret. Do not share.
 #

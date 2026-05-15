@@ -1,4 +1,4 @@
-PROG:=dogv2
+PROG:=dog
 
 GOOS ?= $(shell uname -s | tr A-Z a-z)
 # GO:=GOOS=$(GOOS) CGO_ENABLED=0 go

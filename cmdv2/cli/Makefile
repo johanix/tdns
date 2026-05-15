@@ -1,4 +1,4 @@
-PROG:=tdns-cliv2
+PROG:=tdns-cli
 
 # We need CGO because we now need sqlite also in tdns-cli
 # GO:=GOOS=$(GOOS) CGO_ENABLED=1 go

@@ -4,26 +4,26 @@
 all: v2
 
 version:
-	$(MAKE) -C ./authv2/ version
-	$(MAKE) -C ./cliv2/ version
-	$(MAKE) -C ./agentv2/ version
-	$(MAKE) -C ./imrv2/ version
-	$(MAKE) -C ./dogv2/ version
+	$(MAKE) -C ./auth/ version
+	$(MAKE) -C ./cli/ version
+	$(MAKE) -C ./agent/ version
+	$(MAKE) -C ./imr/ version
+	$(MAKE) -C ./dog/ version
 
 # experimental version of major apps
 v2:
-	$(MAKE) -C ./authv2/
-	$(MAKE) -C ./cliv2/
-	$(MAKE) -C ./agentv2/
-	$(MAKE) -C ./imrv2/
-	$(MAKE) -C ./dogv2/
+	$(MAKE) -C ./auth/
+	$(MAKE) -C ./cli/
+	$(MAKE) -C ./agent/
+	$(MAKE) -C ./imr/
+	$(MAKE) -C ./dog/
 
 clean:
-	$(MAKE) -C ./authv2/ clean
-	$(MAKE) -C ./cliv2/ clean
-	$(MAKE) -C ./agentv2/ clean
-	$(MAKE) -C ./imrv2/ clean
-	$(MAKE) -C ./dogv2/ clean
+	$(MAKE) -C ./auth/ clean
+	$(MAKE) -C ./cli/ clean
+	$(MAKE) -C ./agent/ clean
+	$(MAKE) -C ./imr/ clean
+	$(MAKE) -C ./dog/ clean
 
 check-root:
 	@if [ "$$(id -u)" -ne 0 ]; then echo "Must run as root"; exit 1; fi
@@ -32,17 +32,17 @@ install-dirs: check-root
 	mkdir -p /usr/local/bin /usr/local/libexec
 
 install: check-root install-dirs
-	$(MAKE) -C ./authv2/ install
-	$(MAKE) -C ./cliv2/ install
-	$(MAKE) -C ./agentv2/ install
-	$(MAKE) -C ./imrv2/ install
-	$(MAKE) -C ./dogv2/ install
+	$(MAKE) -C ./auth/ install
+	$(MAKE) -C ./cli/ install
+	$(MAKE) -C ./agent/ install
+	$(MAKE) -C ./imr/ install
+	$(MAKE) -C ./dog/ install
 
 TAR_VERSION:=v2
 TARFILE:=/tmp/usr.local.tdns.$(TAR_VERSION).tar.gz
-TAR_CONTENTS:=bin/tdns-cliv2 bin/dogv2 \
-	libexec/tdns-imrv2 libexec/tdns-authv2 \
-	libexec/tdns-agentv2
+TAR_CONTENTS:=bin/tdns-cli bin/dog \
+	libexec/tdns-imr libexec/tdns-auth \
+	libexec/tdns-agent
 
 tarball: install
 	cd /usr/local && tar -czf $(TARFILE) $(TAR_CONTENTS)

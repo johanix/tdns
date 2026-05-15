@@ -1,4 +1,4 @@
-module dogv2
+module dog
 
 go 1.25.2
 

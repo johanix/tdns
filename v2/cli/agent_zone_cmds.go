@@ -269,8 +269,8 @@ This will:
 - Send the update to the combiner
 
 Examples:
-  tdns-cliv2 agent zone addrr --zone whisky.dnslab. --rr "whisky.dnslab. IN NS ns.alpha.dnslab."
-  tdns-cliv2 agent zone addrr --zone whisky.dnslab. --rr "whisky.dnslab. 300 IN DNSKEY 257 3 13 <base64>"`,
+  tdns-cli agent zone addrr --zone whisky.dnslab. --rr "whisky.dnslab. IN NS ns.alpha.dnslab."
+  tdns-cli agent zone addrr --zone whisky.dnslab. --rr "whisky.dnslab. 300 IN DNSKEY 257 3 13 <base64>"`,
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 
@@ -343,8 +343,8 @@ This will:
 - Send the update to the combiner
 
 Examples:
-  tdns-cliv2 agent zone delrr --zone whisky.dnslab. --rr "whisky.dnslab. IN NS ns.alpha.dnslab."
-  tdns-cliv2 agent zone delrr --zone whisky.dnslab. --rr "whisky.dnslab. 300 IN DNSKEY 257 3 13 <base64>"`,
+  tdns-cli agent zone delrr --zone whisky.dnslab. --rr "whisky.dnslab. IN NS ns.alpha.dnslab."
+  tdns-cli agent zone delrr --zone whisky.dnslab. --rr "whisky.dnslab. 300 IN DNSKEY 257 3 13 <base64>"`,
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 

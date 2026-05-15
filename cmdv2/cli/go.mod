@@ -1,4 +1,4 @@
-module tdns-cliv2
+module tdns-cli
 
 go 1.25.2
 

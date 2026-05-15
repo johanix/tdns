@@ -1,4 +1,4 @@
-module tdns-imrv2
+module tdns-imr
 
 go 1.25.2
 
