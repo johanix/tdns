@@ -38,10 +38,10 @@ COPY --from=builder /usr/local/bin/tdns-* /usr/local/bin/
 # Set up configuration and certificates
 RUN mkdir -p /etc/tdns/certs
 
-COPY --from=builder /app/cmdv2/agentv2/tdns-agent.sample.yaml /etc/tdns/tdns-agentv2.yaml
-COPY --from=builder /app/cmdv2/agentv2/agent-zones.yaml /etc/tdns/
-COPY --from=builder /app/cmdv2/cliv2/tdns-cli.sample.yaml /etc/tdns/tdns-cli.yaml
-COPY --from=builder /app/cmdv2/authv2/tdns-auth.sample.yaml /etc/tdns/tdns-authv2.yaml
+COPY --from=builder /app/cmdv2/agent/tdns-agent.sample.yaml /etc/tdns/tdns-agent.yaml
+COPY --from=builder /app/cmdv2/agent/agent-zones.yaml /etc/tdns/
+COPY --from=builder /app/cmdv2/cli/tdns-cli.sample.yaml /etc/tdns/tdns-cli.yaml
+COPY --from=builder /app/cmdv2/auth/tdns-auth.sample.yaml /etc/tdns/tdns-auth.yaml
 COPY --from=builder /app/utils/ /tmp/utils/
 
 # Run the cert generation using the local openssl.cnf and create the db
@@ -52,8 +52,8 @@ RUN tdns-cli db init -f /var/tmp/tdns-agent.db \
     && rm -rf /tmp/utils
 
 # Generate JOSE keypairs
-RUN tdns-cliv2 keys generate --jose
+RUN tdns-cli keys generate --jose
 
-ENTRYPOINT ["tdns-agentv2"]
-CMD ["--config", "/etc/tdns/tdns-agentv2.yaml"]
+ENTRYPOINT ["tdns-agent"]
+CMD ["--config", "/etc/tdns/tdns-agent.yaml"]
 

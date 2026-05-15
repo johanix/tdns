@@ -1,4 +1,4 @@
-module tdns-authv2
+module tdns-agent
 
 go 1.25.2
 
@@ -12,7 +12,7 @@ replace (
 
 require (
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
-	github.com/mattn/go-sqlite3 v1.14.28
+	github.com/mattn/go-sqlite3 v1.14.16
 )
 
 require (

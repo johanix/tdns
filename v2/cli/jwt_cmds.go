@@ -39,16 +39,16 @@ base64-decodes the RDATA and prints the JWK as pretty JSON.
 
 Examples:
   # Inspect CHUNK (JWT)
-  dogv2 node.dist123.kdc. CHUNK | tdns-cli jwt inspect -
+  dog node.dist123.kdc. CHUNK | tdns-cli jwt inspect -
 
   # Inspect JWK (pretty-print JSON)
-  dogv2 dns.agent.provider. JWK | tdns-cli jwt inspect -
+  dog dns.agent.provider. JWK | tdns-cli jwt inspect -
 
   # With signature verification (CHUNK only)
-  dogv2 node.dist123.kdc. CHUNK | tdns-cli jwt inspect - --verify --verify-key /path/to/kdc.jose.pub
+  dog node.dist123.kdc. CHUNK | tdns-cli jwt inspect - --verify --verify-key /path/to/kdc.jose.pub
 
 Input format auto-detection:
-  - DNS wire format (from dogv2/dig): CHUNK → JWT; JWK → base64-decode and pretty JSON
+  - DNS wire format (from dog/dig): CHUNK → JWT; JWK → base64-decode and pretty JSON
   - DNS text format (zone file / dig style): same
   - Base64-encoded JWT (starts with eyJ...)
   - Raw CHUNK RDATA`,

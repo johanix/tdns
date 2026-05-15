@@ -1,4 +1,4 @@
-module tdns-imrv2
+module dog
 
 go 1.25.2
 
@@ -13,14 +13,13 @@ replace (
 
 require (
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
-	github.com/johanix/tdns/v2/cli v0.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39
+	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000
+	github.com/miekg/dns v1.1.70
 	github.com/spf13/cobra v1.8.1
-	github.com/spf13/viper v1.16.0
 )
 
 require (
-	github.com/c-bata/go-prompt v0.2.6 // indirect
-	github.com/chzyer/readline v0.0.0-20180603132655-2972be24d48e // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
@@ -34,26 +33,17 @@ require (
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/johanix/tdns-transport/v2 v2.0.0-00010101000000-000000000000 // indirect
 	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f // indirect
-	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39 // indirect
-	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000 // indirect
 	github.com/leodido/go-urn v1.4.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
-	github.com/mattn/go-colorable v0.1.12 // indirect
-	github.com/mattn/go-isatty v0.0.14 // indirect
-	github.com/mattn/go-runewidth v0.0.9 // indirect
 	github.com/mattn/go-sqlite3 v1.14.16 // indirect
-	github.com/mattn/go-tty v0.0.3 // indirect
-	github.com/miekg/dns v1.1.70 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
-	github.com/pkg/term v1.2.0-beta.2 // indirect
 	github.com/quic-go/quic-go v0.58.0 // indirect
-	github.com/rivo/uniseg v0.4.7 // indirect
-	github.com/ryanuber/columnize v2.1.2+incompatible // indirect
 	github.com/spf13/afero v1.9.5 // indirect
 	github.com/spf13/cast v1.5.1 // indirect
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
 	github.com/spf13/pflag v1.0.6 // indirect
+	github.com/spf13/viper v1.16.0 // indirect
 	github.com/subosito/gotenv v1.4.2 // indirect
 	github.com/twotwotwo/sorts v0.0.0-20160814051341-bf5c1f2b8553 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
@@ -62,13 +52,9 @@ require (
 	golang.org/x/net v0.48.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.39.0 // indirect
-	golang.org/x/term v0.38.0 // indirect
 	golang.org/x/text v0.32.0 // indirect
 	golang.org/x/tools v0.40.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	zgo.at/acidtab v1.1.0 // indirect
-	zgo.at/runewidth v0.1.0 // indirect
-	zgo.at/termtext v1.5.0 // indirect
 )

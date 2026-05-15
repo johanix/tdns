@@ -25,13 +25,13 @@ cmd/hpke-inline-test/hpke-inline-test
 cmd/hpke-test/hpke-test
 
 # cmdv2/ (v2) binaries
-cmdv2/agentv2/tdns-agentv2
-cmdv2/agentv2/tdns-agentv2.netbsd
-cmdv2/authv2/tdns-authv2
-cmdv2/authv2/tdns-authv2.netbsd
-cmdv2/cliv2/tdns-cliv2
-cmdv2/cliv2/tdns-cliv2.netbsd
-cmdv2/dogv2/dogv2
-cmdv2/dogv2/dogv2.netbsd
-cmdv2/imrv2/tdns-imrv2
-cmdv2/imrv2/tdns-imrv2.netbsd
+cmdv2/agent/tdns-agent
+cmdv2/agent/tdns-agent.netbsd
+cmdv2/auth/tdns-auth
+cmdv2/auth/tdns-auth.netbsd
+cmdv2/cli/tdns-cli
+cmdv2/cli/tdns-cli.netbsd
+cmdv2/dog/dog
+cmdv2/dog/dog.netbsd
+cmdv2/imr/tdns-imr
+cmdv2/imr/tdns-imr.netbsd

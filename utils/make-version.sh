@@ -3,9 +3,8 @@ appversion=$1
 appdate=$2
 prog=$3
 
-versioned_progs="tdns-agent tdns-agentv2 tdns-auth tdns-authv2 \
-		 tdns-combiner tdns-cli tdns-cliv2 \
-		 dog dogv2 tdns-imr tdns-imrv2 tdns-reporter tdns-scanner"
+versioned_progs="tdns-agent tdns-auth tdns-combiner tdns-cli \
+		 dog tdns-imr tdns-reporter tdns-scanner"
 
 case " $versioned_progs " in
     *" $prog "*)

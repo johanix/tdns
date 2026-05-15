@@ -1,4 +1,4 @@
-PROG:=tdns-authv2
+PROG:=tdns-auth
 
 # GO:=GOWORK=/Users/johani/src/git/tdns/go.work CGO_ENABLED=1 go
 GO:= CGO_ENABLED=1 go
