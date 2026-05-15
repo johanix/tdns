@@ -29,7 +29,7 @@ which is a code bug:
 ## Root cause: asymmetric read and write paths
 
 The parent zone (`p.axfr.net`) was configured with
-`allow-child-updates: true` but no `delegation-backend:`.
+`allow-child-updates: true` but no `delegationbackend:`.
 That made the write path and the read path disagree on
 where "current child delegation data" lives:
 
@@ -64,15 +64,15 @@ Enforced at config-parse time. Choices:
   reflect child updates until a reload.
 - `zonefile` — DB + on-disk zone file fragment. Same
   in-memory caveat as `db`.
-- A named custom backend from the `delegation-backends:`
+- A named custom backend from the `delegationbackends:`
   config block.
 
 There is no silent default. A zone with
-`allow-child-updates: true` and no `delegation-backend:`
+`allow-child-updates: true` and no `delegationbackend:`
 is marked broken at parse time with:
 
 ```
-zone has 'allow-child-updates' but no 'delegation-backend' configured, zone in error state
+zone has 'allow-child-updates' but no 'delegationbackend' configured, zone in error state
 ```
 
 ## Code changes
@@ -153,7 +153,7 @@ successful update or explicit zone-write will catch up).
 ## Operator impact
 
 Any existing config with `allow-child-updates: true` and
-no `delegation-backend:` will now refuse to load the zone.
+no `delegationbackend:` will now refuse to load the zone.
 Operators must explicitly choose a backend:
 
 ```yaml
@@ -162,7 +162,7 @@ zones:
       type: primary
       zonefile: /etc/tdns/zones/p.axfr.net
       options: [allow-child-updates, delegation-sync-parent]
-      delegation-backend: direct   # <-- now required
+      delegationbackend: direct    # <-- now required
 ```
 
 `direct` preserves the prior in-memory behavior and adds
@@ -171,7 +171,7 @@ zonefile persistence on each apply.
 ## Recovery: cleaning the stale accumulation
 
 Once the fix is deployed and the affected parent zone is
-restarted with `delegation-backend: direct`, the next CDS
+restarted with `delegationbackend: direct`, the next CDS
 scan will compute its diff against the real current DS
 set in the in-memory zone. For a zone that has
 accumulated `N` stale DS RRs while only `K` are valid in

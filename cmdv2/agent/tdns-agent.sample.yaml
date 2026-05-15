@@ -103,13 +103,13 @@ resolver:
 # Named delegation backends for parent zones that receive child UPDATEs.
 # Two predefined backends need no config: "db" and "direct".
 # Named backends are only needed for types that require parameters.
-# Zones reference backends by name via "delegation-backend: <name>".
+# Zones reference backends by name via "delegationbackend: <name>".
 #
-# A zone that has 'allow-child-updates' MUST specify a 'delegation-backend:'.
+# A zone that has 'allow-child-updates' MUST specify a 'delegationbackend:'.
 # Without one the read path (scanner) and write path (zone updater) disagree
 # on where current delegation data lives, and DS/NS records accumulate
 # without ever being removed.
-delegation-backends:
+delegationbackends:
    - name:		files-dnslab
      type:		zonefile
      directory:	/var/lib/tdns/delegations/dnslab
@@ -118,9 +118,9 @@ delegation-backends:
 # In zone config, reference a backend:
 #   zones:
 #     - name:  dnslab.
-#       delegation-backend: db           # predefined, no config needed
+#       delegationbackend: db            # predefined, no config needed
 #     - name:  example.com.
-#       delegation-backend: files-dnslab  # looked up from delegation-backends above
+#       delegationbackend: files-dnslab  # looked up from delegationbackends above
 
 delegationsync:
    # Leader election TTL: how long a leader remains valid before re-election.

@@ -635,8 +635,8 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// without ever being removed. Refuse to start such a zone rather
 		// than letting it silently misbehave.
 		if options[OptAllowChildUpdates] && zconf.DelegationBackend == "" {
-			lgConfig.Error("zone has 'allow-child-updates' but no 'delegation-backend' configured, zone in error state", "zone", zname)
-			zd.SetError(ConfigError, "allow-child-updates requires delegation-backend to be configured (e.g. 'delegation-backend: direct')")
+			lgConfig.Error("zone has 'allow-child-updates' but no 'delegationbackend' configured, zone in error state", "zone", zname)
+			zd.SetError(ConfigError, "allow-child-updates requires delegationbackend to be configured (e.g. 'delegationbackend: direct')")
 			broken_zones = append(broken_zones, zname)
 			continue
 		}
@@ -767,7 +767,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			backend, err := LookupDelegationBackend(zconf.DelegationBackend, kdb, zdp)
 			if err != nil {
 				lgConfig.Error("failed to create delegation backend, zone in error state", "zone", zname, "backend", zconf.DelegationBackend, "error", err)
-				zd.SetError(ConfigError, "delegation-backend %q: %v", zconf.DelegationBackend, err)
+				zd.SetError(ConfigError, "delegationbackend %q: %v", zconf.DelegationBackend, err)
 				broken_zones = append(broken_zones, zname)
 				continue
 			}
@@ -857,7 +857,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 
 		// Note: DelegationBackend wiring is done synchronously above,
 		// outside the FirstZoneLoad guard, so config-reload picks up
-		// changes to the 'delegation-backend' key.
+		// changes to the 'delegationbackend' key.
 
 		// Leader election OnFirstLoad is registered in StartAgent() (not here)
 		// because LeaderElectionManager doesn't exist until StartAgent runs.
