@@ -61,8 +61,9 @@ func isRootKeysCommand(cmd *cobra.Command) bool {
 func init() {
 	// Config/API init moved to rootCmd.PersistentPreRun (skipped for root-level "keys")
 
-	// Register catalog zone management commands
-	rootCmd.AddCommand(cli.CatalogCmd)
+	// Catalog zone management lives under 'auth' — catalog zones are an
+	// auth-daemon concern (RFC 9432 catalog zones served by tdns-auth).
+	cli.AuthCmd.AddCommand(cli.CatalogCmd)
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "",
 		fmt.Sprintf("config file (default is %s)", tdns.DefaultCliCfgFile))

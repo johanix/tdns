@@ -8,24 +8,26 @@ import (
 )
 
 func init() {
-	// From ../tdns/cli/db_cmds.go:
-	rootCmd.AddCommand(cli.DbCmd)
+	// From ../tdns/cli/db_cmds.go: per-daemon factory; both auth and agent
+	// have their own SQLite DB so each gets its own 'db init' command.
+	cli.AuthCmd.AddCommand(cli.NewDbCmd("auth"))
+	cli.AgentCmd.AddCommand(cli.NewDbCmd("agent"))
 
-	// From ../tdns/cli/start_cmds.go:
-	// Root-level ping targets the auth daemon.
-	rootCmd.AddCommand(cli.NewPingCmd("auth"))
+	// Note: 'auth ping' is already wired in v2/cli/auth_cmds.go init().
 
-	// From ../tdns/cli/report.go:
-	rootCmd.AddCommand(cli.ReportCmd)
+	// From ../tdns/cli/report.go: 'auth report' — reports are an
+	// auth-daemon concern (CDS/CSYNC/error reports about a zone).
+	cli.AuthCmd.AddCommand(cli.ReportCmd)
 
-	rootCmd.AddCommand(cli.NewDaemonCmd("auth"))
+	// Note: 'auth daemon' is already wired in v2/cli/auth_cmds.go init().
 	cli.AgentCmd.AddCommand(cli.NewDaemonCmd("agent"))
 
-	// From ../tdns/cli/ddns_cmds.go:
-	rootCmd.AddCommand(cli.DdnsCmd, cli.DelCmd)
+	// From ../tdns/cli/ddns_cmds.go: 'auth ddns' and 'auth del' —
+	// DDNS update protocol + delegation-sync are auth-daemon concerns.
+	cli.AuthCmd.AddCommand(cli.DdnsCmd, cli.DelCmd)
 
 	// From ../tdns/cli/debug_cmds.go:
-	rootCmd.AddCommand(cli.NewDebugCmd("auth"))
+	cli.AuthCmd.AddCommand(cli.NewDebugCmd("auth"))
 	cli.AgentCmd.AddCommand(cli.NewDebugCmd("agent"))
 
 	// Keystore and truststore are under AuthCmd and AgentCmd
@@ -33,21 +35,23 @@ func init() {
 	cli.AgentCmd.AddCommand(cli.NewKeystoreCmd("agent"))
 	cli.AgentCmd.AddCommand(cli.NewTruststoreCmd("agent"))
 
-	// From ../tdns/cli/dsync_cmds.go:
-	rootCmd.AddCommand(cli.DsyncDiscoveryCmd)
+	// From ../tdns/cli/dsync_cmds.go: 'imr dsync-query' — DSYNC discovery
+	// resolves via the IMR resolver, so it sits under the imr daemon parent.
+	cli.ImrCmd.AddCommand(cli.DsyncDiscoveryCmd)
 
 	// From ../tdns/cli/config_cmds.go:
-	rootCmd.AddCommand(cli.NewConfigCmd("auth"))
+	cli.AuthCmd.AddCommand(cli.NewConfigCmd("auth"))
 	cli.AgentCmd.AddCommand(cli.NewConfigCmd("agent"))
 
 	// From ../tdns/cli/generate_cmds.go: daemon-agnostic record syntax helpers
 	cli.UtilCmd.AddCommand(cli.GenerateCmd)
 
-	// From ../tdns/cli/notify_cmds.go:
-	rootCmd.AddCommand(cli.NotifyCmd)
+	// From ../tdns/cli/notify_cmds.go: 'auth notify' — sends NOTIFY
+	// (CDS/CSYNC/DNSKEY) toward the parent or signer, an auth-daemon op.
+	cli.AuthCmd.AddCommand(cli.NotifyCmd)
 
-	// From ../tdns/cli/commands.go:
-	rootCmd.AddCommand(cli.NewStopCmd("auth"))
+	// From ../tdns/cli/commands.go: 'auth stop' (matches 'agent stop' via NewDaemonCmd).
+	cli.AuthCmd.AddCommand(cli.NewStopCmd("auth"))
 
 	// From ../tdns/cli/combiner_cmds.go:
 	//	rootCmd.AddCommand(cli.CombinerCmd)
