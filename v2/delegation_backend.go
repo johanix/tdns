@@ -49,7 +49,7 @@ type DelegationBackendConf struct {
 //   - "db"     → DBDelegationBackend (uses the zone's existing KeyDB)
 //   - "direct" → DirectDelegationBackend (modifies in-memory zone data)
 //
-// Any other name is looked up in the "delegation-backends" config list.
+// Any other name is looked up in the "delegationbackends" config list.
 func LookupDelegationBackend(name string, kdb *KeyDB, zd *ZoneData) (DelegationBackend, error) {
 	switch name {
 	case "db":
@@ -60,8 +60,8 @@ func LookupDelegationBackend(name string, kdb *KeyDB, zd *ZoneData) (DelegationB
 
 	// Look up named backend in config
 	var backends []DelegationBackendConf
-	if err := viper.UnmarshalKey("delegation-backends", &backends); err != nil {
-		return nil, fmt.Errorf("failed to parse delegation-backends config: %w", err)
+	if err := viper.UnmarshalKey("delegationbackends", &backends); err != nil {
+		return nil, fmt.Errorf("failed to parse delegationbackends config: %w", err)
 	}
 
 	for _, bc := range backends {
@@ -88,7 +88,7 @@ func LookupDelegationBackend(name string, kdb *KeyDB, zd *ZoneData) (DelegationB
 		}
 	}
 
-	return nil, fmt.Errorf("delegation backend %q not found in delegation-backends config", name)
+	return nil, fmt.Errorf("delegation backend %q not found in delegationbackends config", name)
 }
 
 // ExportDelegationData writes all delegation data for a parent zone to a file

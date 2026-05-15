@@ -80,7 +80,12 @@ childsync:                 # What to do when we are the child
 
 # Named delegation backends for parent zones that receive child UPDATEs.
 # Predefined: "db" and "direct" (no config needed).
-# delegation-backends:
+#
+# A zone that has 'allow-child-updates' MUST specify a 'delegationbackend:'.
+# Without one the read path (scanner) and write path (zone updater) disagree
+# on where current delegation data lives, and DS/NS records accumulate
+# without ever being removed.
+# delegationbackends:
 #   - name:       files-dnslab
 #     type:       zonefile
 #     directory:  /var/lib/tdns/delegations/dnslab
