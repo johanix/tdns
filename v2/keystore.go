@@ -563,6 +563,13 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		resp.Msg = fmt.Sprintf("Deleted %d keys for zone %s. Generated: %s. Standby keys will follow via KeyStateWorker.",
 			count, kp.Zone, strings.Join(generated, ", "))
 
+	case "purge":
+		purgeResp, err := kdb.dnssecKeyPurge(tx, kp)
+		if err != nil {
+			return purgeResp, err
+		}
+		resp = *purgeResp
+
 	default:
 		resp.Msg = fmt.Sprintf("Unknown keystore dnssec sub-command: %s", kp.SubCommand)
 		lgSigner.Warn("unknown DnssecKeyMgmt subcommand", "subcommand", kp.SubCommand)
@@ -572,6 +579,149 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 
 	txSuccess = true
 	return &resp, nil
+}
+
+// dnssecKeyPurge deletes DNSKEY keystore rows in state 'removed', keeping
+// the 3 most recent per zone (highest auto-increment id). When kp.Zone is
+// "all" (case-insensitive), every zone with removed keys is processed.
+// kp.Force=false means dry-run: the rows that would be deleted are
+// returned in resp.Dnskeys but no DELETE runs.
+//
+// Ordering by id (rather than a transition timestamp) is pragmatic — the
+// DnssecKeyStore schema has no removed_at column, but in a normal
+// KSK-rollover lifecycle keys are removed in creation order, so the
+// highest 3 ids among removed keys are exactly the most recent.
+func (kdb *KeyDB) dnssecKeyPurge(tx *Tx, kp KeystorePost) (*KeystoreResponse, error) {
+	const keepN = 3
+
+	resp := &KeystoreResponse{Time: time.Now()}
+
+	// Resolve target zone list.
+	var zones []string
+	if strings.EqualFold(strings.TrimSpace(kp.Zone), "all") {
+		rows, err := tx.Query(
+			`SELECT DISTINCT zonename FROM DnssecKeyStore WHERE state=? ORDER BY zonename`,
+			DnskeyStateRemoved)
+		if err != nil {
+			return resp, fmt.Errorf("dnssecKeyPurge: list zones: %w", err)
+		}
+		for rows.Next() {
+			var z string
+			if err := rows.Scan(&z); err != nil {
+				rows.Close()
+				return resp, fmt.Errorf("dnssecKeyPurge: scan zone: %w", err)
+			}
+			zones = append(zones, z)
+		}
+		rows.Close()
+	} else {
+		if kp.Zone == "" {
+			resp.Error = true
+			resp.ErrorMsg = "zone is required for purge (use 'all' to purge every zone)"
+			return resp, fmt.Errorf("%s", resp.ErrorMsg)
+		}
+		zones = []string{kp.Zone}
+	}
+
+	purged := map[string]DnssecKey{}
+	deletedCount := 0
+	zonesAffected := 0
+
+	for _, zone := range zones {
+		// Find the ids to keep: 3 most recent removed keys for this zone.
+		rows, err := tx.Query(
+			`SELECT id FROM DnssecKeyStore WHERE zonename=? AND state=? ORDER BY id DESC LIMIT ?`,
+			zone, DnskeyStateRemoved, keepN)
+		if err != nil {
+			return resp, fmt.Errorf("dnssecKeyPurge: keep query for %s: %w", zone, err)
+		}
+		var keepIDs []int
+		for rows.Next() {
+			var id int
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				return resp, fmt.Errorf("dnssecKeyPurge: scan keep id for %s: %w", zone, err)
+			}
+			keepIDs = append(keepIDs, id)
+		}
+		rows.Close()
+
+		// Build the "NOT IN (?,?,?)" clause and arg list. With fewer than
+		// keepN removed keys for this zone, the clause collapses to a no-op
+		// and there's nothing to purge for that zone.
+		args := []interface{}{zone, DnskeyStateRemoved}
+		notInClause := ""
+		if len(keepIDs) > 0 {
+			placeholders := make([]string, len(keepIDs))
+			for i, id := range keepIDs {
+				placeholders[i] = "?"
+				args = append(args, id)
+			}
+			notInClause = " AND id NOT IN (" + strings.Join(placeholders, ",") + ")"
+		}
+
+		// Collect the to-be-purged keys for the response (for both dry-run
+		// and commit — operators want to see what was/will be deleted).
+		listSQL := `SELECT keyid, flags, algorithm, keyrr FROM DnssecKeyStore WHERE zonename=? AND state=?` + notInClause
+		listRows, err := tx.Query(listSQL, args...)
+		if err != nil {
+			return resp, fmt.Errorf("dnssecKeyPurge: list query for %s: %w", zone, err)
+		}
+		zonePurgedCount := 0
+		for listRows.Next() {
+			var keyid, flags int
+			var algorithm, keyrr string
+			if err := listRows.Scan(&keyid, &flags, &algorithm, &keyrr); err != nil {
+				listRows.Close()
+				return resp, fmt.Errorf("dnssecKeyPurge: scan key for %s: %w", zone, err)
+			}
+			mapkey := fmt.Sprintf("%s::%d", zone, keyid)
+			purged[mapkey] = DnssecKey{
+				Name:      zone,
+				State:     DnskeyStateRemoved,
+				Flags:     uint16(flags),
+				Algorithm: algorithm,
+				Keystr:    keyrr,
+			}
+			zonePurgedCount++
+		}
+		listRows.Close()
+		if zonePurgedCount > 0 {
+			zonesAffected++
+		}
+
+		if !kp.Force {
+			continue // dry-run: don't actually delete
+		}
+
+		// Commit path: delete the rows + invalidate caches for this zone.
+		delSQL := `DELETE FROM DnssecKeyStore WHERE zonename=? AND state=?` + notInClause
+		res, err := tx.Exec(delSQL, args...)
+		if err != nil {
+			return resp, fmt.Errorf("dnssecKeyPurge: delete for %s: %w", zone, err)
+		}
+		n, _ := res.RowsAffected()
+		deletedCount += int(n)
+
+		kdb.mu.Lock()
+		for cacheKey := range kdb.KeystoreDnskeyCache {
+			if strings.HasPrefix(cacheKey, zone+"+") {
+				delete(kdb.KeystoreDnskeyCache, cacheKey)
+			}
+		}
+		kdb.mu.Unlock()
+	}
+
+	resp.Dnskeys = purged
+	if kp.Force {
+		resp.Msg = fmt.Sprintf("Purged %d removed key(s) across %d zone(s) (kept %d most recent per zone).",
+			deletedCount, zonesAffected, keepN)
+		lgSigner.Info("dnssec keystore purge", "deleted", deletedCount, "zones", zonesAffected)
+	} else {
+		resp.Msg = fmt.Sprintf("DRY RUN: would purge %d removed key(s) across %d zone(s) (keeping %d most recent per zone). Pass --force to actually delete.",
+			len(purged), zonesAffected, keepN)
+	}
+	return resp, nil
 }
 
 func (kdb *KeyDB) GetSig0Keys(zonename, state string) (*Sig0ActiveKeys, error) {
