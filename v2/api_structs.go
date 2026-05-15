@@ -29,6 +29,7 @@ type KeystorePost struct {
 	State           string
 	ParentState     uint8
 	Creator         string
+	Force           bool // commit destructive operation; otherwise dry-run (used by 'purge')
 }
 
 type KeystoreResponse struct {
