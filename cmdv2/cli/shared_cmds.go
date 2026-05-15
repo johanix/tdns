@@ -40,8 +40,8 @@ func init() {
 	rootCmd.AddCommand(cli.NewConfigCmd("auth"))
 	cli.AgentCmd.AddCommand(cli.NewConfigCmd("agent"))
 
-	// From ../tdns/cli/generate_cmds.go:
-	rootCmd.AddCommand(cli.GenerateCmd)
+	// From ../tdns/cli/generate_cmds.go: daemon-agnostic record syntax helpers
+	cli.UtilCmd.AddCommand(cli.GenerateCmd)
 
 	// From ../tdns/cli/notify_cmds.go:
 	rootCmd.AddCommand(cli.NotifyCmd)
@@ -55,8 +55,9 @@ func init() {
 	// From ../tdns/cli/agent_cmds.go:
 	rootCmd.AddCommand(cli.AgentCmd)
 
-	// Root-level keys (generate JOSE for agent/combiner; no config required)
-	rootCmd.AddCommand(cli.RootKeysCmd)
+	// JOSE key generation utility: 'util keys generate'. No config required
+	// (intentionally; that's why it sits under util rather than agent/combiner).
+	cli.UtilCmd.AddCommand(cli.RootKeysCmd)
 
 	// From ../tdns/cli/jose_keys_cmds.go: agent/combiner keys (generate, show) — under agent/combiner, uses config
 	cli.AgentCmd.AddCommand(cli.NewKeysCmd("agent"))
@@ -66,8 +67,8 @@ func init() {
 	// Agent uses AgentZoneCmd (wired in cli/agent_zone_cmds.go).
 	// Combiner uses combinerZoneCmd (wired in cli/legacy_combiner_edits_cmds.go).
 
-	// From ../tdns/cli/base32_cmds.go
-	rootCmd.AddCommand(cli.Base32Cmd)
+	// From ../tdns/cli/base32_cmds.go: daemon-agnostic encode/decode helper
+	cli.UtilCmd.AddCommand(cli.Base32Cmd)
 
 	// From ../tdns/cli/scanner_cmds.go:
 	rootCmd.AddCommand(cli.ScannerCmd)
@@ -78,8 +79,11 @@ func init() {
 	// From ../tdns/cli/auth_cmds.go:
 	rootCmd.AddCommand(cli.AuthCmd)
 
-	// From ../tdns/cli/jwt_cmds.go:
-	rootCmd.AddCommand(cli.JwtCmd)
+	// From ../tdns/cli/jwt_cmds.go: daemon-agnostic JWT inspection
+	cli.UtilCmd.AddCommand(cli.JwtCmd)
+
+	// Synthetic 'util' parent itself (must be added once, after children).
+	rootCmd.AddCommand(cli.UtilCmd)
 
 	// distrib_cmds.go and transaction_cmds.go live in tdns-mp/v2/cli;
 	// their endpoints are only served by mp daemons, so they are wired
