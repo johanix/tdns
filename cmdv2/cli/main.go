@@ -14,7 +14,7 @@ import (
 	_ "github.com/johanix/tdns/v2/core" // Import for RR type registration
 )
 
-// Register the PQ algorithm names as metadata only. cliv2 doesn't
+// Register the PQ algorithm names as metadata only. tdns-cli doesn't
 // sign or verify; it just builds API requests against tdns server
 // binaries and needs to recognize the algorithm names + codepoints
 // so CLI argument validation works. The actual crypto stays out of
@@ -23,10 +23,10 @@ import (
 // Keep these codepoints in sync with what the server binaries
 // register in their own init() functions.
 func init() {
-	algs.RegisterMetadata(199, "MLDSA44",     algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
-	algs.RegisterMetadata(200, "SLHDSA128S",  algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
-	algs.RegisterMetadata(201, "FALCON512",   algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
-	algs.RegisterMetadata(202, "MAYO1",       algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.RegisterMetadata(199, "MLDSA44", algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.RegisterMetadata(200, "SLHDSA128S", algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.RegisterMetadata(201, "FALCON512", algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.RegisterMetadata(202, "MAYO1", algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
 	algs.RegisterMetadata(203, "SNOVA24_5_4", algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
 }
 

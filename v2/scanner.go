@@ -232,8 +232,22 @@ func ScannerEngine(ctx context.Context, conf *Config) error {
 						Zone: sr.ChildZone,
 					}
 
-					// Fetch current DS from delegation backend for comparison
-					if sr.ZoneData != nil && sr.ZoneData.DelegationBackend != nil {
+					// Fetch current DS from delegation backend for comparison.
+					// A parent zone that accepts child updates MUST have a
+					// DelegationBackend (enforced at config-validation time).
+					// Without it the scanner has no way to know the current
+					// DS state, so every CDS-NOTIFY would look like a fresh
+					// delegation and DS records would accumulate without
+					// ever being removed.
+					if sr.ZoneData == nil {
+						lg.Error("ScannerEngine: no ZoneData on scan request, cannot compute current delegation state", "child", sr.ChildZone)
+					} else if sr.ZoneData.DelegationBackend == nil {
+						if sr.ZoneData.Options[OptAllowChildUpdates] {
+							lg.Error("ScannerEngine: zone allows child updates but has no DelegationBackend; diff against empty current state will produce spurious adds (invariant violation)", "child", sr.ChildZone, "parent", sr.ZoneData.ZoneName)
+						} else {
+							lg.Warn("ScannerEngine: parent zone has no DelegationBackend, cannot read current DS for diff", "child", sr.ChildZone, "parent", sr.ZoneData.ZoneName)
+						}
+					} else {
 						delegData, err := sr.ZoneData.DelegationBackend.GetDelegationData(sr.ZoneData.ZoneName, sr.ChildZone)
 						if err != nil {
 							lg.Warn("ScannerEngine: error fetching delegation data", "child", sr.ChildZone, "error", err)
@@ -819,9 +833,22 @@ func (scanner *Scanner) ProcessCSYNCNotify(ctx context.Context, tuple ScanTuple,
 		return
 	}
 
-	// Get current delegation data from backend
+	// Get current delegation data from backend. A parent zone that
+	// accepts child updates MUST have a DelegationBackend (enforced at
+	// config-validation time). Without one, NS/glue diffs would be
+	// computed against an empty current state and spurious adds would
+	// accumulate (the same class of bug as DS accumulation on CDS).
 	var delegationData map[string]map[uint16][]dns.RR
-	if parentZD.DelegationBackend != nil {
+	if parentZD.DelegationBackend == nil {
+		if parentZD.Options[OptAllowChildUpdates] {
+			scanLog.Printf("ProcessCSYNCNotify: %s: parent zone %s allows child updates but has no DelegationBackend; refusing to compute diff against empty current state (invariant violation)", childZone, parentZD.ZoneName)
+			response.Error = true
+			response.ErrorMsg = "parent zone has no DelegationBackend"
+			responseCh <- response
+			return
+		}
+		scanLog.Printf("ProcessCSYNCNotify: %s: parent zone %s has no DelegationBackend, proceeding with empty current state", childZone, parentZD.ZoneName)
+	} else {
 		delegationData, err = parentZD.DelegationBackend.GetDelegationData(parentZD.ZoneName, childZone)
 		if err != nil {
 			scanLog.Printf("ProcessCSYNCNotify: %s: error fetching delegation data: %v", childZone, err)

@@ -186,7 +186,7 @@ type ZoneConf struct {
 	Frozen            bool         // true if zone is frozen; not a config param
 	Dirty             bool         // true if zone has been modified; not a config param
 	UpdatePolicy      UpdatePolicyConf
-	DelegationBackend string    `yaml:"delegation-backend" mapstructure:"delegation-backend"` // named backend for child delegation data
+	DelegationBackend string    `yaml:"delegationbackend" mapstructure:"delegationbackend"` // named backend for child delegation data
 	DnssecPolicy      string    `yaml:"dnssecpolicy" mapstructure:"dnssecpolicy"`
 	Template          string    `yaml:"template" mapstructure:"template"`
 	MultiSigner       string    `yaml:"multisigner" mapstructure:"multisigner"`

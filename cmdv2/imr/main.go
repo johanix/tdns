@@ -20,10 +20,10 @@ import (
 )
 
 func init() {
-	algs.Register(199, mldsa44.New(),     algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
-	algs.Register(200, slhdsa128s.New(),  algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
-	algs.Register(201, falcon512.New(),   algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
-	algs.Register(202, mayo1.New(),       algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.Register(199, mldsa44.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.Register(200, slhdsa128s.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.Register(201, falcon512.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.Register(202, mayo1.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
 	algs.Register(203, snova24_5_4.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
 }
 

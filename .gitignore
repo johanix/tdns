@@ -20,11 +20,11 @@ cmd/imr/tdns-imr
 cmd/cli/tdns-cli
 cmd/dog/dog
 
-cmdv2/authv2/tdns-authv2
-cmdv2/cliv2/tdns-cliv2
-cmdv2/dogv2/dogv2
-cmdv2/imrv2/tdns-imrv2
-cmdv2/agentv2/tdns-agentv2
+cmdv2/auth/tdns-auth
+cmdv2/cli/tdns-cli
+cmdv2/dog/dog
+cmdv2/imr/tdns-imr
+cmdv2/agent/tdns-agent
 
 # old stuff; going away:
 sidecar/music-sidecar

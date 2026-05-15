@@ -628,6 +628,19 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			continue
 		}
 
+		// A zone that accepts child updates MUST have a delegation backend.
+		// Without one, the write path mutates in-memory zone data while the
+		// scanner read path queries the (nil) backend, so diff computation
+		// always sees "empty current state" and child updates accumulate
+		// without ever being removed. Refuse to start such a zone rather
+		// than letting it silently misbehave.
+		if options[OptAllowChildUpdates] && zconf.DelegationBackend == "" {
+			lgConfig.Error("zone has 'allow-child-updates' but no 'delegationbackend' configured, zone in error state", "zone", zname)
+			zd.SetError(ConfigError, "allow-child-updates requires delegationbackend to be configured (e.g. 'delegationbackend: direct')")
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+
 		switch zconf.UpdatePolicy.Zone.Type {
 		case "selfsub", "self":
 			// all ok, we know these
@@ -738,27 +751,71 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 
 		invokeOptionHandlers(zname, options)
 
-		if zdp.FirstZoneLoad {
-			lgConfig.Info("considering OnFirstLoad callbacks", "zone", zname,
-				"online-signing", options[OptOnlineSigning],
-				"inline-signing", options[OptInlineSigning],
-				"multi-provider", options[OptMultiProvider],
-				"apptype", AppTypeToString[Globals.App.Type])
+		// Wire the delegation backend synchronously on every parse pass
+		// (initial load + reload). Backend constructors don't touch zone
+		// data, so this works before FirstZoneLoad has completed.
+		// Config validation above guarantees that OptAllowChildUpdates
+		// implies a non-empty zconf.DelegationBackend.
+		if options[OptAllowChildUpdates] {
+			kdb := conf.Internal.KeyDB
+			if kdb == nil {
+				lgConfig.Error("KeyDB unavailable, cannot wire delegation backend", "zone", zname)
+				zd.SetError(ConfigError, "KeyDB unavailable")
+				broken_zones = append(broken_zones, zname)
+				continue
+			}
+			backend, err := LookupDelegationBackend(zconf.DelegationBackend, kdb, zdp)
+			if err != nil {
+				lgConfig.Error("failed to create delegation backend, zone in error state", "zone", zname, "backend", zconf.DelegationBackend, "error", err)
+				zd.SetError(ConfigError, "delegationbackend %q: %v", zconf.DelegationBackend, err)
+				broken_zones = append(broken_zones, zname)
+				continue
+			}
+			zdp.mu.Lock()
+			zdp.DelegationBackend = backend
+			zdp.mu.Unlock()
+			lgConfig.Info("delegation backend wired", "zone", zname, "backend", backend.Name())
+		} else {
+			// Reload may have cleared OptAllowChildUpdates; drop any
+			// previously-wired backend so the live state matches config.
+			zdp.mu.Lock()
+			zdp.DelegationBackend = nil
+			zdp.mu.Unlock()
+		}
 
-			// Signing callback: zones with explicit signing options in config
-			if options[OptOnlineSigning] || options[OptInlineSigning] {
+		lgConfig.Info("evaluating zone option flags", "zone", zname,
+			"online-signing", options[OptOnlineSigning],
+			"inline-signing", options[OptInlineSigning],
+			"multi-provider", options[OptMultiProvider],
+			"firstLoad", zdp.FirstZoneLoad,
+			"apptype", AppTypeToString[Globals.App.Type])
+
+		// Condition checks are evaluated on every parse pass (initial +
+		// reload) so config-reload picks up flag changes. The setup
+		// functions need the zone to be loaded; on initial load we defer
+		// via OnFirstLoad, on reload (zone already loaded) we call them
+		// directly. The setup functions are idempotent.
+
+		// Signing setup: zones with explicit signing options in config.
+		if options[OptOnlineSigning] || options[OptInlineSigning] {
+			if zdp.FirstZoneLoad {
 				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
 					if err := zd.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
 						lgConfig.Error("SetupZoneSigning failed in OnFirstLoad", "zone", zd.ZoneName, "error", err)
 					}
 				})
+			} else {
+				if err := zdp.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
+					lgConfig.Error("SetupZoneSigning failed on reload", "zone", zname, "error", err)
+				}
 			}
+		}
 
-			// Rollover policy validation callback: at first zone load,
-			// run E5 immediately (it doesn't need the parent's DS TTL),
-			// then issue an asynchronous parent-DS query so E10/E11 can
-			// run as soon as the observation comes back. This is W2 of
-			// the rollover-timing-fixes plan.
+		// Rollover policy validation: requires loaded zone data. Only
+		// registered on first load; the ObserveParentDSTTL goroutine it
+		// spawns is long-running and re-spawning on reload would leak.
+		// (See follow-up: make rollover setup reload-safe.)
+		if zdp.FirstZoneLoad {
 			zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
 				if zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method == RolloverMethodNone {
 					return
@@ -768,51 +825,43 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				// goroutine cancels on daemon shutdown.
 				go ObserveParentDSTTL(ctx, zd, zd.DnssecPolicy)
 			})
-
-			// Delegation sync callback: set up DSYNC publication (parent) or
-			// delegation sync monitoring (child) after zone is loaded.
-			if options[OptDelSyncParent] || options[OptDelSyncChild] {
-				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
-					// Skip if the MP HSYNCPARAM callback already set up delegation sync for this zone.
-					if zd.Options[OptDelSyncChild] && !options[OptDelSyncChild] {
-						return
-					}
-					if zd.Options[OptDelSyncParent] && !options[OptDelSyncParent] {
-						return
-					}
-					delegationSyncQ := conf.Internal.DelegationSyncQ
-					if delegationSyncQ == nil {
-						lgConfig.Error("DelegationSyncQ not available in OnFirstLoad", "zone", zd.ZoneName)
-						return
-					}
-					if err := zd.SetupZoneSync(delegationSyncQ); err != nil {
-						lgConfig.Error("SetupZoneSync failed in OnFirstLoad", "zone", zd.ZoneName, "error", err)
-					}
-				})
-			}
-
-			// Parent delegation backend: initialize on parent zones that accept child updates.
-			if options[OptDelSyncParent] && options[OptAllowChildUpdates] && zconf.DelegationBackend != "" {
-				backendName := zconf.DelegationBackend
-				kdb := conf.Internal.KeyDB
-				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
-					if kdb == nil {
-						return
-					}
-					backend, err := LookupDelegationBackend(backendName, kdb, zd)
-					if err != nil {
-						lgConfig.Error("failed to create delegation backend", "zone", zd.ZoneName, "backend", backendName, "error", err)
-						return
-					}
-					zd.DelegationBackend = backend
-					lgConfig.Info("delegation backend initialized", "zone", zd.ZoneName, "backend", backend.Name())
-				})
-			}
-
-			// Leader election OnFirstLoad is registered in StartAgent() (not here)
-			// because LeaderElectionManager doesn't exist until StartAgent runs.
-			// MP zone KEY publication is registered in tdns-mp's StartAgent.
 		}
+
+		// Delegation sync setup: DSYNC publication (parent) or
+		// delegation sync monitoring (child).
+		if options[OptDelSyncParent] || options[OptDelSyncChild] {
+			capturedOpts := options
+			setupSync := func(zd *ZoneData) {
+				// Skip if the MP HSYNCPARAM callback already set up delegation sync for this zone.
+				if zd.Options[OptDelSyncChild] && !capturedOpts[OptDelSyncChild] {
+					return
+				}
+				if zd.Options[OptDelSyncParent] && !capturedOpts[OptDelSyncParent] {
+					return
+				}
+				delegationSyncQ := conf.Internal.DelegationSyncQ
+				if delegationSyncQ == nil {
+					lgConfig.Error("DelegationSyncQ not available", "zone", zd.ZoneName)
+					return
+				}
+				if err := zd.SetupZoneSync(delegationSyncQ); err != nil {
+					lgConfig.Error("SetupZoneSync failed", "zone", zd.ZoneName, "error", err)
+				}
+			}
+			if zdp.FirstZoneLoad {
+				zdp.OnFirstLoad = append(zdp.OnFirstLoad, setupSync)
+			} else {
+				setupSync(zdp)
+			}
+		}
+
+		// Note: DelegationBackend wiring is done synchronously above,
+		// outside the FirstZoneLoad guard, so config-reload picks up
+		// changes to the 'delegationbackend' key.
+
+		// Leader election OnFirstLoad is registered in StartAgent() (not here)
+		// because LeaderElectionManager doesn't exist until StartAgent runs.
+		// MP zone KEY publication is registered in tdns-mp's StartAgent.
 
 		switch Globals.App.Type {
 		case AppTypeAuth, AppTypeAgent, // AppTypeCombiner,

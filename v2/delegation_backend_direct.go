@@ -20,8 +20,35 @@ type DirectDelegationBackend struct {
 func (b *DirectDelegationBackend) Name() string { return "direct" }
 
 func (b *DirectDelegationBackend) ApplyChildUpdate(parentZone string, ur UpdateRequest) error {
-	_, err := b.zd.ApplyChildUpdateToZoneData(ur, b.kdb)
-	return err
+	updated, err := b.zd.ApplyChildUpdateToZoneData(ur, b.kdb)
+	if err != nil {
+		return err
+	}
+	if !updated {
+		return nil
+	}
+	// Persist to source zonefile so accumulated child updates survive a
+	// restart. Without this, every CHILD-UPDATE only mutates RAM, gets
+	// lost on next start, and the scanner re-discovers the "missing"
+	// delegation on first NOTIFY — re-accumulating from scratch. The
+	// in-memory mutation set OptDirty; WriteZone clears it on success.
+	if b.zd.Zonefile == "" {
+		lg.Debug("DirectDelegationBackend: no source zonefile, skipping persist", "zone", b.zd.ZoneName)
+		return nil
+	}
+	msg, werr := b.zd.WriteZone(true, false)
+	if werr != nil {
+		// Propagate the persistence failure. The in-memory state did
+		// receive the update, but the zonefile didn't — and if the
+		// daemon restarts before the next successful update lands, the
+		// change is lost on reload and the scanner will rediscover the
+		// "missing" delegation and re-accumulate. Surface the error
+		// upstream so operators see it and can act.
+		lg.Warn("DirectDelegationBackend: failed to persist zone after CHILD-UPDATE", "zone", b.zd.ZoneName, "file", b.zd.Zonefile, "error", werr)
+		return fmt.Errorf("persist zone after CHILD-UPDATE: %w", werr)
+	}
+	lg.Info("DirectDelegationBackend: persisted zone after CHILD-UPDATE", "zone", b.zd.ZoneName, "msg", msg)
+	return nil
 }
 
 func (b *DirectDelegationBackend) GetDelegationData(parentZone, childZone string) (map[string]map[uint16][]dns.RR, error) {
