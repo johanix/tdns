@@ -104,6 +104,11 @@ resolver:
 # Two predefined backends need no config: "db" and "direct".
 # Named backends are only needed for types that require parameters.
 # Zones reference backends by name via "delegation-backend: <name>".
+#
+# A zone that has 'allow-child-updates' MUST specify a 'delegation-backend:'.
+# Without one the read path (scanner) and write path (zone updater) disagree
+# on where current delegation data lives, and DS/NS records accumulate
+# without ever being removed.
 delegation-backends:
    - name:		files-dnslab
      type:		zonefile
