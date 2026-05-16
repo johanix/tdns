@@ -254,6 +254,19 @@ func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq ImrRequest) {
 		imr.DebugLog.Printf("QUERY qname=%s qtype=%s", rrq.Qname, dns.TypeToString[rrq.Qtype])
 	}
 
+	// Bounded, ctx-aware send. We're a per-request goroutine now, so
+	// a slow or abandoned consumer must not pin us forever. 2s is the
+	// same ceiling the original engine-loop send used.
+	sendResp := func(r ImrResponse) {
+		select {
+		case rrq.ResponseCh <- r:
+		case <-ctx.Done():
+			lgImr.Warn("handleRecursorRequest: ctx cancelled before response delivered", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
+		case <-time.After(2 * time.Second):
+			lgImr.Warn("handleRecursorRequest: timed out sending response", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
+		}
+	}
+
 	var resp *ImrResponse
 
 	crrset := imr.Cache.Get(rrq.Qname, rrq.Qtype)
@@ -273,13 +286,13 @@ func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq ImrRequest) {
 					cache.CacheContextToString[crrset.Context], rrs)
 			}
 			resp = &ImrResponse{RRset: crrset.RRset}
-			rrq.ResponseCh <- *resp
+			sendResp(*resp)
 			return
 		case cache.ContextReferral, cache.ContextGlue, cache.ContextHint:
 			if !imr.upgradeIndirectCacheHits() && crrset.RRset != nil && crrset.RRset.RRtype == rrq.Qtype {
 				lgImr.Debug("returning cached indirect data (UpgradeIndirectCacheHits=false)", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
 				resp = &ImrResponse{RRset: crrset.RRset}
-				rrq.ResponseCh <- *resp
+				sendResp(*resp)
 				return
 			}
 			lgImr.Debug("cache hit but indirect context, issuing direct query", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
@@ -306,7 +319,7 @@ func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq ImrRequest) {
 			ErrorMsg: "ImrEngine: no response from ImrQuery",
 		}
 	}
-	rrq.ResponseCh <- *resp
+	sendResp(*resp)
 }
 
 // upgradeIndirectCacheHits reports whether cache hits whose context
