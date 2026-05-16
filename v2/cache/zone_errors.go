@@ -88,6 +88,34 @@ func (z *Zone) IsZoneAddressAvailable(addr string) bool {
 	return time.Now().After(backoff.NextTry)
 }
 
+// SnapshotAddressBackoffs returns a copy of the zone's address-backoff
+// map containing only entries whose NextTry is still in the future.
+// Mirrors AuthServer.SnapshotAddressBackoffs. Thread-safe.
+func (z *Zone) SnapshotAddressBackoffs(now time.Time) map[string]*AddressBackoff {
+	if z == nil {
+		return nil
+	}
+	z.mu.Lock()
+	defer z.mu.Unlock()
+	if len(z.AddressBackoffs) == 0 {
+		return nil
+	}
+	snap := make(map[string]*AddressBackoff)
+	for addr, backoff := range z.AddressBackoffs {
+		if backoff.NextTry.After(now) {
+			snap[addr] = &AddressBackoff{
+				NextTry:      backoff.NextTry,
+				FailureCount: backoff.FailureCount,
+				LastError:    backoff.LastError,
+			}
+		}
+	}
+	if len(snap) == 0 {
+		return nil
+	}
+	return snap
+}
+
 // RecordZoneAddressSuccess clears any zone-specific backoff for the given address.
 // Thread-safe: acquires mu lock.
 func (z *Zone) RecordZoneAddressSuccess(addr string) {

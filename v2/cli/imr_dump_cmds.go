@@ -271,6 +271,117 @@ var dumpZoneCmd = &cobra.Command{
 	Short: "Zone-specific dumps",
 }
 
+var dumpZoneBackoffsCmd = &cobra.Command{
+	Use:   "backoffs [zone]",
+	Short: "Show zone-scoped lame-delegation backoffs (per zone, per address)",
+	Long: `List addresses currently in backoff per zone. These are recorded
+when a server returns REFUSED / NOTAUTH / SERVFAIL / NOTIMP for a
+specific zone (i.e. likely lame delegation). Distinct from the
+server-wide backoffs shown by "auth-servers errors".
+
+With no zone argument: dumps every zone that has any backoffs.
+With a zone argument: dumps just that zone.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		if Conf.Internal.RRsetCache == nil {
+			fmt.Println("RRsetCache is nil")
+			return
+		}
+		var filter string
+		if len(args) == 1 {
+			filter = dns.Fqdn(args[0])
+		}
+
+		now := time.Now()
+		type zoneEntry struct {
+			zoneName string
+			zone     *cache.Zone
+			backoffs map[string]*cache.AddressBackoff
+		}
+		var entries []zoneEntry
+		for item := range Conf.Internal.RRsetCache.ZoneMap.IterBuffered() {
+			if filter != "" && item.Key != filter {
+				continue
+			}
+			b := item.Val.SnapshotAddressBackoffs(now)
+			if len(b) == 0 {
+				continue
+			}
+			entries = append(entries, zoneEntry{zoneName: item.Key, zone: item.Val, backoffs: b})
+		}
+
+		if len(entries) == 0 {
+			if filter != "" {
+				fmt.Printf("No zone-scoped backoffs for %s\n", filter)
+			} else {
+				fmt.Println("No zone-scoped backoffs recorded.")
+			}
+			return
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			return lessByReverseLabels(entries[i].zoneName, entries[j].zoneName)
+		})
+		fmt.Println("Zone | Address | Backoff Time | Failures | Error")
+		fmt.Println(strings.Repeat("-", 80))
+		for _, e := range entries {
+			addrs := make([]string, 0, len(e.backoffs))
+			for a := range e.backoffs {
+				addrs = append(addrs, a)
+			}
+			sort.Strings(addrs)
+			for _, addr := range addrs {
+				b := e.backoffs[addr]
+				remaining := b.NextTry.Sub(now)
+				if remaining < 0 {
+					remaining = 0
+				}
+				errMsg := "-"
+				if b.LastError != "" {
+					errMsg = b.LastError
+				}
+				fmt.Printf("%s | %s | retry in %s | %d | %s\n",
+					e.zoneName, addr, formatDuration(remaining), b.FailureCount, errMsg)
+			}
+		}
+	},
+}
+
+var dumpTuningCmd = &cobra.Command{
+	Use:   "tuning",
+	Short: "Show effective IMR tuning values (backoff policy, family, discovery, etc.)",
+	Run: func(cmd *cobra.Command, args []string) {
+		p := cache.GetBackoffPolicy()
+		t := Conf.Imr.Tuning
+		fmt.Println("Backoff policy (effective):")
+		fmt.Printf("  first_failure   : %s\n", p.FirstFailure)
+		fmt.Printf("  max_failure     : %s\n", p.MaxFailure)
+		fmt.Printf("  multiplier      : %.2f\n", p.Multiplier)
+		fmt.Printf("  jitter_fraction : %.2f\n", p.JitterFraction)
+		fmt.Printf("  routing_failure : %s\n", p.RoutingFailure)
+		fmt.Printf("  lame_delegation : %s\n", p.LameDelegation)
+		fmt.Println()
+		fmt.Println("Address-family tracker (config; W8 will activate):")
+		fmt.Printf("  window_duration   : %s\n", t.AddressFamily.WindowDuration)
+		fmt.Printf("  failure_threshold : %d\n", t.AddressFamily.FailureThreshold)
+		fmt.Printf("  suspect_duration  : %s\n", t.AddressFamily.SuspectDuration)
+		fmt.Printf("  probe_interval    : %s\n", t.AddressFamily.ProbeInterval)
+		fmt.Println()
+		fmt.Println("Discovery state machine (config; W9 will activate):")
+		fmt.Printf("  retry_after_failure : %s\n", t.Discovery.RetryAfterFailure)
+		fmt.Printf("  max_failures        : %d\n", t.Discovery.MaxFailures)
+		fmt.Println()
+		fmt.Printf("Per-query budget   : %s\n", t.QueryBudget)
+		upgradeStr := "true (legacy default)"
+		if t.UpgradeIndirectCacheHits != nil {
+			if *t.UpgradeIndirectCacheHits {
+				upgradeStr = "true (explicit)"
+			} else {
+				upgradeStr = "false (explicit) -- indirect cache hits returned without re-query"
+			}
+		}
+		fmt.Printf("Upgrade indirect cache hits: %s\n", upgradeStr)
+	},
+}
+
 var dumpZoneServersCmd = &cobra.Command{
 	Use:   "servers [zone]",
 	Short: "List auth servers for a specific zone (verbose)",
@@ -737,9 +848,9 @@ func formatDuration(d time.Duration) string {
 // It attaches dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd, dumpDnskeysCmd, dumpZoneCmd, and dumpZonesCmd to ImrDumpCmd, adds the keys/servers/errors subcommands under auth-servers, and attaches the zone servers subcommand under zone.
 func init() {
 	// rootCmd.AddCommand(ImrDumpCmd)
-	ImrDumpCmd.AddCommand(dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd, dumpDnskeysCmd, dumpZoneCmd, dumpZonesCmd)
+	ImrDumpCmd.AddCommand(dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd, dumpDnskeysCmd, dumpZoneCmd, dumpZonesCmd, dumpTuningCmd)
 	dumpAuthServersCmd.AddCommand(newDumpKeysCmd(), newDumpServersCmd(), dumpAuthServersErrorsCmd)
-	dumpZoneCmd.AddCommand(dumpZoneServersCmd)
+	dumpZoneCmd.AddCommand(dumpZoneServersCmd, dumpZoneBackoffsCmd)
 }
 
 func PrintCacheItem(item core.Tuple[string, cache.CachedRRset], suffix string) {
