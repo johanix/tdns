@@ -281,6 +281,7 @@ server-wide backoffs shown by "auth-servers errors".
 
 With no zone argument: dumps every zone that has any backoffs.
 With a zone argument: dumps just that zone.`,
+	Args: cobra.MaximumNArgs(1),
 	Run: func(cmd *cobra.Command, args []string) {
 		if Conf.Internal.RRsetCache == nil {
 			fmt.Println("RRsetCache is nil")
