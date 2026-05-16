@@ -10,14 +10,18 @@ import (
 	"strings"
 	"time"
 
+	cache "github.com/johanix/tdns/v2/cache"
 	"github.com/miekg/dns"
 )
 
-// APIagent handles the /agent management API endpoint.
-// After MP migration, only IMR commands remain here. All MP
-// commands (config, add-rr, resync, discover, etc.) are now
-// handled by tdns-mp's APIagent.
-func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
+// APIimr handles the /imr management API endpoint -- in-process IMR
+// inspection and control for tdns-agent, tdns-auth, and tdns-imr.
+// (This file used to be apihandler_agent.go and the endpoint used
+// to be /agent. After the MP migration only IMR commands remained
+// here, so the route and handler were renamed. tdns-mp keeps its
+// own /agent endpoint for MP-specific commands and now also exposes
+// /imr backed by an analogous APIimr handler.)
+func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
 		var amp AgentMgmtPost
@@ -165,8 +169,94 @@ func (conf *Config) APIagent(refreshZoneCh chan<- ZoneRefresher, kdb *KeyDB) fun
 			resp.Data = entries
 			resp.Msg = fmt.Sprintf("Found %d cache entries for identity %s", len(entries), identity)
 
+		case "imr-dump-tuning":
+			t := conf.Imr.Tuning
+			p := cache.GetBackoffPolicy()
+			upgradeStr := "true (legacy default)"
+			if t.UpgradeIndirectCacheHits != nil {
+				if *t.UpgradeIndirectCacheHits {
+					upgradeStr = "true (explicit)"
+				} else {
+					upgradeStr = "false (explicit)"
+				}
+			}
+			data := map[string]interface{}{
+				"backoff": map[string]interface{}{
+					"first_failure":   p.FirstFailure.String(),
+					"max_failure":     p.MaxFailure.String(),
+					"multiplier":      p.Multiplier,
+					"jitter_fraction": p.JitterFraction,
+					"routing_failure": p.RoutingFailure.String(),
+					"lame_delegation": p.LameDelegation.String(),
+				},
+				"address_family": map[string]interface{}{
+					"window_duration":   t.AddressFamily.WindowDuration.String(),
+					"failure_threshold": t.AddressFamily.FailureThreshold,
+					"suspect_duration":  t.AddressFamily.SuspectDuration.String(),
+					"probe_interval":    t.AddressFamily.ProbeInterval.String(),
+				},
+				"discovery": map[string]interface{}{
+					"retry_after_failure": t.Discovery.RetryAfterFailure.String(),
+					"max_failures":        t.Discovery.MaxFailures,
+				},
+				"query_budget":                t.QueryBudget.String(),
+				"upgrade_indirect_cache_hits": upgradeStr,
+			}
+			resp.Data = data
+			resp.Msg = "IMR tuning snapshot"
+
+		case "imr-dump-zone-backoffs":
+			imr := Globals.ImrEngine
+			if imr == nil || imr.Cache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "IMR engine not available"
+				return
+			}
+			zoneFilter, _ := amp.Data["zone"].(string)
+			if zoneFilter != "" {
+				zoneFilter = dns.Fqdn(zoneFilter)
+			}
+			now := time.Now()
+			type zoneRecord struct {
+				Zone    string `json:"zone"`
+				Address string `json:"address"`
+				NextTry string `json:"next_try"`
+				Remain  string `json:"remaining"`
+				Count   uint8  `json:"failure_count"`
+				Err     string `json:"last_error,omitempty"`
+			}
+			var records []zoneRecord
+			for item := range imr.Cache.ZoneMap.IterBuffered() {
+				if zoneFilter != "" && item.Key != zoneFilter {
+					continue
+				}
+				snap := item.Val.SnapshotAddressBackoffs(now)
+				for addr, b := range snap {
+					rem := b.NextTry.Sub(now)
+					if rem < 0 {
+						rem = 0
+					}
+					records = append(records, zoneRecord{
+						Zone: item.Key, Address: addr,
+						NextTry: b.NextTry.Format(time.RFC3339),
+						Remain:  rem.Truncate(time.Second).String(),
+						Count:   b.FailureCount, Err: b.LastError,
+					})
+				}
+			}
+			resp.Data = records
+			if len(records) == 0 {
+				if zoneFilter != "" {
+					resp.Msg = fmt.Sprintf("No zone-scoped backoffs for %s", zoneFilter)
+				} else {
+					resp.Msg = "No zone-scoped backoffs recorded"
+				}
+			} else {
+				resp.Msg = fmt.Sprintf("%d zone-scoped backoffs", len(records))
+			}
+
 		default:
-			resp.ErrorMsg = fmt.Sprintf("Unknown agent command: %s", amp.Command)
+			resp.ErrorMsg = fmt.Sprintf("Unknown IMR command: %s", amp.Command)
 			resp.Error = true
 		}
 	}

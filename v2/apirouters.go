@@ -66,6 +66,13 @@ func (conf *Config) SetupSimpleAPIRouter(ctx context.Context) (*mux.Router, erro
 	sr.HandleFunc("/config", APIconfig(conf)).Methods("POST")
 	sr.HandleFunc("/debug", APIdebug(conf)).Methods("POST")
 
+	// /imr: only registered on apps that actually host an IMR.
+	// SetupSimpleAPIRouter is used by tdns-imr (which does) and by
+	// tdns-scanner / tdns-reporter (which don't).
+	if Globals.App.Type == AppTypeImr {
+		sr.HandleFunc("/imr", conf.APIimr()).Methods("POST")
+	}
+
 	return rtr, nil
 }
 
@@ -113,9 +120,12 @@ func (conf *Config) SetupAPIRouter(ctx context.Context) (*mux.Router, error) {
 	// Auth peer routes removed — peer management is MP-only.
 	// For tdns-mp signer, routes are registered via SetupMPSignerRoutes.
 
-	if Globals.App.Type == AppTypeAgent {
-		sr.HandleFunc("/agent", conf.APIagent(conf.Internal.RefreshZoneCh, kdb)).Methods("POST")
-		// MP routes (/agent/distrib, /agent/transaction, /agent/debug) now registered by tdns-mp
+	// /imr: in-process IMR inspection and control. Available on every
+	// app that hosts an IMR -- tdns-agent, tdns-auth (and, via
+	// SetupSimpleAPIRouter, tdns-imr). MP-specific commands keep
+	// their own /agent endpoint, registered by tdns-mp.
+	if Globals.App.Type == AppTypeAgent || Globals.App.Type == AppTypeAuth {
+		sr.HandleFunc("/imr", conf.APIimr()).Methods("POST")
 	}
 	if Globals.App.Type == AppTypeScanner {
 		sr.HandleFunc("/scanner", APIscanner(conf, &Globals.App, conf.Internal.ScannerQ, kdb)).Methods("POST")
