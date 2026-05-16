@@ -285,13 +285,19 @@ func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq ImrRequest) {
 					rrq.Qname, dns.TypeToString[rrq.Qtype],
 					cache.CacheContextToString[crrset.Context], rrs)
 			}
-			resp = &ImrResponse{RRset: crrset.RRset}
+			resp = &ImrResponse{
+				RRset:     crrset.RRset,
+				Validated: crrset.State == cache.ValidationStateSecure,
+			}
 			sendResp(*resp)
 			return
 		case cache.ContextReferral, cache.ContextGlue, cache.ContextHint:
 			if !imr.upgradeIndirectCacheHits() && crrset.RRset != nil && crrset.RRset.RRtype == rrq.Qtype {
 				lgImr.Debug("returning cached indirect data (UpgradeIndirectCacheHits=false)", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
-				resp = &ImrResponse{RRset: crrset.RRset}
+				resp = &ImrResponse{
+					RRset:     crrset.RRset,
+					Validated: crrset.State == cache.ValidationStateSecure,
+				}
 				sendResp(*resp)
 				return
 			}
