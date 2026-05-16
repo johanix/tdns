@@ -41,12 +41,44 @@ var (
 	}
 )
 
-// SetBackoffPolicy replaces the active policy. Safe for concurrent
-// calls. Typically invoked once at IMR init.
+// SetBackoffPolicy replaces the active policy. The incoming policy
+// is sanitized first: nonsensical values (negative durations, zero
+// multiplier, MaxFailure < FirstFailure, jitter outside [0, 1)) are
+// silently replaced with the pre-call defaults for that field so a
+// misconfigured policy can never disable or invert the backoff
+// schedule at runtime. Safe for concurrent calls.
 func SetBackoffPolicy(p BackoffPolicy) {
 	backoffMu.Lock()
 	defer backoffMu.Unlock()
-	backoffPolicy = p
+	backoffPolicy = sanitizeBackoffPolicy(p, backoffPolicy)
+}
+
+// sanitizeBackoffPolicy returns a copy of p with invalid fields
+// replaced by the corresponding field from prev. Centralised so both
+// SetBackoffPolicy and tests share the same definition of "valid".
+func sanitizeBackoffPolicy(p, prev BackoffPolicy) BackoffPolicy {
+	if p.FirstFailure <= 0 {
+		p.FirstFailure = prev.FirstFailure
+	}
+	if p.MaxFailure <= 0 || p.MaxFailure < p.FirstFailure {
+		p.MaxFailure = prev.MaxFailure
+		if p.MaxFailure < p.FirstFailure {
+			p.MaxFailure = p.FirstFailure
+		}
+	}
+	if p.Multiplier <= 0 {
+		p.Multiplier = prev.Multiplier
+	}
+	if p.JitterFraction < 0 || p.JitterFraction >= 1 {
+		p.JitterFraction = prev.JitterFraction
+	}
+	if p.RoutingFailure <= 0 {
+		p.RoutingFailure = prev.RoutingFailure
+	}
+	if p.LameDelegation <= 0 {
+		p.LameDelegation = prev.LameDelegation
+	}
+	return p
 }
 
 // GetBackoffPolicy returns a copy of the active policy. Used by

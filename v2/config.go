@@ -340,51 +340,63 @@ type DiscoveryConf struct {
 	MaxFailures       int           `yaml:"max_failures" mapstructure:"max_failures"`
 }
 
-// LoadImrTuningDefaults fills zero-valued fields with sensible
-// defaults. Safe to call repeatedly. UpgradeIndirectCacheHits is
-// left nil intentionally — callers check nil-vs-explicit to
-// distinguish "use legacy behaviour" from an explicit toggle.
+// LoadImrTuningDefaults fills missing or invalid fields with sensible
+// defaults. Any non-positive duration, zero/negative integer count,
+// or out-of-range Multiplier / JitterFraction is treated as "unset"
+// and replaced. UpgradeIndirectCacheHits is left nil intentionally —
+// callers check nil-vs-explicit to distinguish "use legacy
+// behaviour" from an explicit toggle. Safe to call repeatedly.
 func LoadImrTuningDefaults(t *ImrTuningConf) {
 	if t == nil {
 		return
 	}
-	if t.Backoff.FirstFailure == 0 {
+	// Backoff
+	if t.Backoff.FirstFailure <= 0 {
 		t.Backoff.FirstFailure = 15 * time.Second
 	}
-	if t.Backoff.MaxFailure == 0 {
+	if t.Backoff.MaxFailure <= 0 {
 		t.Backoff.MaxFailure = 1 * time.Hour
 	}
-	if t.Backoff.Multiplier == 0 {
+	if t.Backoff.MaxFailure < t.Backoff.FirstFailure {
+		// Configured MaxFailure shorter than FirstFailure is nonsense;
+		// clamp upward so categorizeError can never produce a backoff
+		// shorter than the first-attempt baseline.
+		t.Backoff.MaxFailure = t.Backoff.FirstFailure
+	}
+	if t.Backoff.Multiplier <= 0 {
 		t.Backoff.Multiplier = 3.0
 	}
-	if t.Backoff.JitterFraction == 0 {
+	if t.Backoff.JitterFraction < 0 || t.Backoff.JitterFraction >= 1 {
 		t.Backoff.JitterFraction = 0.25
 	}
-	if t.Backoff.RoutingFailure == 0 {
+	if t.Backoff.RoutingFailure <= 0 {
 		t.Backoff.RoutingFailure = 1 * time.Hour
 	}
-	if t.Backoff.LameDelegation == 0 {
+	if t.Backoff.LameDelegation <= 0 {
 		t.Backoff.LameDelegation = 1 * time.Hour
 	}
-	if t.AddressFamily.WindowDuration == 0 {
+	// AddressFamily
+	if t.AddressFamily.WindowDuration <= 0 {
 		t.AddressFamily.WindowDuration = 10 * time.Minute
 	}
-	if t.AddressFamily.FailureThreshold == 0 {
+	if t.AddressFamily.FailureThreshold <= 0 {
 		t.AddressFamily.FailureThreshold = 5
 	}
-	if t.AddressFamily.SuspectDuration == 0 {
+	if t.AddressFamily.SuspectDuration <= 0 {
 		t.AddressFamily.SuspectDuration = 10 * time.Minute
 	}
-	if t.AddressFamily.ProbeInterval == 0 {
+	if t.AddressFamily.ProbeInterval <= 0 {
 		t.AddressFamily.ProbeInterval = 30 * time.Second
 	}
-	if t.Discovery.RetryAfterFailure == 0 {
+	// Discovery
+	if t.Discovery.RetryAfterFailure <= 0 {
 		t.Discovery.RetryAfterFailure = 30 * time.Second
 	}
-	if t.Discovery.MaxFailures == 0 {
+	if t.Discovery.MaxFailures <= 0 {
 		t.Discovery.MaxFailures = 3
 	}
-	if t.QueryBudget == 0 {
+	// QueryBudget
+	if t.QueryBudget <= 0 {
 		t.QueryBudget = 8 * time.Second
 	}
 }
