@@ -37,6 +37,11 @@ type Imr struct {
 	// a secure DNSSEC validation state. Default true; set false in lab environments where
 	// the full DNSSEC chain is not yet established.
 	RequireDnssecValidation bool
+	// Tuning is a snapshot of conf.Imr.Tuning taken at init time
+	// with defaults applied via LoadImrTuningDefaults. Subsequent
+	// work items read backoff / address-family / discovery /
+	// query-budget knobs from here.
+	Tuning ImrTuningConf
 }
 
 type ImrRequest struct {
@@ -98,6 +103,7 @@ func (conf *Config) InitImrEngine(quiet bool) error {
 	if conf.Imr.RequireDnssecValidation != nil {
 		requireDnssec = *conf.Imr.RequireDnssecValidation
 	}
+	LoadImrTuningDefaults(&conf.Imr.Tuning)
 	imr := &Imr{
 		Cache:                   rrcache,
 		DnskeyCache:             rrcache.DnskeyCache,
@@ -107,6 +113,7 @@ func (conf *Config) InitImrEngine(quiet bool) error {
 		Debug:                   conf.Imr.Debug,
 		Quiet:                   quiet,
 		RequireDnssecValidation: requireDnssec,
+		Tuning:                  conf.Imr.Tuning,
 	}
 
 	if conf.Imr.Logging.Enabled {

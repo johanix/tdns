@@ -287,6 +287,106 @@ type ImrEngineConf struct {
 	// indeterminate/insecure records during lab/development when the full DNSSEC
 	// chain is not yet established.
 	RequireDnssecValidation *bool `yaml:"require_dnssec_validation" mapstructure:"require_dnssec_validation"`
+	// Tuning holds runtime-tunable behaviour knobs (backoff, RTT,
+	// address-family tracking, discovery state, etc.). All fields
+	// are optional in YAML; LoadImrTuningDefaults fills zero values.
+	Tuning ImrTuningConf `yaml:"tuning" mapstructure:"tuning"`
+}
+
+// ImrTuningConf holds runtime-tunable behaviour knobs for the IMR.
+// Fields are exposed as YAML / mapstructure for config files;
+// LoadImrTuningDefaults fills zero values with sensible defaults so
+// callers can just embed an empty ImrTuningConf and have it work.
+type ImrTuningConf struct {
+	Backoff       BackoffConf       `yaml:"backoff" mapstructure:"backoff"`
+	AddressFamily AddressFamilyConf `yaml:"address_family" mapstructure:"address_family"`
+	Discovery     DiscoveryConf     `yaml:"discovery" mapstructure:"discovery"`
+	QueryBudget   time.Duration     `yaml:"query_budget" mapstructure:"query_budget"`
+	// UpgradeIndirectCacheHits controls whether cache hits with an
+	// indirect context (Glue, Referral, Hint) trigger a fresh query
+	// to "upgrade" the data quality. nil = legacy behaviour (true).
+	// tdns-mp overrides this to false in its default config to cut
+	// gossip-driven query volume.
+	UpgradeIndirectCacheHits *bool `yaml:"upgrade_indirect_cache_hits" mapstructure:"upgrade_indirect_cache_hits"`
+}
+
+// BackoffConf tunes per-(address, transport) backoff behaviour
+// after a failed query. Replaces the hardcoded 2 min / 1 h constants
+// that lived in cache/authserver.go.
+type BackoffConf struct {
+	FirstFailure   time.Duration `yaml:"first_failure" mapstructure:"first_failure"`
+	MaxFailure     time.Duration `yaml:"max_failure" mapstructure:"max_failure"`
+	Multiplier     float64       `yaml:"multiplier" mapstructure:"multiplier"`
+	JitterFraction float64       `yaml:"jitter_fraction" mapstructure:"jitter_fraction"`
+	RoutingFailure time.Duration `yaml:"routing_failure" mapstructure:"routing_failure"`
+	LameDelegation time.Duration `yaml:"lame_delegation" mapstructure:"lame_delegation"`
+}
+
+// AddressFamilyConf tunes per-process IPv4/IPv6 reachability
+// tracking (deprioritise a family after N distinct failures in a
+// sliding window, probe periodically to detect recovery).
+type AddressFamilyConf struct {
+	WindowDuration   time.Duration `yaml:"window_duration" mapstructure:"window_duration"`
+	FailureThreshold int           `yaml:"failure_threshold" mapstructure:"failure_threshold"`
+	SuspectDuration  time.Duration `yaml:"suspect_duration" mapstructure:"suspect_duration"`
+	ProbeInterval    time.Duration `yaml:"probe_interval" mapstructure:"probe_interval"`
+}
+
+// DiscoveryConf tunes the discovery state machine used for
+// transport-signal (SVCB / TSYNC) and TLSA lookups, replacing
+// the fire-and-forget goroutine pattern.
+type DiscoveryConf struct {
+	RetryAfterFailure time.Duration `yaml:"retry_after_failure" mapstructure:"retry_after_failure"`
+	MaxFailures       int           `yaml:"max_failures" mapstructure:"max_failures"`
+}
+
+// LoadImrTuningDefaults fills zero-valued fields with sensible
+// defaults. Safe to call repeatedly. UpgradeIndirectCacheHits is
+// left nil intentionally — callers check nil-vs-explicit to
+// distinguish "use legacy behaviour" from an explicit toggle.
+func LoadImrTuningDefaults(t *ImrTuningConf) {
+	if t == nil {
+		return
+	}
+	if t.Backoff.FirstFailure == 0 {
+		t.Backoff.FirstFailure = 15 * time.Second
+	}
+	if t.Backoff.MaxFailure == 0 {
+		t.Backoff.MaxFailure = 1 * time.Hour
+	}
+	if t.Backoff.Multiplier == 0 {
+		t.Backoff.Multiplier = 3.0
+	}
+	if t.Backoff.JitterFraction == 0 {
+		t.Backoff.JitterFraction = 0.25
+	}
+	if t.Backoff.RoutingFailure == 0 {
+		t.Backoff.RoutingFailure = 1 * time.Hour
+	}
+	if t.Backoff.LameDelegation == 0 {
+		t.Backoff.LameDelegation = 1 * time.Hour
+	}
+	if t.AddressFamily.WindowDuration == 0 {
+		t.AddressFamily.WindowDuration = 10 * time.Minute
+	}
+	if t.AddressFamily.FailureThreshold == 0 {
+		t.AddressFamily.FailureThreshold = 5
+	}
+	if t.AddressFamily.SuspectDuration == 0 {
+		t.AddressFamily.SuspectDuration = 10 * time.Minute
+	}
+	if t.AddressFamily.ProbeInterval == 0 {
+		t.AddressFamily.ProbeInterval = 30 * time.Second
+	}
+	if t.Discovery.RetryAfterFailure == 0 {
+		t.Discovery.RetryAfterFailure = 30 * time.Second
+	}
+	if t.Discovery.MaxFailures == 0 {
+		t.Discovery.MaxFailures = 3
+	}
+	if t.QueryBudget == 0 {
+		t.QueryBudget = 8 * time.Second
+	}
 }
 
 type ImrLoggingConf struct {
