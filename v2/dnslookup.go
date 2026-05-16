@@ -800,10 +800,28 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					}
 					return crrset.RRset, int(crrset.Rcode), crrset.Context, crrset.Transport, nil
 				}
-			case cache.ContextReferral, cache.ContextGlue, cache.ContextHint, cache.ContextPriming, cache.ContextFailure:
-				// These are indirect - issue a direct query to upgrade quality and get DNSSEC signatures
-				if Globals.Debug {
+			case cache.ContextReferral, cache.ContextGlue, cache.ContextHint:
+				// Indirect contexts. By default re-query to upgrade
+				// quality (get DNSSEC signatures). With the
+				// UpgradeIndirectCacheHits=false toggle, return the
+				// cached data if it matches qtype.
+				if !imr.upgradeIndirectCacheHits() && crrset.RRset != nil && crrset.RRset.RRtype == qtype {
+					if requireEncrypted && !core.IsEncryptedTransport(crrset.Transport) {
+						// PR flag still wins -- need encrypted transport
+						crrset = nil
+					} else {
+						if Globals.Debug {
+							lg.Printf("IterativeDNSQuery: returning cached indirect data for <%s, %s> (UpgradeIndirectCacheHits=false, context=%s)", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
+						}
+						return crrset.RRset, int(crrset.Rcode), crrset.Context, crrset.Transport, nil
+					}
+				} else if Globals.Debug {
 					lg.Printf("IterativeDNSQuery: found <%s, %s> in cache with context=%s, but issuing direct query to upgrade quality and get DNSSEC signatures", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
+				}
+				// Fall through to issue query
+			case cache.ContextPriming, cache.ContextFailure:
+				if Globals.Debug {
+					lg.Printf("IterativeDNSQuery: found <%s, %s> in cache with context=%s, issuing direct query", qname, dns.TypeToString[qtype], cache.CacheContextToString[crrset.Context])
 				}
 				// Fall through to issue query
 			default:

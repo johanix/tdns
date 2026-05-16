@@ -275,12 +275,20 @@ func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq ImrRequest) {
 			resp = &ImrResponse{RRset: crrset.RRset}
 			rrq.ResponseCh <- *resp
 			return
-		case cache.ContextReferral, cache.ContextGlue, cache.ContextHint, cache.ContextPriming, cache.ContextFailure:
+		case cache.ContextReferral, cache.ContextGlue, cache.ContextHint:
+			if !imr.upgradeIndirectCacheHits() && crrset.RRset != nil && crrset.RRset.RRtype == rrq.Qtype {
+				lgImr.Debug("returning cached indirect data (UpgradeIndirectCacheHits=false)", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
+				resp = &ImrResponse{RRset: crrset.RRset}
+				rrq.ResponseCh <- *resp
+				return
+			}
 			lgImr.Debug("cache hit but indirect context, issuing direct query", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
 			if imr.DebugLog != nil {
 				imr.DebugLog.Printf("CACHE-INDIRECT qname=%s qtype=%s context=%s, issuing fresh query",
 					rrq.Qname, dns.TypeToString[rrq.Qtype], cache.CacheContextToString[crrset.Context])
 			}
+		case cache.ContextPriming, cache.ContextFailure:
+			lgImr.Debug("cache hit but priming/failure, issuing direct query", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
 		default:
 			lgImr.Debug("cache hit with unknown context, issuing query", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
 		}
@@ -299,6 +307,21 @@ func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq ImrRequest) {
 		}
 	}
 	rrq.ResponseCh <- *resp
+}
+
+// upgradeIndirectCacheHits reports whether cache hits whose context
+// is indirect (Glue, Referral, Hint) should trigger a fresh query
+// to "upgrade" the data with DNSSEC signatures, or whether the
+// cached data may be returned as-is. Legacy default is true
+// (always upgrade); tdns-mp overrides to false in its default
+// config because gossip workloads benefit from reduced query volume.
+// ContextFailure and ContextPriming are NOT affected by this toggle
+// — those are always re-queried regardless.
+func (imr *Imr) upgradeIndirectCacheHits() bool {
+	if imr == nil || imr.Tuning.UpgradeIndirectCacheHits == nil {
+		return true
+	}
+	return *imr.Tuning.UpgradeIndirectCacheHits
 }
 
 func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *ImrResponse) (*ImrResponse, error) {
@@ -357,14 +380,21 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 				validateResponse()
 			}
 			return &resp, nil
-		case cache.ContextReferral, cache.ContextGlue, cache.ContextHint, cache.ContextPriming, cache.ContextFailure:
-			// These are indirect - issue a direct query to upgrade quality and get DNSSEC signatures
+		case cache.ContextReferral, cache.ContextGlue, cache.ContextHint:
+			// Indirect contexts. By default we re-query to get DNSSEC
+			// signatures; with UpgradeIndirectCacheHits=false we return
+			// the cached data instead -- saves query volume when the
+			// cached glue/referral already answers the question.
+			if !imr.upgradeIndirectCacheHits() && crrset.RRset != nil && crrset.RRset.RRtype == qtype {
+				lgImr.Debug("ImrQuery: returning cached indirect data (UpgradeIndirectCacheHits=false)", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
+				resp.RRset = crrset.RRset
+				return &resp, nil
+			}
 			lgImr.Debug("ImrQuery: cache hit but indirect context, issuing direct query", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
-			// Fall through to issue query
+		case cache.ContextPriming, cache.ContextFailure:
+			lgImr.Debug("ImrQuery: cache hit but priming/failure, issuing direct query", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
 		default:
-			// Unknown context - be safe and issue query
 			lgImr.Debug("ImrQuery: cache hit with unknown context, issuing query", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
-			// Fall through to issue query
 		}
 	}
 
@@ -578,6 +608,31 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			lgImr.Debug("ImrResponder: PR flag set but cached data came over unencrypted transport, skipping cache", "qname", qname, "qtype", dns.TypeToString[qtype], "transport", core.TransportToString[crrset.Transport])
 			crrset = nil // Force query over encrypted transport
 		}
+	}
+	// Optional fast return for indirect cache hits. By default
+	// ImrResponder falls through to a full iterative query for
+	// Referral/Glue/Hint entries (to get DNSSEC signatures). With
+	// UpgradeIndirectCacheHits=false, return the cached data if it
+	// answers the question — same trade-off as ImrQuery's branch.
+	if crrset != nil && !imr.upgradeIndirectCacheHits() &&
+		(crrset.Context == cache.ContextReferral ||
+			crrset.Context == cache.ContextGlue ||
+			crrset.Context == cache.ContextHint) &&
+		crrset.RRset != nil && crrset.RRset.RRtype == qtype {
+		lgImr.Debug("ImrResponder: returning cached indirect data (UpgradeIndirectCacheHits=false)", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
+		m.SetRcode(r, dns.RcodeSuccess)
+		m.Answer = crrset.RRset.RRs
+		if msgoptions.DO {
+			m.Answer = append(m.Answer, crrset.RRset.RRSIGs...)
+		}
+		m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
+		if core.IsEncryptedTransport(crrset.Transport) {
+			if err := edns0.SetPRFlagInMessage(m); err != nil {
+				lgImr.Error("ImrResponder: failed to set PR flag in response", "err", err)
+			}
+		}
+		w.WriteMsg(m)
+		return
 	}
 	if crrset != nil {
 		switch {
