@@ -281,7 +281,24 @@ containing either the private or the public SIG(0) key and the name of the zone.
 	clear.Flags().Bool("force", false, "Skip confirmation prompt")
 	clear.MarkFlagRequired("zone")
 
-	c.AddCommand(add, importCmd, generate, list, delete, setstate, genDS, rollover, clear, newKeystoreDnssecPolicyCmd(role), newKeystoreDnssecDsPushCmd(role), newKeystoreDnssecQueryParentCmd(role), newAutoRolloverCmd(role))
+	purge := &cobra.Command{
+		Use:   "purge",
+		Short: "Delete keys in 'removed' state, keeping the 3 most recent per zone",
+		Long: `Delete keys in 'removed' state from the keystore, keeping the 3
+most recent per zone (by insert order). Use --zone all to apply to
+every zone with removed keys at once.
+
+Dry-run by default: prints the keys that would be deleted and exits
+without modifying anything. Pass --force to actually delete.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			dnssecKeyPurgeCmd(role, cmd)
+		},
+	}
+	purge.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to purge ('all' for every zone)")
+	purge.Flags().Bool("force", false, "Actually delete; otherwise dry-run")
+	purge.MarkFlagRequired("zone")
+
+	c.AddCommand(add, importCmd, generate, list, delete, setstate, genDS, rollover, clear, purge, newKeystoreDnssecPolicyCmd(role), newKeystoreDnssecDsPushCmd(role), newKeystoreDnssecQueryParentCmd(role), newAutoRolloverCmd(role))
 	return c
 }
 
@@ -579,6 +596,88 @@ func dnssecKeyMgmt(role, cmd string) {
 		}
 	}
 
+}
+
+// dnssecKeyPurgeCmd handles "keystore dnssec purge". The zone "all"
+// passes through verbatim (no Fqdn); anything else is normalized. The
+// server returns the set of keys it deleted (or would delete in
+// dry-run mode); we print them in the same column format as 'list'.
+func dnssecKeyPurgeCmd(role string, cmd *cobra.Command) {
+	zoneArg := strings.TrimSpace(tdns.Globals.Zonename)
+	if zoneArg == "" {
+		fmt.Println("Error: --zone is required (use 'all' to purge every zone)")
+		os.Exit(1)
+	}
+	if strings.EqualFold(zoneArg, "all") {
+		zoneArg = "all"
+	} else {
+		zoneArg = dns.Fqdn(zoneArg)
+	}
+	force, _ := cmd.Flags().GetBool("force")
+
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		log.Fatalf("Error creating API client: %v", err)
+	}
+
+	tr, err := SendKeystoreCmd(api, tdns.KeystorePost{
+		Command:    "dnssec-mgmt",
+		SubCommand: "purge",
+		Zone:       zoneArg,
+		Force:      force,
+	})
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	if tr.Error {
+		fmt.Printf("Error from TDNSD: %s\n", tr.ErrorMsg)
+		os.Exit(1)
+	}
+
+	if len(tr.Dnskeys) > 0 {
+		if force {
+			fmt.Println("Purged DNSSEC key pairs:")
+		} else {
+			fmt.Println("DNSSEC key pairs that would be purged:")
+		}
+		type entry struct {
+			zone, keyid, alg, keystr string
+			flags                    uint16
+		}
+		var entries []entry
+		for k, v := range tr.Dnskeys {
+			tmp := strings.SplitN(k, "::", 2)
+			if len(tmp) != 2 {
+				continue
+			}
+			entries = append(entries, entry{
+				zone:   tmp[0],
+				keyid:  tmp[1],
+				flags:  v.Flags,
+				alg:    v.Algorithm,
+				keystr: v.Keystr,
+			})
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i].zone != entries[j].zone {
+				return entries[i].zone < entries[j].zone
+			}
+			return entries[i].keyid < entries[j].keyid
+		})
+		var out []string
+		for _, e := range entries {
+			out = append(out, fmt.Sprintf("%s|%s|%d|%s|%.50s...\n",
+				e.zone, e.keyid, e.flags, e.alg, e.keystr))
+		}
+		if tdns.Globals.ShowHeaders {
+			out = append([]string{"Signer|KeyID|Flags|Algorithm|DNSKEY Record"}, out...)
+		}
+		fmt.Printf("%s\n", columnize.SimpleFormat(out))
+	}
+	if tr.Msg != "" {
+		fmt.Println(tr.Msg)
+	}
 }
 
 func dnssecGenDS(role string) {
