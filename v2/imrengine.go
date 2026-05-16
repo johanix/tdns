@@ -104,6 +104,14 @@ func (conf *Config) InitImrEngine(quiet bool) error {
 		requireDnssec = *conf.Imr.RequireDnssecValidation
 	}
 	LoadImrTuningDefaults(&conf.Imr.Tuning)
+	cache.SetBackoffPolicy(cache.BackoffPolicy{
+		FirstFailure:   conf.Imr.Tuning.Backoff.FirstFailure,
+		MaxFailure:     conf.Imr.Tuning.Backoff.MaxFailure,
+		Multiplier:     conf.Imr.Tuning.Backoff.Multiplier,
+		JitterFraction: conf.Imr.Tuning.Backoff.JitterFraction,
+		RoutingFailure: conf.Imr.Tuning.Backoff.RoutingFailure,
+		LameDelegation: conf.Imr.Tuning.Backoff.LameDelegation,
+	})
 	imr := &Imr{
 		Cache:                   rrcache,
 		DnskeyCache:             rrcache.DnskeyCache,
@@ -228,73 +236,69 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 				lgImr.Warn("received nil or invalid request (no response channel)")
 				continue
 			}
-			lgImr.Debug("received query", "qname", rrq.Qname, "qclass", dns.ClassToString[rrq.Qclass], "qtype", dns.TypeToString[rrq.Qtype])
-			if imr.DebugLog != nil {
-				imr.DebugLog.Printf("QUERY qname=%s qtype=%s", rrq.Qname, dns.TypeToString[rrq.Qtype])
-			}
-
-			var resp *ImrResponse
-
-			// 1. Is the answer in the cache?
-			crrset := imr.Cache.Get(rrq.Qname, rrq.Qtype)
-			if crrset != nil {
-				// Only use cached answer if it's a direct answer or negative response.
-				// Don't use referrals, glue, hints, priming, or failures - issue a direct query instead
-				// to get DNSSEC signatures and upgrade the quality of the data.
-				switch crrset.Context {
-				case cache.ContextAnswer, cache.ContextNoErrNoAns, cache.ContextNXDOMAIN:
-					// These are direct answers or negative responses - safe to use
-					lgImr.Debug("cache hit", "qname", rrq.Qname, "qclass", dns.ClassToString[rrq.Qclass], "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
-					if imr.DebugLog != nil {
-						var rrs []string
-						if crrset.RRset != nil {
-							for _, rr := range crrset.RRset.RRs {
-								rrs = append(rrs, rr.String())
-							}
-						}
-						imr.DebugLog.Printf("CACHE-HIT qname=%s qtype=%s context=%s answer=%v",
-							rrq.Qname, dns.TypeToString[rrq.Qtype],
-							cache.CacheContextToString[crrset.Context], rrs)
-					}
-					resp = &ImrResponse{
-						RRset: crrset.RRset,
-					}
-					rrq.ResponseCh <- *resp
-					continue // Skip query, we have a good answer
-				case cache.ContextReferral, cache.ContextGlue, cache.ContextHint, cache.ContextPriming, cache.ContextFailure:
-					// These are indirect - issue a direct query to upgrade quality and get DNSSEC signatures
-					lgImr.Debug("cache hit but indirect context, issuing direct query", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
-					if imr.DebugLog != nil {
-						imr.DebugLog.Printf("CACHE-INDIRECT qname=%s qtype=%s context=%s, issuing fresh query",
-							rrq.Qname, dns.TypeToString[rrq.Qtype], cache.CacheContextToString[crrset.Context])
-					}
-					// Fall through to issue query
-				default:
-					// Unknown context - be safe and issue query
-					lgImr.Debug("cache hit with unknown context, issuing query", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
-					// Fall through to issue query
-				}
-			} else if imr.DebugLog != nil {
-				imr.DebugLog.Printf("CACHE-MISS qname=%s qtype=%s, issuing fresh query", rrq.Qname, dns.TypeToString[rrq.Qtype])
-			}
-			// Cache miss or indirect context - issue query
-			{
-				var err error
-				lgImr.Debug("not in cache, querying", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
-
-				resp, err = imr.ImrQuery(ctx, rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
-				if err != nil {
-					lgImr.Error("ImrQuery failed", "err", err)
-				} else if resp == nil {
-					resp = &ImrResponse{
-						Error:    true,
-						ErrorMsg: "ImrEngine: no response from ImrQuery",
-					}
-				}
-				rrq.ResponseCh <- *resp
-			}
+			// Each request runs in its own goroutine. The underlying
+			// ImrQuery is fully reentrant; serialising callers behind
+			// the channel-read loop served no purpose and stalled
+			// concurrent CLI / RPC invocations behind any slow query.
+			go imr.handleRecursorRequest(ctx, rrq)
 		}
 	}
+}
+
+// handleRecursorRequest answers a single RecursorCh request. Runs
+// on its own goroutine spawned by the engine loop. Cache hits are
+// answered directly; everything else falls through to ImrQuery.
+func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq ImrRequest) {
+	lgImr.Debug("received query", "qname", rrq.Qname, "qclass", dns.ClassToString[rrq.Qclass], "qtype", dns.TypeToString[rrq.Qtype])
+	if imr.DebugLog != nil {
+		imr.DebugLog.Printf("QUERY qname=%s qtype=%s", rrq.Qname, dns.TypeToString[rrq.Qtype])
+	}
+
+	var resp *ImrResponse
+
+	crrset := imr.Cache.Get(rrq.Qname, rrq.Qtype)
+	if crrset != nil {
+		switch crrset.Context {
+		case cache.ContextAnswer, cache.ContextNoErrNoAns, cache.ContextNXDOMAIN:
+			lgImr.Debug("cache hit", "qname", rrq.Qname, "qclass", dns.ClassToString[rrq.Qclass], "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
+			if imr.DebugLog != nil {
+				var rrs []string
+				if crrset.RRset != nil {
+					for _, rr := range crrset.RRset.RRs {
+						rrs = append(rrs, rr.String())
+					}
+				}
+				imr.DebugLog.Printf("CACHE-HIT qname=%s qtype=%s context=%s answer=%v",
+					rrq.Qname, dns.TypeToString[rrq.Qtype],
+					cache.CacheContextToString[crrset.Context], rrs)
+			}
+			resp = &ImrResponse{RRset: crrset.RRset}
+			rrq.ResponseCh <- *resp
+			return
+		case cache.ContextReferral, cache.ContextGlue, cache.ContextHint, cache.ContextPriming, cache.ContextFailure:
+			lgImr.Debug("cache hit but indirect context, issuing direct query", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
+			if imr.DebugLog != nil {
+				imr.DebugLog.Printf("CACHE-INDIRECT qname=%s qtype=%s context=%s, issuing fresh query",
+					rrq.Qname, dns.TypeToString[rrq.Qtype], cache.CacheContextToString[crrset.Context])
+			}
+		default:
+			lgImr.Debug("cache hit with unknown context, issuing query", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
+		}
+	} else if imr.DebugLog != nil {
+		imr.DebugLog.Printf("CACHE-MISS qname=%s qtype=%s, issuing fresh query", rrq.Qname, dns.TypeToString[rrq.Qtype])
+	}
+
+	lgImr.Debug("not in cache, querying", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
+	resp, err := imr.ImrQuery(ctx, rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
+	if err != nil {
+		lgImr.Error("ImrQuery failed", "err", err)
+	} else if resp == nil {
+		resp = &ImrResponse{
+			Error:    true,
+			ErrorMsg: "ImrEngine: no response from ImrQuery",
+		}
+	}
+	rrq.ResponseCh <- *resp
 }
 
 func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *ImrResponse) (*ImrResponse, error) {

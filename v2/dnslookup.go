@@ -759,6 +759,15 @@ func (imr *Imr) IterativeDNSQuery(ctx context.Context, qname string, qtype uint1
 func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname string, qtype uint16, serverMap map[string]*cache.AuthServer, force bool, visitedZones map[string]bool, requireEncrypted bool) (*core.RRset, int, cache.CacheContext, core.Transport, error) {
 	lg := imr.Cache.Logger
 
+	// Apply per-query wall-time budget. context.WithTimeout takes
+	// min(parent.Deadline, now+budget), so recursive calls inherit
+	// the outermost deadline rather than each getting a fresh budget.
+	if budget := imr.Tuning.QueryBudget; budget > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, budget)
+		defer cancel()
+	}
+
 	if Globals.Debug {
 		lg.Printf("IterativeDNSQuery: looking up <%s, %s> using %d servers", qname, dns.TypeToString[qtype], len(serverMap))
 	}

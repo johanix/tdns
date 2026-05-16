@@ -504,64 +504,41 @@ func (as *AuthServer) IsAddressAvailable(addr string) bool {
 	return time.Now().After(backoff.NextTry)
 }
 
-// categorizeError analyzes the error and returns the appropriate backoff duration.
-// Routing errors (no route to host) get 1 hour immediately as they're unlikely to resolve soon.
-// Timeout errors get 2 minutes as they might be temporary.
-// Other errors default to 2 minutes for first failure, 1 hour for subsequent failures.
-// categorizeError selects a backoff duration based on the provided error text and
-// whether this is the first failure for an address.
-//
-// Rules:
-// - If err is nil: return 2 minutes for a first failure, 1 hour otherwise.
-// - If the error text indicates a routing failure (contains "no route to host",
-//   "network is unreachable", or "host unreachable"): return 1 hour.
-// - If the error text indicates a timeout (contains "timeout", "i/o timeout", or
-//   "deadline exceeded"): return 2 minutes.
-// categorizeError determines the backoff duration to apply for an address failure
-// based on the provided error and whether this is the first consecutive failure.
-// Behavior:
-// - If err is nil: return 2 minutes for a first failure, 1 hour otherwise.
-// - If the error message contains routing indicators ("no route to host", "network is unreachable", "host unreachable"): return 1 hour.
-// - If the error message contains timeout indicators ("timeout", "i/o timeout", "deadline exceeded"): return 2 minutes.
-// - For all other errors: return 2 minutes for a first failure, 1 hour otherwise.
-
-func categorizeError(err error, isFirstFailure bool) time.Duration {
+// isRoutingError reports whether the error string indicates a
+// host- or network-level routing failure ("no route to host" etc.).
+// These are unlikely to recover on a short timescale, so the policy
+// applies its RoutingFailure backoff (typically 1h) immediately.
+func isRoutingError(err error) bool {
 	if err == nil {
-		// No error provided, use default behavior
-		if isFirstFailure {
-			return 2 * time.Minute
-		}
-		return 1 * time.Hour
+		return false
 	}
 	errStr := err.Error()
-
-	// Check for routing errors - these are unlikely to resolve soon, so backoff 1 hour immediately
-	if strings.Contains(errStr, "no route to host") ||
+	return strings.Contains(errStr, "no route to host") ||
 		strings.Contains(errStr, "network is unreachable") ||
-		strings.Contains(errStr, "host unreachable") {
-		return 1 * time.Hour
-	}
-
-	// Check for timeout errors - these might be temporary, so backoff 2 minutes
-	if strings.Contains(errStr, "timeout") ||
-		strings.Contains(errStr, "deadline exceeded") {
-		return 2 * time.Minute
-	}
-
-	// Other errors: 2 minutes for first failure, 1 hour for subsequent
-	if isFirstFailure {
-		return 2 * time.Minute
-	}
-	return 1 * time.Hour
+		strings.Contains(errStr, "host unreachable")
 }
 
-// RecordAddressFailure records a failure for the given address and sets appropriate backoff.
-// The error parameter is analyzed to determine backoff duration:
-//   - Routing errors ("no route to host"): 1 hour immediately
-//   - Timeout errors: 2 minutes
-//   - Other errors: 2 minutes for first failure, 1 hour for subsequent failures
-//
-// If as.Debug is true, the error message is stored in LastError for debugging purposes.
+// categorizeError selects a backoff duration based on (a) whether
+// the error indicates a routing failure and (b) the previous backoff
+// state for this address-key. nil prev means "first failure ever".
+// Otherwise the duration grows geometrically per the current
+// BackoffPolicy, capped at MaxFailure and randomised by JitterFraction.
+func categorizeError(err error, prev *AddressBackoff) time.Duration {
+	if isRoutingError(err) {
+		return applyJitter(GetBackoffPolicy().RoutingFailure)
+	}
+	var count uint8
+	if prev != nil {
+		count = prev.FailureCount
+	}
+	return applyJitter(exponentialBackoff(count))
+}
+
+// RecordAddressFailure records a failure for the given address and
+// applies a backoff per the active BackoffPolicy. Routing-class
+// errors get an immediate long backoff; everything else uses an
+// exponential schedule based on the previous failure count.
+// If as.Debug is true, the error message is stored in LastError.
 // Thread-safe: acquires mu lock.
 func (as *AuthServer) RecordAddressFailure(addr string, err error) {
 	if as == nil {
@@ -578,25 +555,25 @@ func (as *AuthServer) RecordAddressFailure(addr string, err error) {
 		errMsg = err.Error()
 	}
 	if !exists {
-		// First failure: determine backoff based on error type
-		backoffDuration := categorizeError(err, true)
 		as.AddressBackoffs[addr] = &AddressBackoff{
-			NextTry:      time.Now().Add(backoffDuration),
+			NextTry:      time.Now().Add(categorizeError(err, nil)),
 			FailureCount: 1,
 			LastError:    errMsg,
 		}
 		return
 	}
-	// Subsequent failure: determine backoff based on error type
-	backoffDuration := categorizeError(err, false)
-	backoff.NextTry = time.Now().Add(backoffDuration)
-	backoff.LastError = errMsg      // Update last error even if not first failure
-	if backoff.FailureCount < 255 { // Prevent overflow
+	backoff.NextTry = time.Now().Add(categorizeError(err, backoff))
+	backoff.LastError = errMsg
+	if backoff.FailureCount < 255 {
 		backoff.FailureCount++
 	}
 }
 
-// RecordAddressFailureForRcode records a failure for the given address based on a DNS response code.
+// RecordAddressFailureForRcode records a failure for the given
+// address based on a DNS response code. NOTIMP is treated as a
+// "broken implementation" signal and gets the full LameDelegation
+// backoff immediately. Other rcodes follow the standard exponential
+// schedule.
 // Thread-safe: acquires mu lock.
 func (as *AuthServer) RecordAddressFailureForRcode(addr string, rcode uint8) {
 	if as == nil {
@@ -609,29 +586,22 @@ func (as *AuthServer) RecordAddressFailureForRcode(addr string, rcode uint8) {
 	}
 	backoff, exists := as.AddressBackoffs[addr]
 
-	// Determine backoff duration based on rcode
 	var backoffDuration time.Duration
-	var errMsg string
-	switch rcode {
-	case dns.RcodeNotImplemented:
-		backoffDuration = 1 * time.Hour
-		if as.Debug {
-			errMsg = fmt.Sprintf("rcode=%d", rcode)
+	if rcode == dns.RcodeNotImplemented {
+		backoffDuration = applyJitter(GetBackoffPolicy().LameDelegation)
+	} else {
+		var count uint8
+		if exists {
+			count = backoff.FailureCount
 		}
-	default:
-		// For other rcodes, use default behavior (2 min first, 1 hour subsequent)
-		if !exists {
-			backoffDuration = 2 * time.Minute
-		} else {
-			backoffDuration = 1 * time.Hour
-		}
-		if as.Debug {
-			errMsg = fmt.Sprintf("rcode=%d", rcode)
-		}
+		backoffDuration = applyJitter(exponentialBackoff(count))
+	}
+	errMsg := ""
+	if as.Debug {
+		errMsg = fmt.Sprintf("rcode=%d", rcode)
 	}
 
 	if !exists {
-		// First failure
 		as.AddressBackoffs[addr] = &AddressBackoff{
 			NextTry:      time.Now().Add(backoffDuration),
 			FailureCount: 1,
@@ -639,12 +609,11 @@ func (as *AuthServer) RecordAddressFailureForRcode(addr string, rcode uint8) {
 		}
 		return
 	}
-	// Subsequent failure
 	backoff.NextTry = time.Now().Add(backoffDuration)
 	if as.Debug {
 		backoff.LastError = errMsg
 	}
-	if backoff.FailureCount < 255 { // Prevent overflow
+	if backoff.FailureCount < 255 {
 		backoff.FailureCount++
 	}
 }

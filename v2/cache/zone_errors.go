@@ -10,8 +10,12 @@ import (
 	"github.com/miekg/dns"
 )
 
-// RecordZoneAddressFailureForRcode records a zone-specific failure for the given address based on a DNS response code.
-// REFUSED/NOTAUTH/NOTIMP responses (lame delegations) get 1 hour backoff immediately as they're unlikely to resolve soon.
+// RecordZoneAddressFailureForRcode records a zone-specific failure
+// for the given address based on a DNS response code. REFUSED /
+// NOTAUTH / SERVFAIL signal lame delegation and get the policy's
+// LameDelegation backoff. NOTIMP is kept at a longer fixed 6h since
+// it indicates the server speaks DNS but lacks features we need.
+// Other rcodes follow the standard exponential schedule.
 // Thread-safe: acquires mu lock.
 func (z *Zone) RecordZoneAddressFailureForRcode(addr string, rcode uint8, debug bool) {
 	if z == nil {
@@ -24,40 +28,31 @@ func (z *Zone) RecordZoneAddressFailureForRcode(addr string, rcode uint8, debug 
 	}
 	backoff, exists := z.AddressBackoffs[addr]
 
-	// Determine backoff duration based on rcode
 	var backoffDuration time.Duration
 	var errMsg string
 	switch rcode {
-	case dns.RcodeRefused, dns.RcodeNotAuth: // lame delegation
-		backoffDuration = 1 * time.Hour
+	case dns.RcodeRefused, dns.RcodeNotAuth, dns.RcodeServerFailure:
+		backoffDuration = applyJitter(GetBackoffPolicy().LameDelegation)
 		if debug {
-			errMsg = fmt.Sprintf("rcode=%d: lame delegation; backoff=1h", rcode)
-		}
-	case dns.RcodeServerFailure:
-		// SERVFAIL might be temporary, but for zone-specific failures, treat as persistent
-		backoffDuration = 1 * time.Hour
-		if debug {
-			errMsg = fmt.Sprintf("rcode=SERVFAIL; backoff=1h")
+			errMsg = fmt.Sprintf("rcode=%d: lame delegation", rcode)
 		}
 	case dns.RcodeNotImplemented:
 		backoffDuration = 6 * time.Hour
 		if debug {
-			errMsg = fmt.Sprintf("rcode=NOTIMP; backoff=6h")
+			errMsg = "rcode=NOTIMP; backoff=6h"
 		}
 	default:
-		// For other rcodes, use default behavior (2 min first, 1 hour subsequent)
-		if !exists {
-			backoffDuration = 2 * time.Minute
-		} else {
-			backoffDuration = 1 * time.Hour
+		var count uint8
+		if exists {
+			count = backoff.FailureCount
 		}
+		backoffDuration = applyJitter(exponentialBackoff(count))
 		if debug {
 			errMsg = fmt.Sprintf("rcode=%d", rcode)
 		}
 	}
 
 	if !exists {
-		// First failure
 		z.AddressBackoffs[addr] = &AddressBackoff{
 			NextTry:      time.Now().Add(backoffDuration),
 			FailureCount: 1,
@@ -65,12 +60,11 @@ func (z *Zone) RecordZoneAddressFailureForRcode(addr string, rcode uint8, debug 
 		}
 		return
 	}
-	// Subsequent failure
 	backoff.NextTry = time.Now().Add(backoffDuration)
 	if debug {
 		backoff.LastError = errMsg
 	}
-	if backoff.FailureCount < 255 { // Prevent overflow
+	if backoff.FailureCount < 255 {
 		backoff.FailureCount++
 	}
 }
