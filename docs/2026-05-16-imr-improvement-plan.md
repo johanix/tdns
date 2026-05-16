@@ -1455,10 +1455,10 @@ restart.
 
 | Work item | Status | PR | Notes |
 |-----------|--------|----|----|
-| W1 Config foundation         | not started | - | |
-| W2 Quick wins bundle         | not started | - | |
-| W3 Cache-upgrade policy      | not started | - | |
-| W4 Observability v1          | not started | - | |
+| W1 Config foundation         | landed (720023c) | (branch imr-overhaul) | |
+| W2 Quick wins bundle         | landed (22305af) | (branch imr-overhaul) | S3+S10+S11 |
+| W3 Cache-upgrade policy      | landed (4b0c2b1) | (branch imr-overhaul) | |
+| W4 Observability v1          | landed (32cf1f0) | (branch imr-overhaul) | |
 | W5 DNSClient interface       | not started | - | Enables W6+ tests |
 | W6 (addr,transport) refactor | not started | - | Largest item; depends on W5 |
 | W7 RTT                       | not started | - | Depends on W6 |
