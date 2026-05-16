@@ -326,6 +326,20 @@ func (imr *Imr) upgradeIndirectCacheHits() bool {
 
 func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *ImrResponse) (*ImrResponse, error) {
 	lgImr.Debug("ImrQuery: not in cache, querying", "qname", qname, "qtype", dns.TypeToString[qtype])
+
+	// Apply per-query wall-time budget at the top-level public entry,
+	// not just at IterativeDNSQueryWithLoopDetection. Sub-queries
+	// spawned by resolveNSAddresses / CollectNSAddresses go back
+	// through this same ImrQuery on the parent ctx; wrapping here
+	// bounds the whole logical request. context.WithTimeout takes
+	// min(parent.Deadline, now+budget), so nested ImrQuery calls
+	// inherit the outermost deadline cleanly.
+	if budget := imr.Tuning.QueryBudget; budget > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, budget)
+		defer cancel()
+	}
+
 	maxiter := 12
 
 	resp := ImrResponse{
