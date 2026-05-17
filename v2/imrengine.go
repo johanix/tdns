@@ -731,6 +731,33 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 		w.WriteMsg(m)
 		return
 	}
+	// DS records are exclusively published at the parent zone, so a
+	// cached DS entry with ContextReferral (the canonical path: we
+	// learned it from the parent's referral in handleReferral) IS the
+	// authoritative answer. Serve it directly. Without this branch the
+	// switch below falls through, the responder re-queries iteratively,
+	// the iterative path's FindClosestKnownZone returns the qname's
+	// OWN serverMap (e.g. net.'s servers for `net DS`), the qname's
+	// servers respond NODATA (DS doesn't live at zone apex), and we
+	// hand the client a phantom NODATA for a DS that's right there in
+	// cache as `state: secure`. Confirmed via `dog @127.0.0.1:1099
+	// net DS +dnssec` and tdns-mp `dog sigchase` against the local IMR.
+	if crrset != nil && qtype == dns.TypeDS && crrset.Context == cache.ContextReferral &&
+		crrset.RRset != nil && crrset.RRset.RRtype == dns.TypeDS && len(crrset.RRset.RRs) > 0 {
+		m.SetRcode(r, dns.RcodeSuccess)
+		m.Answer = crrset.RRset.RRs
+		if msgoptions.DO {
+			m.Answer = append(m.Answer, crrset.RRset.RRSIGs...)
+		}
+		m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
+		if core.IsEncryptedTransport(crrset.Transport) {
+			if err := edns0.SetPRFlagInMessage(m); err != nil {
+				lgImr.Error("ImrResponder: failed to set PR flag in response", "err", err)
+			}
+		}
+		w.WriteMsg(m)
+		return
+	}
 	if crrset != nil {
 		switch {
 		case crrset.Rcode == uint8(dns.RcodeNameError) && crrset.Context == cache.ContextNXDOMAIN:
