@@ -33,7 +33,7 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		lgApi.Debug("received /agent request", "cmd", amp.Command, "from", r.RemoteAddr)
+		lgApi.Debug("received /imr request", "cmd", amp.Command, "from", r.RemoteAddr)
 
 		resp := AgentMgmtResponse{
 			Time: time.Now(),

@@ -68,8 +68,12 @@ func newImrQueryCmd(role string) *cobra.Command {
 					fmt.Printf("  TTL: %v  Expires in: %s  Rcode: %s  State: %s  Context: %s\n",
 						data["ttl"], data["expires_in"], data["rcode"], data["state"], data["context"])
 				} else {
-					buf, _ := json.MarshalIndent(amr.Data, "", "  ")
-					fmt.Println(string(buf))
+					buf, err := json.MarshalIndent(amr.Data, "", "  ")
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "failed to marshal response Data: %v\n", err)
+					} else {
+						fmt.Println(string(buf))
+					}
 				}
 			}
 		},
@@ -158,8 +162,12 @@ func newImrShowCmd(role string) *cobra.Command {
 						fmt.Printf("    TTL: %v  Expires in: %s\n", entry["ttl"], entry["expires_in"])
 					}
 				} else {
-					buf, _ := json.MarshalIndent(amr.Data, "", "  ")
-					fmt.Println(string(buf))
+					buf, err := json.MarshalIndent(amr.Data, "", "  ")
+					if err != nil {
+						fmt.Fprintf(os.Stderr, "failed to marshal response Data: %v\n", err)
+					} else {
+						fmt.Println(string(buf))
+					}
 				}
 			}
 		},
@@ -183,8 +191,12 @@ func newImrDumpTuningCmd(role string) *cobra.Command {
 			}
 			data, ok := amr.Data.(map[string]interface{})
 			if !ok {
-				buf, _ := json.MarshalIndent(amr.Data, "", "  ")
-				fmt.Println(string(buf))
+				buf, err := json.MarshalIndent(amr.Data, "", "  ")
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "failed to marshal response Data: %v\n", err)
+				} else {
+					fmt.Println(string(buf))
+				}
 				return
 			}
 			printSection := func(title string, key string) {
