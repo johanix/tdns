@@ -41,7 +41,14 @@ type RTTEstimate struct {
 }
 
 type AuthServer struct {
-	Name             string
+	Name string
+	// Addrs holds BARE IP literals (e.g. "192.0.2.1" or "2001:db8::1"),
+	// NOT host:port. The port is added by core.DNSClient.Exchange via
+	// net.JoinHostPort(addr, c.Port) at dial time. Passing a host:port
+	// string through AddAddr makes JoinHostPort produce
+	// "[1.2.3.4:53]:53" because of the embedded colon, after which Dial
+	// tries to resolve "1.2.3.4:53" as a hostname and fails with
+	// "no such host". Always pass bare IPs.
 	Addrs            []string
 	Alpn             []string // {"do53", "doq", "dot", "doh"}
 	Transports       []core.Transport

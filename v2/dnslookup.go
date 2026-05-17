@@ -974,7 +974,11 @@ func (imr *Imr) expandServerMapWithMissingNS(ctx context.Context, qname string, 
 				if addrStr == "" {
 					continue
 				}
-				srv.AddAddr(net.JoinHostPort(addrStr, "53"))
+				// AuthServer.Addrs stores BARE IPs (no port). Exchange
+				// adds the port via JoinHostPort when dialing. Double-
+				// porting here would produce e.g. "[1.2.3.4:53]:53" and
+				// Dial would try to resolve "1.2.3.4:53" as a hostname.
+				srv.AddAddr(addrStr)
 			}
 		}
 		added += len(srv.Addrs) - before
@@ -2568,17 +2572,19 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 					srv.SetSrc("referral-oob-cached")
 					serverMap[ns.Ns] = srv
 				}
+				// AuthServer.Addrs stores BARE IPs (no port). Exchange adds
+				// the port via JoinHostPort when dialing.
 				if haveA {
 					for _, addrRR := range cachedA.RRset.RRs {
 						if a, ok := addrRR.(*dns.A); ok {
-							srv.AddAddr(net.JoinHostPort(a.A.String(), "53"))
+							srv.AddAddr(a.A.String())
 						}
 					}
 				}
 				if haveAAAA {
 					for _, addrRR := range cachedAAAA.RRset.RRs {
 						if a, ok := addrRR.(*dns.AAAA); ok {
-							srv.AddAddr(net.JoinHostPort(a.AAAA.String(), "53"))
+							srv.AddAddr(a.AAAA.String())
 						}
 					}
 				}
