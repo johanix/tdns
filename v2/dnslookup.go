@@ -404,13 +404,19 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 								target = tmprrset.RRs[0].(*dns.CNAME).Target
 								continue
 							} else {
-								// seems that we have found the answer; cache it and return
+								// seems that we have found the answer; cache it and return.
+								// State explicitly None here (we have raw answer
+								// data but have not validated it). Callers that
+								// care about validation are expected to invoke
+								// the validator and update the cache entry's
+								// State on completion.
 								imr.Cache.Set(qname, qtype, &cache.CachedRRset{
 									Name:       qname,
 									RRtype:     qtype,
 									Rcode:      uint8(rcode),
 									RRset:      &rrset,
 									Context:    cache.ContextAnswer,
+									State:      cache.ValidationStateNone,
 									Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
 									Transport:  core.TransportDo53, // AuthDNSQuery path - default to Do53
 								})
@@ -425,6 +431,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 								RRtype:    qtype,
 								RRset:     nil,
 								Context:   cache.ContextNXDOMAIN,
+								State:     cache.ValidationStateNone,
 								Transport: core.TransportDo53, // AuthDNSQuery path - default to Do53
 							})
 							return nil, rcode, context, nil
@@ -453,6 +460,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 				Rcode:      uint8(rcode),
 				RRset:      &rrset,
 				Context:    cache.ContextAnswer,
+				State:      cache.ValidationStateNone,
 				Expiration: time.Now().Add(cache.GetMinTTL(rrset.RRs)),
 				Transport:  core.TransportDo53, // AuthDNSQuery path - default to Do53
 			})
@@ -493,6 +501,7 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 									RRs:    []dns.RR{dns.Copy(rr)},
 								},
 								Context:    cache.ContextNoErrNoAns,
+								State:      cache.ValidationStateNone,
 								Transport:  core.TransportDo53, // AuthDNSQuery path - default to Do53
 								Expiration: time.Now().Add(time.Duration(rr.Header().Ttl) * time.Second),
 							})

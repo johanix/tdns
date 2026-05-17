@@ -294,9 +294,13 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 		return ValidationStateNone, fmt.Errorf("rrset is nil; nothing to validate")
 	}
 
-	// Check cache first - if we already have this RRset validated and it hasn't changed or expired, reuse the validation state
+	// Check cache first - if we already have this RRset validated and it hasn't changed or expired, reuse the validation state.
+	// Note: the ValidationState enum starts at iota+1, so the zero value
+	// (Go-default-initialised) is 0, NOT ValidationStateNone (=1). A cached
+	// entry written without an explicit State field has State==0 and must be
+	// treated as "not validated yet", not as a usable cached verdict.
 	cached := rrcache.Get(rrset.Name, rrset.RRtype)
-	if cached != nil && cached.State != ValidationStateNone {
+	if cached != nil && cached.State > ValidationStateNone {
 		// Get() already checks expiration and returns nil if expired, so if cached is not nil, it's not expired
 		// But we double-check expiration to be explicit about the semantics
 		if cached.Expiration.Before(time.Now()) {
