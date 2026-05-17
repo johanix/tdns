@@ -358,7 +358,7 @@ func recordParentDSTTLObservation(zone string, pol *DnssecPolicy, rrs []dns.RR) 
 // on cache retention. Using max would over-pessimize E10/E11 lead
 // times based on a TTL the cache will never actually honor.
 //
-// See guide/rapid-key-rollover.md §4.6 for the same discussion.
+// See guide/rollover-timing-equations.md §6 for the same discussion.
 func minDSTTL(rrs []dns.RR) uint32 {
 	var min uint32
 	for _, rr := range rrs {

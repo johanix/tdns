@@ -19,15 +19,28 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   detailed documentation for each.
 
 - [TDNS Special Features and Extensions](special-features.md)
-  -- Delegation sync, DNS transport signaling, experimental
-  record types.
+  -- Delegation sync (both parent and child sides, including
+  the DSYNC scheme dispatch, the NOTIFY scanner, and the
+  pluggable delegation backends), DNS transport signaling,
+  experimental record types, and post-quantum algorithm
+  support (ML-DSA / SLH-DSA / Falcon / MAYO / SNOVA for both
+  SIG(0) and DNSSEC).
 
-- [Rapid Automated KSK Rollover](rapid-key-rollover.md)
-  -- Operator how-to for configuring tdns to perform automated
-  KSK rollovers on any cadence, from seconds-apart for testbeds
-  to monthly for stable production. Covers the three-knob mental
-  model (TTLs, KSK lifetime, RRSIG validity), how each maps to
-  configuration parameters, and concrete example configs.
+- [Automatic DNSSEC Key Rollovers](key-rollover.md)
+  -- Operator manual for the automated KSK rollover engine,
+  covering policy YAML, the `auto-rollover` CLI subcommand
+  tree, the status output, PQ-safe parent UPDATEs,
+  DSYNC-aware dispatch and verification, the three-knob
+  mental model (TTLs, KSK lifetime, RRSIG validity), worked
+  examples at testbed, weekly, and monthly cadences, and
+  the failure-category model.
+
+- [Rollover Timing Equations](rollover-timing-equations.md)
+  -- Canonical reference for the cache-flush invariants,
+  the parent-DS-RRset contract, and the timing equations
+  (E1-E13) that the rollover engine must satisfy.
+  Companion to the key-rollover guide above; required
+  reading when changing engine timing behaviour.
 
 - Future Work (coming soon)
   -- IXFR support, TSIG authentication, scanner integration

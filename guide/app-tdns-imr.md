@@ -15,14 +15,15 @@ Features:
 
 - supports modern DNS transports (DoT, DoH and DoQ) in addition to Do53 (UDP/TCP).
 
-Planned, not yet implemented:
-
-- Understand and cache ALPN signaling from authoritative nameservers via the
-  opportunistic inclusion of an SVCB record in the Additional section on
-  responses.
-
-- Use authoritative nameserver preferred transport (if any, from the cached
-  ALPN data).
+- consumes transport signals from authoritative nameservers — when an
+  SVCB record at `_dns.<ns>` arrives in the Additional section (or via
+  active discovery, see `query-for-transport` /
+  `always-query-for-transport`), tdns-imr parses SvcParam key 65280,
+  updates the server's transport preferences in the referral cache, and
+  promotes the connection mode to "opportunistic" so subsequent queries
+  attempt the preferred encrypted transport. TSYNC is supported as an
+  alternative carrier. See section 2 of
+  [TDNS Special Features](special-features.md) for the full picture.
 
 The **tdns-imr** interactive CLI has the following implemented or planned
 features:
