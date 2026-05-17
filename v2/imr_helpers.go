@@ -20,6 +20,24 @@ const (
 	transportQueryReasonNewServer   = "new-auth-server"
 )
 
+// asyncContextFromQuery returns a context for fire-and-forget background
+// work spawned during a query (NS revalidation, transport-signal discovery,
+// TLSA discovery). It is decoupled from the parent's cancel signal — so
+// when the foreground IterativeDNSQuery returns and its W2 budget timeout's
+// deferred cancel fires, the background goroutine keeps running — but
+// inherits the parent's values. A safety timeout bounds total wall-clock
+// time so a stuck background goroutine cannot leak forever.
+//
+// Without this detach the background work captures the foreground query's
+// short-lived context: as soon as the foreground returns, every in-flight
+// DNS query in the background fails with "context canceled" and validation
+// of e.g. an apex NS RRset cannot reach the signer's DNSKEYs. Before the
+// W2 query-budget wrap this didn't matter because the caller's ctx tended
+// to live for the duration of the API request.
+func asyncContextFromQuery(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), timeout)
+}
+
 func (imr *Imr) TransportSignalRRType() uint16 {
 	if imr == nil {
 		return dns.TypeSVCB
@@ -77,7 +95,7 @@ func (imr *Imr) launchTransportSignalQuery(ctx context.Context, owner string, re
 		return
 	}
 	go func() {
-		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		queryCtx, cancel := asyncContextFromQuery(ctx, 5*time.Second)
 		defer cancel()
 		rrtype := imr.TransportSignalRRType()
 		if imr.Cache.Debug {
@@ -112,7 +130,7 @@ func (imr *Imr) maybeQueryTLSA(ctx context.Context, base string) {
 			continue
 		}
 		go func(owner string) {
-			queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			queryCtx, cancel := asyncContextFromQuery(ctx, 5*time.Second)
 			defer cancel()
 			resp, err := imr.ImrQuery(queryCtx, owner, dns.TypeTLSA, dns.ClassINET, nil)
 			if err != nil || resp == nil || resp.RRset == nil || len(resp.RRset.RRs) == 0 {

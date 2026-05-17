@@ -2543,7 +2543,13 @@ func (imr *Imr) scheduleReferralNSRevalidation(ctx context.Context, zonename str
 	}
 	go func() {
 		defer imr.Cache.ClearNSRevalidation(zonename)
-		imr.revalidateReferralNS(ctx, zonename, snapshot)
+		// Detach from the caller's W2 query-budget context: the foreground
+		// IterativeDNSQuery returns long before this background chain walk
+		// completes, and its deferred cancel would otherwise kill every
+		// in-flight DNSKEY fetch this goroutine makes.
+		asyncCtx, cancel := asyncContextFromQuery(ctx, 60*time.Second)
+		defer cancel()
+		imr.revalidateReferralNS(asyncCtx, zonename, snapshot)
 	}()
 }
 
