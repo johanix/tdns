@@ -907,6 +907,85 @@ func maxInt(a, b int) int {
 	return b
 }
 
+// expandServerMapWithMissingNS resolves A/AAAA records for any NS names in
+// the qname's closest known zone that are missing from serverMap (or
+// present but with no addresses). Returns the number of addresses added
+// across all NS names.
+//
+// This is the fallback path for the case where the parent zone provided
+// glue only for in-bailiwick NS names but every in-bailiwick server is
+// unreachable: we then have to do explicit A/AAAA lookups for the
+// out-of-bailiwick names that the parent could not legally glue. Without
+// this fallback, the IMR returns "no Answers found" even though there are
+// other authoritative servers that would have answered, simply because
+// the parent's referral didn't include their addresses.
+//
+// Synchronous on purpose: only called after the optimistic try-all-known-
+// addresses pass has failed. Each ImrQuery here runs the normal chain
+// walk, which has its own W2 budget and is not bound by serverMap.
+func (imr *Imr) expandServerMapWithMissingNS(ctx context.Context, qname string, serverMap map[string]*cache.AuthServer) int {
+	if imr == nil || imr.Cache == nil || serverMap == nil {
+		return 0
+	}
+	zonename, _, _ := imr.Cache.FindClosestKnownZone(qname)
+	if zonename == "" {
+		return 0
+	}
+	crrset := imr.Cache.Get(zonename, dns.TypeNS)
+	if crrset == nil || crrset.RRset == nil || len(crrset.RRset.RRs) == 0 {
+		return 0
+	}
+	added := 0
+	for _, rr := range crrset.RRset.RRs {
+		ns, ok := rr.(*dns.NS)
+		if !ok {
+			continue
+		}
+		nsname := dns.Fqdn(ns.Ns)
+		srv, present := serverMap[nsname]
+		if present && len(srv.Addrs) > 0 {
+			continue // already have addresses, nothing to do
+		}
+		if srv == nil {
+			srv = imr.Cache.GetOrCreateAuthServer(nsname)
+			serverMap[nsname] = srv
+		}
+		before := len(srv.Addrs)
+		for _, atype := range []uint16{dns.TypeA, dns.TypeAAAA} {
+			select {
+			case <-ctx.Done():
+				return added
+			default:
+			}
+			resp, err := imr.ImrQuery(ctx, nsname, atype, dns.ClassINET, nil)
+			if err != nil || resp == nil || resp.RRset == nil {
+				continue
+			}
+			for _, addrRR := range resp.RRset.RRs {
+				var addrStr string
+				switch a := addrRR.(type) {
+				case *dns.A:
+					addrStr = a.A.String()
+				case *dns.AAAA:
+					addrStr = a.AAAA.String()
+				default:
+					continue
+				}
+				if addrStr == "" {
+					continue
+				}
+				srv.AddAddr(net.JoinHostPort(addrStr, "53"))
+			}
+		}
+		added += len(srv.Addrs) - before
+		if Globals.Debug && len(srv.Addrs) > before {
+			lgDns.Debug("expandServerMapWithMissingNS: resolved addresses for previously-unresolved NS",
+				"ns", nsname, "zone", zonename, "addresses", srv.Addrs)
+		}
+	}
+	return added
+}
+
 // force is true if we should force a lookup even if the answer is in the cache
 // visitedZones tracks which zones we've been referred to for this qname to prevent referral loops
 // requireEncrypted is true if PR flag is set and only encrypted transports should be used
@@ -1045,143 +1124,169 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 
 	// Prioritize (server, addr, transport) tuples. requireEncrypted is
 	// applied here so tryServer no longer needs to filter.
-	zoneName, zone, prioritized := imr.prioritizeServers(qname, serverMap, requireEncrypted)
-	if Globals.Debug {
-		lg.Printf("IterativeDNSQuery: prioritized %d (server,addr,transport) tuples (from %d servers)", len(prioritized), len(serverMap))
-	}
-
-	for _, tuple := range prioritized {
-		select {
-		case <-ctx.Done():
-			return nil, 0, cache.ContextFailure, core.TransportDo53, ctx.Err()
-		default:
-		}
-		server := tuple.Server
-		addr := tuple.Addr
-		nsname := tuple.NSName
-		transport := tuple.Transport
-
+	//
+	// Two-attempt outer loop: if the first pass exhausts every tuple
+	// without an answer, try resolving any NS names in the zone whose
+	// addresses were not provided as glue (typical for out-of-bailiwick
+	// NS where the parent legally cannot glue them), then re-prioritize
+	// with the expanded serverMap. Hard cap at 2 attempts to prevent
+	// loops if resolution keeps producing nothing.
+	var zoneName string
+	var zone *cache.Zone
+	var prioritized []ServerAddrXportTuple
+	for attempt := 0; attempt < 2; attempt++ {
+		zoneName, zone, prioritized = imr.prioritizeServers(qname, serverMap, requireEncrypted)
 		if Globals.Debug {
-			lg.Printf("IterativeDNSQuery: using nameserver %s@%s over %s (ALPN: %v) for <%s, %s> query\n",
-				addr, nsname, core.TransportToString[transport], server.Alpn, qname, dns.TypeToString[qtype])
+			lg.Printf("IterativeDNSQuery: prioritized %d (server,addr,transport) tuples (from %d servers) attempt=%d", len(prioritized), len(serverMap), attempt+1)
 		}
 
-		r, _, err := imr.tryServer(ctx, server, addr, transport, m, qname, qtype)
-		if err != nil {
-			if imr.Cache.Verbose {
-				// lg.Printf("IterativeDNSQuery: Error from dns.Exchange: %v (rtt: %v)", err, rtt)
-			}
-			continue // go to next tuple
-		}
-
-		if r == nil {
-			if Globals.Debug {
-				lg.Printf("IterativeDNSQuery: nil response from tryServer(dns.Exchange) qname=%s, qtype=%s", qname, dns.TypeToString[qtype])
-			}
-			continue
-		}
-
-		if Globals.Debug {
-			lg.Printf("IterativeDNSQuery: response from tryServer(dns.Exchange) qname=%s, qtype=%s:\n%s", qname, dns.TypeToString[qtype], PrintMsgFull(r, imr.LineWidth))
-		}
-
-		for _, hook := range getImrResponseHooks() {
-			hook(ctx, qname, qtype, server.Name, addr, transport, r, r.MsgHdr.Rcode)
-		}
-
-		rcode = r.MsgHdr.Rcode
-
-		// Lame-delegation rcodes: zone-scoped backoff for this (addr, transport).
-		// Other servers / other transports stay available.
-		switch rcode {
-		case dns.RcodeRefused, dns.RcodeNotAuth, dns.RcodeServerFailure, dns.RcodeNotImplemented:
-			if Globals.Debug {
-				lg.Printf("IterativeDNSQuery: %s response from %s@%s over %s for %s %s (likely lame delegation for zone %q)",
-					dns.RcodeToString[rcode], addr, nsname, core.TransportToString[transport], qname, dns.TypeToString[qtype], zoneName)
-			}
-			if zone != nil {
-				zone.RecordZoneAddressFailureForRcode(addr, transport, uint8(rcode), Globals.Debug)
-			} else {
-				server.RecordAddressFailureForRcode(addr, transport, uint8(rcode))
-			}
-			continue
-		case dns.RcodeSuccess:
-			if zone != nil {
-				zone.RecordZoneAddressSuccess(addr, transport)
-			}
-		default:
-			if zone != nil {
-				zone.RecordZoneAddressSuccess(addr, transport)
-			}
-		}
-
-		if len(r.Answer) != 0 {
-			// Parse any transport signal for this specific server even on final answers
-			// Note: server is a shared instance across all zones, so modifications are automatically visible everywhere
-			imr.parseTransportForServerFromAdditional(ctx, server, r)
-			tmprrset, rcode2, ctx2, transport2, err, done := imr.handleAnswer(ctx, qname, qtype, r, force, transport, requireEncrypted)
-			if err != nil || done {
-				return tmprrset, rcode2, ctx2, transport2, err
-			}
-			// If not done, fall-through to process referral glue embedded with answers
-			nsRRs, zonename, nsMap := extractReferral(r, qname, qtype)
-			if len(nsRRs.RRs) > 0 {
-				serverMap, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsRRs, zonename, nsMap, r)
-				if err != nil {
-					lgDns.Error("*** IterativeDNSQuery: Error from CollectNSAddressesFromAdditional",
-						"collectnsaddressesfromadditional", err)
-					return nil, rcode, cache.ContextFailure, transport, err
-				}
-				if len(serverMap) == 0 {
-					return nil, rcode, cache.ContextReferral, transport, nil
-				}
-				rrset, rcode, cacheCtx, transport, err := imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, force, visitedZones, requireEncrypted)
-				return rrset, rcode, cacheCtx, transport, err
-			}
-			continue
-		}
-
-		if len(r.Ns) != 0 {
-			kind := classifyResponse(qname, qtype, r)
-			lgDns.Debug("IterativeDNSQuery: classified response",
-				"qname", qname, "qtype", dns.TypeToString[qtype],
-				"kind", responseKindToString(kind), "rcode", dns.RcodeToString[rcode],
-				"answerCount", len(r.Answer), "authorityCount", len(r.Ns))
-
-			switch kind {
-			case responseKindNegativeNoData, responseKindNegativeNXDOMAIN:
-				if ctxNeg, rcodeNeg, handled := imr.handleNegative(qname, qtype, r, transport); handled {
-					return nil, rcodeNeg, ctxNeg, transport, nil
-				}
-				// If not handled, fall through to try next server
-				if rcode == dns.RcodeNameError {
-					lgDns.Debug("IterativeDNSQuery: NXDOMAIN response lacked usable SOA",
-						"qname", qname, "qtype", dns.TypeToString[qtype])
-				}
-				continue
-			case responseKindReferral:
-				return imr.handleReferral(ctx, qname, qtype, r, force, visitedZones, transport, requireEncrypted)
-			case responseKindError:
-				lgDns.Debug("IterativeDNSQuery: treating response as error",
-					"qname", qname, "qtype", dns.TypeToString[qtype],
-					"rcode", dns.RcodeToString[rcode])
-				continue
-			case responseKindUnknown:
-				lgDns.Debug("IterativeDNSQuery: responseKindUnknown, trying next server",
-					"qname", qname, "qtype", dns.TypeToString[qtype])
-				continue
+		for _, tuple := range prioritized {
+			select {
+			case <-ctx.Done():
+				return nil, 0, cache.ContextFailure, core.TransportDo53, ctx.Err()
 			default:
-				// Should not reach here, but be defensive
-				lgDns.Debug("IterativeDNSQuery: unexpected response kind, trying next server",
-					"kind", kind, "qname", qname, "qtype", dns.TypeToString[qtype])
+			}
+			server := tuple.Server
+			addr := tuple.Addr
+			nsname := tuple.NSName
+			transport := tuple.Transport
+
+			if Globals.Debug {
+				lg.Printf("IterativeDNSQuery: using nameserver %s@%s over %s (ALPN: %v) for <%s, %s> query\n",
+					addr, nsname, core.TransportToString[transport], server.Alpn, qname, dns.TypeToString[qtype])
+			}
+
+			r, _, err := imr.tryServer(ctx, server, addr, transport, m, qname, qtype)
+			if err != nil {
+				if imr.Cache.Verbose {
+					// lg.Printf("IterativeDNSQuery: Error from dns.Exchange: %v (rtt: %v)", err, rtt)
+				}
+				continue // go to next tuple
+			}
+
+			if r == nil {
+				if Globals.Debug {
+					lg.Printf("IterativeDNSQuery: nil response from tryServer(dns.Exchange) qname=%s, qtype=%s", qname, dns.TypeToString[qtype])
+				}
+				continue
+			}
+
+			if Globals.Debug {
+				lg.Printf("IterativeDNSQuery: response from tryServer(dns.Exchange) qname=%s, qtype=%s:\n%s", qname, dns.TypeToString[qtype], PrintMsgFull(r, imr.LineWidth))
+			}
+
+			for _, hook := range getImrResponseHooks() {
+				hook(ctx, qname, qtype, server.Name, addr, transport, r, r.MsgHdr.Rcode)
+			}
+
+			rcode = r.MsgHdr.Rcode
+
+			// Lame-delegation rcodes: zone-scoped backoff for this (addr, transport).
+			// Other servers / other transports stay available.
+			switch rcode {
+			case dns.RcodeRefused, dns.RcodeNotAuth, dns.RcodeServerFailure, dns.RcodeNotImplemented:
+				if Globals.Debug {
+					lg.Printf("IterativeDNSQuery: %s response from %s@%s over %s for %s %s (likely lame delegation for zone %q)",
+						dns.RcodeToString[rcode], addr, nsname, core.TransportToString[transport], qname, dns.TypeToString[qtype], zoneName)
+				}
+				if zone != nil {
+					zone.RecordZoneAddressFailureForRcode(addr, transport, uint8(rcode), Globals.Debug)
+				} else {
+					server.RecordAddressFailureForRcode(addr, transport, uint8(rcode))
+				}
+				continue
+			case dns.RcodeSuccess:
+				if zone != nil {
+					zone.RecordZoneAddressSuccess(addr, transport)
+				}
+			default:
+				if zone != nil {
+					zone.RecordZoneAddressSuccess(addr, transport)
+				}
+			}
+
+			if len(r.Answer) != 0 {
+				// Parse any transport signal for this specific server even on final answers
+				// Note: server is a shared instance across all zones, so modifications are automatically visible everywhere
+				imr.parseTransportForServerFromAdditional(ctx, server, r)
+				tmprrset, rcode2, ctx2, transport2, err, done := imr.handleAnswer(ctx, qname, qtype, r, force, transport, requireEncrypted)
+				if err != nil || done {
+					return tmprrset, rcode2, ctx2, transport2, err
+				}
+				// If not done, fall-through to process referral glue embedded with answers
+				nsRRs, zonename, nsMap := extractReferral(r, qname, qtype)
+				if len(nsRRs.RRs) > 0 {
+					serverMap, err := imr.ParseAdditionalForNSAddrs(ctx, "authority", nsRRs, zonename, nsMap, r)
+					if err != nil {
+						lgDns.Error("*** IterativeDNSQuery: Error from CollectNSAddressesFromAdditional",
+							"collectnsaddressesfromadditional", err)
+						return nil, rcode, cache.ContextFailure, transport, err
+					}
+					if len(serverMap) == 0 {
+						return nil, rcode, cache.ContextReferral, transport, nil
+					}
+					rrset, rcode, cacheCtx, transport, err := imr.IterativeDNSQueryWithLoopDetection(ctx, qname, qtype, serverMap, force, visitedZones, requireEncrypted)
+					return rrset, rcode, cacheCtx, transport, err
+				}
+				continue
+			}
+
+			if len(r.Ns) != 0 {
+				kind := classifyResponse(qname, qtype, r)
+				lgDns.Debug("IterativeDNSQuery: classified response",
+					"qname", qname, "qtype", dns.TypeToString[qtype],
+					"kind", responseKindToString(kind), "rcode", dns.RcodeToString[rcode],
+					"answerCount", len(r.Answer), "authorityCount", len(r.Ns))
+
+				switch kind {
+				case responseKindNegativeNoData, responseKindNegativeNXDOMAIN:
+					if ctxNeg, rcodeNeg, handled := imr.handleNegative(qname, qtype, r, transport); handled {
+						return nil, rcodeNeg, ctxNeg, transport, nil
+					}
+					// If not handled, fall through to try next server
+					if rcode == dns.RcodeNameError {
+						lgDns.Debug("IterativeDNSQuery: NXDOMAIN response lacked usable SOA",
+							"qname", qname, "qtype", dns.TypeToString[qtype])
+					}
+					continue
+				case responseKindReferral:
+					return imr.handleReferral(ctx, qname, qtype, r, force, visitedZones, transport, requireEncrypted)
+				case responseKindError:
+					lgDns.Debug("IterativeDNSQuery: treating response as error",
+						"qname", qname, "qtype", dns.TypeToString[qtype],
+						"rcode", dns.RcodeToString[rcode])
+					continue
+				case responseKindUnknown:
+					lgDns.Debug("IterativeDNSQuery: responseKindUnknown, trying next server",
+						"qname", qname, "qtype", dns.TypeToString[qtype])
+					continue
+				default:
+					// Should not reach here, but be defensive
+					lgDns.Debug("IterativeDNSQuery: unexpected response kind, trying next server",
+						"kind", kind, "qname", qname, "qtype", dns.TypeToString[qtype])
+					continue
+				}
+			}
+
+			if rcode == dns.RcodeSuccess {
+				return &rrset, rcode, cache.ContextFailure, transport, nil // no point in continuing
+			}
+			continue
+		}
+		// Tuple loop exhausted without an answer. On the first attempt,
+		// try to resolve any NS names in this zone whose addresses are
+		// missing (typical for out-of-bailiwick NS that the parent could
+		// not glue) and retry. If nothing new was added, give up.
+		if attempt == 0 {
+			added := imr.expandServerMapWithMissingNS(ctx, qname, serverMap)
+			if added > 0 {
+				if Globals.Debug {
+					lg.Printf("IterativeDNSQuery: expanded serverMap with %d previously-unresolved NS addresses; retrying", added)
+				}
 				continue
 			}
 		}
-
-		if rcode == dns.RcodeSuccess {
-			return &rrset, rcode, cache.ContextFailure, transport, nil // no point in continuing
-		}
-		continue
+		break
 	}
 	// If we get here, we tried all servers but none succeeded
 	// If PR flag was set, this might be because no encrypted transport was available

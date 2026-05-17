@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -14,6 +15,7 @@ import (
 
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
+	"github.com/miekg/dns"
 )
 
 // TestCandidateTransports_SinglePreferred: when only one transport is
@@ -266,6 +268,86 @@ func TestPrioritizeServers_SuspectFamilyDeprioritized(t *testing.T) {
 			break
 		}
 	}
+}
+
+// TestExpandServerMapWithMissingNS_EarlyExits exercises the helper's
+// short-circuit paths: nothing to do when the cache has no NS RRset for
+// the closest known zone, when every NS name in the RRset is already in
+// serverMap with addresses, or when serverMap is nil. The full
+// resolve-and-merge path needs a working IMR (network) so it is left to
+// live verification.
+func TestExpandServerMapWithMissingNS_EarlyExits(t *testing.T) {
+	imr := newTestImr(t)
+
+	// 1. Empty serverMap, no zone known -> 0 added.
+	got := imr.expandServerMapWithMissingNS(context.Background(), "anything.example.", map[string]*cache.AuthServer{})
+	if got != 0 {
+		t.Errorf("no closest known zone: expected 0 added, got %d", got)
+	}
+
+	// 2. Closest zone known but no NS RRset cached -> 0 added.
+	imr.Cache.ZoneMap.Set("example.", &cache.Zone{ZoneName: "example."})
+	got = imr.expandServerMapWithMissingNS(context.Background(), "anything.example.", map[string]*cache.AuthServer{})
+	if got != 0 {
+		t.Errorf("no cached NS RRset: expected 0 added, got %d", got)
+	}
+
+	// 3. NS RRset present but every NS name already has addresses in serverMap.
+	nsRR, _ := dns.NewRR("example. 3600 IN NS ns1.example.")
+	imr.Cache.Set("example.", dns.TypeNS, &cache.CachedRRset{
+		Name:    "example.",
+		RRtype:  dns.TypeNS,
+		Context: cache.ContextAnswer,
+		State:   cache.ValidationStateNone,
+		RRset: &core.RRset{
+			Name:   "example.",
+			Class:  dns.ClassINET,
+			RRtype: dns.TypeNS,
+			RRs:    []dns.RR{nsRR},
+		},
+		Expiration: time.Now().Add(time.Hour),
+	})
+	srv := cache.NewAuthServer("ns1.example.")
+	srv.SetAddrs([]string{"10.0.0.1:53"})
+	sm := map[string]*cache.AuthServer{"ns1.example.": srv}
+	got = imr.expandServerMapWithMissingNS(context.Background(), "thing.example.", sm)
+	if got != 0 {
+		t.Errorf("all NS already resolved: expected 0 added, got %d", got)
+	}
+
+	// 4. nil serverMap is a safe no-op.
+	got = imr.expandServerMapWithMissingNS(context.Background(), "thing.example.", nil)
+	if got != 0 {
+		t.Errorf("nil serverMap: expected 0 added, got %d", got)
+	}
+
+	// 5. ctx already canceled -> 0 added (helper short-circuits in the per-NS
+	// resolution loop).
+	imr.Cache.Set("other.", dns.TypeNS, &cache.CachedRRset{
+		Name: "other.", RRtype: dns.TypeNS,
+		Context: cache.ContextAnswer, State: cache.ValidationStateNone,
+		RRset: &core.RRset{
+			Name: "other.", Class: dns.ClassINET, RRtype: dns.TypeNS,
+			RRs: []dns.RR{mustNSRR(t, "other. 3600 IN NS unresolved.other.")},
+		},
+		Expiration: time.Now().Add(time.Hour),
+	})
+	imr.Cache.ZoneMap.Set("other.", &cache.Zone{ZoneName: "other."})
+	cctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got = imr.expandServerMapWithMissingNS(cctx, "thing.other.", map[string]*cache.AuthServer{})
+	if got != 0 {
+		t.Errorf("canceled ctx: expected 0 added, got %d", got)
+	}
+}
+
+func mustNSRR(t *testing.T, s string) dns.RR {
+	t.Helper()
+	rr, err := dns.NewRR(s)
+	if err != nil {
+		t.Fatalf("dns.NewRR: %v", err)
+	}
+	return rr
 }
 
 // newTestImr returns a minimal Imr suitable for prioritizeServers tests.
