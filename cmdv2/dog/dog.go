@@ -106,6 +106,7 @@ var rootCmd = &cobra.Command{
 				serial = uint32(tmp)
 				rrtype = dns.TypeIXFR // Set rrtype so the later switch on rrtype triggers IXFR logic
 				fmt.Printf("RRtype is IXFR, using base serial %d\n", serial)
+				continue
 			}
 
 			if strings.HasPrefix(ucarg, "+") {
@@ -205,7 +206,12 @@ var rootCmd = &cobra.Command{
 			// (which must be a recursive resolver). Walker output is
 			// a structured per-link tree; no normal answer is printed.
 			if options["sigchase"] == "true" {
-				chaserClient := core.NewDNSClient(core.TransportDo53, options["port"], nil)
+				chaserTransport, err := core.StringToTransport(options["transport"])
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: invalid transport %s: %v\n", options["transport"], err)
+					os.Exit(1)
+				}
+				chaserClient := core.NewDNSClient(chaserTransport, options["port"], nil)
 				// Resolve trust anchors via the standard priority chain:
 				//   --trust-anchor flag → IMR config → compiled-in.
 				taLogf := func(format string, args ...any) {
