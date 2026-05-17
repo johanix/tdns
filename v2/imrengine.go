@@ -1412,33 +1412,23 @@ func (imr *Imr) parseTrustAnchorsFromConfig(conf *Config) (map[string][]*dns.DS,
 		lgImr.Info("configured DS trust anchor", "zone", name, "keytag", ds.KeyTag, "digesttype", ds.DigestType)
 	}
 
-	// If trust-anchor-file is provided, read and parse all RRs
+	// If trust-anchor-file is provided, read and parse all RRs via
+	// the shared parser in cache/trustanchor.go. dog +sigchase uses
+	// the same parser, so any format quirks are handled in one place.
 	if taFile != "" {
-		data, err := os.ReadFile(taFile)
+		fileDS, fileKeys, err := cache.LoadTrustAnchorsFromFile(taFile, func(format string, args ...any) {
+			lgImr.Warn(fmt.Sprintf("trust-anchor-file %s: "+format, append([]any{taFile}, args...)...))
+		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to read trust-anchor-file %q: %v", taFile, err)
 		}
-		lines := strings.Split(string(data), "\n")
-		for _, ln := range lines {
-			s := strings.TrimSpace(ln)
-			if s == "" || strings.HasPrefix(s, ";") || strings.HasPrefix(s, "#") {
-				continue
-			}
-			rr, err := dns.NewRR(s)
-			if err != nil {
-				lgImr.Warn("skipping unparsable line in trust anchor file", "file", taFile, "line", s, "err", err)
-				continue
-			}
-			switch t := rr.(type) {
-			case *dns.DNSKEY:
-				name := dns.Fqdn(t.Hdr.Name)
-				dnskeysByName[name] = append(dnskeysByName[name], t)
-			case *dns.DS:
-				name := dns.Fqdn(t.Hdr.Name)
-				dsByName[name] = append(dsByName[name], t)
-			default:
-				lgImr.Warn("ignoring non-TA RR in trust anchor file", "file", taFile, "rr", rr.String())
-			}
+		for _, ds := range fileDS {
+			name := dns.Fqdn(ds.Hdr.Name)
+			dsByName[name] = append(dsByName[name], ds)
+		}
+		for _, k := range fileKeys {
+			name := dns.Fqdn(k.Hdr.Name)
+			dnskeysByName[name] = append(dnskeysByName[name], k)
 		}
 	}
 

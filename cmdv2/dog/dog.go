@@ -32,6 +32,7 @@ var port = "53"
 
 var server string
 var cfgFile string
+var trustAnchorFile string // -k / --trust-anchor
 
 var options = make(map[string]string, 2)
 
@@ -205,7 +206,30 @@ var rootCmd = &cobra.Command{
 			// a structured per-link tree; no normal answer is printed.
 			if options["sigchase"] == "true" {
 				chaserClient := core.NewDNSClient(core.TransportDo53, options["port"], nil)
-				chaser := tdns.NewChaser(chaserClient, options["server"])
+				// Resolve trust anchors via the standard priority chain:
+				//   --trust-anchor flag → IMR config → compiled-in.
+				taLogf := func(format string, args ...any) {
+					if tdns.Globals.Verbose {
+						fmt.Fprintf(os.Stderr, format+"\n", args...)
+					}
+				}
+				dss, keys, taSource := tdns.LoadDefaultTrustAnchors(trustAnchorFile, taLogf)
+				// Some TA files (autotrust / RFC 5011 managed) hold DNSKEY
+				// records rather than DS. Convert each KSK DNSKEY to its
+				// SHA-256 DS equivalent so the chaser, which keys off DS,
+				// can anchor the root regardless of file format.
+				for _, k := range keys {
+					if k.Flags&dns.SEP == 0 {
+						continue
+					}
+					if ds := k.ToDS(dns.SHA256); ds != nil {
+						dss = append(dss, ds)
+					}
+				}
+				if tdns.Globals.Verbose {
+					fmt.Fprintf(os.Stderr, ";; trust anchor source: %s (%d DS records, %d DNSKEYs)\n", taSource, len(dss), len(keys))
+				}
+				chaser := tdns.NewChaser(chaserClient, options["server"], dss)
 				result, err := chaser.Chase(qname, rrtype)
 				if err != nil {
 					fmt.Fprintf(os.Stderr, "Error: chase failed: %v\n", err)
@@ -401,6 +425,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debugging output")
 	rootCmd.PersistentFlags().BoolVarP(&short, "short", "", false, "Only list RRs that are part of the Answer section")
 	rootCmd.PersistentFlags().StringVarP(&port, "port", "p", "53", "Port to send DNS query to")
+	rootCmd.PersistentFlags().StringVarP(&trustAnchorFile, "trust-anchor", "k", "", "Path to DNSSEC trust anchor file (zone-file format DS or DNSKEY records). Used by +sigchase. Default: read from "+tdns.DefaultImrCfgFile+" or fall back to compiled-in root KSK DS records.")
 }
 
 func ProcessOptions(options map[string]string, ucarg string) (map[string]string, error) {

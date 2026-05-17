@@ -83,12 +83,25 @@ type ChainResult struct {
 type Chaser struct {
 	Client core.DNSClienter // any DNSClienter implementation (W5)
 	Server string           // bare host, the client adds the port
+	// TrustAnchors hold the operator-trusted DS records keyed by zone
+	// name (typically just "." for root). Used to validate the root
+	// (or other configured TA's) DNSKEY at the top of the chain so
+	// the root link reports Secure instead of Indeterminate. nil =
+	// no anchors configured; the root link stays Indeterminate.
+	TrustAnchors map[string][]*dns.DS
 }
 
 // NewChaser returns a Chaser that talks to the given recursive resolver
-// via the supplied DNSClienter.
-func NewChaser(client core.DNSClienter, server string) *Chaser {
-	return &Chaser{Client: client, Server: server}
+// via the supplied DNSClienter. trustAnchors is optional; pass nil to
+// run without TA verification (the root link will then be reported as
+// Indeterminate).
+func NewChaser(client core.DNSClienter, server string, trustAnchors []*dns.DS) *Chaser {
+	tas := map[string][]*dns.DS{}
+	for _, ds := range trustAnchors {
+		name := dns.Fqdn(ds.Hdr.Name)
+		tas[name] = append(tas[name], ds)
+	}
+	return &Chaser{Client: client, Server: server, TrustAnchors: tas}
 }
 
 // Chase walks the chain from the root toward qname and verifies each
@@ -166,11 +179,38 @@ func (c *Chaser) Chase(qname string, qtype uint16) (*ChainResult, error) {
 				link.Notes = append(link.Notes, "DS at parent has no matching DNSKEY (or DNSKEY RRSIG failed)")
 				result.Status = worstStatus(result.Status, ChainStatusBogus)
 			}
+		} else if tas := c.TrustAnchors[zone]; len(tas) > 0 {
+			// TA-anchored zone (typically root). Treat the configured
+			// DS records exactly the same way as a parent's
+			// referral-supplied DS: match against the zone's DNSKEY
+			// RRset and validate the RRset's signature with the
+			// matched KSK. This is what makes the root link reach
+			// Secure for a fully-signed chain.
+			link.DS = tas
+			rrsetForValidate := dnskeyRRsetForValidator(zone, dnskeys, sigs)
+			matched := false
+			for _, ds := range tas {
+				ok, ksk := cache.ValidateDNSKEYRRsetUsingDS(rrsetForValidate, ds, zone, false)
+				if ok && ksk != nil {
+					link.MatchedKSK = ksk
+					link.Status = ChainStatusSecure
+					link.Notes = append(link.Notes, fmt.Sprintf("trust-anchor DS keytag=%d matches KSK; DNSKEY RRset signature OK", ds.KeyTag))
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				link.Status = ChainStatusBogus
+				link.Notes = append(link.Notes, "trust-anchor DS has no matching DNSKEY at this zone (KSK rolled? wrong TA?)")
+				result.Status = worstStatus(result.Status, ChainStatusBogus)
+			}
 		} else {
-			// Root: no DS to match (TA would supply this); mark as
-			// Indeterminate at the root unless a TA check is wired in.
+			// No TA configured for this zone (typically the root).
+			// Without a TA we have no way to anchor the chain; report
+			// the link as Indeterminate so the overall verdict
+			// reflects the missing anchor.
 			link.Status = ChainStatusIndeterminate
-			link.Notes = append(link.Notes, "root link: no trust-anchor verification performed in this version")
+			link.Notes = append(link.Notes, "no trust anchor configured for this zone")
 			result.Status = worstStatus(result.Status, ChainStatusIndeterminate)
 		}
 		result.Links = append(result.Links, link)
