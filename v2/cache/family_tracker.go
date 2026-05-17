@@ -53,9 +53,23 @@ type FamilyStatsSnapshot struct {
 }
 
 // NewFamilyTracker constructs a tracker with the given knobs. All durations
-// must be > 0; threshold must be > 0. Caller is responsible for sourcing
-// these from ImrTuningConf.AddressFamily.
+// must be > 0 and threshold > 0; non-positive values are silently clamped to
+// safe minima so a misconfigured caller can never disable the tracker or
+// trip a divide-by-zero / "probe always allowed" foot-gun. Values are
+// sourced from ImrTuningConf.AddressFamily via InitImrEngine.
 func NewFamilyTracker(window, suspect, probe time.Duration, threshold int) *FamilyTracker {
+	if window <= 0 {
+		window = time.Minute
+	}
+	if suspect <= 0 {
+		suspect = time.Minute
+	}
+	if probe <= 0 {
+		probe = time.Second
+	}
+	if threshold <= 0 {
+		threshold = 1
+	}
 	return &FamilyTracker{
 		window:          window,
 		threshold:       threshold,

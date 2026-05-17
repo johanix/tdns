@@ -175,6 +175,32 @@ func TestFamilyTracker_UnknownFamilyIgnored(t *testing.T) {
 	}
 }
 
+// TestFamilyTracker_NewClampsBadInputs verifies that NewFamilyTracker
+// silently replaces non-positive values with safe minima rather than
+// returning a tracker that misbehaves at runtime (probe always allowed,
+// divide-by-zero in window math, etc.).
+func TestFamilyTracker_NewClampsBadInputs(t *testing.T) {
+	ft := NewFamilyTracker(0, -1*time.Second, 0, 0)
+	if ft.window <= 0 {
+		t.Errorf("window not clamped: got %v", ft.window)
+	}
+	if ft.suspectDuration <= 0 {
+		t.Errorf("suspectDuration not clamped: got %v", ft.suspectDuration)
+	}
+	if ft.probeInterval <= 0 {
+		t.Errorf("probeInterval not clamped: got %v", ft.probeInterval)
+	}
+	if ft.threshold <= 0 {
+		t.Errorf("threshold not clamped: got %d", ft.threshold)
+	}
+	// Sanity: a tracker built with clamped defaults still functions —
+	// one failure with threshold=1 should immediately mark suspect.
+	ft.RecordResult(v6Addr, false)
+	if !ft.IsSuspect(FamilyV6) {
+		t.Error("clamped threshold=1 should trip on first failure")
+	}
+}
+
 // TestFamilyTracker_NilSafe verifies the nil receiver is safe — callers may
 // pass a nil tracker (e.g. in tests / boot paths) without panicking.
 func TestFamilyTracker_NilSafe(t *testing.T) {
