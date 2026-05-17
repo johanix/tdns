@@ -274,7 +274,31 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 // handleRecursorRequest answers a single RecursorCh request. Runs
 // on its own goroutine spawned by the engine loop. Cache hits are
 // answered directly; everything else falls through to ImrQuery.
+//
+// Defensive: a top-level recover ensures that any panic in this
+// goroutine logs and reports an error to the caller rather than
+// killing the whole process. tdns-auth and tdns-mp embed this
+// engine and a panic here previously took down the server.
 func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq ImrRequest) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			lgImr.Error("handleRecursorRequest: PANIC recovered",
+				"qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype],
+				"panic", fmt.Sprintf("%v", rec))
+			// Try to send an error response so the caller doesn't hang.
+			// Non-blocking: if the response channel is full or closed, drop.
+			if rrq.ResponseCh != nil {
+				select {
+				case rrq.ResponseCh <- ImrResponse{
+					Error:    true,
+					ErrorMsg: fmt.Sprintf("IMR recovered from panic: %v", rec),
+				}:
+				default:
+				}
+			}
+		}
+	}()
+
 	lgImr.Debug("received query", "qname", rrq.Qname, "qclass", dns.ClassToString[rrq.Qclass], "qtype", dns.TypeToString[rrq.Qtype])
 	if imr.DebugLog != nil {
 		imr.DebugLog.Printf("QUERY qname=%s qtype=%s", rrq.Qname, dns.TypeToString[rrq.Qtype])
@@ -344,14 +368,28 @@ func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq ImrRequest) {
 	lgImr.Debug("not in cache, querying", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
 	resp, err := imr.ImrQuery(ctx, rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
 	if err != nil {
-		lgImr.Error("ImrQuery failed", "err", err)
-	} else if resp == nil {
-		resp = &ImrResponse{
-			Error:    true,
-			ErrorMsg: "ImrEngine: no response from ImrQuery",
-		}
+		lgImr.Error("ImrQuery failed",
+			"qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "err", err)
 	}
-	sendResp(*resp)
+	sendResp(buildImrResponse(resp, err))
+}
+
+// buildImrResponse normalises an ImrQuery result tuple into a non-nil
+// ImrResponse value. CRITICAL: tdns-auth and tdns-mp embed the IMR engine
+// and previously crashed when this normalisation was inlined incorrectly:
+// the old code dereferenced *resp after `err != nil` without first
+// initialising resp, panicking on the deref and (with no recover()) taking
+// down the whole process. The W2 context-cancel cascade made that trigger
+// constantly. Lifted to a pure helper so the regression is testable
+// without driving the full engine.
+func buildImrResponse(resp *ImrResponse, err error) ImrResponse {
+	if err != nil {
+		return ImrResponse{Error: true, ErrorMsg: err.Error()}
+	}
+	if resp == nil {
+		return ImrResponse{Error: true, ErrorMsg: "ImrEngine: no response from ImrQuery"}
+	}
+	return *resp
 }
 
 // upgradeIndirectCacheHits reports whether cache hits whose context

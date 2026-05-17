@@ -203,6 +203,30 @@ func createAuthDnsHandler(ctx context.Context, conf *Config) func(w dns.Response
 	dnsqueryq := conf.Internal.DnsQueryQ // NOTE: Only used by original tdns-kdc (before repo split). New dzm/tdns-kdc uses RegisterQueryHandler.
 
 	return func(w dns.ResponseWriter, r *dns.Msg) {
+		// Defensive: catch any panic in the auth-side DNS handler chain so
+		// a bug in zone lookup, signing, IMR delegation, etc. returns
+		// SERVFAIL to the client instead of crashing the process. tdns-auth
+		// + tdns-mp both reach this handler from a per-connection
+		// goroutine, and an unrecovered panic in any handler chain takes
+		// down the entire server. ns1.p.axfr.net crashed exactly this way
+		// when the IMR's nil-resp deref propagated up.
+		defer func() {
+			if rec := recover(); rec != nil {
+				qname := ""
+				if r != nil && len(r.Question) > 0 {
+					qname = r.Question[0].Name
+				}
+				lgDns.Error("DnsHandler: PANIC recovered — returning SERVFAIL",
+					"qname", qname, "remoteaddr", w.RemoteAddr(),
+					"panic", fmt.Sprintf("%v", rec))
+				// Best-effort SERVFAIL. If w is already broken / written, ignore.
+				defer func() { _ = recover() }()
+				resp := new(dns.Msg)
+				resp.SetRcode(r, dns.RcodeServerFailure)
+				_ = w.WriteMsg(resp)
+			}
+		}()
+
 		lgDns.Debug("DnsHandler: received DNS message", "remoteaddr", w.RemoteAddr(),
 			"id", r.MsgHdr.Id, "opcode", dns.OpcodeToString[r.Opcode],
 			"questions", len(r.Question), "additional", len(r.Extra))
