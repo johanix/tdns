@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	mrand "math/rand/v2"
 	"net"
 	"slices"
 	"sort"
@@ -2592,7 +2593,50 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 			}
 			oobRRset.RRs = append(oobRRset.RRs, rr)
 		}
+		// Depth-aware resolution budget: it matters more to find good
+		// addresses near the root because each TLD / SLD NS is reused
+		// across millions of downstream queries; a name deep in the
+		// long tail benefits only the few queries that touch it. So
+		// resolve more aggressively at shallow depths and back off as
+		// we descend.
+		//
+		//   depth(child) ≤ nsLookupShallowDepth → nsLookupBudgetShallow
+		//                 lookups per pass (default 3, applies to TLDs
+		//                 like net. and SLDs like axfr.net.)
+		//   depth(child) >  nsLookupShallowDepth → nsLookupBudgetDeep
+		//                 lookups per pass (default 1, applies from
+		//                 the third label down)
+		//
+		// "Per pass" = once per referral that delegates into this zone.
+		// Frequently-visited zones converge to full coverage quickly;
+		// rarely-visited deep zones converge slowly. Backwaters that
+		// never get visited stay sparsely resolved — that's correct,
+		// the cost wouldn't be amortized over anything.
 		if len(oobRRset.RRs) > 0 {
+			budget := nsLookupBudgetDeep
+			if zoneDepth(zonename) <= nsLookupShallowDepth {
+				budget = nsLookupBudgetShallow
+			}
+			if len(oobRRset.RRs) > budget {
+				// Pick `budget` of them at random. Random spreads the
+				// resolution load across an IMR population that all
+				// hit the same parent.
+				mrand.Shuffle(len(oobRRset.RRs), func(i, j int) {
+					oobRRset.RRs[i], oobRRset.RRs[j] = oobRRset.RRs[j], oobRRset.RRs[i]
+				})
+				oobRRset.RRs = oobRRset.RRs[:budget]
+			}
+			if Globals.Debug {
+				picked := make([]string, 0, len(oobRRset.RRs))
+				for _, rr := range oobRRset.RRs {
+					if ns, ok := rr.(*dns.NS); ok {
+						picked = append(picked, ns.Ns)
+					}
+				}
+				lgDns.Debug("handleReferral: OOB resolution budget",
+					"zone", zonename, "depth", zoneDepth(zonename),
+					"budget", budget, "picked", picked)
+			}
 			if err := imr.CollectNSAddresses(ctx, &oobRRset, nil); err != nil {
 				lgDns.Error("*** handleReferral: Error from CollectNSAddresses (out-of-bailiwick)", "err", err)
 				// Non-fatal: we can still proceed with whatever glue we have.
@@ -2611,6 +2655,22 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 }
 
 const maxNSRevalidateServers = 3
+
+// Depth-aware OOB NS lookup budget. See handleReferral for the rationale.
+const (
+	nsLookupShallowDepth   = 2 // TLD (depth 1) and SLD (depth 2)
+	nsLookupBudgetShallow  = 3
+	nsLookupBudgetDeep     = 1
+)
+
+// zoneDepth returns the label depth of a zone name: 0 for root ".",
+// 1 for a TLD ("net."), 2 for an SLD ("axfr.net."), etc.
+func zoneDepth(zone string) int {
+	if zone == "" || zone == "." {
+		return 0
+	}
+	return len(dns.SplitDomainName(zone))
+}
 
 func (imr *Imr) scheduleReferralNSRevalidation(ctx context.Context, zonename string, serverMap map[string]*cache.AuthServer) {
 	if ctx == nil {

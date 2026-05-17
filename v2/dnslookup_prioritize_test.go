@@ -350,6 +350,57 @@ func mustNSRR(t *testing.T, s string) dns.RR {
 	return rr
 }
 
+// TestZoneDepth covers the depth labelling that drives the OOB NS
+// lookup budget in handleReferral.
+func TestZoneDepth(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{".", 0},
+		{"", 0},
+		{"net.", 1},
+		{"axfr.net.", 2},
+		{"p.axfr.net.", 3},
+		{"q.r.s.t.example.com.", 6},
+	}
+	for _, c := range cases {
+		if got := zoneDepth(c.in); got != c.want {
+			t.Errorf("zoneDepth(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+// TestNSLookupBudget covers the per-pass budget constants and shows
+// that the depth threshold maps the way we expect: TLDs and SLDs are
+// "shallow" (budget 3); third level and below are "deep" (budget 1).
+func TestNSLookupBudget(t *testing.T) {
+	pickBudget := func(zone string) int {
+		if zoneDepth(zone) <= nsLookupShallowDepth {
+			return nsLookupBudgetShallow
+		}
+		return nsLookupBudgetDeep
+	}
+	cases := []struct {
+		zone string
+		want int
+	}{
+		{"net.", nsLookupBudgetShallow},
+		{"com.", nsLookupBudgetShallow},
+		{"axfr.net.", nsLookupBudgetShallow},
+		{"example.com.", nsLookupBudgetShallow},
+		{"p.axfr.net.", nsLookupBudgetDeep},
+		{"a.b.example.com.", nsLookupBudgetDeep},
+		{"deep.a.b.c.example.com.", nsLookupBudgetDeep},
+	}
+	for _, c := range cases {
+		if got := pickBudget(c.zone); got != c.want {
+			t.Errorf("budget for zone %q (depth %d) = %d, want %d",
+				c.zone, zoneDepth(c.zone), got, c.want)
+		}
+	}
+}
+
 // newTestImr returns a minimal Imr suitable for prioritizeServers tests.
 // The cache is populated but no network clients are exercised. FamilyTracker
 // uses sensible defaults; tests that need to drive specific suspect/probe
