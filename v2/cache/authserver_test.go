@@ -93,6 +93,75 @@ func TestZoneAddrXportKeying(t *testing.T) {
 	}
 }
 
+// TestRTT_DecayOthersOnRecord verifies the exploration mechanism:
+// recording an RTT sample for one tuple multiplies every other tuple's
+// EMA by rttDecayFactor. Over many picks of one winner, alternates'
+// EMAs drift toward zero; once below the winner's actual EMA, the sort
+// will pick a loser and re-sample it. Test verifies the per-record
+// arithmetic and that the winner itself isn't decayed.
+func TestRTT_DecayOthersOnRecord(t *testing.T) {
+	as := NewAuthServer("rtt-decay.example.")
+	as.RecordRTT("1.2.3.4:53", core.TransportDo53, 100*time.Millisecond)
+	as.RecordRTT("5.6.7.8:53", core.TransportDo53, 200*time.Millisecond)
+	as.RecordRTT("9.9.9.9:53", core.TransportDo53, 300*time.Millisecond)
+
+	// Initial state: each has its own sample (no decay applied to peers
+	// of a brand-new key since they were recorded first; the LATEST
+	// record decays the prior ones).
+	// After the 9.9.9.9 record:
+	//   - 9.9.9.9 EMA = 300ms (untouched, just recorded)
+	//   - 5.6.7.8 EMA = 200ms × 0.98 = 196ms (decayed by 9.9.9.9 pick)
+	//   - 1.2.3.4 EMA = (decayed by 5.6.7.8 pick: 100 × 0.98 = 98)
+	//                   then again by 9.9.9.9 pick: 98 × 0.98 = 96.04ms
+	got1234, _ := as.GetRTT("1.2.3.4:53", core.TransportDo53)
+	got5678, _ := as.GetRTT("5.6.7.8:53", core.TransportDo53)
+	got9999, _ := as.GetRTT("9.9.9.9:53", core.TransportDo53)
+
+	if got9999 != 300*time.Millisecond {
+		t.Errorf("just-recorded EMA changed: 9.9.9.9 = %s, want 300ms", got9999)
+	}
+	want5678 := time.Duration(float64(200*time.Millisecond) * rttDecayFactor)
+	if got5678 != want5678 {
+		t.Errorf("5.6.7.8 EMA after 1 decay = %s, want %s", got5678, want5678)
+	}
+	want1234 := time.Duration(float64(time.Duration(float64(100*time.Millisecond)*rttDecayFactor)) * rttDecayFactor)
+	if got1234 != want1234 {
+		t.Errorf("1.2.3.4 EMA after 2 decays = %s, want %s", got1234, want1234)
+	}
+
+	// Pick the same winner again — winner unchanged, others decay once more.
+	as.RecordRTT("9.9.9.9:53", core.TransportDo53, 300*time.Millisecond)
+	got1234_2, _ := as.GetRTT("1.2.3.4:53", core.TransportDo53)
+	if got1234_2 >= got1234 {
+		t.Errorf("expected 1.2.3.4 EMA to decay further; before=%s after=%s", got1234, got1234_2)
+	}
+}
+
+// TestRTT_DecayCrossover verifies the exploration cross-over: with a
+// fast winner and a slower-but-not-much-slower loser, after enough picks
+// of the winner the loser's decayed EMA dips below the winner's,
+// allowing the sort path to pick it. This is the end-to-end behaviour
+// the decay mechanism is designed to produce.
+func TestRTT_DecayCrossover(t *testing.T) {
+	as := NewAuthServer("rtt-crossover.example.")
+	const winnerAddr = "1.1.1.1:53"
+	const loserAddr = "2.2.2.2:53"
+
+	// Winner is consistently 20ms, loser is 25ms (1.25x slower). With
+	// decay factor 0.98, loser's EMA needs to drop below 20ms = a factor
+	// of 20/25 = 0.8, so K such that 0.98^K < 0.8, K > log(0.8)/log(0.98)
+	// ≈ 11 picks of the winner.
+	as.RecordRTT(loserAddr, core.TransportDo53, 25*time.Millisecond)
+	for i := 0; i < 30; i++ {
+		as.RecordRTT(winnerAddr, core.TransportDo53, 20*time.Millisecond)
+	}
+	winnerRTT, _ := as.GetRTT(winnerAddr, core.TransportDo53)
+	loserRTT, _ := as.GetRTT(loserAddr, core.TransportDo53)
+	if loserRTT >= winnerRTT {
+		t.Errorf("after 30 winner picks expected loser EMA (%s) to drop below winner EMA (%s)", loserRTT, winnerRTT)
+	}
+}
+
 // TestSnapshotAddressBackoffs_KeyShape verifies the snapshot returns the
 // AddrXport-keyed map and only includes entries still in backoff.
 func TestSnapshotAddressBackoffs_KeyShape(t *testing.T) {

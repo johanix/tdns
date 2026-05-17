@@ -663,6 +663,14 @@ func (as *AuthServer) RecordAddressSuccess(addr string, t core.Transport) {
 // each new sample 25% weight and 75% to the running average.
 const rttEMAAlpha = 0.25
 
+// rttDecayFactor is the per-pick decay applied to every OTHER tuple's
+// EMA whenever RecordRTT is called for one tuple. Drives exploration:
+// see the comment in RecordRTT. 0.98 (~2% per pick) gives a slow loser
+// (200ms vs 20ms winner) ~114 picks of grace before it gets re-probed
+// — fast enough to notice topology changes within a few minutes of
+// steady traffic, slow enough to avoid thrashing.
+const rttDecayFactor = 0.98
+
 // RecordRTT folds a new observation into the running RTT estimate for the
 // given (address, transport). Non-positive rtts are ignored. Thread-safe.
 func (as *AuthServer) RecordRTT(addr string, t core.Transport, rtt time.Duration) {
@@ -687,6 +695,25 @@ func (as *AuthServer) RecordRTT(addr string, t core.Transport, rtt time.Duration
 	r.LastSample = rtt
 	r.LastSampleAt = time.Now()
 	as.RTTEstimates[key] = r
+
+	// Decay every OTHER tuple's EMA by rttDecayFactor. This is the
+	// exploration mechanism: pure-greedy RTT sort would make a winning
+	// tuple win forever, never re-probing its alternates even if they
+	// have gotten faster (or the winner has gotten slower). Decaying
+	// losers ~2% per pick of someone else means each loser's EMA drifts
+	// toward zero at a rate proportional to traffic volume; once a
+	// loser's decayed EMA dips below the winner's actual EMA, the sort
+	// picks it, it gets a fresh sample, and the system either re-ranks
+	// (it really did get faster) or partially restores its EMA via the
+	// usual alpha=0.25 averaging (still slow — but now we know that
+	// recently). Frequency of re-exploration auto-scales with query
+	// rate: busy servers re-probe quickly, quiet ones slowly.
+	for okey, or := range as.RTTEstimates {
+		if okey == key {
+			continue
+		}
+		or.EMA = time.Duration(float64(or.EMA) * rttDecayFactor)
+	}
 }
 
 // GetRTT returns the smoothed RTT estimate for the given (address, transport)
