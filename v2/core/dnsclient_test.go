@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -210,9 +211,12 @@ func TestExchange_Do53_DisableFallback_TC(t *testing.T) {
 		m.Truncated = true
 		_ = w.WriteMsg(m)
 	})
-	tcpCalled := false
+	// atomic.Bool: the TCP handler runs on the miekg/dns server goroutine,
+	// the assertion below runs on the test goroutine. A plain bool would
+	// race under -race.
+	var tcpCalled atomic.Bool
 	tcp := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
-		tcpCalled = true
+		tcpCalled.Store(true)
 		m := new(dns.Msg)
 		m.SetReply(r)
 		m.Answer = []dns.RR{aRR(qname, "192.0.2.3")}
@@ -233,7 +237,7 @@ func TestExchange_Do53_DisableFallback_TC(t *testing.T) {
 	if resp == nil || !resp.Truncated {
 		t.Fatalf("expected truncated UDP response without TCP fallback, got %v", resp)
 	}
-	if tcpCalled {
+	if tcpCalled.Load() {
 		t.Fatalf("TCP handler was invoked despite DisableFallback")
 	}
 }
@@ -243,9 +247,9 @@ func TestExchange_Do53_DisableFallback_Timeout(t *testing.T) {
 	udp := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
 		time.Sleep(2 * time.Second)
 	})
-	tcpCalled := false
+	var tcpCalled atomic.Bool
 	tcp := dns.HandlerFunc(func(w dns.ResponseWriter, r *dns.Msg) {
-		tcpCalled = true
+		tcpCalled.Store(true)
 		m := new(dns.Msg)
 		m.SetReply(r)
 		_ = w.WriteMsg(m)
@@ -262,7 +266,7 @@ func TestExchange_Do53_DisableFallback_Timeout(t *testing.T) {
 	if err == nil {
 		t.Fatalf("expected timeout error with DisableFallback set, got nil")
 	}
-	if tcpCalled {
+	if tcpCalled.Load() {
 		t.Fatalf("TCP handler was invoked despite DisableFallback")
 	}
 }
