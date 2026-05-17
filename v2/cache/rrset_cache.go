@@ -56,7 +56,7 @@ func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, cdr *CachedDnskeyRRs
 //
 // The returned cache has ready-to-use concurrent maps for RRsets, Servers, ServerMap, AuthServerMap, ZoneMap and a reference to the global DnskeyCache, along with per-transport DNS clients (Do53, DoT, DoH, DoQ) using standard ports. The provided logger is used for cache logging; the verbose and debug flags enable their respective logging modes.
 func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
-	var client = map[core.Transport]*core.DNSClient{}
+	var client = map[core.Transport]core.DNSClienter{}
 
 	client[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, "53", nil)
 	client[core.TransportDoT] = core.NewDNSClient(core.TransportDoT, "853", nil)

@@ -1459,7 +1459,7 @@ restart.
 | W2 Quick wins bundle         | landed (22305af) | (branch imr-overhaul) | S3+S10+S11 |
 | W3 Cache-upgrade policy      | landed (4b0c2b1) | (branch imr-overhaul) | |
 | W4 Observability v1          | landed (32cf1f0) | (branch imr-overhaul) | |
-| W5 DNSClient interface       | not started | - | Enables W6+ tests |
+| W5 DNSClient interface       | landed | (branch imr-overhaul) | Enables W6+ tests; tryServer collapsed to single Exchange call |
 | W6 (addr,transport) refactor | not started | - | Largest item; depends on W5 |
 | W7 RTT                       | not started | - | Depends on W6 |
 | W8 Address-family tracker    | not started | - | Depends on W1 |

@@ -52,7 +52,7 @@ type RRsetCacheT struct {
 	AuthServerMap *core.ConcurrentMap[string, *AuthServer]            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
 	ZoneMap       *core.ConcurrentMap[string, *Zone]                  // map[zone]*Zone
 	DnskeyCache   *DnskeyCacheT
-	DNSClient     map[core.Transport]*core.DNSClient
+	DNSClient     map[core.Transport]core.DNSClienter
 	//Options                map[ImrOption]string
 	Primed                 bool
 	Logger                 *log.Logger
