@@ -47,7 +47,7 @@ var defaultPorts = map[string]string{
 var rootCmd = &cobra.Command{
 	Use:   "dog",
 	Short: "CLI utility used issue DNS queries and present the result",
-	Long:  `dog is a CLI utility used issue DNS queries and present the result.
+	Long: `dog is a CLI utility used issue DNS queries and present the result.
 	
 	Options:
 		+DNSSEC: Set the DO (DNSEC OK) bit in queries
@@ -96,16 +96,16 @@ var rootCmd = &cobra.Command{
 				continue
 			}
 
-		if strings.HasPrefix(ucarg, "IXFR=") {
-			serialstr, _ := strings.CutPrefix(ucarg, "IXFR=")
-			tmp, err := strconv.Atoi(serialstr)
-			if err != nil {
-				log.Fatalf("Error: %v", err)
+			if strings.HasPrefix(ucarg, "IXFR=") {
+				serialstr, _ := strings.CutPrefix(ucarg, "IXFR=")
+				tmp, err := strconv.Atoi(serialstr)
+				if err != nil {
+					log.Fatalf("Error: %v", err)
+				}
+				serial = uint32(tmp)
+				rrtype = dns.TypeIXFR // Set rrtype so the later switch on rrtype triggers IXFR logic
+				fmt.Printf("RRtype is IXFR, using base serial %d\n", serial)
 			}
-			serial = uint32(tmp)
-			rrtype = dns.TypeIXFR // Set rrtype so the later switch on rrtype triggers IXFR logic
-			fmt.Printf("RRtype is IXFR, using base serial %d\n", serial)
-		}
 
 			if strings.HasPrefix(ucarg, "+") {
 				if tdns.Globals.Debug {
@@ -197,6 +197,22 @@ var rootCmd = &cobra.Command{
 			qname = dns.Fqdn(qname)
 			if tdns.Globals.Verbose {
 				fmt.Printf("*** %s for %s IN %s:\n", options["opcode"], qname, dns.TypeToString[rrtype])
+			}
+
+			// +sigchase short-circuits the normal Exchange path and
+			// runs the chain-walker against the configured server
+			// (which must be a recursive resolver). Walker output is
+			// a structured per-link tree; no normal answer is printed.
+			if options["sigchase"] == "true" {
+				chaserClient := core.NewDNSClient(core.TransportDo53, options["port"], nil)
+				chaser := tdns.NewChaser(chaserClient, options["server"])
+				result, err := chaser.Chase(qname, rrtype)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: chase failed: %v\n", err)
+					os.Exit(1)
+				}
+				tdns.RenderChain(result, os.Stdout)
+				continue
 			}
 
 			switch rrtype {
@@ -416,6 +432,15 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 		// Acts as the +XYZ-syntax equivalent of the --short flag.
 		options["short"] = "true"
 		return options, nil
+	case "+SIGCHASE", "+SIGCHA", "+SC":
+		// drill-style: walk the DNSSEC chain for the qname/qtype and
+		// emit a per-link verdict tree. Dispatches into the chase
+		// library in tdns/v2/chase.go instead of the normal query
+		// path. Verifies each (parent DS) <-> (child KSK) <-> (DNSKEY
+		// RRset signature) link and the final leaf RRSIG against the
+		// deepest zone's keys.
+		options["sigchase"] = "true"
+		return options, nil
 	case "+TCP":
 		if transport, exists := options["transport"]; exists {
 			return nil, fmt.Errorf("Error: multiple transport options specified (%s and TCP)", transport)
@@ -594,7 +619,7 @@ func ParseServer(serverArg string, options map[string]string) (map[string]string
 	// Extract host and port
 	host := u.Host
 	port := ""
-	
+
 	// Check if host contains a colon (could be IPv6 or host:port)
 	if strings.Contains(host, ":") {
 		// Check if it's an IPv6 address in brackets with port (e.g., [::1]:5354)
