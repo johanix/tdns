@@ -672,18 +672,34 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 	return &rrset, rcode, cache.ContextNoErrNoAns, fmt.Errorf("no Answers found from any auth server looking up '%s %s'", qname, dns.TypeToString[qtype])
 }
 
-// ServerAddrTuple represents a (server, address) pair for prioritization
-type ServerAddrTuple struct {
-	Server *cache.AuthServer
-	Addr   string
-	NSName string
+// ServerAddrXportTuple represents one prioritized query candidate: a server,
+// one of its addresses, and the transport to use for the attempt.
+type ServerAddrXportTuple struct {
+	Server    *cache.AuthServer
+	Addr      string
+	NSName    string
+	Transport core.Transport
 }
 
-// prioritizeServers returns a prioritized list of (server, addr) tuples.
-// It filters out addresses that are in backoff (either zone-specific or server-wide).
-// Future: This function can be extended to prioritize by RTT or other metrics.
-func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.AuthServer) (string, *cache.Zone, []ServerAddrTuple) {
-	// Find the zone for this qname to check zone-specific backoffs
+// prioritizeServers returns a flat, prioritized list of
+// (server, addr, transport) tuples for the IMR to try in order.
+//
+// For each (server, addr):
+//   - Emit one tuple per available transport, filtered against the
+//     per-(addr, transport) backoff on both the server and the
+//     enclosing zone (lame-delegation tracking).
+//   - The first transport per (server, addr) is the deterministic
+//     "preferred" pick from the weighted-hash policy. Alternate
+//     transports follow, ordered by descending weight. This means a
+//     failure of (X, DoT) is followed immediately in the iteration by
+//     (X, Do53) — same address, different transport — instead of
+//     burning the next server first.
+//
+// requireEncrypted excludes Do53 tuples; if the server has no
+// encrypted transport available the server contributes no tuples.
+//
+// Future (W7): sort tuples by RTT across servers.
+func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.AuthServer, requireEncrypted bool) (string, *cache.Zone, []ServerAddrXportTuple) {
 	zoneName, _, _ := imr.Cache.FindClosestKnownZone(qname)
 	var zone *cache.Zone
 	if zoneName != "" {
@@ -692,32 +708,135 @@ func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.Auth
 		}
 	}
 
-	var tuples []ServerAddrTuple
-	// now := time.Now()
-
+	var tuples []ServerAddrXportTuple
 	for nsname, server := range serverMap {
-		// Get available addresses for this server (checks server-wide backoffs)
-		availableAddrs := server.GetAvailableAddresses()
-
-		for _, addr := range availableAddrs {
-			// Check zone-specific backoff if zone exists
-			if zone != nil && !zone.IsZoneAddressAvailable(addr) {
-				lgDns.Debug("prioritizeServers: skipping address due to zone-specific backoff", "addr", addr, "ns", nsname, "zone", zoneName)
-				continue
+		transports := candidateTransports(server, qname, requireEncrypted)
+		if len(transports) == 0 {
+			continue
+		}
+		for _, addr := range server.GetAddrs() {
+			for _, t := range transports {
+				if !server.IsAddrXportAvailable(addr, t) {
+					if Globals.Debug {
+						lgDns.Debug("prioritizeServers: skipping (addr,transport) due to server backoff",
+							"addr", addr, "transport", core.TransportToString[t], "ns", nsname)
+					}
+					continue
+				}
+				if zone != nil && !zone.IsZoneAddrXportAvailable(addr, t) {
+					if Globals.Debug {
+						lgDns.Debug("prioritizeServers: skipping (addr,transport) due to zone backoff",
+							"addr", addr, "transport", core.TransportToString[t], "ns", nsname, "zone", zoneName)
+					}
+					continue
+				}
+				tuples = append(tuples, ServerAddrXportTuple{
+					Server: server, Addr: addr, NSName: nsname, Transport: t,
+				})
 			}
+		}
+	}
+	return zoneName, zone, tuples
+}
 
-			tuples = append(tuples, ServerAddrTuple{
-				Server: server,
-				Addr:   addr,
-				NSName: nsname,
-			})
+// candidateTransports returns the ordered list of transports to try for a
+// query to this (qname, server). The first entry is the deterministic
+// weighted-hash pick (same scheme as the legacy pickTransport so cache
+// distribution is preserved per server). Remaining entries are the other
+// configured transports in descending weight order, with the Do53 remainder
+// included when not requireEncrypted. requireEncrypted filters out Do53.
+func candidateTransports(server *cache.AuthServer, qname string, requireEncrypted bool) []core.Transport {
+	if server == nil {
+		if requireEncrypted {
+			return nil
+		}
+		return []core.Transport{core.TransportDo53}
+	}
+
+	type wt struct {
+		t core.Transport
+		w int
+	}
+	var weighted []wt
+	total := 0
+	for _, t := range server.Transports {
+		if requireEncrypted && !core.IsEncryptedTransport(t) {
+			continue
+		}
+		w, ok := server.TransportWeights[t]
+		if !ok {
+			w = 0
+		}
+		weighted = append(weighted, wt{t: t, w: int(w)})
+		total += int(w)
+	}
+	if !requireEncrypted && total < 100 {
+		// Do53 remainder (only if not already present at non-zero weight).
+		present := false
+		for i := range weighted {
+			if weighted[i].t == core.TransportDo53 {
+				weighted[i].w += 100 - total
+				present = true
+				break
+			}
+		}
+		if !present {
+			weighted = append(weighted, wt{t: core.TransportDo53, w: 100 - total})
+		}
+		total = 100
+	}
+	if len(weighted) == 0 {
+		return nil
+	}
+
+	// Deterministic hash bucket: same scheme as legacy pickTransport.
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(qname))
+	_, _ = h.Write([]byte("|"))
+	_, _ = h.Write([]byte(server.Name))
+	bucket := int(h.Sum32() % uint32(maxInt(total, 1)))
+
+	// Find the hash winner. Iteration order over server.Transports is stable
+	// (slice), so the cumulative walk is deterministic.
+	winnerIdx := len(weighted) - 1
+	acc := 0
+	for i, c := range weighted {
+		acc += c.w
+		if bucket < acc {
+			winnerIdx = i
+			break
 		}
 	}
 
-	// Future: Sort by RTT or other metrics here
-	// For now, we keep the order as-is (which is essentially random map iteration order)
+	// Order: winner first, then remaining by descending weight, ties broken
+	// by transport ordinal for determinism.
+	rest := make([]wt, 0, len(weighted)-1)
+	for i, c := range weighted {
+		if i == winnerIdx {
+			continue
+		}
+		rest = append(rest, c)
+	}
+	sort.SliceStable(rest, func(i, j int) bool {
+		if rest[i].w != rest[j].w {
+			return rest[i].w > rest[j].w
+		}
+		return rest[i].t < rest[j].t
+	})
 
-	return zoneName, zone, tuples
+	out := make([]core.Transport, 0, len(weighted))
+	out = append(out, weighted[winnerIdx].t)
+	for _, c := range rest {
+		out = append(out, c.t)
+	}
+	return out
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // force is true if we should force a lookup even if the answer is in the cache
@@ -856,13 +975,13 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		}
 	}
 
-	// Prioritize servers and addresses (filters out backoff addresses)
-	zoneName, zone, prioritized := imr.prioritizeServers(qname, serverMap)
+	// Prioritize (server, addr, transport) tuples. requireEncrypted is
+	// applied here so tryServer no longer needs to filter.
+	zoneName, zone, prioritized := imr.prioritizeServers(qname, serverMap, requireEncrypted)
 	if Globals.Debug {
-		lg.Printf("IterativeDNSQuery: prioritized %d server-address tuples (from %d servers)", len(prioritized), len(serverMap))
+		lg.Printf("IterativeDNSQuery: prioritized %d (server,addr,transport) tuples (from %d servers)", len(prioritized), len(serverMap))
 	}
 
-	// Iterate over prioritized server-address tuples
 	for _, tuple := range prioritized {
 		select {
 		case <-ctx.Done():
@@ -872,25 +991,19 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		server := tuple.Server
 		addr := tuple.Addr
 		nsname := tuple.NSName
+		transport := tuple.Transport
 
 		if Globals.Debug {
-			lg.Printf("IterativeDNSQuery: using nameserver %s@%s (ALPN: %v) for <%s, %s> query\n",
-				addr, nsname, server.Alpn, qname, dns.TypeToString[qtype])
+			lg.Printf("IterativeDNSQuery: using nameserver %s@%s over %s (ALPN: %v) for <%s, %s> query\n",
+				addr, nsname, core.TransportToString[transport], server.Alpn, qname, dns.TypeToString[qtype])
 		}
 
-		r, transport, _, err := imr.tryServer(ctx, server, addr, m, qname, qtype, requireEncrypted)
+		r, _, err := imr.tryServer(ctx, server, addr, transport, m, qname, qtype)
 		if err != nil {
-			// If PR flag is set and we can't get encrypted transport, try next server
-			if requireEncrypted && strings.Contains(err.Error(), "PR flag requires encrypted transport") {
-				if Globals.Debug {
-					lg.Printf("IterativeDNSQuery: server %s has no encrypted transport for PR request, trying next server", server.Name)
-				}
-				continue // Try next server
-			}
 			if imr.Cache.Verbose {
 				// lg.Printf("IterativeDNSQuery: Error from dns.Exchange: %v (rtt: %v)", err, rtt)
 			}
-			continue // go to next server
+			continue // go to next tuple
 		}
 
 		if r == nil {
@@ -904,39 +1017,33 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			lg.Printf("IterativeDNSQuery: response from tryServer(dns.Exchange) qname=%s, qtype=%s:\n%s", qname, dns.TypeToString[qtype], PrintMsgFull(r, imr.LineWidth))
 		}
 
-		// Run IMR response hooks
 		for _, hook := range getImrResponseHooks() {
 			hook(ctx, qname, qtype, server.Name, addr, transport, r, r.MsgHdr.Rcode)
 		}
 
 		rcode = r.MsgHdr.Rcode
 
-		// Check for REFUSED/NOTAUTH/NOTIMP/SERVFAIL responses (lame delegations) and record as zone-specific failure
+		// Lame-delegation rcodes: zone-scoped backoff for this (addr, transport).
+		// Other servers / other transports stay available.
 		switch rcode {
 		case dns.RcodeRefused, dns.RcodeNotAuth, dns.RcodeServerFailure, dns.RcodeNotImplemented:
 			if Globals.Debug {
-				lg.Printf("IterativeDNSQuery: %s response from %s@%s for %s %s (likely lame delegation for zone %q)",
-					dns.RcodeToString[rcode], addr, nsname, qname, dns.TypeToString[qtype], zoneName)
+				lg.Printf("IterativeDNSQuery: %s response from %s@%s over %s for %s %s (likely lame delegation for zone %q)",
+					dns.RcodeToString[rcode], addr, nsname, core.TransportToString[transport], qname, dns.TypeToString[qtype], zoneName)
 			}
-			// Record zone-specific failure (not server-wide, as server might work for other zones)
 			if zone != nil {
-				zone.RecordZoneAddressFailureForRcode(addr, uint8(rcode), Globals.Debug)
+				zone.RecordZoneAddressFailureForRcode(addr, transport, uint8(rcode), Globals.Debug)
 			} else {
-				// If zone not found, fall back to server-wide backoff
-				server.RecordAddressFailureForRcode(addr, uint8(rcode))
+				server.RecordAddressFailureForRcode(addr, transport, uint8(rcode))
 			}
-			continue // Try next server
+			continue
 		case dns.RcodeSuccess:
-			// Successful response - clear any zone-specific backoff for this address
-			// (server-wide backoff already cleared by tryServer)
 			if zone != nil {
-				zone.RecordZoneAddressSuccess(addr)
+				zone.RecordZoneAddressSuccess(addr, transport)
 			}
 		default:
-			// Other rcodes (NXDOMAIN, etc.) - server responded successfully, clear zone-specific backoff
-			// (server-wide backoff already cleared by tryServer)
 			if zone != nil {
-				zone.RecordZoneAddressSuccess(addr)
+				zone.RecordZoneAddressSuccess(addr, transport)
 			}
 		}
 
@@ -1604,24 +1711,23 @@ func buildQuery(qname string, qtype uint16) (*dns.Msg, error) {
 	return m, nil
 }
 
-func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr string, m *dns.Msg, qname string, qtype uint16, requireEncrypted bool) (*dns.Msg, core.Transport, time.Duration, error) {
+// tryServer executes one query attempt for an explicit (server, addr,
+// transport) tuple selected upstream by prioritizeServers. It records the
+// outcome against the server's per-(addr, transport) backoff map.
+func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport, m *dns.Msg, qname string, qtype uint16) (*dns.Msg, time.Duration, error) {
 	select {
 	case <-ctx.Done():
-		return nil, core.TransportDo53, 0, ctx.Err()
+		return nil, 0, ctx.Err()
 	default:
 	}
 
-	t, err := pickTransport(server, qname, requireEncrypted)
-	if err != nil {
-		return nil, core.TransportDo53, 0, err
-	}
 	c, exist := imr.Cache.DNSClient[t]
 	if !exist {
-		return nil, core.TransportDo53, 0, fmt.Errorf("no DNS client for transport %d exists", t)
+		return nil, 0, fmt.Errorf("no DNS client for transport %d exists", t)
 	}
 	server.IncrementTransportCounter(t)
 	if Globals.Debug {
-		lgDns.Debug("*** tryServer: calling c.Exchange with Transport=, server= (addrs: ), addr=, qname=, qtype",
+		lgDns.Debug("*** tryServer: calling c.Exchange",
 			"transport", core.TransportToString[t],
 			"server", server.Name,
 			"addrs", server.Addrs,
@@ -1630,7 +1736,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 			"qtype", dns.TypeToString[qtype])
 	}
 	if !imr.Quiet {
-		lgDns.Debug("IMR: Query / to using transport (weights: doq= dot= doh= do53=)",
+		lgDns.Debug("IMR: query",
 			"query", qname,
 			"rrtype", dns.TypeToString[qtype],
 			"name", server.Name,
@@ -1640,10 +1746,9 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 			"doh", server.TransportWeights[core.TransportDoH],
 			"do53", server.TransportWeights[core.TransportDo53])
 	}
-	// Run IMR outbound query hooks
 	for _, hook := range getImrOutboundQueryHooks() {
 		if err := hook(ctx, qname, qtype, server.Name, addr, t); err != nil {
-			return nil, t, 0, err
+			return nil, 0, err
 		}
 	}
 
@@ -1653,26 +1758,25 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 	// (W2) bounds the wider iterative loop.
 	r, _, err := c.Exchange(m, addr, Globals.Debug && !imr.Quiet)
 	if err != nil {
-		lgDns.Error("*** tryServer: query \" \" sent to returned error",
+		lgDns.Error("*** tryServer: query returned error",
 			"qname", qname,
-			"s", dns.TypeToString[qtype],
+			"qtype", dns.TypeToString[qtype],
 			"addr", addr,
+			"transport", core.TransportToString[t],
 			"error", err)
-		server.RecordAddressFailure(addr, err)
-		return nil, t, 0, err
+		server.RecordAddressFailure(addr, t, err)
+		return nil, 0, err
 	}
 	if r != nil {
-		server.RecordAddressSuccess(addr)
+		server.RecordAddressSuccess(addr, t)
+	} else if Globals.Debug {
+		lgDns.Debug("*** tryServer: query returned no response",
+			"qname", qname,
+			"qtype", dns.TypeToString[qtype],
+			"addr", addr,
+			"transport", core.TransportToString[t])
 	}
-	if Globals.Debug {
-		if r == nil {
-			lgDns.Debug("*** tryServer: query \" \" sent to returned no response",
-				"qname", qname,
-				"s", dns.TypeToString[qtype],
-				"addr", addr)
-		}
-	}
-	return r, t, 0, nil
+	return r, 0, nil
 }
 
 // applyTransportSignalToServer parses a colon-separated transport string and applies it to the given server.

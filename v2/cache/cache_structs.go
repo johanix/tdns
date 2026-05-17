@@ -71,9 +71,10 @@ type RRsetCacheT struct {
 type Zone struct {
 	ZoneName string
 	State    ValidationState
-	// Zone-specific address backoffs: map[address]*AddressBackoff
-	// Tracks per-zone, per-address failures (e.g., REFUSED for this zone from this address)
-	AddressBackoffs map[string]*AddressBackoff
+	// Zone-specific address backoffs keyed by (address, transport).
+	// Tracks per-zone, per-(address,transport) failures (e.g., REFUSED for
+	// this zone from this address over a specific transport).
+	AddressBackoffs map[AddrXport]*AddressBackoff
 	mu              sync.Mutex // Protects State and AddressBackoffs
 }
 

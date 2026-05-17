@@ -14,12 +14,20 @@ import (
 	"github.com/miekg/dns"
 )
 
-// AddressBackoff tracks backoff state for a single server address.
+// AddressBackoff tracks backoff state for a single (address, transport) tuple.
 // Used to avoid repeatedly querying addresses that don't respond or have routing issues.
 type AddressBackoff struct {
 	NextTry      time.Time // When this address can be tried again
 	FailureCount uint8     // Number of consecutive failures (1 = first failure, 2+ = second+ failure)
 	LastError    string    // Last error message (stored when debug mode is enabled)
+}
+
+// AddrXport keys backoff state by both address and transport. A timeout on
+// (1.2.3.4:53, DoT) does not poison (1.2.3.4:53, Do53) or vice versa: that
+// would conflate problems with the TLS path with problems with the address.
+type AddrXport struct {
+	Addr      string
+	Transport core.Transport
 }
 
 type AuthServer struct {
@@ -40,8 +48,9 @@ type AuthServer struct {
 	Src               string                    // "answer", "glue", "hint", "priming", "stub", ...
 	Expire            time.Time
 	Debug             bool // If true, store error messages in AddressBackoff.LastError
-	// Backoff tracking (guarded by mu)
-	AddressBackoffs map[string]*AddressBackoff // keyed by address string (e.g., "1.2.3.4:53" or "[2001:db8::1]:53")
+	// Backoff tracking (guarded by mu). Keyed by (address, transport): a
+	// failure on (1.2.3.4:53, DoT) does not block (1.2.3.4:53, Do53).
+	AddressBackoffs map[AddrXport]*AddressBackoff
 }
 
 // NewAuthServer creates a new AuthServer instance with default values.
@@ -417,22 +426,21 @@ func (as *AuthServer) SnapshotCounters() map[core.Transport]uint64 {
 	return out
 }
 
-// SnapshotAddressBackoffs returns a copy of the address backoff map.
-// Only includes addresses that are currently in backoff (NextTry > now).
-func (as *AuthServer) SnapshotAddressBackoffs(now time.Time) map[string]*AddressBackoff {
+// SnapshotAddressBackoffs returns a copy of the (address, transport) backoff
+// map. Only includes entries that are currently in backoff (NextTry > now).
+func (as *AuthServer) SnapshotAddressBackoffs(now time.Time) map[AddrXport]*AddressBackoff {
 	if as == nil {
 		return nil
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
-	if as.AddressBackoffs == nil || len(as.AddressBackoffs) == 0 {
+	if len(as.AddressBackoffs) == 0 {
 		return nil
 	}
-	snap := make(map[string]*AddressBackoff)
-	for addr, backoff := range as.AddressBackoffs {
+	snap := make(map[AddrXport]*AddressBackoff)
+	for key, backoff := range as.AddressBackoffs {
 		if backoff.NextTry.After(now) {
-			// Create a copy of the backoff struct
-			snap[addr] = &AddressBackoff{
+			snap[key] = &AddressBackoff{
 				NextTry:      backoff.NextTry,
 				FailureCount: backoff.FailureCount,
 				LastError:    backoff.LastError,
@@ -485,22 +493,21 @@ func (as *AuthServer) PromoteConnMode(target ConnMode) {
 	}
 }
 
-// IsAddressAvailable returns true if the given address is not in backoff or backoff has expired.
-// Thread-safe: acquires mu lock.
-func (as *AuthServer) IsAddressAvailable(addr string) bool {
+// IsAddrXportAvailable returns true if the (address, transport) tuple is not
+// in backoff (or its backoff has expired). Thread-safe.
+func (as *AuthServer) IsAddrXportAvailable(addr string, t core.Transport) bool {
 	if as == nil {
 		return false
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	if as.AddressBackoffs == nil {
-		return true // No backoffs recorded, address is available
+		return true
 	}
-	backoff, exists := as.AddressBackoffs[addr]
+	backoff, exists := as.AddressBackoffs[AddrXport{Addr: addr, Transport: t}]
 	if !exists {
-		return true // No backoff for this address
+		return true
 	}
-	// Check if backoff has expired
 	return time.Now().After(backoff.NextTry)
 }
 
@@ -534,28 +541,28 @@ func categorizeError(err error, prev *AddressBackoff) time.Duration {
 	return applyJitter(exponentialBackoff(count))
 }
 
-// RecordAddressFailure records a failure for the given address and
-// applies a backoff per the active BackoffPolicy. Routing-class
-// errors get an immediate long backoff; everything else uses an
-// exponential schedule based on the previous failure count.
-// If as.Debug is true, the error message is stored in LastError.
-// Thread-safe: acquires mu lock.
-func (as *AuthServer) RecordAddressFailure(addr string, err error) {
+// RecordAddressFailure records a failure for the given (address, transport)
+// tuple and applies a backoff per the active BackoffPolicy. Routing-class
+// errors get an immediate long backoff; everything else uses an exponential
+// schedule based on the previous failure count for this tuple. If as.Debug is
+// true, the error message is stored in LastError. Thread-safe.
+func (as *AuthServer) RecordAddressFailure(addr string, t core.Transport, err error) {
 	if as == nil {
 		return
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	if as.AddressBackoffs == nil {
-		as.AddressBackoffs = make(map[string]*AddressBackoff)
+		as.AddressBackoffs = make(map[AddrXport]*AddressBackoff)
 	}
-	backoff, exists := as.AddressBackoffs[addr]
+	key := AddrXport{Addr: addr, Transport: t}
+	backoff, exists := as.AddressBackoffs[key]
 	errMsg := ""
 	if as.Debug && err != nil {
 		errMsg = err.Error()
 	}
 	if !exists {
-		as.AddressBackoffs[addr] = &AddressBackoff{
+		as.AddressBackoffs[key] = &AddressBackoff{
 			NextTry:      time.Now().Add(categorizeError(err, nil)),
 			FailureCount: 1,
 			LastError:    errMsg,
@@ -570,21 +577,21 @@ func (as *AuthServer) RecordAddressFailure(addr string, err error) {
 }
 
 // RecordAddressFailureForRcode records a failure for the given
-// address based on a DNS response code. NOTIMP is treated as a
-// "broken implementation" signal and gets the full LameDelegation
+// (address, transport) tuple based on a DNS response code. NOTIMP is treated
+// as a "broken implementation" signal and gets the full LameDelegation
 // backoff immediately. Other rcodes follow the standard exponential
-// schedule.
-// Thread-safe: acquires mu lock.
-func (as *AuthServer) RecordAddressFailureForRcode(addr string, rcode uint8) {
+// schedule. Thread-safe.
+func (as *AuthServer) RecordAddressFailureForRcode(addr string, t core.Transport, rcode uint8) {
 	if as == nil {
 		return
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	if as.AddressBackoffs == nil {
-		as.AddressBackoffs = make(map[string]*AddressBackoff)
+		as.AddressBackoffs = make(map[AddrXport]*AddressBackoff)
 	}
-	backoff, exists := as.AddressBackoffs[addr]
+	key := AddrXport{Addr: addr, Transport: t}
+	backoff, exists := as.AddressBackoffs[key]
 
 	var backoffDuration time.Duration
 	if rcode == dns.RcodeNotImplemented {
@@ -602,7 +609,7 @@ func (as *AuthServer) RecordAddressFailureForRcode(addr string, rcode uint8) {
 	}
 
 	if !exists {
-		as.AddressBackoffs[addr] = &AddressBackoff{
+		as.AddressBackoffs[key] = &AddressBackoff{
 			NextTry:      time.Now().Add(backoffDuration),
 			FailureCount: 1,
 			LastError:    errMsg,
@@ -618,81 +625,15 @@ func (as *AuthServer) RecordAddressFailureForRcode(addr string, rcode uint8) {
 	}
 }
 
-// RecordAddressSuccess clears any backoff for the given address.
-// Thread-safe: acquires mu lock.
-func (as *AuthServer) RecordAddressSuccess(addr string) {
+// RecordAddressSuccess clears any backoff for the given (address, transport)
+// tuple. Thread-safe.
+func (as *AuthServer) RecordAddressSuccess(addr string, t core.Transport) {
 	if as == nil {
 		return
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	if as.AddressBackoffs != nil {
-		delete(as.AddressBackoffs, addr)
-		// If map is empty, we could nil it out, but keeping it is fine for efficiency
+		delete(as.AddressBackoffs, AddrXport{Addr: addr, Transport: t})
 	}
-}
-
-// AllAddressesInBackoff returns true if all addresses for this server are currently in backoff.
-// Thread-safe: acquires mu lock once for the entire operation.
-func (as *AuthServer) AllAddressesInBackoff() bool {
-	if as == nil {
-		return false
-	}
-	as.mu.Lock()
-	defer as.mu.Unlock()
-
-	// Copy Addrs while holding the lock to avoid TOCTOU
-	if len(as.Addrs) == 0 {
-		return false
-	}
-	addrs := make([]string, len(as.Addrs))
-	copy(addrs, as.Addrs)
-
-	// Check backoffs while still holding the same lock
-	if as.AddressBackoffs == nil || len(as.AddressBackoffs) == 0 {
-		return false // No backoffs recorded
-	}
-	now := time.Now()
-	for _, addr := range addrs {
-		backoff, exists := as.AddressBackoffs[addr]
-		if !exists {
-			return false // At least one address has no backoff
-		}
-		if now.After(backoff.NextTry) {
-			return false // At least one address's backoff has expired
-		}
-	}
-	return true // All addresses are in active backoff
-}
-
-// GetAvailableAddresses returns a list of addresses that are currently available (not in backoff).
-// Thread-safe: acquires mu lock once for the entire operation.
-func (as *AuthServer) GetAvailableAddresses() []string {
-	if as == nil {
-		return nil
-	}
-	as.mu.Lock()
-	defer as.mu.Unlock()
-
-	// Copy Addrs while holding the lock to avoid TOCTOU
-	if len(as.Addrs) == 0 {
-		return nil
-	}
-	addrs := make([]string, len(as.Addrs))
-	copy(addrs, as.Addrs)
-
-	// Check backoffs while still holding the same lock
-	var available []string
-	now := time.Now()
-	for _, addr := range addrs {
-		if as.AddressBackoffs == nil {
-			available = append(available, addr)
-			continue
-		}
-		backoff, exists := as.AddressBackoffs[addr]
-		if !exists || now.After(backoff.NextTry) {
-			available = append(available, addr)
-		}
-	}
-	return available
 }

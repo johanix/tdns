@@ -186,25 +186,27 @@ var dumpAuthServersErrorsCmd = &cobra.Command{
 			nsname := item.Key
 			server := item.Val
 
-			// Get snapshot of addresses in backoff (thread-safe)
+			// Get snapshot of (address, transport) tuples in backoff
 			backoffs := server.SnapshotAddressBackoffs(now)
 			if len(backoffs) > 0 {
 				hasErrors = true
-				// Sort addresses for consistent output
-				addrs := make([]string, 0, len(backoffs))
-				for addr := range backoffs {
-					addrs = append(addrs, addr)
+				keys := make([]cache.AddrXport, 0, len(backoffs))
+				for k := range backoffs {
+					keys = append(keys, k)
 				}
-				sort.Strings(addrs)
+				sort.Slice(keys, func(i, j int) bool {
+					if keys[i].Addr != keys[j].Addr {
+						return keys[i].Addr < keys[j].Addr
+					}
+					return keys[i].Transport < keys[j].Transport
+				})
 
-				// Collect information for addresses in backoff
-				for _, addr := range addrs {
-					backoff := backoffs[addr]
+				for _, k := range keys {
+					backoff := backoffs[k]
 					timeUntilRetry := backoff.NextTry.Sub(now)
 					if timeUntilRetry < 0 {
 						timeUntilRetry = 0
 					}
-					// Always include all 5 columns for alignment
 					failures := "0"
 					if backoff.FailureCount > 0 {
 						failures = fmt.Sprintf("%d", backoff.FailureCount)
@@ -213,7 +215,7 @@ var dumpAuthServersErrorsCmd = &cobra.Command{
 					if backoff.LastError != "" {
 						errorMsg = backoff.LastError
 					}
-					line := fmt.Sprintf("%s | %s | retry in %s | %s | %s", nsname, addr, formatDuration(timeUntilRetry), failures, errorMsg)
+					line := fmt.Sprintf("%s | %s | %s | retry in %s | %s | %s", nsname, k.Addr, core.TransportToString[k.Transport], formatDuration(timeUntilRetry), failures, errorMsg)
 					lines = append(lines, line)
 				}
 			}
@@ -224,8 +226,7 @@ var dumpAuthServersErrorsCmd = &cobra.Command{
 			return
 		}
 
-		// Print header and results
-		fmt.Println("Nameserver | Address | Backoff Time | Failures | Error")
+		fmt.Println("Nameserver | Address | Transport | Backoff Time | Failures | Error")
 		fmt.Println(strings.Repeat("-", 80))
 		for _, line := range lines {
 			fmt.Println(line)
@@ -296,7 +297,7 @@ With a zone argument: dumps just that zone.`,
 		type zoneEntry struct {
 			zoneName string
 			zone     *cache.Zone
-			backoffs map[string]*cache.AddressBackoff
+			backoffs map[cache.AddrXport]*cache.AddressBackoff
 		}
 		var entries []zoneEntry
 		for item := range Conf.Internal.RRsetCache.ZoneMap.IterBuffered() {
@@ -321,16 +322,21 @@ With a zone argument: dumps just that zone.`,
 		sort.Slice(entries, func(i, j int) bool {
 			return lessByReverseLabels(entries[i].zoneName, entries[j].zoneName)
 		})
-		fmt.Println("Zone | Address | Backoff Time | Failures | Error")
+		fmt.Println("Zone | Address | Transport | Backoff Time | Failures | Error")
 		fmt.Println(strings.Repeat("-", 80))
 		for _, e := range entries {
-			addrs := make([]string, 0, len(e.backoffs))
-			for a := range e.backoffs {
-				addrs = append(addrs, a)
+			keys := make([]cache.AddrXport, 0, len(e.backoffs))
+			for k := range e.backoffs {
+				keys = append(keys, k)
 			}
-			sort.Strings(addrs)
-			for _, addr := range addrs {
-				b := e.backoffs[addr]
+			sort.Slice(keys, func(i, j int) bool {
+				if keys[i].Addr != keys[j].Addr {
+					return keys[i].Addr < keys[j].Addr
+				}
+				return keys[i].Transport < keys[j].Transport
+			})
+			for _, k := range keys {
+				b := e.backoffs[k]
 				remaining := b.NextTry.Sub(now)
 				if remaining < 0 {
 					remaining = 0
@@ -339,8 +345,8 @@ With a zone argument: dumps just that zone.`,
 				if b.LastError != "" {
 					errMsg = b.LastError
 				}
-				fmt.Printf("%s | %s | retry in %s | %d | %s\n",
-					e.zoneName, addr, formatDuration(remaining), b.FailureCount, errMsg)
+				fmt.Printf("%s | %s | %s | retry in %s | %d | %s\n",
+					e.zoneName, k.Addr, core.TransportToString[k.Transport], formatDuration(remaining), b.FailureCount, errMsg)
 			}
 		}
 	},

@@ -7,26 +7,27 @@ import (
 	"fmt"
 	"time"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
-// RecordZoneAddressFailureForRcode records a zone-specific failure
-// for the given address based on a DNS response code. REFUSED /
-// NOTAUTH / SERVFAIL signal lame delegation and get the policy's
-// LameDelegation backoff. NOTIMP is kept at a longer fixed 6h since
-// it indicates the server speaks DNS but lacks features we need.
-// Other rcodes follow the standard exponential schedule.
-// Thread-safe: acquires mu lock.
-func (z *Zone) RecordZoneAddressFailureForRcode(addr string, rcode uint8, debug bool) {
+// RecordZoneAddressFailureForRcode records a zone-specific failure for the
+// given (address, transport) tuple based on a DNS response code.
+// REFUSED / NOTAUTH / SERVFAIL signal lame delegation and get the policy's
+// LameDelegation backoff. NOTIMP is kept at a longer fixed 6h since it
+// indicates the server speaks DNS but lacks features we need. Other rcodes
+// follow the standard exponential schedule. Thread-safe.
+func (z *Zone) RecordZoneAddressFailureForRcode(addr string, t core.Transport, rcode uint8, debug bool) {
 	if z == nil {
 		return
 	}
 	z.mu.Lock()
 	defer z.mu.Unlock()
 	if z.AddressBackoffs == nil {
-		z.AddressBackoffs = make(map[string]*AddressBackoff)
+		z.AddressBackoffs = make(map[AddrXport]*AddressBackoff)
 	}
-	backoff, exists := z.AddressBackoffs[addr]
+	key := AddrXport{Addr: addr, Transport: t}
+	backoff, exists := z.AddressBackoffs[key]
 
 	var backoffDuration time.Duration
 	var errMsg string
@@ -53,7 +54,7 @@ func (z *Zone) RecordZoneAddressFailureForRcode(addr string, rcode uint8, debug 
 	}
 
 	if !exists {
-		z.AddressBackoffs[addr] = &AddressBackoff{
+		z.AddressBackoffs[key] = &AddressBackoff{
 			NextTry:      time.Now().Add(backoffDuration),
 			FailureCount: 1,
 			LastError:    errMsg,
@@ -69,29 +70,28 @@ func (z *Zone) RecordZoneAddressFailureForRcode(addr string, rcode uint8, debug 
 	}
 }
 
-// IsZoneAddressAvailable returns true if the given address is not in zone-specific backoff or backoff has expired.
-// Thread-safe: acquires mu lock.
-func (z *Zone) IsZoneAddressAvailable(addr string) bool {
+// IsZoneAddrXportAvailable returns true if the (address, transport) tuple is
+// not in zone-specific backoff (or its backoff has expired). Thread-safe.
+func (z *Zone) IsZoneAddrXportAvailable(addr string, t core.Transport) bool {
 	if z == nil {
 		return true // No zone-specific restrictions
 	}
 	z.mu.Lock()
 	defer z.mu.Unlock()
 	if z.AddressBackoffs == nil {
-		return true // No backoffs recorded, address is available
+		return true
 	}
-	backoff, exists := z.AddressBackoffs[addr]
+	backoff, exists := z.AddressBackoffs[AddrXport{Addr: addr, Transport: t}]
 	if !exists {
-		return true // No backoff for this address
+		return true
 	}
-	// Check if backoff has expired
 	return time.Now().After(backoff.NextTry)
 }
 
-// SnapshotAddressBackoffs returns a copy of the zone's address-backoff
-// map containing only entries whose NextTry is still in the future.
+// SnapshotAddressBackoffs returns a copy of the zone's (address, transport)
+// backoff map containing only entries whose NextTry is still in the future.
 // Mirrors AuthServer.SnapshotAddressBackoffs. Thread-safe.
-func (z *Zone) SnapshotAddressBackoffs(now time.Time) map[string]*AddressBackoff {
+func (z *Zone) SnapshotAddressBackoffs(now time.Time) map[AddrXport]*AddressBackoff {
 	if z == nil {
 		return nil
 	}
@@ -100,10 +100,10 @@ func (z *Zone) SnapshotAddressBackoffs(now time.Time) map[string]*AddressBackoff
 	if len(z.AddressBackoffs) == 0 {
 		return nil
 	}
-	snap := make(map[string]*AddressBackoff)
-	for addr, backoff := range z.AddressBackoffs {
+	snap := make(map[AddrXport]*AddressBackoff)
+	for key, backoff := range z.AddressBackoffs {
 		if backoff.NextTry.After(now) {
-			snap[addr] = &AddressBackoff{
+			snap[key] = &AddressBackoff{
 				NextTry:      backoff.NextTry,
 				FailureCount: backoff.FailureCount,
 				LastError:    backoff.LastError,
@@ -116,16 +116,15 @@ func (z *Zone) SnapshotAddressBackoffs(now time.Time) map[string]*AddressBackoff
 	return snap
 }
 
-// RecordZoneAddressSuccess clears any zone-specific backoff for the given address.
-// Thread-safe: acquires mu lock.
-func (z *Zone) RecordZoneAddressSuccess(addr string) {
+// RecordZoneAddressSuccess clears any zone-specific backoff for the given
+// (address, transport) tuple. Thread-safe.
+func (z *Zone) RecordZoneAddressSuccess(addr string, t core.Transport) {
 	if z == nil {
 		return
 	}
 	z.mu.Lock()
 	defer z.mu.Unlock()
 	if z.AddressBackoffs != nil {
-		delete(z.AddressBackoffs, addr)
-		// If map is empty, we could nil it out, but keeping it is fine for efficiency
+		delete(z.AddressBackoffs, AddrXport{Addr: addr, Transport: t})
 	}
 }

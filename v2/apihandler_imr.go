@@ -11,6 +11,7 @@ import (
 	"time"
 
 	cache "github.com/johanix/tdns/v2/cache"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -218,12 +219,13 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 			}
 			now := time.Now()
 			type zoneRecord struct {
-				Zone    string `json:"zone"`
-				Address string `json:"address"`
-				NextTry string `json:"next_try"`
-				Remain  string `json:"remaining"`
-				Count   uint8  `json:"failure_count"`
-				Err     string `json:"last_error,omitempty"`
+				Zone      string `json:"zone"`
+				Address   string `json:"address"`
+				Transport string `json:"transport"`
+				NextTry   string `json:"next_try"`
+				Remain    string `json:"remaining"`
+				Count     uint8  `json:"failure_count"`
+				Err       string `json:"last_error,omitempty"`
 			}
 			var records []zoneRecord
 			for item := range imr.Cache.ZoneMap.IterBuffered() {
@@ -231,16 +233,17 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				snap := item.Val.SnapshotAddressBackoffs(now)
-				for addr, b := range snap {
+				for key, b := range snap {
 					rem := b.NextTry.Sub(now)
 					if rem < 0 {
 						rem = 0
 					}
 					records = append(records, zoneRecord{
-						Zone: item.Key, Address: addr,
-						NextTry: b.NextTry.Format(time.RFC3339),
-						Remain:  rem.Truncate(time.Second).String(),
-						Count:   b.FailureCount, Err: b.LastError,
+						Zone: item.Key, Address: key.Addr,
+						Transport: core.TransportToString[key.Transport],
+						NextTry:   b.NextTry.Format(time.RFC3339),
+						Remain:    rem.Truncate(time.Second).String(),
+						Count:     b.FailureCount, Err: b.LastError,
 					})
 				}
 			}
