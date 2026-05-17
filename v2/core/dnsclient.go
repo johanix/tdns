@@ -62,6 +62,18 @@ func IsEncryptedTransport(t Transport) bool {
 
 // DNSClienter abstracts a single network exchange so callers can be tested
 // with a fake. The concrete *DNSClient implements it.
+//
+// Note on Exchange not taking a context.Context: CodeRabbit suggested
+// adding one so callers can cancel mid-exchange. Deliberately not done.
+// Exchange is a single network round-trip bounded by c.Timeout
+// (default 5s), and DoQ's internal context is already derived from
+// that timeout. Cancellation at the layer above — tryServer checks
+// ctx.Done() before the call, and the W2 query budget on
+// IterativeDNSQuery bounds the wider walk — is enough in practice
+// and avoids threading ctx through ~50 call sites for negligible
+// benefit. If a use case ever appears where mid-Exchange
+// cancellation matters (very long DoH bodies?), an ExchangeContext
+// variant can be added without breaking this interface.
 type DNSClienter interface {
 	Exchange(msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, error)
 	TransportKind() Transport
