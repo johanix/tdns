@@ -10,6 +10,7 @@ import (
 	"os"
 	"slices"
 	"testing"
+	"time"
 
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
@@ -157,6 +158,75 @@ func TestPrioritizeServers_RequireEncryptedFilters(t *testing.T) {
 	}
 	if len(tuples) == 0 {
 		t.Error("expected at least one encrypted tuple, got none")
+	}
+}
+
+// TestPrioritizeServers_RTTSortAcrossServers: when two servers are configured
+// and one has a low recorded RTT while the other has a high recorded RTT, the
+// fast server's tuples should be listed first.
+func TestPrioritizeServers_RTTSortAcrossServers(t *testing.T) {
+	imr := newTestImr(t)
+
+	fast := cache.NewAuthServer("fast.example.")
+	fast.SetAddrs([]string{"10.0.0.10:53"})
+	fast.SetTransports([]core.Transport{core.TransportDo53})
+	fast.SetTransportWeight(core.TransportDo53, 100)
+	fast.RecordRTT("10.0.0.10:53", core.TransportDo53, 20*time.Millisecond)
+
+	slow := cache.NewAuthServer("slow.example.")
+	slow.SetAddrs([]string{"10.0.0.20:53"})
+	slow.SetTransports([]core.Transport{core.TransportDo53})
+	slow.SetTransportWeight(core.TransportDo53, 100)
+	slow.RecordRTT("10.0.0.20:53", core.TransportDo53, 800*time.Millisecond)
+
+	serverMap := map[string]*cache.AuthServer{
+		"fast.example.": fast,
+		"slow.example.": slow,
+	}
+	_, _, tuples := imr.prioritizeServers("q.example.", serverMap, false)
+	if len(tuples) < 2 {
+		t.Fatalf("expected at least 2 tuples, got %d", len(tuples))
+	}
+	if tuples[0].NSName != "fast.example." {
+		t.Errorf("expected fast.example. first, got %q (tuples=%+v)", tuples[0].NSName, tuples)
+	}
+}
+
+// TestPrioritizeServers_UnprobedSentinelOrdering: an unprobed tuple should
+// land between a known-fast (<200ms) and a known-slow (>200ms) tuple.
+func TestPrioritizeServers_UnprobedSentinelOrdering(t *testing.T) {
+	imr := newTestImr(t)
+
+	makeServer := func(nsname, addr string, rtt time.Duration, record bool) *cache.AuthServer {
+		s := cache.NewAuthServer(nsname)
+		s.SetAddrs([]string{addr})
+		s.SetTransports([]core.Transport{core.TransportDo53})
+		s.SetTransportWeight(core.TransportDo53, 100)
+		if record {
+			s.RecordRTT(addr, core.TransportDo53, rtt)
+		}
+		return s
+	}
+	fast := makeServer("fast.example.", "10.0.0.30:53", 20*time.Millisecond, true)
+	slow := makeServer("slow.example.", "10.0.0.40:53", 800*time.Millisecond, true)
+	unprobed := makeServer("new.example.", "10.0.0.50:53", 0, false)
+
+	serverMap := map[string]*cache.AuthServer{
+		"fast.example.": fast,
+		"slow.example.": slow,
+		"new.example.":  unprobed,
+	}
+	_, _, tuples := imr.prioritizeServers("q.example.", serverMap, false)
+	if len(tuples) != 3 {
+		t.Fatalf("expected 3 tuples, got %d (%+v)", len(tuples), tuples)
+	}
+	order := []string{tuples[0].NSName, tuples[1].NSName, tuples[2].NSName}
+	want := []string{"fast.example.", "new.example.", "slow.example."}
+	for i := range order {
+		if order[i] != want[i] {
+			t.Errorf("ordering: got %v, want %v", order, want)
+			break
+		}
 	}
 }
 

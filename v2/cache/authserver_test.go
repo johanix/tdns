@@ -117,3 +117,79 @@ func TestSnapshotAddressBackoffs_KeyShape(t *testing.T) {
 		t.Errorf("expected 0 entries after virtual 24h elapsed, got %d", len(snap))
 	}
 }
+
+// TestRTT_RecordAndGet verifies a fresh sample is returned exactly.
+func TestRTT_RecordAndGet(t *testing.T) {
+	as := NewAuthServer("rtt1.example.")
+	as.RecordRTT("1.2.3.4:53", core.TransportDo53, 100*time.Millisecond)
+	got, ok := as.GetRTT("1.2.3.4:53", core.TransportDo53)
+	if !ok {
+		t.Fatal("expected sample present")
+	}
+	if got != 100*time.Millisecond {
+		t.Errorf("first sample should equal observation, got %s", got)
+	}
+}
+
+// TestRTT_GetMiss verifies an unknown tuple returns ok=false.
+func TestRTT_GetMiss(t *testing.T) {
+	as := NewAuthServer("rtt2.example.")
+	if _, ok := as.GetRTT("9.9.9.9:53", core.TransportDoT); ok {
+		t.Error("expected ok=false for unprobed tuple")
+	}
+	as.RecordRTT("1.2.3.4:53", core.TransportDo53, 50*time.Millisecond)
+	if _, ok := as.GetRTT("1.2.3.4:53", core.TransportDoT); ok {
+		t.Error("Do53 sample should not satisfy DoT lookup")
+	}
+}
+
+// TestRTT_EMAConvergence verifies multiple samples drift EMA toward the new
+// value rather than jumping.
+func TestRTT_EMAConvergence(t *testing.T) {
+	as := NewAuthServer("rtt3.example.")
+	as.RecordRTT("1.2.3.4:53", core.TransportDo53, 100*time.Millisecond)
+	for i := 0; i < 10; i++ {
+		as.RecordRTT("1.2.3.4:53", core.TransportDo53, 500*time.Millisecond)
+	}
+	got, _ := as.GetRTT("1.2.3.4:53", core.TransportDo53)
+	if got < 300*time.Millisecond {
+		t.Errorf("after 10 high samples EMA should have drifted upward toward 500ms, got %s", got)
+	}
+	if got > 500*time.Millisecond {
+		t.Errorf("EMA must not exceed latest sample, got %s", got)
+	}
+	for i := 0; i < 10; i++ {
+		as.RecordRTT("1.2.3.4:53", core.TransportDo53, 10*time.Millisecond)
+	}
+	got, _ = as.GetRTT("1.2.3.4:53", core.TransportDo53)
+	if got > 100*time.Millisecond {
+		t.Errorf("after 10 low samples EMA should have drifted toward 10ms, got %s", got)
+	}
+}
+
+// TestRTT_IgnoresNonPositive verifies RecordRTT silently drops zero/negative.
+func TestRTT_IgnoresNonPositive(t *testing.T) {
+	as := NewAuthServer("rtt4.example.")
+	as.RecordRTT("1.2.3.4:53", core.TransportDo53, 0)
+	as.RecordRTT("1.2.3.4:53", core.TransportDo53, -1*time.Millisecond)
+	if _, ok := as.GetRTT("1.2.3.4:53", core.TransportDo53); ok {
+		t.Error("non-positive samples should not create an entry")
+	}
+}
+
+// TestRTT_Decay verifies that a sample older than BackoffPolicy.MaxFailure
+// is treated as expired (ok=false), so the sort path re-probes.
+func TestRTT_Decay(t *testing.T) {
+	as := NewAuthServer("rtt5.example.")
+	as.RecordRTT("1.2.3.4:53", core.TransportDo53, 50*time.Millisecond)
+
+	max := GetBackoffPolicy().MaxFailure
+	as.mu.Lock()
+	r := as.RTTEstimates[AddrXport{Addr: "1.2.3.4:53", Transport: core.TransportDo53}]
+	r.LastSampleAt = time.Now().Add(-max - time.Minute)
+	as.mu.Unlock()
+
+	if _, ok := as.GetRTT("1.2.3.4:53", core.TransportDo53); ok {
+		t.Error("expected stale RTT (older than MaxFailure) to read as missing")
+	}
+}

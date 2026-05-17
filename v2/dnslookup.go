@@ -736,7 +736,46 @@ func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.Auth
 			}
 		}
 	}
+
+	sortTuplesByRTT(tuples)
 	return zoneName, zone, tuples
+}
+
+// unprobedRTTSentinel is the RTT used for sort when no usable sample exists
+// for a tuple. A midpoint value keeps unprobed tuples between known-fast and
+// known-slow ones, so they get tried at a reasonable priority and acquire a
+// real sample.
+const unprobedRTTSentinel = 200 * time.Millisecond
+
+// sortTuplesByRTT stable-sorts the slice in ascending RTT order, using
+// unprobedRTTSentinel for tuples without a usable sample. Stable: tuples
+// with equal RTT (including all unprobed tuples on first query) preserve
+// the order prioritizeServers emitted them in, which is the W6
+// preferred-first-per-(server,addr) order.
+func sortTuplesByRTT(tuples []ServerAddrXportTuple) {
+	if len(tuples) < 2 {
+		return
+	}
+	keys := make([]time.Duration, len(tuples))
+	for i, tup := range tuples {
+		if r, ok := tup.Server.GetRTT(tup.Addr, tup.Transport); ok {
+			keys[i] = r
+		} else {
+			keys[i] = unprobedRTTSentinel
+		}
+	}
+	indices := make([]int, len(tuples))
+	for i := range indices {
+		indices[i] = i
+	}
+	sort.SliceStable(indices, func(i, j int) bool {
+		return keys[indices[i]] < keys[indices[j]]
+	})
+	sorted := make([]ServerAddrXportTuple, len(tuples))
+	for newIdx, oldIdx := range indices {
+		sorted[newIdx] = tuples[oldIdx]
+	}
+	copy(tuples, sorted)
 }
 
 // candidateTransports returns the ordered list of transports to try for a
@@ -1756,7 +1795,14 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 	// TCP fallback internally for Do53. DoT/DoH/DoQ have no fallback path.
 	// The Exchange timeout bounds wall time per call; the overall query budget
 	// (W2) bounds the wider iterative loop.
+	//
+	// We measure wall-clock RTT ourselves instead of trusting the rtt returned
+	// by Exchange, because Exchange's TCP fallback path returns only the TCP
+	// rtt and hides any preceding UDP-timeout cost. The wall-clock value is
+	// what we actually care about for prioritization.
+	start := time.Now()
 	r, _, err := c.Exchange(m, addr, Globals.Debug && !imr.Quiet)
+	rtt := time.Since(start)
 	if err != nil {
 		lgDns.Error("*** tryServer: query returned error",
 			"qname", qname,
@@ -1765,10 +1811,15 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 			"transport", core.TransportToString[t],
 			"error", err)
 		server.RecordAddressFailure(addr, t, err)
-		return nil, 0, err
+		// Penalty RTT: record the full elapsed time so a slow-failing path
+		// naturally sorts to the bottom of prioritizeServers even after the
+		// backoff lifts.
+		server.RecordRTT(addr, t, rtt)
+		return nil, rtt, err
 	}
 	if r != nil {
 		server.RecordAddressSuccess(addr, t)
+		server.RecordRTT(addr, t, rtt)
 	} else if Globals.Debug {
 		lgDns.Debug("*** tryServer: query returned no response",
 			"qname", qname,
@@ -1776,7 +1827,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 			"addr", addr,
 			"transport", core.TransportToString[t])
 	}
-	return r, 0, nil
+	return r, rtt, nil
 }
 
 // applyTransportSignalToServer parses a colon-separated transport string and applies it to the given server.

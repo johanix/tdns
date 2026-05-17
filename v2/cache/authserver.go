@@ -30,6 +30,16 @@ type AddrXport struct {
 	Transport core.Transport
 }
 
+// RTTEstimate is an exponentially-weighted moving average of observed
+// round-trip times for one (address, transport) tuple. It feeds the
+// prioritizeServers sort so the IMR prefers faster paths.
+type RTTEstimate struct {
+	EMA          time.Duration // exponential moving average
+	Samples      uint32        // number of samples folded in
+	LastSample   time.Duration // most recent observation
+	LastSampleAt time.Time     // wall-clock time of LastSample
+}
+
 type AuthServer struct {
 	Name             string
 	Addrs            []string
@@ -51,6 +61,9 @@ type AuthServer struct {
 	// Backoff tracking (guarded by mu). Keyed by (address, transport): a
 	// failure on (1.2.3.4:53, DoT) does not block (1.2.3.4:53, Do53).
 	AddressBackoffs map[AddrXport]*AddressBackoff
+	// RTT estimates (guarded by mu). Used by prioritizeServers to prefer
+	// faster (address, transport) tuples.
+	RTTEstimates map[AddrXport]*RTTEstimate
 }
 
 // NewAuthServer creates a new AuthServer instance with default values.
@@ -636,4 +649,78 @@ func (as *AuthServer) RecordAddressSuccess(addr string, t core.Transport) {
 	if as.AddressBackoffs != nil {
 		delete(as.AddressBackoffs, AddrXport{Addr: addr, Transport: t})
 	}
+}
+
+// rttEMAAlpha is the smoothing factor for RTT EMA updates. Lower values
+// react more slowly to changes; higher values are noisier. 0.25 gives
+// each new sample 25% weight and 75% to the running average.
+const rttEMAAlpha = 0.25
+
+// RecordRTT folds a new observation into the running RTT estimate for the
+// given (address, transport). Non-positive rtts are ignored. Thread-safe.
+func (as *AuthServer) RecordRTT(addr string, t core.Transport, rtt time.Duration) {
+	if as == nil || rtt <= 0 {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if as.RTTEstimates == nil {
+		as.RTTEstimates = make(map[AddrXport]*RTTEstimate)
+	}
+	key := AddrXport{Addr: addr, Transport: t}
+	r, ok := as.RTTEstimates[key]
+	if !ok {
+		r = &RTTEstimate{EMA: rtt, Samples: 1}
+	} else {
+		r.EMA = time.Duration(rttEMAAlpha*float64(rtt) + (1-rttEMAAlpha)*float64(r.EMA))
+		if r.Samples < ^uint32(0) {
+			r.Samples++
+		}
+	}
+	r.LastSample = rtt
+	r.LastSampleAt = time.Now()
+	as.RTTEstimates[key] = r
+}
+
+// GetRTT returns the smoothed RTT estimate for the given (address, transport)
+// tuple, and ok=true if a usable sample exists. Samples older than the
+// active BackoffPolicy.MaxFailure are treated as expired (ok=false) so the
+// sort path re-probes them. Thread-safe.
+func (as *AuthServer) GetRTT(addr string, t core.Transport) (time.Duration, bool) {
+	if as == nil {
+		return 0, false
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	r, ok := as.RTTEstimates[AddrXport{Addr: addr, Transport: t}]
+	if !ok {
+		return 0, false
+	}
+	if time.Since(r.LastSampleAt) > GetBackoffPolicy().MaxFailure {
+		return 0, false
+	}
+	return r.EMA, true
+}
+
+// SnapshotRTTEstimates returns a copy of the RTT-estimate map. Useful for
+// observability dumps. Thread-safe.
+func (as *AuthServer) SnapshotRTTEstimates() map[AddrXport]*RTTEstimate {
+	if as == nil {
+		return nil
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if len(as.RTTEstimates) == 0 {
+		return nil
+	}
+	snap := make(map[AddrXport]*RTTEstimate, len(as.RTTEstimates))
+	for k, v := range as.RTTEstimates {
+		snap[k] = &RTTEstimate{
+			EMA:          v.EMA,
+			Samples:      v.Samples,
+			LastSample:   v.LastSample,
+			LastSampleAt: v.LastSampleAt,
+		}
+	}
+	return snap
 }
