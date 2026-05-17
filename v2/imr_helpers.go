@@ -73,22 +73,25 @@ func (imr *Imr) launchTransportSignalQuery(ctx context.Context, owner string, re
 	if imr.TransportSignalCached(owner) {
 		return
 	}
-	if !imr.Cache.MarkTransportQuery(owner) {
+	if !imr.TransportSignalDiscovery.Begin(owner) {
 		return
 	}
 	go func() {
-		defer imr.Cache.ClearTransportQuery(owner)
 		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 		rrtype := imr.TransportSignalRRType()
 		if imr.Cache.Debug {
 			imr.Cache.Logger.Printf("Transport signal query (%s): querying %s %s", reason, owner, dns.TypeToString[rrtype])
 		}
-		if _, err := imr.ImrQuery(queryCtx, owner, rrtype, dns.ClassINET, nil); err != nil {
+		resp, err := imr.ImrQuery(queryCtx, owner, rrtype, dns.ClassINET, nil)
+		if err != nil || resp == nil || resp.RRset == nil || len(resp.RRset.RRs) == 0 {
 			if imr.Cache.Debug {
 				imr.Cache.Logger.Printf("Transport signal query (%s) failed for %s %s: %v", reason, owner, dns.TypeToString[rrtype], err)
 			}
+			imr.TransportSignalDiscovery.Fail(owner, err)
+			return
 		}
+		imr.TransportSignalDiscovery.Succeed(owner)
 	}()
 }
 
@@ -105,15 +108,15 @@ func (imr *Imr) maybeQueryTLSA(ctx context.Context, base string) {
 		dns.Fqdn(fmt.Sprintf("_853._tcp.%s", base)),
 	}
 	for _, owner := range targets {
-		if !imr.Cache.MarkTLSAQuery(owner) {
+		if !imr.TLSADiscovery.Begin(owner) {
 			continue
 		}
 		go func(owner string) {
-			defer imr.Cache.ClearTLSAQuery(owner)
 			queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			defer cancel()
 			resp, err := imr.ImrQuery(queryCtx, owner, dns.TypeTLSA, dns.ClassINET, nil)
 			if err != nil || resp == nil || resp.RRset == nil || len(resp.RRset.RRs) == 0 {
+				imr.TLSADiscovery.Fail(owner, err)
 				return
 			}
 			rr := resp.RRset
@@ -122,11 +125,13 @@ func (imr *Imr) maybeQueryTLSA(ctx context.Context, base string) {
 				vstate, err = imr.Cache.ValidateRRsetWithParentZone(queryCtx, rr, imr.IterativeDNSQueryFetcher(), imr.ParentZone)
 				if err != nil {
 					lgImr.Warn("maybeQueryTLSA: failed to validate TLSA RRset", "err", err)
+					imr.TLSADiscovery.Fail(owner, err)
 					return
 				}
 			}
 			baseHint := baseFromTLSAOwner(owner)
 			imr.Cache.StoreTLSAForServer(baseHint, owner, rr, vstate)
+			imr.TLSADiscovery.Succeed(owner)
 		}(owner)
 	}
 }

@@ -366,13 +366,13 @@ var dumpTuningCmd = &cobra.Command{
 		fmt.Printf("  routing_failure : %s\n", p.RoutingFailure)
 		fmt.Printf("  lame_delegation : %s\n", p.LameDelegation)
 		fmt.Println()
-		fmt.Println("Address-family tracker (config; W8 will activate):")
+		fmt.Println("Address-family tracker:")
 		fmt.Printf("  window_duration   : %s\n", t.AddressFamily.WindowDuration)
 		fmt.Printf("  failure_threshold : %d\n", t.AddressFamily.FailureThreshold)
 		fmt.Printf("  suspect_duration  : %s\n", t.AddressFamily.SuspectDuration)
 		fmt.Printf("  probe_interval    : %s\n", t.AddressFamily.ProbeInterval)
 		fmt.Println()
-		fmt.Println("Discovery state machine (config; W9 will activate):")
+		fmt.Println("Discovery state machine:")
 		fmt.Printf("  retry_after_failure : %s\n", t.Discovery.RetryAfterFailure)
 		fmt.Printf("  max_failures        : %d\n", t.Discovery.MaxFailures)
 		fmt.Println()
@@ -386,6 +386,64 @@ var dumpTuningCmd = &cobra.Command{
 			}
 		}
 		fmt.Printf("Upgrade indirect cache hits: %s\n", upgradeStr)
+	},
+}
+
+var dumpDiscoveryCmd = &cobra.Command{
+	Use:   "discovery",
+	Short: "Show live IMR discovery state (transport-signal and TLSA per owner)",
+	Long: `List the current state of each owner the IMR has attempted to
+discover side-channel info for: SVCB/TSYNC transport signals and
+TLSA pin records. Discovery is opportunistic; this shows what's
+been tried, what succeeded, and which owners are in cooldown after
+repeated failures.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		imr := tdns.Globals.ImrEngine
+		if imr == nil {
+			fmt.Println("IMR engine not initialised")
+			return
+		}
+		now := time.Now()
+		printTracker := func(label string, snap map[string]cache.DiscoveryState) {
+			fmt.Printf("%s:\n", label)
+			if len(snap) == 0 {
+				fmt.Println("  (no entries)")
+				fmt.Println()
+				return
+			}
+			owners := make([]string, 0, len(snap))
+			for o := range snap {
+				owners = append(owners, o)
+			}
+			sort.Strings(owners)
+			fmt.Println("  Owner | Status | Attempts | Last Attempt | Next Attempt | Last Error")
+			fmt.Println("  " + strings.Repeat("-", 90))
+			for _, o := range owners {
+				s := snap[o]
+				next := "-"
+				if !s.NextAttemptAt.IsZero() {
+					rem := s.NextAttemptAt.Sub(now)
+					if rem < 0 {
+						rem = 0
+					}
+					next = formatDuration(rem)
+				}
+				last := "-"
+				if !s.LastAttemptAt.IsZero() {
+					last = formatDuration(now.Sub(s.LastAttemptAt)) + " ago"
+				}
+				errMsg := "-"
+				if s.LastError != "" {
+					errMsg = s.LastError
+				}
+				fmt.Printf("  %s | %s | %d | %s | %s | %s\n",
+					o, cache.DiscoveryStatusToString[s.Status],
+					s.AttemptCount, last, next, errMsg)
+			}
+			fmt.Println()
+		}
+		printTracker("Transport-signal discovery", imr.TransportSignalDiscovery.Snapshot())
+		printTracker("TLSA discovery", imr.TLSADiscovery.Snapshot())
 	},
 }
 
@@ -855,7 +913,7 @@ func formatDuration(d time.Duration) string {
 // It attaches dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd, dumpDnskeysCmd, dumpZoneCmd, and dumpZonesCmd to ImrDumpCmd, adds the keys/servers/errors subcommands under auth-servers, and attaches the zone servers subcommand under zone.
 func init() {
 	// rootCmd.AddCommand(ImrDumpCmd)
-	ImrDumpCmd.AddCommand(dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd, dumpDnskeysCmd, dumpZoneCmd, dumpZonesCmd, dumpTuningCmd)
+	ImrDumpCmd.AddCommand(dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd, dumpDnskeysCmd, dumpZoneCmd, dumpZonesCmd, dumpTuningCmd, dumpDiscoveryCmd)
 	dumpAuthServersCmd.AddCommand(newDumpKeysCmd(), newDumpServersCmd(), dumpAuthServersErrorsCmd)
 	dumpZoneCmd.AddCommand(dumpZoneServersCmd, dumpZoneBackoffsCmd)
 }

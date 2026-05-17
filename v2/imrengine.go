@@ -46,6 +46,14 @@ type Imr struct {
 	// appears to have lost connectivity over that family. Sourced from
 	// Tuning.AddressFamily; see W8.
 	FamilyTracker *cache.FamilyTracker
+	// TransportSignalDiscovery and TLSADiscovery track the state of the
+	// IMR's opportunistic side-channel discovery (SVCB/TSYNC transport
+	// signals and TLSA pin records, respectively). Separate trackers so a
+	// broken TLSA endpoint doesn't backoff transport-signal probing for
+	// the same owner, and vice versa. Sourced from Tuning.Discovery;
+	// see W9.
+	TransportSignalDiscovery *cache.DiscoveryTracker
+	TLSADiscovery            *cache.DiscoveryTracker
 }
 
 type ImrRequest struct {
@@ -131,6 +139,14 @@ func (conf *Config) InitImrEngine(quiet bool) error {
 			conf.Imr.Tuning.AddressFamily.SuspectDuration,
 			conf.Imr.Tuning.AddressFamily.ProbeInterval,
 			conf.Imr.Tuning.AddressFamily.FailureThreshold,
+		),
+		TransportSignalDiscovery: cache.NewDiscoveryTracker(
+			conf.Imr.Tuning.Discovery.RetryAfterFailure,
+			conf.Imr.Tuning.Discovery.MaxFailures,
+		),
+		TLSADiscovery: cache.NewDiscoveryTracker(
+			conf.Imr.Tuning.Discovery.RetryAfterFailure,
+			conf.Imr.Tuning.Discovery.MaxFailures,
 		),
 	}
 

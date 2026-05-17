@@ -54,18 +54,14 @@ type RRsetCacheT struct {
 	DnskeyCache   *DnskeyCacheT
 	DNSClient     map[core.Transport]core.DNSClienter
 	//Options                map[ImrOption]string
-	Primed                 bool
-	Logger                 *log.Logger
-	LineWidth              int
-	Verbose                bool
-	Debug                  bool
-	Quiet                  bool // if true, suppress informational logging (useful for CLI tools)
-	transportQueryMu       sync.Mutex
-	transportQueryInFlight map[string]struct{}
-	nsRevalidateMu         sync.Mutex
-	nsRevalidateInFlight   map[string]struct{}
-	tlsaQueryMu            sync.Mutex
-	tlsaQueryInFlight      map[string]struct{}
+	Primed               bool
+	Logger               *log.Logger
+	LineWidth            int
+	Verbose              bool
+	Debug                bool
+	Quiet                bool // if true, suppress informational logging (useful for CLI tools)
+	nsRevalidateMu       sync.Mutex
+	nsRevalidateInFlight map[string]struct{}
 }
 
 type Zone struct {

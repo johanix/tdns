@@ -1463,5 +1463,5 @@ restart.
 | W6 (addr,transport) refactor | landed | (branch imr-overhaul) | Absorbs S1+S2+S4; backoff keyed by AddrXport |
 | W7 RTT                       | landed | (branch imr-overhaul) | EMA per (addr,transport); prioritizeServers sort |
 | W8 Address-family tracker    | landed | (branch imr-overhaul) | Suspect-family deprioritized; periodic probes |
-| W9 Discovery state machine   | not started | - | Independent |
+| W9 Discovery state machine   | landed | (branch imr-overhaul) | Per-owner state, exponential cooldown, separate TLSA tracker |
 | W10 Parallel NS first-success | deferred   | - | Re-evaluate after W7+W8 |
