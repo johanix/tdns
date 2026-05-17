@@ -16,6 +16,27 @@ import (
 
 var Conf tdns.Config
 
+// clientResponseDeadline returns how long the interactive CLI should wait
+// for the IMR engine to deliver a response on RecursorCh. It must be
+// strictly greater than the IMR's per-query W2 budget
+// (Conf.Imr.Tuning.QueryBudget, default 8s) or the CLI will give up
+// before the IMR can return any answer or error — which is exactly the
+// "Timeout waiting for response" symptom we used to see with the
+// previous hardcoded 3s.
+//
+// We add 2 seconds of slack to cover the time the IMR spends on cache
+// lookup, response marshalling, and channel send around the underlying
+// IterativeDNSQuery. Falls back to a 12s default if the IMR tuning has
+// not been initialised (e.g., tests, early startup).
+func clientResponseDeadline() time.Duration {
+	const slack = 2 * time.Second
+	const defaultDeadline = 12 * time.Second
+	if Conf.Imr.Tuning.QueryBudget <= 0 {
+		return defaultDeadline
+	}
+	return Conf.Imr.Tuning.QueryBudget + slack
+}
+
 // ImrCmd is the parent command for all IMR-related commands
 var ImrCmd = &cobra.Command{
 	Use:   "imr",
@@ -130,8 +151,8 @@ var ImrQueryCmd = &cobra.Command{
 			} else {
 				fmt.Printf("No records found: %s\n", r.Msg)
 			}
-		case <-time.After(3 * time.Second):
-			fmt.Println("Timeout waiting for response")
+		case <-time.After(clientResponseDeadline()):
+			fmt.Println("Timeout waiting for response (CLI gave up before the IMR returned). The IMR's own query budget (Conf.Imr.Tuning.QueryBudget) bounds the underlying chain walk; check the IMR log for the actual failure.")
 			return
 		}
 	},
