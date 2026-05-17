@@ -970,15 +970,19 @@ func PrintCacheItem(item core.Tuple[string, cache.CachedRRset], suffix string) {
 			return
 		}
 		for _, rr := range item.Val.RRset.RRs {
+			// Per-RR state is just a copy of the RRset's State (DNS RRs
+			// don't carry validation state individually), which is
+			// already shown on the header line above. Avoid the
+			// "(state: )" empty-string render footgun for State==0
+			// and skip the duplicate.
 			switch rr.Header().Rrtype {
 			case dns.TypeDS:
-				fmt.Printf("  %s %s", maskDsLine(rr.String()), ctxLabel)
+				fmt.Printf("  %s %s\n", maskDsLine(rr.String()), ctxLabel)
 			case dns.TypeDNSKEY:
-				fmt.Printf("  %s %s", maskDnskeyLine(rr.String()), ctxLabel)
+				fmt.Printf("  %s %s\n", maskDnskeyLine(rr.String()), ctxLabel)
 			default:
-				fmt.Printf("  %s %s", rr.String(), ctxLabel)
+				fmt.Printf("  %s %s\n", rr.String(), ctxLabel)
 			}
-			fmt.Printf(" (state: %s)\n", cache.ValidationStateToString[item.Val.State])
 		}
 		for _, rr := range item.Val.RRset.RRSIGs {
 			fmt.Printf("  %s %s\n", maskRrsigLine(rr.String()), ctxLabel)
