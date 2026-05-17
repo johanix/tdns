@@ -1653,111 +1653,11 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 
 // parseTransportString parses strings like "doq:30,dot:20" into a map[string]uint8
 // parseTransportString removed; use transport.ParseTransportString
-
-// pickTransport chooses a transport based on configured weights, falling back sensibly
-// If requireEncrypted is true, only encrypted transports (doq, dot, doh) are considered
-func pickTransport(server *cache.AuthServer, qname string, requireEncrypted bool) (core.Transport, error) {
-	if server == nil {
-		if requireEncrypted {
-			return core.TransportDo53, fmt.Errorf("PR flag requires encrypted transport but server is nil")
-		}
-		return core.TransportDo53, nil
-	}
-
-	// Filter transports if encryption is required
-	var availableTransports []core.Transport
-	if requireEncrypted {
-		for _, t := range server.Transports {
-			if core.IsEncryptedTransport(t) {
-				availableTransports = append(availableTransports, t)
-			}
-		}
-		// Check if server has any encrypted transports configured
-		if len(availableTransports) == 0 {
-			// Check transport weights for encrypted options
-			hasEncrypted := false
-			for t := range server.TransportWeights {
-				if core.IsEncryptedTransport(t) && server.TransportWeights[t] > 0 {
-					hasEncrypted = true
-					break
-				}
-			}
-			if !hasEncrypted {
-				return core.TransportDo53, fmt.Errorf("PR flag requires encrypted transport but server %s has no encrypted transports available", server.Name)
-			}
-		}
-	} else {
-		availableTransports = server.Transports
-	}
-
-	if len(server.TransportWeights) == 0 {
-		if server.PrefTransport != 0 {
-			if requireEncrypted && !core.IsEncryptedTransport(server.PrefTransport) {
-				// PrefTransport is do53, but we need encrypted - try availableTransports
-				if len(availableTransports) > 0 {
-					return availableTransports[0], nil
-				}
-				return core.TransportDo53, fmt.Errorf("PR flag requires encrypted transport but server %s only has do53", server.Name)
-			}
-			return server.PrefTransport, nil
-		}
-		if len(availableTransports) > 0 {
-			return availableTransports[0], nil
-		}
-		if requireEncrypted {
-			return core.TransportDo53, fmt.Errorf("PR flag requires encrypted transport but server %s has no encrypted transports", server.Name)
-		}
-		return core.TransportDo53, nil
-	}
-	// Build weighted list honoring server.Transports order, filtering for encrypted if required
-	var total int
-	type pair struct {
-		t core.Transport
-		w int
-	}
-	var candidates []pair
-	transportsToCheck := availableTransports
-	if !requireEncrypted {
-		transportsToCheck = server.Transports
-	}
-	for _, t := range transportsToCheck {
-		if w, ok := server.TransportWeights[t]; ok && w > 0 {
-			candidates = append(candidates, pair{t: t, w: int(w)})
-			total += int(w)
-		}
-	}
-	// remainder goes to Do53 (only if encryption not required)
-	if !requireEncrypted && total < 100 {
-		candidates = append(candidates, pair{t: core.TransportDo53, w: 100 - total})
-		total = 100
-	}
-	if total == 0 {
-		if requireEncrypted {
-			return core.TransportDo53, fmt.Errorf("PR flag requires encrypted transport but server %s has no encrypted transports with weights", server.Name)
-		}
-		if server.PrefTransport != 0 {
-			return server.PrefTransport, nil
-		}
-		if len(server.Transports) > 0 {
-			return server.Transports[0], nil
-		}
-		return core.TransportDo53, nil
-	}
-	// stable hash on (qname, server.Name)
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(qname))
-	_, _ = h.Write([]byte{"|"[0]})
-	_, _ = h.Write([]byte(server.Name))
-	bucket := int(h.Sum32() % 100)
-	acc := 0
-	for _, c := range candidates {
-		acc += c.w
-		if bucket < acc {
-			return c.t, nil
-		}
-	}
-	return candidates[len(candidates)-1].t, nil
-}
+// pickTransport removed in W6 cleanup; its logic was absorbed into
+// candidateTransports + the prioritizeServers tuple-expansion loop. The
+// deterministic fnv32(qname|server.Name) weighted-hash bucket scheme is
+// preserved by sortTuplesByWeightedPreference so cache distribution per
+// query is unchanged from the legacy single-transport pick.
 
 func RecursiveDNSQueryWithConfig(qname string, qtype uint16, timeout time.Duration, retries int) (*core.RRset, error) {
 	resolvers := viper.GetStringSlice("dns.resolvers")
