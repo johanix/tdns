@@ -2,13 +2,13 @@
 
 TDNS includes several applications built on the TDNS Go library.
 
-| Application     | Binary            | Description                              |
-|-----------------|-------------------|------------------------------------------|
-| tdns-auth       | tdns-authv2       | Authoritative DNS nameserver             |
-| tdns-agent      | tdns-agentv2      | Single-provider delegation-sync agent    |
-| tdns-imr        | tdns-imrv2        | Recursive DNS nameserver (IMR)           |
-| tdns-cli        | tdns-cliv2        | Management CLI for all TDNS services     |
-| dog             | dogv2             | DNS query tool with extended RR support  |
+| Application     | Binary       | Description                              |
+|-----------------|--------------|------------------------------------------|
+| tdns-auth       | tdns-auth    | Authoritative DNS nameserver             |
+| tdns-agent      | tdns-agent   | Single-provider delegation-sync agent    |
+| tdns-imr        | tdns-imr     | Recursive DNS nameserver (IMR)           |
+| tdns-cli        | tdns-cli     | Management CLI for all TDNS services     |
+| dog             | dog          | DNS query tool with extended RR support  |
 
 For the multi-provider applications (tdns-mpagent,
 tdns-mpcombiner, tdns-mpsigner, tdns-mpcli), see the
@@ -33,7 +33,7 @@ those changes with the parent zone via generalized NOTIFY
 or SIG(0)-signed DNS UPDATE, as advertised by the parent's
 DSYNC RRset.
 
-[Full documentation](app-agent.md) (coming soon)
+Full documentation (coming soon).
 
 ## tdns-imr -- Recursive Nameserver
 

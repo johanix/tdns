@@ -13,6 +13,15 @@ authoritative and recursive DNS service.
 3. **Experimental Record Types** -- DSYNC, DELEG, TSYNC, and
    the records that tdns defines as infrastructure for other
    components (HSYNC3, HSYNCPARAM, JWK, CHUNK).
+4. **Post-Quantum Algorithm Support** -- ML-DSA, SLH-DSA,
+   Falcon, MAYO and SNOVA for both SIG(0) and DNSSEC, via
+   the dnssec-algorithms registry on top of a forked
+   miekg/dns.
+5. **Automatic Key Rollover** -- Pointer to the dedicated
+   [key-rollover](key-rollover.md) guide and its
+   [timing-equations](rollover-timing-equations.md)
+   companion. The engine reuses the delegation-sync
+   transports from §1 and the SIG(0) PQ support from §4.
 
 For multi-provider DNSSEC see the
 [tdns-mp Guide](../../tdns-mp/guide/README.md).
@@ -23,37 +32,270 @@ For multi-provider DNSSEC see the
 When a child zone's delegation data changes -- NS records,
 glue addresses, or DS records -- the parent zone must be
 updated to reflect the change. Traditionally this is a
-manual process. TDNS automates it.
+manual process. TDNS automates it on both sides: tdns-agent
+(or tdns-auth running as the child's primary) detects the
+change and pushes it to the parent; tdns-auth on the parent
+side receives the push, verifies it, and applies it to a
+configurable delegation backend.
 
-The mechanism is built on two components:
+The mechanism is built on three components:
 
 - The **DSYNC** record type (RFC 9859), published by the
   parent to advertise which synchronization schemes it
   supports and where to send updates.
 - **SIG(0) key management**, used to authenticate DNS UPDATE
   messages sent from child to parent.
+- A pluggable **delegation backend** on the parent side that
+  decides where applied changes are persisted.
 
-TDNS supports two synchronization schemes:
+TDNS supports two synchronization schemes, and the same
+parent zone can advertise both at once:
 
-- **UPDATE** -- The child agent constructs a DNS UPDATE
-  message, signs it with a SIG(0) key, and sends it to
-  the parent's designated UPDATE receiver. This is
-  immediate and does not require a scanner on the parent
-  side.
+- **UPDATE** -- The child constructs a DNS UPDATE message,
+  signs it with a SIG(0) key, and sends it to the parent's
+  designated UPDATE receiver. The change is immediate and
+  does not require any scanner on the parent.
 
-- **NOTIFY** -- The child agent publishes CDS or CSYNC
-  records at the zone apex and sends a generalized NOTIFY
-  to the parent. The parent's scanner picks up the NOTIFY,
-  queries the child, verifies the records, and applies the
-  changes.
+- **NOTIFY** -- The child publishes CDS or CSYNC records at
+  its zone apex and sends a generalized NOTIFY for the
+  corresponding RRtype to the parent's NOTIFY target. The
+  parent's scanner picks up the NOTIFY, queries the child
+  for the advertised records, verifies them, and applies
+  the resulting DS or delegation changes.
 
-Both tdns-auth (as parent primary) and tdns-agent (as child
-agent) implement their respective roles. See the
-[Multi-Provider Advanced Topics](../../tdns-mp/guide/multi-provider-advanced.md)
-document, sections 1 and 2, for configuration details
-including DSYNC publication, delegation backends, and key
-bootstrap. Those sections are written in a multi-provider
-context but apply equally to the single-provider tdns-agent.
+
+### 1.1 Parent: publishing DSYNC
+
+A parent zone advertises its delegation-sync capabilities
+by adding the zone option `delegation-sync-parent` (zone
+option `OptDelSyncParent`). When set, tdns-auth synthesises
+the necessary DSYNC RRs at the well-known owner name
+`_dsync.<zonename>` based on the global
+`delegationsync.parent.*` configuration:
+
+```yaml
+delegationsync:
+   parent:
+      schemes: [ notify, update ]
+      notify:
+         types:     [ CDS, CSYNC ]
+         target:    notifications.{ZONENAME}
+         port:      5354
+         addresses: [ 127.0.0.1, "::1" ]
+      update:
+         types:     [ ANY ]
+         target:    updates.{ZONENAME}
+         port:      5354
+         addresses: [ 127.0.0.1, "::1" ]
+         keygen:
+            algorithm: ED25519
+         key-verification:
+            mechanisms:      [ truststore, dnssec ]
+            max-attempts:    5
+            retry-interval:  30s
+            require-dnssec:  false
+      bootstrap:
+         methods: at-apex,unsigned,manual
+```
+
+The publication code (`PublishDsyncRRs`, in
+[tdns/v2/ops_dsync.go](../v2/ops_dsync.go)) creates one
+DSYNC RR per scheme, accompanied by A/AAAA glue for the
+target FQDNs. For the UPDATE target it additionally
+publishes an SVCB record carrying a SIG(0) **bootstrap**
+SvcParam (key 65282) that tells children which SIG(0)
+key-bootstrap methods the parent accepts -- typically
+`at-apex` (RFC 9615-style apex publication), `unsigned`
+(opportunistic trust-on-first-use), or `manual`. Publication
+happens via the OnFirstLoad callback, so the records appear
+on initial zone load without operator action beyond enabling
+the zone option.
+
+The parent also runs a SIG(0) key preparation step
+(`ParentSig0KeyPrep`) so that the UPDATE receiver always
+has an active keypair available for replies that need to
+be signed (KeyState responses, for example).
+
+
+### 1.2 Parent: the UPDATE receiver
+
+When the `update` scheme is enabled, tdns-auth listens on
+the addresses+ports declared above and routes inbound
+UPDATE messages through `UpdateResponder` (see
+[tdns/v2/updateresponder.go](../v2/updateresponder.go)).
+SIG(0) verification runs ahead of the responder; if the
+signature is missing, invalid, or signed by an unknown key,
+the UPDATE is rejected before any policy is evaluated.
+
+Trust evaluation is controlled by the
+`update.key-verification` block:
+
+- `mechanisms` -- which sources are consulted to decide
+  whether the signing key is trusted. `truststore` looks
+  for a locally accepted KEY; other mechanisms include
+  DNSSEC-validated KEY lookup at the child apex
+  (RFC 9615 "at-apex" bootstrap).
+- `max-attempts` / `retry-interval` -- how aggressively the
+  receiver retries DNS lookups when the signing key is not
+  yet known. This lets a fresh child key (just published)
+  succeed without a manual import.
+- `require-dnssec` -- if true, the child zone's signing key
+  must be reachable through a validating DNSSEC chain.
+
+A verified UPDATE for a delegated child zone becomes a
+`CHILD-UPDATE` request (zone_updater.go) that is handed to
+the parent's `DelegationBackend` (see 1.4).
+
+
+### 1.3 Parent: the generalized-NOTIFY scanner
+
+When the `notify` scheme is enabled, tdns-auth listens on
+the configured addresses+ports and accepts NOTIFY messages
+of the advertised types (CDS, CSYNC). `NotifyResponder`
+([tdns/v2/notifyresponder.go](../v2/notifyresponder.go))
+checks that the zone really advertises NOTIFY for the
+incoming Qtype (via `advertisesDsyncNotify`) and then
+enqueues a scan request on the scanner queue.
+
+The scanner engine
+([tdns/v2/scanner.go](../v2/scanner.go)) processes scan
+requests asynchronously and also runs on a configurable
+periodic interval:
+
+```yaml
+scanner:
+   interval: 3600              # seconds
+   options:
+      - at-apex                # RFC 8078 bootstrap support
+      - at-ns                  # RFC 9615 signaling support
+      # - no-dnssec-validation # lab/testbed only
+   at-apex:
+      checks:   3
+      interval: 600
+```
+
+For each scan the engine:
+
+- Queries the child's authoritative nameservers
+  (preferring TCP) for the relevant RRset (CDS or CSYNC).
+- Requires that all NS for the child return the same
+  RRset -- partial consistency is treated as a transient
+  state and rejected.
+- Validates DNSSEC where possible. For first-time CDS
+  bootstrap with no existing DS, the `at-apex` option
+  permits an opportunistic accept after `checks` repeated
+  matches separated by `interval` seconds (RFC 8078).
+- For CDS: converts each CDS to its DS form (RFC 7344) and
+  detects the algorithm-0 removal sentinel.
+- For CSYNC: extracts the type bitmap, honours `IMMEDIATE`
+  and `USESOAMIN` flags (RFC 7477), and verifies the
+  child's SOA serial does not change during the scan to
+  catch in-flight zone updates.
+- Diffs the verified records against what the
+  DelegationBackend already holds and emits adds/removes.
+
+Successful scan results produce CHILD-UPDATE requests that
+flow through the same backend pipeline as direct UPDATEs.
+
+
+### 1.4 Parent: delegation backends
+
+Once a CHILD-UPDATE has been authorized (either by SIG(0)
+on the UPDATE path, or by the scanner on the NOTIFY path),
+the change is applied through a pluggable **delegation
+backend**. Each parent zone that accepts child updates
+**must** declare which backend it uses; config-parse
+rejects the zone otherwise. There is no silent default.
+
+Zones opt in by combining a zone-level switch with a
+named backend reference:
+
+```yaml
+zones:
+   example.com.:
+      type:                primary
+      delegation-sync-parent: true
+      allow-child-updates:   true
+      delegationbackend:     files-dnslab
+```
+
+Named backends live at the top level of the daemon's
+config:
+
+```yaml
+delegationbackends:
+   - name:           files-dnslab
+     type:           zonefile
+     directory:      /var/lib/tdns/delegations/dnslab
+     notify-command: /usr/bin/notify-hook.sh
+
+   - name: inline
+     type: direct
+
+   - name: tracking
+     type: db
+```
+
+Three backend types are implemented:
+
+- **`direct`** -- applies the update to the parent zone's
+  in-memory tree and persists by rewriting the zone source
+  file. The zone is marked dirty during the write and
+  clean on success. If the zone has no source file (loaded
+  via XFR, generated, etc.) the persist step is skipped
+  silently; in-memory state is still updated. Best fit for
+  small or medium parent zones managed as flat files.
+
+- **`db`** -- writes to a SQLite table keyed on
+  `(parent, child, owner, rrtype)`, with idempotent
+  replace semantics. Does **not** touch the in-memory
+  zone, so served data only reflects the change after a
+  zone reload. Best fit when the database is the source
+  of truth and the served zone is rebuilt from it.
+
+- **`zonefile`** -- hybrid: writes to the database (for
+  durable state) and emits per-delegation fragment files
+  into `directory`, optionally executing `notify-command`
+  after each write. Requires the `directory:` field. Best
+  fit when an external provisioning pipeline assembles
+  the parent zone from fragments.
+
+The backend is also the canonical answer for "what does
+the parent currently believe about this delegation?" The
+NOTIFY scanner consults the backend when computing the
+diff between newly-observed CDS/CSYNC and current state,
+so backend state and served state stay reconcilable even
+when they live in physically different stores.
+
+Backend state can be inspected with the CLI:
+
+```sh
+tdns-cli auth delegation list   --zone example.com.
+tdns-cli auth delegation show   --zone example.com. --child sub.example.com.
+```
+
+
+### 1.5 Child: pushing changes
+
+On the child side, a zone with `delegation-sync-child`
+enabled runs through `SetupZoneSync` (also wired via
+OnFirstLoad). This:
+
+- Calls `DelegationSyncSetup` to ensure the child has an
+  active SIG(0) keypair, and arranges for the public KEY
+  to be published according to the parent's advertised
+  bootstrap methods.
+- Subscribes the zone to the engine that watches for
+  changes in delegation-relevant RRsets (NS, glue, DNSKEY
+  → DS) and dispatches them via `DelegationSyncher`.
+
+`DelegationSyncher` consumes `DelegationSyncQ` and routes
+each change to `SyncZoneDelegation`, which discovers the
+parent's DSYNC RRset and sends either a SIG(0)-signed
+UPDATE, a generalized NOTIFY(CDS/CSYNC), or both -- driven
+by what the parent advertises and by per-policy preference.
+The same dispatch logic is reused by the auto-rollover
+engine; see section 5 for the full picture.
 
 
 ## 2. DNS Transport Signaling
@@ -196,7 +438,7 @@ transparently.
 ## 3. Experimental Record Types
 
 TDNS implements several record types beyond the standard set.
-The dog tool (`dogv2`) can query and display all of them
+The dog tool (`dog`) can query and display all of them
 natively -- dig cannot decode the private-use types.
 
 Some of these record types are defined and parsed in tdns
@@ -256,3 +498,184 @@ actual transport implementation lives in
 [tdns-transport](../../tdns-transport/) and the protocol
 that uses it is implemented in
 [tdns-mp](../../tdns-mp/guide/README.md).
+
+
+## 4. Post-Quantum Algorithm Support
+
+TDNS supports post-quantum (PQ) signature algorithms for
+both DNSSEC (RRSIG over RRsets) and SIG(0) (transaction
+signatures on DNS UPDATE). The same algorithm and key can
+be used in either role: a SIG(0) MLDSA44 key signing a
+delegation UPDATE goes through exactly the same code path
+as an MLDSA44 ZSK signing an RRset.
+
+PQ support rests on three pieces:
+
+- A small **fork of miekg/dns** that adds a pluggable
+  algorithm registry to the otherwise-hardcoded dispatch
+  in `dnssec.go`, `sig0.go`, key parsing and key
+  generation.
+- The **dnssec-algorithms** wrapper module, where each PQ
+  algorithm is implemented as a self-contained subpackage
+  that registers itself on `init()`.
+- A **compile-time registration model** in applications --
+  an app gets the algorithms it imports, nothing more.
+
+
+### 4.1 Supported algorithms
+
+The following PQ algorithms are implemented under
+[dnssec-algorithms](https://github.com/johanix/dnssec-algorithms)
+(local clone at `/Users/johani/src/git/tdns-project/dnssec-algorithms`):
+
+| Algorithm           | DNSKEY # | Status        | Backend          |
+|---------------------|---------:|---------------|------------------|
+| ML-DSA-44 (FIPS 204)|      199 | Final         | CIRCL (pure Go)  |
+| SLH-DSA-128s (FIPS 205) | 200 | Final         | CIRCL (pure Go)  |
+| Falcon-512          |      201 | Draft         | liboqs (cgo)     |
+| MAYO-1              |      202 | NIST onramp   | liboqs (cgo)     |
+| SNOVA-24_5_4        |      203 | NIST onramp   | liboqs (cgo)     |
+
+DNSKEY algorithm codes 199-203 are in the IANA-Unassigned
+range and are coordinated only inside this project. They
+**will** change when the IETF assigns codepoints; treat
+them as experimental.
+
+CIRCL-backed algorithms (MLDSA, SLH-DSA) build with the
+standard Go toolchain. liboqs-backed algorithms require a
+working liboqs C library plus cgo.
+
+
+### 4.2 The forked miekg/dns
+
+The pluggable registry lives on the `algorithm-registry`
+branch of `github.com/johanix/dns`. Every Go module in
+the project that wants PQ support carries a `replace`
+directive:
+
+```
+replace github.com/miekg/dns =>
+    github.com/johanix/dns v0.0.0-20260515091838-3300006a8466
+```
+
+(version pseudo-tag will drift; use whatever is current in
+`dnssec-algorithms/go.mod`).
+
+What the fork changes: upstream miekg/dns has roughly six
+hardcoded `switch alg {}` sites -- in `dnssec.go` (sign,
+verify), `sig0.go`, the keyscan parser, and `Generate`.
+Each of these grows an extra default arm that consults a
+process-wide registry, so an algorithm that isn't built in
+can still be signed, verified, generated, parsed and
+serialised by anyone holding the new
+`dns.Algorithm` interface. The design and rationale are
+documented in
+[`tdns/docs/2026-05-13-miekg-dns-pluggable-algorithms-proposal.md`](../docs/2026-05-13-miekg-dns-pluggable-algorithms-proposal.md).
+
+The `dns.Algorithm` interface each algorithm implements:
+
+```go
+type Algorithm interface {
+    Name() string                  // BIND private-key label
+    Hash() crypto.Hash             // 0 for identity-hash PQ algs
+    Generate(bits int) (crypto.PrivateKey, error)
+    PublicKeyFromWire(buf []byte) (crypto.PublicKey, error)
+    PublicKeyToWire(pub crypto.PublicKey) ([]byte, error)
+    ReadPrivateKey(fields map[string]string) (crypto.PrivateKey, error)
+    PrivateKeyToString(priv crypto.PrivateKey) string
+    Verify(pub crypto.PublicKey, hashed, sig []byte) error
+}
+```
+
+Signing goes through Go's standard `crypto.Signer` --
+each PQ key type implements it, so `SignMsg` and
+`SignRRset` in [tdns/v2/sign.go](../v2/sign.go) need no
+special-casing.
+
+
+### 4.3 The dnssec-algorithms wrapper
+
+`dnssec-algorithms` is one Go module with one subpackage
+per algorithm: `mldsa44`, `slhdsa128s`, `falcon512`,
+`mayo1`, `snova24_5_4`. Each subpackage implements
+`dns.Algorithm` for one algorithm and registers itself in
+its `init()` function:
+
+```go
+// dnssec-algorithms/mldsa44/mldsa44.go
+func init() {
+    dns.RegisterAlgorithm(199, New())
+}
+```
+
+This pattern -- side-effect registration via blank import
+-- is borrowed from Go's image and database/sql packages.
+It means the wrapper module itself never has to know which
+algorithms exist; each subpackage stands on its own.
+
+CIRCL-backed packages have no extra build requirements.
+liboqs-backed packages will only compile and register if
+the liboqs headers and library are present at build time
+and cgo is enabled.
+
+
+### 4.4 Registering algorithms in an application
+
+Applications get exactly the algorithms they `import`.
+There is **no** runtime configuration, **no** dynamic
+loading and **no** "enable everything" fallback. To use
+ML-DSA-44 in tdns-auth, the application's main package
+must include a blank import:
+
+```go
+import (
+    _ "github.com/johanix/dnssec-algorithms/mldsa44"
+    _ "github.com/johanix/dnssec-algorithms/slhdsa128s"
+    // _ "github.com/johanix/dnssec-algorithms/falcon512" // requires liboqs
+)
+```
+
+The blank import triggers the subpackage's `init()`, which
+calls `dns.RegisterAlgorithm`. Once that has happened, all
+the usual code paths -- `DNSKEY.Generate(0)`, `SignMsg`,
+`SignRRset`, `RRSIG.Verify`, the keystore loader and the
+BIND key-file parser -- dispatch through the registry
+automatically. The application code itself doesn't change.
+
+The tdns-cli CLI exposes a static list of algorithm names
+([tdns/v2/cli/algorithms.go](../v2/cli/algorithms.go))
+that controls tab-completion and validation for
+`--algorithm` flags. If you add a new algorithm via blank
+import, also add its CLI name there so operators can
+select it.
+
+**Rule of thumb:** if you're building a tdns binary and
+you want it to be able to *create* or *use* PQ keys,
+import the subpackage. If you only need to *parse and
+verify* PQ-signed RRsets received from elsewhere, you
+still need to import the subpackage -- verification goes
+through the same registry as everything else.
+
+
+
+## 5. Automatic Key Rollover
+
+TDNS includes a fully automated KSK rollover engine that
+reuses the delegation-sync mechanics from §1 (DSYNC
+discovery, parallel UPDATE+NOTIFY dispatch, SIG(0)-signed
+parent UPDATEs) and the PQ algorithm support from §4 (the
+SIG(0) key the engine uses to sign parent UPDATEs can
+itself be a PQ key, with no extra configuration).
+
+Because the topic is large enough to need a dedicated
+operator manual -- covering the policy YAML, the
+`auto-rollover` CLI, the status output, DSYNC-aware
+dispatch and verification, fast vs. slow cadences, worked
+examples, and the failure model -- it lives in its own
+document:
+
+- [Automatic DNSSEC Key Rollovers](key-rollover.md) --
+  the operator-facing guide.
+- [Rollover Timing Equations](rollover-timing-equations.md)
+  -- the canonical cache-flush invariants and timing
+  math that the engine must satisfy.
