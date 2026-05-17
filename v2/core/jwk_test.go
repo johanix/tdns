@@ -40,7 +40,7 @@ func TestEncodeDecodeP256(t *testing.T) {
 	publicKey := &privateKey.PublicKey
 
 	// Encode to JWK
-	jwkData, algorithm, err := EncodePublicKeyToJWK(publicKey)
+	jwkData, algorithm, err := EncodePublicKeyToJWK(publicKey, "")
 	if err != nil {
 		t.Fatalf("EncodePublicKeyToJWK failed: %v", err)
 	}
@@ -205,7 +205,7 @@ func TestGetJWKKeyType(t *testing.T) {
 	}
 
 	// Encode to JWK
-	jwkData, _, err := EncodePublicKeyToJWK(&privateKey.PublicKey)
+	jwkData, _, err := EncodePublicKeyToJWK(&privateKey.PublicKey, "")
 	if err != nil {
 		t.Fatalf("EncodePublicKeyToJWK failed: %v", err)
 	}
@@ -234,7 +234,7 @@ func TestJWKSizeEstimates(t *testing.T) {
 	}
 
 	// Encode to JWK
-	jwkData, _, err := EncodePublicKeyToJWK(&privateKey.PublicKey)
+	jwkData, _, err := EncodePublicKeyToJWK(&privateKey.PublicKey, "")
 	if err != nil {
 		t.Fatalf("EncodePublicKeyToJWK failed: %v", err)
 	}
@@ -288,7 +288,7 @@ func TestJWKRRCopy(t *testing.T) {
 
 // TestEncodeNilKey tests error handling for nil keys
 func TestEncodeNilKey(t *testing.T) {
-	_, _, err := EncodePublicKeyToJWK(nil)
+	_, _, err := EncodePublicKeyToJWK(nil, "")
 	if err == nil {
 		t.Error("EncodePublicKeyToJWK(nil) succeeded, want error")
 	}
@@ -297,7 +297,7 @@ func TestEncodeNilKey(t *testing.T) {
 // TestUnsupportedKeyType tests error handling for unsupported key types
 func TestUnsupportedKeyType(t *testing.T) {
 	// Try to encode a string (not a valid key type)
-	_, _, err := EncodePublicKeyToJWK("not a key")
+	_, _, err := EncodePublicKeyToJWK("not a key", "")
 	if err == nil {
 		t.Error("EncodePublicKeyToJWK(string) succeeded, want error")
 	}

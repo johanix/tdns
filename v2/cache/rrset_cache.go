@@ -56,7 +56,7 @@ func (dkc *DnskeyCacheT) Set(zonename string, keyid uint16, cdr *CachedDnskeyRRs
 //
 // The returned cache has ready-to-use concurrent maps for RRsets, Servers, ServerMap, AuthServerMap, ZoneMap and a reference to the global DnskeyCache, along with per-transport DNS clients (Do53, DoT, DoH, DoQ) using standard ports. The provided logger is used for cache logging; the verbose and debug flags enable their respective logging modes.
 func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
-	var client = map[core.Transport]*core.DNSClient{}
+	var client = map[core.Transport]core.DNSClienter{}
 
 	client[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, "53", nil)
 	client[core.TransportDoT] = core.NewDNSClient(core.TransportDoT, "853", nil)
@@ -64,20 +64,18 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 	client[core.TransportDoQ] = core.NewDNSClient(core.TransportDoQ, "853", nil) // RFC 9250: DoQ uses port 853
 
 	return &RRsetCacheT{
-		RRsets:                 core.NewCmap[CachedRRset](),
-		Servers:                core.NewCmap[[]string](),               // servers stored as []string{ "1.2.3.4:53", "9.8.7.6:53"}
-		ServerMap:              core.NewCmap[map[string]*AuthServer](), // servers stored as map[nsname]*AuthServer{}
-		AuthServerMap:          core.NewCmap[*AuthServer](),            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
-		ZoneMap:                core.NewCmap[*Zone](),                  // zone -> *Zone
-		DnskeyCache:            DnskeyCache,
-		Logger:                 lg,
-		LineWidth:              130, // default line width for truncating long lines in logging and output
-		Verbose:                verbose,
-		Debug:                  debug,
-		DNSClient:              client,
-		transportQueryInFlight: make(map[string]struct{}),
-		nsRevalidateInFlight:   make(map[string]struct{}),
-		tlsaQueryInFlight:      make(map[string]struct{}),
+		RRsets:               core.NewCmap[CachedRRset](),
+		Servers:              core.NewCmap[[]string](),               // servers stored as []string{ "1.2.3.4:53", "9.8.7.6:53"}
+		ServerMap:            core.NewCmap[map[string]*AuthServer](), // servers stored as map[nsname]*AuthServer{}
+		AuthServerMap:        core.NewCmap[*AuthServer](),            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
+		ZoneMap:              core.NewCmap[*Zone](),                  // zone -> *Zone
+		DnskeyCache:          DnskeyCache,
+		Logger:               lg,
+		LineWidth:            130, // default line width for truncating long lines in logging and output
+		Verbose:              verbose,
+		Debug:                debug,
+		DNSClient:            client,
+		nsRevalidateInFlight: make(map[string]struct{}),
 	}
 }
 
@@ -345,33 +343,6 @@ func isSubdomainOf(name, parent string) bool {
 	return strings.HasSuffix(name, suffix)
 }
 
-const (
-	transportQueryReasonObservation = "opportunistic-signal"
-	transportQueryReasonNewServer   = "new-auth-server"
-)
-
-func (rrcache *RRsetCacheT) MarkTransportQuery(owner string) bool {
-	rrcache.transportQueryMu.Lock()
-	defer rrcache.transportQueryMu.Unlock()
-	if rrcache.transportQueryInFlight == nil {
-		rrcache.transportQueryInFlight = make(map[string]struct{})
-	}
-	if _, exist := rrcache.transportQueryInFlight[owner]; exist {
-		return false
-	}
-	rrcache.transportQueryInFlight[owner] = struct{}{}
-	return true
-}
-
-func (rrcache *RRsetCacheT) ClearTransportQuery(owner string) {
-	rrcache.transportQueryMu.Lock()
-	defer rrcache.transportQueryMu.Unlock()
-	if rrcache.transportQueryInFlight == nil {
-		return
-	}
-	delete(rrcache.transportQueryInFlight, owner)
-}
-
 func (rrcache *RRsetCacheT) lookupSOARRset(name string) *core.RRset {
 	if rrcache == nil {
 		return nil
@@ -397,28 +368,6 @@ func (rrcache *RRsetCacheT) lookupSOARRset(name string) *core.RRset {
 		cur = strings.Join(labels[1:], ".") + "."
 	}
 	return nil
-}
-
-func (rrcache *RRsetCacheT) MarkTLSAQuery(owner string) bool {
-	rrcache.tlsaQueryMu.Lock()
-	defer rrcache.tlsaQueryMu.Unlock()
-	if rrcache.tlsaQueryInFlight == nil {
-		rrcache.tlsaQueryInFlight = make(map[string]struct{})
-	}
-	if _, ok := rrcache.tlsaQueryInFlight[owner]; ok {
-		return false
-	}
-	rrcache.tlsaQueryInFlight[owner] = struct{}{}
-	return true
-}
-
-func (rrcache *RRsetCacheT) ClearTLSAQuery(owner string) {
-	rrcache.tlsaQueryMu.Lock()
-	defer rrcache.tlsaQueryMu.Unlock()
-	if rrcache.tlsaQueryInFlight == nil {
-		return
-	}
-	delete(rrcache.tlsaQueryInFlight, owner)
 }
 
 // A stub is a static mapping from a zone name to a list of addresses (later probably AuthServers)

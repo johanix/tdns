@@ -376,10 +376,34 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 	return nil
 }
 
+// rdataOnly returns just the RDATA portion of an RR's presentation form,
+// stripping the owner / TTL / class / type header. Used by MsgPrint's
+// short mode to mimic dig's +short output.
+//
+// miekg/dns RR.String() returns "<name>\t<ttl>\t<class>\t<type>\t<rdata>".
+// We split on tab and take everything from field index 4 onward. RDATA
+// itself may contain internal whitespace; we preserve that by joining
+// the tail with tabs (matching miekg/dns's own format).
+func rdataOnly(rr dns.RR) string {
+	if rr == nil {
+		return ""
+	}
+	parts := strings.SplitN(rr.String(), "\t", 5)
+	if len(parts) < 5 {
+		// Unexpected format — fall back to the full string rather than
+		// silently emit nothing.
+		return rr.String()
+	}
+	return parts[4]
+}
+
 func MsgPrint(m *dns.Msg, server string, elapsed time.Duration, short bool, options map[string]string) {
 	if short {
+		// dig-compatible +short: print only the RDATA of each Answer RR,
+		// nothing else. No headers, no flags, no AUTHORITY/ADDITIONAL, no
+		// owner/TTL/class/type prefix.
 		for _, rr := range m.Answer {
-			fmt.Printf("%s\n", rr.String())
+			fmt.Println(rdataOnly(rr))
 		}
 		return
 	}

@@ -52,28 +52,25 @@ type RRsetCacheT struct {
 	AuthServerMap *core.ConcurrentMap[string, *AuthServer]            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
 	ZoneMap       *core.ConcurrentMap[string, *Zone]                  // map[zone]*Zone
 	DnskeyCache   *DnskeyCacheT
-	DNSClient     map[core.Transport]*core.DNSClient
+	DNSClient     map[core.Transport]core.DNSClienter
 	//Options                map[ImrOption]string
-	Primed                 bool
-	Logger                 *log.Logger
-	LineWidth              int
-	Verbose                bool
-	Debug                  bool
-	Quiet                  bool // if true, suppress informational logging (useful for CLI tools)
-	transportQueryMu       sync.Mutex
-	transportQueryInFlight map[string]struct{}
-	nsRevalidateMu         sync.Mutex
-	nsRevalidateInFlight   map[string]struct{}
-	tlsaQueryMu            sync.Mutex
-	tlsaQueryInFlight      map[string]struct{}
+	Primed               bool
+	Logger               *log.Logger
+	LineWidth            int
+	Verbose              bool
+	Debug                bool
+	Quiet                bool // if true, suppress informational logging (useful for CLI tools)
+	nsRevalidateMu       sync.Mutex
+	nsRevalidateInFlight map[string]struct{}
 }
 
 type Zone struct {
 	ZoneName string
 	State    ValidationState
-	// Zone-specific address backoffs: map[address]*AddressBackoff
-	// Tracks per-zone, per-address failures (e.g., REFUSED for this zone from this address)
-	AddressBackoffs map[string]*AddressBackoff
+	// Zone-specific address backoffs keyed by (address, transport).
+	// Tracks per-zone, per-(address,transport) failures (e.g., REFUSED for
+	// this zone from this address over a specific transport).
+	AddressBackoffs map[AddrXport]*AddressBackoff
 	mu              sync.Mutex // Protects State and AddressBackoffs
 }
 

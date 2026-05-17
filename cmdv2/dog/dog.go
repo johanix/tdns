@@ -32,6 +32,7 @@ var port = "53"
 
 var server string
 var cfgFile string
+var trustAnchorFile string // -k / --trust-anchor
 
 var options = make(map[string]string, 2)
 
@@ -47,7 +48,7 @@ var defaultPorts = map[string]string{
 var rootCmd = &cobra.Command{
 	Use:   "dog",
 	Short: "CLI utility used issue DNS queries and present the result",
-	Long:  `dog is a CLI utility used issue DNS queries and present the result.
+	Long: `dog is a CLI utility used issue DNS queries and present the result.
 	
 	Options:
 		+DNSSEC: Set the DO (DNSEC OK) bit in queries
@@ -96,16 +97,17 @@ var rootCmd = &cobra.Command{
 				continue
 			}
 
-		if strings.HasPrefix(ucarg, "IXFR=") {
-			serialstr, _ := strings.CutPrefix(ucarg, "IXFR=")
-			tmp, err := strconv.Atoi(serialstr)
-			if err != nil {
-				log.Fatalf("Error: %v", err)
+			if strings.HasPrefix(ucarg, "IXFR=") {
+				serialstr, _ := strings.CutPrefix(ucarg, "IXFR=")
+				tmp, err := strconv.Atoi(serialstr)
+				if err != nil {
+					log.Fatalf("Error: %v", err)
+				}
+				serial = uint32(tmp)
+				rrtype = dns.TypeIXFR // Set rrtype so the later switch on rrtype triggers IXFR logic
+				fmt.Printf("RRtype is IXFR, using base serial %d\n", serial)
+				continue
 			}
-			serial = uint32(tmp)
-			rrtype = dns.TypeIXFR // Set rrtype so the later switch on rrtype triggers IXFR logic
-			fmt.Printf("RRtype is IXFR, using base serial %d\n", serial)
-		}
 
 			if strings.HasPrefix(ucarg, "+") {
 				if tdns.Globals.Debug {
@@ -120,6 +122,12 @@ var rootCmd = &cobra.Command{
 			}
 
 			cleanArgs = append(cleanArgs, arg)
+		}
+
+		// +SHORT (and --short) both flow through to MsgPrint via the
+		// short variable. Either source enables short mode.
+		if options["short"] == "true" {
+			short = true
 		}
 
 		if _, exists := options["transport"]; !exists {
@@ -191,6 +199,50 @@ var rootCmd = &cobra.Command{
 			qname = dns.Fqdn(qname)
 			if tdns.Globals.Verbose {
 				fmt.Printf("*** %s for %s IN %s:\n", options["opcode"], qname, dns.TypeToString[rrtype])
+			}
+
+			// +sigchase short-circuits the normal Exchange path and
+			// runs the chain-walker against the configured server
+			// (which must be a recursive resolver). Walker output is
+			// a structured per-link tree; no normal answer is printed.
+			if options["sigchase"] == "true" {
+				chaserTransport, err := core.StringToTransport(options["transport"])
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: invalid transport %s: %v\n", options["transport"], err)
+					os.Exit(1)
+				}
+				chaserClient := core.NewDNSClient(chaserTransport, options["port"], nil)
+				// Resolve trust anchors via the standard priority chain:
+				//   --trust-anchor flag → IMR config → compiled-in.
+				taLogf := func(format string, args ...any) {
+					if tdns.Globals.Verbose {
+						fmt.Fprintf(os.Stderr, format+"\n", args...)
+					}
+				}
+				dss, keys, taSource := tdns.LoadDefaultTrustAnchors(trustAnchorFile, taLogf)
+				// Some TA files (autotrust / RFC 5011 managed) hold DNSKEY
+				// records rather than DS. Convert each KSK DNSKEY to its
+				// SHA-256 DS equivalent so the chaser, which keys off DS,
+				// can anchor the root regardless of file format.
+				for _, k := range keys {
+					if k.Flags&dns.SEP == 0 {
+						continue
+					}
+					if ds := k.ToDS(dns.SHA256); ds != nil {
+						dss = append(dss, ds)
+					}
+				}
+				if tdns.Globals.Verbose {
+					fmt.Fprintf(os.Stderr, ";; trust anchor source: %s (%d DS records, %d DNSKEYs)\n", taSource, len(dss), len(keys))
+				}
+				chaser := tdns.NewChaser(chaserClient, options["server"], dss)
+				result, err := chaser.Chase(qname, rrtype)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "Error: chase failed: %v\n", err)
+					os.Exit(1)
+				}
+				tdns.RenderChain(result, os.Stdout)
+				continue
 			}
 
 			switch rrtype {
@@ -379,6 +431,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debugging output")
 	rootCmd.PersistentFlags().BoolVarP(&short, "short", "", false, "Only list RRs that are part of the Answer section")
 	rootCmd.PersistentFlags().StringVarP(&port, "port", "p", "53", "Port to send DNS query to")
+	rootCmd.PersistentFlags().StringVarP(&trustAnchorFile, "trust-anchor", "k", "", "Path to DNSSEC trust anchor file (zone-file format DS or DNSKEY records). Used by +sigchase. Default: read from "+tdns.DefaultImrCfgFile+" or fall back to compiled-in root KSK DS records.")
 }
 
 func ProcessOptions(options map[string]string, ucarg string) (map[string]string, error) {
@@ -404,6 +457,20 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 		return options, nil
 	case "+MULTI":
 		options["multi"] = "true"
+		return options, nil
+	case "+SHORT":
+		// dig-compatible: only print the RDATA of the Answer RRset.
+		// Acts as the +XYZ-syntax equivalent of the --short flag.
+		options["short"] = "true"
+		return options, nil
+	case "+SIGCHASE", "+SIGCHA", "+SC":
+		// drill-style: walk the DNSSEC chain for the qname/qtype and
+		// emit a per-link verdict tree. Dispatches into the chase
+		// library in tdns/v2/chase.go instead of the normal query
+		// path. Verifies each (parent DS) <-> (child KSK) <-> (DNSKEY
+		// RRset signature) link and the final leaf RRSIG against the
+		// deepest zone's keys.
+		options["sigchase"] = "true"
 		return options, nil
 	case "+TCP":
 		if transport, exists := options["transport"]; exists {
@@ -583,7 +650,7 @@ func ParseServer(serverArg string, options map[string]string) (map[string]string
 	// Extract host and port
 	host := u.Host
 	port := ""
-	
+
 	// Check if host contains a colon (could be IPv6 or host:port)
 	if strings.Contains(host, ":") {
 		// Check if it's an IPv6 address in brackets with port (e.g., [::1]:5354)

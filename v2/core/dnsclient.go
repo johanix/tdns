@@ -60,6 +60,25 @@ func IsEncryptedTransport(t Transport) bool {
 	return t == TransportDoT || t == TransportDoH || t == TransportDoQ
 }
 
+// DNSClienter abstracts a single network exchange so callers can be tested
+// with a fake. The concrete *DNSClient implements it.
+//
+// Note on Exchange not taking a context.Context: CodeRabbit suggested
+// adding one so callers can cancel mid-exchange. Deliberately not done.
+// Exchange is a single network round-trip bounded by c.Timeout
+// (default 5s), and DoQ's internal context is already derived from
+// that timeout. Cancellation at the layer above — tryServer checks
+// ctx.Done() before the call, and the W2 query budget on
+// IterativeDNSQuery bounds the wider walk — is enough in practice
+// and avoids threading ctx through ~50 call sites for negligible
+// benefit. If a use case ever appears where mid-Exchange
+// cancellation matters (very long DoH bodies?), an ExchangeContext
+// variant can be added without breaking this interface.
+type DNSClienter interface {
+	Exchange(msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, error)
+	TransportKind() Transport
+}
+
 // DNSClient represents a DNS client that supports multiple transport protocols
 type DNSClient struct {
 	Port            string
@@ -155,6 +174,10 @@ func NewDNSClient(transport Transport, port string, tlsConfig *tls.Config, opts 
 	return client
 }
 
+// TransportKind returns the transport this client was configured for.
+// Satisfies the DNSClienter interface.
+func (c *DNSClient) TransportKind() Transport { return c.Transport }
+
 // Exchange sends a DNS message and returns the response
 func (c *DNSClient) Exchange(msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, error) {
 	//	if !Globals.Debug {
@@ -182,9 +205,25 @@ func (c *DNSClient) Exchange(msg *dns.Msg, server string, debug bool) (*dns.Msg,
 			return c.DNSClientTCP.Exchange(msg, addr)
 		}
 		r, rtt, err := c.DNSClientUDP.Exchange(msg, addr)
-		if err == nil && r != nil && r.Truncated && !c.DisableFallback {
+		if err == nil && r != nil && r.Truncated && !c.DisableFallback && c.DNSClientTCP != nil {
 			log.Printf("Do53: UDP response from %s truncated (TC=1); retrying over TCP", addr)
 			return c.DNSClientTCP.Exchange(msg, addr)
+		}
+		// Timeout / transient-error fallback: a single dropped UDP packet
+		// (or a network blocking UDP) makes the UDP exchange return a transient
+		// error. Take one shot over TCP against the same address before giving
+		// up. This consolidates what used to live in the IMR tryServer path.
+		if err != nil && !c.DisableFallback && c.DNSClientTCP != nil && IsTransientNetErr(err) {
+			if debug {
+				log.Printf("Do53: UDP transient error from %s (%v); retrying over TCP", addr, err)
+			}
+			tr, trtt, terr := c.DNSClientTCP.Exchange(msg, addr)
+			if terr == nil {
+				return tr, trtt, nil
+			}
+			// Prefer the original UDP error if TCP also fails (operators usually
+			// want to know the primary-path symptom).
+			return r, rtt, err
 		}
 		return r, rtt, err
 	case TransportDoT:

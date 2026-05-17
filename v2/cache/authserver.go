@@ -14,7 +14,7 @@ import (
 	"github.com/miekg/dns"
 )
 
-// AddressBackoff tracks backoff state for a single server address.
+// AddressBackoff tracks backoff state for a single (address, transport) tuple.
 // Used to avoid repeatedly querying addresses that don't respond or have routing issues.
 type AddressBackoff struct {
 	NextTry      time.Time // When this address can be tried again
@@ -22,8 +22,33 @@ type AddressBackoff struct {
 	LastError    string    // Last error message (stored when debug mode is enabled)
 }
 
+// AddrXport keys backoff state by both address and transport. A timeout on
+// (1.2.3.4:53, DoT) does not poison (1.2.3.4:53, Do53) or vice versa: that
+// would conflate problems with the TLS path with problems with the address.
+type AddrXport struct {
+	Addr      string
+	Transport core.Transport
+}
+
+// RTTEstimate is an exponentially-weighted moving average of observed
+// round-trip times for one (address, transport) tuple. It feeds the
+// prioritizeServers sort so the IMR prefers faster paths.
+type RTTEstimate struct {
+	EMA          time.Duration // exponential moving average
+	Samples      uint32        // number of samples folded in
+	LastSample   time.Duration // most recent observation
+	LastSampleAt time.Time     // wall-clock time of LastSample
+}
+
 type AuthServer struct {
-	Name             string
+	Name string
+	// Addrs holds BARE IP literals (e.g. "192.0.2.1" or "2001:db8::1"),
+	// NOT host:port. The port is added by core.DNSClient.Exchange via
+	// net.JoinHostPort(addr, c.Port) at dial time. Passing a host:port
+	// string through AddAddr makes JoinHostPort produce
+	// "[1.2.3.4:53]:53" because of the embedded colon, after which Dial
+	// tries to resolve "1.2.3.4:53" as a hostname and fails with
+	// "no such host". Always pass bare IPs.
 	Addrs            []string
 	Alpn             []string // {"do53", "doq", "dot", "doh"}
 	Transports       []core.Transport
@@ -40,8 +65,12 @@ type AuthServer struct {
 	Src               string                    // "answer", "glue", "hint", "priming", "stub", ...
 	Expire            time.Time
 	Debug             bool // If true, store error messages in AddressBackoff.LastError
-	// Backoff tracking (guarded by mu)
-	AddressBackoffs map[string]*AddressBackoff // keyed by address string (e.g., "1.2.3.4:53" or "[2001:db8::1]:53")
+	// Backoff tracking (guarded by mu). Keyed by (address, transport): a
+	// failure on (1.2.3.4:53, DoT) does not block (1.2.3.4:53, Do53).
+	AddressBackoffs map[AddrXport]*AddressBackoff
+	// RTT estimates (guarded by mu). Used by prioritizeServers to prefer
+	// faster (address, transport) tuples.
+	RTTEstimates map[AddrXport]*RTTEstimate
 }
 
 // NewAuthServer creates a new AuthServer instance with default values.
@@ -417,22 +446,21 @@ func (as *AuthServer) SnapshotCounters() map[core.Transport]uint64 {
 	return out
 }
 
-// SnapshotAddressBackoffs returns a copy of the address backoff map.
-// Only includes addresses that are currently in backoff (NextTry > now).
-func (as *AuthServer) SnapshotAddressBackoffs(now time.Time) map[string]*AddressBackoff {
+// SnapshotAddressBackoffs returns a copy of the (address, transport) backoff
+// map. Only includes entries that are currently in backoff (NextTry > now).
+func (as *AuthServer) SnapshotAddressBackoffs(now time.Time) map[AddrXport]*AddressBackoff {
 	if as == nil {
 		return nil
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
-	if as.AddressBackoffs == nil || len(as.AddressBackoffs) == 0 {
+	if len(as.AddressBackoffs) == 0 {
 		return nil
 	}
-	snap := make(map[string]*AddressBackoff)
-	for addr, backoff := range as.AddressBackoffs {
+	snap := make(map[AddrXport]*AddressBackoff)
+	for key, backoff := range as.AddressBackoffs {
 		if backoff.NextTry.After(now) {
-			// Create a copy of the backoff struct
-			snap[addr] = &AddressBackoff{
+			snap[key] = &AddressBackoff{
 				NextTry:      backoff.NextTry,
 				FailureCount: backoff.FailureCount,
 				LastError:    backoff.LastError,
@@ -485,245 +513,248 @@ func (as *AuthServer) PromoteConnMode(target ConnMode) {
 	}
 }
 
-// IsAddressAvailable returns true if the given address is not in backoff or backoff has expired.
-// Thread-safe: acquires mu lock.
-func (as *AuthServer) IsAddressAvailable(addr string) bool {
+// IsAddrXportAvailable returns true if the (address, transport) tuple is not
+// in backoff (or its backoff has expired). Thread-safe.
+func (as *AuthServer) IsAddrXportAvailable(addr string, t core.Transport) bool {
 	if as == nil {
 		return false
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	if as.AddressBackoffs == nil {
-		return true // No backoffs recorded, address is available
+		return true
 	}
-	backoff, exists := as.AddressBackoffs[addr]
+	backoff, exists := as.AddressBackoffs[AddrXport{Addr: addr, Transport: t}]
 	if !exists {
-		return true // No backoff for this address
+		return true
 	}
-	// Check if backoff has expired
 	return time.Now().After(backoff.NextTry)
 }
 
-// categorizeError analyzes the error and returns the appropriate backoff duration.
-// Routing errors (no route to host) get 1 hour immediately as they're unlikely to resolve soon.
-// Timeout errors get 2 minutes as they might be temporary.
-// Other errors default to 2 minutes for first failure, 1 hour for subsequent failures.
-// categorizeError selects a backoff duration based on the provided error text and
-// whether this is the first failure for an address.
-//
-// Rules:
-// - If err is nil: return 2 minutes for a first failure, 1 hour otherwise.
-// - If the error text indicates a routing failure (contains "no route to host",
-//   "network is unreachable", or "host unreachable"): return 1 hour.
-// - If the error text indicates a timeout (contains "timeout", "i/o timeout", or
-//   "deadline exceeded"): return 2 minutes.
-// categorizeError determines the backoff duration to apply for an address failure
-// based on the provided error and whether this is the first consecutive failure.
-// Behavior:
-// - If err is nil: return 2 minutes for a first failure, 1 hour otherwise.
-// - If the error message contains routing indicators ("no route to host", "network is unreachable", "host unreachable"): return 1 hour.
-// - If the error message contains timeout indicators ("timeout", "i/o timeout", "deadline exceeded"): return 2 minutes.
-// - For all other errors: return 2 minutes for a first failure, 1 hour otherwise.
-
-func categorizeError(err error, isFirstFailure bool) time.Duration {
+// isRoutingError reports whether the error string indicates a
+// host- or network-level routing failure ("no route to host" etc.).
+// These are unlikely to recover on a short timescale, so the policy
+// applies its RoutingFailure backoff (typically 1h) immediately.
+func isRoutingError(err error) bool {
 	if err == nil {
-		// No error provided, use default behavior
-		if isFirstFailure {
-			return 2 * time.Minute
-		}
-		return 1 * time.Hour
+		return false
 	}
 	errStr := err.Error()
-
-	// Check for routing errors - these are unlikely to resolve soon, so backoff 1 hour immediately
-	if strings.Contains(errStr, "no route to host") ||
+	return strings.Contains(errStr, "no route to host") ||
 		strings.Contains(errStr, "network is unreachable") ||
-		strings.Contains(errStr, "host unreachable") {
-		return 1 * time.Hour
-	}
-
-	// Check for timeout errors - these might be temporary, so backoff 2 minutes
-	if strings.Contains(errStr, "timeout") ||
-		strings.Contains(errStr, "deadline exceeded") {
-		return 2 * time.Minute
-	}
-
-	// Other errors: 2 minutes for first failure, 1 hour for subsequent
-	if isFirstFailure {
-		return 2 * time.Minute
-	}
-	return 1 * time.Hour
+		strings.Contains(errStr, "host unreachable")
 }
 
-// RecordAddressFailure records a failure for the given address and sets appropriate backoff.
-// The error parameter is analyzed to determine backoff duration:
-//   - Routing errors ("no route to host"): 1 hour immediately
-//   - Timeout errors: 2 minutes
-//   - Other errors: 2 minutes for first failure, 1 hour for subsequent failures
-//
-// If as.Debug is true, the error message is stored in LastError for debugging purposes.
-// Thread-safe: acquires mu lock.
-func (as *AuthServer) RecordAddressFailure(addr string, err error) {
+// categorizeError selects a backoff duration based on (a) whether
+// the error indicates a routing failure and (b) the previous backoff
+// state for this address-key. nil prev means "first failure ever".
+// Otherwise the duration grows geometrically per the current
+// BackoffPolicy, capped at MaxFailure and randomised by JitterFraction.
+func categorizeError(err error, prev *AddressBackoff) time.Duration {
+	if isRoutingError(err) {
+		return applyJitter(GetBackoffPolicy().RoutingFailure)
+	}
+	var count uint8
+	if prev != nil {
+		count = prev.FailureCount
+	}
+	return applyJitter(exponentialBackoff(count))
+}
+
+// RecordAddressFailure records a failure for the given (address, transport)
+// tuple and applies a backoff per the active BackoffPolicy. Routing-class
+// errors get an immediate long backoff; everything else uses an exponential
+// schedule based on the previous failure count for this tuple. If as.Debug is
+// true, the error message is stored in LastError. Thread-safe.
+func (as *AuthServer) RecordAddressFailure(addr string, t core.Transport, err error) {
 	if as == nil {
 		return
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	if as.AddressBackoffs == nil {
-		as.AddressBackoffs = make(map[string]*AddressBackoff)
+		as.AddressBackoffs = make(map[AddrXport]*AddressBackoff)
 	}
-	backoff, exists := as.AddressBackoffs[addr]
+	key := AddrXport{Addr: addr, Transport: t}
+	backoff, exists := as.AddressBackoffs[key]
 	errMsg := ""
 	if as.Debug && err != nil {
 		errMsg = err.Error()
 	}
 	if !exists {
-		// First failure: determine backoff based on error type
-		backoffDuration := categorizeError(err, true)
-		as.AddressBackoffs[addr] = &AddressBackoff{
-			NextTry:      time.Now().Add(backoffDuration),
+		as.AddressBackoffs[key] = &AddressBackoff{
+			NextTry:      time.Now().Add(categorizeError(err, nil)),
 			FailureCount: 1,
 			LastError:    errMsg,
 		}
 		return
 	}
-	// Subsequent failure: determine backoff based on error type
-	backoffDuration := categorizeError(err, false)
-	backoff.NextTry = time.Now().Add(backoffDuration)
-	backoff.LastError = errMsg      // Update last error even if not first failure
-	if backoff.FailureCount < 255 { // Prevent overflow
+	backoff.NextTry = time.Now().Add(categorizeError(err, backoff))
+	backoff.LastError = errMsg
+	if backoff.FailureCount < 255 {
 		backoff.FailureCount++
 	}
 }
 
-// RecordAddressFailureForRcode records a failure for the given address based on a DNS response code.
-// Thread-safe: acquires mu lock.
-func (as *AuthServer) RecordAddressFailureForRcode(addr string, rcode uint8) {
+// RecordAddressFailureForRcode records a failure for the given
+// (address, transport) tuple based on a DNS response code. NOTIMP is treated
+// as a "broken implementation" signal and gets the full LameDelegation
+// backoff immediately. Other rcodes follow the standard exponential
+// schedule. Thread-safe.
+func (as *AuthServer) RecordAddressFailureForRcode(addr string, t core.Transport, rcode uint8) {
 	if as == nil {
 		return
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	if as.AddressBackoffs == nil {
-		as.AddressBackoffs = make(map[string]*AddressBackoff)
+		as.AddressBackoffs = make(map[AddrXport]*AddressBackoff)
 	}
-	backoff, exists := as.AddressBackoffs[addr]
+	key := AddrXport{Addr: addr, Transport: t}
+	backoff, exists := as.AddressBackoffs[key]
 
-	// Determine backoff duration based on rcode
 	var backoffDuration time.Duration
-	var errMsg string
-	switch rcode {
-	case dns.RcodeNotImplemented:
-		backoffDuration = 1 * time.Hour
-		if as.Debug {
-			errMsg = fmt.Sprintf("rcode=%d", rcode)
+	if rcode == dns.RcodeNotImplemented {
+		backoffDuration = applyJitter(GetBackoffPolicy().LameDelegation)
+	} else {
+		var count uint8
+		if exists {
+			count = backoff.FailureCount
 		}
-	default:
-		// For other rcodes, use default behavior (2 min first, 1 hour subsequent)
-		if !exists {
-			backoffDuration = 2 * time.Minute
-		} else {
-			backoffDuration = 1 * time.Hour
-		}
-		if as.Debug {
-			errMsg = fmt.Sprintf("rcode=%d", rcode)
-		}
+		backoffDuration = applyJitter(exponentialBackoff(count))
+	}
+	errMsg := ""
+	if as.Debug {
+		errMsg = fmt.Sprintf("rcode=%d", rcode)
 	}
 
 	if !exists {
-		// First failure
-		as.AddressBackoffs[addr] = &AddressBackoff{
+		as.AddressBackoffs[key] = &AddressBackoff{
 			NextTry:      time.Now().Add(backoffDuration),
 			FailureCount: 1,
 			LastError:    errMsg,
 		}
 		return
 	}
-	// Subsequent failure
 	backoff.NextTry = time.Now().Add(backoffDuration)
 	if as.Debug {
 		backoff.LastError = errMsg
 	}
-	if backoff.FailureCount < 255 { // Prevent overflow
+	if backoff.FailureCount < 255 {
 		backoff.FailureCount++
 	}
 }
 
-// RecordAddressSuccess clears any backoff for the given address.
-// Thread-safe: acquires mu lock.
-func (as *AuthServer) RecordAddressSuccess(addr string) {
+// RecordAddressSuccess clears any backoff for the given (address, transport)
+// tuple. Thread-safe.
+func (as *AuthServer) RecordAddressSuccess(addr string, t core.Transport) {
 	if as == nil {
 		return
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	if as.AddressBackoffs != nil {
-		delete(as.AddressBackoffs, addr)
-		// If map is empty, we could nil it out, but keeping it is fine for efficiency
+		delete(as.AddressBackoffs, AddrXport{Addr: addr, Transport: t})
 	}
 }
 
-// AllAddressesInBackoff returns true if all addresses for this server are currently in backoff.
-// Thread-safe: acquires mu lock once for the entire operation.
-func (as *AuthServer) AllAddressesInBackoff() bool {
-	if as == nil {
-		return false
+// rttEMAAlpha is the smoothing factor for RTT EMA updates. Lower values
+// react more slowly to changes; higher values are noisier. 0.25 gives
+// each new sample 25% weight and 75% to the running average.
+const rttEMAAlpha = 0.25
+
+// rttDecayFactor is the per-pick decay applied to every OTHER tuple's
+// EMA whenever RecordRTT is called for one tuple. Drives exploration:
+// see the comment in RecordRTT. 0.98 (~2% per pick) gives a slow loser
+// (200ms vs 20ms winner) ~114 picks of grace before it gets re-probed
+// — fast enough to notice topology changes within a few minutes of
+// steady traffic, slow enough to avoid thrashing.
+const rttDecayFactor = 0.98
+
+// RecordRTT folds a new observation into the running RTT estimate for the
+// given (address, transport). Non-positive rtts are ignored. Thread-safe.
+func (as *AuthServer) RecordRTT(addr string, t core.Transport, rtt time.Duration) {
+	if as == nil || rtt <= 0 {
+		return
 	}
 	as.mu.Lock()
 	defer as.mu.Unlock()
-
-	// Copy Addrs while holding the lock to avoid TOCTOU
-	if len(as.Addrs) == 0 {
-		return false
+	if as.RTTEstimates == nil {
+		as.RTTEstimates = make(map[AddrXport]*RTTEstimate)
 	}
-	addrs := make([]string, len(as.Addrs))
-	copy(addrs, as.Addrs)
-
-	// Check backoffs while still holding the same lock
-	if as.AddressBackoffs == nil || len(as.AddressBackoffs) == 0 {
-		return false // No backoffs recorded
-	}
-	now := time.Now()
-	for _, addr := range addrs {
-		backoff, exists := as.AddressBackoffs[addr]
-		if !exists {
-			return false // At least one address has no backoff
-		}
-		if now.After(backoff.NextTry) {
-			return false // At least one address's backoff has expired
+	key := AddrXport{Addr: addr, Transport: t}
+	r, ok := as.RTTEstimates[key]
+	if !ok {
+		r = &RTTEstimate{EMA: rtt, Samples: 1}
+	} else {
+		r.EMA = time.Duration(rttEMAAlpha*float64(rtt) + (1-rttEMAAlpha)*float64(r.EMA))
+		if r.Samples < ^uint32(0) {
+			r.Samples++
 		}
 	}
-	return true // All addresses are in active backoff
-}
+	r.LastSample = rtt
+	r.LastSampleAt = time.Now()
+	as.RTTEstimates[key] = r
 
-// GetAvailableAddresses returns a list of addresses that are currently available (not in backoff).
-// Thread-safe: acquires mu lock once for the entire operation.
-func (as *AuthServer) GetAvailableAddresses() []string {
-	if as == nil {
-		return nil
-	}
-	as.mu.Lock()
-	defer as.mu.Unlock()
-
-	// Copy Addrs while holding the lock to avoid TOCTOU
-	if len(as.Addrs) == 0 {
-		return nil
-	}
-	addrs := make([]string, len(as.Addrs))
-	copy(addrs, as.Addrs)
-
-	// Check backoffs while still holding the same lock
-	var available []string
-	now := time.Now()
-	for _, addr := range addrs {
-		if as.AddressBackoffs == nil {
-			available = append(available, addr)
+	// Decay every OTHER tuple's EMA by rttDecayFactor. This is the
+	// exploration mechanism: pure-greedy RTT sort would make a winning
+	// tuple win forever, never re-probing its alternates even if they
+	// have gotten faster (or the winner has gotten slower). Decaying
+	// losers ~2% per pick of someone else means each loser's EMA drifts
+	// toward zero at a rate proportional to traffic volume; once a
+	// loser's decayed EMA dips below the winner's actual EMA, the sort
+	// picks it, it gets a fresh sample, and the system either re-ranks
+	// (it really did get faster) or partially restores its EMA via the
+	// usual alpha=0.25 averaging (still slow — but now we know that
+	// recently). Frequency of re-exploration auto-scales with query
+	// rate: busy servers re-probe quickly, quiet ones slowly.
+	for okey, or := range as.RTTEstimates {
+		if okey == key {
 			continue
 		}
-		backoff, exists := as.AddressBackoffs[addr]
-		if !exists || now.After(backoff.NextTry) {
-			available = append(available, addr)
+		or.EMA = time.Duration(float64(or.EMA) * rttDecayFactor)
+	}
+}
+
+// GetRTT returns the smoothed RTT estimate for the given (address, transport)
+// tuple, and ok=true if a usable sample exists. Samples older than the
+// active BackoffPolicy.MaxFailure are treated as expired (ok=false) so the
+// sort path re-probes them. Thread-safe.
+func (as *AuthServer) GetRTT(addr string, t core.Transport) (time.Duration, bool) {
+	if as == nil {
+		return 0, false
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	r, ok := as.RTTEstimates[AddrXport{Addr: addr, Transport: t}]
+	if !ok {
+		return 0, false
+	}
+	if time.Since(r.LastSampleAt) > GetBackoffPolicy().MaxFailure {
+		return 0, false
+	}
+	return r.EMA, true
+}
+
+// SnapshotRTTEstimates returns a copy of the RTT-estimate map. Useful for
+// observability dumps. Thread-safe.
+func (as *AuthServer) SnapshotRTTEstimates() map[AddrXport]*RTTEstimate {
+	if as == nil {
+		return nil
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if len(as.RTTEstimates) == 0 {
+		return nil
+	}
+	snap := make(map[AddrXport]*RTTEstimate, len(as.RTTEstimates))
+	for k, v := range as.RTTEstimates {
+		snap[k] = &RTTEstimate{
+			EMA:          v.EMA,
+			Samples:      v.Samples,
+			LastSample:   v.LastSample,
+			LastSampleAt: v.LastSampleAt,
 		}
 	}
-	return available
+	return snap
 }

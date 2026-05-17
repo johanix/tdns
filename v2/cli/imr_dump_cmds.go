@@ -186,25 +186,27 @@ var dumpAuthServersErrorsCmd = &cobra.Command{
 			nsname := item.Key
 			server := item.Val
 
-			// Get snapshot of addresses in backoff (thread-safe)
+			// Get snapshot of (address, transport) tuples in backoff
 			backoffs := server.SnapshotAddressBackoffs(now)
 			if len(backoffs) > 0 {
 				hasErrors = true
-				// Sort addresses for consistent output
-				addrs := make([]string, 0, len(backoffs))
-				for addr := range backoffs {
-					addrs = append(addrs, addr)
+				keys := make([]cache.AddrXport, 0, len(backoffs))
+				for k := range backoffs {
+					keys = append(keys, k)
 				}
-				sort.Strings(addrs)
+				sort.Slice(keys, func(i, j int) bool {
+					if keys[i].Addr != keys[j].Addr {
+						return keys[i].Addr < keys[j].Addr
+					}
+					return keys[i].Transport < keys[j].Transport
+				})
 
-				// Collect information for addresses in backoff
-				for _, addr := range addrs {
-					backoff := backoffs[addr]
+				for _, k := range keys {
+					backoff := backoffs[k]
 					timeUntilRetry := backoff.NextTry.Sub(now)
 					if timeUntilRetry < 0 {
 						timeUntilRetry = 0
 					}
-					// Always include all 5 columns for alignment
 					failures := "0"
 					if backoff.FailureCount > 0 {
 						failures = fmt.Sprintf("%d", backoff.FailureCount)
@@ -213,7 +215,7 @@ var dumpAuthServersErrorsCmd = &cobra.Command{
 					if backoff.LastError != "" {
 						errorMsg = backoff.LastError
 					}
-					line := fmt.Sprintf("%s | %s | retry in %s | %s | %s", nsname, addr, formatDuration(timeUntilRetry), failures, errorMsg)
+					line := fmt.Sprintf("%s | %s | %s | retry in %s | %s | %s", nsname, k.Addr, core.TransportToString[k.Transport], formatDuration(timeUntilRetry), failures, errorMsg)
 					lines = append(lines, line)
 				}
 			}
@@ -224,8 +226,7 @@ var dumpAuthServersErrorsCmd = &cobra.Command{
 			return
 		}
 
-		// Print header and results
-		fmt.Println("Nameserver | Address | Backoff Time | Failures | Error")
+		fmt.Println("Nameserver | Address | Transport | Backoff Time | Failures | Error")
 		fmt.Println(strings.Repeat("-", 80))
 		for _, line := range lines {
 			fmt.Println(line)
@@ -269,6 +270,181 @@ var dumpZonesCmd = &cobra.Command{
 var dumpZoneCmd = &cobra.Command{
 	Use:   "zone",
 	Short: "Zone-specific dumps",
+}
+
+var dumpZoneBackoffsCmd = &cobra.Command{
+	Use:   "backoffs [zone]",
+	Short: "Show zone-scoped lame-delegation backoffs (per zone, per address)",
+	Long: `List addresses currently in backoff per zone. These are recorded
+when a server returns REFUSED / NOTAUTH / SERVFAIL / NOTIMP for a
+specific zone (i.e. likely lame delegation). Distinct from the
+server-wide backoffs shown by "auth-servers errors".
+
+With no zone argument: dumps every zone that has any backoffs.
+With a zone argument: dumps just that zone.`,
+	Args: cobra.MaximumNArgs(1),
+	Run: func(cmd *cobra.Command, args []string) {
+		if Conf.Internal.RRsetCache == nil {
+			fmt.Println("RRsetCache is nil")
+			return
+		}
+		var filter string
+		if len(args) == 1 {
+			filter = dns.Fqdn(args[0])
+		}
+
+		now := time.Now()
+		type zoneEntry struct {
+			zoneName string
+			zone     *cache.Zone
+			backoffs map[cache.AddrXport]*cache.AddressBackoff
+		}
+		var entries []zoneEntry
+		for item := range Conf.Internal.RRsetCache.ZoneMap.IterBuffered() {
+			if filter != "" && item.Key != filter {
+				continue
+			}
+			b := item.Val.SnapshotAddressBackoffs(now)
+			if len(b) == 0 {
+				continue
+			}
+			entries = append(entries, zoneEntry{zoneName: item.Key, zone: item.Val, backoffs: b})
+		}
+
+		if len(entries) == 0 {
+			if filter != "" {
+				fmt.Printf("No zone-scoped backoffs for %s\n", filter)
+			} else {
+				fmt.Println("No zone-scoped backoffs recorded.")
+			}
+			return
+		}
+		sort.Slice(entries, func(i, j int) bool {
+			return lessByReverseLabels(entries[i].zoneName, entries[j].zoneName)
+		})
+		fmt.Println("Zone | Address | Transport | Backoff Time | Failures | Error")
+		fmt.Println(strings.Repeat("-", 80))
+		for _, e := range entries {
+			keys := make([]cache.AddrXport, 0, len(e.backoffs))
+			for k := range e.backoffs {
+				keys = append(keys, k)
+			}
+			sort.Slice(keys, func(i, j int) bool {
+				if keys[i].Addr != keys[j].Addr {
+					return keys[i].Addr < keys[j].Addr
+				}
+				return keys[i].Transport < keys[j].Transport
+			})
+			for _, k := range keys {
+				b := e.backoffs[k]
+				remaining := b.NextTry.Sub(now)
+				if remaining < 0 {
+					remaining = 0
+				}
+				errMsg := "-"
+				if b.LastError != "" {
+					errMsg = b.LastError
+				}
+				fmt.Printf("%s | %s | %s | retry in %s | %d | %s\n",
+					e.zoneName, k.Addr, core.TransportToString[k.Transport], formatDuration(remaining), b.FailureCount, errMsg)
+			}
+		}
+	},
+}
+
+var dumpTuningCmd = &cobra.Command{
+	Use:   "tuning",
+	Short: "Show effective IMR tuning values (backoff policy, family, discovery, etc.)",
+	Run: func(cmd *cobra.Command, args []string) {
+		p := cache.GetBackoffPolicy()
+		t := Conf.Imr.Tuning
+		fmt.Println("Backoff policy (effective):")
+		fmt.Printf("  first_failure   : %s\n", p.FirstFailure)
+		fmt.Printf("  max_failure     : %s\n", p.MaxFailure)
+		fmt.Printf("  multiplier      : %.2f\n", p.Multiplier)
+		fmt.Printf("  jitter_fraction : %.2f\n", p.JitterFraction)
+		fmt.Printf("  routing_failure : %s\n", p.RoutingFailure)
+		fmt.Printf("  lame_delegation : %s\n", p.LameDelegation)
+		fmt.Println()
+		fmt.Println("Address-family tracker:")
+		fmt.Printf("  window_duration   : %s\n", t.AddressFamily.WindowDuration)
+		fmt.Printf("  failure_threshold : %d\n", t.AddressFamily.FailureThreshold)
+		fmt.Printf("  suspect_duration  : %s\n", t.AddressFamily.SuspectDuration)
+		fmt.Printf("  probe_interval    : %s\n", t.AddressFamily.ProbeInterval)
+		fmt.Println()
+		fmt.Println("Discovery state machine:")
+		fmt.Printf("  retry_after_failure : %s\n", t.Discovery.RetryAfterFailure)
+		fmt.Printf("  max_failures        : %d\n", t.Discovery.MaxFailures)
+		fmt.Println()
+		fmt.Printf("Per-query budget   : %s\n", t.QueryBudget)
+		upgradeStr := "true (legacy default)"
+		if t.UpgradeIndirectCacheHits != nil {
+			if *t.UpgradeIndirectCacheHits {
+				upgradeStr = "true (explicit)"
+			} else {
+				upgradeStr = "false (explicit) -- indirect cache hits returned without re-query"
+			}
+		}
+		fmt.Printf("Upgrade indirect cache hits: %s\n", upgradeStr)
+	},
+}
+
+var dumpDiscoveryCmd = &cobra.Command{
+	Use:   "discovery",
+	Short: "Show live IMR discovery state (transport-signal and TLSA per owner)",
+	Long: `List the current state of each owner the IMR has attempted to
+discover side-channel info for: SVCB/TSYNC transport signals and
+TLSA pin records. Discovery is opportunistic; this shows what's
+been tried, what succeeded, and which owners are in cooldown after
+repeated failures.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		imr := tdns.Globals.ImrEngine
+		if imr == nil {
+			fmt.Println("IMR engine not initialised")
+			return
+		}
+		now := time.Now()
+		printTracker := func(label string, snap map[string]cache.DiscoveryState) {
+			fmt.Printf("%s:\n", label)
+			if len(snap) == 0 {
+				fmt.Println("  (no entries)")
+				fmt.Println()
+				return
+			}
+			owners := make([]string, 0, len(snap))
+			for o := range snap {
+				owners = append(owners, o)
+			}
+			sort.Strings(owners)
+			fmt.Println("  Owner | Status | Attempts | Last Attempt | Next Attempt | Last Error")
+			fmt.Println("  " + strings.Repeat("-", 90))
+			for _, o := range owners {
+				s := snap[o]
+				next := "-"
+				if !s.NextAttemptAt.IsZero() {
+					rem := s.NextAttemptAt.Sub(now)
+					if rem < 0 {
+						rem = 0
+					}
+					next = formatDuration(rem)
+				}
+				last := "-"
+				if !s.LastAttemptAt.IsZero() {
+					last = formatDuration(now.Sub(s.LastAttemptAt)) + " ago"
+				}
+				errMsg := "-"
+				if s.LastError != "" {
+					errMsg = s.LastError
+				}
+				fmt.Printf("  %s | %s | %d | %s | %s | %s\n",
+					o, cache.DiscoveryStatusToString[s.Status],
+					s.AttemptCount, last, next, errMsg)
+			}
+			fmt.Println()
+		}
+		printTracker("Transport-signal discovery", imr.TransportSignalDiscovery.Snapshot())
+		printTracker("TLSA discovery", imr.TLSADiscovery.Snapshot())
+	},
 }
 
 var dumpZoneServersCmd = &cobra.Command{
@@ -737,9 +913,9 @@ func formatDuration(d time.Duration) string {
 // It attaches dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd, dumpDnskeysCmd, dumpZoneCmd, and dumpZonesCmd to ImrDumpCmd, adds the keys/servers/errors subcommands under auth-servers, and attaches the zone servers subcommand under zone.
 func init() {
 	// rootCmd.AddCommand(ImrDumpCmd)
-	ImrDumpCmd.AddCommand(dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd, dumpDnskeysCmd, dumpZoneCmd, dumpZonesCmd)
+	ImrDumpCmd.AddCommand(dumpSuffixCmd, dumpServersCmd, dumpAuthServersCmd, dumpKeysCmd, dumpDnskeysCmd, dumpZoneCmd, dumpZonesCmd, dumpTuningCmd, dumpDiscoveryCmd)
 	dumpAuthServersCmd.AddCommand(newDumpKeysCmd(), newDumpServersCmd(), dumpAuthServersErrorsCmd)
-	dumpZoneCmd.AddCommand(dumpZoneServersCmd)
+	dumpZoneCmd.AddCommand(dumpZoneServersCmd, dumpZoneBackoffsCmd)
 }
 
 func PrintCacheItem(item core.Tuple[string, cache.CachedRRset], suffix string) {
@@ -794,15 +970,19 @@ func PrintCacheItem(item core.Tuple[string, cache.CachedRRset], suffix string) {
 			return
 		}
 		for _, rr := range item.Val.RRset.RRs {
+			// Per-RR state is just a copy of the RRset's State (DNS RRs
+			// don't carry validation state individually), which is
+			// already shown on the header line above. Avoid the
+			// "(state: )" empty-string render footgun for State==0
+			// and skip the duplicate.
 			switch rr.Header().Rrtype {
 			case dns.TypeDS:
-				fmt.Printf("  %s %s", maskDsLine(rr.String()), ctxLabel)
+				fmt.Printf("  %s %s\n", maskDsLine(rr.String()), ctxLabel)
 			case dns.TypeDNSKEY:
-				fmt.Printf("  %s %s", maskDnskeyLine(rr.String()), ctxLabel)
+				fmt.Printf("  %s %s\n", maskDnskeyLine(rr.String()), ctxLabel)
 			default:
-				fmt.Printf("  %s %s", rr.String(), ctxLabel)
+				fmt.Printf("  %s %s\n", rr.String(), ctxLabel)
 			}
-			fmt.Printf(" (state: %s)\n", cache.ValidationStateToString[item.Val.State])
 		}
 		for _, rr := range item.Val.RRset.RRSIGs {
 			fmt.Printf("  %s %s\n", maskRrsigLine(rr.String()), ctxLabel)

@@ -37,6 +37,23 @@ type Imr struct {
 	// a secure DNSSEC validation state. Default true; set false in lab environments where
 	// the full DNSSEC chain is not yet established.
 	RequireDnssecValidation bool
+	// Tuning is a snapshot of conf.Imr.Tuning taken at init time
+	// with defaults applied via LoadImrTuningDefaults. Subsequent
+	// work items read backoff / address-family / discovery /
+	// query-budget knobs from here.
+	Tuning ImrTuningConf
+	// FamilyTracker deprioritizes v4 or v6 tuples when the local host
+	// appears to have lost connectivity over that family. Sourced from
+	// Tuning.AddressFamily; see W8.
+	FamilyTracker *cache.FamilyTracker
+	// TransportSignalDiscovery and TLSADiscovery track the state of the
+	// IMR's opportunistic side-channel discovery (SVCB/TSYNC transport
+	// signals and TLSA pin records, respectively). Separate trackers so a
+	// broken TLSA endpoint doesn't backoff transport-signal probing for
+	// the same owner, and vice versa. Sourced from Tuning.Discovery;
+	// see W9.
+	TransportSignalDiscovery *cache.DiscoveryTracker
+	TLSADiscovery            *cache.DiscoveryTracker
 }
 
 type ImrRequest struct {
@@ -98,6 +115,15 @@ func (conf *Config) InitImrEngine(quiet bool) error {
 	if conf.Imr.RequireDnssecValidation != nil {
 		requireDnssec = *conf.Imr.RequireDnssecValidation
 	}
+	LoadImrTuningDefaults(&conf.Imr.Tuning)
+	cache.SetBackoffPolicy(cache.BackoffPolicy{
+		FirstFailure:   conf.Imr.Tuning.Backoff.FirstFailure,
+		MaxFailure:     conf.Imr.Tuning.Backoff.MaxFailure,
+		Multiplier:     conf.Imr.Tuning.Backoff.Multiplier,
+		JitterFraction: conf.Imr.Tuning.Backoff.JitterFraction,
+		RoutingFailure: conf.Imr.Tuning.Backoff.RoutingFailure,
+		LameDelegation: conf.Imr.Tuning.Backoff.LameDelegation,
+	})
 	imr := &Imr{
 		Cache:                   rrcache,
 		DnskeyCache:             rrcache.DnskeyCache,
@@ -107,6 +133,21 @@ func (conf *Config) InitImrEngine(quiet bool) error {
 		Debug:                   conf.Imr.Debug,
 		Quiet:                   quiet,
 		RequireDnssecValidation: requireDnssec,
+		Tuning:                  conf.Imr.Tuning,
+		FamilyTracker: cache.NewFamilyTracker(
+			conf.Imr.Tuning.AddressFamily.WindowDuration,
+			conf.Imr.Tuning.AddressFamily.SuspectDuration,
+			conf.Imr.Tuning.AddressFamily.ProbeInterval,
+			conf.Imr.Tuning.AddressFamily.FailureThreshold,
+		),
+		TransportSignalDiscovery: cache.NewDiscoveryTracker(
+			conf.Imr.Tuning.Discovery.RetryAfterFailure,
+			conf.Imr.Tuning.Discovery.MaxFailures,
+		),
+		TLSADiscovery: cache.NewDiscoveryTracker(
+			conf.Imr.Tuning.Discovery.RetryAfterFailure,
+			conf.Imr.Tuning.Discovery.MaxFailures,
+		),
 	}
 
 	if conf.Imr.Logging.Enabled {
@@ -221,77 +262,167 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 				lgImr.Warn("received nil or invalid request (no response channel)")
 				continue
 			}
-			lgImr.Debug("received query", "qname", rrq.Qname, "qclass", dns.ClassToString[rrq.Qclass], "qtype", dns.TypeToString[rrq.Qtype])
-			if imr.DebugLog != nil {
-				imr.DebugLog.Printf("QUERY qname=%s qtype=%s", rrq.Qname, dns.TypeToString[rrq.Qtype])
-			}
-
-			var resp *ImrResponse
-
-			// 1. Is the answer in the cache?
-			crrset := imr.Cache.Get(rrq.Qname, rrq.Qtype)
-			if crrset != nil {
-				// Only use cached answer if it's a direct answer or negative response.
-				// Don't use referrals, glue, hints, priming, or failures - issue a direct query instead
-				// to get DNSSEC signatures and upgrade the quality of the data.
-				switch crrset.Context {
-				case cache.ContextAnswer, cache.ContextNoErrNoAns, cache.ContextNXDOMAIN:
-					// These are direct answers or negative responses - safe to use
-					lgImr.Debug("cache hit", "qname", rrq.Qname, "qclass", dns.ClassToString[rrq.Qclass], "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
-					if imr.DebugLog != nil {
-						var rrs []string
-						if crrset.RRset != nil {
-							for _, rr := range crrset.RRset.RRs {
-								rrs = append(rrs, rr.String())
-							}
-						}
-						imr.DebugLog.Printf("CACHE-HIT qname=%s qtype=%s context=%s answer=%v",
-							rrq.Qname, dns.TypeToString[rrq.Qtype],
-							cache.CacheContextToString[crrset.Context], rrs)
-					}
-					resp = &ImrResponse{
-						RRset: crrset.RRset,
-					}
-					rrq.ResponseCh <- *resp
-					continue // Skip query, we have a good answer
-				case cache.ContextReferral, cache.ContextGlue, cache.ContextHint, cache.ContextPriming, cache.ContextFailure:
-					// These are indirect - issue a direct query to upgrade quality and get DNSSEC signatures
-					lgImr.Debug("cache hit but indirect context, issuing direct query", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
-					if imr.DebugLog != nil {
-						imr.DebugLog.Printf("CACHE-INDIRECT qname=%s qtype=%s context=%s, issuing fresh query",
-							rrq.Qname, dns.TypeToString[rrq.Qtype], cache.CacheContextToString[crrset.Context])
-					}
-					// Fall through to issue query
-				default:
-					// Unknown context - be safe and issue query
-					lgImr.Debug("cache hit with unknown context, issuing query", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
-					// Fall through to issue query
-				}
-			} else if imr.DebugLog != nil {
-				imr.DebugLog.Printf("CACHE-MISS qname=%s qtype=%s, issuing fresh query", rrq.Qname, dns.TypeToString[rrq.Qtype])
-			}
-			// Cache miss or indirect context - issue query
-			{
-				var err error
-				lgImr.Debug("not in cache, querying", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
-
-				resp, err = imr.ImrQuery(ctx, rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
-				if err != nil {
-					lgImr.Error("ImrQuery failed", "err", err)
-				} else if resp == nil {
-					resp = &ImrResponse{
-						Error:    true,
-						ErrorMsg: "ImrEngine: no response from ImrQuery",
-					}
-				}
-				rrq.ResponseCh <- *resp
-			}
+			// Each request runs in its own goroutine. The underlying
+			// ImrQuery is fully reentrant; serialising callers behind
+			// the channel-read loop served no purpose and stalled
+			// concurrent CLI / RPC invocations behind any slow query.
+			go imr.handleRecursorRequest(ctx, rrq)
 		}
 	}
 }
 
+// handleRecursorRequest answers a single RecursorCh request. Runs
+// on its own goroutine spawned by the engine loop. Cache hits are
+// answered directly; everything else falls through to ImrQuery.
+//
+// Defensive: a top-level recover ensures that any panic in this
+// goroutine logs and reports an error to the caller rather than
+// killing the whole process. tdns-auth and tdns-mp embed this
+// engine and a panic here previously took down the server.
+func (imr *Imr) handleRecursorRequest(ctx context.Context, rrq ImrRequest) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			lgImr.Error("handleRecursorRequest: PANIC recovered",
+				"qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype],
+				"panic", fmt.Sprintf("%v", rec))
+			// Try to send an error response so the caller doesn't hang.
+			// Non-blocking: if the response channel is full or closed, drop.
+			if rrq.ResponseCh != nil {
+				select {
+				case rrq.ResponseCh <- ImrResponse{
+					Error:    true,
+					ErrorMsg: fmt.Sprintf("IMR recovered from panic: %v", rec),
+				}:
+				default:
+				}
+			}
+		}
+	}()
+
+	lgImr.Debug("received query", "qname", rrq.Qname, "qclass", dns.ClassToString[rrq.Qclass], "qtype", dns.TypeToString[rrq.Qtype])
+	if imr.DebugLog != nil {
+		imr.DebugLog.Printf("QUERY qname=%s qtype=%s", rrq.Qname, dns.TypeToString[rrq.Qtype])
+	}
+
+	// Bounded, ctx-aware send. We're a per-request goroutine now, so
+	// a slow or abandoned consumer must not pin us forever. 2s is the
+	// same ceiling the original engine-loop send used.
+	sendResp := func(r ImrResponse) {
+		select {
+		case rrq.ResponseCh <- r:
+		case <-ctx.Done():
+			lgImr.Warn("handleRecursorRequest: ctx cancelled before response delivered", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
+		case <-time.After(2 * time.Second):
+			lgImr.Warn("handleRecursorRequest: timed out sending response", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
+		}
+	}
+
+	var resp *ImrResponse
+
+	crrset := imr.Cache.Get(rrq.Qname, rrq.Qtype)
+	if crrset != nil {
+		switch crrset.Context {
+		case cache.ContextAnswer, cache.ContextNoErrNoAns, cache.ContextNXDOMAIN:
+			lgImr.Debug("cache hit", "qname", rrq.Qname, "qclass", dns.ClassToString[rrq.Qclass], "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
+			if imr.DebugLog != nil {
+				var rrs []string
+				if crrset.RRset != nil {
+					for _, rr := range crrset.RRset.RRs {
+						rrs = append(rrs, rr.String())
+					}
+				}
+				imr.DebugLog.Printf("CACHE-HIT qname=%s qtype=%s context=%s answer=%v",
+					rrq.Qname, dns.TypeToString[rrq.Qtype],
+					cache.CacheContextToString[crrset.Context], rrs)
+			}
+			resp = &ImrResponse{
+				RRset:     crrset.RRset,
+				Validated: crrset.State == cache.ValidationStateSecure,
+			}
+			sendResp(*resp)
+			return
+		case cache.ContextReferral, cache.ContextGlue, cache.ContextHint:
+			if !imr.upgradeIndirectCacheHits() && crrset.RRset != nil && crrset.RRset.RRtype == rrq.Qtype {
+				lgImr.Debug("returning cached indirect data (UpgradeIndirectCacheHits=false)", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
+				resp = &ImrResponse{
+					RRset:     crrset.RRset,
+					Validated: crrset.State == cache.ValidationStateSecure,
+				}
+				sendResp(*resp)
+				return
+			}
+			lgImr.Debug("cache hit but indirect context, issuing direct query", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
+			if imr.DebugLog != nil {
+				imr.DebugLog.Printf("CACHE-INDIRECT qname=%s qtype=%s context=%s, issuing fresh query",
+					rrq.Qname, dns.TypeToString[rrq.Qtype], cache.CacheContextToString[crrset.Context])
+			}
+		case cache.ContextPriming, cache.ContextFailure:
+			lgImr.Debug("cache hit but priming/failure, issuing direct query", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
+		default:
+			lgImr.Debug("cache hit with unknown context, issuing query", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "context", cache.CacheContextToString[crrset.Context])
+		}
+	} else if imr.DebugLog != nil {
+		imr.DebugLog.Printf("CACHE-MISS qname=%s qtype=%s, issuing fresh query", rrq.Qname, dns.TypeToString[rrq.Qtype])
+	}
+
+	lgImr.Debug("not in cache, querying", "qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype])
+	resp, err := imr.ImrQuery(ctx, rrq.Qname, rrq.Qtype, rrq.Qclass, nil)
+	if err != nil {
+		lgImr.Error("ImrQuery failed",
+			"qname", rrq.Qname, "qtype", dns.TypeToString[rrq.Qtype], "err", err)
+	}
+	sendResp(buildImrResponse(resp, err))
+}
+
+// buildImrResponse normalises an ImrQuery result tuple into a non-nil
+// ImrResponse value. CRITICAL: tdns-auth and tdns-mp embed the IMR engine
+// and previously crashed when this normalisation was inlined incorrectly:
+// the old code dereferenced *resp after `err != nil` without first
+// initialising resp, panicking on the deref and (with no recover()) taking
+// down the whole process. The W2 context-cancel cascade made that trigger
+// constantly. Lifted to a pure helper so the regression is testable
+// without driving the full engine.
+func buildImrResponse(resp *ImrResponse, err error) ImrResponse {
+	if err != nil {
+		return ImrResponse{Error: true, ErrorMsg: err.Error()}
+	}
+	if resp == nil {
+		return ImrResponse{Error: true, ErrorMsg: "ImrEngine: no response from ImrQuery"}
+	}
+	return *resp
+}
+
+// upgradeIndirectCacheHits reports whether cache hits whose context
+// is indirect (Glue, Referral, Hint) should trigger a fresh query
+// to "upgrade" the data with DNSSEC signatures, or whether the
+// cached data may be returned as-is. Legacy default is true
+// (always upgrade); tdns-mp overrides to false in its default
+// config because gossip workloads benefit from reduced query volume.
+// ContextFailure and ContextPriming are NOT affected by this toggle
+// — those are always re-queried regardless.
+func (imr *Imr) upgradeIndirectCacheHits() bool {
+	if imr == nil || imr.Tuning.UpgradeIndirectCacheHits == nil {
+		return true
+	}
+	return *imr.Tuning.UpgradeIndirectCacheHits
+}
+
 func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass uint16, respch chan *ImrResponse) (*ImrResponse, error) {
 	lgImr.Debug("ImrQuery: not in cache, querying", "qname", qname, "qtype", dns.TypeToString[qtype])
+
+	// Apply per-query wall-time budget at the top-level public entry,
+	// not just at IterativeDNSQueryWithLoopDetection. Sub-queries
+	// spawned by resolveNSAddresses / CollectNSAddresses go back
+	// through this same ImrQuery on the parent ctx; wrapping here
+	// bounds the whole logical request. context.WithTimeout takes
+	// min(parent.Deadline, now+budget), so nested ImrQuery calls
+	// inherit the outermost deadline cleanly.
+	if budget := imr.Tuning.QueryBudget; budget > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, budget)
+		defer cancel()
+	}
+
 	maxiter := 12
 
 	resp := ImrResponse{
@@ -346,14 +477,21 @@ func (imr *Imr) ImrQuery(ctx context.Context, qname string, qtype uint16, qclass
 				validateResponse()
 			}
 			return &resp, nil
-		case cache.ContextReferral, cache.ContextGlue, cache.ContextHint, cache.ContextPriming, cache.ContextFailure:
-			// These are indirect - issue a direct query to upgrade quality and get DNSSEC signatures
+		case cache.ContextReferral, cache.ContextGlue, cache.ContextHint:
+			// Indirect contexts. By default we re-query to get DNSSEC
+			// signatures; with UpgradeIndirectCacheHits=false we return
+			// the cached data instead -- saves query volume when the
+			// cached glue/referral already answers the question.
+			if !imr.upgradeIndirectCacheHits() && crrset.RRset != nil && crrset.RRset.RRtype == qtype {
+				lgImr.Debug("ImrQuery: returning cached indirect data (UpgradeIndirectCacheHits=false)", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
+				resp.RRset = crrset.RRset
+				return &resp, nil
+			}
 			lgImr.Debug("ImrQuery: cache hit but indirect context, issuing direct query", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
-			// Fall through to issue query
+		case cache.ContextPriming, cache.ContextFailure:
+			lgImr.Debug("ImrQuery: cache hit but priming/failure, issuing direct query", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
 		default:
-			// Unknown context - be safe and issue query
 			lgImr.Debug("ImrQuery: cache hit with unknown context, issuing query", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
-			// Fall through to issue query
 		}
 	}
 
@@ -567,6 +705,58 @@ func (imr *Imr) ImrResponder(ctx context.Context, w dns.ResponseWriter, r *dns.M
 			lgImr.Debug("ImrResponder: PR flag set but cached data came over unencrypted transport, skipping cache", "qname", qname, "qtype", dns.TypeToString[qtype], "transport", core.TransportToString[crrset.Transport])
 			crrset = nil // Force query over encrypted transport
 		}
+	}
+	// Optional fast return for indirect cache hits. By default
+	// ImrResponder falls through to a full iterative query for
+	// Referral/Glue/Hint entries (to get DNSSEC signatures). With
+	// UpgradeIndirectCacheHits=false, return the cached data if it
+	// answers the question — same trade-off as ImrQuery's branch.
+	if crrset != nil && !imr.upgradeIndirectCacheHits() &&
+		(crrset.Context == cache.ContextReferral ||
+			crrset.Context == cache.ContextGlue ||
+			crrset.Context == cache.ContextHint) &&
+		crrset.RRset != nil && crrset.RRset.RRtype == qtype {
+		lgImr.Debug("ImrResponder: returning cached indirect data (UpgradeIndirectCacheHits=false)", "qname", qname, "qtype", dns.TypeToString[qtype], "context", cache.CacheContextToString[crrset.Context])
+		m.SetRcode(r, dns.RcodeSuccess)
+		m.Answer = crrset.RRset.RRs
+		if msgoptions.DO {
+			m.Answer = append(m.Answer, crrset.RRset.RRSIGs...)
+		}
+		m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
+		if core.IsEncryptedTransport(crrset.Transport) {
+			if err := edns0.SetPRFlagInMessage(m); err != nil {
+				lgImr.Error("ImrResponder: failed to set PR flag in response", "err", err)
+			}
+		}
+		w.WriteMsg(m)
+		return
+	}
+	// DS records are exclusively published at the parent zone, so a
+	// cached DS entry with ContextReferral (the canonical path: we
+	// learned it from the parent's referral in handleReferral) IS the
+	// authoritative answer. Serve it directly. Without this branch the
+	// switch below falls through, the responder re-queries iteratively,
+	// the iterative path's FindClosestKnownZone returns the qname's
+	// OWN serverMap (e.g. net.'s servers for `net DS`), the qname's
+	// servers respond NODATA (DS doesn't live at zone apex), and we
+	// hand the client a phantom NODATA for a DS that's right there in
+	// cache as `state: secure`. Confirmed via `dog @127.0.0.1:1099
+	// net DS +dnssec` and tdns-mp `dog sigchase` against the local IMR.
+	if crrset != nil && qtype == dns.TypeDS && crrset.Context == cache.ContextReferral &&
+		crrset.RRset != nil && crrset.RRset.RRtype == dns.TypeDS && len(crrset.RRset.RRs) > 0 {
+		m.SetRcode(r, dns.RcodeSuccess)
+		m.Answer = crrset.RRset.RRs
+		if msgoptions.DO {
+			m.Answer = append(m.Answer, crrset.RRset.RRSIGs...)
+		}
+		m.AuthenticatedData = crrset.State == cache.ValidationStateSecure
+		if core.IsEncryptedTransport(crrset.Transport) {
+			if err := edns0.SetPRFlagInMessage(m); err != nil {
+				lgImr.Error("ImrResponder: failed to set PR flag in response", "err", err)
+			}
+		}
+		w.WriteMsg(m)
+		return
 	}
 	if crrset != nil {
 		switch {
@@ -1222,33 +1412,23 @@ func (imr *Imr) parseTrustAnchorsFromConfig(conf *Config) (map[string][]*dns.DS,
 		lgImr.Info("configured DS trust anchor", "zone", name, "keytag", ds.KeyTag, "digesttype", ds.DigestType)
 	}
 
-	// If trust-anchor-file is provided, read and parse all RRs
+	// If trust-anchor-file is provided, read and parse all RRs via
+	// the shared parser in cache/trustanchor.go. dog +sigchase uses
+	// the same parser, so any format quirks are handled in one place.
 	if taFile != "" {
-		data, err := os.ReadFile(taFile)
+		fileDS, fileKeys, err := cache.LoadTrustAnchorsFromFile(taFile, func(format string, args ...any) {
+			lgImr.Warn(fmt.Sprintf("trust-anchor-file %s: "+format, append([]any{taFile}, args...)...))
+		})
 		if err != nil {
 			return nil, nil, fmt.Errorf("failed to read trust-anchor-file %q: %v", taFile, err)
 		}
-		lines := strings.Split(string(data), "\n")
-		for _, ln := range lines {
-			s := strings.TrimSpace(ln)
-			if s == "" || strings.HasPrefix(s, ";") || strings.HasPrefix(s, "#") {
-				continue
-			}
-			rr, err := dns.NewRR(s)
-			if err != nil {
-				lgImr.Warn("skipping unparsable line in trust anchor file", "file", taFile, "line", s, "err", err)
-				continue
-			}
-			switch t := rr.(type) {
-			case *dns.DNSKEY:
-				name := dns.Fqdn(t.Hdr.Name)
-				dnskeysByName[name] = append(dnskeysByName[name], t)
-			case *dns.DS:
-				name := dns.Fqdn(t.Hdr.Name)
-				dsByName[name] = append(dsByName[name], t)
-			default:
-				lgImr.Warn("ignoring non-TA RR in trust anchor file", "file", taFile, "rr", rr.String())
-			}
+		for _, ds := range fileDS {
+			name := dns.Fqdn(ds.Hdr.Name)
+			dsByName[name] = append(dsByName[name], ds)
+		}
+		for _, k := range fileKeys {
+			name := dns.Fqdn(k.Hdr.Name)
+			dnskeysByName[name] = append(dnskeysByName[name], k)
 		}
 	}
 
