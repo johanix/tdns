@@ -93,7 +93,10 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 			if zone, ok := rrcache.ZoneMap.Get(signer); ok && zone.GetState() == ValidationStateIndeterminate {
 				return false, true, ValidationStateIndeterminate, nil
 			}
-			return false, false, ValidationStateNone, nil
+			// Couldn't reach the signer zone — chain unavailable, not a sig
+			// verification failure. The outer loop uses this distinction to
+			// pick Indeterminate over Bogus when no actual verify happened.
+			return false, false, ValidationStateIndeterminate, nil
 		}
 		if rrcache.Debug {
 			log.Printf("ValidateRRset: FindClosestKnownZone(%q) returned %d servers", signer, len(servers))
@@ -225,14 +228,20 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 			}
 		}
 
-		return false, false, ValidationStateNone, nil
+		// No usable DNSKEY for this signer — chain unavailable. NOT a sig
+		// verification failure: we couldn't even attempt the verify. The
+		// outer loop reads this as Indeterminate so a missing chain doesn't
+		// get slandered as Bogus.
+		return false, false, ValidationStateIndeterminate, nil
 	}
 	if err := sig.Verify(&dkrr.Dnskey, rrset.RRs); err != nil {
 		if rrcache.Verbose {
 			log.Printf("ValidateRRset: signature verify FAILED for %s %s using %s::%d: %v",
 				rrset.Name, dns.TypeToString[rrset.RRtype], signer, keyid, err)
 		}
-		return false, false, ValidationStateNone, nil
+		// Real verification failure: had the key, sig didn't verify.
+		// Outer loop reads this as Bogus.
+		return false, false, ValidationStateBogus, nil
 	}
 	// Time validity
 	if WithinValidityPeriod(sig.Inception, sig.Expiration, time.Now().UTC()) {
@@ -270,7 +279,10 @@ func (rrcache *RRsetCacheT) validateRRsetWithRRSIG(ctx context.Context, rrset *c
 		log.Printf("ValidateRRset: signature time INVALID for %s %s using %s::%d (inc=%d exp=%d now=%d)",
 			rrset.Name, dns.TypeToString[rrset.RRtype], signer, keyid, sig.Inception, sig.Expiration, time.Now().UTC().Unix())
 	}
-	return false, false, ValidationStateNone, nil
+	// Signature inception/expiration window is invalid (premature or
+	// expired). The crypto verified, but the sig is not currently
+	// usable — that is a real Bogus condition, not a chain gap.
+	return false, false, ValidationStateBogus, nil
 }
 
 // ValidateRRset attempts to validate the provided RRset using DNSKEYs present in the DnskeyCache.
@@ -418,6 +430,15 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 		return ValidationStateIndeterminate, nil
 	}
 
+	// Track the failure category across all RRSIGs. The inner function
+	// returns ValidationStateBogus when a sig actually failed verification
+	// or its validity window is invalid, and ValidationStateIndeterminate
+	// when the chain to the signer's DNSKEY is unavailable (no real
+	// verify happened). Bogus wins over Indeterminate so a single real
+	// failure is reported truthfully even if other sigs couldn't be
+	// attempted.
+	sawSigFail := false  // at least one sig actually failed verification
+	sawChainGap := false // at least one sig couldn't be attempted at all
 	for _, rr := range rrset.RRSIGs {
 		sig, ok := rr.(*dns.RRSIG)
 		if !ok {
@@ -436,15 +457,28 @@ func (rrcache *RRsetCacheT) ValidateRRsetWithParentZone(ctx context.Context, rrs
 		if valid {
 			return ValidationStateSecure, nil
 		}
-		// Continue to next signature
+		switch returnState {
+		case ValidationStateBogus:
+			sawSigFail = true
+		case ValidationStateIndeterminate:
+			sawChainGap = true
+		}
 	}
 	if rrcache.Verbose {
-		log.Printf("ValidateRRset: no acceptable signature validated for %s %s", rrset.Name, dns.TypeToString[rrset.RRtype])
+		log.Printf("ValidateRRset: no acceptable signature validated for %s %s (sawSigFail=%v sawChainGap=%v)",
+			rrset.Name, dns.TypeToString[rrset.RRtype], sawSigFail, sawChainGap)
 	}
-	// All signatures failed validation - return bogus
-	// Note: We don't need to check for indeterminate zones here because the helper function
-	// already checks for indeterminate zones and returns early, so we would have returned
-	// earlier if any signer zone was indeterminate.
+	// Pick the verdict by precedence:
+	//   - sigFail wins: at least one sig had keys and failed → Bogus.
+	//   - chainGap only: every sig couldn't be attempted → Indeterminate.
+	//   - neither (no sigs at all, or all returned an unexpected state):
+	//     default to Bogus, matching the prior conservative behaviour.
+	if sawSigFail {
+		return ValidationStateBogus, nil
+	}
+	if sawChainGap {
+		return ValidationStateIndeterminate, nil
+	}
 	return ValidationStateBogus, nil
 }
 
