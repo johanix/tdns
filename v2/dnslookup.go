@@ -1134,6 +1134,16 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	var zoneName string
 	var zone *cache.Zone
 	var prioritized []ServerAddrXportTuple
+	// Diagnostic accumulator: track the last (server, addr, transport)
+	// we attempted so error returns can tell the operator WHERE the
+	// chain walk got stuck instead of just "no Answers found" or
+	// "context deadline exceeded". Updated on every tuple attempt.
+	var (
+		lastNS, lastAddr string
+		lastTransport    core.Transport
+		lastErr          error
+		attempts         int
+	)
 	for attempt := 0; attempt < 2; attempt++ {
 		zoneName, zone, prioritized = imr.prioritizeServers(qname, serverMap, requireEncrypted)
 		if Globals.Debug {
@@ -1143,13 +1153,15 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		for _, tuple := range prioritized {
 			select {
 			case <-ctx.Done():
-				return nil, 0, cache.ContextFailure, core.TransportDo53, ctx.Err()
+				return nil, 0, cache.ContextFailure, core.TransportDo53, walkErr(zoneName, lastNS, lastAddr, lastTransport, attempts, lastErr, ctx.Err())
 			default:
 			}
 			server := tuple.Server
 			addr := tuple.Addr
 			nsname := tuple.NSName
 			transport := tuple.Transport
+			lastNS, lastAddr, lastTransport = nsname, addr, transport
+			attempts++
 
 			if Globals.Debug {
 				lg.Printf("IterativeDNSQuery: using nameserver %s@%s over %s (ALPN: %v) for <%s, %s> query\n",
@@ -1158,6 +1170,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 
 			r, _, err := imr.tryServer(ctx, server, addr, transport, m, qname, qtype)
 			if err != nil {
+				lastErr = err
 				if imr.Cache.Verbose {
 					// lg.Printf("IterativeDNSQuery: Error from dns.Exchange: %v (rtt: %v)", err, rtt)
 				}
@@ -1288,12 +1301,41 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		}
 		break
 	}
-	// If we get here, we tried all servers but none succeeded
-	// If PR flag was set, this might be because no encrypted transport was available
+	// If we get here, we tried all servers but none succeeded.
+	// Enrich the error with diagnostic info so operators don't see a
+	// bare "no Answers found" / "context deadline exceeded" and have to
+	// dig through the IMR log to find out what happened.
 	if requireEncrypted {
-		return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53, fmt.Errorf("PR flag requires encrypted transport but no answers found from any server with encrypted transport for '%s %s'", qname, dns.TypeToString[qtype])
+		base := fmt.Errorf("PR flag requires encrypted transport but no answers found from any server with encrypted transport for '%s %s'", qname, dns.TypeToString[qtype])
+		return nil, dns.RcodeServerFailure, cache.ContextFailure, core.TransportDo53, walkErr(zoneName, lastNS, lastAddr, lastTransport, attempts, lastErr, base)
 	}
-	return &rrset, rcode, cache.ContextNoErrNoAns, core.TransportDo53, fmt.Errorf("IterativeDNSQuery: no Answers found from any auth server looking up '%s %s'", qname, dns.TypeToString[qtype])
+	base := fmt.Errorf("IterativeDNSQuery: no Answers found from any auth server looking up '%s %s'", qname, dns.TypeToString[qtype])
+	return &rrset, rcode, cache.ContextNoErrNoAns, core.TransportDo53, walkErr(zoneName, lastNS, lastAddr, lastTransport, attempts, lastErr, base)
+}
+
+// walkErr wraps the underlying error with the diagnostic state of the
+// IterativeDNSQuery walk at the point of failure. Use the operator's
+// last-attempted (server, addr, transport) and the most recent per-tuple
+// error so a CLI showing the returned error tells the operator WHERE
+// the chain walk got stuck.
+//
+// Format kept compact since this string ends up in user-facing CLI
+// output ("Error: ...") rather than only in logs.
+func walkErr(zoneName, lastNS, lastAddr string, lastTransport core.Transport, attempts int, lastErr, base error) error {
+	if attempts == 0 {
+		// Never tried anything — no point listing a last-attempt that
+		// doesn't exist. Keep the base error.
+		return fmt.Errorf("%w (zone=%s, no auth-server attempts made)", base, zoneName)
+	}
+	parts := []string{
+		fmt.Sprintf("zone=%s", zoneName),
+		fmt.Sprintf("attempts=%d", attempts),
+		fmt.Sprintf("last=%s@%s/%s", lastNS, lastAddr, core.TransportToString[lastTransport]),
+	}
+	if lastErr != nil {
+		parts = append(parts, fmt.Sprintf("lastErr=%s", lastErr))
+	}
+	return fmt.Errorf("%w (%s)", base, strings.Join(parts, " "))
 }
 
 // CollectNSAddresses - given an NS RRset, chase down the A and AAAA records corresponding to each nsname
