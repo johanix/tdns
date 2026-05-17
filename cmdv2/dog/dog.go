@@ -122,6 +122,12 @@ var rootCmd = &cobra.Command{
 			cleanArgs = append(cleanArgs, arg)
 		}
 
+		// +SHORT (and --short) both flow through to MsgPrint via the
+		// short variable. Either source enables short mode.
+		if options["short"] == "true" {
+			short = true
+		}
+
 		if _, exists := options["transport"]; !exists {
 			options["transport"] = "Do53"
 		}
@@ -404,6 +410,11 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 		return options, nil
 	case "+MULTI":
 		options["multi"] = "true"
+		return options, nil
+	case "+SHORT":
+		// dig-compatible: only print the RDATA of the Answer RRset.
+		// Acts as the +XYZ-syntax equivalent of the --short flag.
+		options["short"] = "true"
 		return options, nil
 	case "+TCP":
 		if transport, exists := options["transport"]; exists {
