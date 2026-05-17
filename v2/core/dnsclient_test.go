@@ -46,6 +46,18 @@ func testServers(t *testing.T, udpHandler, tcpHandler dns.HandlerFunc) (port str
 		NotifyStartedFunc: func() { close(tcpReady) },
 	}
 
+	// Wait for a server's NotifyStartedFunc with a timeout. If
+	// ListenAndServe errors before the notify fires (port collision,
+	// permission denied, etc.) the channel would otherwise never close
+	// and the test would hang forever. Fail fast instead.
+	awaitReady := func(name string, ready <-chan struct{}) {
+		select {
+		case <-ready:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("testServers: %s server did not signal ready within 2s (likely bind failure on 127.0.0.1:%s)", name, portStr)
+		}
+	}
+
 	var wg sync.WaitGroup
 	if udpHandler != nil {
 		wg.Add(1)
@@ -55,7 +67,7 @@ func testServers(t *testing.T, udpHandler, tcpHandler dns.HandlerFunc) (port str
 				t.Logf("udp server stopped: %v", err)
 			}
 		}()
-		<-udpReady
+		awaitReady("udp", udpReady)
 	} else {
 		close(udpReady)
 	}
@@ -67,17 +79,37 @@ func testServers(t *testing.T, udpHandler, tcpHandler dns.HandlerFunc) (port str
 				t.Logf("tcp server stopped: %v", err)
 			}
 		}()
-		<-tcpReady
+		awaitReady("tcp", tcpReady)
 	} else {
 		close(tcpReady)
 	}
 
 	cleanup = func() {
+		// Run each Shutdown in its own goroutine with a wall-clock
+		// safety net. miekg/dns's Shutdown waits for in-flight handlers
+		// to drain; if a handler is misbehaving (e.g., a deliberately
+		// hanging UDP handler used to test timeout fallback) Shutdown
+		// itself can block. The bounded select prevents cleanup from
+		// stalling the test process.
+		shutdownWithTimeout := func(name string, srv *dns.Server) {
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				if err := srv.Shutdown(); err != nil {
+					t.Logf("testServers: %s Shutdown error: %v", name, err)
+				}
+			}()
+			select {
+			case <-done:
+			case <-time.After(5 * time.Second):
+				t.Logf("testServers: %s Shutdown did not return within 5s; continuing", name)
+			}
+		}
 		if udpHandler != nil {
-			_ = udpSrv.Shutdown()
+			shutdownWithTimeout("udp", udpSrv)
 		}
 		if tcpHandler != nil {
-			_ = tcpSrv.Shutdown()
+			shutdownWithTimeout("tcp", tcpSrv)
 		}
 		wg.Wait()
 	}
