@@ -230,11 +230,57 @@ func TestPrioritizeServers_UnprobedSentinelOrdering(t *testing.T) {
 	}
 }
 
+// TestPrioritizeServers_SuspectFamilyDeprioritized: when v6 is suspect,
+// v4 tuples come first; v6 tuples appear only as the single probe at the
+// back. Repeat: the probe quota is one per ProbeInterval.
+func TestPrioritizeServers_SuspectFamilyDeprioritized(t *testing.T) {
+	imr := newTestImr(t)
+	// Mark v6 suspect right now.
+	for i := 0; i < 5; i++ {
+		imr.FamilyTracker.RecordResult("[2001:db8::1]:53", false)
+	}
+	if !imr.FamilyTracker.IsSuspect(cache.FamilyV6) {
+		t.Fatal("setup: v6 should be suspect")
+	}
+
+	ns := "ns.example."
+	s := cache.NewAuthServer(ns)
+	s.SetAddrs([]string{"10.0.0.1:53", "[2001:db8::1]:53"})
+	s.SetTransports([]core.Transport{core.TransportDo53})
+	s.SetTransportWeight(core.TransportDo53, 100)
+	serverMap := map[string]*cache.AuthServer{ns: s}
+
+	_, _, tuples := imr.prioritizeServers("q.example.", serverMap, false)
+	if len(tuples) < 1 {
+		t.Fatal("expected at least the v4 tuple")
+	}
+	if tuples[0].Addr != "10.0.0.1:53" {
+		t.Errorf("expected v4 first, got %q", tuples[0].Addr)
+	}
+	// First prioritizeServers call may have included one v6 probe at back.
+	// A second call with no time elapsed must NOT include another v6 probe.
+	_, _, tuples2 := imr.prioritizeServers("q.example.", serverMap, false)
+	for _, tup := range tuples2 {
+		if cache.FamilyOf(tup.Addr) == cache.FamilyV6 {
+			t.Errorf("second call within ProbeInterval should not include any v6 tuple, got %+v", tup)
+			break
+		}
+	}
+}
+
 // newTestImr returns a minimal Imr suitable for prioritizeServers tests.
-// The cache is populated but no network clients are exercised.
+// The cache is populated but no network clients are exercised. FamilyTracker
+// uses sensible defaults; tests that need to drive specific suspect/probe
+// behaviour replace the field after construction.
 func newTestImr(t *testing.T) *Imr {
 	t.Helper()
 	lg := log.New(os.Stderr, "test", log.LstdFlags)
 	c := cache.NewRRsetCache(lg, false, false)
-	return &Imr{Cache: c}
+	ft := cache.NewFamilyTracker(
+		10*time.Minute, // window
+		10*time.Minute, // suspect duration
+		30*time.Second, // probe interval
+		5,              // failure threshold
+	)
+	return &Imr{Cache: c, FamilyTracker: ft}
 }

@@ -42,6 +42,10 @@ type Imr struct {
 	// work items read backoff / address-family / discovery /
 	// query-budget knobs from here.
 	Tuning ImrTuningConf
+	// FamilyTracker deprioritizes v4 or v6 tuples when the local host
+	// appears to have lost connectivity over that family. Sourced from
+	// Tuning.AddressFamily; see W8.
+	FamilyTracker *cache.FamilyTracker
 }
 
 type ImrRequest struct {
@@ -122,6 +126,12 @@ func (conf *Config) InitImrEngine(quiet bool) error {
 		Quiet:                   quiet,
 		RequireDnssecValidation: requireDnssec,
 		Tuning:                  conf.Imr.Tuning,
+		FamilyTracker: cache.NewFamilyTracker(
+			conf.Imr.Tuning.AddressFamily.WindowDuration,
+			conf.Imr.Tuning.AddressFamily.SuspectDuration,
+			conf.Imr.Tuning.AddressFamily.ProbeInterval,
+			conf.Imr.Tuning.AddressFamily.FailureThreshold,
+		),
 	}
 
 	if conf.Imr.Logging.Enabled {

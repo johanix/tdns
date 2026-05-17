@@ -709,6 +709,7 @@ func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.Auth
 	}
 
 	var tuples []ServerAddrXportTuple
+	var suspectTuples []ServerAddrXportTuple
 	for nsname, server := range serverMap {
 		transports := candidateTransports(server, qname, requireEncrypted)
 		if len(transports) == 0 {
@@ -730,6 +731,22 @@ func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.Auth
 					}
 					continue
 				}
+				// Address-family deprioritization (W8). If the local host's
+				// v4 or v6 path is currently suspect, suppress those tuples
+				// — but let one through per ProbeInterval as a recovery
+				// probe, appended after the healthy bucket.
+				fam := cache.FamilyOf(addr)
+				if imr.FamilyTracker.IsSuspect(fam) {
+					if imr.FamilyTracker.ShouldProbe(fam) {
+						suspectTuples = append(suspectTuples, ServerAddrXportTuple{
+							Server: server, Addr: addr, NSName: nsname, Transport: t,
+						})
+					} else if Globals.Debug {
+						lgDns.Debug("prioritizeServers: skipping suspect-family (addr,transport)",
+							"addr", addr, "transport", core.TransportToString[t], "family", int(fam))
+					}
+					continue
+				}
 				tuples = append(tuples, ServerAddrXportTuple{
 					Server: server, Addr: addr, NSName: nsname, Transport: t,
 				})
@@ -738,6 +755,9 @@ func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.Auth
 	}
 
 	sortTuplesByRTT(tuples)
+	// Suspect-family tuples (if any) follow the healthy ones — they're
+	// reachable in principle, just deprioritized while the family is suspect.
+	tuples = append(tuples, suspectTuples...)
 	return zoneName, zone, tuples
 }
 
@@ -1803,6 +1823,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 	start := time.Now()
 	r, _, err := c.Exchange(m, addr, Globals.Debug && !imr.Quiet)
 	rtt := time.Since(start)
+	imr.FamilyTracker.RecordResult(addr, err == nil && r != nil)
 	if err != nil {
 		lgDns.Error("*** tryServer: query returned error",
 			"qname", qname,
