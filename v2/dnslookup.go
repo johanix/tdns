@@ -2499,11 +2499,47 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 				// by scheduleReferralNSRevalidation below.
 				continue
 			}
-			// out-of-bailiwick: only bother if we don't already have addresses cached
-			if cA := imr.Cache.Get(ns.Ns, dns.TypeA); cA != nil && cA.RRset != nil && len(cA.RRset.RRs) > 0 {
-				continue
-			}
-			if cAAAA := imr.Cache.Get(ns.Ns, dns.TypeAAAA); cAAAA != nil && cAAAA.RRset != nil && len(cAAAA.RRset.RRs) > 0 {
+			// Out-of-bailiwick: the parent zone cannot legally provide glue
+			// for these names (RFC 9156), so they did not appear in
+			// ParseAdditionalForNSAddrs's output. We have two cases:
+			//
+			//   1. Addresses already cached (from a prior direct query) -
+			//      seed serverMap so prioritizeServers can try this NS.
+			//      Previously this was a `continue` that silently dropped
+			//      the known-good address on the floor, leading to "no
+			//      Answers found" when the in-bailiwick NS happened to be
+			//      down even though we knew of a working alternate.
+			//
+			//   2. No cached addresses - kick off async resolution via
+			//      CollectNSAddresses (further down). The current foreground
+			//      query may not see the result, but the next one will
+			//      benefit, and expandServerMapWithMissingNS handles the
+			//      "we need this address right now" case as a fallback.
+			cachedA := imr.Cache.Get(ns.Ns, dns.TypeA)
+			cachedAAAA := imr.Cache.Get(ns.Ns, dns.TypeAAAA)
+			haveA := cachedA != nil && cachedA.RRset != nil && len(cachedA.RRset.RRs) > 0
+			haveAAAA := cachedAAAA != nil && cachedAAAA.RRset != nil && len(cachedAAAA.RRset.RRs) > 0
+			if haveA || haveAAAA {
+				srv, present := serverMap[ns.Ns]
+				if !present {
+					srv = imr.Cache.GetOrCreateAuthServer(ns.Ns)
+					srv.SetSrc("referral-oob-cached")
+					serverMap[ns.Ns] = srv
+				}
+				if haveA {
+					for _, addrRR := range cachedA.RRset.RRs {
+						if a, ok := addrRR.(*dns.A); ok {
+							srv.AddAddr(net.JoinHostPort(a.A.String(), "53"))
+						}
+					}
+				}
+				if haveAAAA {
+					for _, addrRR := range cachedAAAA.RRset.RRs {
+						if a, ok := addrRR.(*dns.AAAA); ok {
+							srv.AddAddr(net.JoinHostPort(a.AAAA.String(), "53"))
+						}
+					}
+				}
 				continue
 			}
 			oobRRset.RRs = append(oobRRset.RRs, rr)
