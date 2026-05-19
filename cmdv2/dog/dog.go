@@ -66,6 +66,8 @@ var rootCmd = &cobra.Command{
 		+DELEG: Set the DELEG bit in queries
 		+PRIVACY or +PR: Set the PR (Privacy Requested) bit in queries (requires encrypted transport)
 		+MULTI: Present RRs in multi-line format
+		+SHORT: Only print the RDATA of the Answer RRset (dig-compatible; same as --short)
+		+SIGCHASE or +SC: Walk and verify the DNSSEC chain for the qname/qtype, emitting a per-link verdict tree. Server must be a recursive resolver. Trust anchors come from --trust-anchor, the IMR config, or the compiled-in root KSKs.
 	`,
 
 	Run: func(cmd *cobra.Command, args []string) {
