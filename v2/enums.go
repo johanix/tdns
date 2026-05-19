@@ -44,11 +44,15 @@ const (
 	OptCatalogZone
 	OptCatalogMemberAutoCreate
 	OptCatalogMemberAutoDelete
-	OptMPManualApproval
-	OptMultiSigner     // Dynamically set by signer when HSYNC shows multiple signers
-	OptMPNotListedErr  // Warning: zone has HSYNC3 but we are not listed as a provider
-	OptMPDisallowEdits // Zone is signed but we are not a signer: no edits allowed
+	OptMultiSigner // Dynamically set by signer when HSYNC shows multiple signers
+	optZoneOptionTdnsSentinel
 )
+
+// Compile-time gate: tdns's own ZoneOption values must fit in
+// tdns's allocated range. If a new constant added above crosses
+// TdnsZoneOptionMax, the unsigned subtraction underflows and
+// the build fails.
+const _ uint = uint(TdnsZoneOptionMax) - uint(optZoneOptionTdnsSentinel-1)
 
 var ZoneOptionToString = map[ZoneOption]string{
 	OptDelSyncParent:     "delegation-sync-parent",
@@ -71,10 +75,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptCatalogZone:             "catalog-zone",
 	OptCatalogMemberAutoCreate: "catalog-member-auto-create",
 	OptCatalogMemberAutoDelete: "catalog-member-auto-delete",
-	OptMPManualApproval:        "mp-manual-approval",
 	OptMultiSigner:             "multi-signer",
-	OptMPNotListedErr:          "mp-not-listed-error",
-	OptMPDisallowEdits:         "mp-disallow-edits",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -97,10 +98,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"catalog-zone":               OptCatalogZone,
 	"catalog-member-auto-create": OptCatalogMemberAutoCreate,
 	"catalog-member-auto-delete": OptCatalogMemberAutoDelete,
-	"mp-manual-approval":         OptMPManualApproval,
 	"multi-signer":               OptMultiSigner,
-	"mp-not-listed-error":        OptMPNotListedErr,
-	"mp-disallow-edits":          OptMPDisallowEdits,
 }
 
 type ImrOption uint8
@@ -198,7 +196,6 @@ const (
 const (
 	AppTypeAuth AppType = iota + 1
 	AppTypeAgent
-	// AppTypeCombiner
 	AppTypeImr // simplified recursor
 	AppTypeCli
 	AppTypeReporter
@@ -206,16 +203,21 @@ const (
 	AppTypeKdc        // Key Distribution Center
 	AppTypeKrs        // Key Receiving Service (edge receiver)
 	AppTypeEdgeSigner // NYI
-	AppTypeMPSigner   // MP signer (tdns-mp): DNS infra from tdns, MP wiring from tdns-mp
-	AppTypeMPAgent    // MP agent (tdns-mp): DNS infra from tdns, MP wiring from tdns-mp
-	AppTypeMPCombiner // MP combiner (tdns-mp): DNS infra from tdns, MP wiring from tdns-mp
-	AppTypeMPAuditor  // MP auditor (tdns-mp): read-only observer, no zone contributions
+	appTypeTdnsSentinel
 )
 
+// Compile-time gate: tdns's own AppType values must fit in tdns's
+// allocated range. If a new constant added above crosses
+// TdnsAppTypeMax, the unsigned subtraction underflows and the
+// build fails.
+const _ uint = uint(TdnsAppTypeMax) - uint(appTypeTdnsSentinel-1)
+
+// AppTypeToString and StringToAppType cover tdns-owned values
+// only. Downstream packages (tdns-mp, tdns-nm, tdns-es) extend
+// these maps via init() in their own enums.go.
 var AppTypeToString = map[AppType]string{
-	AppTypeAuth:  "auth",
-	AppTypeAgent: "agent",
-	//AppTypeCombiner:   "combiner",
+	AppTypeAuth:       "auth",
+	AppTypeAgent:      "agent",
 	AppTypeImr:        "imr",
 	AppTypeCli:        "cli",
 	AppTypeReporter:   "reporter",
@@ -223,16 +225,11 @@ var AppTypeToString = map[AppType]string{
 	AppTypeKdc:        "kdc",
 	AppTypeKrs:        "krs",
 	AppTypeEdgeSigner: "edgeSigner", // NYI
-	AppTypeMPSigner:   "mpsigner",
-	AppTypeMPAgent:    "mpagent",
-	AppTypeMPCombiner: "mpcombiner",
-	AppTypeMPAuditor:  "mpauditor",
 }
 
 var StringToAppType = map[string]AppType{
-	"auth":  AppTypeAuth,
-	"agent": AppTypeAgent,
-	//"combiner":   AppTypeCombiner,
+	"auth":       AppTypeAuth,
+	"agent":      AppTypeAgent,
 	"imr":        AppTypeImr,
 	"cli":        AppTypeCli,
 	"reporter":   AppTypeReporter,
@@ -240,10 +237,6 @@ var StringToAppType = map[string]AppType{
 	"kdc":        AppTypeKdc,
 	"krs":        AppTypeKrs,
 	"edgeSigner": AppTypeEdgeSigner, // NYI
-	"mpsigner":   AppTypeMPSigner,
-	"mpagent":    AppTypeMPAgent,
-	"mpcombiner": AppTypeMPCombiner,
-	"mpauditor":  AppTypeMPAuditor,
 }
 
 type ErrorType uint8
