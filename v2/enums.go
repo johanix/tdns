@@ -7,6 +7,22 @@ import "fmt"
 
 type ZoneOption uint8
 
+// Range allocation for ZoneOption across the tdns ecosystem.
+// Each downstream repo gets a numeric range starting one past the
+// previous max. Downstream packages assign their values via:
+//
+//	const X tdns.ZoneOption = tdns.TdnsZoneOptionMax + 1 + iota
+//
+// and use a compile-time gate to ensure they stay in their range
+// (see enums.go in each downstream package). Resizing a range:
+// change the value here and recompile.
+const (
+	TdnsZoneOptionMax   ZoneOption = 32
+	TdnsMpZoneOptionMax ZoneOption = 64
+	TdnsNmZoneOptionMax ZoneOption = 96
+	TdnsEsZoneOptionMax ZoneOption = 128
+)
+
 const (
 	OptDelSyncParent ZoneOption = iota + 1
 	OptDelSyncChild
@@ -162,6 +178,22 @@ var AgentOptionToString = map[AgentOption]string{}
 var StringToAgentOption = map[string]AgentOption{}
 
 type AppType uint8
+
+// Range allocation for AppType across the tdns ecosystem.
+// Each downstream repo gets a numeric range starting one past the
+// previous max. Downstream packages assign their values via:
+//
+//	const X tdns.AppType = tdns.TdnsAppTypeMax + 1 + iota
+//
+// and use a compile-time gate to ensure they stay in their range
+// (see enums.go in each downstream package). Resizing a range:
+// change the value here and recompile.
+const (
+	TdnsAppTypeMax   AppType = 16
+	TdnsMpAppTypeMax AppType = 32
+	TdnsNmAppTypeMax AppType = 48
+	TdnsEsAppTypeMax AppType = 64
+)
 
 const (
 	AppTypeAuth AppType = iota + 1
