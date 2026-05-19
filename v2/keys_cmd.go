@@ -1,8 +1,9 @@
 /*
  * Copyright (c) 2025 Johan Stenstam, johani@johani.org
  *
- * JOSE keypair CLI (generate, show) for agent and combiner secure CHUNK comms.
- * Invoked from tdns-agent and tdns-combiner when first argument is "keys".
+ * JOSE keypair CLI (generate, show). Used by CLI commands that
+ * manage long_term_jose_priv_key for any role that publishes
+ * JWK records.
  */
 
 package tdns
@@ -20,7 +21,7 @@ import (
 )
 
 // LoadConfigForKeys reads the given YAML config file and decodes it into Config.
-// Used by tdns-cli agent/combiner keys to get long_term_jose_priv_key path.
+// Used by CLI keys commands to get the long_term_jose_priv_key path.
 // Does not process includes or run full ParseConfig.
 func LoadConfigForKeys(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -34,11 +35,11 @@ func LoadConfigForKeys(path string) (*Config, error) {
 	return &conf, nil
 }
 
-// RunKeysCmd runs the "keys" subcommand (generate | show).
-// Used by tdns-cli agent keys / tdns-cli combiner keys. conf must be loaded from the server's config file.
-func RunKeysCmd(conf *Config, appType AppType, args []string) error {
+// RunKeysCmd runs the "keys" subcommand (generate | show). The
+// caller (a cobra command) is expected to pass a valid subcommand;
+// arg validation lives in the cobra layer.
+func RunKeysCmd(conf *Config, args []string) error {
 	if len(args) < 1 {
-		printKeysUsage(appType)
 		return fmt.Errorf("missing subcommand (generate or show)")
 	}
 
@@ -46,23 +47,22 @@ func RunKeysCmd(conf *Config, appType AppType, args []string) error {
 
 	switch args[0] {
 	case "generate":
-		return runKeysGenerate(conf, appType, backend, args[1:])
+		return runKeysGenerate(conf, backend, args[1:])
 	case "show":
-		return runKeysShow(conf, appType, backend, args[1:])
+		return runKeysShow(conf, backend, args[1:])
 	default:
-		printKeysUsage(appType)
 		return fmt.Errorf("unknown keys command: %q", args[0])
 	}
 }
 
-func runKeysGenerate(conf *Config, appType AppType, backend crypto.Backend, args []string) error {
+func runKeysGenerate(conf *Config, backend crypto.Backend, args []string) error {
 	fs := flag.NewFlagSet("keys generate", flag.ContinueOnError)
 	output := fs.String("output", "", "path for generated private key (default from config)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 
-	privPath := strings.TrimSpace(getKeysPrivKeyPath(conf, appType))
+	privPath := strings.TrimSpace(getKeysPrivKeyPath(conf))
 	if *output != "" {
 		privPath = strings.TrimSpace(*output)
 	}
@@ -100,8 +100,8 @@ func runKeysGenerate(conf *Config, appType AppType, backend crypto.Backend, args
 	return nil
 }
 
-func runKeysShow(conf *Config, appType AppType, backend crypto.Backend, args []string) error {
-	privPath := strings.TrimSpace(getKeysPrivKeyPath(conf, appType))
+func runKeysShow(conf *Config, backend crypto.Backend, args []string) error {
+	privPath := strings.TrimSpace(getKeysPrivKeyPath(conf))
 	if privPath == "" {
 		return fmt.Errorf("no key path: set long_term_jose_priv_key in server config")
 	}
@@ -137,32 +137,9 @@ func runKeysShow(conf *Config, appType AppType, backend crypto.Backend, args []s
 	return nil
 }
 
-func getKeysPrivKeyPath(conf *Config, appType AppType) string {
-	switch appType {
-	case AppTypeAgent, AppTypeMPAgent, AppTypeMPSigner, AppTypeMPCombiner:
-		if conf.MultiProvider != nil {
-			return conf.MultiProvider.LongTermJosePrivKey
-		}
-		return ""
-	default:
-		return ""
+func getKeysPrivKeyPath(conf *Config) string {
+	if conf.MultiProvider != nil {
+		return conf.MultiProvider.LongTermJosePrivKey
 	}
-}
-
-func printKeysUsage(appType AppType) {
-	var name string
-	switch appType {
-	case AppTypeMPCombiner:
-		name = "tdns-combiner"
-	case AppTypeMPAgent:
-		name = "tdns-mpagent"
-	case AppTypeMPSigner:
-		name = "tdns-mpsigner"
-	default:
-		name = "tdns-agent"
-	}
-	fmt.Fprintf(os.Stderr, "Usage: %s keys generate [-output path]\n", name)
-	fmt.Fprintf(os.Stderr, "       %s keys show\n", name)
-	fmt.Fprintf(os.Stderr, "  generate  Write JOSE keypair; path from config long_term_jose_priv_key or -output.\n")
-	fmt.Fprintf(os.Stderr, "  show      Print public key (JWK) from configured long_term_jose_priv_key.\n")
+	return ""
 }

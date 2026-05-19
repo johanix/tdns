@@ -73,11 +73,6 @@ func runKeysCommand(role string, cmd *cobra.Command, subcommand string, args []s
 		log.Fatalf("Load config %s: %v", serverConfigPath, err)
 	}
 
-	appType := tdns.AppTypeAgent
-	if role == "combiner" {
-		appType = tdns.AppTypeMPCombiner
-	}
-
 	runArgs := []string{subcommand}
 	if subcommand == "generate" {
 		output, _ := cmd.Flags().GetString("output")
@@ -86,7 +81,7 @@ func runKeysCommand(role string, cmd *cobra.Command, subcommand string, args []s
 		}
 	}
 
-	if err := tdns.RunKeysCmd(conf, appType, runArgs); err != nil {
+	if err := tdns.RunKeysCmd(conf, runArgs); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
