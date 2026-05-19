@@ -215,13 +215,13 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// Config files may omit trailing dots; wire protocol always uses FQDN.
 	conf.normalizeConfigIdentities()
 
-	// Validate multi-provider.role matches the application type
+	// Validate multi-provider.role matches the application type for
+	// tdns-side roles. Downstream packages (tdns-mp, tdns-nm, tdns-es)
+	// validate their own roles in their own config-validation paths.
 	if conf.MultiProvider != nil {
 		expectedRole := map[AppType]string{
-			AppTypeAuth: "signer",
-			//AppTypeCombiner:   "combiner",
-			AppTypeMPCombiner: "combiner",
-			AppTypeAgent:      "agent",
+			AppTypeAuth:  "signer",
+			AppTypeAgent: "agent",
 		}
 		if expected, ok := expectedRole[Globals.App.Type]; ok {
 			if conf.MultiProvider.Role != expected {
@@ -863,9 +863,13 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// because LeaderElectionManager doesn't exist until StartAgent runs.
 		// MP zone KEY publication is registered in tdns-mp's StartAgent.
 
+		// Non-zone-serving app types skip zone refresh. Everything
+		// else (Auth, Agent, downstream MP/NM/ES roles) queues each
+		// parsed zone for refresh.
 		switch Globals.App.Type {
-		case AppTypeAuth, AppTypeAgent, // AppTypeCombiner,
-			AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
+		case AppTypeImr, AppTypeCli, AppTypeReporter, AppTypeScanner, AppTypeKdc, AppTypeKrs, AppTypeEdgeSigner:
+			// skip — these app types don't serve zones
+		default:
 			if conf.Internal.RefreshZoneCh == nil {
 				lgConfig.Error("refresh channel is not configured, zones will not be refreshed, terminating")
 				return nil, nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")

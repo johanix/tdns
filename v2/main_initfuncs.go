@@ -101,9 +101,13 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			return fmt.Errorf("cannot determine default config file: Globals.App.Name is not set")
 		}
 	}
-	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeScanner, AppTypeReporter, AppTypeKdc, AppTypeKrs,
-		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
+	// Imr uses the default config file directly. Every other app
+	// type accepts flag-driven overrides. This inversion avoids
+	// enumerating AppType values defined in downstream packages
+	// (tdns-mp, tdns-nm, tdns-es).
+	if Globals.App.Type == AppTypeImr {
+		conf.Internal.CfgFile = defaultcfg
+	} else {
 		flag.StringVar(&conf.Internal.CfgFile, "config", defaultcfg, "config file path")
 		flag.BoolVarP(&Globals.Debug, "debug", "", false, "run in debug mode (may activate dangerous tests)")
 		flag.BoolVarP(&Globals.Verbose, "verbose", "v", false, "Verbose mode")
@@ -111,23 +115,20 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		flag.Usage = func() {
 			flag.PrintDefaults()
 		}
-	case AppTypeImr:
-		conf.Internal.CfgFile = defaultcfg
 	}
 	lgConfig.Debug("MainInit starting", "defaultcfg", defaultcfg, "cfgfile", conf.Internal.CfgFile)
-	switch Globals.App.Type {
-	case AppTypeAuth, AppTypeAgent, AppTypeImr, AppTypeScanner, AppTypeReporter, AppTypeCli, AppTypeKdc, AppTypeKrs,
-		AppTypeMPSigner, AppTypeMPAgent, AppTypeMPCombiner, AppTypeMPAuditor:
-		// Long-running daemons keep the startup banner. CLI prints it
-		// only when -v / --verbose is set; otherwise the banner clutters
-		// every short command invocation.
-		if Globals.App.Type != AppTypeCli || Globals.Verbose {
-			fmt.Printf("*** TDNS %s version %s mode of operation: %q (verbose: %t, debug: %t)\n",
-				Globals.App.Name, Globals.App.Version, AppTypeToString[Globals.App.Type], Globals.Verbose, Globals.Debug)
-		}
-	default:
-		return fmt.Errorf("*** TDNS %s: Error: unknown mode of operation: %q",
-			Globals.App.Name, Globals.App.Type)
+	// Defensive: catch an unset Globals.App.Type. Every binary's
+	// main() must set this before calling MainInit.
+	if Globals.App.Type == 0 {
+		return fmt.Errorf("*** TDNS %s: Error: Globals.App.Type not set",
+			Globals.App.Name)
+	}
+	// Long-running daemons keep the startup banner. CLI prints it
+	// only when -v / --verbose is set; otherwise the banner clutters
+	// every short command invocation.
+	if Globals.App.Type != AppTypeCli || Globals.Verbose {
+		fmt.Printf("*** TDNS %s version %s mode of operation: %q (verbose: %t, debug: %t)\n",
+			Globals.App.Name, Globals.App.Version, AppTypeToString[Globals.App.Type], Globals.Verbose, Globals.Debug)
 	}
 	err := conf.ParseConfig(false) // false = initial config, not reload
 	if err != nil {

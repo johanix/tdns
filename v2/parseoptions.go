@@ -331,14 +331,6 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			cleanoptions = append(cleanoptions, opt)
 			lg.Debug("catalog member auto-delete enabled", "zone", zname)
 
-		case OptMPManualApproval:
-			if !invokeOptionValidator(opt, conf, zname, zd, options) {
-				continue
-			}
-			options[opt] = true
-			cleanoptions = append(cleanoptions, opt)
-			lg.Debug("mp-manual-approval enabled", "zone", zname)
-
 		default:
 			lg.Warn("unknown zone option in switch, ignoring", "zone", zname, "option", ZoneOptionToString[opt])
 			if zd != nil {
