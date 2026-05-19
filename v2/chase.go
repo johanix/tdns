@@ -114,6 +114,17 @@ func (c *Chaser) Chase(qname string, qtype uint16) (*ChainResult, error) {
 	}
 	qname = dns.Fqdn(qname)
 	zones := zoneCutsFromRoot(qname) // root-first
+	// DS records live at the PARENT zone, not at qname's own zone. So
+	// for a DS leaf query, drop qname from the zone chain — the parent
+	// becomes the deepest validated zone, and the leaf RRset is then
+	// verified against that parent's DNSKEYs (whose ZSK signed the DS).
+	// Without this, the chaser would try to fetch DS for qname itself
+	// (a redundant second wire query to fetch what the leaf will get),
+	// and even on success would attempt leaf verification against the
+	// child zone's DNSKEYs — which never signed the DS.
+	if qtype == dns.TypeDS && len(zones) > 1 {
+		zones = zones[:len(zones)-1]
+	}
 	result := &ChainResult{Status: ChainStatusSecure}
 
 	for i, zone := range zones {
