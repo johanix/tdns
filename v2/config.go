@@ -52,11 +52,20 @@ type Config struct {
 	Zones          []ZoneConf                 `yaml:"zones"`
 	Templates      []ZoneConf                 `yaml:"templates"`
 	Kasp           KaspConf                   `yaml:"kasp" mapstructure:"kasp"`
+	Dnssec         DnssecConf                 `yaml:"dnssec" mapstructure:"dnssec"`
 	Keys           KeyConf
 	Db             DbConf
 	Registrars     map[string][]string
 	Log            LogConf
 	Internal       InternalConf
+}
+
+// DnssecConf holds DNSSEC-wide settings consumed by the signer and IMR.
+type DnssecConf struct {
+	// LargeAlgorithms lists DNSSEC algorithm numbers whose DNSKEY/RRSIG sizes
+	// are large for UDP. The IMR may query child DNSKEY over TCP when parent
+	// DS uses one; the signer warns if one signs the bulk of a zone.
+	LargeAlgorithms []uint8 `yaml:"large_algorithms" mapstructure:"large_algorithms"`
 }
 
 // KaspConf holds Key and Signing Policy parameters for the signer.
@@ -638,6 +647,9 @@ type InternalDnsConf struct {
 // MP state has moved to tdns-mp's own InternalMpConf.
 type InternalConf struct {
 	InternalDnsConf
+
+	// LargeAlgorithms is the derived lookup set from Dnssec.LargeAlgorithms.
+	LargeAlgorithms map[uint8]bool
 
 	// PostParseZonesHook is called after ParseZones completes during
 	// reload (SIGHUP or "config reload-zones"). Set by MP apps to

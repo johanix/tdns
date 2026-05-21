@@ -167,6 +167,11 @@ keybootstrap:
 #     value is 1h. No silent default — config parse fails closed if
 #     omitted.
 #
+# Algorithm numbers treated as "large" for IMR DNSKEY-over-TCP and signer warnings.
+# RSASHA512 (10) is a stand-in where ML-DSA-44 is unavailable.
+dnssec:
+   large_algorithms: [ 10 ]
+
 # Multiple policies may coexist; each zone references one.
 dnssecpolicies:
    # Static KSK, no automated rollover. Useful for zones whose operators
@@ -185,6 +190,22 @@ dnssecpolicies:
          ds:       14d
       # rollover: omitted → method: none (static keys)
       # clamping: omitted → disabled (no TTL clamping)
+
+   # Large KSK (RSASHA512) + small ZSK for UDP-friendly zone signatures.
+   large-ksk:
+      algorithm:  ECDSAP256SHA256
+      ksk:
+         algorithm:  RSASHA512
+         lifetime:   90d
+      zsk:
+         algorithm:  ECDSAP256SHA256
+         lifetime:   30d
+      csk:
+         lifetime:  none
+      sigvalidity:
+         default:  14d
+         dnskey:   30d
+         ds:       14d
 
    # Rapid-cadence policy with automated KSK rollover. Suitable for
    # testing / experimentation.

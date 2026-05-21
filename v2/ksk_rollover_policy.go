@@ -480,8 +480,11 @@ func parseParentAgent(policyName, raw string) (string, error) {
 // Used by the `auto-rollover validate` CLI to fold them into its
 // structured report alongside E5/E10/E11 results. The daemon path
 // calls warnDnssecPolicyCoupling (logger wrapper) at config load.
-func CollectDnssecPolicyCouplingWarnings(out *DnssecPolicy) []string {
+func CollectDnssecPolicyCouplingWarnings(out *DnssecPolicy, isLarge func(uint8) bool) []string {
 	var warnings []string
+	if msg := largeAlgBulkWarningMsg(out, isLarge); msg != "" {
+		warnings = append(warnings, msg)
+	}
 	kskL := time.Duration(out.KSK.Lifetime) * time.Second
 	if kskL > 0 && out.TTLS.DNSKEY > 0 {
 		maxTTL := time.Duration(out.TTLS.DNSKEY) * time.Second
@@ -503,7 +506,7 @@ func warnDnssecPolicyCoupling(policyName string, out *DnssecPolicy) {
 	if out.suppressLoadWarnings {
 		return
 	}
-	for _, w := range CollectDnssecPolicyCouplingWarnings(out) {
+	for _, w := range CollectDnssecPolicyCouplingWarnings(out, nil) {
 		lgConfig.Warn("dnssec policy: "+w, "policy", policyName)
 	}
 
@@ -550,9 +553,9 @@ func ParseDnssecPolicyConfQuiet(name string, dp *DnssecPolicyConf) (*DnssecPolic
 
 func parseDnssecPolicyConfImpl(name string, dp *DnssecPolicyConf, quiet bool) (*DnssecPolicy, error) {
 	dp.Name = name
-	alg := dns.StringToAlgorithm[strings.TrimSpace(strings.ToUpper(dp.Algorithm))]
-	if alg == 0 {
-		return nil, fmt.Errorf("policy %q: unknown algorithm %q", name, dp.Algorithm)
+	alg, kskAlg, zskAlg, err := resolvePolicyRoleAlgorithms(name, dp)
+	if err != nil {
+		return nil, err
 	}
 	kskLT, err := GenKeyLifetime(dp.KSK.Lifetime)
 	if err != nil {
@@ -567,11 +570,13 @@ func parseDnssecPolicyConfImpl(name string, dp *DnssecPolicyConf, quiet bool) (*
 		return nil, fmt.Errorf("policy %q: %w", name, err)
 	}
 	out := &DnssecPolicy{
-		Name:      name,
-		Algorithm: alg,
-		KSK:       kskLT,
-		ZSK:       zskLT,
-		CSK:       cskLT,
+		Name:         name,
+		Algorithm:    alg,
+		KSKAlgorithm: kskAlg,
+		ZSKAlgorithm: zskAlg,
+		KSK:          kskLT,
+		ZSK:          zskLT,
+		CSK:          cskLT,
 	}
 	if quiet {
 		// Mark the policy so FinishDnssecPolicy / warnDnssecPolicyCoupling
@@ -604,9 +609,9 @@ func ValidateDnssecPoliciesFromFile(path string) error {
 	var errs []error
 	for name, dp := range root.DnssecPolicies {
 		dp.Name = name
-		alg := dns.StringToAlgorithm[strings.TrimSpace(strings.ToUpper(dp.Algorithm))]
-		if alg == 0 {
-			errs = append(errs, fmt.Errorf("policy %q: unknown algorithm %q", name, dp.Algorithm))
+		alg, kskAlg, zskAlg, err := resolvePolicyRoleAlgorithms(name, &dp)
+		if err != nil {
+			errs = append(errs, err)
 			continue
 		}
 		kskLT, err := GenKeyLifetime(dp.KSK.Lifetime)
@@ -625,11 +630,13 @@ func ValidateDnssecPoliciesFromFile(path string) error {
 			continue
 		}
 		tmp := DnssecPolicy{
-			Name:      name,
-			Algorithm: alg,
-			KSK:       kskLT,
-			ZSK:       zskLT,
-			CSK:       cskLT,
+			Name:         name,
+			Algorithm:    alg,
+			KSKAlgorithm: kskAlg,
+			ZSKAlgorithm: zskAlg,
+			KSK:          kskLT,
+			ZSK:          zskLT,
+			CSK:          cskLT,
 		}
 		if err := FinishDnssecPolicy(name, &dp, &tmp); err != nil {
 			errs = append(errs, err)

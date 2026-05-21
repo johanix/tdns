@@ -28,13 +28,17 @@ const (
 	TransportDoT
 	TransportDoH
 	TransportDoQ
+	// TransportDo53TCP is an internal transport: plain DNS over TCP only.
+	// Not selectable via config; used when parent DS signals a large algorithm.
+	TransportDo53TCP
 )
 
 var TransportToString = map[Transport]string{
-	TransportDo53: "do53",
-	TransportDoT:  "dot",
-	TransportDoH:  "doh",
-	TransportDoQ:  "doq",
+	TransportDo53:    "do53",
+	TransportDoT:     "dot",
+	TransportDoH:     "doh",
+	TransportDoQ:     "doq",
+	TransportDo53TCP: "do53-tcp",
 }
 
 // StringToTransport converts a string transport name to Transport type
@@ -140,7 +144,7 @@ func NewDNSClient(transport Transport, port string, tlsConfig *tls.Config, opts 
 
 	// Initialize transport-specific configurations
 	switch transport {
-	case TransportDo53:
+	case TransportDo53, TransportDo53TCP:
 		client.DNSClientUDP = &dns.Client{Net: "udp", Timeout: client.Timeout}
 		client.DNSClientTCP = &dns.Client{Net: "tcp", Timeout: client.Timeout}
 	case TransportDoT:
@@ -193,7 +197,7 @@ func (c *DNSClient) Exchange(msg *dns.Msg, server string, debug bool) (*dns.Msg,
 	}
 
 	switch c.Transport {
-	case TransportDo53:
+	case TransportDo53, TransportDo53TCP:
 		if debug {
 			log.Printf("*** Do53 sending message to %s:%s opcode: %s qname: %s rrtype: %s",
 				server, c.Port,

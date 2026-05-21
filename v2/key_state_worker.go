@@ -251,12 +251,10 @@ func maintainStandbyKeys(conf *Config, kdb *KeyDB, standbyZskCount, standbyKskCo
 			continue
 		}
 
-		alg := zd.DnssecPolicy.Algorithm
-
-		maintainStandbyKeysForType(kdb, zoneName, alg, "ZSK", 256, standbyZskCount)
+		maintainStandbyKeysForType(kdb, zoneName, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", 256, standbyZskCount)
 
 		if standbyKskCount > 0 && (zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method == RolloverMethodNone) {
-			maintainStandbyKeysForType(kdb, zoneName, alg, "KSK", 257, standbyKskCount)
+			maintainStandbyKeysForType(kdb, zoneName, zd.DnssecPolicy.KSKAlgorithm, "KSK", 257, standbyKskCount)
 		}
 	}
 }

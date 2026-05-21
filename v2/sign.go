@@ -338,6 +338,14 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 		if hasRealZSK {
 			return dak, nil
 		}
+		if zd.DnssecPolicy != nil {
+			for _, zsk := range dak.ZSKs {
+				if zsk.DnskeyRR.Flags == 257 {
+					WarnLargeAlgKskReusedAsZsk(zd, zsk.DnskeyRR.Algorithm, Conf.IsLargeAlgorithm)
+					break
+				}
+			}
+		}
 		// If we only have KSK reused as CSK, we'll generate a real ZSK below
 	}
 
@@ -389,7 +397,7 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 	if len(dak.KSKs) == 0 {
 		// Invalidate cache before generating to ensure fresh data
 		delete(kdb.KeystoreDnskeyCache, zd.ZoneName+"+"+DnskeyStateActive)
-		pkc, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "KSK", nil)
+		pkc, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.KSKAlgorithm, "KSK", nil)
 		if err != nil {
 			return nil, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate KSK for zone %s: %v", zd.ZoneName, err)
 		}
@@ -397,7 +405,7 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 		// Bootstrap KSK landed straight in active. Register in
 		// RolloverKeyState so rolloverDue and the K-step clamp scheduler
 		// can find an active_at timestamp. No-op for non-rollover zones.
-		if err := RegisterBootstrapActiveKSK(kdb, zd.ZoneName, pkc.KeyId, zd.DnssecPolicy.Rollover.Method, zd.DnssecPolicy.Algorithm); err != nil {
+		if err := RegisterBootstrapActiveKSK(kdb, zd.ZoneName, pkc.KeyId, zd.DnssecPolicy.Rollover.Method, zd.DnssecPolicy.KSKAlgorithm); err != nil {
 			return nil, fmt.Errorf("EnsureActiveDnssecKeys: register bootstrap KSK for zone %s keyid %d: %w", zd.ZoneName, pkc.KeyId, err)
 		}
 		// Invalidate cache and re-fetch active keys after KSK generation
@@ -419,11 +427,12 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 	if realZSKCount == 0 {
 		// Invalidate cache before generating to ensure fresh data
 		delete(kdb.KeystoreDnskeyCache, zd.ZoneName+"+"+DnskeyStateActive)
-		_, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.Algorithm, "ZSK", nil)
+		_, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", nil)
 		if err != nil {
 			return nil, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate ZSK for zone %s: %v", zd.ZoneName, err)
 		}
 		lgSigner.Info("generated ZSK", "msg", msg)
+		WarnLargeAlgZoneSigningRole(zd, "ZSK", zd.DnssecPolicy.ZSKAlgorithm, Conf.IsLargeAlgorithm)
 		// Invalidate cache and re-fetch active keys after ZSK generation
 		dak, err = zd.refreshActiveDnssecKeys(kdb, "after ZSK generation")
 		if err != nil {
@@ -617,7 +626,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 		lgSigner.Warn("SignZone: persist max_observed_ttl", "zone", zd.ZoneName, "err", err)
 	}
 	if zd.DnssecPolicy != nil {
-		UpdateSigValidityFloor(zd, zd.DnssecPolicy, Conf.KaspPropagationDelay(), maxObservedTTL, true)
+		UpdateSigValidityFloor(zd, zd.DnssecPolicy, Conf.KaspPropagationDelay(), maxObservedTTL, true, Conf.IsLargeAlgorithm)
 	}
 
 	return newrrsigs, nil

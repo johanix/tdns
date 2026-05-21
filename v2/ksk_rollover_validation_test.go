@@ -206,7 +206,7 @@ func TestUpdateSigValidityFloorConfig(t *testing.T) {
 	}
 	zd := &ZoneData{ZoneName: "test.example."}
 	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
-	UpdateSigValidityFloor(zd, pol, prop, 0, false)
+	UpdateSigValidityFloor(zd, pol, prop, 0, false, nil)
 	if zd.HasError(DnssecError) || zd.HasError(DnssecPolicyWarning) {
 		t.Fatalf("no TTL ceilings: expected no floor errors, got dnssec=%v warn=%v",
 			zd.HasError(DnssecError), zd.HasError(DnssecPolicyWarning))
@@ -216,7 +216,7 @@ func TestUpdateSigValidityFloorConfig(t *testing.T) {
 	pol.SigValidity.Default = 3600 // 1h, H=2h with prop=1h → 2h ≤ 2×H
 	zd2 := &ZoneData{ZoneName: "tight.example."}
 	zd2.Options = map[ZoneOption]bool{OptOnlineSigning: true}
-	UpdateSigValidityFloor(zd2, pol, prop, 0, false)
+	UpdateSigValidityFloor(zd2, pol, prop, 0, false, nil)
 	if !zd2.HasError(DnssecError) {
 		t.Fatal("expected hard floor error for short default validity")
 	}
@@ -233,13 +233,13 @@ func TestUpdateSigValidityFloorRuntime(t *testing.T) {
 	}
 	zd := &ZoneData{ZoneName: "test.example."}
 	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
-	UpdateSigValidityFloor(zd, pol, prop, 300, true)
+	UpdateSigValidityFloor(zd, pol, prop, 300, true, nil)
 	if zd.HasError(DnssecError) {
 		t.Fatalf("runtime floor should pass: %s", zd.ErrorMsg)
 	}
 
 	pol.SigValidity.Default = 1800 // 30m
-	UpdateSigValidityFloor(zd, pol, prop, 3600, true)
+	UpdateSigValidityFloor(zd, pol, prop, 3600, true, nil)
 	if !zd.HasError(DnssecError) {
 		t.Fatal("expected runtime hard error when validity too short for observed TTL")
 	}

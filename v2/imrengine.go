@@ -54,6 +54,12 @@ type Imr struct {
 	// see W9.
 	TransportSignalDiscovery *cache.DiscoveryTracker
 	TLSADiscovery            *cache.DiscoveryTracker
+	// largeAlgs is copied from conf.Internal.LargeAlgorithms at init.
+	largeAlgs map[uint8]bool
+}
+
+func (imr *Imr) isLargeAlgorithm(alg uint8) bool {
+	return imr.largeAlgs != nil && imr.largeAlgs[alg]
 }
 
 type ImrRequest struct {
@@ -148,6 +154,7 @@ func (conf *Config) InitImrEngine(quiet bool) error {
 			conf.Imr.Tuning.Discovery.RetryAfterFailure,
 			conf.Imr.Tuning.Discovery.MaxFailures,
 		),
+		largeAlgs: conf.Internal.LargeAlgorithms,
 	}
 
 	if conf.Imr.Logging.Enabled {

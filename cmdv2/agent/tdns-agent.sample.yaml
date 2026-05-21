@@ -162,6 +162,9 @@ keybootstrap:
       interval:		60	# seconds between lookups
       nameservers:	all	# one | all
 
+dnssec:
+   large_algorithms: [ 10 ]   # RSASHA512 stand-in for large KSK
+
 dnssecpolicies:
    default:
       algorithm:  ED25519
@@ -169,6 +172,21 @@ dnssecpolicies:
          lifetime:  forever
       zsk:
          lifetime:  forever
+      csk:
+         lifetime:  none
+      sigvalidity:
+         default:  14d
+         dnskey:   30d
+         ds:       14d
+
+   large-ksk:
+      algorithm:  ECDSAP256SHA256
+      ksk:
+         algorithm:  RSASHA512
+         lifetime:   90d
+      zsk:
+         algorithm:  ECDSAP256SHA256
+         lifetime:   30d
       csk:
          lifetime:  none
       sigvalidity:

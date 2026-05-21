@@ -1099,6 +1099,8 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	}
 	// if Globals.Debug { fmt.Printf("IterativeDNSQuery: message after AddOTSToMessage: %s", m.String()) }
 
+	forceTCP := imr.dnskeyQueryForceTCP(qname, qtype)
+
 	// If PR flag is set, verify at least one server has encrypted transports available
 	if requireEncrypted {
 		hasEncrypted := false
@@ -1173,7 +1175,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					addr, nsname, core.TransportToString[transport], server.Alpn, qname, dns.TypeToString[qtype])
 			}
 
-			r, _, err := imr.tryServer(ctx, server, addr, transport, m, qname, qtype)
+			r, _, err := imr.tryServer(ctx, server, addr, transport, m, qname, qtype, forceTCP)
 			if err != nil {
 				lastErr = err
 				if imr.Cache.Verbose {
@@ -1834,21 +1836,25 @@ func buildQuery(qname string, qtype uint16) (*dns.Msg, error) {
 // tryServer executes one query attempt for an explicit (server, addr,
 // transport) tuple selected upstream by prioritizeServers. It records the
 // outcome against the server's per-(addr, transport) backoff map.
-func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport, m *dns.Msg, qname string, qtype uint16) (*dns.Msg, time.Duration, error) {
+func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport, m *dns.Msg, qname string, qtype uint16, forceTCP bool) (*dns.Msg, time.Duration, error) {
 	select {
 	case <-ctx.Done():
 		return nil, 0, ctx.Err()
 	default:
 	}
 
-	c, exist := imr.Cache.DNSClient[t]
-	if !exist {
-		return nil, 0, fmt.Errorf("no DNS client for transport %d exists", t)
+	eff := t
+	if forceTCP && t == core.TransportDo53 {
+		eff = core.TransportDo53TCP
 	}
-	server.IncrementTransportCounter(t)
+	c, exist := imr.Cache.DNSClient[eff]
+	if !exist {
+		return nil, 0, fmt.Errorf("no DNS client for transport %d exists", eff)
+	}
+	server.IncrementTransportCounter(eff)
 	if Globals.Debug {
 		lgDns.Debug("*** tryServer: calling c.Exchange",
-			"transport", core.TransportToString[t],
+			"transport", core.TransportToString[eff],
 			"server", server.Name,
 			"addrs", server.Addrs,
 			"addr", addr,
@@ -1860,14 +1866,14 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 			"query", qname,
 			"rrtype", dns.TypeToString[qtype],
 			"name", server.Name,
-			"transport", core.TransportToString[t],
+			"transport", core.TransportToString[eff],
 			"doq", server.TransportWeights[core.TransportDoQ],
 			"dot", server.TransportWeights[core.TransportDoT],
 			"doh", server.TransportWeights[core.TransportDoH],
 			"do53", server.TransportWeights[core.TransportDo53])
 	}
 	for _, hook := range getImrOutboundQueryHooks() {
-		if err := hook(ctx, qname, qtype, server.Name, addr, t); err != nil {
+		if err := hook(ctx, qname, qtype, server.Name, addr, eff); err != nil {
 			return nil, 0, err
 		}
 	}
@@ -1890,18 +1896,18 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 			"qname", qname,
 			"qtype", dns.TypeToString[qtype],
 			"addr", addr,
-			"transport", core.TransportToString[t],
+			"transport", core.TransportToString[eff],
 			"error", err)
-		server.RecordAddressFailure(addr, t, err)
+		server.RecordAddressFailure(addr, eff, err)
 		// Penalty RTT: record the full elapsed time so a slow-failing path
 		// naturally sorts to the bottom of prioritizeServers even after the
 		// backoff lifts.
-		server.RecordRTT(addr, t, rtt)
+		server.RecordRTT(addr, eff, rtt)
 		return nil, rtt, err
 	}
 	if r != nil {
-		server.RecordAddressSuccess(addr, t)
-		server.RecordRTT(addr, t, rtt)
+		server.RecordAddressSuccess(addr, eff)
+		server.RecordRTT(addr, eff, rtt)
 	} else if Globals.Debug {
 		lgDns.Debug("*** tryServer: query returned no response",
 			"qname", qname,
