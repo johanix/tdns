@@ -247,7 +247,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		// push phase if the target DS RRset differs from what we have
 		// submitted. Arming is the single advance on this tick — the
 		// actual push happens on the next tick under pending-parent-push.
-		ds, low, high, idxOK, err := ComputeTargetDSSetForZone(kdb, zone, uint8(dns.SHA256))
+		ds, low, high, idxOK, err := ComputeTargetDSSetForZone(kdb, zone, uint8(dns.SHA256), pol)
 		if err != nil {
 			return err
 		}
@@ -331,7 +331,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 			lgSigner.Warn("rollover: parent-agent unset, cannot observe", "zone", zone)
 			return nil
 		}
-		expected, low, high, idxOK, err := ComputeTargetDSSetForZone(kdb, zone, uint8(dns.SHA256))
+		expected, low, high, idxOK, err := ComputeTargetDSSetForZone(kdb, zone, uint8(dns.SHA256), pol)
 		if err != nil {
 			return err
 		}
@@ -439,7 +439,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		//      shared parent). Probe failures keep the engine in this
 		//      phase; we do NOT enter pending-parent-push as a fresh
 		//      attempt group.
-		expected, low, high, idxOK, err := ComputeTargetDSSetForZone(kdb, zone, uint8(dns.SHA256))
+		expected, low, high, idxOK, err := ComputeTargetDSSetForZone(kdb, zone, uint8(dns.SHA256), pol)
 		if err != nil {
 			return err
 		}

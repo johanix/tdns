@@ -198,13 +198,13 @@ func TestEvaluateRolloverPolicyInvariantsSeveritySplit(t *testing.T) {
 	pol := &DnssecPolicy{}
 	pol.Rollover.Method = RolloverMethodMultiDS
 	pol.Rollover.NumDS = 2
-	pol.KSK.Lifetime = 21 * 60    // 21m
-	pol.KSK.SigValidity = 60 * 60 // 1h
+	pol.KSK.Lifetime = 21 * 60       // 21m
+	pol.SigValidity.DNSKEY = 60 * 60 // 1h
 	pol.Rollover.DsPublishDelay = 5 * time.Minute
 	pol.Clamping.Enabled = true
 	pol.Clamping.Margin = 1 * time.Minute // < min(5m dnskey, 1h sigvalidity) → E5 fail
 	pol.TTLS.DNSKEY = 300                 // 5m
-	pol.TTLS.DS = 600                     // 10m so E10/E11 can run
+	pol.TTLS.ParentDS = 600               // 10m so E10/E11 can run
 
 	zd := &ZoneData{ZoneName: "test.example."}
 	EvaluateRolloverPolicyInvariants(zd, pol)
@@ -233,13 +233,13 @@ func TestEvaluateRolloverPolicyInvariantsPreservesStateWhenDSTTLUnknown(t *testi
 	pol.Rollover.Method = RolloverMethodMultiDS
 	pol.Rollover.NumDS = 2
 	pol.KSK.Lifetime = 60 // 1m, deliberately tight to fail E10
-	pol.KSK.SigValidity = 60 * 60
+	pol.SigValidity.DNSKEY = 60 * 60
 	pol.Rollover.DsPublishDelay = 5 * time.Minute
 	pol.Clamping.Enabled = true
 	pol.Clamping.Margin = 5 * time.Minute
 	pol.TTLS.DNSKEY = 300
 	pol.TTLS.MaxServed = 300
-	pol.TTLS.DS = 600 // Known DS TTL — first eval can run E10.
+	pol.TTLS.ParentDS = 600 // Known parent DS TTL — first eval can run E10.
 
 	zd := &ZoneData{ZoneName: "test.example."}
 	EvaluateRolloverPolicyInvariants(zd, pol)
@@ -255,7 +255,7 @@ func TestEvaluateRolloverPolicyInvariantsPreservesStateWhenDSTTLUnknown(t *testi
 
 	// Now simulate parent observation gone — clear the DS override
 	// AND the observed value. Re-evaluate.
-	pol.TTLS.DS = 0
+	pol.TTLS.ParentDS = 0
 	zd.ParentDSTTLObserved = 0
 	EvaluateRolloverPolicyInvariants(zd, pol)
 	if !zd.HasError(RolloverPolicyViolation) {

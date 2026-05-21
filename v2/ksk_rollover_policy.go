@@ -242,6 +242,17 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 		out.Clamping.Margin = 0
 	}
 
+	if s := strings.TrimSpace(conf.Ttls.ParentDS); s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("dnssec policy %q: ttls.parent-ds: %w", policyName, err)
+		}
+		if d < 0 {
+			return fmt.Errorf("dnssec policy %q: ttls.parent-ds must be non-negative", policyName)
+		}
+		out.TTLS.ParentDS = uint32(d.Seconds())
+	}
+
 	if s := strings.TrimSpace(conf.Ttls.DS); s != "" {
 		d, err := time.ParseDuration(s)
 		if err != nil {
@@ -252,6 +263,12 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 		}
 		out.TTLS.DS = uint32(d.Seconds())
 	}
+
+	sv, err := parsePolicySigValidity(policyName, conf.SigValidity)
+	if err != nil {
+		return err
+	}
+	out.SigValidity = sv
 
 	// max_served must be parsed AFTER clamping so the cross-check against
 	// clamping.margin sees the resolved margin value.
@@ -283,6 +300,61 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 
 	warnDnssecPolicyCoupling(policyName, out)
 	return nil
+}
+
+func parsePolicySigValidity(policyName string, conf DnssecPolicySigValidityConf) (PolicySigValidity, error) {
+	defaultStr := strings.TrimSpace(conf.Default)
+	if defaultStr == "" {
+		return PolicySigValidity{}, fmt.Errorf("dnssec policy %q: sigvalidity.default is required", policyName)
+	}
+	defaultDur, err := time.ParseDuration(defaultStr)
+	if err != nil {
+		return PolicySigValidity{}, fmt.Errorf("dnssec policy %q: sigvalidity.default: %w", policyName, err)
+	}
+	if defaultDur <= 0 {
+		return PolicySigValidity{}, fmt.Errorf("dnssec policy %q: sigvalidity.default must be positive", policyName)
+	}
+	out := PolicySigValidity{Default: uint32(defaultDur.Seconds())}
+
+	dnskeyStr := strings.TrimSpace(conf.Dnskey)
+	if dnskeyStr == "" {
+		out.DNSKEY = out.Default
+	} else {
+		d, err := time.ParseDuration(dnskeyStr)
+		if err != nil {
+			return PolicySigValidity{}, fmt.Errorf("dnssec policy %q: sigvalidity.dnskey: %w", policyName, err)
+		}
+		if d <= 0 {
+			return PolicySigValidity{}, fmt.Errorf("dnssec policy %q: sigvalidity.dnskey must be positive", policyName)
+		}
+		out.DNSKEY = uint32(d.Seconds())
+	}
+
+	dsStr := strings.TrimSpace(conf.Ds)
+	if dsStr == "" {
+		out.DS = out.Default
+	} else {
+		d, err := time.ParseDuration(dsStr)
+		if err != nil {
+			return PolicySigValidity{}, fmt.Errorf("dnssec policy %q: sigvalidity.ds: %w", policyName, err)
+		}
+		if d <= 0 {
+			return PolicySigValidity{}, fmt.Errorf("dnssec policy %q: sigvalidity.ds must be positive", policyName)
+		}
+		out.DS = uint32(d.Seconds())
+	}
+	return out, nil
+}
+
+// applyChildDSFallbackTTL sets hdr.Ttl from policy ttls.ds when the child
+// has not expressed a TTL (zero header). Child-driven TTLs are never changed.
+func applyChildDSFallbackTTL(hdr *dns.RR_Header, pol *DnssecPolicy) {
+	if hdr == nil || hdr.Ttl != 0 || pol == nil {
+		return
+	}
+	if pol.TTLS.DS > 0 {
+		hdr.Ttl = pol.TTLS.DS
+	}
 }
 
 func parseRolloverMethod(s string) (RolloverMethod, error) {
@@ -485,9 +557,9 @@ func parseDnssecPolicyConfImpl(name string, dp *DnssecPolicyConf, quiet bool) (*
 	out := &DnssecPolicy{
 		Name:      name,
 		Algorithm: alg,
-		KSK:       GenKeyLifetime(dp.KSK.Lifetime, dp.KSK.SigValidity),
-		ZSK:       GenKeyLifetime(dp.ZSK.Lifetime, dp.ZSK.SigValidity),
-		CSK:       GenKeyLifetime(dp.CSK.Lifetime, dp.CSK.SigValidity),
+		KSK:       GenKeyLifetime(dp.KSK.Lifetime),
+		ZSK:       GenKeyLifetime(dp.ZSK.Lifetime),
+		CSK:       GenKeyLifetime(dp.CSK.Lifetime),
 	}
 	if quiet {
 		// Mark the policy so FinishDnssecPolicy / warnDnssecPolicyCoupling
@@ -528,9 +600,9 @@ func ValidateDnssecPoliciesFromFile(path string) error {
 		tmp := DnssecPolicy{
 			Name:      name,
 			Algorithm: alg,
-			KSK:       GenKeyLifetime(dp.KSK.Lifetime, dp.KSK.SigValidity),
-			ZSK:       GenKeyLifetime(dp.ZSK.Lifetime, dp.ZSK.SigValidity),
-			CSK:       GenKeyLifetime(dp.CSK.Lifetime, dp.CSK.SigValidity),
+			KSK:       GenKeyLifetime(dp.KSK.Lifetime),
+			ZSK:       GenKeyLifetime(dp.ZSK.Lifetime),
+			CSK:       GenKeyLifetime(dp.CSK.Lifetime),
 		}
 		if err := FinishDnssecPolicy(name, &dp, &tmp); err != nil {
 			errs = append(errs, err)

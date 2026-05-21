@@ -164,28 +164,30 @@ keybootstrap:
 
 dnssecpolicies:
    default:
-      algorithm:        ED25519
+      algorithm:  ED25519
       ksk:
-         lifetime:      forever
-         sigvalidity:   168h    # 24*7h = 1 week
+         lifetime:  forever
       zsk:
-         lifetime:      forever
-         sigvalidity:   2h
+         lifetime:  forever
       csk:
-         lifetime:      none
-         sigvalidity:   168h
+         lifetime:  none
+      sigvalidity:
+         default:  14d
+         dnskey:   30d
+         ds:       14d
 
    fastroll:
-      algorithm:        ED25519
+      algorithm:  ED25519
       ksk:
-         lifetime:      48h
-         sigvalidity:   5h
+         lifetime:  48h
       zsk:
-         lifetime:      12h
-         sigvalidity:   2h
+         lifetime:  12h
       csk:
-         lifetime:      none
-         sigvalidity:   168h
+         lifetime:  none
+      sigvalidity:
+         default:  14d
+         dnskey:   30d
+         ds:       14d
 
 db:
    file:		/var/tmp/tdns-agent.db

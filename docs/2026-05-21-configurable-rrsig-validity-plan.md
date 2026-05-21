@@ -293,7 +293,7 @@ numbers during implementation against the default policy's own TTLs.
 1. **Config/struct reshape:** move sig-validity to
    `default/dnskey/ds`; parse + resolve. `ttls.ds` → `ttls.parent-ds`
    rename + new `ttls.ds`. Drop per-keytype `SigValidity`. Update the
-   default policy + samples (new safe defaults).
+   default policy + samples (new safe defaults). **DONE** (2026-05-22)
 2. **`DnssecPolicyWarning` error type** in `enums.go` (non-impacting;
    reused later by plan #3's A.4).
 3. **Floor validation:** the universal config-load check with the

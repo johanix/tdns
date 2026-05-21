@@ -17,14 +17,14 @@ import (
 //
 // Inputs the function reads:
 //
-//   - pol.KSK.Lifetime, KSK.SigValidity
+//   - pol.KSK.Lifetime, SigValidity.DNSKEY
 //   - pol.Rollover.NumDS
 //   - pol.Rollover.DsPublishDelay (proxy for parent_prop, per §4.9)
 //   - pol.Clamping.{Enabled, Margin}
 //   - pol.TTLS.{DNSKEY, MaxServed, DS}
 //   - zd.ParentDSTTLObserved
 //
-// Behaviour when DS_TTL is not yet known (pol.TTLS.DS == 0 AND
+// Behaviour when DS_TTL is not yet known (pol.TTLS.ParentDS == 0 AND
 // zd.ParentDSTTLObserved == 0): E10/E11 are deferred (no error
 // raised, but no clearance either if E10/E11 were the active
 // condition). E5 is checked unconditionally — it does not depend on
@@ -44,7 +44,7 @@ func EvaluateRolloverPolicyInvariants(zd *ZoneData, pol *DnssecPolicy) {
 	//
 	// E5 is config-only (no DS_TTL needed); E10/E11 require a
 	// resolved DS_TTL. When DS_TTL is unknown (parent unreachable
-	// at zone init, no ttls.ds override, no prior observation),
+	// at zone init, no ttls.parent-ds override, no prior observation),
 	// we can only freshly evaluate E5 — so we must NOT clobber any
 	// prior E10/E11 state. Strategy:
 	//
@@ -98,13 +98,13 @@ func EvaluateRolloverPolicyInvariants(zd *ZoneData, pol *DnssecPolicy) {
 }
 
 // resolveDSTTL returns the DS TTL the engine should use for E10/E11.
-// Override (pol.TTLS.DS) wins over observation (zd.ParentDSTTLObserved)
+// Override (pol.TTLS.ParentDS) wins over observation (zd.ParentDSTTLObserved)
 // when both are set: the operator may have explicit knowledge that the
 // observation doesn't capture (e.g., parent's DS RRset cached behind
 // a CDN with a shorter TTL than the authoritative answer).
 func resolveDSTTL(zd *ZoneData, pol *DnssecPolicy) (time.Duration, bool) {
-	if pol.TTLS.DS > 0 {
-		return time.Duration(pol.TTLS.DS) * time.Second, true
+	if pol.TTLS.ParentDS > 0 {
+		return time.Duration(pol.TTLS.ParentDS) * time.Second, true
 	}
 	if zd != nil && zd.ParentDSTTLObserved > 0 {
 		return time.Duration(zd.ParentDSTTLObserved) * time.Second, true
@@ -131,7 +131,7 @@ func CheckE5(pol *DnssecPolicy) InvariantResult                       { return c
 func CheckE10(pol *DnssecPolicy, dsTTL time.Duration) InvariantResult { return checkE10(pol, dsTTL) }
 func CheckE11(pol *DnssecPolicy, dsTTL time.Duration) InvariantResult { return checkE11(pol, dsTTL) }
 
-// checkE5: retirement_period ≥ min(DNSKEY_TTL, KSK.SigValidity), per
+// checkE5: retirement_period ≥ min(DNSKEY_TTL, SigValidity.DNSKEY), per
 // spec §4.5.1. DNSKEY_TTL here is the **served** TTL (E13 form,
 // min(ttls.dnskey, ttls.max_served)), NOT the operator-configured
 // ttls.dnskey alone — validators can only cache DNSKEY for as long
@@ -156,7 +156,7 @@ func checkE5(pol *DnssecPolicy) InvariantResult {
 		return InvariantResult{}
 	}
 	dnskeyTTL := configuredServedDnskeyTTL(pol)
-	sigVal := time.Duration(pol.KSK.SigValidity) * time.Second
+	sigVal := time.Duration(pol.SigValidity.DNSKEY) * time.Second
 	if dnskeyTTL == 0 && sigVal == 0 {
 		return InvariantResult{}
 	}
@@ -245,7 +245,7 @@ func checkE10(pol *DnssecPolicy, dsTTL time.Duration) InvariantResult {
 			"(%s = %s + %s + %s + %s); parent DS replacement too late before next rollover",
 			available, n-1, kskLifetime,
 			required, retirement, parentProp, dsTTL, standbyTime),
-		Suggestion: fmt.Sprintf("Raise rollover.num-ds to ≥ %d, OR raise ksk.lifetime, OR lower clamping.margin/rollover.ds-publish-delay/ttls.ds/rollover.standby-time.",
+		Suggestion: fmt.Sprintf("Raise rollover.num-ds to ≥ %d, OR raise ksk.lifetime, OR lower clamping.margin/rollover.ds-publish-delay/ttls.parent-ds/rollover.standby-time.",
 			requiredN),
 	}
 }

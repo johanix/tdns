@@ -57,7 +57,7 @@ the YAML's zones: block (when --zone matches a configured zone).
 
 DS_TTL handling: the runtime engine uses the parent's observed DS
 RRset TTL. validate doesn't have that observation, so it uses the
-ttls.ds policy override if set, OR --parent-ds-ttl <duration> if
+ttls.parent-ds policy override if set, OR --parent-ds-ttl <duration> if
 supplied. Without either, E10/E11 are skipped (and the report says
 so).`,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -117,11 +117,11 @@ so).`,
 				}
 				dsTTL = d
 				dsTTLSrc = fmt.Sprintf("--parent-ds-ttl %s", parentDSTTL)
-			case pol.TTLS.DS > 0:
-				dsTTL = time.Duration(pol.TTLS.DS) * time.Second
-				dsTTLSrc = fmt.Sprintf("ttls.ds = %s (policy override)", dsTTL)
+			case pol.TTLS.ParentDS > 0:
+				dsTTL = time.Duration(pol.TTLS.ParentDS) * time.Second
+				dsTTLSrc = fmt.Sprintf("ttls.parent-ds = %s (policy override)", dsTTL)
 			default:
-				dsTTLSrc = "(unknown — no ttls.ds in policy and no --parent-ds-ttl supplied; E10/E11 skipped)"
+				dsTTLSrc = "(unknown — no ttls.parent-ds in policy and no --parent-ds-ttl supplied; E10/E11 skipped)"
 			}
 
 			renderValidateReport(cfgPath, z, polName, pol, dsTTL, dsTTLSrc)
@@ -130,7 +130,7 @@ so).`,
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
 	c.Flags().StringVar(&serverConfig, "serverconfig", "", "Read this YAML file instead of asking the daemon (offline)")
 	c.Flags().StringVar(&policyName, "policy", "", "Override the dnssecpolicy name to validate (offline mode only)")
-	c.Flags().StringVar(&parentDSTTL, "parent-ds-ttl", "", "Hypothetical DS RRset TTL (e.g. 1h) for E10/E11; overrides ttls.ds")
+	c.Flags().StringVar(&parentDSTTL, "parent-ds-ttl", "", "Hypothetical parent DS RRset TTL (e.g. 1h) for E10/E11; overrides ttls.parent-ds")
 	_ = c.MarkFlagRequired("zone")
 	return c
 }
@@ -209,15 +209,19 @@ func loadPolicyFromYAMLFile(path, zone, policyName string) (*tdns.DnssecPolicy, 
 func renderValidateReport(cfgPath, zone, policyName string, pol *tdns.DnssecPolicy, dsTTL time.Duration, dsTTLSrc string) {
 	fmt.Printf("Zone:    %s\n", zone)
 	fmt.Printf("Policy:  %s  (from %s)\n", policyName, cfgPath)
-	fmt.Printf("Method:  %s, num-ds: %d, ksk.lifetime: %s, ksk.sig-validity: %s\n",
+	fmt.Printf("Method:  %s, num-ds: %d, ksk.lifetime: %s\n",
 		rolloverMethodString(pol.Rollover.Method),
 		pol.Rollover.NumDS,
-		(time.Duration(pol.KSK.Lifetime) * time.Second).String(),
-		(time.Duration(pol.KSK.SigValidity) * time.Second).String())
+		(time.Duration(pol.KSK.Lifetime) * time.Second).String())
+	fmt.Printf("SigValidity: default=%s dnskey=%s ds=%s\n",
+		(time.Duration(pol.SigValidity.Default) * time.Second).String(),
+		(time.Duration(pol.SigValidity.DNSKEY) * time.Second).String(),
+		(time.Duration(pol.SigValidity.DS) * time.Second).String())
 	fmt.Printf("Clamping: enabled=%t margin=%s\n", pol.Clamping.Enabled, pol.Clamping.Margin)
-	fmt.Printf("TTLs:    dnskey=%ss max_served=%ss ds(override)=%ss\n",
+	fmt.Printf("TTLs:    dnskey=%ss max_served=%ss parent-ds(override)=%ss child-ds(fallback)=%ss\n",
 		fmt.Sprintf("%d", pol.TTLS.DNSKEY),
 		fmt.Sprintf("%d", pol.TTLS.MaxServed),
+		fmt.Sprintf("%d", pol.TTLS.ParentDS),
 		fmt.Sprintf("%d", pol.TTLS.DS))
 	fmt.Printf("Cadence: ds-publish-delay=%s scheme-pref=%s parent-cds-poll-estimate=%s standby-time=%s\n",
 		pol.Rollover.DsPublishDelay,

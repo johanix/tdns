@@ -139,7 +139,7 @@ type ZoneData struct {
 	// ParentDSTTLObserved is the most recent TTL observed on the parent's
 	// DS RRset (seconds). Refreshed by every successful QueryParentAgentDS
 	// call. Zero means "not yet observed" — the E10 cache-flush invariant
-	// check defers until either this value or DnssecPolicy.TTLS.DS is set.
+	// check defers until either this value or DnssecPolicy.TTLS.ParentDS is set.
 	ParentDSTTLObserved uint32
 	TransportSignal     *core.RRset // transport signal RRset (SVCB or TSYNC)
 	AddTransportSignal  bool        // whether to attach TransportSignal in responses
@@ -306,14 +306,25 @@ type DnssecPolicyRolloverConf struct {
 type DnssecPolicyTtlsConf struct {
 	DNSKEY    string `yaml:"dnskey" mapstructure:"dnskey"`
 	MaxServed string `yaml:"max_served" mapstructure:"max_served"`
-	// DS is an optional override for the parent's DS RRset TTL when the
-	// engine cannot observe it (parent unreachable at zone init, testbed
-	// determinism, registries that gate DS queries). Used by the E10
-	// cache-flush invariant check: (N − 1) × KSK.Lifetime ≥
+	// ParentDS is an optional override for the parent's DS RRset TTL when
+	// the engine cannot observe it (parent unreachable at zone init,
+	// testbed determinism, registries that gate DS queries). Used by the
+	// E10 cache-flush invariant check: (N − 1) × KSK.Lifetime ≥
 	// retirement_period + parent_prop + DS_TTL. When unset, the engine
 	// defers E10 validation until the first successful
 	// QueryParentAgentDS observation supplies the live TTL.
+	ParentDS string `yaml:"parent-ds" mapstructure:"parent-ds"`
+	// DS is the fallback TTL for DS RRsets this zone publishes at its
+	// children's secure delegations when the child has not expressed a
+	// TTL (CDS / DNS UPDATE). Child-driven TTLs are never overridden.
 	DS string `yaml:"ds" mapstructure:"ds"`
+}
+
+// DnssecPolicySigValidityConf is the YAML `sigvalidity:` subtree.
+type DnssecPolicySigValidityConf struct {
+	Default string `yaml:"default" mapstructure:"default"`
+	Dnskey  string `yaml:"dnskey" mapstructure:"dnskey"`
+	Ds      string `yaml:"ds" mapstructure:"ds"`
 }
 
 // DnssecPolicyClampingConf is the YAML `clamping:` subtree under a DNSSEC policy.
@@ -329,17 +340,16 @@ type DnssecPolicyConf struct {
 	Mode      string `yaml:"mode" mapstructure:"mode"`
 
 	KSK struct {
-		Lifetime    string
-		SigValidity string
+		Lifetime string
 	}
 	ZSK struct {
-		Lifetime    string
-		SigValidity string
+		Lifetime string
 	}
 	CSK struct {
-		Lifetime    string
-		SigValidity string
+		Lifetime string
 	}
+
+	SigValidity DnssecPolicySigValidityConf `yaml:"sigvalidity" mapstructure:"sigvalidity"`
 
 	Rollover DnssecPolicyRolloverConf `yaml:"rollover" mapstructure:"rollover"`
 	Ttls     DnssecPolicyTtlsConf     `yaml:"ttls" mapstructure:"ttls"`
@@ -347,8 +357,14 @@ type DnssecPolicyConf struct {
 }
 
 type KeyLifetime struct {
-	Lifetime    uint32
-	SigValidity uint32
+	Lifetime uint32
+}
+
+// PolicySigValidity holds resolved RRSIG validity periods (seconds).
+type PolicySigValidity struct {
+	Default uint32
+	DNSKEY  uint32
+	DS      uint32
 }
 
 // DnssecPolicy is what is actually used; it is created from the corresponding DnssecPolicyConf
@@ -360,6 +376,8 @@ type DnssecPolicy struct {
 	KSK KeyLifetime
 	ZSK KeyLifetime
 	CSK KeyLifetime
+
+	SigValidity PolicySigValidity
 
 	Rollover RolloverPolicy
 	TTLS     DnssecPolicyTTLS
@@ -382,10 +400,14 @@ type DnssecPolicyTTLS struct {
 	// the operator can't directly edit (e.g. inbound zone transfers).
 	// Zero means no ceiling. Validation: must be >= 60s when set.
 	MaxServed uint32
-	// DS is the operator-provided override for the parent's DS RRset TTL.
-	// Zero means "observe at runtime" — the engine queries the parent
-	// agent and stores the observed TTL on zd.ParentDSTTLObserved. Used
-	// by the E10 invariant check.
+	// ParentDS is the operator-provided override for the parent's DS RRset
+	// TTL. Zero means "observe at runtime" — the engine queries the parent
+	// agent and stores the observed TTL on zd.ParentDSTTLObserved. Used by
+	// the E10 invariant check.
+	ParentDS uint32
+	// DS is the fallback TTL for child DS RRsets when the child has not
+	// expressed a TTL. Zero means no fallback (TTL may remain 0 until set
+	// elsewhere). Bounds sigvalidity.ds at config-load time.
 	DS uint32
 }
 

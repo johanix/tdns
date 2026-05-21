@@ -201,7 +201,7 @@ Use --dry-run to print the DS set and the UPDATE without sending.`,
 			// documented above.
 
 			if dryRun {
-				dsSet, low, high, idxOK, err := tdns.ComputeTargetDSSetForZone(kdb, z, uint8(dns.SHA256))
+				dsSet, low, high, idxOK, err := tdns.ComputeTargetDSSetForZone(kdb, z, uint8(dns.SHA256), nil)
 				if err != nil {
 					log.Fatalf("compute DS: %v", err)
 				}
@@ -304,7 +304,7 @@ or 2s / 60s / 1h when those are unset.
 				log.Fatal("parent-agent not set: configure rollover.parent-agent on the dnssec policy or pass --parent-agent host:port")
 			}
 
-			expected, _, _, _, err := tdns.ComputeTargetDSSetForZone(kdb, z, uint8(dns.SHA256))
+			expected, _, _, _, err := tdns.ComputeTargetDSSetForZone(kdb, z, uint8(dns.SHA256), pol)
 			if err != nil {
 				log.Fatalf("compute expected DS: %v", err)
 			}

@@ -150,7 +150,7 @@ ORDER BY COALESCE(r.rollover_index, 2147483646) ASC, k.keyid ASC`
 // dsSetFromSnapshot derives DS RRset from a precomputed key-row
 // snapshot. Used by W5 to ensure UPDATE and NOTIFY paths describe
 // identical sets in auto-mode parallel dispatch.
-func dsSetFromSnapshot(snap *RolloverTargetKeySnapshot, childZone string, digest uint8) ([]dns.RR, int, int, bool, error) {
+func dsSetFromSnapshot(snap *RolloverTargetKeySnapshot, childZone string, digest uint8, pol *DnssecPolicy) ([]dns.RR, int, int, bool, error) {
 	childZone = dns.Fqdn(childZone)
 	out := make([]dns.RR, 0, len(snap.Rows))
 	for _, row := range snap.Rows {
@@ -167,14 +167,7 @@ func dsSetFromSnapshot(snap *RolloverTargetKeySnapshot, childZone string, digest
 			return nil, 0, 0, false, fmt.Errorf("dsSetFromSnapshot: ToDS failed for keyid %d", row.keyid)
 		}
 		ds.Hdr.Name = childZone
-		// Match ComputeTargetDSSetForZone's TTL fixup: when the parsed
-		// DNSKEY had no TTL (or ToDS produced a TTL=0 header), use the
-		// 3600s legacy default. Without this the snapshot path emitted
-		// TTL=0 DS records while the non-snapshot path emitted 3600,
-		// defeating W5's "same set on both paths" guarantee.
-		if ds.Hdr.Ttl == 0 {
-			ds.Hdr.Ttl = 3600
-		}
+		applyChildDSFallbackTTL(&ds.Hdr, pol)
 		out = append(out, ds)
 	}
 	return out, snap.IndexLow, snap.IndexHigh, snap.IndexRangeKnown, nil
@@ -209,7 +202,7 @@ func cdsSetFromSnapshot(snap *RolloverTargetKeySnapshot, childZone string) ([]dn
 	return out, snap.IndexLow, snap.IndexHigh, snap.IndexRangeKnown, nil
 }
 
-func ComputeTargetDSSetForZone(kdb *KeyDB, childZone string, digest uint8) (ds []dns.RR, indexLow, indexHigh int, indexRangeKnown bool, err error) {
+func ComputeTargetDSSetForZone(kdb *KeyDB, childZone string, digest uint8, pol *DnssecPolicy) (ds []dns.RR, indexLow, indexHigh int, indexRangeKnown bool, err error) {
 	childZone = dns.Fqdn(childZone)
 	rows, low, high, idxOK, err := loadTargetKSKsForRollover(kdb, childZone)
 	if err != nil {
@@ -229,9 +222,7 @@ func ComputeTargetDSSetForZone(kdb *KeyDB, childZone string, digest uint8) (ds [
 			return nil, 0, 0, false, fmt.Errorf("ComputeTargetDSSetForZone: ToDS failed for keyid %d", row.keyid)
 		}
 		dsRR.Hdr.Name = childZone
-		if dsRR.Hdr.Ttl == 0 {
-			dsRR.Hdr.Ttl = 3600
-		}
+		applyChildDSFallbackTTL(&dsRR.Hdr, pol)
 		ds = append(ds, dsRR)
 	}
 	return ds, low, high, idxOK, nil
@@ -539,9 +530,9 @@ func pushDSRRsetViaUpdate(ctx context.Context, deps RolloverEngineDeps) (KSKDSPu
 		err   error
 	)
 	if deps.TargetKeySnapshot != nil {
-		dsSet, low, high, idxOK, err = dsSetFromSnapshot(deps.TargetKeySnapshot, child, uint8(dns.SHA256))
+		dsSet, low, high, idxOK, err = dsSetFromSnapshot(deps.TargetKeySnapshot, child, uint8(dns.SHA256), deps.Policy)
 	} else {
-		dsSet, low, high, idxOK, err = ComputeTargetDSSetForZone(kdb, child, uint8(dns.SHA256))
+		dsSet, low, high, idxOK, err = ComputeTargetDSSetForZone(kdb, child, uint8(dns.SHA256), deps.Policy)
 	}
 	if err != nil {
 		out.Category = SoftfailChildConfigLocalError

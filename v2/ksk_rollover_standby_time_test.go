@@ -124,11 +124,9 @@ func TestStandbyTimePolicyParse(t *testing.T) {
 				Algorithm: "ECDSAP256SHA256",
 			}
 			conf.KSK.Lifetime = "10m"
-			conf.KSK.SigValidity = "20m"
 			conf.ZSK.Lifetime = "10m"
-			conf.ZSK.SigValidity = "20m"
 			conf.CSK.Lifetime = "10m"
-			conf.CSK.SigValidity = "20m"
+			conf.SigValidity.Default = "20m"
 			conf.Rollover.Method = "multi-ds"
 			conf.Rollover.NumDS = 3
 			conf.Rollover.ParentAgent = "127.0.0.1:53"
