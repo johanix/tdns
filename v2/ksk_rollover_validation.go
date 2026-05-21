@@ -372,3 +372,120 @@ func minDSTTL(rrs []dns.RR) uint32 {
 	}
 	return min
 }
+
+type sigValidityFloorBand int
+
+const (
+	sigValidityFloorOK sigValidityFloorBand = iota
+	sigValidityFloorWarning
+	sigValidityFloorError
+)
+
+func checkSigValidityFloorBand(validity, servedTTL, propagationDelay time.Duration) sigValidityFloorBand {
+	if servedTTL == 0 {
+		return sigValidityFloorOK
+	}
+	if validity == 0 {
+		return sigValidityFloorError
+	}
+	h := servedTTL + propagationDelay
+	if validity <= 2*h {
+		return sigValidityFloorError
+	}
+	if validity < 4*h {
+		return sigValidityFloorWarning
+	}
+	return sigValidityFloorOK
+}
+
+func configuredServedTTLForSigValidity(pol *DnssecPolicy, which string) time.Duration {
+	switch which {
+	case "dnskey":
+		return configuredServedDnskeyTTL(pol)
+	case "ds":
+		if pol.TTLS.DS == 0 {
+			return 0
+		}
+		return time.Duration(pol.TTLS.DS) * time.Second
+	default:
+		if pol.TTLS.MaxServed == 0 {
+			return 0
+		}
+		return time.Duration(pol.TTLS.MaxServed) * time.Second
+	}
+}
+
+// UpdateSigValidityFloor applies config-load or runtime sig-validity floor
+// checks and sets/clears DnssecError / DnssecPolicyWarning on zd.
+// When runtime is true, maxObservedTTL is the bound for all three values.
+func UpdateSigValidityFloor(zd *ZoneData, pol *DnssecPolicy, propagationDelay time.Duration, maxObservedTTL uint32, runtime bool) {
+	if zd == nil || pol == nil {
+		return
+	}
+	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+		return
+	}
+
+	var hardMsgs, warnMsgs []string
+
+	if runtime {
+		if maxObservedTTL == 0 {
+			zd.ClearError(DnssecPolicyWarning)
+			return
+		}
+		served := time.Duration(maxObservedTTL) * time.Second
+		for _, spec := range []struct {
+			label string
+			secs  uint32
+		}{
+			{"sigvalidity.default", pol.SigValidity.Default},
+			{"sigvalidity.dnskey", pol.SigValidity.DNSKEY},
+			{"sigvalidity.ds", pol.SigValidity.DS},
+		} {
+			validity := time.Duration(spec.secs) * time.Second
+			switch checkSigValidityFloorBand(validity, served, propagationDelay) {
+			case sigValidityFloorError:
+				hardMsgs = append(hardMsgs, fmt.Sprintf("%s (%s) ≤ 2×(servedTTL+propagationDelay) with servedTTL=%s",
+					spec.label, validity, served))
+			case sigValidityFloorWarning:
+				warnMsgs = append(warnMsgs, fmt.Sprintf("%s (%s) < 4×(servedTTL+propagationDelay) with servedTTL=%s",
+					spec.label, validity, served))
+			}
+		}
+	} else {
+		for _, spec := range []struct {
+			label    string
+			secs     uint32
+			whichTTL string
+		}{
+			{"sigvalidity.default", pol.SigValidity.Default, "default"},
+			{"sigvalidity.dnskey", pol.SigValidity.DNSKEY, "dnskey"},
+			{"sigvalidity.ds", pol.SigValidity.DS, "ds"},
+		} {
+			served := configuredServedTTLForSigValidity(pol, spec.whichTTL)
+			validity := time.Duration(spec.secs) * time.Second
+			if served == 0 {
+				continue
+			}
+			switch checkSigValidityFloorBand(validity, served, propagationDelay) {
+			case sigValidityFloorError:
+				hardMsgs = append(hardMsgs, fmt.Sprintf("%s (%s) ≤ 2×(servedTTL+propagationDelay) with servedTTL=%s",
+					spec.label, validity, served))
+			case sigValidityFloorWarning:
+				warnMsgs = append(warnMsgs, fmt.Sprintf("%s (%s) < 4×(servedTTL+propagationDelay) with servedTTL=%s",
+					spec.label, validity, served))
+			}
+		}
+	}
+
+	if len(hardMsgs) == 0 {
+		zd.ClearError(DnssecError)
+	} else {
+		zd.SetError(DnssecError, "sig-validity floor: %s", strings.Join(hardMsgs, "; "))
+	}
+	if len(warnMsgs) == 0 {
+		zd.ClearError(DnssecPolicyWarning)
+	} else {
+		zd.SetError(DnssecPolicyWarning, "%s", strings.Join(warnMsgs, "; "))
+	}
+}

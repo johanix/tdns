@@ -114,6 +114,20 @@ func SignMsg(m dns.Msg, signer string, sak *Sig0ActiveKeys) (*dns.Msg, error) {
 // clamp == nil disables clamping entirely (no behavior change from the
 // pre-4D signature). Most callers pass nil; SignZone builds a *ClampParams
 // once per pass for clamping zones and threads it down.
+func sigValiditySeconds(pol *DnssecPolicy, rrtype uint16) uint32 {
+	if pol == nil {
+		return 0
+	}
+	switch rrtype {
+	case dns.TypeDNSKEY:
+		return pol.SigValidity.DNSKEY
+	case dns.TypeDS:
+		return pol.SigValidity.DS
+	default:
+		return pol.SigValidity.Default
+	}
+}
+
 func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, force bool, clamp *ClampParams) (bool, error) {
 
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
@@ -215,7 +229,7 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 		shouldSign := true
 		for idx, oldsig := range rrset.RRSIGs {
 			if oldsig.(*dns.RRSIG).KeyTag == key.DnskeyRR.KeyTag() {
-				shouldSign = NeedsResigning(oldsig.(*dns.RRSIG)) || force
+				shouldSign = NeedsResigning(oldsig.(*dns.RRSIG), rrset.RRs[0].Header().Ttl) || force
 				if shouldSign {
 					lgSigner.Debug("removing older RRSIG by same DNSKEY", "name", oldsig.Header().Name, "rrtype", dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)])
 					rrset.RRSIGs = append(rrset.RRSIGs[:idx], rrset.RRSIGs[idx+1:]...)
@@ -233,8 +247,9 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 			}
 			rrsig.KeyTag = key.DnskeyRR.KeyTag()
 			rrsig.Algorithm = key.DnskeyRR.Algorithm
-			rrsig.Inception, rrsig.Expiration = sigLifetime(now, 3600*24*30) // 30 days
-			rrsig.SignerName = zd.ZoneName                                   // name
+			lifetime := sigValiditySeconds(zd.DnssecPolicy, rrset.RRs[0].Header().Rrtype)
+			rrsig.Inception, rrsig.Expiration = sigLifetime(now, lifetime)
+			rrsig.SignerName = zd.ZoneName // name
 
 			err := rrsig.Sign(key.CS, rrset.RRs)
 			if err != nil {
@@ -258,15 +273,25 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 // XXX: Perhaps a working algorithm woul be to test for the remaining signature lifetime to be something like
 //
 //	less than 3 x resigning interval?
-func NeedsResigning(rrsig *dns.RRSIG) bool {
-	// here we should check is enough lifetime is left for the RRSIG
-	// to be valid.
-
-	// inceptionTime := time.Unix(int64(rrsig.Inception), 0)
+func NeedsResigning(rrsig *dns.RRSIG, servedTTL uint32) bool {
 	expirationTime := time.Unix(int64(rrsig.Expiration), 0)
+	remaining := time.Until(expirationTime)
 
-	if time.Until(expirationTime) < 3*time.Duration(viper.GetInt("resignerengine.interval")) {
-		lgSigner.Info("RRSIG needs resigning, less than 3 intervals left", "name", rrsig.Header().Name, "rrtype", dns.TypeToString[uint16(rrsig.Header().Rrtype)])
+	scanInterval := time.Duration(viper.GetInt("resignerengine.interval")) * time.Second
+	if scanInterval < 60*time.Second {
+		scanInterval = 60 * time.Second
+	}
+	if scanInterval > 3600*time.Second {
+		scanInterval = 3600 * time.Second
+	}
+
+	threshold := time.Duration(servedTTL)*time.Second + Conf.KaspPropagationDelay() + scanInterval
+	if remaining < threshold {
+		lgSigner.Info("RRSIG needs resigning, remaining validity below served TTL headroom",
+			"name", rrsig.Header().Name,
+			"type_covered", dns.TypeToString[uint16(rrsig.TypeCovered)],
+			"remaining", remaining.String(),
+			"threshold", threshold.String())
 		return true
 	}
 	return false
@@ -433,6 +458,9 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return 0, fmt.Errorf("SignZone: zone %s should not be signed here (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
+	if zd.HasError(DnssecError) {
+		return 0, fmt.Errorf("SignZone: zone %s has DNSSEC error: %s", zd.ZoneName, zd.ErrorMsg)
+	}
 
 	// Single-signer signing (mode 1). Multi-provider signing
 	// (modes 2-4) is handled by mpzd.SignZone() in tdns-mp.
@@ -587,6 +615,9 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 	// Reset per pass: a TTL reduction takes effect after one full cycle.
 	if err := UpsertZoneSigningMaxTTL(kdb, zd.ZoneName, maxObservedTTL); err != nil {
 		lgSigner.Warn("SignZone: persist max_observed_ttl", "zone", zd.ZoneName, "err", err)
+	}
+	if zd.DnssecPolicy != nil {
+		UpdateSigValidityFloor(zd, zd.DnssecPolicy, Conf.KaspPropagationDelay(), maxObservedTTL, true)
 	}
 
 	return newrrsigs, nil

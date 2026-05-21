@@ -150,6 +150,11 @@ func TestHasServiceImpactingError(t *testing.T) {
 		t.Fatal("rollover-policy warning: serving must continue")
 	}
 
+	zd.SetError(DnssecPolicyWarning, "sig-validity headroom")
+	if zd.HasServiceImpactingError() {
+		t.Fatal("dnssec-policy warning: serving must continue")
+	}
+
 	zd.SetError(ConfigError, "bad config")
 	if !zd.HasServiceImpactingError() {
 		t.Fatal("ConfigError: serving must stop")

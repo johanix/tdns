@@ -817,6 +817,10 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// (See follow-up: make rollover setup reload-safe.)
 		if zdp.FirstZoneLoad {
 			zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
+				if zd.DnssecPolicy != nil &&
+					(zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) {
+					UpdateSigValidityFloor(zd, zd.DnssecPolicy, conf.KaspPropagationDelay(), 0, false)
+				}
 				if zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method == RolloverMethodNone {
 					return
 				}

@@ -655,6 +655,20 @@ type InternalConf struct {
 // AuditResponseMsg, StatusUpdateMsg) live in tdns-mp/v2/config.go.
 // They are MP-only and were removed from tdns during the tdns-mp
 // extraction.
+const defaultKaspPropagationDelay = time.Hour
+
+// KaspPropagationDelay returns the configured kasp.propagation_delay, or 1h.
+func (conf *Config) KaspPropagationDelay() time.Duration {
+	if conf == nil || conf.Kasp.PropagationDelay == "" {
+		return defaultKaspPropagationDelay
+	}
+	d, err := time.ParseDuration(conf.Kasp.PropagationDelay)
+	if err != nil || d <= 0 {
+		return defaultKaspPropagationDelay
+	}
+	return d
+}
+
 func (conf *Config) ReloadConfig() (string, error) {
 	confMu.Lock()
 	defer confMu.Unlock()

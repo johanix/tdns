@@ -295,16 +295,18 @@ numbers during implementation against the default policy's own TTLs.
    rename + new `ttls.ds`. Drop per-keytype `SigValidity`. Update the
    default policy + samples (new safe defaults). **DONE** (2026-05-22)
 2. **`DnssecPolicyWarning` error type** in `enums.go` (non-impacting;
-   reused later by plan #3's A.4).
+   reused later by plan #3's A.4). **DONE** (2026-05-22)
 3. **Floor validation:** the universal config-load check with the
    three bands (hard `DnssecError` ≤ 2×H or unset; `DnssecPolicyWarning`
    in (2×,4×)); runtime guard via `max_observed_ttl`. Land before
    adherence so bad values mark zones broken, not silently obeyed.
+   **DONE** (2026-05-22)
 4. **Signer adherence:** `sign.go:236` picks validity by RRtype.
+   **DONE** (2026-05-22)
 5. **Resigner coupling:** `NeedsResigning` driven by per-RRtype
-   validity + served TTL + scan-interval slack.
+   validity + served TTL + scan-interval slack. **DONE** (2026-05-22)
 6. **Validator rename:** E5 / CLI / status read `SigValidity.DNSKEY`;
-   E10/E11 read `ttls.parent-ds`.
+   E10/E11 read `ttls.parent-ds`. **DONE** (2026-05-22, step 1)
 
 Steps 3 and 4 must ship together (3 before 4). Build after each:
 `cd tdns/cmdv2 && GOROOT=/opt/local/lib/go make`; `gofmt -w` edits.

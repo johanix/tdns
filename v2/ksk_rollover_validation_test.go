@@ -195,6 +195,56 @@ func TestCheckE10(t *testing.T) {
 	}
 }
 
+func TestUpdateSigValidityFloorConfig(t *testing.T) {
+	prop := time.Hour
+	pol := &DnssecPolicy{
+		SigValidity: PolicySigValidity{
+			Default: uint32((14 * 24 * time.Hour).Seconds()),
+			DNSKEY:  uint32((30 * 24 * time.Hour).Seconds()),
+			DS:      uint32((14 * 24 * time.Hour).Seconds()),
+		},
+	}
+	zd := &ZoneData{ZoneName: "test.example."}
+	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+	UpdateSigValidityFloor(zd, pol, prop, 0, false)
+	if zd.HasError(DnssecError) || zd.HasError(DnssecPolicyWarning) {
+		t.Fatalf("no TTL ceilings: expected no floor errors, got dnssec=%v warn=%v",
+			zd.HasError(DnssecError), zd.HasError(DnssecPolicyWarning))
+	}
+
+	pol.TTLS.MaxServed = 3600
+	pol.SigValidity.Default = 3600 // 1h, H=2h with prop=1h → 2h ≤ 2×H
+	zd2 := &ZoneData{ZoneName: "tight.example."}
+	zd2.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+	UpdateSigValidityFloor(zd2, pol, prop, 0, false)
+	if !zd2.HasError(DnssecError) {
+		t.Fatal("expected hard floor error for short default validity")
+	}
+}
+
+func TestUpdateSigValidityFloorRuntime(t *testing.T) {
+	prop := time.Hour
+	pol := &DnssecPolicy{
+		SigValidity: PolicySigValidity{
+			Default: uint32((14 * 24 * time.Hour).Seconds()),
+			DNSKEY:  uint32((30 * 24 * time.Hour).Seconds()),
+			DS:      uint32((14 * 24 * time.Hour).Seconds()),
+		},
+	}
+	zd := &ZoneData{ZoneName: "test.example."}
+	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+	UpdateSigValidityFloor(zd, pol, prop, 300, true)
+	if zd.HasError(DnssecError) {
+		t.Fatalf("runtime floor should pass: %s", zd.ErrorMsg)
+	}
+
+	pol.SigValidity.Default = 1800 // 30m
+	UpdateSigValidityFloor(zd, pol, prop, 3600, true)
+	if !zd.HasError(DnssecError) {
+		t.Fatal("expected runtime hard error when validity too short for observed TTL")
+	}
+}
+
 // TestResolveDSTTL confirms the resolution priority: override > observation > none.
 func TestResolveDSTTL(t *testing.T) {
 	policy := func(override uint32) *DnssecPolicy {
