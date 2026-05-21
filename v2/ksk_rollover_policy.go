@@ -554,12 +554,24 @@ func parseDnssecPolicyConfImpl(name string, dp *DnssecPolicyConf, quiet bool) (*
 	if alg == 0 {
 		return nil, fmt.Errorf("policy %q: unknown algorithm %q", name, dp.Algorithm)
 	}
+	kskLT, err := GenKeyLifetime(dp.KSK.Lifetime)
+	if err != nil {
+		return nil, fmt.Errorf("policy %q: %w", name, err)
+	}
+	zskLT, err := GenKeyLifetime(dp.ZSK.Lifetime)
+	if err != nil {
+		return nil, fmt.Errorf("policy %q: %w", name, err)
+	}
+	cskLT, err := GenKeyLifetime(dp.CSK.Lifetime)
+	if err != nil {
+		return nil, fmt.Errorf("policy %q: %w", name, err)
+	}
 	out := &DnssecPolicy{
 		Name:      name,
 		Algorithm: alg,
-		KSK:       GenKeyLifetime(dp.KSK.Lifetime),
-		ZSK:       GenKeyLifetime(dp.ZSK.Lifetime),
-		CSK:       GenKeyLifetime(dp.CSK.Lifetime),
+		KSK:       kskLT,
+		ZSK:       zskLT,
+		CSK:       cskLT,
 	}
 	if quiet {
 		// Mark the policy so FinishDnssecPolicy / warnDnssecPolicyCoupling
@@ -597,12 +609,27 @@ func ValidateDnssecPoliciesFromFile(path string) error {
 			errs = append(errs, fmt.Errorf("policy %q: unknown algorithm %q", name, dp.Algorithm))
 			continue
 		}
+		kskLT, err := GenKeyLifetime(dp.KSK.Lifetime)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("policy %q: %w", name, err))
+			continue
+		}
+		zskLT, err := GenKeyLifetime(dp.ZSK.Lifetime)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("policy %q: %w", name, err))
+			continue
+		}
+		cskLT, err := GenKeyLifetime(dp.CSK.Lifetime)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("policy %q: %w", name, err))
+			continue
+		}
 		tmp := DnssecPolicy{
 			Name:      name,
 			Algorithm: alg,
-			KSK:       GenKeyLifetime(dp.KSK.Lifetime),
-			ZSK:       GenKeyLifetime(dp.ZSK.Lifetime),
-			CSK:       GenKeyLifetime(dp.CSK.Lifetime),
+			KSK:       kskLT,
+			ZSK:       zskLT,
+			CSK:       cskLT,
 		}
 		if err := FinishDnssecPolicy(name, &dp, &tmp); err != nil {
 			errs = append(errs, err)
