@@ -26,6 +26,7 @@ import (
 // current intent and shifts when an asap fires. The renderer is
 // guidance, not contract.
 func populateNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *DnssecPolicy, propagationDelay time.Duration, now time.Time) {
+	populateZskNextTransitions(out, kdb, zone, pol, propagationDelay)
 	if pol == nil || pol.Rollover.Method == RolloverMethodNone || pol.KSK.Lifetime == 0 {
 		return
 	}
@@ -407,6 +408,58 @@ func slotFromKid(ordered []uint16, kid uint16) int {
 		}
 	}
 	return 0
+}
+
+// populateZskNextTransitions fills NextTransition fields on ZSK entries
+// for ksk-zsk mode zones with a configured ZSK.Lifetime.
+func populateZskNextTransitions(out *RolloverStatus, kdb *KeyDB, zone string, pol *DnssecPolicy, propagationDelay time.Duration) {
+	if pol == nil || pol.Mode != DnssecPolicyModeKSKZSK || pol.ZSK.Lifetime == 0 {
+		return
+	}
+	lifetime := time.Duration(pol.ZSK.Lifetime) * time.Second
+
+	var activeAt *time.Time
+	for i := range out.ZSKs {
+		if out.ZSKs[i].State != DnskeyStateActive {
+			continue
+		}
+		if t, ok := parseRFC3339(out.ZSKs[i].StateSince); ok {
+			activeAt = &t
+		}
+		break
+	}
+
+	maxTTL, _ := LoadZoneSigningMaxTTL(kdb, zone)
+	removalMargin := zskRemovalMargin(propagationDelay, maxTTL)
+
+	for i := range out.ZSKs {
+		e := &out.ZSKs[i]
+		switch e.State {
+		case DnskeyStateActive:
+			if activeAt == nil {
+				e.NextTransitionNote = "no active_at — roll timing unknown"
+				break
+			}
+			e.NextTransition = "ZSK roll (standby → active)"
+			t := activeAt.Add(lifetime)
+			e.NextTransitionAt = t.UTC().Format(time.RFC3339)
+		case DnskeyStateStandby:
+			if activeAt != nil {
+				e.NextTransition = "promote on ZSK roll"
+				e.NextTransitionAt = activeAt.Add(lifetime).UTC().Format(time.RFC3339)
+			}
+		case DnskeyStateRetired:
+			if t, ok := parseRFC3339(e.StateSince); ok {
+				e.NextTransition = "retired → removed"
+				e.NextTransitionAt = t.Add(removalMargin).UTC().Format(time.RFC3339)
+			}
+		case DnskeyStatePublished:
+			e.NextTransition = "published → standby"
+			if t, ok := parseRFC3339(e.StateSince); ok {
+				e.NextTransitionAt = t.Add(propagationDelay).UTC().Format(time.RFC3339)
+			}
+		}
+	}
 }
 
 func parseRFC3339(s string) (time.Time, bool) {

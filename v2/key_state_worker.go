@@ -117,6 +117,8 @@ func checkAndTransitionKeys(ctx context.Context, conf *Config, kdb *KeyDB, propa
 
 	transitionPublishedToStandby(conf, kdb, now, propagationDelay)
 
+	rolloverZsksForAllZones(ctx, conf, kdb, propagationDelay, now)
+
 	transitionRetiredToRemoved(conf, kdb, now, propagationDelay)
 
 	maintainStandbyKeys(conf, kdb, standbyZskCount, standbyKskCount)
@@ -204,8 +206,18 @@ func transitionRetiredToRemoved(conf *Config, kdb *KeyDB, now time.Time, propaga
 			continue
 		}
 
+		margin := propagationDelay
+		if key.Flags&dns.SEP == 0 {
+			maxTTL, err := LoadZoneSigningMaxTTL(kdb, key.ZoneName)
+			if err != nil {
+				lgSigner.Warn("KeyStateWorker: LoadZoneSigningMaxTTL failed, using propagation_delay only", "zone", key.ZoneName, "err", err)
+			} else {
+				margin = zskRemovalMargin(propagationDelay, maxTTL)
+			}
+		}
+
 		elapsed := now.Sub(*key.RetiredAt)
-		if elapsed < propagationDelay {
+		if elapsed < margin {
 			continue
 		}
 

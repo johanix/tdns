@@ -994,9 +994,15 @@ func StateSinceForDnssecKey(kdb *KeyDB, zone string, k *DnssecKeyWithTimestamps)
 			return *k.RetiredAt
 		}
 	case DnskeyStateActive:
+		if k.Flags&dns.SEP == 0 && k.ActiveAt != nil {
+			return *k.ActiveAt
+		}
 		at, err := RolloverKeyActiveAt(kdb, zone, k.KeyTag)
 		if err == nil && at != nil {
 			return *at
+		}
+		if k.ActiveAt != nil {
+			return *k.ActiveAt
 		}
 	case DnskeyStateStandby:
 		// Genuine standby (post-C18): the key reached propagated-

@@ -198,6 +198,7 @@ type PolicySummary struct {
 	Name                     string `json:"name"`
 	Algorithm                string `json:"algorithm"`
 	KskLifetime              string `json:"kskLifetime"`
+	ZskLifetime              string `json:"zskLifetime,omitempty"`
 	DsPublishDelay           string `json:"dsPublishDelay"`
 	MaxAttemptsBeforeBackoff int    `json:"maxAttemptsBeforeBackoff"`
 	SoftfailDelay            string `json:"softfailDelay"`

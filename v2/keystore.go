@@ -958,8 +958,14 @@ func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, news
 		return fmt.Errorf("key with keyid %d in zone %s is not in state %s", keyid, zonename, oldstate)
 	}
 
-	// Update the state in the DnssecKeyStore table
-	res, err := tx.Exec(updateDnskeyStateSql, newstate, zonename, keyid, oldstate)
+	now := time.Now().UTC().Format(time.RFC3339)
+	var res sql.Result
+	if newstate == DnskeyStateActive {
+		res, err = tx.Exec(`UPDATE DnssecKeyStore SET state=?, active_at=? WHERE zonename=? AND keyid=? AND state=?`,
+			newstate, now, zonename, keyid, oldstate)
+	} else {
+		res, err = tx.Exec(updateDnskeyStateSql, newstate, zonename, keyid, oldstate)
+	}
 	if err != nil {
 		return fmt.Errorf("error updating DnssecKeyStore: %v", err)
 	}
@@ -972,7 +978,6 @@ func (kdb *KeyDB) PromoteDnssecKey(zonename string, keyid uint16, oldstate, news
 		return fmt.Errorf("no rows updated, key with keyid %d in zone %s might not be in state %s", keyid, zonename, oldstate)
 	}
 
-	// Delete cached data for both old and new states
 	delete(kdb.KeystoreDnskeyCache, zonename+"+"+oldstate)
 	delete(kdb.KeystoreDnskeyCache, zonename+"+"+newstate)
 
@@ -1059,6 +1064,7 @@ type DnssecKeyWithTimestamps struct {
 	State       string
 	KeyRR       string
 	PublishedAt *time.Time
+	ActiveAt    *time.Time
 	RetiredAt   *time.Time
 }
 
@@ -1069,10 +1075,10 @@ func GetDnssecKeysByState(kdb *KeyDB, zone string, state string) ([]DnssecKeyWit
 	var args []interface{}
 
 	if zone == "" {
-		query = `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(retired_at, '') FROM DnssecKeyStore WHERE state=?`
+		query = `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(active_at, ''), COALESCE(retired_at, '') FROM DnssecKeyStore WHERE state=?`
 		args = []interface{}{state}
 	} else {
-		query = `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(retired_at, '') FROM DnssecKeyStore WHERE zonename=? AND state=?`
+		query = `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(active_at, ''), COALESCE(retired_at, '') FROM DnssecKeyStore WHERE zonename=? AND state=?`
 		args = []interface{}{zone, state}
 	}
 
@@ -1084,9 +1090,9 @@ func GetDnssecKeysByState(kdb *KeyDB, zone string, state string) ([]DnssecKeyWit
 
 	var entries []DnssecKeyWithTimestamps
 	for rows.Next() {
-		var zonename, algorithm, st, keyrr, publishedAtStr, retiredAtStr string
+		var zonename, algorithm, st, keyrr, publishedAtStr, activeAtStr, retiredAtStr string
 		var keyid, flags int
-		if err := rows.Scan(&zonename, &keyid, &flags, &algorithm, &st, &keyrr, &publishedAtStr, &retiredAtStr); err != nil {
+		if err := rows.Scan(&zonename, &keyid, &flags, &algorithm, &st, &keyrr, &publishedAtStr, &activeAtStr, &retiredAtStr); err != nil {
 			return nil, fmt.Errorf("GetDnssecKeysByState: scan failed: %w", err)
 		}
 
@@ -1107,6 +1113,11 @@ func GetDnssecKeysByState(kdb *KeyDB, zone string, state string) ([]DnssecKeyWit
 		if publishedAtStr != "" {
 			if t, err := time.Parse(time.RFC3339, publishedAtStr); err == nil {
 				entry.PublishedAt = &t
+			}
+		}
+		if activeAtStr != "" {
+			if t, err := time.Parse(time.RFC3339, activeAtStr); err == nil {
+				entry.ActiveAt = &t
 			}
 		}
 		if retiredAtStr != "" {
@@ -1166,6 +1177,9 @@ func UpdateDnssecKeyStateTx(tx *Tx, kdb *KeyDB, zonename string, keyid uint16, n
 	switch newstate {
 	case DnskeyStatePublished:
 		res, err = tx.Exec(`UPDATE DnssecKeyStore SET state=?, published_at=? WHERE zonename=? AND keyid=?`,
+			newstate, now, zonename, keyid)
+	case DnskeyStateActive:
+		res, err = tx.Exec(`UPDATE DnssecKeyStore SET state=?, active_at=? WHERE zonename=? AND keyid=?`,
 			newstate, now, zonename, keyid)
 	case DnskeyStateRetired:
 		res, err = tx.Exec(`UPDATE DnssecKeyStore SET state=?, retired_at=? WHERE zonename=? AND keyid=?`,
@@ -1265,8 +1279,8 @@ func (kdb *KeyDB) RolloverKey(zonename string, keytype string, tx *Tx) (uint16, 
 	}()
 
 	// standby → active
-	_, txErr = tx.Exec(`UPDATE DnssecKeyStore SET state=? WHERE zonename=? AND keyid=?`,
-		DnskeyStateActive, zonename, standbyKey.KeyTag)
+	_, txErr = tx.Exec(`UPDATE DnssecKeyStore SET state=?, active_at=? WHERE zonename=? AND keyid=?`,
+		DnskeyStateActive, now, zonename, standbyKey.KeyTag)
 	if txErr != nil {
 		return 0, 0, fmt.Errorf("standby→active transition failed: %w", txErr)
 	}

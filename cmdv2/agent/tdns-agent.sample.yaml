@@ -181,7 +181,7 @@ dnssecpolicies:
       ksk:
          lifetime:  48h
       zsk:
-         lifetime:  12h
+         lifetime:  12h   # drives automated ZSK rollover (KeyStateWorker)
       csk:
          lifetime:  none
       sigvalidity:

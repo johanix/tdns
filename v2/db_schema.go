@@ -77,6 +77,7 @@ privatekey	  TEXT,
 keyrr		  TEXT,
 comment		  TEXT,
 published_at              TEXT DEFAULT '',
+active_at                 TEXT DEFAULT '',
 retired_at                TEXT DEFAULT '',
 UNIQUE (zonename, keyid)
 )`,
