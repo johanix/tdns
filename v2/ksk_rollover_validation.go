@@ -168,10 +168,10 @@ func checkE5(pol *DnssecPolicy) InvariantResult {
 		return InvariantResult{}
 	}
 	return InvariantResult{
-		Message: fmt.Sprintf("E5: clamping.margin (%s) < min(served DNSKEY_TTL, ksk.sig-validity) (%s); "+
+		Message: fmt.Sprintf("E5: clamping.margin (%s) < min(served DNSKEY_TTL, sigvalidity.dnskey) (%s); "+
 			"retirement period too short to flush DNSKEY/RRSIG caches before next rollover",
 			pol.Clamping.Margin, floor),
-		Suggestion: fmt.Sprintf("Raise clamping.margin to ≥ %s, OR lower min(ttls.dnskey, ttls.max_served) and/or ksk.sig-validity so their min is ≤ %s.",
+		Suggestion: fmt.Sprintf("Raise clamping.margin to ≥ %s, OR lower min(ttls.dnskey, ttls.max_served) and/or sigvalidity.dnskey so their min is ≤ %s.",
 			floor, pol.Clamping.Margin),
 	}
 }
@@ -431,6 +431,7 @@ func UpdateSigValidityFloor(zd *ZoneData, pol *DnssecPolicy, propagationDelay ti
 	if runtime {
 		if maxObservedTTL == 0 {
 			zd.ClearError(DnssecPolicyWarning)
+			zd.ClearError(DnssecError)
 			return
 		}
 		served := time.Duration(maxObservedTTL) * time.Second

@@ -295,9 +295,9 @@ var errorTypeReportOrder = []ErrorType{
 	RefreshError,
 	AgentError,
 	DnssecError,
-	DnssecPolicyWarning,
 	RolloverPolicyViolation,
 	RolloverParentBlocker,
+	DnssecPolicyWarning,
 	RolloverPolicyWarning,
 }
 

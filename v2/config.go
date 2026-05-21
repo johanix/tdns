@@ -657,6 +657,21 @@ type InternalConf struct {
 // extraction.
 const defaultKaspPropagationDelay = time.Hour
 
+// validateKaspPropagationDelay rejects invalid kasp.propagation_delay at config load.
+func validateKaspPropagationDelay(s string) error {
+	if s == "" {
+		return nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("kasp.propagation_delay: invalid duration %q: %w", s, err)
+	}
+	if d <= 0 {
+		return fmt.Errorf("kasp.propagation_delay: must be positive, got %s", d)
+	}
+	return nil
+}
+
 // KaspPropagationDelay returns the configured kasp.propagation_delay, or 1h.
 func (conf *Config) KaspPropagationDelay() time.Duration {
 	if conf == nil || conf.Kasp.PropagationDelay == "" {
@@ -664,6 +679,13 @@ func (conf *Config) KaspPropagationDelay() time.Duration {
 	}
 	d, err := time.ParseDuration(conf.Kasp.PropagationDelay)
 	if err != nil || d <= 0 {
+		if err != nil {
+			lgConfig.Warn("invalid kasp.propagation_delay, using default",
+				"value", conf.Kasp.PropagationDelay, "default", defaultKaspPropagationDelay, "err", err)
+		} else {
+			lgConfig.Warn("kasp.propagation_delay must be positive, using default",
+				"value", conf.Kasp.PropagationDelay, "default", defaultKaspPropagationDelay)
+		}
 		return defaultKaspPropagationDelay
 	}
 	return d
