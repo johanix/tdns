@@ -1,8 +1,13 @@
 package tdns
 
 import (
+	"log"
+	"os"
 	"testing"
+	"time"
 
+	"github.com/johanix/tdns/v2/cache"
+	"github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -55,6 +60,16 @@ func TestIsLargeAlgorithmConfig(t *testing.T) {
 	}
 }
 
+func TestGenKeyLifetimeEmpty(t *testing.T) {
+	lt, err := GenKeyLifetime("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lt.Lifetime != 0 {
+		t.Fatalf("empty lifetime = %d, want 0 (unset CSK)", lt.Lifetime)
+	}
+}
+
 func TestImrDnskeyQueryForceTCP(t *testing.T) {
 	imr := &Imr{largeAlgs: map[uint8]bool{dns.RSASHA512: true}}
 	if imr.dnskeyQueryForceTCP("example.com.", dns.TypeA) {
@@ -62,5 +77,33 @@ func TestImrDnskeyQueryForceTCP(t *testing.T) {
 	}
 	if imr.dnskeyQueryForceTCP("example.com.", dns.TypeDNSKEY) {
 		t.Fatal("no cached DS must not force TCP")
+	}
+
+	qname := "example.com."
+	logger := log.New(os.Stderr, "", 0)
+	rrcache := cache.NewRRsetCache(logger, false, false)
+	ds := &dns.DS{
+		Hdr: dns.RR_Header{
+			Name:   qname,
+			Rrtype: dns.TypeDS,
+			Class:  dns.ClassINET,
+			Ttl:    3600,
+		},
+		Algorithm: dns.RSASHA512,
+	}
+	rrcache.Set(qname, dns.TypeDS, &cache.CachedRRset{
+		Name:       qname,
+		RRtype:     dns.TypeDS,
+		Expiration: time.Now().Add(time.Hour),
+		RRset: &core.RRset{
+			Name:   qname,
+			RRtype: dns.TypeDS,
+			Class:  dns.ClassINET,
+			RRs:    []dns.RR{ds},
+		},
+	})
+	imr.Cache = rrcache
+	if !imr.dnskeyQueryForceTCP(qname, dns.TypeDNSKEY) {
+		t.Fatal("cached large-alg parent DS must force TCP for child DNSKEY")
 	}
 }

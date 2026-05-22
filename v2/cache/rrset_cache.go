@@ -59,7 +59,7 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 	var client = map[core.Transport]core.DNSClienter{}
 
 	client[core.TransportDo53] = core.NewDNSClient(core.TransportDo53, "53", nil)
-	client[core.TransportDo53TCP] = core.NewDNSClient(core.TransportDo53, "53", nil, core.WithForceTCP())
+	client[core.TransportDo53TCP] = core.NewDNSClient(core.TransportDo53TCP, "53", nil)
 	client[core.TransportDoT] = core.NewDNSClient(core.TransportDoT, "853", nil)
 	client[core.TransportDoH] = core.NewDNSClient(core.TransportDoH, "443", nil)
 	client[core.TransportDoQ] = core.NewDNSClient(core.TransportDoQ, "853", nil) // RFC 9250: DoQ uses port 853

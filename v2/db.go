@@ -168,6 +168,7 @@ func dbMigrateSchema(db *sql.DB) {
 		ddl    string
 	}{
 		{"DnssecKeyStore", "published_at", "ALTER TABLE DnssecKeyStore ADD COLUMN published_at TEXT DEFAULT ''"},
+		{"DnssecKeyStore", "active_at", "ALTER TABLE DnssecKeyStore ADD COLUMN active_at TEXT DEFAULT ''"},
 		{"DnssecKeyStore", "retired_at", "ALTER TABLE DnssecKeyStore ADD COLUMN retired_at TEXT DEFAULT ''"},
 		{"Sig0KeyStore", "parent_state", "ALTER TABLE Sig0KeyStore ADD COLUMN parent_state INTEGER DEFAULT 0"},
 		// Rollover overhaul phase 2: softfail-state columns on RolloverZoneState.

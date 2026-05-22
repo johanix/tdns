@@ -267,7 +267,7 @@ func maintainStandbyKeysForType(kdb *KeyDB, zoneName string, alg uint8, keytype 
 		lgSigner.Error("KeyStateWorker: error getting standby keys", "zone", zoneName, "keytype", keytype, "err", err)
 		return
 	}
-	standbyCount := countKeysByFlags(standbyKeys, expectedFlags)
+	standbyCount := countKeysByFlagsAndAlg(standbyKeys, expectedFlags, alg)
 
 	if standbyCount >= standbyKeyCount {
 		return
@@ -278,7 +278,7 @@ func maintainStandbyKeysForType(kdb *KeyDB, zoneName string, alg uint8, keytype 
 		lgSigner.Error("KeyStateWorker: error getting published keys", "zone", zoneName, "keytype", keytype, "err", err)
 		return
 	}
-	publishedCount := countKeysByFlags(publishedKeys, expectedFlags)
+	publishedCount := countKeysByFlagsAndAlg(publishedKeys, expectedFlags, alg)
 
 	if publishedCount > 0 {
 		lgSigner.Debug("KeyStateWorker: keys in pipeline, not generating", "zone", zoneName, "keytype", keytype, "published", publishedCount)
@@ -298,12 +298,12 @@ func maintainStandbyKeysForType(kdb *KeyDB, zoneName string, alg uint8, keytype 
 	}
 }
 
-// countKeysByFlags counts how many keys in the slice have the expected flags value.
+// countKeysByFlagsAndAlg counts keys matching flags and algorithm.
 // ZSK: flags=256, KSK/CSK: flags=257.
-func countKeysByFlags(keys []DnssecKeyWithTimestamps, expectedFlags uint16) int {
+func countKeysByFlagsAndAlg(keys []DnssecKeyWithTimestamps, expectedFlags uint16, alg uint8) int {
 	count := 0
 	for _, k := range keys {
-		if k.Flags == expectedFlags {
+		if k.Flags == expectedFlags && k.Algorithm == alg {
 			count++
 		}
 	}

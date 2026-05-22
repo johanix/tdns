@@ -1169,7 +1169,7 @@ func GenKeyLifetime(lifetime string) (KeyLifetime, error) {
 	case "forever":
 		lifetime_secs = time.Duration(10000) * time.Hour
 
-	case "none":
+	case "", "none":
 		lifetime_secs = time.Duration(0)
 
 	default:

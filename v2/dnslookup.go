@@ -1913,7 +1913,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 			"qname", qname,
 			"qtype", dns.TypeToString[qtype],
 			"addr", addr,
-			"transport", core.TransportToString[t])
+			"transport", core.TransportToString[eff])
 	}
 	return r, rtt, nil
 }
@@ -2664,9 +2664,9 @@ const maxNSRevalidateServers = 3
 
 // Depth-aware OOB NS lookup budget. See handleReferral for the rationale.
 const (
-	nsLookupShallowDepth   = 2 // TLD (depth 1) and SLD (depth 2)
-	nsLookupBudgetShallow  = 3
-	nsLookupBudgetDeep     = 1
+	nsLookupShallowDepth  = 2 // TLD (depth 1) and SLD (depth 2)
+	nsLookupBudgetShallow = 3
+	nsLookupBudgetDeep    = 1
 )
 
 // zoneDepth returns the label depth of a zone name: 0 for root ".",

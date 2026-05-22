@@ -44,8 +44,10 @@ var TransportToString = map[Transport]string{
 // StringToTransport converts a string transport name to Transport type
 func StringToTransport(s string) (Transport, error) {
 	switch s {
-	case "do53", "Do53", "Do53-TCP":
+	case "do53", "Do53":
 		return TransportDo53, nil
+	case "do53-tcp", "Do53-TCP":
+		return TransportDo53TCP, nil
 	case "tcp", "TCP":
 		return TransportDo53, nil // TCP is still Do53, just forced TCP
 	case "dot", "DoT", "DoT-TCP":
@@ -144,9 +146,12 @@ func NewDNSClient(transport Transport, port string, tlsConfig *tls.Config, opts 
 
 	// Initialize transport-specific configurations
 	switch transport {
-	case TransportDo53, TransportDo53TCP:
+	case TransportDo53:
 		client.DNSClientUDP = &dns.Client{Net: "udp", Timeout: client.Timeout}
 		client.DNSClientTCP = &dns.Client{Net: "tcp", Timeout: client.Timeout}
+	case TransportDo53TCP:
+		client.DNSClientTCP = &dns.Client{Net: "tcp", Timeout: client.Timeout}
+		client.ForceTCP = true
 	case TransportDoT:
 		client.DNSClientTLS = &dns.Client{
 			Net:       "tcp-tls",
