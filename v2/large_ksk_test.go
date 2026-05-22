@@ -83,14 +83,21 @@ func TestLargeKskImrMetrics(t *testing.T) {
 		Hdr:       dns.RR_Header{Name: "large.example.", Rrtype: dns.TypeDS, Class: dns.ClassINET},
 		Algorithm: dns.RSASHA512,
 	}
-	imr.noteDSEncountered([]dns.RR{largeDS})
+	imr.noteDSEncountered([]dns.RR{largeDS, largeDS})
 
 	imr.noteDNSKEYLookup(false)
 	imr.noteDNSKEYLookup(true)
 
 	m := LargeKskImrMetricsSnapshot()
 	if m.DSEncounteredTotal != 2 || m.DSEncounteredLarge != 1 {
-		t.Fatalf("DS metrics = %+v, want total=2 large=1", m)
+		t.Fatalf("DS metrics = %+v, want total=2 large RRsets=1", m)
+	}
+	if len(m.DSDLargeRRByAlgorithm) != 1 || m.DSDLargeRRByAlgorithm[0].Algorithm != dns.RSASHA512 ||
+		m.DSDLargeRRByAlgorithm[0].Count != 2 {
+		t.Fatalf("per-alg DS RR metrics = %+v, want RSASHA512 x2", m.DSDLargeRRByAlgorithm)
+	}
+	if LargeAlgDSMetrics() != 2 {
+		t.Fatalf("LargeAlgDSMetrics = %d, want 2 large DS RRs", LargeAlgDSMetrics())
 	}
 	if m.DNSKEYLookupTotal != 2 || m.DNSKEYLookupForcedTCP != 1 {
 		t.Fatalf("DNSKEY metrics = %+v, want total=2 forced=1", m)

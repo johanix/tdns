@@ -15,9 +15,23 @@ func pct(part, total uint64) string {
 }
 
 func printLargeKskImrMetrics(m tdns.LargeKskImrMetrics) {
+	var largeDSRRs uint64
+	for _, e := range m.DSDLargeRRByAlgorithm {
+		largeDSRRs += e.Count
+	}
+
 	fmt.Printf("DS RRsets encountered (referrals):  %d\n", m.DSEncounteredTotal)
-	fmt.Printf("  with large-alg DS:                %d (%s)\n",
+	fmt.Printf("  with large-alg DS:                %d (%s of RRsets)\n",
 		m.DSEncounteredLarge, pct(m.DSEncounteredLarge, m.DSEncounteredTotal))
+	if len(m.DSDLargeRRByAlgorithm) == 0 {
+		fmt.Printf("  large DS RRs by algorithm:        none\n")
+	} else {
+		fmt.Printf("  large DS RRs by algorithm:        %d total\n", largeDSRRs)
+		for _, e := range m.DSDLargeRRByAlgorithm {
+			fmt.Printf("    %s: %d\n", tdns.DNSSECAlgorithmLabel(e.Algorithm), e.Count)
+		}
+	}
+
 	fmt.Printf("DNSKEY lookups:                     %d\n", m.DNSKEYLookupTotal)
 	fmt.Printf("  forced TCP from start (do53-tcp):  %d (%s)\n",
 		m.DNSKEYLookupForcedTCP, pct(m.DNSKEYLookupForcedTCP, m.DNSKEYLookupTotal))
@@ -32,9 +46,10 @@ var imrStatsLargeKskCmd = &cobra.Command{
 	Long: `Counters for evaluating direct-TCP DNSKEY fetching when parent DS
 signals a large KSK algorithm (dnssec.large_algorithms).
 
-DS RRsets are counted when cached from referrals. DNSKEY lookups are
-counted at the start of each outbound DNSKEY query; forced-TCP means
-do53-tcp was selected from the start (not UDP-to-TCP fallback).`,
+DS RRsets are counted when cached from referrals; large-alg DS RRs are
+counted individually per algorithm. DNSKEY lookups are counted at the
+start of each outbound DNSKEY query; forced-TCP means do53-tcp was
+selected from the start (not UDP-to-TCP fallback).`,
 	Args: cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
 		printLargeKskImrMetrics(tdns.LargeKskImrMetricsSnapshot())

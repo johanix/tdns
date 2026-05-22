@@ -13,10 +13,14 @@ import (
 	"github.com/miekg/dns"
 )
 
-// LargeAlgDSMetrics returns how often the IMR cached a referral DS RRset
-// containing a large algorithm number. Prefer LargeKskImrMetricsSnapshot.
+// LargeAlgDSMetrics returns the total number of individual large-alg DS RRs
+// encountered in referrals. Prefer LargeKskImrMetricsSnapshot.
 func LargeAlgDSMetrics() uint64 {
-	return imrDSEncounteredLarge.Load()
+	var n uint64
+	for i := range imrDSDLargeRRByAlg {
+		n += imrDSDLargeRRByAlg[i].Load()
+	}
+	return n
 }
 
 func buildLargeAlgorithmSet(algs []uint8) map[uint8]bool {
