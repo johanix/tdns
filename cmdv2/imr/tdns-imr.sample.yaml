@@ -17,6 +17,14 @@ imrengine:
       # - always-query-for-transport
       # - query-for-transport-tlsa
 
+# DNSSEC algorithm numbers whose DNSKEY/RRSIG payloads are large for UDP.
+# When a referral DS RRset contains any listed algorithm, the IMR fetches
+# the child zone's DNSKEY over TCP from the start (do53-tcp), not UDP with
+# TC fallback. RSASHA512 (10) is a stand-in where ML-DSA-44 is unavailable.
+# Inspect counters: tdns-cli imr stats large-ksk
+dnssec:
+   large_algorithms: [ 10 ]
+
 log:
    file:                /var/log/tdns/tdns-imr.log
    level:               info    # default level: debug|info|warn|error

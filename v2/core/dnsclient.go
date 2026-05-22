@@ -49,7 +49,7 @@ func StringToTransport(s string) (Transport, error) {
 	case "do53-tcp", "Do53-TCP":
 		return TransportDo53TCP, nil
 	case "tcp", "TCP":
-		return TransportDo53, nil // TCP is still Do53, just forced TCP
+		return TransportDo53TCP, nil
 	case "dot", "DoT", "DoT-TCP":
 		return TransportDoT, nil
 	case "doh", "DoH", "DoH-TCP":
