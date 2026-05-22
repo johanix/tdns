@@ -209,11 +209,13 @@ var imrZoneCheckCmd = &cobra.Command{
 // Stats command - no arguments
 var ImrStatsCmd = &cobra.Command{
 	Use:   "stats",
-	Short: "Show statistics",
-	Long:  `Show DNS query statistics`,
+	Short: "Show IMR statistics",
+	Long:  `Show DNS query and large-KSK telemetry statistics.`,
 	Args:  cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
-		fmt.Println("Showing statistics")
+		printLargeKskImrMetrics(tdns.LargeKskImrMetricsSnapshot())
+		fmt.Println()
+		fmt.Println("Subcommands: large-ksk, auth-transports, auth-servers")
 	},
 }
 
@@ -519,6 +521,7 @@ func init() {
 		"guide": "(zone or car)",
 	}
 
+	ImrStatsCmd.AddCommand(imrStatsLargeKskCmd)
 	ImrStatsCmd.AddCommand(imrStatsAuthTransportsCmd)
 	ImrStatsCmd.AddCommand(imrStatsAuthServersCmd)
 	ImrShowCmd.AddCommand(imrShowOptionsCmd)

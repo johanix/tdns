@@ -70,6 +70,33 @@ func TestGenKeyLifetimeEmpty(t *testing.T) {
 	}
 }
 
+func TestLargeKskImrMetrics(t *testing.T) {
+	imr := &Imr{largeAlgs: map[uint8]bool{dns.RSASHA512: true}}
+
+	smallDS := &dns.DS{
+		Hdr:       dns.RR_Header{Name: "small.example.", Rrtype: dns.TypeDS, Class: dns.ClassINET},
+		Algorithm: dns.ED25519,
+	}
+	imr.noteDSEncountered([]dns.RR{smallDS})
+
+	largeDS := &dns.DS{
+		Hdr:       dns.RR_Header{Name: "large.example.", Rrtype: dns.TypeDS, Class: dns.ClassINET},
+		Algorithm: dns.RSASHA512,
+	}
+	imr.noteDSEncountered([]dns.RR{largeDS})
+
+	imr.noteDNSKEYLookup(false)
+	imr.noteDNSKEYLookup(true)
+
+	m := LargeKskImrMetricsSnapshot()
+	if m.DSEncounteredTotal != 2 || m.DSEncounteredLarge != 1 {
+		t.Fatalf("DS metrics = %+v, want total=2 large=1", m)
+	}
+	if m.DNSKEYLookupTotal != 2 || m.DNSKEYLookupForcedTCP != 1 {
+		t.Fatalf("DNSKEY metrics = %+v, want total=2 forced=1", m)
+	}
+}
+
 func TestImrDnskeyQueryForceTCP(t *testing.T) {
 	imr := &Imr{largeAlgs: map[uint8]bool{dns.RSASHA512: true}}
 	if imr.dnskeyQueryForceTCP("example.com.", dns.TypeA) {

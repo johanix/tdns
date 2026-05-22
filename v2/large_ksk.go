@@ -9,44 +9,14 @@ package tdns
 import (
 	"fmt"
 	"strings"
-	"sync/atomic"
 
 	"github.com/miekg/dns"
 )
 
-var largeAlgDSObserved atomic.Uint64
-
-// LargeAlgDSMetrics returns how often the IMR saw a cached parent DS with a
-// large algorithm number before querying the child DNSKEY (Part B).
+// LargeAlgDSMetrics returns how often the IMR cached a referral DS RRset
+// containing a large algorithm number. Prefer LargeKskImrMetricsSnapshot.
 func LargeAlgDSMetrics() uint64 {
-	return largeAlgDSObserved.Load()
-}
-
-func noteLargeAlgDSObserved() {
-	largeAlgDSObserved.Add(1)
-}
-
-// dnskeyQueryForceTCP returns true when a cached parent DS RRset signals a large
-// child KSK algorithm and the IMR should fetch the child DNSKEY over TCP.
-func (imr *Imr) dnskeyQueryForceTCP(qname string, qtype uint16) bool {
-	if imr == nil || imr.Cache == nil || qtype != dns.TypeDNSKEY {
-		return false
-	}
-	ds := imr.Cache.Get(qname, dns.TypeDS)
-	if ds == nil || ds.RRset == nil {
-		return false
-	}
-	for _, rr := range ds.RRset.RRs {
-		d, ok := rr.(*dns.DS)
-		if !ok || !imr.isLargeAlgorithm(d.Algorithm) {
-			continue
-		}
-		noteLargeAlgDSObserved()
-		lgDns.Info("large-alg DS observed; will query child DNSKEY over TCP",
-			"zone", qname, "alg", d.Algorithm)
-		return true
-	}
-	return false
+	return imrDSEncounteredLarge.Load()
 }
 
 func buildLargeAlgorithmSet(algs []uint8) map[uint8]bool {

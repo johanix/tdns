@@ -1100,6 +1100,9 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	// if Globals.Debug { fmt.Printf("IterativeDNSQuery: message after AddOTSToMessage: %s", m.String()) }
 
 	forceTCP := imr.dnskeyQueryForceTCP(qname, qtype)
+	if qtype == dns.TypeDNSKEY {
+		imr.noteDNSKEYLookup(forceTCP)
+	}
 
 	// If PR flag is set, verify at least one server has encrypted transports available
 	if requireEncrypted {
@@ -2457,6 +2460,7 @@ func (imr *Imr) handleReferral(ctx context.Context, qname string, qtype uint16, 
 		}
 		// XXX: ValidateRRset *must* return one of secure or indeterminate. There is
 		// a DS, so insecure or none should not be possible.
+		imr.noteDSEncountered(dsRRs)
 		imr.Cache.Set(zonename, dns.TypeDS, &cache.CachedRRset{
 			Name:       zonename,
 			RRtype:     dns.TypeDS,
