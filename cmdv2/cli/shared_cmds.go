@@ -63,13 +63,8 @@ func init() {
 	// From ../tdns/cli/agent_cmds.go:
 	rootCmd.AddCommand(cli.AgentCmd)
 
-	// JOSE key generation utility: 'util keys generate'. No config required
-	// (intentionally; that's why it sits under util rather than agent/combiner).
-	cli.UtilCmd.AddCommand(cli.RootKeysCmd)
-
-	// From ../tdns/cli/jose_keys_cmds.go: agent/combiner keys (generate, show) — under agent/combiner, uses config
-	cli.AgentCmd.AddCommand(cli.NewKeysCmd("agent"))
-	//	cli.CombinerCmd.AddCommand(cli.NewKeysCmd("combiner"))
+	// JOSE/JWT keys CLI moved to tdns-mp/v2/cli and tdns-mp/cmd/mpcli;
+	// plain tdns-cli no longer carries those commands. See tdns-mp PR #27.
 
 	// ZoneCmd is now under AuthCmd (wired in cli/auth_cmds.go init).
 	// Agent uses AgentZoneCmd (wired in cli/agent_zone_cmds.go).
@@ -86,9 +81,6 @@ func init() {
 
 	// From ../tdns/cli/auth_cmds.go:
 	rootCmd.AddCommand(cli.AuthCmd)
-
-	// From ../tdns/cli/jwt_cmds.go: daemon-agnostic JWT inspection
-	cli.UtilCmd.AddCommand(cli.JwtCmd)
 
 	// Synthetic 'util' parent itself (must be added once, after children).
 	rootCmd.AddCommand(cli.UtilCmd)
