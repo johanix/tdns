@@ -5,6 +5,18 @@ APPDATE=`date +"%Y-%m-%d-%H:%M"`
 
 GOFLAGS:=-v
 
+# WITH_LIBOQS=1 wires in liboqs-backed PQ algorithms (Falcon-512,
+# MAYO-1, SNOVA-24_5_4) in cmdv2/{agent,auth,imr}. Requires the build
+# host to have liboqs installed (pkgsrc on NetBSD, MacPorts on macOS).
+# Before building, source the env script in this same shell:
+#   . ../../../dnssec-algorithms/liboqs/liboqs-env.sh
+# Default (unset): those algorithms are metadata-only — recognized
+# by name but not usable for sign/verify.
+WITH_LIBOQS ?= 0
+ifeq ($(WITH_LIBOQS),1)
+GOFLAGS += -tags liboqs
+endif
+
 GOOS ?= $(shell uname -s | tr A-Z a-z)
 
 default: ${PROG}
@@ -16,9 +28,28 @@ all: $(PROG)
 version:
 	/bin/sh ../../utils/make-version.sh $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
 
-build:
+build: check-liboqs
 	@test -f version.go || /bin/sh ../../utils/make-version.sh "unknown" "unknown" $(PROG)
 	$(GO) build $(GOFLAGS) -o ${PROG}
+
+# Pre-flight check: when WITH_LIBOQS=1, verify pkg-config can find
+# liboqs-go.pc and print actionable guidance otherwise. No-op when
+# WITH_LIBOQS is unset.
+check-liboqs:
+ifeq ($(WITH_LIBOQS),1)
+	@pkg-config --exists liboqs-go 2>/dev/null || { \
+	   echo ""; \
+	   echo "  WITH_LIBOQS=1 was set but pkg-config cannot find liboqs-go."; \
+	   echo "  Source the env script in this shell first:"; \
+	   echo ""; \
+	   echo "    . ../../../dnssec-algorithms/liboqs/liboqs-env.sh"; \
+	   echo ""; \
+	   echo "  Then re-run make. See dnssec-algorithms/README.md for"; \
+	   echo "  per-platform liboqs install instructions."; \
+	   echo ""; \
+	   exit 1; \
+	}
+endif
 
 netbsd:
 	GOOS=netbsd GOARCH=amd64 $(GO) build $(GOFLAGS) -o ${PROG}.netbsd
@@ -67,4 +98,4 @@ lint:
 	gosec ./...
 	golangci-lint run
 
-.PHONY: build version clean
+.PHONY: build version clean check-liboqs

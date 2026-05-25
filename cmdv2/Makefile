@@ -1,5 +1,10 @@
 .PHONY: all v2 version clean install install-dirs check-root tarball
 
+# WITH_LIBOQS=1 enables the liboqs-backed PQ algorithms (Falcon-512,
+# MAYO-1, SNOVA-24_5_4) in agent/auth/imr. See utils/Makefile.common.
+WITH_LIBOQS ?= 0
+export WITH_LIBOQS
+
 # all apps in this directory
 all: v2
 
