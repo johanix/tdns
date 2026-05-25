@@ -13,6 +13,7 @@ require (
 	github.com/go-playground/validator/v10 v10.22.1
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
+	github.com/johanix/dnssec-algorithms v0.0.0-20260513135759-676b5158decd
 	github.com/johanix/tdns-transport/v2 v2.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f
 	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39
@@ -44,14 +45,20 @@ require (
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
 	github.com/subosito/gotenv v1.4.2 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	golang.org/x/crypto v0.46.0 // indirect
+	golang.org/x/crypto v0.49.0 // indirect
 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
-	golang.org/x/mod v0.31.0 // indirect
-	golang.org/x/net v0.48.0 // indirect
-	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.39.0 // indirect
-	golang.org/x/text v0.32.0 // indirect
-	golang.org/x/tools v0.40.0 // indirect
+	golang.org/x/mod v0.34.0 // indirect
+	golang.org/x/net v0.52.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/text v0.35.0 // indirect
+	golang.org/x/tools v0.43.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
+
+// Pinned at johanix/dns:algorithm-registry tip — provides the
+// pluggable Algorithm interface. ML-DSA-44 itself lives out-of-tree
+// in github.com/johanix/dnssec-algorithms/mldsa44 and is wired in by
+// blank import from each binary's main package.
+replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260515091838-3300006a8466
