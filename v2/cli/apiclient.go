@@ -159,6 +159,13 @@ func getClientKeyFromParent(role string) string {
 	return roleToClientKey[role]
 }
 
+// GetClientKeyFromParent is the exported form of getClientKeyFromParent
+// for cross-package CLI consumers (e.g. tdns-mp/v2/cli's JOSE keys
+// commands) that need to resolve a role name to its clientKey.
+func GetClientKeyFromParent(role string) string {
+	return getClientKeyFromParent(role)
+}
+
 // getApiDetailsByClientKey returns the ApiDetails entry whose Name
 // matches clientKey, or nil if no such entry exists. Data comes from
 // the CliConf handed to InitApiClients — no viper reach-through.
@@ -172,4 +179,10 @@ func getApiDetailsByClientKey(clientKey string) *ApiDetails {
 		}
 	}
 	return nil
+}
+
+// GetApiDetailsByClientKey is the exported form of
+// getApiDetailsByClientKey for cross-package CLI consumers.
+func GetApiDetailsByClientKey(clientKey string) *ApiDetails {
+	return getApiDetailsByClientKey(clientKey)
 }
