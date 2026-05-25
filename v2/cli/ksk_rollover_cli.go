@@ -841,7 +841,7 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 			fmt.Printf("ZSK rollover state for zone %s  Current time: %s\n", s.Zone, currentTime)
 			currentTimePrinted = true
 		}
-		fmt.Println("  no rollovers ongoing (automated ZSK rollover not implemented)")
+		printZskRolloverSummary(s)
 		if len(s.ZSKs) > 0 {
 			fmt.Println()
 			printRolloverKeyTable(s.ZSKs, verbose, false)
@@ -855,12 +855,15 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 	// gives the message room to breathe.
 	printRolloverKeyErrors(s, showKSK, showZSK, verbose)
 
-	if verbose && s.Policy != nil && showKSK {
+	if verbose && s.Policy != nil && (showKSK || showZSK) {
 		fmt.Println()
 		fmt.Println("  policy:")
 		fmt.Printf("    name                         %s\n", s.Policy.Name)
 		fmt.Printf("    algorithm                    %s\n", s.Policy.Algorithm)
 		fmt.Printf("    ksk.lifetime                 %s\n", s.Policy.KskLifetime)
+		if s.Policy.ZskLifetime != "" {
+			fmt.Printf("    zsk.lifetime                 %s\n", s.Policy.ZskLifetime)
+		}
 		fmt.Printf("    rollover.ds-publish-delay    %s\n", s.Policy.DsPublishDelay)
 		fmt.Printf("    rollover.max-attempts        %d\n", s.Policy.MaxAttemptsBeforeBackoff)
 		fmt.Printf("    rollover.softfail-delay      %s\n", s.Policy.SoftfailDelay)
@@ -1206,21 +1209,90 @@ func printRolloverKeyTable(keys []tdns.RolloverKeyEntry, verbose bool, kskTable 
 				seqStr, keyidStr, k.State, pub, sinceStr, nextCol, expectedCol))
 		}
 	} else {
-		rows = append(rows, "keyid|state|published_at")
+		rows = append(rows, "keyid|state|active_at|next_roll")
 		for _, k := range keys {
-			pub := "-"
-			if k.Published != "" {
-				if t, err := time.Parse(time.RFC3339, k.Published); err == nil {
-					pub = formatTimeWithDelta(t)
-				}
-			}
-			rows = append(rows, fmt.Sprintf("%d|%s|%s", k.KeyID, k.State, pub))
+			at := formatStateSinceCol(k)
+			nextRoll := formatZskNextRollCol(k)
+			rows = append(rows, fmt.Sprintf("%d|%s|%s|%s", k.KeyID, k.State, at, nextRoll))
 		}
 	}
 	formatted := columnize.SimpleFormat(rows)
 	for _, line := range strings.Split(formatted, "\n") {
 		fmt.Printf("  %s\n", line)
 	}
+}
+
+func printZskRolloverSummary(s *tdns.RolloverStatus) {
+	if s.Policy == nil {
+		fmt.Println("  automated ZSK rollover: no policy attached")
+		return
+	}
+	lifetimeStr := s.Policy.ZskLifetime
+	if lifetimeStr == "" || lifetimeStr == "0s" {
+		fmt.Println("  automated ZSK rollover: disabled (zsk.lifetime not set)")
+		return
+	}
+	lifetime, err := time.ParseDuration(lifetimeStr)
+	if err != nil || lifetime <= 0 {
+		fmt.Printf("  automated ZSK rollover: zsk.lifetime %q invalid\n", lifetimeStr)
+		return
+	}
+
+	var activeKey *tdns.RolloverKeyEntry
+	standbyReady := false
+	for i := range s.ZSKs {
+		switch s.ZSKs[i].State {
+		case tdns.DnskeyStateActive:
+			if activeKey == nil {
+				activeKey = &s.ZSKs[i]
+			}
+		case tdns.DnskeyStateStandby:
+			standbyReady = true
+		}
+	}
+
+	fmt.Printf("  zsk.lifetime                 %s\n", lifetimeStr)
+	if activeKey == nil {
+		fmt.Println("  active ZSK                   none")
+	} else {
+		fmt.Printf("  active ZSK                   keyid %d\n", activeKey.KeyID)
+		if activeKey.StateSince != "" {
+			if t, err := time.Parse(time.RFC3339, activeKey.StateSince); err == nil {
+				fmt.Printf("  active_at                    %s\n", formatTimeWithDelta(t))
+				next := t.Add(lifetime)
+				fmt.Printf("  next roll (scheduled)        %s\n", formatTimeWithDelta(next))
+			} else {
+				fmt.Println("  active_at                    unknown")
+			}
+		} else {
+			fmt.Println("  active_at                    unknown (not stamped yet)")
+		}
+	}
+	if standbyReady {
+		fmt.Println("  standby ZSK                  ready")
+	} else {
+		fmt.Println("  standby ZSK                  not ready")
+	}
+}
+
+func formatStateSinceCol(k tdns.RolloverKeyEntry) string {
+	if k.StateSince == "" {
+		return "-"
+	}
+	if t, err := time.Parse(time.RFC3339, k.StateSince); err == nil {
+		return formatTimeWithDelta(t)
+	}
+	return "-"
+}
+
+func formatZskNextRollCol(k tdns.RolloverKeyEntry) string {
+	if k.State != tdns.DnskeyStateActive || k.NextTransitionAt == "" {
+		return "-"
+	}
+	if t, err := time.Parse(time.RFC3339, k.NextTransitionAt); err == nil {
+		return formatTimeWithDelta(t)
+	}
+	return "-"
 }
 
 // headlinePhraseFor returns the phrase appended after the headline

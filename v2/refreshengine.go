@@ -226,7 +226,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.mu.Unlock()
 							if zd.DnssecPolicy != nil &&
 								(zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) {
-								UpdateSigValidityFloor(zd, zd.DnssecPolicy, conf.KaspPropagationDelay(), 0, false)
+								UpdateSigValidityFloor(zd, zd.DnssecPolicy, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm)
 							}
 						}
 
@@ -340,7 +340,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						if dnssecPolicyChanged {
 							if zd.DnssecPolicy != nil &&
 								(zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) {
-								UpdateSigValidityFloor(zd, zd.DnssecPolicy, conf.KaspPropagationDelay(), 0, false)
+								UpdateSigValidityFloor(zd, zd.DnssecPolicy, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm)
 							}
 							triggerResign(conf, zone)
 						}

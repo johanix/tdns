@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/gookit/goutil/dump"
 	core "github.com/johanix/tdns/v2/core"
@@ -301,6 +302,11 @@ INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags,
 		// pkc.PrivateKey should already be in PEM format from above
 		_, err = tx.Exec(addDnssecKeySql, owner, state, pkc.KeyId,
 			dns.AlgorithmToString[pkc.Algorithm], flags, creator, pkc.PrivateKey, pkc.DnskeyRR.String())
+		if err == nil && state == DnskeyStateActive {
+			now := time.Now().UTC().Format(time.RFC3339)
+			_, err = tx.Exec(`UPDATE DnssecKeyStore SET active_at=? WHERE zonename=? AND keyid=?`,
+				now, owner, pkc.KeyId)
+		}
 	}
 	if err != nil {
 		lgDns.Error("GenerateKeypair: error storing key in keystore", "err", err)

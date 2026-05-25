@@ -234,6 +234,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 	if err := validateKaspPropagationDelay(conf.Kasp.PropagationDelay); err != nil {
 		return err
 	}
+	conf.Internal.LargeAlgorithms = buildLargeAlgorithmSet(conf.Dnssec.LargeAlgorithms)
 
 	// Normalize service.transport.type (default: none)
 	if conf.Service.Transport.Type == "" {
@@ -275,6 +276,11 @@ func (conf *Config) ParseConfig(reload bool) error {
 	conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
 	for name, dp := range conf.DnssecPolicies {
 		dpLocal := dp
+		alg, kskAlg, zskAlg, err := resolvePolicyRoleAlgorithms(name, &dpLocal)
+		if err != nil {
+			lgConfig.Error("DNSSEC policy invalid algorithm, ignored", "policy", name, "err", err)
+			continue
+		}
 		kskLT, err := GenKeyLifetime(dpLocal.KSK.Lifetime)
 		if err != nil {
 			lgConfig.Error("DNSSEC policy invalid ksk.lifetime, ignored", "policy", name, "err", err)
@@ -291,11 +297,13 @@ func (conf *Config) ParseConfig(reload bool) error {
 			continue
 		}
 		tmp := DnssecPolicy{
-			Name:      name,
-			Algorithm: dns.StringToAlgorithm[strings.ToUpper(dpLocal.Algorithm)],
-			KSK:       kskLT,
-			ZSK:       zskLT,
-			CSK:       cskLT,
+			Name:         name,
+			Algorithm:    alg,
+			KSKAlgorithm: kskAlg,
+			ZSKAlgorithm: zskAlg,
+			KSK:          kskLT,
+			ZSK:          zskLT,
+			CSK:          cskLT,
 		}
 		if tmp.Algorithm == 0 {
 			lgConfig.Error("DNSSEC policy has unknown algorithm, ignored", "policy", name, "algorithm", dpLocal.Algorithm)
@@ -834,7 +842,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// policy/kasp edits on reload refresh DnssecError/Warning state.
 		if options[OptOnlineSigning] || options[OptInlineSigning] {
 			if zdp.DnssecPolicy != nil {
-				UpdateSigValidityFloor(zdp, zdp.DnssecPolicy, conf.KaspPropagationDelay(), 0, false)
+				UpdateSigValidityFloor(zdp, zdp.DnssecPolicy, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm)
 			}
 		}
 
@@ -1137,12 +1145,14 @@ func BuiltinDefaultDnssecPolicy() DnssecPolicy {
 		panic(err)
 	}
 	return DnssecPolicy{
-		Name:      "default",
-		Algorithm: dns.ED25519,
-		Mode:      DnssecPolicyModeKSKZSK,
-		KSK:       kskLT,
-		ZSK:       zskLT,
-		CSK:       cskLT,
+		Name:         "default",
+		Algorithm:    dns.ED25519,
+		KSKAlgorithm: dns.ED25519,
+		ZSKAlgorithm: dns.ED25519,
+		Mode:         DnssecPolicyModeKSKZSK,
+		KSK:          kskLT,
+		ZSK:          zskLT,
+		CSK:          cskLT,
 		SigValidity: PolicySigValidity{
 			Default: uint32((14 * day).Seconds()),
 			DNSKEY:  uint32((30 * day).Seconds()),
@@ -1159,7 +1169,7 @@ func GenKeyLifetime(lifetime string) (KeyLifetime, error) {
 	case "forever":
 		lifetime_secs = time.Duration(10000) * time.Hour
 
-	case "none":
+	case "", "none":
 		lifetime_secs = time.Duration(0)
 
 	default:

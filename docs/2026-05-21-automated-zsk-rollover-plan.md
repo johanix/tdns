@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-21
 **Author:** Johan Stenstam
-**Status:** Planning — ready to implement
+**Status:** Implemented (2026-05-22)
 **Depends on:** `2026-05-21-configurable-rrsig-validity-plan.md`
 (configurable, adhered-to RRSIG validity + floor invariant; supplies the
 "signatures outlive the served TTL" guarantee S4 relies on).
@@ -323,11 +323,11 @@ at least its floor invariant, so S4's "signatures outlive the TTL"
 assumption is enforced rather than assumed. ZSK rollover can be built in
 parallel but should not be enabled in production ahead of it.
 
-1. **S1 `ZSK.Lifetime` wiring** (read in S3). Trivial on its own.
-2. **S2 `active_at` column** + stamping. Schema + write sites.
-3. **S3 `rolloverZsksForAllZones`** wired into the tick. Core feature.
-4. **S4 TTL-aware removal** for ZSK.
-5. **S5 status** rendering.
+1. **S1 `ZSK.Lifetime` wiring** (read in S3). **DONE**
+2. **S2 `active_at` column** + stamping. Schema + write sites. **DONE**
+3. **S3 `rolloverZsksForAllZones`** wired into the tick. Core feature. **DONE**
+4. **S4 TTL-aware removal** for ZSK. **DONE**
+5. **S5 status** rendering. **DONE**
 
 Build after each Go change:
 `cd tdns/cmdv2 && GOROOT=/opt/local/lib/go make`. `gofmt -w` every

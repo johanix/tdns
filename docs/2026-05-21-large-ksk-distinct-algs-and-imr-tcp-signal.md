@@ -2,7 +2,7 @@
 
 **Date:** 2026-05-21
 **Author:** Johan Stenstam
-**Status:** Planning — ready to implement
+**Status:** Implemented on branch `feat/large-ksk-support` (2026-05-22)
 **Related drafts:**
  - `draft-johani-dnsop-dnssec-large-ksk-00` (Proposals 1 and 2 below)
  - `draft-johani-dnsop-dnssec-alg-private-ranges-00` (where a large

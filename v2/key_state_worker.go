@@ -117,6 +117,8 @@ func checkAndTransitionKeys(ctx context.Context, conf *Config, kdb *KeyDB, propa
 
 	transitionPublishedToStandby(conf, kdb, now, propagationDelay)
 
+	rolloverZsksForAllZones(ctx, conf, kdb, propagationDelay, now)
+
 	transitionRetiredToRemoved(conf, kdb, now, propagationDelay)
 
 	maintainStandbyKeys(conf, kdb, standbyZskCount, standbyKskCount)
@@ -204,8 +206,18 @@ func transitionRetiredToRemoved(conf *Config, kdb *KeyDB, now time.Time, propaga
 			continue
 		}
 
+		margin := propagationDelay
+		if key.Flags&dns.SEP == 0 {
+			maxTTL, err := LoadZoneSigningMaxTTL(kdb, key.ZoneName)
+			if err != nil {
+				lgSigner.Warn("KeyStateWorker: LoadZoneSigningMaxTTL failed, using propagation_delay only", "zone", key.ZoneName, "err", err)
+			} else {
+				margin = zskRemovalMargin(propagationDelay, maxTTL)
+			}
+		}
+
 		elapsed := now.Sub(*key.RetiredAt)
-		if elapsed < propagationDelay {
+		if elapsed < margin {
 			continue
 		}
 
@@ -239,12 +251,10 @@ func maintainStandbyKeys(conf *Config, kdb *KeyDB, standbyZskCount, standbyKskCo
 			continue
 		}
 
-		alg := zd.DnssecPolicy.Algorithm
-
-		maintainStandbyKeysForType(kdb, zoneName, alg, "ZSK", 256, standbyZskCount)
+		maintainStandbyKeysForType(kdb, zoneName, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", 256, standbyZskCount)
 
 		if standbyKskCount > 0 && (zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method == RolloverMethodNone) {
-			maintainStandbyKeysForType(kdb, zoneName, alg, "KSK", 257, standbyKskCount)
+			maintainStandbyKeysForType(kdb, zoneName, zd.DnssecPolicy.KSKAlgorithm, "KSK", 257, standbyKskCount)
 		}
 	}
 }
@@ -257,7 +267,7 @@ func maintainStandbyKeysForType(kdb *KeyDB, zoneName string, alg uint8, keytype 
 		lgSigner.Error("KeyStateWorker: error getting standby keys", "zone", zoneName, "keytype", keytype, "err", err)
 		return
 	}
-	standbyCount := countKeysByFlags(standbyKeys, expectedFlags)
+	standbyCount := countKeysByFlagsAndAlg(standbyKeys, expectedFlags, alg)
 
 	if standbyCount >= standbyKeyCount {
 		return
@@ -268,7 +278,7 @@ func maintainStandbyKeysForType(kdb *KeyDB, zoneName string, alg uint8, keytype 
 		lgSigner.Error("KeyStateWorker: error getting published keys", "zone", zoneName, "keytype", keytype, "err", err)
 		return
 	}
-	publishedCount := countKeysByFlags(publishedKeys, expectedFlags)
+	publishedCount := countKeysByFlagsAndAlg(publishedKeys, expectedFlags, alg)
 
 	if publishedCount > 0 {
 		lgSigner.Debug("KeyStateWorker: keys in pipeline, not generating", "zone", zoneName, "keytype", keytype, "published", publishedCount)
@@ -288,12 +298,12 @@ func maintainStandbyKeysForType(kdb *KeyDB, zoneName string, alg uint8, keytype 
 	}
 }
 
-// countKeysByFlags counts how many keys in the slice have the expected flags value.
+// countKeysByFlagsAndAlg counts keys matching flags and algorithm.
 // ZSK: flags=256, KSK/CSK: flags=257.
-func countKeysByFlags(keys []DnssecKeyWithTimestamps, expectedFlags uint16) int {
+func countKeysByFlagsAndAlg(keys []DnssecKeyWithTimestamps, expectedFlags uint16, alg uint8) int {
 	count := 0
 	for _, k := range keys {
-		if k.Flags == expectedFlags {
+		if k.Flags == expectedFlags && k.Algorithm == alg {
 			count++
 		}
 	}

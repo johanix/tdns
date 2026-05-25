@@ -162,6 +162,9 @@ keybootstrap:
       interval:		60	# seconds between lookups
       nameservers:	all	# one | all
 
+dnssec:
+   large_algorithms: [ 10 ]   # RSASHA512 stand-in for large KSK
+
 dnssecpolicies:
    default:
       algorithm:  ED25519
@@ -176,12 +179,27 @@ dnssecpolicies:
          dnskey:   30d
          ds:       14d
 
+   large-ksk:
+      algorithm:  ECDSAP256SHA256
+      ksk:
+         algorithm:  RSASHA512
+         lifetime:   90d
+      zsk:
+         algorithm:  ECDSAP256SHA256
+         lifetime:   30d
+      csk:
+         lifetime:  none
+      sigvalidity:
+         default:  14d
+         dnskey:   30d
+         ds:       14d
+
    fastroll:
       algorithm:  ED25519
       ksk:
          lifetime:  48h
       zsk:
-         lifetime:  12h
+         lifetime:  12h   # drives automated ZSK rollover (KeyStateWorker)
       csk:
          lifetime:  none
       sigvalidity:

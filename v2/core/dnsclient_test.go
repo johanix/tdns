@@ -306,3 +306,19 @@ var (
 	_ DNSClienter = (*DNSClient)(nil)
 	_ DNSClienter = (*FakeDNSClient)(nil)
 )
+
+func TestStringToTransportTCPAliases(t *testing.T) {
+	for _, s := range []string{"tcp", "TCP", "do53-tcp", "Do53-TCP"} {
+		got, err := StringToTransport(s)
+		if err != nil {
+			t.Fatalf("StringToTransport(%q): %v", s, err)
+		}
+		if got != TransportDo53TCP {
+			t.Fatalf("StringToTransport(%q) = %v, want TransportDo53TCP", s, got)
+		}
+	}
+	got, err := StringToTransport("do53")
+	if err != nil || got != TransportDo53 {
+		t.Fatalf("StringToTransport(do53) = %v, %v, want TransportDo53", got, err)
+	}
+}

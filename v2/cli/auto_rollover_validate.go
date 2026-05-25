@@ -236,7 +236,7 @@ func renderValidateReport(cfgPath, zone, policyName string, pol *tdns.DnssecPoli
 	// Rule-of-thumb coupling concerns (rapid-rollover patterns,
 	// sig-validity vs lifetime, clamping-margin floor). These aren't
 	// §4 cache-flush invariants but warrant operator attention.
-	couplingWarnings := tdns.CollectDnssecPolicyCouplingWarnings(pol)
+	couplingWarnings := tdns.CollectDnssecPolicyCouplingWarnings(pol, nil)
 	if len(couplingWarnings) > 0 {
 		fmt.Println("Policy coupling warnings:")
 		for _, w := range couplingWarnings {

@@ -418,7 +418,7 @@ func configuredServedTTLForSigValidity(pol *DnssecPolicy, which string) time.Dur
 // UpdateSigValidityFloor applies config-load or runtime sig-validity floor
 // checks and sets/clears DnssecError / DnssecPolicyWarning on zd.
 // When runtime is true, maxObservedTTL is the bound for all three values.
-func UpdateSigValidityFloor(zd *ZoneData, pol *DnssecPolicy, propagationDelay time.Duration, maxObservedTTL uint32, runtime bool) {
+func UpdateSigValidityFloor(zd *ZoneData, pol *DnssecPolicy, propagationDelay time.Duration, maxObservedTTL uint32, runtime bool, isLarge func(uint8) bool) {
 	if zd == nil || pol == nil {
 		return
 	}
@@ -484,6 +484,7 @@ func UpdateSigValidityFloor(zd *ZoneData, pol *DnssecPolicy, propagationDelay ti
 	} else {
 		zd.SetError(DnssecError, "sig-validity floor: %s", strings.Join(hardMsgs, "; "))
 	}
+	warnMsgs = appendDnssecPolicyWarnings(warnMsgs, pol, isLarge)
 	if len(warnMsgs) == 0 {
 		zd.ClearError(DnssecPolicyWarning)
 	} else {

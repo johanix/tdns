@@ -340,10 +340,12 @@ type DnssecPolicyConf struct {
 	Mode      string `yaml:"mode" mapstructure:"mode"`
 
 	KSK struct {
-		Lifetime string
+		Lifetime  string
+		Algorithm string `yaml:"algorithm" mapstructure:"algorithm"`
 	}
 	ZSK struct {
-		Lifetime string
+		Lifetime  string
+		Algorithm string `yaml:"algorithm" mapstructure:"algorithm"`
 	}
 	CSK struct {
 		Lifetime string
@@ -369,9 +371,11 @@ type PolicySigValidity struct {
 
 // DnssecPolicy is what is actually used; it is created from the corresponding DnssecPolicyConf
 type DnssecPolicy struct {
-	Name      string
-	Algorithm uint8
-	Mode      string
+	Name         string
+	Algorithm    uint8 // default / CSK algorithm
+	KSKAlgorithm uint8
+	ZSKAlgorithm uint8
+	Mode         string
 
 	KSK KeyLifetime
 	ZSK KeyLifetime

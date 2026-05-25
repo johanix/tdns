@@ -547,6 +547,7 @@ func policySummary(pol *DnssecPolicy) *PolicySummary {
 		Name:                     pol.Name,
 		Algorithm:                dns.AlgorithmToString[pol.Algorithm],
 		KskLifetime:              (time.Duration(pol.KSK.Lifetime) * time.Second).String(),
+		ZskLifetime:              (time.Duration(pol.ZSK.Lifetime) * time.Second).String(),
 		DsPublishDelay:           pol.Rollover.DsPublishDelay.String(),
 		MaxAttemptsBeforeBackoff: pol.Rollover.MaxAttemptsBeforeBackoff,
 		SoftfailDelay:            pol.Rollover.SoftfailDelay.String(),
