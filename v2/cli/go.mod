@@ -3,22 +3,17 @@ module github.com/johanix/tdns/v2/cli
 go 1.25.2
 
 replace (
-	//	github.com/johanix/tdns/v2/hpke => ../hpke
-	github.com/johanix/tdns-transport/v2 => ../../../tdns-transport/v2
 	github.com/johanix/tdns/v2 => ../
 	github.com/johanix/tdns/v2/cache => ../cache
 	github.com/johanix/tdns/v2/core => ../core
-	//	github.com/johanix/tdns/v2/crypto => ../crypto
 	github.com/johanix/tdns/v2/edns0 => ../edns0
 )
 
 require (
 	github.com/c-bata/go-prompt v0.2.6
 	github.com/chzyer/readline v0.0.0-20180603132655-2972be24d48e
-	github.com/go-jose/go-jose/v4 v4.1.4
 	github.com/go-playground/validator/v10 v10.22.1
 	github.com/gookit/goutil v0.6.15
-	github.com/johanix/tdns-transport/v2 v2.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f
 	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39
