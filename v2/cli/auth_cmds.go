@@ -18,6 +18,10 @@ func init() {
 	AuthCmd.AddCommand(NewPingCmd("auth"))
 	AuthCmd.AddCommand(NewDaemonCmd("auth"))
 	AuthCmd.AddCommand(NewZoneCmd("auth"))
-	AuthCmd.AddCommand(NewKeystoreCmd("auth"))
-	AuthCmd.AddCommand(NewTruststoreCmd("auth"))
+
+	// Keystore and truststore are wired by the binary's own init()
+	// after the binary has registered its DNSSEC algorithms — the
+	// keystore commands' --help text embeds the supported-algorithm
+	// list at command-construction time, so deferring lets PQ
+	// algorithms appear in --help. See cmdv2/cliv2/shared_cmds.go.
 }

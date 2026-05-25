@@ -154,8 +154,7 @@ func PrepArgs(args ...interface{}) {
 			}
 
 			tdns.Globals.Algorithm = strings.ToUpper(tdns.Globals.Algorithm)
-			_, exist := dns.StringToAlgorithm[tdns.Globals.Algorithm]
-			if !exist {
+			if !isKnownAlgorithm(tdns.Globals.Algorithm) {
 				fmt.Printf("Error: algorithm \"%s\" is not known\n", tdns.Globals.Algorithm)
 				os.Exit(1)
 			}

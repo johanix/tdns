@@ -11,11 +11,13 @@ replace (
 )
 
 require (
+	github.com/johanix/dnssec-algorithms v0.0.0-20260515092703-423a9a3a4bf5
 	github.com/johanix/tdns/v2 v2.0.0-00010101000000-000000000000
 	github.com/mattn/go-sqlite3 v1.14.16
 )
 
 require (
+	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/fsnotify/fsnotify v1.6.0 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.3 // indirect
 	github.com/go-jose/go-jose/v4 v4.1.4 // indirect
@@ -34,6 +36,7 @@ require (
 	github.com/magiconair/properties v1.8.7 // indirect
 	github.com/miekg/dns v1.1.70 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
+	github.com/open-quantum-safe/liboqs-go v0.0.0-20260310140033-75451133b94a // indirect
 	github.com/pelletier/go-toml/v2 v2.0.8 // indirect
 	github.com/quic-go/quic-go v0.58.0 // indirect
 	github.com/spf13/afero v1.9.5 // indirect
@@ -44,14 +47,16 @@ require (
 	github.com/subosito/gotenv v1.4.2 // indirect
 	github.com/twotwotwo/sorts v0.0.0-20160814051341-bf5c1f2b8553 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	golang.org/x/crypto v0.46.0 // indirect
-	golang.org/x/mod v0.31.0 // indirect
-	golang.org/x/net v0.48.0 // indirect
-	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.39.0 // indirect
-	golang.org/x/text v0.32.0 // indirect
-	golang.org/x/tools v0.40.0 // indirect
+	golang.org/x/crypto v0.49.0 // indirect
+	golang.org/x/mod v0.34.0 // indirect
+	golang.org/x/net v0.52.0 // indirect
+	golang.org/x/sync v0.20.0 // indirect
+	golang.org/x/sys v0.42.0 // indirect
+	golang.org/x/text v0.35.0 // indirect
+	golang.org/x/tools v0.43.0 // indirect
 	gopkg.in/ini.v1 v1.67.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
+
+replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260515091838-3300006a8466

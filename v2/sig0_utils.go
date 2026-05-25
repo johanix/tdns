@@ -6,9 +6,6 @@ package tdns
 import (
 	"context"
 	"crypto"
-	"crypto/ecdsa"
-	"crypto/ed25519"
-	"crypto/rsa"
 	"os"
 	"path/filepath"
 	"slices"
@@ -175,19 +172,10 @@ func GenerateKeyMaterial(owner string, rrtype uint16, alg uint8, keytype string)
 			return nil, fmt.Errorf("error from nkey.Generate: %v", err)
 		}
 
-		var pk crypto.PrivateKey
-		switch privkey := privkey.(type) {
-		case *rsa.PrivateKey:
-			pk = privkey
-		case ed25519.PrivateKey:
-			pk = privkey
-		case *ecdsa.PrivateKey:
-			pk = privkey
-		default:
-			return nil, fmt.Errorf("error: unknown private key type: %T", privkey)
-		}
-
-		privkeyPEM, err := PrivateKeyToPEM(pk)
+		// PrivateKeyToPEM dispatches by Go type (stdlib for RSA/ECDSA/
+		// Ed25519, dnssec-algorithms/pkcs8 registry for the rest), so
+		// just forward whatever Generate returned.
+		privkeyPEM, err := PrivateKeyToPEM(privkey)
 		if err != nil {
 			return nil, fmt.Errorf("error from PrivateKeyToPEM: %v", err)
 		}

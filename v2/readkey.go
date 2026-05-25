@@ -5,11 +5,9 @@ package tdns
 
 import (
 	"crypto"
-	"crypto/ecdsa"
-	"crypto/ed25519"
-	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"errors"
 
 	"fmt"
 	"os"
@@ -17,6 +15,8 @@ import (
 
 	"github.com/miekg/dns"
 	"gopkg.in/yaml.v3"
+
+	dnsalgpkcs8 "github.com/johanix/dnssec-algorithms/pkcs8"
 )
 
 // StripKeyFileComments removes lines that are empty or start with '#' (after trim),
@@ -318,16 +318,16 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 
 	pkc.PrivateKey = privKeyBase64
 
-	switch pkc.Algorithm {
-	case dns.RSASHA256, dns.RSASHA512:
-		pkc.CS = pkc.K.(*rsa.PrivateKey)
-	case dns.ED25519:
-		pkc.CS = pkc.K.(ed25519.PrivateKey)
-	case dns.ECDSAP256SHA256, dns.ECDSAP384SHA384:
-		pkc.CS = pkc.K.(*ecdsa.PrivateKey)
-	default:
-		return nil, fmt.Errorf("error: no support for algorithm %s yet", dns.AlgorithmToString[pkc.Algorithm])
+	// Every supported DNSSEC algorithm — built-in (RSA/ECDSA/Ed25519)
+	// or registered via dns.RegisterAlgorithm — returns a private key
+	// that satisfies crypto.Signer. Assert that once, in algorithm-
+	// agnostic form, instead of branching per algorithm number.
+	signer, ok := pkc.K.(crypto.Signer)
+	if !ok {
+		return nil, fmt.Errorf("private key for algorithm %s does not satisfy crypto.Signer",
+			dns.AlgorithmToString[pkc.Algorithm])
 	}
+	pkc.CS = signer
 
 	//	log.Printf("PrepareKeyCache: Zone: %s, algorithm: %s, keyid: %d,\nprivkey: %s,\npubkey: %s\npkc.K: %v",
 	//		rr.Header().Name, dns.AlgorithmToString[pkc.Algorithm], pkc.KeyId, pkc.PrivateKey, pubkey, pkc.K)
@@ -346,8 +346,14 @@ func PrivateKeyToPEM(privkey crypto.PrivateKey) (string, error) {
 		return "", fmt.Errorf("private key is nil")
 	}
 
-	// Marshal the private key to PKCS#8 DER format
+	// Try Go's standard PKCS#8 marshaler first (handles RSA, ECDSA,
+	// Ed25519). For algorithms it doesn't know — registered via
+	// dns.RegisterAlgorithm and contributing a PKCS#8 codec via
+	// dnssec-algorithms/pkcs8 — fall through to the registry.
 	derBytes, err := x509.MarshalPKCS8PrivateKey(privkey)
+	if err != nil {
+		derBytes, err = dnsalgpkcs8.Marshal(privkey)
+	}
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal private key to PKCS#8: %v", err)
 	}
@@ -382,10 +388,21 @@ func PEMToPrivateKey(pemData string) (crypto.PrivateKey, error) {
 		return nil, fmt.Errorf("PEM block type is %q, expected \"PRIVATE KEY\"", block.Type)
 	}
 
-	// Parse PKCS#8 private key
+	// Parse PKCS#8 private key. Try Go's standard parser first
+	// (handles RSA, ECDSA, Ed25519); for algorithms it doesn't know
+	// (registered via dns.RegisterAlgorithm and contributing a PKCS#8
+	// codec via dnssec-algorithms/pkcs8) fall through to the
+	// registry's Parse, which iterates registered codecs by OID.
 	privkey, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse PKCS#8 private key: %v", err)
+		var derr error
+		privkey, derr = dnsalgpkcs8.Parse(block.Bytes)
+		if errors.Is(derr, dnsalgpkcs8.ErrUnsupported) {
+			return nil, fmt.Errorf("failed to parse PKCS#8 private key: stdlib: %v; registry: no codec for the algorithm OID", err)
+		}
+		if derr != nil {
+			return nil, fmt.Errorf("failed to parse PKCS#8 private key: %v", derr)
+		}
 	}
 
 	return privkey, nil
