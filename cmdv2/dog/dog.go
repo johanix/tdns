@@ -475,25 +475,29 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 		options["sigchase"] = "true"
 		return options, nil
 	case "+TCP":
-		if transport, exists := options["transport"]; exists {
+		// A pre-existing "Do53" is the default ParseServer writes when
+		// the user supplied @host without a scheme; treat it as an
+		// upgrade target. Only reject when a different encrypted
+		// transport was already explicitly selected.
+		if transport, exists := options["transport"]; exists && transport != "Do53" {
 			return nil, fmt.Errorf("Error: multiple transport options specified (%s and TCP)", transport)
 		}
 		options["transport"] = "Do53-TCP"
 		return options, nil
 	case "+TLS", "+DOT":
-		if transport, exists := options["transport"]; exists {
+		if transport, exists := options["transport"]; exists && transport != "Do53" {
 			return nil, fmt.Errorf("Error: multiple transport options specified (%s and DoT)", transport)
 		}
 		options["transport"] = "DoT"
 		return options, nil
 	case "+HTTPS", "+DOH":
-		if transport, exists := options["transport"]; exists {
+		if transport, exists := options["transport"]; exists && transport != "Do53" {
 			return nil, fmt.Errorf("Error: multiple transport options specified (%s and DoH)", transport)
 		}
 		options["transport"] = "DoH"
 		return options, nil
 	case "+QUIC", "+DOQ":
-		if transport, exists := options["transport"]; exists {
+		if transport, exists := options["transport"]; exists && transport != "Do53" {
 			return nil, fmt.Errorf("Error: multiple transport options specified (%s and DoQ)", transport)
 		}
 		options["transport"] = "DoQ"
