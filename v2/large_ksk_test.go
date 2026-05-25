@@ -71,6 +71,9 @@ func TestGenKeyLifetimeEmpty(t *testing.T) {
 }
 
 func TestLargeKskImrMetrics(t *testing.T) {
+	resetLargeKskImrMetricsForTest()
+	t.Cleanup(resetLargeKskImrMetricsForTest)
+
 	imr := &Imr{largeAlgs: map[uint8]bool{dns.RSASHA512: true}}
 
 	smallDS := &dns.DS{

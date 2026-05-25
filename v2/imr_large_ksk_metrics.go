@@ -67,6 +67,17 @@ func LargeKskImrMetricsSnapshot() LargeKskImrMetrics {
 	return m
 }
 
+// resetLargeKskImrMetricsForTest zeroes all package-global counters. Test-only.
+func resetLargeKskImrMetricsForTest() {
+	imrDSEncounteredTotal.Store(0)
+	imrDSEncounteredLarge.Store(0)
+	imrDNSKEYLookupTotal.Store(0)
+	imrDNSKEYLookupForcedTCP.Store(0)
+	for i := range imrDSDLargeRRByAlg {
+		imrDSDLargeRRByAlg[i].Store(0)
+	}
+}
+
 func (imr *Imr) noteDSEncountered(dsRRs []dns.RR) {
 	if len(dsRRs) == 0 {
 		return

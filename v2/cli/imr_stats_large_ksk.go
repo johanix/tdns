@@ -35,7 +35,10 @@ func printLargeKskImrMetrics(m tdns.LargeKskImrMetrics) {
 	fmt.Printf("DNSKEY lookups:                     %d\n", m.DNSKEYLookupTotal)
 	fmt.Printf("  forced TCP from start (do53-tcp):  %d (%s)\n",
 		m.DNSKEYLookupForcedTCP, pct(m.DNSKEYLookupForcedTCP, m.DNSKEYLookupTotal))
-	normal := m.DNSKEYLookupTotal - m.DNSKEYLookupForcedTCP
+	var normal uint64
+	if m.DNSKEYLookupForcedTCP <= m.DNSKEYLookupTotal {
+		normal = m.DNSKEYLookupTotal - m.DNSKEYLookupForcedTCP
+	}
 	fmt.Printf("  normal (UDP / encrypted / other):  %d (%s)\n",
 		normal, pct(normal, m.DNSKEYLookupTotal))
 }
