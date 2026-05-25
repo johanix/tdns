@@ -224,6 +224,10 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.KeyDB = conf.Internal.KeyDB
 							zd.Data = core.NewCmap[OwnerData]()
 							zd.mu.Unlock()
+							if zd.DnssecPolicy != nil &&
+								(zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) {
+								UpdateSigValidityFloor(zd, zd.DnssecPolicy, conf.KaspPropagationDelay(), 0, false)
+							}
 						}
 
 						if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,
@@ -334,6 +338,10 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// converges on the next sign pass instead of waiting
 						// for a key-state event.
 						if dnssecPolicyChanged {
+							if zd.DnssecPolicy != nil &&
+								(zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) {
+								UpdateSigValidityFloor(zd, zd.DnssecPolicy, conf.KaspPropagationDelay(), 0, false)
+							}
 							triggerResign(conf, zone)
 						}
 						lgEngine.Debug("updated configuration for zone", "zone", zone, "notify", zd.Downstreams, "upstream", zd.Upstream, "zonefile", zd.Zonefile, "store", ZoneStoreToString[zd.ZoneStore])

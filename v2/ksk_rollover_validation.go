@@ -17,14 +17,14 @@ import (
 //
 // Inputs the function reads:
 //
-//   - pol.KSK.Lifetime, KSK.SigValidity
+//   - pol.KSK.Lifetime, SigValidity.DNSKEY
 //   - pol.Rollover.NumDS
 //   - pol.Rollover.DsPublishDelay (proxy for parent_prop, per §4.9)
 //   - pol.Clamping.{Enabled, Margin}
 //   - pol.TTLS.{DNSKEY, MaxServed, DS}
 //   - zd.ParentDSTTLObserved
 //
-// Behaviour when DS_TTL is not yet known (pol.TTLS.DS == 0 AND
+// Behaviour when DS_TTL is not yet known (pol.TTLS.ParentDS == 0 AND
 // zd.ParentDSTTLObserved == 0): E10/E11 are deferred (no error
 // raised, but no clearance either if E10/E11 were the active
 // condition). E5 is checked unconditionally — it does not depend on
@@ -44,7 +44,7 @@ func EvaluateRolloverPolicyInvariants(zd *ZoneData, pol *DnssecPolicy) {
 	//
 	// E5 is config-only (no DS_TTL needed); E10/E11 require a
 	// resolved DS_TTL. When DS_TTL is unknown (parent unreachable
-	// at zone init, no ttls.ds override, no prior observation),
+	// at zone init, no ttls.parent-ds override, no prior observation),
 	// we can only freshly evaluate E5 — so we must NOT clobber any
 	// prior E10/E11 state. Strategy:
 	//
@@ -98,13 +98,13 @@ func EvaluateRolloverPolicyInvariants(zd *ZoneData, pol *DnssecPolicy) {
 }
 
 // resolveDSTTL returns the DS TTL the engine should use for E10/E11.
-// Override (pol.TTLS.DS) wins over observation (zd.ParentDSTTLObserved)
+// Override (pol.TTLS.ParentDS) wins over observation (zd.ParentDSTTLObserved)
 // when both are set: the operator may have explicit knowledge that the
 // observation doesn't capture (e.g., parent's DS RRset cached behind
 // a CDN with a shorter TTL than the authoritative answer).
 func resolveDSTTL(zd *ZoneData, pol *DnssecPolicy) (time.Duration, bool) {
-	if pol.TTLS.DS > 0 {
-		return time.Duration(pol.TTLS.DS) * time.Second, true
+	if pol.TTLS.ParentDS > 0 {
+		return time.Duration(pol.TTLS.ParentDS) * time.Second, true
 	}
 	if zd != nil && zd.ParentDSTTLObserved > 0 {
 		return time.Duration(zd.ParentDSTTLObserved) * time.Second, true
@@ -131,7 +131,7 @@ func CheckE5(pol *DnssecPolicy) InvariantResult                       { return c
 func CheckE10(pol *DnssecPolicy, dsTTL time.Duration) InvariantResult { return checkE10(pol, dsTTL) }
 func CheckE11(pol *DnssecPolicy, dsTTL time.Duration) InvariantResult { return checkE11(pol, dsTTL) }
 
-// checkE5: retirement_period ≥ min(DNSKEY_TTL, KSK.SigValidity), per
+// checkE5: retirement_period ≥ min(DNSKEY_TTL, SigValidity.DNSKEY), per
 // spec §4.5.1. DNSKEY_TTL here is the **served** TTL (E13 form,
 // min(ttls.dnskey, ttls.max_served)), NOT the operator-configured
 // ttls.dnskey alone — validators can only cache DNSKEY for as long
@@ -156,7 +156,7 @@ func checkE5(pol *DnssecPolicy) InvariantResult {
 		return InvariantResult{}
 	}
 	dnskeyTTL := configuredServedDnskeyTTL(pol)
-	sigVal := time.Duration(pol.KSK.SigValidity) * time.Second
+	sigVal := time.Duration(pol.SigValidity.DNSKEY) * time.Second
 	if dnskeyTTL == 0 && sigVal == 0 {
 		return InvariantResult{}
 	}
@@ -168,10 +168,10 @@ func checkE5(pol *DnssecPolicy) InvariantResult {
 		return InvariantResult{}
 	}
 	return InvariantResult{
-		Message: fmt.Sprintf("E5: clamping.margin (%s) < min(served DNSKEY_TTL, ksk.sig-validity) (%s); "+
+		Message: fmt.Sprintf("E5: clamping.margin (%s) < min(served DNSKEY_TTL, sigvalidity.dnskey) (%s); "+
 			"retirement period too short to flush DNSKEY/RRSIG caches before next rollover",
 			pol.Clamping.Margin, floor),
-		Suggestion: fmt.Sprintf("Raise clamping.margin to ≥ %s, OR lower min(ttls.dnskey, ttls.max_served) and/or ksk.sig-validity so their min is ≤ %s.",
+		Suggestion: fmt.Sprintf("Raise clamping.margin to ≥ %s, OR lower min(ttls.dnskey, ttls.max_served) and/or sigvalidity.dnskey so their min is ≤ %s.",
 			floor, pol.Clamping.Margin),
 	}
 }
@@ -245,7 +245,7 @@ func checkE10(pol *DnssecPolicy, dsTTL time.Duration) InvariantResult {
 			"(%s = %s + %s + %s + %s); parent DS replacement too late before next rollover",
 			available, n-1, kskLifetime,
 			required, retirement, parentProp, dsTTL, standbyTime),
-		Suggestion: fmt.Sprintf("Raise rollover.num-ds to ≥ %d, OR raise ksk.lifetime, OR lower clamping.margin/rollover.ds-publish-delay/ttls.ds/rollover.standby-time.",
+		Suggestion: fmt.Sprintf("Raise rollover.num-ds to ≥ %d, OR raise ksk.lifetime, OR lower clamping.margin/rollover.ds-publish-delay/ttls.parent-ds/rollover.standby-time.",
 			requiredN),
 	}
 }
@@ -371,4 +371,122 @@ func minDSTTL(rrs []dns.RR) uint32 {
 		}
 	}
 	return min
+}
+
+type sigValidityFloorBand int
+
+const (
+	sigValidityFloorOK sigValidityFloorBand = iota
+	sigValidityFloorWarning
+	sigValidityFloorError
+)
+
+func checkSigValidityFloorBand(validity, servedTTL, propagationDelay time.Duration) sigValidityFloorBand {
+	if servedTTL == 0 {
+		return sigValidityFloorOK
+	}
+	if validity == 0 {
+		return sigValidityFloorError
+	}
+	h := servedTTL + propagationDelay
+	if validity <= 2*h {
+		return sigValidityFloorError
+	}
+	if validity < 4*h {
+		return sigValidityFloorWarning
+	}
+	return sigValidityFloorOK
+}
+
+func configuredServedTTLForSigValidity(pol *DnssecPolicy, which string) time.Duration {
+	switch which {
+	case "dnskey":
+		return configuredServedDnskeyTTL(pol)
+	case "ds":
+		if pol.TTLS.DS == 0 {
+			return 0
+		}
+		return time.Duration(pol.TTLS.DS) * time.Second
+	default:
+		if pol.TTLS.MaxServed == 0 {
+			return 0
+		}
+		return time.Duration(pol.TTLS.MaxServed) * time.Second
+	}
+}
+
+// UpdateSigValidityFloor applies config-load or runtime sig-validity floor
+// checks and sets/clears DnssecError / DnssecPolicyWarning on zd.
+// When runtime is true, maxObservedTTL is the bound for all three values.
+func UpdateSigValidityFloor(zd *ZoneData, pol *DnssecPolicy, propagationDelay time.Duration, maxObservedTTL uint32, runtime bool) {
+	if zd == nil || pol == nil {
+		return
+	}
+	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+		return
+	}
+
+	var hardMsgs, warnMsgs []string
+
+	if runtime {
+		if maxObservedTTL == 0 {
+			zd.ClearError(DnssecPolicyWarning)
+			zd.ClearError(DnssecError)
+			return
+		}
+		served := time.Duration(maxObservedTTL) * time.Second
+		for _, spec := range []struct {
+			label string
+			secs  uint32
+		}{
+			{"sigvalidity.default", pol.SigValidity.Default},
+			{"sigvalidity.dnskey", pol.SigValidity.DNSKEY},
+			{"sigvalidity.ds", pol.SigValidity.DS},
+		} {
+			validity := time.Duration(spec.secs) * time.Second
+			switch checkSigValidityFloorBand(validity, served, propagationDelay) {
+			case sigValidityFloorError:
+				hardMsgs = append(hardMsgs, fmt.Sprintf("%s (%s) ≤ 2×(servedTTL+propagationDelay) with servedTTL=%s",
+					spec.label, validity, served))
+			case sigValidityFloorWarning:
+				warnMsgs = append(warnMsgs, fmt.Sprintf("%s (%s) < 4×(servedTTL+propagationDelay) with servedTTL=%s",
+					spec.label, validity, served))
+			}
+		}
+	} else {
+		for _, spec := range []struct {
+			label    string
+			secs     uint32
+			whichTTL string
+		}{
+			{"sigvalidity.default", pol.SigValidity.Default, "default"},
+			{"sigvalidity.dnskey", pol.SigValidity.DNSKEY, "dnskey"},
+			{"sigvalidity.ds", pol.SigValidity.DS, "ds"},
+		} {
+			served := configuredServedTTLForSigValidity(pol, spec.whichTTL)
+			validity := time.Duration(spec.secs) * time.Second
+			if served == 0 {
+				continue
+			}
+			switch checkSigValidityFloorBand(validity, served, propagationDelay) {
+			case sigValidityFloorError:
+				hardMsgs = append(hardMsgs, fmt.Sprintf("%s (%s) ≤ 2×(servedTTL+propagationDelay) with servedTTL=%s",
+					spec.label, validity, served))
+			case sigValidityFloorWarning:
+				warnMsgs = append(warnMsgs, fmt.Sprintf("%s (%s) < 4×(servedTTL+propagationDelay) with servedTTL=%s",
+					spec.label, validity, served))
+			}
+		}
+	}
+
+	if len(hardMsgs) == 0 {
+		zd.ClearError(DnssecError)
+	} else {
+		zd.SetError(DnssecError, "sig-validity floor: %s", strings.Join(hardMsgs, "; "))
+	}
+	if len(warnMsgs) == 0 {
+		zd.ClearError(DnssecPolicyWarning)
+	} else {
+		zd.SetError(DnssecPolicyWarning, "%s", strings.Join(warnMsgs, "; "))
+	}
 }

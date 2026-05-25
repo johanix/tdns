@@ -6,7 +6,7 @@ import (
 )
 
 // TestCheckE5 exercises the §4.5.1 retirement_period bound check.
-// E5: retirement_period ≥ min(DNSKEY_TTL, KSK.SigValidity).
+// E5: retirement_period ≥ min(DNSKEY_TTL, SigValidity.DNSKEY).
 func TestCheckE5(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -19,7 +19,7 @@ func TestCheckE5(t *testing.T) {
 				p := &DnssecPolicy{}
 				p.Clamping.Enabled = false
 				p.TTLS.DNSKEY = 300
-				p.KSK.SigValidity = 60
+				p.SigValidity.DNSKEY = 60
 				return p
 			}(),
 			wantEmpty: true,
@@ -30,8 +30,8 @@ func TestCheckE5(t *testing.T) {
 				p := &DnssecPolicy{}
 				p.Clamping.Enabled = true
 				p.Clamping.Margin = 5 * time.Minute
-				p.TTLS.DNSKEY = 300         // 5m
-				p.KSK.SigValidity = 60 * 60 // 1h
+				p.TTLS.DNSKEY = 300            // 5m
+				p.SigValidity.DNSKEY = 60 * 60 // 1h
 				return p
 			}(),
 			wantEmpty: true,
@@ -44,9 +44,9 @@ func TestCheckE5(t *testing.T) {
 				p := &DnssecPolicy{}
 				p.Clamping.Enabled = true
 				p.Clamping.Margin = 5 * time.Minute
-				p.TTLS.DNSKEY = 7200        // 2h configured
-				p.TTLS.MaxServed = 300      // 5m clamp
-				p.KSK.SigValidity = 20 * 60 // 20m
+				p.TTLS.DNSKEY = 7200           // 2h configured
+				p.TTLS.MaxServed = 300         // 5m clamp
+				p.SigValidity.DNSKEY = 20 * 60 // 20m
 				return p
 			}(),
 			wantEmpty: true,
@@ -61,7 +61,7 @@ func TestCheckE5(t *testing.T) {
 				p.Clamping.Margin = 1 * time.Minute
 				p.TTLS.DNSKEY = 7200
 				p.TTLS.MaxServed = 300
-				p.KSK.SigValidity = 20 * 60
+				p.SigValidity.DNSKEY = 20 * 60
 				return p
 			}(),
 			wantEmpty: false,
@@ -72,8 +72,8 @@ func TestCheckE5(t *testing.T) {
 				p := &DnssecPolicy{}
 				p.Clamping.Enabled = true
 				p.Clamping.Margin = 1 * time.Minute
-				p.TTLS.DNSKEY = 300         // 5m -> floor
-				p.KSK.SigValidity = 60 * 60 // 1h
+				p.TTLS.DNSKEY = 300            // 5m -> floor
+				p.SigValidity.DNSKEY = 60 * 60 // 1h
 				return p
 			}(),
 			wantEmpty: false,
@@ -195,11 +195,61 @@ func TestCheckE10(t *testing.T) {
 	}
 }
 
+func TestUpdateSigValidityFloorConfig(t *testing.T) {
+	prop := time.Hour
+	pol := &DnssecPolicy{
+		SigValidity: PolicySigValidity{
+			Default: uint32((14 * 24 * time.Hour).Seconds()),
+			DNSKEY:  uint32((30 * 24 * time.Hour).Seconds()),
+			DS:      uint32((14 * 24 * time.Hour).Seconds()),
+		},
+	}
+	zd := &ZoneData{ZoneName: "test.example."}
+	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+	UpdateSigValidityFloor(zd, pol, prop, 0, false)
+	if zd.HasError(DnssecError) || zd.HasError(DnssecPolicyWarning) {
+		t.Fatalf("no TTL ceilings: expected no floor errors, got dnssec=%v warn=%v",
+			zd.HasError(DnssecError), zd.HasError(DnssecPolicyWarning))
+	}
+
+	pol.TTLS.MaxServed = 3600
+	pol.SigValidity.Default = 3600 // 1h, H=2h with prop=1h → 2h ≤ 2×H
+	zd2 := &ZoneData{ZoneName: "tight.example."}
+	zd2.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+	UpdateSigValidityFloor(zd2, pol, prop, 0, false)
+	if !zd2.HasError(DnssecError) {
+		t.Fatal("expected hard floor error for short default validity")
+	}
+}
+
+func TestUpdateSigValidityFloorRuntime(t *testing.T) {
+	prop := time.Hour
+	pol := &DnssecPolicy{
+		SigValidity: PolicySigValidity{
+			Default: uint32((14 * 24 * time.Hour).Seconds()),
+			DNSKEY:  uint32((30 * 24 * time.Hour).Seconds()),
+			DS:      uint32((14 * 24 * time.Hour).Seconds()),
+		},
+	}
+	zd := &ZoneData{ZoneName: "test.example."}
+	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+	UpdateSigValidityFloor(zd, pol, prop, 300, true)
+	if zd.HasError(DnssecError) {
+		t.Fatalf("runtime floor should pass: %s", zd.ErrorMsg)
+	}
+
+	pol.SigValidity.Default = 1800 // 30m
+	UpdateSigValidityFloor(zd, pol, prop, 3600, true)
+	if !zd.HasError(DnssecError) {
+		t.Fatal("expected runtime hard error when validity too short for observed TTL")
+	}
+}
+
 // TestResolveDSTTL confirms the resolution priority: override > observation > none.
 func TestResolveDSTTL(t *testing.T) {
 	policy := func(override uint32) *DnssecPolicy {
 		p := &DnssecPolicy{}
-		p.TTLS.DS = override
+		p.TTLS.ParentDS = override
 		return p
 	}
 	zone := func(observed uint32) *ZoneData {

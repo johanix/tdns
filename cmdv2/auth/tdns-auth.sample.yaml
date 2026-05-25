@@ -174,14 +174,15 @@ dnssecpolicies:
    default:
       algorithm:  ED25519
       ksk:
-         lifetime:     forever
-         sigvalidity:  168h     # 24*7h = 1 week
+         lifetime:  forever
       zsk:
-         lifetime:     forever
-         sigvalidity:  2h
+         lifetime:  forever
       csk:
-         lifetime:     none
-         sigvalidity:  168h
+         lifetime:  none
+      sigvalidity:
+         default:  14d
+         dnskey:   30d
+         ds:       14d
       # rollover: omitted → method: none (static keys)
       # clamping: omitted → disabled (no TTL clamping)
 
@@ -190,14 +191,15 @@ dnssecpolicies:
    fastroll:
       algorithm:  ED25519
       ksk:
-         lifetime:     48h
-         sigvalidity:  168h     # exceed lifetime so RRSIGs outlive the key cycle
+         lifetime:  48h
       zsk:
-         lifetime:     12h
-         sigvalidity:  2h
+         lifetime:  12h
       csk:
-         lifetime:     none
-         sigvalidity:  168h
+         lifetime:  none
+      sigvalidity:
+         default:  14d
+         dnskey:   30d
+         ds:       14d
       rollover:
          method:                multi-ds
          num-ds:                3                  # pipeline depth

@@ -247,6 +247,9 @@ const (
 	RefreshError
 	AgentError
 	DnssecError
+	// DnssecPolicyWarning: sig-validity floor headroom warning (2×H <
+	// validity < 4×H). Zone keeps signing; visibility-only.
+	DnssecPolicyWarning
 	// RolloverPolicyViolation: hard cache-flush invariant violation
 	// (E5/E10) detected from policy + observed parent state. The
 	// rollover engine refuses to advance keys for the affected zone:
@@ -276,6 +279,7 @@ var ErrorTypeToString = map[ErrorType]string{
 	RefreshError:            "refresh",
 	AgentError:              "agent",
 	DnssecError:             "DNSSEC",
+	DnssecPolicyWarning:     "dnssec-policy-warning",
 	RolloverPolicyViolation: "rollover-policy",
 	RolloverPolicyWarning:   "rollover-policy-warning",
 	RolloverParentBlocker:   "rollover-parent-blocker",
@@ -293,6 +297,7 @@ var errorTypeReportOrder = []ErrorType{
 	DnssecError,
 	RolloverPolicyViolation,
 	RolloverParentBlocker,
+	DnssecPolicyWarning,
 	RolloverPolicyWarning,
 }
 

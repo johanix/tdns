@@ -231,6 +231,10 @@ func (conf *Config) ParseConfig(reload bool) error {
 		}
 	}
 
+	if err := validateKaspPropagationDelay(conf.Kasp.PropagationDelay); err != nil {
+		return err
+	}
+
 	// Normalize service.transport.type (default: none)
 	if conf.Service.Transport.Type == "" {
 		conf.Service.Transport.Type = "none"
@@ -271,12 +275,27 @@ func (conf *Config) ParseConfig(reload bool) error {
 	conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
 	for name, dp := range conf.DnssecPolicies {
 		dpLocal := dp
+		kskLT, err := GenKeyLifetime(dpLocal.KSK.Lifetime)
+		if err != nil {
+			lgConfig.Error("DNSSEC policy invalid ksk.lifetime, ignored", "policy", name, "err", err)
+			continue
+		}
+		zskLT, err := GenKeyLifetime(dpLocal.ZSK.Lifetime)
+		if err != nil {
+			lgConfig.Error("DNSSEC policy invalid zsk.lifetime, ignored", "policy", name, "err", err)
+			continue
+		}
+		cskLT, err := GenKeyLifetime(dpLocal.CSK.Lifetime)
+		if err != nil {
+			lgConfig.Error("DNSSEC policy invalid csk.lifetime, ignored", "policy", name, "err", err)
+			continue
+		}
 		tmp := DnssecPolicy{
 			Name:      name,
 			Algorithm: dns.StringToAlgorithm[strings.ToUpper(dpLocal.Algorithm)],
-			KSK:       GenKeyLifetime(dpLocal.KSK.Lifetime, dpLocal.KSK.SigValidity),
-			ZSK:       GenKeyLifetime(dpLocal.ZSK.Lifetime, dpLocal.ZSK.SigValidity),
-			CSK:       GenKeyLifetime(dpLocal.CSK.Lifetime, dpLocal.CSK.SigValidity),
+			KSK:       kskLT,
+			ZSK:       zskLT,
+			CSK:       cskLT,
 		}
 		if tmp.Algorithm == 0 {
 			lgConfig.Error("DNSSEC policy has unknown algorithm, ignored", "policy", name, "algorithm", dpLocal.Algorithm)
@@ -811,6 +830,14 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			}
 		}
 
+		// Sig-validity floor: config-load check on every parse pass so
+		// policy/kasp edits on reload refresh DnssecError/Warning state.
+		if options[OptOnlineSigning] || options[OptInlineSigning] {
+			if zdp.DnssecPolicy != nil {
+				UpdateSigValidityFloor(zdp, zdp.DnssecPolicy, conf.KaspPropagationDelay(), 0, false)
+			}
+		}
+
 		// Rollover policy validation: requires loaded zone data. Only
 		// registered on first load; the ObserveParentDSTTL goroutine it
 		// spawns is long-running and re-spawning on reload would leak.
@@ -1096,18 +1123,36 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 // no dnssecpolicies.default is defined in config (e.g. for agent autozone). An explicit
 // dnssecpolicies.default in YAML overrides this. No automatic key rollovers.
 func BuiltinDefaultDnssecPolicy() DnssecPolicy {
+	const day = 24 * time.Hour
+	kskLT, err := GenKeyLifetime("forever")
+	if err != nil {
+		panic(err)
+	}
+	zskLT, err := GenKeyLifetime("forever")
+	if err != nil {
+		panic(err)
+	}
+	cskLT, err := GenKeyLifetime("none")
+	if err != nil {
+		panic(err)
+	}
 	return DnssecPolicy{
 		Name:      "default",
 		Algorithm: dns.ED25519,
 		Mode:      DnssecPolicyModeKSKZSK,
-		KSK:       GenKeyLifetime("forever", "168h"),
-		ZSK:       GenKeyLifetime("forever", "2h"),
-		CSK:       GenKeyLifetime("none", "168h"),
+		KSK:       kskLT,
+		ZSK:       zskLT,
+		CSK:       cskLT,
+		SigValidity: PolicySigValidity{
+			Default: uint32((14 * day).Seconds()),
+			DNSKEY:  uint32((30 * day).Seconds()),
+			DS:      uint32((14 * day).Seconds()),
+		},
 	}
 }
 
-func GenKeyLifetime(lifetime, sigvalidity string) KeyLifetime {
-	var lifetime_secs, sigvalidity_secs time.Duration
+func GenKeyLifetime(lifetime string) (KeyLifetime, error) {
+	var lifetime_secs time.Duration
 	var err error
 
 	switch lifetime {
@@ -1120,18 +1165,12 @@ func GenKeyLifetime(lifetime, sigvalidity string) KeyLifetime {
 	default:
 		lifetime_secs, err = time.ParseDuration(lifetime)
 		if err != nil {
-			Fatal("error from ParseDuration", "err", err)
+			return KeyLifetime{}, fmt.Errorf("invalid key lifetime %q: %w", lifetime, err)
 		}
 	}
-
-	sigvalidity_secs, err = time.ParseDuration(sigvalidity)
-	if err != nil {
-		Fatal("error from ParseDuration", "err", err)
-	}
 	return KeyLifetime{
-		Lifetime:    uint32(lifetime_secs.Seconds()),
-		SigValidity: uint32(sigvalidity_secs.Seconds()),
-	}
+		Lifetime: uint32(lifetime_secs.Seconds()),
+	}, nil
 }
 
 // NormalizeAddress ensures an address has a port number.
