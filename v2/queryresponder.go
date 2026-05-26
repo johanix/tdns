@@ -822,9 +822,12 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 		}
 	}
 
-	// Final catch everything we don't want to deal with
+	// Final catch everything we don't want to deal with.
+	// minimal-responses is defined to affect positive answers only, so on
+	// the REFUSED catch-all we keep the pre-existing behavior (always
+	// include authority NS + glue) regardless of the option.
 	m.MsgHdr.Rcode = dns.RcodeRefused
-	zd.addNSAndGlue(m, apex, msgoptions, minimalResponses)
+	zd.addNSAndGlue(m, apex, msgoptions, false)
 	w.WriteMsg(m)
 
 	_ = origqname
