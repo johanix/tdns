@@ -9,7 +9,6 @@ import (
 	"math/big"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -19,21 +18,6 @@ import (
 
 // sig0TTL is the TTL used for SIG(0) records in signed messages.
 const sig0TTL uint32 = 300
-
-// signerStaleRRSIGsDropped counts how many RRSIGs SignRRset has dropped
-// because their signing key was no longer in the active key set. The
-// counter is intended to surface key-state-related events: outside of
-// rollovers it should stay flat; a non-zero rate means SOMETHING changed
-// the active set and the stale-RRSIG cleanup is doing its job. Read via
-// SignerStaleRRSIGsDropped().
-var signerStaleRRSIGsDropped uint64
-
-// SignerStaleRRSIGsDropped returns a snapshot of the stale-RRSIG-drop
-// counter. Used by tests and a future observability surface; per-zone
-// breakdown can be added later if needed.
-func SignerStaleRRSIGsDropped() uint64 {
-	return atomic.LoadUint64(&signerStaleRRSIGsDropped)
-}
 
 // cryptoRandIntn returns a random int in [0, n) using crypto/rand.
 func cryptoRandIntn(n int) int {
@@ -192,38 +176,12 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 	resigned := false
 	now := time.Now().UTC()
 
-	// Drop any RRSIG whose signing key is no longer in our active key set.
-	// This happens after a KSK rollover: the previously-active key is now
-	// retired (or removed) and we no longer want its RRSIG covering the
-	// DNSKEY RRset (or any other RRset signed by KSKs/ZSKs). Without this,
-	// stale RRSIGs by retired keys hang around until their validity
-	// expires — long after the keys themselves leave the zone.
-	//
-	// Logged at INFO level (not Debug) and metered so operators can see
-	// in production logs when this fires. Outside of rollover events the
-	// counter should stay flat; a non-zero rate would indicate an
-	// unexpected key-state change worth investigating.
-	activeKeyTags := make(map[uint16]bool, len(signingkeys))
-	for _, key := range signingkeys {
-		activeKeyTags[key.DnskeyRR.KeyTag()] = true
-	}
-	filtered := rrset.RRSIGs[:0]
-	for _, sig := range rrset.RRSIGs {
-		s, ok := sig.(*dns.RRSIG)
-		if !ok || activeKeyTags[s.KeyTag] {
-			filtered = append(filtered, sig)
-			continue
-		}
-		atomic.AddUint64(&signerStaleRRSIGsDropped, 1)
-		lgSigner.Info("dropping RRSIG by non-active key",
-			"zone", zd.ZoneName,
-			"name", s.Header().Name,
-			"rrtype", dns.TypeToString[s.TypeCovered],
-			"keytag", s.KeyTag,
-			"reason", "key no longer in active set (post-rollover or manual state change)")
-		resigned = true // we changed the rrset.RRSIGs; flag as updated
-	}
-	rrset.RRSIGs = filtered
+	// SignRRset is purely additive: it ensures every RRset has an RRSIG
+	// by every currently-active signing key, and drops only RRSIGs that
+	// are expired or near-expiry (via NeedsResigning, evaluated below).
+	// RRSIGs by no-longer-active keys are left in place — replacing them
+	// is a zone-level "replacement" operation that belongs to ResignZone,
+	// not to individual RRset additions.
 
 	for _, key := range signingkeys {
 		shouldSign := true
@@ -458,6 +416,139 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 	}
 
 	return dak, nil
+}
+
+// ResignZone re-signs every RRset in the zone from scratch with the
+// currently-active keys. This is the "replacement" counterpart to
+// SignZone's purely additive semantics: SignZone leaves existing
+// RRSIGs alone (it only fills gaps and refreshes near-expiry ones);
+// ResignZone discards each RRset's RRSIGs and rebuilds them by the
+// active key set.
+//
+// Use after toggling key states (active → inactive, retired, removed)
+// when you want the served zone's RRSIG set to match the new active
+// set immediately, rather than waiting for natural expiry.
+//
+// Per-RRset publish atomicity: the strip-and-resign happens on a
+// local copy of each RRset, and the result is published via a single
+// RRtypes.Set call. Readers (queries, AXFR) therefore go from "old
+// RRSIGs" directly to "new RRSIGs" with no observable intermediate
+// state in which the RRset is unsigned. A bulk strip-then-SignZone
+// would have left the entire zone partially unsigned during the
+// sign pass — visible to any concurrent query or zone transfer.
+//
+// Delegations and glue follow the same rules as SignZone: delegation
+// NS RRsets are not signed, glue addresses (A/AAAA at delegation
+// names) are not signed.
+//
+// Returns the count of RRSIGs written by the final pass.
+func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
+	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+		return 0, fmt.Errorf("ResignZone: zone %s should not be signed here (neither online-signing nor inline-signing)", zd.ZoneName)
+	}
+	if zd.HasError(DnssecError) {
+		return 0, fmt.Errorf("ResignZone: zone %s has DNSSEC error: %s", zd.ZoneName, zd.ErrorMsg)
+	}
+
+	dak, err := zd.EnsureActiveDnssecKeys(kdb)
+	if err != nil {
+		lgSigner.Error("ResignZone: failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "err", err)
+		return 0, err
+	}
+
+	if !zd.Options[OptBlackLies] {
+		if err := zd.GenerateNsecChain(kdb); err != nil {
+			return 0, err
+		}
+	}
+
+	var clamp *ClampParams
+	if zd.DnssecPolicy != nil {
+		clamp, err = ClampParamsForZone(kdb, zd.ZoneName, zd.DnssecPolicy, time.Now())
+		if err != nil {
+			lgSigner.Error("ResignZone: ClampParamsForZone failed; refusing to sign", "zone", zd.ZoneName, "err", err)
+			return 0, fmt.Errorf("ResignZone: ClampParamsForZone for zone %s: %w", zd.ZoneName, err)
+		}
+	}
+
+	if err := zd.PublishDnskeyRRs(dak); err != nil {
+		return 0, err
+	}
+
+	names, err := zd.GetOwnerNames()
+	if err != nil {
+		return 0, err
+	}
+	sort.Strings(names)
+
+	var delegations []string
+	for _, name := range names {
+		if name == zd.ZoneName {
+			continue
+		}
+		owner, err := zd.GetOwner(name)
+		if err != nil {
+			return 0, err
+		}
+		if owner == nil {
+			continue
+		}
+		if _, exist := owner.RRtypes.Get(dns.TypeNS); exist {
+			delegations = append(delegations, name)
+		}
+	}
+
+	newrrsigs := 0
+	for _, name := range names {
+		owner, err := zd.GetOwner(name)
+		if err != nil {
+			return 0, err
+		}
+		if owner == nil {
+			continue
+		}
+		for _, rrt := range owner.RRtypes.Keys() {
+			if rrt == dns.TypeRRSIG {
+				continue
+			}
+			if rrt == dns.TypeNS && name != zd.ZoneName {
+				continue // delegation NS — not signed
+			}
+			if rrt == dns.TypeA || rrt == dns.TypeAAAA {
+				var isglue bool
+				for _, del := range delegations {
+					if strings.HasSuffix(name, del) {
+						isglue = true
+						break
+					}
+				}
+				if isglue {
+					continue
+				}
+			}
+
+			// Work on a local copy. The published RRset stays unchanged
+			// until we Set the new one back in a single atomic store, so
+			// readers never observe an unsigned intermediate state.
+			rrset := owner.RRtypes.GetOnlyRRSet(rrt)
+			rrset.RRSIGs = nil
+			resigned, err := zd.SignRRset(&rrset, zd.ZoneName, dak, true, clamp)
+			if err != nil {
+				lgSigner.Error("ResignZone: SignRRset failed",
+					"zone", zd.ZoneName, "name", name,
+					"rrtype", dns.TypeToString[rrt], "err", err)
+				return newrrsigs, err
+			}
+			owner.RRtypes.Set(rrt, rrset)
+			if resigned {
+				newrrsigs++
+			}
+		}
+	}
+
+	lgSigner.Info("ResignZone completed",
+		"zone", zd.ZoneName, "rrsigs_written", newrrsigs)
+	return newrrsigs, nil
 }
 
 // XXX: MaybesignRRset should report on whether it actually signed anything
