@@ -14,22 +14,20 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
-	"github.com/johanix/dnssec-algorithms/falcon512"
-	"github.com/johanix/dnssec-algorithms/mayo1"
 	"github.com/johanix/dnssec-algorithms/mldsa44"
 	"github.com/johanix/dnssec-algorithms/slhdsa128s"
-	"github.com/johanix/dnssec-algorithms/snova24_5_4"
 
 	tdns "github.com/johanix/tdns/v2"
 	algs "github.com/johanix/tdns/v2/algorithms"
 )
 
+// Pure-Go PQ algorithms (CIRCL-backed) — always registered. The
+// liboqs-backed ones (falcon512, mayo1, snova24_5_4) are registered
+// from pq_algorithms_liboqs.go (build tag liboqs) or have their
+// metadata declared from pq_algorithms_noliboqs.go.
 func init() {
-	algs.Register(199, mldsa44.New(),     algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
-	algs.Register(200, slhdsa128s.New(),  algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
-	algs.Register(201, falcon512.New(),   algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
-	algs.Register(202, mayo1.New(),       algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
-	algs.Register(203, snova24_5_4.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.Register(199, mldsa44.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.Register(200, slhdsa128s.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
 }
 
 func main() {
