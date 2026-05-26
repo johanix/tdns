@@ -660,6 +660,19 @@ type InternalConf struct {
 	// Set by MP apps (before calling parent MainInit) to run
 	// MP-specific config validators alongside the built-in ones.
 	PostValidateConfigHook func(conf *Config) error
+
+	// PostParseConfigHook is called at the very end of ParseConfig,
+	// after tdns has decoded the YAML, run its own normalization,
+	// and executed all tdns-side validation. Downstream packages
+	// (tdns-mp, tdns-nm, etc.) can register a hook that decodes
+	// their own config-section structs from the same processed
+	// configMap, running in parallel with the tdns-side decode.
+	//
+	// The configMap argument is the post-include, post-default
+	// processed map that tdns itself decoded into conf — pass it
+	// to mapstructure to decode any downstream sub-tree without
+	// re-reading the file from disk.
+	PostParseConfigHook func(conf *Config, configMap map[string]interface{}) error
 }
 
 // NOTE: MsgQs and its associated message types (KeystateInventoryMsg,

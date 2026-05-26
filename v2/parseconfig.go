@@ -420,6 +420,12 @@ func (conf *Config) ParseConfig(reload bool) error {
 		}
 	}
 
+	if hook := conf.Internal.PostParseConfigHook; hook != nil {
+		if err := hook(conf, configMap); err != nil {
+			return fmt.Errorf("PostParseConfigHook: %w", err)
+		}
+	}
+
 	return nil
 }
 
