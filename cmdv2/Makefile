@@ -1,12 +1,16 @@
 .PHONY: all v2 version clean install install-dirs check-root tarball
 
-# WITH_LIBOQS=1 enables the liboqs-backed PQ algorithms (Falcon-512,
-# MAYO-1, SNOVA-24_5_4) in agent/auth/imr. See utils/Makefile.common.
-# Passed explicitly on each recursive $(MAKE) call below — works on
-# both GNU make and NetBSD bmake (bmake's `export` requires VAR=value
-# syntax, which differs from GNU make's bare-name form).
-WITH_LIBOQS ?= 0
-MAKE_VARS = WITH_LIBOQS=$(WITH_LIBOQS)
+# WITH_LIBOQS=1  enables the liboqs-backed PQ algorithms (Falcon-512,
+#                MAYO-1, SNOVA-24_5_4) in agent/auth/imr.
+# WITH_SQISIGN=1 enables the the-sqisign-backed PQ algorithm
+#                (SQIsign-I) in auth.
+# Both knobs are independent. Each is forwarded explicitly on every
+# recursive $(MAKE) below — works on both GNU make and NetBSD bmake
+# (bmake's `export` syntax differs from GNU make's bare-name form).
+# See utils/Makefile.common for the build-tag wiring.
+WITH_LIBOQS  ?= 0
+WITH_SQISIGN ?= 0
+MAKE_VARS = WITH_LIBOQS=$(WITH_LIBOQS) WITH_SQISIGN=$(WITH_SQISIGN)
 
 # all apps in this directory
 all: v2

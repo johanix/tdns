@@ -13,11 +13,29 @@ GOFLAGS:=-v
 # Default (unset): those algorithms are metadata-only — recognized
 # by name but not usable for sign/verify.
 #
+# WITH_SQISIGN=1 wires in the SQIsign reference C library (SQIsign-I)
+# in cmdv2/auth. The two knobs are independent — use either or both.
+# The reference library is not packaged anywhere; install it once via
+# dnssec-algorithms/sqisignc/build-sqisign.sh, then source the env
+# script before each `make`:
+#   . ../../../dnssec-algorithms/sqisignc/sqisign-env.sh
+#
 # The conditional is evaluated in shell rather than via make's ifeq,
 # because GNU make's ifeq/endif and bmake's .if/.endif are not portable
 # to each other. Backtick command substitution works on both.
-WITH_LIBOQS ?= 0
-LIBOQS_TAGS = `test "$(WITH_LIBOQS)" = 1 && echo -tags liboqs`
+WITH_LIBOQS  ?= 0
+WITH_SQISIGN ?= 0
+# Compose `-tags a,b` only when at least one knob is set. Backtick
+# command substitution stays portable between GNU make and NetBSD
+# bmake. The body is one shell pipeline that emits each enabled tag
+# on its own line, then joins them with paste so the result is empty
+# when no knob is set (and has no stray leading/trailing comma when
+# exactly one is set). Avoids ${var#prefix} shell-parameter expansion,
+# whose `#` would be eaten by make as a comment delimiter.
+GO_BUILD_TAGS = `{ test "$(WITH_LIBOQS)"  = 1 && echo liboqs ; \
+                   test "$(WITH_SQISIGN)" = 1 && echo sqisign ; } | \
+                 paste -sd, - | \
+                 sed -e 's/^./-tags &/'`
 
 GOOS ?= $(shell uname -s | tr A-Z a-z)
 
@@ -30,9 +48,9 @@ all: $(PROG)
 version:
 	/bin/sh ../../utils/make-version.sh $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
 
-build: check-liboqs
+build: check-liboqs check-sqisign
 	@test -f version.go || /bin/sh ../../utils/make-version.sh "unknown" "unknown" $(PROG)
-	$(GO) build $(GOFLAGS) $(LIBOQS_TAGS) -o ${PROG}
+	$(GO) build $(GOFLAGS) $(GO_BUILD_TAGS) -o ${PROG}
 
 # Pre-flight check: when WITH_LIBOQS=1, verify pkg-config can find
 # liboqs-go.pc and print actionable guidance otherwise. No-op when
@@ -54,8 +72,28 @@ check-liboqs:
 	   }; \
 	fi
 
+# Pre-flight check: when WITH_SQISIGN=1, verify pkg-config can find
+# sqisign.pc and print actionable guidance otherwise. Symmetric to
+# check-liboqs above.
+check-sqisign:
+	@if [ "$(WITH_SQISIGN)" = "1" ]; then \
+	   pkg-config --exists sqisign 2>/dev/null || { \
+	      echo ""; \
+	      echo "  WITH_SQISIGN=1 was set but pkg-config cannot find sqisign."; \
+	      echo "  Source the env script in this shell first:"; \
+	      echo ""; \
+	      echo "    . ../../../dnssec-algorithms/sqisignc/sqisign-env.sh"; \
+	      echo ""; \
+	      echo "  If no install is found, build the reference C library:"; \
+	      echo ""; \
+	      echo "    sh ../../../dnssec-algorithms/sqisignc/build-sqisign.sh"; \
+	      echo ""; \
+	      exit 1; \
+	   }; \
+	fi
+
 netbsd:
-	GOOS=netbsd GOARCH=amd64 $(GO) build $(GOFLAGS) $(LIBOQS_TAGS) -o ${PROG}.netbsd
+	GOOS=netbsd GOARCH=amd64 $(GO) build $(GOFLAGS) $(GO_BUILD_TAGS) -o ${PROG}.netbsd
 
 # johaniaws: Sync local tdns source to remote AWS environment.
 # Requires: sshfs mount at ~/sshfs/msigner1
@@ -101,4 +139,4 @@ lint:
 	gosec ./...
 	golangci-lint run
 
-.PHONY: build version clean check-liboqs
+.PHONY: build version clean check-liboqs check-sqisign
