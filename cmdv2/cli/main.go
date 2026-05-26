@@ -28,6 +28,7 @@ func init() {
 	algs.RegisterMetadata(201, "FALCON512", algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
 	algs.RegisterMetadata(202, "MAYO1", algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
 	algs.RegisterMetadata(203, "SNOVA24_5_4", algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.RegisterMetadata(204, "SQISIGN1", algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
 }
 
 func main() {
