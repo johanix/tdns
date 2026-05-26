@@ -80,6 +80,14 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			}
 			resp.Msg = fmt.Sprintf("Zone %s: signed with %d new RRSIGs", zd.ZoneName, newrrsigs)
 
+		case "resign-zone":
+			newrrsigs, err := zd.ResignZone(kdb)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+			resp.Msg = fmt.Sprintf("Zone %s: resigned, %d RRSIGs written by currently-active keys", zd.ZoneName, newrrsigs)
+
 		case "generate-nsec":
 			err := zd.GenerateNsecChain(kdb)
 			if err != nil {

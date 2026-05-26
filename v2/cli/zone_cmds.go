@@ -46,9 +46,17 @@ func NewZoneCmd(role string, extras ...*cobra.Command) *cobra.Command {
 
 	sign := &cobra.Command{
 		Use:   "sign",
-		Short: "Request signing of a zone",
+		Short: "Request signing of a zone (additive: cover gaps with active keys)",
 		Run: func(cmd *cobra.Command, args []string) {
 			runZoneSimpleCmd(role, "sign-zone")
+		},
+	}
+
+	resign := &cobra.Command{
+		Use:   "resign",
+		Short: "Re-sign zone from scratch with currently-active keys (drops all existing RRSIGs)",
+		Run: func(cmd *cobra.Command, args []string) {
+			runZoneSimpleCmd(role, "resign-zone")
 		},
 	}
 
@@ -100,7 +108,7 @@ func NewZoneCmd(role string, extras ...*cobra.Command) *cobra.Command {
 	}
 	nsec.AddCommand(nsecGenerate, nsecShow)
 
-	c.AddCommand(list, nsec, sign, reload, bump, write, freeze, thaw)
+	c.AddCommand(list, nsec, sign, resign, reload, bump, write, freeze, thaw)
 	// Role-independent extras attached to every zone tree. Each is built
 	// fresh so the command pointer is unique per NewZoneCmd invocation.
 	c.AddCommand(newZoneReadFakeCmd(), newZoneUpdateCmd(role), newZoneDsyncCmd(role))
