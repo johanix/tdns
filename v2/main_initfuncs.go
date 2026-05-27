@@ -143,7 +143,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	}
 	err = conf.ParseConfig(false) // false = initial config, not reload
 	if err != nil {
-		return fmt.Errorf("error parsing config %q: %v", conf.Internal.CfgFile, err)
+		return fmt.Errorf("error parsing config %q: %w", conf.Internal.CfgFile, err)
 	}
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeScanner:
@@ -151,7 +151,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		if kdb == nil {
 			err = conf.InitializeKeyDB()
 			if err != nil {
-				return fmt.Errorf("error initializing KeyDB: %v", err)
+				return fmt.Errorf("error initializing KeyDB: %w", err)
 			}
 		}
 	default:
@@ -159,7 +159,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	}
 	err = Globals.Validate()
 	if err != nil {
-		return fmt.Errorf("error validating TDNS globals: %v", err)
+		return fmt.Errorf("error validating TDNS globals: %w", err)
 	}
 	if Globals.App.Type != AppTypeCli || Globals.Verbose {
 		fmt.Printf("TDNS %s version %s starting.\n", Globals.App.Name, Globals.App.Version)
@@ -191,7 +191,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// It's only registered if zones are configured (TDNS-internal check).
 	// Note: .server. queries are automatically handled by createAuthDnsHandler() as a fallback before returning REFUSED.
 	if err := RegisterDefaultQueryHandlers(conf); err != nil {
-		return fmt.Errorf("failed to register default query handlers: %v", err)
+		return fmt.Errorf("failed to register default query handlers: %w", err)
 	}
 	// Create all channels unconditionally to simplify code and reduce conditional complexity.
 	// Channels containing pointers have minimal memory overhead, so unused channels are acceptable.
@@ -221,7 +221,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// Parse all configured zones
 	all_zones, _, err := conf.ParseZones(ctx, false) // false = initial load, not reload
 	if err != nil {
-		return fmt.Errorf("error parsing zones: %v", err)
+		return fmt.Errorf("error parsing zones: %w", err)
 	}
 	// Provide the complete zone list to engines that need cross-zone post-initialization
 	conf.Internal.AllZones = all_zones
