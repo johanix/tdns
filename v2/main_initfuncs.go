@@ -15,7 +15,6 @@ import (
 	"github.com/gorilla/mux"
 	_ "github.com/mattn/go-sqlite3"
 	flag "github.com/spf13/pflag"
-	"github.com/spf13/viper"
 )
 
 var engineWg sync.WaitGroup
@@ -116,7 +115,6 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			flag.PrintDefaults()
 		}
 	}
-	lgConfig.Debug("MainInit starting", "defaultcfg", defaultcfg, "cfgfile", conf.Internal.CfgFile)
 	// Defensive: catch an unset Globals.App.Type. Every binary's
 	// main() must set this before calling MainInit.
 	if Globals.App.Type == 0 {
@@ -130,17 +128,22 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		fmt.Printf("*** TDNS %s version %s mode of operation: %q (verbose: %t, debug: %t)\n",
 			Globals.App.Name, Globals.App.Version, AppTypeToString[Globals.App.Type], Globals.Verbose, Globals.Debug)
 	}
-	err := conf.ParseConfig(false) // false = initial config, not reload
+	// Set up logging BEFORE ParseConfig so the parse and its hooks have
+	// a live logger. SetupLogging reads the log: block directly from the
+	// config file (it doesn't resolve includes) and hard-fails if the
+	// log: block isn't at the top level — preventing silent fallback to
+	// defaults. See tdns/docs/2026-05-27-early-logging-setup.md.
+	logConf, err := SetupLogging(conf.Internal.CfgFile)
+	if err != nil {
+		return fmt.Errorf("error setting up logging: %w", err)
+	}
+	lgConfig.Debug("MainInit starting", "defaultcfg", defaultcfg, "cfgfile", conf.Internal.CfgFile)
+	if Globals.App.Type != AppTypeCli || Globals.Verbose {
+		fmt.Printf("Logging to file: %s\n", logConf.File)
+	}
+	err = conf.ParseConfig(false) // false = initial config, not reload
 	if err != nil {
 		return fmt.Errorf("error parsing config %q: %v", conf.Internal.CfgFile, err)
-	}
-	logfile := viper.GetString("log.file")
-	err = SetupLogging(logfile, Conf.Log)
-	if err != nil {
-		return fmt.Errorf("error setting up logging: %v", err)
-	}
-	if Globals.App.Type != AppTypeCli || Globals.Verbose {
-		fmt.Printf("Logging to file: %s\n", logfile)
 	}
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeScanner:

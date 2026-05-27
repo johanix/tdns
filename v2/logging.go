@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"gopkg.in/natefinch/lumberjack.v2"
+	"gopkg.in/yaml.v3"
 )
 
 var (
@@ -26,17 +27,65 @@ var (
 	logWriter       io.Writer // the underlying lumberjack (or stdout) writer
 )
 
+// parseLogConfFromFile reads the supplied config file and extracts ONLY the
+// top-level log: section. It does not resolve !include directives or any
+// other config structure — the log: block must live at the top level of
+// the main config file. Returns an explicit error if the log: section is
+// missing or log.file is empty, so misconfiguration cannot silently fall
+// back to default behaviour.
+//
+// See tdns/docs/2026-05-27-early-logging-setup.md for design rationale.
+func parseLogConfFromFile(cfgfile string) (LogConf, error) {
+	data, err := os.ReadFile(cfgfile)
+	if err != nil {
+		return LogConf{}, fmt.Errorf("read config %q: %w", cfgfile, err)
+	}
+	// Pointer field: distinguishes "no log: section at all" from
+	// "log: section present but zero-valued".
+	var raw struct {
+		Log *LogConf `yaml:"log"`
+	}
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return LogConf{}, fmt.Errorf("parse log section of %q: %w", cfgfile, err)
+	}
+	if raw.Log == nil {
+		return LogConf{}, fmt.Errorf(
+			"no log: section found at the top level of %q\n\n"+
+				"  The log: block is REQUIRED and MUST live at the top level\n"+
+				"  of the main config file. It cannot be hidden inside an\n"+
+				"  included file — SetupLogging runs before include\n"+
+				"  resolution, so an included log: block would be invisible\n"+
+				"  and logging would silently fall back to defaults.\n\n"+
+				"  Move the log: block into %q and retry.",
+			cfgfile, cfgfile)
+	}
+	if raw.Log.File == "" {
+		return LogConf{}, fmt.Errorf(
+			"log.file is empty in %q (log: section found but log.file is required)",
+			cfgfile)
+	}
+	return *raw.Log, nil
+}
+
 // SetupLogging configures the slog-based logging system with lumberjack rotation.
 // It also bridges the old log package so that existing log.Printf calls flow
 // through slog to the same output.
-func SetupLogging(logfile string, logConf LogConf) error {
-	if logfile == "" {
-		return fmt.Errorf("log file not specified (key log.file)")
+//
+// Reads the log: section directly from the supplied config file so it can be
+// called BEFORE ParseConfig — that way ParseConfig and its hooks have a live
+// logger to write to. Returns the parsed LogConf so callers can stash it if
+// desired (the full ParseConfig will re-populate Conf.Log from the same input,
+// so a caller that drops the return value is fine).
+func SetupLogging(cfgfile string) (LogConf, error) {
+	logConf, err := parseLogConfFromFile(cfgfile)
+	if err != nil {
+		return LogConf{}, err
 	}
+
 	// H27: Validate log file path
-	logfile = filepath.Clean(logfile)
+	logfile := filepath.Clean(logConf.File)
 	if strings.Contains(logfile, "..") {
-		return fmt.Errorf("log file path must not contain directory traversal: %s", logfile)
+		return LogConf{}, fmt.Errorf("log file path must not contain directory traversal: %s", logfile)
 	}
 
 	lj := &lumberjack.Logger{
@@ -72,7 +121,7 @@ func SetupLogging(logfile string, logConf LogConf) error {
 		SetSubsystemLevel(name, ParseLogLevel(levelStr))
 	}
 
-	return nil
+	return logConf, nil
 }
 
 // SetupCliLogging sets up logging for CLI commands.
