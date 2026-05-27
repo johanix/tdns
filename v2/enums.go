@@ -134,14 +134,17 @@ type AuthOption uint8
 
 const (
 	AuthOptParentUpdate AuthOption = iota + 1
+	AuthOptMinimalResponses
 )
 
 var AuthOptionToString = map[AuthOption]string{
-	AuthOptParentUpdate: "parent-update",
+	AuthOptParentUpdate:     "parent-update",
+	AuthOptMinimalResponses: "minimal-responses",
 }
 
 var StringToAuthOption = map[string]AuthOption{
-	"parent-update": AuthOptParentUpdate,
+	"parent-update":     AuthOptParentUpdate,
+	"minimal-responses": AuthOptMinimalResponses,
 }
 
 // outbound_soa_serial mode values for DnsEngine.OutboundSoaSerial.

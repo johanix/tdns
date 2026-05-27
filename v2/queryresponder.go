@@ -348,7 +348,12 @@ func (zd *ZoneData) sendNXDOMAIN(m *dns.Msg, w dns.ResponseWriter, qname string,
 }
 
 // addNSAndGlue adds NS records and glue records (A/AAAA) to the message, along with DNSSEC signatures if requested.
-func (zd *ZoneData) addNSAndGlue(m *dns.Msg, apex *OwnerData, msgoptions *edns0.MsgOptions) {
+// When minimalResponses is true, BIND-style minimal-responses semantics apply: the authority NS RRset and
+// its associated additional-section glue (and their RRSIGs) are omitted from positive answers.
+func (zd *ZoneData) addNSAndGlue(m *dns.Msg, apex *OwnerData, msgoptions *edns0.MsgOptions, minimalResponses bool) {
+	if minimalResponses {
+		return
+	}
 	m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs...)
 	v4glue, v6glue := zd.FindGlue(apex.RRtypes.GetOnlyRRSet(dns.TypeNS), msgoptions.DO)
 	m.Extra = append(m.Extra, v4glue.RRs...)
@@ -393,7 +398,7 @@ func (zd *ZoneData) addTransportSignal(m *dns.Msg, msgoptions *edns0.MsgOptions,
 
 // handleSOAQuery handles SOA queries for the zone apex.
 func (zd *ZoneData) handleSOAQuery(m *dns.Msg, w dns.ResponseWriter, apex *OwnerData,
-	msgoptions *edns0.MsgOptions, transportSignalInAnswer *bool) {
+	msgoptions *edns0.MsgOptions, transportSignalInAnswer *bool, minimalResponses bool) {
 	soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
 	soaRRset.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 	lgHandler.Debug("SOA RRset details", "zone", zd.ZoneName, "count", len(soaRRset.RRs), "rrset", soaRRset)
@@ -405,14 +410,14 @@ func (zd *ZoneData) handleSOAQuery(m *dns.Msg, w dns.ResponseWriter, apex *Owner
 		m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs...)
 		// Note: NS and glue RRSIGs are already added by addNSAndGlue
 	}
-	zd.addNSAndGlue(m, apex, msgoptions)
+	zd.addNSAndGlue(m, apex, msgoptions, minimalResponses)
 	zd.addTransportSignal(m, msgoptions, *transportSignalInAnswer)
 }
 
 // handleCNAMEChain handles CNAME responses, including following CNAME chains across zones.
 // Returns true if a CNAME response was handled and the message should be sent, false otherwise.
 func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname string, qtype uint16, owner *OwnerData,
-	msgoptions *edns0.MsgOptions, kdb *KeyDB, apex *OwnerData, transportSignalInAnswer *bool) (bool, error) {
+	msgoptions *edns0.MsgOptions, kdb *KeyDB, apex *OwnerData, transportSignalInAnswer *bool, minimalResponses bool) (bool, error) {
 
 	if owner.RRtypes.Count() != 1 {
 		return false, nil // Not a CNAME-only owner
@@ -548,7 +553,7 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname str
 
 	// Add NS and glue records from the zone where we found the final answer (or last CNAME)
 	// Use the original zone's apex for NS records
-	zd.addNSAndGlue(m, apex, msgoptions)
+	zd.addNSAndGlue(m, apex, msgoptions, minimalResponses)
 
 	// Check for transport signal
 	if zd.AddTransportSignal && zd.TransportSignal != nil {
@@ -584,6 +589,16 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	}
 	// Track if the configured transport signal is already present in the Answer section
 	transportSignalInAnswer := false
+
+	// minimal-responses: BIND-style suppression of authority NS RRset and
+	// apex glue on positive answers. Referrals and NXDOMAIN/NODATA paths are
+	// unaffected (their authority/additional sections are still required).
+	minimalResponses := false
+	if kdb != nil && kdb.Options != nil {
+		if v, ok := kdb.Options[AuthOptMinimalResponses]; ok && v == "true" {
+			minimalResponses = true
+		}
+	}
 
 	// Get DNSSEC keys if KeyDB is available and zone has DNSSEC enabled
 	var dak *DnssecKeys
@@ -700,7 +715,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	if len(qname) > len(zd.ZoneName) {
 		// 2. Check for qname + CNAME (only if CNAME is the only RR type)
 		lgHandler.Debug("checking for CNAME", "qname", qname, "zone", zd.ZoneName)
-		handled, err := zd.handleCNAMEChain(m, w, qname, qtype, owner, msgoptions, kdb, apex, &transportSignalInAnswer)
+		handled, err := zd.handleCNAMEChain(m, w, qname, qtype, owner, msgoptions, kdb, apex, &transportSignalInAnswer, minimalResponses)
 		if err != nil {
 			lgHandler.Error("error handling CNAME chain", "err", err)
 			// Error response already sent by handleCNAMEChain
@@ -747,7 +762,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 					transportSignalInAnswer = true
 				}
 			}
-			zd.addNSAndGlue(m, apex, msgoptions)
+			zd.addNSAndGlue(m, apex, msgoptions, minimalResponses)
 			// Add transport signal RRs that aren't already present in the Answer section
 			zd.addTransportSignal(m, msgoptions, transportSignalInAnswer)
 			if msgoptions.DO {
@@ -789,7 +804,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 
 	lgHandler.Debug("checking for SOA query", "zone", zd.ZoneName)
 	if qtype == dns.TypeSOA && qname == zd.ZoneName {
-		zd.handleSOAQuery(m, w, apex, msgoptions, &transportSignalInAnswer)
+		zd.handleSOAQuery(m, w, apex, msgoptions, &transportSignalInAnswer, minimalResponses)
 		w.WriteMsg(m)
 		return nil
 	}
@@ -807,9 +822,12 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 		}
 	}
 
-	// Final catch everything we don't want to deal with
+	// Final catch everything we don't want to deal with.
+	// minimal-responses is defined to affect positive answers only, so on
+	// the REFUSED catch-all we keep the pre-existing behavior (always
+	// include authority NS + glue) regardless of the option.
 	m.MsgHdr.Rcode = dns.RcodeRefused
-	zd.addNSAndGlue(m, apex, msgoptions)
+	zd.addNSAndGlue(m, apex, msgoptions, false)
 	w.WriteMsg(m)
 
 	_ = origqname
