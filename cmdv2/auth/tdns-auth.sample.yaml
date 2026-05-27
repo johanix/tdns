@@ -47,6 +47,15 @@ dnsengine:
    #               BIND/Knot/etc. secondaries where serial-regression on
    #               restart would otherwise cause sync confusion.
    # outbound_soa_serial:  persist
+   # options is a list of server-wide auth options. Recognized:
+   #   minimal-responses        — omit authority NS RRset and apex glue from
+   #                              positive answers (BIND-style). Referrals
+   #                              and NXDOMAIN/NODATA paths are unaffected.
+   #                              Bool; absence = false. "minimal-responses:false"
+   #                              disables explicitly.
+   #   parent-update:delta      — parent delegation update mode (delta only).
+   # options:
+   #    - minimal-responses
 
 resignerengine:
    interval:  300    # seconds between runs. Reasonable value is likely ~3600

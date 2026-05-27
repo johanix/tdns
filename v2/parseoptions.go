@@ -119,6 +119,17 @@ func (conf *Config) ParseAuthOptions() {
 				lg.Warn("Auth option has invalid value, defaulting", "option", key, "value", optval, "allowed", UpdateModeDelta, "default", UpdateModeDelta)
 				clean[authOpt] = UpdateModeDelta
 			}
+		case AuthOptMinimalResponses:
+			val := strings.ToLower(optval)
+			switch val {
+			case "", "true":
+				clean[authOpt] = "true"
+			case "false":
+				clean[authOpt] = "false"
+			default:
+				lg.Warn("Auth option has invalid value, defaulting to true", "option", key, "value", optval)
+				clean[authOpt] = "true"
+			}
 		default:
 			clean[authOpt] = optval
 		}
