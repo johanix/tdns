@@ -19,35 +19,6 @@ import (
 
 var engineWg sync.WaitGroup
 
-/*
-// buildChunkQueryEndpoint returns "host:port" for the agent's DNS service so the receiver of a NOTIFY(CHUNK) knows where to send the CHUNK query. Prefers Publish so the combiner can reach the agent.
-func buildChunkQueryEndpoint(conf *Config) string {
-	if conf.MultiProvider == nil {
-		return ""
-	}
-	dns := &conf.MultiProvider.Dns
-	port := dns.Port
-	if port == 0 {
-		port = 53
-	}
-	var host string
-	if len(dns.Addresses.Publish) > 0 {
-		host = strings.TrimSpace(dns.Addresses.Publish[0])
-	}
-	if host == "" && len(dns.Addresses.Listen) > 0 {
-		host = strings.TrimSpace(dns.Addresses.Listen[0])
-	}
-	if host == "" {
-		return ""
-	}
-	// If host already contains a port, use as-is
-	if _, _, err := net.SplitHostPort(host); err == nil {
-		return host
-	}
-	return net.JoinHostPort(host, strconv.Itoa(int(port)))
-}
-*/
-
 // startEngine wraps engine functions in a goroutine with error handling.
 // It logs errors if the engine function returns an error, preventing silent failures.
 func StartEngine(app *AppDetails, name string, engineFunc func() error) {
