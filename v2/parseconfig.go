@@ -65,7 +65,8 @@ func processConfigFile(file string, baseDir string, depth int) (map[string]inter
 	var config map[string]interface{}
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		// On parse error, show context around the reported line to help diagnose
-		// (e.g. tabs, wrong indentation, stray colons)
+		// (e.g. tabs, wrong indentation, stray colons). Both log it (server-side
+		// detail) AND fold it into the returned error so callers over RPC see it.
 		errStr := err.Error()
 		var lineNum int
 		if idx := strings.Index(errStr, "line "); idx >= 0 {
@@ -78,6 +79,7 @@ func processConfigFile(file string, baseDir string, depth int) (map[string]inter
 				fmt.Sscanf(rest[:end], "%d", &lineNum)
 			}
 		}
+		var contextBuf strings.Builder
 		if lineNum > 0 {
 			lines := strings.Split(string(data), "\n")
 			start := lineNum - 4
@@ -91,25 +93,34 @@ func processConfigFile(file string, baseDir string, depth int) (map[string]inter
 			lgConfig.Error("YAML parse error", "line", lineNum, "contextStart", start+1, "contextEnd", end)
 			for i := start; i < end; i++ {
 				line := lines[i]
+				marker := "  "
+				if i == lineNum-1 {
+					marker = "> "
+				}
 				// Reveal tabs and other problematic chars for the failing line
 				if i == lineNum-1 {
 					reveal := strings.ReplaceAll(line, "\t", "\\t")
 					reveal = strings.ReplaceAll(reveal, "\r", "\\r")
 					if reveal != line {
 						lgConfig.Error("context line", "num", i+1, "line", line, "raw", reveal)
-					} else {
-						lgConfig.Error("context line", "num", i+1, "line", line)
+						fmt.Fprintf(&contextBuf, "  %s%4d: %s\n", marker, i+1, reveal)
+						continue
 					}
+					lgConfig.Error("context line", "num", i+1, "line", line)
 				} else {
 					lgConfig.Error("context line", "num", i+1, "line", line)
 				}
+				fmt.Fprintf(&contextBuf, "  %s%4d: %s\n", marker, i+1, line)
 			}
 		}
 		lgConfig.Debug("error unmarshalling YAML to struct", "file", file)
 		if Globals.Debug {
 			fmt.Printf("Config that we failed to unmarshal:\n%s\n", string(data))
 		}
-		return nil, nil, fmt.Errorf("error parsing YAML: %v", err)
+		if contextBuf.Len() > 0 {
+			return nil, nil, fmt.Errorf("error parsing YAML in %s: %v\n%s(tabs shown as \\t; '>' marks the reported line — actual mistake often on a previous line)", file, err, contextBuf.String())
+		}
+		return nil, nil, fmt.Errorf("error parsing YAML in %s: %v", file, err)
 	}
 
 	// Track included files
