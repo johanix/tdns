@@ -28,6 +28,29 @@ const (
 
 // TODO: Add support for TSIG zone transfers.
 
+// clarifyXfrError turns the opaque miekg/dns "bad xfr rcode: N" transfer
+// error into a human-readable failure that names the rcode, e.g.
+// "inbound zone transfer of dingo.dnago.dungo. from <upstream> failed: REFUSED"
+// instead of "dns: bad xfr rcode: 5". Non-transfer errors pass through
+// unchanged. Applied at the source so every ZoneTransferIn caller (refresh
+// engine, etc.) reports the clear message.
+func clarifyXfrError(zone, upstream string, err error) error {
+	if err == nil {
+		return nil
+	}
+	const marker = "bad xfr rcode: "
+	if i := strings.Index(err.Error(), marker); i >= 0 {
+		if code, perr := strconv.Atoi(strings.TrimSpace(err.Error()[i+len(marker):])); perr == nil {
+			name := dns.RcodeToString[code]
+			if name == "" {
+				name = fmt.Sprintf("rcode %d", code)
+			}
+			return fmt.Errorf("inbound zone transfer of %s from %s failed: %s", zone, upstream, name)
+		}
+	}
+	return err
+}
+
 func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype string) (uint32, error) {
 
 	if upstream == "" {
@@ -52,7 +75,7 @@ func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype string)
 	answerChan, err := transfer.In(msg, upstream)
 	if err != nil {
 		zd.Logger.Printf("Error from transfer.In: %v\n", err)
-		return 0, err
+		return 0, clarifyXfrError(zd.ZoneName, upstream, err)
 	}
 
 	count := 0
@@ -60,7 +83,7 @@ func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype string)
 	for envelope := range answerChan {
 		if envelope.Error != nil {
 			zd.Logger.Printf("ZoneTransfer: zone %s error: %v", zd.ZoneName, envelope.Error)
-			return 0, envelope.Error
+			return 0, clarifyXfrError(zd.ZoneName, upstream, envelope.Error)
 		}
 
 		for _, rr := range envelope.RR {
