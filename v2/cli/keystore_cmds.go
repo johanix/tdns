@@ -84,14 +84,25 @@ containing either the private or the public SIG(0) key and the name of the zone.
 		Use:   "generate",
 		Short: "Generate a new SIG(0) key pair and add it to the keystore",
 		Run: func(cmd *cobra.Command, args []string) {
-			PrepArgs("zonename", "algorithm", "state")
+			PrepArgs("zonename", "state")
 			sig0KeyMgmt(role, "generate")
 		},
 	}
 	generate.Flags().StringVarP(&NewState, "state", "", "", "Inital key state (created|published|active|retired)")
-	generate.Flags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
+	generate.Flags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "",
 		sig0AlgorithmsHelp("Algorithm to use for SIG(0) key generation"))
 	generate.MarkFlagRequired("state")
+
+	algorithms := &cobra.Command{
+		Use:   "algorithms",
+		Short: "List the SIG(0) algorithms the server supports",
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := printServerAlgorithms(role, useSIG0); err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+		},
+	}
 
 	list := &cobra.Command{
 		Use:   "list",
@@ -140,7 +151,7 @@ KEY RR). The resulting pair is directly consumable by commands accepting
 	setstate.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to delete")
 	setstate.Flags().StringVarP(&NewState, "state", "", "", "New state of key (created|published|active|retired)")
 
-	c.AddCommand(add, importCmd, generate, list, export, delete, setstate)
+	c.AddCommand(add, importCmd, generate, algorithms, list, export, delete, setstate)
 	return c
 }
 
@@ -185,17 +196,27 @@ containing either the private or the public SIG(0) key and the name of the zone.
 		Use:   "generate",
 		Short: "Generate a new DNSSEC key pair and add it to the keystore",
 		Run: func(cmd *cobra.Command, args []string) {
-			PrepArgs("zonename", "algorithm", "keytype", "state")
+			PrepArgs("zonename", "keytype", "state")
 			dnssecKeyMgmt(role, "generate")
 		},
 	}
 	generate.Flags().StringVarP(&keytype, "keytype", "", "", "Key type to generate (KSK|ZSK|CSK)")
 	generate.Flags().StringVarP(&NewState, "state", "", "", "Inital key state (created|published|active|retired)")
-	generate.Flags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
+	generate.Flags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "",
 		dnssecAlgorithmsHelp("Algorithm to use for DNSSEC key generation"))
 	generate.MarkFlagRequired("keytype")
 	generate.MarkFlagRequired("state")
-	// generate.MarkFlagRequired("algorithm") // XXX: marking it as required defeats the default value
+
+	algorithms := &cobra.Command{
+		Use:   "algorithms",
+		Short: "List the DNSSEC algorithms the server supports",
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := printServerAlgorithms(role, useDNSSEC); err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+		},
+	}
 
 	list := &cobra.Command{
 		Use:   "list",
@@ -204,6 +225,23 @@ containing either the private or the public SIG(0) key and the name of the zone.
 			dnssecKeyMgmt(role, "list")
 		},
 	}
+
+	export := &cobra.Command{
+		Use:   "export",
+		Short: "Export a DNSSEC key pair from the keystore as BIND-style .private/.key files",
+		Long: `Write the DNSSEC key pair for (zone, keyid) to two files in BIND filename
+convention: K<zone>+<alg-num>+<keyid>.private (PKCS#8 PEM) and .key (zone-file
+DNSKEY RR). The resulting pair is directly consumable by 'keystore dnssec import'.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename", "keyid")
+			dnssecKeyMgmt(role, "export")
+		},
+	}
+	export.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone the key belongs to")
+	export.Flags().IntVarP(&keyid, "keyid", "", 0, "Key ID of key to export")
+	export.Flags().StringVarP(&outdir, "outdir", "o", ".", "Directory to write .private and .key files to")
+	export.MarkFlagRequired("zone")
+	export.MarkFlagRequired("keyid")
 
 	delete := &cobra.Command{
 		Use:   "delete",
@@ -298,7 +336,7 @@ without modifying anything. Pass --force to actually delete.`,
 	purge.Flags().Bool("force", false, "Actually delete; otherwise dry-run")
 	purge.MarkFlagRequired("zone")
 
-	c.AddCommand(add, importCmd, generate, list, delete, setstate, genDS, rollover, clear, purge, newKeystoreDnssecPolicyCmd(role), newKeystoreDnssecDsPushCmd(role), newKeystoreDnssecQueryParentCmd(role), newAutoRolloverCmd(role))
+	c.AddCommand(add, importCmd, generate, algorithms, list, export, delete, setstate, genDS, rollover, clear, purge, newKeystoreDnssecPolicyCmd(role), newKeystoreDnssecDsPushCmd(role), newKeystoreDnssecQueryParentCmd(role), newAutoRolloverCmd(role))
 	return c
 }
 
@@ -350,7 +388,9 @@ func sig0KeyMgmt(role, cmd string) {
 	case "generate":
 		data.Zone = tdns.Globals.Zonename
 		data.Keyname = tdns.Globals.Zonename // It should be possible to generate SIG(0) keys for other names than zone names.
-		data.Algorithm = MustAlgorithmNumber(tdns.Globals.Algorithm)
+		// Bare "-a" lists the server's SIG(0) algorithms and exits;
+		// otherwise resolve the name to a codepoint via the server.
+		data.Algorithm = ResolveAlgorithm(role, useSIG0)
 		data.State = NewState
 
 	case "delete", "setstate", "export":
@@ -458,6 +498,36 @@ func writeSig0ExportFiles(sk tdns.Sig0Key, outdir string) error {
 	return nil
 }
 
+func writeDnssecExportFiles(dk tdns.DnssecKey, outdir string) error {
+	algNum, ok := AlgorithmNumber(strings.ToUpper(dk.Algorithm))
+	if !ok {
+		return fmt.Errorf("unknown algorithm %q in exported key", dk.Algorithm)
+	}
+	base := fmt.Sprintf("K%s+%03d+%05d", dk.Name, algNum, dk.Keyid)
+	privPath := filepath.Join(outdir, base+".private")
+	keyPath := filepath.Join(outdir, base+".key")
+	for _, p := range []string{privPath, keyPath} {
+		if _, err := os.Stat(p); err == nil {
+			return fmt.Errorf("refusing to overwrite existing file %s (move or delete it first)", p)
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("stat %s: %v", p, err)
+		}
+	}
+	if err := os.WriteFile(privPath, []byte(dk.PrivateKey), 0600); err != nil {
+		return fmt.Errorf("write %s: %v", privPath, err)
+	}
+	keyRR := dk.Keystr
+	if !strings.HasSuffix(keyRR, "\n") {
+		keyRR += "\n"
+	}
+	if err := os.WriteFile(keyPath, []byte(keyRR), 0644); err != nil {
+		return fmt.Errorf("write %s: %v", keyPath, err)
+	}
+	fmt.Printf("Wrote %s\n", privPath)
+	fmt.Printf("Wrote %s\n", keyPath)
+	return nil
+}
+
 func dnssecKeyMgmt(role, cmd string) {
 	data := tdns.KeystorePost{
 		Command:    "dnssec-mgmt",
@@ -503,7 +573,9 @@ func dnssecKeyMgmt(role, cmd string) {
 
 	case "generate":
 		data.Zone = tdns.Globals.Zonename
-		data.Algorithm = MustAlgorithmNumber(tdns.Globals.Algorithm)
+		// Bare "-a" lists the server's DNSSEC algorithms and exits;
+		// otherwise resolve the name to a codepoint via the server.
+		data.Algorithm = ResolveAlgorithm(role, useDNSSEC)
 		data.KeyType = keytype // "KSK|ZSK|CSK"
 		data.State = NewState
 
@@ -511,7 +583,7 @@ func dnssecKeyMgmt(role, cmd string) {
 		data.Zone = tdns.Globals.Zonename
 		data.KeyType = keytype
 
-	case "delete", "setstate":
+	case "delete", "setstate", "export":
 		data.Keyid = uint16(keyid)
 		data.Zone = tdns.Globals.Zonename
 		data.Keyname = tdns.Globals.Zonename
@@ -588,6 +660,22 @@ func dnssecKeyMgmt(role, cmd string) {
 			fmt.Printf("%s\n", columnize.SimpleFormat(out))
 		} else {
 			fmt.Printf("No DNSSEC key pairs found\n")
+		}
+
+	case "export":
+		if len(tr.Dnskeys) == 0 {
+			fmt.Printf("No key returned for zone %s keyid %d\n",
+				tdns.Globals.Zonename, keyid)
+			os.Exit(1)
+		}
+		for _, v := range tr.Dnskeys {
+			if err := writeDnssecExportFiles(v, outdir); err != nil {
+				fmt.Printf("Error writing key files: %v\n", err)
+				os.Exit(1)
+			}
+		}
+		if tr.Msg != "" {
+			fmt.Printf("%s\n", tr.Msg)
 		}
 
 	case "add", "import", "generate", "delete", "setstate", "rollover", "clear":

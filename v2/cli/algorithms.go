@@ -4,39 +4,175 @@
 package cli
 
 import (
+	"fmt"
+	"os"
+	"sort"
 	"strings"
 
+	tdns "github.com/johanix/tdns/v2"
 	algregistry "github.com/johanix/tdns/v2/algorithms"
 )
 
-// isKnownAlgorithm reports whether name (already upper-cased)
-// matches an algorithm registered with the tdns/v2/algorithms
-// runtime registry. Used by the CLI's --algorithm argument
-// validator.
+// --- Local registry helpers --------------------------------------------
+//
+// These resolve algorithm names against the CLI's own in-process
+// registry (populated by RegisterMetadata in the cli main package).
+// They back the *local* code paths that have no server to ask:
+//   - `debug sig0 generate`, which generates a key in-process, and
+//   - exported-key parsing, which reads an algorithm name out of a key
+//     blob.
+// Remote generate commands use the server-sourced helpers below
+// instead, so the CLI never decides a name<->codepoint mapping that
+// the server might disagree with.
+
+// isKnownAlgorithm reports whether name (already upper-cased) matches
+// an algorithm in the CLI's local registry.
 func isKnownAlgorithm(name string) bool {
 	_, ok := algregistry.AlgorithmNumber(name)
 	return ok
 }
 
-// AlgorithmNumber returns the DNSSEC algorithm number for name and
-// true if registered, or 0 and false otherwise. The caller is
-// expected to upper-case the input.
+// AlgorithmNumber returns the DNSSEC algorithm number for name from the
+// local registry, or 0, false if unknown.
 func AlgorithmNumber(name string) (uint8, bool) {
 	return algregistry.AlgorithmNumber(name)
 }
 
 // MustAlgorithmNumber is the AlgorithmNumber variant for call sites
-// that have already validated name (typically via prepargs's
-// "algorithm" stage). Returns 0 for unknown names.
+// that have already validated name. Returns 0 for unknown names.
 func MustAlgorithmNumber(name string) uint8 {
 	num, _ := algregistry.AlgorithmNumber(name)
 	return num
 }
 
+// --- Server-sourced helpers --------------------------------------------
+
+// serverAlgCache memoizes the per-role algorithm list for the lifetime
+// of the process, so bare "-a" listing and codepoint resolution don't
+// each trigger a separate server round-trip.
+var serverAlgCache = map[string][]algregistry.AlgorithmInfo{}
+
+// fetchServerAlgorithms returns the algorithm registry of the server
+// for role (e.g. "auth", "agent"). It hard-fails — returns an error —
+// when the server is unreachable; there is no local fallback, because
+// these commands send their generate request to the same server
+// anyway, so resolving the algorithm offline would only defer the
+// failure by one step. The result is cached per role.
+func fetchServerAlgorithms(role string) ([]algregistry.AlgorithmInfo, error) {
+	if cached, ok := serverAlgCache[role]; ok {
+		return cached, nil
+	}
+	api, err := GetApiClient(role, false)
+	if err != nil {
+		return nil, fmt.Errorf("cannot reach %s server to determine supported algorithms: %v", role, err)
+	}
+	resp, err := SendKeystoreCmd(api, tdns.KeystorePost{Command: "list-algorithms"})
+	if err != nil {
+		return nil, fmt.Errorf("cannot reach %s server to determine supported algorithms: %v", role, err)
+	}
+	serverAlgCache[role] = resp.Algorithms
+	return resp.Algorithms, nil
+}
+
+// algUse selects which capability a command cares about.
+type algUse int
+
+const (
+	useSIG0 algUse = iota
+	useDNSSEC
+)
+
+func (u algUse) permits(a algregistry.AlgorithmInfo) bool {
+	switch u {
+	case useDNSSEC:
+		return a.ForDNSSEC
+	default:
+		return a.ForSIG0
+	}
+}
+
+// resolveServerAlgorithm validates name against role's server registry
+// and returns its codepoint. name is upper-cased by the caller. On an
+// unknown name it returns an error listing the server's valid choices
+// for the given use.
+func resolveServerAlgorithm(role, name string, use algUse) (uint8, error) {
+	algs, err := fetchServerAlgorithms(role)
+	if err != nil {
+		return 0, err
+	}
+	for _, a := range algs {
+		if a.Name == name && use.permits(a) {
+			return a.Number, nil
+		}
+	}
+	return 0, fmt.Errorf("algorithm %q is not supported by the %s server. Supported: %s",
+		name, role, strings.Join(serverAlgNames(algs, use), ", "))
+}
+
+// printServerAlgorithms lists the algorithms role's server supports for
+// the given use, one per line as "NAME (codepoint N)".
+func printServerAlgorithms(role string, use algUse) error {
+	algs, err := fetchServerAlgorithms(role)
+	if err != nil {
+		return err
+	}
+	fmt.Printf("Algorithms supported by the %s server:\n", role)
+	for _, a := range algs {
+		if use.permits(a) {
+			fmt.Printf("  %-16s %d\n", a.Name, a.Number)
+		}
+	}
+	return nil
+}
+
+func serverAlgNames(algs []algregistry.AlgorithmInfo, use algUse) []string {
+	var names []string
+	for _, a := range algs {
+		if use.permits(a) {
+			names = append(names, a.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// ResolveAlgorithm turns the user's --algorithm input into a codepoint,
+// using role's server as the source of truth. It upper-cases the name,
+// resolves it against role's server registry, and returns the
+// codepoint. On any error (algorithm not given, unreachable server,
+// unknown name) it prints the error — including the server's supported
+// list where relevant — and exits 1.
+//
+// To discover the supported set without generating a key, use the
+// sibling "algorithms" subcommand.
+func ResolveAlgorithm(role string, use algUse) uint8 {
+	raw := tdns.Globals.Algorithm
+	if raw == "" {
+		algs, err := fetchServerAlgorithms(role)
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+		fmt.Printf("Error: no algorithm given (-a). Algorithms supported by the %s server: %s\n",
+			role, strings.Join(serverAlgNames(algs, use), ", "))
+		os.Exit(1)
+	}
+	num, err := resolveServerAlgorithm(role, strings.ToUpper(raw), use)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	return num
+}
+
+// sig0AlgorithmsHelp / dnssecAlgorithmsHelp build the --algorithm flag
+// help text. The supported set is per-server and only knowable at
+// invocation time, so the help no longer enumerates algorithms; it
+// points the user at the live query (bare "-a").
 func sig0AlgorithmsHelp(prefix string) string {
-	return prefix + ". Supported: " + strings.Join(algregistry.SupportedSIG0(), ", ")
+	return prefix + " (use the 'algorithms' subcommand to list what the server supports)"
 }
 
 func dnssecAlgorithmsHelp(prefix string) string {
-	return prefix + ". Supported: " + strings.Join(algregistry.SupportedDNSSEC(), ", ")
+	return prefix + " (use the 'algorithms' subcommand to list what the server supports)"
 }
