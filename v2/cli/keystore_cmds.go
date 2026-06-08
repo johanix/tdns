@@ -468,34 +468,43 @@ func sig0KeyMgmt(role, cmd string) {
 // in outdir: K<zone>+<alg>+<keyid>.private (PKCS#8 PEM as stored in the
 // keystore) and .key (zone-file KEY RR text). The resulting basename is
 // directly consumable by tdns.ReadPrivateKey.
+// writeNewFile writes data to path, failing if path already exists.
+// The O_CREATE|O_EXCL open makes the "don't overwrite" guarantee atomic
+// at the OS level (no check-then-write race), which matters because the
+// .private file holds an unredacted private key.
+func writeNewFile(path string, data []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("refusing to overwrite existing file %s (move or delete it first)", path)
+		}
+		return fmt.Errorf("open %s: %v", path, err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return fmt.Errorf("write %s: %v", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close %s: %v", path, err)
+	}
+	fmt.Printf("Wrote %s\n", path)
+	return nil
+}
+
 func writeSig0ExportFiles(sk tdns.Sig0Key, outdir string) error {
 	algNum, ok := AlgorithmNumber(strings.ToUpper(sk.Algorithm))
 	if !ok {
 		return fmt.Errorf("unknown algorithm %q in exported key", sk.Algorithm)
 	}
 	base := fmt.Sprintf("K%s+%03d+%05d", sk.Name, algNum, sk.Keyid)
-	privPath := filepath.Join(outdir, base+".private")
-	keyPath := filepath.Join(outdir, base+".key")
-	for _, p := range []string{privPath, keyPath} {
-		if _, err := os.Stat(p); err == nil {
-			return fmt.Errorf("refusing to overwrite existing file %s (move or delete it first)", p)
-		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("stat %s: %v", p, err)
-		}
-	}
-	if err := os.WriteFile(privPath, []byte(sk.PrivateKey), 0600); err != nil {
-		return fmt.Errorf("write %s: %v", privPath, err)
+	if err := writeNewFile(filepath.Join(outdir, base+".private"), []byte(sk.PrivateKey), 0600); err != nil {
+		return err
 	}
 	keyRR := sk.Keystr
 	if !strings.HasSuffix(keyRR, "\n") {
 		keyRR += "\n"
 	}
-	if err := os.WriteFile(keyPath, []byte(keyRR), 0644); err != nil {
-		return fmt.Errorf("write %s: %v", keyPath, err)
-	}
-	fmt.Printf("Wrote %s\n", privPath)
-	fmt.Printf("Wrote %s\n", keyPath)
-	return nil
+	return writeNewFile(filepath.Join(outdir, base+".key"), []byte(keyRR), 0644)
 }
 
 func writeDnssecExportFiles(dk tdns.DnssecKey, outdir string) error {
@@ -504,28 +513,14 @@ func writeDnssecExportFiles(dk tdns.DnssecKey, outdir string) error {
 		return fmt.Errorf("unknown algorithm %q in exported key", dk.Algorithm)
 	}
 	base := fmt.Sprintf("K%s+%03d+%05d", dk.Name, algNum, dk.Keyid)
-	privPath := filepath.Join(outdir, base+".private")
-	keyPath := filepath.Join(outdir, base+".key")
-	for _, p := range []string{privPath, keyPath} {
-		if _, err := os.Stat(p); err == nil {
-			return fmt.Errorf("refusing to overwrite existing file %s (move or delete it first)", p)
-		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("stat %s: %v", p, err)
-		}
-	}
-	if err := os.WriteFile(privPath, []byte(dk.PrivateKey), 0600); err != nil {
-		return fmt.Errorf("write %s: %v", privPath, err)
+	if err := writeNewFile(filepath.Join(outdir, base+".private"), []byte(dk.PrivateKey), 0600); err != nil {
+		return err
 	}
 	keyRR := dk.Keystr
 	if !strings.HasSuffix(keyRR, "\n") {
 		keyRR += "\n"
 	}
-	if err := os.WriteFile(keyPath, []byte(keyRR), 0644); err != nil {
-		return fmt.Errorf("write %s: %v", keyPath, err)
-	}
-	fmt.Printf("Wrote %s\n", privPath)
-	fmt.Printf("Wrote %s\n", keyPath)
-	return nil
+	return writeNewFile(filepath.Join(outdir, base+".key"), []byte(keyRR), 0644)
 }
 
 func dnssecKeyMgmt(role, cmd string) {
