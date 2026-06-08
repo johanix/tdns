@@ -268,9 +268,6 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.ApiServer = conf.ApiServer
 			resp.Identities = conf.Service.Identities
 			resp.DBFile = conf.Db.File
-			if conf.MultiProvider != nil {
-				resp.CombinerOptions = conf.MultiProvider.CombinerOptions
-			}
 			resp.Msg = fmt.Sprintf("%s: Configuration is ok, boot time: %s, last config reload: %s",
 				Globals.App.Name, Globals.App.ServerBootTime.Format(TimeLayout), Globals.App.ServerConfigTime.Format(TimeLayout))
 

@@ -99,20 +99,10 @@ func runConfigCmd(role, command string, showVerboseStatus bool) {
 		} else {
 			fmt.Printf("DnsEngine: no auth options configured\n")
 		}
-		if len(resp.CombinerOptions) > 0 {
-			fmt.Printf("Combiner: options:\n")
-			for opt := range resp.CombinerOptions {
-				optName, ok := tdns.CombinerOptionToString[opt]
-				if !ok {
-					optName = fmt.Sprintf("unknown option %d", opt)
-				}
-				fmt.Printf("  %s\n", optName)
-			}
-			if resp.DBFile != "" {
-				fmt.Printf("DB: %s\n", resp.DBFile)
-			} else {
-				fmt.Printf("DB: not configured\n")
-			}
+		if resp.DBFile != "" {
+			fmt.Printf("DB: %s\n", resp.DBFile)
+		} else {
+			fmt.Printf("DB: not configured\n")
 		}
 		if len(resp.Identities) > 0 {
 			fmt.Printf("Identities: %v\n", resp.Identities)

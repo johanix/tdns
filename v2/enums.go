@@ -154,30 +154,6 @@ const (
 	OutboundSoaSerialPersist  = "persist"  // outbound = previous outbound serial; bumps written to OutgoingSerials
 )
 
-type CombinerOption uint8
-
-const (
-	CombinerOptAddSignature CombinerOption = iota + 1
-)
-
-var CombinerOptionToString = map[CombinerOption]string{
-	CombinerOptAddSignature: "add-signature",
-}
-
-var StringToCombinerOption = map[string]CombinerOption{
-	"add-signature": CombinerOptAddSignature,
-}
-
-type SignerOption uint8
-
-var SignerOptionToString = map[SignerOption]string{}
-var StringToSignerOption = map[string]SignerOption{}
-
-type AgentOption uint8
-
-var AgentOptionToString = map[AgentOption]string{}
-var StringToAgentOption = map[string]AgentOption{}
-
 type AppType uint8
 
 // Range allocation for AppType across the tdns ecosystem.

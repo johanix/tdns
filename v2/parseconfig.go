@@ -223,25 +223,6 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	// Normalize all identity fields (domain names) from config to FQDN form.
-	// Config files may omit trailing dots; wire protocol always uses FQDN.
-	conf.normalizeConfigIdentities()
-
-	// Validate multi-provider.role matches the application type for
-	// tdns-side roles. Downstream packages (tdns-mp, tdns-nm, tdns-es)
-	// validate their own roles in their own config-validation paths.
-	if conf.MultiProvider != nil {
-		expectedRole := map[AppType]string{
-			AppTypeAuth:  "signer",
-			AppTypeAgent: "agent",
-		}
-		if expected, ok := expectedRole[Globals.App.Type]; ok {
-			if conf.MultiProvider.Role != expected {
-				return fmt.Errorf("multi-provider.role=%q does not match app type %s (expected %q)",
-					conf.MultiProvider.Role, Globals.App.Name, expected)
-			}
-		}
-	}
-
 	if err := validateKaspPropagationDelay(conf.Kasp.PropagationDelay); err != nil {
 		return err
 	}
@@ -374,8 +355,6 @@ func (conf *Config) ParseConfig(reload bool) error {
 	case AppTypeAuth, AppTypeAgent:
 		conf.ParseAuthOptions()
 	}
-
-	conf.parseMultiProviderOptions()
 
 	// KDC and KRS configuration parsing has been moved to tdns-nm
 	// See kdc.ParseKdcConfigFromFile() and krs.ParseKrsConfigFromFile()
@@ -743,23 +722,14 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		}
 
 		if Globals.App.Type == AppTypeAgent && zconf.Type == "primary" {
-			if conf.MultiProvider == nil {
-				lgConfig.Error("agent has primary zone but multi-provider config is missing, zone in error state", "zone", zname)
-				zd.SetError(ConfigError, "agent has primary zone %q but multi-provider config is missing", zname)
-				broken_zones = append(broken_zones, zname)
-				continue
-			}
-			// Agent only supports primary zone if it matches its identity
-			if zname != conf.MultiProvider.Identity {
-				lgConfig.Error("primary zone does not match agent identity, zone in error state", "zone", zname, "identity", conf.MultiProvider.Identity)
-				zd.SetError(AgentError, "primary zone does not match agent identity (%q)", conf.MultiProvider.Identity)
-				broken_zones = append(broken_zones, zname)
-				continue
-			} else {
-				// For agent's own zone, ensure required options are set
-				options[OptAllowUpdates] = true
-				options[OptOnlineSigning] = true
-			}
+			// tdns-agent doesn't serve primary zones. MP roles are
+			// hosted by tdns-mp (tdns-mpagent etc.), not by standalone
+			// tdns-agent. A primary zone in a tdns-agent config is a
+			// configuration error.
+			lgConfig.Error("tdns-agent does not support primary zones, zone in error state", "zone", zname)
+			zd.SetError(ConfigError, "tdns-agent does not support primary zones; use tdns-mpagent for multi-provider roles")
+			broken_zones = append(broken_zones, zname)
+			continue
 		}
 
 		// log.Printf("*** ParseZones: 5. Refreshch: %v", conf.Internal.RefreshZoneCh)
@@ -1409,49 +1379,4 @@ func validateGroupPrefix(prefix string, prefixType string) error {
 	}
 
 	return nil
-}
-
-// normalizeConfigIdentities applies dns.Fqdn() to all identity fields (domain names)
-// in the parsed config. This ensures trailing dots are present regardless of whether
-// the YAML config included them.
-func (conf *Config) normalizeConfigIdentities() {
-	// Agent identity and peers
-	if conf.MultiProvider != nil {
-		if conf.MultiProvider.Identity != "" {
-			conf.MultiProvider.Identity = dns.Fqdn(conf.MultiProvider.Identity)
-		}
-		if conf.MultiProvider.Dns.ControlZone != "" {
-			conf.MultiProvider.Dns.ControlZone = dns.Fqdn(conf.MultiProvider.Dns.ControlZone)
-		}
-		if conf.MultiProvider.Combiner != nil && conf.MultiProvider.Combiner.Identity != "" {
-			conf.MultiProvider.Combiner.Identity = dns.Fqdn(conf.MultiProvider.Combiner.Identity)
-		}
-		if conf.MultiProvider.Signer != nil && conf.MultiProvider.Signer.Identity != "" {
-			conf.MultiProvider.Signer.Identity = dns.Fqdn(conf.MultiProvider.Signer.Identity)
-		}
-		for i, p := range conf.MultiProvider.AuthorizedPeers {
-			conf.MultiProvider.AuthorizedPeers[i] = dns.Fqdn(p)
-		}
-		for _, peer := range conf.MultiProvider.Peers {
-			if peer != nil && peer.Identity != "" {
-				peer.Identity = dns.Fqdn(peer.Identity)
-			}
-		}
-	}
-
-	// Multi-provider agent peers and combiner-specific normalization
-	if conf.MultiProvider != nil {
-		for _, agent := range conf.MultiProvider.Agents {
-			if agent != nil && agent.Identity != "" {
-				agent.Identity = dns.Fqdn(agent.Identity)
-			}
-		}
-		if conf.MultiProvider.Role == "combiner" {
-			for i, ns := range conf.MultiProvider.ProtectedNamespaces {
-				conf.MultiProvider.ProtectedNamespaces[i] = dns.Fqdn(ns)
-			}
-			// Provider zone RR type registration removed — handled
-			// by tdns-mp initMPCombiner.
-		}
-	}
 }

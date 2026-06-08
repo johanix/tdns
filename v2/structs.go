@@ -782,14 +782,13 @@ type AgentMgmtPost struct {
 }
 
 type AgentMgmtResponse struct {
-	Identity    AgentId
-	Status      string
-	Time        time.Time
-	AgentConfig MultiProviderConf
-	Msg         string
-	Error       bool
-	ErrorMsg    string
-	Data        interface{} `json:"data,omitempty"` // Generic data field for custom responses
+	Identity AgentId
+	Status   string
+	Time     time.Time
+	Msg      string
+	Error    bool
+	ErrorMsg string
+	Data     interface{} `json:"data,omitempty"` // Generic data field for custom responses
 }
 
 // DnskeyStatus holds the result of DNSKEY change detection (local keys only).
