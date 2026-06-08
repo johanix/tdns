@@ -3,14 +3,17 @@
 # WITH_LIBOQS=1  enables the liboqs-backed PQ algorithms (Falcon-512,
 #                MAYO-1, SNOVA-24_5_4) in agent/auth/imr.
 # WITH_SQISIGN=1 enables the the-sqisign-backed PQ algorithm
-#                (SQIsign-I) in auth.
-# Both knobs are independent. Each is forwarded explicitly on every
+#                (SQIsign-I) in auth/imr.
+# WITH_QRUOV=1   enables the QR-UOV-backed PQ algorithm (QR-UOV-I,
+#                q=31 L=3) in auth/imr.
+# The knobs are independent. Each is forwarded explicitly on every
 # recursive $(MAKE) below — works on both GNU make and NetBSD bmake
 # (bmake's `export` syntax differs from GNU make's bare-name form).
 # See utils/Makefile.common for the build-tag wiring.
 WITH_LIBOQS  ?= 0
 WITH_SQISIGN ?= 0
-MAKE_VARS = WITH_LIBOQS=$(WITH_LIBOQS) WITH_SQISIGN=$(WITH_SQISIGN)
+WITH_QRUOV   ?= 0
+MAKE_VARS = WITH_LIBOQS=$(WITH_LIBOQS) WITH_SQISIGN=$(WITH_SQISIGN) WITH_QRUOV=$(WITH_QRUOV)
 
 # all apps in this directory
 all: v2
