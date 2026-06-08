@@ -469,6 +469,36 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		}
 		resp.Msg = fmt.Sprintf("%s rollover for zone %s: active key %d retired, standby key %d now active", keytype, kp.Zone, oldKeyid, newKeyid)
 
+	case "export":
+		const getDnskeySql = `
+SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND keyid=?`
+		row := tx.QueryRow(getDnskeySql, kp.Zone, kp.Keyid)
+		var zonename, state, algorithm, creator, privatekey, keyrrstr string
+		var keyid, flags int
+		err := row.Scan(&zonename, &state, &keyid, &flags, &algorithm, &creator, &privatekey, &keyrrstr)
+		if err != nil {
+			if err == sql.ErrNoRows {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("DNSSEC key for zone %q keyid %d not found", kp.Zone, kp.Keyid)
+				return &resp, nil
+			}
+			return &resp, fmt.Errorf("error from row.Scan(): %v", err)
+		}
+		mapkey := fmt.Sprintf("%s::%d", zonename, keyid)
+		resp.Dnskeys = map[string]DnssecKey{
+			mapkey: {
+				Name:       zonename,
+				State:      state,
+				Keyid:      uint16(keyid),
+				Flags:      uint16(flags),
+				Algorithm:  algorithm,
+				Creator:    creator,
+				PrivateKey: privatekey, // unredacted: export intentionally surfaces it
+				Keystr:     keyrrstr,
+			},
+		}
+		resp.Msg = fmt.Sprintf("Exported DNSSEC key %s keyid %d", zonename, keyid)
+
 	case "delete":
 		const getDnskeySql = `
 SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zonename=? AND keyid=?`

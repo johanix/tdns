@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	algorithms "github.com/johanix/tdns/v2/algorithms"
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -33,15 +34,16 @@ type KeystorePost struct {
 }
 
 type KeystoreResponse struct {
-	AppName  string
-	Time     time.Time
-	Status   string
-	Zone     string
-	Dnskeys  map[string]DnssecKey // TrustAnchor
-	Sig0keys map[string]Sig0Key
-	Msg      string
-	Error    bool
-	ErrorMsg string
+	AppName    string
+	Time       time.Time
+	Status     string
+	Zone       string
+	Dnskeys    map[string]DnssecKey // TrustAnchor
+	Sig0keys   map[string]Sig0Key
+	Algorithms []algorithms.AlgorithmInfo // populated by the "list-algorithms" command
+	Msg        string
+	Error      bool
+	ErrorMsg   string
 }
 
 type TruststorePost struct {

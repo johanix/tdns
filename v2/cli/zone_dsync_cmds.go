@@ -78,7 +78,8 @@ func newZoneDsyncCmd(role string) *cobra.Command {
 		Use:   "bootstrap-sig0-key",
 		Short: "Send dsync bootstrap command",
 		Run: func(cmd *cobra.Command, args []string) {
-			PrepArgs("zonename", "algorithm")
+			PrepArgs("zonename")
+			alg := ResolveAlgorithm(role, useSIG0)
 
 			api, err := GetApiClient(role, true)
 			if err != nil {
@@ -87,7 +88,7 @@ func newZoneDsyncCmd(role string) *cobra.Command {
 			resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
 				Command:   "bootstrap-sig0-key",
 				Zone:      dns.Fqdn(tdns.Globals.Zonename),
-				Algorithm: MustAlgorithmNumber(tdns.Globals.Algorithm),
+				Algorithm: alg,
 			})
 			PrintUpdateResult(resp.UpdateResult)
 			if err != nil {
@@ -103,14 +104,15 @@ func newZoneDsyncCmd(role string) *cobra.Command {
 			}
 		},
 	}
-	bootstrap.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
+	bootstrap.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "",
 		sig0AlgorithmsHelp("Algorithm for the new SIG(0) key"))
 
 	rollKey := &cobra.Command{
 		Use:   "roll-sig0-key",
 		Short: "Send dsync rollover command",
 		Run: func(cmd *cobra.Command, args []string) {
-			PrepArgs("zonename", "algorithm", "rollaction")
+			PrepArgs("zonename", "rollaction")
+			alg := ResolveAlgorithm(role, useSIG0)
 
 			api, err := GetApiClient(role, true)
 			if err != nil {
@@ -119,7 +121,7 @@ func newZoneDsyncCmd(role string) *cobra.Command {
 			resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
 				Command:   "roll-sig0-key",
 				Zone:      dns.Fqdn(tdns.Globals.Zonename),
-				Algorithm: MustAlgorithmNumber(tdns.Globals.Algorithm),
+				Algorithm: alg,
 				Action:    rollaction,
 			})
 			PrintUpdateResult(resp.UpdateResult)
@@ -136,7 +138,7 @@ func newZoneDsyncCmd(role string) *cobra.Command {
 			}
 		},
 	}
-	rollKey.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
+	rollKey.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "",
 		sig0AlgorithmsHelp("Algorithm for the new SIG(0) key"))
 	rollKey.PersistentFlags().StringVarP(&rollaction, "rollaction", "r", "complete", "[debug] Phase of the rollover to perform: complete, add, remove, update-local")
 	rollKey.PersistentFlags().MarkHidden("rollaction")

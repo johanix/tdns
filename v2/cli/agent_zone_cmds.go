@@ -134,7 +134,8 @@ var agentZoneDsyncBootstrapCmd = &cobra.Command{
 	Use:   "bootstrap-sig0-key",
 	Short: "Send dsync bootstrap command to the agent",
 	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename", "algorithm")
+		PrepArgs("zonename")
+		alg := ResolveAlgorithm("agent", useSIG0)
 
 		// AgentZoneCmd is only attached under AgentCmd → role "agent".
 		api, err := GetApiClient("agent", true)
@@ -145,7 +146,7 @@ var agentZoneDsyncBootstrapCmd = &cobra.Command{
 		resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
 			Command:   "bootstrap-sig0-key",
 			Zone:      dns.Fqdn(tdns.Globals.Zonename),
-			Algorithm: MustAlgorithmNumber(tdns.Globals.Algorithm),
+			Algorithm: alg,
 		})
 		PrintUpdateResult(resp.UpdateResult)
 		if err != nil {
@@ -166,7 +167,8 @@ var agentZoneDsyncRollKeyCmd = &cobra.Command{
 	Use:   "roll-sig0-key",
 	Short: "Send dsync rollover command to the agent",
 	Run: func(cmd *cobra.Command, args []string) {
-		PrepArgs("zonename", "algorithm", "rollaction")
+		PrepArgs("zonename", "rollaction")
+		alg := ResolveAlgorithm("agent", useSIG0)
 
 		// AgentZoneCmd is only attached under AgentCmd → role "agent".
 		api, err := GetApiClient("agent", true)
@@ -177,7 +179,7 @@ var agentZoneDsyncRollKeyCmd = &cobra.Command{
 		resp, err := SendDsyncCommand(api, tdns.ZoneDsyncPost{
 			Command:   "roll-sig0-key",
 			Zone:      dns.Fqdn(tdns.Globals.Zonename),
-			Algorithm: MustAlgorithmNumber(tdns.Globals.Algorithm),
+			Algorithm: alg,
 			Action:    agentRollaction,
 		})
 		PrintUpdateResult(resp.UpdateResult)
@@ -455,9 +457,9 @@ func init() {
 	// 20260415 johani: agentZoneDelRRCmd.Flags().StringVarP(&agentZoneRR, "rr", "", "", "DNS record to delete")
 	// 20260415 johani: agentZoneDelRRCmd.Flags().Bool("force", false, "Bypass dedup check and always send transaction")
 
-	agentZoneDsyncRollKeyCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
+	agentZoneDsyncRollKeyCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "",
 		sig0AlgorithmsHelp("Algorithm for the new SIG(0) key"))
-	agentZoneDsyncBootstrapCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "ED25519",
+	agentZoneDsyncBootstrapCmd.PersistentFlags().StringVarP(&tdns.Globals.Algorithm, "algorithm", "a", "",
 		sig0AlgorithmsHelp("Algorithm for the new SIG(0) key"))
 	agentZoneDsyncRollKeyCmd.PersistentFlags().StringVarP(&agentRollaction, "rollaction", "r", "complete", "[debug] Phase of the rollover to perform: complete, add, remove, update-local")
 	agentZoneDsyncRollKeyCmd.PersistentFlags().MarkHidden("rollaction")

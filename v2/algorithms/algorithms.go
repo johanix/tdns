@@ -50,12 +50,18 @@ type entry struct {
 	number uint8
 	name   string
 	caps   Capabilities
+	// real is true when a genuine implementation was wired into
+	// miekg/dns via Register, false for metadata-only entries
+	// (RegisterMetadata). Only real algorithms can actually generate,
+	// sign, or verify; metadata entries exist so name-aware UI can
+	// recognize a codepoint the binary itself cannot use.
+	real bool
 }
 
 var (
-	mu        sync.RWMutex
-	byNumber  = map[uint8]entry{}
-	byName    = map[string]uint8{}
+	mu       sync.RWMutex
+	byNumber = map[uint8]entry{}
+	byName   = map[string]uint8{}
 )
 
 // Register wires impl into miekg/dns's algorithm registry at the
@@ -67,7 +73,7 @@ func Register(num uint8, impl dns.Algorithm, caps Capabilities) {
 		panic(fmt.Sprintf("algorithms.Register(%d, %s): %v",
 			num, impl.Name(), err))
 	}
-	registerMetadata(num, impl.Name(), caps)
+	record(num, impl.Name(), caps, true)
 }
 
 // RegisterMetadata records an algorithm's codepoint, name, and
@@ -76,10 +82,10 @@ func Register(num uint8, impl dns.Algorithm, caps Capabilities) {
 // validation, --help text) but don't sign or verify with the
 // algorithm themselves. Panics on conflict.
 func RegisterMetadata(num uint8, name string, caps Capabilities) {
-	registerMetadata(num, name, caps)
+	record(num, name, caps, false)
 }
 
-func registerMetadata(num uint8, name string, caps Capabilities) {
+func record(num uint8, name string, caps Capabilities, real bool) {
 	mu.Lock()
 	defer mu.Unlock()
 	if existing, ok := byNumber[num]; ok {
@@ -90,7 +96,7 @@ func registerMetadata(num uint8, name string, caps Capabilities) {
 		panic(fmt.Sprintf("algorithms: name %q already registered (was %d)",
 			name, existing))
 	}
-	byNumber[num] = entry{number: num, name: name, caps: caps}
+	byNumber[num] = entry{number: num, name: name, caps: caps, real: real}
 	byName[name] = num
 }
 
@@ -161,6 +167,42 @@ func supportedWhere(pred func(Capabilities) bool) []string {
 	return out
 }
 
+// AlgorithmInfo is a serializable view of one registry entry. It is
+// the unit returned by [All] and is what a server reports to the CLI
+// so the CLI can resolve names to codepoints without its own
+// hardcoded table.
+type AlgorithmInfo struct {
+	Number    uint8  `json:"number"`
+	Name      string `json:"name"`
+	ForSIG0   bool   `json:"forsig0"`
+	ForDNSSEC bool   `json:"fordnssec"`
+}
+
+// All returns every genuinely-usable (real) algorithm, sorted by
+// codepoint. Metadata-only entries are excluded: a server must not
+// advertise algorithms it cannot actually generate, sign, or verify
+// with. This is the authoritative set a server reports to the CLI.
+func All() []AlgorithmInfo {
+	mu.RLock()
+	defer mu.RUnlock()
+	out := make([]AlgorithmInfo, 0, len(byNumber))
+	for _, e := range byNumber {
+		if !e.real {
+			continue
+		}
+		out = append(out, AlgorithmInfo{
+			Number:    e.number,
+			Name:      e.name,
+			ForSIG0:   e.caps.ForSIG0,
+			ForDNSSEC: e.caps.ForDNSSEC,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].Number < out[j].Number
+	})
+	return out
+}
+
 // init pre-registers the algorithms built into miekg/dns. They aren't
 // reachable through the Algorithm interface (built-ins use the
 // per-algorithm switch arms, not the registry), but tdns code needs
@@ -177,6 +219,8 @@ func init() {
 		{dns.ECDSAP384SHA384, "ECDSAP384SHA384", Capabilities{ForSIG0: true, ForDNSSEC: true}},
 		{dns.ED25519, "ED25519", Capabilities{ForSIG0: true, ForDNSSEC: true}},
 	} {
-		registerMetadata(b.num, b.name, b.caps)
+		// Built-ins are genuinely usable (miekg/dns handles them via
+		// its per-algorithm switch arms), so they are real.
+		record(b.num, b.name, b.caps, true)
 	}
 }
