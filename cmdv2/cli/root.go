@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -109,6 +110,41 @@ func initConfig() {
 		cfgFileUsed = viper.ConfigFileUsed()
 	} else {
 		log.Fatalf("Could not load config %s: Error: %v", viper.ConfigFileUsed(), err)
+	}
+
+	// Expand any top-level "include:" directives. viper has no native
+	// include support, so we merge each listed file in turn. This is a
+	// single-level (non-recursive) shim: an included file's own
+	// "include:" is not processed. Relative paths resolve against the
+	// main config file's directory. Used e.g. to pull algorithm
+	// enrichment data in from a shareable /etc/tdns/algorithms.yaml,
+	// keeping it out of this host-local, secret-bearing config.
+	for _, inc := range viper.GetStringSlice("include") {
+		incPath := inc
+		if !filepath.IsAbs(incPath) {
+			incPath = filepath.Join(filepath.Dir(cfgFileUsed), incPath)
+		}
+		// A missing included file is not fatal — it is treated as an
+		// optional overlay (mirrors the LocalConfig handling below), so
+		// e.g. an as-yet-uninstalled /etc/tdns/algorithms.yaml just
+		// leaves the CLI without that enrichment. A present-but-broken
+		// include is still a hard error.
+		if _, err := os.Stat(incPath); err != nil {
+			if os.IsNotExist(err) {
+				if tdns.Globals.Verbose {
+					fmt.Fprintln(os.Stderr, "Skipping missing included config:", incPath)
+				}
+				continue
+			}
+			log.Fatalf("Error stat(%s): %v", incPath, err)
+		}
+		viper.SetConfigFile(incPath)
+		if err := viper.MergeInConfig(); err != nil {
+			log.Fatalf("Could not merge included config %s: Error: %v", incPath, err)
+		}
+		if tdns.Globals.Verbose {
+			fmt.Fprintln(os.Stderr, "Merged included config:", incPath)
+		}
 	}
 
 	LocalConfig = viper.GetString("cli.localconfig")

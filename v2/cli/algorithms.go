@@ -8,6 +8,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"text/tabwriter"
 
 	tdns "github.com/johanix/tdns/v2"
 	algregistry "github.com/johanix/tdns/v2/algorithms"
@@ -110,19 +111,48 @@ func resolveServerAlgorithm(role, name string, use algUse) (uint8, error) {
 }
 
 // printServerAlgorithms lists the algorithms role's server supports for
-// the given use, one per line as "NAME (codepoint N)".
+// the given use. The set of algorithms is server-authoritative; if the
+// CLI config carries an "algorithms" enrichment map (see
+// [algorithmProfile]), each entry is annotated with key/signature sizes,
+// relative cost, etc. With no enrichment configured it falls back to the
+// original compact "NAME codepoint" listing.
 func printServerAlgorithms(role string, use algUse) error {
 	algs, err := fetchServerAlgorithms(role)
 	if err != nil {
 		return err
 	}
+	profiles := loadAlgorithmProfiles()
 	fmt.Printf("Algorithms supported by the %s server:\n", role)
-	for _, a := range algs {
-		if use.permits(a) {
-			fmt.Printf("  %-16s %d\n", a.Name, a.Number)
+
+	if len(profiles) == 0 {
+		for _, a := range algs {
+			if use.permits(a) {
+				fmt.Printf("  %-16s %d\n", a.Name, a.Number)
+			}
 		}
+		return nil
 	}
-	return nil
+
+	// Enriched table. Sizes are in bytes; SIGN/VRFY are signing/
+	// validation cost relative to ED25519 (= 1); "-" means the profile
+	// did not specify the field.
+	fmt.Println("  (sizes in bytes; SIGN/VRFY = signing/validation cost relative to ED25519=1; '-' = unspecified)")
+	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
+	fmt.Fprintln(tw, "  NAME\tCP\tPUBKEY\tSIG\tSECKEY\tLVL\tSIGN\tVRFY\tMATURITY\tDESCRIPTION")
+	for _, a := range algs {
+		if !use.permits(a) {
+			continue
+		}
+		// viper lower-cases config keys, so the profile map is keyed by
+		// the lower-cased algorithm name.
+		p := profiles[strings.ToLower(a.Name)]
+		fmt.Fprintf(tw, "  %s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			a.Name, a.Number,
+			algIntCol(p.PublicKeyBytes), algIntCol(p.SignatureBytes), algIntCol(p.SecretKeyBytes),
+			algIntCol(p.SecurityLevel), algIntCol(p.SigningCost), algIntCol(p.ValidationCost),
+			algStrCol(p.Maturity), algStrCol(p.Description))
+	}
+	return tw.Flush()
 }
 
 func serverAlgNames(algs []algregistry.AlgorithmInfo, use algUse) []string {

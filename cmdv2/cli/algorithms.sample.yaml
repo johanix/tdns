@@ -1,0 +1,115 @@
+# algorithms.yaml — algorithm enrichment data for tdns-cli.
+#
+# Install as /etc/tdns/algorithms.yaml and pull it into tdns-cli.yaml:
+#
+#   include:
+#      - /etc/tdns/algorithms.yaml
+#
+# This data is consumed ONLY by the `tdns-cli ... keystore <sig0|dnssec>
+# algorithms` listing, to annotate the algorithms a server reports as
+# supported. It is intentionally separated from the host-local CLI
+# config (API keys, addresses, ...) so it can be shared and
+# version-controlled on its own.
+#
+# Keyed by the algorithm NAME the server reports. Entries that match no
+# server-supported algorithm are ignored; supported algorithms with no
+# entry here simply print "-" in the enrichment columns. The set of
+# supported algorithms always comes from the server — nothing here
+# changes that.
+#
+# Fields (all optional; omit what you don't know — a missing field shows
+# as "-"):
+#   description     free-form note
+#   publickeybytes  DNSKEY/KEY public key size, bytes
+#   signaturebytes  RRSIG/SIG signature size, bytes (typical; see notes
+#                   for variable-length schemes)
+#   secretkeybytes  stored private key size, bytes
+#   securitylevel   NIST PQ security level (1/3/5); omit for classical
+#   maturity        final | draft | candidate | builtin
+#   signingcost     cost of signing,    relative to ED25519 (= 1)
+#   validationcost  cost of validation, relative to ED25519 (= 1)
+#
+# ED25519 is the cost reference (signingcost = validationcost = 1). The
+# PQ signing/validation costs are intentionally left unset below — fill
+# them in with your own measurements, relative to ED25519, as you
+# benchmark each algorithm on your reference hardware. Example:
+#
+#   MLDSA44:
+#      signingcost:     5
+#      validationcost:  2
+
+algorithms:
+   ED25519:
+      description:     "Edwards-curve DSA; classical, cost reference"
+      publickeybytes:  32
+      signaturebytes:  64
+      secretkeybytes:  32
+      maturity:        builtin
+      signingcost:     1
+      validationcost:  1
+
+   MLDSA44:
+      description:     "ML-DSA-44 (FIPS 204), lattice"
+      publickeybytes:  1312
+      signaturebytes:  2420
+      secretkeybytes:  2560
+      securitylevel:   1
+      maturity:        final
+      # signingcost:     <measure relative to ED25519>
+      # validationcost:  <measure relative to ED25519>
+
+   SLHDSA128S:
+      description:     "SLH-DSA-SHA2-128s (FIPS 205), hash-based; tiny keys, large slow signatures"
+      publickeybytes:  32
+      signaturebytes:  7856
+      secretkeybytes:  64
+      securitylevel:   1
+      maturity:        final
+
+   FALCON512:
+      description:     "Falcon-512 (FIPS 206 draft), lattice; signature is variable-length, <= 752"
+      publickeybytes:  897
+      signaturebytes:  752
+      secretkeybytes:  1281
+      securitylevel:   1
+      maturity:        draft
+
+   MAYO1:
+      description:     "MAYO-1 (NIST onramp), oil-and-vinegar; seed-sized secret key"
+      publickeybytes:  1420
+      signaturebytes:  454
+      secretkeybytes:  24
+      securitylevel:   1
+      maturity:        candidate
+
+   SNOVA24_5_4:
+      description:     "SNOVA-24_5_4 (NIST onramp), oil-and-vinegar"
+      publickeybytes:  1016
+      signaturebytes:  248
+      secretkeybytes:  48
+      securitylevel:   1
+      maturity:        candidate
+
+   SQISIGN1:
+      description:     "SQIsign-I (NIST onramp), isogeny; very small keys and signatures, slow"
+      publickeybytes:  65
+      signaturebytes:  148
+      secretkeybytes:  353
+      securitylevel:   1
+      maturity:        candidate
+
+   QRUOV1:
+      description:     "QR-UOV-I q=31 L=3 (NIST onramp), oil-and-vinegar; large public key"
+      publickeybytes:  23641
+      signaturebytes:  157
+      secretkeybytes:  32
+      securitylevel:   1
+      maturity:        candidate
+
+   MAYO2:
+      description:     "MAYO-2 (NIST onramp), oil-and-vinegar; larger pubkey / smaller sig than MAYO-1"
+      publickeybytes:  4912
+      signaturebytes:  186
+      secretkeybytes:  24
+      securitylevel:   1
+      maturity:        candidate
