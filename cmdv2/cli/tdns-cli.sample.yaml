@@ -1,3 +1,10 @@
+# Pull in shareable, non-secret algorithm enrichment data (key/signature
+# sizes, relative costs, maturity) kept separate from this host-local,
+# secret-bearing config. Consumed by `tdns-cli ... keystore <sig0|dnssec>
+# algorithms`. See algorithms.sample.yaml.
+include:
+   - /etc/tdns/algorithms.yaml
+
 apiservers:
    - name:              tdns-server
      baseurl:           https://127.0.0.1:8989/api/v1
