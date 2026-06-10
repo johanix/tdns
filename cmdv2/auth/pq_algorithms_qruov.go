@@ -16,11 +16,11 @@
 package main
 
 import (
-	"github.com/johanix/dnssec-algorithms/qruov1"
+	"github.com/johanix/dnssec-algorithms/qruov_q31_l3"
 
 	algs "github.com/johanix/tdns/v2/algorithms"
 )
 
 func init() {
-	algs.Register(205, qruov1.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.Register(205, qruov_q31_l3.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
 }

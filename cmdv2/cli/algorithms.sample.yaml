@@ -53,7 +53,7 @@ algorithms:
       publickeybytes:  1312
       signaturebytes:  2420
       secretkeybytes:  2560
-      securitylevel:   1
+      securitylevel:   2
       maturity:        final
       # signingcost:     <measure relative to ED25519>
       # validationcost:  <measure relative to ED25519>
@@ -98,7 +98,7 @@ algorithms:
       securitylevel:   1
       maturity:        candidate
 
-   QRUOV1:
+   QRUOV_Q31_L3:
       description:     "QR-UOV-I q=31 L=3 (NIST onramp), oil-and-vinegar; large public key"
       publickeybytes:  23641
       signaturebytes:  157
@@ -111,5 +111,45 @@ algorithms:
       publickeybytes:  4912
       signaturebytes:  186
       secretkeybytes:  24
+      securitylevel:   1
+      maturity:        candidate
+
+   MAYO3:
+      description:     "MAYO-3 (NIST onramp), oil-and-vinegar; level-3 parameter set"
+      publickeybytes:  2986
+      signaturebytes:  681
+      secretkeybytes:  32
+      securitylevel:   3
+      maturity:        candidate
+
+   MAYO5:
+      description:     "MAYO-5 (NIST onramp), oil-and-vinegar; level-5 parameter set"
+      publickeybytes:  5554
+      signaturebytes:  964
+      secretkeybytes:  40
+      securitylevel:   5
+      maturity:        candidate
+
+   FALCON1024:
+      description:     "Falcon-1024 (FIPS 206 draft), lattice; level-5, variable-length sig <= 1462"
+      publickeybytes:  1793
+      signaturebytes:  1462
+      secretkeybytes:  2305
+      securitylevel:   5
+      maturity:        draft
+
+   SNOVA37_17_2:
+      description:     "SNOVA-37_17_2 (NIST onramp), oil-and-vinegar; smallest signature (124 B), larger public key"
+      publickeybytes:  9842
+      signaturebytes:  124
+      secretkeybytes:  48
+      securitylevel:   1
+      maturity:        candidate
+
+   SNOVA25_8_3:
+      description:     "SNOVA-25_8_3 (NIST onramp), oil-and-vinegar; small signature, modest public key"
+      publickeybytes:  2320
+      signaturebytes:  165
+      secretkeybytes:  48
       securitylevel:   1
       maturity:        candidate
