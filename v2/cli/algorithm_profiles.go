@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 
 	"github.com/spf13/viper"
 )
@@ -31,8 +32,8 @@ type algorithmProfile struct {
 	PublicKeyBytes int    `mapstructure:"publickeybytes"`
 	SignatureBytes int    `mapstructure:"signaturebytes"`
 	SecretKeyBytes int    `mapstructure:"secretkeybytes"`
-	SecurityLevel  int    `mapstructure:"securitylevel"` // NIST PQ level 1/3/5; 0 = unspecified
-	Maturity       string `mapstructure:"maturity"`      // final | draft | candidate | builtin
+	SecurityLevel  int    `mapstructure:"securitylevel"`  // NIST PQ level 1/3/5; 0 = unspecified
+	Maturity       string `mapstructure:"maturity"`       // final | draft | candidate | builtin
 	SigningCost    int    `mapstructure:"signingcost"`    // relative to ED25519 (= 1); 0 = unknown
 	ValidationCost int    `mapstructure:"validationcost"` // relative to ED25519 (= 1); 0 = unknown
 }
@@ -72,4 +73,51 @@ func algStrCol(s string) string {
 		return "-"
 	}
 	return s
+}
+
+// algorithmFamily returns the family grouping key for an algorithm name:
+// the leading run before the first digit or underscore (MAYO1 -> "MAYO",
+// SNOVA24_5_4 -> "SNOVA", FALCON1024 -> "FALCON", QRUOV_Q31_L3 ->
+// "QRUOV"). Used to sort the listing so related parameter sets group
+// together; it is display-only and does not affect codepoints.
+func algorithmFamily(name string) string {
+	i := strings.IndexFunc(name, func(r rune) bool {
+		return (r >= '0' && r <= '9') || r == '_'
+	})
+	if i <= 0 {
+		return name
+	}
+	return name[:i]
+}
+
+// descWrapWidth bounds the DESCRIPTION column so a long note wraps onto
+// continuation rows instead of stretching the whole table.
+const descWrapWidth = 60
+
+// wrapText word-wraps s into lines no longer than width. A single word
+// longer than width gets its own (overlong) line rather than being
+// split. Returns nil for empty s.
+func wrapText(s string, width int) []string {
+	if s == "" {
+		return nil
+	}
+	var lines []string
+	var b strings.Builder
+	for _, w := range strings.Fields(s) {
+		switch {
+		case b.Len() == 0:
+			b.WriteString(w)
+		case b.Len()+1+len(w) > width:
+			lines = append(lines, b.String())
+			b.Reset()
+			b.WriteString(w)
+		default:
+			b.WriteByte(' ')
+			b.WriteString(w)
+		}
+	}
+	if b.Len() > 0 {
+		lines = append(lines, b.String())
+	}
+	return lines
 }
