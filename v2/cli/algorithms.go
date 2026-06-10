@@ -121,36 +121,71 @@ func printServerAlgorithms(role string, use algUse) error {
 	if err != nil {
 		return err
 	}
+
+	// Filter to the requested capability, then group related parameter
+	// sets together: order by algorithm family (MAYO*, SNOVA*, FALCON*,
+	// ...), families by their lowest codepoint, and members by codepoint
+	// within a family. This is display-only — codepoints are unchanged
+	// and stay authoritative on the wire.
+	var rows []algregistry.AlgorithmInfo
+	for _, a := range algs {
+		if use.permits(a) {
+			rows = append(rows, a)
+		}
+	}
+	familyMin := map[string]uint8{}
+	for _, a := range rows {
+		if f := algorithmFamily(a.Name); familyMin[f] == 0 || a.Number < familyMin[f] {
+			familyMin[f] = a.Number
+		}
+	}
+	sort.Slice(rows, func(i, j int) bool {
+		fi, fj := algorithmFamily(rows[i].Name), algorithmFamily(rows[j].Name)
+		if fi != fj {
+			if familyMin[fi] != familyMin[fj] {
+				return familyMin[fi] < familyMin[fj]
+			}
+			return fi < fj
+		}
+		return rows[i].Number < rows[j].Number
+	})
+
 	profiles := loadAlgorithmProfiles()
 	fmt.Printf("Algorithms supported by the %s server:\n", role)
 
 	if len(profiles) == 0 {
-		for _, a := range algs {
-			if use.permits(a) {
-				fmt.Printf("  %-16s %d\n", a.Name, a.Number)
-			}
+		for _, a := range rows {
+			fmt.Printf("  %-16s %d\n", a.Name, a.Number)
 		}
 		return nil
 	}
 
 	// Enriched table. Sizes are in bytes; SIGN/VRFY are signing/
 	// validation cost relative to ED25519 (= 1); "-" means the profile
-	// did not specify the field.
+	// did not specify the field. A long DESCRIPTION wraps onto
+	// continuation rows so it cannot stretch the table.
 	fmt.Println("  (sizes in bytes; SIGN/VRFY = signing/validation cost relative to ED25519=1; '-' = unspecified)")
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "  NAME\tCP\tPUBKEY\tSIG\tSECKEY\tLVL\tSIGN\tVRFY\tMATURITY\tDESCRIPTION")
-	for _, a := range algs {
-		if !use.permits(a) {
-			continue
-		}
+	for _, a := range rows {
 		// viper lower-cases config keys, so the profile map is keyed by
 		// the lower-cased algorithm name.
 		p := profiles[strings.ToLower(a.Name)]
+		desc := wrapText(p.Description, descWrapWidth)
+		firstLine, contLines := "", []string(nil)
+		if len(desc) > 0 {
+			firstLine, contLines = desc[0], desc[1:]
+		}
 		fmt.Fprintf(tw, "  %s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 			a.Name, a.Number,
 			algIntCol(p.PublicKeyBytes), algIntCol(p.SignatureBytes), algIntCol(p.SecretKeyBytes),
 			algIntCol(p.SecurityLevel), algIntCol(p.SigningCost), algIntCol(p.ValidationCost),
-			algStrCol(p.Maturity), algStrCol(p.Description))
+			algStrCol(p.Maturity), algStrCol(firstLine))
+		// Continuation rows: nine empty leading cells so the wrapped
+		// text lands under the DESCRIPTION column.
+		for _, line := range contLines {
+			fmt.Fprintf(tw, "  %s%s\n", strings.Repeat("\t", 9), line)
+		}
 	}
 	return tw.Flush()
 }
