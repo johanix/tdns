@@ -29,7 +29,13 @@ func init() {
 	algs.RegisterMetadata(202, "MAYO1", algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
 	algs.RegisterMetadata(203, "SNOVA24_5_4", algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
 	algs.RegisterMetadata(204, "SQISIGN1", algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
-	algs.RegisterMetadata(205, "QRUOV1", algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.RegisterMetadata(205, "QRUOV_Q31_L3", algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.RegisterMetadata(206, "MAYO2", algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.RegisterMetadata(207, "MAYO3", algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.RegisterMetadata(208, "MAYO5", algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.RegisterMetadata(209, "FALCON1024", algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.RegisterMetadata(210, "SNOVA37_17_2", algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.RegisterMetadata(211, "SNOVA25_8_3", algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
 }
 
 func main() {
