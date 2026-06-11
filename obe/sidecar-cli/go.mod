@@ -50,7 +50,7 @@ require (
 	github.com/orcaman/concurrent-map/v2 v2.0.1 // indirect
 	github.com/pelletier/go-toml/v2 v2.2.2 // indirect
 	github.com/pkg/term v1.2.0-beta.2 // indirect
-	github.com/quic-go/quic-go v0.57.0 // indirect
+	github.com/quic-go/quic-go v0.59.1 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/ryanuber/columnize v2.1.2+incompatible // indirect
 	github.com/sagikazarmark/locafero v0.4.0 // indirect
