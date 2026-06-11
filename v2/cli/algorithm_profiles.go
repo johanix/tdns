@@ -92,7 +92,7 @@ func algorithmFamily(name string) string {
 
 // descWrapWidth bounds the DESCRIPTION column so a long note wraps onto
 // continuation rows instead of stretching the whole table.
-const descWrapWidth = 60
+const descWrapWidth = 50
 
 // wrapText word-wraps s into lines no longer than width. A single word
 // longer than width gets its own (overlong) line rather than being
