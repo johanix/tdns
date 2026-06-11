@@ -38,20 +38,21 @@ type algorithmProfile struct {
 	ValidationCost int    `mapstructure:"validationcost"` // relative to ED25519 (= 1); 0 = unknown
 }
 
-// loadAlgorithmProfiles returns the "algorithms" enrichment map from the
-// (already include-expanded) CLI config, or nil if none is configured.
+// loadAlgorithmProfiles returns the "algorithms.profiles" enrichment map
+// from the (already include-expanded) CLI config, or nil if none is
+// configured.
 //
 // viper lower-cases all config keys, so the returned map is keyed by the
 // lower-cased algorithm name; callers must look up with
 // strings.ToLower(name). Malformed config is non-fatal — enrichment is
 // optional, so we warn and fall back to the bare listing.
 func loadAlgorithmProfiles() map[string]algorithmProfile {
-	if !viper.IsSet("algorithms") {
+	if !viper.IsSet("algorithms.profiles") {
 		return nil
 	}
 	var profiles map[string]algorithmProfile
-	if err := viper.UnmarshalKey("algorithms", &profiles); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: ignoring malformed 'algorithms' config section: %v\n", err)
+	if err := viper.UnmarshalKey("algorithms.profiles", &profiles); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: ignoring malformed 'algorithms.profiles' config section: %v\n", err)
 		return nil
 	}
 	return profiles
@@ -90,9 +91,21 @@ func algorithmFamily(name string) string {
 	return name[:i]
 }
 
-// descWrapWidth bounds the DESCRIPTION column so a long note wraps onto
-// continuation rows instead of stretching the whole table.
-const descWrapWidth = 50
+// defaultDescWrapWidth bounds the DESCRIPTION column so a long note
+// wraps onto continuation rows instead of stretching the whole table.
+// Overridable via "algorithms.display.descriptionwidth" in the config.
+const defaultDescWrapWidth = 50
+
+// descWrapWidth returns the DESCRIPTION column wrap width from
+// "algorithms.display.descriptionwidth", falling back to
+// defaultDescWrapWidth when unset or non-positive.
+func descWrapWidth() int {
+	w := viper.GetInt("algorithms.display.descriptionwidth")
+	if w <= 0 {
+		return defaultDescWrapWidth
+	}
+	return w
+}
 
 // wrapText word-wraps s into lines no longer than width. A single word
 // longer than width gets its own (overlong) line rather than being

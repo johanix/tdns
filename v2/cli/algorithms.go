@@ -167,11 +167,12 @@ func printServerAlgorithms(role string, use algUse) error {
 	fmt.Println("  (sizes in bytes; SIGN/VRFY = signing/validation cost relative to ED25519=1; '-' = unspecified)")
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
 	fmt.Fprintln(tw, "  NAME\tCP\tPUBKEY\tSIG\tSECKEY\tLVL\tSIGN\tVRFY\tMATURITY\tDESCRIPTION")
+	wrapWidth := descWrapWidth()
 	for _, a := range rows {
 		// viper lower-cases config keys, so the profile map is keyed by
 		// the lower-cased algorithm name.
 		p := profiles[strings.ToLower(a.Name)]
-		desc := wrapText(p.Description, descWrapWidth)
+		desc := wrapText(p.Description, wrapWidth)
 		firstLine, contLines := "", []string(nil)
 		if len(desc) > 0 {
 			firstLine, contLines = desc[0], desc[1:]
