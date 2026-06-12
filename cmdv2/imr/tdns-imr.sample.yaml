@@ -18,12 +18,30 @@ imrengine:
       # - query-for-transport-tlsa
 
 # DNSSEC algorithm numbers whose DNSKEY/RRSIG payloads are large for UDP.
+# Consulted ONLY when dnskey_query_transport is "use_ds_signal" (the default).
 # When a referral DS RRset contains any listed algorithm, the IMR fetches
-# the child zone's DNSKEY over TCP from the start (do53-tcp), not UDP with
-# TC fallback. RSASHA512 (10) is a stand-in where ML-DSA-44 is unavailable.
-# Inspect counters: tdns-cli imr stats large-ksk
+# the child zone's DNSKEY over a non-UDP transport from the start, not UDP
+# with TC fallback. RSASHA512 (10) is a stand-in where ML-DSA-44 is
+# unavailable. Inspect counters: tdns-cli imr stats large-ksk
+#
+# dnskey_query_transport selects how the IMR picks a transport for DNSKEY
+# queries. DNSKEY queries are ~0.1% of traffic and exempt from a server's
+# probabilistic transport-weight distribution, so the chosen transport
+# bypasses those weights (it still honors the server's advertised
+# capabilities, preferring doq > dot > doh > tcp). Values:
+#    force_udp        - disable this feature; follow normal probabilistic
+#                       transport selection even for large-KSK zones.
+#    use_ds_signal    - (default) bypass to the best transport only when the
+#                       parent DS uses a large_algorithms algorithm.
+#    try_encrypted    - bypass for ALL DNSKEY queries; prefer encrypted,
+#                       fall back to TCP, never UDP. Avoids having to keep
+#                       large_algorithms current as PQ algorithms proliferate.
+#    force_encrypted  - bypass for ALL DNSKEY queries; encrypted only, fail
+#                       the query if the server advertises no encrypted
+#                       transport.
 dnssec:
    large_algorithms: [ 10 ]
+   dnskey_query_transport: use_ds_signal
 
 log:
    file:                /var/log/tdns/tdns-imr.log
