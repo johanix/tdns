@@ -17,11 +17,11 @@ import (
 )
 
 var (
-	imrDSEncounteredTotal    atomic.Uint64
-	imrDSEncounteredLarge    atomic.Uint64
-	imrDSDLargeRRByAlg       [256]atomic.Uint64
-	imrDNSKEYLookupTotal     atomic.Uint64
-	imrDNSKEYLookupForcedTCP atomic.Uint64
+	imrDSEncounteredTotal   atomic.Uint64
+	imrDSEncounteredLarge   atomic.Uint64
+	imrDSDLargeRRByAlg      [256]atomic.Uint64
+	imrDNSKEYLookupTotal    atomic.Uint64
+	imrDNSKEYLookupBypassed atomic.Uint64
 )
 
 // LargeKskDSAlgCount holds the number of individual DS RRs seen for one
@@ -37,7 +37,11 @@ type LargeKskImrMetrics struct {
 	DSEncounteredLarge    uint64
 	DSDLargeRRByAlgorithm []LargeKskDSAlgCount
 	DNSKEYLookupTotal     uint64
-	DNSKEYLookupForcedTCP uint64
+	// DNSKEYLookupBypassed counts DNSKEY lookups that bypassed the server's
+	// probabilistic transport selection per the dnskey_query_transport policy.
+	// The transport actually chosen may be do53-tcp OR an encrypted transport
+	// (DoQ/DoT/DoH) depending on the server's advertised capabilities.
+	DNSKEYLookupBypassed uint64
 }
 
 // DNSSECAlgorithmLabel returns a human-readable algorithm name with number.
@@ -50,10 +54,10 @@ func DNSSECAlgorithmLabel(alg uint8) string {
 
 func LargeKskImrMetricsSnapshot() LargeKskImrMetrics {
 	m := LargeKskImrMetrics{
-		DSEncounteredTotal:    imrDSEncounteredTotal.Load(),
-		DSEncounteredLarge:    imrDSEncounteredLarge.Load(),
-		DNSKEYLookupTotal:     imrDNSKEYLookupTotal.Load(),
-		DNSKEYLookupForcedTCP: imrDNSKEYLookupForcedTCP.Load(),
+		DSEncounteredTotal:   imrDSEncounteredTotal.Load(),
+		DSEncounteredLarge:   imrDSEncounteredLarge.Load(),
+		DNSKEYLookupTotal:    imrDNSKEYLookupTotal.Load(),
+		DNSKEYLookupBypassed: imrDNSKEYLookupBypassed.Load(),
 	}
 	for alg := range imrDSDLargeRRByAlg {
 		if c := imrDSDLargeRRByAlg[alg].Load(); c > 0 {
@@ -74,7 +78,7 @@ func resetLargeKskImrMetricsForTest() {
 	imrDSEncounteredTotal.Store(0)
 	imrDSEncounteredLarge.Store(0)
 	imrDNSKEYLookupTotal.Store(0)
-	imrDNSKEYLookupForcedTCP.Store(0)
+	imrDNSKEYLookupBypassed.Store(0)
 	for i := range imrDSDLargeRRByAlg {
 		imrDSDLargeRRByAlg[i].Store(0)
 	}
@@ -102,7 +106,7 @@ func (imr *Imr) noteDSEncountered(dsRRs []dns.RR) {
 func (imr *Imr) noteDNSKEYLookup(bypassed bool) {
 	imrDNSKEYLookupTotal.Add(1)
 	if bypassed {
-		imrDNSKEYLookupForcedTCP.Add(1)
+		imrDNSKEYLookupBypassed.Add(1)
 	}
 }
 

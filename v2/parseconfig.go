@@ -209,6 +209,12 @@ func (conf *Config) ParseConfig(reload bool) error {
 		}
 	}
 
+	// Reset raw fields that derive an internal default when omitted, so a
+	// reload after the operator removes the YAML key reverts to the default
+	// instead of preserving the previously-decoded value (mapstructure leaves
+	// absent keys untouched).
+	conf.Dnssec.DNSKEYTransport = ""
+
 	// Decode the entire config at once
 	if err := decoder.Decode(configMap); err != nil {
 		errMsg := err.Error()

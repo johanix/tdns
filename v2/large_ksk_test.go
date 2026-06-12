@@ -102,8 +102,8 @@ func TestLargeKskImrMetrics(t *testing.T) {
 	if LargeAlgDSMetrics() != 2 {
 		t.Fatalf("LargeAlgDSMetrics = %d, want 2 large DS RRs", LargeAlgDSMetrics())
 	}
-	if m.DNSKEYLookupTotal != 2 || m.DNSKEYLookupForcedTCP != 1 {
-		t.Fatalf("DNSKEY metrics = %+v, want total=2 forced=1", m)
+	if m.DNSKEYLookupTotal != 2 || m.DNSKEYLookupBypassed != 1 {
+		t.Fatalf("DNSKEY metrics = %+v, want total=2 bypassed=1", m)
 	}
 }
 
