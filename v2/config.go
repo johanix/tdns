@@ -64,7 +64,22 @@ type DnssecConf struct {
 	// LargeAlgorithms lists DNSSEC algorithm numbers whose DNSKEY/RRSIG sizes
 	// are large for UDP. The IMR may query child DNSKEY over TCP when parent
 	// DS uses one; the signer warns if one signs the bulk of a zone.
+	// Consulted ONLY when DNSKEYTransport is "use_ds_signal".
 	LargeAlgorithms []uint8 `yaml:"large_algorithms" mapstructure:"large_algorithms"`
+
+	// DNSKEYTransport selects how the IMR chooses a transport for DNSKEY
+	// queries. DNSKEY queries are ~0.1% of traffic and exempt from a server's
+	// probabilistic transport-weight distribution, so the chosen transport
+	// bypasses those weights (it still honors the server's advertised
+	// capabilities). Values:
+	//   "force_udp"       - disable Part 3; follow normal probabilistic selection.
+	//   "use_ds_signal"   - (default) bypass to best transport only when the
+	//                       cached parent DS uses a LargeAlgorithms algorithm.
+	//   "try_encrypted"   - bypass for all DNSKEY; prefer encrypted, fall back
+	//                       to TCP, never UDP.
+	//   "force_encrypted" - bypass for all DNSKEY; encrypted only, fail the
+	//                       query if the server advertises no encrypted transport.
+	DNSKEYTransport string `yaml:"dnskey_query_transport" mapstructure:"dnskey_query_transport"`
 }
 
 // KaspConf holds Key and Signing Policy parameters for the signer.
@@ -433,6 +448,10 @@ type InternalConf struct {
 
 	// LargeAlgorithms is the derived lookup set from Dnssec.LargeAlgorithms.
 	LargeAlgorithms map[uint8]bool
+
+	// DNSKEYTransport is the validated policy derived from
+	// Dnssec.DNSKEYTransport. Defaults to DNSKEYTransportUseDSSignal.
+	DNSKEYTransport DNSKEYTransportPolicy
 
 	// PostParseZonesHook is called after ParseZones completes during
 	// reload (SIGHUP or "config reload-zones"). Set by MP apps to

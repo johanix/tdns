@@ -228,6 +228,12 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 	conf.Internal.LargeAlgorithms = buildLargeAlgorithmSet(conf.Dnssec.LargeAlgorithms)
 
+	dnskeyXport, err := parseDNSKEYTransportPolicy(conf.Dnssec.DNSKEYTransport)
+	if err != nil {
+		return err
+	}
+	conf.Internal.DNSKEYTransport = dnskeyXport
+
 	// Normalize service.transport.type (default: none)
 	if conf.Service.Transport.Type == "" {
 		conf.Service.Transport.Type = "none"

@@ -56,6 +56,10 @@ type Imr struct {
 	TLSADiscovery            *cache.DiscoveryTracker
 	// largeAlgs is copied from conf.Internal.LargeAlgorithms at init.
 	largeAlgs map[uint8]bool
+	// dnskeyTransport is the DNSKEY-query transport policy, copied from
+	// conf.Internal.DNSKEYTransport at init. The empty zero value behaves
+	// as DNSKEYTransportUseDSSignal.
+	dnskeyTransport DNSKEYTransportPolicy
 }
 
 func (imr *Imr) isLargeAlgorithm(alg uint8) bool {
@@ -154,7 +158,8 @@ func (conf *Config) InitImrEngine(quiet bool) error {
 			conf.Imr.Tuning.Discovery.RetryAfterFailure,
 			conf.Imr.Tuning.Discovery.MaxFailures,
 		),
-		largeAlgs: conf.Internal.LargeAlgorithms,
+		largeAlgs:       conf.Internal.LargeAlgorithms,
+		dnskeyTransport: conf.Internal.DNSKEYTransport,
 	}
 
 	if conf.Imr.Logging.Enabled {

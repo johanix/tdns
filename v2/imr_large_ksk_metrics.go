@@ -11,6 +11,8 @@ import (
 	"sort"
 	"sync/atomic"
 
+	cache "github.com/johanix/tdns/v2/cache"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -97,17 +99,51 @@ func (imr *Imr) noteDSEncountered(dsRRs []dns.RR) {
 	}
 }
 
-func (imr *Imr) noteDNSKEYLookup(forceTCP bool) {
+func (imr *Imr) noteDNSKEYLookup(bypassed bool) {
 	imrDNSKEYLookupTotal.Add(1)
-	if forceTCP {
+	if bypassed {
 		imrDNSKEYLookupForcedTCP.Add(1)
 	}
 }
 
-// dnskeyQueryForceTCP returns true when a cached parent DS RRset signals a large
-// child KSK algorithm and the IMR should fetch the child DNSKEY over TCP.
-func (imr *Imr) dnskeyQueryForceTCP(qname string, qtype uint16) bool {
-	if imr == nil || imr.Cache == nil || qtype != dns.TypeDNSKEY {
+// dnskeyPolicy returns the effective DNSKEY transport policy, treating the
+// empty zero value as the default (use_ds_signal).
+func (imr *Imr) dnskeyPolicy() DNSKEYTransportPolicy {
+	if imr == nil || imr.dnskeyTransport == "" {
+		return DNSKEYTransportUseDSSignal
+	}
+	return imr.dnskeyTransport
+}
+
+// dnskeyTransportBypass reports whether this DNSKEY query should bypass the
+// server's probabilistic transport-weight selection and instead use the best
+// available transport (resolved per-server by preferredDNSKEYTransport).
+//
+// DNSKEY queries are ~0.1% of traffic, so forcing them off the probabilistic
+// distribution does not meaningfully disturb a server's load shape.
+//
+//   - force_udp:       never bypass.
+//   - use_ds_signal:   bypass only when the cached parent DS uses a large alg.
+//   - try/force_encrypted: always bypass.
+func (imr *Imr) dnskeyTransportBypass(qname string, qtype uint16) bool {
+	if imr == nil || qtype != dns.TypeDNSKEY {
+		return false
+	}
+	switch imr.dnskeyPolicy() {
+	case DNSKEYTransportForceUDP:
+		return false
+	case DNSKEYTransportTryEncrypted, DNSKEYTransportForceEncrypted:
+		return true
+	case DNSKEYTransportUseDSSignal:
+		return imr.dnskeyDSSignalsLarge(qname)
+	}
+	return false
+}
+
+// dnskeyDSSignalsLarge reports whether a cached parent DS RRset for qname uses
+// a large child KSK algorithm.
+func (imr *Imr) dnskeyDSSignalsLarge(qname string) bool {
+	if imr == nil || imr.Cache == nil {
 		return false
 	}
 	ds := imr.Cache.Get(qname, dns.TypeDS)
@@ -119,9 +155,48 @@ func (imr *Imr) dnskeyQueryForceTCP(qname string, qtype uint16) bool {
 		if !ok || !imr.isLargeAlgorithm(d.Algorithm) {
 			continue
 		}
-		lgDns.Info("large-alg DS observed; will query child DNSKEY over TCP",
+		lgDns.Info("large-alg DS observed; will bypass UDP for child DNSKEY",
 			"zone", qname, "alg", d.Algorithm)
 		return true
+	}
+	return false
+}
+
+// preferredDNSKEYTransport picks the transport for a DNSKEY query that has been
+// selected to bypass probabilistic transport weights. It honors the server's
+// advertised capabilities (server.Transports) but ignores the weights. The
+// preference order is DoQ > DoT > DoH > TCP.
+//
+// Returns 0 (no transport) when the policy is force_encrypted and the server
+// advertises no encrypted transport; the caller must fail the query in that
+// case rather than fall back to cleartext.
+func (imr *Imr) preferredDNSKEYTransport(server *cache.AuthServer) core.Transport {
+	order := []core.Transport{core.TransportDoQ, core.TransportDoT, core.TransportDoH}
+	for _, pref := range order {
+		if serverAdvertises(server, pref) {
+			return pref
+		}
+	}
+
+	if imr.dnskeyPolicy() == DNSKEYTransportForceEncrypted {
+		// No encrypted transport available: signal failure (no fallback).
+		return 0
+	}
+
+	// Non-encrypted fallback: plain TCP, never UDP.
+	return core.TransportDo53TCP
+}
+
+// serverAdvertises reports whether the server lists transport t in its
+// advertised Transports.
+func serverAdvertises(server *cache.AuthServer, t core.Transport) bool {
+	if server == nil {
+		return false
+	}
+	for _, a := range server.Transports {
+		if a == t {
+			return true
+		}
 	}
 	return false
 }

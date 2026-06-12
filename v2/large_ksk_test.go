@@ -107,16 +107,10 @@ func TestLargeKskImrMetrics(t *testing.T) {
 	}
 }
 
-func TestImrDnskeyQueryForceTCP(t *testing.T) {
-	imr := &Imr{largeAlgs: map[uint8]bool{dns.RSASHA512: true}}
-	if imr.dnskeyQueryForceTCP("example.com.", dns.TypeA) {
-		t.Fatal("non-DNSKEY query must not force TCP")
-	}
-	if imr.dnskeyQueryForceTCP("example.com.", dns.TypeDNSKEY) {
-		t.Fatal("no cached DS must not force TCP")
-	}
-
-	qname := "example.com."
+// cacheWithLargeDS returns an RRset cache seeded with a large-algorithm parent
+// DS for qname.
+func cacheWithLargeDS(t *testing.T, qname string) *cache.RRsetCacheT {
+	t.Helper()
 	logger := log.New(os.Stderr, "", 0)
 	rrcache := cache.NewRRsetCache(logger, false, false)
 	ds := &dns.DS{
@@ -139,8 +133,96 @@ func TestImrDnskeyQueryForceTCP(t *testing.T) {
 			RRs:    []dns.RR{ds},
 		},
 	})
-	imr.Cache = rrcache
-	if !imr.dnskeyQueryForceTCP(qname, dns.TypeDNSKEY) {
-		t.Fatal("cached large-alg parent DS must force TCP for child DNSKEY")
+	return rrcache
+}
+
+func TestParseDNSKEYTransportPolicy(t *testing.T) {
+	cases := map[string]DNSKEYTransportPolicy{
+		"":                DNSKEYTransportUseDSSignal, // empty -> default
+		"use_ds_signal":   DNSKEYTransportUseDSSignal,
+		"FORCE_UDP":       DNSKEYTransportForceUDP, // case-insensitive
+		"try_encrypted":   DNSKEYTransportTryEncrypted,
+		"force_encrypted": DNSKEYTransportForceEncrypted,
+	}
+	for in, want := range cases {
+		got, err := parseDNSKEYTransportPolicy(in)
+		if err != nil {
+			t.Fatalf("parse(%q) err = %v", in, err)
+		}
+		if got != want {
+			t.Fatalf("parse(%q) = %q, want %q", in, got, want)
+		}
+	}
+	if _, err := parseDNSKEYTransportPolicy("bogus"); err == nil {
+		t.Fatal("parse(bogus) should error")
+	}
+}
+
+func TestDnskeyTransportBypass(t *testing.T) {
+	qname := "example.com."
+
+	// use_ds_signal: bypass only when cached DS is large.
+	imr := &Imr{largeAlgs: map[uint8]bool{dns.RSASHA512: true}}
+	if imr.dnskeyTransportBypass(qname, dns.TypeA) {
+		t.Fatal("non-DNSKEY query must never bypass")
+	}
+	if imr.dnskeyTransportBypass(qname, dns.TypeDNSKEY) {
+		t.Fatal("use_ds_signal with no cached DS must not bypass")
+	}
+	imr.Cache = cacheWithLargeDS(t, qname)
+	if !imr.dnskeyTransportBypass(qname, dns.TypeDNSKEY) {
+		t.Fatal("use_ds_signal with large cached DS must bypass")
+	}
+
+	// force_udp: never bypass, even with a large DS.
+	imrUDP := &Imr{
+		largeAlgs:       map[uint8]bool{dns.RSASHA512: true},
+		dnskeyTransport: DNSKEYTransportForceUDP,
+		Cache:           cacheWithLargeDS(t, qname),
+	}
+	if imrUDP.dnskeyTransportBypass(qname, dns.TypeDNSKEY) {
+		t.Fatal("force_udp must never bypass")
+	}
+
+	// try_encrypted / force_encrypted: always bypass DNSKEY, DS irrelevant.
+	for _, pol := range []DNSKEYTransportPolicy{DNSKEYTransportTryEncrypted, DNSKEYTransportForceEncrypted} {
+		i := &Imr{dnskeyTransport: pol} // no cache, no large algs
+		if !i.dnskeyTransportBypass(qname, dns.TypeDNSKEY) {
+			t.Fatalf("%s must bypass for DNSKEY regardless of DS", pol)
+		}
+		if i.dnskeyTransportBypass(qname, dns.TypeA) {
+			t.Fatalf("%s must not bypass non-DNSKEY", pol)
+		}
+	}
+}
+
+func TestPreferredDNSKEYTransport(t *testing.T) {
+	mkServer := func(ts ...core.Transport) *cache.AuthServer {
+		s := cache.NewAuthServer("ns.example.")
+		s.Transports = ts
+		return s
+	}
+
+	// Prefers DoQ over DoT over DoH.
+	imr := &Imr{dnskeyTransport: DNSKEYTransportTryEncrypted}
+	if got := imr.preferredDNSKEYTransport(mkServer(core.TransportDo53, core.TransportDoT, core.TransportDoQ)); got != core.TransportDoQ {
+		t.Fatalf("want DoQ, got %v", got)
+	}
+	if got := imr.preferredDNSKEYTransport(mkServer(core.TransportDo53, core.TransportDoT)); got != core.TransportDoT {
+		t.Fatalf("want DoT, got %v", got)
+	}
+
+	// try_encrypted with no encrypted transport falls back to TCP.
+	if got := imr.preferredDNSKEYTransport(mkServer(core.TransportDo53)); got != core.TransportDo53TCP {
+		t.Fatalf("try_encrypted no-encrypted want TCP, got %v", got)
+	}
+
+	// force_encrypted with no encrypted transport returns 0 (fail).
+	imrForce := &Imr{dnskeyTransport: DNSKEYTransportForceEncrypted}
+	if got := imrForce.preferredDNSKEYTransport(mkServer(core.TransportDo53)); got != 0 {
+		t.Fatalf("force_encrypted no-encrypted want 0, got %v", got)
+	}
+	if got := imrForce.preferredDNSKEYTransport(mkServer(core.TransportDo53, core.TransportDoT)); got != core.TransportDoT {
+		t.Fatalf("force_encrypted with DoT want DoT, got %v", got)
 	}
 }
