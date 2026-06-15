@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -160,13 +161,59 @@ func printServerAlgorithms(role string, use algUse) error {
 		return nil
 	}
 
-	// Enriched table. Sizes are in bytes; SIGN/VRFY are signing/
-	// validation cost relative to ED25519 (= 1); "-" means the profile
-	// did not specify the field. A long DESCRIPTION wraps onto
-	// continuation rows so it cannot stretch the table.
-	fmt.Println("  (sizes in bytes; SIGN/VRFY = signing/validation cost relative to ED25519=1; '-' = unspecified)")
+	// Enriched table. PUBKEY/SIG are the raw public-key and signature
+	// byte counts, excluding the surrounding DNSKEY/RRSIG record framing
+	// (RDATA header, owner/signer name, etc.); they are what the profiles
+	// measure, not the size of a complete record. SIGN/VRFY are relative
+	// signing/validation performance hints (cost relative to ED25519 = 1).
+	// "-" means the profile did not specify the field. A long DESCRIPTION
+	// wraps onto continuation rows so it cannot stretch the table.
+	//
+	// CP, SIGN, VRFY and SECKEY are only shown in verbose mode (-v); the
+	// default listing collapses them to keep the common columns readable.
+	verbose := tdns.Globals.Verbose
+	if verbose {
+		fmt.Println("  (PUBKEY/SIG = raw key & signature bytes, excl. RR framing; SIGN/VRFY = performance hints; '-' = unspecified)")
+	} else {
+		fmt.Println("  (PUBKEY/SIG = raw key & signature bytes, excl. RR framing; '-' = unspecified; -v adds CP, SECKEY, SIGN, VRFY)")
+	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-	fmt.Fprintln(tw, "  NAME\tCP\tPUBKEY\tSIG\tSECKEY\tLVL\tSIGN\tVRFY\tMATURITY\tDESCRIPTION")
+
+	// Build the column set for the requested verbosity. cells() yields the
+	// value cells for one algorithm row in the same column order; the
+	// header and the per-row formatting share this single source of truth
+	// so they cannot drift apart.
+	header := []string{"NAME"}
+	if verbose {
+		header = append(header, "CP")
+	}
+	header = append(header, "PUBKEY", "SIG")
+	if verbose {
+		header = append(header, "SECKEY")
+	}
+	header = append(header, "LVL")
+	if verbose {
+		header = append(header, "SIGN", "VRFY")
+	}
+	header = append(header, "MATURITY", "DESCRIPTION")
+	cells := func(a algregistry.AlgorithmInfo, p algorithmProfile, desc string) []string {
+		c := []string{a.Name}
+		if verbose {
+			c = append(c, strconv.Itoa(int(a.Number)))
+		}
+		c = append(c, algIntCol(p.PublicKeyBytes), algIntCol(p.SignatureBytes))
+		if verbose {
+			c = append(c, algIntCol(p.SecretKeyBytes))
+		}
+		c = append(c, algIntCol(p.SecurityLevel))
+		if verbose {
+			c = append(c, algIntCol(p.SigningCost), algIntCol(p.ValidationCost))
+		}
+		return append(c, algStrCol(p.Maturity), algStrCol(desc))
+	}
+	descCol := len(header) - 1
+
+	fmt.Fprintln(tw, "  "+strings.Join(header, "\t"))
 	wrapWidth := descWrapWidth()
 	for _, a := range rows {
 		// viper lower-cases config keys, so the profile map is keyed by
@@ -177,15 +224,11 @@ func printServerAlgorithms(role string, use algUse) error {
 		if len(desc) > 0 {
 			firstLine, contLines = desc[0], desc[1:]
 		}
-		fmt.Fprintf(tw, "  %s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			a.Name, a.Number,
-			algIntCol(p.PublicKeyBytes), algIntCol(p.SignatureBytes), algIntCol(p.SecretKeyBytes),
-			algIntCol(p.SecurityLevel), algIntCol(p.SigningCost), algIntCol(p.ValidationCost),
-			algStrCol(p.Maturity), algStrCol(firstLine))
-		// Continuation rows: nine empty leading cells so the wrapped
+		fmt.Fprintln(tw, "  "+strings.Join(cells(a, p, firstLine), "\t"))
+		// Continuation rows: enough empty leading cells so the wrapped
 		// text lands under the DESCRIPTION column.
 		for _, line := range contLines {
-			fmt.Fprintf(tw, "  %s%s\n", strings.Repeat("\t", 9), line)
+			fmt.Fprintf(tw, "  %s%s\n", strings.Repeat("\t", descCol), line)
 		}
 	}
 	return tw.Flush()
