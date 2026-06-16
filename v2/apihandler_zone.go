@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/miekg/dns"
@@ -87,6 +88,13 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				resp.ErrorMsg = err.Error()
 			}
 			resp.Msg = fmt.Sprintf("Zone %s: resigned, %d RRSIGs written by currently-active keys", zd.ZoneName, newrrsigs)
+
+		case "set-policy":
+			resp.Msg, err = setZonePolicy(zd, kdb, zp.Policy)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
 
 		case "generate-nsec":
 			err := zd.GenerateNsecChain(kdb)
@@ -196,6 +204,57 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			resp.Error = true
 		}
 	}
+}
+
+// setZonePolicy applies a DNSSEC policy to a zone at runtime: it validates the
+// named policy, persists a per-zone override (so the change survives restart
+// without rewriting the operator's YAML), rebinds the zone to the new policy,
+// and re-signs. The re-sign is ADDITIVE (SignZone, not ResignZone): the
+// algorithm reconcile in EnsureActiveDnssecKeys retires any wrong-algorithm
+// active key and generates one of the new policy's algorithm, while the
+// retired key's existing RRSIGs stay in place. The zone is therefore briefly
+// double-signed and stays validatable; the KeyStateWorker removes the retired
+// keys and strips their RRSIGs after propagation_delay.
+func setZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, error) {
+	policyName = strings.TrimSpace(policyName)
+	if policyName == "" {
+		return "", fmt.Errorf("set-policy: no policy specified")
+	}
+	pol, ok := Conf.Internal.DnssecPolicies[policyName]
+	if !ok {
+		return "", fmt.Errorf("set-policy: DNSSEC policy %q does not exist", policyName)
+	}
+	if pol.Error != "" {
+		return "", fmt.Errorf("set-policy: DNSSEC policy %q is broken: %s", policyName, pol.Error)
+	}
+	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+		return "", fmt.Errorf("set-policy: zone %s is not signed (neither online-signing nor inline-signing)", zd.ZoneName)
+	}
+
+	if err := SetZonePolicyOverride(kdb, zd.ZoneName, policyName); err != nil {
+		return "", fmt.Errorf("set-policy: persist override: %w", err)
+	}
+
+	zd.mu.Lock()
+	zd.DnssecPolicy = &pol
+	zd.DnssecPolicyName = policyName
+	zd.mu.Unlock()
+
+	UpdateSigValidityFloor(zd, zd.DnssecPolicy, Conf.KaspPropagationDelay(), 0, false, Conf.IsLargeAlgorithm)
+
+	// Additive sign: reconcile (retire wrong-alg, generate new) + add new-key
+	// RRSIGs, leaving the retired keys' RRSIGs in place for a graceful
+	// transition.
+	newrrsigs, err := zd.SignZone(kdb, true)
+	if err != nil {
+		return "", fmt.Errorf("set-policy: re-sign zone %s: %w", zd.ZoneName, err)
+	}
+
+	msg := fmt.Sprintf("Zone %s: DNSSEC policy set to %q (%d new RRSIGs). "+
+		"WARNING: this override is stored in the keystore, not the zone config; "+
+		"update the zone's dnssec_policy in YAML to make it the permanent base.",
+		zd.ZoneName, policyName, newrrsigs)
+	return msg, nil
 }
 
 func APIzoneDsync(ctx context.Context, app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
