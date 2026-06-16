@@ -381,6 +381,13 @@ override with the config base — the override wins until explicitly cleared
 
 ### Phase 6 — policy-cleanup command (collapse double-signing early)
 
+STATUS: DONE (uncommitted as of this writing). `policy-cleanup` subcommand
+in keystore.go DnssecKeyMgmt: transitions the zone's retired keys to
+removed and strips their RRSIGs by keytag (reusing StripZoneRRSIGs), keeps
+active keys; triggers a re-sign. CLI command in keystore_cmds.go (with
+confirmation prompt); added to the resign-trigger list in
+apihandler_funcs.go.
+
 `tdns-cli auth keystore dnssec policy-cleanup -z <zone>`: remove RETIRED
 keys no longer wanted by the policy and their sigs NOW, keeping active
 keys — for operators who don't want to wait out the double-signed window
@@ -440,7 +447,7 @@ dedicated presentation of the transition window yet.
 | 4 set-policy            | MED     | +100 / −0  | 45–60m | DONE fa4d163 (live) |
 | 5a parseDnssecConfig    | LOW     | +40 / −20  | 30–40m | DONE d25b398 |
 | 5 reload convergence    | MED     | +50 / −15  | 40–60m | DONE d25b398 |
-| 6 policy-cleanup        | LOW–MED | +70 / −0   | 40m    | remaining |
+| 6 policy-cleanup        | LOW–MED | +70 / −0   | 40m    | DONE (uncommitted) |
 | 7 visibility (-v only)  | LOW     | +45 / −5   | 30–40m | remaining |
 | **Total**               |         | **~+605 / −75** | **~5.5–7h** | |
 

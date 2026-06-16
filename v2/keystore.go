@@ -609,6 +609,49 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		resp.Msg = fmt.Sprintf("Deleted %d keys for zone %s. Generated: %s. Standby keys will follow via KeyStateWorker.",
 			count, kp.Zone, strings.Join(generated, ", "))
 
+	case "policy-cleanup":
+		// Collapse the double-signed window left by a policy change: remove the
+		// zone's RETIRED keys (and their RRSIGs) NOW, keeping the active keys,
+		// instead of waiting for the KeyStateWorker to age them out after
+		// propagation_delay. Operator-chosen: it accelerates removal, so a
+		// resolver still caching ONLY an old (now-removed) DNSKEY briefly can't
+		// validate until it re-queries; the active new-alg keys already serve.
+		// Distinct from `clear`, which deletes ALL keys and regenerates.
+		if kp.Zone == "" {
+			resp.Error = true
+			resp.ErrorMsg = "zone is required for policy-cleanup"
+			return &resp, fmt.Errorf("zone is required for policy-cleanup")
+		}
+		retired, err := GetDnssecKeysByState(kdb, kp.Zone, DnskeyStateRetired)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+		zd, zoneExists := Zones.Get(kp.Zone)
+		var removedTags []uint16
+		for _, k := range retired {
+			if err := UpdateDnssecKeyStateTx(tx, kdb, kp.Zone, k.KeyTag, DnskeyStateRemoved); err != nil {
+				lgSigner.Error("policy-cleanup: retired→removed failed", "zone", kp.Zone, "keyid", k.KeyTag, "err", err)
+				continue
+			}
+			removedTags = append(removedTags, k.KeyTag)
+			if zoneExists {
+				tag := k.KeyTag
+				if _, err := zd.StripZoneRRSIGs(func(rrsig *dns.RRSIG) bool {
+					return rrsig.KeyTag == tag
+				}); err != nil {
+					lgSigner.Error("policy-cleanup: failed to strip removed key's RRSIGs", "zone", kp.Zone, "keyid", tag, "err", err)
+				}
+			}
+		}
+		if len(removedTags) == 0 {
+			resp.Msg = fmt.Sprintf("Zone %s: no retired keys to clean up.", kp.Zone)
+		} else {
+			resp.Msg = fmt.Sprintf("Zone %s: removed %d retired key(s) %v and stripped their RRSIGs; active keys retained.",
+				kp.Zone, len(removedTags), removedTags)
+		}
+
 	case "purge":
 		purgeResp, err := kdb.dnssecKeyPurge(tx, kp)
 		if err != nil {
