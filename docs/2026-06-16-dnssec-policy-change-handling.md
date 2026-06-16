@@ -245,57 +245,98 @@ re-sign. Return the stark warning (2.5).
 
 ---
 
-### Phase 5 — zone reload handles policy changes (convergence)
+### Phase 5a — extract parseDnssecConfig() helper
 
-NB the three reload CLI commands (verified):
-- `config reload` — reloads GENERAL config only (re-parses the main
-  config incl. the dnssec.policies DEFINITIONS into
-  conf.Internal.DnssecPolicies); does NOT touch zones. NOT on the
+Pull the parsing of the ENTIRE `dnssec:` block out of ParseConfig into a
+standalone helper — parseDnssecConfig(conf) — that resolves policies +
+split_algorithms + large_algorithms + kasp into the conf.Internal.*
+structures (including the broken-policy error states from Phase 4 /
+already-landed work). ParseConfig calls it; nothing else changes there.
+
+Two payoffs:
+1. Testability — the dnssec parse becomes a pure function over YAML →
+   resolved structures, unit-testable without driving full ParseConfig.
+   (We could not test the policy-loading loop directly before because it
+   was buried in ParseConfig.)
+2. Reuse on zone reload — Phase 5 calls this helper from the zone-reload
+   path so reloading zones ALSO re-parses the dnssec block they depend
+   on, closing the "forgot to reload policies before zones" gap.
+
+It also makes the policies-before-zones dependency an explicit invariant
+of the reload path rather than an accident of call order in ParseConfig.
+
+- Scope: ENTIRE dnssec: block (policies + split_algorithms +
+  large_algorithms + kasp). They are parsed and validated together — a
+  policy's validity depends on split_algorithms — so they cannot be split.
+- Files: parseconfig.go (extract), a new test file.
+- Risk: LOW. Pure refactor + tests; behavior identical, just relocated.
+  One caveat: confirm ParseConfig does nothing BETWEEN the dnssec parse
+  and ParseZones that the zone-reload path would miss (trace the seam).
+- LOC: +40 / −20, plus ~+60 test LOC.
+- Agent time: ~30–40 min.
+- Verify: ParseConfig behavior unchanged (existing flows); new unit tests
+  exercise parseDnssecConfig directly (good/broken policies, split gate,
+  large-alg names, kasp).
+
+---
+
+### Phase 5 — zone reload re-parses dnssec + reconciles (convergence)
+
+The three reload CLI commands (verified):
+- `config reload` — reloads GENERAL config only (calls ParseConfig →
+  parseDnssecConfig + the rest); does NOT touch zones. NOT on the
   per-zone path.
 - `config reload-zones` — re-runs ParseZones for ALL zones.
 - `zone reload -z <zone>` — re-reads ONE zone's config.
 
 The last two CONVERGE: both push a ZoneRefresher into the RefreshEngine
-channel, and both flow through the SAME per-zone block at
-refreshengine.go:315-346. So the reconcile-on-reload logic is added ONCE,
-there — not twice.
+channel and flow through the SAME per-zone block at
+refreshengine.go:315-346. Logic is added ONCE, there.
 
-Two gaps to close in that block:
-1. It only fires on a policy NAME change (zd.DnssecPolicyName !=
-   zr.DnssecPolicy). It does NOT detect "same policy name, internal
-   details changed" — e.g. operator edits policy `pq-mayo` to switch its
-   KSK alg, zone still references `pq-mayo`. Name unchanged → no
-   reconcile. Must compare the RESOLVED policy (algorithms/lifetimes),
-   not just the name, OR always re-run reconcile (idempotent: a no-op
-   when keys already match).
-2. Ordering / cross-command dependency: policy DEFINITIONS live in the
-   main config (reloaded by `config reload`), but they're re-APPLIED to
-   zones only via the zone path (reload-zones / zone reload). So changing
-   a policy's internals is a TWO-step operator action today (config
-   reload, then reload-zones). Document this; consider whether `config
-   reload` should also nudge affected zones, or just clearly require the
-   two steps.
+DESIGN (uses Phase 5a): the zone-reload entry points CALL
+parseDnssecConfig FIRST, so reloading zones ALSO refreshes the dnssec
+block (policies etc.) they depend on. Decision (confirmed): re-parse the
+dnssec block on EVERY zone reload — including `zone reload -z <one>`.
+Policies are few and small; the parse is cheap; doing it "sometimes"
+would be more confusing than always. Side effect accepted: a single-zone
+reload updates the server-wide policy structs. Blast radius for
+re-APPLICATION stays scoped — only the reloaded zone(s) get reconciled
+against the refreshed policies; other zones are untouched until they too
+are reloaded.
+
+This ELIMINATES the old two-step "config reload then reload-zones" dance:
+`reload-zones` (or `zone reload -z`) now picks up edited policy
+definitions by itself.
+
+Remaining gap to close in the per-zone block:
+- The existing detection fires only on a policy NAME change
+  (zd.DnssecPolicyName != zr.DnssecPolicy). It misses "same name, internal
+  details changed" (operator edits policy `pq-mayo`'s KSK alg; zone still
+  references `pq-mayo`). Resolution: always re-run the Phase 1 reconcile
+  on reload (idempotent — a no-op when keys already match the freshly
+  parsed policy), rather than gating on a name compare. Simpler and
+  correct: the reconcile itself is the change detector.
 
 On reload the convergence is a HARD cutover when the config BASE changed
-(can't be graceful — RRSIGs not persisted across the reload of zone data;
-2.3). An ordinary reload with no policy change must be a no-op (the
-reconcile is idempotent — only generates/retires when keys don't match).
-Effective policy = override (Phase 3) else config base; reload must NOT
-clobber a live override with the config base unless the operator intends
-it (decide: does editing YAML override the override? probably the
-override should win until explicitly cleared — confirm at impl).
+(can't be graceful — RRSIGs are not persisted across a reload of zone
+data; 2.3). An ordinary reload with no policy change is a no-op (reconcile
+generates/retires only when keys don't match). Effective policy =
+override (Phase 3) else config base; reload must NOT clobber a live
+override with the config base — the override wins until explicitly cleared
+(confirm the clear path at impl).
 
-- Files: refreshengine.go (the dnssecPolicyChanged block, ~315-346):
-  broaden the change detection + call Phase 1 reconcile, not just
-  triggerResign.
-- Risk: MED. Change-detection is fiddly (resolved-field compare, or
-  idempotent always-reconcile). Must not thrash on reload, must respect
-  the override precedence.
-- LOC: +60 / −10.
+- Files: the zone-reload entry points (config.go ReloadZoneConfig /
+  zone_utils.go ReloadZone) call parseDnssecConfig before pushing
+  ZoneRefreshers; refreshengine.go (~315-346) calls Phase 1 reconcile
+  unconditionally instead of only on name change.
+- Risk: MED. The reconcile-always approach removes the fiddly field
+  compare but must be genuinely idempotent (no thrash on repeated
+  reloads) and must respect override precedence.
+- LOC: +50 / −15.
 - Agent time: ~40–60 min.
-- Verify: edit a policy's algorithm in YAML, `config reload` then
-  `reload-zones` → zone reconciles to the new algorithm (hard cutover OK).
-  `zone reload -z` with no change → no key churn. A zone with a live
+- Verify: edit a policy's algorithm in YAML, then `reload-zones` (one
+  step) → affected zones reconcile to the new algorithm (hard cutover OK).
+  `zone reload -z` of an unchanged zone → no key churn. A zone with a live
   override is not reverted to the config base by a reload.
 
 ---
@@ -359,17 +400,22 @@ dedicated presentation of the transition window yet.
 | 2 strip removed sigs    | MED     | +70 / −5   | 45–60m |
 | 3 override table + read | MED     | +110 / −10 | 50–70m |
 | 4 set-policy            | MED     | +100 / −0  | 45–60m |
-| 5 reload convergence    | MED     | +60 / −10  | 40–60m |
+| 5a parseDnssecConfig    | LOW     | +40 / −20  | 30–40m |
+| 5 reload convergence    | MED     | +50 / −15  | 40–60m |
 | 6 policy-cleanup        | LOW–MED | +70 / −0   | 40m    |
 | 7 visibility (-v only)  | LOW     | +45 / −5   | 30–40m |
-| **Total**               |         | **~+575 / −50** | **~5–6.5h** |
+| **Total**               |         | **~+605 / −75** | **~5.5–7h** |
 
 Plus tests (~+250 LOC across phases) and testbed validation cycles for
 Phases 1, 4, 5 (operator-gated builds, not in the agent-time figures).
 
 Sequencing note: Phases 1+2 are the engine and are independently
 valuable (reconcile + orphan-sig fix) even without the live UI. 3→4 add
-persistence + the live path. 5 is the restart/reload safety net. 6+7 are
-operability. Recommend checkpoints after 1, after 2, after 4, after 7.
-Phase 1 is the riskiest and gates everything — do it first, testbed it
-before proceeding.
+persistence + the live path. 5a (pure refactor) can land anytime and is a
+prerequisite for 5; 5 is the reload safety net that also closes the
+"reload policies before zones" gap. 6+7 are operability. Recommend
+checkpoints after 1, after 2, after 4, after 7. Phase 1 is the riskiest
+and gates everything — do it first, testbed it before proceeding. 5a is
+the lowest-risk and could even be done early/standalone (it's the
+testability refactor that was deferred during the config-restructure
+work).
