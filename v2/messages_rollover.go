@@ -310,7 +310,7 @@ type ConfigPathsResponse struct {
 	DBFile     string `json:"dbFile"`     // sqlite keystore
 	// PolicyName is the dnssecpolicy attached to the zone named in
 	// ?zone=. Empty when ?zone= is not provided or the zone has no
-	// rollover policy. CLI uses this to pick which dnssecpolicies
+	// rollover policy. CLI uses this to pick which dnssec.policies
 	// block to validate.
 	PolicyName string `json:"policyName,omitempty"`
 }

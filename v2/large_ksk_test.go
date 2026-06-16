@@ -3,6 +3,7 @@ package tdns
 import (
 	"log"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -32,6 +33,81 @@ func TestResolvePolicyRoleAlgorithms(t *testing.T) {
 	}
 }
 
+// Uses RSASHA512 as the stand-in for a "large KSK" algorithm: the PQ
+// algorithms (FALCON512, MAYO1, …) are registered at runtime by the
+// application via algorithms.Register, so they are absent from
+// dns.StringToAlgorithm inside the v2 package test binary. The gating
+// logic is algorithm-agnostic — any pair of distinct codepoints exercises
+// it identically.
+func TestValidateSplitAlgorithm(t *testing.T) {
+	// Same algorithm always passes, even with no allowlist.
+	if err := validateSplitAlgorithm("p", dns.ED25519, dns.ED25519, nil); err != nil {
+		t.Fatalf("same-alg pair must pass with nil allowlist: %v", err)
+	}
+	// Differing pair fails closed when no allowlist is configured.
+	if err := validateSplitAlgorithm("p", dns.RSASHA512, dns.ED25519, nil); err == nil {
+		t.Fatal("mixed pair must be rejected without an allowlist")
+	}
+	allowed := buildSplitAlgorithmSet(map[string][]string{
+		"RSASHA512": {"ED25519", "ECDSAP256SHA256"},
+	})
+	// Listed pair passes.
+	if err := validateSplitAlgorithm("p", dns.RSASHA512, dns.ED25519, allowed); err != nil {
+		t.Fatalf("listed mixed pair must pass: %v", err)
+	}
+	// Same KSK, ZSK not in its list, fails.
+	if err := validateSplitAlgorithm("p", dns.RSASHA512, dns.ECDSAP384SHA384, allowed); err == nil {
+		t.Fatal("unlisted ZSK for an allowlisted KSK must be rejected")
+	}
+	// KSK not in the allowlist at all, fails.
+	if err := validateSplitAlgorithm("p", dns.ECDSAP256SHA256, dns.ED25519, allowed); err == nil {
+		t.Fatal("KSK absent from allowlist must be rejected")
+	}
+}
+
+func TestBuildSplitAlgorithmSet(t *testing.T) {
+	if buildSplitAlgorithmSet(nil) != nil {
+		t.Fatal("nil input must yield nil set")
+	}
+	// Unknown algorithm names are dropped, not promoted to a permit.
+	got := buildSplitAlgorithmSet(map[string][]string{
+		"NOSUCHALG": {"ED25519"},
+		"RSASHA512": {"ED25519", "BOGUS"},
+	})
+	if got == nil {
+		t.Fatal("valid KSK entry must survive")
+	}
+	if _, ok := got[dns.ECDSAP256SHA256]; ok {
+		t.Fatal("unrelated alg must not be present")
+	}
+	set := got[dns.RSASHA512]
+	if !set[dns.ED25519] {
+		t.Fatal("RSASHA512->ED25519 must be permitted")
+	}
+	if len(set) != 1 {
+		t.Fatalf("BOGUS ZSK must be dropped, set = %v", set)
+	}
+}
+
+func TestParseDnssecPolicyConfSplitGate(t *testing.T) {
+	dp := DnssecPolicyConf{Algorithm: "RSASHA512"}
+	dp.ZSK.Algorithm = "ED25519"
+	dp.KSK.Lifetime = "forever"
+	dp.ZSK.Lifetime = "forever"
+	// No allowlist -> mixed pair rejected by the split-algorithm gate.
+	_, err := parseDnssecPolicyConfImpl("mixed", &dp, true, nil)
+	if err == nil || !strings.Contains(err.Error(), "split_algorithms") {
+		t.Fatalf("parse must reject mixed pair via the split gate, got %v", err)
+	}
+	// With the pair allowlisted, the gate passes (any later error is from
+	// downstream policy validation, not the split gate).
+	allowed := buildSplitAlgorithmSet(map[string][]string{"RSASHA512": {"ED25519"}})
+	_, err = parseDnssecPolicyConfImpl("mixed", &dp, true, allowed)
+	if err != nil && strings.Contains(err.Error(), "split_algorithms") {
+		t.Fatalf("allowlisted pair must pass the split gate, got %v", err)
+	}
+}
+
 func TestLargeAlgBulkWarning(t *testing.T) {
 	isLarge := func(alg uint8) bool { return alg == dns.RSASHA512 }
 	pol := &DnssecPolicy{
@@ -49,14 +125,150 @@ func TestLargeAlgBulkWarning(t *testing.T) {
 	}
 }
 
+func TestDnssecPolicyToInfo(t *testing.T) {
+	// Healthy policy: names resolved, lifetimes rendered, no error.
+	healthy := DnssecPolicy{
+		Name:         "good",
+		Algorithm:    dns.ED25519,
+		KSKAlgorithm: dns.RSASHA512,
+		ZSKAlgorithm: dns.ED25519,
+		Mode:         DnssecPolicyModeKSKZSK,
+		KSK:          KeyLifetime{Lifetime: foreverLifetimeSecs},
+		CSK:          KeyLifetime{Lifetime: 0},
+		ZSK:          KeyLifetime{Lifetime: 3600},
+		Rollover:     RolloverPolicy{Method: RolloverMethodMultiDS},
+	}
+	info := DnssecPolicyToInfo(healthy)
+	if info.PolicyError != "" {
+		t.Fatalf("healthy policy must have empty PolicyError, got %q", info.PolicyError)
+	}
+	if info.KSKAlgorithm != "RSASHA512" || info.ZSKAlgorithm != "ED25519" {
+		t.Fatalf("alg names = ksk %q zsk %q", info.KSKAlgorithm, info.ZSKAlgorithm)
+	}
+	if info.KSKLifetime != "forever" {
+		t.Fatalf("KSK forever sentinel = %q, want \"forever\"", info.KSKLifetime)
+	}
+	if info.ZSKLifetime != "1h0m0s" {
+		t.Fatalf("ZSK lifetime = %q, want 1h0m0s", info.ZSKLifetime)
+	}
+	if info.RolloverMethod != "multi-ds" {
+		t.Fatalf("rollover = %q, want multi-ds", info.RolloverMethod)
+	}
+
+	// Broken policy: error carried; unset algorithm renders as "-".
+	broken := DnssecPolicy{Name: "bad", Error: "unknown algorithm \"FOOBAR\""}
+	bi := DnssecPolicyToInfo(broken)
+	if bi.PolicyError == "" {
+		t.Fatal("broken policy must carry PolicyError")
+	}
+	if bi.Algorithm != "-" || bi.KSKAlgorithm != "-" {
+		t.Fatalf("unset algs should render as \"-\", got %q / %q", bi.Algorithm, bi.KSKAlgorithm)
+	}
+	if bi.KSKLifetime != "none" {
+		t.Fatalf("zero lifetime = %q, want none", bi.KSKLifetime)
+	}
+}
+
+func TestExpandTemplateDnssecPolicyPrecedence(t *testing.T) {
+	tmpl := &ZoneConf{DnssecPolicy: "default"}
+
+	// Zone with its own policy: keeps it (template does not clobber).
+	z, err := ExpandTemplate(ZoneConf{Name: "z1.", DnssecPolicy: "pq-mayo"}, tmpl, AppTypeAuth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if z.DnssecPolicy != "pq-mayo" {
+		t.Fatalf("zone policy = %q, want pq-mayo (zone must win over template)", z.DnssecPolicy)
+	}
+
+	// Zone without a policy: inherits the template's.
+	z, err = ExpandTemplate(ZoneConf{Name: "z2."}, tmpl, AppTypeAuth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if z.DnssecPolicy != "default" {
+		t.Fatalf("zone policy = %q, want inherited default", z.DnssecPolicy)
+	}
+}
+
+func TestParseExtendedDuration(t *testing.T) {
+	ok := map[string]time.Duration{
+		"14d":   14 * 24 * time.Hour,
+		"90d":   90 * 24 * time.Hour,
+		"2w":    2 * 7 * 24 * time.Hour,
+		"1w":    7 * 24 * time.Hour,
+		"168h":  168 * time.Hour, // stdlib unit still works
+		"30m":   30 * time.Minute,
+		"1h30m": 90 * time.Minute,
+		" 7d ":  7 * 24 * time.Hour, // trimmed
+	}
+	for in, want := range ok {
+		got, err := parseExtendedDuration(in)
+		if err != nil {
+			t.Fatalf("parseExtendedDuration(%q) err = %v", in, err)
+		}
+		if got != want {
+			t.Fatalf("parseExtendedDuration(%q) = %v, want %v", in, got, want)
+		}
+	}
+	for _, bad := range []string{"1.5d", "xd", "d", "", "1y", "-7d", "-2w"} {
+		if _, err := parseExtendedDuration(bad); err == nil {
+			t.Fatalf("parseExtendedDuration(%q) should have errored", bad)
+		}
+	}
+}
+
+func TestResolveZonePolicyRef(t *testing.T) {
+	policies := map[string]DnssecPolicy{
+		"good":   {Name: "good"},
+		"broken": {Name: "broken", Error: "unknown algorithm \"FOOBAR\""},
+	}
+	// Healthy policy is usable, no error.
+	if usable, msg := resolveZonePolicyRef("good", policies); !usable || msg != "" {
+		t.Fatalf("good: usable=%v msg=%q, want true,\"\"", usable, msg)
+	}
+	// Broken policy: not usable, message names it broken with the reason.
+	usable, msg := resolveZonePolicyRef("broken", policies)
+	if usable {
+		t.Fatal("broken policy must not be usable")
+	}
+	if !strings.Contains(msg, "is broken") || !strings.Contains(msg, "FOOBAR") {
+		t.Fatalf("broken msg = %q, want it to mention broken + the reason", msg)
+	}
+	// Missing policy: not usable, distinct "does not exist" message.
+	usable, msg = resolveZonePolicyRef("nope", policies)
+	if usable {
+		t.Fatal("missing policy must not be usable")
+	}
+	if !strings.Contains(msg, "does not exist") {
+		t.Fatalf("missing msg = %q, want \"does not exist\"", msg)
+	}
+}
+
 func TestIsLargeAlgorithmConfig(t *testing.T) {
 	conf := &Config{}
-	conf.Internal.LargeAlgorithms = buildLargeAlgorithmSet([]uint8{dns.RSASHA512})
+	set, err := buildLargeAlgorithmSet([]string{"RSASHA512"})
+	if err != nil {
+		t.Fatalf("buildLargeAlgorithmSet: %v", err)
+	}
+	conf.Internal.LargeAlgorithms = set
 	if !conf.IsLargeAlgorithm(dns.RSASHA512) {
 		t.Fatal("RSASHA512 should be large")
 	}
 	if conf.IsLargeAlgorithm(dns.ED25519) {
 		t.Fatal("ED25519 should not be large")
+	}
+}
+
+func TestBuildLargeAlgorithmSetUnknown(t *testing.T) {
+	// Unknown name is a hard error (unlike split_algorithms, which skips).
+	if _, err := buildLargeAlgorithmSet([]string{"NOSUCHALG"}); err == nil {
+		t.Fatal("unknown algorithm name must be a hard error")
+	}
+	// Empty list is fine (no large algorithms configured).
+	set, err := buildLargeAlgorithmSet(nil)
+	if err != nil || set != nil {
+		t.Fatalf("empty list: set=%v err=%v, want nil,nil", set, err)
 	}
 }
 

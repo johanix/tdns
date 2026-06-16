@@ -176,102 +176,134 @@ keybootstrap:
 #     value is 1h. No silent default — config parse fails closed if
 #     omitted.
 #
-# Algorithm numbers treated as "large" for IMR DNSKEY-over-TCP and signer warnings.
-# RSASHA512 (10) is a stand-in where ML-DSA-44 is unavailable.
+# All DNSSEC configuration lives under this one block: deployment-wide
+# guardrails (large_algorithms, split_algorithms), the named policies that
+# zones reference (dnssec.policies:), and the key/signing policy for the
+# KeyStateWorker (dnssec.kasp:).
 dnssec:
-   large_algorithms: [ 10 ]
+   # Algorithm NAMES treated as "large" for IMR DNSKEY-over-TCP and signer
+   # warnings. RSASHA512 is a stand-in where ML-DSA-44 is unavailable. Names,
+   # not codepoints: non-standardized PQ codepoints are assigned per
+   # deployment at runtime, so a bare number could mean different algorithms
+   # on the IMR and the signer. A name this binary's registry doesn't know is
+   # a hard config error (the server refuses to start).
+   large_algorithms: [ RSASHA512 ]
 
-# Multiple policies may coexist; each zone references one.
-dnssecpolicies:
-   # Static KSK, no automated rollover. Useful for zones whose operators
-   # want manual control over key cycles.
-   default:
-      algorithm:  ED25519
-      ksk:
-         lifetime:  forever
-      zsk:
-         lifetime:  forever
-      csk:
-         lifetime:  none
-      sigvalidity:
-         default:  14d
-         dnskey:   30d
-         ds:       14d
-      # rollover: omitted → method: none (static keys)
-      # clamping: omitted → disabled (no TTL clamping)
+   # split_algorithms gates which KSK/ZSK algorithm PAIRS a policy may use when
+   # the two roles differ. A policy whose ksk.algorithm != zsk.algorithm is
+   # REJECTED at config parse (fail closed) unless that exact pair is listed
+   # here. Same-algorithm policies are always allowed and need no entry.
+   #
+   # Keyed by KSK algorithm name; the value lists the ZSK algorithm names that
+   # KSK is permitted to pair with. Use this to allow a large/PQ KSK with a
+   # small classical ZSK while forbidding combinations you don't want to run.
+   #
+   # The RSASHA512 entry below authorizes the "large-ksk" policy further down
+   # (RSASHA512 KSK + ECDSAP256SHA256 ZSK). Remove it and that policy fails to
+   # load.
+   split_algorithms:
+      RSASHA512: [ ED25519, ECDSAP256SHA256 ]
+      # Example with PQ algorithms (registered at runtime by the binary):
+      # FALCON512: [ ED25519, ECDSAP256SHA256 ]
+      # MAYO1:     [ ED25519 ]
 
-   # Large KSK (RSASHA512) + small ZSK for UDP-friendly zone signatures.
-   large-ksk:
-      algorithm:  ECDSAP256SHA256
-      ksk:
-         algorithm:  RSASHA512
-         lifetime:   90d
-      zsk:
+   # Named DNSSEC policies. Each zone references one via its dnssec_policy
+   # field. A policy that sets different ksk.algorithm and zsk.algorithm must
+   # have that pair allowlisted in dnssec.split_algorithms above, or config
+   # load fails.
+   policies:
+      # Static KSK, no automated rollover. Useful for zones whose operators
+      # want manual control over key cycles.
+      default:
+         algorithm:  ED25519
+         ksk:
+            lifetime:  forever
+         zsk:
+            lifetime:  forever
+         csk:
+            lifetime:  none
+         sigvalidity:
+            default:  14d
+            dnskey:   30d
+            ds:       14d
+         # rollover: omitted → method: none (static keys)
+         # clamping: omitted → disabled (no TTL clamping)
+
+      # Large KSK (RSASHA512) + small ZSK for UDP-friendly zone signatures.
+      # The differing KSK/ZSK algorithms require an entry in
+      # dnssec.split_algorithms (RSASHA512: [ ..., ECDSAP256SHA256 ]) above —
+      # without it this policy is rejected at config load.
+      large-ksk:
          algorithm:  ECDSAP256SHA256
-         lifetime:   30d
-      csk:
-         lifetime:  none
-      sigvalidity:
-         default:  14d
-         dnskey:   30d
-         ds:       14d
+         ksk:
+            algorithm:  RSASHA512
+            lifetime:   90d
+         zsk:
+            algorithm:  ECDSAP256SHA256
+            lifetime:   30d
+         csk:
+            lifetime:  none
+         sigvalidity:
+            default:  14d
+            dnskey:   30d
+            ds:       14d
 
-   # Rapid-cadence policy with automated KSK rollover. Suitable for
-   # testing / experimentation.
-   fastroll:
-      algorithm:  ED25519
-      ksk:
-         lifetime:  48h
-      zsk:
-         lifetime:  12h   # drives automated ZSK rollover (KeyStateWorker)
-      csk:
-         lifetime:  none
-      sigvalidity:
-         default:  14d
-         dnskey:   30d
-         ds:       14d
-      rollover:
-         method:                multi-ds
-         num-ds:                3                  # pipeline depth
-         parent-agent:          127.0.0.1:5354     # parent's agent for DS observation
-         confirm-initial-wait:  2s
-         confirm-poll-max:      60s
-         confirm-timeout:       1h
-      ttls:
-         dnskey:      2h            # operator-configured DNSKEY TTL
-         # max_served: 5m           # OPTIONAL steady-state ceiling on every served
-                                    # TTL in the zone. Set to enforce low TTLs on
-                                    # zones whose source data has high TTLs that
-                                    # the operator can't directly edit (e.g.
-                                    # inbound zone transfers, provisioning systems
-                                    # that publish 1h+ TTLs). When set, SignRRset
-                                    # writes min(operator_ttl, max_served) to
-                                    # every RR header TTL and the RRSIG covers
-                                    # the clamped value. Composes with K-step
-                                    # rollover clamping: effective ceiling is
-                                    # min(K*margin, max_served). Must be >= 60s.
-      clamping:
-         enabled:  true         # K-step TTL clamping near rollover
-         margin:   1h           # REQUIRED when enabled: true
-                                # — floor TTL near rollover
-                                # — retired-KSK hold time
+      # Rapid-cadence policy with automated KSK rollover. Suitable for
+      # testing / experimentation.
+      fastroll:
+         algorithm:  ED25519
+         ksk:
+            lifetime:  48h
+         zsk:
+            lifetime:  12h   # drives automated ZSK rollover (KeyStateWorker)
+         csk:
+            lifetime:  none
+         sigvalidity:
+            default:  14d
+            dnskey:   30d
+            ds:       14d
+         rollover:
+            method:                multi-ds
+            num-ds:                3                  # pipeline depth
+            parent-agent:          127.0.0.1:5354     # parent's agent for DS observation
+            confirm-initial-wait:  2s
+            confirm-poll-max:      60s
+            confirm-timeout:       1h
+         ttls:
+            dnskey:      2h            # operator-configured DNSKEY TTL
+            # max_served: 5m           # OPTIONAL steady-state ceiling on every served
+                                       # TTL in the zone. Set to enforce low TTLs on
+                                       # zones whose source data has high TTLs that
+                                       # the operator can't directly edit (e.g.
+                                       # inbound zone transfers, provisioning systems
+                                       # that publish 1h+ TTLs). When set, SignRRset
+                                       # writes min(operator_ttl, max_served) to
+                                       # every RR header TTL and the RRSIG covers
+                                       # the clamped value. Composes with K-step
+                                       # rollover clamping: effective ceiling is
+                                       # min(K*margin, max_served). Must be >= 60s.
+         clamping:
+            enabled:  true         # K-step TTL clamping near rollover
+            margin:   1h           # REQUIRED when enabled: true
+                                   # — floor TTL near rollover
+                                   # — retired-KSK hold time
 
-# Key and Signing Policy (KASP)
-# Controls the KeyStateWorker's automatic key state transitions and standby
-# key maintenance. The KeyStateWorker runs periodically to:
-#   - Transition published keys to standby after propagation_delay
-#   - Transition retired keys to removed after propagation_delay
-#   - Generate new standby keys when count drops below configured thresholds
-kasp:
-   propagation_delay:  1h     # Wait time before published→standby and retired→removed
-                              # transitions for non-rollover zones. Also used by the
-                              # rollover worker's pending-child-publish phase.
-   check_interval:     1m     # How often the KeyStateWorker runs its checks
-   standby_zsk_count:  1      # Number of standby ZSKs to maintain per zone (0 = no standby)
-   standby_ksk_count:  0      # Number of standby KSKs to maintain per zone (0 = no standby).
-                              # NOTE: For zones with rollover.method != none, the rollover
-                              # pipeline-fill (Phase 4A) generates KSKs up to rollover.num-ds
-                              # automatically; standby_ksk_count is independent of that.
+   # Key and Signing Policy (KASP). Controls the KeyStateWorker's automatic
+   # key state transitions and standby key maintenance. The KeyStateWorker
+   # runs periodically to:
+   #   - Transition published keys to standby after propagation_delay
+   #   - Transition retired keys to removed after propagation_delay
+   #   - Generate new standby keys when count drops below configured thresholds
+   kasp:
+      propagation_delay:  1h     # Wait time before published→standby and retired→removed
+                                 # transitions for non-rollover zones. Also used by the
+                                 # rollover worker's pending-child-publish phase.
+      check_interval:     1m     # How often the KeyStateWorker runs its checks
+      standby_zsk_count:  1      # Number of standby ZSKs to maintain per zone (0 = no standby)
+      standby_ksk_count:  0      # Number of standby KSKs to maintain per zone (0 = no standby).
+                                 # NOTE: For zones with rollover.method != none, the rollover
+                                 # pipeline-fill (Phase 4A) generates KSKs up to rollover.num-ds
+                                 # automatically; standby_ksk_count is independent of that.
 
 # Catalog zone configuration (RFC 9432)
 # Required if any zone has the 'catalog-zone' option enabled.

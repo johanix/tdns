@@ -293,6 +293,10 @@ Document in `tdns/cmd/.../*.sample.yaml` and any policy sample (3-space
 indent):
 
 ```yaml
+dnssec:
+   split_algorithms:                # required for the mixed pair below
+      RSASHA512: [ ECDSAP256SHA256 ]
+
 dnssecpolicies:
    large-ksk:
       algorithm:  ECDSAP256SHA256   # default / ZSK fallback
@@ -303,6 +307,55 @@ dnssecpolicies:
          algorithm:  ECDSAP256SHA256
          lifetime:   30d
 ```
+
+See A.3.9 for the `split_algorithms` gate that the mixed pair requires.
+
+### A.3.9 Gating which KSK/ZSK algorithm pairs are allowed (2026-06-16)
+
+Per-role algorithm support (A.3.1–A.3.4) lets a policy name any KSK
+algorithm with any ZSK algorithm. Not every combination should be
+operationally permitted, so a deployment-wide allowlist gates which
+*mixed* pairs are accepted. This lives under the shared `dnssec:`
+block, not under `dnssecpolicies:` — like `large_algorithms`, it is a
+property of the deployment, not of any single named policy, and every
+policy is validated against it.
+
+```yaml
+dnssec:
+   large_algorithms: [ 10 ]
+   split_algorithms:                  # kskAlg -> permitted zskAlgs
+      RSASHA512: [ ED25519, ECDSAP256SHA256 ]
+      # FALCON512: [ ED25519 ]        # PQ algs, registered at runtime
+```
+
+Semantics (fail closed):
+- A policy with `ksk.algorithm == zsk.algorithm` always passes; no
+  entry needed.
+- A policy whose KSK and ZSK algorithms **differ** is rejected at
+  config parse unless that exact pair is listed. Error:
+  `policy %q: KSK algorithm A may not pair with ZSK algorithm B; not
+  listed in dnssec.split_algorithms`.
+
+Implementation:
+- `DnssecConf.SplitAlgorithms map[string][]string` (`config.go`),
+  derived to `Internal.SplitAlgorithms map[uint8]map[uint8]bool` via
+  `buildSplitAlgorithmSet` (`large_ksk.go`). Unknown algorithm names
+  are dropped with a warning (a typo gates rather than silently
+  permits). PQ names resolve through the same runtime-populated
+  `dns.StringToAlgorithm` as the policy `algorithm:` field.
+- `validateSplitAlgorithm(name, kskAlg, zskAlg, allowed)` enforces the
+  rule. Wired into all three parse paths: runtime config load
+  (`parseconfig.go`), `parseDnssecPolicyConfImpl`, and the standalone
+  `ValidateDnssecPoliciesFromFile` CLI validator (which reads a
+  `dnssec.split_algorithms` block from the validated file).
+- Tests: `TestValidateSplitAlgorithm`, `TestBuildSplitAlgorithmSet`,
+  `TestParseDnssecPolicyConfSplitGate` (`large_ksk_test.go`).
+
+Related fix found in the same pass: the automated KSK-rollover
+pipeline-fill (`ksk_rollover_automated.go`) generated rolled KSKs with
+`pol.Algorithm` instead of `pol.KSKAlgorithm`, so a per-role KSK
+algorithm was honored for the *initial* KSK but silently lost on every
+rollover. Corrected to `pol.KSKAlgorithm`.
 
 ## A.4 Warn when a large algorithm signs the bulk of the zone
 

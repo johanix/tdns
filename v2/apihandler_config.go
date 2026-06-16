@@ -16,7 +16,7 @@ import (
 // path so a CLI like `auto-rollover validate` can re-parse the same
 // YAML the daemon is running. When ?zone= is supplied, the zone's
 // active dnssecpolicy name is returned alongside, telling the
-// validator which dnssecpolicies block to check.
+// validator which dnssec.policies block to check.
 //
 // Read-only; no zone lock taken. Safe to call from any client.
 func APIConfigPaths(conf *Config) func(w http.ResponseWriter, r *http.Request) {

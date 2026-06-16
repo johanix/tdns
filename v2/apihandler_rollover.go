@@ -47,8 +47,8 @@ func APIRolloverStatus(conf *Config) func(w http.ResponseWriter, r *http.Request
 		// in every status response. Uses the parsed kasp.check_interval
 		// the same way KeyStateWorker does at startup.
 		var checkInterval time.Duration
-		if conf.Kasp.CheckInterval != "" {
-			if d, err := time.ParseDuration(conf.Kasp.CheckInterval); err == nil && d > 0 {
+		if conf.Dnssec.Kasp.CheckInterval != "" {
+			if d, err := time.ParseDuration(conf.Dnssec.Kasp.CheckInterval); err == nil && d > 0 {
 				checkInterval = d
 			}
 		}
@@ -58,8 +58,8 @@ func APIRolloverStatus(conf *Config) func(w http.ResponseWriter, r *http.Request
 		// kasp.propagation_delay drives the ds-published → standby
 		// timing computed in populateNextTransitions.
 		var propagationDelay time.Duration
-		if conf.Kasp.PropagationDelay != "" {
-			if d, err := time.ParseDuration(conf.Kasp.PropagationDelay); err == nil && d > 0 {
+		if conf.Dnssec.Kasp.PropagationDelay != "" {
+			if d, err := time.ParseDuration(conf.Dnssec.Kasp.PropagationDelay); err == nil && d > 0 {
 				propagationDelay = d
 			}
 		}

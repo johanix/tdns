@@ -25,7 +25,7 @@ const (
 // KeyStateWorker runs periodic checks on DNSSEC key states and performs
 // automatic transitions and standby key maintenance.
 func KeyStateWorker(ctx context.Context, conf *Config) error {
-	kasp := &conf.Kasp
+	kasp := &conf.Dnssec.Kasp
 
 	propagationDelay := defaultPropagationDelay
 	if kasp.PropagationDelay != "" {
