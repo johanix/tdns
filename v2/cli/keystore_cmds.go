@@ -218,6 +218,17 @@ containing either the private or the public SIG(0) key and the name of the zone.
 		},
 	}
 
+	policies := &cobra.Command{
+		Use:   "policies",
+		Short: "List the DNSSEC policies the server loaded (including any in error)",
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := printServerPolicies(role); err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+		},
+	}
+
 	list := &cobra.Command{
 		Use:   "list",
 		Short: "List all DNSSEC key pairs in the keystore",
@@ -336,7 +347,7 @@ without modifying anything. Pass --force to actually delete.`,
 	purge.Flags().Bool("force", false, "Actually delete; otherwise dry-run")
 	purge.MarkFlagRequired("zone")
 
-	c.AddCommand(add, importCmd, generate, algorithms, list, export, delete, setstate, genDS, rollover, clear, purge, newKeystoreDnssecPolicyCmd(role), newKeystoreDnssecDsPushCmd(role), newKeystoreDnssecQueryParentCmd(role), newAutoRolloverCmd(role))
+	c.AddCommand(add, importCmd, generate, algorithms, policies, list, export, delete, setstate, genDS, rollover, clear, purge, newKeystoreDnssecPolicyCmd(role), newKeystoreDnssecDsPushCmd(role), newKeystoreDnssecQueryParentCmd(role), newAutoRolloverCmd(role))
 	return c
 }
 

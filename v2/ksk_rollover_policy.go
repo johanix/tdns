@@ -5,12 +5,40 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/miekg/dns"
 	"gopkg.in/yaml.v3"
 )
+
+// parseExtendedDuration parses a Go duration string with one extension:
+// a single trailing "d" (days) or "w" (weeks) suffix on a plain integer,
+// e.g. "14d" or "2w". Everything else falls through to time.ParseDuration,
+// so "168h", "30m", "1h30m" keep working. Days = 24h, weeks = 168h. Operators
+// express key lifetimes and signature validity in days/weeks; the stdlib
+// parser stops at hours.
+func parseExtendedDuration(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 {
+		unit := s[len(s)-1]
+		if unit == 'd' || unit == 'w' {
+			n, err := strconv.Atoi(s[:len(s)-1])
+			if err == nil {
+				per := 24 * time.Hour
+				if unit == 'w' {
+					per = 7 * 24 * time.Hour
+				}
+				return time.Duration(n) * per, nil
+			}
+			// Not "<int>d/w" (e.g. "1h30m" has no d/w tail anyway, but
+			// "1.5d" lands here) — fall through and let ParseDuration give
+			// the canonical error.
+		}
+	}
+	return time.ParseDuration(s)
+}
 
 const (
 	DnssecPolicyModeKSKZSK = "ksk-zsk"
@@ -24,6 +52,19 @@ const (
 	RolloverMethodMultiDS
 	RolloverMethodDoubleSignature
 )
+
+// String returns the YAML/config name for the rollover method.
+func (m RolloverMethod) String() string {
+	switch m {
+	case RolloverMethodNone:
+		return "none"
+	case RolloverMethodMultiDS:
+		return "multi-ds"
+	case RolloverMethodDoubleSignature:
+		return "double-signature"
+	}
+	return fmt.Sprintf("unknown(%d)", int(m))
+}
 
 type RolloverPolicy struct {
 	Method             RolloverMethod
@@ -206,7 +247,7 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 	}
 
 	if strings.TrimSpace(conf.Ttls.DNSKEY) != "" {
-		d, err := time.ParseDuration(strings.TrimSpace(conf.Ttls.DNSKEY))
+		d, err := parseExtendedDuration(strings.TrimSpace(conf.Ttls.DNSKEY))
 		if err != nil {
 			return fmt.Errorf("dnssec policy %q: ttls.dnskey: %w", policyName, err)
 		}
@@ -226,7 +267,7 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 		if marginStr == "" {
 			return fmt.Errorf("dnssec policy %q: clamping.margin is required when clamping.enabled: true", policyName)
 		}
-		d, err := time.ParseDuration(marginStr)
+		d, err := parseExtendedDuration(marginStr)
 		if err != nil {
 			return fmt.Errorf("dnssec policy %q: clamping.margin: %w", policyName, err)
 		}
@@ -243,7 +284,7 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 	}
 
 	if s := strings.TrimSpace(conf.Ttls.ParentDS); s != "" {
-		d, err := time.ParseDuration(s)
+		d, err := parseExtendedDuration(s)
 		if err != nil {
 			return fmt.Errorf("dnssec policy %q: ttls.parent-ds: %w", policyName, err)
 		}
@@ -254,7 +295,7 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 	}
 
 	if s := strings.TrimSpace(conf.Ttls.DS); s != "" {
-		d, err := time.ParseDuration(s)
+		d, err := parseExtendedDuration(s)
 		if err != nil {
 			return fmt.Errorf("dnssec policy %q: ttls.ds: %w", policyName, err)
 		}
@@ -273,7 +314,7 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 	// max_served must be parsed AFTER clamping so the cross-check against
 	// clamping.margin sees the resolved margin value.
 	if s := strings.TrimSpace(conf.Ttls.MaxServed); s != "" {
-		d, err := time.ParseDuration(s)
+		d, err := parseExtendedDuration(s)
 		if err != nil {
 			return fmt.Errorf("dnssec policy %q: ttls.max_served: %w", policyName, err)
 		}
@@ -307,7 +348,7 @@ func parsePolicySigValidity(policyName string, conf DnssecPolicySigValidityConf)
 	if defaultStr == "" {
 		return PolicySigValidity{}, fmt.Errorf("dnssec policy %q: sigvalidity.default is required", policyName)
 	}
-	defaultDur, err := time.ParseDuration(defaultStr)
+	defaultDur, err := parseExtendedDuration(defaultStr)
 	if err != nil {
 		return PolicySigValidity{}, fmt.Errorf("dnssec policy %q: sigvalidity.default: %w", policyName, err)
 	}
@@ -320,7 +361,7 @@ func parsePolicySigValidity(policyName string, conf DnssecPolicySigValidityConf)
 	if dnskeyStr == "" {
 		out.DNSKEY = out.Default
 	} else {
-		d, err := time.ParseDuration(dnskeyStr)
+		d, err := parseExtendedDuration(dnskeyStr)
 		if err != nil {
 			return PolicySigValidity{}, fmt.Errorf("dnssec policy %q: sigvalidity.dnskey: %w", policyName, err)
 		}
@@ -334,7 +375,7 @@ func parsePolicySigValidity(policyName string, conf DnssecPolicySigValidityConf)
 	if dsStr == "" {
 		out.DS = out.Default
 	} else {
-		d, err := time.ParseDuration(dsStr)
+		d, err := parseExtendedDuration(dsStr)
 		if err != nil {
 			return PolicySigValidity{}, fmt.Errorf("dnssec policy %q: sigvalidity.ds: %w", policyName, err)
 		}
@@ -376,7 +417,7 @@ func fillRolloverDurations(policyName string, conf *DnssecPolicyConf, out *Dnsse
 		if val == "" {
 			return def, nil
 		}
-		d, err := time.ParseDuration(val)
+		d, err := parseExtendedDuration(val)
 		if err != nil {
 			return 0, fmt.Errorf("rollover.%s: %w", field, err)
 		}

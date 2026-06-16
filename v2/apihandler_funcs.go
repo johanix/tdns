@@ -90,6 +90,20 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 				Algorithms: algorithms.All(),
 			}
 
+		case "list-policies":
+			// Read-only: report all DNSSEC policies the server loaded,
+			// including ones rejected at parse (Error set), so the operator
+			// can see why a policy is unusable.
+			pols := make([]DnssecPolicyInfo, 0, len(conf.Internal.DnssecPolicies))
+			for _, p := range conf.Internal.DnssecPolicies {
+				pols = append(pols, DnssecPolicyToInfo(p))
+			}
+			resp = &KeystoreResponse{
+				AppName:  Globals.App.Name,
+				Time:     time.Now(),
+				Policies: pols,
+			}
+
 		default:
 			lgApi.Warn("unknown keystore command", "cmd", kp.Command)
 			resp = &KeystoreResponse{

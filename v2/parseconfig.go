@@ -982,8 +982,10 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 		zconf.UpdatePolicy = tmpl.UpdatePolicy
 	}
 
-	// tdns-agent does not have DNSSEC policies, so we ignore them
-	if appMode != AppTypeAgent && tmpl.DnssecPolicy != "" {
+	// tdns-agent does not have DNSSEC policies, so we ignore them.
+	// A zone's explicit dnssecpolicy wins over the template's: the template
+	// supplies a default only when the zone didn't set its own.
+	if appMode != AppTypeAgent && tmpl.DnssecPolicy != "" && zconf.DnssecPolicy == "" {
 		zconf.DnssecPolicy = tmpl.DnssecPolicy
 	}
 
@@ -1194,7 +1196,7 @@ func GenKeyLifetime(lifetime string) (KeyLifetime, error) {
 		lifetime_secs = time.Duration(0)
 
 	default:
-		lifetime_secs, err = time.ParseDuration(lifetime)
+		lifetime_secs, err = parseExtendedDuration(lifetime)
 		if err != nil {
 			return KeyLifetime{}, fmt.Errorf("invalid key lifetime %q: %w", lifetime, err)
 		}

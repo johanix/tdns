@@ -159,11 +159,19 @@ governs zones (Zone.Errors, visible in `auth zone list`).
    here: split_algorithms warn+skip and policy-error-state were already
    the behavior; this step added the visible error record.)
 
-5. [next] **CLI `tdns-cli auth keystore dnssec policies`.** Server-API
-   command (mirrors `keystore dnssec algorithms`): query the running
-   daemon, render a table of all policies, with broken ones showing an
-   ERROR row + the reason. Pattern: SendKeystoreCmd(KeystorePost{
-   Command:"list-policies"}) -> server handler -> KeystoreResponse.
+5. [done] **CLI `tdns-cli auth keystore dnssec policies`.** Server-API
+   command (mirrors `keystore dnssec algorithms`): queries the running
+   daemon (Command:"list-policies"), renders a table of all policies;
+   broken ones show STATUS=ERROR with the reason listed below the table
+   (kept out of the tab columns so a long reason doesn't stretch them).
+   New wire type DnssecPolicyInfo + DnssecPolicyToInfo projection (algs
+   as names, lifetimes as strings, "forever"/"none" rendered).
+   RolloverMethod.String() added. Server handler case in APIkeystore
+   ranges conf.Internal.DnssecPolicies. CLI in cli/policies.go.
+   LIVE-VERIFIED against a modern auth server: default/fastroll healthy,
+   large-ksk (RSASHA512 KSK + ED25519 ZSK) ok via split_algorithms, a
+   "broken" policy (alg FOOBAR) shows ERROR + reason, server started
+   regardless (resilient startup confirmed end-to-end).
 
 6. [next] **Docs + samples.** Finalize this doc; ensure the validate
    command help states it cannot verify algorithm availability.

@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -41,9 +42,73 @@ type KeystoreResponse struct {
 	Dnskeys    map[string]DnssecKey // TrustAnchor
 	Sig0keys   map[string]Sig0Key
 	Algorithms []algorithms.AlgorithmInfo // populated by the "list-algorithms" command
+	Policies   []DnssecPolicyInfo         // populated by the "list-policies" command
 	Msg        string
 	Error      bool
 	ErrorMsg   string
+}
+
+// DnssecPolicyInfo is the wire-friendly projection of a DnssecPolicy that the
+// "list-policies" command returns: algorithms rendered as names (not
+// codepoints) and durations as strings, so the CLI can render a table without
+// the server's internal types. PolicyError is non-empty for a policy that was
+// defined in config but rejected at parse (the other fields are then best-effort).
+type DnssecPolicyInfo struct {
+	Name           string `json:"name"`
+	PolicyError    string `json:"policyerror,omitempty"`
+	Algorithm      string `json:"algorithm,omitempty"`
+	KSKAlgorithm   string `json:"kskalgorithm,omitempty"`
+	ZSKAlgorithm   string `json:"zskalgorithm,omitempty"`
+	Mode           string `json:"mode,omitempty"`
+	KSKLifetime    string `json:"ksklifetime,omitempty"`
+	ZSKLifetime    string `json:"zsklifetime,omitempty"`
+	RolloverMethod string `json:"rollovermethod,omitempty"`
+}
+
+// foreverLifetimeSecs is the seconds value GenKeyLifetime assigns to the
+// "forever" keyword (10000h). Rendered back as "forever" for display.
+const foreverLifetimeSecs = uint32(10000 * 3600)
+
+// renderLifetime turns a KeyLifetime's seconds into the operator-facing string:
+// "none" for 0, "forever" for the forever sentinel, else a duration.
+func renderLifetime(secs uint32) string {
+	switch secs {
+	case 0:
+		return "none"
+	case foreverLifetimeSecs:
+		return "forever"
+	default:
+		return (time.Duration(secs) * time.Second).String()
+	}
+}
+
+// algName renders an algorithm codepoint as its registered name, or "-" when
+// unset (0). Used so the policies listing shows names, not numbers.
+func algName(alg uint8) string {
+	if alg == 0 {
+		return "-"
+	}
+	if n := dns.AlgorithmToString[alg]; n != "" {
+		return n
+	}
+	return fmt.Sprintf("ALG%d", alg)
+}
+
+// DnssecPolicyToInfo projects a runtime DnssecPolicy into its wire form. A
+// broken policy (Error set) still produces a row — the name and error are
+// always populated; the remaining fields are whatever parsing managed to fill.
+func DnssecPolicyToInfo(p DnssecPolicy) DnssecPolicyInfo {
+	return DnssecPolicyInfo{
+		Name:           p.Name,
+		PolicyError:    p.Error,
+		Algorithm:      algName(p.Algorithm),
+		KSKAlgorithm:   algName(p.KSKAlgorithm),
+		ZSKAlgorithm:   algName(p.ZSKAlgorithm),
+		Mode:           p.Mode,
+		KSKLifetime:    renderLifetime(p.KSK.Lifetime),
+		ZSKLifetime:    renderLifetime(p.ZSK.Lifetime),
+		RolloverMethod: p.Rollover.Method.String(),
+	}
 }
 
 type TruststorePost struct {

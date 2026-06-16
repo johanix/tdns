@@ -125,6 +125,99 @@ func TestLargeAlgBulkWarning(t *testing.T) {
 	}
 }
 
+func TestDnssecPolicyToInfo(t *testing.T) {
+	// Healthy policy: names resolved, lifetimes rendered, no error.
+	healthy := DnssecPolicy{
+		Name:         "good",
+		Algorithm:    dns.ED25519,
+		KSKAlgorithm: dns.RSASHA512,
+		ZSKAlgorithm: dns.ED25519,
+		Mode:         DnssecPolicyModeKSKZSK,
+		KSK:          KeyLifetime{Lifetime: foreverLifetimeSecs},
+		CSK:          KeyLifetime{Lifetime: 0},
+		ZSK:          KeyLifetime{Lifetime: 3600},
+		Rollover:     RolloverPolicy{Method: RolloverMethodMultiDS},
+	}
+	info := DnssecPolicyToInfo(healthy)
+	if info.PolicyError != "" {
+		t.Fatalf("healthy policy must have empty PolicyError, got %q", info.PolicyError)
+	}
+	if info.KSKAlgorithm != "RSASHA512" || info.ZSKAlgorithm != "ED25519" {
+		t.Fatalf("alg names = ksk %q zsk %q", info.KSKAlgorithm, info.ZSKAlgorithm)
+	}
+	if info.KSKLifetime != "forever" {
+		t.Fatalf("KSK forever sentinel = %q, want \"forever\"", info.KSKLifetime)
+	}
+	if info.ZSKLifetime != "1h0m0s" {
+		t.Fatalf("ZSK lifetime = %q, want 1h0m0s", info.ZSKLifetime)
+	}
+	if info.RolloverMethod != "multi-ds" {
+		t.Fatalf("rollover = %q, want multi-ds", info.RolloverMethod)
+	}
+
+	// Broken policy: error carried; unset algorithm renders as "-".
+	broken := DnssecPolicy{Name: "bad", Error: "unknown algorithm \"FOOBAR\""}
+	bi := DnssecPolicyToInfo(broken)
+	if bi.PolicyError == "" {
+		t.Fatal("broken policy must carry PolicyError")
+	}
+	if bi.Algorithm != "-" || bi.KSKAlgorithm != "-" {
+		t.Fatalf("unset algs should render as \"-\", got %q / %q", bi.Algorithm, bi.KSKAlgorithm)
+	}
+	if bi.KSKLifetime != "none" {
+		t.Fatalf("zero lifetime = %q, want none", bi.KSKLifetime)
+	}
+}
+
+func TestExpandTemplateDnssecPolicyPrecedence(t *testing.T) {
+	tmpl := &ZoneConf{DnssecPolicy: "default"}
+
+	// Zone with its own policy: keeps it (template does not clobber).
+	z, err := ExpandTemplate(ZoneConf{Name: "z1.", DnssecPolicy: "pq-mayo"}, tmpl, AppTypeAuth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if z.DnssecPolicy != "pq-mayo" {
+		t.Fatalf("zone policy = %q, want pq-mayo (zone must win over template)", z.DnssecPolicy)
+	}
+
+	// Zone without a policy: inherits the template's.
+	z, err = ExpandTemplate(ZoneConf{Name: "z2."}, tmpl, AppTypeAuth)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if z.DnssecPolicy != "default" {
+		t.Fatalf("zone policy = %q, want inherited default", z.DnssecPolicy)
+	}
+}
+
+func TestParseExtendedDuration(t *testing.T) {
+	ok := map[string]time.Duration{
+		"14d":   14 * 24 * time.Hour,
+		"90d":   90 * 24 * time.Hour,
+		"2w":    2 * 7 * 24 * time.Hour,
+		"1w":    7 * 24 * time.Hour,
+		"168h":  168 * time.Hour, // stdlib unit still works
+		"30m":   30 * time.Minute,
+		"1h30m": 90 * time.Minute,
+		" 7d ":  7 * 24 * time.Hour, // trimmed
+	}
+	for in, want := range ok {
+		got, err := parseExtendedDuration(in)
+		if err != nil {
+			t.Fatalf("parseExtendedDuration(%q) err = %v", in, err)
+		}
+		if got != want {
+			t.Fatalf("parseExtendedDuration(%q) = %v, want %v", in, got, want)
+		}
+	}
+	for _, bad := range []string{"1.5d", "xd", "d", "", "1y"} {
+		if _, err := parseExtendedDuration(bad); err == nil {
+			t.Fatalf("parseExtendedDuration(%q) should have errored", bad)
+		}
+	}
+}
+
 func TestResolveZonePolicyRef(t *testing.T) {
 	policies := map[string]DnssecPolicy{
 		"good":   {Name: "good"},
