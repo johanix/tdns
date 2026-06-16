@@ -152,6 +152,18 @@ UNIQUE (zonename, keyid)
 		updated_at        TEXT
 	)`,
 
+	// ZonePolicyOverride records a per-zone DNSSEC policy set dynamically at
+	// runtime (via `zone set-policy`), overriding the policy named in the
+	// zone's YAML config. Sparse — only zones whose policy was changed live
+	// appear here. The effective policy for a zone is the override if present,
+	// else the config base. This lets a live policy change survive restart
+	// without the server rewriting the operator's YAML.
+	"ZonePolicyOverride": `CREATE TABLE IF NOT EXISTS 'ZonePolicyOverride' (
+		zone    TEXT NOT NULL PRIMARY KEY,
+		policy  TEXT NOT NULL,
+		set_at  TEXT
+	)`,
+
 	// RolloverCdsPublication records the most recent successful CDS
 	// publication via the NOTIFY-scheme rollover push path. Sparse —
 	// only zones that have actually run a NOTIFY publish-and-sign at

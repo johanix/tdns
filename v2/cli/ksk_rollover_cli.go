@@ -285,7 +285,7 @@ or 2s / 60s / 1h when those are unset.
 			defer kdb.DB.Close()
 
 			z := dns.Fqdn(tdns.Globals.Zonename)
-			pol := dnssecPolicyForZone(&Conf, z)
+			pol := dnssecPolicyForZone(&Conf, kdb, z)
 			if pol == nil {
 				log.Fatal("no dnssec policy for this zone (dnssec_policy in zone config)")
 			}
@@ -348,7 +348,7 @@ or 2s / 60s / 1h when those are unset.
 	return c
 }
 
-func dnssecPolicyForZone(conf *tdns.Config, zname string) *tdns.DnssecPolicy {
+func dnssecPolicyForZone(conf *tdns.Config, kdb *tdns.KeyDB, zname string) *tdns.DnssecPolicy {
 	want := dns.Fqdn(zname)
 	for i := range conf.Zones {
 		zc := &conf.Zones[i]
@@ -358,7 +358,12 @@ func dnssecPolicyForZone(conf *tdns.Config, zname string) *tdns.DnssecPolicy {
 		if zc.DnssecPolicy == "" {
 			return nil
 		}
-		if p, ok := conf.Internal.DnssecPolicies[zc.DnssecPolicy]; ok {
+		// Effective policy = dynamic override if present, else config base.
+		polName := zc.DnssecPolicy
+		if eff, overridden, err := tdns.EffectiveDnssecPolicyName(kdb, want, zc.DnssecPolicy); err == nil && overridden {
+			polName = eff
+		}
+		if p, ok := conf.Internal.DnssecPolicies[polName]; ok {
 			return &p
 		}
 	}
@@ -385,7 +390,7 @@ func openKeystoreForCli() (*tdns.KeyDB, string, *tdns.DnssecPolicy, error) {
 		return nil, "", nil, fmt.Errorf("keystore: %w", err)
 	}
 	z := dns.Fqdn(tdns.Globals.Zonename)
-	pol := dnssecPolicyForZone(&Conf, z)
+	pol := dnssecPolicyForZone(&Conf, kdb, z)
 	return kdb, z, pol, nil
 }
 

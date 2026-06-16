@@ -206,7 +206,16 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// retry (CLI reload, ticker), the zd already has config
 						// from the first attempt — must not overwrite with zeros.
 						if zd.ZoneType == 0 {
-							dp := conf.Internal.DnssecPolicies[zr.DnssecPolicy]
+							// Effective policy = dynamic override (set via
+							// `zone set-policy`) if present, else the config base.
+							polName := zr.DnssecPolicy
+							if eff, overridden, err := EffectiveDnssecPolicyName(conf.Internal.KeyDB, zone, zr.DnssecPolicy); err != nil {
+								lgEngine.Warn("failed to read DNSSEC policy override, using config base", "zone", zone, "err", err)
+							} else if overridden {
+								lgEngine.Info("DNSSEC policy override in effect", "zone", zone, "policy", eff, "config", zr.DnssecPolicy)
+								polName = eff
+							}
+							dp := conf.Internal.DnssecPolicies[polName]
 							msc := conf.MultiSigner[zr.MultiSigner]
 
 							zd.mu.Lock()
@@ -218,7 +227,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.Options = zr.Options
 							zd.UpdatePolicy = zr.UpdatePolicy
 							zd.DnssecPolicy = &dp
-							zd.DnssecPolicyName = zr.DnssecPolicy
+							zd.DnssecPolicyName = polName
 							zd.MultiSigner = &msc
 							zd.DelegationSyncQ = conf.Internal.DelegationSyncQ
 							zd.KeyDB = conf.Internal.KeyDB
@@ -314,14 +323,21 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// values, so &dp is a fresh address every refresh tick.
 						var dnssecPolicyChanged bool
 						if zr.DnssecPolicy != "" {
-							if dp, exists := conf.Internal.DnssecPolicies[zr.DnssecPolicy]; exists {
-								if zd.DnssecPolicyName != zr.DnssecPolicy {
+							// Effective policy = dynamic override if present, else config base.
+							polName := zr.DnssecPolicy
+							if eff, overridden, err := EffectiveDnssecPolicyName(conf.Internal.KeyDB, zone, zr.DnssecPolicy); err != nil {
+								lgEngine.Warn("failed to read DNSSEC policy override, using config base", "zone", zone, "err", err)
+							} else if overridden {
+								polName = eff
+							}
+							if dp, exists := conf.Internal.DnssecPolicies[polName]; exists {
+								if zd.DnssecPolicyName != polName {
 									zd.DnssecPolicy = &dp
-									zd.DnssecPolicyName = zr.DnssecPolicy
+									zd.DnssecPolicyName = polName
 									dnssecPolicyChanged = true
 								}
 							} else {
-								lgEngine.Warn("DNSSEC policy not found, keeping existing", "policy", zr.DnssecPolicy, "zone", zone)
+								lgEngine.Warn("DNSSEC policy not found, keeping existing", "policy", polName, "zone", zone)
 							}
 						}
 						if zr.MultiSigner != "" {
@@ -492,7 +508,14 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// DYNAMIC ZONE: not from config (catalog member, API-created).
 					// Config-defined zones are always pre-registered by ParseZones.
 					lgEngine.Info("adding dynamic zone (not pre-registered)", "zone", zone)
-					dp := conf.Internal.DnssecPolicies[zr.DnssecPolicy]
+					// Effective policy = dynamic override if present, else config base.
+					polName := zr.DnssecPolicy
+					if eff, overridden, err := EffectiveDnssecPolicyName(conf.Internal.KeyDB, zone, zr.DnssecPolicy); err != nil {
+						lgEngine.Warn("failed to read DNSSEC policy override, using config base", "zone", zone, "err", err)
+					} else if overridden {
+						polName = eff
+					}
+					dp := conf.Internal.DnssecPolicies[polName]
 					msc := conf.MultiSigner[zr.MultiSigner]
 					zd := &ZoneData{
 						ZoneName:         zone,
@@ -505,7 +528,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						Options:          zr.Options,
 						UpdatePolicy:     zr.UpdatePolicy,
 						DnssecPolicy:     &dp,
-						DnssecPolicyName: zr.DnssecPolicy,
+						DnssecPolicyName: polName,
 						MultiSigner:      &msc,
 						DelegationSyncQ:  conf.Internal.DelegationSyncQ,
 						Data:             core.NewCmap[OwnerData](),
