@@ -267,6 +267,76 @@ func (zd *ZoneData) refreshActiveDnssecKeys(kdb *KeyDB, context string) (*Dnssec
 	return dak, nil
 }
 
+// reconcileActiveKeyAlgorithms retires active keys whose algorithm the zone's
+// policy no longer wants, so the caller's generate-if-missing logic replaces
+// them with keys of the policy's algorithm. It returns true if it retired any
+// key (the caller must then re-fetch the active set).
+//
+// Scope: KSK-ZSK mode only. CSK mode (Mode==csk) is left untouched — it is not
+// enforced elsewhere in the signing path, so reconciling it here would create
+// inconsistency. Retiring (not deleting) keeps the old DNSKEY published and its
+// RRSIGs valid until the KeyStateWorker removes it: a graceful algorithm change.
+//
+// Safety: a KSK rollover is strictly same-algorithm and maintains the
+// "exactly one active KSK" invariant, so an active KSK whose algorithm differs
+// from the policy can only be a genuine policy change, never an in-flight
+// rollover. We still skip retirement while a rollover is in progress, as a
+// defensive guard.
+func (zd *ZoneData) reconcileActiveKeyAlgorithms(kdb *KeyDB, dak *DnssecKeys) (bool, error) {
+	if zd.DnssecPolicy == nil || zd.DnssecPolicy.Mode == DnssecPolicyModeCSK {
+		return false, nil
+	}
+
+	rolloverInProgress := false
+	if row, err := LoadRolloverZoneRow(kdb, zd.ZoneName); err != nil {
+		return false, err
+	} else if row != nil {
+		rolloverInProgress = row.RolloverInProgress
+	}
+
+	retiredAny := false
+	retire := func(keyid uint16, role string, have, want uint8) error {
+		lgSigner.Info("retiring active DNSSEC key: algorithm no longer matches policy",
+			"zone", zd.ZoneName, "keyid", keyid, "role", role,
+			"have", dns.AlgorithmToString[have], "want", dns.AlgorithmToString[want])
+		if err := UpdateDnssecKeyState(kdb, zd.ZoneName, keyid, DnskeyStateRetired); err != nil {
+			return fmt.Errorf("reconcile: retire %s %d for zone %s: %w", role, keyid, zd.ZoneName, err)
+		}
+		retiredAny = true
+		return nil
+	}
+
+	for _, ksk := range dak.KSKs {
+		if ksk.DnskeyRR.Algorithm == zd.DnssecPolicy.KSKAlgorithm {
+			continue
+		}
+		if rolloverInProgress {
+			lgSigner.Warn("active KSK algorithm differs from policy but a rollover is in progress; deferring retirement",
+				"zone", zd.ZoneName, "keyid", ksk.KeyId)
+			continue
+		}
+		if err := retire(ksk.KeyId, "KSK", ksk.DnskeyRR.Algorithm, zd.DnssecPolicy.KSKAlgorithm); err != nil {
+			return retiredAny, err
+		}
+	}
+
+	// Only real ZSKs (flags=256). A KSK reused as CSK (flags=257) is handled by
+	// the KSK loop above, not here.
+	for _, zsk := range dak.ZSKs {
+		if zsk.DnskeyRR.Flags != 256 {
+			continue
+		}
+		if zsk.DnskeyRR.Algorithm == zd.DnssecPolicy.ZSKAlgorithm {
+			continue
+		}
+		if err := retire(zsk.KeyId, "ZSK", zsk.DnskeyRR.Algorithm, zd.DnssecPolicy.ZSKAlgorithm); err != nil {
+			return retiredAny, err
+		}
+	}
+
+	return retiredAny, nil
+}
+
 // EnsureActiveDnssecKeys ensures that a zone has active DNSSEC keys.
 // If no active keys exist, it will:
 // 1. Try to promote published keys to active (if available)
@@ -281,6 +351,23 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 	if err != nil {
 		lgSigner.Error("failed to get DNSSEC active keys", "zone", zd.ZoneName, "err", err)
 		return nil, err
+	}
+
+	// Reconcile the active key algorithms against the policy: retire any
+	// active key whose algorithm the policy no longer wants, so the
+	// generate-if-missing logic below replaces it with one of the policy's
+	// algorithm. Retired keys keep their DNSKEY published and their RRSIGs
+	// valid until the KeyStateWorker removes them, so the zone stays
+	// validatable (a graceful, zone-side algorithm change). On a no-op (keys
+	// already match the policy) this returns without changes — idempotent,
+	// safe on every sign/re-sign.
+	if retired, err := zd.reconcileActiveKeyAlgorithms(kdb, dak); err != nil {
+		return nil, err
+	} else if retired {
+		dak, err = zd.refreshActiveDnssecKeys(kdb, "after algorithm reconcile")
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// If we already have active keys (including a real ZSK, not just KSK reused as CSK), return them
@@ -549,6 +636,58 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 	lgSigner.Info("ResignZone completed",
 		"zone", zd.ZoneName, "rrsigs_written", newrrsigs)
 	return newrrsigs, nil
+}
+
+// StripZoneRRSIGs removes, from every RRset in the served zone data, the RRSIGs
+// for which remove(rrsig) returns true. It is purely subtractive — it does NOT
+// re-sign. Used to drop orphan signatures left by a key that was removed (a key
+// in "removed" state, or hard-deleted by `clear`): such a key is no longer in
+// the DNSKEY RRset, so its RRSIGs are unvalidatable and must go. Re-signing
+// (SignZone) is additive and never removes another key's RRSIGs, which is why
+// this explicit strip is needed.
+//
+// Per-RRset atomicity matches ResignZone: each RRset is modified on a local
+// copy and published via a single RRtypes.Set, so readers never see a partial
+// state. Returns the number of RRSIGs removed.
+func (zd *ZoneData) StripZoneRRSIGs(remove func(*dns.RRSIG) bool) (int, error) {
+	names, err := zd.GetOwnerNames()
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, name := range names {
+		owner, err := zd.GetOwner(name)
+		if err != nil {
+			return removed, err
+		}
+		if owner == nil {
+			continue
+		}
+		for _, rrt := range owner.RRtypes.Keys() {
+			rrset := owner.RRtypes.GetOnlyRRSet(rrt)
+			if len(rrset.RRSIGs) == 0 {
+				continue
+			}
+			kept := rrset.RRSIGs[:0:0]
+			changed := false
+			for _, sig := range rrset.RRSIGs {
+				if rrsig, ok := sig.(*dns.RRSIG); ok && remove(rrsig) {
+					removed++
+					changed = true
+					continue
+				}
+				kept = append(kept, sig)
+			}
+			if changed {
+				rrset.RRSIGs = kept
+				owner.RRtypes.Set(rrt, rrset)
+			}
+		}
+	}
+	if removed > 0 {
+		lgSigner.Info("stripped orphan RRSIGs from zone", "zone", zd.ZoneName, "count", removed)
+	}
+	return removed, nil
 }
 
 // XXX: MaybesignRRset should report on whether it actually signed anything

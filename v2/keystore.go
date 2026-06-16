@@ -589,6 +589,23 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 			generated = append(generated, fmt.Sprintf("KSK %d (active)", kskPkc.KeyId))
 		}
 
+		// Strip the served RRSIGs left behind by the just-deleted keys: any
+		// RRSIG whose keytag is not one of the regenerated keys is an orphan
+		// (its DNSKEY is gone) and can no longer validate. The post-commit
+		// re-sign (triggerResign) is additive and would not remove them.
+		keep := map[uint16]bool{}
+		if zskPkc != nil {
+			keep[zskPkc.KeyId] = true
+		}
+		if kskPkc != nil {
+			keep[kskPkc.KeyId] = true
+		}
+		if _, err := zd.StripZoneRRSIGs(func(rrsig *dns.RRSIG) bool {
+			return !keep[rrsig.KeyTag]
+		}); err != nil {
+			lgSigner.Error("clear: failed to strip orphan RRSIGs", "zone", kp.Zone, "err", err)
+		}
+
 		resp.Msg = fmt.Sprintf("Deleted %d keys for zone %s. Generated: %s. Standby keys will follow via KeyStateWorker.",
 			count, kp.Zone, strings.Join(generated, ", "))
 

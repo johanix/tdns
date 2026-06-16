@@ -228,6 +228,18 @@ func transitionRetiredToRemoved(conf *Config, kdb *KeyDB, now time.Time, propaga
 			continue
 		}
 
+		// The removed key is no longer in the DNSKEY RRset, so its RRSIGs can
+		// no longer validate. Strip them now — re-signing is additive and
+		// would leave them in place.
+		removedKeytag := key.KeyTag
+		if zd, ok := Zones.Get(key.ZoneName); ok {
+			if _, err := zd.StripZoneRRSIGs(func(rrsig *dns.RRSIG) bool {
+				return rrsig.KeyTag == removedKeytag
+			}); err != nil {
+				lgSigner.Error("KeyStateWorker: failed to strip removed key's RRSIGs", "zone", key.ZoneName, "keyid", removedKeytag, "err", err)
+			}
+		}
+
 		triggerResign(conf, key.ZoneName)
 	}
 }
