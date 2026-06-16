@@ -321,7 +321,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// Lookup DNSSEC policy and MultiSigner from config (same as new zone creation).
 						// Compare by name (not pointer): conf.Internal.DnssecPolicies stores
 						// values, so &dp is a fresh address every refresh tick.
-						var dnssecPolicyChanged bool
+						var reapplyPolicy bool
 						if zr.DnssecPolicy != "" {
 							// Effective policy = dynamic override if present, else config base.
 							polName := zr.DnssecPolicy
@@ -331,11 +331,16 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								polName = eff
 							}
 							if dp, exists := conf.Internal.DnssecPolicies[polName]; exists {
-								if zd.DnssecPolicyName != polName {
-									zd.DnssecPolicy = &dp
-									zd.DnssecPolicyName = polName
-									dnssecPolicyChanged = true
-								}
+								// Always rebind: the policy struct is rebuilt from
+								// scratch by parseDnssecConfig on every reload, so even
+								// a same-name policy may have changed internals (e.g.
+								// an edited KSK algorithm). Re-binding + a re-sign below
+								// converges the zone; the algorithm reconcile in
+								// EnsureActiveDnssecKeys is idempotent (no churn when
+								// keys already match).
+								zd.DnssecPolicy = &dp
+								zd.DnssecPolicyName = polName
+								reapplyPolicy = true
 							} else {
 								lgEngine.Warn("DNSSEC policy not found, keeping existing", "policy", polName, "zone", zone)
 							}
@@ -349,15 +354,16 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 						zd.mu.Unlock()
 
-						// Force a re-sign so clamping picks up the new policy
-						// (e.g. ttls.max_served change) and max_observed_ttl
-						// converges on the next sign pass instead of waiting
-						// for a key-state event.
-						if dnssecPolicyChanged {
-							if zd.DnssecPolicy != nil &&
-								(zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) {
-								UpdateSigValidityFloor(zd, zd.DnssecPolicy, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm)
-							}
+						// Re-sign on every reload of a signed zone so a changed
+						// policy takes effect — whether the policy NAME changed or
+						// just its internals (algorithm, ttls.max_served, …). The
+						// re-sign drives EnsureActiveDnssecKeys, whose algorithm
+						// reconcile retires wrong-algorithm keys and generates new
+						// ones; it is idempotent, so an unchanged policy causes no
+						// key churn.
+						if reapplyPolicy && zd.DnssecPolicy != nil &&
+							(zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) {
+							UpdateSigValidityFloor(zd, zd.DnssecPolicy, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm)
 							triggerResign(conf, zone)
 						}
 						lgEngine.Debug("updated configuration for zone", "zone", zone, "notify", zd.Downstreams, "upstream", zd.Upstream, "zonefile", zd.Zonefile, "store", ZoneStoreToString[zd.ZoneStore])

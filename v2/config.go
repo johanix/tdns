@@ -546,6 +546,14 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 		// Continue with existing templates rather than failing entirely
 	}
 
+	// Re-parse the dnssec: block so zones are re-applied against the current
+	// policy definitions (an edited policy is picked up here, no separate
+	// `config reload` needed first). A parse error leaves the previous
+	// policies in place rather than failing the whole reload.
+	if err := conf.parseDnssecConfig(); err != nil {
+		lgConfig.Error("ReloadZoneConfig: failed to re-parse dnssec config, keeping previous policies", "err", err)
+	}
+
 	prezones := Zones.Keys()
 	lgConfig.Info("ReloadZones: zones prior to reloading", "zones", prezones)
 	// XXX: This is wrong. We must get the zones config file from outside (to enamble things like MUSIC to use a different config file)

@@ -222,16 +222,14 @@ func (conf *Config) ParseConfig(reload bool) error {
 		lgConfig.Warn("unknown config keys ignored (possible misspellings)", "keys", md.Unused)
 	}
 
-	// Normalize all identity fields (domain names) from config to FQDN form.
-	if err := validateKaspPropagationDelay(conf.Dnssec.Kasp.PropagationDelay); err != nil {
+	// Parse the entire dnssec: block (large_algorithms, split_algorithms,
+	// kasp, and the named policies) into conf.Internal.*. The zone-reload
+	// paths call this same helper so reloading zones also refreshes the
+	// policy definitions they depend on. ParseZones (later) validates zone
+	// dnssec_policy references against the resolved map.
+	if err := conf.parseDnssecConfig(); err != nil {
 		return err
 	}
-	largeAlgs, err := buildLargeAlgorithmSet(conf.Dnssec.LargeAlgorithms)
-	if err != nil {
-		return err
-	}
-	conf.Internal.LargeAlgorithms = largeAlgs
-	conf.Internal.SplitAlgorithms = buildSplitAlgorithmSet(conf.Dnssec.SplitAlgorithms)
 
 	// Normalize service.transport.type (default: none)
 	if conf.Service.Transport.Type == "" {
@@ -263,69 +261,6 @@ func (conf *Config) ParseConfig(reload bool) error {
 	viper.SetConfigType("yaml")
 	if err := viper.ReadConfig(strings.NewReader(string(processedConfig))); err != nil {
 		return fmt.Errorf("error reading processed config: %v", err)
-	}
-
-	// Rebuild DnssecPolicies on every parse. On reload, removed or
-	// rejected policies must not survive from the previous config.
-	// ParseZones (called later from MainInit) validates zone
-	// dnssec_policy references against this map, so it must be populated
-	// before ParseZones runs — for all apps, not just tdns-native ones.
-	conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
-	for name, dp := range conf.Dnssec.Policies {
-		dpLocal := dp
-		// markBroken records a rejected policy in the map (Name + Error) so it
-		// stays visible to the operator and zones referencing it can be
-		// quarantined with a reason. The server still starts.
-		markBroken := func(reason string) {
-			lgConfig.Error("DNSSEC policy rejected, unusable", "policy", name, "err", reason)
-			conf.Internal.DnssecPolicies[name] = DnssecPolicy{Name: name, Error: reason}
-		}
-		alg, kskAlg, zskAlg, err := resolvePolicyRoleAlgorithms(name, &dpLocal)
-		if err != nil {
-			markBroken(err.Error())
-			continue
-		}
-		if err := validateSplitAlgorithm(name, kskAlg, zskAlg, conf.Internal.SplitAlgorithms); err != nil {
-			markBroken(err.Error())
-			continue
-		}
-		kskLT, err := GenKeyLifetime(dpLocal.KSK.Lifetime)
-		if err != nil {
-			markBroken(fmt.Sprintf("ksk.lifetime: %v", err))
-			continue
-		}
-		zskLT, err := GenKeyLifetime(dpLocal.ZSK.Lifetime)
-		if err != nil {
-			markBroken(fmt.Sprintf("zsk.lifetime: %v", err))
-			continue
-		}
-		cskLT, err := GenKeyLifetime(dpLocal.CSK.Lifetime)
-		if err != nil {
-			markBroken(fmt.Sprintf("csk.lifetime: %v", err))
-			continue
-		}
-		tmp := DnssecPolicy{
-			Name:         name,
-			Algorithm:    alg,
-			KSKAlgorithm: kskAlg,
-			ZSKAlgorithm: zskAlg,
-			KSK:          kskLT,
-			ZSK:          zskLT,
-			CSK:          cskLT,
-		}
-		if err := FinishDnssecPolicy(name, &dpLocal, &tmp); err != nil {
-			markBroken(err.Error())
-			continue
-		}
-		conf.Internal.DnssecPolicies[name] = tmp
-	}
-	// If no "default" policy in config, use built-in default (e.g. for agent autozone).
-	// An explicit dnssec.policies.default in YAML overrides this. A broken
-	// "default" stays broken (it is in the map with Error set, so "exists" is
-	// true): we surface the operator's error rather than silently substituting
-	// the builtin. Zones referencing it are quarantined with the reason.
-	if _, exists := conf.Internal.DnssecPolicies["default"]; !exists {
-		conf.Internal.DnssecPolicies["default"] = BuiltinDefaultDnssecPolicy()
 	}
 
 	// Populate ConfigGroupConfig.Name from map keys after parsing CatalogConf
@@ -1131,6 +1066,88 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 	onStack[name] = false
 	Templates[name] = t
 	return t, nil
+}
+
+// parseDnssecConfig resolves the entire dnssec: block (large_algorithms,
+// split_algorithms, kasp, and the named policies) from conf.Dnssec into the
+// derived conf.Internal.* structures. Called from ParseConfig at startup, and
+// from the zone-reload paths so that reloading zones also refreshes the policy
+// definitions they depend on (closing the "reload policies before zones" gap).
+//
+// Rebuilds conf.Internal.DnssecPolicies from scratch every call: on reload,
+// removed or rejected policies must not survive from the previous parse. A
+// policy that fails to parse is kept in the map with its Error field set
+// (visible to the operator; zones referencing it are quarantined), rather than
+// dropped — the server still starts.
+func (conf *Config) parseDnssecConfig() error {
+	if err := validateKaspPropagationDelay(conf.Dnssec.Kasp.PropagationDelay); err != nil {
+		return err
+	}
+	largeAlgs, err := buildLargeAlgorithmSet(conf.Dnssec.LargeAlgorithms)
+	if err != nil {
+		return err
+	}
+	conf.Internal.LargeAlgorithms = largeAlgs
+	conf.Internal.SplitAlgorithms = buildSplitAlgorithmSet(conf.Dnssec.SplitAlgorithms)
+
+	conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
+	for name, dp := range conf.Dnssec.Policies {
+		dpLocal := dp
+		// markBroken records a rejected policy in the map (Name + Error) so it
+		// stays visible to the operator and zones referencing it can be
+		// quarantined with a reason. The server still starts.
+		markBroken := func(reason string) {
+			lgConfig.Error("DNSSEC policy rejected, unusable", "policy", name, "err", reason)
+			conf.Internal.DnssecPolicies[name] = DnssecPolicy{Name: name, Error: reason}
+		}
+		alg, kskAlg, zskAlg, err := resolvePolicyRoleAlgorithms(name, &dpLocal)
+		if err != nil {
+			markBroken(err.Error())
+			continue
+		}
+		if err := validateSplitAlgorithm(name, kskAlg, zskAlg, conf.Internal.SplitAlgorithms); err != nil {
+			markBroken(err.Error())
+			continue
+		}
+		kskLT, err := GenKeyLifetime(dpLocal.KSK.Lifetime)
+		if err != nil {
+			markBroken(fmt.Sprintf("ksk.lifetime: %v", err))
+			continue
+		}
+		zskLT, err := GenKeyLifetime(dpLocal.ZSK.Lifetime)
+		if err != nil {
+			markBroken(fmt.Sprintf("zsk.lifetime: %v", err))
+			continue
+		}
+		cskLT, err := GenKeyLifetime(dpLocal.CSK.Lifetime)
+		if err != nil {
+			markBroken(fmt.Sprintf("csk.lifetime: %v", err))
+			continue
+		}
+		tmp := DnssecPolicy{
+			Name:         name,
+			Algorithm:    alg,
+			KSKAlgorithm: kskAlg,
+			ZSKAlgorithm: zskAlg,
+			KSK:          kskLT,
+			ZSK:          zskLT,
+			CSK:          cskLT,
+		}
+		if err := FinishDnssecPolicy(name, &dpLocal, &tmp); err != nil {
+			markBroken(err.Error())
+			continue
+		}
+		conf.Internal.DnssecPolicies[name] = tmp
+	}
+	// If no "default" policy in config, use built-in default (e.g. for agent autozone).
+	// An explicit dnssec.policies.default in YAML overrides this. A broken
+	// "default" stays broken (it is in the map with Error set, so "exists" is
+	// true): we surface the operator's error rather than silently substituting
+	// the builtin. Zones referencing it are quarantined with the reason.
+	if _, exists := conf.Internal.DnssecPolicies["default"]; !exists {
+		conf.Internal.DnssecPolicies["default"] = BuiltinDefaultDnssecPolicy()
+	}
+	return nil
 }
 
 // resolveZonePolicyRef decides whether a zone's named DNSSEC policy is usable.
