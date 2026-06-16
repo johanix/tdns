@@ -1706,7 +1706,7 @@ func healBootstrapActiveAt(kdb *KeyDB, zone string, pol *DnssecPolicy) {
 		if !needHeal {
 			continue
 		}
-		if err := RegisterBootstrapActiveKSK(kdb, zone, k.KeyTag, pol.Rollover.Method, pol.Algorithm); err != nil {
+		if err := RegisterBootstrapActiveKSK(kdb, zone, k.KeyTag, pol.Rollover.Method, pol.KSKAlgorithm); err != nil {
 			lgSigner.Warn("rollover: heal active SEP KSK state failed", "zone", zone, "keyid", k.KeyTag, "err", err)
 			continue
 		}

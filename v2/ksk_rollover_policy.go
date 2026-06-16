@@ -25,16 +25,16 @@ func parseExtendedDuration(s string) (time.Duration, error) {
 		unit := s[len(s)-1]
 		if unit == 'd' || unit == 'w' {
 			n, err := strconv.Atoi(s[:len(s)-1])
-			if err == nil {
+			if err == nil && n >= 0 {
 				per := 24 * time.Hour
 				if unit == 'w' {
 					per = 7 * 24 * time.Hour
 				}
 				return time.Duration(n) * per, nil
 			}
-			// Not "<int>d/w" (e.g. "1h30m" has no d/w tail anyway, but
-			// "1.5d" lands here) — fall through and let ParseDuration give
-			// the canonical error.
+			// Not a non-negative "<int>d/w" (e.g. "1.5d" or "-7d") — fall
+			// through and let ParseDuration give the canonical error. ("1h30m"
+			// has no d/w tail anyway.)
 		}
 	}
 	return time.ParseDuration(s)
