@@ -211,7 +211,7 @@ func TestParseExtendedDuration(t *testing.T) {
 			t.Fatalf("parseExtendedDuration(%q) = %v, want %v", in, got, want)
 		}
 	}
-	for _, bad := range []string{"1.5d", "xd", "d", "", "1y"} {
+	for _, bad := range []string{"1.5d", "xd", "d", "", "1y", "-7d", "-2w"} {
 		if _, err := parseExtendedDuration(bad); err == nil {
 			t.Fatalf("parseExtendedDuration(%q) should have errored", bad)
 		}
