@@ -524,8 +524,13 @@ func warnDnssecPolicyCoupling(policyName string, out *DnssecPolicy) {
 }
 
 // dnssecPoliciesYAML is the top-level shape for `tdns zone keystore dnssec policy validate --file`.
+// Mirrors the daemon config: policies and the split_algorithms allowlist
+// both live under the dnssec: block.
 type dnssecPoliciesYAML struct {
-	DnssecPolicies map[string]DnssecPolicyConf `yaml:"dnssecpolicies"`
+	Dnssec struct {
+		Policies        map[string]DnssecPolicyConf `yaml:"policies"`
+		SplitAlgorithms map[string][]string         `yaml:"split_algorithms"`
+	} `yaml:"dnssec"`
 }
 
 // ParseDnssecPolicyConf parses a single DnssecPolicyConf into the
@@ -537,7 +542,7 @@ type dnssecPoliciesYAML struct {
 // which logs via lgConfig. Callers that want to suppress those logs
 // (e.g. the validate CLI) should use ParseDnssecPolicyConfQuiet instead.
 func ParseDnssecPolicyConf(name string, dp *DnssecPolicyConf) (*DnssecPolicy, error) {
-	return parseDnssecPolicyConfImpl(name, dp, false)
+	return parseDnssecPolicyConfImpl(name, dp, false, nil)
 }
 
 // ParseDnssecPolicyConfQuiet is the silent counterpart of
@@ -548,13 +553,19 @@ func ParseDnssecPolicyConf(name string, dp *DnssecPolicyConf) (*DnssecPolicy, er
 // on the returned policy to render the same warnings as structured
 // output.
 func ParseDnssecPolicyConfQuiet(name string, dp *DnssecPolicyConf) (*DnssecPolicy, error) {
-	return parseDnssecPolicyConfImpl(name, dp, true)
+	return parseDnssecPolicyConfImpl(name, dp, true, nil)
 }
 
-func parseDnssecPolicyConfImpl(name string, dp *DnssecPolicyConf, quiet bool) (*DnssecPolicy, error) {
+// parseDnssecPolicyConfImpl resolves and validates one policy. splitAllowed
+// is the KSK/ZSK pairing allowlist (kskAlg -> permitted zskAlgs); nil means
+// only same-algorithm policies pass (fail closed).
+func parseDnssecPolicyConfImpl(name string, dp *DnssecPolicyConf, quiet bool, splitAllowed map[uint8]map[uint8]bool) (*DnssecPolicy, error) {
 	dp.Name = name
 	alg, kskAlg, zskAlg, err := resolvePolicyRoleAlgorithms(name, dp)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateSplitAlgorithm(name, kskAlg, zskAlg, splitAllowed); err != nil {
 		return nil, err
 	}
 	kskLT, err := GenKeyLifetime(dp.KSK.Lifetime)
@@ -592,7 +603,7 @@ func parseDnssecPolicyConfImpl(name string, dp *DnssecPolicyConf, quiet bool) (*
 	return out, nil
 }
 
-// ValidateDnssecPoliciesFromFile parses a YAML file with a top-level dnssecpolicies: map
+// ValidateDnssecPoliciesFromFile parses a YAML file with a dnssec.policies: map
 // and validates every policy the same way as runtime config loading.
 func ValidateDnssecPoliciesFromFile(path string) error {
 	data, err := os.ReadFile(path)
@@ -603,14 +614,19 @@ func ValidateDnssecPoliciesFromFile(path string) error {
 	if err := yaml.Unmarshal(data, &root); err != nil {
 		return fmt.Errorf("yaml: %w", err)
 	}
-	if len(root.DnssecPolicies) == 0 {
-		return errors.New("no dnssecpolicies: block found (top-level key must be dnssecpolicies)")
+	if len(root.Dnssec.Policies) == 0 {
+		return errors.New("no dnssec.policies: block found (policies live under the dnssec: key)")
 	}
+	splitAllowed := buildSplitAlgorithmSet(root.Dnssec.SplitAlgorithms)
 	var errs []error
-	for name, dp := range root.DnssecPolicies {
+	for name, dp := range root.Dnssec.Policies {
 		dp.Name = name
 		alg, kskAlg, zskAlg, err := resolvePolicyRoleAlgorithms(name, &dp)
 		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := validateSplitAlgorithm(name, kskAlg, zskAlg, splitAllowed); err != nil {
 			errs = append(errs, err)
 			continue
 		}

@@ -40,23 +40,21 @@ func (s SensitiveString) String() string {
 }
 
 type Config struct {
-	Service        ServiceConf
-	DnsEngine      DnsEngineConf
-	Imr            ImrEngineConf `yaml:"imrengine" mapstructure:"imrengine"`
-	ApiServer      ApiServerConf
-	DnssecPolicies map[string]DnssecPolicyConf
-	MultiSigner    map[string]MultiSignerConf `yaml:"multisigner"`
-	Catalog        *CatalogConf               `yaml:"catalog" mapstructure:"catalog"`
-	DynamicZones   DynamicZonesConf           `yaml:"dynamiczones" mapstructure:"dynamiczones"`
-	Zones          []ZoneConf                 `yaml:"zones"`
-	Templates      []ZoneConf                 `yaml:"templates"`
-	Kasp           KaspConf                   `yaml:"kasp" mapstructure:"kasp"`
-	Dnssec         DnssecConf                 `yaml:"dnssec" mapstructure:"dnssec"`
-	Keys           KeyConf
-	Db             DbConf
-	Registrars     map[string][]string
-	Log            LogConf
-	Internal       InternalConf
+	Service      ServiceConf
+	DnsEngine    DnsEngineConf
+	Imr          ImrEngineConf `yaml:"imrengine" mapstructure:"imrengine"`
+	ApiServer    ApiServerConf
+	MultiSigner  map[string]MultiSignerConf `yaml:"multisigner"`
+	Catalog      *CatalogConf               `yaml:"catalog" mapstructure:"catalog"`
+	DynamicZones DynamicZonesConf           `yaml:"dynamiczones" mapstructure:"dynamiczones"`
+	Zones        []ZoneConf                 `yaml:"zones"`
+	Templates    []ZoneConf                 `yaml:"templates"`
+	Dnssec       DnssecConf                 `yaml:"dnssec" mapstructure:"dnssec"`
+	Keys         KeyConf
+	Db           DbConf
+	Registrars   map[string][]string
+	Log          LogConf
+	Internal     InternalConf
 }
 
 // DnssecConf holds DNSSEC-wide settings consumed by the signer and IMR.
@@ -65,19 +63,35 @@ type DnssecConf struct {
 	// are large for UDP. The IMR may query child DNSKEY over TCP when parent
 	// DS uses one; the signer warns if one signs the bulk of a zone.
 	LargeAlgorithms []uint8 `yaml:"large_algorithms" mapstructure:"large_algorithms"`
+
+	// SplitAlgorithms gates which KSK/ZSK algorithm pairs a policy may use.
+	// Keyed by KSK algorithm name; the value lists ZSK algorithm names that
+	// algorithm's KSK is permitted to pair with. A policy whose KSK and ZSK
+	// algorithms differ is rejected at parse time unless the pair appears
+	// here. Same-algorithm policies are always allowed and need no entry.
+	SplitAlgorithms map[string][]string `yaml:"split_algorithms" mapstructure:"split_algorithms"`
+
+	// Policies are the named DNSSEC policies a zone references via its
+	// dnssec_policy field. YAML: dnssec.policies:.
+	Policies map[string]DnssecPolicyConf `yaml:"policies" mapstructure:"policies"`
+
+	// Kasp is the Key and Signing Policy controlling the KeyStateWorker.
+	// YAML: dnssec.kasp:.
+	Kasp KaspConf `yaml:"kasp" mapstructure:"kasp"`
 }
 
 // KaspConf holds Key and Signing Policy parameters for the signer.
 // Controls the KeyStateWorker's automatic key state transitions and standby key maintenance.
-// YAML key: "kasp:"
+// YAML key: "dnssec.kasp:"
 //
 // Example:
 //
-//	kasp:
-//	    propagation_delay: 1h
-//	    standby_zsk_count: 1
-//	    standby_ksk_count: 0
-//	    check_interval: 1m
+//	dnssec:
+//	    kasp:
+//	        propagation_delay: 1h
+//	        standby_zsk_count: 1
+//	        standby_ksk_count: 0
+//	        check_interval: 1m
 type KaspConf struct {
 	// PropagationDelay is how long to wait for DNSKEY RRsets to propagate
 	// through all caches before allowing state transitions.
@@ -434,6 +448,11 @@ type InternalConf struct {
 	// LargeAlgorithms is the derived lookup set from Dnssec.LargeAlgorithms.
 	LargeAlgorithms map[uint8]bool
 
+	// SplitAlgorithms is the derived lookup set from Dnssec.SplitAlgorithms:
+	// kskAlg -> set of permitted zskAlgs. nil/empty means no mixed pair is
+	// allowed (only same-algorithm KSK/ZSK policies pass).
+	SplitAlgorithms map[uint8]map[uint8]bool
+
 	// PostParseZonesHook is called after ParseZones completes during
 	// reload (SIGHUP or "config reload-zones"). Set by MP apps to
 	// register tdns-mp callbacks on newly added zones.
@@ -482,17 +501,17 @@ func validateKaspPropagationDelay(s string) error {
 
 // KaspPropagationDelay returns the configured kasp.propagation_delay, or 1h.
 func (conf *Config) KaspPropagationDelay() time.Duration {
-	if conf == nil || conf.Kasp.PropagationDelay == "" {
+	if conf == nil || conf.Dnssec.Kasp.PropagationDelay == "" {
 		return defaultKaspPropagationDelay
 	}
-	d, err := time.ParseDuration(conf.Kasp.PropagationDelay)
+	d, err := time.ParseDuration(conf.Dnssec.Kasp.PropagationDelay)
 	if err != nil || d <= 0 {
 		if err != nil {
 			lgConfig.Warn("invalid kasp.propagation_delay, using default",
-				"value", conf.Kasp.PropagationDelay, "default", defaultKaspPropagationDelay, "err", err)
+				"value", conf.Dnssec.Kasp.PropagationDelay, "default", defaultKaspPropagationDelay, "err", err)
 		} else {
 			lgConfig.Warn("kasp.propagation_delay must be positive, using default",
-				"value", conf.Kasp.PropagationDelay, "default", defaultKaspPropagationDelay)
+				"value", conf.Dnssec.Kasp.PropagationDelay, "default", defaultKaspPropagationDelay)
 		}
 		return defaultKaspPropagationDelay
 	}

@@ -223,10 +223,11 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	// Normalize all identity fields (domain names) from config to FQDN form.
-	if err := validateKaspPropagationDelay(conf.Kasp.PropagationDelay); err != nil {
+	if err := validateKaspPropagationDelay(conf.Dnssec.Kasp.PropagationDelay); err != nil {
 		return err
 	}
 	conf.Internal.LargeAlgorithms = buildLargeAlgorithmSet(conf.Dnssec.LargeAlgorithms)
+	conf.Internal.SplitAlgorithms = buildSplitAlgorithmSet(conf.Dnssec.SplitAlgorithms)
 
 	// Normalize service.transport.type (default: none)
 	if conf.Service.Transport.Type == "" {
@@ -266,11 +267,15 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// dnssec_policy references against this map, so it must be populated
 	// before ParseZones runs — for all apps, not just tdns-native ones.
 	conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
-	for name, dp := range conf.DnssecPolicies {
+	for name, dp := range conf.Dnssec.Policies {
 		dpLocal := dp
 		alg, kskAlg, zskAlg, err := resolvePolicyRoleAlgorithms(name, &dpLocal)
 		if err != nil {
 			lgConfig.Error("DNSSEC policy invalid algorithm, ignored", "policy", name, "err", err)
+			continue
+		}
+		if err := validateSplitAlgorithm(name, kskAlg, zskAlg, conf.Internal.SplitAlgorithms); err != nil {
+			lgConfig.Error("DNSSEC policy split-algorithm not permitted, ignored", "policy", name, "err", err)
 			continue
 		}
 		kskLT, err := GenKeyLifetime(dpLocal.KSK.Lifetime)
@@ -308,7 +313,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 		conf.Internal.DnssecPolicies[name] = tmp
 	}
 	// If no "default" policy in config, use built-in default (e.g. for agent autozone).
-	// An explicit dnssecpolicies.default in YAML overrides this.
+	// An explicit dnssec.policies.default in YAML overrides this.
 	if _, exists := conf.Internal.DnssecPolicies["default"]; !exists {
 		conf.Internal.DnssecPolicies["default"] = BuiltinDefaultDnssecPolicy()
 	}
@@ -1115,8 +1120,8 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 }
 
 // builtinDefaultDnssecPolicy returns the built-in "default" DNSSEC policy used when
-// no dnssecpolicies.default is defined in config (e.g. for agent autozone). An explicit
-// dnssecpolicies.default in YAML overrides this. No automatic key rollovers.
+// no dnssec.policies.default is defined in config (e.g. for agent autozone). An explicit
+// dnssec.policies.default in YAML overrides this. No automatic key rollovers.
 func BuiltinDefaultDnssecPolicy() DnssecPolicy {
 	const day = 24 * time.Hour
 	kskLT, err := GenKeyLifetime("forever")

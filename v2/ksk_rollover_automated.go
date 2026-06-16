@@ -173,7 +173,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		if n >= num {
 			break
 		}
-		kid, _, err := GenerateKskRolloverCreated(kdb, zone, "key-state-worker", pol.Algorithm, pol.Rollover.Method)
+		kid, _, err := GenerateKskRolloverCreated(kdb, zone, "key-state-worker", pol.KSKAlgorithm, pol.Rollover.Method)
 		if err != nil {
 			lgSigner.Error("rollover: pipeline KSK generation failed", "zone", zone, "err", err)
 			break
