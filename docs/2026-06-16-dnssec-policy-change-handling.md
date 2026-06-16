@@ -1,12 +1,15 @@
 # DNSSEC policy change handling: reconcile, live override, visibility
 
-Status: DESIGN COMPLETE, NOT YET IMPLEMENTED (2026-06-16).
+Status (2026-06-16): IN PROGRESS. Phases 1, 2, 3, 4, 5a, 5 DONE on branch
+dnssec-policy-change-phase1-2; Phases 1+2 and 4 live-verified on the nox
+auth signer. Phases 6 and 7 remaining. Per-phase status + commit hashes
+below.
 The originally-reported orphan-RRSIG bug turned out to be one symptom of a
 larger gap (DNSSEC policy changes are not applied), and is folded in here
 as Phase 2.
 
-Branch context: dnssec-config-restructure (per-role KSK/ZSK algorithms +
-config restructure already landed). This is the natural continuation:
+Branch context: built on PR #259 (per-role KSK/ZSK algorithms + config
+restructure), now merged to main. This is the natural continuation:
 making a policy that SAYS "KSK=MAYO5, ZSK=MAYO2" actually take effect.
 
 
@@ -158,6 +161,12 @@ changes core signing/serving semantics, needs testbed validation.
 
 ### Phase 1 — Reconcile engine in EnsureActiveDnssecKeys
 
+STATUS: DONE (commit 1144928), live-verified on nox. Implemented as
+reconcileActiveKeyAlgorithms in sign.go (retire wrong-alg active keys via
+UpdateDnssecKeyState; CSK mode skipped; defensive RolloverInProgress
+guard). No new retire helper needed — UpdateDnssecKeyState already stamps
+retired_at. Tested: TestReconcileActiveKeyAlgorithms.
+
 Make EnsureActiveDnssecKeys ensure active keys of the policy's wanted
 (role, alg) set, generating missing ones and RETIRING active keys whose
 algorithm the policy no longer wants. Add a general "retire this active
@@ -182,6 +191,12 @@ specific — F1). Write the reconcile loop over a wanted-set abstraction.
 
 ### Phase 2 — Strip RRSIGs of removed keys (fixes orphans generally)
 
+STATUS: DONE (commit 1144928), live-verified on nox. Implemented as
+StripZoneRRSIGs(remove func) in sign.go — one subtractive, per-RRset-
+atomic pass; called at the retired→removed transition (strip the removed
+key's keytag) and on `clear` (strip everything not in the regenerated
+keyset). Tested: TestStripZoneRRSIGs.
+
 At the retired→removed transition (key_state_worker.go) and on `clear`,
 strip the served RRSIGs whose keytag belongs to no surviving key. One
 subtractive pass over the zone (GetOwnerNames→GetOwner→RRtypes; filter
@@ -205,6 +220,13 @@ RRSIG bug AND the latent ZSK-rollover orphan case — both stem from F2
 
 ### Phase 3 — DB override table + effective-policy resolution
 
+STATUS: DONE (commit 85b8451). ZonePolicyOverride table in db_schema.go;
+Set/Clear/Get + EffectiveDnssecPolicyName resolver in
+db_zone_policy_override.go. Resolver wired into all four read sites: the
+three refreshengine paths (first-load, existing-zone refresh,
+dynamic/catalog) and the CLI dnssecPolicyForZone helper. Tested:
+TestZonePolicyOverride.
+
 Add a ZonePolicyOverride table (zone TEXT PRIMARY KEY, policy TEXT,
 set_at TEXT). Read/write helpers. Introduce a single
 zd.EffectiveDnssecPolicyName() / resolution used at every site that
@@ -226,6 +248,12 @@ override wins over config base.
 
 ### Phase 4 — set-policy command (live reconcile + persist override)
 
+STATUS: DONE (commit fa4d163), live-verified on nox. setZonePolicy in
+apihandler_zone.go (validate → persist override → rebind → ADDITIVE
+SignZone so retired keys' sigs stay = graceful double-sign). CLI
+`zone set-policy -z -p` in zone_cmds.go; ZonePost.Policy field added.
+Returns the YAML-divergence warning.
+
 `tdns-cli auth zone set-policy -z <zone> -p <policy>`. API handler:
 validate policy exists and is healthy (Error==""), write the override
 row, rebind zd.DnssecPolicy, run reconcile (Phase 1) live, trigger
@@ -246,6 +274,10 @@ re-sign. Return the stark warning (2.5).
 ---
 
 ### Phase 5a — extract parseDnssecConfig() helper
+
+STATUS: DONE (commit d25b398). Config.parseDnssecConfig() in
+parseconfig.go; ParseConfig calls it; behavior identical. Tested:
+TestParseDnssecConfig.
 
 Pull the parsing of the ENTIRE `dnssec:` block out of ParseConfig into a
 standalone helper — parseDnssecConfig(conf) — that resolves policies +
@@ -281,6 +313,12 @@ of the reload path rather than an accident of call order in ParseConfig.
 ---
 
 ### Phase 5 — zone reload re-parses dnssec + reconciles (convergence)
+
+STATUS: DONE (commit d25b398). ReloadZoneConfig and ReloadZone call
+parseDnssecConfig before re-applying zones (two-step dance eliminated).
+Per-zone refresh block rebinds + re-signs on every reload of a signed
+zone (not just on name change); reconcile is idempotent. Override still
+wins over config base on reload.
 
 The three reload CLI commands (verified):
 - `config reload` — reloads GENERAL config only (calls ParseConfig →
@@ -394,17 +432,17 @@ dedicated presentation of the transition window yet.
 
 ## 5. Totals (rough)
 
-| Phase | Risk | LOC (±)      | Agent time |
-|-------|------|--------------|------------|
-| 1 reconcile engine      | HIGH    | +120 / −20 | 60–90m |
-| 2 strip removed sigs    | MED     | +70 / −5   | 45–60m |
-| 3 override table + read | MED     | +110 / −10 | 50–70m |
-| 4 set-policy            | MED     | +100 / −0  | 45–60m |
-| 5a parseDnssecConfig    | LOW     | +40 / −20  | 30–40m |
-| 5 reload convergence    | MED     | +50 / −15  | 40–60m |
-| 6 policy-cleanup        | LOW–MED | +70 / −0   | 40m    |
-| 7 visibility (-v only)  | LOW     | +45 / −5   | 30–40m |
-| **Total**               |         | **~+605 / −75** | **~5.5–7h** |
+| Phase | Risk | LOC (±)      | Agent time | Status |
+|-------|------|--------------|------------|--------|
+| 1 reconcile engine      | HIGH    | +120 / −20 | 60–90m | DONE 1144928 (live) |
+| 2 strip removed sigs    | MED     | +70 / −5   | 45–60m | DONE 1144928 (live) |
+| 3 override table + read | MED     | +110 / −10 | 50–70m | DONE 85b8451 |
+| 4 set-policy            | MED     | +100 / −0  | 45–60m | DONE fa4d163 (live) |
+| 5a parseDnssecConfig    | LOW     | +40 / −20  | 30–40m | DONE d25b398 |
+| 5 reload convergence    | MED     | +50 / −15  | 40–60m | DONE d25b398 |
+| 6 policy-cleanup        | LOW–MED | +70 / −0   | 40m    | remaining |
+| 7 visibility (-v only)  | LOW     | +45 / −5   | 30–40m | remaining |
+| **Total**               |         | **~+605 / −75** | **~5.5–7h** | |
 
 Plus tests (~+250 LOC across phases) and testbed validation cycles for
 Phases 1, 4, 5 (operator-gated builds, not in the agent-time figures).
