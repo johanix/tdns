@@ -125,6 +125,33 @@ func TestLargeAlgBulkWarning(t *testing.T) {
 	}
 }
 
+func TestResolveZonePolicyRef(t *testing.T) {
+	policies := map[string]DnssecPolicy{
+		"good":   {Name: "good"},
+		"broken": {Name: "broken", Error: "unknown algorithm \"FOOBAR\""},
+	}
+	// Healthy policy is usable, no error.
+	if usable, msg := resolveZonePolicyRef("good", policies); !usable || msg != "" {
+		t.Fatalf("good: usable=%v msg=%q, want true,\"\"", usable, msg)
+	}
+	// Broken policy: not usable, message names it broken with the reason.
+	usable, msg := resolveZonePolicyRef("broken", policies)
+	if usable {
+		t.Fatal("broken policy must not be usable")
+	}
+	if !strings.Contains(msg, "is broken") || !strings.Contains(msg, "FOOBAR") {
+		t.Fatalf("broken msg = %q, want it to mention broken + the reason", msg)
+	}
+	// Missing policy: not usable, distinct "does not exist" message.
+	usable, msg = resolveZonePolicyRef("nope", policies)
+	if usable {
+		t.Fatal("missing policy must not be usable")
+	}
+	if !strings.Contains(msg, "does not exist") {
+		t.Fatalf("missing msg = %q, want \"does not exist\"", msg)
+	}
+}
+
 func TestIsLargeAlgorithmConfig(t *testing.T) {
 	conf := &Config{}
 	set, err := buildLargeAlgorithmSet([]string{"RSASHA512"})

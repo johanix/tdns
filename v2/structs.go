@@ -371,7 +371,17 @@ type PolicySigValidity struct {
 
 // DnssecPolicy is what is actually used; it is created from the corresponding DnssecPolicyConf
 type DnssecPolicy struct {
-	Name         string
+	Name string
+
+	// Error is empty for a healthy policy. When non-empty, the policy was
+	// defined in config but rejected during parse (unknown algorithm, bad
+	// lifetime, disallowed KSK/ZSK split, etc.) — the remaining fields may
+	// be incomplete and the policy must not be used for signing. A broken
+	// policy is still kept in Internal.DnssecPolicies (with Name + Error set)
+	// so it is visible to the operator and so zones referencing it can be
+	// quarantined with a clear reason.
+	Error string
+
 	Algorithm    uint8 // default / CSK algorithm
 	KSKAlgorithm uint8
 	ZSKAlgorithm uint8
