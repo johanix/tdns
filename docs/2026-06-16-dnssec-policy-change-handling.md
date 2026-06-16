@@ -1,9 +1,10 @@
 # DNSSEC policy change handling: reconcile, live override, visibility
 
-Status (2026-06-16): IN PROGRESS. Phases 1, 2, 3, 4, 5a, 5 DONE on branch
-dnssec-policy-change-phase1-2; Phases 1+2 and 4 live-verified on the nox
-auth signer. Phases 6 and 7 remaining. Per-phase status + commit hashes
-below.
+Status (2026-06-16): ALL PHASES DONE on branch
+dnssec-policy-change-phase1-2. Phases 1+2 and 4 live-verified on the nox
+auth signer; the rest verified by build + unit tests (auth-signer changes
+don't need the multi-role testbed). Per-phase status + commit hashes
+below. Ready for a PR.
 The originally-reported orphan-RRSIG bug turned out to be one symptom of a
 larger gap (DNSSEC policy changes are not applied), and is folded in here
 as Phase 2.
@@ -161,11 +162,21 @@ changes core signing/serving semantics, needs testbed validation.
 
 ### Phase 1 — Reconcile engine in EnsureActiveDnssecKeys
 
-STATUS: DONE (commit 1144928), live-verified on nox. Implemented as
-reconcileActiveKeyAlgorithms in sign.go (retire wrong-alg active keys via
-UpdateDnssecKeyState; CSK mode skipped; defensive RolloverInProgress
-guard). No new retire helper needed — UpdateDnssecKeyState already stamps
-retired_at. Tested: TestReconcileActiveKeyAlgorithms.
+STATUS: DONE (commit 1144928 + a follow-up), live-verified on nox.
+Implemented as reconcileActiveKeyAlgorithms in sign.go (retire wrong-alg
+active keys via UpdateDnssecKeyState; CSK mode skipped; defensive
+RolloverInProgress guard). No new retire helper needed —
+UpdateDnssecKeyState already stamps retired_at. Tested:
+TestReconcileActiveKeyAlgorithms.
+Follow-up (live test): the reconcile also had to sweep STANDBY and
+PUBLISHED keys, not just active. A wrong-algorithm standby/published key
+(a leftover from the prior policy) is still published in the DNSKEY RRset
+and the KeyStateWorker never removes it — so the served zone kept a stale
+wrong-alg DNSKEY. Fixed: reconcile now REMOVES wrong-alg standby/published
+keys outright (they never signed, so no orphan RRSIGs; removal just drops
+them from the RRset). Algorithm uniquely identifies a leftover — a
+same-alg rollover pipeline key always matches the policy, so this never
+touches one. Tested: TestReconcileRemovesNonActiveWrongAlgKeys.
 
 Make EnsureActiveDnssecKeys ensure active keys of the policy's wanted
 (role, alg) set, generating missing ones and RETIRING active keys whose
@@ -381,12 +392,15 @@ override with the config base — the override wins until explicitly cleared
 
 ### Phase 6 — policy-cleanup command (collapse double-signing early)
 
-STATUS: DONE (uncommitted as of this writing). `policy-cleanup` subcommand
-in keystore.go DnssecKeyMgmt: transitions the zone's retired keys to
-removed and strips their RRSIGs by keytag (reusing StripZoneRRSIGs), keeps
-active keys; triggers a re-sign. CLI command in keystore_cmds.go (with
-confirmation prompt); added to the resign-trigger list in
-apihandler_funcs.go.
+STATUS: DONE (commit bfb8813 + a CLI follow-up). `policy-cleanup`
+subcommand in keystore.go DnssecKeyMgmt: transitions the zone's retired
+keys to removed and strips their RRSIGs by keytag (reusing
+StripZoneRRSIGs), keeps active keys; triggers a re-sign. CLI command in
+keystore_cmds.go (with confirmation prompt); added to the resign-trigger
+list in apihandler_funcs.go. Follow-up (live test): the dnssecKeyMgmt CLI
+switch was missing policy-cleanup in two places — the request-dispatch
+case (it exited "Unknown keystore command" before contacting the server)
+and the response-print case (the result Msg was dropped). Both fixed.
 
 `tdns-cli auth keystore dnssec policy-cleanup -z <zone>`: remove RETIRED
 keys no longer wanted by the policy and their sigs NOW, keeping active
@@ -406,6 +420,12 @@ delete ALL keys + regenerate). Reuses Phase 2's sig-strip.
 ---
 
 ### Phase 7 — Visibility (zone list -v only)
+
+STATUS: DONE (uncommitted as of this writing). list-zones handler
+populates ZoneConf.EffectiveDnssecPolicy (= zd.DnssecPolicyName) and
+DnssecPolicyOverridden (from GetZonePolicyOverride). Only VerboseListZone
+(`-v`) renders the new "DNSSEC policy: <name> [(override; ...)]" line;
+plain ListZones is untouched, so default output is byte-identical.
 
 Surface a zone's DNSSEC policy where it is currently invisible. ONLY the
 verbose listing changes:
@@ -448,7 +468,7 @@ dedicated presentation of the transition window yet.
 | 5a parseDnssecConfig    | LOW     | +40 / −20  | 30–40m | DONE d25b398 |
 | 5 reload convergence    | MED     | +50 / −15  | 40–60m | DONE d25b398 |
 | 6 policy-cleanup        | LOW–MED | +70 / −0   | 40m    | DONE (uncommitted) |
-| 7 visibility (-v only)  | LOW     | +45 / −5   | 30–40m | remaining |
+| 7 visibility (-v only)  | LOW     | +45 / −5   | 30–40m | DONE (uncommitted) |
 | **Total**               |         | **~+605 / −75** | **~5.5–7h** | |
 
 Plus tests (~+250 LOC across phases) and testbed validation cycles for

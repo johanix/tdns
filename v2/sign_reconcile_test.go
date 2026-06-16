@@ -153,3 +153,68 @@ func TestReconcileActiveKeyAlgorithms(t *testing.T) {
 		t.Fatal("second reconcile should be a no-op (no thrashing)")
 	}
 }
+
+// Wrong-algorithm STANDBY/PUBLISHED keys (leftovers from a prior policy) are
+// removed by the reconcile too — otherwise they keep appearing in the DNSKEY
+// RRset. They never signed, so removal is safe (no orphan RRSIGs).
+func TestReconcileRemovesNonActiveWrongAlgKeys(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := &ZoneData{
+		ZoneName: "example.",
+		Options:  map[ZoneOption]bool{OptOnlineSigning: true},
+		DnssecPolicy: &DnssecPolicy{
+			Mode:         DnssecPolicyModeKSKZSK,
+			KSKAlgorithm: dns.ED25519,
+			ZSKAlgorithm: dns.RSASHA256,
+		},
+		Logger: log.New(os.Stderr, "", 0),
+	}
+
+	// Correct-algorithm active keys.
+	if _, _, err := kdb.GenerateKeypair(zd.ZoneName, "test", DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, "KSK", nil); err != nil {
+		t.Fatalf("generate active KSK: %v", err)
+	}
+	if _, _, err := kdb.GenerateKeypair(zd.ZoneName, "test", DnskeyStateActive, dns.TypeDNSKEY, dns.RSASHA256, "ZSK", nil); err != nil {
+		t.Fatalf("generate active ZSK: %v", err)
+	}
+	// Correct-algorithm STANDBY ZSK (a legitimate pipeline key — must survive).
+	if _, _, err := kdb.GenerateKeypair(zd.ZoneName, "test", DnskeyStateStandby, dns.TypeDNSKEY, dns.RSASHA256, "ZSK", nil); err != nil {
+		t.Fatalf("generate good standby ZSK: %v", err)
+	}
+	// Wrong-algorithm STANDBY ZSK + PUBLISHED ZSK (prior-policy leftovers).
+	if _, _, err := kdb.GenerateKeypair(zd.ZoneName, "test", DnskeyStateStandby, dns.TypeDNSKEY, dns.ED25519, "ZSK", nil); err != nil {
+		t.Fatalf("generate stale standby ZSK: %v", err)
+	}
+	if _, _, err := kdb.GenerateKeypair(zd.ZoneName, "test", DnskeyStatePublished, dns.TypeDNSKEY, dns.ED25519, "ZSK", nil); err != nil {
+		t.Fatalf("generate stale published ZSK: %v", err)
+	}
+
+	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+	if err != nil {
+		t.Fatalf("GetDnssecKeys: %v", err)
+	}
+	if _, err := zd.reconcileActiveKeyAlgorithms(kdb, dak); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+
+	// The wrong-alg standby/published ZSKs are gone (removed); the correct-alg
+	// standby ZSK survives.
+	for _, state := range []string{DnskeyStateStandby, DnskeyStatePublished} {
+		keys, err := GetDnssecKeysByState(kdb, zd.ZoneName, state)
+		if err != nil {
+			t.Fatalf("GetDnssecKeysByState %s: %v", state, err)
+		}
+		for _, k := range keys {
+			if k.Algorithm != dns.RSASHA256 {
+				t.Fatalf("%s key %d alg %s should have been removed (policy ZSK alg is RSASHA256)", state, k.KeyTag, dns.AlgorithmToString[k.Algorithm])
+			}
+		}
+	}
+	good, err := GetDnssecKeysByState(kdb, zd.ZoneName, DnskeyStateStandby)
+	if err != nil {
+		t.Fatalf("GetDnssecKeysByState standby: %v", err)
+	}
+	if len(good) != 1 || good[0].Algorithm != dns.RSASHA256 {
+		t.Fatalf("the correct-alg standby ZSK should survive, got %d standby keys", len(good))
+	}
+}

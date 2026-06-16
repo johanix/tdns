@@ -629,7 +629,7 @@ func dnssecKeyMgmt(role, cmd string) {
 		data.Zone = tdns.Globals.Zonename
 		data.Keyname = tdns.Globals.Zonename
 
-	case "clear":
+	case "clear", "policy-cleanup":
 		data.Zone = tdns.Globals.Zonename
 
 	default:
@@ -719,7 +719,7 @@ func dnssecKeyMgmt(role, cmd string) {
 			fmt.Printf("%s\n", tr.Msg)
 		}
 
-	case "add", "import", "generate", "delete", "setstate", "rollover", "clear":
+	case "add", "import", "generate", "delete", "setstate", "rollover", "clear", "policy-cleanup":
 		if tr.Msg != "" {
 			fmt.Printf("%s\n", tr.Msg)
 		}

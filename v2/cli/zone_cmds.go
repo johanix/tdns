@@ -415,6 +415,18 @@ func VerboseListZone(cr tdns.ZoneResponse) {
 		sort.Strings(opts)
 		line += fmt.Sprintf("\tType: %s\tStore: %s\tOptions: %v\n", zconf.Type, zconf.Store, opts)
 
+		if zconf.EffectiveDnssecPolicy != "" {
+			pol := zconf.EffectiveDnssecPolicy
+			if zconf.DnssecPolicyOverridden {
+				if zconf.DnssecPolicyConfigBase != "" {
+					pol += fmt.Sprintf(" (override from config: %s)", zconf.DnssecPolicyConfigBase)
+				} else {
+					pol += " (override; set live, not in config)"
+				}
+			}
+			line += fmt.Sprintf("\tDNSSEC policy: %s\n", pol)
+		}
+
 		line += fmt.Sprintf("\tPrimary: %s\tNotify: %s\tFile: %s\n", zconf.Primary, zconf.Notify, zconf.Zonefile)
 
 		// Check for catalog zone flags

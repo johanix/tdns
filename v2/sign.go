@@ -334,6 +334,45 @@ func (zd *ZoneData) reconcileActiveKeyAlgorithms(kdb *KeyDB, dak *DnssecKeys) (b
 		}
 	}
 
+	// Standby and published keys of a wrong algorithm are leftovers from a
+	// prior policy (e.g. a standby ZSK from the previous algorithm). They never
+	// signed the zone — only active keys sign — so there are no RRSIGs by them
+	// to orphan; their only footprint is being published in the DNSKEY RRset.
+	// Remove them outright so they drop out of the RRset immediately. Algorithm
+	// uniquely identifies a leftover: a legitimate same-algorithm rollover
+	// pipeline key always matches the policy algorithm, so this never touches
+	// one. (KSK case still respects the rollover-in-progress guard.)
+	for _, state := range []string{DnskeyStateStandby, DnskeyStatePublished} {
+		keys, err := GetDnssecKeysByState(kdb, zd.ZoneName, state)
+		if err != nil {
+			return retiredAny, fmt.Errorf("reconcile: list %s keys for zone %s: %w", state, zd.ZoneName, err)
+		}
+		for _, k := range keys {
+			var want uint8
+			role := "ZSK"
+			if k.Flags&dns.SEP != 0 {
+				want, role = zd.DnssecPolicy.KSKAlgorithm, "KSK"
+			} else {
+				want = zd.DnssecPolicy.ZSKAlgorithm
+			}
+			if k.Algorithm == want {
+				continue
+			}
+			if role == "KSK" && rolloverInProgress {
+				lgSigner.Warn("non-active KSK algorithm differs from policy but a rollover is in progress; deferring removal",
+					"zone", zd.ZoneName, "keyid", k.KeyTag, "state", state)
+				continue
+			}
+			lgSigner.Info("removing non-active DNSSEC key: algorithm no longer matches policy",
+				"zone", zd.ZoneName, "keyid", k.KeyTag, "role", role, "state", state,
+				"have", dns.AlgorithmToString[k.Algorithm], "want", dns.AlgorithmToString[want])
+			if err := UpdateDnssecKeyState(kdb, zd.ZoneName, k.KeyTag, DnskeyStateRemoved); err != nil {
+				return retiredAny, fmt.Errorf("reconcile: remove %s %d (%s) for zone %s: %w", role, k.KeyTag, state, zd.ZoneName, err)
+			}
+			retiredAny = true
+		}
+	}
+
 	return retiredAny, nil
 }
 

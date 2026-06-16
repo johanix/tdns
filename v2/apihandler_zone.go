@@ -178,22 +178,39 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				}
 				// For primary zones, we could show Parent if needed, but typically Primary field is for secondary zones
 
+				// Effective DNSSEC policy (the one bound to the running zone)
+				// and, when it came from a dynamic set-policy override, the
+				// config-base policy it overrides (for display).
+				_, overridden, _ := GetZonePolicyOverride(kdb, zname)
+				configPolicy := ""
+				if overridden {
+					for i := range Conf.Zones {
+						if dns.Fqdn(Conf.Zones[i].Name) == zname {
+							configPolicy = Conf.Zones[i].DnssecPolicy
+							break
+						}
+					}
+				}
+
 				zconf := ZoneConf{
-					Name:          zname,
-					Type:          ZoneTypeToString[zd.ZoneType],
-					Store:         ZoneStoreToString[zd.ZoneStore],
-					Dirty:         zd.Options[OptDirty],
-					Frozen:        zd.Options[OptFrozen],
-					Options:       options,
-					Error:         zd.Error,
-					ErrorType:     zd.ErrorType,
-					ErrorMsg:      zd.ErrorMsg,
-					RefreshCount:  zd.RefreshCount,
-					SourceCatalog: zd.SourceCatalog,
-					Zonefile:      zd.Zonefile,
-					Primary:       primary,
-					Notify:        zd.Downstreams, // Notify addresses (displayed by CLI)
-					Downstreams:   zd.Downstreams,
+					Name:                   zname,
+					Type:                   ZoneTypeToString[zd.ZoneType],
+					Store:                  ZoneStoreToString[zd.ZoneStore],
+					Dirty:                  zd.Options[OptDirty],
+					Frozen:                 zd.Options[OptFrozen],
+					Options:                options,
+					Error:                  zd.Error,
+					ErrorType:              zd.ErrorType,
+					ErrorMsg:               zd.ErrorMsg,
+					RefreshCount:           zd.RefreshCount,
+					SourceCatalog:          zd.SourceCatalog,
+					Zonefile:               zd.Zonefile,
+					Primary:                primary,
+					Notify:                 zd.Downstreams, // Notify addresses (displayed by CLI)
+					Downstreams:            zd.Downstreams,
+					EffectiveDnssecPolicy:  zd.DnssecPolicyName,
+					DnssecPolicyOverridden: overridden,
+					DnssecPolicyConfigBase: configPolicy,
 				}
 				zones[zname] = zconf
 			}
