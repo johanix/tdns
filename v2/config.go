@@ -59,10 +59,15 @@ type Config struct {
 
 // DnssecConf holds DNSSEC-wide settings consumed by the signer and IMR.
 type DnssecConf struct {
-	// LargeAlgorithms lists DNSSEC algorithm numbers whose DNSKEY/RRSIG sizes
-	// are large for UDP. The IMR may query child DNSKEY over TCP when parent
-	// DS uses one; the signer warns if one signs the bulk of a zone.
-	LargeAlgorithms []uint8 `yaml:"large_algorithms" mapstructure:"large_algorithms"`
+	// LargeAlgorithms lists, by algorithm NAME (e.g. "RSASHA512",
+	// "FALCON512"), the DNSSEC algorithms whose DNSKEY/RRSIG sizes are large
+	// for UDP. The IMR may query child DNSKEY over TCP when parent DS uses
+	// one; the signer warns if one signs the bulk of a zone. Names (not
+	// codepoints) because non-standardized PQ codepoints are assigned per
+	// deployment at runtime by algorithms.Register — a bare codepoint could
+	// mean different algorithms on the IMR and the signer. A name unknown to
+	// the running binary's registry is a hard config error.
+	LargeAlgorithms []string `yaml:"large_algorithms" mapstructure:"large_algorithms"`
 
 	// SplitAlgorithms gates which KSK/ZSK algorithm pairs a policy may use.
 	// Keyed by KSK algorithm name; the value lists ZSK algorithm names that

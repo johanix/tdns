@@ -20,10 +20,11 @@ imrengine:
 # DNSSEC algorithm numbers whose DNSKEY/RRSIG payloads are large for UDP.
 # When a referral DS RRset contains any listed algorithm, the IMR fetches
 # the child zone's DNSKEY over TCP from the start (do53-tcp), not UDP with
-# TC fallback. RSASHA512 (10) is a stand-in where ML-DSA-44 is unavailable.
-# Inspect counters: tdns-cli imr stats large-ksk
+# TC fallback. Listed by algorithm NAME (not codepoint): RSASHA512 is a
+# stand-in where ML-DSA-44 is unavailable. A name unknown to this binary's
+# registry is a hard config error. Inspect counters: tdns-cli imr stats large-ksk
 dnssec:
-   large_algorithms: [ 10 ]
+   large_algorithms: [ RSASHA512 ]
 
 log:
    file:                /var/log/tdns/tdns-imr.log

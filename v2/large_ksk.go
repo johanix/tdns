@@ -23,15 +23,24 @@ func LargeAlgDSMetrics() uint64 {
 	return n
 }
 
-func buildLargeAlgorithmSet(algs []uint8) map[uint8]bool {
-	if len(algs) == 0 {
-		return nil
+// buildLargeAlgorithmSet resolves the dnssec.large_algorithms names into the
+// derived codepoint lookup. Unlike split_algorithms (pure allowlist data, where
+// an unregistered name can never be requested), this list actively drives the
+// IMR's transport decision, so an unknown name is a hard config error rather
+// than a silent skip.
+func buildLargeAlgorithmSet(names []string) (map[uint8]bool, error) {
+	if len(names) == 0 {
+		return nil, nil
 	}
-	m := make(map[uint8]bool, len(algs))
-	for _, a := range algs {
-		m[a] = true
+	m := make(map[uint8]bool, len(names))
+	for _, name := range names {
+		alg := dns.StringToAlgorithm[strings.ToUpper(strings.TrimSpace(name))]
+		if alg == 0 {
+			return nil, fmt.Errorf("dnssec.large_algorithms: unknown algorithm %q (not registered in this binary)", name)
+		}
+		m[alg] = true
 	}
-	return m
+	return m, nil
 }
 
 // IsLargeAlgorithm reports whether alg is listed in dnssec.large_algorithms.

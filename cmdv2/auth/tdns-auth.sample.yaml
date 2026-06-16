@@ -181,9 +181,13 @@ keybootstrap:
 # zones reference (dnssec.policies:), and the key/signing policy for the
 # KeyStateWorker (dnssec.kasp:).
 dnssec:
-   # Algorithm numbers treated as "large" for IMR DNSKEY-over-TCP and signer
-   # warnings. RSASHA512 (10) is a stand-in where ML-DSA-44 is unavailable.
-   large_algorithms: [ 10 ]
+   # Algorithm NAMES treated as "large" for IMR DNSKEY-over-TCP and signer
+   # warnings. RSASHA512 is a stand-in where ML-DSA-44 is unavailable. Names,
+   # not codepoints: non-standardized PQ codepoints are assigned per
+   # deployment at runtime, so a bare number could mean different algorithms
+   # on the IMR and the signer. A name this binary's registry doesn't know is
+   # a hard config error (the server refuses to start).
+   large_algorithms: [ RSASHA512 ]
 
    # split_algorithms gates which KSK/ZSK algorithm PAIRS a policy may use when
    # the two roles differ. A policy whose ksk.algorithm != zsk.algorithm is

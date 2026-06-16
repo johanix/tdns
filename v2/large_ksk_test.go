@@ -127,12 +127,28 @@ func TestLargeAlgBulkWarning(t *testing.T) {
 
 func TestIsLargeAlgorithmConfig(t *testing.T) {
 	conf := &Config{}
-	conf.Internal.LargeAlgorithms = buildLargeAlgorithmSet([]uint8{dns.RSASHA512})
+	set, err := buildLargeAlgorithmSet([]string{"RSASHA512"})
+	if err != nil {
+		t.Fatalf("buildLargeAlgorithmSet: %v", err)
+	}
+	conf.Internal.LargeAlgorithms = set
 	if !conf.IsLargeAlgorithm(dns.RSASHA512) {
 		t.Fatal("RSASHA512 should be large")
 	}
 	if conf.IsLargeAlgorithm(dns.ED25519) {
 		t.Fatal("ED25519 should not be large")
+	}
+}
+
+func TestBuildLargeAlgorithmSetUnknown(t *testing.T) {
+	// Unknown name is a hard error (unlike split_algorithms, which skips).
+	if _, err := buildLargeAlgorithmSet([]string{"NOSUCHALG"}); err == nil {
+		t.Fatal("unknown algorithm name must be a hard error")
+	}
+	// Empty list is fine (no large algorithms configured).
+	set, err := buildLargeAlgorithmSet(nil)
+	if err != nil || set != nil {
+		t.Fatalf("empty list: set=%v err=%v, want nil,nil", set, err)
 	}
 }
 

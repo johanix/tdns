@@ -226,7 +226,11 @@ func (conf *Config) ParseConfig(reload bool) error {
 	if err := validateKaspPropagationDelay(conf.Dnssec.Kasp.PropagationDelay); err != nil {
 		return err
 	}
-	conf.Internal.LargeAlgorithms = buildLargeAlgorithmSet(conf.Dnssec.LargeAlgorithms)
+	largeAlgs, err := buildLargeAlgorithmSet(conf.Dnssec.LargeAlgorithms)
+	if err != nil {
+		return err
+	}
+	conf.Internal.LargeAlgorithms = largeAlgs
 	conf.Internal.SplitAlgorithms = buildSplitAlgorithmSet(conf.Dnssec.SplitAlgorithms)
 
 	// Normalize service.transport.type (default: none)
