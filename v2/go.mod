@@ -19,7 +19,7 @@ require (
 	github.com/mattn/go-sqlite3 v1.14.16
 	github.com/miekg/dns v1.1.70
 	github.com/mitchellh/mapstructure v1.5.0
-	github.com/quic-go/quic-go v0.58.0
+	github.com/quic-go/quic-go v0.59.1
 	github.com/spf13/pflag v1.0.6
 	github.com/spf13/viper v1.16.0
 	github.com/twotwotwo/sorts v0.0.0-20160814051341-bf5c1f2b8553
