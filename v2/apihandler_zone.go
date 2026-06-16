@@ -248,6 +248,19 @@ func setZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, error) 
 		return "", fmt.Errorf("set-policy: zone %s is not signed (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
 
+	// Capture the current policy + its algorithms before rebinding, so we can
+	// report the transition and whether it causes (transient) double-signing.
+	zd.mu.Lock()
+	oldName := zd.DnssecPolicyName
+	var oldKSKAlg, oldZSKAlg uint8
+	if zd.DnssecPolicy != nil {
+		oldKSKAlg, oldZSKAlg = zd.DnssecPolicy.KSKAlgorithm, zd.DnssecPolicy.ZSKAlgorithm
+	}
+	zd.mu.Unlock()
+	// A different algorithm in either role means new keys are introduced
+	// alongside the retired old ones — the zone is transiently double-signed.
+	algChanged := oldKSKAlg != pol.KSKAlgorithm || oldZSKAlg != pol.ZSKAlgorithm
+
 	if err := SetZonePolicyOverride(kdb, zd.ZoneName, policyName); err != nil {
 		return "", fmt.Errorf("set-policy: persist override: %w", err)
 	}
@@ -267,11 +280,26 @@ func setZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, error) 
 		return "", fmt.Errorf("set-policy: re-sign zone %s: %w", zd.ZoneName, err)
 	}
 
-	msg := fmt.Sprintf("Zone %s: DNSSEC policy set to %q (%d new RRSIGs). "+
-		"WARNING: this override is stored in the keystore, not the zone config; "+
-		"update the zone's dnssec_policy in YAML to make it the permanent base.",
-		zd.ZoneName, policyName, newrrsigs)
-	return msg, nil
+	// Build an explicit, multi-line message: a live DNSSEC policy change is
+	// intrusive (transient double-signing + divergence from the YAML config),
+	// so spell out what happened and what the operator should do.
+	var b strings.Builder
+	if oldName != "" && oldName != policyName {
+		fmt.Fprintf(&b, "Zone %s: DNSSEC policy changed from %q to %q (%d new RRSIGs).\n",
+			zd.ZoneName, oldName, policyName, newrrsigs)
+	} else {
+		fmt.Fprintf(&b, "Zone %s: DNSSEC policy set to %q (%d new RRSIGs).\n",
+			zd.ZoneName, policyName, newrrsigs)
+	}
+	b.WriteString("WARNING: the policy change is stored in the keystore, not the zone config.\n")
+	if algChanged {
+		b.WriteString("WARNING: this change has caused multiple signatures on RRsets (new keys+sigs added alongside the old).\n")
+	}
+	fmt.Fprintf(&b, "NOTE #1: update the zone's dnssec_policy in YAML to make %q the permanent policy.", policyName)
+	if algChanged {
+		fmt.Fprintf(&b, "\nNOTE #2: to clean up keys and signatures from the previous policy use \"... keystore dnssec policy-cleanup -z %s\" (note that this may break DNSSEC validation).", zd.ZoneName)
+	}
+	return b.String(), nil
 }
 
 func APIzoneDsync(ctx context.Context, app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
