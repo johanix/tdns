@@ -15,6 +15,8 @@ import (
 	_ "github.com/mattn/go-sqlite3"
 
 	"github.com/johanix/dnssec-algorithms/mldsa44"
+	"github.com/johanix/dnssec-algorithms/mldsa65"
+	"github.com/johanix/dnssec-algorithms/mldsa87"
 	"github.com/johanix/dnssec-algorithms/slhdsa128s"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -28,6 +30,8 @@ import (
 func init() {
 	algs.Register(199, mldsa44.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
 	algs.Register(200, slhdsa128s.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.Register(212, mldsa65.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
+	algs.Register(213, mldsa87.New(), algs.Capabilities{ForSIG0: true, ForDNSSEC: true})
 }
 
 func main() {
