@@ -146,8 +146,8 @@ github.com/ianlancetaylor/demangle v0.0.0-20181102032728-5e5cf60278f6/go.mod h1:
 github.com/ianlancetaylor/demangle v0.0.0-20200824232613-28f6c0f3b639/go.mod h1:aSSvb/t6k1mPoxDqO4vJh6VOCGPwU4O0C2/Eqndh1Sc=
 github.com/inconshreveable/mousetrap v1.1.0 h1:wN+x4NVGpMsO7ErUn/mUI3vEoE6Jt13X2s0bqwp9tc8=
 github.com/inconshreveable/mousetrap v1.1.0/go.mod h1:vpF70FUmC8bwa3OWnCshd2FqLfsEA9PFc4w1p2J65bw=
-github.com/johanix/dns v0.0.0-20260515091838-3300006a8466 h1:XPf9HP+LpU8FPXIvc3zaz/AwjI2Qa9cRRkTJoq8R590=
-github.com/johanix/dns v0.0.0-20260515091838-3300006a8466/go.mod h1:hBcNfObhP6OL8tg/LRRiRxqToCk64JmTahUFw2q39GM=
+github.com/johanix/dns v0.0.0-20260608092609-2a28f8f1484d h1:rkhMXetTV0gTQPj0Wj6nRaMu1w3iVt+TiL8z2DeMFrA=
+github.com/johanix/dns v0.0.0-20260608092609-2a28f8f1484d/go.mod h1:hBcNfObhP6OL8tg/LRRiRxqToCk64JmTahUFw2q39GM=
 github.com/johanix/dnssec-algorithms v0.0.0-20260515092703-423a9a3a4bf5 h1:ifLEEyglYuFsSGGhOkNt32Ecx7vJwu9T9VB04YJ95WQ=
 github.com/johanix/dnssec-algorithms v0.0.0-20260515092703-423a9a3a4bf5/go.mod h1:9bqZgp2xuoeqFcMazjYzAFOOygrDieZAwlySt+UWe8s=
 github.com/jstemmer/go-junit-report v0.0.0-20190106144839-af01ea7f8024/go.mod h1:6v2b51hI/fHJwM22ozAgKL4VKDeJcHhJFhtBdhmNjmU=
