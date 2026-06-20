@@ -1,8 +1,13 @@
 # Algorithm rollover via the auto-rollover engine
 
-Status (2026-06-17): DESIGN. Nothing implemented. Open items flagged in
-§6 (CSK handling, trigger surface, multi-ds vs double-signature) await a
-decision; the rest is settled.
+Status (2026-06-17): DESIGN + IMPLEMENTATION PLAN for the first step.
+Nothing implemented yet. §0–§7 are the design/rationale; §8 is the
+turnkey build order for the first step (relaxed-mode ZSK algorithm
+rollover), with resolved mechanical decisions, test cases, and success
+criteria — ready to hand to an implementing agent. Remaining §6 open
+items (CSK handling, multi-ds vs double-signature, strict-mode alg
+rollover, large-zone secondary propagation) are LATER steps, out of scope
+for the first.
 
 Branch context: dnssec-policy-change-phase1-2. Builds on the per-role
 KSK/ZSK algorithm work (PR #259) and the policy-change work documented in
@@ -254,11 +259,14 @@ rollover.
   (`db_zone_policy_override.go`), at the START of the roll. This is
   required, not incidental: the bound policy (resolved via
   `EffectiveDnssecPolicyName` at zone load/refresh, `refreshengine.go:212,
-  340,531`) is what drives the standby maintainer to mint NEW-alg keys
-  (§4.6) and what lets a mid-roll restart resume toward the right target
-  instead of reverting to the old policy and stalling the roll. The
-  override stores ONLY the target policy name — never an intermediate
-  "both algorithms" policy (there is none; §4.1 / mode is global, §4.4).
+  340,531`) is what makes future-generated keys carry the NEW algorithm
+  (§4.6, the KISS FIFO model — note: with role-only counting, no new key
+  is generated until the count actually drops; the override does NOT
+  trigger eager minting) and what lets a mid-roll restart resume toward
+  the right target instead of reverting to the old policy and stalling the
+  roll. The override stores ONLY the target policy name — never an
+  intermediate "both algorithms" policy (there is none; §4.1 / mode is
+  global, §4.4).
 - "ROLL IN PROGRESS" is derived from KEY STATE (an active key whose
   algorithm ≠ the bound policy's algorithm), NOT from override≠YAML —
   because `set-policy` already legitimately leaves override≠YAML after a
@@ -276,8 +284,8 @@ rollover.
 
 These three land TOGETHER. Writing the override without gating the
 synchronous reconcile gives the unsafe immediate swap; gating the reconcile
-without writing the override gives a roll that does not survive restart and
-that the standby maintainer fights (it would re-mint old-alg standbys).
+without writing the override gives a roll that does not survive restart
+(future keys would still be minted with the old algorithm).
 
 ### 3.5 Ownership
 
@@ -370,58 +378,129 @@ alg-split/PQ-transition mode that makes the ZSK-alg roll cheap. KSK-alg
 rolls are effectively identical in both modes (§3.2.1), so the mode
 matters in practice only for the ZSK-alg roll.
 
-### 4.5 CSK mode — OPEN
+The mode also selects the STANDBY-COUNTING DISCIPLINE, which is the
+structural difference between the two modes for a ZSK roll — not merely a
+reconcile-retire detail:
 
-`reconcileActiveKeyAlgorithms` early-returns on CSK mode (`sign.go:287`). A
-CSK is SEP-flagged and has a parent DS, so a CSK algorithm change is a
-parent-coordinated rollover. Decision needed: support it via the engine
-(same as KSK), or reject the change with an error until supported.
+- RELAXED: completeness does not require per-algorithm coverage, so the
+  zone needs `standby_zsk_count` standby ZSKs in TOTAL, regardless of
+  algorithm. Count standbys BY ROLE (flags), algorithm-agnostic. The
+  result is ONE FIFO pipeline that merely spans algorithms during a
+  transition (§3.1, §4.6). This is the NEW code.
+- STRICT: completeness requires every RRset signed by every algorithm in
+  the DNSKEY RRset, so during a transition the zone needs active + standby
+  ZSKs of EACH algorithm at once (the maintained double-signature). Count
+  standbys BY (ROLE, ALGORITHM) — which is exactly what today's
+  `maintainStandbyKeysForType` / `countKeysByFlagsAndAlg` already do
+  (key_state_worker.go:269,318). So STRICT inherits today's counting; the
+  per-alg counting that today's code does is the STRICT shape, not a bug.
 
-### 4.6 First step: relaxed-mode ZSK-alg roll (mostly already built)
+So the knob selects three things together: (1) the reconcile-retire
+behavior (§8.3), (2) the standby-counting discipline (role vs role+alg),
+and (3) the sweep rule (§8.3). Strict reuses today's per-alg behavior;
+relaxed is the role-only branch.
+
+Default vs. implemented: the knob lands with the first step (§8), default
+`strict`, but in step 1 only the RELAXED path performs an algorithm roll.
+Strict-mode algorithm rollover (maintained whole-zone double-signature
+through drain) is NOT implemented in step 1, so an algorithm change
+requested while the global mode is `strict` is REFUSED with a clear "not
+implemented" error rather than silently running the unsafe synchronous
+swap. The default is therefore safe-but-restrictive: relaxed must be
+opted into to perform an alg roll. (Strict-mode alg rollover is later
+work.)
+
+### 4.5 CSK mode — reject until supported
+
+`reconcileActiveKeyAlgorithms` early-returns on CSK mode (`sign.go:287`),
+so a CSK algorithm change is currently a SILENT NO-OP that reports
+success — a footgun. A CSK is SEP-flagged and has a parent DS, so a real
+CSK algorithm change is a parent-coordinated rollover (engine work, like
+KSK), out of scope for the first step.
+
+DECISION: until CSK alg rollover is built, a CSK-mode algorithm change is
+HARD-REJECTED with a clear "not implemented" error, in both modes. Because
+`reconcileActiveKeyAlgorithms` early-returns on CSK (sign.go:287) and never
+sees the keys, the rejection lives at the ENTRY layer (the
+`set-policy`/`change-policy` handler and/or `EnsureActiveDnssecKeys`), NOT
+in the reconcile — see the CSK note in §8.3. Supporting it via the engine
+is later work.
+
+### 4.6 First step: relaxed-mode ZSK-alg roll (the KISS FIFO model)
 
 The relaxed-mode ZSK algorithm roll is the recommended FIRST
 implementation step: no parent/DS coordination, no maintained
-double-signature, no new key state — and most of it falls out of the
-existing policy-driven standby maintainer.
+double-signature, no new key state. An algorithm rollover is NOT a panic
+maneuver — it is a scheduled, controlled change — so the design is the
+simplest possible: ONE thing changes.
 
-The standby maintainer already follows the policy algorithm:
-`maintainStandbyKeysForType` counts standby ZSKs OF THE POLICY ALGORITHM
-(`countKeysByFlagsAndAlg` matches flags AND alg) and generates with
-`zd.DnssecPolicy.ZSKAlgorithm` (`key_state_worker.go:269,279-313`). So
-when the policy ZSK algorithm changes, the maintainer sees zero standby
-ZSKs of the new algorithm and generates one automatically. It flows
-published→standby via the existing propagation-gated transition; the
-existing `zskRollDue`/`RolloverKey` promotes "the standby ZSK" (selected
-by flags, algorithm-blind — `keystore.go:1353`) to active; the old-alg
-ZSK retires and drains via the existing worker. Steps 1–4 of a relaxed
-ZSK-alg roll therefore need NO new code.
+THE MODEL: the ZSK pipeline is a strict FIFO that drains in order. A
+relaxed ZSK alg roll changes exactly one thing — newly-GENERATED keys
+carry the new algorithm. Everything else rides the existing machinery:
 
-What is actually missing:
+- Existing old-alg keys (active, standbys, retired) are LEFT ALONE. They
+  promote active→retired→removed in their normal FIFO order, on their
+  normal timers. No sweeping of legitimate pipeline members, no deletion
+  in the middle, no out-of-order promotion.
+- The new algorithm enters the pipeline only when the maintainer would
+  NATURALLY generate the next key (a standby was promoted, count dropped
+  below `standby_zsk_count`). That key — and every key after it — is the
+  new algorithm.
+- Promotion stays FIFO (oldest `published_at` first, `keystore.go:1353`):
+  old-alg standbys promote first (in turn) and drain; new-alg standbys
+  promote only when their turn comes. The transition completes naturally
+  as the FIFO turns over.
 
-- POLICY OVERRIDE WRITE at roll start (§3.4): `change-policy` writes the
-  zone→target-policy row into the existing `ZonePolicyOverride` table and
-  rebinds `zd.DnssecPolicy` in-memory, so the standby maintainer mints
-  new-alg keys and a restart resumes toward the target. This is the same
-  write `set-policy` does — `change-policy` is `set-policy` minus the
-  synchronous reconcile. Reuse, not new table.
-- ON-DEMAND TRIGGER. Today the roll fires only on `ZSK.Lifetime` expiry.
-  An operator changing the algorithm wants it to start now, not wait a
-  lifetime — a "roll ZSK asap" trigger, modeled on the KSK `asap` path.
-- RELAXED-MODE RECONCILE BRANCH. `reconcileActiveKeyAlgorithms` currently
-  retires the wrong-alg active ZSK immediately (§2 unsafe path). In
-  relaxed mode it must instead NOT retire — let the standby-maintainer +
-  roll flow carry it. A guarded branch; "roll in progress" is derived from
-  key state (active-alg ≠ bound-policy-alg), not from override≠YAML (§3.4).
-- COORDINATION GUARD so the reconcile retire and the worker roll don't
-  both fire.
-- GLOBAL MODE KNOB (§4.4) and the CLI/API trigger surface (§6 item 2).
+THE THROTTLE: with N standbys + 1 active, a fully-natural roll takes N+1
+`ZSK.Lifetime` periods (e.g. ~6 weeks at 2-week lifetime, N=2). The
+operator accelerates with `asap` (§8.1): each `asap` promotes the NEXT
+FIFO standby now. Because the existing same-alg standbys are already fully
+propagated (parallel propagation), successive `asap`s execute back-to-back
+(bounded only by max(propagation_delay, DNSKEY TTL) for the retire/drain
+side, not by lifetime). So the operator dials the speed — ride the
+cadence, or `asap` through the old-alg spares to reach the new algorithm
+in roughly one propagation/TTL window plus the time for a fresh new-alg
+key to reach standby. `asap` IS the trigger; `change-policy` only sets the
+algorithm of future keys. No separate alg-roll trigger exists.
 
-Rough cost (estimate, not a plan): ~115–215 source LOC + ~100–160 test
-LOC, ~3–5 agent-hours. The one refinement to watch: `RolloverKey` picks
-the first standby by flags only, so when both an old- and a new-alg
-standby are briefly present it should prefer the policy-algorithm one
-(~10 LOC). This step validates the trigger + global-mode design before the
-expensive KSK / parent-DS work.
+WHY THIS INVERTS THE EARLIER "FALLS OUT FOR FREE" FRAMING: today's
+`maintainStandbyKeysForType` counts standbys BY (role, algorithm)
+(`countKeysByFlagsAndAlg`, key_state_worker.go:269,318). With N old-alg
+standbys present and the policy now new-alg, it would see ZERO new-alg
+standbys and EAGERLY generate N new-alg keys immediately — bloating the
+DNSKEY RRset to old+new sets at once. That eager per-alg behavior is the
+STRICT-mode shape (§4.4), and it is exactly the anti-pattern relaxed mode
+must avoid. Relaxed mode requires NEW code: count standbys BY ROLE only
+(algorithm-agnostic) — "have N standby ZSKs? generate nothing" — and
+stamp the new algorithm only when generation actually happens.
+
+What is actually needed (all in §8):
+
+- POLICY OVERRIDE WRITE (§3.4): `change-policy` writes the zone→target row
+  into the existing `ZonePolicyOverride` table and rebinds
+  `zd.DnssecPolicy`, so future generation uses the new algorithm and a
+  restart resumes toward the target. Reuse, not a new table.
+- ROLE-ONLY STANDBY COUNTING in relaxed mode (the inversion above): the
+  maintainer counts standby ZSKs by role, not (role, alg).
+- SWEEP, corrected for relaxed mode: the wrong-alg standby/published sweep
+  is a DNSKEY-RRset-bloat SAFETY valve and STAYS. But in relaxed mode it
+  must enforce "total standby ZSKs ≤ `standby_zsk_count`" by deleting the
+  YOUNGEST surplus (keep the oldest N — they are next in FIFO), NEVER by
+  algorithm alone. Maintainer and sweep MUST share one role-total count
+  (§8.3). Strict mode keeps today's per-alg sweep.
+- RELAXED-MODE RECONCILE BRANCH (§8.3): the reconcile does NOT retire the
+  wrong-alg active ZSK; it lets the FIFO carry the roll.
+- ZSK `asap`/`cancel` at KSK parity (D1, §8.1) — the throttle.
+- GLOBAL MODE KNOB (§4.4) + CLI/API for `change-policy`.
+
+NOT needed (drop from earlier drafts): immediate new-alg generation;
+out-of-order/algorithm-aware promotion ("standby-pick refinement");
+deleting old-alg standbys to make room. FIFO + role-only count + `asap`
+make these unnecessary.
+
+Rough cost: ~120–220 source LOC + ~120–180 test LOC, ~3–5 agent-hours,
+PLUS the step-0 ZSK-manual-parity prerequisite (D1, §8.1). Build order,
+decisions, and tests in §8.
 
 
 ## 5. Summary
@@ -447,19 +526,26 @@ expensive KSK / parent-DS work.
 - The policy-change reconcile stops swapping KSKs and hands KSK/CSK
   algorithm changes to the engine; the engine owns KSK state transitions.
 - One role per roll (§4.1). Mode is a GLOBAL config choice
-  (`dnssec.completeness`, default strict — §4.4). CSK handling is open
-  (§4.5).
-- Recommended first step: relaxed-mode ZSK-alg roll, most of which already
-  falls out of the policy-driven standby maintainer (§4.6).
+  (`dnssec.completeness`, default strict — §4.4). CSK alg change is
+  hard-rejected until engine support exists (§4.5).
+- Recommended first step: relaxed-mode ZSK-alg roll — the KISS FIFO model
+  (§4.6): `change-policy` only changes the algorithm of future-generated
+  keys; the FIFO drains in order and `asap` is the throttle. Relaxed mode
+  counts standbys by role (not by alg) and caps the standby total by
+  deleting the youngest surplus — the inverse of today's per-alg
+  maintainer/sweep, which is the strict-mode shape. Build order, resolved
+  decisions (incl. D5), and tests in §8.
 
 
 ## 6. Open items
 
-1. §4.5 — CSK algorithm change: support via the engine, or reject until
-   supported?
-2. Trigger surface — an explicit `auto-rollover policy-change` command, or
-   automatic hand-off from `set-policy` when the target algorithm differs?
-   The explicit command keeps the manual/automated boundary clean (§3.5).
+1. RESOLVED (§4.5, §8.3) — CSK algorithm change is HARD-REJECTED (replacing
+   today's silent no-op) until engine support exists. Supporting it via the
+   engine is later work.
+2. RESOLVED (§8.3) — explicit `auto-rollover policy-change` command for
+   the trigger (reuses set-policy's override write); the relaxed-mode
+   reconcile (D3) is what makes the roll gradual rather than a synchronous
+   swap. Keeps the manual/automated boundary clean (§3.5).
 3. multi-ds vs double-signature — multi-ds is attractive for PQ KSKs
    (§3.3, Shor's-window), so the KSK pipeline extends multi-ds rather than
    implementing the (currently unimplemented) double-signature method. The
@@ -511,3 +597,377 @@ Spec references: RFC 7583 (DNSSEC key timing — multi-DS / double-DS
 rollover); RFC 6840 §5.9 (a parent DS with no matching working key is
 skipped, not fatal — one working chain suffices); RFC 4035 §2.2 / §5.2
 (algorithm completeness — relaxed by draft-johani-dnsop-dnssec-alg-split).
+
+
+## 8. Implementation plan — relaxed-mode ZSK algorithm rollover
+
+This section is the turnkey spec for the FIRST implementation step. §0–§7
+are the design/rationale; this is the build order, the resolved
+mechanical decisions, and the verification. Follow the project rules in
+CLAUDE.md (gofmt after edits; build with `cd tdns/cmdv2 && GOROOT=
+/opt/local/lib/go make` before committing; show diff + update this doc's
+step status before committing each step; no testbed access — verify by
+build + `go test -race`).
+
+### 8.0 Resolved decisions (do not re-litigate)
+
+- D1 — Prerequisite: bring ZSK MANUAL-TRIGGER plumbing to KSK parity
+  FIRST (§8 step 0). Automatic, lifetime-driven ZSK rollover is complete
+  (`zsk_rollover.go`), but ZSK has NO manual/on-demand trigger — the
+  KSK-only `manual_rollover_*` columns, `SetManualRolloverRequest`,
+  `APIRolloverAsap`, `asap`/`cancel` CLI have no ZSK equivalent. The
+  alg-roll trigger IS a manual on-demand ZSK roll, so build the general
+  capability (a ZSK `asap`/`cancel`) before the alg-roll-specific piece,
+  rather than a one-off. This is a real prerequisite: do not start the
+  alg-roll trigger on top of a ZSK subsystem with no manual control.
+- D2 — Mode knob (§4.4): add `dnssec.completeness: strict|relaxed`,
+  default `strict`. Implement ONLY the relaxed ZSK-only alg-roll path now.
+  Everything else is REFUSED with a clear "not implemented" error (never
+  the silent synchronous swap): any ZSK alg change under `strict`, and any
+  KSK or CSK alg change in EITHER mode (a SAFETY gate, not just scoping).
+  The KSK and strict-ZSK refusals live in `reconcileActiveKeyAlgorithms`;
+  the CSK refusal lives at the ENTRY layer because the reconcile
+  early-returns on CSK and never sees the keys (§8.3). Only a ZSK-only alg
+  change under `relaxed` proceeds.
+- D3 — change-policy refactor = Alt A: put the relaxed behavior INSIDE
+  `reconcileActiveKeyAlgorithms`, mode-driven. In relaxed mode the
+  reconcile does NOT retire the wrong-alg active ZSK (it hands off to the
+  rollover machinery). `change-policy` then reuses the existing
+  `setZonePolicy` path (override write + in-memory rebind + SignZone),
+  and the relaxed reconcile naturally no-ops the dangerous synchronous
+  retire. Consequence (intended): under relaxed mode, `set-policy` on an
+  alg change is ALSO gradual — correct, since the synchronous swap is
+  exactly the §2 unsafe behavior. (Alt B = a `gradual bool` parameter on
+  a shared apply function; Alt C = a separate thin change-policy that
+  skips SignZone. Both rejected as more code / two paths to keep correct.)
+- D4 — "Roll in progress" is derived from KEY STATE (an active ZSK whose
+  algorithm ≠ the bound policy's ZSK algorithm), NOT from override≠YAML
+  (§3.4). No new in-progress table/column. (The re-entrancy guard, §8.3,
+  uses a FULLER predicate that also covers the drain window.)
+- D5 — KISS FIFO model (§4.6): a relaxed ZSK alg roll changes ONLY the
+  algorithm of newly-generated keys; the FIFO drains in order, `asap` is
+  the throttle, nothing is generated eagerly and no legitimate pipeline
+  key is deleted out of order. This requires, in RELAXED mode: (a)
+  standby maintenance counts standbys BY ROLE (flags) only, not
+  (role, alg); (b) the wrong-alg standby/published sweep is replaced by a
+  total-count cap — keep the oldest `standby_zsk_count` standby ZSKs (any
+  algorithm), delete the YOUNGEST surplus, NEVER delete by algorithm
+  alone; (c) maintainer and sweep share ONE role-total count (else they
+  oscillate). STRICT mode keeps today's per-alg counting and per-alg sweep
+  unchanged. There is NO immediate new-alg generation, NO algorithm-aware
+  promotion, NO deletion of old-alg standbys to make room.
+
+### 8.1 Step 0 — ZSK manual-trigger parity (prerequisite)
+
+Bring ZSK to KSK parity for on-demand rolling. Model on the KSK manual
+mechanism (`apihandler_rollover.go` `APIRolloverAsap`/cancel;
+`SetManualRolloverRequest`/`ClearManualRolloverRequest`; the
+`manual_rollover_*` columns).
+
+DECISION — ZSK manual state lives in a NEW small table, e.g.
+`ZskRolloverState (zone TEXT PRIMARY KEY, manual_rollover_requested_at
+TEXT, manual_rollover_earliest TEXT)`. Do NOT reuse `RolloverZoneState`:
+that table is overwhelmingly KSK/DS-specific (it has `zone` as its sole
+PK plus `last_ds_*`, `rollover_phase`, `observe_*`, `*_push_at`,
+`parent_advertises_*`, CDS index columns — all parent-DS machinery a ZSK
+has no part in, db_schema.go:109-141). Reusing it with a key-type
+discriminator would force a composite PK change and entangle ZSK state
+with the KSK rollover-phase machine — strictly more work and worse
+coupling than a 3-column sibling table. Mirror `RolloverZoneState`'s
+helpers (`Set*`/`Clear*`) for the new table.
+
+`zskRollDue` (`zsk_rollover.go:17`) gains a manual-request check (roll due
+when a manual request is set even if lifetime has not elapsed), mirroring
+KSK `rolloverDue` (`ksk_rollover_automated.go:1559`).
+
+CLI/API: `auto-rollover asap`/`cancel` gain ZSK support (today they are
+KSK-oriented), or add ZSK-typed variants. Keep it symmetric with KSK.
+
+REQUIRED persistence semantics: a manual `asap` request MUST persist
+until the roll actually COMMITS (clear it only after `RolloverKey`
+succeeds — mirror the KSK path, which clears `manual_rollover_*` only
+after the swap), NOT on the first "roll due but no standby yet" no-op.
+This matters whenever an operator `asap`s while no standby is ready (e.g.
+right after a fresh key was generated but has not yet reached `standby`):
+the first worker ticks legitimately find no standby. If the request
+cleared on that no-op, the `asap` would fire once and silently stall,
+never rolling. The request must survive those ticks and fire when a
+standby appears. (This is general ZSK-asap correctness; it also matters
+for the alg roll when the operator asaps through to the new-alg key.)
+
+Verify: T0.1–T0.4 (§8.4). This step is independently valuable and
+independently testable — it completes ZSK rollover to KSK parity
+regardless of the alg-roll work.
+
+### 8.2 Step 1 — global completeness knob
+
+Add `dnssec.completeness: strict|relaxed` (default `strict`) to
+`DnssecConf` (config.go), parse in `parseDnssecConfig` (parseconfig.go),
+expose via `Conf.Internal` where the reconcile reads it. Sample config +
+doc. Per D2, only relaxed is wired to do an alg roll; strict refuses.
+
+Verify: T2 (§8.4) + a parse test (good/bad values, default).
+
+### 8.3 Step 2 — relaxed-mode ZSK alg roll
+
+Reconcile branch (D3) — `reconcileActiveKeyAlgorithms` (sign.go:286)
+becomes mode-aware. There are FOUR cases for an active-key algorithm
+mismatch, and step 2 must handle ALL of them, not just the ZSK one:
+
+- ZSK mismatch, RELAXED mode: do NOT retire — return without the
+  synchronous swap so the standby maintainer + ZSK roll carry it. (The
+  step-1 happy path.)
+- ZSK mismatch, STRICT mode: REFUSE with the D2 "strict-mode algorithm
+  rollover not implemented" error. Do NOT run the legacy synchronous
+  retire for an algorithm change.
+- KSK mismatch, EITHER mode: REFUSE with a clear "KSK algorithm rollover
+  not implemented (route via the engine — not yet built)" error. THIS IS A
+  SAFETY REQUIREMENT, NOT POLISH. The current KSK loop (sign.go:310-322)
+  retires the wrong-alg active KSK immediately → the §2 bogus-zone path.
+  §8.6 excludes KSK from SCOPE, but excluding from scope does NOT stop the
+  existing code from running — under relaxed mode a
+  `set-policy`/`change-policy` that changes the KSK algorithm would
+  otherwise silently run the unsafe synchronous swap. The KSK refusal goes
+  IN this function (it is reached for ksk-zsk mode): detect the KSK
+  mismatch at the top of the KSK loop and return the error instead of
+  retiring.
+
+NOTE ON CSK (different layer — read carefully): `reconcileActiveKeyAlgorithms`
+EARLY-RETURNS on CSK mode (sign.go:287) — it never reaches any key loop for
+a CSK zone. So a CSK alg change is NOT a "retire the KSK" path here; it is
+today a SILENT NO-OP (the early return), which reports success while
+nothing happens — its own footgun. The CSK refusal therefore CANNOT live
+in this function; put it at the ENTRY layer — validate in the
+`set-policy`/`change-policy` handler (and/or in `EnsureActiveDnssecKeys`
+before calling the reconcile) that the zone's mode is not CSK for an
+algorithm change, returning "CSK algorithm rollover not implemented." Do
+NOT add a CSK check inside `reconcileActiveKeyAlgorithms` — it would never
+fire. (See §4.5.)
+
+So: only a ZSK-only algorithm change under relaxed mode proceeds.
+Everything else is refused with zero key-state change — KSK mismatch (any
+mode) and strict-mode ZSK mismatch in the reconcile; CSK mismatch (any
+mode) at the entry layer. Non-algorithm reconcile behavior the function
+legitimately handles is preserved.
+
+Both-role guard (validate BEFORE writing the override): a policy whose
+target differs in BOTH the KSK and ZSK algorithm is rejected at the
+`change-policy`/`set-policy` entry with a "roll one role at a time" error
+(§4.1) — before any override write or rebind, so the zone is never left
+half-changed. (The KSK/CSK refusal above is the reconcile-layer backstop;
+this is the operator-facing front-door check.)
+
+Re-entrancy guard (validate BEFORE writing the override): a
+`change-policy` for a zone that ALREADY has a ZSK algorithm rollover in
+flight is REFUSED with "an algorithm rollover is already in progress for
+this zone; wait for it to complete (or cancel it)". This is a distinct,
+FULLER notion of "in progress" than D4 — D4 (`active ZSK alg ≠ bound
+policy alg`) is for the RECONCILE's decision and reads false during the
+DRAIN window (after promotion the new key is active and matches the
+policy, while the old key is still `retired`/draining). For the
+re-entrancy guard, "in flight" means ANY of:
+  (a) an active ZSK whose algorithm ≠ the target's ZSK algorithm
+      (pre-promotion), OR
+  (b) a ZSK of an algorithm other than the target's present in any of
+      `standby` / `active` / `retired` (drain not yet complete).
+Rationale: without this, a second `change-policy` mid-roll silently
+rebinds the policy and re-arms the trigger, abandoning or tangling the
+in-flight roll — and the back-to-original-alg sub-case lands exactly in
+D4's drain-window blind spot, where the reconcile would mis-read the
+zone as "not rolling." Refusing is the safe, predictable behavior for
+step 1. (A deliberate "supersede the in-flight roll" semantics is
+possible later but is NOT step-1 scope; refuse for now. An operator who
+genuinely wants to change course uses ZSK `cancel` (§8.1) first, then
+re-issues `change-policy`.) The fuller in-progress predicate here is the
+ZSK analog of the KSK post-promotion composite-in-progress item the
+review carried to later steps — but for ZSK it is needed NOW, for this
+guard.
+
+Role-only standby counting (D5): in RELAXED mode, standby maintenance
+counts standby ZSKs BY ROLE (flags), NOT (role, alg). Change
+`maintainStandbyKeysForType`/`countKeysByFlagsAndAlg`
+(key_state_worker.go:269,318) so that in relaxed mode "do I have
+`standby_zsk_count` standby ZSKs?" ignores algorithm — N old-alg standbys
+satisfy the count and NOTHING is generated. Only when the count actually
+drops (a standby was promoted) does the maintainer generate, and that new
+key carries the new algorithm. STRICT mode keeps today's per-alg counting.
+(This is the inversion described in §4.6: today's per-alg behavior is the
+strict shape; relaxed is the new role-only branch.)
+
+Sweep — keep it, but correct the relaxed rule (D5): the wrong-alg
+standby/published sweep (sign.go:346-375) is a DNSKEY-RRset-bloat SAFETY
+valve and STAYS. In RELAXED mode replace "delete by wrong algorithm" with
+a TOTAL-COUNT CAP: keep the oldest `standby_zsk_count` standby ZSKs (by
+`published_at`/creation, ANY algorithm), delete the YOUNGEST surplus,
+NEVER delete based on algorithm alone (deleting a legitimate old-alg FIFO
+member would break the roll). The maintainer (above) and the sweep MUST
+use ONE shared role-total count, or they oscillate (generate→sweep→
+generate). STRICT mode keeps today's per-alg sweep (a wrong-alg standby
+there genuinely is a leftover).
+
+Coordination guard: with the relaxed reconcile no-op for ZSK, the ZSK
+roll worker is the sole actor. Assert this; add a guard only if a path
+can still double-fire.
+
+NO standby-pick refinement / NO out-of-order promotion (D5): `RolloverKey`
+(keystore.go:1353) promotes the oldest standby by FIFO order — which is
+already correct. Do NOT add algorithm-aware standby selection: the roll
+proceeds by draining the FIFO in order (old-alg standbys first, then
+new-alg), never by picking the new-alg key out of turn.
+
+change-policy is set-the-future-algorithm; `asap` is the throttle (D5):
+`auto-rollover policy-change -z <zone> -p <policy>` writes the
+`ZonePolicyOverride` target + in-memory rebind (reuse
+`setZonePolicy`/`SetZonePolicyOverride`) so future-generated keys carry
+the new algorithm and a restart resumes toward the target. It does NOT
+generate keys, retire anything, or "start a roll" synchronously. The roll
+then advances on the normal ZSK cadence, OR the operator accelerates it
+with the step-0 ZSK `asap` (each `asap` promotes the next FIFO standby
+now; successive `asap`s run back-to-back because the existing standbys are
+already propagated). CLI + API + wire field for `change-policy`, modeled
+on set-policy; `asap` is the step-0 command, reused unchanged.
+
+Rapid-asap drain transient (accepted, no throttle): `asap`-ing faster
+than the retire/drain side clears can transiently hold MULTIPLE retired
+old-alg ZSKs in the DNSKEY RRset at once (each draining on its own
+max(propagation_delay, DNSKEY TTL) timer). This is SAFE (retired keys
+staying published is the drain contract) and self-clearing; it is the
+operator's explicit choice to go fast. Do NOT add a throttle (the KSK
+asap path does not either). Note it for operators.
+
+Existing-test migration: introducing relaxed mode changes
+`reconcileActiveKeyAlgorithms` behavior, so
+`TestReconcileActiveKeyAlgorithms` (which today asserts IMMEDIATE retire
+of a wrong-alg ZSK) must be updated — split into strict-mode (refuse/keep
+current) and relaxed-mode (no-op) variants. Do this as part of step 2,
+not as a surprise at build time.
+
+Verify: T1, T2b, T2c, T2d, T-timing, T3, T3b, T4, T4b, T5–T9 (§8.4).
+
+### 8.4 Test cases (unit/integration, `go test -race`)
+
+Model on `sign_reconcile_test.go`, `db_zone_policy_override_test.go`.
+Drive the worker / fake time where a sequence is needed.
+
+Step 0 (ZSK manual parity):
+- T0.1 — ZSK manual `asap` request persists and reads back; `cancel`
+  clears it.
+- T0.2 — ZSK roll-due returns true when a manual request is set even
+  though `ZSK.Lifetime` has not elapsed.
+- T0.3 — manual ZSK roll with a standby present swaps
+  standby→active / active→retired; with NO standby present it warns and
+  no-ops (no key loss).
+- T0.4 — PERSISTENCE: a manual request set while no standby exists is NOT
+  cleared by the no-standby no-op tick(s); once a standby appears the roll
+  fires and the request is cleared only then (asserts §8.1 persistence).
+
+Step 1 (mode knob):
+- T2 — ZSK alg change requested while global mode is `strict`: refused
+  with "not implemented"; NO synchronous swap, NO key state change.
+
+Step 2 (relaxed alg roll):
+- T2b — SAFETY: a KSK-only (and, separately, a CSK) algorithm change under
+  RELAXED mode is REFUSED with "not implemented"; NO active KSK/CSK retire,
+  NO key churn (asserts the §8.3 KSK/CSK refusal — without this the §2
+  bogus path runs).
+- T2c — a policy change whose target differs in BOTH KSK and ZSK algorithm
+  is rejected at the entry with a "one role at a time" error, BEFORE any
+  override write or rebind (§4.1).
+- T2d — RE-ENTRANCY: a second `change-policy` issued while a ZSK alg roll
+  is in flight is REFUSED ("already in progress"), with no override
+  rewrite / no rebind. Cover BOTH in-flight phases: (i) pre-promotion
+  (active ZSK still old-alg), and (ii) drain window (new-alg ZSK promoted
+  to active, old-alg ZSK still `retired`/draining) — the latter is D4's
+  blind spot, so the guard must use the fuller predicate (§8.3). Include
+  the back-to-original-alg sub-case in the drain window.
+- T-timing — a `change-policy` to a policy with the SAME algorithms but
+  different timings (e.g. shorter `ZSK.Lifetime`): does NOT trigger an
+  algorithm roll, does NOT error; the override is written and the new
+  timings take effect. Separately assert that if the active ZSK has
+  already outlived the new shorter lifetime, the existing same-alg
+  lifetime-driven roll fires normally on the next tick (not the alg-roll
+  path).
+- T1 — relaxed-mode reconcile with active ZSK alg ≠ policy alg: does NOT
+  retire the active ZSK (the §2 unsafe path is gated off).
+- T3 — ROLE-ONLY COUNT (D5): standby_zsk_count=2, two OLD-alg standbys
+  present, policy ZSK alg changed to new. The maintainer generates
+  NOTHING (role-only count sees 2 standbys ≥ 2) — assert NO new-alg key is
+  minted and the two old-alg standbys are untouched. (Inverts the earlier
+  draft, which asserted immediate new-alg minting.)
+- T3b — GENERATE-ON-DRAIN (D5): from T3's state, after one standby is
+  promoted (count drops to 1), the maintainer generates ONE key and it is
+  the NEW algorithm. The old-alg standby that remains is untouched.
+- T4 — SWEEP CAP (D5): with standby_zsk_count=2 and THREE standby ZSKs
+  present (e.g. a stray extra), the relaxed sweep deletes the YOUNGEST one
+  (back to 2), keeps the oldest two regardless of algorithm; it does NOT
+  delete an old-alg standby merely for being old-alg. Assert maintainer +
+  sweep agree on the count (no generate→sweep oscillation across ticks).
+- T4b — NO out-of-order promotion (D5): with an old-alg standby (older)
+  and a new-alg standby (younger) both present, a roll promotes the
+  OLD-alg one (FIFO oldest-first), not the new-alg one.
+- T5 — full sequence via asap (standby_zsk_count=2): change-policy (new
+  alg) → maintainer generates nothing (T3) → `asap` promotes old-alg
+  standby#1 → active (old active → retired, draining); `asap` again
+  promotes old-alg standby#2 → active immediately (already propagated) →
+  now count=0 standbys → maintainer generates 2 NEW-alg keys → once
+  propagated, `asap` promotes a new-alg key → zone now signs new alg;
+  old-alg keys finish draining (retired → removed + RRSIGs stripped).
+  Assert: no instant with zero valid ZSK coverage; FIFO order preserved
+  throughout; DNSKEY RRset never holds more than active + 2 standby +
+  draining-retired.
+- T6 — `change-policy` writes the override to the TARGET + rebinds; a
+  simulated restart (re-resolve via `EffectiveDnssecPolicyName`) rebinds
+  to the target, not the old policy.
+- T7 — override≠YAML but active-alg == bound-policy-alg (a COMPLETED
+  prior change): engine does NOT treat a roll as in progress (D4).
+- T8 — relaxed roll does NOT maintain a whole-zone double-signature:
+  after switch+drain only new-alg RRSIGs remain; old-alg RRSIGs are not
+  refreshed.
+- T9 — reload mid-roll: a `zone reload` (which re-parses dnssec + triggers
+  a resign) while the active ZSK is still old-alg must NOT retire it — the
+  T1 invariant holds through reload (D3: reload goes through the same
+  relaxed reconcile path). Cheap to unit-test with fake time.
+
+### 8.5 Success criteria
+
+- Step 0: ZSK has `asap`/`cancel` at KSK parity, with request persistence
+  per §8.1; T0.1–T0.4 green; build clean.
+- Step 1: knob parses, defaults strict; T2 green.
+- Step 2: a relaxed-mode `change-policy` to a different-ZSK-algorithm
+  policy gradually rolls the ZSK (new-alg standby → active, old-alg
+  retired → removed + stripped) with the zone validatable throughout; AND
+  a KSK/CSK, both-role, or re-entrant alg change is safely refused (no key
+  churn); AND a same-alg/timing-only change applies without a roll; AND
+  the roll proceeds by FIFO drain + `asap` with no eager new-alg
+  generation and no out-of-order promotion (D5);
+  T1, T2b, T2c, T2d, T-timing, T3, T3b, T4, T4b, T5–T9 green;
+  `go test ./... -race` clean; full `make` builds all binaries. Testbed
+  validation is operator-gated (not part of agent done-ness).
+
+### 8.6 Explicitly OUT of scope for this step
+
+NOT BUILT (but SAFELY REFUSED, not left to run unsafely — §8.3):
+- KSK algorithm rollover (parent DS / multi-ds — §1, §3.3).
+- CSK algorithm change (§4.5).
+- Strict-mode algorithm rollover (maintained whole-zone double-signature —
+  §3.2.1).
+A request for any of these returns a clear "not implemented" error with no
+key-state change. The distinction from "out of scope" in earlier drafts:
+these are not merely unaddressed, they are actively GATED, because the
+existing reconcile code would otherwise run the §2 unsafe path.
+
+NOTED, not built (no gating needed this step):
+- Large-zone secondary-propagation wait for the ZSK switch (§6 item 5):
+  `transitionPublishedToStandby` uses `propagation_delay` only. Document
+  the limitation in operator docs; do not build the secondary-observation
+  wait now.
+- `policy-cleanup` during an in-progress relaxed roll: after promotion the
+  old-alg ZSK is `retired`; `policy-cleanup` would strip its RRSIGs
+  immediately, unsafe while resolvers may still cache old-alg answers. Do
+  not build a guard now, but WARN in operator docs (and ideally refuse
+  cleanup when `active alg ≠ policy` or a wrong-alg `retired` ZSK exists —
+  cheap, optional).
+- Multi-provider zones (`OptMultiProvider`) are skipped by the ZSK roll
+  worker (`zsk_rollover.go:46`); document the exclusion.
+
+Keep the step to relaxed-mode ZSK only.
