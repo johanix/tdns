@@ -17,9 +17,12 @@ import (
 var Conf Config
 
 // confMu protects Conf and Globals during config reload operations.
-// Readers do not need to hold this — the reload window is brief and
-// reads during reload may see partial state, which is acceptable.
-// Only reload paths acquire the write lock.
+// Reload paths take the write lock; they replace whole maps/slices
+// (e.g. Conf.Internal.DnssecPolicies, Conf.Zones) wholesale. Readers that
+// can run concurrently with a reload — notably API handlers — must take
+// the read lock around those accesses: a bare read racing a map/slice
+// reassignment is a data race, not merely a partial-state read. Reads on
+// startup-only paths (no concurrent reload) need not lock.
 var confMu sync.RWMutex
 
 // SensitiveString wraps a string that should not appear in logs.

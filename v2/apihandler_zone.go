@@ -189,12 +189,16 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				}
 				configPolicy := ""
 				if overridden {
+					// Conf.Zones is replaced wholesale by a config reload;
+					// guard the scan with confMu (read lock).
+					confMu.RLock()
 					for i := range Conf.Zones {
 						if dns.Fqdn(Conf.Zones[i].Name) == zname {
 							configPolicy = Conf.Zones[i].DnssecPolicy
 							break
 						}
 					}
+					confMu.RUnlock()
 				}
 
 				zconf := ZoneConf{
@@ -242,7 +246,13 @@ func setZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, error) 
 	if policyName == "" {
 		return "", fmt.Errorf("set-policy: no policy specified")
 	}
+	// Snapshot the resolved policy under confMu: a concurrent config reload
+	// (ReloadZoneConfig / ReloadZone) replaces Conf.Internal.DnssecPolicies
+	// wholesale. pol is a value copy, so we can release the lock immediately
+	// and not hold it across the re-sign below.
+	confMu.RLock()
 	pol, ok := Conf.Internal.DnssecPolicies[policyName]
+	confMu.RUnlock()
 	if !ok {
 		return "", fmt.Errorf("set-policy: DNSSEC policy %q does not exist", policyName)
 	}
