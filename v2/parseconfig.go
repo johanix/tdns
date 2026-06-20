@@ -996,6 +996,43 @@ func (conf *Config) reloadTemplatesFromFile() error {
 	return conf.buildTemplateMap()
 }
 
+// reloadDnssecFromFile re-reads the config file, decodes just the dnssec:
+// block into conf.Dnssec, and re-parses it into conf.Internal.*. Used by the
+// zone-reload paths so an edited policy (or other dnssec setting) is picked up
+// without a full config reload — parseDnssecConfig alone would re-parse the
+// already-decoded (startup) conf.Dnssec, missing the operator's edits. Mirrors
+// reloadTemplatesFromFile.
+func (conf *Config) reloadDnssecFromFile() error {
+	cfgfile := conf.Internal.CfgFile
+	if cfgfile == "" {
+		// No config file (e.g. embedded use) — just re-parse what we have.
+		return conf.parseDnssecConfig()
+	}
+
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	if err != nil {
+		return fmt.Errorf("error processing config: %v", err)
+	}
+
+	var partial struct {
+		Dnssec DnssecConf `yaml:"dnssec"`
+	}
+	decoderConfig := &mapstructure.DecoderConfig{
+		TagName: "yaml",
+		Result:  &partial,
+	}
+	decoder, err := mapstructure.NewDecoder(decoderConfig)
+	if err != nil {
+		return fmt.Errorf("error creating decoder: %v", err)
+	}
+	if err := decoder.Decode(configMap); err != nil {
+		return fmt.Errorf("error decoding dnssec config: %v", err)
+	}
+
+	conf.Dnssec = partial.Dnssec
+	return conf.parseDnssecConfig()
+}
+
 // expandTemplateChain expands a template by following its parent chain (via the Template field)
 // using DFS with cycle detection. It updates the global Templates map with the fully expanded
 // template on success. If a cycle is detected, all templates in the cycle are removed from the

@@ -180,8 +180,13 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 
 				// Effective DNSSEC policy (the one bound to the running zone)
 				// and, when it came from a dynamic set-policy override, the
-				// config-base policy it overrides (for display).
-				_, overridden, _ := GetZonePolicyOverride(kdb, zname)
+				// config-base policy it overrides (for display). A lookup error
+				// degrades that one zone's override flag to false (the listing
+				// still succeeds); log it rather than silently swallow.
+				_, overridden, ovErr := GetZonePolicyOverride(kdb, zname)
+				if ovErr != nil {
+					lgApi.Warn("list-zones: failed to read DNSSEC policy override", "zone", zname, "err", ovErr)
+				}
 				configPolicy := ""
 				if overridden {
 					for i := range Conf.Zones {
@@ -248,9 +253,11 @@ func setZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, error) 
 		return "", fmt.Errorf("set-policy: zone %s is not signed (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
 
-	// Capture the current policy + its algorithms before rebinding, so we can
-	// report the transition and whether it causes (transient) double-signing.
+	// Capture the current policy (pointer + name + algorithms) before rebinding,
+	// so we can report the transition, decide whether it double-signs, and
+	// restore it if the re-sign fails.
 	zd.mu.Lock()
+	oldPol := zd.DnssecPolicy
 	oldName := zd.DnssecPolicyName
 	var oldKSKAlg, oldZSKAlg uint8
 	if zd.DnssecPolicy != nil {
@@ -261,10 +268,10 @@ func setZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, error) 
 	// alongside the retired old ones — the zone is transiently double-signed.
 	algChanged := oldKSKAlg != pol.KSKAlgorithm || oldZSKAlg != pol.ZSKAlgorithm
 
-	if err := SetZonePolicyOverride(kdb, zd.ZoneName, policyName); err != nil {
-		return "", fmt.Errorf("set-policy: persist override: %w", err)
-	}
-
+	// Rebind and re-sign FIRST; only persist the durable override after the
+	// re-sign succeeds. Otherwise a sign failure would leave a persisted
+	// override (surviving restart) for a policy the zone was never actually
+	// signed under. On failure, restore the previous in-memory binding.
 	zd.mu.Lock()
 	zd.DnssecPolicy = &pol
 	zd.DnssecPolicyName = policyName
@@ -277,7 +284,15 @@ func setZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, error) 
 	// transition.
 	newrrsigs, err := zd.SignZone(kdb, true)
 	if err != nil {
+		zd.mu.Lock()
+		zd.DnssecPolicy = oldPol
+		zd.DnssecPolicyName = oldName
+		zd.mu.Unlock()
 		return "", fmt.Errorf("set-policy: re-sign zone %s: %w", zd.ZoneName, err)
+	}
+
+	if err := SetZonePolicyOverride(kdb, zd.ZoneName, policyName); err != nil {
+		return "", fmt.Errorf("set-policy: zone re-signed but persisting the override failed (the change will not survive restart): %w", err)
 	}
 
 	// Build an explicit, multi-line message: a live DNSSEC policy change is

@@ -13,8 +13,8 @@ func TestZonePolicyOverride(t *testing.T) {
 	if eff != "default" || overridden {
 		t.Fatalf("no override: got (%q, %v), want (\"default\", false)", eff, overridden)
 	}
-	if _, ok, _ := GetZonePolicyOverride(kdb, "example."); ok {
-		t.Fatal("GetZonePolicyOverride should report no override")
+	if _, ok, err := GetZonePolicyOverride(kdb, "example."); err != nil || ok {
+		t.Fatalf("GetZonePolicyOverride should report no override (ok=%v err=%v)", ok, err)
 	}
 
 	// Set an override: effective = override, marked overridden. Zone name is
@@ -34,17 +34,17 @@ func TestZonePolicyOverride(t *testing.T) {
 	if err := SetZonePolicyOverride(kdb, "example.", "fastroll"); err != nil {
 		t.Fatalf("SetZonePolicyOverride replace: %v", err)
 	}
-	if name, ok, _ := GetZonePolicyOverride(kdb, "example."); !ok || name != "fastroll" {
-		t.Fatalf("after replace: got (%q, %v), want (\"fastroll\", true)", name, ok)
+	if name, ok, err := GetZonePolicyOverride(kdb, "example."); err != nil || !ok || name != "fastroll" {
+		t.Fatalf("after replace: got (%q, %v, err=%v), want (\"fastroll\", true, nil)", name, ok, err)
 	}
 
 	// Clear: back to config base.
 	if err := ClearZonePolicyOverride(kdb, "example."); err != nil {
 		t.Fatalf("ClearZonePolicyOverride: %v", err)
 	}
-	eff, overridden, _ = EffectiveDnssecPolicyName(kdb, "example.", "default")
-	if eff != "default" || overridden {
-		t.Fatalf("after clear: got (%q, %v), want (\"default\", false)", eff, overridden)
+	eff, overridden, err = EffectiveDnssecPolicyName(kdb, "example.", "default")
+	if err != nil || eff != "default" || overridden {
+		t.Fatalf("after clear: got (%q, %v, err=%v), want (\"default\", false, nil)", eff, overridden, err)
 	}
 	// Clearing a non-existent override is not an error.
 	if err := ClearZonePolicyOverride(kdb, "nosuch."); err != nil {

@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"log"
 	"os"
 	"path/filepath"
@@ -49,7 +50,7 @@ www.example.		3600	IN	A	192.0.2.1
 	owner.RRtypes.Set(dns.TypeA, rrset)
 
 	// Strip only keytag 1111.
-	removed, err := zd.StripZoneRRSIGs(func(s *dns.RRSIG) bool { return s.KeyTag == 1111 })
+	removed, err := zd.StripZoneRRSIGs(context.Background(), func(s *dns.RRSIG) bool { return s.KeyTag == 1111 })
 	if err != nil {
 		t.Fatalf("StripZoneRRSIGs: %v", err)
 	}

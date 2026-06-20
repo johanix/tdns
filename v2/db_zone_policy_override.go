@@ -21,6 +21,9 @@ import (
 // SetZonePolicyOverride records (or replaces) the dynamic DNSSEC policy for a
 // zone. The zone name is normalized to FQDN.
 func SetZonePolicyOverride(kdb *KeyDB, zone, policy string) error {
+	if kdb == nil || kdb.DB == nil {
+		return fmt.Errorf("SetZonePolicyOverride: nil keystore")
+	}
 	zone = dns.Fqdn(strings.TrimSpace(zone))
 	policy = strings.TrimSpace(policy)
 	if zone == "." || policy == "" {
@@ -40,6 +43,9 @@ ON CONFLICT(zone) DO UPDATE SET
 // so the zone falls back to its config-base policy. Removing a non-existent
 // override is not an error.
 func ClearZonePolicyOverride(kdb *KeyDB, zone string) error {
+	if kdb == nil || kdb.DB == nil {
+		return fmt.Errorf("ClearZonePolicyOverride: nil keystore")
+	}
 	zone = dns.Fqdn(strings.TrimSpace(zone))
 	_, err := kdb.DB.Exec(`DELETE FROM ZonePolicyOverride WHERE zone = ?`, zone)
 	return err
@@ -48,6 +54,9 @@ func ClearZonePolicyOverride(kdb *KeyDB, zone string) error {
 // GetZonePolicyOverride returns the dynamic policy name for a zone and whether
 // one is set. ok is false (and name "") when the zone has no override.
 func GetZonePolicyOverride(kdb *KeyDB, zone string) (name string, ok bool, err error) {
+	if kdb == nil || kdb.DB == nil {
+		return "", false, fmt.Errorf("GetZonePolicyOverride: nil keystore")
+	}
 	zone = dns.Fqdn(strings.TrimSpace(zone))
 	var v sql.NullString
 	err = kdb.DB.QueryRow(`SELECT policy FROM ZonePolicyOverride WHERE zone = ?`, zone).Scan(&v)

@@ -215,7 +215,19 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								lgEngine.Info("DNSSEC policy override in effect", "zone", zone, "policy", eff, "config", zr.DnssecPolicy)
 								polName = eff
 							}
+							// Look up the resolved policy. A non-empty name that is
+							// not in the map (e.g. an override pointing to a removed
+							// policy) must not bind a zero-value policy — quarantine
+							// the zone instead.
 							dp := conf.Internal.DnssecPolicies[polName]
+							if polName != "" {
+								if _, exists := conf.Internal.DnssecPolicies[polName]; !exists {
+									lgEngine.Error("zone has unknown effective DNSSEC policy, will not be signed", "zone", zone, "policy", polName, "config_policy", zr.DnssecPolicy)
+									zd.SetError(DnssecError, "DNSSEC policy %q does not exist", polName)
+									dp = DnssecPolicy{}
+									polName = ""
+								}
+							}
 							msc := conf.MultiSigner[zr.MultiSigner]
 
 							zd.mu.Lock()
@@ -521,7 +533,19 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					} else if overridden {
 						polName = eff
 					}
+					// A non-empty effective policy name that is not in the map
+					// (e.g. an override to a removed policy) must not bind a
+					// zero-value policy — quarantine the zone after creation.
 					dp := conf.Internal.DnssecPolicies[polName]
+					unknownPolicy := ""
+					if polName != "" {
+						if _, exists := conf.Internal.DnssecPolicies[polName]; !exists {
+							lgEngine.Error("dynamic zone has unknown effective DNSSEC policy, will not be signed", "zone", zone, "policy", polName, "config_policy", zr.DnssecPolicy)
+							unknownPolicy = polName
+							dp = DnssecPolicy{}
+							polName = ""
+						}
+					}
 					msc := conf.MultiSigner[zr.MultiSigner]
 					zd := &ZoneData{
 						ZoneName:         zone,
@@ -543,6 +567,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					}
 
 					Zones.Set(zone, zd)
+					if unknownPolicy != "" {
+						zd.SetError(DnssecError, "DNSSEC policy %q does not exist", unknownPolicy)
+					}
 
 					if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,
 						tryPostpass); err != nil {

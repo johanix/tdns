@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"crypto"
 	"database/sql"
 	"fmt"
@@ -600,10 +601,17 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		if kskPkc != nil {
 			keep[kskPkc.KeyId] = true
 		}
-		if _, err := zd.StripZoneRRSIGs(func(rrsig *dns.RRSIG) bool {
+		if _, err := zd.StripZoneRRSIGs(context.Background(), func(rrsig *dns.RRSIG) bool {
 			return !keep[rrsig.KeyTag]
 		}); err != nil {
+			// Fail the whole operation: returning rolls back the keystore tx
+			// (key delete+regenerate), so the operator can re-run cleanly
+			// rather than be left with un-stripped orphan RRSIGs and a
+			// "success" message.
 			lgSigner.Error("clear: failed to strip orphan RRSIGs", "zone", kp.Zone, "err", err)
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("clear: failed to strip orphan RRSIGs for zone %s: %v", kp.Zone, err)
+			return &resp, err
 		}
 
 		resp.Msg = fmt.Sprintf("Deleted %d keys for zone %s. Generated: %s. Standby keys will follow via KeyStateWorker.",
@@ -631,19 +639,27 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		zd, zoneExists := Zones.Get(kp.Zone)
 		var removedTags []uint16
 		for _, k := range retired {
-			if err := UpdateDnssecKeyStateTx(tx, kdb, kp.Zone, k.KeyTag, DnskeyStateRemoved); err != nil {
-				lgSigner.Error("policy-cleanup: retired→removed failed", "zone", kp.Zone, "keyid", k.KeyTag, "err", err)
-				continue
-			}
-			removedTags = append(removedTags, k.KeyTag)
+			// Strip the key's RRSIGs from the served zone BEFORE the state
+			// change, and fail the whole operation (rolling back the tx) on
+			// error — so we never report success while orphan RRSIGs remain.
 			if zoneExists {
 				tag := k.KeyTag
-				if _, err := zd.StripZoneRRSIGs(func(rrsig *dns.RRSIG) bool {
+				if _, err := zd.StripZoneRRSIGs(context.Background(), func(rrsig *dns.RRSIG) bool {
 					return rrsig.KeyTag == tag
 				}); err != nil {
 					lgSigner.Error("policy-cleanup: failed to strip removed key's RRSIGs", "zone", kp.Zone, "keyid", tag, "err", err)
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("policy-cleanup: failed to strip RRSIGs for key %d in zone %s: %v", tag, kp.Zone, err)
+					return &resp, err
 				}
 			}
+			if err := UpdateDnssecKeyStateTx(tx, kdb, kp.Zone, k.KeyTag, DnskeyStateRemoved); err != nil {
+				lgSigner.Error("policy-cleanup: retired→removed failed", "zone", kp.Zone, "keyid", k.KeyTag, "err", err)
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("policy-cleanup: retired→removed failed for key %d in zone %s: %v", k.KeyTag, kp.Zone, err)
+				return &resp, err
+			}
+			removedTags = append(removedTags, k.KeyTag)
 		}
 		if len(removedTags) == 0 {
 			resp.Msg = fmt.Sprintf("Zone %s: no retired keys to clean up.", kp.Zone)

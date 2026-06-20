@@ -1175,13 +1175,13 @@ func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool, wait 
 		return "", fmt.Errorf("zone %s: zone has been modified, reload not possible", zd.ZoneName)
 	}
 
-	// Re-parse the dnssec: block so a reloaded zone is re-applied against the
-	// current policy definitions (an edited policy is picked up without a
-	// separate `config reload`). Cheap; a parse error keeps the previous
-	// policies. Updates the server-wide policy structs, but only this zone is
-	// re-applied here — other zones converge when they are themselves reloaded.
+	// Re-read and re-parse the dnssec: block from the config file so this zone
+	// is re-applied against the CURRENT policy definitions — an edited policy is
+	// picked up without a separate `config reload`. Cheap; a parse error keeps
+	// the previous policies. Updates the server-wide policy structs, but only
+	// this zone is re-applied here — other zones converge when reloaded.
 	confMu.Lock()
-	if err := Conf.parseDnssecConfig(); err != nil {
+	if err := Conf.reloadDnssecFromFile(); err != nil {
 		lg.Error("ReloadZone: failed to re-parse dnssec config, keeping previous policies", "zone", zd.ZoneName, "err", err)
 	}
 	confMu.Unlock()

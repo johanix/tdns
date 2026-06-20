@@ -546,11 +546,11 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 		// Continue with existing templates rather than failing entirely
 	}
 
-	// Re-parse the dnssec: block so zones are re-applied against the current
-	// policy definitions (an edited policy is picked up here, no separate
-	// `config reload` needed first). A parse error leaves the previous
-	// policies in place rather than failing the whole reload.
-	if err := conf.parseDnssecConfig(); err != nil {
+	// Re-read and re-parse the dnssec: block from the config file so zones are
+	// re-applied against the CURRENT policy definitions — an edited policy is
+	// picked up here, no separate `config reload` needed first. A parse error
+	// leaves the previous policies in place rather than failing the whole reload.
+	if err := conf.reloadDnssecFromFile(); err != nil {
 		lgConfig.Error("ReloadZoneConfig: failed to re-parse dnssec config, keeping previous policies", "err", err)
 	}
 

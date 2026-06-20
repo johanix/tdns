@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"math/big"
@@ -687,14 +688,19 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 //
 // Per-RRset atomicity matches ResignZone: each RRset is modified on a local
 // copy and published via a single RRtypes.Set, so readers never see a partial
-// state. Returns the number of RRSIGs removed.
-func (zd *ZoneData) StripZoneRRSIGs(remove func(*dns.RRSIG) bool) (int, error) {
+// state. Returns the number of RRSIGs removed. ctx lets a large-zone strip be
+// cancelled (e.g. on shutdown); callers without a meaningful context may pass
+// context.Background().
+func (zd *ZoneData) StripZoneRRSIGs(ctx context.Context, remove func(*dns.RRSIG) bool) (int, error) {
 	names, err := zd.GetOwnerNames()
 	if err != nil {
 		return 0, err
 	}
 	removed := 0
 	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return removed, err
+		}
 		owner, err := zd.GetOwner(name)
 		if err != nil {
 			return removed, err

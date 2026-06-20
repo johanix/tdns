@@ -80,4 +80,7 @@ func TestParseDnssecConfig(t *testing.T) {
 	if _, ok := conf.Internal.DnssecPolicies["split-bad"]; ok {
 		t.Fatal("removed policy must not survive a re-parse")
 	}
+	if _, ok := conf.Internal.DnssecPolicies["bad-alg"]; ok {
+		t.Fatal("removed policy must not survive a re-parse")
+	}
 }
