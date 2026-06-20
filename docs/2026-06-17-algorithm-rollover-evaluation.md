@@ -482,12 +482,17 @@ What is actually needed (all in §8):
   restart resumes toward the target. Reuse, not a new table.
 - ROLE-ONLY STANDBY COUNTING in relaxed mode (the inversion above): the
   maintainer counts standby ZSKs by role, not (role, alg).
-- SWEEP, corrected for relaxed mode: the wrong-alg standby/published sweep
-  is a DNSKEY-RRset-bloat SAFETY valve and STAYS. But in relaxed mode it
-  must enforce "total standby ZSKs ≤ `standby_zsk_count`" by deleting the
-  YOUNGEST surplus (keep the oldest N — they are next in FIFO), NEVER by
-  algorithm alone. Maintainer and sweep MUST share one role-total count
-  (§8.3). Strict mode keeps today's per-alg sweep.
+- DELETION RULE, corrected for relaxed mode: today there is NO count cap —
+  the existing loop (sign.go:338-375) deletes standby/published keys by
+  ALGORITHM mismatch. In relaxed mode, SKIP that algorithm-based deletion
+  for same-role ZSK keys (an old-alg standby is a legitimate FIFO member),
+  and ADD a new total-count cap (keep oldest N, delete youngest surplus,
+  never by algorithm), sharing one role-total count with the maintainer
+  (§8.3). Strict mode keeps today's algorithm-based deletion.
+- FIFO PROMOTION GUARANTEED (pre-existing latent bug — REQUIRED fix): the
+  standby-selection query is currently UNORDERED, so promotion is not
+  actually FIFO. Add `ORDER BY published_at` (§8.3). Without this the whole
+  in-order-drain model is unsound.
 - RELAXED-MODE RECONCILE BRANCH (§8.3): the reconcile does NOT retire the
   wrong-alg active ZSK; it lets the FIFO carry the roll.
 - ZSK `asap`/`cancel` at KSK parity (D1, §8.1) — the throttle.
@@ -583,10 +588,12 @@ decisions, and tests in §8.
 | EnsureActiveDnssecKeys (calls reconcile) | sign.go:385-411 |
 | StripZoneRRSIGs | sign.go:694 |
 | KeyStateWorker retired→removed + strip | key_state_worker.go:~232 |
-| Standby maintainer — already policy-alg-driven (§4.6) | key_state_worker.go:253,279-313 |
+| Standby maintainer (per-alg count today = strict shape; relaxed→role-only) | key_state_worker.go:253,279-313 |
 | countKeysByFlagsAndAlg (matches flags AND alg) | key_state_worker.go:318 |
+| Algorithm-based standby/published deletion (NOT a count cap) | sign.go:338-375 |
 | ZSK roll due + RolloverKey (same-alg today) | zsk_rollover.go:17,59; keystore.go:1318 |
-| RolloverKey standby pick (by flags only) | keystore.go:1353 |
+| RolloverKey standby pick (first by flags — see next) | keystore.go:1352-1358 |
+| GetDnssecKeysByState — UNORDERED query (FIFO bug; needs ORDER BY) | keystore.go:1178,1183,1186 |
 | ZonePolicyOverride table (zone→target name, reuse) | db_zone_policy_override.go |
 | EffectiveDnssecPolicyName (override else config) | db_zone_policy_override.go:80 |
 | Override resolved into bound policy at load/refresh | refreshengine.go:212,340,531 |
@@ -649,13 +656,17 @@ build + `go test -race`).
   the throttle, nothing is generated eagerly and no legitimate pipeline
   key is deleted out of order. This requires, in RELAXED mode: (a)
   standby maintenance counts standbys BY ROLE (flags) only, not
-  (role, alg); (b) the wrong-alg standby/published sweep is replaced by a
-  total-count cap — keep the oldest `standby_zsk_count` standby ZSKs (any
-  algorithm), delete the YOUNGEST surplus, NEVER delete by algorithm
-  alone; (c) maintainer and sweep share ONE role-total count (else they
-  oscillate). STRICT mode keeps today's per-alg counting and per-alg sweep
-  unchanged. There is NO immediate new-alg generation, NO algorithm-aware
-  promotion, NO deletion of old-alg standbys to make room.
+  (role, alg); (b) the existing algorithm-based standby/published deletion
+  (sign.go:338-375) is SKIPPED for same-role ZSK keys, and a NEW
+  total-count cap is ADDED — keep the oldest `standby_zsk_count` standby
+  ZSKs (any algorithm), delete the YOUNGEST surplus, NEVER by algorithm
+  alone (there is no count cap today — see §8.3); (c) maintainer and cap
+  share ONE role-total count (else they oscillate); (d) FIFO promotion is
+  GUARANTEED by adding `ORDER BY published_at` to the standby selection —
+  a pre-existing latent bug (the query is currently unordered), REQUIRED
+  to fix (§8.3). STRICT mode keeps today's per-alg counting and per-alg
+  deletion unchanged. There is NO immediate new-alg generation, NO
+  algorithm-aware promotion, NO deletion of old-alg standbys to make room.
 
 ### 8.1 Step 0 — ZSK manual-trigger parity (prerequisite)
 
@@ -794,26 +805,57 @@ key carries the new algorithm. STRICT mode keeps today's per-alg counting.
 (This is the inversion described in §4.6: today's per-alg behavior is the
 strict shape; relaxed is the new role-only branch.)
 
-Sweep — keep it, but correct the relaxed rule (D5): the wrong-alg
-standby/published sweep (sign.go:346-375) is a DNSKEY-RRset-bloat SAFETY
-valve and STAYS. In RELAXED mode replace "delete by wrong algorithm" with
-a TOTAL-COUNT CAP: keep the oldest `standby_zsk_count` standby ZSKs (by
-`published_at`/creation, ANY algorithm), delete the YOUNGEST surplus,
-NEVER delete based on algorithm alone (deleting a legitimate old-alg FIFO
-member would break the roll). The maintainer (above) and the sweep MUST
-use ONE shared role-total count, or they oscillate (generate→sweep→
-generate). STRICT mode keeps today's per-alg sweep (a wrong-alg standby
-there genuinely is a leftover).
+Sweep — understand what exists first, then change it (D5): there is NO
+count-based cap today. The loop at sign.go:338-375 inside
+`reconcileActiveKeyAlgorithms` removes standby/published keys PURELY on
+ALGORITHM MISMATCH (delete any standby/published key whose alg ≠ policy
+alg; KSK case respects `rolloverInProgress`). It is not a
+`standby_zsk_count` cap and has no notion of "surplus." So the relaxed
+change is two distinct things, NOT "adjust the cap":
+
+1. SKIP the algorithm-based deletion for same-role ZSK keys in RELAXED
+   mode — an old-alg standby/published ZSK is a legitimate FIFO member
+   during a roll, not a leftover; deleting it by algorithm would break the
+   roll. (In strict mode this algorithm-based deletion STAYS — there a
+   wrong-alg standby genuinely is a leftover.)
+2. ADD a new TOTAL-COUNT CAP (this does not exist yet) as the
+   DNSKEY-RRset-bloat safety valve relaxed mode still needs: keep the
+   oldest `standby_zsk_count` standby ZSKs (by `published_at`, ANY
+   algorithm), delete the YOUNGEST surplus, never by algorithm. Put it
+   wherever fits cleanly (in the maintainer, or a small dedicated pass) —
+   but the maintainer's generate-count and this cap MUST use ONE shared
+   role-total definition of "how many standby ZSKs exist," or they
+   oscillate (generate→delete→generate).
+
+Net: relaxed mode trades an algorithm-based deletion (removed for
+same-role ZSK) for a count-based cap (added). Strict mode is unchanged.
 
 Coordination guard: with the relaxed reconcile no-op for ZSK, the ZSK
 roll worker is the sole actor. Assert this; add a guard only if a path
 can still double-fire.
 
-NO standby-pick refinement / NO out-of-order promotion (D5): `RolloverKey`
-(keystore.go:1353) promotes the oldest standby by FIFO order — which is
-already correct. Do NOT add algorithm-aware standby selection: the roll
-proceeds by draining the FIFO in order (old-alg standbys first, then
-new-alg), never by picking the new-alg key out of turn.
+FIFO PROMOTION MUST BE GUARANTEED — pre-existing latent bug to FIX
+(REQUIRED, not optional): the KISS model depends on standbys promoting
+OLDEST-FIRST. The current code does NOT guarantee this. `RolloverKey`
+(keystore.go:1352-1358) promotes the FIRST standby returned by
+`GetDnssecKeysByState`, and that query (keystore.go:1183,1186) has NO
+`ORDER BY` clause — SQLite row order is unspecified (today it is
+incidentally insertion order, but that is not guaranteed and can change
+with indexes/query plan/vacuum). So promotion is effectively ARBITRARY,
+not FIFO. This is a latent bug in the EXISTING same-alg ZSK rollover too,
+and it is fatal to an alg roll: an out-of-order promotion could activate a
+NEW-alg standby before the OLD-alg ones have drained, defeating the whole
+gradual model.
+
+FIX: add an explicit `ORDER BY published_at ASC` (tie-break by keyid) to
+the standby selection — either in `GetDnssecKeysByState` (broadest fix;
+check callers tolerate ordered results — they should) or in `RolloverKey`'s
+standby pick specifically. Oldest `published_at` = furthest through
+propagation = correct next-to-promote. After the fix, promotion is FIFO by
+construction. Do NOT add algorithm-aware standby selection — ordering
+alone gives the correct old-then-new drain. (Per the "fix pointed-out
+bugs in the same PR" rule, fix this even though it predates the alg-roll
+work.)
 
 change-policy is set-the-future-algorithm; `asap` is the throttle (D5):
 `auto-rollover policy-change -z <zone> -p <policy>` writes the
@@ -842,7 +884,7 @@ of a wrong-alg ZSK) must be updated — split into strict-mode (refuse/keep
 current) and relaxed-mode (no-op) variants. Do this as part of step 2,
 not as a surprise at build time.
 
-Verify: T1, T2b, T2c, T2d, T-timing, T3, T3b, T4, T4b, T5–T9 (§8.4).
+Verify: T1, T2b, T2c, T2d, T-timing, T3, T3b, T4, T4b, T4c, T5–T9 (§8.4).
 
 ### 8.4 Test cases (unit/integration, `go test -race`)
 
@@ -904,7 +946,13 @@ Step 2 (relaxed alg roll):
   sweep agree on the count (no generate→sweep oscillation across ticks).
 - T4b — NO out-of-order promotion (D5): with an old-alg standby (older)
   and a new-alg standby (younger) both present, a roll promotes the
-  OLD-alg one (FIFO oldest-first), not the new-alg one.
+  OLD-alg one (FIFO oldest-first), not the new-alg one. (Will FAIL against
+  the current unordered query — see T4c.)
+- T4c — FIFO ORDERING FIX (pre-existing bug): with multiple same-role
+  standbys created in a known order, `RolloverKey` promotes the one with
+  the OLDEST `published_at`, deterministically, regardless of row/insertion
+  order. Asserts the `ORDER BY published_at` fix (§8.3). Independent of
+  algorithm — also covers same-alg rollover correctness.
 - T5 — full sequence via asap (standby_zsk_count=2): change-policy (new
   alg) → maintainer generates nothing (T3) → `asap` promotes old-alg
   standby#1 → active (old active → retired, draining); `asap` again
@@ -939,8 +987,9 @@ Step 2 (relaxed alg roll):
   a KSK/CSK, both-role, or re-entrant alg change is safely refused (no key
   churn); AND a same-alg/timing-only change applies without a roll; AND
   the roll proceeds by FIFO drain + `asap` with no eager new-alg
-  generation and no out-of-order promotion (D5);
-  T1, T2b, T2c, T2d, T-timing, T3, T3b, T4, T4b, T5–T9 green;
+  generation and no out-of-order promotion (D5); AND the pre-existing
+  unordered-standby-selection bug is fixed (FIFO `ORDER BY published_at`);
+  T1, T2b, T2c, T2d, T-timing, T3, T3b, T4, T4b, T4c, T5–T9 green;
   `go test ./... -race` clean; full `make` builds all binaries. Testbed
   validation is operator-gated (not part of agent done-ness).
 
