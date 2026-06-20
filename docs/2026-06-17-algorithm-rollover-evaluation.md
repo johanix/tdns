@@ -243,17 +243,41 @@ the DNSKEY also shrinks the window in which the new key's public value is
 exposed — the reason multi-DS is the natural shape for a post-quantum KSK
 rollover.
 
-### 3.4 Trigger and reconcile
+### 3.4 Trigger, the policy override, and reconcile
 
 - TRIGGER: an operator command modelled on `auto-rollover asap`:
   `auto-rollover policy-change -z <zone> -p <policy>`, which tells the
-  engine to mint the next pipeline key(s) with the new algorithm.
+  engine to roll the zone toward the new policy's algorithm.
   (Trigger-surface alternatives in §6.)
-- RECONCILE: `reconcileActiveKeyAlgorithms` no longer performs the KSK
-  active → retired swap. On a KSK (or CSK) algorithm mismatch it hands the
-  rollover to the engine. It retains responsibility for ZSK algorithm
-  changes, driving those through the pipeline as well rather than
-  retiring and regenerating in place.
+- POLICY OVERRIDE (DB): `change-policy` writes the zone→target-policy
+  mapping into the SAME `ZonePolicyOverride` table that `set-policy` uses
+  (`db_zone_policy_override.go`), at the START of the roll. This is
+  required, not incidental: the bound policy (resolved via
+  `EffectiveDnssecPolicyName` at zone load/refresh, `refreshengine.go:212,
+  340,531`) is what drives the standby maintainer to mint NEW-alg keys
+  (§4.6) and what lets a mid-roll restart resume toward the right target
+  instead of reverting to the old policy and stalling the roll. The
+  override stores ONLY the target policy name — never an intermediate
+  "both algorithms" policy (there is none; §4.1 / mode is global, §4.4).
+- "ROLL IN PROGRESS" is derived from KEY STATE (an active key whose
+  algorithm ≠ the bound policy's algorithm), NOT from override≠YAML —
+  because `set-policy` already legitimately leaves override≠YAML after a
+  COMPLETED manual change. No new table or in-progress column is needed.
+- RECONCILE: `change-policy` is essentially `set-policy` MINUS the
+  synchronous reconcile. `set-policy` today writes the override, rebinds
+  `zd.DnssecPolicy`, and calls `SignZone(force)` which synchronously
+  retires old / generates new (the §2 unsafe path for an algorithm
+  change). `change-policy` writes the override and rebinds in-memory (so
+  the running standby maintainer sees the new policy at once), but hands
+  off to the engine instead of the synchronous swap.
+  `reconcileActiveKeyAlgorithms` no longer performs the immediate active →
+  retired swap on an algorithm mismatch; it hands the rollover to the
+  engine (§3.5, §4.4 relaxed mode).
+
+These three land TOGETHER. Writing the override without gating the
+synchronous reconcile gives the unsafe immediate swap; gating the reconcile
+without writing the override gives a roll that does not survive restart and
+that the standby maintainer fights (it would re-mint old-alg standbys).
 
 ### 3.5 Ownership
 
@@ -319,19 +343,32 @@ therefore a first-class scenario.
 The signer supports two completeness modes (§3.2.1): STRICT (honors §4035;
 maintained double-signature through drain) and RELAXED (alg-split; drain
 only, no maintained double-signature). The rollover is valid at every
-instant in both. The mode is a configuration/policy choice (§4.4).
+instant in both. The mode is a GLOBAL config choice (§4.4).
 
-### 4.4 Mode selection — config/policy
+### 4.4 Mode selection — global
 
-Strict vs relaxed completeness is a signer mode selected by configuration
-(zone- or policy-level). Strict is the conservative default and the only
-choice that produces §4035-conformant zones a strict checker accepts;
-relaxed is the alg-split/PQ-transition mode that makes the ZSK-alg roll
-cheap. Exact knob (global default, per-policy, per-zone) is an
-implementation detail; the design requirement is only that BOTH modes
-exist and the rollover honors the selected one. KSK-alg rolls are
-effectively identical in both modes (§3.2.1), so the mode matters in
-practice only for the ZSK-alg roll.
+DECISION: completeness mode is a GLOBAL setting,
+`dnssec.completeness: strict|relaxed`, default `strict`. It sits in the
+`dnssec:` block alongside `split_algorithms` / `large_algorithms`, which
+are likewise deployment-wide.
+
+It is NOT per-zone or per-policy, for two reasons:
+
+- It is a property of "which validators must we satisfy" — a
+  deployment-wide fact (the same validator population resolves all of an
+  operator's zones), not something a zone acquires from the policy it
+  happens to roll into.
+- A per-policy knob is incoherent for the rollover itself: the mechanic
+  operates DURING the transition between a source and a target policy, so
+  it cannot depend on either policy's setting without an ill-defined case
+  (source strict, target relaxed → which mechanic?). The mode must be
+  constant across the transition, i.e. a property of the signer/deployment.
+
+Strict is the conservative default and the only mode that produces
+§4035-conformant zones a strict checker accepts; relaxed is the
+alg-split/PQ-transition mode that makes the ZSK-alg roll cheap. KSK-alg
+rolls are effectively identical in both modes (§3.2.1), so the mode
+matters in practice only for the ZSK-alg roll.
 
 ### 4.5 CSK mode — OPEN
 
@@ -339,6 +376,52 @@ practice only for the ZSK-alg roll.
 CSK is SEP-flagged and has a parent DS, so a CSK algorithm change is a
 parent-coordinated rollover. Decision needed: support it via the engine
 (same as KSK), or reject the change with an error until supported.
+
+### 4.6 First step: relaxed-mode ZSK-alg roll (mostly already built)
+
+The relaxed-mode ZSK algorithm roll is the recommended FIRST
+implementation step: no parent/DS coordination, no maintained
+double-signature, no new key state — and most of it falls out of the
+existing policy-driven standby maintainer.
+
+The standby maintainer already follows the policy algorithm:
+`maintainStandbyKeysForType` counts standby ZSKs OF THE POLICY ALGORITHM
+(`countKeysByFlagsAndAlg` matches flags AND alg) and generates with
+`zd.DnssecPolicy.ZSKAlgorithm` (`key_state_worker.go:269,279-313`). So
+when the policy ZSK algorithm changes, the maintainer sees zero standby
+ZSKs of the new algorithm and generates one automatically. It flows
+published→standby via the existing propagation-gated transition; the
+existing `zskRollDue`/`RolloverKey` promotes "the standby ZSK" (selected
+by flags, algorithm-blind — `keystore.go:1353`) to active; the old-alg
+ZSK retires and drains via the existing worker. Steps 1–4 of a relaxed
+ZSK-alg roll therefore need NO new code.
+
+What is actually missing:
+
+- POLICY OVERRIDE WRITE at roll start (§3.4): `change-policy` writes the
+  zone→target-policy row into the existing `ZonePolicyOverride` table and
+  rebinds `zd.DnssecPolicy` in-memory, so the standby maintainer mints
+  new-alg keys and a restart resumes toward the target. This is the same
+  write `set-policy` does — `change-policy` is `set-policy` minus the
+  synchronous reconcile. Reuse, not new table.
+- ON-DEMAND TRIGGER. Today the roll fires only on `ZSK.Lifetime` expiry.
+  An operator changing the algorithm wants it to start now, not wait a
+  lifetime — a "roll ZSK asap" trigger, modeled on the KSK `asap` path.
+- RELAXED-MODE RECONCILE BRANCH. `reconcileActiveKeyAlgorithms` currently
+  retires the wrong-alg active ZSK immediately (§2 unsafe path). In
+  relaxed mode it must instead NOT retire — let the standby-maintainer +
+  roll flow carry it. A guarded branch; "roll in progress" is derived from
+  key state (active-alg ≠ bound-policy-alg), not from override≠YAML (§3.4).
+- COORDINATION GUARD so the reconcile retire and the worker roll don't
+  both fire.
+- GLOBAL MODE KNOB (§4.4) and the CLI/API trigger surface (§6 item 2).
+
+Rough cost (estimate, not a plan): ~115–215 source LOC + ~100–160 test
+LOC, ~3–5 agent-hours. The one refinement to watch: `RolloverKey` picks
+the first standby by flags only, so when both an old- and a new-alg
+standby are briefly present it should prefer the policy-algorithm one
+(~10 LOC). This step validates the trigger + global-mode design before the
+expensive KSK / parent-DS work.
 
 
 ## 5. Summary
@@ -363,8 +446,11 @@ parent-coordinated rollover. Decision needed: support it via the engine
   roll, avoiding the ZSK cost.
 - The policy-change reconcile stops swapping KSKs and hands KSK/CSK
   algorithm changes to the engine; the engine owns KSK state transitions.
-- One role per roll (§4.1). Mode is a config choice (§4.4). CSK handling
-  is open (§4.5).
+- One role per roll (§4.1). Mode is a GLOBAL config choice
+  (`dnssec.completeness`, default strict — §4.4). CSK handling is open
+  (§4.5).
+- Recommended first step: relaxed-mode ZSK-alg roll, most of which already
+  falls out of the policy-driven standby maintainer (§4.6).
 
 
 ## 6. Open items
@@ -379,7 +465,8 @@ parent-coordinated rollover. Decision needed: support it via the engine
    implementing the (currently unimplemented) double-signature method. The
    ZSK-alg roll has no parent/DS dimension and is double-signature-shaped
    on the zone side regardless.
-4. §4.4 — mode selection knob: global default, per-policy, or per-zone?
+4. RESOLVED (§4.4) — mode selection is GLOBAL (`dnssec.completeness`,
+   default strict), not per-policy/per-zone.
 5. ZSK-alg roll, large zones: the new-alg coverage must reach secondaries
    (AXFR/IXFR + propagation) before the old-alg key can be demoted. The
    standby gate handles "wait for propagation" for the KSK/DS; the ZSK
@@ -410,6 +497,14 @@ parent-coordinated rollover. Decision needed: support it via the engine
 | EnsureActiveDnssecKeys (calls reconcile) | sign.go:385-411 |
 | StripZoneRRSIGs | sign.go:694 |
 | KeyStateWorker retired→removed + strip | key_state_worker.go:~232 |
+| Standby maintainer — already policy-alg-driven (§4.6) | key_state_worker.go:253,279-313 |
+| countKeysByFlagsAndAlg (matches flags AND alg) | key_state_worker.go:318 |
+| ZSK roll due + RolloverKey (same-alg today) | zsk_rollover.go:17,59; keystore.go:1318 |
+| RolloverKey standby pick (by flags only) | keystore.go:1353 |
+| ZonePolicyOverride table (zone→target name, reuse) | db_zone_policy_override.go |
+| EffectiveDnssecPolicyName (override else config) | db_zone_policy_override.go:80 |
+| Override resolved into bound policy at load/refresh | refreshengine.go:212,340,531 |
+| set-policy (override write + synchronous reconcile) | apihandler_zone.go:240 |
 | Policy-change design (zone-side only) | docs/2026-06-16-dnssec-policy-change-handling.md |
 
 Spec references: RFC 7583 (DNSSEC key timing — multi-DS / double-DS
