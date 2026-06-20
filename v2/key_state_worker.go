@@ -232,6 +232,13 @@ func transitionRetiredToRemoved(ctx context.Context, conf *Config, kdb *KeyDB, n
 			if _, err := zd.StripZoneRRSIGs(ctx, func(rrsig *dns.RRSIG) bool {
 				return rrsig.KeyTag == removedKeytag
 			}); err != nil {
+				// A cancelled context is an expected shutdown path, not a
+				// per-key failure: stop the sweep quietly rather than
+				// error-logging for every remaining retired key.
+				if ctx.Err() != nil {
+					lgSigner.Info("KeyStateWorker: stopping retired→removed sweep on context cancellation", "zone", key.ZoneName)
+					return
+				}
 				lgSigner.Error("KeyStateWorker: failed to strip removed key's RRSIGs, will retry", "zone", key.ZoneName, "keyid", removedKeytag, "err", err)
 				continue
 			}

@@ -299,7 +299,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 	return &resp, nil
 }
 
-func (kdb *KeyDB) DnssecKeyMgmt(tx *Tx, kp KeystorePost) (*KeystoreResponse, error) {
+func (kdb *KeyDB) DnssecKeyMgmt(ctx context.Context, tx *Tx, kp KeystorePost) (*KeystoreResponse, error) {
 	// dump.P(kp)
 
 	const (
@@ -601,7 +601,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 		if kskPkc != nil {
 			keep[kskPkc.KeyId] = true
 		}
-		if _, err := zd.StripZoneRRSIGs(context.Background(), func(rrsig *dns.RRSIG) bool {
+		if _, err := zd.StripZoneRRSIGs(ctx, func(rrsig *dns.RRSIG) bool {
 			return !keep[rrsig.KeyTag]
 		}); err != nil {
 			// Fail the whole operation: returning rolls back the keystore tx
@@ -644,7 +644,7 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 			// error — so we never report success while orphan RRSIGs remain.
 			if zoneExists {
 				tag := k.KeyTag
-				if _, err := zd.StripZoneRRSIGs(context.Background(), func(rrsig *dns.RRSIG) bool {
+				if _, err := zd.StripZoneRRSIGs(ctx, func(rrsig *dns.RRSIG) bool {
 					return rrsig.KeyTag == tag
 				}); err != nil {
 					lgSigner.Error("policy-cleanup: failed to strip removed key's RRSIGs", "zone", kp.Zone, "keyid", tag, "err", err)

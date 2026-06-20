@@ -67,7 +67,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 			}
 
 		case "dnssec-mgmt":
-			resp, err = kdb.DnssecKeyMgmt(tx, kp)
+			resp, err = kdb.DnssecKeyMgmt(r.Context(), tx, kp)
 			if err != nil {
 				lgApi.Error("DnssecKeyMgmt failed", "err", err)
 				resp = &KeystoreResponse{
