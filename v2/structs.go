@@ -734,13 +734,17 @@ type KeyDB struct {
 func (kdb *KeyDB) Lock()   { kdb.mu.Lock() }
 func (kdb *KeyDB) Unlock() { kdb.mu.Unlock() }
 
-// SetOptions replaces the auth-option map atomically (config reload). A nil map
-// is normalized to an empty one so readers never observe a nil dereference.
+// SetOptions replaces the auth-option map atomically (config reload). It stores
+// a private COPY of opts, not the caller's map, so the stored map can never be
+// mutated out from under a concurrent lock-free reader even if the caller later
+// changes its own map. A nil map yields an empty one so readers never observe a
+// nil dereference.
 func (kdb *KeyDB) SetOptions(opts map[AuthOption]string) {
-	if opts == nil {
-		opts = map[AuthOption]string{}
+	cp := make(map[AuthOption]string, len(opts))
+	for k, v := range opts {
+		cp[k] = v
 	}
-	kdb.options.Store(&opts)
+	kdb.options.Store(&cp)
 }
 
 // AuthOption returns the value for an auth option and whether it is set, reading
