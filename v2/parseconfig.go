@@ -173,6 +173,80 @@ func processConfigFile(file string, baseDir string, depth int) (map[string]inter
 	return config, includedFiles, nil
 }
 
+// deprecatedConfigKey describes a config key (or key fragment) that the
+// code no longer reads, together with operator-facing migration advice.
+// `match` is tested against each unused config key path reported by
+// mapstructure (dotted, e.g. "dnssec.policies[fastroll].KSK.sigvalidity"):
+//   - exact: the unused path equals match (use for top-level keys)
+//   - else: match is treated as a substring (use ".suffix" forms to catch
+//     a renamed leaf wherever it appears, e.g. ".sigvalidity")
+type deprecatedConfigKey struct {
+	match  string
+	exact  bool
+	advice string
+	key    string // populated per-occurrence by classifyUnusedConfigKeys (the actual offending path)
+}
+
+// deprecatedConfigKeys is the registry of config keys removed or moved by
+// past restructures. When the operator's config still uses one, the loader
+// emits a specific migration error instead of a generic "unknown key"
+// warning — turning a silent, system-wide breakage (e.g. every signed zone
+// losing its policy) into a one-line "here is what to change."
+//
+// TEMPLATE — adding a new entry as the config evolves:
+//   - Removed/renamed a TOP-LEVEL key (foo: → bar.foo:)? Add
+//     {match: "foo", exact: true, advice: "`foo:` moved to `bar.foo:` (restructure YYYY-MM-DD)"}.
+//   - Renamed/moved a LEAF that can appear under many parents
+//     (x: → y: under each policy)? Add
+//     {match: ".oldleaf", advice: "`oldleaf` moved to ...; see <doc>"}.
+//
+// Keep advice concrete: name the new location and, ideally, the change date
+// or doc so an operator can find the migration.
+var deprecatedConfigKeys = []deprecatedConfigKey{
+	// Config restructure 2026-06-16 (per-role KSK/ZSK algorithms + nesting):
+	// the DNSSEC config moved under a single top-level `dnssec:` block.
+	{match: "dnssecpolicies", exact: true,
+		advice: "`dnssecpolicies:` moved under `dnssec:` as `dnssec.policies:` (restructure 2026-06-16)"},
+	{match: "kasp", exact: true,
+		advice: "`kasp:` moved under `dnssec:` as `dnssec.kasp:` (restructure 2026-06-16)"},
+	{match: "large_algorithms", exact: true,
+		advice: "`large_algorithms:` moved under `dnssec:` as `dnssec.large_algorithms:` (restructure 2026-06-16)"},
+	{match: "split_algorithms", exact: true,
+		advice: "`split_algorithms:` moved under `dnssec:` as `dnssec.split_algorithms:` (restructure 2026-06-16)"},
+	// sigvalidity reshape: was a per-key scalar (ksk/zsk/csk: sigvalidity: X);
+	// is now a policy-level subtree `sigvalidity: { default, dnskey, ds }`
+	// with `default` required.
+	{match: ".sigvalidity",
+		advice: "per-key `sigvalidity:` is now a policy-level subtree `sigvalidity: { default, dnskey, ds }` (default required)"},
+}
+
+// classifyUnusedConfigKeys splits mapstructure's unused-key list into keys
+// that match a known deprecated shape (with migration advice) and keys that
+// are merely unrecognized (likely typos). Case-insensitive on the path;
+// mapstructure reports field paths in the Go struct's case (e.g. ".KSK.").
+func classifyUnusedConfigKeys(unused []string) (deprecated []deprecatedConfigKey, unknown []string) {
+	for _, key := range unused {
+		lk := strings.ToLower(key)
+		var hit *deprecatedConfigKey
+		for i := range deprecatedConfigKeys {
+			d := &deprecatedConfigKeys[i]
+			ml := strings.ToLower(d.match)
+			if (d.exact && lk == ml) || (!d.exact && strings.Contains(lk, ml)) {
+				hit = d
+				break
+			}
+		}
+		if hit != nil {
+			// Carry the actual key in a per-occurrence copy so the log line
+			// names the offending path, not just the pattern.
+			deprecated = append(deprecated, deprecatedConfigKey{key: key, advice: hit.advice})
+		} else {
+			unknown = append(unknown, key)
+		}
+	}
+	return deprecated, unknown
+}
+
 func (conf *Config) ParseConfig(reload bool) error {
 	lgConfig.Debug("entering ParseConfig")
 
@@ -219,7 +293,21 @@ func (conf *Config) ParseConfig(reload bool) error {
 	}
 
 	if len(md.Unused) > 0 {
-		lgConfig.Warn("unknown config keys ignored (possible misspellings)", "keys", md.Unused)
+		// Split the unused keys into two buckets: keys that match a known
+		// DEPRECATED/RENAMED config shape (the config lags the code — emit
+		// a specific migration message), and genuinely unrecognized keys
+		// (likely typos — the generic warning). A deprecated key carries a
+		// real risk (e.g. a moved DNSSEC policy block silently disables
+		// signing for every zone), so it gets a loud, actionable line of
+		// its own rather than being buried in the generic list.
+		deprecated, unknown := classifyUnusedConfigKeys(md.Unused)
+		for _, d := range deprecated {
+			lgConfig.Error("deprecated config key (config lags the code) — "+d.advice,
+				"key", d.key)
+		}
+		if len(unknown) > 0 {
+			lgConfig.Warn("unknown config keys ignored (possible misspellings)", "keys", unknown)
+		}
 	}
 
 	// Parse the entire dnssec: block (large_algorithms, split_algorithms,
