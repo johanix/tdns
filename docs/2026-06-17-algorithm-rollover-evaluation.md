@@ -1,13 +1,21 @@
 # Algorithm rollover via the auto-rollover engine
 
-Status: DESIGN + IMPLEMENTATION PLAN — FINAL, ready to implement. Three
-independent review passes complete; pass 3 verdict "implement §8 as
-written." Nothing implemented yet. §0–§7 are the design/rationale; §8 is
-the turnkey build order for the first step (relaxed-mode ZSK algorithm
-rollover), with resolved mechanical decisions (D1–D5), test cases, and
-success criteria. Remaining §6 open items (CSK handling, multi-ds vs
-double-signature, strict-mode alg rollover, large-zone secondary
-propagation) are LATER steps, out of scope for the first.
+Status: IN PROGRESS. §0–§7 are the design/rationale; §8 is the build plan
+for relaxed-mode ZSK algorithm rollover. Progress (2026-06-21):
+
+- STEP 0 (ZSK manual-trigger parity + active_at self-heal + active_seq
+  counter + status-display parity): DONE — merged to main via PR #261
+  (merge commit b4c59a2d). Testbed-confirmed on cpt.p.axfr.net.
+- STEP 1 (global dnssec.completeness knob): DONE — same PR #261. Knob
+  parses + is exposed on Conf.Internal; not yet read (that is step 2).
+- STEP 2 (the actual relaxed-mode ZSK ALGORITHM roll): NOT STARTED. This
+  is where the real logic lives — role-only standby counting, the sweep
+  fix, the FIFO ORDER BY fix, change-policy, and the KSK/CSK/both-role/
+  re-entrancy refusals.
+
+Remaining §6 open items (CSK handling, multi-ds vs double-signature,
+strict-mode alg rollover, large-zone secondary propagation) are LATER
+steps. Per-step detail + actuals are in §8.
 
 Branch context: dnssec-policy-change-phase1-2. Builds on the per-role
 KSK/ZSK algorithm work (PR #259) and the policy-change work documented in
@@ -683,6 +691,16 @@ build + `go test -race`).
 
 ### 8.1 Step 0 — ZSK manual-trigger parity (prerequisite)
 
+STATUS: DONE (PR #261, merged b4c59a2d). Built as designed below, with
+all four scope items: ZSK asap/cancel via the new ZskRolloverState table;
+manual-request persistence; active_at self-heal (healZskActiveAt); and the
+active_seq counter on a new DnssecKeyStore.active_seq column. Status
+display brought to KSK parity (active_seq column, state_since incl. removed
+keys, removed-key cap, next_transition for all states). Tests T0.1–T0.6 +
+display-parity/standby tests; go test -race green; testbed-confirmed.
+Actuals: ~360 source + ~290 test LOC across the step-0 commits. The design
+below is retained as the as-built record.
+
 Bring ZSK to KSK parity for on-demand rolling. Model on the KSK manual
 mechanism (`apihandler_rollover.go` `APIRolloverAsap`/cancel;
 `SetManualRolloverRequest`/`ClearManualRolloverRequest`; the
@@ -785,6 +803,13 @@ alg-roll work.
 
 ### 8.2 Step 1 — global completeness knob
 
+STATUS: DONE (PR #261, merged b4c59a2d). `dnssec.completeness` field on
+DnssecConf; `resolveCompletenessMode` (empty→strict, unknown→hard error);
+resolved into `Conf.Internal.Completeness`. Sample config + comment. Test
+TestResolveCompletenessMode. The knob parses and is exposed but NOT yet
+read — the behavior it gates (relaxed vs strict refusal) is step 2.
+Actuals: ~58 source + ~38 test LOC.
+
 Add `dnssec.completeness: strict|relaxed` (default `strict`) to
 `DnssecConf` (config.go), parse in `parseDnssecConfig` (parseconfig.go),
 expose via `Conf.Internal` where the reconcile reads it. Sample config +
@@ -793,6 +818,13 @@ doc. Per D2, only relaxed is wired to do an alg roll; strict refuses.
 Verify: T2 (§8.4) + a parse test (good/bad values, default).
 
 ### 8.3 Step 2 — relaxed-mode ZSK alg roll
+
+STATUS: NOT STARTED. This is the next chunk and the highest-risk of the
+three (MED–HIGH): it touches reconcileActiveKeyAlgorithms (the §2
+bogus-zone path is one wrong branch away) and carries the heaviest test
+matrix. Builds on the now-merged steps 0+1 (the manual trigger, the
+completeness knob, the active_seq/active_at machinery). Estimate: ~180–320
+source + ~200–300 test LOC, ~5–8 h.
 
 Reconcile branch (D3) — `reconcileActiveKeyAlgorithms` (sign.go:286)
 becomes mode-aware. There are FOUR cases for an active-key algorithm
