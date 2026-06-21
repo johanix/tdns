@@ -868,7 +868,12 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 	}
 
 	if showZSK {
-		fmt.Println()
+		// Separate from a preceding KSK section. When ZSK is the first/only
+		// section, the global header's trailing blank is the separator — adding
+		// one here too would double the gap.
+		if showKSK {
+			fmt.Println()
+		}
 		if currentTimePrinted {
 			fmt.Printf("ZSK rollover state for zone %s\n", s.Zone)
 		} else {
@@ -903,7 +908,18 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 func printZoneGlobalHeader(s *tdns.RolloverStatus, verbose bool) {
 	printed := false
 	if s.Policy != nil {
-		fmt.Printf("Current policy: %s\n", policyHeaderValue(s.Policy))
+		// Non-verbose: name + per-role algorithms on the one line. Verbose: the
+		// algorithms are in the detail table just below, so the line carries
+		// only the policy name (no redundant "(KSK …, ZSK …)" suffix).
+		if verbose {
+			name := s.Policy.Name
+			if name == "" {
+				name = "(unnamed)"
+			}
+			fmt.Printf("Current policy: %s\n", name)
+		} else {
+			fmt.Printf("Current policy: %s\n", policyHeaderValue(s.Policy))
+		}
 		printed = true
 	}
 	if t := s.AlgTransition; t != nil {
@@ -962,7 +978,6 @@ func printPolicyDetail(p *tdns.PolicySummary) {
 		}
 	}
 
-	fmt.Println("policy:")
 	rows := make([]string, 0, depth)
 	for i := 0; i < depth; i++ {
 		fields := make([]string, 0, 8)
