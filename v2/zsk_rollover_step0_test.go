@@ -273,6 +273,57 @@ func TestZskRemovedDisplayParity(t *testing.T) {
 	}
 }
 
+// Display: a standby ZSK gets a state_since (from published_at, since ZSKs
+// have no standby_at) and a next_transition (promote-on-roll = active_at +
+// lifetime), not blank. Covers the renderer un-gating + the standby
+// state_since fix.
+func TestZskStandbyStateSinceAndNextTransition(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	seedActiveZSK(t, kdb, true) // one active, one standby
+
+	// A real standby arrives via published→standby, so published_at is set.
+	// The test seed creates it directly in standby, so stamp published_at to
+	// mirror production (it is what state_since resolves from for a ZSK).
+	now := time.Now().UTC().Format(time.RFC3339)
+	if _, err := kdb.DB.Exec(`UPDATE DnssecKeyStore SET published_at=? WHERE zonename=? AND state=? AND CAST(flags AS INTEGER)=256`,
+		now, zskTestZone, DnskeyStateStandby); err != nil {
+		t.Fatalf("stamp standby published_at: %v", err)
+	}
+
+	// Build status entries the way ComputeRolloverStatus does.
+	out := &RolloverStatus{}
+	out.ZSKs, _ = loadRolloverKeyEntries(kdb, zskTestZone, false)
+
+	// Standby must have a non-empty state_since (sourced from published_at).
+	var standby *RolloverKeyEntry
+	for i := range out.ZSKs {
+		if out.ZSKs[i].State == DnskeyStateStandby {
+			standby = &out.ZSKs[i]
+		}
+	}
+	if standby == nil {
+		t.Fatalf("no standby ZSK entry; got %+v", out.ZSKs)
+	}
+	if standby.StateSince == "" {
+		t.Fatalf("standby ZSK state_since is empty; want published_at")
+	}
+
+	// Next-transition: with an active ZSK present and a 15m lifetime, the
+	// standby should be marked promote-on-roll with a concrete time.
+	pol := &DnssecPolicy{Mode: DnssecPolicyModeKSKZSK}
+	pol.ZSK.Lifetime = uint32((15 * time.Minute).Seconds())
+	populateZskNextTransitions(out, kdb, zskTestZone, pol, time.Minute)
+
+	for i := range out.ZSKs {
+		if out.ZSKs[i].State == DnskeyStateStandby {
+			standby = &out.ZSKs[i]
+		}
+	}
+	if standby.NextTransition == "" || standby.NextTransitionAt == "" {
+		t.Fatalf("standby ZSK next_transition not populated: %+v", *standby)
+	}
+}
+
 func zskActiveSeqOf(t *testing.T, kdb *KeyDB, keyid uint16) *int {
 	t.Helper()
 	for _, st := range []string{DnskeyStateActive, DnskeyStateRetired, DnskeyStateStandby} {

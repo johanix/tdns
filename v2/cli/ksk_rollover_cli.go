@@ -1358,11 +1358,18 @@ func formatStateSinceCol(k tdns.RolloverKeyEntry) string {
 }
 
 func formatZskNextRollCol(k tdns.RolloverKeyEntry) string {
-	if k.State != tdns.DnskeyStateActive || k.NextTransitionAt == "" {
-		return "-"
+	// Show the engine's next-transition time for ANY state that has one
+	// (active→retired, standby→active-on-roll, published→standby,
+	// retired→removed) — not just the active key. The `state` column tells
+	// the operator which transition the time refers to. Falls back to the
+	// engine's note when there is a transition but no concrete time.
+	if k.NextTransitionAt != "" {
+		if t, err := time.Parse(time.RFC3339, k.NextTransitionAt); err == nil {
+			return formatTimeWithDelta(t)
+		}
 	}
-	if t, err := time.Parse(time.RFC3339, k.NextTransitionAt); err == nil {
-		return formatTimeWithDelta(t)
+	if k.NextTransitionNote != "" {
+		return k.NextTransitionNote
 	}
 	return "-"
 }
