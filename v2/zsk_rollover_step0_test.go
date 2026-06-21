@@ -34,7 +34,7 @@ func TestZskManualRequestPersistAndCancel(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	now := time.Now()
 
-	if m, err := LoadZskManualRollover(kdb, zskTestZone); err != nil || m.Earliest != "" {
+	if m, err := LoadZskManualRollover(kdb, zskTestZone); err != nil || m.Earliest != "" || m.RequestedAt != "" {
 		t.Fatalf("no request yet: got (%+v, %v)", m, err)
 	}
 	if err := SetZskManualRolloverRequest(kdb, zskTestZone, now, now); err != nil {
@@ -47,7 +47,7 @@ func TestZskManualRequestPersistAndCancel(t *testing.T) {
 	if err := ClearZskManualRolloverRequest(kdb, zskTestZone); err != nil {
 		t.Fatalf("ClearZskManualRolloverRequest: %v", err)
 	}
-	if m, err := LoadZskManualRollover(kdb, zskTestZone); err != nil || m.Earliest != "" {
+	if m, err := LoadZskManualRollover(kdb, zskTestZone); err != nil || m.Earliest != "" || m.RequestedAt != "" {
 		t.Fatalf("after clear: got (%+v, %v), want empty", m, err)
 	}
 }
@@ -140,7 +140,7 @@ func TestZskManualRequestSurvivesNoStandby(t *testing.T) {
 	}
 	// The request must still be present (worker would NOT clear it without a
 	// standby to roll to).
-	if m2, err := LoadZskManualRollover(kdb, zskTestZone); err != nil || m2.Earliest == "" {
+	if m2, err := LoadZskManualRollover(kdb, zskTestZone); err != nil || m2.Earliest == "" || m2.RequestedAt == "" {
 		t.Fatalf("request must persist with no standby: got (%+v, %v)", m2, err)
 	}
 }
