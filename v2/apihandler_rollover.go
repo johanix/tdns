@@ -98,6 +98,26 @@ func APIRolloverAsap(conf *Config) func(w http.ResponseWriter, r *http.Request) 
 		lock.Lock()
 		defer lock.Unlock()
 
+		// ZSK asap: no parent-DS coordination, so "earliest" is just now —
+		// the next KeyStateWorker tick rolls if a standby ZSK exists. Set
+		// the manual request and return; the worker handles the rest
+		// (including the "due but no standby yet" wait, since the request
+		// persists until the roll commits).
+		if strings.EqualFold(req.KeyType, "ZSK") {
+			now := time.Now()
+			if err := SetZskManualRolloverRequest(kdb, zone, now, now); err != nil {
+				lgApi.Warn("rollover/asap: SetZskManualRolloverRequest failed", "zone", zone, "err", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(RolloverAsapResponse{
+				Zone:        zone,
+				RequestedAt: now.UTC().Format(time.RFC3339),
+				Earliest:    now.UTC().Format(time.RFC3339),
+			})
+			return
+		}
+
 		// asap is a write operation; refuse cleanly if a rollover is
 		// already underway. ComputeEarliestRollover itself does not
 		// gate on this (so that ComputeRolloverWhen can project past
@@ -181,6 +201,16 @@ func APIRolloverCancel(conf *Config) func(w http.ResponseWriter, r *http.Request
 		lock := AcquireRolloverLock(zone)
 		lock.Lock()
 		defer lock.Unlock()
+
+		if strings.EqualFold(req.KeyType, "ZSK") {
+			if err := ClearZskManualRolloverRequest(kdb, zone); err != nil {
+				lgApi.Warn("rollover/cancel: ClearZskManualRolloverRequest failed", "zone", zone, "err", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(RolloverCancelResponse{Zone: zone, Cleared: true})
+			return
+		}
 
 		if err := ClearManualRolloverRequest(kdb, zone); err != nil {
 			lgApi.Warn("rollover/cancel: ClearManualRolloverRequest failed", "zone", zone, "err", err)

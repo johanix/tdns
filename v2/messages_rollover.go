@@ -266,6 +266,10 @@ type RolloverWhenGateEntry struct {
 // scheduled rollover.
 type RolloverAsapRequest struct {
 	Zone string `json:"zone"`
+	// KeyType selects which role to roll: "" or "KSK" (default) = KSK,
+	// "ZSK" = ZSK. ZSK uses the lighter ZskRolloverState manual-request
+	// path (no parent-DS coordination).
+	KeyType string `json:"keytype,omitempty"`
 }
 
 type RolloverAsapResponse struct {
@@ -279,6 +283,8 @@ type RolloverAsapResponse struct {
 // Request/response types for POST /api/v1/rollover/cancel.
 type RolloverCancelRequest struct {
 	Zone string `json:"zone"`
+	// KeyType: "" / "KSK" (default) = KSK, "ZSK" = ZSK.
+	KeyType string `json:"keytype,omitempty"`
 }
 
 type RolloverCancelResponse struct {

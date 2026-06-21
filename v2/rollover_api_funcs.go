@@ -646,14 +646,21 @@ func rolloverKeyEntryFromKeystoreKey(kdb *KeyDB, zone string, k *DnssecKeyWithTi
 	if ts := StateSinceForDnssecKey(kdb, zone, k); !ts.IsZero() {
 		entry.StateSince = ts.UTC().Format(time.RFC3339)
 	}
-	seq, err := RolloverKeyActiveSeq(kdb, zone, k.KeyTag)
-	if err != nil {
-		// Don't fail the whole status response over one key's lookup
-		// — partial status is still useful — but log so the failure
-		// isn't invisible.
-		lgSigner.Debug("rolloverKeyEntryFromKeystoreKey: RolloverKeyActiveSeq failed", "zone", zone, "keyid", k.KeyTag, "err", err)
-	} else if seq >= 0 {
-		v := seq
+	if wantSEP {
+		// KSK active_seq lives in RolloverKeyState.
+		seq, err := RolloverKeyActiveSeq(kdb, zone, k.KeyTag)
+		if err != nil {
+			// Don't fail the whole status response over one key's lookup
+			// — partial status is still useful — but log so the failure
+			// isn't invisible.
+			lgSigner.Debug("rolloverKeyEntryFromKeystoreKey: RolloverKeyActiveSeq failed", "zone", zone, "keyid", k.KeyTag, "err", err)
+		} else if seq >= 0 {
+			v := seq
+			entry.ActiveSeq = &v
+		}
+	} else if k.ActiveSeq != nil {
+		// ZSK active_seq lives in DnssecKeyStore (loaded into the key).
+		v := *k.ActiveSeq
 		entry.ActiveSeq = &v
 	}
 	if msg, err := LoadLastRolloverError(kdb, zone, k.KeyTag); err != nil {

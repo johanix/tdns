@@ -611,12 +611,20 @@ Online-only: scheduling against a stopped daemon is meaningless
 			tdns.Globals.App.Type = tdns.AppTypeCli
 			z := dns.Fqdn(tdns.Globals.Zonename)
 
+			if autoRolloverFlags.kskOnly && autoRolloverFlags.zskOnly {
+				cliFatalf("flags --ksk and --zsk are mutually exclusive")
+			}
+			keytype := "KSK"
+			if autoRolloverFlags.zskOnly {
+				keytype = "ZSK"
+			}
+
 			api, err := GetApiClient("auth", true)
 			if err != nil {
 				cliFatalf("error getting API client: %v", err)
 			}
 			status, body, err := api.RequestNG("POST", "/rollover/asap",
-				tdns.RolloverAsapRequest{Zone: z}, true)
+				tdns.RolloverAsapRequest{Zone: z, KeyType: keytype}, true)
 			if err != nil {
 				cliFatalf("error calling rollover/asap: %v", err)
 			}
@@ -630,9 +638,13 @@ Online-only: scheduling against a stopped daemon is meaningless
 			if err := json.Unmarshal(body, &resp); err != nil {
 				cliFatalf("error parsing rollover/asap response: %v", err)
 			}
-			fmt.Printf("scheduled manual rollover for zone %s\n", resp.Zone)
+			fmt.Printf("scheduled manual %s rollover for zone %s\n", keytype, resp.Zone)
 			fmt.Printf("  earliest          %s\n", formatRolloverTime(resp.Earliest))
-			fmt.Printf("  from active keyid %d to %d\n", resp.FromKeyID, resp.ToKeyID)
+			// ZSK response carries no from/to keyid (the standby is picked
+			// by the worker at roll time); only print it for KSK.
+			if keytype == "KSK" {
+				fmt.Printf("  from active keyid %d to %d\n", resp.FromKeyID, resp.ToKeyID)
+			}
 		},
 	}
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
@@ -655,19 +667,27 @@ manual_rollover_* row isn't being read by anything).`,
 			tdns.Globals.App.Type = tdns.AppTypeCli
 			z := dns.Fqdn(tdns.Globals.Zonename)
 
+			if autoRolloverFlags.kskOnly && autoRolloverFlags.zskOnly {
+				cliFatalf("flags --ksk and --zsk are mutually exclusive")
+			}
+			keytype := "KSK"
+			if autoRolloverFlags.zskOnly {
+				keytype = "ZSK"
+			}
+
 			api, err := GetApiClient("auth", true)
 			if err != nil {
 				cliFatalf("error getting API client: %v", err)
 			}
 			status, body, err := api.RequestNG("POST", "/rollover/cancel",
-				tdns.RolloverCancelRequest{Zone: z}, true)
+				tdns.RolloverCancelRequest{Zone: z, KeyType: keytype}, true)
 			if err != nil {
 				cliFatalf("error calling rollover/cancel: %v", err)
 			}
 			if status != http.StatusOK {
 				cliFatalf("unexpected status %d from rollover/cancel: %s", status, strings.TrimSpace(string(body)))
 			}
-			fmt.Printf("cleared manual rollover request for zone %s\n", z)
+			fmt.Printf("cleared manual %s rollover request for zone %s\n", keytype, z)
 		},
 	}
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
@@ -1256,12 +1276,19 @@ func printRolloverKeyTable(keys []tdns.RolloverKeyEntry, verbose bool, kskTable 
 			}
 		}
 	} else {
+		// active_seq leads the ZSK table, matching the KSK layout, so a
+		// ZSK roll is visible the same way (the active key's number ticks
+		// up each roll).
 		if verbose {
-			rows = append(rows, "keyid|alg|state|active_at|next_roll")
+			rows = append(rows, "active_seq|keyid|alg|state|active_at|next_roll")
 		} else {
-			rows = append(rows, "keyid|state|active_at|next_roll")
+			rows = append(rows, "active_seq|keyid|state|active_at|next_roll")
 		}
 		for _, k := range keys {
+			seqStr := "-"
+			if k.ActiveSeq != nil {
+				seqStr = fmt.Sprintf("%d", *k.ActiveSeq)
+			}
 			at := formatStateSinceCol(k)
 			nextRoll := formatZskNextRollCol(k)
 			if verbose {
@@ -1269,9 +1296,9 @@ func printRolloverKeyTable(keys []tdns.RolloverKeyEntry, verbose bool, kskTable 
 				if algStr == "" {
 					algStr = "-"
 				}
-				rows = append(rows, fmt.Sprintf("%d|%s|%s|%s|%s", k.KeyID, algStr, k.State, at, nextRoll))
+				rows = append(rows, fmt.Sprintf("%s|%d|%s|%s|%s|%s", seqStr, k.KeyID, algStr, k.State, at, nextRoll))
 			} else {
-				rows = append(rows, fmt.Sprintf("%d|%s|%s|%s", k.KeyID, k.State, at, nextRoll))
+				rows = append(rows, fmt.Sprintf("%s|%d|%s|%s|%s", seqStr, k.KeyID, k.State, at, nextRoll))
 			}
 		}
 	}
