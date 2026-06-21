@@ -602,6 +602,8 @@ decisions, and tests in §8.
 | GetDnssecKeysByState — UNORDERED query (FIFO bug; needs ORDER BY) | keystore.go:1178,1183,1186 |
 | KSK active_at self-heal (mirror for ZSK — §8.1) | ksk_rollover_automated.go:1690 |
 | ZSK active_at lives in DnssecKeyStore (not RolloverKeyState) | keystore.go:1075,1189,1293,1393 |
+| DnssecKeyStore schema (add ZSK active_seq column here — §8.1) | db_schema.go:68-83 |
+| KSK active_seq pattern to mirror (MAX(seq)+1) | ksk_rollover_zone_state.go:306-325 |
 | ZonePolicyOverride table (zone→target name, reuse) | db_zone_policy_override.go |
 | EffectiveDnssecPolicyName (override else config) | db_zone_policy_override.go:80 |
 | Override resolved into bound policy at load/refresh | refreshengine.go:212,340,531 |
@@ -721,6 +723,33 @@ accurate) and stamp only when currently NULL (never overwrite a real
 timestamp, or every restart would push the roll forward). Run it on the
 KeyStateWorker tick alongside the ZSK roll check.
 
+ZSK `active_seq` — a monotonic per-key roll counter for operator feedback.
+KSK has `active_seq` ("n-th active KSK in this zone's history",
+RolloverKeyState); ZSK has none (the status shows `-`). Add the ZSK analog
+so an operator gets immediate confirmation a roll progressed (the active
+ZSK's number ticks up each roll).
+
+DECISION (KISS, operator-confirmed): store it as a new `active_seq INTEGER`
+column on `DnssecKeyStore` (NOT RolloverKeyState, NOT a new table — the
+seq travels with the key row, no NULL-DS-column bloat, no per-key ZSK
+table). Stamp it at the standby→active transition (`RolloverKey`,
+keystore.go), in the SAME transaction as `active_at`, as
+`MAX(active_seq)+1` over that zone's ZSK rows (`flags & 256` — KSK and ZSK
+seqs are independent per-role counters). The self-heal above should also
+stamp a missing `active_seq` for a healed active ZSK.
+
+Purge semantics (accepted): `MAX(active_seq)+1` survives NORMAL purges —
+retired→removed and policy-cleanup delete the OLDEST (low-seq) keys, never
+the newest, so MAX is always held by the most-recent key and the counter
+keeps climbing. It resets only if ALL ZSK rows are deleted (`clear`),
+which is the intended "wipe and start over" semantics — a restarted seq
+after `clear` is correct, not a bug. (Note: the KSK `MAX(active_seq)+1`
+over RolloverKeyState has the same property; this mirrors it.)
+
+Display: fill the ZSK key table's `active_seq` column (currently always
+`-`) from `DnssecKeyStore.active_seq`, and optionally show the active
+ZSK's number in the ZSK status header.
+
 CLI/API: `auto-rollover asap`/`cancel` gain ZSK support (today they are
 KSK-oriented), or add ZSK-typed variants. Keep it symmetric with KSK.
 
@@ -736,7 +765,7 @@ never rolling. The request must survive those ticks and fire when a
 standby appears. (This is general ZSK-asap correctness; it also matters
 for the alg roll when the operator asaps through to the new-alg key.)
 
-Verify: T0.1–T0.5 (§8.4). This step is independently valuable and
+Verify: T0.1–T0.6 (§8.4). This step is independently valuable and
 independently testable — it completes ZSK rollover to KSK parity
 (manual trigger + asap/cancel + active_at self-heal) regardless of the
 alg-roll work.
@@ -964,6 +993,12 @@ Step 0 (ZSK manual parity):
   stamped (first-observation) so `zskRollDue` becomes decidable and the
   roll can fire; an active ZSK that already has a real `active_at` is NOT
   overwritten (idempotent across restarts). Mirrors the KSK heal.
+- T0.6 — active_seq COUNTER: each ZSK roll stamps the newly-active ZSK
+  with `MAX(active_seq)+1` over the zone's ZSK rows, so the active key's
+  seq increments by one per roll (1, 2, 3, …). A normal purge of the
+  oldest (removed) keys does NOT regress the counter (MAX still held by
+  the newest key). After `clear` (all ZSK rows deleted) the seq restarts
+  (accepted, §8.1). KSK and ZSK seqs are independent (scoped by flags).
 
 Step 1 (mode knob):
 - T2 — ZSK alg change requested while global mode is `strict`: refused
@@ -1041,7 +1076,8 @@ Step 2 (relaxed alg roll):
 ### 8.5 Success criteria
 
 - Step 0: ZSK has `asap`/`cancel` at KSK parity, with request persistence
-  and the `active_at` self-heal per §8.1; T0.1–T0.5 green; build clean.
+  the `active_at` self-heal, and the `active_seq` roll counter per §8.1;
+  T0.1–T0.6 green; build clean.
 - Step 1: knob parses, defaults strict; T2 green.
 - Step 2: a relaxed-mode `change-policy` to a different-ZSK-algorithm
   policy gradually rolls the ZSK (new-alg standby → active, old-alg
