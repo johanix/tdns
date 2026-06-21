@@ -120,6 +120,9 @@ type RolloverStatus struct {
 	// by active_seq, most recent first).
 	HiddenRemovedKskCount int                `json:"hiddenRemovedKskCount,omitempty"`
 	ZSKs                  []RolloverKeyEntry `json:"zsks"`
+	// HiddenRemovedZskCount is the ZSK analog of HiddenRemovedKskCount:
+	// removed ZSKs beyond the display cap, omitted from ZSKs.
+	HiddenRemovedZskCount int `json:"hiddenRemovedZskCount,omitempty"`
 
 	// Policy summary. Verbose mode shows this; compact mode hides it.
 	Policy *PolicySummary `json:"policy,omitempty"`

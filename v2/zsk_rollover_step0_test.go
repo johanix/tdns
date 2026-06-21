@@ -226,6 +226,53 @@ func TestZskActiveSeqCounter(t *testing.T) {
 	}
 }
 
+// Display parity: a removed ZSK shows a state_since timestamp (sourced from
+// retired_at, since ZSKs have no RolloverKeyState row), not blank; and the
+// removed-key display cap + hidden count apply to ZSKs like KSKs.
+func TestZskRemovedDisplayParity(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	// Create several removed ZSKs with retired_at set, distinct active_seq.
+	for i := 0; i < 5; i++ {
+		pkc, _, err := kdb.GenerateKeypair(zskTestZone, "test", DnskeyStateRemoved, dns.TypeDNSKEY, dns.ED25519, "ZSK", nil)
+		if err != nil {
+			t.Fatalf("generate removed ZSK %d: %v", i, err)
+		}
+		ts := time.Now().Add(time.Duration(-i) * time.Hour).UTC().Format(time.RFC3339)
+		if _, err := kdb.DB.Exec(`UPDATE DnssecKeyStore SET retired_at=?, active_seq=? WHERE zonename=? AND keyid=?`,
+			ts, i, zskTestZone, int(pkc.KeyId)); err != nil {
+			t.Fatalf("stamp removed ZSK %d: %v", i, err)
+		}
+	}
+
+	zsks, hidden := loadRolloverKeyEntries(kdb, zskTestZone, false)
+	// Cap: only rolloverStatusRemovedDisplayCap shown, rest hidden.
+	if len(zsks) != rolloverStatusRemovedDisplayCap {
+		t.Fatalf("shown removed ZSKs = %d, want %d", len(zsks), rolloverStatusRemovedDisplayCap)
+	}
+	if hidden != 5-rolloverStatusRemovedDisplayCap {
+		t.Fatalf("hidden removed ZSKs = %d, want %d", hidden, 5-rolloverStatusRemovedDisplayCap)
+	}
+	// Shown keys are the highest active_seq (most recent), descending.
+	if zsks[0].ActiveSeq == nil || *zsks[0].ActiveSeq != 4 {
+		t.Fatalf("first shown removed ZSK seq = %v, want 4", zsks[0].ActiveSeq)
+	}
+	// state_since resolves (non-empty) for a removed ZSK via retired_at.
+	zd := testZone(t, zskTestZone, zskTestZone+" IN SOA . . 1 1 1 1 1\n")
+	zd.KeyDB = kdb
+	k := &DnssecKeyWithTimestamps{ZoneName: zskTestZone, KeyTag: zsks[0].KeyID, Flags: 256, State: DnskeyStateRemoved}
+	// reload the full key (with retired_at) for the state-since check
+	removed, _ := GetDnssecKeysByState(kdb, zskTestZone, DnskeyStateRemoved)
+	for i := range removed {
+		if removed[i].KeyTag == zsks[0].KeyID {
+			k = &removed[i]
+		}
+	}
+	if ts := StateSinceForDnssecKey(kdb, zskTestZone, k); ts.IsZero() {
+		t.Fatalf("removed ZSK state_since is zero; want retired_at")
+	}
+}
+
 func zskActiveSeqOf(t *testing.T, kdb *KeyDB, keyid uint16) *int {
 	t.Helper()
 	for _, st := range []string{DnskeyStateActive, DnskeyStateRetired, DnskeyStateStandby} {

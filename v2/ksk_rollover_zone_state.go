@@ -993,6 +993,17 @@ func StateSinceForDnssecKey(kdb *KeyDB, zone string, k *DnssecKeyWithTimestamps)
 		if k.RetiredAt != nil {
 			return *k.RetiredAt
 		}
+	case DnskeyStateRemoved:
+		// ZSKs have no RolloverKeyState row, so the generic
+		// rollover_state_at fallback below returns zero and the status
+		// table would show "-" for a removed ZSK. retired_at (preserved on
+		// the DnssecKeyStore row through removal — the retired→removed
+		// transition stamps no new timestamp) is the best available
+		// "state since" for a removed ZSK. KSK removed keys still resolve
+		// via rollover_state_at below.
+		if k.Flags&dns.SEP == 0 && k.RetiredAt != nil {
+			return *k.RetiredAt
+		}
 	case DnskeyStateActive:
 		if k.Flags&dns.SEP == 0 && k.ActiveAt != nil {
 			return *k.ActiveAt

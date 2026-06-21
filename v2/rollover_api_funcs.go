@@ -83,7 +83,9 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInte
 	var hiddenRemoved int
 	out.KSKs, hiddenRemoved = loadRolloverKeyEntries(kdb, zone, true)
 	out.HiddenRemovedKskCount = hiddenRemoved
-	out.ZSKs, _ = loadRolloverKeyEntries(kdb, zone, false)
+	var hiddenRemovedZsk int
+	out.ZSKs, hiddenRemovedZsk = loadRolloverKeyEntries(kdb, zone, false)
+	out.HiddenRemovedZskCount = hiddenRemovedZsk
 
 	if err := populateDSKeyidsForStatus(kdb, zone, out); err != nil {
 		return nil, fmt.Errorf("ComputeRolloverStatus: %w", err)
@@ -606,7 +608,12 @@ func loadRolloverKeyEntries(kdb *KeyDB, zone string, wantSEP bool) ([]RolloverKe
 			}
 			batch = append(batch, rolloverKeyEntryFromKeystoreKey(kdb, zone, k, wantSEP))
 		}
-		if st == DnskeyStateRemoved && wantSEP {
+		// Cap + sort removed keys for BOTH roles (KSK and ZSK): show only
+		// the most-recent rolloverStatusRemovedDisplayCap by active_seq
+		// (descending; keys without a seq sink to the bottom), the rest
+		// summarized as a hidden count. Also makes the removed rows read in
+		// seq order rather than keytag order.
+		if st == DnskeyStateRemoved {
 			sort.SliceStable(batch, func(i, j int) bool {
 				si := rolloverActiveSeqSortKey(batch[i].ActiveSeq)
 				sj := rolloverActiveSeqSortKey(batch[j].ActiveSeq)

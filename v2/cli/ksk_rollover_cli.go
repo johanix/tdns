@@ -870,6 +870,9 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 		if len(s.ZSKs) > 0 {
 			fmt.Println()
 			printRolloverKeyTable(s.ZSKs, verbose, false)
+			if s.HiddenRemovedZskCount > 0 {
+				fmt.Printf("  ... %d older removed key(s) not shown\n", s.HiddenRemovedZskCount)
+			}
 		}
 	}
 
@@ -1280,9 +1283,9 @@ func printRolloverKeyTable(keys []tdns.RolloverKeyEntry, verbose bool, kskTable 
 		// ZSK roll is visible the same way (the active key's number ticks
 		// up each roll).
 		if verbose {
-			rows = append(rows, "active_seq|keyid|alg|state|active_at|next_roll")
+			rows = append(rows, "active_seq|keyid|alg|state|state_since|next_roll")
 		} else {
-			rows = append(rows, "active_seq|keyid|state|active_at|next_roll")
+			rows = append(rows, "active_seq|keyid|state|state_since|next_roll")
 		}
 		for _, k := range keys {
 			seqStr := "-"
