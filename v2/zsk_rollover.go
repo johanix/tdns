@@ -198,6 +198,58 @@ func LoadZskManualRollover(kdb *KeyDB, zone string) (ZskManualRollover, error) {
 	return out, nil
 }
 
+// ZskAlgRollState describes an in-flight relaxed-mode ZSK algorithm rollover.
+// FromAlg is an old algorithm still present in the pipeline; ToAlg is the
+// target (effective-policy) ZSK algorithm. Done/Total give a coarse progress
+// count for the operator (promotions of target-alg keys / total live ZSK
+// pipeline members of any algorithm).
+type ZskAlgRollState struct {
+	InFlight bool
+	FromAlg  uint8
+	ToAlg    uint8
+	Done     int
+	Total    int
+}
+
+// zskAlgRollInFlight reports whether a ZSK algorithm rollover toward targetZSKAlg
+// is in flight for a zone, using the FULLER drain-window predicate (the spec's
+// re-entrancy / status notion of "in progress", §8.3): a ZSK of an algorithm
+// other than targetZSKAlg present in any of standby / active / retired. This is
+// stricter than "active ZSK alg ≠ policy alg" (D4) — it stays true through the
+// drain window, after the new-alg key has been promoted to active while an
+// old-alg ZSK is still retired/draining. Both the change-policy re-entrancy
+// guard and the status display derive "in flight" from this one function.
+func zskAlgRollInFlight(kdb *KeyDB, zone string, targetZSKAlg uint8) (ZskAlgRollState, error) {
+	zone = dns.Fqdn(zone)
+	var out ZskAlgRollState
+	var fromAlg uint8
+	for _, state := range []string{DnskeyStateStandby, DnskeyStateActive, DnskeyStateRetired} {
+		keys, err := GetDnssecKeysByState(kdb, zone, state)
+		if err != nil {
+			return out, fmt.Errorf("zskAlgRollInFlight: list %s keys for zone %s: %w", state, zone, err)
+		}
+		for _, k := range keys {
+			if k.Flags != 256 {
+				continue
+			}
+			out.Total++
+			if k.Algorithm == targetZSKAlg {
+				out.Done++
+			} else {
+				out.InFlight = true
+				if fromAlg == 0 {
+					fromAlg = k.Algorithm
+				}
+			}
+		}
+	}
+	if out.InFlight {
+		out.FromAlg = fromAlg
+		out.ToAlg = targetZSKAlg
+	}
+	return out, nil
+}
+
 // zskRemovalMargin is the hold time before a retired ZSK may be removed:
 // propagationDelay + max observed signing TTL (sum, not max).
 func zskRemovalMargin(propagationDelay time.Duration, maxObservedTTL uint32) time.Duration {

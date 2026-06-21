@@ -941,6 +941,13 @@ func printStateTable(s *tdns.RolloverStatus) {
 	if s.Policy != nil {
 		left = append(left, kv{"policy:", policyHeaderValue(s.Policy)})
 	}
+	if t := s.AlgTransition; t != nil {
+		v := fmt.Sprintf("%s %s → %s  (in progress)", t.Role, t.FromAlg, t.ToAlg)
+		if t.Total > 0 {
+			v += fmt.Sprintf(", %d of %d on new alg", t.Done, t.Total)
+		}
+		left = append(left, kv{"alg rollover:", v})
+	}
 	if s.Phase != "" && s.Phase != "idle" {
 		left = append(left, kv{"phase:", s.Phase})
 	}
@@ -1599,8 +1606,9 @@ Differs from 'reset' (which clears last_rollover_error for one keyid).`,
 // today; others accept the flags as no-ops so an operator can copy a
 // command line between subcommands without "unknown flag" errors.
 var autoRolloverFlags struct {
-	kskOnly bool
-	zskOnly bool
+	kskOnly    bool
+	zskOnly    bool
+	policyName string
 }
 
 // newAutoRolloverCmd returns the parent command holding the auto-rollover
@@ -1631,10 +1639,70 @@ func newAutoRolloverCmd(_ string) *cobra.Command {
 		newAutoRolloverWhenCmd(),
 		newAutoRolloverAsapCmd(),
 		newAutoRolloverCancelCmd(),
+		newAutoRolloverPolicyChangeCmd(),
 		newAutoRolloverStatusCmd(),
 		newAutoRolloverResetCmd(),
 		newAutoRolloverUnstickCmd(),
 		newAutoRolloverValidateCmd(),
 	)
+	return c
+}
+
+// newAutoRolloverPolicyChangeCmd binds a zone toward a new DNSSEC policy for a
+// gradual, relaxed-mode ZSK ALGORITHM rollover. It only sets the algorithm of
+// future-generated keys (writes the policy override + rebinds); it does NOT
+// perform the roll. `auto-rollover asap -z <zone> --zsk` is the throttle.
+func newAutoRolloverPolicyChangeCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "policy-change",
+		Short: "Bind a zone to a new DNSSEC policy for a gradual ZSK algorithm rollover",
+		Long: `Bind a zone toward a new DNSSEC policy so its ZSK algorithm rolls over
+GRADUALLY. Unlike "zone set-policy" (which retires the old key
+synchronously — unsafe for an algorithm change), this only sets the
+algorithm of FUTURE-generated ZSKs: the existing FIFO key pipeline drains
+in order, oldest first.
+
+This command does NOT perform the roll. After binding, the algorithm
+rolls on the normal ZSK cadence — OR run
+
+  auto-rollover asap -z <zone> --zsk
+
+to promote the next standby now (repeat to accelerate through the
+already-propagated old-alg standbys to the new algorithm).
+
+Requires dnssec.completeness: relaxed. A KSK / CSK / both-role algorithm
+change, or a second policy-change while a roll is in flight, is refused.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs(cmd, "zonename")
+			tdns.Globals.App.Type = tdns.AppTypeCli
+			if strings.TrimSpace(autoRolloverFlags.policyName) == "" {
+				cliFatalf("flag --policy is required")
+			}
+			z := dns.Fqdn(tdns.Globals.Zonename)
+
+			api, err := GetApiClient("auth", true)
+			if err != nil {
+				cliFatalf("error getting API client: %v", err)
+			}
+			cr, err := SendZoneCommand(api, tdns.ZonePost{
+				Command: "change-policy",
+				Zone:    z,
+				Policy:  strings.TrimSpace(autoRolloverFlags.policyName),
+			})
+			if err != nil {
+				cliFatalf("error from %q: %s", cr.AppName, err.Error())
+			}
+			if cr.Error {
+				cliFatalf("%s", cr.ErrorMsg)
+			}
+			if cr.Msg != "" {
+				fmt.Printf("%s\n", cr.Msg)
+			}
+		},
+	}
+	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
+	c.Flags().StringVarP(&autoRolloverFlags.policyName, "policy", "p", "", "Target DNSSEC policy name")
+	_ = c.MarkFlagRequired("zone")
+	_ = c.MarkFlagRequired("policy")
 	return c
 }

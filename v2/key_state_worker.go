@@ -273,23 +273,46 @@ func maintainStandbyKeys(conf *Config, kdb *KeyDB, standbyZskCount, standbyKskCo
 			continue
 		}
 
-		maintainStandbyKeysForType(kdb, zoneName, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", 256, standbyZskCount)
+		// RELAXED completeness counts standby ZSKs by ROLE only (algorithm-
+		// agnostic): N old-alg standbys satisfy the count, so an algorithm
+		// change generates nothing eagerly — the gradual FIFO roll mints the
+		// new algorithm only when the count actually drops (a standby was
+		// promoted). STRICT keeps per-(role,algorithm) counting (the maintained
+		// double-signature shape). See the algorithm-rollover plan §8.3 / D5.
+		relaxed := Conf.Internal.Completeness == CompletenessRelaxed
+		maintainStandbyKeysForType(kdb, zoneName, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", 256, standbyZskCount, relaxed)
+
+		// In relaxed mode, cap the standby-ZSK TOTAL (any algorithm) at
+		// standbyZskCount: with the algorithm-based deletion skipped, an
+		// asap-faster-than-drain or stray extra could otherwise bloat the
+		// DNSKEY RRset. Keep the oldest standbyZskCount (FIFO, by published_at),
+		// delete the youngest surplus, NEVER by algorithm. Shares the same
+		// role-total count as the maintainer above so the two never oscillate.
+		if relaxed {
+			capStandbyZsksByCount(kdb, zoneName, standbyZskCount)
+		}
 
 		if standbyKskCount > 0 && (zd.DnssecPolicy == nil || zd.DnssecPolicy.Rollover.Method == RolloverMethodNone) {
-			maintainStandbyKeysForType(kdb, zoneName, zd.DnssecPolicy.KSKAlgorithm, "KSK", 257, standbyKskCount)
+			// KSK is always per-(role,algorithm): relaxed mode's role-only
+			// discipline is a ZSK-roll property (the ZSK signs the whole zone);
+			// a KSK algorithm change is refused, not gradually rolled, here.
+			maintainStandbyKeysForType(kdb, zoneName, zd.DnssecPolicy.KSKAlgorithm, "KSK", 257, standbyKskCount, false)
 		}
 	}
 }
 
 // maintainStandbyKeysForType checks and maintains standby key count for a
-// specific key type (ZSK or KSK) in a zone.
-func maintainStandbyKeysForType(kdb *KeyDB, zoneName string, alg uint8, keytype string, expectedFlags uint16, standbyKeyCount int) {
+// specific key type (ZSK or KSK) in a zone. When roleOnly is true (relaxed-mode
+// ZSK), the standby/published pipeline counts are by ROLE (flags) only, not by
+// (role, algorithm): N old-algorithm standbys satisfy the count and nothing is
+// generated. When false (strict, or any KSK), counts are per-(role, algorithm).
+func maintainStandbyKeysForType(kdb *KeyDB, zoneName string, alg uint8, keytype string, expectedFlags uint16, standbyKeyCount int, roleOnly bool) {
 	standbyKeys, err := GetDnssecKeysByState(kdb, zoneName, DnskeyStateStandby)
 	if err != nil {
 		lgSigner.Error("KeyStateWorker: error getting standby keys", "zone", zoneName, "keytype", keytype, "err", err)
 		return
 	}
-	standbyCount := countKeysByFlagsAndAlg(standbyKeys, expectedFlags, alg)
+	standbyCount := countKeysForMaintain(standbyKeys, expectedFlags, alg, roleOnly)
 
 	if standbyCount >= standbyKeyCount {
 		return
@@ -300,7 +323,7 @@ func maintainStandbyKeysForType(kdb *KeyDB, zoneName string, alg uint8, keytype 
 		lgSigner.Error("KeyStateWorker: error getting published keys", "zone", zoneName, "keytype", keytype, "err", err)
 		return
 	}
-	publishedCount := countKeysByFlagsAndAlg(publishedKeys, expectedFlags, alg)
+	publishedCount := countKeysForMaintain(publishedKeys, expectedFlags, alg, roleOnly)
 
 	if publishedCount > 0 {
 		lgSigner.Debug("KeyStateWorker: keys in pipeline, not generating", "zone", zoneName, "keytype", keytype, "published", publishedCount)
@@ -320,14 +343,53 @@ func maintainStandbyKeysForType(kdb *KeyDB, zoneName string, alg uint8, keytype 
 	}
 }
 
-// countKeysByFlagsAndAlg counts keys matching flags and algorithm.
-// ZSK: flags=256, KSK/CSK: flags=257.
-func countKeysByFlagsAndAlg(keys []DnssecKeyWithTimestamps, expectedFlags uint16, alg uint8) int {
+// capStandbyZsksByCount enforces the relaxed-mode standby-ZSK total cap: if more
+// than standbyZskCount standby ZSKs (flags=256, any algorithm) exist, delete the
+// YOUNGEST surplus (highest published_at), keeping the oldest standbyZskCount.
+// GetDnssecKeysByState returns standbys ordered published_at ASC, so the oldest
+// (furthest through propagation, next to promote) are kept and only the tail is
+// removed. Removal here is safe: a standby key has never signed, so there are no
+// RRSIGs to orphan — its only footprint is the DNSKEY RRset. This shares the
+// role-total count with maintainStandbyKeysForType(roleOnly=true), so generate
+// and cap agree and never oscillate.
+func capStandbyZsksByCount(kdb *KeyDB, zoneName string, standbyZskCount int) {
+	standbyKeys, err := GetDnssecKeysByState(kdb, zoneName, DnskeyStateStandby)
+	if err != nil {
+		lgSigner.Error("KeyStateWorker: cap: error getting standby keys", "zone", zoneName, "err", err)
+		return
+	}
+	var zsks []DnssecKeyWithTimestamps
+	for _, k := range standbyKeys {
+		if k.Flags == 256 {
+			zsks = append(zsks, k)
+		}
+	}
+	if len(zsks) <= standbyZskCount {
+		return
+	}
+	for _, k := range zsks[standbyZskCount:] {
+		lgSigner.Info("KeyStateWorker: relaxed cap: removing youngest surplus standby ZSK",
+			"zone", zoneName, "keyid", k.KeyTag, "have", len(zsks), "cap", standbyZskCount,
+			"alg", dns.AlgorithmToString[k.Algorithm])
+		if err := UpdateDnssecKeyState(kdb, zoneName, k.KeyTag, DnskeyStateRemoved); err != nil {
+			lgSigner.Error("KeyStateWorker: cap: remove surplus standby ZSK failed", "zone", zoneName, "keyid", k.KeyTag, "err", err)
+		}
+	}
+}
+
+// countKeysForMaintain counts keys for the standby maintainer. With roleOnly it
+// matches by flags (role) only — algorithm-agnostic, the relaxed-mode ZSK shape;
+// otherwise it matches flags AND algorithm (strict / KSK).
+func countKeysForMaintain(keys []DnssecKeyWithTimestamps, expectedFlags uint16, alg uint8, roleOnly bool) int {
 	count := 0
 	for _, k := range keys {
-		if k.Flags == expectedFlags && k.Algorithm == alg {
-			count++
+		if k.Flags != expectedFlags {
+			continue
 		}
+		if !roleOnly && k.Algorithm != alg {
+			continue
+		}
+		count++
 	}
 	return count
 }

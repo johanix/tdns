@@ -124,6 +124,12 @@ type RolloverStatus struct {
 	// removed ZSKs beyond the display cap, omitted from ZSKs.
 	HiddenRemovedZskCount int `json:"hiddenRemovedZskCount,omitempty"`
 
+	// AlgTransition is set when a ZSK algorithm rollover is in flight (an
+	// active/standby/retired ZSK whose algorithm ≠ the effective-policy ZSK
+	// algorithm — the same drain-window predicate the change-policy re-entrancy
+	// guard uses). nil when no roll is in progress.
+	AlgTransition *AlgTransitionInfo `json:"algTransition,omitempty"`
+
 	// Policy summary. Verbose mode shows this; compact mode hides it.
 	Policy *PolicySummary `json:"policy,omitempty"`
 
@@ -215,6 +221,18 @@ type PolicySummary struct {
 	MaxAttemptsBeforeBackoff int    `json:"maxAttemptsBeforeBackoff"`
 	SoftfailDelay            string `json:"softfailDelay"`
 	ClampingMargin           string `json:"clampingMargin,omitempty"`
+}
+
+// AlgTransitionInfo describes an in-flight ZSK algorithm rollover for the
+// status header line: e.g. "ZSK alg rollover: ED25519 → MAYO5 (in progress)".
+// FromAlg/ToAlg are algorithm names; Done/Total are a coarse progress count
+// (target-alg ZSKs / all live ZSK pipeline members).
+type AlgTransitionInfo struct {
+	Role    string `json:"role"` // currently always "ZSK"
+	FromAlg string `json:"fromAlg"`
+	ToAlg   string `json:"toAlg"`
+	Done    int    `json:"done"`
+	Total   int    `json:"total"`
 }
 
 // RolloverWhenResponse is returned by GET /api/v1/rollover/when.

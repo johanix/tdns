@@ -8,10 +8,14 @@ for relaxed-mode ZSK algorithm rollover. Progress (2026-06-21):
   (merge commit b4c59a2d). Testbed-confirmed on cpt.p.axfr.net.
 - STEP 1 (global dnssec.completeness knob): DONE — same PR #261. Knob
   parses + is exposed on Conf.Internal; not yet read (that is step 2).
-- STEP 2 (the actual relaxed-mode ZSK ALGORITHM roll): NOT STARTED. This
-  is where the real logic lives — role-only standby counting, the sweep
-  fix, the FIFO ORDER BY fix, change-policy, and the KSK/CSK/both-role/
-  re-entrancy refusals.
+- STEP 2 (the actual relaxed-mode ZSK ALGORITHM roll): DONE — branch
+  feat/zsk-alg-rollover-step2 (not yet merged). Role-only standby
+  counting + youngest-surplus cap, the relaxed sweep skip, the FIFO
+  ORDER BY fix, change-policy (CLI `auto-rollover policy-change`), the
+  KSK/CSK/both-role/strict/re-entrancy refusals, and the status
+  alg-transition line — all built, with the §8.4 test matrix green under
+  `go test -race`. Testbed validation operator-gated. See §8.3 for the
+  as-built record.
 
 Remaining §6 open items (CSK handling, multi-ds vs double-signature,
 strict-mode alg rollover, large-zone secondary propagation) are LATER
@@ -819,7 +823,47 @@ Verify: T2 (§8.4) + a parse test (good/bad values, default).
 
 ### 8.3 Step 2 — relaxed-mode ZSK alg roll
 
-STATUS: NOT STARTED. This is the next chunk and the highest-risk of the
+STATUS: DONE (branch feat/zsk-alg-rollover-step2; build + `go test ./...
+-race` green, both auth+cli binaries link; only the two pre-existing
+TestGlobalStuffValidate* BaseUri/URL failures remain, unrelated).
+As-built:
+  - FIFO fix: `GetDnssecKeysByState` now `ORDER BY published_at ASC,
+    keyid ASC` (global; all callers consume as a set, none depended on
+    the prior unspecified order). Makes ZSK standby promotion FIFO.
+  - `reconcileActiveKeyAlgorithms` (sign.go) is mode-aware:
+    KSK mismatch (either mode) → REFUSE (error); ZSK mismatch + strict →
+    REFUSE; ZSK mismatch + relaxed → no-op (FIFO carries it). The
+    standby/published algorithm-based deletion is SKIPPED for same-role
+    ZSK keys in relaxed mode (kept for KSK / strict). CSK still
+    early-returns (refused at entry). Refusals are errors so a background
+    re-sign cannot run the unsafe swap (entry-layer front door + reconcile
+    backstop, per the resolved decision).
+  - Role-only standby counting + cap (key_state_worker.go): relaxed-mode
+    ZSK maintainer counts by role only (`countKeysForMaintain` roleOnly);
+    `capStandbyZsksByCount` deletes the youngest surplus standby ZSK (by
+    published_at, any algorithm), sharing the one role-total count so
+    generate and cap never oscillate. `countKeysByFlagsAndAlg` renamed →
+    `countKeysForMaintain`.
+  - change-policy (apihandler_zone.go `changeZonePolicy`, command
+    "change-policy"; CLI `auto-rollover policy-change -z -p`): reuses the
+    set-policy override-write + rebind + SignZone path (D3 — relaxed
+    reconcile no-ops the swap). Entry guards BEFORE any override write:
+    CSK → refuse; both-role → refuse; KSK-only → refuse; re-entrancy via
+    the fuller drain-window predicate `zskAlgRollInFlight` (standby/active/
+    retired ZSK of an alg ≠ target) → refuse; strict-mode ZSK change →
+    refuse. CLI help spells out the two-command (policy-change then
+    `asap --zsk`) workflow.
+  - Status: `RolloverStatus.AlgTransition` (`AlgTransitionInfo`) populated
+    from the shared `zskAlgRollInFlight` predicate; CLI header shows
+    `alg rollover: ZSK X → Y (in progress), N of M on new alg`.
+  - Tests (zsk_alg_rollover_test.go + sign_reconcile_test.go split):
+    T1, T2, T2b, T2c, T2d (pre-promotion + drain-window), T-timing, T3,
+    T3b, T4, T4b, T4c, T5, T6, T7, T8, T9 — all green under -race. The old
+    immediate-retire TestReconcileActiveKeyAlgorithms is replaced by
+    strict-refuse + same-alg-noop variants.
+  Actuals: ~310 source + ~470 test LOC. Testbed validation operator-gated.
+
+(Original plan, retained as the build spec.) The highest-risk of the
 three (MED–HIGH): it touches reconcileActiveKeyAlgorithms (the §2
 bogus-zone path is one wrong branch away) and carries the heaviest test
 matrix. Builds on the now-merged steps 0+1 (the manual trigger, the
