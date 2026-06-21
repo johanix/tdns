@@ -594,27 +594,11 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	// apex glue on positive answers. Referrals and NXDOMAIN/NODATA paths are
 	// unaffected (their authority/additional sections are still required).
 	minimalResponses := false
-	var minRespRaw string
-	var minRespPresent bool
 	if kdb != nil && kdb.Options != nil {
-		minRespRaw, minRespPresent = kdb.Options[AuthOptMinimalResponses]
-		if minRespPresent && minRespRaw == "true" {
+		if v, ok := kdb.Options[AuthOptMinimalResponses]; ok && v == "true" {
 			minimalResponses = true
 		}
 	}
-	// TEMP DIAGNOSTIC (minimal-responses not suppressing NS+glue): log the value
-	// actually resolved at query time, plus why. Logged at Info so it is visible
-	// at the deployed log level. Remove once root-caused.
-	lgHandler.Info("minimal-responses resolved",
-		"zone", zd.ZoneName, "minimalResponses", minimalResponses,
-		"kdbNil", kdb == nil, "optsNil", kdb != nil && kdb.Options == nil,
-		"present", minRespPresent, "rawValue", minRespRaw,
-		"optionCount", func() int {
-			if kdb != nil && kdb.Options != nil {
-				return len(kdb.Options)
-			}
-			return 0
-		}())
 
 	// Get DNSSEC keys if KeyDB is available and zone has DNSSEC enabled
 	var dak *DnssecKeys

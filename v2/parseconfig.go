@@ -408,6 +408,13 @@ func (conf *Config) ParseConfig(reload bool) error {
 				return err
 			}
 		} else if conf.Internal.KeyDB != nil {
+			// Refresh the live KeyDB's Options from the freshly-parsed config so
+			// a reloaded option (e.g. minimal-responses) takes effect without a
+			// restart. The KeyDB is built once at startup and reused across
+			// reloads, but the query responder reads kdb.Options — without this,
+			// reload updated only conf.DnsEngine.Options (the presentation) while
+			// the responder kept the stale startup map.
+			conf.Internal.KeyDB.Options = conf.DnsEngine.Options
 			if err := applyOutboundSoaSerial(conf.Internal.KeyDB, conf.DnsEngine.OutboundSoaSerial); err != nil {
 				return err
 			}
