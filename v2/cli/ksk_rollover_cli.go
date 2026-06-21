@@ -1283,9 +1283,9 @@ func printRolloverKeyTable(keys []tdns.RolloverKeyEntry, verbose bool, kskTable 
 		// ZSK roll is visible the same way (the active key's number ticks
 		// up each roll).
 		if verbose {
-			rows = append(rows, "active_seq|keyid|alg|state|state_since|next_roll")
+			rows = append(rows, "active_seq|keyid|alg|state|state_since|next_transition")
 		} else {
-			rows = append(rows, "active_seq|keyid|state|state_since|next_roll")
+			rows = append(rows, "active_seq|keyid|state|state_since|next_transition")
 		}
 		for _, k := range keys {
 			seqStr := "-"
@@ -1327,40 +1327,23 @@ func printZskRolloverSummary(s *tdns.RolloverStatus) {
 		return
 	}
 
-	var activeKey *tdns.RolloverKeyEntry
+	// Zone-level summary only: zsk.lifetime (not in the per-key table) and
+	// whether a propagated standby is ready to roll into. The active key's
+	// active_at / next-transition timing lives in the key table below, so it
+	// is not repeated here (avoids the redundant header lines).
 	standbyReady := false
 	for i := range s.ZSKs {
-		switch s.ZSKs[i].State {
-		case tdns.DnskeyStateActive:
-			if activeKey == nil {
-				activeKey = &s.ZSKs[i]
-			}
-		case tdns.DnskeyStateStandby:
+		if s.ZSKs[i].State == tdns.DnskeyStateStandby {
 			standbyReady = true
+			break
 		}
 	}
 
 	fmt.Printf("  zsk.lifetime                 %s\n", lifetimeStr)
-	if activeKey == nil {
-		fmt.Println("  active ZSK                   none")
-	} else {
-		fmt.Printf("  active ZSK                   keyid %d\n", activeKey.KeyID)
-		if activeKey.StateSince != "" {
-			if t, err := time.Parse(time.RFC3339, activeKey.StateSince); err == nil {
-				fmt.Printf("  active_at                    %s\n", formatTimeWithDelta(t))
-				next := t.Add(lifetime)
-				fmt.Printf("  next roll (scheduled)        %s\n", formatTimeWithDelta(next))
-			} else {
-				fmt.Println("  active_at                    unknown")
-			}
-		} else {
-			fmt.Println("  active_at                    unknown (not stamped yet)")
-		}
-	}
 	if standbyReady {
-		fmt.Println("  standby ZSK                  ready")
+		fmt.Println("  standby                      ready (a due roll can proceed)")
 	} else {
-		fmt.Println("  standby ZSK                  not ready")
+		fmt.Println("  standby                      none (a due roll will wait for one)")
 	}
 }
 
