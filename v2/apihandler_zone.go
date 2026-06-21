@@ -406,10 +406,16 @@ func changeZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, erro
 			zd.ZoneName, dns.AlgorithmToString[curKSKAlg], dns.AlgorithmToString[pol.KSKAlgorithm])
 	}
 
-	// Re-entrancy: refuse if a ZSK alg roll is already in flight (fuller
-	// drain-window predicate). This covers both the pre-promotion phase and the
-	// drain window (D4's blind spot), and the back-to-original-alg sub-case.
-	if inflight, err := zskAlgRollInFlight(kdb, zd.ZoneName, pol.ZSKAlgorithm); err != nil {
+	// Re-entrancy: refuse if a ZSK alg roll is already in flight. "In flight" is
+	// measured against the zone's CURRENTLY-BOUND ZSK algorithm (curZSKAlg), NOT
+	// the incoming target: before any roll, every ZSK is on the bound algorithm,
+	// so there is nothing in flight and this first change-policy proceeds. A
+	// genuine mid-roll has ZSKs of an algorithm other than the bound policy's
+	// (standby/active/retired) — that is what we refuse a second change-policy
+	// on. This also catches the back-to-original sub-case: mid fastroll→mayo1
+	// (bound=mayo1) the still-draining old ED25519 ZSKs are ≠ the bound MAYO1, so
+	// a change-policy back to ED25519 is correctly refused while they drain.
+	if inflight, err := zskAlgRollInFlight(kdb, zd.ZoneName, curZSKAlg); err != nil {
 		return "", fmt.Errorf("change-policy: checking in-flight roll for zone %s: %w", zd.ZoneName, err)
 	} else if inflight.InFlight {
 		return "", fmt.Errorf("change-policy: a ZSK algorithm rollover is already in progress for zone %s (%s→%s); wait for it to complete, or cancel it with \"auto-rollover cancel -z %s --zsk\" before changing course",

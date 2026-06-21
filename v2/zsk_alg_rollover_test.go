@@ -3,6 +3,7 @@ package tdns
 import (
 	"log"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -538,6 +539,62 @@ func TestT7CompletedChangeNotInProgress(t *testing.T) {
 	}
 	if st.InFlight {
 		t.Fatalf("completed same-alg state must not read in-flight: %+v", st)
+	}
+}
+
+// Regression: a FRESH zone whose ZSKs are all on its currently-bound algorithm
+// (active + standby + draining retired, all the same alg — the normal starting
+// state before any roll) must NOT read as a roll-in-flight relative to that
+// bound algorithm. The re-entrancy guard measures against the BOUND alg, not the
+// incoming target; checking against a different target would falsely report
+// "already in progress" on the very first change-policy. (Caught on the testbed
+// rolling fastroll ED25519 → mayo1.)
+func TestReentrancyFreshZoneNotInFlight(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	// Mirror a live fastroll zone: active + standby + a draining retired ZSK,
+	// all ED25519 (the bound alg).
+	if _, _, err := kdb.GenerateKeypair(algZone, "test", DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, "ZSK", nil); err != nil {
+		t.Fatalf("active ZSK: %v", err)
+	}
+	genZSK(t, kdb, DnskeyStateStandby, dns.ED25519)
+	genZSK(t, kdb, DnskeyStateRetired, dns.ED25519)
+
+	// Against the BOUND alg (ED25519): nothing is in flight — the roll has not
+	// started.
+	if st, err := zskAlgRollInFlight(kdb, algZone, dns.ED25519); err != nil {
+		t.Fatalf("zskAlgRollInFlight(bound): %v", err)
+	} else if st.InFlight {
+		t.Fatalf("fresh same-alg zone must not read in-flight vs its bound alg: %+v", st)
+	}
+
+	// Sanity: against a DIFFERENT alg the predicate trivially trips — which is
+	// exactly why the guard must use the bound alg, not the target.
+	if st, err := zskAlgRollInFlight(kdb, algZone, dns.RSASHA256); err != nil {
+		t.Fatalf("zskAlgRollInFlight(target): %v", err)
+	} else if !st.InFlight {
+		t.Fatal("vs a different alg the predicate should trip (guards the bound-vs-target reasoning)")
+	}
+}
+
+// Regression (end-to-end): changeZonePolicy on a fresh same-alg zone must get
+// PAST the re-entrancy guard (it may fail later in SignZone for lack of real
+// zone data, but it must NOT be refused as "already in progress").
+func TestChangePolicyFreshZonePassesReentrancyGuard(t *testing.T) {
+	withCompleteness(t, CompletenessRelaxed)
+	kdb := newTestKeyDB(t)
+	zd := algTestZone(dns.ED25519, dns.ED25519) // bound fastroll-like: ZSK ED25519
+	if _, _, err := kdb.GenerateKeypair(algZone, "test", DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, "ZSK", nil); err != nil {
+		t.Fatalf("active ZSK: %v", err)
+	}
+	genZSK(t, kdb, DnskeyStateStandby, dns.ED25519)
+	withPolicies(t, map[string]DnssecPolicy{
+		"mayoish": {Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.RSASHA256},
+	})
+	_, err := changeZonePolicy(zd, kdb, "mayoish")
+	// It will likely error in SignZone (no real zone data), but NOT with the
+	// re-entrancy refusal.
+	if err != nil && strings.Contains(err.Error(), "already in progress") {
+		t.Fatalf("fresh zone wrongly refused as already-in-progress: %v", err)
 	}
 }
 
