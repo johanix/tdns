@@ -604,6 +604,9 @@ decisions, and tests in §8.
 | ZSK active_at lives in DnssecKeyStore (not RolloverKeyState) | keystore.go:1075,1189,1293,1393 |
 | DnssecKeyStore schema (add ZSK active_seq column here — §8.1) | db_schema.go:68-83 |
 | KSK active_seq pattern to mirror (MAX(seq)+1) | ksk_rollover_zone_state.go:306-325 |
+| KSK status table active_seq column (parity target) | cli/ksk_rollover_cli.go:1198-1205 |
+| ZSK status table (no active_seq column today — add it) | cli/ksk_rollover_cli.go:~1216 |
+| RolloverKeyEntry.ActiveSeq (populate for ZSK too) | rollover_api_funcs.go (rolloverKeyEntryFromKeystoreKey) |
 | ZonePolicyOverride table (zone→target name, reuse) | db_zone_policy_override.go |
 | EffectiveDnssecPolicyName (override else config) | db_zone_policy_override.go:80 |
 | Override resolved into bound policy at load/refresh | refreshengine.go:212,340,531 |
@@ -746,9 +749,19 @@ which is the intended "wipe and start over" semantics — a restarted seq
 after `clear` is correct, not a bug. (Note: the KSK `MAX(active_seq)+1`
 over RolloverKeyState has the same property; this mirrors it.)
 
-Display: fill the ZSK key table's `active_seq` column (currently always
-`-`) from `DnssecKeyStore.active_seq`, and optionally show the active
-ZSK's number in the ZSK status header.
+Display (REQUIRED — KSK parity): surface the seq in `auto-rollover status`
+exactly as KSK does. The KSK key table has `active_seq` as its first
+column (cli/ksk_rollover_cli.go:1198-1205, from `RolloverKeyEntry.ActiveSeq`);
+the ZSK key table currently has NO such column (its row format is
+`keyid|state|active_at|next_roll`, cli/ksk_rollover_cli.go ~1216). So:
+  - ADD an `active_seq` column to the ZSK key table, matching the KSK
+    layout (seq shown per key; `-` when unset).
+  - Populate `RolloverKeyEntry.ActiveSeq` for ZSK entries in
+    `loadRolloverKeyEntries`/`rolloverKeyEntryFromKeystoreKey`
+    (rollover_api_funcs.go) from the new `DnssecKeyStore.active_seq`
+    (it is already populated for KSKs).
+Optionally also show the active ZSK's number in the ZSK status header. Net:
+a ZSK roll is visible in `auto-rollover status` the same way a KSK roll is.
 
 CLI/API: `auto-rollover asap`/`cancel` gain ZSK support (today they are
 KSK-oriented), or add ZSK-typed variants. Keep it symmetric with KSK.
@@ -999,6 +1012,9 @@ Step 0 (ZSK manual parity):
   oldest (removed) keys does NOT regress the counter (MAX still held by
   the newest key). After `clear` (all ZSK rows deleted) the seq restarts
   (accepted, §8.1). KSK and ZSK seqs are independent (scoped by flags).
+  DISPLAY: `RolloverKeyEntry.ActiveSeq` is populated for ZSK entries and
+  the `auto-rollover status` ZSK key table shows an `active_seq` column
+  (KSK parity); a rolled ZSK shows its incremented seq.
 
 Step 1 (mode knob):
 - T2 — ZSK alg change requested while global mode is `strict`: refused
