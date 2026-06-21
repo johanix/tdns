@@ -1,13 +1,13 @@
 # Algorithm rollover via the auto-rollover engine
 
-Status (2026-06-17): DESIGN + IMPLEMENTATION PLAN for the first step.
-Nothing implemented yet. §0–§7 are the design/rationale; §8 is the
-turnkey build order for the first step (relaxed-mode ZSK algorithm
-rollover), with resolved mechanical decisions, test cases, and success
-criteria — ready to hand to an implementing agent. Remaining §6 open
-items (CSK handling, multi-ds vs double-signature, strict-mode alg
-rollover, large-zone secondary propagation) are LATER steps, out of scope
-for the first.
+Status: DESIGN + IMPLEMENTATION PLAN — FINAL, ready to implement. Three
+independent review passes complete; pass 3 verdict "implement §8 as
+written." Nothing implemented yet. §0–§7 are the design/rationale; §8 is
+the turnkey build order for the first step (relaxed-mode ZSK algorithm
+rollover), with resolved mechanical decisions (D1–D5), test cases, and
+success criteria. Remaining §6 open items (CSK handling, multi-ds vs
+double-signature, strict-mode alg rollover, large-zone secondary
+propagation) are LATER steps, out of scope for the first.
 
 Branch context: dnssec-policy-change-phase1-2. Builds on the per-role
 KSK/ZSK algorithm work (PR #259) and the policy-change work documented in
@@ -516,9 +516,12 @@ decisions, and tests in §8.
   computation, counters, and promotion.
 - The change to the rollover machinery is the algorithm the key generator
   mints, plus an entry gate (new algorithm fully propagated before the old
-  is demoted). Promotion unchanged (FIFO); DS handling unchanged (already
-  alg-blind); the mixed-algorithm DS window falls out for free. No new key
-  state.
+  is demoted). Promotion stays FIFO and algorithm-agnostic — but FIFO must
+  first be MADE correct: the standby-selection query is unordered today, so
+  promotion is currently arbitrary; adding `ORDER BY published_at` is a
+  required fix (§8.3, a pre-existing latent bug). DS handling unchanged
+  (already alg-blind); the mixed-algorithm DS window falls out for free. No
+  new key state.
 - Completeness (RFC 4035 §2.2) binds the signer, not the validator. The
   signer runs in one of two modes (§3.2.1, §4.3): STRICT keeps the old-alg
   key active and double-signing through the drain window; RELAXED retires
@@ -547,10 +550,13 @@ decisions, and tests in §8.
 1. RESOLVED (§4.5, §8.3) — CSK algorithm change is HARD-REJECTED (replacing
    today's silent no-op) until engine support exists. Supporting it via the
    engine is later work.
-2. RESOLVED (§8.3) — explicit `auto-rollover policy-change` command for
-   the trigger (reuses set-policy's override write); the relaxed-mode
-   reconcile (D3) is what makes the roll gradual rather than a synchronous
-   swap. Keeps the manual/automated boundary clean (§3.5).
+2. RESOLVED (§8.3) — two distinct commands, not one "trigger": explicit
+   `auto-rollover policy-change` BINDS the target policy (sets the algorithm
+   of future-generated keys, reusing set-policy's override write), and the
+   ZSK `asap` command (§8.1) is the THROTTLE that promotes the next FIFO
+   standby. The relaxed-mode reconcile (D3) makes the roll gradual rather
+   than a synchronous swap. Keeps the manual/automated boundary clean
+   (§3.5). See §4.6 for the change-policy-then-asap operator workflow.
 3. multi-ds vs double-signature — multi-ds is attractive for PQ KSKs
    (§3.3, Shor's-window), so the KSK pipeline extends multi-ds rather than
    implementing the (currently unimplemented) double-signature method. The
@@ -847,15 +853,20 @@ and it is fatal to an alg roll: an out-of-order promotion could activate a
 NEW-alg standby before the OLD-alg ones have drained, defeating the whole
 gradual model.
 
+SCOPE: this is a ZSK-path bug only. The KSK promotion path
+(`AtomicRollover` → `listRolloverStandbyKeysTx`, ksk_rollover_zone_state.go:
+493) ALREADY orders by `published_at ASC, keyid ASC` — it is correctly
+FIFO. Do NOT touch the KSK path. The fix is confined to the ZSK selection.
+
 FIX: add an explicit `ORDER BY published_at ASC` (tie-break by keyid) to
-the standby selection — either in `GetDnssecKeysByState` (broadest fix;
-check callers tolerate ordered results — they should) or in `RolloverKey`'s
-standby pick specifically. Oldest `published_at` = furthest through
-propagation = correct next-to-promote. After the fix, promotion is FIFO by
-construction. Do NOT add algorithm-aware standby selection — ordering
-alone gives the correct old-then-new drain. (Per the "fix pointed-out
-bugs in the same PR" rule, fix this even though it predates the alg-roll
-work.)
+the ZSK standby selection — either in `GetDnssecKeysByState` (broadest
+fix; check callers tolerate ordered results — they should) or in
+`RolloverKey`'s standby pick specifically. Oldest `published_at` =
+furthest through propagation = correct next-to-promote. After the fix,
+promotion is FIFO by construction. Do NOT add algorithm-aware standby
+selection — ordering alone gives the correct old-then-new drain. (Per the
+"fix pointed-out bugs in the same PR" rule, fix this even though it
+predates the alg-roll work.)
 
 change-policy is set-the-future-algorithm; `asap` is the throttle (D5):
 `auto-rollover policy-change -z <zone> -p <policy>` writes the
@@ -868,6 +879,12 @@ with the step-0 ZSK `asap` (each `asap` promotes the next FIFO standby
 now; successive `asap`s run back-to-back because the existing standbys are
 already propagated). CLI + API + wire field for `change-policy`, modeled
 on set-policy; `asap` is the step-0 command, reused unchanged.
+CLI help requirement: `change-policy`'s help/output must make the
+two-command workflow explicit — e.g. after binding the policy, print
+"policy bound; the algorithm will roll over the next ZSK cadence, or run
+`auto-rollover asap -z <zone>` to accelerate." An operator must not have to
+read this doc to discover that `change-policy` alone does not perform the
+roll.
 
 Rapid-asap drain transient (accepted, no throttle): `asap`-ing faster
 than the retire/drain side clears can transiently hold MULTIPLE retired
