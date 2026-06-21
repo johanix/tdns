@@ -839,8 +839,10 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 	// Zone-global header: the effective policy and any in-flight algorithm
 	// rollover are facts about the ZONE, not about the KSK specifically, so
 	// they print once at the top — visible whether the operator views both
-	// roles, only KSK (--ksk), or only ZSK (--zsk).
-	printZoneGlobalHeader(s)
+	// roles, only KSK (--ksk), or only ZSK (--zsk). In verbose mode the full
+	// policy detail follows here too (an expansion of the policy line), rather
+	// than tacked on at the end of the report.
+	printZoneGlobalHeader(s, verbose)
 
 	currentTime := formatRolloverTimeAbsolute(s.CurrentTime)
 
@@ -889,30 +891,16 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 	// for one or two keys); a dedicated section reads better and
 	// gives the message room to breathe.
 	printRolloverKeyErrors(s, showKSK, showZSK, verbose)
-
-	if verbose && s.Policy != nil && (showKSK || showZSK) {
-		fmt.Println()
-		fmt.Println("  policy:")
-		fmt.Printf("    name                         %s\n", s.Policy.Name)
-		fmt.Printf("    algorithm                    %s\n", s.Policy.Algorithm)
-		fmt.Printf("    ksk.lifetime                 %s\n", s.Policy.KskLifetime)
-		if s.Policy.ZskLifetime != "" {
-			fmt.Printf("    zsk.lifetime                 %s\n", s.Policy.ZskLifetime)
-		}
-		fmt.Printf("    rollover.ds-publish-delay    %s\n", s.Policy.DsPublishDelay)
-		fmt.Printf("    rollover.max-attempts        %d\n", s.Policy.MaxAttemptsBeforeBackoff)
-		fmt.Printf("    rollover.softfail-delay      %s\n", s.Policy.SoftfailDelay)
-		if s.Policy.ClampingMargin != "" {
-			fmt.Printf("    clamping.margin              %s\n", s.Policy.ClampingMargin)
-		}
-	}
 }
 
 // printZoneGlobalHeader prints the zone-wide facts that belong above BOTH the
 // KSK and ZSK sections: the effective policy (name + per-role algorithms) and
 // any in-flight ZSK algorithm rollover. These are properties of the zone, not
 // of a particular key role, so they show regardless of --ksk / --zsk filtering.
-func printZoneGlobalHeader(s *tdns.RolloverStatus) {
+// In verbose mode the full policy detail (an expansion of the policy line) is
+// printed here too — the name already appears in the policy line above, so the
+// detail block drops it and lays the rest out compactly in columns.
+func printZoneGlobalHeader(s *tdns.RolloverStatus, verbose bool) {
 	printed := false
 	if s.Policy != nil {
 		fmt.Printf("Current policy: %s\n", policyHeaderValue(s.Policy))
@@ -928,9 +916,72 @@ func printZoneGlobalHeader(s *tdns.RolloverStatus) {
 		fmt.Println(line)
 		printed = true
 	}
+	if verbose && s.Policy != nil {
+		printPolicyDetail(s.Policy)
+		printed = true
+	}
 	if printed {
 		fmt.Println()
 	}
+}
+
+// printPolicyDetail renders the verbose policy expansion compactly in columns,
+// grouped by category: KSK | ZSK | rollover | clamping. The policy name is
+// omitted (it is already in the "Current policy:" line). Both per-role
+// algorithms are shown — a policy is a zone-wide description, not role-filtered,
+// so the KSK and ZSK algorithm both belong here even under --ksk / --zsk.
+func printPolicyDetail(p *tdns.PolicySummary) {
+	kskAlg := p.KSKAlgorithm
+	zskAlg := p.ZSKAlgorithm
+	if kskAlg == "" && zskAlg == "" {
+		// CSK / legacy single-algorithm policy.
+		kskAlg = p.Algorithm
+	}
+
+	// Four category columns, each a list of "label: value" cells filled
+	// top-down; columnize aligns them into a grid.
+	cols := [4][]string{
+		{cell("ksk.algorithm", kskAlg), cell("ksk.lifetime", p.KskLifetime)},
+		{cell("zsk.algorithm", zskAlg), cell("zsk.lifetime", p.ZskLifetime)},
+		{
+			cell("rollover.ds-publish-delay", p.DsPublishDelay),
+			cell("rollover.max-attempts", fmt.Sprintf("%d", p.MaxAttemptsBeforeBackoff)),
+			cell("rollover.softfail-delay", p.SoftfailDelay),
+		},
+		{cell("clamping.margin", p.ClampingMargin)},
+	}
+
+	depth := 0
+	for _, c := range cols {
+		if len(c) > depth {
+			depth = len(c)
+		}
+	}
+
+	fmt.Println("policy:")
+	rows := make([]string, 0, depth)
+	for i := 0; i < depth; i++ {
+		fields := make([]string, 4)
+		for c := 0; c < 4; c++ {
+			if i < len(cols[c]) {
+				fields[c] = cols[c][i]
+			}
+		}
+		rows = append(rows, strings.Join(fields, "|"))
+	}
+	formatted := columnize.SimpleFormat(rows)
+	for _, line := range strings.Split(formatted, "\n") {
+		fmt.Printf("  %s\n", strings.TrimRight(line, " "))
+	}
+}
+
+// cell formats a "label: value" policy cell, or "" when the value is empty so
+// the slot collapses without printing a dangling label.
+func cell(label, value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	return label + ": " + value
 }
 
 // policyHeaderValue renders the one-line policy summary for the status
