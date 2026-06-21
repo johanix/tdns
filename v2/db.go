@@ -307,7 +307,7 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 		}
 	}
 	dbSetupTables(db)
-	return &KeyDB{
+	kdb := &KeyDB{
 		DB:                  db,
 		DBFile:              dbfile,
 		KeystoreSig0Cache:   make(map[string]*Sig0ActiveKeys),
@@ -315,8 +315,9 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 		KeystoreDnskeyCache: make(map[string]*DnssecKeys),
 		UpdateQ:             make(chan UpdateRequest),
 		KeyBootstrapperQ:    make(chan KeyBootstrapperRequest, 10),
-		Options:             options,
-	}, nil
+	}
+	kdb.SetOptions(options)
+	return kdb, nil
 }
 
 func NewSig0StoreT() *Sig0StoreT {

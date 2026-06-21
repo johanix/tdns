@@ -434,9 +434,9 @@ func changeZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, erro
 	// In relaxed mode the reconcile no-ops the synchronous swap, so SignZone
 	// here only adds RRSIGs by the (unchanged) active keys + re-stages the
 	// pipeline; no old-alg active ZSK is retired. ---
-	oldName := zd.DnssecPolicyName
 	zd.mu.Lock()
 	oldPol := zd.DnssecPolicy
+	oldName := zd.DnssecPolicyName
 	zd.DnssecPolicy = &pol
 	zd.DnssecPolicyName = policyName
 	zd.mu.Unlock()

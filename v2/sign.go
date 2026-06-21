@@ -400,17 +400,18 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 		return nil, err
 	}
 
-	// Reconcile the active key algorithms against the policy: retire any
-	// active key whose algorithm the policy no longer wants, so the
-	// generate-if-missing logic below replaces it with one of the policy's
-	// algorithm. Retired keys keep their DNSKEY published and their RRSIGs
-	// valid until the KeyStateWorker removes them, so the zone stays
-	// validatable (a graceful, zone-side algorithm change). On a no-op (keys
-	// already match the policy) this returns without changes — idempotent,
-	// safe on every sign/re-sign.
-	if retired, err := zd.reconcileActiveKeyAlgorithms(kdb, dak); err != nil {
+	// Reconcile the active key algorithms against the policy. An active-key
+	// algorithm mismatch is REFUSED with an error (a KSK mismatch in either
+	// mode, a ZSK mismatch under strict completeness) — never the legacy
+	// synchronous retire, which is the unsafe path for an algorithm change. A
+	// relaxed-mode ZSK mismatch is a no-op (the gradual roll carries it). The
+	// boolean return reports only whether non-active leftover keys
+	// (standby/published of a wrong algorithm) were removed, in which case we
+	// re-fetch the active set. On a same-algorithm zone this is an idempotent
+	// no-op, safe on every sign/re-sign.
+	if removed, err := zd.reconcileActiveKeyAlgorithms(kdb, dak); err != nil {
 		return nil, err
-	} else if retired {
+	} else if removed {
 		dak, err = zd.refreshActiveDnssecKeys(kdb, "after algorithm reconcile")
 		if err != nil {
 			return nil, err

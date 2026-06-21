@@ -156,6 +156,58 @@ func TestReconcileActiveZSKWrongAlgStrictRefuses(t *testing.T) {
 	}
 }
 
+// A wrong-algorithm active KSK is REFUSED in BOTH completeness modes — a KSK
+// algorithm rollover is parent-coordinated engine work (not yet built), and the
+// legacy immediate retire would bypass the standby DS gate and bogus the parent
+// chain (the §2 path). The reconcile must error and leave the KSK active.
+func TestReconcileActiveKSKWrongAlgRefuses(t *testing.T) {
+	for _, mode := range []string{CompletenessStrict, CompletenessRelaxed} {
+		t.Run(mode, func(t *testing.T) {
+			withCompleteness(t, mode)
+			kdb := newTestKeyDB(t)
+			zd := &ZoneData{
+				ZoneName: "example.",
+				Options:  map[ZoneOption]bool{OptOnlineSigning: true},
+				DnssecPolicy: &DnssecPolicy{
+					Mode:         DnssecPolicyModeKSKZSK,
+					KSKAlgorithm: dns.ED25519,   // policy wants ED25519 KSK
+					ZSKAlgorithm: dns.RSASHA256, // matching ZSK so only the KSK mismatches
+				},
+				Logger: log.New(os.Stderr, "", 0),
+			}
+
+			// Wrong-alg active KSK (RSASHA256, policy wants ED25519) + matching ZSK.
+			if _, _, err := kdb.GenerateKeypair(zd.ZoneName, "test", DnskeyStateActive, dns.TypeDNSKEY, dns.RSASHA256, "KSK", nil); err != nil {
+				t.Fatalf("generate KSK: %v", err)
+			}
+			if _, _, err := kdb.GenerateKeypair(zd.ZoneName, "test", DnskeyStateActive, dns.TypeDNSKEY, dns.RSASHA256, "ZSK", nil); err != nil {
+				t.Fatalf("generate ZSK: %v", err)
+			}
+
+			dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+			if err != nil {
+				t.Fatalf("GetDnssecKeys: %v", err)
+			}
+			removed, err := zd.reconcileActiveKeyAlgorithms(kdb, dak)
+			if err == nil {
+				t.Fatal("KSK alg mismatch must be refused with an error (both modes)")
+			}
+			if removed {
+				t.Fatal("refusal must not remove/retire any key")
+			}
+
+			// The wrong-alg KSK is STILL active (no synchronous swap).
+			dak2, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+			if err != nil {
+				t.Fatalf("GetDnssecKeys after refused reconcile: %v", err)
+			}
+			if len(dak2.KSKs) != 1 || dak2.KSKs[0].DnskeyRR.Algorithm != dns.RSASHA256 {
+				t.Fatalf("wrong-alg KSK must remain active after refusal, got %d KSK(s)", len(dak2.KSKs))
+			}
+		})
+	}
+}
+
 // Same-algorithm reconcile is a no-op in both modes (the common case): no
 // mismatch, no error, no key change.
 func TestReconcileActiveKeysSameAlgNoop(t *testing.T) {

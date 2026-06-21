@@ -408,13 +408,14 @@ func (conf *Config) ParseConfig(reload bool) error {
 				return err
 			}
 		} else if conf.Internal.KeyDB != nil {
-			// Refresh the live KeyDB's Options from the freshly-parsed config so
+			// Refresh the live KeyDB's options from the freshly-parsed config so
 			// a reloaded option (e.g. minimal-responses) takes effect without a
 			// restart. The KeyDB is built once at startup and reused across
-			// reloads, but the query responder reads kdb.Options — without this,
-			// reload updated only conf.DnsEngine.Options (the presentation) while
-			// the responder kept the stale startup map.
-			conf.Internal.KeyDB.Options = conf.DnsEngine.Options
+			// reloads, but the query responder reads them — without this, reload
+			// updated only conf.DnsEngine.Options (the presentation) while the
+			// responder kept the stale startup map. SetOptions swaps the map
+			// atomically, so the per-query lock-free readers are race-free.
+			conf.Internal.KeyDB.SetOptions(conf.DnsEngine.Options)
 			if err := applyOutboundSoaSerial(conf.Internal.KeyDB, conf.DnsEngine.OutboundSoaSerial); err != nil {
 				return err
 			}

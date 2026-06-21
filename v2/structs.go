@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -716,7 +717,11 @@ type KeyDB struct {
 	Ctx                 string
 	UpdateQ             chan UpdateRequest
 	KeyBootstrapperQ    chan KeyBootstrapperRequest
-	Options             map[AuthOption]string
+	// options holds the parsed DnsEngine auth options. It is read on the hot
+	// query path (QueryResponder, per request) and replaced wholesale on config
+	// reload, so it is stored behind an atomic.Pointer for lock-free reads and a
+	// race-free swap. Access via AuthOption()/SetOptions(), never directly.
+	options atomic.Pointer[map[AuthOption]string]
 	// OutboundSoaSerial is the resolved mode for outbound SOA serials:
 	// OutboundSoaSerialKeep / OutboundSoaSerialUnixtime / OutboundSoaSerialPersist.
 	// Sourced from DnsEngineConf.OutboundSoaSerial at parse, defaulted to
@@ -728,6 +733,26 @@ type KeyDB struct {
 // tdns-mp and can no longer access the unexported kdb.mu.
 func (kdb *KeyDB) Lock()   { kdb.mu.Lock() }
 func (kdb *KeyDB) Unlock() { kdb.mu.Unlock() }
+
+// SetOptions replaces the auth-option map atomically (config reload). A nil map
+// is normalized to an empty one so readers never observe a nil dereference.
+func (kdb *KeyDB) SetOptions(opts map[AuthOption]string) {
+	if opts == nil {
+		opts = map[AuthOption]string{}
+	}
+	kdb.options.Store(&opts)
+}
+
+// AuthOption returns the value for an auth option and whether it is set, reading
+// the current option map without a lock.
+func (kdb *KeyDB) AuthOption(key AuthOption) (string, bool) {
+	m := kdb.options.Load()
+	if m == nil {
+		return "", false
+	}
+	v, ok := (*m)[key]
+	return v, ok
+}
 
 type Tx struct {
 	*sql.Tx

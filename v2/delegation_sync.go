@@ -399,10 +399,8 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 
 	// Check the parent-update option to determine whether to use replace or delta mode
 	updateMode := UpdateModeDelta // default
-	if kdb.Options != nil {
-		if mode, exists := kdb.Options[AuthOptParentUpdate]; exists {
-			updateMode = mode
-		}
+	if mode, exists := kdb.AuthOption(AuthOptParentUpdate); exists {
+		updateMode = mode
 	}
 
 	var m *dns.Msg

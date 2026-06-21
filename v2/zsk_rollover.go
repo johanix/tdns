@@ -334,8 +334,17 @@ func ComputeZskRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time
 	}
 	out.Status = "ready"
 	earliest := now
-	if m, err := LoadZskManualRollover(kdb, zone); err == nil && m.Earliest != "" {
-		if t, perr := time.Parse(time.RFC3339, m.Earliest); perr == nil && t.After(earliest) {
+	// A pending manual asap with a future earliest pushes the soonest roll out
+	// to that time. A DB / parse failure here falls back to `earliest = now`
+	// (safe: the worker re-evaluates the manual request before it actually
+	// rolls — this is an observational read, so we log and continue rather than
+	// fail the whole "when" response).
+	if m, err := LoadZskManualRollover(kdb, zone); err != nil {
+		lgSigner.Warn("ComputeZskRolloverWhen: LoadZskManualRollover failed; ignoring manual earliest", "zone", zone, "err", err)
+	} else if m.Earliest != "" {
+		if t, perr := time.Parse(time.RFC3339, m.Earliest); perr != nil {
+			lgSigner.Warn("ComputeZskRolloverWhen: invalid manual_rollover_earliest; ignoring", "zone", zone, "value", m.Earliest, "err", perr)
+		} else if t.After(earliest) {
 			earliest = t
 		}
 	}
