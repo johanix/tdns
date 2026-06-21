@@ -938,17 +938,21 @@ func printPolicyDetail(p *tdns.PolicySummary) {
 		kskAlg = p.Algorithm
 	}
 
-	// Four category columns, each a list of "label: value" cells filled
-	// top-down; columnize aligns them into a grid.
-	cols := [4][]string{
-		{cell("ksk.algorithm", kskAlg), cell("ksk.lifetime", p.KskLifetime)},
-		{cell("zsk.algorithm", zskAlg), cell("zsk.lifetime", p.ZskLifetime)},
+	// Each of the four category columns is a list of (label, value) cells
+	// filled top-down. Emitting label and value as SEPARATE columnize columns
+	// (8 columns total, not 4) makes columnize align every label column AND
+	// every value column independently — so the values line up instead of
+	// wobbling with the label width.
+	type cell struct{ label, value string }
+	cols := [4][]cell{
+		{{"ksk.algorithm", kskAlg}, {"ksk.lifetime", p.KskLifetime}},
+		{{"zsk.algorithm", zskAlg}, {"zsk.lifetime", p.ZskLifetime}},
 		{
-			cell("rollover.ds-publish-delay", p.DsPublishDelay),
-			cell("rollover.max-attempts", fmt.Sprintf("%d", p.MaxAttemptsBeforeBackoff)),
-			cell("rollover.softfail-delay", p.SoftfailDelay),
+			{"rollover.ds-publish-delay", p.DsPublishDelay},
+			{"rollover.max-attempts", fmt.Sprintf("%d", p.MaxAttemptsBeforeBackoff)},
+			{"rollover.softfail-delay", p.SoftfailDelay},
 		},
-		{cell("clamping.margin", p.ClampingMargin)},
+		{{"clamping.margin", p.ClampingMargin}},
 	}
 
 	depth := 0
@@ -961,11 +965,14 @@ func printPolicyDetail(p *tdns.PolicySummary) {
 	fmt.Println("policy:")
 	rows := make([]string, 0, depth)
 	for i := 0; i < depth; i++ {
-		fields := make([]string, 4)
+		fields := make([]string, 0, 8)
 		for c := 0; c < 4; c++ {
-			if i < len(cols[c]) {
-				fields[c] = cols[c][i]
+			var label, value string
+			if i < len(cols[c]) && strings.TrimSpace(cols[c][i].value) != "" {
+				label = cols[c][i].label + ":"
+				value = cols[c][i].value
 			}
+			fields = append(fields, label, value)
 		}
 		rows = append(rows, strings.Join(fields, "|"))
 	}
@@ -973,15 +980,6 @@ func printPolicyDetail(p *tdns.PolicySummary) {
 	for _, line := range strings.Split(formatted, "\n") {
 		fmt.Printf("  %s\n", strings.TrimRight(line, " "))
 	}
-}
-
-// cell formats a "label: value" policy cell, or "" when the value is empty so
-// the slot collapses without printing a dangling label.
-func cell(label, value string) string {
-	if strings.TrimSpace(value) == "" {
-		return ""
-	}
-	return label + ": " + value
 }
 
 // policyHeaderValue renders the one-line policy summary for the status
