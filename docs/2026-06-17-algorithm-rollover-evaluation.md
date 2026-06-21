@@ -600,6 +600,8 @@ decisions, and tests in §8.
 | ZSK roll due + RolloverKey (same-alg today) | zsk_rollover.go:17,59; keystore.go:1318 |
 | RolloverKey standby pick (first by flags — see next) | keystore.go:1352-1358 |
 | GetDnssecKeysByState — UNORDERED query (FIFO bug; needs ORDER BY) | keystore.go:1178,1183,1186 |
+| KSK active_at self-heal (mirror for ZSK — §8.1) | ksk_rollover_automated.go:1690 |
+| ZSK active_at lives in DnssecKeyStore (not RolloverKeyState) | keystore.go:1075,1189,1293,1393 |
 | ZonePolicyOverride table (zone→target name, reuse) | db_zone_policy_override.go |
 | EffectiveDnssecPolicyName (override else config) | db_zone_policy_override.go:80 |
 | Override resolved into bound policy at load/refresh | refreshengine.go:212,340,531 |
@@ -697,6 +699,28 @@ helpers (`Set*`/`Clear*`) for the new table.
 when a manual request is set even if lifetime has not elapsed), mirroring
 KSK `rolloverDue` (`ksk_rollover_automated.go:1559`).
 
+REQUIRED — ZSK `active_at` self-heal (a real pre-existing bug, observed in
+production): a ZSK whose `active_at` is unstamped (NULL) makes both the
+lifetime-driven roll AND the manual roll undecidable — `zskRollDue` reads
+`activeZSK.ActiveAt`, and a nil `active_at` means "lifetime can't be
+evaluated," so the roll never fires. (Seen live: cpt.p.axfr.net's active
+ZSK sat with `active_at: unknown (not stamped yet)` and was stuck — no
+automatic recovery, and no manual override since ZSK has no `asap`.) KSK
+has a self-heal for exactly this (`healBootstrapActiveAt`,
+ksk_rollover_automated.go:1690); ZSK has none.
+
+Add the ZSK analog, and note it is SIMPLER than the KSK one: ZSK
+`active_at` lives directly in `DnssecKeyStore.active_at` (read by
+`GetDnssecKeysByState`, stamped by the standby→active UPDATE at
+keystore.go:1075/1293/1393), NOT in `RolloverKeyState`. So the heal is a
+direct stamp into `DnssecKeyStore.active_at` for any ACTIVE ZSK (flags=256)
+whose `active_at` is NULL — no `RolloverKeyState`/`ZskRolloverState`
+involvement, no new helper beyond an UPDATE. Use "first observation"
+semantics like the KSK heal (stamp now; recoverable, not perfectly
+accurate) and stamp only when currently NULL (never overwrite a real
+timestamp, or every restart would push the roll forward). Run it on the
+KeyStateWorker tick alongside the ZSK roll check.
+
 CLI/API: `auto-rollover asap`/`cancel` gain ZSK support (today they are
 KSK-oriented), or add ZSK-typed variants. Keep it symmetric with KSK.
 
@@ -712,9 +736,10 @@ never rolling. The request must survive those ticks and fire when a
 standby appears. (This is general ZSK-asap correctness; it also matters
 for the alg roll when the operator asaps through to the new-alg key.)
 
-Verify: T0.1–T0.4 (§8.4). This step is independently valuable and
+Verify: T0.1–T0.5 (§8.4). This step is independently valuable and
 independently testable — it completes ZSK rollover to KSK parity
-regardless of the alg-roll work.
+(manual trigger + asap/cancel + active_at self-heal) regardless of the
+alg-roll work.
 
 ### 8.2 Step 1 — global completeness knob
 
@@ -935,6 +960,10 @@ Step 0 (ZSK manual parity):
 - T0.4 — PERSISTENCE: a manual request set while no standby exists is NOT
   cleared by the no-standby no-op tick(s); once a standby appears the roll
   fires and the request is cleared only then (asserts §8.1 persistence).
+- T0.5 — active_at SELF-HEAL: an active ZSK with NULL `active_at` gets
+  stamped (first-observation) so `zskRollDue` becomes decidable and the
+  roll can fire; an active ZSK that already has a real `active_at` is NOT
+  overwritten (idempotent across restarts). Mirrors the KSK heal.
 
 Step 1 (mode knob):
 - T2 — ZSK alg change requested while global mode is `strict`: refused
@@ -1012,7 +1041,7 @@ Step 2 (relaxed alg roll):
 ### 8.5 Success criteria
 
 - Step 0: ZSK has `asap`/`cancel` at KSK parity, with request persistence
-  per §8.1; T0.1–T0.4 green; build clean.
+  and the `active_at` self-heal per §8.1; T0.1–T0.5 green; build clean.
 - Step 1: knob parses, defaults strict; T2 green.
 - Step 2: a relaxed-mode `change-policy` to a different-ZSK-algorithm
   policy gradually rolls the ZSK (new-alg standby → active, old-alg
