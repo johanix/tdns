@@ -246,7 +246,11 @@ type AlgTransitionInfo struct {
 // InProgress=true is the operator-facing signal that the times
 // reflect projection rather than current schedule.
 type RolloverWhenResponse struct {
-	Zone             string                  `json:"zone"`
+	Zone string `json:"zone"`
+	// Role is the key role this schedule is for: "KSK" (parent-DS gated) or
+	// "ZSK" (zone-local, no parent gates). Drives the renderer's header and
+	// whether a gates section applies. Empty is treated as "KSK".
+	Role             string                  `json:"role,omitempty"`
 	CurrentTime      string                  `json:"currentTime,omitempty"`      // RFC3339 UTC, server's wallclock
 	NextScheduled    string                  `json:"nextScheduled,omitempty"`    // RFC3339 UTC
 	EarliestPossible string                  `json:"earliestPossible,omitempty"` // RFC3339 UTC

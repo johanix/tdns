@@ -250,6 +250,99 @@ func zskAlgRollInFlight(kdb *KeyDB, zone string, targetZSKAlg uint8) (ZskAlgRoll
 	return out, nil
 }
 
+// ComputeZskRolloverWhen answers "when will / could the ZSK roll" — the ZSK
+// analog of ComputeRolloverWhen (KSK). A ZSK roll has NO parent-DS dimension,
+// so there are no propagation gates: the only precondition is that a standby
+// ZSK exists to promote. The schedule is therefore simple:
+//
+//   - next scheduled = active ZSK's active_at + ZSK.Lifetime (the
+//     lifetime-driven cadence). Absent when ZSK.Lifetime == 0 (never) or no
+//     active ZSK / no active_at.
+//   - earliest possible = now when a standby ZSK is ready (a roll can fire on
+//     the next tick), or the pending manual-asap earliest if later. When no
+//     standby exists the roll is blocked until one reaches standby — reported
+//     via Status="waiting-for-standby" with no Earliest.
+//
+// Soft conditions are surfaced via Note (200-style), mirroring the KSK path.
+func ComputeZskRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Time) (*RolloverWhenResponse, error) {
+	zone = dns.Fqdn(strings.TrimSpace(zone))
+	if zone == "." || zone == "" {
+		return nil, fmt.Errorf("ComputeZskRolloverWhen: empty zone")
+	}
+	out := &RolloverWhenResponse{
+		Zone:        zone,
+		Role:        "ZSK",
+		CurrentTime: now.UTC().Format(time.RFC3339),
+	}
+	if pol == nil {
+		out.Note = "zone has no DNSSEC policy"
+		return out, nil
+	}
+	if pol.Mode != DnssecPolicyModeKSKZSK {
+		out.Note = "zone is not in ksk-zsk mode; no separate ZSK rollover"
+		return out, nil
+	}
+
+	activeKeys, err := GetDnssecKeysByState(kdb, zone, DnskeyStateActive)
+	if err != nil {
+		return nil, fmt.Errorf("ComputeZskRolloverWhen: list active keys: %w", err)
+	}
+	var activeZSK *DnssecKeyWithTimestamps
+	for i := range activeKeys {
+		if activeKeys[i].Flags == 256 {
+			activeZSK = &activeKeys[i]
+			break
+		}
+	}
+	if activeZSK == nil {
+		out.Note = "no active ZSK"
+		return out, nil
+	}
+	out.FromKeyID = activeZSK.KeyTag
+
+	// Standby readiness: a ZSK roll cannot fire without one to promote.
+	standbyKeys, err := GetDnssecKeysByState(kdb, zone, DnskeyStateStandby)
+	if err != nil {
+		return nil, fmt.Errorf("ComputeZskRolloverWhen: list standby keys: %w", err)
+	}
+	var standbyZSK *DnssecKeyWithTimestamps
+	for i := range standbyKeys {
+		if standbyKeys[i].Flags == 256 {
+			// GetDnssecKeysByState is ordered published_at ASC, so the first
+			// is the oldest — the FIFO next-to-promote.
+			standbyZSK = &standbyKeys[i]
+			break
+		}
+	}
+	if standbyZSK != nil {
+		out.ToKeyID = standbyZSK.KeyTag
+	}
+
+	// Next scheduled = active_at + ZSK.Lifetime.
+	if pol.ZSK.Lifetime > 0 && activeZSK.ActiveAt != nil {
+		out.NextScheduled = activeZSK.ActiveAt.Add(time.Duration(pol.ZSK.Lifetime) * time.Second).UTC().Format(time.RFC3339)
+	} else if pol.ZSK.Lifetime == 0 {
+		out.Note = "ZSK.Lifetime is 0 (no scheduled ZSK rollover); roll manually with \"asap --zsk\""
+	}
+
+	// Earliest possible. No parent gates — bounded only by standby readiness
+	// and any pending manual-asap earliest.
+	if standbyZSK == nil {
+		out.Status = "waiting-for-standby"
+		out.Note = "no standby ZSK available; a roll waits until one reaches standby"
+		return out, nil
+	}
+	out.Status = "ready"
+	earliest := now
+	if m, err := LoadZskManualRollover(kdb, zone); err == nil && m.Earliest != "" {
+		if t, perr := time.Parse(time.RFC3339, m.Earliest); perr == nil && t.After(earliest) {
+			earliest = t
+		}
+	}
+	out.EarliestPossible = earliest.UTC().Format(time.RFC3339)
+	return out, nil
+}
+
 // zskRemovalMargin is the hold time before a retired ZSK may be removed:
 // propagationDelay + max observed signing TTL (sum, not max).
 func zskRemovalMargin(propagationDelay time.Duration, maxObservedTTL uint32) time.Duration {

@@ -398,10 +398,14 @@ func newAutoRolloverWhenCmd() *cobra.Command {
 	var offline bool
 	c := &cobra.Command{
 		Use:   "when",
-		Short: "Compute the earliest moment a KSK rollover could safely fire (no state change)",
-		Long: `Asks the running daemon to compute ComputeEarliestRollover (§8.5) and
-prints the result. Side-effect free; does not request a rollover. Use
-'auto-rollover asap' to actually schedule one.
+		Short: "Compute the earliest moment a rollover could safely fire (no state change)",
+		Long: `Asks the running daemon when the next rollover will fire and the
+earliest it could fire if requested. Side-effect free; does not request
+a rollover. Use 'auto-rollover asap' to actually schedule one.
+
+Reports the KSK schedule by default (parent-DS gated). Use --zsk for the
+ZSK schedule (zone-local, no parent gates — bounded only by standby
+readiness), or --ksk to be explicit. The two flags are mutually exclusive.
 
 Default mode talks to the daemon's API server (no daemon config needed
 on the CLI host). Use --offline to compute locally against the keystore
@@ -412,11 +416,19 @@ config file so the CLI can find db.file and the zone's policy.`,
 			tdns.Globals.App.Type = tdns.AppTypeCli
 			z := dns.Fqdn(tdns.Globals.Zonename)
 
+			if autoRolloverFlags.kskOnly && autoRolloverFlags.zskOnly {
+				cliFatalf("flags --ksk and --zsk are mutually exclusive")
+			}
+			keytype := "KSK"
+			if autoRolloverFlags.zskOnly {
+				keytype = "ZSK"
+			}
+
 			if offline {
-				runWhenOffline(z)
+				runWhenOffline(z, keytype)
 				return
 			}
-			runWhenOnline(z)
+			runWhenOnline(z, keytype)
 		},
 	}
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
@@ -427,12 +439,12 @@ config file so the CLI can find db.file and the zone's policy.`,
 
 // runWhenOnline is the default path: GET /api/v1/rollover/when via
 // the configured API client. No daemon config loaded on the CLI host.
-func runWhenOnline(z string) {
+func runWhenOnline(z, keytype string) {
 	api, err := GetApiClient("auth", true)
 	if err != nil {
 		cliFatalf("error getting API client: %v", err)
 	}
-	endpoint := "/rollover/when?zone=" + z
+	endpoint := "/rollover/when?zone=" + z + "&keytype=" + keytype
 	// "when" is observational; the daemon always returns 200 with a
 	// structured response (any caveats land in resp.Note). Non-2xx
 	// here would mean network-level failure, in which case the API
@@ -450,14 +462,19 @@ func runWhenOnline(z string) {
 
 // runWhenOffline preserves the legacy direct-DB path for postmortem
 // use when the daemon is down.
-func runWhenOffline(z string) {
+func runWhenOffline(z, keytype string) {
 	kdb, _, pol, err := openKeystoreForCli()
 	if err != nil {
 		cliFatalf("error: %v", err)
 	}
 	defer kdb.DB.Close()
 
-	resp, err := tdns.ComputeRolloverWhen(kdb, z, pol, time.Now())
+	var resp *tdns.RolloverWhenResponse
+	if keytype == "ZSK" {
+		resp, err = tdns.ComputeZskRolloverWhen(kdb, z, pol, time.Now())
+	} else {
+		resp, err = tdns.ComputeRolloverWhen(kdb, z, pol, time.Now())
+	}
 	if err != nil {
 		cliFatalf("%s", err.Error())
 	}
@@ -510,11 +527,21 @@ func printRolloverPolicyWarnings(warns []string) bool {
 // time. During in-progress rollovers, both lines reflect projected
 // times for the rollover after the current one completes.
 func renderRolloverWhen(resp *tdns.RolloverWhenResponse) {
+	role := resp.Role
+	if role == "" {
+		role = "KSK" // legacy daemon / unset
+	}
+	// The "asap" command needs --zsk for the ZSK schedule.
+	asapHint := "request via \"asap\" cmd"
+	if role == "ZSK" {
+		asapHint = "request via \"asap --zsk\" cmd"
+	}
+
 	if printRolloverPolicyErrors(resp.PolicyErrors) {
 		// Schedule output is meaningless while the policy is violated.
 		// Suppress remaining lines except the bare zone header so the
 		// operator still sees which zone they queried.
-		fmt.Printf("KSK rollover schedule for zone %s: blocked\n", resp.Zone)
+		fmt.Printf("%s rollover schedule for zone %s: blocked\n", role, resp.Zone)
 		return
 	}
 	// Warnings don't block — render schedule below the warning header.
@@ -522,9 +549,9 @@ func renderRolloverWhen(resp *tdns.RolloverWhenResponse) {
 
 	// Case 1 / waiting-for-parent: render the structured blocker
 	// instead of the schedule view. The schedule has no meaningful
-	// EarliestPossible in this state.
+	// EarliestPossible in this state. (KSK only — a ZSK has no parent gate.)
 	if resp.Status == "waiting-for-parent" && resp.Blocker != nil {
-		fmt.Printf("KSK rollover for zone %s: not currently possible.\n", resp.Zone)
+		fmt.Printf("%s rollover for zone %s: not currently possible.\n", role, resp.Zone)
 		fmt.Printf("  Reason: %s\n", resp.Blocker.Reason)
 		if resp.Blocker.Cause != "" {
 			fmt.Printf("  Cause:  %s\n", resp.Blocker.Cause)
@@ -546,14 +573,19 @@ func renderRolloverWhen(resp *tdns.RolloverWhenResponse) {
 		// still has the operator anchor.
 		currentTime = time.Now().UTC().Format("15:04:05 UTC (Mon Jan 2 2006)")
 	}
-	fmt.Printf("KSK rollover schedule for zone %s  Current time: %s\n", resp.Zone, currentTime)
+	fmt.Printf("%s rollover schedule for zone %s  Current time: %s\n", role, resp.Zone, currentTime)
 	if resp.InProgress {
 		fmt.Println("  (current rollover in progress; times below project the rollover after it completes)")
 	}
 
 	keyidPair := ""
-	if resp.FromKeyID != 0 || resp.ToKeyID != 0 {
+	switch {
+	case resp.FromKeyID != 0 && resp.ToKeyID != 0:
 		keyidPair = fmt.Sprintf("active keyid %d --> %d", resp.FromKeyID, resp.ToKeyID)
+	case resp.FromKeyID != 0:
+		// No promotion target yet (e.g. ZSK with no standby) — show the active
+		// keyid without a misleading "--> 0".
+		keyidPair = fmt.Sprintf("active keyid %d", resp.FromKeyID)
 	}
 
 	// Pad the time-with-delta to the wider of the two time strings.
@@ -570,7 +602,7 @@ func renderRolloverWhen(resp *tdns.RolloverWhenResponse) {
 	fmt.Printf("  next scheduled       %-*s  %s\n", timeColWidth, nextStr, keyidPair)
 	earliestLine := fmt.Sprintf("  earliest possible    %-*s  %s", timeColWidth, earliestStr, keyidPair)
 	if resp.EarliestPossible != "" && !resp.InProgress {
-		earliestLine += "  (request via \"asap\" cmd)"
+		earliestLine += "  (" + asapHint + ")"
 	}
 	fmt.Println(earliestLine)
 

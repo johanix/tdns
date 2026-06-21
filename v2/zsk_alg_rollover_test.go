@@ -680,3 +680,71 @@ func TestT8NoMaintainedDoubleSignature(t *testing.T) {
 		t.Fatal("retired old-alg ZSK must stay retired (no maintained double-signature)")
 	}
 }
+
+// ComputeZskRolloverWhen: with a standby present the schedule is "ready" with
+// next = active_at + ZSK.Lifetime and earliest = now; with no standby it is
+// "waiting-for-standby" with no earliest. Role is always "ZSK".
+func TestComputeZskRolloverWhen(t *testing.T) {
+	pol := &DnssecPolicy{Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.ED25519}
+	pol.ZSK.Lifetime = uint32((15 * time.Minute).Seconds())
+	now := time.Now()
+
+	// With standby: ready.
+	kdb := newTestKeyDB(t)
+	active := genZSK(t, kdb, DnskeyStateActive, dns.ED25519)
+	if _, err := kdb.DB.Exec(`UPDATE DnssecKeyStore SET active_at=? WHERE zonename=? AND keyid=?`,
+		now.Add(-10*time.Minute).UTC().Format(time.RFC3339), algZone, int(active)); err != nil {
+		t.Fatalf("stamp active_at: %v", err)
+	}
+	standby := genZSK(t, kdb, DnskeyStateStandby, dns.ED25519)
+	r, err := ComputeZskRolloverWhen(kdb, algZone, pol, now)
+	if err != nil {
+		t.Fatalf("ComputeZskRolloverWhen: %v", err)
+	}
+	if r.Role != "ZSK" {
+		t.Fatalf("role = %q, want ZSK", r.Role)
+	}
+	if r.Status != "ready" {
+		t.Fatalf("status = %q, want ready", r.Status)
+	}
+	if r.FromKeyID != active || r.ToKeyID != standby {
+		t.Fatalf("from/to = %d/%d, want %d/%d", r.FromKeyID, r.ToKeyID, active, standby)
+	}
+	if r.NextScheduled == "" || r.EarliestPossible == "" {
+		t.Fatalf("ready schedule must have next + earliest: %+v", r)
+	}
+	// next scheduled = active_at + lifetime = now - 10m + 15m = now + 5m.
+	wantNext := now.Add(-10 * time.Minute).Add(15 * time.Minute).UTC().Format(time.RFC3339)
+	if r.NextScheduled != wantNext {
+		t.Fatalf("next scheduled = %q, want %q (active_at + lifetime)", r.NextScheduled, wantNext)
+	}
+
+	// No standby: waiting-for-standby, no earliest.
+	kdb2 := newTestKeyDB(t)
+	a2 := genZSK(t, kdb2, DnskeyStateActive, dns.ED25519)
+	if _, err := kdb2.DB.Exec(`UPDATE DnssecKeyStore SET active_at=? WHERE zonename=? AND keyid=?`,
+		now.Add(-10*time.Minute).UTC().Format(time.RFC3339), algZone, int(a2)); err != nil {
+		t.Fatalf("stamp active_at: %v", err)
+	}
+	r2, err := ComputeZskRolloverWhen(kdb2, algZone, pol, now)
+	if err != nil {
+		t.Fatalf("ComputeZskRolloverWhen (no standby): %v", err)
+	}
+	if r2.Status != "waiting-for-standby" || r2.EarliestPossible != "" {
+		t.Fatalf("no-standby: status=%q earliest=%q, want waiting-for-standby / empty", r2.Status, r2.EarliestPossible)
+	}
+
+	// A pending manual asap in the future pushes earliest out to that time.
+	future := now.Add(30 * time.Minute)
+	if err := SetZskManualRolloverRequest(kdb, algZone, now, future); err != nil {
+		t.Fatalf("SetZskManualRolloverRequest: %v", err)
+	}
+	r3, err := ComputeZskRolloverWhen(kdb, algZone, pol, now)
+	if err != nil {
+		t.Fatalf("ComputeZskRolloverWhen (manual): %v", err)
+	}
+	wantEarliest := future.UTC().Format(time.RFC3339)
+	if r3.EarliestPossible != wantEarliest {
+		t.Fatalf("manual earliest = %q, want %q", r3.EarliestPossible, wantEarliest)
+	}
+}

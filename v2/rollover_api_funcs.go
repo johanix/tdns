@@ -330,6 +330,7 @@ func ComputeRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Ti
 	}
 	out := &RolloverWhenResponse{
 		Zone:        zone,
+		Role:        "KSK",
 		CurrentTime: now.UTC().Format(time.RFC3339),
 	}
 
