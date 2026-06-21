@@ -835,6 +835,13 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 		// rollover-engine state explicit before the rest of the report.
 		fmt.Println()
 	}
+
+	// Zone-global header: the effective policy and any in-flight algorithm
+	// rollover are facts about the ZONE, not about the KSK specifically, so
+	// they print once at the top — visible whether the operator views both
+	// roles, only KSK (--ksk), or only ZSK (--zsk).
+	printZoneGlobalHeader(s)
+
 	currentTime := formatRolloverTimeAbsolute(s.CurrentTime)
 
 	// Track whether the current-time anchor has been printed yet, so
@@ -901,6 +908,31 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 	}
 }
 
+// printZoneGlobalHeader prints the zone-wide facts that belong above BOTH the
+// KSK and ZSK sections: the effective policy (name + per-role algorithms) and
+// any in-flight ZSK algorithm rollover. These are properties of the zone, not
+// of a particular key role, so they show regardless of --ksk / --zsk filtering.
+func printZoneGlobalHeader(s *tdns.RolloverStatus) {
+	printed := false
+	if s.Policy != nil {
+		fmt.Printf("Current policy: %s\n", policyHeaderValue(s.Policy))
+		printed = true
+	}
+	if t := s.AlgTransition; t != nil {
+		// ASCII "->" (not the Unicode arrow); spell out "algorithm"; describe
+		// the count as published ZSKs (the live keys in the DNSKEY RRset).
+		line := fmt.Sprintf("Algorithm rollover: %s %s -> %s  (in progress)", t.Role, t.FromAlg, t.ToAlg)
+		if t.Total > 0 {
+			line += fmt.Sprintf(", %d of %d published ZSKs on new algorithm", t.Done, t.Total)
+		}
+		fmt.Println(line)
+		printed = true
+	}
+	if printed {
+		fmt.Println()
+	}
+}
+
 // policyHeaderValue renders the one-line policy summary for the status
 // header: the effective policy name plus its per-role algorithms, e.g.
 //
@@ -933,21 +965,10 @@ func printStateTable(s *tdns.RolloverStatus) {
 	type kv struct{ label, value string }
 	var left, right []kv
 
-	// Left column: this zone's current intent + DS state.
+	// Left column: this zone's current intent + DS state. (The effective
+	// policy and any in-flight algorithm rollover are zone-global facts and
+	// print in printZoneGlobalHeader, above both role sections.)
 	left = append(left, kv{"status:", s.Headline + " — " + headlinePhraseFor(s.Headline, s.Phase)})
-	// Effective policy + per-role algorithms, always shown (not just -v):
-	// an operator must be able to see which policy/algorithms the engine
-	// is following, and an algorithm transition is invisible without it.
-	if s.Policy != nil {
-		left = append(left, kv{"policy:", policyHeaderValue(s.Policy)})
-	}
-	if t := s.AlgTransition; t != nil {
-		v := fmt.Sprintf("%s %s → %s  (in progress)", t.Role, t.FromAlg, t.ToAlg)
-		if t.Total > 0 {
-			v += fmt.Sprintf(", %d of %d on new alg", t.Done, t.Total)
-		}
-		left = append(left, kv{"alg rollover:", v})
-	}
 	if s.Phase != "" && s.Phase != "idle" {
 		left = append(left, kv{"phase:", s.Phase})
 	}
