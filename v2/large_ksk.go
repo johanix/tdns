@@ -87,6 +87,21 @@ func buildSplitAlgorithmSet(in map[string][]string) map[uint8]map[uint8]bool {
 	return out
 }
 
+// resolveCompletenessMode validates dnssec.completeness and returns the
+// canonical mode. Empty defaults to "strict" (the conservative,
+// §4035-conformant choice). An unrecognized value is a hard config error —
+// a typo here silently changing signing semantics would be dangerous.
+func resolveCompletenessMode(s string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", CompletenessStrict:
+		return CompletenessStrict, nil
+	case CompletenessRelaxed:
+		return CompletenessRelaxed, nil
+	default:
+		return "", fmt.Errorf("invalid dnssec.completeness %q (want %q or %q)", s, CompletenessStrict, CompletenessRelaxed)
+	}
+}
+
 // validateSplitAlgorithm enforces the KSK/ZSK split-algorithm gate. Same
 // algorithm always passes. A differing pair must be listed in the allowlist
 // (kskAlg -> permitted zskAlgs); otherwise it is rejected (fail closed).

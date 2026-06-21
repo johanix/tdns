@@ -181,6 +181,19 @@ keybootstrap:
 # zones reference (dnssec.policies:), and the key/signing policy for the
 # KeyStateWorker (dnssec.kasp:).
 dnssec:
+   # DNSSEC completeness mode (deployment-wide, RFC 4035 §2.2):
+   #   strict  (default) - a ZSK algorithm rollover keeps the old-algorithm
+   #                       key signing through the drain window (maintained
+   #                       double-signature); zones stay §4035-conformant.
+   #   relaxed           - alg-split regime: the old key drops at the switch
+   #                       (drain only, no maintained double-signature). Sound
+   #                       because completeness binds the signer, not the
+   #                       validator. Needed for the cheap PQ ZSK-alg roll.
+   # NOT per-zone/per-policy: it is a property of which validators must be
+   # satisfied, constant across a policy transition. Unknown value = hard
+   # config error.
+   completeness: strict
+
    # Algorithm NAMES treated as "large" for IMR DNSKEY-over-TCP and signer
    # warnings. RSASHA512 is a stand-in where ML-DSA-44 is unavailable. Names,
    # not codepoints: non-standardized PQ codepoints are assigned per
