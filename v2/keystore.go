@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"crypto"
 	"database/sql"
 	"fmt"
@@ -298,7 +299,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 	return &resp, nil
 }
 
-func (kdb *KeyDB) DnssecKeyMgmt(tx *Tx, kp KeystorePost) (*KeystoreResponse, error) {
+func (kdb *KeyDB) DnssecKeyMgmt(ctx context.Context, tx *Tx, kp KeystorePost) (*KeystoreResponse, error) {
 	// dump.P(kp)
 
 	const (
@@ -573,24 +574,105 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 
 		var generated []string
 
-		// Generate 1 active ZSK
+		// Generate 1 active ZSK. The old keys were just deleted (line above);
+		// if generation fails we MUST abort and roll back the tx, otherwise
+		// the zone is committed with no keys at all and DNSSEC breaks.
 		zskPkc, _, err := kdb.GenerateKeypair(kp.Zone, "clear-regen", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", tx)
 		if err != nil {
 			lgSigner.Error("clear: failed to generate active ZSK", "zone", kp.Zone, "err", err)
-		} else {
-			generated = append(generated, fmt.Sprintf("ZSK %d (active)", zskPkc.KeyId))
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("clear: failed to generate active ZSK for zone %s: %v", kp.Zone, err)
+			return &resp, err
 		}
+		generated = append(generated, fmt.Sprintf("ZSK %d (active)", zskPkc.KeyId))
 
-		// Generate 1 active KSK
+		// Generate 1 active KSK (same abort-and-rollback on failure).
 		kskPkc, _, err := kdb.GenerateKeypair(kp.Zone, "clear-regen", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.KSKAlgorithm, "KSK", tx)
 		if err != nil {
 			lgSigner.Error("clear: failed to generate active KSK", "zone", kp.Zone, "err", err)
-		} else {
-			generated = append(generated, fmt.Sprintf("KSK %d (active)", kskPkc.KeyId))
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("clear: failed to generate active KSK for zone %s: %v", kp.Zone, err)
+			return &resp, err
+		}
+		generated = append(generated, fmt.Sprintf("KSK %d (active)", kskPkc.KeyId))
+
+		// Strip the served RRSIGs left behind by the just-deleted keys: any
+		// RRSIG whose keytag is not one of the regenerated keys is an orphan
+		// (its DNSKEY is gone) and can no longer validate. The post-commit
+		// re-sign (triggerResign) is additive and would not remove them.
+		keep := map[uint16]bool{}
+		if zskPkc != nil {
+			keep[zskPkc.KeyId] = true
+		}
+		if kskPkc != nil {
+			keep[kskPkc.KeyId] = true
+		}
+		if _, err := zd.StripZoneRRSIGs(ctx, func(rrsig *dns.RRSIG) bool {
+			return !keep[rrsig.KeyTag]
+		}); err != nil {
+			// Fail the whole operation: returning rolls back the keystore tx
+			// (key delete+regenerate), so the operator can re-run cleanly
+			// rather than be left with un-stripped orphan RRSIGs and a
+			// "success" message.
+			lgSigner.Error("clear: failed to strip orphan RRSIGs", "zone", kp.Zone, "err", err)
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("clear: failed to strip orphan RRSIGs for zone %s: %v", kp.Zone, err)
+			return &resp, err
 		}
 
 		resp.Msg = fmt.Sprintf("Deleted %d keys for zone %s. Generated: %s. Standby keys will follow via KeyStateWorker.",
 			count, kp.Zone, strings.Join(generated, ", "))
+
+	case "policy-cleanup":
+		// Collapse the double-signed window left by a policy change: remove the
+		// zone's RETIRED keys (and their RRSIGs) NOW, keeping the active keys,
+		// instead of waiting for the KeyStateWorker to age them out after
+		// propagation_delay. Operator-chosen: it accelerates removal, so a
+		// resolver still caching ONLY an old (now-removed) DNSKEY briefly can't
+		// validate until it re-queries; the active new-alg keys already serve.
+		// Distinct from `clear`, which deletes ALL keys and regenerates.
+		if kp.Zone == "" {
+			resp.Error = true
+			resp.ErrorMsg = "zone is required for policy-cleanup"
+			return &resp, fmt.Errorf("zone is required for policy-cleanup")
+		}
+		retired, err := GetDnssecKeysByState(kdb, kp.Zone, DnskeyStateRetired)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+		zd, zoneExists := Zones.Get(kp.Zone)
+		var removedTags []uint16
+		for _, k := range retired {
+			// Strip the key's RRSIGs from the served zone BEFORE the state
+			// change, and fail the whole operation (rolling back the tx) on
+			// error — so we never report success while orphan RRSIGs remain.
+			if zoneExists {
+				tag := k.KeyTag
+				if _, err := zd.StripZoneRRSIGs(ctx, func(rrsig *dns.RRSIG) bool {
+					return rrsig.KeyTag == tag
+				}); err != nil {
+					lgSigner.Error("policy-cleanup: failed to strip removed key's RRSIGs", "zone", kp.Zone, "keyid", tag, "err", err)
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("policy-cleanup: failed to strip RRSIGs for key %d in zone %s: %v", tag, kp.Zone, err)
+					return &resp, err
+				}
+			}
+			if err := UpdateDnssecKeyStateTx(tx, kdb, kp.Zone, k.KeyTag, DnskeyStateRemoved); err != nil {
+				lgSigner.Error("policy-cleanup: retired→removed failed", "zone", kp.Zone, "keyid", k.KeyTag, "err", err)
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("policy-cleanup: retired→removed failed for key %d in zone %s: %v", k.KeyTag, kp.Zone, err)
+				return &resp, err
+			}
+			removedTags = append(removedTags, k.KeyTag)
+		}
+		if len(removedTags) == 0 {
+			resp.Msg = fmt.Sprintf("Zone %s: no retired keys to clean up.", kp.Zone)
+		} else {
+			resp.Msg = fmt.Sprintf("Zone %s: removed %d retired key(s) %v and stripped their RRSIGs; active keys retained.",
+				kp.Zone, len(removedTags), removedTags)
+		}
 
 	case "purge":
 		purgeResp, err := kdb.dnssecKeyPurge(tx, kp)

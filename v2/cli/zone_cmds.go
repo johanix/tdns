@@ -88,6 +88,26 @@ func NewZoneCmd(role string, extras ...*cobra.Command) *cobra.Command {
 		Run:   func(cmd *cobra.Command, args []string) { RunZoneBump(role, args) },
 	}
 
+	var setPolicyName string
+	setPolicy := &cobra.Command{
+		Use:   "set-policy",
+		Short: "Set a zone's DNSSEC policy at runtime (persists as an override, not in YAML)",
+		Long: `Apply a DNSSEC policy to a zone in the running server. The change is stored
+as a per-zone override in the keystore and survives restart, but does NOT
+update the zone's dnssec_policy in the YAML config — update that separately
+to make the new policy the permanent base. If the new policy uses different
+key algorithms, the old keys are retired (their signatures kept until the
+KeyStateWorker removes them) and new keys take over; the zone stays signed
+throughout.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			RunZoneSetPolicy(role, setPolicyName)
+		},
+	}
+	setPolicy.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to set the DNSSEC policy for")
+	setPolicy.Flags().StringVarP(&setPolicyName, "policy", "p", "", "DNSSEC policy name to apply")
+	setPolicy.MarkFlagRequired("zone")
+	setPolicy.MarkFlagRequired("policy")
+
 	nsec := &cobra.Command{
 		Use:   "nsec",
 		Short: "Prefix command, not usable by itself",
@@ -108,7 +128,7 @@ func NewZoneCmd(role string, extras ...*cobra.Command) *cobra.Command {
 	}
 	nsec.AddCommand(nsecGenerate, nsecShow)
 
-	c.AddCommand(list, nsec, sign, resign, reload, bump, write, freeze, thaw)
+	c.AddCommand(list, nsec, sign, resign, reload, bump, write, freeze, thaw, setPolicy)
 	// Role-independent extras attached to every zone tree. Each is built
 	// fresh so the command pointer is unique per NewZoneCmd invocation.
 	c.AddCommand(newZoneReadFakeCmd(), newZoneUpdateCmd(role), newZoneDsyncCmd(role))
@@ -211,6 +231,31 @@ func RunZoneWrite(parent string, args []string) {
 		Command: "write-zone",
 		Zone:    tdns.Globals.Zonename,
 		Force:   force,
+	})
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		os.Exit(1)
+	}
+
+	if cr.Msg != "" {
+		fmt.Printf("%s\n", cr.Msg)
+	}
+}
+
+func RunZoneSetPolicy(parent, policy string) {
+	if tdns.Globals.Zonename == "" {
+		fmt.Println("Error: zone name not specified")
+		os.Exit(1)
+	}
+	api, err := GetApiClient(parent, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", parent, err)
+	}
+
+	cr, err := SendZoneCommand(api, tdns.ZonePost{
+		Command: "set-policy",
+		Zone:    dns.Fqdn(tdns.Globals.Zonename),
+		Policy:  policy,
 	})
 	if err != nil {
 		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
@@ -369,6 +414,18 @@ func VerboseListZone(cr tdns.ZoneResponse) {
 		}
 		sort.Strings(opts)
 		line += fmt.Sprintf("\tType: %s\tStore: %s\tOptions: %v\n", zconf.Type, zconf.Store, opts)
+
+		if zconf.EffectiveDnssecPolicy != "" {
+			pol := zconf.EffectiveDnssecPolicy
+			if zconf.DnssecPolicyOverridden {
+				if zconf.DnssecPolicyConfigBase != "" {
+					pol += fmt.Sprintf(" (override from config: %s)", zconf.DnssecPolicyConfigBase)
+				} else {
+					pol += " (override; set live, not in config)"
+				}
+			}
+			line += fmt.Sprintf("\tDNSSEC policy: %s\n", pol)
+		}
 
 		line += fmt.Sprintf("\tPrimary: %s\tNotify: %s\tFile: %s\n", zconf.Primary, zconf.Notify, zconf.Zonefile)
 

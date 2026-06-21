@@ -119,7 +119,7 @@ func checkAndTransitionKeys(ctx context.Context, conf *Config, kdb *KeyDB, propa
 
 	rolloverZsksForAllZones(ctx, conf, kdb, propagationDelay, now)
 
-	transitionRetiredToRemoved(conf, kdb, now, propagationDelay)
+	transitionRetiredToRemoved(ctx, conf, kdb, now, propagationDelay)
 
 	maintainStandbyKeys(conf, kdb, standbyZskCount, standbyKskCount)
 }
@@ -171,7 +171,7 @@ func transitionPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propa
 
 // transitionRetiredToRemoved transitions keys that have been in "retired"
 // state long enough for all RRSIGs made with them to expire from caches.
-func transitionRetiredToRemoved(conf *Config, kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
+func transitionRetiredToRemoved(ctx context.Context, conf *Config, kdb *KeyDB, now time.Time, propagationDelay time.Duration) {
 	keys, err := GetDnssecKeysByState(kdb, "", DnskeyStateRetired)
 	if err != nil {
 		lgSigner.Error("KeyStateWorker: error getting retired keys", "err", err)
@@ -221,9 +221,31 @@ func transitionRetiredToRemoved(conf *Config, kdb *KeyDB, now time.Time, propaga
 			continue
 		}
 
-		targetState := DnskeyStateRemoved
+		// Strip the key's RRSIGs from the served zone BEFORE marking it removed,
+		// so a strip failure leaves the key in 'retired' and the worker retries
+		// the whole sequence next tick. (If we marked it removed first and the
+		// strip then failed, the worker would no longer see the key and the
+		// orphan RRSIGs would persist forever.) The strip only matters while the
+		// zone is loaded; a not-loaded zone has nothing to serve.
+		removedKeytag := key.KeyTag
+		if zd, ok := Zones.Get(key.ZoneName); ok {
+			if _, err := zd.StripZoneRRSIGs(ctx, func(rrsig *dns.RRSIG) bool {
+				return rrsig.KeyTag == removedKeytag
+			}); err != nil {
+				// A cancelled context is an expected shutdown path, not a
+				// per-key failure: stop the sweep quietly rather than
+				// error-logging for every remaining retired key.
+				if ctx.Err() != nil {
+					lgSigner.Info("KeyStateWorker: stopping retired→removed sweep on context cancellation", "zone", key.ZoneName)
+					return
+				}
+				lgSigner.Error("KeyStateWorker: failed to strip removed key's RRSIGs, will retry", "zone", key.ZoneName, "keyid", removedKeytag, "err", err)
+				continue
+			}
+		}
+
 		lgSigner.Info("KeyStateWorker: transitioning retired→removed", "zone", key.ZoneName, "keyid", key.KeyTag, "elapsed", elapsed.Truncate(time.Second))
-		if err := UpdateDnssecKeyState(kdb, key.ZoneName, key.KeyTag, targetState); err != nil {
+		if err := UpdateDnssecKeyState(kdb, key.ZoneName, key.KeyTag, DnskeyStateRemoved); err != nil {
 			lgSigner.Error("KeyStateWorker: retired→removed failed", "zone", key.ZoneName, "keyid", key.KeyTag, "err", err)
 			continue
 		}

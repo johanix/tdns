@@ -118,6 +118,12 @@ func PrintKeyRR(rr dns.RR, rrtype, ktype string, keyid uint16, leftpad, rightmar
 	fields = append(fields, keyparts...)
 	alg, _ := strconv.Atoi(p[6])
 	algstr := dns.AlgorithmToString[uint8(alg)]
+	if algstr == "" {
+		// Algorithm not registered in this process (e.g. a PQ alg a
+		// display-only tool like dog hasn't linked). Fall back to the
+		// numeric code rather than printing a blank, matching dig.
+		algstr = strconv.Itoa(alg)
+	}
 	commentStr := fmt.Sprintf("; %s alg = %s ; key id = %d", ktype, algstr, keyid)
 	closing := " ) " + commentStr
 	printFieldsWithWrap(initial, fields, leftpad+1, rightmargin, closing)

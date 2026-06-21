@@ -330,6 +330,41 @@ DNSKEY RR). The resulting pair is directly consumable by 'keystore dnssec import
 	clear.Flags().Bool("force", false, "Skip confirmation prompt")
 	clear.MarkFlagRequired("zone")
 
+	policyCleanup := &cobra.Command{
+		Use:   "policy-cleanup",
+		Short: "Remove a zone's retired keys (and their RRSIGs) now, keeping active keys",
+		Long: `After a DNSSEC policy change, the old keys are retired but kept (with their
+signatures) so the zone stays validatable while the new keys take over —
+leaving the zone briefly double-signed. policy-cleanup collapses that window
+early: it removes the retired keys and strips their RRSIGs immediately,
+keeping the active keys. Unlike 'clear' (which deletes ALL keys and
+regenerates), this only touches retired keys.
+
+Accelerating removal means a resolver still caching only an old (now-removed)
+DNSKEY briefly cannot validate until it re-queries; the active keys already
+serve. Normally you can just wait for the KeyStateWorker to age the retired
+keys out after propagation_delay.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename")
+			zone := tdns.Globals.Zonename
+			force, _ := cmd.Flags().GetBool("force")
+			if !force {
+				fmt.Printf("This will immediately remove retired DNSSEC keys (and their signatures) for zone %s. Proceed? [y/N]: ", zone)
+				var response string
+				fmt.Scanln(&response)
+				response = strings.ToLower(strings.TrimSpace(response))
+				if response != "y" && response != "yes" {
+					fmt.Println("Cancelled.")
+					return
+				}
+			}
+			dnssecKeyMgmt(role, "policy-cleanup")
+		},
+	}
+	policyCleanup.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to clean up retired keys for")
+	policyCleanup.Flags().Bool("force", false, "Skip confirmation prompt")
+	policyCleanup.MarkFlagRequired("zone")
+
 	purge := &cobra.Command{
 		Use:   "purge",
 		Short: "Delete keys in 'removed' state, keeping the 3 most recent per zone",
@@ -347,7 +382,7 @@ without modifying anything. Pass --force to actually delete.`,
 	purge.Flags().Bool("force", false, "Actually delete; otherwise dry-run")
 	purge.MarkFlagRequired("zone")
 
-	c.AddCommand(add, importCmd, generate, algorithms, policies, list, export, delete, setstate, genDS, rollover, clear, purge, newKeystoreDnssecPolicyCmd(role), newKeystoreDnssecDsPushCmd(role), newKeystoreDnssecQueryParentCmd(role), newAutoRolloverCmd(role))
+	c.AddCommand(add, importCmd, generate, algorithms, policies, list, export, delete, setstate, genDS, rollover, clear, policyCleanup, purge, newKeystoreDnssecPolicyCmd(role), newKeystoreDnssecDsPushCmd(role), newKeystoreDnssecQueryParentCmd(role), newAutoRolloverCmd(role))
 	return c
 }
 
@@ -594,7 +629,7 @@ func dnssecKeyMgmt(role, cmd string) {
 		data.Zone = tdns.Globals.Zonename
 		data.Keyname = tdns.Globals.Zonename
 
-	case "clear":
+	case "clear", "policy-cleanup":
 		data.Zone = tdns.Globals.Zonename
 
 	default:
@@ -684,7 +719,7 @@ func dnssecKeyMgmt(role, cmd string) {
 			fmt.Printf("%s\n", tr.Msg)
 		}
 
-	case "add", "import", "generate", "delete", "setstate", "rollover", "clear":
+	case "add", "import", "generate", "delete", "setstate", "rollover", "clear", "policy-cleanup":
 		if tr.Msg != "" {
 			fmt.Printf("%s\n", tr.Msg)
 		}

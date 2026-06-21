@@ -186,15 +186,24 @@ type ZoneConf struct {
 	Frozen            bool         // true if zone is frozen; not a config param
 	Dirty             bool         // true if zone has been modified; not a config param
 	UpdatePolicy      UpdatePolicyConf
-	DelegationBackend string    `yaml:"delegationbackend" mapstructure:"delegationbackend"` // named backend for child delegation data
-	DnssecPolicy      string    `yaml:"dnssecpolicy" mapstructure:"dnssecpolicy"`
-	Template          string    `yaml:"template" mapstructure:"template"`
-	MultiSigner       string    `yaml:"multisigner" mapstructure:"multisigner"`
-	Error             bool      // zone is broken and cannot be used
-	ErrorType         ErrorType // "config" | "refresh" | "agent" | "DNSSEC"
-	ErrorMsg          string    // reason for the error (if known)
-	RefreshCount      int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
-	SourceCatalog     string    // if auto-configured, which catalog zone created this zone
+	DelegationBackend string `yaml:"delegationbackend" mapstructure:"delegationbackend"` // named backend for child delegation data
+	DnssecPolicy      string `yaml:"dnssecpolicy" mapstructure:"dnssecpolicy"`
+	// EffectiveDnssecPolicy / DnssecPolicyOverridden / DnssecPolicyConfigBase
+	// are display-only fields populated by the list-zones handler: the policy
+	// actually bound to the running zone; whether it came from a dynamic
+	// `set-policy` override (rather than the config base); and, when
+	// overridden, the config-base policy it overrides. Not config; not
+	// serialized to YAML.
+	EffectiveDnssecPolicy  string    `yaml:"-"`
+	DnssecPolicyOverridden bool      `yaml:"-"`
+	DnssecPolicyConfigBase string    `yaml:"-"`
+	Template               string    `yaml:"template" mapstructure:"template"`
+	MultiSigner            string    `yaml:"multisigner" mapstructure:"multisigner"`
+	Error                  bool      // zone is broken and cannot be used
+	ErrorType              ErrorType // "config" | "refresh" | "agent" | "DNSSEC"
+	ErrorMsg               string    // reason for the error (if known)
+	RefreshCount           int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
+	SourceCatalog          string    // if auto-configured, which catalog zone created this zone
 }
 
 type TemplateConf struct {

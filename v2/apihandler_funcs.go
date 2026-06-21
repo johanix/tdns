@@ -67,7 +67,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 			}
 
 		case "dnssec-mgmt":
-			resp, err = kdb.DnssecKeyMgmt(tx, kp)
+			resp, err = kdb.DnssecKeyMgmt(r.Context(), tx, kp)
 			if err != nil {
 				lgApi.Error("DnssecKeyMgmt failed", "err", err)
 				resp = &KeystoreResponse{
@@ -76,7 +76,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 				}
 			}
 			// Trigger re-sign and inventory push after state-changing operations
-			if err == nil && (kp.SubCommand == "rollover" || kp.SubCommand == "delete" || kp.SubCommand == "setstate" || kp.SubCommand == "clear") {
+			if err == nil && (kp.SubCommand == "rollover" || kp.SubCommand == "delete" || kp.SubCommand == "setstate" || kp.SubCommand == "clear" || kp.SubCommand == "policy-cleanup") {
 				triggerResign(conf, kp.Zone)
 			}
 

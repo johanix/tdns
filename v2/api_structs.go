@@ -160,6 +160,7 @@ type ZonePost struct {
 	Command    string
 	SubCommand string
 	Zone       string
+	Policy     string // target DNSSEC policy name for the "set-policy" command
 	Force      bool
 	Wait       bool
 	Timeout    string

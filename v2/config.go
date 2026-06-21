@@ -17,9 +17,12 @@ import (
 var Conf Config
 
 // confMu protects Conf and Globals during config reload operations.
-// Readers do not need to hold this — the reload window is brief and
-// reads during reload may see partial state, which is acceptable.
-// Only reload paths acquire the write lock.
+// Reload paths take the write lock; they replace whole maps/slices
+// (e.g. Conf.Internal.DnssecPolicies, Conf.Zones) wholesale. Readers that
+// can run concurrently with a reload — notably API handlers — must take
+// the read lock around those accesses: a bare read racing a map/slice
+// reassignment is a data race, not merely a partial-state read. Reads on
+// startup-only paths (no concurrent reload) need not lock.
 var confMu sync.RWMutex
 
 // SensitiveString wraps a string that should not appear in logs.
@@ -544,6 +547,14 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 	if err := conf.reloadTemplatesFromFile(); err != nil {
 		lgConfig.Warn("ReloadZoneConfig: failed to reload templates", "err", err)
 		// Continue with existing templates rather than failing entirely
+	}
+
+	// Re-read and re-parse the dnssec: block from the config file so zones are
+	// re-applied against the CURRENT policy definitions — an edited policy is
+	// picked up here, no separate `config reload` needed first. A parse error
+	// leaves the previous policies in place rather than failing the whole reload.
+	if err := conf.reloadDnssecFromFile(); err != nil {
+		lgConfig.Error("ReloadZoneConfig: failed to re-parse dnssec config, keeping previous policies", "err", err)
 	}
 
 	prezones := Zones.Keys()
