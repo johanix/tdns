@@ -258,15 +258,19 @@ func TestZskRemovedDisplayParity(t *testing.T) {
 		t.Fatalf("first shown removed ZSK seq = %v, want 4", zsks[0].ActiveSeq)
 	}
 	// state_since resolves (non-empty) for a removed ZSK via retired_at.
-	zd := testZone(t, zskTestZone, zskTestZone+" IN SOA . . 1 1 1 1 1\n")
-	zd.KeyDB = kdb
-	k := &DnssecKeyWithTimestamps{ZoneName: zskTestZone, KeyTag: zsks[0].KeyID, Flags: 256, State: DnskeyStateRemoved}
-	// reload the full key (with retired_at) for the state-since check
-	removed, _ := GetDnssecKeysByState(kdb, zskTestZone, DnskeyStateRemoved)
+	// Reload the full key (with retired_at) for the state-since check.
+	removed, err := GetDnssecKeysByState(kdb, zskTestZone, DnskeyStateRemoved)
+	if err != nil {
+		t.Fatalf("load removed ZSKs: %v", err)
+	}
+	var k *DnssecKeyWithTimestamps
 	for i := range removed {
 		if removed[i].KeyTag == zsks[0].KeyID {
 			k = &removed[i]
 		}
+	}
+	if k == nil {
+		t.Fatalf("removed ZSK keyid %d not found in state query", zsks[0].KeyID)
 	}
 	if ts := StateSinceForDnssecKey(kdb, zskTestZone, k); ts.IsZero() {
 		t.Fatalf("removed ZSK state_since is zero; want retired_at")
