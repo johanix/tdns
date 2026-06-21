@@ -4,6 +4,13 @@ Status: PLANNING. This is the build plan for a **KSK algorithm
 rollover** — changing a zone's KSK signing algorithm (e.g. ED25519 →
 MAYO5 for a post-quantum transition) with correct parent-DS coordination.
 
+Estimate at a glance (full breakdown in §10.1): ~160–300 source +
+~470–700 test LOC, ~17–29 h across 6 steps. Risk concentrates in two
+commits — K-2 (HIGH blast radius: the §2 bogus-zone path) and K-3 (the
+one engine-counting change); the rest is LOW-to-MED reuse of the ZSK
+step-2 scaffolding. Confidence MEDIUM, pending the K-0 re-confirmation
+that the engine is algorithm-blind end-to-end.
+
 It is the sibling of the relaxed-mode ZSK algorithm rollover
 (`2026-06-17-algorithm-rollover-evaluation.md` §8, DONE — PR #263). The
 ZSK plan's §0–§7 design/rationale already covers the KSK case
@@ -431,6 +438,8 @@ a testbed checkpoint — they are the bogus-zone-adjacent commits.
   code; the engine may have shifted line numbers. Re-confirm the survey
   claims (algorithm-blind DS dance, FIFO already ordered,
   `rollover_in_progress` semantics). Write down any drift.
+  → **Risk LOW · ~0 src / ~0 test LOC · ~1 h.** Pure reading; the value is
+  catching engine drift before the risky commits.
 
 - **Step K-1 — entry-layer dispatch + KSK refusals.** Extend
   `change-policy` to detect a KSK-only algorithm target and (for now)
@@ -439,6 +448,11 @@ a testbed checkpoint — they are the bogus-zone-adjacent commits.
   guards without yet enabling the roll — a safe intermediate, testable in
   isolation. Verify: KT2c (both-role), KT2d (re-entrancy), KT2b (CSK
   still refused).
+  → **Risk LOW–MED · ~50–90 src / ~80–120 test LOC · ~3–5 h.** Mostly
+  reuse of the ZSK `change-policy` guard scaffolding; the new piece is the
+  K3 KSK re-entrancy predicate (read `rollover_in_progress` /
+  `rollover_phase` + key-state) and the role-dispatch. MED only because
+  the dispatch must correctly separate KSK-only / ZSK-only / both-role.
 
 - **Step K-2 — the reconcile hand-off (K4) + override write, together.**
   Replace the KSK refusal in `reconcileActiveKeyAlgorithms` with a no-op
@@ -449,6 +463,12 @@ a testbed checkpoint — they are the bogus-zone-adjacent commits.
   actually mint). RISKIEST commit (§2 path is one branch away). Testbed
   checkpoint. Verify: KT1 (reconcile no-op on KSK mismatch), KT9 (reload
   mid-roll does not retire).
+  → **Risk HIGH · ~30–60 src / ~80–120 test LOC · ~3–5 h.** Small code
+  (delete the refusal, return no-op on KSK mismatch; wire the override
+  write — both reuse the ZSK pattern), but SAFETY-CRITICAL: a wrong branch
+  reinstates the §2 bogus-zone synchronous swap. HIGH is about blast
+  radius, not line count. Disproportionate test + review effort; mandatory
+  testbed checkpoint before proceeding.
 
 - **Step K-3 — pipeline-fill alg-roll bump (K6a).** Make the pipeline
   mint the new-alg key during an alg roll (transient `NumDS + 1`
@@ -456,6 +476,13 @@ a testbed checkpoint — they are the bogus-zone-adjacent commits.
   Testbed checkpoint. Verify: KT3 (new-alg key minted on bind), KT3b
   (minted key is new-alg), KT4 (no over-mint; old-alg pipeline keys
   untouched).
+  → **Risk MED–HIGH · ~40–80 src / ~120–180 test LOC · ~4–7 h.** The one
+  genuine engine change (the rest of the plan routes AROUND the engine;
+  this reaches INTO the pipeline-fill counting). Must touch
+  `CountKskWithDSAtParent` / the mint loop so mint-target and cap share
+  ONE alg-roll-aware count (the ZSK oscillation lesson). Heaviest test
+  burden after K-5 — counting edge cases (NumDS=1 vs >1, mid-drain
+  overlap). Testbed checkpoint mandatory.
 
 - **Step K-4 — trigger UX + status.** `change-policy` KSK branch prints
   the two-command workflow; `auto-rollover status` shows the KSK
@@ -465,11 +492,63 @@ a testbed checkpoint — they are the bogus-zone-adjacent commits.
   same-alg KSK commands); confirm they read sensibly mid-alg-roll.
   Verify: KT5 (status shows transition), KT-when (when reflects the
   pending KSK roll).
+  → **Risk LOW · ~40–70 src / ~40–60 test LOC · ~2–4 h.** Cosmetic /
+  operator-facing; reuses the ZSK `AlgTransition` field and the
+  zone-global status header verbatim, generalized to KSK. `when`/`asap`/
+  `cancel` already exist, so this is mostly the status line + help text +
+  generalizing the in-flight predicate to either role.
 
 - **Step K-5 — full-sequence + timing tests.** The end-to-end overlap
   sequence (§4) under fake time / driven engine, plus the K9d margin
   assertion and the K6a no-zero-chain invariant. Verify: KT6 (full
   sequence), KT7 (margin hold), KT8 (mixed-alg DS confirm).
+  → **Risk LOW (test-only) · ~0 src / ~150–220 test LOC · ~4–7 h.** No
+  production code (any code change discovered here loops back to the
+  relevant step). The full-sequence test (KT6) is the most involved — it
+  needs the parent-DS observe seam the same-alg KSK tests already use
+  (injected observed DS set). Time goes into driving the engine through
+  all six phases with a mixed-alg DS set, not into writing logic.
+
+
+### 10.1 Effort summary
+
+| Step | What | Risk | Src LOC | Test LOC | Time |
+|------|------|------|---------|----------|------|
+| K-0 | Pre-flight re-read | LOW | 0 | 0 | ~1 h |
+| K-1 | Entry dispatch + KSK refusals | LOW–MED | 50–90 | 80–120 | 3–5 h |
+| K-2 | Reconcile hand-off + override | **HIGH** | 30–60 | 80–120 | 3–5 h |
+| K-3 | Pipeline-fill alg-roll bump | MED–HIGH | 40–80 | 120–180 | 4–7 h |
+| K-4 | Trigger UX + status | LOW | 40–70 | 40–60 | 2–4 h |
+| K-5 | Full-sequence + timing tests | LOW (test) | 0 | 150–220 | 4–7 h |
+| **Total** | | | **~160–300** | **~470–700** | **~17–29 h** |
+
+Calibration: the ZSK step 2 (PR #263), which built the scaffolding this
+plan reuses, landed at ~310 source + ~470 test LOC. The KSK work is
+SMALLER in production code (it routes through an already-built engine
+rather than building one) but LARGER in tests (the parent-DS full-sequence
+case KT6 is heavier than any ZSK test). Net source LOC is lower because
+K-2's hand-off is a deletion-plus-no-op, not new mechanism.
+
+**Where the risk concentrates:** two commits, K-2 and K-3, carry nearly
+all of it. K-2 is HIGH on blast radius (the §2 bogus-zone path is one
+wrong branch away) despite being small; K-3 is the only commit that
+reaches into the engine's counting. Everything else (K-0, K-1, K-4, K-5)
+is LOW-to-MED and largely reuse. Budget the review/testbed effort
+accordingly: most of the human attention belongs on K-2 and K-3, not
+spread evenly.
+
+**Sequencing risk:** K-2 and K-3 must NOT be combined into one commit —
+K-2 (hand-off, no minting) is independently testable and gives a clean
+testbed checkpoint where the zone binds-but-does-not-roll; folding K-3's
+minting in would make a bisect of a bogus-zone regression ambiguous
+between "hand-off wrong" and "counting wrong."
+
+**Confidence:** MEDIUM. The estimates assume the survey's central claim
+holds — that the engine is genuinely algorithm-blind end-to-end and needs
+no DS-dance changes. K-0 exists to confirm that before the risky commits.
+If K-0 surfaces an algorithm assumption in the DS push/observe path that
+the survey missed, K-3 (and possibly a new step) grows materially; treat
+the upper bounds as the planning figure, not the lower.
 
 
 ## 11. Test matrix
