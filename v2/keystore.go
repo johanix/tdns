@@ -574,21 +574,27 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 
 		var generated []string
 
-		// Generate 1 active ZSK
+		// Generate 1 active ZSK. The old keys were just deleted (line above);
+		// if generation fails we MUST abort and roll back the tx, otherwise
+		// the zone is committed with no keys at all and DNSSEC breaks.
 		zskPkc, _, err := kdb.GenerateKeypair(kp.Zone, "clear-regen", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", tx)
 		if err != nil {
 			lgSigner.Error("clear: failed to generate active ZSK", "zone", kp.Zone, "err", err)
-		} else {
-			generated = append(generated, fmt.Sprintf("ZSK %d (active)", zskPkc.KeyId))
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("clear: failed to generate active ZSK for zone %s: %v", kp.Zone, err)
+			return &resp, err
 		}
+		generated = append(generated, fmt.Sprintf("ZSK %d (active)", zskPkc.KeyId))
 
-		// Generate 1 active KSK
+		// Generate 1 active KSK (same abort-and-rollback on failure).
 		kskPkc, _, err := kdb.GenerateKeypair(kp.Zone, "clear-regen", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.KSKAlgorithm, "KSK", tx)
 		if err != nil {
 			lgSigner.Error("clear: failed to generate active KSK", "zone", kp.Zone, "err", err)
-		} else {
-			generated = append(generated, fmt.Sprintf("KSK %d (active)", kskPkc.KeyId))
+			resp.Error = true
+			resp.ErrorMsg = fmt.Sprintf("clear: failed to generate active KSK for zone %s: %v", kp.Zone, err)
+			return &resp, err
 		}
+		generated = append(generated, fmt.Sprintf("KSK %d (active)", kskPkc.KeyId))
 
 		// Strip the served RRSIGs left behind by the just-deleted keys: any
 		// RRSIG whose keytag is not one of the regenerated keys is an orphan
