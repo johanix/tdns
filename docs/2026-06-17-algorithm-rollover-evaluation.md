@@ -894,6 +894,22 @@ staying published is the drain contract) and self-clearing; it is the
 operator's explicit choice to go fast. Do NOT add a throttle (the KSK
 asap path does not either). Note it for operators.
 
+Status display — transition line (already-landed groundwork + step-2 add):
+the `auto-rollover status` display already shows (landed separately) the
+effective policy + per-role algorithms in the header (always), and a
+per-key `alg` column under `-v`. Step 2 ADDS an algorithm-transition line
+to the header when a roll is in flight, e.g.
+`ZSK alg rollover:  ED25519 → MAYO5  (in progress)` — and, if cheap, a
+progress count (`N of M promotions done`). Derive "in flight" from the
+SAME predicate the re-entrancy guard uses (active/standby/retired ZSK of
+an algorithm ≠ the effective-policy ZSK algorithm), so the detection logic
+is shared, not duplicated. Plumb it via a new `RolloverStatus` field
+(e.g. `AlgTransition *AlgTransitionInfo` with from/to alg + progress). The
+override-divergence half (effective policy ≠ config base) can reuse the
+`ZonePolicyOverride` lookup already used by `zone list -v`. This is the
+deferred "(a) Part 2" from the status-display work — it belongs here
+because the in-flight detection is step-2 logic.
+
 Existing-test migration: introducing relaxed mode changes
 `reconcileActiveKeyAlgorithms` behavior, so
 `TestReconcileActiveKeyAlgorithms` (which today asserts IMMEDIATE retire
