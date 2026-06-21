@@ -10,16 +10,18 @@ func TestZskRollDue(t *testing.T) {
 	activeAt := now.Add(-48 * time.Hour)
 	lifetime := uint32((24 * time.Hour).Seconds())
 
-	if !zskRollDue(now, &activeAt, lifetime) {
-		t.Fatal("expected roll due when active age exceeds lifetime")
+	// Lifetime-driven cases (no manual request). The manual-override cases
+	// are covered by TestZskRollDueManualOverride.
+	if due, manual := zskRollDue(now, &activeAt, lifetime, ""); !due || manual {
+		t.Fatalf("expected scheduled roll due (true,false), got (%v,%v)", due, manual)
 	}
-	if zskRollDue(now, &activeAt, 0) {
+	if due, _ := zskRollDue(now, &activeAt, 0, ""); due {
 		t.Fatal("lifetime 0 must never roll")
 	}
-	if zskRollDue(now, nil, lifetime) {
+	if due, _ := zskRollDue(now, nil, lifetime, ""); due {
 		t.Fatal("nil active_at must not roll")
 	}
-	if zskRollDue(now, &now, lifetime) {
+	if due, _ := zskRollDue(now, &now, lifetime, ""); due {
 		t.Fatal("fresh active key must not roll")
 	}
 }

@@ -79,6 +79,7 @@ comment		  TEXT,
 published_at              TEXT DEFAULT '',
 active_at                 TEXT DEFAULT '',
 retired_at                TEXT DEFAULT '',
+active_seq                INTEGER,
 UNIQUE (zonename, keyid)
 )`,
 
@@ -104,6 +105,17 @@ UNIQUE (zonename, keyid)
 		active_seq           INTEGER,
 		last_rollover_error  TEXT,
 		PRIMARY KEY (zone, keyid)
+	)`,
+
+	// ZskRolloverState holds per-zone manual ZSK-rollover requests (the
+	// `auto-rollover asap --zsk` / `cancel --zsk` mechanism). ZSK rollover
+	// has no parent-DS coordination, so unlike RolloverZoneState (KSK) this
+	// carries only the manual-request fields. Separate table to avoid
+	// entangling ZSK state with the KSK rollover-phase machine.
+	"ZskRolloverState": `CREATE TABLE IF NOT EXISTS 'ZskRolloverState' (
+		zone                          TEXT NOT NULL PRIMARY KEY,
+		manual_rollover_requested_at  TEXT,
+		manual_rollover_earliest      TEXT
 	)`,
 
 	"RolloverZoneState": `CREATE TABLE IF NOT EXISTS 'RolloverZoneState' (

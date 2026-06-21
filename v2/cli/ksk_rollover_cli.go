@@ -611,12 +611,20 @@ Online-only: scheduling against a stopped daemon is meaningless
 			tdns.Globals.App.Type = tdns.AppTypeCli
 			z := dns.Fqdn(tdns.Globals.Zonename)
 
+			if autoRolloverFlags.kskOnly && autoRolloverFlags.zskOnly {
+				cliFatalf("flags --ksk and --zsk are mutually exclusive")
+			}
+			keytype := "KSK"
+			if autoRolloverFlags.zskOnly {
+				keytype = "ZSK"
+			}
+
 			api, err := GetApiClient("auth", true)
 			if err != nil {
 				cliFatalf("error getting API client: %v", err)
 			}
 			status, body, err := api.RequestNG("POST", "/rollover/asap",
-				tdns.RolloverAsapRequest{Zone: z}, true)
+				tdns.RolloverAsapRequest{Zone: z, KeyType: keytype}, true)
 			if err != nil {
 				cliFatalf("error calling rollover/asap: %v", err)
 			}
@@ -630,9 +638,13 @@ Online-only: scheduling against a stopped daemon is meaningless
 			if err := json.Unmarshal(body, &resp); err != nil {
 				cliFatalf("error parsing rollover/asap response: %v", err)
 			}
-			fmt.Printf("scheduled manual rollover for zone %s\n", resp.Zone)
+			fmt.Printf("scheduled manual %s rollover for zone %s\n", keytype, resp.Zone)
 			fmt.Printf("  earliest          %s\n", formatRolloverTime(resp.Earliest))
-			fmt.Printf("  from active keyid %d to %d\n", resp.FromKeyID, resp.ToKeyID)
+			// ZSK response carries no from/to keyid (the standby is picked
+			// by the worker at roll time); only print it for KSK.
+			if keytype == "KSK" {
+				fmt.Printf("  from active keyid %d to %d\n", resp.FromKeyID, resp.ToKeyID)
+			}
 		},
 	}
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
@@ -655,19 +667,27 @@ manual_rollover_* row isn't being read by anything).`,
 			tdns.Globals.App.Type = tdns.AppTypeCli
 			z := dns.Fqdn(tdns.Globals.Zonename)
 
+			if autoRolloverFlags.kskOnly && autoRolloverFlags.zskOnly {
+				cliFatalf("flags --ksk and --zsk are mutually exclusive")
+			}
+			keytype := "KSK"
+			if autoRolloverFlags.zskOnly {
+				keytype = "ZSK"
+			}
+
 			api, err := GetApiClient("auth", true)
 			if err != nil {
 				cliFatalf("error getting API client: %v", err)
 			}
 			status, body, err := api.RequestNG("POST", "/rollover/cancel",
-				tdns.RolloverCancelRequest{Zone: z}, true)
+				tdns.RolloverCancelRequest{Zone: z, KeyType: keytype}, true)
 			if err != nil {
 				cliFatalf("error calling rollover/cancel: %v", err)
 			}
 			if status != http.StatusOK {
 				cliFatalf("unexpected status %d from rollover/cancel: %s", status, strings.TrimSpace(string(body)))
 			}
-			fmt.Printf("cleared manual rollover request for zone %s\n", z)
+			fmt.Printf("cleared manual %s rollover request for zone %s\n", keytype, z)
 		},
 	}
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
@@ -850,6 +870,9 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 		if len(s.ZSKs) > 0 {
 			fmt.Println()
 			printRolloverKeyTable(s.ZSKs, verbose, false)
+			if s.HiddenRemovedZskCount > 0 {
+				fmt.Printf("  ... %d older removed key(s) not shown\n", s.HiddenRemovedZskCount)
+			}
 		}
 	}
 
@@ -1256,12 +1279,19 @@ func printRolloverKeyTable(keys []tdns.RolloverKeyEntry, verbose bool, kskTable 
 			}
 		}
 	} else {
+		// active_seq leads the ZSK table, matching the KSK layout, so a
+		// ZSK roll is visible the same way (the active key's number ticks
+		// up each roll).
 		if verbose {
-			rows = append(rows, "keyid|alg|state|active_at|next_roll")
+			rows = append(rows, "active_seq|keyid|alg|state|state_since|next_transition")
 		} else {
-			rows = append(rows, "keyid|state|active_at|next_roll")
+			rows = append(rows, "active_seq|keyid|state|state_since|next_transition")
 		}
 		for _, k := range keys {
+			seqStr := "-"
+			if k.ActiveSeq != nil {
+				seqStr = fmt.Sprintf("%d", *k.ActiveSeq)
+			}
 			at := formatStateSinceCol(k)
 			nextRoll := formatZskNextRollCol(k)
 			if verbose {
@@ -1269,9 +1299,9 @@ func printRolloverKeyTable(keys []tdns.RolloverKeyEntry, verbose bool, kskTable 
 				if algStr == "" {
 					algStr = "-"
 				}
-				rows = append(rows, fmt.Sprintf("%d|%s|%s|%s|%s", k.KeyID, algStr, k.State, at, nextRoll))
+				rows = append(rows, fmt.Sprintf("%s|%d|%s|%s|%s|%s", seqStr, k.KeyID, algStr, k.State, at, nextRoll))
 			} else {
-				rows = append(rows, fmt.Sprintf("%d|%s|%s|%s", k.KeyID, k.State, at, nextRoll))
+				rows = append(rows, fmt.Sprintf("%s|%d|%s|%s|%s", seqStr, k.KeyID, k.State, at, nextRoll))
 			}
 		}
 	}
@@ -1297,40 +1327,23 @@ func printZskRolloverSummary(s *tdns.RolloverStatus) {
 		return
 	}
 
-	var activeKey *tdns.RolloverKeyEntry
+	// Zone-level summary only: zsk.lifetime (not in the per-key table) and
+	// whether a propagated standby is ready to roll into. The active key's
+	// active_at / next-transition timing lives in the key table below, so it
+	// is not repeated here (avoids the redundant header lines).
 	standbyReady := false
 	for i := range s.ZSKs {
-		switch s.ZSKs[i].State {
-		case tdns.DnskeyStateActive:
-			if activeKey == nil {
-				activeKey = &s.ZSKs[i]
-			}
-		case tdns.DnskeyStateStandby:
+		if s.ZSKs[i].State == tdns.DnskeyStateStandby {
 			standbyReady = true
+			break
 		}
 	}
 
 	fmt.Printf("  zsk.lifetime                 %s\n", lifetimeStr)
-	if activeKey == nil {
-		fmt.Println("  active ZSK                   none")
-	} else {
-		fmt.Printf("  active ZSK                   keyid %d\n", activeKey.KeyID)
-		if activeKey.StateSince != "" {
-			if t, err := time.Parse(time.RFC3339, activeKey.StateSince); err == nil {
-				fmt.Printf("  active_at                    %s\n", formatTimeWithDelta(t))
-				next := t.Add(lifetime)
-				fmt.Printf("  next roll (scheduled)        %s\n", formatTimeWithDelta(next))
-			} else {
-				fmt.Println("  active_at                    unknown")
-			}
-		} else {
-			fmt.Println("  active_at                    unknown (not stamped yet)")
-		}
-	}
 	if standbyReady {
-		fmt.Println("  standby ZSK                  ready")
+		fmt.Println("  standby                      ready (a due roll can proceed)")
 	} else {
-		fmt.Println("  standby ZSK                  not ready")
+		fmt.Println("  standby                      none (a due roll will wait for one)")
 	}
 }
 
@@ -1345,11 +1358,18 @@ func formatStateSinceCol(k tdns.RolloverKeyEntry) string {
 }
 
 func formatZskNextRollCol(k tdns.RolloverKeyEntry) string {
-	if k.State != tdns.DnskeyStateActive || k.NextTransitionAt == "" {
-		return "-"
+	// Show the engine's next-transition time for ANY state that has one
+	// (active→retired, standby→active-on-roll, published→standby,
+	// retired→removed) — not just the active key. The `state` column tells
+	// the operator which transition the time refers to. Falls back to the
+	// engine's note when there is a transition but no concrete time.
+	if k.NextTransitionAt != "" {
+		if t, err := time.Parse(time.RFC3339, k.NextTransitionAt); err == nil {
+			return formatTimeWithDelta(t)
+		}
 	}
-	if t, err := time.Parse(time.RFC3339, k.NextTransitionAt); err == nil {
-		return formatTimeWithDelta(t)
+	if k.NextTransitionNote != "" {
+		return k.NextTransitionNote
 	}
 	return "-"
 }

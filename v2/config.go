@@ -86,7 +86,25 @@ type DnssecConf struct {
 	// Kasp is the Key and Signing Policy controlling the KeyStateWorker.
 	// YAML: dnssec.kasp:.
 	Kasp KaspConf `yaml:"kasp" mapstructure:"kasp"`
+
+	// Completeness selects the signer's RFC 4035 §2.2 completeness mode,
+	// deployment-wide (NOT per-zone/per-policy — see the algorithm-rollover
+	// design doc §4.4). "strict" (default) honors completeness: a ZSK
+	// algorithm rollover keeps the old-algorithm key signing through the
+	// drain window (maintained double-signature). "relaxed" (alg-split
+	// regime) drops the old key at the switch (drain only, no maintained
+	// double-signature) — sound because completeness binds the signer, not
+	// the validator. The mode also selects the standby-counting discipline
+	// for a ZSK roll (role-only vs per-(role,algorithm)). Empty = strict.
+	// YAML: dnssec.completeness:.
+	Completeness string `yaml:"completeness" mapstructure:"completeness"`
 }
+
+// DNSSEC completeness modes (Conf.Internal.Completeness / dnssec.completeness).
+const (
+	CompletenessStrict  = "strict"
+	CompletenessRelaxed = "relaxed"
+)
 
 // KaspConf holds Key and Signing Policy parameters for the signer.
 // Controls the KeyStateWorker's automatic key state transitions and standby key maintenance.
@@ -460,6 +478,12 @@ type InternalConf struct {
 	// kskAlg -> set of permitted zskAlgs. nil/empty means no mixed pair is
 	// allowed (only same-algorithm KSK/ZSK policies pass).
 	SplitAlgorithms map[uint8]map[uint8]bool
+
+	// Completeness is the resolved DNSSEC completeness mode from
+	// Dnssec.Completeness ("strict" | "relaxed"), defaulted to "strict".
+	// Read by the algorithm-rollover reconcile (step 2) to decide whether a
+	// ZSK algorithm roll runs relaxed or is refused under strict.
+	Completeness string
 
 	// PostParseZonesHook is called after ParseZones completes during
 	// reload (SIGHUP or "config reload-zones"). Set by MP apps to

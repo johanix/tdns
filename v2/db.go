@@ -170,6 +170,9 @@ func dbMigrateSchema(db *sql.DB) {
 		{"DnssecKeyStore", "published_at", "ALTER TABLE DnssecKeyStore ADD COLUMN published_at TEXT DEFAULT ''"},
 		{"DnssecKeyStore", "active_at", "ALTER TABLE DnssecKeyStore ADD COLUMN active_at TEXT DEFAULT ''"},
 		{"DnssecKeyStore", "retired_at", "ALTER TABLE DnssecKeyStore ADD COLUMN retired_at TEXT DEFAULT ''"},
+		// ZSK active_seq: monotonic per-key roll counter (operator feedback),
+		// MAX(active_seq)+1 over the zone's ZSK rows, stamped at standby→active.
+		{"DnssecKeyStore", "active_seq", "ALTER TABLE DnssecKeyStore ADD COLUMN active_seq INTEGER"},
 		{"Sig0KeyStore", "parent_state", "ALTER TABLE Sig0KeyStore ADD COLUMN parent_state INTEGER DEFAULT 0"},
 		// Rollover overhaul phase 2: softfail-state columns on RolloverZoneState.
 		// All NULL/0-default so existing testbed rows remain valid post-migration.

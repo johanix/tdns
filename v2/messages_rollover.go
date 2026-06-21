@@ -120,6 +120,9 @@ type RolloverStatus struct {
 	// by active_seq, most recent first).
 	HiddenRemovedKskCount int                `json:"hiddenRemovedKskCount,omitempty"`
 	ZSKs                  []RolloverKeyEntry `json:"zsks"`
+	// HiddenRemovedZskCount is the ZSK analog of HiddenRemovedKskCount:
+	// removed ZSKs beyond the display cap, omitted from ZSKs.
+	HiddenRemovedZskCount int `json:"hiddenRemovedZskCount,omitempty"`
 
 	// Policy summary. Verbose mode shows this; compact mode hides it.
 	Policy *PolicySummary `json:"policy,omitempty"`
@@ -266,6 +269,10 @@ type RolloverWhenGateEntry struct {
 // scheduled rollover.
 type RolloverAsapRequest struct {
 	Zone string `json:"zone"`
+	// KeyType selects which role to roll: "" or "KSK" (default) = KSK,
+	// "ZSK" = ZSK. ZSK uses the lighter ZskRolloverState manual-request
+	// path (no parent-DS coordination).
+	KeyType string `json:"keytype,omitempty"`
 }
 
 type RolloverAsapResponse struct {
@@ -279,6 +286,8 @@ type RolloverAsapResponse struct {
 // Request/response types for POST /api/v1/rollover/cancel.
 type RolloverCancelRequest struct {
 	Zone string `json:"zone"`
+	// KeyType: "" / "KSK" (default) = KSK, "ZSK" = ZSK.
+	KeyType string `json:"keytype,omitempty"`
 }
 
 type RolloverCancelResponse struct {

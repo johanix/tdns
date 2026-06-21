@@ -1214,6 +1214,11 @@ func (conf *Config) parseDnssecConfig() error {
 	}
 	conf.Internal.LargeAlgorithms = largeAlgs
 	conf.Internal.SplitAlgorithms = buildSplitAlgorithmSet(conf.Dnssec.SplitAlgorithms)
+	mode, err := resolveCompletenessMode(conf.Dnssec.Completeness)
+	if err != nil {
+		return err
+	}
+	conf.Internal.Completeness = mode
 
 	conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
 	for name, dp := range conf.Dnssec.Policies {

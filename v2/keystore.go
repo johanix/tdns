@@ -1177,6 +1177,10 @@ type DnssecKeyWithTimestamps struct {
 	PublishedAt *time.Time
 	ActiveAt    *time.Time
 	RetiredAt   *time.Time
+	// ActiveSeq is the per-key "n-th active in this zone's history" counter
+	// (DnssecKeyStore.active_seq), nil when never stamped. For ZSK this is
+	// the operator-facing roll counter; KSK uses RolloverKeyState instead.
+	ActiveSeq *int
 }
 
 // GetDnssecKeysByState returns all DNSSEC keys in a given state, with lifecycle timestamps.
@@ -1186,10 +1190,10 @@ func GetDnssecKeysByState(kdb *KeyDB, zone string, state string) ([]DnssecKeyWit
 	var args []interface{}
 
 	if zone == "" {
-		query = `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(active_at, ''), COALESCE(retired_at, '') FROM DnssecKeyStore WHERE state=?`
+		query = `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(active_at, ''), COALESCE(retired_at, ''), active_seq FROM DnssecKeyStore WHERE state=?`
 		args = []interface{}{state}
 	} else {
-		query = `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(active_at, ''), COALESCE(retired_at, '') FROM DnssecKeyStore WHERE zonename=? AND state=?`
+		query = `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(active_at, ''), COALESCE(retired_at, ''), active_seq FROM DnssecKeyStore WHERE zonename=? AND state=?`
 		args = []interface{}{zone, state}
 	}
 
@@ -1203,7 +1207,8 @@ func GetDnssecKeysByState(kdb *KeyDB, zone string, state string) ([]DnssecKeyWit
 	for rows.Next() {
 		var zonename, algorithm, st, keyrr, publishedAtStr, activeAtStr, retiredAtStr string
 		var keyid, flags int
-		if err := rows.Scan(&zonename, &keyid, &flags, &algorithm, &st, &keyrr, &publishedAtStr, &activeAtStr, &retiredAtStr); err != nil {
+		var activeSeq sql.NullInt64
+		if err := rows.Scan(&zonename, &keyid, &flags, &algorithm, &st, &keyrr, &publishedAtStr, &activeAtStr, &retiredAtStr, &activeSeq); err != nil {
 			return nil, fmt.Errorf("GetDnssecKeysByState: scan failed: %w", err)
 		}
 
@@ -1235,6 +1240,10 @@ func GetDnssecKeysByState(kdb *KeyDB, zone string, state string) ([]DnssecKeyWit
 			if t, err := time.Parse(time.RFC3339, retiredAtStr); err == nil {
 				entry.RetiredAt = &t
 			}
+		}
+		if activeSeq.Valid {
+			v := int(activeSeq.Int64)
+			entry.ActiveSeq = &v
 		}
 
 		entries = append(entries, entry)
@@ -1394,6 +1403,22 @@ func (kdb *KeyDB) RolloverKey(zonename string, keytype string, tx *Tx) (uint16, 
 		DnskeyStateActive, now, zonename, standbyKey.KeyTag)
 	if txErr != nil {
 		return 0, 0, fmt.Errorf("standby→active transition failed: %w", txErr)
+	}
+
+	// Stamp the ZSK active_seq counter (operator-facing "n-th active ZSK")
+	// in the same transaction as active_at, so a roll visibly increments it.
+	// KSK active_seq lives in RolloverKeyState (stamped by AtomicRollover),
+	// not here — RolloverKey is the ZSK roll path.
+	if keytype == "ZSK" {
+		seq, serr := nextZskActiveSeqTx(tx, zonename)
+		if serr != nil {
+			txErr = serr
+			return 0, 0, fmt.Errorf("zsk active_seq: %w", serr)
+		}
+		if serr := setZskActiveSeqTx(tx, zonename, standbyKey.KeyTag, seq); serr != nil {
+			txErr = serr
+			return 0, 0, fmt.Errorf("stamp zsk active_seq: %w", serr)
+		}
 	}
 
 	// active → retired (set retired_at)
