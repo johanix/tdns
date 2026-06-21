@@ -878,6 +878,29 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 	}
 }
 
+// policyHeaderValue renders the one-line policy summary for the status
+// header: the effective policy name plus its per-role algorithms, e.g.
+//
+//	p-ed25519  (KSK ED25519, ZSK ED25519)
+//	p-mayo5    (KSK MAYO5, ZSK ED25519)
+//
+// Falls back to the legacy single Algorithm field (CSK / older policies)
+// when per-role names are absent.
+func policyHeaderValue(p *tdns.PolicySummary) string {
+	name := p.Name
+	if name == "" {
+		name = "(unnamed)"
+	}
+	switch {
+	case p.KSKAlgorithm != "" || p.ZSKAlgorithm != "":
+		return fmt.Sprintf("%s  (KSK %s, ZSK %s)", name, p.KSKAlgorithm, p.ZSKAlgorithm)
+	case p.Algorithm != "":
+		return fmt.Sprintf("%s  (%s)", name, p.Algorithm)
+	default:
+		return name
+	}
+}
+
 // printStateTable renders the principal state info as a two-column
 // table (label/value | label/value) via ryanuber/columnize. Left
 // column tracks the current attempt; right column tracks history and
@@ -889,6 +912,12 @@ func printStateTable(s *tdns.RolloverStatus) {
 
 	// Left column: this zone's current intent + DS state.
 	left = append(left, kv{"status:", s.Headline + " — " + headlinePhraseFor(s.Headline, s.Phase)})
+	// Effective policy + per-role algorithms, always shown (not just -v):
+	// an operator must be able to see which policy/algorithms the engine
+	// is following, and an algorithm transition is invisible without it.
+	if s.Policy != nil {
+		left = append(left, kv{"policy:", policyHeaderValue(s.Policy)})
+	}
 	if s.Phase != "" && s.Phase != "idle" {
 		left = append(left, kv{"phase:", s.Phase})
 	}
@@ -1165,7 +1194,11 @@ func printRolloverKeyTable(keys []tdns.RolloverKeyEntry, verbose bool, kskTable 
 	}
 	var rows []string
 	if kskTable {
-		rows = append(rows, "active_seq|keyid|state|published|state_since|next_transition|expected_at")
+		if verbose {
+			rows = append(rows, "active_seq|keyid|alg|state|published|state_since|next_transition|expected_at")
+		} else {
+			rows = append(rows, "active_seq|keyid|state|published|state_since|next_transition|expected_at")
+		}
 		for _, k := range keys {
 			seqStr := "-"
 			if k.ActiveSeq != nil {
@@ -1210,15 +1243,36 @@ func printRolloverKeyTable(keys []tdns.RolloverKeyEntry, verbose bool, kskTable 
 				keyidStr = "-----"
 				sinceStr = "-"
 			}
-			rows = append(rows, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s",
-				seqStr, keyidStr, k.State, pub, sinceStr, nextCol, expectedCol))
+			if verbose {
+				algStr := k.Algorithm
+				if algStr == "" {
+					algStr = "-"
+				}
+				rows = append(rows, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s|%s",
+					seqStr, keyidStr, algStr, k.State, pub, sinceStr, nextCol, expectedCol))
+			} else {
+				rows = append(rows, fmt.Sprintf("%s|%s|%s|%s|%s|%s|%s",
+					seqStr, keyidStr, k.State, pub, sinceStr, nextCol, expectedCol))
+			}
 		}
 	} else {
-		rows = append(rows, "keyid|state|active_at|next_roll")
+		if verbose {
+			rows = append(rows, "keyid|alg|state|active_at|next_roll")
+		} else {
+			rows = append(rows, "keyid|state|active_at|next_roll")
+		}
 		for _, k := range keys {
 			at := formatStateSinceCol(k)
 			nextRoll := formatZskNextRollCol(k)
-			rows = append(rows, fmt.Sprintf("%d|%s|%s|%s", k.KeyID, k.State, at, nextRoll))
+			if verbose {
+				algStr := k.Algorithm
+				if algStr == "" {
+					algStr = "-"
+				}
+				rows = append(rows, fmt.Sprintf("%d|%s|%s|%s|%s", k.KeyID, algStr, k.State, at, nextRoll))
+			} else {
+				rows = append(rows, fmt.Sprintf("%d|%s|%s|%s", k.KeyID, k.State, at, nextRoll))
+			}
 		}
 	}
 	formatted := columnize.SimpleFormat(rows)

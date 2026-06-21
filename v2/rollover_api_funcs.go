@@ -546,6 +546,8 @@ func policySummary(pol *DnssecPolicy) *PolicySummary {
 	out := &PolicySummary{
 		Name:                     pol.Name,
 		Algorithm:                dns.AlgorithmToString[pol.Algorithm],
+		KSKAlgorithm:             dns.AlgorithmToString[pol.KSKAlgorithm],
+		ZSKAlgorithm:             dns.AlgorithmToString[pol.ZSKAlgorithm],
 		KskLifetime:              (time.Duration(pol.KSK.Lifetime) * time.Second).String(),
 		ZskLifetime:              (time.Duration(pol.ZSK.Lifetime) * time.Second).String(),
 		DsPublishDelay:           pol.Rollover.DsPublishDelay.String(),
@@ -632,8 +634,9 @@ func rolloverActiveSeqSortKey(p *int) int {
 
 func rolloverKeyEntryFromKeystoreKey(kdb *KeyDB, zone string, k *DnssecKeyWithTimestamps, wantSEP bool) RolloverKeyEntry {
 	entry := RolloverKeyEntry{
-		KeyID: k.KeyTag,
-		State: k.State,
+		KeyID:     k.KeyTag,
+		State:     k.State,
+		Algorithm: dns.AlgorithmToString[k.Algorithm],
 	}
 	if wantSEP {
 		entry.Published = DnskeyRolloverPublishLabel(k.State)

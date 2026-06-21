@@ -155,6 +155,10 @@ type RolloverKeyEntry struct {
 	KeyID     uint16 `json:"keyid"`
 	ActiveSeq *int   `json:"activeSeq,omitempty"`
 	State     string `json:"state"`
+	// Algorithm is the DNSSEC algorithm name (e.g. "ED25519", "MAYO5").
+	// Shown in the verbose key table; central to watching an algorithm
+	// rollover, where old- and new-algorithm keys coexist in the pipeline.
+	Algorithm string `json:"algorithm,omitempty"`
 	// Published: KSK — short publish label (none / DS / DS+DNSKEY).
 	// ZSK — RFC3339 wall time of published_at when set (operator column published_at).
 	Published       string `json:"published,omitempty"`
@@ -195,8 +199,13 @@ type RolloverKeyEntry struct {
 // PolicySummary is the slice of DnssecPolicy operators want to see
 // in status output. Doesn't expose private-key-relevant fields.
 type PolicySummary struct {
-	Name                     string `json:"name"`
-	Algorithm                string `json:"algorithm"`
+	Name      string `json:"name"`
+	Algorithm string `json:"algorithm"`
+	// Per-role algorithm names (e.g. "ED25519", "MAYO5"). Surfaced so the
+	// status header can show the effective KSK/ZSK algorithms without -v,
+	// and so an algorithm transition is visible.
+	KSKAlgorithm             string `json:"kskAlgorithm,omitempty"`
+	ZSKAlgorithm             string `json:"zskAlgorithm,omitempty"`
 	KskLifetime              string `json:"kskLifetime"`
 	ZskLifetime              string `json:"zskLifetime,omitempty"`
 	DsPublishDelay           string `json:"dsPublishDelay"`
