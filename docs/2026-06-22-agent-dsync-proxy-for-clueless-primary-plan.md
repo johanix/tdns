@@ -5,7 +5,12 @@ Status: PLANNING (2026-06-22). Scope decisions resolved with the operator
 WIDE change-detection trigger (CDS / CSYNC / NS+glue / DNSKEY) with an
 optimistic act-mapping (CDS|DNSKEY change → NOTIFY(CDS), CSYNC|NS-glue
 change → NOTIFY(CSYNC)); no special delete-DS handling; do not gate on
-unsigned. UPDATE-to-parent is deferred to a later step. Ready to build.
+unsigned. UPDATE-to-parent is deferred to a later step. Ready to build. Estimate
+(§9): ~150–280 source + ~330–520 test LOC, ~11–18 h for the NOTIFY-only
+cut (P-1..P-4); no HIGH-risk step (a wrong NOTIFY only makes the parent
+re-scan). The change-detection pattern is a proven tdns-mp template
+(`MPPreRefresh`), and two of the three diff dimensions reuse existing v2
+functions — so this is mostly trigger+gate glue, not new mechanism.
 
 ## 1. The problem
 
@@ -87,14 +92,28 @@ already knows how to perform.
 
 ## 3. What is actually missing
 
-1. **A post-transfer trigger.** Nothing inspects a freshly transferred
-   secondary zone, and nothing enqueues a delegation-sync off a transfer.
-   The `OnZonePreRefresh`/`OnZonePostRefresh` callback hooks EXIST
+1. **A post-transfer trigger for the NON-MP agent-proxy case.** The
+   `OnZonePreRefresh`/`OnZonePostRefresh` callback hooks
    (`structs.go:158-168`, fired in `FetchFromUpstream`,
-   `zone_utils.go:248-285`) but NOTHING registers a callback that looks at
-   delegation/CDS/CSYNC. The `ZoneRefreshAnalysis` struct
-   (`structs.go:78-85`, with `DelegationChanged`/`DnskeyChanged`) is
-   defined but never populated. These unused hooks are the natural home.
+   `zone_utils.go:248-285`) are a PROVEN pattern — tdns-mp already uses
+   them exactly this way: `tdns-mp/v2/config.go:60-71` registers
+   `MPPreRefresh`/`PostRefresh`, and `MPPreRefresh`
+   (`tdns-mp/v2/hsync_utils.go:1257`) runs delegation + HSYNC + DNSKEY
+   change-detection on old-vs-new and records it in a `ZoneRefreshAnalysis`
+   struct, which `PostRefresh` then acts on. So "PreRefresh diff → analysis
+   → PostRefresh act" is not speculative; it is the established template.
+   What is MISSING is the analogous registration for the plain
+   `agent + Secondary` NON-MP zone: the MP wiring is gated on
+   `OptMultiProvider` and lives in tdns-mp, so the proxy needs its own
+   (smaller) registration in the non-MP path. The reusable PARTS are
+   already in `tdns/v2/`:
+   - `DelegationDataChangedNG` (`delegation_utils.go:239`) — old-vs-new
+     NS / A-glue / AAAA-glue / DS delta, returns a `DelegationSyncStatus`.
+   - `DnskeysChangedNG` (`delegation_utils.go:462`) — old-vs-new DNSKEY
+     change. (Both are `*ZoneData` methods, usable outside MP.)
+   - The `ZoneRefreshAnalysis` struct (`structs.go:78-85`) — the carrier.
+   Only the CDS/CSYNC RRset-change detection is genuinely new (a small
+   `RRsetDiffer` over `dns.TypeCDS`/`dns.TypeCSYNC`).
 
 2. **The change-detection trigger (WIDE — operator decision).** After a
    transfer, compare the new zone against the previously-served one and
@@ -284,15 +303,18 @@ primary once it builds).
   yet. Verify: option parses; the proxy case is admitted; a plain agent
   secondary (no proxy option) is still excluded.
 
-- **Step P-2 — wide change-detection hook (the trigger).** Register an
-  `OnZonePreRefresh` callback for proxy zones (PreRefresh, because it
-  receives BOTH old `zd` and incoming `new_zd` — the diff needs both,
-  `zone_utils.go:248`). It compares old-vs-new for the four dimensions
-  (CDS, CSYNC, NS+glue, DNSKEY, via `core.RRsetDiffer`), records the
-  result in `ZoneRefreshAnalysis` (`structs.go:78`, currently unused), and
-  — when any dimension changed — enqueues a proxy-sync request carrying
-  WHICH dimensions changed. Verify (unit tests): a transfer that changes
-  CDS / CSYNC / NS / glue / DNSKEY each sets the right analysis flags and
+- **Step P-2 — wide change-detection hook (the trigger).** Mirror the
+  tdns-mp template (`tdns-mp/v2/config.go:60-71` registers the hook;
+  `MPPreRefresh` runs the diffs): register an `OnZonePreRefresh` callback
+  for proxy zones in the NON-MP path (PreRefresh because it receives BOTH
+  old `zd` and incoming `new_zd`, `zone_utils.go:248`). REUSE the existing
+  detection: `DelegationDataChangedNG` (`delegation_utils.go:239`) for
+  NS+glue+DS and `DnskeysChangedNG` (`delegation_utils.go:462`) for DNSKEY;
+  ADD a small CDS/CSYNC RRset diff (`RRsetDiffer` over
+  `dns.TypeCDS`/`dns.TypeCSYNC`). Record which dimensions changed in
+  `ZoneRefreshAnalysis` and, when any changed, enqueue a proxy-sync request
+  carrying the changed-dimension set. Verify (unit tests): a transfer that
+  changes CDS / CSYNC / NS / glue / DNSKEY each sets the right flag and
   enqueues; an unchanged transfer (same content, new serial only) enqueues
   nothing (D8 edge-trigger).
 
@@ -346,3 +368,59 @@ Everything heavy (DSYNC discovery, NOTIFY wire send, parent-side
 scan-and-apply, the RRset-differ) is reused. The part with the real open
 question — SIG(0) trust for UPDATE-proxy — is explicitly deferred to P-5,
 which is why NOTIFY-only is the first cut.
+
+
+## 9. Effort / risk / LOC estimate
+
+Per-step, for me to implement (build + `go test -race` green; testbed
+validation is operator-gated and not in these figures). LOC are net new
+source / new test, excluding reuse.
+
+| Step | What | Risk | Src LOC | Test LOC | Time |
+|------|------|------|---------|----------|------|
+| P-1 | `delegation-sync-proxy` option + gate | LOW | 20–40 | 30–50 | 1–2 h |
+| P-2 | Wide PreRefresh diff hook + enqueue | MED | 60–110 | 100–160 | 4–6 h |
+| P-3 | Proxy NOTIFY action (act-mapping) | MED | 50–90 | 80–130 | 3–5 h |
+| P-4 | Debounce + test matrix + operator doc | LOW–MED | 20–40 | 120–180 | 3–5 h |
+| **Total (P-1..P-4, NOTIFY-only)** | | | **~150–280** | **~330–520** | **~11–18 h** |
+| P-5 | UPDATE-proxy (LATER, separate) | HIGH | 80–160 | 120–200 | 6–10 h |
+
+Calibration: tdns-mp's `MPPreRefresh` (the proven template) is ~120 lines
+covering three detection dimensions plus role dispatch; the proxy hook is
+narrower (no role dispatch, two dimensions reused + one new), so P-2's new
+code is mostly the CDS/CSYNC diff + the enqueue glue, not the detection
+itself.
+
+Risk notes:
+
+- **P-2 is the load-bearing step (MED).** The risk is not the diff logic
+  (reuses `DelegationDataChangedNG`/`DnskeysChangedNG`, adds a small
+  CDS/CSYNC `RRsetDiffer`) but the LIFECYCLE: registering the hook only
+  for the right zones (agent + Secondary + proxy option), making sure it
+  fires on the secondary transfer path (`FetchFromUpstream`, confirmed),
+  and the old-vs-new pointer discipline the MP code already documents
+  (PreRefresh sees both; do not act before the hard flip). The MP template
+  de-risks this substantially — it is a known-good pattern to mirror, not
+  a green-field design.
+- **P-3 is MED for a subtle reason:** "skip publish-and-sign" means the
+  proxy must NOT reuse `SyncZoneDelegationViaNotify` verbatim (that path
+  mints + signs a CSYNC). It needs a thin proxy variant that emits the
+  NOTIFY directly to the parent's DSYNC target. Getting the "we are a
+  forwarder, not the source of truth" boundary right is the care item; the
+  wire send itself is reused.
+- **P-1, P-4 are LOW.** Config plumbing and tests/docs.
+- **No HIGH-risk step in the NOTIFY-only cut.** Unlike the KSK alg-roll
+  plan (whose K-2 sat one branch from a bogus-zone path), nothing here can
+  break a served zone: the worst failure mode of a wrong NOTIFY is a
+  parent that re-scans and finds nothing to do. That bounds the blast
+  radius and is why this is comfortable to build incrementally.
+- **P-5 (UPDATE-proxy) is HIGH and deliberately out of this work** — the
+  SIG(0)-trust model (parent authorizing the agent as updater for a child
+  it does not own) is an unresolved design question, not just code.
+
+Confidence: HIGH for P-1..P-4. The two facts the estimate rests on are
+both now verified — the heavy machinery operates on transferred-in data
+(§2), and the PreRefresh→analysis→act pattern is proven in tdns-mp (§3).
+The main estimate risk is the debounce/loop-safety detail (Q6), which
+could push P-4 up if the existing delegation-sync path has no reusable
+"already-synced" marker and one must be added.
