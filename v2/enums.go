@@ -44,7 +44,8 @@ const (
 	OptCatalogZone
 	OptCatalogMemberAutoCreate
 	OptCatalogMemberAutoDelete
-	OptMultiSigner // Dynamically set by signer when HSYNC shows multiple signers
+	OptMultiSigner  // Dynamically set by signer when HSYNC shows multiple signers
+	OptDelSyncProxy // agent secondary: proxy CDS/CSYNC NOTIFYs upstream for a DSYNC-unaware primary
 	optZoneOptionTdnsSentinel
 )
 
@@ -76,6 +77,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptCatalogMemberAutoCreate: "catalog-member-auto-create",
 	OptCatalogMemberAutoDelete: "catalog-member-auto-delete",
 	OptMultiSigner:             "multi-signer",
+	OptDelSyncProxy:            "delegation-sync-proxy",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -99,6 +101,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"catalog-member-auto-create": OptCatalogMemberAutoCreate,
 	"catalog-member-auto-delete": OptCatalogMemberAutoDelete,
 	"multi-signer":               OptMultiSigner,
+	"delegation-sync-proxy":      OptDelSyncProxy,
 }
 
 type ImrOption uint8

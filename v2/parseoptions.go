@@ -181,6 +181,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 		switch opt {
 		case OptDelSyncParent,
 			OptDelSyncChild,
+			OptDelSyncProxy,
 			OptAllowUpdates,
 			OptAllowChildUpdates,
 			OptAllowEdits,

@@ -882,6 +882,26 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 		}
 	}
 
+	// delegation-sync-proxy: a tdns-agent acting as a SECONDARY for a zone
+	// whose primary is DSYNC-unaware (BIND/Knot). The agent inspects incoming
+	// transfers for CDS/CSYNC (and NS/glue/DNSKEY) changes and forwards
+	// NOTIFY(CDS/CSYNC) to the parent on the primary's behalf. Unlike
+	// delegation-sync-child this is NOTIFY-only and needs no local SIG(0) key
+	// (a bare NOTIFY tells the parent to re-scan; it carries no payload we must
+	// sign). Valid only for agent + secondary zones; reject other combinations
+	// so a misconfiguration is loud rather than silently inert.
+	if zd.Options[OptDelSyncProxy] {
+		if Globals.App.Type != AppTypeAgent || zd.ZoneType != Secondary {
+			lg.Error("SetupZoneSync: delegation-sync-proxy is only valid for a tdns-agent secondary zone",
+				"zone", zd.ZoneName, "app", Globals.App.Type, "zonetype", zd.ZoneType)
+			zd.SetError(ConfigError, "delegation-sync-proxy is only valid for an agent secondary zone")
+			return fmt.Errorf("delegation-sync-proxy on zone %s requires a tdns-agent secondary zone", zd.ZoneName)
+		}
+		// The change-detection hook (P-2) and the proxy NOTIFY action (P-3) are
+		// wired separately. P-1 only establishes and validates the gate.
+		lg.Info("SetupZoneSync: delegation-sync-proxy enabled (agent secondary)", "zone", zd.ZoneName)
+	}
+
 	return nil
 }
 
