@@ -172,6 +172,19 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 					lgDns.Info("DelegationSyncher: proxy NOTIFY done", "zone", ds.ZoneName, "msg", msg)
 				}
 
+			case "PROXY-UPDATE-SETUP":
+				// delegation-sync-proxy UPDATE path: run the precondition +
+				// KEY-bootstrap state machine (§10.8) off the refresh path (it
+				// does DSYNC discovery and may generate a SIG(0) key). Sets the
+				// per-zone warning for the not-yet-operable states; a no-op for
+				// the NOTIFY proxy.
+				state, perr := zd.ProxyUpdatePreconditionCheck(ctx, kdb, imr())
+				if perr != nil {
+					lgDns.Error("DelegationSyncher: proxy UPDATE precondition error", "zone", ds.ZoneName, "state", state, "err", perr)
+				} else {
+					lgDns.Info("DelegationSyncher: proxy UPDATE precondition", "zone", ds.ZoneName, "state", state)
+				}
+
 			default:
 				lgDns.Warn("DelegationSyncher: unknown command, ignoring", "zone", ds.ZoneName, "command", ds.Command)
 			}

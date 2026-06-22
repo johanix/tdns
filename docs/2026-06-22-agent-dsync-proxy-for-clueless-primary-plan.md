@@ -550,11 +550,22 @@ the native child path.
 
 ### 10.6 Build sub-steps
 
-- U-a: the precondition + KEY-bootstrap state machine (§10.8) — the
-  UPDATE-support gate, the apex-KEY check, agent SIG(0) keygen/storage, the
-  operator-instruction surfacing (log + zone-list status + CLI), and the
-  ready/foreign/waiting state handling. This is the gate that everything
-  else depends on; build it first.
+- U-a: the precondition + KEY-bootstrap state machine (§10.8). STATUS:
+  DONE (state machine + wiring). `delsync_proxy_update.go`:
+  `ProxyUpdatePreconditionCheck` runs the §10.8 flow — UPDATE-support gate
+  (`LookupDSYNCTarget` with `SchemeUpdate`), apex-KEY check, ours-vs-foreign
+  match (`proxyHoldsPrivateKeyFor`), keygen on absence (`proxyEnsureSig0Key`
+  via `Sig0KeyMgmt`, no publish — a secondary can't author the zone), and
+  the KEY-RR + HSYNCPARAM-pubkey operator instruction
+  (`proxyBootstrapInstruction`). New `DelegationSyncWarning` ErrorType
+  surfaces the foreign/waiting states on `zone list` (resilient-config
+  quarantine; never hard-fails). New exported `core.NewHsyncparamPubkeyFlag`.
+  Wired off the refresh path via a `PROXY-UPDATE-SETUP` DelegationSyncher
+  command enqueued from `SetupZoneSync`. Tests: keygen idempotency,
+  ours-vs-foreign, apex-KEY read, instruction text, pubkey RR. The
+  DSYNC-discovery gate itself is network — testbed-validated. The on-demand
+  CLI (`proxy-key`) is U-a2 (needs a daemon API endpoint). Build + full
+  `go test -race` green.
 - U-b: remove the stale replace-mode refusal; confirm shared replace works
   on the fork (U4).
 - U-c: the startup reconcile pass — run `AnalyseZoneDelegation` once on
