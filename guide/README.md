@@ -34,14 +34,16 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   configuration, the change-to-NOTIFY mapping, limitations,
   and verification.
 
-- [Automatic DNSSEC Key Rollovers](key-rollover.md)
-  -- Operator manual for the automated KSK rollover engine,
-  covering policy YAML, the `auto-rollover` CLI subcommand
-  tree, the status output, PQ-safe parent UPDATEs,
-  DSYNC-aware dispatch and verification, the three-knob
-  mental model (TTLs, KSK lifetime, RRSIG validity), worked
-  examples at testbed, weekly, and monthly cadences, and
-  the failure-category model.
+- [Automatic DNSSEC Rollovers](key-rollover.md)
+  -- Operator manual for all three rollover kinds:
+  parent-coordinated **KSK** rollover (the bulk -- policy
+  YAML, the `auto-rollover` CLI tree, status output, PQ-safe
+  parent UPDATEs, DSYNC-aware dispatch and verification, the
+  three-knob mental model, worked examples, and the
+  failure-category model), local **ZSK** rollover, and
+  **algorithm** rollover (the relaxed-mode ZSK alg roll via
+  `policy-change` + `asap --zsk`, with the `completeness`
+  knob and the KSK/CSK/both-role/strict refusals).
 
 - [Rollover Timing Equations](rollover-timing-equations.md)
   -- Canonical reference for the cache-flush invariants,
