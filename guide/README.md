@@ -19,12 +19,20 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   detailed documentation for each.
 
 - [TDNS Special Features and Extensions](special-features.md)
-  -- Delegation sync (both parent and child sides, including
+  -- Delegation sync (parent side, child side, and the
+  agent-as-proxy path for DSYNC-unaware primaries, including
   the DSYNC scheme dispatch, the NOTIFY scanner, and the
   pluggable delegation backends), DNS transport signaling,
   experimental record types, and post-quantum algorithm
   support (ML-DSA / SLH-DSA / Falcon / MAYO / SNOVA for both
   SIG(0) and DNSSEC).
+
+- [Agent as a DSYNC proxy](agent-dsync-proxy.md)
+  -- Operator how-to for running tdns-agent as a secondary
+  that forwards NOTIFY(CDS/CSYNC) to the parent on behalf of
+  a DSYNC-unaware primary (BIND/Knot/NSD): when to use it,
+  configuration, the change-to-NOTIFY mapping, limitations,
+  and verification.
 
 - [Automatic DNSSEC Key Rollovers](key-rollover.md)
   -- Operator manual for the automated KSK rollover engine,
@@ -43,5 +51,6 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   reading when changing engine timing behaviour.
 
 - Future Work (coming soon)
-  -- IXFR support, TSIG authentication, scanner integration
-  for parent-side delegation sync.
+  -- IXFR support, TSIG authentication, and UPDATE-scheme
+  delegation-sync proxying (the NOTIFY-scheme proxy ships
+  now; see the agent-as-proxy guide above).

@@ -4,8 +4,10 @@ This describes how to run tdns-agent as a SECONDARY that forwards
 delegation-sync signals (NOTIFY(CDS)/NOTIFY(CSYNC)) to the parent on
 behalf of a primary that is DSYNC-unaware (BIND9, Knot, NSD, etc.).
 
-See `2026-06-22-agent-dsync-proxy-for-clueless-primary-plan.md` for the
-design. This guide is the how-to.
+This proxy is one of the three delegation-sync roles; for how it fits with
+the parent and self-syncing-child roles see
+[Special Features §1.6](special-features.md). For the design rationale see
+`../docs/2026-06-22-agent-dsync-proxy-for-clueless-primary-plan.md`.
 
 
 ## When to use this

@@ -36,7 +36,10 @@ manual process. TDNS automates it on both sides: tdns-agent
 (or tdns-auth running as the child's primary) detects the
 change and pushes it to the parent; tdns-auth on the parent
 side receives the push, verifies it, and applies it to a
-configurable delegation backend.
+configurable delegation backend. tdns-agent can also act as
+a **proxy** for a child whose primary is DSYNC-unaware
+(BIND/Knot/NSD), forwarding the primary's CDS/CSYNC signals
+to the parent on its behalf (section 1.6).
 
 The mechanism is built on three components:
 
@@ -296,6 +299,63 @@ UPDATE, a generalized NOTIFY(CDS/CSYNC), or both -- driven
 by what the parent advertises and by per-policy preference.
 The same dispatch logic is reused by the auto-rollover
 engine; see section 5 for the full picture.
+
+
+### 1.6 Agent: proxying for a DSYNC-unaware primary
+
+The child side above assumes the child's primary speaks
+DSYNC. Many do not: a stock BIND9, Knot, or NSD primary
+will never discover the parent's DSYNC RRset and will never
+push a DS or delegation change to the parent. But such a
+primary *can* publish a CDS/CDNSKEY (RFC 7344) or CSYNC
+(RFC 7477) in the zone -- the standard, vendor-neutral way
+for a child to signal "please sync me."
+
+tdns-agent bridges that gap. Configure it as a **secondary**
+for the zone with the `delegation-sync-proxy` option. On
+every incoming AXFR/IXFR the agent diffs the new zone
+against the one it was serving and, when a
+delegation-relevant RRset changed, forwards the matching
+generalized NOTIFY to the parent's advertised NOTIFY
+receiver on the primary's behalf. The parent's scanner then
+queries the child and applies the change, exactly as for a
+DSYNC-native child. The primary is never modified.
+
+The change-to-NOTIFY mapping:
+
+| Change in the transfer            | NOTIFY forwarded |
+|-----------------------------------|------------------|
+| CDS RRset changed                 | NOTIFY(CDS)      |
+| DNSKEY RRset changed              | NOTIFY(CDS)      |
+| CSYNC RRset changed               | NOTIFY(CSYNC)    |
+| NS RRset or glue (A/AAAA) changed | NOTIFY(CSYNC)    |
+
+A NOTIFY is a contentless "come re-scan me" signal, so the
+proxy never reads or signs the CDS/CSYNC -- the parent reads
+them itself. That is why the proxy needs no SIG(0) key and
+why a `CDS 0 0 0 00` ("delete DS", RFC 8078) is handled like
+any other CDS change. The trigger is content-edge-triggered,
+so a change fires exactly once and a slow parent is never
+re-NOTIFYd on subsequent refreshes.
+
+The three delegation-sync roles, side by side:
+
+- `delegation-sync-parent` -- I am the parent: publish a
+  DSYNC RRset and receive UPDATE / NOTIFY from children
+  (sections 1.1-1.4).
+- `delegation-sync-child` -- I am the child and author my
+  own zone: detect my delegation changes and push them up
+  (section 1.5).
+- `delegation-sync-proxy` -- I am a secondary for a
+  DSYNC-unaware primary: forward the primary's CDS/CSYNC
+  signals up on its behalf (this section).
+
+The proxy is NOTIFY-only for now; if the parent advertises
+only the UPDATE scheme, the proxy does nothing (UPDATE
+proxying, which would also cover unsigned zones, is planned
+work). For the full operator how-to -- configuration,
+requirements, limitations, and verification -- see
+[Agent as a DSYNC proxy](agent-dsync-proxy.md).
 
 
 ## 2. DNS Transport Signaling
