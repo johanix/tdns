@@ -898,8 +898,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		}
 
 		// Delegation sync setup: DSYNC publication (parent) or
-		// delegation sync monitoring (child).
-		if options[OptDelSyncParent] || options[OptDelSyncChild] {
+		// delegation sync monitoring (child), or proxy forwarding for a
+		// DSYNC-unaware primary (agent secondary).
+		if options[OptDelSyncParent] || options[OptDelSyncChild] || options[OptDelSyncProxy] {
 			capturedOpts := options
 			setupSync := func(zd *ZoneData) {
 				// Skip if the MP HSYNCPARAM callback already set up delegation sync for this zone.
@@ -923,6 +924,26 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			} else {
 				setupSync(zdp)
 			}
+		}
+
+		// delegation-sync-proxy: register the post-transfer change-detection
+		// hook so an agent secondary forwards NOTIFY(CDS/CSYNC) to the parent
+		// when a relevant RRset changes in an incoming transfer. The hook is an
+		// OnZonePreRefresh callback (it needs both old and new zone data to
+		// diff) that records what changed in zd.ProxyRefreshAnalysis; the
+		// matching OnZonePostRefresh callback acts on it (P-3). Mirrors the
+		// tdns-mp MPPreRefresh/PostRefresh pattern (tdns-mp/v2/config.go), for
+		// the non-MP agent path.
+		if options[OptDelSyncProxy] {
+			delegationSyncQ := conf.Internal.DelegationSyncQ
+			zdp.OnZonePreRefresh = append(zdp.OnZonePreRefresh,
+				func(zd, new_zd *ZoneData) {
+					zd.ProxyDelegationPreRefresh(new_zd)
+				})
+			zdp.OnZonePostRefresh = append(zdp.OnZonePostRefresh,
+				func(zd *ZoneData) {
+					zd.ProxyDelegationPostRefresh(delegationSyncQ)
+				})
 		}
 
 		// Note: DelegationBackend wiring is done synchronously above,

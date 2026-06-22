@@ -307,20 +307,26 @@ primary once it builds).
   ConfigError. Build (all binaries incl. tdns-agent) + full
   `go test -race` green.
 
-- **Step P-2 — wide change-detection hook (the trigger).** Mirror the
-  tdns-mp template (`tdns-mp/v2/config.go:60-71` registers the hook;
-  `MPPreRefresh` runs the diffs): register an `OnZonePreRefresh` callback
-  for proxy zones in the NON-MP path (PreRefresh because it receives BOTH
-  old `zd` and incoming `new_zd`, `zone_utils.go:248`). REUSE the existing
-  detection: `DelegationDataChangedNG` (`delegation_utils.go:239`) for
-  NS+glue+DS and `DnskeysChangedNG` (`delegation_utils.go:462`) for DNSKEY;
-  ADD a small CDS/CSYNC RRset diff (`RRsetDiffer` over
-  `dns.TypeCDS`/`dns.TypeCSYNC`). Record which dimensions changed in
-  `ZoneRefreshAnalysis` and, when any changed, enqueue a proxy-sync request
-  carrying the changed-dimension set. Verify (unit tests): a transfer that
-  changes CDS / CSYNC / NS / glue / DNSKEY each sets the right flag and
-  enqueues; an unchanged transfer (same content, new serial only) enqueues
-  nothing (D8 edge-trigger).
+- **Step P-2 — wide change-detection hook (the trigger).** STATUS: DONE.
+  Mirrored the tdns-mp template: `parseconfig.go` registers an
+  `OnZonePreRefresh` + `OnZonePostRefresh` pair for `OptDelSyncProxy`
+  zones. `delsync_proxy.go` adds `ProxyDelegationAnalysis` (the carrier;
+  also stored on `ZoneData.ProxyRefreshAnalysis`, `structs.go`),
+  `ProxyDelegationPreRefresh` (diffs old-vs-new: CDS/CSYNC via a small
+  apex `core.RRsetDiffer`, NS+glue+DS via the existing
+  `DelegationDataChangedNG`, DNSKEY via the existing `DnskeysChangedNG`),
+  and `ProxyDelegationPostRefresh` (on any change, enqueues a
+  `PROXY-NOTIFY` `DelegationSyncRequest` carrying the changed dimensions +
+  the delegation deltas, and clears the analysis). The D4 act-mapping is
+  encoded as `wantCDSNotify` (CDS|DNSKEY) / `wantCSYNCNotify`
+  (CSYNC|NS-glue). The `PROXY-NOTIFY` command currently lands on the
+  DelegationSyncher's safe `default` (warn+ignore) until P-3 adds the
+  handler — so P-2 is working code on its own. Tests
+  (`delsync_proxy_p2_test.go`): no-change → nothing; each of CDS / CSYNC /
+  NS-glue / DNSKEY flips exactly its flag and the right
+  want{CDS,CSYNC}Notify; PostRefresh enqueues exactly one PROXY-NOTIFY on
+  change, nothing on empty/absent analysis, and clears the analysis. Build
+  + full `go test -race` green.
 
 - **Step P-3 — proxy NOTIFY action (the act).** A delegation-sync command
   (new `PROXY-NOTIFY`, or a proxy flag on the existing path) that, gated on
