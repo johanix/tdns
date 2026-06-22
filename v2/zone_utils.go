@@ -796,7 +796,7 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 }
 
 func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
-	wantsSync := zd.Options[OptDelSyncParent] || zd.Options[OptDelSyncChild]
+	wantsSync := zd.Options[OptDelSyncParent] || zd.Options[OptDelSyncChild] || zd.Options[OptDelSyncProxy]
 
 	// Dynamic parentsync=agent detection removed — handled by tdns-mp
 	// MPPostRefresh (hsync_utils.go) and OnFirstLoad (start_agent.go).

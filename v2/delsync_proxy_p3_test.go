@@ -1,7 +1,9 @@
 package tdns
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -45,7 +47,7 @@ func TestEmitProxyNotifiesActMapping(t *testing.T) {
 			zd := &ZoneData{ZoneName: "child.example."}
 			q := make(chan NotifyRequest, 4)
 			a := tc.analysis
-			sent := zd.emitProxyNotifies(q, &a, targets)
+			sent := zd.emitProxyNotifies(context.Background(), q, &a, targets)
 
 			got := drainNotifyTypes(q)
 			if len(got) != len(tc.want) {
@@ -74,7 +76,7 @@ func TestEmitProxyNotifiesTargetPassthrough(t *testing.T) {
 	q := make(chan NotifyRequest, 2)
 	targets := []string{"192.0.2.53:53", "[2001:db8::53]:53"}
 
-	zd.emitProxyNotifies(q, &ProxyDelegationAnalysis{CsyncChanged: true}, targets)
+	zd.emitProxyNotifies(context.Background(), q, &ProxyDelegationAnalysis{CsyncChanged: true}, targets)
 	select {
 	case r := <-q:
 		if r.RRtype != dns.TypeCSYNC {
@@ -88,5 +90,28 @@ func TestEmitProxyNotifiesTargetPassthrough(t *testing.T) {
 		}
 	default:
 		t.Fatal("expected a NOTIFY(CSYNC)")
+	}
+}
+
+// A cancelled context must stop the sends without blocking, even when the
+// notifyq is full (backpressure / shutdown). emitProxyNotifies returns what it
+// managed to send (here: nothing) rather than deadlocking.
+func TestEmitProxyNotifiesContextCancelled(t *testing.T) {
+	zd := &ZoneData{ZoneName: "child.example."}
+	full := make(chan NotifyRequest) // unbuffered, no reader → a blocking send would hang
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	done := make(chan []string, 1)
+	go func() {
+		done <- zd.emitProxyNotifies(ctx, full, &ProxyDelegationAnalysis{CsyncChanged: true, CdsChanged: true}, []string{"192.0.2.53:53"})
+	}()
+	select {
+	case sent := <-done:
+		if len(sent) != 0 {
+			t.Fatalf("cancelled ctx should send nothing, got %v", sent)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("emitProxyNotifies blocked on a full queue despite a cancelled context")
 	}
 }

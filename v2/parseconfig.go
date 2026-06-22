@@ -934,7 +934,11 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// matching OnZonePostRefresh callback acts on it (P-3). Mirrors the
 		// tdns-mp MPPreRefresh/PostRefresh pattern (tdns-mp/v2/config.go), for
 		// the non-MP agent path.
-		if options[OptDelSyncProxy] {
+		// Register only on first load: on reload zdp is the existing registry
+		// entry and its OnZone*Refresh slices already carry these hooks, so
+		// appending again would accumulate duplicates (same convention as the
+		// OnFirstLoad-guarded setupSync block above).
+		if options[OptDelSyncProxy] && zdp.FirstZoneLoad {
 			delegationSyncQ := conf.Internal.DelegationSyncQ
 			zdp.OnZonePreRefresh = append(zdp.OnZonePreRefresh,
 				func(zd, new_zd *ZoneData) {

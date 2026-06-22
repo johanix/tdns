@@ -131,12 +131,20 @@ func (zd *ZoneData) ProxyDelegationPostRefresh(delsyncq chan DelegationSyncReque
 		"ns_or_glue", analysis.NsOrGlueChanged, "dnskey", analysis.DnskeyChanged,
 		"want_cds_notify", analysis.wantCDSNotify(), "want_csync_notify", analysis.wantCSYNCNotify())
 
-	delsyncq <- DelegationSyncRequest{
+	// Non-blocking enqueue: this runs on the refresh path, which has no ctx to
+	// select on, so we must not block on a backed-up queue (e.g. during
+	// shutdown). Dropping is safe — the proxy is idempotent: the next transfer
+	// re-detects the still-unforwarded change and re-enqueues.
+	select {
+	case delsyncq <- DelegationSyncRequest{
 		Command:       "PROXY-NOTIFY",
 		ZoneName:      zd.ZoneName,
 		ZoneData:      zd,
 		SyncStatus:    analysis.DelegationStatus,
 		ProxyAnalysis: analysis,
+	}:
+	default:
+		zd.Logger.Printf("ProxyDelegationPostRefresh: DelegationSyncQ full for %s; dropping proxy NOTIFY (will re-detect on next transfer)", zd.ZoneName)
 	}
 }
 
@@ -172,7 +180,7 @@ func (zd *ZoneData) ProxyNotifyParent(ctx context.Context, notifyq chan NotifyRe
 		return "parent advertises no NOTIFY DSYNC target; nothing forwarded", nil
 	}
 
-	sent := zd.emitProxyNotifies(notifyq, analysis, dsynctarget.Addresses)
+	sent := zd.emitProxyNotifies(ctx, notifyq, analysis, dsynctarget.Addresses)
 	lgDns.Info("delegation-sync-proxy: forwarded NOTIFY(s) to parent",
 		"zone", zd.ZoneName, "parent", zd.Parent, "sent", sent, "target", dsynctarget.Addresses)
 	return fmt.Sprintf("forwarded NOTIFY(%v) to parent %s", sent, zd.Parent), nil
@@ -182,15 +190,25 @@ func (zd *ZoneData) ProxyNotifyParent(ctx context.Context, notifyq chan NotifyRe
 // given targets, and returns the list of RRtypes notified ("CSYNC"/"CDS").
 // Separated from DSYNC discovery so the act-mapping → emission is testable
 // without the network. CSYNC is sent before CDS for a stable, predictable order.
-func (zd *ZoneData) emitProxyNotifies(notifyq chan NotifyRequest, analysis *ProxyDelegationAnalysis, targets []string) []string {
+// The sends are ctx-aware so a backed-up notifyq cannot block shutdown; a
+// cancelled context stops further sends and returns what was sent so far.
+func (zd *ZoneData) emitProxyNotifies(ctx context.Context, notifyq chan NotifyRequest, analysis *ProxyDelegationAnalysis, targets []string) []string {
 	var sent []string
 	if analysis.wantCSYNCNotify() {
-		notifyq <- NotifyRequest{ZoneName: zd.ZoneName, ZoneData: zd, RRtype: dns.TypeCSYNC, Targets: targets}
-		sent = append(sent, "CSYNC")
+		select {
+		case notifyq <- NotifyRequest{ZoneName: zd.ZoneName, ZoneData: zd, RRtype: dns.TypeCSYNC, Targets: targets}:
+			sent = append(sent, "CSYNC")
+		case <-ctx.Done():
+			return sent
+		}
 	}
 	if analysis.wantCDSNotify() {
-		notifyq <- NotifyRequest{ZoneName: zd.ZoneName, ZoneData: zd, RRtype: dns.TypeCDS, Targets: targets}
-		sent = append(sent, "CDS")
+		select {
+		case notifyq <- NotifyRequest{ZoneName: zd.ZoneName, ZoneData: zd, RRtype: dns.TypeCDS, Targets: targets}:
+			sent = append(sent, "CDS")
+		case <-ctx.Done():
+			return sent
+		}
 	}
 	return sent
 }
