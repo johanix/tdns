@@ -482,16 +482,29 @@ DECISION U3 — proxied UPDATEs are REPLACE-form (delete the RRset, re-add
 the current authoritative members) rather than delta (add/remove diff).
 Replace is idempotent and self-correcting: it does not depend on the
 parent's current state matching our assumption, so it fixes drift instead
-of risking duplicate-adds or missed-removes. The builder already exists:
-`CreateChildReplaceUpdate` (`childsync_utils.go:173`) does whole-RRset
-replace for NS + glue + DS.
+of risking duplicate-adds or missed-removes.
+
+PRECEDENT — the KSK rollover engine ALREADY pushes the child's DS RRset to
+the parent in replace form, in production: `BuildChildWholeDSUpdate`
+(`ksk_rollover_ds_push.go:38`) does `RemoveRRset` (DEL ANY DS) + `Insert`
+(new DS), and it does NOT go through the disabled
+`SyncZoneDelegationViaUpdate` mode-switch. So replace-form is the normal,
+exercised parent-UPDATE shape on the fork — strong corroboration of U3/U4.
+Two conventions to copy from it that `CreateChildReplaceUpdate` should
+match: `Ttl: 0` on the ClassANY delete (not 3600), and `m.SetEdns0(1232,
+true)` (EDNS0 + DO — matters for PQ-sized records). Open U-build choice:
+reuse `CreateChildReplaceUpdate` (`childsync_utils.go:173`, NS+glue+DS) for
+the whole payload after aligning those conventions, OR reuse the proven
+`BuildChildWholeDSUpdate` for the DS dimension and `CreateChildReplaceUpdate`
+only for NS+glue. Lean toward one builder for all three, aligned to the
+KSK conventions.
 
 NOTE — `SyncZoneDelegationViaUpdate` currently refuses replace mode with a
 stale "replace mode is currently broken" guard. That bug was in upstream
-miekg/dns, NOT tdns; the tdns fork fixes it, so the guard is obsolete.
-DECISION U4 — remove that refusal and re-enable shared replace mode as
-part of P-5 (verify the existing child UPDATE path still works before/after
-— it benefits too).
+miekg/dns, NOT tdns; the tdns fork fixes it (and the KSK path above already
+relies on the fix), so the guard is obsolete. DECISION U4 — remove that
+refusal and re-enable shared replace mode as part of P-5 (verify the
+existing child UPDATE path still works before/after — it benefits too).
 
 ### 10.3 Scope: NS+glue AND DS (resolved)
 
