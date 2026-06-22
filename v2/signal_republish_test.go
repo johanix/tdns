@@ -163,7 +163,10 @@ func drainUpdateQ(q chan UpdateRequest) []UpdateRequest {
 	var out []UpdateRequest
 	for {
 		select {
-		case ur := <-q:
+		case ur, ok := <-q:
+			if !ok {
+				return out
+			}
 			out = append(out, ur)
 		default:
 			return out
