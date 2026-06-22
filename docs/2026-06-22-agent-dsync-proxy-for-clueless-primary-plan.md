@@ -365,12 +365,14 @@ primary once it builds).
   refused, D5); a no-NOTIFY-target parent is the logged no-op in
   `ProxyNotifyParent` (P-3). Build + full `go test -race` green.
 
-- **Step P-5 (LATER, not this work) — UPDATE-proxy.** Add the DNS-UPDATE-
-  to-parent scheme: reuse `AnalyseZoneDelegation`'s delta +
-  `SyncZoneDelegationViaUpdate`. Brings the SIG(0)-trust question (parent
-  must authorize the agent's key as updater for a child it does not own)
-  and the advantage of working for UNSIGNED zones (D5). Designed later;
-  D5/D6 pre-position the change-detection so this step does not redo it.
+- **Step P-5 — UPDATE-proxy (DESIGNED 2026-06-22, ready to build).** Add
+  the DNS-UPDATE-to-parent scheme alongside the NOTIFY proxy. Unlike NOTIFY,
+  UPDATE carries the actual delegation records as payload, so it works for
+  UNSIGNED zones too (the headline advantage) and lands the change in one
+  round-trip without relying on the parent's scanner. Full design below
+  (§10). Estimate: ~150–280 source + ~150–250 test LOC, ~8–14 h; the SIG(0)
+  trust model and the replace-form question are now resolved, so the HIGH
+  risk from the NOTIFY-cut estimate is reduced to MED.
 
 
 ## 8. Why this is small (NOTIFY-only first cut)
@@ -448,3 +450,120 @@ both now verified — the heavy machinery operates on transferred-in data
 The main estimate risk is the debounce/loop-safety detail (Q6), which
 could push P-4 up if the existing delegation-sync path has no reusable
 "already-synced" marker and one must be added.
+
+
+## 10. UPDATE-proxy design (P-5)
+
+All open questions resolved with the operator on 2026-06-22.
+
+### 10.1 Trust model (resolved)
+
+The parent authorizes a DNS UPDATE by the SIG(0) key that signed it
+(`ValidateUpdate`, `sig0_validate.go:21`). Its path-3 (`FindSig0KeyViaDNS`,
+`sig0_validate.go:161`) trusts a key whose public KEY is **published in the
+child zone** and resolvable via DNS — exactly how a DSYNC-native child is
+trusted, with NO parent-side configuration.
+
+DECISION U1 — the agent holds a SIG(0) keypair and signs proxied UPDATEs
+with `SignerName = <child zone>`. The agent's public KEY is published at
+the child apex (the parent then resolves+trusts it via path-3). The agent
+effectively signs *as the child*, with a key the child zone vouches for.
+
+DECISION U2 (bootstrap) — the agent generates the keypair on proxy setup
+and EXPORTS the public KEY; the OPERATOR publishes that KEY record at the
+DSYNC-unaware primary, once, exactly as they already add DS/CDS there. No
+new bootstrap protocol; the agent uses the private half once it sees its
+KEY in the transferred zone. (P-5 includes the keygen + export tooling,
+DECISION U6.)
+
+### 10.2 Form: replace, not delta (resolved)
+
+DECISION U3 — proxied UPDATEs are REPLACE-form (delete the RRset, re-add
+the current authoritative members) rather than delta (add/remove diff).
+Replace is idempotent and self-correcting: it does not depend on the
+parent's current state matching our assumption, so it fixes drift instead
+of risking duplicate-adds or missed-removes. The builder already exists:
+`CreateChildReplaceUpdate` (`childsync_utils.go:173`) does whole-RRset
+replace for NS + glue + DS.
+
+NOTE — `SyncZoneDelegationViaUpdate` currently refuses replace mode with a
+stale "replace mode is currently broken" guard. That bug was in upstream
+miekg/dns, NOT tdns; the tdns fork fixes it, so the guard is obsolete.
+DECISION U4 — remove that refusal and re-enable shared replace mode as
+part of P-5 (verify the existing child UPDATE path still works before/after
+— it benefits too).
+
+### 10.3 Scope: NS+glue AND DS (resolved)
+
+DECISION U5 — the UPDATE-proxy reconciles the full delegation: NS, A/AAAA
+glue, and DS. DS is derived from the child's apex DNSKEYs (signed zones;
+`AnalyseZoneDelegation` already does this, `delegation_utils.go:126`).
+NS+glue applies to all zones including UNSIGNED — which is the case NOTIFY
+cannot serve and the main reason to build UPDATE-proxy.
+
+### 10.4 Trigger: two phases (the operator's model)
+
+The expensive parent comparison is a STARTUP reconciliation, not a
+per-transfer operation:
+
+- STARTUP (once, on first load of a proxy zone): run the full parent-vs-
+  child compare `AnalyseZoneDelegation` (one network round-trip to the
+  parent). If out of sync, send a replace UPDATE. This catches drift that
+  accumulated while the agent was down, and means a restart does NOT
+  re-send unless there is a genuine difference.
+- STEADY-STATE (every transfer after): the LOCAL old-vs-new compare
+  `DelegationDataChangedNG` (the PreRefresh diff already built for the
+  NOTIFY proxy, P-2 — no parent round-trip). If the child's own delegation
+  data changed, send a replace UPDATE.
+
+Both phases share ONE payload builder: the replace of the current
+authoritative NS/glue/DS read from the freshly-transferred zone. The two
+comparisons only decide WHETHER to send; the payload never depends on the
+parent's state (that is the point of replace-form). So the parent
+round-trip happens once at startup, never in steady state.
+
+### 10.5 Scheme selection
+
+`BestSyncScheme` (`childsync_utils.go:386`) already picks UPDATE vs NOTIFY
+from the parent's advertised DSYNC RRset + local preference. UPDATE
+advertised → this path; NOTIFY advertised → the existing NOTIFY proxy
+(§5). A parent advertising both is the operator's preference choice, as for
+the native child path.
+
+### 10.6 Build sub-steps
+
+- U-a: agent SIG(0) keygen + storage (under the child zone name) + public-
+  KEY export tooling (CLI/log) for the operator to publish (U1/U2/U6).
+- U-b: remove the stale replace-mode refusal; confirm shared replace works
+  on the fork (U4).
+- U-c: the startup reconcile pass — run `AnalyseZoneDelegation` once on
+  first load for proxy zones, send a replace UPDATE if out of sync (U4
+  trigger phase 1).
+- U-d: the steady-state UPDATE action — on a PROXY-UPDATE request (the
+  UPDATE sibling of PROXY-NOTIFY), build the replace via
+  `CreateChildReplaceUpdate`, sign with the agent's SIG(0) key
+  (`SignerName = child`), send via `SendUpdate`. ctx-aware sends (the
+  review lesson).
+- U-e: scheme dispatch — extend the proxy PostRefresh/handler so a parent
+  advertising UPDATE routes to PROXY-UPDATE, NOTIFY routes to the existing
+  PROXY-NOTIFY.
+- U-f: tests (signed + unsigned zones; startup-reconcile fires once;
+  steady-state local-diff fires on change; replace payload correctness;
+  no-resend-on-restart) + operator doc (the manual KEY-publication
+  bootstrap step).
+
+DECISION U6 — the keygen + export tooling is part of P-5, not a separate
+prerequisite.
+
+### 10.7 Open items for U-build time
+
+- The agent's SIG(0) key is per-child (stored under the child zone name).
+  Confirm the keystore cleanly holds a key for a zone the agent only
+  secondaries (not authors) — it should, since the key is keyed by zone
+  name, but verify against `GetSig0Keys`/`Sig0StateActive`.
+- Until the operator publishes the agent's KEY at the primary, the parent
+  cannot validate the UPDATE (path-3 fails). The proxy should detect "my
+  KEY is not yet in the transferred zone" and hold off / warn, rather than
+  send UPDATEs the parent will REFUSE. A clean precondition check.
+
+
