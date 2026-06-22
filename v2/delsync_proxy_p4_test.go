@@ -11,7 +11,7 @@ import (
 // the SOA serial advanced. This is the Q6 self-debounce: no extra state needed.
 
 // simulateRefresh runs one PreRefresh+PostRefresh cycle and reports whether a
-// PROXY-NOTIFY was enqueued. It mutates served (the running zone) to the new
+// PROXY-SYNC was enqueued. It mutates served (the running zone) to the new
 // content, mirroring the hard flip, so the next call diffs against it.
 func simulateRefresh(t *testing.T, served **ZoneData, newZoneStr string, q chan DelegationSyncRequest) bool {
 	t.Helper()
@@ -79,6 +79,6 @@ child.example.	3600 IN CSYNC 1 3 A NS AAAA
 
 	// Exactly one NOTIFY request total across the three refreshes.
 	if len(q) != 1 {
-		t.Fatalf("total enqueued PROXY-NOTIFY = %d, want exactly 1", len(q))
+		t.Fatalf("total enqueued PROXY-SYNC = %d, want exactly 1", len(q))
 	}
 }

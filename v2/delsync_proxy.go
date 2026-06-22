@@ -125,7 +125,7 @@ func (zd *ZoneData) ProxyDelegationPostRefresh(delsyncq chan DelegationSyncReque
 		return
 	}
 
-	lgDns.Info("delegation-sync-proxy: change detected in transfer; queueing proxy NOTIFY",
+	lgDns.Info("delegation-sync-proxy: change detected in transfer; queueing proxy sync",
 		"zone", zd.ZoneName,
 		"cds", analysis.CdsChanged, "csync", analysis.CsyncChanged,
 		"ns_or_glue", analysis.NsOrGlueChanged, "dnskey", analysis.DnskeyChanged,
@@ -134,17 +134,18 @@ func (zd *ZoneData) ProxyDelegationPostRefresh(delsyncq chan DelegationSyncReque
 	// Non-blocking enqueue: this runs on the refresh path, which has no ctx to
 	// select on, so we must not block on a backed-up queue (e.g. during
 	// shutdown). Dropping is safe — the proxy is idempotent: the next transfer
-	// re-detects the still-unforwarded change and re-enqueues.
+	// re-detects the still-unforwarded change and re-enqueues. The handler picks
+	// UPDATE vs NOTIFY off the refresh path (scheme discovery is network).
 	select {
 	case delsyncq <- DelegationSyncRequest{
-		Command:       "PROXY-NOTIFY",
+		Command:       "PROXY-SYNC",
 		ZoneName:      zd.ZoneName,
 		ZoneData:      zd,
 		SyncStatus:    analysis.DelegationStatus,
 		ProxyAnalysis: analysis,
 	}:
 	default:
-		zd.Logger.Printf("ProxyDelegationPostRefresh: DelegationSyncQ full for %s; dropping proxy NOTIFY (will re-detect on next transfer)", zd.ZoneName)
+		zd.Logger.Printf("ProxyDelegationPostRefresh: DelegationSyncQ full for %s; dropping proxy sync (will re-detect on next transfer)", zd.ZoneName)
 	}
 }
 

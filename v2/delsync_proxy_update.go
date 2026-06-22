@@ -237,6 +237,46 @@ func (zd *ZoneData) proxyCurrentDelegationRRs() (newNS, newA, newAAAA, newDS []d
 	return newNS, newA, newAAAA, newDS
 }
 
+// ProxyDelegationSync is the steady-state dispatcher: on a detected change it
+// picks the scheme the parent advertises and forwards accordingly — a DNS
+// UPDATE (carrying the delegation records) when the parent advertises UPDATE, or
+// a NOTIFY (a "come re-scan me" signal) when it advertises NOTIFY. Runs in the
+// DelegationSyncher (off the refresh path), so the network calls (scheme
+// discovery, the send) are fine here. UPDATE is preferred when both are
+// advertised because it lands the change in one round-trip and works for
+// unsigned zones; NOTIFY is the fallback (and the only option for an unsigned
+// zone whose parent offers only NOTIFY — there it is a no-op, nothing to scan).
+func (zd *ZoneData) ProxyDelegationSync(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest, imr *Imr, analysis *ProxyDelegationAnalysis) (string, error) {
+	scheme, _, err := zd.BestSyncScheme(ctx, imr)
+	if err != nil {
+		return "", fmt.Errorf("ProxyDelegationSync: BestSyncScheme(%s): %w", zd.ZoneName, err)
+	}
+	switch scheme {
+	case "UPDATE":
+		msg, state, uerr := zd.ProxyUpdateParent(ctx, kdb, imr)
+		if uerr != nil {
+			return "", uerr
+		}
+		// If the UPDATE precondition is not ready (KEY not yet published, etc.)
+		// the parent may still accept a NOTIFY — fall back so the change is not
+		// silently dropped while the operator completes the KEY bootstrap.
+		if state != ProxyUpdateReady {
+			nmsg, nerr := zd.ProxyNotifyParent(ctx, notifyq, imr, analysis)
+			if nerr != nil {
+				return msg, nil // UPDATE not ready, NOTIFY failed — report the UPDATE state
+			}
+			return fmt.Sprintf("%s; fell back to NOTIFY: %s", msg, nmsg), nil
+		}
+		return msg, nil
+	case "NOTIFY":
+		return zd.ProxyNotifyParent(ctx, notifyq, imr, analysis)
+	default:
+		lgDns.Info("delegation-sync-proxy: parent advertises no usable sync scheme; nothing forwarded",
+			"zone", zd.ZoneName, "scheme", scheme)
+		return "parent advertises no usable sync scheme; nothing forwarded", nil
+	}
+}
+
 // proxyUpdateMode returns the parent-update form for the proxy: the operator's
 // `parent-update` auth option if set, otherwise REPLACE (the proxy default —
 // replace is idempotent and self-correcting, the right behavior for forwarding

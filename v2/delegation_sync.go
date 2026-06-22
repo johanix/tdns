@@ -160,16 +160,15 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 					}
 				}
 
-			case "PROXY-NOTIFY":
-				// delegation-sync-proxy: an agent secondary forwards
-				// NOTIFY(CDS/CSYNC) to the parent on behalf of a DSYNC-unaware
-				// primary, for the dimensions detected in the incoming transfer.
-				// NOTIFY-only; no publish/sign.
-				msg, perr := zd.ProxyNotifyParent(ctx, notifyq, imr(), ds.ProxyAnalysis)
+			case "PROXY-SYNC":
+				// delegation-sync-proxy: an agent secondary forwards a detected
+				// change to the parent on behalf of a DSYNC-unaware primary,
+				// picking UPDATE or NOTIFY by what the parent advertises.
+				msg, perr := zd.ProxyDelegationSync(ctx, kdb, notifyq, imr(), ds.ProxyAnalysis)
 				if perr != nil {
-					lgDns.Error("DelegationSyncher: proxy NOTIFY failed", "zone", ds.ZoneName, "err", perr)
+					lgDns.Error("DelegationSyncher: proxy sync failed", "zone", ds.ZoneName, "err", perr)
 				} else {
-					lgDns.Info("DelegationSyncher: proxy NOTIFY done", "zone", ds.ZoneName, "msg", msg)
+					lgDns.Info("DelegationSyncher: proxy sync done", "zone", ds.ZoneName, "msg", msg)
 				}
 
 			case "PROXY-UPDATE-SETUP":

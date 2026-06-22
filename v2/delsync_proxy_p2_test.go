@@ -6,7 +6,7 @@ import (
 
 // P-2: the change-detection trigger. ProxyDelegationPreRefresh diffs the
 // incoming zone against the served one across CDS / CSYNC / NS+glue / DNSKEY
-// and records the result; ProxyDelegationPostRefresh enqueues a PROXY-NOTIFY
+// and records the result; ProxyDelegationPostRefresh enqueues a PROXY-SYNC
 // only when a NOTIFY-relevant dimension changed.
 
 // A minimal signed delegation apex. Variants below flip exactly one dimension.
@@ -124,25 +124,25 @@ child.example.	3600 IN CSYNC 1 3 A NS AAAA
 	}
 }
 
-// PostRefresh enqueues a PROXY-NOTIFY when something changed, and enqueues
+// PostRefresh enqueues a PROXY-SYNC when something changed, and enqueues
 // nothing when the analysis is absent or empty. It also clears the analysis.
 func TestProxyPostRefreshEnqueue(t *testing.T) {
 	zd := testZone(t, "child.example.", proxyBaseZone)
 	q := make(chan DelegationSyncRequest, 1)
 
-	// Change present ⇒ one PROXY-NOTIFY enqueued.
+	// Change present ⇒ one PROXY-SYNC enqueued.
 	zd.ProxyRefreshAnalysis = &ProxyDelegationAnalysis{CdsChanged: true}
 	zd.ProxyDelegationPostRefresh(q)
 	select {
 	case req := <-q:
-		if req.Command != "PROXY-NOTIFY" {
-			t.Fatalf("enqueued command = %q, want PROXY-NOTIFY", req.Command)
+		if req.Command != "PROXY-SYNC" {
+			t.Fatalf("enqueued command = %q, want PROXY-SYNC", req.Command)
 		}
 		if req.ZoneName != "child.example." {
 			t.Fatalf("enqueued zone = %q", req.ZoneName)
 		}
 	default:
-		t.Fatal("expected a PROXY-NOTIFY to be enqueued on change")
+		t.Fatal("expected a PROXY-SYNC to be enqueued on change")
 	}
 	if zd.ProxyRefreshAnalysis != nil {
 		t.Fatal("analysis must be cleared after PostRefresh")

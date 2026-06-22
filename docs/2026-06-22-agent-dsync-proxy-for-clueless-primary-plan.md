@@ -600,9 +600,17 @@ the native child path.
   authoritative-RR reader (signed + unsigned). The send itself is
   network/testbed-validated. NOT yet wired to a trigger — U-c (startup) and
   U-e (scheme dispatch) call it. Build + full `go test -race` green.
-- U-e: scheme dispatch — extend the proxy PostRefresh/handler so a parent
-  advertising UPDATE routes to PROXY-UPDATE, NOTIFY routes to the existing
-  PROXY-NOTIFY.
+- U-e: scheme dispatch. STATUS: DONE. The PostRefresh hook now enqueues a
+  single generic `PROXY-SYNC` request (was `PROXY-NOTIFY`); the
+  DelegationSyncher handler calls `ProxyDelegationSync`
+  (`delsync_proxy_update.go`), which picks the scheme via `BestSyncScheme`
+  and routes to `ProxyUpdateParent` (UPDATE) or `ProxyNotifyParent`
+  (NOTIFY). UPDATE is preferred when advertised (one round-trip, works
+  unsigned); if the UPDATE precondition is not yet READY (KEY not published)
+  it falls back to NOTIFY so the change is not dropped during bootstrap.
+  Scheme discovery + send run in the syncher (off the refresh path). Tests
+  updated for the command rename; the dispatch itself is network/testbed-
+  validated. Build + full `go test -race` green.
 - U-f: tests (signed + unsigned zones; startup-reconcile fires once;
   steady-state local-diff fires on change; replace payload correctness;
   no-resend-on-restart) + operator doc (the manual KEY-publication
