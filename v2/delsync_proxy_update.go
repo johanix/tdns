@@ -201,6 +201,37 @@ func (zd *ZoneData) clearProxyUpdateWarning() {
 	zd.ClearError(DelegationSyncWarning)
 }
 
+// ProxyKeyStatus is the operator-facing report for the `proxy-key` command: the
+// current UPDATE-proxy state and, in the waiting state, the records the operator
+// must publish at the primary (the KEY RR + HSYNCPARAM pubkey). It runs the
+// §10.8 precondition check (which generates a keypair if needed in the waiting
+// state) and formats a human-readable result.
+func (zd *ZoneData) ProxyKeyStatus(ctx context.Context, kdb *KeyDB, imr *Imr) (string, error) {
+	if !zd.Options[OptDelSyncProxy] {
+		return "", fmt.Errorf("zone %s does not have the delegation-sync-proxy option", zd.ZoneName)
+	}
+	state, err := zd.ProxyUpdatePreconditionCheck(ctx, kdb, imr)
+	if err != nil {
+		return "", err
+	}
+	switch state {
+	case ProxyUpdateUnsupported:
+		return fmt.Sprintf("zone %s: UPDATE proxy not applicable — the parent advertises no DSYNC UPDATE receiver (NOTIFY proxy may still apply); nothing to publish.", zd.ZoneName), nil
+	case ProxyUpdateReady:
+		return fmt.Sprintf("zone %s: UPDATE proxy READY — the agent's KEY is published at the apex and the agent holds its private key.", zd.ZoneName), nil
+	case ProxyUpdateForeignKey:
+		return fmt.Sprintf("zone %s: UPDATE proxy NOT operable — a foreign KEY occupies the apex (the agent does not hold its private key). Remove it, or the agent cannot proxy via UPDATE (NOTIFY may still apply).", zd.ZoneName), nil
+	case ProxyUpdateWaiting:
+		instr, ierr := zd.proxyBootstrapInstruction(kdb)
+		if ierr != nil {
+			return "", ierr
+		}
+		return fmt.Sprintf("zone %s: UPDATE proxy WAITING — publish the following at the primary apex, then the agent will proxy UPDATEs once it sees the KEY:\n\n%s\n", zd.ZoneName, instr), nil
+	default:
+		return fmt.Sprintf("zone %s: UPDATE proxy state %q", zd.ZoneName, state), nil
+	}
+}
+
 // proxyCurrentDelegationRRs reads the current authoritative delegation RRsets
 // from the SERVED zone (the freshly-transferred data): the apex NS, the in-
 // bailiwick glue (A/AAAA) for those nameservers, and the DS derived from the

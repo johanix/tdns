@@ -108,6 +108,21 @@ throughout.`,
 	setPolicy.MarkFlagRequired("zone")
 	setPolicy.MarkFlagRequired("policy")
 
+	proxyKey := &cobra.Command{
+		Use:   "proxy-key",
+		Short: "Show the delegation-sync-proxy UPDATE state and the KEY to publish at the primary",
+		Long: `For a zone with the delegation-sync-proxy option (a tdns-agent acting as a
+secondary for a DSYNC-unaware primary), report whether the agent can proxy
+DNS UPDATEs to the parent, and — when waiting — print the exact records to
+add at the primary apex (the agent's KEY RR and an HSYNCPARAM pubkey flag).
+States: update-unsupported / ready / foreign-key / waiting-for-key.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			RunZoneProxyKey(role)
+		},
+	}
+	proxyKey.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to report proxy-key state for")
+	proxyKey.MarkFlagRequired("zone")
+
 	nsec := &cobra.Command{
 		Use:   "nsec",
 		Short: "Prefix command, not usable by itself",
@@ -128,7 +143,7 @@ throughout.`,
 	}
 	nsec.AddCommand(nsecGenerate, nsecShow)
 
-	c.AddCommand(list, nsec, sign, resign, reload, bump, write, freeze, thaw, setPolicy)
+	c.AddCommand(list, nsec, sign, resign, reload, bump, write, freeze, thaw, setPolicy, proxyKey)
 	// Role-independent extras attached to every zone tree. Each is built
 	// fresh so the command pointer is unique per NewZoneCmd invocation.
 	c.AddCommand(newZoneReadFakeCmd(), newZoneUpdateCmd(role), newZoneDsyncCmd(role))
@@ -262,6 +277,33 @@ func RunZoneSetPolicy(parent, policy string) {
 		os.Exit(1)
 	}
 
+	if cr.Msg != "" {
+		fmt.Printf("%s\n", cr.Msg)
+	}
+}
+
+func RunZoneProxyKey(parent string) {
+	if tdns.Globals.Zonename == "" {
+		fmt.Println("Error: zone name not specified")
+		os.Exit(1)
+	}
+	api, err := GetApiClient(parent, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", parent, err)
+	}
+
+	cr, err := SendZoneCommand(api, tdns.ZonePost{
+		Command: "proxy-key",
+		Zone:    dns.Fqdn(tdns.Globals.Zonename),
+	})
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		os.Exit(1)
+	}
+	if cr.Error {
+		fmt.Printf("Error: %s\n", cr.ErrorMsg)
+		os.Exit(1)
+	}
 	if cr.Msg != "" {
 		fmt.Printf("%s\n", cr.Msg)
 	}

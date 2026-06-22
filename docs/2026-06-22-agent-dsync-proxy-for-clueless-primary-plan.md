@@ -569,9 +569,17 @@ the native child path.
   Wired off the refresh path via a `PROXY-UPDATE-SETUP` DelegationSyncher
   command enqueued from `SetupZoneSync`. Tests: keygen idempotency,
   ours-vs-foreign, apex-KEY read, instruction text, pubkey RR. The
-  DSYNC-discovery gate itself is network — testbed-validated. The on-demand
-  CLI (`proxy-key`) is U-a2 (needs a daemon API endpoint). Build + full
+  DSYNC-discovery gate itself is network — testbed-validated. Build + full
   `go test -race` green.
+- U-a2: the on-demand CLI + API. STATUS: DONE. `tdns-cli ... zone proxy-key
+  -z <zone>` sends a `proxy-key` ZonePost command to the daemon; the
+  `APIzone` handler runs `ProxyKeyStatus` (`delsync_proxy_update.go`) on the
+  live zone and returns a human-readable report: the state
+  (update-unsupported / ready / foreign-key / waiting) and, in the waiting
+  state, the exact KEY RR + HSYNCPARAM pubkey to publish at the primary.
+  Online (it reads the served zone's apex + does DSYNC discovery, not
+  doable offline). Tests: non-proxy-zone error + update-unsupported message.
+  Build (incl. tdns-cli) + full `go test -race` green.
 - U-b: remove the stale replace-mode refusal (U4). STATUS: DONE. The
   refusal in `SyncZoneDelegationViaUpdate` is replaced with the real
   replace implementation: `CreateChildReplaceUpdate` over the

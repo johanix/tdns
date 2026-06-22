@@ -244,3 +244,26 @@ func TestProxyStartupReconcileNotReady(t *testing.T) {
 		t.Fatalf("expected a not-ready message, got %q", msg)
 	}
 }
+
+// U-a2: ProxyKeyStatus reports an error for a non-proxy zone, and the
+// update-unsupported message when no UPDATE target is discoverable (nil imr).
+func TestProxyKeyStatus(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	// Zone without the proxy option ⇒ error.
+	zdPlain := proxyUpdZoneData(t, kdb, proxyUpdBaseZone())
+	if _, err := zdPlain.ProxyKeyStatus(context.Background(), kdb, nil); err == nil {
+		t.Fatal("ProxyKeyStatus must error for a non-proxy zone")
+	}
+
+	// Proxy zone, no imr ⇒ update-unsupported message (nothing to publish).
+	zdProxy := proxyUpdZoneData(t, kdb, proxyUpdBaseZone())
+	zdProxy.Options = map[ZoneOption]bool{OptDelSyncProxy: true}
+	msg, err := zdProxy.ProxyKeyStatus(context.Background(), kdb, nil)
+	if err != nil {
+		t.Fatalf("ProxyKeyStatus (proxy, no imr): %v", err)
+	}
+	if !strings.Contains(msg, "not applicable") {
+		t.Fatalf("expected update-unsupported message, got %q", msg)
+	}
+}
