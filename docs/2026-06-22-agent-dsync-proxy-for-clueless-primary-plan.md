@@ -328,16 +328,22 @@ primary once it builds).
   change, nothing on empty/absent analysis, and clears the analysis. Build
   + full `go test -race` green.
 
-- **Step P-3 — proxy NOTIFY action (the act).** A delegation-sync command
-  (new `PROXY-NOTIFY`, or a proxy flag on the existing path) that, gated on
-  D7 (proxy option set; a change was detected; parent advertises a NOTIFY
-  DSYNC target), sends — per the D4 act mapping — NOTIFY(CDS) when CDS or
-  DNSKEY changed, and NOTIFY(CSYNC) when CSYNC or NS/glue changed. It does
-  NOT call `PublishCsyncRR()` / sign and does NOT need `AnalyseZoneDelegation`
-  (§5, D1): a NOTIFY is a contentless "come re-scan" and the parent reads
-  the zone itself. Verify: each act-mapping case emits the right NOTIFY(s);
-  no DSYNC-NOTIFY target ⇒ no send, no error; both CDS+CSYNC changing fires
-  both, independently.
+- **Step P-3 — proxy NOTIFY action (the act).** STATUS: DONE. New
+  `PROXY-NOTIFY` command in the `DelegationSyncher` switch
+  (`delegation_sync.go`) calls `ProxyNotifyParent` (`delsync_proxy.go`):
+  resolve parent if needed, `BestSyncScheme` for DSYNC discovery, require a
+  NOTIFY target (NOTIFY-only, D3/D9 — UPDATE-only parent ⇒ logged no-op,
+  not an error), then emit per the D4 act-mapping. The emission is factored
+  into `emitProxyNotifies` (CSYNC-then-CDS) so the mapping → NOTIFY is
+  unit-testable without the network. NO `PublishCsyncRR()` / sign and NO
+  `AnalyseZoneDelegation` (§5, D1). The changed-dimension set is carried
+  from PostRefresh to the handler via a new
+  `DelegationSyncRequest.ProxyAnalysis` field. Tests
+  (`delsync_proxy_p3_test.go`): all seven act-mapping combinations emit the
+  exact NOTIFY set (CDS-only, CSYNC-only, DNSKEY→CDS, NS/glue→CSYNC, both,
+  all-four, none); target + zone pass through unchanged. The
+  DSYNC-discovery half of `ProxyNotifyParent` needs the network and is
+  left for testbed validation. Build + full `go test -race` green.
 
 - **Step P-4 — loop/debounce (D8) + tests + operator doc.** Confirm Q5
   (IXFR reads the post-flip served zone, so AXFR/IXFR behave identically)

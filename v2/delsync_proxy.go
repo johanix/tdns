@@ -15,6 +15,9 @@
 package tdns
 
 import (
+	"context"
+	"fmt"
+
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
@@ -129,9 +132,65 @@ func (zd *ZoneData) ProxyDelegationPostRefresh(delsyncq chan DelegationSyncReque
 		"want_cds_notify", analysis.wantCDSNotify(), "want_csync_notify", analysis.wantCSYNCNotify())
 
 	delsyncq <- DelegationSyncRequest{
-		Command:    "PROXY-NOTIFY",
-		ZoneName:   zd.ZoneName,
-		ZoneData:   zd,
-		SyncStatus: analysis.DelegationStatus,
+		Command:       "PROXY-NOTIFY",
+		ZoneName:      zd.ZoneName,
+		ZoneData:      zd,
+		SyncStatus:    analysis.DelegationStatus,
+		ProxyAnalysis: analysis,
 	}
+}
+
+// ProxyNotifyParent forwards NOTIFY(CDS) and/or NOTIFY(CSYNC) to the parent's
+// DSYNC NOTIFY receiver on behalf of a DSYNC-unaware primary, for the
+// dimensions recorded in analysis (D4 act-mapping). It does NOT publish or sign
+// anything: a NOTIFY is a contentless "come re-scan me" signal — the CDS/CSYNC
+// the primary published are already in the served zone, and the parent reads
+// them itself. NOTIFY is the only scheme used here (D3/D9); if the parent does
+// not advertise a NOTIFY DSYNC target, this is a no-op (not an error — the
+// parent may not offer the service, or may want UPDATE, which is later work).
+func (zd *ZoneData) ProxyNotifyParent(ctx context.Context, notifyq chan NotifyRequest, imr *Imr, analysis *ProxyDelegationAnalysis) (string, error) {
+	if analysis == nil || !analysis.anyChange() {
+		return "no change to proxy", nil
+	}
+	if zd.Parent == "" || zd.Parent == "." {
+		p, err := imr.ParentZone(zd.ZoneName)
+		if err != nil {
+			return "", fmt.Errorf("ProxyNotifyParent: ParentZone(%s): %w", zd.ZoneName, err)
+		}
+		zd.Parent = p
+	}
+
+	scheme, dsynctarget, err := zd.BestSyncScheme(ctx, imr)
+	if err != nil {
+		return "", fmt.Errorf("ProxyNotifyParent: BestSyncScheme(%s): %w", zd.ZoneName, err)
+	}
+	// NOTIFY-only for now (D3/D9). If the parent advertises only UPDATE we
+	// cannot proxy yet; report and stop without error.
+	if scheme != "NOTIFY" || dsynctarget == nil || len(dsynctarget.Addresses) == 0 {
+		lgDns.Info("delegation-sync-proxy: parent does not advertise a usable NOTIFY DSYNC target; nothing forwarded",
+			"zone", zd.ZoneName, "parent", zd.Parent, "scheme", scheme)
+		return "parent advertises no NOTIFY DSYNC target; nothing forwarded", nil
+	}
+
+	sent := zd.emitProxyNotifies(notifyq, analysis, dsynctarget.Addresses)
+	lgDns.Info("delegation-sync-proxy: forwarded NOTIFY(s) to parent",
+		"zone", zd.ZoneName, "parent", zd.Parent, "sent", sent, "target", dsynctarget.Addresses)
+	return fmt.Sprintf("forwarded NOTIFY(%v) to parent %s", sent, zd.Parent), nil
+}
+
+// emitProxyNotifies sends the NOTIFY(s) the act-mapping (D4) calls for to the
+// given targets, and returns the list of RRtypes notified ("CSYNC"/"CDS").
+// Separated from DSYNC discovery so the act-mapping → emission is testable
+// without the network. CSYNC is sent before CDS for a stable, predictable order.
+func (zd *ZoneData) emitProxyNotifies(notifyq chan NotifyRequest, analysis *ProxyDelegationAnalysis, targets []string) []string {
+	var sent []string
+	if analysis.wantCSYNCNotify() {
+		notifyq <- NotifyRequest{ZoneName: zd.ZoneName, ZoneData: zd, RRtype: dns.TypeCSYNC, Targets: targets}
+		sent = append(sent, "CSYNC")
+	}
+	if analysis.wantCDSNotify() {
+		notifyq <- NotifyRequest{ZoneName: zd.ZoneName, ZoneData: zd, RRtype: dns.TypeCDS, Targets: targets}
+		sent = append(sent, "CDS")
+	}
+	return sent
 }

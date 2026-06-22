@@ -613,6 +613,9 @@ type DelegationSyncRequest struct {
 	NewDnskeys   *core.RRset
 	MsignerGroup *core.RRset
 	Response     chan DelegationSyncStatus // used for API-based requests
+	// ProxyAnalysis is set for the PROXY-NOTIFY command: the changed-dimension
+	// set the proxy NOTIFY action keys on (delegation-sync-proxy).
+	ProxyAnalysis *ProxyDelegationAnalysis
 }
 
 type BumperData struct {
