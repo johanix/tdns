@@ -62,7 +62,11 @@ func (gs *GlobalStuff) Validate() error {
 		}
 	}
 	if gs.BaseUri != "" {
-		if _, err := url.Parse(gs.BaseUri); err != nil {
+		// url.Parse alone is too lax: "not a uri" parses without error as a
+		// relative reference. A usable base URI for an API endpoint needs both
+		// a scheme and a host, so require them explicitly.
+		u, err := url.Parse(gs.BaseUri)
+		if err != nil || u.Scheme == "" || u.Host == "" {
 			return fmt.Errorf("invalid base URI: %s", gs.BaseUri)
 		}
 	}
