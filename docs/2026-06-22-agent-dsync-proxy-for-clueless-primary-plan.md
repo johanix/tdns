@@ -620,10 +620,24 @@ each transfer):
      proxy for this zone; keep serving the zone normally.
    - **No KEY present**: GENERATE a SIG(0) keypair (reuse the keystore
      `Sig0KeyMgmt` generate path), store it under the child zone name, and
-     INSTRUCT the operator with the exact KEY record to add at the primary.
-     WARN status on `zone list`: "DSYNC UPDATE proxy waiting: publish this
-     KEY at the primary." HOLD OFF on UPDATEs until the KEY appears in a
-     transfer (sending before then just earns a REFUSED).
+     INSTRUCT the operator to add TWO records at the primary apex (U10):
+     the agent's **KEY RR**, AND an **HSYNCPARAM `pubkey`** flag. WARN
+     status on `zone list`: "DSYNC UPDATE proxy waiting: publish the KEY +
+     HSYNCPARAM pubkey at the primary." HOLD OFF on UPDATEs until the KEY
+     appears in a transfer (sending before then just earns a REFUSED).
+
+DECISION U10 — the no-KEY operator instruction is TWO records, not one, and
+is emitted ONLY when the parent advertises DSYNC UPDATE (step 1 gate):
+  1. the **KEY RR** — the agent's SIG(0) public key at the child apex (the
+     record the parent's path-3 validation resolves);
+  2. an **HSYNCPARAM record with the `pubkey` flag** — the standardized
+     instruction to ALL zone providers to (re-)publish the KEY found at the
+     apex. `HSYNCPARAM_PUBKEY` is a real flag (key code 4, `core/
+     rr_hsyncparam.go:45`; `HasPubkey()` at `:387`). Without it the KEY
+     sits only in the one primary's copy; with it every provider in the
+     zone's HSYNC set republishes it, so the bootstrap works in the
+     multi-provider world too — not just a single primary. (Sibling flag
+     `HSYNCPARAM_PUBCDS` does the analogous job for CDS.)
 
 DECISION U8 — error severity: NONE of the above hard-fails. The agent
 starts; all zones, including this one, are served normally as a secondary.
@@ -634,11 +648,14 @@ per-zone status on `tdns-cli zone list` (reuse the existing
 quarantine model: the UPDATE-proxy FUNCTION is degraded, not the zone.
 
 DECISION U9 — operator instruction surfacing (BOTH): (a) on generation, log
-the ready-to-paste KEY record at Warn AND record it in the per-zone status
-so it persists (and re-emit while still missing); (b) a CLI command (e.g.
-`... keystore dnssec proxy-key -z <zone>`) that prints, on demand, the
-exact KEY record to publish plus the current state (update-unsupported /
-ready / foreign / waiting).
+the ready-to-paste records (KEY RR + HSYNCPARAM pubkey, U10) at Warn AND
+record them in the per-zone status so they persist (and re-emit while still
+missing); (b) a CLI command (e.g. `... keystore dnssec proxy-key -z
+<zone>`) that prints, on demand, the exact KEY RR + HSYNCPARAM pubkey to
+publish plus the current state (update-unsupported / ready / foreign /
+waiting). The CLI emits the records ONLY in the waiting state (parent
+supports UPDATE, no KEY yet); in the update-unsupported state it says so
+and emits nothing to publish.
 
 Reuse map: `DelegationSyncSetup` / `Sig0KeyPreparation`
 (`delegation_sync.go:192,265`) are the child-side precedent — they
