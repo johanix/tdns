@@ -348,13 +348,26 @@ func APIRolloverWhen(conf *Config) func(w http.ResponseWriter, r *http.Request) 
 			pol = zd.DnssecPolicy
 		}
 
-		out, err := ComputeRolloverWhen(kdb, zone, pol, time.Now())
+		// keytype selects the schedule: "" / "KSK" = the parent-DS-gated KSK
+		// schedule (default); "ZSK" = the zone-local ZSK schedule.
+		role := "KSK"
+		if strings.EqualFold(r.URL.Query().Get("keytype"), "ZSK") {
+			role = "ZSK"
+		}
+		var out *RolloverWhenResponse
+		var err error
+		if role == "ZSK" {
+			out, err = ComputeZskRolloverWhen(kdb, zone, pol, time.Now())
+		} else {
+			out, err = ComputeRolloverWhen(kdb, zone, pol, time.Now())
+		}
 		if err != nil {
-			// ComputeRolloverWhen only returns top-level errors for
-			// empty zone (already handled above). Defensive: surface
-			// any remaining case as a Note rather than HTTP error.
-			lgApi.Debug("rollover/when: ComputeRolloverWhen returned error", "zone", zone, "err", err)
-			_ = json.NewEncoder(w).Encode(RolloverWhenResponse{Zone: zone, Note: err.Error()})
+			// The compute functions only return top-level errors for an empty
+			// zone (already handled above). Defensive: surface any remaining
+			// case as a Note rather than an HTTP error. Carry the requested
+			// role so the CLI renders the right header even on this path.
+			lgApi.Debug("rollover/when: compute returned error", "zone", zone, "err", err)
+			_ = json.NewEncoder(w).Encode(RolloverWhenResponse{Zone: zone, Role: role, Note: err.Error()})
 			return
 		}
 		_ = json.NewEncoder(w).Encode(out)

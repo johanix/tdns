@@ -96,6 +96,13 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				resp.ErrorMsg = err.Error()
 			}
 
+		case "change-policy":
+			resp.Msg, err = changeZonePolicy(zd, kdb, zp.Policy)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+
 		case "generate-nsec":
 			err := zd.GenerateNsecChain(kdb)
 			if err != nil {
@@ -324,6 +331,145 @@ func setZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, error) 
 	if algChanged {
 		fmt.Fprintf(&b, "\nNOTE #2: to clean up keys and signatures from the previous policy use \"... keystore dnssec policy-cleanup -z %s\" (note that this may break DNSSEC validation).", zd.ZoneName)
 	}
+	return b.String(), nil
+}
+
+// changeZonePolicy binds a zone toward a new DNSSEC policy for a gradual,
+// relaxed-mode ZSK ALGORITHM rollover. Unlike set-policy (which retires the
+// old-alg key synchronously — the unsafe §2 swap for an algorithm change),
+// change-policy only sets the algorithm of FUTURE-generated keys: it writes the
+// ZonePolicyOverride target + rebinds zd.DnssecPolicy, then the existing FIFO
+// ZSK pipeline drains in order. `auto-rollover asap -z <zone> --zsk` is the
+// throttle. The relaxed reconcile (sign.go) no-ops the synchronous retire, so
+// reusing set-policy's path is safe (D3).
+//
+// Entry-layer safety gates, all validated BEFORE any override write or rebind
+// so the zone is never left half-changed:
+//   - CSK target: refused (a CSK alg change is parent-coordinated engine work,
+//     not built; the reconcile early-returns on CSK and never sees it).
+//   - both-role target (KSK alg AND ZSK alg differ): refused — roll one role at
+//     a time (§4.1).
+//   - re-entrancy: a ZSK alg roll already in flight (fuller drain-window
+//     predicate): refused.
+//   - KSK-only alg target / strict mode: deferred to the reconcile, which
+//     refuses (defensive backstop) — but we surface a clean error here too.
+func changeZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, error) {
+	policyName = strings.TrimSpace(policyName)
+	if policyName == "" {
+		return "", fmt.Errorf("change-policy: no policy specified")
+	}
+	confMu.RLock()
+	pol, ok := Conf.Internal.DnssecPolicies[policyName]
+	confMu.RUnlock()
+	if !ok {
+		return "", fmt.Errorf("change-policy: DNSSEC policy %q does not exist", policyName)
+	}
+	if pol.Error != "" {
+		return "", fmt.Errorf("change-policy: DNSSEC policy %q is broken: %s", policyName, pol.Error)
+	}
+	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+		return "", fmt.Errorf("change-policy: zone %s is not signed (neither online-signing nor inline-signing)", zd.ZoneName)
+	}
+
+	// Capture the current (source) policy algorithms/mode.
+	zd.mu.Lock()
+	cur := zd.DnssecPolicy
+	zd.mu.Unlock()
+	var curKSKAlg, curZSKAlg uint8
+	if cur != nil {
+		curKSKAlg, curZSKAlg = cur.KSKAlgorithm, cur.ZSKAlgorithm
+	}
+
+	// --- Entry guards (before any override write / rebind) ---
+
+	// CSK target (or current zone in CSK mode): an algorithm change to/within a
+	// CSK is parent-coordinated and not built. The reconcile early-returns on
+	// CSK, so this MUST be caught here.
+	if pol.Mode == DnssecPolicyModeCSK || (cur != nil && cur.Mode == DnssecPolicyModeCSK) {
+		return "", fmt.Errorf("change-policy: CSK algorithm rollover not implemented for zone %s (a CSK is SEP-flagged with a parent DS — route via the engine, not yet built)", zd.ZoneName)
+	}
+
+	kskChanged := curKSKAlg != pol.KSKAlgorithm
+	zskChanged := curZSKAlg != pol.ZSKAlgorithm
+
+	// Both-role target: roll one role at a time (§4.1).
+	if kskChanged && zskChanged {
+		return "", fmt.Errorf("change-policy: policy %q changes BOTH the KSK (%s→%s) and ZSK (%s→%s) algorithm for zone %s; roll one role at a time (issue two policy changes in sequence)",
+			policyName,
+			dns.AlgorithmToString[curKSKAlg], dns.AlgorithmToString[pol.KSKAlgorithm],
+			dns.AlgorithmToString[curZSKAlg], dns.AlgorithmToString[pol.ZSKAlgorithm], zd.ZoneName)
+	}
+
+	// KSK-only algorithm change: not implemented (parent-coordinated engine).
+	if kskChanged {
+		return "", fmt.Errorf("change-policy: KSK algorithm rollover not implemented for zone %s (%s→%s); route via the auto-rollover engine — not yet built",
+			zd.ZoneName, dns.AlgorithmToString[curKSKAlg], dns.AlgorithmToString[pol.KSKAlgorithm])
+	}
+
+	// Re-entrancy: refuse if a ZSK alg roll is already in flight. "In flight" is
+	// measured against the zone's CURRENTLY-BOUND ZSK algorithm (curZSKAlg), NOT
+	// the incoming target: before any roll, every ZSK is on the bound algorithm,
+	// so there is nothing in flight and this first change-policy proceeds. A
+	// genuine mid-roll has ZSKs of an algorithm other than the bound policy's
+	// (standby/active/retired) — that is what we refuse a second change-policy
+	// on. This also catches the back-to-original sub-case: mid fastroll→mayo1
+	// (bound=mayo1) the still-draining old ED25519 ZSKs are ≠ the bound MAYO1, so
+	// a change-policy back to ED25519 is correctly refused while they drain.
+	if inflight, err := zskAlgRollInFlight(kdb, zd.ZoneName, curZSKAlg); err != nil {
+		return "", fmt.Errorf("change-policy: checking in-flight roll for zone %s: %w", zd.ZoneName, err)
+	} else if inflight.InFlight {
+		return "", fmt.Errorf("change-policy: a ZSK algorithm rollover is already in progress for zone %s (%s→%s); wait for it to complete, or cancel it with \"auto-rollover cancel -z %s --zsk\" before changing course",
+			zd.ZoneName, dns.AlgorithmToString[inflight.FromAlg], dns.AlgorithmToString[inflight.ToAlg], zd.ZoneName)
+	}
+
+	// Strict mode: a ZSK alg change is not implemented (the reconcile refuses).
+	// Surface it here cleanly before touching anything. A same-algorithm /
+	// timing-only change is always allowed (no roll happens).
+	if zskChanged && Conf.Internal.Completeness != CompletenessRelaxed {
+		return "", fmt.Errorf("change-policy: strict-mode ZSK algorithm rollover not implemented for zone %s (%s→%s); set dnssec.completeness: relaxed to roll the ZSK algorithm gradually",
+			zd.ZoneName, dns.AlgorithmToString[curZSKAlg], dns.AlgorithmToString[pol.ZSKAlgorithm])
+	}
+
+	// --- Bind the target: reuse set-policy's override-write + rebind + sign.
+	// In relaxed mode the reconcile no-ops the synchronous swap, so SignZone
+	// here only adds RRSIGs by the (unchanged) active keys + re-stages the
+	// pipeline; no old-alg active ZSK is retired. ---
+	zd.mu.Lock()
+	oldPol := zd.DnssecPolicy
+	oldName := zd.DnssecPolicyName
+	zd.DnssecPolicy = &pol
+	zd.DnssecPolicyName = policyName
+	zd.mu.Unlock()
+
+	UpdateSigValidityFloor(zd, zd.DnssecPolicy, Conf.KaspPropagationDelay(), 0, false, Conf.IsLargeAlgorithm)
+
+	if _, err := zd.SignZone(kdb, true); err != nil {
+		zd.mu.Lock()
+		zd.DnssecPolicy = oldPol
+		zd.DnssecPolicyName = oldName
+		zd.mu.Unlock()
+		return "", fmt.Errorf("change-policy: re-sign zone %s: %w", zd.ZoneName, err)
+	}
+
+	if err := SetZonePolicyOverride(kdb, zd.ZoneName, policyName); err != nil {
+		return "", fmt.Errorf("change-policy: zone bound but persisting the override failed (the change will not survive restart): %w", err)
+	}
+
+	var b strings.Builder
+	if oldName != "" && oldName != policyName {
+		fmt.Fprintf(&b, "Zone %s: DNSSEC policy bound from %q to %q.\n", zd.ZoneName, oldName, policyName)
+	} else {
+		fmt.Fprintf(&b, "Zone %s: DNSSEC policy bound to %q.\n", zd.ZoneName, policyName)
+	}
+	if zskChanged {
+		fmt.Fprintf(&b, "ZSK algorithm will roll %s → %s GRADUALLY: future-generated ZSKs carry the new algorithm and the existing keys drain in FIFO order.\n",
+			dns.AlgorithmToString[curZSKAlg], dns.AlgorithmToString[pol.ZSKAlgorithm])
+		fmt.Fprintf(&b, "This command does NOT perform the roll. It advances on the normal ZSK cadence, or run \"auto-rollover asap -z %s --zsk\" to promote the next standby now (repeat to accelerate).\n", zd.ZoneName)
+	} else {
+		b.WriteString("Algorithms unchanged; new policy timings take effect. No algorithm roll is triggered.\n")
+	}
+	b.WriteString("WARNING: the policy change is stored in the keystore, not the zone config.\n")
+	fmt.Fprintf(&b, "NOTE: update the zone's dnssec_policy in YAML to make %q the permanent policy.", policyName)
 	return b.String(), nil
 }
 

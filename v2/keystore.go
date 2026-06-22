@@ -1189,11 +1189,19 @@ func GetDnssecKeysByState(kdb *KeyDB, zone string, state string) ([]DnssecKeyWit
 	var query string
 	var args []interface{}
 
+	// ORDER BY published_at ASC, keyid ASC makes the result deterministic and
+	// FIFO by propagation age (oldest-published first). This is REQUIRED for
+	// correct ZSK rollover: RolloverKey promotes the first standby returned
+	// here, so without an explicit order promotion is arbitrary (SQLite row
+	// order is unspecified) — fatal to an algorithm roll, where an old-alg
+	// standby must promote before a younger new-alg one. NULL published_at
+	// sorts first (an unpublished key precedes published ones); standby keys
+	// always have published_at, so the promotion pick is unaffected.
 	if zone == "" {
-		query = `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(active_at, ''), COALESCE(retired_at, ''), active_seq FROM DnssecKeyStore WHERE state=?`
+		query = `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(active_at, ''), COALESCE(retired_at, ''), active_seq FROM DnssecKeyStore WHERE state=? ORDER BY published_at ASC, keyid ASC`
 		args = []interface{}{state}
 	} else {
-		query = `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(active_at, ''), COALESCE(retired_at, ''), active_seq FROM DnssecKeyStore WHERE zonename=? AND state=?`
+		query = `SELECT zonename, keyid, flags, algorithm, state, COALESCE(keyrr, ''), COALESCE(published_at, ''), COALESCE(active_at, ''), COALESCE(retired_at, ''), active_seq FROM DnssecKeyStore WHERE zonename=? AND state=? ORDER BY published_at ASC, keyid ASC`
 		args = []interface{}{zone, state}
 	}
 

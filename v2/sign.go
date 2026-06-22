@@ -268,25 +268,36 @@ func (zd *ZoneData) refreshActiveDnssecKeys(kdb *KeyDB, context string) (*Dnssec
 	return dak, nil
 }
 
-// reconcileActiveKeyAlgorithms retires active keys whose algorithm the zone's
-// policy no longer wants, so the caller's generate-if-missing logic replaces
-// them with keys of the policy's algorithm. It returns true if it retired any
-// key (the caller must then re-fetch the active set).
+// reconcileActiveKeyAlgorithms reconciles active keys against the zone's policy
+// algorithm. For a SAME-algorithm policy (the common case) it is a no-op. For an
+// algorithm MISMATCH the behavior is mode-aware (dnssec.completeness):
 //
-// Scope: KSK-ZSK mode only. CSK mode (Mode==csk) is left untouched — it is not
-// enforced elsewhere in the signing path, so reconciling it here would create
-// inconsistency. Retiring (not deleting) keeps the old DNSKEY published and its
-// RRSIGs valid until the KeyStateWorker removes it: a graceful algorithm change.
+//   - ZSK mismatch, RELAXED mode: do NOT retire the wrong-alg active ZSK. The
+//     gradual FIFO ZSK roll (change-policy binds the new alg → newly-generated
+//     keys carry it → standbys drain in order, asap is the throttle) carries
+//     the transition. Retiring here would be the unsafe synchronous swap.
+//   - ZSK mismatch, STRICT mode: REFUSE. Strict-mode algorithm rollover
+//     (maintained whole-zone double-signature) is not implemented; running the
+//     legacy synchronous retire would produce an unsafe zone.
+//   - KSK mismatch, EITHER mode: REFUSE. A KSK algorithm rollover must go
+//     through the parent-coordinated engine (standby DS gate); the legacy
+//     immediate retire here bypasses the gate and bogus-zones the parent DS
+//     chain. Not yet built — refuse rather than run the unsafe swap.
 //
-// Safety: a KSK rollover is strictly same-algorithm and maintains the
-// "exactly one active KSK" invariant, so an active KSK whose algorithm differs
-// from the policy can only be a genuine policy change, never an in-flight
-// rollover. We still skip retirement while a rollover is in progress, as a
-// defensive guard.
+// CSK mode (Mode==csk) early-returns: it never reaches the key loops, so a CSK
+// algorithm change is refused at the ENTRY layer (change-policy/set-policy), not
+// here. See the algorithm-rollover plan §8.3.
+//
+// It returns true if it retired/removed any key (the caller must then re-fetch
+// the active set). Refusals are returned as errors so a background re-sign can
+// never silently run the unsafe swap — the entry layer is the front door, this
+// is the backstop.
 func (zd *ZoneData) reconcileActiveKeyAlgorithms(kdb *KeyDB, dak *DnssecKeys) (bool, error) {
 	if zd.DnssecPolicy == nil || zd.DnssecPolicy.Mode == DnssecPolicyModeCSK {
 		return false, nil
 	}
+
+	relaxed := Conf.Internal.Completeness == CompletenessRelaxed
 
 	rolloverInProgress := false
 	if row, err := LoadRolloverZoneRow(kdb, zd.ZoneName); err != nil {
@@ -295,54 +306,46 @@ func (zd *ZoneData) reconcileActiveKeyAlgorithms(kdb *KeyDB, dak *DnssecKeys) (b
 		rolloverInProgress = row.RolloverInProgress
 	}
 
-	retiredAny := false
-	retire := func(keyid uint16, role string, have, want uint8) error {
-		lgSigner.Info("retiring active DNSSEC key: algorithm no longer matches policy",
-			"zone", zd.ZoneName, "keyid", keyid, "role", role,
-			"have", dns.AlgorithmToString[have], "want", dns.AlgorithmToString[want])
-		if err := UpdateDnssecKeyState(kdb, zd.ZoneName, keyid, DnskeyStateRetired); err != nil {
-			return fmt.Errorf("reconcile: retire %s %d for zone %s: %w", role, keyid, zd.ZoneName, err)
-		}
-		retiredAny = true
-		return nil
-	}
-
+	// KSK algorithm mismatch is REFUSED in both modes — a KSK alg rollover is
+	// parent-coordinated engine work (not yet built), and the legacy immediate
+	// retire below would bypass the standby DS gate and bogus the parent chain.
 	for _, ksk := range dak.KSKs {
-		if ksk.DnskeyRR.Algorithm == zd.DnssecPolicy.KSKAlgorithm {
-			continue
-		}
-		if rolloverInProgress {
-			lgSigner.Warn("active KSK algorithm differs from policy but a rollover is in progress; deferring retirement",
-				"zone", zd.ZoneName, "keyid", ksk.KeyId)
-			continue
-		}
-		if err := retire(ksk.KeyId, "KSK", ksk.DnskeyRR.Algorithm, zd.DnssecPolicy.KSKAlgorithm); err != nil {
-			return retiredAny, err
+		if ksk.DnskeyRR.Algorithm != zd.DnssecPolicy.KSKAlgorithm {
+			return false, fmt.Errorf("KSK algorithm rollover not implemented for zone %s (active KSK %d is %s, policy wants %s); route via the auto-rollover engine — not yet built",
+				zd.ZoneName, ksk.KeyId, dns.AlgorithmToString[ksk.DnskeyRR.Algorithm], dns.AlgorithmToString[zd.DnssecPolicy.KSKAlgorithm])
 		}
 	}
 
-	// Only real ZSKs (flags=256). A KSK reused as CSK (flags=257) is handled by
-	// the KSK loop above, not here.
+	// ZSK algorithm mismatch: refuse in strict mode; no-op in relaxed mode (the
+	// gradual roll carries it). A matching ZSK falls through to the leftover
+	// sweep below unchanged.
 	for _, zsk := range dak.ZSKs {
-		if zsk.DnskeyRR.Flags != 256 {
+		if zsk.DnskeyRR.Flags != 256 { // KSK-reused-as-CSK handled by the KSK loop
 			continue
 		}
 		if zsk.DnskeyRR.Algorithm == zd.DnssecPolicy.ZSKAlgorithm {
 			continue
 		}
-		if err := retire(zsk.KeyId, "ZSK", zsk.DnskeyRR.Algorithm, zd.DnssecPolicy.ZSKAlgorithm); err != nil {
-			return retiredAny, err
+		if !relaxed {
+			return false, fmt.Errorf("strict-mode ZSK algorithm rollover not implemented for zone %s (active ZSK %d is %s, policy wants %s); set dnssec.completeness: relaxed to roll the ZSK algorithm gradually",
+				zd.ZoneName, zsk.KeyId, dns.AlgorithmToString[zsk.DnskeyRR.Algorithm], dns.AlgorithmToString[zd.DnssecPolicy.ZSKAlgorithm])
 		}
+		lgSigner.Info("relaxed mode: active ZSK algorithm differs from policy; leaving it for the gradual FIFO roll (not retiring)",
+			"zone", zd.ZoneName, "keyid", zsk.KeyId,
+			"have", dns.AlgorithmToString[zsk.DnskeyRR.Algorithm], "want", dns.AlgorithmToString[zd.DnssecPolicy.ZSKAlgorithm])
 	}
 
-	// Standby and published keys of a wrong algorithm are leftovers from a
-	// prior policy (e.g. a standby ZSK from the previous algorithm). They never
-	// signed the zone — only active keys sign — so there are no RRSIGs by them
-	// to orphan; their only footprint is being published in the DNSKEY RRset.
-	// Remove them outright so they drop out of the RRset immediately. Algorithm
-	// uniquely identifies a leftover: a legitimate same-algorithm rollover
-	// pipeline key always matches the policy algorithm, so this never touches
-	// one. (KSK case still respects the rollover-in-progress guard.)
+	retiredAny := false
+
+	// Standby and published keys of a wrong algorithm are normally leftovers
+	// from a prior policy — they never signed, so removing them is safe and
+	// drops them out of the DNSKEY RRset. BUT in relaxed mode an old-alg
+	// standby/published ZSK during a roll is a legitimate FIFO member, not a
+	// leftover: deleting it by algorithm would break the gradual drain. So in
+	// relaxed mode SKIP the algorithm-based deletion for same-role ZSK keys
+	// (the standby total-count cap in maintainStandbyKeys is the relaxed-mode
+	// bloat valve instead). KSK leftovers are still removed (respecting the
+	// rollover-in-progress guard); strict mode is unchanged.
 	for _, state := range []string{DnskeyStateStandby, DnskeyStatePublished} {
 		keys, err := GetDnssecKeysByState(kdb, zd.ZoneName, state)
 		if err != nil {
@@ -357,6 +360,10 @@ func (zd *ZoneData) reconcileActiveKeyAlgorithms(kdb *KeyDB, dak *DnssecKeys) (b
 				want = zd.DnssecPolicy.ZSKAlgorithm
 			}
 			if k.Algorithm == want {
+				continue
+			}
+			if role == "ZSK" && relaxed {
+				// Legitimate old-alg FIFO member during a relaxed roll.
 				continue
 			}
 			if role == "KSK" && rolloverInProgress {
@@ -393,17 +400,18 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 		return nil, err
 	}
 
-	// Reconcile the active key algorithms against the policy: retire any
-	// active key whose algorithm the policy no longer wants, so the
-	// generate-if-missing logic below replaces it with one of the policy's
-	// algorithm. Retired keys keep their DNSKEY published and their RRSIGs
-	// valid until the KeyStateWorker removes them, so the zone stays
-	// validatable (a graceful, zone-side algorithm change). On a no-op (keys
-	// already match the policy) this returns without changes — idempotent,
-	// safe on every sign/re-sign.
-	if retired, err := zd.reconcileActiveKeyAlgorithms(kdb, dak); err != nil {
+	// Reconcile the active key algorithms against the policy. An active-key
+	// algorithm mismatch is REFUSED with an error (a KSK mismatch in either
+	// mode, a ZSK mismatch under strict completeness) — never the legacy
+	// synchronous retire, which is the unsafe path for an algorithm change. A
+	// relaxed-mode ZSK mismatch is a no-op (the gradual roll carries it). The
+	// boolean return reports only whether non-active leftover keys
+	// (standby/published of a wrong algorithm) were removed, in which case we
+	// re-fetch the active set. On a same-algorithm zone this is an idempotent
+	// no-op, safe on every sign/re-sign.
+	if removed, err := zd.reconcileActiveKeyAlgorithms(kdb, dak); err != nil {
 		return nil, err
-	} else if retired {
+	} else if removed {
 		dak, err = zd.refreshActiveDnssecKeys(kdb, "after algorithm reconcile")
 		if err != nil {
 			return nil, err

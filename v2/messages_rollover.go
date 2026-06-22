@@ -124,6 +124,12 @@ type RolloverStatus struct {
 	// removed ZSKs beyond the display cap, omitted from ZSKs.
 	HiddenRemovedZskCount int `json:"hiddenRemovedZskCount,omitempty"`
 
+	// AlgTransition is set when a ZSK algorithm rollover is in flight (an
+	// active/standby/retired ZSK whose algorithm ≠ the effective-policy ZSK
+	// algorithm — the same drain-window predicate the change-policy re-entrancy
+	// guard uses). nil when no roll is in progress.
+	AlgTransition *AlgTransitionInfo `json:"algTransition,omitempty"`
+
 	// Policy summary. Verbose mode shows this; compact mode hides it.
 	Policy *PolicySummary `json:"policy,omitempty"`
 
@@ -217,6 +223,18 @@ type PolicySummary struct {
 	ClampingMargin           string `json:"clampingMargin,omitempty"`
 }
 
+// AlgTransitionInfo describes an in-flight ZSK algorithm rollover for the
+// status header line: e.g. "ZSK alg rollover: ED25519 → MAYO5 (in progress)".
+// FromAlg/ToAlg are algorithm names; Done/Total are a coarse progress count
+// (target-alg ZSKs / all live ZSK pipeline members).
+type AlgTransitionInfo struct {
+	Role    string `json:"role"` // currently always "ZSK"
+	FromAlg string `json:"fromAlg"`
+	ToAlg   string `json:"toAlg"`
+	Done    int    `json:"done"`
+	Total   int    `json:"total"`
+}
+
 // RolloverWhenResponse is returned by GET /api/v1/rollover/when.
 // Carries both the policy-driven scheduled rollover time and the
 // gate-driven earliest-possible time. Either may be empty when not
@@ -228,7 +246,11 @@ type PolicySummary struct {
 // InProgress=true is the operator-facing signal that the times
 // reflect projection rather than current schedule.
 type RolloverWhenResponse struct {
-	Zone             string                  `json:"zone"`
+	Zone string `json:"zone"`
+	// Role is the key role this schedule is for: "KSK" (parent-DS gated) or
+	// "ZSK" (zone-local, no parent gates). Drives the renderer's header and
+	// whether a gates section applies. Empty is treated as "KSK".
+	Role             string                  `json:"role,omitempty"`
 	CurrentTime      string                  `json:"currentTime,omitempty"`      // RFC3339 UTC, server's wallclock
 	NextScheduled    string                  `json:"nextScheduled,omitempty"`    // RFC3339 UTC
 	EarliestPossible string                  `json:"earliestPossible,omitempty"` // RFC3339 UTC

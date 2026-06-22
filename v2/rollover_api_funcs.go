@@ -78,6 +78,23 @@ func ComputeRolloverStatus(kdb *KeyDB, zone string, pol *DnssecPolicy, checkInte
 	if pol != nil {
 		populateAttemptTiming(out, row, pol)
 		out.Policy = policySummary(pol)
+
+		// Surface an in-flight ZSK algorithm rollover in the header (shares the
+		// drain-window predicate with the change-policy re-entrancy guard). Only
+		// meaningful for KSK-ZSK mode; a CSK has no separate ZSK algorithm.
+		if pol.Mode == DnssecPolicyModeKSKZSK && pol.ZSKAlgorithm != 0 {
+			if st, err := zskAlgRollInFlight(kdb, zone, pol.ZSKAlgorithm); err != nil {
+				lgRollover.Debug("ComputeRolloverStatus: zskAlgRollInFlight failed", "zone", zone, "err", err)
+			} else if st.InFlight {
+				out.AlgTransition = &AlgTransitionInfo{
+					Role:    "ZSK",
+					FromAlg: dns.AlgorithmToString[st.FromAlg],
+					ToAlg:   dns.AlgorithmToString[st.ToAlg],
+					Done:    st.Done,
+					Total:   st.Total,
+				}
+			}
+		}
 	}
 
 	var hiddenRemoved int
@@ -313,6 +330,7 @@ func ComputeRolloverWhen(kdb *KeyDB, zone string, pol *DnssecPolicy, now time.Ti
 	}
 	out := &RolloverWhenResponse{
 		Zone:        zone,
+		Role:        "KSK",
 		CurrentTime: now.UTC().Format(time.RFC3339),
 	}
 

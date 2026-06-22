@@ -398,10 +398,14 @@ func newAutoRolloverWhenCmd() *cobra.Command {
 	var offline bool
 	c := &cobra.Command{
 		Use:   "when",
-		Short: "Compute the earliest moment a KSK rollover could safely fire (no state change)",
-		Long: `Asks the running daemon to compute ComputeEarliestRollover (§8.5) and
-prints the result. Side-effect free; does not request a rollover. Use
-'auto-rollover asap' to actually schedule one.
+		Short: "Compute the earliest moment a rollover could safely fire (no state change)",
+		Long: `Asks the running daemon when the next rollover will fire and the
+earliest it could fire if requested. Side-effect free; does not request
+a rollover. Use 'auto-rollover asap' to actually schedule one.
+
+Reports the KSK schedule by default (parent-DS gated). Use --zsk for the
+ZSK schedule (zone-local, no parent gates — bounded only by standby
+readiness), or --ksk to be explicit. The two flags are mutually exclusive.
 
 Default mode talks to the daemon's API server (no daemon config needed
 on the CLI host). Use --offline to compute locally against the keystore
@@ -412,11 +416,19 @@ config file so the CLI can find db.file and the zone's policy.`,
 			tdns.Globals.App.Type = tdns.AppTypeCli
 			z := dns.Fqdn(tdns.Globals.Zonename)
 
+			if autoRolloverFlags.kskOnly && autoRolloverFlags.zskOnly {
+				cliFatalf("flags --ksk and --zsk are mutually exclusive")
+			}
+			keytype := "KSK"
+			if autoRolloverFlags.zskOnly {
+				keytype = "ZSK"
+			}
+
 			if offline {
-				runWhenOffline(z)
+				runWhenOffline(z, keytype)
 				return
 			}
-			runWhenOnline(z)
+			runWhenOnline(z, keytype)
 		},
 	}
 	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
@@ -427,12 +439,12 @@ config file so the CLI can find db.file and the zone's policy.`,
 
 // runWhenOnline is the default path: GET /api/v1/rollover/when via
 // the configured API client. No daemon config loaded on the CLI host.
-func runWhenOnline(z string) {
+func runWhenOnline(z, keytype string) {
 	api, err := GetApiClient("auth", true)
 	if err != nil {
 		cliFatalf("error getting API client: %v", err)
 	}
-	endpoint := "/rollover/when?zone=" + z
+	endpoint := "/rollover/when?zone=" + z + "&keytype=" + keytype
 	// "when" is observational; the daemon always returns 200 with a
 	// structured response (any caveats land in resp.Note). Non-2xx
 	// here would mean network-level failure, in which case the API
@@ -450,14 +462,19 @@ func runWhenOnline(z string) {
 
 // runWhenOffline preserves the legacy direct-DB path for postmortem
 // use when the daemon is down.
-func runWhenOffline(z string) {
+func runWhenOffline(z, keytype string) {
 	kdb, _, pol, err := openKeystoreForCli()
 	if err != nil {
 		cliFatalf("error: %v", err)
 	}
 	defer kdb.DB.Close()
 
-	resp, err := tdns.ComputeRolloverWhen(kdb, z, pol, time.Now())
+	var resp *tdns.RolloverWhenResponse
+	if keytype == "ZSK" {
+		resp, err = tdns.ComputeZskRolloverWhen(kdb, z, pol, time.Now())
+	} else {
+		resp, err = tdns.ComputeRolloverWhen(kdb, z, pol, time.Now())
+	}
 	if err != nil {
 		cliFatalf("%s", err.Error())
 	}
@@ -510,11 +527,21 @@ func printRolloverPolicyWarnings(warns []string) bool {
 // time. During in-progress rollovers, both lines reflect projected
 // times for the rollover after the current one completes.
 func renderRolloverWhen(resp *tdns.RolloverWhenResponse) {
+	role := resp.Role
+	if role == "" {
+		role = "KSK" // legacy daemon / unset
+	}
+	// The "asap" command needs --zsk for the ZSK schedule.
+	asapHint := "request via \"asap\" cmd"
+	if role == "ZSK" {
+		asapHint = "request via \"asap --zsk\" cmd"
+	}
+
 	if printRolloverPolicyErrors(resp.PolicyErrors) {
 		// Schedule output is meaningless while the policy is violated.
 		// Suppress remaining lines except the bare zone header so the
 		// operator still sees which zone they queried.
-		fmt.Printf("KSK rollover schedule for zone %s: blocked\n", resp.Zone)
+		fmt.Printf("%s rollover schedule for zone %s: blocked\n", role, resp.Zone)
 		return
 	}
 	// Warnings don't block — render schedule below the warning header.
@@ -522,9 +549,9 @@ func renderRolloverWhen(resp *tdns.RolloverWhenResponse) {
 
 	// Case 1 / waiting-for-parent: render the structured blocker
 	// instead of the schedule view. The schedule has no meaningful
-	// EarliestPossible in this state.
+	// EarliestPossible in this state. (KSK only — a ZSK has no parent gate.)
 	if resp.Status == "waiting-for-parent" && resp.Blocker != nil {
-		fmt.Printf("KSK rollover for zone %s: not currently possible.\n", resp.Zone)
+		fmt.Printf("%s rollover for zone %s: not currently possible.\n", role, resp.Zone)
 		fmt.Printf("  Reason: %s\n", resp.Blocker.Reason)
 		if resp.Blocker.Cause != "" {
 			fmt.Printf("  Cause:  %s\n", resp.Blocker.Cause)
@@ -546,14 +573,19 @@ func renderRolloverWhen(resp *tdns.RolloverWhenResponse) {
 		// still has the operator anchor.
 		currentTime = time.Now().UTC().Format("15:04:05 UTC (Mon Jan 2 2006)")
 	}
-	fmt.Printf("KSK rollover schedule for zone %s  Current time: %s\n", resp.Zone, currentTime)
+	fmt.Printf("%s rollover schedule for zone %s  Current time: %s\n", role, resp.Zone, currentTime)
 	if resp.InProgress {
 		fmt.Println("  (current rollover in progress; times below project the rollover after it completes)")
 	}
 
 	keyidPair := ""
-	if resp.FromKeyID != 0 || resp.ToKeyID != 0 {
+	switch {
+	case resp.FromKeyID != 0 && resp.ToKeyID != 0:
 		keyidPair = fmt.Sprintf("active keyid %d --> %d", resp.FromKeyID, resp.ToKeyID)
+	case resp.FromKeyID != 0:
+		// No promotion target yet (e.g. ZSK with no standby) — show the active
+		// keyid without a misleading "--> 0".
+		keyidPair = fmt.Sprintf("active keyid %d", resp.FromKeyID)
 	}
 
 	// Pad the time-with-delta to the wider of the two time strings.
@@ -570,7 +602,7 @@ func renderRolloverWhen(resp *tdns.RolloverWhenResponse) {
 	fmt.Printf("  next scheduled       %-*s  %s\n", timeColWidth, nextStr, keyidPair)
 	earliestLine := fmt.Sprintf("  earliest possible    %-*s  %s", timeColWidth, earliestStr, keyidPair)
 	if resp.EarliestPossible != "" && !resp.InProgress {
-		earliestLine += "  (request via \"asap\" cmd)"
+		earliestLine += "  (" + asapHint + ")"
 	}
 	fmt.Println(earliestLine)
 
@@ -835,6 +867,15 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 		// rollover-engine state explicit before the rest of the report.
 		fmt.Println()
 	}
+
+	// Zone-global header: the effective policy and any in-flight algorithm
+	// rollover are facts about the ZONE, not about the KSK specifically, so
+	// they print once at the top — visible whether the operator views both
+	// roles, only KSK (--ksk), or only ZSK (--zsk). In verbose mode the full
+	// policy detail follows here too (an expansion of the policy line), rather
+	// than tacked on at the end of the report.
+	printZoneGlobalHeader(s, verbose)
+
 	currentTime := formatRolloverTimeAbsolute(s.CurrentTime)
 
 	// Track whether the current-time anchor has been printed yet, so
@@ -859,7 +900,12 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 	}
 
 	if showZSK {
-		fmt.Println()
+		// Separate from a preceding KSK section. When ZSK is the first/only
+		// section, the global header's trailing blank is the separator — adding
+		// one here too would double the gap.
+		if showKSK {
+			fmt.Println()
+		}
 		if currentTimePrinted {
 			fmt.Printf("ZSK rollover state for zone %s\n", s.Zone)
 		} else {
@@ -882,22 +928,104 @@ func renderRolloverStatus(s *tdns.RolloverStatus, verbose, showKSK, showZSK bool
 	// for one or two keys); a dedicated section reads better and
 	// gives the message room to breathe.
 	printRolloverKeyErrors(s, showKSK, showZSK, verbose)
+}
 
-	if verbose && s.Policy != nil && (showKSK || showZSK) {
+// printZoneGlobalHeader prints the zone-wide facts that belong above BOTH the
+// KSK and ZSK sections: the effective policy (name + per-role algorithms) and
+// any in-flight ZSK algorithm rollover. These are properties of the zone, not
+// of a particular key role, so they show regardless of --ksk / --zsk filtering.
+// In verbose mode the full policy detail (an expansion of the policy line) is
+// printed here too — the name already appears in the policy line above, so the
+// detail block drops it and lays the rest out compactly in columns.
+func printZoneGlobalHeader(s *tdns.RolloverStatus, verbose bool) {
+	printed := false
+	if s.Policy != nil {
+		// Non-verbose: name + per-role algorithms on the one line. Verbose: the
+		// algorithms are in the detail table just below, so the line carries
+		// only the policy name (no redundant "(KSK …, ZSK …)" suffix).
+		if verbose {
+			name := s.Policy.Name
+			if name == "" {
+				name = "(unnamed)"
+			}
+			fmt.Printf("Current policy: %s\n", name)
+		} else {
+			fmt.Printf("Current policy: %s\n", policyHeaderValue(s.Policy))
+		}
+		printed = true
+	}
+	if t := s.AlgTransition; t != nil {
+		// ASCII "->" (not the Unicode arrow); spell out "algorithm"; describe
+		// the count as published ZSKs (the live keys in the DNSKEY RRset).
+		line := fmt.Sprintf("Algorithm rollover: %s %s -> %s  (in progress)", t.Role, t.FromAlg, t.ToAlg)
+		if t.Total > 0 {
+			line += fmt.Sprintf(", %d of %d published ZSKs on new algorithm", t.Done, t.Total)
+		}
+		fmt.Println(line)
+		printed = true
+	}
+	if verbose && s.Policy != nil {
+		printPolicyDetail(s.Policy)
+		printed = true
+	}
+	if printed {
 		fmt.Println()
-		fmt.Println("  policy:")
-		fmt.Printf("    name                         %s\n", s.Policy.Name)
-		fmt.Printf("    algorithm                    %s\n", s.Policy.Algorithm)
-		fmt.Printf("    ksk.lifetime                 %s\n", s.Policy.KskLifetime)
-		if s.Policy.ZskLifetime != "" {
-			fmt.Printf("    zsk.lifetime                 %s\n", s.Policy.ZskLifetime)
+	}
+}
+
+// printPolicyDetail renders the verbose policy expansion compactly in columns,
+// grouped by category: KSK | ZSK | rollover | clamping. The policy name is
+// omitted (it is already in the "Current policy:" line). Both per-role
+// algorithms are shown — a policy is a zone-wide description, not role-filtered,
+// so the KSK and ZSK algorithm both belong here even under --ksk / --zsk.
+func printPolicyDetail(p *tdns.PolicySummary) {
+	kskAlg := p.KSKAlgorithm
+	zskAlg := p.ZSKAlgorithm
+	if kskAlg == "" && zskAlg == "" {
+		// CSK / legacy single-algorithm policy.
+		kskAlg = p.Algorithm
+	}
+
+	// Each of the four category columns is a list of (label, value) cells
+	// filled top-down. Emitting label and value as SEPARATE columnize columns
+	// (8 columns total, not 4) makes columnize align every label column AND
+	// every value column independently — so the values line up instead of
+	// wobbling with the label width.
+	type cell struct{ label, value string }
+	cols := [4][]cell{
+		{{"ksk.algorithm", kskAlg}, {"ksk.lifetime", p.KskLifetime}},
+		{{"zsk.algorithm", zskAlg}, {"zsk.lifetime", p.ZskLifetime}},
+		{
+			{"rollover.ds-publish-delay", p.DsPublishDelay},
+			{"rollover.max-attempts", fmt.Sprintf("%d", p.MaxAttemptsBeforeBackoff)},
+			{"rollover.softfail-delay", p.SoftfailDelay},
+		},
+		{{"clamping.margin", p.ClampingMargin}},
+	}
+
+	depth := 0
+	for _, c := range cols {
+		if len(c) > depth {
+			depth = len(c)
 		}
-		fmt.Printf("    rollover.ds-publish-delay    %s\n", s.Policy.DsPublishDelay)
-		fmt.Printf("    rollover.max-attempts        %d\n", s.Policy.MaxAttemptsBeforeBackoff)
-		fmt.Printf("    rollover.softfail-delay      %s\n", s.Policy.SoftfailDelay)
-		if s.Policy.ClampingMargin != "" {
-			fmt.Printf("    clamping.margin              %s\n", s.Policy.ClampingMargin)
+	}
+
+	rows := make([]string, 0, depth)
+	for i := 0; i < depth; i++ {
+		fields := make([]string, 0, 8)
+		for c := 0; c < 4; c++ {
+			var label, value string
+			if i < len(cols[c]) && strings.TrimSpace(cols[c][i].value) != "" {
+				label = cols[c][i].label + ":"
+				value = cols[c][i].value
+			}
+			fields = append(fields, label, value)
 		}
+		rows = append(rows, strings.Join(fields, "|"))
+	}
+	formatted := columnize.SimpleFormat(rows)
+	for _, line := range strings.Split(formatted, "\n") {
+		fmt.Printf("  %s\n", strings.TrimRight(line, " "))
 	}
 }
 
@@ -933,14 +1061,10 @@ func printStateTable(s *tdns.RolloverStatus) {
 	type kv struct{ label, value string }
 	var left, right []kv
 
-	// Left column: this zone's current intent + DS state.
+	// Left column: this zone's current intent + DS state. (The effective
+	// policy and any in-flight algorithm rollover are zone-global facts and
+	// print in printZoneGlobalHeader, above both role sections.)
 	left = append(left, kv{"status:", s.Headline + " — " + headlinePhraseFor(s.Headline, s.Phase)})
-	// Effective policy + per-role algorithms, always shown (not just -v):
-	// an operator must be able to see which policy/algorithms the engine
-	// is following, and an algorithm transition is invisible without it.
-	if s.Policy != nil {
-		left = append(left, kv{"policy:", policyHeaderValue(s.Policy)})
-	}
 	if s.Phase != "" && s.Phase != "idle" {
 		left = append(left, kv{"phase:", s.Phase})
 	}
@@ -1599,8 +1723,9 @@ Differs from 'reset' (which clears last_rollover_error for one keyid).`,
 // today; others accept the flags as no-ops so an operator can copy a
 // command line between subcommands without "unknown flag" errors.
 var autoRolloverFlags struct {
-	kskOnly bool
-	zskOnly bool
+	kskOnly    bool
+	zskOnly    bool
+	policyName string
 }
 
 // newAutoRolloverCmd returns the parent command holding the auto-rollover
@@ -1631,10 +1756,70 @@ func newAutoRolloverCmd(_ string) *cobra.Command {
 		newAutoRolloverWhenCmd(),
 		newAutoRolloverAsapCmd(),
 		newAutoRolloverCancelCmd(),
+		newAutoRolloverPolicyChangeCmd(),
 		newAutoRolloverStatusCmd(),
 		newAutoRolloverResetCmd(),
 		newAutoRolloverUnstickCmd(),
 		newAutoRolloverValidateCmd(),
 	)
+	return c
+}
+
+// newAutoRolloverPolicyChangeCmd binds a zone toward a new DNSSEC policy for a
+// gradual, relaxed-mode ZSK ALGORITHM rollover. It only sets the algorithm of
+// future-generated keys (writes the policy override + rebinds); it does NOT
+// perform the roll. `auto-rollover asap -z <zone> --zsk` is the throttle.
+func newAutoRolloverPolicyChangeCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "policy-change",
+		Short: "Bind a zone to a new DNSSEC policy for a gradual ZSK algorithm rollover",
+		Long: `Bind a zone toward a new DNSSEC policy so its ZSK algorithm rolls over
+GRADUALLY. Unlike "zone set-policy" (which retires the old key
+synchronously — unsafe for an algorithm change), this only sets the
+algorithm of FUTURE-generated ZSKs: the existing FIFO key pipeline drains
+in order, oldest first.
+
+This command does NOT perform the roll. After binding, the algorithm
+rolls on the normal ZSK cadence — OR run
+
+  auto-rollover asap -z <zone> --zsk
+
+to promote the next standby now (repeat to accelerate through the
+already-propagated old-alg standbys to the new algorithm).
+
+Requires dnssec.completeness: relaxed. A KSK / CSK / both-role algorithm
+change, or a second policy-change while a roll is in flight, is refused.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs(cmd, "zonename")
+			tdns.Globals.App.Type = tdns.AppTypeCli
+			if strings.TrimSpace(autoRolloverFlags.policyName) == "" {
+				cliFatalf("flag --policy is required")
+			}
+			z := dns.Fqdn(tdns.Globals.Zonename)
+
+			api, err := GetApiClient("auth", true)
+			if err != nil {
+				cliFatalf("error getting API client: %v", err)
+			}
+			cr, err := SendZoneCommand(api, tdns.ZonePost{
+				Command: "change-policy",
+				Zone:    z,
+				Policy:  strings.TrimSpace(autoRolloverFlags.policyName),
+			})
+			if err != nil {
+				cliFatalf("error from %q: %s", cr.AppName, err.Error())
+			}
+			if cr.Error {
+				cliFatalf("%s", cr.ErrorMsg)
+			}
+			if cr.Msg != "" {
+				fmt.Printf("%s\n", cr.Msg)
+			}
+		},
+	}
+	c.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone")
+	c.Flags().StringVarP(&autoRolloverFlags.policyName, "policy", "p", "", "Target DNSSEC policy name")
+	_ = c.MarkFlagRequired("zone")
+	_ = c.MarkFlagRequired("policy")
 	return c
 }
