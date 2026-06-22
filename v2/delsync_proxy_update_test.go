@@ -155,3 +155,76 @@ upd.example.	3600 IN NS ns1.upd.example.
 ns1.upd.example.	3600 IN A 192.0.2.1
 `
 }
+
+// U-d: proxyUpdateMode defaults to replace and honors the parent-update option.
+func TestProxyUpdateModeDefaultAndOverride(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	// No option set ⇒ replace (the proxy default; differs from the auth-side
+	// delta default).
+	if got := proxyUpdateMode(kdb); got != UpdateModeReplace {
+		t.Fatalf("default proxy update mode = %q, want replace", got)
+	}
+
+	// Operator chooses delta.
+	kdb.SetOptions(map[AuthOption]string{AuthOptParentUpdate: UpdateModeDelta})
+	if got := proxyUpdateMode(kdb); got != UpdateModeDelta {
+		t.Fatalf("with parent-update:delta, mode = %q, want delta", got)
+	}
+
+	// Operator chooses replace explicitly.
+	kdb.SetOptions(map[AuthOption]string{AuthOptParentUpdate: UpdateModeReplace})
+	if got := proxyUpdateMode(kdb); got != UpdateModeReplace {
+		t.Fatalf("with parent-update:replace, mode = %q, want replace", got)
+	}
+}
+
+// U-d: proxyCurrentDelegationRRs reads the current authoritative NS + glue + DS
+// (DS derived from apex DNSKEY SEP keys) from the served zone.
+func TestProxyCurrentDelegationRRs(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	// A signed delegation: NS + in-bailiwick glue + a KSK DNSKEY (SEP) → DS.
+	zoneStr := `upd.example.	3600 IN SOA ns1.upd.example. hostmaster.upd.example. 1 7200 1800 604800 3600
+upd.example.	3600 IN NS ns1.upd.example.
+upd.example.	3600 IN NS ns2.upd.example.
+ns1.upd.example.	3600 IN A 192.0.2.1
+ns1.upd.example.	3600 IN AAAA 2001:db8::1
+ns2.upd.example.	3600 IN A 192.0.2.2
+upd.example.	3600 IN DNSKEY 257 3 15 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaA=
+`
+	zd := proxyUpdZoneData(t, kdb, zoneStr)
+	newNS, newA, newAAAA, newDS := zd.proxyCurrentDelegationRRs()
+	if len(newNS) != 2 {
+		t.Fatalf("NS = %d, want 2", len(newNS))
+	}
+	if len(newA) != 2 {
+		t.Fatalf("A glue = %d, want 2", len(newA))
+	}
+	if len(newAAAA) != 1 {
+		t.Fatalf("AAAA glue = %d, want 1", len(newAAAA))
+	}
+	if len(newDS) != 1 {
+		t.Fatalf("DS (from KSK DNSKEY) = %d, want 1", len(newDS))
+	}
+	if _, ok := newDS[0].(*dns.DS); !ok {
+		t.Fatalf("DS RR has wrong type %T", newDS[0])
+	}
+}
+
+// U-d: an unsigned zone (no DNSKEYs) yields NS + glue but no DS — the case the
+// UPDATE path serves that NOTIFY cannot.
+func TestProxyCurrentDelegationRRsUnsigned(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zoneStr := `upd.example.	3600 IN SOA ns1.upd.example. hostmaster.upd.example. 1 7200 1800 604800 3600
+upd.example.	3600 IN NS ns1.upd.example.
+ns1.upd.example.	3600 IN A 192.0.2.1
+`
+	zd := proxyUpdZoneData(t, kdb, zoneStr)
+	newNS, newA, _, newDS := zd.proxyCurrentDelegationRRs()
+	if len(newNS) != 1 || len(newA) != 1 {
+		t.Fatalf("NS/A = %d/%d, want 1/1", len(newNS), len(newA))
+	}
+	if len(newDS) != 0 {
+		t.Fatalf("unsigned zone must yield no DS, got %d", len(newDS))
+	}
+}

@@ -478,11 +478,17 @@ DECISION U6.)
 
 ### 10.2 Form: replace, not delta (resolved)
 
-DECISION U3 — proxied UPDATEs are REPLACE-form (delete the RRset, re-add
-the current authoritative members) rather than delta (add/remove diff).
-Replace is idempotent and self-correcting: it does not depend on the
-parent's current state matching our assumption, so it fixes drift instead
-of risking duplicate-adds or missed-removes.
+DECISION U3 — proxied UPDATEs are REPLACE-form by DEFAULT (delete the
+RRset, re-add the current authoritative members) rather than delta
+(add/remove diff). Replace is idempotent and self-correcting: it does not
+depend on the parent's current state matching our assumption, so it fixes
+drift instead of risking duplicate-adds or missed-removes. The form is
+OPERATOR-OVERRIDABLE via the existing `parent-update` auth option
+(`delta|replace`), mirroring the tdns-auth child path — the proxy reads the
+same option but DEFAULTS to replace (auth defaults to delta). NOTE — this
+required un-gating `replace` at the config parser too: `parseAuthOptions`
+previously rejected `parent-update: replace` (the other half of the stale
+miekg/dns workaround); it now accepts both values.
 
 PRECEDENT — the KSK rollover engine ALREADY pushes the child's DS RRset to
 the parent in replace form, in production: `BuildChildWholeDSUpdate`
@@ -581,11 +587,19 @@ the native child path.
 - U-c: the startup reconcile pass — run `AnalyseZoneDelegation` once on
   first load for proxy zones, send a replace UPDATE if out of sync (U4
   trigger phase 1).
-- U-d: the steady-state UPDATE action — on a PROXY-UPDATE request (the
-  UPDATE sibling of PROXY-NOTIFY), build the replace via
-  `CreateChildReplaceUpdate`, sign with the agent's SIG(0) key
-  (`SignerName = child`), send via `SendUpdate`. ctx-aware sends (the
-  review lesson).
+- U-d: the UPDATE action. STATUS: DONE. `ProxyUpdateParent`
+  (`delsync_proxy_update.go`): re-checks the §10.8 precondition (sends only
+  in READY), resolves the parent UPDATE target, builds the UPDATE in the
+  configured form (`proxyUpdateMode` — REPLACE default, DELTA if
+  `parent-update: delta`), signs with the agent's SIG(0) key as the child
+  (`SignerName = child zone`), and sends via `SendUpdate`. Replace reads the
+  current authoritative NS+glue+DS from the served zone
+  (`proxyCurrentDelegationRRs`; DS from apex DNSKEY SEP keys, empty for an
+  unsigned zone); delta uses `AnalyseZoneDelegation`. The config parser now
+  accepts `parent-update: replace` (U3). Tests: mode default/override,
+  authoritative-RR reader (signed + unsigned). The send itself is
+  network/testbed-validated. NOT yet wired to a trigger — U-c (startup) and
+  U-e (scheme dispatch) call it. Build + full `go test -race` green.
 - U-e: scheme dispatch — extend the proxy PostRefresh/handler so a parent
   advertising UPDATE routes to PROXY-UPDATE, NOTIFY routes to the existing
   PROXY-NOTIFY.
