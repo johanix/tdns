@@ -516,6 +516,11 @@ cannot serve and the main reason to build UPDATE-proxy.
 
 ### 10.4 Trigger: two phases (the operator's model)
 
+Both phases are gated by §10.8: they only run once the precondition state
+machine reports READY (parent advertises UPDATE AND the agent's KEY is
+published at the apex). In the foreign-KEY or waiting-for-KEY states no
+UPDATE is sent.
+
 The expensive parent comparison is a STARTUP reconciliation, not a
 per-transfer operation:
 
@@ -545,8 +550,11 @@ the native child path.
 
 ### 10.6 Build sub-steps
 
-- U-a: agent SIG(0) keygen + storage (under the child zone name) + public-
-  KEY export tooling (CLI/log) for the operator to publish (U1/U2/U6).
+- U-a: the precondition + KEY-bootstrap state machine (§10.8) — the
+  UPDATE-support gate, the apex-KEY check, agent SIG(0) keygen/storage, the
+  operator-instruction surfacing (log + zone-list status + CLI), and the
+  ready/foreign/waiting state handling. This is the gate that everything
+  else depends on; build it first.
 - U-b: remove the stale replace-mode refusal; confirm shared replace works
   on the fork (U4).
 - U-c: the startup reconcile pass — run `AnalyseZoneDelegation` once on
@@ -578,5 +586,73 @@ prerequisite.
   cannot validate the UPDATE (path-3 fails). The proxy should detect "my
   KEY is not yet in the transferred zone" and hold off / warn, rather than
   send UPDATEs the parent will REFUSE. A clean precondition check.
+
+
+### 10.8 The precondition + KEY-bootstrap state machine (resolved)
+
+The UPDATE-proxy cannot just "sign and send." The parent only trusts an
+UPDATE signed by a SIG(0) key published as a KEY RR at the child apex
+(§10.1, path-3). Since the agent is a SECONDARY, it cannot publish that
+KEY itself — the operator must add it at the DSYNC-unaware primary. So the
+agent needs a small state machine to (a) decide whether UPDATE-proxy is
+even relevant, (b) ensure it holds a usable key, and (c) tell the operator
+exactly what to publish — without ever hard-failing the zone.
+
+DECISION U7 — the resolved flow, evaluated on a proxy zone (on setup and on
+each transfer):
+
+1. GATE: does the parent advertise DSYNC **UPDATE**? (DSYNC discovery /
+   `BestSyncScheme`.) If NOT, UPDATE-proxy is not applicable to this zone —
+   do NOT generate a key, do NOT nag the operator about a KEY record. The
+   NOTIFY proxy (P-3) may still apply if the parent advertises NOTIFY. This
+   gate comes FIRST, before any KEY handling.
+
+2. If UPDATE is advertised, inspect the apex KEY RRset:
+   - **KEY present, and we hold the matching private key** (the keystore
+     has it — `GetSig0Keys(child, Sig0StateActive)` non-empty and
+     `VerifyPublishedKeyRRs` confirms the published KEY is ours): READY.
+     Sign and send proxied UPDATEs.
+   - **KEY present, but it is FOREIGN** (we do not hold the private key for
+     the published KEY): we cannot proxy via UPDATE, and we MUST NOT mint a
+     competing KEY. WARN (not error) — surface a per-zone status visible on
+     `tdns-cli zone list`: "DSYNC UPDATE proxy not operable: a foreign KEY
+     occupies the apex; NOTIFY proxy may still apply." Disable the UPDATE
+     proxy for this zone; keep serving the zone normally.
+   - **No KEY present**: GENERATE a SIG(0) keypair (reuse the keystore
+     `Sig0KeyMgmt` generate path), store it under the child zone name, and
+     INSTRUCT the operator with the exact KEY record to add at the primary.
+     WARN status on `zone list`: "DSYNC UPDATE proxy waiting: publish this
+     KEY at the primary." HOLD OFF on UPDATEs until the KEY appears in a
+     transfer (sending before then just earns a REFUSED).
+
+DECISION U8 — error severity: NONE of the above hard-fails. The agent
+starts; all zones, including this one, are served normally as a secondary.
+The foreign-KEY and waiting-for-KEY conditions are WARNINGS surfaced as a
+per-zone status on `tdns-cli zone list` (reuse the existing
+`zd.SetError`/zone-status surface that `VerboseListZone` already renders,
+`cli/zone_cmds.go:408`). This matches the project's resilient-config
+quarantine model: the UPDATE-proxy FUNCTION is degraded, not the zone.
+
+DECISION U9 — operator instruction surfacing (BOTH): (a) on generation, log
+the ready-to-paste KEY record at Warn AND record it in the per-zone status
+so it persists (and re-emit while still missing); (b) a CLI command (e.g.
+`... keystore dnssec proxy-key -z <zone>`) that prints, on demand, the
+exact KEY record to publish plus the current state (update-unsupported /
+ready / foreign / waiting).
+
+Reuse map: `DelegationSyncSetup` / `Sig0KeyPreparation`
+(`delegation_sync.go:192,265`) are the child-side precedent — they
+generate a keypair AND publish the KEY into the zone. The proxy reuses the
+KEYGEN + keystore half (`Sig0KeyMgmt` generate, `GetSig0Keys`,
+`VerifyPublishedKeyRRs`) but REPLACES the "publish into the zone" half with
+the operator-instruction surfacing, because a secondary cannot author the
+zone. So U-a is a new `ProxySig0KeyPreparation`-style function modelled on
+`Sig0KeyPreparation` minus the publish step, plus the §10.8 state machine.
+
+Open U-build detail: where the per-zone "UPDATE-proxy state" is rendered —
+the simplest is the existing zone-error/status field (one warning line);
+if a distinct non-error "warning" severity is wanted on `zone list`,
+that may need a small status-field addition. Decide at build time; the
+error-field reuse works for a first cut.
 
 
