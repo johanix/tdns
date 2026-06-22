@@ -345,17 +345,25 @@ primary once it builds).
   DSYNC-discovery half of `ProxyNotifyParent` needs the network and is
   left for testbed validation. Build + full `go test -race` green.
 
-- **Step P-4 — loop/debounce (D8) + tests + operator doc.** Confirm Q5
-  (IXFR reads the post-flip served zone, so AXFR/IXFR behave identically)
-  and settle Q6 (a "last-proxied content/serial" guard so a parent that is
-  slow to absorb does not get re-NOTIFYd every refresh — though the
-  content-diff trigger already suppresses the common case). Full test
-  matrix: CDS-only, CSYNC-only, both, DNSKEY-only→NOTIFY(CDS),
-  NS/glue-only→NOTIFY(CSYNC), delete-DS CDS (must NOTIFY like any CDS
-  change), no-change no-op, no-DSYNC-at-parent no-op, AXFR vs IXFR,
-  unsigned zone (no CDS/CSYNC/DNSKEY ⇒ nothing to send, but NOT refused —
-  D5). Operator doc: configuring tdns-agent as a DSYNC proxy secondary for
-  a BIND/Knot primary.
+- **Step P-4 — loop/debounce (D8) + tests + operator doc.** STATUS: DONE.
+  Q6 RESOLVED with NO extra state: the trigger is content-edge-triggered
+  (it diffs the served zone against the incoming one), so a change fires
+  exactly ONCE — on the transfer where the content appears — and a later
+  transfer carrying the SAME already-forwarded content does NOT re-fire,
+  even with a bumped serial. So a slow parent gets no NOTIFY storm and no
+  "last-proxied serial" marker is needed; the self-debounce falls out of
+  P-2's design. Q5 (AXFR vs IXFR) is handled by construction: PreRefresh
+  reads the post-flip served zone, identical for both. Test
+  (`delsync_proxy_p4_test.go`): three sequential refreshes (serial-only
+  bump → CDS change → same-CDS re-transfer) enqueue exactly ONE
+  PROXY-NOTIFY. Operator guide written
+  (`2026-06-22-agent-dsync-proxy-operator-guide.md`). The remaining
+  matrix rows (delete-DS CDS, unsigned-zone, no-DSYNC-target) are covered
+  by earlier unit tests + by construction: delete-DS is just another CDS
+  change (D1, the proxy never reads CDS contents); an unsigned zone has no
+  CDS/CSYNC/DNSKEY so the diff finds nothing (and the option is not
+  refused, D5); a no-NOTIFY-target parent is the logged no-op in
+  `ProxyNotifyParent` (P-3). Build + full `go test -race` green.
 
 - **Step P-5 (LATER, not this work) — UPDATE-proxy.** Add the DNS-UPDATE-
   to-parent scheme: reuse `AnalyseZoneDelegation`'s delta +
