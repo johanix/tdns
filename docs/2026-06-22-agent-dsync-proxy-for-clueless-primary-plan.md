@@ -1,16 +1,24 @@
 # tdns-agent as a DSYNC proxy for a DSYNC-unaware primary
 
-Status: PLANNING (2026-06-22). Scope decisions resolved with the operator
-(§4): NOTIFY-only first cut; a new `delegation-sync-proxy` zone option; a
+Status: IMPLEMENTED (2026-06-22), on branch feat/agent-dsync-proxy,
+pending testbed validation of the network paths. Both schemes are built:
+the NOTIFY proxy (P-1..P-4) and the UPDATE proxy (P-5: U-a precondition +
+KEY-bootstrap state machine, U-b replace-mode re-enable, U-c startup
+reconcile, U-d the configurable replace/delta UPDATE action, U-e UPDATE/
+NOTIFY scheme dispatch, U-a2 the `zone proxy-key` CLI, U-f docs). The agent
+forwards via whichever scheme the parent advertises (UPDATE preferred when
+available; it also serves unsigned zones). All build + `go test -race`
+green; the network-dependent paths (DSYNC discovery, NOTIFY/UPDATE on the
+wire) are operator/testbed-validated. Per-step as-built detail in §7.
+
+Original scope decisions (§4): a new `delegation-sync-proxy` zone option; a
 WIDE change-detection trigger (CDS / CSYNC / NS+glue / DNSKEY) with an
-optimistic act-mapping (CDS|DNSKEY change → NOTIFY(CDS), CSYNC|NS-glue
-change → NOTIFY(CSYNC)); no special delete-DS handling; do not gate on
-unsigned. UPDATE-to-parent is deferred to a later step. Ready to build. Estimate
-(§9): ~150–280 source + ~330–520 test LOC, ~11–18 h for the NOTIFY-only
-cut (P-1..P-4); no HIGH-risk step (a wrong NOTIFY only makes the parent
-re-scan). The change-detection pattern is a proven tdns-mp template
+optimistic act-mapping; no special delete-DS handling; do not gate on
+unsigned. The change-detection pattern follows the proven tdns-mp template
 (`MPPreRefresh`), and two of the three diff dimensions reuse existing v2
-functions — so this is mostly trigger+gate glue, not new mechanism.
+functions. UPDATE decisions (§10): replace-form default but operator-
+overridable via `parent-update`; the agent signs as the child with a key
+the operator publishes at the primary (KEY + HSYNCPARAM pubkey).
 
 ## 1. The problem
 
@@ -626,10 +634,21 @@ the native child path.
   Scheme discovery + send run in the syncher (off the refresh path). Tests
   updated for the command rename; the dispatch itself is network/testbed-
   validated. Build + full `go test -race` green.
-- U-f: tests (signed + unsigned zones; startup-reconcile fires once;
-  steady-state local-diff fires on change; replace payload correctness;
-  no-resend-on-restart) + operator doc (the manual KEY-publication
-  bootstrap step).
+- U-f: operator doc + test-matrix. STATUS: DONE. `guide/agent-dsync-proxy.md`
+  rewritten to cover both schemes: an "UPDATE proxy" section (the SIG(0)
+  trust model, the step-by-step KEY + HSYNCPARAM-pubkey bootstrap via
+  `zone proxy-key`, the four states, the startup reconcile), corrected
+  requirements/limitations, and dual-scheme verification.
+  `guide/special-features.md` §1.6 and `guide/README.md` updated (no longer
+  "NOTIFY-only"; the Future-Work UPDATE-proxy entry removed). Unit tests
+  cover the decision logic (25 proxy tests): precondition states,
+  ours-vs-foreign, keygen idempotency, instruction text, the
+  authoritative-RR reader (signed + unsigned), parent-update mode
+  default/override, the not-ready startup early-return, the replace-UPDATE
+  builder structure, and `proxy-key` formatting. The remaining matrix rows
+  (signed/unsigned UPDATE on the wire, startup-reconcile-fires-once,
+  no-resend-on-restart) are network/testbed — operator-gated, not
+  agent-side unit-testable. Full `go test -race` green.
 
 DECISION U6 — the keygen + export tooling is part of P-5, not a separate
 prerequisite.

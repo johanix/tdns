@@ -350,11 +350,15 @@ The three delegation-sync roles, side by side:
   DSYNC-unaware primary: forward the primary's CDS/CSYNC
   signals up on its behalf (this section).
 
-The proxy is NOTIFY-only for now; if the parent advertises
-only the UPDATE scheme, the proxy does nothing (UPDATE
-proxying, which would also cover unsigned zones, is planned
-work). For the full operator how-to -- configuration,
-requirements, limitations, and verification -- see
+The proxy forwards via whichever scheme the parent
+advertises: NOTIFY (the parent re-scans the child), or a
+signed DNS UPDATE (the agent sends the delegation records
+directly, which also covers unsigned zones). The UPDATE
+scheme needs a SIG(0) key the parent trusts -- the agent
+generates it and the operator publishes its KEY at the
+primary (a one-time `zone proxy-key` bootstrap). For the
+full operator how-to -- configuration, the UPDATE
+KEY-bootstrap, limitations, and verification -- see
 [Agent as a DSYNC proxy](agent-dsync-proxy.md).
 
 

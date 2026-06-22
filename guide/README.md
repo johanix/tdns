@@ -29,10 +29,11 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
 
 - [Agent as a DSYNC proxy](agent-dsync-proxy.md)
   -- Operator how-to for running tdns-agent as a secondary
-  that forwards NOTIFY(CDS/CSYNC) to the parent on behalf of
-  a DSYNC-unaware primary (BIND/Knot/NSD): when to use it,
-  configuration, the change-to-NOTIFY mapping, limitations,
-  and verification.
+  that forwards delegation-sync (NOTIFY and/or signed DNS
+  UPDATE) to the parent on behalf of a DSYNC-unaware primary
+  (BIND/Knot/NSD): when to use it, configuration, the
+  change mapping, the UPDATE KEY-bootstrap (`zone proxy-key`),
+  limitations, and verification.
 
 - [Automatic DNSSEC Rollovers](key-rollover.md)
   -- Operator manual for all three rollover kinds:
@@ -53,6 +54,4 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   reading when changing engine timing behaviour.
 
 - Future Work (coming soon)
-  -- IXFR support, TSIG authentication, and UPDATE-scheme
-  delegation-sync proxying (the NOTIFY-scheme proxy ships
-  now; see the agent-as-proxy guide above).
+  -- IXFR support and TSIG authentication.
