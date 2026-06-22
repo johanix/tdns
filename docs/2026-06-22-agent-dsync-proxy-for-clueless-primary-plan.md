@@ -752,27 +752,43 @@ error-field reuse works for a first cut.
 
 
 
-## 11. The HSYNCPARAM pubkey CONSUMER (tdns-auth secondary)
+## 11. The HSYNCPARAM pubkey / pubcds CONSUMER (tdns-auth secondary)
 
 This is the COUNTERPART to §10's producer. The proxy (and any provider)
-publishes `HSYNCPARAM pubkey` at the customer apex (§9 U10); SOMEONE must
-act on it. This section is that consumer, on the tdns-auth side — and it is
-a tdns-auth feature, NOT an agent/proxy one.
+publishes `HSYNCPARAM pubkey` and/or `HSYNCPARAM pubcds` at the customer
+apex (§9 U10); SOMEONE must act on those flags. This section is that
+consumer, on the tdns-auth side — and it is a tdns-auth feature, NOT an
+agent/proxy one. Both flags are handled by the SAME machinery, differing
+only in which apex RRset is republished and under which signal-name prefix.
 
-### 11.1 The mechanism (RFC 9615 at-NS signaling, for the SIG(0) KEY)
+Note on producers: the §10 proxy emits ONLY `pubkey`
+(`proxyBootstrapInstruction`, `delsync_proxy_update.go:194`) — it needs its
+SIG(0) KEY republished so it can sign UPDATEs; it never authors CDS, so it
+has no reason to set `pubcds`. But `pubcds` is a real, independently-set
+flag (an operator by hand, or multi-provider/HSYNC tooling that wants
+providers to republish the child's CDS at the signal names). The consumer
+must act on whichever flag it finds, regardless of who set it; it does NOT
+assume the proxy is the source.
 
-RFC 9615 (DNSSEC bootstrapping) defines authenticated signaling names of
-the form `_dsboot.<child>._signal.<ns>` under each of the child's
-nameservers, so a parent can DNSSEC-validate the child's bootstrap data
-out-of-band (the scanner already CONSUMES this for CDS:
-`queryCDSAtSignalingNames`, `scanner.go:1283`). The same shape applies to
-the child's SIG(0) KEY, at `_sig0key.<child>._signal.<ns>` — and there is
-already a CONSUMER for THAT: `LookupChildKeyAtSignal` /`VerifyChildKey`
-(`truststore_verify.go:33,57`). What is missing is a PRODUCER on a
-plain tdns-auth secondary. The `pubkey` flag is the instruction to produce
-it.
+### 11.1 The mechanism (RFC 9615 at-NS signaling)
 
-Worked example (the operator's framing):
+RFC 9615 (DNSSEC bootstrapping) defines authenticated signaling names
+under each of the child's nameservers, so a parent can DNSSEC-validate the
+child's bootstrap data out-of-band. There are two such names, and tdns
+already has a CONSUMER for each:
+
+| Flag     | Apex RRset republished | Signal name                       | Existing consumer in tdns                                  |
+|----------|------------------------|-----------------------------------|------------------------------------------------------------|
+| `pubcds` | CDS (and CDNSKEY)      | `_dsboot.<child>._signal.<ns>`    | `queryCDSAtSignalingNames` (`scanner.go:1288`)             |
+| `pubkey` | KEY (SIG(0))           | `_sig0key.<child>._signal.<ns>`   | `LookupChildKeyAtSignal`/`VerifyChildKey` (`truststore_verify.go:33,57`) |
+
+What is missing on a plain tdns-auth secondary is the PRODUCER. The flag is
+the instruction to produce the signal record; the consumer is whoever
+validates the bootstrap (a DSYNC parent for `pubcds`, a SIG(0)-validating
+UPDATE receiver for `pubkey`).
+
+Worked example (the operator's framing, `pubkey` shown; `pubcds` is
+identical with CDS in place of KEY and `_dsboot` in place of `_sig0key`):
 - tdns-auth server `ns.foobar.com` is a SECONDARY for customer zone
   `example.com.`.
 - `example.com.` apex carries `example.com. KEY …` and
@@ -781,20 +797,24 @@ Worked example (the operator's framing):
   under the signaling name
   `_sig0key.example.com._signal.ns.foobar.com.  KEY …`.
 
+For `pubcds`, the apex carries `example.com. CDS …` (and optionally
+`CDNSKEY`) plus `example.com. HSYNCPARAM pubcds`, and the republished
+record is `_dsboot.example.com._signal.ns.foobar.com.  CDS …`.
+
 The republished record's owner is built from the NS HOSTNAME
 (`<ns> = ns.foobar.com`), so the signal record lives UNDER THE NS'S ZONE,
 not under the customer zone. That is the whole point: the parent/validator
-finds the child's KEY via the child's nameservers, authenticated by those
-nameservers' own DNSSEC.
+finds the child's bootstrap data via the child's nameservers, authenticated
+by those nameservers' own DNSSEC.
 
 ### 11.2 The hard precondition (and what's out of scope)
 
-`ns.foobar.com` can publish `_sig0key.example.com._signal.ns.foobar.com.`
-ONLY if it is PRIMARY (locally authoritative AND writable) for a zone that
-is a parent of `_signal.ns.foobar.com.` — i.e. it locally owns and can
-write `ns.foobar.com.` (as its own zone) or `foobar.com.`. If no such
-local primary zone exists, this NS's signal record is a NON-STARTER —
-skip it (warn).
+`ns.foobar.com` can publish a `_signal.ns.foobar.com.` record ONLY if it is
+PRIMARY (locally authoritative AND writable) for a zone that is a parent of
+`_signal.ns.foobar.com.` — i.e. it locally owns and can write
+`ns.foobar.com.` (as its own zone) or `foobar.com.`. If no such local
+primary zone exists, this NS's signal record is a NON-STARTER — skip it
+(warn). This precondition is identical for both flags.
 
 OUT OF SCOPE (for now): the case where `ns.foobar.com` is NOT primary for
 that zone but some intra-company mechanism could convey the publish request
@@ -802,74 +822,96 @@ to wherever the real primary is. We handle only the locally-primary case.
 
 ### 11.3 The algorithm (per incoming transfer of a customer zone)
 
-1. Read the apex HSYNCPARAM of the transferred zone; if it has no `pubkey`
-   flag (`HSYNCPARAM.HasPubkey()`, `core/rr_hsyncparam.go:387` — already in
-   tdns, currently unused), do nothing.
-2. Collect the apex KEY RRset of the transferred customer zone (ALL KEYs).
+Run once per active flag. The two flags share every step except the
+source RRset and the signal-name prefix (drive both from the table in
+§11.1):
+
+1. Read the apex HSYNCPARAM of the transferred zone. Determine which flags
+   are set: `HSYNCPARAM.HasPubkey()` (`core/rr_hsyncparam.go:387`) and
+   `HSYNCPARAM.HasPubcds()` (`core/rr_hsyncparam.go:397`) — both already in
+   tdns, currently unused. If neither, do nothing.
+2. For each set flag, collect the corresponding apex RRset of the
+   transferred customer zone: ALL KEYs for `pubkey`; CDS (and CDNSKEY if
+   present) for `pubcds`. If the flag is set but the apex RRset is empty,
+   skip that flag (nothing to republish) and warn.
 3. For each NS hostname `<ns>` in the customer zone's apex NS RRset:
-   a. Build the signal owner `_sig0key.<customerzone>._signal.<ns>.`.
+   a. Build the signal owner from the flag's prefix:
+      `_sig0key.<customerzone>._signal.<ns>.` (pubkey) or
+      `_dsboot.<customerzone>._signal.<ns>.` (pubcds).
    b. `FindZone(signalOwner)` (`zone_utils.go:602` — longest-suffix match
       over locally-served zones). If it returns a zone we are PRIMARY for,
       that is the target; else skip this NS (non-starter, §11.2).
-   c. Publish each apex KEY (re-owned to the signal name) into the target
-      zone via the internal publish path (the `UpdateQ <- UpdateRequest{
-      Cmd:"ZONE-UPDATE", InternalUpdate:true}` idiom that `PublishKeyRRs`
-      uses, `ops_key.go:17`). If the target zone is signed (inline-signing),
-      the normal publish path re-signs the new `_signal` KEY RRset.
-4. Idempotency: republish only on CHANGE (the apex KEY or the NS set
-   differs from what we last published), so a plain re-transfer of unchanged
-   data is a no-op — same content-edge discipline as the proxy's §10.4/D8.
+   c. Publish each apex record (re-owned to the signal name) into the
+      target zone via the internal publish path (the `UpdateQ <-
+      UpdateRequest{Cmd:"ZONE-UPDATE", InternalUpdate:true}` idiom that
+      `PublishKeyRRs` uses, `ops_key.go:17`). If the target zone is signed
+      (inline-signing), the normal publish path re-signs the new `_signal`
+      RRset.
+4. Idempotency: republish only on CHANGE (the apex source RRset or the NS
+   set differs from what we last published), so a plain re-transfer of
+   unchanged data is a no-op — same content-edge discipline as the proxy's
+   §10.4/D8. The two flags are gated independently (a CDS change does not
+   force a KEY republish, and vice versa).
 
 ### 11.4 Reuse vs. new (and the tdns-mp question)
 
-- REUSE (parsing): `HSYNCPARAM.HasPubkey()` lives in `tdns/v2/core` — the
-  flag check is ~3 lines, no analysis engine needed.
+- REUSE (parsing): `HSYNCPARAM.HasPubkey()` and `HasPubcds()` live in
+  `tdns/v2/core` — the flag checks are ~3 lines each, no analysis engine
+  needed.
 - DO NOT reuse the tdns-mp HSYNC analysis (`HsyncChanged`,
   `tdns-mp/v2/hsync_utils.go`): it returns an MP-specific `*HsyncStatus`
   and is entangled with provider-groups/signers. A plain tdns-auth
-  secondary must NOT depend on tdns-mp. For `pubkey` we need none of that —
-  just the flag, the apex KEY/NS RRsets, `FindZone`, and the publish idiom.
+  secondary must NOT depend on tdns-mp. For these flags we need none of
+  that — just the flags, the apex KEY/CDS/NS RRsets, `FindZone`, and the
+  publish idiom.
 - NEW: the per-NS signal-name publish (build owner, find local primary
-  zone, publish/re-sign), and the change-detection gate.
+  zone, publish/re-sign), parameterized over the (flag, source RRset,
+  prefix) pair, and the per-flag change-detection gate.
 
 ### 11.5 Always-on (operator decision)
 
 The check runs on EVERY tdns-auth secondary, with NO option gating it
-(operator-confirmed). The flag should "just work" as the producer intends.
+(operator-confirmed). The flags should "just work" as the producer intends.
 It is safe to be always-on: it only acts when (a) the transferred zone
-actually carries `HSYNCPARAM pubkey` AND (b) this server is locally primary
-for a parent of the signal name — both narrow conditions. A secondary that
-is primary for nothing relevant does nothing.
+actually carries `HSYNCPARAM pubkey`/`pubcds` AND (b) this server is locally
+primary for a parent of the signal name — both narrow conditions. A
+secondary that is primary for nothing relevant does nothing.
 
 ### 11.6 Wiring (the hook)
 
 The natural home is the post-transfer path — the same `OnZonePreRefresh`/
 `OnZonePostRefresh` machinery the proxy uses (§3), but registered for ALL
 secondary zones on tdns-auth (the always-on decision), not just
-proxy-option zones. PreRefresh detects the `pubkey` + apex-KEY/NS change;
-PostRefresh publishes into the target zone(s). (Or run it from the existing
-refresh callback path if a lighter touch fits — decide at build time.) The
-publish targets a DIFFERENT zone than the one being refreshed (the NS's
-zone), so this is a cross-zone internal publish via `UpdateQ`, not a
-mutation of the transferred zone.
+proxy-option zones. PreRefresh detects the active flag(s) + apex-source/NS
+change; PostRefresh publishes into the target zone(s). (Or run it from the
+existing refresh callback path if a lighter touch fits — decide at build
+time.) The publish targets a DIFFERENT zone than the one being refreshed
+(the NS's zone), so this is a cross-zone internal publish via `UpdateQ`, not
+a mutation of the transferred zone.
 
 ### 11.7 Open items for build time
 
 - Confirm the change-detection gate's state: where to remember "what we
   last published at the signal names" so re-publish is change-only (a small
-  per-zone marker, or diff the live `_signal` RRset in the target zone vs.
-  the apex KEY — the latter needs no new state).
+  per-zone-per-flag marker, or diff the live `_signal` RRset in the target
+  zone vs. the apex source RRset — the latter needs no new state).
 - A signed TARGET zone (the NS's zone, inline-signing) must re-sign the new
-  `_signal` KEY RRset; confirm the internal publish path does this for a
+  `_signal` RRset; confirm the internal publish path does this for a
   non-apex owner.
 - Out-of-bailiwick NS whose zone we do not serve: skip + (rate-limited)
   warn, so the operator sees that some NS signal records could not be
   produced locally.
+- `pubcds` specifics: republish CDNSKEY alongside CDS only if the customer
+  apex actually carries it (RFC 7344 allows either or both); never
+  synthesize one from the other.
 
 ### 11.8 Estimate
 
-Small-to-medium: ~120–200 source + ~120–200 test LOC. No HIGH-risk step
-(it only ADDS a signaling RRset to a zone we already author; worst case is
-a spurious `_signal` KEY, which a validator simply ignores if it doesn't
-match). The producer (this) plus the existing consumer
-(`LookupChildKeyAtSignal`) closes the RFC-9615-style loop for SIG(0) KEYs.
+Small-to-medium: ~150–230 source + ~150–230 test LOC for BOTH flags (the
+second flag is mostly a table row plus a second source-RRset path and its
+tests, not a second implementation). No HIGH-risk step (it only ADDS a
+signaling RRset to a zone we already author; worst case is a spurious
+`_signal` record, which a validator simply ignores if it doesn't match).
+The producer (this) plus the existing consumers (`queryCDSAtSignalingNames`
+for CDS, `LookupChildKeyAtSignal` for the SIG(0) KEY) closes the
+RFC-9615-style loop for both bootstrap kinds.
