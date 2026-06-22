@@ -566,8 +566,18 @@ the native child path.
   DSYNC-discovery gate itself is network — testbed-validated. The on-demand
   CLI (`proxy-key`) is U-a2 (needs a daemon API endpoint). Build + full
   `go test -race` green.
-- U-b: remove the stale replace-mode refusal; confirm shared replace works
-  on the fork (U4).
+- U-b: remove the stale replace-mode refusal (U4). STATUS: DONE. The
+  refusal in `SyncZoneDelegationViaUpdate` is replaced with the real
+  replace implementation: `CreateChildReplaceUpdate` over the
+  `DelegationSyncStatus.New{NS,A,AAAA,DS}` full-set fields (already
+  populated by the delegation analysis). The default delta path is
+  untouched, so the existing child UPDATE path is unchanged. Tests
+  (`childsync_replace_test.go`): the replace UPDATE is well-formed
+  (ClassANY deletes of NS/DS + ClassINET adds of the new members), and the
+  unsigned case (no DS) replaces NS+glue only. Build + full `go test -race`
+  green. (The actual replace UPDATE landing at a real parent is
+  testbed-validated — it is the fork's miekg/dns fix that makes it work on
+  the wire.)
 - U-c: the startup reconcile pass — run `AnalyseZoneDelegation` once on
   first load for proxy zones, send a replace UPDATE if out of sync (U4
   trigger phase 1).

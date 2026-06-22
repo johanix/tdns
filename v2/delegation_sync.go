@@ -432,11 +432,19 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 	var err error
 
 	if updateMode == UpdateModeReplace {
-		// Replace mode has an unresolved bug — refuse to proceed and make it visible.
-		err := fmt.Errorf("parent-update replace mode is currently broken and cannot be used")
-		zd.SetError(ConfigError, "parent-update replace mode is currently broken and cannot be used")
-		lgDns.Error("SyncZoneDelegationViaUpdate: replace mode disabled", "zone", zd.ZoneName)
-		return "", 0, UpdateResult{}, err
+		// Replace mode: DEL the whole RRset, then ADD the current authoritative
+		// members (NewNS / NewA / NewAAAA / NewDS, populated by the delegation
+		// analysis). Idempotent and self-correcting — it does not depend on the
+		// parent's current state. The historical "replace mode is broken" guard
+		// here was a workaround for an upstream miekg/dns bug fixed in the tdns
+		// fork (the KSK rollover engine's BuildChildWholeDSUpdate already relies
+		// on the fix in production).
+		lgDns.Info("SyncZoneDelegationViaUpdate: using replace mode", "zone", zd.ZoneName)
+		m, err = CreateChildReplaceUpdate(zd.Parent, zd.ZoneName,
+			syncstate.NewNS, syncstate.NewA, syncstate.NewAAAA, syncstate.NewDS)
+		if err != nil {
+			return "", 0, UpdateResult{}, err
+		}
 	} else {
 		// Delta mode: use adds and removes (existing behavior)
 		lgDns.Info("SyncZoneDelegationViaUpdate: using delta mode", "zone", zd.ZoneName)
