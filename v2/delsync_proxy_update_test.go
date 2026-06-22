@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -226,5 +227,20 @@ ns1.upd.example.	3600 IN A 192.0.2.1
 	}
 	if len(newDS) != 0 {
 		t.Fatalf("unsigned zone must yield no DS, got %d", len(newDS))
+	}
+}
+
+// U-c: startup reconcile with no imr (no DSYNC discovery possible) reports
+// update-unsupported and does not attempt any parent compare or send. This
+// exercises the not-ready early-return branch without the network.
+func TestProxyStartupReconcileNotReady(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := proxyUpdZoneData(t, kdb, proxyUpdBaseZone())
+	msg, err := zd.ProxyStartupReconcile(context.Background(), kdb, nil)
+	if err != nil {
+		t.Fatalf("ProxyStartupReconcile (nil imr): unexpected error: %v", err)
+	}
+	if !strings.Contains(msg, "not ready") {
+		t.Fatalf("expected a not-ready message, got %q", msg)
 	}
 }

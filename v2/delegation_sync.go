@@ -172,16 +172,17 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				}
 
 			case "PROXY-UPDATE-SETUP":
-				// delegation-sync-proxy UPDATE path: run the precondition +
-				// KEY-bootstrap state machine (§10.8) off the refresh path (it
-				// does DSYNC discovery and may generate a SIG(0) key). Sets the
-				// per-zone warning for the not-yet-operable states; a no-op for
-				// the NOTIFY proxy.
-				state, perr := zd.ProxyUpdatePreconditionCheck(ctx, kdb, imr())
+				// delegation-sync-proxy UPDATE path, first load: run the
+				// precondition + KEY-bootstrap state machine (§10.8) and, if
+				// READY, a one-time parent-vs-child reconcile (catches drift from
+				// while the agent was down, without re-sending every restart).
+				// Off the refresh path (DSYNC discovery + parent compare are
+				// network). A no-op for the NOTIFY proxy.
+				msg, perr := zd.ProxyStartupReconcile(ctx, kdb, imr())
 				if perr != nil {
-					lgDns.Error("DelegationSyncher: proxy UPDATE precondition error", "zone", ds.ZoneName, "state", state, "err", perr)
+					lgDns.Error("DelegationSyncher: proxy startup reconcile error", "zone", ds.ZoneName, "err", perr)
 				} else {
-					lgDns.Info("DelegationSyncher: proxy UPDATE precondition", "zone", ds.ZoneName, "state", state)
+					lgDns.Info("DelegationSyncher: proxy startup reconcile", "zone", ds.ZoneName, "msg", msg)
 				}
 
 			default:

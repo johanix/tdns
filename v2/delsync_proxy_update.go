@@ -237,6 +237,46 @@ func (zd *ZoneData) proxyCurrentDelegationRRs() (newNS, newA, newAAAA, newDS []d
 	return newNS, newA, newAAAA, newDS
 }
 
+// ProxyStartupReconcile runs once when a delegation-sync-proxy zone first
+// loads: it runs the §10.8 precondition state machine and, if UPDATE-proxy is
+// READY, does a one-time parent-vs-child reconcile — `AnalyseZoneDelegation`
+// (the network compare) and, only when out of sync, a proxied UPDATE. This
+// catches delegation drift that accumulated while the agent was down WITHOUT
+// re-sending on every restart (the sync check gates the send even though
+// replace-form would otherwise be harmless to re-send). Steady-state changes
+// after this are handled by the PreRefresh diff + PROXY-SYNC dispatch (U-e),
+// which need no parent round-trip.
+func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB, imr *Imr) (string, error) {
+	state, err := zd.ProxyUpdatePreconditionCheck(ctx, kdb, imr)
+	if err != nil {
+		return "", err
+	}
+	if state != ProxyUpdateReady {
+		// Not operable via UPDATE (yet). Nothing to reconcile here; the NOTIFY
+		// path and the per-zone warning cover this.
+		return fmt.Sprintf("startup reconcile: UPDATE proxy not ready (%s)", state), nil
+	}
+	if zd.Parent == "" || zd.Parent == "." {
+		if p, perr := imr.ParentZone(zd.ZoneName); perr == nil {
+			zd.Parent = p
+		}
+	}
+	dss, aerr := zd.AnalyseZoneDelegation(imr)
+	if aerr != nil {
+		return "", fmt.Errorf("ProxyStartupReconcile: AnalyseZoneDelegation(%s): %w", zd.ZoneName, aerr)
+	}
+	if dss.InSync {
+		lgDns.Info("delegation-sync-proxy: startup reconcile — parent already in sync", "zone", zd.ZoneName)
+		return "startup reconcile: parent already in sync; nothing sent", nil
+	}
+	lgDns.Info("delegation-sync-proxy: startup reconcile — parent out of sync, sending UPDATE", "zone", zd.ZoneName)
+	msg, _, uerr := zd.ProxyUpdateParent(ctx, kdb, imr)
+	if uerr != nil {
+		return "", fmt.Errorf("ProxyStartupReconcile: %w", uerr)
+	}
+	return "startup reconcile: " + msg, nil
+}
+
 // ProxyDelegationSync is the steady-state dispatcher: on a detected change it
 // picks the scheme the parent advertises and forwards accordingly — a DNS
 // UPDATE (carrying the delegation records) when the parent advertises UPDATE, or

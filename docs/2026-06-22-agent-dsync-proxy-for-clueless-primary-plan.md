@@ -584,9 +584,16 @@ the native child path.
   green. (The actual replace UPDATE landing at a real parent is
   testbed-validated — it is the fork's miekg/dns fix that makes it work on
   the wire.)
-- U-c: the startup reconcile pass — run `AnalyseZoneDelegation` once on
-  first load for proxy zones, send a replace UPDATE if out of sync (U4
-  trigger phase 1).
+- U-c: the startup reconcile pass. STATUS: DONE. `ProxyStartupReconcile`
+  (`delsync_proxy_update.go`), called once on first load from the
+  `PROXY-UPDATE-SETUP` handler: runs the §10.8 precondition and, if READY,
+  does a one-time parent compare (`AnalyseZoneDelegation`) and a proxied
+  UPDATE ONLY when out of sync — so downtime drift is fixed without
+  re-sending on every restart (the sync check gates the send even though
+  replace-form would be harmless to re-send). Steady-state changes after
+  this go through the U-e PreRefresh diff (no parent round-trip). Test: the
+  not-ready early return (network-free). The READY reconcile path is
+  network/testbed-validated. Build + full `go test -race` green.
 - U-d: the UPDATE action. STATUS: DONE. `ProxyUpdateParent`
   (`delsync_proxy_update.go`): re-checks the §10.8 precondition (sends only
   in READY), resolves the parent UPDATE target, builds the UPDATE in the
