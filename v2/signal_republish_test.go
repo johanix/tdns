@@ -17,15 +17,7 @@ func init() {
 	_ = core.RegisterHsyncparamRR()
 }
 
-// mustRR parses an RR string or fails the test.
-func mustRR(t *testing.T, s string) dns.RR {
-	t.Helper()
-	rr, err := dns.NewRR(s)
-	if err != nil {
-		t.Fatalf("dns.NewRR(%q): %v", s, err)
-	}
-	return rr
-}
+// mustRR is shared with childsync_replace_test.go (same package).
 
 // newMapZone builds a ready MapZone with the given owners pre-populated. Each
 // entry in owners maps an owner name to its RRs (grouped into RRsets by type).
