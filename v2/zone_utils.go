@@ -796,7 +796,7 @@ func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegation
 }
 
 func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
-	wantsSync := zd.Options[OptDelSyncParent] || zd.Options[OptDelSyncChild]
+	wantsSync := zd.Options[OptDelSyncParent] || zd.Options[OptDelSyncChild] || zd.Options[OptDelSyncProxy]
 
 	// Dynamic parentsync=agent detection removed — handled by tdns-mp
 	// MPPostRefresh (hsync_utils.go) and OnFirstLoad (start_agent.go).
@@ -878,6 +878,34 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 				// CSYNC and CDS are published proactively when the zone is modified
 				// (via zone_updater.go and delegation_sync.go).
 			default:
+			}
+		}
+	}
+
+	// delegation-sync-proxy: a tdns-agent acting as a SECONDARY for a zone
+	// whose primary is DSYNC-unaware (BIND/Knot). The agent inspects incoming
+	// transfers for CDS/CSYNC (and NS/glue/DNSKEY) changes and forwards
+	// NOTIFY(CDS/CSYNC) — and, when the parent advertises UPDATE and the agent's
+	// KEY is published at the apex, DNS UPDATEs — to the parent on the primary's
+	// behalf. Valid only for agent + secondary zones; reject other combinations
+	// so a misconfiguration is loud rather than silently inert.
+	if zd.Options[OptDelSyncProxy] {
+		if Globals.App.Type != AppTypeAgent || zd.ZoneType != Secondary {
+			lg.Error("SetupZoneSync: delegation-sync-proxy is only valid for a tdns-agent secondary zone",
+				"zone", zd.ZoneName, "app", Globals.App.Type, "zonetype", zd.ZoneType)
+			zd.SetError(ConfigError, "delegation-sync-proxy is only valid for an agent secondary zone")
+			return fmt.Errorf("delegation-sync-proxy on zone %s requires a tdns-agent secondary zone", zd.ZoneName)
+		}
+		lg.Info("SetupZoneSync: delegation-sync-proxy enabled (agent secondary)", "zone", zd.ZoneName)
+		// Run the UPDATE-proxy precondition check (§10.8) off the refresh path,
+		// via the DelegationSyncher: it does DSYNC discovery (network) and may
+		// generate a SIG(0) key, so it must not run inline here. The check is a
+		// no-op for the NOTIFY proxy, which needs no key.
+		if delsyncq != nil {
+			delsyncq <- DelegationSyncRequest{
+				Command:  "PROXY-UPDATE-SETUP",
+				ZoneName: zd.ZoneName,
+				ZoneData: zd,
 			}
 		}
 	}

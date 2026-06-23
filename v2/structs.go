@@ -166,6 +166,13 @@ type ZoneData struct {
 	// They receive zd which now serves the new data. Used for: queue sends (SyncQ,
 	// DelegationSyncQ) that need the live zone pointer, and any post-flip notifications.
 	OnZonePostRefresh []func(zd *ZoneData)
+
+	// ProxyRefreshAnalysis carries the delegation-sync-proxy change-detection
+	// result from the PreRefresh hook (which sees old+new zone data) to the
+	// PostRefresh hook (which acts). nil when no proxy analysis is pending.
+	// Set/consumed only on the OnZonePreRefresh/PostRefresh path for zones with
+	// OptDelSyncProxy; protected by zd.mu.
+	ProxyRefreshAnalysis *ProxyDelegationAnalysis
 }
 
 // Lock and Unlock expose the mutex for code that moves to
@@ -606,6 +613,9 @@ type DelegationSyncRequest struct {
 	NewDnskeys   *core.RRset
 	MsignerGroup *core.RRset
 	Response     chan DelegationSyncStatus // used for API-based requests
+	// ProxyAnalysis is set for the PROXY-NOTIFY command: the changed-dimension
+	// set the proxy NOTIFY action keys on (delegation-sync-proxy).
+	ProxyAnalysis *ProxyDelegationAnalysis
 }
 
 type BumperData struct {

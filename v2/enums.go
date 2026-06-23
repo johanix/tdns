@@ -44,7 +44,8 @@ const (
 	OptCatalogZone
 	OptCatalogMemberAutoCreate
 	OptCatalogMemberAutoDelete
-	OptMultiSigner // Dynamically set by signer when HSYNC shows multiple signers
+	OptMultiSigner  // Dynamically set by signer when HSYNC shows multiple signers
+	OptDelSyncProxy // agent secondary: proxy CDS/CSYNC NOTIFYs upstream for a DSYNC-unaware primary
 	optZoneOptionTdnsSentinel
 )
 
@@ -76,6 +77,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptCatalogMemberAutoCreate: "catalog-member-auto-create",
 	OptCatalogMemberAutoDelete: "catalog-member-auto-delete",
 	OptMultiSigner:             "multi-signer",
+	OptDelSyncProxy:            "delegation-sync-proxy",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -99,6 +101,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"catalog-member-auto-create": OptCatalogMemberAutoCreate,
 	"catalog-member-auto-delete": OptCatalogMemberAutoDelete,
 	"multi-signer":               OptMultiSigner,
+	"delegation-sync-proxy":      OptDelSyncProxy,
 }
 
 type ImrOption uint8
@@ -251,6 +254,13 @@ const (
 	// visibility signal, not a hardfail. Auto-rollover progression
 	// gates here because no scheme means no DS push is possible.
 	RolloverParentBlocker
+	// DelegationSyncWarning: a delegation-sync function is degraded but the
+	// zone is otherwise fine. Used by the delegation-sync-proxy UPDATE path
+	// when it is not operable (parent advertises no UPDATE, a foreign KEY
+	// occupies the apex, or the agent's KEY is not yet published at the
+	// primary). Visibility-only — the zone keeps serving and the NOTIFY proxy
+	// may still apply.
+	DelegationSyncWarning
 )
 
 var ErrorTypeToString = map[ErrorType]string{
@@ -262,6 +272,7 @@ var ErrorTypeToString = map[ErrorType]string{
 	RolloverPolicyViolation: "rollover-policy",
 	RolloverPolicyWarning:   "rollover-policy-warning",
 	RolloverParentBlocker:   "rollover-parent-blocker",
+	DelegationSyncWarning:   "delegation-sync-warning",
 }
 
 // errorTypeReportOrder defines the deterministic order in which the
@@ -278,6 +289,7 @@ var errorTypeReportOrder = []ErrorType{
 	RolloverParentBlocker,
 	DnssecPolicyWarning,
 	RolloverPolicyWarning,
+	DelegationSyncWarning,
 }
 
 // rolloverGatingErrors are categories that the auto-rollover CLI
