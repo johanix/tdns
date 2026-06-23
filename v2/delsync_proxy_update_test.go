@@ -69,8 +69,14 @@ func TestProxyEnsureSig0KeyGeneratesAndIsIdempotent(t *testing.T) {
 	if err := zd.proxyEnsureSig0Key(kdb); err != nil {
 		t.Fatalf("second proxyEnsureSig0Key: %v", err)
 	}
-	sak, _ = kdb.GetSig0Keys(proxyUpdZone, Sig0StateActive)
-	if sak == nil || len(sak.Keys) != 1 {
+	sak, err := kdb.GetSig0Keys(proxyUpdZone, Sig0StateActive)
+	if err != nil {
+		t.Fatalf("GetSig0Keys after second ensure: %v", err)
+	}
+	if sak == nil {
+		t.Fatalf("after second ensure: still want exactly 1 key (idempotent), got nil")
+	}
+	if len(sak.Keys) != 1 {
 		t.Fatalf("after second ensure: still want exactly 1 key (idempotent), got %d", len(sak.Keys))
 	}
 }
