@@ -11,6 +11,22 @@ templates:
      dnssecpolicy:    none
      multisigner:     mstest
 
+   # delegation-sync-proxy: run tdns-agent as a SECONDARY for a zone whose
+   # PRIMARY is DSYNC-unaware (BIND9, Knot, NSD). The agent inspects each
+   # incoming transfer for changes to the zone's CDS / CSYNC / NS+glue / DNSKEY
+   # and forwards NOTIFY(CDS) / NOTIFY(CSYNC) to the parent's advertised DSYNC
+   # NOTIFY receiver on the primary's behalf. The primary stays unchanged.
+   #
+   # Requirements: the PARENT advertises a DSYNC RRset with a NOTIFY scheme for
+   # CDS/CSYNC (NOTIFY-only for now; an UPDATE-only parent is a no-op). The
+   # PRIMARY publishes CDS/CDNSKEY and/or CSYNC when it wants the parent updated
+   # (its own tooling). Valid ONLY on an agent secondary zone; no SIG(0) key is
+   # needed (a NOTIFY carries no payload the agent must sign).
+   - name:            dsync-proxy
+     store:           map
+     type:            secondary
+     options:         [ delegation-sync-proxy ]
+
 zones:
    - name:            test.net
      zonefile:        /etc/tdns/zones/test.net
@@ -21,6 +37,14 @@ zones:
      zonefile:        /etc/tdns/zones/johani.org
      options:	      [ online-signing ]
      template:        secondary
+
+   # Example: proxy delegation-sync for a zone served by a DSYNC-unaware
+   # primary. The agent transfers child.example. from that primary (here a
+   # BIND/Knot at 192.0.2.10:53) and forwards NOTIFY(CDS/CSYNC) to the parent
+   # whenever the primary changes the zone's CDS/CSYNC/NS/glue/DNSKEY.
+   - name:            child.example.
+     primary:         192.0.2.10:53
+     template:        dsync-proxy
 
    # Commented zones kept for reference
    # child.test.net:

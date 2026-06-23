@@ -113,10 +113,10 @@ func (conf *Config) ParseAuthOptions() {
 				val = UpdateModeDelta
 			}
 			switch val {
-			case UpdateModeDelta:
+			case UpdateModeDelta, UpdateModeReplace:
 				clean[authOpt] = val
 			default:
-				lg.Warn("Auth option has invalid value, defaulting", "option", key, "value", optval, "allowed", UpdateModeDelta, "default", UpdateModeDelta)
+				lg.Warn("Auth option has invalid value, defaulting", "option", key, "value", optval, "allowed", UpdateModeDelta+"|"+UpdateModeReplace, "default", UpdateModeDelta)
 				clean[authOpt] = UpdateModeDelta
 			}
 		case AuthOptMinimalResponses:
@@ -181,6 +181,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 		switch opt {
 		case OptDelSyncParent,
 			OptDelSyncChild,
+			OptDelSyncProxy,
 			OptAllowUpdates,
 			OptAllowChildUpdates,
 			OptAllowEdits,

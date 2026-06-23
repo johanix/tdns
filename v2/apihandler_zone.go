@@ -103,6 +103,13 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				resp.ErrorMsg = err.Error()
 			}
 
+		case "proxy-key":
+			resp.Msg, err = zd.ProxyKeyStatus(context.Background(), kdb, Globals.ImrEngine)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+
 		case "generate-nsec":
 			err := zd.GenerateNsecChain(kdb)
 			if err != nil {

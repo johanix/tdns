@@ -755,6 +755,14 @@ func (s *HSYNCPARAMFlag) copy() HSYNCPARAMKeyValue {
 	return &HSYNCPARAMFlag{code: s.code}
 }
 
+// NewHsyncparamPubkeyFlag returns an HSYNCPARAM pubkey flag value. Exported so
+// callers outside this package (e.g. the delegation-sync-proxy bootstrap
+// instruction) can construct a pubkey flag without reaching the unexported
+// field.
+func NewHsyncparamPubkeyFlag() HSYNCPARAMKeyValue {
+	return &HSYNCPARAMFlag{code: HSYNCPARAM_PUBKEY}
+}
+
 // --- HSYNCPARAMLocal: catch-all for unknown keys ---
 
 type HSYNCPARAMLocal struct {
