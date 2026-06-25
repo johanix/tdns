@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -262,12 +263,18 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return fmt.Errorf("error processing config: %v", err)
 	}
 
-	// Configure mapstructure decoder to respect yaml tags
+	// Configure mapstructure decoder to respect yaml tags. The decode hook
+	// converts a bare-string primary:/notify: entry (the pre-migration shape)
+	// into a PeerConf legacy marker instead of failing the whole-file decode —
+	// per-zone validation then quarantines just that zone to ERROR. A custom
+	// yaml.Unmarshaler does NOT work here: config decodes yaml -> map ->
+	// mapstructure, and mapstructure ignores the yaml.Unmarshaler interface.
 	var md mapstructure.Metadata
 	decoderConfig := &mapstructure.DecoderConfig{
-		TagName:  "yaml",
-		Result:   conf,
-		Metadata: &md,
+		TagName:    "yaml",
+		Result:     conf,
+		Metadata:   &md,
+		DecodeHook: stringToPeerConfHook(),
 	}
 	decoder, err := mapstructure.NewDecoder(decoderConfig)
 	if err != nil {
@@ -283,12 +290,10 @@ func (conf *Config) ParseConfig(reload bool) error {
 		}
 	}
 
-	// Decode the entire config at once
+	// Decode the entire config at once. A bare-string primary:/notify: entry no
+	// longer aborts the decode — stringToPeerConfHook turns it into a PeerConf
+	// legacy marker that per-zone validation quarantines (see DecoderConfig above).
 	if err := decoder.Decode(configMap); err != nil {
-		errMsg := err.Error()
-		if strings.Contains(errMsg, "'Primary'") && strings.Contains(errMsg, "[]interface") {
-			return fmt.Errorf("error decoding config: %v\nHint: 'primary' must be a single address string (e.g., primary: \"10.4.0.4:8055\"), not a YAML list", err)
-		}
 		return fmt.Errorf("error decoding config: %v", err)
 	}
 
@@ -633,17 +638,41 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			_ = append([]string{}, zname) // primary_zones was unused
 		case "secondary":
 			zonetype = Secondary
-			if zconf.Primary == "" {
+			// Legacy bare-string primary: (pre-migration shape) — the decode
+			// hook recorded it as a Legacy marker; quarantine just this zone.
+			if zconf.Primary.Legacy != "" {
+				lgConfig.Error("secondary zone uses legacy bare-string primary, zone in error state", "zone", zname, "primary", zconf.Primary.Legacy)
+				zd.SetError(ConfigError, "primary now requires {addr, key} (got bare string %q)", zconf.Primary.Legacy)
+				broken_zones = append(broken_zones, zname)
+				continue
+			}
+			if zconf.Primary.Addr == "" {
 				lgConfig.Error("secondary zone has no primary configured, zone in error state", "zone", zname)
 				zd.SetError(ConfigError, "secondary zone but has no primary (upstream) configured")
 				broken_zones = append(broken_zones, zname)
 				continue
 			}
+			// Key is mandatory and explicit — no default to NOKEY.
+			if zconf.Primary.Key == "" {
+				lgConfig.Error("secondary zone primary has no key, zone in error state", "zone", zname)
+				zd.SetError(ConfigError, "primary requires an explicit key (use key: NOKEY for no TSIG)")
+				broken_zones = append(broken_zones, zname)
+				continue
+			}
+			// Improvement 1 phase: NOKEY is the only resolvable key name. Any
+			// other name is an unknown-key error until the keys: block exists
+			// (Improvement 2). NOKEY comparison is case-sensitive.
+			if zconf.Primary.Key != NOKEY {
+				lgConfig.Error("secondary zone primary references unknown key, zone in error state", "zone", zname, "key", zconf.Primary.Key)
+				zd.SetError(ConfigError, "unknown primary key %q (only NOKEY is valid until TSIG keys are configured)", zconf.Primary.Key)
+				broken_zones = append(broken_zones, zname)
+				continue
+			}
 
 			// Normalize primary address to include port if not specified
-			origPrimary := zconf.Primary
-			zconf.Primary = NormalizeAddress(zconf.Primary)
-			if origPrimary != zconf.Primary {
+			origPrimary := zconf.Primary.Addr
+			zconf.Primary.Addr = NormalizeAddress(zconf.Primary.Addr)
+			if origPrimary != zconf.Primary.Addr {
 				lgConfig.Warn("primary has no port specified, using default :53", "zone", zname, "primary", origPrimary)
 			}
 
@@ -1021,7 +1050,7 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 		// fmt.Printf("ExpandTemplate: zone %s now uses the \"%s\" storage alternative.\n", zconf.Name, tmpl.Store)
 		zconf.Store = tmpl.Store
 	}
-	if tmpl.Primary != "" {
+	if tmpl.Primary.Addr != "" {
 		zconf.Primary = tmpl.Primary
 	}
 	if len(tmpl.Zonefile) > 0 {
@@ -1420,6 +1449,21 @@ func NormalizeAddress(addr string) string {
 	return addr
 }
 
+// stringToPeerConfHook returns a mapstructure decode hook that converts a
+// bare-string value (the legacy primary:/notify: shape) into a PeerConf carrying
+// a Legacy marker, instead of letting mapstructure fail the whole-file decode on
+// the string->struct type mismatch. mapstructure applies the hook element-wise
+// for []PeerConf, so a bare-string entry inside a notify: list is handled too.
+// Per-zone validation later sees a non-empty Legacy and quarantines that zone.
+func stringToPeerConfHook() mapstructure.DecodeHookFunc {
+	return func(from reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
+		if from.Kind() != reflect.String || to != reflect.TypeOf(PeerConf{}) {
+			return data, nil
+		}
+		return PeerConf{Legacy: data.(string)}, nil
+	}
+}
+
 // NormalizeAddresses ensures all addresses have a port number.
 // If an address doesn't have a port, ":53" is appended.
 // This allows users to specify addresses as either "IP" or "IP:port" in config.
@@ -1433,6 +1477,32 @@ func NormalizeAddresses(addresses []string) []string {
 		normalized = append(normalized, NormalizeAddress(addr))
 	}
 	return normalized
+}
+
+// normalizePeerAddrs returns a copy of peers with each .Addr run through
+// NormalizeAddress (ensuring a port). The Key and Legacy fields are preserved.
+func normalizePeerAddrs(peers []PeerConf) []PeerConf {
+	if len(peers) == 0 {
+		return peers
+	}
+	normalized := make([]PeerConf, 0, len(peers))
+	for _, p := range peers {
+		p.Addr = NormalizeAddress(p.Addr)
+		normalized = append(normalized, p)
+	}
+	return normalized
+}
+
+// peerAddrs extracts the .Addr value from each PeerConf into a []string.
+func peerAddrs(peers []PeerConf) []string {
+	if len(peers) == 0 {
+		return nil
+	}
+	addrs := make([]string, 0, len(peers))
+	for _, p := range peers {
+		addrs = append(addrs, p.Addr)
+	}
+	return addrs
 }
 
 // setDynamicZonesDefaults sets default values for DynamicZonesConf if not configured

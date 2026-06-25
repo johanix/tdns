@@ -423,7 +423,7 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 		zr := ZoneRefresher{
 			Name:      zoneName,
 			ZoneType:  Secondary,
-			Primary:   NormalizeAddress(configGroupConfig.Upstream),
+			Primary:   PeerConf{Addr: NormalizeAddress(configGroupConfig.Upstream), Key: NOKEY},
 			ZoneStore: zd.ZoneStore,
 			Options:   zd.Options,
 		}

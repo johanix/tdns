@@ -228,9 +228,8 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 					RefreshCount:           zd.RefreshCount,
 					SourceCatalog:          zd.SourceCatalog,
 					Zonefile:               zd.Zonefile,
-					Primary:                primary,
-					Notify:                 zd.Downstreams, // Notify addresses (displayed by CLI)
-					Downstreams:            zd.Downstreams,
+					Primary:                PeerConf{Addr: primary, Key: NOKEY},
+					Notify:                 zd.Notify, // Notify addresses (displayed by CLI)
 					EffectiveDnssecPolicy:  zd.DnssecPolicyName,
 					DnssecPolicyOverridden: overridden,
 					DnssecPolicyConfigBase: configPolicy,

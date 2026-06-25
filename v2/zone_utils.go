@@ -547,21 +547,21 @@ func (zd *ZoneData) NotifyDownstreams() error {
 		lg.Error("NotifyDownstreams: zonedata is nil")
 		return fmt.Errorf("zonedata is nil")
 	}
-	for _, d := range zd.Downstreams {
+	for _, d := range zd.Notify {
 
-		// log.Printf("%s: Notifying downstream server %s about new SOA serial", zd.ZoneName, d)
+		// log.Printf("%s: Notifying downstream server %s about new SOA serial", zd.ZoneName, d.Addr)
 
 		m := new(dns.Msg)
 		m.SetNotify(zd.ZoneName)
-		r, err := dns.Exchange(m, d)
+		r, err := dns.Exchange(m, d.Addr)
 		if err != nil {
 			// well, we tried
-			lg.Error("downstream NOTIFY failed", "downstream", d, "zone", zd.ZoneName, "err", err)
+			lg.Error("downstream NOTIFY failed", "downstream", d.Addr, "zone", zd.ZoneName, "err", err)
 			continue
 		}
 		if r.Opcode != dns.OpcodeNotify {
 			// well, we tried
-			lg.Error("unexpected opcode from downstream on NOTIFY", "downstream", d, "zone", zd.ZoneName, "opcode", dns.OpcodeToString[r.Opcode])
+			lg.Error("unexpected opcode from downstream on NOTIFY", "downstream", d.Addr, "zone", zd.ZoneName, "opcode", dns.OpcodeToString[r.Opcode])
 		}
 	}
 	return nil

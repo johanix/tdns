@@ -32,7 +32,7 @@ type RefreshCounter struct {
 	CurRefresh     uint32
 	IncomingSerial uint32
 	Upstream       string
-	Downstreams    []string
+	Notify         []PeerConf
 	Zonefile       string
 }
 
@@ -53,11 +53,11 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		lgEngine.Error("FindSoaRefresh failed", "zone", zone, "error", err)
 	}
 	refreshCounters.Set(zone, &RefreshCounter{
-		Name:        zone,
-		SOARefresh:  refresh,
-		CurRefresh:  refresh,
-		Upstream:    NormalizeAddress(zr.Primary),
-		Downstreams: NormalizeAddresses(zr.Notify),
+		Name:       zone,
+		SOARefresh: refresh,
+		CurRefresh: refresh,
+		Upstream:   NormalizeAddress(zr.Primary.Addr),
+		Notify:     normalizePeerAddrs(zr.Notify),
 	})
 
 	// Check if this is a catalog zone and parse it
@@ -232,8 +232,8 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 
 							zd.mu.Lock()
 							zd.ZoneStore = zr.ZoneStore
-							zd.Upstream = NormalizeAddress(zr.Primary)
-							zd.Downstreams = NormalizeAddresses(zr.Notify)
+							zd.Upstream = NormalizeAddress(zr.Primary.Addr)
+							zd.Notify = normalizePeerAddrs(zr.Notify)
 							zd.Zonefile = zr.Zonefile
 							zd.ZoneType = zr.ZoneType
 							zd.Options = zr.Options
@@ -300,11 +300,11 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						zd.mu.Lock()
 						// Update notify addresses only if provided
 						if zr.Notify != nil {
-							zd.Downstreams = NormalizeAddresses(zr.Notify)
+							zd.Notify = normalizePeerAddrs(zr.Notify)
 						}
 						// Update upstream only if provided
-						if zr.Primary != "" {
-							zd.Upstream = NormalizeAddress(zr.Primary)
+						if zr.Primary.Addr != "" {
+							zd.Upstream = NormalizeAddress(zr.Primary.Addr)
 						}
 						// Update zonefile only if provided
 						if zr.Zonefile != "" {
@@ -378,7 +378,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							UpdateSigValidityFloor(zd, zd.DnssecPolicy, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm)
 							triggerResign(conf, zone)
 						}
-						lgEngine.Debug("updated configuration for zone", "zone", zone, "notify", zd.Downstreams, "upstream", zd.Upstream, "zonefile", zd.Zonefile, "store", ZoneStoreToString[zd.ZoneStore])
+						lgEngine.Debug("updated configuration for zone", "zone", zone, "notify", zd.Notify, "upstream", zd.Upstream, "zonefile", zd.Zonefile, "store", ZoneStoreToString[zd.ZoneStore])
 
 						// Update or create refreshCounter with current config values
 						var refresh uint32 = 300 // 5 minutes, must have something even if we don't get SOA
@@ -392,20 +392,20 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 						if rc, haveParams := refreshCounters.Get(zone); haveParams {
 							// Update existing refreshCounter with new config values
-							rc.Upstream = NormalizeAddress(zr.Primary)
-							rc.Downstreams = NormalizeAddresses(zr.Notify)
+							rc.Upstream = NormalizeAddress(zr.Primary.Addr)
+							rc.Notify = normalizePeerAddrs(zr.Notify)
 							rc.Zonefile = zr.Zonefile
 							rc.SOARefresh = refresh
 							rc.CurRefresh = refresh // immediate refresh handled by goroutine below
 						} else {
 							// Create new refreshCounter
 							refreshCounters.Set(zone, &RefreshCounter{
-								Name:        zone,
-								SOARefresh:  refresh,
-								CurRefresh:  refresh, // immediate refresh handled by goroutine below
-								Upstream:    NormalizeAddress(zr.Primary),
-								Downstreams: NormalizeAddresses(zr.Notify),
-								Zonefile:    zr.Zonefile,
+								Name:       zone,
+								SOARefresh: refresh,
+								CurRefresh: refresh, // immediate refresh handled by goroutine below
+								Upstream:   NormalizeAddress(zr.Primary.Addr),
+								Notify:     normalizePeerAddrs(zr.Notify),
+								Zonefile:   zr.Zonefile,
 							})
 						}
 						// XXX: Should do refresh in parallel
@@ -470,13 +470,13 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								// Send NOTIFY to downstreams after successful refresh (updated OR forced)
 								// Force typically means "config reload-zones", so we want to notify even if unchanged
 								if updated || force {
-									if len(zd.Downstreams) > 0 {
-										lgEngine.Info("zone refreshed, sending NOTIFY to downstreams", "zone", zd.ZoneName, "updated", updated, "forced", force, "downstreams", len(zd.Downstreams))
+									if len(zd.Notify) > 0 {
+										lgEngine.Info("zone refreshed, sending NOTIFY to downstreams", "zone", zd.ZoneName, "updated", updated, "forced", force, "downstreams", len(zd.Notify))
 										conf.Internal.NotifyQ <- NotifyRequest{
 											ZoneName: zd.ZoneName,
 											ZoneData: zd,
 											RRtype:   dns.TypeSOA,
-											Targets:  zd.Downstreams,
+											Targets:  peerAddrs(zd.Notify),
 											Urgent:   false,
 										}
 									}
@@ -551,8 +551,8 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						ZoneName:         zone,
 						ZoneStore:        zr.ZoneStore,
 						Logger:           log.Default(),
-						Upstream:         NormalizeAddress(zr.Primary),
-						Downstreams:      NormalizeAddresses(zr.Notify),
+						Upstream:         NormalizeAddress(zr.Primary.Addr),
+						Notify:           normalizePeerAddrs(zr.Notify),
 						Zonefile:         zr.Zonefile,
 						ZoneType:         zr.ZoneType,
 						Options:          zr.Options,

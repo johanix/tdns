@@ -624,15 +624,15 @@ func handleCatalogNotifyAdd(catalogZoneName, address string, resp *CatalogRespon
 
 	// Check if address already exists and add if not (protected by mutex)
 	zd.mu.Lock()
-	for _, existingAddr := range zd.Downstreams {
-		if existingAddr == address {
+	for _, p := range zd.Notify {
+		if p.Addr == address {
 			zd.mu.Unlock()
 			return fmt.Errorf("notify address %s already exists for catalog zone %s", address, catalogZoneName)
 		}
 	}
 
 	// Add the address
-	zd.Downstreams = append(zd.Downstreams, address)
+	zd.Notify = append(zd.Notify, PeerConf{Addr: address, Key: NOKEY})
 	zd.mu.Unlock()
 
 	// Update dynamic config file if persistence is enabled
@@ -673,13 +673,13 @@ func handleCatalogNotifyRemove(catalogZoneName, address string, resp *CatalogRes
 	// Find and remove the address (protected by mutex)
 	zd.mu.Lock()
 	found := false
-	newDownstreams := make([]string, 0, len(zd.Downstreams))
-	for _, existingAddr := range zd.Downstreams {
-		if existingAddr == address {
+	newNotify := make([]PeerConf, 0, len(zd.Notify))
+	for _, p := range zd.Notify {
+		if p.Addr == address {
 			found = true
 			continue // Skip this address
 		}
-		newDownstreams = append(newDownstreams, existingAddr)
+		newNotify = append(newNotify, p)
 	}
 
 	if !found {
@@ -687,7 +687,7 @@ func handleCatalogNotifyRemove(catalogZoneName, address string, resp *CatalogRes
 		return fmt.Errorf("notify address %s not found for catalog zone %s", address, catalogZoneName)
 	}
 
-	zd.Downstreams = newDownstreams
+	zd.Notify = newNotify
 	zd.mu.Unlock()
 
 	// Update dynamic config file if persistence is enabled
@@ -724,8 +724,7 @@ func handleCatalogNotifyList(catalogZoneName string, resp *CatalogResponse) erro
 
 	// Return a copy of the notify addresses (protected by mutex)
 	zd.mu.Lock()
-	resp.NotifyAddresses = make([]string, len(zd.Downstreams))
-	copy(resp.NotifyAddresses, zd.Downstreams)
+	resp.NotifyAddresses = peerAddrs(zd.Notify)
 	zd.mu.Unlock()
 
 	return nil

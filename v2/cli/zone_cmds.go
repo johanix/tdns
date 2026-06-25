@@ -10,12 +10,23 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strings"
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
 )
+
+// peerConfAddrsString joins the .Addr value of each PeerConf with commas,
+// for compact display of notify peers in the zone listing.
+func peerConfAddrsString(peers []tdns.PeerConf) string {
+	addrs := make([]string, 0, len(peers))
+	for _, p := range peers {
+		addrs = append(addrs, p.Addr)
+	}
+	return strings.Join(addrs, ",")
+}
 
 // NewZoneCmd returns a fresh "zone" command tree bound to the given
 // role. Additional subcommands may be attached via extras — used by
@@ -414,10 +425,10 @@ func ListZones(cr tdns.ZoneResponse) {
 		sort.Strings(opts)
 		line := fmt.Sprintf("%s|%s|%s|", zname, zconf.Type, zconf.Store)
 		if showprimary {
-			line += fmt.Sprintf("%s|", zconf.Primary)
+			line += fmt.Sprintf("%s|", zconf.Primary.Addr)
 		}
 		if shownotify {
-			line += fmt.Sprintf("%s|", zconf.Notify)
+			line += fmt.Sprintf("%s|", peerConfAddrsString(zconf.Notify))
 		}
 		if showfile {
 			line += fmt.Sprintf("%s|", zconf.Zonefile)
@@ -469,7 +480,7 @@ func VerboseListZone(cr tdns.ZoneResponse) {
 			line += fmt.Sprintf("\tDNSSEC policy: %s\n", pol)
 		}
 
-		line += fmt.Sprintf("\tPrimary: %s\tNotify: %s\tFile: %s\n", zconf.Primary, zconf.Notify, zconf.Zonefile)
+		line += fmt.Sprintf("\tPrimary: %s\tNotify: %s\tFile: %s\n", zconf.Primary.Addr, peerConfAddrsString(zconf.Notify), zconf.Zonefile)
 
 		// Check for catalog zone flags
 		isCatalogZone := false

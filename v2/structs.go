@@ -107,8 +107,8 @@ type ZoneData struct {
 	Verbose           bool
 	Debug             bool
 	IxfrChain         []Ixfr
-	Upstream          string   // primary from where zone is xfrred
-	Downstreams       []string // secondaries that we notify
+	Upstream          string     // primary address from where zone is xfrred (bare addr; key on TsigKeyName)
+	Notify            []PeerConf // downstream secondaries that we notify (addr + key)
 	Zonefile          string
 	DelegationSyncQ   chan DelegationSyncRequest
 	Parent            string   // name of parentzone (if filled in)
@@ -180,15 +180,31 @@ type ZoneData struct {
 func (zd *ZoneData) Lock()   { zd.mu.Lock() }
 func (zd *ZoneData) Unlock() { zd.mu.Unlock() }
 
+// NOKEY is the built-in sentinel key name meaning "no TSIG, unauthenticated".
+// Every PeerConf carries a key name; NOKEY makes the no-TSIG choice explicit.
+// It is a reserved name: a keys.tsig[] entry named NOKEY is rejected at parse.
+const NOKEY = "NOKEY"
+
+// PeerConf is a replication peer reference: an address plus a TSIG key name.
+// Used for the upstream primary (secondary zones) and downstream notify peers
+// (primary zones). Key is mandatory and explicit; NOKEY means unauthenticated.
+// The Legacy field is set by stringToPeerConfHook when a bare-string value is
+// found in config (pre-migration shape); a non-empty Legacy quarantines the
+// zone to ERROR at validation rather than aborting the whole-file decode.
+type PeerConf struct {
+	Addr   string `yaml:"addr" mapstructure:"addr"`
+	Key    string `yaml:"key" mapstructure:"key"`
+	Legacy string `yaml:"-" mapstructure:"-"` // bare-string marker; not config
+}
+
 // ZoneConf represents the external config for a zone; it contains no zone data
 type ZoneConf struct {
 	Name              string `validate:"required"`
 	Zonefile          string
 	Type              string `validate:"required"`
 	Store             string // xfr | map | slice | reg (defaults to "map" if not specified)
-	Primary           string // upstream, for secondary zones
-	Notify            []string
-	Downstreams       []string
+	Primary           PeerConf // upstream, for secondary zones
+	Notify            []PeerConf
 	OptionsStrs       []string     `yaml:"options" mapstructure:"options"`
 	Options           []ZoneOption `yaml:"-" mapstructure:"-"` // Ignore during both yaml and mapstructure decoding
 	Frozen            bool         // true if zone is frozen; not a config param
@@ -537,8 +553,8 @@ func rrsToStrings(rrs []dns.RR) []string {
 type ZoneRefresher struct {
 	Name         string
 	ZoneType     ZoneType // primary | secondary
-	Primary      string
-	Notify       []string
+	Primary      PeerConf
+	Notify       []PeerConf
 	ZoneStore    ZoneStore // 1=xfr, 2=map, 3=slice
 	Zonefile     string
 	Options      map[ZoneOption]bool

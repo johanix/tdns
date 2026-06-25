@@ -228,7 +228,7 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			ZoneType:  zoneType,
 			Primary:   zconf.Primary,
 			ZoneStore: zoneStore,
-			Notify:    zconf.Downstreams,
+			Notify:    zconf.Notify,
 			Zonefile:  zconf.Zonefile,
 			Options:   options,
 		}
@@ -308,9 +308,8 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 		Zonefile:      zoneFilePath,
 		Type:          typeStr,
 		Store:         storeStr,
-		Primary:       primary,
-		Notify:        zd.Downstreams, // Notify addresses are stored in Downstreams
-		Downstreams:   zd.Downstreams,
+		Primary:       PeerConf{Addr: primary, Key: NOKEY},
+		Notify:        zd.Notify,
 		OptionsStrs:   optionsStrs,
 		SourceCatalog: zd.SourceCatalog,
 		// Note: We don't serialize Frozen, Dirty, Error, ErrorType, ErrorMsg, RefreshCount
