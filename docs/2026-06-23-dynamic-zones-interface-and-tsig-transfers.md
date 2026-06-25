@@ -201,7 +201,18 @@ zones.
   **TESTBED CHECKPOINT NEEDED** (the silent-failure cases — survive-restart marker reload,
   delete/modify mid-AXFR resurrection — require the running server on NetBSD VMs; not provable on this
   dev box).
-- ⏳ B2, B3, B4 — pending (API structs + handlers + CLI; surfaces the cores + `Provisioning`).
+- ✅ **B2/B3/B4 DONE** (2026-06-25) — **Improvement 1 feature-complete.** B2: `ZonePost` gains
+  `Primary PeerConf`, `Options []string`, inert `Tsig{Name,Secret,Algo}`; `ZoneConf.Provisioning`
+  display field. B3: four `APIzone` cases (`add`→`ProvisionDynamicZone` returns `accepted`+poll-hint,
+  `delete`→`RemoveDynamicZone`, `modify`→`ModifyDynamicZone`, `list-dynamic`→`getDynamicZonesFromZonesMap`
+  enriched with `Provisioning`); the four commands are exempted from the zone-must-exist pre-check;
+  `zoneProvisioning(zd)` derivation (error precedence) also wired into `list-zones`. B4: `zone add`/
+  `delete`/`modify`/`list-dynamic` CLI subcommands (flags `--zone --primary-addr --primary-key
+  --options`, inert `--tsig-*`, no `--store`; `dns.Fqdn` normalization). Tests:
+  `apihandler_zone_provisioning_test.go`. All 5 binaries build; full v2 suite green under `-race`.
+- **Remaining for Improvement 1:** testbed verification only (the §B5 silent-failure cases:
+  survive-restart marker reload; delete/modify mid-AXFR resurrection — need the running server on the
+  NetBSD VMs). Sample-config migration to structured `primary:`/`notify:` (§8 / §11) when convenient.
 
 ### B0. Primary/key syntax — the NOKEY model
 Every primary reference always carries a key name; built-in sentinel `NOKEY` means "no TSIG,
