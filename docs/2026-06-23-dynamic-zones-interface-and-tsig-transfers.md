@@ -171,7 +171,23 @@ zones.
   flips (set directly under `zd.mu`, not via `SetStatus`, to avoid re-lock). `zonestatus_test.go`
   proves set/get + orthogonality with the error registry (Ready+RefreshError → derives "error";
   clearing reverts to "ready"). `Ready`/`FirstZoneLoad` consumers untouched.
-- ⏳ B1a/b/c, B5a/b, B2, B3, B4 — pending.
+- ✅ **B1a/B1b/B1c DONE** (2026-06-25) — `DynamicZoneInput` + three shared cores in `dynamic_zones.go`:
+  `ProvisionDynamicZone` (gate on `dynamic.allowed` for API callers; reject `type:primary` + non-NOKEY
+  key + duplicate; map-only; `OptApiManagedZone` marker; `Status:Pending`; register → persist →
+  **rollback on persist failure** → fire-and-forget enqueue, returns "poll list-dynamic"),
+  `RemoveDynamicZone` (`OptApiManagedZone` guard; `generation.Add(1)` after `Zones.Remove`; drop config
+  + zone file), `ModifyDynamicZone` (guard; delete+re-add — fresh `ZoneData`, old `generation.Add(1)`;
+  `Force` re-pull). Pulled forward from B5: `ZoneData.generation atomic.Uint64` field +
+  `OptApiManagedZone` enum (the **pre-persist guard half** of B5b is still pending). **Deviation from
+  doc (approved 2026-06-25):** catalog path NOT fully re-pointed at the shared core (it carries
+  `SourceCatalog`/`OptAutomaticZone`/group options the input struct doesn't); instead the §3 map-only
+  break is applied surgically in `AutoConfigureZonesFromCatalog` (literal `ZoneStore: MapZone` + ERROR
+  log on explicit non-map store). `dynamic_zones_cores_test.go` covers gate/reject/happy/duplicate/
+  delete-guard+bump/modify-replace+bump.
+- ⏳ B5a/b, B2, B3, B4 — pending. (B5a still adds the `ShouldPersistZone` dynamic branch + marker
+  reload + reload-spare; B5b still adds the refreshengine pre-persist guard. Until B5a, API-zone
+  persistence (`AddDynamicZoneToConfig`) no-ops because `ShouldPersistZone` lacks the API branch — so
+  rollback-on-persist-fail is wired but persistence itself lands in B5a.)
 
 ### B0. Primary/key syntax — the NOKEY model
 Every primary reference always carries a key name; built-in sentinel `NOKEY` means "no TSIG,
