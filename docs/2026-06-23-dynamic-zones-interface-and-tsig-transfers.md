@@ -164,7 +164,14 @@ zones.
   `PeerConf{Addr,Key:NOKEY}`; `TemplateConf` left untouched (dead code). All 5 binaries build;
   `peerconf_decode_test.go` proves resilient decode (mixed modern + legacy → whole-file decode succeeds,
   legacy captured as markers).
-- ⏳ B6, B1a/b/c, B5a/b, B2, B3, B4 — pending.
+- ✅ **B6 DONE** (2026-06-25) — `ZoneStatus` enum (`Unknown`/`Pending`/`Loading`/`Ready`) +
+  `ZoneStatusToString`; `ZoneData.Status` field + `SetStatus`/`GetStatus` (mirrors `SetError` lock
+  discipline, no registry). Three transition sites: `Pending` at fresh-zone build (refreshengine.go),
+  `Loading` at `FetchFromUpstream`/`FetchFromFile` start, `Ready` co-located with the `Ready`-flip hard
+  flips (set directly under `zd.mu`, not via `SetStatus`, to avoid re-lock). `zonestatus_test.go`
+  proves set/get + orthogonality with the error registry (Ready+RefreshError → derives "error";
+  clearing reverts to "ready"). `Ready`/`FirstZoneLoad` consumers untouched.
+- ⏳ B1a/b/c, B5a/b, B2, B3, B4 — pending.
 
 ### B0. Primary/key syntax — the NOKEY model
 Every primary reference always carries a key name; built-in sentinel `NOKEY` means "no TSIG,
