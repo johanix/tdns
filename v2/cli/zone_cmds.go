@@ -154,7 +154,61 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 	}
 	nsec.AddCommand(nsecGenerate, nsecShow)
 
-	c.AddCommand(list, nsec, sign, resign, reload, bump, write, freeze, thaw, setPolicy, proxyKey)
+	// Dynamic-zones management (add/delete/modify/list-dynamic). No --store
+	// flag: dynamic zones are map-only. The --tsig-* flags are accepted now but
+	// inert in Improvement 1 (a non-NOKEY key is rejected server-side).
+	var dzPrimaryAddr, dzPrimaryKey, dzTsigName, dzTsigSecret, dzTsigAlgo string
+	var dzOptions []string
+
+	add := &cobra.Command{
+		Use:   "add",
+		Short: "Add a dynamic secondary zone at runtime (persists across restart)",
+		Run: func(cmd *cobra.Command, args []string) {
+			RunZoneAdd(role, dzPrimaryAddr, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigAlgo)
+		},
+	}
+	add.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add")
+	add.Flags().StringVar(&dzPrimaryAddr, "primary-addr", "", "Primary (upstream) address [host:port]")
+	add.Flags().StringVar(&dzPrimaryKey, "primary-key", tdns.NOKEY, "Primary TSIG key name (NOKEY for none)")
+	add.Flags().StringSliceVar(&dzOptions, "options", nil, "Zone options (comma-separated)")
+	add.Flags().StringVar(&dzTsigName, "tsig-name", "", "TSIG key name (inert until TSIG support lands)")
+	add.Flags().StringVar(&dzTsigSecret, "tsig-secret", "", "TSIG secret (inert until TSIG support lands)")
+	add.Flags().StringVar(&dzTsigAlgo, "tsig-algo", "", "TSIG algorithm (inert until TSIG support lands)")
+	add.MarkFlagRequired("zone")
+	add.MarkFlagRequired("primary-addr")
+
+	del := &cobra.Command{
+		Use:   "delete",
+		Short: "Delete a dynamic (API-managed) zone",
+		Run: func(cmd *cobra.Command, args []string) {
+			RunZoneDelete(role)
+		},
+	}
+	del.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to delete")
+	del.MarkFlagRequired("zone")
+
+	modify := &cobra.Command{
+		Use:   "modify",
+		Short: "Modify a dynamic (API-managed) zone's primary or options",
+		Run: func(cmd *cobra.Command, args []string) {
+			RunZoneModify(role, dzPrimaryAddr, dzPrimaryKey, dzOptions)
+		},
+	}
+	modify.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to modify")
+	modify.Flags().StringVar(&dzPrimaryAddr, "primary-addr", "", "New primary (upstream) address [host:port]")
+	modify.Flags().StringVar(&dzPrimaryKey, "primary-key", tdns.NOKEY, "New primary TSIG key name (NOKEY for none)")
+	modify.Flags().StringSliceVar(&dzOptions, "options", nil, "Zone options (comma-separated)")
+	modify.MarkFlagRequired("zone")
+
+	listDynamic := &cobra.Command{
+		Use:   "list-dynamic",
+		Short: "List dynamic zones (catalog members + API-managed) and their provisioning state",
+		Run: func(cmd *cobra.Command, args []string) {
+			RunZoneListDynamic(role)
+		},
+	}
+
+	c.AddCommand(list, nsec, sign, resign, reload, bump, write, freeze, thaw, setPolicy, proxyKey, add, del, modify, listDynamic)
 	// Role-independent extras attached to every zone tree. Each is built
 	// fresh so the command pointer is unique per NewZoneCmd invocation.
 	c.AddCommand(newZoneReadFakeCmd(), newZoneUpdateCmd(role), newZoneDsyncCmd(role))
@@ -367,6 +421,115 @@ func RunZoneBump(parent string, args []string) {
 	if resp.Msg != "" {
 		fmt.Printf("%s\n", resp.Msg)
 	}
+}
+
+func RunZoneAdd(role, primaryAddr, primaryKey string, options []string, tsigName, tsigSecret, tsigAlgo string) {
+	if tdns.Globals.Zonename == "" {
+		fmt.Println("Error: zone name not specified")
+		os.Exit(1)
+	}
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", role, err)
+	}
+	cr, err := SendZoneCommand(api, tdns.ZonePost{
+		Command:    "add",
+		Zone:       dns.Fqdn(tdns.Globals.Zonename),
+		Primary:    tdns.PeerConf{Addr: primaryAddr, Key: primaryKey},
+		Options:    options,
+		TsigName:   tsigName,
+		TsigSecret: tsigSecret,
+		TsigAlgo:   tsigAlgo,
+	})
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		os.Exit(1)
+	}
+	if cr.Msg != "" {
+		fmt.Printf("%s\n", cr.Msg)
+	}
+}
+
+func RunZoneDelete(role string) {
+	if tdns.Globals.Zonename == "" {
+		fmt.Println("Error: zone name not specified")
+		os.Exit(1)
+	}
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", role, err)
+	}
+	cr, err := SendZoneCommand(api, tdns.ZonePost{
+		Command: "delete",
+		Zone:    dns.Fqdn(tdns.Globals.Zonename),
+	})
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		os.Exit(1)
+	}
+	if cr.Msg != "" {
+		fmt.Printf("%s\n", cr.Msg)
+	}
+}
+
+func RunZoneModify(role, primaryAddr, primaryKey string, options []string) {
+	if tdns.Globals.Zonename == "" {
+		fmt.Println("Error: zone name not specified")
+		os.Exit(1)
+	}
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", role, err)
+	}
+	cr, err := SendZoneCommand(api, tdns.ZonePost{
+		Command: "modify",
+		Zone:    dns.Fqdn(tdns.Globals.Zonename),
+		Primary: tdns.PeerConf{Addr: primaryAddr, Key: primaryKey},
+		Options: options,
+	})
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		os.Exit(1)
+	}
+	if cr.Msg != "" {
+		fmt.Printf("%s\n", cr.Msg)
+	}
+}
+
+func RunZoneListDynamic(role string) {
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", role, err)
+	}
+	cr, err := SendZoneCommand(api, tdns.ZonePost{Command: "list-dynamic"})
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		os.Exit(1)
+	}
+	if len(cr.Zones) == 0 {
+		fmt.Println("No dynamic zones.")
+		return
+	}
+	names := make([]string, 0, len(cr.Zones))
+	for name := range cr.Zones {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := []string{"Zone|Type|Provisioning|Managed|Primary|Error"}
+	for _, name := range names {
+		zc := cr.Zones[name]
+		managed := "catalog"
+		if zc.ApiManaged {
+			managed = "api"
+		}
+		errStr := ""
+		if zc.Error {
+			errStr = zc.ErrorMsg
+		}
+		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s",
+			name, zc.Type, zc.Provisioning, managed, zc.Primary.Addr, errStr))
+	}
+	fmt.Println(columnize.SimpleFormat(out))
 }
 
 func SendZoneCommand(api *tdns.ApiClient, data tdns.ZonePost) (tdns.ZoneResponse, error) {
