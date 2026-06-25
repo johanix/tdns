@@ -86,7 +86,13 @@ type ZoneRefreshAnalysis struct {
 }
 
 type ZoneData struct {
-	mu         sync.Mutex
+	mu sync.Mutex
+	// generation is bumped on every removal/replacement of this zone
+	// (RemoveDynamicZone, ModifyDynamicZone, config-reload Zones.Remove). A
+	// refresh goroutine snapshots it at dispatch; the pre-persist guard (B5b)
+	// drops the persist if the live generation no longer matches — closing the
+	// resurrection race where a mid-flight refresh re-writes a deleted zone.
+	generation atomic.Uint64
 	ZoneName   string
 	ZoneStore  ZoneStore // 1 = "xfr", 2 = "map", 3 = "slice". An xfr zone only supports xfr related ops
 	ZoneType   ZoneType

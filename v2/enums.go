@@ -42,6 +42,7 @@ const (
 	// OptServerSvcb
 	OptAddTransportSignal
 	OptCatalogZone
+	OptApiManagedZone // zone created/managed via the dynamic-zones API (zone add/delete/modify)
 	OptCatalogMemberAutoCreate
 	OptCatalogMemberAutoDelete
 	OptMultiSigner  // Dynamically set by signer when HSYNC shows multiple signers
@@ -74,6 +75,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	// OptServerSvcb:        "create-server-svcb",
 	OptAddTransportSignal:      "add-transport-signal",
 	OptCatalogZone:             "catalog-zone",
+	OptApiManagedZone:          "api-managed-zone",
 	OptCatalogMemberAutoCreate: "catalog-member-auto-create",
 	OptCatalogMemberAutoDelete: "catalog-member-auto-delete",
 	OptMultiSigner:             "multi-signer",
@@ -98,6 +100,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"automatic-zone":             OptAutomaticZone,
 	"add-transport-signal":       OptAddTransportSignal,
 	"catalog-zone":               OptCatalogZone,
+	"api-managed-zone":           OptApiManagedZone,
 	"catalog-member-auto-create": OptCatalogMemberAutoCreate,
 	"catalog-member-auto-delete": OptCatalogMemberAutoDelete,
 	"multi-signer":               OptMultiSigner,
