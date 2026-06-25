@@ -139,8 +139,10 @@ func (conf *Config) ShouldPersistZone(zd *ZoneData) bool {
 		return conf.DynamicZones.CatalogMembers.Storage == "persistent" && conf.DynamicZones.CatalogMembers.Allowed
 	}
 
-	// Future: check for other dynamic zone types
-	// For now, only catalog zones and catalog members are supported
+	if zd.Options[OptApiManagedZone] {
+		// API-managed zone (zone add/delete/modify)
+		return conf.DynamicZones.Dynamic.Storage == "persistent" && conf.DynamicZones.Dynamic.Allowed
+	}
 
 	return false
 }
@@ -215,6 +217,16 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 				options[opt] = true
 			}
 		}
+		// Re-derive the internal markers from their persisted fields — they are
+		// not serialized as options (B5a). Without this, a reloaded managed zone
+		// loses its marker on restart and degrades to looking static (the latent
+		// catalog bug this fix also closes).
+		if zconf.SourceCatalog != "" {
+			options[OptAutomaticZone] = true
+		}
+		if zconf.ApiManaged {
+			options[OptApiManagedZone] = true
+		}
 
 		// Log what we're loading
 		if options[OptCatalogZone] {
@@ -278,9 +290,11 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 	for opt, enabled := range zd.Options {
 		if enabled {
 			if optStr, ok := ZoneOptionToString[opt]; ok {
-				// Skip internal options that shouldn't be in config
-				// OptAutomaticZone is an internal marker (via SourceCatalog field), not a config option
-				if opt != OptDirty && opt != OptFrozen && opt != OptAutomaticZone {
+				// Skip internal options that shouldn't be in config.
+				// OptAutomaticZone is re-derived on reload from SourceCatalog;
+				// OptApiManagedZone is re-derived from the ApiManaged bool — both
+				// are internal markers, not config options.
+				if opt != OptDirty && opt != OptFrozen && opt != OptAutomaticZone && opt != OptApiManagedZone {
 					optionsStrs = append(optionsStrs, optStr)
 				}
 			}
@@ -316,6 +330,7 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 		Notify:        zd.Notify,
 		OptionsStrs:   optionsStrs,
 		SourceCatalog: zd.SourceCatalog,
+		ApiManaged:    zd.Options[OptApiManagedZone],
 		// Note: We don't serialize Frozen, Dirty, Error, ErrorType, ErrorMsg, RefreshCount
 		// as these are runtime state, not configuration
 	}

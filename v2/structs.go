@@ -239,6 +239,10 @@ type ZoneConf struct {
 	ErrorMsg               string    // reason for the error (if known)
 	RefreshCount           int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
 	SourceCatalog          string    // if auto-configured, which catalog zone created this zone
+	// ApiManaged marks a zone created/managed via the dynamic-zones API (zone
+	// add/delete/modify). Persisted so OptApiManagedZone can be re-derived on
+	// reload — a dedicated bool, not a SourceCatalog="api" sentinel.
+	ApiManaged bool `yaml:"apimanaged" mapstructure:"apimanaged"`
 }
 
 type TemplateConf struct {
