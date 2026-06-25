@@ -97,6 +97,11 @@ type ZoneData struct {
 	Data *core.ConcurrentMap[string, OwnerData]
 	// 20260415 johani: MP    *ZoneMPExtension // Multi-provider state; nil for non-MP zones
 	Ready bool // true if zd.Data has been populated (from file or upstream)
+	// Status is the positive-lifecycle state (pending -> loading -> ready),
+	// orthogonal to the error registry. Use SetStatus/GetStatus to mutate/read.
+	// Surfaced to the API as ZoneConf.Provisioning. Added alongside Ready/
+	// FirstZoneLoad without rewriting their consumers.
+	Status ZoneStatus
 
 	XfrType string // axfr | ixfr
 	Logger  *log.Logger

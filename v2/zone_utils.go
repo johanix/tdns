@@ -134,6 +134,7 @@ func (zd *ZoneData) DoTransfer() (bool, uint32, error) {
 func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core.RRset) (bool, error) {
 
 	// log.Printf("Reading zone %s from file %s\n", zd.ZoneName, zd.Upstream)
+	zd.SetStatus(ZoneStatusLoading)
 
 	new_zd := ZoneData{
 		ZoneName:       zd.ZoneName,
@@ -197,6 +198,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	zd.ZoneType = new_zd.ZoneType
 	zd.Data = new_zd.Data
 	zd.Ready = true
+	zd.Status = ZoneStatusReady // co-located with Ready; set directly (already under zd.mu)
 	zd.mu.Unlock()
 
 	// Repopulate all dynamically generated RRs after zone refresh
@@ -215,6 +217,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RRset) (bool, error) {
 
 	lg.Info("transferring zone via AXFR", "zone", zd.ZoneName, "upstream", zd.Upstream)
+	zd.SetStatus(ZoneStatusLoading)
 
 	new_zd := ZoneData{
 		ZoneName:       zd.ZoneName,
@@ -273,6 +276,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	zd.ZoneType = new_zd.ZoneType
 	zd.Data = new_zd.Data
 	zd.Ready = true
+	zd.Status = ZoneStatusReady // co-located with Ready; set directly (already under zd.mu)
 	zd.mu.Unlock()
 
 	// Repopulate all dynamically generated RRs after zone refresh

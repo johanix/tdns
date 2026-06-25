@@ -221,6 +221,25 @@ var StringToAppType = map[string]AppType{
 	"edgeSigner": AppTypeEdgeSigner, // NYI
 }
 
+// ZoneStatus is the positive-lifecycle state of a zone, orthogonal to the
+// error registry (a zone can be ZoneStatusReady and still carry a RefreshError).
+// Minimal by design: a single value with a setter/getter, no registry.
+type ZoneStatus uint8
+
+const (
+	ZoneStatusUnknown ZoneStatus = iota // zero value; pre-registration
+	ZoneStatusPending                   // registered + enqueued, no data yet
+	ZoneStatusLoading                   // transfer/file-load in progress
+	ZoneStatusReady                     // data populated (>=1 successful load)
+)
+
+var ZoneStatusToString = map[ZoneStatus]string{
+	ZoneStatusUnknown: "unknown",
+	ZoneStatusPending: "pending",
+	ZoneStatusLoading: "loading",
+	ZoneStatusReady:   "ready",
+}
+
 type ErrorType uint8
 
 const (
@@ -372,6 +391,23 @@ func (zd *ZoneData) ClearError(errtype ErrorType) {
 	}
 	zd.recomputeDerivedErrorFieldsLocked()
 	Zones.Set(zd.ZoneName, zd)
+}
+
+// SetStatus sets the zone's positive-lifecycle status and republishes the zone
+// in the Zones map. Same lock discipline as SetError; no derived fields to
+// recompute. Orthogonal to the error registry.
+func (zd *ZoneData) SetStatus(s ZoneStatus) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.Status = s
+	Zones.Set(zd.ZoneName, zd)
+}
+
+// GetStatus returns the zone's positive-lifecycle status under the lock.
+func (zd *ZoneData) GetStatus() ZoneStatus {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return zd.Status
 }
 
 // HasError returns true if the zone has an active error of the given type.

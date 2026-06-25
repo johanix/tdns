@@ -564,6 +564,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						Data:             core.NewCmap[OwnerData](),
 						KeyDB:            conf.Internal.KeyDB,
 						FirstZoneLoad:    true,
+						Status:           ZoneStatusPending, // registered + enqueued, no data yet (B6)
 					}
 
 					Zones.Set(zone, zd)
