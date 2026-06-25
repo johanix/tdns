@@ -243,6 +243,10 @@ type ZoneConf struct {
 	// add/delete/modify). Persisted so OptApiManagedZone can be re-derived on
 	// reload — a dedicated bool, not a SourceCatalog="api" sentinel.
 	ApiManaged bool `yaml:"apimanaged" mapstructure:"apimanaged"`
+	// Provisioning is a display-only derived lifecycle string
+	// ("pending"|"loading"|"ready"|"error") populated by the list handlers from
+	// ZoneStatus + the error registry. Not config; not serialized to YAML.
+	Provisioning string `yaml:"-" mapstructure:"-"`
 }
 
 type TemplateConf struct {
