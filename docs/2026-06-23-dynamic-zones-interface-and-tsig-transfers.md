@@ -184,10 +184,24 @@ zones.
   break is applied surgically in `AutoConfigureZonesFromCatalog` (literal `ZoneStore: MapZone` + ERROR
   log on explicit non-map store). `dynamic_zones_cores_test.go` covers gate/reject/happy/duplicate/
   delete-guard+bump/modify-replace+bump.
-- ⏳ B5a/b, B2, B3, B4 — pending. (B5a still adds the `ShouldPersistZone` dynamic branch + marker
-  reload + reload-spare; B5b still adds the refreshengine pre-persist guard. Until B5a, API-zone
-  persistence (`AddDynamicZoneToConfig`) no-ops because `ShouldPersistZone` lacks the API branch — so
-  rollback-on-persist-fail is wired but persistence itself lands in B5a.)
+- ✅ **B5a DONE** (2026-06-25) — `ZoneConf.ApiManaged bool` field; `ShouldPersistZone` third branch
+  (`OptApiManagedZone` → `dynamic.{allowed,storage}`); `zoneDataToZoneConf` writes `ApiManaged` +
+  skips `OptApiManagedZone`/`OptAutomaticZone` from `OptionsStrs` (internal markers); marker
+  re-derivation in `LoadDynamicZoneFiles` (`OptAutomaticZone` ← `SourceCatalog` **fixes the latent
+  catalog bug**, `OptApiManagedZone` ← `ApiManaged`); refreshengine **both** persist branches widened
+  `ShouldPersistZone(zd) && OptAutomaticZone` → `ShouldPersistZone(zd)`; `ReloadZoneConfig` spare
+  widened to `ShouldPersistZone(zd)` (closes the reload-spare gap) + `generation.Add(1)` on its
+  `Zones.Remove`.
+- ✅ **B5b DONE** (2026-06-25) — `zoneStillLive(zd, gen)` helper (live && same-pointer &&
+  same-generation); refresh goroutine snapshots `gen := zd.generation.Load()` at dispatch; pre-persist
+  guard `&& zoneStillLive(zd, gen)` at the goroutine persist site, and `&& zoneStillLive(zd,
+  zd.generation.Load())` at the ticker persist site (reduces to identity check — ticker re-fetches
+  `zd` fresh). `dynamic_zones_b5_test.go` covers write-side, ShouldPersistZone branch, zoneStillLive
+  (bump/replace/remove all fail the guard), marker re-derivation. Full suite green under `-race`.
+  **TESTBED CHECKPOINT NEEDED** (the silent-failure cases — survive-restart marker reload,
+  delete/modify mid-AXFR resurrection — require the running server on NetBSD VMs; not provable on this
+  dev box).
+- ⏳ B2, B3, B4 — pending (API structs + handlers + CLI; surfaces the cores + `Provisioning`).
 
 ### B0. Primary/key syntax — the NOKEY model
 Every primary reference always carries a key name; built-in sentinel `NOKEY` means "no TSIG,
