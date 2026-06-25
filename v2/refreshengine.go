@@ -629,7 +629,15 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 				if rc.CurRefresh <= 0 {
 					lgEngine.Debug("refreshing zone due to refresh counter", "zone", zone)
 					// log.Printf("Len(Zones) = %d", len(Zones))
-					zd, _ := Zones.Get(zone)
+					zd, ok := Zones.Get(zone)
+					if !ok || zd == nil {
+						// Zone was deleted (RemoveDynamicZone / config reload)
+						// after its counter was created. Drop the orphaned counter
+						// so we never dereference a missing entry on the next tick.
+						lgEngine.Debug("ticker: zone gone, dropping stale refresh counter", "zone", zone)
+						refreshCounters.Remove(zone)
+						continue
+					}
 					if zd.HasServiceImpactingError() {
 						lgEngine.Warn("zone in error state, not refreshing", "zone", zone, "errortype", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
 						continue

@@ -683,6 +683,23 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			continue
 		}
 
+		// Legacy bare-string notify: entries (the decode hook recorded each as a
+		// Legacy marker) quarantine the zone, mirroring the primary check —
+		// otherwise an empty-Addr PeerConf silently drops that notify target.
+		legacyNotify := false
+		for _, n := range zconf.Notify {
+			if n.Legacy != "" {
+				lgConfig.Error("zone uses legacy bare-string notify entry, zone in error state", "zone", zname, "notify", n.Legacy)
+				zd.SetError(ConfigError, "notify now requires {addr, key} (got bare string %q)", n.Legacy)
+				legacyNotify = true
+				break
+			}
+		}
+		if legacyNotify {
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+
 		lgConfig.Debug("checking DNSSEC policy", "zone", zname)
 		// dump.P(zconf)
 

@@ -605,7 +605,11 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 		return "", fmt.Errorf("failed to persist dynamic zone %s: %w", name, err)
 	}
 
-	// Enqueue the initial transfer — fire-and-forget (no Wait, no Response).
+	// Enqueue the initial transfer — fire-and-forget (no Wait, no Response). If
+	// enqueue fails (channel full / context cancelled), the zone is registered
+	// and persisted but no refresh is scheduled — it would be stuck in pending
+	// with no AXFR. Surface that rather than reporting success; the zone is
+	// reachable via list-dynamic and the operator can retry modify/delete.
 	zr := ZoneRefresher{
 		Name:      name,
 		ZoneType:  in.Type,
@@ -613,15 +617,25 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 		ZoneStore: MapZone,
 		Options:   options,
 	}
-	select {
-	case conf.Internal.RefreshZoneCh <- zr:
-	case <-ctx.Done():
-		lg.Warn("ProvisionDynamicZone: context cancelled while enqueuing refresh", "zone", name)
-	case <-time.After(5 * time.Second):
-		lg.Warn("ProvisionDynamicZone: timeout enqueuing refresh", "zone", name)
+	if err := conf.enqueueRefresh(ctx, zr); err != nil {
+		return "", fmt.Errorf("zone %s registered but failed to schedule initial transfer: %w", name, err)
 	}
 
 	return fmt.Sprintf("zone %s provisioning; poll list-dynamic for state", name), nil
+}
+
+// enqueueRefresh sends a ZoneRefresher to the refresh engine, returning an error
+// if the send cannot complete (context cancelled or the channel stays full past
+// the timeout) instead of silently dropping the request.
+func (conf *Config) enqueueRefresh(ctx context.Context, zr ZoneRefresher) error {
+	select {
+	case conf.Internal.RefreshZoneCh <- zr:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("context cancelled while enqueuing refresh for %s: %w", zr.Name, ctx.Err())
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("timeout enqueuing refresh for %s (refresh channel full)", zr.Name)
+	}
 }
 
 // RemoveDynamicZone is the shared *delete* core. It refuses to delete a static
@@ -645,8 +659,13 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 	// not resurrect the files we are about to remove.
 	zd.generation.Add(1)
 
+	// Persist the removal. RemoveDynamicZoneFromConfig rewrites the whole file
+	// from the live Zones map, so it MUST run after Zones.Remove (otherwise the
+	// zone would be re-written back in). If the rewrite fails, surface it: the
+	// zone is gone from memory but the stale config entry would resurrect it on
+	// restart — that's a failed delete, not a success.
 	if err := conf.RemoveDynamicZoneFromConfig(name); err != nil {
-		lg.Warn("RemoveDynamicZone: failed to update dynamic config file", "zone", name, "error", err)
+		return "", fmt.Errorf("zone %s removed from memory but failed to update dynamic config (will reappear on restart): %w", name, err)
 	}
 	// Best-effort remove the persisted zone file.
 	if conf.DynamicZones.ZoneDirectory != "" {
@@ -706,10 +725,14 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	}
 	Zones.Set(name, newZd)
 
-	// (4) Overwrite the persisted entry. (5) Force a re-pull from the new upstream.
+	// (4) Overwrite the persisted entry. AddDynamicZoneToConfig rewrites the
+	// whole file from the live Zones map, so it MUST run after Zones.Set (so the
+	// rewrite includes the new params). On failure, surface it — the live zone
+	// now has the new params but they would be lost on restart.
 	if err := conf.AddDynamicZoneToConfig(newZd); err != nil {
-		lg.Warn("ModifyDynamicZone: failed to update dynamic config file", "zone", name, "error", err)
+		return "", fmt.Errorf("zone %s modified in memory but failed to persist (change will be lost on restart): %w", name, err)
 	}
+	// (5) Force a re-pull from the new upstream.
 	zr := ZoneRefresher{
 		Name:      name,
 		ZoneType:  newZd.ZoneType,
@@ -718,12 +741,8 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		Options:   options,
 		Force:     true,
 	}
-	select {
-	case conf.Internal.RefreshZoneCh <- zr:
-	case <-ctx.Done():
-		lg.Warn("ModifyDynamicZone: context cancelled while enqueuing refresh", "zone", name)
-	case <-time.After(5 * time.Second):
-		lg.Warn("ModifyDynamicZone: timeout enqueuing refresh", "zone", name)
+	if err := conf.enqueueRefresh(ctx, zr); err != nil {
+		return "", fmt.Errorf("zone %s modified but failed to schedule refresh: %w", name, err)
 	}
 
 	return fmt.Sprintf("zone %s modified; poll list-dynamic for state", name), nil

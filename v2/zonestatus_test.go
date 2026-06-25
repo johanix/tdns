@@ -57,3 +57,36 @@ func provisioningString(zd *ZoneData) string {
 	}
 	return ZoneStatusToString[zd.GetStatus()]
 }
+
+// TestSetStatus_NoResurrection verifies the CodeRabbit fix: SetStatus on a zone
+// that is no longer the live entry (deleted, or replaced by a new pointer) must
+// NOT re-insert the stale pointer into Zones. Otherwise an in-flight refresh
+// calling SetStatus(Loading) would resurrect a just-deleted zone.
+func TestSetStatus_NoResurrection(t *testing.T) {
+	resetZonesForTest()
+	zd := &ZoneData{ZoneName: "res.example."}
+	Zones.Set("res.example.", zd)
+
+	// Live entry: SetStatus republishes (zone stays present).
+	zd.SetStatus(ZoneStatusLoading)
+	if _, ok := Zones.Get("res.example."); !ok {
+		t.Fatal("live zone vanished after SetStatus")
+	}
+
+	// Deleted: SetStatus on the stale pointer must NOT bring it back.
+	Zones.Remove("res.example.")
+	zd.SetStatus(ZoneStatusReady)
+	if _, ok := Zones.Get("res.example."); ok {
+		t.Error("SetStatus resurrected a deleted zone")
+	}
+
+	// Replaced: a new pointer holds the name; SetStatus on the old pointer must
+	// not clobber the new entry back to the old.
+	Zones.Set("res.example.", zd)
+	newZd := &ZoneData{ZoneName: "res.example."}
+	Zones.Set("res.example.", newZd)
+	zd.SetStatus(ZoneStatusReady)
+	if cur, _ := Zones.Get("res.example."); cur != newZd {
+		t.Error("SetStatus on stale pointer clobbered the replacement entry")
+	}
+}

@@ -399,11 +399,18 @@ func (zd *ZoneData) ClearError(errtype ErrorType) {
 // SetStatus sets the zone's positive-lifecycle status and republishes the zone
 // in the Zones map. Same lock discipline as SetError; no derived fields to
 // recompute. Orthogonal to the error registry.
+//
+// The republish is guarded: an in-flight refresh on a deleted or replaced zone
+// (e.g. SetStatus(Loading) at the top of FetchFromUpstream) must NOT re-insert
+// the stale pointer into Zones — that would resurrect a zone the operator just
+// deleted. We only republish when zd is still the live entry for its name.
 func (zd *ZoneData) SetStatus(s ZoneStatus) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
 	zd.Status = s
-	Zones.Set(zd.ZoneName, zd)
+	if cur, live := Zones.Get(zd.ZoneName); live && cur == zd {
+		Zones.Set(zd.ZoneName, zd)
+	}
 }
 
 // GetStatus returns the zone's positive-lifecycle status under the lock.

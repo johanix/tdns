@@ -202,6 +202,13 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				}
 				// For primary zones, we could show Parent if needed, but typically Primary field is for secondary zones
 
+				// Snapshot the notify slice under the lock — the catalog notify
+				// add/remove handlers mutate zd.Notify under zd.mu, so an
+				// unsynchronized read here would race the slice header.
+				zd.mu.Lock()
+				notifySnapshot := append([]PeerConf(nil), zd.Notify...)
+				zd.mu.Unlock()
+
 				// Effective DNSSEC policy (the one bound to the running zone)
 				// and, when it came from a dynamic set-policy override, the
 				// config-base policy it overrides (for display). A lookup error
@@ -241,7 +248,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 					Provisioning:           zoneProvisioning(zd),
 					Zonefile:               zd.Zonefile,
 					Primary:                PeerConf{Addr: primary, Key: NOKEY},
-					Notify:                 zd.Notify, // Notify addresses (displayed by CLI)
+					Notify:                 notifySnapshot, // Notify addresses (displayed by CLI)
 					EffectiveDnssecPolicy:  zd.DnssecPolicyName,
 					DnssecPolicyOverridden: overridden,
 					DnssecPolicyConfigBase: configPolicy,
