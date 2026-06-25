@@ -155,6 +155,17 @@ zones.
 
 ## 5. Improvement 1 — Dynamic-zones management interface  *(do first)*
 
+**Implementation status (branch `dynamic-zones-mgmt`):**
+- ✅ **B0a/B0b/B0c DONE** (2026-06-25) — `PeerConf{Addr,Key,Legacy}` + `NOKEY` const;
+  `stringToPeerConfHook` mapstructure decode hook (dead `'Primary'/[]interface` special-case removed);
+  `ZoneConf.Primary`→`PeerConf`, `Notify`/`Downstreams`→one `Notify []PeerConf`, `ZoneData.Downstreams`
+  →`Notify []PeerConf` (`Upstream` stays `string`); `ZoneRefresher`/`RefreshCounter` plumbed; secondary
+  key validation (legacy/missing/non-NOKEY → per-zone ERROR); catalog notify-API wraps as
+  `PeerConf{Addr,Key:NOKEY}`; `TemplateConf` left untouched (dead code). All 5 binaries build;
+  `peerconf_decode_test.go` proves resilient decode (mixed modern + legacy → whole-file decode succeeds,
+  legacy captured as markers).
+- ⏳ B6, B1a/b/c, B5a/b, B2, B3, B4 — pending.
+
 ### B0. Primary/key syntax — the NOKEY model
 Every primary reference always carries a key name; built-in sentinel `NOKEY` means "no TSIG,
 unauthenticated." Before the `keys:` block exists (Improvement 2), `NOKEY` is the only resolvable
@@ -209,17 +220,34 @@ phase structural rather than a warned special case.
   - **Remove the now-obsolete special-case** at parseconfig.go:289-292: once `Primary` is a `PeerConf`
     and the hook absorbs the bare-string/list shapes into legacy markers, the `'Primary'` +
     `[]interface` whole-file error branch no longer triggers and should be deleted (dead branch).
-- **Touch points (verified line anchors; note doc anchors run a few lines stale — match on content):**
-  `ZoneConf.Primary` type (structs.go:~189) **and** `TemplateConf.Primary` (structs.go:~222) — both
-  change to `PeerConf`; `stringToPeerConfHook` + `DecodeHook` wiring on the `DecoderConfig`
-  (parseconfig.go:267-271, new); normalize `.Addr` at parseconfig.go:645; template application at the
-  real call site (parseconfig.go:595-604, where `ExpandTemplate` is invoked — *not* 1010-1011, which
-  is the `ExpandTemplate` definition); `zoneDataToZoneConf` persistence (dynamic_zones.go:~315);
-  key-name plumbing through `ZoneRefresher`/`ZoneData` alongside `Upstream`. Structured `notify:`
-  (Improvement 2, A3b) uses the same `PeerConf` type and the same hook — do not introduce a second
-  struct. **Also consolidate the duplicate `ZoneConf.Notify`/`ZoneConf.Downstreams` (structs.go:190-191)
+- **Touch points (verified against the code 2026-06-25 — full usage map, ~52 sites across 8 files):**
+  `ZoneConf.Primary` type (structs.go:189) changes to `PeerConf`. **`TemplateConf.Primary`
+  (structs.go:222) is NOT changed — `TemplateConf` is dead code** (zero live references; the real
+  template path is `ZoneConf`-based via `ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf)`, so
+  `tmpl.Primary` reads are already `ZoneConf` fields). Leave `TemplateConf` untouched (don't delete
+  unused code without asking). `stringToPeerConfHook` + `DecodeHook` wiring on the `DecoderConfig`
+  (parseconfig.go:267-271, new); normalize `.Addr` at parseconfig.go:645 (and the `==`/`!=` empty- and
+  change-checks at parseconfig.go:636/646 compare `.Addr`); template empty-checks `tmpl.Primary.Addr
+  != ""` / `len(tmpl.Notify) > 0` at the real call site (`ExpandTemplate`); `zoneDataToZoneConf`
+  persistence (dynamic_zones.go:~311). **`ZoneData.Upstream` STAYS `string`** — it's consumed as a bare
+  address by the AXFR machinery (`ZoneTransferIn(zd.Upstream, …)`) and logs (~14 sites); `PeerConf`
+  collapses to `.Addr` flowing *into* `Upstream` and rehydrates as `Primary{Addr: zd.Upstream}` on the
+  way out. `TsigKeyName` is added alongside `Upstream` later (Improvement 2 step 2), not here.
+  `ZoneRefresher.Primary`/`Notify` and `RefreshCounter` also carry these — convert in step. Structured
+  `notify:` (Improvement 2, A3b) uses the same `PeerConf` type and the same hook — do not introduce a
+  second struct. **Also consolidate the duplicate `ZoneConf.Notify`/`ZoneConf.Downstreams` (structs.go:190-191)
   and `ZoneData.Downstreams` (structs.go:~111) to a single `notify`-named `[]PeerConf` during this
   migration** — `notify:` is canonical, `downstreams:` is removed.
+- **Catalog notify-API stays address-only (decided 2026-06-25).** The existing catalog notify
+  add/remove/list handlers (`apihandler_catalog.go:627-728`) are string-based (`CatalogPost.Address
+  string`, `==` comparisons, `[]string` copy into `CatalogResponse.NotifyAddresses`). When
+  `ZoneData.Downstreams` becomes `[]PeerConf`, **wrap internally as `PeerConf{Addr: address, Key:
+  NOKEY}`** — the wire API stays address-only, `NotifyAddresses` stays `[]string`, comparisons/append/
+  copy operate on `.Addr`. **Do NOT** add a key field to the catalog notify-API: catalog zones
+  typically manage edge servers (pure secondaries), not core servers with downstreams, so catalog-
+  managed TSIG notify peers is a non-need; adding the TSIG machinery there is overengineering. A
+  NOKEY-keyed catalog notify peer *is* the correct NOKEY-model representation, not a workaround. (If
+  ever wanted, extending the catalog notify-API with a key is a clean additive change in a later step.)
 
 ### B1. Shared cores in v2/dynamic_zones.go
 Factor reusable methods so the catalog path and the new API/CLI both call the same code (no
