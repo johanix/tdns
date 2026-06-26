@@ -105,12 +105,76 @@ is left untouched.
 | **Two ZoneData fields** | `ZoneData.PrimariesConf []PeerConf` (as-written, **persisted**, re-resolved each load) **and** `ZoneData.Upstreams []PeerConf` (resolved `addr:port`, **runtime-only**). | The hostname is the durable thing; addresses are derived and ephemeral. Persisting resolved addresses would freeze them and contradict re-resolution on restart. |
 | **Transfer fallback** | SOA probe and AXFR **iterate `Upstreams`**, advancing to the next on **transport errors only** (no route / conn refused / timeout / network unreachable). A **DNS response** (any rcode, incl. REFUSED/SERVFAIL) is honoured as-is. All-transport-failed → error. | A transport error means "this *address* is unreachable" → try a sibling. A DNS response means "a server answered" → that's not an address problem; trying siblings of the same logical server is pointless or harmful (e.g. it would convert today's quiet REFUSED back-off into a noisy double-failure). |
 | **Loop location** | The fallback loop lives in the **callers** (`DoTransfer`, `FetchFromUpstream`); `ZoneTransferIn` keeps its single-`upstream string` signature. | Smaller change; `clarifyXfrError` and the envelope-read loop stay intact. |
-| **Scope** | The fix lives in the **shared transfer path**, so EVERY secondary with a hostname/multi-primary benefits — static config, catalog, and API-added — not just dynamic zones. | The latent bug was never dynamic-zones-specific; the interface just made it easy to trip. Fix it where it actually lives. |
+| **Scope** | The transfer-path fix (the resolved-list loop) benefits EVERY secondary — static config, catalog, **and** API-added — because they all reach `DoTransfer`/`FetchFromUpstream` via `zd.Upstreams`. **Multi-*primary*** (a list the operator writes) is added for **static + API** zones; **catalog members get multi-*address* only** (see catalog row). | The latent bug was never dynamic-zones-specific; the interface just made it easy to trip. Fix it where it actually lives. |
+| **Catalog scope (minimal — decided 2026-06-26)** | `ConfigGroupConfig.Upstream` stays a **single scalar `string`** (no config-group schema change, no catalog-YAML cutover). At catalog auto-config (`catalog.go:382`) that scalar is run through **`resolvePrimaries`** to populate `zd.Upstreams`, **and `zd.PrimariesConf` is set to `[{scalarUpstream, NOKEY}]`** (the as-written form, so the catalog member persists + re-resolves like any dynamic zone). Note: catalog does not map `tsig_key` into that key today — it is `NOKEY` until TSIG lands. | Catalog members are edge secondaries that pull from *one* provider primary — per-member multi-primary lists are a redundancy model nobody deploys (same over-engineering rejected for the catalog notify-API in Improvement 1). But the **reported bug** (hostname → one address, no fallback) absolutely hits catalog members, so they need the multi-*address* expansion. This delivers the fix where it's needed without the part that's overkill. |
+| **Empty / invalid list** | `primaries: []` (or all-`NOKEY`-but-no-addr) on a **secondary** → `ConfigError` ("no primary configured"), zone quarantined, server still starts. A `primaries:` on a **primary** zone is ignored (warn). | Same service-impacting semantics as today's "secondary has no primary" check, just list-shaped. |
+| **Dedup of resolved tuples** | After expansion, **dedup the resolved `(addr:port)` set** (two entries, or a hostname + its own IP, can yield the same address). Keep first occurrence (preserves v4-first ordering and the first-seen key). | Avoids probing the same address twice per refresh and avoids a spurious duplicate in `Upstreams`. Dedup is on `addr:port`; a genuine `(addr, differing-key)` collision is flagged (TSIG-relevant, §3 note below). |
 | **CLI key scope** | `--primaries` is a comma-separated list; **one `--primary-key` applies to all** entries on the CLI. Per-primary keys remain expressible via YAML/API (the structured `[]PeerConf`). | A primary set usually shares one TSIG key; per-primary CLI syntax (`a:53/K1,b:53/K2`) is clunky and rarely needed. The structured paths still allow it. |
 | **Dead RefreshCounter fields** | **Delete** `RefreshCounter.Upstream` and `RefreshCounter.Notify` and their 6 write sites. | Verified write-only / read-nowhere. Converting a dead scalar to a dead list is pointless. (Operator-approved 2026-06-26.) |
 | **miekg/dns built-in fallback** | Not relied upon. | Go's dialer picks one address (UDP: no fallback; TCP: connect-failure only). Insufficient for DNS-level robustness; we do explicit resolve-to-list + per-address retry. |
 
-## 4. Blast radius (verified — ~58 sites, 8 files)
+### 3.1 Cross-cutting clarifications (added 2026-06-26 after plan review)
+
+- **Resolution runs on EVERY ingress path, not just static parse.** `resolvePrimaries`
+  is called wherever as-written primaries enter or re-enter the runtime:
+  (1) `ParseZones` (static config, initial + `ReloadZoneConfig`);
+  (2) `LoadDynamicZoneFiles` (persisted dynamic zones on startup);
+  (3) `ProvisionDynamicZone` (API `zone add` with a hostname — must resolve at
+  add time, not only on the next restart);
+  (4) `ModifyDynamicZone` (API `zone modify`);
+  (5) catalog auto-config (the single scalar, per the catalog row).
+  Missing any one leaves hostname primaries broken on that path only. Phase
+  ownership is called out in §9.
+
+- **NOTIFY-triggered refresh must NOT blank `Upstreams`/`PrimariesConf`.** An inbound
+  NOTIFY enqueues a **minimal** `ZoneRefresher` (no primary fields). The refreshengine
+  merge guard becomes `len(zr.PrimariesConf) > 0` (was `zr.Primary.Addr != ""`); when
+  false, the zone **keeps its existing `zd.Upstreams` AND `zd.PrimariesConf`** rather
+  than wiping them. (`ZoneRefresher` carries both forms — as-written and resolved —
+  per §5; both are set on a config-bearing merge and both preserved on a NOTIFY
+  merge.) Getting this wrong would erase a zone's upstreams on every NOTIFY — called
+  out explicitly in P3/P4.
+
+- **Re-resolution cadence: reload/restart only.** Addresses are re-resolved at
+  parse/load/reload — **not** on the refresh ticker, **not** on record TTL. A
+  mid-life DNS change to a primary's address requires a config reload (or restart).
+  This is a deliberate consequence of principle 1 (no runtime resolution
+  dependency); document it for operators. A future "re-resolve on ticker" is
+  possible but explicitly out of scope.
+
+- **Supersedes the TSIG doc's scalar primary/key model.** The related TSIG plan
+  (Improvement 2) used singular `primary: {addr, key}` and a scalar
+  `ZoneData.TsigKeyName string`. **This plan supersedes both:** the config key is
+  `primaries: []PeerConf`, and the **per-peer TSIG key lives on each `Upstreams[]`
+  entry** (the key is copied to every address a hostname expands to). When the TSIG
+  loops land, the transfer fallback already has `up.Key` per address — no scalar
+  `TsigKeyName` is needed. The TSIG doc should be cross-referenced/updated so
+  Improvement 2 builds on `Upstreams []PeerConf` rather than reintroducing a scalar.
+  (The `(peerIP, key_name)` keystore tuple from the TSIG doc is unchanged and
+  aligned — a hostname expanding to N addresses yields N `(addr, sameKey)` tuples.)
+
+- **`(addr, differing-key)` collision.** If two `primaries:` entries expand to the
+  same address but carry **different** keys, that is a genuine ambiguity (which key
+  for that peer?). Dedup keeps the first; the second is dropped with a
+  `ConfigWarning`. Inert in Improvement 1 (all keys are `NOKEY`); relevant when TSIG
+  lands.
+
+- **NOTIFY source validation is OUT OF SCOPE here.** Inbound NOTIFY
+  (`notifyresponder.go`) accepts any sender and triggers a refresh using the zone's
+  configured `Upstreams`. Validating the NOTIFY source against the primary set is a
+  *security policy* decision that belongs with Improvement 2 (TSIG), where NOTIFY
+  authentication is already in scope. v1 behaviour: **any sender triggers a refresh;
+  the refresh still only pulls from the configured `Upstreams`** (a spurious NOTIFY
+  costs at most one SOA probe against the real primaries). Stated so it's a decision,
+  not an omission.
+
+- **No stickiness in v1 (intentional).** Every SOA check and AXFR starts at the
+  first `Upstreams` entry. A permanently-bad first address adds one failed-probe of
+  latency per refresh interval before falling through to a working sibling. This is
+  accepted for v1; "remember last-good address" is a possible future optimization,
+  not done here.
+
+## 4. Blast radius (verified — ~60 sites, 9 files)
 
 Counts per group (full per-site map captured during planning; the non-mechanical
 ones are spelled out in the phases):
@@ -119,17 +183,31 @@ ones are spelled out in the phases):
   template apply, refresher build, persistence read).
 - **B. `ZoneData.Upstream`** → `Upstreams`: 14 sites (the biggest group — the two
   transfer sites + many logs + persistence + the modify carry-forward).
-- **C. `ZoneRefresher.Primary`** → `Primaries`: 9 sites (4 overlap A/B); the
-  Primary→Upstream flow in refreshengine.
+- **C. `ZoneRefresher.Primary`** → **two fields `PrimariesConf` (as-written) +
+  `Primaries` (resolved)**: 9 sites (4 overlap A/B); the Primary→Upstream flow in
+  refreshengine, **including the NOTIFY-refresh merge guard** (`zr.Primary.Addr != ""`
+  → `len(zr.PrimariesConf) > 0`; on a config-bearing merge set both `zd.PrimariesConf`
+  and `zd.Upstreams`; on an empty NOTIFY merge preserve both).
 - **D. `RefreshCounter.Upstream`/`.Notify`**: 6 dead writes → **deleted**.
 - **E. Persistence** (`zoneDataToZoneConf`, `LoadDynamicZoneFiles`): 3 sites.
-- **F. API + CLI** (`ZonePost.Primary`, APIzone add/modify, `--primary-addr`,
-  RunZoneAdd/Modify, list display): ~12 sites.
-- **G. `DynamicZoneInput.Primary`** in the cores: 11 sites.
+  `zoneDataToZoneConf` must write **`PrimariesConf` with its per-entry keys**
+  (NOT reconstructed from resolved `Upstreams`, NOT hardcoded `Key: NOKEY`) — else
+  API/catalog keys are lost on restart once TSIG lands.
+- **F. API + CLI** (`ZonePost.Primary`→`Primaries`, APIzone add/modify, the
+  **`--primaries`** comma-list flag (replacing `--primary-addr`),
+  RunZoneAdd/Modify, list display rendering the list): ~12 sites.
+- **G. `DynamicZoneInput.Primary`** in the cores: 11 sites — **plus a
+  `resolvePrimaries` call in `ProvisionDynamicZone` and `ModifyDynamicZone`** so an
+  API-added hostname primary resolves at add time, not only on the next restart.
 - **H. Helpers**: none new needed beyond `resolvePrimaries` — `net.LookupHost`,
   `net.ParseIP`, `net.JoinHostPort`/`SplitHostPort` all already in use.
 - **I. `ErrorType` enum**: 4 edits to add `ConfigWarning` (const,
   `ErrorTypeToString`, `errorTypeReportOrder`; **NOT** `serviceImpactingErrors`).
+- **J. Catalog** (`catalog.go:382`, the auto-config `&ZoneData{Upstream: …}` and the
+  inline `ZoneRefresher{Primary: …}` enqueue at catalog.go:428): run the
+  single `ConfigGroupConfig.Upstream` scalar through `resolvePrimaries` → populate
+  `Upstreams`. `ConfigGroupConfig.Upstream` itself **stays a scalar** (no
+  config-group schema change). ~2 sites.
 
 **The 12 non-mechanical sites** (scalar→list is not a rename) are the parse
 validation loops, the resolution point (parseconfig.go:673-675 area), the template
@@ -150,7 +228,8 @@ ZoneData:
   // (Upstream string is removed)
 
 ZoneRefresher:
-  Primaries []PeerConf            // carries the RESOLVED list to RefreshEngine
+  PrimariesConf []PeerConf        // AS-WRITTEN; copied to zd.PrimariesConf on merge
+  Primaries     []PeerConf        // RESOLVED; copied to zd.Upstreams on merge
 
 DynamicZoneInput.Primaries []PeerConf
 ZonePost.Primaries        []PeerConf
@@ -158,9 +237,21 @@ ZonePost.Primaries        []PeerConf
 RefreshCounter:                   // Upstream + Notify fields DELETED (dead)
 ```
 
+**`ZoneRefresher` carries BOTH forms** — the as-written `PrimariesConf` and the
+resolved `Primaries` — because both must reach `ZoneData`: the as-written form to
+persist, the resolved form to transfer. A refresher with only the resolved list
+would leave `zd.PrimariesConf` with no source (and P5 persistence nothing to write).
+
+**Merge rule (refreshengine):**
+- `len(zr.PrimariesConf) > 0` (config load / reload / dynamic add+modify): set
+  `zd.PrimariesConf = zr.PrimariesConf` **and** `zd.Upstreams = zr.Primaries`.
+- `len(zr.PrimariesConf) == 0` (NOTIFY-triggered refresh — minimal refresher):
+  **preserve both** `zd.PrimariesConf` and `zd.Upstreams` (do not blank them).
+
 Flow: `primaries: [{foo.bar:53, K}]` → parse-time `resolvePrimaries` →
-`PrimariesConf = [{foo.bar:53,K}]`, `Upstreams = [{1.2.3.4:53,K},{[2001::53]:53,K}]`
-→ `ZoneRefresher.Primaries = Upstreams` → transfer loop iterates `Upstreams`.
+`zr.PrimariesConf = [{foo.bar:53,K}]`, `zr.Primaries = [{1.2.3.4:53,K},{[2001::53]:53,K}]`
+→ merge sets `zd.PrimariesConf` (persisted) + `zd.Upstreams` (transferred). Transfer
+loop iterates `zd.Upstreams`; persistence writes `zd.PrimariesConf`.
 
 ## 6. Resolution helper
 
@@ -176,8 +267,16 @@ func resolvePrimaries(primaries []PeerConf) (resolved []PeerConf, unresolved []s
   `{host:port, key}` unchanged.
 - Else `net.LookupHost(host)`; emit `{addr:port, key}` per result, **v4 first**.
   An entry that resolves to nothing (or errors) is appended to `unresolved`.
-- Caller: `len(resolved) == 0` → `ConfigError` (quarantine). `len(unresolved) > 0
-  && len(resolved) > 0` → `ConfigWarning` (served). Otherwise clean.
+- **Dedup** the resolved tuples on `addr:port`, keeping the first occurrence (so
+  v4-first ordering and the first-seen key survive). If a later duplicate carries a
+  **different key** than the kept one, drop it and record it for a `ConfigWarning`
+  (the `(addr, differing-key)` ambiguity, §3.1 — inert under all-`NOKEY`).
+- Caller decision: `len(resolved) == 0` → `ConfigError` (quarantine). `len(resolved)
+  > 0 && (len(unresolved) > 0 || key-collision)` → `ConfigWarning` (served).
+  Otherwise clean.
+- This helper is the single resolution chokepoint called from all five ingress
+  paths (§3.1): `ParseZones`, `LoadDynamicZoneFiles`, `ProvisionDynamicZone`,
+  `ModifyDynamicZone`, and catalog auto-config (on the catalog scalar).
 
 ## 7. Transfer fallback (the behaviour fix)
 
@@ -227,31 +326,42 @@ model).
 
 | Phase | Scope | ~LOC | Prob | Conseq | Risk |
 |---|---|---|---|---|---|
-| **P1** | `ConfigWarning` enum (4 edits) + `resolvePrimaries` helper + unit test | ~70 | Low | Low | **Low** |
+| **P1** | `ConfigWarning` enum (4 edits) + `resolvePrimaries` helper (incl. dedup) + unit test | ~80 | Low | Low | **Low** |
 | **P2** | Struct migration `Primary`→`Primaries`/`PrimariesConf`/`Upstreams`; delete dead `RefreshCounter` fields; all mechanical rename sites (A/C/F/G non-transfer) | ~120 | Low | Low | **Low** (compiler-guided; tree won't build until complete) |
-| **P3** | Parse/load resolution: parseconfig secondary-zone block (per-element Legacy/empty/key loops + the resolve call + ConfigWarning/ConfigError), `LoadDynamicZoneFiles` re-resolution, `ZoneRefresher`→`ZoneData` flow | ~90 | Med | Med | **Med** — the resolution logic + partial-fail semantics |
-| **P4** | Transfer fallback loops in `DoTransfer` + `FetchFromUpstream`; transport-vs-DNS classification; per-attempt error messages; list-rendering logs | ~80 | Med | Med | **Med** — the actual bug fix; transport-error classification is the fiddly part |
-| **P5** | Persistence: `zoneDataToZoneConf` writes `PrimariesConf` (as-written, NOT resolved); round-trip test | ~30 | Low | Med | **Low–Med** — must persist as-written |
-| **P6** | API/CLI: `--primaries` comma-list (one key for all), `RunZoneAdd/Modify` build `[]PeerConf`, list displays render the list; migrate `*.sample.yaml` `primary:`→`primaries:` | ~70 | Low | Low | **Low** |
+| **P3** | Resolution on **all five ingress paths**: parseconfig secondary-zone block (per-element Legacy/empty/key loops + resolve + ConfigWarning/ConfigError), `LoadDynamicZoneFiles`, **`ProvisionDynamicZone` + `ModifyDynamicZone`**, **catalog auto-config scalar (J)**; **`ZoneRefresher` carries both `PrimariesConf` (as-written) + `Primaries` (resolved); refreshengine merge sets `zd.PrimariesConf` + `zd.Upstreams` when `len(zr.PrimariesConf) > 0`, preserves both when empty (NOTIFY)** | ~130 | Med | Med | **Med** — resolution logic + partial-fail semantics + the both-fields merge/NOTIFY-preservation guard |
+| **P4** | Transfer fallback loops in `DoTransfer` + `FetchFromUpstream`; transport-vs-DNS classification; per-attempt error messages (`clarifyXfrError` names the failed address); list-rendering logs; confirm a failed attempt does not corrupt `IncomingSerial` | ~80 | Med | Med | **Med** — the actual bug fix; transport-error classification is the fiddly part |
+| **P5** | Persistence: `zoneDataToZoneConf` writes **`PrimariesConf` with per-entry keys** (as-written, NOT resolved, NOT hardcoded `NOKEY`); round-trip test asserts hostname + key survive and re-resolve on reload | ~35 | Low | Med | **Low–Med** — must persist as-written *with keys* |
+| **P6** | API/CLI: `--primaries` comma-list (one key for all), `RunZoneAdd/Modify` build `[]PeerConf`, **list-zones / list-dynamic render the as-written `PrimariesConf` list (the hostnames the operator wrote, not resolved addresses) + surface `config-warning`**; migrate `*.sample.yaml` `primary:`→`primaries:` | ~80 | Low | Low | **Low** |
 
-**Total ~460 LOC.** P1+P2 land together (foundation); P5+P6 together (surface) —
-so ~4 review checkpoints.
+**Total ~515 LOC.** P1+P2 land together (foundation); P5+P6 together (surface) —
+so ~4 review checkpoints. (Up from ~460 after the plan-review amendments folded in
+catalog, the extra resolution call sites, persist-with-keys, and the NOTIFY guard.)
 
 ## 10. Tests
 
 - **P1:** `resolvePrimaries` — literal IP passthrough (no lookup); a hostname
   expands to its addresses with v4 before v6 and the key copied to each; an entry
-  that doesn't resolve lands in `unresolved`; port is preserved.
+  that doesn't resolve lands in `unresolved`; port is preserved; **dedup** collapses
+  a repeated `addr:port` (keeping first); a `(addr, differing-key)` duplicate is
+  dropped + flagged.
 - **P3:** parse a zone with a bad-resolving + good-resolving primary → zone served,
   `ConfigWarning` set, `Upstreams` holds the good addresses. Parse a zone whose only
-  primary doesn't resolve → `ConfigError`, quarantined, server still starts. A
-  legacy bare-string element in `primaries:` → that zone ERROR (per-element).
+  primary doesn't resolve → `ConfigError`, quarantined, server still starts. Empty
+  `primaries: []` on a secondary → `ConfigError`. A legacy bare-string element in
+  `primaries:` → that zone ERROR (per-element). **`zone add` with a hostname primary
+  resolves at add time** (not only on the next restart). **A NOTIFY-triggered refresh
+  (minimal `ZoneRefresher`, no primaries) does NOT blank `zd.Upstreams`.** **A
+  catalog member with a hostname upstream expands to multiple addresses.**
 - **P4:** transfer fallback — first `Upstreams` address gives a transport error,
   second succeeds → transfer succeeds (use a closed port + a working test server, or
   two addresses one of which refuses). A DNS REFUSED from the first address is
-  honoured (not retried against the second).
-- **P5:** add a dynamic zone with a hostname primary → persisted config contains the
-  **hostname** (not resolved addresses); reload re-resolves.
+  honoured (not retried against the second). A failed first attempt does not corrupt
+  `IncomingSerial`.
+- **P5:** add a dynamic zone with a hostname primary **carrying a non-NOKEY-shaped
+  key name** → persisted config contains the **hostname AND the key** (not resolved
+  addresses, not forced `NOKEY`); reload re-resolves the hostname.
+- **P6:** `list-zones`/`list-dynamic` render the `primaries` list and surface
+  `config-warning` text for a partially-resolved zone.
 
 ## 11. Verify-before-coding (not blockers — confirm at implementation time)
 
