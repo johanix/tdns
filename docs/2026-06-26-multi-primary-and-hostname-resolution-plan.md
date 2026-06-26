@@ -1,0 +1,268 @@
+# Multi-Primary Upstreams + Hostname Resolution
+
+**Date:** 2026-06-26
+**Status:** Design / implementation plan
+**Tree:** this repo (`github.com/johanix/tdns`), package `v2/`, binary built from `cmdv2/auth`
+**Branch:** `dynamic-zones-mgmt` (follow-on to the dynamic-zones management interface;
+not yet merged — this change is intrinsic to making that interface usable in the
+field)
+**Related:** [2026-06-23-dynamic-zones-interface-and-tsig-transfers.md](2026-06-23-dynamic-zones-interface-and-tsig-transfers.md)
+(established the `PeerConf` / NOKEY model this builds on)
+
+## Summary
+
+Today a secondary zone has exactly **one** primary (`zd.Upstream`, a scalar
+`string`), handed straight to the SOA-probe and AXFR code, which connects to a
+single address. Two problems follow:
+
+1. **No redundancy.** Real DNS infrastructure always has more than one primary.
+   tdns can only express one.
+2. **A hostname primary that resolves to multiple addresses (e.g. A + AAAA) only
+   ever tries one of them, and gives up on failure.** This surfaced on a test box
+   with no outbound IPv6 route: `zone add --primary-addr nsa.johani.org:53` (a name
+   with both A and AAAA) picked the AAAA, hit `no route to host`, and never fell
+   back to the working A address. A sibling zone using a v4-only name worked fine.
+
+The fix is **not** "teach the transfer code to resolve hostnames." The real defect
+is that **`Primary` is a scalar when it must be a list.** Once the primary is a
+list of upstreams, expanding a hostname into several `addr:port` tuples is trivial
+— there is already a slist to store them in.
+
+This plan:
+- Renames `primary:` → **`primaries:`** (a `[]PeerConf` list). No siblings.
+- Resolves each entry's address **at config-parse/load time** (every startup and
+  reload), turning a hostname into one-or-more `addr:port` tuples (the per-entry
+  key copied to each). Re-resolved on every load, so the address set tracks DNS
+  changes over time.
+- Makes the SOA-probe and AXFR paths **iterate the resolved list**, advancing to
+  the next address on **transport errors only** (no route / refused / timeout),
+  honouring any DNS response as-is.
+- Keeps the operator's **as-written** entries (hostnames and IPs) for persistence;
+  the resolved addresses are runtime-only and never frozen to disk.
+
+## 1. Operating principles (why the design is shaped this way)
+
+These come from how experienced DNS operators actually run infrastructure, and
+they drive every decision below:
+
+- **DNS infrastructure must not depend on DNS resolution working.** A nameserver
+  has to keep working precisely when resolution has broken down. Operators
+  therefore *choose* to configure primaries by **IP address**, even though the
+  software is free to accept hostnames.
+- **A nameserver may still support hostnames** — that freedom is fine to offer; it
+  just must not become a runtime dependency. So: accept a hostname, but resolve it
+  **at config-parse time** (a moment when a resolution failure can be surfaced
+  loudly and quarantined), not during transfers. After expansion the runtime path
+  is pure-IP and resolution-independent, honouring the first principle.
+- **There is always more than one primary, for redundancy.** The data model must
+  be a list, not a scalar. Once it is a list, hostname-expansion is "append the
+  resolved addresses to the list" — no special machinery.
+- **Get the server running and the zone served.** A primary that fails to resolve
+  must not take down a zone that has other, working primaries. Partial failure is a
+  *visibility* signal, not a service-impacting error.
+
+## 2. Current state (verified against the code 2026-06-26)
+
+`ZoneData.Upstream` is a single `string` (structs.go:121), holding the configured
+primary's address with a default port appended — **never resolved**. It is set
+only from config, always as `NormalizeAddress(zr.Primary.Addr)`
+(refreshengine.go:247/319/576, dynamic_zones.go:592/719, catalog.go:382), where
+`Primary` is a `PeerConf` (`{Addr, Key, Legacy}`, the structured form from the
+prior PR). Two send sites consume it directly:
+
+- **SOA probe** — `DoTransfer` (zone_utils.go:84): `dns.Exchange(m, upstream)` at
+  zone_utils.go:101, a single destination.
+- **AXFR/IXFR** — `ZoneTransferIn` (dnsutils.go:54): `transfer.In(msg, upstream)` at
+  dnsutils.go:75, reached from `FetchFromUpstream` (zone_utils.go:217) which passes
+  `zd.Upstream` at zone_utils.go:237.
+
+Both hand a `host:port` string to the vendored miekg/dns (`johanix/dns`), which
+calls Go's dialer. The dialer resolves a hostname but connects to **one** address
+— for the UDP SOA probe it never falls back; for the TCP AXFR it falls back only on
+TCP-connect failure, not on a DNS-level failure. So a multi-address hostname primary
+is a single point of failure even though the redundancy exists in DNS.
+
+`NormalizeAddress` (parseconfig.go:1453) appends a default `:53` and does **no**
+resolution — a hostname survives it unchanged.
+
+`RefreshCounter.Upstream` and `RefreshCounter.Notify` (refreshengine.go:46-47) are
+**write-only / dead** (verified: read nowhere; the ticker re-refreshes via
+`zd.Upstream`). They are deleted as part of this work (decided — see §4).
+
+`TemplateConf` (structs.go:252) is dead code (never instantiated; templates use
+`[]ZoneConf` / `map[string]ZoneConf`). Its `Primary` field is irrelevant here and
+is left untouched.
+
+## 3. Design decisions
+
+| Topic | Decision (2026-06-26) | Rationale |
+|---|---|---|
+| **Scalar → list** | `primary: PeerConf` → **`primaries: []PeerConf`** everywhere (config, refresher, input, wire). YAML key renamed; **no siblings**. | The actual defect: a primary is a redundant *set*, not one thing. A list makes hostname-expansion trivial. |
+| **Resolution timing** | **At config-parse/load time**, re-resolved on every startup/reload — NOT at transfer time, NOT cached once-and-for-all. | Honours "infra must not depend on resolution at runtime" while picking up address changes over time. A parse-time failure can be quarantined loudly. |
+| **Hostname allowed** | A `primaries:` entry's `addr` may be an IP **or** a hostname (both with `:port`). Hostname → all resolved `addr:port`, **v4 before v6**. | The software offers the freedom; operators choose IPs. v4-first directly fixes the broken-outbound-v6 case (the working family is tried first) and is harmless on healthy dual-stack. |
+| **Resolution source** | `net.LookupHost` (the system stub resolver), matching existing code (childsync_utils.go:457, dsync_lookup.go:407). NOT the in-process IMR. | The operator wrote a name expecting it to resolve the way the box resolves names. Using the IMR would resolve differently from the rest of the OS — a debugging trap. |
+| **Partial resolution** | Some entries resolve, some don't, **≥1 address results → zone is SERVED** + a visibility-only **`ConfigWarning`** naming the unresolved entries. **Zero addresses → `ConfigError`** (service-impacting, zone quarantined). | Get the server running and the zone served. One dead name must not kill a zone with working primaries. The warning makes the degradation visible without degrading service. |
+| **Two ZoneData fields** | `ZoneData.PrimariesConf []PeerConf` (as-written, **persisted**, re-resolved each load) **and** `ZoneData.Upstreams []PeerConf` (resolved `addr:port`, **runtime-only**). | The hostname is the durable thing; addresses are derived and ephemeral. Persisting resolved addresses would freeze them and contradict re-resolution on restart. |
+| **Transfer fallback** | SOA probe and AXFR **iterate `Upstreams`**, advancing to the next on **transport errors only** (no route / conn refused / timeout / network unreachable). A **DNS response** (any rcode, incl. REFUSED/SERVFAIL) is honoured as-is. All-transport-failed → error. | A transport error means "this *address* is unreachable" → try a sibling. A DNS response means "a server answered" → that's not an address problem; trying siblings of the same logical server is pointless or harmful (e.g. it would convert today's quiet REFUSED back-off into a noisy double-failure). |
+| **Loop location** | The fallback loop lives in the **callers** (`DoTransfer`, `FetchFromUpstream`); `ZoneTransferIn` keeps its single-`upstream string` signature. | Smaller change; `clarifyXfrError` and the envelope-read loop stay intact. |
+| **Scope** | The fix lives in the **shared transfer path**, so EVERY secondary with a hostname/multi-primary benefits — static config, catalog, and API-added — not just dynamic zones. | The latent bug was never dynamic-zones-specific; the interface just made it easy to trip. Fix it where it actually lives. |
+| **CLI key scope** | `--primaries` is a comma-separated list; **one `--primary-key` applies to all** entries on the CLI. Per-primary keys remain expressible via YAML/API (the structured `[]PeerConf`). | A primary set usually shares one TSIG key; per-primary CLI syntax (`a:53/K1,b:53/K2`) is clunky and rarely needed. The structured paths still allow it. |
+| **Dead RefreshCounter fields** | **Delete** `RefreshCounter.Upstream` and `RefreshCounter.Notify` and their 6 write sites. | Verified write-only / read-nowhere. Converting a dead scalar to a dead list is pointless. (Operator-approved 2026-06-26.) |
+| **miekg/dns built-in fallback** | Not relied upon. | Go's dialer picks one address (UDP: no fallback; TCP: connect-failure only). Insufficient for DNS-level robustness; we do explicit resolve-to-list + per-address retry. |
+
+## 4. Blast radius (verified — ~58 sites, 8 files)
+
+Counts per group (full per-site map captured during planning; the non-mechanical
+ones are spelled out in the phases):
+
+- **A. `ZoneConf.Primary`** → `Primaries`: 11 sites (parse validation, normalize,
+  template apply, refresher build, persistence read).
+- **B. `ZoneData.Upstream`** → `Upstreams`: 14 sites (the biggest group — the two
+  transfer sites + many logs + persistence + the modify carry-forward).
+- **C. `ZoneRefresher.Primary`** → `Primaries`: 9 sites (4 overlap A/B); the
+  Primary→Upstream flow in refreshengine.
+- **D. `RefreshCounter.Upstream`/`.Notify`**: 6 dead writes → **deleted**.
+- **E. Persistence** (`zoneDataToZoneConf`, `LoadDynamicZoneFiles`): 3 sites.
+- **F. API + CLI** (`ZonePost.Primary`, APIzone add/modify, `--primary-addr`,
+  RunZoneAdd/Modify, list display): ~12 sites.
+- **G. `DynamicZoneInput.Primary`** in the cores: 11 sites.
+- **H. Helpers**: none new needed beyond `resolvePrimaries` — `net.LookupHost`,
+  `net.ParseIP`, `net.JoinHostPort`/`SplitHostPort` all already in use.
+- **I. `ErrorType` enum**: 4 edits to add `ConfigWarning` (const,
+  `ErrorTypeToString`, `errorTypeReportOrder`; **NOT** `serviceImpactingErrors`).
+
+**The 12 non-mechanical sites** (scalar→list is not a rename) are the parse
+validation loops, the resolution point (parseconfig.go:673-675 area), the template
+is-set test, the two transfer loops, the single-value upstream logs, the
+"primary changed/provided?" guards in modify, the persistence as-written decision,
+the list-zones display pick, and the CLI flag change. Each is addressed in the
+phase that owns it.
+
+## 5. Data model (final)
+
+```
+ZoneConf:
+  Primaries []PeerConf            // YAML primaries: — as written (IP or host:port)
+
+ZoneData:
+  PrimariesConf []PeerConf        // as-written; PERSISTED; re-resolved each load
+  Upstreams     []PeerConf        // resolved addr:port tuples; RUNTIME ONLY
+  // (Upstream string is removed)
+
+ZoneRefresher:
+  Primaries []PeerConf            // carries the RESOLVED list to RefreshEngine
+
+DynamicZoneInput.Primaries []PeerConf
+ZonePost.Primaries        []PeerConf
+
+RefreshCounter:                   // Upstream + Notify fields DELETED (dead)
+```
+
+Flow: `primaries: [{foo.bar:53, K}]` → parse-time `resolvePrimaries` →
+`PrimariesConf = [{foo.bar:53,K}]`, `Upstreams = [{1.2.3.4:53,K},{[2001::53]:53,K}]`
+→ `ZoneRefresher.Primaries = Upstreams` → transfer loop iterates `Upstreams`.
+
+## 6. Resolution helper
+
+```go
+// resolvePrimaries expands each as-written entry into one-or-more addr:port
+// tuples, copying the per-entry key to each. A literal IP passes through
+// unchanged (no lookup). Returns the resolved list plus the list of entries
+// that produced NO address (for the ConfigWarning / ConfigError decision).
+func resolvePrimaries(primaries []PeerConf) (resolved []PeerConf, unresolved []string)
+```
+
+- Split `host:port` (default `:53`). If `net.ParseIP(host) != nil` → emit
+  `{host:port, key}` unchanged.
+- Else `net.LookupHost(host)`; emit `{addr:port, key}` per result, **v4 first**.
+  An entry that resolves to nothing (or errors) is appended to `unresolved`.
+- Caller: `len(resolved) == 0` → `ConfigError` (quarantine). `len(unresolved) > 0
+  && len(resolved) > 0` → `ConfigWarning` (served). Otherwise clean.
+
+## 7. Transfer fallback (the behaviour fix)
+
+Both `DoTransfer` (SOA) and `FetchFromUpstream` (AXFR) loop over `zd.Upstreams`:
+
+```
+for _, up := range zd.Upstreams:
+    r/err = attempt(up)            // dns.Exchange (SOA) or ZoneTransferIn (AXFR)
+    if isTransportError(err):      // no route / refused / timeout / net unreachable
+        record err; continue       // try the next address
+    return <result>                // any DNS response (incl. REFUSED) — honour it
+return all-transport-failed-error  // only when every address had a transport error
+```
+
+- **SOA probe** classification is clean: `dns.Exchange` returns `err != nil` for
+  transport failures and `(*dns.Msg, nil)` for any DNS response. So `err != nil` →
+  try next; `err == nil` → honour the rcode via the existing `switch` (REFUSED /
+  SERVFAIL / NXDOMAIN keep today's "never mind, not ready" semantics).
+- **AXFR** transport failure can surface at `transfer.In` itself or as an
+  `envelope.Error` mid-stream; treat a connection-level error from either as
+  "try next." `zd.Data` is reset at the start of each attempt (it already is, at
+  dnsutils.go:68-71) so a partial failed transfer does not pollute the next try.
+- `isTransportError` matches `net.Error`/`*net.OpError` / `syscall` connection
+  errors (`ECONNREFUSED`, `EHOSTUNREACH`, `ENETUNREACH`, timeout). Confirm the
+  exact set against the vendored dialer at implementation time (§11).
+- `clarifyXfrError` should name the **address that failed** (per-attempt), not a
+  single configured upstream.
+
+## 8. `ConfigWarning` error type
+
+Add a visibility-only warning, mirroring `DelegationSyncWarning`:
+- `enums.go` const block — add `ConfigWarning` after `DelegationSyncWarning`.
+- `ErrorTypeToString` — `ConfigWarning: "config-warning"`.
+- `errorTypeReportOrder` — append (low severity).
+- **NOT** added to `serviceImpactingErrors` / rollover gating sets — omission =
+  the zone keeps serving. This is the established pattern for the `*Warning` types.
+
+Partial-resolution → `SetError(ConfigWarning, "primary %q did not resolve (serving
+from N of M)", …)`. Zero → `SetError(ConfigError, …)` (existing, service-impacting).
+
+## 9. Phased plan
+
+Each phase: code → `cd tdns/cmdv2 && GOROOT=/opt/local/lib/go make` → `go test
+-race` → update this doc's phase status → show diff → wait for OK → commit + push.
+Risk graded as `probability × consequence` (see the dynamic-zones doc §7 for the
+model).
+
+| Phase | Scope | ~LOC | Prob | Conseq | Risk |
+|---|---|---|---|---|---|
+| **P1** | `ConfigWarning` enum (4 edits) + `resolvePrimaries` helper + unit test | ~70 | Low | Low | **Low** |
+| **P2** | Struct migration `Primary`→`Primaries`/`PrimariesConf`/`Upstreams`; delete dead `RefreshCounter` fields; all mechanical rename sites (A/C/F/G non-transfer) | ~120 | Low | Low | **Low** (compiler-guided; tree won't build until complete) |
+| **P3** | Parse/load resolution: parseconfig secondary-zone block (per-element Legacy/empty/key loops + the resolve call + ConfigWarning/ConfigError), `LoadDynamicZoneFiles` re-resolution, `ZoneRefresher`→`ZoneData` flow | ~90 | Med | Med | **Med** — the resolution logic + partial-fail semantics |
+| **P4** | Transfer fallback loops in `DoTransfer` + `FetchFromUpstream`; transport-vs-DNS classification; per-attempt error messages; list-rendering logs | ~80 | Med | Med | **Med** — the actual bug fix; transport-error classification is the fiddly part |
+| **P5** | Persistence: `zoneDataToZoneConf` writes `PrimariesConf` (as-written, NOT resolved); round-trip test | ~30 | Low | Med | **Low–Med** — must persist as-written |
+| **P6** | API/CLI: `--primaries` comma-list (one key for all), `RunZoneAdd/Modify` build `[]PeerConf`, list displays render the list; migrate `*.sample.yaml` `primary:`→`primaries:` | ~70 | Low | Low | **Low** |
+
+**Total ~460 LOC.** P1+P2 land together (foundation); P5+P6 together (surface) —
+so ~4 review checkpoints.
+
+## 10. Tests
+
+- **P1:** `resolvePrimaries` — literal IP passthrough (no lookup); a hostname
+  expands to its addresses with v4 before v6 and the key copied to each; an entry
+  that doesn't resolve lands in `unresolved`; port is preserved.
+- **P3:** parse a zone with a bad-resolving + good-resolving primary → zone served,
+  `ConfigWarning` set, `Upstreams` holds the good addresses. Parse a zone whose only
+  primary doesn't resolve → `ConfigError`, quarantined, server still starts. A
+  legacy bare-string element in `primaries:` → that zone ERROR (per-element).
+- **P4:** transfer fallback — first `Upstreams` address gives a transport error,
+  second succeeds → transfer succeeds (use a closed port + a working test server, or
+  two addresses one of which refuses). A DNS REFUSED from the first address is
+  honoured (not retried against the second).
+- **P5:** add a dynamic zone with a hostname primary → persisted config contains the
+  **hostname** (not resolved addresses); reload re-resolves.
+
+## 11. Verify-before-coding (not blockers — confirm at implementation time)
+
+- **`isTransportError` classification:** confirm the exact error set the vendored
+  `johanix/dns` dialer surfaces for `dns.Exchange` and `transfer.In` (net.Error
+  timeout, `*net.OpError` with `ECONNREFUSED`/`EHOSTUNREACH`/`ENETUNREACH`). The
+  loop's correctness hinges on classifying these vs DNS-level errors.
+- **IXFR:** production refresh hardcodes `"axfr"` (FetchFromUpstream,
+  zone_utils.go:234); the loop applies to AXFR. IXFR, when wired, uses the same
+  loop via `ZoneTransferIn`.
+- **Sample-config cutover:** like the prior `primary:` struct migration, this is a
+  hard cutover — a bare-string or `primary:`-keyed config entry goes to ERROR; the
+  operator migrates to `primaries:`. Migrate the shipped `*.sample.yaml` in P6 and
+  note the upgrade requirement.
