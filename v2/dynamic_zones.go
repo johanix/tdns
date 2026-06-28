@@ -164,16 +164,24 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 	lg.Info("loading dynamic zones from config file", "path", conf.DynamicZones.ConfigFile)
 
 	// Load dynamic config file
-	zoneConfs, err := conf.loadDynamicConfigFile()
+	cf, err := conf.loadDynamicConfigFile()
 	if err != nil {
 		// Error already logged in loadDynamicConfigFile
 		return nil // Start with empty config rather than failing
 	}
 
+	// Load the persisted (API-created) TSIG keys into the store BEFORE enqueuing
+	// the zones that reference them, so the refresh engine can sign their SOA
+	// probe / AXFR. Config keys were loaded first (LoadTsigKeys) and win on a name
+	// collision (loadDynamicTsigKeys skips already-defined names).
+	if cf.Keys != nil {
+		conf.loadDynamicTsigKeys(cf.Keys.Tsig)
+	}
+
 	loadedCount := 0
 	skippedCount := 0
 
-	for _, zconf := range zoneConfs {
+	for _, zconf := range cf.Zones {
 		zoneName := zconf.Name
 
 		// Check if zone already exists (from main config or already loaded)
@@ -282,6 +290,12 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 // DynamicConfigFile represents the structure of the dynamic zones config file
 type DynamicConfigFile struct {
 	Zones []ZoneConf `yaml:"zones"`
+	// Keys mirrors the main config's keys: block (keys.tsig[]) so the dynamic file
+	// is self-contained: the TSIG secrets the persisted zones reference (API-created
+	// via `zone add --tsig-*`) are stored alongside them and reloaded on startup,
+	// so an API-provisioned TSIG secondary survives a restart instead of
+	// quarantining on an unknown key. Omitted when empty.
+	Keys *KeyConf `yaml:"keys,omitempty"`
 }
 
 var (
@@ -345,7 +359,7 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 
 // loadDynamicConfigFile loads the dynamic config file and returns the zone configs
 // Thread-safe: protected by dynamicConfigMutex to prevent races with writeDynamicConfigFile
-func (conf *Config) loadDynamicConfigFile() ([]ZoneConf, error) {
+func (conf *Config) loadDynamicConfigFile() (*DynamicConfigFile, error) {
 	if conf.DynamicZones.ConfigFile == "" {
 		return nil, fmt.Errorf("dynamic config file path not configured")
 	}
@@ -359,7 +373,7 @@ func (conf *Config) loadDynamicConfigFile() ([]ZoneConf, error) {
 	// Check if file exists
 	if _, err := os.Stat(conf.DynamicZones.ConfigFile); os.IsNotExist(err) {
 		lg.Debug("dynamic config file does not exist, starting with empty config", "path", conf.DynamicZones.ConfigFile)
-		return []ZoneConf{}, nil
+		return &DynamicConfigFile{}, nil
 	}
 
 	// Read file
@@ -373,15 +387,15 @@ func (conf *Config) loadDynamicConfigFile() ([]ZoneConf, error) {
 	if err := yaml.Unmarshal(data, &configFile); err != nil {
 		// File is corrupted - log error and return empty config
 		lg.Error("failed to parse dynamic config file, starting with empty config", "path", conf.DynamicZones.ConfigFile, "err", err)
-		return []ZoneConf{}, nil
+		return &DynamicConfigFile{}, nil
 	}
 
 	lg.Info("loaded zones from dynamic config file", "count", len(configFile.Zones), "path", conf.DynamicZones.ConfigFile)
-	return configFile.Zones, nil
+	return &configFile, nil
 }
 
 // writeDynamicConfigFile writes the dynamic config file with atomic writes
-func (conf *Config) writeDynamicConfigFile(zones []ZoneConf) error {
+func (conf *Config) writeDynamicConfigFile(zones []ZoneConf, keys []TsigDetails) error {
 	if conf.DynamicZones.ConfigFile == "" {
 		return fmt.Errorf("dynamic config file path not configured")
 	}
@@ -392,6 +406,9 @@ func (conf *Config) writeDynamicConfigFile(zones []ZoneConf) error {
 	// Create config file structure
 	configFile := DynamicConfigFile{
 		Zones: zones,
+	}
+	if len(keys) > 0 {
+		configFile.Keys = &KeyConf{Tsig: keys}
 	}
 
 	// Marshal to YAML
@@ -439,8 +456,53 @@ func (conf *Config) writeDynamicConfigFile(zones []ZoneConf) error {
 		return fmt.Errorf("failed to rename temp file to final file: %v", err)
 	}
 
-	lg.Info("wrote dynamic config file", "path", conf.DynamicZones.ConfigFile, "zones", len(zones))
+	lg.Info("wrote dynamic config file", "path", conf.DynamicZones.ConfigFile, "zones", len(zones), "keys", len(keys))
 	return nil
+}
+
+// getDynamicTsigKeysFromZones collects the TSIG key definitions referenced by the
+// persisted dynamic zones' primaries, so the dynamic config file carries the
+// secrets its zones need to sign replication. A config-owned key a dynamic zone
+// happens to reference is included too; on reload it is skipped in favour of the
+// config copy (loadDynamicTsigKeys), so the duplication is harmless.
+func (conf *Config) getDynamicTsigKeysFromZones(zones []ZoneConf) []TsigDetails {
+	seen := map[string]bool{}
+	var out []TsigDetails
+	for _, z := range zones {
+		for _, p := range z.Primaries {
+			if p.Key == "" || p.Key == NOKEY || seen[p.Key] {
+				continue
+			}
+			seen[p.Key] = true
+			if d, ok := conf.Internal.TsigKeyStore.Get(p.Key); ok {
+				out = append(out, d)
+			}
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
+}
+
+// loadDynamicTsigKeys upserts TSIG keys persisted in the dynamic config file into
+// the live store, but never overrides a key already defined — config keys are
+// loaded first (LoadTsigKeys), so they win. Invalid entries are skipped+logged.
+func (conf *Config) loadDynamicTsigKeys(keys []TsigDetails) {
+	loaded := 0
+	for _, k := range keys {
+		if conf.Internal.TsigKeyStore.Has(k.Name) {
+			lg.Debug("dynamic tsig key already defined (config wins), skipping", "key", k.Name)
+			continue
+		}
+		if err := validateTsigKeySpec(k.Name, k.Algorithm, k.Secret); err != nil {
+			lg.Warn("skipping invalid dynamic tsig key", "key", k.Name, "err", err)
+			continue
+		}
+		conf.Internal.TsigKeyStore.Add(k)
+		loaded++
+	}
+	if loaded > 0 {
+		lg.Info("loaded dynamic TSIG keys from dynamic config file", "count", loaded)
+	}
 }
 
 // getDynamicZonesFromZonesMap collects all dynamic zones from the Zones map
@@ -478,11 +540,13 @@ func (conf *Config) WriteDynamicConfigFile() error {
 		return nil // No config file configured, nothing to write
 	}
 
-	// Collect all dynamic zones
+	// Collect all dynamic zones and the TSIG keys they reference (so the file is
+	// self-contained and an API-created TSIG secondary survives a restart).
 	dynamicZones := conf.getDynamicZonesFromZonesMap()
+	keys := conf.getDynamicTsigKeysFromZones(dynamicZones)
 
 	// Write to file
-	return conf.writeDynamicConfigFile(dynamicZones)
+	return conf.writeDynamicConfigFile(dynamicZones, keys)
 }
 
 // AddDynamicZoneToConfig adds or updates a zone in the dynamic config file
@@ -538,6 +602,39 @@ type DynamicZoneInput struct {
 	Type      ZoneType
 	Primaries []PeerConf
 	Options   map[ZoneOption]bool
+	// Inline TSIG key (API/CLI add/modify). When TsigName is set it is validated
+	// and upserted into the keys: store, then applied to every keyless primary
+	// (NOKEY/empty). The secret is persisted with the zone (the dynamic config
+	// file's keys: block), so an API-created TSIG secondary survives a restart.
+	// TsigAlgo defaults to hmac-sha256 when empty.
+	TsigName   string
+	TsigSecret string
+	TsigAlgo   string
+}
+
+// applyInlineTsigKey upserts an inline TSIG key supplied with an add/modify
+// request into the keys: store and points every keyless primary (NOKEY/empty) at
+// it. It is a no-op when no inline key name was given. Must run before the primary
+// key-validation loop (so the new name validates) and before persistence (so the
+// secret is written out by getDynamicTsigKeysFromZones).
+func (conf *Config) applyInlineTsigKey(in *DynamicZoneInput) error {
+	if in.TsigName == "" {
+		return nil
+	}
+	algo := in.TsigAlgo
+	if algo == "" {
+		algo = "hmac-sha256"
+	}
+	if err := validateTsigKeySpec(in.TsigName, algo, in.TsigSecret); err != nil {
+		return err
+	}
+	conf.Internal.TsigKeyStore.Add(TsigDetails{Name: in.TsigName, Algorithm: algo, Secret: in.TsigSecret})
+	for i := range in.Primaries {
+		if in.Primaries[i].Key == "" || in.Primaries[i].Key == NOKEY {
+			in.Primaries[i].Key = in.TsigName
+		}
+	}
+	return nil
 }
 
 // ProvisionDynamicZone is the shared *add* core, called by both the catalog
@@ -568,9 +665,14 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 		return "", fmt.Errorf("zone %s already exists", name)
 	}
 
-	// Validate the primary's key. Improvement-1 phase: NOKEY is the only
-	// resolvable key name (any other is an unknown-key error until the keys:
-	// block lands).
+	// An inline TSIG key (tsig_name/secret/algo) is upserted into the keys: store
+	// and applied to keyless primaries before we validate the primary keys below.
+	if err := conf.applyInlineTsigKey(&in); err != nil {
+		return "", fmt.Errorf("zone %s: %w", name, err)
+	}
+
+	// Validate every primary's key: NOKEY (no TSIG) or a name defined in the
+	// keys: store (config or inline/API). An unknown name is rejected.
 	if in.Type == Secondary {
 		if len(in.Primaries) == 0 {
 			return "", fmt.Errorf("secondary zone %s requires at least one primary", name)
@@ -724,6 +826,12 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	}
 	if !oldZd.Options[OptApiManagedZone] {
 		return "", fmt.Errorf("zone %s is not API-managed and cannot be modified here", name)
+	}
+	// An inline TSIG key (tsig_name/secret/algo) is upserted and applied to keyless
+	// primaries first; a same-name upsert rotates the secret for primaries that
+	// already reference it (no primaries needed for a pure key rotation).
+	if err := conf.applyInlineTsigKey(&in); err != nil {
+		return "", fmt.Errorf("zone %s: %w", name, err)
 	}
 	// When primaries are supplied they REPLACE the set, so every entry must be
 	// complete (empty in.Primaries means "keep the old set" and skips this).

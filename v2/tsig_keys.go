@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"encoding/base64"
 	"fmt"
 	"strings"
 	"sync"
@@ -102,4 +103,33 @@ func (conf *Config) LoadTsigKeys() error {
 // NOKEY (no TSIG) or a name defined in the keys: store.
 func (conf *Config) tsigKeyDefined(name string) bool {
 	return name == NOKEY || conf.Internal.TsigKeyStore.Has(name)
+}
+
+// knownTsigAlgo reports whether algo names a supported HMAC TSIG algorithm
+// (canonical compare, so "hmac-sha256" and "hmac-sha256." both match).
+func knownTsigAlgo(algo string) bool {
+	switch dns.CanonicalName(algo) {
+	case dns.HmacSHA1, dns.HmacSHA224, dns.HmacSHA256, dns.HmacSHA384, dns.HmacSHA512:
+		return true
+	}
+	return false
+}
+
+// validateTsigKeySpec checks an inline (API-supplied) TSIG key before it enters
+// the store: a complete, non-reserved name, a supported algorithm, and a base64
+// secret. Used by the dynamic-zone add/modify path and the dynamic-config reload.
+func validateTsigKeySpec(name, algo, secret string) error {
+	if name == "" || secret == "" {
+		return fmt.Errorf("tsig key requires both a name and a secret")
+	}
+	if strings.EqualFold(name, NOKEY) || strings.EqualFold(name, BLOCKED) {
+		return fmt.Errorf("tsig key name %q is a reserved sentinel (NOKEY/BLOCKED)", name)
+	}
+	if !knownTsigAlgo(algo) {
+		return fmt.Errorf("tsig algorithm %q for key %q is not a supported HMAC algorithm", algo, name)
+	}
+	if _, err := base64.StdEncoding.DecodeString(secret); err != nil {
+		return fmt.Errorf("tsig secret for key %q is not valid base64: %w", name, err)
+	}
+	return nil
 }
