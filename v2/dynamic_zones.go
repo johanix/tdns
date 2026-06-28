@@ -625,8 +625,7 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	// Partial resolution: the zone is served from the addresses that resolved,
 	// with a visibility-only ConfigWarning naming the rest.
 	if len(res.Unresolved) > 0 || len(res.KeyCollisions) > 0 {
-		served := len(in.Primaries) - len(res.Unresolved)
-		zd.SetError(ConfigWarning, "serving from %d of %d primaries (unresolved: %v, key-collisions: %v)", served, len(in.Primaries), res.Unresolved, res.KeyCollisions)
+		zd.SetError(ConfigWarning, "serving from %d resolved upstream(s) of %d configured primaries (unresolved: %v, key-collisions: %v)", len(res.Resolved), len(in.Primaries), res.Unresolved, res.KeyCollisions)
 	}
 
 	// Enqueue the initial transfer — fire-and-forget (no Wait, no Response). If
@@ -746,7 +745,14 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	// (2) Build a fresh ZoneData carrying the changed params; (3) replace.
 	options := in.Options
 	if options == nil {
-		options = oldZd.Options
+		// Carry the old options forward into a FRESH map — newZd must not share a
+		// mutable map with oldZd, or the B5 replace-not-mutate strategy breaks
+		// (an in-flight refresh on oldZd and later updates on newZd would race on
+		// one map guarded by two different mutexes).
+		options = make(map[ZoneOption]bool, len(oldZd.Options))
+		for k, v := range oldZd.Options {
+			options[k] = v
+		}
 	} else {
 		options[OptApiManagedZone] = true
 	}
@@ -774,8 +780,7 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	// Partial resolution of the new primaries: served from what resolved, with
 	// a visibility-only ConfigWarning naming the rest.
 	if len(modRes.Unresolved) > 0 || len(modRes.KeyCollisions) > 0 {
-		served := len(in.Primaries) - len(modRes.Unresolved)
-		newZd.SetError(ConfigWarning, "serving from %d of %d primaries (unresolved: %v, key-collisions: %v)", served, len(in.Primaries), modRes.Unresolved, modRes.KeyCollisions)
+		newZd.SetError(ConfigWarning, "serving from %d resolved upstream(s) of %d configured primaries (unresolved: %v, key-collisions: %v)", len(modRes.Resolved), len(in.Primaries), modRes.Unresolved, modRes.KeyCollisions)
 	}
 	// (5) Force a re-pull from the new upstream.
 	zr := ZoneRefresher{

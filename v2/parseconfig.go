@@ -699,9 +699,12 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				continue
 			}
 			if len(res.Unresolved) > 0 || len(res.KeyCollisions) > 0 {
-				served := len(zconf.Primaries) - len(res.Unresolved)
-				lgConfig.Warn("secondary zone: some primaries unavailable, serving from the rest", "zone", zname, "unresolved", res.Unresolved, "key_collisions", res.KeyCollisions, "serving", served, "of", len(zconf.Primaries))
-				zd.SetError(ConfigWarning, "serving from %d of %d primaries (unresolved: %v, key-collisions: %v)", served, len(zconf.Primaries), res.Unresolved, res.KeyCollisions)
+				// Count resolved addresses actually usable for transfer — not
+				// entries-minus-unresolved, which over-counts when a key
+				// collision drops an otherwise-resolved address.
+				served := len(res.Resolved)
+				lgConfig.Warn("secondary zone: some primaries unavailable, serving from the rest", "zone", zname, "unresolved", res.Unresolved, "key_collisions", res.KeyCollisions, "resolved_upstreams", served, "configured_primaries", len(zconf.Primaries))
+				zd.SetError(ConfigWarning, "serving from %d resolved upstream(s) of %d configured primaries (unresolved: %v, key-collisions: %v)", served, len(zconf.Primaries), res.Unresolved, res.KeyCollisions)
 			}
 			resolvedPrimaries = res.Resolved
 
@@ -1098,7 +1101,10 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 		zconf.Store = tmpl.Store
 	}
 	if len(tmpl.Primaries) > 0 {
-		zconf.Primaries = tmpl.Primaries
+		// Clone — ParseZones normalizes zconf.Primaries[i].Addr in place, so an
+		// alias of the template slice would let the first zone using this
+		// template mutate the shared template state for every later zone.
+		zconf.Primaries = clonePeerConfs(tmpl.Primaries)
 	}
 	if len(tmpl.Zonefile) > 0 {
 		// H26: Validate zone name doesn't contain format specifiers

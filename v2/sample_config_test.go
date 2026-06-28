@@ -16,7 +16,7 @@ import (
 func TestSampleZonesConfigDecodes(t *testing.T) {
 	data, err := os.ReadFile("../cmdv2/auth/auth-zones.sample.yaml")
 	if err != nil {
-		t.Skipf("sample not found (%v)", err)
+		t.Fatalf("checked-in sample not found (%v)", err)
 	}
 	var raw map[string]interface{}
 	if err := yaml.Unmarshal(data, &raw); err != nil {
@@ -65,7 +65,7 @@ func TestSampleZonesConfigDecodes(t *testing.T) {
 func TestSampleTemplatesConfigIsValidYAML(t *testing.T) {
 	data, err := os.ReadFile("../cmdv2/auth/auth-templates.sample.yaml")
 	if err != nil {
-		t.Skipf("sample not found (%v)", err)
+		t.Fatalf("checked-in sample not found (%v)", err)
 	}
 	var raw map[string]interface{}
 	if err := yaml.Unmarshal(data, &raw); err != nil {

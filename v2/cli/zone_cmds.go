@@ -647,7 +647,14 @@ func VerboseListZone(cr tdns.ZoneResponse) {
 	for zname, zconf := range cr.Zones {
 		line := fmt.Sprintf("zone: %s\n", zname)
 		if zconf.Error {
-			line += fmt.Sprintf("\tState: ERROR ErrorType: %s ErrorMsg: %s\n", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
+			// A service-impacting error is ERROR; a non-service-impacting
+			// warning (e.g. ConfigWarning) leaves the zone serving — render it
+			// as such, matching ListZones rather than masquerading as ERROR.
+			if tdns.ErrorTypeIsServiceImpacting(zconf.ErrorType) {
+				line += fmt.Sprintf("\tState: ERROR ErrorType: %s ErrorMsg: %s\n", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
+			} else {
+				line += fmt.Sprintf("\tState: serving Warning[%s]: %s\n", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
+			}
 		}
 		opts := []string{}
 		for _, opt := range zconf.Options {
