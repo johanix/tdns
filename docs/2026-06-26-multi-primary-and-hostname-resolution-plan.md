@@ -103,7 +103,7 @@ is left untouched.
 | **Resolution source** (revised 2026-06-28) | **The in-process IMR** — `conf.Internal.ImrEngine.DefaultRRsetFetcher` for A + AAAA — NOT `net.LookupHost`. Because the IMR engine goroutine starts *after* `ParseZones`/`LoadDynamicZoneFiles` in `MainInit`, `MainInit` now calls `conf.InitImrEngine()` synchronously before `ParseZones` (idempotent, first-init-wins; the per-app `StartXxx` reuses the instance and adds trust anchors + listeners). | Primaries must resolve the way **tdns itself** resolves names — through its own recursive resolver, with the root hints / stubs / validation tdns is configured with — not via the OS stub resolver, whose configuration tdns does not control. **This reverses the original `net.LookupHost` decision** (the earlier rationale — "resolve the way the box's OS resolves" — was rejected: the relevant resolver is tdns's, not the OS's). |
 | **Partial resolution** | Some entries resolve, some don't, **≥1 address results → zone is SERVED** + a visibility-only **`ConfigWarning`** naming the unresolved entries. **Zero addresses → `ConfigError`** (service-impacting, zone quarantined). | Get the server running and the zone served. One dead name must not kill a zone with working primaries. The warning makes the degradation visible without degrading service. |
 | **Two ZoneData fields** | `ZoneData.PrimariesConf []PeerConf` (as-written, **persisted**, re-resolved each load) **and** `ZoneData.Upstreams []PeerConf` (resolved `addr:port`, **runtime-only**). | The hostname is the durable thing; addresses are derived and ephemeral. Persisting resolved addresses would freeze them and contradict re-resolution on restart. |
-| **Transfer fallback** | SOA probe and AXFR **iterate `Upstreams`**, advancing to the next on **transport errors only** (no route / conn refused / timeout / network unreachable). A **DNS response** (any rcode, incl. REFUSED/SERVFAIL) is honoured as-is. All-transport-failed → error. | A transport error means "this *address* is unreachable" → try a sibling. A DNS response means "a server answered" → that's not an address problem; trying siblings of the same logical server is pointless or harmful (e.g. it would convert today's quiet REFUSED back-off into a noisy double-failure). |
+| **Transfer fallback** (revised 2026-06-28) | Both paths **iterate `Upstreams`** until one yields what's needed. **AXFR**: advance on ANY failure — transport error, a REFUSED/NOTAUTH/SERVFAIL xfr rcode, or bad zone data; stop on the first success; all-failed → error. **SOA probe**: advance on a transport error OR a non-usable rcode (REFUSED/SERVFAIL/NXDOMAIN/empty); stop on a usable NOERROR+SOA; if every primary answered but none was usable → quiet back-off (no transfer, no error); all-unreachable → hard error. | Multiple **primaries** are independent servers, not addresses of one server: `allow-transfer` ACLs routinely differ per primary, so a REFUSED from one says nothing about a sibling. Terminating on REFUSED would defeat the very redundancy multi-primary exists to provide. **Reverses the earlier "retry on transport errors only, honour any DNS response" decision** — which wrongly conflated multiple distinct primaries with multiple addresses of one server, and so dropped the `isTransportError` distinction entirely. |
 | **Loop location** | The fallback loop lives in the **callers** (`DoTransfer`, `FetchFromUpstream`); `ZoneTransferIn` keeps its single-`upstream string` signature. | Smaller change; `clarifyXfrError` and the envelope-read loop stay intact. |
 | **Scope** | The transfer-path fix (the resolved-list loop) benefits EVERY secondary — static config, catalog, **and** API-added — because they all reach `DoTransfer`/`FetchFromUpstream` via `zd.Upstreams`. **Multi-*primary*** (a list the operator writes) is added for **static + API** zones; **catalog members get multi-*address* only** (see catalog row). | The latent bug was never dynamic-zones-specific; the interface just made it easy to trip. Fix it where it actually lives. |
 | **Catalog scope (minimal — decided 2026-06-26)** | `ConfigGroupConfig.Upstream` stays a **single scalar `string`** (no config-group schema change, no catalog-YAML cutover). At catalog auto-config (`catalog.go:382`) that scalar is run through **`resolvePrimaries`** to populate `zd.Upstreams`, **and `zd.PrimariesConf` is set to `[{scalarUpstream, NOKEY}]`** (the as-written form, so the catalog member persists + re-resolves like any dynamic zone). Note: catalog does not map `tsig_key` into that key today — it is `NOKEY` until TSIG lands. | Catalog members are edge secondaries that pull from *one* provider primary — per-member multi-primary lists are a redundancy model nobody deploys (same over-engineering rejected for the catalog notify-API in Improvement 1). But the **reported bug** (hostname → one address, no fallback) absolutely hits catalog members, so they need the multi-*address* expansion. This delivers the fix where it's needed without the part that's overkill. |
@@ -296,32 +296,50 @@ func resolvePrimaries(ctx context.Context, imr *Imr, primaries []PeerConf) Prima
   paths (§3.1): `ParseZones`, `LoadDynamicZoneFiles`, `ProvisionDynamicZone`,
   `ModifyDynamicZone`, and catalog auto-config (on the catalog scalar).
 
-## 7. Transfer fallback (the behaviour fix)
+## 7. Transfer fallback (the behaviour fix) — revised 2026-06-28
 
-Both `DoTransfer` (SOA) and `FetchFromUpstream` (AXFR) loop over `zd.Upstreams`:
+Both `DoTransfer` (SOA) and `FetchFromUpstream` (AXFR) loop over `zd.Upstreams`,
+but the **stop condition differs** because multiple primaries are independent
+servers (per-primary ACLs differ), so a refusal from one is not a refusal from
+all. There is **no `isTransportError` distinction** — that idea was dropped (it
+wrongly treated a REFUSED as "honour, don't retry," which defeats redundancy).
+
+**AXFR** (`FetchFromUpstream`) — retry on *any* failure:
 
 ```
 for _, up := range zd.Upstreams:
-    r/err = attempt(up)            // dns.Exchange (SOA) or ZoneTransferIn (AXFR)
-    if isTransportError(err):      // no route / refused / timeout / net unreachable
-        record err; continue       // try the next address
-    return <result>                // any DNS response (incl. REFUSED) — honour it
-return all-transport-failed-error  // only when every address had a transport error
+    new_zd = fresh ZoneData                 // per-attempt, so a failed try can't pollute
+    err = new_zd.ZoneTransferIn(up.Addr, …) // transport err, REFUSED/NOTAUTH rcode, or bad data
+    if err != nil: record err; continue     // a sibling may still serve us
+    success; break
+if !transferred: return all-failed-error    // every primary failed
 ```
 
-- **SOA probe** classification is clean: `dns.Exchange` returns `err != nil` for
-  transport failures and `(*dns.Msg, nil)` for any DNS response. So `err != nil` →
-  try next; `err == nil` → honour the rcode via the existing `switch` (REFUSED /
-  SERVFAIL / NXDOMAIN keep today's "never mind, not ready" semantics).
-- **AXFR** transport failure can surface at `transfer.In` itself or as an
-  `envelope.Error` mid-stream; treat a connection-level error from either as
-  "try next." `zd.Data` is reset at the start of each attempt (it already is, at
-  dnsutils.go:68-71) so a partial failed transfer does not pollute the next try.
-- `isTransportError` matches `net.Error`/`*net.OpError` / `syscall` connection
-  errors (`ECONNREFUSED`, `EHOSTUNREACH`, `ENETUNREACH`, timeout). Confirm the
-  exact set against the vendored dialer at implementation time (§11).
-- `clarifyXfrError` should name the **address that failed** (per-attempt), not a
-  single configured upstream.
+**SOA probe** (`DoTransfer`) — advance until a *usable* SOA:
+
+```
+sawResponse = false
+for _, up := range zd.Upstreams:
+    r, err = dns.Exchange(SOA, up.Addr)
+    if err != nil: record err; continue            // transport: try next
+    sawResponse = true
+    if NOERROR && answer[0] is SOA: return decision(serial)   // usable → stop
+    else: continue                                 // REFUSED/SERVFAIL/NXDOMAIN/empty → try next
+if sawResponse: return false, 0, nil               // all answered, none usable → quiet back-off
+return all-unreachable-error                        // nobody answered
+```
+
+- `dns.Exchange` returns `err != nil` only for transport failures; any DNS
+  response (incl. REFUSED) is `(*dns.Msg, nil)`. So `err != nil` → next address;
+  a response is inspected for a usable SOA, else we move on.
+- AXFR transport failure can surface at `transfer.In` or as an `envelope.Error`
+  mid-stream; both come back as the `ZoneTransferIn` error, so both retry.
+  `zd.Data` is reset at the start of each `ZoneTransferIn` (dnsutils.go:68-71) and
+  `new_zd` is rebuilt per attempt, so a partial/failed transfer cannot pollute the
+  next try **or** the live zone — `zd.IncomingSerial` is only updated in the hard
+  flip, after a success.
+- `clarifyXfrError` already names the **address that failed** (per-attempt) — it
+  is passed the current `up.Addr` each iteration.
 
 ## 8. `ConfigWarning` error type
 
@@ -347,7 +365,7 @@ model).
 | **P1** | `ConfigWarning` enum (4 edits) + `resolvePrimaries` helper (incl. dedup) + unit test | ~80 | Low | Low | **Low** |
 | **P2** | Struct migration `Primary`→`Primaries`/`PrimariesConf`/`Upstreams`; delete dead `RefreshCounter` fields; all mechanical rename sites (A/C/F/G non-transfer) | ~120 | Low | Low | **Low** (compiler-guided; tree won't build until complete) |
 | **P3** | Resolution on **all five ingress paths**: parseconfig secondary-zone block (per-element Legacy/empty/key loops + resolve + ConfigWarning/ConfigError), `LoadDynamicZoneFiles`, **`ProvisionDynamicZone` + `ModifyDynamicZone`**, **catalog auto-config scalar (J)**; **`ZoneRefresher` carries both `PrimariesConf` (as-written) + `Primaries` (resolved); refreshengine merge sets `zd.PrimariesConf` + `zd.Upstreams` when `len(zr.PrimariesConf) > 0`, preserves both when empty (NOTIFY)** | ~130 | Med | Med | **Med** — resolution logic + partial-fail semantics + the both-fields merge/NOTIFY-preservation guard |
-| **P4** | Transfer fallback loops in `DoTransfer` + `FetchFromUpstream`; transport-vs-DNS classification; per-attempt error messages (`clarifyXfrError` names the failed address); list-rendering logs; confirm a failed attempt does not corrupt `IncomingSerial` | ~80 | Med | Med | **Med** — the actual bug fix; transport-error classification is the fiddly part |
+| **P4** | Transfer fallback loops in `DoTransfer` + `FetchFromUpstream`: AXFR retries on ANY failure (incl. REFUSED — per-primary ACLs differ); SOA advances until a usable answer; per-attempt error messages (`clarifyXfrError` names the failed address); fresh `new_zd` per attempt keeps a failed try from corrupting `IncomingSerial` | ~90 | Med | Med | **Med** — the actual bug fix; the stop-condition (which failures retry vs honour) is the subtle part |
 | **P5** | Persistence: `zoneDataToZoneConf` writes **`PrimariesConf` with per-entry keys** (as-written, NOT resolved, NOT hardcoded `NOKEY`); round-trip test asserts hostname + key survive and re-resolve on reload | ~35 | Low | Med | **Low–Med** — must persist as-written *with keys* |
 | **P6** | API/CLI: `--primaries` comma-list (one key for all), `RunZoneAdd/Modify` build `[]PeerConf`, **list-zones / list-dynamic render the as-written `PrimariesConf` list (the hostnames the operator wrote, not resolved addresses) + surface `config-warning`**; migrate `*.sample.yaml` `primary:`→`primaries:` | ~80 | Low | Low | **Low** |
 
@@ -370,11 +388,13 @@ catalog, the extra resolution call sites, persist-with-keys, and the NOTIFY guar
   resolves at add time** (not only on the next restart). **A NOTIFY-triggered refresh
   (minimal `ZoneRefresher`, no primaries) does NOT blank `zd.Upstreams`.** **A
   catalog member with a hostname upstream expands to multiple addresses.**
-- **P4:** transfer fallback — first `Upstreams` address gives a transport error,
-  second succeeds → transfer succeeds (use a closed port + a working test server, or
-  two addresses one of which refuses). A DNS REFUSED from the first address is
-  honoured (not retried against the second). A failed first attempt does not corrupt
-  `IncomingSerial`.
+- **P4:** transfer fallback (`transfer_fallback_test.go`, SOA path with a real
+  UDP test server) — first address gives a transport error (closed port), second
+  succeeds → probe succeeds; **a REFUSED from the first primary advances to the
+  second** (the bug fix: per-primary ACLs differ, so REFUSED must not terminate);
+  every primary REFUSED → quiet back-off (no transfer, no error); all unreachable
+  → error; no-upstreams → error (both `DoTransfer` and `FetchFromUpstream`). The
+  AXFR loop shares the iteration pattern; a full AXFR test server is deferred.
 - **P5:** add a dynamic zone with a hostname primary **carrying a non-NOKEY-shaped
   key name** → persisted config contains the **hostname AND the key** (not resolved
   addresses, not forced `NOKEY`); reload re-resolves the hostname.
@@ -383,10 +403,11 @@ catalog, the extra resolution call sites, persist-with-keys, and the NOTIFY guar
 
 ## 11. Verify-before-coding (not blockers — confirm at implementation time)
 
-- **`isTransportError` classification:** confirm the exact error set the vendored
-  `johanix/dns` dialer surfaces for `dns.Exchange` and `transfer.In` (net.Error
-  timeout, `*net.OpError` with `ECONNREFUSED`/`EHOSTUNREACH`/`ENETUNREACH`). The
-  loop's correctness hinges on classifying these vs DNS-level errors.
+- **Stop condition (resolved 2026-06-28):** AXFR retries on *every* failure, so
+  no transport-vs-DNS error classification is needed. The SOA probe only needs
+  `dns.Exchange`'s clean split (`err != nil` ⟺ transport failure; any DNS response
+  is `(*dns.Msg, nil)`), which holds for the vendored dialer. The earlier
+  `isTransportError` helper was dropped.
 - **IXFR:** production refresh hardcodes `"axfr"` (FetchFromUpstream,
   zone_utils.go:234); the loop applies to AXFR. IXFR, when wired, uses the same
   loop via `ZoneTransferIn`.
