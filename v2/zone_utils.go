@@ -52,7 +52,7 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, err
 		return updated, err
 
 	case Secondary:
-		do_transfer, upstream_serial, err := zd.DoTransfer()
+		do_transfer, upstream_serial, err := zd.DoTransfer(conf)
 		if err != nil {
 			return false, err
 		}
@@ -98,7 +98,7 @@ func firstUpstreamAddr(upstreams []PeerConf) string {
 // A usable NOERROR+SOA from any primary is honoured (transfer decided on
 // serial). If every primary answered but none gave a usable SOA, we back off
 // quietly (no transfer, no error); only all-unreachable is a hard error.
-func (zd *ZoneData) DoTransfer() (bool, uint32, error) {
+func (zd *ZoneData) DoTransfer(conf *Config) (bool, uint32, error) {
 	if zd == nil {
 		panic("DoTransfer: zd == nil")
 	}
@@ -106,10 +106,6 @@ func (zd *ZoneData) DoTransfer() (bool, uint32, error) {
 	if len(zd.Upstreams) == 0 {
 		return false, 0, fmt.Errorf("DoTransfer: zone %s has no upstreams configured", zd.ZoneName)
 	}
-
-	// log.Printf("%s: known zone, current incoming serial %d", zd.ZoneName, zd.IncomingSerial)
-	m := new(dns.Msg)
-	m.SetQuestion(zd.ZoneName, dns.TypeSOA)
 
 	sawResponse := false
 	var lastErr error
@@ -120,10 +116,22 @@ func (zd *ZoneData) DoTransfer() (bool, uint32, error) {
 			upstream = net.JoinHostPort(upstream, "53")
 			lg.Debug("DoTransfer: no port specified for upstream, using default port 53", "zone", zd.ZoneName, "upstream", upstream)
 		}
-		r, err := dns.Exchange(m, upstream)
+		// Fresh message per attempt: TSIG signing adds an RR with a per-attempt
+		// timestamp and this upstream's key.
+		m := new(dns.Msg)
+		m.SetQuestion(zd.ZoneName, dns.TypeSOA)
+		c := new(dns.Client)
+		provider, serr := SignForPeer(m, up.Key, conf)
+		if serr != nil {
+			lg.Error("DoTransfer: TSIG sign setup failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "key", up.Key, "err", serr)
+			lastErr = serr
+			continue
+		}
+		c.TsigProvider = provider // nil for NOKEY => plain exchange (no MAC)
+		r, _, err := c.Exchange(m, upstream)
 		if err != nil {
-			// Transport failure for this address — try the next sibling.
-			lg.Warn("DoTransfer: SOA probe transport error, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "err", err)
+			// Transport failure (or a TSIG response-verify failure) — try the next sibling.
+			lg.Warn("DoTransfer: SOA probe failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "err", err)
 			lastErr = err
 			continue
 		}
