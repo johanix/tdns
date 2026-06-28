@@ -101,8 +101,10 @@ func (zd *ZoneData) SendNotify(ctx context.Context, ntype uint16, targets []stri
 
 	switch ntype {
 	case dns.TypeSOA:
-		// Here we only need the downstreams
-		if len(zd.Downstreams) == 0 {
+		// We send to the targets passed in by the caller (derived from the
+		// zone's notify peers), so validate that slice — not zd.Notify, which
+		// can diverge from the actual targets for this request.
+		if len(targets) == 0 {
 			return dns.RcodeServerFailure, nil, fmt.Errorf("zone %q: error: no downstreams. Ignoring notify request", zd.ZoneName)
 		}
 
