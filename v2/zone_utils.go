@@ -164,7 +164,7 @@ func (zd *ZoneData) DoTransfer() (bool, uint32, error) {
 // Return updated, error
 func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core.RRset) (bool, error) {
 
-	// log.Printf("Reading zone %s from file %s\n", zd.ZoneName, zd.Upstream)
+	// log.Printf("Reading zone %s from file %s\n", zd.ZoneName, zd.Zonefile)
 	zd.SetStatus(ZoneStatusLoading)
 
 	new_zd := ZoneData{
