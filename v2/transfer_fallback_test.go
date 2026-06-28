@@ -202,7 +202,7 @@ func TestDoTransfer_AllUnreachableIsError(t *testing.T) {
 
 func TestFetchFromUpstream_NoUpstreams(t *testing.T) {
 	zd := &ZoneData{ZoneName: "example.test."}
-	if _, err := zd.FetchFromUpstream(false, false, nil); err == nil {
+	if _, err := zd.FetchFromUpstream(false, false, nil, &Config{}); err == nil {
 		t.Fatal("expected an error when no upstreams are configured")
 	}
 }

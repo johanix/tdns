@@ -51,7 +51,7 @@ func clarifyXfrError(zone, upstream string, err error) error {
 	return err
 }
 
-func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype string) (uint32, error) {
+func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype, keyName string, conf *Config) (uint32, error) {
 
 	if upstream == "" {
 		Fatal("ZoneTransfer: upstream not set")
@@ -72,6 +72,13 @@ func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype string)
 	lgDns.Info("ZoneTransferIn", "zone", zd.ZoneName, "store", ZoneStoreToString[zd.ZoneStore])
 
 	transfer := new(dns.Transfer)
+	// Sign the AXFR/IXFR request under this upstream's key (NOKEY => unsigned).
+	// The provider also verifies the TSIG on the inbound envelopes.
+	provider, serr := SignForPeer(msg, keyName, conf)
+	if serr != nil {
+		return 0, fmt.Errorf("ZoneTransferIn %s: TSIG sign setup: %w", zd.ZoneName, serr)
+	}
+	transfer.TsigProvider = provider
 	answerChan, err := transfer.In(msg, upstream)
 	if err != nil {
 		zd.Logger.Printf("Error from transfer.In: %v\n", err)

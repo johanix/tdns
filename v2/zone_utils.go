@@ -63,7 +63,7 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, err
 			} else if force {
 				lg.Debug("forced retransfer regardless of SOA serial", "zone", zd.ZoneName)
 			}
-			updated, err = zd.FetchFromUpstream(verbose, debug, dynamicRRs)
+			updated, err = zd.FetchFromUpstream(verbose, debug, dynamicRRs, conf)
 			if err != nil {
 				lg.Error("FetchZone failed", "zone", zd.ZoneName, "upstream", firstUpstreamAddr(zd.Upstreams), "err", err)
 				return false, err
@@ -258,7 +258,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 }
 
 // Return updated, err
-func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RRset) (bool, error) {
+func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RRset, conf *Config) (bool, error) {
 
 	if len(zd.Upstreams) == 0 {
 		return false, fmt.Errorf("FetchFromUpstream: zone %s has no upstreams configured", zd.ZoneName)
@@ -295,7 +295,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 			Ready:          true, // this is only used by the checks for changes to DNSKEYs, HSYNC, etc.
 			// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 		}
-		if _, err := new_zd.ZoneTransferIn(upstream, zd.IncomingSerial, "axfr"); err != nil {
+		if _, err := new_zd.ZoneTransferIn(upstream, zd.IncomingSerial, "axfr", up.Key, conf); err != nil {
 			lg.Warn("FetchFromUpstream: AXFR from upstream failed, trying next", "zone", zd.ZoneName, "upstream", upstream, "err", err)
 			lastErr = err
 			continue
