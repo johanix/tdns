@@ -104,7 +104,13 @@ type ImrResponse struct {
 // this, the *tdnsmp.Imr embedding wraps a nil *tdns.Imr and promoted method
 // calls panic. Do not fold InitImrEngine back into ImrEngine without updating
 // tdns-mp/v2/start_agent.go.
-func (conf *Config) InitImrEngine(quiet bool) error {
+//
+// ctx is threaded into root-hints priming (PrimeWithHints' "." NS fetch), so a
+// stalled prime can be cancelled rather than blocking startup. tdns-mp pins a
+// published tdns/v2 and so is unaffected until it bumps the dependency; when it
+// does, its two call sites (tdns-mp/v2/start_agent.go:35, start_auditor.go:41)
+// must pass their already-in-scope ctx: InitImrEngine(ctx, true).
+func (conf *Config) InitImrEngine(ctx context.Context, quiet bool) error {
 	// Idempotency guard: IMR is a process singleton. Subsequent calls are
 	// no-ops; first-init wins.
 	if conf.Internal.ImrEngine != nil {
@@ -189,7 +195,7 @@ func (conf *Config) InitImrEngine(quiet bool) error {
 	}
 
 	if !rrcache.IsPrimed() {
-		err := rrcache.PrimeWithHints(conf.Imr.RootHints, imr.IterativeDNSQueryFetcher())
+		err := rrcache.PrimeWithHints(ctx, conf.Imr.RootHints, imr.IterativeDNSQueryFetcher())
 		if err != nil {
 			return fmt.Errorf("failed to initialize RecursorCache w/ root hints: %v", err)
 		}
@@ -242,7 +248,7 @@ func (conf *Config) ImrEngine(ctx context.Context, quiet bool) error {
 	// Shutdowner here — that would leave conf.Internal.ImrEngine nil and the
 	// dereference below would panic.
 	if conf.Internal.ImrEngine == nil {
-		if err := conf.InitImrEngine(quiet); err != nil {
+		if err := conf.InitImrEngine(ctx, quiet); err != nil {
 			return fmt.Errorf("ImrEngine: InitImrEngine failed: %w", err)
 		}
 	}

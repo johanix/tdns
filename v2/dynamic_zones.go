@@ -237,16 +237,28 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			lg.Debug("enqueuing zone for refresh", "zone", zoneName, "type", zconf.Type)
 		}
 
+		// Re-resolve the persisted as-written primaries (hostnames -> addresses)
+		// on every load. Zero resolved is logged and still enqueued so the zone
+		// is created and visible (it surfaces a refresh error rather than
+		// silently vanishing); partial is logged and served from the rest.
+		res := resolvePrimaries(ctx, conf.Internal.ImrEngine, zconf.Primaries)
+		if zoneType == Secondary && len(res.Resolved) == 0 {
+			lg.Error("dynamic zone: no primary resolved to an address (enqueuing anyway, will surface as refresh error)", "zone", zoneName, "unresolved", res.Unresolved)
+		} else if len(res.Unresolved) > 0 || len(res.KeyCollisions) > 0 {
+			lg.Warn("dynamic zone: some primaries unavailable, serving from the rest", "zone", zoneName, "unresolved", res.Unresolved, "key_collisions", res.KeyCollisions, "serving", len(res.Resolved))
+		}
+
 		// Create ZoneRefresher and enqueue to RefreshEngine (same as ParseZones does)
 		zr := ZoneRefresher{
-			Name:      zoneName,
-			Force:     true, // Force refresh on startup to load from disk
-			ZoneType:  zoneType,
-			Primary:   zconf.Primary,
-			ZoneStore: zoneStore,
-			Notify:    zconf.Notify,
-			Zonefile:  zconf.Zonefile,
-			Options:   options,
+			Name:          zoneName,
+			Force:         true, // Force refresh on startup to load from disk
+			ZoneType:      zoneType,
+			PrimariesConf: clonePeerConfs(zconf.Primaries),
+			Primaries:     res.Resolved,
+			ZoneStore:     zoneStore,
+			Notify:        zconf.Notify,
+			Zonefile:      zconf.Zonefile,
+			Options:       options,
 		}
 
 		// Attempt non-blocking send (same pattern as ParseZones)
@@ -314,19 +326,12 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 		typeStr = "secondary" // Default
 	}
 
-	// Get primary/upstream
-	primary := zd.Upstream
-	if primary == "" && zd.ZoneType == Secondary {
-		// Try to get from parent or other sources if available
-		primary = zd.Parent
-	}
-
 	zconf := ZoneConf{
 		Name:          zd.ZoneName,
 		Zonefile:      zoneFilePath,
 		Type:          typeStr,
 		Store:         storeStr,
-		Primary:       PeerConf{Addr: primary, Key: NOKEY},
+		Primaries:     clonePeerConfs(zd.PrimariesConf),
 		Notify:        zd.Notify,
 		OptionsStrs:   optionsStrs,
 		SourceCatalog: zd.SourceCatalog,
@@ -529,10 +534,10 @@ func (conf *Config) CheckDynamicConfigFileIncluded(includedFiles []string) bool 
 // DynamicZoneInput carries the parameters for the shared add/modify cores. There
 // is no Store field: dynamic zones are always MapZone (enforced in the cores).
 type DynamicZoneInput struct {
-	Name    string
-	Type    ZoneType
-	Primary PeerConf
-	Options map[ZoneOption]bool
+	Name      string
+	Type      ZoneType
+	Primaries []PeerConf
+	Options   map[ZoneOption]bool
 }
 
 // ProvisionDynamicZone is the shared *add* core, called by both the catalog
@@ -567,11 +572,13 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	// resolvable key name (any other is an unknown-key error until the keys:
 	// block lands).
 	if in.Type == Secondary {
-		if in.Primary.Addr == "" {
+		if len(in.Primaries) == 0 || in.Primaries[0].Addr == "" {
 			return "", fmt.Errorf("secondary zone %s requires a primary address", name)
 		}
-		if in.Primary.Key != NOKEY {
-			return "", fmt.Errorf("unknown primary key %q (only NOKEY is valid until TSIG keys are configured)", in.Primary.Key)
+		for _, p := range in.Primaries {
+			if p.Key != NOKEY {
+				return "", fmt.Errorf("unknown primary key %q (only NOKEY is valid until TSIG keys are configured)", p.Key)
+			}
 		}
 	}
 
@@ -583,18 +590,28 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 		options[OptApiManagedZone] = true
 	}
 
+	// Resolve hostname primaries to addresses via the IMR at add time (not only
+	// on the next restart). Zero resolved on a secondary -> reject the add.
+	res := resolvePrimaries(ctx, conf.Internal.ImrEngine, in.Primaries)
+	if in.Type == Secondary && len(res.Resolved) == 0 {
+		return "", fmt.Errorf("zone %s: no primary resolved to an address (unresolved: %v)", name, res.Unresolved)
+	}
+	primariesConf := clonePeerConfs(in.Primaries)
+	upstreams := res.Resolved
+
 	// Store is always map for dynamic zones — single chokepoint for the map-only
 	// rule (also covers the catalog re-point).
 	zd := &ZoneData{
-		ZoneName:  name,
-		ZoneType:  in.Type,
-		ZoneStore: MapZone,
-		Upstream:  NormalizeAddress(in.Primary.Addr),
-		Logger:    log.Default(),
-		Options:   options,
-		Status:    ZoneStatusPending,
-		Data:      core.NewCmap[OwnerData](),
-		KeyDB:     conf.Internal.KeyDB,
+		ZoneName:      name,
+		ZoneType:      in.Type,
+		ZoneStore:     MapZone,
+		PrimariesConf: primariesConf,
+		Upstreams:     upstreams,
+		Logger:        log.Default(),
+		Options:       options,
+		Status:        ZoneStatusPending,
+		Data:          core.NewCmap[OwnerData](),
+		KeyDB:         conf.Internal.KeyDB,
 	}
 
 	// Register, then persist; roll back the live registration if persist fails
@@ -605,17 +622,24 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 		return "", fmt.Errorf("failed to persist dynamic zone %s: %w", name, err)
 	}
 
+	// Partial resolution: the zone is served from the addresses that resolved,
+	// with a visibility-only ConfigWarning naming the rest.
+	if len(res.Unresolved) > 0 || len(res.KeyCollisions) > 0 {
+		zd.SetError(ConfigWarning, "serving from %d resolved upstream(s) of %d configured primaries (unresolved: %v, key-collisions: %v)", len(res.Resolved), len(in.Primaries), res.Unresolved, res.KeyCollisions)
+	}
+
 	// Enqueue the initial transfer — fire-and-forget (no Wait, no Response). If
 	// enqueue fails (channel full / context cancelled), the zone is registered
 	// and persisted but no refresh is scheduled — it would be stuck in pending
 	// with no AXFR. Surface that rather than reporting success; the zone is
 	// reachable via list-dynamic and the operator can retry modify/delete.
 	zr := ZoneRefresher{
-		Name:      name,
-		ZoneType:  in.Type,
-		Primary:   PeerConf{Addr: NormalizeAddress(in.Primary.Addr), Key: in.Primary.Key},
-		ZoneStore: MapZone,
-		Options:   options,
+		Name:          name,
+		ZoneType:      in.Type,
+		PrimariesConf: primariesConf,
+		Primaries:     upstreams,
+		ZoneStore:     MapZone,
+		Options:       options,
 	}
 	if err := conf.enqueueRefresh(ctx, zr); err != nil {
 		return "", fmt.Errorf("zone %s registered but failed to schedule initial transfer: %w", name, err)
@@ -680,7 +704,7 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 
 // ModifyDynamicZone is the shared *modify* core. Implemented as
 // stale-old + build-new + replace (NOT in-place mutation) so the modify/refresh
-// data race is gone by construction: the refresh reads the old zd.Upstream
+// data race is gone by construction: the refresh reads the old zd.Upstreams
 // without a lock, so the changed params live on a fresh ZoneData and the old one
 // is only ever read by its now-doomed refresh. Scope: primary addr/key and
 // options; store is fixed at map; rename is out of scope (= delete+add).
@@ -693,8 +717,25 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	if !oldZd.Options[OptApiManagedZone] {
 		return "", fmt.Errorf("zone %s is not API-managed and cannot be modified here", name)
 	}
-	if in.Primary.Addr != "" && in.Primary.Key != NOKEY {
-		return "", fmt.Errorf("unknown primary key %q (only NOKEY is valid until TSIG keys are configured)", in.Primary.Key)
+	for _, p := range in.Primaries {
+		if p.Key != "" && p.Key != NOKEY {
+			return "", fmt.Errorf("unknown primary key %q (only NOKEY is valid until TSIG keys are configured)", p.Key)
+		}
+	}
+
+	// Resolve any new primaries up front, before mutating state, so a
+	// zero-resolution modify is rejected cleanly with no side effects. When no
+	// new primaries are supplied, carry the old as-written + resolved forward.
+	primariesConf := oldZd.PrimariesConf
+	upstreams := oldZd.Upstreams
+	var modRes PrimaryResolveResult
+	if len(in.Primaries) > 0 {
+		modRes = resolvePrimaries(ctx, conf.Internal.ImrEngine, in.Primaries)
+		if len(modRes.Resolved) == 0 {
+			return "", fmt.Errorf("zone %s: no primary resolved to an address (unresolved: %v)", name, modRes.Unresolved)
+		}
+		primariesConf = clonePeerConfs(in.Primaries)
+		upstreams = modRes.Resolved
 	}
 
 	// (1) Bump the old generation so any in-flight refresh on the captured
@@ -704,24 +745,28 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	// (2) Build a fresh ZoneData carrying the changed params; (3) replace.
 	options := in.Options
 	if options == nil {
-		options = oldZd.Options
+		// Carry the old options forward into a FRESH map — newZd must not share a
+		// mutable map with oldZd, or the B5 replace-not-mutate strategy breaks
+		// (an in-flight refresh on oldZd and later updates on newZd would race on
+		// one map guarded by two different mutexes).
+		options = make(map[ZoneOption]bool, len(oldZd.Options))
+		for k, v := range oldZd.Options {
+			options[k] = v
+		}
 	} else {
 		options[OptApiManagedZone] = true
 	}
-	newUpstream := oldZd.Upstream
-	if in.Primary.Addr != "" {
-		newUpstream = NormalizeAddress(in.Primary.Addr)
-	}
 	newZd := &ZoneData{
-		ZoneName:  name,
-		ZoneType:  oldZd.ZoneType,
-		ZoneStore: MapZone,
-		Upstream:  newUpstream,
-		Logger:    log.Default(),
-		Options:   options,
-		Status:    ZoneStatusPending,
-		Data:      core.NewCmap[OwnerData](),
-		KeyDB:     conf.Internal.KeyDB,
+		ZoneName:      name,
+		ZoneType:      oldZd.ZoneType,
+		ZoneStore:     MapZone,
+		PrimariesConf: primariesConf,
+		Upstreams:     upstreams,
+		Logger:        log.Default(),
+		Options:       options,
+		Status:        ZoneStatusPending,
+		Data:          core.NewCmap[OwnerData](),
+		KeyDB:         conf.Internal.KeyDB,
 	}
 	Zones.Set(name, newZd)
 
@@ -732,14 +777,20 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	if err := conf.AddDynamicZoneToConfig(newZd); err != nil {
 		return "", fmt.Errorf("zone %s modified in memory but failed to persist (change will be lost on restart): %w", name, err)
 	}
+	// Partial resolution of the new primaries: served from what resolved, with
+	// a visibility-only ConfigWarning naming the rest.
+	if len(modRes.Unresolved) > 0 || len(modRes.KeyCollisions) > 0 {
+		newZd.SetError(ConfigWarning, "serving from %d resolved upstream(s) of %d configured primaries (unresolved: %v, key-collisions: %v)", len(modRes.Resolved), len(in.Primaries), modRes.Unresolved, modRes.KeyCollisions)
+	}
 	// (5) Force a re-pull from the new upstream.
 	zr := ZoneRefresher{
-		Name:      name,
-		ZoneType:  newZd.ZoneType,
-		Primary:   PeerConf{Addr: newUpstream, Key: in.Primary.Key},
-		ZoneStore: MapZone,
-		Options:   options,
-		Force:     true,
+		Name:          name,
+		ZoneType:      newZd.ZoneType,
+		PrimariesConf: primariesConf,
+		Primaries:     upstreams,
+		ZoneStore:     MapZone,
+		Options:       options,
+		Force:         true,
 	}
 	if err := conf.enqueueRefresh(ctx, zr); err != nil {
 		return "", fmt.Errorf("zone %s modified but failed to schedule refresh: %w", name, err)

@@ -30,6 +30,53 @@ end with none of Improvement 2's code. Improvement 2 is then layered on with **n
 change and no re-provisioning** of zones added before it, because Improvement 1 already uses the
 final primary/key syntax (the NOKEY model, §5.B0).
 
+## Revision note (2026-06-28) — two model changes supersede parts of this plan
+
+1. **Multi-primary + hostname resolution** (separate PR; see
+   `2026-06-26-multi-primary-and-hostname-resolution-plan.md`). Scalar `primary:` → list
+   **`primaries: []PeerConf`**; `ZoneData.Upstream` → `PrimariesConf` (as-written, persisted) +
+   `Upstreams` (resolved `addr:port`, runtime-only); hostnames resolve via the in-process IMR at
+   parse/load; SOA-probe and AXFR iterate the list with per-primary fallback. **There is no scalar
+   `ZoneData.TsigKeyName`** — the per-peer key is `.Key` on each `primaries[]` / `Upstreams[]`
+   entry, signed per attempt in the loop. Read every singular `primary` / `zd.Upstream` below as
+   the list form.
+
+2. **TSIG is now NSD-aligned, not per-peer** (decided 2026-06-28). The per-peer `(peerIP, name)`
+   keystore is **dropped**; §6 is rewritten, and §3's "why per-peer" plus several §9 decisions are
+   superseded (marked). Headline of the new model:
+   - a **`keys:` block** maps **name → {algorithm, secret}** (globally-unique names; the *only*
+     secret store; = NSD `key:`);
+   - **four directional zone fields**, two per role — "initiate to an endpoint" (carries a key it
+     **uses** to sign) vs "accept from a class" (carries a key it **requires**):
+
+     | field | = NSD | role | entry |
+     |---|---|---|---|
+     | `primaries:` (exists) | request-xfr | secondary: pull from | `{addr, key}` |
+     | `allow-notify:` (new) | allow-notify | secondary: who may NOTIFY me | `{ip-spec, key｜NOKEY｜BLOCKED}` |
+     | `notify:` (exists) | notify | primary: who I notify | `{addr, key}` |
+     | `downstreams:` (back) | provide-xfr | primary: who may AXFR from me | `{ip-spec, key｜NOKEY｜BLOCKED}` |
+
+   - **ip-spec** = single IP, CIDR `1.2.3.4/24`, mask `1.2.3.4&255.255.255.0`, range `a-b`, or
+     `0.0.0.0/0`/`::/0` for any. The ACL is an **ordered list**: a matching `BLOCKED` denies
+     (supersedes), else first address-match wins (`NOKEY` → unsigned accepted; `<name>` → require a
+     valid TSIG under that name). This is what lets you key on **TSIG only** (`0.0.0.0/0 K`) or
+     **address only** (`1.2.3.4 NOKEY`) — key and address are independent conditions.
+   - `downstreams:` **returns** — not as the old `notify:` synonym, but as the **transfer ACL**
+     (provide-xfr). Inbound NOTIFY becomes `allow-notify:` (same shape) — this subsumes the old
+     open question about NOTIFY key selection.
+   - **Defaults:** empty `downstreams:` → **deny** (serve no AXFR — a hard cutover, since tdns
+     serves AXFR to anyone today); empty `allow-notify:` → **accept NOTIFY from the configured
+     `primaries:` set**.
+   - This **dissolves** the "why per-peer" rationale, the persisted per-peer keystore, most of its
+     refcounting, and the hostname-keystore-keying problem entirely.
+   - **Familiar-terminology aliases** (`provide-xfr:`/`allow-transfer:` → `downstreams:`,
+     `request-xfr:`/`upstreams:` → `primaries:`) are a **later, input-only** addition — accepted on
+     input via a small key-normalization pass on the raw decoded map (before mapstructure, where the
+     PeerConf hook lives), canonical name used in docs/output, `alias + canonical on one zone` →
+     per-zone ERROR. **Not in v1.**
+
+   Full model and steps in §6.
+
 ## 1. Current state (verified against the code)
 
 ### Dynamic-zones machinery (exists, internal-only)
@@ -83,7 +130,8 @@ AXFR payload transfer. Today none of these paths apply TSIG:
 | Secondary → primary | AXFR / IXFR request | `ZoneTransferOut` (dnsutils.go:222) via queryresponder.go:816 | No TSIG verify; no ACL |
 
 `ZoneTransferIn` is a `ZoneData` method; `zd.KeyDB` is already on the struct — TSIG lookup does not
-require a signature change, only `zd.TsigKeyName` (§6.A2). The catalog path already *looks up*
+require a signature change (the per-entry key name on `primaries[]`/`Upstreams[]` resolves to a
+secret in the `keys:` store — see §6, revised). The catalog path already *looks up*
 `ConfigGroupConfig.TsigKey` (config.go:395) — only the *application* is a TODO (catalog.go:399-404).
 The one existing TSIG store, `Globals.TsigKeys` (global.go:45), is keyed by bare name and used for
 catalog-config checks and CLI/reporter clients — **not** auth-server replication paths. tdns-auth
@@ -116,28 +164,26 @@ Outbound NOTIFY targets are plain address strings (`ZoneConf.Notify []string`, c
 | Topic | Decision (2026-06-23) | Rationale |
 |---|---|---|
 | **Interface scope** | Full CRUD: `add`/`delete`/`modify`/`list-dynamic`, API + CLI — not a one-off `add`. | A management interface should be reasonably complete; most delete/list primitives already exist, so the marginal cost is small. |
-| **TSIG scope** | **Per-peer**, keyed `(peer address, key name)`. Not global, not per-zone. Applies to **all replication peer messages**: SOA query, AXFR/IXFR, NOTIFY — sign outbound, verify inbound. | A TSIG key is a bilateral agreement between two *servers* (RFC 8945); the secret belongs to the relationship with the remote endpoint. Partial coverage (AXFR only) fails against real primaries that require TSIG on SOA queries too. Matches BIND's `server { keys ... }` model. |
-| **Downstream peer syntax** | Structured `notify: [{addr, key}]`; `key` mandatory, `NOKEY` = unsigned. Hard cutover from bare-string entries (same per-zone ERROR quarantine as `primary:`). **`notify:` is the one canonical name** — the duplicate `downstreams:` field/key is removed in the same migration (§5.B0, §6.A3b). | Primary-side TSIG needs a key per downstream for outbound NOTIFY signing and inbound AXFR verification. Plain `notify: [addr, …]` strings carry no key name. Today `ZoneConf` carries *both* `Notify` and `Downstreams` (structs.go:190-191) — an ambiguity the `PeerConf` migration resolves to one. |
+| **TSIG scope** (revised 2026-06-28) | **NSD-aligned**: secrets keyed by **name** (a `keys:` block, name→secret), peer **authorization** as separate address ACLs (`allow-notify:` / `downstreams:`). Applies to **all replication messages** — SOA query, AXFR/IXFR, NOTIFY — sign outbound (by key name), verify inbound (ACL address-match + key name from the wire). **Reverses the per-peer `(peerIP, name)` keystore** (see §6, §3 "why per-peer"). | A TSIG key name is on the wire and identifies one secret (RFC 8945), so name-keying is the standard model; address authorization is a distinct concern best expressed as an ordered ip-spec ACL (NSD `provide-xfr`/`allow-notify`). Drops the per-peer store, its refcounting, and the hostname-keystore problem. |
+| **Primary-side fields** (revised 2026-06-28) | Two distinct fields: **`notify: [{addr, key}]`** — who I notify (single endpoints, key signs the NOTIFY); and **`downstreams: []AclEntry`** — who may AXFR from me (the provide-xfr ACL: ip-spec + key｜NOKEY｜BLOCKED). `notify:` stays the canonical NOTIFY-target name; **`downstreams:` returns**, but as the **transfer ACL**, not a `notify:` synonym. (Multi-primary already cleaned up the old `Notify`/`Downstreams` duplication; B0's "one canonical name" still holds for the *notify-target* list.) | NSD keeps "who I notify" and "who may transfer from me" as **separate** lists — they genuinely differ (a signer/monitor may pull without being notified; a `/24` may pull). Deriving the xfr-ACL from `notify:` (the old plan) conflates them. |
 | **Direct-API zones gate** | `zone add` is **refused unless `dynamiczones.dynamic.allowed: true`**; persistence uses `dynamiczones.dynamic.storage` (parallel to catalog's `members.storage`). | The config field `DynamicZonesConf.Dynamic.Allowed` already exists and **defaults false** (config.go:419) but is checked nowhere — so today the gate is silently inert. The interface must honour it or it ships an always-on capability the operator believed they had disabled. |
 | **`list-dynamic` scope** | Returns **all persistable dynamic zones** — predicate: `ShouldPersistZone(zd)` (catalog members, catalog zones if persistent, API-managed). **Not** the same predicate as delete/modify: those mutate only `OptApiManagedZone` zones. Catalog members appear in the list (read-only from this API) but cannot be deleted/modified here — use the catalog API for that. | `getDynamicZonesFromZonesMap()` already filters on `ShouldPersistZone`; reusing it is correct once B5 extends that gate for API zones. Using `OptApiManagedZone` for list would hide catalog members and confuse operators who expect to see the full dynamic set. |
 | **API `zone add` scope (v1)** | **Secondary zones only** via API/CLI in Improvement 1. Primary zones with `notify:` peers are static-config (or catalog) only until a later extension; wire structs may carry notify peers for Improvement 2 static YAML, but `ProvisionDynamicZone` rejects `type: primary`. | Avoids half-specifying primary+notify on the API surface before TSIG and `PeerConf` notify migration land; catalog and static config cover primary today. |
 | **`modify` mutable fields (v1)** | **`primary` addr/key and `options` only.** Not notify/downstreams, DNSSEC policy, update policy, store, or rename (rename = delete+add). Matches B1c scope; catalog group options remain catalog-config territory. | Keeps the first `modify` core small; notify/TSIG changes on primaries are static-config or future work. |
 | **Catalog non-map store** | Re-pointing catalog at the map-only core is an **explicit breaking change** for any config group using `store: xfr` or `store: slice`. | `parseZoneStore` silently coerces empty/unknown → map today (catalog.go:474-492), so most groups are unaffected; but an *explicit* non-map store now becomes an ERROR rather than a silent honour. Consistent with no-backwards-compat — but it is a behaviour change, called out here, not buried in a §10 audit. |
-| **Primary/key syntax** | Structured `primary: {addr, key}`; `key` **mandatory and explicit**, built-in sentinel `NOKEY` = unauthenticated. No default. | Makes the "no TSIG" choice deliberate and visible; makes the pre-TSIG phase *structural* rather than a special case (see §5.B0). |
+| **Primary/key syntax** (revised 2026-06-28) | `primaries: [{addr, key}]` — a **list** (multi-primary), each entry `{addr, key}`; `key` **mandatory and explicit**, sentinel `NOKEY` = unauthenticated. The key is the **name** referenced from the `keys:` block. | List for redundancy (multi-primary); mandatory key makes "no TSIG" deliberate; name-referenced secret per the NSD model. (B0 shipped the struct; multi-primary made it a list.) |
 | **Invalid `primary.key` handling** | **Per-zone ERROR quarantine, not a fatal parse error.** A missing/empty `key`, or a key name that doesn't resolve, puts *that zone* into ERROR state; the server still starts and other zones are unaffected. | Matches the project's resilient-config-startup rule (config errors are quarantined per-object, never fatal). "Must fail to parse" would abort the whole server — wrong. |
 | **Zone store for dynamic zones** | **`MapZone` only**, enforced in the shared `ProvisionDynamicZone` core — applies to **catalog-, API-, and CLI-provisioned** zones alike. Any other store requested → reject (ERROR/error). | `slice` is legacy; `xfr` is not wanted for dynamically managed secondaries. One rule in one place removes the whole re-instantiation problem from `modify` (B1c). `parseZoneStore` already defaults empty/unknown → map, so this is a tightening, not a new behaviour. |
 | **Sequencing** | Improvement 1 (interface) first, Improvement 2 (TSIG) second. | One-way dependency: the interface establishes the `PeerConf` syntax TSIG then consumes (doing TSIG first builds those structs twice). The interface also ships standalone value (NOKEY zones work end-to-end with none of TSIG's code). Risk is not the driver — under `risk = probability × consequence` (§7) both halves are Low–Med overall; the one elevated cell is B5b (resurrection race), in the interface half. |
 
-### Why per-peer and not global or per-zone
-- **Global is wrong:** `Globals.TsigKeys` keyed by bare name means two unrelated primaries that both
-  use the name `transfer-key` (with different secrets) collide — the second registration silently
-  overwrites the first.
-- **Per-zone is wrong:** it would duplicate one shared secret across several zones that pull from the
-  same primary, and cannot express "these N zones all transfer from one peer over one key."
-- **Per-peer is right:** the key is a property of the remote endpoint. One upstream may serve many
-  zones over one key; `(upstream, name)` is the natural tuple. Note the existing Sig0/DNSKEY stores
-  in `KeyDB` are legitimately *per-zone* (a signing key belongs to a zone) — TSIG is a different kind
-  of key (transport auth, belongs to a peer), so it gets a sibling store with a different key tuple.
+### Why per-peer and not global or per-zone  *(superseded 2026-06-28 — see §6 "Why name-keyed")*
+
+This subsection argued for a per-peer `(peerIP, name)` keystore. **That decision is reversed.** The
+NSD-aligned model keys the secret by **name** (globally, from the `keys:` block) and expresses peer
+*authorization* separately as an address ACL — which both simplifies the store (no per-peer table, no
+refcounting, no hostname-keystore-keying) and is the standard, operator-familiar decomposition. The
+original concern ("two peers reuse the same wire key-name with different secrets") is avoided by
+naming the two relationships distinctly, and NSD doesn't support it either. Rationale in full at §6.
 
 ## 4. Sequencing & why the split is safe (verified)
 
@@ -280,7 +326,7 @@ phase structural rather than a warned special case.
   persistence (dynamic_zones.go:~311). **`ZoneData.Upstream` STAYS `string`** — it's consumed as a bare
   address by the AXFR machinery (`ZoneTransferIn(zd.Upstream, …)`) and logs (~14 sites); `PeerConf`
   collapses to `.Addr` flowing *into* `Upstream` and rehydrates as `Primary{Addr: zd.Upstream}` on the
-  way out. `TsigKeyName` is added alongside `Upstream` later (Improvement 2 step 2), not here.
+  way out. *(Superseded 2026-06-28: multi-primary made `ZoneData.Upstream` → `PrimariesConf`/`Upstreams []PeerConf`; the per-entry key carries the TSIG key name, and there is **no** scalar `TsigKeyName` — see the revision note.)*
   `ZoneRefresher.Primary`/`Notify` and `RefreshCounter` also carry these — convert in step. Structured
   `notify:` (Improvement 2, A3b) uses the same `PeerConf` type and the same hook — do not introduce a
   second struct. **Also consolidate the duplicate `ZoneConf.Notify`/`ZoneConf.Downstreams` (structs.go:190-191)
@@ -354,20 +400,15 @@ divergence):
   window between `Zones.Set` replacing the entry where a concurrent query for this zone is REFUSED;
   acceptable for a management op on a secondary that is about to re-AXFR regardless (decided
   2026-06-24).
-  - **Key/peer change handling (the keystore must follow the change — A3 gap fix):** changing
-    `primary.addr`-IP and/or `primary.key` changes the keystore tuple `(peerIP, key_name)`. Because
-    `modify` is delete+re-add, the keystore ops attach to the two halves: the new `ZoneData` adds its
-    key, the old tuple is refcount-dropped.
+  - **Key/peer change handling:**
     - *Improvement 1 (no TSIG yet):* the only legal key value is `NOKEY`, so a modify moves only
-      `NOKEY` ↔ `NOKEY` — no keystore op, but the validation (must be `NOKEY`) still runs.
-    - *Improvement 2:* if the modify supplies a new non-`NOKEY` key (with secret via the API
-      `{tsig_*}` fields, or referencing a declared `keys.tsig[]` name), call
-      `AddTsigKey(peerIP(newAddr), newKey, …)` for the new tuple **and** refcount-drop the old via
-      `DeleteTsigKey(peerIP(oldAddr), oldKey)` (drop only if no other live zone still references the
-      old `(peerIP, name)` — same refcount rule as `delete`, step 10). A change to the **IP** or the
-      **key name** re-binds under the new `(peerIP, key)` and refcount-drops the old; a **port-only**
-      change (same IP, same key) is **not** a keystore change — only the send target moves.
-    - Config-declared (`keys:`) keys are never refcount-dropped by a modify (config owns them, step 3).
+      `NOKEY` ↔ `NOKEY` — no key op, but the validation (must be `NOKEY`) still runs.
+    - *Improvement 2 (NSD model — revised 2026-06-28):* a key change just sets a new **key name** on
+      the `primaries[]` entry — the secret lives in the name-keyed `keys:` store, so there is **no
+      per-peer re-bind** (the old `(peerIP, key_name)` rebind/refcount machinery is gone). If the
+      modify carries `{tsig_*}`, it upserts that name→secret; an old API-owned name is dropped by the
+      name-reference scan (§6 step 1) when no live zone still names it (config-owned names are never
+      dropped). A port- or IP-only change touches only the send target, not the key.
 
 ### B2. API request/response
 Extend `ZonePost` (api_structs.go:159) with `Options []string` and the structured primary
@@ -658,246 +699,176 @@ this is a few lines, not infrastructure.
 - parse → a `primary:` with missing/empty `key` puts that zone in ERROR state **but the server still
   starts**; a non-`NOKEY` key is an ERROR-state zone until Improvement 2.
 
-## 6. Improvement 2 — TSIG on zone-replication peer transactions, per-peer scoping  *(do second)*
+## 6. Improvement 2 — TSIG on zone-replication peer transactions  *(do second)* — NSD-aligned (rewritten 2026-06-28)
 
-### Transaction map (full scope — nothing here is optional)
+### Model
 
-A secondary configured with `primary: {addr, key: K}` and a primary configured with
-`notify: [{addr: D, key: K}, …]` share one per-peer keystore entry per remote endpoint. The same
-`(peer_addr, key_name)` tuple is used whether this server is signing an outbound message or
-verifying an inbound one.
+One secret store and four directional fields:
+
+- **`keys:` block** — `name → {algorithm, secret}`, globally-unique names; the **only** secret
+  store. Both sign and verify look the secret up **by name** (the name is on the wire — the TSIG
+  RR owner). `KeyConf.Tsig []TsigDetails{Name, Algorithm, Secret}` already exists (structs.go:809);
+  this just tags + loads it. No per-peer `(peerIP, name)` store.
+- **Secondary:** `primaries: []PeerConf{addr, key}` (multi-primary; the key NAME signs our outbound
+  SOA/AXFR to that primary) and `allow-notify: []AclEntry` (who may NOTIFY us).
+- **Primary:** `notify: []PeerConf{addr, key}` (the key NAME signs our outbound NOTIFY) and
+  `downstreams: []AclEntry` (who may AXFR from us).
+- **`AclEntry{ ip-spec, key }`**, `key ∈ {<name>, NOKEY, BLOCKED}`, `ip-spec` ∈ {IP, CIDR `/24`,
+  mask `&m`, range `a-b`, `0.0.0.0/0`/`::/0`}.
+
+### Transaction map (sign outbound by key-name; verify inbound by ACL + key-name)
 
 ```
 Secondary                              Primary
 ─────────                              ───────
-DoTransfer (SOA query)        ──TSIG──►
-ZoneTransferIn (AXFR/IXFR)    ──TSIG──►
-                              ◄──TSIG──  SendNotify (NOTIFY)
-NotifyResponder (verify)      ◄──TSIG──
-                              ◄──TSIG──  ZoneTransferOut (verify AXFR request)
+DoTransfer (SOA query)        ──TSIG──►            sign with primaries[i].key
+ZoneTransferIn (AXFR/IXFR)    ──TSIG──►            sign with primaries[i].key
+                              ◄──TSIG──  SendNotify   sign with notify[j].key
+NotifyResponder (verify)      ◄──TSIG──            allow-notify ACL, then verify
+                              ◄──TSIG──  ZoneTransferOut
+ZoneTransferOut (serve)       ◄────────            downstreams ACL, then verify
 ```
 
-**Address model — send by `addr:port`, key/match by IP only (decided 2026-06-24).** Two distinct
-uses of a peer address, which the current code conflated:
-- **Send side:** the configured `primary.addr` / `notify[].addr` is a full `host:port` and is used
-  *verbatim* to reach the peer. We must **not** assume the peer listens on `:53` — `DoTransfer`,
-  `ZoneTransferIn`, and `SendNotify` send to the exact configured port. (`NormalizeAddress` may still
-  default a missing port to `:53`, but an explicit non-53 port is honoured.)
-- **Keystore/ACL key side:** the lookup tuple is **`(IP, key_name)` — IP only, port stripped from
-  both sides.** Inbound `RemoteAddr()` carries an ephemeral source port that never equals the
-  configured listen port, so matching on `host:port` would fail every legitimate peer. Define a helper
-  `peerIP(addr) = host-part of net.SplitHostPort(addr)` (bare IP, no port) and use it as the keystore
-  key on **both** store and lookup. The keystore tuple is therefore `(peerIP, name)`, **not**
-  `(addr:port, name)`.
-- **Accepted limitation:** IP-only matching cannot distinguish two replication peers sharing one IP on
-  different ports (e.g. two tdns instances on `192.0.2.1:5301` and `:5302` with different keys) — they
-  resolve to the same `(IP, name)`. This matches BIND's address-based `server`-ACL behaviour and is an
-  accepted constraint, documented rather than worked around.
+- **Outbound:** each peer entry carries a key NAME → look up the secret in `keys:` → sign (NOKEY →
+  plain, today's path). The multi-primary SOA-probe / AXFR loops sign **per attempt** with the
+  current `up.Key`.
+- **Inbound:** match `peerIP(srcAddr)` against the ACL (`allow-notify` / `downstreams`); the matched
+  entry's `key` field decides — `NOKEY` → accept unsigned; `<name>` → the request's TSIG must name
+  that key and verify against the `keys:` secret; `BLOCKED` → deny. The key name for verification
+  comes from the **request's** TSIG RR; the source IP selects the ACL entry (and thus accept/deny +
+  required key).
 
-**Shared signing/verify helpers** (new, e.g. `v2/tsig_peer.go`):
-- `SignForPeer(msg, peerAddr, keyName, kdb)` — if `keyName == NOKEY`, no-op; else
-  `GetTsigKey(peerIP(peerAddr), keyName)`, set `Client.TsigSecret` / `msg.SetTsig(…)`. `peerAddr` here
-  is the configured `addr:port` (send side); only its IP is used for the keystore lookup. Used by all
-  outbound paths.
-- `VerifyFromPeer(msg, remoteAddr, keyName, kdb)` — if `keyName == NOKEY`, accept unsigned; else
-  verify TSIG on `msg` against `(peerIP(remoteAddr), keyName)`. `remoteAddr` is the inbound
-  `RemoteAddr()`; its ephemeral port is discarded by `peerIP`. Used by all inbound paths.
+**Send vs match (unchanged in spirit):** send to the configured full `addr:port` (never assume
+`:53`); match the ACL on **IP only** (`peerIP(srcAddr)` = port stripped), because the inbound source
+port is ephemeral. ip-spec ranges (`/24`, mask, range) match the source IP against the prefix. (The
+old "two peers on one IP, different ports, different keys" limitation is moot — the address ACL and
+the key are now independent, and the key name is carried on the wire.)
 
-Retire `Globals.TsigKeys` for auth replication: load `keys:` block into the per-peer keystore at
-startup (A3); catalog/API provisioning call `AddTsigKey`. CLI reporter may keep its own client-side
-`ParseTsigKeys` path — out of scope for auth.
+### Shared helpers (new, e.g. `v2/tsig_peer.go`)
+
+- `SignForPeer(msg, keyName, kdb)` — if `keyName == NOKEY`, no-op; else look up the secret **by
+  name** in the `keys:`-loaded store, `msg.SetTsig(name, algo, …)` and set the client/transfer
+  `TsigSecret`. Used by all outbound paths. (No `peerAddr` needed — the secret is name-keyed.)
+- `VerifyFromPeer(msg, kdb)` — read the TSIG RR's key name from `msg`, look up the secret by name,
+  verify the MAC; return ok/fail. The caller has already done the ACL address-match (below).
+- `matchACL(acl []AclEntry, srcIP) (allow bool, requiredKey string)` — ordered scan: a `BLOCKED`
+  whose `ip-spec` matches `srcIP` → deny (supersedes); else the first `ip-spec` match → `(true,
+  key)`; no match → deny. ip-spec parsing: `net.ParseCIDR` for CIDR/`/0`; small parsers for mask
+  `a&m` and range `a-b`; a bare IP is a `/32`/`/128`.
+- `peerIP(addr)` — host part of `net.SplitHostPort(addr)` (bare IP, port stripped), used to reduce
+  the inbound `RemoteAddr()` for the ACL match.
+
+Retire `Globals.TsigKeys` for auth replication: the `keys:` block is the name→secret store; catalog/
+API provisioning upsert into it by name. CLI reporter may keep its own client-side `ParseTsigKeys`
+path — out of scope for auth.
 
 ### Implementation steps
 
-> **Step ↔ A-label map** (the §7 assessment table and cross-refs elsewhere use the `A`-labels; the
-> steps below are the same work, numbered): step 1 = **A1**; step 2 = **A2** (+ the structured
-> `notify:` half is **A3b**); step 3 = **A3a** (`keys:` block), with `notify:` cutover = **A3b**;
-> step 4 = **A4**; step 5 = **A5**; step 6 = **A6**; step 7 = **A7**; step 8 = **A8**; step 9 =
-> **A9**; the test list = **A10**.
+> **A-label map** (the §7 assessment table uses `A`-labels): step 1 = **A1**+**A3a** (keystore +
+> `keys:` block, now merged into one name→secret store); step 2 = the new **ACL** machinery; steps
+> 3–7 = **A4–A8**; step 8 = **A9**; step 9 = key/ACL lifecycle. The old **A2** (`PeerConf` struct)
+> shipped with multi-primary + B0 and is no longer a step here.
 
-1. **(A1) Per-peer TSIG keystore** — add a TSIG store in `KeyDB` (struct at structs.go:~719). DB table
-   `TsigKeys(upstream, name, algorithm, secret, owner, …)` UNIQUE(upstream, name), where `owner` ∈
-   {`config`, `api`} (drives the refcount-drop discriminator, step 10) + accessors
-   `GetTsigKey(upstream, name)` / `AddTsigKey(upstream, name, algo, secret, owner)` (upsert) /
-   `DeleteTsigKey(upstream, name)` (scans live `Zones`; drops only when unreferenced and
-   `owner="api"`, step 10). Cache key: `peerIP(upstream)+"+"+name` (mirror the Sig0 cache
-   convention `zonename+"+"+state` at keystore.go:844). **The accessors key on `peerIP` (bare IP, port
-   stripped) — NOT `NormalizeAddress` (which would force `:53`)** — so store and lookup agree
-   regardless of the peer's actual port and the inbound ephemeral source port (see address model
-   above). (Note: `KeyConf.Tsig []TsigDetails{Name, Algorithm, Secret}` already exists at
-   structs.go:809 — that is the *config* shape; the per-peer keystore is the new `(peerIP, name)`
-   runtime store.)
+1. **`keys:` block — the name→secret store.** Tag `Config.Keys` (`yaml:"keys" mapstructure:"keys"`);
+   the shape exists (`KeyConf.Tsig []TsigDetails{Name, Algorithm, Secret}` at structs.go:809). Load
+   `keys.tsig[]` into a **name-keyed** store at startup (auth loads no keys today). Sign and verify
+   both look the secret up **by name** — no `(peerIP, name)` tuple, no per-peer DB table.
+   - `NOKEY` is reserved: a `keys.tsig[]` entry named `NOKEY` (any case) → ERROR.
+   - A peer/ACL referencing a non-`NOKEY` key name with **no matching `keys.tsig[]` entry** → that
+     zone to per-zone ERROR (same quarantine rule as B0).
+   - **API-created keys** (`zone add --tsig-*`) upsert a name→secret entry; persist them with an
+     `owner` discriminator (`config`|`api`) if API-key auto-drop is wanted. Auto-drop, if kept, is a
+     **name-reference scan** of live `Zones` (much simpler than the old per-peer scan): drop an
+     `owner="api"` key when no live zone's `primaries[].key` / `notify[].key` / ACL entry still names
+     it. Config-declared keys are config-owned and never auto-dropped. (Whether to implement
+     auto-drop at all in v1 is a small detail — a never-dropped name store is also acceptable.)
+   - **Config wins on reload** still falls out of load order: DB-load → `keys:` bind (upsert by name)
+     → zone parse. Because the keystore is now name-keyed, the conflict is `name` vs `name` — config,
+     bound last, lands on top.
 
-2. **`PeerConf` struct + runtime refs** — shared `{Addr, Key}` type for both upstream and downstream
-   peers (replaces bare `Primary string` from B0 and bare `Notify []string`):
-   ```yaml
-   # secondary
-   primary:
-     addr: 192.0.2.1:53
-     key:  transfer-key    # NOKEY = unsigned
+2. **ip-spec type + ordered-ACL matcher** (new; shared by `allow-notify:` and `downstreams:`). Parse
+   `1.2.3.4`, `1.2.3.4/24`, `1.2.3.4&255.255.255.0`, `1.2.3.4-1.2.3.25`, and `0.0.0.0/0` / `::/0`
+   (`net.ParseCIDR` does CIDR/`/0`; mask and range are small parsers; a bare IP is a host route).
+   Each `AclEntry` is `{spec, key｜NOKEY｜BLOCKED}`. `matchACL(acl, srcIP)` scans in order: a matching
+   `BLOCKED` denies (supersedes); else the first `spec` match wins. YAML form: a string
+   `"1.2.3.4/24 transfer-key"` reads closest to NSD (or a struct `{spec, key}` — pick one and run it
+   through a decode hook like `stringToPeerConfHook`). `allow-notify:`/`downstreams:` are both
+   `[]AclEntry` on `ZoneConf`/`ZoneData`/`ZoneRefresher`.
 
-   # primary
-   notify:
-     - addr: 192.0.2.2:53
-       key:  transfer-key  # NOKEY = unsigned NOTIFY + accept unsigned AXFR from this peer
-   ```
-   On `ZoneData`: keep `Upstream string` + add `TsigKeyName string` (secondary); replace
-   `Downstreams []string` with **`Notify []PeerConf`** (one canonical name end to end — YAML key
-   `notify:`, `ZoneConf.Notify`, `ZoneData.Notify`; `downstreams`/`DownstreamPeers` are gone, per
-   §3/B0c). `ZoneRefresher` carries the same fields; assign in refreshengine.
+3. **Secondary → primary: SOA probe** — `DoTransfer` already iterates `zd.Upstreams` (multi-primary).
+   For each attempt, `SignForPeer(m, up.Key, kdb)` and move the call onto a `dns.Client{TsigSecret:…}`
+   + `client.Exchange` — the package-level `dns.Exchange` has **no `TsigSecret` and can't verify the
+   response MAC**. `NOKEY` keeps today's plain path (no client, no MAC).
 
-3. **`keys:` config block — explicit binding algorithm.** Tag `Config.Keys`
-   (`yaml:"keys" mapstructure:"keys"`); tdns-auth does not call any key-loading routine at startup
-   today, so add the load. The config shape **already exists** — `Config.Keys.Tsig []TsigDetails`
-   (`KeyConf.Tsig` at structs.go:809, `TsigDetails{Name, Algorithm, Secret}` at structs.go:812-815);
-   `keys.tsig[]` throughout this doc refers to that slice. **Pin `Algorithm` as the field name**
-   (the DB column / accessor args spell it `algorithm`/`algo` — same value, the lowercase DB column
-   maps to the struct's `Algorithm`). No new config struct is defined; only the **load** (parse →
-   keystore bind) is new. Binding rule, spelled out:
-   - **Startup load ordering (decided 2026-06-25): DB first, then config upserts.** The persistent
-     `TsigKeys` table is loaded into the keystore **before** the `keys:` block is bound. The `keys:`
-     bind then runs `AddTsigKey(…, owner="config")` for each declared key, which **upserts** —
-     overwriting any colliding `(peerIP, name)` row (including a prior `owner="api"` row) with the
-     config secret and `owner="config"`. This ordering is what makes **"config wins on reload"**
-     automatic and non-special-cased: config is applied last, so it always lands on top. (API-created
-     `owner="api"` rows for peers the operator manages purely via API have no config entry to collide
-     with and survive untouched.) Concretely: keystore-DB-load → `keys:` bind → zone parse/bind.
-   - For each **secondary** zone: `AddTsigKey(peerIP(zconf.Primary.Addr), zconf.Primary.Key,
-     algo, secret)` where `(algo, secret)` come from the `keys.tsig[]` entry whose `name ==
-     zconf.Primary.Key`. (Keystore keyed by IP; the full `addr:port` is retained on `zd` for sending.)
-   - For each **primary** notify peer: `AddTsigKey(peerIP(peer.Addr), peer.Key, algo, secret)`
-     likewise.
-   - A non-`NOKEY` key name with **no matching `keys.tsig[]` entry** → that zone to per-zone ERROR
-     (same quarantine rule as B0). Bare-string `notify:`/`primary:` → per-zone ERROR (handled by the
-     shared `stringToPeerConfHook` decode hook, B0).
-   - **Config reload:** on `keys.tsig[]` add/change/remove, re-bind — `AddTsigKey` upserts by
-     `(peer, name)`; a removed key whose `(peer, name)` is still referenced by a live zone → leave the
-     zone in ERROR (do not silently keep stale secret). 
-   - **Conflict policy (config vs API):** if an API `AddTsigKey` and a `keys:`-derived bind target the
-     same `(peer, name)` with different secrets, **config wins on reload** — and this falls out of the
-     load ordering above (config binds last, upserting over the `owner="api"` row), not a special-case
-     comparison. The API path is for zones the operator manages entirely via API. Document this; do not
-     merge silently.
-   - **Reference counting:** the keystore entry for `(peerIP, name)` is shared across all zones
-     pulling from that peer IP; `zone delete` / key removal drops it only when no live zone still
-     references it (§ step 10). Static `keys:` entries are owned by config, not refcounted away by API
-     deletes.
-
-4. **Secondary → primary: SOA probe** — `DoTransfer` (zone_utils.go:84). Many primaries require TSIG
-   here; AXFR signing alone is insufficient. **Mechanism caveat (not a one-liner):** the probe today
-   uses the **package-level `dns.Exchange(m, upstream)`** (zone_utils.go:101), which has **no
-   `TsigSecret` field and cannot verify the response MAC.** To sign+verify the probe, `DoTransfer`
-   must switch to a **`dns.Client{TsigSecret: …}`** and call `client.Exchange(m, upstream)`:
-   `SignForPeer` sets `msg.SetTsig(name, algo, …)` **and** populates the client's `TsigSecret` map for
-   the `(keyname → secret)` it resolves. For `NOKEY`, keep today's plain `dns.Exchange` path
-   unchanged (no client, no MAC). So step 4 = "set TSIG on the message **and** move the call onto a
-   `dns.Client` carrying the secret," not merely "call `SignForPeer` before `dns.Exchange`."
-
-5. **Secondary → primary: AXFR/IXFR** — `ZoneTransferIn` (dnsutils.go:54): before `transfer.In`,
-   set `transfer.TsigSecret` and `msg.SetTsig` via `SignForPeer` (same key as DoTransfer). Remove
+4. **Secondary → primary: AXFR/IXFR** — `ZoneTransferIn`, per attempt in `FetchFromUpstream`'s loop:
+   `SignForPeer` sets `transfer.TsigSecret` + `msg.SetTsig` for `up.Key` before `transfer.In`. Remove
    TODO at dnsutils.go:29. *Verify miekg/dns `Transfer.TsigSecret` / `SetTsig` / algorithm constants
-   against the vendored version.* **IXFR scope:** production refresh hardcodes `"axfr"`
-   (`FetchFromUpstream`, zone_utils.go:234), so the only call signed here is AXFR. The same
-   `SignForPeer`/`ZoneTransferIn` helper covers IXFR unchanged **if/when** the IXFR path is ever
-   wired — **no separate IXFR work in this plan.** Titles saying "AXFR/IXFR" mean "the one transfer
-   helper, which both use," not two code paths.
+   against the vendored version.* Production refresh hardcodes `"axfr"` (zone_utils.go:234), so AXFR
+   is the only call signed; IXFR uses the same helper if/when wired.
 
-6. **Secondary ← primary: inbound NOTIFY** — `NotifyResponder` (notifyresponder.go:122): for
-   NOTIFY(SOA) that will trigger a zone refresh, call `VerifyFromPeer(dnr.Msg, remoteAddr,
-   zd.TsigKeyName, kdb)` using the triggering zone's upstream key. **`NotifyResponder` has no `kdb`
-   today (verified) — thread `zd.KeyDB` in** (the zone is already resolved via `FindZone`). If
-   `zd.TsigKeyName == NOKEY`, accept unsigned (today's behaviour); else verify and REFUSE + log on
-   failure.
-   - **Response signing is REQUIRED, not optional (RFC 8945).** When the incoming NOTIFY carried a
-     valid TSIG, the NOTIFY response **must** be signed with the **same `(peerIP, key)`** used to
-     verify it — an unsigned reply to a signed request is treated as forged by the sender. (Confirm
-     the exact miekg/dns server-side mechanism — typically `w.WriteMsg` after `m.SetTsig(...)`, or the
-     server auto-signing when the request's TSIG verified — against the vendored API, §10.) For a
-     `NOKEY` zone the response stays unsigned.
-   - **No address-ACL on NOTIFY (deliberate, asymmetric with A8).** A `NOKEY` secondary accepts and
-     acts on a NOTIFY from **any** source (today's behaviour, preserved) — there is intentionally no
-     "is this a configured primary?" address check here, unlike the inbound-AXFR ACL (A8). Rationale:
-     a NOTIFY only *triggers* a SOA-serial refresh from the secondary's already-configured upstream;
-     it cannot inject data, so a spurious NOTIFY costs at most one SOA probe. Authentication is via
-     TSIG when a non-`NOKEY` key is configured; address-based rejection is not added. State this so the
-     NOTIFY-vs-AXFR asymmetry is a decision, not an oversight.
+5. **Secondary ← primary: inbound NOTIFY** — `NotifyResponder` (notifyresponder.go:122; thread
+   `zd.KeyDB` in — it has none today). Match `peerIP(remoteAddr)` against `allow-notify:`
+   (**empty ⇒ accept from the resolved `primaries:` IPs**, so operators needn't restate their
+   primary list). On `BLOCKED` / no match → **ignore** (NOTIFY is low-stakes — it only triggers a
+   probe against the secondary's own TSIG-protected primaries; log, don't act). On an allow match:
+   `NOKEY` → accept unsigned; `<name>` → `VerifyFromPeer` (REFUSE + log on bad MAC). **Sign the NOTIFY
+   response** with the same key when the request was signed (RFC 8945; for a `NOKEY` path it stays
+   unsigned). The key for verification is named in the request's TSIG RR; the ACL entry only gates
+   accept/deny and which name is *required*.
 
-7. **Primary → secondary: outbound NOTIFY** — `SendNotify` (notifier.go:95): for each target, find
-   the `zd.Notify` entry whose **`peerIP(entry.Addr) == peerIP(target)`** (IP-only match), call
-   `SignForPeer(m, target, peer.Key, kdb)` before `ExchangeContext` — sending to the entry's full
+6. **Primary → secondary: outbound NOTIFY** — `SendNotify` (notifier.go:95): for each `notify[]`
+   target, `SignForPeer(m, entry.Key, kdb)` before `ExchangeContext`, sending to the entry's full
    `addr:port`.
 
-8. **Primary ← secondary: inbound AXFR/IXFR** — `ZoneTransferOut` (dnsutils.go:222), reached from
-   queryresponder.go:816. **The requester address must be plumbed in: today `ZoneTransferOut(w, r)`
-   gets the requester only via `w.RemoteAddr()` and does no ACL (verified) — use that, reduced by
-   `peerIP`.** Before serving, match `peerIP(w.RemoteAddr())` against the `zd.Notify` peer list
-   (IP-only — the requester's ephemeral source port is irrelevant): if no entry matches → REFUSE
-   (closes the open AXFR ACL gap); if the matched entry's key is `NOKEY` → serve unsigned; else
-   `VerifyFromPeer(r, w.RemoteAddr(), peer.Key, kdb)` and serve only on success. **This IP-only match
-   is what makes the ACL work — a `host:port` comparison would reject every real secondary** (its
-   source port is never the configured listen port).
+7. **Primary ← secondary: inbound AXFR/IXFR (the `downstreams:` ACL — the substantive change)** —
+   `ZoneTransferOut` (dnsutils.go:222, reached from queryresponder.go:816, has `w.RemoteAddr()` and
+   does no ACL today). Match `peerIP(w.RemoteAddr())` against `downstreams:`: **empty ⇒ DENY** (closes
+   today's open-AXFR gap — a hard cutover); `BLOCKED` / no match → REFUSE; match key `NOKEY` → serve
+   unsigned; `<name>` → `VerifyFromPeer` and serve only on a valid MAC. This is the NSD `provide-xfr`
+   model — `downstreams: 0.0.0.0/0 transfer-key` (anyone with the key) and `downstreams: 1.2.3.4
+   NOKEY` (this host, no TSIG) both fall out of the ip-spec + key fields.
 
-9. **Wire catalog path + unify `tsig_key` into `primary.key`** — catalog.go:399-404. Today this block
-   looks up `ConfigGroupConfig.TsigKey` against `Globals.TsigKeys`, and on the "found" branch logs
-   `"CATALOG: applied TSIG key"` (catalog.go:403) while the actual apply is a TODO (catalog.go:402) —
-   **the log is a lie; delete it now** (this is a one-line correctness fix worth doing immediately,
-   independent of the rest). Then: map the catalog group's `tsig_key` into the provisioned zone's
-   `primary.key` (a single field — **deprecate the parallel `tsig_key`-only path**, do not keep two
-   ways to specify the same thing), call `AddTsigKey(peerIP(upstream), name, …, owner="config")`, and
-   set `zd.TsigKeyName`.
-   - **Re-point the existing catalog config-check.** Today catalog.go:397 *validates* the group's
-     `tsig_key` against `Globals.TsigKeys`. Once `Globals.TsigKeys` is no longer populated on auth
-     (this step), that check must be re-pointed at the new source of truth — the parsed `keys.tsig[]`
-     names (a name-set built when the `keys:` block loads, A3a) — or it always-fails. Don't leave it
-     reading the now-empty `Globals.TsigKeys`.
+8. **Wire catalog path** — catalog.go:399-404: map the group's `tsig_key` onto the provisioned
+   zone's `primaries[].key` name (the `keys:` store holds the secret); **delete the false "applied
+   TSIG key" log** (catalog.go:403) now (a one-line correctness fix, independent of the rest).
+   Re-point the existing `tsig_key` config-check from the (now-unused-on-auth) `Globals.TsigKeys` to
+   the parsed `keys.tsig[]` name-set, or it always-fails.
 
-10. **Programmatic provisioning + keystore lifecycle (refcounted).** The keystore entry for
-    `(upstream, name)` is shared across all zones pulling from that peer, so create/drop must be
-    reference-counted across all three mutating cores.
-    - **Refcount mechanism (specified — do not store a counter):** there is no `refcount` column and
-      no counter to keep in sync. "Still referenced" is **computed by scanning live `Zones`** at drop
-      time: a `(peerIP, name)` is still in use iff some live `ZoneData` has
-      `peerIP(zd.Primary.Addr)==peerIP && zd.Primary.Key==name`, **or** any `zd.Notify[i]` matches the
-      same tuple. `DeleteTsigKey(peerIP, name)` runs this scan and removes the DB row + cache entry
-      **only when the scan finds no remaining reference.** A scan over the sharded `Zones` map at a
-      management-op cadence (delete/modify) is cheap; this avoids counter-drift bugs entirely.
-    - **Ownership discriminator (config vs API) — one new column.** The `TsigKeys` table gets an
-      `owner` field (`"config"` | `"api"`). Config-declared (`keys:`) entries (`owner="config"`) are
-      **never** dropped by API add/modify/delete — the scan-and-drop applies only to `owner="api"`
-      rows. This is how "config wins / config owns its keys" (step 3 conflict policy) is enforced
-      mechanically rather than by convention. On reload, `keys:` binding re-asserts `owner="config"`
-      (upsert), overwriting any colliding `owner="api"` row (config-wins).
-    - `zone add` with `{tsig_name, tsig_secret, tsig_algo}` → `AddTsigKey(peerIP(upstream), name,
-      algo, secret)` (upsert).
-    - `zone modify` that changes `(addr, key)` → `AddTsigKey` for the new tuple, refcounted
-      `DeleteTsigKey` for the old tuple (B1c key-change handling). Note a port-only change of `addr`
-      does **not** change the keystore tuple (IP unchanged) — only the send target moves.
-    - `zone delete` → refcounted `DeleteTsigKey(peerIP(upstream), name)`: drop the keystore entry
-      **only if no other live zone still references `(peerIP, name)`**.
-    - **Config-declared (`keys:`) entries are never dropped by API add/modify/delete** — config owns
-      them (step 3); the refcount applies to API-created keystore entries.
+9. **API/CLI + key lifecycle.** `zone add`/`modify` carry `{tsig_name, tsig_secret, tsig_algo}` →
+   upsert a `keys:` (name→secret) entry and reference it from `primaries[].key`. Key auto-drop, if
+   implemented, is the name-reference scan from step 1 (`owner="api"` only). ACL flags
+   (`--downstreams` / `--allow-notify`) are added if/when the API surfaces primary-side management;
+   v1 may keep the ACLs static-config-only. Note a port-only change of a primary's `addr` does not
+   change the key (it's name-keyed) — only the send target moves.
+
+### Why name-keyed + address ACLs (supersedes the old "why per-peer")
+
+- The TSIG key name is **on the wire** (the TSIG RR owner) and both sides must agree on it per
+  relationship, so a name identifies **one** secret. Keying secrets by name (NSD `key:`) is the
+  standard model and removes the per-peer store, its refcounting, and the hostname-keystore-keying
+  problem (old decision A) entirely.
+- The old `(peerIP, name)` tuple existed only to disambiguate "two peers using the same wire
+  key-name with different secrets" — a case you avoid by giving the two relationships distinct names,
+  and one NSD can't express either. Dropping it is a net simplification.
+- **Address authorization is a separate concern from the key**, expressed as an ordered ACL of
+  ip-specs (NSD `allow-notify`/`provide-xfr`). That independence is what lets you key on TSIG only
+  (`0.0.0.0/0 K`) **or** address only (`1.2.3.4 NOKEY`).
 
 ### Tests (Improvement 2)
-- End-to-end replication with TSIG on **all** paths: SOA probe, AXFR, NOTIFY trigger, inbound AXFR
-  verify — use miekg/dns test server or two tdns-auth instances.
-- `NOKEY` zone: all paths remain plain/unauthenticated (today's behaviour).
-- **Collision test:** two peers, same key name, different secrets → both directions work.
-- NOTIFY rejected when TSIG required but missing/invalid; AXFR rejected when requester not in peer
-  list or TSIG invalid.
-- **NOTIFY response is TSIG-signed** when the request was signed (RFC 8945) — assert the reply carries
-  a valid TSIG under the same `(peerIP, key)`; a `NOKEY` zone's reply is unsigned.
-- **NOTIFY has no address-ACL:** a `NOKEY` secondary accepts a NOTIFY from an unconfigured source and
-  triggers a SOA probe (deliberate, asymmetric with the AXFR ACL — step 6).
-- **Refcount + ownership:** two API zones share `(peerIP, name)`; deleting one keeps the key (still
-  referenced), deleting both drops it. A `keys:`-declared (`owner=config`) key is **not** dropped by
-  any API delete.
-- **Load ordering / config-wins:** seed the DB with an `owner="api"` entry for `(peerIP, name)` with
-  secret S1, then start/reload with a `keys:` entry for the same `(peerIP, name)` carrying secret S2.
-  After load the keystore holds **S2 with `owner="config"`** (config bound last, upserted over the
-  api row) — proving config-wins is a consequence of DB-first-then-config ordering, not a comparison.
-- **`NOKEY` reserved:** a `keys.tsig[]` entry named `NOKEY` → parse ERROR for that key/zone.
-- Restart: the persistent `TsigKeys` DB loads **before** the `keys:` bind and before the first
-  refresh/NOTIFY; `TsigKeyName` + downstream peer keys are resolvable when the first transfer fires.
+- End-to-end with TSIG on all paths (SOA probe, AXFR, NOTIFY, inbound AXFR verify) — miekg/dns test
+  server or two tdns-auth instances. Multi-primary: the secondary signs **per attempt** with the
+  current primary's key.
+- `NOKEY` end to end stays plain/unauthenticated (today's behaviour).
+- **ACL (`downstreams:`):** `0.0.0.0/0 K` (key-only) admits any source with key K; `1.2.3.4 NOKEY`
+  (addr-only) admits that host unsigned; a `BLOCKED` entry supersedes a following allow; an unmatched
+  source → REFUSE. **Empty `downstreams:` → AXFR REFUSED.**
+- **ACL (`allow-notify:`):** empty ⇒ NOTIFY accepted from a configured primary's IP, ignored from a
+  stranger; an explicit entry with `<name>` requires a valid TSIG.
+- **NOTIFY response is TSIG-signed** when the request was; `NOKEY` reply unsigned.
+- **`keys:` by name:** a `keys.tsig[]` entry named `NOKEY` → ERROR; a peer/ACL referencing an
+  undefined key name → that zone ERROR; config-wins on reload (config bound last upserts the name).
+- Restart: the `keys:` store (DB + config) is loaded before the first refresh/NOTIFY, so every
+  referenced key name resolves when the first transfer fires.
 
 ## 7. Assessment (risk / LOC / Claude implementation time)
 
@@ -948,6 +919,14 @@ adds real wall-clock per tdns build cycle. **Revised 2026-06-25** for the probab
 | **A10** tests: all paths + collision + ACL reject + load-ordering/config-wins + refcount/ownership | Med | Low | **Low–Med** | ~165 | 70–100 min |
 | **Improvement 2 subtotal** | — | — | **Low–Med** (A1/A8 the elevated cells) | **~625** | **6.5–9 h** |
 | **Total** | — | — | **Low–Med** (two elevated cells: B5b, A8; one Med foundation: A1) | **~1285** | **14–18.5 h** |
+
+> **Improvement-2 rows superseded (2026-06-28).** The A1–A10 breakdown above reflects the old
+> per-peer-keystore design; the NSD-aligned model (§6) re-shapes it: **A1** shrinks (a name→secret
+> store, no per-peer DB table / refcount); **A2** is gone (`PeerConf` shipped with B0 + multi-primary;
+> no `TsigKeyName`); a **new ACL row** (ip-spec type + ordered matcher, shared by `allow-notify:` /
+> `downstreams:`) is added; **A8** becomes the `downstreams:` ACL and **A6** the `allow-notify:` ACL.
+> Net direction is **smaller** (the keystore/refcount removals outweigh the ACL additions), but the
+> per-row numbers above should be re-estimated against §6's steps before use.
 
 **What moved after the external review + verification (and why):**
 - **B5 split into B5a/B5b (B5b new, 2026-06-24):** beyond the marker-reload fix, there is a *second*
@@ -1143,22 +1122,29 @@ syntax it depends on, so it cannot ship first regardless of how loud-and-testabl
 - cmdv2/auth/*.sample.yaml (migrate sample `primary:`/`notify:` to structured form; document
   `dynamiczones.dynamic.allowed`)
 
-**Improvement 2:**
-- v2/tsig_peer.go (new: `SignForPeer`, `VerifyFromPeer`, `NOKEY` sentinel)
-- v2/keystore.go + v2/db_schema.go (per-peer TSIG table + accessors)
-- v2/structs.go (`PeerConf`; `ZoneData.TsigKeyName`, `ZoneData.Notify []PeerConf`; `ZoneRefresher` fields)
-- v2/config.go + v2/parseconfig.go (`keys:` tag; structured `notify:`; bind keys at parse)
-- v2/zone_utils.go (`DoTransfer` — A4 sign)
-- v2/dnsutils.go (`ZoneTransferIn` sign — A5; `ZoneTransferOut` verify — A8)
-- v2/notifier.go (`SendNotify` sign — A7)
-- v2/notifyresponder.go (inbound NOTIFY verify — A6)
+**Improvement 2 (NSD-aligned — revised 2026-06-28):**
+- v2/tsig_peer.go (new: `SignForPeer(msg, keyName, kdb)`, `VerifyFromPeer(msg, kdb)`, `peerIP(addr)`,
+  `NOKEY` sentinel)
+- v2/tsig_keys.go (new: the **name→secret** store — load `keys.tsig[]`; `GetTsigKey(name)`;
+  optional persist + `owner` discriminator + name-reference auto-drop for API keys). **No per-peer
+  `(peerIP, name)` table.**
+- v2/acl.go (new: `AclEntry{ip-spec, key}`, ip-spec parse/match (CIDR/mask/range/any), ordered
+  `matchACL`, `BLOCKED`)
+- v2/structs.go (`ZoneConf`/`ZoneData`/`ZoneRefresher`: add `AllowNotify []AclEntry` +
+  `Downstreams []AclEntry`. **No `ZoneData.TsigKeyName`** — keys are on `primaries[]`/`notify[]`.)
+- v2/config.go + v2/parseconfig.go (`keys:` tag + load into the name store; decode/validate
+  `allow-notify:`/`downstreams:`; a referenced-but-undefined key name → zone ERROR)
+- v2/zone_utils.go (`DoTransfer` — sign per `up.Key` in the multi-primary loop)
+- v2/dnsutils.go (`ZoneTransferIn` sign per `up.Key`; `ZoneTransferOut` — `downstreams:` ACL + verify)
+- v2/notifier.go (`SendNotify` — sign with `notify[].key`)
+- v2/notifyresponder.go (inbound NOTIFY — `allow-notify:` ACL (empty ⇒ accept from `primaries:`) +
+  verify; thread `zd.KeyDB`)
 - v2/queryresponder.go (AXFR path: `ZoneTransferOut` already has `w.RemoteAddr()`; reduce via
-  `peerIP` for the ACL/verify — no new param needed)
-- v2/catalog.go (wire TSIG → `primary.key` + keystore — A9)
-- v2/refreshengine.go (assign peer/key fields onto `ZoneData`)
-- v2/dynamic_zones.go (persist `PeerConf{addr,key}` for `primary` + `notify` peers)
-- v2/tsig_peer.go (`peerIP(addr)` helper — bare-IP keystore/ACL key)
-- v2/global.go / v2/tsig_utils.go (stop using `Globals.TsigKeys` on auth replication path)
+  `peerIP` for the `downstreams:` match/verify — no new param)
+- v2/catalog.go (map group `tsig_key` → `primaries[].key` name; delete the false "applied TSIG key"
+  log; re-point the `tsig_key` check at `keys.tsig[]`)
+- v2/refreshengine.go (assign `AllowNotify`/`Downstreams` onto `ZoneData`)
+- v2/global.go / v2/tsig_utils.go (stop using `Globals.TsigKeys` on the auth replication path)
 
 ## 9. Decisions (all resolved 2026-06-23, incl. external-review round)
 - **Static-config migration (B0): hard cutover, resilient.** Bare-string `primary:`/`notify:` values
@@ -1168,8 +1154,9 @@ syntax it depends on, so it cannot ship first regardless of how loud-and-testabl
   mapstructure`, and mapstructure ignores the YAML interface — verified). The hook records a legacy
   marker so the whole-file decode succeeds and per-zone validation quarantines just that zone (without
   it, one legacy value aborts the whole-file decode, verified at parseconfig.go:287-292).
-- **Canonical peer field: `notify:`.** The duplicate `downstreams:` field/key is **removed** in the
-  `PeerConf` migration (B0c) — one name, one `[]PeerConf`.
+- **Canonical NOTIFY-target field: `notify:`** (B0c) — one `[]PeerConf` for *who I notify*.
+  **Revised 2026-06-28:** `downstreams:` returns as a *separate* field — the **transfer ACL**
+  (provide-xfr), not a `notify:` synonym — and `allow-notify:` is added as the inbound-NOTIFY ACL.
 - **Direct-API zones gate:** `zone add` honours `dynamiczones.dynamic.allowed` (default false,
   currently inert) and persists under `dynamiczones.dynamic.storage`.
 - **Marker reload (B5): unified fix for ALL dynamic zone types.** `LoadDynamicZoneFiles` re-derives
@@ -1195,22 +1182,23 @@ syntax it depends on, so it cannot ship first regardless of how loud-and-testabl
   them onto `ZoneStatus` is a future follow-up, not this work.
 - **TSIG transaction scope: full replication cycle.** SOA probe, AXFR/IXFR, NOTIFY — sign outbound,
   verify inbound; not `transfer.In` alone. Shared `SignForPeer`/`VerifyFromPeer`, no one-off TSIG.
-- **Inbound AXFR ACL (A8):** requester must match a configured `notify:` peer; unknown requesters
-  REFUSED (replaces today's open `ZoneTransferOut`). A NOTIFY-only peer still needs a list entry.
-- **Peer address model (B4, decided 2026-06-24):** **send** to the configured full `addr:port` (never
-  assume `:53`); **key the keystore and match the ACL on IP only** (`peerIP(addr)` = port stripped,
-  on both store and lookup), because the inbound source port is ephemeral. Keystore tuple is
-  `(peerIP, key_name)`. Accepted limitation: two peers sharing one IP on different ports cannot be
-  distinguished (matches BIND's address-based `server`-ACL model).
-- **Catalog `tsig_key` → `primary.key`:** single field on provisioned zones; the parallel
-  `tsig_key`-only path is deprecated; the false "applied TSIG key" log is deleted now.
-- **`keys:` conflict policy + load ordering (ordering decided 2026-06-25):** startup loads the
-  persistent `TsigKeys` DB **first**, then binds the `keys:` block (`AddTsigKey(owner="config")`
-  upserts). Because config binds last, on a `(peerIP, name)` collision **config wins on reload**
-  automatically — no special-case comparison. API-set (`owner="api"`) keys are for API-managed zones
-  and survive when no config entry collides; keystore entries are reference-counted across zones
-  sharing a peer IP.
-- **`Globals.TsigKeys` retirement:** auth replication uses **only** the `KeyDB` per-peer store; the
+- **Inbound AXFR ACL (revised 2026-06-28 — the `downstreams:` ACL):** served only if
+  `peerIP(requester)` matches a `downstreams:` entry (ip-spec + key｜NOKEY｜BLOCKED, ordered, BLOCKED
+  supersedes); **empty `downstreams:` ⇒ DENY** (closes today's open `ZoneTransferOut`). This is a
+  *separate* ACL from `notify:` (NSD `provide-xfr`), **not** "match a configured notify peer."
+- **Inbound NOTIFY (revised 2026-06-28 — the `allow-notify:` ACL):** matched against `allow-notify:`;
+  **empty ⇒ accept from the configured `primaries:` IPs**; a non-NOKEY entry requires a valid TSIG.
+  Supersedes the old single-key `zd.TsigKeyName` verify and the "no address-ACL on NOTIFY" stance.
+- **Address model (revised 2026-06-28):** **send** to the configured full `addr:port` (never assume
+  `:53`); **match ACLs on IP only** (`peerIP` = port stripped) via ip-spec (IP/CIDR/mask/range).
+  **Secrets are keyed by name, not `(peerIP, name)`** — the old per-peer keystore tuple is dropped.
+- **Catalog `tsig_key` → `primaries[].key`:** map the group key-name onto the provisioned zone's
+  primary key (name-referenced in `keys:`); delete the false "applied TSIG key" log now.
+- **`keys:` load ordering (decided 2026-06-25, simplified 2026-06-28):** DB-load → `keys:` bind
+  (upsert by **name**) → zone parse. Config binds last, so on a **name** collision config wins on
+  reload — no special-case comparison. API keys (`owner="api"`) survive when no config name collides;
+  optional auto-drop is a **name-reference** scan of live `Zones`.
+- **`Globals.TsigKeys` retirement:** auth replication uses **only** the `keys:` name→secret store; the
   CLI reporter / `notifyreporter` client path may keep `Globals.TsigKeys` (out of scope for auth).
 - **API `zone add` scope (v1):** secondary zones only; `ProvisionDynamicZone` rejects primary.
 - **`modify` scope (v1):** `primary` addr/key + `options` only; no notify, policy, store, or rename.
@@ -1267,5 +1255,18 @@ note + migrated `*.sample.yaml`:
   ```
 - **What an un-migrated zone does:** loads into **ERROR state** (visible via `list-zones`), server
   still starts, other zones unaffected. The ERROR message names the field and the required shape.
-- **Adding TSIG (Improvement 2):** declare a `keys:` block and replace `NOKEY` with the key name on
-  the relevant `primary`/`notify` entries — no other config change, no re-provisioning.
+- **`primary:` → `primaries:` (multi-primary, separate PR).** The struct above became a **list**;
+  see `2026-06-26-multi-primary-and-hostname-resolution-plan.md` for that cutover. Read the `primary:`
+  examples above as a one-element `primaries:` list.
+- **Adding TSIG (Improvement 2, NSD-aligned — revised 2026-06-28):**
+  - declare a **`keys:`** block (`name → {algorithm, secret}`) and replace `NOKEY` with the **key
+    name** on the relevant `primaries[]` / `notify[]` entries (the entry references the name; the
+    secret lives in `keys:`);
+  - add a **`downstreams:`** ACL on every primary that should serve AXFR — **this is a hard cutover:
+    with `downstreams:` empty, AXFR is now REFUSED to everyone** (tdns serves AXFR openly today).
+    Entries are `ip-spec key｜NOKEY｜BLOCKED`, e.g. `203.0.113.0/24 transfer-key`, `192.0.2.9 NOKEY`,
+    `0.0.0.0/0 BLOCKED`;
+  - optionally add **`allow-notify:`** (same shape) to restrict who may NOTIFY a secondary — empty
+    means "accept from the configured `primaries:`."
+  - An un-migrated zone that needs a key it can't resolve, or names an undefined key, → ERROR
+    (visible via `list-zones`), server still starts.

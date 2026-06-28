@@ -43,8 +43,6 @@ type RefreshCounter struct {
 	SOARefresh     uint32
 	CurRefresh     uint32
 	IncomingSerial uint32
-	Upstream       string
-	Notify         []PeerConf
 	Zonefile       string
 }
 
@@ -68,8 +66,6 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		Name:       zone,
 		SOARefresh: refresh,
 		CurRefresh: refresh,
-		Upstream:   NormalizeAddress(zr.Primary.Addr),
-		Notify:     normalizePeerAddrs(zr.Notify),
 	})
 
 	// Check if this is a catalog zone and parse it
@@ -244,7 +240,10 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 
 							zd.mu.Lock()
 							zd.ZoneStore = zr.ZoneStore
-							zd.Upstream = NormalizeAddress(zr.Primary.Addr)
+							if len(zr.PrimariesConf) > 0 {
+								zd.PrimariesConf = clonePeerConfs(zr.PrimariesConf)
+								zd.Upstreams = clonePeerConfs(zr.Primaries)
+							}
 							zd.Notify = normalizePeerAddrs(zr.Notify)
 							zd.Zonefile = zr.Zonefile
 							zd.ZoneType = zr.ZoneType
@@ -314,9 +313,10 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						if zr.Notify != nil {
 							zd.Notify = normalizePeerAddrs(zr.Notify)
 						}
-						// Update upstream only if provided
-						if zr.Primary.Addr != "" {
-							zd.Upstream = NormalizeAddress(zr.Primary.Addr)
+						// Update primaries only if provided (config-bearing refresher).
+						if len(zr.PrimariesConf) > 0 {
+							zd.PrimariesConf = clonePeerConfs(zr.PrimariesConf)
+							zd.Upstreams = clonePeerConfs(zr.Primaries)
 						}
 						// Update zonefile only if provided
 						if zr.Zonefile != "" {
@@ -390,7 +390,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							UpdateSigValidityFloor(zd, zd.DnssecPolicy, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm)
 							triggerResign(conf, zone)
 						}
-						lgEngine.Debug("updated configuration for zone", "zone", zone, "notify", zd.Notify, "upstream", zd.Upstream, "zonefile", zd.Zonefile, "store", ZoneStoreToString[zd.ZoneStore])
+						lgEngine.Debug("updated configuration for zone", "zone", zone, "notify", zd.Notify, "primaries", zd.PrimariesConf, "upstreams", zd.Upstreams, "zonefile", zd.Zonefile, "store", ZoneStoreToString[zd.ZoneStore])
 
 						// Update or create refreshCounter with current config values
 						var refresh uint32 = 300 // 5 minutes, must have something even if we don't get SOA
@@ -404,8 +404,6 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 						if rc, haveParams := refreshCounters.Get(zone); haveParams {
 							// Update existing refreshCounter with new config values
-							rc.Upstream = NormalizeAddress(zr.Primary.Addr)
-							rc.Notify = normalizePeerAddrs(zr.Notify)
 							rc.Zonefile = zr.Zonefile
 							rc.SOARefresh = refresh
 							rc.CurRefresh = refresh // immediate refresh handled by goroutine below
@@ -415,8 +413,6 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								Name:       zone,
 								SOARefresh: refresh,
 								CurRefresh: refresh, // immediate refresh handled by goroutine below
-								Upstream:   NormalizeAddress(zr.Primary.Addr),
-								Notify:     normalizePeerAddrs(zr.Notify),
 								Zonefile:   zr.Zonefile,
 							})
 						}
@@ -569,11 +565,17 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 					}
 					msc := conf.MultiSigner[zr.MultiSigner]
+					// Resolution happens at every ingress path (parse/load/add/
+					// modify/catalog), so a config-bearing refresher always carries
+					// the resolved Primaries alongside the as-written PrimariesConf.
+					primariesConf := clonePeerConfs(zr.PrimariesConf)
+					upstreams := clonePeerConfs(zr.Primaries)
 					zd := &ZoneData{
 						ZoneName:         zone,
 						ZoneStore:        zr.ZoneStore,
 						Logger:           log.Default(),
-						Upstream:         NormalizeAddress(zr.Primary.Addr),
+						PrimariesConf:    primariesConf,
+						Upstreams:        upstreams,
 						Notify:           normalizePeerAddrs(zr.Notify),
 						Zonefile:         zr.Zonefile,
 						ZoneType:         zr.ZoneType,

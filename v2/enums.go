@@ -283,6 +283,10 @@ const (
 	// primary). Visibility-only — the zone keeps serving and the NOTIFY proxy
 	// may still apply.
 	DelegationSyncWarning
+	// ConfigWarning: zone config is degraded but the zone is still served
+	// (e.g. some primaries failed to resolve while others succeeded).
+	// Visibility-only.
+	ConfigWarning
 )
 
 var ErrorTypeToString = map[ErrorType]string{
@@ -295,6 +299,7 @@ var ErrorTypeToString = map[ErrorType]string{
 	RolloverPolicyWarning:   "rollover-policy-warning",
 	RolloverParentBlocker:   "rollover-parent-blocker",
 	DelegationSyncWarning:   "delegation-sync-warning",
+	ConfigWarning:           "config-warning",
 }
 
 // errorTypeReportOrder defines the deterministic order in which the
@@ -312,6 +317,7 @@ var errorTypeReportOrder = []ErrorType{
 	DnssecPolicyWarning,
 	RolloverPolicyWarning,
 	DelegationSyncWarning,
+	ConfigWarning,
 }
 
 // rolloverGatingErrors are categories that the auto-rollover CLI
@@ -343,6 +349,19 @@ var serviceImpactingErrors = []ErrorType{
 	ConfigError,
 	AgentError,
 	DnssecError,
+}
+
+// ErrorTypeIsServiceImpacting reports whether an error category makes a zone
+// unable to serve (so it should render as an ERROR) versus a visibility-only
+// warning under which the zone keeps serving (e.g. ConfigWarning). Exported for
+// CLI display, which renders the two differently.
+func ErrorTypeIsServiceImpacting(t ErrorType) bool {
+	for _, e := range serviceImpactingErrors {
+		if t == e {
+			return true
+		}
+	}
+	return false
 }
 
 // ZoneError is one entry in the per-zone error registry. Use SetError

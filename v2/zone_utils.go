@@ -65,7 +65,7 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, err
 			}
 			updated, err = zd.FetchFromUpstream(verbose, debug, dynamicRRs)
 			if err != nil {
-				lg.Error("FetchZone failed", "zone", zd.ZoneName, "upstream", zd.Upstream, "err", err)
+				lg.Error("FetchZone failed", "zone", zd.ZoneName, "upstream", firstUpstreamAddr(zd.Upstreams), "err", err)
 				return false, err
 			}
 			return updated, nil // zone updated, no error
@@ -80,60 +80,91 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, err
 	return false, nil
 }
 
-// Return shouldTransfer, new upstream serial, error
-func (zd *ZoneData) DoTransfer() (bool, uint32, error) {
-	var upstream_serial uint32
+// firstUpstreamAddr returns the first transfer target, or "" if none configured.
+func firstUpstreamAddr(upstreams []PeerConf) string {
+	if len(upstreams) == 0 {
+		return ""
+	}
+	return upstreams[0].Addr
+}
 
+// Return shouldTransfer, new upstream serial, error
+//
+// The SOA probe iterates zd.Upstreams, advancing to the next address whenever
+// the current one does not yield a usable SOA — a transport error OR a
+// non-usable rcode (REFUSED/SERVFAIL/NXDOMAIN/empty). Different primaries are
+// independent servers that may answer differently (e.g. per-primary ACLs), so
+// one primary refusing does not mean the zone is unavailable from a sibling.
+// A usable NOERROR+SOA from any primary is honoured (transfer decided on
+// serial). If every primary answered but none gave a usable SOA, we back off
+// quietly (no transfer, no error); only all-unreachable is a hard error.
+func (zd *ZoneData) DoTransfer() (bool, uint32, error) {
 	if zd == nil {
 		panic("DoTransfer: zd == nil")
+	}
+
+	if len(zd.Upstreams) == 0 {
+		return false, 0, fmt.Errorf("DoTransfer: zone %s has no upstreams configured", zd.ZoneName)
 	}
 
 	// log.Printf("%s: known zone, current incoming serial %d", zd.ZoneName, zd.IncomingSerial)
 	m := new(dns.Msg)
 	m.SetQuestion(zd.ZoneName, dns.TypeSOA)
 
-	upstream := zd.Upstream
-	if _, _, err := net.SplitHostPort(upstream); err != nil {
-		// If error, assume no port was specified
-		upstream = net.JoinHostPort(upstream, "53")
-		lg.Debug("DoTransfer: no port specified for upstream, using default port 53", "zone", zd.ZoneName, "upstream", zd.Upstream)
-	}
-	r, err := dns.Exchange(m, upstream)
-	if err != nil {
-		lg.Error("dns.Exchange failed", "zone", zd.ZoneName, "qtype", "SOA", "err", err)
-		return false, 0, err
-	}
-
-	rcode := r.MsgHdr.Rcode
-	switch rcode {
-	case dns.RcodeRefused, dns.RcodeServerFailure, dns.RcodeNameError:
-		return false, 0, nil // never mind
-	case dns.RcodeSuccess:
-		if len(r.Answer) == 0 {
-			lg.Debug("DoTransfer: NOERROR but empty answer section", "zone", zd.ZoneName, "upstream", upstream)
-			return false, 0, nil
+	sawResponse := false
+	var lastErr error
+	for _, up := range zd.Upstreams {
+		upstream := up.Addr
+		if _, _, err := net.SplitHostPort(upstream); err != nil {
+			// If error, assume no port was specified
+			upstream = net.JoinHostPort(upstream, "53")
+			lg.Debug("DoTransfer: no port specified for upstream, using default port 53", "zone", zd.ZoneName, "upstream", upstream)
 		}
-		if soa, ok := r.Answer[0].(*dns.SOA); ok {
-			lg.Info("DoTransfer: serial check", "zone", zd.ZoneName, "notify_serial", soa.Serial, "incoming_serial", zd.IncomingSerial, "current_serial", zd.CurrentSerial)
-			if soa.Serial <= zd.IncomingSerial {
-				// log.Printf("New upstream serial for %s (%d) is <= old incoming serial (%d)",
-				// 	zd.ZoneName, soa.Serial, zd.IncomingSerial)
-				return false, soa.Serial, nil
+		r, err := dns.Exchange(m, upstream)
+		if err != nil {
+			// Transport failure for this address — try the next sibling.
+			lg.Warn("DoTransfer: SOA probe transport error, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "err", err)
+			lastErr = err
+			continue
+		}
+		sawResponse = true
+		switch r.MsgHdr.Rcode {
+		case dns.RcodeSuccess:
+			if len(r.Answer) == 0 {
+				lg.Debug("DoTransfer: NOERROR but empty answer section, trying next upstream", "zone", zd.ZoneName, "upstream", upstream)
+				continue
 			}
-			// log.Printf("New upstream serial for %s (%d) is > current serial (%d)",
-			// 	zd.ZoneName, soa.Serial, zd.IncomingSerial)
-			return true, soa.Serial, nil
+			if soa, ok := r.Answer[0].(*dns.SOA); ok {
+				lg.Info("DoTransfer: serial check", "zone", zd.ZoneName, "upstream", upstream, "notify_serial", soa.Serial, "incoming_serial", zd.IncomingSerial, "current_serial", zd.CurrentSerial)
+				if soa.Serial <= zd.IncomingSerial {
+					return false, soa.Serial, nil
+				}
+				return true, soa.Serial, nil
+			}
+			// NOERROR but the first answer is not a SOA — try the next sibling.
+			continue
+		default:
+			// REFUSED / SERVFAIL / NXDOMAIN / etc. This primary will not give a
+			// usable SOA, but a sibling may (e.g. differing per-primary ACLs).
+			lg.Debug("DoTransfer: non-usable SOA rcode, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "rcode", dns.RcodeToString[r.MsgHdr.Rcode])
+			continue
 		}
-	default:
 	}
 
-	return false, upstream_serial, nil
+	if sawResponse {
+		// At least one primary answered, but none gave a usable SOA (e.g. all
+		// REFUSED). Back off quietly — no transfer this cycle, not an error.
+		return false, 0, nil
+	}
+	// No primary was even reachable.
+	lg.Error("DoTransfer: SOA probe failed on all upstreams (unreachable)", "zone", zd.ZoneName, "count", len(zd.Upstreams), "err", lastErr)
+	return false, 0, fmt.Errorf("SOA probe of %s failed: all %d upstream(s) unreachable: %w", zd.ZoneName, len(zd.Upstreams), lastErr)
 }
 
 // Return updated, error
 func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core.RRset) (bool, error) {
 
-	// log.Printf("Reading zone %s from file %s\n", zd.ZoneName, zd.Upstream)
+	// log.Printf("Reading zone %s from file %s\n", zd.ZoneName, zd.Zonefile)
 	zd.SetStatus(ZoneStatusLoading)
 
 	new_zd := ZoneData{
@@ -216,28 +247,48 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 // Return updated, err
 func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RRset) (bool, error) {
 
-	lg.Info("transferring zone via AXFR", "zone", zd.ZoneName, "upstream", zd.Upstream)
+	if len(zd.Upstreams) == 0 {
+		return false, fmt.Errorf("FetchFromUpstream: zone %s has no upstreams configured", zd.ZoneName)
+	}
 	zd.SetStatus(ZoneStatusLoading)
 
-	new_zd := ZoneData{
-		ZoneName:       zd.ZoneName,
-		ZoneType:       zd.ZoneType,
-		ZoneStore:      zd.ZoneStore,
-		XfrType:        zd.XfrType,
-		IncomingSerial: zd.IncomingSerial,
-		CurrentSerial:  zd.CurrentSerial,
-		Logger:         zd.Logger,
-		Verbose:        zd.Verbose,
-		Debug:          zd.Debug,
-		Options:        zd.Options,
-		Ready:          true, // this is only used by the checks for changes to DNSKEYs, HSYNC, etc.
-		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
+	// Iterate the resolved upstreams, advancing to the next on ANY failure —
+	// a transport error, a REFUSED/NOTAUTH/SERVFAIL xfr rcode, or bad zone data.
+	// allow-transfer ACLs commonly differ per primary, so one primary refusing
+	// us says nothing about a sibling. A fresh new_zd per attempt keeps a failed
+	// transfer from polluting the next try; the live zd.IncomingSerial is only
+	// touched in the hard flip below, after a success.
+	var new_zd ZoneData
+	transferred := false
+	var lastErr error
+	for _, up := range zd.Upstreams {
+		upstream := up.Addr
+		lg.Info("transferring zone via AXFR", "zone", zd.ZoneName, "upstream", upstream)
+		new_zd = ZoneData{
+			ZoneName:       zd.ZoneName,
+			ZoneType:       zd.ZoneType,
+			ZoneStore:      zd.ZoneStore,
+			XfrType:        zd.XfrType,
+			IncomingSerial: zd.IncomingSerial,
+			CurrentSerial:  zd.CurrentSerial,
+			Logger:         zd.Logger,
+			Verbose:        zd.Verbose,
+			Debug:          zd.Debug,
+			Options:        zd.Options,
+			Ready:          true, // this is only used by the checks for changes to DNSKEYs, HSYNC, etc.
+			// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
+		}
+		if _, err := new_zd.ZoneTransferIn(upstream, zd.IncomingSerial, "axfr"); err != nil {
+			lg.Warn("FetchFromUpstream: AXFR from upstream failed, trying next", "zone", zd.ZoneName, "upstream", upstream, "err", err)
+			lastErr = err
+			continue
+		}
+		transferred = true
+		break
 	}
-
-	_, err := new_zd.ZoneTransferIn(zd.Upstream, zd.IncomingSerial, "axfr")
-	if err != nil {
-		lg.Error("ZoneTransfer failed", "zone", zd.ZoneName, "err", err)
-		return false, err
+	if !transferred {
+		lg.Error("FetchFromUpstream: AXFR failed on all upstreams", "zone", zd.ZoneName, "count", len(zd.Upstreams), "err", lastErr)
+		return false, fmt.Errorf("AXFR of %s failed: tried all %d upstream(s): %w", zd.ZoneName, len(zd.Upstreams), lastErr)
 	}
 
 	if new_zd.IncomingSerial == zd.IncomingSerial {

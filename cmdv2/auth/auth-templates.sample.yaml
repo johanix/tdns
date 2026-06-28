@@ -9,8 +9,8 @@
 #                      - map:   Default, general-purpose (recommended for most zones)
 #                      - slice: Experimental alternative (may be faster/use less memory)
 #                      - xfr:   Zone transfer only (AXFR in/out, NO normal queries)
-#   - primary:         Upstream server for secondary zones (IP:port)
-#   - notify:          List of downstream servers to notify (IP:port)
+#   - primaries:       Upstream servers for secondary zones — list of {addr, key}
+#   - notify:          Downstream servers to notify — list of {addr, key}
 #   - options:         List of zone options (see below)
 #   - dnssec_policy:   DNSSEC policy name (from dnssecpolicies section)
 #   - multi_signer:    Multi-signer configuration name
@@ -112,7 +112,7 @@ templates:
    basic-secondary:
       type:            secondary
       store:           map         # Default storage (serves normal DNS queries)
-      # primary: must be set per-zone or overridden
+      # primaries: must be set per-zone or overridden
 
    # Secondary with child sync
    child-secondary:
@@ -144,7 +144,7 @@ templates:
          - catalog-zone                   # RFC 9432 catalog zone
          - catalog-member-auto-create     # Auto-create member zones
          - catalog-member-auto-delete     # Auto-delete removed zones
-      # primary: must be set per-zone
+      # primaries: must be set per-zone
 
    # Read-only catalog (metadata only, no auto-configuration)
    catalog-readonly:
@@ -167,8 +167,10 @@ templates:
       type:            primary
       store:           map
       notify:
-         - "192.0.2.1:53"                 # Notify public secondaries
-         - "192.0.2.2:53"
+         - addr: "192.0.2.1:53"           # Notify public secondaries
+           key:  NOKEY
+         - addr: "192.0.2.2:53"
+           key:  NOKEY
       options:
          - delegation-sync-parent
          - online-signing

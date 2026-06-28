@@ -631,6 +631,10 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		}
 
 		var zonetype ZoneType
+		// resolvedPrimaries holds the addr:port tuples for a secondary zone's
+		// upstreams, resolved (hostnames -> addresses) at parse time. nil for
+		// primary zones. Carried to the ZoneRefresher build below.
+		var resolvedPrimaries []PeerConf
 
 		switch strings.ToLower(zconf.Type) {
 		case "primary":
@@ -638,43 +642,71 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			_ = append([]string{}, zname) // primary_zones was unused
 		case "secondary":
 			zonetype = Secondary
-			// Legacy bare-string primary: (pre-migration shape) — the decode
-			// hook recorded it as a Legacy marker; quarantine just this zone.
-			if zconf.Primary.Legacy != "" {
-				lgConfig.Error("secondary zone uses legacy bare-string primary, zone in error state", "zone", zname, "primary", zconf.Primary.Legacy)
-				zd.SetError(ConfigError, "primary now requires {addr, key} (got bare string %q)", zconf.Primary.Legacy)
-				broken_zones = append(broken_zones, zname)
-				continue
-			}
-			if zconf.Primary.Addr == "" {
+			if len(zconf.Primaries) == 0 {
 				lgConfig.Error("secondary zone has no primary configured, zone in error state", "zone", zname)
 				zd.SetError(ConfigError, "secondary zone but has no primary (upstream) configured")
 				broken_zones = append(broken_zones, zname)
 				continue
 			}
-			// Key is mandatory and explicit — no default to NOKEY.
-			if zconf.Primary.Key == "" {
-				lgConfig.Error("secondary zone primary has no key, zone in error state", "zone", zname)
-				zd.SetError(ConfigError, "primary requires an explicit key (use key: NOKEY for no TSIG)")
-				broken_zones = append(broken_zones, zname)
-				continue
+			secondaryOK := true
+			for i := range zconf.Primaries {
+				p := &zconf.Primaries[i]
+				if p.Legacy != "" {
+					lgConfig.Error("secondary zone uses legacy bare-string primary, zone in error state", "zone", zname, "primary", p.Legacy)
+					zd.SetError(ConfigError, "primary now requires {addr, key} (got bare string %q)", p.Legacy)
+					secondaryOK = false
+					break
+				}
+				if p.Addr == "" {
+					lgConfig.Error("secondary zone primary has no address, zone in error state", "zone", zname)
+					zd.SetError(ConfigError, "secondary zone but has no primary (upstream) configured")
+					secondaryOK = false
+					break
+				}
+				if p.Key == "" {
+					lgConfig.Error("secondary zone primary has no key, zone in error state", "zone", zname)
+					zd.SetError(ConfigError, "primary requires an explicit key (use key: NOKEY for no TSIG)")
+					secondaryOK = false
+					break
+				}
+				if p.Key != NOKEY {
+					lgConfig.Error("secondary zone primary references unknown key, zone in error state", "zone", zname, "key", p.Key)
+					zd.SetError(ConfigError, "unknown primary key %q (only NOKEY is valid until TSIG keys are configured)", p.Key)
+					secondaryOK = false
+					break
+				}
+				origPrimary := p.Addr
+				p.Addr = NormalizeAddress(p.Addr)
+				if origPrimary != p.Addr {
+					lgConfig.Warn("primary has no port specified, using default :53", "zone", zname, "primary", origPrimary)
+				}
 			}
-			// Improvement 1 phase: NOKEY is the only resolvable key name. Any
-			// other name is an unknown-key error until the keys: block exists
-			// (Improvement 2). NOKEY comparison is case-sensitive.
-			if zconf.Primary.Key != NOKEY {
-				lgConfig.Error("secondary zone primary references unknown key, zone in error state", "zone", zname, "key", zconf.Primary.Key)
-				zd.SetError(ConfigError, "unknown primary key %q (only NOKEY is valid until TSIG keys are configured)", zconf.Primary.Key)
+			if !secondaryOK {
 				broken_zones = append(broken_zones, zname)
 				continue
 			}
 
-			// Normalize primary address to include port if not specified
-			origPrimary := zconf.Primary.Addr
-			zconf.Primary.Addr = NormalizeAddress(zconf.Primary.Addr)
-			if origPrimary != zconf.Primary.Addr {
-				lgConfig.Warn("primary has no port specified, using default :53", "zone", zname, "primary", origPrimary)
+			// Resolve the as-written primaries to addr:port tuples (hostnames
+			// -> addresses via the IMR), re-resolved on every parse/reload.
+			// Zero resolved -> ConfigError (quarantine); partial -> ConfigWarning
+			// (serve from the rest). A prior parse's ConfigWarning was already
+			// cleared by the SetError(NoError) reset at the top of the loop.
+			res := resolvePrimaries(ctx, conf.Internal.ImrEngine, zconf.Primaries)
+			if len(res.Resolved) == 0 {
+				lgConfig.Error("secondary zone: no primary resolved to an address, zone in error state", "zone", zname, "unresolved", res.Unresolved)
+				zd.SetError(ConfigError, "no primary resolved to an address (unresolved: %v)", res.Unresolved)
+				broken_zones = append(broken_zones, zname)
+				continue
 			}
+			if len(res.Unresolved) > 0 || len(res.KeyCollisions) > 0 {
+				// Count resolved addresses actually usable for transfer — not
+				// entries-minus-unresolved, which over-counts when a key
+				// collision drops an otherwise-resolved address.
+				served := len(res.Resolved)
+				lgConfig.Warn("secondary zone: some primaries unavailable, serving from the rest", "zone", zname, "unresolved", res.Unresolved, "key_collisions", res.KeyCollisions, "resolved_upstreams", served, "configured_primaries", len(zconf.Primaries))
+				zd.SetError(ConfigWarning, "serving from %d resolved upstream(s) of %d configured primaries (unresolved: %v, key-collisions: %v)", served, len(zconf.Primaries), res.Unresolved, res.KeyCollisions)
+			}
+			resolvedPrimaries = res.Resolved
 
 		default:
 			lgConfig.Error("unknown zone type, zone in error state", "zone", zname, "type", zconf.Type)
@@ -728,7 +760,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		}
 		lgConfig.Debug("zone outgoing options", "zone", zname, "options", outopts)
 
-		lgConfig.Info("zone configuration", "zone", zname, "type", zconf.Type, "store", zconf.Store, "primary", zconf.Primary, "notify", zconf.Notify, "zonefile", zconf.Zonefile)
+		lgConfig.Info("zone configuration", "zone", zname, "type", zconf.Type, "store", zconf.Store, "primaries", zconf.Primaries, "notify", zconf.Notify, "zonefile", zconf.Zonefile)
 
 		lgConfig.Debug("zone incoming update policy", "zone", zname, "policy", fmt.Sprintf("%+v", zconf.UpdatePolicy))
 
@@ -1030,16 +1062,17 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				return nil, nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
 			}
 			zr := ZoneRefresher{
-				Name:         zname,
-				Force:        true,     // force refresh, ignoring SOA serial, when reloading from file
-				ZoneType:     zonetype, // primary | secondary
-				Primary:      zconf.Primary,
-				ZoneStore:    zonestore,
-				Notify:       zconf.Notify,
-				Zonefile:     zconf.Zonefile,
-				Options:      options,
-				UpdatePolicy: policy,
-				DnssecPolicy: zconf.DnssecPolicy,
+				Name:          zname,
+				Force:         true,     // force refresh, ignoring SOA serial, when reloading from file
+				ZoneType:      zonetype, // primary | secondary
+				PrimariesConf: clonePeerConfs(zconf.Primaries),
+				Primaries:     resolvedPrimaries,
+				ZoneStore:     zonestore,
+				Notify:        zconf.Notify,
+				Zonefile:      zconf.Zonefile,
+				Options:       options,
+				UpdatePolicy:  policy,
+				DnssecPolicy:  zconf.DnssecPolicy,
 			}
 			select {
 			case conf.Internal.RefreshZoneCh <- zr:
@@ -1067,8 +1100,11 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 		// fmt.Printf("ExpandTemplate: zone %s now uses the \"%s\" storage alternative.\n", zconf.Name, tmpl.Store)
 		zconf.Store = tmpl.Store
 	}
-	if tmpl.Primary.Addr != "" {
-		zconf.Primary = tmpl.Primary
+	if len(tmpl.Primaries) > 0 {
+		// Clone — ParseZones normalizes zconf.Primaries[i].Addr in place, so an
+		// alias of the template slice would let the first zone using this
+		// template mutate the shared template state for every later zone.
+		zconf.Primaries = clonePeerConfs(tmpl.Primaries)
 	}
 	if len(tmpl.Zonefile) > 0 {
 		// H26: Validate zone name doesn't contain format specifiers

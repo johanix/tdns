@@ -157,25 +157,25 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 	// Dynamic-zones management (add/delete/modify/list-dynamic). No --store
 	// flag: dynamic zones are map-only. The --tsig-* flags are accepted now but
 	// inert in Improvement 1 (a non-NOKEY key is rejected server-side).
-	var dzPrimaryAddr, dzPrimaryKey, dzTsigName, dzTsigSecret, dzTsigAlgo string
-	var dzOptions []string
+	var dzPrimaryKey, dzTsigName, dzTsigSecret, dzTsigAlgo string
+	var dzPrimaries, dzOptions []string
 
 	add := &cobra.Command{
 		Use:   "add",
 		Short: "Add a dynamic secondary zone at runtime (persists across restart)",
 		Run: func(cmd *cobra.Command, args []string) {
-			RunZoneAdd(role, dzPrimaryAddr, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigAlgo)
+			RunZoneAdd(role, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigAlgo)
 		},
 	}
 	add.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add")
-	add.Flags().StringVar(&dzPrimaryAddr, "primary-addr", "", "Primary (upstream) address [host:port]")
-	add.Flags().StringVar(&dzPrimaryKey, "primary-key", tdns.NOKEY, "Primary TSIG key name (NOKEY for none)")
+	add.Flags().StringSliceVar(&dzPrimaries, "primaries", nil, "Primary (upstream) addresses [host:port], comma-separated")
+	add.Flags().StringVar(&dzPrimaryKey, "primary-key", tdns.NOKEY, "Primary TSIG key name applied to all primaries (NOKEY for none)")
 	add.Flags().StringSliceVar(&dzOptions, "options", nil, "Zone options (comma-separated)")
 	add.Flags().StringVar(&dzTsigName, "tsig-name", "", "TSIG key name (inert until TSIG support lands)")
 	add.Flags().StringVar(&dzTsigSecret, "tsig-secret", "", "TSIG secret (inert until TSIG support lands)")
 	add.Flags().StringVar(&dzTsigAlgo, "tsig-algo", "", "TSIG algorithm (inert until TSIG support lands)")
 	add.MarkFlagRequired("zone")
-	add.MarkFlagRequired("primary-addr")
+	add.MarkFlagRequired("primaries")
 
 	del := &cobra.Command{
 		Use:   "delete",
@@ -191,12 +191,12 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 		Use:   "modify",
 		Short: "Modify a dynamic (API-managed) zone's primary or options",
 		Run: func(cmd *cobra.Command, args []string) {
-			RunZoneModify(role, dzPrimaryAddr, dzPrimaryKey, dzOptions)
+			RunZoneModify(role, dzPrimaries, dzPrimaryKey, dzOptions)
 		},
 	}
 	modify.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to modify")
-	modify.Flags().StringVar(&dzPrimaryAddr, "primary-addr", "", "New primary (upstream) address [host:port]")
-	modify.Flags().StringVar(&dzPrimaryKey, "primary-key", tdns.NOKEY, "New primary TSIG key name (NOKEY for none)")
+	modify.Flags().StringSliceVar(&dzPrimaries, "primaries", nil, "New primary (upstream) addresses [host:port], comma-separated")
+	modify.Flags().StringVar(&dzPrimaryKey, "primary-key", tdns.NOKEY, "New primary TSIG key name applied to all primaries (NOKEY for none)")
 	modify.Flags().StringSliceVar(&dzOptions, "options", nil, "Zone options (comma-separated)")
 	modify.MarkFlagRequired("zone")
 
@@ -423,7 +423,22 @@ func RunZoneBump(parent string, args []string) {
 	}
 }
 
-func RunZoneAdd(role, primaryAddr, primaryKey string, options []string, tsigName, tsigSecret, tsigAlgo string) {
+// peerConfsFromAddrs builds a []PeerConf from comma-listed addresses, applying
+// the single CLI key to each. Per-primary keys remain expressible via the
+// structured YAML/API paths.
+func peerConfsFromAddrs(addrs []string, key string) []tdns.PeerConf {
+	out := make([]tdns.PeerConf, 0, len(addrs))
+	for _, a := range addrs {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			continue
+		}
+		out = append(out, tdns.PeerConf{Addr: a, Key: key})
+	}
+	return out
+}
+
+func RunZoneAdd(role string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigAlgo string) {
 	if tdns.Globals.Zonename == "" {
 		fmt.Println("Error: zone name not specified")
 		os.Exit(1)
@@ -435,7 +450,7 @@ func RunZoneAdd(role, primaryAddr, primaryKey string, options []string, tsigName
 	cr, err := SendZoneCommand(api, tdns.ZonePost{
 		Command:    "add",
 		Zone:       dns.Fqdn(tdns.Globals.Zonename),
-		Primary:    tdns.PeerConf{Addr: primaryAddr, Key: primaryKey},
+		Primaries:  peerConfsFromAddrs(primaries, primaryKey),
 		Options:    options,
 		TsigName:   tsigName,
 		TsigSecret: tsigSecret,
@@ -472,7 +487,7 @@ func RunZoneDelete(role string) {
 	}
 }
 
-func RunZoneModify(role, primaryAddr, primaryKey string, options []string) {
+func RunZoneModify(role string, primaries []string, primaryKey string, options []string) {
 	if tdns.Globals.Zonename == "" {
 		fmt.Println("Error: zone name not specified")
 		os.Exit(1)
@@ -481,12 +496,15 @@ func RunZoneModify(role, primaryAddr, primaryKey string, options []string) {
 	if err != nil {
 		log.Fatalf("Error getting API client for %s: %v", role, err)
 	}
-	cr, err := SendZoneCommand(api, tdns.ZonePost{
+	post := tdns.ZonePost{
 		Command: "modify",
 		Zone:    dns.Fqdn(tdns.Globals.Zonename),
-		Primary: tdns.PeerConf{Addr: primaryAddr, Key: primaryKey},
 		Options: options,
-	})
+	}
+	if peers := peerConfsFromAddrs(primaries, primaryKey); len(peers) > 0 {
+		post.Primaries = peers
+	}
+	cr, err := SendZoneCommand(api, post)
 	if err != nil {
 		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
 		os.Exit(1)
@@ -527,7 +545,7 @@ func RunZoneListDynamic(role string) {
 			errStr = zc.ErrorMsg
 		}
 		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s",
-			name, zc.Type, zc.Provisioning, managed, zc.Primary.Addr, errStr))
+			name, zc.Type, zc.Provisioning, managed, peerConfAddrsString(zc.Primaries), errStr))
 	}
 	fmt.Println(columnize.SimpleFormat(out))
 }
@@ -576,7 +594,11 @@ func ListZones(cr tdns.ZoneResponse) {
 	}
 	zoneLines := []string{}
 	for zname, zconf := range cr.Zones {
-		if zconf.Error {
+		// Service-impacting errors collapse to a single ERROR row. A
+		// non-service-impacting error (e.g. ConfigWarning: serving from a subset
+		// of primaries) leaves the zone serving, so render it normally and
+		// annotate it below rather than masquerading as an ERROR.
+		if zconf.Error && tdns.ErrorTypeIsServiceImpacting(zconf.ErrorType) {
 			line := fmt.Sprintf("%s|%s||||Error[%s]: %s", zname, "ERROR", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
 			zoneLines = append(zoneLines, line)
 			continue
@@ -588,7 +610,7 @@ func ListZones(cr tdns.ZoneResponse) {
 		sort.Strings(opts)
 		line := fmt.Sprintf("%s|%s|%s|", zname, zconf.Type, zconf.Store)
 		if showprimary {
-			line += fmt.Sprintf("%s|", zconf.Primary.Addr)
+			line += fmt.Sprintf("%s|", peerConfAddrsString(zconf.Primaries))
 		}
 		if shownotify {
 			line += fmt.Sprintf("%s|", peerConfAddrsString(zconf.Notify))
@@ -597,6 +619,9 @@ func ListZones(cr tdns.ZoneResponse) {
 			line += fmt.Sprintf("%s|", zconf.Zonefile)
 		}
 		line += fmt.Sprintf("%t|%t|%v", zconf.Frozen, zconf.Dirty, opts)
+		if zconf.Error { // non-service-impacting => a warning; the zone still serves
+			line += fmt.Sprintf(" [%s: %s]", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
+		}
 		zoneLines = append(zoneLines, line)
 	}
 	sort.Slice(zoneLines, func(i, j int) bool {
@@ -622,7 +647,14 @@ func VerboseListZone(cr tdns.ZoneResponse) {
 	for zname, zconf := range cr.Zones {
 		line := fmt.Sprintf("zone: %s\n", zname)
 		if zconf.Error {
-			line += fmt.Sprintf("\tState: ERROR ErrorType: %s ErrorMsg: %s\n", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
+			// A service-impacting error is ERROR; a non-service-impacting
+			// warning (e.g. ConfigWarning) leaves the zone serving — render it
+			// as such, matching ListZones rather than masquerading as ERROR.
+			if tdns.ErrorTypeIsServiceImpacting(zconf.ErrorType) {
+				line += fmt.Sprintf("\tState: ERROR ErrorType: %s ErrorMsg: %s\n", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
+			} else {
+				line += fmt.Sprintf("\tState: serving Warning[%s]: %s\n", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
+			}
 		}
 		opts := []string{}
 		for _, opt := range zconf.Options {
@@ -643,7 +675,7 @@ func VerboseListZone(cr tdns.ZoneResponse) {
 			line += fmt.Sprintf("\tDNSSEC policy: %s\n", pol)
 		}
 
-		line += fmt.Sprintf("\tPrimary: %s\tNotify: %s\tFile: %s\n", zconf.Primary.Addr, peerConfAddrsString(zconf.Notify), zconf.Zonefile)
+		line += fmt.Sprintf("\tPrimary: %s\tNotify: %s\tFile: %s\n", peerConfAddrsString(zconf.Primaries), peerConfAddrsString(zconf.Notify), zconf.Zonefile)
 
 		// Check for catalog zone flags
 		isCatalogZone := false

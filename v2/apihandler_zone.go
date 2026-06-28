@@ -195,12 +195,8 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 					}
 				}
 
-				// For secondary zones, Primary should be the Upstream address, not Parent
-				primary := ""
-				if zd.ZoneType == Secondary {
-					primary = zd.Upstream
-				}
-				// For primary zones, we could show Parent if needed, but typically Primary field is for secondary zones
+				// For secondary zones, list as-written primaries from runtime state.
+				primaries := clonePeerConfs(zd.PrimariesConf)
 
 				// Snapshot the notify slice under the lock — the catalog notify
 				// add/remove handlers mutate zd.Notify under zd.mu, so an
@@ -247,7 +243,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 					ApiManaged:             zd.Options[OptApiManagedZone],
 					Provisioning:           zoneProvisioning(zd),
 					Zonefile:               zd.Zonefile,
-					Primary:                PeerConf{Addr: primary, Key: NOKEY},
+					Primaries:              primaries,
 					Notify:                 notifySnapshot, // Notify addresses (displayed by CLI)
 					EffectiveDnssecPolicy:  zd.DnssecPolicyName,
 					DnssecPolicyOverridden: overridden,
@@ -259,10 +255,10 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 
 		case "add":
 			msg, err := Conf.ProvisionDynamicZone(r.Context(), DynamicZoneInput{
-				Name:    zp.Zone,
-				Type:    Secondary,
-				Primary: zp.Primary,
-				Options: zoneOptionsFromStrings(zp.Options),
+				Name:      zp.Zone,
+				Type:      Secondary,
+				Primaries: zp.Primaries,
+				Options:   zoneOptionsFromStrings(zp.Options),
 			}, true)
 			if err != nil {
 				resp.Error = true
@@ -284,10 +280,10 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 
 		case "modify":
 			msg, err := Conf.ModifyDynamicZone(r.Context(), DynamicZoneInput{
-				Name:    zp.Zone,
-				Type:    Secondary,
-				Primary: zp.Primary,
-				Options: zoneOptionsFromStrings(zp.Options),
+				Name:      zp.Zone,
+				Type:      Secondary,
+				Primaries: zp.Primaries,
+				Options:   zoneOptionsFromStrings(zp.Options),
 			})
 			if err != nil {
 				resp.Error = true
@@ -307,6 +303,12 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				if zd, ok := Zones.Get(zc.Name); ok {
 					zc.Provisioning = zoneProvisioning(zd)
 					zc.ApiManaged = zd.Options[OptApiManagedZone]
+					// Surface the zone's error/warning state (e.g. ConfigWarning
+					// for a partially-resolved primary set) — zoneDataToZoneConf
+					// deliberately omits runtime error fields.
+					zc.Error = zd.Error
+					zc.ErrorType = zd.ErrorType
+					zc.ErrorMsg = zd.ErrorMsg
 				}
 				zones[zc.Name] = zc
 			}
