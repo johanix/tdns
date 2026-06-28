@@ -165,6 +165,9 @@ func (zd *ZoneData) DoTransfer() (bool, uint32, error) {
 func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core.RRset) (bool, error) {
 
 	// log.Printf("Reading zone %s from file %s\n", zd.ZoneName, zd.Zonefile)
+	// Capture prior status so an error or no-op (unchanged) file read of an
+	// already-ready zone is restored to it, not left stuck in `loading`.
+	prevStatus := zd.GetStatus()
 	zd.SetStatus(ZoneStatusLoading)
 
 	new_zd := ZoneData{
@@ -184,12 +187,14 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	updated, _, err := new_zd.ReadZoneFile(zd.Zonefile, force)
 	if err != nil {
 		lg.Error("ReadZoneFile failed", "zone", zd.ZoneName, "err", err)
+		zd.SetStatus(prevStatus)
 		return false, err
 	}
 
 	// zd.Logger.Printf("FetchFromFile: Zone %s: zone file read, updated=%v delegation sync=%v", zd.ZoneName, updated, zd.Optoins["delegationsync"])
 
 	if !updated {
+		zd.SetStatus(prevStatus)
 		return false, nil // new zone not loaded, but not returning any error
 	}
 
@@ -250,6 +255,10 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	if len(zd.Upstreams) == 0 {
 		return false, fmt.Errorf("FetchFromUpstream: zone %s has no upstreams configured", zd.ZoneName)
 	}
+	// Capture the prior status so a no-op (serial unchanged) or all-failed
+	// refresh of an already-ready zone is restored to it, not left stuck in
+	// `loading` until some later successful transfer flips it back.
+	prevStatus := zd.GetStatus()
 	zd.SetStatus(ZoneStatusLoading)
 
 	// Iterate the resolved upstreams, advancing to the next on ANY failure —
@@ -288,11 +297,13 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	}
 	if !transferred {
 		lg.Error("FetchFromUpstream: AXFR failed on all upstreams", "zone", zd.ZoneName, "count", len(zd.Upstreams), "err", lastErr)
+		zd.SetStatus(prevStatus) // still serving prior data; failure surfaces as RefreshError
 		return false, fmt.Errorf("AXFR of %s failed: tried all %d upstream(s): %w", zd.ZoneName, len(zd.Upstreams), lastErr)
 	}
 
 	if new_zd.IncomingSerial == zd.IncomingSerial {
 		lg.Debug("FetchFromUpstream: upstream serial is unchanged", "zone", zd.ZoneName, "serial", zd.IncomingSerial)
+		zd.SetStatus(prevStatus) // no-op refresh — nothing changed, restore prior status
 		return false, nil
 	}
 

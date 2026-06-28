@@ -572,10 +572,18 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	// resolvable key name (any other is an unknown-key error until the keys:
 	// block lands).
 	if in.Type == Secondary {
-		if len(in.Primaries) == 0 || in.Primaries[0].Addr == "" {
-			return "", fmt.Errorf("secondary zone %s requires a primary address", name)
+		if len(in.Primaries) == 0 {
+			return "", fmt.Errorf("secondary zone %s requires at least one primary", name)
 		}
+		// Validate EVERY entry (not just the first), matching ParseZones — a
+		// later empty/keyless entry must not be persisted as an invalid upstream.
 		for _, p := range in.Primaries {
+			if p.Addr == "" {
+				return "", fmt.Errorf("secondary zone %s has a primary with no address", name)
+			}
+			if p.Key == "" {
+				return "", fmt.Errorf("secondary zone %s primary %q has no key (use NOKEY for no TSIG)", name, p.Addr)
+			}
 			if p.Key != NOKEY {
 				return "", fmt.Errorf("unknown primary key %q (only NOKEY is valid until TSIG keys are configured)", p.Key)
 			}
@@ -717,9 +725,14 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	if !oldZd.Options[OptApiManagedZone] {
 		return "", fmt.Errorf("zone %s is not API-managed and cannot be modified here", name)
 	}
+	// When primaries are supplied they REPLACE the set, so every entry must be
+	// complete (empty in.Primaries means "keep the old set" and skips this).
 	for _, p := range in.Primaries {
-		if p.Key != "" && p.Key != NOKEY {
-			return "", fmt.Errorf("unknown primary key %q (only NOKEY is valid until TSIG keys are configured)", p.Key)
+		if p.Addr == "" {
+			return "", fmt.Errorf("zone %s: a modified primary has no address", name)
+		}
+		if p.Key != NOKEY {
+			return "", fmt.Errorf("zone %s primary %q requires key NOKEY (only NOKEY is valid until TSIG keys are configured)", name, p.Addr)
 		}
 	}
 
