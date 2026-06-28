@@ -103,6 +103,23 @@ func SignForPeer(msg *dns.Msg, keyName string, conf *Config) (dns.TsigProvider, 
 	return conf.tsigProvider(), nil
 }
 
+// notifyKeyFor returns the TSIG key name to sign an outbound NOTIFY to target,
+// found by matching target's IP against the zone's notify peers (IP-only — the
+// configured and actual ports may differ). NOKEY when no peer matches (e.g. a
+// parent NOTIFY for CSYNC/CDS, which has no notify: entry).
+func (zd *ZoneData) notifyKeyFor(target string) string {
+	tip, ok := peerIP(target)
+	if !ok {
+		return NOKEY
+	}
+	for _, p := range zd.Notify {
+		if pip, ok := peerIP(p.Addr); ok && pip == tip {
+			return p.Key
+		}
+	}
+	return NOKEY
+}
+
 // peerIP reduces a "host:port" (or bare "host") address to its IP for ACL
 // matching. The inbound RemoteAddr()'s ephemeral source port is irrelevant, so it
 // is dropped. Returns (zero, false) if no valid IP can be parsed.

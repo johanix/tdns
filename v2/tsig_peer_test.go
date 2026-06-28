@@ -88,6 +88,26 @@ func TestTsigProvider_RoundTrip(t *testing.T) {
 	}
 }
 
+func TestNotifyKeyFor(t *testing.T) {
+	zd := &ZoneData{Notify: []PeerConf{
+		{Addr: "192.0.2.1:53", Key: "k1"},
+		{Addr: "192.0.2.2:5353", Key: "k2"},
+		{Addr: "192.0.2.3:53", Key: NOKEY},
+	}}
+	cases := map[string]string{
+		"192.0.2.1:53":   "k1",
+		"192.0.2.1:9999": "k1", // IP-only match (configured vs actual port differ)
+		"192.0.2.2:5353": "k2",
+		"192.0.2.3:53":   NOKEY,
+		"203.0.113.9:53":  NOKEY, // no matching notify peer
+	}
+	for target, want := range cases {
+		if got := zd.notifyKeyFor(target); got != want {
+			t.Errorf("notifyKeyFor(%q) = %q, want %q", target, got, want)
+		}
+	}
+}
+
 func TestPeerIP(t *testing.T) {
 	cases := map[string]string{
 		"192.0.2.1:53":     "192.0.2.1",
