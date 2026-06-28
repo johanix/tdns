@@ -118,7 +118,8 @@ type ZoneData struct {
 	Verbose           bool
 	Debug             bool
 	IxfrChain         []Ixfr
-	Upstream          string     // primary address from where zone is xfrred (bare addr; key on TsigKeyName)
+	PrimariesConf     []PeerConf // as-written primaries; persisted; re-resolved each load (P3)
+	Upstreams         []PeerConf // resolved addr:port tuples; runtime-only; used for transfer
 	Notify            []PeerConf // downstream secondaries that we notify (addr + key)
 	Zonefile          string
 	DelegationSyncQ   chan DelegationSyncRequest
@@ -212,9 +213,9 @@ type PeerConf struct {
 type ZoneConf struct {
 	Name              string `validate:"required"`
 	Zonefile          string
-	Type              string `validate:"required"`
-	Store             string // xfr | map | slice | reg (defaults to "map" if not specified)
-	Primary           PeerConf // upstream, for secondary zones
+	Type              string     `validate:"required"`
+	Store             string     // xfr | map | slice | reg (defaults to "map" if not specified)
+	Primaries         []PeerConf `yaml:"primaries" mapstructure:"primaries"` // upstream set, for secondary zones
 	Notify            []PeerConf
 	OptionsStrs       []string     `yaml:"options" mapstructure:"options"`
 	Options           []ZoneOption `yaml:"-" mapstructure:"-"` // Ignore during both yaml and mapstructure decoding
@@ -570,20 +571,21 @@ func rrsToStrings(rrs []dns.RR) []string {
 }
 
 type ZoneRefresher struct {
-	Name         string
-	ZoneType     ZoneType // primary | secondary
-	Primary      PeerConf
-	Notify       []PeerConf
-	ZoneStore    ZoneStore // 1=xfr, 2=map, 3=slice
-	Zonefile     string
-	Options      map[ZoneOption]bool
-	Edns0Options *edns0.MsgOptions
-	UpdatePolicy UpdatePolicy
-	DnssecPolicy string
-	MultiSigner  string
-	Force        bool // force refresh, ignoring SOA serial
-	Wait         bool // wait for refresh to complete before responding
-	Response     chan RefresherResponse
+	Name          string
+	ZoneType      ZoneType   // primary | secondary
+	PrimariesConf []PeerConf // as-written; copied to zd.PrimariesConf on merge
+	Primaries     []PeerConf // resolved; copied to zd.Upstreams on merge
+	Notify        []PeerConf
+	ZoneStore     ZoneStore // 1=xfr, 2=map, 3=slice
+	Zonefile      string
+	Options       map[ZoneOption]bool
+	Edns0Options  *edns0.MsgOptions
+	UpdatePolicy  UpdatePolicy
+	DnssecPolicy  string
+	MultiSigner   string
+	Force         bool // force refresh, ignoring SOA serial
+	Wait          bool // wait for refresh to complete before responding
+	Response      chan RefresherResponse
 }
 
 type RefresherResponse struct {

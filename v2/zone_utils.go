@@ -65,7 +65,7 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, err
 			}
 			updated, err = zd.FetchFromUpstream(verbose, debug, dynamicRRs)
 			if err != nil {
-				lg.Error("FetchZone failed", "zone", zd.ZoneName, "upstream", zd.Upstream, "err", err)
+				lg.Error("FetchZone failed", "zone", zd.ZoneName, "upstream", firstUpstreamAddr(zd.Upstreams), "err", err)
 				return false, err
 			}
 			return updated, nil // zone updated, no error
@@ -80,6 +80,14 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, err
 	return false, nil
 }
 
+// firstUpstreamAddr returns the first transfer target, or "" if none configured.
+func firstUpstreamAddr(upstreams []PeerConf) string {
+	if len(upstreams) == 0 {
+		return ""
+	}
+	return upstreams[0].Addr
+}
+
 // Return shouldTransfer, new upstream serial, error
 func (zd *ZoneData) DoTransfer() (bool, uint32, error) {
 	var upstream_serial uint32
@@ -92,11 +100,11 @@ func (zd *ZoneData) DoTransfer() (bool, uint32, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(zd.ZoneName, dns.TypeSOA)
 
-	upstream := zd.Upstream
+	upstream := firstUpstreamAddr(zd.Upstreams)
 	if _, _, err := net.SplitHostPort(upstream); err != nil {
 		// If error, assume no port was specified
 		upstream = net.JoinHostPort(upstream, "53")
-		lg.Debug("DoTransfer: no port specified for upstream, using default port 53", "zone", zd.ZoneName, "upstream", zd.Upstream)
+		lg.Debug("DoTransfer: no port specified for upstream, using default port 53", "zone", zd.ZoneName, "upstream", upstream)
 	}
 	r, err := dns.Exchange(m, upstream)
 	if err != nil {
@@ -216,7 +224,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 // Return updated, err
 func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RRset) (bool, error) {
 
-	lg.Info("transferring zone via AXFR", "zone", zd.ZoneName, "upstream", zd.Upstream)
+	lg.Info("transferring zone via AXFR", "zone", zd.ZoneName, "upstream", firstUpstreamAddr(zd.Upstreams))
 	zd.SetStatus(ZoneStatusLoading)
 
 	new_zd := ZoneData{
@@ -234,7 +242,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}
 
-	_, err := new_zd.ZoneTransferIn(zd.Upstream, zd.IncomingSerial, "axfr")
+	_, err := new_zd.ZoneTransferIn(firstUpstreamAddr(zd.Upstreams), zd.IncomingSerial, "axfr")
 	if err != nil {
 		lg.Error("ZoneTransfer failed", "zone", zd.ZoneName, "err", err)
 		return false, err

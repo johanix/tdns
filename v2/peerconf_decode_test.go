@@ -8,7 +8,7 @@ import (
 )
 
 // TestStringToPeerConfHook_ResilientDecode is the B0a regression guard: a
-// config carrying a legacy bare-string primary:/notify: among modern struct
+// config carrying a legacy bare-string primaries:/notify: among modern struct
 // entries must decode the WHOLE file successfully (no abort), with the legacy
 // values captured as PeerConf{Legacy: ...} markers that per-zone validation
 // later quarantines — rather than failing the entire decode on the
@@ -24,12 +24,13 @@ func TestStringToPeerConfHook_ResilientDecode(t *testing.T) {
 zones:
   modern.example.:
     type: secondary
-    primary:
-      addr: 192.0.2.1:53
-      key: NOKEY
+    primaries:
+      - addr: 192.0.2.1:53
+        key: NOKEY
   legacy-primary.example.:
     type: secondary
-    primary: 192.0.2.2:53
+    primaries:
+      - 192.0.2.2:53
   legacy-notify.example.:
     type: primary
     notify:
@@ -62,7 +63,7 @@ zones:
 	}
 
 	// Modern zone: real PeerConf, no Legacy marker.
-	mod := result.Zones["modern.example."].Primary
+	mod := result.Zones["modern.example."].Primaries[0]
 	if mod.Legacy != "" {
 		t.Errorf("modern primary wrongly flagged legacy: %+v", mod)
 	}
@@ -72,7 +73,7 @@ zones:
 
 	// Legacy bare-string primary: captured as a Legacy marker (validation will
 	// quarantine this zone to ERROR), Addr/Key empty.
-	leg := result.Zones["legacy-primary.example."].Primary
+	leg := result.Zones["legacy-primary.example."].Primaries[0]
 	if leg.Legacy != "192.0.2.2:53" {
 		t.Errorf("legacy primary not captured as marker: got %+v", leg)
 	}

@@ -8,10 +8,11 @@ import "testing"
 // OptAutomaticZone is re-derived from SourceCatalog).
 func TestZoneDataToZoneConf_WritesApiManaged(t *testing.T) {
 	zd := &ZoneData{
-		ZoneName: "api.example.",
-		ZoneType: Secondary,
-		Upstream: "192.0.2.1:53",
-		Options:  map[ZoneOption]bool{OptApiManagedZone: true},
+		ZoneName:      "api.example.",
+		ZoneType:      Secondary,
+		PrimariesConf: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}},
+		Upstreams:     []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}},
+		Options:       map[ZoneOption]bool{OptApiManagedZone: true},
 	}
 	zc := zoneDataToZoneConf(zd, "/tmp")
 	if !zc.ApiManaged {

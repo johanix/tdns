@@ -375,11 +375,15 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 		// RULE 4: Auto-configure zone using config group
 		lg.Info("CATALOG: auto-configuring zone", "zone", zoneName, "group", member.MetaGroup, "upstream", configGroupConfig.Upstream, "store", "map")
 
+		primariesConf := []PeerConf{{Addr: configGroupConfig.Upstream, Key: NOKEY}}
+		upstreams := normalizePrimaries(primariesConf)
+
 		zd := &ZoneData{
 			ZoneName:      zoneName,
 			ZoneType:      Secondary,
 			ZoneStore:     MapZone, // dynamic zones are map-only (§3)
-			Upstream:      NormalizeAddress(configGroupConfig.Upstream),
+			PrimariesConf: primariesConf,
+			Upstreams:     upstreams,
 			Logger:        log.Default(),
 			SourceCatalog: update.CatalogZone,
 			Options: map[ZoneOption]bool{
@@ -425,7 +429,6 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 		zr := ZoneRefresher{
 			Name:      zoneName,
 			ZoneType:  Secondary,
-			Primary:   PeerConf{Addr: NormalizeAddress(configGroupConfig.Upstream), Key: NOKEY},
 			ZoneStore: zd.ZoneStore,
 			Options:   zd.Options,
 		}

@@ -238,15 +238,17 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 		}
 
 		// Create ZoneRefresher and enqueue to RefreshEngine (same as ParseZones does)
+		primariesConf, resolved := refresherPrimariesFromConf(zconf.Primaries)
 		zr := ZoneRefresher{
-			Name:      zoneName,
-			Force:     true, // Force refresh on startup to load from disk
-			ZoneType:  zoneType,
-			Primary:   zconf.Primary,
-			ZoneStore: zoneStore,
-			Notify:    zconf.Notify,
-			Zonefile:  zconf.Zonefile,
-			Options:   options,
+			Name:          zoneName,
+			Force:         true, // Force refresh on startup to load from disk
+			ZoneType:      zoneType,
+			PrimariesConf: primariesConf,
+			Primaries:     resolved,
+			ZoneStore:     zoneStore,
+			Notify:        zconf.Notify,
+			Zonefile:      zconf.Zonefile,
+			Options:       options,
 		}
 
 		// Attempt non-blocking send (same pattern as ParseZones)
@@ -314,19 +316,12 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 		typeStr = "secondary" // Default
 	}
 
-	// Get primary/upstream
-	primary := zd.Upstream
-	if primary == "" && zd.ZoneType == Secondary {
-		// Try to get from parent or other sources if available
-		primary = zd.Parent
-	}
-
 	zconf := ZoneConf{
 		Name:          zd.ZoneName,
 		Zonefile:      zoneFilePath,
 		Type:          typeStr,
 		Store:         storeStr,
-		Primary:       PeerConf{Addr: primary, Key: NOKEY},
+		Primaries:     clonePeerConfs(zd.PrimariesConf),
 		Notify:        zd.Notify,
 		OptionsStrs:   optionsStrs,
 		SourceCatalog: zd.SourceCatalog,
@@ -529,10 +524,10 @@ func (conf *Config) CheckDynamicConfigFileIncluded(includedFiles []string) bool 
 // DynamicZoneInput carries the parameters for the shared add/modify cores. There
 // is no Store field: dynamic zones are always MapZone (enforced in the cores).
 type DynamicZoneInput struct {
-	Name    string
-	Type    ZoneType
-	Primary PeerConf
-	Options map[ZoneOption]bool
+	Name      string
+	Type      ZoneType
+	Primaries []PeerConf
+	Options   map[ZoneOption]bool
 }
 
 // ProvisionDynamicZone is the shared *add* core, called by both the catalog
@@ -567,11 +562,13 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	// resolvable key name (any other is an unknown-key error until the keys:
 	// block lands).
 	if in.Type == Secondary {
-		if in.Primary.Addr == "" {
+		if len(in.Primaries) == 0 || in.Primaries[0].Addr == "" {
 			return "", fmt.Errorf("secondary zone %s requires a primary address", name)
 		}
-		if in.Primary.Key != NOKEY {
-			return "", fmt.Errorf("unknown primary key %q (only NOKEY is valid until TSIG keys are configured)", in.Primary.Key)
+		for _, p := range in.Primaries {
+			if p.Key != NOKEY {
+				return "", fmt.Errorf("unknown primary key %q (only NOKEY is valid until TSIG keys are configured)", p.Key)
+			}
 		}
 	}
 
@@ -583,18 +580,22 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 		options[OptApiManagedZone] = true
 	}
 
+	primariesConf := clonePeerConfs(in.Primaries)
+	upstreams := normalizePrimaries(in.Primaries)
+
 	// Store is always map for dynamic zones — single chokepoint for the map-only
 	// rule (also covers the catalog re-point).
 	zd := &ZoneData{
-		ZoneName:  name,
-		ZoneType:  in.Type,
-		ZoneStore: MapZone,
-		Upstream:  NormalizeAddress(in.Primary.Addr),
-		Logger:    log.Default(),
-		Options:   options,
-		Status:    ZoneStatusPending,
-		Data:      core.NewCmap[OwnerData](),
-		KeyDB:     conf.Internal.KeyDB,
+		ZoneName:      name,
+		ZoneType:      in.Type,
+		ZoneStore:     MapZone,
+		PrimariesConf: primariesConf,
+		Upstreams:     upstreams,
+		Logger:        log.Default(),
+		Options:       options,
+		Status:        ZoneStatusPending,
+		Data:          core.NewCmap[OwnerData](),
+		KeyDB:         conf.Internal.KeyDB,
 	}
 
 	// Register, then persist; roll back the live registration if persist fails
@@ -611,11 +612,12 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	// with no AXFR. Surface that rather than reporting success; the zone is
 	// reachable via list-dynamic and the operator can retry modify/delete.
 	zr := ZoneRefresher{
-		Name:      name,
-		ZoneType:  in.Type,
-		Primary:   PeerConf{Addr: NormalizeAddress(in.Primary.Addr), Key: in.Primary.Key},
-		ZoneStore: MapZone,
-		Options:   options,
+		Name:          name,
+		ZoneType:      in.Type,
+		PrimariesConf: primariesConf,
+		Primaries:     upstreams,
+		ZoneStore:     MapZone,
+		Options:       options,
 	}
 	if err := conf.enqueueRefresh(ctx, zr); err != nil {
 		return "", fmt.Errorf("zone %s registered but failed to schedule initial transfer: %w", name, err)
@@ -680,7 +682,7 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 
 // ModifyDynamicZone is the shared *modify* core. Implemented as
 // stale-old + build-new + replace (NOT in-place mutation) so the modify/refresh
-// data race is gone by construction: the refresh reads the old zd.Upstream
+// data race is gone by construction: the refresh reads the old zd.Upstreams
 // without a lock, so the changed params live on a fresh ZoneData and the old one
 // is only ever read by its now-doomed refresh. Scope: primary addr/key and
 // options; store is fixed at map; rename is out of scope (= delete+add).
@@ -693,8 +695,10 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	if !oldZd.Options[OptApiManagedZone] {
 		return "", fmt.Errorf("zone %s is not API-managed and cannot be modified here", name)
 	}
-	if in.Primary.Addr != "" && in.Primary.Key != NOKEY {
-		return "", fmt.Errorf("unknown primary key %q (only NOKEY is valid until TSIG keys are configured)", in.Primary.Key)
+	for _, p := range in.Primaries {
+		if p.Key != "" && p.Key != NOKEY {
+			return "", fmt.Errorf("unknown primary key %q (only NOKEY is valid until TSIG keys are configured)", p.Key)
+		}
 	}
 
 	// (1) Bump the old generation so any in-flight refresh on the captured
@@ -708,20 +712,23 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	} else {
 		options[OptApiManagedZone] = true
 	}
-	newUpstream := oldZd.Upstream
-	if in.Primary.Addr != "" {
-		newUpstream = NormalizeAddress(in.Primary.Addr)
+	primariesConf := oldZd.PrimariesConf
+	upstreams := oldZd.Upstreams
+	if len(in.Primaries) > 0 {
+		primariesConf = clonePeerConfs(in.Primaries)
+		upstreams = normalizePrimaries(in.Primaries)
 	}
 	newZd := &ZoneData{
-		ZoneName:  name,
-		ZoneType:  oldZd.ZoneType,
-		ZoneStore: MapZone,
-		Upstream:  newUpstream,
-		Logger:    log.Default(),
-		Options:   options,
-		Status:    ZoneStatusPending,
-		Data:      core.NewCmap[OwnerData](),
-		KeyDB:     conf.Internal.KeyDB,
+		ZoneName:      name,
+		ZoneType:      oldZd.ZoneType,
+		ZoneStore:     MapZone,
+		PrimariesConf: primariesConf,
+		Upstreams:     upstreams,
+		Logger:        log.Default(),
+		Options:       options,
+		Status:        ZoneStatusPending,
+		Data:          core.NewCmap[OwnerData](),
+		KeyDB:         conf.Internal.KeyDB,
 	}
 	Zones.Set(name, newZd)
 
@@ -734,12 +741,13 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	}
 	// (5) Force a re-pull from the new upstream.
 	zr := ZoneRefresher{
-		Name:      name,
-		ZoneType:  newZd.ZoneType,
-		Primary:   PeerConf{Addr: newUpstream, Key: in.Primary.Key},
-		ZoneStore: MapZone,
-		Options:   options,
-		Force:     true,
+		Name:          name,
+		ZoneType:      newZd.ZoneType,
+		PrimariesConf: primariesConf,
+		Primaries:     upstreams,
+		ZoneStore:     MapZone,
+		Options:       options,
+		Force:         true,
 	}
 	if err := conf.enqueueRefresh(ctx, zr); err != nil {
 		return "", fmt.Errorf("zone %s modified but failed to schedule refresh: %w", name, err)

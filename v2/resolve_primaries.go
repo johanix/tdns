@@ -74,3 +74,29 @@ func splitHostPortDefault(addr string) (host, port string) {
 	}
 	return host, port
 }
+
+func clonePeerConfs(in []PeerConf) []PeerConf {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]PeerConf, len(in))
+	copy(out, in)
+	return out
+}
+
+// normalizePrimaries returns a copy with NormalizeAddress applied to each entry.
+// No DNS lookup — resolvePrimaries is wired in P3.
+func normalizePrimaries(in []PeerConf) []PeerConf {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]PeerConf, len(in))
+	for i, p := range in {
+		out[i] = PeerConf{Addr: NormalizeAddress(p.Addr), Key: p.Key, Legacy: p.Legacy}
+	}
+	return out
+}
+
+func refresherPrimariesFromConf(primaries []PeerConf) (primariesConf, resolved []PeerConf) {
+	return clonePeerConfs(primaries), normalizePrimaries(primaries)
+}

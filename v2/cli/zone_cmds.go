@@ -435,7 +435,7 @@ func RunZoneAdd(role, primaryAddr, primaryKey string, options []string, tsigName
 	cr, err := SendZoneCommand(api, tdns.ZonePost{
 		Command:    "add",
 		Zone:       dns.Fqdn(tdns.Globals.Zonename),
-		Primary:    tdns.PeerConf{Addr: primaryAddr, Key: primaryKey},
+		Primaries:  []tdns.PeerConf{{Addr: primaryAddr, Key: primaryKey}},
 		Options:    options,
 		TsigName:   tsigName,
 		TsigSecret: tsigSecret,
@@ -481,12 +481,15 @@ func RunZoneModify(role, primaryAddr, primaryKey string, options []string) {
 	if err != nil {
 		log.Fatalf("Error getting API client for %s: %v", role, err)
 	}
-	cr, err := SendZoneCommand(api, tdns.ZonePost{
+	post := tdns.ZonePost{
 		Command: "modify",
 		Zone:    dns.Fqdn(tdns.Globals.Zonename),
-		Primary: tdns.PeerConf{Addr: primaryAddr, Key: primaryKey},
 		Options: options,
-	})
+	}
+	if primaryAddr != "" {
+		post.Primaries = []tdns.PeerConf{{Addr: primaryAddr, Key: primaryKey}}
+	}
+	cr, err := SendZoneCommand(api, post)
 	if err != nil {
 		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
 		os.Exit(1)
@@ -527,7 +530,7 @@ func RunZoneListDynamic(role string) {
 			errStr = zc.ErrorMsg
 		}
 		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s",
-			name, zc.Type, zc.Provisioning, managed, zc.Primary.Addr, errStr))
+			name, zc.Type, zc.Provisioning, managed, peerConfAddrsString(zc.Primaries), errStr))
 	}
 	fmt.Println(columnize.SimpleFormat(out))
 }
@@ -588,7 +591,7 @@ func ListZones(cr tdns.ZoneResponse) {
 		sort.Strings(opts)
 		line := fmt.Sprintf("%s|%s|%s|", zname, zconf.Type, zconf.Store)
 		if showprimary {
-			line += fmt.Sprintf("%s|", zconf.Primary.Addr)
+			line += fmt.Sprintf("%s|", peerConfAddrsString(zconf.Primaries))
 		}
 		if shownotify {
 			line += fmt.Sprintf("%s|", peerConfAddrsString(zconf.Notify))
@@ -643,7 +646,7 @@ func VerboseListZone(cr tdns.ZoneResponse) {
 			line += fmt.Sprintf("\tDNSSEC policy: %s\n", pol)
 		}
 
-		line += fmt.Sprintf("\tPrimary: %s\tNotify: %s\tFile: %s\n", zconf.Primary.Addr, peerConfAddrsString(zconf.Notify), zconf.Zonefile)
+		line += fmt.Sprintf("\tPrimary: %s\tNotify: %s\tFile: %s\n", peerConfAddrsString(zconf.Primaries), peerConfAddrsString(zconf.Notify), zconf.Zonefile)
 
 		// Check for catalog zone flags
 		isCatalogZone := false

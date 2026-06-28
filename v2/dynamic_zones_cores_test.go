@@ -30,7 +30,7 @@ func TestProvisionDynamicZone_Gate(t *testing.T) {
 	conf, _ := newTestConfigForCores(t)
 	conf.DynamicZones.Dynamic.Allowed = false
 
-	in := DynamicZoneInput{Name: "gated.example", Type: Secondary, Primary: PeerConf{Addr: "192.0.2.1:53", Key: NOKEY}}
+	in := DynamicZoneInput{Name: "gated.example", Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}}}
 	if _, err := conf.ProvisionDynamicZone(context.Background(), in, true); err == nil {
 		t.Fatal("expected add to be refused when dynamic.allowed=false")
 	}
@@ -45,13 +45,13 @@ func TestProvisionDynamicZone_RejectsPrimaryAndBadKey(t *testing.T) {
 	conf, _ := newTestConfigForCores(t)
 
 	// type: primary is rejected on the API path (v1 secondary-only).
-	prim := DynamicZoneInput{Name: "prim.example", Type: Primary, Primary: PeerConf{Addr: "192.0.2.1:53", Key: NOKEY}}
+	prim := DynamicZoneInput{Name: "prim.example", Type: Primary, Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}}}
 	if _, err := conf.ProvisionDynamicZone(context.Background(), prim, true); err == nil {
 		t.Error("expected type: primary to be rejected on API path")
 	}
 
 	// non-NOKEY key is rejected until TSIG keys exist.
-	badKey := DynamicZoneInput{Name: "badkey.example", Type: Secondary, Primary: PeerConf{Addr: "192.0.2.1:53", Key: "transfer-key"}}
+	badKey := DynamicZoneInput{Name: "badkey.example", Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: "transfer-key"}}}
 	if _, err := conf.ProvisionDynamicZone(context.Background(), badKey, true); err == nil {
 		t.Error("expected non-NOKEY key to be rejected")
 	}
@@ -61,7 +61,7 @@ func TestProvisionDynamicZone_HappyPathAndDuplicate(t *testing.T) {
 	resetZonesForTest()
 	conf, ch := newTestConfigForCores(t)
 
-	in := DynamicZoneInput{Name: "ok.example", Type: Secondary, Primary: PeerConf{Addr: "192.0.2.1", Key: NOKEY}}
+	in := DynamicZoneInput{Name: "ok.example", Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.1", Key: NOKEY}}}
 	if _, err := conf.ProvisionDynamicZone(context.Background(), in, true); err != nil {
 		t.Fatalf("happy-path add failed: %v", err)
 	}
@@ -78,8 +78,8 @@ func TestProvisionDynamicZone_HappyPathAndDuplicate(t *testing.T) {
 	if zd.GetStatus() != ZoneStatusPending {
 		t.Errorf("fresh add status = %v, want Pending", zd.GetStatus())
 	}
-	if zd.Upstream != "192.0.2.1:53" {
-		t.Errorf("upstream not normalized: got %q", zd.Upstream)
+	if firstUpstreamAddr(zd.Upstreams) != "192.0.2.1:53" {
+		t.Errorf("upstream not normalized: got %q", firstUpstreamAddr(zd.Upstreams))
 	}
 	// A ZoneRefresher was enqueued.
 	select {
@@ -106,7 +106,7 @@ func TestRemoveDynamicZone_GuardAndGenerationBump(t *testing.T) {
 	}
 
 	// An API-managed zone is deleted and its generation bumped.
-	in := DynamicZoneInput{Name: "del.example", Type: Secondary, Primary: PeerConf{Addr: "192.0.2.1:53", Key: NOKEY}}
+	in := DynamicZoneInput{Name: "del.example", Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}}}
 	if _, err := conf.ProvisionDynamicZone(context.Background(), in, true); err != nil {
 		t.Fatalf("add failed: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestModifyDynamicZone_ReplacesAndBumps(t *testing.T) {
 	resetZonesForTest()
 	conf, ch := newTestConfigForCores(t)
 
-	in := DynamicZoneInput{Name: "mod.example", Type: Secondary, Primary: PeerConf{Addr: "192.0.2.1:53", Key: NOKEY}}
+	in := DynamicZoneInput{Name: "mod.example", Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}}}
 	if _, err := conf.ProvisionDynamicZone(context.Background(), in, true); err != nil {
 		t.Fatalf("add failed: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestModifyDynamicZone_ReplacesAndBumps(t *testing.T) {
 	gen0 := oldZd.generation.Load()
 
 	// Modify the upstream.
-	mod := DynamicZoneInput{Name: "mod.example", Type: Secondary, Primary: PeerConf{Addr: "192.0.2.9:53", Key: NOKEY}}
+	mod := DynamicZoneInput{Name: "mod.example", Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.9:53", Key: NOKEY}}}
 	if _, err := conf.ModifyDynamicZone(context.Background(), mod); err != nil {
 		t.Fatalf("modify failed: %v", err)
 	}
@@ -149,8 +149,8 @@ func TestModifyDynamicZone_ReplacesAndBumps(t *testing.T) {
 	if newZd == oldZd {
 		t.Error("modify should replace the ZoneData pointer (delete+re-add), not mutate in place")
 	}
-	if newZd.Upstream != "192.0.2.9:53" {
-		t.Errorf("modify did not apply new upstream: got %q", newZd.Upstream)
+	if firstUpstreamAddr(newZd.Upstreams) != "192.0.2.9:53" {
+		t.Errorf("modify did not apply new upstream: got %q", firstUpstreamAddr(newZd.Upstreams))
 	}
 	if oldZd.generation.Load() != gen0+1 {
 		t.Errorf("old generation not bumped on modify: got %d, want %d", oldZd.generation.Load(), gen0+1)
@@ -171,7 +171,7 @@ func TestModifyDynamicZone_ReplacesAndBumps(t *testing.T) {
 	// Modify on a static zone is refused.
 	static := &ZoneData{ZoneName: "static2.example.", ZoneType: Secondary, Options: map[ZoneOption]bool{}}
 	Zones.Set("static2.example.", static)
-	if _, err := conf.ModifyDynamicZone(context.Background(), DynamicZoneInput{Name: "static2.example", Type: Secondary, Primary: PeerConf{Addr: "192.0.2.1:53", Key: NOKEY}}); err == nil {
+	if _, err := conf.ModifyDynamicZone(context.Background(), DynamicZoneInput{Name: "static2.example", Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}}}); err == nil {
 		t.Error("expected refusal to modify a non-API-managed zone")
 	}
 }
