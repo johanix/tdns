@@ -53,7 +53,7 @@ type Config struct {
 	Zones        []ZoneConf                 `yaml:"zones"`
 	Templates    []ZoneConf                 `yaml:"templates"`
 	Dnssec       DnssecConf                 `yaml:"dnssec" mapstructure:"dnssec"`
-	Keys         KeyConf
+	Keys         KeyConf                    `yaml:"keys" mapstructure:"keys"`
 	Db           DbConf
 	Registrars   map[string][]string
 	Log          LogConf
@@ -463,7 +463,8 @@ type InternalDnsConf struct {
 	ResignQ             chan *ZoneData     // the names of zones that should be kept re-signed should be sent into this channel
 	RRsetCache          *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
 	ImrEngine           *Imr
-	Scanner             *Scanner // Scanner instance for async job tracking
+	Scanner             *Scanner      // Scanner instance for async job tracking
+	TsigKeyStore        *TsigKeyStore // name->secret store for replication TSIG (Improvement 2)
 }
 
 // InternalConf holds DNS-internal state (channels, engine references).
@@ -556,6 +557,11 @@ func (conf *Config) ReloadConfig() (string, error) {
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
+	}
+	// Rebuild the TSIG key store so a keys: edit is picked up on reload (config
+	// binds last → "config wins"). Bad entries are skipped + logged.
+	if kerr := conf.LoadTsigKeys(); kerr != nil {
+		lgConfig.Error("TSIG keys: config error on reload (affected keys skipped)", "err", kerr)
 	}
 	Globals.App.ServerConfigTime = time.Now()
 	return "Config reloaded.", err

@@ -669,9 +669,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 					secondaryOK = false
 					break
 				}
-				if p.Key != NOKEY {
+				if !conf.tsigKeyDefined(p.Key) {
 					lgConfig.Error("secondary zone primary references unknown key, zone in error state", "zone", zname, "key", p.Key)
-					zd.SetError(ConfigError, "unknown primary key %q (only NOKEY is valid until TSIG keys are configured)", p.Key)
+					zd.SetError(ConfigError, "unknown primary key %q (define it in keys.tsig or use NOKEY for no TSIG)", p.Key)
 					secondaryOK = false
 					break
 				}

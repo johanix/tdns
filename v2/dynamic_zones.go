@@ -584,8 +584,8 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 			if p.Key == "" {
 				return "", fmt.Errorf("secondary zone %s primary %q has no key (use NOKEY for no TSIG)", name, p.Addr)
 			}
-			if p.Key != NOKEY {
-				return "", fmt.Errorf("unknown primary key %q (only NOKEY is valid until TSIG keys are configured)", p.Key)
+			if !conf.tsigKeyDefined(p.Key) {
+				return "", fmt.Errorf("unknown primary key %q (define it in keys.tsig or use NOKEY for no TSIG)", p.Key)
 			}
 		}
 	}
@@ -731,8 +731,8 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		if p.Addr == "" {
 			return "", fmt.Errorf("zone %s: a modified primary has no address", name)
 		}
-		if p.Key != NOKEY {
-			return "", fmt.Errorf("zone %s primary %q requires key NOKEY (only NOKEY is valid until TSIG keys are configured)", name, p.Addr)
+		if !conf.tsigKeyDefined(p.Key) {
+			return "", fmt.Errorf("zone %s primary %q has unknown key %q (define it in keys.tsig or use NOKEY)", name, p.Addr, p.Key)
 		}
 	}
 

@@ -844,7 +844,7 @@ type KeyBootstrapperRequest struct {
 }
 
 type KeyConf struct {
-	Tsig []TsigDetails
+	Tsig []TsigDetails `yaml:"tsig" mapstructure:"tsig"`
 }
 type TsigDetails struct {
 	Name      string `validate:"required" yaml:"name"`

@@ -116,6 +116,13 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	if err != nil {
 		return fmt.Errorf("error parsing config %q: %w", conf.Internal.CfgFile, err)
 	}
+	// Build the replication TSIG name->secret store from the keys: block before
+	// zones are parsed, so a primary/notify/ACL key name can be validated against
+	// it. A bad key entry is non-fatal (skipped + logged); zones referencing it
+	// are quarantined at parse.
+	if err := conf.LoadTsigKeys(); err != nil {
+		lgConfig.Error("TSIG keys: config error (affected keys skipped; zones referencing them are quarantined)", "err", err)
+	}
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeScanner:
 		kdb := conf.Internal.KeyDB
