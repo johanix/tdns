@@ -15,6 +15,9 @@ func newTestConfigForCores(t *testing.T) (*Config, chan ZoneRefresher) {
 	conf := &Config{}
 	conf.Internal.RefreshZoneCh = ch
 	conf.DynamicZones.Dynamic.Allowed = true
+	// A real (empty-cache) IMR so hostname primaries route through the resolver;
+	// literal-IP primaries short-circuit before any lookup.
+	conf.Internal.ImrEngine = newTestImr(t)
 	return conf, ch
 }
 
@@ -54,6 +57,21 @@ func TestProvisionDynamicZone_RejectsPrimaryAndBadKey(t *testing.T) {
 	badKey := DynamicZoneInput{Name: "badkey.example", Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: "transfer-key"}}}
 	if _, err := conf.ProvisionDynamicZone(context.Background(), badKey, true); err == nil {
 		t.Error("expected non-NOKEY key to be rejected")
+	}
+}
+
+func TestProvisionDynamicZone_HostnameNoResolve(t *testing.T) {
+	resetZonesForTest()
+	conf, _ := newTestConfigForCores(t)
+
+	// The empty-cache test IMR cannot resolve a hostname, so a secondary whose
+	// only primary is a name resolves to zero addresses and the add is rejected.
+	in := DynamicZoneInput{Name: "hn.example", Type: Secondary, Primaries: []PeerConf{{Addr: "ns.unresolvable.invalid", Key: NOKEY}}}
+	if _, err := conf.ProvisionDynamicZone(context.Background(), in, true); err == nil {
+		t.Fatal("expected add to be rejected when no primary resolves to an address")
+	}
+	if _, ok := Zones.Get("hn.example."); ok {
+		t.Fatal("zone should not be registered when the add is rejected")
 	}
 }
 

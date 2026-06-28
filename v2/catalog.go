@@ -376,7 +376,13 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 		lg.Info("CATALOG: auto-configuring zone", "zone", zoneName, "group", member.MetaGroup, "upstream", configGroupConfig.Upstream, "store", "map")
 
 		primariesConf := []PeerConf{{Addr: configGroupConfig.Upstream, Key: NOKEY}}
-		upstreams := normalizePrimaries(primariesConf)
+		res := resolvePrimaries(ctx, conf.Internal.ImrEngine, primariesConf)
+		if len(res.Resolved) == 0 {
+			lg.Error("CATALOG: upstream did not resolve to an address, skipping zone", "zone", zoneName, "group", member.MetaGroup, "upstream", configGroupConfig.Upstream, "unresolved", res.Unresolved)
+			skippedCount++
+			continue
+		}
+		upstreams := res.Resolved
 
 		zd := &ZoneData{
 			ZoneName:      zoneName,

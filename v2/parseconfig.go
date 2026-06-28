@@ -631,6 +631,10 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		}
 
 		var zonetype ZoneType
+		// resolvedPrimaries holds the addr:port tuples for a secondary zone's
+		// upstreams, resolved (hostnames -> addresses) at parse time. nil for
+		// primary zones. Carried to the ZoneRefresher build below.
+		var resolvedPrimaries []PeerConf
 
 		switch strings.ToLower(zconf.Type) {
 		case "primary":
@@ -681,6 +685,25 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				broken_zones = append(broken_zones, zname)
 				continue
 			}
+
+			// Resolve the as-written primaries to addr:port tuples (hostnames
+			// -> addresses via the IMR), re-resolved on every parse/reload.
+			// Zero resolved -> ConfigError (quarantine); partial -> ConfigWarning
+			// (serve from the rest). A prior parse's ConfigWarning was already
+			// cleared by the SetError(NoError) reset at the top of the loop.
+			res := resolvePrimaries(ctx, conf.Internal.ImrEngine, zconf.Primaries)
+			if len(res.Resolved) == 0 {
+				lgConfig.Error("secondary zone: no primary resolved to an address, zone in error state", "zone", zname, "unresolved", res.Unresolved)
+				zd.SetError(ConfigError, "no primary resolved to an address (unresolved: %v)", res.Unresolved)
+				broken_zones = append(broken_zones, zname)
+				continue
+			}
+			if len(res.Unresolved) > 0 || len(res.KeyCollisions) > 0 {
+				served := len(zconf.Primaries) - len(res.Unresolved)
+				lgConfig.Warn("secondary zone: some primaries unavailable, serving from the rest", "zone", zname, "unresolved", res.Unresolved, "key_collisions", res.KeyCollisions, "serving", served, "of", len(zconf.Primaries))
+				zd.SetError(ConfigWarning, "serving from %d of %d primaries (unresolved: %v, key-collisions: %v)", served, len(zconf.Primaries), res.Unresolved, res.KeyCollisions)
+			}
+			resolvedPrimaries = res.Resolved
 
 		default:
 			lgConfig.Error("unknown zone type, zone in error state", "zone", zname, "type", zconf.Type)
@@ -1035,13 +1058,12 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				lgConfig.Error("refresh channel is not configured, zones will not be refreshed, terminating")
 				return nil, nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
 			}
-			primariesConf, resolved := refresherPrimariesFromConf(zconf.Primaries)
 			zr := ZoneRefresher{
 				Name:          zname,
 				Force:         true,     // force refresh, ignoring SOA serial, when reloading from file
 				ZoneType:      zonetype, // primary | secondary
-				PrimariesConf: primariesConf,
-				Primaries:     resolved,
+				PrimariesConf: clonePeerConfs(zconf.Primaries),
+				Primaries:     resolvedPrimaries,
 				ZoneStore:     zonestore,
 				Notify:        zconf.Notify,
 				Zonefile:      zconf.Zonefile,

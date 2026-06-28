@@ -565,11 +565,11 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 					}
 					msc := conf.MultiSigner[zr.MultiSigner]
+					// Resolution happens at every ingress path (parse/load/add/
+					// modify/catalog), so a config-bearing refresher always carries
+					// the resolved Primaries alongside the as-written PrimariesConf.
 					primariesConf := clonePeerConfs(zr.PrimariesConf)
 					upstreams := clonePeerConfs(zr.Primaries)
-					if len(upstreams) == 0 {
-						upstreams = normalizePrimaries(primariesConf)
-					}
 					zd := &ZoneData{
 						ZoneName:         zone,
 						ZoneStore:        zr.ZoneStore,

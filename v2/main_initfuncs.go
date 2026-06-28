@@ -189,6 +189,21 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// if Globals.Debug {
 	//	log.Printf("*** MainInit: 5 ***")
 	// }
+	// The in-process IMR is the resolver for hostname primaries, which are
+	// resolved at parse/load time (ParseZones, LoadDynamicZoneFiles below).
+	// Those run before the per-app StartXxx brings up the ImrEngine goroutine,
+	// so initialize the IMR synchronously now. InitImrEngine primes the cache
+	// with root hints and is idempotent (first-init wins) — the later
+	// StartEngine("ImrEngine", ...) reuses this instance and just adds trust
+	// anchors + listeners. Non-fatal: if the IMR is disabled or fails to init,
+	// resolvePrimaries degrades (a hostname primary is reported unresolved),
+	// it does not abort startup.
+	if conf.Imr.Active == nil || *conf.Imr.Active {
+		if err := conf.InitImrEngine(false); err != nil {
+			lgConfig.Warn("early IMR init failed; hostname primaries will not resolve at parse time", "err", err)
+		}
+	}
+
 	// Parse all configured zones
 	all_zones, _, err := conf.ParseZones(ctx, false) // false = initial load, not reload
 	if err != nil {

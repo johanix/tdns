@@ -100,7 +100,7 @@ is left untouched.
 | **Scalar → list** | `primary: PeerConf` → **`primaries: []PeerConf`** everywhere (config, refresher, input, wire). YAML key renamed; **no siblings**. | The actual defect: a primary is a redundant *set*, not one thing. A list makes hostname-expansion trivial. |
 | **Resolution timing** | **At config-parse/load time**, re-resolved on every startup/reload — NOT at transfer time, NOT cached once-and-for-all. | Honours "infra must not depend on resolution at runtime" while picking up address changes over time. A parse-time failure can be quarantined loudly. |
 | **Hostname allowed** | A `primaries:` entry's `addr` may be an IP **or** a hostname (both with `:port`). Hostname → all resolved `addr:port`, **v4 before v6**. | The software offers the freedom; operators choose IPs. v4-first directly fixes the broken-outbound-v6 case (the working family is tried first) and is harmless on healthy dual-stack. |
-| **Resolution source** | `net.LookupHost` (the system stub resolver), matching existing code (childsync_utils.go:457, dsync_lookup.go:407). NOT the in-process IMR. | The operator wrote a name expecting it to resolve the way the box resolves names. Using the IMR would resolve differently from the rest of the OS — a debugging trap. |
+| **Resolution source** (revised 2026-06-28) | **The in-process IMR** — `conf.Internal.ImrEngine.DefaultRRsetFetcher` for A + AAAA — NOT `net.LookupHost`. Because the IMR engine goroutine starts *after* `ParseZones`/`LoadDynamicZoneFiles` in `MainInit`, `MainInit` now calls `conf.InitImrEngine()` synchronously before `ParseZones` (idempotent, first-init-wins; the per-app `StartXxx` reuses the instance and adds trust anchors + listeners). | Primaries must resolve the way **tdns itself** resolves names — through its own recursive resolver, with the root hints / stubs / validation tdns is configured with — not via the OS stub resolver, whose configuration tdns does not control. **This reverses the original `net.LookupHost` decision** (the earlier rationale — "resolve the way the box's OS resolves" — was rejected: the relevant resolver is tdns's, not the OS's). |
 | **Partial resolution** | Some entries resolve, some don't, **≥1 address results → zone is SERVED** + a visibility-only **`ConfigWarning`** naming the unresolved entries. **Zero addresses → `ConfigError`** (service-impacting, zone quarantined). | Get the server running and the zone served. One dead name must not kill a zone with working primaries. The warning makes the degradation visible without degrading service. |
 | **Two ZoneData fields** | `ZoneData.PrimariesConf []PeerConf` (as-written, **persisted**, re-resolved each load) **and** `ZoneData.Upstreams []PeerConf` (resolved `addr:port`, **runtime-only**). | The hostname is the durable thing; addresses are derived and ephemeral. Persisting resolved addresses would freeze them and contradict re-resolution on restart. |
 | **Transfer fallback** | SOA probe and AXFR **iterate `Upstreams`**, advancing to the next on **transport errors only** (no route / conn refused / timeout / network unreachable). A **DNS response** (any rcode, incl. REFUSED/SERVFAIL) is honoured as-is. All-transport-failed → error. | A transport error means "this *address* is unreachable" → try a sibling. A DNS response means "a server answered" → that's not an address problem; trying siblings of the same logical server is pointless or harmful (e.g. it would convert today's quiet REFUSED back-off into a noisy double-failure). |
@@ -125,6 +125,19 @@ is left untouched.
   (5) catalog auto-config (the single scalar, per the catalog row).
   Missing any one leaves hostname primaries broken on that path only. Phase
   ownership is called out in §9.
+
+- **IMR availability at parse time (added 2026-06-28).** Resolution uses the
+  in-process IMR (`conf.Internal.ImrEngine`). In `MainInit` the resolve sites run
+  *before* the per-app `StartXxx` brings up the IMR engine goroutine, so `MainInit`
+  calls `conf.InitImrEngine()` synchronously before `ParseZones`. `InitImrEngine`
+  primes the cache with root hints and is idempotent; the later
+  `StartEngine("ImrEngine", …)` reuses the instance and adds trust anchors +
+  listeners. The early init is gated on `conf.Imr.Active` and is non-fatal: if the
+  IMR is disabled or fails to init, `resolvePrimaries` gets a nil IMR and reports
+  hostname entries as unresolved (literal-IP primaries are unaffected — they are
+  never queried). Consequence to document for operators: **with the IMR disabled,
+  primaries must be IP literals.** Resolution still depends only on init-time
+  IMR availability, not on runtime resolution during transfers (principle 1 holds).
 
 - **NOTIFY-triggered refresh must NOT blank `Upstreams`/`PrimariesConf`.** An inbound
   NOTIFY enqueues a **minimal** `ZoneRefresher` (no primary fields). The refreshengine
@@ -199,8 +212,10 @@ ones are spelled out in the phases):
 - **G. `DynamicZoneInput.Primary`** in the cores: 11 sites — **plus a
   `resolvePrimaries` call in `ProvisionDynamicZone` and `ModifyDynamicZone`** so an
   API-added hostname primary resolves at add time, not only on the next restart.
-- **H. Helpers**: none new needed beyond `resolvePrimaries` — `net.LookupHost`,
-  `net.ParseIP`, `net.JoinHostPort`/`SplitHostPort` all already in use.
+- **H. Helpers**: `resolvePrimaries` + `expandPrimaryEntry` (IMR A/AAAA lookup),
+  `sortV4First`, `buildUpstreams` — built on `imr.DefaultRRsetFetcher`,
+  `net.ParseIP`, `net.JoinHostPort`/`SplitHostPort` (all already in use). Plus
+  the early `conf.InitImrEngine()` in `MainInit` before `ParseZones`.
 - **I. `ErrorType` enum**: 4 edits to add `ConfigWarning` (const,
   `ErrorTypeToString`, `errorTypeReportOrder`; **NOT** `serviceImpactingErrors`).
 - **J. Catalog** (`catalog.go:382`, the auto-config `&ZoneData{Upstream: …}` and the
@@ -258,15 +273,18 @@ loop iterates `zd.Upstreams`; persistence writes `zd.PrimariesConf`.
 ```go
 // resolvePrimaries expands each as-written entry into one-or-more addr:port
 // tuples, copying the per-entry key to each. A literal IP passes through
-// unchanged (no lookup). Returns the resolved list plus the list of entries
-// that produced NO address (for the ConfigWarning / ConfigError decision).
-func resolvePrimaries(primaries []PeerConf) (resolved []PeerConf, unresolved []string)
+// unchanged (no lookup). Hostnames resolve via the in-process IMR (A then
+// AAAA). Returns Resolved plus Unresolved (entries that produced NO address)
+// plus KeyCollisions (for the ConfigWarning / ConfigError decision).
+func resolvePrimaries(ctx context.Context, imr *Imr, primaries []PeerConf) PrimaryResolveResult
 ```
 
 - Split `host:port` (default `:53`). If `net.ParseIP(host) != nil` → emit
-  `{host:port, key}` unchanged.
-- Else `net.LookupHost(host)`; emit `{addr:port, key}` per result, **v4 first**.
-  An entry that resolves to nothing (or errors) is appended to `unresolved`.
+  `{host:port, key}` unchanged (literal IP, never queried).
+- Else resolve through the IMR: `imr.DefaultRRsetFetcher(ctx, fqdn, A)` and
+  `… AAAA`, collect the addresses **v4 first**, emit `{addr:port, key}` per
+  result. A name that resolves to nothing (lookup error, empty, or no IMR
+  available) is appended to `Unresolved`. A 10s per-entry timeout bounds startup.
 - **Dedup** the resolved tuples on `addr:port`, keeping the first occurrence (so
   v4-first ordering and the first-seen key survive). If a later duplicate carries a
   **different key** than the kept one, drop it and record it for a `ConfigWarning`
