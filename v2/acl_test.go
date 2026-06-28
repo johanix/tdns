@@ -1,11 +1,11 @@
 package tdns
 
 import (
-	"net"
+	"net/netip"
 	"testing"
 )
 
-func aclIP(s string) net.IP { return net.ParseIP(s) }
+func aclIP(s string) netip.Addr { return netip.MustParseAddr(s) }
 
 func TestIpSpecMatch(t *testing.T) {
 	cases := []struct {

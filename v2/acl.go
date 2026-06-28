@@ -5,9 +5,9 @@
 package tdns
 
 import (
-	"bytes"
 	"fmt"
 	"net"
+	"net/netip"
 	"strings"
 )
 
@@ -34,7 +34,7 @@ type AclEntry struct {
 // ACL) -> (false, ""); callers layer their empty-ACL defaults on top (downstreams
 // empty => deny; allow-notify empty => accept from primaries). A malformed
 // prefix never matches; it is rejected at config time by ValidateACL.
-func matchACL(acl []AclEntry, ip net.IP) (allowed bool, requiredKey string) {
+func matchACL(acl []AclEntry, ip netip.Addr) (allowed bool, requiredKey string) {
 	for _, e := range acl { // BLOCKED supersedes — scan all first
 		if e.Key == BLOCKED && ipSpecMatch(e.Prefix, ip) {
 			return false, ""
@@ -52,22 +52,26 @@ func matchACL(acl []AclEntry, ip net.IP) (allowed bool, requiredKey string) {
 }
 
 // ipSpecMatch reports whether ip falls within the ip-spec. A spec that fails to
-// parse (or a nil ip) returns false.
-func ipSpecMatch(spec string, ip net.IP) bool {
-	ipnet, lo, hi, err := parseIPSpec(spec)
-	if err != nil || ip == nil {
+// parse (or an invalid ip) returns false.
+func ipSpecMatch(spec string, ip netip.Addr) bool {
+	pfx, lo, hi, isRange, err := parseIPSpec(spec)
+	if err != nil || !ip.IsValid() {
 		return false
 	}
-	if ipnet != nil {
-		return ipnet.Contains(ip)
+	a := ip.Unmap()
+	if isRange {
+		// Same-family comparison only; a v4 addr never falls in a v6 range.
+		if a.Is4() != lo.Is4() {
+			return false
+		}
+		return a.Compare(lo) >= 0 && a.Compare(hi) <= 0
 	}
-	ip16 := ip.To16()
-	return ip16 != nil && bytes.Compare(ip16, lo) >= 0 && bytes.Compare(ip16, hi) <= 0
+	return pfx.Contains(a)
 }
 
 // ValidateIPSpec returns an error if spec is not a valid ip-spec.
 func ValidateIPSpec(spec string) error {
-	_, _, _, err := parseIPSpec(spec)
+	_, _, _, _, err := parseIPSpec(spec)
 	return err
 }
 
@@ -86,54 +90,60 @@ func ValidateACL(acl []AclEntry, keyDefined func(string) bool) error {
 	return nil
 }
 
-// parseIPSpec parses an ip-spec into either an *net.IPNet (CIDR / mask / bare IP
-// host-route) or a [lo, hi] range (lo/hi in 16-byte form). Exactly one of ipnet
-// or (lo,hi) is non-nil on success.
-func parseIPSpec(spec string) (ipnet *net.IPNet, lo, hi net.IP, err error) {
+// parseIPSpec parses an ip-spec into either a netip.Prefix (CIDR / mask / bare-IP
+// host route) or a [lo, hi] netip.Addr range (isRange). lo/hi are Unmap'd and of
+// the same family. The string spellings a&m and a-b have no netip parser, so the
+// splitting is by hand; the addresses and matching are netip.
+func parseIPSpec(spec string) (pfx netip.Prefix, lo, hi netip.Addr, isRange bool, err error) {
 	spec = strings.TrimSpace(spec)
 	switch {
 	case strings.Contains(spec, "/"): // CIDR (incl. 0.0.0.0/0, ::/0)
-		_, n, e := net.ParseCIDR(spec)
+		p, e := netip.ParsePrefix(spec)
 		if e != nil {
-			return nil, nil, nil, fmt.Errorf("bad CIDR %q: %w", spec, e)
+			return pfx, lo, hi, false, fmt.Errorf("bad CIDR %q: %w", spec, e)
 		}
-		return n, nil, nil, nil
+		return p.Masked(), lo, hi, false, nil
+
 	case strings.Contains(spec, "&"): // mask: ip&netmask
 		parts := strings.SplitN(spec, "&", 2)
-		base := net.ParseIP(strings.TrimSpace(parts[0]))
-		maskIP := net.ParseIP(strings.TrimSpace(parts[1]))
-		if base == nil || maskIP == nil {
-			return nil, nil, nil, fmt.Errorf("bad masked spec %q", spec)
+		base, e1 := netip.ParseAddr(strings.TrimSpace(parts[0]))
+		maskAddr, e2 := netip.ParseAddr(strings.TrimSpace(parts[1]))
+		if e1 != nil || e2 != nil {
+			return pfx, lo, hi, false, fmt.Errorf("bad masked spec %q", spec)
 		}
-		var mask net.IPMask
-		if v4 := maskIP.To4(); v4 != nil {
-			mask = net.IPMask(v4)
-		} else {
-			mask = net.IPMask(maskIP.To16())
+		// Size returns (0, 0) for a non-canonical (non-contiguous) mask.
+		ones, bits := net.IPMask(maskAddr.AsSlice()).Size()
+		if bits == 0 {
+			return pfx, lo, hi, false, fmt.Errorf("non-contiguous netmask in %q", spec)
 		}
-		return &net.IPNet{IP: base.Mask(mask), Mask: mask}, nil, nil, nil
+		p, e := base.Prefix(ones)
+		if e != nil {
+			return pfx, lo, hi, false, fmt.Errorf("bad masked spec %q: %w", spec, e)
+		}
+		return p, lo, hi, false, nil
+
 	case strings.Contains(spec, "-"): // range: lo-hi
 		parts := strings.SplitN(spec, "-", 2)
-		loIP := net.ParseIP(strings.TrimSpace(parts[0]))
-		hiIP := net.ParseIP(strings.TrimSpace(parts[1]))
-		if loIP == nil || hiIP == nil {
-			return nil, nil, nil, fmt.Errorf("bad range %q", spec)
+		loA, e1 := netip.ParseAddr(strings.TrimSpace(parts[0]))
+		hiA, e2 := netip.ParseAddr(strings.TrimSpace(parts[1]))
+		if e1 != nil || e2 != nil {
+			return pfx, lo, hi, false, fmt.Errorf("bad range %q", spec)
 		}
-		lo16, hi16 := loIP.To16(), hiIP.To16()
-		if lo16 == nil || hi16 == nil || bytes.Compare(lo16, hi16) > 0 {
-			return nil, nil, nil, fmt.Errorf("bad range bounds %q", spec)
+		loA, hiA = loA.Unmap(), hiA.Unmap()
+		if loA.Is4() != hiA.Is4() {
+			return pfx, lo, hi, false, fmt.Errorf("range %q mixes IPv4 and IPv6", spec)
 		}
-		return nil, lo16, hi16, nil
+		if loA.Compare(hiA) > 0 {
+			return pfx, lo, hi, false, fmt.Errorf("range %q: low > high", spec)
+		}
+		return pfx, loA, hiA, true, nil
+
 	default: // bare IP -> host route
-		ip := net.ParseIP(spec)
-		if ip == nil {
-			return nil, nil, nil, fmt.Errorf("bad ip-spec %q", spec)
+		a, e := netip.ParseAddr(spec)
+		if e != nil {
+			return pfx, lo, hi, false, fmt.Errorf("bad ip-spec %q", spec)
 		}
-		bits := 128
-		base := ip.To16()
-		if v4 := ip.To4(); v4 != nil {
-			bits, base = 32, v4
-		}
-		return &net.IPNet{IP: base, Mask: net.CIDRMask(bits, len(base)*8)}, nil, nil, nil
+		a = a.Unmap()
+		return netip.PrefixFrom(a, a.BitLen()), lo, hi, false, nil
 	}
 }
