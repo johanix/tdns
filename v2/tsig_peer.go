@@ -120,6 +120,66 @@ func (zd *ZoneData) notifyKeyFor(target string) string {
 	return NOKEY
 }
 
+// checkInboundTSIG verifies that an inbound request — already ACL-allowed — carries
+// the TSIG the ACL requires. requiredKey == NOKEY (or "") accepts the request as
+// is, signed or not. For a named key, the request must carry a TSIG RR naming that
+// key (canonical compare) and the server's TsigProvider must have validated the
+// MAC, which the library records in w.TsigStatus(). Returns nil on success, else a
+// reason error for the caller to log. The provider must be set on the dns.Server
+// (conf.tsigProvider()) or w.TsigStatus() is meaningless.
+func checkInboundTSIG(w dns.ResponseWriter, r *dns.Msg, requiredKey string) error {
+	if requiredKey == "" || requiredKey == NOKEY {
+		return nil
+	}
+	ts := r.IsTsig()
+	if ts == nil {
+		return fmt.Errorf("TSIG required (key %q) but request is unsigned", requiredKey)
+	}
+	if status := w.TsigStatus(); status != nil {
+		return fmt.Errorf("TSIG verification failed: %w", status)
+	}
+	if dns.CanonicalName(ts.Hdr.Name) != dns.CanonicalName(requiredKey) {
+		return fmt.Errorf("TSIG signed with key %q but ACL requires %q", ts.Hdr.Name, requiredKey)
+	}
+	return nil
+}
+
+// signResponseLikeRequest mirrors a verified request's TSIG onto a single-message
+// response so the server's WriteMsg fills in the response MAC (RFC 8945: a signed
+// request gets a signed response). It is a no-op when the request was unsigned or
+// its TSIG failed verification (w.TsigStatus() != nil) — matching the library's own
+// Transfer.Out gate. Multi-message AXFR responses are handled by Transfer.Out
+// directly and must NOT call this. The server must have a TsigProvider set for the
+// MAC to actually be written.
+func signResponseLikeRequest(w dns.ResponseWriter, req, resp *dns.Msg) {
+	if ts := req.IsTsig(); ts != nil && w.TsigStatus() == nil {
+		resp.SetTsig(ts.Hdr.Name, ts.Algorithm, ts.Fudge, time.Now().Unix())
+	}
+}
+
+// allowNotifyDecision resolves the allow-notify ACL for an inbound NOTIFY's source
+// IP. An empty ACL accepts (unsigned) from any configured primary's IP — so
+// operators needn't restate the primary list — and ignores everything else. A
+// non-empty ACL is matched verbatim (matchACL: BLOCKED/no-match => deny).
+func (zd *ZoneData) allowNotifyDecision(src netip.Addr) (allowed bool, requiredKey string) {
+	if len(zd.AllowNotify) == 0 {
+		for _, p := range zd.Upstreams { // resolved primaries
+			if pip, ok := peerIP(p.Addr); ok && pip == src {
+				return true, NOKEY
+			}
+		}
+		return false, ""
+	}
+	return matchACL(zd.AllowNotify, src)
+}
+
+// downstreamsDecision resolves the downstreams (provide-xfr) ACL for an inbound
+// AXFR/IXFR's source IP. An empty ACL DENIES — a hard cutover that closes the
+// legacy open-AXFR default (matchACL already returns (false,"") for an empty ACL).
+func (zd *ZoneData) downstreamsDecision(src netip.Addr) (allowed bool, requiredKey string) {
+	return matchACL(zd.Downstreams, src)
+}
+
 // peerIP reduces a "host:port" (or bare "host") address to its IP for ACL
 // matching. The inbound RemoteAddr()'s ephemeral source port is irrelevant, so it
 // is dropped. Returns (zero, false) if no valid IP can be parsed.

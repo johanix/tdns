@@ -119,6 +119,33 @@ func NotifyHandler(ctx context.Context, conf *Config) error {
 // TODO: Add per-source rate limiting for NOTIFY messages. An attacker could flood
 // the server with NOTIFY messages to trigger excessive zone refreshes and scanner
 // scans. Consider a token bucket or sliding window rate limiter keyed by source IP.
+// authorizeInboundNotify applies the secondary-side allow-notify ACL and any
+// required TSIG to an inbound NOTIFY(SOA). It returns ok=true to proceed, or
+// ok=false with the refusal rcode, an EDE code, and a human reason to log and
+// return. An empty allow-notify ACL accepts (unsigned) from any resolved primary
+// IP, so operators needn't restate the primary list. The server's TsigProvider
+// (do53.go) has already verified the MAC; this only checks that the source is
+// permitted and that the named key the ACL requires is the one on the wire.
+func (zd *ZoneData) authorizeInboundNotify(w dns.ResponseWriter, r *dns.Msg) (ok bool, rcode int, ede uint16, reason string) {
+	src, parsed := peerIP(w.RemoteAddr().String())
+	if !parsed {
+		return false, dns.RcodeRefused, edns0.EDENotifyNotPermitted, "unparseable source address"
+	}
+	allowed, requiredKey := zd.allowNotifyDecision(src)
+	if !allowed {
+		return false, dns.RcodeRefused, edns0.EDENotifyNotPermitted,
+			fmt.Sprintf("source %s not permitted by allow-notify", src)
+	}
+	if err := checkInboundTSIG(w, r, requiredKey); err != nil {
+		ede := edns0.EDETsigValidationFailure
+		if r.IsTsig() == nil {
+			ede = edns0.EDETsigRequired
+		}
+		return false, dns.RcodeNotAuth, ede, err.Error()
+	}
+	return true, dns.RcodeSuccess, 0, ""
+}
+
 func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan ZoneRefresher, scannerq chan ScanRequest) error {
 
 	qname := dnr.Qname
@@ -263,6 +290,17 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 
 	switch ntype {
 	case dns.TypeSOA:
+		// allow-notify ACL gate (secondary side). CDS/CSYNC/DNSKEY NOTIFYs use
+		// their own authorization (child-delegation / DSYNC / multi-signer) and
+		// are intentionally not gated here.
+		if ok, rcode, ede, reason := zd.authorizeInboundNotify(dnr.ResponseWriter, dnr.Msg); !ok {
+			lgHandler.Warn("NOTIFY(SOA) refused", "zone", targetZoneName, "from", dnr.ResponseWriter.RemoteAddr(), "reason", reason)
+			m.SetRcode(dnr.Msg, rcode)
+			edns0.AttachEDEToResponseWithText(m, ede, reason, false)
+			signResponseLikeRequest(dnr.ResponseWriter, dnr.Msg, m)
+			dnr.ResponseWriter.WriteMsg(m)
+			return nil
+		}
 		select {
 		case <-ctx.Done():
 			// Send immediate failure so NOTIFY sender doesn't block on cancellation
@@ -320,6 +358,8 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 		}
 	}
 
+	// Sign the success response when the NOTIFY was itself signed (RFC 8945).
+	signResponseLikeRequest(dnr.ResponseWriter, dnr.Msg, m)
 	dnr.ResponseWriter.WriteMsg(m)
 	return nil
 }

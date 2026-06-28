@@ -59,6 +59,11 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 				Net:           transport,
 				Handler:       dnsMux,        // Use local mux instead of global handler
 				MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
+				// Keystore-backed TSIG provider: verifies inbound TSIG on
+				// replication traffic (NOTIFY, AXFR/IXFR) and signs responses
+				// to signed requests (RFC 8945). tdns UPDATEs are SIG(0)-signed
+				// (a SIG RR, not a TSIG RR), so this never touches them.
+				TsigProvider: conf.tsigProvider(),
 			}
 			// Must bump the buffer size of incoming UDP msgs, as updates
 			// may be much larger then queries

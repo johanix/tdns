@@ -245,6 +245,8 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								zd.Upstreams = clonePeerConfs(zr.Primaries)
 							}
 							zd.Notify = normalizePeerAddrs(zr.Notify)
+							zd.AllowNotify = zr.AllowNotify
+							zd.Downstreams = zr.Downstreams
 							zd.Zonefile = zr.Zonefile
 							zd.ZoneType = zr.ZoneType
 							zd.Options = zr.Options
@@ -312,6 +314,13 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// Update notify addresses only if provided
 						if zr.Notify != nil {
 							zd.Notify = normalizePeerAddrs(zr.Notify)
+						}
+						// Update allow-notify / downstreams ACLs only if provided
+						if zr.AllowNotify != nil {
+							zd.AllowNotify = zr.AllowNotify
+						}
+						if zr.Downstreams != nil {
+							zd.Downstreams = zr.Downstreams
 						}
 						// Update primaries only if provided (config-bearing refresher).
 						if len(zr.PrimariesConf) > 0 {
@@ -577,6 +586,8 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						PrimariesConf:    primariesConf,
 						Upstreams:        upstreams,
 						Notify:           normalizePeerAddrs(zr.Notify),
+						AllowNotify:      zr.AllowNotify,
+						Downstreams:      zr.Downstreams,
 						Zonefile:         zr.Zonefile,
 						ZoneType:         zr.ZoneType,
 						Options:          zr.Options,

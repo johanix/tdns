@@ -732,6 +732,22 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			continue
 		}
 
+		// allow-notify: / downstreams: ACL validation — every ip-spec must parse
+		// and every key must be NOKEY, BLOCKED, or a defined keys.tsig name.
+		// A bad ACL quarantines just this zone (same rule as the primary check).
+		if err := ValidateACL(zconf.AllowNotify, conf.tsigKeyDefined); err != nil {
+			lgConfig.Error("zone allow-notify ACL invalid, zone in error state", "zone", zname, "err", err)
+			zd.SetError(ConfigError, "allow-notify: %v", err)
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+		if err := ValidateACL(zconf.Downstreams, conf.tsigKeyDefined); err != nil {
+			lgConfig.Error("zone downstreams ACL invalid, zone in error state", "zone", zname, "err", err)
+			zd.SetError(ConfigError, "downstreams: %v", err)
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+
 		lgConfig.Debug("checking DNSSEC policy", "zone", zname)
 		// dump.P(zconf)
 
@@ -1069,6 +1085,8 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				Primaries:     resolvedPrimaries,
 				ZoneStore:     zonestore,
 				Notify:        zconf.Notify,
+				AllowNotify:   zconf.AllowNotify,
+				Downstreams:   zconf.Downstreams,
 				Zonefile:      zconf.Zonefile,
 				Options:       options,
 				UpdatePolicy:  policy,
