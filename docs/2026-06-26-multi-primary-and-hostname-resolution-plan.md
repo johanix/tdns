@@ -395,9 +395,12 @@ catalog, the extra resolution call sites, persist-with-keys, and the NOTIFY guar
   every primary REFUSED → quiet back-off (no transfer, no error); all unreachable
   → error; no-upstreams → error (both `DoTransfer` and `FetchFromUpstream`). The
   AXFR loop shares the iteration pattern; a full AXFR test server is deferred.
-- **P5:** add a dynamic zone with a hostname primary **carrying a non-NOKEY-shaped
-  key name** → persisted config contains the **hostname AND the key** (not resolved
-  addresses, not forced `NOKEY`); reload re-resolves the hostname.
+- **P5** (`TestZoneDataToZoneConf_PersistsAsWrittenPrimaries`): `zoneDataToZoneConf`
+  on a zone whose as-written primary is a **hostname with a non-NOKEY key** and
+  whose resolved `Upstreams` are addresses → the persisted `Primaries` is the
+  **hostname + key**, NOT the resolved addresses and NOT forced `NOKEY`. Tested at
+  the serialization level (`ProvisionDynamicZone` rejects non-NOKEY keys in
+  Improvement 1); persisting the hostname is what lets reload re-resolve it.
 - **P6:** `list-zones`/`list-dynamic` render the `primaries` list and surface
   `config-warning` text for a partially-resolved zone.
 

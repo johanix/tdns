@@ -41,6 +41,43 @@ func TestZoneDataToZoneConf_WritesApiManaged(t *testing.T) {
 	}
 }
 
+// TestZoneDataToZoneConf_PersistsAsWrittenPrimaries verifies P5: persistence
+// writes the as-written PrimariesConf (hostnames + per-entry keys), NOT the
+// resolved Upstreams and NOT a hardcoded NOKEY. Persisting the hostname (rather
+// than whatever it resolved to once) is what lets reload re-resolve it.
+func TestZoneDataToZoneConf_PersistsAsWrittenPrimaries(t *testing.T) {
+	zd := &ZoneData{
+		ZoneName: "rt.example.",
+		ZoneType: Secondary,
+		// As-written: a hostname carrying a non-NOKEY-shaped key name.
+		PrimariesConf: []PeerConf{{Addr: "ns.example.org:53", Key: "transfer-key"}},
+		// Resolved (runtime-only): the addresses the hostname expanded to. These
+		// must NOT be what gets persisted.
+		Upstreams: []PeerConf{
+			{Addr: "192.0.2.1:53", Key: "transfer-key"},
+			{Addr: "[2001:db8::1]:53", Key: "transfer-key"},
+		},
+		Options: map[ZoneOption]bool{OptApiManagedZone: true},
+	}
+	zc := zoneDataToZoneConf(zd, "/tmp")
+
+	if len(zc.Primaries) != 1 {
+		t.Fatalf("want 1 persisted primary (the as-written entry), got %d: %+v", len(zc.Primaries), zc.Primaries)
+	}
+	got := zc.Primaries[0]
+	if got.Addr != "ns.example.org:53" {
+		t.Errorf("persisted the resolved address, not the hostname: %q", got.Addr)
+	}
+	if got.Key != "transfer-key" {
+		t.Errorf("per-entry key not preserved (forced to NOKEY?): %q", got.Key)
+	}
+	for _, p := range zc.Primaries {
+		if p.Addr == "192.0.2.1:53" || p.Addr == "[2001:db8::1]:53" {
+			t.Errorf("a resolved address leaked into the persisted config: %q", p.Addr)
+		}
+	}
+}
+
 // TestShouldPersistZone_DynamicBranch verifies the B5a third branch: an
 // API-managed zone is persistable iff dynamic.{allowed && storage==persistent}.
 func TestShouldPersistZone_DynamicBranch(t *testing.T) {
