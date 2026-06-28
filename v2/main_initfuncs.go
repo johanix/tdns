@@ -199,7 +199,7 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// resolvePrimaries degrades (a hostname primary is reported unresolved),
 	// it does not abort startup.
 	if conf.Imr.Active == nil || *conf.Imr.Active {
-		if err := conf.InitImrEngine(false); err != nil {
+		if err := conf.InitImrEngine(ctx, false); err != nil {
 			lgConfig.Warn("early IMR init failed; hostname primaries will not resolve at parse time", "err", err)
 		}
 	}
