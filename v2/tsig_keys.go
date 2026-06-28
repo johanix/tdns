@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+
+	"github.com/miekg/dns"
 )
 
 // TsigKeyStore is the auth-server TSIG secret store, keyed by key NAME (the NSD
@@ -33,7 +35,7 @@ func (s *TsigKeyStore) Get(name string) (TsigDetails, bool) {
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	d, ok := s.keys[name]
+	d, ok := s.keys[dns.CanonicalName(name)]
 	return d, ok
 }
 
@@ -50,7 +52,7 @@ func (s *TsigKeyStore) Add(d TsigDetails) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.keys[d.Name] = d
+	s.keys[dns.CanonicalName(d.Name)] = d // canonical (lowercase FQDN) key, matches the wire name
 }
 
 // Names returns the set of defined key names (used to re-point the catalog
