@@ -78,9 +78,9 @@ func (conf *Config) LoadTsigKeys() error {
 	store := NewTsigKeyStore()
 	var firstErr error
 	for _, t := range conf.Keys.Tsig {
-		if strings.EqualFold(t.Name, NOKEY) {
+		if strings.EqualFold(t.Name, NOKEY) || strings.EqualFold(t.Name, BLOCKED) {
 			if firstErr == nil {
-				firstErr = fmt.Errorf("keys.tsig: %q is the reserved no-TSIG sentinel and cannot be a key name", t.Name)
+				firstErr = fmt.Errorf("keys.tsig: %q is a reserved sentinel (NOKEY/BLOCKED) and cannot be a key name", t.Name)
 			}
 			continue
 		}
