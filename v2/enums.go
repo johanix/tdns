@@ -351,6 +351,19 @@ var serviceImpactingErrors = []ErrorType{
 	DnssecError,
 }
 
+// ErrorTypeIsServiceImpacting reports whether an error category makes a zone
+// unable to serve (so it should render as an ERROR) versus a visibility-only
+// warning under which the zone keeps serving (e.g. ConfigWarning). Exported for
+// CLI display, which renders the two differently.
+func ErrorTypeIsServiceImpacting(t ErrorType) bool {
+	for _, e := range serviceImpactingErrors {
+		if t == e {
+			return true
+		}
+	}
+	return false
+}
+
 // ZoneError is one entry in the per-zone error registry. Use SetError
 // to upsert and ClearError to remove.
 type ZoneError struct {

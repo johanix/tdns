@@ -303,6 +303,12 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				if zd, ok := Zones.Get(zc.Name); ok {
 					zc.Provisioning = zoneProvisioning(zd)
 					zc.ApiManaged = zd.Options[OptApiManagedZone]
+					// Surface the zone's error/warning state (e.g. ConfigWarning
+					// for a partially-resolved primary set) — zoneDataToZoneConf
+					// deliberately omits runtime error fields.
+					zc.Error = zd.Error
+					zc.ErrorType = zd.ErrorType
+					zc.ErrorMsg = zd.ErrorMsg
 				}
 				zones[zc.Name] = zc
 			}

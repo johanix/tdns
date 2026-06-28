@@ -401,8 +401,14 @@ catalog, the extra resolution call sites, persist-with-keys, and the NOTIFY guar
   **hostname + key**, NOT the resolved addresses and NOT forced `NOKEY`. Tested at
   the serialization level (`ProvisionDynamicZone` rejects non-NOKEY keys in
   Improvement 1); persisting the hostname is what lets reload re-resolve it.
-- **P6:** `list-zones`/`list-dynamic` render the `primaries` list and surface
-  `config-warning` text for a partially-resolved zone.
+- **P6** (`TestSampleZonesConfigDecodes`, `TestSampleTemplatesConfigIsValidYAML`):
+  the shipped `*.sample.yaml` are migrated to `primaries:`/`notify:` struct lists
+  and decode with no Legacy markers. CLI: `--primaries` is a comma-list building a
+  `[]PeerConf` (one `--primary-key` applied to all); `list-zones`/`list-dynamic`
+  render the as-written `primaries` list and surface `config-warning` *distinctly*
+  from service-impacting errors — a warning zone stays a normal row with an
+  annotation (via the new exported `ErrorTypeIsServiceImpacting`), not an ERROR row,
+  and `list-dynamic` now carries the zone's error/warning state.
 
 ## 11. Verify-before-coding (not blockers — confirm at implementation time)
 
@@ -414,7 +420,14 @@ catalog, the extra resolution call sites, persist-with-keys, and the NOTIFY guar
 - **IXFR:** production refresh hardcodes `"axfr"` (FetchFromUpstream,
   zone_utils.go:234); the loop applies to AXFR. IXFR, when wired, uses the same
   loop via `ZoneTransferIn`.
-- **Sample-config cutover:** like the prior `primary:` struct migration, this is a
-  hard cutover — a bare-string or `primary:`-keyed config entry goes to ERROR; the
-  operator migrates to `primaries:`. Migrate the shipped `*.sample.yaml` in P6 and
-  note the upgrade requirement.
+- **Sample-config cutover (done in P6):** hard cutover — a bare-string or
+  `primary:`-keyed entry goes to ERROR; operators migrate to `primaries:` (a list
+  of `{addr, key}`). The shipped `*.sample.yaml` were migrated, **and their
+  bare-string `notify:` entries too** — those were a leftover from the B0
+  PeerConf migration and would have quarantined the example zones; the same
+  struct form fixes both. `TestSampleZonesConfigDecodes` is a regression guard so
+  the samples can't silently rot out of struct-sync again.
+
+  **Operator upgrade note:** any existing config using `primary: "ip:port"` (or a
+  bare-string `notify:`) must change to the list-of-`{addr, key}` form, e.g.
+  `primaries:\n  - addr: "ip:port"\n    key: NOKEY`.
