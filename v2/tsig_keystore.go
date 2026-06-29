@@ -26,6 +26,11 @@ FROM TsigKeystore ORDER BY keyname`
 
 const deleteTsigKeystoreSql = `DELETE FROM TsigKeystore WHERE keyname=?`
 
+const updateTsigKeystoreOwnerSql = `UPDATE TsigKeystore SET owner=? WHERE keyname=? AND origin='api'`
+
+const overwriteTsigKeystoreSql = `
+UPDATE TsigKeystore SET algorithm=?, secret=?, owner=?, creator=? WHERE keyname=?`
+
 const updateTsigKeystoreConfigSql = `
 UPDATE TsigKeystore SET algorithm=?, secret=?, owner=? WHERE keyname=? AND origin='config'`
 
@@ -157,6 +162,25 @@ func listTsigKeystore(q rowsQuerier) ([]TsigKeystoreRow, error) {
 
 func deleteTsigKeystore(tx *Tx, keyname string) error {
 	_, err := tx.Exec(deleteTsigKeystoreSql, dns.CanonicalName(keyname))
+	return err
+}
+
+func updateTsigKeystoreOwner(tx *Tx, keyname, owner string) error {
+	_, err := tx.Exec(updateTsigKeystoreOwnerSql, owner, dns.CanonicalName(keyname))
+	return err
+}
+
+func overwriteTsigKeystore(tx *Tx, row TsigKeystoreRow) error {
+	if err := validateTsigKeySpec(row.Keyname, row.Algorithm, row.Secret); err != nil {
+		return err
+	}
+	_, err := tx.Exec(overwriteTsigKeystoreSql,
+		dns.CanonicalName(row.Algorithm),
+		row.Secret,
+		row.Owner,
+		row.Creator,
+		dns.CanonicalName(row.Keyname),
+	)
 	return err
 }
 

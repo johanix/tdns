@@ -122,7 +122,7 @@ func TestTsigKeyMgmtAddListDeleteAndCacheDelta(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	store := NewTsigKeyStore()
 
-	resp, err := kdb.TsigKeyMgmt(nil, KeystorePost{
+	resp, err := kdb.TsigKeyMgmt(nil, nil, KeystorePost{
 		SubCommand:    "add",
 		TsigKeyname:   "mgmt-key.",
 		TsigAlgorithm: "hmac-sha256",
@@ -142,7 +142,7 @@ func TestTsigKeyMgmtAddListDeleteAndCacheDelta(t *testing.T) {
 		t.Fatal("store missing key after add delta")
 	}
 
-	resp, err = kdb.TsigKeyMgmt(nil, KeystorePost{SubCommand: "list"})
+	resp, err = kdb.TsigKeyMgmt(nil, nil, KeystorePost{SubCommand: "list"})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -150,7 +150,7 @@ func TestTsigKeyMgmtAddListDeleteAndCacheDelta(t *testing.T) {
 		t.Fatalf("list: %+v", resp.TsigKeys)
 	}
 
-	resp, err = kdb.TsigKeyMgmt(nil, KeystorePost{SubCommand: "delete", TsigKeyname: "mgmt-key."})
+	resp, err = kdb.TsigKeyMgmt(nil, nil, KeystorePost{SubCommand: "delete", TsigKeyname: "mgmt-key."})
 	if err != nil {
 		t.Fatalf("delete: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestTsigKeyMgmtDeleteConfigOriginRejected(t *testing.T) {
 		t.Fatalf("Commit: %v", err)
 	}
 
-	_, err = kdb.TsigKeyMgmt(nil, KeystorePost{SubCommand: "delete", TsigKeyname: "static."})
+	_, err = kdb.TsigKeyMgmt(nil, nil, KeystorePost{SubCommand: "delete", TsigKeyname: "static."})
 	if err == nil {
 		t.Fatal("expected delete of config-origin key to fail")
 	}
@@ -245,5 +245,65 @@ func TestSyncConfigTsigKeys_DropsRemovedConfigKey(t *testing.T) {
 	}
 	if _, err := getTsigKeystoreByName(kdb, "api."); err != nil {
 		t.Fatalf("api-origin key must remain: %v", err)
+	}
+}
+
+func TestTsigKeyMgmtListRefCount(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	conf := &Config{Catalog: &CatalogConf{ConfigGroups: map[string]*ConfigGroupConfig{
+		"g": {TsigKey: "cat-key."},
+	}}}
+	tx, err := kdb.Begin("TestTsigKeyMgmtListRefCount")
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	for _, row := range []TsigKeystoreRow{
+		{Keyname: "cat-key.", Algorithm: "hmac-sha256", Secret: b64Secret16, Origin: "api", Creator: "test"},
+		{Keyname: "zone-key.", Algorithm: "hmac-sha256", Secret: b64Secret16, Origin: "api", Creator: "test"},
+	} {
+		if err := insertTsigKeystore(tx, row); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	Zones.Set("z.", &ZoneData{ZoneName: "z.", PrimariesConf: []PeerConf{{Key: "zone-key."}}})
+	t.Cleanup(func() { Zones.Remove("z.") })
+
+	resp, err := kdb.TsigKeyMgmt(conf, nil, KeystorePost{SubCommand: "list"})
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	byName := map[string]TsigKeyInfo{}
+	for _, k := range resp.TsigKeys {
+		byName[k.Name] = k
+	}
+	if byName["cat-key."].RefCount != 1 || byName["zone-key."].RefCount != 1 {
+		t.Fatalf("refcounts: %+v", resp.TsigKeys)
+	}
+}
+
+func TestTsigKeyMgmtDeleteReferencedRejected(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	conf := &Config{}
+	tx, err := kdb.Begin("TestTsigKeyMgmtDeleteReferencedRejected")
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if err := insertTsigKeystore(tx, TsigKeystoreRow{
+		Keyname: "in-use.", Algorithm: "hmac-sha256", Secret: b64Secret16, Origin: "api", Creator: "test",
+	}); err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+	Zones.Set("z.", &ZoneData{ZoneName: "z.", Downstreams: []AclEntry{{Key: "in-use."}}})
+	t.Cleanup(func() { Zones.Remove("z.") })
+
+	_, err = kdb.TsigKeyMgmt(conf, nil, KeystorePost{SubCommand: "delete", TsigKeyname: "in-use."})
+	if err == nil {
+		t.Fatal("expected delete of referenced key to fail")
 	}
 }

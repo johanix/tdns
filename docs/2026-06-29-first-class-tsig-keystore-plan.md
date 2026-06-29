@@ -405,8 +405,8 @@ Reconciled with §9 (review #6).
 | 2 | DB CRUD `TsigKeyMgmt` + cache-after-commit discipline (§4); in-memory store loads from DB | Med | ~220 | done (`c6c21aa`) |
 | 3 | Boot reorder (§5): KeyDB before `LoadTsigKeys`; `LoadTsigKeys` = load DB + sync `keys.tsig` (`main_initfuncs.go:123,130`) | Med | ~120 | done (`656afd3`) |
 | 4 | Reload reconcile in place, three-mode/no-silent-overwrite (§6); **`config reload-tsig`** CLI + API; **keep** legacy YAML re-merge on reload until step 12 | Med | ~140 | done |
-| 5 | Reference-count scan over `Zones` + catalog groups (§8) | Low | ~70 | in progress |
-| 6 | API: `tsig-mgmt` command, `KeystorePost`/`KeystoreResponse` TSIG fields + `TsigKeyInfo`/`TsigKeyDisposition` (§11) | Med | ~140 | pending |
+| 5 | Reference-count scan over `Zones` + catalog groups (§8) | Low | ~70 | done |
+| 6 | API: `tsig-mgmt` command, `KeystorePost`/`KeystoreResponse` TSIG fields + `TsigKeyInfo`/`TsigKeyDisposition` (§11) | Med | ~140 | in progress |
 | 7 | CLI `keystore tsig {list, add, setowner, delete}` + operator-string sweep (§14) | Med | ~200 | pending |
 | 8 | `generate` + `GenerateTsigSecret` (§12) | Low | ~70 | pending |
 | 9 | `import` extractor (BIND/NSD) + three-mode (default/`--interactive`/`--force`) + `-v` (§10) | Med–High | ~250 | pending |

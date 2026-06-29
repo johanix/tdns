@@ -12,8 +12,8 @@ import (
 
 // TsigKeyMgmt implements DB CRUD for the global TSIG keystore. Mutations return
 // TsigCacheDelta on the response for post-commit cache refresh (§4); they do not
-// touch the in-memory TsigKeyStore directly.
-func (kdb *KeyDB) TsigKeyMgmt(tx *Tx, kp KeystorePost) (*KeystoreResponse, error) {
+// touch the in-memory TsigKeyStore directly. conf supplies live zone refcounts.
+func (kdb *KeyDB) TsigKeyMgmt(conf *Config, tx *Tx, kp KeystorePost) (*KeystoreResponse, error) {
 	resp := &KeystoreResponse{Time: time.Now(), TsigCacheDelta: &TsigCacheDelta{}}
 
 	localtx := false
@@ -39,6 +39,13 @@ func (kdb *KeyDB) TsigKeyMgmt(tx *Tx, kp KeystorePost) (*KeystoreResponse, error
 		}
 	}()
 
+	refCount := func(name string) int {
+		if conf == nil {
+			return 0
+		}
+		return conf.tsigKeyZoneRefCount(name)
+	}
+
 	switch kp.SubCommand {
 	case "list":
 		rows, err := listTsigKeystore(kdb)
@@ -47,7 +54,9 @@ func (kdb *KeyDB) TsigKeyMgmt(tx *Tx, kp KeystorePost) (*KeystoreResponse, error
 		}
 		resp.TsigKeys = make([]TsigKeyInfo, len(rows))
 		for i, row := range rows {
-			resp.TsigKeys[i] = tsigKeystoreRowToInfo(row)
+			info := tsigKeystoreRowToInfo(row)
+			info.RefCount = refCount(row.Keyname)
+			resp.TsigKeys[i] = info
 		}
 		resp.Msg = fmt.Sprintf("%d TSIG key(s)", len(rows))
 		resp.TsigCacheDelta = nil
@@ -69,11 +78,51 @@ func (kdb *KeyDB) TsigKeyMgmt(tx *Tx, kp KeystorePost) (*KeystoreResponse, error
 			Owner:     owner,
 			Creator:   creator,
 		}
-		if err := insertTsigKeystore(tx, row); err != nil {
+		existing, err := getTsigKeystoreByName(tx, row.Keyname)
+		if err == nil {
+			if tsigDetailsMatchRow(TsigDetails{Name: row.Keyname, Algorithm: row.Algorithm, Secret: row.Secret}, existing) {
+				resp.Msg = fmt.Sprintf("TSIG key %q unchanged", row.Keyname)
+				resp.TsigCacheDelta = nil
+				txSuccess = true
+				return resp, nil
+			}
+			if !kp.Force {
+				return resp, fmt.Errorf("TSIG key %q already exists with a different secret/algorithm (use --force)", row.Keyname)
+			}
+			if err := overwriteTsigKeystore(tx, row); err != nil {
+				return resp, err
+			}
+		} else if err != sql.ErrNoRows {
+			return resp, err
+		} else if err := insertTsigKeystore(tx, row); err != nil {
 			return resp, err
 		}
 		resp.TsigCacheDelta.markChanged(row.Keyname)
 		resp.Msg = fmt.Sprintf("TSIG key %q added", kp.TsigKeyname)
+
+	case "setowner":
+		name := kp.TsigKeyname
+		if name == "" {
+			name = kp.Keyname
+		}
+		if kp.Owner == "" {
+			return resp, fmt.Errorf("setowner requires owner")
+		}
+		existing, err := getTsigKeystoreByName(tx, name)
+		if err == sql.ErrNoRows {
+			return resp, fmt.Errorf("TSIG key %q not found", name)
+		}
+		if err != nil {
+			return resp, err
+		}
+		if existing.Origin != "api" {
+			return resp, fmt.Errorf("TSIG key %q has origin=%q; set owner via keys.tsig", name, existing.Origin)
+		}
+		if err := updateTsigKeystoreOwner(tx, name, kp.Owner); err != nil {
+			return resp, err
+		}
+		resp.TsigCacheDelta = nil
+		resp.Msg = fmt.Sprintf("TSIG key %q owner set to %q", name, kp.Owner)
 
 	case "delete":
 		name := kp.TsigKeyname
@@ -89,6 +138,9 @@ func (kdb *KeyDB) TsigKeyMgmt(tx *Tx, kp KeystorePost) (*KeystoreResponse, error
 		}
 		if existing.Origin != "api" {
 			return resp, fmt.Errorf("TSIG key %q has origin=%q and cannot be deleted via keystore (manage via keys.tsig)", name, existing.Origin)
+		}
+		if n := refCount(name); n > 0 {
+			return resp, fmt.Errorf("TSIG key %q is referenced by %d zone(s); remove references first", name, n)
 		}
 		if err := deleteTsigKeystore(tx, name); err != nil {
 			return resp, err
