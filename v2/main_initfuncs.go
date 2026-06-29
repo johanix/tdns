@@ -116,17 +116,12 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	if err != nil {
 		return fmt.Errorf("error parsing config %q: %w", conf.Internal.CfgFile, err)
 	}
-	// Build the replication TSIG name->secret store from the keys: block before
-	// zones are parsed, so a primary/notify/ACL key name can be validated against
-	// it. A bad key entry is non-fatal (skipped + logged); zones referencing it
-	// are quarantined at parse.
-	if err := conf.LoadTsigKeys(); err != nil {
-		lgConfig.Error("TSIG keys: config error (affected keys skipped; zones referencing them are quarantined)", "err", err)
-	}
+	// KeyDB must exist before TSIG load so LoadTsigKeys can sync keys.tsig into
+	// TsigKeystore and populate the cache from the DB (Auth/Agent init KeyDB in
+	// ParseConfig; Scanner only here).
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeScanner:
-		kdb := conf.Internal.KeyDB
-		if kdb == nil {
+		if conf.Internal.KeyDB == nil {
 			err = conf.InitializeKeyDB()
 			if err != nil {
 				return fmt.Errorf("error initializing KeyDB: %w", err)
@@ -134,6 +129,11 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		}
 	default:
 		lgConfig.Info("not initializing KeyDB", "app", Globals.App.Name, "mode", AppTypeToString[Globals.App.Type])
+	}
+	// Build the replication TSIG store before zones are parsed so primary/notify/ACL
+	// key names validate against it. Bad keys.tsig entries are non-fatal (skipped).
+	if err := conf.LoadTsigKeys(); err != nil {
+		lgConfig.Error("TSIG keys: config error (affected keys skipped; zones referencing them are quarantined)", "err", err)
 	}
 	err = Globals.Validate()
 	if err != nil {

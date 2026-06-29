@@ -182,3 +182,68 @@ func TestTsigKeyMgmtDeleteConfigOriginRejected(t *testing.T) {
 		t.Fatal("expected delete of config-origin key to fail")
 	}
 }
+
+func TestLoadTsigKeysFromDB_SyncsConfigAndKeepsAPI(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	tx, err := kdb.Begin("TestLoadTsigKeysFromDB")
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	if err := insertTsigKeystore(tx, TsigKeystoreRow{
+		Keyname: "api-only.", Algorithm: "hmac-sha512", Secret: b64Secret16, Origin: "api", Creator: "test",
+	}); err != nil {
+		t.Fatalf("insert api: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	conf := &Config{
+		Keys: KeyConf{
+			Tsig: []TsigDetails{{Name: "cfg.", Algorithm: "hmac-sha256", Secret: b64Secret16}},
+		},
+	}
+	conf.Internal.KeyDB = kdb
+	if err := conf.LoadTsigKeys(); err != nil {
+		t.Fatalf("LoadTsigKeys: %v", err)
+	}
+	if !conf.Internal.TsigKeyStore.Has("cfg.") || !conf.Internal.TsigKeyStore.Has("api-only.") {
+		t.Fatalf("expected config+api keys, names=%v", conf.Internal.TsigKeyStore.Names())
+	}
+	row, err := getTsigKeystoreByName(kdb, "cfg.")
+	if err != nil || row.Origin != "config" {
+		t.Fatalf("cfg row: %+v err=%v", row, err)
+	}
+}
+
+func TestSyncConfigTsigKeys_DropsRemovedConfigKey(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	tx, err := kdb.Begin("TestSyncConfigTsigKeys_DropsRemovedConfigKey")
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	for _, row := range []TsigKeystoreRow{
+		{Keyname: "keep.", Algorithm: "hmac-sha256", Secret: b64Secret16, Origin: "config", Creator: "config"},
+		{Keyname: "drop.", Algorithm: "hmac-sha256", Secret: b64Secret16, Origin: "config", Creator: "config"},
+		{Keyname: "api.", Algorithm: "hmac-sha256", Secret: b64Secret16, Origin: "api", Creator: "test"},
+	} {
+		if err := insertTsigKeystore(tx, row); err != nil {
+			t.Fatalf("insert: %v", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	if err := kdb.SyncConfigTsigKeys([]TsigDetails{
+		{Name: "keep.", Algorithm: "hmac-sha256", Secret: b64Secret16},
+	}); err != nil {
+		t.Fatalf("SyncConfigTsigKeys: %v", err)
+	}
+	if _, err := getTsigKeystoreByName(kdb, "drop."); err != sql.ErrNoRows {
+		t.Fatalf("drop. should be gone, err=%v", err)
+	}
+	if _, err := getTsigKeystoreByName(kdb, "api."); err != nil {
+		t.Fatalf("api-origin key must remain: %v", err)
+	}
+}

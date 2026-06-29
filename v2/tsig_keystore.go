@@ -26,6 +26,9 @@ FROM TsigKeystore ORDER BY keyname`
 
 const deleteTsigKeystoreSql = `DELETE FROM TsigKeystore WHERE keyname=?`
 
+const updateTsigKeystoreConfigSql = `
+UPDATE TsigKeystore SET algorithm=?, secret=?, owner=? WHERE keyname=? AND origin='config'`
+
 // TsigKeystoreRow is one row in the TsigKeystore table.
 type TsigKeystoreRow struct {
 	Keyname   string
@@ -115,6 +118,11 @@ func tsigKeystoreRowToInfo(row TsigKeystoreRow) TsigKeyInfo {
 	}
 }
 
+func tsigDetailsMatchRow(t TsigDetails, row TsigKeystoreRow) bool {
+	return row.Secret == t.Secret &&
+		dns.CanonicalName(row.Algorithm) == dns.CanonicalName(t.Algorithm)
+}
+
 func scanTsigKeystoreRow(rows *sql.Rows) (TsigKeystoreRow, error) {
 	var row TsigKeystoreRow
 	err := rows.Scan(
@@ -150,6 +158,92 @@ func listTsigKeystore(q rowsQuerier) ([]TsigKeystoreRow, error) {
 func deleteTsigKeystore(tx *Tx, keyname string) error {
 	_, err := tx.Exec(deleteTsigKeystoreSql, dns.CanonicalName(keyname))
 	return err
+}
+
+func updateTsigKeystoreConfig(tx *Tx, t TsigDetails) error {
+	owner := "config"
+	_, err := tx.Exec(updateTsigKeystoreConfigSql,
+		dns.CanonicalName(t.Algorithm),
+		t.Secret,
+		owner,
+		dns.CanonicalName(t.Name),
+	)
+	return err
+}
+
+// SyncConfigTsigKeys materialises keys.tsig into TsigKeystore as origin=config rows:
+// insert new names, update changed config-origin rows, drop config-origin rows removed
+// from the YAML. An api-origin row with a differing secret is left unchanged (WARN).
+func (kdb *KeyDB) SyncConfigTsigKeys(entries []TsigDetails) error {
+	want := make(map[string]TsigDetails, len(entries))
+	for _, t := range entries {
+		want[dns.CanonicalName(t.Name)] = t
+	}
+
+	tx, err := kdb.Begin("SyncConfigTsigKeys")
+	if err != nil {
+		return err
+	}
+	var txSuccess bool
+	defer func() {
+		if txSuccess {
+			if err := tx.Commit(); err != nil {
+				lgConfig.Error("SyncConfigTsigKeys commit failed", "err", err)
+			}
+		} else {
+			tx.Rollback()
+		}
+	}()
+
+	for name, t := range want {
+		existing, err := getTsigKeystoreByName(tx, name)
+		if err == sql.ErrNoRows {
+			if err := insertTsigKeystore(tx, TsigKeystoreRow{
+				Keyname:   t.Name,
+				Algorithm: t.Algorithm,
+				Secret:    t.Secret,
+				Origin:    "config",
+				Owner:     "config",
+				Creator:   "config",
+			}); err != nil {
+				return err
+			}
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if existing.Origin == "config" {
+			if !tsigDetailsMatchRow(t, existing) {
+				if err := updateTsigKeystoreConfig(tx, t); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+		if !tsigDetailsMatchRow(t, existing) {
+			lgConfig.Warn("keys.tsig: key differs from stored api-origin row; not updated",
+				"key", name)
+		}
+	}
+
+	rows, err := listTsigKeystore(tx)
+	if err != nil {
+		return err
+	}
+	for _, row := range rows {
+		if row.Origin != "config" {
+			continue
+		}
+		if _, ok := want[row.Keyname]; !ok {
+			if err := deleteTsigKeystore(tx, row.Keyname); err != nil {
+				return err
+			}
+		}
+	}
+
+	txSuccess = true
+	return nil
 }
 
 // LoadTsigKeystoreInto replaces the in-memory store with every TsigKeystore row.

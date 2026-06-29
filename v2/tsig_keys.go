@@ -98,16 +98,12 @@ func (s *TsigKeyStore) ReplaceAll(keys []TsigDetails) {
 	}
 }
 
-// LoadTsigKeys (re)builds conf.Internal.TsigKeyStore from the keys: block. NOKEY
-// is reserved — a keys.tsig[] entry named NOKEY (any case) is an error, because
-// the sentinel must stay unambiguous — and every entry must be complete. Bad
-// entries are skipped (resilient-config rule: a single bad key does not abort
-// startup; zones referencing the skipped name are quarantined at parse), and the
-// first error is returned for loud logging. A missing keys: block is not an error.
-func (conf *Config) LoadTsigKeys() error {
-	store := NewTsigKeyStore()
+// collectValidConfigTsigKeys returns every complete, non-reserved keys.tsig entry.
+// Invalid entries are skipped; the first validation error is returned for logging.
+func collectValidConfigTsigKeys(tsig []TsigDetails) ([]TsigDetails, error) {
 	var firstErr error
-	for _, t := range conf.Keys.Tsig {
+	var out []TsigDetails
+	for _, t := range tsig {
 		if strings.EqualFold(t.Name, NOKEY) || strings.EqualFold(t.Name, BLOCKED) {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("keys.tsig: %q is a reserved sentinel (NOKEY/BLOCKED) and cannot be a key name", t.Name)
@@ -120,7 +116,40 @@ func (conf *Config) LoadTsigKeys() error {
 			}
 			continue
 		}
+		out = append(out, t)
+	}
+	return out, firstErr
+}
+
+// LoadTsigKeys loads the in-memory TSIG store. When KeyDB is available the cache
+// is built from the TsigKeystore table after syncing keys.tsig into the DB as
+// origin=config rows. Without KeyDB (CLI client) keys.tsig alone populates the cache.
+func (conf *Config) LoadTsigKeys() error {
+	if conf.Internal.KeyDB != nil {
+		return conf.loadTsigKeysFromDB()
+	}
+	return conf.loadTsigKeysFromYAML()
+}
+
+func (conf *Config) loadTsigKeysFromYAML() error {
+	entries, firstErr := collectValidConfigTsigKeys(conf.Keys.Tsig)
+	store := NewTsigKeyStore()
+	for _, t := range entries {
 		store.Add(t)
+	}
+	conf.Internal.TsigKeyStore = store
+	return firstErr
+}
+
+func (conf *Config) loadTsigKeysFromDB() error {
+	kdb := conf.Internal.KeyDB
+	entries, firstErr := collectValidConfigTsigKeys(conf.Keys.Tsig)
+	if err := kdb.SyncConfigTsigKeys(entries); err != nil {
+		return err
+	}
+	store := NewTsigKeyStore()
+	if err := kdb.LoadTsigKeystoreInto(store); err != nil {
+		return err
 	}
 	conf.Internal.TsigKeyStore = store
 	return firstErr
