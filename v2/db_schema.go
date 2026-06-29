@@ -80,7 +80,22 @@ published_at              TEXT DEFAULT '',
 active_at                 TEXT DEFAULT '',
 retired_at                TEXT DEFAULT '',
 active_seq                INTEGER,
-UNIQUE (zonename, keyid)
+	UNIQUE (zonename, keyid)
+)`,
+
+	// TsigKeystore holds global TSIG secrets (one row per key name). The in-memory
+	// TsigKeyStore is a read-through cache; this table is authoritative.
+	"TsigKeystore": `CREATE TABLE IF NOT EXISTS 'TsigKeystore' (
+id          INTEGER PRIMARY KEY,
+keyname     TEXT NOT NULL,
+algorithm   TEXT NOT NULL,
+secret      TEXT NOT NULL,
+origin      TEXT NOT NULL,
+owner       TEXT NOT NULL DEFAULT '',
+creator     TEXT DEFAULT '',
+created_at  TEXT DEFAULT '',
+comment     TEXT DEFAULT '',
+UNIQUE (keyname)
 )`,
 
 	// OutgoingSerials persists the outgoing SOA serial per zone.
