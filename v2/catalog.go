@@ -385,7 +385,7 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 				// Fail closed: a configured-but-undefined tsig_key must not silently
 				// downgrade to unsigned transfers. Skip the member until the key is
 				// defined (mirrors the static primary-key validation in ParseZones).
-				lg.Error("CATALOG: tsig_key not defined in keys.tsig, skipping zone (fail closed, not unsigned)", "key", configGroupConfig.TsigKey, "zone", zoneName, "group", member.MetaGroup)
+				lg.Error("CATALOG: tsig_key not defined (add via keys.tsig or keystore tsig), skipping zone (fail closed, not unsigned)", "key", configGroupConfig.TsigKey, "zone", zoneName, "group", member.MetaGroup)
 				skippedCount++
 				continue
 			}

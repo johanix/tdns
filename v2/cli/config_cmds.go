@@ -40,6 +40,7 @@ func NewConfigCmd(role string) *cobra.Command {
 		},
 	}
 
+	var force, interactive bool
 	reloadTsig := &cobra.Command{
 		Use:   "reload-tsig",
 		Short: "Reconcile keys.tsig into the TSIG keystore (config reload-tsig)",
@@ -50,7 +51,6 @@ overwrite all conflicts, or --interactive to prompt per conflict.`,
 			runReloadTsigCmd(role, force, interactive)
 		},
 	}
-	var force, interactive bool
 	reloadTsig.Flags().BoolVar(&force, "force", false, "overwrite all secret/algorithm conflicts with keys.tsig")
 	reloadTsig.Flags().BoolVar(&interactive, "interactive", false, "prompt per conflict before overwriting")
 

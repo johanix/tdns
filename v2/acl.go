@@ -90,7 +90,7 @@ func ValidateACL(acl []AclEntry, keyDefined func(string) bool) error {
 			return fmt.Errorf("acl entry %q: %w", e.Prefix, err)
 		}
 		if e.Key != BLOCKED && !keyDefined(e.Key) {
-			return fmt.Errorf("acl entry %q: unknown key %q (use a keys.tsig name, NOKEY, or BLOCKED)", e.Prefix, e.Key)
+			return fmt.Errorf("acl entry %q: unknown key %q (use a keys.tsig or keystore tsig name, NOKEY, or BLOCKED)", e.Prefix, e.Key)
 		}
 	}
 	return nil

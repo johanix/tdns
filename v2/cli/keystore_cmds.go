@@ -31,7 +31,7 @@ func NewKeystoreCmd(role string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "keystore",
 		Short: "Prefix command to access different features of the keystore",
-		Long: `The keystore holds SIG(0) and DNSSEC key pairs.
+		Long: `The keystore holds SIG(0), DNSSEC, and global TSIG keys.
 The CLI contains functions for listing, adding, deleting, and
 changing the state of keys.`,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -39,8 +39,127 @@ changing the state of keys.`,
 		},
 	}
 
-	c.AddCommand(newKeystoreSig0Cmd(role), newKeystoreDnssecCmd(role))
+	c.AddCommand(newKeystoreSig0Cmd(role), newKeystoreDnssecCmd(role), newKeystoreTsigCmd(role))
 	return c
+}
+
+func newKeystoreTsigCmd(role string) *cobra.Command {
+	var tsigName, tsigAlgo, tsigSecret, tsigOwner string
+	var tsigForce, tsigYes bool
+
+	c := &cobra.Command{
+		Use:   "tsig",
+		Short: "Manage global TSIG keys in the keystore",
+		Long: `Global TSIG keystore (no --zone). Keys are DB-backed with origin=api
+for keys created here; config keys are managed via keys.tsig.`,
+	}
+
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List TSIG keys (no secrets)",
+		Run: func(cmd *cobra.Command, args []string) {
+			tsigKeyMgmt(role, "list", tsigName, tsigAlgo, tsigSecret, tsigOwner, tsigForce)
+		},
+	}
+
+	add := &cobra.Command{
+		Use:   "add",
+		Short: "Add a TSIG key with a known secret",
+		Run: func(cmd *cobra.Command, args []string) {
+			tsigKeyMgmt(role, "add", tsigName, tsigAlgo, tsigSecret, tsigOwner, tsigForce)
+		},
+	}
+	add.Flags().StringVar(&tsigName, "name", "", "TSIG key name")
+	add.Flags().StringVar(&tsigAlgo, "algorithm", "hmac-sha256", "HMAC algorithm")
+	add.Flags().StringVar(&tsigSecret, "secret", "", "Base64-encoded secret")
+	add.Flags().StringVar(&tsigOwner, "owner", "api", "Owner label (default api)")
+	add.Flags().BoolVar(&tsigForce, "force", false, "Overwrite on secret/algorithm conflict")
+	add.MarkFlagRequired("name")
+	add.MarkFlagRequired("secret")
+
+	setowner := &cobra.Command{
+		Use:   "setowner",
+		Short: "Change owner on an api-origin TSIG key",
+		Run: func(cmd *cobra.Command, args []string) {
+			tsigKeyMgmt(role, "setowner", tsigName, tsigAlgo, tsigSecret, tsigOwner, tsigForce)
+		},
+	}
+	setowner.Flags().StringVar(&tsigName, "name", "", "TSIG key name")
+	setowner.Flags().StringVar(&tsigOwner, "owner", "", "New owner label")
+	setowner.MarkFlagRequired("name")
+	setowner.MarkFlagRequired("owner")
+
+	deleteCmd := &cobra.Command{
+		Use:   "delete",
+		Short: "Delete an api-origin TSIG key",
+		Run: func(cmd *cobra.Command, args []string) {
+			if !tsigYes {
+				fmt.Printf("Delete TSIG key %q? [y/N] ", tsigName)
+				var ans string
+				fmt.Scanln(&ans)
+				if ans != "y" && ans != "Y" && ans != "yes" {
+					fmt.Println("Aborted.")
+					return
+				}
+			}
+			tsigKeyMgmt(role, "delete", tsigName, tsigAlgo, tsigSecret, tsigOwner, tsigForce)
+		},
+	}
+	deleteCmd.Flags().StringVar(&tsigName, "name", "", "TSIG key name")
+	deleteCmd.Flags().BoolVarP(&tsigYes, "yes", "y", false, "Skip confirmation prompt")
+	deleteCmd.MarkFlagRequired("name")
+
+	c.AddCommand(list, add, setowner, deleteCmd)
+	return c
+}
+
+func tsigKeyMgmt(role, subcmd, name, algo, secret, owner string, force bool) {
+	data := tdns.KeystorePost{
+		Command:       "tsig-mgmt",
+		SubCommand:    subcmd,
+		TsigKeyname:   name,
+		TsigAlgorithm: algo,
+		TsigSecret:    secret,
+		Owner:         owner,
+		Force:         force,
+		Creator:       "tdns-cli",
+	}
+
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		fmt.Printf("Error creating API client: %v\n", err)
+		os.Exit(1)
+	}
+
+	tr, err := SendKeystoreCmd(api, data)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	if tr.Error {
+		fmt.Printf("Error from server: %s\n", tr.ErrorMsg)
+		os.Exit(1)
+	}
+
+	switch subcmd {
+	case "list":
+		var out, rows []string
+		if tdns.Globals.ShowHeaders {
+			out = append(out, "Name|Algorithm|Origin|Owner|Refs|Created")
+		}
+		for _, k := range tr.TsigKeys {
+			rows = append(rows, fmt.Sprintf("%s|%s|%s|%s|%d|%s",
+				k.Name, k.Algorithm, k.Origin, k.Owner, k.RefCount, k.Created))
+		}
+		sort.Strings(rows)
+		out = append(out, rows...)
+		fmt.Println(columnize.SimpleFormat(out))
+
+	default:
+		if tr.Msg != "" {
+			fmt.Println(tr.Msg)
+		}
+	}
 }
 
 func newKeystoreSig0Cmd(role string) *cobra.Command {
