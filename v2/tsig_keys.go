@@ -53,6 +53,9 @@ func (s *TsigKeyStore) Add(d TsigDetails) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.keys == nil {
+		s.keys = make(map[string]TsigDetails)
+	}
 	s.keys[dns.CanonicalName(d.Name)] = d // canonical (lowercase FQDN) key, matches the wire name
 }
 
@@ -80,6 +83,19 @@ func (s *TsigKeyStore) Names() map[string]bool {
 		out[n] = true
 	}
 	return out
+}
+
+// ReplaceAll swaps the cache contents for keys (used when loading from the DB).
+func (s *TsigKeyStore) ReplaceAll(keys []TsigDetails) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.keys = make(map[string]TsigDetails, len(keys))
+	for _, d := range keys {
+		s.keys[dns.CanonicalName(d.Name)] = d
+	}
 }
 
 // LoadTsigKeys (re)builds conf.Internal.TsigKeyStore from the keys: block. NOKEY

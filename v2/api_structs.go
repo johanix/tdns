@@ -32,20 +32,43 @@ type KeystorePost struct {
 	ParentState     uint8
 	Creator         string
 	Force           bool // commit destructive operation; otherwise dry-run (used by 'purge')
+	// TSIG keystore (tsig-mgmt); do not overload Algorithm uint8 above.
+	TsigKeyname   string `json:"tsigkeyname,omitempty"`
+	TsigAlgorithm string `json:"tsigalgorithm,omitempty"`
+	TsigSecret    string `json:"tsigsecret,omitempty"`
+	Owner         string `json:"owner,omitempty"`
+}
+
+type TsigKeyInfo struct {
+	Name      string `json:"name"`
+	Algorithm string `json:"algorithm"`
+	Origin    string `json:"origin"`
+	Owner     string `json:"owner"`
+	RefCount  int    `json:"refcount"`
+	Created   string `json:"created"`
+}
+
+// TsigCacheDelta records in-memory cache patches to apply after a successful DB
+// commit (§4). Not echoed on the API wire.
+type TsigCacheDelta struct {
+	Changed []string
+	Deleted []string
 }
 
 type KeystoreResponse struct {
-	AppName    string
-	Time       time.Time
-	Status     string
-	Zone       string
-	Dnskeys    map[string]DnssecKey // TrustAnchor
-	Sig0keys   map[string]Sig0Key
-	Algorithms []algorithms.AlgorithmInfo // populated by the "list-algorithms" command
-	Policies   []DnssecPolicyInfo         // populated by the "list-policies" command
-	Msg        string
-	Error      bool
-	ErrorMsg   string
+	AppName        string
+	Time           time.Time
+	Status         string
+	Zone           string
+	Dnskeys        map[string]DnssecKey // TrustAnchor
+	Sig0keys       map[string]Sig0Key
+	TsigKeys       []TsigKeyInfo              `json:"tsigkeys,omitempty"`
+	Algorithms     []algorithms.AlgorithmInfo // populated by the "list-algorithms" command
+	Policies       []DnssecPolicyInfo         // populated by the "list-policies" command
+	Msg            string
+	Error          bool
+	ErrorMsg       string
+	TsigCacheDelta *TsigCacheDelta `json:"-"`
 }
 
 // DnssecPolicyInfo is the wire-friendly projection of a DnssecPolicy that the
