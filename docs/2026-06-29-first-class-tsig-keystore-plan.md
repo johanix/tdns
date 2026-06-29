@@ -1,289 +1,440 @@
-# First-class TSIG keystore — plan (2026-06-29)
+# First-class TSIG keystore — implementation plan (consolidated 2026-06-29)
+
+Consolidates the original plan, the critical review
+([…-plan-review.md](./2026-06-29-first-class-tsig-keystore-plan-review.md)), and the
+follow-up design discussion into an implementation-ready spec. **All code refs are
+against `tsig-on-replication` @ `6dd2a2b`** and were re-verified (line numbers
+shifted since the review — e.g. `6dd2a2b` grew `dynamic_zones.go`).
 
 ## Summary
 
-Make TSIG keys **first-class, DB-backed keystore members**, managed the same way
-SIG(0) and DNSSEC keys already are (`Sig0KeyStore` / `DnssecKeyStore` tables, a
-`keystore` CLI group, the `KeystorePost`/`KeystoreResponse` API). Today TSIG keys
-live in an in-memory `map[name]TsigDetails` populated from the `keys.tsig` config
-block plus a side-channel `keys:` block in the dynamic-zones YAML file. That is
-inconsistent with every other key type, and the reload path has to rebuild the
-in-memory store from config and re-merge the dynamic keys (commit `bf53aef`,
-review finding #4), which leaves a small swap window.
+Make TSIG keys **first-class, DB-backed keystore members**, managed like SIG(0)
+and DNSSEC (`Sig0KeyStore`/`DnssecKeyStore` tables, the `keystore` CLI group, the
+`KeystorePost`/`KeystoreResponse` API). Today TSIG keys live in an in-memory
+`map[name]TsigDetails` populated from `keys.tsig` plus a side-channel `keys:` block
+in the dynamic-zones YAML — the only key type not in the DB. This work moves them
+into the DB with an explicit `origin`/`owner` model, a `keystore tsig` command set,
+in-place reconcile-on-reload, no auto-drop, and advisory reference counting.
 
-This plan replaces that with a single DB-backed store and a `keystore tsig`
-command set, plus a key model that distinguishes **how a key is managed**
-(`origin`) from **what it is for** (`owner`).
+Layered onto `tsig-on-replication` (PR #269 → `dynamic-zones-mgmt`).
 
-It is layered onto branch `tsig-on-replication` (PR #269 → base
-`dynamic-zones-mgmt`). **It supersedes the interim #4 reload fix** in `bf53aef`.
+## 0. Already landed in #269 (so the plan doesn't re-propose it)
 
-## 1. Current state (verified against the code)
+- **Multi-key inbound ACL** (`9f84831`): `matchACL` returns the **set** of approved
+  keys for a source (union of matching entries, N keys), `checkInboundTSIG` accepts
+  **any** of them. `v2/acl.go:40`, `v2/tsig_peer.go:139`. This **closes the old
+  "dual-key rotation ACL gap"** — rotation's remaining work is operational docs
+  only (§11), not inbound-verify code. *(Review #1.)*
+- **ACL validation on the dynamic load path** + **full modify rollback** (`6dd2a2b`):
+  `v2/dynamic_zones.go` LoadDynamicZoneFiles ValidateACL; ModifyDynamicZone restores
+  `oldZd` on persist failure.
+- **Inbound TSIG verify, signing, `allow-notify:`/`downstreams:` ACLs** (earlier #269).
 
-### TSIG keys today
-- `v2/tsig_keys.go`: `TsigKeyStore { mu; keys map[string]TsigDetails }`,
-  `TsigDetails {Name, Algorithm, Secret}`. In-memory only.
-- Read path (must keep working unchanged): `TsigKeyStore.Get/Has`, used by
-  `tsigKeyProvider.hmac` (inbound verify), `SignForPeer` (outbound sign),
-  `tsigKeyDefined` (config validation) — `v2/tsig_peer.go`, `v2/tsig_keys.go`.
-- Config keys: `LoadTsigKeys()` builds a fresh store from `conf.Keys.Tsig` and
-  swaps it in.
-- Dynamic keys: API `stageInlineTsigKey`/`commitStagedTsigKey` add to the store,
-  and the secret is persisted into the dynamic-zones YAML file's `keys:` block
-  (`getDynamicTsigKeysFromZones` / `loadDynamicTsigKeys`).
-- Reload (`ReloadConfig`, `bf53aef`): on a successful parse, `LoadTsigKeys()`
-  rebuilds config-only, then re-merges persisted dynamic keys. Correct but has a
-  brief window where the swapped-in store is config-only.
-- Catalog: a config group's `tsig_key` **references a key by name only**
-  (`catalog.go`, validated via `tsigKeyDefined`). It does **not** distribute key
-  material.
+## 1. Current state (verified, with refs)
 
-### How SIG(0)/DNSSEC keys are managed (the pattern to mirror)
-- DB: `v2/db.go` — `KeyDB { DB *sql.DB; … }`, `Tx`, `kdb.Begin(ctx)` /
-  `tx.Commit()` / `tx.Rollback()`.
-- Schema: `v2/db_schema.go` — `DefaultTables` map of `CREATE TABLE IF NOT EXISTS`;
-  `dbSetupTables()` applies them; `dbMigrateSchema()` adds later columns via
-  `ALTER TABLE ADD COLUMN`; `dbMigrateData()` runs one-shot data migrations.
-- CRUD: `v2/keystore.go` — `Sig0KeyMgmt(tx, kp)`, `DnssecKeyMgmt(ctx, tx, kp)`;
-  `INSERT OR REPLACE` / `SELECT … rows.Scan` / `DELETE`, with a per-key in-memory
-  cache invalidated on write.
-- CLI: `v2/cli/keystore_cmds.go` — `keystore sig0 {…}` and `keystore dnssec {…}`
-  subtrees; handler builds a `KeystorePost` and `SendKeystoreCmd`s it.
-- API: `v2/apihandler_funcs.go` `APIkeystore`; `v2/api_structs.go`
-  `KeystorePost{Command, SubCommand, …}` / `KeystoreResponse`. Dispatch on
-  `Command` (`"sig0-mgmt"`, `"dnssec-mgmt"`), transaction opened per request.
-- Secret/key generation: `v2/sig0_utils.go` `GenerateKeyMaterial` (asymmetric,
-  via miekg/dns + `crypto/rand`). **No TSIG secret generator exists yet.**
+| Thing | Ref |
+|------|-----|
+| In-memory `TsigKeyStore{mu; keys map[string]TsigDetails}` + `Get/Has/Add/Delete` | `v2/tsig_keys.go:22,33,44,50,61` |
+| `TsigDetails{Name,Algorithm,Secret}` | `v2/structs.go:862` |
+| Hot path: `tsigKeyProvider` / `SignForPeer` | `v2/tsig_peer.go:31,100` |
+| `LoadTsigKeys()` builds store from `conf.Keys.Tsig`, swaps; rejects NOKEY/BLOCKED | `v2/tsig_keys.go:91,97` |
+| `validateTsigKeySpec` / `knownTsigAlgo` / `tsigKeyDefined` | `v2/tsig_keys.go:142,131,115` |
+| Reload: rebuild config keys then re-merge dynamic YAML keys | `v2/config.go:554,568,571` |
+| Dynamic keys persisted in dynamic-zones YAML `keys:` block | `v2/dynamic_zones.go:316` (`DynamicConfigFile`), `:432,509,536` |
+| Inline `stageInlineTsigKey`/`commitStagedTsigKey` | `v2/dynamic_zones.go:667,690` |
+| Provision/Modify dynamic zone | `v2/dynamic_zones.go:710,891` |
+| Catalog `tsig_key` name-only, validated via `tsigKeyDefined` | `v2/catalog.go:383,384`; `ConfigGroupConfig.TsigKey` `config.go:395`; `Catalog.ConfigGroups` `config.go:371` |
+| CLI client keystore `ParseTsigKeys(*KeyConf)` → `Globals.TsigKeys` | `v2/tsig_utils.go:10,21` |
+| KeyDB + `Tx` + `Begin` | `v2/db.go:283,63`; CRUD `v2/keystore.go:18,302` |
+| Schema map + table DDL | `v2/db_schema.go:11,51,68`; `dbSetupTables/dbMigrateSchema/dbMigrateData` `v2/db.go:97,164,120` |
+| `keystore` CLI tree (`sig0`/`dnssec`, verbs incl. `generate`,`purge`) | `v2/cli/keystore_cmds.go:48,160,84,196,369` |
+| `APIkeystore` (commit in `defer` after handler) | `v2/apihandler_funcs.go:20,35,37,42,59,69` |
+| `KeystorePost{Algorithm uint8, KeyType string, Force bool}` / `KeystoreResponse{Dnskeys,Sig0keys}` | `v2/api_structs.go:18,26,25,34,37,42,43` |
+| `/keystore` behind shared API key + TLS, Auth+Agent only | `v2/apirouters.go:19,99,100` |
+| Boot order (see §5) | `v2/main_initfuncs.go:123,130,215,228` |
 
-### Important structural difference
-SIG(0)/DNSSEC keys are **per-zone**, keyed `(zonename, keyid)`, and their CLI
-takes `--zone`. **TSIG keys are global** — one secret per name, zone-independent.
-So `keystore tsig` operates on a **global key namespace** (no `--zone`). This is a
-deliberate UX departure from `keystore sig0/dnssec`.
+**Structural difference:** SIG(0)/DNSSEC are **per-zone** (`(zonename,keyid)` PK,
+`--zone` CLI). TSIG is **global** (one secret per name). `keystore tsig` therefore
+takes **no `--zone`** — a deliberate UX departure.
 
-## 2. The key model: `origin` vs `owner`
+## 2. Key model: `origin` vs `owner`
 
-A TSIG key carries two orthogonal attributes (decided after design discussion):
+A TSIG key carries two orthogonal attributes:
 
-- **`origin`** — *how the key is managed*. Values today: `config` | `api`.
-  - `config`: declared in `keys.tsig` YAML; the DB row is a materialization,
-    reconciled against the YAML on reload. **Not** CLI-deletable (edit YAML).
-  - `api`: created/managed via the API/CLI; the DB row is authoritative. **Is**
-    CLI-deletable and purgeable.
-  - (Catalog does not create keys today, so `origin` is never `catalog`. If a
-    future key-distribution mechanism *pushes* secrets, it adds an `origin` value.)
+- **`origin`** — *how it's managed*: `config` | `api`.
+  - `config`: declared in `keys.tsig`; DB row is a materialization, reconciled
+    against the YAML on reload (§6). Not CLI-deletable (edit YAML).
+  - `api`: created/managed via the API/CLI; DB row authoritative. CLI-deletable,
+    purgeable.
+  - Catalog does **not** create keys, so `origin` is never `catalog`.
+- **`owner`** — *what it's for*: an **open string** (seed `config|api|catalog`).
+  Governs how a **zero-reference** key is interpreted and audit grouping. Defaults
+  to `origin`. **Mutable** post-creation via `keystore tsig setowner` (api-origin)
+  or the YAML `owner:` field (config-origin) — never delete+recreate.
 
-- **`owner`** — *what the key is for / who consumes it*. An **open enum**:
-  `config` | `api` | `catalog` | `{future key-dist infra}` | …. Operator-assignable.
-  Governs how a **zero-reference** key is interpreted and how keys are grouped for
-  audit. Defaults to `origin` when unspecified.
-
-They are orthogonal. The case that proves it:
-
-| `origin` (managed via) | `owner` (for) | meaning |
+| `origin` | `owner` | meaning |
 |---|---|---|
-| config | config | plain static key for local config zones |
-| api | api | plain dynamic key for local API zones |
-| **config** | **catalog** | declared in `keys.tsig`, reconciled on reload — but its purpose is catalog consumers, so **0 local refs is expected**, never flagged or purged as an orphan |
+| config | config | static key for config zones |
+| api | api | dynamic key for local API zones |
+| **config** | **catalog** | declared in `keys.tsig`, reconciled — but for catalog consumers, so 0 local refs is expected, never an orphan |
 | api | catalog | created via API, earmarked for catalog consumers |
 
-### Consequences for management
-- **No auto-drop.** A zero-reference key is valid for *both* config and dynamic
-  keys — it may be pre-provisioned for an upcoming `zone add` or for future
-  catalog consumers. Removal is always explicit.
-- **Reference counting is advisory only** — shown in `list`, warned on `delete`;
-  never an automatic deletion trigger.
-- **`delete`** gates on `origin`: only `origin=api` keys are CLI-deletable.
-- **`purge`** is strict: candidate = `origin=api` **and** `owner=api` **and**
-  zero references. Anything owned by catalog/agent/future, or `origin=config`, is
-  never an orphan and is never purged.
-- **Revocation:** a `config` key → remove from `keys.tsig` + reload (reconcile
-  drops it). An `api` key → `keystore tsig delete`/`purge`. Restart always rebuilds
-  from the authoritative sources (YAML + DB), so it is the universal reset.
+**Consequences:**
+- **No auto-drop.** A zero-ref key is valid for both kinds (may be pre-provisioned
+  for an upcoming `zone add` or for catalog consumers). Removal is always explicit.
+- **Reference counting is advisory only** (§8) — shown in `list`; never an automatic
+  deletion trigger. *(Resolves review #3: §2 now says "advisory/shown", not
+  "warned on delete"; delete is **refused** while referenced — §9.)*
+- **Secrets immutable by default; override is break-glass `--force`** (§7).
+- **`delete`/`purge` gate on `origin=api`**; `purge` additionally on `owner=api` and
+  zero references.
 
-## 3. Storage: the `TsigKeyStore` table
+## 3. Storage: the `TsigKeystore` table
 
-New table in `db_schema.go`, name-keyed (global), modelled on the existing key
-tables but without the per-zone / rollover-state machinery:
+New table in `v2/db_schema.go` `DefaultTables` (`:11`), modelled on
+`Sig0KeyStore`/`DnssecKeyStore` (`:51,68`) but name-keyed and without the per-zone /
+rollover-state machinery:
 
 ```sql
-CREATE TABLE IF NOT EXISTS 'TsigKeyStore' (
+CREATE TABLE IF NOT EXISTS 'TsigKeystore' (
     id          INTEGER PRIMARY KEY,
-    keyname     TEXT NOT NULL,          -- canonical (lowercase FQDN), matches the wire name
-    algorithm   TEXT NOT NULL,          -- "hmac-sha256", "hmac-sha512", …
-    secret      TEXT NOT NULL,          -- base64 (std) raw HMAC secret
-    origin      TEXT NOT NULL,          -- 'config' | 'api'        (management authority)
-    owner       TEXT NOT NULL,          -- open enum               (purpose; defaults to origin)
-    creator     TEXT,                   -- audit: which tool/user created it (cf. Sig0/Dnssec)
+    keyname     TEXT NOT NULL,   -- canonical (lowercase FQDN), matches the wire name
+    algorithm   TEXT NOT NULL,   -- "hmac-sha256", …
+    secret      TEXT NOT NULL,   -- base64(std) raw HMAC secret
+    origin      TEXT NOT NULL,   -- 'config' | 'api'
+    owner       TEXT NOT NULL DEFAULT '',  -- open string; '' resolves to origin at read
+    creator     TEXT DEFAULT '', -- audit: tool/user (cf. Sig0/Dnssec 'creator')
     created_at  TEXT DEFAULT '',
     comment     TEXT DEFAULT '',
     UNIQUE (keyname)
 )
 ```
 
-- `keyname` is canonicalised (`dns.CanonicalName`) on write and lookup, matching
-  the in-memory store today.
-- `origin` drives reconcile + deletability; `owner` drives zero-ref interpretation
-  + audit (both stored explicitly so cleanup has ground truth even when invariants
-  break — a deliberate decision).
-- `creator` is the existing audit notion (e.g. `"tdns-cli"`), kept distinct from
-  `origin`/`owner`.
+- **Naming (review #13):** SQL table is **`TsigKeystore`** (lowercase `s`) to avoid
+  colliding with the Go type `TsigKeyStore` (the in-memory cache). Logs/CRUD refer
+  to the table as `TsigKeystore`, the cache as `TsigKeyStore`.
+- `keyname` canonicalised via `dns.CanonicalName` on every write/lookup (as the
+  cache does today, `tsig_keys.go:38,55`).
+- `created_at` text timestamp like `DnssecKeyStore.published_at` (`db_schema.go`).
+  Stamp at insert (`time.Now().Format(...)`).
 
-The in-memory `TsigKeyStore` becomes a **read-through cache** of this table:
-populated from the DB at load, write-through on every mutation. All HMAC
-sign/verify paths keep reading it via `Get/Has` (no change to the hot path).
+## 4. In-memory cache & lock discipline (review #14)
 
-## 4. Lifecycle & reconcile
+The Go `TsigKeyStore` (`tsig_keys.go:22`) stays as the **read-through cache**; the
+hot path (`Get`/`Has`, `tsigKeyProvider`, `SignForPeer`) is unchanged. New rule for
+all mutating paths:
 
-- **Startup:** open KeyDB (table auto-created), load all rows into the in-memory
-  cache, then **sync `keys.tsig` → DB** (upsert each as `origin=config`, with the
-  declared `owner`), and reconcile (drop `origin=config` rows no longer in the
-  YAML). `api` rows are authoritative and loaded as-is. Catalog `tsig_key`
-  references are validated (name must resolve to a defined key).
-- **Reload:** reconcile `origin=config` rows against `keys.tsig` **in place** under
-  one lock — drop removed, upsert changed — leaving `origin=api` rows untouched. No
-  store swap → **no window** (this is the proper fix that supersedes `bf53aef`).
-- **Mutations** (`create`/`add`/`import`/`delete`/`purge`): DB write inside a `Tx`,
-  then update the in-memory cache. `delete`/`purge` honour the `origin`/`owner`
-  rules above.
-- **Config-key secret duplication:** a `config` key's secret lives in both the YAML
-  (the operator's editable declaration) and the DB (the materialized runtime store
-  + origin/owner metadata). Intentional: YAML declares, DB materialises.
+- **Update the cache only AFTER a successful DB commit.** `APIkeystore` commits in a
+  `defer` *after* the handler returns (`apihandler_funcs.go:37–46`), so the handler
+  (`TsigKeyMgmt`) must **not** mutate the cache inline — instead it returns the
+  changed rows and the cache is refreshed in the `defer` on `tx.Commit()` success
+  (mirroring how SIG(0)/DNSSEC invalidate their caches on write). Simplest concrete
+  approach: collect changed/deleted key names during the tx; after commit succeeds,
+  re-`Get` those rows from the DB into the cache (or `Delete` from the cache).
+- **Config reconcile** (§6) runs under `confMu` (as `ReloadConfig` already does,
+  `config.go:555`) and mutates the cache under `TsigKeyStore.mu` (`tsig_keys.go:23`)
+  — it must not interleave a half-built set into the live cache; reconcile in place
+  (add/update/delete diff), never swap.
 
-## 5. Reference counting (advisory)
+## 5. Boot order (review #9) — explicit
 
-A key's reference count = number of live references to its (canonical) name across
-**every** field that holds a TSIG key name:
+Today (`v2/main_initfuncs.go`): `LoadTsigKeys()` (`:123`) runs **before**
+`InitializeKeyDB()` (`:130`), then `ParseZones()` (`:215`), then
+`LoadDynamicZoneFiles()` (`:228`). For a DB-backed store this **must change**:
 
-- `ZoneData.PrimariesConf[].Key`, `ZoneData.Upstreams[].Key`, `ZoneData.Notify[].Key`
-  (all `PeerConf.Key`)
-- `ZoneData.AllowNotify[].Key`, `ZoneData.Downstreams[].Key` (both `AclEntry.Key`)
-- catalog config groups' `tsig_key`
+1. **`InitializeKeyDB()`** — move to run **before** TSIG load; creates the
+   `TsigKeystore` table via `dbSetupTables` (`db.go:97`).
+2. **`LoadTsigKeys()` (rewritten)** — was "build map from `conf.Keys.Tsig` + swap"
+   (`tsig_keys.go:91`). Now:
+   a. load every `TsigKeystore` row into the cache (incl. `origin=api`);
+   b. **sync `conf.Keys.Tsig` → DB** as `origin=config` and **reconcile** (drop
+      `origin=config` rows no longer in the YAML; upsert changed — §6);
+   c. cache now reflects **config ∪ api**.
+3. **`ParseZones()`** — validates references via `tsigKeyDefined` (`tsig_keys.go:115`,
+   used at `parseconfig.go:674` and ACL checks `:738,744`). Because step 2 loaded
+   `api` rows into the cache, **static zones referencing an api-origin key validate
+   correctly** instead of quarantining.
+4. **`LoadDynamicZoneFiles()`** — runs the one-time **legacy migration** (§13) first
+   (import any YAML `keys:` block → DB, rewrite file), then enqueues dynamic zones.
+   Their keys are already in the cache from step 2, so the old per-zone key re-merge
+   (`config.go:571`, `loadDynamicTsigKeys`) is **removed**.
 
-Used only to inform `list` and to warn on `delete`. Never triggers deletion.
+## 6. Reconcile-on-reload — three-mode, no silent overwrite (review #10)
 
-## 6. CLI: `keystore tsig {list, create, import, add, delete, purge}`
+`ReloadConfig` (`config.go:554`) currently rebuilds config keys then re-merges the
+dynamic YAML keys (`:568,571`). New behaviour (replaces that block) applies the
+**same three-mode model as `import`/`purge`** (§9) — a config reload must **never
+silently overwrite an existing keystore secret**:
 
-Global (no `--zone`). Mirrors the `keystore sig0/dnssec` command/handler structure.
+- **Default reload** (a full `config reload`, signal, or `config reload-tsig` with no
+  flags), on a **successful** parse only (guard present, `config.go:557`),
+  reconciles `origin=config` keys **in place** under `TsigKeyStore.mu` (no swap → no
+  window):
+  - **Apply the safe subset:** add new config keys (`origin=config`); drop config
+    keys removed from the YAML **that are unreferenced**; identical secret = no-op.
+  - **Withhold + flag (WARN), apply nothing for these:**
+    1. a config key whose **secret/algorithm differs** from the stored row (api- or
+       config-origin) — *no silent overwrite*; and
+    2. a config key **removed** from the YAML but **still referenced** by a live
+       zone (§8) — a referenced key can't be dropped (§9 delete rule).
+- **`config reload-tsig --force | --interactive`** resolves the withheld
+  **secret-conflicts** (case 1): `--force` overwrites all (sets `origin=config`,
+  secret←YAML); `--interactive` prompts per conflict (`overwrite "X"? [y/N]`). This
+  is the dedicated command — sibling of the existing **`config reload-zones`**
+  (`cli/config_cmds.go:34`) — that carries the flags the signal-driven reload can't.
+- Case 2 (removed-but-referenced) is **always** withheld — no `--force` escape;
+  the operator must remove the zone's reference first (consistent with delete). The
+  zone keeps serving with the old key until then.
+- **Collision precedence is thus "config wins via the explicit override", not
+  silently:** declaring `foo` in `keys.tsig` when an `origin=api foo` exists with a
+  different secret is a case-1 conflict — withheld + flagged on default reload,
+  taken over (→ `origin=config`) only on `config reload-tsig --force`/`--interactive`.
+  (Identical secret: quiet no-op; the row's `origin` flips to `config` since config
+  now declares it.)
+
+## 7. Immutability + override (no silent replace)
+
+- A key's secret/algorithm is **not changed in place by default**. On `add`/`import`
+  a name collision with a **differing** secret/algorithm is **withheld and reported**
+  (WARN: *"key X has a different secret/algorithm than the stored key; not updated —
+  use --force / --interactive"*); an **identical** re-add is an idempotent no-op.
+- **`--force`** is the **break-glass** in-place override (see the three-mode model,
+  §9). The **preferred** way to roll a key is the **dual-key rotation procedure**
+  (§11), which needs no overwrite.
+- **Behaviour change to call out (review #2):** today `commitStagedTsigKey`
+  (`dynamic_zones.go:690`) **always overwrites** an existing name, and CLI help
+  advertises rotation via `zone modify` (`v2/cli/zone_cmds.go`). Under this plan the
+  inline `zone add/modify --tsig-*` path becomes **create-if-absent / error on
+  differing secret** (§14). Update CLI help and the test that currently *expects*
+  overwrite+rollback (`v2/tsig_dynzone_test.go` `TestStageInlineTsigKey`).
+
+## 8. Reference counting (advisory) (review #15)
+
+Refcount of a key = number of live references to its canonical name across **every**
+field that holds a TSIG key name. Scan the live **`Zones` map** (not just parsed
+config) plus catalog config:
+
+- `PeerConf.Key` in `ZoneData.PrimariesConf` / `Upstreams` / `Notify`
+  (`structs.go:208`).
+- `AclEntry.Key` in `ZoneData.AllowNotify` / `Downstreams` (`acl.go:25`).
+- Catalog: `conf.Catalog.ConfigGroups[].TsigKey` (`config.go:371,395`) — config-level,
+  not per-zone.
+
+Rules:
+- **Dedupe `Upstreams` vs `PrimariesConf`** (the same key appears in both after
+  resolve): count **distinct (zone, field-site)** edges, and report **# zones
+  referencing the name** in `list` (a single human-meaningful number).
+- Static zones in main config are in the `Zones` map after `ParseZones`; scanning
+  `Zones` covers them. (No separate `conf.Zones` scan needed at list time.)
+- Used only for `list` display and the `delete` refuse-while-referenced gate (§9).
+- **Atomicity caveat (delete).** The refuse-while-referenced check scans the live
+  `Zones` map, then deletes. The keystore delete holds `confMu` (§4), **but the
+  dynamic-zone mutators (`ProvisionDynamicZone`/`ModifyDynamicZone`/`RemoveDynamicZone`,
+  `dynamic_zones.go:710,891` + delete) do NOT take `confMu` today** — verified;
+  they mutate the thread-safe `Zones` map directly. So a concurrent
+  `zone add … --primary-key K` can start referencing `K` between the check and the
+  delete. The outcome is a **recoverable dangling reference** (the new zone fails to
+  sign / quarantines on its next reload; fixed by re-adding `K` or repointing the
+  zone) — an accepted **low-severity admin-vs-admin race**, no security impact.
+  Fully closing it would require the dynamic-zone mutators to also acquire `confMu`;
+  **out of scope here** (call out if/when those mutators are revisited).
+
+## 9. CLI: `keystore tsig { list, generate, import, add, setowner, delete, purge }`
+
+Global (no `--zone`). Mirrors `keystore sig0/dnssec` structure
+(`cli/keystore_cmds.go:48,160`). **`generate`, not `create`** (review #7 — matches
+existing UX, `:84,196`).
 
 | Subcommand | Flags | Behaviour |
 |---|---|---|
-| `list` | — | name, algorithm, origin, owner, #refs, created. |
-| `create` | `--name`, `--algorithm`, `[--owner]` | server **generates** the secret (random bytes sized to the algorithm, base64); user supplies no secret. `origin=api`. |
-| `import` | `--file`, `[--owner]` | bring in an existing key from a standard format (see §9). `origin=api`. |
-| `add` | `--name`, `--algorithm`, `--secret` \| `--secret-file`, `[--owner]` | add with a known secret. `--secret-file` preferred; `--secret` kept (exposed; see [#3 decision]). `origin=api`. |
-| `delete` | `--name`, `[--force]` | only `origin=api`; warn/refuse if referenced (override with `--force`). |
-| `purge` | `[--force]` | drop all `origin=api` **and** `owner=api` **and** zero-ref keys. Never touches config/catalog/other-owner keys. |
+| `list` | — | name, algorithm, origin, owner, #refs, created. Never the secret. |
+| `generate` | `--name`, `--algorithm`, `[--owner]` | server generates the secret (§12). `origin=api`. |
+| `import` | `--file`, `--format bind\|nsd`, `[--owner]`, `[--interactive]`, `[--force]`, `[-v]` | extract keys from a config file; three-mode conflicts (§10). `origin=api`. |
+| `add` | `--name`, `--algorithm`, `--secret`\|`--secret-file`, `[--owner]`, `[--force]` | add with a known secret. `--secret-file` preferred ([[additive-hardening-keep-cli-paths]]); conflict = error unless `--force` (§7). `origin=api`. |
+| `setowner` | `--name`, `--owner` | change `owner` (api-origin only; config via YAML `owner:`). Mirrors `setstate`. |
+| `delete` | `--name`, `[-y]` | api-origin only. **Refused while referenced** by any zone (no override; remove the reference first). `-y` skips the confirm prompt. |
+| `purge` | `[--interactive]`, `[--force]`, `[-y]` | **dry-run by default** (lists candidates, deletes nothing); candidates = `origin=api` ∧ `owner=api` ∧ zero-ref; three-mode (§10). |
 
-Config-origin keys appear in `list` but are not `add/delete/purge`-able here (manage
-via `keys.tsig`).
+**Three-mode model (the consistency rule for *every* multi-key op — `import`,
+`purge`, and config-key reconcile-on-reload, §6):**
+- **default** → apply only the **unambiguous / non-destructive** subset; **withhold**
+  anything that would clobber/delete an existing key; report; exit non-zero if
+  anything withheld. (`import`: imports new keys, withholds conflicts.
+  `purge`: every candidate is a delete ⇒ nothing in the safe subset ⇒ pure
+  **dry-run**, consistent with DNSSEC purge. **config reload** (§6): add new /
+  drop-removed-unreferenced config keys, withhold secret-conflicts + removed-but-
+  referenced; the dedicated **`config reload-tsig`** command carries the flags.)
+- **`--force`** → apply everything, no prompts.
+- **`--interactive`** → prompt per withheld item (`overwrite "X"? [y/N]` /
+  `purge "X" (api, 0 refs)? [y/N]`). Requires a TTY; error in non-interactive
+  contexts. Mutually exclusive with `--force`.
 
-## 7. API: extend `KeystorePost` / `KeystoreResponse`
+`purge` reuses the existing **`KeystorePost.Force`** dry-run plumbing
+(`api_structs.go:34`, the DNSSEC purge pattern `keystore.go:677`,
+`cli/keystore_cmds.go:369`'s "Dry-run by default … --force").
 
-- New `Command: "tsig-mgmt"`, `SubCommand` ∈ `list|create|import|add|delete|purge`.
-- Request fields (add to `KeystorePost` or a focused struct): `Keyname`,
-  `Algorithm` (string, e.g. `hmac-sha256`), `Secret`, `Owner`, `Force`.
-  `Secret` is request-only, never echoed back.
-- Handler `kdb.TsigKeyMgmt(tx, kp)` in `keystore.go`, dispatched from `APIkeystore`.
-- Response carries the key list (name, algorithm, origin, owner, refcount,
-  created) — **never the secret**.
-- **Authz:** same gate as the existing `keystore sig0/dnssec` mutations. *(Confirm
-  what that gate is and that it is sufficient for secret-bearing ops.)*
+## 10. `import` — formats, extraction, three-mode conflicts (review #21)
 
-## 8. Secret generation (`create`)
+- **Formats:** `--format bind` (`key "name" { algorithm …; secret "…"; };`) and
+  `--format nsd` (`key:` blocks). Explicit `--format` (auto-detect is a later
+  nicety). `tsig-keygen` emits the BIND form.
+- **Extractor, not a config parser:** scans the input for key declarations, ignores
+  everything else — a bare snippet *or* a whole `named.conf`/`nsd.conf` are the same
+  input. Does **not** follow `include`/macros. (95% case: inline key blocks.)
+- **Batch:** one file → 0..N keys.
+- **Three-mode conflicts (§9):** default imports new + identical-no-op, withholds
+  conflicts (report, exit non-zero); `--interactive` prompts per conflict; `--force`
+  overwrites all. Conflict detection is **server-side** (CLI lacks the stored secret
+  to compare), so `--interactive` is a **two-phase round-trip**: (1) server applies
+  the safe subset and returns the conflicting names; (2) CLI prompts, re-submits the
+  approved subset with force. The prompt names the key only (no secrets shown).
+- **`-v`** lists every found key with its disposition (`imported` / `unchanged` /
+  `conflict`). This requires per-key disposition in the API response (§11).
+- Reject reserved names `NOKEY`/`BLOCKED` (§12, review #17).
 
-New helper (e.g. `tsig_keys.go`):
+## 11. API wire model (review #12) — exact
+
+Extend `KeystorePost` (`api_structs.go:18`) and `KeystoreResponse` (`:37`). **Do not
+overload `Algorithm uint8`** (`:26`, a DNSSEC codepoint).
+
+- `KeystorePost` additions: `TsigKeyname string`, `TsigAlgorithm string`
+  (`"hmac-sha256"`), `TsigSecret string` (request-only, never echoed), `Owner string`,
+  `Interactive bool`. Reuse existing `Force bool` (`:34`) and `Command/SubCommand`.
+- New `Command: "tsig-mgmt"`, `SubCommand ∈ {list,generate,import,add,setowner,delete,purge}`.
+  Handler **`kdb.TsigKeyMgmt(tx, kp)`** in `v2/keystore.go` (next to `Sig0KeyMgmt`
+  `:18` / `DnssecKeyMgmt` `:302`), dispatched from `APIkeystore` (`apihandler_funcs.go:59,69`).
+- `KeystoreResponse` additions (alongside `Dnskeys`/`Sig0keys` maps `:42,43`):
+  - `TsigKeys []TsigKeyInfo` — list/result. `TsigKeyInfo{Name, Algorithm, Origin,
+    Owner, RefCount int, Created string}` — **no secret**.
+  - `TsigImport []TsigKeyDisposition` — per-key import outcome.
+    `TsigKeyDisposition{Name, Status string /* imported|unchanged|conflict */}`.
+- Authz: inherited `/keystore` gate — shared API key (`apiKeyAuthMiddleware`
+  `apirouters.go:19`) over TLS, Auth+Agent (`:99,100`); identical to sig0/dnssec.
+  **No mTLS** (server cert only); cross-cutting hardening, its own change (§16).
+
+## 12. Secret generation (`generate`)
+
+New helper in `v2/tsig_keys.go`:
 
 ```go
 func GenerateTsigSecret(algorithm string) (string, error) // base64(std) of N random bytes
 ```
 
-`crypto/rand`, N sized to the HMAC algorithm's natural block/output:
+`crypto/rand`, N sized to the HMAC output (sha1→20, sha224→28, sha256→32,
+sha384→48, sha512→64; matches `tsig-keygen`). Validate `algorithm` via
+`knownTsigAlgo` (`tsig_keys.go:131`). **Reject reserved names** `NOKEY`/`BLOCKED` in
+`generate`/`add`/`import` and the DB insert path, reusing `validateTsigKeySpec`
+(`tsig_keys.go:142,147`) — same rule `LoadTsigKeys` enforces (`:97`) (review #17).
 
-| algorithm | bytes |
-|---|---|
-| hmac-sha1 | 20 |
-| hmac-sha224 | 28 |
-| hmac-sha256 | 32 |
-| hmac-sha384 | 48 |
-| hmac-sha512 | 64 |
+## 13. Migration (review #11) — placement + idempotency
 
-(Matches `tsig-keygen` conventions.)
+`6dd2a2b`-era code persists dynamic keys in the dynamic-zones YAML `keys:` block
+(`DynamicConfigFile`, `dynamic_zones.go:316`; written by `writeDynamicConfigFile`
+`:432`, read by `loadDynamicTsigKeys` `:536`). One-shot, automatic migration.
 
-## 9. Wiring the existing paths onto the keystore
+- **Placement:** **not** `dbMigrateData` (`db.go:120` is SQL-only, no `Config`).
+  Put it in a startup hook inside **`LoadDynamicZoneFiles`** (`dynamic_zones.go:153`),
+  which already has `conf`, the dynamic-config mutex, and `dynamicConfigBroken`
+  (`:335`) handling.
+- **Steps:** if the loaded `DynamicConfigFile.Keys` is non-empty, import each into
+  `TsigKeystore` as `origin=api, owner=api` (idempotent — skip names already in the
+  store, e.g. config keys), then **rewrite the dynamic-zones file once** via
+  `writeDynamicConfigFile` (which, post-migration, emits no `keys:` block) so
+  plaintext secrets don't linger in two places. On a *successful* import only; if
+  import fails, leave the block for a retry next start.
+- **Idempotent detection:** "already migrated" ⇔ the file has no `keys:` block. No
+  separate marker needed.
+- Low risk: the YAML `keys:` block is new on this branch; nothing in production
+  depends on it.
 
-- **`keys.tsig` (config):** synced to DB as `origin=config` at load + reconciled on
-  reload (§4). Gains an optional per-entry `owner:` field (so a config key can be
-  declared `owner: catalog`).
-- **Inline `zone add/modify --tsig-*`:** becomes a thin wrapper that creates/adds
-  an `origin=api, owner=api` key (via the keystore path) and references it from the
-  zone. **Create-if-absent guard:** supplying a secret for an existing name with a
-  *different* value is an **error** (rotation is an explicit `zone modify` /
-  `keystore tsig add`), to avoid silently rotating a name shared by other zones
-  (keys are name-keyed / global, NSD-style).
-- **Catalog `tsig_key`:** unchanged — a name reference, validated against the
-  store. No key material created. (`owner=catalog` keys are how an operator
-  pre-provisions for catalog consumers.)
-- **Retire** the dynamic-zones YAML `keys:` block once keys live in the DB (§11
-  migration).
+## 14. Wiring the existing paths
 
-## 10. Implementation steps (staged commits)
+- **`keys.tsig` (config):** synced to DB `origin=config` + reconciled on reload
+  (§5/§6). Gains an optional per-entry `owner:` field on `TsigDetails`
+  (`structs.go:862`) — `yaml:"owner"`, validated as a free string; empty ⇒ defaults
+  to `origin`; an *invalid* (non-string/none today) `owner` never blocks the key
+  (advisory metadata). Stored in the DB on first sync and updated on reconcile when
+  the YAML changes. *(Review #16.)*
+- **Inline `zone add/modify --tsig-*`:** thin wrapper that creates/adds an
+  `origin=api, owner=api` key via the keystore path and references it. **Create-if-
+  absent / error on differing secret** (§7) — the behaviour change in `commitStagedTsigKey`
+  (`dynamic_zones.go:690`); update CLI help and `tsig_dynzone_test.go`.
+- **Catalog `tsig_key`:** unchanged — a name reference validated against the store
+  (`catalog.go:383,384`); creates no key. (`owner=catalog` keys are how an operator
+  pre-provisions.)
+- **Retire** the dynamic-zones YAML `keys:` block (§13 migration); drop the reload
+  re-merge (`config.go:571`).
+- **Operator-facing strings (review #18):** errors that say `keys.tsig` (e.g.
+  `parseconfig.go:674`, `catalog.go:388`) should also reference the keystore /
+  `keystore tsig`. Sweep these in step 9/CLI.
+- **CLI client parser (review #19, §12 F):** `ParseTsigKeys` (`tsig_utils.go:10`)
+  already takes `*KeyConf` (same shape as the server's `keys.tsig`), so the **type
+  is already shared**; the divergence is **strictness** — `ParseTsigKeys` silently
+  skips incomplete entries with no reserved-name/algo checks, while `LoadTsigKeys`
+  uses `validateTsigKeySpec`. Unify by having `ParseTsigKeys` call the same
+  `validateTsigKeySpec` (`tsig_keys.go:142`). CLI keys stay **file-based** in
+  `tdns-cli.yaml` (no DB connection — short-lived client). Own, mostly-orthogonal
+  step.
 
-Each step builds, passes `go test -race ./...`, and is `go vet`-clean; committed
-separately.
+## 15. Implementation steps (staged commits)
+
+Each builds, passes `go test -race ./...`, `go vet`-clean; one commit each.
+Reconciled with §9 (review #6).
 
 | # | Step | Risk | ~LOC |
 |---|---|---|---|
-| 1 | `TsigKeyStore` table in `db_schema.go` + creation/migration scaffolding | Low | ~40 |
-| 2 | DB CRUD `TsigKeyMgmt` + in-memory store as read-through cache (load-from-DB, write-through) | Med | ~200 |
-| 3 | Startup: load from DB + sync `keys.tsig`→DB (`origin=config`) with reconcile; replace `LoadTsigKeys` build+swap | Med | ~120 |
-| 4 | Reload: in-place config reconcile (supersede `bf53aef`); drop the YAML re-merge + window | Med | ~60 |
-| 5 | Reference-count scan helper (all key-name fields + catalog) | Low | ~50 |
-| 6 | API: `tsig-mgmt` command + handler dispatch | Low–Med | ~120 |
-| 7 | CLI: `keystore tsig {list,add,import,delete,purge}` | Med | ~200 |
-| 8 | `create` + `GenerateTsigSecret` | Low | ~60 |
-| 9 | Rewire inline `zone add/modify --tsig-*` onto the keystore + create-if-absent guard | Med | ~120 |
-| 10 | Migrate YAML-persisted dynamic keys → DB; retire the `keys:` block | Med | ~90 |
-| 11 | `owner` end-to-end: `keys.tsig` `owner:`, `--owner`, list/purge logic | Low–Med | ~80 |
-| 12 | Tests across the above | — | ~400 |
+| 1 | `TsigKeystore` table in `db_schema.go` + creation; reserved-name/`validateTsigKeySpec` on DB insert | Low | ~50 |
+| 2 | DB CRUD `TsigKeyMgmt` + cache-after-commit discipline (§4); in-memory store loads from DB | Med | ~220 |
+| 3 | Boot reorder (§5): KeyDB before `LoadTsigKeys`; `LoadTsigKeys` = load DB + sync `keys.tsig` (`main_initfuncs.go:123,130`) | Med | ~120 |
+| 4 | Reload reconcile in place, three-mode/no-silent-overwrite (§6); drop YAML re-merge; add **`config reload-tsig [--force\|--interactive]`** (sibling of `config reload-zones`, `cli/config_cmds.go:34`) | Med | ~130 |
+| 5 | Reference-count scan over `Zones` + catalog groups (§8) | Low | ~70 |
+| 6 | API: `tsig-mgmt` command, `KeystorePost`/`KeystoreResponse` TSIG fields + `TsigKeyInfo`/`TsigKeyDisposition` (§11) | Med | ~140 |
+| 7 | CLI `keystore tsig {list, add, setowner, delete}` + operator-string sweep (§14) | Med | ~200 |
+| 8 | `generate` + `GenerateTsigSecret` (§12) | Low | ~70 |
+| 9 | `import` extractor (BIND/NSD) + three-mode (default/`--interactive`/`--force`) + `-v` (§10) | Med–High | ~250 |
+| 10 | `purge` three-mode (reuse `Force` dry-run) (§9) | Low | ~70 |
+| 11 | Inline `zone add/modify --tsig-*` → create-if-absent (§7/§14); update CLI help + `tsig_dynzone_test.go` | Med | ~120 |
+| 12 | Legacy migration hook in `LoadDynamicZoneFiles`; retire YAML `keys:` block (§13) | Med | ~110 |
+| 13 | `owner` end-to-end: `keys.tsig owner:`, `--owner`, `setowner`, list/purge logic (§2/§9) | Low–Med | ~90 |
+| 14 | CLI `ParseTsigKeys` strictness unification (§14, review #19) | Low | ~40 |
+| 15 | Tests across all of the above | — | ~600 |
 
-Rough total: ~1.1–1.4k LOC incl. tests. (Sequencing keeps a working build at each
-step: steps 1–4 make the store DB-backed without changing behaviour; 5–8 add the
-management surface; 9–11 rewire and migrate.)
+Rough total ~2.2k LOC incl. tests (tests bumped from the original ~400 estimate —
+review #18 polish — given import extractors, reconcile, migration, refcount,
+immutability, three-mode). **Sequencing keeps a working build:** steps 1–4 make the
+store DB-backed with **no behaviour change** *provided* migration + inline path stay
+on old semantics until steps 11–12 (state this explicitly in each commit).
 
-## 11. Migration
+## 16. Open / deferred
 
-Existing branches persist dynamic TSIG keys in the dynamic-zones YAML `keys:`
-block (from `bf53aef`). One-shot migration:
+- **mTLS** — server has TLS, CLI uses the API key alone (no client cert). API-wide
+  hardening (`apirouters.go:19`), its own change. *(Review #20: SQLite holds
+  plaintext TSIG secrets — consistent with SIG(0)/DNSSEC private keys today; one
+  line, accepted.)*
+- **`comment` field (review #22):** column exists; v1 sets only `creator`
+  (`"tdns-cli"` / API caller). `comment` populated by an optional later `--comment`
+  flag; omit from v1.
+- **Agent app-type scope (review #23):** `/keystore` is on Auth **and** Agent
+  (`apirouters.go:99`). `keystore tsig` ops are available on both for consistency
+  with sig0/dnssec; whether tdns-agent meaningfully *uses* TSIG keys is out of scope
+  (no behaviour gated on it here).
+- **`getDynamicTsigKeysFromZones` walks primaries only** (`dynamic_zones.go:509`):
+  after the YAML `keys:` block is retired (§13) this function is **removed**; keys
+  referenced only from `allow-notify`/`downstreams` must pre-exist in the store
+  anyway (they're never persisted to dynamic YAML). Footnote, no action.
 
-- On first start with the new code, if the dynamic-zones YAML carries a `keys:`
-  block, import each into `TsigKeyStore` as `origin=api, owner=api` (idempotent;
-  skip names already present from config), then stop writing/reading that block.
-- `dbMigrateData()` is the natural home for the DB side; the YAML side is a
-  read-once-then-ignore.
-- No production deployments depend on the YAML `keys:` block yet (it is new on this
-  feature branch), so this is low-risk.
+## 17. Rotation (operational — no code)
 
-## 12. Open decisions (to confirm before / during implementation)
+The dual-key procedure, using existing primitives (the multi-key ACL is already in
+the code, §0):
 
-1. **`import` format** — proposed: BIND `key "name" { algorithm …; secret "…"; };`
-   (named.conf snippet — the natural interchange when peering with BIND/NSD).
-   Optionally also `dnssec-keygen` `Khmac…` files. *Pick one to start.*
-2. **`owner` assignment surface** — `keys.tsig[].owner:` for config keys, `--owner`
-   for CLI; default `owner = origin`. Confirm the value set we seed
-   (`config|api|catalog`) and that it is a free string (open enum).
-3. **Migration trigger** — automatic on first start (proposed) vs an explicit
-   `keystore tsig import-legacy` command.
-4. **Authz** — confirm the existing keystore mutation gate and that it is adequate
-   for secret-bearing TSIG ops.
-5. **Catalog** — confirmed for now: references names only, does **not** distribute
-   secrets. (If that changes later, it adds an `origin` value and a reconcile
-   source; out of scope here.)
+1. `keystore tsig generate/add/import` a **new** key.
+2. Add it to the relevant ACL(s) **alongside** the old — `downstreams:` for AXFR,
+   `allow-notify:` for NOTIFY — so the server accepts **either** (N-key,
+   `matchACL` union `acl.go:40`).
+3. Migrate clients/secondaries to sign with the new key (flip `primaries[].key`).
+4. When all use the new key, remove the old from the ACL, then `keystore tsig delete`
+   it (now unreferenced).
 
-## 13. Relationship to PR #269
-
-- #269 ships the on-the-wire TSIG machinery (sign/verify on replication) and the
-  interim reload fix (`bf53aef`).
-- This work folds onto the same branch (per decision) and **replaces** the interim
-  reload fix with the DB-backed in-place reconcile (step 4). Until step 4 lands,
-  `bf53aef` remains correct (self-healing, tiny window).
+`--force` in-place replacement (§7) exists as a break-glass alternative, not the
+recommended path.
