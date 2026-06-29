@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"strings"
@@ -208,6 +209,33 @@ func knownTsigAlgo(algo string) bool {
 		return true
 	}
 	return false
+}
+
+// GenerateTsigSecret returns a base64-encoded random secret sized for algorithm.
+func GenerateTsigSecret(algorithm string) (string, error) {
+	if !knownTsigAlgo(algorithm) {
+		return "", fmt.Errorf("tsig algorithm %q is not a supported HMAC algorithm", algorithm)
+	}
+	var n int
+	switch dns.CanonicalName(algorithm) {
+	case dns.HmacSHA1:
+		n = 20
+	case dns.HmacSHA224:
+		n = 28
+	case dns.HmacSHA256:
+		n = 32
+	case dns.HmacSHA384:
+		n = 48
+	case dns.HmacSHA512:
+		n = 64
+	default:
+		return "", fmt.Errorf("tsig algorithm %q is not a supported HMAC algorithm", algorithm)
+	}
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate tsig secret: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(b), nil
 }
 
 // validateTsigKeySpec checks an inline (API-supplied) TSIG key before it enters

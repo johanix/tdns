@@ -387,7 +387,7 @@ note if anything diverged from the plan.
 | **Branch** | `feat/tsig-first-class` (cut from `tsig-on-replication` tip when work starts) |
 | **Merge target** | `tsig-on-replication` (PR #269 stack) |
 | **Started** | 2026-06-29 (`feat/tsig-first-class`) |
-| **Overall** | in progress (step 8) |
+| **Overall** | in progress (step 9) |
 
 **Commit workflow (per step):** finish the step → `go test -race ./...` + `go vet` clean
 (compile via test/build) → **stop and report** (“step N ready”) so you can review or
@@ -407,8 +407,8 @@ Reconciled with §9 (review #6).
 | 4 | Reload reconcile in place, three-mode/no-silent-overwrite (§6); **`config reload-tsig`** CLI + API; **keep** legacy YAML re-merge on reload until step 12 | Med | ~140 | done (`d9f56d3`) |
 | 5 | Reference-count scan over `Zones` + catalog groups (§8) | Low | ~70 | done (`35aa8ed`) |
 | 6 | API: `tsig-mgmt` command, `KeystorePost`/`KeystoreResponse` TSIG fields + `TsigKeyInfo`/`TsigKeyDisposition` (§11) | Med | ~140 | done (`530d0c6`) |
-| 7 | CLI `keystore tsig {list, add, setowner, delete}` + operator-string sweep (§14) | Med | ~200 | done |
-| 8 | `generate` + `GenerateTsigSecret` (§12) | Low | ~70 | pending |
+| 7 | CLI `keystore tsig {list, add, setowner, delete}` + operator-string sweep (§14) | Med | ~200 | done (`4a86dc5`) |
+| 8 | `generate` + `GenerateTsigSecret` (§12) | Low | ~70 | done |
 | 9 | `import` extractor (BIND/NSD) + three-mode (default/`--interactive`/`--force`) + `-v` (§10) | Med–High | ~250 | pending |
 | 10 | `purge` three-mode (reuse `Force` dry-run) (§9) | Low | ~70 | pending |
 | 11 | Inline `zone add/modify --tsig-*` → create-if-absent (§7/§14); update CLI help + `tsig_dynzone_test.go` | Med | ~120 | pending |

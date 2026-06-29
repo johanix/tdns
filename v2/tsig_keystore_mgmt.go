@@ -66,6 +66,25 @@ func (kdb *KeyDB) TsigKeyMgmt(conf *Config, tx *Tx, kp KeystorePost) (*KeystoreR
 			return resp, err
 		}
 
+	case "generate":
+		algo := kp.TsigAlgorithm
+		if algo == "" {
+			algo = "hmac-sha256"
+		}
+		secret, err := GenerateTsigSecret(algo)
+		if err != nil {
+			return resp, err
+		}
+		kp.TsigAlgorithm = algo
+		kp.TsigSecret = secret
+		if kp.TsigKeyname == "" {
+			return resp, fmt.Errorf("generate requires a TSIG key name")
+		}
+		if err := kdb.tsigKeyMgmtAdd(conf, tx, kp, resp); err != nil {
+			return resp, err
+		}
+		resp.Msg = fmt.Sprintf("TSIG key %q generated (%s)", kp.TsigKeyname, algo)
+
 	case "setowner":
 		name := kp.TsigKeyname
 		if name == "" {

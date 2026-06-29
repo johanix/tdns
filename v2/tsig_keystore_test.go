@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"testing"
 )
 
@@ -115,6 +116,40 @@ func TestLoadTsigKeystoreInto(t *testing.T) {
 	}
 	if !store.Has("a.") || !store.Has("b.") {
 		t.Fatalf("expected both keys loaded, names=%v", store.Names())
+	}
+}
+
+func TestGenerateTsigSecret(t *testing.T) {
+	s, err := GenerateTsigSecret("hmac-sha256")
+	if err != nil {
+		t.Fatalf("GenerateTsigSecret: %v", err)
+	}
+	raw, err := base64.StdEncoding.DecodeString(s)
+	if err != nil || len(raw) != 32 {
+		t.Fatalf("got len %d err=%v", len(raw), err)
+	}
+	if _, err := GenerateTsigSecret("md5"); err == nil {
+		t.Fatal("expected error for md5")
+	}
+}
+
+func TestTsigKeyMgmtGenerate(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	store := NewTsigKeyStore()
+	resp, err := kdb.TsigKeyMgmt(nil, nil, KeystorePost{
+		SubCommand:    "generate",
+		TsigKeyname:   "gen.",
+		TsigAlgorithm: "hmac-sha256",
+		Creator:       "test",
+	})
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	if err := ApplyTsigCacheDelta(store, kdb, resp.TsigCacheDelta); err != nil {
+		t.Fatalf("delta: %v", err)
+	}
+	if !store.Has("gen.") {
+		t.Fatal("generated key not in cache after delta")
 	}
 }
 

@@ -77,6 +77,18 @@ for keys created here; config keys are managed via keys.tsig.`,
 	add.MarkFlagRequired("name")
 	add.MarkFlagRequired("secret")
 
+	generate := &cobra.Command{
+		Use:   "generate",
+		Short: "Generate a new TSIG key and add it to the keystore",
+		Run: func(cmd *cobra.Command, args []string) {
+			tsigKeyMgmt(role, "generate", tsigName, tsigAlgo, tsigSecret, tsigOwner, tsigForce)
+		},
+	}
+	generate.Flags().StringVar(&tsigName, "name", "", "TSIG key name")
+	generate.Flags().StringVar(&tsigAlgo, "algorithm", "hmac-sha256", "HMAC algorithm")
+	generate.Flags().StringVar(&tsigOwner, "owner", "api", "Owner label (default api)")
+	generate.MarkFlagRequired("name")
+
 	setowner := &cobra.Command{
 		Use:   "setowner",
 		Short: "Change owner on an api-origin TSIG key",
@@ -109,7 +121,7 @@ for keys created here; config keys are managed via keys.tsig.`,
 	deleteCmd.Flags().BoolVarP(&tsigYes, "yes", "y", false, "Skip confirmation prompt")
 	deleteCmd.MarkFlagRequired("name")
 
-	c.AddCommand(list, add, setowner, deleteCmd)
+	c.AddCommand(list, add, generate, setowner, deleteCmd)
 	return c
 }
 
