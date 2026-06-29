@@ -408,7 +408,7 @@ Reconciled with §9 (review #6).
 | 5 | Reference-count scan over `Zones` + catalog groups (§8) | Low | ~70 | done (`35aa8ed`) |
 | 6 | API: `tsig-mgmt` command, `KeystorePost`/`KeystoreResponse` TSIG fields + `TsigKeyInfo`/`TsigKeyDisposition` (§11) | Med | ~140 | done (`530d0c6`) |
 | 7 | CLI `keystore tsig {list, add, setowner, delete}` + operator-string sweep (§14) | Med | ~200 | done (`4a86dc5`) |
-| 8 | `generate` + `GenerateTsigSecret` (§12) | Low | ~70 | done |
+| 8 | `generate` + `GenerateTsigSecret` (§12) | Low | ~70 | done (`e690cd5`) |
 | 9 | `import` extractor (BIND/NSD) + three-mode (default/`--interactive`/`--force`) + `-v` (§10) | Med–High | ~250 | pending |
 | 10 | `purge` three-mode (reuse `Force` dry-run) (§9) | Low | ~70 | pending |
 | 11 | Inline `zone add/modify --tsig-*` → create-if-absent (§7/§14); update CLI help + `tsig_dynzone_test.go` | Med | ~120 | pending |
