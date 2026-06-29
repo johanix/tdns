@@ -53,7 +53,7 @@ type Config struct {
 	Zones        []ZoneConf                 `yaml:"zones"`
 	Templates    []ZoneConf                 `yaml:"templates"`
 	Dnssec       DnssecConf                 `yaml:"dnssec" mapstructure:"dnssec"`
-	Keys         KeyConf
+	Keys         KeyConf                    `yaml:"keys" mapstructure:"keys"`
 	Db           DbConf
 	Registrars   map[string][]string
 	Log          LogConf
@@ -463,7 +463,8 @@ type InternalDnsConf struct {
 	ResignQ             chan *ZoneData     // the names of zones that should be kept re-signed should be sent into this channel
 	RRsetCache          *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
 	ImrEngine           *Imr
-	Scanner             *Scanner // Scanner instance for async job tracking
+	Scanner             *Scanner      // Scanner instance for async job tracking
+	TsigKeyStore        *TsigKeyStore // name->secret store for replication TSIG (Improvement 2)
 }
 
 // InternalConf holds DNS-internal state (channels, engine references).
@@ -556,6 +557,20 @@ func (conf *Config) ReloadConfig() (string, error) {
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
+	}
+	// Rebuild the TSIG key store ONLY after a successful parse (a failed reload
+	// must not swap in a half-parsed config), then RE-MERGE the persisted
+	// dynamic/API keys. LoadTsigKeys repopulates from conf.Keys.Tsig only, so
+	// without the re-merge a reload would silently drop API-created keys and break
+	// dynamic secondaries' next signed SOA/AXFR/NOTIFY lookup. Config keys win
+	// (loadDynamicTsigKeys skips names already defined).
+	if err == nil {
+		if kerr := conf.LoadTsigKeys(); kerr != nil {
+			lgConfig.Error("TSIG keys: config error on reload (affected keys skipped)", "err", kerr)
+		}
+		if cf, derr := conf.loadDynamicConfigFile(); derr == nil && cf != nil && cf.Keys != nil {
+			conf.loadDynamicTsigKeys(cf.Keys.Tsig)
+		}
 	}
 	Globals.App.ServerConfigTime = time.Now()
 	return "Config reloaded.", err

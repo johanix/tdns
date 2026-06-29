@@ -30,6 +30,33 @@ end with none of Improvement 2's code. Improvement 2 is then layered on with **n
 change and no re-provisioning** of zones added before it, because Improvement 1 already uses the
 final primary/key syntax (the NOKEY model, §5.B0).
 
+## Implementation status (2026-06-28) — Improvement 2 (§6) COMPLETE
+
+All nine §6 steps are implemented on branch `tsig-on-replication` (one commit per
+step; each builds, passes `go test -race ./...`, and is `go vet`-clean):
+
+| Step | Commit | Note |
+|------|--------|------|
+| 1 keys: store | `ce5edcd` | name→secret `TsigKeyStore`, NOKEY/BLOCKED reserved |
+| 2 ip-spec ACL | `a11b0fb`,`05ca2a8` | `net/netip`; BLOCKED supersedes, first-match-wins |
+| — helpers | `946486d` | keystore-backed `TsigProvider`, `SignForPeer`, `peerIP` |
+| 3 SOA probe sign | `0437828` | `DoTransfer` per-attempt `up.Key` |
+| 4 AXFR/IXFR sign | `f58c205` | `ZoneTransferIn` |
+| 6 outbound NOTIFY sign | `7890be5` | `SendNotify`; threads `conf` (tdns-mp deferred-break) |
+| **5+7 inbound verify** | `d68acff` | NOTIFY(SOA) `allow-notify` + AXFR `downstreams`; one provider on the auth `dns.Server` does verify + RFC 8945 response signing. **Combined** because they share all wiring. |
+| 8 catalog wiring | `1a92b0d` | `tsig_key` → `primaries[].key`; false "applied" log deleted |
+| 9 API/CLI + lifecycle | `5c9f771` | inline `tsig_name/secret/algo` on `zone add`/`modify`, upsert + **persist** to the dynamic config file's `keys:` block (survives restart) |
+
+**Operator-visible behaviour change (hard cutover, step 7):** an empty
+`downstreams:` ACL now **denies all AXFR/IXFR** (tdns previously served transfers
+to anyone). Every zone that should serve transfers needs an explicit
+`downstreams:` after deploy. See §11 migration.
+
+**Deferred (per this plan):** ACL flags on the API (`--allow-notify`/`--downstreams`
+are static-config-only in v1); TSIG key auto-drop (a never-dropped name store is
+acceptable). tdns-mp must update its 4 `Notifier` call sites + the `DoTransfer`/
+`FetchFromUpstream`/`ZoneTransferIn` callers when it bumps the pinned `tdns/v2`.
+
 ## Revision note (2026-06-28) — two model changes supersede parts of this plan
 
 1. **Multi-primary + hostname resolution** (separate PR; see

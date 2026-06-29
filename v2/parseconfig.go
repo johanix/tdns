@@ -669,9 +669,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 					secondaryOK = false
 					break
 				}
-				if p.Key != NOKEY {
+				if !conf.tsigKeyDefined(p.Key) {
 					lgConfig.Error("secondary zone primary references unknown key, zone in error state", "zone", zname, "key", p.Key)
-					zd.SetError(ConfigError, "unknown primary key %q (only NOKEY is valid until TSIG keys are configured)", p.Key)
+					zd.SetError(ConfigError, "unknown primary key %q (define it in keys.tsig or use NOKEY for no TSIG)", p.Key)
 					secondaryOK = false
 					break
 				}
@@ -728,6 +728,22 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			}
 		}
 		if legacyNotify {
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+
+		// allow-notify: / downstreams: ACL validation — every ip-spec must parse
+		// and every key must be NOKEY, BLOCKED, or a defined keys.tsig name.
+		// A bad ACL quarantines just this zone (same rule as the primary check).
+		if err := ValidateACL(zconf.AllowNotify, conf.tsigKeyDefined); err != nil {
+			lgConfig.Error("zone allow-notify ACL invalid, zone in error state", "zone", zname, "err", err)
+			zd.SetError(ConfigError, "allow-notify: %v", err)
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+		if err := ValidateACL(zconf.Downstreams, conf.tsigKeyDefined); err != nil {
+			lgConfig.Error("zone downstreams ACL invalid, zone in error state", "zone", zname, "err", err)
+			zd.SetError(ConfigError, "downstreams: %v", err)
 			broken_zones = append(broken_zones, zname)
 			continue
 		}
@@ -1069,6 +1085,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				Primaries:     resolvedPrimaries,
 				ZoneStore:     zonestore,
 				Notify:        zconf.Notify,
+				AllowNotify:   zconf.AllowNotify,
+				Downstreams:   zconf.Downstreams,
+				ConfigUpdate:  true, // config-bearing: lets reload clear removed ACLs
 				Zonefile:      zconf.Zonefile,
 				Options:       options,
 				UpdatePolicy:  policy,

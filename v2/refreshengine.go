@@ -245,6 +245,8 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								zd.Upstreams = clonePeerConfs(zr.Primaries)
 							}
 							zd.Notify = normalizePeerAddrs(zr.Notify)
+							zd.AllowNotify = zr.AllowNotify
+							zd.Downstreams = zr.Downstreams
 							zd.Zonefile = zr.Zonefile
 							zd.ZoneType = zr.ZoneType
 							zd.Options = zr.Options
@@ -309,8 +311,18 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// notify addresses, upstream, zonefile, zone store, options, update policy, DNSSEC policy, etc.
 						// Only update fields that are actually set in ZoneRefresher (non-zero/non-empty values)
 						zd.mu.Lock()
-						// Update notify addresses only if provided
-						if zr.Notify != nil {
+						// Notify + ACLs. For a config-bearing refresher (reload),
+						// assign even when nil/empty so a config that REMOVES a notify
+						// list or an ACL actually clears it (empty downstreams => deny,
+						// empty allow-notify => fall back to primaries) instead of
+						// leaving stale permissions. A NOTIFY/refresh-only trigger
+						// (ConfigUpdate=false) carries none of these and must not touch
+						// them.
+						if zr.ConfigUpdate {
+							zd.Notify = normalizePeerAddrs(zr.Notify)
+							zd.AllowNotify = zr.AllowNotify
+							zd.Downstreams = zr.Downstreams
+						} else if zr.Notify != nil {
 							zd.Notify = normalizePeerAddrs(zr.Notify)
 						}
 						// Update primaries only if provided (config-bearing refresher).
@@ -577,6 +589,8 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						PrimariesConf:    primariesConf,
 						Upstreams:        upstreams,
 						Notify:           normalizePeerAddrs(zr.Notify),
+						AllowNotify:      zr.AllowNotify,
+						Downstreams:      zr.Downstreams,
 						Zonefile:         zr.Zonefile,
 						ZoneType:         zr.ZoneType,
 						Options:          zr.Options,
