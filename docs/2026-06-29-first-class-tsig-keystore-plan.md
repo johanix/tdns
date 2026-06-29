@@ -387,7 +387,7 @@ note if anything diverged from the plan.
 | **Branch** | `feat/tsig-first-class` (cut from `tsig-on-replication` tip when work starts) |
 | **Merge target** | `tsig-on-replication` (PR #269 stack) |
 | **Started** | 2026-06-29 (`feat/tsig-first-class`) |
-| **Overall** | in progress (step 11) |
+| **Overall** | in progress (step 12) |
 
 **Commit workflow (per step):** finish the step → `go test -race ./...` + `go vet` clean
 (compile via test/build) → **stop and report** (“step N ready”) so you can review or
@@ -410,8 +410,8 @@ Reconciled with §9 (review #6).
 | 7 | CLI `keystore tsig {list, add, setowner, delete}` + operator-string sweep (§14) | Med | ~200 | done (`4a86dc5`) |
 | 8 | `generate` + `GenerateTsigSecret` (§12) | Low | ~70 | done (`e690cd5`) |
 | 9 | `import` extractor (BIND/NSD) + three-mode (default/`--interactive`/`--force`) + `-v` (§10) | Med–High | ~250 | done (`6e36a82`) |
-| 10 | `purge` three-mode (reuse `Force` dry-run) (§9) | Low | ~70 | done |
-| 11 | Inline `zone add/modify --tsig-*` → create-if-absent (§7/§14); update CLI help + `tsig_dynzone_test.go` | Med | ~120 | pending |
+| 10 | `purge` three-mode (reuse `Force` dry-run) (§9) | Low | ~70 | done (`3139fe6`) |
+| 11 | Inline `zone add/modify --tsig-*` → create-if-absent (§7/§14); update CLI help + `tsig_dynzone_test.go` | Med | ~120 | done |
 | 12 | Legacy migration hook in `LoadDynamicZoneFiles` (§13); retire YAML `keys:` block; **remove** startup `loadDynamicTsigKeys` and reload YAML re-merge — same commit | Med | ~120 | pending |
 | 13 | `owner` end-to-end: `keys.tsig owner:`, `--owner`, `setowner`, list/purge logic (§2/§9) | Low–Med | ~90 | pending |
 | 14 | CLI `ParseTsigKeys` strictness unification (§14, review #19) | Low | ~40 | pending |
