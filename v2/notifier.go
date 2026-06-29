@@ -142,6 +142,7 @@ func (zd *ZoneData) SendNotify(ctx context.Context, conf *Config, ntype uint16, 
 	var lastFailEDE []dns.EDNS0_EDE
 	haveLastFailRcode := false
 	var lastSetupErr error
+	attemptedTargets := 0
 
 	for i, dst := range targets {
 		// Honor cancellation between targets so daemon shutdown
@@ -167,6 +168,7 @@ func (zd *ZoneData) SendNotify(ctx context.Context, conf *Config, ntype uint16, 
 			lastSetupErr = serr
 			continue
 		}
+		attemptedTargets++
 		c.TsigProvider = provider
 
 		lgDns.Debug("sending NOTIFY message", "msg", m.String())
@@ -204,9 +206,11 @@ func (zd *ZoneData) SendNotify(ctx context.Context, conf *Config, ntype uint16, 
 			// context that's the whole point of Phase 4 plumbing.
 			return lastFailRcode, lastFailEDE, nil
 		}
-		// Every target was skipped because its TSIG sign setup failed (e.g. an
-		// unknown key): surface that real cause rather than a generic "no response".
-		if lastSetupErr != nil {
+		// No target was attempted at all because every one's TSIG sign setup failed
+		// (e.g. an unknown key): surface that real cause rather than a generic "no
+		// response". If at least one target WAS attempted (signed) but failed
+		// transport, fall through to the no-response error below.
+		if attemptedTargets == 0 && lastSetupErr != nil {
 			return dns.RcodeServerFailure, nil, fmt.Errorf("TSIG setup failed for NOTIFY target(s): %w", lastSetupErr)
 		}
 		// No response from any target at all → genuine transport

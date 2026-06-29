@@ -74,12 +74,16 @@ func TestStageInlineTsigKey(t *testing.T) {
 		t.Error("rollback should remove a newly-added key")
 	}
 
-	// Committing a name that already exists must NOT delete it on rollback.
+	// Committing over an existing name (a rotation) must, on rollback, RESTORE the
+	// previous secret — not delete the key and not leave the new (rejected) secret.
 	conf.Internal.TsigKeyStore.Add(TsigDetails{Name: "pre", Algorithm: "hmac-sha256", Secret: b64Secret16})
 	rb := conf.commitStagedTsigKey(&TsigDetails{Name: "pre", Algorithm: "hmac-sha256", Secret: "YWJjZGVmZ2hpamtsbW5vcA=="})
+	if d, _ := conf.Internal.TsigKeyStore.Get("pre"); d.Secret != "YWJjZGVmZ2hpamtsbW5vcA==" {
+		t.Errorf("commit should install the new secret before rollback, got %q", d.Secret)
+	}
 	rb()
-	if !conf.Internal.TsigKeyStore.Has("pre") {
-		t.Error("rollback must not delete a pre-existing key")
+	if d, ok := conf.Internal.TsigKeyStore.Get("pre"); !ok || d.Secret != b64Secret16 {
+		t.Errorf("rollback must restore the previous secret: got %q ok=%v, want %q", d.Secret, ok, b64Secret16)
 	}
 
 	// No inline name -> (nil, nil) no-op.

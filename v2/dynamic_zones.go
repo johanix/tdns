@@ -166,8 +166,15 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 	// Load dynamic config file
 	cf, err := conf.loadDynamicConfigFile()
 	if err != nil {
-		// Error already logged in loadDynamicConfigFile
-		return nil // Start with empty config rather than failing
+		// The file exists but is unreadable (corrupt). Don't crash — but mark the
+		// config broken so writeDynamicConfigFile refuses to overwrite it, and run
+		// with config zones only until the operator repairs it and restarts.
+		// (Error already logged in loadDynamicConfigFile.)
+		dynamicConfigMutex.Lock()
+		dynamicConfigBroken = true
+		dynamicConfigMutex.Unlock()
+		lg.Error("dynamic config unreadable: blocking dynamic-config writes until repaired and restarted (running with config zones only)", "path", conf.DynamicZones.ConfigFile)
+		return nil
 	}
 
 	// Load the persisted (API-created) TSIG keys into the store BEFORE enqueuing
@@ -306,6 +313,11 @@ var (
 	// Used by both loadDynamicConfigFile() and writeDynamicConfigFile() to prevent
 	// race conditions and ensure consistency between read/write operations
 	dynamicConfigMutex sync.Mutex
+	// dynamicConfigBroken is set (under dynamicConfigMutex) when the dynamic config
+	// file could not be parsed at startup. While set, writeDynamicConfigFile refuses
+	// to write, so an unreadable file is never overwritten with the (incomplete)
+	// in-memory state. Cleared only by a restart with a readable file.
+	dynamicConfigBroken bool
 )
 
 // zoneDataToZoneConf converts a ZoneData to ZoneConf for serialization
@@ -387,12 +399,14 @@ func (conf *Config) loadDynamicConfigFile() (*DynamicConfigFile, error) {
 		return nil, fmt.Errorf("failed to read dynamic config file %s: %v", conf.DynamicZones.ConfigFile, err)
 	}
 
-	// Try to parse YAML
+	// Try to parse YAML. A corrupt file must NOT be treated as empty: doing so
+	// makes startup forget every persisted zone/key, and the next dynamic write
+	// would then overwrite the file with that empty state — permanent data loss.
+	// Surface the error; the caller blocks dynamic-config writes until it's fixed.
 	var configFile DynamicConfigFile
 	if err := yaml.Unmarshal(data, &configFile); err != nil {
-		// File is corrupted - log error and return empty config
-		lg.Error("failed to parse dynamic config file, starting with empty config", "path", conf.DynamicZones.ConfigFile, "err", err)
-		return &DynamicConfigFile{}, nil
+		lg.Error("dynamic config file is corrupt; refusing to treat it as empty", "path", conf.DynamicZones.ConfigFile, "err", err)
+		return nil, fmt.Errorf("dynamic config file %s is corrupt: %w", conf.DynamicZones.ConfigFile, err)
 	}
 
 	lg.Info("loaded zones from dynamic config file", "count", len(configFile.Zones), "path", conf.DynamicZones.ConfigFile)
@@ -407,6 +421,13 @@ func (conf *Config) writeDynamicConfigFile(zones []ZoneConf, keys []TsigDetails)
 
 	dynamicConfigMutex.Lock()
 	defer dynamicConfigMutex.Unlock()
+
+	// Refuse to write if the file was unreadable at startup: the in-memory state is
+	// incomplete (it never loaded the persisted zones/keys), so writing now would
+	// clobber the file. Operator must repair/remove it and restart.
+	if dynamicConfigBroken {
+		return fmt.Errorf("refusing to write dynamic config: %s was corrupt at startup; repair or remove it and restart (avoids clobbering persisted zones/keys)", conf.DynamicZones.ConfigFile)
+	}
 
 	// Create config file structure
 	configFile := DynamicConfigFile{
@@ -655,10 +676,12 @@ func (conf *Config) commitStagedTsigKey(staged *TsigDetails) (rollback func()) {
 	if staged == nil {
 		return func() {}
 	}
-	existed := conf.Internal.TsigKeyStore.Has(staged.Name)
+	// Snapshot any pre-existing key BEFORE overwriting it, so a rollback restores
+	// the previous secret rather than leaving a failed rotation's new secret live.
+	prev, existed := conf.Internal.TsigKeyStore.Get(staged.Name)
 	conf.Internal.TsigKeyStore.Add(*staged)
 	if existed {
-		return func() {}
+		return func() { conf.Internal.TsigKeyStore.Add(prev) }
 	}
 	return func() { conf.Internal.TsigKeyStore.Delete(staged.Name) }
 }
@@ -911,12 +934,25 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	} else {
 		options[OptApiManagedZone] = true
 	}
+	// Carry forward the notify list and the allow-notify / downstreams ACLs from
+	// the old zone (copied under its lock into fresh slices — newZd must not share
+	// mutable state with oldZd). Otherwise a TSIG-only modify, which doesn't supply
+	// these, would erase persisted NOTIFY/transfer authorization policy.
+	oldZd.mu.Lock()
+	notify := append([]PeerConf(nil), oldZd.Notify...)
+	allowNotify := append([]AclEntry(nil), oldZd.AllowNotify...)
+	downstreams := append([]AclEntry(nil), oldZd.Downstreams...)
+	oldZd.mu.Unlock()
+
 	newZd := &ZoneData{
 		ZoneName:      name,
 		ZoneType:      oldZd.ZoneType,
 		ZoneStore:     MapZone,
 		PrimariesConf: primariesConf,
 		Upstreams:     upstreams,
+		Notify:        notify,
+		AllowNotify:   allowNotify,
+		Downstreams:   downstreams,
 		Logger:        log.Default(),
 		Options:       options,
 		Status:        ZoneStatusPending,
