@@ -140,6 +140,11 @@ func (kdb *KeyDB) TsigKeyMgmt(conf *Config, tx *Tx, kp KeystorePost) (*KeystoreR
 			return resp, err
 		}
 
+	case "purge":
+		if err := kdb.tsigKeyMgmtPurge(conf, tx, kp, resp); err != nil {
+			return resp, err
+		}
+
 	default:
 		return resp, fmt.Errorf("unknown tsig-mgmt subcommand: %q", kp.SubCommand)
 	}
@@ -273,5 +278,62 @@ func (kdb *KeyDB) tsigKeyMgmtImport(conf *Config, tx *Tx, kp KeystorePost, resp 
 		resp.Error = true
 		resp.ErrorMsg = fmt.Sprintf("%d key(s) withheld due to secret/algorithm conflict (use --force or --interactive)", conflicts)
 	}
+	return nil
+}
+
+func (kdb *KeyDB) tsigKeyMgmtPurge(conf *Config, tx *Tx, kp KeystorePost, resp *KeystoreResponse) error {
+	refCount := func(name string) int {
+		if conf == nil {
+			return 0
+		}
+		return conf.tsigKeyZoneRefCount(name)
+	}
+	rows, err := listTsigKeystore(kdb)
+	if err != nil {
+		return err
+	}
+	var candidates []TsigKeystoreRow
+	for _, row := range rows {
+		if row.Origin != "api" || tsigKeystoreEffectiveOwner(row) != "api" {
+			continue
+		}
+		if refCount(row.Keyname) > 0 {
+			continue
+		}
+		candidates = append(candidates, row)
+	}
+
+	resp.TsigKeys = make([]TsigKeyInfo, len(candidates))
+	for i, row := range candidates {
+		resp.TsigKeys[i] = tsigKeystoreRowToInfo(row)
+	}
+
+	if !kp.Force && len(kp.TsigOverwrite) == 0 {
+		resp.TsigCacheDelta = nil
+		resp.Msg = fmt.Sprintf("DRY RUN: would purge %d TSIG key(s) (origin=api, owner=api, zero refs). Pass --force to delete.", len(candidates))
+		return nil
+	}
+
+	toDelete := candidates
+	if !kp.Force && len(kp.TsigOverwrite) > 0 {
+		approved := make(map[string]bool, len(kp.TsigOverwrite))
+		for _, n := range kp.TsigOverwrite {
+			approved[dns.CanonicalName(n)] = true
+		}
+		toDelete = nil
+		for _, row := range candidates {
+			if approved[row.Keyname] {
+				toDelete = append(toDelete, row)
+			}
+		}
+	}
+
+	for _, row := range toDelete {
+		if err := deleteTsigKeystore(tx, row.Keyname); err != nil {
+			return err
+		}
+		resp.TsigCacheDelta.markDeleted(row.Keyname)
+	}
+	resp.Msg = fmt.Sprintf("Purged %d TSIG key(s)", len(toDelete))
 	return nil
 }

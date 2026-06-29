@@ -107,6 +107,20 @@ Default: import new keys and skip conflicts. --force overwrites all conflicts;
 	importCmd.Flags().BoolVarP(&tsigVerbose, "verbose", "v", false, "List per-key disposition")
 	importCmd.MarkFlagRequired("file")
 
+	purgeCmd := &cobra.Command{
+		Use:   "purge",
+		Short: "Delete unreferenced api-origin TSIG keys owned by api",
+		Long: `Dry-run by default: lists purge candidates (origin=api, owner=api,
+zero zone references) and deletes nothing. Pass --force to delete all
+candidates, or --interactive to prompt per key.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			tsigKeyPurge(role, tsigForce, tsigInteractive, tsigYes)
+		},
+	}
+	purgeCmd.Flags().BoolVar(&tsigForce, "force", false, "Actually delete; otherwise dry-run")
+	purgeCmd.Flags().BoolVar(&tsigInteractive, "interactive", false, "Prompt per purge candidate")
+	purgeCmd.Flags().BoolVarP(&tsigYes, "yes", "y", false, "Skip confirmation when used with --force")
+
 	setowner := &cobra.Command{
 		Use:   "setowner",
 		Short: "Change owner on an api-origin TSIG key",
@@ -139,7 +153,7 @@ Default: import new keys and skip conflicts. --force overwrites all conflicts;
 	deleteCmd.Flags().BoolVarP(&tsigYes, "yes", "y", false, "Skip confirmation prompt")
 	deleteCmd.MarkFlagRequired("name")
 
-	c.AddCommand(list, add, generate, importCmd, setowner, deleteCmd)
+	c.AddCommand(list, add, generate, importCmd, setowner, deleteCmd, purgeCmd)
 	return c
 }
 
