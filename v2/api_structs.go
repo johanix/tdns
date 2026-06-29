@@ -38,6 +38,10 @@ type KeystorePost struct {
 	TsigSecret    string `json:"tsigsecret,omitempty"`
 	Owner         string `json:"owner,omitempty"`
 	Interactive   bool   `json:"interactive,omitempty"`
+	TsigImportData   string   `json:"tsigimportdata,omitempty"`
+	TsigImportFormat string   `json:"tsigimportformat,omitempty"`
+	TsigOverwrite    []string `json:"tsigoverwrite,omitempty"`
+	TsigVerbose      bool     `json:"tsigverbose,omitempty"`
 }
 
 type TsigKeyInfo struct {

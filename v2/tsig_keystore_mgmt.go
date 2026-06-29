@@ -8,6 +8,8 @@ import (
 	"database/sql"
 	"fmt"
 	"time"
+
+	"github.com/miekg/dns"
 )
 
 // TsigKeyMgmt implements DB CRUD for the global TSIG keystore. Mutations return
@@ -133,6 +135,11 @@ func (kdb *KeyDB) TsigKeyMgmt(conf *Config, tx *Tx, kp KeystorePost) (*KeystoreR
 		resp.TsigCacheDelta.markDeleted(name)
 		resp.Msg = fmt.Sprintf("TSIG key %q deleted", name)
 
+	case "import":
+		if err := kdb.tsigKeyMgmtImport(conf, tx, kp, resp); err != nil {
+			return resp, err
+		}
+
 	default:
 		return resp, fmt.Errorf("unknown tsig-mgmt subcommand: %q", kp.SubCommand)
 	}
@@ -185,6 +192,86 @@ func (kdb *KeyDB) tsigKeyMgmtAdd(_ *Config, tx *Tx, kp KeystorePost, resp *Keyst
 	resp.TsigCacheDelta.markChanged(row.Keyname)
 	if resp.Msg == "" {
 		resp.Msg = fmt.Sprintf("TSIG key %q added", row.Keyname)
+	}
+	return nil
+}
+
+func overwriteApproved(name string, kp KeystorePost) bool {
+	if kp.Force {
+		return true
+	}
+	c := dns.CanonicalName(name)
+	for _, n := range kp.TsigOverwrite {
+		if dns.CanonicalName(n) == c {
+			return true
+		}
+	}
+	return false
+}
+
+func (kdb *KeyDB) tsigKeyMgmtImport(conf *Config, tx *Tx, kp KeystorePost, resp *KeystoreResponse) error {
+	if kp.TsigImportData == "" {
+		return fmt.Errorf("import requires tsig import data")
+	}
+	if kp.TsigImportFormat == "" {
+		return fmt.Errorf("import requires format (bind or nsd)")
+	}
+	keys, err := extractTsigImportKeys(kp.TsigImportData, kp.TsigImportFormat)
+	if err != nil {
+		return err
+	}
+	owner := kp.Owner
+	if owner == "" {
+		owner = "api"
+	}
+	creator := kp.Creator
+	if creator == "" {
+		creator = "api-request"
+	}
+
+	var imported, unchanged, conflicts int
+	resp.TsigImport = make([]TsigKeyDisposition, 0, len(keys))
+	for _, t := range keys {
+		disp := TsigKeyDisposition{Name: t.Name}
+		existing, err := getTsigKeystoreByName(tx, t.Name)
+		if err == sql.ErrNoRows {
+			row := TsigKeystoreRow{
+				Keyname: t.Name, Algorithm: t.Algorithm, Secret: t.Secret,
+				Origin: "api", Owner: owner, Creator: creator,
+			}
+			if err := insertTsigKeystore(tx, row); err != nil {
+				return err
+			}
+			resp.TsigCacheDelta.markChanged(t.Name)
+			disp.Status = "imported"
+			imported++
+		} else if err != nil {
+			return err
+		} else if tsigDetailsMatchRow(t, existing) {
+			disp.Status = "unchanged"
+			unchanged++
+		} else if overwriteApproved(t.Name, kp) {
+			row := TsigKeystoreRow{
+				Keyname: t.Name, Algorithm: t.Algorithm, Secret: t.Secret,
+				Origin: "api", Owner: owner, Creator: creator,
+			}
+			if err := overwriteTsigKeystore(tx, row); err != nil {
+				return err
+			}
+			resp.TsigCacheDelta.markChanged(t.Name)
+			disp.Status = "imported"
+			imported++
+		} else {
+			disp.Status = "conflict"
+			conflicts++
+		}
+		resp.TsigImport = append(resp.TsigImport, disp)
+	}
+
+	resp.Msg = fmt.Sprintf("import: %d imported, %d unchanged, %d conflict(s)", imported, unchanged, conflicts)
+	if conflicts > 0 {
+		resp.Error = true
+		resp.ErrorMsg = fmt.Sprintf("%d key(s) withheld due to secret/algorithm conflict (use --force or --interactive)", conflicts)
 	}
 	return nil
 }
