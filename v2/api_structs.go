@@ -237,19 +237,23 @@ type ZoneDsyncResponse struct {
 	UpdateResult UpdateResult
 }
 type ConfigPost struct {
-	Command string // status | sync | ...
+	Command       string   // status | reload | reload-zones | reload-tsig | ...
+	Force         bool     // reload-tsig: overwrite secret conflicts
+	TsigOverwrite []string `json:"tsigoverwrite,omitempty"` // reload-tsig --interactive: per-key overwrite
 }
 
 type ConfigResponse struct {
-	AppName    string
-	Time       time.Time
-	DnsEngine  DnsEngineConf
-	ApiServer  ApiServerConf
-	Identities []string
-	DBFile     string
-	Msg        string
-	Error      bool
-	ErrorMsg   string
+	AppName              string
+	Time                 time.Time
+	DnsEngine            DnsEngineConf
+	ApiServer            ApiServerConf
+	Identities           []string
+	DBFile               string
+	Msg                  string
+	Error                bool
+	ErrorMsg             string
+	TsigConflicts        []string `json:"tsigconflicts,omitempty"`
+	TsigWithheldRemovals []string `json:"tsigwithheldremovals,omitempty"`
 }
 
 type DelegationPost struct {

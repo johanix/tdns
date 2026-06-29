@@ -287,6 +287,21 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 				resp.ErrorMsg = err.Error()
 			}
 
+		case "reload-tsig":
+			lgApi.Info("reloading TSIG keys from config")
+			var result TsigReconcileResult
+			result, err = conf.ReloadTsigConfig(TsigReconcileOptions{
+				Force:     cp.Force,
+				Overwrite: cp.TsigOverwrite,
+			})
+			resp.Msg = formatTsigReconcileMsg(result)
+			resp.TsigConflicts = result.Conflicts
+			resp.TsigWithheldRemovals = result.WithheldRemovals
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+
 		case "status":
 			lgApi.Debug("config status inquiry")
 			resp.DnsEngine = conf.DnsEngine

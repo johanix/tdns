@@ -558,22 +558,38 @@ func (conf *Config) ReloadConfig() (string, error) {
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
 	}
-	// Rebuild the TSIG key store ONLY after a successful parse (a failed reload
-	// must not swap in a half-parsed config), then RE-MERGE the persisted
-	// dynamic/API keys. LoadTsigKeys repopulates from conf.Keys.Tsig only, so
-	// without the re-merge a reload would silently drop API-created keys and break
-	// dynamic secondaries' next signed SOA/AXFR/NOTIFY lookup. Config keys win
-	// (loadDynamicTsigKeys skips names already defined).
+	// Rebuild the TSIG store ONLY after a successful parse, then RE-MERGE persisted
+	// dynamic/API keys (kept until step 12). With KeyDB, reconcile config keys in
+	// place (§6) instead of swapping the whole cache.
 	if err == nil {
-		if kerr := conf.LoadTsigKeys(); kerr != nil {
+		if conf.Internal.KeyDB != nil {
+			if _, kerr := conf.reconcileAndRefreshTsigKeys(TsigReconcileOptions{}); kerr != nil {
+				lgConfig.Error("TSIG keys: config error on reload (affected keys skipped)", "err", kerr)
+			}
+		} else if kerr := conf.LoadTsigKeys(); kerr != nil {
 			lgConfig.Error("TSIG keys: config error on reload (affected keys skipped)", "err", kerr)
 		}
-		if cf, derr := conf.loadDynamicConfigFile(); derr == nil && cf != nil && cf.Keys != nil {
-			conf.loadDynamicTsigKeys(cf.Keys.Tsig)
-		}
+		conf.mergeDynamicTsigKeysAfterReload()
 	}
 	Globals.App.ServerConfigTime = time.Now()
 	return "Config reloaded.", err
+}
+
+// ReloadTsigConfig re-reads keys.tsig from the config file and reconciles the DB
+// keystore + live cache. opts.Force / opts.Overwrite resolve secret conflicts (§6).
+func (conf *Config) ReloadTsigConfig(opts TsigReconcileOptions) (TsigReconcileResult, error) {
+	confMu.Lock()
+	defer confMu.Unlock()
+	if conf.Internal.KeyDB == nil {
+		return TsigReconcileResult{}, fmt.Errorf("TSIG keystore reconcile requires KeyDB")
+	}
+	if err := conf.reloadTsigKeysFromFile(); err != nil {
+		return TsigReconcileResult{}, err
+	}
+	result, err := conf.reconcileAndRefreshTsigKeys(opts)
+	conf.mergeDynamicTsigKeysAfterReload()
+	Globals.App.ServerConfigTime = time.Now()
+	return result, err
 }
 
 func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {

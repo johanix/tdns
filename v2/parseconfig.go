@@ -1269,6 +1269,38 @@ func (conf *Config) reloadDnssecFromFile() error {
 	return conf.parseDnssecConfig()
 }
 
+// reloadTsigKeysFromFile re-reads the config file and decodes just the keys:
+// block into conf.Keys. Used by reload-tsig without a full config reload.
+func (conf *Config) reloadTsigKeysFromFile() error {
+	cfgfile := conf.Internal.CfgFile
+	if cfgfile == "" {
+		return nil
+	}
+
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	if err != nil {
+		return fmt.Errorf("error processing config: %v", err)
+	}
+
+	var partial struct {
+		Keys KeyConf `yaml:"keys"`
+	}
+	decoderConfig := &mapstructure.DecoderConfig{
+		TagName: "yaml",
+		Result:  &partial,
+	}
+	decoder, err := mapstructure.NewDecoder(decoderConfig)
+	if err != nil {
+		return fmt.Errorf("error creating decoder: %v", err)
+	}
+	if err := decoder.Decode(configMap); err != nil {
+		return fmt.Errorf("error decoding keys config: %v", err)
+	}
+
+	conf.Keys = partial.Keys
+	return nil
+}
+
 // expandTemplateChain expands a template by following its parent chain (via the Template field)
 // using DFS with cycle detection. It updates the global Templates map with the fully expanded
 // template on success. If a cycle is detected, all templates in the cycle are removed from the

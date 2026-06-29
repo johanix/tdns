@@ -4,11 +4,13 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"github.com/johanix/tdns/v2"
 	"github.com/spf13/cobra"
@@ -38,6 +40,20 @@ func NewConfigCmd(role string) *cobra.Command {
 		},
 	}
 
+	reloadTsig := &cobra.Command{
+		Use:   "reload-tsig",
+		Short: "Reconcile keys.tsig into the TSIG keystore (config reload-tsig)",
+		Long: `Re-read keys.tsig from the config file and reconcile into the DB-backed
+TSIG keystore. Secret conflicts are withheld by default; use --force to
+overwrite all conflicts, or --interactive to prompt per conflict.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			runReloadTsigCmd(role, force, interactive)
+		},
+	}
+	var force, interactive bool
+	reloadTsig.Flags().BoolVar(&force, "force", false, "overwrite all secret/algorithm conflicts with keys.tsig")
+	reloadTsig.Flags().BoolVar(&interactive, "interactive", false, "prompt per conflict before overwriting")
+
 	status := &cobra.Command{
 		Use:   "status",
 		Short: "Send config status command to tdns-auth",
@@ -46,8 +62,63 @@ func NewConfigCmd(role string) *cobra.Command {
 		},
 	}
 
-	c.AddCommand(reload, reloadZones, status)
+	c.AddCommand(reload, reloadZones, reloadTsig, status)
 	return c
+}
+
+func runReloadTsigCmd(role string, force, interactive bool) {
+	if force && interactive {
+		fmt.Println("Error: --force and --interactive are mutually exclusive")
+		os.Exit(1)
+	}
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		fmt.Printf("Error creating API client: %v\n", err)
+		os.Exit(1)
+	}
+
+	post := tdns.ConfigPost{Command: "reload-tsig", Force: force}
+	if interactive {
+		probe, err := SendConfigCommand(api, tdns.ConfigPost{Command: "reload-tsig"})
+		if err != nil {
+			fmt.Printf("Error: %s\n", err.Error())
+			os.Exit(1)
+		}
+		if len(probe.TsigConflicts) == 0 {
+			if probe.Msg != "" {
+				fmt.Println(probe.Msg)
+			}
+			return
+		}
+		reader := bufio.NewReader(os.Stdin)
+		var overwrite []string
+		for _, name := range probe.TsigConflicts {
+			fmt.Printf("Overwrite TSIG key %q with keys.tsig? [y/N] ", name)
+			line, _ := reader.ReadString('\n')
+			line = strings.TrimSpace(strings.ToLower(line))
+			if line == "y" || line == "yes" {
+				overwrite = append(overwrite, name)
+			}
+		}
+		if len(overwrite) == 0 {
+			fmt.Println("No keys overwritten.")
+			return
+		}
+		post.TsigOverwrite = overwrite
+	}
+
+	resp, err := SendConfigCommand(api, post)
+	if err != nil {
+		fmt.Printf("Error: %s\n", err.Error())
+		os.Exit(1)
+	}
+	if resp.Error {
+		fmt.Printf("Error from %s: %s\n", resp.AppName, resp.ErrorMsg)
+		os.Exit(1)
+	}
+	if resp.Msg != "" {
+		fmt.Println(resp.Msg)
+	}
 }
 
 // runConfigCmd posts a ConfigPost with the given command and prints the

@@ -155,6 +155,35 @@ func (conf *Config) loadTsigKeysFromDB() error {
 	return firstErr
 }
 
+// reconcileAndRefreshTsigKeys runs three-mode config-key reconcile against the DB
+// and patches the live cache in place (§6). Caller must hold confMu when mutating
+// config during reload.
+func (conf *Config) reconcileAndRefreshTsigKeys(opts TsigReconcileOptions) (TsigReconcileResult, error) {
+	if conf.Internal.KeyDB == nil {
+		err := conf.loadTsigKeysFromYAML()
+		return TsigReconcileResult{}, err
+	}
+	kdb := conf.Internal.KeyDB
+	entries, firstErr := collectValidConfigTsigKeys(conf.Keys.Tsig)
+	result, err := kdb.ReconcileConfigTsigKeys(entries, opts, conf.tsigKeyReferencedByZone)
+	if err != nil {
+		return result, err
+	}
+	if conf.Internal.TsigKeyStore == nil {
+		conf.Internal.TsigKeyStore = NewTsigKeyStore()
+	}
+	if err := ApplyTsigCacheDelta(conf.Internal.TsigKeyStore, kdb, result.TsigCacheDelta); err != nil {
+		return result, err
+	}
+	return result, firstErr
+}
+
+func (conf *Config) mergeDynamicTsigKeysAfterReload() {
+	if cf, derr := conf.loadDynamicConfigFile(); derr == nil && cf != nil && cf.Keys != nil {
+		conf.loadDynamicTsigKeys(cf.Keys.Tsig)
+	}
+}
+
 // tsigKeyDefined reports whether a primary/notify/ACL key name is acceptable:
 // NOKEY (no TSIG) or a name defined in the keys: store.
 func (conf *Config) tsigKeyDefined(name string) bool {
