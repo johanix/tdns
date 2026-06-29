@@ -62,43 +62,9 @@ func (kdb *KeyDB) TsigKeyMgmt(conf *Config, tx *Tx, kp KeystorePost) (*KeystoreR
 		resp.TsigCacheDelta = nil
 
 	case "add":
-		owner := kp.Owner
-		if owner == "" {
-			owner = "api"
-		}
-		creator := kp.Creator
-		if creator == "" {
-			creator = "api-request"
-		}
-		row := TsigKeystoreRow{
-			Keyname:   kp.TsigKeyname,
-			Algorithm: kp.TsigAlgorithm,
-			Secret:    kp.TsigSecret,
-			Origin:    "api",
-			Owner:     owner,
-			Creator:   creator,
-		}
-		existing, err := getTsigKeystoreByName(tx, row.Keyname)
-		if err == nil {
-			if tsigDetailsMatchRow(TsigDetails{Name: row.Keyname, Algorithm: row.Algorithm, Secret: row.Secret}, existing) {
-				resp.Msg = fmt.Sprintf("TSIG key %q unchanged", row.Keyname)
-				resp.TsigCacheDelta = nil
-				txSuccess = true
-				return resp, nil
-			}
-			if !kp.Force {
-				return resp, fmt.Errorf("TSIG key %q already exists with a different secret/algorithm (use --force)", row.Keyname)
-			}
-			if err := overwriteTsigKeystore(tx, row); err != nil {
-				return resp, err
-			}
-		} else if err != sql.ErrNoRows {
-			return resp, err
-		} else if err := insertTsigKeystore(tx, row); err != nil {
+		if err := kdb.tsigKeyMgmtAdd(conf, tx, kp, resp); err != nil {
 			return resp, err
 		}
-		resp.TsigCacheDelta.markChanged(row.Keyname)
-		resp.Msg = fmt.Sprintf("TSIG key %q added", kp.TsigKeyname)
 
 	case "setowner":
 		name := kp.TsigKeyname
@@ -154,4 +120,52 @@ func (kdb *KeyDB) TsigKeyMgmt(conf *Config, tx *Tx, kp KeystorePost) (*KeystoreR
 
 	txSuccess = true
 	return resp, nil
+}
+
+func (kdb *KeyDB) tsigKeyMgmtAdd(_ *Config, tx *Tx, kp KeystorePost, resp *KeystoreResponse) error {
+	owner := kp.Owner
+	if owner == "" {
+		owner = "api"
+	}
+	creator := kp.Creator
+	if creator == "" {
+		creator = "api-request"
+	}
+	row := TsigKeystoreRow{
+		Keyname:   kp.TsigKeyname,
+		Algorithm: kp.TsigAlgorithm,
+		Secret:    kp.TsigSecret,
+		Origin:    "api",
+		Owner:     owner,
+		Creator:   creator,
+	}
+	if row.Keyname == "" {
+		return fmt.Errorf("add requires a TSIG key name")
+	}
+	if row.Algorithm == "" {
+		row.Algorithm = "hmac-sha256"
+	}
+	existing, err := getTsigKeystoreByName(tx, row.Keyname)
+	if err == nil {
+		if tsigDetailsMatchRow(TsigDetails{Name: row.Keyname, Algorithm: row.Algorithm, Secret: row.Secret}, existing) {
+			resp.Msg = fmt.Sprintf("TSIG key %q unchanged", row.Keyname)
+			resp.TsigCacheDelta = nil
+			return nil
+		}
+		if !kp.Force {
+			return fmt.Errorf("TSIG key %q already exists with a different secret/algorithm (use --force)", row.Keyname)
+		}
+		if err := overwriteTsigKeystore(tx, row); err != nil {
+			return err
+		}
+	} else if err != sql.ErrNoRows {
+		return err
+	} else if err := insertTsigKeystore(tx, row); err != nil {
+		return err
+	}
+	resp.TsigCacheDelta.markChanged(row.Keyname)
+	if resp.Msg == "" {
+		resp.Msg = fmt.Sprintf("TSIG key %q added", row.Keyname)
+	}
+	return nil
 }

@@ -31,6 +31,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 		lgApi.Debug("received /keystore request", "cmd", kp.Command, "subcmd", kp.SubCommand, "from", r.RemoteAddr)
 
 		var resp *KeystoreResponse
+		var tsigCacheDelta *TsigCacheDelta
 
 		tx, err := kdb.Begin("APIkeystore")
 
@@ -39,7 +40,19 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 				if err != nil {
 					tx.Rollback()
 				} else {
-					tx.Commit()
+					if commitErr := tx.Commit(); commitErr != nil {
+						err = commitErr
+						if resp != nil {
+							resp.Error = true
+							resp.ErrorMsg = commitErr.Error()
+						}
+					} else if tsigCacheDelta != nil {
+						confMu.Lock()
+						if applyErr := ApplyTsigCacheDelta(conf.Internal.TsigKeyStore, kdb, tsigCacheDelta); applyErr != nil {
+							lgApi.Error("ApplyTsigCacheDelta failed", "err", applyErr)
+						}
+						confMu.Unlock()
+					}
 				}
 			}
 			w.Header().Set("Content-Type", "application/json")
@@ -78,6 +91,21 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 			// Trigger re-sign and inventory push after state-changing operations
 			if err == nil && (kp.SubCommand == "rollover" || kp.SubCommand == "delete" || kp.SubCommand == "setstate" || kp.SubCommand == "clear" || kp.SubCommand == "policy-cleanup") {
 				triggerResign(conf, kp.Zone)
+			}
+
+		case "tsig-mgmt":
+			confMu.Lock()
+			resp, err = kdb.TsigKeyMgmt(conf, tx, kp)
+			confMu.Unlock()
+			if err != nil {
+				if resp == nil {
+					resp = &KeystoreResponse{Time: time.Now(), Error: true, ErrorMsg: err.Error()}
+				} else {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+				}
+			} else if resp != nil {
+				tsigCacheDelta = resp.TsigCacheDelta
 			}
 
 		case "list-algorithms":

@@ -37,6 +37,7 @@ type KeystorePost struct {
 	TsigAlgorithm string `json:"tsigalgorithm,omitempty"`
 	TsigSecret    string `json:"tsigsecret,omitempty"`
 	Owner         string `json:"owner,omitempty"`
+	Interactive   bool   `json:"interactive,omitempty"`
 }
 
 type TsigKeyInfo struct {
@@ -46,6 +47,12 @@ type TsigKeyInfo struct {
 	Owner     string `json:"owner"`
 	RefCount  int    `json:"refcount"`
 	Created   string `json:"created"`
+}
+
+// TsigKeyDisposition reports per-key outcome for import (and similar batch ops).
+type TsigKeyDisposition struct {
+	Name   string `json:"name"`
+	Status string `json:"status"` // imported | unchanged | conflict
 }
 
 // TsigCacheDelta records in-memory cache patches to apply after a successful DB
@@ -63,6 +70,7 @@ type KeystoreResponse struct {
 	Dnskeys        map[string]DnssecKey // TrustAnchor
 	Sig0keys       map[string]Sig0Key
 	TsigKeys       []TsigKeyInfo              `json:"tsigkeys,omitempty"`
+	TsigImport     []TsigKeyDisposition       `json:"tsigimport,omitempty"`
 	Algorithms     []algorithms.AlgorithmInfo // populated by the "list-algorithms" command
 	Policies       []DnssecPolicyInfo         // populated by the "list-policies" command
 	Msg            string
