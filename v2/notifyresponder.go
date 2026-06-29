@@ -131,12 +131,12 @@ func (zd *ZoneData) authorizeInboundNotify(w dns.ResponseWriter, r *dns.Msg) (ok
 	if !parsed {
 		return false, dns.RcodeRefused, edns0.EDENotifyNotPermitted, "unparseable source address"
 	}
-	allowed, requiredKey := zd.allowNotifyDecision(src)
+	allowed, approvedKeys := zd.allowNotifyDecision(src)
 	if !allowed {
 		return false, dns.RcodeRefused, edns0.EDENotifyNotPermitted,
 			fmt.Sprintf("source %s not permitted by allow-notify", src)
 	}
-	if err := checkInboundTSIG(w, r, requiredKey); err != nil {
+	if err := checkInboundTSIG(w, r, approvedKeys); err != nil {
 		ede := edns0.EDETsigValidationFailure
 		if r.IsTsig() == nil {
 			ede = edns0.EDETsigRequired

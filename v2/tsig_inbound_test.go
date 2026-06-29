@@ -43,33 +43,45 @@ func TestCheckInboundTSIG(t *testing.T) {
 	unsigned := new(dns.Msg)
 	unsigned.SetQuestion("example.test.", dns.TypeSOA)
 
-	// NOKEY / empty: always accepted, signed or not.
-	if err := checkInboundTSIG(&fakeRW{}, unsigned, NOKEY); err != nil {
+	// NOKEY / empty approved: always accepted, signed or not (source trusted by addr).
+	if err := checkInboundTSIG(&fakeRW{}, unsigned, []string{NOKEY}); err != nil {
 		t.Errorf("NOKEY unsigned: unexpected error %v", err)
 	}
-	if err := checkInboundTSIG(&fakeRW{}, signedMsg("k"), ""); err != nil {
-		t.Errorf("empty required key: unexpected error %v", err)
+	if err := checkInboundTSIG(&fakeRW{}, signedMsg("k"), []string{""}); err != nil {
+		t.Errorf("empty approved key: unexpected error %v", err)
 	}
 
 	// Named key required but request unsigned -> error.
-	if err := checkInboundTSIG(&fakeRW{}, unsigned, "k"); err == nil {
+	if err := checkInboundTSIG(&fakeRW{}, unsigned, []string{"k"}); err == nil {
 		t.Error("named key + unsigned request should error")
 	}
 
 	// Named key, request signed but the server reported a bad MAC -> error.
-	if err := checkInboundTSIG(&fakeRW{tsigStatus: errors.New("bad mac")}, signedMsg("k"), "k"); err == nil {
+	if err := checkInboundTSIG(&fakeRW{tsigStatus: errors.New("bad mac")}, signedMsg("k"), []string{"k"}); err == nil {
 		t.Error("named key + failed TsigStatus should error")
 	}
 
 	// Named key, signed and verified, names match -> ok.
-	if err := checkInboundTSIG(&fakeRW{}, signedMsg("k"), "k"); err != nil {
+	if err := checkInboundTSIG(&fakeRW{}, signedMsg("k"), []string{"k"}); err != nil {
 		t.Errorf("named key + valid TSIG: unexpected error %v", err)
 	}
 
-	// Named key, signed and verified, but with a DIFFERENT key than the ACL
-	// requires -> error (a valid MAC under the wrong key must not pass).
-	if err := checkInboundTSIG(&fakeRW{}, signedMsg("other"), "k"); err == nil {
-		t.Error("valid TSIG under the wrong key name should error")
+	// Named key, signed and verified, but with a DIFFERENT key than approved
+	// -> error (a valid MAC under an unapproved key must not pass).
+	if err := checkInboundTSIG(&fakeRW{}, signedMsg("other"), []string{"k"}); err == nil {
+		t.Error("valid TSIG under an unapproved key name should error")
+	}
+
+	// Dual-key overlap: two approved keys, signed with either -> ok.
+	if err := checkInboundTSIG(&fakeRW{}, signedMsg("oldkey"), []string{"oldkey", "newkey"}); err != nil {
+		t.Errorf("dual-key (oldkey): unexpected error %v", err)
+	}
+	if err := checkInboundTSIG(&fakeRW{}, signedMsg("newkey"), []string{"oldkey", "newkey"}); err != nil {
+		t.Errorf("dual-key (newkey): unexpected error %v", err)
+	}
+	// ...but a third, unapproved key is still rejected.
+	if err := checkInboundTSIG(&fakeRW{}, signedMsg("evilkey"), []string{"oldkey", "newkey"}); err == nil {
+		t.Error("dual-key: an unapproved third key must still be rejected")
 	}
 }
 
@@ -94,8 +106,8 @@ func TestProviderRejectsAlgorithmMismatch(t *testing.T) {
 func TestAllowNotifyDecision(t *testing.T) {
 	// Empty allow-notify: accept (unsigned) from a resolved primary IP only.
 	zd := &ZoneData{Upstreams: []PeerConf{{Addr: "192.0.2.1:53"}, {Addr: "192.0.2.2:53"}}}
-	if ok, key := zd.allowNotifyDecision(netip.MustParseAddr("192.0.2.1")); !ok || key != NOKEY {
-		t.Errorf("empty ACL, primary src: got (%v,%q), want (true,NOKEY)", ok, key)
+	if ok, keys := zd.allowNotifyDecision(netip.MustParseAddr("192.0.2.1")); !ok || !keysContain(keys, NOKEY) {
+		t.Errorf("empty ACL, primary src: got (%v,%v), want (true,[NOKEY])", ok, keys)
 	}
 	if ok, _ := zd.allowNotifyDecision(netip.MustParseAddr("203.0.113.9")); ok {
 		t.Error("empty ACL, non-primary src should be denied")
@@ -106,8 +118,8 @@ func TestAllowNotifyDecision(t *testing.T) {
 		Upstreams:   []PeerConf{{Addr: "192.0.2.1:53"}},
 		AllowNotify: []AclEntry{{Prefix: "198.51.100.0/24", Key: "nkey"}},
 	}
-	if ok, key := zd2.allowNotifyDecision(netip.MustParseAddr("198.51.100.7")); !ok || key != "nkey" {
-		t.Errorf("ACL match: got (%v,%q), want (true,nkey)", ok, key)
+	if ok, keys := zd2.allowNotifyDecision(netip.MustParseAddr("198.51.100.7")); !ok || !keysContain(keys, "nkey") {
+		t.Errorf("ACL match: got (%v,%v), want (true,[nkey])", ok, keys)
 	}
 	if ok, _ := zd2.allowNotifyDecision(netip.MustParseAddr("192.0.2.1")); ok {
 		t.Error("with a non-empty ACL, a primary not in the ACL must be denied")
@@ -122,8 +134,8 @@ func TestDownstreamsDecision(t *testing.T) {
 	}
 
 	zd2 := &ZoneData{Downstreams: []AclEntry{{Prefix: "0.0.0.0/0", Key: "xkey"}}}
-	if ok, key := zd2.downstreamsDecision(netip.MustParseAddr("192.0.2.1")); !ok || key != "xkey" {
-		t.Errorf("0.0.0.0/0 xkey: got (%v,%q), want (true,xkey)", ok, key)
+	if ok, keys := zd2.downstreamsDecision(netip.MustParseAddr("192.0.2.1")); !ok || !keysContain(keys, "xkey") {
+		t.Errorf("0.0.0.0/0 xkey: got (%v,%v), want (true,[xkey])", ok, keys)
 	}
 }
 

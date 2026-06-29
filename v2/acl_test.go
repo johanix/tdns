@@ -49,11 +49,35 @@ func TestMatchACL(t *testing.T) {
 	if ok, _ := matchACL(acl, aclIP("192.0.2.5")); ok {
 		t.Error("BLOCKED entry should deny 192.0.2.5")
 	}
-	if ok, k := matchACL(acl, aclIP("192.0.2.9")); !ok || k != "transfer-key" {
-		t.Errorf("192.0.2.9: got ok=%v key=%q, want true/transfer-key", ok, k)
+	// 192.0.2.9 matches the /24 (transfer-key) AND the catch-all (NOKEY): the source
+	// is approved for BOTH (union of matching entries), not just the first.
+	if ok, keys := matchACL(acl, aclIP("192.0.2.9")); !ok || !keysContain(keys, "transfer-key") || !keysContain(keys, NOKEY) {
+		t.Errorf("192.0.2.9: got ok=%v keys=%v, want both transfer-key and NOKEY", ok, keys)
 	}
-	if ok, k := matchACL(acl, aclIP("203.0.113.1")); !ok || k != NOKEY {
-		t.Errorf("203.0.113.1: got ok=%v key=%q, want true/NOKEY", ok, k)
+	if ok, keys := matchACL(acl, aclIP("203.0.113.1")); !ok || !keysContain(keys, NOKEY) {
+		t.Errorf("203.0.113.1: got ok=%v keys=%v, want NOKEY", ok, keys)
+	}
+}
+
+func keysContain(keys []string, want string) bool {
+	for _, k := range keys {
+		if k == want {
+			return true
+		}
+	}
+	return false
+}
+
+// Two entries for the same source naming different keys (the rotation overlap):
+// the source is approved for BOTH, so the server accepts either.
+func TestMatchACL_DualKey(t *testing.T) {
+	acl := []AclEntry{
+		{Prefix: "192.0.2.0/24", Key: "oldkey"},
+		{Prefix: "192.0.2.0/24", Key: "newkey"},
+	}
+	ok, keys := matchACL(acl, aclIP("192.0.2.10"))
+	if !ok || !keysContain(keys, "oldkey") || !keysContain(keys, "newkey") {
+		t.Errorf("dual-key: got ok=%v keys=%v, want both oldkey and newkey", ok, keys)
 	}
 }
 
@@ -65,8 +89,8 @@ func TestMatchACL_BlockedSupersedesLaterOrder(t *testing.T) {
 	if ok, _ := matchACL(acl, aclIP("192.0.2.5")); ok {
 		t.Error("BLOCKED should supersede a preceding allow")
 	}
-	if ok, k := matchACL(acl, aclIP("192.0.2.6")); !ok || k != "k" {
-		t.Errorf("192.0.2.6 should be allowed with k, got ok=%v key=%q", ok, k)
+	if ok, keys := matchACL(acl, aclIP("192.0.2.6")); !ok || !keysContain(keys, "k") {
+		t.Errorf("192.0.2.6 should be allowed with k, got ok=%v keys=%v", ok, keys)
 	}
 }
 

@@ -126,28 +126,44 @@ func (zd *ZoneData) notifyKeyFor(target string) string {
 	return NOKEY
 }
 
-// checkInboundTSIG verifies that an inbound request — already ACL-allowed — carries
-// the TSIG the ACL requires. requiredKey == NOKEY (or "") accepts the request as
-// is, signed or not. For a named key, the request must carry a TSIG RR naming that
-// key (canonical compare) and the server's TsigProvider must have validated the
-// MAC, which the library records in w.TsigStatus(). Returns nil on success, else a
-// reason error for the caller to log. The provider must be set on the dns.Server
-// (conf.tsigProvider()) or w.TsigStatus() is meaningless.
-func checkInboundTSIG(w dns.ResponseWriter, r *dns.Msg, requiredKey string) error {
-	if requiredKey == "" || requiredKey == NOKEY {
-		return nil
+// checkInboundTSIG verifies that an inbound request — already ACL-allowed — is
+// authenticated by ONE OF the keys approved for its source. approvedKeys is the set
+// returned by the ACL match: a NOKEY (or "") member means "unsigned accepted"; a
+// named member means "a TSIG under that key is accepted". The request passes iff:
+//   - it is unsigned AND NOKEY is in the approved set, or
+//   - it is signed, its MAC verified (w.TsigStatus()==nil, set by the server's
+//     TsigProvider), AND its key name matches one of the approved NAMED keys.
+// Accepting ANY approved key (not just one) is what makes the dual-key rotation
+// overlap work. Returns nil on success, else a reason error for the caller to log.
+// The provider must be set on the dns.Server or w.TsigStatus() is meaningless.
+func checkInboundTSIG(w dns.ResponseWriter, r *dns.Msg, approvedKeys []string) error {
+	// NOKEY (or "") in the approved set => the source is trusted by address; TSIG is
+	// not required and a present one is not enforced. Accept — preserving the
+	// empty-allow-notify "accept from primaries" behaviour (a primary that happens to
+	// sign its NOTIFY is still accepted). Checked first, so a NOKEY entry alongside
+	// named keys still means "unsigned is OK too".
+	for _, k := range approvedKeys {
+		if k == "" || k == NOKEY {
+			return nil
+		}
 	}
+	// Named key(s) required: the request must be signed, its MAC must have verified
+	// (w.TsigStatus()==nil, set by the server's TsigProvider), and the key must be
+	// one of the approved names — ANY of them, which is the dual-key overlap.
 	ts := r.IsTsig()
 	if ts == nil {
-		return fmt.Errorf("TSIG required (key %q) but request is unsigned", requiredKey)
+		return fmt.Errorf("TSIG required but request is unsigned (approved keys: %v)", approvedKeys)
 	}
 	if status := w.TsigStatus(); status != nil {
 		return fmt.Errorf("TSIG verification failed: %w", status)
 	}
-	if dns.CanonicalName(ts.Hdr.Name) != dns.CanonicalName(requiredKey) {
-		return fmt.Errorf("TSIG signed with key %q but ACL requires %q", ts.Hdr.Name, requiredKey)
+	wire := dns.CanonicalName(ts.Hdr.Name)
+	for _, k := range approvedKeys {
+		if dns.CanonicalName(k) == wire {
+			return nil
+		}
 	}
-	return nil
+	return fmt.Errorf("TSIG signed with key %q, not approved for this source (approved keys: %v)", ts.Hdr.Name, approvedKeys)
 }
 
 // signResponseLikeRequest mirrors a verified request's TSIG onto a single-message
@@ -170,22 +186,22 @@ func signResponseLikeRequest(w dns.ResponseWriter, req, resp *dns.Msg) {
 // IP. An empty ACL accepts (unsigned) from any configured primary's IP — so
 // operators needn't restate the primary list — and ignores everything else. A
 // non-empty ACL is matched verbatim (matchACL: BLOCKED/no-match => deny).
-func (zd *ZoneData) allowNotifyDecision(src netip.Addr) (allowed bool, requiredKey string) {
+func (zd *ZoneData) allowNotifyDecision(src netip.Addr) (allowed bool, approvedKeys []string) {
 	if len(zd.AllowNotify) == 0 {
 		for _, p := range zd.Upstreams { // resolved primaries
 			if pip, ok := peerIP(p.Addr); ok && pip == src {
-				return true, NOKEY
+				return true, []string{NOKEY}
 			}
 		}
-		return false, ""
+		return false, nil
 	}
 	return matchACL(zd.AllowNotify, src)
 }
 
 // downstreamsDecision resolves the downstreams (provide-xfr) ACL for an inbound
 // AXFR/IXFR's source IP. An empty ACL DENIES — a hard cutover that closes the
-// legacy open-AXFR default (matchACL already returns (false,"") for an empty ACL).
-func (zd *ZoneData) downstreamsDecision(src netip.Addr) (allowed bool, requiredKey string) {
+// legacy open-AXFR default (matchACL already returns (false,nil) for an empty ACL).
+func (zd *ZoneData) downstreamsDecision(src netip.Addr) (allowed bool, approvedKeys []string) {
 	return matchACL(zd.Downstreams, src)
 }
 

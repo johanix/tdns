@@ -237,10 +237,10 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	if src, ok := peerIP(w.RemoteAddr().String()); !ok {
 		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, unparseable source %q", zone, w.RemoteAddr())
 		return zd.refuseTransfer(w, r)
-	} else if allowed, requiredKey := zd.downstreamsDecision(src); !allowed {
+	} else if allowed, approvedKeys := zd.downstreamsDecision(src); !allowed {
 		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer to %s (not permitted by downstreams ACL)", zone, src)
 		return zd.refuseTransfer(w, r)
-	} else if err := checkInboundTSIG(w, r, requiredKey); err != nil {
+	} else if err := checkInboundTSIG(w, r, approvedKeys); err != nil {
 		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer to %s: %v", zone, src, err)
 		return zd.refuseTransfer(w, r)
 	}

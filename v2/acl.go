@@ -28,27 +28,33 @@ type AclEntry struct {
 }
 
 // matchACL applies an ordered ACL to a source IP, NSD-style: a matching BLOCKED
-// entry denies (it supersedes any allow, regardless of order); otherwise the
-// first entry whose prefix matches wins. Returns (allowed, requiredKeyName) —
-// requiredKeyName is NOKEY when no TSIG is required. No match (incl. an empty
-// ACL) -> (false, ""); callers layer their empty-ACL defaults on top (downstreams
-// empty => deny; allow-notify empty => accept from primaries). A malformed
-// prefix never matches; it is rejected at config time by ValidateACL.
-func matchACL(acl []AclEntry, ip netip.Addr) (allowed bool, requiredKey string) {
+// entry denies (it supersedes any allow, regardless of order); otherwise the source
+// is approved for the SET of keys named by EVERY matching non-BLOCKED entry (a key
+// may be NOKEY = unsigned accepted). Returning the full set — not just the first
+// match — is what lets two entries for one source name two different keys, so the
+// server accepts EITHER during a dual-key rotation (add the new key alongside the
+// old, migrate clients, then drop the old). Returns (allowed, approvedKeys); no
+// match (incl. an empty ACL) -> (false, nil); callers layer their empty-ACL defaults
+// on top (downstreams empty => deny; allow-notify empty => accept from primaries).
+// A malformed prefix never matches; it is rejected at config time by ValidateACL.
+func matchACL(acl []AclEntry, ip netip.Addr) (allowed bool, approvedKeys []string) {
 	for _, e := range acl { // BLOCKED supersedes — scan all first
 		if e.Key == BLOCKED && ipSpecMatch(e.Prefix, ip) {
-			return false, ""
+			return false, nil
 		}
 	}
-	for _, e := range acl { // first non-BLOCKED prefix match wins
+	for _, e := range acl { // collect EVERY non-BLOCKED prefix match
 		if e.Key == BLOCKED {
 			continue
 		}
 		if ipSpecMatch(e.Prefix, ip) {
-			return true, e.Key
+			approvedKeys = append(approvedKeys, e.Key)
 		}
 	}
-	return false, ""
+	if len(approvedKeys) == 0 {
+		return false, nil
+	}
+	return true, approvedKeys
 }
 
 // ipSpecMatch reports whether ip falls within the ip-spec. A spec that fails to
