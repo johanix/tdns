@@ -263,6 +263,21 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			lg.Warn("dynamic zone: some primaries unavailable, serving from the rest", "zone", zoneName, "unresolved", res.Unresolved, "key_collisions", res.KeyCollisions, "serving", len(res.Resolved))
 		}
 
+		// Validate the persisted ACLs before installing them (ParseZones validates
+		// the config path; this load path must too). A malformed prefix never
+		// matches, so an unvalidated typo in a BLOCKED entry would be silently
+		// skipped while a broader allow still grants access. Quarantine the zone.
+		if err := ValidateACL(zconf.AllowNotify, conf.tsigKeyDefined); err != nil {
+			lg.Error("dynamic zone: invalid allow-notify ACL, skipping zone", "zone", zoneName, "err", err)
+			skippedCount++
+			continue
+		}
+		if err := ValidateACL(zconf.Downstreams, conf.tsigKeyDefined); err != nil {
+			lg.Error("dynamic zone: invalid downstreams ACL, skipping zone", "zone", zoneName, "err", err)
+			skippedCount++
+			continue
+		}
+
 		// Create ZoneRefresher and enqueue to RefreshEngine (same as ParseZones does)
 		zr := ZoneRefresher{
 			Name:          zoneName,
@@ -966,11 +981,13 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 
 	// (4) Overwrite the persisted entry. AddDynamicZoneToConfig rewrites the
 	// whole file from the live Zones map, so it MUST run after Zones.Set (so the
-	// rewrite includes the new params). On failure, surface it — the live zone
-	// now has the new params but they would be lost on restart.
+	// rewrite includes the new params). On failure, fully revert the in-memory
+	// modification: roll back the staged key AND restore the old zone, so the live
+	// zone can't be left referencing a rolled-back key (a partially-applied modify).
 	if err := conf.AddDynamicZoneToConfig(newZd); err != nil {
 		rollbackKey()
-		return "", fmt.Errorf("zone %s modified in memory but failed to persist (change will be lost on restart): %w", name, err)
+		Zones.Set(name, oldZd)
+		return "", fmt.Errorf("zone %s failed to persist; rolled back the in-memory modification: %w", name, err)
 	}
 	// Partial resolution of the new primaries: served from what resolved, with
 	// a visibility-only ConfigWarning naming the rest.
