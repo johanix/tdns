@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"net"
 	"testing"
 	"time"
@@ -44,7 +45,11 @@ func startTestSOAServer(t *testing.T, zone string, serial uint32, rcode int) (st
 	case <-time.After(2 * time.Second):
 		t.Fatal("test DNS server did not start")
 	}
-	return addr, func() { _ = srv.Shutdown() }
+	return addr, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.ShutdownContext(ctx)
+	}
 }
 
 // startTestSOAServerTSIG starts a UDP SOA responder that REQUIRES a valid TSIG
@@ -92,7 +97,11 @@ func startTestSOAServerTSIG(t *testing.T, zone string, serial uint32, keyName, s
 	case <-time.After(2 * time.Second):
 		t.Fatal("test DNS server did not start")
 	}
-	return addr, func() { _ = srv.Shutdown() }
+	return addr, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = srv.ShutdownContext(ctx)
+	}
 }
 
 // A keyed upstream: the SOA probe must be TSIG-signed (server accepts), and a
@@ -120,9 +129,14 @@ func TestDoTransfer_SignsWithKey(t *testing.T) {
 	}
 	zd2 := &ZoneData{ZoneName: zone, Upstreams: []PeerConf{{Addr: good, Key: "tkey"}}}
 	// Wrong secret -> the server rejects with NOTAUTH, so the probe gets no usable
-	// SOA (quiet back-off) and crucially never reads the upstream's real serial.
-	if _, serial, _ := zd2.DoTransfer(bad); serial == 42 {
-		t.Error("a wrong secret must not yield the upstream's SOA serial")
+	// SOA: it must back off quietly (no error) without warranting a transfer and
+	// crucially without ever reading the upstream's real serial.
+	xfr, serial, err := zd2.DoTransfer(bad)
+	if err != nil {
+		t.Fatalf("wrong secret should back off without accepting data, got err=%v", err)
+	}
+	if xfr || serial == 42 {
+		t.Fatalf("wrong secret must not yield a usable transfer: xfr=%v serial=%d", xfr, serial)
 	}
 }
 

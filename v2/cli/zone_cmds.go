@@ -157,14 +157,14 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 	// Dynamic-zones management (add/delete/modify/list-dynamic). No --store
 	// flag: dynamic zones are map-only. The --tsig-* flags are accepted now but
 	// inert in Improvement 1 (a non-NOKEY key is rejected server-side).
-	var dzPrimaryKey, dzTsigName, dzTsigSecret, dzTsigAlgo string
+	var dzPrimaryKey, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo string
 	var dzPrimaries, dzOptions []string
 
 	add := &cobra.Command{
 		Use:   "add",
 		Short: "Add a dynamic secondary zone at runtime (persists across restart)",
 		Run: func(cmd *cobra.Command, args []string) {
-			RunZoneAdd(role, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigAlgo)
+			RunZoneAdd(role, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo)
 		},
 	}
 	add.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add")
@@ -172,7 +172,8 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 	add.Flags().StringVar(&dzPrimaryKey, "primary-key", tdns.NOKEY, "Primary TSIG key name applied to all primaries (NOKEY for none)")
 	add.Flags().StringSliceVar(&dzOptions, "options", nil, "Zone options (comma-separated)")
 	add.Flags().StringVar(&dzTsigName, "tsig-name", "", "Inline TSIG key name; upserted into keys: and applied to keyless primaries")
-	add.Flags().StringVar(&dzTsigSecret, "tsig-secret", "", "Inline TSIG secret (base64); required with --tsig-name")
+	add.Flags().StringVar(&dzTsigSecretFile, "tsig-secret-file", "", "File containing the inline TSIG secret (base64); preferred over --tsig-secret")
+	add.Flags().StringVar(&dzTsigSecret, "tsig-secret", "", "Inline TSIG secret (base64). WARNING: visible in shell history / process list; prefer --tsig-secret-file")
 	add.Flags().StringVar(&dzTsigAlgo, "tsig-algo", "", "Inline TSIG algorithm (default hmac-sha256)")
 	add.MarkFlagRequired("zone")
 	add.MarkFlagRequired("primaries")
@@ -191,7 +192,7 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 		Use:   "modify",
 		Short: "Modify a dynamic (API-managed) zone's primary or options",
 		Run: func(cmd *cobra.Command, args []string) {
-			RunZoneModify(role, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigAlgo)
+			RunZoneModify(role, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo)
 		},
 	}
 	modify.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to modify")
@@ -199,7 +200,8 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 	modify.Flags().StringVar(&dzPrimaryKey, "primary-key", tdns.NOKEY, "New primary TSIG key name applied to all primaries (NOKEY for none)")
 	modify.Flags().StringSliceVar(&dzOptions, "options", nil, "Zone options (comma-separated)")
 	modify.Flags().StringVar(&dzTsigName, "tsig-name", "", "Inline TSIG key name; upserted into keys: and applied to keyless primaries (also rotates the secret for an existing name)")
-	modify.Flags().StringVar(&dzTsigSecret, "tsig-secret", "", "Inline TSIG secret (base64); required with --tsig-name")
+	modify.Flags().StringVar(&dzTsigSecretFile, "tsig-secret-file", "", "File containing the inline TSIG secret (base64); preferred over --tsig-secret")
+	modify.Flags().StringVar(&dzTsigSecret, "tsig-secret", "", "Inline TSIG secret (base64). WARNING: visible in shell history / process list; prefer --tsig-secret-file")
 	modify.Flags().StringVar(&dzTsigAlgo, "tsig-algo", "", "Inline TSIG algorithm (default hmac-sha256)")
 	modify.MarkFlagRequired("zone")
 
@@ -441,9 +443,31 @@ func peerConfsFromAddrs(addrs []string, key string) []tdns.PeerConf {
 	return out
 }
 
-func RunZoneAdd(role string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigAlgo string) {
+// resolveTsigSecret returns the inline TSIG secret from --tsig-secret-file
+// (preferred — not exposed in shell history or process listings) or the literal
+// --tsig-secret flag. Setting both is an error.
+func resolveTsigSecret(literal, file string) (string, error) {
+	if file == "" {
+		return literal, nil
+	}
+	if literal != "" {
+		return "", fmt.Errorf("set only one of --tsig-secret or --tsig-secret-file")
+	}
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return "", fmt.Errorf("reading --tsig-secret-file %q: %w", file, err)
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+func RunZoneAdd(role string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigSecretFile, tsigAlgo string) {
 	if tdns.Globals.Zonename == "" {
 		fmt.Println("Error: zone name not specified")
+		os.Exit(1)
+	}
+	secret, err := resolveTsigSecret(tsigSecret, tsigSecretFile)
+	if err != nil {
+		fmt.Printf("Error: %s\n", err.Error())
 		os.Exit(1)
 	}
 	api, err := GetApiClient(role, true)
@@ -456,7 +480,7 @@ func RunZoneAdd(role string, primaries []string, primaryKey string, options []st
 		Primaries:  peerConfsFromAddrs(primaries, primaryKey),
 		Options:    options,
 		TsigName:   tsigName,
-		TsigSecret: tsigSecret,
+		TsigSecret: secret,
 		TsigAlgo:   tsigAlgo,
 	})
 	if err != nil {
@@ -490,9 +514,14 @@ func RunZoneDelete(role string) {
 	}
 }
 
-func RunZoneModify(role string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigAlgo string) {
+func RunZoneModify(role string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigSecretFile, tsigAlgo string) {
 	if tdns.Globals.Zonename == "" {
 		fmt.Println("Error: zone name not specified")
+		os.Exit(1)
+	}
+	secret, err := resolveTsigSecret(tsigSecret, tsigSecretFile)
+	if err != nil {
+		fmt.Printf("Error: %s\n", err.Error())
 		os.Exit(1)
 	}
 	api, err := GetApiClient(role, true)
@@ -504,7 +533,7 @@ func RunZoneModify(role string, primaries []string, primaryKey string, options [
 		Zone:       dns.Fqdn(tdns.Globals.Zonename),
 		Options:    options,
 		TsigName:   tsigName,
-		TsigSecret: tsigSecret,
+		TsigSecret: secret,
 		TsigAlgo:   tsigAlgo,
 	}
 	if peers := peerConfsFromAddrs(primaries, primaryKey); len(peers) > 0 {

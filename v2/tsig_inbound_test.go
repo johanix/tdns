@@ -73,6 +73,24 @@ func TestCheckInboundTSIG(t *testing.T) {
 	}
 }
 
+// A key provisioned for one algorithm must reject an inbound TSIG that names a
+// different algorithm, even if the secret matches (RFC 8945 keys are algo-bound).
+func TestProviderRejectsAlgorithmMismatch(t *testing.T) {
+	conf := &Config{}
+	conf.Internal.TsigKeyStore = NewTsigKeyStore()
+	conf.Internal.TsigKeyStore.Add(TsigDetails{Name: "k", Algorithm: "hmac-sha256", Secret: "MTIzNDU2Nzg5MDEyMzQ1Ng=="})
+	p := tsigKeyProvider{conf.Internal.TsigKeyStore}
+
+	mismatch := &dns.TSIG{Hdr: dns.RR_Header{Name: "k."}, Algorithm: dns.HmacSHA1}
+	if _, err := p.hmac(mismatch); err != dns.ErrKeyAlg {
+		t.Errorf("algorithm mismatch: got err=%v, want ErrKeyAlg", err)
+	}
+	match := &dns.TSIG{Hdr: dns.RR_Header{Name: "k."}, Algorithm: dns.HmacSHA256}
+	if _, err := p.hmac(match); err != nil {
+		t.Errorf("matching algorithm: unexpected err=%v", err)
+	}
+}
+
 func TestAllowNotifyDecision(t *testing.T) {
 	// Empty allow-notify: accept (unsigned) from a resolved primary IP only.
 	zd := &ZoneData{Upstreams: []PeerConf{{Addr: "192.0.2.1:53"}, {Addr: "192.0.2.2:53"}}}

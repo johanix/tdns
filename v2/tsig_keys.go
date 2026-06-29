@@ -56,6 +56,17 @@ func (s *TsigKeyStore) Add(d TsigDetails) {
 	s.keys[dns.CanonicalName(d.Name)] = d // canonical (lowercase FQDN) key, matches the wire name
 }
 
+// Delete removes a key by name. Used to roll back an inline key that was staged
+// into the store but whose add/modify request then failed. Nil-receiver safe.
+func (s *TsigKeyStore) Delete(name string) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.keys, dns.CanonicalName(name))
+}
+
 // Names returns the set of defined key names (used to re-point the catalog
 // config-check off Globals.TsigKeys).
 func (s *TsigKeyStore) Names() map[string]bool {
@@ -87,9 +98,9 @@ func (conf *Config) LoadTsigKeys() error {
 			}
 			continue
 		}
-		if t.Name == "" || t.Algorithm == "" || t.Secret == "" {
+		if err := validateTsigKeySpec(t.Name, t.Algorithm, t.Secret); err != nil {
 			if firstErr == nil {
-				firstErr = fmt.Errorf("keys.tsig: entry %q is incomplete (name, algorithm and secret are all required)", t.Name)
+				firstErr = fmt.Errorf("keys.tsig: %w", err)
 			}
 			continue
 		}
@@ -103,6 +114,16 @@ func (conf *Config) LoadTsigKeys() error {
 // NOKEY (no TSIG) or a name defined in the keys: store.
 func (conf *Config) tsigKeyDefined(name string) bool {
 	return name == NOKEY || conf.Internal.TsigKeyStore.Has(name)
+}
+
+// tsigKeyAcceptable is tsigKeyDefined extended with an optional staged (not yet
+// committed) inline key name, so a dynamic add/modify can validate primaries that
+// reference an inline key before that key is committed to the live store.
+func (conf *Config) tsigKeyAcceptable(name string, staged *TsigDetails) bool {
+	if staged != nil && dns.CanonicalName(name) == dns.CanonicalName(staged.Name) {
+		return true
+	}
+	return conf.tsigKeyDefined(name)
 }
 
 // knownTsigAlgo reports whether algo names a supported HMAC TSIG algorithm

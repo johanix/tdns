@@ -70,6 +70,18 @@ func TestMatchACL_BlockedSupersedesLaterOrder(t *testing.T) {
 	}
 }
 
+func TestValidateIPSpec_MixedFamilyMask(t *testing.T) {
+	for _, s := range []string{"2001:db8::&255.255.255.0", "192.0.2.1&ffff:ffff::"} {
+		if err := ValidateIPSpec(s); err == nil {
+			t.Errorf("ValidateIPSpec(%q) = nil, want error (mixed IPv4/IPv6 mask)", s)
+		}
+	}
+	// A same-family mask still parses.
+	if err := ValidateIPSpec("192.0.2.0&255.255.255.0"); err != nil {
+		t.Errorf("same-family mask rejected: %v", err)
+	}
+}
+
 func TestValidateACL(t *testing.T) {
 	defined := func(name string) bool { return name == NOKEY || name == "good" }
 	good := []AclEntry{

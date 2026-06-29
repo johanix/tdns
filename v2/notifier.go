@@ -141,6 +141,7 @@ func (zd *ZoneData) SendNotify(ctx context.Context, conf *Config, ntype uint16, 
 	var lastFailRcode int
 	var lastFailEDE []dns.EDNS0_EDE
 	haveLastFailRcode := false
+	var lastSetupErr error
 
 	for i, dst := range targets {
 		// Honor cancellation between targets so daemon shutdown
@@ -163,6 +164,7 @@ func (zd *ZoneData) SendNotify(ctx context.Context, conf *Config, ntype uint16, 
 		provider, serr := SignForPeer(m, zd.notifyKeyFor(dst), conf)
 		if serr != nil {
 			lgDns.Error("NOTIFY: TSIG sign setup failed, skipping target", "zone", zd.ZoneName, "target", dst, "err", serr)
+			lastSetupErr = serr
 			continue
 		}
 		c.TsigProvider = provider
@@ -201,6 +203,11 @@ func (zd *ZoneData) SendNotify(ctx context.Context, conf *Config, ntype uint16, 
 			// engine into the transport bucket and lose the EDE
 			// context that's the whole point of Phase 4 plumbing.
 			return lastFailRcode, lastFailEDE, nil
+		}
+		// Every target was skipped because its TSIG sign setup failed (e.g. an
+		// unknown key): surface that real cause rather than a generic "no response".
+		if lastSetupErr != nil {
+			return dns.RcodeServerFailure, nil, fmt.Errorf("TSIG setup failed for NOTIFY target(s): %w", lastSetupErr)
 		}
 		// No response from any target at all → genuine transport
 		// failure. err is non-nil only on this branch.

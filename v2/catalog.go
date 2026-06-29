@@ -381,11 +381,15 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 		// against the keys: store, not the retired Globals.TsigKeys.
 		primaryKey := NOKEY
 		if configGroupConfig.TsigKey != "" {
-			if conf.tsigKeyDefined(configGroupConfig.TsigKey) {
-				primaryKey = configGroupConfig.TsigKey
-			} else {
-				lg.Warn("CATALOG: tsig_key not defined in keys.tsig, provisioning zone unsigned", "key", configGroupConfig.TsigKey, "zone", zoneName)
+			if !conf.tsigKeyDefined(configGroupConfig.TsigKey) {
+				// Fail closed: a configured-but-undefined tsig_key must not silently
+				// downgrade to unsigned transfers. Skip the member until the key is
+				// defined (mirrors the static primary-key validation in ParseZones).
+				lg.Error("CATALOG: tsig_key not defined in keys.tsig, skipping zone (fail closed, not unsigned)", "key", configGroupConfig.TsigKey, "zone", zoneName, "group", member.MetaGroup)
+				skippedCount++
+				continue
 			}
+			primaryKey = configGroupConfig.TsigKey
 		}
 		primariesConf := []PeerConf{{Addr: configGroupConfig.Upstream, Key: primaryKey}}
 		res := resolvePrimaries(ctx, conf.Internal.ImrEngine, primariesConf)

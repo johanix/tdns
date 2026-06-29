@@ -35,10 +35,10 @@ func TestTsigKeyStore_NilSafe(t *testing.T) {
 func TestLoadTsigKeys_ReservedAndIncompleteSkipped(t *testing.T) {
 	conf := &Config{}
 	conf.Keys.Tsig = []TsigDetails{
-		{Name: "good", Algorithm: "hmac-sha256", Secret: "S"},
-		{Name: "NOKEY", Algorithm: "hmac-sha256", Secret: "S"}, // reserved -> error, skipped
-		{Name: "incomplete", Algorithm: "", Secret: "S"},       // incomplete -> error, skipped
-		{Name: "good2", Algorithm: "hmac-sha512", Secret: "S2"},
+		{Name: "good", Algorithm: "hmac-sha256", Secret: b64Secret16},
+		{Name: "NOKEY", Algorithm: "hmac-sha256", Secret: b64Secret16}, // reserved -> error, skipped
+		{Name: "incomplete", Algorithm: "", Secret: b64Secret16},       // no algorithm -> error, skipped
+		{Name: "good2", Algorithm: "hmac-sha512", Secret: b64Secret16},
 	}
 	if err := conf.LoadTsigKeys(); err == nil {
 		t.Fatal("expected an error for the reserved/incomplete entries")
@@ -54,7 +54,7 @@ func TestLoadTsigKeys_ReservedAndIncompleteSkipped(t *testing.T) {
 
 func TestLoadTsigKeys_CleanLoad(t *testing.T) {
 	conf := &Config{}
-	conf.Keys.Tsig = []TsigDetails{{Name: "k", Algorithm: "hmac-sha256", Secret: "S"}}
+	conf.Keys.Tsig = []TsigDetails{{Name: "k", Algorithm: "hmac-sha256", Secret: b64Secret16}}
 	if err := conf.LoadTsigKeys(); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -65,7 +65,7 @@ func TestLoadTsigKeys_CleanLoad(t *testing.T) {
 
 func TestTsigKeyDefined(t *testing.T) {
 	conf := &Config{}
-	conf.Keys.Tsig = []TsigDetails{{Name: "k", Algorithm: "hmac-sha256", Secret: "S"}}
+	conf.Keys.Tsig = []TsigDetails{{Name: "k", Algorithm: "hmac-sha256", Secret: b64Secret16}}
 	_ = conf.LoadTsigKeys()
 	if !conf.tsigKeyDefined(NOKEY) {
 		t.Error("NOKEY should be accepted (no TSIG)")

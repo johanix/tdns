@@ -582,6 +582,13 @@ type ZoneRefresher struct {
 	Notify        []PeerConf
 	AllowNotify   []AclEntry // copied to zd.AllowNotify on merge
 	Downstreams   []AclEntry // copied to zd.Downstreams on merge
+	// ConfigUpdate marks a config-bearing refresher (from ParseZones /
+	// LoadDynamicZoneFiles) as opposed to a NOTIFY/refresh-only trigger. On reload
+	// it lets the merge assign Notify/AllowNotify/Downstreams even when they are
+	// nil/empty, so a config that REMOVES an ACL actually clears it (empty
+	// downstreams => deny, empty allow-notify => primaries) instead of keeping
+	// stale permissions.
+	ConfigUpdate  bool
 	ZoneStore     ZoneStore // 1=xfr, 2=map, 3=slice
 	Zonefile      string
 	Options       map[ZoneOption]bool

@@ -146,6 +146,17 @@ func (zd *ZoneData) authorizeInboundNotify(w dns.ResponseWriter, r *dns.Msg) (ok
 	return true, dns.RcodeSuccess, 0, ""
 }
 
+// writeNotifyReply signs the reply to mirror a verified request TSIG (RFC 8945,
+// no-op for unsigned/unverified requests) and writes it. Used for EVERY NOTIFY
+// response — success and refusal — so a TSIG-authenticated NOTIFY never sees its
+// intended rcode/EDE turn into a TSIG-failure on an unsigned reply.
+func writeNotifyReply(dnr *DnsNotifyRequest, m *dns.Msg) {
+	signResponseLikeRequest(dnr.ResponseWriter, dnr.Msg, m)
+	if err := dnr.ResponseWriter.WriteMsg(m); err != nil {
+		lgHandler.Error("NOTIFY: WriteMsg failed", "zone", dnr.Qname, "err", err)
+	}
+}
+
 func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan ZoneRefresher, scannerq chan ScanRequest) error {
 
 	qname := dnr.Qname
@@ -159,9 +170,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 		if dnr.Msg != nil {
 			m.MsgHdr.Id = dnr.Msg.MsgHdr.Id
 		}
-		if err := dnr.ResponseWriter.WriteMsg(m); err != nil {
-			lgHandler.Error("WriteMsg error on FormatError", "err", err)
-		}
+		writeNotifyReply(dnr, m)
 		return nil
 	}
 	ntype := dnr.Msg.Question[0].Qtype
@@ -194,7 +203,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 			m.SetRcode(dnr.Msg, dns.RcodeRefused)
 			edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyParentNotAuthoritative,
 				fmt.Sprintf("server is not authoritative for %s", qname), false)
-			dnr.ResponseWriter.WriteMsg(m)
+			writeNotifyReply(dnr, m)
 			return nil
 		}
 		if !strings.EqualFold(dns.Fqdn(zd.ZoneName), dns.Fqdn(qname)) {
@@ -207,14 +216,14 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 				m.SetRcode(dnr.Msg, dns.RcodeRefused)
 				edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyTargetNotChildDelegation,
 					fmt.Sprintf("%s is a child delegation, not authoritative on this server", qname), false)
-				dnr.ResponseWriter.WriteMsg(m)
+				writeNotifyReply(dnr, m)
 				return nil
 			}
 			lgHandler.Warn("received NOTIFY for interior name in zone, ignoring", "type", dns.TypeToString[ntype], "qname", qname, "zone", zd.ZoneName)
 			m.SetRcode(dnr.Msg, dns.RcodeRefused)
 			edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyParentNotAuthoritative,
 				fmt.Sprintf("%s is not a zone apex on this server (containing zone %s)", qname, zd.ZoneName), false)
-			dnr.ResponseWriter.WriteMsg(m)
+			writeNotifyReply(dnr, m)
 			return nil
 		}
 		targetZoneName = zd.ZoneName
@@ -228,7 +237,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 			m.SetRcode(dnr.Msg, dns.RcodeRefused)
 			edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyTargetNotChildDelegation,
 				fmt.Sprintf("%s has no parent label", qname), false)
-			dnr.ResponseWriter.WriteMsg(m)
+			writeNotifyReply(dnr, m)
 			return nil
 		}
 		zd, _ = FindZone(labels[1])
@@ -237,7 +246,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 			m.SetRcode(dnr.Msg, dns.RcodeNotAuth)
 			edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyParentNotAuthoritative,
 				fmt.Sprintf("server is not authoritative for parent of %s", qname), false)
-			dnr.ResponseWriter.WriteMsg(m)
+			writeNotifyReply(dnr, m)
 			return nil
 		}
 		if !zd.IsChildDelegation(qname) {
@@ -245,7 +254,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 			m.SetRcode(dnr.Msg, dns.RcodeRefused)
 			edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyTargetNotChildDelegation,
 				fmt.Sprintf("%s is not a child delegation of %s", qname, zd.ZoneName), false)
-			dnr.ResponseWriter.WriteMsg(m)
+			writeNotifyReply(dnr, m)
 			return nil
 		}
 		// DSYNC scheme gate: refuse NOTIFY for an RRtype the parent
@@ -259,7 +268,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 			edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyDsyncSchemeNotAdvertised,
 				fmt.Sprintf("parent zone %s does not advertise NOTIFY for type %s; ignoring",
 					zd.ZoneName, dns.TypeToString[ntype]), false)
-			dnr.ResponseWriter.WriteMsg(m)
+			writeNotifyReply(dnr, m)
 			return nil
 		}
 		targetZoneName = zd.ZoneName
@@ -269,8 +278,22 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 		m.SetRcode(dnr.Msg, dns.RcodeRefused)
 		edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyUnknownType,
 			fmt.Sprintf("NOTIFY for type %s not supported", dns.TypeToString[ntype]), false)
-		dnr.ResponseWriter.WriteMsg(m)
+		writeNotifyReply(dnr, m)
 		return nil
+	}
+
+	// Authorize NOTIFY(SOA) BEFORE exposing any zone state: an unauthorized or
+	// unsigned NOTIFY to an errored zone must get the ACL/TSIG refusal, not the
+	// zone-error response (which would leak zone state). CDS/CSYNC/DNSKEY keep
+	// their own authorization (checked above) and are intentionally not gated here.
+	if ntype == dns.TypeSOA {
+		if ok, rcode, ede, reason := zd.authorizeInboundNotify(dnr.ResponseWriter, dnr.Msg); !ok {
+			lgHandler.Warn("NOTIFY(SOA) refused", "zone", targetZoneName, "from", dnr.ResponseWriter.RemoteAddr(), "reason", reason)
+			m.SetRcode(dnr.Msg, rcode)
+			edns0.AttachEDEToResponseWithText(m, ede, reason, false)
+			writeNotifyReply(dnr, m)
+			return nil
+		}
 	}
 
 	// Refuse NOTIFY only when the zone has a service-impacting error
@@ -282,7 +305,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 		m.SetRcode(dnr.Msg, dns.RcodeServerFailure)
 		edns0.AttachEDEToResponseWithText(m, edns0.EDENotifyZoneInErrorState,
 			fmt.Sprintf("zone %s in error state: %s", targetZoneName, zd.ErrorMsg), false)
-		dnr.ResponseWriter.WriteMsg(m)
+		writeNotifyReply(dnr, m)
 		return nil
 	}
 
@@ -290,24 +313,13 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 
 	switch ntype {
 	case dns.TypeSOA:
-		// allow-notify ACL gate (secondary side). CDS/CSYNC/DNSKEY NOTIFYs use
-		// their own authorization (child-delegation / DSYNC / multi-signer) and
-		// are intentionally not gated here.
-		if ok, rcode, ede, reason := zd.authorizeInboundNotify(dnr.ResponseWriter, dnr.Msg); !ok {
-			lgHandler.Warn("NOTIFY(SOA) refused", "zone", targetZoneName, "from", dnr.ResponseWriter.RemoteAddr(), "reason", reason)
-			m.SetRcode(dnr.Msg, rcode)
-			edns0.AttachEDEToResponseWithText(m, ede, reason, false)
-			signResponseLikeRequest(dnr.ResponseWriter, dnr.Msg, m)
-			dnr.ResponseWriter.WriteMsg(m)
-			return nil
-		}
+		// allow-notify ACL + TSIG were already enforced above (before any
+		// zone-state response), so an unauthorized NOTIFY can't observe zone state.
 		select {
 		case <-ctx.Done():
 			// Send immediate failure so NOTIFY sender doesn't block on cancellation
 			m.SetRcode(dnr.Msg, dns.RcodeServerFailure)
-			if err := dnr.ResponseWriter.WriteMsg(m); err != nil {
-				lgHandler.Error("WriteMsg error on cancellation", "notifyType", "SOA", "err", err)
-			}
+			writeNotifyReply(dnr, m)
 			return nil
 		case zonech <- ZoneRefresher{
 			Name:         targetZoneName, // send zone name into RefreshEngine
@@ -324,9 +336,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 		case <-ctx.Done():
 			// Send immediate failure so NOTIFY sender doesn't block on cancellation
 			m.SetRcode(dnr.Msg, dns.RcodeServerFailure)
-			if err := dnr.ResponseWriter.WriteMsg(m); err != nil {
-				lgHandler.Error("WriteMsg error on cancellation", "notifyType", "CDS/CSYNC", "err", err)
-			}
+			writeNotifyReply(dnr, m)
 			return nil
 		case scannerq <- ScanRequest{
 			Cmd:          "SCAN",
@@ -344,9 +354,7 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 		case <-ctx.Done():
 			// Send immediate failure so NOTIFY sender doesn't block on cancellation
 			m.SetRcode(dnr.Msg, dns.RcodeServerFailure)
-			if err := dnr.ResponseWriter.WriteMsg(m); err != nil {
-				lgHandler.Error("WriteMsg error on cancellation", "notifyType", "DNSKEY", "err", err)
-			}
+			writeNotifyReply(dnr, m)
 			return nil
 		case scannerq <- ScanRequest{
 			Cmd:          "SCAN",
@@ -358,8 +366,6 @@ func NotifyResponder(ctx context.Context, dnr *DnsNotifyRequest, zonech chan Zon
 		}
 	}
 
-	// Sign the success response when the NOTIFY was itself signed (RFC 8945).
-	signResponseLikeRequest(dnr.ResponseWriter, dnr.Msg, m)
-	dnr.ResponseWriter.WriteMsg(m)
+	writeNotifyReply(dnr, m)
 	return nil
 }

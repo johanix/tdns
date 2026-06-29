@@ -265,6 +265,9 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			Primaries:     res.Resolved,
 			ZoneStore:     zoneStore,
 			Notify:        zconf.Notify,
+			AllowNotify:   zconf.AllowNotify,
+			Downstreams:   zconf.Downstreams,
+			ConfigUpdate:  true, // config-bearing (persisted dynamic zone)
 			Zonefile:      zconf.Zonefile,
 			Options:       options,
 		}
@@ -347,6 +350,8 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 		Store:         storeStr,
 		Primaries:     clonePeerConfs(zd.PrimariesConf),
 		Notify:        zd.Notify,
+		AllowNotify:   zd.AllowNotify,
+		Downstreams:   zd.Downstreams,
 		OptionsStrs:   optionsStrs,
 		SourceCatalog: zd.SourceCatalog,
 		ApiManaged:    zd.Options[OptApiManagedZone],
@@ -470,10 +475,16 @@ func (conf *Config) getDynamicTsigKeysFromZones(zones []ZoneConf) []TsigDetails 
 	var out []TsigDetails
 	for _, z := range zones {
 		for _, p := range z.Primaries {
-			if p.Key == "" || p.Key == NOKEY || seen[p.Key] {
+			if p.Key == "" || p.Key == NOKEY {
 				continue
 			}
-			seen[p.Key] = true
+			// Dedup by the canonical name (TsigKeyStore.Get canonicalises), so
+			// mixed-case / trailing-dot variants of one key aren't written twice.
+			canon := dns.CanonicalName(p.Key)
+			if seen[canon] {
+				continue
+			}
+			seen[canon] = true
 			if d, ok := conf.Internal.TsigKeyStore.Get(p.Key); ok {
 				out = append(out, d)
 			}
@@ -612,29 +623,44 @@ type DynamicZoneInput struct {
 	TsigAlgo   string
 }
 
-// applyInlineTsigKey upserts an inline TSIG key supplied with an add/modify
-// request into the keys: store and points every keyless primary (NOKEY/empty) at
-// it. It is a no-op when no inline key name was given. Must run before the primary
-// key-validation loop (so the new name validates) and before persistence (so the
-// secret is written out by getDynamicTsigKeysFromZones).
-func (conf *Config) applyInlineTsigKey(in *DynamicZoneInput) error {
+// stageInlineTsigKey validates an inline TSIG key supplied with an add/modify
+// request and points every keyless primary (NOKEY/empty) at it, WITHOUT touching
+// the live key store. It returns the staged key to be committed only after the
+// request fully succeeds (commitStagedTsigKey), so a rejected add/modify never
+// installs or rotates a live key. Returns (nil, nil) when no inline key was given.
+func (conf *Config) stageInlineTsigKey(in *DynamicZoneInput) (*TsigDetails, error) {
 	if in.TsigName == "" {
-		return nil
+		return nil, nil
 	}
 	algo := in.TsigAlgo
 	if algo == "" {
 		algo = "hmac-sha256"
 	}
 	if err := validateTsigKeySpec(in.TsigName, algo, in.TsigSecret); err != nil {
-		return err
+		return nil, err
 	}
-	conf.Internal.TsigKeyStore.Add(TsigDetails{Name: in.TsigName, Algorithm: algo, Secret: in.TsigSecret})
 	for i := range in.Primaries {
 		if in.Primaries[i].Key == "" || in.Primaries[i].Key == NOKEY {
 			in.Primaries[i].Key = in.TsigName
 		}
 	}
-	return nil
+	return &TsigDetails{Name: in.TsigName, Algorithm: algo, Secret: in.TsigSecret}, nil
+}
+
+// commitStagedTsigKey adds a staged inline key to the live store just before the
+// dynamic-zone request is registered/persisted, and returns a rollback func. The
+// rollback removes the key only if it was newly added, so rolling back a failed
+// request never deletes a pre-existing config/runtime key. nil staged => no-ops.
+func (conf *Config) commitStagedTsigKey(staged *TsigDetails) (rollback func()) {
+	if staged == nil {
+		return func() {}
+	}
+	existed := conf.Internal.TsigKeyStore.Has(staged.Name)
+	conf.Internal.TsigKeyStore.Add(*staged)
+	if existed {
+		return func() {}
+	}
+	return func() { conf.Internal.TsigKeyStore.Delete(staged.Name) }
 }
 
 // ProvisionDynamicZone is the shared *add* core, called by both the catalog
@@ -665,14 +691,16 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 		return "", fmt.Errorf("zone %s already exists", name)
 	}
 
-	// An inline TSIG key (tsig_name/secret/algo) is upserted into the keys: store
-	// and applied to keyless primaries before we validate the primary keys below.
-	if err := conf.applyInlineTsigKey(&in); err != nil {
-		return "", fmt.Errorf("zone %s: %w", name, err)
+	// Stage an inline TSIG key (tsig_name/secret/algo) and apply it to keyless
+	// primaries. Staging only validates + rewrites; the key is committed to the
+	// live store later (after persistence), so a rejected add installs nothing.
+	staged, serr := conf.stageInlineTsigKey(&in)
+	if serr != nil {
+		return "", fmt.Errorf("zone %s: %w", name, serr)
 	}
 
-	// Validate every primary's key: NOKEY (no TSIG) or a name defined in the
-	// keys: store (config or inline/API). An unknown name is rejected.
+	// Validate every primary's key: NOKEY (no TSIG), a name defined in the keys:
+	// store, or the staged inline key. An unknown name is rejected.
 	if in.Type == Secondary {
 		if len(in.Primaries) == 0 {
 			return "", fmt.Errorf("secondary zone %s requires at least one primary", name)
@@ -686,7 +714,7 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 			if p.Key == "" {
 				return "", fmt.Errorf("secondary zone %s primary %q has no key (use NOKEY for no TSIG)", name, p.Addr)
 			}
-			if !conf.tsigKeyDefined(p.Key) {
+			if !conf.tsigKeyAcceptable(p.Key, staged) {
 				return "", fmt.Errorf("unknown primary key %q (define it in keys.tsig or use NOKEY for no TSIG)", p.Key)
 			}
 		}
@@ -724,11 +752,15 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 		KeyDB:         conf.Internal.KeyDB,
 	}
 
-	// Register, then persist; roll back the live registration if persist fails
-	// (never leave a live-but-unpersisted zone that vanishes on restart).
+	// Commit the staged inline key just before registration/persistence (so the
+	// persisted keys: block includes it), then register and persist. On persist
+	// failure, roll back BOTH the registration and the key so a failed add leaves
+	// no live-but-unpersisted zone and no orphaned live key.
+	rollbackKey := conf.commitStagedTsigKey(staged)
 	Zones.Set(name, zd)
 	if err := conf.AddDynamicZoneToConfig(zd); err != nil {
 		Zones.Remove(name)
+		rollbackKey()
 		return "", fmt.Errorf("failed to persist dynamic zone %s: %w", name, err)
 	}
 
@@ -827,11 +859,13 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	if !oldZd.Options[OptApiManagedZone] {
 		return "", fmt.Errorf("zone %s is not API-managed and cannot be modified here", name)
 	}
-	// An inline TSIG key (tsig_name/secret/algo) is upserted and applied to keyless
-	// primaries first; a same-name upsert rotates the secret for primaries that
-	// already reference it (no primaries needed for a pure key rotation).
-	if err := conf.applyInlineTsigKey(&in); err != nil {
-		return "", fmt.Errorf("zone %s: %w", name, err)
+	// Stage an inline TSIG key (validate + rewrite keyless primaries) without
+	// mutating the live store; a same-name stage rotates the secret for primaries
+	// that already reference it (no primaries needed for a pure rotation). The key
+	// is committed only after the modify succeeds.
+	staged, serr := conf.stageInlineTsigKey(&in)
+	if serr != nil {
+		return "", fmt.Errorf("zone %s: %w", name, serr)
 	}
 	// When primaries are supplied they REPLACE the set, so every entry must be
 	// complete (empty in.Primaries means "keep the old set" and skips this).
@@ -839,7 +873,7 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		if p.Addr == "" {
 			return "", fmt.Errorf("zone %s: a modified primary has no address", name)
 		}
-		if !conf.tsigKeyDefined(p.Key) {
+		if !conf.tsigKeyAcceptable(p.Key, staged) {
 			return "", fmt.Errorf("zone %s primary %q has unknown key %q (define it in keys.tsig or use NOKEY)", name, p.Addr, p.Key)
 		}
 	}
@@ -889,6 +923,9 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		Data:          core.NewCmap[OwnerData](),
 		KeyDB:         conf.Internal.KeyDB,
 	}
+	// Commit the staged inline key just before persistence so the rewritten file
+	// includes it; roll it back if persistence fails.
+	rollbackKey := conf.commitStagedTsigKey(staged)
 	Zones.Set(name, newZd)
 
 	// (4) Overwrite the persisted entry. AddDynamicZoneToConfig rewrites the
@@ -896,6 +933,7 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	// rewrite includes the new params). On failure, surface it — the live zone
 	// now has the new params but they would be lost on restart.
 	if err := conf.AddDynamicZoneToConfig(newZd); err != nil {
+		rollbackKey()
 		return "", fmt.Errorf("zone %s modified in memory but failed to persist (change will be lost on restart): %w", name, err)
 	}
 	// Partial resolution of the new primaries: served from what resolved, with

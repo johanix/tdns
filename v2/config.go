@@ -558,10 +558,19 @@ func (conf *Config) ReloadConfig() (string, error) {
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
 	}
-	// Rebuild the TSIG key store so a keys: edit is picked up on reload (config
-	// binds last → "config wins"). Bad entries are skipped + logged.
-	if kerr := conf.LoadTsigKeys(); kerr != nil {
-		lgConfig.Error("TSIG keys: config error on reload (affected keys skipped)", "err", kerr)
+	// Rebuild the TSIG key store ONLY after a successful parse (a failed reload
+	// must not swap in a half-parsed config), then RE-MERGE the persisted
+	// dynamic/API keys. LoadTsigKeys repopulates from conf.Keys.Tsig only, so
+	// without the re-merge a reload would silently drop API-created keys and break
+	// dynamic secondaries' next signed SOA/AXFR/NOTIFY lookup. Config keys win
+	// (loadDynamicTsigKeys skips names already defined).
+	if err == nil {
+		if kerr := conf.LoadTsigKeys(); kerr != nil {
+			lgConfig.Error("TSIG keys: config error on reload (affected keys skipped)", "err", kerr)
+		}
+		if cf, derr := conf.loadDynamicConfigFile(); derr == nil && cf != nil && cf.Keys != nil {
+			conf.loadDynamicTsigKeys(cf.Keys.Tsig)
+		}
 	}
 	Globals.App.ServerConfigTime = time.Now()
 	return "Config reloaded.", err

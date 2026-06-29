@@ -35,11 +35,17 @@ func (p tsigKeyProvider) hmac(t *dns.TSIG) (hash.Hash, error) {
 	if !ok {
 		return nil, dns.ErrSecret
 	}
+	// Bind the algorithm to the configured key (RFC 8945 keys are algorithm-bound):
+	// an inbound TSIG must use the algorithm the key was provisioned with, else a
+	// hmac-sha256 key would also accept a hmac-sha1 MAC whenever the secret matches.
+	if dns.CanonicalName(t.Algorithm) != dns.CanonicalName(d.Algorithm) {
+		return nil, dns.ErrKeyAlg
+	}
 	rawsecret, err := base64.StdEncoding.DecodeString(d.Secret)
 	if err != nil {
 		return nil, err
 	}
-	switch dns.CanonicalName(t.Algorithm) {
+	switch dns.CanonicalName(d.Algorithm) {
 	case dns.HmacSHA1:
 		return hmac.New(sha1.New, rawsecret), nil
 	case dns.HmacSHA224:
@@ -152,6 +158,9 @@ func checkInboundTSIG(w dns.ResponseWriter, r *dns.Msg, requiredKey string) erro
 // directly and must NOT call this. The server must have a TsigProvider set for the
 // MAC to actually be written.
 func signResponseLikeRequest(w dns.ResponseWriter, req, resp *dns.Msg) {
+	if w == nil || req == nil || resp == nil {
+		return
+	}
 	if ts := req.IsTsig(); ts != nil && w.TsigStatus() == nil {
 		resp.SetTsig(ts.Hdr.Name, ts.Algorithm, ts.Fudge, time.Now().Unix())
 	}

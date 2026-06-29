@@ -111,6 +111,12 @@ func parseIPSpec(spec string) (pfx netip.Prefix, lo, hi netip.Addr, isRange bool
 		if e1 != nil || e2 != nil {
 			return pfx, lo, hi, false, fmt.Errorf("bad masked spec %q", spec)
 		}
+		// Reject a family mismatch before building the prefix: a v6 base with a v4
+		// mask (or vice versa) would otherwise silently produce a wrong-scope prefix
+		// (e.g. 2001:db8::&255.255.255.0 -> a /24 of the v6 address).
+		if base.Unmap().Is4() != maskAddr.Unmap().Is4() {
+			return pfx, lo, hi, false, fmt.Errorf("masked spec %q mixes IPv4 and IPv6", spec)
+		}
 		// Size returns (0, 0) for a non-canonical (non-contiguous) mask.
 		ones, bits := net.IPMask(maskAddr.AsSlice()).Size()
 		if bits == 0 {

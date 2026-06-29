@@ -1087,6 +1087,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				Notify:        zconf.Notify,
 				AllowNotify:   zconf.AllowNotify,
 				Downstreams:   zconf.Downstreams,
+				ConfigUpdate:  true, // config-bearing: lets reload clear removed ACLs
 				Zonefile:      zconf.Zonefile,
 				Options:       options,
 				UpdatePolicy:  policy,

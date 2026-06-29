@@ -36,7 +36,7 @@ func TestValidateTsigKeySpec(t *testing.T) {
 	}
 }
 
-func TestApplyInlineTsigKey(t *testing.T) {
+func TestStageInlineTsigKey(t *testing.T) {
 	conf := &Config{}
 	conf.Internal.TsigKeyStore = NewTsigKeyStore()
 	in := DynamicZoneInput{
@@ -45,13 +45,18 @@ func TestApplyInlineTsigKey(t *testing.T) {
 		TsigName:   "ikey",
 		TsigSecret: b64Secret16, // no algo -> default hmac-sha256
 	}
-	if err := conf.applyInlineTsigKey(&in); err != nil {
-		t.Fatalf("applyInlineTsigKey: %v", err)
+	staged, err := conf.stageInlineTsigKey(&in)
+	if err != nil {
+		t.Fatalf("stageInlineTsigKey: %v", err)
 	}
-	d, ok := conf.Internal.TsigKeyStore.Get("ikey")
-	if !ok || d.Algorithm != "hmac-sha256" {
-		t.Fatalf("key not upserted with default algo: %+v ok=%v", d, ok)
+	if staged == nil || staged.Algorithm != "hmac-sha256" {
+		t.Fatalf("staged key missing or wrong default algo: %+v", staged)
 	}
+	// Staging must NOT touch the live store.
+	if conf.Internal.TsigKeyStore.Has("ikey") {
+		t.Error("staging must not commit the key to the live store")
+	}
+	// Keyless primary points at the inline key; the explicit one is untouched.
 	if in.Primaries[0].Key != "ikey" {
 		t.Errorf("keyless primary Key = %q, want ikey", in.Primaries[0].Key)
 	}
@@ -59,16 +64,35 @@ func TestApplyInlineTsigKey(t *testing.T) {
 		t.Errorf("explicit primary Key = %q, want explicit (must be untouched)", in.Primaries[1].Key)
 	}
 
-	// No inline name -> no-op.
-	in2 := DynamicZoneInput{Primaries: []PeerConf{{Addr: "x", Key: NOKEY}}}
-	if err := conf.applyInlineTsigKey(&in2); err != nil || in2.Primaries[0].Key != NOKEY {
-		t.Errorf("no inline name should be a no-op: err=%v key=%q", err, in2.Primaries[0].Key)
+	// Commit installs it; the returned rollback removes a newly-added key.
+	rollback := conf.commitStagedTsigKey(staged)
+	if d, ok := conf.Internal.TsigKeyStore.Get("ikey"); !ok || d.Algorithm != "hmac-sha256" {
+		t.Fatalf("commit did not install the key: %+v ok=%v", d, ok)
+	}
+	rollback()
+	if conf.Internal.TsigKeyStore.Has("ikey") {
+		t.Error("rollback should remove a newly-added key")
 	}
 
-	// Inline name with an invalid secret -> error (and nothing stored).
+	// Committing a name that already exists must NOT delete it on rollback.
+	conf.Internal.TsigKeyStore.Add(TsigDetails{Name: "pre", Algorithm: "hmac-sha256", Secret: b64Secret16})
+	rb := conf.commitStagedTsigKey(&TsigDetails{Name: "pre", Algorithm: "hmac-sha256", Secret: "YWJjZGVmZ2hpamtsbW5vcA=="})
+	rb()
+	if !conf.Internal.TsigKeyStore.Has("pre") {
+		t.Error("rollback must not delete a pre-existing key")
+	}
+
+	// No inline name -> (nil, nil) no-op.
+	in2 := DynamicZoneInput{Primaries: []PeerConf{{Addr: "x", Key: NOKEY}}}
+	staged2, err := conf.stageInlineTsigKey(&in2)
+	if err != nil || staged2 != nil || in2.Primaries[0].Key != NOKEY {
+		t.Errorf("no inline name should be a no-op: staged=%v err=%v key=%q", staged2, err, in2.Primaries[0].Key)
+	}
+
+	// Inline name with an invalid secret -> error, nothing staged, nothing stored.
 	in3 := DynamicZoneInput{TsigName: "bad", TsigSecret: "%%%"}
-	if err := conf.applyInlineTsigKey(&in3); err == nil {
-		t.Error("invalid inline secret should error")
+	if staged3, err := conf.stageInlineTsigKey(&in3); err == nil || staged3 != nil {
+		t.Errorf("invalid inline secret should error with no staged key: staged=%v err=%v", staged3, err)
 	}
 	if conf.Internal.TsigKeyStore.Has("bad") {
 		t.Error("a rejected inline key must not be stored")
