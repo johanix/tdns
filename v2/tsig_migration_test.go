@@ -3,6 +3,7 @@ package tdns
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -36,7 +37,7 @@ func TestMigrateDynamicConfigTsigKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read config: %v", err)
 	}
-	if contains := string(data); containsKeysBlock(contains) {
+	if strings.Contains(string(data), "\nkeys:") || strings.Contains(string(data), "\nkeys:\n") {
 		t.Fatal("rewritten file must not contain keys: block")
 	}
 
@@ -44,19 +45,6 @@ func TestMigrateDynamicConfigTsigKeys(t *testing.T) {
 	if err := conf.migrateDynamicConfigTsigKeys(cf); err != nil {
 		t.Fatalf("second migrate: %v", err)
 	}
-}
-
-func containsKeysBlock(s string) bool {
-	return len(s) > 0 && (containsSubstring(s, "\nkeys:") || containsSubstring(s, "\nkeys:\n"))
-}
-
-func containsSubstring(s, sub string) bool {
-	for i := 0; i+len(sub) <= len(s); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }
 
 func TestMigrateDynamicConfigTsigKeys_SkipsExisting(t *testing.T) {
