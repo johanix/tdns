@@ -1110,26 +1110,21 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 	return all_zones, broken_zones, nil
 }
 
+// ExpandTemplate applies template tmpl's settings to zone zconf. Every config
+// field the template SETS is copied to the zone UNLESS the zone already set it
+// (the zone always wins), so new ZoneConf config fields are propagated
+// automatically without editing this function. Three fields need bespoke
+// handling and are excluded from the generic copy: Zonefile (%-substituted with
+// the zone name), OptionsStrs (unioned, not gap-filled) and DnssecPolicy (gated
+// off for agents). Name and Template are never copied from a template. Runtime/
+// display fields (Error, Frozen, RefreshCount, Provisioning, …) are never set in
+// a template config, so the zero-value check skips them naturally.
 func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, error) {
+	// --- bespoke fields (cannot be a plain gap-fill copy) ---
 
-	// for each field in tmpl, check whether it contains any data
-	// and if so, then let that data overwrite the same field in zconf
-
-	if tmpl.Type != "" {
-		zconf.Type = tmpl.Type
-	}
-	if tmpl.Store != "" {
-		// fmt.Printf("ExpandTemplate: zone %s now uses the \"%s\" storage alternative.\n", zconf.Name, tmpl.Store)
-		zconf.Store = tmpl.Store
-	}
-	if len(tmpl.Primaries) > 0 {
-		// Clone — ParseZones normalizes zconf.Primaries[i].Addr in place, so an
-		// alias of the template slice would let the first zone using this
-		// template mutate the shared template state for every later zone.
-		zconf.Primaries = clonePeerConfs(tmpl.Primaries)
-	}
-	if len(tmpl.Zonefile) > 0 {
-		// H26: Validate zone name doesn't contain format specifiers
+	// Zonefile: the template carries a pattern that is %-substituted with the
+	// zone name, not copied verbatim.
+	if zconf.Zonefile == "" && tmpl.Zonefile != "" {
 		if strings.ContainsAny(zconf.Name, "%") {
 			return zconf, fmt.Errorf("zone name %q contains format specifiers", zconf.Name)
 		}
@@ -1139,37 +1134,46 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 		}
 		zconf.Zonefile = expanded
 	}
-	if len(tmpl.Notify) > 0 {
-		zconf.Notify = tmpl.Notify
-	}
-	if len(tmpl.AllowNotify) > 0 {
-		zconf.AllowNotify = tmpl.AllowNotify
-	}
-	if len(tmpl.Downstreams) > 0 {
-		zconf.Downstreams = tmpl.Downstreams
-	}
 
-	// template options are appended to existing zone options
-	if len(tmpl.OptionsStrs) > 0 {
-		for _, option := range tmpl.OptionsStrs {
-			if !slices.Contains(zconf.OptionsStrs, option) {
-				zconf.OptionsStrs = append(zconf.OptionsStrs, option)
-			}
+	// OptionsStrs: union (append template options the zone lacks), not gap-fill.
+	for _, option := range tmpl.OptionsStrs {
+		if !slices.Contains(zconf.OptionsStrs, option) {
+			zconf.OptionsStrs = append(zconf.OptionsStrs, option)
 		}
 	}
-	if (tmpl.UpdatePolicy.Child.Type != "" && len(tmpl.UpdatePolicy.Child.RRtypes) > 0) ||
-		(tmpl.UpdatePolicy.Zone.Type != "" && len(tmpl.UpdatePolicy.Zone.RRtypes) > 0) {
-		zconf.UpdatePolicy = tmpl.UpdatePolicy
-	}
 
-	// tdns-agent does not have DNSSEC policies, so we ignore them.
-	// A zone's explicit dnssecpolicy wins over the template's: the template
-	// supplies a default only when the zone didn't set its own.
-	if appMode != AppTypeAgent && tmpl.DnssecPolicy != "" && zconf.DnssecPolicy == "" {
+	// DnssecPolicy: gap-fill, but agents do not sign so it is gated off there.
+	if appMode != AppTypeAgent && zconf.DnssecPolicy == "" && tmpl.DnssecPolicy != "" {
 		zconf.DnssecPolicy = tmpl.DnssecPolicy
 	}
 
-	zconf.MultiSigner = tmpl.MultiSigner
+	// --- generic gap-fill for every other config field (zone wins) ---
+	// The template fills only the fields the zone left at their zero value; a
+	// template config never sets runtime/display fields, so IsZero skips them.
+	bespoke := map[string]bool{
+		"Name": true, "Template": true, // never copied from a template
+		"Zonefile": true, "OptionsStrs": true, "DnssecPolicy": true, // handled above
+	}
+	zv := reflect.ValueOf(&zconf).Elem()
+	tv := reflect.ValueOf(tmpl).Elem()
+	for i := 0; i < zv.NumField(); i++ {
+		if bespoke[zv.Type().Field(i).Name] {
+			continue
+		}
+		zf, tf := zv.Field(i), tv.Field(i)
+		if !zf.CanSet() || !zf.IsZero() || tf.IsZero() {
+			continue // not settable, zone already set it, or template didn't set it
+		}
+		if zf.Kind() == reflect.Slice {
+			// Clone so the zone doesn't alias the template's backing array —
+			// ParseZones normalizes some slices (e.g. Primaries) in place.
+			c := reflect.MakeSlice(zf.Type(), tf.Len(), tf.Len())
+			reflect.Copy(c, tf)
+			zf.Set(c)
+		} else {
+			zf.Set(tf)
+		}
+	}
 
 	return zconf, nil
 }
