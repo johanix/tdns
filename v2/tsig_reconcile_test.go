@@ -229,6 +229,8 @@ func TestTsigKeyZoneRefCount_AllFields(t *testing.T) {
 	}
 	for _, tc := range fields {
 		Zones.Set(tc.zd.ZoneName, tc.zd)
+		zoneName := tc.zd.ZoneName
+		t.Cleanup(func() { Zones.Remove(zoneName) })
 		if n := conf.tsigKeyZoneRefCount("k."); n != 1 {
 			t.Fatalf("%s: refcount = %d, want 1", tc.name, n)
 		}

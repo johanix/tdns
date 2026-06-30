@@ -15,8 +15,8 @@ import (
 // TsigKeyMgmt implements DB CRUD for the global TSIG keystore. Mutations return
 // TsigCacheDelta on the response for post-commit cache refresh (§4); they do not
 // touch the in-memory TsigKeyStore directly. conf supplies live zone refcounts.
-func (kdb *KeyDB) TsigKeyMgmt(conf *Config, tx *Tx, kp KeystorePost) (*KeystoreResponse, error) {
-	resp := &KeystoreResponse{Time: time.Now(), TsigCacheDelta: &TsigCacheDelta{}}
+func (kdb *KeyDB) TsigKeyMgmt(conf *Config, tx *Tx, kp KeystorePost) (resp *KeystoreResponse, retErr error) {
+	resp = &KeystoreResponse{Time: time.Now(), TsigCacheDelta: &TsigCacheDelta{}}
 
 	localtx := false
 	var err error
@@ -32,8 +32,15 @@ func (kdb *KeyDB) TsigKeyMgmt(conf *Config, tx *Tx, kp KeystorePost) (*KeystoreR
 	defer func() {
 		if localtx {
 			if txSuccess {
-				if err := tx.Commit(); err != nil {
-					lgSigner.Error("TsigKeyMgmt commit failed", "err", err)
+				if cerr := tx.Commit(); cerr != nil {
+					lgSigner.Error("TsigKeyMgmt commit failed", "err", cerr)
+					if retErr == nil {
+						retErr = cerr
+						if resp != nil {
+							resp.Error = true
+							resp.ErrorMsg = cerr.Error()
+						}
+					}
 				}
 			} else {
 				tx.Rollback()
@@ -183,6 +190,9 @@ func (kdb *KeyDB) tsigKeyMgmtAdd(_ *Config, tx *Tx, kp KeystorePost, resp *Keyst
 			resp.TsigCacheDelta = nil
 			return nil
 		}
+		if existing.Origin == "config" {
+			return fmt.Errorf("TSIG key %q is config-managed (origin=config); change it in keys.tsig, not via the keystore", row.Keyname)
+		}
 		if !kp.Force {
 			return fmt.Errorf("TSIG key %q already exists with a different secret/algorithm (use --force)", row.Keyname)
 		}
@@ -255,6 +265,9 @@ func (kdb *KeyDB) tsigKeyMgmtImport(conf *Config, tx *Tx, kp KeystorePost, resp 
 		} else if tsigDetailsMatchRow(t, existing) {
 			disp.Status = "unchanged"
 			unchanged++
+		} else if existing.Origin == "config" {
+			disp.Status = "conflict"
+			conflicts++
 		} else if overwriteApproved(t.Name, kp) {
 			row := TsigKeystoreRow{
 				Keyname: t.Name, Algorithm: t.Algorithm, Secret: t.Secret,

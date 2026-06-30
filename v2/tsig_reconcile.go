@@ -35,8 +35,8 @@ type TsigReconcileResult struct {
 // ReconcileConfigTsigKeys applies keys.tsig to TsigKeystore without silent overwrite.
 // isReferenced returns true when a config-origin key removed from the YAML is still
 // referenced and must be retained.
-func (kdb *KeyDB) ReconcileConfigTsigKeys(entries []TsigDetails, opts TsigReconcileOptions, isReferenced func(string) bool) (TsigReconcileResult, error) {
-	result := TsigReconcileResult{TsigCacheDelta: &TsigCacheDelta{}}
+func (kdb *KeyDB) ReconcileConfigTsigKeys(entries []TsigDetails, opts TsigReconcileOptions, isReferenced func(string) bool) (result TsigReconcileResult, retErr error) {
+	result = TsigReconcileResult{TsigCacheDelta: &TsigCacheDelta{}}
 	want := make(map[string]TsigDetails, len(entries))
 	for _, t := range entries {
 		want[dns.CanonicalName(t.Name)] = t
@@ -53,8 +53,11 @@ func (kdb *KeyDB) ReconcileConfigTsigKeys(entries []TsigDetails, opts TsigReconc
 	var txSuccess bool
 	defer func() {
 		if txSuccess {
-			if err := tx.Commit(); err != nil {
-				lgConfig.Error("ReconcileConfigTsigKeys commit failed", "err", err)
+			if cerr := tx.Commit(); cerr != nil {
+				lgConfig.Error("ReconcileConfigTsigKeys commit failed", "err", cerr)
+				if retErr == nil {
+					retErr = cerr
+				}
 			}
 		} else {
 			tx.Rollback()
@@ -142,8 +145,10 @@ func (kdb *KeyDB) ReconcileConfigTsigKeys(entries []TsigDetails, opts TsigReconc
 func formatTsigReconcileMsg(res TsigReconcileResult) string {
 	var parts []string
 	parts = append(parts, "TSIG config keys reconciled.")
-	if n := len(res.TsigCacheDelta.Changed) + len(res.TsigCacheDelta.Deleted); n > 0 {
-		parts = append(parts, fmt.Sprintf("%d cache update(s).", n))
+	if res.TsigCacheDelta != nil {
+		if n := len(res.TsigCacheDelta.Changed) + len(res.TsigCacheDelta.Deleted); n > 0 {
+			parts = append(parts, fmt.Sprintf("%d cache update(s).", n))
+		}
 	}
 	if len(res.Conflicts) > 0 {
 		parts = append(parts, fmt.Sprintf("%d secret conflict(s) withheld: %s (use config reload-tsig --force or --interactive).",

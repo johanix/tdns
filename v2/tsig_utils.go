@@ -14,6 +14,7 @@ import (
 // same validateTsigKeySpec rules as the server LoadTsigKeys path.
 func ParseTsigKeys(keyconf *KeyConf) (int, map[string]string) {
 	if keyconf == nil || len(keyconf.Tsig) == 0 {
+		Globals.TsigKeys = nil
 		return 0, nil
 	}
 	valid, firstErr := collectValidConfigTsigKeys(keyconf.Tsig)
@@ -21,6 +22,7 @@ func ParseTsigKeys(keyconf *KeyConf) (int, map[string]string) {
 		fmt.Fprintf(os.Stderr, "warning: skipping invalid TSIG key in tdns-cli.yaml: %v\n", firstErr)
 	}
 	if len(valid) == 0 {
+		Globals.TsigKeys = nil
 		return 0, nil
 	}
 	Globals.TsigKeys = make(map[string]*TsigDetails, len(valid))

@@ -3,6 +3,8 @@ package tdns
 import "testing"
 
 func TestParseTsigKeys_StrictValidation(t *testing.T) {
+	saved := Globals.TsigKeys
+	t.Cleanup(func() { Globals.TsigKeys = saved })
 	Globals.TsigKeys = nil
 	n, secrets := ParseTsigKeys(&KeyConf{Tsig: []TsigDetails{
 		{Name: "good.", Algorithm: "hmac-sha256", Secret: b64Secret16},

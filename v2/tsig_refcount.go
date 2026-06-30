@@ -10,7 +10,7 @@ import "github.com/miekg/dns"
 // keyname. Used by config-key reconcile to withhold dropping referenced keys (§8).
 func (conf *Config) tsigKeyZoneRefCount(keyname string) int {
 	c := dns.CanonicalName(keyname)
-	if c == "" || c == NOKEY {
+	if c == "" || tsigNameIsReserved(keyname) {
 		return 0
 	}
 	n := 0

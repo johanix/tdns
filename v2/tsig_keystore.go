@@ -198,7 +198,7 @@ func updateTsigKeystoreConfig(tx *Tx, t TsigDetails) error {
 // SyncConfigTsigKeys materialises keys.tsig into TsigKeystore as origin=config rows:
 // insert new names, update changed config-origin rows, drop config-origin rows removed
 // from the YAML. An api-origin row with a differing secret is left unchanged (WARN).
-func (kdb *KeyDB) SyncConfigTsigKeys(entries []TsigDetails) error {
+func (kdb *KeyDB) SyncConfigTsigKeys(entries []TsigDetails) (retErr error) {
 	want := make(map[string]TsigDetails, len(entries))
 	for _, t := range entries {
 		want[dns.CanonicalName(t.Name)] = t
@@ -211,8 +211,11 @@ func (kdb *KeyDB) SyncConfigTsigKeys(entries []TsigDetails) error {
 	var txSuccess bool
 	defer func() {
 		if txSuccess {
-			if err := tx.Commit(); err != nil {
-				lgConfig.Error("SyncConfigTsigKeys commit failed", "err", err)
+			if cerr := tx.Commit(); cerr != nil {
+				lgConfig.Error("SyncConfigTsigKeys commit failed", "err", cerr)
+				if retErr == nil {
+					retErr = cerr
+				}
 			}
 		} else {
 			tx.Rollback()

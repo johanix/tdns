@@ -271,6 +271,9 @@ func TestReconcileConfigTsigKeys_InteractiveOverwrite(t *testing.T) {
 	res, err := kdb.ReconcileConfigTsigKeys([]TsigDetails{
 		{Name: "k.", Algorithm: "hmac-sha256", Secret: b64Secret16},
 	}, TsigReconcileOptions{}, nil)
+	if err != nil {
+		t.Fatalf("unexpected reconcile error: %v", err)
+	}
 	if len(res.Conflicts) != 1 {
 		t.Fatalf("expected conflict, got %+v err=%v", res.Conflicts, err)
 	}

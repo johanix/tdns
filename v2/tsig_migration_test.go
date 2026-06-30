@@ -41,8 +41,10 @@ func TestMigrateDynamicConfigTsigKeys(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read config: %v", err)
 	}
-	if strings.Contains(string(data), "\nkeys:") || strings.Contains(string(data), "\nkeys:\n") {
-		t.Fatal("rewritten file must not contain keys: block")
+	for _, ln := range strings.Split(string(data), "\n") {
+		if strings.HasPrefix(strings.TrimSpace(ln), "keys:") {
+			t.Fatal("rewritten file must not contain keys: block")
+		}
 	}
 	if err := conf.migrateDynamicConfigTsigKeys(cf); err != nil {
 		t.Fatalf("second migrate: %v", err)

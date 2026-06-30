@@ -56,6 +56,11 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 						}
 						if applyErr := ApplyTsigCacheDelta(conf.Internal.TsigKeyStore, kdb, tsigCacheDelta); applyErr != nil {
 							lgApi.Error("ApplyTsigCacheDelta failed", "err", applyErr)
+							if resp == nil {
+								resp = &KeystoreResponse{Time: time.Now()}
+							}
+							resp.Error = true
+							resp.ErrorMsg = fmt.Sprintf("TSIG keystore committed, but runtime cache refresh failed: %v", applyErr)
 						}
 						if !tsigMgmt {
 							confMu.Unlock()

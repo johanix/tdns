@@ -270,6 +270,9 @@ func tsigKeyImport(role, file, format, owner string, force, interactive, verbose
 	}
 	tr, err := tsigKeystorePost(role, post)
 	if err != nil {
+		if tr.Error || len(tr.TsigImport) > 0 || tr.Msg != "" {
+			printTsigImportResult(tr, verbose)
+		}
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
 	}

@@ -81,7 +81,7 @@ func runReloadTsigCmd(role string, force, interactive bool) {
 	if interactive {
 		requireInteractiveTTY()
 		probe, err := SendConfigCommand(api, tdns.ConfigPost{Command: "reload-tsig"})
-		if err != nil {
+		if err != nil && len(probe.TsigConflicts) == 0 {
 			fmt.Printf("Error: %s\n", err.Error())
 			os.Exit(1)
 		}
@@ -113,6 +113,12 @@ func runReloadTsigCmd(role string, force, interactive bool) {
 
 	resp, err := SendConfigCommand(api, post)
 	if err != nil {
+		if resp.Msg != "" {
+			fmt.Println(resp.Msg)
+		}
+		if reloadTsigWithheld(resp) {
+			os.Exit(1)
+		}
 		fmt.Printf("Error: %s\n", err.Error())
 		os.Exit(1)
 	}
