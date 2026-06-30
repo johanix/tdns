@@ -52,6 +52,20 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, err
 		return updated, err
 
 	case Secondary:
+		// D1: re-resolve hostname primaries each refresh, so a transient
+		// resolution failure self-heals and a changed primary address is
+		// followed. Literal-IP primaries pass through unchanged (no lookup). If
+		// nothing resolves this cycle (IMR not up yet at startup, or the name is
+		// temporarily unreachable), keep the previous upstreams; DoTransfer then
+		// surfaces a refresh error and we retry next cycle — never a permanent
+		// quarantine.
+		if len(zd.PrimariesConf) > 0 {
+			if res := resolvePrimaries(context.Background(), conf.Internal.ImrEngine, zd.PrimariesConf); len(res.Resolved) > 0 {
+				zd.Upstreams = res.Resolved
+			} else {
+				lg.Warn("zone refresh: no primary resolved this cycle, will retry next refresh", "zone", zd.ZoneName, "unresolved", res.Unresolved)
+			}
+		}
 		do_transfer, upstream_serial, err := zd.DoTransfer(conf)
 		if err != nil {
 			return false, err

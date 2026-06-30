@@ -693,12 +693,15 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			// cleared by the SetError(NoError) reset at the top of the loop.
 			res := resolvePrimaries(ctx, conf.Internal.ImrEngine, zconf.Primaries)
 			if len(res.Resolved) == 0 {
-				lgConfig.Error("secondary zone: no primary resolved to an address, zone in error state", "zone", zname, "unresolved", res.Unresolved)
-				zd.SetError(ConfigError, "no primary resolved to an address (unresolved: %v)", res.Unresolved)
-				broken_zones = append(broken_zones, zname)
-				continue
-			}
-			if len(res.Unresolved) > 0 || len(res.KeyCollisions) > 0 {
+				// D1: an unresolved hostname primary at parse time is NOT fatal.
+				// The zone is created and the refresh engine re-resolves on every
+				// cycle, so a transient failure (or an IMR not yet up at boot)
+				// self-heals instead of permanently quarantining the zone. It
+				// serves nothing until a primary resolves, surfacing as a refresh
+				// error rather than a config quarantine.
+				lgConfig.Warn("secondary zone: no primary resolved yet, will retry at refresh", "zone", zname, "unresolved", res.Unresolved)
+				zd.SetError(ConfigWarning, "no primary resolved yet (unresolved: %v); retrying at refresh", res.Unresolved)
+			} else if len(res.Unresolved) > 0 || len(res.KeyCollisions) > 0 {
 				// Count resolved addresses actually usable for transfer — not
 				// entries-minus-unresolved, which over-counts when a key
 				// collision drops an otherwise-resolved address.

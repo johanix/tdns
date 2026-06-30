@@ -196,20 +196,13 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	// if Globals.Debug {
 	//	log.Printf("*** MainInit: 5 ***")
 	// }
-	// The in-process IMR is the resolver for hostname primaries, which are
-	// resolved at parse/load time (ParseZones, LoadDynamicZoneFiles below).
-	// Those run before the per-app StartXxx brings up the ImrEngine goroutine,
-	// so initialize the IMR synchronously now. InitImrEngine primes the cache
-	// with root hints and is idempotent (first-init wins) — the later
-	// StartEngine("ImrEngine", ...) reuses this instance and just adds trust
-	// anchors + listeners. Non-fatal: if the IMR is disabled or fails to init,
-	// resolvePrimaries degrades (a hostname primary is reported unresolved),
-	// it does not abort startup.
-	if conf.Imr.Active == nil || *conf.Imr.Active {
-		if err := conf.InitImrEngine(ctx, false); err != nil {
-			lgConfig.Warn("early IMR init failed; hostname primaries will not resolve at parse time", "err", err)
-		}
-	}
+	// D1: hostname primaries are resolved at REFRESH time (zd.Refresh re-resolves
+	// PrimariesConf each cycle), not at parse/load time — so the IMR is no longer
+	// primed synchronously here. The per-app StartXxx brings up the ImrEngine
+	// goroutine, and the first refresh of a hostname-primary zone resolves once it
+	// is up (retrying until then). This removes a boot-time stall on a live
+	// root-NS fetch, and a primary that is briefly unresolvable at startup no
+	// longer quarantines its zone (it surfaces as a retryable refresh error).
 
 	// Parse all configured zones
 	all_zones, _, err := conf.ParseZones(ctx, false) // false = initial load, not reload
