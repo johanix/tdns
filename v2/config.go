@@ -558,9 +558,8 @@ func (conf *Config) ReloadConfig() (string, error) {
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
 	}
-	// Rebuild the TSIG store ONLY after a successful parse, then RE-MERGE persisted
-	// dynamic/API keys (kept until step 12). With KeyDB, reconcile config keys in
-	// place (§6) instead of swapping the whole cache.
+	// Rebuild the TSIG store ONLY after a successful parse. With KeyDB, reconcile
+	// config keys in place (§6).
 	if err == nil {
 		if conf.Internal.KeyDB != nil {
 			if _, kerr := conf.reconcileAndRefreshTsigKeys(TsigReconcileOptions{}); kerr != nil {
@@ -569,7 +568,6 @@ func (conf *Config) ReloadConfig() (string, error) {
 		} else if kerr := conf.LoadTsigKeys(); kerr != nil {
 			lgConfig.Error("TSIG keys: config error on reload (affected keys skipped)", "err", kerr)
 		}
-		conf.mergeDynamicTsigKeysAfterReload()
 	}
 	Globals.App.ServerConfigTime = time.Now()
 	return "Config reloaded.", err
@@ -587,7 +585,6 @@ func (conf *Config) ReloadTsigConfig(opts TsigReconcileOptions) (TsigReconcileRe
 		return TsigReconcileResult{}, err
 	}
 	result, err := conf.reconcileAndRefreshTsigKeys(opts)
-	conf.mergeDynamicTsigKeysAfterReload()
 	Globals.App.ServerConfigTime = time.Now()
 	return result, err
 }

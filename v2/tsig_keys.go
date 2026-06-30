@@ -122,6 +122,15 @@ func collectValidConfigTsigKeys(tsig []TsigDetails) ([]TsigDetails, error) {
 	return out, firstErr
 }
 
+// tsigConfigEffectiveOwner returns the owner label for a keys.tsig entry; empty
+// owner defaults to "config" (the origin for config-declared keys).
+func tsigConfigEffectiveOwner(t TsigDetails) string {
+	if strings.TrimSpace(t.Owner) != "" {
+		return t.Owner
+	}
+	return "config"
+}
+
 // LoadTsigKeys loads the in-memory TSIG store. When KeyDB is available the cache
 // is built from the TsigKeystore table after syncing keys.tsig into the DB as
 // origin=config rows. Without KeyDB (CLI client) keys.tsig alone populates the cache.
@@ -177,12 +186,6 @@ func (conf *Config) reconcileAndRefreshTsigKeys(opts TsigReconcileOptions) (Tsig
 		return result, err
 	}
 	return result, firstErr
-}
-
-func (conf *Config) mergeDynamicTsigKeysAfterReload() {
-	if cf, derr := conf.loadDynamicConfigFile(); derr == nil && cf != nil && cf.Keys != nil {
-		conf.loadDynamicTsigKeys(cf.Keys.Tsig)
-	}
 }
 
 // tsigKeyDefined reports whether a primary/notify/ACL key name is acceptable:
