@@ -415,7 +415,7 @@ Reconciled with §9 (review #6).
 | 12 | Legacy migration hook in `LoadDynamicZoneFiles` (§13); retire YAML `keys:` block; **remove** startup `loadDynamicTsigKeys` and reload YAML re-merge — same commit | Med | ~120 | done (`fd019e0`) |
 | 13 | `owner` end-to-end: `keys.tsig owner:`, `--owner`, `setowner`, list/purge logic (§2/§9) | Low–Med | ~90 | done (`ded1ecd`) |
 | 14 | CLI `ParseTsigKeys` strictness unification (§14, review #19) | Low | ~40 | done (`5dec326`) |
-| 15 | Tests across all of the above | — | ~600 | done (pending commit) |
+| 15 | Tests across all of the above | — | ~600 | done (`6e0c724`) |
 
 Rough total ~2.2k LOC incl. tests (tests bumped from ~400 — import extractors,
 reconcile, migration, refcount, immutability, three-mode). **Sequencing keeps a
