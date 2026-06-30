@@ -32,6 +32,10 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 
 		var resp *KeystoreResponse
 		var tsigCacheDelta *TsigCacheDelta
+		tsigMgmt := kp.Command == "tsig-mgmt"
+		if tsigMgmt {
+			confMu.Lock()
+		}
 
 		tx, err := kdb.Begin("APIkeystore")
 
@@ -47,13 +51,20 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 							resp.ErrorMsg = commitErr.Error()
 						}
 					} else if tsigCacheDelta != nil {
-						confMu.Lock()
+						if !tsigMgmt {
+							confMu.Lock()
+						}
 						if applyErr := ApplyTsigCacheDelta(conf.Internal.TsigKeyStore, kdb, tsigCacheDelta); applyErr != nil {
 							lgApi.Error("ApplyTsigCacheDelta failed", "err", applyErr)
 						}
-						confMu.Unlock()
+						if !tsigMgmt {
+							confMu.Unlock()
+						}
 					}
 				}
+			}
+			if tsigMgmt {
+				confMu.Unlock()
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
@@ -94,9 +105,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 			}
 
 		case "tsig-mgmt":
-			confMu.Lock()
 			resp, err = kdb.TsigKeyMgmt(conf, tx, kp)
-			confMu.Unlock()
 			if err != nil {
 				if resp == nil {
 					resp = &KeystoreResponse{Time: time.Now(), Error: true, ErrorMsg: err.Error()}
