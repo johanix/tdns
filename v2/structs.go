@@ -392,7 +392,11 @@ type DnssecPolicyClampingConf struct {
 
 // DnssecPolicyConf should match the configuration
 type DnssecPolicyConf struct {
-	Name      string
+	Name string
+	// Template, if set, names an entry in dnssec.templates: whose fields are
+	// deep-merged into this policy to fill any gaps (this policy's own values
+	// win). Never copied from the template itself.
+	Template  string `yaml:"template" mapstructure:"template"`
 	Algorithm string
 	Mode      string `yaml:"mode" mapstructure:"mode"`
 

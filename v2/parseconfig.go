@@ -1148,34 +1148,64 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 	}
 
 	// --- generic gap-fill for every other config field (zone wins) ---
-	// The template fills only the fields the zone left at their zero value; a
-	// template config never sets runtime/display fields, so IsZero skips them.
+	// Shallow (deep=false): zones have no nested config block that wants a
+	// recursive merge — UpdatePolicy is copied whole if the zone left it unset.
+	// A template config never sets runtime/display fields, so IsZero skips them.
 	bespoke := map[string]bool{
 		"Name": true, "Template": true, // never copied from a template
 		"Zonefile": true, "OptionsStrs": true, "DnssecPolicy": true, // handled above
 	}
-	zv := reflect.ValueOf(&zconf).Elem()
-	tv := reflect.ValueOf(tmpl).Elem()
-	for i := 0; i < zv.NumField(); i++ {
-		if bespoke[zv.Type().Field(i).Name] {
+	gapFillStruct(reflect.ValueOf(&zconf).Elem(), reflect.ValueOf(tmpl).Elem(), bespoke, false)
+	return zconf, nil
+}
+
+// gapFillStruct fills fields of dst that are still at their zero value from the
+// matching field of src; dst always wins. dst and src must be addressable
+// structs of the same type. skip names top-level fields that are never copied.
+//
+// When deep is false a struct-typed field is treated as a single value (copied
+// whole only if dst's is entirely zero). When deep is true a struct-typed field
+// is merged recursively, so dst can set part of a nested block and inherit the
+// rest from src. Slices are cloned so dst never aliases src's backing array.
+//
+// Caveat (both modes): a leaf counts as "set" iff it is non-zero, so dst cannot
+// override an src value back to the zero value ("" / 0 / false / nil) — that
+// reads as unset and src fills it.
+func gapFillStruct(dst, src reflect.Value, skip map[string]bool, deep bool) {
+	for i := 0; i < dst.NumField(); i++ {
+		if skip[dst.Type().Field(i).Name] {
 			continue
 		}
-		zf, tf := zv.Field(i), tv.Field(i)
-		if !zf.CanSet() || !zf.IsZero() || tf.IsZero() {
-			continue // not settable, zone already set it, or template didn't set it
+		df, sf := dst.Field(i), src.Field(i)
+		if !df.CanSet() {
+			continue
 		}
-		if zf.Kind() == reflect.Slice {
-			// Clone so the zone doesn't alias the template's backing array —
-			// ParseZones normalizes some slices (e.g. Primaries) in place.
-			c := reflect.MakeSlice(zf.Type(), tf.Len(), tf.Len())
-			reflect.Copy(c, tf)
-			zf.Set(c)
+		if deep && df.Kind() == reflect.Struct {
+			gapFillStruct(df, sf, nil, deep) // skip set applies only at the top level
+			continue
+		}
+		if !df.IsZero() || sf.IsZero() {
+			continue // dst already set it, or src has nothing to give
+		}
+		if df.Kind() == reflect.Slice {
+			c := reflect.MakeSlice(df.Type(), sf.Len(), sf.Len())
+			reflect.Copy(c, sf)
+			df.Set(c)
 		} else {
-			zf.Set(tf)
+			df.Set(sf)
 		}
 	}
+}
 
-	return zconf, nil
+// ExpandPolicyTemplate fills the gaps in a DNSSEC policy from a named template
+// (the policy's own values win). Unlike zone templates it deep-merges: a policy
+// that sets only some fields of a nested block (ksk, zsk, rollover, ttls,
+// sigvalidity, clamping, ...) inherits the remaining fields of that block from
+// the template, rather than overriding the whole block.
+func ExpandPolicyTemplate(pconf DnssecPolicyConf, tmpl *DnssecPolicyConf) DnssecPolicyConf {
+	skip := map[string]bool{"Name": true, "Template": true}
+	gapFillStruct(reflect.ValueOf(&pconf).Elem(), reflect.ValueOf(tmpl).Elem(), skip, true)
+	return pconf
 }
 
 // buildTemplateMap rebuilds the global Templates map from conf.Templates.
@@ -1422,6 +1452,17 @@ func (conf *Config) parseDnssecConfig() error {
 		markBroken := func(reason string) {
 			lgConfig.Error("DNSSEC policy rejected, unusable", "policy", name, "err", reason)
 			conf.Internal.DnssecPolicies[name] = DnssecPolicy{Name: name, Error: reason}
+		}
+		// A policy may inherit the gaps in its definition from a named template
+		// (deep merge; the policy's own values win). An unknown template name
+		// quarantines just this policy and keeps the server running.
+		if dpLocal.Template != "" {
+			tmpl, ok := conf.Dnssec.Templates[dpLocal.Template]
+			if !ok {
+				markBroken(fmt.Sprintf("references unknown dnssec template %q", dpLocal.Template))
+				continue
+			}
+			dpLocal = ExpandPolicyTemplate(dpLocal, &tmpl)
 		}
 		alg, kskAlg, zskAlg, err := resolvePolicyRoleAlgorithms(name, &dpLocal)
 		if err != nil {

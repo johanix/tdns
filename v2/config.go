@@ -79,6 +79,13 @@ type DnssecConf struct {
 	// here. Same-algorithm policies are always allowed and need no entry.
 	SplitAlgorithms map[string][]string `yaml:"split_algorithms" mapstructure:"split_algorithms"`
 
+	// Templates are named, partial DNSSEC policies. A policy may set
+	// `template: <name>` to inherit (deep-merge) the gaps in its own definition
+	// from the named template here; the policy's own values always win.
+	// Templates are not registered as usable policies themselves.
+	// YAML: dnssec.templates:.
+	Templates map[string]DnssecPolicyConf `yaml:"templates" mapstructure:"templates"`
+
 	// Policies are the named DNSSEC policies a zone references via its
 	// dnssec_policy field. YAML: dnssec.policies:.
 	Policies map[string]DnssecPolicyConf `yaml:"policies" mapstructure:"policies"`
