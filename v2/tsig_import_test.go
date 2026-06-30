@@ -40,6 +40,50 @@ func TestExtractNsdTsigKeys(t *testing.T) {
 	}
 }
 
+func TestExtractBindTsigKeys_IgnoresComments(t *testing.T) {
+	data := `
+/* key "ghost." { algorithm hmac-sha512; secret "` + b64Secret16 + `"; }; */
+# key "hash." { algorithm hmac-sha512; secret "` + b64Secret16 + `"; };
+key "live." {
+    # algorithm hmac-sha1;
+    algorithm hmac-sha256;
+    secret "` + b64Secret16 + `";
+};
+`
+	keys, err := extractBindTsigKeys(data)
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("extract: %+v err=%v", keys, err)
+	}
+	if keys[0].Name != "live." || keys[0].Algorithm != "hmac-sha256" {
+		t.Fatalf("got %+v", keys[0])
+	}
+}
+
+func TestExtractNsdTsigKeys_IgnoresComments(t *testing.T) {
+	data := `
+key:
+    name: live.
+    # algorithm: hmac-sha512
+    algorithm: hmac-sha256
+    secret: "` + b64Secret16 + `"
+# name: ghost.
+`
+	keys, err := extractNsdTsigKeys(data)
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("extract: %+v err=%v", keys, err)
+	}
+	if keys[0].Name != "live." || keys[0].Algorithm != "hmac-sha256" {
+		t.Fatalf("got %+v", keys[0])
+	}
+}
+
+func TestExtractBindTsigKeys_ReservedNameRejected(t *testing.T) {
+	data := `key "NOKEY." { algorithm hmac-sha256; secret "` + b64Secret16 + `"; };`
+	if _, err := extractBindTsigKeys(data); err == nil {
+		t.Fatal("expected reserved name error")
+	}
+}
+
 func TestTsigKeyMgmtImport(t *testing.T) {
 	kdb := newTestKeyDB(t)
 

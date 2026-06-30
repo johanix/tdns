@@ -13,7 +13,8 @@ import (
 )
 
 var (
-	bindTsigKeyStartRe = regexp.MustCompile(`(?m)^\s*key\s+"([^"]+)"\s*\{`)
+	bindBlockCommentRe = regexp.MustCompile(`(?s)/\*.*?\*/`)
+	bindTsigKeyStartRe = regexp.MustCompile(`(?mi)^\s*key\s+"([^"]+)"\s*\{`)
 	bindTsigAlgoRe     = regexp.MustCompile(`(?is)\balgorithm\s+([A-Za-z0-9._-]+)\s*;`)
 	bindTsigSecretRe   = regexp.MustCompile(`(?is)\bsecret\s+"([^"]*)"\s*;`)
 )
@@ -31,7 +32,27 @@ func extractTsigImportKeys(data, format string) ([]TsigDetails, error) {
 	}
 }
 
+func stripLineComment(line, marker string) string {
+	if idx := strings.Index(line, marker); idx >= 0 {
+		return line[:idx]
+	}
+	return line
+}
+
+func stripBindComments(data string) string {
+	data = bindBlockCommentRe.ReplaceAllString(data, "")
+	var b strings.Builder
+	for _, line := range strings.Split(data, "\n") {
+		line = stripLineComment(line, "//")
+		line = stripLineComment(line, "#")
+		b.WriteString(line)
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
 func extractBindTsigKeys(data string) ([]TsigDetails, error) {
+	data = stripBindComments(data)
 	var out []TsigDetails
 	seen := map[string]bool{}
 	loc := bindTsigKeyStartRe.FindStringSubmatchIndex(data)
@@ -62,17 +83,21 @@ func extractBindTsigKeys(data string) ([]TsigDetails, error) {
 	return out, nil
 }
 
+func stripNsdLineComment(line string) string {
+	return strings.TrimSpace(stripLineComment(line, "#"))
+}
+
 func extractNsdTsigKeys(data string) ([]TsigDetails, error) {
 	lines := strings.Split(data, "\n")
 	var out []TsigDetails
 	seen := map[string]bool{}
 	for i := 0; i < len(lines); i++ {
-		if strings.TrimSpace(lines[i]) != "key:" {
+		if !strings.EqualFold(strings.TrimSpace(lines[i]), "key:") {
 			continue
 		}
 		var name, algo, secret string
 		for j := i + 1; j < len(lines); j++ {
-			trimmed := strings.TrimSpace(lines[j])
+			trimmed := stripNsdLineComment(lines[j])
 			if trimmed == "" {
 				continue
 			}
