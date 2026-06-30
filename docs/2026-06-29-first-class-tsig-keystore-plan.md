@@ -414,7 +414,7 @@ Reconciled with §9 (review #6).
 | 11 | Inline `zone add/modify --tsig-*` → create-if-absent (§7/§14); update CLI help + `tsig_dynzone_test.go` | Med | ~120 | done (`3511c1f`) |
 | 12 | Legacy migration hook in `LoadDynamicZoneFiles` (§13); retire YAML `keys:` block; **remove** startup `loadDynamicTsigKeys` and reload YAML re-merge — same commit | Med | ~120 | done (`fd019e0`) |
 | 13 | `owner` end-to-end: `keys.tsig owner:`, `--owner`, `setowner`, list/purge logic (§2/§9) | Low–Med | ~90 | done (`ded1ecd`) |
-| 14 | CLI `ParseTsigKeys` strictness unification (§14, review #19) | Low | ~40 | done |
+| 14 | CLI `ParseTsigKeys` strictness unification (§14, review #19) | Low | ~40 | done (`5dec326`) |
 | 15 | Tests across all of the above | — | ~600 | pending |
 
 Rough total ~2.2k LOC incl. tests (tests bumped from ~400 — import extractors,
