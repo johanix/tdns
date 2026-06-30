@@ -177,17 +177,25 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 		return nil
 	}
 
+	loadedCount := 0
+	skippedCount := 0
+	// needsRepersist triggers a single rewrite of the dynamic config after the
+	// load. It is set when a legacy store token is normalized (in the loop) or
+	// when the legacy keys: block is migrated out (just below). Because
+	// writeDynamicConfigFile writes zones only, that one rewrite also strips the
+	// migrated keys: block from the file.
+	needsRepersist := false
+
 	// One-shot migration: legacy dynamic-zones YAML keys: → TsigKeystore (§13).
+	// On success, flag a re-persist so the now-migrated keys: block is dropped
+	// from the file and the migration stops re-running on every start.
 	if cf.Keys != nil && len(cf.Keys.Tsig) > 0 {
 		if err := conf.migrateDynamicConfigTsigKeys(cf); err != nil {
 			lg.Error("dynamic TSIG key migration failed; keys block retained for retry on next start", "err", err)
 			return fmt.Errorf("dynamic TSIG key migration: %w", err)
 		}
+		needsRepersist = true
 	}
-
-	loadedCount := 0
-	skippedCount := 0
-	needsRepersist := false // set when a legacy/non-canonical token is normalized
 
 	for i, zconf := range cf.Zones {
 		zoneName := zconf.Name
@@ -312,10 +320,11 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 
 	lg.Info("dynamic zone loading complete", "loaded", loadedCount, "skipped", skippedCount)
 
-	// Self-heal: if any zone carried a legacy/non-canonical token (e.g. a
-	// daemon-written "MapZone"), rewrite the whole dynamic config once, in
-	// canonical form, so the warning never recurs and the operator never has to
-	// hand-edit the file. One write for the entire load, not one per zone.
+	// Self-heal: if a legacy store token was normalized (e.g. a daemon-written
+	// "MapZone") or the legacy keys: block was migrated out, rewrite the whole
+	// dynamic config once, in canonical form. The warning never recurs, the
+	// migrated keys: block is dropped, and the operator never has to hand-edit
+	// the file. One write for the entire load, not one per zone.
 	// writeDynamicConfigFile is mutex-guarded, atomic, and refuses to write a
 	// config that was broken at startup. A failure here is non-fatal: the zones
 	// loaded fine; only the on-disk normalization didn't happen this pass.
@@ -323,7 +332,7 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 		if err := conf.writeDynamicConfigFile(cf.Zones); err != nil {
 			lg.Warn("could not re-persist dynamic config in canonical form; will retry on next load or zone change", "err", err)
 		} else {
-			lg.Info("re-persisted dynamic config in canonical form (normalized legacy store tokens)")
+			lg.Info("re-persisted dynamic config in canonical form (normalized legacy store tokens and/or stripped migrated keys: block)")
 		}
 	}
 	return nil
