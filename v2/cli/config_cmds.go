@@ -67,7 +67,7 @@ overwrite all conflicts, or --interactive to prompt per conflict.`,
 }
 
 func runReloadTsigCmd(role string, force, interactive bool) {
-	if force && interactive {
+	if tsigForceInteractiveConflict(force, interactive) {
 		fmt.Println("Error: --force and --interactive are mutually exclusive")
 		os.Exit(1)
 	}
@@ -79,6 +79,7 @@ func runReloadTsigCmd(role string, force, interactive bool) {
 
 	post := tdns.ConfigPost{Command: "reload-tsig", Force: force}
 	if interactive {
+		requireInteractiveTTY()
 		probe, err := SendConfigCommand(api, tdns.ConfigPost{Command: "reload-tsig"})
 		if err != nil {
 			fmt.Printf("Error: %s\n", err.Error())
@@ -87,6 +88,9 @@ func runReloadTsigCmd(role string, force, interactive bool) {
 		if len(probe.TsigConflicts) == 0 {
 			if probe.Msg != "" {
 				fmt.Println(probe.Msg)
+			}
+			if reloadTsigWithheld(probe) {
+				os.Exit(1)
 			}
 			return
 		}
@@ -119,6 +123,19 @@ func runReloadTsigCmd(role string, force, interactive bool) {
 	if resp.Msg != "" {
 		fmt.Println(resp.Msg)
 	}
+	if reloadTsigWithheld(resp) {
+		os.Exit(1)
+	}
+}
+
+// reloadTsigWithheld reports whether the reload-tsig response withheld changes.
+func reloadTsigWithheld(resp tdns.ConfigResponse) bool {
+	n := len(resp.TsigConflicts) + len(resp.TsigWithheldRemovals)
+	if n == 0 {
+		return false
+	}
+	fmt.Fprintf(os.Stderr, "%d TSIG reconcile item(s) withheld (conflicts or referenced removals)\n", n)
+	return true
 }
 
 // runConfigCmd posts a ConfigPost with the given command and prints the

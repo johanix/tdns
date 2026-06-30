@@ -44,7 +44,7 @@ changing the state of keys.`,
 }
 
 func newKeystoreTsigCmd(role string) *cobra.Command {
-	var tsigName, tsigAlgo, tsigSecret, tsigOwner, tsigImportFile, tsigImportFormat string
+	var tsigName, tsigAlgo, tsigSecret, tsigSecretFile, tsigOwner, tsigImportFile, tsigImportFormat string
 	var tsigForce, tsigYes, tsigInteractive, tsigVerbose bool
 
 	c := &cobra.Command{
@@ -66,16 +66,25 @@ for keys created here; config keys are managed via keys.tsig.`,
 		Use:   "add",
 		Short: "Add a TSIG key with a known secret",
 		Run: func(cmd *cobra.Command, args []string) {
-			tsigKeyMgmt(role, "add", tsigName, tsigAlgo, tsigSecret, tsigOwner, tsigForce)
+			secret, err := resolveTsigSecret(tsigSecret, tsigSecretFile)
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			if secret == "" {
+				fmt.Println("Error: set exactly one of --secret or --secret-file")
+				os.Exit(1)
+			}
+			tsigKeyMgmt(role, "add", tsigName, tsigAlgo, secret, tsigOwner, tsigForce)
 		},
 	}
 	add.Flags().StringVar(&tsigName, "name", "", "TSIG key name")
 	add.Flags().StringVar(&tsigAlgo, "algorithm", "hmac-sha256", "HMAC algorithm")
-	add.Flags().StringVar(&tsigSecret, "secret", "", "Base64-encoded secret")
+	add.Flags().StringVar(&tsigSecretFile, "secret-file", "", "File containing the base64 TSIG secret; preferred over --secret")
+	add.Flags().StringVar(&tsigSecret, "secret", "", "Inline TSIG secret (base64). WARNING: visible in shell history / process list; prefer --secret-file")
 	add.Flags().StringVar(&tsigOwner, "owner", "api", "Owner label (default api)")
 	add.Flags().BoolVar(&tsigForce, "force", false, "Overwrite on secret/algorithm conflict")
 	add.MarkFlagRequired("name")
-	add.MarkFlagRequired("secret")
 
 	generate := &cobra.Command{
 		Use:   "generate",
@@ -207,7 +216,7 @@ func tsigKeyMgmt(role, subcmd, name, algo, secret, owner string, force bool) {
 }
 
 func tsigKeyImport(role, file, format, owner string, force, interactive, verbose bool) {
-	if force && interactive {
+	if tsigForceInteractiveConflict(force, interactive) {
 		fmt.Println("Error: --force and --interactive are mutually exclusive")
 		os.Exit(1)
 	}
@@ -227,10 +236,19 @@ func tsigKeyImport(role, file, format, owner string, force, interactive, verbose
 		Creator:          "tdns-cli",
 	}
 	if interactive {
+		requireInteractiveTTY()
 		probe, err := tsigKeystorePost(role, post)
 		if err == nil {
 			printTsigImportResult(probe, verbose)
 			return
+		}
+		if tsigImportConflictCount(probe.TsigImport) == 0 {
+			if probe.ErrorMsg != "" {
+				fmt.Printf("Error: %s\n", probe.ErrorMsg)
+			} else {
+				fmt.Printf("Error: %v\n", err)
+			}
+			os.Exit(1)
 		}
 		var overwrite []string
 		for _, d := range probe.TsigImport {
@@ -258,6 +276,20 @@ func tsigKeyImport(role, file, format, owner string, force, interactive, verbose
 	printTsigImportResult(tr, verbose)
 }
 
+func tsigImportConflictCount(dispositions []tdns.TsigKeyDisposition) int {
+	n := 0
+	for _, d := range dispositions {
+		if d.Status == "conflict" {
+			n++
+		}
+	}
+	return n
+}
+
+func tsigForceInteractiveConflict(force, interactive bool) bool {
+	return force && interactive
+}
+
 func printTsigImportResult(tr tdns.KeystoreResponse, verbose bool) {
 	if tr.Error {
 		fmt.Printf("Error from server: %s\n", tr.ErrorMsg)
@@ -276,12 +308,17 @@ func printTsigImportResult(tr tdns.KeystoreResponse, verbose bool) {
 }
 
 func tsigKeyPurge(role string, force, interactive, yes bool) {
-	if force && interactive {
+	if tsigForceInteractiveConflict(force, interactive) {
 		fmt.Println("Error: --force and --interactive are mutually exclusive")
+		os.Exit(1)
+	}
+	if yes && !force && !interactive {
+		fmt.Println("Error: purge -y requires --force (default is dry-run)")
 		os.Exit(1)
 	}
 	post := tdns.KeystorePost{Command: "tsig-mgmt", SubCommand: "purge", Force: force, Creator: "tdns-cli"}
 	if interactive {
+		requireInteractiveTTY()
 		probe, err := tsigKeystorePost(role, post)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
@@ -307,6 +344,7 @@ func tsigKeyPurge(role string, force, interactive, yes bool) {
 		post.TsigOverwrite = overwrite
 		post.Force = false
 	} else if force && !yes {
+		requireTTYOrYes(false, "purge --force")
 		fmt.Print("Purge all matching TSIG keys? [y/N] ")
 		var ans string
 		fmt.Scanln(&ans)
