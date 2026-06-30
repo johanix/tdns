@@ -13,7 +13,6 @@ import (
 )
 
 var (
-	bindBlockCommentRe = regexp.MustCompile(`(?s)/\*.*?\*/`)
 	bindTsigKeyStartRe = regexp.MustCompile(`(?mi)^\s*key\s+"([^"]+)"\s*\{`)
 	bindTsigAlgoRe     = regexp.MustCompile(`(?is)\balgorithm\s+([A-Za-z0-9._-]+)\s*;`)
 	bindTsigSecretRe   = regexp.MustCompile(`(?is)\bsecret\s+"([^"]*)"\s*;`)
@@ -39,14 +38,53 @@ func stripLineComment(line, marker string) string {
 	return line
 }
 
+// stripBindComments removes BIND-style comments (`//` and `#` to end of line, and
+// `/* … */` blocks) while preserving the contents of double-quoted strings. The
+// quote-awareness matters: a base64 secret can legitimately contain "//" (the std
+// base64 alphabet includes '/'), and a naive line stripper would truncate it.
 func stripBindComments(data string) string {
-	data = bindBlockCommentRe.ReplaceAllString(data, "")
 	var b strings.Builder
-	for _, line := range strings.Split(data, "\n") {
-		line = stripLineComment(line, "//")
-		line = stripLineComment(line, "#")
-		b.WriteString(line)
-		b.WriteByte('\n')
+	for i := 0; i < len(data); {
+		c := data[i]
+		switch {
+		case c == '"':
+			// Copy the quoted token verbatim; comment markers inside are literal.
+			b.WriteByte(c)
+			i++
+			for i < len(data) {
+				b.WriteByte(data[i])
+				if data[i] == '"' {
+					i++
+					break
+				}
+				i++
+			}
+		case c == '/' && i+1 < len(data) && data[i+1] == '/':
+			// "//" line comment: skip to end of line (the '\n' is kept next pass).
+			i += 2
+			for i < len(data) && data[i] != '\n' {
+				i++
+			}
+		case c == '#':
+			// "#" line comment: skip to end of line.
+			i++
+			for i < len(data) && data[i] != '\n' {
+				i++
+			}
+		case c == '/' && i+1 < len(data) && data[i+1] == '*':
+			// "/* … */" block comment (an unterminated block eats the rest).
+			i += 2
+			for i+1 < len(data) && !(data[i] == '*' && data[i+1] == '/') {
+				i++
+			}
+			i += 2
+			if i > len(data) {
+				i = len(data)
+			}
+		default:
+			b.WriteByte(c)
+			i++
+		}
 	}
 	return b.String()
 }

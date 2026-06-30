@@ -1,6 +1,11 @@
 package tdns
 
-import "testing"
+import (
+	"bytes"
+	"encoding/base64"
+	"strings"
+	"testing"
+)
 
 const bindSample = `
 options { directory "/var/named"; };
@@ -150,5 +155,32 @@ key "existing." { algorithm hmac-sha256; secret "YWJjZGVmZ2hpamtsbW5vcA=="; };`
 	got, ok := store.Get("existing.")
 	if !ok || got.Secret != "YWJjZGVmZ2hpamtsbW5vcA==" {
 		t.Fatalf("overwrite failed: %+v ok=%v", got, ok)
+	}
+}
+
+// TestExtractBindTsigKeys_SlashInSecret pins the quote-awareness of the comment
+// stripper: a std-base64 secret can contain "//", which must not be truncated as a
+// line comment, while a genuinely "//"-commented-out key is still ignored.
+func TestExtractBindTsigKeys_SlashInSecret(t *testing.T) {
+	secret := base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xff}, 16))
+	if !strings.Contains(secret, "//") {
+		t.Fatalf("fixture secret %q lacks the // it is meant to exercise", secret)
+	}
+	data := `
+// key "commented." { algorithm hmac-sha256; secret "` + secret + `"; };
+key "live." {
+    algorithm hmac-sha256;
+    secret "` + secret + `";
+};
+`
+	keys, err := extractBindTsigKeys(data)
+	if err != nil || len(keys) != 1 {
+		t.Fatalf("extract: %+v err=%v", keys, err)
+	}
+	if keys[0].Name != "live." {
+		t.Fatalf("expected only the live key, got %+v", keys)
+	}
+	if keys[0].Secret != secret {
+		t.Fatalf("secret truncated by comment stripper: got %q want %q", keys[0].Secret, secret)
 	}
 }
