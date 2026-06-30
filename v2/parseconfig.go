@@ -1139,6 +1139,12 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 	if len(tmpl.Notify) > 0 {
 		zconf.Notify = tmpl.Notify
 	}
+	if len(tmpl.AllowNotify) > 0 {
+		zconf.AllowNotify = tmpl.AllowNotify
+	}
+	if len(tmpl.Downstreams) > 0 {
+		zconf.Downstreams = tmpl.Downstreams
+	}
 
 	// template options are appended to existing zone options
 	if len(tmpl.OptionsStrs) > 0 {

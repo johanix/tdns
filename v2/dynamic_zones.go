@@ -188,12 +188,13 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 	loadedCount := 0
 	skippedCount := 0
 
-	for _, zconf := range cf.Zones {
+	for i, zconf := range cf.Zones {
 		zoneName := zconf.Name
+		lg.Info("LoadDynamicZoneFiles: processing dynamic zone entry", "zone", zoneName, "entry", i+1, "of", len(cf.Zones))
 
 		// Check if zone already exists (from main config or already loaded)
 		if _, exists := Zones.Get(zoneName); exists {
-			lg.Debug("zone already exists, skipping dynamic config entry", "zone", zoneName)
+			lg.Info("LoadDynamicZoneFiles: zone already present (e.g. static config); skipping dynamic entry", "zone", zoneName)
 			skippedCount++
 			continue
 		}
@@ -298,12 +299,12 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 		select {
 		case conf.Internal.RefreshZoneCh <- zr:
 			loadedCount++
-			lg.Debug("enqueued zone for refresh", "zone", zoneName)
+			lg.Info("LoadDynamicZoneFiles: enqueued dynamic zone for refresh", "zone", zoneName, "type", zoneType, "resolved_primaries", len(res.Resolved))
 		case <-ctx.Done():
-			lg.Warn("context cancelled while enqueueing zone", "zone", zoneName)
+			lg.Warn("LoadDynamicZoneFiles: context cancelled while enqueueing dynamic zone", "zone", zoneName)
 			return ctx.Err()
 		case <-time.After(5 * time.Second):
-			lg.Debug("timeout enqueueing zone to RefreshEngine", "zone", zoneName)
+			lg.Error("LoadDynamicZoneFiles: TIMEOUT enqueueing dynamic zone to RefreshEngine (channel full / engine not draining); zone DROPPED and will NOT be served", "zone", zoneName)
 			skippedCount++
 		}
 	}

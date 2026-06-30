@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/go-playground/validator/v10"
+	"github.com/mitchellh/mapstructure"
 	"github.com/spf13/viper"
 )
 
@@ -28,12 +29,22 @@ func NewCustomValidator() (*CustomValidator, error) {
 func ValidateConfig(v *viper.Viper, cfgfile string) error {
 	var config Config
 
+	// Mirror the main loader's decode hook (parseconfig.go) so a legacy
+	// bare-string primary:/notify: entry becomes a PeerConf legacy marker
+	// (quarantined per-zone) instead of failing this validation decode and
+	// aborting startup. Composed with viper's defaults so duration/slice
+	// fields still decode.
+	decodeHook := viper.DecodeHook(mapstructure.ComposeDecodeHookFunc(
+		mapstructure.StringToTimeDurationHookFunc(),
+		mapstructure.StringToSliceHookFunc(","),
+		stringToPeerConfHook(),
+	))
 	if v == nil {
-		if err := viper.Unmarshal(&config); err != nil {
+		if err := viper.Unmarshal(&config, decodeHook); err != nil {
 			return fmt.Errorf("ValidateConfig: Unmarshal error: %v", err)
 		}
 	} else {
-		if err := v.Unmarshal(&config); err != nil {
+		if err := v.Unmarshal(&config, decodeHook); err != nil {
 			return fmt.Errorf("ValidateConfig: Unmarshal error: %v", err)
 		}
 	}
