@@ -666,9 +666,11 @@ func (conf *Config) commitStagedTsigKey(staged *TsigDetails) (rollback func(), e
 		delResp, delErr := kdb.TsigKeyMgmt(conf, nil, KeystorePost{
 			SubCommand: "delete", TsigKeyname: staged.Name,
 		})
-		if delErr == nil {
-			_ = ApplyTsigCacheDelta(conf.Internal.TsigKeyStore, kdb, delResp.TsigCacheDelta)
+		if delErr != nil {
+			lg.Warn("inline TSIG rollback delete failed", "key", staged.Name, "err", delErr)
+			return
 		}
+		_ = ApplyTsigCacheDelta(conf.Internal.TsigKeyStore, kdb, delResp.TsigCacheDelta)
 	}, nil
 }
 

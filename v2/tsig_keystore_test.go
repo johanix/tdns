@@ -153,6 +153,16 @@ func TestTsigKeyMgmtGenerate(t *testing.T) {
 	}
 }
 
+func TestTsigKeyMgmtGenerate_ReservedNameRejected(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	_, err := kdb.TsigKeyMgmt(nil, nil, KeystorePost{
+		SubCommand: "generate", TsigKeyname: "NOKEY.", TsigAlgorithm: "hmac-sha256", Creator: "test",
+	})
+	if err == nil {
+		t.Fatal("expected reserved name rejection")
+	}
+}
+
 func TestTsigKeyMgmtAddListDeleteAndCacheDelta(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	store := NewTsigKeyStore()

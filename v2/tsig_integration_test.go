@@ -109,7 +109,7 @@ func TestTsigKeyMgmtAdd_ForceOverwriteAndIdempotent(t *testing.T) {
 	}
 }
 
-func TestTsigKeyMgmtImport_ForceAndUnchanged(t *testing.T) {
+func TestTsigKeyMgmtImport_ConflictAndForce(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	tx, err := kdb.Begin("seed-import")
 	if err != nil {
@@ -228,6 +228,9 @@ func TestCommitStagedTsigKey_WithKeyDB(t *testing.T) {
 	rollback()
 	if conf.Internal.TsigKeyStore.Has("inline.") {
 		t.Fatal("rollback should remove newly added key")
+	}
+	if _, err := getTsigKeystoreByName(kdb, "inline."); err == nil {
+		t.Fatal("rollback should delete DB row for newly added key")
 	}
 }
 

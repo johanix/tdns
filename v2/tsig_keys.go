@@ -105,7 +105,7 @@ func collectValidConfigTsigKeys(tsig []TsigDetails) ([]TsigDetails, error) {
 	var firstErr error
 	var out []TsigDetails
 	for _, t := range tsig {
-		if strings.EqualFold(t.Name, NOKEY) || strings.EqualFold(t.Name, BLOCKED) {
+		if tsigNameIsReserved(t.Name) {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("keys.tsig: %q is a reserved sentinel (NOKEY/BLOCKED) and cannot be a key name", t.Name)
 			}
@@ -123,12 +123,12 @@ func collectValidConfigTsigKeys(tsig []TsigDetails) ([]TsigDetails, error) {
 }
 
 // tsigConfigEffectiveOwner returns the owner label for a keys.tsig entry; empty
-// owner defaults to "config" (the origin for config-declared keys).
+// owner defaults via the same rule as keystore rows with origin=config.
 func tsigConfigEffectiveOwner(t TsigDetails) string {
 	if strings.TrimSpace(t.Owner) != "" {
 		return t.Owner
 	}
-	return "config"
+	return tsigKeystoreEffectiveOwner(TsigKeystoreRow{Origin: "config"})
 }
 
 // LoadTsigKeys loads the in-memory TSIG store. When KeyDB is available the cache
@@ -194,6 +194,11 @@ func (conf *Config) tsigKeyDefined(name string) bool {
 	return name == NOKEY || conf.Internal.TsigKeyStore.Has(name)
 }
 
+func tsigNameIsReserved(name string) bool {
+	c := dns.CanonicalName(name)
+	return strings.EqualFold(c, dns.CanonicalName(NOKEY)) || strings.EqualFold(c, dns.CanonicalName(BLOCKED))
+}
+
 // tsigKeyAcceptable is tsigKeyDefined extended with an optional staged (not yet
 // committed) inline key name, so a dynamic add/modify can validate primaries that
 // reference an inline key before that key is committed to the live store.
@@ -248,7 +253,7 @@ func validateTsigKeySpec(name, algo, secret string) error {
 	if name == "" || secret == "" {
 		return fmt.Errorf("tsig key requires both a name and a secret")
 	}
-	if strings.EqualFold(name, NOKEY) || strings.EqualFold(name, BLOCKED) {
+	if tsigNameIsReserved(name) {
 		return fmt.Errorf("tsig key name %q is a reserved sentinel (NOKEY/BLOCKED)", name)
 	}
 	if !knownTsigAlgo(algo) {

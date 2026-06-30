@@ -33,6 +33,10 @@ func TestMigrateDynamicConfigTsigKeys(t *testing.T) {
 	if !conf.Internal.TsigKeyStore.Has("dyn.") {
 		t.Fatal("migrated key missing from cache")
 	}
+	row, err := getTsigKeystoreByName(kdb, "dyn.")
+	if err != nil || row.Origin != "api" || row.Owner != "api" || row.Creator != "dynamic-config-migration" {
+		t.Fatalf("row metadata: %+v err=%v", row, err)
+	}
 	data, err := os.ReadFile(cfgPath)
 	if err != nil {
 		t.Fatalf("read config: %v", err)
@@ -40,8 +44,6 @@ func TestMigrateDynamicConfigTsigKeys(t *testing.T) {
 	if strings.Contains(string(data), "\nkeys:") || strings.Contains(string(data), "\nkeys:\n") {
 		t.Fatal("rewritten file must not contain keys: block")
 	}
-
-	// Idempotent second pass (no keys block).
 	if err := conf.migrateDynamicConfigTsigKeys(cf); err != nil {
 		t.Fatalf("second migrate: %v", err)
 	}
