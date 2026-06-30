@@ -26,8 +26,9 @@ var rootCmd = &cobra.Command{
 	Short: "tdns-cli is a tool used to interact with the tdnsd nameserver via API",
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		tdns.SetupCliLogging()
-		// keys generate (root-level) does not need config or API
-		if isRootKeysCommand(cmd) {
+		// keys generate (root-level) and gen-docs (offline doc generator) do
+		// not need config or API.
+		if isRootKeysCommand(cmd) || cmd.Name() == "gen-docs" {
 			return
 		}
 		initConfig()
