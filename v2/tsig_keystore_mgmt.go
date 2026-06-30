@@ -50,7 +50,7 @@ func (kdb *KeyDB) TsigKeyMgmt(conf *Config, tx *Tx, kp KeystorePost) (*KeystoreR
 
 	switch kp.SubCommand {
 	case "list":
-		rows, err := listTsigKeystore(kdb)
+		rows, err := listTsigKeystore(tx)
 		if err != nil {
 			return resp, err
 		}
@@ -288,7 +288,7 @@ func (kdb *KeyDB) tsigKeyMgmtPurge(conf *Config, tx *Tx, kp KeystorePost, resp *
 		}
 		return conf.tsigKeyZoneRefCount(name)
 	}
-	rows, err := listTsigKeystore(kdb)
+	rows, err := listTsigKeystore(tx)
 	if err != nil {
 		return err
 	}
