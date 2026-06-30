@@ -266,6 +266,26 @@ func PrintGenericRR(rr dns.RR, leftpad, rightmargin int) {
 	fmt.Printf("%s%s%s\n", p[0], namepad, strings.Join(p[1:], " "))
 }
 
+// xfrErrorRcode extracts the numeric rcode from a miekg/dns transfer error of
+// the form "dns: bad xfr rcode: N" and returns its mnemonic (e.g. REFUSED,
+// SERVFAIL, NOTAUTH). It returns ("", false) when the error is not a bad-rcode
+// error, so the caller can fall back to printing the raw error.
+func xfrErrorRcode(errstr string) (string, bool) {
+	const marker = "bad xfr rcode: "
+	i := strings.Index(errstr, marker)
+	if i < 0 {
+		return "", false
+	}
+	rcode, err := strconv.Atoi(strings.TrimSpace(errstr[i+len(marker):]))
+	if err != nil {
+		return "", false
+	}
+	if name, ok := dns.RcodeToString[rcode]; ok {
+		return name, true
+	}
+	return fmt.Sprintf("rcode %d", rcode), true
+}
+
 func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, options map[string]string) error {
 	msg := new(dns.Msg)
 	if ttype == dns.TypeIXFR {
@@ -296,11 +316,14 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 	for envelope := range answerChan {
 		leftpad := 20
 		if envelope.Error != nil {
-			fmt.Printf("Oops. Zone transfer envelope signals an error:\n")
 			errstr := envelope.Error.Error()
-			if strings.Contains(errstr, "bad xfr rcode: 9") {
-				fmt.Printf("Error: %s: Not authoritative for zone %s\n",
-					upstream, zname)
+			// miekg/dns reports a non-NOERROR AXFR response as
+			// "dns: bad xfr rcode: N". Translate the numeric rcode to its
+			// mnemonic (REFUSED, SERVFAIL, NOTAUTH, ...) so the error reads
+			// sensibly instead of leaking a bare number.
+			if rcodeName, ok := xfrErrorRcode(errstr); ok {
+				fmt.Printf("Error: AXFR of %s from %s failed: server returned %s\n",
+					zname, upstream, rcodeName)
 			} else {
 				fmt.Printf("Error: zone %s error: %v\n", zname, errstr)
 			}
