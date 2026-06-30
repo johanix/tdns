@@ -30,6 +30,26 @@ var ZoneStoreToString = map[ZoneStore]string{
 	SliceZone: "SliceZone",
 }
 
+// zoneStoreToConfigToken maps a ZoneStore to its CANONICAL config-file token
+// ("map"/"slice"/"xfr") — the form parseZoneStore reads. This is deliberately
+// distinct from ZoneStoreToString, which is the human/display form ("MapZone")
+// used in API responses and logs. Persisting config must use the token, not the
+// display string, or the daemon writes a value its own reader rejects.
+var zoneStoreToConfigToken = map[ZoneStore]string{
+	XfrZone:   "xfr",
+	MapZone:   "map",
+	SliceZone: "slice",
+}
+
+// zoneStoreConfigToken returns the canonical config token for s, defaulting to
+// "map" for any unmapped value (matching parseZoneStore's default).
+func zoneStoreConfigToken(s ZoneStore) string {
+	if tok, ok := zoneStoreToConfigToken[s]; ok {
+		return tok
+	}
+	return "map"
+}
+
 type ZoneType uint8
 
 const (

@@ -187,6 +187,7 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 
 	loadedCount := 0
 	skippedCount := 0
+	needsRepersist := false // set when a legacy/non-canonical token is normalized
 
 	for i, zconf := range cf.Zones {
 		zoneName := zconf.Name
@@ -212,18 +213,17 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			continue
 		}
 
-		// Parse zone store
-		var zoneStore ZoneStore
-		switch strings.ToLower(zconf.Store) {
-		case "map":
-			zoneStore = MapZone
-		case "slice":
-			zoneStore = SliceZone
-		case "xfr":
-			zoneStore = XfrZone
-		default:
-			lg.Warn("invalid zone store, defaulting to map", "zone", zoneName, "store", zconf.Store)
-			zoneStore = MapZone
+		// Parse zone store (tolerant: parseZoneStore also accepts the legacy
+		// display tokens MapZone/SliceZone/XfrZone the daemon used to persist).
+		// If the on-disk token isn't already canonical, normalize it in the
+		// parsed config and flag a one-shot re-persist after the load.
+		zoneStore := parseZoneStore(zconf.Store)
+		if raw := strings.TrimSpace(zconf.Store); raw != "" {
+			if canonical := zoneStoreConfigToken(zoneStore); raw != canonical {
+				lg.Info("normalizing legacy zone store token in dynamic config", "zone", zoneName, "from", raw, "to", canonical)
+				cf.Zones[i].Store = canonical
+				needsRepersist = true
+			}
 		}
 
 		// Parse options
@@ -311,6 +311,21 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 	}
 
 	lg.Info("dynamic zone loading complete", "loaded", loadedCount, "skipped", skippedCount)
+
+	// Self-heal: if any zone carried a legacy/non-canonical token (e.g. a
+	// daemon-written "MapZone"), rewrite the whole dynamic config once, in
+	// canonical form, so the warning never recurs and the operator never has to
+	// hand-edit the file. One write for the entire load, not one per zone.
+	// writeDynamicConfigFile is mutex-guarded, atomic, and refuses to write a
+	// config that was broken at startup. A failure here is non-fatal: the zones
+	// loaded fine; only the on-disk normalization didn't happen this pass.
+	if needsRepersist {
+		if err := conf.writeDynamicConfigFile(cf.Zones); err != nil {
+			lg.Warn("could not re-persist dynamic config in canonical form; will retry on next load or zone change", "err", err)
+		} else {
+			lg.Info("re-persisted dynamic config in canonical form (normalized legacy store tokens)")
+		}
+	}
 	return nil
 }
 
@@ -356,11 +371,9 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 	}
 	sort.Strings(optionsStrs) // Sort for consistent output
 
-	// Determine store string
-	storeStr := ZoneStoreToString[zd.ZoneStore]
-	if storeStr == "" {
-		storeStr = "map" // Default
-	}
+	// Determine store string: the CANONICAL config token (map/slice/xfr), not
+	// the ZoneStoreToString display form ("MapZone") which the reader rejects.
+	storeStr := zoneStoreConfigToken(zd.ZoneStore)
 
 	// Determine type string
 	typeStr := ZoneTypeToString[zd.ZoneType]
