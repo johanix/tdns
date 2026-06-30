@@ -295,7 +295,11 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			Options:       options,
 		}
 
-		// Attempt non-blocking send (same pattern as ParseZones)
+		// Blocking send, exactly like the static-zone enqueue in ParseZones.
+		// LoadDynamicZoneFiles runs after the RefreshEngine is started (see
+		// StartAuth/StartAgent), so the engine drains the channel and this send
+		// completes — a zone is never silently dropped. Only ctx cancellation
+		// (shutdown) aborts the enqueue.
 		select {
 		case conf.Internal.RefreshZoneCh <- zr:
 			loadedCount++
@@ -303,9 +307,6 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 		case <-ctx.Done():
 			lg.Warn("LoadDynamicZoneFiles: context cancelled while enqueueing dynamic zone", "zone", zoneName)
 			return ctx.Err()
-		case <-time.After(5 * time.Second):
-			lg.Error("LoadDynamicZoneFiles: TIMEOUT enqueueing dynamic zone to RefreshEngine (channel full / engine not draining); zone DROPPED and will NOT be served", "zone", zoneName)
-			skippedCount++
 		}
 	}
 

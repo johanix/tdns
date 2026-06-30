@@ -211,20 +211,28 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	}
 	// Provide the complete zone list to engines that need cross-zone post-initialization
 	conf.Internal.AllZones = all_zones
-	// Load dynamic zones from dynamic config file (if configured and included)
-	// This must happen after ParseZones so that main config zones take precedence
-	if conf.DynamicZones.ConfigFile != "" {
-		// Check if dynamic config file is included (warns if not)
-		// Note: includedFiles are tracked during ParseConfig, but we don't have access here
-		// The warning was already logged during ParseConfig validation
-		// For now, we'll try to load it anyway (it may have been included)
-		if err := conf.LoadDynamicZoneFiles(ctx); err != nil {
-			lgConfig.Warn("failed to load dynamic zones", "err", err)
-			// Don't fail startup, just log the warning
-		}
-	}
+	// NOTE: dynamic zones are intentionally NOT loaded here. Their enqueue is a
+	// blocking send to RefreshZoneCh, which is only drained once RefreshEngine is
+	// running — so the load is deferred to StartAuth/StartAgent (after the engine
+	// starts) via loadDynamicZonesIfConfigured(). Loading here (pre-engine) would
+	// block on a channel already full of static zones, which previously dropped
+	// the dynamic zones after a 5s timeout.
 	lgConfig.Debug("MainInit complete")
 	return nil
+}
+
+// loadDynamicZonesIfConfigured loads persisted dynamic zones from the dynamic
+// config file (if one is configured) and enqueues each for refresh. It MUST be
+// called after RefreshEngine has been started: the enqueue is a blocking send
+// (like the static-zone enqueue in ParseZones), so it relies on the engine
+// draining RefreshZoneCh. A load failure is logged, not fatal.
+func (conf *Config) loadDynamicZonesIfConfigured(ctx context.Context) {
+	if conf.DynamicZones.ConfigFile == "" {
+		return
+	}
+	if err := conf.LoadDynamicZoneFiles(ctx); err != nil {
+		lgConfig.Warn("failed to load dynamic zones", "err", err)
+	}
 }
 
 // StartImr starts subsystems for tdns-imr
@@ -272,6 +280,10 @@ func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error 
 	StartEngineNoError(&Globals.App, "ResignerEngine", func() { ResignerEngine(ctx, conf.Internal.ResignQ) })
 	StartEngine(&Globals.App, "KeyStateWorker", func() error { return KeyStateWorker(ctx, conf) })
 
+	// RefreshEngine is now running and draining RefreshZoneCh, so persisted
+	// dynamic zones can be loaded with a blocking enqueue (no drop).
+	conf.loadDynamicZonesIfConfigured(ctx)
+
 	return nil
 }
 
@@ -301,6 +313,11 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	})
 	StartEngine(&Globals.App, "NotifyHandler", func() error { return NotifyHandler(ctx, conf) })
 	StartEngine(&Globals.App, "DnsEngine", func() error { return DnsEngine(ctx, conf) })
+
+	// RefreshEngine is now running and draining RefreshZoneCh, so persisted
+	// dynamic zones can be loaded with a blocking enqueue (no drop).
+	conf.loadDynamicZonesIfConfigured(ctx)
+
 	return nil
 }
 
