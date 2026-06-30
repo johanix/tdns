@@ -185,7 +185,7 @@ func overwriteTsigKeystore(tx *Tx, row TsigKeystoreRow) error {
 }
 
 func updateTsigKeystoreConfig(tx *Tx, t TsigDetails) error {
-	owner := "config"
+	owner := tsigConfigEffectiveOwner(t)
 	_, err := tx.Exec(updateTsigKeystoreConfigSql,
 		dns.CanonicalName(t.Algorithm),
 		t.Secret,
@@ -227,7 +227,7 @@ func (kdb *KeyDB) SyncConfigTsigKeys(entries []TsigDetails) error {
 				Algorithm: t.Algorithm,
 				Secret:    t.Secret,
 				Origin:    "config",
-				Owner:     "config",
+				Owner:     tsigConfigEffectiveOwner(t),
 				Creator:   "config",
 			}); err != nil {
 				return err
@@ -238,7 +238,8 @@ func (kdb *KeyDB) SyncConfigTsigKeys(entries []TsigDetails) error {
 			return err
 		}
 		if existing.Origin == "config" {
-			if !tsigDetailsMatchRow(t, existing) {
+			wantOwner := tsigConfigEffectiveOwner(t)
+			if !tsigDetailsMatchRow(t, existing) || tsigKeystoreEffectiveOwner(existing) != wantOwner {
 				if err := updateTsigKeystoreConfig(tx, t); err != nil {
 					return err
 				}

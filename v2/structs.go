@@ -863,6 +863,7 @@ type TsigDetails struct {
 	Name      string `validate:"required" yaml:"name"`
 	Algorithm string `validate:"required" yaml:"algorithm"`
 	Secret    string `validate:"required" yaml:"secret"`
+	Owner     string `yaml:"owner,omitempty"`
 }
 
 type ZoneName string

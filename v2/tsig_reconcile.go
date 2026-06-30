@@ -13,10 +13,10 @@ import (
 )
 
 const promoteTsigKeystoreToConfigSql = `
-UPDATE TsigKeystore SET origin='config', owner='config' WHERE keyname=?`
+UPDATE TsigKeystore SET origin='config', owner=? WHERE keyname=?`
 
 const forceTsigKeystoreFromConfigSql = `
-UPDATE TsigKeystore SET algorithm=?, secret=?, origin='config', owner='config', creator='config'
+UPDATE TsigKeystore SET algorithm=?, secret=?, origin='config', owner=?, creator='config'
 WHERE keyname=?`
 
 // TsigReconcileOptions controls three-mode config-key reconcile (§6).
@@ -69,7 +69,7 @@ func (kdb *KeyDB) ReconcileConfigTsigKeys(entries []TsigDetails, opts TsigReconc
 				Algorithm: t.Algorithm,
 				Secret:    t.Secret,
 				Origin:    "config",
-				Owner:     "config",
+				Owner:     tsigConfigEffectiveOwner(t),
 				Creator:   "config",
 			}); err != nil {
 				return result, err
@@ -80,9 +80,15 @@ func (kdb *KeyDB) ReconcileConfigTsigKeys(entries []TsigDetails, opts TsigReconc
 		if err != nil {
 			return result, err
 		}
+		wantOwner := tsigConfigEffectiveOwner(t)
 		if tsigDetailsMatchRow(t, existing) {
 			if existing.Origin != "config" {
-				if _, err := tx.Exec(promoteTsigKeystoreToConfigSql, name); err != nil {
+				if _, err := tx.Exec(promoteTsigKeystoreToConfigSql, wantOwner, name); err != nil {
+					return result, err
+				}
+				result.TsigCacheDelta.markChanged(name)
+			} else if tsigKeystoreEffectiveOwner(existing) != wantOwner {
+				if err := updateTsigKeystoreConfig(tx, t); err != nil {
 					return result, err
 				}
 				result.TsigCacheDelta.markChanged(name)
@@ -93,6 +99,7 @@ func (kdb *KeyDB) ReconcileConfigTsigKeys(entries []TsigDetails, opts TsigReconc
 			if _, err := tx.Exec(forceTsigKeystoreFromConfigSql,
 				dns.CanonicalName(t.Algorithm),
 				t.Secret,
+				wantOwner,
 				name,
 			); err != nil {
 				return result, err
