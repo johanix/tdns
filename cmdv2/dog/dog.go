@@ -423,23 +423,29 @@ var rootCmd = &cobra.Command{
 				}
 
 				elapsed := time.Since(start)
-				// A TSIG verification failure (bad MAC, or the server returned no
-				// TSIG at all) still yields the response message; show it plus a
-				// warning, like dig, rather than exiting -- so the returned TSIG
-				// (or its absence) can be inspected. A real transport error with
-				// no response stays fatal.
-				if err != nil {
-					if tsigKeyFlag != "" && res != nil {
-						fmt.Fprintf(os.Stderr, ";; WARNING: response TSIG did not validate: %v\n", err)
-					} else {
-						fmt.Printf("Error from %s: %v\n", server, err)
-						fmt.Printf("*** This is what we got: %+v\n", res)
-						os.Exit(1)
-					}
-				} else if tsigKeyFlag != "" && res != nil && res.IsTsig() != nil {
-					fmt.Printf(";; TSIG: response validated OK (key %s)\n", res.IsTsig().Hdr.Name)
+				// A TSIG issue does not mean "no answer": a bad response MAC
+				// still returns the message, and an ABSENT response TSIG returns
+				// no error at all (miekg only verifies a TSIG that is present).
+				// So when we signed the query (-y) we always show the response
+				// and append a dig-style TSIG status footer below, covering all
+				// three cases: validated OK, failed to validate, or absent. A
+				// real transport error with no response stays fatal.
+				if err != nil && !(tsigKeyFlag != "" && res != nil) {
+					fmt.Printf("Error from %s: %v\n", server, err)
+					fmt.Printf("*** This is what we got: %+v\n", res)
+					os.Exit(1)
 				}
 				tdns.MsgPrint(res, server, elapsed, short, options)
+				if tsigKeyFlag != "" && res != nil {
+					switch {
+					case err != nil:
+						fmt.Printf(";; WARNING: response TSIG did not validate: %v\n", err)
+					case res.IsTsig() != nil:
+						fmt.Printf(";; TSIG: response signature validated OK (key %s)\n", res.IsTsig().Hdr.Name)
+					default:
+						fmt.Printf(";; WARNING: query was TSIG-signed but the response carried NO TSIG\n")
+					}
+				}
 			}
 		}
 	},
