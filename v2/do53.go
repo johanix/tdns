@@ -44,7 +44,10 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 
 	// Create a local ServeMux for DnsEngine to avoid conflicts with other engines
 	dnsMux := dns.NewServeMux()
-	dnsMux.HandleFunc(".", authDNSHandler)
+	// TsigSigningHandler is installed only here, on the Do53 mux, because only
+	// the Do53 servers below carry a TsigProvider (needed to MAC the response).
+	// DoT/DoH/DoQ receive the unwrapped authDNSHandler (do53.go DnsDoXEngine calls).
+	dnsMux.HandleFunc(".", TsigSigningHandler(authDNSHandler))
 
 	addresses := conf.DnsEngine.Addresses
 	if !CaseFoldContains(conf.DnsEngine.Transports, "do53") {

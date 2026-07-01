@@ -91,6 +91,44 @@ func (conf *Config) tsigProvider() dns.TsigProvider {
 	return tsigKeyProvider{conf.Internal.TsigKeyStore}
 }
 
+// tsigSignResponseWriter wraps a dns.ResponseWriter so a response to a
+// TSIG-signed request is itself TSIG-signed with the same key (RFC 8945 §5.1).
+// miekg never adds a response TSIG on its own: the server's TsigProvider only
+// computes the MAC for a response that already carries a TSIG RR. This writer
+// adds that RR (SetTsig) just before WriteMsg, so the underlying miekg writer
+// then MACs it, prefixing the request MAC (§5.4.1).
+//
+// Only responses to a request whose TSIG *verified* (TsigStatus() == nil) are
+// signed. A request with a bad or unknown key is left unsigned here; returning
+// a proper error TSIG (BADKEY/BADSIG) is a separate, deferred concern.
+type tsigSignResponseWriter struct {
+	dns.ResponseWriter
+	reqTsig *dns.TSIG
+}
+
+func (w *tsigSignResponseWriter) WriteMsg(m *dns.Msg) error {
+	if w.reqTsig != nil && w.ResponseWriter.TsigStatus() == nil && m.IsTsig() == nil {
+		m.SetTsig(w.reqTsig.Hdr.Name, w.reqTsig.Algorithm, tsigFudge, time.Now().Unix())
+	}
+	return w.ResponseWriter.WriteMsg(m)
+}
+
+// TsigSigningHandler wraps next so that, when a request carries a TSIG, every
+// response next writes is TSIG-signed (see tsigSignResponseWriter).
+//
+// Install it ONLY on transports whose dns.Server has a TsigProvider set (Do53
+// today): the underlying writer must be able to compute the MAC. DoT (no
+// provider) and DoH/DoQ (buffer-backed writers with no TSIG machinery) must get
+// the UNWRAPPED handler, or they would emit a TSIG RR with an empty MAC.
+func TsigSigningHandler(next func(dns.ResponseWriter, *dns.Msg)) func(dns.ResponseWriter, *dns.Msg) {
+	return func(w dns.ResponseWriter, r *dns.Msg) {
+		if rt := r.IsTsig(); rt != nil {
+			w = &tsigSignResponseWriter{ResponseWriter: w, reqTsig: rt}
+		}
+		next(w, r)
+	}
+}
+
 // SignForPeer prepares msg for TSIG signing under keyName and returns the
 // provider to set on the dns.Client / dns.Transfer. keyName == NOKEY (or the
 // empty string) is a no-op: it returns (nil, nil) and the caller signs nothing.
