@@ -16,6 +16,7 @@ import (
 	"net/netip"
 	"time"
 
+	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -91,6 +92,108 @@ func (conf *Config) tsigProvider() dns.TsigProvider {
 	return tsigKeyProvider{conf.Internal.TsigKeyStore}
 }
 
+// tsigSignResponseWriter wraps a dns.ResponseWriter so a response to a
+// TSIG-signed request is itself TSIG-signed with the same key (RFC 8945 §5.1).
+// miekg never adds a response TSIG on its own: the server's TsigProvider only
+// computes the MAC for a response that already carries a TSIG RR. This writer
+// adds that RR (SetTsig) just before WriteMsg, so the underlying miekg writer
+// then MACs it, prefixing the request MAC (§5.4.1).
+//
+// Only responses to a request whose TSIG *verified* (TsigStatus() == nil) are
+// signed. A request with a bad or unknown key is left unsigned here; returning
+// a proper error TSIG (BADKEY/BADSIG) is a separate, deferred concern.
+type tsigSignResponseWriter struct {
+	dns.ResponseWriter
+	reqTsig *dns.TSIG
+}
+
+func (w *tsigSignResponseWriter) WriteMsg(m *dns.Msg) error {
+	if w.reqTsig != nil && w.ResponseWriter.TsigStatus() == nil && m.IsTsig() == nil {
+		m.SetTsig(w.reqTsig.Hdr.Name, w.reqTsig.Algorithm, tsigFudge, time.Now().Unix())
+	}
+	return w.ResponseWriter.WriteMsg(m)
+}
+
+// TsigSigningHandler wraps next so that a TSIG-signed request is handled per
+// RFC 8945: if its TSIG failed verification the request is rejected with a
+// NOTAUTH error TSIG (see writeTsigErrorResponse) and next is NOT called; if it
+// verified, next's response is TSIG-signed (see tsigSignResponseWriter).
+//
+// Install it ONLY on transports whose dns.Server has a TsigProvider set (Do53
+// and DoT): the underlying writer must be able to verify inbound and MAC the
+// reply. DoH/DoQ (buffer-backed writers with no TSIG machinery) must get the
+// UNWRAPPED handler, or they would emit/expect TSIGs the writer can't process.
+func TsigSigningHandler(next func(dns.ResponseWriter, *dns.Msg)) func(dns.ResponseWriter, *dns.Msg) {
+	return func(w dns.ResponseWriter, r *dns.Msg) {
+		if rt := r.IsTsig(); rt != nil {
+			// The request's TSIG failed verification: reject with NOTAUTH + an
+			// error TSIG + EDE, and do NOT answer. An UNSIGNED request that an
+			// ACL requires a key for is a different case, handled downstream as
+			// REFUSED (ACL denial), not here.
+			if terr := w.TsigStatus(); terr != nil {
+				writeTsigErrorResponse(w, r, rt, terr)
+				return
+			}
+			w = &tsigSignResponseWriter{ResponseWriter: w, reqTsig: rt}
+		}
+		next(w, r)
+	}
+}
+
+// tsigErrorCode maps a TSIG verification failure (from w.TsigStatus(), set by the
+// keystore provider or miekg's time-window check) to the RFC 8945 TSIG error
+// code carried in the response TSIG's Error field, plus a short human reason.
+func tsigErrorCode(err error) (uint16, string) {
+	switch err {
+	case dns.ErrSig:
+		return dns.RcodeBadSig, "BADSIG (bad signature/MAC)"
+	case dns.ErrSecret:
+		return dns.RcodeBadKey, "BADKEY (unknown key)"
+	case dns.ErrKeyAlg:
+		return dns.RcodeBadKey, "BADKEY (algorithm mismatch)"
+	case dns.ErrTime:
+		return dns.RcodeBadTime, "BADTIME (time outside fudge window)"
+	default:
+		return dns.RcodeBadSig, fmt.Sprintf("TSIG verification failed (%v)", err)
+	}
+}
+
+// writeTsigErrorResponse answers a request whose TSIG failed verification with a
+// NOTAUTH message carrying (1) an error TSIG RR — same key name + algorithm, the
+// mapped BADKEY/BADSIG/BADTIME error code, and an EMPTY MAC (a rejected request's
+// response is not signed, RFC 8945 §5.3.2) — and (2) an EDE giving a
+// human-readable reason. The query itself is NOT answered. The message is packed
+// and written raw (w.Write) so the server's WriteMsg does not try to re-sign the
+// deliberately-unsigned error TSIG.
+func writeTsigErrorResponse(w dns.ResponseWriter, r *dns.Msg, reqTsig *dns.TSIG, tsigErr error) {
+	code, reason := tsigErrorCode(tsigErr)
+
+	resp := new(dns.Msg)
+	resp.SetRcode(r, dns.RcodeNotAuth)
+	resp.Authoritative = true
+	edns0.AttachEDEToResponseWithText(resp, dns.ExtendedErrorCodeOther,
+		fmt.Sprintf("TSIG %s for key %q", reason, reqTsig.Hdr.Name), false)
+	resp.Extra = append(resp.Extra, &dns.TSIG{
+		Hdr:        dns.RR_Header{Name: reqTsig.Hdr.Name, Rrtype: dns.TypeTSIG, Class: dns.ClassANY},
+		Algorithm:  reqTsig.Algorithm,
+		TimeSigned: uint64(time.Now().Unix()),
+		Fudge:      tsigFudge,
+		OrigId:     r.Id,
+		Error:      code,
+	})
+
+	packed, err := resp.Pack()
+	if err != nil {
+		lgDns.Error("TSIG error response: pack failed", "keyname", reqTsig.Hdr.Name, "err", err)
+		return
+	}
+	if _, err := w.Write(packed); err != nil {
+		lgDns.Warn("TSIG error response: write failed", "keyname", reqTsig.Hdr.Name, "err", err)
+	}
+	lgDns.Info("rejected TSIG-signed request that failed verification",
+		"keyname", reqTsig.Hdr.Name, "reason", reason, "remote", w.RemoteAddr())
+}
+
 // SignForPeer prepares msg for TSIG signing under keyName and returns the
 // provider to set on the dns.Client / dns.Transfer. keyName == NOKEY (or the
 // empty string) is a no-op: it returns (nil, nil) and the caller signs nothing.
@@ -133,6 +236,7 @@ func (zd *ZoneData) notifyKeyFor(target string) string {
 //   - it is unsigned AND NOKEY is in the approved set, or
 //   - it is signed, its MAC verified (w.TsigStatus()==nil, set by the server's
 //     TsigProvider), AND its key name matches one of the approved NAMED keys.
+//
 // Accepting ANY approved key (not just one) is what makes the dual-key rotation
 // overlap work. Returns nil on success, else a reason error for the caller to log.
 // The provider must be set on the dns.Server or w.TsigStatus() is meaningless.

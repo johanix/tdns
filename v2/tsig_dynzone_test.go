@@ -65,7 +65,10 @@ func TestStageInlineTsigKey(t *testing.T) {
 	}
 
 	// Commit installs it; the returned rollback removes a newly-added key.
-	rollback := conf.commitStagedTsigKey(staged)
+	rollback, err := conf.commitStagedTsigKey(staged)
+	if err != nil {
+		t.Fatalf("commitStagedTsigKey: %v", err)
+	}
 	if d, ok := conf.Internal.TsigKeyStore.Get("ikey"); !ok || d.Algorithm != "hmac-sha256" {
 		t.Fatalf("commit did not install the key: %+v ok=%v", d, ok)
 	}
@@ -74,16 +77,20 @@ func TestStageInlineTsigKey(t *testing.T) {
 		t.Error("rollback should remove a newly-added key")
 	}
 
-	// Committing over an existing name (a rotation) must, on rollback, RESTORE the
-	// previous secret — not delete the key and not leave the new (rejected) secret.
+	// A differing secret for an existing name is rejected (create-if-absent).
 	conf.Internal.TsigKeyStore.Add(TsigDetails{Name: "pre", Algorithm: "hmac-sha256", Secret: b64Secret16})
-	rb := conf.commitStagedTsigKey(&TsigDetails{Name: "pre", Algorithm: "hmac-sha256", Secret: "YWJjZGVmZ2hpamtsbW5vcA=="})
-	if d, _ := conf.Internal.TsigKeyStore.Get("pre"); d.Secret != "YWJjZGVmZ2hpamtsbW5vcA==" {
-		t.Errorf("commit should install the new secret before rollback, got %q", d.Secret)
+	if _, err := conf.stageInlineTsigKey(&DynamicZoneInput{
+		TsigName: "pre", TsigSecret: "YWJjZGVmZ2hpamtsbW5vcA==",
+	}); err == nil {
+		t.Fatal("expected error staging inline key with conflicting secret")
 	}
-	rb()
-	if d, ok := conf.Internal.TsigKeyStore.Get("pre"); !ok || d.Secret != b64Secret16 {
-		t.Errorf("rollback must restore the previous secret: got %q ok=%v, want %q", d.Secret, ok, b64Secret16)
+	if _, err := conf.commitStagedTsigKey(&TsigDetails{
+		Name: "pre", Algorithm: "hmac-sha256", Secret: "YWJjZGVmZ2hpamtsbW5vcA==",
+	}); err == nil {
+		t.Fatal("expected error committing conflicting inline key")
+	}
+	if d, _ := conf.Internal.TsigKeyStore.Get("pre"); d.Secret != b64Secret16 {
+		t.Errorf("conflicting commit must not change stored secret, got %q", d.Secret)
 	}
 
 	// No inline name -> (nil, nil) no-op.
@@ -100,47 +107,5 @@ func TestStageInlineTsigKey(t *testing.T) {
 	}
 	if conf.Internal.TsigKeyStore.Has("bad") {
 		t.Error("a rejected inline key must not be stored")
-	}
-}
-
-func TestGetDynamicTsigKeysFromZones(t *testing.T) {
-	conf := &Config{}
-	conf.Internal.TsigKeyStore = NewTsigKeyStore()
-	conf.Internal.TsigKeyStore.Add(TsigDetails{Name: "k1", Algorithm: "hmac-sha256", Secret: b64Secret16})
-	conf.Internal.TsigKeyStore.Add(TsigDetails{Name: "k2", Algorithm: "hmac-sha256", Secret: b64Secret16})
-	zones := []ZoneConf{
-		{Name: "a.", Primaries: []PeerConf{{Addr: "1", Key: "k1"}, {Addr: "2", Key: NOKEY}}},
-		{Name: "b.", Primaries: []PeerConf{{Addr: "3", Key: "k2"}, {Addr: "4", Key: "k1"}}}, // k1 again
-		{Name: "c.", Primaries: []PeerConf{{Addr: "5", Key: "missing"}}},                    // not in store
-	}
-	keys := conf.getDynamicTsigKeysFromZones(zones)
-	if len(keys) != 2 {
-		t.Fatalf("got %d keys, want 2 (k1,k2 deduped; NOKEY and missing skipped)", len(keys))
-	}
-	if keys[0].Name != "k1" || keys[1].Name != "k2" { // sorted by name
-		t.Errorf("keys = [%s %s], want sorted [k1 k2]", keys[0].Name, keys[1].Name)
-	}
-}
-
-func TestLoadDynamicTsigKeys_ConfigWins(t *testing.T) {
-	conf := &Config{}
-	conf.Internal.TsigKeyStore = NewTsigKeyStore()
-	// Pre-existing config key "shared" (loaded first) with secret A.
-	conf.Internal.TsigKeyStore.Add(TsigDetails{Name: "shared", Algorithm: "hmac-sha256", Secret: b64Secret16})
-
-	conf.loadDynamicTsigKeys([]TsigDetails{
-		{Name: "shared", Algorithm: "hmac-sha256", Secret: "YWJjZGVmZ2hpamtsbW5vcA=="}, // must NOT override
-		{Name: "dyn", Algorithm: "hmac-sha256", Secret: "YWJjZGVmZ2hpamtsbW5vcA=="},    // new -> loaded
-		{Name: "broken", Algorithm: "md5", Secret: "x"},                                // invalid -> skipped
-	})
-
-	if d, _ := conf.Internal.TsigKeyStore.Get("shared"); d.Secret != b64Secret16 {
-		t.Error("config key must win; the dynamic override must be skipped")
-	}
-	if !conf.Internal.TsigKeyStore.Has("dyn") {
-		t.Error("a new dynamic key should be loaded")
-	}
-	if conf.Internal.TsigKeyStore.Has("broken") {
-		t.Error("an invalid dynamic key should be skipped")
 	}
 }

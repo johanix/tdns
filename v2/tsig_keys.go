@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"crypto/rand"
 	"encoding/base64"
 	"fmt"
 	"strings"
@@ -53,6 +54,9 @@ func (s *TsigKeyStore) Add(d TsigDetails) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.keys == nil {
+		s.keys = make(map[string]TsigDetails)
+	}
 	s.keys[dns.CanonicalName(d.Name)] = d // canonical (lowercase FQDN) key, matches the wire name
 }
 
@@ -82,17 +86,26 @@ func (s *TsigKeyStore) Names() map[string]bool {
 	return out
 }
 
-// LoadTsigKeys (re)builds conf.Internal.TsigKeyStore from the keys: block. NOKEY
-// is reserved — a keys.tsig[] entry named NOKEY (any case) is an error, because
-// the sentinel must stay unambiguous — and every entry must be complete. Bad
-// entries are skipped (resilient-config rule: a single bad key does not abort
-// startup; zones referencing the skipped name are quarantined at parse), and the
-// first error is returned for loud logging. A missing keys: block is not an error.
-func (conf *Config) LoadTsigKeys() error {
-	store := NewTsigKeyStore()
+// ReplaceAll swaps the cache contents for keys (used when loading from the DB).
+func (s *TsigKeyStore) ReplaceAll(keys []TsigDetails) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.keys = make(map[string]TsigDetails, len(keys))
+	for _, d := range keys {
+		s.keys[dns.CanonicalName(d.Name)] = d
+	}
+}
+
+// collectValidConfigTsigKeys returns every complete, non-reserved keys.tsig entry.
+// Invalid entries are skipped; the first validation error is returned for logging.
+func collectValidConfigTsigKeys(tsig []TsigDetails) ([]TsigDetails, error) {
 	var firstErr error
-	for _, t := range conf.Keys.Tsig {
-		if strings.EqualFold(t.Name, NOKEY) || strings.EqualFold(t.Name, BLOCKED) {
+	var out []TsigDetails
+	for _, t := range tsig {
+		if tsigNameIsReserved(t.Name) {
 			if firstErr == nil {
 				firstErr = fmt.Errorf("keys.tsig: %q is a reserved sentinel (NOKEY/BLOCKED) and cannot be a key name", t.Name)
 			}
@@ -104,16 +117,86 @@ func (conf *Config) LoadTsigKeys() error {
 			}
 			continue
 		}
+		out = append(out, t)
+	}
+	return out, firstErr
+}
+
+// tsigConfigEffectiveOwner returns the owner label for a keys.tsig entry; empty
+// owner defaults via the same rule as keystore rows with origin=config.
+func tsigConfigEffectiveOwner(t TsigDetails) string {
+	if strings.TrimSpace(t.Owner) != "" {
+		return t.Owner
+	}
+	return tsigKeystoreEffectiveOwner(TsigKeystoreRow{Origin: "config"})
+}
+
+// LoadTsigKeys loads the in-memory TSIG store. When KeyDB is available the cache
+// is built from the TsigKeystore table after syncing keys.tsig into the DB as
+// origin=config rows. Without KeyDB (CLI client) keys.tsig alone populates the cache.
+func (conf *Config) LoadTsigKeys() error {
+	if conf.Internal.KeyDB != nil {
+		return conf.loadTsigKeysFromDB()
+	}
+	return conf.loadTsigKeysFromYAML()
+}
+
+func (conf *Config) loadTsigKeysFromYAML() error {
+	entries, firstErr := collectValidConfigTsigKeys(conf.Keys.Tsig)
+	store := NewTsigKeyStore()
+	for _, t := range entries {
 		store.Add(t)
 	}
 	conf.Internal.TsigKeyStore = store
 	return firstErr
 }
 
+func (conf *Config) loadTsigKeysFromDB() error {
+	kdb := conf.Internal.KeyDB
+	entries, firstErr := collectValidConfigTsigKeys(conf.Keys.Tsig)
+	if err := kdb.SyncConfigTsigKeys(entries); err != nil {
+		return err
+	}
+	store := NewTsigKeyStore()
+	if err := kdb.LoadTsigKeystoreInto(store); err != nil {
+		return err
+	}
+	conf.Internal.TsigKeyStore = store
+	return firstErr
+}
+
+// reconcileAndRefreshTsigKeys runs three-mode config-key reconcile against the DB
+// and patches the live cache in place (§6). Caller must hold confMu when mutating
+// config during reload.
+func (conf *Config) reconcileAndRefreshTsigKeys(opts TsigReconcileOptions) (TsigReconcileResult, error) {
+	if conf.Internal.KeyDB == nil {
+		err := conf.loadTsigKeysFromYAML()
+		return TsigReconcileResult{}, err
+	}
+	kdb := conf.Internal.KeyDB
+	entries, firstErr := collectValidConfigTsigKeys(conf.Keys.Tsig)
+	result, err := kdb.ReconcileConfigTsigKeys(entries, opts, conf.tsigKeyReferencedByZone)
+	if err != nil {
+		return result, err
+	}
+	if conf.Internal.TsigKeyStore == nil {
+		conf.Internal.TsigKeyStore = NewTsigKeyStore()
+	}
+	if err := ApplyTsigCacheDelta(conf.Internal.TsigKeyStore, kdb, result.TsigCacheDelta); err != nil {
+		return result, err
+	}
+	return result, firstErr
+}
+
 // tsigKeyDefined reports whether a primary/notify/ACL key name is acceptable:
 // NOKEY (no TSIG) or a name defined in the keys: store.
 func (conf *Config) tsigKeyDefined(name string) bool {
 	return name == NOKEY || conf.Internal.TsigKeyStore.Has(name)
+}
+
+func tsigNameIsReserved(name string) bool {
+	c := dns.CanonicalName(name)
+	return strings.EqualFold(c, dns.CanonicalName(NOKEY)) || strings.EqualFold(c, dns.CanonicalName(BLOCKED))
 }
 
 // tsigKeyAcceptable is tsigKeyDefined extended with an optional staged (not yet
@@ -136,6 +219,33 @@ func knownTsigAlgo(algo string) bool {
 	return false
 }
 
+// GenerateTsigSecret returns a base64-encoded random secret sized for algorithm.
+func GenerateTsigSecret(algorithm string) (string, error) {
+	if !knownTsigAlgo(algorithm) {
+		return "", fmt.Errorf("tsig algorithm %q is not a supported HMAC algorithm", algorithm)
+	}
+	var n int
+	switch dns.CanonicalName(algorithm) {
+	case dns.HmacSHA1:
+		n = 20
+	case dns.HmacSHA224:
+		n = 28
+	case dns.HmacSHA256:
+		n = 32
+	case dns.HmacSHA384:
+		n = 48
+	case dns.HmacSHA512:
+		n = 64
+	default:
+		return "", fmt.Errorf("tsig algorithm %q is not a supported HMAC algorithm", algorithm)
+	}
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate tsig secret: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(b), nil
+}
+
 // validateTsigKeySpec checks an inline (API-supplied) TSIG key before it enters
 // the store: a complete, non-reserved name, a supported algorithm, and a base64
 // secret. Used by the dynamic-zone add/modify path and the dynamic-config reload.
@@ -143,7 +253,7 @@ func validateTsigKeySpec(name, algo, secret string) error {
 	if name == "" || secret == "" {
 		return fmt.Errorf("tsig key requires both a name and a secret")
 	}
-	if strings.EqualFold(name, NOKEY) || strings.EqualFold(name, BLOCKED) {
+	if tsigNameIsReserved(name) {
 		return fmt.Errorf("tsig key name %q is a reserved sentinel (NOKEY/BLOCKED)", name)
 	}
 	if !knownTsigAlgo(algo) {

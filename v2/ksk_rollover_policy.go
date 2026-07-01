@@ -569,6 +569,7 @@ func warnDnssecPolicyCoupling(policyName string, out *DnssecPolicy) {
 // both live under the dnssec: block.
 type dnssecPoliciesYAML struct {
 	Dnssec struct {
+		Templates       map[string]DnssecPolicyConf `yaml:"templates"`
 		Policies        map[string]DnssecPolicyConf `yaml:"policies"`
 		SplitAlgorithms map[string][]string         `yaml:"split_algorithms"`
 	} `yaml:"dnssec"`
@@ -662,6 +663,14 @@ func ValidateDnssecPoliciesFromFile(path string) error {
 	var errs []error
 	for name, dp := range root.Dnssec.Policies {
 		dp.Name = name
+		if dp.Template != "" {
+			tmpl, ok := root.Dnssec.Templates[dp.Template]
+			if !ok {
+				errs = append(errs, fmt.Errorf("policy %q: references unknown dnssec template %q", name, dp.Template))
+				continue
+			}
+			dp = ExpandPolicyTemplate(dp, &tmpl)
+		}
 		alg, kskAlg, zskAlg, err := resolvePolicyRoleAlgorithms(name, &dp)
 		if err != nil {
 			errs = append(errs, err)

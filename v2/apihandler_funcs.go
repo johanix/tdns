@@ -31,6 +31,11 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 		lgApi.Debug("received /keystore request", "cmd", kp.Command, "subcmd", kp.SubCommand, "from", r.RemoteAddr)
 
 		var resp *KeystoreResponse
+		var tsigCacheDelta *TsigCacheDelta
+		tsigMgmt := kp.Command == "tsig-mgmt"
+		if tsigMgmt {
+			confMu.Lock()
+		}
 
 		tx, err := kdb.Begin("APIkeystore")
 
@@ -39,8 +44,32 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 				if err != nil {
 					tx.Rollback()
 				} else {
-					tx.Commit()
+					if commitErr := tx.Commit(); commitErr != nil {
+						err = commitErr
+						if resp != nil {
+							resp.Error = true
+							resp.ErrorMsg = commitErr.Error()
+						}
+					} else if tsigCacheDelta != nil {
+						if !tsigMgmt {
+							confMu.Lock()
+						}
+						if applyErr := ApplyTsigCacheDelta(conf.Internal.TsigKeyStore, kdb, tsigCacheDelta); applyErr != nil {
+							lgApi.Error("ApplyTsigCacheDelta failed", "err", applyErr)
+							if resp == nil {
+								resp = &KeystoreResponse{Time: time.Now()}
+							}
+							resp.Error = true
+							resp.ErrorMsg = fmt.Sprintf("TSIG keystore committed, but runtime cache refresh failed: %v", applyErr)
+						}
+						if !tsigMgmt {
+							confMu.Unlock()
+						}
+					}
 				}
+			}
+			if tsigMgmt {
+				confMu.Unlock()
 			}
 			w.Header().Set("Content-Type", "application/json")
 			json.NewEncoder(w).Encode(resp)
@@ -78,6 +107,19 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 			// Trigger re-sign and inventory push after state-changing operations
 			if err == nil && (kp.SubCommand == "rollover" || kp.SubCommand == "delete" || kp.SubCommand == "setstate" || kp.SubCommand == "clear" || kp.SubCommand == "policy-cleanup") {
 				triggerResign(conf, kp.Zone)
+			}
+
+		case "tsig-mgmt":
+			resp, err = kdb.TsigKeyMgmt(conf, tx, kp)
+			if err != nil {
+				if resp == nil {
+					resp = &KeystoreResponse{Time: time.Now(), Error: true, ErrorMsg: err.Error()}
+				} else {
+					resp.Error = true
+					resp.ErrorMsg = err.Error()
+				}
+			} else if resp != nil {
+				tsigCacheDelta = resp.TsigCacheDelta
 			}
 
 		case "list-algorithms":
@@ -282,6 +324,21 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		case "reload-zones":
 			lgApi.Info("reloading zones")
 			resp.Msg, err = conf.ReloadZoneConfig(r.Context())
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+
+		case "reload-tsig":
+			lgApi.Info("reloading TSIG keys from config")
+			var result TsigReconcileResult
+			result, err = conf.ReloadTsigConfig(TsigReconcileOptions{
+				Force:     cp.Force,
+				Overwrite: cp.TsigOverwrite,
+			})
+			resp.Msg = formatTsigReconcileMsg(result)
+			resp.TsigConflicts = result.Conflicts
+			resp.TsigWithheldRemovals = result.WithheldRemovals
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()

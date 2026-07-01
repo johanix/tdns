@@ -140,7 +140,14 @@ func transitionPublishedToStandby(conf *Config, kdb *KeyDB, now time.Time, propa
 			}
 		}
 		if key.PublishedAt == nil {
-			lgSigner.Warn("KeyStateWorker: published key has no published_at timestamp, skipping", "zone", key.ZoneName, "keyid", key.KeyTag)
+			// Legacy/migrated key with no published_at (column was added later with
+			// DEFAULT ''): stamp it now (persisted via UpdateDnssecKeyState) so the
+			// rollover can progress, instead of skipping it forever. Conservative —
+			// the key then waits the full propagation delay measured from now.
+			lgSigner.Warn("KeyStateWorker: published key missing published_at; stamping it now and deferring transition", "zone", key.ZoneName, "keyid", key.KeyTag)
+			if err := UpdateDnssecKeyState(kdb, key.ZoneName, key.KeyTag, DnskeyStatePublished); err != nil {
+				lgSigner.Error("KeyStateWorker: failed to stamp published_at", "zone", key.ZoneName, "keyid", key.KeyTag, "err", err)
+			}
 			continue
 		}
 

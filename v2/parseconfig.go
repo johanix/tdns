@@ -271,10 +271,13 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// mapstructure, and mapstructure ignores the yaml.Unmarshaler interface.
 	var md mapstructure.Metadata
 	decoderConfig := &mapstructure.DecoderConfig{
-		TagName:    "yaml",
-		Result:     conf,
-		Metadata:   &md,
-		DecodeHook: stringToPeerConfHook(),
+		TagName:  "yaml",
+		Result:   conf,
+		Metadata: &md,
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			stringToPeerConfHook(),
+			stringToAclEntryHook(),
+		),
 	}
 	decoder, err := mapstructure.NewDecoder(decoderConfig)
 	if err != nil {
@@ -671,7 +674,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				}
 				if !conf.tsigKeyDefined(p.Key) {
 					lgConfig.Error("secondary zone primary references unknown key, zone in error state", "zone", zname, "key", p.Key)
-					zd.SetError(ConfigError, "unknown primary key %q (define it in keys.tsig or use NOKEY for no TSIG)", p.Key)
+					zd.SetError(ConfigError, "unknown primary key %q (define it in keys.tsig or keystore tsig, or use NOKEY for no TSIG)", p.Key)
 					secondaryOK = false
 					break
 				}
@@ -693,12 +696,15 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			// cleared by the SetError(NoError) reset at the top of the loop.
 			res := resolvePrimaries(ctx, conf.Internal.ImrEngine, zconf.Primaries)
 			if len(res.Resolved) == 0 {
-				lgConfig.Error("secondary zone: no primary resolved to an address, zone in error state", "zone", zname, "unresolved", res.Unresolved)
-				zd.SetError(ConfigError, "no primary resolved to an address (unresolved: %v)", res.Unresolved)
-				broken_zones = append(broken_zones, zname)
-				continue
-			}
-			if len(res.Unresolved) > 0 || len(res.KeyCollisions) > 0 {
+				// D1: an unresolved hostname primary at parse time is NOT fatal.
+				// The zone is created and the refresh engine re-resolves on every
+				// cycle, so a transient failure (or an IMR not yet up at boot)
+				// self-heals instead of permanently quarantining the zone. It
+				// serves nothing until a primary resolves, surfacing as a refresh
+				// error rather than a config quarantine.
+				lgConfig.Warn("secondary zone: no primary resolved yet, will retry at refresh", "zone", zname, "unresolved", res.Unresolved)
+				zd.SetError(ConfigWarning, "no primary resolved yet (unresolved: %v); retrying at refresh", res.Unresolved)
+			} else if len(res.Unresolved) > 0 || len(res.KeyCollisions) > 0 {
 				// Count resolved addresses actually usable for transfer — not
 				// entries-minus-unresolved, which over-counts when a key
 				// collision drops an otherwise-resolved address.
@@ -1107,26 +1113,21 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 	return all_zones, broken_zones, nil
 }
 
+// ExpandTemplate applies template tmpl's settings to zone zconf. Every config
+// field the template SETS is copied to the zone UNLESS the zone already set it
+// (the zone always wins), so new ZoneConf config fields are propagated
+// automatically without editing this function. Three fields need bespoke
+// handling and are excluded from the generic copy: Zonefile (%-substituted with
+// the zone name), OptionsStrs (unioned, not gap-filled) and DnssecPolicy (gated
+// off for agents). Name and Template are never copied from a template. Runtime/
+// display fields (Error, Frozen, RefreshCount, Provisioning, …) are never set in
+// a template config, so the zero-value check skips them naturally.
 func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, error) {
+	// --- bespoke fields (cannot be a plain gap-fill copy) ---
 
-	// for each field in tmpl, check whether it contains any data
-	// and if so, then let that data overwrite the same field in zconf
-
-	if tmpl.Type != "" {
-		zconf.Type = tmpl.Type
-	}
-	if tmpl.Store != "" {
-		// fmt.Printf("ExpandTemplate: zone %s now uses the \"%s\" storage alternative.\n", zconf.Name, tmpl.Store)
-		zconf.Store = tmpl.Store
-	}
-	if len(tmpl.Primaries) > 0 {
-		// Clone — ParseZones normalizes zconf.Primaries[i].Addr in place, so an
-		// alias of the template slice would let the first zone using this
-		// template mutate the shared template state for every later zone.
-		zconf.Primaries = clonePeerConfs(tmpl.Primaries)
-	}
-	if len(tmpl.Zonefile) > 0 {
-		// H26: Validate zone name doesn't contain format specifiers
+	// Zonefile: the template carries a pattern that is %-substituted with the
+	// zone name, not copied verbatim.
+	if zconf.Zonefile == "" && tmpl.Zonefile != "" {
 		if strings.ContainsAny(zconf.Name, "%") {
 			return zconf, fmt.Errorf("zone name %q contains format specifiers", zconf.Name)
 		}
@@ -1136,33 +1137,78 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 		}
 		zconf.Zonefile = expanded
 	}
-	if len(tmpl.Notify) > 0 {
-		zconf.Notify = tmpl.Notify
-	}
 
-	// template options are appended to existing zone options
-	if len(tmpl.OptionsStrs) > 0 {
-		for _, option := range tmpl.OptionsStrs {
-			if !slices.Contains(zconf.OptionsStrs, option) {
-				zconf.OptionsStrs = append(zconf.OptionsStrs, option)
-			}
+	// OptionsStrs: union (append template options the zone lacks), not gap-fill.
+	for _, option := range tmpl.OptionsStrs {
+		if !slices.Contains(zconf.OptionsStrs, option) {
+			zconf.OptionsStrs = append(zconf.OptionsStrs, option)
 		}
 	}
-	if (tmpl.UpdatePolicy.Child.Type != "" && len(tmpl.UpdatePolicy.Child.RRtypes) > 0) ||
-		(tmpl.UpdatePolicy.Zone.Type != "" && len(tmpl.UpdatePolicy.Zone.RRtypes) > 0) {
-		zconf.UpdatePolicy = tmpl.UpdatePolicy
-	}
 
-	// tdns-agent does not have DNSSEC policies, so we ignore them.
-	// A zone's explicit dnssecpolicy wins over the template's: the template
-	// supplies a default only when the zone didn't set its own.
-	if appMode != AppTypeAgent && tmpl.DnssecPolicy != "" && zconf.DnssecPolicy == "" {
+	// DnssecPolicy: gap-fill, but agents do not sign so it is gated off there.
+	if appMode != AppTypeAgent && zconf.DnssecPolicy == "" && tmpl.DnssecPolicy != "" {
 		zconf.DnssecPolicy = tmpl.DnssecPolicy
 	}
 
-	zconf.MultiSigner = tmpl.MultiSigner
-
+	// --- generic gap-fill for every other config field (zone wins) ---
+	// Shallow (deep=false): zones have no nested config block that wants a
+	// recursive merge — UpdatePolicy is copied whole if the zone left it unset.
+	// A template config never sets runtime/display fields, so IsZero skips them.
+	bespoke := map[string]bool{
+		"Name": true, "Template": true, // never copied from a template
+		"Zonefile": true, "OptionsStrs": true, "DnssecPolicy": true, // handled above
+	}
+	gapFillStruct(reflect.ValueOf(&zconf).Elem(), reflect.ValueOf(tmpl).Elem(), bespoke, false)
 	return zconf, nil
+}
+
+// gapFillStruct fills fields of dst that are still at their zero value from the
+// matching field of src; dst always wins. dst and src must be addressable
+// structs of the same type. skip names top-level fields that are never copied.
+//
+// When deep is false a struct-typed field is treated as a single value (copied
+// whole only if dst's is entirely zero). When deep is true a struct-typed field
+// is merged recursively, so dst can set part of a nested block and inherit the
+// rest from src. Slices are cloned so dst never aliases src's backing array.
+//
+// Caveat (both modes): a leaf counts as "set" iff it is non-zero, so dst cannot
+// override an src value back to the zero value ("" / 0 / false / nil) — that
+// reads as unset and src fills it.
+func gapFillStruct(dst, src reflect.Value, skip map[string]bool, deep bool) {
+	for i := 0; i < dst.NumField(); i++ {
+		if skip[dst.Type().Field(i).Name] {
+			continue
+		}
+		df, sf := dst.Field(i), src.Field(i)
+		if !df.CanSet() {
+			continue
+		}
+		if deep && df.Kind() == reflect.Struct {
+			gapFillStruct(df, sf, nil, deep) // skip set applies only at the top level
+			continue
+		}
+		if !df.IsZero() || sf.IsZero() {
+			continue // dst already set it, or src has nothing to give
+		}
+		if df.Kind() == reflect.Slice {
+			c := reflect.MakeSlice(df.Type(), sf.Len(), sf.Len())
+			reflect.Copy(c, sf)
+			df.Set(c)
+		} else {
+			df.Set(sf)
+		}
+	}
+}
+
+// ExpandPolicyTemplate fills the gaps in a DNSSEC policy from a named template
+// (the policy's own values win). Unlike zone templates it deep-merges: a policy
+// that sets only some fields of a nested block (ksk, zsk, rollover, ttls,
+// sigvalidity, clamping, ...) inherits the remaining fields of that block from
+// the template, rather than overriding the whole block.
+func ExpandPolicyTemplate(pconf DnssecPolicyConf, tmpl *DnssecPolicyConf) DnssecPolicyConf {
+	skip := map[string]bool{"Name": true, "Template": true}
+	gapFillStruct(reflect.ValueOf(&pconf).Elem(), reflect.ValueOf(tmpl).Elem(), skip, true)
+	return pconf
 }
 
 // buildTemplateMap rebuilds the global Templates map from conf.Templates.
@@ -1267,6 +1313,38 @@ func (conf *Config) reloadDnssecFromFile() error {
 
 	conf.Dnssec = partial.Dnssec
 	return conf.parseDnssecConfig()
+}
+
+// reloadTsigKeysFromFile re-reads the config file and decodes just the keys:
+// block into conf.Keys. Used by reload-tsig without a full config reload.
+func (conf *Config) reloadTsigKeysFromFile() error {
+	cfgfile := conf.Internal.CfgFile
+	if cfgfile == "" {
+		return nil
+	}
+
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	if err != nil {
+		return fmt.Errorf("error processing config: %v", err)
+	}
+
+	var partial struct {
+		Keys KeyConf `yaml:"keys"`
+	}
+	decoderConfig := &mapstructure.DecoderConfig{
+		TagName: "yaml",
+		Result:  &partial,
+	}
+	decoder, err := mapstructure.NewDecoder(decoderConfig)
+	if err != nil {
+		return fmt.Errorf("error creating decoder: %v", err)
+	}
+	if err := decoder.Decode(configMap); err != nil {
+		return fmt.Errorf("error decoding keys config: %v", err)
+	}
+
+	conf.Keys = partial.Keys
+	return nil
 }
 
 // expandTemplateChain expands a template by following its parent chain (via the Template field)
@@ -1377,6 +1455,17 @@ func (conf *Config) parseDnssecConfig() error {
 		markBroken := func(reason string) {
 			lgConfig.Error("DNSSEC policy rejected, unusable", "policy", name, "err", reason)
 			conf.Internal.DnssecPolicies[name] = DnssecPolicy{Name: name, Error: reason}
+		}
+		// A policy may inherit the gaps in its definition from a named template
+		// (deep merge; the policy's own values win). An unknown template name
+		// quarantines just this policy and keeps the server running.
+		if dpLocal.Template != "" {
+			tmpl, ok := conf.Dnssec.Templates[dpLocal.Template]
+			if !ok {
+				markBroken(fmt.Sprintf("references unknown dnssec template %q", dpLocal.Template))
+				continue
+			}
+			dpLocal = ExpandPolicyTemplate(dpLocal, &tmpl)
 		}
 		alg, kskAlg, zskAlg, err := resolvePolicyRoleAlgorithms(name, &dpLocal)
 		if err != nil {
@@ -1533,6 +1622,21 @@ func stringToPeerConfHook() mapstructure.DecodeHookFunc {
 			return data, nil
 		}
 		return PeerConf{Legacy: data.(string)}, nil
+	}
+}
+
+// stringToAclEntryHook is the AclEntry analogue of stringToPeerConfHook: it turns
+// a legacy bare-string allow-notify:/downstreams: value into an AclEntry carrying
+// a Legacy marker (applied element-wise across the []AclEntry list), so a
+// pre-{prefix,key} list quarantines just that zone (ValidateACL rejects the
+// marker) instead of failing the whole-file decode on the string->struct
+// mismatch.
+func stringToAclEntryHook() mapstructure.DecodeHookFunc {
+	return func(from reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
+		if from.Kind() != reflect.String || to != reflect.TypeOf(AclEntry{}) {
+			return data, nil
+		}
+		return AclEntry{Legacy: data.(string)}, nil
 	}
 }
 

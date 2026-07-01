@@ -16,7 +16,9 @@ import (
 func (tx *Tx) Commit() error {
 	// log.Printf("---> Committing KeyDB transaction: %s", tx.context)
 	err := tx.Tx.Commit()
+	tx.KeyDB.mu.Lock()
 	tx.KeyDB.Ctx = ""
+	tx.KeyDB.mu.Unlock()
 	if err != nil {
 		lgConfig.Error("error committing KeyDB transaction", "context", tx.context, "err", err)
 	}
@@ -26,7 +28,9 @@ func (tx *Tx) Commit() error {
 func (tx *Tx) Rollback() error {
 	// log.Printf("<--- Rolling back KeyDB transaction: %s", tx.context)
 	err := tx.Tx.Rollback()
+	tx.KeyDB.mu.Lock()
 	tx.KeyDB.Ctx = ""
+	tx.KeyDB.mu.Unlock()
 	if err != nil {
 		lgConfig.Error("error rolling back KeyDB transaction", "context", tx.context, "err", err)
 	}
@@ -62,13 +66,20 @@ func (db *KeyDB) Prepare(q string) (*sql.Stmt, error) {
 
 func (db *KeyDB) Begin(context string) (*Tx, error) {
 	// log.Printf("---> Beginning KeyDB transaction: %s", context)
+	db.mu.Lock()
 	if db.Ctx != "" {
+		ctx := db.Ctx
+		db.mu.Unlock()
 		lgConfig.Error("KeyDB transaction already in progress", "context", db.Ctx)
-		return nil, fmt.Errorf("KeyDB transaction already in progress: %s", db.Ctx)
+		return nil, fmt.Errorf("KeyDB transaction already in progress: %s", ctx)
 	}
 	db.Ctx = context
+	db.mu.Unlock()
 	tx, err := db.DB.Begin()
 	if err != nil {
+		db.mu.Lock()
+		db.Ctx = ""
+		db.mu.Unlock()
 		lgConfig.Error("error beginning transaction", "context", context, "err", err)
 		return nil, err
 	}

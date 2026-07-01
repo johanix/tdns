@@ -238,7 +238,14 @@ func (w *doqResponseWriter) WriteMsg(m *dns.Msg) error {
 	return nil
 }
 
-func (w *doqResponseWriter) Close() error              { return w.stream.Close() }
+func (w *doqResponseWriter) Close() error { return w.stream.Close() }
+
+// TODO(tsig): DoQ is served by this stream-backed writer, not a miekg
+// dns.Server, so miekg's conn-level TSIG (verify-on-read, MAC-on-write) does not
+// apply and TsigStatus is a stub. Supporting TSIG over DoQ would mean manually
+// dns.TsigVerify'ing the inbound message and dns.TsigGenerate'ing the reply
+// (request-MAC prefixed) in this path. Deferred: encrypted transports usually
+// authenticate peers via TLS/mTLS, and tdns replication (AXFR/NOTIFY) is Do53.
 func (w *doqResponseWriter) TsigStatus() error         { return nil }
 func (w *doqResponseWriter) TsigTimersOnly(bool)       {}
 func (w *doqResponseWriter) Hijack()                   {}

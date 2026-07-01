@@ -220,11 +220,55 @@ dnssec:
       # FALCON512: [ ED25519, ECDSAP256SHA256 ]
       # MAYO1:     [ ED25519 ]
 
+   # Named DNSSEC policy TEMPLATES. A template is a partial policy: any policy
+   # below may set `template: <name>` to inherit this template's settings for
+   # the fields it does not specify itself. Inheritance is a DEEP merge — a
+   # policy that sets only some fields of a nested block (ksk, zsk, rollover,
+   # ttls, sigvalidity, clamping) inherits the rest of that block from the
+   # template; the policy's own values always win. Templates are not usable
+   # policies themselves (a zone cannot reference a template).
+   #
+   # Caveat: inheritance fills only the fields a policy leaves UNSET, so a
+   # policy cannot override a template value back to an empty/zero value (e.g.
+   # it cannot set clamping.enabled back to false once the template enabled it).
+   templates:
+      # Shared cadence, signature validity, rollover and TTLs. Policies that
+      # reference this template need only declare their own key lifetimes.
+      base:
+         algorithm:  ED25519
+         sigvalidity:
+            default:  14d
+            dnskey:   30d
+            ds:       14d
+         rollover:
+            method:                multi-ds
+            num-ds:                3
+            parent-agent:          127.0.0.1:5354
+            confirm-initial-wait:  2s
+            confirm-poll-max:      60s
+            confirm-timeout:       1h
+         ttls:
+            dnskey:  2h
+
    # Named DNSSEC policies. Each zone references one via its dnssec_policy
    # field. A policy that sets different ksk.algorithm and zsk.algorithm must
    # have that pair allowlisted in dnssec.split_algorithms above, or config
-   # load fails.
+   # load fails. A policy may also set `template: <name>` to inherit defaults
+   # from a template in dnssec.templates above.
    policies:
+      # Inherits algorithm, sigvalidity, rollover and ttls from the `base`
+      # template above and sets only its own key lifetimes. This is the deep
+      # merge in action: the whole rollover/ttls/sigvalidity blocks come from
+      # base, while ksk/zsk here are the policy's own.
+      from-template:
+         template:  base
+         ksk:
+            lifetime:  90d
+         zsk:
+            lifetime:  30d
+         csk:
+            lifetime:  none
+
       # Static KSK, no automated rollover. Useful for zones whose operators
       # want manual control over key cycles.
       default:
@@ -417,9 +461,34 @@ db:
 
 log:
    file:   /var/log/axfr.net/tdns-auth.log
-   level:  info     # default level: debug|info|warn|error
-   # subsystems:    # per-subsystem level overrides
-   #   dns:  debug
+
+   # Global log level, applied to every subsystem unless overridden below.
+   # One of: debug | info | warn | error   (empty defaults to info)
+   level:  info
+
+   # Per-subsystem level overrides. A subsystem uses the global 'level' above
+   # unless listed here. The subsystem name is the tag shown after the level in
+   # each log line, e.g. a line tagged "[INFO/zones]" is the "zones" subsystem.
+   #
+   # Commonly useful subsystems for tdns-auth:
+   #   config     config-file parsing and reload
+   #   zones      zone load, dynamic zones, AXFR/IXFR (in and out)
+   #   dns        DNS query / lookup / resolution
+   #   engine     refresh engine + internal resolver (IMR) engine
+   #   handler    DNS request handlers
+   #   api        HTTP management API
+   #   signer     DNSSEC signing and the key-state worker
+   #   rollover   DNSSEC key rollover
+   #   conn-retry connection retries (defaults to 'error' to reduce noise;
+   #              set to debug/info to see it)
+   #   CDS, CSYNC, DNSKEY, GENERIC   inbound NOTIFY handling, per RR type
+   # Other subsystems (present, used by specific features / app types):
+   #   agent, combiner, gossip, transport, elect, provider-group, signal-republish
+   #
+   # subsystems:
+   #   dns:        debug
+   #   zones:      debug
+   #   conn-retry: info
 
 common:
    servername:  tdns-auth

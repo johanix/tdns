@@ -50,7 +50,9 @@ On the tdns-agent, configure the zone as a normal secondary and add the
 zones:
    child.example.:
       type: secondary
-      primary: 192.0.2.10:53        # the DSYNC-unaware BIND/Knot primary
+      primaries:
+         - addr: 192.0.2.10:53      # the DSYNC-unaware BIND/Knot primary
+           key:  NOKEY              # no TSIG; trust this primary by address
       store: map
       options:
          - delegation-sync-proxy

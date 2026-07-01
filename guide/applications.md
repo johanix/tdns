@@ -18,10 +18,13 @@ document.
 ## tdns-auth -- Authoritative Nameserver
 
 An authoritative DNS nameserver with support for DNSSEC
-online signing, inbound/outbound NOTIFY and AXFR, SIG(0)
-signed dynamic updates, delegation synchronization (both
-parent and child roles), DNS catalog zones (RFC 9432),
-dynamic zone management via REST API, and zone templates.
+online signing and named signing policies, inbound/outbound
+NOTIFY and AXFR (optionally TSIG-authenticated, with NSD-style
+access-control lists and multiple primaries per secondary
+zone), SIG(0) signed dynamic updates, delegation
+synchronization (both parent and child roles), DNS catalog
+zones (RFC 9432), dynamic zone management via REST API, and
+zone templates.
 
 [Full documentation](app-tdns-auth.md)
 
@@ -48,9 +51,10 @@ interactive CLI for manual queries and cache inspection.
 
 A CLI tool to interact with TDNS services via their REST
 APIs. Sub-commands cover zone management (signing, NSEC
-chains, reload), DNS UPDATE composition, keystore and
-truststore management, generalized NOTIFY, and DSYNC
-inspection.
+chains, reload, and dynamic add/modify/delete), DNS UPDATE
+composition, keystore management (DNSSEC, SIG(0), and TSIG
+keys) and truststore management, generalized NOTIFY, and
+DSYNC inspection.
 
 [Full documentation](app-tdns-cli.md)
 

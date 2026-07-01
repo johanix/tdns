@@ -6,7 +6,10 @@ feature set:
 0. Load zones from text files on disk.
 
 1. Inbound and outbound NOTIFY support. Inbound and outbound
-   AXFR support. No support for IXFR yet.
+   AXFR support, optionally TSIG-authenticated. No support for
+   IXFR yet. A secondary zone may be configured with multiple
+   primaries, and inbound NOTIFY and outbound AXFR are governed
+   by NSD-style access-control lists (see feature 16 below).
 
 2. Respond correctly to non-DNSSEC queries.
 
@@ -26,7 +29,6 @@ In addition, TDNS-AUTH has a couple of extra features:
 1. There is a built-in REST API, used by the mgmt tool "tdns-cli".
 
 2. Support for inbound, SIG(0) signed, dynamic updates.
-   No TSIG support (yet).
 
 3. Support for publication of the DSYNC RRtype (see 
    draft-ietf-dnsop-generalized-notify).
@@ -63,8 +65,9 @@ In addition, TDNS-AUTH has a couple of extra features:
    and receiving them via zone transfer.
 
 10. Support for a built-in keystore (to store private/public DNSSEC
-    and SIG(0) key pairs). These are used to sign zone data and DNS
-    UPDATE messages.
+    and SIG(0) key pairs, plus shared-secret TSIG keys). These are
+    used to sign zone data and DNS UPDATE messages, and to
+    authenticate zone transfers and NOTIFY.
 
 11. Support for a built-in truststore (to store public DNSSEC and 
     SIG(0) keys). These are used to validate child CDS and CSYNC
@@ -97,6 +100,30 @@ In addition, TDNS-AUTH has a couple of extra features:
     - Configuration file persistence for zone definitions
     - Graceful handling of corrupted files on startup
     - Atomic file writes to prevent data loss
+
+16. NSD-style access control for zone transfers and NOTIFY.
+    `allow-notify:` (who may NOTIFY a secondary) and
+    `downstreams:` (who may AXFR from a primary) are lists of
+    entries, each an address prefix plus an optional TSIG key
+    name (or the `NOKEY` / `BLOCKED` sentinels). An empty
+    `downstreams:` denies all outbound transfers -- a deliberate
+    change from the historical open-AXFR default -- so a primary
+    must explicitly list the peers it will answer.
+
+17. First-class TSIG (RFC 8945). TSIG keys live in the
+    DB-backed keystore (managed via `tdns-cli` and the REST API)
+    and are referenced by name from peer (`primaries:`,
+    `notify:`) and ACL (`allow-notify:`, `downstreams:`) config.
+    A primary specified by hostname rather than IP is resolved
+    via the built-in resolver and re-resolved on the refresh
+    cadence.
+
+18. DNSSEC signing policies, referenced per zone by name
+    (`dnssecpolicy:`), with reusable policy templates: a policy
+    may inherit from a named template (`dnssec.templates:`) via
+    a `template:` reference, and a deep merge fills in the
+    fields the policy does not set itself. See the annotated
+    sample config and the key-rollover guide.
 
 Comments, questions, pull requests, etc are welcome!
 

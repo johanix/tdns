@@ -25,6 +25,11 @@ const BLOCKED = "BLOCKED"
 type AclEntry struct {
 	Prefix string `yaml:"prefix" mapstructure:"prefix"`
 	Key    string `yaml:"key" mapstructure:"key"`
+	// Legacy is set by stringToAclEntryHook when a bare-string allow-notify: /
+	// downstreams: value is found (the pre-{prefix,key} shape). Not config: it
+	// exists so a legacy list quarantines just that zone (ValidateACL rejects a
+	// non-empty Legacy) instead of failing the whole config decode.
+	Legacy string `yaml:"-" mapstructure:"-"`
 }
 
 // matchACL applies an ordered ACL to a source IP, NSD-style: a matching BLOCKED
@@ -86,11 +91,14 @@ func ValidateIPSpec(spec string) error {
 // name). Returns the first error, for per-zone quarantine.
 func ValidateACL(acl []AclEntry, keyDefined func(string) bool) error {
 	for _, e := range acl {
+		if e.Legacy != "" {
+			return fmt.Errorf("entry %q is a legacy bare-string address; migrate to { prefix: %s, key: NOKEY } — {prefix, key} is now required, and downstreams: is an AXFR ACL (not a notify list)", e.Legacy, e.Legacy)
+		}
 		if err := ValidateIPSpec(e.Prefix); err != nil {
 			return fmt.Errorf("acl entry %q: %w", e.Prefix, err)
 		}
 		if e.Key != BLOCKED && !keyDefined(e.Key) {
-			return fmt.Errorf("acl entry %q: unknown key %q (use a keys.tsig name, NOKEY, or BLOCKED)", e.Prefix, e.Key)
+			return fmt.Errorf("acl entry %q: unknown key %q (use a keys.tsig or keystore tsig name, NOKEY, or BLOCKED)", e.Prefix, e.Key)
 		}
 	}
 	return nil

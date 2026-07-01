@@ -32,20 +32,55 @@ type KeystorePost struct {
 	ParentState     uint8
 	Creator         string
 	Force           bool // commit destructive operation; otherwise dry-run (used by 'purge')
+	// TSIG keystore (tsig-mgmt); do not overload Algorithm uint8 above.
+	TsigKeyname   string `json:"tsigkeyname,omitempty"`
+	TsigAlgorithm string `json:"tsigalgorithm,omitempty"`
+	TsigSecret    string `json:"tsigsecret,omitempty"`
+	Owner         string `json:"owner,omitempty"`
+	Interactive   bool   `json:"interactive,omitempty"`
+	TsigImportData   string   `json:"tsigimportdata,omitempty"`
+	TsigImportFormat string   `json:"tsigimportformat,omitempty"`
+	TsigOverwrite    []string `json:"tsigoverwrite,omitempty"`
+	TsigVerbose      bool     `json:"tsigverbose,omitempty"`
+}
+
+type TsigKeyInfo struct {
+	Name      string `json:"name"`
+	Algorithm string `json:"algorithm"`
+	Origin    string `json:"origin"`
+	Owner     string `json:"owner"`
+	RefCount  int    `json:"refcount"`
+	Created   string `json:"created"`
+}
+
+// TsigKeyDisposition reports per-key outcome for import (and similar batch ops).
+type TsigKeyDisposition struct {
+	Name   string `json:"name"`
+	Status string `json:"status"` // imported | unchanged | conflict
+}
+
+// TsigCacheDelta records in-memory cache patches to apply after a successful DB
+// commit (§4). Not echoed on the API wire.
+type TsigCacheDelta struct {
+	Changed []string
+	Deleted []string
 }
 
 type KeystoreResponse struct {
-	AppName    string
-	Time       time.Time
-	Status     string
-	Zone       string
-	Dnskeys    map[string]DnssecKey // TrustAnchor
-	Sig0keys   map[string]Sig0Key
-	Algorithms []algorithms.AlgorithmInfo // populated by the "list-algorithms" command
-	Policies   []DnssecPolicyInfo         // populated by the "list-policies" command
-	Msg        string
-	Error      bool
-	ErrorMsg   string
+	AppName        string
+	Time           time.Time
+	Status         string
+	Zone           string
+	Dnskeys        map[string]DnssecKey // TrustAnchor
+	Sig0keys       map[string]Sig0Key
+	TsigKeys       []TsigKeyInfo              `json:"tsigkeys,omitempty"`
+	TsigImport     []TsigKeyDisposition       `json:"tsigimport,omitempty"`
+	Algorithms     []algorithms.AlgorithmInfo // populated by the "list-algorithms" command
+	Policies       []DnssecPolicyInfo         // populated by the "list-policies" command
+	Msg            string
+	Error          bool
+	ErrorMsg       string
+	TsigCacheDelta *TsigCacheDelta `json:"-"`
 }
 
 // DnssecPolicyInfo is the wire-friendly projection of a DnssecPolicy that the
@@ -214,19 +249,23 @@ type ZoneDsyncResponse struct {
 	UpdateResult UpdateResult
 }
 type ConfigPost struct {
-	Command string // status | sync | ...
+	Command       string   // status | reload | reload-zones | reload-tsig | ...
+	Force         bool     // reload-tsig: overwrite secret conflicts
+	TsigOverwrite []string `json:"tsigoverwrite,omitempty"` // reload-tsig --interactive: per-key overwrite
 }
 
 type ConfigResponse struct {
-	AppName    string
-	Time       time.Time
-	DnsEngine  DnsEngineConf
-	ApiServer  ApiServerConf
-	Identities []string
-	DBFile     string
-	Msg        string
-	Error      bool
-	ErrorMsg   string
+	AppName              string
+	Time                 time.Time
+	DnsEngine            DnsEngineConf
+	ApiServer            ApiServerConf
+	Identities           []string
+	DBFile               string
+	Msg                  string
+	Error                bool
+	ErrorMsg             string
+	TsigConflicts        []string `json:"tsigconflicts,omitempty"`
+	TsigWithheldRemovals []string `json:"tsigwithheldremovals,omitempty"`
 }
 
 type DelegationPost struct {
