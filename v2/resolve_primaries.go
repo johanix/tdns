@@ -64,7 +64,7 @@ func expandPrimaryEntry(ctx context.Context, imr *Imr, p PeerConf) ([]PeerConf, 
 	if len(addrs) == 0 {
 		return nil, false
 	}
-	lg.Info("resolved hostname primary", "hostname", host, "addresses", addrs)
+	lg.Debug("resolved hostname primary", "hostname", host, "addresses", addrs)
 	return buildUpstreams(addrs, port, p.Key), true
 }
 
