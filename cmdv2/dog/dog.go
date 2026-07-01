@@ -248,11 +248,23 @@ var rootCmd = &cobra.Command{
 				continue
 			}
 
+			// Parse -y once (if given); used by both the AXFR/IXFR and the
+			// regular-query paths below. Base64 secrets never contain ':'.
+			var tsigName, tsigAlgo, tsigSecret string
+			if tsigKeyFlag != "" {
+				var terr error
+				tsigName, tsigAlgo, tsigSecret, terr = parseTsigFlag(tsigKeyFlag)
+				if terr != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", terr)
+					os.Exit(1)
+				}
+			}
+
 			switch rrtype {
 			case dns.TypeAXFR, dns.TypeIXFR:
 				if options["transport"] == "Do53" {
 					upstream := net.JoinHostPort(options["server"], options["port"])
-					tdns.ZoneTransferPrint(qname, upstream, serial, rrtype, options)
+					tdns.ZoneTransferPrint(qname, upstream, serial, rrtype, options, tsigName, tsigAlgo, tsigSecret)
 				} else {
 					fmt.Printf("Zone transfer only supported for transport Do53 (TCP), this is %s\n", options["transport"])
 					os.Exit(1)
@@ -386,15 +398,10 @@ var rootCmd = &cobra.Command{
 				// truncated, retried query stays signed and verifiable.
 				var tsigOpt core.DNSClientOption
 				if tsigKeyFlag != "" {
-					tname, talgo, tsecret, terr := parseTsigFlag(tsigKeyFlag)
-					if terr != nil {
-						fmt.Fprintf(os.Stderr, "Error: %v\n", terr)
-						os.Exit(1)
-					}
 					switch t {
 					case core.TransportDo53, core.TransportDo53TCP, core.TransportDoT:
-						m.SetTsig(dns.Fqdn(tname), talgo, 300, time.Now().Unix())
-						tsigOpt = core.WithTsigSecret(tname, tsecret)
+						m.SetTsig(dns.Fqdn(tsigName), tsigAlgo, 300, time.Now().Unix())
+						tsigOpt = core.WithTsigSecret(tsigName, tsigSecret)
 						clientOpts = append(clientOpts, tsigOpt)
 					default:
 						fmt.Fprintf(os.Stderr, "Warning: -y (TSIG) is only supported on Do53/Do53-TCP/DoT; not signing over %s\n", transport)

@@ -286,7 +286,12 @@ func xfrErrorRcode(errstr string) (string, bool) {
 	return fmt.Sprintf("rcode %d", rcode), true
 }
 
-func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, options map[string]string) error {
+// ZoneTransferPrint fetches and prints an AXFR/IXFR. When tsigName is non-empty
+// the request is TSIG-signed with that key (algorithm tsigAlgo, base64 secret
+// tsigSecret) and the response envelope MACs are verified -- so a transfer gated
+// by a downstreams ACL that requires a key is accepted. tsigName == "" means an
+// unsigned transfer.
+func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, options map[string]string, tsigName, tsigAlgo, tsigSecret string) error {
 	msg := new(dns.Msg)
 	if ttype == dns.TypeIXFR {
 		// msg.SetIxfr(zname, serial, soa.Ns, soa.Mbox)
@@ -307,6 +312,13 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 	}
 
 	transfer := new(dns.Transfer)
+	// TSIG-sign the transfer request (dog -y) so a downstreams ACL that requires
+	// a key accepts it; miekg base64-decodes the secret and verifies the
+	// per-envelope response MACs.
+	if tsigName != "" {
+		msg.SetTsig(dns.Fqdn(tsigName), tsigAlgo, 300, time.Now().Unix())
+		transfer.TsigSecret = map[string]string{dns.Fqdn(tsigName): tsigSecret}
+	}
 	answerChan, err := transfer.In(msg, upstream)
 	if err != nil {
 		fmt.Printf("Error from transfer.In: %v\n", err)
