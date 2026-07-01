@@ -271,10 +271,13 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// mapstructure, and mapstructure ignores the yaml.Unmarshaler interface.
 	var md mapstructure.Metadata
 	decoderConfig := &mapstructure.DecoderConfig{
-		TagName:    "yaml",
-		Result:     conf,
-		Metadata:   &md,
-		DecodeHook: stringToPeerConfHook(),
+		TagName:  "yaml",
+		Result:   conf,
+		Metadata: &md,
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			stringToPeerConfHook(),
+			stringToAclEntryHook(),
+		),
 	}
 	decoder, err := mapstructure.NewDecoder(decoderConfig)
 	if err != nil {
@@ -1619,6 +1622,21 @@ func stringToPeerConfHook() mapstructure.DecodeHookFunc {
 			return data, nil
 		}
 		return PeerConf{Legacy: data.(string)}, nil
+	}
+}
+
+// stringToAclEntryHook is the AclEntry analogue of stringToPeerConfHook: it turns
+// a legacy bare-string allow-notify:/downstreams: value into an AclEntry carrying
+// a Legacy marker (applied element-wise across the []AclEntry list), so a
+// pre-{prefix,key} list quarantines just that zone (ValidateACL rejects the
+// marker) instead of failing the whole-file decode on the string->struct
+// mismatch.
+func stringToAclEntryHook() mapstructure.DecodeHookFunc {
+	return func(from reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
+		if from.Kind() != reflect.String || to != reflect.TypeOf(AclEntry{}) {
+			return data, nil
+		}
+		return AclEntry{Legacy: data.(string)}, nil
 	}
 }
 

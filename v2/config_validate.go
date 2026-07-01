@@ -38,6 +38,7 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 		mapstructure.StringToTimeDurationHookFunc(),
 		mapstructure.StringToSliceHookFunc(","),
 		stringToPeerConfHook(),
+		stringToAclEntryHook(),
 	))
 	if v == nil {
 		if err := viper.Unmarshal(&config, decodeHook); err != nil {
