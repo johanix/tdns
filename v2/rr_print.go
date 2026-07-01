@@ -613,6 +613,11 @@ func PrintRR(rr dns.RR, leftpad int, options map[string]string) error {
 		} else {
 			PrintGenericRR(rr, leftpad, rightmargin)
 		}
+	case *dns.TSIG:
+		// miekg's TSIG.String() already renders the dig-style ";; TSIG
+		// PSEUDOSECTION"; reuse it verbatim rather than the generic multi-line
+		// RR formatter, which would mangle the pseudo-RR.
+		fmt.Printf("%s\n", rr.String())
 	default:
 		PrintGenericRR(rr, leftpad, rightmargin)
 	}
