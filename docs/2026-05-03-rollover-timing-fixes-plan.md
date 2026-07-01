@@ -8,6 +8,21 @@
 
 ---
 
+> **LANDED (2026-07-01).** The core of this plan shipped. **W1** (E12/E13 —
+> the `− DNSKEY_TTL` term) landed as `e120dc4` and **W8** (tests) as
+> `ed47876`, merged via **PR #212** (`rollover-timing-fixes-1`); **W2**
+> (E5/E10/E11 config-load validation via `EvaluateRolloverPolicyInvariants`)
+> is present and wired at config load. Current code:
+> `tPublish := tRoll.Add(-(deps.PropagationDelay + dnskeyTTL))` in the
+> deps-shaped helper `transitionDsPublishedToPublishedForZone`
+> (`ksk_rollover_automated.go:1162`; public entry
+> `TransitionRolloverKskDsPublishedToPublished`, `:1004`). Note the
+> transition is now `ds-published → published` (C18 published/standby
+> split), not `…ToStandby` as named in W1 below. `effectiveServedDnskeyTTL`
+> (`:1400`) implements the E13 clamp with the deferral branch W1 specified.
+> The remaining operator-signalling / multi-error workstreams (W4–W9) were
+> not separately re-verified in this pass.
+
 ## Recommendation: where to fix
 
 Fix on `rollover-notify-scheme` directly.
