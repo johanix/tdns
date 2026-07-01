@@ -131,7 +131,14 @@ func (w *dohResponseWriter) WriteMsg(m *dns.Msg) error {
 	return err
 }
 
-func (w *dohResponseWriter) Close() error              { return nil }
+func (w *dohResponseWriter) Close() error { return nil }
+
+// TODO(tsig): DoH is served by this buffer-backed writer, not a miekg
+// dns.Server, so miekg's conn-level TSIG (verify-on-read, MAC-on-write) does not
+// apply and TsigStatus is a stub. Supporting TSIG over DoH would mean manually
+// dns.TsigVerify'ing the inbound message and dns.TsigGenerate'ing the reply
+// (request-MAC prefixed) in this path. Deferred: encrypted transports usually
+// authenticate peers via TLS/mTLS, and tdns replication (AXFR/NOTIFY) is Do53.
 func (w *dohResponseWriter) TsigStatus() error         { return nil }
 func (w *dohResponseWriter) TsigTimersOnly(bool)       {}
 func (w *dohResponseWriter) Hijack()                   {}

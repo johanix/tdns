@@ -59,7 +59,12 @@ func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs []string, cert *tl
 				Net:           "tcp-tls",
 				TLSConfig:     tlsConfig,
 				MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
-				Handler:       dns.HandlerFunc(loggingHandler),
+				// TSIG parity with Do53: verify inbound TSIG and sign responses
+				// to validated TSIG-signed requests (RFC 8945). Safe here because
+				// this is a real miekg dns.Server (unlike the DoH/DoQ custom
+				// writers); TsigSigningHandler needs the provider to MAC the reply.
+				TsigProvider: conf.tsigProvider(),
+				Handler:      dns.HandlerFunc(TsigSigningHandler(loggingHandler)),
 			}
 			servers = append(servers, server)
 			go func(srv *dns.Server, hp string) {
