@@ -164,6 +164,18 @@ type ZonePost struct {
 	Force      bool
 	Wait       bool
 	Timeout    string
+	// Dynamic-zones management (add/modify). No Store field — dynamic zones are
+	// map-only. Primaries carries the structured {addr, key} list; key must be NOKEY
+	// until TSIG keys land (Improvement 2). Options are ZoneOption strings.
+	Primaries []PeerConf
+	Options   []string
+	// TSIG secret-bearing fields are accepted now but inert in Improvement 1:
+	// a non-NOKEY key is rejected by ProvisionDynamicZone, so these are
+	// carried-on-the-wire-for-later, not silently dropped. Consumed in
+	// Improvement 2. TsigSecret is request-only and never echoed back.
+	TsigName   string
+	TsigSecret string
+	TsigAlgo   string
 }
 
 type ZoneResponse struct {

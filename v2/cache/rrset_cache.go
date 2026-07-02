@@ -662,7 +662,7 @@ func (rrcache *RRsetCacheT) IsPrimed() bool {
 	return rrcache.Primed
 }
 
-func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetcher) error {
+func (rrcache *RRsetCacheT) PrimeWithHints(ctx context.Context, hintsfile string, fetcher RRsetFetcher) error {
 	var data []byte
 	var err error
 	var source string
@@ -818,7 +818,7 @@ func (rrcache *RRsetCacheT) PrimeWithHints(hintsfile string, fetcher RRsetFetche
 	rrcache.ServerMap.Set(".", authMap)
 	rrcache.Servers.Set(".", servers)
 
-	rrset, err := fetcher(context.Background(), ".", dns.TypeNS, authMap) // force re-query bypassing cache
+	rrset, err := fetcher(ctx, ".", dns.TypeNS, authMap) // force re-query bypassing cache (cancellable via ctx)
 	if err != nil {
 		return fmt.Errorf("Error priming RRsetCache with root hints: %v", err)
 	}

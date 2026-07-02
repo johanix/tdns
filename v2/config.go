@@ -600,12 +600,21 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 			lgConfig.Warn("ReloadZoneConfig: zone not in config and also not in zone list", "zone", zname)
 			continue
 		}
-		if zd.Options[OptAutomaticZone] {
-			lgConfig.Info("ReloadZoneConfig: zone is automatic, not removing from zone list", "zone", zname)
+		// Spare any LIVE dynamic/managed zone (catalog zone, catalog member, or
+		// API-managed) — these are never in the static config. Guard on the
+		// markers directly, NOT ShouldPersistZone: the latter is false for
+		// storage: memory, which is a disk-persistence policy, not a liveness
+		// signal — a memory-backed dynamic zone is still a valid live zone and
+		// must survive a config reload.
+		if zd.Options[OptCatalogZone] || zd.Options[OptAutomaticZone] || zd.Options[OptApiManagedZone] {
+			lgConfig.Info("ReloadZoneConfig: zone is dynamic/managed, not removing from zone list", "zone", zname)
 			continue
 		}
 		lgConfig.Info("ReloadZoneConfig: zone no longer in config, removing from zone list", "zone", zname)
 		Zones.Remove(zname)
+		// Bump generation so any in-flight refresh on the captured pointer fails
+		// the pre-persist guard (B5b) and does not resurrect the removed zone.
+		zd.generation.Add(1)
 	}
 
 	lgConfig.Info("ReloadZones: zones after reloading", "zones", zonelist, "broken", brokenlist)

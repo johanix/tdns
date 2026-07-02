@@ -15,6 +15,18 @@ import (
 	core "github.com/johanix/tdns/v2/core"
 )
 
+// zoneStillLive reports whether zd is still the live, unchanged entry for its
+// zone — used as the pre-persist guard (B5b) that closes the resurrection race.
+// A persist must be dropped if, since the refresh was dispatched, the zone was
+// removed (!live), replaced by a new ZoneData (cur != zd — e.g. ModifyDynamicZone),
+// or its generation was bumped (delete/modify/config-reload). For call sites with
+// no dispatch-time snapshot, pass zd.generation.Load() and the check reduces to
+// the liveness+identity test.
+func zoneStillLive(zd *ZoneData, gen uint64) bool {
+	cur, live := Zones.Get(zd.ZoneName)
+	return live && cur == zd && zd.generation.Load() == gen
+}
+
 // After all zones are initialized, (re)compute transport signals across zones to resolve cross-zone dependencies.
 func runTransportSignalPostpass(conf *Config) {
 	for zname, zdz := range Zones.Items() {
@@ -31,8 +43,6 @@ type RefreshCounter struct {
 	SOARefresh     uint32
 	CurRefresh     uint32
 	IncomingSerial uint32
-	Upstream       string
-	Downstreams    []string
 	Zonefile       string
 }
 
@@ -53,11 +63,9 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		lgEngine.Error("FindSoaRefresh failed", "zone", zone, "error", err)
 	}
 	refreshCounters.Set(zone, &RefreshCounter{
-		Name:        zone,
-		SOARefresh:  refresh,
-		CurRefresh:  refresh,
-		Upstream:    NormalizeAddress(zr.Primary),
-		Downstreams: NormalizeAddresses(zr.Notify),
+		Name:       zone,
+		SOARefresh: refresh,
+		CurRefresh: refresh,
 	})
 
 	// Check if this is a catalog zone and parse it
@@ -232,8 +240,11 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 
 							zd.mu.Lock()
 							zd.ZoneStore = zr.ZoneStore
-							zd.Upstream = NormalizeAddress(zr.Primary)
-							zd.Downstreams = NormalizeAddresses(zr.Notify)
+							if len(zr.PrimariesConf) > 0 {
+								zd.PrimariesConf = clonePeerConfs(zr.PrimariesConf)
+								zd.Upstreams = clonePeerConfs(zr.Primaries)
+							}
+							zd.Notify = normalizePeerAddrs(zr.Notify)
 							zd.Zonefile = zr.Zonefile
 							zd.ZoneType = zr.ZoneType
 							zd.Options = zr.Options
@@ -300,11 +311,12 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						zd.mu.Lock()
 						// Update notify addresses only if provided
 						if zr.Notify != nil {
-							zd.Downstreams = NormalizeAddresses(zr.Notify)
+							zd.Notify = normalizePeerAddrs(zr.Notify)
 						}
-						// Update upstream only if provided
-						if zr.Primary != "" {
-							zd.Upstream = NormalizeAddress(zr.Primary)
+						// Update primaries only if provided (config-bearing refresher).
+						if len(zr.PrimariesConf) > 0 {
+							zd.PrimariesConf = clonePeerConfs(zr.PrimariesConf)
+							zd.Upstreams = clonePeerConfs(zr.Primaries)
 						}
 						// Update zonefile only if provided
 						if zr.Zonefile != "" {
@@ -378,7 +390,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							UpdateSigValidityFloor(zd, zd.DnssecPolicy, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm)
 							triggerResign(conf, zone)
 						}
-						lgEngine.Debug("updated configuration for zone", "zone", zone, "notify", zd.Downstreams, "upstream", zd.Upstream, "zonefile", zd.Zonefile, "store", ZoneStoreToString[zd.ZoneStore])
+						lgEngine.Debug("updated configuration for zone", "zone", zone, "notify", zd.Notify, "primaries", zd.PrimariesConf, "upstreams", zd.Upstreams, "zonefile", zd.Zonefile, "store", ZoneStoreToString[zd.ZoneStore])
 
 						// Update or create refreshCounter with current config values
 						var refresh uint32 = 300 // 5 minutes, must have something even if we don't get SOA
@@ -392,24 +404,25 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 						if rc, haveParams := refreshCounters.Get(zone); haveParams {
 							// Update existing refreshCounter with new config values
-							rc.Upstream = NormalizeAddress(zr.Primary)
-							rc.Downstreams = NormalizeAddresses(zr.Notify)
 							rc.Zonefile = zr.Zonefile
 							rc.SOARefresh = refresh
 							rc.CurRefresh = refresh // immediate refresh handled by goroutine below
 						} else {
 							// Create new refreshCounter
 							refreshCounters.Set(zone, &RefreshCounter{
-								Name:        zone,
-								SOARefresh:  refresh,
-								CurRefresh:  refresh, // immediate refresh handled by goroutine below
-								Upstream:    NormalizeAddress(zr.Primary),
-								Downstreams: NormalizeAddresses(zr.Notify),
-								Zonefile:    zr.Zonefile,
+								Name:       zone,
+								SOARefresh: refresh,
+								CurRefresh: refresh, // immediate refresh handled by goroutine below
+								Zonefile:   zr.Zonefile,
 							})
 						}
 						// XXX: Should do refresh in parallel
 						go func(zd *ZoneData, zone string, force bool, conf *Config, zr ZoneRefresher) {
+							// Snapshot the generation at dispatch. The pre-persist
+							// guard below drops the persist if the zone was deleted
+							// or replaced mid-refresh (generation bumped), closing
+							// the resurrection race (B5b).
+							gen := zd.generation.Load()
 							updated, err := zd.Refresh(Globals.Verbose, Globals.Debug, force, conf)
 							if err != nil {
 								lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
@@ -444,8 +457,13 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 									// is pointless unless dynamic changes have been made (OptDirty).
 									if zd.ZoneType == Primary && !zd.Options[OptDirty] {
 										lgEngine.Debug("skipping zone file write for unmodified primary zone", "zone", zd.ZoneName)
-									} else if conf.ShouldPersistZone(zd) && zd.Options[OptAutomaticZone] {
-										// Auto-configured catalog member zone
+									} else if conf.ShouldPersistZone(zd) && zoneStillLive(zd, gen) {
+										// Any persistable dynamic zone (catalog zone, catalog
+										// member, or API-managed — B5a widened this beyond
+										// OptAutomaticZone so API zones rewrite their files too).
+										// zoneStillLive guards the resurrection race: if the
+										// zone was deleted or replaced mid-refresh, skip the
+										// persist so we do not re-write a removed zone (B5b).
 										_, err := zd.WriteDynamicZoneFile(conf.DynamicZones.ZoneDirectory)
 										if err != nil {
 											lgEngine.Warn("failed to write dynamic zone file", "zone", zd.ZoneName, "error", err)
@@ -470,13 +488,13 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								// Send NOTIFY to downstreams after successful refresh (updated OR forced)
 								// Force typically means "config reload-zones", so we want to notify even if unchanged
 								if updated || force {
-									if len(zd.Downstreams) > 0 {
-										lgEngine.Info("zone refreshed, sending NOTIFY to downstreams", "zone", zd.ZoneName, "updated", updated, "forced", force, "downstreams", len(zd.Downstreams))
+									if len(zd.Notify) > 0 {
+										lgEngine.Info("zone refreshed, sending NOTIFY to downstreams", "zone", zd.ZoneName, "updated", updated, "forced", force, "downstreams", len(zd.Notify))
 										conf.Internal.NotifyQ <- NotifyRequest{
 											ZoneName: zd.ZoneName,
 											ZoneData: zd,
 											RRtype:   dns.TypeSOA,
-											Targets:  zd.Downstreams,
+											Targets:  peerAddrs(zd.Notify),
 											Urgent:   false,
 										}
 									}
@@ -547,12 +565,18 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 					}
 					msc := conf.MultiSigner[zr.MultiSigner]
+					// Resolution happens at every ingress path (parse/load/add/
+					// modify/catalog), so a config-bearing refresher always carries
+					// the resolved Primaries alongside the as-written PrimariesConf.
+					primariesConf := clonePeerConfs(zr.PrimariesConf)
+					upstreams := clonePeerConfs(zr.Primaries)
 					zd := &ZoneData{
 						ZoneName:         zone,
 						ZoneStore:        zr.ZoneStore,
 						Logger:           log.Default(),
-						Upstream:         NormalizeAddress(zr.Primary),
-						Downstreams:      NormalizeAddresses(zr.Notify),
+						PrimariesConf:    primariesConf,
+						Upstreams:        upstreams,
+						Notify:           normalizePeerAddrs(zr.Notify),
 						Zonefile:         zr.Zonefile,
 						ZoneType:         zr.ZoneType,
 						Options:          zr.Options,
@@ -564,6 +588,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						Data:             core.NewCmap[OwnerData](),
 						KeyDB:            conf.Internal.KeyDB,
 						FirstZoneLoad:    true,
+						Status:           ZoneStatusPending, // registered + enqueued, no data yet (B6)
 					}
 
 					Zones.Set(zone, zd)
@@ -606,7 +631,15 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 				if rc.CurRefresh <= 0 {
 					lgEngine.Debug("refreshing zone due to refresh counter", "zone", zone)
 					// log.Printf("Len(Zones) = %d", len(Zones))
-					zd, _ := Zones.Get(zone)
+					zd, ok := Zones.Get(zone)
+					if !ok || zd == nil {
+						// Zone was deleted (RemoveDynamicZone / config reload)
+						// after its counter was created. Drop the orphaned counter
+						// so we never dereference a missing entry on the next tick.
+						lgEngine.Debug("ticker: zone gone, dropping stale refresh counter", "zone", zone)
+						refreshCounters.Remove(zone)
+						continue
+					}
 					if zd.HasServiceImpactingError() {
 						lgEngine.Warn("zone in error state, not refreshing", "zone", zone, "errortype", ErrorTypeToString[zd.ErrorType], "error", zd.ErrorMsg)
 						continue
@@ -676,8 +709,13 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// is pointless unless dynamic changes have been made (OptDirty).
 						if zd.ZoneType == Primary && !zd.Options[OptDirty] {
 							lgEngine.Debug("skipping zone file write for unmodified primary zone", "zone", zd.ZoneName)
-						} else if conf.ShouldPersistZone(zd) && zd.Options[OptAutomaticZone] {
-							// Auto-configured catalog member zone
+						} else if conf.ShouldPersistZone(zd) && zoneStillLive(zd, zd.generation.Load()) {
+							// Any persistable dynamic zone (catalog zone, catalog
+							// member, or API-managed — B5a widened this beyond
+							// OptAutomaticZone so API zones rewrite their files too).
+							// zoneStillLive guards against a delete landing mid-tick:
+							// zd is the current map entry here, so the check reduces
+							// to the identity test (B5b).
 							_, err := zd.WriteDynamicZoneFile(conf.DynamicZones.ZoneDirectory)
 							if err != nil {
 								lgEngine.Warn("failed to write dynamic zone file", "zone", zd.ZoneName, "error", err)

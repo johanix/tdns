@@ -364,20 +364,32 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 			continue
 		}
 
-		// Determine store value (default to "map" if not specified)
-		storeValue := configGroupConfig.Store
-		if storeValue == "" {
-			storeValue = "map"
+		// Dynamic zones are map-only (§3 breaking change). An explicit non-map
+		// store on a config group is now an ERROR (was silently coerced to map
+		// by parseZoneStore); announce it rather than honour a store we no
+		// longer support for dynamically managed secondaries.
+		if s := configGroupConfig.Store; s != "" && parseZoneStore(s) != MapZone {
+			lg.Error("CATALOG: config group requests non-map store, which is no longer supported for dynamic zones; forcing map", "zone", zoneName, "group", member.MetaGroup, "store", s)
 		}
 
 		// RULE 4: Auto-configure zone using config group
-		lg.Info("CATALOG: auto-configuring zone", "zone", zoneName, "group", member.MetaGroup, "upstream", configGroupConfig.Upstream, "store", storeValue)
+		lg.Info("CATALOG: auto-configuring zone", "zone", zoneName, "group", member.MetaGroup, "upstream", configGroupConfig.Upstream, "store", "map")
+
+		primariesConf := []PeerConf{{Addr: configGroupConfig.Upstream, Key: NOKEY}}
+		res := resolvePrimaries(ctx, conf.Internal.ImrEngine, primariesConf)
+		if len(res.Resolved) == 0 {
+			lg.Error("CATALOG: upstream did not resolve to an address, skipping zone", "zone", zoneName, "group", member.MetaGroup, "upstream", configGroupConfig.Upstream, "unresolved", res.Unresolved)
+			skippedCount++
+			continue
+		}
+		upstreams := res.Resolved
 
 		zd := &ZoneData{
 			ZoneName:      zoneName,
 			ZoneType:      Secondary,
-			ZoneStore:     parseZoneStore(storeValue),
-			Upstream:      NormalizeAddress(configGroupConfig.Upstream),
+			ZoneStore:     MapZone, // dynamic zones are map-only (§3)
+			PrimariesConf: primariesConf,
+			Upstreams:     upstreams,
 			Logger:        log.Default(),
 			SourceCatalog: update.CatalogZone,
 			Options: map[ZoneOption]bool{
@@ -423,7 +435,6 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 		zr := ZoneRefresher{
 			Name:      zoneName,
 			ZoneType:  Secondary,
-			Primary:   NormalizeAddress(configGroupConfig.Upstream),
 			ZoneStore: zd.ZoneStore,
 			Options:   zd.Options,
 		}

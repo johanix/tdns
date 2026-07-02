@@ -86,7 +86,13 @@ type ZoneRefreshAnalysis struct {
 }
 
 type ZoneData struct {
-	mu         sync.Mutex
+	mu sync.Mutex
+	// generation is bumped on every removal/replacement of this zone
+	// (RemoveDynamicZone, ModifyDynamicZone, config-reload Zones.Remove). A
+	// refresh goroutine snapshots it at dispatch; the pre-persist guard (B5b)
+	// drops the persist if the live generation no longer matches — closing the
+	// resurrection race where a mid-flight refresh re-writes a deleted zone.
+	generation atomic.Uint64
 	ZoneName   string
 	ZoneStore  ZoneStore // 1 = "xfr", 2 = "map", 3 = "slice". An xfr zone only supports xfr related ops
 	ZoneType   ZoneType
@@ -97,6 +103,11 @@ type ZoneData struct {
 	Data *core.ConcurrentMap[string, OwnerData]
 	// 20260415 johani: MP    *ZoneMPExtension // Multi-provider state; nil for non-MP zones
 	Ready bool // true if zd.Data has been populated (from file or upstream)
+	// Status is the positive-lifecycle state (pending -> loading -> ready),
+	// orthogonal to the error registry. Use SetStatus/GetStatus to mutate/read.
+	// Surfaced to the API as ZoneConf.Provisioning. Added alongside Ready/
+	// FirstZoneLoad without rewriting their consumers.
+	Status ZoneStatus
 
 	XfrType string // axfr | ixfr
 	Logger  *log.Logger
@@ -107,8 +118,9 @@ type ZoneData struct {
 	Verbose           bool
 	Debug             bool
 	IxfrChain         []Ixfr
-	Upstream          string   // primary from where zone is xfrred
-	Downstreams       []string // secondaries that we notify
+	PrimariesConf     []PeerConf // as-written primaries; persisted; re-resolved each load (P3)
+	Upstreams         []PeerConf // resolved addr:port tuples; runtime-only; used for transfer
+	Notify            []PeerConf // downstream secondaries that we notify (addr + key)
 	Zonefile          string
 	DelegationSyncQ   chan DelegationSyncRequest
 	Parent            string   // name of parentzone (if filled in)
@@ -180,15 +192,31 @@ type ZoneData struct {
 func (zd *ZoneData) Lock()   { zd.mu.Lock() }
 func (zd *ZoneData) Unlock() { zd.mu.Unlock() }
 
+// NOKEY is the built-in sentinel key name meaning "no TSIG, unauthenticated".
+// Every PeerConf carries a key name; NOKEY makes the no-TSIG choice explicit.
+// It is a reserved name: a keys.tsig[] entry named NOKEY is rejected at parse.
+const NOKEY = "NOKEY"
+
+// PeerConf is a replication peer reference: an address plus a TSIG key name.
+// Used for the upstream primary (secondary zones) and downstream notify peers
+// (primary zones). Key is mandatory and explicit; NOKEY means unauthenticated.
+// The Legacy field is set by stringToPeerConfHook when a bare-string value is
+// found in config (pre-migration shape); a non-empty Legacy quarantines the
+// zone to ERROR at validation rather than aborting the whole-file decode.
+type PeerConf struct {
+	Addr   string `yaml:"addr" mapstructure:"addr"`
+	Key    string `yaml:"key" mapstructure:"key"`
+	Legacy string `yaml:"-" mapstructure:"-"` // bare-string marker; not config
+}
+
 // ZoneConf represents the external config for a zone; it contains no zone data
 type ZoneConf struct {
 	Name              string `validate:"required"`
 	Zonefile          string
-	Type              string `validate:"required"`
-	Store             string // xfr | map | slice | reg (defaults to "map" if not specified)
-	Primary           string // upstream, for secondary zones
-	Notify            []string
-	Downstreams       []string
+	Type              string     `validate:"required"`
+	Store             string     // xfr | map | slice | reg (defaults to "map" if not specified)
+	Primaries         []PeerConf `yaml:"primaries" mapstructure:"primaries"` // upstream set, for secondary zones
+	Notify            []PeerConf
 	OptionsStrs       []string     `yaml:"options" mapstructure:"options"`
 	Options           []ZoneOption `yaml:"-" mapstructure:"-"` // Ignore during both yaml and mapstructure decoding
 	Frozen            bool         // true if zone is frozen; not a config param
@@ -212,6 +240,14 @@ type ZoneConf struct {
 	ErrorMsg               string    // reason for the error (if known)
 	RefreshCount           int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
 	SourceCatalog          string    // if auto-configured, which catalog zone created this zone
+	// ApiManaged marks a zone created/managed via the dynamic-zones API (zone
+	// add/delete/modify). Persisted so OptApiManagedZone can be re-derived on
+	// reload — a dedicated bool, not a SourceCatalog="api" sentinel.
+	ApiManaged bool `yaml:"apimanaged" mapstructure:"apimanaged"`
+	// Provisioning is a display-only derived lifecycle string
+	// ("pending"|"loading"|"ready"|"error") populated by the list handlers from
+	// ZoneStatus + the error registry. Not config; not serialized to YAML.
+	Provisioning string `yaml:"-" mapstructure:"-"`
 }
 
 type TemplateConf struct {
@@ -535,20 +571,21 @@ func rrsToStrings(rrs []dns.RR) []string {
 }
 
 type ZoneRefresher struct {
-	Name         string
-	ZoneType     ZoneType // primary | secondary
-	Primary      string
-	Notify       []string
-	ZoneStore    ZoneStore // 1=xfr, 2=map, 3=slice
-	Zonefile     string
-	Options      map[ZoneOption]bool
-	Edns0Options *edns0.MsgOptions
-	UpdatePolicy UpdatePolicy
-	DnssecPolicy string
-	MultiSigner  string
-	Force        bool // force refresh, ignoring SOA serial
-	Wait         bool // wait for refresh to complete before responding
-	Response     chan RefresherResponse
+	Name          string
+	ZoneType      ZoneType   // primary | secondary
+	PrimariesConf []PeerConf // as-written; copied to zd.PrimariesConf on merge
+	Primaries     []PeerConf // resolved; copied to zd.Upstreams on merge
+	Notify        []PeerConf
+	ZoneStore     ZoneStore // 1=xfr, 2=map, 3=slice
+	Zonefile      string
+	Options       map[ZoneOption]bool
+	Edns0Options  *edns0.MsgOptions
+	UpdatePolicy  UpdatePolicy
+	DnssecPolicy  string
+	MultiSigner   string
+	Force         bool // force refresh, ignoring SOA serial
+	Wait          bool // wait for refresh to complete before responding
+	Response      chan RefresherResponse
 }
 
 type RefresherResponse struct {

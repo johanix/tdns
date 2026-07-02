@@ -41,13 +41,23 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			}
 		}()
 
+		// The dynamic-zones management commands handle zone existence
+		// themselves in their cores (add requires absence; delete/modify/
+		// list-dynamic resolve internally), so they bypass this pre-check.
+		zoneLookupExempt := map[string]bool{
+			"list-zones":   true,
+			"add":          true,
+			"delete":       true,
+			"modify":       true,
+			"list-dynamic": true,
+		}
 		zd, exist := Zones.Get(zp.Zone)
-		if !exist && zp.Command != "list-zones" {
+		if !exist && !zoneLookupExempt[zp.Command] {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", zp.Zone)
 			return
 		}
-		if zd == nil && zp.Command != "list-zones" {
+		if zd == nil && !zoneLookupExempt[zp.Command] {
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Zone %s: zone data is nil", zp.Zone)
 			return
@@ -185,12 +195,15 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 					}
 				}
 
-				// For secondary zones, Primary should be the Upstream address, not Parent
-				primary := ""
-				if zd.ZoneType == Secondary {
-					primary = zd.Upstream
-				}
-				// For primary zones, we could show Parent if needed, but typically Primary field is for secondary zones
+				// For secondary zones, list as-written primaries from runtime state.
+				primaries := clonePeerConfs(zd.PrimariesConf)
+
+				// Snapshot the notify slice under the lock — the catalog notify
+				// add/remove handlers mutate zd.Notify under zd.mu, so an
+				// unsynchronized read here would race the slice header.
+				zd.mu.Lock()
+				notifySnapshot := append([]PeerConf(nil), zd.Notify...)
+				zd.mu.Unlock()
 
 				// Effective DNSSEC policy (the one bound to the running zone)
 				// and, when it came from a dynamic set-policy override, the
@@ -227,10 +240,11 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 					ErrorMsg:               zd.ErrorMsg,
 					RefreshCount:           zd.RefreshCount,
 					SourceCatalog:          zd.SourceCatalog,
+					ApiManaged:             zd.Options[OptApiManagedZone],
+					Provisioning:           zoneProvisioning(zd),
 					Zonefile:               zd.Zonefile,
-					Primary:                primary,
-					Notify:                 zd.Downstreams, // Notify addresses (displayed by CLI)
-					Downstreams:            zd.Downstreams,
+					Primaries:              primaries,
+					Notify:                 notifySnapshot, // Notify addresses (displayed by CLI)
 					EffectiveDnssecPolicy:  zd.DnssecPolicyName,
 					DnssecPolicyOverridden: overridden,
 					DnssecPolicyConfigBase: configPolicy,
@@ -239,11 +253,96 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			}
 			resp.Zones = zones
 
+		case "add":
+			msg, err := Conf.ProvisionDynamicZone(r.Context(), DynamicZoneInput{
+				Name:      zp.Zone,
+				Type:      Secondary,
+				Primaries: zp.Primaries,
+				Options:   zoneOptionsFromStrings(zp.Options),
+			}, true)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+			resp.Status = "accepted"
+			resp.Zone = dns.Fqdn(zp.Zone)
+			resp.Msg = msg
+
+		case "delete":
+			msg, err := Conf.RemoveDynamicZone(zp.Zone)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+			resp.Msg = msg
+
+		case "modify":
+			msg, err := Conf.ModifyDynamicZone(r.Context(), DynamicZoneInput{
+				Name:      zp.Zone,
+				Type:      Secondary,
+				Primaries: zp.Primaries,
+				Options:   zoneOptionsFromStrings(zp.Options),
+			})
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+			resp.Status = "accepted"
+			resp.Msg = msg
+
+		case "list-dynamic":
+			// The persistable dynamic subset (catalog members + API-managed),
+			// per ShouldPersistZone — not all zones. Catalog members are listed
+			// (read-only here) but only OptApiManagedZone zones are mutable via
+			// delete/modify.
+			zones := map[string]ZoneConf{}
+			for _, zc := range Conf.getDynamicZonesFromZonesMap() {
+				if zd, ok := Zones.Get(zc.Name); ok {
+					zc.Provisioning = zoneProvisioning(zd)
+					zc.ApiManaged = zd.Options[OptApiManagedZone]
+					// Surface the zone's error/warning state (e.g. ConfigWarning
+					// for a partially-resolved primary set) — zoneDataToZoneConf
+					// deliberately omits runtime error fields.
+					zc.Error = zd.Error
+					zc.ErrorType = zd.ErrorType
+					zc.ErrorMsg = zd.ErrorMsg
+				}
+				zones[zc.Name] = zc
+			}
+			resp.Zones = zones
+
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown zone command: %s", zp.Command)
 			resp.Error = true
 		}
 	}
+}
+
+// zoneProvisioning derives the display-only lifecycle string from ZoneStatus
+// and the error registry: error takes precedence over the positive lifecycle.
+func zoneProvisioning(zd *ZoneData) string {
+	if zd.Error {
+		return "error"
+	}
+	return ZoneStatusToString[zd.GetStatus()]
+}
+
+// zoneOptionsFromStrings converts ZoneOption name strings (from the API) into
+// the option map the cores expect. Unknown names are ignored.
+func zoneOptionsFromStrings(strs []string) map[ZoneOption]bool {
+	if len(strs) == 0 {
+		return nil
+	}
+	opts := map[ZoneOption]bool{}
+	for _, s := range strs {
+		if opt, ok := StringToZoneOption[s]; ok {
+			opts[opt] = true
+		}
+	}
+	return opts
 }
 
 // setZonePolicy applies a DNSSEC policy to a zone at runtime: it validates the

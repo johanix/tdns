@@ -9,6 +9,7 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -16,7 +17,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/miekg/dns"
 	"gopkg.in/yaml.v3"
+
+	core "github.com/johanix/tdns/v2/core"
 )
 
 // WriteDynamicZoneFile writes a zone file to the dynamic zones directory using atomic writes
@@ -135,8 +139,10 @@ func (conf *Config) ShouldPersistZone(zd *ZoneData) bool {
 		return conf.DynamicZones.CatalogMembers.Storage == "persistent" && conf.DynamicZones.CatalogMembers.Allowed
 	}
 
-	// Future: check for other dynamic zone types
-	// For now, only catalog zones and catalog members are supported
+	if zd.Options[OptApiManagedZone] {
+		// API-managed zone (zone add/delete/modify)
+		return conf.DynamicZones.Dynamic.Storage == "persistent" && conf.DynamicZones.Dynamic.Allowed
+	}
 
 	return false
 }
@@ -211,6 +217,16 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 				options[opt] = true
 			}
 		}
+		// Re-derive the internal markers from their persisted fields — they are
+		// not serialized as options (B5a). Without this, a reloaded managed zone
+		// loses its marker on restart and degrades to looking static (the latent
+		// catalog bug this fix also closes).
+		if zconf.SourceCatalog != "" {
+			options[OptAutomaticZone] = true
+		}
+		if zconf.ApiManaged {
+			options[OptApiManagedZone] = true
+		}
 
 		// Log what we're loading
 		if options[OptCatalogZone] {
@@ -221,16 +237,28 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			lg.Debug("enqueuing zone for refresh", "zone", zoneName, "type", zconf.Type)
 		}
 
+		// Re-resolve the persisted as-written primaries (hostnames -> addresses)
+		// on every load. Zero resolved is logged and still enqueued so the zone
+		// is created and visible (it surfaces a refresh error rather than
+		// silently vanishing); partial is logged and served from the rest.
+		res := resolvePrimaries(ctx, conf.Internal.ImrEngine, zconf.Primaries)
+		if zoneType == Secondary && len(res.Resolved) == 0 {
+			lg.Error("dynamic zone: no primary resolved to an address (enqueuing anyway, will surface as refresh error)", "zone", zoneName, "unresolved", res.Unresolved)
+		} else if len(res.Unresolved) > 0 || len(res.KeyCollisions) > 0 {
+			lg.Warn("dynamic zone: some primaries unavailable, serving from the rest", "zone", zoneName, "unresolved", res.Unresolved, "key_collisions", res.KeyCollisions, "serving", len(res.Resolved))
+		}
+
 		// Create ZoneRefresher and enqueue to RefreshEngine (same as ParseZones does)
 		zr := ZoneRefresher{
-			Name:      zoneName,
-			Force:     true, // Force refresh on startup to load from disk
-			ZoneType:  zoneType,
-			Primary:   zconf.Primary,
-			ZoneStore: zoneStore,
-			Notify:    zconf.Downstreams,
-			Zonefile:  zconf.Zonefile,
-			Options:   options,
+			Name:          zoneName,
+			Force:         true, // Force refresh on startup to load from disk
+			ZoneType:      zoneType,
+			PrimariesConf: clonePeerConfs(zconf.Primaries),
+			Primaries:     res.Resolved,
+			ZoneStore:     zoneStore,
+			Notify:        zconf.Notify,
+			Zonefile:      zconf.Zonefile,
+			Options:       options,
 		}
 
 		// Attempt non-blocking send (same pattern as ParseZones)
@@ -274,9 +302,11 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 	for opt, enabled := range zd.Options {
 		if enabled {
 			if optStr, ok := ZoneOptionToString[opt]; ok {
-				// Skip internal options that shouldn't be in config
-				// OptAutomaticZone is an internal marker (via SourceCatalog field), not a config option
-				if opt != OptDirty && opt != OptFrozen && opt != OptAutomaticZone {
+				// Skip internal options that shouldn't be in config.
+				// OptAutomaticZone is re-derived on reload from SourceCatalog;
+				// OptApiManagedZone is re-derived from the ApiManaged bool — both
+				// are internal markers, not config options.
+				if opt != OptDirty && opt != OptFrozen && opt != OptAutomaticZone && opt != OptApiManagedZone {
 					optionsStrs = append(optionsStrs, optStr)
 				}
 			}
@@ -296,23 +326,16 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 		typeStr = "secondary" // Default
 	}
 
-	// Get primary/upstream
-	primary := zd.Upstream
-	if primary == "" && zd.ZoneType == Secondary {
-		// Try to get from parent or other sources if available
-		primary = zd.Parent
-	}
-
 	zconf := ZoneConf{
 		Name:          zd.ZoneName,
 		Zonefile:      zoneFilePath,
 		Type:          typeStr,
 		Store:         storeStr,
-		Primary:       primary,
-		Notify:        zd.Downstreams, // Notify addresses are stored in Downstreams
-		Downstreams:   zd.Downstreams,
+		Primaries:     clonePeerConfs(zd.PrimariesConf),
+		Notify:        zd.Notify,
 		OptionsStrs:   optionsStrs,
 		SourceCatalog: zd.SourceCatalog,
+		ApiManaged:    zd.Options[OptApiManagedZone],
 		// Note: We don't serialize Frozen, Dirty, Error, ErrorType, ErrorMsg, RefreshCount
 		// as these are runtime state, not configuration
 	}
@@ -506,4 +529,285 @@ func (conf *Config) CheckDynamicConfigFileIncluded(includedFiles []string) bool 
 	// Not included - log warning
 	lg.Warn("dynamic config file not included via 'include:' in main config, dynamic zones will not be loaded on startup", "path", conf.DynamicZones.ConfigFile)
 	return false
+}
+
+// DynamicZoneInput carries the parameters for the shared add/modify cores. There
+// is no Store field: dynamic zones are always MapZone (enforced in the cores).
+type DynamicZoneInput struct {
+	Name      string
+	Type      ZoneType
+	Primaries []PeerConf
+	Options   map[ZoneOption]bool
+}
+
+// ProvisionDynamicZone is the shared *add* core, called by both the catalog
+// auto-configure path and the new zone-add API/CLI. It registers + persists +
+// enqueues a refresh, then returns immediately — it does NOT wait for the AXFR
+// (the caller polls ZoneConf.Provisioning for state). fromAPI gates the
+// dynamiczones.dynamic.allowed check and the OptApiManagedZone marker: the
+// catalog path has its own members config and is not API-managed.
+func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInput, fromAPI bool) (string, error) {
+	name := dns.Fqdn(in.Name)
+
+	// API/CLI callers are gated by dynamiczones.dynamic.allowed (defaults false).
+	// The catalog path is gated by its own members config, not this.
+	if fromAPI && !conf.DynamicZones.Dynamic.Allowed {
+		return "", fmt.Errorf("dynamic zone provisioning via API is not allowed (set dynamiczones.dynamic.allowed: true)")
+	}
+
+	// API/CLI v1 is secondary-only (primary + notify peers are static/catalog
+	// config until a later extension).
+	if fromAPI && in.Type != Secondary {
+		return "", fmt.Errorf("zone add supports secondary zones only (got %s)", ZoneTypeToString[in.Type])
+	}
+
+	if _, err := dns.IsDomainName(name); !err {
+		return "", fmt.Errorf("invalid zone name %q", in.Name)
+	}
+	if _, exists := Zones.Get(name); exists {
+		return "", fmt.Errorf("zone %s already exists", name)
+	}
+
+	// Validate the primary's key. Improvement-1 phase: NOKEY is the only
+	// resolvable key name (any other is an unknown-key error until the keys:
+	// block lands).
+	if in.Type == Secondary {
+		if len(in.Primaries) == 0 {
+			return "", fmt.Errorf("secondary zone %s requires at least one primary", name)
+		}
+		// Validate EVERY entry (not just the first), matching ParseZones — a
+		// later empty/keyless entry must not be persisted as an invalid upstream.
+		for _, p := range in.Primaries {
+			if p.Addr == "" {
+				return "", fmt.Errorf("secondary zone %s has a primary with no address", name)
+			}
+			if p.Key == "" {
+				return "", fmt.Errorf("secondary zone %s primary %q has no key (use NOKEY for no TSIG)", name, p.Addr)
+			}
+			if p.Key != NOKEY {
+				return "", fmt.Errorf("unknown primary key %q (only NOKEY is valid until TSIG keys are configured)", p.Key)
+			}
+		}
+	}
+
+	options := in.Options
+	if options == nil {
+		options = map[ZoneOption]bool{}
+	}
+	if fromAPI {
+		options[OptApiManagedZone] = true
+	}
+
+	// Resolve hostname primaries to addresses via the IMR at add time (not only
+	// on the next restart). Zero resolved on a secondary -> reject the add.
+	res := resolvePrimaries(ctx, conf.Internal.ImrEngine, in.Primaries)
+	if in.Type == Secondary && len(res.Resolved) == 0 {
+		return "", fmt.Errorf("zone %s: no primary resolved to an address (unresolved: %v)", name, res.Unresolved)
+	}
+	primariesConf := clonePeerConfs(in.Primaries)
+	upstreams := res.Resolved
+
+	// Store is always map for dynamic zones — single chokepoint for the map-only
+	// rule (also covers the catalog re-point).
+	zd := &ZoneData{
+		ZoneName:      name,
+		ZoneType:      in.Type,
+		ZoneStore:     MapZone,
+		PrimariesConf: primariesConf,
+		Upstreams:     upstreams,
+		Logger:        log.Default(),
+		Options:       options,
+		Status:        ZoneStatusPending,
+		Data:          core.NewCmap[OwnerData](),
+		KeyDB:         conf.Internal.KeyDB,
+	}
+
+	// Register, then persist; roll back the live registration if persist fails
+	// (never leave a live-but-unpersisted zone that vanishes on restart).
+	Zones.Set(name, zd)
+	if err := conf.AddDynamicZoneToConfig(zd); err != nil {
+		Zones.Remove(name)
+		return "", fmt.Errorf("failed to persist dynamic zone %s: %w", name, err)
+	}
+
+	// Partial resolution: the zone is served from the addresses that resolved,
+	// with a visibility-only ConfigWarning naming the rest.
+	if len(res.Unresolved) > 0 || len(res.KeyCollisions) > 0 {
+		zd.SetError(ConfigWarning, "serving from %d resolved upstream(s) of %d configured primaries (unresolved: %v, key-collisions: %v)", len(res.Resolved), len(in.Primaries), res.Unresolved, res.KeyCollisions)
+	}
+
+	// Enqueue the initial transfer — fire-and-forget (no Wait, no Response). If
+	// enqueue fails (channel full / context cancelled), the zone is registered
+	// and persisted but no refresh is scheduled — it would be stuck in pending
+	// with no AXFR. Surface that rather than reporting success; the zone is
+	// reachable via list-dynamic and the operator can retry modify/delete.
+	zr := ZoneRefresher{
+		Name:          name,
+		ZoneType:      in.Type,
+		PrimariesConf: primariesConf,
+		Primaries:     upstreams,
+		ZoneStore:     MapZone,
+		Options:       options,
+	}
+	if err := conf.enqueueRefresh(ctx, zr); err != nil {
+		return "", fmt.Errorf("zone %s registered but failed to schedule initial transfer: %w", name, err)
+	}
+
+	return fmt.Sprintf("zone %s provisioning; poll list-dynamic for state", name), nil
+}
+
+// enqueueRefresh sends a ZoneRefresher to the refresh engine, returning an error
+// if the send cannot complete (context cancelled or the channel stays full past
+// the timeout) instead of silently dropping the request.
+func (conf *Config) enqueueRefresh(ctx context.Context, zr ZoneRefresher) error {
+	select {
+	case conf.Internal.RefreshZoneCh <- zr:
+		return nil
+	case <-ctx.Done():
+		return fmt.Errorf("context cancelled while enqueuing refresh for %s: %w", zr.Name, ctx.Err())
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("timeout enqueuing refresh for %s (refresh channel full)", zr.Name)
+	}
+}
+
+// RemoveDynamicZone is the shared *delete* core. It refuses to delete a static
+// or catalog-managed zone (guard on OptApiManagedZone), bumps the zone's
+// generation counter so any in-flight refresh self-aborts at its pre-persist
+// guard (B5b), removes it from the live map and the persisted config, and
+// best-effort removes the persisted zone file.
+func (conf *Config) RemoveDynamicZone(name string) (string, error) {
+	name = dns.Fqdn(name)
+	zd, exists := Zones.Get(name)
+	if !exists {
+		return "", fmt.Errorf("zone %s not found", name)
+	}
+	if !zd.Options[OptApiManagedZone] {
+		return "", fmt.Errorf("zone %s is not API-managed and cannot be deleted here", name)
+	}
+
+	Zones.Remove(name)
+	// Bump generation AFTER removing from the map so any refresh goroutine that
+	// snapshotted the old generation fails the pre-persist guard (B5b) and does
+	// not resurrect the files we are about to remove.
+	zd.generation.Add(1)
+
+	// Persist the removal. RemoveDynamicZoneFromConfig rewrites the whole file
+	// from the live Zones map, so it MUST run after Zones.Remove (otherwise the
+	// zone would be re-written back in). If the rewrite fails, surface it: the
+	// zone is gone from memory but the stale config entry would resurrect it on
+	// restart — that's a failed delete, not a success.
+	if err := conf.RemoveDynamicZoneFromConfig(name); err != nil {
+		return "", fmt.Errorf("zone %s removed from memory but failed to update dynamic config (will reappear on restart): %w", name, err)
+	}
+	// Best-effort remove the persisted zone file.
+	if conf.DynamicZones.ZoneDirectory != "" {
+		zoneFilePath := filepath.Join(conf.DynamicZones.ZoneDirectory, name+"zone")
+		if err := os.Remove(zoneFilePath); err != nil && !os.IsNotExist(err) {
+			lg.Warn("RemoveDynamicZone: failed to remove zone file", "zone", name, "path", zoneFilePath, "error", err)
+		}
+	}
+
+	return fmt.Sprintf("zone %s deleted", name), nil
+}
+
+// ModifyDynamicZone is the shared *modify* core. Implemented as
+// stale-old + build-new + replace (NOT in-place mutation) so the modify/refresh
+// data race is gone by construction: the refresh reads the old zd.Upstreams
+// without a lock, so the changed params live on a fresh ZoneData and the old one
+// is only ever read by its now-doomed refresh. Scope: primary addr/key and
+// options; store is fixed at map; rename is out of scope (= delete+add).
+func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) (string, error) {
+	name := dns.Fqdn(in.Name)
+	oldZd, exists := Zones.Get(name)
+	if !exists {
+		return "", fmt.Errorf("zone %s not found", name)
+	}
+	if !oldZd.Options[OptApiManagedZone] {
+		return "", fmt.Errorf("zone %s is not API-managed and cannot be modified here", name)
+	}
+	// When primaries are supplied they REPLACE the set, so every entry must be
+	// complete (empty in.Primaries means "keep the old set" and skips this).
+	for _, p := range in.Primaries {
+		if p.Addr == "" {
+			return "", fmt.Errorf("zone %s: a modified primary has no address", name)
+		}
+		if p.Key != NOKEY {
+			return "", fmt.Errorf("zone %s primary %q requires key NOKEY (only NOKEY is valid until TSIG keys are configured)", name, p.Addr)
+		}
+	}
+
+	// Resolve any new primaries up front, before mutating state, so a
+	// zero-resolution modify is rejected cleanly with no side effects. When no
+	// new primaries are supplied, carry the old as-written + resolved forward.
+	primariesConf := oldZd.PrimariesConf
+	upstreams := oldZd.Upstreams
+	var modRes PrimaryResolveResult
+	if len(in.Primaries) > 0 {
+		modRes = resolvePrimaries(ctx, conf.Internal.ImrEngine, in.Primaries)
+		if len(modRes.Resolved) == 0 {
+			return "", fmt.Errorf("zone %s: no primary resolved to an address (unresolved: %v)", name, modRes.Unresolved)
+		}
+		primariesConf = clonePeerConfs(in.Primaries)
+		upstreams = modRes.Resolved
+	}
+
+	// (1) Bump the old generation so any in-flight refresh on the captured
+	// pointer self-aborts at its pre-persist guard (B5b).
+	oldZd.generation.Add(1)
+
+	// (2) Build a fresh ZoneData carrying the changed params; (3) replace.
+	options := in.Options
+	if options == nil {
+		// Carry the old options forward into a FRESH map — newZd must not share a
+		// mutable map with oldZd, or the B5 replace-not-mutate strategy breaks
+		// (an in-flight refresh on oldZd and later updates on newZd would race on
+		// one map guarded by two different mutexes).
+		options = make(map[ZoneOption]bool, len(oldZd.Options))
+		for k, v := range oldZd.Options {
+			options[k] = v
+		}
+	} else {
+		options[OptApiManagedZone] = true
+	}
+	newZd := &ZoneData{
+		ZoneName:      name,
+		ZoneType:      oldZd.ZoneType,
+		ZoneStore:     MapZone,
+		PrimariesConf: primariesConf,
+		Upstreams:     upstreams,
+		Logger:        log.Default(),
+		Options:       options,
+		Status:        ZoneStatusPending,
+		Data:          core.NewCmap[OwnerData](),
+		KeyDB:         conf.Internal.KeyDB,
+	}
+	Zones.Set(name, newZd)
+
+	// (4) Overwrite the persisted entry. AddDynamicZoneToConfig rewrites the
+	// whole file from the live Zones map, so it MUST run after Zones.Set (so the
+	// rewrite includes the new params). On failure, surface it — the live zone
+	// now has the new params but they would be lost on restart.
+	if err := conf.AddDynamicZoneToConfig(newZd); err != nil {
+		return "", fmt.Errorf("zone %s modified in memory but failed to persist (change will be lost on restart): %w", name, err)
+	}
+	// Partial resolution of the new primaries: served from what resolved, with
+	// a visibility-only ConfigWarning naming the rest.
+	if len(modRes.Unresolved) > 0 || len(modRes.KeyCollisions) > 0 {
+		newZd.SetError(ConfigWarning, "serving from %d resolved upstream(s) of %d configured primaries (unresolved: %v, key-collisions: %v)", len(modRes.Resolved), len(in.Primaries), modRes.Unresolved, modRes.KeyCollisions)
+	}
+	// (5) Force a re-pull from the new upstream.
+	zr := ZoneRefresher{
+		Name:          name,
+		ZoneType:      newZd.ZoneType,
+		PrimariesConf: primariesConf,
+		Primaries:     upstreams,
+		ZoneStore:     MapZone,
+		Options:       options,
+		Force:         true,
+	}
+	if err := conf.enqueueRefresh(ctx, zr); err != nil {
+		return "", fmt.Errorf("zone %s modified but failed to schedule refresh: %w", name, err)
+	}
+
+	return fmt.Sprintf("zone %s modified; poll list-dynamic for state", name), nil
 }
