@@ -663,14 +663,12 @@ func ValidateDnssecPoliciesFromFile(path string) error {
 	var errs []error
 	for name, dp := range root.Dnssec.Policies {
 		dp.Name = name
-		if dp.Template != "" {
-			tmpl, ok := root.Dnssec.Templates[dp.Template]
-			if !ok {
-				errs = append(errs, fmt.Errorf("policy %q: references unknown dnssec template %q", name, dp.Template))
-				continue
-			}
-			dp = ExpandPolicyTemplate(dp, &tmpl)
+		expanded, terr := resolveDnssecPolicyTemplate(dp, root.Dnssec.Templates)
+		if terr != nil {
+			errs = append(errs, fmt.Errorf("policy %q: %w", name, terr))
+			continue
 		}
+		dp = expanded
 		alg, kskAlg, zskAlg, err := resolvePolicyRoleAlgorithms(name, &dp)
 		if err != nil {
 			errs = append(errs, err)

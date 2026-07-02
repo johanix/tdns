@@ -70,7 +70,7 @@ func (db *KeyDB) Begin(context string) (*Tx, error) {
 	if db.Ctx != "" {
 		ctx := db.Ctx
 		db.mu.Unlock()
-		lgConfig.Error("KeyDB transaction already in progress", "context", db.Ctx)
+		lgConfig.Error("KeyDB transaction already in progress", "context", ctx) // captured under lock; don't re-read db.Ctx unlocked
 		return nil, fmt.Errorf("KeyDB transaction already in progress: %s", ctx)
 	}
 	db.Ctx = context

@@ -7,6 +7,8 @@ package tdns
 import (
 	"database/sql"
 	"fmt"
+
+	"github.com/miekg/dns"
 )
 
 // migrateDynamicConfigTsigKeys imports legacy dynamic-zones YAML keys: entries into
@@ -37,8 +39,16 @@ func (conf *Config) migrateDynamicConfigTsigKeys(cf *DynamicConfigFile) error {
 		if err := validateTsigKeySpec(k.Name, k.Algorithm, k.Secret); err != nil {
 			return fmt.Errorf("dynamic key %q: %w", k.Name, err)
 		}
-		_, err := getTsigKeystoreByName(tx, k.Name)
+		existing, err := getTsigKeystoreByName(tx, k.Name)
 		if err == nil {
+			// A name already present is skipped (idempotent) ONLY if its secret
+			// and algorithm match. If they differ, dropping the legacy keys:
+			// block would silently switch dynamic zones from their YAML secret to
+			// the store's — refuse the migration instead.
+			if existing.Secret != k.Secret ||
+				dns.CanonicalName(existing.Algorithm) != dns.CanonicalName(k.Algorithm) {
+				return fmt.Errorf("dynamic key %q conflicts with an existing keystore key (different secret/algorithm); refusing to drop the legacy keys: block", k.Name)
+			}
 			continue
 		}
 		if err != sql.ErrNoRows {

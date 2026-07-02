@@ -106,7 +106,7 @@ func runReloadTsigCmd(role string, force, interactive bool) {
 		}
 		if len(overwrite) == 0 {
 			fmt.Println("No keys overwritten.")
-			return
+			os.Exit(1) // withheld conflicts remain — signal incomplete reconciliation
 		}
 		post.TsigOverwrite = overwrite
 	}

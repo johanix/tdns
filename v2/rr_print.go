@@ -325,9 +325,14 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 		return err
 	}
 
+	// Track the first envelope error so a failed AXFR/IXFR (bad rcode, or a
+	// failed TSIG verification on the response) is returned to the caller
+	// instead of looking successful.
+	var xfrErr error
 	for envelope := range answerChan {
 		leftpad := 20
 		if envelope.Error != nil {
+			xfrErr = envelope.Error
 			errstr := envelope.Error.Error()
 			// miekg/dns reports a non-NOERROR AXFR response as
 			// "dns: bad xfr rcode: N". Translate the numeric rcode to its
@@ -414,7 +419,7 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 			fmt.Printf("Done printing %d RRs in envelope\n", len(envelope.RR))
 		}
 	}
-	return nil
+	return xfrErr
 }
 
 // rdataOnly returns just the RDATA portion of an RR's presentation form,

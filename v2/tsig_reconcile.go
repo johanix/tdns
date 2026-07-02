@@ -68,8 +68,8 @@ func (kdb *KeyDB) ReconcileConfigTsigKeys(entries []TsigDetails, opts TsigReconc
 		existing, err := getTsigKeystoreByName(tx, name)
 		if err == sql.ErrNoRows {
 			if err := insertTsigKeystore(tx, TsigKeystoreRow{
-				Keyname:   t.Name,
-				Algorithm: t.Algorithm,
+				Keyname:   name, // canonical, matching want[] and the cache delta key
+				Algorithm: dns.CanonicalName(t.Algorithm),
 				Secret:    t.Secret,
 				Origin:    "config",
 				Owner:     tsigConfigEffectiveOwner(t),

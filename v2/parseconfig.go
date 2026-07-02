@@ -1211,6 +1211,22 @@ func ExpandPolicyTemplate(pconf DnssecPolicyConf, tmpl *DnssecPolicyConf) Dnssec
 	return pconf
 }
 
+// resolveDnssecPolicyTemplate applies a policy's `template:` reference (if any)
+// by deep-merging the named template into dp (the policy's own values win).
+// Returns the possibly-expanded policy, or an error if the referenced template
+// is unknown. Shared by the runtime config parse and the standalone
+// `policy validate --file` path so the two cannot drift.
+func resolveDnssecPolicyTemplate(dp DnssecPolicyConf, templates map[string]DnssecPolicyConf) (DnssecPolicyConf, error) {
+	if dp.Template == "" {
+		return dp, nil
+	}
+	tmpl, ok := templates[dp.Template]
+	if !ok {
+		return dp, fmt.Errorf("references unknown dnssec template %q", dp.Template)
+	}
+	return ExpandPolicyTemplate(dp, &tmpl), nil
+}
+
 // buildTemplateMap rebuilds the global Templates map from conf.Templates.
 // Called from ParseConfig() and reloadTemplatesFromFile().
 func (conf *Config) buildTemplateMap() error {
@@ -1459,14 +1475,12 @@ func (conf *Config) parseDnssecConfig() error {
 		// A policy may inherit the gaps in its definition from a named template
 		// (deep merge; the policy's own values win). An unknown template name
 		// quarantines just this policy and keeps the server running.
-		if dpLocal.Template != "" {
-			tmpl, ok := conf.Dnssec.Templates[dpLocal.Template]
-			if !ok {
-				markBroken(fmt.Sprintf("references unknown dnssec template %q", dpLocal.Template))
-				continue
-			}
-			dpLocal = ExpandPolicyTemplate(dpLocal, &tmpl)
+		expanded, terr := resolveDnssecPolicyTemplate(dpLocal, conf.Dnssec.Templates)
+		if terr != nil {
+			markBroken(terr.Error())
+			continue
 		}
+		dpLocal = expanded
 		alg, kskAlg, zskAlg, err := resolvePolicyRoleAlgorithms(name, &dpLocal)
 		if err != nil {
 			markBroken(err.Error())

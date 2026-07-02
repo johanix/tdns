@@ -264,7 +264,9 @@ var rootCmd = &cobra.Command{
 			case dns.TypeAXFR, dns.TypeIXFR:
 				if options["transport"] == "Do53" {
 					upstream := net.JoinHostPort(options["server"], options["port"])
-					tdns.ZoneTransferPrint(qname, upstream, serial, rrtype, options, tsigName, tsigAlgo, tsigSecret)
+					if err := tdns.ZoneTransferPrint(qname, upstream, serial, rrtype, options, tsigName, tsigAlgo, tsigSecret); err != nil {
+						os.Exit(1)
+					}
 				} else {
 					fmt.Printf("Zone transfer only supported for transport Do53 (TCP), this is %s\n", options["transport"])
 					os.Exit(1)
@@ -397,12 +399,14 @@ var rootCmd = &cobra.Command{
 				// option is reused on the TCP-fallback client below so a
 				// truncated, retried query stays signed and verifiable.
 				var tsigOpt core.DNSClientOption
+				var tsigSigned bool // true only if the query was ACTUALLY TSIG-signed
 				if tsigKeyFlag != "" {
 					switch t {
 					case core.TransportDo53, core.TransportDo53TCP, core.TransportDoT:
 						m.SetTsig(dns.Fqdn(tsigName), tsigAlgo, 300, time.Now().Unix())
 						tsigOpt = core.WithTsigSecret(tsigName, tsigSecret)
 						clientOpts = append(clientOpts, tsigOpt)
+						tsigSigned = true
 					default:
 						fmt.Fprintf(os.Stderr, "Warning: -y (TSIG) is only supported on Do53/Do53-TCP/DoT; not signing over %s\n", transport)
 					}
@@ -437,13 +441,13 @@ var rootCmd = &cobra.Command{
 				// and append a dig-style TSIG status footer below, covering all
 				// three cases: validated OK, failed to validate, or absent. A
 				// real transport error with no response stays fatal.
-				if err != nil && !(tsigKeyFlag != "" && res != nil) {
+				if err != nil && !(tsigSigned && res != nil) {
 					fmt.Printf("Error from %s: %v\n", server, err)
 					fmt.Printf("*** This is what we got: %+v\n", res)
 					os.Exit(1)
 				}
 				tdns.MsgPrint(res, server, elapsed, short, options)
-				if tsigKeyFlag != "" && res != nil {
+				if tsigSigned && res != nil {
 					switch {
 					case err != nil:
 						fmt.Printf(";; WARNING: response TSIG did not validate: %v\n", err)
@@ -505,7 +509,7 @@ func parseTsigFlag(s string) (name, algo, secret string, err error) {
 	switch algo {
 	case dns.HmacSHA1, dns.HmacSHA224, dns.HmacSHA256, dns.HmacSHA384, dns.HmacSHA512:
 	default:
-		return "", "", "", fmt.Errorf("unsupported TSIG algorithm %q (use hmac-sha1|sha224|sha256|sha384|sha512)", algo)
+		return "", "", "", fmt.Errorf("unsupported TSIG algorithm %q (use hmac-sha1|hmac-sha224|hmac-sha256|hmac-sha384|hmac-sha512)", algo)
 	}
 	if name == "" || secret == "" {
 		return "", "", "", fmt.Errorf("-y must be [algorithm:]name:secret")

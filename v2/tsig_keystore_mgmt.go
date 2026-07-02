@@ -358,7 +358,10 @@ func (kdb *KeyDB) tsigKeyMgmtPurge(conf *Config, tx *Tx, kp KeystorePost, resp *
 		}
 		toDelete = nil
 		for _, row := range candidates {
-			if approved[row.Keyname] {
+			// Canonicalize the candidate side too: approved is keyed by
+			// CanonicalName, so a non-canonical stored keyname would otherwise
+			// silently fail to match and be left undeleted.
+			if approved[dns.CanonicalName(row.Keyname)] {
 				toDelete = append(toDelete, row)
 			}
 		}

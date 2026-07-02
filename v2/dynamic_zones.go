@@ -986,8 +986,12 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	// modification: roll back the staged key AND restore the old zone, so the live
 	// zone can't be left referencing a rolled-back key (a partially-applied modify).
 	if err := conf.AddDynamicZoneToConfig(newZd); err != nil {
-		rollbackKey()
+		// Restore the old zone BEFORE rolling back the staged key: rollbackKey
+		// deletes via the keystore, which refuses a referenced key, and newZd
+		// (live until this Set) may reference the newly-staged key — otherwise
+		// the key is left orphaned. Mirrors the add path's ordering.
 		Zones.Set(name, oldZd)
+		rollbackKey()
 		return "", fmt.Errorf("zone %s failed to persist; rolled back the in-memory modification: %w", name, err)
 	}
 	// Partial resolution of the new primaries: served from what resolved, with

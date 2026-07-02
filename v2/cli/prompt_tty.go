@@ -13,7 +13,7 @@ func stdinIsTTY() bool {
 
 func requireInteractiveTTY() {
 	if !stdinIsTTY() {
-		fmt.Println("Error: --interactive requires a terminal")
+		fmt.Fprintln(os.Stderr, "Error: --interactive requires a terminal")
 		os.Exit(1)
 	}
 }
@@ -22,6 +22,6 @@ func requireTTYOrYes(yes bool, action string) {
 	if yes || stdinIsTTY() {
 		return
 	}
-	fmt.Printf("Error: %s requires a terminal or -y\n", action)
+	fmt.Fprintf(os.Stderr, "Error: %s requires a terminal or -y\n", action)
 	os.Exit(1)
 }
