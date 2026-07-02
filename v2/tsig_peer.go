@@ -173,14 +173,26 @@ func writeTsigErrorResponse(w dns.ResponseWriter, r *dns.Msg, reqTsig *dns.TSIG,
 	resp.Authoritative = true
 	edns0.AttachEDEToResponseWithText(resp, dns.ExtendedErrorCodeOther,
 		fmt.Sprintf("TSIG %s for key %q", reason, reqTsig.Hdr.Name), false)
-	resp.Extra = append(resp.Extra, &dns.TSIG{
+	et := &dns.TSIG{
 		Hdr:        dns.RR_Header{Name: reqTsig.Hdr.Name, Rrtype: dns.TypeTSIG, Class: dns.ClassANY},
 		Algorithm:  reqTsig.Algorithm,
 		TimeSigned: uint64(time.Now().Unix()),
 		Fudge:      tsigFudge,
 		OrigId:     r.Id,
 		Error:      code,
-	})
+	}
+	if code == dns.RcodeBadTime {
+		// RFC 8945 §5.2: a BADTIME error TSIG carries the server's current time
+		// (48-bit, 6 bytes) in Other Data so a clock-skewed peer can measure its
+		// offset and correct. OtherData is a hex string of OtherLen bytes.
+		now := uint64(time.Now().Unix())
+		et.OtherLen = 6
+		et.OtherData = hex.EncodeToString([]byte{
+			byte(now >> 40), byte(now >> 32), byte(now >> 24),
+			byte(now >> 16), byte(now >> 8), byte(now),
+		})
+	}
+	resp.Extra = append(resp.Extra, et)
 
 	packed, err := resp.Pack()
 	if err != nil {
