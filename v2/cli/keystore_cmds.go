@@ -45,7 +45,7 @@ changing the state of keys.`,
 
 func newKeystoreTsigCmd(role string) *cobra.Command {
 	var tsigName, tsigAlgo, tsigSecret, tsigSecretFile, tsigOwner, tsigImportFile, tsigImportFormat string
-	var tsigForce, tsigYes, tsigInteractive, tsigVerbose bool
+	var tsigForce, tsigYes, tsigInteractive, tsigVerbose, tsigExportBind, tsigExportNsd bool
 
 	c := &cobra.Command{
 		Use:   "tsig",
@@ -162,7 +162,26 @@ candidates, or --interactive to prompt per key.`,
 	deleteCmd.Flags().BoolVarP(&tsigYes, "yes", "y", false, "Skip confirmation prompt")
 	deleteCmd.MarkFlagRequired("name")
 
-	c.AddCommand(list, add, generate, importCmd, setowner, deleteCmd, purgeCmd)
+	exportCmd := &cobra.Command{
+		Use:   "export <keyname>",
+		Short: "Print a TSIG key's secret (default) or a full BIND/NSD key block, to stdout",
+		Long: "Print a TSIG key's base64 secret to stdout with NO trailing newline and\n" +
+			"nothing else, so it can be captured inline in another command (e.g. via\n" +
+			"shell backticks or $(...)) to TSIG-sign a dog query or transfer:\n" +
+			"\n" +
+			"    dog @srv -y name.:$(tdns-cli auth keystore tsig export name) zone. axfr\n" +
+			"\n" +
+			"With --bind or --nsd, print a complete BIND9 or NSD key block instead\n" +
+			"(still on stdout). Errors go to stderr so stdout stays clean for capture.",
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			tsigKeyExport(role, args[0], tsigExportBind, tsigExportNsd)
+		},
+	}
+	exportCmd.Flags().BoolVar(&tsigExportBind, "bind", false, "Output a complete BIND9 key { ... } block")
+	exportCmd.Flags().BoolVar(&tsigExportNsd, "nsd", false, "Output a complete NSD key: block")
+
+	c.AddCommand(list, add, generate, importCmd, exportCmd, setowner, deleteCmd, purgeCmd)
 	return c
 }
 
@@ -212,6 +231,52 @@ func tsigKeyMgmt(role, subcmd, name, algo, secret, owner string, force bool) {
 		if tr.Msg != "" {
 			fmt.Println(tr.Msg)
 		}
+	}
+}
+
+// tsigKeyExport prints a TSIG key to stdout for use inline in other commands.
+// Default: the base64 secret only, with NO trailing newline and nothing else, so
+// it can be captured in `backticks` / $() to TSIG-sign a dog query or transfer.
+// --bind / --nsd print a full BIND9 / NSD key block instead. All diagnostics go
+// to stderr, so stdout carries only the intended payload.
+func tsigKeyExport(role, name string, asBind, asNsd bool) {
+	if asBind && asNsd {
+		fmt.Fprintln(os.Stderr, "Error: --bind and --nsd are mutually exclusive")
+		os.Exit(1)
+	}
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating API client: %v\n", err)
+		os.Exit(1)
+	}
+	tr, err := SendKeystoreCmd(api, tdns.KeystorePost{
+		Command:     "tsig-mgmt",
+		SubCommand:  "export",
+		TsigKeyname: name,
+		Creator:     "tdns-cli",
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if tr.Error {
+		fmt.Fprintf(os.Stderr, "Error from server: %s\n", tr.ErrorMsg)
+		os.Exit(1)
+	}
+	if tr.TsigExport == nil {
+		fmt.Fprintf(os.Stderr, "Error: server returned no key for %q\n", name)
+		os.Exit(1)
+	}
+	ex := tr.TsigExport
+	kn := strings.TrimSuffix(ex.Name, ".")
+	algo := strings.TrimSuffix(ex.Algorithm, ".")
+	switch {
+	case asBind:
+		fmt.Printf("key \"%s\" {\n\talgorithm %s;\n\tsecret \"%s\";\n};\n", kn, algo, ex.Secret)
+	case asNsd:
+		fmt.Printf("key:\n\tname: \"%s\"\n\talgorithm: %s\n\tsecret: \"%s\"\n", kn, algo, ex.Secret)
+	default:
+		fmt.Print(ex.Secret) // bare secret, no newline, nothing else
 	}
 }
 

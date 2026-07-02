@@ -152,6 +152,29 @@ func (kdb *KeyDB) TsigKeyMgmt(conf *Config, tx *Tx, kp KeystorePost) (resp *Keys
 			return resp, err
 		}
 
+	case "export":
+		name := kp.TsigKeyname
+		if name == "" {
+			name = kp.Keyname
+		}
+		if name == "" {
+			return resp, fmt.Errorf("export requires a TSIG key name")
+		}
+		row, err := getTsigKeystoreByName(tx, name)
+		if err == sql.ErrNoRows {
+			return resp, fmt.Errorf("TSIG key %q not found", name)
+		}
+		if err != nil {
+			return resp, err
+		}
+		resp.TsigExport = &TsigKeyExport{
+			Name:      row.Keyname,
+			Algorithm: row.Algorithm,
+			Secret:    row.Secret,
+		}
+		resp.TsigCacheDelta = nil
+		resp.Msg = fmt.Sprintf("exported TSIG key %q", name)
+
 	default:
 		return resp, fmt.Errorf("unknown tsig-mgmt subcommand: %q", kp.SubCommand)
 	}

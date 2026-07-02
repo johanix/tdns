@@ -75,12 +75,25 @@ type KeystoreResponse struct {
 	Sig0keys       map[string]Sig0Key
 	TsigKeys       []TsigKeyInfo              `json:"tsigkeys,omitempty"`
 	TsigImport     []TsigKeyDisposition       `json:"tsigimport,omitempty"`
+	TsigExport     *TsigKeyExport             `json:"tsigexport,omitempty"`
 	Algorithms     []algorithms.AlgorithmInfo // populated by the "list-algorithms" command
 	Policies       []DnssecPolicyInfo         // populated by the "list-policies" command
 	Msg            string
 	Error          bool
 	ErrorMsg       string
 	TsigCacheDelta *TsigCacheDelta `json:"-"`
+}
+
+// TsigKeyExport carries a TSIG key's secret back to the caller for the explicit
+// `tsig export` command. This is the ONE keystore response that returns a secret
+// (list/status never do) — deliberately, since export's whole purpose is to hand
+// the operator the secret. It exposes nothing a direct read of the keystore
+// SQLite DB (secrets stored in cleartext) would not: the DB is a convenience
+// store, not an HSM, so the API key is the trust boundary, not the secret-at-rest.
+type TsigKeyExport struct {
+	Name      string
+	Algorithm string
+	Secret    string
 }
 
 // DnssecPolicyInfo is the wire-friendly projection of a DnssecPolicy that the
