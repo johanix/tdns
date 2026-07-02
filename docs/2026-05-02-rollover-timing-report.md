@@ -8,6 +8,23 @@ timing equations")
 
 ---
 
+> **RESOLVED (2026-07-01).** The E3/E12/E13 divergence this audit found is
+> **fixed** in current `main` / `feat/tsig-first-class`. `T_publish` now
+> subtracts the DNSKEY TTL:
+> `tPublish := tRoll.Add(-(deps.PropagationDelay + dnskeyTTL))`
+> (`ksk_rollover_automated.go:1162`), with
+> `dnskeyTTL = effectiveServedDnskeyTTL(...)` = `min(TTLS.DNSKEY,
+> TTLS.MaxServed)` (or the observed served TTL, deferring the transition
+> when still unknowable) (`:1400`). Landed as **W1** (`e120dc4`) with
+> regression tests **W8** (`ed47876`), merged via **PR #212**
+> (`rollover-timing-fixes-1`); **W7** (`01c2c4b`) reshaped it into the
+> deps-helper `transitionDsPublishedToPublishedForZone` (`:1059`; public
+> entry `TransitionRolloverKskDsPublishedToPublished`, `:1004`). The
+> transition is now `ds-published → published` after the C18
+> published/standby split. E5/E10/E11 config-load validation (**W2**) is
+> also present. The per-equation verdicts below (E3/E12/E13 DIVERGES) are
+> retained as the historical audit record.
+
 ## E1 — DS-side cache-flush invariant: `T_DS_pub_n + parent_prop + DS_TTL ≤ T_roll_n`
 
 **Verdict:** UNCLEAR (structurally satisfied iff E10 holds; E10 is *not*

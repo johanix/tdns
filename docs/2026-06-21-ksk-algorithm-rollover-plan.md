@@ -1,5 +1,14 @@
 # KSK algorithm rollover via the auto-rollover engine
 
+> **Superseded on method (2026-07-01)** by
+> `2026-07-01-ksk-alg-rollover-parallel-fifo-design.md`. This plan assumed
+> a KSK algorithm rollover "rides the multi-DS engine unchanged"; that is
+> wrong — multi-DS cannot do an algorithm rollover (orphan-DS / downgrade
+> signature), so the design moved to **double-signature via parallel
+> per-(role,algorithm) FIFOs**. The build-step scaffolding below (entry
+> dispatch, safety refusals, trigger UX, test matrix) still applies; see
+> §9 of the 2026-07-01 doc for how each K-step is re-rated.
+
 Status: PLANNING. This is the build plan for a **KSK algorithm
 rollover** — changing a zone's KSK signing algorithm (e.g. ED25519 →
 MAYO5 for a post-quantum transition) with correct parent-DS coordination.
