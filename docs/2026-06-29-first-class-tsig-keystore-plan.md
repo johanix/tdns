@@ -376,34 +376,60 @@ sha384→48, sha512→64; matches `tsig-keygen`). Validate `algorithm` via
   `tdns-cli.yaml` (no DB connection — short-lived client). Own, mostly-orthogonal
   step.
 
+## Implementation status
+
+Project tracking lives in this doc (no Linear). **Update the table below as each
+§15 step lands** — set Status, commit on `feat/tsig-first-class`, and a one-line
+note if anything diverged from the plan.
+
+| | |
+|---|---|
+| **Branch** | `feat/tsig-first-class` (cut from `tsig-on-replication` tip when work starts) |
+| **Merge target** | `tsig-on-replication` (PR #269 stack) |
+| **Started** | 2026-06-29 (`feat/tsig-first-class`) |
+| **Overall** | complete |
+
+**Commit workflow (per step):** finish the step → `go test -race ./...` + `go vet` clean
+(compile via test/build) → **stop and report** (“step N ready”) so you can review or
+redirect → **commit only when you say to** → update Status in the table below.
+One commit per §15 step on `feat/tsig-first-class`; no push unless you ask.
+
 ## 15. Implementation steps (staged commits)
 
 Each builds, passes `go test -race ./...`, `go vet`-clean; one commit each.
 Reconciled with §9 (review #6).
 
-| # | Step | Risk | ~LOC |
-|---|---|---|---|
-| 1 | `TsigKeystore` table in `db_schema.go` + creation; reserved-name/`validateTsigKeySpec` on DB insert | Low | ~50 |
-| 2 | DB CRUD `TsigKeyMgmt` + cache-after-commit discipline (§4); in-memory store loads from DB | Med | ~220 |
-| 3 | Boot reorder (§5): KeyDB before `LoadTsigKeys`; `LoadTsigKeys` = load DB + sync `keys.tsig` (`main_initfuncs.go:123,130`) | Med | ~120 |
-| 4 | Reload reconcile in place, three-mode/no-silent-overwrite (§6); drop YAML re-merge; add **`config reload-tsig [--force\|--interactive]`** (sibling of `config reload-zones`, `cli/config_cmds.go:34`) | Med | ~130 |
-| 5 | Reference-count scan over `Zones` + catalog groups (§8) | Low | ~70 |
-| 6 | API: `tsig-mgmt` command, `KeystorePost`/`KeystoreResponse` TSIG fields + `TsigKeyInfo`/`TsigKeyDisposition` (§11) | Med | ~140 |
-| 7 | CLI `keystore tsig {list, add, setowner, delete}` + operator-string sweep (§14) | Med | ~200 |
-| 8 | `generate` + `GenerateTsigSecret` (§12) | Low | ~70 |
-| 9 | `import` extractor (BIND/NSD) + three-mode (default/`--interactive`/`--force`) + `-v` (§10) | Med–High | ~250 |
-| 10 | `purge` three-mode (reuse `Force` dry-run) (§9) | Low | ~70 |
-| 11 | Inline `zone add/modify --tsig-*` → create-if-absent (§7/§14); update CLI help + `tsig_dynzone_test.go` | Med | ~120 |
-| 12 | Legacy migration hook in `LoadDynamicZoneFiles`; retire YAML `keys:` block (§13) | Med | ~110 |
-| 13 | `owner` end-to-end: `keys.tsig owner:`, `--owner`, `setowner`, list/purge logic (§2/§9) | Low–Med | ~90 |
-| 14 | CLI `ParseTsigKeys` strictness unification (§14, review #19) | Low | ~40 |
-| 15 | Tests across all of the above | — | ~600 |
+| # | Step | Risk | ~LOC | Status |
+|---|---|---|---|---|
+| 1 | `TsigKeystore` table in `db_schema.go` + creation; reserved-name/`validateTsigKeySpec` on DB insert | Low | ~50 | done (`d1eb719`) |
+| 2 | DB CRUD `TsigKeyMgmt` + cache-after-commit discipline (§4); in-memory store loads from DB | Med | ~220 | done (`c6c21aa`) |
+| 3 | Boot reorder (§5): KeyDB before `LoadTsigKeys`; `LoadTsigKeys` = load DB + sync `keys.tsig` (`main_initfuncs.go:123,130`) | Med | ~120 | done (`656afd3`) |
+| 4 | Reload reconcile in place, three-mode/no-silent-overwrite (§6); **`config reload-tsig`** CLI + API; **keep** legacy YAML re-merge on reload until step 12 | Med | ~140 | done (`d9f56d3`) |
+| 5 | Reference-count scan over `Zones` + catalog groups (§8) | Low | ~70 | done (`35aa8ed`) |
+| 6 | API: `tsig-mgmt` command, `KeystorePost`/`KeystoreResponse` TSIG fields + `TsigKeyInfo`/`TsigKeyDisposition` (§11) | Med | ~140 | done (`530d0c6`) |
+| 7 | CLI `keystore tsig {list, add, setowner, delete}` + operator-string sweep (§14) | Med | ~200 | done (`4a86dc5`) |
+| 8 | `generate` + `GenerateTsigSecret` (§12) | Low | ~70 | done (`e690cd5`) |
+| 9 | `import` extractor (BIND/NSD) + three-mode (default/`--interactive`/`--force`) + `-v` (§10) | Med–High | ~250 | done (`6e36a82`) |
+| 10 | `purge` three-mode (reuse `Force` dry-run) (§9) | Low | ~70 | done (`3139fe6`) |
+| 11 | Inline `zone add/modify --tsig-*` → create-if-absent (§7/§14); update CLI help + `tsig_dynzone_test.go` | Med | ~120 | done (`3511c1f`) |
+| 12 | Legacy migration hook in `LoadDynamicZoneFiles` (§13); retire YAML `keys:` block; **remove** startup `loadDynamicTsigKeys` and reload YAML re-merge — same commit | Med | ~120 | done (`fd019e0`) |
+| 13 | `owner` end-to-end: `keys.tsig owner:`, `--owner`, `setowner`, list/purge logic (§2/§9) | Low–Med | ~90 | done (`ded1ecd`) |
+| 14 | CLI `ParseTsigKeys` strictness unification (§14, review #19) | Low | ~40 | done (`5dec326`) |
+| 15 | Tests across all of the above | — | ~600 | done (`6e0c724`) |
 
-Rough total ~2.2k LOC incl. tests (tests bumped from the original ~400 estimate —
-review #18 polish — given import extractors, reconcile, migration, refcount,
-immutability, three-mode). **Sequencing keeps a working build:** steps 1–4 make the
-store DB-backed with **no behaviour change** *provided* migration + inline path stay
-on old semantics until steps 11–12 (state this explicitly in each commit).
+Rough total ~2.2k LOC incl. tests (tests bumped from ~400 — import extractors,
+reconcile, migration, refcount, immutability, three-mode). **Sequencing keeps a
+working build:**
+- Steps **1–3:** DB-backed store; legacy YAML paths unchanged on startup/reload.
+- Step **4:** DB reconcile on reload + `config reload-tsig`; **YAML re-merge kept**
+  as fallback until step 12 (no reload regression for unmigrated installs).
+- Steps **5–10:** management surface; legacy paths still in place.
+- Step **11:** inline `zone --tsig-*` immutability (behaviour change — call out in
+  commit message).
+- Step **12:** migration + **single commit** removes all YAML key paths (startup +
+  reload); after this, DB is the sole store.
+
+Status values: `pending` → `in progress` → `done (<commit>)` (or `skipped` + note).
 
 ## 16. Open / deferred
 

@@ -385,7 +385,7 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 				// Fail closed: a configured-but-undefined tsig_key must not silently
 				// downgrade to unsigned transfers. Skip the member until the key is
 				// defined (mirrors the static primary-key validation in ParseZones).
-				lg.Error("CATALOG: tsig_key not defined in keys.tsig, skipping zone (fail closed, not unsigned)", "key", configGroupConfig.TsigKey, "zone", zoneName, "group", member.MetaGroup)
+				lg.Error("CATALOG: tsig_key not defined (add via keys.tsig or keystore tsig), skipping zone (fail closed, not unsigned)", "key", configGroupConfig.TsigKey, "zone", zoneName, "group", member.MetaGroup)
 				skippedCount++
 				continue
 			}
@@ -493,12 +493,16 @@ func getConfigGroupNames(configGroups map[string]*ConfigGroupConfig) []string {
 // Defaults to MapZone if empty or unknown (matching parseconfig.go behavior)
 func parseZoneStore(storeStr string) ZoneStore {
 	storeStr = strings.ToLower(strings.TrimSpace(storeStr))
+	// Accept both the canonical config tokens (xfr/map/slice) and the legacy
+	// display forms (xfrzone/mapzone/slicezone) the daemon used to persist, so
+	// existing dynamic-config files load without a spurious warning. Callers
+	// that re-persist normalize back to the canonical token (zoneStoreConfigToken).
 	switch storeStr {
-	case "xfr":
+	case "xfr", "xfrzone":
 		return XfrZone
-	case "map":
+	case "map", "mapzone":
 		return MapZone
-	case "slice":
+	case "slice", "slicezone":
 		return SliceZone
 	case "":
 		// Default to map when not specified

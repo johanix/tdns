@@ -114,6 +114,22 @@ func WithForceTCP() DNSClientOption {
 	}
 }
 
+// WithTsigSecret enables TSIG on the underlying miekg clients (Do53 / Do53-TCP /
+// DoT). A query signed with msg.SetTsig(keyname, algo, ...) is then MAC'd on
+// send, and the response's TSIG is verified on receive, using the base64 secret
+// looked up by keyname. keyname is canonicalised to an FQDN to match the wire
+// key name. No effect on DoH/DoQ, which use non-dns.Client transports.
+func WithTsigSecret(keyname, secret string) DNSClientOption {
+	return func(c *DNSClient) {
+		m := map[string]string{dns.Fqdn(keyname): secret}
+		for _, cl := range []*dns.Client{c.DNSClientUDP, c.DNSClientTCP, c.DNSClientTLS} {
+			if cl != nil {
+				cl.TsigSecret = m
+			}
+		}
+	}
+}
+
 // NewDNSClient creates a new DNS client with the specified transport
 // XXX: Once we can do cert validation we should add a WithVerifyCertificates() option.
 func NewDNSClient(transport Transport, port string, tlsConfig *tls.Config, opts ...DNSClientOption) *DNSClient {

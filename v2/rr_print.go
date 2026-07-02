@@ -266,7 +266,32 @@ func PrintGenericRR(rr dns.RR, leftpad, rightmargin int) {
 	fmt.Printf("%s%s%s\n", p[0], namepad, strings.Join(p[1:], " "))
 }
 
-func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, options map[string]string) error {
+// xfrErrorRcode extracts the numeric rcode from a miekg/dns transfer error of
+// the form "dns: bad xfr rcode: N" and returns its mnemonic (e.g. REFUSED,
+// SERVFAIL, NOTAUTH). It returns ("", false) when the error is not a bad-rcode
+// error, so the caller can fall back to printing the raw error.
+func xfrErrorRcode(errstr string) (string, bool) {
+	const marker = "bad xfr rcode: "
+	i := strings.Index(errstr, marker)
+	if i < 0 {
+		return "", false
+	}
+	rcode, err := strconv.Atoi(strings.TrimSpace(errstr[i+len(marker):]))
+	if err != nil {
+		return "", false
+	}
+	if name, ok := dns.RcodeToString[rcode]; ok {
+		return name, true
+	}
+	return fmt.Sprintf("rcode %d", rcode), true
+}
+
+// ZoneTransferPrint fetches and prints an AXFR/IXFR. When tsigName is non-empty
+// the request is TSIG-signed with that key (algorithm tsigAlgo, base64 secret
+// tsigSecret) and the response envelope MACs are verified -- so a transfer gated
+// by a downstreams ACL that requires a key is accepted. tsigName == "" means an
+// unsigned transfer.
+func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, options map[string]string, tsigName, tsigAlgo, tsigSecret string) error {
 	msg := new(dns.Msg)
 	if ttype == dns.TypeIXFR {
 		// msg.SetIxfr(zname, serial, soa.Ns, soa.Mbox)
@@ -287,20 +312,35 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 	}
 
 	transfer := new(dns.Transfer)
+	// TSIG-sign the transfer request (dog -y) so a downstreams ACL that requires
+	// a key accepts it; miekg base64-decodes the secret and verifies the
+	// per-envelope response MACs.
+	if tsigName != "" {
+		msg.SetTsig(dns.Fqdn(tsigName), tsigAlgo, 300, time.Now().Unix())
+		transfer.TsigSecret = map[string]string{dns.Fqdn(tsigName): tsigSecret}
+	}
 	answerChan, err := transfer.In(msg, upstream)
 	if err != nil {
 		fmt.Printf("Error from transfer.In: %v\n", err)
 		return err
 	}
 
+	// Track the first envelope error so a failed AXFR/IXFR (bad rcode, or a
+	// failed TSIG verification on the response) is returned to the caller
+	// instead of looking successful.
+	var xfrErr error
 	for envelope := range answerChan {
 		leftpad := 20
 		if envelope.Error != nil {
-			fmt.Printf("Oops. Zone transfer envelope signals an error:\n")
+			xfrErr = envelope.Error
 			errstr := envelope.Error.Error()
-			if strings.Contains(errstr, "bad xfr rcode: 9") {
-				fmt.Printf("Error: %s: Not authoritative for zone %s\n",
-					upstream, zname)
+			// miekg/dns reports a non-NOERROR AXFR response as
+			// "dns: bad xfr rcode: N". Translate the numeric rcode to its
+			// mnemonic (REFUSED, SERVFAIL, NOTAUTH, ...) so the error reads
+			// sensibly instead of leaking a bare number.
+			if rcodeName, ok := xfrErrorRcode(errstr); ok {
+				fmt.Printf("Error: AXFR of %s from %s failed: server returned %s\n",
+					zname, upstream, rcodeName)
 			} else {
 				fmt.Printf("Error: zone %s error: %v\n", zname, errstr)
 			}
@@ -379,7 +419,7 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 			fmt.Printf("Done printing %d RRs in envelope\n", len(envelope.RR))
 		}
 	}
-	return nil
+	return xfrErr
 }
 
 // rdataOnly returns just the RDATA portion of an RR's presentation form,
@@ -590,6 +630,11 @@ func PrintRR(rr dns.RR, leftpad int, options map[string]string) error {
 		} else {
 			PrintGenericRR(rr, leftpad, rightmargin)
 		}
+	case *dns.TSIG:
+		// miekg's TSIG.String() already renders the dig-style ";; TSIG
+		// PSEUDOSECTION"; reuse it verbatim rather than the generic multi-line
+		// RR formatter, which would mangle the pseudo-RR.
+		fmt.Printf("%s\n", rr.String())
 	default:
 		PrintGenericRR(rr, leftpad, rightmargin)
 	}

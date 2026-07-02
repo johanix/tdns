@@ -569,6 +569,7 @@ func warnDnssecPolicyCoupling(policyName string, out *DnssecPolicy) {
 // both live under the dnssec: block.
 type dnssecPoliciesYAML struct {
 	Dnssec struct {
+		Templates       map[string]DnssecPolicyConf `yaml:"templates"`
 		Policies        map[string]DnssecPolicyConf `yaml:"policies"`
 		SplitAlgorithms map[string][]string         `yaml:"split_algorithms"`
 	} `yaml:"dnssec"`
@@ -662,6 +663,12 @@ func ValidateDnssecPoliciesFromFile(path string) error {
 	var errs []error
 	for name, dp := range root.Dnssec.Policies {
 		dp.Name = name
+		expanded, terr := resolveDnssecPolicyTemplate(dp, root.Dnssec.Templates)
+		if terr != nil {
+			errs = append(errs, fmt.Errorf("policy %q: %w", name, terr))
+			continue
+		}
+		dp = expanded
 		alg, kskAlg, zskAlg, err := resolvePolicyRoleAlgorithms(name, &dp)
 		if err != nil {
 			errs = append(errs, err)

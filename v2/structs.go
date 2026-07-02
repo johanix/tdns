@@ -30,6 +30,26 @@ var ZoneStoreToString = map[ZoneStore]string{
 	SliceZone: "SliceZone",
 }
 
+// zoneStoreToConfigToken maps a ZoneStore to its CANONICAL config-file token
+// ("map"/"slice"/"xfr") — the form parseZoneStore reads. This is deliberately
+// distinct from ZoneStoreToString, which is the human/display form ("MapZone")
+// used in API responses and logs. Persisting config must use the token, not the
+// display string, or the daemon writes a value its own reader rejects.
+var zoneStoreToConfigToken = map[ZoneStore]string{
+	XfrZone:   "xfr",
+	MapZone:   "map",
+	SliceZone: "slice",
+}
+
+// zoneStoreConfigToken returns the canonical config token for s, defaulting to
+// "map" for any unmapped value (matching parseZoneStore's default).
+func zoneStoreConfigToken(s ZoneStore) string {
+	if tok, ok := zoneStoreToConfigToken[s]; ok {
+		return tok
+	}
+	return "map"
+}
+
 type ZoneType uint8
 
 const (
@@ -392,7 +412,11 @@ type DnssecPolicyClampingConf struct {
 
 // DnssecPolicyConf should match the configuration
 type DnssecPolicyConf struct {
-	Name      string
+	Name string
+	// Template, if set, names an entry in dnssec.templates: whose fields are
+	// deep-merged into this policy to fill any gaps (this policy's own values
+	// win). Never copied from the template itself.
+	Template  string `yaml:"template" mapstructure:"template"`
 	Algorithm string
 	Mode      string `yaml:"mode" mapstructure:"mode"`
 
@@ -863,6 +887,7 @@ type TsigDetails struct {
 	Name      string `validate:"required" yaml:"name"`
 	Algorithm string `validate:"required" yaml:"algorithm"`
 	Secret    string `validate:"required" yaml:"secret"`
+	Owner     string `yaml:"owner,omitempty"`
 }
 
 type ZoneName string

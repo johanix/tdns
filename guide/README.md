@@ -54,4 +54,4 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   reading when changing engine timing behaviour.
 
 - Future Work (coming soon)
-  -- IXFR support and TSIG authentication.
+  -- IXFR support.

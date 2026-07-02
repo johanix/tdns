@@ -33,6 +33,7 @@ var port = "53"
 var server string
 var cfgFile string
 var trustAnchorFile string // -k / --trust-anchor
+var tsigKeyFlag string      // -y / --tsig : [algorithm:]name:secret (dig-compatible)
 
 var options = make(map[string]string, 2)
 
@@ -247,11 +248,25 @@ var rootCmd = &cobra.Command{
 				continue
 			}
 
+			// Parse -y once (if given); used by both the AXFR/IXFR and the
+			// regular-query paths below. Base64 secrets never contain ':'.
+			var tsigName, tsigAlgo, tsigSecret string
+			if tsigKeyFlag != "" {
+				var terr error
+				tsigName, tsigAlgo, tsigSecret, terr = parseTsigFlag(tsigKeyFlag)
+				if terr != nil {
+					fmt.Fprintf(os.Stderr, "Error: %v\n", terr)
+					os.Exit(1)
+				}
+			}
+
 			switch rrtype {
 			case dns.TypeAXFR, dns.TypeIXFR:
 				if options["transport"] == "Do53" {
 					upstream := net.JoinHostPort(options["server"], options["port"])
-					tdns.ZoneTransferPrint(qname, upstream, serial, rrtype, options)
+					if err := tdns.ZoneTransferPrint(qname, upstream, serial, rrtype, options, tsigName, tsigAlgo, tsigSecret); err != nil {
+						os.Exit(1)
+					}
 				} else {
 					fmt.Printf("Zone transfer only supported for transport Do53 (TCP), this is %s\n", options["transport"])
 					os.Exit(1)
@@ -379,6 +394,24 @@ var rootCmd = &cobra.Command{
 					}
 				}
 
+				// TSIG-sign the query (dig -y). Only the miekg-client transports
+				// (Do53/Do53-TCP/DoT) have a TSIG path here; warn otherwise. The
+				// option is reused on the TCP-fallback client below so a
+				// truncated, retried query stays signed and verifiable.
+				var tsigOpt core.DNSClientOption
+				var tsigSigned bool // true only if the query was ACTUALLY TSIG-signed
+				if tsigKeyFlag != "" {
+					switch t {
+					case core.TransportDo53, core.TransportDo53TCP, core.TransportDoT:
+						m.SetTsig(dns.Fqdn(tsigName), tsigAlgo, 300, time.Now().Unix())
+						tsigOpt = core.WithTsigSecret(tsigName, tsigSecret)
+						clientOpts = append(clientOpts, tsigOpt)
+						tsigSigned = true
+					default:
+						fmt.Fprintf(os.Stderr, "Warning: -y (TSIG) is only supported on Do53/Do53-TCP/DoT; not signing over %s\n", transport)
+					}
+				}
+
 				client := core.NewDNSClient(t, options["port"], tlsConfig, clientOpts...)
 				res, _, err := client.Exchange(m, server, false) // FIXME: duration is always zero
 				if err == nil && res != nil && res.Truncated && t == core.TransportDo53 && !forceTCP {
@@ -391,18 +424,39 @@ var rootCmd = &cobra.Command{
 						fmt.Fprintf(os.Stderr, "Warning: PR (Privacy Requested) flag is set but response was truncated, falling back to unencrypted Do53-TCP. This is unsafe and leaks information.\n")
 					}
 					fmt.Println(";; Truncated UDP response received; retrying over TCP")
-					tcpClient := core.NewDNSClient(core.TransportDo53, options["port"], tlsConfig, core.WithForceTCP())
+					tcpOpts := []core.DNSClientOption{core.WithForceTCP()}
+					if tsigOpt != nil {
+						tcpOpts = append(tcpOpts, tsigOpt)
+					}
+					tcpClient := core.NewDNSClient(core.TransportDo53, options["port"], tlsConfig, tcpOpts...)
 					res, _, err = tcpClient.Exchange(m, server, false)
 					options["transport"] = "Do53-TCP"
 				}
 
 				elapsed := time.Since(start)
-				if err != nil {
+				// A TSIG issue does not mean "no answer": a bad response MAC
+				// still returns the message, and an ABSENT response TSIG returns
+				// no error at all (miekg only verifies a TSIG that is present).
+				// So when we signed the query (-y) we always show the response
+				// and append a dig-style TSIG status footer below, covering all
+				// three cases: validated OK, failed to validate, or absent. A
+				// real transport error with no response stays fatal.
+				if err != nil && !(tsigSigned && res != nil) {
 					fmt.Printf("Error from %s: %v\n", server, err)
 					fmt.Printf("*** This is what we got: %+v\n", res)
 					os.Exit(1)
 				}
 				tdns.MsgPrint(res, server, elapsed, short, options)
+				if tsigSigned && res != nil {
+					switch {
+					case err != nil:
+						fmt.Printf(";; WARNING: response TSIG did not validate: %v\n", err)
+					case res.IsTsig() != nil:
+						fmt.Printf(";; TSIG: response signature validated OK (key %s)\n", res.IsTsig().Hdr.Name)
+					default:
+						fmt.Printf(";; WARNING: query was TSIG-signed but the response carried NO TSIG\n")
+					}
+				}
 			}
 		}
 	},
@@ -434,6 +488,33 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&short, "short", "", false, "Only list RRs that are part of the Answer section")
 	rootCmd.PersistentFlags().StringVarP(&port, "port", "p", "53", "Port to send DNS query to")
 	rootCmd.PersistentFlags().StringVarP(&trustAnchorFile, "trust-anchor", "k", "", "Path to DNSSEC trust anchor file (zone-file format DS or DNSKEY records). Used by +sigchase. Default: read from "+tdns.DefaultImrCfgFile+" or fall back to compiled-in root KSK DS records.")
+	rootCmd.PersistentFlags().StringVarP(&tsigKeyFlag, "tsig", "y", "", "TSIG-sign the query. Format [algorithm:]name:secret (dig-compatible); algorithm defaults to hmac-sha256. Do53/Do53-TCP/DoT only.")
+}
+
+// parseTsigFlag parses a dig-style -y value "[algorithm:]name:secret". The
+// secret is base64 and never contains ':', so a 3-way split is unambiguous. The
+// returned algo is a canonical miekg TSIG algorithm name (e.g. dns.HmacSHA256).
+func parseTsigFlag(s string) (name, algo, secret string, err error) {
+	parts := strings.SplitN(s, ":", 3)
+	switch len(parts) {
+	case 2:
+		name, secret = parts[0], parts[1]
+		algo = dns.HmacSHA256
+	case 3:
+		name, secret = parts[1], parts[2]
+		algo = dns.Fqdn(strings.ToLower(parts[0]))
+	default:
+		return "", "", "", fmt.Errorf("-y must be [algorithm:]name:secret")
+	}
+	switch algo {
+	case dns.HmacSHA1, dns.HmacSHA224, dns.HmacSHA256, dns.HmacSHA384, dns.HmacSHA512:
+	default:
+		return "", "", "", fmt.Errorf("unsupported TSIG algorithm %q (use hmac-sha1|hmac-sha224|hmac-sha256|hmac-sha384|hmac-sha512)", algo)
+	}
+	if name == "" || secret == "" {
+		return "", "", "", fmt.Errorf("-y must be [algorithm:]name:secret")
+	}
+	return name, algo, secret, nil
 }
 
 func ProcessOptions(options map[string]string, ucarg string) (map[string]string, error) {
