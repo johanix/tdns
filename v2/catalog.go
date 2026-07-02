@@ -375,7 +375,23 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 		// RULE 4: Auto-configure zone using config group
 		lg.Info("CATALOG: auto-configuring zone", "zone", zoneName, "group", member.MetaGroup, "upstream", configGroupConfig.Upstream, "store", "map")
 
-		primariesConf := []PeerConf{{Addr: configGroupConfig.Upstream, Key: NOKEY}}
+		// The group's tsig_key (if any) names a key in the keys: store; put that
+		// name on the primary so the SOA probe / AXFR is signed with it (the
+		// secret is resolved by name at transfer time, SignForPeer). Validate
+		// against the keys: store, not the retired Globals.TsigKeys.
+		primaryKey := NOKEY
+		if configGroupConfig.TsigKey != "" {
+			if !conf.tsigKeyDefined(configGroupConfig.TsigKey) {
+				// Fail closed: a configured-but-undefined tsig_key must not silently
+				// downgrade to unsigned transfers. Skip the member until the key is
+				// defined (mirrors the static primary-key validation in ParseZones).
+				lg.Error("CATALOG: tsig_key not defined in keys.tsig, skipping zone (fail closed, not unsigned)", "key", configGroupConfig.TsigKey, "zone", zoneName, "group", member.MetaGroup)
+				skippedCount++
+				continue
+			}
+			primaryKey = configGroupConfig.TsigKey
+		}
+		primariesConf := []PeerConf{{Addr: configGroupConfig.Upstream, Key: primaryKey}}
 		res := resolvePrimaries(ctx, conf.Internal.ImrEngine, primariesConf)
 		if len(res.Resolved) == 0 {
 			lg.Error("CATALOG: upstream did not resolve to an address, skipping zone", "zone", zoneName, "group", member.MetaGroup, "upstream", configGroupConfig.Upstream, "unresolved", res.Unresolved)
@@ -404,17 +420,8 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 			}
 		}
 
-		// Configure TSIG if specified
-		if configGroupConfig.TsigKey != "" {
-			_, ok := Globals.TsigKeys[configGroupConfig.TsigKey]
-			if !ok {
-				lg.Warn("CATALOG: TSIG key not found", "key", configGroupConfig.TsigKey, "zone", zoneName)
-			} else {
-				// Apply TSIG configuration to zone
-				// TODO: Set zd.TsigKey = tsigDetails (depends on TSIG implementation)
-				lg.Info("CATALOG: applied TSIG key", "key", configGroupConfig.TsigKey, "zone", zoneName)
-			}
-		}
+		// (TSIG for the upstream is now carried by primariesConf[].Key above and
+		// resolved by name from the keys: store at transfer time.)
 
 		// Add to Zones map
 		Zones.Set(zoneName, zd)

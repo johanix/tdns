@@ -51,7 +51,7 @@ func clarifyXfrError(zone, upstream string, err error) error {
 	return err
 }
 
-func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype string) (uint32, error) {
+func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype, keyName string, conf *Config) (uint32, error) {
 
 	if upstream == "" {
 		Fatal("ZoneTransfer: upstream not set")
@@ -72,6 +72,13 @@ func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype string)
 	lgDns.Info("ZoneTransferIn", "zone", zd.ZoneName, "store", ZoneStoreToString[zd.ZoneStore])
 
 	transfer := new(dns.Transfer)
+	// Sign the AXFR/IXFR request under this upstream's key (NOKEY => unsigned).
+	// The provider also verifies the TSIG on the inbound envelopes.
+	provider, serr := SignForPeer(msg, keyName, conf)
+	if serr != nil {
+		return 0, fmt.Errorf("ZoneTransferIn %s: TSIG sign setup: %w", zd.ZoneName, serr)
+	}
+	transfer.TsigProvider = provider
 	answerChan, err := transfer.In(msg, upstream)
 	if err != nil {
 		zd.Logger.Printf("Error from transfer.In: %v\n", err)
@@ -221,6 +228,22 @@ func estimateEnvelopeSize(rrs []dns.RR) int {
 
 func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	zone := dns.Fqdn(zd.ZoneName)
+
+	// downstreams (provide-xfr) ACL: who may AXFR/IXFR from us. An empty ACL
+	// DENIES — a hard cutover that closes the legacy open-AXFR default. On a
+	// denied or unverifiable requester, REFUSE and serve no zone data. The
+	// server's TsigProvider (do53.go) has verified any TSIG MAC already; here
+	// we enforce the source ACL and that the required key is the one on the wire.
+	if src, ok := peerIP(w.RemoteAddr().String()); !ok {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, unparseable source %q", zone, w.RemoteAddr())
+		return zd.refuseTransfer(w, r)
+	} else if allowed, approvedKeys := zd.downstreamsDecision(src); !allowed {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer to %s (not permitted by downstreams ACL)", zone, src)
+		return zd.refuseTransfer(w, r)
+	} else if err := checkInboundTSIG(w, r, approvedKeys); err != nil {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer to %s: %v", zone, src, err)
+		return zd.refuseTransfer(w, r)
+	}
 
 	if zd.Verbose {
 		zd.Logger.Printf("ZoneTransferOut: Will try to serve zone %s", zone)
@@ -420,6 +443,18 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	zd.Logger.Printf("ZoneTransferOut: %s: Sent %d RRs.", zone, total_sent)
 
 	return total_sent, nil
+}
+
+// refuseTransfer writes a REFUSED reply to an AXFR/IXFR request (signed when the
+// request itself carried a verified TSIG, per RFC 8945) and reports zero RRs sent.
+func (zd *ZoneData) refuseTransfer(w dns.ResponseWriter, r *dns.Msg) (int, error) {
+	m := new(dns.Msg)
+	m.SetRcode(r, dns.RcodeRefused)
+	signResponseLikeRequest(w, r, m)
+	if err := w.WriteMsg(m); err != nil {
+		zd.Logger.Printf("ZoneTransferOut: %s: WriteMsg on REFUSED failed: %v", dns.Fqdn(zd.ZoneName), err)
+	}
+	return 0, nil
 }
 
 func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, error) {

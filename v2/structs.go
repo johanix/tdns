@@ -121,6 +121,8 @@ type ZoneData struct {
 	PrimariesConf     []PeerConf // as-written primaries; persisted; re-resolved each load (P3)
 	Upstreams         []PeerConf // resolved addr:port tuples; runtime-only; used for transfer
 	Notify            []PeerConf // downstream secondaries that we notify (addr + key)
+	AllowNotify       []AclEntry // secondary: who may NOTIFY us; empty => accept from resolved primaries
+	Downstreams       []AclEntry // primary: who may AXFR from us (provide-xfr ACL); empty => deny
 	Zonefile          string
 	DelegationSyncQ   chan DelegationSyncRequest
 	Parent            string   // name of parentzone (if filled in)
@@ -217,6 +219,8 @@ type ZoneConf struct {
 	Store             string     // xfr | map | slice | reg (defaults to "map" if not specified)
 	Primaries         []PeerConf `yaml:"primaries" mapstructure:"primaries"` // upstream set, for secondary zones
 	Notify            []PeerConf
+	AllowNotify       []AclEntry   `yaml:"allow-notify" mapstructure:"allow-notify"` // secondary: who may NOTIFY us (ip-spec + key｜NOKEY｜BLOCKED)
+	Downstreams       []AclEntry   `yaml:"downstreams" mapstructure:"downstreams"`   // primary: who may AXFR from us (provide-xfr ACL)
 	OptionsStrs       []string     `yaml:"options" mapstructure:"options"`
 	Options           []ZoneOption `yaml:"-" mapstructure:"-"` // Ignore during both yaml and mapstructure decoding
 	Frozen            bool         // true if zone is frozen; not a config param
@@ -576,6 +580,15 @@ type ZoneRefresher struct {
 	PrimariesConf []PeerConf // as-written; copied to zd.PrimariesConf on merge
 	Primaries     []PeerConf // resolved; copied to zd.Upstreams on merge
 	Notify        []PeerConf
+	AllowNotify   []AclEntry // copied to zd.AllowNotify on merge
+	Downstreams   []AclEntry // copied to zd.Downstreams on merge
+	// ConfigUpdate marks a config-bearing refresher (from ParseZones /
+	// LoadDynamicZoneFiles) as opposed to a NOTIFY/refresh-only trigger. On reload
+	// it lets the merge assign Notify/AllowNotify/Downstreams even when they are
+	// nil/empty, so a config that REMOVES an ACL actually clears it (empty
+	// downstreams => deny, empty allow-notify => primaries) instead of keeping
+	// stale permissions.
+	ConfigUpdate  bool
 	ZoneStore     ZoneStore // 1=xfr, 2=map, 3=slice
 	Zonefile      string
 	Options       map[ZoneOption]bool
@@ -844,7 +857,7 @@ type KeyBootstrapperRequest struct {
 }
 
 type KeyConf struct {
-	Tsig []TsigDetails
+	Tsig []TsigDetails `yaml:"tsig" mapstructure:"tsig"`
 }
 type TsigDetails struct {
 	Name      string `validate:"required" yaml:"name"`

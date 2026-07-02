@@ -116,6 +116,13 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	if err != nil {
 		return fmt.Errorf("error parsing config %q: %w", conf.Internal.CfgFile, err)
 	}
+	// Build the replication TSIG name->secret store from the keys: block before
+	// zones are parsed, so a primary/notify/ACL key name can be validated against
+	// it. A bad key entry is non-fatal (skipped + logged); zones referencing it
+	// are quarantined at parse.
+	if err := conf.LoadTsigKeys(); err != nil {
+		lgConfig.Error("TSIG keys: config error (affected keys skipped; zones referencing them are quarantined)", "err", err)
+	}
 	switch Globals.App.Type {
 	case AppTypeAuth, AppTypeAgent, AppTypeScanner:
 		kdb := conf.Internal.KeyDB
@@ -257,7 +264,7 @@ func (conf *Config) StartAuth(ctx context.Context, apirouter *mux.Router) error 
 	}
 	kdb := conf.Internal.KeyDB
 	StartEngineNoError(&Globals.App, "RefreshEngine", func() { RefreshEngine(ctx, conf) })
-	StartEngine(&Globals.App, "Notifier", func() error { return Notifier(ctx, conf.Internal.NotifyQ) })
+	StartEngine(&Globals.App, "Notifier", func() error { return Notifier(ctx, conf, conf.Internal.NotifyQ) })
 	StartEngineNoError(&Globals.App, "AuthQueryEngine", func() { AuthQueryEngine(ctx, conf.Internal.AuthQueryQ) })
 	StartEngine(&Globals.App, "ScannerEngine", func() error { return ScannerEngine(ctx, conf) })
 	StartEngine(&Globals.App, "ZoneUpdaterEngine", func() error { return kdb.ZoneUpdaterEngine(ctx) })
@@ -287,7 +294,7 @@ func (conf *Config) StartAgent(ctx context.Context, apirouter *mux.Router) error
 	}
 	kdb := conf.Internal.KeyDB
 	StartEngineNoError(&Globals.App, "RefreshEngine", func() { RefreshEngine(ctx, conf) })
-	StartEngine(&Globals.App, "Notifier", func() error { return Notifier(ctx, conf.Internal.NotifyQ) })
+	StartEngine(&Globals.App, "Notifier", func() error { return Notifier(ctx, conf, conf.Internal.NotifyQ) })
 
 	// MP engines (CHUNK, heartbeats, discovery, SDE, leader election, etc.)
 	// removed — for MP functionality use tdns-mp/v2/start_agent.go.

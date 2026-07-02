@@ -165,14 +165,15 @@ type ZonePost struct {
 	Wait       bool
 	Timeout    string
 	// Dynamic-zones management (add/modify). No Store field — dynamic zones are
-	// map-only. Primaries carries the structured {addr, key} list; key must be NOKEY
-	// until TSIG keys land (Improvement 2). Options are ZoneOption strings.
+	// map-only. Primaries carries the structured {addr, key} list; each key is a
+	// keys.tsig name, an inline TsigName (below), or NOKEY. Options are ZoneOption
+	// strings.
 	Primaries []PeerConf
 	Options   []string
-	// TSIG secret-bearing fields are accepted now but inert in Improvement 1:
-	// a non-NOKEY key is rejected by ProvisionDynamicZone, so these are
-	// carried-on-the-wire-for-later, not silently dropped. Consumed in
-	// Improvement 2. TsigSecret is request-only and never echoed back.
+	// Inline TSIG key for the add/modify: when TsigName is set the server upserts
+	// {name, algo, secret} into its keys: store, points keyless primaries at it,
+	// and persists it with the zone (survives restart). TsigAlgo defaults to
+	// hmac-sha256. TsigSecret is request-only and never echoed back in a response.
 	TsigName   string
 	TsigSecret string
 	TsigAlgo   string

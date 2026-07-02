@@ -255,10 +255,13 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 
 		case "add":
 			msg, err := Conf.ProvisionDynamicZone(r.Context(), DynamicZoneInput{
-				Name:      zp.Zone,
-				Type:      Secondary,
-				Primaries: zp.Primaries,
-				Options:   zoneOptionsFromStrings(zp.Options),
+				Name:       zp.Zone,
+				Type:       Secondary,
+				Primaries:  zp.Primaries,
+				Options:    zoneOptionsFromStrings(zp.Options),
+				TsigName:   zp.TsigName,
+				TsigSecret: zp.TsigSecret,
+				TsigAlgo:   zp.TsigAlgo,
 			}, true)
 			if err != nil {
 				resp.Error = true
@@ -280,10 +283,13 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 
 		case "modify":
 			msg, err := Conf.ModifyDynamicZone(r.Context(), DynamicZoneInput{
-				Name:      zp.Zone,
-				Type:      Secondary,
-				Primaries: zp.Primaries,
-				Options:   zoneOptionsFromStrings(zp.Options),
+				Name:       zp.Zone,
+				Type:       Secondary,
+				Primaries:  zp.Primaries,
+				Options:    zoneOptionsFromStrings(zp.Options),
+				TsigName:   zp.TsigName,
+				TsigSecret: zp.TsigSecret,
+				TsigAlgo:   zp.TsigAlgo,
 			})
 			if err != nil {
 				resp.Error = true

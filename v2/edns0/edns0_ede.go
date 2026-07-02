@@ -64,6 +64,7 @@ const (
 	EDENotifyParentNotAuthoritative   // parent zone not authoritative on this server
 	EDENotifyZoneInErrorState         // target zone in error state
 	EDENotifyUnknownType              // unsupported NOTIFY RRtype
+	EDENotifyNotPermitted             // source not permitted by the zone's allow-notify ACL
 )
 
 var EDECodeToString = map[uint16]string{
@@ -96,6 +97,7 @@ var EDECodeToString = map[uint16]string{
 	EDENotifyParentNotAuthoritative:   "this server is not authoritative for the parent zone",
 	EDENotifyZoneInErrorState:         "target zone is in error state",
 	EDENotifyUnknownType:              "unsupported NOTIFY RRtype",
+	EDENotifyNotPermitted:             "source not permitted by allow-notify ACL",
 }
 
 // AttachEDEToResponse attaches an Extended DNS Error (EDE) option to the DNS response
