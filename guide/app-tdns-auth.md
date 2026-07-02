@@ -125,6 +125,36 @@ In addition, TDNS-AUTH has a couple of extra features:
     fields the policy does not set itself. See the annotated
     sample config and the key-rollover guide.
 
+## TSIG on queries: optional, but strict once used
+
+How TDNS-AUTH treats TSIG (feature 17) on an ordinary query is a deliberate
+**policy** choice, not an RFC-correctness issue — RFC 8945 does not mandate a
+particular behaviour on the QUERY opcode:
+
+- An **unsigned** query is answered normally. TSIG is never *required* to query.
+- A **correctly signed** query is answered, and the response is itself
+  TSIG-signed, so the requester can authenticate the answer.
+- A **wrongly signed** query — bad MAC, unknown key, or a timestamp outside the
+  fudge window — is **rejected** with `NOTAUTH`, an error TSIG carrying
+  `BADSIG` / `BADKEY` / `BADTIME`, and an EDNS Extended DNS Error (EDE) stating
+  the reason.
+
+The asymmetry — an *unsigned* query is accepted but a *wrongly signed* one is
+refused — is intentional. The only parties that hold a TSIG key are secondaries
+and other provisioned partners, and they hold it precisely because they need
+authenticated exchanges. A failed signature from such a peer is a real
+misconfiguration on their side — a wrong secret, a key left stale after a
+rotation, or clock skew — so TDNS-AUTH fails **loud**: the `NOTAUTH` + error-TSIG
++ EDE tells them exactly what is wrong immediately, instead of masking it behind
+a silently unauthenticated answer. An ordinary client, which has no key, simply
+queries unsigned and is unaffected.
+
+Zone transfers (AXFR/IXFR), dynamic UPDATE, and NOTIFY are stricter still, and
+there it is *not* a policy choice: TSIG can be **required** by the
+`allow-notify:` / `downstreams:` ACL, so a missing key is refused (`REFUSED`) and
+a bad signature is rejected (`NOTAUTH` + error TSIG). TSIG there gates access or
+mutation, not merely response authentication.
+
 Comments, questions, pull requests, etc are welcome!
 
 Johan Stenstam
