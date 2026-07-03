@@ -606,7 +606,7 @@ type ZoneRefresher struct {
 	// downstreams => deny, empty allow-notify => primaries) instead of keeping
 	// stale permissions.
 	ConfigUpdate bool
-	ZoneStore    ZoneStore // 1=xfr, 2=map, 3=slice
+	ZoneStore    ZoneStore // 1=xfr, 2=map
 	Zonefile     string
 	Options      map[ZoneOption]bool
 	Edns0Options *edns0.MsgOptions
