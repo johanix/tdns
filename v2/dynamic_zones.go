@@ -222,7 +222,8 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 		}
 
 		// Parse zone store (tolerant: parseZoneStore also accepts the legacy
-		// display tokens MapZone/SliceZone/XfrZone the daemon used to persist).
+		// display tokens MapZone/XfrZone (and the deprecated "slice" alias) the
+		// daemon used to persist).
 		// If the on-disk token isn't already canonical, normalize it in the
 		// parsed config and flag a one-shot re-persist after the load.
 		zoneStore := parseZoneStore(zconf.Store)

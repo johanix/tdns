@@ -7,7 +7,7 @@ import "testing"
 // that shipped — the write side used the display form ("MapZone") which the
 // reader rejected.
 func TestZoneStoreRoundTrip(t *testing.T) {
-	for _, s := range []ZoneStore{MapZone, SliceZone, XfrZone} {
+	for _, s := range []ZoneStore{MapZone, XfrZone} {
 		tok := zoneStoreConfigToken(s)
 		if got := parseZoneStore(tok); got != s {
 			t.Errorf("round-trip failed: %v -> %q -> %v", s, tok, got)
@@ -19,7 +19,7 @@ func TestZoneStoreRoundTrip(t *testing.T) {
 // what parseZoneStore considers canonical (lowercase), or the dirty-detection
 // in LoadDynamicZoneFiles would re-flag and re-persist on every load.
 func TestZoneStoreCanonicalToken(t *testing.T) {
-	want := map[ZoneStore]string{MapZone: "map", SliceZone: "slice", XfrZone: "xfr"}
+	want := map[ZoneStore]string{MapZone: "map", XfrZone: "xfr"}
 	for s, tok := range want {
 		if got := zoneStoreConfigToken(s); got != tok {
 			t.Errorf("zoneStoreConfigToken(%v) = %q, want %q", s, got, tok)
@@ -35,8 +35,8 @@ func TestParseZoneStoreTolerant(t *testing.T) {
 		"map":       MapZone,
 		"MapZone":   MapZone, // legacy display form (the shipped bug)
 		"mapzone":   MapZone,
-		"slice":     SliceZone,
-		"SliceZone": SliceZone,
+		"slice":     MapZone, // deprecated alias
+		"SliceZone": MapZone, // deprecated display form
 		"xfr":       XfrZone,
 		"XfrZone":   XfrZone,
 		"  Map  ":   MapZone, // trimmed + case-insensitive

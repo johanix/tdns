@@ -618,20 +618,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			}
 		}
 
-		zconf.Store = strings.ToLower(zconf.Store)
-		// fmt.Printf("Zone %s uses \"%s\" storage\n", zconf.Name, zconf.Store)
-		var zonestore ZoneStore
-		switch zconf.Store {
-		case "xfr":
-			zonestore = XfrZone
-		case "map":
-			zonestore = MapZone
-		case "slice":
-			zonestore = SliceZone
-		default:
-			lgConfig.Warn("unknown zone store type, using map store", "zone", zname, "store", zconf.Store)
-			zonestore = MapZone
-		}
+		zonestore := parseZoneStore(zconf.Store)
 
 		var zonetype ZoneType
 		// resolvedPrimaries holds the addr:port tuples for a secondary zone's
