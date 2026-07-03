@@ -192,6 +192,7 @@ func (zd *ZoneData) requestPublish(urgent bool)                  // enqueue to t
 
 ## 3. Current state to convert
 ### 3.1 Mutators
+
 | Mutator / path | file:line | writer | note |
 |---|---|---|---|
 | `SignZone`/`ResignZone`/`GenerateNsecChain`/`StripZoneRRSIGs` | sign.go:749/580/918/702 | **ResignerEngine** | whole pass → one publish |

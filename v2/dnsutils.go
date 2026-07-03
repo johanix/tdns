@@ -634,48 +634,40 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	count := 0
 	//	var total_sent int
 
-	switch zd.ZoneStore {
-	case MapZone:
-		// SOA
-		soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
-		zonedata += RRsetToString(&soa)
-		count += len(soa.RRs) + len(soa.RRSIGs)
+	// SOA
+	zonedata += RRsetToString(&soa)
+	count += len(soa.RRs) + len(soa.RRSIGs)
 
-		// Rest of apex
-		for _, rrt := range apex.RRtypes.Keys() {
-			if rrt != dns.TypeSOA {
-				rrset := apex.RRtypes.GetOnlyRRSet(rrt)
-				zonedata += RRsetToString(&rrset)
-				count += len(rrset.RRs) + len(rrset.RRSIGs)
-			}
+	// Rest of apex
+	for _, rrt := range apex.RRtypes.Keys() {
+		if rrt != dns.TypeSOA {
+			rrset := apex.RRtypes.GetOnlyRRSet(rrt)
+			zonedata += RRsetToString(&rrset)
+			count += len(rrset.RRs) + len(rrset.RRSIGs)
 		}
+	}
 
-		// Rest of zone
-		for _, owner := range zd.Data.Keys() {
-			omap, _ := zd.Data.Get(owner)
-			if owner == zd.ZoneName {
-				continue
-			}
-			for _, rrt := range omap.RRtypes.Keys() {
-				rrl := omap.RRtypes.GetOnlyRRSet(rrt)
-				zonedata += RRsetToString(&rrl)
-				count += len(rrl.RRs) + len(rrl.RRSIGs)
+	// Rest of zone
+	for _, owner := range zd.Data.Keys() {
+		omap, _ := zd.Data.Get(owner)
+		if owner == zd.ZoneName {
+			continue
+		}
+		for _, rrt := range omap.RRtypes.Keys() {
+			rrl := omap.RRtypes.GetOnlyRRSet(rrt)
+			zonedata += RRsetToString(&rrl)
+			count += len(rrl.RRs) + len(rrl.RRSIGs)
 
-				if count >= 1000 {
-					bytes, err = writer.WriteString(zonedata)
-					if err != nil {
-						return err
-					}
-					totalbytes += bytes
-					bytes = 0
-					count = 0
+			if count >= 1000 {
+				bytes, err = writer.WriteString(zonedata)
+				if err != nil {
+					return err
 				}
+				totalbytes += bytes
+				bytes = 0
+				count = 0
 			}
 		}
-
-	default:
-		zd.Logger.Printf("Zone %s: zone store %d: no outbound zone transfer. Sorry.",
-			zd.ZoneName, zd.ZoneStore)
 	}
 
 	// 	for _, rr := range zd.RRs {

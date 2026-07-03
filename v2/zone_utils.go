@@ -431,6 +431,9 @@ func (zd *ZoneData) SetOption(option ZoneOption, value bool) {
 }
 
 func (zd *ZoneData) NameExists(qname string) bool {
+	if zd.ZoneStore != MapZone || zd.Data == nil || zd.Data.IsEmpty() {
+		return false
+	}
 	_, ok := zd.Data.Get(qname)
 	lg.Debug("NameExists result", "qname", qname, "exists", ok)
 	return ok

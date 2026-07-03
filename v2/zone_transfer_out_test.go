@@ -28,7 +28,7 @@ func (s *axfrTestServer) recordSize(m *dns.Msg) {
 	}
 }
 
-func startTestAXFRServerTSIG(t *testing.T, zd *ZoneData, conf *Config) *axfrTestServer {
+func startTestAXFRServerCore(t *testing.T, zd *ZoneData, tsigProvider dns.TsigProvider) *axfrTestServer {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -43,17 +43,21 @@ func startTestAXFRServerTSIG(t *testing.T, zd *ZoneData, conf *Config) *axfrTest
 			ResponseWriter: w,
 			record:         srv.recordSize,
 		}
-		handler := TsigSigningHandler(func(w2 dns.ResponseWriter, req *dns.Msg) {
+		serve := func(w2 dns.ResponseWriter, req *dns.Msg) {
 			_, _ = zd.ZoneTransferOut(w2, req)
-		})
-		handler(rec, r)
+		}
+		if tsigProvider != nil {
+			TsigSigningHandler(serve)(rec, r)
+		} else {
+			serve(rec, r)
+		}
 	})
 
 	started := make(chan struct{})
 	dnsSrv := &dns.Server{
 		Listener:          ln,
 		Handler:           mux,
-		TsigProvider:      conf.tsigProvider(),
+		TsigProvider:      tsigProvider,
 		NotifyStartedFunc: func() { close(started) },
 	}
 	go func() { _ = dnsSrv.ActivateAndServe() }()
@@ -72,40 +76,12 @@ func startTestAXFRServerTSIG(t *testing.T, zd *ZoneData, conf *Config) *axfrTest
 
 func startTestAXFRServer(t *testing.T, zd *ZoneData) *axfrTestServer {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
+	return startTestAXFRServerCore(t, zd, nil)
+}
 
-	srv := &axfrTestServer{addr: ln.Addr().String()}
-	zone := dns.Fqdn(zd.ZoneName)
-	mux := dns.NewServeMux()
-	mux.HandleFunc(zone, func(w dns.ResponseWriter, r *dns.Msg) {
-		rec := &recordingResponseWriter{
-			ResponseWriter: w,
-			record:         srv.recordSize,
-		}
-		_, _ = zd.ZoneTransferOut(rec, r)
-	})
-
-	started := make(chan struct{})
-	dnsSrv := &dns.Server{
-		Listener:          ln,
-		Handler:           mux,
-		NotifyStartedFunc: func() { close(started) },
-	}
-	go func() { _ = dnsSrv.ActivateAndServe() }()
-	select {
-	case <-started:
-	case <-time.After(2 * time.Second):
-		t.Fatal("test AXFR server did not start")
-	}
-	srv.shutdown = func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = dnsSrv.ShutdownContext(ctx)
-	}
-	return srv
+func startTestAXFRServerTSIG(t *testing.T, zd *ZoneData, conf *Config) *axfrTestServer {
+	t.Helper()
+	return startTestAXFRServerCore(t, zd, conf.tsigProvider())
 }
 
 type recordingResponseWriter struct {
