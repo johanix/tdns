@@ -234,8 +234,6 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 
 	// Hard flip: update served zone data atomically.
 	zd.mu.Lock()
-	zd.Owners = new_zd.Owners
-	zd.OwnerIndex = new_zd.OwnerIndex
 	zd.IncomingSerial = new_zd.IncomingSerial
 	if zd.FirstZoneLoad {
 		zd.CurrentSerial = new_zd.CurrentSerial
@@ -338,8 +336,6 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 
 	// Hard flip: update served zone data atomically.
 	zd.mu.Lock()
-	zd.Owners = new_zd.Owners
-	zd.OwnerIndex = new_zd.OwnerIndex
 	zd.IncomingSerial = new_zd.IncomingSerial
 	if zd.FirstZoneLoad {
 		zd.CurrentSerial = new_zd.CurrentSerial
@@ -435,76 +431,31 @@ func (zd *ZoneData) SetOption(option ZoneOption, value bool) {
 }
 
 func (zd *ZoneData) NameExists(qname string) bool {
-	var ok bool
-	switch zd.ZoneStore {
-	case SliceZone:
-		_, ok = zd.OwnerIndex.Get(qname)
-
-	case MapZone:
-		_, ok = zd.Data.Get(qname)
-
-	default:
-		lg.Error("NameExists: unexpected zone storage type", "zoneStore", ZoneStoreToString[zd.ZoneStore])
-		return false
-	}
-
+	_, ok := zd.Data.Get(qname)
 	lg.Debug("NameExists result", "qname", qname, "exists", ok)
 	return ok
 }
-
-// XXX: FIXME: SliceZones do not yet have support for adding new owner names.
 
 func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 	if !zd.Ready {
 		return nil, fmt.Errorf("getOwner: zone %s: %w", zd.ZoneName, ErrZoneNotReady)
 	}
-	var owner OwnerData
-	var ok bool
-	switch zd.ZoneStore {
-	case SliceZone:
-		if len(zd.Owners) == 0 {
-			return nil, nil
-		}
-		idx, _ := zd.OwnerIndex.Get(qname)
-		owner = zd.Owners[idx]
-
-	case MapZone:
-		if zd.Data.IsEmpty() {
-			return nil, nil
-		}
-		if owner, ok = zd.Data.Get(qname); !ok {
-			owner = OwnerData{
-				Name:    qname,
-				RRtypes: NewRRTypeStore(),
-			}
-			// XXX: Hmm. This seems wrong. We create an ownername where there wasn't one
-			//      based on a request for it?
-			// zd.Data.Set(qname, owner)
-			return nil, nil // Seems better
-		}
-		return &owner, nil
-
-	default:
-		lg.Error("GetOwner: zone storage not supported", "zoneStore", zd.ZoneStore)
-		return &owner, fmt.Errorf("getOwner: only supported for SliceZone and MapZone, not %s",
+	if zd.ZoneStore != MapZone {
+		return nil, fmt.Errorf("getOwner: only supported for MapZone, not %s",
 			ZoneStoreToString[zd.ZoneStore])
 	}
-	// dump.P(owner)
-	return &owner, nil
+	if zd.Data.IsEmpty() {
+		return nil, nil
+	}
+	if owner, ok := zd.Data.Get(qname); ok {
+		return &owner, nil
+	}
+	return nil, nil
 }
 
 // XXX: This MUST ONLY be called from the ZoneUpdater, due to locking issues
 func (zd *ZoneData) AddOwner(owner *OwnerData) {
-	//	zd.mu.Lock()
-	switch zd.ZoneStore {
-	case SliceZone:
-		zd.Owners = append(zd.Owners, *owner)
-		zd.OwnerIndex.Set(owner.Name, len(zd.Owners)-1)
-
-	case MapZone:
-		zd.Data.Set(owner.Name, *owner)
-	}
-	// zd.mu.Unlock()
+	zd.Data.Set(owner.Name, *owner)
 }
 
 func (zd *ZoneData) GetRRset(qname string, rrtype uint16) (*core.RRset, error) {
@@ -531,26 +482,14 @@ func (zd *ZoneData) GetRRset(qname string, rrtype uint16) (*core.RRset, error) {
 }
 
 func (zd *ZoneData) GetOwnerNames() ([]string, error) {
-	var names []string
-	switch zd.ZoneStore {
-	case SliceZone:
-		if len(zd.Owners) == 0 {
-			return names, nil
-		}
-		names = zd.OwnerIndex.Keys()
-
-	case MapZone:
-		if zd.Data.IsEmpty() {
-			return names, nil
-		}
-		names = zd.Data.Keys()
-
-	default:
-		lg.Error("GetOwnerNames: zone storage not supported", "zoneStore", zd.ZoneStore)
-		return names, fmt.Errorf("getOwnerNames: only supported for SliceZone and MapZone, not %s",
+	if zd.ZoneStore != MapZone {
+		return nil, fmt.Errorf("getOwnerNames: only supported for MapZone, not %s",
 			ZoneStoreToString[zd.ZoneStore])
 	}
-	return names, nil
+	if zd.Data.IsEmpty() {
+		return nil, nil
+	}
+	return zd.Data.Keys(), nil
 }
 
 // XXX: Is qname the name of a zone cut for a child zone?
@@ -606,26 +545,8 @@ func (zd *ZoneData) GetSOA() (*dns.SOA, error) {
 }
 
 func (zd *ZoneData) PrintOwners() {
-	switch zd.ZoneStore {
-	case SliceZone:
-		fmt.Printf("owner name\tindex\n")
-		for i, v := range zd.Owners {
-			rrtypes := []string{}
-			for _, t := range v.RRtypes.Keys() {
-				rrtypes = append(rrtypes, dns.TypeToString[t])
-			}
-			fmt.Printf("%d\t%s\t%s\n", i, v.Name, strings.Join(rrtypes, ", "))
-		}
-		for _, k := range zd.OwnerIndex.Keys() {
-			v, _ := zd.OwnerIndex.Get(k)
-			fmt.Printf("%s\t%d\n", k, v)
-		}
-	case MapZone:
-		for _, key := range zd.Data.Keys() {
-			fmt.Printf("%s\n", key)
-		}
-	default:
-		lg.Debug("PrintOwners: unsupported zone storage type", "zoneStore", ZoneStoreToString[zd.ZoneStore])
+	for _, key := range zd.Data.Keys() {
+		fmt.Printf("%s\n", key)
 	}
 }
 

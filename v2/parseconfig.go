@@ -627,7 +627,8 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		case "map":
 			zonestore = MapZone
 		case "slice":
-			zonestore = SliceZone
+			lgConfig.Warn("zone store type slice is deprecated, using map", "zone", zname)
+			zonestore = MapZone
 		default:
 			lgConfig.Warn("unknown zone store type, using map store", "zone", zname, "store", zconf.Store)
 			zonestore = MapZone

@@ -503,7 +503,8 @@ func parseZoneStore(storeStr string) ZoneStore {
 	case "map", "mapzone":
 		return MapZone
 	case "slice", "slicezone":
-		return SliceZone
+		lg.Warn("zone store type slice is deprecated, using map", "store", storeStr)
+		return MapZone
 	case "":
 		// Default to map when not specified
 		return MapZone

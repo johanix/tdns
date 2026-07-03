@@ -21,13 +21,11 @@ type ZoneStore uint8
 const (
 	XfrZone ZoneStore = iota + 1
 	MapZone
-	SliceZone
 )
 
 var ZoneStoreToString = map[ZoneStore]string{
-	XfrZone:   "XfrZone",
-	MapZone:   "MapZone",
-	SliceZone: "SliceZone",
+	XfrZone: "XfrZone",
+	MapZone: "MapZone",
 }
 
 // zoneStoreToConfigToken maps a ZoneStore to its CANONICAL config-file token
@@ -36,9 +34,8 @@ var ZoneStoreToString = map[ZoneStore]string{
 // used in API responses and logs. Persisting config must use the token, not the
 // display string, or the daemon writes a value its own reader rejects.
 var zoneStoreToConfigToken = map[ZoneStore]string{
-	XfrZone:   "xfr",
-	MapZone:   "map",
-	SliceZone: "slice",
+	XfrZone: "xfr",
+	MapZone: "map",
 }
 
 // zoneStoreConfigToken returns the canonical config token for s, defaulting to
@@ -114,10 +111,8 @@ type ZoneData struct {
 	// resurrection race where a mid-flight refresh re-writes a deleted zone.
 	generation atomic.Uint64
 	ZoneName   string
-	ZoneStore  ZoneStore // 1 = "xfr", 2 = "map", 3 = "slice". An xfr zone only supports xfr related ops
+	ZoneStore  ZoneStore // 1 = "xfr", 2 = "map". An xfr zone only supports xfr related ops
 	ZoneType   ZoneType
-	Owners     Owners
-	OwnerIndex *core.ConcurrentMap[string, int]
 	ApexLen    int
 	//	RRs            RRArray
 	Data *core.ConcurrentMap[string, OwnerData]
@@ -513,8 +508,6 @@ type Ixfr struct {
 	Added      []core.RRset
 }
 
-type Owners []OwnerData
-
 type OwnerData struct {
 	Name    string
 	RRtypes *RRTypeStore
@@ -612,17 +605,17 @@ type ZoneRefresher struct {
 	// nil/empty, so a config that REMOVES an ACL actually clears it (empty
 	// downstreams => deny, empty allow-notify => primaries) instead of keeping
 	// stale permissions.
-	ConfigUpdate  bool
-	ZoneStore     ZoneStore // 1=xfr, 2=map, 3=slice
-	Zonefile      string
-	Options       map[ZoneOption]bool
-	Edns0Options  *edns0.MsgOptions
-	UpdatePolicy  UpdatePolicy
-	DnssecPolicy  string
-	MultiSigner   string
-	Force         bool // force refresh, ignoring SOA serial
-	Wait          bool // wait for refresh to complete before responding
-	Response      chan RefresherResponse
+	ConfigUpdate bool
+	ZoneStore    ZoneStore // 1=xfr, 2=map, 3=slice
+	Zonefile     string
+	Options      map[ZoneOption]bool
+	Edns0Options *edns0.MsgOptions
+	UpdatePolicy UpdatePolicy
+	DnssecPolicy string
+	MultiSigner  string
+	Force        bool // force refresh, ignoring SOA serial
+	Wait         bool // wait for refresh to complete before responding
+	Response     chan RefresherResponse
 }
 
 type RefresherResponse struct {
