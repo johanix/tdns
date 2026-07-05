@@ -238,10 +238,18 @@ downstream:** the returned error flows into the existing broken-policy path
 `DnssecPolicy.Error` docstring already enumerates "disallowed KSK/ZSK split" as a
 rejection reason and states a broken policy is kept-but-unusable and its zones
 quarantined — so ForKSK/ForZSK is simply one more reason feeding that same
-mechanism. There is also a second parse site in `ParseDnssecPolicyConf` (the
-non-`Impl` wrapper, `v2/ksk_rollover_policy.go:~677`) that mirrors the same
-`validateSplitAlgorithm` call — add the role check there too, or refactor both to
-share one helper.
+mechanism.
+
+**IMPLEMENTED (PR-A):** `validateSplitAlgorithm` has **three** production call
+sites, not two — the role check was added beside every one:
+`v2/ksk_rollover_policy.go:610` (`parseDnssecPolicyConfImpl`), `:680` (the
+non-`Impl` loop), and `v2/parseconfig.go:1476` (the live `parseDnssecConfig`
+path, which uses `markBroken(err)` to set `Error`). The third site is the one the
+running daemon actually takes; it was missed in the original two-site estimate and
+found only because the enforcement test initially passed for the wrong reason (a
+split-check rejection masking the absent role check). Lesson recorded: any future
+per-policy validation must cover all three sites (or they should be refactored to
+one shared helper).
 
 **No family field.** Cryptographic family (lattice/code-based/multivariate/…)
 is analysis-doc material — it lives in

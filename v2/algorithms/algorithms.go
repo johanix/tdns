@@ -42,8 +42,21 @@ type Capabilities struct {
 	ForSIG0 bool
 
 	// ForDNSSEC means the algorithm is accepted for DNSSEC zone
-	// signing — DNSKEY rdata, RRSIG over RRsets.
+	// signing — DNSKEY rdata, RRSIG over RRsets. It is the umbrella
+	// capability; ForKSK and ForZSK refine which zone-signing role(s)
+	// the algorithm may fill.
 	ForDNSSEC bool
+
+	// ForKSK means the algorithm may be used as a Key Signing Key;
+	// ForZSK means it may be used as a Zone Signing Key. They refine
+	// ForDNSSEC: an algorithm whose signature is small enough to sit on
+	// every RRSIG is ForZSK; one whose signature is only tolerable in
+	// the (occasional, TCP/DoT) DNSKEY response — e.g. a code-based
+	// signature of several KiB — is ForKSK but not ForZSK. Both are
+	// meaningless unless ForDNSSEC is set. A classical algorithm is
+	// typically {ForDNSSEC, ForKSK, ForZSK} all true.
+	ForKSK bool
+	ForZSK bool
 }
 
 type entry struct {
@@ -88,10 +101,36 @@ func RegisterMetadata(num uint8, name string, caps Capabilities) {
 func record(num uint8, name string, caps Capabilities, real bool) {
 	mu.Lock()
 	defer mu.Unlock()
+
 	if existing, ok := byNumber[num]; ok {
-		panic(fmt.Sprintf("algorithms: codepoint %d already registered (was %s)",
-			num, existing.name))
+		// The codepoint is already known. The one legitimate case is
+		// promotion: a metadata-only entry (RegisterMetadata) being
+		// upgraded to a real one when the implementation is later wired
+		// in via Register — the common shape once every app carries the
+		// full metadata table and additionally links some impls. The
+		// name and capabilities must agree; a disagreement is a genuine
+		// bug, and two real registrations of one codepoint always are.
+		if existing.name != name {
+			panic(fmt.Sprintf("algorithms: codepoint %d already registered as %q, cannot re-register as %q",
+				num, existing.name, name))
+		}
+		if existing.real && real {
+			panic(fmt.Sprintf("algorithms: codepoint %d (%s) already has a real implementation registered",
+				num, name))
+		}
+		if existing.caps != caps {
+			panic(fmt.Sprintf("algorithms: codepoint %d (%s) capability mismatch between metadata and implementation registration",
+				num, name))
+		}
+		// Promote metadata → real (or a redundant metadata-only repeat,
+		// which is a harmless no-op). byName is already correct.
+		if real && !existing.real {
+			existing.real = true
+			byNumber[num] = existing
+		}
+		return
 	}
+
 	if existing, ok := byName[name]; ok {
 		panic(fmt.Sprintf("algorithms: name %q already registered (was %d)",
 			name, existing))
@@ -148,6 +187,18 @@ func SupportedDNSSEC() []string {
 	return supportedWhere(func(c Capabilities) bool { return c.ForDNSSEC })
 }
 
+// SupportedKSK returns the names of all registered algorithms usable
+// as a Key Signing Key, sorted by codepoint.
+func SupportedKSK() []string {
+	return supportedWhere(func(c Capabilities) bool { return c.ForKSK })
+}
+
+// SupportedZSK returns the names of all registered algorithms usable
+// as a Zone Signing Key, sorted by codepoint.
+func SupportedZSK() []string {
+	return supportedWhere(func(c Capabilities) bool { return c.ForZSK })
+}
+
 func supportedWhere(pred func(Capabilities) bool) []string {
 	mu.RLock()
 	defer mu.RUnlock()
@@ -176,6 +227,8 @@ type AlgorithmInfo struct {
 	Name      string `json:"name"`
 	ForSIG0   bool   `json:"forsig0"`
 	ForDNSSEC bool   `json:"fordnssec"`
+	ForKSK    bool   `json:"forksk"`
+	ForZSK    bool   `json:"forzsk"`
 }
 
 // All returns every genuinely-usable (real) algorithm, sorted by
@@ -195,6 +248,8 @@ func All() []AlgorithmInfo {
 			Name:      e.name,
 			ForSIG0:   e.caps.ForSIG0,
 			ForDNSSEC: e.caps.ForDNSSEC,
+			ForKSK:    e.caps.ForKSK,
+			ForZSK:    e.caps.ForZSK,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -213,11 +268,13 @@ func init() {
 		name string
 		caps Capabilities
 	}{
-		{dns.RSASHA256, "RSASHA256", Capabilities{ForSIG0: true, ForDNSSEC: true}},
-		{dns.RSASHA512, "RSASHA512", Capabilities{ForSIG0: true, ForDNSSEC: true}},
-		{dns.ECDSAP256SHA256, "ECDSAP256SHA256", Capabilities{ForSIG0: true, ForDNSSEC: true}},
-		{dns.ECDSAP384SHA384, "ECDSAP384SHA384", Capabilities{ForSIG0: true, ForDNSSEC: true}},
-		{dns.ED25519, "ED25519", Capabilities{ForSIG0: true, ForDNSSEC: true}},
+		// Classical algorithms have small signatures and are usable in
+		// either DNSSEC role, so ForKSK and ForZSK are both set.
+		{dns.RSASHA256, "RSASHA256", Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: true}},
+		{dns.RSASHA512, "RSASHA512", Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: true}},
+		{dns.ECDSAP256SHA256, "ECDSAP256SHA256", Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: true}},
+		{dns.ECDSAP384SHA384, "ECDSAP384SHA384", Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: true}},
+		{dns.ED25519, "ED25519", Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: true}},
 	} {
 		// Built-ins are genuinely usable (miekg/dns handles them via
 		// its per-algorithm switch arms), so they are real.

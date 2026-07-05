@@ -1477,6 +1477,10 @@ func (conf *Config) parseDnssecConfig() error {
 			markBroken(err.Error())
 			continue
 		}
+		if err := validateRoleCapabilities(name, kskAlg, zskAlg); err != nil {
+			markBroken(err.Error())
+			continue
+		}
 		kskLT, err := GenKeyLifetime(dpLocal.KSK.Lifetime)
 		if err != nil {
 			markBroken(fmt.Sprintf("ksk.lifetime: %v", err))

@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/miekg/dns"
+
+	algorithms "github.com/johanix/tdns/v2/algorithms"
 )
 
 // LargeAlgDSMetrics returns the total number of individual large-alg DS RRs
@@ -115,6 +117,35 @@ func validateSplitAlgorithm(policyName string, kskAlg, zskAlg uint8, allowed map
 		return nil
 	}
 	return fmt.Errorf("policy %q: KSK algorithm %s may not pair with ZSK algorithm %s; not listed in dnssec.split_algorithms", policyName, kskName, zskName)
+}
+
+// validateRoleCapabilities rejects a policy that assigns an algorithm to
+// a DNSSEC role it is not permitted to fill: the KSK algorithm must have
+// ForKSK, the ZSK algorithm must have ForZSK. This blocks, for example, a
+// large-signature code-based algorithm (ForKSK, not ForZSK) from being
+// used as a zone-signing key, where its signature would bloat every RRSIG.
+// A rejected policy is kept but marked unusable via DnssecPolicy.Error,
+// like the other parse-time policy validations.
+func validateRoleCapabilities(policyName string, kskAlg, zskAlg uint8) error {
+	kskCaps, ok := algorithms.Caps(kskAlg)
+	if !ok {
+		return fmt.Errorf("policy %q: KSK algorithm %s (%d) is not a registered algorithm",
+			policyName, dns.AlgorithmToString[kskAlg], kskAlg)
+	}
+	if !kskCaps.ForKSK {
+		return fmt.Errorf("policy %q: algorithm %s (%d) is not permitted as a KSK",
+			policyName, dns.AlgorithmToString[kskAlg], kskAlg)
+	}
+	zskCaps, ok := algorithms.Caps(zskAlg)
+	if !ok {
+		return fmt.Errorf("policy %q: ZSK algorithm %s (%d) is not a registered algorithm",
+			policyName, dns.AlgorithmToString[zskAlg], zskAlg)
+	}
+	if !zskCaps.ForZSK {
+		return fmt.Errorf("policy %q: algorithm %s (%d) is not permitted as a ZSK",
+			policyName, dns.AlgorithmToString[zskAlg], zskAlg)
+	}
+	return nil
 }
 
 // resolvePolicyRoleAlgorithms parses the top-level and per-role algorithm fields.
