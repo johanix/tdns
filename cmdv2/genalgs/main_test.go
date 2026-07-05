@@ -6,103 +6,189 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/johanix/dnssec-algorithms/registry"
 )
 
-func mustName(t *testing.T, name string) registry.Alg {
-	t.Helper()
-	for _, a := range registry.Algorithms {
-		if a.Name == name {
-			return a
-		}
-	}
-	t.Fatalf("registry has no algorithm %q", name)
-	return registry.Alg{}
+// A registry.go fixture exercising every idiom parseRegistry must
+// resolve: named Caps shorthands, the base+concat package form, inline
+// Caps, and the Group constants.
+const registryFixture = `package registry
+
+type Group string
+
+const (
+	PureGo Group = "purego"
+	Liboqs Group = "liboqs"
+)
+
+type Caps struct{ ForSIG0, ForDNSSEC, ForKSK, ForZSK bool }
+
+type Alg struct {
+	Codepoint uint8
+	Name      string
+	Caps      Caps
+	Package   string
+	Group     Group
 }
 
-// TestGenMetadataIsValidGo ensures the generated metadata file for the
-// full registry is syntactically valid, gofmt-clean Go, contains a
-// RegisterMetadata line for every algorithm, and encodes role caps.
-func TestGenMetadataIsValidGo(t *testing.T) {
-	src := genMetadata("main", registry.Algorithms)
+var dnssec = Caps{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: true}
+var kskOnly = Caps{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: false}
 
+const base = "github.com/johanix/dnssec-algorithms/"
+
+var Algorithms = []Alg{
+	{199, "MLDSA44", dnssec, base + "mldsa44", PureGo},
+	{200, "SLHDSA128S", kskOnly, base + "slhdsa128s", PureGo},
+	{201, "FALCON512", dnssec, base + "falcon512", Liboqs},
+	{214, "CROSSX", Caps{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: false}, base + "crossx", Liboqs},
+}
+`
+
+func writeFixture(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	reg := filepath.Join(dir, "registry")
+	if err := os.MkdirAll(reg, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(reg, "registry.go"), []byte(registryFixture), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestParseRegistry(t *testing.T) {
+	algrepo := writeFixture(t)
+	algs, err := parseRegistry(filepath.Join(algrepo, "registry", "registry.go"))
+	if err != nil {
+		t.Fatalf("parseRegistry: %v", err)
+	}
+	if len(algs) != 4 {
+		t.Fatalf("got %d algs, want 4", len(algs))
+	}
+
+	byName := map[string]Alg{}
+	for _, a := range algs {
+		byName[a.Name] = a
+	}
+
+	// Named shorthand resolved.
+	if got := byName["MLDSA44"]; got.Codepoint != 199 || !got.Caps.ForZSK || got.Package != "github.com/johanix/dnssec-algorithms/mldsa44" || got.Group != "purego" {
+		t.Errorf("MLDSA44 parsed wrong: %+v", got)
+	}
+	// kskOnly shorthand → ForZSK false.
+	if byName["SLHDSA128S"].Caps.ForZSK {
+		t.Error("SLHDSA128S should have ForZSK=false")
+	}
+	// Group constant string value.
+	if byName["FALCON512"].Group != "liboqs" {
+		t.Errorf("FALCON512 group = %q, want liboqs", byName["FALCON512"].Group)
+	}
+	// Inline Caps literal resolved.
+	if crossx := byName["CROSSX"]; !crossx.Caps.ForKSK || crossx.Caps.ForZSK {
+		t.Errorf("CROSSX inline caps parsed wrong: %+v", crossx.Caps)
+	}
+}
+
+func TestGenMetadataIsValidGo(t *testing.T) {
+	algrepo := writeFixture(t)
+	all, err := parseRegistry(filepath.Join(algrepo, "registry", "registry.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := genMetadata("main", all)
 	if _, err := format.Source(src); err != nil {
-		t.Fatalf("generated metadata is not valid Go: %v\n%s", err, src)
+		t.Fatalf("generated metadata not valid Go: %v\n%s", err, src)
 	}
 	s := string(src)
-	for _, a := range registry.Algorithms {
-		if !strings.Contains(s, `RegisterMetadata(`) || !strings.Contains(s, a.Name) {
-			t.Errorf("metadata missing entry for %q", a.Name)
-		}
-	}
-	// Spot-check a KSK-only algorithm carries ForZSK: false.
-	cross := mustName(t, "CROSSRSDPG128SMALL")
-	if !cross.Caps.ForKSK || cross.Caps.ForZSK {
-		t.Fatalf("registry sanity: CROSS should be ForKSK && !ForZSK, got %+v", cross.Caps)
+	if strings.Count(s, "RegisterMetadata(") != 4 {
+		t.Errorf("expected 4 RegisterMetadata lines, got %d", strings.Count(s, "RegisterMetadata("))
 	}
 	if !strings.Contains(s, "ForKSK: true, ForZSK: false") {
-		t.Error("generated metadata does not encode a ForKSK:true/ForZSK:false algorithm")
+		t.Error("metadata does not encode a KSK-only algorithm")
 	}
 }
 
-// TestGenImplBuildTags checks that non-purego groups get a build tag and
-// purego does not, and that impl files import the adapter packages.
-func TestGenImplBuildTags(t *testing.T) {
-	liboqs := genImpl("main", registry.Liboqs, []registry.Alg{mustName(t, "FALCON512")})
-	if !strings.Contains(string(liboqs), "//go:build liboqs") {
-		t.Error("liboqs impl missing build tag")
+func TestGenRegisteredNoBuildTags(t *testing.T) {
+	algrepo := writeFixture(t)
+	all, err := parseRegistry(filepath.Join(algrepo, "registry", "registry.go"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(string(liboqs), `"github.com/johanix/dnssec-algorithms/falcon512"`) {
-		t.Error("liboqs impl missing adapter import")
+	src := genRegistered("main", all)
+	if _, err := format.Source(src); err != nil {
+		t.Fatalf("generated registered_algs not valid Go: %v\n%s", err, src)
 	}
-	if !strings.Contains(string(liboqs), "falcon512.New()") {
-		t.Error("liboqs impl missing constructor call")
+	s := string(src)
+	if strings.Contains(s, "//go:build") {
+		t.Error("registered_algs.go must NOT contain build tags")
 	}
-
-	purego := genImpl("main", registry.PureGo, []registry.Alg{mustName(t, "MLDSA44")})
-	if strings.Contains(string(purego), "//go:build") {
-		t.Error("purego impl should have NO build tag")
-	}
-	if _, err := format.Source(purego); err != nil {
-		t.Fatalf("purego impl not valid Go: %v", err)
+	if !strings.Contains(s, "mldsa44.New()") || !strings.Contains(s, "falcon512.New()") {
+		t.Error("registered_algs.go missing expected constructor calls")
 	}
 }
 
-// TestReadListUnknownNameFails ensures a typo'd algorithm name is a hard
-// error, not a silent drop.
-func TestReadListUnknownNameFails(t *testing.T) {
-	byName := map[string]registry.Alg{}
-	for _, a := range registry.Algorithms {
+func TestReadListErrors(t *testing.T) {
+	algrepo := writeFixture(t)
+	all, err := parseRegistry(filepath.Join(algrepo, "registry", "registry.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]Alg{}
+	for _, a := range all {
 		byName[a.Name] = a
 	}
 
 	dir := t.TempDir()
 	good := filepath.Join(dir, "good.list")
-	if err := os.WriteFile(good, []byte("MLDSA44\n# comment\n\nFALCON512\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	algs, err := readList(good, byName)
-	if err != nil {
-		t.Fatalf("good list: %v", err)
-	}
-	if len(algs) != 2 {
-		t.Fatalf("good list: got %d algs, want 2", len(algs))
+	os.WriteFile(good, []byte("MLDSA44\n# comment\n\nFALCON512\n"), 0o644)
+	sel, err := readList(good, byName)
+	if err != nil || len(sel) != 2 {
+		t.Fatalf("good list: sel=%d err=%v", len(sel), err)
 	}
 
 	bad := filepath.Join(dir, "bad.list")
-	if err := os.WriteFile(bad, []byte("MLDSA44\nNOSUCHALG\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	os.WriteFile(bad, []byte("NOSUCH\n"), 0o644)
 	if _, err := readList(bad, byName); err == nil {
-		t.Error("expected error for unknown algorithm name, got nil")
+		t.Error("expected error for unknown alg")
 	}
 
 	dup := filepath.Join(dir, "dup.list")
-	if err := os.WriteFile(dup, []byte("MLDSA44\nMLDSA44\n"), 0o644); err != nil {
+	os.WriteFile(dup, []byte("MLDSA44\nMLDSA44\n"), 0o644)
+	if _, err := readList(dup, byName); err == nil {
+		t.Error("expected error for duplicate alg")
+	}
+}
+
+// TestDetectLibFailure verifies that a library whose -env.sh exits
+// non-zero is reported as unavailable (a stub script that fails).
+func TestDetectLibFailure(t *testing.T) {
+	algrepo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(algrepo, "liboqs"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := readList(dup, byName); err == nil {
-		t.Error("expected error for duplicate algorithm name, got nil")
+	script := filepath.Join(algrepo, "liboqs", "liboqs-env.sh")
+	os.WriteFile(script, []byte("#!/bin/bash\necho 'not found' >&2\nexit 1\n"), 0o755)
+
+	if _, err := detectLib(algrepo, "liboqs"); err == nil {
+		t.Error("detectLib should fail when the env script exits non-zero")
+	}
+}
+
+// TestDetectLibSuccess verifies parsing of a successful env script's
+// exported variables.
+func TestDetectLibSuccess(t *testing.T) {
+	algrepo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(algrepo, "liboqs"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(algrepo, "liboqs", "liboqs-env.sh")
+	os.WriteFile(script, []byte("#!/bin/bash\necho 'export PKG_CONFIG_PATH=\"/x/pc\"'\necho 'export CGO_LDFLAGS=\"-lcrypto\"'\n"), 0o755)
+
+	env, err := detectLib(algrepo, "liboqs")
+	if err != nil {
+		t.Fatalf("detectLib: %v", err)
+	}
+	if env.vars["PKG_CONFIG_PATH"] != "/x/pc" || env.vars["CGO_LDFLAGS"] != "-lcrypto" {
+		t.Errorf("parsed env wrong: %+v", env.vars)
 	}
 }
