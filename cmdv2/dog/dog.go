@@ -69,6 +69,7 @@ var rootCmd = &cobra.Command{
 		+MULTI: Present RRs in multi-line format
 		+SHORT: Only print the RDATA of the Answer RRset (dig-compatible; same as --short)
 		+SIGCHASE or +SC: Walk and verify the DNSSEC chain for the qname/qtype, emitting a per-link verdict tree. Server must be a recursive resolver. Trust anchors come from --trust-anchor, the IMR config, or the compiled-in root KSKs.
+		+ALGCHASE or +AC: Like +SIGCHASE, but also annotate each algorithm number in the chain with its algorithm name (e.g. "alg=13 (ECDSAP256SHA256)"). Implies +SIGCHASE.
 	`,
 
 	Run: func(cmd *cobra.Command, args []string) {
@@ -244,7 +245,7 @@ var rootCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "Error: chase failed: %v\n", err)
 					os.Exit(1)
 				}
-				tdns.RenderChain(result, os.Stdout)
+				tdns.RenderChain(result, os.Stdout, options["algchase"] == "true")
 				continue
 			}
 
@@ -554,6 +555,14 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 		// RRset signature) link and the final leaf RRSIG against the
 		// deepest zone's keys.
 		options["sigchase"] = "true"
+		return options, nil
+	case "+ALGCHASE", "+ALGCHA", "+AC":
+		// Annotate each algorithm number in the +sigchase chain output
+		// with its algorithm name (from the in-process registry), e.g.
+		// "alg=214 (CROSSRSDPG128SMALL)". Meaningless on its own — it
+		// enriches what +sigchase already walks — so it implies +sigchase.
+		options["sigchase"] = "true"
+		options["algchase"] = "true"
 		return options, nil
 	case "+TCP":
 		// A pre-existing "Do53" is the default ParseServer writes when

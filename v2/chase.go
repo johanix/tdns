@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	algorithms "github.com/johanix/tdns/v2/algorithms"
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -420,9 +421,27 @@ func worstStatus(a, b ChainStatus) ChainStatus {
 	return b
 }
 
-// RenderChain formats a ChainResult as a human-readable tree on w.
+// algField formats an algorithm number for chain display. When
+// algNames is set (dog +algchase), it appends the algorithm's registered
+// name, e.g. "alg=214 (CROSSRSDPG128SMALL)" — or "alg=250 (unknown)" for
+// a codepoint this binary has no metadata for. Otherwise it is the bare
+// "alg=N".
+func algField(alg uint8, algNames bool) string {
+	if !algNames {
+		return fmt.Sprintf("alg=%d", alg)
+	}
+	name, ok := algorithms.AlgorithmName(alg)
+	if !ok {
+		name = "unknown"
+	}
+	return fmt.Sprintf("alg=%d (%s)", alg, name)
+}
+
+// RenderChain formats a ChainResult as a human-readable tree on w. When
+// algNames is set (dog +algchase), algorithm numbers in the DS and
+// DNSKEY summaries are annotated with their registered names.
 // Used by `dog sigchase` and (soon) by `imr explain`.
-func RenderChain(result *ChainResult, w io.Writer) {
+func RenderChain(result *ChainResult, w io.Writer, algNames bool) {
 	if result == nil {
 		fmt.Fprintln(w, "chain: nil result")
 		return
@@ -439,7 +458,7 @@ func RenderChain(result *ChainResult, w io.Writer) {
 		if len(link.DS) > 0 {
 			tags := make([]string, 0, len(link.DS))
 			for _, ds := range link.DS {
-				tags = append(tags, fmt.Sprintf("keytag=%d alg=%d digest_type=%d", ds.KeyTag, ds.Algorithm, ds.DigestType))
+				tags = append(tags, fmt.Sprintf("keytag=%d %s digest_type=%d", ds.KeyTag, algField(ds.Algorithm, algNames), ds.DigestType))
 			}
 			sort.Strings(tags)
 			fmt.Fprintf(w, "%s   DS at parent:   %s\n", indent, strings.Join(tags, ", "))
@@ -451,7 +470,7 @@ func RenderChain(result *ChainResult, w io.Writer) {
 				if k.Flags&257 == 257 {
 					role = "KSK"
 				}
-				tags = append(tags, fmt.Sprintf("%s keytag=%d alg=%d", role, k.KeyTag(), k.Algorithm))
+				tags = append(tags, fmt.Sprintf("%s keytag=%d %s", role, k.KeyTag(), algField(k.Algorithm, algNames)))
 			}
 			sort.Strings(tags)
 			fmt.Fprintf(w, "%s   DNSKEY:         %s\n", indent, strings.Join(tags, ", "))
