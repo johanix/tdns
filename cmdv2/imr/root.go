@@ -22,6 +22,7 @@ var cfgFile, cfgFileUsed string
 var LocalConfig string
 
 var cliflag bool
+var showVersion bool
 var appCtx context.Context
 var appCancel context.CancelFunc
 
@@ -31,6 +32,9 @@ var rootCmd = &cobra.Command{
 	Long:  `A DNS lookup tool with both command-line and interactive interfaces`,
 	Args:  cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
+		if showVersion {
+			tdns.PrintVersionAndExit()
+		}
 		if cliflag {
 			cli.StartInteractiveMode() // old go-prompt version
 			// StartInteractiveMode() // old go-prompt version
@@ -66,6 +70,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d",
 		false, "debug output")
 	rootCmd.PersistentFlags().BoolVarP(&cliflag, "cli", "", false, "CLI mode")
+	rootCmd.PersistentFlags().BoolVar(&showVersion, "version", false, "print version and supported algorithms, then exit")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v",
 		false, "verbose output")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.ShowHeaders, "headers", "H",

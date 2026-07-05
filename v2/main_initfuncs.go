@@ -71,12 +71,21 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			return fmt.Errorf("cannot determine default config file: Globals.App.Name is not set")
 		}
 	}
+	// --version is accepted by every daemon: it prints the exact
+	// version and the algorithms this binary supports (from the
+	// in-process registry — no config, DB, or server needed) and exits.
+	// Registered on the shared flag set so it works for imr too, which
+	// otherwise parses no flags.
+	var showVersion bool
+	flag.BoolVar(&showVersion, "version", false, "print version and supported algorithms, then exit")
+
 	// Imr uses the default config file directly. Every other app
 	// type accepts flag-driven overrides. This inversion avoids
 	// enumerating AppType values defined in downstream packages
 	// (tdns-mp, tdns-nm, tdns-es).
 	if Globals.App.Type == AppTypeImr {
 		conf.Internal.CfgFile = defaultcfg
+		flag.Parse() // only --version is registered for imr
 	} else {
 		flag.StringVar(&conf.Internal.CfgFile, "config", defaultcfg, "config file path")
 		flag.BoolVarP(&Globals.Debug, "debug", "", false, "run in debug mode (may activate dangerous tests)")
@@ -85,6 +94,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 		flag.Usage = func() {
 			flag.PrintDefaults()
 		}
+	}
+	if showVersion {
+		PrintVersionAndExit()
 	}
 	// Defensive: catch an unset Globals.App.Type. Every binary's
 	// main() must set this before calling MainInit.
