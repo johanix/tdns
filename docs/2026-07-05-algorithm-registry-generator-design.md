@@ -1,9 +1,11 @@
 # Algorithm Registry & Code-Generator Design
 
 **Date:** 2026-07-05
-**Status:** Design AGREED, ready to implement (no code written yet). This doc is
-the implementation reference — build from it top to bottom via the sequencing at
-the end.
+**Status:** Design AGREED and implementation-ready (no code written yet). All
+three earlier gaps resolved with verified seams (role-enforcement point,
+CLI codepoint-sourcing invariant, +algchase). This doc is the implementation
+reference — build from the sequencing (PR-A/B/C) at the end; the "Verified
+implementation seams" index lists every file:symbol to touch.
 **Scope:** tdns (`v2/algorithms`, `cmdv2/*`) + dnssec-algorithms
 
 ## Concrete schema sketch (Input 1 — registry.go in dnssec-algorithms)
@@ -211,11 +213,35 @@ TCP/DoT) DNSKEY response but would bloat every RRSIG as a ZSK. Blast radius is
 small: only `SupportedSIG0`/`SupportedDNSSEC` predicates + the JSON export read
 `Capabilities` today; the additions are purely additive.
 
-**Enforcement point: the dnssec policy parser.** A policy names algorithms for
-the KSK and ZSK roles; the parser rejects a policy that assigns a `ForZSK:false`
-algorithm to the ZSK role (or `ForKSK:false` to the KSK role), failing early at
-config-load rather than at signing time. This is the right seam — role usage is
-declared in policy, so role legality is checked where policy is validated.
+**Enforcement point (verified seam): `parseDnssecPolicyConfImpl`.** A dnssec
+policy names a `KSKAlgorithm` and a `ZSKAlgorithm` (both `uint8` codepoints —
+`DnssecPolicy` struct, `v2/structs.go:449`). Enforcement is a new sibling check
+next to the existing `validateSplitAlgorithm` call in
+`parseDnssecPolicyConfImpl` (`v2/ksk_rollover_policy.go:604`):
+
+```go
+alg, kskAlg, zskAlg, err := resolvePolicyRoleAlgorithms(name, dp)
+...
+if err := validateSplitAlgorithm(name, kskAlg, zskAlg, splitAllowed); err != nil {
+    return nil, err
+}
+if err := validateRoleCapabilities(name, kskAlg, zskAlg); err != nil { // NEW
+    return nil, err
+}
+```
+
+`validateRoleCapabilities` checks `algorithms.Caps(kskAlg).ForKSK` and
+`Caps(zskAlg).ForZSK`; on failure it returns
+`policy %q: algorithm %s (%d) is not permitted as a KSK/ZSK`. **No new plumbing
+downstream:** the returned error flows into the existing broken-policy path
+(`DnssecPolicy{Name: name, Error: reason}`, `v2/parseconfig.go:1460`). The
+`DnssecPolicy.Error` docstring already enumerates "disallowed KSK/ZSK split" as a
+rejection reason and states a broken policy is kept-but-unusable and its zones
+quarantined — so ForKSK/ForZSK is simply one more reason feeding that same
+mechanism. There is also a second parse site in `ParseDnssecPolicyConf` (the
+non-`Impl` wrapper, `v2/ksk_rollover_policy.go:~677`) that mirrors the same
+`validateSplitAlgorithm` call — add the role check there too, or refactor both to
+share one helper.
 
 **No family field.** Cryptographic family (lattice/code-based/multivariate/…)
 is analysis-doc material — it lives in
@@ -284,13 +310,96 @@ builder + operator audience) must cover, at minimum:
 - **`dog +sigchase +algchase`** — once it exists (step 6), document how it
   reports codepoint + name + role along a chain.
 
+## CLI codepoint sourcing — invariant to preserve (GAP 2, verified)
+
+The CLI (`v2/cli/algorithms.go`) already follows the right rule and it must be
+kept: **for any command that will hit a server (generate/use/list-for-a-role),
+the CLI resolves name↔codepoint from the SERVER, never from its own table** —
+`resolveServerAlgorithm(role, name, use)` calls the `list-algorithms` API and
+hard-fails if the server is unreachable (no local fallback). Only genuinely
+offline paths (`debug sig0 generate`, parsing an exported-key blob) use the local
+`algregistry.AlgorithmNumber`.
+
+The generator does NOT change this. It only regenerates the local
+`RegisterMetadata` block that backs the *offline* paths — which is currently
+hand-maintained and incomplete, so those offline paths break on any alg not in
+the manual list; complete generated metadata fixes exactly that. **The
+server-sourced path in `algorithms.go` is untouched.**
+
+Why keep server-sourcing even though local metadata is now complete:
+1. The local table (`RegisterMetadata`) knows an alg *exists* but not whether
+   *this server* was built with its implementation (`WITH_LIBOQS` etc.) — only
+   the server's `list-algorithms` reflects its `real` (usable) set. Resolving a
+   for-server command locally would defer the failure to the server by one step.
+2. CLI and server may be different builds/versions; identical-at-build-time
+   metadata does not guarantee identical-at-runtime across two deployed binaries.
+
+**Invariant (comment it in code, do not erode post-generator):** for-server
+commands use `resolveServerAlgorithm`; the local generated table is for offline
+paths only.
+
+## +algchase — design (GAP 3, verified)
+
+`+algchase` **requires `+sigchase`** (it annotates what sigchase already walks;
+alone it is meaningless). dog flags are string-keyed in an `options` map
+(`options["sigchase"]="true"`, parsed at `cmdv2/dog/dog.go:549`). Add
+`options["algchase"]` similarly; if `algchase && !sigchase`, error
+`+algchase requires +sigchase`.
+
+`+sigchase` already builds per-link `link.Notes` lines (`v2/chase.go`, e.g. :183)
+that reference the signing key / keytag and whether the RRSIG validates. From the
+key, dog has the RRSIG's algorithm codepoint. `+algchase` enriches those existing
+notes with the algorithm *name* via `algorithms.AlgorithmName(codepoint)`. This
+works only once dog carries the full codepoint→name table — i.e. it depends on
+step 5 (the generator populating dog's `RegisterMetadata`), NOT on new chase
+logic. Until then dog can only print bare numbers (the current bug). So
+`+algchase` is a display enhancement gated on step 5, not new traversal code.
+
+## Verified implementation seams (quick index)
+
+| Concern | File : symbol |
+|---|---|
+| `record()` promote-not-panic | `v2/algorithms/algorithms.go:88` `record()` |
+| `Capabilities` + entry | `v2/algorithms/algorithms.go:39` / `:49` |
+| classical builtin table | `v2/algorithms/algorithms.go:210` `init()` |
+| caps consumers (blast radius) | `SupportedSIG0` `:140`, `SupportedDNSSEC` `:147`, `All()`/JSON `:185`, `v2/cli/algorithms.go` |
+| policy struct | `v2/structs.go:449` `DnssecPolicy` (`Error`, `KSKAlgorithm`, `ZSKAlgorithm`) |
+| role enforcement seam | `v2/ksk_rollover_policy.go:604` `parseDnssecPolicyConfImpl` (+ ~677 wrapper) |
+| broken-policy path | `v2/parseconfig.go:1460` |
+| CLI server-sourced resolve | `v2/cli/algorithms.go` `resolveServerAlgorithm` / `fetchServerAlgorithms` |
+| hand-maintained metadata to replace | `cmdv2/cli/main.go`, `cmdv2/dog/main.go` |
+| impl files to replace | `cmdv2/{auth,imr,agent}/pq_algorithms_{liboqs,sqisign,qruov}.go` |
+| sigchase flag / notes | `cmdv2/dog/dog.go:549`, `v2/chase.go` |
+| C-lib detect scripts | `dnssec-algorithms/{liboqs,sqisignc,qruovc}/*-env.sh` |
+
 ## Suggested sequencing
 
-1. `record()` promotion fix (small; unblocks metadata+impl coexistence).
-2. `ForKSK`/`ForZSK` added to `Capabilities`.
-3. `registry.go` metadata table in dnssec-algorithms (pure data).
-4. Generator `cmd/` tool in tdns + per-app `algs.list` files; wire `go:generate`.
-5. Replace hand-maintained `pq_algorithms_*.go` and the CLI name list with
-   generated output; delete the manual `RegisterMetadata` blocks in cli/dog.
-6. `dog +sigchase +algchase` (now trivial — global metadata is always present).
-7. Write `guide/pq-dnssec.md` against the finished model.
+Branch/PR boundaries follow the repo split (dnssec-algorithms is a separate
+repo needing publish+re-pin).
+
+**PR-A (tdns) — foundation, fully specified, locally testable:**
+1. `record()` promote-not-panic (verify name/caps match; wire impl into
+   miekg/dns; set `real=true`; panic only on genuine conflict). + unit tests.
+2. `ForKSK`/`ForZSK` on `Capabilities`; set them on the 5 classical builtin-table
+   entries (all `ForKSK:true, ForZSK:true`); thread through `All()`/JSON export
+   and the cli reader.
+3. Role enforcement: `validateRoleCapabilities` in `parseDnssecPolicyConfImpl`
+   (+ the wrapper). + parse tests (a ForZSK:false alg as ZSK ⇒ policy `Error` set,
+   zone quarantined).
+
+**PR-B (dnssec-algorithms):**
+4. `registry.go` pure-data metadata table (schema above); one row per alg incl.
+   CROSS. Commit, publish, note the version for re-pin.
+
+**PR-C (tdns) — generator + cutover (against published table):**
+5. Generator `cmd/genalgs` + per-app `algs.list` files; `go:generate` wiring;
+   C-lib auto-detect via `-env.sh`; emit `metadata_gen.go` + `impl_<group>_gen.go`
+   + consolidated build-env file.
+6. Replace the hand-maintained `pq_algorithms_*.go` and the manual
+   `RegisterMetadata` blocks (cli/dog) with generated output. **Prove
+   equivalence:** generated registration ≡ current per-app behavior (same
+   codepoints, same per-app subsets). Preserve the CLI server-sourcing invariant.
+
+**Follow-ups (separate branches):**
+7. `dog +algchase` (display enhancement; depends on step 6 metadata).
+8. Write `guide/pq-dnssec.md` against the finished model.
