@@ -1,12 +1,54 @@
 # Algorithm Registry & Code-Generator Design
 
 **Date:** 2026-07-05
-**Status:** Design AGREED and implementation-ready (no code written yet). All
-three earlier gaps resolved with verified seams (role-enforcement point,
-CLI codepoint-sourcing invariant, +algchase). This doc is the implementation
-reference — build from the sequencing (PR-A/B/C) at the end; the "Verified
-implementation seams" index lists every file:symbol to touch.
+**Status:** IN PROGRESS — see the "Progress" section below. Foundation, registry
+table, generator, `--version`, and `dog +algchase` are DONE; the cutover
+(wire go:generate + per-app algs.list, replace the hand-maintained files,
+Makefile integration) remains. This doc is the implementation reference —
+sequencing (PR-A/B/C) and the "Verified implementation seams" index are below.
 **Scope:** tdns (`v2/algorithms`, `cmdv2/*`) + dnssec-algorithms
+
+## Progress (updated 2026-07-05, end of session)
+
+**DONE — dnssec-algorithms `main` (pushed):**
+- PR-B: `registry/registry.go` pure-data metadata table (16 algs, 199–214;
+  verified zero-cgo importable). Commit `4091eff`. Includes
+  `cross_rsdpg_128_small` adapter + `docs/pqc-algorithm-families.md` (`8876ff0`).
+
+**DONE — tdns branch `feature/alg-registry-generator` (7 commits; NOT yet pushed):**
+- PR-A `c30b5f1`: `record()` metadata→real promotion (no panic); `ForKSK`/`ForZSK`
+  on `Capabilities` (+ builtins, `All()`/JSON export, `SupportedKSK/ZSK`); policy
+  role enforcement (`validateRoleCapabilities` at ALL THREE parse sites). Tested.
+- `1735f15`: genalgs first cut (superseded).
+- `c0b787c` / `4a10711`: design revised — NO build tags; availability resolved at
+  generate time; generator takes `--algrepo <dir>`.
+- `8e1c863`: genalgs REWORKED to the final model — `--algrepo`, AST-parses
+  `registry/registry.go`, runs `-env.sh` detection, FAILS if a selected alg's lib
+  is absent, emits `metadata_algs.go` + one flat `registered_algs.go` (no tags) +
+  `algs-env.mk`. Dependency-free. Tested (parser, generators, detect success/fail).
+- `d3f0cad`: `--version` flag on auth/imr/agent — prints version + supported
+  algorithms (from the in-process registry, no config/server) and exits. Shared
+  `tdns.PrintVersionAndExit()`; per-app hook.
+- `466f7fb`: `dog +algchase` — annotates each `alg=N` in the sigchase chain with
+  its registered name (`alg=13 (ECDSAP256SHA256)`; `(unknown)` when unknown).
+  Verified live + unit tested.
+
+**NOT DONE — the cutover (next session), all in tdns:**
+- Per-app `algs.list` (auth/imr/agent full or subset; cli/dog as needed) + wire
+  `go:generate` calling genalgs with `--algrepo`.
+- Delete the 7 hand-maintained `cmdv2/*/pq_algorithms_*.go` and the manual
+  `RegisterMetadata` blocks in `cmdv2/{cli,dog}/main.go`. Prove equivalence
+  (same codepoints/subsets per app). This is what makes `dog +algchase` name PQ
+  codepoints and fixes the `--version` KSK/ZSK "-" wart (apps' current
+  hand-written `init()` still use pre-role `Capabilities`).
+- Makefile integration: regenerate-if-missing rules (mirroring the existing
+  `version.go` step), `include algs-env.mk`, drop `WITH_LIBOQS/SQISIGN/QRUOV`.
+  Verify a cgo build on a Hetzner guest (the C libs aren't on the workstation
+  for sqisign/qruov... actually all three are on this Mac, but a guest confirms
+  the NetBSD/Linux paths).
+- Then re-pin tdns go.mod to the published dnssec-algorithms registry commit.
+
+**Follow-ups after cutover:** `guide/pq-dnssec.md` (see requirements below).
 
 ## Concrete schema sketch (Input 1 — registry.go in dnssec-algorithms)
 
