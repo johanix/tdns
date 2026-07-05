@@ -125,14 +125,23 @@ cross-app sync, no separate CLI list.
 
 ### The generator — NO BUILD TAGS (revised 2026-07-05)
 
-`cmdv2/genalgs`, invoked via `go generate`. The **registry table path is an
-explicit `-registry` argument** (not a Go import / go.mod replace) — the
-generator parses the registry `.go` file at that path via `go/parser` and
-extracts the `Algorithms` slice. This keeps the table type-checked Go (its own
-repo's tests catch malformed rows) while decoupling the generator from any
-go.mod entanglement or a fixed checkout layout: the caller points `-registry` at
-wherever dnssec-algorithms lives. That path also gives the generator the
-`-env.sh` scripts for availability detection (below).
+`cmdv2/genalgs`, invoked via `go generate`. Interface:
+
+```
+genalgs --algrepo <dir> --list <algs.list> --out <dir> [--pkg main]
+```
+
+The **`--algrepo` argument is the root of a dnssec-algorithms checkout** — one
+path from which the generator derives everything it needs from that repo:
+- the registry table at `<algrepo>/registry/registry.go`, which it **parses via
+  `go/parser`** (no import / go.mod replace) and extracts the `Algorithms` slice
+  from — keeping the table type-checked Go in its own repo while decoupling the
+  generator from go.mod entanglement or a fixed layout;
+- the availability scripts at `<algrepo>/{liboqs,sqisignc,qruovc}/*-env.sh` (below).
+
+This is faithful to the agreed "explicit argument" design and matches the
+"pinned-but-local checkout" principle: the caller (the Makefile) points
+`--algrepo` at the local dnssec-algorithms working copy.
 
 **Availability is resolved at GENERATE time, so there are NO build tags.** This
 is the key shift from the original design. Previously each impl file carried
