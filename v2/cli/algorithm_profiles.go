@@ -12,30 +12,41 @@ import (
 	"github.com/spf13/viper"
 )
 
-// algorithmProfile is optional, CLI-side descriptive metadata about a
-// DNSSEC/SIG(0) algorithm: key and signature sizes, relative cost,
-// maturity, and a free-form note. It exists purely to *annotate* the
-// `keystore ... algorithms` listing during PQ algorithm experimentation
-// — it never feeds name<->codepoint resolution or what a server reports
-// as supported (that stays server-authoritative).
+// algorithmProfile is optional, CLI-side cost data for a DNSSEC/SIG(0)
+// algorithm: relative signing and validation cost. It is the one piece of
+// listing enrichment that is NOT server-reported, because cost is
+// machine-dependent (it shifts across CPU architectures) — the static
+// facts (sizes, NIST level, maturity, description) now come from the
+// server in AlgorithmInfo.Facts. It never feeds name<->codepoint
+// resolution or what a server reports as supported (that stays
+// server-authoritative).
 //
-// Profiles are read from the optional "algorithms" map in the CLI
-// config, keyed by algorithm name. The data is deliberately kept out of
-// the (host-local, secret-bearing) main CLI config and pulled in from a
-// shareable file such as /etc/tdns/algorithms.yaml via an "include:".
+// Cost profiles are read from the optional "algorithms.profiles" map in
+// the CLI config, keyed by algorithm name. The data is deliberately kept
+// out of the (host-local, secret-bearing) main CLI config and pulled in
+// from a shareable file via an "include:".
 //
 // Every field is optional. A zero value means "not provided" and is
-// rendered as "-" in the listing; because no real key/signature size or
-// cost is legitimately zero, that convention is unambiguous here.
+// rendered as "-" in the listing; because no real cost is legitimately
+// zero, that convention is unambiguous here.
+//
+// The remaining fields (Description, sizes, SecurityLevel, Maturity) are
+// still accepted for backward compatibility with existing config files
+// but are ignored — those values now come from the server. TODO: this
+// struct will be replaced by a per-arch cost table
+// (algorithm-costs.yaml) in a follow-up.
 type algorithmProfile struct {
+	SigningCost    int `mapstructure:"signingcost"`    // relative to ED25519 (= 1); 0 = unknown
+	ValidationCost int `mapstructure:"validationcost"` // relative to ED25519 (= 1); 0 = unknown
+
+	// Accepted-but-ignored (superseded by AlgorithmInfo.Facts). Retained
+	// so existing algorithms.yaml files do not error on unmarshal.
 	Description    string `mapstructure:"description"`
 	PublicKeyBytes int    `mapstructure:"publickeybytes"`
 	SignatureBytes int    `mapstructure:"signaturebytes"`
 	SecretKeyBytes int    `mapstructure:"secretkeybytes"`
-	SecurityLevel  int    `mapstructure:"securitylevel"`  // NIST PQ level 1/3/5; 0 = unspecified
-	Maturity       string `mapstructure:"maturity"`       // final | draft | candidate | builtin
-	SigningCost    int    `mapstructure:"signingcost"`    // relative to ED25519 (= 1); 0 = unknown
-	ValidationCost int    `mapstructure:"validationcost"` // relative to ED25519 (= 1); 0 = unknown
+	SecurityLevel  int    `mapstructure:"securitylevel"`
+	Maturity       string `mapstructure:"maturity"`
 }
 
 // loadAlgorithmProfiles returns the "algorithms.profiles" enrichment map
