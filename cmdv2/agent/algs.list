@@ -1,0 +1,10 @@
+# Algorithms tdns-agent links an implementation for.
+# Deliberately a small subset: pure-Go + liboqs only, no SQIsign/QR-UOV.
+# One registry NAME per line (see dnssec-algorithms/registry/registry.go).
+# Pure-Go (no lib needed):
+MLDSA44
+SLHDSA128S
+# liboqs-backed:
+FALCON512
+MAYO1
+SNOVA24_5_4

@@ -20,11 +20,17 @@ import (
 
 var cfgFile, cfgFileUsed string
 var LocalConfig string
+var showVersion bool // --version : print version + supported algorithms, then exit
 
 var rootCmd = &cobra.Command{
 	Use:   "tdns-cli",
 	Short: "tdns-cli is a tool used to interact with the tdnsd nameserver via API",
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
+		// --version is answered before any config/API setup: it reports what
+		// this binary knows, in-process, and exits.
+		if showVersion {
+			tdns.PrintVersionAndExit()
+		}
 		tdns.SetupCliLogging()
 		// keys generate (root-level) and gen-docs (offline doc generator) do
 		// not need config or API.
@@ -33,6 +39,15 @@ var rootCmd = &cobra.Command{
 		}
 		initConfig()
 		initApi()
+	},
+	// tdns-cli has no default action; with no subcommand it prints help.
+	// A bare `tdns-cli --version` still needs to reach PrintVersionAndExit,
+	// so handle it here (PersistentPreRun does not fire without a subcommand).
+	Run: func(cmd *cobra.Command, args []string) {
+		if showVersion {
+			tdns.PrintVersionAndExit()
+		}
+		_ = cmd.Help()
 	},
 }
 
@@ -81,6 +96,7 @@ func init() {
 
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "",
 		fmt.Sprintf("config file (default is %s)", tdns.DefaultCliCfgFile))
+	rootCmd.PersistentFlags().BoolVar(&showVersion, "version", false, "print version and supported algorithms, then exit")
 	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "zone name")
 	rootCmd.PersistentFlags().StringVarP(&tdns.Globals.ParentZone, "pzone", "Z", "", "parent zone name")
 

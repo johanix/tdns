@@ -56,9 +56,63 @@ all: $(PROG)
 version:
 	/bin/sh ../../utils/make-version.sh $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
 
-build: check-liboqs check-sqisign check-qruov
+# Path to the genalgs binary (built from cmdv2/genalgs). Overridable.
+GENALGS ?= ../genalgs/tdns-genalgs
+
+# Algorithm code generation.
+#
+# The presence and content of algs.list select one of three behaviors:
+#
+#   * No algs.list file at all: the app wants only the classical built-in
+#     algorithms. genalgs is NOT run and dnssec-algorithms is NOT needed
+#     at all — tdns builds fully standalone. This is the default for any
+#     app that has not opted into the PQ algorithm registry.
+#
+#   * algs.list present but empty (comments/blank lines only): the app
+#     wants the full name<->codepoint<->role metadata for every registry
+#     algorithm, but links no real implementation (a metadata-only app,
+#     e.g. a query/validation tool). genalgs runs and emits metadata_algs.go
+#     (all names) and an empty registered_algs.go. dnssec-algorithms is
+#     needed (for the registry table).
+#
+#   * algs.list present with entries: the app links a real implementation
+#     for each named algorithm. genalgs emits metadata for all algorithms
+#     plus Register calls for the selected ones, and (for C-backed algs)
+#     the library build env.
+#
+# For the latter two (algs.list exists), genalgs is re-run whenever
+# registered_algs.go is missing or older than algs.list, using the
+# dnssec-algorithms path recorded as ALGREPO in the generated algs-env.mk.
+# If ALGREPO is unknown (no algs-env.mk yet — the first build), make stops
+# with a message telling the user to run genalgs once with --algrepo.
+#
+# ALGREPO comes from `-include algs-env.mk` in the app Makefile (below
+# this include).
+build: generate check-liboqs check-sqisign check-qruov
 	@test -f version.go || /bin/sh ../../utils/make-version.sh "unknown" "unknown" $(PROG)
 	$(GO) build $(GOFLAGS) $(GO_BUILD_TAGS) -o ${PROG}
+
+generate:
+	@if [ ! -f algs.list ]; then \
+	   : "no algs.list -> standalone build, genalgs not run"; \
+	 elif [ -f registered_algs.go ] && [ ! algs.list -nt registered_algs.go ] && [ ! algs.list -nt algs-env.mk ]; then \
+	   : "generated files are current"; \
+	 elif [ -n "$(ALGREPO)" ]; then \
+	   echo "  algs.list changed (or no generated files); running genalgs --algrepo $(ALGREPO)"; \
+	   $(GENALGS) --algrepo "$(ALGREPO)" --list algs.list --out . || exit 1; \
+	 else \
+	   echo ""; \
+	   echo "  $(PROG): algs.list is present but the generated files are missing"; \
+	   echo "  or stale, and the dnssec-algorithms location is unknown."; \
+	   echo "  Run genalgs once, pointing --algrepo at your dnssec-algorithms checkout:"; \
+	   echo ""; \
+	   echo "    $(GENALGS) --algrepo <path-to-dnssec-algorithms> --list algs.list --out ."; \
+	   echo ""; \
+	   echo "  That generates registered_algs.go/metadata_algs.go and records the"; \
+	   echo "  path in algs-env.mk so future 'make' runs regenerate automatically."; \
+	   echo ""; \
+	   exit 1; \
+	 fi
 
 # Pre-flight check: when WITH_LIBOQS=1, verify pkg-config can find
 # liboqs-go.pc and print actionable guidance otherwise. No-op when
@@ -167,4 +221,4 @@ lint:
 	gosec ./...
 	golangci-lint run
 
-.PHONY: build version clean check-liboqs check-sqisign check-qruov
+.PHONY: build generate version clean check-liboqs check-sqisign check-qruov

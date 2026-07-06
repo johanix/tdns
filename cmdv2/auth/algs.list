@@ -1,0 +1,24 @@
+# Algorithms tdns-auth links an implementation for.
+# One registry NAME per line (see dnssec-algorithms/registry/registry.go).
+# genalgs resolves each name to its codepoint, caps, package, and lib group,
+# checks the lib is installed, and emits registered_algs.go + metadata_algs.go.
+# Pure-Go (no lib needed):
+MLDSA44
+MLDSA65
+MLDSA87
+SLHDSA128S
+# liboqs-backed:
+FALCON512
+# FALCON1024
+MAYO1
+MAYO2
+MAYO3
+MAYO5
+SNOVA24_5_4
+SNOVA37_17_2
+SNOVA25_8_3
+CROSSRSDPG128SMALL
+# SQIsign reference lib:
+SQISIGN1
+# QR-UOV reference lib:
+# QRUOV_Q31_L3

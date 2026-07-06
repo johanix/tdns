@@ -46,11 +46,26 @@ import (
 	"strings"
 )
 
+// verbose, when set by -v, makes genalgs trace each step it takes
+// (resolving paths, parsing the registry, reading the list, running each
+// -env.sh detection script, writing each generated file) to stderr.
+var verbose bool
+
+// vlog writes a trace line to stderr when -v is in effect. Traces go to
+// stderr so the one-line summary genalgs prints to stdout stays clean and
+// machine-readable.
+func vlog(format string, args ...any) {
+	if verbose {
+		fmt.Fprintf(os.Stderr, "genalgs: "+format+"\n", args...)
+	}
+}
+
 func main() {
 	algrepo := flag.String("algrepo", "", "root of a dnssec-algorithms checkout (has registry/ and the *-env.sh scripts)")
 	listPath := flag.String("list", "algs.list", "per-app algorithm list (one NAME per line)")
 	outDir := flag.String("out", ".", "directory to write the generated files into")
 	pkgName := flag.String("pkg", "main", "package name for the generated files")
+	flag.BoolVar(&verbose, "v", false, "verbose: trace each step (paths, list, -env.sh runs, files written)")
 	flag.Parse()
 
 	if *algrepo == "" {
@@ -64,19 +79,45 @@ func main() {
 }
 
 func run(algrepo, listPath, outDir, pkgName string) error {
+	// Resolve --algrepo to an absolute path up front. Everything derives
+	// from it (the registry path, and the -env.sh scripts run via a
+	// subprocess whose cmd.Dir is set to algrepo). A relative algrepo
+	// would otherwise be applied twice for the -env.sh scripts — once as
+	// the subprocess Dir and once in the script path resolved from that
+	// Dir — so a relative path that looks correct fails with a spurious
+	// "library not available". Absolutizing here makes both forms work.
+	absRepo, err := filepath.Abs(algrepo)
+	if err != nil {
+		return fmt.Errorf("resolving --algrepo %q: %w", algrepo, err)
+	}
+	if absRepo != algrepo {
+		vlog("resolved --algrepo %q to %s", algrepo, absRepo)
+	}
+	algrepo = absRepo
+	if fi, err := os.Stat(filepath.Join(algrepo, "registry", "registry.go")); err != nil || fi.IsDir() {
+		return fmt.Errorf("--algrepo %q does not look like a dnssec-algorithms checkout "+
+			"(no registry/registry.go under it)", algrepo)
+	}
+
 	registryFile := filepath.Join(algrepo, "registry", "registry.go")
+	vlog("parsing registry %s", registryFile)
 	all, err := parseRegistry(registryFile)
 	if err != nil {
 		return fmt.Errorf("parsing registry %s: %w", registryFile, err)
 	}
+	vlog("registry has %d algorithms", len(all))
 	byName := map[string]Alg{}
 	for _, a := range all {
 		byName[a.Name] = a
 	}
 
+	vlog("reading algorithm list %s", listPath)
 	selected, err := readList(listPath, byName)
 	if err != nil {
 		return err
+	}
+	for _, a := range selected {
+		vlog("  selected %s (codepoint %d, group %s, package %s)", a.Name, a.Codepoint, a.Group, a.Package)
 	}
 
 	// Resolve library availability for every group the selection needs.
@@ -87,8 +128,11 @@ func run(algrepo, listPath, outDir, pkgName string) error {
 			needGroups[a.Group] = true
 		}
 	}
+	if len(needGroups) == 0 {
+		vlog("no C-backed algorithms selected; skipping library detection")
+	}
 	envByGroup := map[string]libEnv{}
-	for g := range needGroups {
+	for _, g := range sortedGroups(needGroups) {
 		env, err := detectLib(algrepo, g)
 		if err != nil {
 			// Name the algorithms that triggered the requirement.
@@ -103,16 +147,23 @@ func run(algrepo, listPath, outDir, pkgName string) error {
 				"  install it (see dnssec-algorithms/BUILDING.md) or remove those algorithms from %s",
 				g, strings.Join(culprits, ", "), err, listPath)
 		}
+		vlog("  %s library detected", g)
 		envByGroup[g] = env
 	}
 
-	if err := writeFormatted(filepath.Join(outDir, "metadata_algs.go"), genMetadata(pkgName, all)); err != nil {
+	metaPath := filepath.Join(outDir, "metadata_algs.go")
+	vlog("writing %s (metadata for all %d algorithms)", metaPath, len(all))
+	if err := writeFormatted(metaPath, genMetadata(pkgName, all)); err != nil {
 		return err
 	}
-	if err := writeFormatted(filepath.Join(outDir, "registered_algs.go"), genRegistered(pkgName, selected)); err != nil {
+	regPath := filepath.Join(outDir, "registered_algs.go")
+	vlog("writing %s (%d implementation registrations)", regPath, len(selected))
+	if err := writeFormatted(regPath, genRegistered(pkgName, selected)); err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(outDir, "algs-env.mk"), genEnvMk(needGroups, envByGroup), 0o644); err != nil {
+	mkPath := filepath.Join(outDir, "algs-env.mk")
+	vlog("writing %s (build env for %d libraries; ALGREPO=%s)", mkPath, len(needGroups), algrepo)
+	if err := os.WriteFile(mkPath, genEnvMk(algrepo, needGroups, envByGroup), 0o644); err != nil {
 		return fmt.Errorf("writing algs-env.mk: %w", err)
 	}
 
@@ -203,7 +254,16 @@ func genRegistered(pkgName string, selected []Alg) []byte {
 	b.WriteString("// algs.list. No build tags: the generator verified each library was\n")
 	b.WriteString("// installed before emitting these calls. Each Register promotes the\n")
 	b.WriteString("// algorithm's metadata entry to a real, usable algorithm.\n\n")
-	fmt.Fprintf(&b, "package %s\n\n", pkgName)
+	fmt.Fprintf(&b, "package %s\n", pkgName)
+
+	// Metadata-only app (empty algs.list): no implementations to register,
+	// so emit no imports and no init — importing algs unused would not
+	// compile. The metadata_algs.go file still provides the full table.
+	if len(sorted) == 0 {
+		b.WriteString("\n// No algorithm implementations selected (metadata-only build).\n")
+		return b.Bytes()
+	}
+	b.WriteString("\n")
 
 	b.WriteString("import (\n")
 	for _, a := range sorted {

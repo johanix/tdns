@@ -34,6 +34,7 @@ var server string
 var cfgFile string
 var trustAnchorFile string // -k / --trust-anchor
 var tsigKeyFlag string      // -y / --tsig : [algorithm:]name:secret (dig-compatible)
+var showVersion bool        // --version : print version + supported algorithms, then exit
 
 var options = make(map[string]string, 2)
 
@@ -73,6 +74,9 @@ var rootCmd = &cobra.Command{
 	`,
 
 	Run: func(cmd *cobra.Command, args []string) {
+		if showVersion {
+			tdns.PrintVersionAndExit()
+		}
 
 		var cleanArgs []string
 		var err error
@@ -486,6 +490,7 @@ func init() {
 
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v", false, "Verbose mode")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debugging output")
+	rootCmd.PersistentFlags().BoolVar(&showVersion, "version", false, "print version and supported algorithms, then exit")
 	rootCmd.PersistentFlags().BoolVarP(&short, "short", "", false, "Only list RRs that are part of the Answer section")
 	rootCmd.PersistentFlags().StringVarP(&port, "port", "p", "53", "Port to send DNS query to")
 	rootCmd.PersistentFlags().StringVarP(&trustAnchorFile, "trust-anchor", "k", "", "Path to DNSSEC trust anchor file (zone-file format DS or DNSKEY records). Used by +sigchase. Default: read from "+tdns.DefaultImrCfgFile+" or fall back to compiled-in root KSK DS records.")
