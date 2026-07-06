@@ -66,7 +66,7 @@ func TestRegisterMetadata_NewAlgorithm(t *testing.T) {
 	const testNum uint8 = 249
 	const testName = "TESTALG-249"
 
-	RegisterMetadata(testNum, testName, Capabilities{ForSIG0: true})
+	RegisterMetadata(testNum, testName, Capabilities{ForSIG0: true}, Facts{})
 
 	if num, ok := AlgorithmNumber(testName); !ok || num != testNum {
 		t.Errorf("after RegisterMetadata: AlgorithmNumber(%q) = %d, %v; want %d, true",
@@ -95,7 +95,7 @@ func TestRegisterMetadata_ConflictPanics(t *testing.T) {
 	}()
 	// dns.RSASHA256 is already registered by init().
 	RegisterMetadata(dns.RSASHA256, "SHOULD-NOT-REGISTER",
-		Capabilities{ForSIG0: true})
+		Capabilities{ForSIG0: true}, Facts{})
 }
 
 // record() promotion semantics. These exercise the shared internal
@@ -109,12 +109,12 @@ func TestRecord_MetadataThenRealPromotes(t *testing.T) {
 	caps := Capabilities{ForSIG0: true, ForDNSSEC: true, ForZSK: true}
 
 	// First: metadata-only.
-	record(num, name, caps, false)
+	record(num, name, caps, Facts{}, false)
 	if e, ok := byNumber[num]; !ok || e.real {
 		t.Fatalf("after metadata record: entry real=%v ok=%v; want real=false", e.real, ok)
 	}
 	// Then: a real registration of the same codepoint/name/caps promotes.
-	record(num, name, caps, true)
+	record(num, name, caps, Facts{}, true)
 	e, ok := byNumber[num]
 	if !ok || !e.real {
 		t.Fatalf("after real record: entry real=%v ok=%v; want real=true", e.real, ok)
@@ -128,9 +128,9 @@ func TestRecord_RepeatedMetadataIsNoop(t *testing.T) {
 	const num = 241
 	const name = "REPEAT-META"
 	caps := Capabilities{ForSIG0: true}
-	record(num, name, caps, false)
+	record(num, name, caps, Facts{}, false)
 	// A second identical metadata record must not panic (harmless no-op).
-	record(num, name, caps, false)
+	record(num, name, caps, Facts{}, false)
 	if e := byNumber[num]; e.real {
 		t.Errorf("repeated metadata should stay metadata-only, got real=true")
 	}
@@ -143,8 +143,8 @@ func TestRecord_DifferentNameSameCodepointPanics(t *testing.T) {
 			t.Error("expected panic when re-registering a codepoint under a different name")
 		}
 	}()
-	record(num, "NAME-A", Capabilities{}, false)
-	record(num, "NAME-B", Capabilities{}, false) // different name → panic
+	record(num, "NAME-A", Capabilities{}, Facts{}, false)
+	record(num, "NAME-B", Capabilities{}, Facts{}, false) // different name → panic
 }
 
 func TestRecord_CapabilityMismatchPanics(t *testing.T) {
@@ -155,8 +155,8 @@ func TestRecord_CapabilityMismatchPanics(t *testing.T) {
 			t.Error("expected panic on metadata/impl capability mismatch")
 		}
 	}()
-	record(num, name, Capabilities{ForDNSSEC: true, ForZSK: true}, false)
-	record(num, name, Capabilities{ForDNSSEC: true, ForKSK: true}, true) // caps differ → panic
+	record(num, name, Capabilities{ForDNSSEC: true, ForZSK: true}, Facts{}, false)
+	record(num, name, Capabilities{ForDNSSEC: true, ForKSK: true}, Facts{}, true) // caps differ → panic
 }
 
 func TestRecord_TwoRealPanics(t *testing.T) {
@@ -168,8 +168,35 @@ func TestRecord_TwoRealPanics(t *testing.T) {
 			t.Error("expected panic on a second real registration of one codepoint")
 		}
 	}()
-	record(num, name, caps, true)
-	record(num, name, caps, true) // second real → panic
+	record(num, name, caps, Facts{}, true)
+	record(num, name, caps, Facts{}, true) // second real → panic
+}
+
+// TestFactsCarriedThrough verifies static Facts survive registration and
+// surface in All(), and that a metadata entry lacking facts is filled in
+// when the later real registration supplies them (promotion).
+func TestFactsCarriedThrough(t *testing.T) {
+	const num = 245
+	const name = "FACTS-TEST"
+	caps := Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: true}
+	facts := Facts{PubKeyBytes: 100, SigBytes: 200, SecurityLevel: 3, Maturity: "candidate", Description: "d"}
+
+	// Metadata first with no facts, then a real registration carrying facts.
+	record(num, name, caps, Facts{}, false)
+	record(num, name, caps, facts, true)
+
+	if got := byNumber[num].facts; got != facts {
+		t.Fatalf("facts not filled in on promotion: got %+v want %+v", got, facts)
+	}
+	for _, a := range All() {
+		if a.Number == num {
+			if a.Facts != facts {
+				t.Errorf("All() facts = %+v; want %+v", a.Facts, facts)
+			}
+			return
+		}
+	}
+	t.Errorf("codepoint %d (real) missing from All()", num)
 }
 
 func TestSupportedKSK_ZSK_IncludeBuiltins(t *testing.T) {

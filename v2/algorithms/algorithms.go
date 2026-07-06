@@ -59,10 +59,27 @@ type Capabilities struct {
 	ForZSK bool
 }
 
+// Facts is static, machine-independent information about an algorithm,
+// fixed by its specification (sizes, NIST level, maturity, description).
+// It mirrors dnssec-algorithms/registry.Facts; the generated metadata
+// carries it through so a binary can display it without a separate config
+// file. All fields are optional — a zero value means "not provided" and
+// is rendered as "-" by callers. Machine-dependent costs are deliberately
+// NOT here (they belong in the measured, per-arch cost data).
+type Facts struct {
+	PubKeyBytes   int    `json:"pubkeybytes,omitempty"`
+	SigBytes      int    `json:"sigbytes,omitempty"`
+	SecKeyBytes   int    `json:"seckeybytes,omitempty"`
+	SecurityLevel int    `json:"securitylevel,omitempty"`
+	Maturity      string `json:"maturity,omitempty"`
+	Description   string `json:"description,omitempty"`
+}
+
 type entry struct {
 	number uint8
 	name   string
 	caps   Capabilities
+	facts  Facts
 	// real is true when a genuine implementation was wired into
 	// miekg/dns via Register, false for metadata-only entries
 	// (RegisterMetadata). Only real algorithms can actually generate,
@@ -78,27 +95,27 @@ var (
 )
 
 // Register wires impl into miekg/dns's algorithm registry at the
-// given codepoint and records the capability set so tdns code can
-// query it. Panics on conflict (init-time pattern — the application
-// must resolve duplicate codepoints itself).
-func Register(num uint8, impl dns.Algorithm, caps Capabilities) {
+// given codepoint and records the capability set and static facts so
+// tdns code can query them. Panics on conflict (init-time pattern — the
+// application must resolve duplicate codepoints itself).
+func Register(num uint8, impl dns.Algorithm, caps Capabilities, facts Facts) {
 	if err := dns.RegisterAlgorithm(num, impl); err != nil {
 		panic(fmt.Sprintf("algorithms.Register(%d, %s): %v",
 			num, impl.Name(), err))
 	}
-	record(num, impl.Name(), caps, true)
+	record(num, impl.Name(), caps, facts, true)
 }
 
-// RegisterMetadata records an algorithm's codepoint, name, and
-// capabilities without touching miekg/dns's registry. Used by
-// binaries that only need name-aware UI (e.g. CLI argument
-// validation, --help text) but don't sign or verify with the
-// algorithm themselves. Panics on conflict.
-func RegisterMetadata(num uint8, name string, caps Capabilities) {
-	record(num, name, caps, false)
+// RegisterMetadata records an algorithm's codepoint, name, capabilities,
+// and static facts without touching miekg/dns's registry. Used by
+// binaries that only need name-aware UI (e.g. CLI argument validation,
+// --help text) but don't sign or verify with the algorithm themselves.
+// Panics on conflict.
+func RegisterMetadata(num uint8, name string, caps Capabilities, facts Facts) {
+	record(num, name, caps, facts, false)
 }
 
-func record(num uint8, name string, caps Capabilities, real bool) {
+func record(num uint8, name string, caps Capabilities, facts Facts, real bool) {
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -123,11 +140,16 @@ func record(num uint8, name string, caps Capabilities, real bool) {
 				num, name))
 		}
 		// Promote metadata → real (or a redundant metadata-only repeat,
-		// which is a harmless no-op). byName is already correct.
+		// which is a harmless no-op). byName is already correct. Facts are
+		// the same static data in both the metadata and the impl
+		// registration; fill them in if the earlier entry lacked them.
+		if existing.facts == (Facts{}) && facts != (Facts{}) {
+			existing.facts = facts
+		}
 		if real && !existing.real {
 			existing.real = true
-			byNumber[num] = existing
 		}
+		byNumber[num] = existing
 		return
 	}
 
@@ -135,7 +157,7 @@ func record(num uint8, name string, caps Capabilities, real bool) {
 		panic(fmt.Sprintf("algorithms: name %q already registered (was %d)",
 			name, existing))
 	}
-	byNumber[num] = entry{number: num, name: name, caps: caps, real: real}
+	byNumber[num] = entry{number: num, name: name, caps: caps, facts: facts, real: real}
 	byName[name] = num
 }
 
@@ -229,6 +251,10 @@ type AlgorithmInfo struct {
 	ForDNSSEC bool   `json:"fordnssec"`
 	ForKSK    bool   `json:"forksk"`
 	ForZSK    bool   `json:"forzsk"`
+	// Facts is the static, machine-independent enrichment (sizes, NIST
+	// level, maturity, description). Carried so a server can report it to
+	// the CLI listing, replacing the old algorithms.yaml enrichment file.
+	Facts Facts `json:"facts"`
 }
 
 // All returns every genuinely-usable (real) algorithm, sorted by
@@ -250,6 +276,7 @@ func All() []AlgorithmInfo {
 			ForDNSSEC: e.caps.ForDNSSEC,
 			ForKSK:    e.caps.ForKSK,
 			ForZSK:    e.caps.ForZSK,
+			Facts:     e.facts,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -263,21 +290,26 @@ func All() []AlgorithmInfo {
 // per-algorithm switch arms, not the registry), but tdns code needs
 // to know they exist for argument validation and --help output.
 func init() {
+	// Classical algorithms have small signatures and are usable in either
+	// DNSSEC role, so ForKSK and ForZSK are both set. Their facts (sizes;
+	// RSA shown for a 2048-bit key) are inlined here because the generated
+	// metadata only covers the registry (PQ) algorithms, not the miekg/dns
+	// built-ins. These mirror dnssec-algorithms/registry AlgorithmFacts.
+	dnssecCaps := Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: true}
 	for _, b := range []struct {
-		num  uint8
-		name string
-		caps Capabilities
+		num   uint8
+		name  string
+		caps  Capabilities
+		facts Facts
 	}{
-		// Classical algorithms have small signatures and are usable in
-		// either DNSSEC role, so ForKSK and ForZSK are both set.
-		{dns.RSASHA256, "RSASHA256", Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: true}},
-		{dns.RSASHA512, "RSASHA512", Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: true}},
-		{dns.ECDSAP256SHA256, "ECDSAP256SHA256", Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: true}},
-		{dns.ECDSAP384SHA384, "ECDSAP384SHA384", Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: true}},
-		{dns.ED25519, "ED25519", Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: true}},
+		{dns.RSASHA256, "RSASHA256", dnssecCaps, Facts{PubKeyBytes: 260, SigBytes: 256, SecKeyBytes: 1192, Maturity: "builtin", Description: "RSA with SHA-256 (RFC 5702); classical. Sizes for a 2048-bit key (variable)"}},
+		{dns.RSASHA512, "RSASHA512", dnssecCaps, Facts{PubKeyBytes: 260, SigBytes: 256, SecKeyBytes: 1192, Maturity: "builtin", Description: "RSA with SHA-512 (RFC 5702); classical. Sizes for a 2048-bit key (variable)"}},
+		{dns.ECDSAP256SHA256, "ECDSAP256SHA256", dnssecCaps, Facts{PubKeyBytes: 64, SigBytes: 64, SecKeyBytes: 32, Maturity: "builtin", Description: "ECDSA P-256 with SHA-256 (RFC 6605); classical, widely deployed"}},
+		{dns.ECDSAP384SHA384, "ECDSAP384SHA384", dnssecCaps, Facts{PubKeyBytes: 96, SigBytes: 96, SecKeyBytes: 48, Maturity: "builtin", Description: "ECDSA P-384 with SHA-384 (RFC 6605); classical"}},
+		{dns.ED25519, "ED25519", dnssecCaps, Facts{PubKeyBytes: 32, SigBytes: 64, SecKeyBytes: 32, Maturity: "builtin", Description: "Edwards-curve DSA (RFC 8080); classical"}},
 	} {
 		// Built-ins are genuinely usable (miekg/dns handles them via
 		// its per-algorithm switch arms), so they are real.
-		record(b.num, b.name, b.caps, true)
+		record(b.num, b.name, b.caps, b.facts, true)
 	}
 }

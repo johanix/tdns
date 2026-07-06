@@ -224,6 +224,31 @@ func capsLiteral(c Caps) string {
 		c.ForSIG0, c.ForDNSSEC, c.ForKSK, c.ForZSK)
 }
 
+// factsLiteral emits an algs.Facts composite literal, omitting zero-valued
+// fields so a factless algorithm renders as algs.Facts{}.
+func factsLiteral(f Facts) string {
+	var parts []string
+	if f.PubKeyBytes != 0 {
+		parts = append(parts, fmt.Sprintf("PubKeyBytes: %d", f.PubKeyBytes))
+	}
+	if f.SigBytes != 0 {
+		parts = append(parts, fmt.Sprintf("SigBytes: %d", f.SigBytes))
+	}
+	if f.SecKeyBytes != 0 {
+		parts = append(parts, fmt.Sprintf("SecKeyBytes: %d", f.SecKeyBytes))
+	}
+	if f.SecurityLevel != 0 {
+		parts = append(parts, fmt.Sprintf("SecurityLevel: %d", f.SecurityLevel))
+	}
+	if f.Maturity != "" {
+		parts = append(parts, fmt.Sprintf("Maturity: %q", f.Maturity))
+	}
+	if f.Description != "" {
+		parts = append(parts, fmt.Sprintf("Description: %q", f.Description))
+	}
+	return "algs.Facts{" + strings.Join(parts, ", ") + "}"
+}
+
 func genMetadata(pkgName string, all []Alg) []byte {
 	sorted := append([]Alg(nil), all...)
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].Codepoint < sorted[j].Codepoint })
@@ -238,7 +263,7 @@ func genMetadata(pkgName string, all []Alg) []byte {
 	b.WriteString("import algs \"github.com/johanix/tdns/v2/algorithms\"\n\n")
 	b.WriteString("func init() {\n")
 	for _, a := range sorted {
-		fmt.Fprintf(&b, "\talgs.RegisterMetadata(%d, %q, %s)\n", a.Codepoint, a.Name, capsLiteral(a.Caps))
+		fmt.Fprintf(&b, "\talgs.RegisterMetadata(%d, %q, %s, %s)\n", a.Codepoint, a.Name, capsLiteral(a.Caps), factsLiteral(a.Facts))
 	}
 	b.WriteString("}\n")
 	return b.Bytes()
@@ -275,7 +300,7 @@ func genRegistered(pkgName string, selected []Alg) []byte {
 	b.WriteString("func init() {\n")
 	for _, a := range sorted {
 		pkgIdent := a.Package[strings.LastIndex(a.Package, "/")+1:]
-		fmt.Fprintf(&b, "\talgs.Register(%d, %s.New(), %s)\n", a.Codepoint, pkgIdent, capsLiteral(a.Caps))
+		fmt.Fprintf(&b, "\talgs.Register(%d, %s.New(), %s, %s)\n", a.Codepoint, pkgIdent, capsLiteral(a.Caps), factsLiteral(a.Facts))
 	}
 	b.WriteString("}\n")
 	return b.Bytes()

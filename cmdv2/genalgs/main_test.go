@@ -41,6 +41,18 @@ var Algorithms = []Alg{
 	{201, "FALCON512", dnssec, base + "falcon512", Liboqs},
 	{214, "CROSSX", Caps{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: false}, base + "crossx", Liboqs},
 }
+
+type Facts struct {
+	PubKeyBytes, SigBytes, SecKeyBytes, SecurityLevel int
+	Maturity, Description                             string
+}
+
+var AlgorithmFacts = map[string]Facts{
+	"MLDSA44":    {PubKeyBytes: 1312, SigBytes: 2420, SecKeyBytes: 2560, SecurityLevel: 2, Maturity: "final", Description: "ML-DSA-44"},
+	"SLHDSA128S": {PubKeyBytes: 32, SigBytes: 7856, SecKeyBytes: 64, SecurityLevel: 1, Maturity: "final"},
+	// FALCON512 and CROSSX deliberately have NO facts entry, to test the
+	// join leaving them zero-valued.
+}
 `
 
 func writeFixture(t *testing.T) string {
@@ -86,6 +98,20 @@ func TestParseRegistry(t *testing.T) {
 	// Inline Caps literal resolved.
 	if crossx := byName["CROSSX"]; !crossx.Caps.ForKSK || crossx.Caps.ForZSK {
 		t.Errorf("CROSSX inline caps parsed wrong: %+v", crossx.Caps)
+	}
+
+	// Facts joined by name.
+	if f := byName["MLDSA44"].Facts; f.PubKeyBytes != 1312 || f.SigBytes != 2420 ||
+		f.SecurityLevel != 2 || f.Maturity != "final" || f.Description != "ML-DSA-44" {
+		t.Errorf("MLDSA44 facts parsed wrong: %+v", f)
+	}
+	// An algorithm with a facts entry but omitted optional fields.
+	if f := byName["SLHDSA128S"].Facts; f.SigBytes != 7856 || f.Description != "" {
+		t.Errorf("SLHDSA128S facts parsed wrong: %+v", f)
+	}
+	// An algorithm with NO facts entry keeps zero-valued Facts.
+	if f := byName["FALCON512"].Facts; f != (Facts{}) {
+		t.Errorf("FALCON512 should have zero Facts (no AlgorithmFacts entry), got %+v", f)
 	}
 }
 

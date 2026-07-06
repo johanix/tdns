@@ -25,6 +25,19 @@ type Alg struct {
 	Caps      Caps
 	Package   string
 	Group     string
+	Facts     Facts // joined from AlgorithmFacts by Name; zero if none
+}
+
+// Facts mirrors the registry's Facts struct — static, spec-fixed
+// enrichment. Parsed from the AlgorithmFacts map and joined to each Alg
+// by Name. All fields optional (zero = "not provided").
+type Facts struct {
+	PubKeyBytes   int
+	SigBytes      int
+	SecKeyBytes   int
+	SecurityLevel int
+	Maturity      string
+	Description   string
 }
 
 const groupPureGo = "purego"
@@ -48,6 +61,7 @@ func parseRegistry(path string) ([]Alg, error) {
 	strConsts := map[string]string{}
 	groupConsts := map[string]string{} // PureGo -> "purego", etc.
 	var algsExpr *ast.CompositeLit
+	var factsExpr *ast.CompositeLit
 
 	for _, decl := range f.Decls {
 		gd, ok := decl.(*ast.GenDecl)
@@ -76,6 +90,12 @@ func parseRegistry(path string) ([]Alg, error) {
 						return nil, fmt.Errorf("Algorithms is not a composite literal")
 					}
 					algsExpr = cl
+				case "AlgorithmFacts":
+					cl, ok := vs.Values[0].(*ast.CompositeLit)
+					if !ok {
+						return nil, fmt.Errorf("AlgorithmFacts is not a composite literal")
+					}
+					factsExpr = cl
 				default:
 					// Caps shorthand vars: `dnssec = Caps{...}`.
 					if c, ok := capsLit(vs.Values[0]); ok {
@@ -87,6 +107,14 @@ func parseRegistry(path string) ([]Alg, error) {
 	}
 	if algsExpr == nil {
 		return nil, fmt.Errorf("no `Algorithms` var found")
+	}
+
+	// Parse AlgorithmFacts (map[string]Facts keyed by name). Absent is
+	// tolerated (older registry); each algorithm without an entry keeps
+	// zero-value Facts.
+	facts, err := parseFacts(factsExpr)
+	if err != nil {
+		return nil, err
 	}
 
 	var out []Alg
@@ -125,7 +153,76 @@ func parseRegistry(path string) ([]Alg, error) {
 			Caps:      caps,
 			Package:   pkg,
 			Group:     group,
+			Facts:     facts[name], // zero value if no AlgorithmFacts entry
 		})
+	}
+	return out, nil
+}
+
+// parseFacts resolves the AlgorithmFacts map literal (map[string]Facts,
+// keyed by name) into a name->Facts map. A nil expr (no AlgorithmFacts in
+// the registry) yields an empty map. Each value is a Facts struct literal
+// with keyed fields; unknown field names are a hard error so a registry
+// schema change fails loudly rather than silently dropping data.
+func parseFacts(expr *ast.CompositeLit) (map[string]Facts, error) {
+	out := map[string]Facts{}
+	if expr == nil {
+		return out, nil
+	}
+	for i, el := range expr.Elts {
+		kv, ok := el.(*ast.KeyValueExpr)
+		if !ok {
+			return nil, fmt.Errorf("AlgorithmFacts[%d]: not a key:value entry", i)
+		}
+		name, ok := stringLit(kv.Key)
+		if !ok {
+			return nil, fmt.Errorf("AlgorithmFacts[%d]: key is not a string literal", i)
+		}
+		lit, ok := kv.Value.(*ast.CompositeLit)
+		if !ok {
+			return nil, fmt.Errorf("AlgorithmFacts[%q]: value is not a Facts literal", name)
+		}
+		var fct Facts
+		for _, fe := range lit.Elts {
+			fkv, ok := fe.(*ast.KeyValueExpr)
+			if !ok {
+				return nil, fmt.Errorf("AlgorithmFacts[%q]: fields must be keyed (Field: value)", name)
+			}
+			field, ok := fkv.Key.(*ast.Ident)
+			if !ok {
+				return nil, fmt.Errorf("AlgorithmFacts[%q]: field key is not an identifier", name)
+			}
+			switch field.Name {
+			case "PubKeyBytes", "SigBytes", "SecKeyBytes", "SecurityLevel":
+				n, err := intLit(fkv.Value)
+				if err != nil {
+					return nil, fmt.Errorf("AlgorithmFacts[%q].%s: %w", name, field.Name, err)
+				}
+				switch field.Name {
+				case "PubKeyBytes":
+					fct.PubKeyBytes = n
+				case "SigBytes":
+					fct.SigBytes = n
+				case "SecKeyBytes":
+					fct.SecKeyBytes = n
+				case "SecurityLevel":
+					fct.SecurityLevel = n
+				}
+			case "Maturity", "Description":
+				s, ok := stringLit(fkv.Value)
+				if !ok {
+					return nil, fmt.Errorf("AlgorithmFacts[%q].%s: not a string literal", name, field.Name)
+				}
+				if field.Name == "Maturity" {
+					fct.Maturity = s
+				} else {
+					fct.Description = s
+				}
+			default:
+				return nil, fmt.Errorf("AlgorithmFacts[%q]: unknown field %q", name, field.Name)
+			}
+		}
+		out[name] = fct
 	}
 	return out, nil
 }
