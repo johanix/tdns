@@ -44,7 +44,11 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 
 	// Create a local ServeMux for DnsEngine to avoid conflicts with other engines
 	dnsMux := dns.NewServeMux()
-	dnsMux.HandleFunc(".", authDNSHandler)
+	// TsigSigningHandler is installed here, on the Do53 mux, because the Do53
+	// servers below carry a TsigProvider (needed to MAC the response). DoH/DoQ
+	// receive the unwrapped authDNSHandler; DoT installs the wrapper itself in
+	// DnsDoTEngine, since it also carries a TsigProvider.
+	dnsMux.HandleFunc(".", TsigSigningHandler(authDNSHandler))
 
 	addresses := conf.DnsEngine.Addresses
 	if !CaseFoldContains(conf.DnsEngine.Transports, "do53") {
@@ -59,6 +63,11 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 				Net:           transport,
 				Handler:       dnsMux,        // Use local mux instead of global handler
 				MsgAcceptFunc: MsgAcceptFunc, // We need a tweaked version for DNS UPDATE
+				// Keystore-backed TSIG provider: verifies inbound TSIG on
+				// replication traffic (NOTIFY, AXFR/IXFR) and signs responses
+				// to signed requests (RFC 8945). tdns UPDATEs are SIG(0)-signed
+				// (a SIG RR, not a TSIG RR), so this never touches them.
+				TsigProvider: conf.tsigProvider(),
 			}
 			// Must bump the buffer size of incoming UDP msgs, as updates
 			// may be much larger then queries

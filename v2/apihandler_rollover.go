@@ -47,8 +47,8 @@ func APIRolloverStatus(conf *Config) func(w http.ResponseWriter, r *http.Request
 		// in every status response. Uses the parsed kasp.check_interval
 		// the same way KeyStateWorker does at startup.
 		var checkInterval time.Duration
-		if conf.Kasp.CheckInterval != "" {
-			if d, err := time.ParseDuration(conf.Kasp.CheckInterval); err == nil && d > 0 {
+		if conf.Dnssec.Kasp.CheckInterval != "" {
+			if d, err := time.ParseDuration(conf.Dnssec.Kasp.CheckInterval); err == nil && d > 0 {
 				checkInterval = d
 			}
 		}
@@ -58,8 +58,8 @@ func APIRolloverStatus(conf *Config) func(w http.ResponseWriter, r *http.Request
 		// kasp.propagation_delay drives the ds-published → standby
 		// timing computed in populateNextTransitions.
 		var propagationDelay time.Duration
-		if conf.Kasp.PropagationDelay != "" {
-			if d, err := time.ParseDuration(conf.Kasp.PropagationDelay); err == nil && d > 0 {
+		if conf.Dnssec.Kasp.PropagationDelay != "" {
+			if d, err := time.ParseDuration(conf.Dnssec.Kasp.PropagationDelay); err == nil && d > 0 {
 				propagationDelay = d
 			}
 		}
@@ -97,6 +97,26 @@ func APIRolloverAsap(conf *Config) func(w http.ResponseWriter, r *http.Request) 
 		lock := AcquireRolloverLock(zone)
 		lock.Lock()
 		defer lock.Unlock()
+
+		// ZSK asap: no parent-DS coordination, so "earliest" is just now —
+		// the next KeyStateWorker tick rolls if a standby ZSK exists. Set
+		// the manual request and return; the worker handles the rest
+		// (including the "due but no standby yet" wait, since the request
+		// persists until the roll commits).
+		if strings.EqualFold(req.KeyType, "ZSK") {
+			now := time.Now()
+			if err := SetZskManualRolloverRequest(kdb, zone, now, now); err != nil {
+				lgApi.Warn("rollover/asap: SetZskManualRolloverRequest failed", "zone", zone, "err", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(RolloverAsapResponse{
+				Zone:        zone,
+				RequestedAt: now.UTC().Format(time.RFC3339),
+				Earliest:    now.UTC().Format(time.RFC3339),
+			})
+			return
+		}
 
 		// asap is a write operation; refuse cleanly if a rollover is
 		// already underway. ComputeEarliestRollover itself does not
@@ -181,6 +201,16 @@ func APIRolloverCancel(conf *Config) func(w http.ResponseWriter, r *http.Request
 		lock := AcquireRolloverLock(zone)
 		lock.Lock()
 		defer lock.Unlock()
+
+		if strings.EqualFold(req.KeyType, "ZSK") {
+			if err := ClearZskManualRolloverRequest(kdb, zone); err != nil {
+				lgApi.Warn("rollover/cancel: ClearZskManualRolloverRequest failed", "zone", zone, "err", err)
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			_ = json.NewEncoder(w).Encode(RolloverCancelResponse{Zone: zone, Cleared: true})
+			return
+		}
 
 		if err := ClearManualRolloverRequest(kdb, zone); err != nil {
 			lgApi.Warn("rollover/cancel: ClearManualRolloverRequest failed", "zone", zone, "err", err)
@@ -318,13 +348,26 @@ func APIRolloverWhen(conf *Config) func(w http.ResponseWriter, r *http.Request) 
 			pol = zd.DnssecPolicy
 		}
 
-		out, err := ComputeRolloverWhen(kdb, zone, pol, time.Now())
+		// keytype selects the schedule: "" / "KSK" = the parent-DS-gated KSK
+		// schedule (default); "ZSK" = the zone-local ZSK schedule.
+		role := "KSK"
+		if strings.EqualFold(r.URL.Query().Get("keytype"), "ZSK") {
+			role = "ZSK"
+		}
+		var out *RolloverWhenResponse
+		var err error
+		if role == "ZSK" {
+			out, err = ComputeZskRolloverWhen(kdb, zone, pol, time.Now())
+		} else {
+			out, err = ComputeRolloverWhen(kdb, zone, pol, time.Now())
+		}
 		if err != nil {
-			// ComputeRolloverWhen only returns top-level errors for
-			// empty zone (already handled above). Defensive: surface
-			// any remaining case as a Note rather than HTTP error.
-			lgApi.Debug("rollover/when: ComputeRolloverWhen returned error", "zone", zone, "err", err)
-			_ = json.NewEncoder(w).Encode(RolloverWhenResponse{Zone: zone, Note: err.Error()})
+			// The compute functions only return top-level errors for an empty
+			// zone (already handled above). Defensive: surface any remaining
+			// case as a Note rather than an HTTP error. Carry the requested
+			// role so the CLI renders the right header even on this path.
+			lgApi.Debug("rollover/when: compute returned error", "zone", zone, "err", err)
+			_ = json.NewEncoder(w).Encode(RolloverWhenResponse{Zone: zone, Role: role, Note: err.Error()})
 			return
 		}
 		_ = json.NewEncoder(w).Encode(out)

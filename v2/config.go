@@ -17,9 +17,12 @@ import (
 var Conf Config
 
 // confMu protects Conf and Globals during config reload operations.
-// Readers do not need to hold this — the reload window is brief and
-// reads during reload may see partial state, which is acceptable.
-// Only reload paths acquire the write lock.
+// Reload paths take the write lock; they replace whole maps/slices
+// (e.g. Conf.Internal.DnssecPolicies, Conf.Zones) wholesale. Readers that
+// can run concurrently with a reload — notably API handlers — must take
+// the read lock around those accesses: a bare read racing a map/slice
+// reassignment is a data race, not merely a partial-state read. Reads on
+// startup-only paths (no concurrent reload) need not lock.
 var confMu sync.RWMutex
 
 // SensitiveString wraps a string that should not appear in logs.
@@ -40,33 +43,25 @@ func (s SensitiveString) String() string {
 }
 
 type Config struct {
-	Service        ServiceConf
-	DnsEngine      DnsEngineConf
-	Imr            ImrEngineConf `yaml:"imrengine" mapstructure:"imrengine"`
-	ApiServer      ApiServerConf
-	DnssecPolicies map[string]DnssecPolicyConf
-	MultiSigner    map[string]MultiSignerConf `yaml:"multisigner"`
-	Catalog        *CatalogConf               `yaml:"catalog" mapstructure:"catalog"`
-	DynamicZones   DynamicZonesConf           `yaml:"dynamiczones" mapstructure:"dynamiczones"`
-	Zones          []ZoneConf                 `yaml:"zones"`
-	Templates      []ZoneConf                 `yaml:"templates"`
-	Kasp           KaspConf                   `yaml:"kasp" mapstructure:"kasp"`
-	Dnssec         DnssecConf                 `yaml:"dnssec" mapstructure:"dnssec"`
-	Keys           KeyConf
-	Db             DbConf
-	Registrars     map[string][]string
-	Log            LogConf
-	Internal       InternalConf
+	Service      ServiceConf
+	DnsEngine    DnsEngineConf
+	Imr          ImrEngineConf `yaml:"imrengine" mapstructure:"imrengine"`
+	ApiServer    ApiServerConf
+	MultiSigner  map[string]MultiSignerConf `yaml:"multisigner"`
+	Catalog      *CatalogConf               `yaml:"catalog" mapstructure:"catalog"`
+	DynamicZones DynamicZonesConf           `yaml:"dynamiczones" mapstructure:"dynamiczones"`
+	Zones        []ZoneConf                 `yaml:"zones"`
+	Templates    []ZoneConf                 `yaml:"templates"`
+	Dnssec       DnssecConf                 `yaml:"dnssec" mapstructure:"dnssec"`
+	Keys         KeyConf                    `yaml:"keys" mapstructure:"keys"`
+	Db           DbConf
+	Registrars   map[string][]string
+	Log          LogConf
+	Internal     InternalConf
 }
 
 // DnssecConf holds DNSSEC-wide settings consumed by the signer and IMR.
 type DnssecConf struct {
-	// LargeAlgorithms lists DNSSEC algorithm numbers whose DNSKEY/RRSIG sizes
-	// are large for UDP. The IMR may query child DNSKEY over TCP when parent
-	// DS uses one; the signer warns if one signs the bulk of a zone.
-	// Consulted ONLY when DNSKEYTransport is "use_ds_signal".
-	LargeAlgorithms []uint8 `yaml:"large_algorithms" mapstructure:"large_algorithms"`
-
 	// DNSKEYTransport selects how the IMR chooses a transport for DNSKEY
 	// queries. DNSKEY queries are ~0.1% of traffic and exempt from a server's
 	// probabilistic transport-weight distribution, so the chosen transport
@@ -80,19 +75,70 @@ type DnssecConf struct {
 	//   "force_encrypted" - bypass for all DNSKEY; encrypted only, fail the
 	//                       query if the server advertises no encrypted transport.
 	DNSKEYTransport string `yaml:"dnskey_query_transport" mapstructure:"dnskey_query_transport"`
+
+	// LargeAlgorithms lists, by algorithm NAME (e.g. "RSASHA512",
+	// "FALCON512"), the DNSSEC algorithms whose DNSKEY/RRSIG sizes are large
+	// for UDP. The IMR may query child DNSKEY over TCP when parent DS uses
+	// one; the signer warns if one signs the bulk of a zone. Names (not
+	// codepoints) because non-standardized PQ codepoints are assigned per
+	// deployment at runtime by algorithms.Register — a bare codepoint could
+	// mean different algorithms on the IMR and the signer. A name unknown to
+	// the running binary's registry is a hard config error.
+	LargeAlgorithms []string `yaml:"large_algorithms" mapstructure:"large_algorithms"`
+
+	// SplitAlgorithms gates which KSK/ZSK algorithm pairs a policy may use.
+	// Keyed by KSK algorithm name; the value lists ZSK algorithm names that
+	// algorithm's KSK is permitted to pair with. A policy whose KSK and ZSK
+	// algorithms differ is rejected at parse time unless the pair appears
+	// here. Same-algorithm policies are always allowed and need no entry.
+	SplitAlgorithms map[string][]string `yaml:"split_algorithms" mapstructure:"split_algorithms"`
+
+	// Templates are named, partial DNSSEC policies. A policy may set
+	// `template: <name>` to inherit (deep-merge) the gaps in its own definition
+	// from the named template here; the policy's own values always win.
+	// Templates are not registered as usable policies themselves.
+	// YAML: dnssec.templates:.
+	Templates map[string]DnssecPolicyConf `yaml:"templates" mapstructure:"templates"`
+
+	// Policies are the named DNSSEC policies a zone references via its
+	// dnssec_policy field. YAML: dnssec.policies:.
+	Policies map[string]DnssecPolicyConf `yaml:"policies" mapstructure:"policies"`
+
+	// Kasp is the Key and Signing Policy controlling the KeyStateWorker.
+	// YAML: dnssec.kasp:.
+	Kasp KaspConf `yaml:"kasp" mapstructure:"kasp"`
+
+	// Completeness selects the signer's RFC 4035 §2.2 completeness mode,
+	// deployment-wide (NOT per-zone/per-policy — see the algorithm-rollover
+	// design doc §4.4). "strict" (default) honors completeness: a ZSK
+	// algorithm rollover keeps the old-algorithm key signing through the
+	// drain window (maintained double-signature). "relaxed" (alg-split
+	// regime) drops the old key at the switch (drain only, no maintained
+	// double-signature) — sound because completeness binds the signer, not
+	// the validator. The mode also selects the standby-counting discipline
+	// for a ZSK roll (role-only vs per-(role,algorithm)). Empty = strict.
+	// YAML: dnssec.completeness:.
+	Completeness string `yaml:"completeness" mapstructure:"completeness"`
 }
+
+// DNSSEC completeness modes (Conf.Internal.Completeness / dnssec.completeness).
+const (
+	CompletenessStrict  = "strict"
+	CompletenessRelaxed = "relaxed"
+)
 
 // KaspConf holds Key and Signing Policy parameters for the signer.
 // Controls the KeyStateWorker's automatic key state transitions and standby key maintenance.
-// YAML key: "kasp:"
+// YAML key: "dnssec.kasp:"
 //
 // Example:
 //
-//	kasp:
-//	    propagation_delay: 1h
-//	    standby_zsk_count: 1
-//	    standby_ksk_count: 0
-//	    check_interval: 1m
+//	dnssec:
+//	    kasp:
+//	        propagation_delay: 1h
+//	        standby_zsk_count: 1
+//	        standby_ksk_count: 0
+//	        check_interval: 1m
 type KaspConf struct {
 	// PropagationDelay is how long to wait for DNSKEY RRsets to propagate
 	// through all caches before allowing state transitions.
@@ -438,7 +484,8 @@ type InternalDnsConf struct {
 	ResignQ             chan *ZoneData     // the names of zones that should be kept re-signed should be sent into this channel
 	RRsetCache          *cache.RRsetCacheT // ConcurrentMap of cached RRsets from queries
 	ImrEngine           *Imr
-	Scanner             *Scanner // Scanner instance for async job tracking
+	Scanner             *Scanner      // Scanner instance for async job tracking
+	TsigKeyStore        *TsigKeyStore // name->secret store for replication TSIG (Improvement 2)
 }
 
 // InternalConf holds DNS-internal state (channels, engine references).
@@ -452,6 +499,17 @@ type InternalConf struct {
 	// DNSKEYTransport is the validated policy derived from
 	// Dnssec.DNSKEYTransport. Defaults to DNSKEYTransportUseDSSignal.
 	DNSKEYTransport DNSKEYTransportPolicy
+
+	// SplitAlgorithms is the derived lookup set from Dnssec.SplitAlgorithms:
+	// kskAlg -> set of permitted zskAlgs. nil/empty means no mixed pair is
+	// allowed (only same-algorithm KSK/ZSK policies pass).
+	SplitAlgorithms map[uint8]map[uint8]bool
+
+	// Completeness is the resolved DNSSEC completeness mode from
+	// Dnssec.Completeness ("strict" | "relaxed"), defaulted to "strict".
+	// Read by the algorithm-rollover reconcile (step 2) to decide whether a
+	// ZSK algorithm roll runs relaxed or is refused under strict.
+	Completeness string
 
 	// PostParseZonesHook is called after ParseZones completes during
 	// reload (SIGHUP or "config reload-zones"). Set by MP apps to
@@ -501,17 +559,17 @@ func validateKaspPropagationDelay(s string) error {
 
 // KaspPropagationDelay returns the configured kasp.propagation_delay, or 1h.
 func (conf *Config) KaspPropagationDelay() time.Duration {
-	if conf == nil || conf.Kasp.PropagationDelay == "" {
+	if conf == nil || conf.Dnssec.Kasp.PropagationDelay == "" {
 		return defaultKaspPropagationDelay
 	}
-	d, err := time.ParseDuration(conf.Kasp.PropagationDelay)
+	d, err := time.ParseDuration(conf.Dnssec.Kasp.PropagationDelay)
 	if err != nil || d <= 0 {
 		if err != nil {
 			lgConfig.Warn("invalid kasp.propagation_delay, using default",
-				"value", conf.Kasp.PropagationDelay, "default", defaultKaspPropagationDelay, "err", err)
+				"value", conf.Dnssec.Kasp.PropagationDelay, "default", defaultKaspPropagationDelay, "err", err)
 		} else {
 			lgConfig.Warn("kasp.propagation_delay must be positive, using default",
-				"value", conf.Kasp.PropagationDelay, "default", defaultKaspPropagationDelay)
+				"value", conf.Dnssec.Kasp.PropagationDelay, "default", defaultKaspPropagationDelay)
 		}
 		return defaultKaspPropagationDelay
 	}
@@ -525,8 +583,35 @@ func (conf *Config) ReloadConfig() (string, error) {
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
 	}
+	// Rebuild the TSIG store ONLY after a successful parse. With KeyDB, reconcile
+	// config keys in place (§6).
+	if err == nil {
+		if conf.Internal.KeyDB != nil {
+			if _, kerr := conf.reconcileAndRefreshTsigKeys(TsigReconcileOptions{}); kerr != nil {
+				lgConfig.Error("TSIG keys: config error on reload (affected keys skipped)", "err", kerr)
+			}
+		} else if kerr := conf.LoadTsigKeys(); kerr != nil {
+			lgConfig.Error("TSIG keys: config error on reload (affected keys skipped)", "err", kerr)
+		}
+	}
 	Globals.App.ServerConfigTime = time.Now()
 	return "Config reloaded.", err
+}
+
+// ReloadTsigConfig re-reads keys.tsig from the config file and reconciles the DB
+// keystore + live cache. opts.Force / opts.Overwrite resolve secret conflicts (§6).
+func (conf *Config) ReloadTsigConfig(opts TsigReconcileOptions) (TsigReconcileResult, error) {
+	confMu.Lock()
+	defer confMu.Unlock()
+	if conf.Internal.KeyDB == nil {
+		return TsigReconcileResult{}, fmt.Errorf("TSIG keystore reconcile requires KeyDB")
+	}
+	if err := conf.reloadTsigKeysFromFile(); err != nil {
+		return TsigReconcileResult{}, err
+	}
+	result, err := conf.reconcileAndRefreshTsigKeys(opts)
+	Globals.App.ServerConfigTime = time.Now()
+	return result, err
 }
 
 func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
@@ -539,6 +624,14 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 	if err := conf.reloadTemplatesFromFile(); err != nil {
 		lgConfig.Warn("ReloadZoneConfig: failed to reload templates", "err", err)
 		// Continue with existing templates rather than failing entirely
+	}
+
+	// Re-read and re-parse the dnssec: block from the config file so zones are
+	// re-applied against the CURRENT policy definitions — an edited policy is
+	// picked up here, no separate `config reload` needed first. A parse error
+	// leaves the previous policies in place rather than failing the whole reload.
+	if err := conf.reloadDnssecFromFile(); err != nil {
+		lgConfig.Error("ReloadZoneConfig: failed to re-parse dnssec config, keeping previous policies", "err", err)
 	}
 
 	prezones := Zones.Keys()
@@ -560,12 +653,21 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 			lgConfig.Warn("ReloadZoneConfig: zone not in config and also not in zone list", "zone", zname)
 			continue
 		}
-		if zd.Options[OptAutomaticZone] {
-			lgConfig.Info("ReloadZoneConfig: zone is automatic, not removing from zone list", "zone", zname)
+		// Spare any LIVE dynamic/managed zone (catalog zone, catalog member, or
+		// API-managed) — these are never in the static config. Guard on the
+		// markers directly, NOT ShouldPersistZone: the latter is false for
+		// storage: memory, which is a disk-persistence policy, not a liveness
+		// signal — a memory-backed dynamic zone is still a valid live zone and
+		// must survive a config reload.
+		if zd.Options[OptCatalogZone] || zd.Options[OptAutomaticZone] || zd.Options[OptApiManagedZone] {
+			lgConfig.Info("ReloadZoneConfig: zone is dynamic/managed, not removing from zone list", "zone", zname)
 			continue
 		}
 		lgConfig.Info("ReloadZoneConfig: zone no longer in config, removing from zone list", "zone", zname)
 		Zones.Remove(zname)
+		// Bump generation so any in-flight refresh on the captured pointer fails
+		// the pre-persist guard (B5b) and does not resurrect the removed zone.
+		zd.generation.Add(1)
 	}
 
 	lgConfig.Info("ReloadZones: zones after reloading", "zones", zonelist, "broken", brokenlist)

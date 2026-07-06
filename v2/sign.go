@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"context"
 	"crypto/rand"
 	"fmt"
 	"math/big"
@@ -267,6 +268,122 @@ func (zd *ZoneData) refreshActiveDnssecKeys(kdb *KeyDB, context string) (*Dnssec
 	return dak, nil
 }
 
+// reconcileActiveKeyAlgorithms reconciles active keys against the zone's policy
+// algorithm. For a SAME-algorithm policy (the common case) it is a no-op. For an
+// algorithm MISMATCH the behavior is mode-aware (dnssec.completeness):
+//
+//   - ZSK mismatch, RELAXED mode: do NOT retire the wrong-alg active ZSK. The
+//     gradual FIFO ZSK roll (change-policy binds the new alg → newly-generated
+//     keys carry it → standbys drain in order, asap is the throttle) carries
+//     the transition. Retiring here would be the unsafe synchronous swap.
+//   - ZSK mismatch, STRICT mode: REFUSE. Strict-mode algorithm rollover
+//     (maintained whole-zone double-signature) is not implemented; running the
+//     legacy synchronous retire would produce an unsafe zone.
+//   - KSK mismatch, EITHER mode: REFUSE. A KSK algorithm rollover must go
+//     through the parent-coordinated engine (standby DS gate); the legacy
+//     immediate retire here bypasses the gate and bogus-zones the parent DS
+//     chain. Not yet built — refuse rather than run the unsafe swap.
+//
+// CSK mode (Mode==csk) early-returns: it never reaches the key loops, so a CSK
+// algorithm change is refused at the ENTRY layer (change-policy/set-policy), not
+// here. See the algorithm-rollover plan §8.3.
+//
+// It returns true if it retired/removed any key (the caller must then re-fetch
+// the active set). Refusals are returned as errors so a background re-sign can
+// never silently run the unsafe swap — the entry layer is the front door, this
+// is the backstop.
+func (zd *ZoneData) reconcileActiveKeyAlgorithms(kdb *KeyDB, dak *DnssecKeys) (bool, error) {
+	if zd.DnssecPolicy == nil || zd.DnssecPolicy.Mode == DnssecPolicyModeCSK {
+		return false, nil
+	}
+
+	relaxed := Conf.Internal.Completeness == CompletenessRelaxed
+
+	rolloverInProgress := false
+	if row, err := LoadRolloverZoneRow(kdb, zd.ZoneName); err != nil {
+		return false, err
+	} else if row != nil {
+		rolloverInProgress = row.RolloverInProgress
+	}
+
+	// KSK algorithm mismatch is REFUSED in both modes — a KSK alg rollover is
+	// parent-coordinated engine work (not yet built), and the legacy immediate
+	// retire below would bypass the standby DS gate and bogus the parent chain.
+	for _, ksk := range dak.KSKs {
+		if ksk.DnskeyRR.Algorithm != zd.DnssecPolicy.KSKAlgorithm {
+			return false, fmt.Errorf("KSK algorithm rollover not implemented for zone %s (active KSK %d is %s, policy wants %s); route via the auto-rollover engine — not yet built",
+				zd.ZoneName, ksk.KeyId, dns.AlgorithmToString[ksk.DnskeyRR.Algorithm], dns.AlgorithmToString[zd.DnssecPolicy.KSKAlgorithm])
+		}
+	}
+
+	// ZSK algorithm mismatch: refuse in strict mode; no-op in relaxed mode (the
+	// gradual roll carries it). A matching ZSK falls through to the leftover
+	// sweep below unchanged.
+	for _, zsk := range dak.ZSKs {
+		if zsk.DnskeyRR.Flags != 256 { // KSK-reused-as-CSK handled by the KSK loop
+			continue
+		}
+		if zsk.DnskeyRR.Algorithm == zd.DnssecPolicy.ZSKAlgorithm {
+			continue
+		}
+		if !relaxed {
+			return false, fmt.Errorf("strict-mode ZSK algorithm rollover not implemented for zone %s (active ZSK %d is %s, policy wants %s); set dnssec.completeness: relaxed to roll the ZSK algorithm gradually",
+				zd.ZoneName, zsk.KeyId, dns.AlgorithmToString[zsk.DnskeyRR.Algorithm], dns.AlgorithmToString[zd.DnssecPolicy.ZSKAlgorithm])
+		}
+		lgSigner.Info("relaxed mode: active ZSK algorithm differs from policy; leaving it for the gradual FIFO roll (not retiring)",
+			"zone", zd.ZoneName, "keyid", zsk.KeyId,
+			"have", dns.AlgorithmToString[zsk.DnskeyRR.Algorithm], "want", dns.AlgorithmToString[zd.DnssecPolicy.ZSKAlgorithm])
+	}
+
+	retiredAny := false
+
+	// Standby and published keys of a wrong algorithm are normally leftovers
+	// from a prior policy — they never signed, so removing them is safe and
+	// drops them out of the DNSKEY RRset. BUT in relaxed mode an old-alg
+	// standby/published ZSK during a roll is a legitimate FIFO member, not a
+	// leftover: deleting it by algorithm would break the gradual drain. So in
+	// relaxed mode SKIP the algorithm-based deletion for same-role ZSK keys
+	// (the standby total-count cap in maintainStandbyKeys is the relaxed-mode
+	// bloat valve instead). KSK leftovers are still removed (respecting the
+	// rollover-in-progress guard); strict mode is unchanged.
+	for _, state := range []string{DnskeyStateStandby, DnskeyStatePublished} {
+		keys, err := GetDnssecKeysByState(kdb, zd.ZoneName, state)
+		if err != nil {
+			return retiredAny, fmt.Errorf("reconcile: list %s keys for zone %s: %w", state, zd.ZoneName, err)
+		}
+		for _, k := range keys {
+			var want uint8
+			role := "ZSK"
+			if k.Flags&dns.SEP != 0 {
+				want, role = zd.DnssecPolicy.KSKAlgorithm, "KSK"
+			} else {
+				want = zd.DnssecPolicy.ZSKAlgorithm
+			}
+			if k.Algorithm == want {
+				continue
+			}
+			if role == "ZSK" && relaxed {
+				// Legitimate old-alg FIFO member during a relaxed roll.
+				continue
+			}
+			if role == "KSK" && rolloverInProgress {
+				lgSigner.Warn("non-active KSK algorithm differs from policy but a rollover is in progress; deferring removal",
+					"zone", zd.ZoneName, "keyid", k.KeyTag, "state", state)
+				continue
+			}
+			lgSigner.Info("removing non-active DNSSEC key: algorithm no longer matches policy",
+				"zone", zd.ZoneName, "keyid", k.KeyTag, "role", role, "state", state,
+				"have", dns.AlgorithmToString[k.Algorithm], "want", dns.AlgorithmToString[want])
+			if err := UpdateDnssecKeyState(kdb, zd.ZoneName, k.KeyTag, DnskeyStateRemoved); err != nil {
+				return retiredAny, fmt.Errorf("reconcile: remove %s %d (%s) for zone %s: %w", role, k.KeyTag, state, zd.ZoneName, err)
+			}
+			retiredAny = true
+		}
+	}
+
+	return retiredAny, nil
+}
+
 // EnsureActiveDnssecKeys ensures that a zone has active DNSSEC keys.
 // If no active keys exist, it will:
 // 1. Try to promote published keys to active (if available)
@@ -281,6 +398,24 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 	if err != nil {
 		lgSigner.Error("failed to get DNSSEC active keys", "zone", zd.ZoneName, "err", err)
 		return nil, err
+	}
+
+	// Reconcile the active key algorithms against the policy. An active-key
+	// algorithm mismatch is REFUSED with an error (a KSK mismatch in either
+	// mode, a ZSK mismatch under strict completeness) — never the legacy
+	// synchronous retire, which is the unsafe path for an algorithm change. A
+	// relaxed-mode ZSK mismatch is a no-op (the gradual roll carries it). The
+	// boolean return reports only whether non-active leftover keys
+	// (standby/published of a wrong algorithm) were removed, in which case we
+	// re-fetch the active set. On a same-algorithm zone this is an idempotent
+	// no-op, safe on every sign/re-sign.
+	if removed, err := zd.reconcileActiveKeyAlgorithms(kdb, dak); err != nil {
+		return nil, err
+	} else if removed {
+		dak, err = zd.refreshActiveDnssecKeys(kdb, "after algorithm reconcile")
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// If we already have active keys (including a real ZSK, not just KSK reused as CSK), return them
@@ -549,6 +684,63 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 	lgSigner.Info("ResignZone completed",
 		"zone", zd.ZoneName, "rrsigs_written", newrrsigs)
 	return newrrsigs, nil
+}
+
+// StripZoneRRSIGs removes, from every RRset in the served zone data, the RRSIGs
+// for which remove(rrsig) returns true. It is purely subtractive — it does NOT
+// re-sign. Used to drop orphan signatures left by a key that was removed (a key
+// in "removed" state, or hard-deleted by `clear`): such a key is no longer in
+// the DNSKEY RRset, so its RRSIGs are unvalidatable and must go. Re-signing
+// (SignZone) is additive and never removes another key's RRSIGs, which is why
+// this explicit strip is needed.
+//
+// Per-RRset atomicity matches ResignZone: each RRset is modified on a local
+// copy and published via a single RRtypes.Set, so readers never see a partial
+// state. Returns the number of RRSIGs removed. ctx lets a large-zone strip be
+// cancelled (e.g. on shutdown); callers without a meaningful context may pass
+// context.Background().
+func (zd *ZoneData) StripZoneRRSIGs(ctx context.Context, remove func(*dns.RRSIG) bool) (int, error) {
+	names, err := zd.GetOwnerNames()
+	if err != nil {
+		return 0, err
+	}
+	removed := 0
+	for _, name := range names {
+		if err := ctx.Err(); err != nil {
+			return removed, err
+		}
+		owner, err := zd.GetOwner(name)
+		if err != nil {
+			return removed, err
+		}
+		if owner == nil {
+			continue
+		}
+		for _, rrt := range owner.RRtypes.Keys() {
+			rrset := owner.RRtypes.GetOnlyRRSet(rrt)
+			if len(rrset.RRSIGs) == 0 {
+				continue
+			}
+			kept := rrset.RRSIGs[:0:0]
+			changed := false
+			for _, sig := range rrset.RRSIGs {
+				if rrsig, ok := sig.(*dns.RRSIG); ok && remove(rrsig) {
+					removed++
+					changed = true
+					continue
+				}
+				kept = append(kept, sig)
+			}
+			if changed {
+				rrset.RRSIGs = kept
+				owner.RRtypes.Set(rrt, rrset)
+			}
+		}
+	}
+	if removed > 0 {
+		lgSigner.Info("stripped orphan RRSIGs from zone", "zone", zd.ZoneName, "count", removed)
+	}
+	return removed, nil
 }
 
 // XXX: MaybesignRRset should report on whether it actually signed anything

@@ -163,49 +163,53 @@ keybootstrap:
       nameservers:	all	# one | all
 
 dnssec:
-   large_algorithms: [ 10 ]   # RSASHA512 stand-in for large KSK
+   large_algorithms: [ RSASHA512 ]   # by name; stand-in for large KSK
 
-dnssecpolicies:
-   default:
-      algorithm:  ED25519
-      ksk:
-         lifetime:  forever
-      zsk:
-         lifetime:  forever
-      csk:
-         lifetime:  none
-      sigvalidity:
-         default:  14d
-         dnskey:   30d
-         ds:       14d
+   # Authorizes the "large-ksk" policy's mixed KSK/ZSK pair below.
+   split_algorithms:
+      RSASHA512: [ ECDSAP256SHA256 ]
 
-   large-ksk:
-      algorithm:  ECDSAP256SHA256
-      ksk:
-         algorithm:  RSASHA512
-         lifetime:   90d
-      zsk:
+   policies:
+      default:
+         algorithm:  ED25519
+         ksk:
+            lifetime:  forever
+         zsk:
+            lifetime:  forever
+         csk:
+            lifetime:  none
+         sigvalidity:
+            default:  14d
+            dnskey:   30d
+            ds:       14d
+
+      large-ksk:
          algorithm:  ECDSAP256SHA256
-         lifetime:   30d
-      csk:
-         lifetime:  none
-      sigvalidity:
-         default:  14d
-         dnskey:   30d
-         ds:       14d
+         ksk:
+            algorithm:  RSASHA512
+            lifetime:   90d
+         zsk:
+            algorithm:  ECDSAP256SHA256
+            lifetime:   30d
+         csk:
+            lifetime:  none
+         sigvalidity:
+            default:  14d
+            dnskey:   30d
+            ds:       14d
 
-   fastroll:
-      algorithm:  ED25519
-      ksk:
-         lifetime:  48h
-      zsk:
-         lifetime:  12h   # drives automated ZSK rollover (KeyStateWorker)
-      csk:
-         lifetime:  none
-      sigvalidity:
-         default:  14d
-         dnskey:   30d
-         ds:       14d
+      fastroll:
+         algorithm:  ED25519
+         ksk:
+            lifetime:  48h
+         zsk:
+            lifetime:  12h   # drives automated ZSK rollover (KeyStateWorker)
+         csk:
+            lifetime:  none
+         sigvalidity:
+            default:  14d
+            dnskey:   30d
+            ds:       14d
 
 db:
    file:		/var/tmp/tdns-agent.db

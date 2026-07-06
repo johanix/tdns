@@ -364,20 +364,48 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 			continue
 		}
 
-		// Determine store value (default to "map" if not specified)
-		storeValue := configGroupConfig.Store
-		if storeValue == "" {
-			storeValue = "map"
+		// Dynamic zones are map-only (§3 breaking change). An explicit non-map
+		// store on a config group is now an ERROR (was silently coerced to map
+		// by parseZoneStore); announce it rather than honour a store we no
+		// longer support for dynamically managed secondaries.
+		if s := configGroupConfig.Store; s != "" && parseZoneStore(s) != MapZone {
+			lg.Error("CATALOG: config group requests non-map store, which is no longer supported for dynamic zones; forcing map", "zone", zoneName, "group", member.MetaGroup, "store", s)
 		}
 
 		// RULE 4: Auto-configure zone using config group
-		lg.Info("CATALOG: auto-configuring zone", "zone", zoneName, "group", member.MetaGroup, "upstream", configGroupConfig.Upstream, "store", storeValue)
+		lg.Info("CATALOG: auto-configuring zone", "zone", zoneName, "group", member.MetaGroup, "upstream", configGroupConfig.Upstream, "store", "map")
+
+		// The group's tsig_key (if any) names a key in the keys: store; put that
+		// name on the primary so the SOA probe / AXFR is signed with it (the
+		// secret is resolved by name at transfer time, SignForPeer). Validate
+		// against the keys: store, not the retired Globals.TsigKeys.
+		primaryKey := NOKEY
+		if configGroupConfig.TsigKey != "" {
+			if !conf.tsigKeyDefined(configGroupConfig.TsigKey) {
+				// Fail closed: a configured-but-undefined tsig_key must not silently
+				// downgrade to unsigned transfers. Skip the member until the key is
+				// defined (mirrors the static primary-key validation in ParseZones).
+				lg.Error("CATALOG: tsig_key not defined (add via keys.tsig or keystore tsig), skipping zone (fail closed, not unsigned)", "key", configGroupConfig.TsigKey, "zone", zoneName, "group", member.MetaGroup)
+				skippedCount++
+				continue
+			}
+			primaryKey = configGroupConfig.TsigKey
+		}
+		primariesConf := []PeerConf{{Addr: configGroupConfig.Upstream, Key: primaryKey}}
+		res := resolvePrimaries(ctx, conf.Internal.ImrEngine, primariesConf)
+		if len(res.Resolved) == 0 {
+			lg.Error("CATALOG: upstream did not resolve to an address, skipping zone", "zone", zoneName, "group", member.MetaGroup, "upstream", configGroupConfig.Upstream, "unresolved", res.Unresolved)
+			skippedCount++
+			continue
+		}
+		upstreams := res.Resolved
 
 		zd := &ZoneData{
 			ZoneName:      zoneName,
 			ZoneType:      Secondary,
-			ZoneStore:     parseZoneStore(storeValue),
-			Upstream:      NormalizeAddress(configGroupConfig.Upstream),
+			ZoneStore:     MapZone, // dynamic zones are map-only (§3)
+			PrimariesConf: primariesConf,
+			Upstreams:     upstreams,
 			Logger:        log.Default(),
 			SourceCatalog: update.CatalogZone,
 			Options: map[ZoneOption]bool{
@@ -392,17 +420,8 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 			}
 		}
 
-		// Configure TSIG if specified
-		if configGroupConfig.TsigKey != "" {
-			_, ok := Globals.TsigKeys[configGroupConfig.TsigKey]
-			if !ok {
-				lg.Warn("CATALOG: TSIG key not found", "key", configGroupConfig.TsigKey, "zone", zoneName)
-			} else {
-				// Apply TSIG configuration to zone
-				// TODO: Set zd.TsigKey = tsigDetails (depends on TSIG implementation)
-				lg.Info("CATALOG: applied TSIG key", "key", configGroupConfig.TsigKey, "zone", zoneName)
-			}
-		}
+		// (TSIG for the upstream is now carried by primariesConf[].Key above and
+		// resolved by name from the keys: store at transfer time.)
 
 		// Add to Zones map
 		Zones.Set(zoneName, zd)
@@ -423,7 +442,6 @@ func AutoConfigureZonesFromCatalog(ctx context.Context, update *CatalogZoneUpdat
 		zr := ZoneRefresher{
 			Name:      zoneName,
 			ZoneType:  Secondary,
-			Primary:   NormalizeAddress(configGroupConfig.Upstream),
 			ZoneStore: zd.ZoneStore,
 			Options:   zd.Options,
 		}
@@ -475,13 +493,18 @@ func getConfigGroupNames(configGroups map[string]*ConfigGroupConfig) []string {
 // Defaults to MapZone if empty or unknown (matching parseconfig.go behavior)
 func parseZoneStore(storeStr string) ZoneStore {
 	storeStr = strings.ToLower(strings.TrimSpace(storeStr))
+	// Accept both the canonical config tokens (xfr/map/slice) and the legacy
+	// display forms (xfrzone/mapzone/slicezone) the daemon used to persist, so
+	// existing dynamic-config files load without a spurious warning. Callers
+	// that re-persist normalize back to the canonical token (zoneStoreConfigToken).
 	switch storeStr {
-	case "xfr":
+	case "xfr", "xfrzone":
 		return XfrZone
-	case "map":
+	case "map", "mapzone":
 		return MapZone
-	case "slice":
-		return SliceZone
+	case "slice", "slicezone":
+		lg.Warn("zone store type slice is deprecated, using map", "store", storeStr)
+		return MapZone
 	case "":
 		// Default to map when not specified
 		return MapZone

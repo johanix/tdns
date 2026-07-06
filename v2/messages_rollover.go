@@ -120,6 +120,15 @@ type RolloverStatus struct {
 	// by active_seq, most recent first).
 	HiddenRemovedKskCount int                `json:"hiddenRemovedKskCount,omitempty"`
 	ZSKs                  []RolloverKeyEntry `json:"zsks"`
+	// HiddenRemovedZskCount is the ZSK analog of HiddenRemovedKskCount:
+	// removed ZSKs beyond the display cap, omitted from ZSKs.
+	HiddenRemovedZskCount int `json:"hiddenRemovedZskCount,omitempty"`
+
+	// AlgTransition is set when a ZSK algorithm rollover is in flight (an
+	// active/standby/retired ZSK whose algorithm ≠ the effective-policy ZSK
+	// algorithm — the same drain-window predicate the change-policy re-entrancy
+	// guard uses). nil when no roll is in progress.
+	AlgTransition *AlgTransitionInfo `json:"algTransition,omitempty"`
 
 	// Policy summary. Verbose mode shows this; compact mode hides it.
 	Policy *PolicySummary `json:"policy,omitempty"`
@@ -155,6 +164,10 @@ type RolloverKeyEntry struct {
 	KeyID     uint16 `json:"keyid"`
 	ActiveSeq *int   `json:"activeSeq,omitempty"`
 	State     string `json:"state"`
+	// Algorithm is the DNSSEC algorithm name (e.g. "ED25519", "MAYO5").
+	// Shown in the verbose key table; central to watching an algorithm
+	// rollover, where old- and new-algorithm keys coexist in the pipeline.
+	Algorithm string `json:"algorithm,omitempty"`
 	// Published: KSK — short publish label (none / DS / DS+DNSKEY).
 	// ZSK — RFC3339 wall time of published_at when set (operator column published_at).
 	Published       string `json:"published,omitempty"`
@@ -195,14 +208,31 @@ type RolloverKeyEntry struct {
 // PolicySummary is the slice of DnssecPolicy operators want to see
 // in status output. Doesn't expose private-key-relevant fields.
 type PolicySummary struct {
-	Name                     string `json:"name"`
-	Algorithm                string `json:"algorithm"`
+	Name      string `json:"name"`
+	Algorithm string `json:"algorithm"`
+	// Per-role algorithm names (e.g. "ED25519", "MAYO5"). Surfaced so the
+	// status header can show the effective KSK/ZSK algorithms without -v,
+	// and so an algorithm transition is visible.
+	KSKAlgorithm             string `json:"kskAlgorithm,omitempty"`
+	ZSKAlgorithm             string `json:"zskAlgorithm,omitempty"`
 	KskLifetime              string `json:"kskLifetime"`
 	ZskLifetime              string `json:"zskLifetime,omitempty"`
 	DsPublishDelay           string `json:"dsPublishDelay"`
 	MaxAttemptsBeforeBackoff int    `json:"maxAttemptsBeforeBackoff"`
 	SoftfailDelay            string `json:"softfailDelay"`
 	ClampingMargin           string `json:"clampingMargin,omitempty"`
+}
+
+// AlgTransitionInfo describes an in-flight ZSK algorithm rollover for the
+// status header line: e.g. "ZSK alg rollover: ED25519 → MAYO5 (in progress)".
+// FromAlg/ToAlg are algorithm names; Done/Total are a coarse progress count
+// (target-alg ZSKs / all live ZSK pipeline members).
+type AlgTransitionInfo struct {
+	Role    string `json:"role"` // currently always "ZSK"
+	FromAlg string `json:"fromAlg"`
+	ToAlg   string `json:"toAlg"`
+	Done    int    `json:"done"`
+	Total   int    `json:"total"`
 }
 
 // RolloverWhenResponse is returned by GET /api/v1/rollover/when.
@@ -216,7 +246,11 @@ type PolicySummary struct {
 // InProgress=true is the operator-facing signal that the times
 // reflect projection rather than current schedule.
 type RolloverWhenResponse struct {
-	Zone             string                  `json:"zone"`
+	Zone string `json:"zone"`
+	// Role is the key role this schedule is for: "KSK" (parent-DS gated) or
+	// "ZSK" (zone-local, no parent gates). Drives the renderer's header and
+	// whether a gates section applies. Empty is treated as "KSK".
+	Role             string                  `json:"role,omitempty"`
 	CurrentTime      string                  `json:"currentTime,omitempty"`      // RFC3339 UTC, server's wallclock
 	NextScheduled    string                  `json:"nextScheduled,omitempty"`    // RFC3339 UTC
 	EarliestPossible string                  `json:"earliestPossible,omitempty"` // RFC3339 UTC
@@ -257,6 +291,10 @@ type RolloverWhenGateEntry struct {
 // scheduled rollover.
 type RolloverAsapRequest struct {
 	Zone string `json:"zone"`
+	// KeyType selects which role to roll: "" or "KSK" (default) = KSK,
+	// "ZSK" = ZSK. ZSK uses the lighter ZskRolloverState manual-request
+	// path (no parent-DS coordination).
+	KeyType string `json:"keytype,omitempty"`
 }
 
 type RolloverAsapResponse struct {
@@ -270,6 +308,8 @@ type RolloverAsapResponse struct {
 // Request/response types for POST /api/v1/rollover/cancel.
 type RolloverCancelRequest struct {
 	Zone string `json:"zone"`
+	// KeyType: "" / "KSK" (default) = KSK, "ZSK" = ZSK.
+	KeyType string `json:"keytype,omitempty"`
 }
 
 type RolloverCancelResponse struct {
@@ -310,7 +350,7 @@ type ConfigPathsResponse struct {
 	DBFile     string `json:"dbFile"`     // sqlite keystore
 	// PolicyName is the dnssecpolicy attached to the zone named in
 	// ?zone=. Empty when ?zone= is not provided or the zone has no
-	// rollover policy. CLI uses this to pick which dnssecpolicies
+	// rollover policy. CLI uses this to pick which dnssec.policies
 	// block to validate.
 	PolicyName string `json:"policyName,omitempty"`
 }

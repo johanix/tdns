@@ -37,7 +37,12 @@ type NotifyResponse struct {
 
 // XXX: The whole point with the NotifierEngine is to be able to control the max rate of send notifications per
 // zone. This is not yet implemented, but this is where to do it.
-func Notifier(ctx context.Context, notifyreqQ chan NotifyRequest) error {
+// Notifier drains the NOTIFY queue and sends outbound NOTIFYs, signing each with
+// the matching notify-peer's TSIG key (Improvement 2). conf is threaded for the
+// key store. NOTE: tdns-mp pins a published tdns/v2 and calls Notifier at four
+// sites (start_signer/agent/auditor/combiner) — when it bumps the dependency,
+// pass its conf.Config: Notifier(ctx, conf.Config, conf.Config.Internal.NotifyQ).
+func Notifier(ctx context.Context, conf *Config, notifyreqQ chan NotifyRequest) error {
 
 	lgDns.Info("NotifierEngine: starting")
 	for {
@@ -55,7 +60,7 @@ func Notifier(ctx context.Context, notifyreqQ chan NotifyRequest) error {
 
 			lgDns.Info("NotifierEngine: will notify downstreams", "zone", zd.ZoneName)
 
-			rcode, ede, sendErr := zd.SendNotify(ctx, nr.RRtype, nr.Targets)
+			rcode, ede, sendErr := zd.SendNotify(ctx, conf, nr.RRtype, nr.Targets)
 
 			if nr.Response != nil {
 				resp := NotifyResponse{
@@ -92,7 +97,7 @@ func Notifier(ctx context.Context, notifyreqQ chan NotifyRequest) error {
 // ctx cancels in-flight per-target sends. On daemon shutdown, the
 // caller cancels ctx and the per-target loop exits at the next
 // iteration boundary or via ExchangeContext returning early.
-func (zd *ZoneData) SendNotify(ctx context.Context, ntype uint16, targets []string) (int, []dns.EDNS0_EDE, error) {
+func (zd *ZoneData) SendNotify(ctx context.Context, conf *Config, ntype uint16, targets []string) (int, []dns.EDNS0_EDE, error) {
 	if zd.ZoneName == "." {
 		return dns.RcodeServerFailure, nil, fmt.Errorf("zone %q: error: zone name not specified. Ignoring notify request", zd.ZoneName)
 	}
@@ -101,8 +106,10 @@ func (zd *ZoneData) SendNotify(ctx context.Context, ntype uint16, targets []stri
 
 	switch ntype {
 	case dns.TypeSOA:
-		// Here we only need the downstreams
-		if len(zd.Downstreams) == 0 {
+		// We send to the targets passed in by the caller (derived from the
+		// zone's notify peers), so validate that slice — not zd.Notify, which
+		// can diverge from the actual targets for this request.
+		if len(targets) == 0 {
 			return dns.RcodeServerFailure, nil, fmt.Errorf("zone %q: error: no downstreams. Ignoring notify request", zd.ZoneName)
 		}
 
@@ -134,6 +141,8 @@ func (zd *ZoneData) SendNotify(ctx context.Context, ntype uint16, targets []stri
 	var lastFailRcode int
 	var lastFailEDE []dns.EDNS0_EDE
 	haveLastFailRcode := false
+	var lastSetupErr error
+	attemptedTargets := 0
 
 	for i, dst := range targets {
 		// Honor cancellation between targets so daemon shutdown
@@ -149,6 +158,18 @@ func (zd *ZoneData) SendNotify(ctx context.Context, ntype uint16, targets []stri
 
 		// remove SOA, add ntype
 		m.Question = []dns.Question{dns.Question{Name: zd.ZoneName, Qtype: ntype, Qclass: dns.ClassINET}}
+
+		// Sign the NOTIFY with the matching notify-peer's key (NOKEY => unsigned).
+		// c is reused across targets, so the per-target provider (nil for NOKEY)
+		// is reset every iteration.
+		provider, serr := SignForPeer(m, zd.notifyKeyFor(dst), conf)
+		if serr != nil {
+			lgDns.Error("NOTIFY: TSIG sign setup failed, skipping target", "zone", zd.ZoneName, "target", dst, "err", serr)
+			lastSetupErr = serr
+			continue
+		}
+		attemptedTargets++
+		c.TsigProvider = provider
 
 		lgDns.Debug("sending NOTIFY message", "msg", m.String())
 
@@ -184,6 +205,13 @@ func (zd *ZoneData) SendNotify(ctx context.Context, ntype uint16, targets []stri
 			// engine into the transport bucket and lose the EDE
 			// context that's the whole point of Phase 4 plumbing.
 			return lastFailRcode, lastFailEDE, nil
+		}
+		// No target was attempted at all because every one's TSIG sign setup failed
+		// (e.g. an unknown key): surface that real cause rather than a generic "no
+		// response". If at least one target WAS attempted (signed) but failed
+		// transport, fall through to the no-response error below.
+		if attemptedTargets == 0 && lastSetupErr != nil {
+			return dns.RcodeServerFailure, nil, fmt.Errorf("TSIG setup failed for NOTIFY target(s): %w", lastSetupErr)
 		}
 		// No response from any target at all → genuine transport
 		// failure. err is non-nil only on this branch.

@@ -10,12 +10,23 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strings"
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
 	"github.com/ryanuber/columnize"
 	"github.com/spf13/cobra"
 )
+
+// peerConfAddrsString joins the .Addr value of each PeerConf with commas,
+// for compact display of notify peers in the zone listing.
+func peerConfAddrsString(peers []tdns.PeerConf) string {
+	addrs := make([]string, 0, len(peers))
+	for _, p := range peers {
+		addrs = append(addrs, p.Addr)
+	}
+	return strings.Join(addrs, ",")
+}
 
 // NewZoneCmd returns a fresh "zone" command tree bound to the given
 // role. Additional subcommands may be attached via extras — used by
@@ -88,6 +99,41 @@ func NewZoneCmd(role string, extras ...*cobra.Command) *cobra.Command {
 		Run:   func(cmd *cobra.Command, args []string) { RunZoneBump(role, args) },
 	}
 
+	var setPolicyName string
+	setPolicy := &cobra.Command{
+		Use:   "set-policy",
+		Short: "Set a zone's DNSSEC policy at runtime (persists as an override, not in YAML)",
+		Long: `Apply a DNSSEC policy to a zone in the running server. The change is stored
+as a per-zone override in the keystore and survives restart, but does NOT
+update the zone's dnssec_policy in the YAML config — update that separately
+to make the new policy the permanent base. If the new policy uses different
+key algorithms, the old keys are retired (their signatures kept until the
+KeyStateWorker removes them) and new keys take over; the zone stays signed
+throughout.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			RunZoneSetPolicy(role, setPolicyName)
+		},
+	}
+	setPolicy.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to set the DNSSEC policy for")
+	setPolicy.Flags().StringVarP(&setPolicyName, "policy", "p", "", "DNSSEC policy name to apply")
+	setPolicy.MarkFlagRequired("zone")
+	setPolicy.MarkFlagRequired("policy")
+
+	proxyKey := &cobra.Command{
+		Use:   "proxy-key",
+		Short: "Show the delegation-sync-proxy UPDATE state and the KEY to publish at the primary",
+		Long: `For a zone with the delegation-sync-proxy option (a tdns-agent acting as a
+secondary for a DSYNC-unaware primary), report whether the agent can proxy
+DNS UPDATEs to the parent, and — when waiting — print the exact records to
+add at the primary apex (the agent's KEY RR and an HSYNCPARAM pubkey flag).
+States: update-unsupported / ready / foreign-key / waiting-for-key.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			RunZoneProxyKey(role)
+		},
+	}
+	proxyKey.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to report proxy-key state for")
+	proxyKey.MarkFlagRequired("zone")
+
 	nsec := &cobra.Command{
 		Use:   "nsec",
 		Short: "Prefix command, not usable by itself",
@@ -108,7 +154,66 @@ func NewZoneCmd(role string, extras ...*cobra.Command) *cobra.Command {
 	}
 	nsec.AddCommand(nsecGenerate, nsecShow)
 
-	c.AddCommand(list, nsec, sign, resign, reload, bump, write, freeze, thaw)
+	// Dynamic-zones management (add/delete/modify/list-dynamic). No --store
+	// flag: dynamic zones are map-only. The --tsig-* flags are accepted now but
+	// inert in Improvement 1 (a non-NOKEY key is rejected server-side).
+	var dzPrimaryKey, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo string
+	var dzPrimaries, dzOptions []string
+
+	add := &cobra.Command{
+		Use:   "add",
+		Short: "Add a dynamic secondary zone at runtime (persists across restart)",
+		Run: func(cmd *cobra.Command, args []string) {
+			RunZoneAdd(role, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo)
+		},
+	}
+	add.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add")
+	add.Flags().StringSliceVar(&dzPrimaries, "primaries", nil, "Primary (upstream) addresses [host:port], comma-separated")
+	add.Flags().StringVar(&dzPrimaryKey, "primary-key", tdns.NOKEY, "Primary TSIG key name applied to all primaries (NOKEY for none)")
+	add.Flags().StringSliceVar(&dzOptions, "options", nil, "Zone options (comma-separated)")
+	add.Flags().StringVar(&dzTsigName, "tsig-name", "", "Inline TSIG key name; created in keystore if absent and applied to keyless primaries")
+	add.Flags().StringVar(&dzTsigSecretFile, "tsig-secret-file", "", "File containing the inline TSIG secret (base64); preferred over --tsig-secret")
+	add.Flags().StringVar(&dzTsigSecret, "tsig-secret", "", "Inline TSIG secret (base64). WARNING: visible in shell history / process list; prefer --tsig-secret-file")
+	add.Flags().StringVar(&dzTsigAlgo, "tsig-algo", "", "Inline TSIG algorithm (default hmac-sha256)")
+	add.MarkFlagRequired("zone")
+	add.MarkFlagRequired("primaries")
+
+	del := &cobra.Command{
+		Use:   "delete",
+		Short: "Delete a dynamic (API-managed) zone",
+		Run: func(cmd *cobra.Command, args []string) {
+			RunZoneDelete(role)
+		},
+	}
+	del.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to delete")
+	del.MarkFlagRequired("zone")
+
+	modify := &cobra.Command{
+		Use:   "modify",
+		Short: "Modify a dynamic (API-managed) zone's primary or options",
+		Run: func(cmd *cobra.Command, args []string) {
+			RunZoneModify(role, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo)
+		},
+	}
+	modify.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to modify")
+	modify.Flags().StringSliceVar(&dzPrimaries, "primaries", nil, "New primary (upstream) addresses [host:port], comma-separated")
+	modify.Flags().StringVar(&dzPrimaryKey, "primary-key", tdns.NOKEY, "New primary TSIG key name applied to all primaries (NOKEY for none)")
+	modify.Flags().StringSliceVar(&dzOptions, "options", nil, "Zone options (comma-separated)")
+	modify.Flags().StringVar(&dzTsigName, "tsig-name", "", "Inline TSIG key name; created in keystore if absent (existing keys cannot be rotated here)")
+	modify.Flags().StringVar(&dzTsigSecretFile, "tsig-secret-file", "", "File containing the inline TSIG secret (base64); preferred over --tsig-secret")
+	modify.Flags().StringVar(&dzTsigSecret, "tsig-secret", "", "Inline TSIG secret (base64). WARNING: visible in shell history / process list; prefer --tsig-secret-file")
+	modify.Flags().StringVar(&dzTsigAlgo, "tsig-algo", "", "Inline TSIG algorithm (default hmac-sha256)")
+	modify.MarkFlagRequired("zone")
+
+	listDynamic := &cobra.Command{
+		Use:   "list-dynamic",
+		Short: "List dynamic zones (catalog members + API-managed) and their provisioning state",
+		Run: func(cmd *cobra.Command, args []string) {
+			RunZoneListDynamic(role)
+		},
+	}
+
+	c.AddCommand(list, nsec, sign, resign, reload, bump, write, freeze, thaw, setPolicy, proxyKey, add, del, modify, listDynamic)
 	// Role-independent extras attached to every zone tree. Each is built
 	// fresh so the command pointer is unique per NewZoneCmd invocation.
 	c.AddCommand(newZoneReadFakeCmd(), newZoneUpdateCmd(role), newZoneDsyncCmd(role))
@@ -222,6 +327,58 @@ func RunZoneWrite(parent string, args []string) {
 	}
 }
 
+func RunZoneSetPolicy(parent, policy string) {
+	if tdns.Globals.Zonename == "" {
+		fmt.Println("Error: zone name not specified")
+		os.Exit(1)
+	}
+	api, err := GetApiClient(parent, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", parent, err)
+	}
+
+	cr, err := SendZoneCommand(api, tdns.ZonePost{
+		Command: "set-policy",
+		Zone:    dns.Fqdn(tdns.Globals.Zonename),
+		Policy:  policy,
+	})
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		os.Exit(1)
+	}
+
+	if cr.Msg != "" {
+		fmt.Printf("%s\n", cr.Msg)
+	}
+}
+
+func RunZoneProxyKey(parent string) {
+	if tdns.Globals.Zonename == "" {
+		fmt.Println("Error: zone name not specified")
+		os.Exit(1)
+	}
+	api, err := GetApiClient(parent, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", parent, err)
+	}
+
+	cr, err := SendZoneCommand(api, tdns.ZonePost{
+		Command: "proxy-key",
+		Zone:    dns.Fqdn(tdns.Globals.Zonename),
+	})
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		os.Exit(1)
+	}
+	if cr.Error {
+		fmt.Printf("Error: %s\n", cr.ErrorMsg)
+		os.Exit(1)
+	}
+	if cr.Msg != "" {
+		fmt.Printf("%s\n", cr.Msg)
+	}
+}
+
 func RunZoneList(parent string, args []string) {
 	api, err := GetApiClient(parent, true)
 	if err != nil {
@@ -271,6 +428,163 @@ func RunZoneBump(parent string, args []string) {
 	}
 }
 
+// peerConfsFromAddrs builds a []PeerConf from comma-listed addresses, applying
+// the single CLI key to each. Per-primary keys remain expressible via the
+// structured YAML/API paths.
+func peerConfsFromAddrs(addrs []string, key string) []tdns.PeerConf {
+	out := make([]tdns.PeerConf, 0, len(addrs))
+	for _, a := range addrs {
+		a = strings.TrimSpace(a)
+		if a == "" {
+			continue
+		}
+		out = append(out, tdns.PeerConf{Addr: a, Key: key})
+	}
+	return out
+}
+
+// resolveTsigSecret returns the inline TSIG secret from --tsig-secret-file
+// (preferred — not exposed in shell history or process listings) or the literal
+// --tsig-secret flag. Setting both is an error.
+func resolveTsigSecret(literal, file string) (string, error) {
+	if file == "" {
+		return literal, nil
+	}
+	if literal != "" {
+		return "", fmt.Errorf("set only one of --tsig-secret or --tsig-secret-file")
+	}
+	b, err := os.ReadFile(file)
+	if err != nil {
+		return "", fmt.Errorf("reading --tsig-secret-file %q: %w", file, err)
+	}
+	return strings.TrimSpace(string(b)), nil
+}
+
+func RunZoneAdd(role string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigSecretFile, tsigAlgo string) {
+	if tdns.Globals.Zonename == "" {
+		fmt.Println("Error: zone name not specified")
+		os.Exit(1)
+	}
+	secret, err := resolveTsigSecret(tsigSecret, tsigSecretFile)
+	if err != nil {
+		fmt.Printf("Error: %s\n", err.Error())
+		os.Exit(1)
+	}
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", role, err)
+	}
+	cr, err := SendZoneCommand(api, tdns.ZonePost{
+		Command:    "add",
+		Zone:       dns.Fqdn(tdns.Globals.Zonename),
+		Primaries:  peerConfsFromAddrs(primaries, primaryKey),
+		Options:    options,
+		TsigName:   tsigName,
+		TsigSecret: secret,
+		TsigAlgo:   tsigAlgo,
+	})
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		os.Exit(1)
+	}
+	if cr.Msg != "" {
+		fmt.Printf("%s\n", cr.Msg)
+	}
+}
+
+func RunZoneDelete(role string) {
+	if tdns.Globals.Zonename == "" {
+		fmt.Println("Error: zone name not specified")
+		os.Exit(1)
+	}
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", role, err)
+	}
+	cr, err := SendZoneCommand(api, tdns.ZonePost{
+		Command: "delete",
+		Zone:    dns.Fqdn(tdns.Globals.Zonename),
+	})
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		os.Exit(1)
+	}
+	if cr.Msg != "" {
+		fmt.Printf("%s\n", cr.Msg)
+	}
+}
+
+func RunZoneModify(role string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigSecretFile, tsigAlgo string) {
+	if tdns.Globals.Zonename == "" {
+		fmt.Println("Error: zone name not specified")
+		os.Exit(1)
+	}
+	secret, err := resolveTsigSecret(tsigSecret, tsigSecretFile)
+	if err != nil {
+		fmt.Printf("Error: %s\n", err.Error())
+		os.Exit(1)
+	}
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", role, err)
+	}
+	post := tdns.ZonePost{
+		Command:    "modify",
+		Zone:       dns.Fqdn(tdns.Globals.Zonename),
+		Options:    options,
+		TsigName:   tsigName,
+		TsigSecret: secret,
+		TsigAlgo:   tsigAlgo,
+	}
+	if peers := peerConfsFromAddrs(primaries, primaryKey); len(peers) > 0 {
+		post.Primaries = peers
+	}
+	cr, err := SendZoneCommand(api, post)
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		os.Exit(1)
+	}
+	if cr.Msg != "" {
+		fmt.Printf("%s\n", cr.Msg)
+	}
+}
+
+func RunZoneListDynamic(role string) {
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", role, err)
+	}
+	cr, err := SendZoneCommand(api, tdns.ZonePost{Command: "list-dynamic"})
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		os.Exit(1)
+	}
+	if len(cr.Zones) == 0 {
+		fmt.Println("No dynamic zones.")
+		return
+	}
+	names := make([]string, 0, len(cr.Zones))
+	for name := range cr.Zones {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	out := []string{"Zone|Type|Provisioning|Managed|Primary|Error"}
+	for _, name := range names {
+		zc := cr.Zones[name]
+		managed := "catalog"
+		if zc.ApiManaged {
+			managed = "api"
+		}
+		errStr := ""
+		if zc.Error {
+			errStr = zc.ErrorMsg
+		}
+		out = append(out, fmt.Sprintf("%s|%s|%s|%s|%s|%s",
+			name, zc.Type, zc.Provisioning, managed, peerConfAddrsString(zc.Primaries), errStr))
+	}
+	fmt.Println(columnize.SimpleFormat(out))
+}
+
 func SendZoneCommand(api *tdns.ApiClient, data tdns.ZonePost) (tdns.ZoneResponse, error) {
 	var cr tdns.ZoneResponse
 	bytebuf := new(bytes.Buffer)
@@ -315,7 +629,11 @@ func ListZones(cr tdns.ZoneResponse) {
 	}
 	zoneLines := []string{}
 	for zname, zconf := range cr.Zones {
-		if zconf.Error {
+		// Service-impacting errors collapse to a single ERROR row. A
+		// non-service-impacting error (e.g. ConfigWarning: serving from a subset
+		// of primaries) leaves the zone serving, so render it normally and
+		// annotate it below rather than masquerading as an ERROR.
+		if zconf.Error && tdns.ErrorTypeIsServiceImpacting(zconf.ErrorType) {
 			line := fmt.Sprintf("%s|%s||||Error[%s]: %s", zname, "ERROR", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
 			zoneLines = append(zoneLines, line)
 			continue
@@ -327,15 +645,18 @@ func ListZones(cr tdns.ZoneResponse) {
 		sort.Strings(opts)
 		line := fmt.Sprintf("%s|%s|%s|", zname, zconf.Type, zconf.Store)
 		if showprimary {
-			line += fmt.Sprintf("%s|", zconf.Primary)
+			line += fmt.Sprintf("%s|", peerConfAddrsString(zconf.Primaries))
 		}
 		if shownotify {
-			line += fmt.Sprintf("%s|", zconf.Notify)
+			line += fmt.Sprintf("%s|", peerConfAddrsString(zconf.Notify))
 		}
 		if showfile {
 			line += fmt.Sprintf("%s|", zconf.Zonefile)
 		}
 		line += fmt.Sprintf("%t|%t|%v", zconf.Frozen, zconf.Dirty, opts)
+		if zconf.Error { // non-service-impacting => a warning; the zone still serves
+			line += fmt.Sprintf(" [%s: %s]", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
+		}
 		zoneLines = append(zoneLines, line)
 	}
 	sort.Slice(zoneLines, func(i, j int) bool {
@@ -361,7 +682,14 @@ func VerboseListZone(cr tdns.ZoneResponse) {
 	for zname, zconf := range cr.Zones {
 		line := fmt.Sprintf("zone: %s\n", zname)
 		if zconf.Error {
-			line += fmt.Sprintf("\tState: ERROR ErrorType: %s ErrorMsg: %s\n", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
+			// A service-impacting error is ERROR; a non-service-impacting
+			// warning (e.g. ConfigWarning) leaves the zone serving — render it
+			// as such, matching ListZones rather than masquerading as ERROR.
+			if tdns.ErrorTypeIsServiceImpacting(zconf.ErrorType) {
+				line += fmt.Sprintf("\tState: ERROR ErrorType: %s ErrorMsg: %s\n", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
+			} else {
+				line += fmt.Sprintf("\tState: serving Warning[%s]: %s\n", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
+			}
 		}
 		opts := []string{}
 		for _, opt := range zconf.Options {
@@ -370,7 +698,19 @@ func VerboseListZone(cr tdns.ZoneResponse) {
 		sort.Strings(opts)
 		line += fmt.Sprintf("\tType: %s\tStore: %s\tOptions: %v\n", zconf.Type, zconf.Store, opts)
 
-		line += fmt.Sprintf("\tPrimary: %s\tNotify: %s\tFile: %s\n", zconf.Primary, zconf.Notify, zconf.Zonefile)
+		if zconf.EffectiveDnssecPolicy != "" {
+			pol := zconf.EffectiveDnssecPolicy
+			if zconf.DnssecPolicyOverridden {
+				if zconf.DnssecPolicyConfigBase != "" {
+					pol += fmt.Sprintf(" (override from config: %s)", zconf.DnssecPolicyConfigBase)
+				} else {
+					pol += " (override; set live, not in config)"
+				}
+			}
+			line += fmt.Sprintf("\tDNSSEC policy: %s\n", pol)
+		}
+
+		line += fmt.Sprintf("\tPrimary: %s\tNotify: %s\tFile: %s\n", peerConfAddrsString(zconf.Primaries), peerConfAddrsString(zconf.Notify), zconf.Zonefile)
 
 		// Check for catalog zone flags
 		isCatalogZone := false

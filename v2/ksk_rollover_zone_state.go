@@ -993,6 +993,17 @@ func StateSinceForDnssecKey(kdb *KeyDB, zone string, k *DnssecKeyWithTimestamps)
 		if k.RetiredAt != nil {
 			return *k.RetiredAt
 		}
+	case DnskeyStateRemoved:
+		// ZSKs have no RolloverKeyState row, so the generic
+		// rollover_state_at fallback below returns zero and the status
+		// table would show "-" for a removed ZSK. retired_at (preserved on
+		// the DnssecKeyStore row through removal — the retired→removed
+		// transition stamps no new timestamp) is the best available
+		// "state since" for a removed ZSK. KSK removed keys still resolve
+		// via rollover_state_at below.
+		if k.Flags&dns.SEP == 0 && k.RetiredAt != nil {
+			return *k.RetiredAt
+		}
 	case DnskeyStateActive:
 		if k.Flags&dns.SEP == 0 && k.ActiveAt != nil {
 			return *k.ActiveAt
@@ -1005,6 +1016,15 @@ func StateSinceForDnssecKey(kdb *KeyDB, zone string, k *DnssecKeyWithTimestamps)
 			return *k.ActiveAt
 		}
 	case DnskeyStateStandby:
+		// ZSKs have no RolloverKeyState row and DnssecKeyStore has no
+		// standby_at column (the published→standby transition stamps
+		// nothing). Use published_at as the state-since: for a ZSK the
+		// published→standby gap is just propagation_delay, so published_at
+		// is effectively "standby since". KSKs fall through to the
+		// RolloverKeyState lookups below.
+		if k.Flags&dns.SEP == 0 && k.PublishedAt != nil {
+			return *k.PublishedAt
+		}
 		// Genuine standby (post-C18): the key reached propagated-
 		// standby state. RolloverKeyState.standby_at is the
 		// transition moment.

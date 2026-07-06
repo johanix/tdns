@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"fmt"
 	"net/http"
 	"time"
 
@@ -31,19 +32,131 @@ type KeystorePost struct {
 	ParentState     uint8
 	Creator         string
 	Force           bool // commit destructive operation; otherwise dry-run (used by 'purge')
+	// TSIG keystore (tsig-mgmt); do not overload Algorithm uint8 above.
+	TsigKeyname   string `json:"tsigkeyname,omitempty"`
+	TsigAlgorithm string `json:"tsigalgorithm,omitempty"`
+	TsigSecret    string `json:"tsigsecret,omitempty"`
+	Owner         string `json:"owner,omitempty"`
+	Interactive   bool   `json:"interactive,omitempty"`
+	TsigImportData   string   `json:"tsigimportdata,omitempty"`
+	TsigImportFormat string   `json:"tsigimportformat,omitempty"`
+	TsigOverwrite    []string `json:"tsigoverwrite,omitempty"`
+	TsigVerbose      bool     `json:"tsigverbose,omitempty"`
+}
+
+type TsigKeyInfo struct {
+	Name      string `json:"name"`
+	Algorithm string `json:"algorithm"`
+	Origin    string `json:"origin"`
+	Owner     string `json:"owner"`
+	RefCount  int    `json:"refcount"`
+	Created   string `json:"created"`
+}
+
+// TsigKeyDisposition reports per-key outcome for import (and similar batch ops).
+type TsigKeyDisposition struct {
+	Name   string `json:"name"`
+	Status string `json:"status"` // imported | unchanged | conflict
+}
+
+// TsigCacheDelta records in-memory cache patches to apply after a successful DB
+// commit (§4). Not echoed on the API wire.
+type TsigCacheDelta struct {
+	Changed []string
+	Deleted []string
 }
 
 type KeystoreResponse struct {
-	AppName    string
-	Time       time.Time
-	Status     string
-	Zone       string
-	Dnskeys    map[string]DnssecKey // TrustAnchor
-	Sig0keys   map[string]Sig0Key
-	Algorithms []algorithms.AlgorithmInfo // populated by the "list-algorithms" command
-	Msg        string
-	Error      bool
-	ErrorMsg   string
+	AppName        string
+	Time           time.Time
+	Status         string
+	Zone           string
+	Dnskeys        map[string]DnssecKey // TrustAnchor
+	Sig0keys       map[string]Sig0Key
+	TsigKeys       []TsigKeyInfo              `json:"tsigkeys,omitempty"`
+	TsigImport     []TsigKeyDisposition       `json:"tsigimport,omitempty"`
+	TsigExport     *TsigKeyExport             `json:"tsigexport,omitempty"`
+	Algorithms     []algorithms.AlgorithmInfo // populated by the "list-algorithms" command
+	Policies       []DnssecPolicyInfo         // populated by the "list-policies" command
+	Msg            string
+	Error          bool
+	ErrorMsg       string
+	TsigCacheDelta *TsigCacheDelta `json:"-"`
+}
+
+// TsigKeyExport carries a TSIG key's secret back to the caller for the explicit
+// `tsig export` command. This is the ONE keystore response that returns a secret
+// (list/status never do) — deliberately, since export's whole purpose is to hand
+// the operator the secret. It exposes nothing a direct read of the keystore
+// SQLite DB (secrets stored in cleartext) would not: the DB is a convenience
+// store, not an HSM, so the API key is the trust boundary, not the secret-at-rest.
+type TsigKeyExport struct {
+	Name      string
+	Algorithm string
+	Secret    string
+}
+
+// DnssecPolicyInfo is the wire-friendly projection of a DnssecPolicy that the
+// "list-policies" command returns: algorithms rendered as names (not
+// codepoints) and durations as strings, so the CLI can render a table without
+// the server's internal types. PolicyError is non-empty for a policy that was
+// defined in config but rejected at parse (the other fields are then best-effort).
+type DnssecPolicyInfo struct {
+	Name           string `json:"name"`
+	PolicyError    string `json:"policyerror,omitempty"`
+	Algorithm      string `json:"algorithm,omitempty"`
+	KSKAlgorithm   string `json:"kskalgorithm,omitempty"`
+	ZSKAlgorithm   string `json:"zskalgorithm,omitempty"`
+	Mode           string `json:"mode,omitempty"`
+	KSKLifetime    string `json:"ksklifetime,omitempty"`
+	ZSKLifetime    string `json:"zsklifetime,omitempty"`
+	RolloverMethod string `json:"rollovermethod,omitempty"`
+}
+
+// foreverLifetimeSecs is the seconds value GenKeyLifetime assigns to the
+// "forever" keyword (10000h). Rendered back as "forever" for display.
+const foreverLifetimeSecs = uint32(10000 * 3600)
+
+// renderLifetime turns a KeyLifetime's seconds into the operator-facing string:
+// "none" for 0, "forever" for the forever sentinel, else a duration.
+func renderLifetime(secs uint32) string {
+	switch secs {
+	case 0:
+		return "none"
+	case foreverLifetimeSecs:
+		return "forever"
+	default:
+		return (time.Duration(secs) * time.Second).String()
+	}
+}
+
+// algName renders an algorithm codepoint as its registered name, or "-" when
+// unset (0). Used so the policies listing shows names, not numbers.
+func algName(alg uint8) string {
+	if alg == 0 {
+		return "-"
+	}
+	if n := dns.AlgorithmToString[alg]; n != "" {
+		return n
+	}
+	return fmt.Sprintf("ALG%d", alg)
+}
+
+// DnssecPolicyToInfo projects a runtime DnssecPolicy into its wire form. A
+// broken policy (Error set) still produces a row — the name and error are
+// always populated; the remaining fields are whatever parsing managed to fill.
+func DnssecPolicyToInfo(p DnssecPolicy) DnssecPolicyInfo {
+	return DnssecPolicyInfo{
+		Name:           p.Name,
+		PolicyError:    p.Error,
+		Algorithm:      algName(p.Algorithm),
+		KSKAlgorithm:   algName(p.KSKAlgorithm),
+		ZSKAlgorithm:   algName(p.ZSKAlgorithm),
+		Mode:           p.Mode,
+		KSKLifetime:    renderLifetime(p.KSK.Lifetime),
+		ZSKLifetime:    renderLifetime(p.ZSK.Lifetime),
+		RolloverMethod: p.Rollover.Method.String(),
+	}
 }
 
 type TruststorePost struct {
@@ -95,9 +208,23 @@ type ZonePost struct {
 	Command    string
 	SubCommand string
 	Zone       string
+	Policy     string // target DNSSEC policy name for the "set-policy" command
 	Force      bool
 	Wait       bool
 	Timeout    string
+	// Dynamic-zones management (add/modify). No Store field — dynamic zones are
+	// map-only. Primaries carries the structured {addr, key} list; each key is a
+	// keys.tsig name, an inline TsigName (below), or NOKEY. Options are ZoneOption
+	// strings.
+	Primaries []PeerConf
+	Options   []string
+	// Inline TSIG key for the add/modify: when TsigName is set the server upserts
+	// {name, algo, secret} into its keys: store, points keyless primaries at it,
+	// and persists it with the zone (survives restart). TsigAlgo defaults to
+	// hmac-sha256. TsigSecret is request-only and never echoed back in a response.
+	TsigName   string
+	TsigSecret string
+	TsigAlgo   string
 }
 
 type ZoneResponse struct {
@@ -135,19 +262,23 @@ type ZoneDsyncResponse struct {
 	UpdateResult UpdateResult
 }
 type ConfigPost struct {
-	Command string // status | sync | ...
+	Command       string   // status | reload | reload-zones | reload-tsig | ...
+	Force         bool     // reload-tsig: overwrite secret conflicts
+	TsigOverwrite []string `json:"tsigoverwrite,omitempty"` // reload-tsig --interactive: per-key overwrite
 }
 
 type ConfigResponse struct {
-	AppName    string
-	Time       time.Time
-	DnsEngine  DnsEngineConf
-	ApiServer  ApiServerConf
-	Identities []string
-	DBFile     string
-	Msg        string
-	Error      bool
-	ErrorMsg   string
+	AppName              string
+	Time                 time.Time
+	DnsEngine            DnsEngineConf
+	ApiServer            ApiServerConf
+	Identities           []string
+	DBFile               string
+	Msg                  string
+	Error                bool
+	ErrorMsg             string
+	TsigConflicts        []string `json:"tsigconflicts,omitempty"`
+	TsigWithheldRemovals []string `json:"tsigwithheldremovals,omitempty"`
 }
 
 type DelegationPost struct {

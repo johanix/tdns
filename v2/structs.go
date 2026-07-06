@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -20,13 +21,30 @@ type ZoneStore uint8
 const (
 	XfrZone ZoneStore = iota + 1
 	MapZone
-	SliceZone
 )
 
 var ZoneStoreToString = map[ZoneStore]string{
-	XfrZone:   "XfrZone",
-	MapZone:   "MapZone",
-	SliceZone: "SliceZone",
+	XfrZone: "XfrZone",
+	MapZone: "MapZone",
+}
+
+// zoneStoreToConfigToken maps a ZoneStore to its CANONICAL config-file token
+// ("map"/"slice"/"xfr") — the form parseZoneStore reads. This is deliberately
+// distinct from ZoneStoreToString, which is the human/display form ("MapZone")
+// used in API responses and logs. Persisting config must use the token, not the
+// display string, or the daemon writes a value its own reader rejects.
+var zoneStoreToConfigToken = map[ZoneStore]string{
+	XfrZone: "xfr",
+	MapZone: "map",
+}
+
+// zoneStoreConfigToken returns the canonical config token for s, defaulting to
+// "map" for any unmapped value (matching parseZoneStore's default).
+func zoneStoreConfigToken(s ZoneStore) string {
+	if tok, ok := zoneStoreToConfigToken[s]; ok {
+		return tok
+	}
+	return "map"
 }
 
 type ZoneType uint8
@@ -85,17 +103,26 @@ type ZoneRefreshAnalysis struct {
 }
 
 type ZoneData struct {
-	mu         sync.Mutex
+	mu sync.Mutex
+	// generation is bumped on every removal/replacement of this zone
+	// (RemoveDynamicZone, ModifyDynamicZone, config-reload Zones.Remove). A
+	// refresh goroutine snapshots it at dispatch; the pre-persist guard (B5b)
+	// drops the persist if the live generation no longer matches — closing the
+	// resurrection race where a mid-flight refresh re-writes a deleted zone.
+	generation atomic.Uint64
 	ZoneName   string
-	ZoneStore  ZoneStore // 1 = "xfr", 2 = "map", 3 = "slice". An xfr zone only supports xfr related ops
+	ZoneStore  ZoneStore // 1 = "xfr", 2 = "map". An xfr zone only supports xfr related ops
 	ZoneType   ZoneType
-	Owners     Owners
-	OwnerIndex *core.ConcurrentMap[string, int]
 	ApexLen    int
 	//	RRs            RRArray
 	Data *core.ConcurrentMap[string, OwnerData]
 	// 20260415 johani: MP    *ZoneMPExtension // Multi-provider state; nil for non-MP zones
 	Ready bool // true if zd.Data has been populated (from file or upstream)
+	// Status is the positive-lifecycle state (pending -> loading -> ready),
+	// orthogonal to the error registry. Use SetStatus/GetStatus to mutate/read.
+	// Surfaced to the API as ZoneConf.Provisioning. Added alongside Ready/
+	// FirstZoneLoad without rewriting their consumers.
+	Status ZoneStatus
 
 	XfrType string // axfr | ixfr
 	Logger  *log.Logger
@@ -106,8 +133,11 @@ type ZoneData struct {
 	Verbose           bool
 	Debug             bool
 	IxfrChain         []Ixfr
-	Upstream          string   // primary from where zone is xfrred
-	Downstreams       []string // secondaries that we notify
+	PrimariesConf     []PeerConf // as-written primaries; persisted; re-resolved each load (P3)
+	Upstreams         []PeerConf // resolved addr:port tuples; runtime-only; used for transfer
+	Notify            []PeerConf // downstream secondaries that we notify (addr + key)
+	AllowNotify       []AclEntry // secondary: who may NOTIFY us; empty => accept from resolved primaries
+	Downstreams       []AclEntry // primary: who may AXFR from us (provide-xfr ACL); empty => deny
 	Zonefile          string
 	DelegationSyncQ   chan DelegationSyncRequest
 	Parent            string   // name of parentzone (if filled in)
@@ -165,6 +195,13 @@ type ZoneData struct {
 	// They receive zd which now serves the new data. Used for: queue sends (SyncQ,
 	// DelegationSyncQ) that need the live zone pointer, and any post-flip notifications.
 	OnZonePostRefresh []func(zd *ZoneData)
+
+	// ProxyRefreshAnalysis carries the delegation-sync-proxy change-detection
+	// result from the PreRefresh hook (which sees old+new zone data) to the
+	// PostRefresh hook (which acts). nil when no proxy analysis is pending.
+	// Set/consumed only on the OnZonePreRefresh/PostRefresh path for zones with
+	// OptDelSyncProxy; protected by zd.mu.
+	ProxyRefreshAnalysis *ProxyDelegationAnalysis
 }
 
 // Lock and Unlock expose the mutex for code that moves to
@@ -172,29 +209,64 @@ type ZoneData struct {
 func (zd *ZoneData) Lock()   { zd.mu.Lock() }
 func (zd *ZoneData) Unlock() { zd.mu.Unlock() }
 
+// NOKEY is the built-in sentinel key name meaning "no TSIG, unauthenticated".
+// Every PeerConf carries a key name; NOKEY makes the no-TSIG choice explicit.
+// It is a reserved name: a keys.tsig[] entry named NOKEY is rejected at parse.
+const NOKEY = "NOKEY"
+
+// PeerConf is a replication peer reference: an address plus a TSIG key name.
+// Used for the upstream primary (secondary zones) and downstream notify peers
+// (primary zones). Key is mandatory and explicit; NOKEY means unauthenticated.
+// The Legacy field is set by stringToPeerConfHook when a bare-string value is
+// found in config (pre-migration shape); a non-empty Legacy quarantines the
+// zone to ERROR at validation rather than aborting the whole-file decode.
+type PeerConf struct {
+	Addr   string `yaml:"addr" mapstructure:"addr"`
+	Key    string `yaml:"key" mapstructure:"key"`
+	Legacy string `yaml:"-" mapstructure:"-"` // bare-string marker; not config
+}
+
 // ZoneConf represents the external config for a zone; it contains no zone data
 type ZoneConf struct {
 	Name              string `validate:"required"`
 	Zonefile          string
-	Type              string `validate:"required"`
-	Store             string // xfr | map | slice | reg (defaults to "map" if not specified)
-	Primary           string // upstream, for secondary zones
-	Notify            []string
-	Downstreams       []string
+	Type              string     `validate:"required"`
+	Store             string     // xfr | map | slice | reg (defaults to "map" if not specified)
+	Primaries         []PeerConf `yaml:"primaries" mapstructure:"primaries"` // upstream set, for secondary zones
+	Notify            []PeerConf
+	AllowNotify       []AclEntry   `yaml:"allow-notify" mapstructure:"allow-notify"` // secondary: who may NOTIFY us (ip-spec + key｜NOKEY｜BLOCKED)
+	Downstreams       []AclEntry   `yaml:"downstreams" mapstructure:"downstreams"`   // primary: who may AXFR from us (provide-xfr ACL)
 	OptionsStrs       []string     `yaml:"options" mapstructure:"options"`
 	Options           []ZoneOption `yaml:"-" mapstructure:"-"` // Ignore during both yaml and mapstructure decoding
 	Frozen            bool         // true if zone is frozen; not a config param
 	Dirty             bool         // true if zone has been modified; not a config param
 	UpdatePolicy      UpdatePolicyConf
-	DelegationBackend string    `yaml:"delegationbackend" mapstructure:"delegationbackend"` // named backend for child delegation data
-	DnssecPolicy      string    `yaml:"dnssecpolicy" mapstructure:"dnssecpolicy"`
-	Template          string    `yaml:"template" mapstructure:"template"`
-	MultiSigner       string    `yaml:"multisigner" mapstructure:"multisigner"`
-	Error             bool      // zone is broken and cannot be used
-	ErrorType         ErrorType // "config" | "refresh" | "agent" | "DNSSEC"
-	ErrorMsg          string    // reason for the error (if known)
-	RefreshCount      int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
-	SourceCatalog     string    // if auto-configured, which catalog zone created this zone
+	DelegationBackend string `yaml:"delegationbackend" mapstructure:"delegationbackend"` // named backend for child delegation data
+	DnssecPolicy      string `yaml:"dnssecpolicy" mapstructure:"dnssecpolicy"`
+	// EffectiveDnssecPolicy / DnssecPolicyOverridden / DnssecPolicyConfigBase
+	// are display-only fields populated by the list-zones handler: the policy
+	// actually bound to the running zone; whether it came from a dynamic
+	// `set-policy` override (rather than the config base); and, when
+	// overridden, the config-base policy it overrides. Not config; not
+	// serialized to YAML.
+	EffectiveDnssecPolicy  string    `yaml:"-"`
+	DnssecPolicyOverridden bool      `yaml:"-"`
+	DnssecPolicyConfigBase string    `yaml:"-"`
+	Template               string    `yaml:"template" mapstructure:"template"`
+	MultiSigner            string    `yaml:"multisigner" mapstructure:"multisigner"`
+	Error                  bool      // zone is broken and cannot be used
+	ErrorType              ErrorType // "config" | "refresh" | "agent" | "DNSSEC"
+	ErrorMsg               string    // reason for the error (if known)
+	RefreshCount           int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
+	SourceCatalog          string    // if auto-configured, which catalog zone created this zone
+	// ApiManaged marks a zone created/managed via the dynamic-zones API (zone
+	// add/delete/modify). Persisted so OptApiManagedZone can be re-derived on
+	// reload — a dedicated bool, not a SourceCatalog="api" sentinel.
+	ApiManaged bool `yaml:"apimanaged" mapstructure:"apimanaged"`
+	// Provisioning is a display-only derived lifecycle string
+	// ("pending"|"loading"|"ready"|"error") populated by the list handlers from
+	// ZoneStatus + the error registry. Not config; not serialized to YAML.
+	Provisioning string `yaml:"-" mapstructure:"-"`
 }
 
 type TemplateConf struct {
@@ -335,7 +407,11 @@ type DnssecPolicyClampingConf struct {
 
 // DnssecPolicyConf should match the configuration
 type DnssecPolicyConf struct {
-	Name      string
+	Name string
+	// Template, if set, names an entry in dnssec.templates: whose fields are
+	// deep-merged into this policy to fill any gaps (this policy's own values
+	// win). Never copied from the template itself.
+	Template  string `yaml:"template" mapstructure:"template"`
 	Algorithm string
 	Mode      string `yaml:"mode" mapstructure:"mode"`
 
@@ -371,7 +447,17 @@ type PolicySigValidity struct {
 
 // DnssecPolicy is what is actually used; it is created from the corresponding DnssecPolicyConf
 type DnssecPolicy struct {
-	Name         string
+	Name string
+
+	// Error is empty for a healthy policy. When non-empty, the policy was
+	// defined in config but rejected during parse (unknown algorithm, bad
+	// lifetime, disallowed KSK/ZSK split, etc.) — the remaining fields may
+	// be incomplete and the policy must not be used for signing. A broken
+	// policy is still kept in Internal.DnssecPolicies (with Name + Error set)
+	// so it is visible to the operator and so zones referencing it can be
+	// quarantined with a clear reason.
+	Error string
+
 	Algorithm    uint8 // default / CSK algorithm
 	KSKAlgorithm uint8
 	ZSKAlgorithm uint8
@@ -421,8 +507,6 @@ type Ixfr struct {
 	Removed    []core.RRset
 	Added      []core.RRset
 }
-
-type Owners []OwnerData
 
 type OwnerData struct {
 	Name    string
@@ -508,11 +592,21 @@ func rrsToStrings(rrs []dns.RR) []string {
 }
 
 type ZoneRefresher struct {
-	Name         string
-	ZoneType     ZoneType // primary | secondary
-	Primary      string
-	Notify       []string
-	ZoneStore    ZoneStore // 1=xfr, 2=map, 3=slice
+	Name          string
+	ZoneType      ZoneType   // primary | secondary
+	PrimariesConf []PeerConf // as-written; copied to zd.PrimariesConf on merge
+	Primaries     []PeerConf // resolved; copied to zd.Upstreams on merge
+	Notify        []PeerConf
+	AllowNotify   []AclEntry // copied to zd.AllowNotify on merge
+	Downstreams   []AclEntry // copied to zd.Downstreams on merge
+	// ConfigUpdate marks a config-bearing refresher (from ParseZones /
+	// LoadDynamicZoneFiles) as opposed to a NOTIFY/refresh-only trigger. On reload
+	// it lets the merge assign Notify/AllowNotify/Downstreams even when they are
+	// nil/empty, so a config that REMOVES an ACL actually clears it (empty
+	// downstreams => deny, empty allow-notify => primaries) instead of keeping
+	// stale permissions.
+	ConfigUpdate bool
+	ZoneStore    ZoneStore // 1=xfr, 2=map
 	Zonefile     string
 	Options      map[ZoneOption]bool
 	Edns0Options *edns0.MsgOptions
@@ -586,6 +680,9 @@ type DelegationSyncRequest struct {
 	NewDnskeys   *core.RRset
 	MsignerGroup *core.RRset
 	Response     chan DelegationSyncStatus // used for API-based requests
+	// ProxyAnalysis is set for the PROXY-NOTIFY command: the changed-dimension
+	// set the proxy NOTIFY action keys on (delegation-sync-proxy).
+	ProxyAnalysis *ProxyDelegationAnalysis
 }
 
 type BumperData struct {
@@ -697,7 +794,11 @@ type KeyDB struct {
 	Ctx                 string
 	UpdateQ             chan UpdateRequest
 	KeyBootstrapperQ    chan KeyBootstrapperRequest
-	Options             map[AuthOption]string
+	// options holds the parsed DnsEngine auth options. It is read on the hot
+	// query path (QueryResponder, per request) and replaced wholesale on config
+	// reload, so it is stored behind an atomic.Pointer for lock-free reads and a
+	// race-free swap. Access via AuthOption()/SetOptions(), never directly.
+	options atomic.Pointer[map[AuthOption]string]
 	// OutboundSoaSerial is the resolved mode for outbound SOA serials:
 	// OutboundSoaSerialKeep / OutboundSoaSerialUnixtime / OutboundSoaSerialPersist.
 	// Sourced from DnsEngineConf.OutboundSoaSerial at parse, defaulted to
@@ -709,6 +810,30 @@ type KeyDB struct {
 // tdns-mp and can no longer access the unexported kdb.mu.
 func (kdb *KeyDB) Lock()   { kdb.mu.Lock() }
 func (kdb *KeyDB) Unlock() { kdb.mu.Unlock() }
+
+// SetOptions replaces the auth-option map atomically (config reload). It stores
+// a private COPY of opts, not the caller's map, so the stored map can never be
+// mutated out from under a concurrent lock-free reader even if the caller later
+// changes its own map. A nil map yields an empty one so readers never observe a
+// nil dereference.
+func (kdb *KeyDB) SetOptions(opts map[AuthOption]string) {
+	cp := make(map[AuthOption]string, len(opts))
+	for k, v := range opts {
+		cp[k] = v
+	}
+	kdb.options.Store(&cp)
+}
+
+// AuthOption returns the value for an auth option and whether it is set, reading
+// the current option map without a lock.
+func (kdb *KeyDB) AuthOption(key AuthOption) (string, bool) {
+	m := kdb.options.Load()
+	if m == nil {
+		return "", false
+	}
+	v, ok := (*m)[key]
+	return v, ok
+}
 
 type Tx struct {
 	*sql.Tx
@@ -749,12 +874,13 @@ type KeyBootstrapperRequest struct {
 }
 
 type KeyConf struct {
-	Tsig []TsigDetails
+	Tsig []TsigDetails `yaml:"tsig" mapstructure:"tsig"`
 }
 type TsigDetails struct {
 	Name      string `validate:"required" yaml:"name"`
 	Algorithm string `validate:"required" yaml:"algorithm"`
 	Secret    string `validate:"required" yaml:"secret"`
+	Owner     string `yaml:"owner,omitempty"`
 }
 
 type ZoneName string

@@ -23,15 +23,24 @@ func LargeAlgDSMetrics() uint64 {
 	return n
 }
 
-func buildLargeAlgorithmSet(algs []uint8) map[uint8]bool {
-	if len(algs) == 0 {
-		return nil
+// buildLargeAlgorithmSet resolves the dnssec.large_algorithms names into the
+// derived codepoint lookup. Unlike split_algorithms (pure allowlist data, where
+// an unregistered name can never be requested), this list actively drives the
+// IMR's transport decision, so an unknown name is a hard config error rather
+// than a silent skip.
+func buildLargeAlgorithmSet(names []string) (map[uint8]bool, error) {
+	if len(names) == 0 {
+		return nil, nil
 	}
-	m := make(map[uint8]bool, len(algs))
-	for _, a := range algs {
-		m[a] = true
+	m := make(map[uint8]bool, len(names))
+	for _, name := range names {
+		alg := dns.StringToAlgorithm[strings.ToUpper(strings.TrimSpace(name))]
+		if alg == 0 {
+			return nil, fmt.Errorf("dnssec.large_algorithms: unknown algorithm %q (not registered in this binary)", name)
+		}
+		m[alg] = true
 	}
-	return m
+	return m, nil
 }
 
 // DNSKEYTransportPolicy selects how the IMR chooses a transport for DNSKEY
@@ -71,6 +80,72 @@ func (conf *Config) IsLargeAlgorithm(alg uint8) bool {
 		return false
 	}
 	return conf.Internal.LargeAlgorithms[alg]
+}
+
+// buildSplitAlgorithmSet converts the dnssec.split_algorithms config
+// (kskAlgName -> []zskAlgName) into the derived lookup kskAlg -> set of
+// permitted zskAlgs. Unknown algorithm names are skipped with a warning so
+// a typo gates rather than silently permits. Returns nil if no pairs are
+// configured (the fail-closed default: only same-algorithm policies pass).
+func buildSplitAlgorithmSet(in map[string][]string) map[uint8]map[uint8]bool {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[uint8]map[uint8]bool, len(in))
+	for kskName, zskNames := range in {
+		kskAlg := dns.StringToAlgorithm[strings.ToUpper(strings.TrimSpace(kskName))]
+		if kskAlg == 0 {
+			lgConfig.Warn("dnssec.split_algorithms: unknown KSK algorithm, ignored", "algorithm", kskName)
+			continue
+		}
+		set := out[kskAlg]
+		if set == nil {
+			set = make(map[uint8]bool, len(zskNames))
+			out[kskAlg] = set
+		}
+		for _, zskName := range zskNames {
+			zskAlg := dns.StringToAlgorithm[strings.ToUpper(strings.TrimSpace(zskName))]
+			if zskAlg == 0 {
+				lgConfig.Warn("dnssec.split_algorithms: unknown ZSK algorithm, ignored", "ksk", kskName, "zsk", zskName)
+				continue
+			}
+			set[zskAlg] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// resolveCompletenessMode validates dnssec.completeness and returns the
+// canonical mode. Empty defaults to "strict" (the conservative,
+// §4035-conformant choice). An unrecognized value is a hard config error —
+// a typo here silently changing signing semantics would be dangerous.
+func resolveCompletenessMode(s string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", CompletenessStrict:
+		return CompletenessStrict, nil
+	case CompletenessRelaxed:
+		return CompletenessRelaxed, nil
+	default:
+		return "", fmt.Errorf("invalid dnssec.completeness %q (want %q or %q)", s, CompletenessStrict, CompletenessRelaxed)
+	}
+}
+
+// validateSplitAlgorithm enforces the KSK/ZSK split-algorithm gate. Same
+// algorithm always passes. A differing pair must be listed in the allowlist
+// (kskAlg -> permitted zskAlgs); otherwise it is rejected (fail closed).
+func validateSplitAlgorithm(policyName string, kskAlg, zskAlg uint8, allowed map[uint8]map[uint8]bool) error {
+	if kskAlg == zskAlg {
+		return nil
+	}
+	kskName := dns.AlgorithmToString[kskAlg]
+	zskName := dns.AlgorithmToString[zskAlg]
+	if allowed[kskAlg][zskAlg] {
+		return nil
+	}
+	return fmt.Errorf("policy %q: KSK algorithm %s may not pair with ZSK algorithm %s; not listed in dnssec.split_algorithms", policyName, kskName, zskName)
 }
 
 // resolvePolicyRoleAlgorithms parses the top-level and per-role algorithm fields.

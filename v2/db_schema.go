@@ -79,7 +79,23 @@ comment		  TEXT,
 published_at              TEXT DEFAULT '',
 active_at                 TEXT DEFAULT '',
 retired_at                TEXT DEFAULT '',
-UNIQUE (zonename, keyid)
+active_seq                INTEGER,
+	UNIQUE (zonename, keyid)
+)`,
+
+	// TsigKeystore holds global TSIG secrets (one row per key name). The in-memory
+	// TsigKeyStore is a read-through cache; this table is authoritative.
+	"TsigKeystore": `CREATE TABLE IF NOT EXISTS 'TsigKeystore' (
+id          INTEGER PRIMARY KEY,
+keyname     TEXT NOT NULL,
+algorithm   TEXT NOT NULL,
+secret      TEXT NOT NULL,
+origin      TEXT NOT NULL,
+owner       TEXT NOT NULL DEFAULT '',
+creator     TEXT DEFAULT '',
+created_at  TEXT DEFAULT '',
+comment     TEXT DEFAULT '',
+UNIQUE (keyname)
 )`,
 
 	// OutgoingSerials persists the outgoing SOA serial per zone.
@@ -104,6 +120,17 @@ UNIQUE (zonename, keyid)
 		active_seq           INTEGER,
 		last_rollover_error  TEXT,
 		PRIMARY KEY (zone, keyid)
+	)`,
+
+	// ZskRolloverState holds per-zone manual ZSK-rollover requests (the
+	// `auto-rollover asap --zsk` / `cancel --zsk` mechanism). ZSK rollover
+	// has no parent-DS coordination, so unlike RolloverZoneState (KSK) this
+	// carries only the manual-request fields. Separate table to avoid
+	// entangling ZSK state with the KSK rollover-phase machine.
+	"ZskRolloverState": `CREATE TABLE IF NOT EXISTS 'ZskRolloverState' (
+		zone                          TEXT NOT NULL PRIMARY KEY,
+		manual_rollover_requested_at  TEXT,
+		manual_rollover_earliest      TEXT
 	)`,
 
 	"RolloverZoneState": `CREATE TABLE IF NOT EXISTS 'RolloverZoneState' (
@@ -150,6 +177,18 @@ UNIQUE (zonename, keyid)
 		zone              TEXT NOT NULL PRIMARY KEY,
 		max_observed_ttl  INTEGER NOT NULL DEFAULT 0,
 		updated_at        TEXT
+	)`,
+
+	// ZonePolicyOverride records a per-zone DNSSEC policy set dynamically at
+	// runtime (via `zone set-policy`), overriding the policy named in the
+	// zone's YAML config. Sparse — only zones whose policy was changed live
+	// appear here. The effective policy for a zone is the override if present,
+	// else the config base. This lets a live policy change survive restart
+	// without the server rewriting the operator's YAML.
+	"ZonePolicyOverride": `CREATE TABLE IF NOT EXISTS 'ZonePolicyOverride' (
+		zone    TEXT NOT NULL PRIMARY KEY,
+		policy  TEXT NOT NULL,
+		set_at  TEXT
 	)`,
 
 	// RolloverCdsPublication records the most recent successful CDS

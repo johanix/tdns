@@ -16,7 +16,9 @@ import (
 func (tx *Tx) Commit() error {
 	// log.Printf("---> Committing KeyDB transaction: %s", tx.context)
 	err := tx.Tx.Commit()
+	tx.KeyDB.mu.Lock()
 	tx.KeyDB.Ctx = ""
+	tx.KeyDB.mu.Unlock()
 	if err != nil {
 		lgConfig.Error("error committing KeyDB transaction", "context", tx.context, "err", err)
 	}
@@ -26,7 +28,9 @@ func (tx *Tx) Commit() error {
 func (tx *Tx) Rollback() error {
 	// log.Printf("<--- Rolling back KeyDB transaction: %s", tx.context)
 	err := tx.Tx.Rollback()
+	tx.KeyDB.mu.Lock()
 	tx.KeyDB.Ctx = ""
+	tx.KeyDB.mu.Unlock()
 	if err != nil {
 		lgConfig.Error("error rolling back KeyDB transaction", "context", tx.context, "err", err)
 	}
@@ -62,13 +66,20 @@ func (db *KeyDB) Prepare(q string) (*sql.Stmt, error) {
 
 func (db *KeyDB) Begin(context string) (*Tx, error) {
 	// log.Printf("---> Beginning KeyDB transaction: %s", context)
+	db.mu.Lock()
 	if db.Ctx != "" {
-		lgConfig.Error("KeyDB transaction already in progress", "context", db.Ctx)
-		return nil, fmt.Errorf("KeyDB transaction already in progress: %s", db.Ctx)
+		ctx := db.Ctx
+		db.mu.Unlock()
+		lgConfig.Error("KeyDB transaction already in progress", "context", ctx) // captured under lock; don't re-read db.Ctx unlocked
+		return nil, fmt.Errorf("KeyDB transaction already in progress: %s", ctx)
 	}
 	db.Ctx = context
+	db.mu.Unlock()
 	tx, err := db.DB.Begin()
 	if err != nil {
+		db.mu.Lock()
+		db.Ctx = ""
+		db.mu.Unlock()
 		lgConfig.Error("error beginning transaction", "context", context, "err", err)
 		return nil, err
 	}
@@ -170,6 +181,9 @@ func dbMigrateSchema(db *sql.DB) {
 		{"DnssecKeyStore", "published_at", "ALTER TABLE DnssecKeyStore ADD COLUMN published_at TEXT DEFAULT ''"},
 		{"DnssecKeyStore", "active_at", "ALTER TABLE DnssecKeyStore ADD COLUMN active_at TEXT DEFAULT ''"},
 		{"DnssecKeyStore", "retired_at", "ALTER TABLE DnssecKeyStore ADD COLUMN retired_at TEXT DEFAULT ''"},
+		// ZSK active_seq: monotonic per-key roll counter (operator feedback),
+		// MAX(active_seq)+1 over the zone's ZSK rows, stamped at standby→active.
+		{"DnssecKeyStore", "active_seq", "ALTER TABLE DnssecKeyStore ADD COLUMN active_seq INTEGER"},
 		{"Sig0KeyStore", "parent_state", "ALTER TABLE Sig0KeyStore ADD COLUMN parent_state INTEGER DEFAULT 0"},
 		// Rollover overhaul phase 2: softfail-state columns on RolloverZoneState.
 		// All NULL/0-default so existing testbed rows remain valid post-migration.
@@ -304,7 +318,7 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 		}
 	}
 	dbSetupTables(db)
-	return &KeyDB{
+	kdb := &KeyDB{
 		DB:                  db,
 		DBFile:              dbfile,
 		KeystoreSig0Cache:   make(map[string]*Sig0ActiveKeys),
@@ -312,8 +326,9 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 		KeystoreDnskeyCache: make(map[string]*DnssecKeys),
 		UpdateQ:             make(chan UpdateRequest),
 		KeyBootstrapperQ:    make(chan KeyBootstrapperRequest, 10),
-		Options:             options,
-	}, nil
+	}
+	kdb.SetOptions(options)
+	return kdb, nil
 }
 
 func NewSig0StoreT() *Sig0StoreT {

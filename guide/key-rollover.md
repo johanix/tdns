@@ -1,4 +1,10 @@
-# TDNS Operator Guide: Automatic DNSSEC Key Rollovers
+# TDNS Operator Guide: Automatic DNSSEC Rollovers
+
+TDNS automates three kinds of DNSSEC rollover. This guide
+covers all three; most of it (sections 1-12) is the KSK
+engine, which is the most involved because it coordinates
+with the parent. Sections 14 (ZSK) and 15 (algorithm
+rollover) build on that foundation and are shorter.
 
 TDNS includes a fully automated KSK rollover engine. Once
 a zone is configured with a DNSSEC policy that has
@@ -33,6 +39,35 @@ companion document
 For multi-provider deployments where leader election picks
 which provider drives the rollover, see the
 [tdns-mp guide](../../tdns-mp/guide/).
+
+
+## 0. Three kinds of rollover
+
+It helps to keep the three rollover types distinct, because
+they differ in whether the parent is involved:
+
+- **KSK rollover** (same algorithm) -- replace the
+  key-signing key. The DS at the parent must change, so this
+  is **parent-coordinated**: the engine publishes the new
+  key, pushes/confirms the DS at the parent, then retires
+  the old key. This is the bulk of the guide (sections
+  1-13).
+- **ZSK rollover** (same algorithm) -- replace the
+  zone-signing key. The ZSK has **no parent dependency** (no
+  DS), so this is purely local: pre-publish, activate,
+  retire, remove, on a lifetime cadence. Section 14.
+- **Algorithm rollover** -- change the signing *algorithm*
+  (e.g. ED25519 -> a PQ algorithm), not just the key. This
+  rides the same pipelines but the generator starts minting
+  the new algorithm and the old one drains out. Section 15.
+  Today the **relaxed-mode ZSK** algorithm rollover is
+  implemented; KSK-algorithm and strict-mode rollovers are
+  refused with a clear error (later work).
+
+All three share the same policy YAML (section 1), the same
+`auto-rollover` CLI tree (section 2), and the same `status`
+output (section 3). The role filter flags `--ksk` / `--zsk`
+select which role a command acts on.
 
 
 ## 1. Configuring the engine
@@ -165,14 +200,21 @@ inherits two persistent filter flags, `--ksk` and `--zsk`,
 which limit the operation to keys of that role.
 
 ```
-auto-rollover when     --zone Z [--offline]
-auto-rollover asap     --zone Z
-auto-rollover cancel   --zone Z
-auto-rollover status   --zone Z [--offline] [-v]
-auto-rollover reset    --zone Z --keyid N [--offline [--force]]
-auto-rollover unstick  --zone Z [--offline [--force]]
+auto-rollover when          --zone Z [--ksk|--zsk] [--offline]
+auto-rollover asap          --zone Z [--ksk|--zsk]
+auto-rollover cancel        --zone Z [--ksk|--zsk]
+auto-rollover policy-change  --zone Z --policy P
+auto-rollover status        --zone Z [--ksk|--zsk] [--offline] [-v]
+auto-rollover reset         --zone Z --keyid N [--offline [--force]]
+auto-rollover unstick       --zone Z [--offline [--force]]
 auto-rollover validate ...
 ```
+
+`when`, `asap`, and `cancel` default to the KSK role; pass
+`--zsk` to operate on the zone-signing key instead (a ZSK
+roll has no parent coordination -- see section 14).
+`policy-change` is the algorithm-rollover trigger (section
+15).
 
 | Subcommand | Purpose |
 |------------|---------|
@@ -183,6 +225,7 @@ auto-rollover validate ...
 | `reset`    | Clears `last_rollover_error` for one specific key after the operator has intervened. Takes `--keyid` because errors are scoped per key. `--offline` writes directly to the keystore with a daemon-alive guard you can override with `--force`. |
 | `unstick`  | The engine throttles itself after persistent failures by setting `next_push_at` into the future. `unstick` clears that field so the next tick will probe the parent immediately, without waiting `softfail-delay`. |
 | `validate` | Parses and cross-checks a DNSSEC policy file; surfaces invalid durations, missing required fields, and cross-field constraint violations. |
+| `policy-change` | Binds the zone to a new DNSSEC policy to start an algorithm rollover (section 15). It only changes the algorithm of *future*-generated keys; the existing keys drain out in order. It does NOT perform the roll -- `asap --zsk` is the throttle. |
 
 The `when` command shows two times:
 
@@ -856,7 +899,140 @@ attempts have happened. The `last_softfail_*` fields tell
 you when and why.
 
 
-## 13. Further reading
+## 14. ZSK rollover
+
+A ZSK rollover replaces the zone-signing key. Unlike the
+KSK, the ZSK has no DS at the parent, so there is **no
+parent coordination** -- the whole rollover is local to the
+zone and bounded only by the zone's own TTLs. This makes it
+much simpler than the KSK case, and most of sections 4-12
+(parent DS push, confirm, softfail, DSYNC dispatch) do not
+apply.
+
+The lifecycle is the familiar pre-publish roll: a standby
+ZSK is generated and published ahead of time; when the
+active ZSK reaches `zsk.lifetime` (or you trigger it),
+standby becomes active, the old active becomes retired, and
+after a drain window (propagation delay + the longest TTL it
+signed) the retired key is removed and its signatures are
+stripped. The engine keeps `standby-zsk-count` standbys
+ready so a roll never waits on key generation.
+
+**Configuration.** The ZSK lifetime and signature validity
+live in the same policy block as the KSK:
+
+```yaml
+   mypolicy:
+      algorithm:   ED25519
+      zsk:
+         lifetime:    2w      # roll cadence (forever = never)
+         sigvalidity: 2h
+```
+
+`zsk.lifetime: forever` disables the scheduled roll; you can
+still roll manually with `asap --zsk`.
+
+**Operating it.** The same `auto-rollover` commands drive
+the ZSK, with `--zsk`:
+
+```
+auto-rollover when   --zone Z --zsk     # next/earliest ZSK roll
+auto-rollover asap   --zone Z --zsk     # roll at the earliest moment
+auto-rollover cancel --zone Z --zsk     # cancel a pending asap
+auto-rollover status --zone Z           # shows KSK and ZSK both
+```
+
+`asap --zsk` schedules a roll for the next worker tick; if
+no standby ZSK is ready yet, the request persists until one
+is and then fires (it is not lost). Because a ZSK roll has
+no DS dance, `when --zsk` shows only the local schedule
+(active_at + lifetime) and a "ready / waiting-for-standby"
+status -- there are no parent-DS gates. The `status` output
+lists ZSKs alongside KSKs, each with its own `active_seq`
+counter (the n-th active ZSK in the zone's history), which
+ticks up by one on every roll -- a quick confirmation that a
+roll progressed.
+
+
+## 15. Algorithm rollover
+
+An algorithm rollover changes the signing *algorithm*, not
+just the key -- for example ED25519 to a post-quantum
+algorithm. It reuses the rollover pipelines: you bind the
+zone to a policy with the new algorithm, and from then on
+newly-generated keys carry it while the old-algorithm keys
+drain out in the normal FIFO order. Nothing is swapped
+synchronously; the transition is gradual and safe at every
+instant.
+
+Today the **relaxed-mode ZSK** algorithm rollover is
+implemented. The following are deliberately **refused** with
+a clear error rather than run unsafely (they are later
+work): a KSK-algorithm rollover (it needs the parent-DS
+engine), a CSK-algorithm change, a both-roles-at-once
+change, and a ZSK-algorithm change under strict completeness
+mode.
+
+**The completeness knob.** A ZSK signs the whole zone, so a
+strict reading of RFC 4035 would require maintaining
+old-algorithm signatures over the entire zone throughout the
+drain -- expensive. TDNS exposes a global choice:
+
+```yaml
+dnssec:
+   completeness: relaxed     # strict (default) | relaxed
+```
+
+`relaxed` (the alg-split model) drops the maintained
+whole-zone double-signature: the new algorithm signs
+everything and the old-algorithm key simply drains, which
+every validator still accepts (a validator needs one working
+chain, not one per algorithm). A ZSK algorithm rollover
+requires `relaxed`; under the default `strict` it is
+refused.
+
+**The two-command workflow.** Binding the new algorithm and
+performing the roll are separate steps:
+
+```
+# 1. bind the new algorithm (changes only FUTURE keys)
+auto-rollover policy-change --zone Z --policy newalg-policy
+
+# 2. drive the drain (each asap promotes the next standby)
+auto-rollover asap --zone Z --zsk
+```
+
+`policy-change` does NOT roll anything -- it writes the
+zone's policy override so that future-generated ZSKs use the
+new algorithm, and the existing keys keep draining in order.
+The roll then advances on the normal ZSK cadence, or you
+accelerate it with `asap --zsk`: each `asap` promotes the
+next standby, and because the existing standbys are already
+propagated, successive `asap`s run back-to-back until the
+new-algorithm keys take over. A second `policy-change` while
+a roll is already in flight is refused; cancel first
+(`cancel --zsk`) if you need to change course.
+
+**Watching it.** `auto-rollover status` shows an
+algorithm-transition line in the header while a roll is in
+flight, e.g.
+
+```
+Algorithm rollover: ZSK ED25519 -> MAYO1  (in progress), 1 of 3 published ZSKs on new algorithm
+```
+
+The roll is complete when every live ZSK is on the new
+algorithm and the old-algorithm keys have drained out and
+been removed.
+
+For the design rationale and the safety model see
+`tdns/docs/2026-06-17-algorithm-rollover-evaluation.md` (the
+ZSK alg roll) and
+`tdns/docs/2026-06-21-ksk-algorithm-rollover-plan.md` (the
+planned KSK alg roll).
+
+
+## 16. Further reading
 
 - **Timing math:** the canonical engine reference is
   [Rollover Timing Equations](rollover-timing-equations.md)

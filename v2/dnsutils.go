@@ -9,7 +9,6 @@ import (
 	"io"
 	"log"
 	"os"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,16 +16,15 @@ import (
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
-	"github.com/twotwotwo/sorts"
 	// "github.com/gookit/goutil/dump"
 )
 
 const (
-	year68     = 1 << 31 // For RFC1982 (Serial Arithmetic) calculations in 32 bits
-	TimeLayout = "2006-01-02 15:04:05"
+	year68            = 1 << 31 // For RFC1982 (Serial Arithmetic) calculations in 32 bits
+	TimeLayout        = "2006-01-02 15:04:05"
+	safeMessageSize   = 64000 // ~1.5 KB headroom for per-envelope question + TSIG
+	dnsMaxMessageSize = 65535
 )
-
-// TODO: Add support for TSIG zone transfers.
 
 // clarifyXfrError turns the opaque miekg/dns "bad xfr rcode: N" transfer
 // error into a human-readable failure that names the rcode, e.g.
@@ -51,7 +49,7 @@ func clarifyXfrError(zone, upstream string, err error) error {
 	return err
 }
 
-func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype string) (uint32, error) {
+func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype, keyName string, conf *Config) (uint32, error) {
 
 	if upstream == "" {
 		Fatal("ZoneTransfer: upstream not set")
@@ -65,13 +63,19 @@ func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype string)
 		msg.SetAxfr(zd.ZoneName)
 	}
 
-	if zd.ZoneStore == MapZone || zd.ZoneStore == SliceZone {
-		// zd.Data = make(map[string]OwnerData, 30)
+	if zd.ZoneStore == MapZone {
 		zd.Data = core.NewCmap[OwnerData]()
 	}
 	lgDns.Info("ZoneTransferIn", "zone", zd.ZoneName, "store", ZoneStoreToString[zd.ZoneStore])
 
 	transfer := new(dns.Transfer)
+	// Sign the AXFR/IXFR request under this upstream's key (NOKEY => unsigned).
+	// The provider also verifies the TSIG on the inbound envelopes.
+	provider, serr := SignForPeer(msg, keyName, conf)
+	if serr != nil {
+		return 0, fmt.Errorf("ZoneTransferIn %s: TSIG sign setup: %w", zd.ZoneName, serr)
+	}
+	transfer.TsigProvider = provider
 	answerChan, err := transfer.In(msg, upstream)
 	if err != nil {
 		zd.Logger.Printf("Error from transfer.In: %v\n", err)
@@ -103,8 +107,6 @@ func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype string)
 		return 0, nil
 	}
 
-	zd.ComputeIndices() // if zd.ZoneStore == SliceZone, otherwise no-op
-
 	return soa.Serial, nil
 }
 
@@ -116,72 +118,84 @@ type batchState struct {
 	batchNum      *int
 	totalSent     *int
 	outbound      chan<- *dns.Envelope
+	done          <-chan struct{}
 	zd            *ZoneData
 }
 
-// maybeFlushBatch checks if the current batch should be sent based on size estimates.
-// It handles both pre-add checks (when newRRSize > 0) and periodic checks (when newRRSize == 0).
-// Returns true if a batch was sent, false otherwise.
+func (bs *batchState) sendEnvelope(rrs []dns.RR) bool {
+	select {
+	case bs.outbound <- &dns.Envelope{RR: rrs}:
+		return true
+	case <-bs.done:
+		return false
+	}
+}
+
+func (bs *batchState) flushBatch() bool {
+	if len(*bs.rrs) == 0 {
+		return true
+	}
+	actualSize := estimateEnvelopeSize(*bs.rrs)
+	*bs.totalSent += *bs.count
+	if bs.zd.Verbose || Globals.Debug {
+		bs.zd.Logger.Printf("XfrOut: Zone %s: Sending batch #%d: %d RRs, %d bytes (estimated: %d)",
+			bs.zd.ZoneName, *bs.batchNum, *bs.count, actualSize, *bs.estimatedSize)
+	}
+	if !bs.sendEnvelope(*bs.rrs) {
+		return false
+	}
+	*bs.rrs = []dns.RR{}
+	*bs.count = 0
+	*bs.estimatedSize = 0
+	(*bs.batchNum)++
+	return true
+}
+
+// maybeFlushBatch flushes the current batch when adding newRRSize would exceed
+// safeMessageSize, or on periodic accurate checks near the limit.
 func maybeFlushBatch(bs *batchState, newRRSize int, isPeriodicCheck bool) bool {
-	const maxMessageSize = 60000
-	const safeMessageSize = 59000
-	const theoreticalMaxSize = 65536
-	const checkSizeInterval = 50
-	const accurateCheckThreshold = 55000
-
-	// Pre-add check: if adding newRRSize would exceed limit, do accurate check
-	if newRRSize > 0 {
-		if *bs.estimatedSize+newRRSize >= safeMessageSize ||
-			(*bs.estimatedSize >= accurateCheckThreshold && len(*bs.rrs)%checkSizeInterval == 0) {
-			actualSize := estimateEnvelopeSize(*bs.rrs)
-			if actualSize >= safeMessageSize {
-				// Send current batch before adding more
-				*bs.totalSent += *bs.count
-				if bs.zd.Verbose || Globals.Debug {
-					efficiency := float64(actualSize) / float64(safeMessageSize) * 100.0
-					maxEfficiency := float64(actualSize) / float64(maxMessageSize) * 100.0
-					theoreticalEfficiency := float64(actualSize) / float64(theoreticalMaxSize) * 100.0
-					bs.zd.Logger.Printf("XfrOut: Zone %s: Sending batch #%d: %d RRs, %d bytes (estimated: %d, efficiency: %.1f%% of %d safe / %.1f%% of %d target / %.1f%% of %d theoretical max)",
-						bs.zd.ZoneName, *bs.batchNum, *bs.count, actualSize, *bs.estimatedSize, efficiency, safeMessageSize, maxEfficiency, maxMessageSize, theoreticalEfficiency, theoreticalMaxSize)
-				}
-				bs.outbound <- &dns.Envelope{RR: *bs.rrs}
-				*bs.rrs = []dns.RR{}
-				*bs.count = 0
-				*bs.estimatedSize = 0
-				(*bs.batchNum)++
-				return true
-			} else {
-				// Update estimate with accurate measurement
-				*bs.estimatedSize = actualSize
-			}
-		}
+	if len(*bs.rrs) == 0 {
+		return true
 	}
-
-	// Periodic accurate check to verify estimate accuracy
-	if isPeriodicCheck && len(*bs.rrs)%checkSizeInterval == 0 && *bs.estimatedSize >= accurateCheckThreshold {
-		actualSize := estimateEnvelopeSize(*bs.rrs)
-		if actualSize >= safeMessageSize {
-			*bs.totalSent += *bs.count
-			if bs.zd.Verbose || Globals.Debug {
-				efficiency := float64(actualSize) / float64(safeMessageSize) * 100.0
-				maxEfficiency := float64(actualSize) / float64(maxMessageSize) * 100.0
-				theoreticalEfficiency := float64(actualSize) / float64(theoreticalMaxSize) * 100.0
-				bs.zd.Logger.Printf("XfrOut: Zone %s: Sending batch #%d: %d RRs, %d bytes (estimated: %d, efficiency: %.1f%% of %d safe / %.1f%% of %d target / %.1f%% of %d theoretical max)",
-					bs.zd.ZoneName, *bs.batchNum, *bs.count, actualSize, *bs.estimatedSize, efficiency, safeMessageSize, maxEfficiency, maxMessageSize, theoreticalEfficiency, theoreticalMaxSize)
-			}
-			bs.outbound <- &dns.Envelope{RR: *bs.rrs}
-			*bs.rrs = []dns.RR{}
-			*bs.count = 0
-			*bs.estimatedSize = 0
-			(*bs.batchNum)++
-			return true
-		} else {
-			// Adjust estimate based on actual measurement
-			*bs.estimatedSize = actualSize
-		}
+	currentSize := estimateEnvelopeSize(*bs.rrs)
+	if newRRSize > 0 && currentSize+newRRSize >= safeMessageSize {
+		return bs.flushBatch()
 	}
+	if isPeriodicCheck && currentSize >= safeMessageSize {
+		return bs.flushBatch()
+	}
+	if isPeriodicCheck && currentSize > 0 {
+		*bs.estimatedSize = currentSize
+	}
+	return true
+}
 
-	return false
+func appendRRset(bs *batchState, rrset core.RRset) bool {
+	newRRSize := 0
+	for _, rr := range rrset.RRs {
+		newRRSize += estimateRRSize(rr)
+	}
+	for _, sig := range rrset.RRSIGs {
+		newRRSize += estimateRRSize(sig)
+	}
+	if newRRSize >= safeMessageSize {
+		owner, rrtype := oversizeRRsetOwner(append([]dns.RR(nil), rrset.RRs...))
+		if owner == "" && len(rrset.RRs) > 0 {
+			owner = rrset.RRs[0].Header().Name
+			rrtype = dns.TypeToString[rrset.RRs[0].Header().Rrtype]
+		}
+		bs.zd.Logger.Printf("ZoneTransferOut: %s: aborting transfer, oversize RRset owner=%s type=%s size~=%d",
+			bs.zd.ZoneName, owner, rrtype, newRRSize)
+		return false
+	}
+	if !maybeFlushBatch(bs, newRRSize, false) {
+		return false
+	}
+	*bs.rrs = append(*bs.rrs, rrset.RRs...)
+	*bs.rrs = append(*bs.rrs, rrset.RRSIGs...)
+	*bs.count += len(rrset.RRs) + len(rrset.RRSIGs)
+	*bs.estimatedSize += newRRSize
+	return maybeFlushBatch(bs, 0, len(*bs.rrs)%50 == 0 && *bs.estimatedSize >= 55000)
 }
 
 // estimateRRSize estimates the size of a single RR by packing it individually
@@ -222,204 +236,192 @@ func estimateEnvelopeSize(rrs []dns.RR) int {
 func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, error) {
 	zone := dns.Fqdn(zd.ZoneName)
 
+	if src, ok := peerIP(w.RemoteAddr().String()); !ok {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, unparseable source %q", zone, w.RemoteAddr())
+		return zd.refuseTransfer(w, r)
+	} else if allowed, approvedKeys := zd.downstreamsDecision(src); !allowed {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer to %s (not permitted by downstreams ACL)", zone, src)
+		return zd.refuseTransfer(w, r)
+	} else if err := checkInboundTSIG(w, r, approvedKeys); err != nil {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer to %s: %v", zone, src, err)
+		return zd.refuseTransfer(w, r)
+	}
+
+	if zd.GetStatus() != ZoneStatusReady {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, zone status %s", zone, ZoneStatusToString[zd.GetStatus()])
+		return zd.refuseTransfer(w, r)
+	}
+
+	if zd.ZoneStore != MapZone {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, zone store %s not supported",
+			zone, ZoneStoreToString[zd.ZoneStore])
+		return zd.refuseTransfer(w, r)
+	}
+
+	apex, err := zd.GetOwner(zd.ZoneName)
+	if err != nil {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, apex lookup failed: %v", zone, err)
+		return zd.refuseTransfer(w, r)
+	}
+	if apex == nil {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, missing apex", zone)
+		return zd.refuseTransfer(w, r)
+	}
+	soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+	if len(soaRRset.RRs) == 0 {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, empty SOA RRset", zone)
+		return zd.refuseTransfer(w, r)
+	}
+	soaOrig, ok := soaRRset.RRs[0].(*dns.SOA)
+	if !ok {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, invalid SOA RR", zone)
+		return zd.refuseTransfer(w, r)
+	}
+
+	soaCopy := dns.Copy(soaOrig).(*dns.SOA)
+	soaCopy.Serial = zd.CurrentSerial
+	transferSOA := core.RRset{
+		Name:   zd.ZoneName,
+		Class:  dns.ClassINET,
+		RRtype: dns.TypeSOA,
+		RRs:    []dns.RR{soaCopy},
+		RRSIGs: soaRRset.RRSIGs,
+	}
+
 	if zd.Verbose {
 		zd.Logger.Printf("ZoneTransferOut: Will try to serve zone %s", zone)
 	}
 
 	outbound_xfr := make(chan *dns.Envelope)
+	done := make(chan struct{})
+	var closeOnce sync.Once
+	closeOutbound := func() { closeOnce.Do(func() { close(outbound_xfr) }) }
+
 	tr := new(dns.Transfer)
 	var wg sync.WaitGroup
 	wg.Add(1)
-
 	go func() {
-		err := tr.Out(w, r, outbound_xfr)
-		if err != nil {
+		defer wg.Done()
+		if err := tr.Out(w, r, outbound_xfr); err != nil {
 			zd.Logger.Printf("Error from transfer.Out(): %v", err)
+			close(done)
 		}
-		wg.Done()
 	}()
 
-	apex, _ := zd.GetOwner(zd.ZoneName)
-	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0].(*dns.SOA)
-	soa.Serial = zd.CurrentSerial
+	defer func() {
+		closeOutbound()
+		wg.Wait()
+		w.Close()
+	}()
 
-	// Re-sign SOA after serial update (the RRSIG covers the serial)
-	if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
-		soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
-		if signed, err := zd.SignRRset(&soaRRset, zd.ZoneName, nil, true, nil); err != nil {
-			zd.Logger.Printf("ZoneTransferOut: failed to re-sign SOA: %v", err)
-		} else if signed {
-			apex.RRtypes.Set(dns.TypeSOA, soaRRset)
-		}
-	}
-
-	total_sent := 0
+	totalSent := 0
 	count := 0
-	batchNum := 1                // Track batch number for debug output
-	estimatedSize := 0           // Running estimate of message size
-	const maxMessageSize = 60000 // Practical limit we target (theoretical DNS max is 65536 bytes / 64K)
-	// We may overshoot maxMessageSize by up to ~1000 bytes in practice, but that's still safely below 65536
-	const safeMessageSize = 59000        // Conservative threshold to avoid "message too large" errors (leaves headroom for DNS header/overhead and compression variations)
-	const theoreticalMaxSize = 65536     // True theoretical maximum DNS message size (64K)
-	const checkSizeInterval = 50         // Check actual size every N RRs to verify estimate accuracy
-	const accurateCheckThreshold = 55000 // When estimated size exceeds this, do accurate checks more frequently
-	// env := dns.Envelope{}
-	rrs := []dns.RR{soa}
-	// Estimate size of initial SOA
-	estimatedSize += estimateRRSize(soa)
+	batchNum := 1
+	estimatedSize := 0
+	rrs := []dns.RR{}
 
-	// SOA
-	// env.RR = append(env.RR, soa)
-	// XXX: If we change the SOA serial we must also recompute the RRSIG.
-	// env.RR = append(env.RR, apex.RRtypes[dns.TypeSOA].RRSIGs...)
-	soaRRSIGs := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRSIGs
-	rrs = append(rrs, soaRRSIGs...)
-	for _, sig := range soaRRSIGs {
-		estimatedSize += estimateRRSize(sig)
-	}
-	if Globals.Debug {
-		// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa.String())
-	}
-
-	// Rest of apex
-	for _, rrt := range apex.RRtypes.Keys() {
-		if rrt != dns.TypeSOA {
-			// env.RR = append(env.RR, apex.RRtypes[rrt].RRs...)
-			rrset := apex.RRtypes.GetOnlyRRSet(rrt)
-			rrs = append(rrs, rrset.RRs...)
-			for _, rr := range rrset.RRs {
-				estimatedSize += estimateRRSize(rr)
-			}
-			if Globals.Debug {
-				// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, apex.RRtypes.GetOnlyRRSet(rrt).RRs)
-			}
-			// env.RR = append(env.RR, apex.RRtypes[rrt].RRSIGs...)
-			rrs = append(rrs, rrset.RRSIGs...)
-			for _, sig := range rrset.RRSIGs {
-				estimatedSize += estimateRRSize(sig)
-			}
-		}
-	}
-	count = len(rrs)
-
-	// Initialize batch state for helper function
 	bs := &batchState{
 		rrs:           &rrs,
 		count:         &count,
 		estimatedSize: &estimatedSize,
 		batchNum:      &batchNum,
-		totalSent:     &total_sent,
+		totalSent:     &totalSent,
 		outbound:      outbound_xfr,
+		done:          done,
 		zd:            zd,
 	}
 
-	switch zd.ZoneStore {
-	case SliceZone:
-		// Rest of zone
-		for _, owner := range zd.Owners {
-			if owner.Name == zd.ZoneName {
-				continue
-			}
-			for _, rrt := range owner.RRtypes.Keys() {
-				rrl := owner.RRtypes.GetOnlyRRSet(rrt)
-
-				// Estimate size of new RRs before adding
-				newRRSize := 0
-				for _, rr := range rrl.RRs {
-					newRRSize += estimateRRSize(rr)
-				}
-				for _, sig := range rrl.RRSIGs {
-					newRRSize += estimateRRSize(sig)
-				}
-
-				// Check if batch should be flushed before adding new RRs
-				maybeFlushBatch(bs, newRRSize, false)
-
-				// Now add the RRset
-				rrs = append(rrs, rrl.RRs...)
-				if Globals.Debug {
-					// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
-				}
-				count += len(rrl.RRs)
-				rrs = append(rrs, rrl.RRSIGs...)
-				count += len(rrl.RRSIGs)
-				estimatedSize += newRRSize
-
-				// Periodic accurate check to verify estimate accuracy
-				maybeFlushBatch(bs, 0, true)
-			}
+	if !appendRRset(bs, transferSOA) {
+		return 0, nil
+	}
+	for _, rrt := range apex.RRtypes.Keys() {
+		if rrt == dns.TypeSOA {
+			continue
 		}
-
-	case MapZone:
-		// Rest of zone
-		for _, owner := range zd.Data.Keys() {
-			omap, _ := zd.Data.Get(owner)
-			if owner == zd.ZoneName {
-				continue
-			}
-			for _, rrt := range omap.RRtypes.Keys() {
-				rrl := omap.RRtypes.GetOnlyRRSet(uint16(rrt))
-
-				// Estimate size of new RRs before adding
-				newRRSize := 0
-				for _, rr := range rrl.RRs {
-					newRRSize += estimateRRSize(rr)
-				}
-				for _, sig := range rrl.RRSIGs {
-					newRRSize += estimateRRSize(sig)
-				}
-
-				// Check if batch should be flushed before adding new RRs
-				maybeFlushBatch(bs, newRRSize, false)
-
-				// Now add the RRset
-				rrs = append(rrs, rrl.RRs...)
-				if Globals.Debug {
-					// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, rrl.RRs)
-				}
-				count += len(rrl.RRs)
-				rrs = append(rrs, rrl.RRSIGs...)
-				count += len(rrl.RRSIGs)
-				estimatedSize += newRRSize
-
-				// Periodic accurate check to verify estimate accuracy
-				maybeFlushBatch(bs, 0, true)
-			}
+		if !appendRRset(bs, apex.RRtypes.GetOnlyRRSet(rrt)) {
+			return 0, nil
 		}
-
-	default:
-		zd.Logger.Printf("Zone %s: zone store %d: outbound zone transfer not supported. Sorry.",
-			zd.ZoneName, zd.ZoneStore)
 	}
 
-	// env.RR = append(env.RR, soa) // trailing SOA
-	rrs = append(rrs, soa)
-	if Globals.Debug {
-		// zd.Logger.Printf("XfrOut[%s]: %v\n", zd.ZoneName, soa)
+	for _, owner := range zd.Data.Keys() {
+		if owner == zd.ZoneName {
+			continue
+		}
+		omap, _ := zd.Data.Get(owner)
+		for _, rrt := range omap.RRtypes.Keys() {
+			rrset := omap.RRtypes.GetOnlyRRSet(uint16(rrt))
+			if !appendRRset(bs, rrset) {
+				return 0, nil
+			}
+		}
 	}
 
-	total_sent += len(rrs)
-	// Get actual size of final message
-	finalSize := estimateEnvelopeSize(rrs)
+	trailingSOA := dns.Copy(soaCopy).(*dns.SOA)
+	trailingSize := estimateRRSize(trailingSOA)
+	if !maybeFlushBatch(bs, trailingSize, false) {
+		return 0, nil
+	}
+	*bs.rrs = append(*bs.rrs, trailingSOA)
+	*bs.count++
+	*bs.estimatedSize += trailingSize
+
+	finalSize := estimateEnvelopeSize(*bs.rrs)
+	if finalSize >= safeMessageSize {
+		if len(*bs.rrs) > 1 {
+			withoutTrailing := (*bs.rrs)[:len(*bs.rrs)-1]
+			savedCount := *bs.count - 1
+			*bs.rrs = withoutTrailing
+			*bs.count = savedCount
+			if !bs.flushBatch() {
+				return 0, nil
+			}
+			*bs.rrs = []dns.RR{trailingSOA}
+			*bs.count = 1
+			*bs.estimatedSize = trailingSize
+			finalSize = estimateEnvelopeSize(*bs.rrs)
+		}
+	}
+	if finalSize >= safeMessageSize {
+		owner, rrtype := oversizeRRsetOwner(*bs.rrs)
+		zd.Logger.Printf("ZoneTransferOut: %s: aborting transfer, oversize RRset owner=%s type=%s size=%d",
+			zone, owner, rrtype, finalSize)
+		return 0, fmt.Errorf("ZoneTransferOut: %s: oversize transfer envelope (%d bytes)", zone, finalSize)
+	}
+
+	totalSent += *bs.count
 	if zd.Verbose || Globals.Debug {
-		efficiency := float64(finalSize) / float64(safeMessageSize) * 100.0
-		maxEfficiency := float64(finalSize) / float64(maxMessageSize) * 100.0
-		theoreticalEfficiency := float64(finalSize) / float64(theoreticalMaxSize) * 100.0
-		zd.Logger.Printf("XfrOut: Zone %s: Sending final batch #%d: %d RRs, %d bytes (efficiency: %.1f%% of %d safe / %.1f%% of %d target / %.1f%% of %d theoretical max, total sent: %d RRs)\n",
-			zd.ZoneName, batchNum, len(rrs), finalSize, efficiency, safeMessageSize, maxEfficiency, maxMessageSize, theoreticalEfficiency, theoreticalMaxSize, total_sent)
+		zd.Logger.Printf("XfrOut: Zone %s: Sending final batch #%d: %d RRs, %d bytes (total sent: %d RRs)",
+			zd.ZoneName, batchNum, len(*bs.rrs), finalSize, totalSent)
 	} else {
-		zd.Logger.Printf("XfrOut: Zone %s: Sending final %d RRs (including trailing SOA, total sent %d)\n",
-			zd.ZoneName, len(rrs), total_sent)
+		zd.Logger.Printf("XfrOut: Zone %s: Sending final %d RRs (including trailing SOA, total sent %d)",
+			zd.ZoneName, len(*bs.rrs), totalSent)
 	}
-	outbound_xfr <- &dns.Envelope{RR: rrs}
+	if !bs.sendEnvelope(*bs.rrs) {
+		return 0, nil
+	}
 
-	close(outbound_xfr)
-	wg.Wait() // wait until everything is written out
-	w.Close() // close connection
+	zd.Logger.Printf("ZoneTransferOut: %s: Sent %d RRs.", zone, totalSent)
+	return totalSent, nil
+}
 
-	zd.Logger.Printf("ZoneTransferOut: %s: Sent %d RRs.", zone, total_sent)
+func oversizeRRsetOwner(rrs []dns.RR) (owner, rrtype string) {
+	if len(rrs) == 0 {
+		return "", ""
+	}
+	rr := rrs[0]
+	return rr.Header().Name, dns.TypeToString[rr.Header().Rrtype]
+}
 
-	return total_sent, nil
+// refuseTransfer writes a REFUSED reply to an AXFR/IXFR request (signed when the
+// request itself carried a verified TSIG, per RFC 8945) and reports zero RRs sent.
+func (zd *ZoneData) refuseTransfer(w dns.ResponseWriter, r *dns.Msg) (int, error) {
+	m := new(dns.Msg)
+	m.SetRcode(r, dns.RcodeRefused)
+	signResponseLikeRequest(w, r, m)
+	if err := w.WriteMsg(m); err != nil {
+		zd.Logger.Printf("ZoneTransferOut: %s: WriteMsg on REFUSED failed: %v", dns.Fqdn(zd.ZoneName), err)
+	}
+	return 0, nil
 }
 
 func (zd *ZoneData) ReadZoneFile(filename string, force bool) (bool, uint32, error) {
@@ -441,7 +443,7 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string
 	zd.Logger.Printf("ParseZoneFromReader: zone: %s", zd.ZoneName)
 
 	switch zd.ZoneStore {
-	case MapZone, SliceZone:
+	case MapZone:
 		zd.Data = core.NewCmap[OwnerData]()
 	default:
 		return false, 0, fmt.Errorf("ParseZoneFromReader: zone store %d not supported", zd.ZoneStore)
@@ -511,7 +513,6 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string
 	zd.CurrentSerial = soa.Serial
 	zd.IncomingSerial = soa.Serial
 
-	zd.ComputeIndices()
 	zd.XfrType = "axfr"
 	// Return true only if serial changed (indicates actual update)
 	// If force=true but serial unchanged, return false (validated but no update)
@@ -536,13 +537,8 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 	switch zd.ZoneStore {
 	case XfrZone:
 		ztype = XfrZone
-	case SliceZone:
-		fallthrough // store slicezones as mapzones during inbound transfer, sort afterwards into slice
 	case MapZone:
-		// omap = zd.Data[owner]
 		if omap, ok = zd.Data.Get(owner); !ok {
-
-			// if omap.RRtypes == nil {
 			omap.Name = owner
 			omap.RRtypes = NewRRTypeStore()
 		}
@@ -638,87 +634,40 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	count := 0
 	//	var total_sent int
 
-	switch zd.ZoneStore {
-	case SliceZone:
-		// SOA
-		soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
-		zonedata += RRsetToString(&soa)
-		count += len(soa.RRs) + len(soa.RRSIGs)
+	// SOA
+	zonedata += RRsetToString(&soa)
+	count += len(soa.RRs) + len(soa.RRSIGs)
 
-		// Rest of apex
-		for _, rrt := range apex.RRtypes.Keys() {
-			if rrt != dns.TypeSOA {
-				rrset := apex.RRtypes.GetOnlyRRSet(rrt)
-				zonedata += RRsetToString(&rrset)
-				count += len(rrset.RRs) + len(rrset.RRSIGs)
-			}
+	// Rest of apex
+	for _, rrt := range apex.RRtypes.Keys() {
+		if rrt != dns.TypeSOA {
+			rrset := apex.RRtypes.GetOnlyRRSet(rrt)
+			zonedata += RRsetToString(&rrset)
+			count += len(rrset.RRs) + len(rrset.RRSIGs)
 		}
+	}
 
-		// Rest of zone
-		for _, owner := range zd.Owners {
-			if owner.Name == zd.ZoneName {
-				continue
-			}
-			for _, rrt := range owner.RRtypes.Keys() {
-				rrl := owner.RRtypes.GetOnlyRRSet(rrt)
-				zonedata += RRsetToString(&rrl)
-				count += len(rrl.RRs) + len(rrl.RRSIGs)
+	// Rest of zone
+	for _, owner := range zd.Data.Keys() {
+		omap, _ := zd.Data.Get(owner)
+		if owner == zd.ZoneName {
+			continue
+		}
+		for _, rrt := range omap.RRtypes.Keys() {
+			rrl := omap.RRtypes.GetOnlyRRSet(rrt)
+			zonedata += RRsetToString(&rrl)
+			count += len(rrl.RRs) + len(rrl.RRSIGs)
 
-				if count >= 1000 {
-					//				   	total_sent += count
-					bytes, err = writer.WriteString(zonedata)
-					if err != nil {
-						return err
-					}
-					totalbytes += bytes
-					bytes = 0
-					count = 0
+			if count >= 1000 {
+				bytes, err = writer.WriteString(zonedata)
+				if err != nil {
+					return err
 				}
+				totalbytes += bytes
+				bytes = 0
+				count = 0
 			}
 		}
-
-	case MapZone:
-		// SOA
-		soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
-		zonedata += RRsetToString(&soa)
-		count += len(soa.RRs) + len(soa.RRSIGs)
-
-		// Rest of apex
-		for _, rrt := range apex.RRtypes.Keys() {
-			if rrt != dns.TypeSOA {
-				rrset := apex.RRtypes.GetOnlyRRSet(rrt)
-				zonedata += RRsetToString(&rrset)
-				count += len(rrset.RRs) + len(rrset.RRSIGs)
-			}
-		}
-
-		// Rest of zone
-		for _, owner := range zd.Data.Keys() {
-			omap, _ := zd.Data.Get(owner)
-			if owner == zd.ZoneName {
-				continue
-			}
-			for _, rrt := range omap.RRtypes.Keys() {
-				rrl := omap.RRtypes.GetOnlyRRSet(rrt)
-				zonedata += RRsetToString(&rrl)
-				count += len(rrl.RRs) + len(rrl.RRSIGs)
-
-				if count >= 1000 {
-					//					total_sent += count
-					bytes, err = writer.WriteString(zonedata)
-					if err != nil {
-						return err
-					}
-					totalbytes += bytes
-					bytes = 0
-					count = 0
-				}
-			}
-		}
-
-	default:
-		zd.Logger.Printf("Zone %s: zone store %d: no outbound zone transfer. Sorry.",
-			zd.ZoneName, zd.ZoneStore)
 	}
 
 	// 	for _, rr := range zd.RRs {
@@ -756,48 +705,6 @@ func RRsetToString(rrset *core.RRset) string {
 
 func InBailiwick(zone string, ns *dns.NS) bool {
 	return strings.HasSuffix(ns.Ns, zone)
-}
-
-func (zd *ZoneData) ComputeIndices() {
-	if zd.ZoneStore == SliceZone {
-		// for _, v := range zd.Data {
-		for _, key := range zd.Data.Keys() {
-			v, _ := zd.Data.Get(key)
-			zd.Owners = append(zd.Owners, v)
-		}
-		quickSort(zd.Owners)
-		// zd.Data = nil
-		zd.Data.Clear()
-		// zd.OwnerIndex = map[string]int{}
-		zd.OwnerIndex = core.NewCmap[int]()
-		for i, od := range zd.Owners {
-			// zd.OwnerIndex[od.Name] = i
-			zd.OwnerIndex.Set(od.Name, i)
-		}
-		idx, _ := zd.OwnerIndex.Get(zd.ZoneName)
-		soas := zd.Owners[idx].RRtypes.GetOnlyRRSet(dns.TypeSOA)
-		soas.RRs = soas.RRs[:1]
-		zd.Owners[idx].RRtypes.Set(dns.TypeSOA, soas)
-	}
-	if zd.Verbose {
-		zd.PrintOwners()
-	}
-}
-
-func (owners Owners) Len() int {
-	return len(owners)
-}
-
-func (owners Owners) Swap(i, j int) {
-	owners[i], owners[j] = owners[j], owners[i]
-}
-
-func (owners Owners) Less(i, j int) bool {
-	return owners[i].Name < owners[j].Name
-}
-
-func quickSort(sortable sort.Interface) {
-	sorts.Quicksort(sortable)
 }
 
 // formatZoneParseError extracts the line number from the parse error string

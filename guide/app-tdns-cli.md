@@ -7,7 +7,7 @@ via a REST-ful API.
 features of **tdnsd**. The sub-commands are grouped under different prefixes:
 
 - "**tdns-cli zone**": generate NSEC chain, sign zone, freeze|thaw, 
-  reload, etc.
+  reload, and runtime add|modify|delete of dynamic zones, etc.
 
 - "**tdns-cli ddns**": various commands to send DNS UPDATE messages.
 
@@ -16,8 +16,9 @@ features of **tdnsd**. The sub-commands are grouped under different prefixes:
 
 - "**tdns-cli keystore**": commands to manage the keystore (i.e. the
   repository of private/public key pairs used to SIG(0) sign UPDATE
-  messages, DNSSEC sign a zone, etc). The commands include listing, 
-  adding and deleting key pairs.
+  messages, DNSSEC sign a zone, etc., plus the shared-secret TSIG
+  keys used to authenticate zone transfers and NOTIFY). The commands
+  include listing, adding and deleting both key pairs and TSIG keys.
 
 - "**tdns-cli truststore**": commands to manage the truststore (i.e. the
   repository of public keys for child zones, used to validate SIG(0)

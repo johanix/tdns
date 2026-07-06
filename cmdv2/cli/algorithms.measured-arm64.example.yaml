@@ -1,5 +1,40 @@
-# algorithms.measured-arm64.example.yaml
+# algorithms.measured-arm64.yaml - algorithm enrichment data for tdns-cli.
 #
+# Install as /etc/tdns/algorithms.yaml and pull it into tdns-cli.yaml:
+#
+#   include:
+#      - /etc/tdns/algorithms.yaml
+#
+# This data is consumed ONLY by the `tdns-cli ... keystore <sig0|dnssec>
+# algorithms` listing, to annotate the algorithms a server reports as
+# supported. It is intentionally separated from the host-local CLI
+# config (API keys, addresses, ...) so it can be shared and
+# version-controlled on its own.
+#
+# Structure:
+#   algorithms.display     listing presentation knobs (optional)
+#   algorithms.profiles    per-algorithm enrichment, keyed by the
+#                          algorithm NAME the server reports
+#
+# Profiles keyed by a NAME matching no server-supported algorithm are
+# ignored; supported algorithms with no entry simply print "-" in the
+# enrichment columns. The set of supported algorithms always comes from
+# the server - nothing here changes that.
+#
+# Profile fields (all optional; omit what you don't know - a missing
+# field shows as "-"):
+#   description     free-form note
+#   publickeybytes  DNSKEY/KEY public key size, bytes
+#   signaturebytes  RRSIG/SIG signature size, bytes (typical; see notes
+#                   for variable-length schemes)
+#   secretkeybytes  stored private key size, bytes
+#   securitylevel   NIST PQ security level (1/3/5); omit for classical
+#   maturity        final | draft | candidate | builtin
+#   signingcost     cost of signing,    relative to ED25519 (= 1)
+#   validationcost  cost of validation, relative to ED25519 (= 1)
+#
+# ED25519 is the cost reference (signingcost = validationcost = 1).
+
 # A WORKED EXAMPLE of algorithms.yaml with signingcost / validationcost
 # filled in from a real benchmark run. This is NOT a drop-in config for
 # your deployment — the costs were measured on ONE machine and the
@@ -11,9 +46,9 @@
 #   Run:      -n 50, RSA at 2048-bit
 #   Reference: ED25519 (signingcost = validationcost = 1)
 #
-# To get numbers for YOUR reference hardware, run cmd/algbench there and
-# paste its output into your own algorithms.yaml. The canonical template
-# (algorithms.sample.yaml) intentionally leaves these costs unset.
+# To get numbers for YOUR reference hardware, run
+# github.com/johanix/dnssec-algorithms/cmd/algbench there and
+# paste its output into your own algorithms.yaml.
 #
 # What survives across hardware is the *shape*, not the exact factors:
 #   - RSA: slow to sign, fast to verify
@@ -82,6 +117,26 @@ algorithms:
          maturity:        final
          signingcost:     3.1
          validationcost:  1.9
+
+      MLDSA65:
+         description:     "ML-DSA-65 (FIPS 204), lattice; level-3 parameter set"
+         publickeybytes:  1952
+         signaturebytes:  3309
+         secretkeybytes:  4032
+         securitylevel:   3
+         maturity:        final
+         # signingcost / validationcost: not yet benchmarked on this host;
+         # run cmd/algbench (dnssec-algorithms) to fill in.
+
+      MLDSA87:
+         description:     "ML-DSA-87 (FIPS 204), lattice; level-5 parameter set"
+         publickeybytes:  2592
+         signaturebytes:  4627
+         secretkeybytes:  4896
+         securitylevel:   5
+         maturity:        final
+         # signingcost / validationcost: not yet benchmarked on this host;
+         # run cmd/algbench (dnssec-algorithms) to fill in.
 
       SLHDSA128S:
          description:     "SLH-DSA-SHA2-128s (FIPS 205), hash-based; tiny keys, large slow signatures"

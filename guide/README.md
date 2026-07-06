@@ -19,21 +19,32 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   detailed documentation for each.
 
 - [TDNS Special Features and Extensions](special-features.md)
-  -- Delegation sync (both parent and child sides, including
+  -- Delegation sync (parent side, child side, and the
+  agent-as-proxy path for DSYNC-unaware primaries, including
   the DSYNC scheme dispatch, the NOTIFY scanner, and the
   pluggable delegation backends), DNS transport signaling,
   experimental record types, and post-quantum algorithm
   support (ML-DSA / SLH-DSA / Falcon / MAYO / SNOVA for both
   SIG(0) and DNSSEC).
 
-- [Automatic DNSSEC Key Rollovers](key-rollover.md)
-  -- Operator manual for the automated KSK rollover engine,
-  covering policy YAML, the `auto-rollover` CLI subcommand
-  tree, the status output, PQ-safe parent UPDATEs,
-  DSYNC-aware dispatch and verification, the three-knob
-  mental model (TTLs, KSK lifetime, RRSIG validity), worked
-  examples at testbed, weekly, and monthly cadences, and
-  the failure-category model.
+- [Agent as a DSYNC proxy](agent-dsync-proxy.md)
+  -- Operator how-to for running tdns-agent as a secondary
+  that forwards delegation-sync (NOTIFY and/or signed DNS
+  UPDATE) to the parent on behalf of a DSYNC-unaware primary
+  (BIND/Knot/NSD): when to use it, configuration, the
+  change mapping, the UPDATE KEY-bootstrap (`zone proxy-key`),
+  limitations, and verification.
+
+- [Automatic DNSSEC Rollovers](key-rollover.md)
+  -- Operator manual for all three rollover kinds:
+  parent-coordinated **KSK** rollover (the bulk -- policy
+  YAML, the `auto-rollover` CLI tree, status output, PQ-safe
+  parent UPDATEs, DSYNC-aware dispatch and verification, the
+  three-knob mental model, worked examples, and the
+  failure-category model), local **ZSK** rollover, and
+  **algorithm** rollover (the relaxed-mode ZSK alg roll via
+  `policy-change` + `asap --zsk`, with the `completeness`
+  knob and the KSK/CSK/both-role/strict refusals).
 
 - [Rollover Timing Equations](rollover-timing-equations.md)
   -- Canonical reference for the cache-flush invariants,
@@ -43,5 +54,4 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   reading when changing engine timing behaviour.
 
 - Future Work (coming soon)
-  -- IXFR support, TSIG authentication, scanner integration
-  for parent-side delegation sync.
+  -- IXFR support.

@@ -42,9 +42,11 @@ const (
 	// OptServerSvcb
 	OptAddTransportSignal
 	OptCatalogZone
+	OptApiManagedZone // zone created/managed via the dynamic-zones API (zone add/delete/modify)
 	OptCatalogMemberAutoCreate
 	OptCatalogMemberAutoDelete
-	OptMultiSigner // Dynamically set by signer when HSYNC shows multiple signers
+	OptMultiSigner  // Dynamically set by signer when HSYNC shows multiple signers
+	OptDelSyncProxy // agent secondary: proxy CDS/CSYNC NOTIFYs upstream for a DSYNC-unaware primary
 	optZoneOptionTdnsSentinel
 )
 
@@ -73,9 +75,11 @@ var ZoneOptionToString = map[ZoneOption]string{
 	// OptServerSvcb:        "create-server-svcb",
 	OptAddTransportSignal:      "add-transport-signal",
 	OptCatalogZone:             "catalog-zone",
+	OptApiManagedZone:          "api-managed-zone",
 	OptCatalogMemberAutoCreate: "catalog-member-auto-create",
 	OptCatalogMemberAutoDelete: "catalog-member-auto-delete",
 	OptMultiSigner:             "multi-signer",
+	OptDelSyncProxy:            "delegation-sync-proxy",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -96,9 +100,11 @@ var StringToZoneOption = map[string]ZoneOption{
 	"automatic-zone":             OptAutomaticZone,
 	"add-transport-signal":       OptAddTransportSignal,
 	"catalog-zone":               OptCatalogZone,
+	"api-managed-zone":           OptApiManagedZone,
 	"catalog-member-auto-create": OptCatalogMemberAutoCreate,
 	"catalog-member-auto-delete": OptCatalogMemberAutoDelete,
 	"multi-signer":               OptMultiSigner,
+	"delegation-sync-proxy":      OptDelSyncProxy,
 }
 
 type ImrOption uint8
@@ -218,6 +224,25 @@ var StringToAppType = map[string]AppType{
 	"edgeSigner": AppTypeEdgeSigner, // NYI
 }
 
+// ZoneStatus is the positive-lifecycle state of a zone, orthogonal to the
+// error registry (a zone can be ZoneStatusReady and still carry a RefreshError).
+// Minimal by design: a single value with a setter/getter, no registry.
+type ZoneStatus uint8
+
+const (
+	ZoneStatusUnknown ZoneStatus = iota // zero value; pre-registration
+	ZoneStatusPending                   // registered + enqueued, no data yet
+	ZoneStatusLoading                   // transfer/file-load in progress
+	ZoneStatusReady                     // data populated (>=1 successful load)
+)
+
+var ZoneStatusToString = map[ZoneStatus]string{
+	ZoneStatusUnknown: "unknown",
+	ZoneStatusPending: "pending",
+	ZoneStatusLoading: "loading",
+	ZoneStatusReady:   "ready",
+}
+
 type ErrorType uint8
 
 const (
@@ -251,6 +276,17 @@ const (
 	// visibility signal, not a hardfail. Auto-rollover progression
 	// gates here because no scheme means no DS push is possible.
 	RolloverParentBlocker
+	// DelegationSyncWarning: a delegation-sync function is degraded but the
+	// zone is otherwise fine. Used by the delegation-sync-proxy UPDATE path
+	// when it is not operable (parent advertises no UPDATE, a foreign KEY
+	// occupies the apex, or the agent's KEY is not yet published at the
+	// primary). Visibility-only — the zone keeps serving and the NOTIFY proxy
+	// may still apply.
+	DelegationSyncWarning
+	// ConfigWarning: zone config is degraded but the zone is still served
+	// (e.g. some primaries failed to resolve while others succeeded).
+	// Visibility-only.
+	ConfigWarning
 )
 
 var ErrorTypeToString = map[ErrorType]string{
@@ -262,6 +298,8 @@ var ErrorTypeToString = map[ErrorType]string{
 	RolloverPolicyViolation: "rollover-policy",
 	RolloverPolicyWarning:   "rollover-policy-warning",
 	RolloverParentBlocker:   "rollover-parent-blocker",
+	DelegationSyncWarning:   "delegation-sync-warning",
+	ConfigWarning:           "config-warning",
 }
 
 // errorTypeReportOrder defines the deterministic order in which the
@@ -278,6 +316,8 @@ var errorTypeReportOrder = []ErrorType{
 	RolloverParentBlocker,
 	DnssecPolicyWarning,
 	RolloverPolicyWarning,
+	DelegationSyncWarning,
+	ConfigWarning,
 }
 
 // rolloverGatingErrors are categories that the auto-rollover CLI
@@ -309,6 +349,19 @@ var serviceImpactingErrors = []ErrorType{
 	ConfigError,
 	AgentError,
 	DnssecError,
+}
+
+// ErrorTypeIsServiceImpacting reports whether an error category makes a zone
+// unable to serve (so it should render as an ERROR) versus a visibility-only
+// warning under which the zone keeps serving (e.g. ConfigWarning). Exported for
+// CLI display, which renders the two differently.
+func ErrorTypeIsServiceImpacting(t ErrorType) bool {
+	for _, e := range serviceImpactingErrors {
+		if t == e {
+			return true
+		}
+	}
+	return false
 }
 
 // ZoneError is one entry in the per-zone error registry. Use SetError
@@ -360,6 +413,30 @@ func (zd *ZoneData) ClearError(errtype ErrorType) {
 	}
 	zd.recomputeDerivedErrorFieldsLocked()
 	Zones.Set(zd.ZoneName, zd)
+}
+
+// SetStatus sets the zone's positive-lifecycle status and republishes the zone
+// in the Zones map. Same lock discipline as SetError; no derived fields to
+// recompute. Orthogonal to the error registry.
+//
+// The republish is guarded: an in-flight refresh on a deleted or replaced zone
+// (e.g. SetStatus(Loading) at the top of FetchFromUpstream) must NOT re-insert
+// the stale pointer into Zones — that would resurrect a zone the operator just
+// deleted. We only republish when zd is still the live entry for its name.
+func (zd *ZoneData) SetStatus(s ZoneStatus) {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.Status = s
+	if cur, live := Zones.Get(zd.ZoneName); live && cur == zd {
+		Zones.Set(zd.ZoneName, zd)
+	}
+}
+
+// GetStatus returns the zone's positive-lifecycle status under the lock.
+func (zd *ZoneData) GetStatus() ZoneStatus {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return zd.Status
 }
 
 // HasError returns true if the zone has an active error of the given type.

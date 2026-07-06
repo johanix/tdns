@@ -594,8 +594,8 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	// apex glue on positive answers. Referrals and NXDOMAIN/NODATA paths are
 	// unaffected (their authority/additional sections are still required).
 	minimalResponses := false
-	if kdb != nil && kdb.Options != nil {
-		if v, ok := kdb.Options[AuthOptMinimalResponses]; ok && v == "true" {
+	if kdb != nil {
+		if v, ok := kdb.AuthOption(AuthOptMinimalResponses); ok && v == "true" {
 			minimalResponses = true
 		}
 	}

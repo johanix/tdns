@@ -1,4 +1,4 @@
-# algorithms.yaml — algorithm enrichment data for tdns-cli.
+# algorithms.yaml --- algorithm enrichment data for tdns-cli.
 #
 # Install as /etc/tdns/algorithms.yaml and pull it into tdns-cli.yaml:
 #

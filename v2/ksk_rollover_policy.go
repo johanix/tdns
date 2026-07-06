@@ -5,12 +5,40 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/miekg/dns"
 	"gopkg.in/yaml.v3"
 )
+
+// parseExtendedDuration parses a Go duration string with one extension:
+// a single trailing "d" (days) or "w" (weeks) suffix on a plain integer,
+// e.g. "14d" or "2w". Everything else falls through to time.ParseDuration,
+// so "168h", "30m", "1h30m" keep working. Days = 24h, weeks = 168h. Operators
+// express key lifetimes and signature validity in days/weeks; the stdlib
+// parser stops at hours.
+func parseExtendedDuration(s string) (time.Duration, error) {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 {
+		unit := s[len(s)-1]
+		if unit == 'd' || unit == 'w' {
+			n, err := strconv.Atoi(s[:len(s)-1])
+			if err == nil && n >= 0 {
+				per := 24 * time.Hour
+				if unit == 'w' {
+					per = 7 * 24 * time.Hour
+				}
+				return time.Duration(n) * per, nil
+			}
+			// Not a non-negative "<int>d/w" (e.g. "1.5d" or "-7d") — fall
+			// through and let ParseDuration give the canonical error. ("1h30m"
+			// has no d/w tail anyway.)
+		}
+	}
+	return time.ParseDuration(s)
+}
 
 const (
 	DnssecPolicyModeKSKZSK = "ksk-zsk"
@@ -24,6 +52,19 @@ const (
 	RolloverMethodMultiDS
 	RolloverMethodDoubleSignature
 )
+
+// String returns the YAML/config name for the rollover method.
+func (m RolloverMethod) String() string {
+	switch m {
+	case RolloverMethodNone:
+		return "none"
+	case RolloverMethodMultiDS:
+		return "multi-ds"
+	case RolloverMethodDoubleSignature:
+		return "double-signature"
+	}
+	return fmt.Sprintf("unknown(%d)", int(m))
+}
 
 type RolloverPolicy struct {
 	Method             RolloverMethod
@@ -206,7 +247,7 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 	}
 
 	if strings.TrimSpace(conf.Ttls.DNSKEY) != "" {
-		d, err := time.ParseDuration(strings.TrimSpace(conf.Ttls.DNSKEY))
+		d, err := parseExtendedDuration(strings.TrimSpace(conf.Ttls.DNSKEY))
 		if err != nil {
 			return fmt.Errorf("dnssec policy %q: ttls.dnskey: %w", policyName, err)
 		}
@@ -226,7 +267,7 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 		if marginStr == "" {
 			return fmt.Errorf("dnssec policy %q: clamping.margin is required when clamping.enabled: true", policyName)
 		}
-		d, err := time.ParseDuration(marginStr)
+		d, err := parseExtendedDuration(marginStr)
 		if err != nil {
 			return fmt.Errorf("dnssec policy %q: clamping.margin: %w", policyName, err)
 		}
@@ -243,7 +284,7 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 	}
 
 	if s := strings.TrimSpace(conf.Ttls.ParentDS); s != "" {
-		d, err := time.ParseDuration(s)
+		d, err := parseExtendedDuration(s)
 		if err != nil {
 			return fmt.Errorf("dnssec policy %q: ttls.parent-ds: %w", policyName, err)
 		}
@@ -254,7 +295,7 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 	}
 
 	if s := strings.TrimSpace(conf.Ttls.DS); s != "" {
-		d, err := time.ParseDuration(s)
+		d, err := parseExtendedDuration(s)
 		if err != nil {
 			return fmt.Errorf("dnssec policy %q: ttls.ds: %w", policyName, err)
 		}
@@ -273,7 +314,7 @@ func FinishDnssecPolicy(policyName string, conf *DnssecPolicyConf, out *DnssecPo
 	// max_served must be parsed AFTER clamping so the cross-check against
 	// clamping.margin sees the resolved margin value.
 	if s := strings.TrimSpace(conf.Ttls.MaxServed); s != "" {
-		d, err := time.ParseDuration(s)
+		d, err := parseExtendedDuration(s)
 		if err != nil {
 			return fmt.Errorf("dnssec policy %q: ttls.max_served: %w", policyName, err)
 		}
@@ -307,7 +348,7 @@ func parsePolicySigValidity(policyName string, conf DnssecPolicySigValidityConf)
 	if defaultStr == "" {
 		return PolicySigValidity{}, fmt.Errorf("dnssec policy %q: sigvalidity.default is required", policyName)
 	}
-	defaultDur, err := time.ParseDuration(defaultStr)
+	defaultDur, err := parseExtendedDuration(defaultStr)
 	if err != nil {
 		return PolicySigValidity{}, fmt.Errorf("dnssec policy %q: sigvalidity.default: %w", policyName, err)
 	}
@@ -320,7 +361,7 @@ func parsePolicySigValidity(policyName string, conf DnssecPolicySigValidityConf)
 	if dnskeyStr == "" {
 		out.DNSKEY = out.Default
 	} else {
-		d, err := time.ParseDuration(dnskeyStr)
+		d, err := parseExtendedDuration(dnskeyStr)
 		if err != nil {
 			return PolicySigValidity{}, fmt.Errorf("dnssec policy %q: sigvalidity.dnskey: %w", policyName, err)
 		}
@@ -334,7 +375,7 @@ func parsePolicySigValidity(policyName string, conf DnssecPolicySigValidityConf)
 	if dsStr == "" {
 		out.DS = out.Default
 	} else {
-		d, err := time.ParseDuration(dsStr)
+		d, err := parseExtendedDuration(dsStr)
 		if err != nil {
 			return PolicySigValidity{}, fmt.Errorf("dnssec policy %q: sigvalidity.ds: %w", policyName, err)
 		}
@@ -376,7 +417,7 @@ func fillRolloverDurations(policyName string, conf *DnssecPolicyConf, out *Dnsse
 		if val == "" {
 			return def, nil
 		}
-		d, err := time.ParseDuration(val)
+		d, err := parseExtendedDuration(val)
 		if err != nil {
 			return 0, fmt.Errorf("rollover.%s: %w", field, err)
 		}
@@ -524,8 +565,14 @@ func warnDnssecPolicyCoupling(policyName string, out *DnssecPolicy) {
 }
 
 // dnssecPoliciesYAML is the top-level shape for `tdns zone keystore dnssec policy validate --file`.
+// Mirrors the daemon config: policies and the split_algorithms allowlist
+// both live under the dnssec: block.
 type dnssecPoliciesYAML struct {
-	DnssecPolicies map[string]DnssecPolicyConf `yaml:"dnssecpolicies"`
+	Dnssec struct {
+		Templates       map[string]DnssecPolicyConf `yaml:"templates"`
+		Policies        map[string]DnssecPolicyConf `yaml:"policies"`
+		SplitAlgorithms map[string][]string         `yaml:"split_algorithms"`
+	} `yaml:"dnssec"`
 }
 
 // ParseDnssecPolicyConf parses a single DnssecPolicyConf into the
@@ -537,7 +584,7 @@ type dnssecPoliciesYAML struct {
 // which logs via lgConfig. Callers that want to suppress those logs
 // (e.g. the validate CLI) should use ParseDnssecPolicyConfQuiet instead.
 func ParseDnssecPolicyConf(name string, dp *DnssecPolicyConf) (*DnssecPolicy, error) {
-	return parseDnssecPolicyConfImpl(name, dp, false)
+	return parseDnssecPolicyConfImpl(name, dp, false, nil)
 }
 
 // ParseDnssecPolicyConfQuiet is the silent counterpart of
@@ -548,13 +595,19 @@ func ParseDnssecPolicyConf(name string, dp *DnssecPolicyConf) (*DnssecPolicy, er
 // on the returned policy to render the same warnings as structured
 // output.
 func ParseDnssecPolicyConfQuiet(name string, dp *DnssecPolicyConf) (*DnssecPolicy, error) {
-	return parseDnssecPolicyConfImpl(name, dp, true)
+	return parseDnssecPolicyConfImpl(name, dp, true, nil)
 }
 
-func parseDnssecPolicyConfImpl(name string, dp *DnssecPolicyConf, quiet bool) (*DnssecPolicy, error) {
+// parseDnssecPolicyConfImpl resolves and validates one policy. splitAllowed
+// is the KSK/ZSK pairing allowlist (kskAlg -> permitted zskAlgs); nil means
+// only same-algorithm policies pass (fail closed).
+func parseDnssecPolicyConfImpl(name string, dp *DnssecPolicyConf, quiet bool, splitAllowed map[uint8]map[uint8]bool) (*DnssecPolicy, error) {
 	dp.Name = name
 	alg, kskAlg, zskAlg, err := resolvePolicyRoleAlgorithms(name, dp)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateSplitAlgorithm(name, kskAlg, zskAlg, splitAllowed); err != nil {
 		return nil, err
 	}
 	kskLT, err := GenKeyLifetime(dp.KSK.Lifetime)
@@ -592,7 +645,7 @@ func parseDnssecPolicyConfImpl(name string, dp *DnssecPolicyConf, quiet bool) (*
 	return out, nil
 }
 
-// ValidateDnssecPoliciesFromFile parses a YAML file with a top-level dnssecpolicies: map
+// ValidateDnssecPoliciesFromFile parses a YAML file with a dnssec.policies: map
 // and validates every policy the same way as runtime config loading.
 func ValidateDnssecPoliciesFromFile(path string) error {
 	data, err := os.ReadFile(path)
@@ -603,14 +656,25 @@ func ValidateDnssecPoliciesFromFile(path string) error {
 	if err := yaml.Unmarshal(data, &root); err != nil {
 		return fmt.Errorf("yaml: %w", err)
 	}
-	if len(root.DnssecPolicies) == 0 {
-		return errors.New("no dnssecpolicies: block found (top-level key must be dnssecpolicies)")
+	if len(root.Dnssec.Policies) == 0 {
+		return errors.New("no dnssec.policies: block found (policies live under the dnssec: key)")
 	}
+	splitAllowed := buildSplitAlgorithmSet(root.Dnssec.SplitAlgorithms)
 	var errs []error
-	for name, dp := range root.DnssecPolicies {
+	for name, dp := range root.Dnssec.Policies {
 		dp.Name = name
+		expanded, terr := resolveDnssecPolicyTemplate(dp, root.Dnssec.Templates)
+		if terr != nil {
+			errs = append(errs, fmt.Errorf("policy %q: %w", name, terr))
+			continue
+		}
+		dp = expanded
 		alg, kskAlg, zskAlg, err := resolvePolicyRoleAlgorithms(name, &dp)
 		if err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := validateSplitAlgorithm(name, kskAlg, zskAlg, splitAllowed); err != nil {
 			errs = append(errs, err)
 			continue
 		}

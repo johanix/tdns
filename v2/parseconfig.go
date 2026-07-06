@@ -13,6 +13,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"time"
@@ -173,6 +174,80 @@ func processConfigFile(file string, baseDir string, depth int) (map[string]inter
 	return config, includedFiles, nil
 }
 
+// deprecatedConfigKey describes a config key (or key fragment) that the
+// code no longer reads, together with operator-facing migration advice.
+// `match` is tested against each unused config key path reported by
+// mapstructure (dotted, e.g. "dnssec.policies[fastroll].KSK.sigvalidity"):
+//   - exact: the unused path equals match (use for top-level keys)
+//   - else: match is treated as a substring (use ".suffix" forms to catch
+//     a renamed leaf wherever it appears, e.g. ".sigvalidity")
+type deprecatedConfigKey struct {
+	match  string
+	exact  bool
+	advice string
+	key    string // populated per-occurrence by classifyUnusedConfigKeys (the actual offending path)
+}
+
+// deprecatedConfigKeys is the registry of config keys removed or moved by
+// past restructures. When the operator's config still uses one, the loader
+// emits a specific migration error instead of a generic "unknown key"
+// warning — turning a silent, system-wide breakage (e.g. every signed zone
+// losing its policy) into a one-line "here is what to change."
+//
+// TEMPLATE — adding a new entry as the config evolves:
+//   - Removed/renamed a TOP-LEVEL key (foo: → bar.foo:)? Add
+//     {match: "foo", exact: true, advice: "`foo:` moved to `bar.foo:` (restructure YYYY-MM-DD)"}.
+//   - Renamed/moved a LEAF that can appear under many parents
+//     (x: → y: under each policy)? Add
+//     {match: ".oldleaf", advice: "`oldleaf` moved to ...; see <doc>"}.
+//
+// Keep advice concrete: name the new location and, ideally, the change date
+// or doc so an operator can find the migration.
+var deprecatedConfigKeys = []deprecatedConfigKey{
+	// Config restructure 2026-06-16 (per-role KSK/ZSK algorithms + nesting):
+	// the DNSSEC config moved under a single top-level `dnssec:` block.
+	{match: "dnssecpolicies", exact: true,
+		advice: "`dnssecpolicies:` moved under `dnssec:` as `dnssec.policies:` (restructure 2026-06-16)"},
+	{match: "kasp", exact: true,
+		advice: "`kasp:` moved under `dnssec:` as `dnssec.kasp:` (restructure 2026-06-16)"},
+	{match: "large_algorithms", exact: true,
+		advice: "`large_algorithms:` moved under `dnssec:` as `dnssec.large_algorithms:` (restructure 2026-06-16)"},
+	{match: "split_algorithms", exact: true,
+		advice: "`split_algorithms:` moved under `dnssec:` as `dnssec.split_algorithms:` (restructure 2026-06-16)"},
+	// sigvalidity reshape: was a per-key scalar (ksk/zsk/csk: sigvalidity: X);
+	// is now a policy-level subtree `sigvalidity: { default, dnskey, ds }`
+	// with `default` required.
+	{match: ".sigvalidity",
+		advice: "per-key `sigvalidity:` is now a policy-level subtree `sigvalidity: { default, dnskey, ds }` (default required)"},
+}
+
+// classifyUnusedConfigKeys splits mapstructure's unused-key list into keys
+// that match a known deprecated shape (with migration advice) and keys that
+// are merely unrecognized (likely typos). Case-insensitive on the path;
+// mapstructure reports field paths in the Go struct's case (e.g. ".KSK.").
+func classifyUnusedConfigKeys(unused []string) (deprecated []deprecatedConfigKey, unknown []string) {
+	for _, key := range unused {
+		lk := strings.ToLower(key)
+		var hit *deprecatedConfigKey
+		for i := range deprecatedConfigKeys {
+			d := &deprecatedConfigKeys[i]
+			ml := strings.ToLower(d.match)
+			if (d.exact && lk == ml) || (!d.exact && strings.Contains(lk, ml)) {
+				hit = d
+				break
+			}
+		}
+		if hit != nil {
+			// Carry the actual key in a per-occurrence copy so the log line
+			// names the offending path, not just the pattern.
+			deprecated = append(deprecated, deprecatedConfigKey{key: key, advice: hit.advice})
+		} else {
+			unknown = append(unknown, key)
+		}
+	}
+	return deprecated, unknown
+}
+
 func (conf *Config) ParseConfig(reload bool) error {
 	lgConfig.Debug("entering ParseConfig")
 
@@ -188,12 +263,21 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return fmt.Errorf("error processing config: %v", err)
 	}
 
-	// Configure mapstructure decoder to respect yaml tags
+	// Configure mapstructure decoder to respect yaml tags. The decode hook
+	// converts a bare-string primary:/notify: entry (the pre-migration shape)
+	// into a PeerConf legacy marker instead of failing the whole-file decode —
+	// per-zone validation then quarantines just that zone to ERROR. A custom
+	// yaml.Unmarshaler does NOT work here: config decodes yaml -> map ->
+	// mapstructure, and mapstructure ignores the yaml.Unmarshaler interface.
 	var md mapstructure.Metadata
 	decoderConfig := &mapstructure.DecoderConfig{
 		TagName:  "yaml",
 		Result:   conf,
 		Metadata: &md,
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			stringToPeerConfHook(),
+			stringToAclEntryHook(),
+		),
 	}
 	decoder, err := mapstructure.NewDecoder(decoderConfig)
 	if err != nil {
@@ -215,24 +299,39 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// absent keys untouched).
 	conf.Dnssec.DNSKEYTransport = ""
 
-	// Decode the entire config at once
+	// Decode the entire config at once. A bare-string primary:/notify: entry no
+	// longer aborts the decode — stringToPeerConfHook turns it into a PeerConf
+	// legacy marker that per-zone validation quarantines (see DecoderConfig above).
 	if err := decoder.Decode(configMap); err != nil {
-		errMsg := err.Error()
-		if strings.Contains(errMsg, "'Primary'") && strings.Contains(errMsg, "[]interface") {
-			return fmt.Errorf("error decoding config: %v\nHint: 'primary' must be a single address string (e.g., primary: \"10.4.0.4:8055\"), not a YAML list", err)
-		}
 		return fmt.Errorf("error decoding config: %v", err)
 	}
 
 	if len(md.Unused) > 0 {
-		lgConfig.Warn("unknown config keys ignored (possible misspellings)", "keys", md.Unused)
+		// Split the unused keys into two buckets: keys that match a known
+		// DEPRECATED/RENAMED config shape (the config lags the code — emit
+		// a specific migration message), and genuinely unrecognized keys
+		// (likely typos — the generic warning). A deprecated key carries a
+		// real risk (e.g. a moved DNSSEC policy block silently disables
+		// signing for every zone), so it gets a loud, actionable line of
+		// its own rather than being buried in the generic list.
+		deprecated, unknown := classifyUnusedConfigKeys(md.Unused)
+		for _, d := range deprecated {
+			lgConfig.Error("deprecated config key (config lags the code) — "+d.advice,
+				"key", d.key)
+		}
+		if len(unknown) > 0 {
+			lgConfig.Warn("unknown config keys ignored (possible misspellings)", "keys", unknown)
+		}
 	}
 
-	// Normalize all identity fields (domain names) from config to FQDN form.
-	if err := validateKaspPropagationDelay(conf.Kasp.PropagationDelay); err != nil {
+	// Parse the entire dnssec: block (large_algorithms, split_algorithms,
+	// kasp, and the named policies) into conf.Internal.*. The zone-reload
+	// paths call this same helper so reloading zones also refreshes the
+	// policy definitions they depend on. ParseZones (later) validates zone
+	// dnssec_policy references against the resolved map.
+	if err := conf.parseDnssecConfig(); err != nil {
 		return err
 	}
-	conf.Internal.LargeAlgorithms = buildLargeAlgorithmSet(conf.Dnssec.LargeAlgorithms)
 
 	dnskeyXport, err := parseDNSKEYTransportPolicy(conf.Dnssec.DNSKEYTransport)
 	if err != nil {
@@ -270,59 +369,6 @@ func (conf *Config) ParseConfig(reload bool) error {
 	viper.SetConfigType("yaml")
 	if err := viper.ReadConfig(strings.NewReader(string(processedConfig))); err != nil {
 		return fmt.Errorf("error reading processed config: %v", err)
-	}
-
-	// Rebuild DnssecPolicies on every parse. On reload, removed or
-	// rejected policies must not survive from the previous config.
-	// ParseZones (called later from MainInit) validates zone
-	// dnssec_policy references against this map, so it must be populated
-	// before ParseZones runs — for all apps, not just tdns-native ones.
-	conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
-	for name, dp := range conf.DnssecPolicies {
-		dpLocal := dp
-		alg, kskAlg, zskAlg, err := resolvePolicyRoleAlgorithms(name, &dpLocal)
-		if err != nil {
-			lgConfig.Error("DNSSEC policy invalid algorithm, ignored", "policy", name, "err", err)
-			continue
-		}
-		kskLT, err := GenKeyLifetime(dpLocal.KSK.Lifetime)
-		if err != nil {
-			lgConfig.Error("DNSSEC policy invalid ksk.lifetime, ignored", "policy", name, "err", err)
-			continue
-		}
-		zskLT, err := GenKeyLifetime(dpLocal.ZSK.Lifetime)
-		if err != nil {
-			lgConfig.Error("DNSSEC policy invalid zsk.lifetime, ignored", "policy", name, "err", err)
-			continue
-		}
-		cskLT, err := GenKeyLifetime(dpLocal.CSK.Lifetime)
-		if err != nil {
-			lgConfig.Error("DNSSEC policy invalid csk.lifetime, ignored", "policy", name, "err", err)
-			continue
-		}
-		tmp := DnssecPolicy{
-			Name:         name,
-			Algorithm:    alg,
-			KSKAlgorithm: kskAlg,
-			ZSKAlgorithm: zskAlg,
-			KSK:          kskLT,
-			ZSK:          zskLT,
-			CSK:          cskLT,
-		}
-		if tmp.Algorithm == 0 {
-			lgConfig.Error("DNSSEC policy has unknown algorithm, ignored", "policy", name, "algorithm", dpLocal.Algorithm)
-			continue
-		}
-		if err := FinishDnssecPolicy(name, &dpLocal, &tmp); err != nil {
-			lgConfig.Error("DNSSEC policy invalid, ignored", "policy", name, "err", err)
-			continue
-		}
-		conf.Internal.DnssecPolicies[name] = tmp
-	}
-	// If no "default" policy in config, use built-in default (e.g. for agent autozone).
-	// An explicit dnssecpolicies.default in YAML overrides this.
-	if _, exists := conf.Internal.DnssecPolicies["default"]; !exists {
-		conf.Internal.DnssecPolicies["default"] = BuiltinDefaultDnssecPolicy()
 	}
 
 	// Populate ConfigGroupConfig.Name from map keys after parsing CatalogConf
@@ -382,6 +428,14 @@ func (conf *Config) ParseConfig(reload bool) error {
 				return err
 			}
 		} else if conf.Internal.KeyDB != nil {
+			// Refresh the live KeyDB's options from the freshly-parsed config so
+			// a reloaded option (e.g. minimal-responses) takes effect without a
+			// restart. The KeyDB is built once at startup and reused across
+			// reloads, but the query responder reads them — without this, reload
+			// updated only conf.DnsEngine.Options (the presentation) while the
+			// responder kept the stale startup map. SetOptions swaps the map
+			// atomically, so the per-query lock-free readers are race-free.
+			conf.Internal.KeyDB.SetOptions(conf.DnsEngine.Options)
 			if err := applyOutboundSoaSerial(conf.Internal.KeyDB, conf.DnsEngine.OutboundSoaSerial); err != nil {
 				return err
 			}
@@ -576,22 +630,13 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			}
 		}
 
-		zconf.Store = strings.ToLower(zconf.Store)
-		// fmt.Printf("Zone %s uses \"%s\" storage\n", zconf.Name, zconf.Store)
-		var zonestore ZoneStore
-		switch zconf.Store {
-		case "xfr":
-			zonestore = XfrZone
-		case "map":
-			zonestore = MapZone
-		case "slice":
-			zonestore = SliceZone
-		default:
-			lgConfig.Warn("unknown zone store type, using map store", "zone", zname, "store", zconf.Store)
-			zonestore = MapZone
-		}
+		zonestore := parseZoneStore(zconf.Store)
 
 		var zonetype ZoneType
+		// resolvedPrimaries holds the addr:port tuples for a secondary zone's
+		// upstreams, resolved (hostnames -> addresses) at parse time. nil for
+		// primary zones. Carried to the ZoneRefresher build below.
+		var resolvedPrimaries []PeerConf
 
 		switch strings.ToLower(zconf.Type) {
 		case "primary":
@@ -599,23 +644,111 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			_ = append([]string{}, zname) // primary_zones was unused
 		case "secondary":
 			zonetype = Secondary
-			if zconf.Primary == "" {
+			if len(zconf.Primaries) == 0 {
 				lgConfig.Error("secondary zone has no primary configured, zone in error state", "zone", zname)
 				zd.SetError(ConfigError, "secondary zone but has no primary (upstream) configured")
 				broken_zones = append(broken_zones, zname)
 				continue
 			}
-
-			// Normalize primary address to include port if not specified
-			origPrimary := zconf.Primary
-			zconf.Primary = NormalizeAddress(zconf.Primary)
-			if origPrimary != zconf.Primary {
-				lgConfig.Warn("primary has no port specified, using default :53", "zone", zname, "primary", origPrimary)
+			secondaryOK := true
+			for i := range zconf.Primaries {
+				p := &zconf.Primaries[i]
+				if p.Legacy != "" {
+					lgConfig.Error("secondary zone uses legacy bare-string primary, zone in error state", "zone", zname, "primary", p.Legacy)
+					zd.SetError(ConfigError, "primary now requires {addr, key} (got bare string %q)", p.Legacy)
+					secondaryOK = false
+					break
+				}
+				if p.Addr == "" {
+					lgConfig.Error("secondary zone primary has no address, zone in error state", "zone", zname)
+					zd.SetError(ConfigError, "secondary zone but has no primary (upstream) configured")
+					secondaryOK = false
+					break
+				}
+				if p.Key == "" {
+					lgConfig.Error("secondary zone primary has no key, zone in error state", "zone", zname)
+					zd.SetError(ConfigError, "primary requires an explicit key (use key: NOKEY for no TSIG)")
+					secondaryOK = false
+					break
+				}
+				if !conf.tsigKeyDefined(p.Key) {
+					lgConfig.Error("secondary zone primary references unknown key, zone in error state", "zone", zname, "key", p.Key)
+					zd.SetError(ConfigError, "unknown primary key %q (define it in keys.tsig or keystore tsig, or use NOKEY for no TSIG)", p.Key)
+					secondaryOK = false
+					break
+				}
+				origPrimary := p.Addr
+				p.Addr = NormalizeAddress(p.Addr)
+				if origPrimary != p.Addr {
+					lgConfig.Warn("primary has no port specified, using default :53", "zone", zname, "primary", origPrimary)
+				}
 			}
+			if !secondaryOK {
+				broken_zones = append(broken_zones, zname)
+				continue
+			}
+
+			// Resolve the as-written primaries to addr:port tuples (hostnames
+			// -> addresses via the IMR), re-resolved on every parse/reload.
+			// Zero resolved -> ConfigError (quarantine); partial -> ConfigWarning
+			// (serve from the rest). A prior parse's ConfigWarning was already
+			// cleared by the SetError(NoError) reset at the top of the loop.
+			res := resolvePrimaries(ctx, conf.Internal.ImrEngine, zconf.Primaries)
+			if len(res.Resolved) == 0 {
+				// D1: an unresolved hostname primary at parse time is NOT fatal.
+				// The zone is created and the refresh engine re-resolves on every
+				// cycle, so a transient failure (or an IMR not yet up at boot)
+				// self-heals instead of permanently quarantining the zone. It
+				// serves nothing until a primary resolves, surfacing as a refresh
+				// error rather than a config quarantine.
+				lgConfig.Warn("secondary zone: no primary resolved yet, will retry at refresh", "zone", zname, "unresolved", res.Unresolved)
+				zd.SetError(ConfigWarning, "no primary resolved yet (unresolved: %v); retrying at refresh", res.Unresolved)
+			} else if len(res.Unresolved) > 0 || len(res.KeyCollisions) > 0 {
+				// Count resolved addresses actually usable for transfer — not
+				// entries-minus-unresolved, which over-counts when a key
+				// collision drops an otherwise-resolved address.
+				served := len(res.Resolved)
+				lgConfig.Warn("secondary zone: some primaries unavailable, serving from the rest", "zone", zname, "unresolved", res.Unresolved, "key_collisions", res.KeyCollisions, "resolved_upstreams", served, "configured_primaries", len(zconf.Primaries))
+				zd.SetError(ConfigWarning, "serving from %d resolved upstream(s) of %d configured primaries (unresolved: %v, key-collisions: %v)", served, len(zconf.Primaries), res.Unresolved, res.KeyCollisions)
+			}
+			resolvedPrimaries = res.Resolved
 
 		default:
 			lgConfig.Error("unknown zone type, zone in error state", "zone", zname, "type", zconf.Type)
 			zd.SetError(ConfigError, "unknown zone type: %s", zconf.Type)
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+
+		// Legacy bare-string notify: entries (the decode hook recorded each as a
+		// Legacy marker) quarantine the zone, mirroring the primary check —
+		// otherwise an empty-Addr PeerConf silently drops that notify target.
+		legacyNotify := false
+		for _, n := range zconf.Notify {
+			if n.Legacy != "" {
+				lgConfig.Error("zone uses legacy bare-string notify entry, zone in error state", "zone", zname, "notify", n.Legacy)
+				zd.SetError(ConfigError, "notify now requires {addr, key} (got bare string %q)", n.Legacy)
+				legacyNotify = true
+				break
+			}
+		}
+		if legacyNotify {
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+
+		// allow-notify: / downstreams: ACL validation — every ip-spec must parse
+		// and every key must be NOKEY, BLOCKED, or a defined keys.tsig name.
+		// A bad ACL quarantines just this zone (same rule as the primary check).
+		if err := ValidateACL(zconf.AllowNotify, conf.tsigKeyDefined); err != nil {
+			lgConfig.Error("zone allow-notify ACL invalid, zone in error state", "zone", zname, "err", err)
+			zd.SetError(ConfigError, "allow-notify: %v", err)
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+		if err := ValidateACL(zconf.Downstreams, conf.tsigKeyDefined); err != nil {
+			lgConfig.Error("zone downstreams ACL invalid, zone in error state", "zone", zname, "err", err)
+			zd.SetError(ConfigError, "downstreams: %v", err)
 			broken_zones = append(broken_zones, zname)
 			continue
 		}
@@ -628,13 +761,15 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			zconf.DnssecPolicy = ""
 		}
 		if zconf.DnssecPolicy != "" {
-			_, exist := conf.Internal.DnssecPolicies[zconf.DnssecPolicy]
-			if !exist {
-				lgConfig.Error("zone refers to non-existing DNSSEC policy, will not be signed", "zone", zname, "policy", zconf.DnssecPolicy)
+			polName := zconf.DnssecPolicy
+			usable, errMsg := resolveZonePolicyRef(polName, conf.Internal.DnssecPolicies)
+			if errMsg != "" {
+				lgConfig.Error("zone DNSSEC policy unusable, zone will not be signed", "zone", zname, "policy", polName, "err", errMsg)
 				zconf.DnssecPolicy = ""
-				zd.SetError(DnssecError, "DNSSEC policy %q does not exist", zconf.DnssecPolicy)
+				zd.SetError(DnssecError, "%s", errMsg)
+			} else if usable {
+				lgConfig.Info("DNSSEC policy accepted", "zone", zname, "policy", polName)
 			}
-			lgConfig.Info("DNSSEC policy accepted", "zone", zname, "policy", zconf.DnssecPolicy)
 		}
 
 		options := parseZoneOptions(conf, zname, zconf, zd)
@@ -646,7 +781,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		}
 		lgConfig.Debug("zone outgoing options", "zone", zname, "options", outopts)
 
-		lgConfig.Info("zone configuration", "zone", zname, "type", zconf.Type, "store", zconf.Store, "primary", zconf.Primary, "notify", zconf.Notify, "zonefile", zconf.Zonefile)
+		lgConfig.Info("zone configuration", "zone", zname, "type", zconf.Type, "store", zconf.Store, "primaries", zconf.Primaries, "notify", zconf.Notify, "zonefile", zconf.Zonefile)
 
 		lgConfig.Debug("zone incoming update policy", "zone", zname, "policy", fmt.Sprintf("%+v", zconf.UpdatePolicy))
 
@@ -862,8 +997,9 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		}
 
 		// Delegation sync setup: DSYNC publication (parent) or
-		// delegation sync monitoring (child).
-		if options[OptDelSyncParent] || options[OptDelSyncChild] {
+		// delegation sync monitoring (child), or proxy forwarding for a
+		// DSYNC-unaware primary (agent secondary).
+		if options[OptDelSyncParent] || options[OptDelSyncChild] || options[OptDelSyncProxy] {
 			capturedOpts := options
 			setupSync := func(zd *ZoneData) {
 				// Skip if the MP HSYNCPARAM callback already set up delegation sync for this zone.
@@ -889,9 +1025,47 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			}
 		}
 
+		// delegation-sync-proxy: register the post-transfer change-detection
+		// hook so an agent secondary forwards NOTIFY(CDS/CSYNC) to the parent
+		// when a relevant RRset changes in an incoming transfer. The hook is an
+		// OnZonePreRefresh callback (it needs both old and new zone data to
+		// diff) that records what changed in zd.ProxyRefreshAnalysis; the
+		// matching OnZonePostRefresh callback acts on it (P-3). Mirrors the
+		// tdns-mp MPPreRefresh/PostRefresh pattern (tdns-mp/v2/config.go), for
+		// the non-MP agent path.
+		// Register only on first load: on reload zdp is the existing registry
+		// entry and its OnZone*Refresh slices already carry these hooks, so
+		// appending again would accumulate duplicates (same convention as the
+		// OnFirstLoad-guarded setupSync block above).
+		if options[OptDelSyncProxy] && zdp.FirstZoneLoad {
+			delegationSyncQ := conf.Internal.DelegationSyncQ
+			zdp.OnZonePreRefresh = append(zdp.OnZonePreRefresh,
+				func(zd, new_zd *ZoneData) {
+					zd.ProxyDelegationPreRefresh(new_zd)
+				})
+			zdp.OnZonePostRefresh = append(zdp.OnZonePostRefresh,
+				func(zd *ZoneData) {
+					zd.ProxyDelegationPostRefresh(delegationSyncQ)
+				})
+		}
+
 		// Note: DelegationBackend wiring is done synchronously above,
 		// outside the FirstZoneLoad guard, so config-reload picks up
 		// changes to the 'delegationbackend' key.
+
+		// Republish-at-signal-names consumer (RFC 9615 at-NS bootstrap):
+		// every tdns-auth SECONDARY watches incoming transfers for an apex
+		// HSYNCPARAM pubkey/pubcds flag and republishes the customer's apex
+		// KEY / CDS(+CDNSKEY) under the _sig0key/_dsboot signal names owned
+		// by each NS, into whichever local primary zone the signal name
+		// falls in. Always-on, no option gate (see signal_republish.go).
+		// Registered only on first load (the OnZonePostRefresh slice would
+		// otherwise accumulate duplicate callbacks across reloads).
+		if Globals.App.Type == AppTypeAuth && zonetype == Secondary && zdp.FirstZoneLoad {
+			zdp.OnZonePostRefresh = append(zdp.OnZonePostRefresh, func(zd *ZoneData) {
+				zd.RepublishAtSignalNames()
+			})
+		}
 
 		// Leader election OnFirstLoad is registered in StartAgent() (not here)
 		// because LeaderElectionManager doesn't exist until StartAgent runs.
@@ -909,16 +1083,20 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				return nil, nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
 			}
 			zr := ZoneRefresher{
-				Name:         zname,
-				Force:        true,     // force refresh, ignoring SOA serial, when reloading from file
-				ZoneType:     zonetype, // primary | secondary
-				Primary:      zconf.Primary,
-				ZoneStore:    zonestore,
-				Notify:       zconf.Notify,
-				Zonefile:     zconf.Zonefile,
-				Options:      options,
-				UpdatePolicy: policy,
-				DnssecPolicy: zconf.DnssecPolicy,
+				Name:          zname,
+				Force:         true,     // force refresh, ignoring SOA serial, when reloading from file
+				ZoneType:      zonetype, // primary | secondary
+				PrimariesConf: clonePeerConfs(zconf.Primaries),
+				Primaries:     resolvedPrimaries,
+				ZoneStore:     zonestore,
+				Notify:        zconf.Notify,
+				AllowNotify:   zconf.AllowNotify,
+				Downstreams:   zconf.Downstreams,
+				ConfigUpdate:  true, // config-bearing: lets reload clear removed ACLs
+				Zonefile:      zconf.Zonefile,
+				Options:       options,
+				UpdatePolicy:  policy,
+				DnssecPolicy:  zconf.DnssecPolicy,
 			}
 			select {
 			case conf.Internal.RefreshZoneCh <- zr:
@@ -934,23 +1112,21 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 	return all_zones, broken_zones, nil
 }
 
+// ExpandTemplate applies template tmpl's settings to zone zconf. Every config
+// field the template SETS is copied to the zone UNLESS the zone already set it
+// (the zone always wins), so new ZoneConf config fields are propagated
+// automatically without editing this function. Three fields need bespoke
+// handling and are excluded from the generic copy: Zonefile (%-substituted with
+// the zone name), OptionsStrs (unioned, not gap-filled) and DnssecPolicy (gated
+// off for agents). Name and Template are never copied from a template. Runtime/
+// display fields (Error, Frozen, RefreshCount, Provisioning, …) are never set in
+// a template config, so the zero-value check skips them naturally.
 func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, error) {
+	// --- bespoke fields (cannot be a plain gap-fill copy) ---
 
-	// for each field in tmpl, check whether it contains any data
-	// and if so, then let that data overwrite the same field in zconf
-
-	if tmpl.Type != "" {
-		zconf.Type = tmpl.Type
-	}
-	if tmpl.Store != "" {
-		// fmt.Printf("ExpandTemplate: zone %s now uses the \"%s\" storage alternative.\n", zconf.Name, tmpl.Store)
-		zconf.Store = tmpl.Store
-	}
-	if tmpl.Primary != "" {
-		zconf.Primary = tmpl.Primary
-	}
-	if len(tmpl.Zonefile) > 0 {
-		// H26: Validate zone name doesn't contain format specifiers
+	// Zonefile: the template carries a pattern that is %-substituted with the
+	// zone name, not copied verbatim.
+	if zconf.Zonefile == "" && tmpl.Zonefile != "" {
 		if strings.ContainsAny(zconf.Name, "%") {
 			return zconf, fmt.Errorf("zone name %q contains format specifiers", zconf.Name)
 		}
@@ -960,31 +1136,94 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 		}
 		zconf.Zonefile = expanded
 	}
-	if len(tmpl.Notify) > 0 {
-		zconf.Notify = tmpl.Notify
-	}
 
-	// template options are appended to existing zone options
-	if len(tmpl.OptionsStrs) > 0 {
-		for _, option := range tmpl.OptionsStrs {
-			if !slices.Contains(zconf.OptionsStrs, option) {
-				zconf.OptionsStrs = append(zconf.OptionsStrs, option)
-			}
+	// OptionsStrs: union (append template options the zone lacks), not gap-fill.
+	for _, option := range tmpl.OptionsStrs {
+		if !slices.Contains(zconf.OptionsStrs, option) {
+			zconf.OptionsStrs = append(zconf.OptionsStrs, option)
 		}
 	}
-	if (tmpl.UpdatePolicy.Child.Type != "" && len(tmpl.UpdatePolicy.Child.RRtypes) > 0) ||
-		(tmpl.UpdatePolicy.Zone.Type != "" && len(tmpl.UpdatePolicy.Zone.RRtypes) > 0) {
-		zconf.UpdatePolicy = tmpl.UpdatePolicy
-	}
 
-	// tdns-agent does not have DNSSEC policies, so we ignore them
-	if appMode != AppTypeAgent && tmpl.DnssecPolicy != "" {
+	// DnssecPolicy: gap-fill, but agents do not sign so it is gated off there.
+	if appMode != AppTypeAgent && zconf.DnssecPolicy == "" && tmpl.DnssecPolicy != "" {
 		zconf.DnssecPolicy = tmpl.DnssecPolicy
 	}
 
-	zconf.MultiSigner = tmpl.MultiSigner
-
+	// --- generic gap-fill for every other config field (zone wins) ---
+	// Shallow (deep=false): zones have no nested config block that wants a
+	// recursive merge — UpdatePolicy is copied whole if the zone left it unset.
+	// A template config never sets runtime/display fields, so IsZero skips them.
+	bespoke := map[string]bool{
+		"Name": true, "Template": true, // never copied from a template
+		"Zonefile": true, "OptionsStrs": true, "DnssecPolicy": true, // handled above
+	}
+	gapFillStruct(reflect.ValueOf(&zconf).Elem(), reflect.ValueOf(tmpl).Elem(), bespoke, false)
 	return zconf, nil
+}
+
+// gapFillStruct fills fields of dst that are still at their zero value from the
+// matching field of src; dst always wins. dst and src must be addressable
+// structs of the same type. skip names top-level fields that are never copied.
+//
+// When deep is false a struct-typed field is treated as a single value (copied
+// whole only if dst's is entirely zero). When deep is true a struct-typed field
+// is merged recursively, so dst can set part of a nested block and inherit the
+// rest from src. Slices are cloned so dst never aliases src's backing array.
+//
+// Caveat (both modes): a leaf counts as "set" iff it is non-zero, so dst cannot
+// override an src value back to the zero value ("" / 0 / false / nil) — that
+// reads as unset and src fills it.
+func gapFillStruct(dst, src reflect.Value, skip map[string]bool, deep bool) {
+	for i := 0; i < dst.NumField(); i++ {
+		if skip[dst.Type().Field(i).Name] {
+			continue
+		}
+		df, sf := dst.Field(i), src.Field(i)
+		if !df.CanSet() {
+			continue
+		}
+		if deep && df.Kind() == reflect.Struct {
+			gapFillStruct(df, sf, nil, deep) // skip set applies only at the top level
+			continue
+		}
+		if !df.IsZero() || sf.IsZero() {
+			continue // dst already set it, or src has nothing to give
+		}
+		if df.Kind() == reflect.Slice {
+			c := reflect.MakeSlice(df.Type(), sf.Len(), sf.Len())
+			reflect.Copy(c, sf)
+			df.Set(c)
+		} else {
+			df.Set(sf)
+		}
+	}
+}
+
+// ExpandPolicyTemplate fills the gaps in a DNSSEC policy from a named template
+// (the policy's own values win). Unlike zone templates it deep-merges: a policy
+// that sets only some fields of a nested block (ksk, zsk, rollover, ttls,
+// sigvalidity, clamping, ...) inherits the remaining fields of that block from
+// the template, rather than overriding the whole block.
+func ExpandPolicyTemplate(pconf DnssecPolicyConf, tmpl *DnssecPolicyConf) DnssecPolicyConf {
+	skip := map[string]bool{"Name": true, "Template": true}
+	gapFillStruct(reflect.ValueOf(&pconf).Elem(), reflect.ValueOf(tmpl).Elem(), skip, true)
+	return pconf
+}
+
+// resolveDnssecPolicyTemplate applies a policy's `template:` reference (if any)
+// by deep-merging the named template into dp (the policy's own values win).
+// Returns the possibly-expanded policy, or an error if the referenced template
+// is unknown. Shared by the runtime config parse and the standalone
+// `policy validate --file` path so the two cannot drift.
+func resolveDnssecPolicyTemplate(dp DnssecPolicyConf, templates map[string]DnssecPolicyConf) (DnssecPolicyConf, error) {
+	if dp.Template == "" {
+		return dp, nil
+	}
+	tmpl, ok := templates[dp.Template]
+	if !ok {
+		return dp, fmt.Errorf("references unknown dnssec template %q", dp.Template)
+	}
+	return ExpandPolicyTemplate(dp, &tmpl), nil
 }
 
 // buildTemplateMap rebuilds the global Templates map from conf.Templates.
@@ -1052,6 +1291,75 @@ func (conf *Config) reloadTemplatesFromFile() error {
 
 	conf.Templates = partial.Templates
 	return conf.buildTemplateMap()
+}
+
+// reloadDnssecFromFile re-reads the config file, decodes just the dnssec:
+// block into conf.Dnssec, and re-parses it into conf.Internal.*. Used by the
+// zone-reload paths so an edited policy (or other dnssec setting) is picked up
+// without a full config reload — parseDnssecConfig alone would re-parse the
+// already-decoded (startup) conf.Dnssec, missing the operator's edits. Mirrors
+// reloadTemplatesFromFile.
+func (conf *Config) reloadDnssecFromFile() error {
+	cfgfile := conf.Internal.CfgFile
+	if cfgfile == "" {
+		// No config file (e.g. embedded use) — just re-parse what we have.
+		return conf.parseDnssecConfig()
+	}
+
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	if err != nil {
+		return fmt.Errorf("error processing config: %v", err)
+	}
+
+	var partial struct {
+		Dnssec DnssecConf `yaml:"dnssec"`
+	}
+	decoderConfig := &mapstructure.DecoderConfig{
+		TagName: "yaml",
+		Result:  &partial,
+	}
+	decoder, err := mapstructure.NewDecoder(decoderConfig)
+	if err != nil {
+		return fmt.Errorf("error creating decoder: %v", err)
+	}
+	if err := decoder.Decode(configMap); err != nil {
+		return fmt.Errorf("error decoding dnssec config: %v", err)
+	}
+
+	conf.Dnssec = partial.Dnssec
+	return conf.parseDnssecConfig()
+}
+
+// reloadTsigKeysFromFile re-reads the config file and decodes just the keys:
+// block into conf.Keys. Used by reload-tsig without a full config reload.
+func (conf *Config) reloadTsigKeysFromFile() error {
+	cfgfile := conf.Internal.CfgFile
+	if cfgfile == "" {
+		return nil
+	}
+
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	if err != nil {
+		return fmt.Errorf("error processing config: %v", err)
+	}
+
+	var partial struct {
+		Keys KeyConf `yaml:"keys"`
+	}
+	decoderConfig := &mapstructure.DecoderConfig{
+		TagName: "yaml",
+		Result:  &partial,
+	}
+	decoder, err := mapstructure.NewDecoder(decoderConfig)
+	if err != nil {
+		return fmt.Errorf("error creating decoder: %v", err)
+	}
+	if err := decoder.Decode(configMap); err != nil {
+		return fmt.Errorf("error decoding keys config: %v", err)
+	}
+
+	conf.Keys = partial.Keys
+	return nil
 }
 
 // expandTemplateChain expands a template by following its parent chain (via the Template field)
@@ -1126,9 +1434,122 @@ func expandTemplateChain(name string, stack []string, onStack map[string]bool, d
 	return t, nil
 }
 
+// parseDnssecConfig resolves the entire dnssec: block (large_algorithms,
+// split_algorithms, kasp, and the named policies) from conf.Dnssec into the
+// derived conf.Internal.* structures. Called from ParseConfig at startup, and
+// from the zone-reload paths so that reloading zones also refreshes the policy
+// definitions they depend on (closing the "reload policies before zones" gap).
+//
+// Rebuilds conf.Internal.DnssecPolicies from scratch every call: on reload,
+// removed or rejected policies must not survive from the previous parse. A
+// policy that fails to parse is kept in the map with its Error field set
+// (visible to the operator; zones referencing it are quarantined), rather than
+// dropped — the server still starts.
+func (conf *Config) parseDnssecConfig() error {
+	if err := validateKaspPropagationDelay(conf.Dnssec.Kasp.PropagationDelay); err != nil {
+		return err
+	}
+	largeAlgs, err := buildLargeAlgorithmSet(conf.Dnssec.LargeAlgorithms)
+	if err != nil {
+		return err
+	}
+	conf.Internal.LargeAlgorithms = largeAlgs
+	conf.Internal.SplitAlgorithms = buildSplitAlgorithmSet(conf.Dnssec.SplitAlgorithms)
+	mode, err := resolveCompletenessMode(conf.Dnssec.Completeness)
+	if err != nil {
+		return err
+	}
+	conf.Internal.Completeness = mode
+
+	conf.Internal.DnssecPolicies = make(map[string]DnssecPolicy)
+	for name, dp := range conf.Dnssec.Policies {
+		dpLocal := dp
+		// markBroken records a rejected policy in the map (Name + Error) so it
+		// stays visible to the operator and zones referencing it can be
+		// quarantined with a reason. The server still starts.
+		markBroken := func(reason string) {
+			lgConfig.Error("DNSSEC policy rejected, unusable", "policy", name, "err", reason)
+			conf.Internal.DnssecPolicies[name] = DnssecPolicy{Name: name, Error: reason}
+		}
+		// A policy may inherit the gaps in its definition from a named template
+		// (deep merge; the policy's own values win). An unknown template name
+		// quarantines just this policy and keeps the server running.
+		expanded, terr := resolveDnssecPolicyTemplate(dpLocal, conf.Dnssec.Templates)
+		if terr != nil {
+			markBroken(terr.Error())
+			continue
+		}
+		dpLocal = expanded
+		alg, kskAlg, zskAlg, err := resolvePolicyRoleAlgorithms(name, &dpLocal)
+		if err != nil {
+			markBroken(err.Error())
+			continue
+		}
+		if err := validateSplitAlgorithm(name, kskAlg, zskAlg, conf.Internal.SplitAlgorithms); err != nil {
+			markBroken(err.Error())
+			continue
+		}
+		kskLT, err := GenKeyLifetime(dpLocal.KSK.Lifetime)
+		if err != nil {
+			markBroken(fmt.Sprintf("ksk.lifetime: %v", err))
+			continue
+		}
+		zskLT, err := GenKeyLifetime(dpLocal.ZSK.Lifetime)
+		if err != nil {
+			markBroken(fmt.Sprintf("zsk.lifetime: %v", err))
+			continue
+		}
+		cskLT, err := GenKeyLifetime(dpLocal.CSK.Lifetime)
+		if err != nil {
+			markBroken(fmt.Sprintf("csk.lifetime: %v", err))
+			continue
+		}
+		tmp := DnssecPolicy{
+			Name:         name,
+			Algorithm:    alg,
+			KSKAlgorithm: kskAlg,
+			ZSKAlgorithm: zskAlg,
+			KSK:          kskLT,
+			ZSK:          zskLT,
+			CSK:          cskLT,
+		}
+		if err := FinishDnssecPolicy(name, &dpLocal, &tmp); err != nil {
+			markBroken(err.Error())
+			continue
+		}
+		conf.Internal.DnssecPolicies[name] = tmp
+	}
+	// If no "default" policy in config, use built-in default (e.g. for agent autozone).
+	// An explicit dnssec.policies.default in YAML overrides this. A broken
+	// "default" stays broken (it is in the map with Error set, so "exists" is
+	// true): we surface the operator's error rather than silently substituting
+	// the builtin. Zones referencing it are quarantined with the reason.
+	if _, exists := conf.Internal.DnssecPolicies["default"]; !exists {
+		conf.Internal.DnssecPolicies["default"] = BuiltinDefaultDnssecPolicy()
+	}
+	return nil
+}
+
+// resolveZonePolicyRef decides whether a zone's named DNSSEC policy is usable.
+// It returns (usable, errMsg): usable is true only for a healthy policy;
+// errMsg is a quarantine reason (empty when usable). The three cases are kept
+// distinct so the operator can tell a typo (policy does not exist) from a
+// genuinely broken policy (defined but rejected at parse).
+func resolveZonePolicyRef(polName string, policies map[string]DnssecPolicy) (usable bool, errMsg string) {
+	pol, exist := policies[polName]
+	switch {
+	case !exist:
+		return false, fmt.Sprintf("DNSSEC policy %q does not exist", polName)
+	case pol.Error != "":
+		return false, fmt.Sprintf("configured DNSSEC policy %q is broken: %s", polName, pol.Error)
+	default:
+		return true, ""
+	}
+}
+
 // builtinDefaultDnssecPolicy returns the built-in "default" DNSSEC policy used when
-// no dnssecpolicies.default is defined in config (e.g. for agent autozone). An explicit
-// dnssecpolicies.default in YAML overrides this. No automatic key rollovers.
+// no dnssec.policies.default is defined in config (e.g. for agent autozone). An explicit
+// dnssec.policies.default in YAML overrides this. No automatic key rollovers.
 func BuiltinDefaultDnssecPolicy() DnssecPolicy {
 	const day = 24 * time.Hour
 	kskLT, err := GenKeyLifetime("forever")
@@ -1172,7 +1593,7 @@ func GenKeyLifetime(lifetime string) (KeyLifetime, error) {
 		lifetime_secs = time.Duration(0)
 
 	default:
-		lifetime_secs, err = time.ParseDuration(lifetime)
+		lifetime_secs, err = parseExtendedDuration(lifetime)
 		if err != nil {
 			return KeyLifetime{}, fmt.Errorf("invalid key lifetime %q: %w", lifetime, err)
 		}
@@ -1202,6 +1623,36 @@ func NormalizeAddress(addr string) string {
 	return addr
 }
 
+// stringToPeerConfHook returns a mapstructure decode hook that converts a
+// bare-string value (the legacy primary:/notify: shape) into a PeerConf carrying
+// a Legacy marker, instead of letting mapstructure fail the whole-file decode on
+// the string->struct type mismatch. mapstructure applies the hook element-wise
+// for []PeerConf, so a bare-string entry inside a notify: list is handled too.
+// Per-zone validation later sees a non-empty Legacy and quarantines that zone.
+func stringToPeerConfHook() mapstructure.DecodeHookFunc {
+	return func(from reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
+		if from.Kind() != reflect.String || to != reflect.TypeOf(PeerConf{}) {
+			return data, nil
+		}
+		return PeerConf{Legacy: data.(string)}, nil
+	}
+}
+
+// stringToAclEntryHook is the AclEntry analogue of stringToPeerConfHook: it turns
+// a legacy bare-string allow-notify:/downstreams: value into an AclEntry carrying
+// a Legacy marker (applied element-wise across the []AclEntry list), so a
+// pre-{prefix,key} list quarantines just that zone (ValidateACL rejects the
+// marker) instead of failing the whole-file decode on the string->struct
+// mismatch.
+func stringToAclEntryHook() mapstructure.DecodeHookFunc {
+	return func(from reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
+		if from.Kind() != reflect.String || to != reflect.TypeOf(AclEntry{}) {
+			return data, nil
+		}
+		return AclEntry{Legacy: data.(string)}, nil
+	}
+}
+
 // NormalizeAddresses ensures all addresses have a port number.
 // If an address doesn't have a port, ":53" is appended.
 // This allows users to specify addresses as either "IP" or "IP:port" in config.
@@ -1215,6 +1666,32 @@ func NormalizeAddresses(addresses []string) []string {
 		normalized = append(normalized, NormalizeAddress(addr))
 	}
 	return normalized
+}
+
+// normalizePeerAddrs returns a copy of peers with each .Addr run through
+// NormalizeAddress (ensuring a port). The Key and Legacy fields are preserved.
+func normalizePeerAddrs(peers []PeerConf) []PeerConf {
+	if len(peers) == 0 {
+		return peers
+	}
+	normalized := make([]PeerConf, 0, len(peers))
+	for _, p := range peers {
+		p.Addr = NormalizeAddress(p.Addr)
+		normalized = append(normalized, p)
+	}
+	return normalized
+}
+
+// peerAddrs extracts the .Addr value from each PeerConf into a []string.
+func peerAddrs(peers []PeerConf) []string {
+	if len(peers) == 0 {
+		return nil
+	}
+	addrs := make([]string, 0, len(peers))
+	for _, p := range peers {
+		addrs = append(addrs, p.Addr)
+	}
+	return addrs
 }
 
 // setDynamicZonesDefaults sets default values for DynamicZonesConf if not configured

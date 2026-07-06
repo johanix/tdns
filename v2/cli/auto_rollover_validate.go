@@ -140,8 +140,10 @@ so).`,
 // zone→policy mapping so the offline path can infer the policy
 // from the zone when --policy isn't supplied.
 type minimalConfigForValidate struct {
-	DnssecPolicies map[string]tdns.DnssecPolicyConf `yaml:"dnssecpolicies"`
-	Zones          []minimalZoneEntry               `yaml:"zones"`
+	Dnssec struct {
+		Policies map[string]tdns.DnssecPolicyConf `yaml:"policies"`
+	} `yaml:"dnssec"`
+	Zones []minimalZoneEntry `yaml:"zones"`
 }
 
 // minimalZoneEntry mirrors just the fields of tdns.ZoneConf that the
@@ -186,13 +188,13 @@ func loadPolicyFromYAMLFile(path, zone, policyName string) (*tdns.DnssecPolicy, 
 	if resolved == "" {
 		return nil, "", fmt.Errorf("zone %s has no dnssecpolicy in %s and --policy was not supplied", zone, path)
 	}
-	pc, ok := raw.DnssecPolicies[resolved]
+	pc, ok := raw.Dnssec.Policies[resolved]
 	if !ok {
-		known := make([]string, 0, len(raw.DnssecPolicies))
-		for n := range raw.DnssecPolicies {
+		known := make([]string, 0, len(raw.Dnssec.Policies))
+		for n := range raw.Dnssec.Policies {
 			known = append(known, n)
 		}
-		return nil, "", fmt.Errorf("dnssecpolicies.%s not found in %s (have: %s)",
+		return nil, "", fmt.Errorf("dnssec.policies.%s not found in %s (have: %s)",
 			resolved, path, strings.Join(known, ", "))
 	}
 	pc.Name = resolved

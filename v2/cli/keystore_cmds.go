@@ -31,7 +31,7 @@ func NewKeystoreCmd(role string) *cobra.Command {
 	c := &cobra.Command{
 		Use:   "keystore",
 		Short: "Prefix command to access different features of the keystore",
-		Long: `The keystore holds SIG(0) and DNSSEC key pairs.
+		Long: `The keystore holds SIG(0), DNSSEC, and global TSIG keys.
 The CLI contains functions for listing, adding, deleting, and
 changing the state of keys.`,
 		Run: func(cmd *cobra.Command, args []string) {
@@ -39,8 +39,420 @@ changing the state of keys.`,
 		},
 	}
 
-	c.AddCommand(newKeystoreSig0Cmd(role), newKeystoreDnssecCmd(role))
+	c.AddCommand(newKeystoreSig0Cmd(role), newKeystoreDnssecCmd(role), newKeystoreTsigCmd(role))
 	return c
+}
+
+func newKeystoreTsigCmd(role string) *cobra.Command {
+	var tsigName, tsigAlgo, tsigSecret, tsigSecretFile, tsigOwner, tsigImportFile, tsigImportFormat string
+	var tsigForce, tsigYes, tsigInteractive, tsigVerbose, tsigExportBind, tsigExportNsd bool
+
+	c := &cobra.Command{
+		Use:   "tsig",
+		Short: "Manage global TSIG keys in the keystore",
+		Long: `Global TSIG keystore (no --zone). Keys are DB-backed with origin=api
+for keys created here; config keys are managed via keys.tsig.`,
+	}
+
+	list := &cobra.Command{
+		Use:   "list",
+		Short: "List TSIG keys (no secrets)",
+		Run: func(cmd *cobra.Command, args []string) {
+			tsigKeyMgmt(role, "list", tsigName, tsigAlgo, tsigSecret, tsigOwner, tsigForce)
+		},
+	}
+
+	add := &cobra.Command{
+		Use:   "add",
+		Short: "Add a TSIG key with a known secret",
+		Run: func(cmd *cobra.Command, args []string) {
+			secret, err := resolveTsigSecret(tsigSecret, tsigSecretFile)
+			if err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+			if secret == "" {
+				fmt.Println("Error: set exactly one of --secret or --secret-file")
+				os.Exit(1)
+			}
+			tsigKeyMgmt(role, "add", tsigName, tsigAlgo, secret, tsigOwner, tsigForce)
+		},
+	}
+	add.Flags().StringVar(&tsigName, "name", "", "TSIG key name")
+	add.Flags().StringVar(&tsigAlgo, "algorithm", "hmac-sha256", "HMAC algorithm")
+	add.Flags().StringVar(&tsigSecretFile, "secret-file", "", "File containing the base64 TSIG secret; preferred over --secret")
+	add.Flags().StringVar(&tsigSecret, "secret", "", "Inline TSIG secret (base64). WARNING: visible in shell history / process list; prefer --secret-file")
+	add.Flags().StringVar(&tsigOwner, "owner", "api", "Owner label (default api)")
+	add.Flags().BoolVar(&tsigForce, "force", false, "Overwrite on secret/algorithm conflict")
+	add.MarkFlagRequired("name")
+
+	generate := &cobra.Command{
+		Use:   "generate",
+		Short: "Generate a new TSIG key and add it to the keystore",
+		Run: func(cmd *cobra.Command, args []string) {
+			tsigKeyMgmt(role, "generate", tsigName, tsigAlgo, tsigSecret, tsigOwner, tsigForce)
+		},
+	}
+	generate.Flags().StringVar(&tsigName, "name", "", "TSIG key name")
+	generate.Flags().StringVar(&tsigAlgo, "algorithm", "hmac-sha256", "HMAC algorithm")
+	generate.Flags().StringVar(&tsigOwner, "owner", "api", "Owner label (default api)")
+	generate.MarkFlagRequired("name")
+
+	importCmd := &cobra.Command{
+		Use:   "import",
+		Short: "Import TSIG keys from a BIND or NSD config snippet",
+		Long: `Scan a config file for TSIG key blocks (not a full config parser).
+Default: import new keys and skip conflicts. --force overwrites all conflicts;
+--interactive prompts per conflict (two-phase round-trip).`,
+		Run: func(cmd *cobra.Command, args []string) {
+			tsigKeyImport(role, tsigImportFile, tsigImportFormat, tsigOwner, tsigForce, tsigInteractive, tsigVerbose)
+		},
+	}
+	importCmd.Flags().StringVarP(&tsigImportFile, "file", "f", "", "File containing TSIG key declarations")
+	importCmd.Flags().StringVar(&tsigImportFormat, "format", "bind", "Key syntax: bind or nsd")
+	importCmd.Flags().StringVar(&tsigOwner, "owner", "api", "Owner label for imported keys")
+	importCmd.Flags().BoolVar(&tsigForce, "force", false, "Overwrite all secret/algorithm conflicts")
+	importCmd.Flags().BoolVar(&tsigInteractive, "interactive", false, "Prompt per conflict before overwriting")
+	importCmd.Flags().BoolVarP(&tsigVerbose, "verbose", "v", false, "List per-key disposition")
+	importCmd.MarkFlagRequired("file")
+
+	purgeCmd := &cobra.Command{
+		Use:   "purge",
+		Short: "Delete unreferenced api-origin TSIG keys owned by api",
+		Long: `Dry-run by default: lists purge candidates (origin=api, owner=api,
+zero zone references) and deletes nothing. Pass --force to delete all
+candidates, or --interactive to prompt per key.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			tsigKeyPurge(role, tsigForce, tsigInteractive, tsigYes)
+		},
+	}
+	purgeCmd.Flags().BoolVar(&tsigForce, "force", false, "Actually delete; otherwise dry-run")
+	purgeCmd.Flags().BoolVar(&tsigInteractive, "interactive", false, "Prompt per purge candidate")
+	purgeCmd.Flags().BoolVarP(&tsigYes, "yes", "y", false, "Skip confirmation when used with --force")
+
+	setowner := &cobra.Command{
+		Use:   "setowner",
+		Short: "Change owner on an api-origin TSIG key",
+		Run: func(cmd *cobra.Command, args []string) {
+			tsigKeyMgmt(role, "setowner", tsigName, tsigAlgo, tsigSecret, tsigOwner, tsigForce)
+		},
+	}
+	setowner.Flags().StringVar(&tsigName, "name", "", "TSIG key name")
+	setowner.Flags().StringVar(&tsigOwner, "owner", "", "New owner label")
+	setowner.MarkFlagRequired("name")
+	setowner.MarkFlagRequired("owner")
+
+	deleteCmd := &cobra.Command{
+		Use:   "delete",
+		Short: "Delete an api-origin TSIG key",
+		Run: func(cmd *cobra.Command, args []string) {
+			if !tsigYes {
+				fmt.Printf("Delete TSIG key %q? [y/N] ", tsigName)
+				var ans string
+				fmt.Scanln(&ans)
+				if ans != "y" && ans != "Y" && ans != "yes" {
+					fmt.Println("Aborted.")
+					return
+				}
+			}
+			tsigKeyMgmt(role, "delete", tsigName, tsigAlgo, tsigSecret, tsigOwner, tsigForce)
+		},
+	}
+	deleteCmd.Flags().StringVar(&tsigName, "name", "", "TSIG key name")
+	deleteCmd.Flags().BoolVarP(&tsigYes, "yes", "y", false, "Skip confirmation prompt")
+	deleteCmd.MarkFlagRequired("name")
+
+	exportCmd := &cobra.Command{
+		Use:   "export <keyname>",
+		Short: "Print a TSIG key's secret (default) or a full BIND/NSD key block, to stdout",
+		Long: "Print a TSIG key's base64 secret to stdout with NO trailing newline and\n" +
+			"nothing else, so it can be captured inline in another command (e.g. via\n" +
+			"shell backticks or $(...)) to TSIG-sign a dog query or transfer:\n" +
+			"\n" +
+			"    dog @srv -y name.:$(tdns-cli auth keystore tsig export name) zone. axfr\n" +
+			"\n" +
+			"With --bind or --nsd, print a complete BIND9 or NSD key block instead\n" +
+			"(still on stdout). Errors go to stderr so stdout stays clean for capture.",
+		Args: cobra.ExactArgs(1),
+		Run: func(cmd *cobra.Command, args []string) {
+			tsigKeyExport(role, args[0], tsigExportBind, tsigExportNsd)
+		},
+	}
+	exportCmd.Flags().BoolVar(&tsigExportBind, "bind", false, "Output a complete BIND9 key { ... } block")
+	exportCmd.Flags().BoolVar(&tsigExportNsd, "nsd", false, "Output a complete NSD key: block")
+
+	c.AddCommand(list, add, generate, importCmd, exportCmd, setowner, deleteCmd, purgeCmd)
+	return c
+}
+
+func tsigKeyMgmt(role, subcmd, name, algo, secret, owner string, force bool) {
+	data := tdns.KeystorePost{
+		Command:       "tsig-mgmt",
+		SubCommand:    subcmd,
+		TsigKeyname:   name,
+		TsigAlgorithm: algo,
+		TsigSecret:    secret,
+		Owner:         owner,
+		Force:         force,
+		Creator:       "tdns-cli",
+	}
+
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		fmt.Printf("Error creating API client: %v\n", err)
+		os.Exit(1)
+	}
+
+	tr, err := SendKeystoreCmd(api, data)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	if tr.Error {
+		fmt.Printf("Error from server: %s\n", tr.ErrorMsg)
+		os.Exit(1)
+	}
+
+	switch subcmd {
+	case "list":
+		var out, rows []string
+		if tdns.Globals.ShowHeaders {
+			out = append(out, "Name|Algorithm|Origin|Owner|Refs|Created")
+		}
+		for _, k := range tr.TsigKeys {
+			rows = append(rows, fmt.Sprintf("%s|%s|%s|%s|%d|%s",
+				k.Name, k.Algorithm, k.Origin, k.Owner, k.RefCount, k.Created))
+		}
+		sort.Strings(rows)
+		out = append(out, rows...)
+		fmt.Println(columnize.SimpleFormat(out))
+
+	default:
+		if tr.Msg != "" {
+			fmt.Println(tr.Msg)
+		}
+	}
+}
+
+// tsigKeyExport prints a TSIG key to stdout for use inline in other commands.
+// Default: the base64 secret only, with NO trailing newline and nothing else, so
+// it can be captured in `backticks` / $() to TSIG-sign a dog query or transfer.
+// --bind / --nsd print a full BIND9 / NSD key block instead. All diagnostics go
+// to stderr, so stdout carries only the intended payload.
+func tsigKeyExport(role, name string, asBind, asNsd bool) {
+	if asBind && asNsd {
+		fmt.Fprintln(os.Stderr, "Error: --bind and --nsd are mutually exclusive")
+		os.Exit(1)
+	}
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error creating API client: %v\n", err)
+		os.Exit(1)
+	}
+	tr, err := SendKeystoreCmd(api, tdns.KeystorePost{
+		Command:     "tsig-mgmt",
+		SubCommand:  "export",
+		TsigKeyname: name,
+		Creator:     "tdns-cli",
+	})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+	if tr.Error {
+		fmt.Fprintf(os.Stderr, "Error from server: %s\n", tr.ErrorMsg)
+		os.Exit(1)
+	}
+	if tr.TsigExport == nil {
+		fmt.Fprintf(os.Stderr, "Error: server returned no key for %q\n", name)
+		os.Exit(1)
+	}
+	ex := tr.TsigExport
+	kn := strings.TrimSuffix(ex.Name, ".")
+	algo := strings.TrimSuffix(ex.Algorithm, ".")
+	switch {
+	case asBind:
+		fmt.Printf("key \"%s\" {\n\talgorithm %s;\n\tsecret \"%s\";\n};\n", kn, algo, ex.Secret)
+	case asNsd:
+		fmt.Printf("key:\n\tname: \"%s\"\n\talgorithm: %s\n\tsecret: \"%s\"\n", kn, algo, ex.Secret)
+	default:
+		fmt.Print(ex.Secret) // bare secret, no newline, nothing else
+	}
+}
+
+func tsigKeyImport(role, file, format, owner string, force, interactive, verbose bool) {
+	if tsigForceInteractiveConflict(force, interactive) {
+		fmt.Println("Error: --force and --interactive are mutually exclusive")
+		os.Exit(1)
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		fmt.Printf("Error reading %s: %v\n", file, err)
+		os.Exit(1)
+	}
+	post := tdns.KeystorePost{
+		Command:          "tsig-mgmt",
+		SubCommand:       "import",
+		TsigImportData:   string(data),
+		TsigImportFormat: format,
+		Owner:            owner,
+		Force:            force,
+		TsigVerbose:      verbose,
+		Creator:          "tdns-cli",
+	}
+	if interactive {
+		requireInteractiveTTY()
+		probe, err := tsigKeystorePost(role, post)
+		if err == nil {
+			printTsigImportResult(probe, verbose)
+			return
+		}
+		if tsigImportConflictCount(probe.TsigImport) == 0 {
+			if probe.ErrorMsg != "" {
+				fmt.Printf("Error: %s\n", probe.ErrorMsg)
+			} else {
+				fmt.Printf("Error: %v\n", err)
+			}
+			os.Exit(1)
+		}
+		var overwrite []string
+		for _, d := range probe.TsigImport {
+			if d.Status != "conflict" {
+				continue
+			}
+			fmt.Printf("Overwrite TSIG key %q? [y/N] ", d.Name)
+			var ans string
+			fmt.Scanln(&ans)
+			if ans == "y" || ans == "Y" || ans == "yes" {
+				overwrite = append(overwrite, d.Name)
+			}
+		}
+		if len(overwrite) == 0 {
+			fmt.Println("No keys overwritten.")
+			os.Exit(1)
+		}
+		post.TsigOverwrite = overwrite
+	}
+	tr, err := tsigKeystorePost(role, post)
+	if err != nil {
+		if tr.Error || len(tr.TsigImport) > 0 || tr.Msg != "" {
+			printTsigImportResult(tr, verbose)
+		}
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	printTsigImportResult(tr, verbose)
+}
+
+func tsigImportConflictCount(dispositions []tdns.TsigKeyDisposition) int {
+	n := 0
+	for _, d := range dispositions {
+		if d.Status == "conflict" {
+			n++
+		}
+	}
+	return n
+}
+
+func tsigForceInteractiveConflict(force, interactive bool) bool {
+	return force && interactive
+}
+
+func printTsigImportResult(tr tdns.KeystoreResponse, verbose bool) {
+	if tr.Error {
+		fmt.Printf("Error from server: %s\n", tr.ErrorMsg)
+	}
+	if verbose {
+		for _, d := range tr.TsigImport {
+			fmt.Printf("%s: %s\n", d.Name, d.Status)
+		}
+	}
+	if tr.Msg != "" {
+		fmt.Println(tr.Msg)
+	}
+	if tr.Error {
+		os.Exit(1)
+	}
+}
+
+func tsigKeyPurge(role string, force, interactive, yes bool) {
+	if tsigForceInteractiveConflict(force, interactive) {
+		fmt.Println("Error: --force and --interactive are mutually exclusive")
+		os.Exit(1)
+	}
+	if yes && !force && !interactive {
+		fmt.Println("Error: purge -y requires --force (default is dry-run)")
+		os.Exit(1)
+	}
+	post := tdns.KeystorePost{Command: "tsig-mgmt", SubCommand: "purge", Force: force, Creator: "tdns-cli"}
+	if interactive {
+		requireInteractiveTTY()
+		probe, err := tsigKeystorePost(role, post)
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			os.Exit(1)
+		}
+		if len(probe.TsigKeys) == 0 {
+			fmt.Println(probe.Msg)
+			return
+		}
+		var overwrite []string
+		for _, k := range probe.TsigKeys {
+			fmt.Printf("Purge TSIG key %q (api, 0 refs)? [y/N] ", k.Name)
+			var ans string
+			fmt.Scanln(&ans)
+			if ans == "y" || ans == "Y" || ans == "yes" {
+				overwrite = append(overwrite, k.Name)
+			}
+		}
+		if len(overwrite) == 0 {
+			fmt.Println("No keys purged.")
+			return
+		}
+		post.TsigOverwrite = overwrite
+		post.Force = false
+	} else if force && !yes {
+		requireTTYOrYes(false, "purge --force")
+		fmt.Print("Purge all matching TSIG keys? [y/N] ")
+		var ans string
+		fmt.Scanln(&ans)
+		if ans != "y" && ans != "Y" && ans != "yes" {
+			fmt.Println("Aborted.")
+			return
+		}
+	}
+	tr, err := tsigKeystorePost(role, post)
+	if err != nil {
+		fmt.Printf("Error: %v\n", err)
+		os.Exit(1)
+	}
+	if tr.Error {
+		fmt.Printf("Error from server: %s\n", tr.ErrorMsg)
+		os.Exit(1)
+	}
+	if len(tr.TsigKeys) > 0 && !force && len(post.TsigOverwrite) == 0 {
+		var out, rows []string
+		if tdns.Globals.ShowHeaders {
+			out = append(out, "Name|Algorithm|Origin|Owner|Created")
+		}
+		for _, k := range tr.TsigKeys {
+			rows = append(rows, fmt.Sprintf("%s|%s|%s|%s|%s", k.Name, k.Algorithm, k.Origin, k.Owner, k.Created))
+		}
+		sort.Strings(rows)
+		out = append(out, rows...)
+		fmt.Println(columnize.SimpleFormat(out))
+	}
+	if tr.Msg != "" {
+		fmt.Println(tr.Msg)
+	}
+}
+
+func tsigKeystorePost(role string, post tdns.KeystorePost) (tdns.KeystoreResponse, error) {
+	api, err := GetApiClient(role, true)
+	if err != nil {
+		return tdns.KeystoreResponse{}, err
+	}
+	return SendKeystoreCmd(api, post)
 }
 
 func newKeystoreSig0Cmd(role string) *cobra.Command {
@@ -218,6 +630,17 @@ containing either the private or the public SIG(0) key and the name of the zone.
 		},
 	}
 
+	policies := &cobra.Command{
+		Use:   "policies",
+		Short: "List the DNSSEC policies the server loaded (including any in error)",
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := printServerPolicies(role); err != nil {
+				fmt.Printf("Error: %v\n", err)
+				os.Exit(1)
+			}
+		},
+	}
+
 	list := &cobra.Command{
 		Use:   "list",
 		Short: "List all DNSSEC key pairs in the keystore",
@@ -319,6 +742,41 @@ DNSKEY RR). The resulting pair is directly consumable by 'keystore dnssec import
 	clear.Flags().Bool("force", false, "Skip confirmation prompt")
 	clear.MarkFlagRequired("zone")
 
+	policyCleanup := &cobra.Command{
+		Use:   "policy-cleanup",
+		Short: "Remove a zone's retired keys (and their RRSIGs) now, keeping active keys",
+		Long: `After a DNSSEC policy change, the old keys are retired but kept (with their
+signatures) so the zone stays validatable while the new keys take over —
+leaving the zone briefly double-signed. policy-cleanup collapses that window
+early: it removes the retired keys and strips their RRSIGs immediately,
+keeping the active keys. Unlike 'clear' (which deletes ALL keys and
+regenerates), this only touches retired keys.
+
+Accelerating removal means a resolver still caching only an old (now-removed)
+DNSKEY briefly cannot validate until it re-queries; the active keys already
+serve. Normally you can just wait for the KeyStateWorker to age the retired
+keys out after propagation_delay.`,
+		Run: func(cmd *cobra.Command, args []string) {
+			PrepArgs("zonename")
+			zone := tdns.Globals.Zonename
+			force, _ := cmd.Flags().GetBool("force")
+			if !force {
+				fmt.Printf("This will immediately remove retired DNSSEC keys (and their signatures) for zone %s. Proceed? [y/N]: ", zone)
+				var response string
+				fmt.Scanln(&response)
+				response = strings.ToLower(strings.TrimSpace(response))
+				if response != "y" && response != "yes" {
+					fmt.Println("Cancelled.")
+					return
+				}
+			}
+			dnssecKeyMgmt(role, "policy-cleanup")
+		},
+	}
+	policyCleanup.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to clean up retired keys for")
+	policyCleanup.Flags().Bool("force", false, "Skip confirmation prompt")
+	policyCleanup.MarkFlagRequired("zone")
+
 	purge := &cobra.Command{
 		Use:   "purge",
 		Short: "Delete keys in 'removed' state, keeping the 3 most recent per zone",
@@ -336,7 +794,7 @@ without modifying anything. Pass --force to actually delete.`,
 	purge.Flags().Bool("force", false, "Actually delete; otherwise dry-run")
 	purge.MarkFlagRequired("zone")
 
-	c.AddCommand(add, importCmd, generate, algorithms, list, export, delete, setstate, genDS, rollover, clear, purge, newKeystoreDnssecPolicyCmd(role), newKeystoreDnssecDsPushCmd(role), newKeystoreDnssecQueryParentCmd(role), newAutoRolloverCmd(role))
+	c.AddCommand(add, importCmd, generate, algorithms, policies, list, export, delete, setstate, genDS, rollover, clear, policyCleanup, purge, newKeystoreDnssecPolicyCmd(role), newKeystoreDnssecDsPushCmd(role), newKeystoreDnssecQueryParentCmd(role), newAutoRolloverCmd(role))
 	return c
 }
 
@@ -583,7 +1041,7 @@ func dnssecKeyMgmt(role, cmd string) {
 		data.Zone = tdns.Globals.Zonename
 		data.Keyname = tdns.Globals.Zonename
 
-	case "clear":
+	case "clear", "policy-cleanup":
 		data.Zone = tdns.Globals.Zonename
 
 	default:
@@ -673,7 +1131,7 @@ func dnssecKeyMgmt(role, cmd string) {
 			fmt.Printf("%s\n", tr.Msg)
 		}
 
-	case "add", "import", "generate", "delete", "setstate", "rollover", "clear":
+	case "add", "import", "generate", "delete", "setstate", "rollover", "clear", "policy-cleanup":
 		if tr.Msg != "" {
 			fmt.Printf("%s\n", tr.Msg)
 		}

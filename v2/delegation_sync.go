@@ -160,6 +160,31 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 					}
 				}
 
+			case "PROXY-SYNC":
+				// delegation-sync-proxy: an agent secondary forwards a detected
+				// change to the parent on behalf of a DSYNC-unaware primary,
+				// picking UPDATE or NOTIFY by what the parent advertises.
+				msg, perr := zd.ProxyDelegationSync(ctx, kdb, notifyq, imr(), ds.ProxyAnalysis)
+				if perr != nil {
+					lgDns.Error("DelegationSyncher: proxy sync failed", "zone", ds.ZoneName, "err", perr)
+				} else {
+					lgDns.Info("DelegationSyncher: proxy sync done", "zone", ds.ZoneName, "msg", msg)
+				}
+
+			case "PROXY-UPDATE-SETUP":
+				// delegation-sync-proxy UPDATE path, first load: run the
+				// precondition + KEY-bootstrap state machine (§10.8) and, if
+				// READY, a one-time parent-vs-child reconcile (catches drift from
+				// while the agent was down, without re-sending every restart).
+				// Off the refresh path (DSYNC discovery + parent compare are
+				// network). A no-op for the NOTIFY proxy.
+				msg, perr := zd.ProxyStartupReconcile(ctx, kdb, imr())
+				if perr != nil {
+					lgDns.Error("DelegationSyncher: proxy startup reconcile error", "zone", ds.ZoneName, "err", perr)
+				} else {
+					lgDns.Info("DelegationSyncher: proxy startup reconcile", "zone", ds.ZoneName, "msg", msg)
+				}
+
 			default:
 				lgDns.Warn("DelegationSyncher: unknown command, ignoring", "zone", ds.ZoneName, "command", ds.Command)
 			}
@@ -399,21 +424,27 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 
 	// Check the parent-update option to determine whether to use replace or delta mode
 	updateMode := UpdateModeDelta // default
-	if kdb.Options != nil {
-		if mode, exists := kdb.Options[AuthOptParentUpdate]; exists {
-			updateMode = mode
-		}
+	if mode, exists := kdb.AuthOption(AuthOptParentUpdate); exists {
+		updateMode = mode
 	}
 
 	var m *dns.Msg
 	var err error
 
 	if updateMode == UpdateModeReplace {
-		// Replace mode has an unresolved bug — refuse to proceed and make it visible.
-		err := fmt.Errorf("parent-update replace mode is currently broken and cannot be used")
-		zd.SetError(ConfigError, "parent-update replace mode is currently broken and cannot be used")
-		lgDns.Error("SyncZoneDelegationViaUpdate: replace mode disabled", "zone", zd.ZoneName)
-		return "", 0, UpdateResult{}, err
+		// Replace mode: DEL the whole RRset, then ADD the current authoritative
+		// members (NewNS / NewA / NewAAAA / NewDS, populated by the delegation
+		// analysis). Idempotent and self-correcting — it does not depend on the
+		// parent's current state. The historical "replace mode is broken" guard
+		// here was a workaround for an upstream miekg/dns bug fixed in the tdns
+		// fork (the KSK rollover engine's BuildChildWholeDSUpdate already relies
+		// on the fix in production).
+		lgDns.Info("SyncZoneDelegationViaUpdate: using replace mode", "zone", zd.ZoneName)
+		m, err = CreateChildReplaceUpdate(zd.Parent, zd.ZoneName,
+			syncstate.NewNS, syncstate.NewA, syncstate.NewAAAA, syncstate.NewDS)
+		if err != nil {
+			return "", 0, UpdateResult{}, err
+		}
 	} else {
 		// Delta mode: use adds and removes (existing behavior)
 		lgDns.Info("SyncZoneDelegationViaUpdate: using delta mode", "zone", zd.ZoneName)

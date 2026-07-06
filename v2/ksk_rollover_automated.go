@@ -173,7 +173,7 @@ func RolloverAutomatedTick(ctx context.Context, deps RolloverEngineDeps) error {
 		if n >= num {
 			break
 		}
-		kid, _, err := GenerateKskRolloverCreated(kdb, zone, "key-state-worker", pol.Algorithm, pol.Rollover.Method)
+		kid, _, err := GenerateKskRolloverCreated(kdb, zone, "key-state-worker", pol.KSKAlgorithm, pol.Rollover.Method)
 		if err != nil {
 			lgSigner.Error("rollover: pipeline KSK generation failed", "zone", zone, "err", err)
 			break
@@ -1706,7 +1706,7 @@ func healBootstrapActiveAt(kdb *KeyDB, zone string, pol *DnssecPolicy) {
 		if !needHeal {
 			continue
 		}
-		if err := RegisterBootstrapActiveKSK(kdb, zone, k.KeyTag, pol.Rollover.Method, pol.Algorithm); err != nil {
+		if err := RegisterBootstrapActiveKSK(kdb, zone, k.KeyTag, pol.Rollover.Method, pol.KSKAlgorithm); err != nil {
 			lgSigner.Warn("rollover: heal active SEP KSK state failed", "zone", zone, "keyid", k.KeyTag, "err", err)
 			continue
 		}

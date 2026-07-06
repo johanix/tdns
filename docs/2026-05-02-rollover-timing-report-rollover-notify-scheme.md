@@ -19,6 +19,18 @@ an "extract orchestrator-agnostic push engine" refactor.
 
 ---
 
+> **RESOLVED (2026-07-01).** This audit re-confirmed the E3/E12/E13
+> divergence on the `rollover-notify-scheme` branch; it is now **fixed** in
+> current `main` / `feat/tsig-first-class`. `T_publish` subtracts the DNSKEY
+> TTL: `tPublish := tRoll.Add(-(deps.PropagationDelay + dnskeyTTL))`
+> (`ksk_rollover_automated.go:1162`), `dnskeyTTL = min(TTLS.DNSKEY,
+> TTLS.MaxServed)` (or observed served TTL) via `effectiveServedDnskeyTTL`
+> (`:1400`). Landed as **W1** (`e120dc4`) + tests **W8** (`ed47876`),
+> merged via **PR #212** (`rollover-timing-fixes-1`). The NOTIFY-specific
+> `parent_prop` caveat (the E6 note below) is operator guidance, not a code
+> bug — it remains open as a documentation item. Verdicts below retained as
+> the historical audit record.
+
 ## E1 — DS-side cache-flush invariant: `T_DS_pub_n + parent_prop + DS_TTL ≤ T_roll_n`
 
 **Verdict:** UNCLEAR (structurally implied iff E10 holds; E10 is *not*

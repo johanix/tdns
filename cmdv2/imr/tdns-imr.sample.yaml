@@ -21,8 +21,9 @@ imrengine:
 # Consulted ONLY when dnskey_query_transport is "use_ds_signal" (the default).
 # When a referral DS RRset contains any listed algorithm, the IMR fetches
 # the child zone's DNSKEY over a non-UDP transport from the start, not UDP
-# with TC fallback. RSASHA512 (10) is a stand-in where ML-DSA-44 is
-# unavailable. Inspect counters: tdns-cli imr stats large-ksk
+# with TC fallback. Listed by algorithm NAME (not codepoint): RSASHA512 is a
+# stand-in where ML-DSA-44 is unavailable. A name unknown to this binary's
+# registry is a hard config error. Inspect counters: tdns-cli imr stats large-ksk
 #
 # dnskey_query_transport selects how the IMR picks a transport for DNSKEY
 # queries. DNSKEY queries are ~0.1% of traffic and exempt from a server's
@@ -40,7 +41,7 @@ imrengine:
 #                       the query if the server advertises no encrypted
 #                       transport.
 dnssec:
-   large_algorithms: [ 10 ]
+   large_algorithms: [ RSASHA512 ]
    dnskey_query_transport: use_ds_signal
 
 log:

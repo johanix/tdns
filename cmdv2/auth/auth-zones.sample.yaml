@@ -12,8 +12,12 @@
 #                    - slice: Experimental alternative (may be faster/use less memory)
 #                    - xfr:   Zone transfer only (AXFR in/out, NO normal queries)
 #   template:        Template name to inherit settings from (optional)
-#   primary:         Upstream server for secondary zones (IP:port)
-#   notify:          List of downstream servers to notify (IP:port list)
+#   primaries:       Upstream servers for secondary zones — a LIST of {addr, key}
+#                    entries (addr is IP:port or host:port; key is a TSIG key name,
+#                    or NOKEY for none). More than one provides redundancy; a host
+#                    name is resolved at load time and may expand to several
+#                    addresses (A + AAAA), each tried in turn on failure.
+#   notify:          Downstream servers to notify — a LIST of {addr, key} entries
 #   downstreams:     Alias for notify (same meaning)
 #   options:         List of zone options (see auth-templates.sample.yaml for complete list)
 #   dnssec_policy:   DNSSEC policy name (from dnssecpolicies: section)
@@ -32,8 +36,10 @@ zones:
      zonefile:        /etc/tdns/zones/example.com.zone
      store:           map
      notify:
-        - "192.0.2.1:53"       # Notify this secondary
-        - "192.0.2.2:53"       # And this one
+        - addr: "192.0.2.1:53"     # Notify this secondary
+          key:  NOKEY
+        - addr: "192.0.2.2:53"     # And this one
+          key:  NOKEY
      options:
         - delegation-sync-parent   # Provide delegation sync for children
         - online-signing           # Sign responses on-the-fly
@@ -46,7 +52,11 @@ zones:
      type:            secondary
      zonefile:        /var/lib/tdns/zones/example.net.zone  # Optional: save transferred zone
      store:           map                                    # Default storage (serves queries)
-     primary:         "203.0.113.1:53"                      # Transfer from this server
+     primaries:                                              # Transfer from these servers (in order, with fallback)
+        - addr: "203.0.113.1:53"
+          key:  NOKEY
+        - addr: "203.0.113.2:53"
+          key:  NOKEY
      options:
         - delegation-sync-child    # Push DS/NS updates to parent
 
@@ -57,8 +67,10 @@ zones:
      zonefile:        /etc/tdns/zones/example.org.zone
      template:        parent-primary    # Inherit from parent-primary template
      notify:                            # Override template's notify list
-        - "192.0.2.10:53"
-        - "192.0.2.11:53"
+        - addr: "192.0.2.10:53"
+          key:  NOKEY
+        - addr: "192.0.2.11:53"
+          key:  NOKEY
      # type, store, options, dnssec_policy inherited from template
 
    # ===========================================================================
@@ -76,7 +88,8 @@ zones:
      zonefile:        /var/lib/tdns/zones/catalog.example.zone
      store:           map
      notify:
-        - "192.0.2.20:53"      # Notify secondaries about catalog changes
+        - addr: "192.0.2.20:53"    # Notify secondaries about catalog changes
+          key:  NOKEY
      options:
         - catalog-zone                    # RFC 9432 catalog zone
         - catalog-member-auto-create      # Auto-create zones from catalog
@@ -89,7 +102,9 @@ zones:
      type:            secondary
      zonefile:        /var/lib/tdns/zones/catalog-upstream.zone  # Optional persistence
      store:           map
-     primary:         "203.0.113.50:5353"      # Fetch catalog from here
+     primaries:                                 # Fetch catalog from here
+        - addr: "203.0.113.50:5353"
+          key:  NOKEY
      options:
         - catalog-zone                         # Parse as catalog zone
         - catalog-member-auto-create           # Auto-configure member zones
@@ -101,7 +116,9 @@ zones:
    - name:            catalog-readonly.
      type:            secondary
      store:           map
-     primary:         "203.0.113.60:5353"
+     primaries:
+        - addr: "203.0.113.60:5353"
+          key:  NOKEY
      options:
         - catalog-zone           # Parse catalog but DON'T auto-configure
                                  # (no catalog-member-auto-create option)
@@ -120,8 +137,10 @@ zones:
      zonefile:        /etc/tdns/zones/stealth.example.zone
      template:        stealth-primary
      notify:                              # Override template notify list
-        - "ns1.public.example:53"
-        - "ns2.public.example:53"
+        - addr: "ns1.public.example:53"
+          key:  NOKEY
+        - addr: "ns2.public.example:53"
+          key:  NOKEY
 
    # ===========================================================================
    # EXAMPLE 10: Fast-rolling DNSSEC zone
@@ -130,7 +149,8 @@ zones:
      zonefile:        /etc/tdns/zones/fastroll.example.zone
      template:        fast-roll-primary
      notify:
-        - "192.0.2.100:53"
+        - addr: "192.0.2.100:53"
+          key:  NOKEY
 
    # ===========================================================================
    # EXAMPLE 11: Zone with dynamic updates enabled
