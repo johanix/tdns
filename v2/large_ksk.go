@@ -127,18 +127,22 @@ func validateSplitAlgorithm(policyName string, kskAlg, zskAlg uint8, allowed map
 // A rejected policy is kept but marked unusable via DnssecPolicy.Error,
 // like the other parse-time policy validations.
 func validateRoleCapabilities(policyName string, kskAlg, zskAlg uint8) error {
-	kskCaps, ok := algorithms.Caps(kskAlg)
+	// CapsReal (not Caps): a policy that signs must name algorithms this
+	// binary can actually generate and sign with, not ones it merely holds
+	// metadata for. A server registers metadata for every algorithm but
+	// links an implementation only for those in its algs.list.
+	kskCaps, ok := algorithms.CapsReal(kskAlg)
 	if !ok {
-		return fmt.Errorf("policy %q: KSK algorithm %s (%d) is not a registered algorithm",
+		return fmt.Errorf("policy %q: KSK algorithm %s (%d) is not a usable (implemented) algorithm in this binary",
 			policyName, dns.AlgorithmToString[kskAlg], kskAlg)
 	}
 	if !kskCaps.ForKSK {
 		return fmt.Errorf("policy %q: algorithm %s (%d) is not permitted as a KSK",
 			policyName, dns.AlgorithmToString[kskAlg], kskAlg)
 	}
-	zskCaps, ok := algorithms.Caps(zskAlg)
+	zskCaps, ok := algorithms.CapsReal(zskAlg)
 	if !ok {
-		return fmt.Errorf("policy %q: ZSK algorithm %s (%d) is not a registered algorithm",
+		return fmt.Errorf("policy %q: ZSK algorithm %s (%d) is not a usable (implemented) algorithm in this binary",
 			policyName, dns.AlgorithmToString[zskAlg], zskAlg)
 	}
 	if !zskCaps.ForZSK {

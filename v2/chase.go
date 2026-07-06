@@ -160,11 +160,20 @@ func (c *Chaser) Chase(qname string, qtype uint16) (*ChainResult, error) {
 				//       unsigned/insecure child. Without NSEC/NSEC3 proof
 				//       support here we report Indeterminate rather than
 				//       Insecure (a full proof-of-no-DS walk is future work).
-				if !c.isZoneCut(zone) {
-					continue // case (a): phantom cut, drop it
+				cut, cutErr := c.isZoneCut(zone)
+				if cutErr == nil && !cut {
+					continue // case (a): confirmed non-cut, drop it
 				}
+				// Case (b), or the zone-cut check itself failed: keep the
+				// candidate on the Indeterminate path. A lookup failure must
+				// not be mistaken for a non-cut (which would silently drop a
+				// possibly-real delegation), so we do NOT skip on error.
 				link.Status = ChainStatusIndeterminate
-				link.Notes = append(link.Notes, "no DS record at parent (and no NSEC proof checked)")
+				if cutErr != nil {
+					link.Notes = append(link.Notes, fmt.Sprintf("no DS at parent; zone-cut check failed: %v", cutErr))
+				} else {
+					link.Notes = append(link.Notes, "no DS record at parent (and no NSEC proof checked)")
+				}
 				result.Links = append(result.Links, link)
 				result.Status = worstStatus(result.Status, ChainStatusIndeterminate)
 				continue
@@ -338,17 +347,25 @@ func (c *Chaser) queryDNSKEY(zone string) ([]*dns.DNSKEY, []*dns.RRSIG, error) {
 // own, so it must not be treated as a zone in the chase (doing so invents
 // a phantom zone with no DS/DNSKEY and derails validation of the leaf,
 // which is actually served from the enclosing zone). A cut exists when the
-// name has an SOA (its own apex) or NS records (a delegation). Query
-// failures are treated as "not a cut" — conservative: we fall back to
-// validating the leaf against the deepest real zone we did establish.
-func (c *Chaser) isZoneCut(name string) bool {
-	if rrs, _, err := c.queryRRset(name, dns.TypeSOA); err == nil && len(rrs) > 0 {
-		return true
+// name has an SOA (its own apex) or NS records (a delegation).
+//
+// The returned error distinguishes "definitely not a cut" (false, nil)
+// from "could not determine" (false, err): a transient SOA/NS lookup
+// failure must NOT be mistaken for a non-cut, or a real delegation could
+// be silently dropped. The caller keeps such a candidate on the
+// Indeterminate path instead of skipping it.
+func (c *Chaser) isZoneCut(name string) (bool, error) {
+	if rrs, _, err := c.queryRRset(name, dns.TypeSOA); err != nil {
+		return false, err
+	} else if len(rrs) > 0 {
+		return true, nil
 	}
-	if rrs, _, err := c.queryRRset(name, dns.TypeNS); err == nil && len(rrs) > 0 {
-		return true
+	if rrs, _, err := c.queryRRset(name, dns.TypeNS); err != nil {
+		return false, err
+	} else if len(rrs) > 0 {
+		return true, nil
 	}
-	return false
+	return false, nil
 }
 
 // verifyLeafSig verifies the answer RRset's RRSIG against the deepest

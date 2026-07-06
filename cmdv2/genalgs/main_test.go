@@ -227,6 +227,28 @@ func TestGenEnvMkRecordsAlgrepo(t *testing.T) {
 	}
 }
 
+// TestGenEnvMkPathListJoin verifies that a path-list variable contributed
+// by more than one library is colon-joined (not space-joined, which would
+// produce an invalid path), while a flag-list variable stays space-joined.
+func TestGenEnvMkPathListJoin(t *testing.T) {
+	need := map[string]bool{"sqisign": true, "qruov": true}
+	envs := map[string]libEnv{
+		"sqisign": {group: "sqisign", vars: map[string]string{"LD_LIBRARY_PATH": "/a/lib", "CGO_LDFLAGS": "-lsqisign"}},
+		"qruov":   {group: "qruov", vars: map[string]string{"LD_LIBRARY_PATH": "/b/lib", "CGO_LDFLAGS": "-lqruov"}},
+	}
+	out := string(genEnvMk("/repo", need, envs))
+
+	// Values are ordered by sortedGroups (qruov before sqisign). The point
+	// of the test is the SEPARATOR: colon for the path list, space for the
+	// flag list.
+	if !strings.Contains(out, "export LD_LIBRARY_PATH := /b/lib:/a/lib") {
+		t.Errorf("LD_LIBRARY_PATH must be colon-joined:\n%s", out)
+	}
+	if !strings.Contains(out, "export CGO_LDFLAGS := -lqruov -lsqisign") {
+		t.Errorf("CGO_LDFLAGS must stay space-joined:\n%s", out)
+	}
+}
+
 // stubEnvScript writes a passing <group>-env.sh under algrepo, at the
 // path detectLib expects for that group.
 func stubEnvScript(t *testing.T, algrepo, group, rel string) {

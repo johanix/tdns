@@ -196,6 +196,22 @@ func Caps(num uint8) (Capabilities, bool) {
 	return e.caps, true
 }
 
+// CapsReal is like [Caps] but returns ok=false for a metadata-only entry
+// (one registered via RegisterMetadata but with no real implementation
+// linked into this binary). Use it where accepting an algorithm implies
+// the binary can actually generate/sign/verify with it — e.g. validating a
+// DNSSEC policy's KSK/ZSK algorithms on a signing server, which must reject
+// an algorithm it only knows the name of.
+func CapsReal(num uint8) (Capabilities, bool) {
+	mu.RLock()
+	defer mu.RUnlock()
+	e, ok := byNumber[num]
+	if !ok || !e.real {
+		return Capabilities{}, false
+	}
+	return e.caps, true
+}
+
 // SupportedSIG0 returns the names of all registered algorithms whose
 // capabilities permit SIG(0) use, sorted by codepoint.
 func SupportedSIG0() []string {

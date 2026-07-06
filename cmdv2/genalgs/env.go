@@ -159,9 +159,26 @@ func genEnvMk(algrepo string, needGroups map[string]bool, envByGroup map[string]
 	}
 	sort.Strings(otherNames)
 	for _, n := range otherNames {
-		fmt.Fprintf(&b, "export %s := %s\n", n, strings.Join(others[n], " "))
+		// Path-list variables must be colon-joined (":") — space-joining
+		// several LD_LIBRARY_PATH values would produce an invalid path like
+		// "/a /b". Flag-style variables (CGO_LDFLAGS) are space-joined.
+		sep := " "
+		if isPathListVar(n) {
+			sep = ":"
+		}
+		fmt.Fprintf(&b, "export %s := %s\n", n, strings.Join(others[n], sep))
 	}
 	return []byte(b.String())
+}
+
+// isPathListVar reports whether an environment variable holds a
+// colon-separated list of paths (rather than a space-separated flag list).
+func isPathListVar(name string) bool {
+	switch name {
+	case "LD_LIBRARY_PATH", "DYLD_LIBRARY_PATH", "PKG_CONFIG_PATH":
+		return true
+	}
+	return false
 }
 
 func appendUnique(xs []string, v string) []string {
