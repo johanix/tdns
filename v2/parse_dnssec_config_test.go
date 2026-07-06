@@ -135,7 +135,8 @@ func registerKSKOnlyStub(t *testing.T) {
 	// dns.StringToAlgorithm in the policy parser) that is permitted as a
 	// KSK but NOT as a ZSK.
 	algorithms.Register(kskOnlyStubNum, kskOnlyStub{},
-		algorithms.Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: false})
+		algorithms.Capabilities{ForSIG0: true, ForDNSSEC: true, ForKSK: true, ForZSK: false},
+		algorithms.Facts{})
 	kskOnlyStubRegistered = true
 }
 

@@ -146,10 +146,23 @@ func (c *Chaser) Chase(qname string, qtype uint16) (*ChainResult, error) {
 			}
 			link.DS = ds
 			if len(ds) == 0 {
-				// No DS at parent — chain is broken or zone is unsigned.
-				// Without NSEC/NSEC3 proof support here, we report
-				// Indeterminate rather than Insecure. A full proof-of-no-DS
-				// walk is a future enhancement.
+				// No DS at parent. Two very different cases:
+				//
+				//   (a) `zone` is not a zone cut at all — just a label
+				//       boundary within the parent (e.g. www.iis.se, which
+				//       has no NS/SOA of its own). It must NOT appear in the
+				//       chain: the queried leaf is served from the enclosing
+				//       zone, and its RRSIG validates against THAT zone's
+				//       keys. Skip this candidate entirely, leaving the
+				//       previous (real) zone as the deepest.
+				//
+				//   (b) `zone` is a genuine delegation with no DS — an
+				//       unsigned/insecure child. Without NSEC/NSEC3 proof
+				//       support here we report Indeterminate rather than
+				//       Insecure (a full proof-of-no-DS walk is future work).
+				if !c.isZoneCut(zone) {
+					continue // case (a): phantom cut, drop it
+				}
 				link.Status = ChainStatusIndeterminate
 				link.Notes = append(link.Notes, "no DS record at parent (and no NSEC proof checked)")
 				result.Links = append(result.Links, link)
@@ -317,6 +330,25 @@ func (c *Chaser) queryDNSKEY(zone string) ([]*dns.DNSKEY, []*dns.RRSIG, error) {
 		}
 	}
 	return keys, sigs, nil
+}
+
+// isZoneCut reports whether name is an actual zone apex — i.e. a
+// delegation point — rather than merely a label boundary within a zone.
+// A candidate like "www.iis.se" is NOT a zone cut: it has no NS/SOA of its
+// own, so it must not be treated as a zone in the chase (doing so invents
+// a phantom zone with no DS/DNSKEY and derails validation of the leaf,
+// which is actually served from the enclosing zone). A cut exists when the
+// name has an SOA (its own apex) or NS records (a delegation). Query
+// failures are treated as "not a cut" — conservative: we fall back to
+// validating the leaf against the deepest real zone we did establish.
+func (c *Chaser) isZoneCut(name string) bool {
+	if rrs, _, err := c.queryRRset(name, dns.TypeSOA); err == nil && len(rrs) > 0 {
+		return true
+	}
+	if rrs, _, err := c.queryRRset(name, dns.TypeNS); err == nil && len(rrs) > 0 {
+		return true
+	}
+	return false
 }
 
 // verifyLeafSig verifies the answer RRset's RRSIG against the deepest

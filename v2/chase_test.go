@@ -4,9 +4,65 @@ import (
 	"bytes"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
+
+	"github.com/johanix/tdns/v2/core"
 )
+
+// scriptedClient is a DNSClienter that answers from a fixed map keyed by
+// "qname/qtype", for driving the chaser in tests without a real resolver.
+// A missing key returns an empty (NOERROR, no-answer) response.
+type scriptedClient struct {
+	answers map[string][]dns.RR
+}
+
+func (s *scriptedClient) TransportKind() core.Transport { return core.TransportDo53 }
+
+func (s *scriptedClient) Exchange(msg *dns.Msg, _ string, _ bool) (*dns.Msg, time.Duration, error) {
+	resp := new(dns.Msg)
+	resp.SetReply(msg)
+	if len(msg.Question) == 1 {
+		q := msg.Question[0]
+		key := q.Name + "/" + dns.TypeToString[q.Qtype]
+		resp.Answer = append(resp.Answer, s.answers[key]...)
+	}
+	return resp, 0, nil
+}
+
+// TestChaseDropsNonApexName is the regression test for the bug where the
+// chaser treated every label boundary as a zone cut, so a non-apex name
+// (e.g. www.iis.se) became a phantom zone with no DS/DNSKEY and derailed
+// validation. The fix: a candidate with no DS AND no NS/SOA of its own is
+// not a zone cut and is dropped from the chain. Here iis.se is a real
+// (secure) zone and www.iis.se is just a name in it; the chain must NOT
+// contain a www.iis.se link.
+func TestChaseDropsNonApexName(t *testing.T) {
+	// Minimal script: iis.se has a DS (at its parent) and a DNSKEY; the
+	// non-apex www.iis.se has neither a DS nor NS/SOA. We are not exercising
+	// signature crypto here — only that the phantom cut is excluded — so
+	// the deeper links are left unsigned/indeterminate, which is fine: the
+	// assertion is purely about which zones appear in the chain.
+	ans := map[string][]dns.RR{
+		"iis.se./DS":     {mustRR(t, "iis.se. 3600 IN DS 51298 13 2 "+strings.Repeat("aa", 32))},
+		"iis.se./DNSKEY": {mustRR(t, "iis.se. 3600 IN DNSKEY 257 3 13 "+strings.Repeat("A", 40))},
+		// www.iis.se: no DS, no NS, no SOA -> not a zone cut.
+		"www.iis.se./A": {mustRR(t, "www.iis.se. 3600 IN A 159.253.30.207")},
+	}
+	c := NewChaser(&scriptedClient{answers: ans}, "192.0.2.1:53", nil)
+	res, err := c.Chase("www.iis.se.", dns.TypeA)
+	if err != nil {
+		t.Fatalf("Chase: %v", err)
+	}
+	var names []string
+	for _, l := range res.Links {
+		names = append(names, l.Zone)
+		if l.Zone == "www.iis.se." {
+			t.Errorf("chain must not contain a www.iis.se. link (it is not a zone cut); links: %v", names)
+		}
+	}
+}
 
 // TestAlgField covers the +algchase annotation helper: bare number when
 // off, "N (NAME)" when on, and "N (unknown)" for an unregistered
