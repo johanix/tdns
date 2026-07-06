@@ -159,6 +159,148 @@ func TestReadListErrors(t *testing.T) {
 	}
 }
 
+// TestGenRegisteredEmptySelection covers the metadata-only case (an app
+// with an empty algs.list). genRegistered must emit a compilable file
+// with no imports — an earlier version always imported the algs package,
+// which does not compile when there are no Register calls to use it.
+func TestGenRegisteredEmptySelection(t *testing.T) {
+	src := genRegistered("main", nil)
+	if _, err := format.Source(src); err != nil {
+		t.Fatalf("empty-selection registered_algs not valid Go: %v\n%s", err, src)
+	}
+	s := string(src)
+	if strings.Contains(s, "algs \"github.com/johanix/tdns/v2/algorithms\"") {
+		t.Error("empty-selection file must not import the algs package (unused → won't compile)")
+	}
+	if strings.Contains(s, "algs.Register(") {
+		t.Error("empty-selection file must contain no Register calls")
+	}
+}
+
+// TestGenEnvMkRecordsAlgrepo verifies the generated algs-env.mk records
+// ALGREPO (so the app Makefile can re-run genalgs) in both the
+// library-backed and the no-library (metadata-only) cases.
+func TestGenEnvMkRecordsAlgrepo(t *testing.T) {
+	const repo = "/abs/path/to/dnssec-algorithms"
+
+	// No C-backed algorithms selected: still records ALGREPO.
+	empty := string(genEnvMk(repo, map[string]bool{}, map[string]libEnv{}))
+	if !strings.Contains(empty, "ALGREPO := "+repo) {
+		t.Errorf("metadata-only algs-env.mk missing ALGREPO:\n%s", empty)
+	}
+
+	// With a library: records ALGREPO and the PKG_CONFIG_PATH.
+	need := map[string]bool{"liboqs": true}
+	envs := map[string]libEnv{"liboqs": {group: "liboqs", vars: map[string]string{"PKG_CONFIG_PATH": "/x/pc"}}}
+	withLib := string(genEnvMk(repo, need, envs))
+	if !strings.Contains(withLib, "ALGREPO := "+repo) {
+		t.Errorf("library algs-env.mk missing ALGREPO:\n%s", withLib)
+	}
+	if !strings.Contains(withLib, "/x/pc") {
+		t.Errorf("library algs-env.mk missing PKG_CONFIG_PATH:\n%s", withLib)
+	}
+}
+
+// stubEnvScript writes a passing <group>-env.sh under algrepo, at the
+// path detectLib expects for that group.
+func stubEnvScript(t *testing.T, algrepo, group, rel string) {
+	t.Helper()
+	dir := filepath.Join(algrepo, filepath.Dir(rel))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(algrepo, rel)
+	body := "#!/bin/bash\necho 'export PKG_CONFIG_PATH=\"/x/" + group + "\"'\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestRunRelativeAlgrepo is the regression test for the doubled-path bug:
+// a relative --algrepo used to be applied twice when running the -env.sh
+// detection scripts (once as the subprocess Dir, once in the script path
+// resolved from that Dir), so a valid relative path failed with a
+// spurious "library not available". run() must absolutize --algrepo so a
+// relative path works. The test runs from a scratch cwd with a relative
+// path to the fixture repo, selecting a liboqs-backed algorithm.
+func TestRunRelativeAlgrepo(t *testing.T) {
+	algrepo := writeFixture(t)               // has registry/registry.go
+	stubEnvScript(t, algrepo, "liboqs", "liboqs/liboqs-env.sh")
+
+	// A working directory a fixed number of levels below algrepo's parent,
+	// so a relative path to algrepo is meaningful. Use algrepo's parent as
+	// cwd and "<base>" as the relative algrepo.
+	parent := filepath.Dir(algrepo)
+	rel := filepath.Base(algrepo)
+
+	outDir := t.TempDir()
+	listPath := filepath.Join(outDir, "algs.list")
+	os.WriteFile(listPath, []byte("FALCON512\n"), 0o644) // liboqs-backed
+
+	// Run from `parent` with the relative algrepo.
+	restore := chdir(t, parent)
+	defer restore()
+
+	if err := run(rel, listPath, outDir, "main"); err != nil {
+		t.Fatalf("run with relative --algrepo failed (doubled-path regression?): %v", err)
+	}
+	// The env fragment should record an ABSOLUTE ALGREPO (the whole point
+	// of the fix). Match on the fixture's basename rather than the exact
+	// path: on macOS t.TempDir() lives under /var, a symlink to
+	// /private/var, so filepath.Abs yields the /private form.
+	mk, err := os.ReadFile(filepath.Join(outDir, "algs-env.mk"))
+	if err != nil {
+		t.Fatalf("reading algs-env.mk: %v", err)
+	}
+	line := ""
+	for _, l := range strings.Split(string(mk), "\n") {
+		if strings.HasPrefix(l, "ALGREPO := ") {
+			line = strings.TrimPrefix(l, "ALGREPO := ")
+			break
+		}
+	}
+	if line == "" {
+		t.Fatalf("no ALGREPO line in algs-env.mk:\n%s", mk)
+	}
+	if !filepath.IsAbs(line) {
+		t.Errorf("ALGREPO %q is not absolute (relative --algrepo was not absolutized)", line)
+	}
+	if filepath.Base(line) != rel {
+		t.Errorf("ALGREPO %q does not resolve to the fixture repo %q", line, rel)
+	}
+}
+
+// TestRunBadAlgrepo verifies run() rejects an --algrepo that is not a
+// dnssec-algorithms checkout, rather than failing later with a confusing
+// error.
+func TestRunBadAlgrepo(t *testing.T) {
+	notARepo := t.TempDir() // no registry/registry.go under it
+	outDir := t.TempDir()
+	listPath := filepath.Join(outDir, "algs.list")
+	os.WriteFile(listPath, []byte("MLDSA44\n"), 0o644)
+
+	err := run(notARepo, listPath, outDir, "main")
+	if err == nil {
+		t.Fatal("run should reject an --algrepo with no registry/registry.go")
+	}
+	if !strings.Contains(err.Error(), "dnssec-algorithms checkout") {
+		t.Errorf("error should explain the bad --algrepo, got: %v", err)
+	}
+}
+
+// chdir changes to dir and returns a function restoring the original cwd.
+func chdir(t *testing.T, dir string) func() {
+	t.Helper()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	return func() { os.Chdir(orig) }
+}
+
 // TestDetectLibFailure verifies that a library whose -env.sh exits
 // non-zero is reported as unavailable (a stub script that fails).
 func TestDetectLibFailure(t *testing.T) {
