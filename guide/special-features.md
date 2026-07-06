@@ -5,21 +5,25 @@ authoritative and recursive DNS service.
 
 ## Contents
 
-1. **Automatic Delegation Synchronization** -- Keeping parent
-   zone delegation data in sync with child zone changes.
-2. **DNS Transport Signaling** -- Enabling resolvers to
-   discover and use encrypted transports (DoT, DoQ, DoH)
-   when communicating with authoritative servers.
-3. **Experimental Record Types** -- DSYNC, DELEG, TSYNC, and
-   the records that tdns defines as infrastructure for other
-   components (HSYNC3, HSYNCPARAM, JWK, CHUNK).
-4. **Post-Quantum Algorithm Support** -- ML-DSA, SLH-DSA,
-   Falcon, MAYO and SNOVA for both SIG(0) and DNSSEC, via
-   the dnssec-algorithms registry on top of a forked
-   miekg/dns.
-5. **Automatic Key Rollover** -- Pointer to the dedicated
-   [key-rollover](key-rollover.md) guide and its
-   [timing-equations](rollover-timing-equations.md)
+1. [**Automatic Delegation Synchronization**](#1-automatic-delegation-synchronization)
+   -- Keeping parent zone delegation data in sync with child
+   zone changes.
+2. [**DNS Transport Signaling**](#2-dns-transport-signaling)
+   -- Enabling resolvers to discover and use encrypted
+   transports (DoT, DoQ, DoH) when communicating with
+   authoritative servers.
+3. [**Experimental Record Types**](#3-experimental-record-types)
+   -- DSYNC, DELEG, TSYNC, and the records that tdns defines
+   as infrastructure for other components (HSYNC3,
+   HSYNCPARAM, JWK, CHUNK).
+4. [**Post-Quantum Algorithm Support**](pq-dnssec.md)
+   -- ML-DSA, SLH-DSA, Falcon, MAYO and SNOVA for both SIG(0)
+   and DNSSEC, via the dnssec-algorithms registry on top of a
+   forked miekg/dns. **(Moved to its own guide,
+   [pq-dnssec.md](pq-dnssec.md).)**
+5. [**Automatic Key Rollover**](key-rollover.md)
+   -- The dedicated [key-rollover](key-rollover.md) guide and
+   its [timing-equations](rollover-timing-equations.md)
    companion. The engine reuses the delegation-sync
    transports from §1 and the SIG(0) PQ support from §4.
 
