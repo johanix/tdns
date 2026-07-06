@@ -162,10 +162,16 @@ native C library and cgo at build time ([§5](#5-building-tdns-with-pq-algorithm
 capabilities and reflect signature-size suitability, not cryptographic
 strength — see [§4](#4-ksk-vs-zsk-suitability).
 
-> _TODO: key/signature sizes per algorithm. Pending measured data; the
-> `dnssec-algorithms/cmd/algbench` tool measures sign/verify cost and
-> sizes. Fill the size columns from a fresh run and reconcile against
-> [`pqc-algorithm-families.md`](https://github.com/johanix/dnssec-algorithms/blob/main/docs/pqc-algorithm-families.md)._
+**Sizes, level, and maturity** are recorded per algorithm in the registry
+(`AlgorithmFacts` in `dnssec-algorithms/registry/registry.go`) alongside
+the codepoint/role decisions, and flow through the generated metadata to
+the server, which reports them to `tdns-cli`. So
+`tdns-cli ... keystore <sig0|dnssec> algorithms` shows each algorithm's
+key/signature sizes, NIST level, maturity, and description with no local
+configuration. **Signing/validation cost** is the one exception: it is
+machine-dependent, measured per CPU architecture by
+`dnssec-algorithms/cmd/algbench` into `algorithm-costs.yaml`, and shown
+only when the CLI is pointed at that file (`algorithms.costsfile`).
 
 ---
 
