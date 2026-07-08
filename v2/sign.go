@@ -706,19 +706,22 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 // cancelled (e.g. on shutdown); callers without a meaningful context may pass
 // context.Background().
 func (zd *ZoneData) StripZoneRRSIGs(ctx context.Context, remove func(*dns.RRSIG) bool) (int, error) {
-	names, err := zd.GetOwnerNames()
-	if err != nil {
-		return 0, err
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.ensureWorkingSet()
+
+	names := make([]string, 0, len(zd.workingSet))
+	for name := range zd.workingSet {
+		names = append(names, name)
 	}
+	sort.Strings(names)
+
 	removed := 0
 	for _, name := range names {
 		if err := ctx.Err(); err != nil {
 			return removed, err
 		}
-		owner, err := zd.GetOwner(name)
-		if err != nil {
-			return removed, err
-		}
+		owner := zd.workingSet[name]
 		if owner == nil {
 			continue
 		}
@@ -739,11 +742,12 @@ func (zd *ZoneData) StripZoneRRSIGs(ctx context.Context, remove func(*dns.RRSIG)
 			}
 			if changed {
 				rrset.RRSIGs = kept
-				owner.RRtypes.Set(rrt, rrset)
+				zd.stageRRsetLocked(name, rrset)
 			}
 		}
 	}
 	if removed > 0 {
+		zd.publishLocked(zd.generation.Load())
 		lgSigner.Info("stripped orphan RRSIGs from zone", "zone", zd.ZoneName, "count", removed)
 	}
 	return removed, nil

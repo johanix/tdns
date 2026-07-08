@@ -143,6 +143,19 @@ func rrsetEqual(a, b core.RRset) bool {
 	return true
 }
 
+func (zd *ZoneData) stagedOwner(name string) *OwnerData {
+	zd.ensureWorkingSet()
+	return zd.workingSet[name]
+}
+
+func (zd *ZoneData) getOrCreateWorkingOwner(name string) *OwnerData {
+	zd.ensureWorkingSet()
+	if od := zd.workingSet[name]; od != nil {
+		return od
+	}
+	return zd.cloneOwner(name)
+}
+
 func (zd *ZoneData) requestPublish(urgent bool) {
 	if urgent {
 		_, _ = zd.publishSync()
