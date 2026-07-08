@@ -514,7 +514,11 @@ func (zd *ZoneData) GetSOA() (*dns.SOA, error) {
 }
 
 func (zd *ZoneData) PrintOwners() {
-	for _, key := range zd.Data.Keys() {
+	names, err := zd.GetOwnerNames()
+	if err != nil {
+		return
+	}
+	for _, key := range names {
 		fmt.Printf("%s\n", key)
 	}
 }

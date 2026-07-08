@@ -326,9 +326,9 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	return nil
 }
 
-func (zd *ZoneData) buildSnapshotLocked(serial uint32, data map[string]*OwnerData, transport *core.RRset) *ZoneSnapshot {
+func (zd *ZoneData) buildSnapshotLocked(serial uint32, data map[string]*OwnerData, transport *core.RRset) *zoneSnapshot {
 	apex := apexFromSnapshotData(zd, data)
-	return &ZoneSnapshot{
+	return &zoneSnapshot{
 		Serial:          serial,
 		SOA:             soaFromApex(serial, apex),
 		Apex:            apex,

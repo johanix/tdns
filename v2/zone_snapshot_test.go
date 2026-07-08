@@ -90,6 +90,30 @@ www.example.	3600	IN	A	192.0.2.1
 	}
 }
 
+func TestCurrentSerialMatchesSnapshot(t *testing.T) {
+	zd := testSnapshotZone(t, "example.", `example. 3600 IN SOA ns.example. hostmaster.example. 1 7200 1800 604800 7200
+example. 3600 IN NS ns.example.
+www.example. 3600 IN A 192.0.2.1
+`)
+	if snap := zd.snapshot.Load(); snap == nil || snap.Serial != zd.CurrentSerial {
+		t.Fatalf("initial serial mirror drift: snap=%v current=%d", snap, zd.CurrentSerial)
+	}
+
+	zd.mu.Lock()
+	zd.ensureWorkingSet()
+	zd.stageRRset("www.example.", coreRRset("www.example.", dns.TypeA, "192.0.2.55"))
+	zd.mu.Unlock()
+	zd.testPublishNow()
+
+	snap := zd.snapshot.Load()
+	if snap == nil || snap.Serial != zd.CurrentSerial || snap.Serial != 2 {
+		t.Fatalf("post-publish serial mirror drift: snap=%v current=%d", snap, zd.CurrentSerial)
+	}
+	if soa := snap.SOA; soa == nil || soa.Serial != snap.Serial {
+		t.Fatalf("SOA serial != snapshot serial: soa=%v snap=%d", soa, snap.Serial)
+	}
+}
+
 func TestInitialSnapshotBeforeReady(t *testing.T) {
 	zd := &ZoneData{
 		ZoneName:      "example.",

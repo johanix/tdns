@@ -175,7 +175,7 @@ type ZoneData struct {
 	AddTransportSignal  bool        // whether to attach TransportSignal in responses
 
 	// Zone snapshot publish path (Project B).
-	snapshot          atomic.Pointer[ZoneSnapshot]
+	snapshot          atomic.Pointer[zoneSnapshot]
 	workingSet        map[string]*OwnerData
 	wsTransportSignal *core.RRset
 	publishCadence    time.Duration

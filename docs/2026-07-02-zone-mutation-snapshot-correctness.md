@@ -1,7 +1,7 @@
 # Project B — Zone-Mutation Correctness via an Immutable Snapshot
 
-**Status:** **B3 enforcement pending** — B1 **done** (`98e50fa`); B2 **done** (`c76dfc4`);
-B3 reader cut-over **done** (uncommitted); unexported published type **remaining**.
+**Status:** **done (tdns-core)** — B1 (`98e50fa`), B2 (`c76dfc4`), B3 complete on branch
+`feature/zone-snapshot-correctness`. B-MP (tdns-mp) deferred per §9.
 **Date:** 2026-07-02 (plan); **implementation log:** 2026-07-08
 **Scope:** replace direct-write-then-bump-serial mutation with an **immutable
 snapshot published atomically**, in **tdns core (`v2/` + `cmdv2/`) only**. A
@@ -65,7 +65,7 @@ Branch: `feature/zone-snapshot-correctness` (off `main`).
 
 **B2 gate:** all B1 tests + `TestPendingChanges` + `TestConcurrentServeAndUpdate` (B2 variant) pass `-race`.
 
-### B3 — reader cut-over done; enforcement remaining
+### B3 — done
 
 | Deliverable | Status | Notes |
 |---|---|---|
@@ -76,11 +76,11 @@ Branch: `feature/zone-snapshot-correctness` (off `main`).
 | Drop dual-write | **done** | `syncLegacyFromSnapshot` removed; publish stores snapshot only |
 | Dead code cleanup | **done** | `setApexSOASerial`, `AddOwner` removed |
 | `check-no-mutators` grep gate | **done** | `utils/Makefile.common`; wired into `lint` |
-| B3 tests | **done** | `TestPublishedSnapshotAfterPublish`; B3 `TestConcurrentServeAndUpdate` — pass `-race` |
-| Unexported published type | **remaining** | `ZoneSnapshot` still exported; rename → `zoneSnapshot` |
-| `PrintOwners` | **remaining** | still walks draft `zd.Data`; should use `GetOwnerNames` |
+| Unexported published type | **done** | `zoneSnapshot` (unexported) |
+| `PrintOwners` | **done** | reads via `GetOwnerNames` |
+| B3 tests | **done** | `TestPublishedSnapshotAfterPublish`, `TestCurrentSerialMatchesSnapshot`, B3 `TestConcurrentServeAndUpdate` — pass `-race` |
 
-**B3 gate (partial):** B1 + B2 + B3 snapshot tests pass `-race`. Full sign-off blocked on unexported type.
+**B3 gate:** all §5 acceptance tests pass `-race`; `make -C v2 check-no-mutators` clean.
 
 ---
 

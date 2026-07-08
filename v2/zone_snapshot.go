@@ -11,9 +11,10 @@ import (
 
 const DefaultPublishCadence = 5 * time.Second
 
-// ZoneSnapshot is the immutable reader-facing view of a zone at one serial
-// boundary. Published snapshots are never mutated in place.
-type ZoneSnapshot struct {
+// zoneSnapshot is the immutable reader-facing view of a zone at one serial
+// boundary. Published snapshots are never mutated in place. The type is
+// unexported so callers cannot mutate served data without going through publish.
+type zoneSnapshot struct {
 	Serial          uint32
 	SOA             *dns.SOA
 	Apex            *OwnerData
@@ -218,7 +219,7 @@ func publishCadenceForZone(zd *ZoneData) time.Duration {
 	return zd.publishCadence
 }
 
-func (zd *ZoneData) publishedSnapshot() *ZoneSnapshot {
+func (zd *ZoneData) publishedSnapshot() *zoneSnapshot {
 	if zd == nil {
 		return nil
 	}
