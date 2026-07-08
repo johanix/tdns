@@ -52,23 +52,20 @@ www.example.	3600	IN	A	192.0.2.1
 	}
 	owner, _ := zd.GetOwner("www.example.")
 	if owner == nil {
-		t.Fatal("missing www owner in legacy store")
+		t.Fatal("missing www owner in published snapshot")
 	}
 	a := owner.RRtypes.GetOnlyRRSet(dns.TypeA)
 	if len(a.RRs) == 0 || a.RRs[0].(*dns.A).A.String() != "192.0.2.1" {
-		t.Fatalf("legacy store mutated during staging: %v", a.RRs)
+		t.Fatalf("published snapshot mutated during staging: %v", a.RRs)
 	}
 }
 
-func TestDualWriteConsistency(t *testing.T) {
+func TestPublishedSnapshotAfterPublish(t *testing.T) {
 	zone := `example.	3600	IN	SOA	ns.example. hostmaster.example. 1 7200 1800 604800 7200
 example.	3600	IN	NS	ns.example.
 www.example.	3600	IN	A	192.0.2.1
 `
 	zd := testSnapshotZone(t, "example.", zone)
-	if !zd.legacyMatchesSnapshot() {
-		t.Fatal("initial dual-write mismatch")
-	}
 
 	zd.mu.Lock()
 	zd.ensureWorkingSet()
@@ -76,11 +73,20 @@ www.example.	3600	IN	A	192.0.2.1
 	zd.mu.Unlock()
 	zd.testPublishNow()
 
-	if !zd.legacyMatchesSnapshot() {
-		t.Fatal("dual-write mismatch after publish")
+	owner, err := zd.GetOwner("www.example.")
+	if err != nil || owner == nil {
+		t.Fatal("missing www owner after publish")
+	}
+	a := owner.RRtypes.GetOnlyRRSet(dns.TypeA)
+	if len(a.RRs) == 0 || a.RRs[0].(*dns.A).A.String() != "192.0.2.99" {
+		t.Fatalf("published A = %v, want 192.0.2.99", a.RRs)
 	}
 	if zd.CurrentSerial != 2 {
 		t.Fatalf("serial = %d, want 2", zd.CurrentSerial)
+	}
+	snap := zd.snapshot.Load()
+	if snap == nil || snap.Serial != 2 {
+		t.Fatalf("snapshot serial = %v, want 2", snap)
 	}
 }
 
@@ -277,18 +283,56 @@ www.example. 3600 IN A 192.0.2.1
 		deadline := time.Now().Add(500 * time.Millisecond)
 		for time.Now().Before(deadline) {
 			zd.mu.Lock()
-			ok := zd.workingSet == nil && zd.legacyMatchesSnapshot()
+			idle := zd.workingSet == nil
 			zd.mu.Unlock()
-			if ok {
+			if !idle {
+				time.Sleep(5 * time.Millisecond)
+				continue
+			}
+			snap := zd.snapshot.Load()
+			if snap == nil {
+				time.Sleep(5 * time.Millisecond)
+				continue
+			}
+			if snap.Serial != zd.snapshotGeneration() {
+				time.Sleep(5 * time.Millisecond)
+				continue
+			}
+			got, err := zd.GetOwner("www.example.")
+			if err != nil || got == nil {
+				time.Sleep(5 * time.Millisecond)
+				continue
+			}
+			snapOwner := snap.Data["www.example."]
+			if snapOwner == nil {
+				time.Sleep(5 * time.Millisecond)
+				continue
+			}
+			aSnap := snapOwner.RRtypes.GetOnlyRRSet(dns.TypeA)
+			aGet := got.RRtypes.GetOnlyRRSet(dns.TypeA)
+			if len(aSnap.RRs) > 0 && len(aGet.RRs) > 0 &&
+				aSnap.RRs[0].(*dns.A).A.String() == aGet.RRs[0].(*dns.A).A.String() {
 				break
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
-		zd.mu.Lock()
-		ok := zd.workingSet == nil && zd.legacyMatchesSnapshot()
-		zd.mu.Unlock()
-		if !ok {
-			t.Fatalf("dual-write mismatch after publish cycle %d", i)
+		snap := zd.snapshot.Load()
+		got, err := zd.GetOwner("www.example.")
+		if snap == nil || err != nil || got == nil {
+			t.Fatalf("snapshot reader mismatch after publish cycle %d", i)
+		}
+		snapOwner := snap.Data["www.example."]
+		if snapOwner == nil {
+			t.Fatalf("missing www in snapshot after publish cycle %d", i)
+		}
+		aSnap := snapOwner.RRtypes.GetOnlyRRSet(dns.TypeA)
+		aGet := got.RRtypes.GetOnlyRRSet(dns.TypeA)
+		if len(aSnap.RRs) == 0 || len(aGet.RRs) == 0 ||
+			aSnap.RRs[0].(*dns.A).A.String() != aGet.RRs[0].(*dns.A).A.String() {
+			t.Fatalf("GetOwner != snapshot after publish cycle %d", i)
+		}
+		if snap.Serial != zd.snapshotGeneration() {
+			t.Fatalf("serial invariant broken after publish cycle %d: snap=%d gen=%d", i, snap.Serial, zd.snapshotGeneration())
 		}
 	}
 

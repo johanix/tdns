@@ -279,7 +279,6 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	}
 
 	soaCopy := dns.Copy(soaOrig).(*dns.SOA)
-	soaCopy.Serial = zd.CurrentSerial
 	transferSOA := core.RRset{
 		Name:   zd.ZoneName,
 		Class:  dns.ClassINET,
@@ -343,11 +342,19 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 		}
 	}
 
-	for _, owner := range zd.Data.Keys() {
+	owners, err := zd.GetOwnerNames()
+	if err != nil {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, owner list failed: %v", zone, err)
+		return zd.refuseTransfer(w, r)
+	}
+	for _, owner := range owners {
 		if owner == zd.ZoneName {
 			continue
 		}
-		omap, _ := zd.Data.Get(owner)
+		omap, err := zd.GetOwner(owner)
+		if err != nil || omap == nil {
+			continue
+		}
 		for _, rrt := range omap.RRtypes.Keys() {
 			rrset := omap.RRtypes.GetOnlyRRSet(uint16(rrt))
 			if !appendRRset(bs, rrset) {
@@ -628,7 +635,6 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 		return err
 	}
 	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
-	soa.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 
 	//	zonedata += soa.String() + "\n"
 	count := 0
@@ -648,9 +654,17 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	}
 
 	// Rest of zone
-	for _, owner := range zd.Data.Keys() {
-		omap, _ := zd.Data.Get(owner)
+	owners, err := zd.GetOwnerNames()
+	if err != nil {
+		lgDns.Error("WriteZoneToFile: failed to list owners", "zone", zd.ZoneName, "err", err)
+		return err
+	}
+	for _, owner := range owners {
 		if owner == zd.ZoneName {
+			continue
+		}
+		omap, err := zd.GetOwner(owner)
+		if err != nil || omap == nil {
 			continue
 		}
 		for _, rrt := range omap.RRtypes.Keys() {

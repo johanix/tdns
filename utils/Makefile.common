@@ -114,17 +114,33 @@ tdnsnbsd:
 	   echo "TDNS_NBSD_DIR is unset (should be user@host:/dir), rsync not possible" ; \
 	fi
 
+UTILS_DIR := $(dir $(lastword $(MAKEFILE_LIST)))
+TDNS_ROOT := $(UTILS_DIR)..
+
+# Reject direct zone mutation outside the staging allowlist (B3).
+check-no-mutators:
+	@violations=$$(grep -RnE '\.(RRtypes\.Set|Data\.Set)\(' \
+		$(TDNS_ROOT)/v2 $(TDNS_ROOT)/cmdv2 --include='*.go' \
+		| grep -v zone_mutation.go \
+		| grep -v '_test\.go' \
+		| grep -v 'dnsutils\.go' || true); \
+	if [ -n "$$violations" ]; then \
+		echo "mutator Set() calls outside allowlist:"; \
+		echo "$$violations"; \
+		exit 1; \
+	fi
+
 test:
 	$(GO) test -v -cover
 
 # install:
 # 	install -s -b -c ${PROG} /usr/local/bin/
 
-lint:
+lint: check-no-mutators
 	go fmt ./...
 	go vet ./...
 	staticcheck ./...
 	gosec ./...
 	golangci-lint run
 
-.PHONY: build generate version clean
+.PHONY: build generate version clean check-no-mutators

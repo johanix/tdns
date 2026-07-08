@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -390,10 +391,14 @@ func (zd *ZoneData) SetOption(option ZoneOption, value bool) {
 }
 
 func (zd *ZoneData) NameExists(qname string) bool {
-	if zd.ZoneStore != MapZone || zd.Data == nil || zd.Data.IsEmpty() {
+	if zd.ZoneStore != MapZone {
 		return false
 	}
-	_, ok := zd.Data.Get(qname)
+	snap := zd.publishedSnapshot()
+	if snap == nil || len(snap.Data) == 0 {
+		return false
+	}
+	_, ok := snap.Data[qname]
 	lg.Debug("NameExists result", "qname", qname, "exists", ok)
 	return ok
 }
@@ -406,18 +411,11 @@ func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 		return nil, fmt.Errorf("getOwner: only supported for MapZone, not %s",
 			ZoneStoreToString[zd.ZoneStore])
 	}
-	if zd.Data.IsEmpty() {
+	snap := zd.publishedSnapshot()
+	if snap == nil || len(snap.Data) == 0 {
 		return nil, nil
 	}
-	if owner, ok := zd.Data.Get(qname); ok {
-		return &owner, nil
-	}
-	return nil, nil
-}
-
-// XXX: This MUST ONLY be called from the ZoneUpdater, due to locking issues
-func (zd *ZoneData) AddOwner(owner *OwnerData) {
-	zd.Data.Set(owner.Name, *owner)
+	return snap.Data[qname], nil
 }
 
 func (zd *ZoneData) GetRRset(qname string, rrtype uint16) (*core.RRset, error) {
@@ -448,10 +446,16 @@ func (zd *ZoneData) GetOwnerNames() ([]string, error) {
 		return nil, fmt.Errorf("getOwnerNames: only supported for MapZone, not %s",
 			ZoneStoreToString[zd.ZoneStore])
 	}
-	if zd.Data.IsEmpty() {
+	snap := zd.publishedSnapshot()
+	if snap == nil || len(snap.Data) == 0 {
 		return nil, nil
 	}
-	return zd.Data.Keys(), nil
+	names := make([]string, 0, len(snap.Data))
+	for name := range snap.Data {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // XXX: Is qname the name of a zone cut for a child zone?
@@ -498,6 +502,9 @@ func (zd *ZoneData) GetSOA() (*dns.SOA, error) {
 	}
 
 	// For all other cases (primary zones, ready zones, catalog zones), require real data
+	if snap := zd.publishedSnapshot(); snap != nil && snap.SOA != nil {
+		return snap.SOA, nil
+	}
 	owner, err := zd.GetOwner(zd.ZoneName)
 	if err != nil || owner == nil {
 		return nil, err
@@ -628,32 +635,6 @@ func nextOutboundSerial(zd *ZoneData) uint32 {
 		}
 	}
 	return zd.CurrentSerial + 1
-}
-
-// setApexSOASerial rewrites the in-memory apex SOA RDATA so its Serial field
-// matches zd.CurrentSerial. Caller must hold zd.mu (or be in a context where
-// no concurrent reader/writer can observe the zone). Returns true if the SOA
-// RR was found and updated, false otherwise (zone not loaded, no apex, no
-// SOA RRset).
-func setApexSOASerial(zd *ZoneData) bool {
-	if zd == nil {
-		return false
-	}
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil || apex == nil {
-		return false
-	}
-	soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
-	if len(soaRRset.RRs) == 0 {
-		return false
-	}
-	soa, ok := soaRRset.RRs[0].(*dns.SOA)
-	if !ok {
-		return false
-	}
-	soa.Serial = zd.CurrentSerial
-	apex.RRtypes.Set(dns.TypeSOA, soaRRset)
-	return true
 }
 
 // BumpSerialOnly advances the SOA serial per the configured
@@ -941,65 +922,62 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 	// 3. Collect transport signals (if add-transport-signal enabled)
 	// Collect from zd.TransportSignal if it exists, and also from zone data at _dns.* owners
 	if zd.Options[OptAddTransportSignal] {
-		// Collect from zd.TransportSignal field
-		if zd.TransportSignal != nil && len(zd.TransportSignal.RRs) > 0 {
-			// Clone the transport signal RRset
+		if ts := zd.publishedTransportSignal(); ts != nil && len(ts.RRs) > 0 {
 			tsClone := &core.RRset{
-				Name:   zd.TransportSignal.Name,
+				Name:   ts.Name,
 				Class:  dns.ClassINET,
-				RRtype: zd.TransportSignal.RRtype,
-				RRs:    make([]dns.RR, len(zd.TransportSignal.RRs)),
-				RRSIGs: make([]dns.RR, len(zd.TransportSignal.RRSIGs)),
+				RRtype: ts.RRtype,
+				RRs:    make([]dns.RR, len(ts.RRs)),
+				RRSIGs: make([]dns.RR, len(ts.RRSIGs)),
 			}
-			for i, rr := range zd.TransportSignal.RRs {
+			for i, rr := range ts.RRs {
 				tsClone.RRs[i] = dns.Copy(rr)
 			}
-			for i, rr := range zd.TransportSignal.RRSIGs {
+			for i, rr := range ts.RRSIGs {
 				tsClone.RRSIGs[i] = dns.Copy(rr)
 			}
 			dynamicRRs = append(dynamicRRs, tsClone)
 		}
 
-		// Also collect transport signals from zone data at _dns.* owners
-		// (they may exist in zone data even if TransportSignal field is not set)
-		for item := range zd.Data.IterBuffered() {
-			owner := item.Key
-			if strings.HasPrefix(owner, "_dns.") {
-				od := item.Val
-				// Check for SVCB
-				if svcbRRset, exists := od.RRtypes.Get(dns.TypeSVCB); exists && len(svcbRRset.RRs) > 0 {
-					svcbClone := &core.RRset{
-						Name:   owner,
-						Class:  dns.ClassINET,
-						RRtype: dns.TypeSVCB,
-						RRs:    make([]dns.RR, len(svcbRRset.RRs)),
-						RRSIGs: make([]dns.RR, len(svcbRRset.RRSIGs)),
-					}
-					for i, rr := range svcbRRset.RRs {
-						svcbClone.RRs[i] = dns.Copy(rr)
-					}
-					for i, rr := range svcbRRset.RRSIGs {
-						svcbClone.RRSIGs[i] = dns.Copy(rr)
-					}
-					dynamicRRs = append(dynamicRRs, svcbClone)
+		snap := zd.publishedSnapshot()
+		if snap == nil {
+			return dynamicRRs
+		}
+		for owner, od := range snap.Data {
+			if od == nil || !strings.HasPrefix(owner, "_dns.") {
+				continue
+			}
+			if svcbRRset, exists := od.RRtypes.Get(dns.TypeSVCB); exists && len(svcbRRset.RRs) > 0 {
+				svcbClone := &core.RRset{
+					Name:   owner,
+					Class:  dns.ClassINET,
+					RRtype: dns.TypeSVCB,
+					RRs:    make([]dns.RR, len(svcbRRset.RRs)),
+					RRSIGs: make([]dns.RR, len(svcbRRset.RRSIGs)),
 				}
-				// Check for TSYNC
-				if tsyncRRset, exists := od.RRtypes.Get(core.TypeTSYNC); exists && len(tsyncRRset.RRs) > 0 {
-					tsyncClone := &core.RRset{
-						Name:   owner,
-						Class:  dns.ClassINET,
-						RRtype: core.TypeTSYNC,
-						RRs:    make([]dns.RR, len(tsyncRRset.RRs)),
-						RRSIGs: make([]dns.RR, len(tsyncRRset.RRSIGs)),
-					}
-					for i, rr := range tsyncRRset.RRs {
-						tsyncClone.RRs[i] = dns.Copy(rr)
-					}
-					for i, rr := range tsyncRRset.RRSIGs {
-						tsyncClone.RRSIGs[i] = dns.Copy(rr)
-					}
-					dynamicRRs = append(dynamicRRs, tsyncClone)
+				for i, rr := range svcbRRset.RRs {
+					svcbClone.RRs[i] = dns.Copy(rr)
 				}
+				for i, rr := range svcbRRset.RRSIGs {
+					svcbClone.RRSIGs[i] = dns.Copy(rr)
+				}
+				dynamicRRs = append(dynamicRRs, svcbClone)
+			}
+			if tsyncRRset, exists := od.RRtypes.Get(core.TypeTSYNC); exists && len(tsyncRRset.RRs) > 0 {
+				tsyncClone := &core.RRset{
+					Name:   owner,
+					Class:  dns.ClassINET,
+					RRtype: core.TypeTSYNC,
+					RRs:    make([]dns.RR, len(tsyncRRset.RRs)),
+					RRSIGs: make([]dns.RR, len(tsyncRRset.RRSIGs)),
+				}
+				for i, rr := range tsyncRRset.RRs {
+					tsyncClone.RRs[i] = dns.Copy(rr)
+				}
+				for i, rr := range tsyncRRset.RRSIGs {
+					tsyncClone.RRSIGs[i] = dns.Copy(rr)
+				}
+				dynamicRRs = append(dynamicRRs, tsyncClone)
 			}
 		}
 	}

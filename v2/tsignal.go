@@ -91,8 +91,8 @@ func (zd *ZoneData) commitTransportSignalLocked(nsOwner string, rrset core.RRset
 
 // SVCB path
 func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
-	apex, exists := zd.Data.Get(zd.ZoneName)
-	if !exists {
+	apex := zd.stagedOwner(zd.ZoneName)
+	if apex == nil {
 		return fmt.Errorf("zone apex not found")
 	}
 	nsRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeNS)
@@ -168,10 +168,13 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 					"ns", nsName)
 				continue
 			}
-			if nsData, exists := zd.Data.Get(nsName); exists {
-				// Prefer explicit SVCB at _dns.<nsName> if valid
+			nsData := zd.stagedOwner(nsName)
+			if nsData == nil {
+				continue
+			}
 				ownerName := "_dns." + nsName
-				if ownerData, ok := zd.Data.Get(ownerName); ok {
+				ownerData := zd.stagedOwner(ownerName)
+				if ownerData != nil {
 					existingSvcb := ownerData.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
 					if len(existingSvcb.RRs) > 0 {
 						valid := true
@@ -195,8 +198,8 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 									if svcb.Target != "." && svcb.Target != "" {
 										if bestZD, _ := FindZone(svcb.Target); bestZD != nil {
 											targetOwner := "_dns." + svcb.Target
-											if tOwnerData, ok := bestZD.Data.Get(targetOwner); ok {
-												targetRRset := tOwnerData.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
+								if tOwner, err := bestZD.GetOwner(targetOwner); err == nil && tOwner != nil {
+									targetRRset := tOwner.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
 												if len(targetRRset.RRs) > 0 {
 													zd.TransportSignal.RRs = append(zd.TransportSignal.RRs, targetRRset.RRs...)
 													if len(targetRRset.RRSIGs) > 0 {
@@ -333,14 +336,13 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 				}
 			}
 		}
-	}
 	return nil
 }
 
 // TSYNC path
 func (zd *ZoneData) createTransportSignalTSYNC(conf *Config) error {
-	apex, exists := zd.Data.Get(zd.ZoneName)
-	if !exists {
+	apex := zd.stagedOwner(zd.ZoneName)
+	if apex == nil {
 		return fmt.Errorf("zone apex not found")
 	}
 	nsRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeNS)
@@ -355,11 +357,14 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config) error {
 			if !dns.IsSubDomain(zd.ZoneName, nsName) {
 				continue
 			}
-			if nsData, exists := zd.Data.Get(nsName); exists {
-				// Prefer explicit TSYNC at _dns.<nsName>; handle indirect via alias if present
-				ownerName := "_dns." + nsName
-				if ownerData, ok := zd.Data.Get(ownerName); ok {
-					existingTS := ownerData.RRtypes.GetOnlyRRSet(core.TypeTSYNC)
+			nsData := zd.stagedOwner(nsName)
+			if nsData == nil {
+				continue
+			}
+			ownerName := "_dns." + nsName
+			ownerData := zd.stagedOwner(ownerName)
+			if ownerData != nil {
+				existingTS := ownerData.RRtypes.GetOnlyRRSet(core.TypeTSYNC)
 					if len(existingTS.RRs) > 0 {
 						// Base RRset is the explicit TSYNC
 						zd.TransportSignal = &core.RRset{Name: ownerName, RRtype: core.TypeTSYNC, RRs: append([]dns.RR(nil), existingTS.RRs...)}
@@ -381,8 +386,8 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config) error {
 								lgDns.Debug("createTransportSignalTSYNC: resolved TSYNC alias target",
 									"owner", ownerName,
 									"targetowner", targetOwner)
-								if tOwnerData, ok := bestZD.Data.Get(targetOwner); ok {
-									targetTS := tOwnerData.RRtypes.GetOnlyRRSet(core.TypeTSYNC)
+								if tOwner, err := bestZD.GetOwner(targetOwner); err == nil && tOwner != nil {
+									targetTS := tOwner.RRtypes.GetOnlyRRSet(core.TypeTSYNC)
 									lgDns.Debug("createTransportSignalTSYNC: found TSYNC RRs at target", "count", len(targetTS.RRs), "target", targetOwner)
 									if len(targetTS.RRs) > 0 {
 										zd.TransportSignal.RRs = append(zd.TransportSignal.RRs, targetTS.RRs...)
@@ -456,6 +461,5 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config) error {
 				return nil
 			}
 		}
-	}
 	return nil
 }

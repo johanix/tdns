@@ -367,7 +367,8 @@ func (zd *ZoneData) addNSAndGlue(m *dns.Msg, apex *OwnerData, msgoptions *edns0.
 // addTransportSignal adds transport signal RRs to the Extra section if not already present in Answer.
 // Returns true if any transport signal was added.
 func (zd *ZoneData) addTransportSignal(m *dns.Msg, msgoptions *edns0.MsgOptions, transportSignalInAnswer bool) bool {
-	if !zd.AddTransportSignal || msgoptions.OtsOptOut || zd.TransportSignal == nil || len(zd.TransportSignal.RRs) == 0 {
+	ts := zd.publishedTransportSignal()
+	if !zd.AddTransportSignal || msgoptions.OtsOptOut || ts == nil || len(ts.RRs) == 0 {
 		return false
 	}
 	if transportSignalInAnswer {
@@ -380,7 +381,7 @@ func (zd *ZoneData) addTransportSignal(m *dns.Msg, msgoptions *edns0.MsgOptions,
 		present[h.Name+"|"+dns.TypeToString[h.Rrtype]] = true
 	}
 	addedAny := false
-	for _, trr := range zd.TransportSignal.RRs {
+	for _, trr := range ts.RRs {
 		h := trr.Header()
 		key := h.Name + "|" + dns.TypeToString[h.Rrtype]
 		if !present[key] {
@@ -389,8 +390,8 @@ func (zd *ZoneData) addTransportSignal(m *dns.Msg, msgoptions *edns0.MsgOptions,
 		}
 	}
 	// If we added any TSYNC/SVCB above, consider adding their signatures too
-	if addedAny && msgoptions.DO && len(zd.TransportSignal.RRSIGs) > 0 {
-		m.Extra = append(m.Extra, zd.TransportSignal.RRSIGs...)
+	if addedAny && msgoptions.DO && len(ts.RRSIGs) > 0 {
+		m.Extra = append(m.Extra, ts.RRSIGs...)
 	}
 	return addedAny
 }
@@ -550,18 +551,19 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname str
 	zd.addNSAndGlue(m, apex, msgoptions, minimalResponses)
 
 	// Check for transport signal
-	if zd.AddTransportSignal && zd.TransportSignal != nil {
+	ts := zd.publishedTransportSignal()
+	if zd.AddTransportSignal && ts != nil {
 		for _, arr := range m.Answer {
-			if rrMatchesTransportSignal(arr, zd.TransportSignal) {
+			if rrMatchesTransportSignal(arr, ts) {
 				*transportSignalInAnswer = true
 				break
 			}
 		}
 	}
 	zd.addTransportSignal(m, msgoptions, *transportSignalInAnswer)
-	if msgoptions.DO && zd.AddTransportSignal && !msgoptions.OtsOptOut && zd.TransportSignal != nil {
-		if !*transportSignalInAnswer && len(zd.TransportSignal.RRSIGs) > 0 {
-			m.Extra = append(m.Extra, zd.TransportSignal.RRSIGs...)
+	if msgoptions.DO && zd.AddTransportSignal && !msgoptions.OtsOptOut && ts != nil {
+		if !*transportSignalInAnswer && len(ts.RRSIGs) > 0 {
+			m.Extra = append(m.Extra, ts.RRSIGs...)
 		}
 	}
 
@@ -626,6 +628,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 		w.WriteMsg(m)
 		return fmt.Errorf("failed to get apex data for zone %s: %v", zd.ZoneName, err)
 	}
+	transportSig := zd.publishedTransportSignal()
 
 	// Inline-signed apex RRsets are served from the published zone; online/compact
 	// signatures are added ephemerally on each response path below.
@@ -736,14 +739,14 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 			if qname == origqname {
 				// zd.Logger.Printf("Exact match qname %s %s", qname, dns.TypeToString[qtype])
 				m.Answer = append(m.Answer, rrset.RRs...)
-				if zd.AddTransportSignal && zd.TransportSignal != nil && qtype == zd.TransportSignal.RRtype && (qname == zd.TransportSignal.Name || origqname == zd.TransportSignal.Name) {
+				if zd.AddTransportSignal && transportSig != nil && qtype == transportSig.RRtype && (qname == transportSig.Name || origqname == transportSig.Name) {
 					transportSignalInAnswer = true
 				}
 			} else {
 				// zd.Logger.Printf("Wildcard match qname %s %s", qname, origqname)
 				tmp := WildcardReplace(rrset.RRs, qname, origqname)
 				m.Answer = append(m.Answer, tmp...)
-				if zd.AddTransportSignal && zd.TransportSignal != nil && qtype == zd.TransportSignal.RRtype && (qname == zd.TransportSignal.Name || origqname == zd.TransportSignal.Name) {
+				if zd.AddTransportSignal && transportSig != nil && qtype == transportSig.RRtype && (qname == transportSig.Name || origqname == transportSig.Name) {
 					transportSignalInAnswer = true
 				}
 			}

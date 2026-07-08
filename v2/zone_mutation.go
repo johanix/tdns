@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -157,6 +158,18 @@ func (zd *ZoneData) getOrCreateWorkingOwner(name string) *OwnerData {
 	return zd.cloneOwner(name)
 }
 
+func (zd *ZoneData) workingOwnerNamesLocked() []string {
+	if zd.workingSet == nil {
+		return nil
+	}
+	names := make([]string, 0, len(zd.workingSet))
+	for name := range zd.workingSet {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func (zd *ZoneData) requestPublish(urgent bool) {
 	if urgent {
 		_, _ = zd.publishSync()
@@ -169,7 +182,7 @@ func (zd *ZoneData) requestPublish(urgent bool) {
 	zd.wakePublisher()
 }
 
-// publishSync runs publish immediately under zd.mu (serial bump + dual-write).
+// publishSync runs publish immediately under zd.mu (serial bump + snapshot swap).
 func (zd *ZoneData) resignWorkingSetSOAIfSigned() {
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return
@@ -263,7 +276,6 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	data := zd.workingSet
 	snap := zd.buildSnapshotLocked(serial, data, transport)
 	zd.snapshot.Store(snap)
-	zd.syncLegacyFromSnapshot(snap)
 
 	zd.workingSet = nil
 	zd.wsTransportSignal = nil
@@ -326,24 +338,6 @@ func (zd *ZoneData) buildSnapshotLocked(serial uint32, data map[string]*OwnerDat
 	}
 }
 
-func (zd *ZoneData) syncLegacyFromSnapshot(snap *ZoneSnapshot) {
-	if snap == nil {
-		return
-	}
-	if zd.Data == nil {
-		zd.Data = core.NewCmap[OwnerData]()
-	} else {
-		zd.Data.Clear()
-	}
-	for name, od := range snap.Data {
-		if od != nil {
-			zd.Data.Set(name, *od)
-		}
-	}
-	zd.TransportSignal = cloneTransportSignal(snap.TransportSignal)
-	zd.IxfrChain = copyIxfrChain(snap.IxfrChain)
-}
-
 func (zd *ZoneData) setWorkingSetSOASerial(serial uint32) {
 	if zd.workingSet == nil {
 		return
@@ -379,7 +373,6 @@ func (zd *ZoneData) InstallInitialSnapshot() {
 	data := snapshotMapFromData(zd.Data)
 	snap := zd.buildSnapshotLocked(zd.CurrentSerial, data, zd.TransportSignal)
 	zd.snapshot.Store(snap)
-	zd.syncLegacyFromSnapshot(snap)
 	zd.Ready = true
 	zd.Status = ZoneStatusReady
 }
@@ -444,48 +437,6 @@ func (zd *ZoneData) snapshotGeneration() uint32 {
 	}
 	return snap.Serial
 }
-
-// legacyMatchesSnapshot reports dual-write consistency for tests.
-func (zd *ZoneData) legacyMatchesSnapshot() bool {
-	snap := zd.snapshot.Load()
-	if snap == nil {
-		return zd.Data == nil || zd.Data.IsEmpty()
-	}
-	if zd.Data == nil {
-		return len(snap.Data) == 0
-	}
-	if zd.Data.Count() != len(snap.Data) {
-		return false
-	}
-	for name, snapOd := range snap.Data {
-		legOd, ok := zd.Data.Get(name)
-		if !ok || snapOd == nil {
-			return false
-		}
-		if legOd.RRtypes != snapOd.RRtypes {
-			return false
-		}
-	}
-	if !transportSignalEqual(zd.TransportSignal, snap.TransportSignal) {
-		return false
-	}
-	if len(zd.IxfrChain) != len(snap.IxfrChain) {
-		return false
-	}
-	return zd.CurrentSerial == snap.Serial
-}
-
-func transportSignalEqual(a, b *core.RRset) bool {
-	if a == nil && b == nil {
-		return true
-	}
-	if a == nil || b == nil {
-		return false
-	}
-	return rrsetEqual(*a, *b)
-}
-
-// test-only hooks (none currently)
 
 func (zd *ZoneData) testPublishNow() {
 	zd.publishNow(zd.generation.Load())

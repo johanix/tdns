@@ -218,8 +218,35 @@ func publishCadenceForZone(zd *ZoneData) time.Duration {
 	return zd.publishCadence
 }
 
-// soaForResponse returns a response-only SOA RRset stamped with the served serial.
+func (zd *ZoneData) publishedSnapshot() *ZoneSnapshot {
+	if zd == nil {
+		return nil
+	}
+	return zd.snapshot.Load()
+}
+
+func (zd *ZoneData) publishedTransportSignal() *core.RRset {
+	snap := zd.publishedSnapshot()
+	if snap == nil {
+		return nil
+	}
+	return snap.TransportSignal
+}
+
+// soaForResponse returns a response-only SOA RRset from the published snapshot.
 func (zd *ZoneData) soaForResponse(apex *OwnerData) core.RRset {
+	if snap := zd.publishedSnapshot(); snap != nil && snap.SOA != nil {
+		rs := core.RRset{
+			Name:   snap.SOA.Hdr.Name,
+			Class:  snap.SOA.Hdr.Class,
+			RRtype: dns.TypeSOA,
+			RRs:    []dns.RR{dns.Copy(snap.SOA)},
+		}
+		if apex != nil {
+			rs.RRSIGs = cloneRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)).RRSIGs
+		}
+		return rs
+	}
 	rs := cloneRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA))
 	if len(rs.RRs) > 0 {
 		if soa, ok := rs.RRs[0].(*dns.SOA); ok {

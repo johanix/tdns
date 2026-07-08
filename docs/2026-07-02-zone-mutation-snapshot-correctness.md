@@ -1,7 +1,7 @@
 # Project B — Zone-Mutation Correctness via an Immutable Snapshot
 
-**Status:** **in progress** — B1 **done** (`98e50fa`); B2 **feature-complete, sign-off pending** on branch
-`feature/zone-snapshot-correctness`; B3 not started.
+**Status:** **B3 enforcement pending** — B1 **done** (`98e50fa`); B2 **done** (`c76dfc4`);
+B3 reader cut-over **done** (uncommitted); unexported published type **remaining**.
 **Date:** 2026-07-02 (plan); **implementation log:** 2026-07-08
 **Scope:** replace direct-write-then-bump-serial mutation with an **immutable
 snapshot published atomically**, in **tdns core (`v2/` + `cmdv2/`) only**. A
@@ -38,12 +38,12 @@ Branch: `feature/zone-snapshot-correctness` (off `main`).
 | Deliverable | Status |
 |---|---|
 | `ZoneSnapshot`, `atomic.Pointer`, `PendingChanges` | `v2/zone_snapshot.go` |
-| Staging API, coalescing publisher, dual-write `syncLegacyFromSnapshot` | `v2/zone_mutation.go` |
+| Staging API, coalescing publisher | `v2/zone_mutation.go` (dual-write removed in B3) |
 | `publish-cadence` on `ZoneConf` / `TemplateConf` | `v2/structs.go`, `v2/parseconfig.go` |
 | `InstallInitialSnapshot()` after first load / `SetupZoneSigning` | `v2/refreshengine.go`, `v2/zone_utils.go` |
 | B1 tests (`TestSnapshotImmutability`, dual-write, coalescing, generation guard) | `v2/zone_snapshot_test.go` — pass `-race` |
 
-### B2 — in progress (commits `6f0b3a3` … pending)
+### B2 — done (`c76dfc4`)
 
 | Mutator / deliverable | Status | Notes |
 |---|---|---|
@@ -59,18 +59,28 @@ Branch: `feature/zone-snapshot-correctness` (off `main`).
 | Post-refresh serial override (`outbound_soa_serial`) | **done** | republish instead of `setApexSOASerial` on served data |
 | `PublishCsyncRR` | **unchanged** | already routes via internal `ZONE-UPDATE` → staged RFC2136 |
 | `dnsutils.SortFunc` (zone file load into `new_zd`) | **intentionally unchanged** | draft build target; consumed by refresh publish |
-| `setApexSOASerial` / `AddOwner` | **dead / unused** | remove in B3 cleanup |
 | `tdns-cli debug zone-txlog` + `/debug` handler | **done** | `pendingChanges()` → `zone-txlog` command + JSON view |
-| `TestConcurrentServeAndUpdate` (B2 variant) | **done** | readers via `GetOwner`; dual-write checked under `zd.mu` after publish |
+| `TestConcurrentServeAndUpdate` (B2 variant) | **done** | superseded by B3 variant in same commit |
 | `pendingChanges` test | **done** | `TestPendingChanges` |
 
-**B2 gate:** all B1 tests + `TestPendingChanges` + `TestConcurrentServeAndUpdate` pass `-race`.
+**B2 gate:** all B1 tests + `TestPendingChanges` + `TestConcurrentServeAndUpdate` (B2 variant) pass `-race`.
 
-**Remaining before B2 sign-off:** dead-code cleanup (`setApexSOASerial`, `AddOwner`); optional smoke of `debug zone-txlog` against a live auth.
+### B3 — reader cut-over done; enforcement remaining
 
-### B3 — not started
+| Deliverable | Status | Notes |
+|---|---|---|
+| Readers via `publishedSnapshot()` | **done** | `GetOwner`, `GetOwnerNames`, `NameExists`, `GetSOA`, `soaForResponse` |
+| Query transport signal | **done** | `queryresponder.go` → `publishedTransportSignal()` |
+| `ZoneTransferOut` / `WriteZoneToFile` | **done** | `GetOwnerNames`/`GetOwner`; no transfer-time SOA serial override |
+| Mutators use working set | **done** | `stagedOwner`, `workingOwnerNamesLocked` in sign/tsignal/ops_dnskey |
+| Drop dual-write | **done** | `syncLegacyFromSnapshot` removed; publish stores snapshot only |
+| Dead code cleanup | **done** | `setApexSOASerial`, `AddOwner` removed |
+| `check-no-mutators` grep gate | **done** | `utils/Makefile.common`; wired into `lint` |
+| B3 tests | **done** | `TestPublishedSnapshotAfterPublish`; B3 `TestConcurrentServeAndUpdate` — pass `-race` |
+| Unexported published type | **remaining** | `ZoneSnapshot` still exported; rename → `zoneSnapshot` |
+| `PrintOwners` | **remaining** | still walks draft `zd.Data`; should use `GetOwnerNames` |
 
-Reader cut-over (`GetOwner` → snapshot), drop dual-write, grep gate, unexported published type.
+**B3 gate (partial):** B1 + B2 + B3 snapshot tests pass `-race`. Full sign-off blocked on unexported type.
 
 ---
 

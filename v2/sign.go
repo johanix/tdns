@@ -614,21 +614,14 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 		return 0, err
 	}
 
-	names, err := zd.GetOwnerNames()
-	if err != nil {
-		return 0, err
-	}
-	sort.Strings(names)
+	names := zd.workingOwnerNamesLocked()
 
 	var delegations []string
 	for _, name := range names {
 		if name == zd.ZoneName {
 			continue
 		}
-		owner, err := zd.GetOwner(name)
-		if err != nil {
-			return 0, err
-		}
+		owner := zd.stagedOwner(name)
 		if owner == nil {
 			continue
 		}
@@ -639,10 +632,7 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 
 	newrrsigs := 0
 	for _, name := range names {
-		owner, err := zd.GetOwner(name)
-		if err != nil {
-			return 0, err
-		}
+		owner := zd.stagedOwner(name)
 		if owner == nil {
 			continue
 		}
@@ -803,12 +793,6 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 		return rrset, resigned
 	}
 
-	names, err := zd.GetOwnerNames()
-	if err != nil {
-		return 0, err
-	}
-	sort.Strings(names)
-
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
 	zd.ensureWorkingSet()
@@ -823,20 +807,14 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 		return 0, err
 	}
 
-	// apex, err := zd.GetOwner(zd.ZoneName)
-	// if err != nil {
-	// 	return err
-	// }
+	names := zd.workingOwnerNamesLocked()
 
 	var delegations []string
 	for _, name := range names {
 		if name == zd.ZoneName {
 			continue
 		}
-		owner, err := zd.GetOwner(name)
-		if err != nil {
-			return 0, err
-		}
+		owner := zd.stagedOwner(name)
 		if owner == nil {
 			continue
 		}
@@ -850,10 +828,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 	var maxObservedTTL uint32
 	for _, name := range names {
 		// log.Printf("SignZone: signing RRsets under name %s", name)
-		owner, err := zd.GetOwner(name)
-		if err != nil {
-			return 0, err
-		}
+		owner := zd.stagedOwner(name)
 		if owner == nil {
 			continue
 		}
@@ -946,11 +921,7 @@ func (zd *ZoneData) GenerateNsecChainWithDak(dak *DnssecKeys) error {
 	//		return rrset
 	//	}
 
-	names, err := zd.GetOwnerNames()
-	if err != nil {
-		return err
-	}
-	sort.Strings(names)
+	names := zd.workingOwnerNamesLocked()
 
 	var nextidx int
 	var nextname string
@@ -958,10 +929,7 @@ func (zd *ZoneData) GenerateNsecChainWithDak(dak *DnssecKeys) error {
 	var hasRRSIG bool
 
 	for idx, name := range names {
-		owner, err := zd.GetOwner(name)
-		if err != nil {
-			return err
-		}
+		owner := zd.stagedOwner(name)
 		if owner == nil {
 			continue
 		}
