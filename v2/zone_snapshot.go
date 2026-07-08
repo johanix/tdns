@@ -248,7 +248,13 @@ func (zd *ZoneData) publishedTransportSignal() *core.RRset {
 
 // soaForResponse returns a response-only SOA RRset from the published snapshot.
 func (zd *ZoneData) soaForResponse(apex *OwnerData) core.RRset {
-	if snap := zd.publishedSnapshot(); snap != nil && snap.SOA != nil {
+	return zd.soaForResponseFrom(zd.publishedSnapshot(), apex)
+}
+
+// soaForResponseFrom builds the response SOA from an ALREADY-PINNED snapshot so
+// the SOA serial matches the rest of the response (no intra-response tearing).
+func (zd *ZoneData) soaForResponseFrom(snap *zoneSnapshot, apex *OwnerData) core.RRset {
+	if snap != nil && snap.SOA != nil {
 		rs := core.RRset{
 			Name:   snap.SOA.Hdr.Name,
 			Class:  snap.SOA.Hdr.Class,

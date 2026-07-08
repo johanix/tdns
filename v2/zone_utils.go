@@ -390,17 +390,44 @@ func (zd *ZoneData) SetOption(option ZoneOption, value bool) {
 	zd.mu.Unlock()
 }
 
+// getOwnerFrom reads an owner from an ALREADY-PINNED snapshot. Response paths
+// (QueryResponder, ZoneTransferOut) pin one snapshot at the top and read
+// everything through the *From helpers, so every read in one response comes from
+// the same serial — no intra-response tearing. snap==nil yields nil (the caller
+// SERVFAILs / refuses).
+func getOwnerFrom(snap *zoneSnapshot, qname string) *OwnerData {
+	if snap == nil {
+		return nil
+	}
+	return snap.Data[qname]
+}
+
+// getRRsetFrom reads one RRset from a pinned snapshot.
+func getRRsetFrom(snap *zoneSnapshot, qname string, rrtype uint16) *core.RRset {
+	owner := getOwnerFrom(snap, qname)
+	if owner == nil {
+		return nil
+	}
+	if rrset, ok := owner.RRtypes.Get(rrtype); ok {
+		return &rrset
+	}
+	return nil
+}
+
+// nameExistsFrom reports whether qname exists in a pinned snapshot.
+func nameExistsFrom(snap *zoneSnapshot, qname string) bool {
+	if snap == nil {
+		return false
+	}
+	_, ok := snap.Data[qname]
+	return ok
+}
+
 func (zd *ZoneData) NameExists(qname string) bool {
 	if zd.ZoneStore != MapZone {
 		return false
 	}
-	snap := zd.publishedSnapshot()
-	if snap == nil || len(snap.Data) == 0 {
-		return false
-	}
-	_, ok := snap.Data[qname]
-	lg.Debug("NameExists result", "qname", qname, "exists", ok)
-	return ok
+	return nameExistsFrom(zd.publishedSnapshot(), qname)
 }
 
 func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
@@ -411,11 +438,7 @@ func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 		return nil, fmt.Errorf("getOwner: only supported for MapZone, not %s",
 			ZoneStoreToString[zd.ZoneStore])
 	}
-	snap := zd.publishedSnapshot()
-	if snap == nil || len(snap.Data) == 0 {
-		return nil, nil
-	}
-	return snap.Data[qname], nil
+	return getOwnerFrom(zd.publishedSnapshot(), qname), nil
 }
 
 func (zd *ZoneData) GetRRset(qname string, rrtype uint16) (*core.RRset, error) {

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
+	edns0 "github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
 )
 
@@ -362,6 +363,84 @@ www.example. 3600 IN A 192.0.2.1
 
 	cancel()
 	wg.Wait()
+}
+
+// TestQueryResponderNoIntraResponseTearing (m3) drives the real QueryResponder
+// under concurrent publishes and asserts that a single response is internally
+// consistent: the publisher keeps www.example. A and the apex-NS glue
+// (ns.example. A) in lockstep, so within any one published snapshot they carry
+// the same octet. A response therefore has matching answer/glue octets only if
+// the whole response is served from ONE pinned snapshot (C1). Before C1 the
+// answer and the glue were independent snapshot loads and could straddle two
+// publishes.
+func TestQueryResponderNoIntraResponseTearing(t *testing.T) {
+	zd := testSnapshotZone(t, "example.", `example. 3600 IN SOA ns.example. hostmaster.example. 1 7200 1800 604800 7200
+example. 3600 IN NS ns.example.
+ns.example. 3600 IN A 10.0.0.1
+www.example. 3600 IN A 10.0.0.1
+`)
+	zd.publishCadence = 10 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for v := 2; ctx.Err() == nil; v++ {
+			ip := fmt.Sprintf("10.0.0.%d", v%250+1)
+			zd.mu.Lock()
+			zd.ensureWorkingSet()
+			zd.stageRRset("www.example.", coreRRset("www.example.", dns.TypeA, ip))
+			zd.stageRRset("ns.example.", coreRRset("ns.example.", dns.TypeA, ip))
+			zd.mu.Unlock()
+			zd.requestPublish(true)
+			time.Sleep(time.Millisecond)
+		}
+	}()
+
+	msgo := &edns0.MsgOptions{}
+	checks := 0
+	for i := 0; i < 5000 && ctx.Err() == nil; i++ {
+		req := new(dns.Msg)
+		req.SetQuestion("www.example.", dns.TypeA)
+		rw := &fakeRW{}
+		if err := zd.QueryResponder(ctx, rw, req, "www.example.", dns.TypeA, msgo, nil, nil); err != nil {
+			continue
+		}
+		resp := rw.written
+		if resp == nil {
+			continue
+		}
+		ans := lastOctetOf(resp.Answer, "www.example.")
+		glue := lastOctetOf(resp.Extra, "ns.example.")
+		if ans < 0 || glue < 0 {
+			continue
+		}
+		checks++
+		if ans != glue {
+			t.Fatalf("intra-response tearing: answer www A .%d != authority glue ns A .%d", ans, glue)
+		}
+	}
+	cancel()
+	wg.Wait()
+	if checks == 0 {
+		t.Fatal("test exercised no comparable responses (answer+glue never both present)")
+	}
+}
+
+func lastOctetOf(rrs []dns.RR, name string) int {
+	for _, rr := range rrs {
+		a, ok := rr.(*dns.A)
+		if !ok || a.Hdr.Name != name {
+			continue
+		}
+		if ip := a.A.To4(); ip != nil {
+			return int(ip[3])
+		}
+	}
+	return -1
 }
 
 func coreRRset(name string, rrtype uint16, ip string) core.RRset {

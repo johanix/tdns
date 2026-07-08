@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -258,11 +259,14 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 		return zd.refuseTransfer(w, r)
 	}
 
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil {
-		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, apex lookup failed: %v", zone, err)
+	// Pin ONE snapshot for the whole transfer so every owner comes from the
+	// same serial — no torn AXFR (M1).
+	snap := zd.publishedSnapshot()
+	if snap == nil {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, no published snapshot", zone)
 		return zd.refuseTransfer(w, r)
 	}
+	apex := getOwnerFrom(snap, zd.ZoneName)
 	if apex == nil {
 		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, missing apex", zone)
 		return zd.refuseTransfer(w, r)
@@ -342,17 +346,17 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 		}
 	}
 
-	owners, err := zd.GetOwnerNames()
-	if err != nil {
-		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, owner list failed: %v", zone, err)
-		return zd.refuseTransfer(w, r)
+	names := make([]string, 0, len(snap.Data))
+	for name := range snap.Data {
+		names = append(names, name)
 	}
-	for _, owner := range owners {
+	sort.Strings(names)
+	for _, owner := range names {
 		if owner == zd.ZoneName {
 			continue
 		}
-		omap, err := zd.GetOwner(owner)
-		if err != nil || omap == nil {
+		omap := getOwnerFrom(snap, owner)
+		if omap == nil {
 			continue
 		}
 		for _, rrt := range omap.RRtypes.Keys() {
@@ -629,10 +633,11 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 
 	writer := bufio.NewWriter(f)
 
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil {
-		lgDns.Error("WriteZoneToFile: failed to get zone apex", "zone", zd.ZoneName, "err", err)
-		return err
+	snap := zd.publishedSnapshot()
+	apex := getOwnerFrom(snap, zd.ZoneName)
+	if apex == nil {
+		lgDns.Error("WriteZoneToFile: failed to get zone apex", "zone", zd.ZoneName)
+		return fmt.Errorf("WriteZoneToFile: %s: no apex in published snapshot", zd.ZoneName)
 	}
 	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
 
@@ -654,17 +659,17 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	}
 
 	// Rest of zone
-	owners, err := zd.GetOwnerNames()
-	if err != nil {
-		lgDns.Error("WriteZoneToFile: failed to list owners", "zone", zd.ZoneName, "err", err)
-		return err
+	names := make([]string, 0, len(snap.Data))
+	for name := range snap.Data {
+		names = append(names, name)
 	}
-	for _, owner := range owners {
+	sort.Strings(names)
+	for _, owner := range names {
 		if owner == zd.ZoneName {
 			continue
 		}
-		omap, err := zd.GetOwner(owner)
-		if err != nil || omap == nil {
+		omap := getOwnerFrom(snap, owner)
+		if omap == nil {
 			continue
 		}
 		for _, rrt := range omap.RRtypes.Keys() {
