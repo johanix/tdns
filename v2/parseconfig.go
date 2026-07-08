@@ -741,6 +741,14 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			continue
 		}
 
+		publishCadence, err := parsePublishCadence(zconf.PublishCadence)
+		if err != nil {
+			lgConfig.Error("zone publish-cadence invalid, zone in error state", "zone", zname, "err", err)
+			zd.SetError(ConfigError, "publish-cadence: %v", err)
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+
 		lgConfig.Debug("checking DNSSEC policy", "zone", zname)
 		// dump.P(zconf)
 
@@ -896,6 +904,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 
 		zdp.mu.Lock()
 		zdp.Options = newOpts
+		zdp.publishCadence = publishCadence
 		zdp.mu.Unlock()
 
 		invokeOptionHandlers(zname, options)

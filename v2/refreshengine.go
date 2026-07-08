@@ -287,6 +287,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							}
 							continue
 						}
+						zd.InstallInitialSnapshot()
 					} else {
 						// EXISTING ZONE: already loaded, normal refresh path.
 						if zd.HasServiceImpactingError() {
@@ -625,6 +626,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							lgEngine.Error("SetupZoneSigning failed", "zone", zone, "error", err)
 						}
 					}
+					zd.InstallInitialSnapshot()
 				}
 			}
 			if zr.Response != nil && !zr.Wait {

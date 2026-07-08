@@ -220,9 +220,6 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 		return false, nil // new zone not loaded, but not returning any error
 	}
 
-	zd.mu.Lock()
-	zd.Ready = true // this is a lie
-	zd.mu.Unlock()
 	new_zd.Ready = true
 
 	// Pre-refresh callbacks: analysis of old vs new zone data + modification of new_zd.
@@ -234,6 +231,7 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 
 	// Hard flip: update served zone data atomically.
 	zd.mu.Lock()
+	firstLoad := zd.FirstZoneLoad
 	zd.IncomingSerial = new_zd.IncomingSerial
 	if zd.FirstZoneLoad {
 		zd.CurrentSerial = new_zd.CurrentSerial
@@ -253,8 +251,10 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	zd.ZoneStore = new_zd.ZoneStore
 	zd.ZoneType = new_zd.ZoneType
 	zd.Data = new_zd.Data
-	zd.Ready = true
-	zd.Status = ZoneStatusReady // co-located with Ready; set directly (already under zd.mu)
+	if !firstLoad {
+		zd.Ready = true
+		zd.Status = ZoneStatusReady // co-located with Ready; set directly (already under zd.mu)
+	}
 	zd.mu.Unlock()
 
 	// Repopulate all dynamically generated RRs after zone refresh
@@ -336,6 +336,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 
 	// Hard flip: update served zone data atomically.
 	zd.mu.Lock()
+	firstLoad := zd.FirstZoneLoad
 	zd.IncomingSerial = new_zd.IncomingSerial
 	if zd.FirstZoneLoad {
 		zd.CurrentSerial = new_zd.CurrentSerial
@@ -355,8 +356,10 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 	zd.ZoneStore = new_zd.ZoneStore
 	zd.ZoneType = new_zd.ZoneType
 	zd.Data = new_zd.Data
-	zd.Ready = true
-	zd.Status = ZoneStatusReady // co-located with Ready; set directly (already under zd.mu)
+	if !firstLoad {
+		zd.Ready = true
+		zd.Status = ZoneStatusReady // co-located with Ready; set directly (already under zd.mu)
+	}
 	zd.mu.Unlock()
 
 	// Repopulate all dynamically generated RRs after zone refresh
@@ -1409,7 +1412,7 @@ $TTL 86400
 		return nil, fmt.Errorf("failed to read zone data: %v", err)
 	}
 
-	zd.Ready = true
+	zd.InstallInitialSnapshot()
 	Zones.Set(zonename, zd)
 
 	return zd, nil
