@@ -24,7 +24,7 @@ type PingResponse struct {
 	BootTime   time.Time
 	Version    string
 	ServerHost string // "master.dnslab"
-	Daemon     string // "tdnsd"
+	Daemon     string // "tdns-auth"
 	Msg        string
 	Pings      int
 	Pongs      int
