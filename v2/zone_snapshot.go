@@ -165,6 +165,18 @@ func cloneTransportSignal(ts *core.RRset) *core.RRset {
 	return &cloned
 }
 
+// snapshotMapFromData builds the snapshot's owner map from a source store.
+//
+// IMMUTABILITY INVARIANT (copy-strategy-A, per the snapshot-correctness design):
+// each entry is a FRESH *OwnerData, but its RRtypes (*RRTypeStore) pointer is
+// SHARED with the source by design — deliberately, so large PQ signature bytes
+// are not re-copied on every publish. The immutability guarantee therefore rests
+// on the source store being FROZEN once snapshotted: callers must never mutate
+// `data` (zd.Data, or a discarded new_zd.Data) in place afterwards. Post-B3 all
+// writers stage into a fresh workingSet and publish; the CI grep gate forbids
+// direct RRtypes.Set/Data.Set on the live path. A future direct writer to a
+// snapshotted store would silently reintroduce the serial-tearing bug — keep
+// this invariant loud.
 func snapshotMapFromData(data *core.ConcurrentMap[string, OwnerData]) map[string]*OwnerData {
 	if data == nil || data.IsEmpty() {
 		return map[string]*OwnerData{}
@@ -247,6 +259,12 @@ func (zd *ZoneData) soaForResponse(apex *OwnerData) core.RRset {
 			rs.RRSIGs = cloneRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)).RRSIGs
 		}
 		return rs
+	}
+	// Fallback (no published snapshot yet): guard a nil apex so a query racing
+	// zone initialization cannot panic here. Hot-path callers also SERVFAIL
+	// when publishedSnapshot()==nil (see QueryResponder).
+	if apex == nil {
+		return core.RRset{}
 	}
 	rs := cloneRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA))
 	if len(rs.RRs) > 0 {

@@ -41,6 +41,9 @@ func newMapZone(name string, ztype ZoneType, owners map[string][]dns.RR) *ZoneDa
 		}
 		zd.Data.Set(oname, od)
 	}
+	// Publish the initial snapshot so post-cutover readers (GetOwner, etc.) see
+	// the data, mirroring what the refresh engine does for real zones.
+	zd.InstallInitialSnapshot()
 	return zd
 }
 

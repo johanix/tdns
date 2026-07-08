@@ -319,7 +319,11 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	zd.repopulateWorkingSetLocked(dynamicRRs)
 	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 
-	if !firstLoad {
+	// Only advertise the zone as Ready once a snapshot actually exists. If the
+	// publish was dropped (zone no longer live / generation guard), leaving
+	// Ready=true with snapshot==nil would let a query dereference a nil apex
+	// (M2). Gate Ready on a real published snapshot.
+	if !firstLoad && zd.snapshot.Load() != nil {
 		zd.Ready = true
 		zd.Status = ZoneStatusReady
 	}

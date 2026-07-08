@@ -53,7 +53,13 @@ func RegisterCatalogZoneCallback(callback CatalogZoneCallback) {
 
 // ParseCatalogZone parses a catalog zone and extracts member zones and groups
 func ParseCatalogZone(zd *ZoneData) (*CatalogZoneUpdate, error) {
-	if zd == nil || zd.Data.IsEmpty() {
+	if zd == nil {
+		return nil, fmt.Errorf("catalog zone data is empty")
+	}
+	// B3: read membership from the published snapshot, not the live zd.Data
+	// (which is no longer written after the dual-write was dropped).
+	snap := zd.publishedSnapshot()
+	if snap == nil || len(snap.Data) == 0 {
 		return nil, fmt.Errorf("catalog zone data is empty")
 	}
 
@@ -77,10 +83,8 @@ func ParseCatalogZone(zd *ZoneData) (*CatalogZoneUpdate, error) {
 
 	zoneSuffix := fmt.Sprintf(".zones.%s", catalogZoneName)
 
-	// Iterate through all owners in the zone
-	for owner := range zd.Data.IterBuffered() {
-		ownerName := owner.Key
-		ownerData := owner.Val
+	// Iterate through all owners in the zone (from the published snapshot).
+	for ownerName, ownerData := range snap.Data {
 
 		// Process *.zones.{catalog-zone}. records (PTR records with zone names)
 		if strings.HasSuffix(ownerName, zoneSuffix) && !strings.HasPrefix(ownerName, "group.") {

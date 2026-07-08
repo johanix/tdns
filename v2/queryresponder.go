@@ -937,19 +937,3 @@ func rrMatchesTransportSignal(rr dns.RR, ts *core.RRset) bool {
 	h := rr.Header()
 	return h.Rrtype == ts.RRtype && h.Name == ts.Name
 }
-
-// findServerTSYNCRRset returns a TSYNC RRset from any owner under this zone that starts with _dns.
-func (zd *ZoneData) XXfindServerTSYNCRRset() *core.RRset {
-	// Look for any TSYNC RRset at owners beginning with _dns.
-	for item := range zd.Data.IterBuffered() {
-		owner := item.Key
-		od := item.Val
-		if strings.HasPrefix(owner, "_dns.") {
-			rrset := od.RRtypes.GetOnlyRRSet(core.TypeTSYNC)
-			if len(rrset.RRs) > 0 {
-				return &rrset
-			}
-		}
-	}
-	return nil
-}
