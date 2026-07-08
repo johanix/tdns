@@ -13,16 +13,15 @@ require (
 	github.com/gookit/goutil v0.6.15
 	github.com/gorilla/mux v1.8.1
 	github.com/johanix/dnssec-algorithms v0.0.0-20260513135759-676b5158decd
-	github.com/johanix/tdns/v2/cache v0.0.0-20251209183459-2d9962c12f9f
-	github.com/johanix/tdns/v2/core v0.0.0-20251215204415-08e1f7d4ef39
+	github.com/johanix/tdns/v2/cache v0.0.0-00010101000000-000000000000
+	github.com/johanix/tdns/v2/core v0.0.0-00010101000000-000000000000
 	github.com/johanix/tdns/v2/edns0 v0.0.0-00010101000000-000000000000
 	github.com/mattn/go-sqlite3 v1.14.16
 	github.com/miekg/dns v1.1.70
 	github.com/mitchellh/mapstructure v1.5.0
-	github.com/quic-go/quic-go v0.60.0
+	github.com/quic-go/quic-go v0.59.1
 	github.com/spf13/pflag v1.0.6
 	github.com/spf13/viper v1.16.0
-	github.com/twotwotwo/sorts v0.0.0-20160814051341-bf5c1f2b8553
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -42,7 +41,7 @@ require (
 	github.com/spf13/jwalterweatherman v1.1.0 // indirect
 	github.com/subosito/gotenv v1.4.2 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
-	golang.org/x/crypto v0.51.0 // indirect
+	golang.org/x/crypto v0.52.0 // indirect
 	golang.org/x/exp v0.0.0-20240506185415-9bf2ced13842 // indirect
 	golang.org/x/mod v0.35.0 // indirect
 	golang.org/x/net v0.55.0 // indirect
