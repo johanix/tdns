@@ -1035,18 +1035,23 @@ func (zd *ZoneData) repopulateWorkingSetLocked(dynamicRRs []*core.RRset) {
 
 		existing, exists := owner.RRtypes.Get(rrset.RRtype)
 		if exists {
+			// Get returns an RRset whose RRs slice shares the published
+			// snapshot's backing array; copy it before appending so a
+			// spare-capacity append cannot mutate the live snapshot.
+			merged := append([]dns.RR(nil), existing.RRs...)
 			for _, newRR := range rrset.RRs {
 				present := false
-				for _, oldRR := range existing.RRs {
+				for _, oldRR := range merged {
 					if dns.IsDuplicate(newRR, oldRR) {
 						present = true
 						break
 					}
 				}
 				if !present {
-					existing.RRs = append(existing.RRs, newRR)
+					merged = append(merged, newRR)
 				}
 			}
+			existing.RRs = merged
 			if len(rrset.RRSIGs) > 0 {
 				existing.RRSIGs = rrset.RRSIGs
 			}

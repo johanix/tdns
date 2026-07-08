@@ -119,6 +119,7 @@ func loadTestTransferZone(t *testing.T, zoneData string) *ZoneData {
 	// Publish the initial snapshot so post-B3 readers (the transfer path) see
 	// the data, mirroring the refresh engine.
 	zd.InstallInitialSnapshot()
+	t.Cleanup(zd.stopPublisher)
 	return zd
 }
 

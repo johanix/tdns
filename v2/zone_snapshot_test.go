@@ -28,6 +28,7 @@ func testSnapshotZone(t *testing.T, name, zoneStr string) *ZoneData {
 	Zones.Set(name, zd)
 	t.Cleanup(func() { Zones.Remove(name) })
 	zd.InstallInitialSnapshot()
+	t.Cleanup(zd.stopPublisher)
 	return zd
 }
 

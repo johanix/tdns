@@ -36,9 +36,6 @@ func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {
 func (zd *ZoneData) publishDnskeyRRsLocked(dak *DnssecKeys) error {
 	apex := zd.stagedOwner(zd.ZoneName)
 	if apex == nil {
-		return fmt.Errorf("zone apex not found")
-	}
-	if apex == nil {
 		return fmt.Errorf("PublishDnskeyRRs: zone apex %q not found", zd.ZoneName)
 	}
 

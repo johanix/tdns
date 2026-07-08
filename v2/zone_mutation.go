@@ -219,8 +219,17 @@ func (zd *ZoneData) publishSync() (BumperResponse, error) {
 }
 
 func (zd *ZoneData) stageRRsetLocked(name string, rs core.RRset) {
+	// The store keys by RR type, but callers frequently build rs via
+	// GetOnlyRRSet (which leaves rs.RRtype unset) or via signing helpers that
+	// drop it. Derive the type from the RRs when rs.RRtype is 0 so the RRset is
+	// never mis-keyed under type 0.
+	rrtype := rs.RRtype
+	if rrtype == 0 && len(rs.RRs) > 0 {
+		rrtype = rs.RRs[0].Header().Rrtype
+	}
+	rs.RRtype = rrtype
 	zd.ensureWorkingSet()
-	zd.cloneOwner(name).RRtypes.Set(rs.RRtype, cloneRRset(rs))
+	zd.cloneOwner(name).RRtypes.Set(rrtype, cloneRRset(rs))
 }
 
 func (zd *ZoneData) stageDeleteLocked(name string, rrtype uint16) {
@@ -350,14 +359,18 @@ func (zd *ZoneData) setWorkingSetSOASerial(serial uint32) {
 	if apex == nil {
 		return
 	}
-	rs := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+	rs := cloneRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA))
 	if len(rs.RRs) == 0 {
 		return
 	}
-	soa := dns.Copy(rs.RRs[0]).(*dns.SOA)
+	soa, ok := rs.RRs[0].(*dns.SOA)
+	if !ok {
+		return
+	}
 	soa.Serial = serial
-	rs.RRs[0] = soa
-	apex.RRtypes.Set(dns.TypeSOA, rs)
+	// Stage into a cloned apex owner rather than writing through the shared
+	// snapshot store — the previous in-place Set tore concurrent readers.
+	zd.cloneOwner(zd.ZoneName).RRtypes.Set(dns.TypeSOA, rs)
 }
 
 func (zd *ZoneData) publishNow(gen uint64) {
@@ -384,7 +397,20 @@ func (zd *ZoneData) InstallInitialSnapshot() {
 func (zd *ZoneData) startPublisher() {
 	zd.publisherOnce.Do(func() {
 		zd.publishWake = make(chan struct{}, 1)
+		zd.publishStop = make(chan struct{})
 		go zd.runPublisher()
+	})
+}
+
+// stopPublisher terminates the per-zone publisher goroutine started by
+// startPublisher. Safe to call at most once; a no-op if the publisher never
+// started. Callers that remove or replace a zone should call this so the
+// goroutine does not stay parked on publishWake forever.
+func (zd *ZoneData) stopPublisher() {
+	zd.publishStopOnce.Do(func() {
+		if zd.publishStop != nil {
+			close(zd.publishStop)
+		}
 	})
 }
 
@@ -400,6 +426,11 @@ func (zd *ZoneData) runPublisher() {
 	var timerC <-chan time.Time
 	for {
 		select {
+		case <-zd.publishStop:
+			if timer != nil {
+				timer.Stop()
+			}
+			return
 		case <-zd.publishWake:
 		case <-timerC:
 		}

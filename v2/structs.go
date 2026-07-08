@@ -184,6 +184,8 @@ type ZoneData struct {
 	lastPublish       time.Time
 	publishWake       chan struct{}
 	publisherOnce     sync.Once
+	publishStop       chan struct{}
+	publishStopOnce   sync.Once
 	// RemoteDNSKEYs holds DNSKEY RRs from other signers (multi-signer mode 4).
 	// These are DNSKEYs found in the incoming zone that do not match keys in our
 	// local keystore. They are preserved across resignings and merged into the

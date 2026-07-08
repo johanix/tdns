@@ -25,6 +25,7 @@ func testZone(t *testing.T, name, zoneStr string) *ZoneData {
 	// Publish the initial snapshot so post-B3 readers (GetOwner etc.) see the
 	// data, mirroring the refresh engine (and testSnapshotZone/newMapZone).
 	zd.InstallInitialSnapshot()
+	t.Cleanup(zd.stopPublisher)
 	return zd
 }
 
