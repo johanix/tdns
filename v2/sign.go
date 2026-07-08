@@ -591,12 +591,6 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 		return 0, err
 	}
 
-	if !zd.Options[OptBlackLies] {
-		if err := zd.GenerateNsecChain(kdb); err != nil {
-			return 0, err
-		}
-	}
-
 	var clamp *ClampParams
 	if zd.DnssecPolicy != nil {
 		clamp, err = ClampParamsForZone(kdb, zd.ZoneName, zd.DnssecPolicy, time.Now())
@@ -606,7 +600,17 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 		}
 	}
 
-	if err := zd.PublishDnskeyRRs(dak); err != nil {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.ensureWorkingSet()
+
+	if !zd.Options[OptBlackLies] {
+		if err := zd.GenerateNsecChainWithDak(dak); err != nil {
+			return 0, err
+		}
+	}
+
+	if err := zd.publishDnskeyRRsLocked(dak); err != nil {
 		return 0, err
 	}
 
@@ -674,12 +678,14 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 					"rrtype", dns.TypeToString[rrt], "err", err)
 				return newrrsigs, err
 			}
-			owner.RRtypes.Set(rrt, rrset)
+			zd.stageRRsetLocked(name, rrset)
 			if resigned {
 				newrrsigs++
 			}
 		}
 	}
+
+	zd.publishLocked(zd.generation.Load())
 
 	lgSigner.Info("ResignZone completed",
 		"zone", zd.ZoneName, "rrsigs_written", newrrsigs)
@@ -766,14 +772,6 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 
 	newrrsigs := 0
 
-	// It's either black lies or we need a traditional NSEC chain
-	if !zd.Options[OptBlackLies] {
-		err = zd.GenerateNsecChain(kdb)
-		if err != nil {
-			return 0, err
-		}
-	}
-
 	// 4D K-step TTL clamp: build ClampParams once per pass so every RRset
 	// signed in this pass observes the same K. nil for non-clamping zones
 	// (or zones with no scheduled rollover, mid-rollover, etc.).
@@ -807,8 +805,17 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 	}
 	sort.Strings(names)
 
-	err = zd.PublishDnskeyRRs(dak)
-	if err != nil {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.ensureWorkingSet()
+
+	if !zd.Options[OptBlackLies] {
+		if err = zd.GenerateNsecChainWithDak(dak); err != nil {
+			return 0, err
+		}
+	}
+
+	if err = zd.publishDnskeyRRsLocked(dak); err != nil {
 		return 0, err
 	}
 
@@ -836,7 +843,6 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 
 	lgSigner.Debug("zone delegations", "zone", zd.ZoneName, "delegations", delegations)
 
-	var signed, zoneResigned bool
 	var maxObservedTTL uint32
 	for _, name := range names {
 		// log.Printf("SignZone: signing RRsets under name %s", name)
@@ -871,8 +877,8 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 			if wasglue {
 				continue
 			}
-			rrset, signed = MaybeSignRRset(rrset, zd.ZoneName)
-			owner.RRtypes.Set(rrt, rrset)
+			rrset, _ = MaybeSignRRset(rrset, zd.ZoneName)
+			zd.stageRRsetLocked(name, rrset)
 
 			// Record TTL after clamping. applyClampToRRset (called from
 			// SignRRset) rewrites headers to min(UnclampedTTL, K*margin,
@@ -884,27 +890,11 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 					maxObservedTTL = t
 				}
 			}
-
-			if signed {
-				zoneResigned = true
-			}
 		}
 	}
 
-	if zoneResigned {
-		//		zd.CurrentSerial++
-		//		apex, _ := zd.GetOwner(zd.ZoneName)
-		//		apex.RRtypes[dns.TypeSOA].RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
-		_, err := zd.BumpSerial()
-		if err != nil {
-			lgSigner.Error("failed to bump SOA serial", "zone", zd.ZoneName, "err", err)
-			return 0, err
-		}
-	}
+	zd.publishLocked(zd.generation.Load())
 
-	// Persist the highest RRset TTL seen this pass. Used by the rollover
-	// worker's pending-child-withdraw phase to compute effective_margin.
-	// Reset per pass: a TTL reduction takes effect after one full cycle.
 	if err := UpsertZoneSigningMaxTTL(kdb, zd.ZoneName, maxObservedTTL); err != nil {
 		lgSigner.Warn("SignZone: persist max_observed_ttl", "zone", zd.ZoneName, "err", err)
 	}
@@ -924,7 +914,14 @@ func (zd *ZoneData) GenerateNsecChain(kdb *KeyDB) error {
 		lgSigner.Error("failed to get DNSSEC active keys for NSEC chain", "zone", zd.ZoneName, "err", err)
 		return err
 	}
-	return zd.GenerateNsecChainWithDak(dak)
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.ensureWorkingSet()
+	if err := zd.GenerateNsecChainWithDak(dak); err != nil {
+		return err
+	}
+	zd.publishLocked(zd.generation.Load())
+	return nil
 }
 
 // GenerateNsecChainWithDak builds or refreshes the NSEC chain using the given active DNSSEC keys.
@@ -1005,7 +1002,7 @@ func (zd *ZoneData) GenerateNsecChainWithDak(dak *DnssecKeys) error {
 		}
 		tmp := owner.RRtypes.GetOnlyRRSet(dns.TypeNSEC)
 		tmp.RRs = []dns.RR{nsecrr}
-		owner.RRtypes.Set(dns.TypeNSEC, tmp)
+		zd.stageRRsetLocked(name, tmp)
 
 	}
 

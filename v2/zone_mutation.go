@@ -144,14 +144,66 @@ func rrsetEqual(a, b core.RRset) bool {
 }
 
 func (zd *ZoneData) requestPublish(urgent bool) {
+	if urgent {
+		_, _ = zd.publishSync()
+		return
+	}
 	zd.startPublisher()
 	zd.mu.Lock()
 	zd.publishQueued = true
-	if urgent {
-		zd.publishUrgent = true
-	}
 	zd.mu.Unlock()
 	zd.wakePublisher()
+}
+
+// publishSync runs publish immediately under zd.mu (serial bump + dual-write).
+func (zd *ZoneData) resignWorkingSetSOAIfSigned() {
+	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+		return
+	}
+	if zd.workingSet == nil {
+		return
+	}
+	apex := zd.workingSet[zd.ZoneName]
+	if apex == nil {
+		return
+	}
+	rs := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+	if len(rs.RRs) == 0 {
+		return
+	}
+	if _, err := zd.SignRRset(&rs, zd.ZoneName, nil, true, nil); err != nil {
+		lg.Error("publish: failed to re-sign SOA", "zone", zd.ZoneName, "err", err)
+		return
+	}
+	zd.cloneOwner(zd.ZoneName).RRtypes.Set(dns.TypeSOA, cloneRRset(rs))
+}
+
+func (zd *ZoneData) publishSync() (BumperResponse, error) {
+	resp := BumperResponse{Zone: zd.ZoneName}
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	resp.OldSerial = zd.CurrentSerial
+	if zd.workingSet == nil {
+		zd.ensureWorkingSet()
+	}
+	zd.publishLocked(zd.generation.Load())
+	resp.NewSerial = zd.CurrentSerial
+	return resp, nil
+}
+
+func (zd *ZoneData) stageRRsetLocked(name string, rs core.RRset) {
+	zd.ensureWorkingSet()
+	zd.cloneOwner(name).RRtypes.Set(rs.RRtype, cloneRRset(rs))
+}
+
+func (zd *ZoneData) stageDeleteLocked(name string, rrtype uint16) {
+	zd.ensureWorkingSet()
+	zd.cloneOwner(name).RRtypes.Delete(rrtype)
+}
+
+func (zd *ZoneData) stageOwnerReplaceLocked(name string, od *OwnerData) {
+	zd.ensureWorkingSet()
+	zd.workingSet[name] = od
 }
 
 func (zd *ZoneData) buildSnapshotLocked(serial uint32, data map[string]*OwnerData, transport *core.RRset) *ZoneSnapshot {
@@ -219,6 +271,8 @@ func (zd *ZoneData) publishLocked(gen uint64) {
 	zd.CurrentSerial = nextOutboundSerial(zd)
 	serial := zd.CurrentSerial
 	zd.setWorkingSetSOASerial(serial)
+
+	zd.resignWorkingSetSOAIfSigned()
 
 	transport := zd.wsTransportSignal
 	if transport == nil {

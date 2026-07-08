@@ -139,3 +139,14 @@ func publishCadenceForZone(zd *ZoneData) time.Duration {
 	}
 	return zd.publishCadence
 }
+
+// soaForResponse returns a response-only SOA RRset stamped with the served serial.
+func (zd *ZoneData) soaForResponse(apex *OwnerData) core.RRset {
+	rs := cloneRRset(apex.RRtypes.GetOnlyRRSet(dns.TypeSOA))
+	if len(rs.RRs) > 0 {
+		if soa, ok := rs.RRs[0].(*dns.SOA); ok {
+			soa.Serial = zd.CurrentSerial
+		}
+	}
+	return rs
+}

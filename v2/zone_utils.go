@@ -707,53 +707,12 @@ func setApexSOASerial(zd *ZoneData) bool {
 // notification is not appropriate (e.g. inside a NOTIFY handler
 // where triggering downstream NOTIFYs could cause side effects).
 func (zd *ZoneData) BumpSerialOnly() (BumperResponse, error) {
-	resp := BumperResponse{
-		Zone: zd.ZoneName,
-	}
-
 	lg.Debug("BumpSerialOnly: bumping SOA serial", "zone", zd.ZoneName)
-	zd.mu.Lock()
-	defer zd.mu.Unlock()
-
-	resp.OldSerial = zd.CurrentSerial
-	zd.CurrentSerial = nextOutboundSerial(zd)
-	resp.NewSerial = zd.CurrentSerial
-	if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial == OutboundSoaSerialPersist {
-		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
-			lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
-			return resp, fmt.Errorf("persist outgoing serial for zone %s: %w", zd.ZoneName, err)
-		}
-	}
-	if !setApexSOASerial(zd) {
-		// No apex SOA to rewrite: nothing more to do (caller may be
-		// bumping serial on a not-yet-loaded zone).
-		return resp, nil
-	}
-	if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
-		apex, err := zd.GetOwner(zd.ZoneName)
-		if err != nil {
-			lg.Error("GetOwner failed", "zone", zd.ZoneName, "err", err)
-			return resp, err
-		}
-		rrset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
-		_, err = zd.SignRRset(&rrset, zd.ZoneName, nil, true, nil) // true = force signing, as we know the SOA has changed
-		if err != nil {
-			lg.Error("BumpSerialOnly: failed to sign SOA RRset", "zone", zd.ZoneName, "err", err)
-			return resp, err
-		}
-		apex.RRtypes.Set(dns.TypeSOA, rrset)
-	}
-
-	return resp, nil
+	return zd.publishSync()
 }
 
 func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
-	resp, err := zd.BumpSerialOnly()
-	if err != nil {
-		return resp, err
-	}
-	zd.NotifyDownstreams()
-	return resp, nil
+	return zd.BumpSerialOnly()
 }
 
 func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegationData, error) {
