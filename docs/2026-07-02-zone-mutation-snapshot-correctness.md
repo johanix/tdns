@@ -4,11 +4,24 @@
 B1→B2→B3; SliceZone retired by Project A step 0)
 **Date:** 2026-07-02
 **Scope:** replace direct-write-then-bump-serial mutation with an **immutable
-snapshot published atomically**, across `v2/` **and** `tdns-mp/v2/`. A **standalone
-correctness fix** (repairs a serial-invariant violation that bites *queries*
-today), independent of A and C. Project C (IXFR) is scheduled **after** B.
+snapshot published atomically**, in **tdns core (`v2/` + `cmdv2/`) only**. A
+**standalone correctness fix** (repairs a serial-invariant violation that bites
+*queries* today), independent of A and C. Project C (IXFR) is scheduled **after** B.
+**tdns-mp is OUT of scope** — see the constraint below.
 **Prerequisite:** Project A **step 0 retires SliceZone**, so the whole store is
 MapZone (`zd.Data`) — B's snapshot is **map-only, no store normalization**.
+
+> **HARD SCOPE CONSTRAINT — do NOT touch `tdns-mp` in this project.** tdns-mp is
+> undergoing a major refactor of its interface to tdns-transport; changing it here
+> would collide with that in-flight work. tdns-mp is a **separate module pinned to
+> a known-good tdns/v2 version** and stays on that pin throughout B — it keeps
+> compiling and serving unaffected by B1→B3, because it never re-pins to the changed
+> core during B. Migrating tdns-mp's mutators to the staging API is a **separate
+> follow-on mini-project (“B-MP”, see §9)**, run *after* the tdns-mp↔transport
+> refactor, which does the migration **and** the re-pin together. Because MP never
+> sees post-B3 tdns/v2 during B, **B3 uses full-strength enforcement** (unexported
+> published type + grep gate) with no compatibility softening; its grep gate is
+> scoped to the tdns-core tree only.
 **Reference:** the sibling POP component solved the same problem the same way —
 `tapir/docs/2026-06-02-pop-149-snapshot-concurrency-design.md` (*POP §n*).
 **Review folded in:** `…-zone-mutation-snapshot-correctness-review.md`.
@@ -222,7 +235,7 @@ func (zd *ZoneData) pendingChanges() *PendingChanges              // under zd.mu
 | **Query-path signing** — `signApexRRsets` (def 92-115; calls 638, 212-213, 277); positive 771-776; CNAME 449/514/534; `signRRsetForZone` 134-183 | queryresponder.go | **query goroutines** | **B2:** delete all `Set`-after-sign write-backs (not only 771-776). **B3:** read inline RRSIGs from snapshot; online/compact stays ephemeral |
 | Query SOA stamps | queryresponder.go:339,403,747,791 | query | **B2:** delete (with other query write-backs) |
 | `WriteZoneToFile` stamp | dnsutils.go:669-670 | API | export reads snapshot |
-| **`tdns-mp`** signing/combiner | mp_signer.go:142,356 (+`BumpSerial` :151); combiner_utils.go:163,165,170 (`mpzd.Data.Set`) | MP | **CONFIRMED no forked store:** `MPZoneData` **embeds** `tdns.ZoneData` (imports the v2 module, go.mod:16) → same `Data` field, all v2 receivers (incl. future `stage*`/`publish()`) promoted for free. Route these Set-sites through `stage*`/`requestPublish` like any mutator (combiner = one publish at end); the CI grep gate catches any missed |
+| **`tdns-mp`** signing/combiner | mp_signer.go:142,356 (+`BumpSerial` :151); combiner_utils.go:163,165,170 (`mpzd.Data.Set`) | MP | **OUT of scope for B — deferred to §9 (B-MP).** `MPZoneData` embeds `tdns.ZoneData` (same `Data` field, so the future `stage*`/`publish()` receivers are promoted for free), which is exactly *why* the migration is mechanical later — but tdns-mp is mid-refactor and stays on its current tdns/v2 pin through B, so these Set-sites are NOT touched here. B-MP routes them and re-pins together. |
 
 `addCDEResponse` (queryresponder.go:940-944) already signs NSEC into the **response
 only** — matches the ephemeral-online split; leave it.
@@ -251,10 +264,16 @@ publish model this becomes one ordered, single-writer sequence:
 the working-set build target** — callbacks stage into it (combiner contributions,
 MP pre-refresh hooks, delsync-proxy analysis parseconfig.go:1043-1049), and the
 single `publish()` in step 4 makes it live. No callback writes served data
-directly.
+directly. **This migration is core-side only:** MP's pre-refresh hooks
+(`tdns-mp/v2/config.go`, `hsync_utils.go MPPreRefresh`) keep mutating `new_zd`
+exactly as today and are NOT modified here — B changes only how *core* consumes
+`new_zd` (as the working set). MP's callbacks meet the new working-set contract
+when MP re-pins, in B-MP (§9). Preserve a working `new_zd` mutation surface through
+B so the pinned MP keeps compiling.
 
 ## 4. Implementation — milestoned (NOT one PR), **writers before readers**
-At ~2000+ LOC across `v2` + `tdns-mp` + QueryResponder, one PR is too risky. Use a
+At ~1800+ LOC across `v2` + `cmdv2` + QueryResponder (tdns-mp excluded, §9), one PR
+is too risky. Use a
 **dual-write / strangler** transition, `-race`-gated at each milestone. **Order is
 load-bearing: writers cut over before readers.** If readers moved to the snapshot
 while legacy mutators still bypassed `publish()`, the snapshot would freeze while
@@ -271,9 +290,10 @@ served data changed underneath — worse than today. So:
   Nothing reads the snapshot yet; legacy writers unchanged. `-race` gate: publisher
   + immutability tests.
 - **B2 — writers cut over (dual-write keeps legacy current for readers).** Route
-  every §3.1 mutator — refresh flips, RFC2136, signing passes, the **ResignerEngine**,
-  DNSKEY/CSYNC/transport/catalog, and **`tdns-mp`** — through `stage*` +
-  `requestPublish`. **Also at the start of B2:** delete all query-path write-backs
+  every §3.1 **tdns-core** mutator — refresh flips, RFC2136, signing passes, the
+  **ResignerEngine**, DNSKEY/CSYNC/transport/catalog — through `stage*` +
+  `requestPublish`. (**`tdns-mp` is excluded** — deferred to §9 B-MP.) **Also at
+  the start of B2:** delete all query-path write-backs
   (`signApexRRsets`, positive/CNAME `Set`-after-sign, query SOA stamps) — readers
   still use legacy `GetOwner`, but legacy must only change via `publish()` so
   dual-write stays consistent. `publish()` still dual-writes, so legacy `zd.Data`
@@ -313,29 +333,55 @@ served data changed underneath — worse than today. So:
   slice-header trap).
 - **`TestPublishCoalescing`** — burst ⇒ ≤1 publish/cadence (one serial bump); idle
   stage ⇒ immediate publish; urgent ⇒ bypass.
-- **Per-writer** — each mutator class (incl. `tdns-mp`) produces the right served
-  zone.
+- **Per-writer** — each tdns-core mutator class produces the right served zone.
+  (tdns-mp writers are out of scope — tested in B-MP, §9.)
 - **`pendingChanges` / `debug zone-txlog`** — stage a change without publishing,
   assert `pendingChanges()` reports it (added/replaced/deleted) and the published
   serial is unchanged; after publish, assert it reports empty. Smoke-test the CLI
   command against a running auth.
-- **CI grep gate** — no `Set` outside the allowlist.
+- **CI grep gate** — no `Set` outside the allowlist, scoped to the tdns-core tree
+  (`v2/*`, `cmdv2/*`); tdns-mp is not in the gate (out of scope).
 
 ## 6. Risk / effort / LOC (revised)
-**Risk: high** — multi-writer serialization, QueryResponder surgery, ~15 mutator
-classes, `tdns-mp`, structural enforcement. Mitigated by dual-write milestones +
-`-race` gates + the CI enforcement. **Effort: multi-day (~20–40 h agent), not 6–9
-h** — the earlier estimate undercounted MP + QueryResponder + enforcement by ~3–5×.
-**LOC: ~1400–1800 impl + ~600 test ≈ 2000–2400.** Parallelizable by mutator class
-within B2 (writer routing) and B3 (enforcement cleanup).
+**Risk: high** — multi-writer serialization, QueryResponder surgery, ~15 tdns-core
+mutator classes, structural enforcement. Mitigated by dual-write milestones +
+`-race` gates + the CI enforcement. **Effort: multi-day agent** — the earlier 6–9 h
+estimate undercounted QueryResponder + enforcement by ~3–5×. (Excluding tdns-mp,
+now deferred to §9, trims the earlier ~20–40 h estimate somewhat, but core alone
+is still multi-day.) **LOC (core only): ~1200–1600 impl + ~600 test.**
+Parallelizable by mutator class within B2 (writer routing) and B3 (enforcement
+cleanup).
 
 ## 7. Decisions (settled)
 map-only snapshot (SliceZone retired by A) · copy strategy **A** · **5 s** coalescing
 cadence (per-zone, urgent bypass, NOTIFY once/publish) · transfer-time signing
-deleted (serve verbatim) · **`tdns-mp` in scope** · **`Serial == CurrentSerial`**,
-`IncomingSerial` = metadata · **milestoned B1→B2→B3 (dual-write), `-race` gate each**.
+deleted (serve verbatim) · **`tdns-mp` OUT of scope — deferred to §9 (B-MP)** ·
+**`Serial == CurrentSerial`**, `IncomingSerial` = metadata · **milestoned
+B1→B2→B3 (dual-write), `-race` gate each** · **B3 full-strength enforcement
+(unexported published type + grep gate), no MP-compat softening** (MP re-pins only
+in B-MP, after B3).
 
 ## 8. What B hands to Project C
 `publish()` already **computes** the per-publish delta; C **retains** it in the
 byte-bounded `IxfrChain`, adds the serial-space chain spec, the downstream tracker,
 and inbound/outbound IXFR. See `…-ixfr-support.md`.
+
+## 9. Deferred follow-on: Project B-MP (tdns-mp migration)
+**Not part of B. Runs AFTER the tdns-mp↔transport refactor completes**, as its own
+mini-project. Until then tdns-mp stays on its current (known-good) tdns/v2 pin and
+is unaffected by B.
+
+Scope, when it runs:
+- Route tdns-mp's mutators through the staging API that B built: the `mpzd.Data.Set`
+  sites in `combiner_utils.go:163,165,170` and `mp_signer.go:142,356` (+ `BumpSerial`
+  :151). Because `MPZoneData` embeds `tdns.ZoneData`, the `stage*`/`publish()`
+  receivers are already promoted — the migration is mechanical (combiner = one
+  publish at end), the same pattern as a B2 core mutator.
+- **Re-pin tdns-mp to the post-B3 tdns/v2** in the same change (this is the point at
+  which MP first meets B3's unexported published type / no exported `Data.Set`, so
+  routing and re-pin must land together or MP won't compile).
+- Extend the grep gate to the tdns-mp module; add MP per-writer tests (the §5
+  per-writer test, MP variant).
+
+Because migration + re-pin happen together here and MP never re-pins during B, B
+itself needs no MP-compatibility concessions.
