@@ -116,6 +116,9 @@ func loadTestTransferZone(t *testing.T, zoneData string) *ZoneData {
 	}
 	zd.Ready = true
 	zd.Status = ZoneStatusReady
+	// Publish the initial snapshot so post-B3 readers (the transfer path) see
+	// the data, mirroring the refresh engine.
+	zd.InstallInitialSnapshot()
 	return zd
 }
 
@@ -363,6 +366,9 @@ func TestZoneTransferOut_OversizeRRsetAborts(t *testing.T) {
 		RRs:    []dns.RR{txt},
 	})
 	zd.Data.Set("big.example.test.", od)
+	// Re-publish so the transfer (which reads the published snapshot) sees the
+	// oversize RRset that was just added to the live store.
+	zd.InstallInitialSnapshot()
 
 	srv := startTestAXFRServer(t, zd)
 	defer srv.shutdown()

@@ -731,6 +731,11 @@ func (zd *ZoneData) StripZoneRRSIGs(ctx context.Context, remove func(*dns.RRSIG)
 				kept = append(kept, sig)
 			}
 			if changed {
+				// GetOnlyRRSet returns an RRset whose RRtype field is unset
+				// (the store keys by type); set it to the actual type so
+				// stageRRsetLocked keys the stripped RRset correctly rather
+				// than under type 0.
+				rrset.RRtype = rrt
 				rrset.RRSIGs = kept
 				zd.stageRRsetLocked(name, rrset)
 			}
