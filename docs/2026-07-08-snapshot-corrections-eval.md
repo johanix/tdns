@@ -3,7 +3,9 @@
 **Date:** 2026-07-08
 **Source:** evaluation summary from an external review agent, of the snapshot-correctness (Project B) implementation.
 
-**Verdict: Do not merge.** Two critical defects + one confirmed regression must be
+**Original verdict: Do not merge** (now DISCHARGED — every defect below is fixed;
+see "Resolution & updated verdict" at the end for the commit mapping and the
+conditional merge recommendation). Two critical defects + one confirmed regression must be
 fixed first. The writer side (B1/B2 staging, publish, dual-write, locking) is
 genuinely solid and well-tested. The reader cutover (B3) is incomplete in exactly
 the way that matters: the serial-tearing bug this project was chartered to
@@ -140,3 +142,41 @@ unstripped data). Fixed by keying the stage on the authoritative loop type
 hiding; exactly the "tests now pass vacuously" risk flagged in R1.
 
 Result: `go test -race .` in `v2/` is fully green.
+
+## Resolution & updated verdict (2026-07-08)
+
+Every defect in this review has been fixed on branch
+`feature/zone-snapshot-correctness` in three GPG-signed commits:
+
+| Item | Fix | Commit |
+|---|---|---|
+| **C1** intra-response tearing | pin one snapshot per response; thread it through all readers via `…From(snap,…)` variants | `a093592` |
+| **M1** torn AXFR / file dump | pin one snapshot per `ZoneTransferOut` / `WriteZoneToFile` | `a093592` |
+| **m3** weak acceptance test | added `TestQueryResponderNoIntraResponseTearing` (concurrent-publish tearing check) | `a093592` |
+| **C2** catalog reads live `zd.Data` | read `publishedSnapshot().Data` | `bdfd444` |
+| **M2** nil-snapshot panic / `Ready` lie | nil-guard `soaForResponse`; gate `Ready` on a real published snapshot | `bdfd444` |
+| **R1** republish test-harness gap | `newMapZone` installs the initial snapshot | `bdfd444` |
+| **m1** dead reader on live `zd.Data` | delete `XXfindServerTSYNCRRset` | `bdfd444` |
+| **m2** shared `*RRTypeStore` | documented the copy-strategy-A invariant (NOT deep-copied — that would defeat the PQ-signature perf goal) | `bdfd444` |
+| +14 pre-existing harness failures | `InstallInitialSnapshot()` in the shared test helpers | `5209efa` |
+| + `StripZoneRRSIGs` mis-keying (**real bug found**) | key the stage on the loop type, not the unset `rrset.RRtype` | `5209efa` |
+
+**Verified:** `go build ./...`, `go vet ./...`, and `go test -race .` in `v2/` —
+all clean; suite fully green (0 failures).
+
+**NOT verified (merge caveats):**
+- Only the `v2` package's unit tests were run — no testbed/integration pass, no
+  real binary build, no live query/AXFR smoke test. C1/M1 is a substantial
+  refactor of the auth server's hot query + transfer path.
+- The "tests pass vacuously" risk (R1/m3) is only half-retired: the tests that
+  were *failing* vacuously are fixed, but tests that *pass* for the wrong reason
+  were not audited — and a real `StripZoneRRSIGs` bug was hiding behind one.
+- m2 is enforced by the CI grep gate + discipline, not by deep-copy.
+
+**Updated verdict: CONDITIONALLY MERGEABLE.** The original "do not merge"
+blockers are discharged and the suite is green, so it clears the review's bar.
+But do not merge on green unit tests alone — gate on (1) human review of the
+C1/M1 read-path refactor and (2) a testbed smoke test of query + AXFR under a
+concurrent publish.
+
+Branch state: three signed commits on top of the B3 work; **not yet pushed**.
