@@ -147,7 +147,10 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 				}
 			}
 			if serialChanged {
-				setApexSOASerial(zd)
+				zd.mu.Lock()
+				zd.ensureWorkingSet()
+				zd.publishWorkingSetLocked(zd.generation.Load(), false)
+				zd.mu.Unlock()
 			}
 		}
 		zd.NotifyDownstreams()
@@ -708,7 +711,10 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								}
 							}
 							if serialChanged {
-								setApexSOASerial(zd)
+								zd.mu.Lock()
+								zd.ensureWorkingSet()
+								zd.publishWorkingSetLocked(zd.generation.Load(), false)
+								zd.mu.Unlock()
 							}
 						}
 

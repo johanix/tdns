@@ -56,6 +56,10 @@ func matchesConfiguredAddrs(hostports []string, rrset *core.RRset) bool {
 // for this zone. It delegates to the chosen mechanism (svcb|tsync) and assigns
 // zd.TransportSignal and zd.AddTransportSignal when successful.
 func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.ensureWorkingSet()
+
 	switch conf.Service.Transport.Type {
 	case "none", "":
 		lgDns.Debug("CreateTransportSignalRRs: service.transport.type=none; skipping transport signal synthesis for zone",
@@ -71,6 +75,18 @@ func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
 			"zone", zd.ZoneName)
 		return nil
 	}
+}
+
+func (zd *ZoneData) commitTransportSignalLocked(nsOwner string, rrset core.RRset, signal *core.RRset) {
+	if nsOwner != "" && len(rrset.RRs) > 0 {
+		zd.stageRRsetLocked(nsOwner, rrset)
+	}
+	if signal != nil {
+		zd.TransportSignal = signal
+		zd.wsTransportSignal = cloneTransportSignal(signal)
+		zd.AddTransportSignal = true
+	}
+	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 }
 
 // SVCB path
@@ -136,6 +152,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 					"zone", zd.ZoneName,
 					"ns", nsName)
 				lgDns.Debug("CreateTransportSignalRRs(SVCB): SVCB", "svcb", tmp.String())
+				zd.commitTransportSignalLocked("", core.RRset{}, zd.TransportSignal)
 				return nil
 			}
 		}
@@ -195,6 +212,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 							lgDns.Debug("CreateTransportSignalRRs(SVCB): using existing SVCB",
 								"owner", ownerName,
 								"zone", zd.ZoneName)
+							zd.commitTransportSignalLocked("", core.RRset{}, zd.TransportSignal)
 							return nil
 						}
 					}
@@ -303,12 +321,14 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 					}
 					// Add into zone data
 					serversvcbs := nsData.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
+					var staged core.RRset
 					if len(serversvcbs.RRs) == 0 {
-						nsData.RRtypes.Set(dns.TypeSVCB, core.RRset{RRs: []dns.RR{tmp}})
+						staged = core.RRset{RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
 					} else {
-						nsData.RRtypes.Set(dns.TypeSVCB, core.RRset{RRs: append(serversvcbs.RRs, tmp)})
+						staged = core.RRset{RRtype: dns.TypeSVCB, RRs: append(serversvcbs.RRs, tmp)}
 						lgDns.Debug("CreateTransportSignalRRs(SVCB): added server SVCB to existing SVCB RRset", "ns", nsName)
 					}
+					zd.commitTransportSignalLocked(nsName, staged, zd.TransportSignal)
 					return nil
 				}
 			}
@@ -382,6 +402,7 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config) error {
 							"owner", ownerName,
 							"alias", alias,
 							"ns", nsName)
+						zd.commitTransportSignalLocked("", core.RRset{}, zd.TransportSignal)
 						return nil
 					}
 				}
@@ -416,13 +437,14 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config) error {
 				}
 				// Store in zone data
 				existing := nsData.RRtypes.GetOnlyRRSet(core.TypeTSYNC)
+				var staged core.RRset
 				if len(existing.RRs) == 0 {
-					nsData.RRtypes.Set(core.TypeTSYNC, core.RRset{RRs: []dns.RR{trr}})
+					staged = core.RRset{RRtype: core.TypeTSYNC, RRs: []dns.RR{trr}}
 				} else {
-					nsData.RRtypes.Set(core.TypeTSYNC, core.RRset{RRs: append(existing.RRs, trr)})
+					staged = core.RRset{RRtype: core.TypeTSYNC, RRs: append(existing.RRs, trr)}
 				}
-				zd.TransportSignal = &core.RRset{Name: "_dns." + nsName, RRtype: core.TypeTSYNC, RRs: []dns.RR{trr}}
-				zd.AddTransportSignal = true
+				signal := &core.RRset{Name: "_dns." + nsName, RRtype: core.TypeTSYNC, RRs: []dns.RR{trr}}
+				zd.commitTransportSignalLocked(nsName, staged, signal)
 				lgDns.Debug("createTransportSignalTSYNC: added TSYNC for in-bailiwick NS",
 					"zone", zd.ZoneName,
 					"ns", nsName,

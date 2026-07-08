@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"fmt"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -219,6 +220,100 @@ func (zd *ZoneData) stageOwnerReplaceLocked(name string, od *OwnerData) {
 	zd.workingSet[name] = od
 }
 
+func (zd *ZoneData) stageOwnerDeleteLocked(name string) {
+	zd.ensureWorkingSet()
+	delete(zd.workingSet, name)
+}
+
+func (zd *ZoneData) publishLocked(gen uint64) {
+	zd.publishWorkingSetLocked(gen, true)
+}
+
+// publishWorkingSetLocked stores the current working set. When bumpSerial is
+// false the caller has already set zd.CurrentSerial (refresh flips, transport
+// signal synthesis without a content serial change).
+func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
+	if zd.workingSet == nil {
+		zd.publishQueued = false
+		zd.publishUrgent = false
+		return
+	}
+	if !zoneStillLive(zd, gen) {
+		zd.workingSet = nil
+		zd.wsTransportSignal = nil
+		zd.publishQueued = false
+		zd.publishUrgent = false
+		return
+	}
+
+	serial := zd.CurrentSerial
+	if bumpSerial {
+		zd.CurrentSerial = nextOutboundSerial(zd)
+		serial = zd.CurrentSerial
+	}
+	zd.setWorkingSetSOASerial(serial)
+
+	zd.resignWorkingSetSOAIfSigned()
+
+	transport := zd.wsTransportSignal
+	if transport == nil {
+		transport = zd.TransportSignal
+	}
+
+	data := zd.workingSet
+	snap := zd.buildSnapshotLocked(serial, data, transport)
+	zd.snapshot.Store(snap)
+	zd.syncLegacyFromSnapshot(snap)
+
+	zd.workingSet = nil
+	zd.wsTransportSignal = nil
+	zd.publishQueued = false
+	zd.publishUrgent = false
+	zd.lastPublish = time.Now()
+
+	if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial == OutboundSoaSerialPersist {
+		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
+			lg.Error("publish: failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
+		}
+	}
+
+	if loaded := zd.snapshot.Load(); loaded != nil && loaded.Serial != zd.CurrentSerial {
+		lg.Error("publish: serial mirror drift", "zone", zd.ZoneName, "current", zd.CurrentSerial, "snapshot", loaded.Serial)
+	}
+
+	_ = zd.NotifyDownstreams()
+}
+
+func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs []*core.RRset, firstLoad bool) error {
+	zd.IncomingSerial = new_zd.IncomingSerial
+	if firstLoad {
+		zd.CurrentSerial = new_zd.CurrentSerial
+		zd.FirstZoneLoad = false
+	} else {
+		zd.CurrentSerial++
+		if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial == OutboundSoaSerialPersist {
+			if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
+				return fmt.Errorf("persist outgoing serial for zone %s: %w", zd.ZoneName, err)
+			}
+		}
+	}
+	zd.ApexLen = new_zd.ApexLen
+	zd.XfrType = new_zd.XfrType
+	zd.ZoneStore = new_zd.ZoneStore
+	zd.ZoneType = new_zd.ZoneType
+
+	zd.workingSet = snapshotMapFromData(new_zd.Data)
+	zd.wsTransportSignal = nil
+	zd.repopulateWorkingSetLocked(dynamicRRs)
+	zd.publishWorkingSetLocked(zd.generation.Load(), false)
+
+	if !firstLoad {
+		zd.Ready = true
+		zd.Status = ZoneStatusReady
+	}
+	return nil
+}
+
 func (zd *ZoneData) buildSnapshotLocked(serial uint32, data map[string]*OwnerData, transport *core.RRset) *ZoneSnapshot {
 	apex := apexFromSnapshotData(zd, data)
 	return &ZoneSnapshot{
@@ -265,55 +360,6 @@ func (zd *ZoneData) setWorkingSetSOASerial(serial uint32) {
 	soa.Serial = serial
 	rs.RRs[0] = soa
 	apex.RRtypes.Set(dns.TypeSOA, rs)
-}
-
-func (zd *ZoneData) publishLocked(gen uint64) {
-	if zd.workingSet == nil {
-		zd.publishQueued = false
-		zd.publishUrgent = false
-		return
-	}
-	if !zoneStillLive(zd, gen) {
-		zd.workingSet = nil
-		zd.wsTransportSignal = nil
-		zd.publishQueued = false
-		zd.publishUrgent = false
-		return
-	}
-
-	zd.CurrentSerial = nextOutboundSerial(zd)
-	serial := zd.CurrentSerial
-	zd.setWorkingSetSOASerial(serial)
-
-	zd.resignWorkingSetSOAIfSigned()
-
-	transport := zd.wsTransportSignal
-	if transport == nil {
-		transport = zd.TransportSignal
-	}
-
-	data := zd.workingSet
-	snap := zd.buildSnapshotLocked(serial, data, transport)
-	zd.snapshot.Store(snap)
-	zd.syncLegacyFromSnapshot(snap)
-
-	zd.workingSet = nil
-	zd.wsTransportSignal = nil
-	zd.publishQueued = false
-	zd.publishUrgent = false
-	zd.lastPublish = time.Now()
-
-	if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial == OutboundSoaSerialPersist {
-		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
-			lg.Error("publish: failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
-		}
-	}
-
-	if loaded := zd.snapshot.Load(); loaded != nil && loaded.Serial != zd.CurrentSerial {
-		lg.Error("publish: serial mirror drift", "zone", zd.ZoneName, "current", zd.CurrentSerial, "snapshot", loaded.Serial)
-	}
-
-	_ = zd.NotifyDownstreams()
 }
 
 func (zd *ZoneData) publishNow(gen uint64) {
