@@ -138,6 +138,12 @@ func (zd *ZoneData) stageRRset(name string, rs core.RRset)       { zd.ensureWork
 func (zd *ZoneData) stageDelete(name string, t uint16)          { zd.ensureWorkingSet(); zd.cloneOwner(name).RRtypes.Delete(t) }
 func (zd *ZoneData) stageOwnerReplace(name string, od *OwnerData){ zd.ensureWorkingSet(); zd.workingSet[name] = od }
 func (zd *ZoneData) requestPublish(urgent bool)                  // enqueue to the coalescing publisher
+
+// Read-only observability of the pending (staged-but-unpublished) state,
+// for the `tdns-cli debug zone-txlog` command (§4 B2). Returns nil when no
+// changes are staged. It is a VIEW, not a mutation path — it does not
+// break the "no exported mutators" invariant (§4 B3).
+func (zd *ZoneData) pendingChanges() *PendingChanges              // under zd.mu; snapshot of workingSet vs published
 ```
 - `publish()` hands the working-set map to the new snapshot (`Data: zd.workingSet`)
   and sets `zd.workingSet = nil` — the published map is never mutated again (next
@@ -153,6 +159,16 @@ func (zd *ZoneData) requestPublish(urgent bool)                  // enqueue to t
   reachable from the published snapshot.
 - **Whole-zone passes** (SignZone/GenerateNsecChain/combiner) stage many owners,
   then **one** `requestPublish` — one delta, one serial bump.
+- **Pending-change observability (`pendingChanges`).** Because publish is
+  coalesced (§1.3, 5 s cadence), an accepted change (e.g. a DNS UPDATE) is staged
+  in `workingSet` but NOT yet served until the next publish. Unlike today's
+  direct-write model, "just query the zone" no longer confirms a change landed
+  during that window. `pendingChanges()` returns a read-only diff of `workingSet`
+  vs the currently-published snapshot (added/replaced/deleted owners+types), plus
+  the published serial and whether a publish is already queued. It is the data
+  source for the `tdns-cli debug zone-txlog` command (§4 B2). Scope note: this is
+  the *pending, unpublished* delta only; the retained history of *already-published*
+  deltas is Project C's `IxfrChain` (§8), out of scope here.
 
 ### 1.7 Serial semantics
 - **`ZoneSnapshot.Serial == CurrentSerial`** at publish (via `nextOutboundSerial`,
@@ -265,6 +281,14 @@ served data changed underneath — worse than today. So:
   **no path may mutate served data except via `publish()`**. `-race` gate:
   `TestConcurrentServeAndUpdate` (see §5 — B2 variant). Online-signing: the
   resigner must produce signed snapshots via publish before DO queries rely on them.
+  **Ship `tdns-cli debug zone-txlog --zone X`** in this milestone: with publish now
+  coalesced, an accepted change is staged but unserved for up to a cadence, so
+  "query the zone" no longer confirms it landed. The command calls
+  `pendingChanges()` (§1.6) and prints the pending (staged-but-unpublished) delta —
+  added/replaced/deleted owners+types — plus the currently-published serial and
+  whether a publish is queued. B2 is where it first has anything to show (staging
+  begins here) and where it is most needed (the publish window opens). It is a
+  read-only view; it must not become a mutation path (§4 B3 enforcement).
 - **B3 — readers cut over + drop legacy + enforce.** Switch QueryResponder
   (`GetOwner`/`GetRRset` → `snap.Data`), `ZoneTransferOut`, and the SOA responder
   to `snapshot.Load()`. Query-path signing split: inline RRSIGs **read** from the
@@ -291,6 +315,10 @@ served data changed underneath — worse than today. So:
   stage ⇒ immediate publish; urgent ⇒ bypass.
 - **Per-writer** — each mutator class (incl. `tdns-mp`) produces the right served
   zone.
+- **`pendingChanges` / `debug zone-txlog`** — stage a change without publishing,
+  assert `pendingChanges()` reports it (added/replaced/deleted) and the published
+  serial is unchanged; after publish, assert it reports empty. Smoke-test the CLI
+  command against a running auth.
 - **CI grep gate** — no `Set` outside the allowlist.
 
 ## 6. Risk / effort / LOC (revised)
