@@ -259,7 +259,34 @@ func NewDebugCmd(role string, extras ...*cobra.Command) *cobra.Command {
 		},
 	}
 
-	c.AddCommand(rrset, validateRRset, lav, showTA, showRRsetCache, sig0)
+	zoneTxlog := &cobra.Command{
+		Use:   "zone-txlog",
+		Short: "Show staged-but-unpublished zone changes",
+		Run: func(cmd *cobra.Command, args []string) {
+			if tdns.Globals.Zonename == "" {
+				fmt.Printf("Error: zone name not specified. Terminating.\n")
+				os.Exit(1)
+			}
+			api, err := GetApiClient(role, true)
+			if err != nil {
+				log.Fatalf("Error: %v", err)
+			}
+			dr := SendDebug(api, tdns.DebugPost{
+				Command: "zone-txlog",
+				Zone:    dns.Fqdn(tdns.Globals.Zonename),
+			})
+			if dr.Error {
+				os.Exit(1)
+			}
+			if dr.ZoneTxlog != nil {
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				_ = enc.Encode(dr.ZoneTxlog)
+			}
+		},
+	}
+
+	c.AddCommand(rrset, validateRRset, lav, showTA, showRRsetCache, zoneTxlog, sig0)
 	for _, e := range extras {
 		c.AddCommand(e)
 	}

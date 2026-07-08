@@ -1,10 +1,12 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -194,6 +196,104 @@ func TestParsePublishCadence(t *testing.T) {
 	if err != nil || d != 10*time.Second {
 		t.Fatalf("10s: d=%v err=%v", d, err)
 	}
+}
+
+func TestPendingChanges(t *testing.T) {
+	zd := testSnapshotZone(t, "example.", `example. 3600 IN SOA ns.example. hostmaster.example. 1 7200 1800 604800 7200
+example. 3600 IN NS ns.example.
+www.example. 3600 IN A 192.0.2.1
+`)
+	serialBefore := zd.snapshotGeneration()
+
+	zd.mu.Lock()
+	zd.ensureWorkingSet()
+	zd.stageRRset("www.example.", coreRRset("www.example.", dns.TypeA, "192.0.2.50"))
+	zd.mu.Unlock()
+
+	pc := zd.pendingChanges()
+	if pc == nil {
+		t.Fatal("expected pending changes after staging")
+	}
+	if pc.PublishedSerial != serialBefore {
+		t.Fatalf("published serial = %d, want %d", pc.PublishedSerial, serialBefore)
+	}
+	if len(pc.Replaced) != 1 || pc.Replaced[0].Owner != "www.example." {
+		t.Fatalf("replaced = %+v, want www.example.", pc.Replaced)
+	}
+
+	zd.testPublishNow()
+	if pc2 := zd.pendingChanges(); pc2 != nil {
+		t.Fatalf("expected nil pending changes after publish, got %+v", pc2)
+	}
+	if zd.snapshotGeneration() != serialBefore+1 {
+		t.Fatalf("serial = %d, want %d", zd.snapshotGeneration(), serialBefore+1)
+	}
+
+	zd.mu.Lock()
+	zd.ensureWorkingSet()
+	zd.stageRRset("new.example.", coreRRset("new.example.", dns.TypeA, "192.0.2.2"))
+	zd.mu.Unlock()
+	pc = zd.pendingChanges()
+	if pc == nil || len(pc.Added) != 1 || pc.Added[0] != "new.example." {
+		t.Fatalf("added = %+v, want new.example.", pc)
+	}
+}
+
+func TestConcurrentServeAndUpdate(t *testing.T) {
+	zd := testSnapshotZone(t, "example.", `example. 3600 IN SOA ns.example. hostmaster.example. 1 7200 1800 604800 7200
+example. 3600 IN NS ns.example.
+www.example. 3600 IN A 192.0.2.1
+`)
+	zd.publishCadence = 100 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for ctx.Err() == nil {
+				owner, err := zd.GetOwner("www.example.")
+				if err != nil || owner == nil {
+					continue
+				}
+				_ = owner.RRtypes.GetOnlyRRSet(dns.TypeA)
+			}
+		}()
+	}
+
+	for i := 0; i < 30; i++ {
+		zd.mu.Lock()
+		zd.ensureWorkingSet()
+		zd.stageRRset("www.example.", coreRRset("www.example.", dns.TypeA, fmt.Sprintf("192.0.2.%d", 20+i%80)))
+		zd.mu.Unlock()
+		if i%5 == 0 {
+			zd.requestPublish(true)
+		} else {
+			zd.requestPublish(false)
+		}
+		deadline := time.Now().Add(500 * time.Millisecond)
+		for time.Now().Before(deadline) {
+			zd.mu.Lock()
+			ok := zd.workingSet == nil && zd.legacyMatchesSnapshot()
+			zd.mu.Unlock()
+			if ok {
+				break
+			}
+			time.Sleep(5 * time.Millisecond)
+		}
+		zd.mu.Lock()
+		ok := zd.workingSet == nil && zd.legacyMatchesSnapshot()
+		zd.mu.Unlock()
+		if !ok {
+			t.Fatalf("dual-write mismatch after publish cycle %d", i)
+		}
+	}
+
+	cancel()
+	wg.Wait()
 }
 
 func coreRRset(name string, rrtype uint16, ip string) core.RRset {

@@ -1,6 +1,8 @@
 package tdns
 
 import (
+	"fmt"
+	"strings"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -29,9 +31,85 @@ type PendingChanges struct {
 	Deleted         []pendingOwnerChange
 }
 
+// PendingChangesView is the JSON/API representation of pendingChanges().
+type PendingChangesView struct {
+	PublishedSerial uint32                   `json:"published_serial"`
+	PublishQueued   bool                     `json:"publish_queued"`
+	Added           []string                 `json:"added,omitempty"`
+	Replaced        []PendingOwnerChangeJSON `json:"replaced,omitempty"`
+	Deleted         []PendingOwnerChangeJSON `json:"deleted,omitempty"`
+}
+
+func pendingChangesView(pc *PendingChanges) *PendingChangesView {
+	if pc == nil {
+		return nil
+	}
+	v := &PendingChangesView{
+		PublishedSerial: pc.PublishedSerial,
+		PublishQueued:   pc.PublishQueued,
+		Added:           append([]string(nil), pc.Added...),
+	}
+	for _, ch := range pc.Replaced {
+		v.Replaced = append(v.Replaced, pendingOwnerChangeJSON(ch))
+	}
+	for _, ch := range pc.Deleted {
+		v.Deleted = append(v.Deleted, pendingOwnerChangeJSON(ch))
+	}
+	return v
+}
+
+func pendingOwnerChangeJSON(ch pendingOwnerChange) PendingOwnerChangeJSON {
+	out := PendingOwnerChangeJSON{
+		Owner:   ch.Owner,
+		RRtypes: append([]uint16(nil), ch.RRtypes...),
+	}
+	for _, t := range ch.RRtypes {
+		out.TypeNames = append(out.TypeNames, dns.TypeToString[t])
+	}
+	return out
+}
+
+// FormatPendingChanges returns a human-readable summary for CLI output.
+func FormatPendingChanges(pc *PendingChanges) string {
+	if pc == nil {
+		return "no pending changes"
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "published serial: %d\n", pc.PublishedSerial)
+	fmt.Fprintf(&b, "publish queued: %v\n", pc.PublishQueued)
+	for _, name := range pc.Added {
+		fmt.Fprintf(&b, "added owner: %s\n", name)
+	}
+	for _, ch := range pc.Replaced {
+		fmt.Fprintf(&b, "replaced owner: %s types: %s\n", ch.Owner, rrtypesString(ch.RRtypes))
+	}
+	for _, ch := range pc.Deleted {
+		fmt.Fprintf(&b, "deleted owner: %s types: %s\n", ch.Owner, rrtypesString(ch.RRtypes))
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+func rrtypesString(types []uint16) string {
+	if len(types) == 0 {
+		return "-"
+	}
+	names := make([]string, len(types))
+	for i, t := range types {
+		names[i] = dns.TypeToString[t]
+	}
+	return strings.Join(names, ",")
+}
+
 type pendingOwnerChange struct {
 	Owner   string
 	RRtypes []uint16
+}
+
+// PendingOwnerChangeJSON is the API/CLI view of a pending owner delta.
+type PendingOwnerChangeJSON struct {
+	Owner     string   `json:"owner"`
+	RRtypes   []uint16 `json:"rrtypes"`
+	TypeNames []string `json:"type_names,omitempty"`
 }
 
 func parsePublishCadence(s string) (time.Duration, error) {
