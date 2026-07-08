@@ -32,9 +32,8 @@ var rootCmd = &cobra.Command{
 	Long:  `A DNS lookup tool with both command-line and interactive interfaces`,
 	Args:  cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
-		if showVersion {
-			tdns.PrintVersionAndExit()
-		}
+		// --version is handled in initImr (via cobra.OnInitialize, which
+		// runs before Run); see the note there.
 		if cliflag {
 			cli.StartInteractiveMode() // old go-prompt version
 			// StartInteractiveMode() // old go-prompt version
@@ -136,6 +135,14 @@ func initConfig() {
 //
 // It receives a context that should be cancelled on SIGINT or SIGTERM (handled in main), calls cli.Conf.MainInit with the default IMR config file, and aborts via tdns.Shutdowner on initialization errors. It installs a SIGHUP watcher that triggers cli.Conf.ParseZones to reload zones, logs reload errors, and then creates the API router with cli.Conf.SetupSimpleAPIRouter. Finally it starts the IMR via cli.Conf.StartImr and invokes tdns.Shutdowner on any fatal startup errors.
 func initImr() {
+	// --version must be answered before any startup work. initImr runs via
+	// cobra.OnInitialize, i.e. BEFORE rootCmd.Run, and it performs the full
+	// MainInit + StartImr, so a --version check in Run would be too late
+	// (the server would already be starting). Handle it here, first.
+	if showVersion {
+		tdns.PrintVersionAndExit()
+	}
+
 	// Get context from cobra command context
 	appCtx = rootCmd.Context()
 	if appCtx == nil {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -87,6 +88,7 @@ func loadAlgorithmProfiles() map[string]algorithmProfile {
 			for a := range cf.Costs {
 				avail = append(avail, a)
 			}
+			sort.Strings(avail) // stable, greppable diagnostic output
 			fmt.Fprintf(os.Stderr, "note: no costs for arch %q in %s (have: %s); set algorithms.costarch to pick one\n",
 				arch, path, strings.Join(avail, ", "))
 		}
