@@ -1,0 +1,25 @@
+# Algorithms dog links an implementation for (full set: dog validates
+# RRSIGs across the whole algorithm range).
+# One registry NAME per line (see dnssec-algorithms/registry/registry.go).
+# genalgs resolves each name to its codepoint, caps, package, and lib group,
+# checks the lib is installed, and emits registered_algs.go + metadata_algs.go.
+# Pure-Go (no lib needed):
+MLDSA44
+SLHDSA128S
+MLDSA65
+MLDSA87
+# liboqs-backed:
+FALCON512
+MAYO1
+MAYO2
+MAYO3
+MAYO5
+FALCON1024
+SNOVA24_5_4
+SNOVA37_17_2
+SNOVA25_8_3
+CROSSRSDPG128SMALL
+# SQIsign reference lib:
+SQISIGN1
+# QR-UOV reference lib:
+QRUOV_Q31_L3

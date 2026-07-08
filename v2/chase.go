@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	algorithms "github.com/johanix/tdns/v2/algorithms"
 	cache "github.com/johanix/tdns/v2/cache"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -145,12 +146,34 @@ func (c *Chaser) Chase(qname string, qtype uint16) (*ChainResult, error) {
 			}
 			link.DS = ds
 			if len(ds) == 0 {
-				// No DS at parent — chain is broken or zone is unsigned.
-				// Without NSEC/NSEC3 proof support here, we report
-				// Indeterminate rather than Insecure. A full proof-of-no-DS
-				// walk is a future enhancement.
+				// No DS at parent. Two very different cases:
+				//
+				//   (a) `zone` is not a zone cut at all — just a label
+				//       boundary within the parent (e.g. www.iis.se, which
+				//       has no NS/SOA of its own). It must NOT appear in the
+				//       chain: the queried leaf is served from the enclosing
+				//       zone, and its RRSIG validates against THAT zone's
+				//       keys. Skip this candidate entirely, leaving the
+				//       previous (real) zone as the deepest.
+				//
+				//   (b) `zone` is a genuine delegation with no DS — an
+				//       unsigned/insecure child. Without NSEC/NSEC3 proof
+				//       support here we report Indeterminate rather than
+				//       Insecure (a full proof-of-no-DS walk is future work).
+				cut, cutErr := c.isZoneCut(zone)
+				if cutErr == nil && !cut {
+					continue // case (a): confirmed non-cut, drop it
+				}
+				// Case (b), or the zone-cut check itself failed: keep the
+				// candidate on the Indeterminate path. A lookup failure must
+				// not be mistaken for a non-cut (which would silently drop a
+				// possibly-real delegation), so we do NOT skip on error.
 				link.Status = ChainStatusIndeterminate
-				link.Notes = append(link.Notes, "no DS record at parent (and no NSEC proof checked)")
+				if cutErr != nil {
+					link.Notes = append(link.Notes, fmt.Sprintf("no DS at parent; zone-cut check failed: %v", cutErr))
+				} else {
+					link.Notes = append(link.Notes, "no DS record at parent (and no NSEC proof checked)")
+				}
 				result.Links = append(result.Links, link)
 				result.Status = worstStatus(result.Status, ChainStatusIndeterminate)
 				continue
@@ -318,6 +341,33 @@ func (c *Chaser) queryDNSKEY(zone string) ([]*dns.DNSKEY, []*dns.RRSIG, error) {
 	return keys, sigs, nil
 }
 
+// isZoneCut reports whether name is an actual zone apex — i.e. a
+// delegation point — rather than merely a label boundary within a zone.
+// A candidate like "www.iis.se" is NOT a zone cut: it has no NS/SOA of its
+// own, so it must not be treated as a zone in the chase (doing so invents
+// a phantom zone with no DS/DNSKEY and derails validation of the leaf,
+// which is actually served from the enclosing zone). A cut exists when the
+// name has an SOA (its own apex) or NS records (a delegation).
+//
+// The returned error distinguishes "definitely not a cut" (false, nil)
+// from "could not determine" (false, err): a transient SOA/NS lookup
+// failure must NOT be mistaken for a non-cut, or a real delegation could
+// be silently dropped. The caller keeps such a candidate on the
+// Indeterminate path instead of skipping it.
+func (c *Chaser) isZoneCut(name string) (bool, error) {
+	if rrs, _, err := c.queryRRset(name, dns.TypeSOA); err != nil {
+		return false, err
+	} else if len(rrs) > 0 {
+		return true, nil
+	}
+	if rrs, _, err := c.queryRRset(name, dns.TypeNS); err != nil {
+		return false, err
+	} else if len(rrs) > 0 {
+		return true, nil
+	}
+	return false, nil
+}
+
 // verifyLeafSig verifies the answer RRset's RRSIG against the deepest
 // zone's DNSKEY RRset. Tries each (sig, key) pair until one validates,
 // then returns Secure. If a sig was present but no key verified, returns
@@ -420,9 +470,27 @@ func worstStatus(a, b ChainStatus) ChainStatus {
 	return b
 }
 
-// RenderChain formats a ChainResult as a human-readable tree on w.
+// algField formats an algorithm number for chain display. When
+// algNames is set (dog +algchase), it appends the algorithm's registered
+// name, e.g. "alg=214 (CROSSRSDPG128SMALL)" — or "alg=250 (unknown)" for
+// a codepoint this binary has no metadata for. Otherwise it is the bare
+// "alg=N".
+func algField(alg uint8, algNames bool) string {
+	if !algNames {
+		return fmt.Sprintf("alg=%d", alg)
+	}
+	name, ok := algorithms.AlgorithmName(alg)
+	if !ok {
+		name = "unknown"
+	}
+	return fmt.Sprintf("alg=%d (%s)", alg, name)
+}
+
+// RenderChain formats a ChainResult as a human-readable tree on w. When
+// algNames is set (dog +algchase), algorithm numbers in the DS and
+// DNSKEY summaries are annotated with their registered names.
 // Used by `dog sigchase` and (soon) by `imr explain`.
-func RenderChain(result *ChainResult, w io.Writer) {
+func RenderChain(result *ChainResult, w io.Writer, algNames bool) {
 	if result == nil {
 		fmt.Fprintln(w, "chain: nil result")
 		return
@@ -439,7 +507,7 @@ func RenderChain(result *ChainResult, w io.Writer) {
 		if len(link.DS) > 0 {
 			tags := make([]string, 0, len(link.DS))
 			for _, ds := range link.DS {
-				tags = append(tags, fmt.Sprintf("keytag=%d alg=%d digest_type=%d", ds.KeyTag, ds.Algorithm, ds.DigestType))
+				tags = append(tags, fmt.Sprintf("keytag=%d %s digest_type=%d", ds.KeyTag, algField(ds.Algorithm, algNames), ds.DigestType))
 			}
 			sort.Strings(tags)
 			fmt.Fprintf(w, "%s   DS at parent:   %s\n", indent, strings.Join(tags, ", "))
@@ -451,7 +519,7 @@ func RenderChain(result *ChainResult, w io.Writer) {
 				if k.Flags&257 == 257 {
 					role = "KSK"
 				}
-				tags = append(tags, fmt.Sprintf("%s keytag=%d alg=%d", role, k.KeyTag(), k.Algorithm))
+				tags = append(tags, fmt.Sprintf("%s keytag=%d %s", role, k.KeyTag(), algField(k.Algorithm, algNames)))
 			}
 			sort.Strings(tags)
 			fmt.Fprintf(w, "%s   DNSKEY:         %s\n", indent, strings.Join(tags, ", "))

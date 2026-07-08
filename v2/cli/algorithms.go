@@ -151,30 +151,33 @@ func printServerAlgorithms(role string, use algUse) error {
 		return rows[i].Number < rows[j].Number
 	})
 
-	profiles := loadAlgorithmProfiles()
+	// Signing/validation costs are the one remaining piece of enrichment
+	// that is NOT server-reported: they are machine-dependent and come from
+	// the optional, per-arch cost profile (algorithms.yaml). Everything
+	// else — sizes, NIST level, maturity, description — is a static fact the
+	// server now reports in AlgorithmInfo.Facts, so the table is always
+	// enriched, with or without a cost profile configured.
+	costs := loadAlgorithmProfiles()
 	fmt.Printf("Algorithms supported by the %s server:\n", role)
 
-	if len(profiles) == 0 {
-		for _, a := range rows {
-			fmt.Printf("  %-16s %d\n", a.Name, a.Number)
-		}
-		return nil
-	}
-
-	// Enriched table. PUBKEY/SIG are the raw public-key and signature
-	// byte counts, excluding the surrounding DNSKEY/RRSIG record framing
-	// (RDATA header, owner/signer name, etc.); they are what the profiles
-	// measure, not the size of a complete record. SIGN/VRFY are relative
-	// signing/validation performance hints (cost relative to ED25519 = 1).
-	// "-" means the profile did not specify the field. A long DESCRIPTION
-	// wraps onto continuation rows so it cannot stretch the table.
+	// PUBKEY/SIG are the raw public-key and signature byte counts,
+	// excluding the surrounding DNSKEY/RRSIG record framing; they are the
+	// algorithm sizes, not the size of a complete record. SIGN/VRFY are
+	// relative signing/validation performance hints (cost relative to
+	// ED25519 = 1), shown only when a cost profile is configured. "-" means
+	// the value was not specified. A long DESCRIPTION wraps onto
+	// continuation rows so it cannot stretch the table.
 	//
-	// CP, SIGN, VRFY and SECKEY are only shown in verbose mode (-v); the
+	// CP, SECKEY, SIGN and VRFY are only shown in verbose mode (-v); the
 	// default listing collapses them to keep the common columns readable.
 	verbose := tdns.Globals.Verbose
-	if verbose {
+	haveCosts := len(costs) > 0
+	switch {
+	case verbose && haveCosts:
 		fmt.Println("  (PUBKEY/SIG = raw key & signature bytes, excl. RR framing; SIGN/VRFY = performance hints; '-' = unspecified)")
-	} else {
+	case verbose:
+		fmt.Println("  (PUBKEY/SIG = raw key & signature bytes, excl. RR framing; '-' = unspecified; configure a cost profile for SIGN/VRFY)")
+	default:
 		fmt.Println("  (PUBKEY/SIG = raw key & signature bytes, excl. RR framing; '-' = unspecified; -v adds CP, SECKEY, SIGN, VRFY)")
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
@@ -182,7 +185,9 @@ func printServerAlgorithms(role string, use algUse) error {
 	// Build the column set for the requested verbosity. cells() yields the
 	// value cells for one algorithm row in the same column order; the
 	// header and the per-row formatting share this single source of truth
-	// so they cannot drift apart.
+	// so they cannot drift apart. SIGN/VRFY appear only in verbose mode AND
+	// only when a cost profile is configured.
+	showCosts := verbose && haveCosts
 	header := []string{"NAME"}
 	if verbose {
 		header = append(header, "CP")
@@ -192,39 +197,40 @@ func printServerAlgorithms(role string, use algUse) error {
 		header = append(header, "SECKEY")
 	}
 	header = append(header, "LVL")
-	if verbose {
+	if showCosts {
 		header = append(header, "SIGN", "VRFY")
 	}
 	header = append(header, "MATURITY", "DESCRIPTION")
-	cells := func(a algregistry.AlgorithmInfo, p algorithmProfile, desc string) []string {
+	cells := func(a algregistry.AlgorithmInfo, cost algorithmProfile, desc string) []string {
+		f := a.Facts
 		c := []string{a.Name}
 		if verbose {
 			c = append(c, strconv.Itoa(int(a.Number)))
 		}
-		c = append(c, algIntCol(p.PublicKeyBytes), algIntCol(p.SignatureBytes))
+		c = append(c, algIntCol(f.PubKeyBytes), algIntCol(f.SigBytes))
 		if verbose {
-			c = append(c, algIntCol(p.SecretKeyBytes))
+			c = append(c, algIntCol(f.SecKeyBytes))
 		}
-		c = append(c, algIntCol(p.SecurityLevel))
-		if verbose {
-			c = append(c, algIntCol(p.SigningCost), algIntCol(p.ValidationCost))
+		c = append(c, algIntCol(f.SecurityLevel))
+		if showCosts {
+			c = append(c, algIntCol(cost.SigningCost), algIntCol(cost.ValidationCost))
 		}
-		return append(c, algStrCol(p.Maturity), algStrCol(desc))
+		return append(c, algStrCol(f.Maturity), algStrCol(desc))
 	}
 	descCol := len(header) - 1
 
 	fmt.Fprintln(tw, "  "+strings.Join(header, "\t"))
 	wrapWidth := descWrapWidth()
 	for _, a := range rows {
-		// viper lower-cases config keys, so the profile map is keyed by
-		// the lower-cased algorithm name.
-		p := profiles[strings.ToLower(a.Name)]
-		desc := wrapText(p.Description, wrapWidth)
+		// viper lower-cases config keys, so the cost map is keyed by the
+		// lower-cased algorithm name.
+		cost := costs[strings.ToLower(a.Name)]
+		desc := wrapText(a.Facts.Description, wrapWidth)
 		firstLine, contLines := "", []string(nil)
 		if len(desc) > 0 {
 			firstLine, contLines = desc[0], desc[1:]
 		}
-		fmt.Fprintln(tw, "  "+strings.Join(cells(a, p, firstLine), "\t"))
+		fmt.Fprintln(tw, "  "+strings.Join(cells(a, cost, firstLine), "\t"))
 		// Continuation rows: enough empty leading cells so the wrapped
 		// text lands under the DESCRIPTION column.
 		for _, line := range contLines {

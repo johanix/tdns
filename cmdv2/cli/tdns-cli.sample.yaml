@@ -1,9 +1,16 @@
-# Pull in shareable, non-secret algorithm enrichment data (key/signature
-# sizes, relative costs, maturity) kept separate from this host-local,
-# secret-bearing config. Consumed by `tdns-cli ... keystore <sig0|dnssec>
-# algorithms`. See algorithms.sample.yaml.
-include:
-   - /etc/tdns/algorithms.yaml
+# The `tdns-cli ... keystore <sig0|dnssec> algorithms` listing shows
+# algorithm sizes, NIST level, maturity, and description — these come from
+# the server (no config needed). The only extra data is per-CPU signing/
+# validation cost, which is machine-dependent and optional:
+#
+# algorithms:
+#    # Multi-arch cost table produced by dnssec-algorithms/cmd/algbench
+#    # (algorithm-costs.yaml). Point at a copy, or at the file in a
+#    # dnssec-algorithms checkout. Omit to show the listing without cost
+#    # columns.
+#    costsfile: /etc/tdns/algorithm-costs.yaml
+#    # Which architecture's costs to show. Defaults to this host's arch.
+#    # costarch: amd64
 
 apiservers:
    - name:              tdns-server

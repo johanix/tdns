@@ -34,6 +34,7 @@ var server string
 var cfgFile string
 var trustAnchorFile string // -k / --trust-anchor
 var tsigKeyFlag string      // -y / --tsig : [algorithm:]name:secret (dig-compatible)
+var showVersion bool        // --version : print version + supported algorithms, then exit
 
 var options = make(map[string]string, 2)
 
@@ -69,9 +70,13 @@ var rootCmd = &cobra.Command{
 		+MULTI: Present RRs in multi-line format
 		+SHORT: Only print the RDATA of the Answer RRset (dig-compatible; same as --short)
 		+SIGCHASE or +SC: Walk and verify the DNSSEC chain for the qname/qtype, emitting a per-link verdict tree. Server must be a recursive resolver. Trust anchors come from --trust-anchor, the IMR config, or the compiled-in root KSKs.
+		+ALGCHASE or +AC: Like +SIGCHASE, but also annotate each algorithm number in the chain with its algorithm name (e.g. "alg=13 (ECDSAP256SHA256)"). Implies +SIGCHASE.
 	`,
 
 	Run: func(cmd *cobra.Command, args []string) {
+		if showVersion {
+			tdns.PrintVersionAndExit()
+		}
 
 		var cleanArgs []string
 		var err error
@@ -244,7 +249,7 @@ var rootCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "Error: chase failed: %v\n", err)
 					os.Exit(1)
 				}
-				tdns.RenderChain(result, os.Stdout)
+				tdns.RenderChain(result, os.Stdout, options["algchase"] == "true")
 				continue
 			}
 
@@ -485,6 +490,7 @@ func init() {
 
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v", false, "Verbose mode")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debugging output")
+	rootCmd.PersistentFlags().BoolVar(&showVersion, "version", false, "print version and supported algorithms, then exit")
 	rootCmd.PersistentFlags().BoolVarP(&short, "short", "", false, "Only list RRs that are part of the Answer section")
 	rootCmd.PersistentFlags().StringVarP(&port, "port", "p", "53", "Port to send DNS query to")
 	rootCmd.PersistentFlags().StringVarP(&trustAnchorFile, "trust-anchor", "k", "", "Path to DNSSEC trust anchor file (zone-file format DS or DNSKEY records). Used by +sigchase. Default: read from "+tdns.DefaultImrCfgFile+" or fall back to compiled-in root KSK DS records.")
@@ -554,6 +560,14 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 		// RRset signature) link and the final leaf RRSIG against the
 		// deepest zone's keys.
 		options["sigchase"] = "true"
+		return options, nil
+	case "+ALGCHASE", "+ALGCHA", "+AC":
+		// Annotate each algorithm number in the +sigchase chain output
+		// with its algorithm name (from the in-process registry), e.g.
+		// "alg=214 (CROSSRSDPG128SMALL)". Meaningless on its own — it
+		// enriches what +sigchase already walks — so it implies +sigchase.
+		options["sigchase"] = "true"
+		options["algchase"] = "true"
 		return options, nil
 	case "+TCP":
 		// A pre-existing "Do53" is the default ParseServer writes when

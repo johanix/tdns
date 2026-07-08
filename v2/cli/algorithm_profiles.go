@@ -6,56 +6,116 @@ package cli
 import (
 	"fmt"
 	"os"
+	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 
 	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
 )
 
-// algorithmProfile is optional, CLI-side descriptive metadata about a
-// DNSSEC/SIG(0) algorithm: key and signature sizes, relative cost,
-// maturity, and a free-form note. It exists purely to *annotate* the
-// `keystore ... algorithms` listing during PQ algorithm experimentation
-// — it never feeds name<->codepoint resolution or what a server reports
-// as supported (that stays server-authoritative).
-//
-// Profiles are read from the optional "algorithms" map in the CLI
-// config, keyed by algorithm name. The data is deliberately kept out of
-// the (host-local, secret-bearing) main CLI config and pulled in from a
-// shareable file such as /etc/tdns/algorithms.yaml via an "include:".
-//
-// Every field is optional. A zero value means "not provided" and is
-// rendered as "-" in the listing; because no real key/signature size or
-// cost is legitimately zero, that convention is unambiguous here.
+// algorithmProfile is CLI-side cost data for a DNSSEC/SIG(0) algorithm:
+// relative signing and validation cost. It is the one piece of listing
+// enrichment that is NOT server-reported, because cost is machine-
+// dependent (it shifts across CPU architectures) — the static facts
+// (sizes, NIST level, maturity, description) come from the server in
+// AlgorithmInfo.Facts. Cost never feeds name<->codepoint resolution or
+// what a server reports as supported (that stays server-authoritative).
 type algorithmProfile struct {
-	Description    string `mapstructure:"description"`
-	PublicKeyBytes int    `mapstructure:"publickeybytes"`
-	SignatureBytes int    `mapstructure:"signaturebytes"`
-	SecretKeyBytes int    `mapstructure:"secretkeybytes"`
-	SecurityLevel  int    `mapstructure:"securitylevel"`  // NIST PQ level 1/3/5; 0 = unspecified
-	Maturity       string `mapstructure:"maturity"`       // final | draft | candidate | builtin
-	SigningCost    int    `mapstructure:"signingcost"`    // relative to ED25519 (= 1); 0 = unknown
-	ValidationCost int    `mapstructure:"validationcost"` // relative to ED25519 (= 1); 0 = unknown
+	SigningCost    int // relative to ED25519 (= 1); 0 = unknown
+	ValidationCost int
 }
 
-// loadAlgorithmProfiles returns the "algorithms.profiles" enrichment map
-// from the (already include-expanded) CLI config, or nil if none is
-// configured.
+// costsYAML mirrors the multi-arch algorithm-costs.yaml produced by
+// dnssec-algorithms/cmd/algbench:
 //
-// viper lower-cases all config keys, so the returned map is keyed by the
-// lower-cased algorithm name; callers must look up with
-// strings.ToLower(name). Malformed config is non-fatal — enrichment is
-// optional, so we warn and fall back to the bare listing.
+//	costs:
+//	   arm64:
+//	      MLDSA44: { signing: 8.5, validation: 2.0 }
+//	   amd64:
+//	      MLDSA44: { signing: 5.9, validation: 2.1 }
+type costsYAML struct {
+	Costs map[string]map[string]struct {
+		Signing    float64 `yaml:"signing"`
+		Validation float64 `yaml:"validation"`
+	} `yaml:"costs"`
+}
+
+// loadAlgorithmProfiles returns the per-algorithm cost map for the listing,
+// keyed by the lower-cased algorithm name (viper lower-cases config keys,
+// and callers look up with strings.ToLower(name)). Returns nil when no
+// cost file is configured, when it cannot be read/parsed, or when it has
+// no block for the selected architecture — in every such case the listing
+// simply omits the SIGN/VRFY columns.
+//
+// Configuration:
+//
+//	algorithms.costsfile   path to algorithm-costs.yaml (from a
+//	                       dnssec-algorithms checkout, or copied locally)
+//	algorithms.costarch    which architecture's costs to show; defaults to
+//	                       this host's runtime.GOARCH
+//
+// Costs are machine-dependent; the shown arch may differ from the server's
+// arch, so the values are hints. Malformed input is non-fatal (warn +
+// omit).
 func loadAlgorithmProfiles() map[string]algorithmProfile {
-	if !viper.IsSet("algorithms.profiles") {
+	path := viper.GetString("algorithms.costsfile")
+	if path == "" {
 		return nil
 	}
-	var profiles map[string]algorithmProfile
-	if err := viper.UnmarshalKey("algorithms.profiles", &profiles); err != nil {
-		fmt.Fprintf(os.Stderr, "warning: ignoring malformed 'algorithms.profiles' config section: %v\n", err)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "warning: cannot read algorithms.costsfile %q: %v\n", path, err)
 		return nil
 	}
-	return profiles
+	var cf costsYAML
+	if err := yaml.Unmarshal(data, &cf); err != nil {
+		fmt.Fprintf(os.Stderr, "warning: ignoring malformed algorithms.costsfile %q: %v\n", path, err)
+		return nil
+	}
+
+	arch := viper.GetString("algorithms.costarch")
+	if arch == "" {
+		arch = runtime.GOARCH
+	}
+	block, ok := cf.Costs[arch]
+	if !ok {
+		// No costs for this arch: not an error, just no cost columns. Name
+		// the arches that ARE present so the operator can set costarch.
+		if len(cf.Costs) > 0 {
+			avail := make([]string, 0, len(cf.Costs))
+			for a := range cf.Costs {
+				avail = append(avail, a)
+			}
+			sort.Strings(avail) // stable, greppable diagnostic output
+			fmt.Fprintf(os.Stderr, "note: no costs for arch %q in %s (have: %s); set algorithms.costarch to pick one\n",
+				arch, path, strings.Join(avail, ", "))
+		}
+		return nil
+	}
+
+	out := make(map[string]algorithmProfile, len(block))
+	for name, c := range block {
+		out[strings.ToLower(name)] = algorithmProfile{
+			SigningCost:    roundCost(c.Signing),
+			ValidationCost: roundCost(c.Validation),
+		}
+	}
+	return out
+}
+
+// roundCost rounds a relative cost to the nearest integer for the listing.
+// A positive-but-sub-1 cost (a fast algorithm, e.g. RSA verify at 0.8)
+// rounds up to 1 rather than to 0, so it does not read as "unspecified".
+func roundCost(f float64) int {
+	if f <= 0 {
+		return 0
+	}
+	if f < 1 {
+		return 1
+	}
+	return int(f + 0.5)
 }
 
 // algIntCol renders an optional integer profile field for the listing:
