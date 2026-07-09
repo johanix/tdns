@@ -56,6 +56,16 @@ func matchesConfiguredAddrs(hostports []string, rrset *core.RRset) bool {
 // for this zone. It delegates to the chosen mechanism (svcb|tsync) and assigns
 // zd.TransportSignal and zd.AddTransportSignal when successful.
 func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
+	// Resolve DNSSEC keys BEFORE taking zd.mu: signing the transport signal with
+	// a nil dak can reach PublishDnskeyRRs, which locks zd.mu, so signing under
+	// the lock with an unresolved dak self-deadlocks during key bootstrap.
+	var dak *DnssecKeys
+	if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
+		var err error
+		if dak, err = zd.EnsureActiveDnssecKeys(zd.KeyDB); err != nil {
+			return err
+		}
+	}
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
 	zd.ensureWorkingSet()
@@ -66,9 +76,9 @@ func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
 			"zone", zd.ZoneName)
 		return nil
 	case "svcb":
-		return zd.createTransportSignalSVCB(conf)
+		return zd.createTransportSignalSVCB(conf, dak)
 	case "tsync":
-		return zd.createTransportSignalTSYNC(conf)
+		return zd.createTransportSignalTSYNC(conf, dak)
 	default:
 		lgDns.Debug("CreateTransportSignalRRs: unknown transport type, skipping",
 			"type", conf.Service.Transport.Type,
@@ -90,7 +100,7 @@ func (zd *ZoneData) commitTransportSignalLocked(nsOwner string, rrset core.RRset
 }
 
 // SVCB path
-func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
+func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys) error {
 	apex := zd.stagedOwner(zd.ZoneName)
 	if apex == nil {
 		return fmt.Errorf("zone apex not found")
@@ -319,7 +329,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 						"ns", nsName)
 					lgDns.Debug("CreateTransportSignalRRs(SVCB): SVCB", "svcb", tmp.String())
 
-					if _, err := zd.SignRRset(zd.TransportSignal, "", nil, false, nil); err != nil {
+					if _, err := zd.SignRRset(zd.TransportSignal, "", dak, false, nil); err != nil {
 						lgDns.Debug("CreateTransportSignalRRs(SVCB): error signing SVCB", "owner", "_dns."+nsName, "err", err)
 					}
 					// Add into zone data
@@ -340,7 +350,7 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config) error {
 }
 
 // TSYNC path
-func (zd *ZoneData) createTransportSignalTSYNC(conf *Config) error {
+func (zd *ZoneData) createTransportSignalTSYNC(conf *Config, dak *DnssecKeys) error {
 	apex := zd.stagedOwner(zd.ZoneName)
 	if apex == nil {
 		return fmt.Errorf("zone apex not found")
@@ -455,7 +465,7 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config) error {
 					"ns", nsName,
 					"rr", trr.String())
 				// Sign TSYNC if online signing is enabled; QueryResponder will include RRSIGs when present
-				if _, err := zd.SignRRset(zd.TransportSignal, "", nil, false, nil); err != nil {
+				if _, err := zd.SignRRset(zd.TransportSignal, "", dak, false, nil); err != nil {
 					lgDns.Debug("createTransportSignalTSYNC: error signing TSYNC", "owner", "_dns."+nsName, "err", err)
 				}
 				return nil

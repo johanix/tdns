@@ -536,7 +536,11 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 	// log.Printf("**** ApplyZoneUpdateToZoneData: ur=%+v", ur)
 
 	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
-	if err != nil && (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && (err != nil || dak == nil || len(dak.KSKs) == 0) {
+	// Resolve keys (generating if needed) BEFORE taking zd.mu below — including
+	// the (nil,nil) "no error, no keys" case. Otherwise SignRRset is later called
+	// under zd.mu with a nil dak, reaches PublishDnskeyRRs, and self-deadlocks
+	// re-locking zd.mu.
+	if (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && (err != nil || dak == nil || len(dak.KSKs) == 0) {
 		lg.Debug("ApplyZoneUpdateToZoneData: GetDnssecKeys failed, attempting to ensure keys exist", "zone", zd.ZoneName)
 		// Try to ensure active keys exist (will generate if needed)
 		dak, err = zd.EnsureActiveDnssecKeys(kdb)
