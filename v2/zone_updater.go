@@ -623,6 +623,12 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 				RRs:    []dns.RR{},
 				RRSIGs: []dns.RR{},
 			}
+		} else {
+			// Get returns an RRset whose RRs/RRSIGs slices alias the published
+			// snapshot's backing arrays (cloneOwner shares them). The in-place
+			// RemoveRR / append / SignRRset below would otherwise tear the live
+			// view for concurrent readers — clone before mutating.
+			rrset = cloneRRset(rrset)
 		}
 
 		switch class {
