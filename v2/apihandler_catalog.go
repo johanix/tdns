@@ -206,6 +206,7 @@ func handleCatalogDelete(catalogZoneName string, resp *CatalogResponse) error {
 	lgApi.Info("deleting catalog zone", "zone", catalogZoneName)
 
 	// Remove the catalog zone from Zones map
+	stopZonePublisher(catalogZoneName)
 	Zones.Remove(catalogZoneName)
 
 	// Remove catalog membership (it's a regular map, needs mutex)
@@ -330,6 +331,7 @@ func handleCatalogZoneDelete(catalogZoneName, zoneName string, resp *CatalogResp
 			lgApi.Info("auto-removing zone from catalog", "zone", zoneName, "catalog", catalogZoneName)
 
 			// Remove from Zones map
+			stopZonePublisher(zoneName)
 			Zones.Remove(zoneName)
 
 			// Remove from dynamic config file

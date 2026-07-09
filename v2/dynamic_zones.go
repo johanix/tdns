@@ -798,6 +798,7 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	}
 	Zones.Set(name, zd)
 	if err := conf.AddDynamicZoneToConfig(zd); err != nil {
+		zd.stopPublisher()
 		Zones.Remove(name)
 		rollbackKey()
 		return "", fmt.Errorf("failed to persist dynamic zone %s: %w", name, err)
@@ -858,6 +859,7 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 		return "", fmt.Errorf("zone %s is not API-managed and cannot be deleted here", name)
 	}
 
+	stopZonePublisher(name)
 	Zones.Remove(name)
 	// Bump generation AFTER removing from the map so any refresh goroutine that
 	// snapshotted the old generation fails the pre-persist guard (B5b) and does

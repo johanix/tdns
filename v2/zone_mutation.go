@@ -414,6 +414,15 @@ func (zd *ZoneData) stopPublisher() {
 	})
 }
 
+// stopZonePublisher stops the per-zone publisher goroutine for the zone
+// currently registered under name (if any), so it does not leak when the zone is
+// removed from the Zones registry.
+func stopZonePublisher(name string) {
+	if zd, ok := Zones.Get(name); ok && zd != nil {
+		zd.stopPublisher()
+	}
+}
+
 func (zd *ZoneData) wakePublisher() {
 	select {
 	case zd.publishWake <- struct{}{}:
