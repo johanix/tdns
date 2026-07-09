@@ -57,4 +57,4 @@ require (
 // pluggable Algorithm interface. ML-DSA-44 itself lives out-of-tree
 // in github.com/johanix/dnssec-algorithms/mldsa44 and is wired in by
 // blank import from each binary's main package.
-replace github.com/miekg/dns => github.com/johanix/dns v0.0.0-20260608092609-2a28f8f1484d
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.1
