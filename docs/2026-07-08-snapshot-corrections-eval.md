@@ -180,3 +180,58 @@ C1/M1 read-path refactor and (2) a testbed smoke test of query + AXFR under a
 concurrent publish.
 
 Branch state: three signed commits on top of the B3 work; **not yet pushed**.
+
+## Transport-signal redesign — option (b) (2026-07-09)
+
+Follow-up beyond the eval defects, addressing the CodeRabbit finding that the
+TSYNC transport signal was **signed after commit** (the snapshot froze an
+unsigned copy) and the broader smell that a separate pre-signed `TransportSignal`
+field duplicated data the resigner already maintains on the stored owner RRset.
+
+**Decision (agreed with maintainer): option (b) — retire the separate field;
+inject from the stored, resigner-maintained owner RRset.** Rationale: pre-sign
+and store everything known beforehand and let the resigner refresh it; reserve
+online signing for genuinely-ephemeral data (CDE). The transport signal must stay
+a stored, directly-queryable RRset (unlike CDE's ephemeral NSEC) so a resolver
+can explicitly fetch it and middleboxes/adversaries cannot strip it.
+
+What changed:
+
+- **Retired** `zd.TransportSignal`, `snap.TransportSignal`, `zd.wsTransportSignal`,
+  `zd.AddTransportSignal`, and helpers `cloneTransportSignal` /
+  `publishedTransportSignal` / `rrMatchesTransportSignal`, plus the
+  `transportSignalInAnswer` plumbing through the query path. The snapshot keeps
+  only `signalSynth map[string]*core.RRset` — the synthesized fallback for the
+  one case with no authoritative home (Case A, below).
+- **Stored under `_dns.<ns>`, signed before publish.** In-bailiwick signals are
+  synthesized, signed, and staged as real `_dns.<ns>` owner RRsets; the resigner
+  keeps their signatures fresh. This fixes the TSYNC sign-after-commit ordering
+  (no late-signed copy exists) and a **latent bug**: the old code stored the synth
+  under the *bare* NS owner (`ns.example.com`) while the RR was named
+  `_dns.ns.example.com`, so it was never directly queryable and was missed by the
+  `_dns.*` refresh carryover.
+- **Injection resolves at query time.** `collectSignalRRsets(snap)` derives the
+  signal owners from the apex NS RRset (the authoritative "which nameservers"
+  source — no parallel name list to keep in sync), and for each reads the stored
+  signed owner RRset from its authoritative home: the pinned snapshot when
+  in-bailiwick, another co-hosted zone's snapshot via `FindZone` when the
+  nameserver's own zone is co-hosted (Case A), or `signalSynth` otherwise. SVCB
+  `Target` / TSYNC `Alias` bridges (Case B) are chased the same way, depth-guarded
+  and deduped. **An alias whose target cannot be resolved is still returned** —
+  the alias is authoritative and SVCB fails safe (the resolver chases it or may
+  already hold the target); dropping it would diverge the injected and
+  direct-query paths.
+- `addTransportSignal` now dedups against the Answer section (so a direct query
+  for the signal is not duplicated into Additional), replacing the removed
+  in-answer flag.
+
+Behavior shifts (intentional): a co-hosted identity nameserver now serves
+provider.com's *authoritative signed* copy rather than an example.com-synthesized
+one (requires the signal enabled on the nameserver's own zone); `_dns.<ns>` is now
+a real owner and thus appears in AXFR; the `ValidateExplicitServerSVCB` gate is no
+longer applied (function retained, now unused).
+
+**Verified:** `go build ./...`, `go vet ./...`, `go test -race -count=1 .` in
+`v2/` — all green. Added `transport_signal_inject_test.go` (5 tests: in-bailiwick
+pickup, cross-zone alias chase, unresolvable-target-still-returns-alias,
+disabled-option, Answer-dedup); the signal path previously had no unit coverage.

@@ -15,12 +15,18 @@ const DefaultPublishCadence = 5 * time.Second
 // boundary. Published snapshots are never mutated in place. The type is
 // unexported so callers cannot mutate served data without going through publish.
 type zoneSnapshot struct {
-	Serial          uint32
-	SOA             *dns.SOA
-	Apex            *OwnerData
-	Data            map[string]*OwnerData
-	TransportSignal *core.RRset
-	IxfrChain       []Ixfr
+	Serial uint32
+	SOA    *dns.SOA
+	Apex   *OwnerData
+	Data   map[string]*OwnerData
+	// signalSynth holds synthesized transport-signal RRsets for owner names
+	// that have no authoritative home on this server (Case A: an out-of-bailiwick
+	// identity nameserver whose own zone we do not host). Keyed by "_dns.<ns>".
+	// Normally empty: in-bailiwick and co-hosted signals are served from their
+	// real, resigner-maintained owner RRsets in Data (or another zone's Data),
+	// not from here. Injection prefers an authoritative copy over a synth entry.
+	signalSynth map[string]*core.RRset
+	IxfrChain   []Ixfr
 }
 
 // PendingChanges describes staged-but-unpublished zone deltas (B2 observability).
@@ -157,12 +163,19 @@ func cloneRRset(rs core.RRset) core.RRset {
 	return out
 }
 
-func cloneTransportSignal(ts *core.RRset) *core.RRset {
-	if ts == nil {
+func cloneSignalSynth(m map[string]*core.RRset) map[string]*core.RRset {
+	if len(m) == 0 {
 		return nil
 	}
-	cloned := cloneRRset(*ts)
-	return &cloned
+	out := make(map[string]*core.RRset, len(m))
+	for k, v := range m {
+		if v == nil {
+			continue
+		}
+		cloned := cloneRRset(*v)
+		out[k] = &cloned
+	}
+	return out
 }
 
 // snapshotMapFromData builds the snapshot's owner map from a source store.
@@ -236,14 +249,6 @@ func (zd *ZoneData) publishedSnapshot() *zoneSnapshot {
 		return nil
 	}
 	return zd.snapshot.Load()
-}
-
-func (zd *ZoneData) publishedTransportSignal() *core.RRset {
-	snap := zd.publishedSnapshot()
-	if snap == nil {
-		return nil
-	}
-	return snap.TransportSignal
 }
 
 // soaForResponse returns a response-only SOA RRset from the published snapshot.

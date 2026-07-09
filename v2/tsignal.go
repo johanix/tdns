@@ -53,8 +53,12 @@ func matchesConfiguredAddrs(hostports []string, rrset *core.RRset) bool {
 }
 
 // CreateTransportSignalRRs orchestrates construction of a transport signal RRset
-// for this zone. It delegates to the chosen mechanism (svcb|tsync) and assigns
-// zd.TransportSignal and zd.AddTransportSignal when successful.
+// for this zone. It delegates to the chosen mechanism (svcb|tsync). In-bailiwick
+// signals are synthesized, SIGNED, and stored as real "_dns.<ns>" owner RRsets
+// (the resigner keeps their signatures fresh); they are served on direct query
+// and injected opportunistically at query time. The only materialized state is
+// the per-snapshot signalSynth fallback for an out-of-bailiwick identity NS whose
+// own zone this server does not host (Case A).
 func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
 	// Resolve DNSSEC keys BEFORE taking zd.mu: signing the transport signal with
 	// a nil dak can reach PublishDnskeyRRs, which locks zd.mu, so signing under
@@ -87,19 +91,97 @@ func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
 	}
 }
 
-func (zd *ZoneData) commitTransportSignalLocked(nsOwner string, rrset core.RRset, signal *core.RRset) {
-	if nsOwner != "" && len(rrset.RRs) > 0 {
-		zd.stageRRsetLocked(nsOwner, rrset)
+// commitTransportSignalLocked stages a signal owner RRset and/or records a
+// synthesized fallback, then publishes.
+//
+//	storedOwner: "_dns.<ns>" owner to stage `stored` under ("" stages nothing)
+//	stored:      the already-signed SVCB/TSYNC RRset for storedOwner
+//	synthName:   "_dns.<ns>" name for a synthesized fallback signal ("" = none)
+//	synth:       the synthesized (unsigned) RRset for synthName (Case A only)
+func (zd *ZoneData) commitTransportSignalLocked(storedOwner string, stored core.RRset, synthName string, synth *core.RRset) {
+	if storedOwner != "" && len(stored.RRs) > 0 {
+		zd.stageRRsetLocked(storedOwner, stored)
 	}
-	if signal != nil {
-		zd.TransportSignal = signal
-		zd.wsTransportSignal = cloneTransportSignal(signal)
-		zd.AddTransportSignal = true
+	if synthName != "" && synth != nil {
+		if zd.wsSignalSynth == nil {
+			zd.wsSignalSynth = map[string]*core.RRset{}
+		}
+		zd.wsSignalSynth[synthName] = synth
 	}
 	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 }
 
-// SVCB path
+// svcbHasAlias reports whether the RRset contains an AliasMode SVCB (non-terminal
+// Target) — i.e. an operator-authored bridge rather than a synthesized server SVCB.
+func svcbHasAlias(rrset core.RRset) bool {
+	for _, rr := range rrset.RRs {
+		if svcb, ok := rr.(*dns.SVCB); ok {
+			if svcb.Target != "." && svcb.Target != "" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// tsyncHasAlias reports whether the RRset contains an aliased TSYNC — an
+// operator-authored bridge to another nameserver's signal.
+func tsyncHasAlias(rrset core.RRset) bool {
+	for _, rr := range rrset.RRs {
+		if prr, ok := rr.(*dns.PrivateRR); ok {
+			if ts, ok2 := prr.Data.(*core.TSYNC); ok2 && ts != nil && ts.Alias != "" && ts.Alias != "." {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// buildServerSVCB constructs a synthesized ServiceMode "_dns.<ns> SVCB" RRset from
+// the server's configured SVCB parameters, optional address hints, the transport
+// signal, and a DANE-EE TLSA for the server certificate.
+func (zd *ZoneData) buildServerSVCB(conf *Config, nsName string, ipv4s, ipv6s []net.IP) (*core.RRset, error) {
+	if Globals.ServerSVCB == nil {
+		return nil, fmt.Errorf("buildServerSVCB: no server SVCB configured")
+	}
+	values := append([]dns.SVCBKeyValue(nil), Globals.ServerSVCB.Value...)
+	if len(ipv4s) > 0 {
+		values = append(values, &dns.SVCBIPv4Hint{Hint: ipv4s})
+	}
+	if len(ipv6s) > 0 {
+		values = append(values, &dns.SVCBIPv6Hint{Hint: ipv6s})
+	}
+	if sig := conf.Service.Transport.Signal; sig != "" {
+		values = append(values, &dns.SVCBLocal{KeyCode: dns.SVCBKey(SvcbTransportKey), Data: []byte(sig)})
+	}
+	certData, err := parseCertificate(conf.Internal.CertData)
+	if err != nil {
+		return nil, fmt.Errorf("buildServerSVCB: failed to parse certificate: %v", err)
+	}
+	tlsaRR := dns.TLSA{
+		Hdr:          dns.RR_Header{Name: "_443._tcp." + nsName, Rrtype: dns.TypeTLSA, Class: dns.ClassINET, Ttl: 10800},
+		Usage:        3, // DANE-EE
+		Selector:     1, // SPKI
+		MatchingType: 1, // SHA-256
+		Certificate:  certData,
+	}
+	tlsastr, err := MarshalTLSAToString(&tlsaRR)
+	if err != nil {
+		return nil, fmt.Errorf("buildServerSVCB: failed to marshal TLSA: %v", err)
+	}
+	values = append(values, &dns.SVCBLocal{KeyCode: dns.SVCBKey(SvcbTLSAKey), Data: []byte(tlsastr)})
+
+	owner := "_dns." + nsName
+	svcb := &dns.SVCB{
+		Hdr:      dns.RR_Header{Name: owner, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
+		Priority: 1,
+		Target:   ".",
+		Value:    values,
+	}
+	return &core.RRset{Name: owner, RRtype: dns.TypeSVCB, RRs: []dns.RR{svcb}}, nil
+}
+
+// SVCB path. See CreateTransportSignalRRs for the storage/injection model.
 func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys) error {
 	apex := zd.stagedOwner(zd.ZoneName)
 	if apex == nil {
@@ -110,246 +192,93 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys) err
 		return fmt.Errorf("no NS records found at zone apex")
 	}
 
-	// Identity NS short-circuit (out-of-bailiwick identity)
 	for _, rr := range nsRRset.RRs {
-		if ns, ok := rr.(*dns.NS); ok {
-			nsName := ns.Ns
-			lgDns.Debug("CreateTransportSignalRRs(SVCB): checking NS", "zone", zd.ZoneName, "ns", nsName)
-			if Globals.ServerSVCB != nil {
-				lgDns.Debug("CreateTransportSignalRRs(SVCB): server SVCB configured", "svcb", Globals.ServerSVCB.String())
+		ns, ok := rr.(*dns.NS)
+		if !ok {
+			continue
+		}
+		nsName := ns.Ns
+		ownerName := "_dns." + nsName
+
+		if !dns.IsSubDomain(zd.ZoneName, nsName) {
+			// Out-of-bailiwick nameserver. Only advertise a signal for one of
+			// THIS server's own identities (Case A). If we also host the
+			// nameserver's own zone, its authoritative _dns.<ns> signal is
+			// injected directly at query time via FindZone — nothing to store
+			// here. Otherwise synthesize an (unsigned) fallback hint from the
+			// server's SVCB config; it can never be a signed owner RRset in this
+			// zone because _dns.<ns> is out of bailiwick.
+			if !CaseFoldContains(conf.Service.Identities, nsName) || Globals.ServerSVCB == nil {
+				continue
 			}
-			if CaseFoldContains(conf.Service.Identities, nsName) {
-				if strings.HasSuffix(nsName, zd.ZoneName) {
-					lgDns.Debug("CreateTransportSignalRRs(SVCB): NS is in-bailiwick, skipping identity path", "zone", zd.ZoneName, "ns", nsName)
-					continue // in-bailiwick; handled below
-				}
-				if Globals.ServerSVCB == nil {
-					lgDns.Debug("CreateTransportSignalRRs(SVCB): no server SVCB configured, skipping identity NS", "ns", nsName)
-					continue
-				}
-				values := append([]dns.SVCBKeyValue(nil), Globals.ServerSVCB.Value...)
-				if sig := conf.Service.Transport.Signal; sig != "" {
-					values = append(values, &dns.SVCBLocal{KeyCode: dns.SVCBKey(SvcbTransportKey), Data: []byte(sig)})
-				}
+			if tz, _ := FindZone(ownerName); tz != nil {
+				lgDns.Debug("createTransportSignalSVCB: identity NS zone is co-hosted; will inject its authoritative signal",
+					"zone", zd.ZoneName, "ns", nsName)
+				return nil
+			}
+			synth, err := zd.buildServerSVCB(conf, nsName, nil, nil)
+			if err != nil {
+				return err
+			}
+			lgDns.Debug("createTransportSignalSVCB: synthesized fallback signal for out-of-bailiwick identity NS",
+				"zone", zd.ZoneName, "ns", nsName, "owner", ownerName)
+			zd.commitTransportSignalLocked("", core.RRset{}, ownerName, synth)
+			return nil
+		}
 
-				certData, err := parseCertificate(conf.Internal.CertData)
-				if err != nil {
-					return fmt.Errorf("CreateTransportSignalRRs(SVCB): failed to parse certificate: %v", err)
-				} else {
-					tlsaRR := dns.TLSA{
-						Hdr:          dns.RR_Header{Name: "_443._tcp." + nsName, Rrtype: dns.TypeTLSA, Class: dns.ClassINET, Ttl: 10800},
-						Usage:        3, // DANE-EE
-						Selector:     1, // SPKI
-						MatchingType: 1, // SHA-256
-						Certificate:  certData,
-					}
-					tlsastr, err := MarshalTLSAToString(&tlsaRR)
-					if err != nil {
-						return fmt.Errorf("CreateTransportSignalRRs(SVCB): failed to marshal TLSA: %v", err)
-					}
-					values = append(values, &dns.SVCBLocal{KeyCode: dns.SVCBKey(SvcbTLSAKey), Data: []byte(tlsastr)})
-				}
-
-				tmp := &dns.SVCB{
-					Hdr:      dns.RR_Header{Name: "_dns." + nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
-					Priority: 1,
-					Target:   ".",
-					Value:    values,
-				}
-				zd.TransportSignal = &core.RRset{Name: "_dns." + nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
-				zd.AddTransportSignal = true
-				lgDns.Debug("CreateTransportSignalRRs(SVCB): Adding server SVCB to zone using identity NS",
-					"zone", zd.ZoneName,
-					"ns", nsName)
-				lgDns.Debug("CreateTransportSignalRRs(SVCB): SVCB", "svcb", tmp.String())
-				zd.commitTransportSignalLocked("", core.RRset{}, zd.TransportSignal)
+		// In-bailiwick nameserver.
+		nsData := zd.stagedOwner(nsName)
+		if nsData == nil {
+			continue
+		}
+		// An operator-authored AliasMode SVCB at _dns.<ns> is a bridge to another
+		// nameserver's signal — leave it untouched; it is served on direct query
+		// and its target is chased at injection time.
+		if ownerData := zd.stagedOwner(ownerName); ownerData != nil {
+			if svcbHasAlias(ownerData.RRtypes.GetOnlyRRSet(dns.TypeSVCB)) {
+				lgDns.Debug("createTransportSignalSVCB: keeping operator SVCB alias", "owner", ownerName, "zone", zd.ZoneName)
 				return nil
 			}
 		}
-	}
 
-	// In-bailiwick NS path
-	for _, rr := range nsRRset.RRs {
-		if ns, ok := rr.(*dns.NS); ok {
-			nsName := ns.Ns
-			if !dns.IsSubDomain(zd.ZoneName, nsName) {
-				lgDns.Debug("CreateTransportSignalRRs(SVCB): NS is out-of-bailiwick, skipping",
-					"zone", zd.ZoneName,
-					"ns", nsName)
-				continue
-			}
-			nsData := zd.stagedOwner(nsName)
-			if nsData == nil {
-				continue
-			}
-				ownerName := "_dns." + nsName
-				ownerData := zd.stagedOwner(ownerName)
-				if ownerData != nil {
-					existingSvcb := ownerData.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
-					if len(existingSvcb.RRs) > 0 {
-						valid := true
-						for _, rr := range existingSvcb.RRs {
-							if svcb, ok := rr.(*dns.SVCB); ok {
-								if err := ValidateExplicitServerSVCB(svcb); err != nil {
-									lgDns.Debug("CreateTransportSignalRRs(SVCB): rejecting explicit SVCB", "owner", ownerName, "err", err)
-									valid = false
-									break
-								}
-							}
-						}
-						if valid {
-							// Start with the explicit SVCB RRset
-							zd.TransportSignal = &core.RRset{Name: ownerName, RRtype: dns.TypeSVCB, RRs: append([]dns.RR(nil), existingSvcb.RRs...), RRSIGs: append([]dns.RR(nil), existingSvcb.RRSIGs...)}
-
-							// If any SVCB has a non-terminal Target (not "."), attempt to include the target SVCB as well.
-							// This mirrors the TSYNC alias behavior so clients get both the original and the target.
-							for _, rr := range existingSvcb.RRs {
-								if svcb, ok := rr.(*dns.SVCB); ok {
-									if svcb.Target != "." && svcb.Target != "" {
-										if bestZD, _ := FindZone(svcb.Target); bestZD != nil {
-											targetOwner := "_dns." + svcb.Target
-								if tOwner, err := bestZD.GetOwner(targetOwner); err == nil && tOwner != nil {
-									targetRRset := tOwner.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
-												if len(targetRRset.RRs) > 0 {
-													zd.TransportSignal.RRs = append(zd.TransportSignal.RRs, targetRRset.RRs...)
-													if len(targetRRset.RRSIGs) > 0 {
-														zd.TransportSignal.RRSIGs = append(zd.TransportSignal.RRSIGs, targetRRset.RRSIGs...)
-													}
-												}
-											}
-										}
-									}
-								}
-							}
-							zd.AddTransportSignal = true
-							lgDns.Debug("CreateTransportSignalRRs(SVCB): using existing SVCB",
-								"owner", ownerName,
-								"zone", zd.ZoneName)
-							zd.commitTransportSignalLocked("", core.RRset{}, zd.TransportSignal)
-							return nil
-						}
-					}
-				}
-
-				// Collect A/AAAA
-				aRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeA)
-				aaaaRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeAAAA)
-				var ipv4s []net.IP
-				var ipv6s []net.IP
-				if aRRset.RRs != nil {
-					for _, rr := range aRRset.RRs {
-						if a, ok := rr.(*dns.A); ok {
-							ipv4s = append(ipv4s, a.A)
-						}
-					}
-					lgDns.Debug("CreateTransportSignalRRs(SVCB): found A records for in-bailiwick NS",
-						"zone", zd.ZoneName,
-						"count", len(ipv4s),
-						"ns", nsName,
-						"addrs", ipv4s)
-				}
-				if aaaaRRset.RRs != nil {
-					for _, rr := range aaaaRRset.RRs {
-						if aaaa, ok := rr.(*dns.AAAA); ok {
-							ipv6s = append(ipv6s, aaaa.AAAA)
-						}
-					}
-					lgDns.Debug("CreateTransportSignalRRs(SVCB): found AAAA records for in-bailiwick NS",
-						"zone", zd.ZoneName,
-						"count", len(ipv6s),
-						"ns", nsName,
-						"addrs", ipv6s)
-				}
-
-				// If any address matches configured addresses, publish SVCB
-				if !matchesConfiguredAddrs(conf.DnsEngine.Addresses, &aRRset) && !matchesConfiguredAddrs(conf.DnsEngine.Addresses, &aaaaRRset) {
-					lgDns.Debug("CreateTransportSignalRRs(SVCB): no addresses match configured for in-bailiwick NS",
-						"zone", zd.ZoneName,
-						"ns", nsName)
-					lgDns.Debug("CreateTransportSignalRRs(SVCB): configured addresses",
-						"zone", zd.ZoneName,
-						"addresses", conf.DnsEngine.Addresses)
-					lgDns.Debug("CreateTransportSignalRRs(SVCB): A RRset", "zone", zd.ZoneName, "rrset", aRRset.RRs)
-					lgDns.Debug("CreateTransportSignalRRs(SVCB): AAAA RRset", "zone", zd.ZoneName, "rrset", aaaaRRset.RRs)
-					continue
-				} else {
-					lgDns.Debug("CreateTransportSignalRRs(SVCB): addresses match configured for in-bailiwick NS",
-						"zone", zd.ZoneName,
-						"ns", nsName,
-						"a_rrs", aRRset.RRs,
-						"aaaa_rrs", aaaaRRset.RRs)
-					values := append([]dns.SVCBKeyValue(nil), Globals.ServerSVCB.Value...)
-					if len(ipv4s) > 0 {
-						values = append(values, &dns.SVCBIPv4Hint{Hint: ipv4s})
-					}
-					if len(ipv6s) > 0 {
-						values = append(values, &dns.SVCBIPv6Hint{Hint: ipv6s})
-					}
-					lgDns.Debug("CreateTransportSignalRRs(SVCB): added IP hints for in-bailiwick NS",
-						"zone", zd.ZoneName,
-						"ipv4hints", ipv4s,
-						"ipv6hints", ipv6s,
-						"ns", nsName)
-					if sig := conf.Service.Transport.Signal; sig != "" {
-						lgDns.Debug("CreateTransportSignalRRs(SVCB): adding transport signal for in-bailiwick NS",
-							"zone", zd.ZoneName,
-							"signal", sig,
-							"ns", nsName)
-						values = append(values, &dns.SVCBLocal{KeyCode: dns.SVCBKey(SvcbTransportKey), Data: []byte(sig)})
-					}
-
-					certData, err := parseCertificate(conf.Internal.CertData)
-					if err != nil {
-						return fmt.Errorf("CreateTransportSignalRRs(SVCB): failed to parse certificate: %v", err)
-					} else {
-						tlsaRR := dns.TLSA{
-							Hdr:          dns.RR_Header{Name: "_443._tcp." + nsName, Rrtype: dns.TypeTLSA, Class: dns.ClassINET, Ttl: 10800},
-							Usage:        3, // DANE-EE
-							Selector:     1, // SPKI
-							MatchingType: 1, // SHA-256
-							Certificate:  certData,
-						}
-						tlsastr, err := MarshalTLSAToString(&tlsaRR)
-						if err != nil {
-							return fmt.Errorf("CreateTransportSignalRRs(SVCB): failed to marshal TLSA: %v", err)
-						}
-						values = append(values, &dns.SVCBLocal{KeyCode: dns.SVCBKey(SvcbTLSAKey), Data: []byte(tlsastr)})
-					}
-
-					tmp := &dns.SVCB{
-						Hdr:      dns.RR_Header{Name: "_dns." + nsName, Rrtype: dns.TypeSVCB, Class: dns.ClassINET, Ttl: 10800},
-						Priority: 1,
-						Target:   ".",
-						Value:    values,
-					}
-					zd.TransportSignal = &core.RRset{Name: "_dns." + nsName, RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
-					zd.AddTransportSignal = true
-					lgDns.Debug("CreateTransportSignalRRs(SVCB): Adding server SVCB to zone using in-bailiwick NS",
-						"zone", zd.ZoneName,
-						"ns", nsName)
-					lgDns.Debug("CreateTransportSignalRRs(SVCB): SVCB", "svcb", tmp.String())
-
-					if _, err := zd.SignRRset(zd.TransportSignal, "", dak, false, nil); err != nil {
-						lgDns.Debug("CreateTransportSignalRRs(SVCB): error signing SVCB", "owner", "_dns."+nsName, "err", err)
-					}
-					// Add into zone data
-					serversvcbs := nsData.RRtypes.GetOnlyRRSet(dns.TypeSVCB)
-					var staged core.RRset
-					if len(serversvcbs.RRs) == 0 {
-						staged = core.RRset{RRtype: dns.TypeSVCB, RRs: []dns.RR{tmp}}
-					} else {
-						staged = core.RRset{RRtype: dns.TypeSVCB, RRs: append(serversvcbs.RRs, tmp)}
-						lgDns.Debug("CreateTransportSignalRRs(SVCB): added server SVCB to existing SVCB RRset", "ns", nsName)
-					}
-					zd.commitTransportSignalLocked(nsName, staged, zd.TransportSignal)
-					return nil
-				}
+		aRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeA)
+		aaaaRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeAAAA)
+		if !matchesConfiguredAddrs(conf.DnsEngine.Addresses, &aRRset) && !matchesConfiguredAddrs(conf.DnsEngine.Addresses, &aaaaRRset) {
+			lgDns.Debug("createTransportSignalSVCB: NS addresses do not match configured; skipping",
+				"zone", zd.ZoneName, "ns", nsName)
+			continue
+		}
+		var ipv4s, ipv6s []net.IP
+		for _, rr := range aRRset.RRs {
+			if a, ok := rr.(*dns.A); ok {
+				ipv4s = append(ipv4s, a.A)
 			}
 		}
+		for _, rr := range aaaaRRset.RRs {
+			if aaaa, ok := rr.(*dns.AAAA); ok {
+				ipv6s = append(ipv6s, aaaa.AAAA)
+			}
+		}
+		stored, err := zd.buildServerSVCB(conf, nsName, ipv4s, ipv6s)
+		if err != nil {
+			return err
+		}
+		// Sign BEFORE staging so the snapshot freezes a signed signal; the
+		// resigner keeps its signature fresh thereafter. Store as a real
+		// _dns.<ns> owner RRset (replacing any prior synthesized server SVCB),
+		// so it is directly queryable and injected from the stored copy.
+		if _, err := zd.SignRRset(stored, "", dak, false, nil); err != nil {
+			lgDns.Debug("createTransportSignalSVCB: error signing SVCB", "owner", ownerName, "err", err)
+		}
+		lgDns.Debug("createTransportSignalSVCB: stored synthesized server SVCB",
+			"zone", zd.ZoneName, "ns", nsName, "owner", ownerName)
+		zd.commitTransportSignalLocked(ownerName, *stored, "", nil)
+		return nil
+	}
 	return nil
 }
 
-// TSYNC path
+// TSYNC path. See CreateTransportSignalRRs for the storage/injection model.
 func (zd *ZoneData) createTransportSignalTSYNC(conf *Config, dak *DnssecKeys) error {
 	apex := zd.stagedOwner(zd.ZoneName)
 	if apex == nil {
@@ -360,116 +289,67 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config, dak *DnssecKeys) er
 		return fmt.Errorf("no NS records found at zone apex")
 	}
 
-	// TSYNC: we only synthesize for in-bailiwick
+	// TSYNC is only synthesized for in-bailiwick nameservers.
 	for _, rr := range nsRRset.RRs {
-		if ns, ok := rr.(*dns.NS); ok {
-			nsName := ns.Ns
-			if !dns.IsSubDomain(zd.ZoneName, nsName) {
-				continue
-			}
-			nsData := zd.stagedOwner(nsName)
-			if nsData == nil {
-				continue
-			}
-			ownerName := "_dns." + nsName
-			ownerData := zd.stagedOwner(ownerName)
-			if ownerData != nil {
-				existingTS := ownerData.RRtypes.GetOnlyRRSet(core.TypeTSYNC)
-					if len(existingTS.RRs) > 0 {
-						// Base RRset is the explicit TSYNC
-						zd.TransportSignal = &core.RRset{Name: ownerName, RRtype: core.TypeTSYNC, RRs: append([]dns.RR(nil), existingTS.RRs...)}
-						zd.AddTransportSignal = true
-						// Check for alias indirection
-						alias := "."
-						if prr, ok := existingTS.RRs[0].(*dns.PrivateRR); ok {
-							if ts, ok2 := prr.Data.(*core.TSYNC); ok2 && ts != nil && ts.Alias != "" {
-								alias = ts.Alias
-							}
-						}
-						if alias != "." {
-							lgDns.Debug("createTransportSignalTSYNC: looking up zone for TSYNC alias target",
-								"owner", ownerName,
-								"target", alias)
-							// Resolve alias target to the closest enclosing zone we serve.
-							if bestZD, _ := FindZone(alias); bestZD != nil {
-								targetOwner := "_dns." + alias
-								lgDns.Debug("createTransportSignalTSYNC: resolved TSYNC alias target",
-									"owner", ownerName,
-									"targetowner", targetOwner)
-								if tOwner, err := bestZD.GetOwner(targetOwner); err == nil && tOwner != nil {
-									targetTS := tOwner.RRtypes.GetOnlyRRSet(core.TypeTSYNC)
-									lgDns.Debug("createTransportSignalTSYNC: found TSYNC RRs at target", "count", len(targetTS.RRs), "target", targetOwner)
-									if len(targetTS.RRs) > 0 {
-										zd.TransportSignal.RRs = append(zd.TransportSignal.RRs, targetTS.RRs...)
-										// also carry over RRSIGs for Additional section symmetry
-										if len(targetTS.RRSIGs) > 0 {
-											zd.TransportSignal.RRSIGs = append(zd.TransportSignal.RRSIGs, targetTS.RRSIGs...)
-										}
-									}
-								} else {
-									lgDns.Debug("createTransportSignalTSYNC: no TSYNC RRset data found for target", "target", targetOwner)
-								}
-							} else {
-								lgDns.Debug("createTransportSignalTSYNC: no zone found for TSYNC target", "target", "_dns."+alias)
-							}
-						}
-						lgDns.Debug("createTransportSignalTSYNC: using existing TSYNC for in-bailiwick NS",
-							"owner", ownerName,
-							"alias", alias,
-							"ns", nsName)
-						zd.commitTransportSignalLocked("", core.RRset{}, zd.TransportSignal)
-						return nil
-					}
-				}
-				aRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeA)
-				aaaaRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeAAAA)
-				// Only synthesize TSYNC for nameservers whose address matches configured addresses
-				if !(matchesConfiguredAddrs(conf.DnsEngine.Addresses, &aRRset) || matchesConfiguredAddrs(conf.DnsEngine.Addresses, &aaaaRRset)) {
-					continue
-				}
-				var ipv4s []string
-				var ipv6s []string
-				for _, rr := range aRRset.RRs {
-					if a, ok := rr.(*dns.A); ok {
-						ipv4s = append(ipv4s, a.A.String())
-					}
-				}
-				for _, rr := range aaaaRRset.RRs {
-					if aaaa, ok := rr.(*dns.AAAA); ok {
-						ipv6s = append(ipv6s, aaaa.AAAA.String())
-					}
-				}
-				tsyncStr := fmt.Sprintf("_dns.%s 10800 IN TSYNC . %q %q %q",
-					nsName,
-					fmt.Sprintf("transport=%s", conf.Service.Transport.Signal),
-					fmt.Sprintf("v4=%s", strings.Join(ipv4s, ",")),
-					fmt.Sprintf("v6=%s", strings.Join(ipv6s, ",")),
-				)
-				trr, err := dns.NewRR(tsyncStr)
-				if err != nil {
-					lgDns.Error("createTransportSignalTSYNC: failed to build TSYNC", "err", err)
-					continue
-				}
-				// Store in zone data
-				existing := nsData.RRtypes.GetOnlyRRSet(core.TypeTSYNC)
-				var staged core.RRset
-				if len(existing.RRs) == 0 {
-					staged = core.RRset{RRtype: core.TypeTSYNC, RRs: []dns.RR{trr}}
-				} else {
-					staged = core.RRset{RRtype: core.TypeTSYNC, RRs: append(existing.RRs, trr)}
-				}
-				signal := &core.RRset{Name: "_dns." + nsName, RRtype: core.TypeTSYNC, RRs: []dns.RR{trr}}
-				zd.commitTransportSignalLocked(nsName, staged, signal)
-				lgDns.Debug("createTransportSignalTSYNC: added TSYNC for in-bailiwick NS",
-					"zone", zd.ZoneName,
-					"ns", nsName,
-					"rr", trr.String())
-				// Sign TSYNC if online signing is enabled; QueryResponder will include RRSIGs when present
-				if _, err := zd.SignRRset(zd.TransportSignal, "", dak, false, nil); err != nil {
-					lgDns.Debug("createTransportSignalTSYNC: error signing TSYNC", "owner", "_dns."+nsName, "err", err)
-				}
+		ns, ok := rr.(*dns.NS)
+		if !ok {
+			continue
+		}
+		nsName := ns.Ns
+		ownerName := "_dns." + nsName
+		if !dns.IsSubDomain(zd.ZoneName, nsName) {
+			continue
+		}
+		nsData := zd.stagedOwner(nsName)
+		if nsData == nil {
+			continue
+		}
+		// Operator-authored aliased TSYNC at _dns.<ns>: leave it; served on
+		// direct query and its target is chased at injection time.
+		if ownerData := zd.stagedOwner(ownerName); ownerData != nil {
+			if tsyncHasAlias(ownerData.RRtypes.GetOnlyRRSet(core.TypeTSYNC)) {
+				lgDns.Debug("createTransportSignalTSYNC: keeping operator TSYNC alias", "owner", ownerName, "zone", zd.ZoneName)
 				return nil
 			}
 		}
+
+		aRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeA)
+		aaaaRRset := nsData.RRtypes.GetOnlyRRSet(dns.TypeAAAA)
+		if !(matchesConfiguredAddrs(conf.DnsEngine.Addresses, &aRRset) || matchesConfiguredAddrs(conf.DnsEngine.Addresses, &aaaaRRset)) {
+			continue
+		}
+		var ipv4s, ipv6s []string
+		for _, rr := range aRRset.RRs {
+			if a, ok := rr.(*dns.A); ok {
+				ipv4s = append(ipv4s, a.A.String())
+			}
+		}
+		for _, rr := range aaaaRRset.RRs {
+			if aaaa, ok := rr.(*dns.AAAA); ok {
+				ipv6s = append(ipv6s, aaaa.AAAA.String())
+			}
+		}
+		tsyncStr := fmt.Sprintf("_dns.%s 10800 IN TSYNC . %q %q %q",
+			nsName,
+			fmt.Sprintf("transport=%s", conf.Service.Transport.Signal),
+			fmt.Sprintf("v4=%s", strings.Join(ipv4s, ",")),
+			fmt.Sprintf("v6=%s", strings.Join(ipv6s, ",")),
+		)
+		trr, err := dns.NewRR(tsyncStr)
+		if err != nil {
+			lgDns.Error("createTransportSignalTSYNC: failed to build TSYNC", "err", err)
+			continue
+		}
+		stored := core.RRset{Name: ownerName, RRtype: core.TypeTSYNC, RRs: []dns.RR{trr}}
+		// Sign BEFORE staging (fixes the prior sign-after-commit ordering that
+		// froze an unsigned TSYNC into the snapshot).
+		if _, err := zd.SignRRset(&stored, "", dak, false, nil); err != nil {
+			lgDns.Debug("createTransportSignalTSYNC: error signing TSYNC", "owner", ownerName, "err", err)
+		}
+		lgDns.Debug("createTransportSignalTSYNC: stored synthesized TSYNC",
+			"zone", zd.ZoneName, "ns", nsName, "owner", ownerName, "rr", trr.String())
+		zd.commitTransportSignalLocked(ownerName, stored, "", nil)
+		return nil
+	}
 	return nil
 }

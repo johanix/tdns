@@ -946,26 +946,12 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 		}
 	}
 
-	// 3. Collect transport signals (if add-transport-signal enabled)
-	// Collect from zd.TransportSignal if it exists, and also from zone data at _dns.* owners
+	// 3. Preserve stored transport-signal owner RRsets across a refresh replace.
+	// A refresh rebuilds the working set from the freshly transferred zone data,
+	// which does not include server-synthesized _dns.<ns> signals; carry them
+	// over so they survive until the transport postpass regenerates them. (The
+	// synthesized-fallback map is carried separately in applyRefreshReplacementLocked.)
 	if zd.Options[OptAddTransportSignal] {
-		if ts := zd.publishedTransportSignal(); ts != nil && len(ts.RRs) > 0 {
-			tsClone := &core.RRset{
-				Name:   ts.Name,
-				Class:  dns.ClassINET,
-				RRtype: ts.RRtype,
-				RRs:    make([]dns.RR, len(ts.RRs)),
-				RRSIGs: make([]dns.RR, len(ts.RRSIGs)),
-			}
-			for i, rr := range ts.RRs {
-				tsClone.RRs[i] = dns.Copy(rr)
-			}
-			for i, rr := range ts.RRSIGs {
-				tsClone.RRSIGs[i] = dns.Copy(rr)
-			}
-			dynamicRRs = append(dynamicRRs, tsClone)
-		}
-
 		snap := zd.publishedSnapshot()
 		if snap == nil {
 			return dynamicRRs
@@ -1058,12 +1044,6 @@ func (zd *ZoneData) repopulateWorkingSetLocked(dynamicRRs []*core.RRset) {
 			zd.stageRRsetLocked(rrset.Name, existing)
 		} else {
 			zd.stageRRsetLocked(rrset.Name, cloneRRset(*rrset))
-		}
-
-		if (rrset.RRtype == dns.TypeSVCB || rrset.RRtype == core.TypeTSYNC) && zd.wsTransportSignal == nil {
-			zd.wsTransportSignal = cloneTransportSignal(rrset)
-			zd.TransportSignal = rrset
-			zd.AddTransportSignal = true
 		}
 	}
 

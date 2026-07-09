@@ -362,40 +362,147 @@ func (zd *ZoneData) addNSAndGlue(m *dns.Msg, apex *OwnerData, snap *zoneSnapshot
 	}
 }
 
-// addTransportSignal adds transport signal RRs to the Extra section if not already present in Answer.
-// Returns true if any transport signal was added.
-func (zd *ZoneData) addTransportSignal(m *dns.Msg, ts *core.RRset, msgoptions *edns0.MsgOptions, transportSignalInAnswer bool) bool {
-	if !zd.AddTransportSignal || msgoptions.OtsOptOut || ts == nil || len(ts.RRs) == 0 {
+// addTransportSignal opportunistically adds transport-signal RRs to the Extra
+// section, skipping any (name,type) already present in the Answer (e.g. when the
+// query was a direct lookup for the signal itself). RRSIGs of each injected
+// RRset are added when DO is set. Returns true if anything was added.
+func (zd *ZoneData) addTransportSignal(m *dns.Msg, sigs []core.RRset, msgoptions *edns0.MsgOptions) bool {
+	if msgoptions.OtsOptOut || len(sigs) == 0 {
 		return false
 	}
-	if transportSignalInAnswer {
-		return false
-	}
-	// Build a set of (name, type) present in Answer to avoid duplicates
 	present := map[string]bool{}
 	for _, arr := range m.Answer {
 		h := arr.Header()
 		present[h.Name+"|"+dns.TypeToString[h.Rrtype]] = true
 	}
 	addedAny := false
-	for _, trr := range ts.RRs {
-		h := trr.Header()
-		key := h.Name + "|" + dns.TypeToString[h.Rrtype]
-		if !present[key] {
+	for _, ts := range sigs {
+		rrsAdded := false
+		for _, trr := range ts.RRs {
+			h := trr.Header()
+			key := h.Name + "|" + dns.TypeToString[h.Rrtype]
+			if present[key] {
+				continue
+			}
+			present[key] = true // guard against duplicates across signal RRsets
 			m.Extra = append(m.Extra, trr)
+			rrsAdded = true
 			addedAny = true
 		}
-	}
-	// If we added any TSYNC/SVCB above, consider adding their signatures too
-	if addedAny && msgoptions.DO && len(ts.RRSIGs) > 0 {
-		m.Extra = append(m.Extra, ts.RRSIGs...)
+		if rrsAdded && msgoptions.DO && len(ts.RRSIGs) > 0 {
+			m.Extra = append(m.Extra, ts.RRSIGs...)
+		}
 	}
 	return addedAny
 }
 
+// collectSignalRRsets resolves the transport-signal RRsets to advertise for this
+// zone, at query time, from the pinned snapshot. It derives the signal owners
+// from the apex NS RRset (the authoritative "which nameservers" source) and, for
+// each, reads the stored, resigner-maintained SVCB/TSYNC RRset from its
+// authoritative home — this zone's pinned snapshot when in-bailiwick, another
+// co-hosted zone's snapshot via FindZone otherwise, or the synthesized fallback
+// (Case A). AliasMode targets are chased the same way. A signal whose target
+// cannot be resolved is still returned (the alias is authoritative and the
+// resolver can chase it / may already hold the target); SVCB fails safe.
+func (zd *ZoneData) collectSignalRRsets(snap *zoneSnapshot) []core.RRset {
+	if snap == nil || snap.Apex == nil || !zd.Options[OptAddTransportSignal] {
+		return nil
+	}
+	nsRRset := snap.Apex.RRtypes.GetOnlyRRSet(dns.TypeNS)
+	if len(nsRRset.RRs) == 0 {
+		return nil
+	}
+	var out []core.RRset
+	seen := map[string]bool{}
+	var add func(name string, depth int)
+	add = func(name string, depth int) {
+		if depth > 3 {
+			return
+		}
+		for _, rs := range zd.lookupSignalRRsets(snap, name) {
+			if len(rs.RRs) == 0 {
+				continue
+			}
+			key := fmt.Sprintf("%s|%d", name, rs.RRtype)
+			if seen[key] {
+				continue
+			}
+			seen[key] = true
+			out = append(out, rs)
+			for _, tgt := range signalChaseTargets(rs) {
+				add("_dns."+tgt, depth+1)
+			}
+		}
+	}
+	for _, rr := range nsRRset.RRs {
+		if ns, ok := rr.(*dns.NS); ok {
+			add("_dns."+ns.Ns, 0)
+		}
+	}
+	return out
+}
+
+// lookupSignalRRsets returns the SVCB/TSYNC RRsets stored at a transport-signal
+// owner name, read from its authoritative home. In-bailiwick names read from the
+// pinned snapshot (no intra-response tearing); out-of-bailiwick names read from
+// another co-hosted zone's current snapshot; failing both, the per-snapshot
+// synthesized fallback (Case A) is used.
+func (zd *ZoneData) lookupSignalRRsets(snap *zoneSnapshot, name string) []core.RRset {
+	if dns.IsSubDomain(zd.ZoneName, name) {
+		return signalRRsetsFromOwner(getOwnerFrom(snap, name))
+	}
+	if tz, _ := FindZone(name); tz != nil {
+		if tz == zd {
+			return signalRRsetsFromOwner(getOwnerFrom(snap, name))
+		}
+		if rrs := signalRRsetsFromOwner(getOwnerFrom(tz.publishedSnapshot(), name)); len(rrs) > 0 {
+			return rrs
+		}
+	}
+	if rs, ok := snap.signalSynth[name]; ok && rs != nil {
+		return []core.RRset{*rs}
+	}
+	return nil
+}
+
+// signalRRsetsFromOwner extracts the SVCB and TSYNC RRsets from an owner (if any).
+func signalRRsetsFromOwner(od *OwnerData) []core.RRset {
+	if od == nil {
+		return nil
+	}
+	var out []core.RRset
+	if rs, ok := od.RRtypes.Get(dns.TypeSVCB); ok && len(rs.RRs) > 0 {
+		out = append(out, rs)
+	}
+	if rs, ok := od.RRtypes.Get(core.TypeTSYNC); ok && len(rs.RRs) > 0 {
+		out = append(out, rs)
+	}
+	return out
+}
+
+// signalChaseTargets returns the alias/target hostnames referenced by a signal
+// RRset (SVCB AliasMode Target, TSYNC Alias), for injection-time chasing.
+func signalChaseTargets(rs core.RRset) []string {
+	var out []string
+	for _, rr := range rs.RRs {
+		switch r := rr.(type) {
+		case *dns.SVCB:
+			if r.Target != "." && r.Target != "" {
+				out = append(out, r.Target)
+			}
+		case *dns.PrivateRR:
+			if ts, ok := r.Data.(*core.TSYNC); ok && ts != nil && ts.Alias != "" && ts.Alias != "." {
+				out = append(out, ts.Alias)
+			}
+		}
+	}
+	return out
+}
+
 // handleSOAQuery handles SOA queries for the zone apex.
-func (zd *ZoneData) handleSOAQuery(m *dns.Msg, w dns.ResponseWriter, apex *OwnerData, snap *zoneSnapshot, ts *core.RRset,
-	msgoptions *edns0.MsgOptions, transportSignalInAnswer *bool, minimalResponses bool) {
+func (zd *ZoneData) handleSOAQuery(m *dns.Msg, w dns.ResponseWriter, apex *OwnerData, snap *zoneSnapshot, sigs []core.RRset,
+	msgoptions *edns0.MsgOptions, minimalResponses bool) {
 	soaRRset := zd.soaForResponseFrom(snap, apex)
 	lgHandler.Debug("SOA RRset details", "zone", zd.ZoneName, "count", len(soaRRset.RRs), "rrset", soaRRset)
 
@@ -406,13 +513,13 @@ func (zd *ZoneData) handleSOAQuery(m *dns.Msg, w dns.ResponseWriter, apex *Owner
 		// Note: NS and glue RRSIGs are already added by addNSAndGlue
 	}
 	zd.addNSAndGlue(m, apex, snap, msgoptions, minimalResponses)
-	zd.addTransportSignal(m, ts, msgoptions, *transportSignalInAnswer)
+	zd.addTransportSignal(m, sigs, msgoptions)
 }
 
 // handleCNAMEChain handles CNAME responses, including following CNAME chains across zones.
 // Returns true if a CNAME response was handled and the message should be sent, false otherwise.
 func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname string, qtype uint16, owner *OwnerData, snap *zoneSnapshot,
-	msgoptions *edns0.MsgOptions, kdb *KeyDB, apex *OwnerData, transportSignalInAnswer *bool, minimalResponses bool) (bool, error) {
+	msgoptions *edns0.MsgOptions, kdb *KeyDB, apex *OwnerData, minimalResponses bool) (bool, error) {
 
 	if owner.RRtypes.Count() != 1 {
 		return false, nil // Not a CNAME-only owner
@@ -547,22 +654,9 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname str
 	// Use the original zone's apex for NS records
 	zd.addNSAndGlue(m, apex, snap, msgoptions, minimalResponses)
 
-	// Check for transport signal (from the pinned snapshot)
-	ts := snap.TransportSignal
-	if zd.AddTransportSignal && ts != nil {
-		for _, arr := range m.Answer {
-			if rrMatchesTransportSignal(arr, ts) {
-				*transportSignalInAnswer = true
-				break
-			}
-		}
-	}
-	zd.addTransportSignal(m, ts, msgoptions, *transportSignalInAnswer)
-	if msgoptions.DO && zd.AddTransportSignal && !msgoptions.OtsOptOut && ts != nil {
-		if !*transportSignalInAnswer && len(ts.RRSIGs) > 0 {
-			m.Extra = append(m.Extra, ts.RRSIGs...)
-		}
-	}
+	// Opportunistically attach transport signals, deduped against the Answer
+	// section (addTransportSignal handles their RRSIGs when DO is set).
+	zd.addTransportSignal(m, zd.collectSignalRRsets(snap), msgoptions)
 
 	return true, nil
 }
@@ -580,9 +674,6 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 		return ctx.Err()
 	default:
 	}
-	// Track if the configured transport signal is already present in the Answer section
-	transportSignalInAnswer := false
-
 	// minimal-responses: BIND-style suppression of authority NS RRset and
 	// apex glue on positive answers. Referrals and NXDOMAIN/NODATA paths are
 	// unaffected (their authority/additional sections are still required).
@@ -634,7 +725,9 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 		w.WriteMsg(m)
 		return nil
 	}
-	transportSig := snap.TransportSignal
+	// Transport signals to advertise, resolved once from the pinned snapshot
+	// (in-bailiwick + co-hosted + synthesized fallback, with alias chasing).
+	sigs := zd.collectSignalRRsets(snap)
 
 	// Inline-signed apex RRsets are served from the published zone; online/compact
 	// signatures are added ephemerally on each response path below.
@@ -716,7 +809,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	if len(qname) > len(zd.ZoneName) {
 		// 2. Check for qname + CNAME (only if CNAME is the only RR type)
 		lgHandler.Debug("checking for CNAME", "qname", qname, "zone", zd.ZoneName)
-		handled, err := zd.handleCNAMEChain(m, w, qname, qtype, owner, snap, msgoptions, kdb, apex, &transportSignalInAnswer, minimalResponses)
+		handled, err := zd.handleCNAMEChain(m, w, qname, qtype, owner, snap, msgoptions, kdb, apex, minimalResponses)
 		if err != nil {
 			lgHandler.Error("error handling CNAME chain", "err", err)
 			// Error response already sent by handleCNAMEChain
@@ -749,20 +842,14 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 			if qname == origqname {
 				// zd.Logger.Printf("Exact match qname %s %s", qname, dns.TypeToString[qtype])
 				m.Answer = append(m.Answer, rrset.RRs...)
-				if zd.AddTransportSignal && transportSig != nil && qtype == transportSig.RRtype && (qname == transportSig.Name || origqname == transportSig.Name) {
-					transportSignalInAnswer = true
-				}
 			} else {
 				// zd.Logger.Printf("Wildcard match qname %s %s", qname, origqname)
 				tmp := WildcardReplace(rrset.RRs, qname, origqname)
 				m.Answer = append(m.Answer, tmp...)
-				if zd.AddTransportSignal && transportSig != nil && qtype == transportSig.RRtype && (qname == transportSig.Name || origqname == transportSig.Name) {
-					transportSignalInAnswer = true
-				}
 			}
 			zd.addNSAndGlue(m, apex, snap, msgoptions, minimalResponses)
 			// Add transport signal RRs that aren't already present in the Answer section
-			zd.addTransportSignal(m, transportSig, msgoptions, transportSignalInAnswer)
+			zd.addTransportSignal(m, sigs, msgoptions)
 			if msgoptions.DO {
 				lgHandler.Debug("considering signing", "qname", qname, "qtype", dns.TypeToString[qtype], "origqname", origqname)
 				if qname == origqname {
@@ -799,7 +886,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 
 	lgHandler.Debug("checking for SOA query", "zone", zd.ZoneName)
 	if qtype == dns.TypeSOA && qname == zd.ZoneName {
-		zd.handleSOAQuery(m, w, apex, snap, transportSig, msgoptions, &transportSignalInAnswer, minimalResponses)
+		zd.handleSOAQuery(m, w, apex, snap, sigs, msgoptions, minimalResponses)
 		w.WriteMsg(m)
 		return nil
 	}
@@ -937,13 +1024,4 @@ func (zd *ZoneData) addCDEResponse(m *dns.Msg, qname string, apex *OwnerData, rr
 		lgHandler.Error("failed to sign NSEC RRset for CDE response", "zone", zd.ZoneName, "err", err)
 	}
 	m.Ns = append(m.Ns, nsecRRset.RRSIGs...)
-}
-
-// rrMatchesTransportSignal checks whether a given RR matches the configured transport signal RRset
-func rrMatchesTransportSignal(rr dns.RR, ts *core.RRset) bool {
-	if ts == nil || rr == nil {
-		return false
-	}
-	h := rr.Header()
-	return h.Rrtype == ts.RRtype && h.Name == ts.Name
 }

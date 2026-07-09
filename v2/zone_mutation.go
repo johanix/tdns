@@ -22,8 +22,8 @@ func (zd *ZoneData) ensureWorkingSet() {
 	for k, v := range snap.Data {
 		zd.workingSet[k] = v
 	}
-	if zd.wsTransportSignal == nil {
-		zd.wsTransportSignal = cloneTransportSignal(snap.TransportSignal)
+	if zd.wsSignalSynth == nil {
+		zd.wsSignalSynth = cloneSignalSynth(snap.signalSynth)
 	}
 }
 
@@ -262,7 +262,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	}
 	if !zoneStillLive(zd, gen) {
 		zd.workingSet = nil
-		zd.wsTransportSignal = nil
+		zd.wsSignalSynth = nil
 		zd.publishQueued = false
 		zd.publishUrgent = false
 		return
@@ -277,17 +277,12 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 
 	zd.resignWorkingSetSOAIfSigned()
 
-	transport := zd.wsTransportSignal
-	if transport == nil {
-		transport = zd.TransportSignal
-	}
-
 	data := zd.workingSet
-	snap := zd.buildSnapshotLocked(serial, data, transport)
+	snap := zd.buildSnapshotLocked(serial, data, zd.wsSignalSynth)
 	zd.snapshot.Store(snap)
 
 	zd.workingSet = nil
-	zd.wsTransportSignal = nil
+	zd.wsSignalSynth = nil
 	zd.publishQueued = false
 	zd.publishUrgent = false
 	zd.lastPublish = time.Now()
@@ -324,7 +319,15 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	zd.ZoneType = new_zd.ZoneType
 
 	zd.workingSet = snapshotMapFromData(new_zd.Data)
-	zd.wsTransportSignal = nil
+	// A refresh replaces zone data wholesale; carry the synthesized-signal
+	// fallback over from the current snapshot so it survives until the transport
+	// postpass recomputes it. The stored _dns.<ns> owner RRsets are preserved
+	// separately by CollectDynamicRRs -> repopulateWorkingSetLocked.
+	if old := zd.snapshot.Load(); old != nil {
+		zd.wsSignalSynth = cloneSignalSynth(old.signalSynth)
+	} else {
+		zd.wsSignalSynth = nil
+	}
 	zd.repopulateWorkingSetLocked(dynamicRRs)
 	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 
@@ -339,15 +342,15 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	return nil
 }
 
-func (zd *ZoneData) buildSnapshotLocked(serial uint32, data map[string]*OwnerData, transport *core.RRset) *zoneSnapshot {
+func (zd *ZoneData) buildSnapshotLocked(serial uint32, data map[string]*OwnerData, signalSynth map[string]*core.RRset) *zoneSnapshot {
 	apex := apexFromSnapshotData(zd, data)
 	return &zoneSnapshot{
-		Serial:          serial,
-		SOA:             soaFromApex(serial, apex),
-		Apex:            apex,
-		Data:            data,
-		TransportSignal: cloneTransportSignal(transport),
-		IxfrChain:       copyIxfrChain(zd.IxfrChain),
+		Serial:      serial,
+		SOA:         soaFromApex(serial, apex),
+		Apex:        apex,
+		Data:        data,
+		signalSynth: cloneSignalSynth(signalSynth),
+		IxfrChain:   copyIxfrChain(zd.IxfrChain),
 	}
 }
 
@@ -388,7 +391,7 @@ func (zd *ZoneData) InstallInitialSnapshot() {
 	defer zd.mu.Unlock()
 
 	data := snapshotMapFromData(zd.Data)
-	snap := zd.buildSnapshotLocked(zd.CurrentSerial, data, zd.TransportSignal)
+	snap := zd.buildSnapshotLocked(zd.CurrentSerial, data, nil)
 	zd.snapshot.Store(snap)
 	zd.Ready = true
 	zd.Status = ZoneStatusReady

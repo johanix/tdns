@@ -171,21 +171,22 @@ type ZoneData struct {
 	// call. Zero means "not yet observed" — the E10 cache-flush invariant
 	// check defers until either this value or DnssecPolicy.TTLS.ParentDS is set.
 	ParentDSTTLObserved uint32
-	TransportSignal     *core.RRset // transport signal RRset (SVCB or TSYNC)
-	AddTransportSignal  bool        // whether to attach TransportSignal in responses
 
 	// Zone snapshot publish path (Project B).
-	snapshot          atomic.Pointer[zoneSnapshot]
-	workingSet        map[string]*OwnerData
-	wsTransportSignal *core.RRset
-	publishCadence    time.Duration
-	publishQueued     bool
-	publishUrgent     bool
-	lastPublish       time.Time
-	publishWake       chan struct{}
-	publisherOnce     sync.Once
-	publishStop       chan struct{}
-	publishStopOnce   sync.Once
+	snapshot   atomic.Pointer[zoneSnapshot]
+	workingSet map[string]*OwnerData
+	// wsSignalSynth stages the synthesized-transport-signal fallback map for the
+	// next publish (see zoneSnapshot.signalSynth). Seeded from the published
+	// snapshot in ensureWorkingSet so unrelated publishes preserve it.
+	wsSignalSynth   map[string]*core.RRset
+	publishCadence  time.Duration
+	publishQueued   bool
+	publishUrgent   bool
+	lastPublish     time.Time
+	publishWake     chan struct{}
+	publisherOnce   sync.Once
+	publishStop     chan struct{}
+	publishStopOnce sync.Once
 	// RemoteDNSKEYs holds DNSKEY RRs from other signers (multi-signer mode 4).
 	// These are DNSKEYs found in the incoming zone that do not match keys in our
 	// local keystore. They are preserved across resignings and merged into the
