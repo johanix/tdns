@@ -39,9 +39,10 @@ default — `/etc/tdns/tdns-auth.yaml`, `/etc/tdns/tdns-imr.yaml` and so on.
 Override with `--config <path>`. No TDNS application reads configuration from
 environment variables.
 
-> `tdns-imr` currently honours `--config` only partially: the named file is
-> read for validation, but the main config decode still reads
-> `/etc/tdns/tdns-imr.yaml`. See [tdns-imr configuration](config-tdns-imr.md).
+> `tdns-imr` is the exception: `--config` does not select the config file. The
+> named file is read and validated, but `/etc/tdns/tdns-imr.yaml` is then
+> decoded on top of it, so the two are merged and the default file wins. See
+> [tdns-imr configuration](config-tdns-imr.md).
 
 **Includes.** A top-level `include:` list splices other YAML files into the
 main config before it is parsed. Includes may nest, to a depth of 10.
