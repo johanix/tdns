@@ -133,7 +133,7 @@ func initConfig() {
 
 // initImr initializes the application, prepares configuration, sets up the IMR API router, and starts the IMR service.
 //
-// It receives a context that should be cancelled on SIGINT or SIGTERM (handled in main), calls cli.Conf.MainInit with the default IMR config file, and aborts via tdns.Shutdowner on initialization errors. It installs a SIGHUP watcher that triggers cli.Conf.ParseZones to reload zones, logs reload errors, and then creates the API router with cli.Conf.SetupSimpleAPIRouter. Finally it starts the IMR via cli.Conf.StartImr and invokes tdns.Shutdowner on any fatal startup errors.
+// It receives a context that should be cancelled on SIGINT or SIGTERM (handled in main), calls cli.Conf.MainInit with the config file initConfig resolved (--config, else the default), and aborts via tdns.Shutdowner on initialization errors. It installs a SIGHUP watcher that triggers cli.Conf.ParseZones to reload zones, logs reload errors, and then creates the API router with cli.Conf.SetupSimpleAPIRouter. Finally it starts the IMR via cli.Conf.StartImr and invokes tdns.Shutdowner on any fatal startup errors.
 func initImr() {
 	// --version must be answered before any startup work. initImr runs via
 	// cobra.OnInitialize, i.e. BEFORE rootCmd.Run, and it performs the full
@@ -157,10 +157,16 @@ func initImr() {
 	appCancel = cancel
 
 	if tdns.Globals.Debug {
-		fmt.Printf("initImr: Calling conf.MainInit(\"\") // Empty string means derive from Globals.App.Name\n")
+		fmt.Printf("initImr: Calling conf.MainInit(%q)\n", cfgFileUsed)
 	}
 
-	err := cli.Conf.MainInit(appCtx, "") // Empty string means derive from Globals.App.Name
+	// Hand MainInit the file initConfig actually read: --config if given,
+	// otherwise tdns.DefaultImrCfgFile. MainInit does not parse flags for
+	// AppTypeImr (see the comment there), so it cannot discover --config on
+	// its own; passing "" would make it fall back to the default file and
+	// decode that over the config the user asked for. cobra.OnInitialize
+	// runs initConfig before initImr, so cfgFileUsed is already set.
+	err := cli.Conf.MainInit(appCtx, cfgFileUsed)
 	if err != nil {
 		tdns.Shutdowner(&cli.Conf, fmt.Sprintf("Error initializing tdns-imr: %v", err))
 	}

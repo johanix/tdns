@@ -12,25 +12,6 @@ Almost all of the resolver's configuration lives under a top-level block called
 **`imrengine:`**, not `imr:`. The only `imr.`-prefixed key is
 `imr.localconfig`, described at the end of this page.
 
-> **`tdns-imr --config <path>` does not select the config file.** The named
-> file *is* read — it is validated, and its values are loaded — but the main
-> config decode then reads `/etc/tdns/tdns-imr.yaml` **on top of it**. The two
-> files are merged, and the default file wins:
->
-> - any key `/etc/tdns/tdns-imr.yaml` defines **overrides** your file;
-> - a key only your file defines **survives**;
-> - the `log:` block always comes from the default file, because logging is set
->   up before the parse;
-> - validation runs against *your* file, so a valid `--config` does not mean the
->   file that actually gets parsed is valid.
->
-> Concretely: `--config` with `imrengine.addresses: [127.0.0.1:15353]` still
-> binds the default file's addresses, while `imrengine.active: false` — a key
-> the default file happens not to set — does take effect.
->
-> Until this is fixed, put the config you want at `/etc/tdns/tdns-imr.yaml` and
-> do not pass `--config`. Other TDNS applications honour `--config` normally.
-
 ## Minimal working example
 
 Three keys are validated as required (`imrengine.addresses`,
