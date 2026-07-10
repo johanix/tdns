@@ -164,10 +164,32 @@ accepted spellings, and inspect the counters with
 
 ## imr.localconfig
 
-The one `imr.`-prefixed key. It names a second config file that is merged on
-top of the main one; a missing file is skipped silently.
+The one `imr.`-prefixed key. It names a second config file, read after the main
+one; a missing file is skipped silently.
 
 ```yaml
 imr:
    localconfig:  /etc/tdns/tdns-imr-local.yaml
 ```
+
+**The overlay does not override the main config file.** It can only *supply*
+keys that the main file leaves unset. Any key the main file defines wins, even
+though the overlay is read later.
+
+```yaml
+# tdns-imr.yaml                  # tdns-imr-local.yaml
+imrengine:                       imrengine:
+   addresses: [ 127.0.0.1:53 ]      addresses: [ 127.0.0.1:5353 ]   # IGNORED
+   transports: [ do53 ]             active: false                   # APPLIED
+```
+
+The overlay's `addresses` is discarded, because the main file sets that key. Its
+`active` is honoured, because the main file does not — so this resolver ends up
+disabled, having never listened on either address.
+
+This holds for every key, hyphenated or not: `root-hints` and `trust_anchor_ds`
+are both picked up from the overlay when the main file omits them, and both
+ignored when it does not.
+
+So `imr.localconfig` is useful for adding local settings, not for overriding
+shared ones. If you need to override a key, change it in the main file.
