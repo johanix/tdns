@@ -219,6 +219,17 @@ var deprecatedConfigKeys = []deprecatedConfigKey{
 	// with `default` required.
 	{match: ".sigvalidity",
 		advice: "per-key `sigvalidity:` is now a policy-level subtree `sigvalidity: { default, dnskey, ds }` (default required)"},
+	{match: ".sig-validity",
+		advice: "`sig-validity:` is spelled `sigvalidity:` and is a policy-level subtree `{ default, dnskey, ds }` (default required), not a key under ksk:/zsk:"},
+	// Zone-level leaves whose misspelling silently disables the feature: an
+	// unrecognized dnssec_policy/dnssec-policy leaves the zone with no policy,
+	// which then rejects online-signing/inline-signing at validation.
+	{match: ".dnssec_policy",
+		advice: "zone key is `dnssecpolicy:` (one word, no underscore); `dnssec_policy:` is ignored, leaving the zone unsigned"},
+	{match: ".dnssec-policy",
+		advice: "zone key is `dnssecpolicy:` (one word, no hyphen); `dnssec-policy:` is ignored, leaving the zone unsigned"},
+	{match: ".multi_signer",
+		advice: "zone key is `multisigner:` (one word, no underscore); `multi_signer:` is ignored"},
 }
 
 // classifyUnusedConfigKeys splits mapstructure's unused-key list into keys
