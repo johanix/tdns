@@ -200,6 +200,9 @@ type deprecatedConfigKey struct {
 //   - Renamed/moved a LEAF that can appear under many parents
 //     (x: → y: under each policy)? Add
 //     {match: ".oldleaf", advice: "`oldleaf` moved to ...; see <doc>"}.
+//     A non-exact entry is matched against the END of the unused path, so it
+//     fires on the leaf itself and not on a valid block of the same name that
+//     merely happens to contain a typo'd child.
 //
 // Keep advice concrete: name the new location and, ideally, the change date
 // or doc so an operator can find the migration.
@@ -243,7 +246,13 @@ func classifyUnusedConfigKeys(unused []string) (deprecated []deprecatedConfigKey
 		for i := range deprecatedConfigKeys {
 			d := &deprecatedConfigKeys[i]
 			ml := strings.ToLower(d.match)
-			if (d.exact && lk == ml) || (!d.exact && strings.Contains(lk, ml)) {
+			// A non-exact entry names a deprecated LEAF (".oldleaf") that may sit
+			// under many parents, so it must match the END of the path. Matching
+			// anywhere in the path would also fire on a valid parent block: a typo
+			// inside the (valid) `sigvalidity:` subtree reports as
+			// "dnssec.policies[p].SigValidity.defualt", which contains
+			// ".sigvalidity" but is a misspelled `default`, not a deprecated key.
+			if (d.exact && lk == ml) || (!d.exact && strings.HasSuffix(lk, ml)) {
 				hit = d
 				break
 			}
