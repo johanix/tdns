@@ -84,9 +84,13 @@ func checkZoneConf(t *testing.T, what string, z ZoneConf) {
 	for _, acl := range [][]AclEntry{z.Downstreams, z.AllowNotify} {
 		for _, e := range acl {
 			if e.Legacy != "" {
+				// A legacy entry carries the bare string and nothing else, so its
+				// Prefix and Key are both empty. Report the one real problem and
+				// move on, rather than also alleging a missing prefix and key.
 				t.Errorf("%s %s: legacy bare-string ACL entry %q (migrate to {prefix, key})", what, z.Name, e.Legacy)
+				continue
 			}
-			if e.Legacy == "" && e.Prefix == "" {
+			if e.Prefix == "" {
 				t.Errorf("%s %s: ACL entry with empty prefix (did you write `addr:` instead of `prefix:`?)", what, z.Name)
 			}
 			if e.Prefix != "" {
