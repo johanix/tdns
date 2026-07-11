@@ -5,25 +5,79 @@
 #
 # Zone declaration properties:
 #   name:            Zone name (required, FQDN with trailing dot)
-#   type:            primary | secondary (required unless using template)
+#   type:            primary | secondary (required unless inherited from a template)
 #   zonefile:        Path to zone file (required for primary, optional for secondary)
-#   store:           map | slice | xfr (defaults to "map" if not specified)
+#   store:           map | xfr (defaults to "map" if not specified)
 #                    - map:   Default, general-purpose (recommended for most zones)
-#                    - slice: Experimental alternative (may be faster/use less memory)
 #                    - xfr:   Zone transfer only (AXFR in/out, NO normal queries)
+#                    ("slice" is deprecated: it logs a warning and falls back to
+#                     "map". Any other value also falls back to "map".)
 #   template:        Template name to inherit settings from (optional)
 #   primaries:       Upstream servers for secondary zones — a LIST of {addr, key}
 #                    entries (addr is IP:port or host:port; key is a TSIG key name,
 #                    or NOKEY for none). More than one provides redundancy; a host
 #                    name is resolved at load time and may expand to several
 #                    addresses (A + AAAA), each tried in turn on failure.
-#   notify:          Downstream servers to notify — a LIST of {addr, key} entries
-#   downstreams:     Alias for notify (same meaning)
+#   notify:          Downstream servers to notify — a LIST of {addr, key} entries.
+#                    This is a list of DESTINATIONS we send NOTIFY to, so each
+#                    entry needs an address (host:port), not a prefix.
+#   allow-notify:    Secondary-side ACL: who may send NOTIFY *to* us.
+#                    A LIST of {prefix, key} entries. See "ACLs" below.
+#   downstreams:     Primary-side ACL: who may AXFR/IXFR *from* us (the
+#                    "provide-xfr" ACL). A LIST of {prefix, key} entries.
+#                    NOT an alias for notify: notify entries are destinations
+#                    ({addr, key}); downstreams entries are source-address ACL
+#                    rules ({prefix, key}).
 #   options:         List of zone options (see auth-templates.sample.yaml for complete list)
-#   dnssec_policy:   DNSSEC policy name (from dnssecpolicies: section)
-#   multi_signer:    Multi-signer configuration name (from multisigner: section)
+#   dnssecpolicy:    DNSSEC policy name (from the dnssec.policies: section).
+#                    NOTE: one word, no underscore and no hyphen. "none" means
+#                    the same as leaving it unset.
+#   multisigner:     Multi-signer configuration name (from multisigner: section).
+#                    NOTE: one word, no underscore.
 #
 # Properties set in templates can be overridden in individual zone declarations.
+#
+# ==============================================================================
+# ACLs: allow-notify: and downstreams:
+# ==============================================================================
+#
+# Both are ordered lists of { prefix, key } entries. They differ only in what
+# they guard: allow-notify: guards inbound NOTIFY on a secondary, downstreams:
+# guards outbound zone transfer on a primary.
+#
+# prefix — an ip-spec matched against the SOURCE address of the request:
+#     bare IP     192.0.2.1              ::1
+#     CIDR        192.0.2.0/24           2001:db8::/32
+#     netmask     192.0.2.0&255.255.255.0
+#     range       192.0.2.10-192.0.2.20  2001:db8::10-2001:db8::20
+#     any         0.0.0.0/0              ::/0
+#   Note that 0.0.0.0/0 matches IPv4 sources only and ::/0 matches IPv6 sources
+#   only — to allow both you need both entries.
+#
+# key — what authentication that source must present:
+#     <name>      a TSIG key name (from keys.tsig: or the keystore). The request
+#                 MUST carry a valid TSIG signed with that key.
+#     NOKEY       the source is trusted by address alone. Unsigned is accepted;
+#                 a TSIG that happens to be present is not enforced.
+#     BLOCKED     deny this source. BLOCKED supersedes any allow entry anywhere
+#                 in the list, regardless of order (NSD semantics).
+#
+# Matching collects EVERY non-BLOCKED entry whose prefix matches, and the
+# request is accepted if it satisfies ANY one of the collected keys. Two
+# consequences worth knowing:
+#
+#   1. A NOKEY entry that matches a source makes TSIG optional for that source
+#      even if a named-key entry also matches it. If you want TSIG enforced,
+#      do not leave a broader NOKEY entry covering the same addresses.
+#
+#   2. Listing two named keys for one source accepts either — which is how you
+#      roll a TSIG key without downtime: add the new key alongside the old,
+#      migrate the client, then drop the old entry.
+#
+# Empty-ACL defaults differ, and the difference is deliberate:
+#   downstreams:  empty => DENY all transfers (closes the legacy open-AXFR default)
+#   allow-notify: empty => accept unsigned NOTIFY from any configured primary's
+#                 address, and nothing else
 #
 # ==============================================================================
 
@@ -40,10 +94,15 @@ zones:
           key:  NOKEY
         - addr: "192.0.2.2:53"     # And this one
           key:  NOKEY
+     downstreams:                  # ...and let those same secondaries transfer
+        - prefix: "192.0.2.1"
+          key:    NOKEY
+        - prefix: "192.0.2.2"
+          key:    NOKEY
      options:
         - delegation-sync-parent   # Provide delegation sync for children
         - online-signing           # Sign responses on-the-fly
-     dnssec_policy:   default
+     dnssecpolicy:    default      # online-signing REQUIRES a dnssecpolicy
 
    # ===========================================================================
    # EXAMPLE 2: Complete SECONDARY zone declaration (no template)
@@ -57,6 +116,11 @@ zones:
           key:  NOKEY
         - addr: "203.0.113.2:53"
           key:  NOKEY
+     allow-notify:                                           # Only these may NOTIFY us
+        - prefix: "203.0.113.1"
+          key:    NOKEY
+        - prefix: "203.0.113.2"
+          key:    NOKEY
      options:
         - delegation-sync-child    # Push DS/NS updates to parent
 
@@ -71,7 +135,7 @@ zones:
           key:  NOKEY
         - addr: "192.0.2.11:53"
           key:  NOKEY
-     # type, store, options, dnssec_policy inherited from template
+     # type, store, options, dnssecpolicy inherited from template
 
    # ===========================================================================
    # EXAMPLE 4: Simple zone using template (minimal declaration)
@@ -81,7 +145,79 @@ zones:
      template:        signed-primary     # Everything inherited from template
 
    # ===========================================================================
-   # EXAMPLE 5: PRIMARY catalog zone (with auto-create/delete)
+   # EXAMPLE 5: AXFR open to everyone, unsigned (IPv4 + IPv6)
+   # ===========================================================================
+   # Two entries are needed: 0.0.0.0/0 covers IPv4 sources, ::/0 covers IPv6.
+   # NOKEY means "trusted by address" — the transfer is accepted unsigned, and
+   # a TSIG is NOT required even if the client sends one.
+   #
+   # This is a lab/testing posture. It is the open-AXFR configuration; prefer
+   # EXAMPLE 6 or 7 for anything reachable from the network.
+   - name:            open.example.
+     type:            primary
+     zonefile:        /etc/tdns/zones/open.example.zone
+     downstreams:
+        - prefix: "0.0.0.0/0"      # every IPv4 source
+          key:    NOKEY
+        - prefix: "::/0"           # every IPv6 source
+          key:    NOKEY
+
+   # ===========================================================================
+   # EXAMPLE 6: AXFR restricted by prefix, unsigned (IPv4 + IPv6)
+   # ===========================================================================
+   # Still NOKEY (no TSIG), but only from our own secondary networks. Note the
+   # mixed ip-spec forms: CIDR, a bare host address, and a range.
+   - name:            prefix-acl.example.
+     type:            primary
+     zonefile:        /etc/tdns/zones/prefix-acl.example.zone
+     downstreams:
+        - prefix: "192.0.2.0/24"                     # IPv4 CIDR
+          key:    NOKEY
+        - prefix: "2001:db8:1::/48"                  # IPv6 CIDR
+          key:    NOKEY
+        - prefix: "203.0.113.7"                      # a single IPv4 host
+          key:    NOKEY
+        - prefix: "2001:db8:2::10-2001:db8:2::1f"    # an IPv6 range
+          key:    NOKEY
+        - prefix: "192.0.2.66"                       # ...but never this one:
+          key:    BLOCKED                            # BLOCKED beats every allow
+
+   # ===========================================================================
+   # EXAMPLE 7: AXFR requiring a real TSIG key
+   # ===========================================================================
+   # Each downstream must present a valid TSIG signed with the named key. The
+   # key names below must be defined in the keys.tsig: section of the main
+   # config (tdns-auth.yaml) or exist in the TSIG keystore, otherwise the zone
+   # is quarantined at config load with "unknown key".
+   #
+   # Because NO entry says NOKEY, an unsigned AXFR from any of these addresses
+   # is REFUSED. Adding a NOKEY entry covering the same addresses would silently
+   # make TSIG optional again — see note (1) in the ACL section above.
+   #
+   # The two entries for 2001:db8:1::/48 are a dual-key rotation overlap: the
+   # secondary on that network is accepted with EITHER key while it migrates
+   # from xfr-key-2025 to xfr-key-2026. Drop the old entry when done.
+   - name:            tsig-acl.example.
+     type:            primary
+     zonefile:        /etc/tdns/zones/tsig-acl.example.zone
+     notify:
+        - addr: "192.0.2.53:53"
+          key:  xfr-key-2026        # NOTIFY to this secondary is TSIG-signed too
+     downstreams:
+        - prefix: "192.0.2.0/24"    # IPv4 secondaries: new key only
+          key:    xfr-key-2026
+        - prefix: "2001:db8:1::/48" # IPv6 secondaries: either key (rotation)
+          key:    xfr-key-2026
+        - prefix: "2001:db8:1::/48"
+          key:    xfr-key-2025
+        - prefix: "192.0.2.66"      # compromised host: denied even with a key
+          key:    BLOCKED
+     options:
+        - online-signing
+     dnssecpolicy:    default
+
+   # ===========================================================================
+   # EXAMPLE 8: PRIMARY catalog zone (with auto-create/delete)
    # ===========================================================================
    - name:            catalog.example.
      type:            primary
@@ -90,13 +226,16 @@ zones:
      notify:
         - addr: "192.0.2.20:53"    # Notify secondaries about catalog changes
           key:  NOKEY
+     downstreams:
+        - prefix: "192.0.2.20"
+          key:    NOKEY
      options:
         - catalog-zone                    # RFC 9432 catalog zone
         - catalog-member-auto-create      # Auto-create zones from catalog
         - catalog-member-auto-delete      # Auto-delete zones removed from catalog
 
    # ===========================================================================
-   # EXAMPLE 6: SECONDARY catalog zone (fetched from upstream)
+   # EXAMPLE 9: SECONDARY catalog zone (fetched from upstream)
    # ===========================================================================
    - name:            catalog-upstream.
      type:            secondary
@@ -111,7 +250,7 @@ zones:
         - catalog-member-auto-delete           # Auto-remove deleted zones
 
    # ===========================================================================
-   # EXAMPLE 7: Read-only catalog (metadata only, no auto-config)
+   # EXAMPLE 10: Read-only catalog (metadata only, no auto-config)
    # ===========================================================================
    - name:            catalog-readonly.
      type:            secondary
@@ -124,14 +263,14 @@ zones:
                                  # (no catalog-member-auto-create option)
 
    # ===========================================================================
-   # EXAMPLE 8: Root zone (special case)
+   # EXAMPLE 11: Root zone (special case)
    # ===========================================================================
    - name:            .
      zonefile:        /etc/tdns/zones/root.zone
      template:        parent-primary
 
    # ===========================================================================
-   # EXAMPLE 9: Stealth primary (hidden, notifies public secondaries)
+   # EXAMPLE 12: Stealth primary (hidden, notifies public secondaries)
    # ===========================================================================
    - name:            stealth.example.
      zonefile:        /etc/tdns/zones/stealth.example.zone
@@ -143,7 +282,7 @@ zones:
           key:  NOKEY
 
    # ===========================================================================
-   # EXAMPLE 10: Fast-rolling DNSSEC zone
+   # EXAMPLE 13: Fast-rolling DNSSEC zone
    # ===========================================================================
    - name:            fastroll.example.
      zonefile:        /etc/tdns/zones/fastroll.example.zone
@@ -153,7 +292,7 @@ zones:
           key:  NOKEY
 
    # ===========================================================================
-   # EXAMPLE 11: Zone with dynamic updates enabled
+   # EXAMPLE 14: Zone with dynamic updates enabled
    # ===========================================================================
    - name:            dynamic.example.
      zonefile:        /etc/tdns/zones/dynamic.example.zone

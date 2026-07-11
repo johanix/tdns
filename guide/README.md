@@ -18,6 +18,20 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   tdns-agent, tdns-imr, tdns-cli, dog) with links to
   detailed documentation for each.
 
+- [TDNS Configuration Guide](configuration.md)
+  -- How to configure each application, starting from a
+  minimal working example. Conventions common to all apps
+  (config file location, `include:`, unknown-key warnings,
+  zone quarantining), then per-application pages:
+  [tdns-auth](config-tdns-auth.md) (TSIG keys, the
+  `allow-notify:` / `downstreams:` ACLs, zone declarations
+  and options, the zone template system, the `dnsengine:`
+  block, DNSSEC policies including policy templates,
+  `split_algorithms` and `large_algorithms`),
+  [tdns-imr](config-tdns-imr.md) (trust anchors, stub zones,
+  the `imrengine.tuning.*` knobs) and
+  [tdns-agent](config-tdns-agent.md) (placeholder).
+
 - [TDNS Special Features and Extensions](special-features.md)
   -- Delegation sync (parent side, child side, and the
   agent-as-proxy path for DSYNC-unaware primaries, including

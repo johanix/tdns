@@ -200,6 +200,9 @@ type deprecatedConfigKey struct {
 //   - Renamed/moved a LEAF that can appear under many parents
 //     (x: → y: under each policy)? Add
 //     {match: ".oldleaf", advice: "`oldleaf` moved to ...; see <doc>"}.
+//     A non-exact entry is matched against the END of the unused path, so it
+//     fires on the leaf itself and not on a valid block of the same name that
+//     merely happens to contain a typo'd child.
 //
 // Keep advice concrete: name the new location and, ideally, the change date
 // or doc so an operator can find the migration.
@@ -219,6 +222,17 @@ var deprecatedConfigKeys = []deprecatedConfigKey{
 	// with `default` required.
 	{match: ".sigvalidity",
 		advice: "per-key `sigvalidity:` is now a policy-level subtree `sigvalidity: { default, dnskey, ds }` (default required)"},
+	{match: ".sig-validity",
+		advice: "`sig-validity:` is spelled `sigvalidity:` and is a policy-level subtree `{ default, dnskey, ds }` (default required), not a key under ksk:/zsk:"},
+	// Zone-level leaves whose misspelling silently disables the feature: an
+	// unrecognized dnssec_policy/dnssec-policy leaves the zone with no policy,
+	// which then rejects online-signing/inline-signing at validation.
+	{match: ".dnssec_policy",
+		advice: "zone key is `dnssecpolicy:` (one word, no underscore); `dnssec_policy:` is ignored, leaving the zone unsigned"},
+	{match: ".dnssec-policy",
+		advice: "zone key is `dnssecpolicy:` (one word, no hyphen); `dnssec-policy:` is ignored, leaving the zone unsigned"},
+	{match: ".multi_signer",
+		advice: "zone key is `multisigner:` (one word, no underscore); `multi_signer:` is ignored"},
 }
 
 // classifyUnusedConfigKeys splits mapstructure's unused-key list into keys
@@ -232,7 +246,13 @@ func classifyUnusedConfigKeys(unused []string) (deprecated []deprecatedConfigKey
 		for i := range deprecatedConfigKeys {
 			d := &deprecatedConfigKeys[i]
 			ml := strings.ToLower(d.match)
-			if (d.exact && lk == ml) || (!d.exact && strings.Contains(lk, ml)) {
+			// A non-exact entry names a deprecated LEAF (".oldleaf") that may sit
+			// under many parents, so it must match the END of the path. Matching
+			// anywhere in the path would also fire on a valid parent block: a typo
+			// inside the (valid) `sigvalidity:` subtree reports as
+			// "dnssec.policies[p].SigValidity.defualt", which contains
+			// ".sigvalidity" but is a misspelled `default`, not a deprecated key.
+			if (d.exact && lk == ml) || (!d.exact && strings.HasSuffix(lk, ml)) {
 				hit = d
 				break
 			}

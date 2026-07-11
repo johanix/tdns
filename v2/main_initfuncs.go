@@ -71,14 +71,15 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 			return fmt.Errorf("cannot determine default config file: Globals.App.Name is not set")
 		}
 	}
-	// Imr uses the default config file directly and is a Cobra app: it
-	// parses argv itself (cmdv2/imr/root.go) and registers its own
-	// --version there. MainInit must NOT parse flags for it — a second
-	// pflag.Parse() here runs against the global set (which lacks imr's
-	// Cobra-registered flags) and would reject --cli/--debug/etc. Every
-	// other app type is a plain-flag daemon: register the shared flags
-	// (including --version) and parse. This AppType inversion avoids
-	// enumerating downstream-defined types (tdns-mp, tdns-nm, tdns-es).
+	// Imr is a Cobra app: it parses argv itself (cmdv2/imr/root.go) and
+	// registers its own --config and --version there. MainInit must NOT
+	// parse flags for it — a second pflag.Parse() here runs against the
+	// global set (which lacks imr's Cobra-registered flags) and would
+	// reject --cli/--debug/etc. Because MainInit cannot see imr's --config,
+	// imr passes the file it already resolved in as defaultcfg; take it as
+	// given. Every other app type is a plain-flag daemon: register the
+	// shared flags (including --version) and parse. This AppType inversion
+	// avoids enumerating downstream-defined types (tdns-mp, tdns-nm, tdns-es).
 	if Globals.App.Type == AppTypeImr {
 		conf.Internal.CfgFile = defaultcfg
 	} else {
