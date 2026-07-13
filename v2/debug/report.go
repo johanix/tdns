@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"sync"
 	"time"
 )
 
@@ -27,6 +28,9 @@ type Violation struct {
 }
 
 type Report struct {
+	// mu guards Stats, Skipped and Violations, which are written concurrently by
+	// the churn actors, pollers and checkers.
+	mu           sync.Mutex        `json:"-"`
 	Tool         string            `json:"tool"` // name + version
 	TestId       string            `json:"test_id,omitempty"`
 	Command      string            `json:"command"` // churn | ddns | probe | ...
@@ -40,6 +44,13 @@ type Report struct {
 	Violations   []Violation       `json:"violations,omitempty"`
 }
 
+// Stat atomically adds delta to a named counter. Safe for concurrent actors.
+func (r *Report) Stat(key string, delta int64) {
+	r.mu.Lock()
+	r.Stats[key] += delta
+	r.mu.Unlock()
+}
+
 func NewReport(tool, command string) *Report {
 	return &Report{
 		Tool:      tool,
@@ -50,13 +61,17 @@ func NewReport(tool, command string) *Report {
 }
 
 func (r *Report) Skip(what, why string) {
+	r.mu.Lock()
 	r.Skipped = append(r.Skipped, fmt.Sprintf("%s: %s", what, why))
+	r.mu.Unlock()
 }
 
 func (r *Report) Violate(invariant, summary, context string) {
+	r.mu.Lock()
 	r.Violations = append(r.Violations, Violation{
 		Invariant: invariant, Time: time.Now(), Summary: summary, Context: context,
 	})
+	r.mu.Unlock()
 }
 
 func (r *Report) ExitCode() int {

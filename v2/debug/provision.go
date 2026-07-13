@@ -172,7 +172,11 @@ func configSnippet(zone, id, cadence, zoneFile string) string {
 	fmt.Fprintf(&b, "     type: primary\n")
 	fmt.Fprintf(&b, "     store: map\n")
 	fmt.Fprintf(&b, "     zonefile: %s\n", zoneFile)
-	fmt.Fprintf(&b, "     update-policy:\n")
+	// allow-updates in options: enables OptAllowUpdates (the on/off switch);
+	// updatepolicy: (no hyphen — matches the ZoneConf field) defines who may
+	// update what. Both are required for RFC 2136 updates to be accepted.
+	fmt.Fprintf(&b, "     options: [ allow-updates ]\n")
+	fmt.Fprintf(&b, "     updatepolicy:\n")
 	fmt.Fprintf(&b, "        zone:\n")
 	fmt.Fprintf(&b, "           type: selfsub   # %s.%s owns names under itself\n", ChurnLabel, zone)
 	fmt.Fprintf(&b, "           rrtypes: [ TXT ]\n")

@@ -29,8 +29,19 @@ func TestConfigSnippetIsAZoneList(t *testing.T) {
 	if got := parsed.Zones[0]["zonefile"]; got != "/tmp/x/test001.zone" {
 		t.Errorf("zonefile not carried through: %v", got)
 	}
-	// update-policy must survive as a nested map, not get flattened.
-	if _, ok := parsed.Zones[0]["update-policy"].(map[string]any); !ok {
-		t.Errorf("update-policy missing or not a nested map: %v", parsed.Zones[0]["update-policy"])
+	// updatepolicy (no hyphen — the ZoneConf field) must survive as a nested map.
+	if _, ok := parsed.Zones[0]["updatepolicy"].(map[string]any); !ok {
+		t.Errorf("updatepolicy missing or not a nested map: %v", parsed.Zones[0]["updatepolicy"])
+	}
+	// options must enable allow-updates, or RFC 2136 updates are refused.
+	opts, _ := parsed.Zones[0]["options"].([]any)
+	hasAllow := false
+	for _, o := range opts {
+		if s, _ := o.(string); s == "allow-updates" {
+			hasAllow = true
+		}
+	}
+	if !hasAllow {
+		t.Errorf("options must include allow-updates, got %v", parsed.Zones[0]["options"])
 	}
 }

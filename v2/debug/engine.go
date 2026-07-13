@@ -156,10 +156,14 @@ func (c *churn) runUpdater(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			c.report.Stats["updates.attempted"]++
+			c.report.Stat("updates.attempted", 1)
 			doDelete := false
 			if _, ok := c.ledger.PickPresent(); ok {
+				// c.rng is shared with the query workers (randomOwner); math/rand
+				// is not concurrency-safe, so take c.mu for every rng access.
+				c.mu.Lock()
 				doDelete = c.rng.Float64() < 0.4 // mostly grow, sometimes shrink
+				c.mu.Unlock()
 			}
 			if doDelete {
 				c.sendDelete(ctx)
@@ -175,19 +179,19 @@ func (c *churn) sendAdd(ctx context.Context) {
 	rec := ChurnRecord{Owner: owner, Rdata: fmt.Sprintf("seq=%d t=%s seed=%d", c.seq, time.Now().Format(time.RFC3339Nano), c.cfg.Seed)}
 	rr, err := churnTXT(rec)
 	if err != nil {
-		c.report.Stats["updates.builderr"]++
+		c.report.Stat("updates.builderr", 1)
 		return
 	}
 	rcode, err := c.signer.Send(ctx, c.cfg.DnsServer, []dns.RR{rr}, nil)
 	if err != nil {
-		c.report.Stats["updates.senderr"]++
+		c.report.Stat("updates.senderr", 1)
 		return
 	}
 	if rcode == dns.RcodeSuccess {
 		c.ledger.RecordAccepted(OpAdd, rec, time.Now())
-		c.report.Stats["updates.accepted"]++
+		c.report.Stat("updates.accepted", 1)
 	} else {
-		c.report.Stats["updates.rejected"]++
+		c.report.Stat("updates.rejected", 1)
 	}
 }
 
@@ -198,20 +202,20 @@ func (c *churn) sendDelete(ctx context.Context) {
 	}
 	rr, err := churnTXT(rec)
 	if err != nil {
-		c.report.Stats["updates.builderr"]++
+		c.report.Stat("updates.builderr", 1)
 		return
 	}
 	// RFC 2136 individual-RR delete (class NONE) via miekg's Remove.
 	rcode, err := c.signer.Send(ctx, c.cfg.DnsServer, nil, []dns.RR{rr})
 	if err != nil {
-		c.report.Stats["updates.senderr"]++
+		c.report.Stat("updates.senderr", 1)
 		return
 	}
 	if rcode == dns.RcodeSuccess {
 		c.ledger.RecordAccepted(OpDel, rec, time.Now())
-		c.report.Stats["updates.accepted"]++
+		c.report.Stat("updates.accepted", 1)
 	} else {
-		c.report.Stats["updates.rejected"]++
+		c.report.Stat("updates.rejected", 1)
 	}
 }
 
@@ -228,12 +232,12 @@ func (c *churn) runAxfrPoller(ctx context.Context) {
 		case <-t.C:
 			recs, openSOA, closeSOA, err := axfrChurn(ctx, c.cfg.DnsServer, c.cfg.Zone, c.suffix)
 			if err != nil {
-				c.report.Stats["axfr.errors"]++
+				c.report.Stat("axfr.errors", 1)
 				continue
 			}
-			c.report.Stats["axfr.count"]++
+			c.report.Stat("axfr.count", 1)
 			if haveLast && openSOA != lastSerial {
-				c.report.Stats["publish.boundaries"]++
+				c.report.Stat("publish.boundaries", 1)
 			}
 			lastSerial, haveLast = openSOA, true
 			c.check.Observe(Observation{
@@ -261,15 +265,15 @@ func (c *churn) runQueryWorker(ctx context.Context, cadence time.Duration) {
 			}
 			serial, err := querySOASerial(ctx, c.cfg.DnsServer, c.cfg.Zone)
 			if err != nil {
-				c.report.Stats["query.errors"]++
+				c.report.Stat("query.errors", 1)
 				continue
 			}
 			present, rec, err := queryName(ctx, c.cfg.DnsServer, owner)
 			if err != nil {
-				c.report.Stats["query.errors"]++
+				c.report.Stat("query.errors", 1)
 				continue
 			}
-			c.report.Stats["query.count"]++
+			c.report.Stat("query.count", 1)
 			c.check.Observe(Observation{
 				Stream: "query", At: time.Now(), Serial: serial,
 				Name: dns.Fqdn(owner), Present: present, Rec: rec,
