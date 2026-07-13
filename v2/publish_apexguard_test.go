@@ -42,3 +42,24 @@ func TestPublishRefusesApexlessSnapshot(t *testing.T) {
 		t.Errorf("working set should be cleared after a refused publish, got %v", zd.workingSet)
 	}
 }
+
+// TestInstallInitialSnapshotRefusesApexlessData covers the second store site
+// (the upstream root cause of the reload crash): InstallInitialSnapshot built a
+// snapshot from zd.Data and set Ready=true unconditionally, so an empty/apex-less
+// zd.Data produced a Ready zone with a nil-apex snapshot. It must refuse and
+// leave the zone not-Ready.
+func TestInstallInitialSnapshotRefusesApexlessData(t *testing.T) {
+	zd := &ZoneData{ZoneName: "noapex.example."} // zd.Data nil → no apex
+	Zones.Set(zd.ZoneName, zd)
+	defer Zones.Remove(zd.ZoneName)
+	defer zd.stopPublisher()
+
+	zd.InstallInitialSnapshot()
+
+	if zd.Ready {
+		t.Fatal("InstallInitialSnapshot marked an apex-less zone Ready")
+	}
+	if zd.snapshot.Load() != nil {
+		t.Fatal("InstallInitialSnapshot stored an apex-less snapshot")
+	}
+}
