@@ -268,7 +268,9 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys) err
 		// _dns.<ns> owner RRset (replacing any prior synthesized server SVCB),
 		// so it is directly queryable and injected from the stored copy.
 		if _, err := zd.SignRRset(stored, "", dak, false, nil); err != nil {
-			lgDns.Debug("createTransportSignalSVCB: error signing SVCB", "owner", ownerName, "err", err)
+			lgDns.Error("createTransportSignalSVCB: error signing SVCB; not staging unsigned signal",
+				"owner", ownerName, "err", err)
+			return fmt.Errorf("createTransportSignalSVCB: failed to sign SVCB for %q: %w", ownerName, err)
 		}
 		lgDns.Debug("createTransportSignalSVCB: stored synthesized server SVCB",
 			"zone", zd.ZoneName, "ns", nsName, "owner", ownerName)
@@ -344,7 +346,9 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config, dak *DnssecKeys) er
 		// Sign BEFORE staging (fixes the prior sign-after-commit ordering that
 		// froze an unsigned TSYNC into the snapshot).
 		if _, err := zd.SignRRset(&stored, "", dak, false, nil); err != nil {
-			lgDns.Debug("createTransportSignalTSYNC: error signing TSYNC", "owner", ownerName, "err", err)
+			lgDns.Error("createTransportSignalTSYNC: error signing TSYNC; not staging unsigned signal",
+				"owner", ownerName, "err", err)
+			return fmt.Errorf("createTransportSignalTSYNC: failed to sign TSYNC for %q: %w", ownerName, err)
 		}
 		lgDns.Debug("createTransportSignalTSYNC: stored synthesized TSYNC",
 			"zone", zd.ZoneName, "ns", nsName, "owner", ownerName, "rr", trr.String())
