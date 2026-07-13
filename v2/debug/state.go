@@ -12,11 +12,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// DefaultConfigDir is the base directory for all tdns-debug on-disk state:
+// the state file (<configdir>/state.yaml) and each test's artifacts
+// (<configdir>/<id>/). Overridable with --configdir. Chosen as a short,
+// predictable path rather than burying artifacts under a deep temp path.
+const DefaultConfigDir = "/tmp/tdns-debug"
+
 // The state file is deliberately NOT a database (design doc §6.2): one small,
 // human-readable, hand-editable YAML document. Losing it loses bookkeeping
 // convenience, not correctness — everything it names is also discoverable by
 // its "<id>." prefix on the server.
-const DefaultStatePath = "/var/tmp/tdns-debug.state.yaml"
 
 type StageEvent struct {
 	Stage string    `yaml:"stage"` // provisioned | ran | cleaned | ...

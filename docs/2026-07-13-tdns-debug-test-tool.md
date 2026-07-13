@@ -109,8 +109,10 @@ Replaced/Deleted []PendingOwnerChangeJSON}` (built by `pendingChangesView()`,
   live server-side anyway (TSIG shared secrets, pre-existing zone keys).
 - `--seed <n>` makes randomized op mixes replayable; the seed is always printed
   and included in the report.
-- `--state <path>` overrides the state-file location (default
-  `/var/tmp/tdns-debug.state.yaml`).
+- `--configdir <dir>` sets the base directory for all on-disk state (default
+  `/tmp/tdns-debug`): the state file lives at `<configdir>/state.yaml` and each
+  test's artifacts at `<configdir>/<id>/`. `--state <path>` overrides just the
+  state-file location; `--out <dir>` overrides just one test's artifact dir.
 
 ## 5. Capability detection
 
@@ -173,13 +175,13 @@ and the stages must correlate. Therefore every provisioned test gets an
 
 ### 6.2 The state file
 
-`/var/tmp/tdns-debug.state.yaml` (override: `--state`). One small YAML document:
-per test ID — creation time, target(s), zone name, key names and local key-file
-paths, what was auto-installed via API vs emitted for the operator, stage
-history (provisioned / ran / cleaned). Deliberately **not a database**: a flat
-file, human-readable and hand-editable, best-effort locked. Losing it loses
-bookkeeping convenience, not correctness — everything it names is also
-discoverable by its `<id>.` prefix.
+`<configdir>/state.yaml` (default `/tmp/tdns-debug/state.yaml`; override:
+`--state`). One small YAML document: per test ID — creation time, target(s),
+zone name, key names and local key-file paths, what was auto-installed via API
+vs emitted for the operator, stage history (provisioned / ran / cleaned).
+Deliberately **not a database**: a flat file, human-readable and hand-editable,
+best-effort locked. Losing it loses bookkeeping convenience, not correctness —
+everything it names is also discoverable by its `<id>.` prefix.
 
 ### 6.3 `--generate-config`: provisioning without running
 
@@ -192,13 +194,15 @@ needs, split along what today's API can and cannot automate:
   zone, TSIG keys (for later phases) inserted into the keystore — all named
   per §6.1 and recorded for cleanup.
 - **Emitted as artifacts for the operator (always):** the zone file (including
-  SOA/NS boilerplate and the guard marker, §6.5) and the exact config snippet
-  to add to the server — zone declaration with a correct update policy
-  (trusting the test's SIG(0) key for TXT under `_churn`), `publish-cadence`,
-  `downstreams` entry for the tool's AXFRs, etc. There is **no API today for
-  provisioning a primary zone** (the dynamic-zone API provisions secondaries),
-  so zone + config installation is an operator step by necessity, not by
-  design. The companion design `2026-07-13-dynamic-primary-zones.md`
+  SOA/NS boilerplate and the guard marker, §6.5) written under
+  `<configdir>/<id>/`, and the exact config snippet to add to the server — a
+  zone declaration whose `zonefile:` points **at that emitted file directly**
+  (no copy step, nothing to keep consistent by hand), with a correct update
+  policy (trusting the test's SIG(0) key for TXT under `_churn`),
+  `publish-cadence`, and a `downstreams` entry for the tool's AXFRs. There is
+  **no API today for provisioning a primary zone** (the dynamic-zone API
+  provisions secondaries), so merging that snippet and reloading is an operator
+  step by necessity, not by design. The companion design `2026-07-13-dynamic-primary-zones.md`
   (template-constrained API-provisioned primaries, sequenced after the
   snapshot merge) is exactly the API that graduates this half to automated.
 - Later phases reuse the same mechanism with different generators: P5's

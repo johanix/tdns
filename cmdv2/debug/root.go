@@ -25,7 +25,17 @@ import (
 
 var cfgFile, cfgFileUsed string
 var statePath string
+var configDir string
 var cconf cli.CliConf
+
+// effectiveStatePath resolves the state file: an explicit --state wins,
+// otherwise it lives under --configdir as state.yaml.
+func effectiveStatePath() string {
+	if statePath != "" {
+		return statePath
+	}
+	return filepath.Join(configDir, "state.yaml")
+}
 
 var rootCmd = &cobra.Command{
 	Use:   "tdns-debug",
@@ -52,8 +62,10 @@ func ExecuteContext(ctx context.Context) {
 func init() {
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "",
 		fmt.Sprintf("config file (default is %s — shared with tdns-cli)", tdns.DefaultCliCfgFile))
-	rootCmd.PersistentFlags().StringVar(&statePath, "state", debug.DefaultStatePath,
-		"tdns-debug state file (test identities)")
+	rootCmd.PersistentFlags().StringVar(&configDir, "configdir", debug.DefaultConfigDir,
+		"base directory for tdns-debug state + per-test artifacts")
+	rootCmd.PersistentFlags().StringVar(&statePath, "state", "",
+		"state file (default <configdir>/state.yaml)")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "debug output")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v", false, "verbose output")
 

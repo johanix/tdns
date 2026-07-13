@@ -36,7 +36,8 @@ type ChurnProvisionInput struct {
 	DnsServer      string // addr[:port]; a literal IP also becomes the ns glue
 	Target         string // apiservers entry name (informational, recorded)
 	PublishCadence string // default "20s" (snapshot-branch config key)
-	OutDir         string // default: ./tdns-debug-<id>
+	ConfigDir      string // base dir; artifacts land in <ConfigDir>/<id> (default DefaultConfigDir)
+	OutDir         string // explicit artifact dir override (wins over ConfigDir)
 }
 
 type ChurnProvision struct {
@@ -69,7 +70,11 @@ func GenerateChurnConfig(st *State, in ChurnProvisionInput) (*ChurnProvision, er
 
 	outDir := in.OutDir
 	if outDir == "" {
-		outDir = "tdns-debug-" + rec.Id
+		base := in.ConfigDir
+		if base == "" {
+			base = DefaultConfigDir
+		}
+		outDir = filepath.Join(base, rec.Id)
 	}
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return nil, err
@@ -97,9 +102,11 @@ func GenerateChurnConfig(st *State, in ChurnProvisionInput) (*ChurnProvision, er
 		return nil, err
 	}
 
-	// Config snippet the operator adds to the target server.
+	// Config snippet the operator adds to the target server. It points
+	// zonefile: at the emitted zone file directly (no copy step, nothing to
+	// keep consistent by hand); the server needs read access to it.
 	snippetFile := filepath.Join(outDir, rec.Id+"-zones.yaml")
-	if err := os.WriteFile(snippetFile, []byte(configSnippet(zone, rec.Id, in.PublishCadence)), 0644); err != nil {
+	if err := os.WriteFile(snippetFile, []byte(configSnippet(zone, rec.Id, in.PublishCadence, zoneFile)), 0644); err != nil {
 		return nil, err
 	}
 
@@ -113,8 +120,7 @@ func GenerateChurnConfig(st *State, in ChurnProvisionInput) (*ChurnProvision, er
 	rec.ArtifactDir = outDir
 
 	todo := []string{
-		fmt.Sprintf("install %s on the server (path referenced by the zone declaration)", zoneFile),
-		fmt.Sprintf("merge %s into the server's zones: config (adjust zonefile path and downstreams prefix)", snippetFile),
+		fmt.Sprintf("merge %s into the server's zones: config (it points zonefile: at %s directly — no copy needed; adjust downstreams prefix if tdns-debug runs off-host)", snippetFile, zoneFile),
 		fmt.Sprintf("trust the SIG(0) public key: tdns-cli auth truststore add --src %s --child %s", keyFile, keyName),
 		"reload the server (or restart)",
 		fmt.Sprintf("then run: tdns-debug test churn --test %s", rec.Id),
@@ -155,15 +161,17 @@ func bootstrapZone(zone, id, dnsServer string) string {
 // policy selfsub/TXT paired with the _churn.<zone> key name (the selfsub
 // grant covers exactly the churn subtree), AXFR open to the adjusted
 // prefix, publish-cadence for snapshot-branch servers (ignored elsewhere).
-func configSnippet(zone, id, cadence string) string {
+// zoneFile is the absolute path of the emitted zone file, referenced
+// directly so there is no copy step and nothing to keep consistent by hand.
+func configSnippet(zone, id, cadence, zoneFile string) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "# tdns-debug %s — merge under the server's zones: section.\n", id)
-	fmt.Fprintf(&b, "# Adjust: zonefile path, downstreams prefix (the host tdns-debug runs on).\n")
+	fmt.Fprintf(&b, "# zonefile points at the emitted file directly; adjust downstreams prefix if tdns-debug runs off-host.\n")
 	fmt.Fprintf(&b, "zones:\n")
 	fmt.Fprintf(&b, "  %s:\n", zone)
 	fmt.Fprintf(&b, "    type: primary\n")
 	fmt.Fprintf(&b, "    store: map\n")
-	fmt.Fprintf(&b, "    zonefile: /etc/tdns/zones/%s.zone\n", strings.TrimSuffix(zone, "."))
+	fmt.Fprintf(&b, "    zonefile: %s\n", zoneFile)
 	fmt.Fprintf(&b, "    update-policy:\n")
 	fmt.Fprintf(&b, "      zone:\n")
 	fmt.Fprintf(&b, "        type: selfsub   # %s.%s owns names under itself\n", ChurnLabel, zone)

@@ -76,9 +76,10 @@ var testChurnCmd = &cobra.Command{
 	Long: `The snapshot-correctness live gate (design doc §10.1). With
 --generate-config it only provisions: allocates a test identity, generates
 the SIG(0) keypair locally, and emits the zone file + config snippet the
-operator installs on the target. The run stage arrives with M2.`,
+operator installs on the target. With --test <id> it runs the churn: signed
+updates vs concurrent AXFR/query observations, checked against the ledger.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		st, err := debug.LoadState(statePath)
+		st, err := debug.LoadState(effectiveStatePath())
 		if err != nil {
 			log.Fatalf("state: %v", err)
 		}
@@ -89,12 +90,13 @@ operator installs on the target. The run stage arrives with M2.`,
 				DnsServer:      dnsServer,
 				Target:         targetName,
 				PublishCadence: publishCadence,
+				ConfigDir:      configDir,
 				OutDir:         outDir,
 			})
 			if err != nil {
 				log.Fatalf("generate-config: %v", err)
 			}
-			if err := st.Save(statePath); err != nil {
+			if err := st.Save(effectiveStatePath()); err != nil {
 				log.Fatalf("state save: %v", err)
 			}
 			rec := prov.Record
@@ -177,7 +179,7 @@ var listTestsCmd = &cobra.Command{
 	Use:   "list-tests",
 	Short: "List known test identities from the state file",
 	Run: func(cmd *cobra.Command, args []string) {
-		st, err := debug.LoadState(statePath)
+		st, err := debug.LoadState(effectiveStatePath())
 		if err != nil {
 			log.Fatalf("state: %v", err)
 		}
@@ -211,7 +213,7 @@ printed for the operator.`,
 		if testId == "" {
 			log.Fatal("--test <id> is required")
 		}
-		st, err := debug.LoadState(statePath)
+		st, err := debug.LoadState(effectiveStatePath())
 		if err != nil {
 			log.Fatalf("state: %v", err)
 		}
@@ -220,8 +222,9 @@ printed for the operator.`,
 			log.Fatal(err)
 		}
 		if rmArtifacts && rec.ArtifactDir != "" {
-			// Only ever remove the tool's own artifact directory.
-			if strings.Contains(rec.ArtifactDir, "tdns-debug-") {
+			// Only ever remove the tool's own artifact directory (matches both
+			// the <configdir>/tdns-debug/<id> layout and legacy tdns-debug-<id>).
+			if strings.Contains(rec.ArtifactDir, "tdns-debug") {
 				if err := os.RemoveAll(rec.ArtifactDir); err != nil {
 					log.Printf("removing %s: %v", rec.ArtifactDir, err)
 				} else {
@@ -238,7 +241,7 @@ printed for the operator.`,
 		fmt.Printf("  4. reload the server\n")
 		rec.Cleaned = true
 		rec.AddStage("cleaned", "local artifacts handled; server-side steps printed")
-		if err := st.Save(statePath); err != nil {
+		if err := st.Save(effectiveStatePath()); err != nil {
 			log.Fatalf("state save: %v", err)
 		}
 	},
