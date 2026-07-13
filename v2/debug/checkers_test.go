@@ -108,7 +108,11 @@ func TestI6DetectsSameSerialDifferentContent(t *testing.T) {
 }
 
 // I6 cross-stream: query says present, AXFR at the same serial says absent.
-func TestI6DetectsCrossStreamDivergence(t *testing.T) {
+// A query/AXFR disagreement at the "same" serial must NOT be flagged: the query
+// stream's (serial, name) pair is non-atomic (separate SOA and TXT queries), so a
+// publish between them pins the wrong serial to the presence fact. Flagging it
+// produced false I6s in the live run. The query stream is load + I2 only.
+func TestQueryStreamDoesNotDriveSerialPinnedI6(t *testing.T) {
 	l := NewLedger()
 	rep := NewReport("test", "churn")
 	c := NewChecker(l, rep, 2*time.Second)
@@ -116,12 +120,28 @@ func TestI6DetectsCrossStreamDivergence(t *testing.T) {
 	t0 := time.Unix(1_700_000_000, 0)
 	l.RecordAccepted(OpAdd, a, t0)
 
+	// query says present@7, AXFR says absent@7 — an unreliable disagreement.
 	c.Observe(Observation{Stream: "query", At: t0.Add(5 * time.Second), Serial: 7,
 		Name: a.Owner, Present: true, Rec: a})
 	c.Observe(Observation{Stream: "axfr", At: t0.Add(6 * time.Second), Serial: 7, Full: true,
 		Churn: nil, HasSOA: true, OpenSOA: 7, CloseSOA: 7})
-	if !has(rep, "I6") {
-		t.Fatalf("expected cross-stream I6; got %+v", rep.Violations)
+	if has(rep, "I6") {
+		t.Fatalf("query/AXFR serial disagreement must not raise I6 (unreliable); got %+v", rep.Violations)
+	}
+}
+
+// A serial that regresses on the query stream must NOT raise I5: concurrent query
+// workers can process observations out of order. Only the ordered AXFR stream
+// drives I5.
+func TestQueryStreamDoesNotDriveI5(t *testing.T) {
+	l := NewLedger()
+	rep := NewReport("test", "churn")
+	c := NewChecker(l, rep, 2*time.Second)
+	t0 := time.Unix(1_700_000_000, 0)
+	c.Observe(Observation{Stream: "query", At: t0, Serial: 25, Name: "x.", Present: false})
+	c.Observe(Observation{Stream: "query", At: t0.Add(time.Second), Serial: 24, Name: "x.", Present: false})
+	if has(rep, "I5") {
+		t.Fatalf("query-stream serial regression must not raise I5; got %+v", rep.Violations)
 	}
 }
 

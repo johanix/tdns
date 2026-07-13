@@ -49,12 +49,11 @@ type Checker struct {
 	report *Report
 	delta  time.Duration
 
-	maxSerial    uint32
-	haveSerial   bool
-	serialFP     map[uint32]string            // I6: serial → full-content fingerprint (from AXFR)
-	serialNames  map[uint32]map[string]bool   // I6 cross-stream: serial → name → present
-	firstSeen    map[uint32]time.Time         // when each serial was first observed
-	lastFullCut  int                          // I3: content cut must not regress
+	maxSerial   uint32
+	haveSerial  bool
+	serialFP    map[uint32]string    // I6: serial → full-content fingerprint (from AXFR)
+	firstSeen   map[uint32]time.Time // when each serial was first observed
+	lastFullCut int                  // I3: content cut must not regress
 }
 
 func NewChecker(ledger *Ledger, report *Report, delta time.Duration) *Checker {
@@ -63,7 +62,6 @@ func NewChecker(ledger *Ledger, report *Report, delta time.Duration) *Checker {
 		report:      report,
 		delta:       delta,
 		serialFP:    map[uint32]string{},
-		serialNames: map[uint32]map[string]bool{},
 		firstSeen:   map[uint32]time.Time{},
 	}
 }
@@ -95,6 +93,14 @@ func (c *Checker) Observe(o Observation) {
 
 // I5 — served serial never regresses (per stream and globally).
 func (c *Checker) checkSerialMonotonic(o Observation) {
+	// Only the single, ordered AXFR poller gives a reliable serial timeline.
+	// Concurrent query workers can have their Observe() calls processed out of
+	// order relative to the server's actual responses, so their serials must not
+	// drive the monotonicity check — that produced false I5s. A real serial
+	// regression still shows up on the AXFR stream.
+	if !o.Full {
+		return
+	}
 	if c.haveSerial && serialLT(o.Serial, c.maxSerial) {
 		c.report.Violate("I5",
 			fmt.Sprintf("serial regressed: observed %d after %d", o.Serial, c.maxSerial),
@@ -152,44 +158,21 @@ func (c *Checker) observeFull(o Observation) {
 	} else {
 		c.serialFP[o.Serial] = fp
 	}
-	// Cross-check query facts recorded earlier for this serial.
-	present := map[string]bool{}
-	for _, r := range o.Churn {
-		present[r.Owner] = true
-	}
-	for name, wasPresent := range c.serialNames[o.Serial] {
-		if wasPresent != present[name] {
-			c.report.Violate("I6",
-				fmt.Sprintf("serial %d disagrees across streams on %s (query said present=%v, AXFR says %v)",
-					o.Serial, name, wasPresent, present[name]),
-				fmt.Sprintf("at=%s", o.At.Format(time.RFC3339Nano)))
-		}
-	}
 }
 
 func (c *Checker) observeName(o Observation) {
-	// I2 — premature visibility for a single name.
+	// The query stream's (serial, name-presence) pair is NOT atomic — the SOA
+	// (serial) and the TXT (name) come from separate queries, so a publish
+	// between them pins the wrong serial to the presence fact. It therefore
+	// cannot drive serial-pinned checks (I6) without false positives. The query
+	// stream's role is (1) concurrent read load that induces tearing the AXFR
+	// poller catches, and (2) I2 premature-visibility, which needs only the
+	// observation time, not the serial. (A serial-reliable query cross-check
+	// would need an SOA-sandwich, SOA/TXT/SOA with a stable serial — a later
+	// enhancement.)
 	if o.Present {
 		c.checkPremature([]ChurnRecord{o.Rec}, o.At)
 	}
-
-	// I6 — cross-stream consistency at a serial. If we already have the full
-	// content for this serial (from an AXFR), the name's presence must agree.
-	if fp, haveFull := c.serialFP[o.Serial]; haveFull {
-		_ = fp
-		// Reconstruct presence from the stored full set is not kept; instead
-		// we rely on the serialNames cross-map plus the AXFR-time check. Record
-		// the fact and let a later AXFR at this serial cross-check it.
-	}
-	if c.serialNames[o.Serial] == nil {
-		c.serialNames[o.Serial] = map[string]bool{}
-	}
-	if prev, seen := c.serialNames[o.Serial][o.Name]; seen && prev != o.Present {
-		c.report.Violate("I6",
-			fmt.Sprintf("serial %d served %s as both present and absent (tearing)", o.Serial, o.Name),
-			fmt.Sprintf("stream=%s at=%s", o.Stream, o.At.Format(time.RFC3339Nano)))
-	}
-	c.serialNames[o.Serial][o.Name] = o.Present
 }
 
 // checkPremature implements I2: any present record whose add was accepted more

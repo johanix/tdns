@@ -97,6 +97,17 @@ func RunChurn(ctx context.Context, cfg ChurnConfig) (*Report, error) {
 		return nil, fmt.Errorf("pre-flight SOA query failed: %w", err)
 	}
 
+	// Baseline reset: the churn label persists across runs (and runs reuse
+	// <seq> owner names), so leftover records from a prior run would look like
+	// torn content to this run's fresh ledger. Clear the _churn subtree and
+	// wait for it to publish empty, so the ledger's empty initial state matches
+	// the served zone.
+	if n, err := c.clearChurnSubtree(ctx); err != nil {
+		return nil, fmt.Errorf("clearing churn subtree: %w", err)
+	} else if n > 0 {
+		rep.Stat("baseline.cleared", int64(n))
+	}
+
 	runCtx, cancel := context.WithTimeout(ctx, cfg.Duration)
 	defer cancel()
 
@@ -125,6 +136,50 @@ func RunChurn(ctx context.Context, cfg ChurnConfig) (*Report, error) {
 	rep.Duration = time.Since(rep.StartedAt)
 	rep.Stats["ops.accepted"] = int64(ledger.AcceptedCount())
 	return rep, nil
+}
+
+// clearChurnSubtree deletes every existing _churn record and waits for the zone
+// to publish empty, establishing the known-empty baseline the fresh ledger
+// assumes. Returns the number of records cleared.
+func (c *churn) clearChurnSubtree(ctx context.Context) (int, error) {
+	recs, _, _, err := axfrChurn(ctx, c.cfg.DnsServer, c.cfg.Zone, c.suffix)
+	if err != nil {
+		return 0, err
+	}
+	if len(recs) == 0 {
+		return 0, nil
+	}
+	var rrs []dns.RR
+	for _, rec := range recs {
+		if rr, err := churnTXT(rec); err == nil {
+			rrs = append(rrs, rr) // exact owner+rdata delete (handles duplicate owners)
+		}
+	}
+	for i := 0; i < len(rrs); i += 20 { // one signed UPDATE per chunk
+		end := i + 20
+		if end > len(rrs) {
+			end = len(rrs)
+		}
+		if _, err := c.signer.Send(ctx, c.cfg.DnsServer, nil, rrs[i:end]); err != nil {
+			return 0, err
+		}
+	}
+	// Wait for the deletes to publish (past one publish cadence + margin).
+	deadline := time.Now().Add(c.cfg.SettleWait + 10*time.Second)
+	for {
+		left, _, _, err := axfrChurn(ctx, c.cfg.DnsServer, c.cfg.Zone, c.suffix)
+		if err == nil && len(left) == 0 {
+			return len(recs), nil
+		}
+		if time.Now().After(deadline) {
+			return len(recs), fmt.Errorf("churn subtree still not empty after clear")
+		}
+		select {
+		case <-ctx.Done():
+			return len(recs), ctx.Err()
+		case <-time.After(2 * time.Second):
+		}
+	}
 }
 
 func (c *churn) nextOwner() string {
