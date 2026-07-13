@@ -4,10 +4,13 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -26,6 +29,13 @@ var (
 	publishCadence string
 	reportJson     bool
 	rmArtifacts    bool
+
+	updateCadence string
+	axfrCadence   string
+	durationStr   string
+	deltaStr      string
+	qps           int
+	seed          int64
 )
 
 // ---- probe ----------------------------------------------------------------
@@ -99,13 +109,66 @@ operator installs on the target. The run stage arrives with M2.`,
 			return
 		}
 
-		if testId == "" && zoneName == "" {
-			log.Fatal("either --generate-config, --test <id>, or --zone <zone> is required")
+		if testId == "" {
+			log.Fatal("--test <id> is required to run (provision first with --generate-config); operator-provided --zone runs land in a later slice")
 		}
-		// The run engine (actors + ledger + checkers) is milestone M2.
-		fmt.Fprintln(os.Stderr, "test churn run engine arrives with M2 (design doc §14); only --generate-config is available in M1")
-		os.Exit(debug.ExitSetup)
+		rec, err := st.Get(testId)
+		if err != nil {
+			log.Fatal(err)
+		}
+		runChurn(cmd.Context(), rec)
 	},
+}
+
+// runChurn resolves a provisioned test into a ChurnConfig and executes it.
+func runChurn(ctx context.Context, rec *debug.TestRecord) {
+	server := dnsServer
+	if server == "" {
+		server = rec.DnsServer
+	}
+	if server == "" {
+		log.Fatal("no DNS server: pass --dns or re-provision with --dns")
+	}
+	if _, _, err := net.SplitHostPort(server); err != nil {
+		server = net.JoinHostPort(server, "53")
+	}
+
+	cfg := debug.ChurnConfig{
+		Zone:          rec.Zone,
+		ChurnKeyName:  rec.Sig0KeyName,
+		DnsServer:     server,
+		KeyFile:       rec.Sig0KeyFile,
+		PrivFile:      rec.Sig0PrivFile,
+		UpdateCadence: mustDur(updateCadence, "updatecadence"),
+		AxfrCadence:   mustDur(axfrCadence, "axfrcadence"),
+		QueryQPS:      qps,
+		Duration:      mustDur(durationStr, "duration"),
+		Delta:         mustDur(deltaStr, "delta"),
+		Seed:          seed,
+		Tool:          appName + " " + appVersion,
+		TestId:        rec.Id,
+	}
+
+	rep, err := debug.RunChurn(ctx, cfg)
+	if err != nil {
+		log.Printf("churn setup error: %v", err)
+		os.Exit(debug.ExitSetup)
+	}
+	rec.AddStage("ran", fmt.Sprintf("%d violation(s), %d ops accepted", len(rep.Violations), rep.Stats["ops.accepted"]))
+	if reportJson {
+		_ = rep.RenderJSON(os.Stdout)
+	} else {
+		rep.RenderText(os.Stdout)
+	}
+	os.Exit(rep.ExitCode())
+}
+
+func mustDur(s, name string) time.Duration {
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		log.Fatalf("invalid --%s %q: %v", name, s, err)
+	}
+	return d
 }
 
 // ---- list-tests / cleanup ---------------------------------------------------
@@ -211,6 +274,13 @@ func init() {
 	testChurnCmd.Flags().StringVar(&publishCadence, "publishcadence", "", "publish-cadence for the emitted config (default 20s)")
 	testChurnCmd.Flags().StringVar(&testId, "test", "", "test identity from a prior --generate-config")
 	testChurnCmd.Flags().StringVarP(&zoneName, "zone", "z", "", "operator-provided zone (no provisioning)")
+	testChurnCmd.Flags().StringVar(&updateCadence, "updatecadence", "1s", "interval between DNS UPDATEs")
+	testChurnCmd.Flags().StringVar(&axfrCadence, "axfrcadence", "3s", "interval between AXFR polls")
+	testChurnCmd.Flags().IntVar(&qps, "qps", 0, "concurrent query-hammer rate (0 = off)")
+	testChurnCmd.Flags().StringVar(&durationStr, "duration", "2m", "total run duration")
+	testChurnCmd.Flags().StringVar(&deltaStr, "delta", "2s", "publish-boundary tolerance for I2/timing checks")
+	testChurnCmd.Flags().Int64Var(&seed, "seed", 0, "PRNG seed for a reproducible op mix")
+	testChurnCmd.Flags().BoolVar(&reportJson, "json", false, "JSON report")
 	testCmd.AddCommand(testChurnCmd)
 
 	cleanupCmd.Flags().StringVar(&testId, "test", "", "test identity to clean up")
