@@ -63,3 +63,26 @@ func TestInstallInitialSnapshotRefusesApexlessData(t *testing.T) {
 		t.Fatal("InstallInitialSnapshot stored an apex-less snapshot")
 	}
 }
+
+// TestInstallInitialSnapshotMarksReadyWhenSnapshotExists covers the first-load
+// flow on this branch: the load path publishes the snapshot and leaves zd.Data
+// empty, then InstallInitialSnapshot runs only to mark the zone Ready. It must
+// flip Ready off the existing valid snapshot rather than refusing (which would
+// leave the zone stuck "loading" and unable to serve AXFR) or overwriting it.
+func TestInstallInitialSnapshotMarksReadyWhenSnapshotExists(t *testing.T) {
+	zd := &ZoneData{ZoneName: "loaded.example."} // zd.Data empty
+	good := &zoneSnapshot{Serial: 7, SOA: &dns.SOA{Serial: 7}}
+	zd.snapshot.Store(good)
+	Zones.Set(zd.ZoneName, zd)
+	defer Zones.Remove(zd.ZoneName)
+	defer zd.stopPublisher()
+
+	zd.InstallInitialSnapshot()
+
+	if !zd.Ready {
+		t.Fatal("InstallInitialSnapshot left a zone with a valid snapshot not Ready (would refuse AXFR)")
+	}
+	if zd.snapshot.Load() != good {
+		t.Fatal("InstallInitialSnapshot overwrote the existing valid snapshot")
+	}
+}

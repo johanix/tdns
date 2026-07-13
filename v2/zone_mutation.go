@@ -408,14 +408,22 @@ func (zd *ZoneData) InstallInitialSnapshot() {
 	defer zd.mu.Unlock()
 
 	data := snapshotMapFromData(zd.Data)
-	// Atomic-swap invariant (same as publishWorkingSetLocked): never install an
-	// apex-less snapshot and — critically — never mark such a zone Ready. All
-	// callers install after reading zone data, so an empty apex here is an
-	// anomaly (e.g. an unpopulated zd.Data during reload); marking Ready with a
-	// nil apex/SOA is exactly the state that crashed readers (GetSOA -> nil).
-	// Refuse: leave the zone not-Ready with whatever snapshot it already had.
 	if apexFromSnapshotData(zd, data) == nil {
-		lg.Error("InstallInitialSnapshot: refusing apex-less snapshot; zone left not Ready", "zone", zd.ZoneName)
+		// zd.Data carries no apex. Two cases:
+		//   1. The load path (initialLoadZone -> applyRefreshReplacementLocked)
+		//      already published a valid snapshot and left zd.Data empty; here
+		//      InstallInitialSnapshot's only job is to mark the zone Ready. Do NOT
+		//      overwrite the good snapshot with an apex-less one — just flip Ready.
+		//   2. There is also no valid snapshot: genuinely nothing to serve (e.g.
+		//      an empty rebuild during reload). Refuse and leave the zone not
+		//      Ready — marking a zone with a nil apex/SOA Ready is exactly what
+		//      crashed readers (GetSOA -> nil).
+		if cur := zd.snapshot.Load(); cur != nil && cur.SOA != nil {
+			zd.Ready = true
+			zd.Status = ZoneStatusReady
+			return
+		}
+		lg.Error("InstallInitialSnapshot: no apex in data and no valid snapshot; zone left not Ready", "zone", zd.ZoneName)
 		return
 	}
 	snap := zd.buildSnapshotLocked(zd.CurrentSerial, data, nil)
