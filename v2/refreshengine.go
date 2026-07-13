@@ -415,7 +415,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							lgEngine.Error("GetSOA failed", "zone", zone, "error", err)
 							zd.SetError(RefreshError, "get soa error: %v", err)
 							zd.LatestError = time.Now()
-						} else {
+						} else if soa != nil {
 							refresh = soa.Refresh
 						}
 						if rc, haveParams := refreshCounters.Get(zone); haveParams {

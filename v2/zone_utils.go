@@ -524,16 +524,30 @@ func (zd *ZoneData) GetSOA() (*dns.SOA, error) {
 		}, nil
 	}
 
-	// For all other cases (primary zones, ready zones, catalog zones), require real data
+	// For all other cases (primary zones, ready zones, catalog zones), require real data.
+	// GetSOA must never return (nil, nil): a nil SOA with no error is a landmine for
+	// callers that read soa.* only in the err==nil branch (e.g. RefreshEngine). During a
+	// concurrent reload the apex owner can be transiently absent — surface that as an
+	// error, not a nil SOA.
 	if snap := zd.publishedSnapshot(); snap != nil && snap.SOA != nil {
 		return snap.SOA, nil
 	}
 	owner, err := zd.GetOwner(zd.ZoneName)
-	if err != nil || owner == nil {
+	if err != nil {
 		return nil, err
 	}
-	soa := owner.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0]
-	return soa.(*dns.SOA), nil
+	if owner == nil {
+		return nil, fmt.Errorf("GetSOA: zone %s: apex owner not found", zd.ZoneName)
+	}
+	soaSet := owner.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+	if len(soaSet.RRs) == 0 {
+		return nil, fmt.Errorf("GetSOA: zone %s: no SOA record at apex", zd.ZoneName)
+	}
+	soa, ok := soaSet.RRs[0].(*dns.SOA)
+	if !ok {
+		return nil, fmt.Errorf("GetSOA: zone %s: apex SOA record is not a *dns.SOA (got %T)", zd.ZoneName, soaSet.RRs[0])
+	}
+	return soa, nil
 }
 
 func (zd *ZoneData) PrintOwners() {
