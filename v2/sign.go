@@ -883,7 +883,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 		lgSigner.Warn("SignZone: persist max_observed_ttl", "zone", zd.ZoneName, "err", err)
 	}
 	if zd.DnssecPolicy != nil {
-		UpdateSigValidityFloor(zd, zd.DnssecPolicy, Conf.KaspPropagationDelay(), maxObservedTTL, true, Conf.IsLargeAlgorithm)
+		UpdateSigValidityFloor(zd, zd.DnssecPolicy, Conf.KaspPropagationDelay(), maxObservedTTL, true, Conf.IsLargeAlgorithm, true)
 	}
 
 	return newrrsigs, nil

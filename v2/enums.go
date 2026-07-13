@@ -386,6 +386,13 @@ type ZoneError struct {
 func (zd *ZoneData) SetError(errtype ErrorType, errmsg string, args ...interface{}) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
+	zd.setErrorLocked(errtype, errmsg, args...)
+}
+
+// setErrorLocked is SetError's body; the caller MUST already hold zd.mu. It
+// exists so a zd.mu-holding path (e.g. SignZone → UpdateSigValidityFloor) can
+// record an error without re-locking — Go mutexes are not reentrant.
+func (zd *ZoneData) setErrorLocked(errtype ErrorType, errmsg string, args ...interface{}) {
 	if errtype == NoError {
 		zd.Errors = nil
 	} else {
@@ -403,6 +410,12 @@ func (zd *ZoneData) SetError(errtype ErrorType, errmsg string, args ...interface
 func (zd *ZoneData) ClearError(errtype ErrorType) {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
+	zd.clearErrorLocked(errtype)
+}
+
+// clearErrorLocked is ClearError's body; the caller MUST already hold zd.mu.
+// See setErrorLocked for why this exists.
+func (zd *ZoneData) clearErrorLocked(errtype ErrorType) {
 	if errtype == NoError {
 		zd.Errors = nil
 	} else if zd.Errors != nil {

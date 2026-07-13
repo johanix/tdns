@@ -973,7 +973,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// policy/kasp edits on reload refresh DnssecError/Warning state.
 		if options[OptOnlineSigning] || options[OptInlineSigning] {
 			if zdp.DnssecPolicy != nil {
-				UpdateSigValidityFloor(zdp, zdp.DnssecPolicy, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm)
+				UpdateSigValidityFloor(zdp, zdp.DnssecPolicy, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm, false)
 			}
 		}
 

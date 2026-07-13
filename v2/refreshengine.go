@@ -263,7 +263,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.mu.Unlock()
 							if zd.DnssecPolicy != nil &&
 								(zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) {
-								UpdateSigValidityFloor(zd, zd.DnssecPolicy, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm)
+								UpdateSigValidityFloor(zd, zd.DnssecPolicy, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm, false)
 							}
 						}
 
@@ -403,7 +403,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// key churn.
 						if reapplyPolicy && zd.DnssecPolicy != nil &&
 							(zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) {
-							UpdateSigValidityFloor(zd, zd.DnssecPolicy, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm)
+							UpdateSigValidityFloor(zd, zd.DnssecPolicy, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm, false)
 							triggerResign(conf, zone)
 						}
 						lgEngine.Debug("updated configuration for zone", "zone", zone, "notify", zd.Notify, "primaries", zd.PrimariesConf, "upstreams", zd.Upstreams, "zonefile", zd.Zonefile, "store", ZoneStoreToString[zd.ZoneStore])
