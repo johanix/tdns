@@ -268,6 +268,23 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		return
 	}
 
+	// Atomic-swap invariant: never store a snapshot without an apex. An
+	// apex-less working set (e.g. an empty rebuild during reload) would yield a
+	// snapshot with nil Apex/SOA; storing it would leave a Ready zone with no
+	// servable SOA and crash readers (GetSOA -> nil). A zone with no apex SOA is
+	// not servable, so refuse the swap and keep serving the current snapshot; a
+	// later valid rebuild will publish correctly. Serial is not bumped here, so
+	// the refused publish does not advance the zone's serial.
+	if apexFromSnapshotData(zd, zd.workingSet) == nil {
+		lg.Error("publish: refusing to swap in an apex-less snapshot; keeping current snapshot",
+			"zone", zd.ZoneName)
+		zd.workingSet = nil
+		zd.wsSignalSynth = nil
+		zd.publishQueued = false
+		zd.publishUrgent = false
+		return
+	}
+
 	serial := zd.CurrentSerial
 	if bumpSerial {
 		zd.CurrentSerial = nextOutboundSerial(zd)
