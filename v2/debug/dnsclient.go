@@ -157,3 +157,54 @@ func axfrChurn(ctx context.Context, server, zone, churnSuffix string) (recs []Ch
 	}
 	return recs, openSOA, closeSOA, nil
 }
+
+// SignednessObs is what axfrSignedness extracts from one transfer: whether the
+// zone came back signed (apex DNSKEY present and at least one RRSIG seen) and
+// the serial. The reload test's I10 checker uses it to catch a signed zone
+// transiently transferring UNSIGNED content during a reload re-sign window.
+type SignednessObs struct {
+	Serial    uint32
+	HasDNSKEY bool // apex DNSKEY RRset present
+	HasRRSIG  bool // at least one RRSIG anywhere in the transfer
+}
+
+// axfrSignedness performs an AXFR and reports whether the zone is served
+// signed. It checks RRSIG/DNSKEY PRESENCE only, never signature validity —
+// enough to catch the unsigned window and needing no algorithm support in the
+// tool (miekg/dns parses RRSIG/DNSKEY RRs regardless of algorithm).
+func axfrSignedness(ctx context.Context, server, zone string) (SignednessObs, error) {
+	apex := dns.Fqdn(zone)
+	m := new(dns.Msg)
+	m.SetAxfr(apex)
+	// Generous read timeout: a large PQ-signed zone (e.g. 10k SQISIGN RRSIGs) is
+	// many MB and slow to transfer.
+	tr := &dns.Transfer{DialTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second}
+	ch, err := tr.In(m, server)
+	if err != nil {
+		return SignednessObs{}, err
+	}
+	var obs SignednessObs
+	sawSOA := false
+	for env := range ch {
+		if env.Error != nil {
+			return SignednessObs{}, env.Error
+		}
+		for _, rr := range env.RR {
+			switch v := rr.(type) {
+			case *dns.SOA:
+				obs.Serial = v.Serial
+				sawSOA = true
+			case *dns.DNSKEY:
+				if strings.EqualFold(rr.Header().Name, apex) {
+					obs.HasDNSKEY = true
+				}
+			case *dns.RRSIG:
+				obs.HasRRSIG = true
+			}
+		}
+	}
+	if !sawSOA {
+		return SignednessObs{}, fmt.Errorf("AXFR of %s produced no SOA", zone)
+	}
+	return obs, nil
+}

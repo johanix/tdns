@@ -35,6 +35,14 @@ var (
 	deltaStr      string
 	qps           int
 	seed          int64
+
+	// test reload: dedicated cadence/duration vars (distinct defaults from
+	// churn's, so a shared var would bleed the wrong default into churn).
+	reloadCadence     string
+	reloadAxfrCadence string
+	reloadDuration    string
+	zoneSize          int
+	algorithm         string
 )
 
 // ---- probe ----------------------------------------------------------------
@@ -178,6 +186,117 @@ func mustDur(s, name string) time.Duration {
 	return d
 }
 
+// ---- test reload ----------------------------------------------------------
+
+var testReloadCmd = &cobra.Command{
+	Use:   "reload",
+	Short: "Reload-window test: a signed zone must never be served/transferred unsigned (I10)",
+	Long: `Repeatedly reloads the zone (mgmt API) while transferring it, and checks
+that a signed zone is never transferred UNSIGNED during the reload re-sign
+window (I10). With --generate-config it only provisions: allocates an identity
+and emits a large online-signed zone + config snippet (default SQISIGN1, whose
+slow signing widens the window). With --test <id> it runs the test.`,
+	Run: func(cmd *cobra.Command, args []string) {
+		st, err := debug.LoadState(effectiveStatePath())
+		if err != nil {
+			log.Fatalf("state: %v", err)
+		}
+
+		if genConfig {
+			prov, err := debug.GenerateReloadConfig(st, debug.ReloadProvisionInput{
+				BaseZone:       baseZone,
+				DnsServer:      dnsServer,
+				Target:         targetName,
+				PublishCadence: publishCadence,
+				ConfigDir:      configDir,
+				OutDir:         outDir,
+				ZoneSize:       zoneSize,
+				Algorithm:      algorithm,
+			})
+			if err != nil {
+				log.Fatalf("generate-config: %v", err)
+			}
+			if err := st.Save(effectiveStatePath()); err != nil {
+				log.Fatalf("state save: %v", err)
+			}
+			rec := prov.Record
+			fmt.Printf("Provisioned %s: zone %s\n", rec.Id, rec.Zone)
+			fmt.Printf("  zone file  : %s\n", prov.ZoneFile)
+			fmt.Printf("  cfg snippet: %s\n", prov.SnippetFile)
+			fmt.Printf("\nOperator to-do:\n")
+			for i, s := range prov.Todo {
+				fmt.Printf("  %d. %s\n", i+1, s)
+			}
+			return
+		}
+
+		if testId == "" {
+			log.Fatal("--test <id> is required to run (provision first with --generate-config)")
+		}
+		rec, err := st.Get(testId)
+		if err != nil {
+			log.Fatal(err)
+		}
+		runReload(cmd.Context(), st, rec)
+	},
+}
+
+// runReload resolves a provisioned reload test, probes the zone-reload
+// capability (printing the matrix so a limited run cannot masquerade as full
+// coverage), and executes it.
+func runReload(ctx context.Context, st *debug.State, rec *debug.TestRecord) {
+	server := dnsServer
+	if server == "" {
+		server = rec.DnsServer
+	}
+	if server == "" {
+		log.Fatal("no DNS server: pass --dns or re-provision with --dns")
+	}
+	if _, _, err := net.SplitHostPort(server); err != nil {
+		server = net.JoinHostPort(server, "53")
+	}
+
+	target := targetName
+	if target == "" {
+		target = rec.Target
+	}
+	api := apiClientFor(target)
+
+	m := debug.ProbeApi(ctx, target, api)
+	debug.ProbeDns(ctx, m, server, rec.Zone)
+	fmt.Print(m.Render())
+
+	cfg := debug.ReloadConfig{
+		Zone:           rec.Zone,
+		DnsServer:      server,
+		Api:            api,
+		Target:         target,
+		ReloadCapable:  m.Available(debug.CapZoneReload),
+		DeclaredSigned: true, // reload zones are always provisioned signed
+		ReloadCadence:  mustDur(reloadCadence, "reloadcadence"),
+		AxfrCadence:    mustDur(reloadAxfrCadence, "axfrcadence"),
+		Duration:       mustDur(reloadDuration, "duration"),
+		Tool:           appName + " " + appVersion,
+		TestId:         rec.Id,
+	}
+
+	rep, err := debug.RunReload(ctx, cfg)
+	if err != nil {
+		log.Printf("reload setup error: %v", err)
+		os.Exit(debug.ExitSetup)
+	}
+	rec.AddStage("ran", fmt.Sprintf("%d violation(s)", len(rep.Violations)))
+	if err := st.Save(effectiveStatePath()); err != nil {
+		log.Printf("state save: %v", err)
+	}
+	if reportJson {
+		_ = rep.RenderJSON(os.Stdout)
+	} else {
+		rep.RenderText(os.Stdout)
+	}
+	os.Exit(rep.ExitCode())
+}
+
 // ---- list-tests / cleanup ---------------------------------------------------
 
 var listTestsCmd = &cobra.Command{
@@ -293,6 +412,21 @@ func init() {
 	testChurnCmd.Flags().Int64Var(&seed, "seed", 0, "PRNG seed for a reproducible op mix")
 	testChurnCmd.Flags().BoolVar(&reportJson, "json", false, "JSON report")
 	testCmd.AddCommand(testChurnCmd)
+
+	testReloadCmd.Flags().BoolVar(&genConfig, "generate-config", false, "provision only: emit zone/config, do not run")
+	testReloadCmd.Flags().StringVar(&baseZone, "base-zone", "", "parent zone under which the test zone is invented")
+	testReloadCmd.Flags().StringVar(&targetName, "target", "", "apiservers entry name for the mgmt API")
+	testReloadCmd.Flags().StringVar(&dnsServer, "dns", "", "DNS server addr:port (also used as ns glue)")
+	testReloadCmd.Flags().StringVar(&outDir, "out", "", "artifact directory (default <configdir>/<id>)")
+	testReloadCmd.Flags().StringVar(&publishCadence, "publishcadence", "", "publish-cadence for the emitted config (default 20s)")
+	testReloadCmd.Flags().IntVar(&zoneSize, "zone-size", 0, "filler RRsets in the generated zone (default 10000)")
+	testReloadCmd.Flags().StringVar(&algorithm, "algorithm", "", "signing algorithm for the generated zone (default SQISIGN1)")
+	testReloadCmd.Flags().StringVar(&testId, "test", "", "test identity from a prior --generate-config")
+	testReloadCmd.Flags().StringVar(&reloadCadence, "reloadcadence", "30s", "interval between zone reloads")
+	testReloadCmd.Flags().StringVar(&reloadAxfrCadence, "axfrcadence", "500ms", "interval between AXFR observations")
+	testReloadCmd.Flags().StringVar(&reloadDuration, "duration", "5m", "total run duration")
+	testReloadCmd.Flags().BoolVar(&reportJson, "json", false, "JSON report")
+	testCmd.AddCommand(testReloadCmd)
 
 	cleanupCmd.Flags().StringVar(&testId, "test", "", "test identity to clean up")
 	cleanupCmd.Flags().BoolVar(&rmArtifacts, "rm", false, "also remove the local artifact directory")

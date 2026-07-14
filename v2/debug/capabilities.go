@@ -38,6 +38,7 @@ const (
 	CapApi          = "mgmt-api"           // the mgmt API answers at all
 	CapZoneBump     = "zone-bump"          // POST /zone Command=bump
 	CapZoneResign   = "zone-resign"        // POST /zone Command=resign-zone
+	CapZoneReload   = "zone-reload"        // POST /zone Command=reload (the reload test's stimulus)
 	CapDebugTxlog   = "debug-zone-txlog"   // POST /debug Command=zone-txlog (snapshot branch)
 	CapNone         = ""                   // actor needs nothing beyond pure DNS
 )
@@ -178,7 +179,7 @@ func ProbeApi(ctx context.Context, targetName string, api *tdns.ApiClient) *Capa
 
 	if api == nil {
 		m.set(CapApi, CapAbsent, "no API client configured for target")
-		for _, c := range []string{CapZoneBump, CapZoneResign, CapDebugTxlog} {
+		for _, c := range []string{CapZoneBump, CapZoneResign, CapZoneReload, CapDebugTxlog} {
 			m.set(c, CapAbsent, "no mgmt API")
 		}
 		return m
@@ -197,7 +198,7 @@ func ProbeApi(ctx context.Context, targetName string, api *tdns.ApiClient) *Capa
 			detail = err.Error()
 		}
 		m.set(CapApi, CapAbsent, detail)
-		for _, c := range []string{CapZoneBump, CapZoneResign, CapDebugTxlog} {
+		for _, c := range []string{CapZoneBump, CapZoneResign, CapZoneReload, CapDebugTxlog} {
 			m.set(c, CapAbsent, "mgmt API unreachable")
 		}
 		return m
@@ -212,6 +213,9 @@ func ProbeApi(ctx context.Context, targetName string, api *tdns.ApiClient) *Capa
 
 	st, detail = apiProbe(ctx, api, "/zone", tdns.ZonePost{Command: "resign-zone", Zone: ProbeZone})
 	m.set(CapZoneResign, st, detail)
+
+	st, detail = apiProbe(ctx, api, "/zone", tdns.ZonePost{Command: "reload", Zone: ProbeZone})
+	m.set(CapZoneReload, st, detail)
 
 	st, detail = apiProbe(ctx, api, "/debug", tdns.DebugPost{Command: "zone-txlog", Zone: ProbeZone})
 	m.set(CapDebugTxlog, st, detail)
