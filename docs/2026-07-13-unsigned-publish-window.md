@@ -322,13 +322,15 @@ currently exercises** (0 log mentions), must be proven before we build a 10K
 reload test on it — else we get `unknown algorithm` spam instead of slow
 signing.
 
-- [ ] Provision a **tiny** SQISIGN1 zone (a handful of RRsets) and confirm it
-      signs cleanly: apex DNSKEY + RRSIGs appear, **no** `unknown algorithm:
-      SQISIGN*` / `bad private key` in `/var/log/tdns/tdns-auth.log`.
-- [ ] If SQISIGN1 is broken (qruov-style or falcon-style), fall back to a
-      **verified** algorithm. `MLDSA` signs cleanly on this server today (0
-      errors) — the safe default; we trade some window width for a valid test.
-      (Chase the SQISIGN break separately — same class as the qruov chip.)
+- [x] **VERIFIED 2026-07-14: SQISIGN1 signs.** `sqisign.pq.axfr.net.` serves a
+      SQISIGN1 ZSK (keyid 56474) whose RRSIG covers the SOA (alg 212); DNSKEY +
+      RRSIGs present, no `unknown algorithm` / `bad private key`. Phase 0 gate
+      cleared — no MLDSA fallback needed.
+- [ ] For the reload test, provision a **single-algorithm** SQISIGN1 zone
+      (KSK+ZSK both SQISIGN1), not a mixed set, to keep the I10 presence/coverage
+      check simple. (The existing `sqisign.pq.axfr.net.` uses a mixed
+      MAYO5-KSK / SQISIGN1-ZSK apex — fine for the verification above, but a
+      clean single-alg zone is the better test fixture.)
 
 ### Phase 1 — Build the `test reload` family *(tdns-debug, `feature/tdns-debug`)*
 
