@@ -121,15 +121,45 @@ func (zd *ZoneData) signedApexRRsets(apex *OwnerData, msgoptions *edns0.MsgOptio
 	return soa, ns, nil
 }
 
-// signRRsetForZone signs an RRset using a zone's DNSSEC keys.
-// It checks DNSSEC options, fetches keys if needed, ensures keys exist, and signs the RRset.
+// ErrZoneUnsigned marks a must-be-signed zone (online- or inline-signing) whose
+// published snapshot carries NO RRSIGs for a served, stored RRset — i.e. the
+// zone is broken (e.g. SignZone failed / an unsigned zone was AXFR'd in). The
+// query path turns this into SERVFAIL. Both alternatives are wrong: ephemeral-
+// signing the answer at query time MASKS the failure (the zone looks healthy to
+// DO queries while its stored/transferred zone is unsigned), and serving it
+// unsigned is a silent downgrade. A broken zone must look broken. See
+// docs/2026-07-14-snapshot-branch-signing-findings.md Finding 1 / Decision 1.
+var ErrZoneUnsigned = fmt.Errorf("zone must be signed but has no stored signatures for the RRset")
+
+// isSynthesizedDenial reports whether rrset is a query-time-synthesized denial-
+// of-existence record — an NSEC built by addCDEResponse / addReferralNSEC. These
+// are the ONLY RRsets legitimately signed ephemerally on the query path: they
+// are constructed fresh per response and never stored, so they can't carry
+// pre-computed RRSIGs. Every other RRset served through signRRsetForZone is
+// stored zone data that must already carry its RRSIGs (a signed zone signs its
+// data at SignZone time), so a missing RRSIG there means the zone is broken.
+func isSynthesizedDenial(rrset core.RRset) bool {
+	for _, rr := range rrset.RRs {
+		if rr.Header().Rrtype == dns.TypeNSEC {
+			return true
+		}
+	}
+	return false
+}
+
+// signRRsetForZone returns the RRset ready for a DO response.
+// It checks DNSSEC options and, for a must-be-signed zone, guarantees the served
+// RRset is signed — or reports the zone broken.
 // Parameters:
 //   - rrset: The RRset to sign
 //   - name: The owner name of the RRset
-//   - zone: The zone data containing the zone configuration
 //   - msgoptions: EDNS0 message options (checked for DO bit)
 //   - kdb: Key database for fetching DNSSEC keys
 //   - dak: Optional pre-fetched active DNSSEC keys (if nil, will be fetched from kdb)
+//
+// Behaviour for a must-be-signed zone whose RRset has no stored RRSIGs: a
+// synthesized denial NSEC is signed ephemerally (its only legitimate case);
+// any other (stored) RRset yields ErrZoneUnsigned so the responder SERVFAILs.
 //
 // Returns the signed RRset and any error encountered.
 func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *edns0.MsgOptions, kdb *KeyDB, dak *DnssecKeys) (core.RRset, error) {
@@ -137,7 +167,8 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 		lgHandler.Debug("DNSSEC not requested, skipping signing", "name", name, "rrtype", dns.TypeToString[rrset.RRtype])
 		return rrset, nil
 	}
-	// If the RRset is already signed (e.g. by inline-signing), return as-is.
+	// If the RRset is already signed (inline-signing, or online-signing RRSIGs
+	// already stored in the snapshot at SignZone time), serve as-is.
 	if len(rrset.RRSIGs) > 0 {
 		return rrset, nil
 	}
@@ -146,8 +177,19 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 		return rrset, fmt.Errorf("no KeyDB available for zone %s", zd.ZoneName)
 	}
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
-		// No signing configured — return unsigned.
+		// Zone is legitimately unsigned — serve unsigned.
 		return rrset, nil
+	}
+
+	// The zone MUST be signed but this RRset has no stored RRSIGs. Only a
+	// query-time-synthesized denial NSEC may be signed ephemerally here; any
+	// stored RRset with no signatures means the zone is broken → SERVFAIL,
+	// rather than ephemeral-signing (which masks the failure) or serving
+	// unsigned (a silent downgrade).
+	if !isSynthesizedDenial(rrset) {
+		lgHandler.Error("must-be-signed zone has no stored signatures for RRset; serving SERVFAIL",
+			"zone", zd.ZoneName, "name", name, "rrtype", dns.TypeToString[rrset.RRtype])
+		return rrset, ErrZoneUnsigned
 	}
 
 	// Get active DNSSEC keys, using provided dak or fetching from kdb
@@ -855,10 +897,21 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 				if qname == origqname {
 					signed, err := MaybeSignRRset(rrset, qname)
 					if err != nil {
-						lgHandler.Error("failed to sign RRset", "qname", qname, "err", err)
-					} else {
-						rrset = signed
+						// A must-be-signed zone that cannot produce signatures for
+						// this stored answer is broken → SERVFAIL. Previously the
+						// error was swallowed and the answer served unsigned (or,
+						// via the removed ephemeral-sign fallback, served with a
+						// fabricated signature that masked the broken zone). See
+						// Finding 1 / Decision 1.
+						lgHandler.Error("failed to sign answer RRset; serving SERVFAIL", "qname", qname, "qtype", dns.TypeToString[qtype], "zone", zd.ZoneName, "err", err)
+						servfail := new(dns.Msg)
+						servfail.SetReply(r)
+						servfail.MsgHdr.Authoritative = true
+						servfail.MsgHdr.Rcode = dns.RcodeServerFailure
+						w.WriteMsg(servfail)
+						return nil
 					}
+					rrset = signed
 				}
 
 				if qname == origqname {

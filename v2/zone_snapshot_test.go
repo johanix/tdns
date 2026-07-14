@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -457,4 +458,110 @@ func coreRRset(name string, rrtype uint16, ip string) core.RRset {
 		}
 	}
 	return core.RRset{}
+}
+
+// TestQueryServfailForUnsignedMustBeSignedZone is the regression test for
+// Finding 1 / Decision 1: a zone that MUST be signed (online/inline-signing) but
+// whose published snapshot carries no RRSIGs for a served RRset is broken. A DO
+// query must SERVFAIL rather than ephemeral-sign the answer (which masked the
+// failure — the zone looked signed to DO queries while its AXFR was unsigned) or
+// serve it unsigned (a silent downgrade).
+func TestQueryServfailForUnsignedMustBeSignedZone(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := testSnapshotZone(t, "broken.example.", `broken.example. 3600 IN SOA ns.broken.example. hostmaster.broken.example. 1 7200 1800 604800 7200
+broken.example. 3600 IN NS ns.broken.example.
+ns.broken.example. 3600 IN A 10.0.0.1
+www.broken.example. 3600 IN A 10.0.0.2
+`)
+	// The zone must be signed, but nothing in the snapshot is signed (SignZone
+	// never ran / failed) — a broken signed zone.
+	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+	zd.KeyDB = kdb
+
+	ctx := context.Background()
+
+	// A DO query for the stored, unsigned A RRset must SERVFAIL...
+	req := new(dns.Msg)
+	req.SetQuestion("www.broken.example.", dns.TypeA)
+	rw := &fakeRW{}
+	if err := zd.QueryResponder(ctx, rw, req, "www.broken.example.", dns.TypeA, &edns0.MsgOptions{DO: true}, kdb, nil); err != nil {
+		t.Fatalf("QueryResponder (DO): %v", err)
+	}
+	resp := rw.written
+	if resp == nil {
+		t.Fatal("no response written for DO query")
+	}
+	if resp.MsgHdr.Rcode != dns.RcodeServerFailure {
+		t.Fatalf("DO query on a broken signed zone: expected SERVFAIL, got %s", dns.RcodeToString[resp.MsgHdr.Rcode])
+	}
+	// ...and must NOT serve a fabricated RRSIG.
+	for _, rr := range append(append([]dns.RR{}, resp.Answer...), resp.Ns...) {
+		if _, ok := rr.(*dns.RRSIG); ok {
+			t.Fatalf("SERVFAIL must not carry a synthesized RRSIG: %s", rr.String())
+		}
+	}
+
+	// Control: without DO, the same unsigned data answers normally (NOERROR) —
+	// an unsigned answer is fine when DNSSEC is not requested.
+	req2 := new(dns.Msg)
+	req2.SetQuestion("www.broken.example.", dns.TypeA)
+	rw2 := &fakeRW{}
+	if err := zd.QueryResponder(ctx, rw2, req2, "www.broken.example.", dns.TypeA, &edns0.MsgOptions{}, kdb, nil); err != nil {
+		t.Fatalf("QueryResponder (non-DO): %v", err)
+	}
+	if rw2.written == nil || rw2.written.MsgHdr.Rcode != dns.RcodeSuccess {
+		t.Fatalf("non-DO query should be NOERROR, got %+v", rw2.written)
+	}
+	if len(rw2.written.Answer) == 0 {
+		t.Fatal("non-DO query should still carry the A answer")
+	}
+}
+
+// TestSignRRsetForZoneBrokenZone locks the two branches of signRRsetForZone's
+// must-be-signed / no-stored-RRSIG decision directly: a stored RRset yields
+// ErrZoneUnsigned (→ SERVFAIL) with no fabricated signature, while the
+// synthesized-denial NSEC carve-out (the one legitimate query-time ephemeral
+// case) is preserved.
+func TestSignRRsetForZoneBrokenZone(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := &ZoneData{
+		ZoneName: "broken.example.",
+		Options:  map[ZoneOption]bool{OptOnlineSigning: true},
+		Logger:   log.New(os.Stderr, "", 0),
+	}
+
+	a, err := dns.NewRR("www.broken.example. 3600 IN A 10.0.0.2")
+	if err != nil {
+		t.Fatalf("NewRR: %v", err)
+	}
+	stored := core.RRset{RRtype: dns.TypeA, RRs: []dns.RR{a}}
+
+	// Stored, unsigned RRset on a must-be-signed zone → ErrZoneUnsigned, no
+	// fabricated signature.
+	got, err := zd.signRRsetForZone(stored, "www.broken.example.", &edns0.MsgOptions{DO: true}, kdb, nil)
+	if !errors.Is(err, ErrZoneUnsigned) {
+		t.Fatalf("stored unsigned RRset on a must-be-signed zone: want ErrZoneUnsigned, got %v", err)
+	}
+	if len(got.RRSIGs) != 0 {
+		t.Fatalf("broken-zone path must not fabricate a signature, got %d RRSIG(s)", len(got.RRSIGs))
+	}
+
+	// Non-DO query returns the RRset unsigned without error (DNSSEC not asked).
+	if _, err := zd.signRRsetForZone(stored, "www.broken.example.", &edns0.MsgOptions{}, kdb, nil); err != nil {
+		t.Fatalf("non-DO signRRsetForZone should not error, got %v", err)
+	}
+
+	// The synthesized-denial carve-out: an NSEC is exempt from the broken-zone
+	// SERVFAIL (it is signed on the fly), a stored A RRset is not.
+	nsec := &dns.NSEC{
+		Hdr:        dns.RR_Header{Name: "broken.example.", Rrtype: dns.TypeNSEC, Class: dns.ClassINET, Ttl: 3600},
+		NextDomain: "\000.broken.example.",
+		TypeBitMap: []uint16{dns.TypeNSEC, dns.TypeRRSIG, dns.TypeNXNAME},
+	}
+	if !isSynthesizedDenial(core.RRset{RRs: []dns.RR{nsec}}) {
+		t.Fatal("a synthesized NSEC must be treated as ephemeral-signable")
+	}
+	if isSynthesizedDenial(stored) {
+		t.Fatal("a stored A RRset must not be treated as ephemeral")
+	}
 }
