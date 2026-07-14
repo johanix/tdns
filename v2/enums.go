@@ -536,6 +536,16 @@ func (zd *ZoneData) HasAutoRolloverImpactingError() bool {
 func (zd *ZoneData) ErrorList() []ZoneError {
 	zd.mu.Lock()
 	defer zd.mu.Unlock()
+	return zd.errorListLocked()
+}
+
+// errorListLocked is ErrorList's body; the caller MUST already hold zd.mu. It
+// exists so a zd.mu-holding path can read the active error list without
+// re-locking — Go mutexes are not reentrant. Concretely: the large-algorithm
+// warning helpers (WarnLargeAlgZoneSigningRole / WarnLargeAlgKskReusedAsZsk) are
+// reached from EnsureActiveDnssecKeys, which the publish-path SOA re-sign
+// (resignWorkingSetSOAIfSigned) now calls with zdLocked=true under zd.mu.
+func (zd *ZoneData) errorListLocked() []ZoneError {
 	if len(zd.Errors) == 0 {
 		return nil
 	}
