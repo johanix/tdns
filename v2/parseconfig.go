@@ -271,9 +271,18 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// mapstructure, and mapstructure ignores the yaml.Unmarshaler interface.
 	var md mapstructure.Metadata
 	decoderConfig := &mapstructure.DecoderConfig{
-		TagName:  "yaml",
-		Result:   conf,
-		Metadata: &md,
+		TagName: "yaml",
+		Result:  conf,
+		// Replace, don't merge. Result is the long-lived conf, reused across
+		// reloads, and ParseZones writes template-expanded options/policy back
+		// into conf.Zones[i] (*zconf = updated). Without ZeroFields, a reload
+		// merges the new zones list into the stale slice, so a zone whose YAML
+		// omits a field silently inherits a former slot-neighbour's value —
+		// e.g. a plain secondary gaining online-signing + a dnssecpolicy. It
+		// also drops Templates/Policies deleted from the config. Absent keys are
+		// still skipped, so runtime state in conf.Internal is untouched.
+		ZeroFields: true,
+		Metadata:   &md,
 		DecodeHook: mapstructure.ComposeDecodeHookFunc(
 			stringToPeerConfHook(),
 			stringToAclEntryHook(),
