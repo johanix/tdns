@@ -183,9 +183,26 @@ func axfrSignedness(ctx context.Context, server, zone string) (SignednessObs, er
 	if err != nil {
 		return SignednessObs{}, err
 	}
+	// dns.Transfer.In has no ctx parameter and its receive loop can block up to
+	// ReadTimeout (60s), so an elapsed run duration or shutdown could not
+	// otherwise interrupt an in-flight AXFR. Close the connection when ctx is
+	// cancelled to unblock the range below; the done channel stops the watcher
+	// on the normal path.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			tr.Close()
+		case <-done:
+		}
+	}()
 	var obs SignednessObs
 	sawSOA := false
 	for env := range ch {
+		if ctx.Err() != nil {
+			return SignednessObs{}, ctx.Err()
+		}
 		if env.Error != nil {
 			return SignednessObs{}, env.Error
 		}

@@ -192,12 +192,19 @@ type SignednessChecker struct {
 
 	querySigned  bool // latched: a +dnssec query was observed signed at least once
 	axfrUnsigned bool // an AXFR was observed unsigned at least once
+	sawAXFR      bool // at least one AXFR completed (so the cross-check could run)
 }
 
 // Observe feeds one transfer's signedness through I10 (the AXFR latch rule).
 func (c *SignednessChecker) Observe(obs SignednessObs) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	// Observe is only reached after a successful AXFR, so this records that the
+	// cross-check has at least one transfer to compare against (see
+	// CrossCheckSignedness — a query-signed run with zero completed AXFRs is
+	// inconclusive, not clean).
+	c.sawAXFR = true
 
 	if obs.HasDNSKEY && obs.HasRRSIG {
 		c.signed = true
@@ -247,6 +254,12 @@ func (c *SignednessChecker) ObserveQuery(obs QuerySignednessObs) {
 // governs it, and any transient startup first-sign window resolves into a
 // signed AXFR). Only the "query signed AND AXFR never once signed" contradiction
 // — which no timing window can explain — trips it.
+//
+// One case is neither clean nor a violation: the query stream saw the zone
+// signed but NO AXFR ever completed (every transfer errored). The cross-check
+// then has nothing to compare against — a masked signing failure can be neither
+// confirmed nor ruled out — so it is recorded as a Skip (surfaced in the report)
+// rather than passing silently as clean.
 func (c *SignednessChecker) CrossCheckSignedness() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -254,6 +267,11 @@ func (c *SignednessChecker) CrossCheckSignedness() {
 		c.report.Violate("I10",
 			"query-signed but AXFR transferred unsigned — masked signing failure (server ephemerally signs query answers while the stored zone is unsigned)",
 			"a +dnssec query returned RRSIG(SOA) but no AXFR in the run ever carried DNSKEY/RRSIG")
+		return
+	}
+	if c.querySigned && !c.sawAXFR {
+		c.report.Skip("I10 query-vs-AXFR cross-check",
+			"query stream saw the zone signed but no AXFR completed in the run (all transfers errored) — masked signing failure cannot be ruled out; see axfr.errors")
 	}
 }
 
