@@ -463,6 +463,27 @@ func TestZoneTransferOut_RefusesWhenNotReady(t *testing.T) {
 	}
 }
 
+// TestZoneTransferOut_RefusesUnsignedMustBeSignedZone: a zone configured for
+// online/inline signing whose SOA carries no RRSIG (unsigned/broken) must be
+// refused, never transferred unsigned to a secondary (fail-closed).
+func TestZoneTransferOut_RefusesUnsignedMustBeSignedZone(t *testing.T) {
+	zd := loadTestTransferZone(t, basicZone) // basicZone is unsigned (no RRSIGs)
+	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+	w := &fakeRW{remote: udpAddr("127.0.0.1")}
+	r := new(dns.Msg)
+	r.SetAxfr(zd.ZoneName)
+	sent, err := zd.ZoneTransferOut(w, r)
+	if err != nil {
+		t.Fatalf("ZoneTransferOut: %v", err)
+	}
+	if sent != 0 {
+		t.Fatalf("expected 0 RRs sent for an unsigned must-be-signed zone, got %d", sent)
+	}
+	if w.written == nil || w.written.Rcode != dns.RcodeRefused {
+		t.Fatalf("expected REFUSED (fail-closed), got %v", w.written)
+	}
+}
+
 // TestZoneTransferOut_TSIGRoundTrip exercises AXFR over TCP with TSIG on both
 // request and response envelopes (production uses TsigSigningHandler + TsigProvider).
 func TestZoneTransferOut_TSIGRoundTrip(t *testing.T) {

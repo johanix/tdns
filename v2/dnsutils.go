@@ -276,6 +276,16 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, empty SOA RRset", zone)
 		return zd.refuseTransfer(w, r)
 	}
+	// Fail-closed: a zone configured to be signed must never be transferred
+	// unsigned. The SOA is an apex RRset and is always signed in a healthy
+	// signed zone, so an SOA with no RRSIG means the pinned snapshot is not
+	// (yet / any longer) signed — refuse rather than hand a secondary a zone it
+	// would serve BOGUS. Catches both a persistent sign failure and the reload
+	// re-sign window. (Surfacing WHY is deferred to the DnssecError redesign.)
+	if (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && len(soaRRset.RRSIGs) == 0 {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, zone is configured to be signed but the SOA has no RRSIG (unsigned/broken)", zone)
+		return zd.refuseTransfer(w, r)
+	}
 	soaOrig, ok := soaRRset.RRs[0].(*dns.SOA)
 	if !ok {
 		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, invalid SOA RR", zone)
