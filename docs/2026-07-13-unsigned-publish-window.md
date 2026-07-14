@@ -309,6 +309,27 @@ defect on the pre-fix build first is what makes the post-fix "clean" result
 evidence rather than assertion — the same discipline that made the tearing
 result convincing.
 
+### Phase 0 — Verify the signing algorithm actually SIGNS (gates Phase 2, not Phase 1)
+
+**"Listed in `keystore dnssec algorithms`" does NOT mean "actually signs."**
+Proven on the running server 2026-07-13: `QRUOV1` is advertised by the registry
+but the signer's key-parse path rejects it — `ParsePrivateKeyFromDB failed:
+unknown algorithm: QRUOV1` (`keystore.go:983/1225`), 525 recurring errors, zone
+`qruov1.pq.axfr.net.` effectively unsignable. A registry-vs-implementation
+seam. (`falcon.pq.axfr.net.` fails differently — `dns: bad private key`: the
+algorithm is known but the key won't parse.) So SQISIGN1, which **no zone
+currently exercises** (0 log mentions), must be proven before we build a 10K
+reload test on it — else we get `unknown algorithm` spam instead of slow
+signing.
+
+- [ ] Provision a **tiny** SQISIGN1 zone (a handful of RRsets) and confirm it
+      signs cleanly: apex DNSKEY + RRSIGs appear, **no** `unknown algorithm:
+      SQISIGN*` / `bad private key` in `/var/log/tdns/tdns-auth.log`.
+- [ ] If SQISIGN1 is broken (qruov-style or falcon-style), fall back to a
+      **verified** algorithm. `MLDSA` signs cleanly on this server today (0
+      errors) — the safe default; we trade some window width for a valid test.
+      (Chase the SQISIGN break separately — same class as the qruov chip.)
+
 ### Phase 1 — Build the `test reload` family *(tdns-debug, `feature/tdns-debug`)*
 
 - [ ] **Reload actor** — mgmt-API call to the reload endpoint (`config
