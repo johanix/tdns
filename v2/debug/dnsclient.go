@@ -97,7 +97,10 @@ func querySOASerial(ctx context.Context, server, zone string) (uint32, error) {
 }
 
 // queryName returns whether a churn owner currently has a TXT record, and the
-// record if present. TCP is used for robustness against truncation.
+// record if present. It queries over UDP with an EDNS0 buffer of 1232 bytes;
+// a single _churn TXT answer is far too small to truncate, so the TC path is
+// unreachable here. (A dedicated TCP-query actor is a separate actor in the
+// library — real traffic is a UDP/TCP mix — not a change to this UDP hammer.)
 func queryName(ctx context.Context, server, owner string) (bool, ChurnRecord, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(dns.Fqdn(owner), dns.TypeTXT)

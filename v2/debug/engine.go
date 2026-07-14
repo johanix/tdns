@@ -54,6 +54,12 @@ type churn struct {
 // Only the pure-DNS actors run here (update-sender, AXFR poller, query hammer);
 // the optional bump/resign/txlog actors are M3.
 func RunChurn(ctx context.Context, cfg ChurnConfig) (*Report, error) {
+	// Duration has no sensible default: a zero value makes the run's
+	// context.WithTimeout expire immediately and return a near-empty report,
+	// which reads as a clean pass. Treat it as a setup error instead.
+	if cfg.Duration <= 0 {
+		return nil, fmt.Errorf("duration must be positive (got %v); pass --duration", cfg.Duration)
+	}
 	if cfg.UpdateCadence <= 0 {
 		cfg.UpdateCadence = time.Second
 	}
@@ -150,10 +156,18 @@ func (c *churn) clearChurnSubtree(ctx context.Context) (int, error) {
 		return 0, nil
 	}
 	var rrs []dns.RR
+	var undeletable int
 	for _, rec := range recs {
-		if rr, err := churnTXT(rec); err == nil {
-			rrs = append(rrs, rr) // exact owner+rdata delete (handles duplicate owners)
+		rr, err := churnTXT(rec)
+		if err != nil {
+			// Cannot build a delete for this record, so it will survive the
+			// clear and the zone won't reach the empty baseline below. Count
+			// it (surfaced in the failure message) rather than dropping silently.
+			undeletable++
+			c.report.Stat("baseline.undeletable", 1)
+			continue
 		}
+		rrs = append(rrs, rr) // exact owner+rdata delete (handles duplicate owners)
 	}
 	for i := 0; i < len(rrs); i += 20 { // one signed UPDATE per chunk
 		end := i + 20
@@ -172,6 +186,9 @@ func (c *churn) clearChurnSubtree(ctx context.Context) (int, error) {
 			return len(recs), nil
 		}
 		if time.Now().After(deadline) {
+			if undeletable > 0 {
+				return len(recs), fmt.Errorf("churn subtree still not empty after clear (%d record(s) could not be parsed into a delete)", undeletable)
+			}
 			return len(recs), fmt.Errorf("churn subtree still not empty after clear")
 		}
 		select {

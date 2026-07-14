@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	tdns "github.com/johanix/tdns/v2"
@@ -51,6 +52,9 @@ type Capability struct {
 // every run and included verbatim in the report, so a green run against a
 // limited target cannot masquerade as full coverage.
 type CapabilityMatrix struct {
+	// mu guards Caps, which is built single-threaded at probe time but then
+	// read (Get/Available) and written (Degrade) concurrently once actors run.
+	mu        sync.Mutex   `json:"-"`
 	Target    string       `json:"target"`
 	DnsServer string       `json:"dns_server,omitempty"`
 	Probed    time.Time    `json:"probed"`
@@ -59,6 +63,12 @@ type CapabilityMatrix struct {
 }
 
 func (m *CapabilityMatrix) set(name string, status CapStatus, detail string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.setLocked(name, status, detail)
+}
+
+func (m *CapabilityMatrix) setLocked(name string, status CapStatus, detail string) {
 	for i := range m.Caps {
 		if m.Caps[i].Name == name {
 			m.Caps[i].Status = status
@@ -70,6 +80,8 @@ func (m *CapabilityMatrix) set(name string, status CapStatus, detail string) {
 }
 
 func (m *CapabilityMatrix) Get(name string) CapStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	for _, c := range m.Caps {
 		if c.Name == name {
 			return c.Status
@@ -79,17 +91,21 @@ func (m *CapabilityMatrix) Get(name string) CapStatus {
 }
 
 func (m *CapabilityMatrix) Available(name string) bool {
-	return name == CapNone || m.Get(name) == CapAvailable
+	return name == CapNone || m.Get(name) == CapAvailable // Get takes the lock
 }
 
 // Degrade marks a capability that failed mid-run (probe said available). The
 // checkers that depend on it are tainted, not failed.
 func (m *CapabilityMatrix) Degrade(name, detail string) {
-	m.set(name, CapDegraded, detail)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.setLocked(name, CapDegraded, detail)
 }
 
 // Render prints the matrix in a compact human-readable form.
 func (m *CapabilityMatrix) Render() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	var b strings.Builder
 	fmt.Fprintf(&b, "Capability matrix for target %q", m.Target)
 	if m.DnsServer != "" {

@@ -47,14 +47,16 @@ func RunActors(ctx context.Context, actors []Actor, caps *CapabilityMatrix, rep 
 				case <-ticker.C:
 					if err := a.Step(ctx); err != nil {
 						failures++
-						rep.Stats["actor."+a.Name()+".errors"]++
+						// rep.Stat is mutex-guarded: actors run concurrently, so
+						// never touch rep.Stats directly (fatal concurrent map write).
+						rep.Stat("actor."+a.Name()+".errors", 1)
 						if failures == degradeAfter && a.Requires() != CapNone {
 							caps.Degrade(a.Requires(), err.Error())
 							rep.Skip("actor "+a.Name(), "degraded mid-run: "+err.Error())
 						}
 					} else {
 						failures = 0
-						rep.Stats["actor."+a.Name()+".steps"]++
+						rep.Stat("actor."+a.Name()+".steps", 1)
 					}
 				}
 			}

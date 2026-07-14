@@ -9,7 +9,6 @@ import (
 	"log"
 	"net"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -118,12 +117,12 @@ updates vs concurrent AXFR/query observations, checked against the ledger.`,
 		if err != nil {
 			log.Fatal(err)
 		}
-		runChurn(cmd.Context(), rec)
+		runChurn(cmd.Context(), st, rec)
 	},
 }
 
 // runChurn resolves a provisioned test into a ChurnConfig and executes it.
-func runChurn(ctx context.Context, rec *debug.TestRecord) {
+func runChurn(ctx context.Context, st *debug.State, rec *debug.TestRecord) {
 	server := dnsServer
 	if server == "" {
 		server = rec.DnsServer
@@ -157,6 +156,12 @@ func runChurn(ctx context.Context, rec *debug.TestRecord) {
 		os.Exit(debug.ExitSetup)
 	}
 	rec.AddStage("ran", fmt.Sprintf("%d violation(s), %d ops accepted", len(rep.Violations), rep.Stats["ops.accepted"]))
+	// Persist the "ran" stage so list-tests reflects it (AddStage only mutates
+	// the in-memory record). Must happen before os.Exit below, which never
+	// returns. A save failure is non-fatal: the run itself succeeded.
+	if err := st.Save(effectiveStatePath()); err != nil {
+		log.Printf("state save: %v", err)
+	}
 	if reportJson {
 		_ = rep.RenderJSON(os.Stdout)
 	} else {
@@ -222,16 +227,19 @@ printed for the operator.`,
 			log.Fatal(err)
 		}
 		if rmArtifacts && rec.ArtifactDir != "" {
-			// Only ever remove the tool's own artifact directory (matches both
-			// the <configdir>/tdns-debug/<id> layout and legacy tdns-debug-<id>).
-			if strings.Contains(rec.ArtifactDir, "tdns-debug") {
+			// Only ever remove a directory that carries this tool's artifact
+			// marker for this test id (written at provision time). This is a
+			// positive ownership check independent of the path string, so it
+			// works for custom --out/--configdir layouts and refuses any
+			// unrelated or hand-edited path.
+			if debug.IsToolArtifactDir(rec.ArtifactDir, rec.Id) {
 				if err := os.RemoveAll(rec.ArtifactDir); err != nil {
 					log.Printf("removing %s: %v", rec.ArtifactDir, err)
 				} else {
 					fmt.Printf("removed local artifacts: %s\n", rec.ArtifactDir)
 				}
 			} else {
-				log.Printf("refusing to remove %q (not a tdns-debug artifact dir)", rec.ArtifactDir)
+				log.Printf("refusing to remove %q (missing tdns-debug artifact marker for %s)", rec.ArtifactDir, rec.Id)
 			}
 		}
 		fmt.Printf("Operator removal list for %s (zone %s):\n", rec.Id, rec.Zone)

@@ -14,6 +14,28 @@ import (
 	"github.com/miekg/dns"
 )
 
+// artifactMarker is a small file dropped into every tool-created artifact
+// directory. `cleanup --rm` requires it (carrying the matching test id) before
+// os.RemoveAll — a positive ownership check that works for any --out/--configdir
+// layout, unlike matching a "tdns-debug" substring in the path (which was both
+// too strict for custom dirs and too loose for unrelated ones).
+const artifactMarker = ".tdns-debug-artifact"
+
+// WriteArtifactMarker records dir as the tool-owned artifact directory for id.
+func WriteArtifactMarker(dir, id string) error {
+	return os.WriteFile(filepath.Join(dir, artifactMarker), []byte(id+"\n"), 0o644)
+}
+
+// IsToolArtifactDir reports whether dir carries this tool's artifact marker for
+// the given test id — the guard `cleanup --rm` uses before os.RemoveAll.
+func IsToolArtifactDir(dir, id string) bool {
+	b, err := os.ReadFile(filepath.Join(dir, artifactMarker))
+	if err != nil {
+		return false
+	}
+	return strings.TrimSpace(string(b)) == id
+}
+
 // Guard marker (design doc §6.5): generated zones carry
 //
 //	_tdns-debug.<zone>. TXT "test-id=<id>"
@@ -118,6 +140,12 @@ func GenerateChurnConfig(st *State, in ChurnProvisionInput) (*ChurnProvision, er
 	rec.Sig0KeyFile = keyFile
 	rec.Sig0PrivFile = privFile
 	rec.ArtifactDir = outDir
+	// Drop a marker so `cleanup --rm` can positively identify this as a
+	// tool-created artifact directory before os.RemoveAll — robust across
+	// custom --out/--configdir layouts, unlike a path substring match.
+	if err := WriteArtifactMarker(outDir, rec.Id); err != nil {
+		return nil, fmt.Errorf("writing artifact marker: %w", err)
+	}
 
 	todo := []string{
 		fmt.Sprintf("merge %s into the server's zones: config (it points zonefile: at %s directly — no copy needed; adjust downstreams prefix if tdns-debug runs off-host)", snippetFile, zoneFile),
