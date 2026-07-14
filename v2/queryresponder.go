@@ -894,25 +894,30 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 			zd.addTransportSignal(m, sigs, msgoptions)
 			if msgoptions.DO {
 				lgHandler.Debug("considering signing", "qname", qname, "qtype", dns.TypeToString[qtype], "origqname", origqname)
-				if qname == origqname {
-					signed, err := MaybeSignRRset(rrset, qname)
-					if err != nil {
-						// A must-be-signed zone that cannot produce signatures for
-						// this stored answer is broken → SERVFAIL. Previously the
-						// error was swallowed and the answer served unsigned (or,
-						// via the removed ephemeral-sign fallback, served with a
-						// fabricated signature that masked the broken zone). See
-						// Finding 1 / Decision 1.
-						lgHandler.Error("failed to sign answer RRset; serving SERVFAIL", "qname", qname, "qtype", dns.TypeToString[qtype], "zone", zd.ZoneName, "err", err)
-						servfail := new(dns.Msg)
-						servfail.SetReply(r)
-						servfail.MsgHdr.Authoritative = true
-						servfail.MsgHdr.Rcode = dns.RcodeServerFailure
-						w.WriteMsg(servfail)
-						return nil
-					}
-					rrset = signed
+				// Fail-closed for BOTH the exact-match answer and the wildcard-
+				// synthesized answer: a must-be-signed zone whose stored answer
+				// RRset carries no RRSIGs is broken → SERVFAIL. This check runs on
+				// the stored RRset (owner = qname, which is the *.parent wildcard
+				// name on the wildcard arm) before WildcardReplace. Previously only
+				// the exact-match arm ran it; the wildcard arm (qname != origqname)
+				// served the WildcardReplace'd answer straight from stored RRSIGs and
+				// so emitted an UNSIGNED wildcard answer for a broken zone (there
+				// were no RRSIGs to replace) — a silent downgrade. A genuinely signed
+				// wildcard still carries stored RRSIGs and answers; an unsigned-by-
+				// design zone serves unsigned as before. Ephemeral-signing the answer
+				// is not an option: it would mask the broken zone. See Finding 1 /
+				// Decision 1.
+				signed, err := MaybeSignRRset(rrset, qname)
+				if err != nil {
+					lgHandler.Error("failed to sign answer RRset; serving SERVFAIL", "qname", qname, "qtype", dns.TypeToString[qtype], "origqname", origqname, "zone", zd.ZoneName, "err", err)
+					servfail := new(dns.Msg)
+					servfail.SetReply(r)
+					servfail.MsgHdr.Authoritative = true
+					servfail.MsgHdr.Rcode = dns.RcodeServerFailure
+					w.WriteMsg(servfail)
+					return nil
 				}
+				rrset = signed
 
 				if qname == origqname {
 					m.Answer = append(m.Answer, rrset.RRSIGs...)

@@ -565,3 +565,149 @@ func TestSignRRsetForZoneBrokenZone(t *testing.T) {
 		t.Fatal("a stored A RRset must not be treated as ephemeral")
 	}
 }
+
+// answerHasRRSIG reports whether any RRSIG (optionally covering a specific type,
+// 0 = any) sits in the Answer section.
+func answerHasRRSIG(m *dns.Msg, typeCovered uint16) bool {
+	for _, rr := range m.Answer {
+		if s, ok := rr.(*dns.RRSIG); ok {
+			if typeCovered == 0 || s.TypeCovered == typeCovered {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// answerHasA reports whether the Answer section carries an A RR with the given
+// owner name.
+func answerHasA(m *dns.Msg, owner string) bool {
+	for _, rr := range m.Answer {
+		if a, ok := rr.(*dns.A); ok && a.Hdr.Name == owner {
+			return true
+		}
+	}
+	return false
+}
+
+// TestWildcardAnswerFailClosed extends Finding 1 / Decision 1 to the wildcard-
+// answer path. A wildcard match (qname != origqname) builds its answer via
+// WildcardReplace and previously served stored RRSIGs directly, bypassing the
+// must-be-signed fail-closed check that the exact-match arm performs. A broken
+// (must-be-signed, unsigned) zone therefore served a wildcard-covered name
+// UNSIGNED — a silent downgrade. The wildcard arm must now SERVFAIL exactly like
+// the exact-match arm, while genuinely-signed and unsigned-by-design wildcards
+// keep answering.
+func TestWildcardAnswerFailClosed(t *testing.T) {
+	ctx := context.Background()
+
+	// Case 1: broken zone — must be signed, but nothing carries RRSIGs. A DO
+	// query for a wildcard-covered name must SERVFAIL, with no fabricated RRSIG.
+	t.Run("broken_wildcard_servfail", func(t *testing.T) {
+		kdb := newTestKeyDB(t)
+		zd := testSnapshotZone(t, "broken-wild.example.", `broken-wild.example. 3600 IN SOA ns.broken-wild.example. hostmaster.broken-wild.example. 1 7200 1800 604800 7200
+broken-wild.example. 3600 IN NS ns.broken-wild.example.
+ns.broken-wild.example. 3600 IN A 10.0.0.1
+*.broken-wild.example. 3600 IN A 10.0.0.5
+`)
+		zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+		zd.KeyDB = kdb
+
+		req := new(dns.Msg)
+		req.SetQuestion("nothere.broken-wild.example.", dns.TypeA)
+		rw := &fakeRW{}
+		if err := zd.QueryResponder(ctx, rw, req, "nothere.broken-wild.example.", dns.TypeA, &edns0.MsgOptions{DO: true}, kdb, nil); err != nil {
+			t.Fatalf("QueryResponder (DO wildcard): %v", err)
+		}
+		resp := rw.written
+		if resp == nil {
+			t.Fatal("no response written for DO wildcard query")
+		}
+		if resp.MsgHdr.Rcode != dns.RcodeServerFailure {
+			t.Fatalf("broken-zone wildcard DO query: expected SERVFAIL, got %s", dns.RcodeToString[resp.MsgHdr.Rcode])
+		}
+		for _, rr := range append(append([]dns.RR{}, resp.Answer...), resp.Ns...) {
+			if _, ok := rr.(*dns.RRSIG); ok {
+				t.Fatalf("SERVFAIL must not carry a synthesized RRSIG: %s", rr.String())
+			}
+			if _, ok := rr.(*dns.A); ok {
+				t.Fatalf("SERVFAIL must not serve the unsigned wildcard answer: %s", rr.String())
+			}
+		}
+	})
+
+	// Case 2: healthy signed zone — the wildcard RRset carries a stored RRSIG. A
+	// DO query for a covered name must answer NOERROR with the wildcard-replaced
+	// A record and its wildcard-replaced RRSIG, both owned by the queried name.
+	t.Run("signed_wildcard_answers", func(t *testing.T) {
+		kdb := newTestKeyDB(t)
+		zd := testSnapshotZone(t, "signed-wild.example.", `signed-wild.example. 3600 IN SOA ns.signed-wild.example. hostmaster.signed-wild.example. 1 7200 1800 604800 7200
+signed-wild.example. 3600 IN NS ns.signed-wild.example.
+ns.signed-wild.example. 3600 IN A 10.0.0.1
+*.signed-wild.example. 3600 IN A 10.0.0.5
+*.signed-wild.example. 3600 IN RRSIG A 13 2 3600 20260801000000 20260701000000 12345 signed-wild.example. AwEAAcBadDummySignatureBytesForTestingWildcardRRSIGPresence0000000000000000000000000000AA==
+`)
+		zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+		zd.KeyDB = kdb
+
+		req := new(dns.Msg)
+		req.SetQuestion("host.signed-wild.example.", dns.TypeA)
+		rw := &fakeRW{}
+		if err := zd.QueryResponder(ctx, rw, req, "host.signed-wild.example.", dns.TypeA, &edns0.MsgOptions{DO: true}, kdb, nil); err != nil {
+			t.Fatalf("QueryResponder (DO signed wildcard): %v", err)
+		}
+		resp := rw.written
+		if resp == nil {
+			t.Fatal("no response written for signed wildcard query")
+		}
+		if resp.MsgHdr.Rcode != dns.RcodeSuccess {
+			t.Fatalf("signed wildcard DO query: expected NOERROR, got %s", dns.RcodeToString[resp.MsgHdr.Rcode])
+		}
+		if !answerHasA(resp, "host.signed-wild.example.") {
+			t.Fatalf("signed wildcard answer missing A owned by the queried name; answer=%v", resp.Answer)
+		}
+		if !answerHasRRSIG(resp, dns.TypeA) {
+			t.Fatalf("signed wildcard answer must carry the (wildcard-replaced) A RRSIG; answer=%v", resp.Answer)
+		}
+		// The wildcard-replaced RRSIG must be re-owned by the queried name.
+		for _, rr := range resp.Answer {
+			if s, ok := rr.(*dns.RRSIG); ok && s.TypeCovered == dns.TypeA && s.Hdr.Name != "host.signed-wild.example." {
+				t.Fatalf("wildcard A RRSIG owner = %s, want host.signed-wild.example.", s.Hdr.Name)
+			}
+		}
+	})
+
+	// Case 3: unsigned-by-design zone — no signing configured. A DO query for a
+	// wildcard-covered name still answers NOERROR, served unsigned (as before);
+	// the fail-closed check applies only to must-be-signed zones.
+	t.Run("unsigned_wildcard_answers", func(t *testing.T) {
+		kdb := newTestKeyDB(t)
+		zd := testSnapshotZone(t, "plain-wild.example.", `plain-wild.example. 3600 IN SOA ns.plain-wild.example. hostmaster.plain-wild.example. 1 7200 1800 604800 7200
+plain-wild.example. 3600 IN NS ns.plain-wild.example.
+ns.plain-wild.example. 3600 IN A 10.0.0.1
+*.plain-wild.example. 3600 IN A 10.0.0.5
+`)
+		// No OptOnlineSigning / OptInlineSigning — legitimately unsigned.
+		zd.KeyDB = kdb
+
+		req := new(dns.Msg)
+		req.SetQuestion("host.plain-wild.example.", dns.TypeA)
+		rw := &fakeRW{}
+		if err := zd.QueryResponder(ctx, rw, req, "host.plain-wild.example.", dns.TypeA, &edns0.MsgOptions{DO: true}, kdb, nil); err != nil {
+			t.Fatalf("QueryResponder (DO unsigned wildcard): %v", err)
+		}
+		resp := rw.written
+		if resp == nil {
+			t.Fatal("no response written for unsigned wildcard query")
+		}
+		if resp.MsgHdr.Rcode != dns.RcodeSuccess {
+			t.Fatalf("unsigned-by-design wildcard DO query: expected NOERROR, got %s", dns.RcodeToString[resp.MsgHdr.Rcode])
+		}
+		if !answerHasA(resp, "host.plain-wild.example.") {
+			t.Fatalf("unsigned wildcard answer missing A owned by the queried name; answer=%v", resp.Answer)
+		}
+		if answerHasRRSIG(resp, 0) {
+			t.Fatalf("unsigned-by-design zone must not fabricate an RRSIG; answer=%v", resp.Answer)
+		}
+	})
+}
