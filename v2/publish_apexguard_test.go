@@ -2,6 +2,7 @@ package tdns
 
 import (
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -84,5 +85,68 @@ func TestInstallInitialSnapshotMarksReadyWhenSnapshotExists(t *testing.T) {
 	}
 	if zd.snapshot.Load() != good {
 		t.Fatal("InstallInitialSnapshot overwrote the existing valid snapshot")
+	}
+}
+
+// TestResignSOAUnderLockNoSelfDeadlock is the regression test for the re-entrant
+// zd.mu self-deadlock (instance #2 of the class 6e090a9 fixed). The publish path
+// holds zd.mu (publishWorkingSetLocked) and re-signs the working-set SOA via
+// resignWorkingSetSOAIfSigned. When the zone has no active keys yet, that reaches
+// EnsureActiveDnssecKeys, which generates them and then publishes the DNSKEY
+// RRset — and PublishDnskeyRRs takes zd.mu, self-deadlocking (Go mutexes are not
+// reentrant). This is the exact production stack:
+//
+//	applyRefreshReplacementLocked -> publishWorkingSetLocked ->
+//	resignWorkingSetSOAIfSigned -> SignRRset -> EnsureActiveDnssecKeys ->
+//	PublishDnskeyRRs -> zd.mu.Lock()  (re-entrant, wedges the daemon)
+//
+// The fix resolves the keys with EnsureActiveDnssecKeys(zdLocked=true), which
+// routes the publish through publishDnskeyRRsLocked (no re-lock). The re-sign
+// runs in a goroutine holding zd.mu; a re-introduced re-lock blocks it forever,
+// so the timeout fails the test instead of hanging the whole run.
+func TestResignSOAUnderLockNoSelfDeadlock(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	zone := `resign.example.	3600	IN	SOA	ns.resign.example. hostmaster.resign.example. 1 7200 1800 604800 7200
+resign.example.	3600	IN	NS	ns.resign.example.
+`
+	zd := testZone(t, "resign.example.", zone)
+	zd.KeyDB = kdb
+	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+	zd.DnssecPolicy = &DnssecPolicy{
+		Mode:         DnssecPolicyModeKSKZSK,
+		KSKAlgorithm: dns.ED25519,
+		ZSKAlgorithm: dns.ED25519,
+	}
+	// No active keys are pre-generated: the first re-sign must GENERATE them and
+	// PUBLISH the DNSKEY RRset — the fresh-key branch that re-locked zd.mu.
+
+	done := make(chan struct{})
+	go func() {
+		zd.mu.Lock() // the publishWorkingSetLocked context: zd.mu held across the re-sign
+		defer zd.mu.Unlock()
+		zd.ensureWorkingSet()
+		zd.resignWorkingSetSOAIfSigned()
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("resignWorkingSetSOAIfSigned deadlocked while zd.mu was held (re-entrant zd.mu via EnsureActiveDnssecKeys -> PublishDnskeyRRs)")
+	}
+
+	// The SOA must actually carry an RRSIG now — proves the re-sign ran to
+	// completion (generated keys, published DNSKEYs, signed the SOA) rather than
+	// bailing out early.
+	zd.mu.Lock()
+	apex := zd.workingSet[zd.ZoneName]
+	zd.mu.Unlock()
+	if apex == nil {
+		t.Fatal("apex missing from working set after resign")
+	}
+	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+	if len(soa.RRSIGs) == 0 {
+		t.Fatal("SOA was not signed under the lock (re-sign did not complete)")
 	}
 }

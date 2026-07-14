@@ -66,7 +66,7 @@ func (zd *ZoneData) CreateTransportSignalRRs(conf *Config) error {
 	var dak *DnssecKeys
 	if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
 		var err error
-		if dak, err = zd.EnsureActiveDnssecKeys(zd.KeyDB); err != nil {
+		if dak, err = zd.EnsureActiveDnssecKeys(zd.KeyDB, false); err != nil {
 			return err
 		}
 	}

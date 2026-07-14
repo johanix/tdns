@@ -122,8 +122,10 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 	var err error
 
 	if dak == nil {
-		// Ensure active keys exist (will generate if needed)
-		dak, err = zd.EnsureActiveDnssecKeys(zd.KeyDB)
+		// Ensure active keys exist (will generate if needed). SignRRset is never
+		// reached with dak==nil while zd.mu is held (the one such caller,
+		// resignWorkingSetSOAIfSigned, resolves the dak first), so zdLocked=false.
+		dak, err = zd.EnsureActiveDnssecKeys(zd.KeyDB, false)
 		if err != nil {
 			lgSigner.Error("failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "err", err)
 			return false, err
@@ -389,7 +391,14 @@ func (zd *ZoneData) reconcileActiveKeyAlgorithms(kdb *KeyDB, dak *DnssecKeys) (b
 // 1. Try to promote published keys to active (if available)
 // 2. Generate new KSK and ZSK keys if needed
 // Returns the active DNSSEC keys or an error if key generation fails.
-func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
+//
+// zdLocked signals that the caller already holds zd.mu. When true the final
+// DNSKEY publish is routed through publishDnskeyRRsLocked (which does NOT take
+// zd.mu) instead of PublishDnskeyRRs (which does) — otherwise the re-lock would
+// self-deadlock (Go mutexes are not reentrant). The only zd.mu-holding caller is
+// resignWorkingSetSOAIfSigned (via the publish path); every other caller resolves
+// keys before taking zd.mu and passes false.
+func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKeys, error) {
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return nil, fmt.Errorf("EnsureActiveDnssecKeys: zone %s does not allow signing (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
@@ -543,8 +552,14 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB) (*DnssecKeys, error) {
 		return nil, err
 	}
 
-	// Publish DNSKEYs to the zone so they're available in queries and AXFR
-	err = zd.PublishDnskeyRRs(dak)
+	// Publish DNSKEYs to the zone so they're available in queries and AXFR.
+	// When the caller already holds zd.mu (zdLocked), use the *Locked variant so
+	// we don't re-acquire zd.mu and self-deadlock.
+	if zdLocked {
+		err = zd.publishDnskeyRRsLocked(dak)
+	} else {
+		err = zd.PublishDnskeyRRs(dak)
+	}
 	if err != nil {
 		lgSigner.Warn("failed to publish DNSKEY RRs", "zone", zd.ZoneName, "err", err)
 		// Don't fail if publishing fails, keys are still usable for signing
@@ -585,7 +600,7 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 		return 0, fmt.Errorf("ResignZone: zone %s has DNSSEC error: %s", zd.ZoneName, zd.ErrorMsg)
 	}
 
-	dak, err := zd.EnsureActiveDnssecKeys(kdb)
+	dak, err := zd.EnsureActiveDnssecKeys(kdb, false)
 	if err != nil {
 		lgSigner.Error("ResignZone: failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "err", err)
 		return 0, err
@@ -762,8 +777,9 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 	// Single-signer signing (mode 1). Multi-provider signing
 	// (modes 2-4) is handled by mpzd.SignZone() in tdns-mp.
 
-	// Ensure active DNSSEC keys exist (will generate if needed)
-	dak, err := zd.EnsureActiveDnssecKeys(kdb)
+	// Ensure active DNSSEC keys exist (will generate if needed). SignZone takes
+	// zd.mu below (line ~801), after this call, so zdLocked=false here.
+	dak, err := zd.EnsureActiveDnssecKeys(kdb, false)
 	if err != nil {
 		lgSigner.Error("failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "err", err)
 		return 0, err

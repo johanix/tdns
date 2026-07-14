@@ -395,7 +395,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 		var err error
 		dak, err = kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 		if err != nil || dak == nil || len(dak.ZSKs) == 0 {
-			dak, err = zd.EnsureActiveDnssecKeys(kdb)
+			dak, err = zd.EnsureActiveDnssecKeys(kdb, false)
 			if err != nil {
 				lg.Error("ApplyChildUpdateToZoneData: failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "error", err)
 				return false, err
@@ -543,7 +543,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 	if (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && (err != nil || dak == nil || len(dak.KSKs) == 0) {
 		lg.Debug("ApplyZoneUpdateToZoneData: GetDnssecKeys failed, attempting to ensure keys exist", "zone", zd.ZoneName)
 		// Try to ensure active keys exist (will generate if needed)
-		dak, err = zd.EnsureActiveDnssecKeys(kdb)
+		dak, err = zd.EnsureActiveDnssecKeys(kdb, false)
 		if err != nil {
 			lg.Error("ApplyZoneUpdateToZoneData: failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "error", err)
 			return false, err

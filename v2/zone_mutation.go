@@ -198,7 +198,17 @@ func (zd *ZoneData) resignWorkingSetSOAIfSigned() {
 	if len(rs.RRs) == 0 {
 		return
 	}
-	if _, err := zd.SignRRset(&rs, zd.ZoneName, nil, true, nil); err != nil {
+	// This runs UNDER zd.mu (called from publishWorkingSetLocked). Resolve the
+	// active keys here with zdLocked=true and pass the non-nil dak into
+	// SignRRset, so SignRRset does NOT fall into its own EnsureActiveDnssecKeys
+	// call (which would reach PublishDnskeyRRs and re-lock zd.mu → self-deadlock,
+	// the same class as the SignZone/UpdateSigValidityFloor deadlock in 6e090a9).
+	dak, err := zd.EnsureActiveDnssecKeys(zd.KeyDB, true)
+	if err != nil {
+		lg.Error("publish: failed to ensure DNSSEC keys for SOA re-sign", "zone", zd.ZoneName, "err", err)
+		return
+	}
+	if _, err := zd.SignRRset(&rs, zd.ZoneName, dak, true, nil); err != nil {
 		lg.Error("publish: failed to re-sign SOA", "zone", zd.ZoneName, "err", err)
 		return
 	}
