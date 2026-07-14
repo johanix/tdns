@@ -159,6 +159,47 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 	return updated, nil
 }
 
+// applyReloadedPolicyLocked rebinds a signed zone to a DNSSEC policy freshly
+// resolved from the config on RELOAD, UNLESS doing so would change the zone's
+// effective KSK or ZSK ALGORITHM.
+//
+// An algorithm change requires a key rollover that is not yet implemented:
+// SignZone (reconcileActiveKeyAlgorithms, sign.go) refuses the mismatch, so
+// blindly rebinding to the new policy would leave the zone bound to a policy it
+// can never sign under — it would go unsigned. To preserve availability we
+// REFUSE the change here: keep the OLD policy bound, log a warning, and let the
+// zone keep signing with its existing keys. A benign edit (same effective KSK
+// and ZSK algorithms, only lifetimes/sigvalidity/rollover/ttls changed) applies
+// normally.
+//
+// This runs only on the reload path (FirstZoneLoad == false), where the current
+// binding is the OLD policy; a first bind (nil current policy) is always
+// applied. The separate set-policy/change-policy command path
+// (apihandler_zone.go) has its own revert-on-failure handling and must not use
+// this guard. The effective algorithms are the resolved DnssecPolicy.KSKAlgorithm
+// / .ZSKAlgorithm fields (top-level algorithm plus any per-role override), the
+// same fields SignZone and set-policy compare against the active keys.
+//
+// Caller must hold zd.mu. Returns true if newPol was applied.
+func (zd *ZoneData) applyReloadedPolicyLocked(newPol *DnssecPolicy, newName string) bool {
+	if cur := zd.DnssecPolicy; cur != nil &&
+		(cur.KSKAlgorithm != newPol.KSKAlgorithm || cur.ZSKAlgorithm != newPol.ZSKAlgorithm) {
+		lgEngine.Warn("refused incompatible DNSSEC algorithm change on reload; keeping existing policy",
+			"zone", zd.ZoneName,
+			"effective_policy", zd.DnssecPolicyName,
+			"config_policy", newName,
+			"effective_ksk_alg", dns.AlgorithmToString[cur.KSKAlgorithm],
+			"config_ksk_alg", dns.AlgorithmToString[newPol.KSKAlgorithm],
+			"effective_zsk_alg", dns.AlgorithmToString[cur.ZSKAlgorithm],
+			"config_zsk_alg", dns.AlgorithmToString[newPol.ZSKAlgorithm],
+			"reason", "algorithm change requires a key rollover (not implemented)")
+		return false
+	}
+	zd.DnssecPolicy = newPol
+	zd.DnssecPolicyName = newName
+	return true
+}
+
 func RefreshEngine(ctx context.Context, conf *Config) {
 
 	var zonerefch = conf.Internal.RefreshZoneCh
@@ -371,16 +412,20 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								polName = eff
 							}
 							if dp, exists := conf.Internal.DnssecPolicies[polName]; exists {
-								// Always rebind: the policy struct is rebuilt from
-								// scratch by parseDnssecConfig on every reload, so even
-								// a same-name policy may have changed internals (e.g.
-								// an edited KSK algorithm). Re-binding + a re-sign below
-								// converges the zone; the algorithm reconcile in
-								// EnsureActiveDnssecKeys is idempotent (no churn when
-								// keys already match).
-								zd.DnssecPolicy = &dp
-								zd.DnssecPolicyName = polName
-								reapplyPolicy = true
+								// Rebind so a same-name policy whose internals changed
+								// on reload (lifetimes, sigvalidity, rollover, ttls, …)
+								// takes effect; the re-sign below converges the zone
+								// (the algorithm reconcile in EnsureActiveDnssecKeys is
+								// idempotent — no key churn when keys already match).
+								// BUT applyReloadedPolicyLocked refuses a change that
+								// alters the effective KSK/ZSK algorithm: that needs a
+								// key rollover that is not yet built, and applying it
+								// would leave the zone bound to an unusable policy and
+								// serving unsigned. On refusal the OLD policy stays
+								// bound (no re-sign) so the zone keeps signing.
+								if zd.applyReloadedPolicyLocked(&dp, polName) {
+									reapplyPolicy = true
+								}
 							} else {
 								lgEngine.Warn("DNSSEC policy not found, keeping existing", "policy", polName, "zone", zone)
 							}
