@@ -208,3 +208,52 @@ func axfrSignedness(ctx context.Context, server, zone string) (SignednessObs, er
 	}
 	return obs, nil
 }
+
+// QuerySignednessObs is what queryApexSignedness extracts from one +dnssec
+// query for the apex SOA: whether the answer carried an RRSIG covering the SOA,
+// and the serial. A signed zone always has an RRSIG(SOA), so its presence is a
+// crisp "the server is serving signed answers" signal. The reload test's I10
+// checker cross-references it against axfrSignedness: a zone that answers
+// queries signed but transfers unsigned is masking a signing failure.
+type QuerySignednessObs struct {
+	Serial   uint32
+	HasRRSIG bool // an RRSIG(SOA) accompanied the apex SOA in the answer
+}
+
+// queryApexSignedness sends a DO-bit (+dnssec) query for the apex SOA and
+// reports whether the answer carried an RRSIG covering it. It checks RRSIG
+// PRESENCE only, never signature validity — enough to tell a signed answer from
+// an unsigned one and needing no algorithm support in the tool (miekg/dns
+// parses RRSIG regardless of algorithm). A large PQ RRSIG(SOA) overflows the
+// UDP buffer, so a truncated answer is retried over TCP rather than misread as
+// unsigned.
+func queryApexSignedness(ctx context.Context, server, zone string) (QuerySignednessObs, error) {
+	apex := dns.Fqdn(zone)
+	m := new(dns.Msg)
+	m.SetQuestion(apex, dns.TypeSOA)
+	m.SetEdns0(1232, true) // DO bit: ask the server for DNSSEC records
+	c := &dns.Client{Timeout: 5 * time.Second}
+	r, _, err := c.ExchangeContext(ctx, m, server)
+	if err != nil {
+		return QuerySignednessObs{}, err
+	}
+	if r.Truncated {
+		c.Net = "tcp"
+		r, _, err = c.ExchangeContext(ctx, m, server)
+		if err != nil {
+			return QuerySignednessObs{}, err
+		}
+	}
+	var obs QuerySignednessObs
+	for _, rr := range r.Answer {
+		switch v := rr.(type) {
+		case *dns.SOA:
+			obs.Serial = v.Serial
+		case *dns.RRSIG:
+			if v.TypeCovered == dns.TypeSOA && strings.EqualFold(rr.Header().Name, apex) {
+				obs.HasRRSIG = true
+			}
+		}
+	}
+	return obs, nil
+}

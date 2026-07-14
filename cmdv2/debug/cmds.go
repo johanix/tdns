@@ -38,11 +38,12 @@ var (
 
 	// test reload: dedicated cadence/duration vars (distinct defaults from
 	// churn's, so a shared var would bleed the wrong default into churn).
-	reloadCadence     string
-	reloadAxfrCadence string
-	reloadDuration    string
-	zoneSize          int
-	algorithm         string
+	reloadCadence      string
+	reloadAxfrCadence  string
+	reloadQueryCadence string
+	reloadDuration     string
+	zoneSize           int
+	algorithm          string
 )
 
 // ---- probe ----------------------------------------------------------------
@@ -275,6 +276,7 @@ func runReload(ctx context.Context, st *debug.State, rec *debug.TestRecord) {
 		DeclaredSigned: true, // reload zones are always provisioned signed
 		ReloadCadence:  mustDur(reloadCadence, "reloadcadence"),
 		AxfrCadence:    mustDur(reloadAxfrCadence, "axfrcadence"),
+		QueryCadence:   mustDur(reloadQueryCadence, "querycadence"),
 		Duration:       mustDur(reloadDuration, "duration"),
 		Tool:           appName + " " + appVersion,
 		TestId:         rec.Id,
@@ -424,6 +426,7 @@ func init() {
 	testReloadCmd.Flags().StringVar(&testId, "test", "", "test identity from a prior --generate-config")
 	testReloadCmd.Flags().StringVar(&reloadCadence, "reloadcadence", "30s", "interval between zone reloads")
 	testReloadCmd.Flags().StringVar(&reloadAxfrCadence, "axfrcadence", "500ms", "interval between AXFR observations")
+	testReloadCmd.Flags().StringVar(&reloadQueryCadence, "querycadence", "500ms", "interval between +dnssec query-signedness observations")
 	testReloadCmd.Flags().StringVar(&reloadDuration, "duration", "5m", "total run duration")
 	testReloadCmd.Flags().BoolVar(&reportJson, "json", false, "JSON report")
 	testCmd.AddCommand(testReloadCmd)

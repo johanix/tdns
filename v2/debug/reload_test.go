@@ -48,3 +48,56 @@ func TestI10IsFalsePositiveFreeBeforeLatch(t *testing.T) {
 		t.Errorf("unsigned-before-latch must not violate, got %d", len(rep.Violations))
 	}
 }
+
+func TestI10CrossCheckQuerySignedAxfrUnsigned(t *testing.T) {
+	// The masked-signing-failure signal: the zone answers +dnssec queries SIGNED
+	// (the server signs ephemerally per query) while its AXFR is only ever
+	// UNSIGNED (no stored RRSIGs). The AXFR-only latch never latches and would
+	// SKIP as a false clean; the query-vs-AXFR cross-check must catch it.
+	rep := NewReport("test", "reload")
+	c := &SignednessChecker{report: rep}
+
+	c.ObserveQuery(QuerySignednessObs{Serial: 1, HasRRSIG: true})
+	c.Observe(SignednessObs{Serial: 1, HasDNSKEY: false, HasRRSIG: false})
+	c.CrossCheckSignedness()
+
+	if len(rep.Violations) != 1 || rep.Violations[0].Invariant != "I10" {
+		t.Fatalf("query-signed + AXFR-unsigned must trip exactly one I10, got %+v", rep.Violations)
+	}
+}
+
+func TestI10CrossCheckBothUnsignedIsClean(t *testing.T) {
+	// A genuinely-unsigned zone: the query is unsigned too, so there is no
+	// divergence and no I10 (this is the false-positive we must never raise).
+	rep := NewReport("test", "reload")
+	c := &SignednessChecker{report: rep}
+
+	c.ObserveQuery(QuerySignednessObs{Serial: 1, HasRRSIG: false})
+	c.Observe(SignednessObs{Serial: 1, HasDNSKEY: false, HasRRSIG: false})
+	c.CrossCheckSignedness()
+
+	if c.QueryEverSigned() {
+		t.Error("an unsigned query must not latch QueryEverSigned")
+	}
+	if len(rep.Violations) != 0 {
+		t.Fatalf("both-unsigned must not violate, got %+v", rep.Violations)
+	}
+}
+
+func TestI10CrossCheckBothSignedIsClean(t *testing.T) {
+	// A healthy signed zone: both the query and the AXFR are signed. The AXFR
+	// latches signed, so the cross-check must not fire.
+	rep := NewReport("test", "reload")
+	c := &SignednessChecker{report: rep}
+
+	c.ObserveQuery(QuerySignednessObs{Serial: 1, HasRRSIG: true})
+	c.Observe(SignednessObs{Serial: 1, HasDNSKEY: true, HasRRSIG: true})
+	c.CrossCheckSignedness()
+
+	if !c.EverSigned() {
+		t.Error("a fully-signed AXFR must latch EverSigned")
+	}
+	if len(rep.Violations) != 0 {
+		t.Fatalf("both-signed must not violate, got %+v", rep.Violations)
+	}
+}
