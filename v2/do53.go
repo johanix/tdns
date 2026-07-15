@@ -48,7 +48,8 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 	// servers below carry a TsigProvider (needed to MAC the response). DoH/DoQ
 	// receive the unwrapped authDNSHandler; DoT installs the wrapper itself in
 	// DnsDoTEngine, since it also carries a TsigProvider.
-	dnsMux.HandleFunc(".", TsigSigningHandler(authDNSHandler))
+	// udpTruncate sits inside TsigSigningHandler so TSIG MACs the truncated wire.
+	dnsMux.HandleFunc(".", TsigSigningHandler(udpTruncate(authDNSHandler)))
 
 	addresses := conf.DnsEngine.Addresses
 	if !CaseFoldContains(conf.DnsEngine.Transports, "do53") {

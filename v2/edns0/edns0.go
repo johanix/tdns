@@ -21,6 +21,7 @@ type MsgOptions struct {
 	HasEROption   bool            // True if ER option is present
 	ErAgentDomain string          // RFC9567: DNS Error Reporting agent domain
 	KeyState      *KeyStateOption // KeyState option if present
+	UDPSize       uint16          // Client-advertised EDNS UDP payload size (RFC 6891)
 }
 
 type EDNS0Option struct {
@@ -35,8 +36,11 @@ func ExtractFlagsAndEDNS0Options(r *dns.Msg) (*MsgOptions, error) {
 
 	opt := r.IsEdns0()
 	if opt == nil {
+		msgoptions.UDPSize = dns.MinMsgSize
 		return msgoptions, nil
 	}
+
+	msgoptions.UDPSize = RequestUDPSize(r)
 
 	// Extract DO bit (DNSSEC OK) - bit 15
 	msgoptions.DO = opt.Do()
@@ -80,4 +84,21 @@ func ExtractFlagsAndEDNS0Options(r *dns.Msg) (*MsgOptions, error) {
 	}
 
 	return msgoptions, nil
+}
+
+// RequestUDPSize returns the EDNS UDP payload size advertised in r. Per RFC
+// 6891: no OPT ⇒ 512; OPT UDP size < 512 ⇒ treat as 512.
+func RequestUDPSize(r *dns.Msg) uint16 {
+	if r == nil {
+		return dns.MinMsgSize
+	}
+	opt := r.IsEdns0()
+	if opt == nil {
+		return dns.MinMsgSize
+	}
+	size := opt.UDPSize()
+	if size < dns.MinMsgSize {
+		return dns.MinMsgSize
+	}
+	return size
 }
