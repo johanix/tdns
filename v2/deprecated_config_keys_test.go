@@ -17,6 +17,15 @@ func TestClassifyUnusedConfigKeys(t *testing.T) {
 		// with a parent path, must still match the ".sigvalidity" substring
 		"dnssec.policies[fastroll].KSK.sigvalidity",
 		"dnssec.policies[default].ZSK.sigvalidity",
+		// deprecated — the hyphenated spelling of the same key, which the
+		// guide used for a long time. Must NOT be shadowed by ".sigvalidity",
+		// which it does not contain.
+		"dnssec.policies[p1].KSK.sig-validity",
+		// deprecated — zone-level leaves whose misspelling silently disables
+		// signing rather than failing loudly
+		"zones[0].dnssec_policy",
+		"zones[1].dnssec-policy",
+		"zones[0].multi_signer",
 		// genuine typos — not deprecated, should land in unknown
 		"servce", // misspelled "service"
 		"dnsengine.adresses",
@@ -35,6 +44,10 @@ func TestClassifyUnusedConfigKeys(t *testing.T) {
 		"dnssecpolicies", "kasp",
 		"dnssec.policies[fastroll].KSK.sigvalidity",
 		"dnssec.policies[default].ZSK.sigvalidity",
+		"dnssec.policies[p1].KSK.sig-validity",
+		"zones[0].dnssec_policy",
+		"zones[1].dnssec-policy",
+		"zones[0].multi_signer",
 	} {
 		if !gotDep[want] {
 			t.Errorf("expected %q classified as deprecated, was not", want)
@@ -73,5 +86,44 @@ func TestClassifyUnusedConfigKeys_ExactVsSubstring(t *testing.T) {
 	}
 	if len(unknown) != 1 {
 		t.Errorf("expected the non-deprecated path in unknown, got %v", unknown)
+	}
+
+	// A non-exact entry names a deprecated LEAF and must match only at the END
+	// of the path. A typo INSIDE the valid `sigvalidity:` subtree produces a
+	// path that contains ".sigvalidity" but is really a misspelled `default`;
+	// reporting it as the deprecated per-key scalar would send the operator
+	// chasing the wrong migration.
+	dep, unknown = classifyUnusedConfigKeys([]string{"dnssec.policies[p1].SigValidity.defualt"})
+	if len(dep) != 0 {
+		t.Errorf("typo inside a valid sigvalidity: block wrongly reported as deprecated: %+v", dep)
+	}
+	if len(unknown) != 1 {
+		t.Errorf("expected the typo in unknown, got %v", unknown)
+	}
+
+	// Likewise the correctly-spelled keys, should one ever reach the classifier.
+	for _, valid := range []string{
+		"zones[0].dnssecpolicy",
+		"zones[0].multisigner",
+		"dnssec.policies[p1].SigValidity.default",
+	} {
+		dep, _ := classifyUnusedConfigKeys([]string{valid})
+		if len(dep) != 0 {
+			t.Errorf("valid key %q wrongly classified as deprecated: %+v", valid, dep)
+		}
+	}
+}
+
+// TestDeprecatedConfigKeysAdviceNamesReplacement is a cheap quality guard on the
+// registry itself: the whole point of an entry is to tell the operator what to
+// write instead, so every advice string must be non-trivial.
+func TestDeprecatedConfigKeysAdviceNamesReplacement(t *testing.T) {
+	for _, d := range deprecatedConfigKeys {
+		if d.match == "" {
+			t.Error("deprecated entry with empty match pattern")
+		}
+		if len(d.advice) < 20 {
+			t.Errorf("deprecated entry %q has uselessly short advice %q", d.match, d.advice)
+		}
 	}
 }

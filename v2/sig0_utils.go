@@ -43,7 +43,7 @@ func (kdb *KeyDB) SendSig0KeyUpdate(ctx context.Context, childpri, parpri string
 	var adds, removes []dns.RR
 
 	if gennewkey {
-		newpkc, msg, err := kdb.GenerateKeypair(Globals.Zonename, "tdnsd", "active", dns.TypeKEY, pkc.Algorithm, "", nil) // nil = no tx
+		newpkc, msg, err := kdb.GenerateKeypair(Globals.Zonename, "tdns-auth", "active", dns.TypeKEY, pkc.Algorithm, "", nil) // nil = no tx
 		if err != nil {
 			return fmt.Errorf("error from GenerateSigningKey: %v", err)
 		}

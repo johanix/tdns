@@ -395,7 +395,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 		var err error
 		dak, err = kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 		if err != nil || dak == nil || len(dak.ZSKs) == 0 {
-			dak, err = zd.EnsureActiveDnssecKeys(kdb)
+			dak, err = zd.EnsureActiveDnssecKeys(kdb, false)
 			if err != nil {
 				lg.Error("ApplyChildUpdateToZoneData: failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "error", err)
 				return false, err
@@ -409,11 +409,12 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 	var updated bool
 	zd.mu.Lock()
 	defer func() {
-		zd.mu.Unlock()
 		if updated {
-			zd.BumpSerial()
+			zd.publishLocked(zd.generation.Load())
 		}
+		zd.mu.Unlock()
 	}()
+	zd.ensureWorkingSet()
 
 	for _, rr := range ur.Actions {
 		class := rr.Header().Class
@@ -434,22 +435,14 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 		// XXX: The logic here is a bit involved. If this is a delete then it is ~ok that the owner doesn't exist.
 		// If it is an add then it is not ok, and then the owner must be created.
 
-		owner, err := zd.GetOwner(ownerName)
-		if err != nil {
-			lg.Warn("ApplyChildUpdateToZoneData: unknown owner name", "owner", ownerName)
+		owner := zd.stagedOwner(ownerName)
+		if owner == nil {
 			if class == dns.ClassNONE || class == dns.ClassANY {
-				// If this is a delete then it is ok that the owner doesn't exist.
+				lg.Warn("ApplyChildUpdateToZoneData: unknown owner name", "owner", ownerName)
 				continue
 			}
-		}
-		if owner == nil {
-			owner = &OwnerData{
-				Name:    ownerName,
-				RRtypes: NewRRTypeStore(),
-			}
-			zd.AddOwner(owner)
+			owner = zd.getOrCreateWorkingOwner(ownerName)
 			updated = true
-			// zd.Options["dirty"] = true
 		}
 
 		rrset, exists := owner.RRtypes.Get(rrtype)
@@ -471,7 +464,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 			lg.Debug("ApplyChildUpdateToZoneData: Remove RR", "owner", ownerName, "rrtype", rrtypestr, "rr", rrcopy.String())
 			rrset.RemoveRR(rrcopy, Globals.Verbose, Globals.Debug) // Cannot remove rr, because it is in the wrong class.
 			if len(rrset.RRs) == 0 {
-				owner.RRtypes.Delete(rrtype)
+				zd.stageDeleteLocked(ownerName, rrtype)
 			} else {
 				// RFC 4035 §2.2: at a delegation point, only DS is
 				// authoritative parent data and gets an RRSIG. NS and
@@ -482,7 +475,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 						lg.Error("ApplyChildUpdateToZoneData: signing failed after RR removal", "rrtype", rrtypestr, "owner", ownerName, "error", err)
 					}
 				}
-				owner.RRtypes.Set(rrtype, rrset)
+				zd.stageRRsetLocked(ownerName, rrset)
 			}
 			updated = true
 			// zd.Options["dirty"] = true
@@ -492,7 +485,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 		case dns.ClassANY:
 			// ClassANY: Remove RRset
 			lg.Debug("ApplyChildUpdateToZoneData: Remove RRset", "rr", rr.String())
-			owner.RRtypes.Delete(rrtype)
+			zd.stageDeleteLocked(ownerName, rrtype)
 			updated = true
 			// zd.Options["dirty"] = true
 			continue
@@ -525,7 +518,7 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 					lg.Error("ApplyChildUpdateToZoneData: signing failed after RR add", "rrtype", rrtypestr, "owner", ownerName, "error", err)
 				}
 			}
-			owner.RRtypes.Set(rrtype, rrset)
+			zd.stageRRsetLocked(ownerName, rrset)
 			updated = true
 			zd.Options[OptDirty] = true
 		}
@@ -543,10 +536,14 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 	// log.Printf("**** ApplyZoneUpdateToZoneData: ur=%+v", ur)
 
 	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
-	if err != nil && (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && (err != nil || dak == nil || len(dak.KSKs) == 0) {
+	// Resolve keys (generating if needed) BEFORE taking zd.mu below — including
+	// the (nil,nil) "no error, no keys" case. Otherwise SignRRset is later called
+	// under zd.mu with a nil dak, reaches PublishDnskeyRRs, and self-deadlocks
+	// re-locking zd.mu.
+	if (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && (err != nil || dak == nil || len(dak.KSKs) == 0) {
 		lg.Debug("ApplyZoneUpdateToZoneData: GetDnssecKeys failed, attempting to ensure keys exist", "zone", zd.ZoneName)
 		// Try to ensure active keys exist (will generate if needed)
-		dak, err = zd.EnsureActiveDnssecKeys(kdb)
+		dak, err = zd.EnsureActiveDnssecKeys(kdb, false)
 		if err != nil {
 			lg.Error("ApplyZoneUpdateToZoneData: failed to ensure active DNSSEC keys", "zone", zd.ZoneName, "error", err)
 			return false, err
@@ -561,11 +558,12 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 
 	zd.mu.Lock()
 	defer func() {
-		zd.mu.Unlock()
 		if updated {
-			zd.BumpSerial()
+			zd.publishLocked(zd.generation.Load())
 		}
+		zd.mu.Unlock()
 	}()
+	zd.ensureWorkingSet()
 
 	lg.Debug("ApplyZoneUpdateToZoneData: processing actions", "zone", zd.ZoneName, "count", len(ur.Actions))
 	for _, rr := range ur.Actions {
@@ -579,7 +577,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 		// engine's queued publish is landing on disk and surviving.
 		if rrtype == dns.TypeCDS {
 			before := 0
-			if owner, _ := zd.GetOwner(ownerName); owner != nil {
+			if owner := zd.stagedOwner(ownerName); owner != nil {
 				if rs, ok := owner.RRtypes.Get(dns.TypeCDS); ok {
 					before = len(rs.RRs)
 				}
@@ -605,22 +603,14 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 		// XXX: The logic here is a bit involved. If this is a delete then it is ~ok that the owner doesn't exist.
 		// If it is an add then it is not ok, and then the owner must be created.
 
-		owner, err := zd.GetOwner(ownerName)
-		if err != nil {
-			lg.Warn("ApplyZoneUpdateToZoneData: unknown owner name", "owner", ownerName)
+		owner := zd.stagedOwner(ownerName)
+		if owner == nil {
 			if class == dns.ClassNONE || class == dns.ClassANY {
+				lg.Warn("ApplyZoneUpdateToZoneData: unknown owner name", "owner", ownerName)
 				continue
 			}
-		}
-
-		if owner == nil {
-			owner = &OwnerData{
-				Name:    ownerName,
-				RRtypes: NewRRTypeStore(),
-			}
-			zd.AddOwner(owner)
+			owner = zd.getOrCreateWorkingOwner(ownerName)
 			updated = true
-			// zd.Options["dirty"] = true
 		}
 
 		rrset, exists := owner.RRtypes.Get(rrtype)
@@ -633,6 +623,12 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 				RRs:    []dns.RR{},
 				RRSIGs: []dns.RR{},
 			}
+		} else {
+			// Get returns an RRset whose RRs/RRSIGs slices alias the published
+			// snapshot's backing arrays (cloneOwner shares them). The in-place
+			// RemoveRR / append / SignRRset below would otherwise tear the live
+			// view for concurrent readers — clone before mutating.
+			rrset = cloneRRset(rrset)
 		}
 
 		switch class {
@@ -640,14 +636,14 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 			// ClassNONE: Remove exact RR
 			rrset.RemoveRR(rrcopy, Globals.Verbose, Globals.Debug) // Cannot remove rr, because it is in the wrong class.
 			if len(rrset.RRs) == 0 {
-				owner.RRtypes.Delete(rrtype)
+				zd.stageDeleteLocked(ownerName, rrtype)
 			} else {
 				_, err := zd.SignRRset(&rrset, ownerName, dak, true, nil)
 				if err != nil {
 					lg.Error("ApplyZoneUpdateToZoneData: signing failed after RR removal", "rrtype", rrtypestr, "owner", ownerName, "error", err)
 					// Continue anyway - the record is still added, just not signed
 				}
-				owner.RRtypes.Set(rrtype, rrset)
+				zd.stageRRsetLocked(ownerName, rrset)
 			}
 			updated = true
 			// zd.Options["dirty"] = true
@@ -656,7 +652,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 
 		case dns.ClassANY:
 			// ClassANY: Remove RRset
-			owner.RRtypes.Delete(rrtype)
+			zd.stageDeleteLocked(ownerName, rrtype)
 			// XXX: As long as we don't maintain any NSEC chain removing a complete RRset should not require any resigning.
 			updated = true
 			// zd.Options["dirty"] = true
@@ -690,7 +686,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 				lg.Error("ApplyZoneUpdateToZoneData: signing failed after RR add", "rrtype", rrtypestr, "owner", ownerName, "error", err)
 				// Continue anyway - the record is still added, just not signed
 			}
-			owner.RRtypes.Set(rrtype, rrset)
+			zd.stageRRsetLocked(ownerName, rrset)
 			updated = true
 			if rrtype == dns.TypeCDS {
 				lgRollover.Debug("zone-update CDS add committed",

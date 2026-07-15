@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -258,11 +259,14 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 		return zd.refuseTransfer(w, r)
 	}
 
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil {
-		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, apex lookup failed: %v", zone, err)
+	// Pin ONE snapshot for the whole transfer so every owner comes from the
+	// same serial — no torn AXFR (M1).
+	snap := zd.publishedSnapshot()
+	if snap == nil {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, no published snapshot", zone)
 		return zd.refuseTransfer(w, r)
 	}
+	apex := getOwnerFrom(snap, zd.ZoneName)
 	if apex == nil {
 		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, missing apex", zone)
 		return zd.refuseTransfer(w, r)
@@ -272,6 +276,16 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, empty SOA RRset", zone)
 		return zd.refuseTransfer(w, r)
 	}
+	// Fail-closed: a zone configured to be signed must never be transferred
+	// unsigned. The SOA is an apex RRset and is always signed in a healthy
+	// signed zone, so an SOA with no RRSIG means the pinned snapshot is not
+	// (yet / any longer) signed — refuse rather than hand a secondary a zone it
+	// would serve BOGUS. Catches both a persistent sign failure and the reload
+	// re-sign window. (Surfacing WHY is deferred to the DnssecError redesign.)
+	if (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && len(soaRRset.RRSIGs) == 0 {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, zone is configured to be signed but the SOA has no RRSIG (unsigned/broken)", zone)
+		return zd.refuseTransfer(w, r)
+	}
 	soaOrig, ok := soaRRset.RRs[0].(*dns.SOA)
 	if !ok {
 		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, invalid SOA RR", zone)
@@ -279,7 +293,6 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 	}
 
 	soaCopy := dns.Copy(soaOrig).(*dns.SOA)
-	soaCopy.Serial = zd.CurrentSerial
 	transferSOA := core.RRset{
 		Name:   zd.ZoneName,
 		Class:  dns.ClassINET,
@@ -343,11 +356,19 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 		}
 	}
 
-	for _, owner := range zd.Data.Keys() {
+	names := make([]string, 0, len(snap.Data))
+	for name := range snap.Data {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, owner := range names {
 		if owner == zd.ZoneName {
 			continue
 		}
-		omap, _ := zd.Data.Get(owner)
+		omap := getOwnerFrom(snap, owner)
+		if omap == nil {
+			continue
+		}
 		for _, rrt := range omap.RRtypes.Keys() {
 			rrset := omap.RRtypes.GetOnlyRRSet(uint16(rrt))
 			if !appendRRset(bs, rrset) {
@@ -622,13 +643,13 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 
 	writer := bufio.NewWriter(f)
 
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil {
-		lgDns.Error("WriteZoneToFile: failed to get zone apex", "zone", zd.ZoneName, "err", err)
-		return err
+	snap := zd.publishedSnapshot()
+	apex := getOwnerFrom(snap, zd.ZoneName)
+	if apex == nil {
+		lgDns.Error("WriteZoneToFile: failed to get zone apex", "zone", zd.ZoneName)
+		return fmt.Errorf("WriteZoneToFile: %s: no apex in published snapshot", zd.ZoneName)
 	}
 	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
-	soa.RRs[0].(*dns.SOA).Serial = zd.CurrentSerial
 
 	//	zonedata += soa.String() + "\n"
 	count := 0
@@ -648,9 +669,17 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	}
 
 	// Rest of zone
-	for _, owner := range zd.Data.Keys() {
-		omap, _ := zd.Data.Get(owner)
+	names := make([]string, 0, len(snap.Data))
+	for name := range snap.Data {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, owner := range names {
 		if owner == zd.ZoneName {
+			continue
+		}
+		omap := getOwnerFrom(snap, owner)
+		if omap == nil {
 			continue
 		}
 		for _, rrt := range omap.RRtypes.Keys() {

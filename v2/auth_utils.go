@@ -13,6 +13,12 @@ import (
 // XXX: This should be merged with the FetchChildDelegationData() function
 // Returns [] NS RRs + [] v4glue RRs + [] v6glue RRs
 func (zd *ZoneData) FindDelegation(qname string, dnssec_ok bool) *ChildDelegationData {
+	return zd.findDelegationFrom(zd.publishedSnapshot(), qname, dnssec_ok)
+}
+
+// findDelegationFrom resolves a child delegation against a pinned snapshot, so
+// the NS RRset and its glue come from one serial (see getOwnerFrom).
+func (zd *ZoneData) findDelegationFrom(snap *zoneSnapshot, qname string, dnssec_ok bool) *ChildDelegationData {
 	var child string
 	labels := strings.Split(qname, ".")
 	for i := 0; i < len(labels)-1; i++ {
@@ -20,9 +26,9 @@ func (zd *ZoneData) FindDelegation(qname string, dnssec_ok bool) *ChildDelegatio
 		if child == zd.ZoneName {
 			break // no point in checking above current zone name
 		}
-		if zd.NameExists(child) {
-			childrrs, err := zd.GetOwner(child)
-			if err != nil || childrrs == nil {
+		if nameExistsFrom(snap, child) {
+			childrrs := getOwnerFrom(snap, child)
+			if childrrs == nil {
 				continue
 			}
 			zd.Logger.Printf("FindDelegation for qname='%s': there are RRs for '%s'", qname, child)
@@ -33,10 +39,8 @@ func (zd *ZoneData) FindDelegation(qname string, dnssec_ok bool) *ChildDelegatio
 					NS_rrset:  &childns,
 					DS_rrset:  &childds,
 				}
-				// zd.Logger.Printf("FindDelegation for qname='%s': there are NS RRs for '%s'", qname, child)
-				// Ok, we found a delegation. Do we need any glue?
 				zd.Logger.Printf("FindDelegation: cdd=%v", cdd)
-				v4glue, v6glue, v4glue_rrsigs, v6glue_rrsigs := zd.FindGlueSimple(childns, dnssec_ok)
+				v4glue, v6glue, v4glue_rrsigs, v6glue_rrsigs := zd.findGlueSimpleFrom(snap, childns, dnssec_ok)
 				cdd.A_glue = v4glue
 				cdd.AAAA_glue = v6glue
 				cdd.A_glue_rrsigs = v4glue_rrsigs
@@ -53,8 +57,11 @@ func (zd *ZoneData) FindDelegation(qname string, dnssec_ok bool) *ChildDelegatio
 // Returns two RRsets with A glue and AAAA glue. Each RRset may be nil.
 // XXX: This is wrong. The v4 (and v6) glue is not an *RRset, but a []*RRset
 func (zd *ZoneData) FindGlue(nsrrs core.RRset, dnssec_ok bool) (*core.RRset, *core.RRset) {
-	// zd.Logger.Printf("FindGlue: nsrrs: %v", nsrrs)
-	// dump.P(nsrrs)
+	return zd.findGlueFrom(zd.publishedSnapshot(), nsrrs, dnssec_ok)
+}
+
+// findGlueFrom resolves in-bailiwick glue against a pinned snapshot.
+func (zd *ZoneData) findGlueFrom(snap *zoneSnapshot, nsrrs core.RRset, dnssec_ok bool) (*core.RRset, *core.RRset) {
 	if len(nsrrs.RRs) == 0 {
 		if zd.Debug {
 			zd.Logger.Printf("FindGlue: nsrrs is empty")
@@ -71,11 +78,11 @@ func (zd *ZoneData) FindGlue(nsrrs core.RRset, dnssec_ok bool) (*core.RRset, *co
 				zd.Logger.Printf("FindGlue: zone '%s' has a nameserver '%s'", zone, nsname)
 			}
 			// nsnidx, exist := zd.OwnerIndex[nsname]
-			if !zd.NameExists(nsname) {
-				continue // no match for nsname in zd.OwnerIndex (i.e nameserver is out of bailiwick)
+			if !nameExistsFrom(snap, nsname) {
+				continue // nameserver is out of bailiwick
 			}
-			nsnamerrs, err := zd.GetOwner(nsname)
-			if err != nil || nsnamerrs == nil {
+			nsnamerrs := getOwnerFrom(snap, nsname)
+			if nsnamerrs == nil {
 				continue
 			}
 
@@ -122,8 +129,11 @@ func (zd *ZoneData) FindGlue(nsrrs core.RRset, dnssec_ok bool) (*core.RRset, *co
 }
 
 func (zd *ZoneData) FindGlueSimple(nsrrs core.RRset, dnssec_ok bool) ([]dns.RR, []dns.RR, []dns.RR, []dns.RR) {
-	// zd.Logger.Printf("FindGlue: nsrrs: %v", nsrrs)
-	// dump.P(nsrrs)
+	return zd.findGlueSimpleFrom(zd.publishedSnapshot(), nsrrs, dnssec_ok)
+}
+
+// findGlueSimpleFrom resolves glue against a pinned snapshot.
+func (zd *ZoneData) findGlueSimpleFrom(snap *zoneSnapshot, nsrrs core.RRset, dnssec_ok bool) ([]dns.RR, []dns.RR, []dns.RR, []dns.RR) {
 	if len(nsrrs.RRs) == 0 {
 		if zd.Debug {
 			zd.Logger.Printf("FindGlueSimple: nsrrs is empty")
@@ -138,11 +148,11 @@ func (zd *ZoneData) FindGlueSimple(nsrrs core.RRset, dnssec_ok bool) ([]dns.RR, 
 			nsname = nsrr.Ns
 			zd.Logger.Printf("FindGlue: zone '%s' has a nameserver '%s'", zone, nsname)
 			// nsnidx, exist := zd.OwnerIndex[nsname]
-			if !zd.NameExists(nsname) {
-				continue // no match for nsname in zd.OwnerIndex (i.e nameserver is out of bailiwick)
+			if !nameExistsFrom(snap, nsname) {
+				continue // nameserver is out of bailiwick
 			}
-			nsnamerrs, err := zd.GetOwner(nsname)
-			if err != nil || nsnamerrs == nil {
+			nsnamerrs := getOwnerFrom(snap, nsname)
+			if nsnamerrs == nil {
 				continue
 			}
 

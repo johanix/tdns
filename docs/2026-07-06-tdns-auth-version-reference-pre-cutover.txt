@@ -1,0 +1,34 @@
+# tdns-auth --version reference — PRE alg-generator-cutover
+# Captured: 2026-07-06 on branch feature/alg-registry-generator
+# Build: GOROOT=/opt/local/lib/go make WITH_LIBOQS=1 WITH_SQISIGN=1 WITH_QRUOV=1
+# auth re-pinned to dnssec-algorithms v0.0.0-20260705191302-4091eff4cce6 (CROSS 214)
+# Purpose: golden reference to diff against post-cutover --version output.
+# NOTE: KSK/ZSK show '-' for PQ algs — pre-role Capabilities; the cutover should FIX these to real yes/no.
+# ---
+
+tdns-auth version v0.8-feat/outbound-transfer-hardening-milestone-2-transport-split-770-g1ff6582 (built 2026-07-03-11:03)
+
+Supported DNSSEC signature algorithms (21):
+
+  CODE  NAME                SIG(0)  DNSSEC  KSK  ZSK
+  8     RSASHA256           yes     yes     yes  yes
+  10    RSASHA512           yes     yes     yes  yes
+  13    ECDSAP256SHA256     yes     yes     yes  yes
+  14    ECDSAP384SHA384     yes     yes     yes  yes
+  15    ED25519             yes     yes     yes  yes
+  199   MLDSA44             yes     yes     -    -
+  200   SLHDSA128S          yes     yes     -    -
+  201   FALCON512           yes     yes     -    -
+  202   MAYO1               yes     yes     -    -
+  203   SNOVA24_5_4         yes     yes     -    -
+  204   SQISIGN1            yes     yes     -    -
+  205   QRUOV_Q31_L3        yes     yes     -    -
+  206   MAYO2               yes     yes     -    -
+  207   MAYO3               yes     yes     -    -
+  208   MAYO5               yes     yes     -    -
+  209   FALCON1024          yes     yes     -    -
+  210   SNOVA37_17_2        yes     yes     -    -
+  211   SNOVA25_8_3         yes     yes     -    -
+  212   MLDSA65             yes     yes     -    -
+  213   MLDSA87             yes     yes     -    -
+  214   CROSSRSDPG128SMALL  yes     yes     -    -

@@ -28,10 +28,13 @@ func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {
 		return fmt.Errorf("zone %s does not allow updates or signing", zd.ZoneName)
 	}
 
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil {
-		return err
-	}
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return zd.publishDnskeyRRsLocked(dak)
+}
+
+func (zd *ZoneData) publishDnskeyRRsLocked(dak *DnssecKeys) error {
+	apex := zd.stagedOwner(zd.ZoneName)
 	if apex == nil {
 		return fmt.Errorf("PublishDnskeyRRs: zone apex %q not found", zd.ZoneName)
 	}
@@ -99,7 +102,7 @@ func (zd *ZoneData) PublishDnskeyRRs(dak *DnssecKeys) error {
 		RRs: publishkeys,
 	}
 
-	apex.RRtypes.Set(dns.TypeDNSKEY, dnskeys)
+	zd.stageRRsetLocked(zd.ZoneName, dnskeys)
 
 	return nil
 }

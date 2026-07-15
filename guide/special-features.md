@@ -5,21 +5,25 @@ authoritative and recursive DNS service.
 
 ## Contents
 
-1. **Automatic Delegation Synchronization** -- Keeping parent
-   zone delegation data in sync with child zone changes.
-2. **DNS Transport Signaling** -- Enabling resolvers to
-   discover and use encrypted transports (DoT, DoQ, DoH)
-   when communicating with authoritative servers.
-3. **Experimental Record Types** -- DSYNC, DELEG, TSYNC, and
-   the records that tdns defines as infrastructure for other
-   components (HSYNC3, HSYNCPARAM, JWK, CHUNK).
-4. **Post-Quantum Algorithm Support** -- ML-DSA, SLH-DSA,
-   Falcon, MAYO and SNOVA for both SIG(0) and DNSSEC, via
-   the dnssec-algorithms registry on top of a forked
-   miekg/dns.
-5. **Automatic Key Rollover** -- Pointer to the dedicated
-   [key-rollover](key-rollover.md) guide and its
-   [timing-equations](rollover-timing-equations.md)
+1. [**Automatic Delegation Synchronization**](#1-automatic-delegation-synchronization)
+   -- Keeping parent zone delegation data in sync with child
+   zone changes.
+2. [**DNS Transport Signaling**](#2-dns-transport-signaling)
+   -- Enabling resolvers to discover and use encrypted
+   transports (DoT, DoQ, DoH) when communicating with
+   authoritative servers.
+3. [**Experimental Record Types**](#3-experimental-record-types)
+   -- DSYNC, DELEG, TSYNC, and the records that tdns defines
+   as infrastructure for other components (HSYNC3,
+   HSYNCPARAM, JWK, CHUNK).
+4. [**Post-Quantum Algorithm Support**](pq-dnssec.md)
+   -- ML-DSA, SLH-DSA, Falcon, MAYO and SNOVA for both SIG(0)
+   and DNSSEC, via the dnssec-algorithms registry on top of a
+   forked miekg/dns. **(Moved to its own guide,
+   [pq-dnssec.md](pq-dnssec.md).)**
+5. [**Automatic Key Rollover**](key-rollover.md)
+   -- The dedicated [key-rollover](key-rollover.md) guide and
+   its [timing-equations](rollover-timing-equations.md)
    companion. The engine reuses the delegation-sync
    transports from §1 and the SIG(0) PQ support from §4.
 
@@ -566,160 +570,18 @@ that uses it is implemented in
 
 ## 4. Post-Quantum Algorithm Support
 
-TDNS supports post-quantum (PQ) signature algorithms for
-both DNSSEC (RRSIG over RRsets) and SIG(0) (transaction
-signatures on DNS UPDATE). The same algorithm and key can
-be used in either role: a SIG(0) MLDSA44 key signing a
-delegation UPDATE goes through exactly the same code path
-as an MLDSA44 ZSK signing an RRset.
+Post-quantum (PQ) DNSSEC and SIG(0) support has moved to its own guide:
+**[pq-dnssec.md](pq-dnssec.md)**. It covers the three-layer architecture
+(forked miekg/dns + the `dnssec-algorithms` module + generated
+compile-time registration), the supported algorithms and their KSK/ZSK
+suitability, per-platform builds, the `algs.list`-based registration
+model, the `dns.Algorithm` interface, and PQ policy/rollover.
 
-PQ support rests on three pieces:
-
-- A small **fork of miekg/dns** that adds a pluggable
-  algorithm registry to the otherwise-hardcoded dispatch
-  in `dnssec.go`, `sig0.go`, key parsing and key
-  generation.
-- The **dnssec-algorithms** wrapper module, where each PQ
-  algorithm is implemented as a self-contained subpackage
-  that registers itself on `init()`.
-- A **compile-time registration model** in applications --
-  an app gets the algorithms it imports, nothing more.
-
-
-### 4.1 Supported algorithms
-
-The following PQ algorithms are implemented under
-[dnssec-algorithms](https://github.com/johanix/dnssec-algorithms)
-(local clone at `/Users/johani/src/git/tdns-project/dnssec-algorithms`):
-
-| Algorithm           | DNSKEY # | Status        | Backend          |
-|---------------------|---------:|---------------|------------------|
-| ML-DSA-44 (FIPS 204)|      199 | Final         | CIRCL (pure Go)  |
-| SLH-DSA-128s (FIPS 205) | 200 | Final         | CIRCL (pure Go)  |
-| Falcon-512          |      201 | Draft         | liboqs (cgo)     |
-| MAYO-1              |      202 | NIST onramp   | liboqs (cgo)     |
-| SNOVA-24_5_4        |      203 | NIST onramp   | liboqs (cgo)     |
-
-DNSKEY algorithm codes 199-203 are in the IANA-Unassigned
-range and are coordinated only inside this project. They
-**will** change when the IETF assigns codepoints; treat
-them as experimental.
-
-CIRCL-backed algorithms (MLDSA, SLH-DSA) build with the
-standard Go toolchain. liboqs-backed algorithms require a
-working liboqs C library plus cgo.
-
-
-### 4.2 The forked miekg/dns
-
-The pluggable registry lives on the `algorithm-registry`
-branch of `github.com/johanix/dns`. Every Go module in
-the project that wants PQ support carries a `replace`
-directive:
-
-```
-replace github.com/miekg/dns =>
-    github.com/johanix/dns v0.0.0-20260515091838-3300006a8466
-```
-
-(version pseudo-tag will drift; use whatever is current in
-`dnssec-algorithms/go.mod`).
-
-What the fork changes: upstream miekg/dns has roughly six
-hardcoded `switch alg {}` sites -- in `dnssec.go` (sign,
-verify), `sig0.go`, the keyscan parser, and `Generate`.
-Each of these grows an extra default arm that consults a
-process-wide registry, so an algorithm that isn't built in
-can still be signed, verified, generated, parsed and
-serialised by anyone holding the new
-`dns.Algorithm` interface. The design and rationale are
-documented in
-[`tdns/docs/2026-05-13-miekg-dns-pluggable-algorithms-proposal.md`](../docs/2026-05-13-miekg-dns-pluggable-algorithms-proposal.md).
-
-The `dns.Algorithm` interface each algorithm implements:
-
-```go
-type Algorithm interface {
-    Name() string                  // BIND private-key label
-    Hash() crypto.Hash             // 0 for identity-hash PQ algs
-    Generate(bits int) (crypto.PrivateKey, error)
-    PublicKeyFromWire(buf []byte) (crypto.PublicKey, error)
-    PublicKeyToWire(pub crypto.PublicKey) ([]byte, error)
-    ReadPrivateKey(fields map[string]string) (crypto.PrivateKey, error)
-    PrivateKeyToString(priv crypto.PrivateKey) string
-    Verify(pub crypto.PublicKey, hashed, sig []byte) error
-}
-```
-
-Signing goes through Go's standard `crypto.Signer` --
-each PQ key type implements it, so `SignMsg` and
-`SignRRset` in [tdns/v2/sign.go](../v2/sign.go) need no
-special-casing.
-
-
-### 4.3 The dnssec-algorithms wrapper
-
-`dnssec-algorithms` is one Go module with one subpackage
-per algorithm: `mldsa44`, `slhdsa128s`, `falcon512`,
-`mayo1`, `snova24_5_4`. Each subpackage implements
-`dns.Algorithm` for one algorithm and registers itself in
-its `init()` function:
-
-```go
-// dnssec-algorithms/mldsa44/mldsa44.go
-func init() {
-    dns.RegisterAlgorithm(199, New())
-}
-```
-
-This pattern -- side-effect registration via blank import
--- is borrowed from Go's image and database/sql packages.
-It means the wrapper module itself never has to know which
-algorithms exist; each subpackage stands on its own.
-
-CIRCL-backed packages have no extra build requirements.
-liboqs-backed packages will only compile and register if
-the liboqs headers and library are present at build time
-and cgo is enabled.
-
-
-### 4.4 Registering algorithms in an application
-
-Applications get exactly the algorithms they `import`.
-There is **no** runtime configuration, **no** dynamic
-loading and **no** "enable everything" fallback. To use
-ML-DSA-44 in tdns-auth, the application's main package
-must include a blank import:
-
-```go
-import (
-    _ "github.com/johanix/dnssec-algorithms/mldsa44"
-    _ "github.com/johanix/dnssec-algorithms/slhdsa128s"
-    // _ "github.com/johanix/dnssec-algorithms/falcon512" // requires liboqs
-)
-```
-
-The blank import triggers the subpackage's `init()`, which
-calls `dns.RegisterAlgorithm`. Once that has happened, all
-the usual code paths -- `DNSKEY.Generate(0)`, `SignMsg`,
-`SignRRset`, `RRSIG.Verify`, the keystore loader and the
-BIND key-file parser -- dispatch through the registry
-automatically. The application code itself doesn't change.
-
-The tdns-cli CLI exposes a static list of algorithm names
-([tdns/v2/cli/algorithms.go](../v2/cli/algorithms.go))
-that controls tab-completion and validation for
-`--algorithm` flags. If you add a new algorithm via blank
-import, also add its CLI name there so operators can
-select it.
-
-**Rule of thumb:** if you're building a tdns binary and
-you want it to be able to *create* or *use* PQ keys,
-import the subpackage. If you only need to *parse and
-verify* PQ-signed RRsets received from elsewhere, you
-still need to import the subpackage -- verification goes
-through the same registry as everything else.
-
+> The material that used to live here is superseded by that guide. In
+> particular the old "blank import" registration model and the
+> `dns.Algorithm` interface signature described in earlier revisions of
+> this section are **out of date** — see pq-dnssec.md for the current
+> `algs.list`/generator model and the correct interface.
 
 
 ## 5. Automatic Key Rollover

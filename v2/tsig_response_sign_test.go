@@ -10,10 +10,16 @@ import (
 type fakeTsigRW struct {
 	tsigStatus error
 	written    *dns.Msg
+	network    string
 }
 
-func (f *fakeTsigRW) LocalAddr() net.Addr       { return nil }
-func (f *fakeTsigRW) RemoteAddr() net.Addr      { return nil }
+func (f *fakeTsigRW) LocalAddr() net.Addr { return nil }
+func (f *fakeTsigRW) RemoteAddr() net.Addr {
+	if f.network == "" {
+		return stubNetAddr{network: "tcp"}
+	}
+	return stubNetAddr{network: f.network}
+}
 func (f *fakeTsigRW) WriteMsg(m *dns.Msg) error { f.written = m; return nil }
 func (f *fakeTsigRW) Write([]byte) (int, error) { return 0, nil }
 func (f *fakeTsigRW) Close() error              { return nil }

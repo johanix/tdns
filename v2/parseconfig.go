@@ -200,6 +200,9 @@ type deprecatedConfigKey struct {
 //   - Renamed/moved a LEAF that can appear under many parents
 //     (x: → y: under each policy)? Add
 //     {match: ".oldleaf", advice: "`oldleaf` moved to ...; see <doc>"}.
+//     A non-exact entry is matched against the END of the unused path, so it
+//     fires on the leaf itself and not on a valid block of the same name that
+//     merely happens to contain a typo'd child.
 //
 // Keep advice concrete: name the new location and, ideally, the change date
 // or doc so an operator can find the migration.
@@ -219,6 +222,17 @@ var deprecatedConfigKeys = []deprecatedConfigKey{
 	// with `default` required.
 	{match: ".sigvalidity",
 		advice: "per-key `sigvalidity:` is now a policy-level subtree `sigvalidity: { default, dnskey, ds }` (default required)"},
+	{match: ".sig-validity",
+		advice: "`sig-validity:` is spelled `sigvalidity:` and is a policy-level subtree `{ default, dnskey, ds }` (default required), not a key under ksk:/zsk:"},
+	// Zone-level leaves whose misspelling silently disables the feature: an
+	// unrecognized dnssec_policy/dnssec-policy leaves the zone with no policy,
+	// which then rejects online-signing/inline-signing at validation.
+	{match: ".dnssec_policy",
+		advice: "zone key is `dnssecpolicy:` (one word, no underscore); `dnssec_policy:` is ignored, leaving the zone unsigned"},
+	{match: ".dnssec-policy",
+		advice: "zone key is `dnssecpolicy:` (one word, no hyphen); `dnssec-policy:` is ignored, leaving the zone unsigned"},
+	{match: ".multi_signer",
+		advice: "zone key is `multisigner:` (one word, no underscore); `multi_signer:` is ignored"},
 }
 
 // classifyUnusedConfigKeys splits mapstructure's unused-key list into keys
@@ -232,7 +246,13 @@ func classifyUnusedConfigKeys(unused []string) (deprecated []deprecatedConfigKey
 		for i := range deprecatedConfigKeys {
 			d := &deprecatedConfigKeys[i]
 			ml := strings.ToLower(d.match)
-			if (d.exact && lk == ml) || (!d.exact && strings.Contains(lk, ml)) {
+			// A non-exact entry names a deprecated LEAF (".oldleaf") that may sit
+			// under many parents, so it must match the END of the path. Matching
+			// anywhere in the path would also fire on a valid parent block: a typo
+			// inside the (valid) `sigvalidity:` subtree reports as
+			// "dnssec.policies[p].SigValidity.defualt", which contains
+			// ".sigvalidity" but is a misspelled `default`, not a deprecated key.
+			if (d.exact && lk == ml) || (!d.exact && strings.HasSuffix(lk, ml)) {
 				hit = d
 				break
 			}
@@ -271,9 +291,18 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// mapstructure, and mapstructure ignores the yaml.Unmarshaler interface.
 	var md mapstructure.Metadata
 	decoderConfig := &mapstructure.DecoderConfig{
-		TagName:  "yaml",
-		Result:   conf,
-		Metadata: &md,
+		TagName: "yaml",
+		Result:  conf,
+		// Replace, don't merge. Result is the long-lived conf, reused across
+		// reloads, and ParseZones writes template-expanded options/policy back
+		// into conf.Zones[i] (*zconf = updated). Without ZeroFields, a reload
+		// merges the new zones list into the stale slice, so a zone whose YAML
+		// omits a field silently inherits a former slot-neighbour's value —
+		// e.g. a plain secondary gaining online-signing + a dnssecpolicy. It
+		// also drops Templates/Policies deleted from the config. Absent keys are
+		// still skipped, so runtime state in conf.Internal is untouched.
+		ZeroFields: true,
+		Metadata:   &md,
 		DecodeHook: mapstructure.ComposeDecodeHookFunc(
 			stringToPeerConfHook(),
 			stringToAclEntryHook(),
@@ -753,6 +782,14 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			continue
 		}
 
+		publishCadence, err := parsePublishCadence(zconf.PublishCadence)
+		if err != nil {
+			lgConfig.Error("zone publish-cadence invalid, zone in error state", "zone", zname, "err", err)
+			zd.SetError(ConfigError, "publish-cadence: %v", err)
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+
 		lgConfig.Debug("checking DNSSEC policy", "zone", zname)
 		// dump.P(zconf)
 
@@ -908,6 +945,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 
 		zdp.mu.Lock()
 		zdp.Options = newOpts
+		zdp.publishCadence = publishCadence
 		zdp.mu.Unlock()
 
 		invokeOptionHandlers(zname, options)
@@ -976,7 +1014,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// policy/kasp edits on reload refresh DnssecError/Warning state.
 		if options[OptOnlineSigning] || options[OptInlineSigning] {
 			if zdp.DnssecPolicy != nil {
-				UpdateSigValidityFloor(zdp, zdp.DnssecPolicy, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm)
+				UpdateSigValidityFloor(zdp, zdp.DnssecPolicy, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm, false)
 			}
 		}
 
@@ -1486,6 +1524,10 @@ func (conf *Config) parseDnssecConfig() error {
 			continue
 		}
 		if err := validateSplitAlgorithm(name, kskAlg, zskAlg, conf.Internal.SplitAlgorithms); err != nil {
+			markBroken(err.Error())
+			continue
+		}
+		if err := validateRoleCapabilities(name, kskAlg, zskAlg); err != nil {
 			markBroken(err.Error())
 			continue
 		}

@@ -78,38 +78,50 @@ rollover settings.
 
 ```yaml
 zones:
-   example.com.:
-      dnssec-policy: production-weekly
+   - name:         example.com.
+     dnssecpolicy: production-weekly
 
-dnssecpolicies:
-   production-weekly:
-      algorithm: ecdsap256sha256
-      mode:      ksk-zsk
-      ksk:
-         lifetime:     7d
-         sig-validity: 14d
-      zsk:
-         lifetime:     30d
-         sig-validity: 14d
-      rollover:
-         method:                      multi-ds
-         num-ds:                      3
-         parent-agent:                parent.example.net:53
-         ds-publish-delay:            5m
-         max-attempts-before-backoff: 5
-         softfail-delay:              1h
-         dsync-scheme-preference:     auto
-      ttls:
-         dnskey:     1h
-         max_served: 8h
-      clamping:
-         enabled: true
-         margin:  15m
+dnssec:
+   policies:
+      production-weekly:
+         algorithm: ecdsap256sha256
+         mode:      ksk-zsk
+         ksk:
+            lifetime: 7d
+         zsk:
+            lifetime: 30d
+         sigvalidity:
+            default: 14d
+            dnskey:  14d
+         rollover:
+            method:                      multi-ds
+            num-ds:                      3
+            parent-agent:                parent.example.net:53
+            ds-publish-delay:            5m
+            max-attempts-before-backoff: 5
+            softfail-delay:              1h
+            dsync-scheme-preference:     auto
+         ttls:
+            dnskey:     1h
+            max_served: 8h
+         clamping:
+            enabled: true
+            margin:  15m
 ```
+
+Note the shapes: `zones:` is a **list** of entries each with a
+`name:`, the zone's policy reference is spelled
+**`dnssecpolicy:`** (one word), and policies live under
+**`dnssec.policies:`** — not a top-level `dnssecpolicies:`.
+
+Note also that signature validity is a **policy-level
+`sigvalidity:` block keyed by RRtype**, with `default`
+required. It is not a per-key-role setting: `ksk:` and
+`zsk:` carry only `lifetime` and `algorithm`.
 
 Most fields have sensible defaults. The minimal required
 set is `algorithm`, `mode`, `ksk.lifetime`,
-`ksk.sig-validity`, `rollover.method`, and
+`sigvalidity.default`, `rollover.method`, and
 `rollover.parent-agent`. Everything else is either
 derived from `ds-publish-delay` or carries an engine
 default.
@@ -171,9 +183,10 @@ Full reference of policy parameters:
 | `algorithm` | yes | -- | DNSSEC algorithm (e.g. `ECDSAP256SHA256`, `MLDSA44`) |
 | `mode` | no | `ksk-zsk` | `ksk-zsk` or `csk` |
 | `ksk.lifetime` | yes | -- | Rollover cadence (`next = active_at + lifetime`) |
-| `ksk.sig-validity` | yes | -- | RRSIG validity for DNSKEY signatures |
 | `zsk.lifetime` | yes | -- | ZSK cadence (out of scope today; engine does not auto-roll ZSKs) |
-| `zsk.sig-validity` | yes | -- | RRSIG validity for non-DNSKEY signatures |
+| `sigvalidity.default` | yes | -- | RRSIG validity for every RRset without a more specific setting |
+| `sigvalidity.dnskey` | no | `sigvalidity.default` | RRSIG validity for the DNSKEY RRset |
+| `sigvalidity.ds` | no | `sigvalidity.default` | RRSIG validity for DS RRsets this zone publishes |
 | `rollover.method` | yes | `none` | `multi-ds`, `double-signature`, or `none` |
 | `rollover.num-ds` | no | `3` (multi-ds) / `2` (double-sig) | DS pipeline depth |
 | `rollover.parent-agent` | yes if `method != none` | -- | Parent's address for DS queries, `host:port` |
@@ -570,27 +583,29 @@ long-weekend resilience because the testbed is on a local
 network with you watching it.
 
 ```yaml
-dnssecpolicies:
-   testbed-fast:
-      algorithm: ECDSAP256SHA256
-      mode: ksk-zsk
-      ksk:
-         lifetime: 10m
-         sig-validity: 30m
-      zsk:
-         lifetime: 24h
-         sig-validity: 1h
-      rollover:
-         method: multi-ds
-         num-ds: 3
-         parent-agent: 192.0.2.1:53
-         ds-publish-delay: 30s
-      ttls:
-         dnskey: 60s
-         max_served: 300s
-      clamping:
-         enabled: true
-         margin: 60s
+dnssec:
+   policies:
+      testbed-fast:
+         algorithm: ECDSAP256SHA256
+         mode: ksk-zsk
+         ksk:
+            lifetime: 10m
+         zsk:
+            lifetime: 24h
+         sigvalidity:
+            default: 1h      # non-DNSKEY RRsets
+            dnskey:  30m     # DNSKEY RRset
+         rollover:
+            method: multi-ds
+            num-ds: 3
+            parent-agent: 192.0.2.1:53
+            ds-publish-delay: 30s
+         ttls:
+            dnskey: 60s
+            max_served: 300s
+         clamping:
+            enabled: true
+            margin: 60s
 ```
 
 Notes:
@@ -598,7 +613,7 @@ Notes:
 - `ksk.lifetime: 10m` makes the next-scheduled rollover
   fire ten minutes after the current active key became
   active. Your testbed will roll continuously.
-- `ksk.sig-validity: 30m` is much shorter than production
+- `sigvalidity.dnskey: 30m` is much shorter than production
   but appropriate for a local testbed where outages are
   minutes, not days. The engine resigns DNSKEY RRSIGs as
   they approach expiry.
@@ -623,35 +638,37 @@ operational confidence in the rollover machinery, and
 need to survive long weekends without paging.
 
 ```yaml
-dnssecpolicies:
-   production-weekly:
-      algorithm: ECDSAP256SHA256
-      mode: ksk-zsk
-      ksk:
-         lifetime: 7d
-         sig-validity: 14d
-      zsk:
-         lifetime: 30d
-         sig-validity: 14d
-      rollover:
-         method: multi-ds
-         num-ds: 3
-         parent-agent: parent.example.net:53
-         ds-publish-delay: 5m
-         max-attempts-before-backoff: 5
-         softfail-delay: 1h
-      ttls:
-         dnskey: 1h
-         max_served: 8h
-      clamping:
-         enabled: true
-         margin: 15m
+dnssec:
+   policies:
+      production-weekly:
+         algorithm: ECDSAP256SHA256
+         mode: ksk-zsk
+         ksk:
+            lifetime: 7d
+         zsk:
+            lifetime: 30d
+         sigvalidity:
+            default: 14d
+            dnskey:  14d
+         rollover:
+            method: multi-ds
+            num-ds: 3
+            parent-agent: parent.example.net:53
+            ds-publish-delay: 5m
+            max-attempts-before-backoff: 5
+            softfail-delay: 1h
+         ttls:
+            dnskey: 1h
+            max_served: 8h
+         clamping:
+            enabled: true
+            margin: 15m
 ```
 
 Notes:
 
 - `ksk.lifetime: 7d` schedules a rollover every week.
-- `ksk.sig-validity: 14d` with engine-default
+- `sigvalidity.dnskey: 14d` with engine-default
   resign-at-half means RRSIGs always have at least 7
   days remaining. Friday-evening signing failure leaves
   you 7 days of validity in caches -- comfortably more
@@ -680,29 +697,31 @@ rollover rhythm -- perhaps to align with monthly
 maintenance windows.
 
 ```yaml
-dnssecpolicies:
-   production-monthly:
-      algorithm: ECDSAP256SHA256
-      mode: ksk-zsk
-      ksk:
-         lifetime: 30d
-         sig-validity: 14d
-      zsk:
-         lifetime: 90d
-         sig-validity: 14d
-      rollover:
-         method: multi-ds
-         num-ds: 3
-         parent-agent: parent.example.net:53
-         ds-publish-delay: 5m
-         max-attempts-before-backoff: 5
-         softfail-delay: 1h
-      ttls:
-         dnskey: 1h
-         max_served: 8h
-      clamping:
-         enabled: true
-         margin: 15m
+dnssec:
+   policies:
+      production-monthly:
+         algorithm: ECDSAP256SHA256
+         mode: ksk-zsk
+         ksk:
+            lifetime: 30d
+         zsk:
+            lifetime: 90d
+         sigvalidity:
+            default: 14d
+            dnskey:  14d
+         rollover:
+            method: multi-ds
+            num-ds: 3
+            parent-agent: parent.example.net:53
+            ds-publish-delay: 5m
+            max-attempts-before-backoff: 5
+            softfail-delay: 1h
+         ttls:
+            dnskey: 1h
+            max_served: 8h
+         clamping:
+            enabled: true
+            margin: 15m
 ```
 
 The only change from 7.2 is `ksk.lifetime` (30 days vs 7
@@ -712,7 +731,7 @@ expectations, safety margin. The orthogonality of the
 three knobs lets you change cadence without touching the
 rest.
 
-Some operators prefer to bump `ksk.sig-validity` higher
+Some operators prefer to bump `sigvalidity.dnskey` higher
 (to 30d) for monthly cadence as well, on the theory that
 "I'm only checking on this thing monthly so it should
 survive a long absence." That's reasonable but not
@@ -794,7 +813,7 @@ tdns-cli auth keystore dnssec policy validate \
    --file /etc/tdns/tdns-auth.yaml
 ```
 
-This parses every policy under `dnssecpolicies:` and
+This parses every policy under `dnssec.policies:` and
 reports configuration errors (invalid durations, missing
 required fields, cross-field constraint violations)
 without affecting the running daemon. The same validation
@@ -918,15 +937,19 @@ signed) the retired key is removed and its signatures are
 stripped. The engine keeps `standby-zsk-count` standbys
 ready so a roll never waits on key generation.
 
-**Configuration.** The ZSK lifetime and signature validity
-live in the same policy block as the KSK:
+**Configuration.** The ZSK lifetime lives in the same policy
+block as the KSK. Signature validity is not per key role: the
+RRsets a ZSK signs take `sigvalidity.default`.
 
 ```yaml
-   mypolicy:
-      algorithm:   ED25519
-      zsk:
-         lifetime:    2w      # roll cadence (forever = never)
-         sigvalidity: 2h
+dnssec:
+   policies:
+      mypolicy:
+         algorithm: ED25519
+         zsk:
+            lifetime: 2w      # roll cadence (forever = never)
+         sigvalidity:
+            default: 2h       # RRSIG validity for the RRsets the ZSK signs
 ```
 
 `zsk.lifetime: forever` disables the scheduled roll; you can

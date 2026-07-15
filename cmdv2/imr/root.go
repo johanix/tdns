@@ -22,6 +22,7 @@ var cfgFile, cfgFileUsed string
 var LocalConfig string
 
 var cliflag bool
+var showVersion bool
 var appCtx context.Context
 var appCancel context.CancelFunc
 
@@ -31,6 +32,8 @@ var rootCmd = &cobra.Command{
 	Long:  `A DNS lookup tool with both command-line and interactive interfaces`,
 	Args:  cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
+		// --version is handled in initImr (via cobra.OnInitialize, which
+		// runs before Run); see the note there.
 		if cliflag {
 			cli.StartInteractiveMode() // old go-prompt version
 			// StartInteractiveMode() // old go-prompt version
@@ -66,6 +69,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d",
 		false, "debug output")
 	rootCmd.PersistentFlags().BoolVarP(&cliflag, "cli", "", false, "CLI mode")
+	rootCmd.PersistentFlags().BoolVar(&showVersion, "version", false, "print version and supported algorithms, then exit")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v",
 		false, "verbose output")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.ShowHeaders, "headers", "H",
@@ -129,8 +133,16 @@ func initConfig() {
 
 // initImr initializes the application, prepares configuration, sets up the IMR API router, and starts the IMR service.
 //
-// It receives a context that should be cancelled on SIGINT or SIGTERM (handled in main), calls cli.Conf.MainInit with the default IMR config file, and aborts via tdns.Shutdowner on initialization errors. It installs a SIGHUP watcher that triggers cli.Conf.ParseZones to reload zones, logs reload errors, and then creates the API router with cli.Conf.SetupSimpleAPIRouter. Finally it starts the IMR via cli.Conf.StartImr and invokes tdns.Shutdowner on any fatal startup errors.
+// It receives a context that should be cancelled on SIGINT or SIGTERM (handled in main), calls cli.Conf.MainInit with the config file initConfig resolved (--config, else the default), and aborts via tdns.Shutdowner on initialization errors. It installs a SIGHUP watcher that triggers cli.Conf.ParseZones to reload zones, logs reload errors, and then creates the API router with cli.Conf.SetupSimpleAPIRouter. Finally it starts the IMR via cli.Conf.StartImr and invokes tdns.Shutdowner on any fatal startup errors.
 func initImr() {
+	// --version must be answered before any startup work. initImr runs via
+	// cobra.OnInitialize, i.e. BEFORE rootCmd.Run, and it performs the full
+	// MainInit + StartImr, so a --version check in Run would be too late
+	// (the server would already be starting). Handle it here, first.
+	if showVersion {
+		tdns.PrintVersionAndExit()
+	}
+
 	// Get context from cobra command context
 	appCtx = rootCmd.Context()
 	if appCtx == nil {
@@ -145,10 +157,16 @@ func initImr() {
 	appCancel = cancel
 
 	if tdns.Globals.Debug {
-		fmt.Printf("initImr: Calling conf.MainInit(\"\") // Empty string means derive from Globals.App.Name\n")
+		fmt.Printf("initImr: Calling conf.MainInit(%q)\n", cfgFileUsed)
 	}
 
-	err := cli.Conf.MainInit(appCtx, "") // Empty string means derive from Globals.App.Name
+	// Hand MainInit the file initConfig actually read: --config if given,
+	// otherwise tdns.DefaultImrCfgFile. MainInit does not parse flags for
+	// AppTypeImr (see the comment there), so it cannot discover --config on
+	// its own; passing "" would make it fall back to the default file and
+	// decode that over the config the user asked for. cobra.OnInitialize
+	// runs initConfig before initImr, so cfgFileUsed is already set.
+	err := cli.Conf.MainInit(appCtx, cfgFileUsed)
 	if err != nil {
 		tdns.Shutdowner(&cli.Conf, fmt.Sprintf("Error initializing tdns-imr: %v", err))
 	}

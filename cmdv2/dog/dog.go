@@ -20,6 +20,8 @@ import (
 	"github.com/johanix/tdns/v2"
 	core "github.com/johanix/tdns/v2/core"
 	edns0 "github.com/johanix/tdns/v2/edns0"
+	dogopts "dog/internal/options"
+	dogtransport "dog/internal/transport"
 
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
@@ -34,6 +36,7 @@ var server string
 var cfgFile string
 var trustAnchorFile string // -k / --trust-anchor
 var tsigKeyFlag string      // -y / --tsig : [algorithm:]name:secret (dig-compatible)
+var showVersion bool        // --version : print version + supported algorithms, then exit
 
 var options = make(map[string]string, 2)
 
@@ -52,7 +55,7 @@ var rootCmd = &cobra.Command{
 	Long: `dog is a CLI utility used issue DNS queries and present the result.
 	
 	Options:
-		+DNSSEC: Set the DO (DNSEC OK) bit in queries
+		+DNSSEC or +DO: Set the DO (DNSSEC OK) bit in queries
 		+CD: Set the CD (Checking Disabled) bit in queries
 		+COMPACT: Set the COMPACT bit in queries (for compact denial of existence proofs)
 		+TCP: Force TCP transport
@@ -60,27 +63,28 @@ var rootCmd = &cobra.Command{
 		+HTTPS: Force HTTPS transport
 		+QUIC: Force QUIC transport
 		+WIDTH=N: Set the width of the output to N characters
+		+BUFsize=N: Set the EDNS(0) UDP payload size (dig-compatible; +BUFSIZ=N accepted)
 		+OPCODE=QUERY|NOTIFY|UPDATE: Set the opcode of the query
 		+OTS=opt_in|opt_out: Set the OTS (transport signaling) EDNS(0)option
 		+ER=agent.domain: Add EDNS(0) Error Reporting option with agent domain (RFC9567)
-		+DO_BIT: Set the DO (DNSEC OK) bit
 		+DELEG: Set the DELEG bit in queries
 		+PRIVACY or +PR: Set the PR (Privacy Requested) bit in queries (requires encrypted transport)
 		+MULTI: Present RRs in multi-line format
 		+SHORT: Only print the RDATA of the Answer RRset (dig-compatible; same as --short)
 		+SIGCHASE or +SC: Walk and verify the DNSSEC chain for the qname/qtype, emitting a per-link verdict tree. Server must be a recursive resolver. Trust anchors come from --trust-anchor, the IMR config, or the compiled-in root KSKs.
+		+ALGCHASE or +AC: Like +SIGCHASE, but also annotate each algorithm number in the chain with its algorithm name (e.g. "alg=13 (ECDSAP256SHA256)"). Implies +SIGCHASE.
 	`,
 
 	Run: func(cmd *cobra.Command, args []string) {
+		if showVersion {
+			tdns.PrintVersionAndExit()
+		}
 
 		var cleanArgs []string
 		var err error
 		var serial uint32
 
 		for _, arg := range args {
-			if tdns.Globals.Debug {
-				fmt.Printf("processing arg: %s, options: %+v\n", arg, options)
-			}
 			if strings.HasPrefix(arg, "@") || strings.Contains(arg, "://") {
 				serverArg := arg
 				if strings.HasPrefix(arg, "@") {
@@ -113,9 +117,6 @@ var rootCmd = &cobra.Command{
 			}
 
 			if strings.HasPrefix(ucarg, "+") {
-				if tdns.Globals.Debug {
-					fmt.Printf("processing dog option: %s\n", ucarg)
-				}
 				options, err = ProcessOptions(options, ucarg)
 				if err != nil {
 					fmt.Printf("Error: %v\n", err)
@@ -244,7 +245,7 @@ var rootCmd = &cobra.Command{
 					fmt.Fprintf(os.Stderr, "Error: chase failed: %v\n", err)
 					os.Exit(1)
 				}
-				tdns.RenderChain(result, os.Stdout)
+				tdns.RenderChain(result, os.Stdout, options["algchase"] == "true")
 				continue
 			}
 
@@ -262,13 +263,13 @@ var rootCmd = &cobra.Command{
 
 			switch rrtype {
 			case dns.TypeAXFR, dns.TypeIXFR:
-				if options["transport"] == "Do53" {
+				if dogtransport.PlainDo53(options["transport"]) {
 					upstream := net.JoinHostPort(options["server"], options["port"])
 					if err := tdns.ZoneTransferPrint(qname, upstream, serial, rrtype, options, tsigName, tsigAlgo, tsigSecret); err != nil {
 						os.Exit(1)
 					}
 				} else {
-					fmt.Printf("Zone transfer only supported for transport Do53 (TCP), this is %s\n", options["transport"])
+					fmt.Printf("Zone transfer only supported over Do53/TCP, not %s\n", options["transport"])
 					os.Exit(1)
 				}
 
@@ -287,14 +288,17 @@ var rootCmd = &cobra.Command{
 				if options["cd_bit"] == "true" {
 					m.MsgHdr.CheckingDisabled = true
 				}
-				// do_bit = options["do_bit"] == "true"
-				// m.SetEdns0(4096, do_bit)
+				ednsUDPSize, err := dogopts.EDNSUDPSizeFromMap(options)
+				if err != nil {
+					fmt.Printf("Error: %v\n", err)
+					os.Exit(1)
+				}
 				opt := &dns.OPT{
 					Hdr: dns.RR_Header{
 						Name:   ".",
 						Rrtype: dns.TypeOPT,
-						Class:  4096, // This is the UDP buffer size
-						Ttl:    0,    // Extended RCODE and flags
+						Class:  ednsUDPSize, // EDNS UDP payload size (RFC 6891)
+						Ttl:    0,             // Extended RCODE and flags
 					},
 				}
 				if options["do_bit"] == "true" {
@@ -336,9 +340,6 @@ var rootCmd = &cobra.Command{
 				}
 				m.Extra = append(m.Extra, opt)
 
-				if tdns.Globals.Debug {
-					fmt.Printf("*** Outbound DNS message: %s\n", m.String())
-				}
 				start := time.Now()
 
 				server, ok := options["server"]
@@ -412,6 +413,15 @@ var rootCmd = &cobra.Command{
 					}
 				}
 
+				if showDNSMessageTrace() {
+					fmt.Println("*** Outbound DNS message:")
+					out := m.String()
+					fmt.Print(out)
+					if !strings.HasSuffix(out, "\n") {
+						fmt.Println()
+					}
+				}
+
 				client := core.NewDNSClient(t, options["port"], tlsConfig, clientOpts...)
 				res, _, err := client.Exchange(m, server, false) // FIXME: duration is always zero
 				if err == nil && res != nil && res.Truncated && t == core.TransportDo53 && !forceTCP {
@@ -445,6 +455,10 @@ var rootCmd = &cobra.Command{
 					fmt.Printf("Error from %s: %v\n", server, err)
 					fmt.Printf("*** This is what we got: %+v\n", res)
 					os.Exit(1)
+				}
+				if showDNSMessageTrace() {
+					fmt.Println()
+					fmt.Println("*** Incoming DNS response:")
 				}
 				tdns.MsgPrint(res, server, elapsed, short, options)
 				if tsigSigned && res != nil {
@@ -485,6 +499,7 @@ func init() {
 
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v", false, "Verbose mode")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "Debugging output")
+	rootCmd.PersistentFlags().BoolVar(&showVersion, "version", false, "print version and supported algorithms, then exit")
 	rootCmd.PersistentFlags().BoolVarP(&short, "short", "", false, "Only list RRs that are part of the Answer section")
 	rootCmd.PersistentFlags().StringVarP(&port, "port", "p", "53", "Port to send DNS query to")
 	rootCmd.PersistentFlags().StringVarP(&trustAnchorFile, "trust-anchor", "k", "", "Path to DNSSEC trust anchor file (zone-file format DS or DNSKEY records). Used by +sigchase. Default: read from "+tdns.DefaultImrCfgFile+" or fall back to compiled-in root KSK DS records.")
@@ -515,6 +530,12 @@ func parseTsigFlag(s string) (name, algo, secret string, err error) {
 		return "", "", "", fmt.Errorf("-y must be [algorithm:]name:secret")
 	}
 	return name, algo, secret, nil
+}
+
+// showDNSMessageTrace enables outbound/incoming DNS message printouts for
+// --verbose and --debug (the latter also prints lower-level parse tracing).
+func showDNSMessageTrace() bool {
+	return tdns.Globals.Verbose || tdns.Globals.Debug
 }
 
 func ProcessOptions(options map[string]string, ucarg string) (map[string]string, error) {
@@ -554,6 +575,14 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 		// RRset signature) link and the final leaf RRSIG against the
 		// deepest zone's keys.
 		options["sigchase"] = "true"
+		return options, nil
+	case "+ALGCHASE", "+ALGCHA", "+AC":
+		// Annotate each algorithm number in the +sigchase chain output
+		// with its algorithm name (from the in-process registry), e.g.
+		// "alg=214 (CROSSRSDPG128SMALL)". Meaningless on its own — it
+		// enriches what +sigchase already walks — so it implies +sigchase.
+		options["sigchase"] = "true"
+		options["algchase"] = "true"
 		return options, nil
 	case "+TCP":
 		// A pre-existing "Do53" is the default ParseServer writes when
@@ -655,6 +684,17 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 				return options, nil
 			}
 			return nil, fmt.Errorf("Error: +WIDTH option requires a valid integer width (e.g., +WIDTH=100)")
+		}
+
+		if val, ok := dogopts.ParseBufsizeFlag(ucarg); ok {
+			if val == "" {
+				return nil, fmt.Errorf("Error: +bufsize requires a value (e.g. +bufsize=512)")
+			}
+			if _, err := dogopts.ParseEDNSUDPSize(val); err != nil {
+				return nil, fmt.Errorf("Error: %v", err)
+			}
+			options["bufsize"] = val
+			return options, nil
 		}
 
 		return nil, fmt.Errorf("Error: Unknown option: %s", ucarg)
@@ -783,11 +823,6 @@ func ParseServer(serverArg string, options map[string]string) (map[string]string
 
 	if strings.HasSuffix(options["server"], "/") {
 		options["server"] = options["server"][:len(options["server"])-1]
-	}
-
-	if tdns.Globals.Debug {
-		fmt.Printf("ParseServer: server: %s, port: %s, transport: %s, path: %s\n",
-			options["server"], options["port"], options["transport"], options["path"])
 	}
 
 	// Basic validation

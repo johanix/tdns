@@ -590,6 +590,16 @@ func APIdebug(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			}
 			resp.CachedRRsets = rrsets
 
+		case "zone-txlog":
+			if zd, ok := Zones.Get(dp.Zone); ok {
+				pc := zd.pendingChanges()
+				resp.ZoneTxlog = pendingChangesView(pc)
+				resp.Msg = FormatPendingChanges(pc)
+			} else {
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("zone %s is unknown", dp.Zone)
+			}
+
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown command: %s", dp.Command)
 			resp.Error = true

@@ -5,45 +5,11 @@ APPDATE=`date +"%Y-%m-%d-%H:%M"`
 
 GOFLAGS:=-v
 
-# WITH_LIBOQS=1 wires in liboqs-backed PQ algorithms (Falcon-512,
-# MAYO-1, SNOVA-24_5_4) in cmdv2/{agent,auth,imr}. Requires the build
-# host to have liboqs installed (pkgsrc on NetBSD, MacPorts on macOS).
-# Before building, source the env script in this same shell:
-#   . ../../../dnssec-algorithms/liboqs/liboqs-env.sh
-# Default (unset): those algorithms are metadata-only — recognized
-# by name but not usable for sign/verify.
-#
-# WITH_SQISIGN=1 wires in the SQIsign reference C library (SQIsign-I)
-# in cmdv2/{auth,imr}. The knobs are independent — use any combination.
-# The reference library is not packaged anywhere; install it once via
-# dnssec-algorithms/sqisignc/build-sqisign.sh, then source the env
-# script before each `make`:
-#   . ../../../dnssec-algorithms/sqisignc/sqisign-env.sh
-#
-# WITH_QRUOV=1 wires in the QR-UOV round2 reference C library (QR-UOV-I,
-# q=31 L=3) in cmdv2/{auth,imr}. Like SQIsign it is unpackaged; install
-# it once via dnssec-algorithms/qruovc/build-qruov.sh, then source the
-# env script before each `make`:
-#   . ../../../dnssec-algorithms/qruovc/qruov-env.sh
-#
-# The conditional is evaluated in shell rather than via make's ifeq,
-# because GNU make's ifeq/endif and bmake's .if/.endif are not portable
-# to each other. Backtick command substitution works on both.
-WITH_LIBOQS  ?= 0
-WITH_SQISIGN ?= 0
-WITH_QRUOV   ?= 0
-# Compose `-tags a,b` only when at least one knob is set. Backtick
-# command substitution stays portable between GNU make and NetBSD
-# bmake. The body is one shell pipeline that emits each enabled tag
-# on its own line, then joins them with paste so the result is empty
-# when no knob is set (and has no stray leading/trailing comma when
-# exactly one is set). Avoids ${var#prefix} shell-parameter expansion,
-# whose `#` would be eaten by make as a comment delimiter.
-GO_BUILD_TAGS = `{ test "$(WITH_LIBOQS)"  = 1 && echo liboqs ; \
-                   test "$(WITH_SQISIGN)" = 1 && echo sqisign ; \
-                   test "$(WITH_QRUOV)"   = 1 && echo qruov ; } | \
-                 paste -sd, - | \
-                 sed -e 's/^./-tags &/'`
+# PQ algorithm selection is no longer a build-time WITH_* / -tags choice.
+# Each app declares the algorithms it wants in its algs.list; genalgs emits
+# the registration files and the C-library build environment (algs-env.mk),
+# which the app Makefile -includes. See the `generate` rule below and
+# guide/pq-dnssec.md.
 
 GOOS ?= $(shell uname -s | tr A-Z a-z)
 
@@ -56,72 +22,66 @@ all: $(PROG)
 version:
 	/bin/sh ../../utils/make-version.sh $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
 
-build: check-liboqs check-sqisign check-qruov
+# Path to the genalgs binary (built from cmdv2/genalgs). Overridable.
+GENALGS ?= ../genalgs/tdns-genalgs
+
+# Algorithm code generation.
+#
+# The presence and content of algs.list select one of three behaviors:
+#
+#   * No algs.list file at all: the app wants only the classical built-in
+#     algorithms. genalgs is NOT run and dnssec-algorithms is NOT needed
+#     at all — tdns builds fully standalone. This is the default for any
+#     app that has not opted into the PQ algorithm registry.
+#
+#   * algs.list present but empty (comments/blank lines only): the app
+#     wants the full name<->codepoint<->role metadata for every registry
+#     algorithm, but links no real implementation (a metadata-only app,
+#     e.g. a query/validation tool). genalgs runs and emits metadata_algs.go
+#     (all names) and an empty registered_algs.go. dnssec-algorithms is
+#     needed (for the registry table).
+#
+#   * algs.list present with entries: the app links a real implementation
+#     for each named algorithm. genalgs emits metadata for all algorithms
+#     plus Register calls for the selected ones, and (for C-backed algs)
+#     the library build env.
+#
+# For the latter two (algs.list exists), genalgs is re-run whenever
+# registered_algs.go is missing or older than algs.list, using the
+# dnssec-algorithms path recorded as ALGREPO in the generated algs-env.mk.
+# If ALGREPO is unknown (no algs-env.mk yet — the first build), make stops
+# with a message telling the user to run genalgs once with --algrepo.
+#
+# ALGREPO comes from `-include algs-env.mk` in the app Makefile (below
+# this include).
+build: generate
 	@test -f version.go || /bin/sh ../../utils/make-version.sh "unknown" "unknown" $(PROG)
-	$(GO) build $(GOFLAGS) $(GO_BUILD_TAGS) -o ${PROG}
+	$(GO) build $(GOFLAGS) -o ${PROG}
 
-# Pre-flight check: when WITH_LIBOQS=1, verify pkg-config can find
-# liboqs-go.pc and print actionable guidance otherwise. No-op when
-# WITH_LIBOQS is unset. The conditional runs in shell to stay portable
-# between GNU make and bmake.
-check-liboqs:
-	@if [ "$(WITH_LIBOQS)" = "1" ]; then \
-	   pkg-config --exists liboqs-go 2>/dev/null || { \
-	      echo ""; \
-	      echo "  WITH_LIBOQS=1 was set but pkg-config cannot find liboqs-go."; \
-	      echo "  Source the env script in this shell first:"; \
-	      echo ""; \
-	      echo "    . ../../../dnssec-algorithms/liboqs/liboqs-env.sh"; \
-	      echo ""; \
-	      echo "  Then re-run make. See dnssec-algorithms/README.md for"; \
-	      echo "  per-platform liboqs install instructions."; \
-	      echo ""; \
-	      exit 1; \
-	   }; \
-	fi
-
-# Pre-flight check: when WITH_SQISIGN=1, verify pkg-config can find
-# sqisign.pc and print actionable guidance otherwise. Symmetric to
-# check-liboqs above.
-check-sqisign:
-	@if [ "$(WITH_SQISIGN)" = "1" ]; then \
-	   pkg-config --exists sqisign 2>/dev/null || { \
-	      echo ""; \
-	      echo "  WITH_SQISIGN=1 was set but pkg-config cannot find sqisign."; \
-	      echo "  Source the env script in this shell first:"; \
-	      echo ""; \
-	      echo "    . ../../../dnssec-algorithms/sqisignc/sqisign-env.sh"; \
-	      echo ""; \
-	      echo "  If no install is found, build the reference C library:"; \
-	      echo ""; \
-	      echo "    sh ../../../dnssec-algorithms/sqisignc/build-sqisign.sh"; \
-	      echo ""; \
-	      exit 1; \
-	   }; \
-	fi
-
-# Pre-flight check: when WITH_QRUOV=1, verify pkg-config can find
-# qruov.pc and print actionable guidance otherwise. Symmetric to
-# check-sqisign above.
-check-qruov:
-	@if [ "$(WITH_QRUOV)" = "1" ]; then \
-	   pkg-config --exists qruov 2>/dev/null || { \
-	      echo ""; \
-	      echo "  WITH_QRUOV=1 was set but pkg-config cannot find qruov."; \
-	      echo "  Source the env script in this shell first:"; \
-	      echo ""; \
-	      echo "    . ../../../dnssec-algorithms/qruovc/qruov-env.sh"; \
-	      echo ""; \
-	      echo "  If no install is found, build the reference C library:"; \
-	      echo ""; \
-	      echo "    sh ../../../dnssec-algorithms/qruovc/build-qruov.sh"; \
-	      echo ""; \
-	      exit 1; \
-	   }; \
-	fi
+generate:
+	@if [ ! -f algs.list ]; then \
+	   : "no algs.list -> standalone build, genalgs not run"; \
+	 elif [ -f registered_algs.go ] && [ ! algs.list -nt registered_algs.go ] && [ ! algs.list -nt algs-env.mk ]; then \
+	   : "generated files are current"; \
+	 elif [ -n "$(ALGREPO)" ]; then \
+	   echo "  algs.list changed (or no generated files); running genalgs --algrepo $(ALGREPO)"; \
+	   $(GENALGS) --algrepo "$(ALGREPO)" --list algs.list --out . || exit 1; \
+	 else \
+	   echo ""; \
+	   echo "  $(PROG): algs.list is present but the generated files are missing"; \
+	   echo "  or stale, and the dnssec-algorithms location is unknown."; \
+	   echo "  Run genalgs once, pointing --algrepo at your dnssec-algorithms checkout:"; \
+	   echo ""; \
+	   echo "    $(GENALGS) --algrepo <path-to-dnssec-algorithms> --list algs.list --out ."; \
+	   echo ""; \
+	   echo "  That generates registered_algs.go/metadata_algs.go and records the"; \
+	   echo "  path in algs-env.mk so future 'make' runs regenerate automatically."; \
+	   echo ""; \
+	   exit 1; \
+	 fi
 
 netbsd:
-	GOOS=netbsd GOARCH=amd64 $(GO) build $(GOFLAGS) $(GO_BUILD_TAGS) -o ${PROG}.netbsd
+	GOOS=netbsd GOARCH=amd64 $(GO) build $(GOFLAGS) -o ${PROG}.netbsd
 
 # johaniaws: Sync local tdns source to remote AWS environment.
 # Requires: sshfs mount at ~/sshfs/msigner1
@@ -154,17 +114,33 @@ tdnsnbsd:
 	   echo "TDNS_NBSD_DIR is unset (should be user@host:/dir), rsync not possible" ; \
 	fi
 
+UTILS_DIR := $(dir $(lastword $(MAKEFILE_LIST)))
+TDNS_ROOT := $(UTILS_DIR)..
+
+# Reject direct zone mutation outside the staging allowlist (B3).
+check-no-mutators:
+	@violations=$$(grep -RnE '\.(RRtypes\.Set|Data\.Set)\(' \
+		$(TDNS_ROOT)/v2 $(TDNS_ROOT)/cmdv2 --include='*.go' \
+		| grep -v zone_mutation.go \
+		| grep -v '_test\.go' \
+		| grep -v 'dnsutils\.go' || true); \
+	if [ -n "$$violations" ]; then \
+		echo "mutator Set() calls outside allowlist:"; \
+		echo "$$violations"; \
+		exit 1; \
+	fi
+
 test:
 	$(GO) test -v -cover
 
 # install:
 # 	install -s -b -c ${PROG} /usr/local/bin/
 
-lint:
+lint: check-no-mutators
 	go fmt ./...
 	go vet ./...
 	staticcheck ./...
 	gosec ./...
 	golangci-lint run
 
-.PHONY: build version clean check-liboqs check-sqisign check-qruov
+.PHONY: build generate version clean check-no-mutators

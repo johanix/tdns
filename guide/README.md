@@ -18,6 +18,20 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   tdns-agent, tdns-imr, tdns-cli, dog) with links to
   detailed documentation for each.
 
+- [TDNS Configuration Guide](configuration.md)
+  -- How to configure each application, starting from a
+  minimal working example. Conventions common to all apps
+  (config file location, `include:`, unknown-key warnings,
+  zone quarantining), then per-application pages:
+  [tdns-auth](config-tdns-auth.md) (TSIG keys, the
+  `allow-notify:` / `downstreams:` ACLs, zone declarations
+  and options, the zone template system, the `dnsengine:`
+  block, DNSSEC policies including policy templates,
+  `split_algorithms` and `large_algorithms`),
+  [tdns-imr](config-tdns-imr.md) (trust anchors, stub zones,
+  the `imrengine.tuning.*` knobs) and
+  [tdns-agent](config-tdns-agent.md) (placeholder).
+
 - [TDNS Special Features and Extensions](special-features.md)
   -- Delegation sync (parent side, child side, and the
   agent-as-proxy path for DSYNC-unaware primaries, including
@@ -52,6 +66,14 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   (E1-E13) that the rollover engine must satisfy.
   Companion to the key-rollover guide above; required
   reading when changing engine timing behaviour.
+
+- [Structured Aggressive Testing with tdns-debug](testing.md)
+  -- Developer framework for aggressive correctness testing of a
+  running tdns server: the actor/ledger/checker architecture, the
+  `test churn` zone-snapshot correctness family and its invariants,
+  the provision/run/cleanup lifecycle, and a worked A/B example that
+  catches a real tearing bug and confirms its fix. A developer tool,
+  not an operator tool; expected to grow more test families over time.
 
 - Future Work (coming soon)
   -- IXFR support.

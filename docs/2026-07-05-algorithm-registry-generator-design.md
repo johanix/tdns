@@ -1,12 +1,54 @@
 # Algorithm Registry & Code-Generator Design
 
 **Date:** 2026-07-05
-**Status:** Design AGREED and implementation-ready (no code written yet). All
-three earlier gaps resolved with verified seams (role-enforcement point,
-CLI codepoint-sourcing invariant, +algchase). This doc is the implementation
-reference — build from the sequencing (PR-A/B/C) at the end; the "Verified
-implementation seams" index lists every file:symbol to touch.
+**Status:** IN PROGRESS — see the "Progress" section below. Foundation, registry
+table, generator, `--version`, and `dog +algchase` are DONE; the cutover
+(wire go:generate + per-app algs.list, replace the hand-maintained files,
+Makefile integration) remains. This doc is the implementation reference —
+sequencing (PR-A/B/C) and the "Verified implementation seams" index are below.
 **Scope:** tdns (`v2/algorithms`, `cmdv2/*`) + dnssec-algorithms
+
+## Progress (updated 2026-07-05, end of session)
+
+**DONE — dnssec-algorithms `main` (pushed):**
+- PR-B: `registry/registry.go` pure-data metadata table (16 algs, 199–214;
+  verified zero-cgo importable). Commit `4091eff`. Includes
+  `cross_rsdpg_128_small` adapter + `docs/pqc-algorithm-families.md` (`8876ff0`).
+
+**DONE — tdns branch `feature/alg-registry-generator` (7 commits; NOT yet pushed):**
+- PR-A `c30b5f1`: `record()` metadata→real promotion (no panic); `ForKSK`/`ForZSK`
+  on `Capabilities` (+ builtins, `All()`/JSON export, `SupportedKSK/ZSK`); policy
+  role enforcement (`validateRoleCapabilities` at ALL THREE parse sites). Tested.
+- `1735f15`: genalgs first cut (superseded).
+- `c0b787c` / `4a10711`: design revised — NO build tags; availability resolved at
+  generate time; generator takes `--algrepo <dir>`.
+- `8e1c863`: genalgs REWORKED to the final model — `--algrepo`, AST-parses
+  `registry/registry.go`, runs `-env.sh` detection, FAILS if a selected alg's lib
+  is absent, emits `metadata_algs.go` + one flat `registered_algs.go` (no tags) +
+  `algs-env.mk`. Dependency-free. Tested (parser, generators, detect success/fail).
+- `d3f0cad`: `--version` flag on auth/imr/agent — prints version + supported
+  algorithms (from the in-process registry, no config/server) and exits. Shared
+  `tdns.PrintVersionAndExit()`; per-app hook.
+- `466f7fb`: `dog +algchase` — annotates each `alg=N` in the sigchase chain with
+  its registered name (`alg=13 (ECDSAP256SHA256)`; `(unknown)` when unknown).
+  Verified live + unit tested.
+
+**NOT DONE — the cutover (next session), all in tdns:**
+- Per-app `algs.list` (auth/imr/agent full or subset; cli/dog as needed) + wire
+  `go:generate` calling genalgs with `--algrepo`.
+- Delete the 7 hand-maintained `cmdv2/*/pq_algorithms_*.go` and the manual
+  `RegisterMetadata` blocks in `cmdv2/{cli,dog}/main.go`. Prove equivalence
+  (same codepoints/subsets per app). This is what makes `dog +algchase` name PQ
+  codepoints and fixes the `--version` KSK/ZSK "-" wart (apps' current
+  hand-written `init()` still use pre-role `Capabilities`).
+- Makefile integration: regenerate-if-missing rules (mirroring the existing
+  `version.go` step), `include algs-env.mk`, drop `WITH_LIBOQS/SQISIGN/QRUOV`.
+  Verify a cgo build on a Hetzner guest (the C libs aren't on the workstation
+  for sqisign/qruov... actually all three are on this Mac, but a guest confirms
+  the NetBSD/Linux paths).
+- Then re-pin tdns go.mod to the published dnssec-algorithms registry commit.
+
+**Follow-ups after cutover:** `guide/pq-dnssec.md` (see requirements below).
 
 ## Concrete schema sketch (Input 1 — registry.go in dnssec-algorithms)
 
@@ -86,15 +128,16 @@ nothing new, and adapters stop hard-coding their own codepoint.
 |---|---|---|
 | `codepoint` (uint8) | wire identity | yes → `RegisterMetadata` |
 | `name` (string) | BIND label / registry name | yes → `RegisterMetadata` |
-| `cli_name` (string) | `--algorithm` flag value | drives CLI name list |
 | `caps` (ForSIG0/ForDNSSEC/**ForKSK/ForZSK**) | usage constraints | yes → `RegisterMetadata` |
-| `package` (string path) | implementing Go package | generator-only (→ import) |
-| `lib_group` (purego/liboqs/sqisign/qruov) | build-tag group | generator-only (→ tag + file) |
+| `package` (string path) | implementing Go package | generator-only (→ import in `registered_algs.go`) |
+| `group` (purego/liboqs/sqisign/qruov) | lib the impl needs | generator-only (→ availability check via `-env.sh`) |
 
-`package` and `lib_group` are **strings**, never live imports — importing the
-table must pull in zero cgo, so `dog` (and any name-aware UI) can link the whole
-table with no liboqs/sqisign/qruov dependency. The generator turns the string
-package paths into real imports in the generated impl files.
+**IMPLEMENTED (PR-B):** the table is `registry/registry.go` in dnssec-algorithms
+(package `registry`), pure data, verified to import zero cgo. `package` and
+`group` are **strings**. No `cli_name` column: the CLI upper-cases input before
+matching, so `name` doubles as the typed name. `group` no longer maps to a build
+tag (see the revised generator section) — it names the library whose presence the
+generator checks at generate time.
 
 ### Input 2 — the per-app implementation list (dead simple)
 
@@ -122,61 +165,90 @@ Adding a new algorithm = **one row in Input 1** + **its name in the Input 2
 lists of the apps that should implement it.** No codepoints touched by hand, no
 cross-app sync, no separate CLI list.
 
-### The generator
+### The generator — NO BUILD TAGS (revised 2026-07-05)
 
-A `cmd/` tool in **tdns**, invoked via `go generate ./...`. The **metadata table
-path is an explicit argument** to the generator — which also hands it the exact
-dnssec-algorithms repo location for free (see "Third-party lib auto-detection").
-For each app it emits:
-
-1. **`metadata_gen.go`** — `RegisterMetadata(codepoint, name, caps)` for **all**
-   algs in Input 1. Pure Go, no build tags, compiled into every app. This is the
-   global codepoint↔name↔role mapping. Fixes dog's stale list; enables `+algchase`.
-
-2. **`impl_<group>_gen.go`** — one file per lib_group, each `//go:build <group>`
-   tagged (except purego, untagged), containing `Register(codepoint, pkg.New(),
-   caps)` for **only** the algs in that app's Input 2 list that belong to that
-   group. This replaces the hand-maintained `pq_algorithms_*.go` files.
-
-Result: `metadata` is uniform everywhere; `impl` is per-app-selected and
-build-tag-gated, both generated, both consistent by construction.
-
-### Third-party lib auto-detection (generate-time)
-
-Because the generator is given the dnssec-algorithms path, it can run that repo's
-existing `-env.sh` scripts to discover which C libs are actually installed —
-**with no changes to the scripts** (verified 2026-07-05). Each script is already
-machine-consumable: bare invocation prints `export PKG_CONFIG_PATH=...`
-(and `CGO_LDFLAGS`, etc.) to **stdout**, sends human diagnostics to **stderr**,
-and exits non-zero when the lib is not found.
+`cmdv2/genalgs`, invoked via `go generate`. Interface:
 
 ```
-run  bash <dnssec-algs>/liboqs/liboqs-env.sh   (capture stdout, exit code)
-  exit 0 + non-empty stdout → PRESENT; stdout IS the exact env to bake in
-  exit != 0 / empty stdout  → ABSENT; skip that group's impl file, warn
+genalgs --algrepo <dir> --list <algs.list> --out <dir> [--pkg main]
 ```
 
-Same for `sqisignc/sqisign-env.sh`, `qruovc/qruov-env.sh`. From one pass the
-generator learns the full present/absent picture **and** the exact per-lib env.
+The **`--algrepo` argument is the root of a dnssec-algorithms checkout** — one
+path from which the generator derives everything it needs from that repo:
+- the registry table at `<algrepo>/registry/registry.go`, which it **parses via
+  `go/parser`** (no import / go.mod replace) and extracts the `Algorithms` slice
+  from — keeping the table type-checked Go in its own repo while decoupling the
+  generator from go.mod entanglement or a fixed layout;
+- the availability scripts at `<algrepo>/{liboqs,sqisignc,qruovc}/*-env.sh` (below).
 
-With that, the generator can:
-- **Emit impl files only for libs that are present** — no more failing deep in
-  the linker with an undefined-reference; the operator is told up front which
-  groups were skipped and why.
-- **Emit one consolidated build-env artifact** (`algs-env.sh` or a Makefile
-  fragment) that sets `PKG_CONFIG_PATH` / `CGO_LDFLAGS` / (NetBSD)
-  `LD_LIBRARY_PATH` for *all detected libs at once* — replacing the current
-  "source three scripts + remember the NetBSD LD_LIBRARY_PATH quirk + pass the
-  right WITH_* flags by hand" dance with "source one generated file."
+This is faithful to the agreed "explicit argument" design and matches the
+"pinned-but-local checkout" principle: the caller (the Makefile) points
+`--algrepo` at the local dnssec-algorithms working copy.
 
-**Honest boundary — this does NOT eliminate build-time env.** cgo reads
-pkg-config *during `go build`*, a separate process from `go generate`, possibly
-on a different machine. The generator can *detect and emit* the env; it cannot
-*inject* it into a later build. So the win is "generate the correct env once, in
-one file, from real detection" — not "no env vars ever." Generated
-`_gen.go` files must not hard-code "lib X is installed" as if universal; the
-build-env file is advisory for the build host, and `WITH_*`/build tags remain the
-authoritative gate at compile time.
+**Availability is resolved at GENERATE time, so there are NO build tags.** This
+is the key shift from the original design. Previously each impl file carried
+`//go:build liboqs` and `go build -tags liboqs` decided at compile time whether
+it was included. Instead:
+
+1. The generator reads the app's `algs.list` (what the operator WANTS) + the
+   registry (all algs + their lib group).
+2. For each wanted alg it checks the lib group is **actually installed** by
+   running the group's `-env.sh` (see below).
+3. **A wanted alg whose lib is ABSENT is a hard error** — generation fails with,
+   e.g., "algs.list selects SQISIGN1 but the sqisign library was not found;
+   install it or remove SQISIGN1 from algs.list." No silent skip.
+4. If all wanted algs are available, it emits **two plain-Go files, no tags:**
+   - **`metadata_gen.go`** — `RegisterMetadata(...)` for **all** registry algs.
+     Needs no libs (pure data). The global codepoint↔name↔role table; fixes
+     dog's stale list, enables `+algchase`.
+   - **`registered_algs.go`** — a single flat file of `Register(...)` calls for
+     **every** selected alg (all lib groups together — no per-group split,
+     because availability is already guaranteed). Replaces all the
+     hand-maintained `pq_algorithms_*.go` files.
+
+Why one impl file is now possible: the per-file split existed ONLY because Go
+allows one `//go:build` constraint per file, so liboqs vs. sqisign impls had to
+live in separate files to be tagged independently. With availability decided at
+generate time, the emitted code is known-good against the installed libs and
+needs no tag — so all `Register` calls collapse into one file.
+
+**Consequences (accepted, see build integration):**
+- `make WITH_LIBOQS=1 …` flags and `//go:build` tags are **removed**. What gets
+  compiled in = `algs.list` ∩ installed libs, resolved by the generator.
+- The generated `metadata_gen.go` and `registered_algs.go` are **build
+  artifacts — NOT committed** (gitignored), regenerated per build host so the
+  binary's algorithm set always matches that host's actual libraries.
+- Therefore a clean checkout does **not** compile until `go generate` runs:
+  generation is a mandatory build step (the Makefile runs it before `go build`).
+  A stray `go build` on a fresh tree yields a binary with zero algorithms — the
+  Makefile is what prevents that footgun.
+
+### Third-party lib availability detection (generate-time)
+
+The generator runs dnssec-algorithms' existing `-env.sh` scripts to learn which
+C libs are installed — **no changes to the scripts** (verified 2026-07-05). Each
+prints `export PKG_CONFIG_PATH=...` (and `CGO_LDFLAGS`) to **stdout**, human
+diagnostics to **stderr**, and exits non-zero when the lib is absent.
+
+```
+run  bash <registry-repo>/liboqs/liboqs-env.sh   (capture stdout, exit code)
+  exit 0 + non-empty stdout → PRESENT; stdout is the exact env for the build
+  exit != 0 / empty stdout  → ABSENT
+```
+
+Same for `sqisignc/sqisign-env.sh`, `qruovc/qruov-env.sh`. The generator uses
+this to (a) **fail** if a wanted alg's lib is absent, and (b) emit **one
+consolidated build-env artifact** (`algs-env.sh` / Makefile fragment) setting
+`PKG_CONFIG_PATH` / `CGO_LDFLAGS` / (NetBSD) `LD_LIBRARY_PATH` for all needed
+libs at once — replacing the "source three scripts + remember the NetBSD
+LD_LIBRARY_PATH quirk + pass WITH_* flags by hand" dance.
+
+**Boundary that still holds:** cgo reads pkg-config during `go build`, so the
+build still needs that env in its process — the generator emits it (the build-env
+artifact) but cannot inject it into a separate `go build`. The Makefile sources
+the artifact. Because the generated impl file is regenerated per host and not
+committed, there is no cross-machine "lib X assumed present" hazard: the file
+always reflects the host it was generated on.
 
 ## Prerequisite change — `record()` must promote, not panic
 
@@ -238,10 +310,18 @@ downstream:** the returned error flows into the existing broken-policy path
 `DnssecPolicy.Error` docstring already enumerates "disallowed KSK/ZSK split" as a
 rejection reason and states a broken policy is kept-but-unusable and its zones
 quarantined — so ForKSK/ForZSK is simply one more reason feeding that same
-mechanism. There is also a second parse site in `ParseDnssecPolicyConf` (the
-non-`Impl` wrapper, `v2/ksk_rollover_policy.go:~677`) that mirrors the same
-`validateSplitAlgorithm` call — add the role check there too, or refactor both to
-share one helper.
+mechanism.
+
+**IMPLEMENTED (PR-A):** `validateSplitAlgorithm` has **three** production call
+sites, not two — the role check was added beside every one:
+`v2/ksk_rollover_policy.go:610` (`parseDnssecPolicyConfImpl`), `:680` (the
+non-`Impl` loop), and `v2/parseconfig.go:1476` (the live `parseDnssecConfig`
+path, which uses `markBroken(err)` to set `Error`). The third site is the one the
+running daemon actually takes; it was missed in the original two-site estimate and
+found only because the enforcement test initially passed for the wrong reason (a
+split-check rejection masking the absent role check). Lesson recorded: any future
+per-policy validation must cover all three sites (or they should be refactored to
+one shared helper).
 
 **No family field.** Cryptographic family (lattice/code-based/multivariate/…)
 is analysis-doc material — it lives in
@@ -391,15 +471,24 @@ repo needing publish+re-pin).
 4. `registry.go` pure-data metadata table (schema above); one row per alg incl.
    CROSS. Commit, publish, note the version for re-pin.
 
-**PR-C (tdns) — generator + cutover (against published table):**
-5. Generator `cmd/genalgs` + per-app `algs.list` files; `go:generate` wiring;
-   C-lib auto-detect via `-env.sh`; emit `metadata_gen.go` + `impl_<group>_gen.go`
-   + consolidated build-env file.
-6. Replace the hand-maintained `pq_algorithms_*.go` and the manual
-   `RegisterMetadata` blocks (cli/dog) with generated output. **Prove
-   equivalence:** generated registration ≡ current per-app behavior (same
-   codepoints, same per-app subsets). Preserve the CLI server-sourcing invariant.
+**PR-C (tdns) — generator + cutover. NO BUILD TAGS (revised model above):**
+5. Generator `cmdv2/genalgs`: `-registry <path>` arg (AST-parse the registry
+   `.go`, no import); `-env.sh` availability detection with **fail-on-missing**;
+   emit `metadata_gen.go` (all algs) + a single flat `registered_algs.go` (all
+   selected impls, no tags) + a consolidated build-env artifact. Generated files
+   are build artifacts — gitignored, not committed.
+   *(A first cut of genalgs — import-based, per-group tagged files — was committed
+   as `1735f15`; it is superseded by this revised model and must be reworked.)*
+6. Per-app `algs.list` (committed) + `go:generate` wiring. Delete the
+   hand-maintained `pq_algorithms_*.go` and the manual `RegisterMetadata` blocks
+   (cli/dog). **Prove equivalence:** generated registration ≡ current per-app
+   behavior (same codepoints, same per-app subsets). Preserve the CLI
+   server-sourcing invariant.
+7. **Build integration (Makefiles):** `go generate` before `go build` per app;
+   drop `WITH_LIBOQS/SQISIGN/QRUOV` flags and all `//go:build` tags; source the
+   generated build-env artifact. A clean checkout builds via `make`, which
+   generates first. *(Approach discussed separately before implementing.)*
 
 **Follow-ups (separate branches):**
-7. `dog +algchase` (display enhancement; depends on step 6 metadata).
-8. Write `guide/pq-dnssec.md` against the finished model.
+8. `dog +algchase` (display enhancement; depends on step 6 metadata).
+9. Write `guide/pq-dnssec.md` against the finished model.

@@ -11,6 +11,8 @@ import (
 	"strings"
 
 	"github.com/miekg/dns"
+
+	algorithms "github.com/johanix/tdns/v2/algorithms"
 )
 
 // LargeAlgDSMetrics returns the total number of individual large-alg DS RRs
@@ -148,6 +150,39 @@ func validateSplitAlgorithm(policyName string, kskAlg, zskAlg uint8, allowed map
 	return fmt.Errorf("policy %q: KSK algorithm %s may not pair with ZSK algorithm %s; not listed in dnssec.split_algorithms", policyName, kskName, zskName)
 }
 
+// validateRoleCapabilities rejects a policy that assigns an algorithm to
+// a DNSSEC role it is not permitted to fill: the KSK algorithm must have
+// ForKSK, the ZSK algorithm must have ForZSK. This blocks, for example, a
+// large-signature code-based algorithm (ForKSK, not ForZSK) from being
+// used as a zone-signing key, where its signature would bloat every RRSIG.
+// A rejected policy is kept but marked unusable via DnssecPolicy.Error,
+// like the other parse-time policy validations.
+func validateRoleCapabilities(policyName string, kskAlg, zskAlg uint8) error {
+	// CapsReal (not Caps): a policy that signs must name algorithms this
+	// binary can actually generate and sign with, not ones it merely holds
+	// metadata for. A server registers metadata for every algorithm but
+	// links an implementation only for those in its algs.list.
+	kskCaps, ok := algorithms.CapsReal(kskAlg)
+	if !ok {
+		return fmt.Errorf("policy %q: KSK algorithm %s (%d) is not a usable (implemented) algorithm in this binary",
+			policyName, dns.AlgorithmToString[kskAlg], kskAlg)
+	}
+	if !kskCaps.ForKSK {
+		return fmt.Errorf("policy %q: algorithm %s (%d) is not permitted as a KSK",
+			policyName, dns.AlgorithmToString[kskAlg], kskAlg)
+	}
+	zskCaps, ok := algorithms.CapsReal(zskAlg)
+	if !ok {
+		return fmt.Errorf("policy %q: ZSK algorithm %s (%d) is not a usable (implemented) algorithm in this binary",
+			policyName, dns.AlgorithmToString[zskAlg], zskAlg)
+	}
+	if !zskCaps.ForZSK {
+		return fmt.Errorf("policy %q: algorithm %s (%d) is not permitted as a ZSK",
+			policyName, dns.AlgorithmToString[zskAlg], zskAlg)
+	}
+	return nil
+}
+
 // resolvePolicyRoleAlgorithms parses the top-level and per-role algorithm fields.
 func resolvePolicyRoleAlgorithms(policyName string, dp *DnssecPolicyConf) (defaultAlg, kskAlg, zskAlg uint8, err error) {
 	defaultAlg = dns.StringToAlgorithm[strings.TrimSpace(strings.ToUpper(dp.Algorithm))]
@@ -209,7 +244,12 @@ func appendDnssecPolicyWarnings(warnMsgs []string, pol *DnssecPolicy, isLarge fu
 
 // WarnLargeAlgZoneSigningRole sets DnssecPolicyWarning when a newly generated
 // ZSK or CSK uses a large algorithm. KSK generation is the supported pattern.
-func WarnLargeAlgZoneSigningRole(zd *ZoneData, keytype string, alg uint8, isLarge func(uint8) bool) {
+//
+// zdLocked signals that the caller already holds zd.mu (the publish-path SOA
+// re-sign reaches this via EnsureActiveDnssecKeys(zdLocked=true)). When true the
+// error read/write is routed through the *Locked variants so this does NOT
+// re-acquire zd.mu and self-deadlock — Go mutexes are not reentrant.
+func WarnLargeAlgZoneSigningRole(zd *ZoneData, keytype string, alg uint8, isLarge func(uint8) bool, zdLocked bool) {
 	if zd == nil || isLarge == nil || !isLarge(alg) {
 		return
 	}
@@ -220,18 +260,25 @@ func WarnLargeAlgZoneSigningRole(zd *ZoneData, keytype string, alg uint8, isLarg
 	if msg == "" {
 		return
 	}
+	errList := zd.ErrorList
+	setErr := zd.SetError
+	if zdLocked {
+		errList = zd.errorListLocked
+		setErr = zd.setErrorLocked
+	}
 	var parts []string
-	for _, e := range zd.ErrorList() {
+	for _, e := range errList() {
 		if e.Type == DnssecPolicyWarning && e.Msg != "" && e.Msg != msg {
 			parts = append(parts, e.Msg)
 		}
 	}
 	parts = append(parts, msg)
-	zd.SetError(DnssecPolicyWarning, "%s", strings.Join(parts, "; "))
+	setErr(DnssecPolicyWarning, "%s", strings.Join(parts, "; "))
 }
 
 // WarnLargeAlgKskReusedAsZsk covers the runtime case where no real ZSK exists.
-func WarnLargeAlgKskReusedAsZsk(zd *ZoneData, alg uint8, isLarge func(uint8) bool) {
+// See WarnLargeAlgZoneSigningRole for the zdLocked contract.
+func WarnLargeAlgKskReusedAsZsk(zd *ZoneData, alg uint8, isLarge func(uint8) bool, zdLocked bool) {
 	if zd == nil || isLarge == nil || !isLarge(alg) {
 		return
 	}
@@ -240,12 +287,18 @@ func WarnLargeAlgKskReusedAsZsk(zd *ZoneData, alg uint8, isLarge func(uint8) boo
 		name = "unknown"
 	}
 	msg := "large algorithm " + name + " signs the bulk of the zone (KSK reused as ZSK); whole-zone signatures inflated"
+	errList := zd.ErrorList
+	setErr := zd.SetError
+	if zdLocked {
+		errList = zd.errorListLocked
+		setErr = zd.setErrorLocked
+	}
 	var parts []string
-	for _, e := range zd.ErrorList() {
+	for _, e := range errList() {
 		if e.Type == DnssecPolicyWarning && e.Msg != "" && e.Msg != msg {
 			parts = append(parts, e.Msg)
 		}
 	}
 	parts = append(parts, msg)
-	zd.SetError(DnssecPolicyWarning, "%s", strings.Join(parts, "; "))
+	setErr(DnssecPolicyWarning, "%s", strings.Join(parts, "; "))
 }

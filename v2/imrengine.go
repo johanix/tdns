@@ -1935,7 +1935,7 @@ func DotServerQnameResponse(qname string, w dns.ResponseWriter, r *dns.Msg) {
 		m.SetRcode(r, dns.RcodeSuccess)
 		v := viper.GetString("server.id")
 		if v == "" {
-			v = "tdnsd - an authoritative name server for experiments and POCs"
+			v = "tdns-imr - a recursive name server for experiments and POCs"
 		}
 		m.Answer = append(m.Answer, &dns.TXT{
 			Hdr: dns.RR_Header{Name: qname, Rrtype: dns.TypeTXT, Class: dns.ClassCHAOS, Ttl: 3600}, Txt: []string{v},

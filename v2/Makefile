@@ -4,4 +4,4 @@ include ../utils/Makefile.common
 
 .PHONY: clean install build version.go
 
-# only interesting target is "lint"
+# only interesting target is "lint" (includes check-no-mutators via Makefile.common)

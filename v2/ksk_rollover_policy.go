@@ -610,6 +610,9 @@ func parseDnssecPolicyConfImpl(name string, dp *DnssecPolicyConf, quiet bool, sp
 	if err := validateSplitAlgorithm(name, kskAlg, zskAlg, splitAllowed); err != nil {
 		return nil, err
 	}
+	if err := validateRoleCapabilities(name, kskAlg, zskAlg); err != nil {
+		return nil, err
+	}
 	kskLT, err := GenKeyLifetime(dp.KSK.Lifetime)
 	if err != nil {
 		return nil, fmt.Errorf("policy %q: %w", name, err)
@@ -675,6 +678,10 @@ func ValidateDnssecPoliciesFromFile(path string) error {
 			continue
 		}
 		if err := validateSplitAlgorithm(name, kskAlg, zskAlg, splitAllowed); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if err := validateRoleCapabilities(name, kskAlg, zskAlg); err != nil {
 			errs = append(errs, err)
 			continue
 		}

@@ -116,6 +116,10 @@ func loadTestTransferZone(t *testing.T, zoneData string) *ZoneData {
 	}
 	zd.Ready = true
 	zd.Status = ZoneStatusReady
+	// Publish the initial snapshot so post-B3 readers (the transfer path) see
+	// the data, mirroring the refresh engine.
+	zd.InstallInitialSnapshot()
+	t.Cleanup(zd.stopPublisher)
 	return zd
 }
 
@@ -363,6 +367,9 @@ func TestZoneTransferOut_OversizeRRsetAborts(t *testing.T) {
 		RRs:    []dns.RR{txt},
 	})
 	zd.Data.Set("big.example.test.", od)
+	// Re-publish so the transfer (which reads the published snapshot) sees the
+	// oversize RRset that was just added to the live store.
+	zd.InstallInitialSnapshot()
 
 	srv := startTestAXFRServer(t, zd)
 	defer srv.shutdown()
@@ -453,6 +460,27 @@ func TestZoneTransferOut_RefusesWhenNotReady(t *testing.T) {
 	}
 	if w.written == nil || w.written.Rcode != dns.RcodeRefused {
 		t.Fatalf("expected REFUSED, got %v", w.written)
+	}
+}
+
+// TestZoneTransferOut_RefusesUnsignedMustBeSignedZone: a zone configured for
+// online/inline signing whose SOA carries no RRSIG (unsigned/broken) must be
+// refused, never transferred unsigned to a secondary (fail-closed).
+func TestZoneTransferOut_RefusesUnsignedMustBeSignedZone(t *testing.T) {
+	zd := loadTestTransferZone(t, basicZone) // basicZone is unsigned (no RRSIGs)
+	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+	w := &fakeRW{remote: udpAddr("127.0.0.1")}
+	r := new(dns.Msg)
+	r.SetAxfr(zd.ZoneName)
+	sent, err := zd.ZoneTransferOut(w, r)
+	if err != nil {
+		t.Fatalf("ZoneTransferOut: %v", err)
+	}
+	if sent != 0 {
+		t.Fatalf("expected 0 RRs sent for an unsigned must-be-signed zone, got %d", sent)
+	}
+	if w.written == nil || w.written.Rcode != dns.RcodeRefused {
+		t.Fatalf("expected REFUSED (fail-closed), got %v", w.written)
 	}
 }
 

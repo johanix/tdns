@@ -13,3 +13,13 @@ reviews:
     - "!**/vendor/**"
     - "!knot-dns-v3.5.2/**"
     - "!labconfig/**"
+
+  tools:
+    # golangci-lint is disabled: CodeRabbit invokes it as `golangci-lint ./...`
+    # from the repo root, which fails in this multi-module layout — the Go
+    # modules live in nested directories (v2/, cmdv2/*, v2/core, …), not the
+    # root, so `./...` typechecking errors with "directory prefix . does not
+    # contain main module or its selected dependencies". The run lints nothing
+    # but that error. Developers run golangci-lint per-module locally instead.
+    golangci-lint:
+      enabled: false
