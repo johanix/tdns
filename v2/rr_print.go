@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"fmt"
+	"net"
 	"strconv"
 	"strings"
 	"time"
@@ -443,6 +444,21 @@ func rdataOnly(rr dns.RR) string {
 	return parts[4]
 }
 
+// digStyleServer formats the ;; SERVER footer like dig: host#port(host). For
+// DoH the server argument is already a URL and is returned unchanged.
+func digStyleServer(host, port string) string {
+	if strings.Contains(host, "://") {
+		return host
+	}
+	if port == "" {
+		port = "53"
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.To4() == nil {
+		return fmt.Sprintf("[%s]#%s([%s])", host, port, host)
+	}
+	return fmt.Sprintf("%s#%s(%s)", host, port, host)
+}
+
 func MsgPrint(m *dns.Msg, server string, elapsed time.Duration, short bool, options map[string]string) {
 	if short {
 		// dig-compatible +short: print only the RDATA of each Answer RR,
@@ -579,7 +595,7 @@ func MsgPrint(m *dns.Msg, server string, elapsed time.Duration, short bool, opti
 	}
 
 	fmt.Printf("\n;; Query time: %d msec\n", elapsed.Milliseconds())
-	fmt.Printf(";; SERVER: %s (%s)\n", server, transport)
+	fmt.Printf(";; SERVER: %s (%s)\n", digStyleServer(server, options["port"]), transport)
 	fmt.Printf(";; WHEN: %s\n", time.Now().Format(TimeLayout))
 
 	buf, err := m.Pack()
