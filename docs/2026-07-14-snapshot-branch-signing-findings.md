@@ -137,6 +137,87 @@ landing the snapshot branch — there may be a #3.
 
 ---
 
+## Finding 4 — `confMu` is held across zone signing on reload (contention/serialization; NOT a deadlock)
+
+Distinct from Finding 3 (the deadlock, now fixed): even with no deadlock, the
+config mutex `confMu` is held across potentially long-lived signing on every
+`config reload-zones`, so slow PQ signing serialises **all** config operations.
+
+**Lock scope.** Both reload entry points hold `confMu` for their entire body:
+- `config reload` → `ReloadConfig` (config.go:562): `confMu.Lock()` +
+  **`defer confMu.Unlock()`** wrapping `ParseConfig(true)`.
+- `config reload-zones` → `ReloadZoneConfig` (config.go:600): `confMu.Lock()` at
+  entry, `confMu.Unlock()` only at config.go:662 — *after* `ParseZones` + the
+  zone-removal loop.
+
+**Who signs.** `config reload` (`ParseConfig`) re-parses the config *sections*
+(dnssec, keys, apiservers) — it does **not** re-parse or sign zones — but it
+shares `confMu`, so a `config reload` **blocks behind** any concurrent
+`reload-zones` that is signing. `config reload-zones` (`ParseZones`) is the
+signer: for every existing signed zone it synchronously calls
+`SetupZoneSigning` → **`SignZone(kdb, false)`** (parseconfig.go:966 →
+zone_utils.go:1102), all under `confMu`.
+
+**Two ways `confMu` ends up spanning signing:**
+**Queries are NOT in scope — the DNS answer path is lock-free.** The read path
+takes **no `zd.mu`**: `GetOwner` (zone_utils.go:441) reads
+`getOwnerFrom(zd.publishedSnapshot(), qname)`, and `publishedSnapshot()`
+(zone_snapshot.go:247) is a bare `zd.snapshot.Load()` over
+`atomic.Pointer[zoneSnapshot]` (structs.go:176) — an atomic load of an immutable
+snapshot, then a map read. So `zd.mu` here is a **writer-side lock only** (guards
+the mutable working set + the publish pointer-swap at sign.go:817); nothing the
+signer does to `zd.mu` can stall a query. This whole finding is about the
+**config plane**, not the query plane.
+
+1. **Directly.** `SignZone`'s RRSIG-generation loop (`SignRRset` per RRset,
+   sign.go:807) runs *before* it takes `zd.mu` (only grabbed at sign.go:817 for
+   the publish), and **it is under `confMu`.** Steady-state `force=false` is
+   additive (skips already-signed RRsets → O(zone-size) checks, cheap-ish); any
+   zone actually needing signatures (fresh/expired/key-change, esp. PQ) generates
+   RRSIGs **under `confMu`**.
+2. **Indirectly (the source of the long holds) — writer-vs-writer.** `SignZone`
+   grabs `zd.mu` at :817 to publish. That contends with the **async refresh
+   engine**, which does the re-read + full re-sign off `RefreshZoneCh` and holds
+   the same `zd.mu` across *its* work. Under rapid/concurrent reloads, a prior
+   reload's slow async re-sign still holds `zd.mu` when the next reload's
+   synchronous `SetupZoneSigning` reaches :817 → it **blocks on `zd.mu` while
+   holding `confMu`**, for the full PQ-sign duration. This is exactly the dump
+   picture: `ParseZones` holding `confMu`, parked on a `zd.mu` held by the
+   refresh-engine goroutine. Note this is writer-vs-writer (config path vs
+   refresh path); a query would sail past on the current snapshot regardless.
+
+**Consequence.** `confMu` serialises **all config ops** — every `reload`,
+`reload-zones`, `reload-tsig`, `config status` — behind zone signing. Under a
+reload storm they pile up on `confMu` (the ~200 blocked handlers we saw); slow
+PQ signing stretches each hold to seconds-minutes. Separate from the deadlock:
+it would make config ops sluggish under PQ load even with the deadlock fixed.
+**DNS queries are unaffected** — they read the immutable snapshot lock-free.
+
+**Fix direction (post-merge, non-gating) — it's mostly a deletion.** The async
+path already runs on every reload: `ParseZones` unconditionally queues a
+`ZoneRefresher{Force: true}` to `RefreshZoneCh` (parseconfig.go:1099), and the
+refresh engine re-reads the file and re-signs off `confMu` (refreshengine.go:512
+→ `SetupZoneSigning`), then `resignq` → `ResignerEngine.resignNow` force-resigns.
+So the synchronous `SetupZoneSigning` at parseconfig.go:966 is largely
+**redundant** — it signs the *old* data with the *old* policy (the policy rebind
+happens in the refresh engine, not at :966) while holding `confMu`. **Fix: delete
+the :966 synchronous call; the already-queued ZoneRefresher covers the signing
+off-lock.** `confMu` then covers only fast config work.
+
+Safety: :966 runs only for *already-loaded* zones (new zones take the
+`FirstZoneLoad`/`OnFirstLoad` branch), which already hold a signed snapshot behind
+the atomic pointer — they keep serving it until the async re-sign atomically
+swaps in the new one, so **no unsigned blip**. Fail-closed (A3 SERVFAIL +
+AXFR-refuse) covers any genuinely-unsigned transient.
+
+Homework before doing it: (a) confirm no caller banks on "signed by the time
+reload returns" (reload response text, tests that reload then assert RRSIGs);
+(b) leave the `FirstZoneLoad`/`OnFirstLoad` branch alone (restart-time, separate
+path); (c) note the async path still double-signs (`force=false` at :512 then
+resigner `force=true`) — pre-existing, a separate cleanup.
+
+---
+
 ## Status & branch/defer contract (2026-07-14)
 
 **Principle (agreed):** the `SetError` / `DnssecError`-subtype restructuring is
@@ -196,6 +277,63 @@ cross-check `e117121` (tdns-debug).
   optimisation once fail-closed is in; not a safety gate).
 - **falcon Part 1** — tdns-side clear error at load (`keystore.go:894` check
   before the `readkey.go:285` decode); Easy, no fork, anytime.
+- **Finding 4** — `confMu` held across zone signing on reload (contention, not a
+  deadlock). Defer the synchronous `SignZone` in `SetupZoneSigning` to the async
+  refresh/`resignq` so `confMu` covers only fast config work. Latency/scalability
+  under PQ signing; not a safety gate.
+
+## Signing pipeline — post-merge redesign (companion to Finding 4)
+
+Design agreed in discussion 2026-07-14. All post-merge, non-gating; independent
+of but complementary to the Finding 4 `confMu` deletion. Target scale: ~100k
+signed zones, mixed algs (MLDSA fast … SQISIGN very slow).
+
+**State of play discovered:**
+- Refresh is **already** parallel — refreshengine.go:481 spawns `go func` per
+  zone (with an explicit `// XXX: Should do refresh in parallel`). But it is
+  **unbounded** and has **no same-zone guard**. The resigner (resigner.go) is
+  **serial** (single goroutine draining `resignq`).
+- `EnsureActiveDnssecKeys` hits the DB on **every** sign (sign.go:406
+  `kdb.GetDnssecKeys`). `KeyDB` is shared SQLite + `kdb.mu` + `Tx`.
+- `zd.generation` already exists (atomic, bumped on zone replacement,
+  config.go:653) and already backs the B5b stale-publish guard.
+
+**1. Bounded worker pool (replaces the unbounded fan-out).** At 100k zones a
+bounded pool (~NumCPU) completes *some zones fully, sooner*, with no CPU/memory
+thrash — strictly better than launching all signs at once to finish together
+much later. Replace the raw `go func` at refreshengine.go:481; feed the resigner
+into the same pool.
+
+**2. Per-`zd` active-key cache (takes the DB out of the hot path).** Cache the
+active `DnssecKeys` behind `atomic.Pointer[DnssecKeys]` on `zd` — the exact
+pattern already used for `snapshot` (structs.go:176) and `options` (:819).
+Lock-free read while signing; skip `GetDnssecKeys` when set. Invalidate at the
+one choke point where the key *set* changes: `DnssecKeyMgmt` add/setstate/delete
++ the key-state/rollover worker. Result: steady-state signing is pure in-memory
+(no DB, no `kdb.mu`); the DB only bites on infrequent key-gen/rollover.
+Correctness rests entirely on invalidating on **every** key-state transition
+(the active set shifts mid-rollover). Supersedes the shared
+`KeystoreDnskeyCache` map (structs.go:811) with a per-zd, lock-free field.
+
+**3. Same-zone ordering (the real hazard) — coalescing dirty-bit + generation
+CAS, NOT per-zone locks or hash-sharding.** `zd.mu` serializes critical sections,
+not whole logical ops, so two `SignZone` on one zone can interleave SOA-serial
+bumps / IXFR appends, or a stale one can publish over a newer one. Hash-sharding
+the pool by zone would serialize same-zone for free but load-imbalances badly
+(one SQISIGN zone stalls its shard) and can't coalesce. Instead:
+- **Single entry point per zone** for *all* triggers (config-reload, refresh,
+  resigner, key-state, dynamic update) with a per-zone state
+  `idle → running → running+pending`. Request: idle→submit one job; running→set
+  `pending` (do **not** submit a second). Worker done: `pending`→re-run once;
+  else idle. Guarantees never-two-concurrent per zone, and a burst of N requests
+  collapses to ≤2 signs — decisive under a reload storm (enqueue O(in-flight),
+  not `zones × reloads`). Coalescing state is O(zones-in-flight), a small sharded
+  map / `sync.Map` of atomic states.
+- **Generation CAS backstop:** worker snapshots `zd.generation` at start; drop
+  the publish if it advanced by completion (extend the existing B5b guard to the
+  sign/publish path). Correctness even if a trigger is left un-routed. The guard
+  must be **zone-scoped across engines** — the real collision is refresh-resign
+  vs. resigner, which is also why the single unified entry point matters.
 
 ## Notes for the tdns-debug reload test
 
@@ -206,3 +344,27 @@ cross-check `e117121` (tdns-debug).
 - SQISIGN is unusable at scale for the window (signing cost), but signs fine at
   ~10 records. Calibrate the window with a faster alg (MLDSA) + more records, or
   a mid-cost alg — measured one reload at a time, never a storm.
+
+## Finding — `reset_soa_serial` is dead code (RESURRECT, do not drop) (2026-07-15)
+
+Found while trying to force snapshot republishes for the AXFR-in bombardment:
+`service.reset_soa_serial` is present in the config + sample config (comment:
+"replace inbound SOA serial with unixtime"), but **nothing in the v2 tree
+consumes it** — `grep -rE 'ResetSoaSerial|reset_soa_serial|ResetSOA' v2/*.go`
+returns zero hits, so the key isn't even bound to a struct field (it lands in
+mapstructure's Unused set). Setting it `true` + `config reload` had no effect;
+the served serial stayed the primary's. Almost certainly never ported from the
+legacy tree.
+
+**Decision (Johan): resurrect it — wire it up in v2, do not remove the knob.**
+
+Intended semantics (for whoever ports it): rewrite the **served** SOA serial to
+unixtime at **publish/serve time**, so a secondary emits a monotonic serial to
+downstreams regardless of the primary's serial scheme. Wiring subtlety learned
+here: apply it *after* the change-detection check, NOT before. The refresh path
+decides whether to republish via `new_zd.IncomingSerial == zd.IncomingSerial`
+(FetchFromUpstream, zone_utils.go:303); if the unixtime rewrite happened before
+that check, every refresh would look "changed" and republish on every poll even
+when the primary is stable. Change-detection must use the primary's real serial;
+only the emitted serial is rewritten. (This is why `reset_soa_serial` was not a
+usable churn lever for the swap test — `auth zone bump` was used instead.)
