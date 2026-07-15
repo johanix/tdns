@@ -267,7 +267,12 @@ func appendDnssecPolicyWarnings(warnMsgs []string, pol *DnssecPolicy, isLarge fu
 
 // WarnLargeAlgZoneSigningRole sets DnssecPolicyWarning when a newly generated
 // ZSK or CSK uses a large algorithm. KSK generation is the supported pattern.
-func WarnLargeAlgZoneSigningRole(zd *ZoneData, keytype string, alg uint8, isLarge func(uint8) bool) {
+//
+// zdLocked signals that the caller already holds zd.mu (the publish-path SOA
+// re-sign reaches this via EnsureActiveDnssecKeys(zdLocked=true)). When true the
+// error read/write is routed through the *Locked variants so this does NOT
+// re-acquire zd.mu and self-deadlock — Go mutexes are not reentrant.
+func WarnLargeAlgZoneSigningRole(zd *ZoneData, keytype string, alg uint8, isLarge func(uint8) bool, zdLocked bool) {
 	if zd == nil || isLarge == nil || !isLarge(alg) {
 		return
 	}
@@ -278,18 +283,25 @@ func WarnLargeAlgZoneSigningRole(zd *ZoneData, keytype string, alg uint8, isLarg
 	if msg == "" {
 		return
 	}
+	errList := zd.ErrorList
+	setErr := zd.SetError
+	if zdLocked {
+		errList = zd.errorListLocked
+		setErr = zd.setErrorLocked
+	}
 	var parts []string
-	for _, e := range zd.ErrorList() {
+	for _, e := range errList() {
 		if e.Type == DnssecPolicyWarning && e.Msg != "" && e.Msg != msg {
 			parts = append(parts, e.Msg)
 		}
 	}
 	parts = append(parts, msg)
-	zd.SetError(DnssecPolicyWarning, "%s", strings.Join(parts, "; "))
+	setErr(DnssecPolicyWarning, "%s", strings.Join(parts, "; "))
 }
 
 // WarnLargeAlgKskReusedAsZsk covers the runtime case where no real ZSK exists.
-func WarnLargeAlgKskReusedAsZsk(zd *ZoneData, alg uint8, isLarge func(uint8) bool) {
+// See WarnLargeAlgZoneSigningRole for the zdLocked contract.
+func WarnLargeAlgKskReusedAsZsk(zd *ZoneData, alg uint8, isLarge func(uint8) bool, zdLocked bool) {
 	if zd == nil || isLarge == nil || !isLarge(alg) {
 		return
 	}
@@ -298,12 +310,18 @@ func WarnLargeAlgKskReusedAsZsk(zd *ZoneData, alg uint8, isLarge func(uint8) boo
 		name = "unknown"
 	}
 	msg := "large algorithm " + name + " signs the bulk of the zone (KSK reused as ZSK); whole-zone signatures inflated"
+	errList := zd.ErrorList
+	setErr := zd.SetError
+	if zdLocked {
+		errList = zd.errorListLocked
+		setErr = zd.setErrorLocked
+	}
 	var parts []string
-	for _, e := range zd.ErrorList() {
+	for _, e := range errList() {
 		if e.Type == DnssecPolicyWarning && e.Msg != "" && e.Msg != msg {
 			parts = append(parts, e.Msg)
 		}
 	}
 	parts = append(parts, msg)
-	zd.SetError(DnssecPolicyWarning, "%s", strings.Join(parts, "; "))
+	setErr(DnssecPolicyWarning, "%s", strings.Join(parts, "; "))
 }

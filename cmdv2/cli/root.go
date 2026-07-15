@@ -24,7 +24,7 @@ var showVersion bool // --version : print version + supported algorithms, then e
 
 var rootCmd = &cobra.Command{
 	Use:   "tdns-cli",
-	Short: "tdns-cli is a tool used to interact with the tdnsd nameserver via API",
+	Short: "tdns-cli is a tool used to interact with the TDNS applications via a mgmt API",
 	PersistentPreRun: func(cmd *cobra.Command, args []string) {
 		// --version is answered before any config/API setup: it reports what
 		// this binary knows, in-process, and exits.
@@ -41,12 +41,10 @@ var rootCmd = &cobra.Command{
 		initApi()
 	},
 	// tdns-cli has no default action; with no subcommand it prints help.
-	// A bare `tdns-cli --version` still needs to reach PrintVersionAndExit,
-	// so handle it here (PersistentPreRun does not fire without a subcommand).
+	// (--version is handled in PersistentPreRun above, which Cobra runs
+	// before this Run even for the bare root command, so there is no need
+	// to re-check showVersion here.)
 	Run: func(cmd *cobra.Command, args []string) {
-		if showVersion {
-			tdns.PrintVersionAndExit()
-		}
 		_ = cmd.Help()
 	},
 }

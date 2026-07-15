@@ -418,7 +418,12 @@ func configuredServedTTLForSigValidity(pol *DnssecPolicy, which string) time.Dur
 // UpdateSigValidityFloor applies config-load or runtime sig-validity floor
 // checks and sets/clears DnssecError / DnssecPolicyWarning on zd.
 // When runtime is true, maxObservedTTL is the bound for all three values.
-func UpdateSigValidityFloor(zd *ZoneData, pol *DnssecPolicy, propagationDelay time.Duration, maxObservedTTL uint32, runtime bool, isLarge func(uint8) bool) {
+// UpdateSigValidityFloor evaluates the sig-validity floor and records the
+// resulting DnssecError / DnssecPolicyWarning. It runs both lock-free (config
+// parse, refresh) and while the caller already holds zd.mu (SignZone). Pass
+// zdLocked=true in the latter case so the error updates use the *Locked
+// error setters and do not self-deadlock re-acquiring zd.mu.
+func UpdateSigValidityFloor(zd *ZoneData, pol *DnssecPolicy, propagationDelay time.Duration, maxObservedTTL uint32, runtime bool, isLarge func(uint8) bool, zdLocked bool) {
 	if zd == nil || pol == nil {
 		return
 	}
@@ -426,12 +431,21 @@ func UpdateSigValidityFloor(zd *ZoneData, pol *DnssecPolicy, propagationDelay ti
 		return
 	}
 
+	// Dispatch error updates to the plain (locking) or *Locked setters
+	// depending on whether the caller already holds zd.mu.
+	setErr := zd.SetError
+	clearErr := zd.ClearError
+	if zdLocked {
+		setErr = zd.setErrorLocked
+		clearErr = zd.clearErrorLocked
+	}
+
 	var hardMsgs, warnMsgs []string
 
 	if runtime {
 		if maxObservedTTL == 0 {
-			zd.ClearError(DnssecPolicyWarning)
-			zd.ClearError(DnssecError)
+			clearErr(DnssecPolicyWarning)
+			clearErr(DnssecError)
 			return
 		}
 		served := time.Duration(maxObservedTTL) * time.Second
@@ -480,14 +494,14 @@ func UpdateSigValidityFloor(zd *ZoneData, pol *DnssecPolicy, propagationDelay ti
 	}
 
 	if len(hardMsgs) == 0 {
-		zd.ClearError(DnssecError)
+		clearErr(DnssecError)
 	} else {
-		zd.SetError(DnssecError, "sig-validity floor: %s", strings.Join(hardMsgs, "; "))
+		setErr(DnssecError, "sig-validity floor: %s", strings.Join(hardMsgs, "; "))
 	}
 	warnMsgs = appendDnssecPolicyWarnings(warnMsgs, pol, isLarge)
 	if len(warnMsgs) == 0 {
-		zd.ClearError(DnssecPolicyWarning)
+		clearErr(DnssecPolicyWarning)
 	} else {
-		zd.SetError(DnssecPolicyWarning, "%s", strings.Join(warnMsgs, "; "))
+		setErr(DnssecPolicyWarning, "%s", strings.Join(warnMsgs, "; "))
 	}
 }

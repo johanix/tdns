@@ -156,8 +156,8 @@ func (zd *ZoneData) AnalyseZoneDelegation(imr *Imr) (DelegationSyncStatus, error
 // Returns unsynched bool, adds, removes []dns.RR, error
 
 // XXX: This requires lots of recursive queries and does not take advantage of the zonedata struct
-//      in tdnsd most likely having cached most of this information. Since the only reason for
-//      the tdns-cli tool is to interact with tdnsd, it really should leverage from that rather
+//      in tdns-auth most likely having cached most of this information. Since the only reason for
+//      the tdns-cli tool is to interact with tdns-auth, it really should leverage from that rather
 //      than just do everything in the CLI.
 
 func ChildDelegationDataUnsynched(zone, pzone, childpri, parpri string) (bool, []dns.RR, []dns.RR, error) {

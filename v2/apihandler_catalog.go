@@ -148,15 +148,6 @@ func handleCatalogCreate(catalogZoneName string, resp *CatalogResponse) error {
 		return fmt.Errorf("failed to create version TXT record: %v", err)
 	}
 
-	// Get or create OwnerData for version owner
-	ownerData, exists := zd.Data.Get(versionOwner)
-	if !exists {
-		ownerData = OwnerData{
-			Name:    versionOwner,
-			RRtypes: NewRRTypeStore(),
-		}
-	}
-
 	// Create or update TXT RRset
 	rrset := core.RRset{
 		Name:   versionOwner,
@@ -164,8 +155,11 @@ func handleCatalogCreate(catalogZoneName string, resp *CatalogResponse) error {
 		Class:  dns.ClassINET,
 		RRs:    []dns.RR{versionTxt},
 	}
-	ownerData.RRtypes.Set(dns.TypeTXT, rrset)
-	zd.Data.Set(versionOwner, ownerData)
+	zd.mu.Lock()
+	zd.ensureWorkingSet()
+	zd.stageRRsetLocked(versionOwner, rrset)
+	zd.publishWorkingSetLocked(zd.generation.Load(), false)
+	zd.mu.Unlock()
 
 	// Register the zone
 	Zones.Set(catalogZoneName, zd)
@@ -212,6 +206,7 @@ func handleCatalogDelete(catalogZoneName string, resp *CatalogResponse) error {
 	lgApi.Info("deleting catalog zone", "zone", catalogZoneName)
 
 	// Remove the catalog zone from Zones map
+	stopZonePublisher(catalogZoneName)
 	Zones.Remove(catalogZoneName)
 
 	// Remove catalog membership (it's a regular map, needs mutex)
@@ -336,6 +331,7 @@ func handleCatalogZoneDelete(catalogZoneName, zoneName string, resp *CatalogResp
 			lgApi.Info("auto-removing zone from catalog", "zone", zoneName, "catalog", catalogZoneName)
 
 			// Remove from Zones map
+			stopZonePublisher(zoneName)
 			Zones.Remove(zoneName)
 
 			// Remove from dynamic config file
@@ -480,11 +476,15 @@ func regenerateCatalogZone(catalogZoneName string) error {
 
 	cm := GetOrCreateCatalogMembership(catalogZoneName)
 
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.ensureWorkingSet()
+
 	// Remove all existing zone records (*.zones.{catalog} and group.*.zones.{catalog})
 	zoneSuffix := fmt.Sprintf(".zones.%s", catalogZoneName)
-	for owner := range zd.Data.IterBuffered() {
-		if strings.HasSuffix(owner.Key, zoneSuffix) {
-			zd.Data.Remove(owner.Key)
+	for name := range zd.workingSet {
+		if strings.HasSuffix(name, zoneSuffix) {
+			zd.stageOwnerDeleteLocked(name)
 		}
 	}
 
@@ -503,37 +503,21 @@ func regenerateCatalogZone(catalogZoneName string) error {
 			continue
 		}
 
-		// Create RRset for PTR record
 		ptrRRset := core.RRset{
 			Name:   ownerName,
 			RRtype: dns.TypePTR,
 			Class:  dns.ClassINET,
 			RRs:    []dns.RR{ptr},
 		}
-
-		// Get or create OwnerData for this owner
-		ownerData, exists := zd.Data.Get(ownerName)
-		if !exists {
-			ownerData = OwnerData{
-				Name:    ownerName,
-				RRtypes: NewRRTypeStore(),
-			}
-		}
-
-		// Add the PTR RRset to the owner
-		ownerData.RRtypes.Set(dns.TypePTR, ptrRRset)
-		zd.Data.Set(ownerName, ownerData)
+		zd.stageRRsetLocked(ownerName, ptrRRset)
 
 		// TXT record for groups: group.{uniqueid}.zones.{catalog} with all groups
 		if len(member.Groups) > 0 {
 			groupOwnerName := fmt.Sprintf("group.%s.zones.%s", member.Hash, catalogZoneName)
 
-			// Create TXT record with all groups as strings
-			// Format: "group1" "group2" "group3" ...
 			txtStrings := make([]string, len(member.Groups))
 			copy(txtStrings, member.Groups)
 
-			// Create TXT RR with all group strings
 			txtRR := &dns.TXT{
 				Hdr: dns.RR_Header{
 					Name:   groupOwnerName,
@@ -544,41 +528,21 @@ func regenerateCatalogZone(catalogZoneName string) error {
 				Txt: txtStrings,
 			}
 
-			// Create RRset for TXT record
 			txtRRset := core.RRset{
 				Name:   groupOwnerName,
 				RRtype: dns.TypeTXT,
 				Class:  dns.ClassINET,
 				RRs:    []dns.RR{txtRR},
 			}
-
-			// Get or create OwnerData for group owner
-			groupOwnerData, exists := zd.Data.Get(groupOwnerName)
-			if !exists {
-				groupOwnerData = OwnerData{
-					Name:    groupOwnerName,
-					RRtypes: NewRRTypeStore(),
-				}
-			}
-
-			// Add the TXT RRset to the group owner
-			groupOwnerData.RRtypes.Set(dns.TypeTXT, txtRRset)
-			zd.Data.Set(groupOwnerName, groupOwnerData)
+			zd.stageRRsetLocked(groupOwnerName, txtRRset)
 		}
 	}
 
-	// Bump SOA serial
-	_, err := zd.BumpSerial()
-	if err != nil {
-		lgApi.Error("error bumping SOA serial for catalog", "catalog", catalogZoneName, "err", err)
-	}
-
-	// Notify downstreams
-	zd.NotifyDownstreams()
+	zd.publishLocked(zd.generation.Load())
 
 	// Write zone file if persistence is enabled
 	if Conf.ShouldPersistZone(zd) {
-		_, err = zd.WriteDynamicZoneFile(Conf.DynamicZones.ZoneDirectory)
+		_, err := zd.WriteDynamicZoneFile(Conf.DynamicZones.ZoneDirectory)
 		if err != nil {
 			lgApi.Warn("failed to write catalog zone file", "zone", catalogZoneName, "err", err)
 			// Don't fail the operation, just log the warning

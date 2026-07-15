@@ -22,6 +22,10 @@ func testZone(t *testing.T, name, zoneStr string) *ZoneData {
 		t.Fatalf("ReadZoneData: %v", err)
 	}
 	zd.Ready = true
+	// Publish the initial snapshot so post-B3 readers (GetOwner etc.) see the
+	// data, mirroring the refresh engine (and testSnapshotZone/newMapZone).
+	zd.InstallInitialSnapshot()
+	t.Cleanup(zd.stopPublisher)
 	return zd
 }
 
@@ -31,13 +35,19 @@ example.		3600	IN	NS	ns.example.
 www.example.		3600	IN	A	192.0.2.1
 `
 	zd := testZone(t, "example.", zone)
+	// Register the zone so StripZoneRRSIGs' publishLocked is not dropped by the
+	// zoneStillLive (registry + generation) guard — in production the zone is
+	// always registered.
+	registerZones(t, zd)
 
-	// Attach two RRSIGs (keytags 1111 and 2222) to the www A RRset.
-	owner, err := zd.GetOwner("www.example.")
-	if err != nil || owner == nil {
-		t.Fatalf("GetOwner www: owner=%v err=%v", owner, err)
+	// Attach two RRSIGs (keytags 1111 and 2222) to the www A RRset via the live
+	// store, then re-publish so the snapshot carries them. Post-B3, GetOwner
+	// returns the immutable snapshot, so it must not be mutated in place.
+	od, ok := zd.Data.Get("www.example.")
+	if !ok {
+		t.Fatal("www owner missing from zd.Data")
 	}
-	rrset := owner.RRtypes.GetOnlyRRSet(dns.TypeA)
+	rrset := od.RRtypes.GetOnlyRRSet(dns.TypeA)
 	mkSig := func(keytag uint16) *dns.RRSIG {
 		return &dns.RRSIG{
 			Hdr:         dns.RR_Header{Name: "www.example.", Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 3600},
@@ -47,7 +57,8 @@ www.example.		3600	IN	A	192.0.2.1
 		}
 	}
 	rrset.RRSIGs = []dns.RR{mkSig(1111), mkSig(2222)}
-	owner.RRtypes.Set(dns.TypeA, rrset)
+	od.RRtypes.Set(dns.TypeA, rrset)
+	zd.InstallInitialSnapshot()
 
 	// Strip only keytag 1111.
 	removed, err := zd.StripZoneRRSIGs(context.Background(), func(s *dns.RRSIG) bool { return s.KeyTag == 1111 })

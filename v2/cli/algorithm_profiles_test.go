@@ -86,3 +86,19 @@ func TestLoadAlgorithmProfiles_MissingArchAndFile(t *testing.T) {
 		t.Errorf("missing file: got %v, want nil", got)
 	}
 }
+
+// TestLoadAlgorithmProfiles_MalformedYAML covers the yaml.Unmarshal error
+// path: a costsfile whose `costs` is not a map must warn and omit (return
+// nil) rather than panic or return garbage.
+func TestLoadAlgorithmProfiles_MalformedYAML(t *testing.T) {
+	t.Cleanup(viper.Reset)
+	path := filepath.Join(t.TempDir(), "algorithm-costs.yaml")
+	if err := os.WriteFile(path, []byte("costs: [not, a, map]"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	viper.Reset()
+	viper.Set("algorithms.costsfile", path)
+	if got := loadAlgorithmProfiles(); got != nil {
+		t.Errorf("malformed yaml: got %v, want nil", got)
+	}
+}

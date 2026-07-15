@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"path"
+	"sort"
 	"strings"
 	"time"
 
@@ -220,9 +221,6 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 		return false, nil // new zone not loaded, but not returning any error
 	}
 
-	zd.mu.Lock()
-	zd.Ready = true // this is a lie
-	zd.mu.Unlock()
 	new_zd.Ready = true
 
 	// Pre-refresh callbacks: analysis of old vs new zone data + modification of new_zd.
@@ -232,34 +230,15 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 		cb(zd, &new_zd)
 	}
 
-	// Hard flip: update served zone data atomically.
+	// Publish replacement: working set from refreshed data + dynamic RRs.
 	zd.mu.Lock()
-	zd.IncomingSerial = new_zd.IncomingSerial
-	if zd.FirstZoneLoad {
-		zd.CurrentSerial = new_zd.CurrentSerial
-		zd.FirstZoneLoad = false
-	} else {
-		zd.CurrentSerial++
-		if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial == OutboundSoaSerialPersist {
-			if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
-				zd.mu.Unlock()
-				lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
-				return false, fmt.Errorf("persist outgoing serial for zone %s: %w", zd.ZoneName, err)
-			}
-		}
+	firstLoad := zd.FirstZoneLoad
+	if err := zd.applyRefreshReplacementLocked(&new_zd, dynamicRRs, firstLoad); err != nil {
+		zd.mu.Unlock()
+		lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
+		return false, err
 	}
-	zd.ApexLen = new_zd.ApexLen
-	zd.XfrType = new_zd.XfrType
-	zd.ZoneStore = new_zd.ZoneStore
-	zd.ZoneType = new_zd.ZoneType
-	zd.Data = new_zd.Data
-	zd.Ready = true
-	zd.Status = ZoneStatusReady // co-located with Ready; set directly (already under zd.mu)
 	zd.mu.Unlock()
-
-	// Repopulate all dynamically generated RRs after zone refresh
-	// (they may have been lost if not present in the zone file)
-	zd.RepopulateDynamicRRs(dynamicRRs)
 
 	// Post-refresh callbacks: queue sends and notifications that need the live zone pointer.
 	for _, cb := range zd.OnZonePostRefresh {
@@ -334,34 +313,15 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 		cb(zd, &new_zd)
 	}
 
-	// Hard flip: update served zone data atomically.
+	// Publish replacement: working set from transferred data + dynamic RRs.
 	zd.mu.Lock()
-	zd.IncomingSerial = new_zd.IncomingSerial
-	if zd.FirstZoneLoad {
-		zd.CurrentSerial = new_zd.CurrentSerial
-		zd.FirstZoneLoad = false
-	} else {
-		zd.CurrentSerial++
-		if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial == OutboundSoaSerialPersist {
-			if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
-				zd.mu.Unlock()
-				lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
-				return false, fmt.Errorf("persist outgoing serial for zone %s: %w", zd.ZoneName, err)
-			}
-		}
+	firstLoad := zd.FirstZoneLoad
+	if err := zd.applyRefreshReplacementLocked(&new_zd, dynamicRRs, firstLoad); err != nil {
+		zd.mu.Unlock()
+		lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
+		return false, err
 	}
-	zd.ApexLen = new_zd.ApexLen
-	zd.XfrType = new_zd.XfrType
-	zd.ZoneStore = new_zd.ZoneStore
-	zd.ZoneType = new_zd.ZoneType
-	zd.Data = new_zd.Data
-	zd.Ready = true
-	zd.Status = ZoneStatusReady // co-located with Ready; set directly (already under zd.mu)
 	zd.mu.Unlock()
-
-	// Repopulate all dynamically generated RRs after zone refresh
-	// (they may have been lost if not present in the transferred zone)
-	zd.RepopulateDynamicRRs(dynamicRRs)
 
 	// Post-refresh callbacks: queue sends and notifications that need the live zone pointer.
 	for _, cb := range zd.OnZonePostRefresh {
@@ -430,13 +390,44 @@ func (zd *ZoneData) SetOption(option ZoneOption, value bool) {
 	zd.mu.Unlock()
 }
 
-func (zd *ZoneData) NameExists(qname string) bool {
-	if zd.ZoneStore != MapZone || zd.Data == nil || zd.Data.IsEmpty() {
+// getOwnerFrom reads an owner from an ALREADY-PINNED snapshot. Response paths
+// (QueryResponder, ZoneTransferOut) pin one snapshot at the top and read
+// everything through the *From helpers, so every read in one response comes from
+// the same serial — no intra-response tearing. snap==nil yields nil (the caller
+// SERVFAILs / refuses).
+func getOwnerFrom(snap *zoneSnapshot, qname string) *OwnerData {
+	if snap == nil {
+		return nil
+	}
+	return snap.Data[qname]
+}
+
+// getRRsetFrom reads one RRset from a pinned snapshot.
+func getRRsetFrom(snap *zoneSnapshot, qname string, rrtype uint16) *core.RRset {
+	owner := getOwnerFrom(snap, qname)
+	if owner == nil {
+		return nil
+	}
+	if rrset, ok := owner.RRtypes.Get(rrtype); ok {
+		return &rrset
+	}
+	return nil
+}
+
+// nameExistsFrom reports whether qname exists in a pinned snapshot.
+func nameExistsFrom(snap *zoneSnapshot, qname string) bool {
+	if snap == nil {
 		return false
 	}
-	_, ok := zd.Data.Get(qname)
-	lg.Debug("NameExists result", "qname", qname, "exists", ok)
+	_, ok := snap.Data[qname]
 	return ok
+}
+
+func (zd *ZoneData) NameExists(qname string) bool {
+	if zd.ZoneStore != MapZone {
+		return false
+	}
+	return nameExistsFrom(zd.publishedSnapshot(), qname)
 }
 
 func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
@@ -447,18 +438,7 @@ func (zd *ZoneData) GetOwner(qname string) (*OwnerData, error) {
 		return nil, fmt.Errorf("getOwner: only supported for MapZone, not %s",
 			ZoneStoreToString[zd.ZoneStore])
 	}
-	if zd.Data.IsEmpty() {
-		return nil, nil
-	}
-	if owner, ok := zd.Data.Get(qname); ok {
-		return &owner, nil
-	}
-	return nil, nil
-}
-
-// XXX: This MUST ONLY be called from the ZoneUpdater, due to locking issues
-func (zd *ZoneData) AddOwner(owner *OwnerData) {
-	zd.Data.Set(owner.Name, *owner)
+	return getOwnerFrom(zd.publishedSnapshot(), qname), nil
 }
 
 func (zd *ZoneData) GetRRset(qname string, rrtype uint16) (*core.RRset, error) {
@@ -489,10 +469,16 @@ func (zd *ZoneData) GetOwnerNames() ([]string, error) {
 		return nil, fmt.Errorf("getOwnerNames: only supported for MapZone, not %s",
 			ZoneStoreToString[zd.ZoneStore])
 	}
-	if zd.Data.IsEmpty() {
+	snap := zd.publishedSnapshot()
+	if snap == nil || len(snap.Data) == 0 {
 		return nil, nil
 	}
-	return zd.Data.Keys(), nil
+	names := make([]string, 0, len(snap.Data))
+	for name := range snap.Data {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
 }
 
 // XXX: Is qname the name of a zone cut for a child zone?
@@ -538,17 +524,38 @@ func (zd *ZoneData) GetSOA() (*dns.SOA, error) {
 		}, nil
 	}
 
-	// For all other cases (primary zones, ready zones, catalog zones), require real data
+	// For all other cases (primary zones, ready zones, catalog zones), require real data.
+	// GetSOA must never return (nil, nil): a nil SOA with no error is a landmine for
+	// callers that read soa.* only in the err==nil branch (e.g. RefreshEngine). During a
+	// concurrent reload the apex owner can be transiently absent — surface that as an
+	// error, not a nil SOA.
+	if snap := zd.publishedSnapshot(); snap != nil && snap.SOA != nil {
+		return snap.SOA, nil
+	}
 	owner, err := zd.GetOwner(zd.ZoneName)
-	if err != nil || owner == nil {
+	if err != nil {
 		return nil, err
 	}
-	soa := owner.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0]
-	return soa.(*dns.SOA), nil
+	if owner == nil {
+		return nil, fmt.Errorf("GetSOA: zone %s: apex owner not found", zd.ZoneName)
+	}
+	soaSet := owner.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+	if len(soaSet.RRs) == 0 {
+		return nil, fmt.Errorf("GetSOA: zone %s: no SOA record at apex", zd.ZoneName)
+	}
+	soa, ok := soaSet.RRs[0].(*dns.SOA)
+	if !ok {
+		return nil, fmt.Errorf("GetSOA: zone %s: apex SOA record is not a *dns.SOA (got %T)", zd.ZoneName, soaSet.RRs[0])
+	}
+	return soa, nil
 }
 
 func (zd *ZoneData) PrintOwners() {
-	for _, key := range zd.Data.Keys() {
+	names, err := zd.GetOwnerNames()
+	if err != nil {
+		return
+	}
+	for _, key := range names {
 		fmt.Printf("%s\n", key)
 	}
 }
@@ -671,32 +678,6 @@ func nextOutboundSerial(zd *ZoneData) uint32 {
 	return zd.CurrentSerial + 1
 }
 
-// setApexSOASerial rewrites the in-memory apex SOA RDATA so its Serial field
-// matches zd.CurrentSerial. Caller must hold zd.mu (or be in a context where
-// no concurrent reader/writer can observe the zone). Returns true if the SOA
-// RR was found and updated, false otherwise (zone not loaded, no apex, no
-// SOA RRset).
-func setApexSOASerial(zd *ZoneData) bool {
-	if zd == nil {
-		return false
-	}
-	apex, err := zd.GetOwner(zd.ZoneName)
-	if err != nil || apex == nil {
-		return false
-	}
-	soaRRset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
-	if len(soaRRset.RRs) == 0 {
-		return false
-	}
-	soa, ok := soaRRset.RRs[0].(*dns.SOA)
-	if !ok {
-		return false
-	}
-	soa.Serial = zd.CurrentSerial
-	apex.RRtypes.Set(dns.TypeSOA, soaRRset)
-	return true
-}
-
 // BumpSerialOnly advances the SOA serial per the configured
 // outbound_soa_serial mode and rewrites the apex SOA RR (and its
 // RRSIG, when the zone is signed). Does not notify downstreams.
@@ -704,53 +685,12 @@ func setApexSOASerial(zd *ZoneData) bool {
 // notification is not appropriate (e.g. inside a NOTIFY handler
 // where triggering downstream NOTIFYs could cause side effects).
 func (zd *ZoneData) BumpSerialOnly() (BumperResponse, error) {
-	resp := BumperResponse{
-		Zone: zd.ZoneName,
-	}
-
 	lg.Debug("BumpSerialOnly: bumping SOA serial", "zone", zd.ZoneName)
-	zd.mu.Lock()
-	defer zd.mu.Unlock()
-
-	resp.OldSerial = zd.CurrentSerial
-	zd.CurrentSerial = nextOutboundSerial(zd)
-	resp.NewSerial = zd.CurrentSerial
-	if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial == OutboundSoaSerialPersist {
-		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
-			lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
-			return resp, fmt.Errorf("persist outgoing serial for zone %s: %w", zd.ZoneName, err)
-		}
-	}
-	if !setApexSOASerial(zd) {
-		// No apex SOA to rewrite: nothing more to do (caller may be
-		// bumping serial on a not-yet-loaded zone).
-		return resp, nil
-	}
-	if zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
-		apex, err := zd.GetOwner(zd.ZoneName)
-		if err != nil {
-			lg.Error("GetOwner failed", "zone", zd.ZoneName, "err", err)
-			return resp, err
-		}
-		rrset := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
-		_, err = zd.SignRRset(&rrset, zd.ZoneName, nil, true, nil) // true = force signing, as we know the SOA has changed
-		if err != nil {
-			lg.Error("BumpSerialOnly: failed to sign SOA RRset", "zone", zd.ZoneName, "err", err)
-			return resp, err
-		}
-		apex.RRtypes.Set(dns.TypeSOA, rrset)
-	}
-
-	return resp, nil
+	return zd.publishSync()
 }
 
 func (zd *ZoneData) BumpSerial() (BumperResponse, error) {
-	resp, err := zd.BumpSerialOnly()
-	if err != nil {
-		return resp, err
-	}
-	zd.NotifyDownstreams()
-	return resp, nil
+	return zd.BumpSerialOnly()
 }
 
 func (zd *ZoneData) FetchChildDelegationData(childname string) (*ChildDelegationData, error) {
@@ -1020,68 +960,51 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 		}
 	}
 
-	// 3. Collect transport signals (if add-transport-signal enabled)
-	// Collect from zd.TransportSignal if it exists, and also from zone data at _dns.* owners
+	// 3. Preserve stored transport-signal owner RRsets across a refresh replace.
+	// A refresh rebuilds the working set from the freshly transferred zone data,
+	// which does not include server-synthesized _dns.<ns> signals; carry them
+	// over so they survive until the transport postpass regenerates them. (The
+	// synthesized-fallback map is carried separately in applyRefreshReplacementLocked.)
 	if zd.Options[OptAddTransportSignal] {
-		// Collect from zd.TransportSignal field
-		if zd.TransportSignal != nil && len(zd.TransportSignal.RRs) > 0 {
-			// Clone the transport signal RRset
-			tsClone := &core.RRset{
-				Name:   zd.TransportSignal.Name,
-				Class:  dns.ClassINET,
-				RRtype: zd.TransportSignal.RRtype,
-				RRs:    make([]dns.RR, len(zd.TransportSignal.RRs)),
-				RRSIGs: make([]dns.RR, len(zd.TransportSignal.RRSIGs)),
-			}
-			for i, rr := range zd.TransportSignal.RRs {
-				tsClone.RRs[i] = dns.Copy(rr)
-			}
-			for i, rr := range zd.TransportSignal.RRSIGs {
-				tsClone.RRSIGs[i] = dns.Copy(rr)
-			}
-			dynamicRRs = append(dynamicRRs, tsClone)
+		snap := zd.publishedSnapshot()
+		if snap == nil {
+			return dynamicRRs
 		}
-
-		// Also collect transport signals from zone data at _dns.* owners
-		// (they may exist in zone data even if TransportSignal field is not set)
-		for item := range zd.Data.IterBuffered() {
-			owner := item.Key
-			if strings.HasPrefix(owner, "_dns.") {
-				od := item.Val
-				// Check for SVCB
-				if svcbRRset, exists := od.RRtypes.Get(dns.TypeSVCB); exists && len(svcbRRset.RRs) > 0 {
-					svcbClone := &core.RRset{
-						Name:   owner,
-						Class:  dns.ClassINET,
-						RRtype: dns.TypeSVCB,
-						RRs:    make([]dns.RR, len(svcbRRset.RRs)),
-						RRSIGs: make([]dns.RR, len(svcbRRset.RRSIGs)),
-					}
-					for i, rr := range svcbRRset.RRs {
-						svcbClone.RRs[i] = dns.Copy(rr)
-					}
-					for i, rr := range svcbRRset.RRSIGs {
-						svcbClone.RRSIGs[i] = dns.Copy(rr)
-					}
-					dynamicRRs = append(dynamicRRs, svcbClone)
+		for owner, od := range snap.Data {
+			if od == nil || !strings.HasPrefix(owner, "_dns.") {
+				continue
+			}
+			if svcbRRset, exists := od.RRtypes.Get(dns.TypeSVCB); exists && len(svcbRRset.RRs) > 0 {
+				svcbClone := &core.RRset{
+					Name:   owner,
+					Class:  dns.ClassINET,
+					RRtype: dns.TypeSVCB,
+					RRs:    make([]dns.RR, len(svcbRRset.RRs)),
+					RRSIGs: make([]dns.RR, len(svcbRRset.RRSIGs)),
 				}
-				// Check for TSYNC
-				if tsyncRRset, exists := od.RRtypes.Get(core.TypeTSYNC); exists && len(tsyncRRset.RRs) > 0 {
-					tsyncClone := &core.RRset{
-						Name:   owner,
-						Class:  dns.ClassINET,
-						RRtype: core.TypeTSYNC,
-						RRs:    make([]dns.RR, len(tsyncRRset.RRs)),
-						RRSIGs: make([]dns.RR, len(tsyncRRset.RRSIGs)),
-					}
-					for i, rr := range tsyncRRset.RRs {
-						tsyncClone.RRs[i] = dns.Copy(rr)
-					}
-					for i, rr := range tsyncRRset.RRSIGs {
-						tsyncClone.RRSIGs[i] = dns.Copy(rr)
-					}
-					dynamicRRs = append(dynamicRRs, tsyncClone)
+				for i, rr := range svcbRRset.RRs {
+					svcbClone.RRs[i] = dns.Copy(rr)
 				}
+				for i, rr := range svcbRRset.RRSIGs {
+					svcbClone.RRSIGs[i] = dns.Copy(rr)
+				}
+				dynamicRRs = append(dynamicRRs, svcbClone)
+			}
+			if tsyncRRset, exists := od.RRtypes.Get(core.TypeTSYNC); exists && len(tsyncRRset.RRs) > 0 {
+				tsyncClone := &core.RRset{
+					Name:   owner,
+					Class:  dns.ClassINET,
+					RRtype: core.TypeTSYNC,
+					RRs:    make([]dns.RR, len(tsyncRRset.RRs)),
+					RRSIGs: make([]dns.RR, len(tsyncRRset.RRSIGs)),
+				}
+				for i, rr := range tsyncRRset.RRs {
+					tsyncClone.RRs[i] = dns.Copy(rr)
+				}
+				for i, rr := range tsyncRRset.RRSIGs {
+					tsyncClone.RRSIGs[i] = dns.Copy(rr)
+				}
+				dynamicRRs = append(dynamicRRs, tsyncClone)
 			}
 		}
 	}
@@ -1089,9 +1012,9 @@ func (zd *ZoneData) CollectDynamicRRs(conf *Config) []*core.RRset {
 	return dynamicRRs
 }
 
-// RepopulateDynamicRRs repopulates dynamically generated RRsets into the zone data after refresh.
-// The RRsets are passed in from RefreshEngine which collected them before the refresh.
-func (zd *ZoneData) RepopulateDynamicRRs(dynamicRRs []*core.RRset) {
+// repopulateWorkingSetLocked merges dynamic RRsets into the working set.
+// Caller must hold zd.mu and have initialized zd.workingSet.
+func (zd *ZoneData) repopulateWorkingSetLocked(dynamicRRs []*core.RRset) {
 	if len(dynamicRRs) == 0 {
 		return
 	}
@@ -1101,79 +1024,65 @@ func (zd *ZoneData) RepopulateDynamicRRs(dynamicRRs []*core.RRset) {
 			continue
 		}
 
-		owner, err := zd.GetOwner(rrset.Name)
-		if err != nil || owner == nil {
-			// Owner doesn't exist, create it
-			if zd.ZoneStore == MapZone {
-				owner = &OwnerData{
-					Name:    rrset.Name,
-					RRtypes: NewRRTypeStore(),
-				}
-				zd.Data.Set(rrset.Name, *owner)
-			} else {
-				lg.Error("RepopulateDynamicRRs: failed to get/create owner", "owner", rrset.Name, "zone", zd.ZoneName, "err", err)
+		owner := zd.stagedOwner(rrset.Name)
+		if owner == nil {
+			if zd.ZoneStore != MapZone {
+				lg.Error("RepopulateDynamicRRs: failed to get/create owner", "owner", rrset.Name, "zone", zd.ZoneName)
 				continue
 			}
+			owner = zd.getOrCreateWorkingOwner(rrset.Name)
 		}
 
-		// Get existing RRset if any, or create new one
 		existing, exists := owner.RRtypes.Get(rrset.RRtype)
 		if exists {
-			// Merge: add any RRs that don't already exist
+			// Get returns an RRset whose RRs slice shares the published
+			// snapshot's backing array; copy it before appending so a
+			// spare-capacity append cannot mutate the live snapshot.
+			merged := append([]dns.RR(nil), existing.RRs...)
 			for _, newRR := range rrset.RRs {
 				present := false
-				for _, oldRR := range existing.RRs {
+				for _, oldRR := range merged {
 					if dns.IsDuplicate(newRR, oldRR) {
 						present = true
 						break
 					}
 				}
 				if !present {
-					existing.RRs = append(existing.RRs, newRR)
+					merged = append(merged, newRR)
 				}
 			}
-			// Merge RRSIGs (replace if new ones exist)
+			existing.RRs = merged
 			if len(rrset.RRSIGs) > 0 {
 				existing.RRSIGs = rrset.RRSIGs
 			}
-			owner.RRtypes.Set(rrset.RRtype, existing)
+			zd.stageRRsetLocked(rrset.Name, existing)
 		} else {
-			// Set new RRset
-			owner.RRtypes.Set(rrset.RRtype, *rrset)
-		}
-
-		// Update owner in zone data (in case we created it or modified it)
-		if zd.ZoneStore == MapZone {
-			zd.Data.Set(rrset.Name, *owner)
-		}
-
-		// Special handling for transport signals: also set zd.TransportSignal
-		// Use the first transport signal RRset found as the primary one
-		if (rrset.RRtype == dns.TypeSVCB || rrset.RRtype == core.TypeTSYNC) && zd.TransportSignal == nil {
-			zd.TransportSignal = rrset
-			zd.AddTransportSignal = true
+			zd.stageRRsetLocked(rrset.Name, cloneRRset(*rrset))
 		}
 	}
 
 	lg.Info("RepopulateDynamicRRs: repopulated dynamic RRsets", "count", len(dynamicRRs), "zone", zd.ZoneName)
 
-	// CDS-publication observability: report whether the apex CDS RRset
-	// survived this refresh. CDS is currently NOT on the
-	// CollectDynamicRRs allowlist, so any CDS the rollover engine
-	// queued via pushDSRRsetViaNotify is wiped here unless the source
-	// zone file re-asserts it. The rollover engine's CDS-ownership
-	// marker (RolloverZoneState.last_published_cds_index_low/high)
-	// outlives the refresh, so the next push will re-publish — but
-	// with a churn cycle visible in zone-update logs as
-	// "no RRset for owner" warnings.
 	apexCdsRRs := 0
-	if owner, _ := zd.GetOwner(zd.ZoneName); owner != nil {
+	if owner := zd.stagedOwner(zd.ZoneName); owner != nil {
 		if rs, ok := owner.RRtypes.Get(dns.TypeCDS); ok {
 			apexCdsRRs = len(rs.RRs)
 		}
 	}
 	lgRollover.Debug("post-refresh apex CDS observation",
 		"zone", zd.ZoneName, "apex_cds_rrs", apexCdsRRs)
+}
+
+// RepopulateDynamicRRs repopulates dynamically generated RRsets and publishes.
+func (zd *ZoneData) RepopulateDynamicRRs(dynamicRRs []*core.RRset) {
+	if len(dynamicRRs) == 0 {
+		return
+	}
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	zd.ensureWorkingSet()
+	zd.repopulateWorkingSetLocked(dynamicRRs)
+	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 }
 
 func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
@@ -1409,7 +1318,7 @@ $TTL 86400
 		return nil, fmt.Errorf("failed to read zone data: %v", err)
 	}
 
-	zd.Ready = true
+	zd.InstallInitialSnapshot()
 	Zones.Set(zonename, zd)
 
 	return zd, nil

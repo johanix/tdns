@@ -112,7 +112,7 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 			return fmt.Errorf("unknown keygen algorithm: %q", algstr)
 		}
 		// Generate a new key and store it in the KeyStore
-		// pkc, msg, err := zd.KeyDB.GenerateKeypair(zd.ZoneName, "tdnsd", "active", dns.TypeKEY, alg, "", nil) // nil = no tx
+		// pkc, msg, err := zd.KeyDB.GenerateKeypair(zd.ZoneName, "tdns-auth", "active", dns.TypeKEY, alg, "", nil) // nil = no tx
 		// if err != nil {
 		// 	zd.Logger.Printf("Error from GeneratePrivateKey(%s, KEY, %s): %v", zd.ZoneName, algstr, err)
 		// 	return err

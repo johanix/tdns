@@ -1,11 +1,35 @@
+# Sample configuration for tdns-imr, the iterative/recursive resolver.
+#
+# The three things tdns-imr will not start without:
+#   imrengine.addresses    (validated: required)
+#   imrengine.transports   (validated: required)
+#   log.file               (validated: required, and read before anything else)
+#   apiserver.apikey       (not validated, but the API router refuses to start
+#                           without it, and that aborts startup)
+#
+# Everything else below is optional and shown with its default.
+#
+# NOTE the block is named `imrengine:`, not `imr:`. The only `imr.`-prefixed
+# key is `imr.localconfig` (see the bottom of this file).
+
 imrengine:
    active:              true   # Set to false to disable IMR. Defaults to true if not specified.
-   root-hints:          "/etc/tdns/root.hints"   # Optional: path to root hints file. If empty, uses compiled-in hints.
-   addresses:           [ 127.0.0.1:99, '[::1]:99']
-   transports:          [ do53, dot, doq ]
-   certfile:            /etc/hsync-test/certs/hoola.bandoola.crt
-   keyfile:             /etc/hsync-test/certs/hoola.bandoola.key
-   
+
+   # Optional: path to a root hints file. If empty, uses compiled-in hints.
+   root-hints:          "/etc/tdns/root.hints"
+
+   # REQUIRED. Addresses (with port) the resolver listens on for DNS queries.
+   addresses:           [ 127.0.0.1:53, '[::1]:53' ]
+
+   # REQUIRED. Any of: do53, dot, doh, doq.
+   # do53 needs no certificate. dot/doh/doq each need certfile+keyfile below;
+   # without them those listeners are silently skipped.
+   transports:          [ do53 ]
+
+   # Ports for the encrypted transports default to dot 853, doh 443, doq 853.
+   # certfile:            /etc/tdns/certs/imr.crt
+   # keyfile:             /etc/tdns/certs/imr.key
+
    # IMR Options (all are boolean flags, no values needed):
    # - query-for-transport: Query for transport signals opportunistically when observed
    # - always-query-for-transport: Always query for new auth servers
@@ -17,6 +41,54 @@ imrengine:
       # - always-query-for-transport
       # - query-for-transport-tlsa
 
+   # DNSSEC trust anchors. Choose ONE of the three forms below.
+   #
+   # IMPORTANT: if none is set, the tdns-imr DAEMON seeds no trust anchor at
+   # all and cannot establish a chain of trust. (The compiled-in root anchor is
+   # wired into `dog`, not into this daemon.) Validation is on by default —
+   # require_dnssec_validation defaults to true — so an unconfigured daemon
+   # validates against an empty anchor set.
+   #
+   # trust_anchor_ds:      ". IN DS 20326 8 2 E06D44B80B8F1D39A95C0B0D7C65D08458E880409BBC683457104237C7F8EC8D"
+   # trust_anchor_dnskey:  ". IN DNSKEY 257 3 8 AwEAAaz/tAm8y..."
+   # trust-anchor-file:    /etc/tdns/root.key    # unbound-style, one DS/DNSKEY per line
+   #                                             # (note: hyphens, unlike the two above)
+
+   # require_dnssec_validation: true
+
+   # Stub / forward zones: answer these from the named servers instead of
+   # iterating from the root.
+   # stubs:
+   #    - zone:     internal.example.
+   #      servers:  [ 192.0.2.53, 2001:db8::53 ]
+
+   # Optional IMR debug log, separate from log.file below.
+   # logging:
+   #    enabled:  true
+   #    file:     /var/log/tdns/imr-debug.log    # this is the default when enabled
+
+   # Resolver tuning. Every key below is optional; the value shown IS the
+   # default. Inspect the effective values at runtime with `dump tuning`
+   # (interactive mode) or `tdns-cli agent imr dump-tuning`.
+   # tuning:
+   #    backoff:
+   #       first_failure:     15s    # first backoff after a server failure
+   #       max_failure:       1h     # ceiling (raised to first_failure if set lower)
+   #       multiplier:        3.0    # exponential growth factor
+   #       jitter_fraction:   0.25   # must be in [0,1); else reset to default
+   #       routing_failure:   1h     # backoff after an unreachable-network error
+   #       lame_delegation:   1h     # backoff after a lame delegation
+   #    address_family:
+   #       window_duration:   10m    # observation window for per-family failures
+   #       failure_threshold: 5      # distinct failures before a family is suspect
+   #       suspect_duration:  10m    # how long a family stays suspect
+   #       probe_interval:    30s    # how often a suspect family is re-probed
+   #    discovery:
+   #       retry_after_failure: 30s  # transport-signal discovery retry
+   #       max_failures:        3    # give up discovery after this many
+   #    query_budget:            8s  # total wall-clock budget for one query
+   #    upgrade_indirect_cache_hits: true   # left unset in code; treated as true
+
 # DNSSEC algorithms whose DNSKEY/RRSIG payloads are large for UDP. When a
 # referral DS RRset uses one, the IMR fetches the child zone's DNSKEY over TCP
 # from the start (do53-tcp), not UDP with TC fallback. Each entry is an
@@ -27,8 +99,25 @@ imrengine:
 dnssec:
    large_algorithms: [ MLDSA*, SLHDSA*, FALCON*, CROSS* ]
 
+# The HTTP management API. apikey is effectively required: SetupSimpleAPIRouter
+# returns an error when it is empty, and that aborts tdns-imr startup.
+# addresses, by contrast, is optional — omit it and the API simply does not
+# listen while the resolver keeps running.
+apiserver:
+   apikey:     "REPLACE-ME-with-a-long-random-string"
+   addresses:  [ 127.0.0.1:8080 ]
+   # usetls defaults to TRUE when not set. With usetls true you must also give
+   # certfile/keyfile, or the API listener fails to start (the resolver itself
+   # keeps running). Set it false for a plaintext API on loopback.
+   usetls:     false
+   # certfile:   /etc/tdns/certs/api.crt
+   # keyfile:    /etc/tdns/certs/api.key
+
 log:
    file:                /var/log/tdns/tdns-imr.log
    level:               info    # default level: debug|info|warn|error
 
-
+# Optional second config file, merged on top of this one. This is the only
+# `imr.`-prefixed key; it is read directly and is not part of `imrengine:`.
+# imr:
+#    localconfig:  /etc/tdns/tdns-imr-local.yaml

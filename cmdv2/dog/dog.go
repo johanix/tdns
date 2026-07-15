@@ -53,7 +53,7 @@ var rootCmd = &cobra.Command{
 	Long: `dog is a CLI utility used issue DNS queries and present the result.
 	
 	Options:
-		+DNSSEC: Set the DO (DNSEC OK) bit in queries
+		+DNSSEC or +DO: Set the DO (DNSSEC OK) bit in queries
 		+CD: Set the CD (Checking Disabled) bit in queries
 		+COMPACT: Set the COMPACT bit in queries (for compact denial of existence proofs)
 		+TCP: Force TCP transport
@@ -64,7 +64,6 @@ var rootCmd = &cobra.Command{
 		+OPCODE=QUERY|NOTIFY|UPDATE: Set the opcode of the query
 		+OTS=opt_in|opt_out: Set the OTS (transport signaling) EDNS(0)option
 		+ER=agent.domain: Add EDNS(0) Error Reporting option with agent domain (RFC9567)
-		+DO_BIT: Set the DO (DNSEC OK) bit
 		+DELEG: Set the DELEG bit in queries
 		+PRIVACY or +PR: Set the PR (Privacy Requested) bit in queries (requires encrypted transport)
 		+MULTI: Present RRs in multi-line format

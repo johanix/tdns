@@ -29,11 +29,15 @@ service:
 dnsengine:
    addresses:    [ 127.0.0.1:5354, '[::1]:5354' ]
    transports:   [ doq, dot, doh ]
+   # Ports per encrypted transport. Defaults: doq 853, dot 853, doh 443.
+   # NOTE: dnsengine.ports.do53 is NOT read. Do53 always listens on the ports
+   # embedded in dnsengine.addresses above.
    ports:
-      do53:  [ 53 ]
       doq:   [ 853 ]
       dot:   [ 853 ]
       doh:   [ 443 ]
+   # certfile/keyfile are required for dot, doh and doq. If either is empty
+   # those listeners are not started (do53 is unaffected).
    certfile:  /etc/tdns/certs/servers/localhost..crt
    keyfile:   /etc/tdns/certs/servers/localhost..key
    # outbound_soa_serial controls the SOA serial advertised to secondaries:
@@ -59,9 +63,13 @@ dnsengine:
 
 resignerengine:
    interval:  300    # seconds between runs. Reasonable value is likely ~3600
-   keygen:
-      mode:       internal    # internal | external
-      generator:  /usr/sbin/dnssec-keygen
+                     # clamped to the range 60..3600
+   # NOTE: resignerengine.keygen is NOT read by the code. Key generation is
+   # always internal. Left here only to document that the keys are not
+   # produced by an external generator.
+   # keygen:
+   #    mode:       internal
+   #    generator:  /usr/sbin/dnssec-keygen
 
 imrengine:
    active:             true                    # true | false, default is true
@@ -74,18 +82,56 @@ apiserver:
    certfile:   /etc/tdns/certs/servers/localhost..crt
    keyfile:    /etc/tdns/certs/servers/localhost..key
 
+# Statically declared TSIG keys.
+#
+# Every key named here is synced into the TSIG keystore in the database
+# (db.file below) as an origin=config row at startup, and the live key cache is
+# then rebuilt from the database. Keys may also be added at runtime with
+#   tdns-cli auth keystore tsig add ...
+# which stores them with origin=keystore. There is no separate keystore path:
+# the keystore IS the db.file SQLite database.
+#
+# A key name referenced from a zone's primaries:, notify:, allow-notify: or
+# downstreams: must resolve either here or in the keystore, otherwise that zone
+# is quarantined at config load with "unknown key".
+#
+# NOKEY and BLOCKED are reserved ACL sentinels and may NOT be used as key names.
+# Supported algorithms: hmac-sha1, hmac-sha224, hmac-sha256, hmac-sha384,
+# hmac-sha512.
+#
+# owner: is an optional free-text provenance LABEL shown by
+#   tdns-cli auth keystore tsig list
+# It does not scope the key to a zone and grants no authority of its own. It
+# defaults to the key's origin ("config" for entries declared here).
+keys:
+   tsig:
+      # The two keys referenced by the tsig-acl.example. zone in
+      # auth-zones.sample.yaml. Generate a secret with e.g.
+      #   openssl rand -base64 32
+      # and prefer adding it via `tdns-cli auth keystore tsig add --secret-file`
+      # over pasting it into a config file.
+      - name:       xfr-key-2026.
+        algorithm:  hmac-sha256
+        secret:     "REPLACE-ME-base64-secret-for-the-2026-key="
+        owner:      rollover-2026   # optional label, not a zone scope
+
+      - name:       xfr-key-2025.   # kept alive during the rotation overlap
+        algorithm:  hmac-sha256
+        secret:     "REPLACE-ME-base64-secret-for-the-2025-key="
+        owner:      rollover-2025
+
 server:
    id:        ooga booga boo
    version:   tdns-server {version}
    hostname:  there-is-no-place-like-127.0.0.1
 
 childsync:                 # What to do when we are the child
-   schemes:         [ update ]    # , notify ] # this child will use either
+   # NOTE: only update-ns, update-a and update-aaaa are read from this block.
+   # Child scheme selection is configured under delegationsync.child.schemes
+   # below; childsync.schemes / sync-on-boot / syncwithparent are NOT read.
    update-ns:       true
    update-a:        true
    update-aaaa:     true
-   sync-on-boot:    false
-   syncwithparent:  true
 
 # Named delegation backends for parent zones that receive child UPDATEs.
 # Predefined: "db" and "direct" (no config needed).
@@ -115,18 +161,18 @@ delegationsync:
          target:     updates.{ZONENAME}
          addresses:  [ 127.0.0.1, '::1' ]
          keygen:
-            mode:       internal               # internal | external
-            generator:  /opt/local/bin/dnssec-keygen
+            # Only `algorithm` is read on the parent side; `mode` and
+            # `generator` are not.
             algorithm:  ED25519
 
    child:
       # in child zones, we attempt the following schemes, if the parent supports
       # them and we're allowed to modify the child zone (adding CDS, CSYNC, KEY
       # RRs, re-signing, etc):
-      schemes:  [ notify, update ]
+      schemes:  [ notify, update ]      # REQUIRED for child-side delegation sync
       update:
          keygen:
-            mode:       internal               # internal | external
+            # `algorithm` and `generator` are read on the child side; `mode` is not.
             generator:  /opt/local/bin/dnssec-keygen
             algorithm:  ED25519
 
@@ -140,15 +186,18 @@ scanner:
       checks:    1     # consecutive all-NS checks before accepting (default: 1)
       interval:  300   # seconds between checks (default: 300)
 
-keybootstrap:
-   consistent-lookup:
-      iterations:   3
-      interval:     60     # seconds between lookups
-      nameservers:  all    # one | all
+# NOTE: there is no `keybootstrap:` config block. The key-bootstrap knobs the
+# code actually reads are:
+#   keystate.require_manual_bootstrap   (bool)
+#   keystate.allow_auto_bootstrap       (bool)
+#   verifyengine.attempts               (default 3)
+#   verifyengine.retry_interval         (default 60, seconds)
+# Per-zone bootstrap methods are set under a zone's updatepolicy.child.keybootstrap.
 
-# DNSSEC policies. Each policy is referenced from a zone's `dnssec-policy:`
-# field. The rollover, ttls, and clamping subtrees are optional; omitting
-# them gives a static-key policy with no automated rollover.
+# DNSSEC policies. Each policy is referenced from a zone's `dnssecpolicy:`
+# field (one word: no underscore, no hyphen). The rollover, ttls, and clamping
+# subtrees are optional; omitting them gives a static-key policy with no
+# automated rollover.
 #
 # Rollover (Phase 4 of the automated KSK rollover plan):
 #   method: none | multi-ds | double-signature
@@ -250,7 +299,7 @@ dnssec:
          ttls:
             dnskey:  2h
 
-   # Named DNSSEC policies. Each zone references one via its dnssec_policy
+   # Named DNSSEC policies. Each zone references one via its dnssecpolicy:
    # field. A policy that sets different ksk.algorithm and zsk.algorithm must
    # have that pair allowlisted in dnssec.split_algorithms above, or config
    # load fails. A policy may also set `template: <name>` to inherit defaults
@@ -404,9 +453,8 @@ catalog:
       kdc:                          # Group name (matches "configkdc" in catalog zone)
          upstream:  "127.0.0.1:5353"   # Where to AXFR member zones from (REQUIRED)
          tsig_key:  ""                 # Optional TSIG key name for authentication
-         store:     map                # Zone store type: map (default), slice, or xfr
+         store:     map                # Zone store type: map (default) or xfr
                                        # - map:   Default, general-purpose (recommended)
-                                       # - slice: Experimental (may be faster/use less memory)
                                        # - xfr:   Zone transfer only (AXFR, NO normal queries)
          options:   []                 # Optional zone options to apply to member zones
                                        # Example: ["delegation-sync-child"]
@@ -415,7 +463,7 @@ catalog:
          upstream:  "192.0.2.1:5353"
          tsig_key:  ""
          store:     map                # Default storage (recommended)
-         options:   []
+         options:   []                 # e.g. ["delegation-sync-child"]
 
    # Signing groups (documentation/informational only, not used for auto-configuration).
    # These groups can be used to indicate which signing infrastructure is
@@ -491,7 +539,7 @@ log:
    #   conn-retry: info
 
 common:
-   servername:  tdns-auth
+   # NOTE: only common.command is read. common.servername is not.
    command:     /usr/local/libexec/tdns-auth
 
 # Registrars are declared here, including where they want notifications/updates.
