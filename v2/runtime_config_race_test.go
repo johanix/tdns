@@ -58,13 +58,21 @@ func TestRuntimeConfigSnapshotNoRace(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for j := 0; j < 5000; j++ {
-				rt := ConfLive()
-				_ = rt.DnssecPolicies["default"]
-				_ = rt.MultiSigner
-				_ = rt.MaxRefresh
-				_ = rt.MinRefresh
-				_ = NeedsResigning(rrsig, 3600)
+			// Read for the full duration (until stop) rather than a fixed
+			// iteration count, so readers overlap the writer's reloads the
+			// whole time — maximizing race-detection coverage.
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					rt := ConfLive()
+					_ = rt.DnssecPolicies["default"]
+					_ = rt.MultiSigner
+					_ = rt.MaxRefresh
+					_ = rt.MinRefresh
+					_ = NeedsResigning(rrsig, 3600)
+				}
 			}
 		}()
 	}
