@@ -1,4 +1,4 @@
-## tdns-cli agent keystore dnssec auto-rollover status
+## tdns-cli auth zone dnssec auto-rollover status
 
 Print rollover state for a zone (KSK and ZSK)
 
@@ -24,7 +24,7 @@ Use -v / --verbose to show rollover_index spans behind the keyid lists
 and the policy summary.
 
 ```
-tdns-cli agent keystore dnssec auto-rollover status [flags]
+tdns-cli auth zone dnssec auto-rollover status [flags]
 ```
 
 ### Options
@@ -41,13 +41,15 @@ tdns-cli agent keystore dnssec auto-rollover status [flags]
 ```
       --config string   config file (default is /etc/tdns/tdns-cli.yaml)
   -d, --debug           debug output
+  -F, --force           force operation
   -H, --headers         show headers
       --ksk             Render only the KSK section (status / when); ignored by other subcommands
   -Z, --pzone string    parent zone name
+      --version         print version and supported algorithms, then exit
       --zsk             Render only the ZSK section (status / when); ignored by other subcommands
 ```
 
 ### SEE ALSO
 
-* [tdns-cli agent keystore dnssec auto-rollover](tdns-cli_agent_keystore_dnssec_auto-rollover.md)	 - Manage and inspect automated KSK rollover (scheduled + manual-ASAP)
+* [tdns-cli auth zone dnssec auto-rollover](tdns-cli_auth_zone_dnssec_auto-rollover.md)	 - Manage and inspect automated KSK rollover (scheduled + manual-ASAP)
 

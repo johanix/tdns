@@ -794,7 +794,9 @@ without modifying anything. Pass --force to actually delete.`,
 	purge.Flags().Bool("force", false, "Actually delete; otherwise dry-run")
 	purge.MarkFlagRequired("zone")
 
-	c.AddCommand(add, importCmd, generate, algorithms, policies, list, export, delete, setstate, genDS, rollover, clear, policyCleanup, purge, newKeystoreDnssecPolicyCmd(role), newKeystoreDnssecDsPushCmd(role), newKeystoreDnssecQueryParentCmd(role), newAutoRolloverCmd(role))
+	// auto-rollover moved to `zone dnssec auto-rollover` (auth only; agents never
+	// sign, so it was vestigial under `agent keystore dnssec`).
+	c.AddCommand(add, importCmd, generate, algorithms, policies, list, export, delete, setstate, genDS, rollover, clear, policyCleanup, purge, newKeystoreDnssecPolicyCmd(role), newKeystoreDnssecDsPushCmd(role), newKeystoreDnssecQueryParentCmd(role))
 	return c
 }
 
