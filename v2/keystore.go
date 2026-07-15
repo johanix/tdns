@@ -755,15 +755,22 @@ func (kdb *KeyDB) forceZoneKeysToPolicyRoles(ctx context.Context, zd *ZoneData, 
 	}
 
 	// Surviving keytags = the kept role's keys (all states) + the just-generated
-	// active key(s), visible within this tx. Strip any RRSIG whose key is gone.
+	// active key(s), visible within this tx.
 	surviving, err := txZoneKeytags(tx, zone)
 	if err != nil {
 		return fmt.Errorf("forceZoneKeysToPolicyRoles: list surviving keys for %s: %w", zone, err)
 	}
+	// Strip (a) orphaned RRSIGs — those made by a dropped key — AND (b) ALL RRSIGs
+	// over the DNSKEY RRset. The DNSKEY RRset content always changes when the key
+	// set changes (a DNSKEY comes or goes), so even the KEPT KSK's DNSKEY RRSIG now
+	// covers a stale key set; it is not an orphan (its key is still active) and the
+	// additive re-sign would leave it in place as bogus cruft. Stripping every
+	// DNSKEY RRSIG here lets the re-sign regenerate exactly one fresh RRSIG per
+	// active KSK. (This method only runs when a role changed, so the key set did.)
 	if _, err := zd.StripZoneRRSIGs(ctx, func(rrsig *dns.RRSIG) bool {
-		return !surviving[rrsig.KeyTag]
+		return !surviving[rrsig.KeyTag] || rrsig.TypeCovered == dns.TypeDNSKEY
 	}); err != nil {
-		return fmt.Errorf("forceZoneKeysToPolicyRoles: strip orphaned RRSIGs for %s: %w", zone, err)
+		return fmt.Errorf("forceZoneKeysToPolicyRoles: strip stale/orphaned RRSIGs for %s: %w", zone, err)
 	}
 
 	if err := tx.Commit(); err != nil {

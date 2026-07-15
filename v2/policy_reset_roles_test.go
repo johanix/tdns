@@ -224,3 +224,60 @@ func TestForceZoneKeysToPolicyRoles(t *testing.T) {
 		}
 	})
 }
+
+// TestForceZoneKeysDNSKEYRRSIGStrip covers the ZSK-only flip's subtle case: the
+// DNSKEY RRset content changes (old ZSK's DNSKEY out, new ZSK's in), so the KEPT
+// KSK's DNSKEY RRSIG now covers a stale key set. It is NOT an orphan (its key is
+// still active), so the orphan strip alone would leave it as bogus cruft. The
+// force op must strip ALL DNSKEY RRSIGs; the kept KSK's non-DNSKEY (SOA) RRSIG
+// must survive, and the dropped ZSK's orphans must go.
+func TestForceZoneKeysDNSKEYRRSIGStrip(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	kskTag := genRoleKey(t, kdb, DnskeyStateActive, algA, "KSK")
+	zskTag := genRoleKey(t, kdb, DnskeyStateActive, algB, "ZSK")
+
+	zone := `zsk-alg.example.	3600	IN	SOA	ns.zsk-alg.example. hostmaster.zsk-alg.example. 1 7200 1800 604800 7200
+zsk-alg.example.	3600	IN	NS	ns.zsk-alg.example.
+`
+	zd := testZone(t, algZone, zone)
+	registerZones(t, zd)
+
+	mkSig := func(covered, keytag uint16) *dns.RRSIG {
+		return &dns.RRSIG{
+			Hdr:         dns.RR_Header{Name: algZone, Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 3600},
+			TypeCovered: covered,
+			KeyTag:      keytag,
+			SignerName:  algZone,
+		}
+	}
+	apex, ok := zd.Data.Get(algZone)
+	if !ok {
+		t.Fatal("apex owner missing from zd.Data")
+	}
+	// DNSKEY RRset signed by BOTH the kept KSK and the dropped ZSK.
+	dk := apex.RRtypes.GetOnlyRRSet(dns.TypeDNSKEY)
+	dk.Name = algZone
+	dk.RRtype = dns.TypeDNSKEY
+	dk.RRSIGs = []dns.RR{mkSig(dns.TypeDNSKEY, kskTag), mkSig(dns.TypeDNSKEY, zskTag)}
+	apex.RRtypes.Set(dns.TypeDNSKEY, dk)
+	// SOA RRset signed by both roles.
+	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+	soa.RRSIGs = []dns.RR{mkSig(dns.TypeSOA, kskTag), mkSig(dns.TypeSOA, zskTag)}
+	apex.RRtypes.Set(dns.TypeSOA, soa)
+	zd.InstallInitialSnapshot()
+
+	// ZSK-only flip: keep KSK (algA), drop+regen ZSK (→ algC).
+	if err := kdb.forceZoneKeysToPolicyRoles(context.Background(), zd, splitPol(algA, algC), false, true); err != nil {
+		t.Fatalf("forceZoneKeysToPolicyRoles: %v", err)
+	}
+
+	// DNSKEY RRSIGs: ALL stripped — the kept KSK's stale one AND the ZSK orphan.
+	if tags := zd.mustRRSIGKeytags(t, algZone, dns.TypeDNSKEY); len(tags) != 0 {
+		t.Fatalf("DNSKEY RRSIGs after ZSK flip = %v, want none (incl. the kept KSK's stale one)", tags)
+	}
+	// SOA RRSIGs: kept KSK's survives (not DNSKEY-covered, key still active); the
+	// dropped ZSK's orphan is stripped.
+	if tags := zd.mustRRSIGKeytags(t, algZone, dns.TypeSOA); len(tags) != 1 || tags[0] != kskTag {
+		t.Fatalf("SOA RRSIGs after ZSK flip = %v, want [%d] (kept KSK only)", tags, kskTag)
+	}
+}
