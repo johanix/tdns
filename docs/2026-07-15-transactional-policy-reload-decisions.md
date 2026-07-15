@@ -107,6 +107,33 @@ applied-policy DB writes are not ctx-aware anywhere in the tree, so full
 threading is a separate `SignZone`-ctx change; the parameter is carried now so
 that change is drop-in later.
 
+### D7 — policy-reset is surgical (per-role key handling)
+**Decision:** policy-reset forces the zone's active key set to match the config
+policy's algorithms **per role** — keep any key whose algorithm is already
+correct, drop+regenerate only the role(s) whose algorithm changed
+(`zoneActiveKeyRoleChanges` → `forceZoneKeysToPolicyRoles`). A ZSK-only change
+keeps the KSK, so the parent DS stays intact; the DS-break warning fires only
+when the KSK algorithm changed. A role is "changed" if it lacks a right-alg
+active key or carries a wrong-alg one (missing role or mid-rollover mix →
+changed, drop all of that role's keys across every state + regen one). A
+split↔CSK **mode change** is handled conservatively as a full reset with the DS
+warning (chosen over trying to keep a former-CSK key as a KSK, whose mixed
+signer semantics aren't worth the risk in a break-glass tool). The no-op case
+(both roles already correct) still re-signs additively + records applied=config.
+**Motivation:** the original unconditional drop+regenerate-all rolled the KSK
+even for a ZSK-only change → new KSK keytag → the parent DS went stale and the
+chain of trust broke for nothing (confirmed on hardware: MAYO5+MAYO2 →
+MAYO5+MAYO1 dropped the MAYO5 KSK). Surgical per-role handling is the correct
+abrupt hard-flip counterpart to change-policy's gradual roll, and because it
+pre-aligns keys before re-signing it works in strict completeness mode
+(reconcile has nothing to refuse). **Side effect:** removed the clear-only
+post-commit cache invalidation from `f81defa` — it was dead for the plain
+`keystore dnssec clear` CLI path (external tx, so the localtx-gated invalidation
+never fired) and is now unused by policy-reset, which uses
+`forceZoneKeysToPolicyRoles` with its own complete post-commit invalidation. The
+general keystore-cache-invalidation hardening (all subcommands / external txs)
+remains a separate follow-up (G3).
+
 ---
 
 ## Deferred to PR-2 (gates)
@@ -139,3 +166,17 @@ in-flight-ZSK-roll and §5.6 deleted-policy fallback branches, and retargets
 routing + escape hatch); wiring it into the live reload/restart paths is the
 behavioural change and carries the §9 live-matrix merge gate — kept separate so
 each PR is reviewable and independently testable.
+
+### G3 — Generic keystore cache-invalidation hardening (CodeRabbit) — follow-up
+**Decision:** the keystore's `DnssecKeyMgmt` cache invalidations are per-subcommand
+and mid-transaction; several are unlocked map mutations, and the pattern is
+vulnerable to the same uncommitted-window re-cache race across `add` / `generate`
+/ `setstate` / `delete`, and skips post-commit invalidation entirely for
+caller-supplied (external) transactions. Generalizing this — a single locked,
+post-commit invalidation hook that also works with external txs — is a deliberate
+refactor of shared DNSSEC-keystore code, deferred to its own pass.
+**Motivation:** these are pre-existing issues (PR-1 only touched the policy-reset
+path); a broad keystore-cache refactor doesn't belong in a policy-reload PR and
+carries real regression risk on the key store. D4/D7 fixed the one observed
+(policy-reset) path completely via the explicit `refreshActiveDnssecKeys` + the
+force op's own complete post-commit invalidation.
