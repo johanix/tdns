@@ -100,14 +100,14 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			resp.Msg = fmt.Sprintf("Zone %s: resigned, %d RRSIGs written by currently-active keys", zd.ZoneName, newrrsigs)
 
 		case "policy-set":
-			resp.Msg, err = setZonePolicy(zd, kdb, zp.Policy)
+			resp.Msg, err = setZonePolicy(r.Context(), zd, kdb, zp.Policy)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
 			}
 
 		case "change-policy":
-			resp.Msg, err = changeZonePolicy(zd, kdb, zp.Policy)
+			resp.Msg, err = changeZonePolicy(r.Context(), zd, kdb, zp.Policy)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -367,7 +367,7 @@ func zoneOptionsFromStrings(strs []string) map[ZoneOption]bool {
 // retired key's existing RRSIGs stay in place. The zone is therefore briefly
 // double-signed and stays validatable; the KeyStateWorker removes the retired
 // keys and strips their RRSIGs after propagation_delay.
-func setZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, error) {
+func setZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName string) (string, error) {
 	policyName = strings.TrimSpace(policyName)
 	if policyName == "" {
 		return "", fmt.Errorf("policy-set: no policy specified")
@@ -408,7 +408,7 @@ func setZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, error) 
 	// under. The additive sign reconciles (retire wrong-alg, generate new) and
 	// adds new-key RRSIGs, leaving retired keys' RRSIGs in place for a graceful
 	// transition.
-	newrrsigs, err := applyZonePolicyTransactional(zd, kdb, &pol, policyName, PolicyApplySourceCommand)
+	newrrsigs, err := applyZonePolicyTransactional(ctx, zd, kdb, &pol, policyName, PolicyApplySourceCommand)
 	if err != nil {
 		return "", fmt.Errorf("policy-set: %w", err)
 	}
@@ -454,7 +454,7 @@ func setZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, error) 
 //     predicate): refused.
 //   - KSK-only alg target / strict mode: deferred to the reconcile, which
 //     refuses (defensive backstop) — but we surface a clean error here too.
-func changeZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, error) {
+func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName string) (string, error) {
 	policyName = strings.TrimSpace(policyName)
 	if policyName == "" {
 		return "", fmt.Errorf("change-policy: no policy specified")
@@ -538,7 +538,7 @@ func changeZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, erro
 	oldName := zd.DnssecPolicyName
 	zd.mu.Unlock()
 
-	if _, err := applyZonePolicyTransactional(zd, kdb, &pol, policyName, PolicyApplySourceCommand); err != nil {
+	if _, err := applyZonePolicyTransactional(ctx, zd, kdb, &pol, policyName, PolicyApplySourceCommand); err != nil {
 		return "", fmt.Errorf("change-policy: %w", err)
 	}
 
@@ -580,13 +580,17 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 	// zone falls back to once the override + applied records are cleared. Read
 	// the name from Conf.Zones (as the list-zones handler does) and the struct
 	// from the ConfLive() snapshot (lock-free).
+	// Conf.Zones is replaced wholesale by a config reload; guard the scan with
+	// confMu (read lock), matching the list-zones handler above.
 	var configName string
+	confMu.RLock()
 	for i := range Conf.Zones {
 		if dns.Fqdn(Conf.Zones[i].Name) == zd.ZoneName {
 			configName = strings.TrimSpace(Conf.Zones[i].DnssecPolicy)
 			break
 		}
 	}
+	confMu.RUnlock()
 	if configName == "" {
 		return "", fmt.Errorf("policy-reset: zone %s has no config-base dnssec_policy to reset to (dynamic/API-managed zones are not supported)", zd.ZoneName)
 	}
@@ -624,14 +628,14 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 	// stripping the old keys' now-orphaned RRSIGs. Reuse the keystore `clear`
 	// path (delete all keys → regen 1 active KSK + 1 active ZSK → strip orphans).
 	if _, err := kdb.DnssecKeyMgmt(ctx, nil, KeystorePost{Command: "dnssec", SubCommand: "clear", Zone: zd.ZoneName}); err != nil {
-		return "", fmt.Errorf("policy-reset: dropping/regenerating keys for zone %s: %w", zd.ZoneName, err)
+		return "", fmt.Errorf("policy-reset: dropping/regenerating keys for zone %s FAILED — the CLI override and applied-policy records were ALREADY cleared (zone now falls back to config policy %q) and its keys may be partially dropped; re-run `zone dnssec policy-reset --confirm` or restart to converge: %w", zd.ZoneName, configName, err)
 	}
 
 	// 4) Re-sign under the config policy and record applied = config through the
 	// shared transactional core (source config → no CLI override written).
-	newrrsigs, err := applyZonePolicyTransactional(zd, kdb, &pol, configName, PolicyApplySourceConfig)
+	newrrsigs, err := applyZonePolicyTransactional(ctx, zd, kdb, &pol, configName, PolicyApplySourceConfig)
 	if err != nil {
-		return "", fmt.Errorf("policy-reset: re-signing zone %s under config policy %q: %w", zd.ZoneName, configName, err)
+		return "", fmt.Errorf("policy-reset: re-signing zone %s under config policy %q FAILED — keys were dropped/regenerated and the override+applied records ALREADY cleared, so the zone is unsigned until it re-signs; re-run `zone dnssec policy-reset --confirm` or restart to converge: %w", zd.ZoneName, configName, err)
 	}
 
 	var b strings.Builder

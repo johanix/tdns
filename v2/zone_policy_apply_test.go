@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -182,7 +183,7 @@ func TestApplyZonePolicyTransactionalRevertOnSignFailure(t *testing.T) {
 	polB := kskzsk(dns.RSASHA256, dns.ED25519) // KSK alg change → SignZone refuses
 	withLivePolicies(t, map[string]DnssecPolicy{"polB": polB})
 
-	if _, err := applyZonePolicyTransactional(zd, kdb, &polB, "polB", PolicyApplySourceCommand); err == nil {
+	if _, err := applyZonePolicyTransactional(context.Background(), zd, kdb, &polB, "polB", PolicyApplySourceCommand); err == nil {
 		t.Fatal("expected SignZone failure on incompatible KSK algorithm change")
 	}
 

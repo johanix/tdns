@@ -20,7 +20,10 @@
 
 package tdns
 
-import "fmt"
+import (
+	"context"
+	"fmt"
+)
 
 // PolicyApplySource records why a policy was applied, and is persisted as
 // applied_source. 'command' additionally persists a CLI override (intent);
@@ -158,13 +161,19 @@ func resolvePolicyPair(kdb *KeyDB, zone, configPolicyName string) (
 // The old binding is snapshotted for REVERT ONLY; it is never used to classify
 // the change (blocking ①). Caller is responsible for having classified/refused
 // before calling this.
+//
+// ctx is threaded as the first parameter per the house convention and to carry
+// cancellation once SignZone and the applied-policy DB writes become ctx-aware;
+// those downstream calls do not yet consume it.
 func applyZonePolicyTransactional(
+	ctx context.Context,
 	zd *ZoneData,
 	kdb *KeyDB,
 	newPol *DnssecPolicy,
 	newName string,
 	source PolicyApplySource,
 ) (newRRSIGs int, err error) {
+	_ = ctx // reserved: no ctx-aware downstream call yet (see doc comment)
 	if newPol == nil {
 		return 0, fmt.Errorf("applyZonePolicyTransactional: nil policy %q for zone %s", newName, zd.ZoneName)
 	}
