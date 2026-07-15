@@ -44,6 +44,17 @@ var (
 	reloadDuration     string
 	zoneSize           int
 	algorithm          string
+
+	// perf qps: adaptive max-QPS finder (query path only).
+	perfUDP         bool
+	perfTCP         bool
+	perfTarget      string
+	perfInitialQPS  int
+	perfThreshold   int
+	perfMaxQPS      int
+	perfDuration    string
+	perfTimeout     string
+	perfMaxDropRate float64
 )
 
 // ---- probe ----------------------------------------------------------------
@@ -392,6 +403,62 @@ func sortedIds(st *debug.State) []string {
 	return ids
 }
 
+// ---- perf (benchmark, not invariant checks) --------------------------------
+
+var perfCmd = &cobra.Command{
+	Use:   "perf",
+	Short: "Performance/benchmark tools (measure throughput; not pass/fail invariant checks)",
+	Run:   func(cmd *cobra.Command, args []string) { _ = cmd.Help() },
+}
+
+var perfQpsCmd = &cobra.Command{
+	Use:   "qps",
+	Short: "Find the max sustainable query rate (adaptive doubling + bisect)",
+	Long: `Stresses ONLY the query path. Queries the zone apex for SOA at a rate for
+--duration, drains for --timeout, and counts exactly how many correct answers
+came back. A step is "clean" if the drop fraction is <= --max-drop-rate; the
+search doubles the rate while clean, then bisects between the last clean rate
+and the first dropping rate until the gap is below --threshold. Exact query and
+correct-response counts are printed for every step (a single drop is visible).
+
+Note: run the generator off-box for a true ceiling — on localhost it competes
+with the server for CPU, so the number is a lower bound.`,
+	Run: func(cmd *cobra.Command, args []string) { runPerfQps(cmd.Context()) },
+}
+
+func runPerfQps(ctx context.Context) {
+	if perfTarget == "" {
+		log.Fatal("no target: pass --target {ip|ip:port}")
+	}
+	if zoneName == "" {
+		log.Fatal("no zone: pass --zone")
+	}
+	cfg := debug.PerfConfig{
+		Tool:        appName + " " + appVersion,
+		Target:      perfTarget,
+		Zone:        zoneName,
+		UDP:         perfUDP,
+		TCP:         perfTCP,
+		InitialQPS:  perfInitialQPS,
+		Threshold:   perfThreshold,
+		Duration:    mustDur(perfDuration, "duration"),
+		Timeout:     mustDur(perfTimeout, "timeout"),
+		MaxDropRate: perfMaxDropRate,
+		MaxQPS:      perfMaxQPS,
+	}
+	rep, err := debug.RunQPS(ctx, cfg)
+	if err != nil {
+		log.Printf("perf qps setup error: %v", err)
+		os.Exit(debug.ExitSetup)
+	}
+	if reportJson {
+		_ = rep.RenderJSON(os.Stdout)
+	} else {
+		rep.RenderText(os.Stdout)
+	}
+	os.Exit(rep.ExitCode())
+}
+
 func init() {
 	probeCmd.Flags().StringVar(&targetName, "target", "", "apiservers entry name for the mgmt API")
 	probeCmd.Flags().StringVar(&dnsServer, "dns", "", "DNS server addr:port to probe")
@@ -433,4 +500,17 @@ func init() {
 
 	cleanupCmd.Flags().StringVar(&testId, "test", "", "test identity to clean up")
 	cleanupCmd.Flags().BoolVar(&rmArtifacts, "rm", false, "also remove the local artifact directory")
+
+	perfQpsCmd.Flags().BoolVar(&perfUDP, "udp", true, "drive the rate search over UDP")
+	perfQpsCmd.Flags().BoolVar(&perfTCP, "tcp", false, "also send 10% of the UDP rate over TCP (reported separately)")
+	perfQpsCmd.Flags().StringVar(&perfTarget, "target", "", "DNS server addr (ip or ip:port; default port 53)")
+	perfQpsCmd.Flags().StringVarP(&zoneName, "zone", "z", "", "zone (queried at the apex for SOA)")
+	perfQpsCmd.Flags().IntVar(&perfInitialQPS, "initial-qps", 1000, "starting query rate")
+	perfQpsCmd.Flags().IntVar(&perfThreshold, "threshold", 1000, "stop when the bisect gap (qps) drops below this")
+	perfQpsCmd.Flags().StringVar(&perfDuration, "duration", "5s", "send window per rate step")
+	perfQpsCmd.Flags().StringVar(&perfTimeout, "timeout", "1s", "straggler drain after each send window")
+	perfQpsCmd.Flags().Float64Var(&perfMaxDropRate, "max-drop-rate", 0.005, "a step is clean if the drop fraction is <= this (0.005 = 0.5%)")
+	perfQpsCmd.Flags().IntVar(&perfMaxQPS, "max-qps", 1000000, "safety cap on the rate search")
+	perfQpsCmd.Flags().BoolVar(&reportJson, "json", false, "JSON report")
+	perfCmd.AddCommand(perfQpsCmd)
 }

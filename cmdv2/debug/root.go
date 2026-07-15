@@ -69,7 +69,7 @@ func init() {
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Debug, "debug", "d", false, "debug output")
 	rootCmd.PersistentFlags().BoolVarP(&tdns.Globals.Verbose, "verbose", "v", false, "verbose output")
 
-	rootCmd.AddCommand(testCmd, probeCmd, listTestsCmd, cleanupCmd)
+	rootCmd.AddCommand(testCmd, probeCmd, perfCmd, listTestsCmd, cleanupCmd)
 }
 
 // initConfig mirrors cmdv2/cli/root.go: main file, single-level include:
