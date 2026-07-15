@@ -608,34 +608,62 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 	lgApi.Warn("policy-reset: forcing a zone off its DNSSEC policy — DROPPING keys and BREAKING the chain of trust until the parent DS is re-published",
 		"zone", zd.ZoneName, "config_policy", configName)
 
-	// 1) Clear both persisted records so the zone falls back to its config base.
-	if err := ClearZonePolicyOverride(kdb, zd.ZoneName); err != nil {
-		return "", fmt.Errorf("policy-reset: clearing CLI override for zone %s: %w", zd.ZoneName, err)
-	}
-	if err := ClearZoneAppliedPolicy(kdb, zd.ZoneName); err != nil {
-		return "", fmt.Errorf("policy-reset: clearing applied-policy record for zone %s: %w", zd.ZoneName, err)
-	}
+	// Serialize the WHOLE reset (rebind → drop+regen keys → re-sign → clear
+	// override) against concurrent policy applies on this zone. We hold
+	// policyApplyMu ourselves and call the *Locked apply variant below to avoid a
+	// double-lock (applyZonePolicyTransactional would otherwise re-acquire it).
+	zd.policyApplyMu.Lock()
+	defer zd.policyApplyMu.Unlock()
 
-	// 2) Rebind to the config policy BEFORE dropping keys, so the keystore
+	// 1) Rebind to the config policy BEFORE dropping keys, so the keystore
 	// `clear` path regenerates fresh active keys under the CONFIG algorithm (it
-	// reads zd.DnssecPolicy from the live zone).
+	// reads zd.DnssecPolicy from the live zone). Snapshot the old binding so we
+	// can restore it if the key drop fails (its tx rolls back — see below).
 	zd.mu.Lock()
+	oldPol := zd.DnssecPolicy
+	oldName := zd.DnssecPolicyName
 	zd.DnssecPolicy = &pol
 	zd.DnssecPolicyName = configName
 	zd.mu.Unlock()
 
-	// 3) Drop the zone's DNSSEC keys and regenerate under the config policy,
+	// 2) Drop the zone's DNSSEC keys and regenerate under the config policy,
 	// stripping the old keys' now-orphaned RRSIGs. Reuse the keystore `clear`
 	// path (delete all keys → regen 1 active KSK + 1 active ZSK → strip orphans).
+	// It runs in its own transaction: on failure it rolls back, leaving the
+	// ORIGINAL keys and every persisted record untouched, so we just restore the
+	// in-memory binding and tell the operator to retry.
 	if _, err := kdb.DnssecKeyMgmt(ctx, nil, KeystorePost{Command: "dnssec", SubCommand: "clear", Zone: zd.ZoneName}); err != nil {
-		return "", fmt.Errorf("policy-reset: dropping/regenerating keys for zone %s FAILED — the CLI override and applied-policy records were ALREADY cleared (zone now falls back to config policy %q) and its keys may be partially dropped; re-run `zone dnssec policy-reset --confirm` or restart to converge: %w", zd.ZoneName, configName, err)
+		zd.mu.Lock()
+		zd.DnssecPolicy = oldPol
+		zd.DnssecPolicyName = oldName
+		zd.mu.Unlock()
+		return "", fmt.Errorf("policy-reset: dropping/regenerating keys for zone %s FAILED — no persisted records were changed and the original keys are intact; re-run `zone dnssec policy-reset --confirm`: %w", zd.ZoneName, err)
 	}
 
-	// 4) Re-sign under the config policy and record applied = config through the
-	// shared transactional core (source config → no CLI override written).
-	newrrsigs, err := applyZonePolicyTransactional(ctx, zd, kdb, &pol, configName, PolicyApplySourceConfig)
+	// 3) Force a fresh active-key read before re-signing. `clear` regenerated the
+	// keys inside its transaction and invalidated the active-key cache mid-tx; a
+	// read during that uncommitted window can re-cache the OLD set, which would
+	// make the re-sign refuse on an algorithm mismatch. Re-fetch from the now
+	// committed DB. From here on the new config-policy keys ARE committed, so any
+	// later failure means "run resign" — NOT re-run policy-reset.
+	if _, err := zd.refreshActiveDnssecKeys(kdb, "policy-reset: after key regen"); err != nil {
+		return "", fmt.Errorf("policy-reset: re-reading regenerated keys for zone %s FAILED — the new config-policy keys are already in the keystore but the zone is not yet re-signed; run `zone dnssec resign -z %s` to converge: %w", zd.ZoneName, zd.ZoneName, err)
+	}
+
+	// 4) Re-sign under the config policy and record applied=config through the
+	// shared core (source config → no CLI override written). We already hold
+	// policyApplyMu, so call the *Locked variant.
+	newrrsigs, err := applyZonePolicyTransactionalLocked(ctx, zd, kdb, &pol, configName, PolicyApplySourceConfig)
 	if err != nil {
-		return "", fmt.Errorf("policy-reset: re-signing zone %s under config policy %q FAILED — keys were dropped/regenerated and the override+applied records ALREADY cleared, so the zone is unsigned until it re-signs; re-run `zone dnssec policy-reset --confirm` or restart to converge: %w", zd.ZoneName, configName, err)
+		return "", fmt.Errorf("policy-reset: re-signing zone %s under config policy %q FAILED — the new config-policy keys are already in the keystore, so run `zone dnssec resign -z %s` to converge (do NOT re-run policy-reset): %w", zd.ZoneName, configName, zd.ZoneName, err)
+	}
+
+	// 5) Only now that the zone is signed under config and applied=config is
+	// recorded, clear any stale CLI override so intent matches reality. Done LAST
+	// so a failure here cannot strand an unsigned zone; it clears only the
+	// override (applied_* is preserved).
+	if err := ClearZonePolicyOverride(kdb, zd.ZoneName); err != nil {
+		return "", fmt.Errorf("policy-reset: zone %s is signed under config policy %q and applied=config recorded, but clearing the stale CLI override FAILED — the override still points at the old policy and a later reload may refuse it; bind the config policy explicitly with `zone dnssec policy-set -z %s -p %s`: %w", zd.ZoneName, configName, zd.ZoneName, configName, err)
 	}
 
 	var b strings.Builder

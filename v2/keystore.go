@@ -328,6 +328,23 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			if txSuccess {
 				if err := tx.Commit(); err != nil {
 					lgSigner.Error("DnssecKeyMgmt commit failed", "err", err)
+					return
+				}
+				// Post-commit cache invalidation. `clear` DELETEs+regenerates
+				// all of a zone's keys inside this tx and invalidates the cache
+				// mid-tx (before commit); a GetDnssecKeys during the uncommitted
+				// window (separate DB connection) can re-cache the OLD set, so
+				// that mid-tx wipe is not enough. Drop the zone's cache entries
+				// again now that the new set is committed, so the next read is
+				// served from the committed DB rather than a stale cache.
+				if kp.SubCommand == "clear" && kp.Zone != "" {
+					kdb.mu.Lock()
+					for key := range kdb.KeystoreDnskeyCache {
+						if strings.HasPrefix(key, kp.Zone+"+") {
+							delete(kdb.KeystoreDnskeyCache, key)
+						}
+					}
+					kdb.mu.Unlock()
 				}
 			} else {
 				lgSigner.Debug("DnssecKeyMgmt rollback")
