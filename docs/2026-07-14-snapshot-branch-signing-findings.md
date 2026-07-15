@@ -413,7 +413,8 @@ all are real tdns-auth bugs, and two are wire-correctness issues.
   public internet: the 30 zones whose ZSK sigs exceed the fragmentation
   threshold (falcon512/mayo3 ZSKs) **time out over UDP instead of falling back
   to TCP** — the exact failure mode alg-split exists to fix. UDP matrix: 105/135;
-  TCP: 135/135. **This is a wire-correctness bug.** (Detailed plan below.)
+  TCP: 135/135. **This is a wire-correctness bug.** ✅ **DONE — fixed + merged in
+  PR #283 (merge `b71c1e2`, 2026-07-15).** See Plan A.
 - **TB3 — NS query at a hosted child apex echoes the answered NS RRset again in
   AUTHORITY.** Redundant (BIND leaves AUTHORITY empty for an authoritative
   positive answer). Cosmetic.
@@ -426,8 +427,8 @@ this doc + the pq-testbed report, in priority order. **Parallelization/perf work
 explicitly DEFERRED per Johan** — it does not affect wire correctness.
 
 **P0 — wire correctness (do first):**
-1. **TB2 — EDNS-aware truncation / TC bit.** 30/135 zones unreachable over UDP.
-   Plan A below.
+1. **TB2 — EDNS-aware truncation / TC bit** — ✅ **DONE, merged PR #283**
+   (`b71c1e2`, 2026-07-15). (Was 30/135 zones unreachable over UDP; Plan A below.)
 2. **Persist effective DNSSEC policy + transactional config-reload** (= this
    doc's Decision 2 / "#4 refuse half"). A config-file policy change must go
    through the *same* transactional evaluation as a `change-policy` CLI request
@@ -459,7 +460,7 @@ explicitly DEFERRED per Johan** — it does not affect wire correctness.
 
 ---
 
-### Plan A (P0-1) — EDNS-aware truncation / TC bit (TB2)
+### Plan A (P0-1) — EDNS-aware truncation / TC bit (TB2) — ✅ DONE (PR #283, `b71c1e2`)
 
 **Fix at one choke point.** Responses go out via `w.WriteMsg(m)` at ~10 sites
 (defaultqueryhandlers.go ×8, dnsutils.go:442, do53.go:235), and `QueryResponder`
@@ -506,8 +507,15 @@ truncated).
 
 Effort: **moderate** — the wrapper + edns capture are small; the only care points
 are the mux placement (excludes DoQ) and its position inside the TSIG handler.
-**Verified implementation-ready 2026-07-15** (mux/handler wiring, `w` propagation
-to `QueryResponder`, and `TsigSigningHandler` structure all checked against main).
+
+**✅ SHIPPED 2026-07-15 in PR #283 (merge `b71c1e2`).** Implemented as designed in
+`v2/udp_truncate.go` (Do53-mux wrapper inside `TsigSigningHandler`, `RequestUDPSize`
+rule, **no 1232 cap** per Johan). Two deltas beyond the plan, both from CodeRabbit
+review: (1) `udpTruncate` reserves `dns.Len(request TSIG)` off bufsize for signed
+requests, so the response still fits after the MAC is appended; (2) `dog` gained a
+`+bufsize` flag (for testing) with a case-fix. Plus a nil-`RemoteAddr` guard.
+Client side already honored TC=1 (`dog` + `tdns-imr` fall back to TCP via
+`core.DNSClient`). Standalone impl doc: `docs/2026-07-15-tc-bit-edns-truncation-plan.md`.
 
 ---
 
