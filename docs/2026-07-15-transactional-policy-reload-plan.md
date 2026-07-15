@@ -258,12 +258,17 @@ const (
 type PolicyChangeClass int
 
 const (
-    PolicyChangeNone           PolicyChangeClass = iota // same name, same effective algs
-    PolicyChangeBenignInternals                         // same name, lifetimes/sigvalidity/ttls/rollover params
+    PolicyChangeNone           PolicyChangeClass = iota // same name, same effective algs (incl. internals-only edits)
     PolicyChangeCompatibleName                          // different name, same KSK+ZSK algs
     PolicyChangeIncompatibleAlg                         // KSK or ZSK algorithm differs — refuse (v1)
 )
 ```
+
+> **Finding A (resolved 2026-07-15): no `BenignInternals` class.** `resolvePolicyPair`
+> resolves both the applied and intent structs from the same `ConfLive()` snapshot
+> *by name*, so a "same name, changed internals" class is unreachable in production.
+> Persist the policy **name only** (no fingerprint) and let the resigner converge
+> internals edits. See the Finding-A decision block in the Phase 0 addendum.
 
 ```go
 // classifyPolicyChange compares the LAST-APPLIED policy (from DB, resolved to
@@ -296,7 +301,8 @@ Rules (v1):
   **intentPol** (same fields as `applyReloadedPolicyLocked` and `setZonePolicy`).
 - Alg mismatch → `PolicyChangeIncompatibleAlg` (delegate to auto-rollover engine
   later; refuse for now).
-- Same name → benign internals or none (cheap re-sign path).
+- Same name, same algs → `PolicyChangeNone`. No forced reload re-sign — internals
+  edits converge via the resigner (Finding A; §6.2 Branch 1, §6.6).
 - Different name, same algs → `PolicyChangeCompatibleName` (transactional apply).
 
 For incompatible changes on the **config path**, refuse (same as c57a564).
@@ -353,9 +359,9 @@ func zonePolicyNeedsApply(kdb *KeyDB, zone, intentName string) (needsApply bool,
 
 - `appliedOK == false` → applied record absent; **does not** automatically mean
   `needsApply == true` (see §5.5 — backfill path).
-- `appliedOK && intentName == appliedName` → `needsApply = false` for
-  name-level changes; classifier still runs for benign-internal edits (same
-  name, changed struct fields in config map).
+- `appliedOK && intentName == appliedName` → `needsApply = false`. An
+  internals-only edit (same name, changed struct fields in the config map) does
+  **not** force a re-sign; it converges via the resigner (Finding A).
 
 ### 5.5 Applied missing — backfill without thundering herd (blocking ②)
 
@@ -445,13 +451,18 @@ if !appliedOK {
 // appliedOK == true from here on ⇒ appliedPol is non-nil.
 class := classifyPolicyChange(appliedPol, appliedName, intentPol, intentName)
 
-// Branch 1 — no name-level change (or benign internals only)
-if intentName == appliedName &&
-   (class == PolicyChangeNone || class == PolicyChangeBenignInternals) {
+// Branch 1 — no name-level change (class == PolicyChangeNone). Includes
+// internals-only edits (same name, changed struct) — see Finding A.
+if intentName == appliedName && class == PolicyChangeNone {
 
     rebind zd to intentPol (same name, struct may have changed in config map)
-    UpdateSigValidityFloor(zd, intentPol, ...)   // pick up sig-validity/TTL edits
-    cheap re-sign (triggerResign) if zone data or policy internals changed
+    UpdateSigValidityFloor(zd, intentPol, ...)   // moves the sig-validity floor;
+                                                 // the resigner re-signs on its
+                                                 // next tick if timing changed
+    // Do NOT triggerResign here. Signature-affecting internals converge via the
+    // resigner (floor above); this also drops the current per-reload
+    // re-sign-every-zone herd. TTL edits (not covered by the floor): next full
+    // sign, or `zone dnssec resign -z <zone>` to force now.
     return
 }
 
@@ -524,11 +535,15 @@ config-only zones without a herd re-sign.
 
 ### 6.6 Cheap no-change path
 
-When applied is present, intent == applied, and class is none/benign:
+When applied is present, intent == applied, and class is `None` (same name,
+same algs — including an internals-only edit; Finding A):
 
 - Rebind to refreshed `intentPol` struct from config map (same name)
-- **`UpdateSigValidityFloor`** — required so sig-validity / TTL / KASP edits apply
-- `triggerResign` if zone data or policy internals changed
+- **`UpdateSigValidityFloor`** — required so sig-validity / KASP edits apply: it
+  moves the floor and the resigner re-signs on its next tick
+- Do **not** `triggerResign` here (no per-reload herd; resigner converges). TTL
+  edits are the one param the floor misses — next full sign or manual
+  `zone dnssec resign`
 - Do **not** write applied again unless backfilling (name unchanged)
 
 Helper:
@@ -600,10 +615,51 @@ Baseline confirmations:
 | ③ | minor | Applied policy name deleted from YAML: refuse-bind fallback keeps existing keys signing + warning; no nil-deref. | §5.6 |
 | ④ | ✅ done | Remove reload `SetupZoneSigning` (Finding 4 `confMu` fix) — **already done in #286**; not part of this project. Just verify it's present in the base. | §6.5 |
 | ⑤ | minor | Config reload during in-flight CLI ZSK roll: config path checks `zskAlgRollInFlight` and **skips** treating intent≠applied as a config-driven re-apply (Branch 1b). Does not duplicate full `change-policy` entry guards on config path. | §6.2 |
-| ⑥ | minor | Benign-internals cheap path must call `UpdateSigValidityFloor`. | §6.2 Branch 1 |
+| ⑥ | **decision** | **Finding A (resolved):** persist policy **name only** (no fingerprint); remove `PolicyChangeBenignInternals`; the same-name reload path rebinds + `UpdateSigValidityFloor` but does **not** `triggerResign`. See the Finding-A block below. | §5.1, §5.4, §6.2 Branch 1, §6.6 |
 | ⑦ | minor | Signed ↔ unsigned via config: **out of scope** for Plan B v1. | §3.6 |
 
 **Phase 3 must not start until ① and ② are reflected in code and tests.**
+
+#### Finding A — internals-only policy edits (RESOLVED 2026-07-15)
+
+**Decision: persist the policy NAME only — no fingerprint — and do NOT force a
+re-sign on the same-name reload path.** Reviewing PR 1 surfaced that
+`resolvePolicyPair` resolves BOTH the applied and intent structs from the same
+`ConfLive()` snapshot *by name*, so when `appliedName == intentName` it hands the
+classifier two copies of the identical struct — the `BenignInternals` class is
+therefore unreachable in production (and nothing consumes it). Rather than add a
+persisted policy fingerprint to detect internals drift, name-only is the correct
+granularity:
+
+- The `applied_*` record exists to answer ①: *did intent diverge from what we
+  signed in a way that needs action?* The actionable divergences are an
+  **algorithm** change (needs a rollover → refuse) and a **name** repoint
+  (operator explicitly chose another policy). Internals drift under the same name
+  is not a correctness divergence.
+- A fingerprint reintroduces the exact ② herd risk: it must be stable across
+  restarts *and code versions*, so any change to `DnssecPolicy`'s shape or its
+  serialization staleness-invalidates every stored fingerprint → a mass re-sign on
+  the first post-upgrade reload. Name comparison can't go stale.
+- Signature-affecting internals converge without a forced re-sign: the resigner
+  and rollover engines read `ConfLive().DnssecPolicies[name]` every cycle, and
+  Branch 1's `UpdateSigValidityFloor` moves the sig-validity floor so the resigner
+  re-signs on its next tick. The one parameter the floor does NOT cover — record
+  **TTLs** — is applied on the next full sign, or immediately via
+  `zone dnssec resign -z <zone>`.
+
+**Consequences for Phase 3 (and a PR-1 follow-up):**
+
+- Remove `PolicyChangeBenignInternals`; the classifier is `None` /
+  `CompatibleName` / `IncompatibleAlg`. **PR 1 shipped the extra enum value and
+  its `benign-internals` test row — delete both** (a small follow-up on the PR-1
+  branch, or fold into PR 2).
+- Branch 1 (same name, same alg = `None`): rebind the refreshed struct + call
+  `UpdateSigValidityFloor`, and do **not** `triggerResign`. This also removes the
+  current per-reload re-sign-every-signed-zone herd (`applyReloadedPolicyLocked`
+  returns true on every non-alg rebind today), reducing pressure on the deferred
+  parallel-signer companion.
+- Reload forces a re-sign only on `CompatibleName` (Branch 2) and refuses on
+  `IncompatibleAlg` (Branch 3). Backfill (Branch 0) never re-signs (②).
 
 ### Phase 1 — Schema + persistence (small)
 
@@ -703,9 +759,11 @@ After PR 2, on a signed PQ zone:
 2. **First post-upgrade backfill:** upgrade binary on a config-only signed zone
    with no `applied_*` row → single `config reload` → `applied_policy` backfilled
    to intent **without** a full PQ re-sign storm (watch logs / sign duration).
-3. **Benign policy edit:** change sig-validity or TTL in same-named policy →
-   reload → `UpdateSigValidityFloor` picks it up; zone re-signed if needed;
-   `applied_policy` unchanged.
+3. **Internals-only policy edit (Finding A):** change **sig-validity** in a
+   same-named policy → reload → NO forced re-sign storm; `UpdateSigValidityFloor`
+   moves the floor and the resigner re-signs on its next tick; `applied_policy`
+   unchanged. Separately, a **TTL** edit → reload → NOT applied until a full sign;
+   `zone dnssec resign -z <zone>` applies it immediately.
 4. **Compatible rename:** two policies with same KSK/ZSK algs; change YAML
    `dnssec_policy` → reload → transactional apply; `applied_policy` updated;
    zone signed on wire and AXFR.
