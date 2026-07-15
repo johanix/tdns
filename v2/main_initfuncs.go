@@ -126,6 +126,9 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	if err != nil {
 		return fmt.Errorf("error parsing config %q: %w", conf.Internal.CfgFile, err)
 	}
+	// Publish the initial runtime-config snapshot before any engine starts, so
+	// the hot readers (RefreshEngine, signer) never Load() an unpopulated one.
+	conf.publishRuntimeConfig()
 	// KeyDB must exist before TSIG load so LoadTsigKeys can sync keys.tsig into
 	// TsigKeystore and populate the cache from the DB (Auth/Agent init KeyDB in
 	// ParseConfig; Scanner only here).

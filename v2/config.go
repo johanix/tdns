@@ -579,6 +579,11 @@ func (conf *Config) ReloadConfig() (string, error) {
 			lgConfig.Error("TSIG keys: config error on reload (affected keys skipped)", "err", kerr)
 		}
 	}
+	// Publish the new runtime-config snapshot on a successful reload (still under
+	// confMu); on a parse error keep the last-good snapshot.
+	if err == nil {
+		conf.publishRuntimeConfig()
+	}
 	Globals.App.ServerConfigTime = time.Now()
 	return "Config reloaded.", err
 }
@@ -658,6 +663,10 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 
 	lgConfig.Info("ReloadZones: zones after reloading", "zones", zonelist, "broken", brokenlist)
 	Globals.App.ServerConfigTime = time.Now()
+
+	// Publish the new runtime-config snapshot while still under confMu — the
+	// reloaded DnssecPolicies (via reloadDnssecFromFile above) are now final.
+	conf.publishRuntimeConfig()
 
 	// Capture hook reference before releasing lock to avoid deadlock
 	// if the hook re-enters config paths.

@@ -41,27 +41,32 @@ handlers and policy resolution (`v2/apihandler_zone.go:372`, `:473`,
 testbed direction is 10^4–10^5 zones — a reload becomes a long global stall
 proportional to *total* signing work.
 
-### …and the synchronous sign is also redundant (a double-sign)
+### …and the synchronous sign is entirely redundant
 
 `ParseZones` **also** enqueues every zone to `RefreshZoneCh` with `Force: true`
 and `ConfigUpdate: true` (`v2/parseconfig.go:1111-1128`), *after* the synchronous
-sign. The refresh engine handles each zone in its **own goroutine**
-(`v2/refreshengine.go:481`, `go func(...)`) and re-signs there
-(`refreshengine.go:512`) — but only inside `if updated` (`refreshengine.go:508`),
-and `updated == serialChanged` **even under force** (`v2/dnsutils.go:538-541`:
-"If force=true but serial unchanged, return false").
+sign, and the RefreshEngine already re-signs on reload through **two** off-lock
+paths:
 
-So on reload:
+1. **Policy / config change — `triggerResign` (`v2/refreshengine.go:442-453`).**
+   When it processes a config-bearing refresher it rebinds the DNSSEC policy via
+   `applyReloadedPolicyLocked`, which returns `true` for **every** non-alg-
+   changing rebind (`refreshengine.go:200`), setting `reapplyPolicy` and calling
+   `triggerResign(conf, zone)` → `ResignQ` → a full `SignZone`. Because a signed
+   zone **must** have a policy (a signing option without a policy is dropped and
+   the zone goes to ERROR — `v2/sample_config_test.go:116`), this fires for
+   **every signed zone on every reload**. It also carries the alg-refuse guard:
+   an incompatible algorithm change returns `false`, so the zone correctly does
+   **not** re-sign and keeps its existing valid signatures.
+2. **Zone-data change — the post-refresh sign (`refreshengine.go:512`), inside
+   `if updated`.** `updated == serialChanged` even under force
+   (`v2/dnsutils.go:538-541`), so this covers a changed zonefile.
 
-- **Zonefile serial changed** → the refresh path re-signs **and** :995 already
-  signed → the zone is signed **twice**.
-- **Config-only change** (policy edit / newly-enabled signing, unchanged serial)
-  → the refresh path does **not** re-sign (`updated == false`) → only :995 signs.
-  So :995 is load-bearing *for the config-only case only*.
-
-That is why the fix (§4) is neither "keep the serial sign off `confMu`" nor "just
-delete :995": it is **delete :995 and make the already-async, already-per-zone-
-goroutine refresh path do the single re-sign, including the config-only case.**
+So on reload a signed zone is currently signed by **:995 (synchronous, under
+`confMu`) *plus* `triggerResign` (452) *plus*, if the serial changed, 512** — up
+to a triple sign. The synchronous :995 sign is pure redundancy on top of the
+refresh path. The fix (§4) is therefore simply to **delete :995**; 452 (policy
+changes) and 512 (data changes) already own every reload re-sign, off `confMu`.
 
 ### Scope is narrow
 
@@ -92,114 +97,95 @@ load produces **no** SERVFAIL / bogus window.
 
 ---
 
-## 3. What must NOT regress
+## 3. What must NOT regress — every reload re-sign is still covered
 
-This is **not** a bare delete of `parseconfig.go:995`. The re-sign must still
-happen, because a `reload-zones` is exactly how these take effect:
+The re-sign must still happen on reload; deleting :995 is safe only because the
+refresh path already covers every case. Walking the scenarios for a signed zone
+(all have a policy):
 
-1. **Newly-enabled signing** — `online-signing`/`inline-signing` flipped on in
-   config for a previously-unsigned zone → the zone must become signed.
-2. **Policy edits picked up on reload** — an edited `dnssec_policy`/KASP block
-   must cause a re-sign under the new parameters.
+| reload scenario | still re-signs? | via |
+|---|---|---|
+| nothing changed | yes | `triggerResign` (452) — `applyReloadedPolicyLocked` returns true on any non-alg rebind |
+| policy internals changed (same alg) | yes | `triggerResign` (452) |
+| policy algorithm changed | **no — correct** | `applyReloadedPolicyLocked` returns false; old policy + valid sigs kept (alg rollover not built) |
+| zonefile serial changed | yes | post-refresh sign (512, `updated == true`) |
+| signing newly enabled | yes | `triggerResign` (452) — the policy binds (nil→policy) |
 
-And `SetupZoneSigning`'s guards must be preserved:
-
-- agent no-op (`Globals.App.Type == AppTypeAgent` → return, `zone_utils.go:1089`),
-- online/inline gate (`zone_utils.go:1093`),
-- `ZoneType != Primary && !OptInlineSigning` → skip (`zone_utils.go:1097`).
-
-So the transformation is **delete the redundant synchronous sign, and let the
-single re-sign happen in the refresh path** — which already runs async, per-zone,
-off `confMu`.
+Guards are preserved because the surviving paths still funnel through
+`SetupZoneSigning` / `resignNow`, which keep the agent no-op and the
+online/inline gate.
 
 ---
 
-## 4. Mechanism
+## 4. Mechanism — delete the synchronous reload sign
 
-The refresh path already exists, already runs each zone in its own goroutine
-(`v2/refreshengine.go:481`), and is already enqueued for every zone on reload
-(`parseconfig.go:1128`). The only reason it does not fully cover reload signing
-today is the `if updated` gate. Fix that, drop the synchronous sign.
+**Delete the reload branch at `v2/parseconfig.go:994-998`** (the
+`else { zdp.SetupZoneSigning(...) }`), keeping the `OnFirstLoad` branch
+(`:988-993`) unchanged. That is the entire code change. The refresh engine's
+`triggerResign` (452, policy/config changes) and post-refresh sign (512, data
+changes) already re-sign every reloaded signed zone, asynchronously and off
+`confMu` (§1, §3).
 
-**Step 1 — delete the synchronous reload sign.** Remove the reload-branch
-`zdp.SetupZoneSigning(...)` at `v2/parseconfig.go:994-998`. Keep the
-`OnFirstLoad` branch (`:988-993`) unchanged. This alone removes the double-sign
-and the confMu-held sign.
+Net effect: reload signing drops from up to **triple** (995 + 452 + 512 on a
+serial change) to at most double, and from double to single on a config-only
+change — while removing the one sign that ran under `confMu`.
 
-**Step 2 — make the refresh path sign on config-reload regardless of serial.**
-In the refresh goroutine, the re-sign (`v2/refreshengine.go:512`) currently sits
-inside `if updated` (`:508`). Change the sign condition to
+### Caveat — timing (sync → async)
 
-```
-updated || (zr.ConfigUpdate && (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]))
-```
+For every reload case, signing moves from synchronous-before-return to
+async-in-the-refresh-path. That async path already existed (452/512); snapshot
+atomicity (§2) keeps serving valid signatures until the new sign lands, so there
+is no query-correctness window — only "signed-on-return" is lost. §7 confirms
+nothing depends on it.
 
-so a config-bearing reload re-signs even when the SOA serial is unchanged (the
-config-only case: policy edit, newly-enabled signing). Keep the **zone-file
-write** logic gated on `updated` (do not rewrite an unchanged file). This is the
-**same idiom the code already uses two lines below**, where NOTIFY fires on
-`updated || force` because "Force typically means config reload-zones"
-(`refreshengine.go:549-551`), and catalog re-parse runs "after EVERY successful
-refresh (updated or not)" (`:564-566`). Signing is simply the one action that was
-left gated on `updated`.
+### Residual (pre-existing, out of scope)
 
-Implementation note: pull the `SetupZoneSigning` call out of the `if updated`
-block into its own `if <sign-condition>` so it is invoked **once** (when both
-`updated` and `ConfigUpdate` are true, do not sign twice). `zr.ConfigUpdate` is
-already carried on the `ZoneRefresher` and captured by the goroutine
-(`parseconfig.go:1121`).
-
-**Result:** exactly **one** sign per reloaded signed zone, in the per-zone
-refresh goroutine — async, concurrent (not serial), off `confMu`, and strictly
-*fewer* signs than today (the serial-changed double-sign is gone too). Guards are
-preserved because we still call `SetupZoneSigning` (its agent/Primary/inline
-checks are intact).
-
-### Caveats
-
-- **Timing (sync → async).** For the config-only case, signing moves from
-  synchronous-before-return to async-in-the-refresh-goroutine. The async path
-  already existed for the serial-changed case, and snapshot atomicity (§2) keeps
-  serving valid signatures until the new sign lands — so no query-correctness
-  issue, only "signed-on-return" is lost. Homework in §7 confirms nothing depends
-  on it.
-- **Idempotence of the extra sign.** A config reload that changed nothing now
-  routes through the refresh-path sign too. That is behavior-preserving vs today
-  (the old :995 also signed unconditionally on every reload) — and still only
-  *one* sign, vs today's one-or-two.
+On a serial-changed reload, 452 (`triggerResign`) **and** 512 (`updated`) both
+fire — a double sign. This exists today independent of this change, so PR-F4 does
+not address it; deduping the two refresh-path triggers belongs with the deferred
+pipeline cleanup (§5).
 
 ### Considered and rejected
 
+- **Widen the `if updated` gate at 512 to also fire on `ConfigUpdate`** (an
+  earlier draft of this plan). Unnecessary and wrong: `triggerResign` (452)
+  already re-signs the config-only case, so widening 512 would *add* a redundant
+  sign, not remove one.
 - **Collect during the locked parse, sign serially after `confMu.Unlock`.**
-  Moves the sign off `confMu` but keeps it **serial** and keeps the redundant
-  extra sign the refresh path already does — both of the things this PR should
-  fix. Rejected.
-- **Direct enqueue to `ResignQ` instead of using the refresh path.** `ResignQ`'s
-  consumer does a full sign (`resigner.go:50`), but the buffer is 10
-  (`main_initfuncs.go:199`) and it bypasses `SetupZoneSigning`'s guards. The
-  refresh path is already the right vehicle; no need for a second one.
+  Keeps signing serial and keeps the redundant refresh-path sign — fixes neither
+  problem.
+- **Replace :995 with `triggerResign(conf, zname)` in `ParseZones`.** Works, but
+  duplicates the `triggerResign` the refresh engine already issues at 452 for the
+  same zone — a self-inflicted double enqueue. Deleting is cleaner.
 
 ---
 
 ## 5. Companion (DEFERRED — do not drop)
 
-The refresh path forks a goroutine **per zone** (`refreshengine.go:481`) with no
-bound — so with this fix, a `reload-zones` over 10^4–10^5 signed zones spawns that
-many concurrent `SignZone` calls, each hitting the keystore DB. The
-"companion to Finding 4" therefore reframes from *"add parallelism"* to
-**"bound and optimize the parallelism the refresh path already has"**:
+With :995 gone, the reload re-sign for a policy/config change flows through
+`triggerResign` → `ResignQ` → the **`ResignerEngine`**, which drains the queue
+**serially** and whose buffer is only **10** (`main_initfuncs.go:199`); a full
+queue drops the request with a warning (`key_state_worker.go:420`), deferring
+that zone to the periodic ticker. So over 10^4–10^5 signed zones a `reload-zones`
+is bounded by one serial signer and a tiny queue — the real remaining scaling
+limit (it is pre-existing: `triggerResign` at 452 already behaves this way; this
+PR just stops *also* signing synchronously under `confMu`).
 
-- a **worker pool** capping concurrent signers (per-zone `zd.mu` already makes
-  cross-zone signing safe),
+The "companion to Finding 4" therefore reframes to **"give the reload re-sign a
+real parallel signer"**:
+
+- a **worker pool** draining a larger resign queue (per-zone `zd.mu` already
+  makes cross-zone signing safe to run concurrently),
 - a per-`zd` **key cache** removing the per-sign keystore DB hit, invalidated by
   any key-set mutation,
 - a **same-zone ordering** guarantee (no two sign ops for one zone in flight;
-  preserve order).
+  preserve order),
+- and, while there, dedupe the 452/512 double-trigger (§4 Residual).
 
 This is **P2 / deferred per Johan**, tracked in
 `2026-07-14-snapshot-branch-signing-findings.md`. It is **not** in PR-F4, but
-PR-F4 makes the refresh-engine sign site (`refreshengine.go:481/512`) the single
-seam that companion later wraps in a pool.
+PR-F4 leaves the `ResignerEngine`/`ResignQ` as the single seam that companion
+later replaces with a pool.
 
 ---
 
@@ -237,20 +223,22 @@ Signing moves sync → async for the config-only case, so this **must** be audit
   contradicts async signing.
 - grep tests for `reload`/`reload-zones` followed by an immediate RRSIG assertion
   that assumes the zone is signed the instant the command returns. Any such test
-  must poll/wait for the async sign (the refresh goroutine) instead. The
-  serial-changed path was already async, so most reload tests should already
+  must poll/wait for the async sign (`triggerResign` → `ResignerEngine`) instead.
+  The serial-changed path was already async, so most reload tests should already
   tolerate this; the config-only tests are the ones to check.
 
 ---
 
 ## 8. Risk / rollback
 
-Small blast radius: two edit sites — delete `parseconfig.go:994-998`, widen the
-sign condition at `refreshengine.go:508-512`. Behavioral change: reload signing
-becomes async + deduplicated. Rollback = restore the synchronous
-`SetupZoneSigning` at `parseconfig.go:995` and revert the refresh-engine
-condition. The `-race` suite plus the §6 live matrix (esp. the config-only cases
-2 & 3, which are the ones the new refresh condition must cover) are the gate.
+Minimal blast radius: **one edit site** — delete the reload branch at
+`parseconfig.go:994-998`. No refresh-engine change (`triggerResign`/512 already
+own the reload re-sign). Behavioral change: reload signing becomes async, and
+the redundant confMu-held sign is gone. Rollback = restore the synchronous
+`SetupZoneSigning` at `parseconfig.go:995`. The `-race` suite plus the §6 live
+matrix (esp. the config-only cases 2 & 3 — a policy edit / newly-enabled signing
+on an unchanged serial, which now rely entirely on `triggerResign` at 452) are
+the gate.
 
 ## 9. PR slicing
 

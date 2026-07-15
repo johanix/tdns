@@ -14,7 +14,6 @@ import (
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 // sig0TTL is the TTL used for SIG(0) records in signed messages.
@@ -190,7 +189,10 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 		shouldSign := true
 		for idx, oldsig := range rrset.RRSIGs {
 			if oldsig.(*dns.RRSIG).KeyTag == key.DnskeyRR.KeyTag() {
-				shouldSign = NeedsResigning(oldsig.(*dns.RRSIG), rrset.RRs[0].Header().Ttl) || force
+				// force first: a forced re-sign (resignNow / triggerResign) must
+				// re-sign regardless, and short-circuiting skips NeedsResigning's
+				// work entirely on that path.
+				shouldSign = force || NeedsResigning(oldsig.(*dns.RRSIG), rrset.RRs[0].Header().Ttl)
 				if shouldSign {
 					lgSigner.Debug("removing older RRSIG by same DNSKEY", "name", oldsig.Header().Name, "rrtype", dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)])
 					rrset.RRSIGs = append(rrset.RRSIGs[:idx], rrset.RRSIGs[idx+1:]...)
@@ -238,7 +240,11 @@ func NeedsResigning(rrsig *dns.RRSIG, servedTTL uint32) bool {
 	expirationTime := time.Unix(int64(rrsig.Expiration), 0)
 	remaining := time.Until(expirationTime)
 
-	scanInterval := time.Duration(viper.GetInt("resignerengine.interval")) * time.Second
+	// resignerengine.interval comes from the immutable RuntimeConfig snapshot
+	// (ConfLive), not the non-thread-safe global viper — this runs in the signing
+	// hot path concurrent with config reload. A zero value clamps to the 60s
+	// floor below.
+	scanInterval := time.Duration(ConfLive().ResignerInterval) * time.Second
 	if scanInterval < 60*time.Second {
 		scanInterval = 60 * time.Second
 	}
