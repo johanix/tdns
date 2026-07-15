@@ -109,6 +109,10 @@ func TestResolvePolicyPairRestartDetectsChange(t *testing.T) {
 // WITHOUT a re-sign; a zone whose active-key algorithms differ from intent is
 // NOT eligible (the caller then drives a real apply).
 func TestBackfillAppliedIfEligible(t *testing.T) {
+	// NOTE: this asserts PR-1's keystore-only predicate. Per the §5.5 PR-2 GATE
+	// on backfillAppliedIfEligible, going live additionally requires the zone to
+	// actually SERVE a signature; this positive case will then also need a
+	// signed-snapshot fixture (or move to the live matrix).
 	t.Run("eligible: keys match intent -> backfill, no sign", func(t *testing.T) {
 		kdb := newTestKeyDB(t)
 		zd := algTestZone(dns.ED25519, dns.ED25519)

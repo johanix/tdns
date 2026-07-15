@@ -247,6 +247,28 @@ func applyZonePolicyTransactionalLocked(
 // (unsigned, no intent, or active-key algorithms differ from intent); the
 // caller then drives a genuine transactional apply toward intent, whose
 // SignZone algorithm backstop refuses an unsafe swap.
+//
+// ⚠ PR-2 GATE (plan §5.5) — MUST be closed before this is called from any live
+// refresh-engine path. The eligibility predicate is CURRENTLY keystore-only: it
+// checks that the zone's ACTIVE keys match intent's algorithms
+// (zoneActiveKeysMatchAlgs). That is NECESSARY but NOT SUFFICIENT — a zone can
+// hold the right active keys yet not actually be signed (fresh keygen with no
+// sign; a secondary whose stored RRSIGs are absent or stale, §5.5 line 79).
+// Recording applied=intent for such a zone marks it "signed under intent" when
+// it is not. Before going live, additionally require the zone to actually SERVE
+// a signature by an active intent-algorithm key, e.g.:
+//
+//	soa, err := zd.GetRRset(zd.ZoneName, dns.TypeSOA) // needs zd.Ready + MapZone
+//	// eligible only if err==nil, soa!=nil, and some rr in soa.RRSIGs is a
+//	// *dns.RRSIG with Algorithm == intentPol.ZSKAlgorithm (CSK: KSKAlgorithm).
+//
+// That check reads served zone data, so the call site MUST run AFTER the zone
+// snapshot is Ready — NOT the pre-initialLoadZone placement §5.5 line 516
+// contemplates for a keystore-only predicate. Otherwise the served-RRSIG check
+// fails closed and every config-only zone falls through to a forced re-sign,
+// defeating blocking-② (the thundering-herd avoidance this function exists for).
+// Left keystore-only in PR-1 because backfill is not called by any production
+// path here (unit tests only).
 func backfillAppliedIfEligible(kdb *KeyDB, zd *ZoneData, intentName string, intentPol *DnssecPolicy) (backfilled bool, err error) {
 	if intentPol == nil || intentName == "" {
 		return false, nil
@@ -273,6 +295,10 @@ func backfillAppliedIfEligible(kdb *KeyDB, zd *ZoneData, intentName string, inte
 // single active SEP key of pol.KSKAlgorithm (which equals pol.ZSKAlgorithm). The
 // SEP bit (flags & 1) distinguishes a KSK/CSK from a ZSK — the same convention
 // the signer and the standby→published migration use.
+//
+// NOTE (§5.5): this proves the KEYSTORE holds matching active keys, NOT that the
+// zone is actually signed under them. It is a necessary-not-sufficient input to
+// backfill eligibility — see the PR-2 GATE note on backfillAppliedIfEligible.
 func zoneActiveKeysMatchAlgs(kdb *KeyDB, zone string, pol *DnssecPolicy) (bool, error) {
 	active, err := GetDnssecKeysByState(kdb, zone, DnskeyStateActive)
 	if err != nil {
