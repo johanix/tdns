@@ -7,6 +7,14 @@ some real bugs, some design decisions. Captured here so they survive.
 Server: snapshot-branch build, DNS 127.0.0.1:5354, API 127.0.0.1:8989, zones in
 `/etc/tdns/auth-zones.yaml`, DNSSEC policies in `/etc/tdns/tdns-auth.yaml`.
 
+> **STATUS 2026-07-15 — the snapshot branch MERGED to main** (PR #279, merge
+> commit `965df6f`). Every merge-gating correctness item in this doc is **DONE
+> and on main**; the "THIS branch / merge gate" framing in the *Status &
+> branch/defer contract* section below is now historical. What genuinely remains
+> open is consolidated in the *Post-merge open findings — PRIORITIZED* section at
+> the end. Code line-numbers cited below are approximate and drift with each
+> commit.
+
 ---
 
 ## Finding 1 — a signing failure is silently masked (query-signed, AXFR-unsigned)
@@ -46,6 +54,12 @@ masks the failure; serving unsigned is a silent downgrade. Remove the blanket
 ephemeral-sign fallback; scope any *genuinely* ephemeral cases (e.g. CDE)
 explicitly. A broken zone must look broken.
 
+**✅ DONE + MERGED:** implemented fail-closed via A3 query SERVFAIL (`449a9e2`,
+`ErrZoneUnsigned`) + AXFR-refuse (`d2bf09b`) — a broken zone now SERVFAILs
+queries and refuses transfer instead of ephemerally-masking. CDE/referral NSECs
+carved out (`isSynthesizedDenial`). Surfacing the error in `config status` is the
+still-open follow-on (item 9 / P1-4).
+
 ---
 
 ## Finding 2 — config-reload is not transactional on a failed policy change
@@ -57,7 +71,7 @@ override (`SetZonePolicyOverride`, `ZonePolicyOverride` DB table,
 `db_schema.go:182`).
 
 But changing the policy via a **config-file edit + reload** takes the
-config-reload path (`parseconfig.go:966`), which applies the new policy, calls
+config-reload path (`parseconfig.go:995`), which applies the new policy, calls
 `SetupZoneSigning`, and on failure merely logs *"SetupZoneSigning failed on
 reload"* and **moves on** — no revert, no transactionality. The zone is left
 bound to the new, unusable policy with no stored signatures (Finding 1).
@@ -78,6 +92,12 @@ bound to the new, unusable policy with no stored signatures (Finding 1).
   Decision 3). On reload the old policy is still in memory; with the persisted
   policy this also works across restart.
 
+**Status:** the *minimal refuse-keeping-old guard* landed + merged (`c57a564`) —
+an incompatible alg change on reload is now refused, keeping the old policy. The
+**full** version (persist the effective policy for *every* signed zone; route a
+config change through the same transactional core as `change-policy`) is still
+open and is now **P0-2 / Plan B** at the end of this doc.
+
 ---
 
 ## Decision 3 (deferred) — surface signing/policy errors on the zone
@@ -86,14 +106,14 @@ The warning/error for a rejected policy change, and for signing failures
 generally (Finding 1, and the falcon/qruov codepoint issues), is the same
 work: a non-service-impacting error/warning set on the zone and surfaced in
 `config status` instead of a swallowed log line. This is the separate
-signing-error design doc (the other agent's), to be undertaken **after the
-snapshot branch merges** (avoids a competing `SetError` redesign vs the
-snapshot branch's — see the branch-strategy note in
-`[[falcon-codepoint-renumber-orphan]]`).
+signing-error design doc (`docs/2026-07-14-dnssec-error-single-bucket.md`). It
+was gated on the snapshot merge (to avoid a competing `SetError` redesign) —
+**that gate is now cleared (merged 2026-07-15)**, so it is eligible to start; it
+is tracked as **item 9 / P1-4** in the prioritized list below.
 
 ---
 
-## Finding 3 — reload-storm deadlock (OPEN — awaiting goroutine dump)
+## Finding 3 — reload-storm deadlock (FIXED + MERGED)
 
 Under a storm of ~11 concurrent `config reload` / `reload-zones` operations
 (operator reload racing tool-driven reloads) while the PQ zones were re-signing,
@@ -126,14 +146,18 @@ DNSKEY-publish branch (fresh keys) — test003's initial SQISIGN load did exactl
 that. The concurrent-reload storm only made it *visible* as a mass pile-up; the
 self-deadlock itself is deterministic once that path is reached.
 
-**Fix:** route the publish-resign path through the `*Locked` variants
-(`publishDnskeyRRsLocked` already exists and is what `SignZone` uses) so
-`EnsureActiveDnssecKeys`/`PublishDnskeyRRs` don't re-lock a held `zd.mu`.
+**Fix (DONE, on main):** routed the publish-resign path through the `*Locked`
+variants — `EnsureActiveDnssecKeys` gained a `zdLocked bool` (sign.go:401) and
+`PublishDnskeyRRs` no longer re-locks a held `zd.mu`. Landed as **`23710d1`**
+("Fix re-entrant zd.mu self-deadlock in the publish-path SOA re-sign").
 
-**Broader:** this is instance #2 of the "a `zd.mu`-holding `*Locked` path calls
-a method that re-locks `zd.mu`" class. A **systematic audit** of that class
-(grep every lock-holding path for calls into `zd.mu`-locking methods) belongs in
-landing the snapshot branch — there may be a #3.
+**Broader (DONE):** this was instance #2 of the "a `zd.mu`-holding `*Locked` path
+calls a method that re-locks `zd.mu`" class (first was `6e090a9`). The
+**systematic 52-site audit** (`f1653eb`) swept every lock-holding path — and
+found a **#3**: large-alg warning helpers re-locking `zd.mu` under publish, fixed
+as **`1e4703c`** ("Fix re-entrant zd.mu self-deadlock #3"). The class is now
+closed; all three fixes are on main. Live-validated: the reload storm that wedged
+the old binary ran clean (16/16 responsive `zone list` probes).
 
 ---
 
@@ -155,7 +179,7 @@ config mutex `confMu` is held across potentially long-lived signing on every
 shares `confMu`, so a `config reload` **blocks behind** any concurrent
 `reload-zones` that is signing. `config reload-zones` (`ParseZones`) is the
 signer: for every existing signed zone it synchronously calls
-`SetupZoneSigning` → **`SignZone(kdb, false)`** (parseconfig.go:966 →
+`SetupZoneSigning` → **`SignZone(kdb, false)`** (parseconfig.go:995 →
 zone_utils.go:1102), all under `confMu`.
 
 **Two ways `confMu` ends up spanning signing:**
@@ -195,16 +219,16 @@ it would make config ops sluggish under PQ load even with the deadlock fixed.
 
 **Fix direction (post-merge, non-gating) — it's mostly a deletion.** The async
 path already runs on every reload: `ParseZones` unconditionally queues a
-`ZoneRefresher{Force: true}` to `RefreshZoneCh` (parseconfig.go:1099), and the
+`ZoneRefresher{Force: true}` to `RefreshZoneCh` (parseconfig.go:1128), and the
 refresh engine re-reads the file and re-signs off `confMu` (refreshengine.go:512
 → `SetupZoneSigning`), then `resignq` → `ResignerEngine.resignNow` force-resigns.
-So the synchronous `SetupZoneSigning` at parseconfig.go:966 is largely
+So the synchronous `SetupZoneSigning` at parseconfig.go:995 is largely
 **redundant** — it signs the *old* data with the *old* policy (the policy rebind
-happens in the refresh engine, not at :966) while holding `confMu`. **Fix: delete
-the :966 synchronous call; the already-queued ZoneRefresher covers the signing
+happens in the refresh engine, not at :995) while holding `confMu`. **Fix: delete
+the :995 synchronous call; the already-queued ZoneRefresher covers the signing
 off-lock.** `confMu` then covers only fast config work.
 
-Safety: :966 runs only for *already-loaded* zones (new zones take the
+Safety: :995 runs only for *already-loaded* zones (new zones take the
 `FirstZoneLoad`/`OnFirstLoad` branch), which already hold a signed snapshot behind
 the atomic pointer — they keep serving it until the async re-sign atomically
 swaps in the new one, so **no unsigned blip**. Fail-closed (A3 SERVFAIL +
@@ -234,38 +258,40 @@ post-merge (item 9, `docs/2026-07-14-dnssec-error-single-bucket.md`).
 |---|---|---|
 | A1 re-entrant `zd.mu` deadlock | **DONE** `23710d1` | — |
 | Query serves unsigned (must-be-signed) | **DONE** — SERVFAIL, A3 `449a9e2` | zone `ERROR` |
-| **AXFR transfers unsigned (must-be-signed)** | **OPEN** — AXFR analog of A3 (`ZoneTransferOut` must refuse); test002 proved it | zone `ERROR` |
-| A3 **wildcard** branch serves unsigned | **OPEN** — `WildcardReplace` bypasses A3 | — |
+| **AXFR transfers unsigned (must-be-signed)** | **DONE** `d2bf09b` — `ZoneTransferOut` refuses when SOA has no RRSIG (dnsutils.go:285) | zone `ERROR` |
+| A3 **wildcard** branch serves unsigned | **DONE** `367f57e` — the `WildcardReplace` arm SERVFAILs too | — |
 | SignZone fails (falcon/qruov codepoint orphan, alg mismatch) | fail-closed via A3 + AXFR-refuse | subtype `signing` |
 | Unsigned-publish reload window (#2) | fail-closed makes it SAFE; publish-only-when-complete removes the blip → **optional/deferrable** | — |
-| Policy change half-breaks a zone (test002 alg switch) | **OPEN** — minimal guard: refuse an incompatible alg change, keep old policy | full transactional + warn (#4) |
+| Policy change half-breaks a zone (test002 alg switch) | **DONE** `c57a564` — refuse incompatible alg change, keep old policy | full transactional + warn (Plan B / item 9) |
 | falcon "bad private key" vague error | tdns-side clear-error-at-load (Easy) | fuller surfacing |
 | `DnssecError` P1/P2/P3 bucket overload | avoided (A3 doesn't set it) | the whole B2 redesign |
 
-**Fixed + committed (signed):** A1 `23710d1`, A3 `449a9e2` (snapshot); I10
-cross-check `e117121` (tdns-debug).
-- A1: `EnsureActiveDnssecKeys` gained `zdLocked bool`; `resignWorkingSetSOAIfSigned`
-  resolves the dak before the lock and passes it in, routing DNSKEY publish
-  through `publishDnskeyRRsLocked`. All 7 call sites audited; timeout-guarded test.
-- A3: query-path (`ErrZoneUnsigned` → SERVFAIL), P1-safe (does NOT set
-  `DnssecError`); CDE/referral NSECs carved out via `isSynthesizedDenial`.
+**Fixed + committed + MERGED to main (all GPG-signed):**
+- **Deadlock class CLOSED** — `23710d1` (#2, publish-path SOA re-sign), `1e4703c`
+  (#3, large-alg warn helpers), `f1653eb` (52-site class audit). Earlier
+  `6e090a9` (#1) was already in.
+- **Query fail-closed** — A3 `449a9e2` (`ErrZoneUnsigned` → SERVFAIL, P1-safe:
+  does NOT set `DnssecError`; CDE/referral NSECs carved out via
+  `isSynthesizedDenial`); wildcard arm `367f57e`.
+- **AXFR fail-closed** — `d2bf09b` (`ZoneTransferOut` refuses an unsigned
+  must-be-signed zone, dnsutils.go:285).
+- **Policy-refuse guard** — `c57a564` (refuse an incompatible alg change on
+  config-reload, keep the old policy).
+- **Docs** — `81986f6` (findings + `DnssecError` single-bucket design).
+- **I10 query-vs-AXFR cross-check** — `e117121` (tdns-debug, PR #282, also merged).
+- A1 detail: `EnsureActiveDnssecKeys` gained `zdLocked bool` (sign.go:401); the
+  publish-path re-sign resolves the dak before the lock and routes DNSKEY publish
+  through `publishDnskeyRRsLocked`. Timeout-guarded regression test.
 
-**OPEN behaviour items for THIS branch (fail-closed correctness — belong here, not deferred):**
-1. **AXFR fail-closed** — `ZoneTransferOut` must refuse to transfer a
-   must-be-signed zone that has no RRSIGs (the AXFR analog of A3). Highest
-   priority: without it a broken zone still hands DNSKEY-but-no-RRSIGs to
-   secondaries (exactly what test002 did).
-2. **A3 wildcard gap** — the `WildcardReplace` positive-answer branch bypasses
-   the A3 SERVFAIL, so a broken-zone wildcard would still serve unsigned.
-3. **Minimal policy-refuse guard** — a config-reload algorithm change that needs
-   the (unbuilt) rollover must be **refused, keeping the old policy**, so a
-   reload can't half-break a zone (the test002 scenario). Behaviour only; the
-   *warn* is #4.
-4. **A1 CLASS AUDIT — IMPORTANT.** A1 was **instance #2** of "a `zd.mu`-holding
-   `*Locked` path calls a method that re-locks `zd.mu`" (first was 6e090a9).
-   Do a **systematic sweep** of every lock-holding path for calls into
-   `zd.mu`-locking methods — there may be a #3 lurking. This is a
-   correctness / merge-gate concern (not surfacing) and belongs on this branch.
+**These were the merge-gating fail-closed items — ALL DONE + MERGED:**
+1. **AXFR fail-closed** — ✅ `d2bf09b` (`ZoneTransferOut` refuses a must-be-signed
+   zone with no RRSIGs, dnsutils.go:285).
+2. **A3 wildcard gap** — ✅ `367f57e` (the `WildcardReplace` arm SERVFAILs too).
+3. **Policy-refuse guard** — ✅ `c57a564` (a config-reload alg change needing the
+   unbuilt rollover is refused, keeping the old policy). The *full transactional*
+   version is now **P0-2 / Plan B** below.
+4. **A1 class audit** — ✅ `f1653eb` (52-site sweep) + `1e4703c` (the #3 it found).
+   Class closed.
 
 **Deferred to post-merge (surfacing / non-gating):**
 - **item 9** — the `DnssecError` subtype (B2) redesign + zone `ERROR`
