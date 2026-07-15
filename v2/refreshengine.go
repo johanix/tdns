@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 
 	core "github.com/johanix/tdns/v2/core"
 )
@@ -271,16 +270,16 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							// not in the map (e.g. an override pointing to a removed
 							// policy) must not bind a zero-value policy — quarantine
 							// the zone instead.
-							dp := conf.Internal.DnssecPolicies[polName]
+							dp := ConfLive().DnssecPolicies[polName]
 							if polName != "" {
-								if _, exists := conf.Internal.DnssecPolicies[polName]; !exists {
+								if _, exists := ConfLive().DnssecPolicies[polName]; !exists {
 									lgEngine.Error("zone has unknown effective DNSSEC policy, will not be signed", "zone", zone, "policy", polName, "config_policy", zr.DnssecPolicy)
 									zd.SetError(DnssecError, "DNSSEC policy %q does not exist", polName)
 									dp = DnssecPolicy{}
 									polName = ""
 								}
 							}
-							msc := conf.MultiSigner[zr.MultiSigner]
+							msc := ConfLive().MultiSigner[zr.MultiSigner]
 
 							zd.mu.Lock()
 							zd.ZoneStore = zr.ZoneStore
@@ -411,7 +410,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							} else if overridden {
 								polName = eff
 							}
-							if dp, exists := conf.Internal.DnssecPolicies[polName]; exists {
+							if dp, exists := ConfLive().DnssecPolicies[polName]; exists {
 								// Rebind so a same-name policy whose internals changed
 								// on reload (lifetimes, sigvalidity, rollover, ttls, …)
 								// takes effect; the re-sign below converges the zone
@@ -431,7 +430,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							}
 						}
 						if zr.MultiSigner != "" {
-							if msc, exists := conf.MultiSigner[zr.MultiSigner]; exists {
+							if msc, exists := ConfLive().MultiSigner[zr.MultiSigner]; exists {
 								zd.MultiSigner = &msc
 							} else {
 								lgEngine.Warn("MultiSigner config not found, keeping existing", "multisigner", zr.MultiSigner, "zone", zone)
@@ -615,17 +614,17 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// A non-empty effective policy name that is not in the map
 					// (e.g. an override to a removed policy) must not bind a
 					// zero-value policy — quarantine the zone after creation.
-					dp := conf.Internal.DnssecPolicies[polName]
+					dp := ConfLive().DnssecPolicies[polName]
 					unknownPolicy := ""
 					if polName != "" {
-						if _, exists := conf.Internal.DnssecPolicies[polName]; !exists {
+						if _, exists := ConfLive().DnssecPolicies[polName]; !exists {
 							lgEngine.Error("dynamic zone has unknown effective DNSSEC policy, will not be signed", "zone", zone, "policy", polName, "config_policy", zr.DnssecPolicy)
 							unknownPolicy = polName
 							dp = DnssecPolicy{}
 							polName = ""
 						}
 					}
-					msc := conf.MultiSigner[zr.MultiSigner]
+					msc := ConfLive().MultiSigner[zr.MultiSigner]
 					// Resolution happens at every ingress path (parse/load/add/
 					// modify/catalog), so a config-bearing refresher always carries
 					// the resolved Primaries alongside the as-written PrimariesConf.
@@ -880,7 +879,7 @@ func FindSoaRefresh(zd *ZoneData) (uint32, error) {
 	// value in the config falls back to the default rather than
 	// wrapping to ~4 billion seconds via the uint32 cast.
 	maxrefresh := defaultMaxRefresh
-	if cfg := viper.GetInt("service.maxrefresh"); cfg > 0 {
+	if cfg := ConfLive().MaxRefresh; cfg > 0 {
 		maxrefresh = uint32(cfg)
 	}
 	if maxrefresh < refresh {
@@ -888,7 +887,7 @@ func FindSoaRefresh(zd *ZoneData) (uint32, error) {
 	}
 
 	minrefresh := defaultMinRefresh
-	if cfg := viper.GetInt("service.minrefresh"); cfg > 0 {
+	if cfg := ConfLive().MinRefresh; cfg > 0 {
 		minrefresh = uint32(cfg)
 	}
 	if minrefresh > refresh {

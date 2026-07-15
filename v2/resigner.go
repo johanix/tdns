@@ -6,8 +6,6 @@ package tdns
 import (
 	"context"
 	"time"
-
-	"github.com/spf13/viper"
 )
 
 // func ResignerEngine(zoneresignch chan ZoneRefresher, stopch chan struct{}) {
@@ -15,7 +13,7 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 
 	//	var zoneresignch = conf.Internal.ResignZoneCh
 
-	interval := viper.GetInt("resignerengine.interval")
+	interval := ConfLive().ResignerInterval
 	if interval < 60 {
 		interval = 60
 	}
@@ -32,7 +30,7 @@ func ResignerEngine(ctx context.Context, zoneresignch chan *ZoneData) {
 	// AtomicRollover or other key-state change) are always honored,
 	// regardless of this setting — otherwise rollovers can leave
 	// the DNSKEY RRset signed by a key that's no longer active.
-	periodic := viper.GetBool("service.resign")
+	periodic := ConfLive().PeriodicResign
 	if !periodic {
 		lgSigner.Info("ResignerEngine: periodic mode OFF; explicit triggerResign requests still honored")
 	} else {

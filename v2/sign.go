@@ -14,7 +14,6 @@ import (
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 // sig0TTL is the TTL used for SIG(0) records in signed messages.
@@ -238,7 +237,7 @@ func NeedsResigning(rrsig *dns.RRSIG, servedTTL uint32) bool {
 	expirationTime := time.Unix(int64(rrsig.Expiration), 0)
 	remaining := time.Until(expirationTime)
 
-	scanInterval := time.Duration(viper.GetInt("resignerengine.interval")) * time.Second
+	scanInterval := time.Duration(ConfLive().ResignerInterval) * time.Second
 	if scanInterval < 60*time.Second {
 		scanInterval = 60 * time.Second
 	}

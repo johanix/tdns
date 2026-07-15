@@ -365,13 +365,10 @@ func setZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, error) 
 	if policyName == "" {
 		return "", fmt.Errorf("policy-set: no policy specified")
 	}
-	// Snapshot the resolved policy under confMu: a concurrent config reload
-	// (ReloadZoneConfig / ReloadZone) replaces Conf.Internal.DnssecPolicies
-	// wholesale. pol is a value copy, so we can release the lock immediately
-	// and not hold it across the re-sign below.
-	confMu.RLock()
-	pol, ok := Conf.Internal.DnssecPolicies[policyName]
-	confMu.RUnlock()
+	// Read the resolved policy from the immutable runtime-config snapshot: a
+	// concurrent config reload publishes a new snapshot rather than mutating in
+	// place, so this is lock-free and pol is a stable value copy.
+	pol, ok := ConfLive().DnssecPolicies[policyName]
 	if !ok {
 		return "", fmt.Errorf("policy-set: DNSSEC policy %q does not exist", policyName)
 	}
@@ -470,9 +467,7 @@ func changeZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, erro
 	if policyName == "" {
 		return "", fmt.Errorf("change-policy: no policy specified")
 	}
-	confMu.RLock()
-	pol, ok := Conf.Internal.DnssecPolicies[policyName]
-	confMu.RUnlock()
+	pol, ok := ConfLive().DnssecPolicies[policyName]
 	if !ok {
 		return "", fmt.Errorf("change-policy: DNSSEC policy %q does not exist", policyName)
 	}
