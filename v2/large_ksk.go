@@ -25,22 +25,76 @@ func LargeAlgDSMetrics() uint64 {
 	return n
 }
 
-// buildLargeAlgorithmSet resolves the dnssec.large_algorithms names into the
-// derived codepoint lookup. Unlike split_algorithms (pure allowlist data, where
-// an unregistered name can never be requested), this list actively drives the
-// IMR's transport decision, so an unknown name is a hard config error rather
-// than a silent skip.
+// buildLargeAlgorithmSet resolves the dnssec.large_algorithms entries into the
+// derived codepoint lookup. Each entry is either an exact algorithm name
+// (e.g. "MLDSA44") or a name prefix with a trailing "*" (e.g. "MLDSA*") that
+// matches every known algorithm sharing that prefix — convenient for whole
+// families (MLDSA44/65/87, the MAYO/SNOVA variants, ...) without spelling out
+// each member. Matching is case-insensitive and resolves against the algorithm
+// metadata registry (see resolveLargeAlgorithms), so a name the IMR recognizes
+// but cannot itself sign with still counts — an IMR must recognize large
+// algorithms in the DS records of zones it does not host. Unlike
+// split_algorithms (pure allowlist data), this list actively drives the IMR's
+// transport decision, so an entry that matches nothing is a hard config error,
+// not a silent skip.
 func buildLargeAlgorithmSet(names []string) (map[uint8]bool, error) {
+	return resolveLargeAlgorithms(names, largeAlgorithmCatalog())
+}
+
+// largeAlgorithmCatalog is the name->codepoint universe that
+// dnssec.large_algorithms resolves against: every DNSSEC-capable algorithm the
+// binary knows of, whether it carries a real implementation or only metadata.
+// Metadata-only entries are intentionally included so a config naming an
+// algorithm (or family) this binary cannot itself sign with is still honored
+// for the IMR's DS-driven transport choice. Names are the registry's canonical
+// uppercase form.
+func largeAlgorithmCatalog() map[string]uint8 {
+	names := algorithms.SupportedDNSSEC()
+	cat := make(map[string]uint8, len(names))
+	for _, n := range names {
+		if num, ok := algorithms.AlgorithmNumber(n); ok {
+			cat[n] = num
+		}
+	}
+	return cat
+}
+
+// resolveLargeAlgorithms resolves dnssec.large_algorithms entries against the
+// given name->codepoint catalog. An entry ending in "*" is a name prefix
+// (matching every catalog name that starts with the text before the "*"); any
+// other entry is an exact name. Matching is case-insensitive. Every entry must
+// resolve to at least one codepoint: an unknown exact name, or a prefix that
+// matches nothing in the catalog, is a hard config error (almost always a
+// misspelling). Returns (nil, nil) for an empty list.
+func resolveLargeAlgorithms(names []string, catalog map[string]uint8) (map[uint8]bool, error) {
 	if len(names) == 0 {
 		return nil, nil
 	}
 	m := make(map[uint8]bool, len(names))
-	for _, name := range names {
-		alg := dns.StringToAlgorithm[strings.ToUpper(strings.TrimSpace(name))]
-		if alg == 0 {
-			return nil, fmt.Errorf("dnssec.large_algorithms: unknown algorithm %q (not registered in this binary)", name)
+	for _, raw := range names {
+		entry := strings.ToUpper(strings.TrimSpace(raw))
+		if entry == "" {
+			continue
 		}
-		m[alg] = true
+		if strings.HasSuffix(entry, "*") {
+			prefix := strings.TrimSuffix(entry, "*")
+			matched := 0
+			for name, num := range catalog {
+				if strings.HasPrefix(name, prefix) {
+					m[num] = true
+					matched++
+				}
+			}
+			if matched == 0 {
+				return nil, fmt.Errorf("dnssec.large_algorithms: prefix %q matches no known DNSSEC algorithm (check spelling)", raw)
+			}
+			continue
+		}
+		num, ok := catalog[entry]
+		if !ok {
+			return nil, fmt.Errorf("dnssec.large_algorithms: unknown algorithm %q (not in the algorithm metadata registry)", raw)
+		}
+		m[num] = true
 	}
 	return m, nil
 }
