@@ -461,36 +461,53 @@ explicitly DEFERRED per Johan** — it does not affect wire correctness.
 
 ### Plan A (P0-1) — EDNS-aware truncation / TC bit (TB2)
 
-**Fix at one choke point, not ~10.** Responses are written via `w.WriteMsg(m)`
-at ~10 sites (defaultqueryhandlers.go ×8, dnsutils.go:442, do53.go:235). Wrap the
-`ResponseWriter` **once** in `createAuthDnsHandler` (do53.go:210) so every
-downstream `WriteMsg` truncates uniformly — no per-site edits.
+**Fix at one choke point.** Responses go out via `w.WriteMsg(m)` at ~10 sites
+(defaultqueryhandlers.go ×8, dnsutils.go:442, do53.go:235), and `QueryResponder`
+is handed the **same** `w` (defaultqueryhandlers.go:112/172), so wrapping the
+`ResponseWriter` once at the handler entry catches every downstream write — no
+per-site edits.
+
+**Wrap on the Do53 mux, NOT in `createAuthDnsHandler` (corrected 2026-07-15 —
+the original plan's location was a bug).** `createAuthDnsHandler`'s closure is
+*also used unwrapped by DoH and DoQ* (do53.go:51 comment), and **DoQ is UDP-based
+(QUIC)** — a wrapper there keyed on `RemoteAddr().Network()=="udp"` would
+**mis-truncate DoQ**, a stream transport that must never be truncated. Install it
+on the Do53 mux only:
+`dnsMux.HandleFunc(".", TsigSigningHandler(udpTruncate(authDNSHandler)))`
+(do53.go:51). `dnsMux` is used by **only** the Do53 UDP+TCP servers (do53.go:60);
+DoT/DoH/DoQ never reach it — so *on this mux* `RemoteAddr().Network()=="udp"`
+reliably means plain Do53-over-UDP, and TCP requests report `"tcp"` (never
+truncated).
 
 1. **Capture the advertised bufsize.** Add `UDPSize uint16` to
    `edns0.MsgOptions` (edns0/edns0.go:13); set it in
    `ExtractFlagsAndEDNS0Options` from `opt.UDPSize()` when an OPT is present.
-   Per RFC 6891: value < 512 ⇒ treat as 512; no OPT ⇒ 512 (bare DNS).
-2. **Detect transport** in the handler: `udp := w.RemoteAddr().Network() == "udp"`
-   (miekg/dns's UDP writer reports `"udp"`; TCP/DoT/DoH/DoQ report `"tcp"` /
-   their own). Only UDP truncates.
-3. **Wrap the writer:** `truncatingResponseWriter{ dns.ResponseWriter; udp bool;
-   bufsize int }` whose `WriteMsg(m)`: `if udp && m.Len() > bufsize {
-   m.Truncate(bufsize) }` (miekg/dns drops trailing RRs to fit **and** sets TC=1,
-   keeping the OPT), then delegate. Non-UDP → delegate unchanged. Replace `w` with
-   this wrapper at the top of `createAuthDnsHandler`.
-4. **TSIG ORDERING — the one subtlety.** `TsigSigningHandler` wraps the auth
-   handler (do53.go:51) and MACs the outgoing message. Truncation MUST happen
-   **before** the TSIG MAC is computed, or the MAC covers a message that is then
-   truncated → the client rejects it. So the truncating writer must sit *inside*
-   (below) the TSIG signer, or the TSIG signer must truncate-then-MAC. Get this
-   ordering right.
-5. **Tests:** unit-test the wrapper (>bufsize over `"udp"` → TC + fits; over
-   `"tcp"` → untouched). Live: `dig +bufsize=512 @srv DNSKEY` on a PQ zone → TC=1
-   + small answer; `+tcp` → full. Re-run the pq-testbed UDP matrix → expect
-   **135/135** (TCP fallback) instead of 105/135.
+   Per RFC 6891: value < 512 ⇒ treat as 512; no OPT ⇒ 512 (bare DNS). (Note: the
+   server's own `srv.UDPSize = 4096` is the *inbound* buffer, unrelated — outbound
+   is never capped by miekg/dns, which is why big answers fragment today.)
+2. **`udpTruncate(next)`:** a handler that per request wraps `w` as
+   `truncatingResponseWriter{ ResponseWriter: w; udp: w.RemoteAddr().Network()=="udp"; bufsize }`
+   and calls `next(that, r)`. Its `WriteMsg(m)`: `if udp && m.Len() > bufsize {
+   m.Truncate(bufsize) }` (miekg/dns drops trailing RRs to fit, sets TC=1, keeps
+   the OPT), then delegate. Non-UDP → delegate unchanged.
+3. **TSIG ordering is correct BY PLACEMENT.** `TsigSigningHandler` wraps `w` as a
+   `tsigSignResponseWriter` (only when the request carries a TSIG — tsig_peer.go:126)
+   and MACs on `WriteMsg`. Because `udpTruncate` sits *inside* it, a TSIG request's
+   chain is `w → tsigSignResponseWriter → truncatingResponseWriter → authHandler`:
+   the handler writes to the truncating writer, which truncates **first**, then the
+   tsig writer MACs the already-truncated message. No MAC-over-untruncated hazard.
+   (In practice TSIG traffic is replication over TCP, so this is belt-and-braces —
+   but the order is right regardless.)
+4. **Tests:** unit-test the wrapper (>bufsize over `"udp"` → TC + fits; over
+   `"tcp"` → untouched); confirm `m.Truncate` keeps the OPT + question. Live:
+   `dig +bufsize=512 @srv DNSKEY` on a PQ zone → TC=1 + small answer; `+tcp` →
+   full. Re-run the pq-testbed UDP matrix → expect **135/135** (TCP fallback)
+   instead of 105/135. Sanity-check a DoQ query is NOT truncated.
 
-Effort: **moderate** — the wrapper + edns capture are small; the TSIG ordering is
-the only place to be careful.
+Effort: **moderate** — the wrapper + edns capture are small; the only care points
+are the mux placement (excludes DoQ) and its position inside the TSIG handler.
+**Verified implementation-ready 2026-07-15** (mux/handler wiring, `w` propagation
+to `QueryResponder`, and `TsigSigningHandler` structure all checked against main).
 
 ---
 
