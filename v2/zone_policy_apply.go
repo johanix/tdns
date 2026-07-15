@@ -23,6 +23,7 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"strings"
 )
 
 // PolicyApplySource records why a policy was applied, and is persisted as
@@ -323,4 +324,86 @@ func zoneActiveKeysMatchAlgs(kdb *KeyDB, zone string, pol *DnssecPolicy) (bool, 
 		}
 	}
 	return haveKSK && haveZSK, nil
+}
+
+// zoneActiveKeyRoleChanges reports, per role, whether the zone's ACTIVE keys must
+// be dropped and regenerated to match pol's algorithms — the per-role decision
+// that lets policy-reset be surgical (keep the role whose algorithm is already
+// correct; roll only the one that changed). A role is UNCHANGED only when it has
+// at least one active key of the target algorithm AND no active key of a wrong
+// algorithm; otherwise it is CHANGED (missing the right algorithm, or carrying a
+// wrong-alg key mid-rollover — both need the abrupt hard-flip that drops the role
+// and regenerates one clean active key). `kskChanged` implies the parent DS
+// breaks (the KSK keytag changes); `zskChanged` alone keeps the DS intact.
+//
+// Mode handling: a split↔CSK mode change (the zone's active keys are CSK-shaped —
+// only SEP keys — while pol is split, or vice versa) is treated conservatively as
+// a full reset: both roles changed (DS break implied by kskChanged). In CSK mode
+// the single SEP key is the only role and zskChanged is always false.
+func zoneActiveKeyRoleChanges(kdb *KeyDB, zone string, pol *DnssecPolicy) (kskChanged, zskChanged bool, err error) {
+	active, err := GetDnssecKeysByState(kdb, zone, DnskeyStateActive)
+	if err != nil {
+		return false, false, err
+	}
+	var sepAny, sepGood, sepBad bool // SEP bit set = KSK/CSK role
+	var zskAny, zskGood, zskBad bool // SEP bit clear = ZSK role
+	for _, k := range active {
+		if k.Flags&0x0001 == 0x0001 {
+			sepAny = true
+			if k.Algorithm == pol.KSKAlgorithm {
+				sepGood = true
+			} else {
+				sepBad = true
+			}
+		} else {
+			zskAny = true
+			if k.Algorithm == pol.ZSKAlgorithm {
+				zskGood = true
+			} else {
+				zskBad = true
+			}
+		}
+	}
+
+	// Mode change: the zone's current key shape (CSK = only SEP active keys)
+	// differs from pol's mode. Conservative full reset, DS break.
+	if (sepAny || zskAny) && (sepAny && !zskAny) != (pol.Mode == DnssecPolicyModeCSK) {
+		return true, true, nil
+	}
+
+	if pol.Mode == DnssecPolicyModeCSK {
+		// Single SEP (CSK) role; wrong-alg or missing CSK key → changed.
+		return !sepGood || sepBad, false, nil
+	}
+	// Split: each role changed iff it lacks a right-alg active key or carries a
+	// wrong-alg one.
+	return !sepGood || sepBad, !zskGood || zskBad, nil
+}
+
+// policyResetDSWarning is the chain-of-trust break notice, emitted only when the
+// KSK algorithm actually changed (the parent DS no longer matches the new KSK).
+const policyResetDSWarning = "WARNING: this was an ABRUPT switch that BREAKS the chain of trust — the parent DS no longer matches the new KSK.\n" +
+	"NOTE: validators will go BOGUS until the new DS is published at the parent (via the auto-rollover engine or a manual DS update)."
+
+// policyResetReport builds the operator-facing message for a completed
+// policy-reset. The DS-break warning fires ONLY when the KSK algorithm changed
+// (kskChanged); when the KSK is untouched the report states the parent DS is
+// unchanged.
+func policyResetReport(zone, configName string, kskChanged, zskChanged bool, newRRSIGs int) string {
+	var b strings.Builder
+	switch {
+	case !kskChanged && !zskChanged:
+		fmt.Fprintf(&b, "Zone %s: DNSSEC policy reset to config policy %q; active keys already matched — no key roll. Re-signed (%d RRSIGs) and recorded applied=config.\n", zone, configName, newRRSIGs)
+		b.WriteString("KSK and parent DS unchanged.")
+	case !kskChanged && zskChanged:
+		fmt.Fprintf(&b, "Zone %s: DNSSEC policy reset to config policy %q; ZSK algorithm rolled (dropped and regenerated the ZSK), KSK kept. Re-signed under the new ZSK (%d RRSIGs).\n", zone, configName, newRRSIGs)
+		b.WriteString("KSK and parent DS unchanged — no DS update needed.")
+	case kskChanged && !zskChanged:
+		fmt.Fprintf(&b, "Zone %s: DNSSEC policy reset to config policy %q; KSK algorithm rolled (dropped and regenerated the KSK), ZSK kept. Re-signed (%d RRSIGs).\n", zone, configName, newRRSIGs)
+		b.WriteString(policyResetDSWarning)
+	default: // both roles changed (incl. a mode change / CSK alg change)
+		fmt.Fprintf(&b, "Zone %s: DNSSEC policy reset to config policy %q; both KSK and ZSK algorithms rolled (dropped and regenerated both). Re-signed (%d RRSIGs).\n", zone, configName, newRRSIGs)
+		b.WriteString(policyResetDSWarning)
+	}
+	return b.String()
 }
