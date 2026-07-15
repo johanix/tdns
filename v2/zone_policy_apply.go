@@ -40,12 +40,13 @@ const (
 type PolicyChangeClass int
 
 const (
-	// PolicyChangeNone: same name, same effective algorithms, identical policy
-	// internals — nothing to do.
+	// PolicyChangeNone: same name, same effective algorithms — nothing to do.
+	// An internals-only edit (lifetimes/sigvalidity/ttls/rollover) under the
+	// same name also lands here and converges via the resigner; there is no
+	// separate "benign internals" class. Finding A: resolvePolicyPair resolves
+	// applied and intent from the SAME ConfLive() snapshot by NAME, so a
+	// "same name, changed internals" delta is unreachable at classify time.
 	PolicyChangeNone PolicyChangeClass = iota
-	// PolicyChangeBenignInternals: same name, same effective algorithms, but
-	// lifetimes/sigvalidity/ttls/rollover internals changed — cheap re-sign.
-	PolicyChangeBenignInternals
 	// PolicyChangeCompatibleName: different name, same KSK+ZSK algorithms —
 	// apply transactionally.
 	PolicyChangeCompatibleName
@@ -58,8 +59,6 @@ func (c PolicyChangeClass) String() string {
 	switch c {
 	case PolicyChangeNone:
 		return "none"
-	case PolicyChangeBenignInternals:
-		return "benign-internals"
 	case PolicyChangeCompatibleName:
 		return "compatible-name"
 	case PolicyChangeIncompatibleAlg:
@@ -97,16 +96,10 @@ func classifyPolicyChange(
 	if appliedName != intentName {
 		return PolicyChangeCompatibleName
 	}
-	// Same name, same effective algorithms: distinguish an identical policy from
-	// an internals-only edit so the caller can pick the cheap re-sign path.
-	// suppressLoadWarnings is a non-semantic parse flag — normalize it out.
-	a, b := *appliedPol, *intentPol
-	a.suppressLoadWarnings = false
-	b.suppressLoadWarnings = false
-	if a == b {
-		return PolicyChangeNone
-	}
-	return PolicyChangeBenignInternals
+	// Same name, same effective algorithms → nothing to do. Any internals-only
+	// edit under the same name converges via the resigner (Finding A), so there
+	// is deliberately no separate class for it.
+	return PolicyChangeNone
 }
 
 // resolvePolicyPair loads a zone's intent (via EffectiveDnssecPolicyName: CLI
@@ -162,10 +155,33 @@ func resolvePolicyPair(kdb *KeyDB, zone, configPolicyName string) (
 // the change (blocking ①). Caller is responsible for having classified/refused
 // before calling this.
 //
+// It serializes concurrent applies on the same zone via zd.policyApplyMu.
+// Callers that must serialize extra steps together with the apply — policy-reset
+// drops and regenerates the zone's keys before the re-sign — hold
+// zd.policyApplyMu themselves and call applyZonePolicyTransactionalLocked.
+//
 // ctx is threaded as the first parameter per the house convention and to carry
 // cancellation once SignZone and the applied-policy DB writes become ctx-aware;
 // those downstream calls do not yet consume it.
 func applyZonePolicyTransactional(
+	ctx context.Context,
+	zd *ZoneData,
+	kdb *KeyDB,
+	newPol *DnssecPolicy,
+	newName string,
+	source PolicyApplySource,
+) (newRRSIGs int, err error) {
+	zd.policyApplyMu.Lock()
+	defer zd.policyApplyMu.Unlock()
+	return applyZonePolicyTransactionalLocked(ctx, zd, kdb, newPol, newName, source)
+}
+
+// applyZonePolicyTransactionalLocked is applyZonePolicyTransactional WITHOUT
+// acquiring zd.policyApplyMu. The caller MUST already hold zd.policyApplyMu for
+// this zone; use it only when the apply is one step of a larger critical
+// section that already holds the mutex (policy-reset). Otherwise call
+// applyZonePolicyTransactional.
+func applyZonePolicyTransactionalLocked(
 	ctx context.Context,
 	zd *ZoneData,
 	kdb *KeyDB,
@@ -192,7 +208,7 @@ func applyZonePolicyTransactional(
 	zd.DnssecPolicyName = newName
 	zd.mu.Unlock()
 
-	UpdateSigValidityFloor(zd, zd.DnssecPolicy, Conf.KaspPropagationDelay(), 0, false, Conf.IsLargeAlgorithm, false)
+	UpdateSigValidityFloor(zd, newPol, Conf.KaspPropagationDelay(), 0, false, Conf.IsLargeAlgorithm, false)
 
 	newRRSIGs, err = zd.SignZone(kdb, true)
 	if err != nil {

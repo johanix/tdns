@@ -23,15 +23,15 @@ func kskzsk(ksk, zsk uint8) DnssecPolicy {
 	return DnssecPolicy{Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: ksk, ZSKAlgorithm: zsk}
 }
 
-// TestClassifyPolicyChange covers the four change classes. The design lock ①
+// TestClassifyPolicyChange covers the three change classes. The design lock ①
 // case is the CompatibleName row: a DIFFERENT applied name with the SAME
 // algorithms must classify as a change, which is only detectable because the
 // classifier compares applied-name vs intent-name, not a binding.
 func TestClassifyPolicyChange(t *testing.T) {
 	polA := kskzsk(dns.ED25519, dns.ED25519)
 	polB := kskzsk(dns.ED25519, dns.ED25519) // same algs, different name
-	polBenign := kskzsk(dns.ED25519, dns.ED25519)
-	polBenign.SigValidity.Default = 1234 // same name+algs, internals differ
+	polInternals := kskzsk(dns.ED25519, dns.ED25519)
+	polInternals.SigValidity.Default = 1234 // same name+algs, internals differ
 	polAlg := kskzsk(dns.RSASHA256, dns.ED25519)
 
 	cases := []struct {
@@ -43,7 +43,9 @@ func TestClassifyPolicyChange(t *testing.T) {
 		want        PolicyChangeClass
 	}{
 		{"identical", polA, "a", polA, "a", PolicyChangeNone},
-		{"benign-internals", polA, "a", polBenign, "a", PolicyChangeBenignInternals},
+		// Finding A: same name, same algs, internals differ → None (no separate
+		// benign class; internals converge via the resigner).
+		{"same-name-internals-differ", polA, "a", polInternals, "a", PolicyChangeNone},
 		{"compatible-rename", polA, "a", polB, "b", PolicyChangeCompatibleName},
 		{"incompatible-ksk-alg", polA, "a", polAlg, "b", PolicyChangeIncompatibleAlg},
 		// An alg change even under the SAME name is still incompatible.
