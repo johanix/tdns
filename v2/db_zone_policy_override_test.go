@@ -154,3 +154,33 @@ func TestZonePolicyOverride(t *testing.T) {
 		t.Fatalf("ClearZonePolicyOverride (absent): %v", err)
 	}
 }
+
+// TestClearOverridePreservesApplied is the applied⊥override independence
+// regression: ClearZonePolicyOverride must clear only the override (intent) and
+// leave the last-applied record intact — it UPDATEs policy=” rather than
+// DELETEing the whole row, which previously wiped applied_* too.
+func TestClearOverridePreservesApplied(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	// Zone carries BOTH an override and an applied record.
+	if err := SetZonePolicyOverride(kdb, "example.", "override-pol"); err != nil {
+		t.Fatalf("SetZonePolicyOverride: %v", err)
+	}
+	if err := SetZoneAppliedPolicy(kdb, "example.", "applied-pol", "config"); err != nil {
+		t.Fatalf("SetZoneAppliedPolicy: %v", err)
+	}
+
+	if err := ClearZonePolicyOverride(kdb, "example."); err != nil {
+		t.Fatalf("ClearZonePolicyOverride: %v", err)
+	}
+
+	// Override gone...
+	if _, ok, err := GetZonePolicyOverride(kdb, "example."); err != nil || ok {
+		t.Fatalf("override should be cleared after ClearZonePolicyOverride (ok=%v err=%v)", ok, err)
+	}
+	// ...applied record preserved (the independence guarantee).
+	name, source, ok, err := GetZoneAppliedPolicy(kdb, "example.")
+	if err != nil || !ok || name != "applied-pol" || source != "config" {
+		t.Fatalf("applied must survive an override clear: got (%q,%q,%v,err=%v), want (applied-pol,config,true,nil)", name, source, ok, err)
+	}
+}

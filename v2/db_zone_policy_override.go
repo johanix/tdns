@@ -39,15 +39,21 @@ ON CONFLICT(zone) DO UPDATE SET
 	return err
 }
 
-// ClearZonePolicyOverride removes a zone's dynamic policy override (if any),
-// so the zone falls back to its config-base policy. Removing a non-existent
-// override is not an error.
+// ClearZonePolicyOverride removes a zone's dynamic policy override (if any), so
+// the zone falls back to its config-base policy. It clears ONLY the override
+// (intent) columns — `policy` and `set_at` — and leaves the last-applied record
+// (applied_*) in the same row intact: the override and the applied record are
+// independent (a config-only zone can carry applied_* with no override). It
+// therefore UPDATEs the row to an empty override rather than DELETEing it, so an
+// applied_* record is never collaterally erased. An empty `policy` reads as "no
+// override" via GetZonePolicyOverride. Clearing a non-existent override (no row)
+// is not an error.
 func ClearZonePolicyOverride(kdb *KeyDB, zone string) error {
 	if kdb == nil || kdb.DB == nil {
 		return fmt.Errorf("ClearZonePolicyOverride: nil keystore")
 	}
 	zone = dns.Fqdn(strings.TrimSpace(zone))
-	_, err := kdb.DB.Exec(`DELETE FROM ZonePolicyOverride WHERE zone = ?`, zone)
+	_, err := kdb.DB.Exec(`UPDATE ZonePolicyOverride SET policy = '', set_at = NULL WHERE zone = ?`, zone)
 	return err
 }
 
