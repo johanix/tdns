@@ -10,11 +10,11 @@ import (
 	"math/big"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 // sig0TTL is the TTL used for SIG(0) records in signed messages.
@@ -190,7 +190,10 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 		shouldSign := true
 		for idx, oldsig := range rrset.RRSIGs {
 			if oldsig.(*dns.RRSIG).KeyTag == key.DnskeyRR.KeyTag() {
-				shouldSign = NeedsResigning(oldsig.(*dns.RRSIG), rrset.RRs[0].Header().Ttl) || force
+				// force first: a forced re-sign (resignNow / triggerResign) must
+				// re-sign regardless, and short-circuiting skips NeedsResigning's
+				// work entirely on that path.
+				shouldSign = force || NeedsResigning(oldsig.(*dns.RRSIG), rrset.RRs[0].Header().Ttl)
 				if shouldSign {
 					lgSigner.Debug("removing older RRSIG by same DNSKEY", "name", oldsig.Header().Name, "rrtype", dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)])
 					rrset.RRSIGs = append(rrset.RRSIGs[:idx], rrset.RRSIGs[idx+1:]...)
@@ -231,6 +234,20 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 	return resigned, nil
 }
 
+// resignerIntervalSec caches resignerengine.interval (seconds). NeedsResigning
+// runs in the signing hot path (per RRset, in the ResignerEngine goroutine), and
+// viper's config map is NOT thread-safe: reading it via viper.GetInt while a
+// config reload rewrites it (viper.ReadConfig in ParseConfig) is a data race that
+// aborts the process ("concurrent map read and map write"). The value is a static
+// daemon setting, so cache it: written single-threaded from ParseConfig via
+// SetResignerIntervalSec, read atomically here. A zero value (never set) clamps to
+// the 60s floor below, matching the old viper.GetInt-returns-0 behaviour.
+var resignerIntervalSec atomic.Int64
+
+// SetResignerIntervalSec caches the resigner scan interval out of viper. Call it
+// from config parse/reload (single-threaded); NeedsResigning reads it atomically.
+func SetResignerIntervalSec(sec int) { resignerIntervalSec.Store(int64(sec)) }
+
 // XXX: Perhaps a working algorithm woul be to test for the remaining signature lifetime to be something like
 //
 //	less than 3 x resigning interval?
@@ -238,7 +255,7 @@ func NeedsResigning(rrsig *dns.RRSIG, servedTTL uint32) bool {
 	expirationTime := time.Unix(int64(rrsig.Expiration), 0)
 	remaining := time.Until(expirationTime)
 
-	scanInterval := time.Duration(viper.GetInt("resignerengine.interval")) * time.Second
+	scanInterval := time.Duration(resignerIntervalSec.Load()) * time.Second
 	if scanInterval < 60*time.Second {
 		scanInterval = 60 * time.Second
 	}
