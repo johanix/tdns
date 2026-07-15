@@ -67,5 +67,13 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   Companion to the key-rollover guide above; required
   reading when changing engine timing behaviour.
 
+- [Structured Aggressive Testing with tdns-debug](testing.md)
+  -- Developer framework for aggressive correctness testing of a
+  running tdns server: the actor/ledger/checker architecture, the
+  `test churn` zone-snapshot correctness family and its invariants,
+  the provision/run/cleanup lifecycle, and a worked A/B example that
+  catches a real tearing bug and confirms its fix. A developer tool,
+  not an operator tool; expected to grow more test families over time.
+
 - Future Work (coming soon)
   -- IXFR support.
