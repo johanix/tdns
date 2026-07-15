@@ -12,8 +12,8 @@ import (
 )
 
 func TestParseBufsizeFlag(t *testing.T) {
-	if val, ok := ParseBufsizeFlag("+BUFsize=512"); !ok || val != "512" {
-		t.Fatalf("+BUFsize=512: val=%q ok=%v", val, ok)
+	if val, ok := ParseBufsizeFlag("+BUFSIZE=512"); !ok || val != "512" {
+		t.Fatalf("+BUFSIZE=512: val=%q ok=%v", val, ok)
 	}
 	if val, ok := ParseBufsizeFlag("+BUFSIZ=1232"); !ok || val != "1232" {
 		t.Fatalf("+BUFSIZ=1232: val=%q ok=%v", val, ok)
@@ -53,7 +53,7 @@ func TestEDNSUDPSizeFromMap(t *testing.T) {
 
 func TestParseBufsizeFlagCaseFromDog(t *testing.T) {
 	// dog uppercases argv before ProcessOptions
-	arg := strings.ToUpper("+bufsiz=512")
+	arg := strings.ToUpper("+bufsize=512")
 	val, ok := ParseBufsizeFlag(arg)
 	if !ok || val != "512" {
 		t.Fatalf("%s: val=%q ok=%v", arg, val, ok)

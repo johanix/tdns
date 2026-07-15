@@ -17,7 +17,7 @@ const DefaultEDNSUDPSize = 4096
 // ParseBufsizeFlag recognizes dig-style +bufsize=N and the +bufsiz=N
 // abbreviation. ucarg must already be uppercased.
 func ParseBufsizeFlag(ucarg string) (value string, ok bool) {
-	for _, prefix := range []string{"+BUFsize=", "+BUFSIZ="} {
+	for _, prefix := range []string{"+BUFSIZE=", "+BUFSIZ="} {
 		if strings.HasPrefix(ucarg, prefix) {
 			val := strings.TrimPrefix(ucarg, prefix)
 			return val, true

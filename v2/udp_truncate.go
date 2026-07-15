@@ -42,10 +42,25 @@ func udpTruncate(next func(dns.ResponseWriter, *dns.Msg)) func(dns.ResponseWrite
 		if ra := w.RemoteAddr(); ra != nil {
 			udp = ra.Network() == "udp"
 		}
+		bufsize := edns0.RequestUDPSize(r)
+		// TsigSigningHandler wraps us and appends the response TSIG AFTER we
+		// truncate, so reserve room for it or the final wire would overshoot
+		// bufsize. The response TSIG mirrors the request's key + algorithm, so
+		// the request TSIG's length is a good proxy.
+		if r != nil {
+			if tsig := r.IsTsig(); tsig != nil {
+				if tl := uint16(dns.Len(tsig)); bufsize > tl {
+					bufsize -= tl
+				} else {
+					bufsize = 0
+				}
+			}
+		}
+
 		w = &truncatingResponseWriter{
 			ResponseWriter: w,
 			udp:            udp,
-			bufsize:        edns0.RequestUDPSize(r),
+			bufsize:        bufsize,
 		}
 		next(w, r)
 	}
