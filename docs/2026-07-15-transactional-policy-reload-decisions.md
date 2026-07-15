@@ -120,6 +120,11 @@ split↔CSK **mode change** is handled conservatively as a full reset with the D
 warning (chosen over trying to keep a former-CSK key as a KSK, whose mixed
 signer semantics aren't worth the risk in a break-glass tool). The no-op case
 (both roles already correct) still re-signs additively + records applied=config.
+The force op strips not only the dropped keys' orphaned RRSIGs but **every
+DNSKEY-covering RRSIG** — on a ZSK-only flip the DNSKEY RRset changed, so the
+kept KSK's DNSKEY RRSIG covers a stale key set (not an orphan; additive re-sign
+won't remove it) — letting the re-sign regenerate exactly one fresh RRSIG per
+active KSK.
 **Motivation:** the original unconditional drop+regenerate-all rolled the KSK
 even for a ZSK-only change → new KSK keytag → the parent DS went stale and the
 chain of trust broke for nothing (confirmed on hardware: MAYO5+MAYO2 →
