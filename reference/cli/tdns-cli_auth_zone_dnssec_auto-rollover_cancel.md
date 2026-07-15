@@ -1,4 +1,4 @@
-## tdns-cli agent keystore dnssec auto-rollover cancel
+## tdns-cli auth zone dnssec auto-rollover cancel
 
 Cancel a pending manual KSK rollover request
 
@@ -12,7 +12,7 @@ Online-only: cancelling against a stopped daemon is meaningless (the
 manual_rollover_* row isn't being read by anything).
 
 ```
-tdns-cli agent keystore dnssec auto-rollover cancel [flags]
+tdns-cli auth zone dnssec auto-rollover cancel [flags]
 ```
 
 ### Options
@@ -27,14 +27,16 @@ tdns-cli agent keystore dnssec auto-rollover cancel [flags]
 ```
       --config string   config file (default is /etc/tdns/tdns-cli.yaml)
   -d, --debug           debug output
+  -F, --force           force operation
   -H, --headers         show headers
       --ksk             Render only the KSK section (status / when); ignored by other subcommands
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
       --zsk             Render only the ZSK section (status / when); ignored by other subcommands
 ```
 
 ### SEE ALSO
 
-* [tdns-cli agent keystore dnssec auto-rollover](tdns-cli_agent_keystore_dnssec_auto-rollover.md)	 - Manage and inspect automated KSK rollover (scheduled + manual-ASAP)
+* [tdns-cli auth zone dnssec auto-rollover](tdns-cli_auth_zone_dnssec_auto-rollover.md)	 - Manage and inspect automated KSK rollover (scheduled + manual-ASAP)
 

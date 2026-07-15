@@ -1752,11 +1752,12 @@ func newAutoRolloverCmd(_ string) *cobra.Command {
 		"Render only the KSK section (status / when); ignored by other subcommands")
 	c.PersistentFlags().BoolVar(&autoRolloverFlags.zskOnly, "zsk", false,
 		"Render only the ZSK section (status / when); ignored by other subcommands")
+	// Note: policy-change is NOT a subcommand of auto-rollover; it is a direct
+	// child of `zone dnssec` (promoted to sit beside policy-set/policy-reset).
 	c.AddCommand(
 		newAutoRolloverWhenCmd(),
 		newAutoRolloverAsapCmd(),
 		newAutoRolloverCancelCmd(),
-		newAutoRolloverPolicyChangeCmd(),
 		newAutoRolloverStatusCmd(),
 		newAutoRolloverResetCmd(),
 		newAutoRolloverUnstickCmd(),
@@ -1774,7 +1775,7 @@ func newAutoRolloverPolicyChangeCmd() *cobra.Command {
 		Use:   "policy-change",
 		Short: "Bind a zone to a new DNSSEC policy for a gradual ZSK algorithm rollover",
 		Long: `Bind a zone toward a new DNSSEC policy so its ZSK algorithm rolls over
-GRADUALLY. Unlike "zone set-policy" (which retires the old key
+GRADUALLY. Unlike "zone dnssec policy-set" (which retires the old key
 synchronously — unsafe for an algorithm change), this only sets the
 algorithm of FUTURE-generated ZSKs: the existing FIFO key pipeline drains
 in order, oldest first.

@@ -99,7 +99,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			}
 			resp.Msg = fmt.Sprintf("Zone %s: resigned, %d RRSIGs written by currently-active keys", zd.ZoneName, newrrsigs)
 
-		case "set-policy":
+		case "policy-set":
 			resp.Msg, err = setZonePolicy(zd, kdb, zp.Policy)
 			if err != nil {
 				resp.Error = true
@@ -363,23 +363,20 @@ func zoneOptionsFromStrings(strs []string) map[ZoneOption]bool {
 func setZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, error) {
 	policyName = strings.TrimSpace(policyName)
 	if policyName == "" {
-		return "", fmt.Errorf("set-policy: no policy specified")
+		return "", fmt.Errorf("policy-set: no policy specified")
 	}
-	// Snapshot the resolved policy under confMu: a concurrent config reload
-	// (ReloadZoneConfig / ReloadZone) replaces Conf.Internal.DnssecPolicies
-	// wholesale. pol is a value copy, so we can release the lock immediately
-	// and not hold it across the re-sign below.
-	confMu.RLock()
-	pol, ok := Conf.Internal.DnssecPolicies[policyName]
-	confMu.RUnlock()
+	// Read the resolved policy from the immutable runtime-config snapshot: a
+	// concurrent config reload publishes a new snapshot rather than mutating in
+	// place, so this is lock-free and pol is a stable value copy.
+	pol, ok := ConfLive().DnssecPolicies[policyName]
 	if !ok {
-		return "", fmt.Errorf("set-policy: DNSSEC policy %q does not exist", policyName)
+		return "", fmt.Errorf("policy-set: DNSSEC policy %q does not exist", policyName)
 	}
 	if pol.Error != "" {
-		return "", fmt.Errorf("set-policy: DNSSEC policy %q is broken: %s", policyName, pol.Error)
+		return "", fmt.Errorf("policy-set: DNSSEC policy %q is broken: %s", policyName, pol.Error)
 	}
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
-		return "", fmt.Errorf("set-policy: zone %s is not signed (neither online-signing nor inline-signing)", zd.ZoneName)
+		return "", fmt.Errorf("policy-set: zone %s is not signed (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
 
 	// Capture the current policy (pointer + name + algorithms) before rebinding,
@@ -417,11 +414,11 @@ func setZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, error) 
 		zd.DnssecPolicy = oldPol
 		zd.DnssecPolicyName = oldName
 		zd.mu.Unlock()
-		return "", fmt.Errorf("set-policy: re-sign zone %s: %w", zd.ZoneName, err)
+		return "", fmt.Errorf("policy-set: re-sign zone %s: %w", zd.ZoneName, err)
 	}
 
 	if err := SetZonePolicyOverride(kdb, zd.ZoneName, policyName); err != nil {
-		return "", fmt.Errorf("set-policy: zone re-signed but persisting the override failed (the change will not survive restart): %w", err)
+		return "", fmt.Errorf("policy-set: zone re-signed but persisting the override failed (the change will not survive restart): %w", err)
 	}
 
 	// Build an explicit, multi-line message: a live DNSSEC policy change is
@@ -470,9 +467,7 @@ func changeZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, erro
 	if policyName == "" {
 		return "", fmt.Errorf("change-policy: no policy specified")
 	}
-	confMu.RLock()
-	pol, ok := Conf.Internal.DnssecPolicies[policyName]
-	confMu.RUnlock()
+	pol, ok := ConfLive().DnssecPolicies[policyName]
 	if !ok {
 		return "", fmt.Errorf("change-policy: DNSSEC policy %q does not exist", policyName)
 	}

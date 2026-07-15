@@ -1,4 +1,4 @@
-## tdns-cli agent keystore dnssec auto-rollover unstick
+## tdns-cli auth zone dnssec auto-rollover unstick
 
 Skip the softfail-delay and probe the parent on the next tick
 
@@ -26,7 +26,7 @@ on the next successful confirmed observation.
 Differs from 'reset' (which clears last_rollover_error for one keyid).
 
 ```
-tdns-cli agent keystore dnssec auto-rollover unstick [flags]
+tdns-cli auth zone dnssec auto-rollover unstick [flags]
 ```
 
 ### Options
@@ -47,10 +47,11 @@ tdns-cli agent keystore dnssec auto-rollover unstick [flags]
       --ksk             Render only the KSK section (status / when); ignored by other subcommands
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
       --zsk             Render only the ZSK section (status / when); ignored by other subcommands
 ```
 
 ### SEE ALSO
 
-* [tdns-cli agent keystore dnssec auto-rollover](tdns-cli_agent_keystore_dnssec_auto-rollover.md)	 - Manage and inspect automated KSK rollover (scheduled + manual-ASAP)
+* [tdns-cli auth zone dnssec auto-rollover](tdns-cli_auth_zone_dnssec_auto-rollover.md)	 - Manage and inspect automated KSK rollover (scheduled + manual-ASAP)
 

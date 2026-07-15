@@ -101,7 +101,7 @@ func NewZoneCmd(role string, extras ...*cobra.Command) *cobra.Command {
 
 	var setPolicyName string
 	setPolicy := &cobra.Command{
-		Use:   "set-policy",
+		Use:   "policy-set",
 		Short: "Set a zone's DNSSEC policy at runtime (persists as an override, not in YAML)",
 		Long: `Apply a DNSSEC policy to a zone in the running server. The change is stored
 as a per-zone override in the keystore and survives restart, but does NOT
@@ -213,7 +213,19 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 		},
 	}
 
-	c.AddCommand(list, nsec, sign, resign, reload, bump, write, freeze, thaw, setPolicy, proxyKey, add, del, modify, listDynamic)
+	// `zone dnssec`: every DNSSEC operation for a zone — signing, policy, and
+	// automated rollover. auto-rollover + policy-change moved here from
+	// `keystore dnssec` (they act on a zone's signing state, not on key
+	// material); policy-set/sign/resign/nsec moved down from the top-level
+	// `zone` tree so all DNSSEC verbs live together.
+	dnssecCmd := &cobra.Command{
+		Use:   "dnssec",
+		Short: "Zone DNSSEC operations: signing, policy, and automated rollover",
+	}
+	dnssecCmd.AddCommand(setPolicy, newAutoRolloverPolicyChangeCmd(), newAutoRolloverCmd(role),
+		sign, resign, nsec)
+
+	c.AddCommand(list, dnssecCmd, reload, bump, write, freeze, thaw, proxyKey, add, del, modify, listDynamic)
 	// Role-independent extras attached to every zone tree. Each is built
 	// fresh so the command pointer is unique per NewZoneCmd invocation.
 	c.AddCommand(newZoneReadFakeCmd(), newZoneUpdateCmd(role), newZoneDsyncCmd(role))
@@ -338,7 +350,7 @@ func RunZoneSetPolicy(parent, policy string) {
 	}
 
 	cr, err := SendZoneCommand(api, tdns.ZonePost{
-		Command: "set-policy",
+		Command: "policy-set",
 		Zone:    dns.Fqdn(tdns.Globals.Zonename),
 		Policy:  policy,
 	})

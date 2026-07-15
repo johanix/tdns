@@ -1,15 +1,15 @@
-## tdns-cli auth zone sign
+## tdns-cli auth zone dnssec nsec generate
 
-Request signing of a zone (additive: cover gaps with active keys)
+Generate NSEC records for a zone
 
 ```
-tdns-cli auth zone sign [flags]
+tdns-cli auth zone dnssec nsec generate [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for sign
+  -h, --help   help for generate
 ```
 
 ### Options inherited from parent commands
@@ -21,10 +21,11 @@ tdns-cli auth zone sign [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 
 ### SEE ALSO
 
-* [tdns-cli auth zone](tdns-cli_auth_zone.md)	 - Prefix command, not usable by itself
+* [tdns-cli auth zone dnssec nsec](tdns-cli_auth_zone_dnssec_nsec.md)	 - Prefix command, not usable by itself
 

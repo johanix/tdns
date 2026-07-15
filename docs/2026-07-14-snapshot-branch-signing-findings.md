@@ -163,6 +163,19 @@ the old binary ran clean (16/16 responsive `zone list` probes).
 
 ## Finding 4 — `confMu` is held across zone signing on reload (contention/serialization; NOT a deadlock)
 
+> **✅ ADDRESSED 2026-07-15 — PR #286 (`feature/async-reload-signing`, commit
+> 4687fd5); OPEN, pending merge + live test.** The synchronous
+> `SetupZoneSigning` at `parseconfig.go:995` was **deleted** (delete-only); reload
+> re-signing now happens entirely off `confMu` in the refresh path —
+> `triggerResign` (refreshengine.go:452, policy/config changes) + the post-refresh
+> sign (512, data changes). Investigation confirmed :995 was **fully** redundant:
+> a signed zone always has a policy, so `triggerResign` fires for every signed
+> zone on every reload (the earlier "widen the `if updated` gate" idea was dropped
+> as unnecessary). Homework (a)/(b)/(c) below are all resolved. Plan:
+> `docs/2026-07-15-finding4-async-reload-signing-plan.md`. The companion
+> (bound/parallelise the now-serial `ResignerEngine` path) remains deferred (P2).
+> The analysis below is retained as the original finding.
+
 Distinct from Finding 3 (the deadlock, now fixed): even with no deadlock, the
 config mutex `confMu` is held across potentially long-lived signing on every
 `config reload-zones`, so slow PQ signing serialises **all** config operations.
@@ -303,10 +316,11 @@ post-merge (item 9, `docs/2026-07-14-dnssec-error-single-bucket.md`).
   optimisation once fail-closed is in; not a safety gate).
 - **falcon Part 1** — tdns-side clear error at load (`keystore.go:894` check
   before the `readkey.go:285` decode); Easy, no fork, anytime.
-- **Finding 4** — `confMu` held across zone signing on reload (contention, not a
-  deadlock). Defer the synchronous `SignZone` in `SetupZoneSigning` to the async
-  refresh/`resignq` so `confMu` covers only fast config work. Latency/scalability
-  under PQ signing; not a safety gate.
+- **Finding 4** — ✅ **DONE (PR #286, pending merge).** `confMu` held across zone
+  signing on reload (contention, not a deadlock). Fixed by deleting the
+  synchronous `SetupZoneSigning` at parseconfig.go:995; the async refresh path
+  (`triggerResign` + post-refresh sign) already covers reload signing off
+  `confMu`. Companion (bound/parallelise the `ResignerEngine` path) still deferred.
 
 ## Signing pipeline — post-merge redesign (companion to Finding 4)
 
@@ -449,9 +463,11 @@ explicitly DEFERRED per Johan** — it does not affect wire correctness.
 7. **`reset_soa_serial` resurrect** — wire up the dead knob (see finding above).
 8. **#2 publish-only-when-complete + derive `.Ready()`** — availability
    optimisation now that fail-closed is merged; not a safety gate.
-9. **Finding 4 — `confMu` held across signing on reload.** Config-plane latency
-   only; queries are lock-free and unaffected. (Its companion the `SignZone`-off-
-   `confMu` deletion is cheap and can ride along whenever P0-2 touches the path.)
+9. **Finding 4 — `confMu` held across signing on reload.** ✅ **DONE — PR #286
+   (`feature/async-reload-signing`), pending merge.** Deleted the synchronous
+   `SetupZoneSigning` at parseconfig.go:995 (delete-only); the async refresh path
+   already re-signs off `confMu`. Config-plane latency only; queries were always
+   lock-free. Companion (parallelise the `ResignerEngine` path) still deferred (#10).
 
 **DEFERRED (Johan, 2026-07-15):**
 10. **Signing-pipeline parallelization** (bounded worker pool + per-`zd` key cache

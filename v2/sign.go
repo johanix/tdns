@@ -10,7 +10,6 @@ import (
 	"math/big"
 	"sort"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -234,20 +233,6 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 	return resigned, nil
 }
 
-// resignerIntervalSec caches resignerengine.interval (seconds). NeedsResigning
-// runs in the signing hot path (per RRset, in the ResignerEngine goroutine), and
-// viper's config map is NOT thread-safe: reading it via viper.GetInt while a
-// config reload rewrites it (viper.ReadConfig in ParseConfig) is a data race that
-// aborts the process ("concurrent map read and map write"). The value is a static
-// daemon setting, so cache it: written single-threaded from ParseConfig via
-// SetResignerIntervalSec, read atomically here. A zero value (never set) clamps to
-// the 60s floor below, matching the old viper.GetInt-returns-0 behaviour.
-var resignerIntervalSec atomic.Int64
-
-// SetResignerIntervalSec caches the resigner scan interval out of viper. Call it
-// from config parse/reload (single-threaded); NeedsResigning reads it atomically.
-func SetResignerIntervalSec(sec int) { resignerIntervalSec.Store(int64(sec)) }
-
 // XXX: Perhaps a working algorithm woul be to test for the remaining signature lifetime to be something like
 //
 //	less than 3 x resigning interval?
@@ -255,7 +240,11 @@ func NeedsResigning(rrsig *dns.RRSIG, servedTTL uint32) bool {
 	expirationTime := time.Unix(int64(rrsig.Expiration), 0)
 	remaining := time.Until(expirationTime)
 
-	scanInterval := time.Duration(resignerIntervalSec.Load()) * time.Second
+	// resignerengine.interval comes from the immutable RuntimeConfig snapshot
+	// (ConfLive), not the non-thread-safe global viper — this runs in the signing
+	// hot path concurrent with config reload. A zero value clamps to the 60s
+	// floor below.
+	scanInterval := time.Duration(ConfLive().ResignerInterval) * time.Second
 	if scanInterval < 60*time.Second {
 		scanInterval = 60 * time.Second
 	}

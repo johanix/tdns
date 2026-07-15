@@ -387,11 +387,6 @@ func (conf *Config) ParseConfig(reload bool) error {
 	if err := viper.ReadConfig(strings.NewReader(string(processedConfig))); err != nil {
 		return fmt.Errorf("error reading processed config: %v", err)
 	}
-	// Cache the resigner scan interval out of viper now, while we hold the config
-	// single-threaded. The signing hot path (NeedsResigning) reads this cached
-	// value instead of the global viper, whose map is not safe to read while this
-	// ReadConfig rewrites it on a later reload.
-	SetResignerIntervalSec(viper.GetInt("resignerengine.interval"))
 
 	// Populate ConfigGroupConfig.Name from map keys after parsing CatalogConf
 	if conf.Catalog != nil {

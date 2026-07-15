@@ -328,7 +328,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 		cb(zd)
 	}
 
-	if viper.GetBool("service.debug") {
+	if ConfLive().ServiceDebug {
 		fname, err := zd.ZoneFileName()
 		if err != nil {
 			lg.Error("ZoneFileName failed", "zone", zd.ZoneName, "err", err)
@@ -1133,6 +1133,7 @@ func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool, wait 
 	if err := Conf.reloadDnssecFromFile(); err != nil {
 		lg.Error("ReloadZone: failed to re-parse dnssec config, keeping previous policies", "zone", zd.ZoneName, "err", err)
 	}
+	Conf.publishRuntimeConfig()
 	confMu.Unlock()
 
 	var respch = make(chan RefresherResponse, 1)

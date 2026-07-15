@@ -1,15 +1,15 @@
-## tdns-cli auth zone nsec generate
+## tdns-cli auth zone dnssec nsec show
 
-Generate NSEC records for a zone
+Show the NSEC chain for a zone
 
 ```
-tdns-cli auth zone nsec generate [flags]
+tdns-cli auth zone dnssec nsec show [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for generate
+  -h, --help   help for show
 ```
 
 ### Options inherited from parent commands
@@ -21,10 +21,11 @@ tdns-cli auth zone nsec generate [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 
 ### SEE ALSO
 
-* [tdns-cli auth zone nsec](tdns-cli_auth_zone_nsec.md)	 - Prefix command, not usable by itself
+* [tdns-cli auth zone dnssec nsec](tdns-cli_auth_zone_dnssec_nsec.md)	 - Prefix command, not usable by itself
 
