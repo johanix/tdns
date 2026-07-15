@@ -171,8 +171,22 @@ type ZoneData struct {
 	// call. Zero means "not yet observed" — the E10 cache-flush invariant
 	// check defers until either this value or DnssecPolicy.TTLS.ParentDS is set.
 	ParentDSTTLObserved uint32
-	TransportSignal     *core.RRset // transport signal RRset (SVCB or TSYNC)
-	AddTransportSignal  bool        // whether to attach TransportSignal in responses
+
+	// Zone snapshot publish path (Project B).
+	snapshot   atomic.Pointer[zoneSnapshot]
+	workingSet map[string]*OwnerData
+	// wsSignalSynth stages the synthesized-transport-signal fallback map for the
+	// next publish (see zoneSnapshot.signalSynth). Seeded from the published
+	// snapshot in ensureWorkingSet so unrelated publishes preserve it.
+	wsSignalSynth   map[string]*core.RRset
+	publishCadence  time.Duration
+	publishQueued   bool
+	publishUrgent   bool
+	lastPublish     time.Time
+	publishWake     chan struct{}
+	publisherOnce   sync.Once
+	publishStop     chan struct{}
+	publishStopOnce sync.Once
 	// RemoteDNSKEYs holds DNSKEY RRs from other signers (multi-signer mode 4).
 	// These are DNSKEYs found in the incoming zone that do not match keys in our
 	// local keystore. They are preserved across resignings and merged into the
@@ -263,6 +277,9 @@ type ZoneConf struct {
 	// add/delete/modify). Persisted so OptApiManagedZone can be re-derived on
 	// reload — a dedicated bool, not a SourceCatalog="api" sentinel.
 	ApiManaged bool `yaml:"apimanaged" mapstructure:"apimanaged"`
+	// PublishCadence is the minimum interval between coalesced snapshot publishes
+	// for this zone (default 5s when unset). RFC 2136 urgent publishes bypass.
+	PublishCadence string `yaml:"publish-cadence" mapstructure:"publish-cadence"`
 	// Provisioning is a display-only derived lifecycle string
 	// ("pending"|"loading"|"ready"|"error") populated by the list handlers from
 	// ZoneStatus + the error registry. Not config; not serialized to YAML.
@@ -270,16 +287,17 @@ type ZoneConf struct {
 }
 
 type TemplateConf struct {
-	Name         string `validate:"required"`
-	Zonefile     string
-	Type         string
-	Store        string
-	Primary      string // upstream, for secondary zones
-	Notify       []string
-	OptionsStrs  []string `yaml:"options" mapstructure:"options"`
-	UpdatePolicy UpdatePolicyConf
-	DnssecPolicy string `yaml:"dnssecpolicy" mapstructure:"dnssecpolicy"`
-	MultiSigner  string `yaml:"multisigner" mapstructure:"multisigner"`
+	Name           string `validate:"required"`
+	Zonefile       string
+	Type           string
+	Store          string
+	Primary        string // upstream, for secondary zones
+	Notify         []string
+	OptionsStrs    []string `yaml:"options" mapstructure:"options"`
+	UpdatePolicy   UpdatePolicyConf
+	DnssecPolicy   string `yaml:"dnssecpolicy" mapstructure:"dnssecpolicy"`
+	MultiSigner    string `yaml:"multisigner" mapstructure:"multisigner"`
+	PublishCadence string `yaml:"publish-cadence" mapstructure:"publish-cadence"`
 }
 
 type UpdatePolicyConf struct {

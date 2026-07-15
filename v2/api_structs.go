@@ -33,11 +33,11 @@ type KeystorePost struct {
 	Creator         string
 	Force           bool // commit destructive operation; otherwise dry-run (used by 'purge')
 	// TSIG keystore (tsig-mgmt); do not overload Algorithm uint8 above.
-	TsigKeyname   string `json:"tsigkeyname,omitempty"`
-	TsigAlgorithm string `json:"tsigalgorithm,omitempty"`
-	TsigSecret    string `json:"tsigsecret,omitempty"`
-	Owner         string `json:"owner,omitempty"`
-	Interactive   bool   `json:"interactive,omitempty"`
+	TsigKeyname      string   `json:"tsigkeyname,omitempty"`
+	TsigAlgorithm    string   `json:"tsigalgorithm,omitempty"`
+	TsigSecret       string   `json:"tsigsecret,omitempty"`
+	Owner            string   `json:"owner,omitempty"`
+	Interactive      bool     `json:"interactive,omitempty"`
 	TsigImportData   string   `json:"tsigimportdata,omitempty"`
 	TsigImportFormat string   `json:"tsigimportformat,omitempty"`
 	TsigOverwrite    []string `json:"tsigoverwrite,omitempty"`
@@ -320,6 +320,7 @@ type DebugResponse struct {
 	TrustedSig0keys map[string]Sig0Key
 	CachedRRsets    []cache.CachedRRset
 	Validated       bool
+	ZoneTxlog       *PendingChangesView
 	Msg             string
 	Error           bool
 	ErrorMsg        string

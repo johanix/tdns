@@ -1,8 +1,8 @@
 # Project B — Zone-Mutation Correctness via an Immutable Snapshot
 
-**Status:** implementation-ready (final — all review rounds folded in; milestoned
-B1→B2→B3; SliceZone retired by Project A step 0)
-**Date:** 2026-07-02
+**Status:** **done (tdns-core)** — B1 (`98e50fa`), B2 (`c76dfc4`), B3 complete on branch
+`feature/zone-snapshot-correctness`. B-MP (tdns-mp) deferred per §9.
+**Date:** 2026-07-02 (plan); **implementation log:** 2026-07-08
 **Scope:** replace direct-write-then-bump-serial mutation with an **immutable
 snapshot published atomically**, in **tdns core (`v2/` + `cmdv2/`) only**. A
 **standalone correctness fix** (repairs a serial-invariant violation that bites
@@ -26,6 +26,61 @@ MapZone (`zd.Data`) — B's snapshot is **map-only, no store normalization**.
 `tapir/docs/2026-06-02-pop-149-snapshot-concurrency-design.md` (*POP §n*).
 **Review folded in:** `…-zone-mutation-snapshot-correctness-review.md`.
 Anchors as of 2026-07-02; verify before editing.
+
+---
+
+## Implementation status (2026-07-08)
+
+Branch: `feature/zone-snapshot-correctness` (off `main`).
+
+### B1 — done (`98e50fa`)
+
+| Deliverable | Status |
+|---|---|
+| `ZoneSnapshot`, `atomic.Pointer`, `PendingChanges` | `v2/zone_snapshot.go` |
+| Staging API, coalescing publisher | `v2/zone_mutation.go` (dual-write removed in B3) |
+| `publish-cadence` on `ZoneConf` / `TemplateConf` | `v2/structs.go`, `v2/parseconfig.go` |
+| `InstallInitialSnapshot()` after first load / `SetupZoneSigning` | `v2/refreshengine.go`, `v2/zone_utils.go` |
+| B1 tests (`TestSnapshotImmutability`, dual-write, coalescing, generation guard) | `v2/zone_snapshot_test.go` — pass `-race` |
+
+### B2 — done (`c76dfc4`)
+
+| Mutator / deliverable | Status | Notes |
+|---|---|---|
+| Query-path write-backs removed | **done** | `signedApexRRsets`, `soaForResponse`; no `Set`-after-sign |
+| `SignZone` / `ResignZone` / `GenerateNsecChain` / `StripZoneRRSIGs` | **done** | stage + `publishLocked` under `zd.mu` |
+| `PublishDnskeyRRs` | **done** | `publishDnskeyRRsLocked` |
+| `BumpSerial` / `BumpSerialOnly` | **done** | `publishSync()` |
+| RFC2136 `ApplyZoneUpdate` / `ApplyChildUpdate` | **done** | `stagedOwner`, sync `publishLocked` on commit |
+| Refresh flips (`FetchFromFile` / `FetchFromUpstream`) | **done** | `applyRefreshReplacementLocked` — no hard `Data` flip |
+| `RepopulateDynamicRRs` | **done** | `repopulateWorkingSetLocked`; folded into refresh publish |
+| `CreateTransportSignalRRs` | **done** | `commitTransportSignalLocked` |
+| Catalog (`regenerateCatalogZone`, create version TXT) | **done** | working-set rebuild + publish |
+| Post-refresh serial override (`outbound_soa_serial`) | **done** | republish instead of `setApexSOASerial` on served data |
+| `PublishCsyncRR` | **unchanged** | already routes via internal `ZONE-UPDATE` → staged RFC2136 |
+| `dnsutils.SortFunc` (zone file load into `new_zd`) | **intentionally unchanged** | draft build target; consumed by refresh publish |
+| `tdns-cli debug zone-txlog` + `/debug` handler | **done** | `pendingChanges()` → `zone-txlog` command + JSON view |
+| `TestConcurrentServeAndUpdate` (B2 variant) | **done** | superseded by B3 variant in same commit |
+| `pendingChanges` test | **done** | `TestPendingChanges` |
+
+**B2 gate:** all B1 tests + `TestPendingChanges` + `TestConcurrentServeAndUpdate` (B2 variant) pass `-race`.
+
+### B3 — done
+
+| Deliverable | Status | Notes |
+|---|---|---|
+| Readers via `publishedSnapshot()` | **done** | `GetOwner`, `GetOwnerNames`, `NameExists`, `GetSOA`, `soaForResponse` |
+| Query transport signal | **done** | `queryresponder.go` → `publishedTransportSignal()` |
+| `ZoneTransferOut` / `WriteZoneToFile` | **done** | `GetOwnerNames`/`GetOwner`; no transfer-time SOA serial override |
+| Mutators use working set | **done** | `stagedOwner`, `workingOwnerNamesLocked` in sign/tsignal/ops_dnskey |
+| Drop dual-write | **done** | `syncLegacyFromSnapshot` removed; publish stores snapshot only |
+| Dead code cleanup | **done** | `setApexSOASerial`, `AddOwner` removed |
+| `check-no-mutators` grep gate | **done** | `utils/Makefile.common`; wired into `lint` |
+| Unexported published type | **done** | `zoneSnapshot` (unexported) |
+| `PrintOwners` | **done** | reads via `GetOwnerNames` |
+| B3 tests | **done** | `TestPublishedSnapshotAfterPublish`, `TestCurrentSerialMatchesSnapshot`, B3 `TestConcurrentServeAndUpdate` — pass `-race` |
+
+**B3 gate:** all §5 acceptance tests pass `-race`; `make -C v2 check-no-mutators` clean.
 
 ---
 

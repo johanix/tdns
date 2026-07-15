@@ -206,7 +206,7 @@ func TestUpdateSigValidityFloorConfig(t *testing.T) {
 	}
 	zd := &ZoneData{ZoneName: "test.example."}
 	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
-	UpdateSigValidityFloor(zd, pol, prop, 0, false, nil)
+	UpdateSigValidityFloor(zd, pol, prop, 0, false, nil, false)
 	if zd.HasError(DnssecError) || zd.HasError(DnssecPolicyWarning) {
 		t.Fatalf("no TTL ceilings: expected no floor errors, got dnssec=%v warn=%v",
 			zd.HasError(DnssecError), zd.HasError(DnssecPolicyWarning))
@@ -216,9 +216,47 @@ func TestUpdateSigValidityFloorConfig(t *testing.T) {
 	pol.SigValidity.Default = 3600 // 1h, H=2h with prop=1h → 2h ≤ 2×H
 	zd2 := &ZoneData{ZoneName: "tight.example."}
 	zd2.Options = map[ZoneOption]bool{OptOnlineSigning: true}
-	UpdateSigValidityFloor(zd2, pol, prop, 0, false, nil)
+	UpdateSigValidityFloor(zd2, pol, prop, 0, false, nil, false)
 	if !zd2.HasError(DnssecError) {
 		t.Fatal("expected hard floor error for short default validity")
+	}
+}
+
+// TestUpdateSigValidityFloorNoSelfDeadlock is the regression test for the
+// SignZone self-deadlock: SignZone holds zd.mu and calls UpdateSigValidityFloor,
+// whose SetError/ClearError re-lock zd.mu (Go mutexes are not reentrant). With
+// zdLocked=true the *Locked setters are used, so no re-lock happens. The call
+// runs in a goroutine holding zd.mu; a regression would block it forever, so
+// the timeout fails the test instead of hanging the whole run.
+func TestUpdateSigValidityFloorNoSelfDeadlock(t *testing.T) {
+	prop := time.Hour
+
+	// hardPol trips the hard floor → exercises SetError(DnssecError) under lock.
+	hardPol := &DnssecPolicy{SigValidity: PolicySigValidity{Default: 3600, DNSKEY: 3600, DS: 3600}}
+	hardPol.TTLS.MaxServed = 3600
+	// laxPol has ample validity → exercises ClearError(DnssecError) under lock.
+	laxPol := &DnssecPolicy{SigValidity: PolicySigValidity{
+		Default: uint32((14 * 24 * time.Hour).Seconds()),
+		DNSKEY:  uint32((30 * 24 * time.Hour).Seconds()),
+		DS:      uint32((14 * 24 * time.Hour).Seconds()),
+	}}
+
+	zd := &ZoneData{ZoneName: "deadlock.example."}
+	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+
+	done := make(chan struct{})
+	go func() {
+		zd.mu.Lock() // the SignZone context: lock held across the calls
+		defer zd.mu.Unlock()
+		UpdateSigValidityFloor(zd, hardPol, prop, 0, false, nil, true) // SetError path
+		UpdateSigValidityFloor(zd, laxPol, prop, 0, false, nil, true)  // ClearError path
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("UpdateSigValidityFloor(zdLocked=true) deadlocked while zd.mu was held")
 	}
 }
 
@@ -233,13 +271,13 @@ func TestUpdateSigValidityFloorRuntime(t *testing.T) {
 	}
 	zd := &ZoneData{ZoneName: "test.example."}
 	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
-	UpdateSigValidityFloor(zd, pol, prop, 300, true, nil)
+	UpdateSigValidityFloor(zd, pol, prop, 300, true, nil, false)
 	if zd.HasError(DnssecError) {
 		t.Fatalf("runtime floor should pass: %s", zd.ErrorMsg)
 	}
 
 	pol.SigValidity.Default = 1800 // 30m
-	UpdateSigValidityFloor(zd, pol, prop, 3600, true, nil)
+	UpdateSigValidityFloor(zd, pol, prop, 3600, true, nil, false)
 	if !zd.HasError(DnssecError) {
 		t.Fatal("expected runtime hard error when validity too short for observed TTL")
 	}

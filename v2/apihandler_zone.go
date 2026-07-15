@@ -406,7 +406,7 @@ func setZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, error) 
 	zd.DnssecPolicyName = policyName
 	zd.mu.Unlock()
 
-	UpdateSigValidityFloor(zd, zd.DnssecPolicy, Conf.KaspPropagationDelay(), 0, false, Conf.IsLargeAlgorithm)
+	UpdateSigValidityFloor(zd, zd.DnssecPolicy, Conf.KaspPropagationDelay(), 0, false, Conf.IsLargeAlgorithm, false)
 
 	// Additive sign: reconcile (retire wrong-alg, generate new) + add new-key
 	// RRSIGs, leaving the retired keys' RRSIGs in place for a graceful
@@ -553,7 +553,7 @@ func changeZonePolicy(zd *ZoneData, kdb *KeyDB, policyName string) (string, erro
 	zd.DnssecPolicyName = policyName
 	zd.mu.Unlock()
 
-	UpdateSigValidityFloor(zd, zd.DnssecPolicy, Conf.KaspPropagationDelay(), 0, false, Conf.IsLargeAlgorithm)
+	UpdateSigValidityFloor(zd, zd.DnssecPolicy, Conf.KaspPropagationDelay(), 0, false, Conf.IsLargeAlgorithm, false)
 
 	if _, err := zd.SignZone(kdb, true); err != nil {
 		zd.mu.Lock()

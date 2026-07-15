@@ -41,6 +41,9 @@ func newMapZone(name string, ztype ZoneType, owners map[string][]dns.RR) *ZoneDa
 		}
 		zd.Data.Set(oname, od)
 	}
+	// Publish the initial snapshot so post-cutover readers (GetOwner, etc.) see
+	// the data, mirroring what the refresh engine does for real zones.
+	zd.InstallInitialSnapshot()
 	return zd
 }
 
@@ -170,7 +173,16 @@ func drainUpdateQ(q chan UpdateRequest) []UpdateRequest {
 // UpdateQ we can drain.
 func signalTarget(name string, owners map[string][]dns.RR) (*ZoneData, chan UpdateRequest) {
 	q := make(chan UpdateRequest, 16)
-	zd := newMapZone(name, Primary, owners)
+	// A real primary always has an apex SOA; inject one (merged with any
+	// caller-supplied apex records) so InstallInitialSnapshot produces a
+	// servable snapshot — the apex guard refuses apex-less zones.
+	soa, _ := dns.NewRR(name + " 3600 IN SOA ns." + name + " hostmaster." + name + " 1 3600 600 604800 300")
+	ns, _ := dns.NewRR(name + " 3600 IN NS ns." + name)
+	full := map[string][]dns.RR{name: {soa, ns}}
+	for oname, rrs := range owners {
+		full[oname] = append(full[oname], rrs...)
+	}
+	zd := newMapZone(name, Primary, full)
 	zd.KeyDB = &KeyDB{UpdateQ: q}
 	return zd, q
 }

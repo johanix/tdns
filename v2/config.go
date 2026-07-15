@@ -646,6 +646,7 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 			continue
 		}
 		lgConfig.Info("ReloadZoneConfig: zone no longer in config, removing from zone list", "zone", zname)
+		stopZonePublisher(zname)
 		Zones.Remove(zname)
 		// Bump generation so any in-flight refresh on the captured pointer fails
 		// the pre-persist guard (B5b) and does not resurrect the removed zone.
