@@ -119,6 +119,28 @@ throughout.`,
 	setPolicy.MarkFlagRequired("zone")
 	setPolicy.MarkFlagRequired("policy")
 
+	var policyResetConfirm bool
+	policyReset := &cobra.Command{
+		Use:   "policy-reset",
+		Short: "DANGER (test/lab): drop a zone's DNSSEC keys and re-sign under its config policy",
+		Long: `Force a zone back onto its config dnssec_policy by DROPPING its current DNSSEC
+keys, clearing both the runtime override and the last-applied record, and
+re-signing from scratch under the YAML config policy.
+
+This is a break-glass tool for test/lab zones. It exists because an abrupt
+policy switch that changes the KSK/ZSK algorithm is otherwise refused (that
+needs a key rollover that is not built). It BREAKS THE CHAIN OF TRUST: the
+parent DS will not match the freshly generated KSK until you re-publish it, so
+validators go BOGUS until the parent DS is updated. NOT for production.
+Requires --confirm and a single --zone (no wildcards, no bulk).`,
+		Run: func(cmd *cobra.Command, args []string) {
+			RunZoneResetPolicy(role, policyResetConfirm)
+		},
+	}
+	policyReset.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to reset the DNSSEC policy for")
+	policyReset.Flags().BoolVar(&policyResetConfirm, "confirm", false, "Confirm this dangerous operation (drops keys, breaks the chain of trust)")
+	policyReset.MarkFlagRequired("zone")
+
 	proxyKey := &cobra.Command{
 		Use:   "proxy-key",
 		Short: "Show the delegation-sync-proxy UPDATE state and the KEY to publish at the primary",
@@ -222,7 +244,7 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 		Use:   "dnssec",
 		Short: "Zone DNSSEC operations: signing, policy, and automated rollover",
 	}
-	dnssecCmd.AddCommand(setPolicy, newAutoRolloverPolicyChangeCmd(), newAutoRolloverCmd(role),
+	dnssecCmd.AddCommand(setPolicy, policyReset, newAutoRolloverPolicyChangeCmd(), newAutoRolloverCmd(role),
 		sign, resign, nsec)
 
 	c.AddCommand(list, dnssecCmd, reload, bump, write, freeze, thaw, proxyKey, add, del, modify, listDynamic)
@@ -353,6 +375,37 @@ func RunZoneSetPolicy(parent, policy string) {
 		Command: "policy-set",
 		Zone:    dns.Fqdn(tdns.Globals.Zonename),
 		Policy:  policy,
+	})
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		os.Exit(1)
+	}
+
+	if cr.Msg != "" {
+		fmt.Printf("%s\n", cr.Msg)
+	}
+}
+
+// RunZoneResetPolicy drives the `zone dnssec policy-reset` escape hatch: it
+// forwards --confirm as ZonePost.Force. The server refuses without it.
+func RunZoneResetPolicy(parent string, confirm bool) {
+	if tdns.Globals.Zonename == "" {
+		fmt.Println("Error: zone name not specified")
+		os.Exit(1)
+	}
+	if !confirm {
+		fmt.Println("Error: policy-reset is destructive (drops the zone's DNSSEC keys and breaks the chain of trust); re-run with --confirm")
+		os.Exit(1)
+	}
+	api, err := GetApiClient(parent, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", parent, err)
+	}
+
+	cr, err := SendZoneCommand(api, tdns.ZonePost{
+		Command: "policy-reset",
+		Zone:    dns.Fqdn(tdns.Globals.Zonename),
+		Force:   confirm,
 	})
 	if err != nil {
 		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
