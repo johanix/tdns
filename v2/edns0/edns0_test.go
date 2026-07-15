@@ -30,6 +30,9 @@ func TestExtractFlagsAndEDNS0Options(t *testing.T) {
 		if opts.DO {
 			t.Error("DO flag should be false (no EDNS0)")
 		}
+		if opts.UDPSize != dns.MinMsgSize {
+			t.Errorf("UDPSize should be %d without EDNS0, got %d", dns.MinMsgSize, opts.UDPSize)
+		}
 	})
 
 	t.Run("WithEDNS0DO", func(t *testing.T) {
@@ -46,6 +49,9 @@ func TestExtractFlagsAndEDNS0Options(t *testing.T) {
 		}
 		if !opts.DO {
 			t.Error("DO flag should be true")
+		}
+		if opts.UDPSize != 4096 {
+			t.Errorf("UDPSize should be 4096, got %d", opts.UDPSize)
 		}
 	})
 
@@ -74,6 +80,34 @@ func TestExtractFlagsAndEDNS0Options(t *testing.T) {
 		}
 		if opts.ErAgentDomain != "erp.example.com." {
 			t.Errorf("ErAgentDomain should be 'erp.example.com.', got %s", opts.ErAgentDomain)
+		}
+	})
+}
+
+func TestRequestUDPSize(t *testing.T) {
+	t.Run("NoEDNS0", func(t *testing.T) {
+		msg := new(dns.Msg)
+		msg.SetQuestion("example.com.", dns.TypeA)
+		if got := RequestUDPSize(msg); got != dns.MinMsgSize {
+			t.Errorf("RequestUDPSize() = %d, want %d", got, dns.MinMsgSize)
+		}
+	})
+
+	t.Run("Advertised4096", func(t *testing.T) {
+		msg := new(dns.Msg)
+		msg.SetQuestion("example.com.", dns.TypeA)
+		msg.SetEdns0(4096, false)
+		if got := RequestUDPSize(msg); got != 4096 {
+			t.Errorf("RequestUDPSize() = %d, want 4096", got)
+		}
+	})
+
+	t.Run("Below512Clamped", func(t *testing.T) {
+		msg := new(dns.Msg)
+		msg.SetQuestion("example.com.", dns.TypeA)
+		msg.SetEdns0(300, false)
+		if got := RequestUDPSize(msg); got != dns.MinMsgSize {
+			t.Errorf("RequestUDPSize() = %d, want %d", got, dns.MinMsgSize)
 		}
 	})
 }
