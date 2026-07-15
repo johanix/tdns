@@ -99,7 +99,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			}
 			resp.Msg = fmt.Sprintf("Zone %s: resigned, %d RRSIGs written by currently-active keys", zd.ZoneName, newrrsigs)
 
-		case "set-policy":
+		case "policy-set":
 			resp.Msg, err = setZonePolicy(zd, kdb, zp.Policy)
 			if err != nil {
 				resp.Error = true

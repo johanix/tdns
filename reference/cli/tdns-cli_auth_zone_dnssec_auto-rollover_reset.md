@@ -1,4 +1,4 @@
-## tdns-cli auth keystore dnssec auto-rollover reset
+## tdns-cli auth zone dnssec auto-rollover reset
 
 Clear last_rollover_error for one key (after operator intervention)
 
@@ -16,7 +16,7 @@ refuses to run --offline if it sees a live daemon process; pass
 stopped first).
 
 ```
-tdns-cli auth keystore dnssec auto-rollover reset [flags]
+tdns-cli auth zone dnssec auto-rollover reset [flags]
 ```
 
 ### Options
@@ -38,10 +38,11 @@ tdns-cli auth keystore dnssec auto-rollover reset [flags]
       --ksk             Render only the KSK section (status / when); ignored by other subcommands
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
       --zsk             Render only the ZSK section (status / when); ignored by other subcommands
 ```
 
 ### SEE ALSO
 
-* [tdns-cli auth keystore dnssec auto-rollover](tdns-cli_auth_keystore_dnssec_auto-rollover.md)	 - Manage and inspect automated KSK rollover (scheduled + manual-ASAP)
+* [tdns-cli auth zone dnssec auto-rollover](tdns-cli_auth_zone_dnssec_auto-rollover.md)	 - Manage and inspect automated KSK rollover (scheduled + manual-ASAP)
 

@@ -1,4 +1,4 @@
-## tdns-cli agent keystore dnssec auto-rollover when
+## tdns-cli auth zone dnssec auto-rollover when
 
 Compute the earliest moment a rollover could safely fire (no state change)
 
@@ -18,7 +18,7 @@ file when the daemon is down — this requires --config with the daemon's
 config file so the CLI can find db.file and the zone's policy.
 
 ```
-tdns-cli agent keystore dnssec auto-rollover when [flags]
+tdns-cli auth zone dnssec auto-rollover when [flags]
 ```
 
 ### Options
@@ -34,14 +34,16 @@ tdns-cli agent keystore dnssec auto-rollover when [flags]
 ```
       --config string   config file (default is /etc/tdns/tdns-cli.yaml)
   -d, --debug           debug output
+  -F, --force           force operation
   -H, --headers         show headers
       --ksk             Render only the KSK section (status / when); ignored by other subcommands
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
       --zsk             Render only the ZSK section (status / when); ignored by other subcommands
 ```
 
 ### SEE ALSO
 
-* [tdns-cli agent keystore dnssec auto-rollover](tdns-cli_agent_keystore_dnssec_auto-rollover.md)	 - Manage and inspect automated KSK rollover (scheduled + manual-ASAP)
+* [tdns-cli auth zone dnssec auto-rollover](tdns-cli_auth_zone_dnssec_auto-rollover.md)	 - Manage and inspect automated KSK rollover (scheduled + manual-ASAP)
 

@@ -1,15 +1,15 @@
-## tdns-cli auth zone nsec show
+## tdns-cli auth zone dnssec sign
 
-Show the NSEC chain for a zone
+Request signing of a zone (additive: cover gaps with active keys)
 
 ```
-tdns-cli auth zone nsec show [flags]
+tdns-cli auth zone dnssec sign [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help   help for show
+  -h, --help   help for sign
 ```
 
 ### Options inherited from parent commands
@@ -21,10 +21,11 @@ tdns-cli auth zone nsec show [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 
 ### SEE ALSO
 
-* [tdns-cli auth zone nsec](tdns-cli_auth_zone_nsec.md)	 - Prefix command, not usable by itself
+* [tdns-cli auth zone dnssec](tdns-cli_auth_zone_dnssec.md)	 - Zone DNSSEC operations: signing, policy, and automated rollover
 
