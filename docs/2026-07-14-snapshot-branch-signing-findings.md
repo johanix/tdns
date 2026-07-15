@@ -368,3 +368,160 @@ that check, every refresh would look "changed" and republish on every poll even
 when the primary is stable. Change-detection must use the primary's real serial;
 only the emitted serial is rewritten. (This is why `reset_soa_serial` was not a
 usable churn lever for the swap test — `auth zone bump` was used instead.)
+
+## Finding — pq.axfr.net testbed bugs (independent of snapshot) (2026-07-15)
+
+From `tdns-project/pq-testbed/README.md` "Known issues found while building"
+(2026-07-13 foffe deployment, 135 PQ leaf zones). None touch the snapshot code;
+all are real tdns-auth bugs, and two are wire-correctness issues.
+
+- **TB1 — DS query at a hosted child apex panics when the IMR engine is off.**
+  `handleDSQuery` case 2 calls `imr.ParentZone()` unguarded (queryresponder.go:293);
+  with `imrengine.active: false`, `imr` is nil → recovered panic → SERVFAIL.
+  Workaround deployed on foffe (imr enabled + root trust anchor). Proper fix:
+  nil-guard `imr`, and prefer a local `FindZone()` walk (already at :300) for the
+  parent before asking the network.
+- **TB2 — no TC bit, ever; the EDNS UDP bufsize is ignored.** No `msg.Truncate()`
+  exists in the response path. A `bufsize=512` client gets a 1666 B UDP answer;
+  a DNSKEY query gets a 7747 B UDP datagram (6 fragments). Net effect on the
+  public internet: the 30 zones whose ZSK sigs exceed the fragmentation
+  threshold (falcon512/mayo3 ZSKs) **time out over UDP instead of falling back
+  to TCP** — the exact failure mode alg-split exists to fix. UDP matrix: 105/135;
+  TCP: 135/135. **This is a wire-correctness bug.** (Detailed plan below.)
+- **TB3 — NS query at a hosted child apex echoes the answered NS RRset again in
+  AUTHORITY.** Redundant (BIND leaves AUTHORITY empty for an authoritative
+  positive answer). Cosmetic.
+
+## Post-merge open findings — PRIORITIZED (2026-07-15)
+
+The snapshot branch is merged; this consolidates every remaining open finding in
+this doc + the pq-testbed report, in priority order. **Parallelization/perf work
+(the signing-pipeline redesign: worker pool, key cache, same-zone ordering) is
+explicitly DEFERRED per Johan** — it does not affect wire correctness.
+
+**P0 — wire correctness (do first):**
+1. **TB2 — EDNS-aware truncation / TC bit.** 30/135 zones unreachable over UDP.
+   Plan A below.
+2. **Persist effective DNSSEC policy + transactional config-reload** (= this
+   doc's Decision 2 / "#4 refuse half"). A config-file policy change must go
+   through the *same* transactional evaluation as a `change-policy` CLI request
+   (apply → re-sign → revert/refuse-keeping-old on failure), or a bad edit
+   half-breaks a signed zone on the wire. Plan B below.
+
+**P1 — correctness, lower frequency / has a workaround:**
+3. **TB1 — DS-query nil-`imr` panic.** Small nil-guard + local-parent walk;
+   currently worked around by enabling imr. SERVFAIL only when imr is off.
+4. **Error SURFACING (item 9 / `DnssecError` subtype B2).** Broken/unsignable
+   zones behave fail-closed (already merged) but still look healthy in
+   `config status`. The "raise a warning" half of P0-2 depends on this.
+5. **falcon Part 1** — tdns-side clear error at load (`keystore.go:894` alg-check
+   before the `readkey.go:285` decode). Easy, no fork.
+
+**P2 — cosmetic / optimization / low-urgency:**
+6. **TB3 — NS-in-AUTHORITY echo.** Cosmetic.
+7. **`reset_soa_serial` resurrect** — wire up the dead knob (see finding above).
+8. **#2 publish-only-when-complete + derive `.Ready()`** — availability
+   optimisation now that fail-closed is merged; not a safety gate.
+9. **Finding 4 — `confMu` held across signing on reload.** Config-plane latency
+   only; queries are lock-free and unaffected. (Its companion the `SignZone`-off-
+   `confMu` deletion is cheap and can ride along whenever P0-2 touches the path.)
+
+**DEFERRED (Johan, 2026-07-15):**
+10. **Signing-pipeline parallelization** (bounded worker pool + per-`zd` key cache
+    + same-zone coalescing) — the "Signing pipeline — post-merge redesign"
+    section above. Real scalability win at 100k zones, but not wire correctness.
+
+---
+
+### Plan A (P0-1) — EDNS-aware truncation / TC bit (TB2)
+
+**Fix at one choke point, not ~10.** Responses are written via `w.WriteMsg(m)`
+at ~10 sites (defaultqueryhandlers.go ×8, dnsutils.go:442, do53.go:235). Wrap the
+`ResponseWriter` **once** in `createAuthDnsHandler` (do53.go:210) so every
+downstream `WriteMsg` truncates uniformly — no per-site edits.
+
+1. **Capture the advertised bufsize.** Add `UDPSize uint16` to
+   `edns0.MsgOptions` (edns0/edns0.go:13); set it in
+   `ExtractFlagsAndEDNS0Options` from `opt.UDPSize()` when an OPT is present.
+   Per RFC 6891: value < 512 ⇒ treat as 512; no OPT ⇒ 512 (bare DNS).
+2. **Detect transport** in the handler: `udp := w.RemoteAddr().Network() == "udp"`
+   (miekg/dns's UDP writer reports `"udp"`; TCP/DoT/DoH/DoQ report `"tcp"` /
+   their own). Only UDP truncates.
+3. **Wrap the writer:** `truncatingResponseWriter{ dns.ResponseWriter; udp bool;
+   bufsize int }` whose `WriteMsg(m)`: `if udp && m.Len() > bufsize {
+   m.Truncate(bufsize) }` (miekg/dns drops trailing RRs to fit **and** sets TC=1,
+   keeping the OPT), then delegate. Non-UDP → delegate unchanged. Replace `w` with
+   this wrapper at the top of `createAuthDnsHandler`.
+4. **TSIG ORDERING — the one subtlety.** `TsigSigningHandler` wraps the auth
+   handler (do53.go:51) and MACs the outgoing message. Truncation MUST happen
+   **before** the TSIG MAC is computed, or the MAC covers a message that is then
+   truncated → the client rejects it. So the truncating writer must sit *inside*
+   (below) the TSIG signer, or the TSIG signer must truncate-then-MAC. Get this
+   ordering right.
+5. **Tests:** unit-test the wrapper (>bufsize over `"udp"` → TC + fits; over
+   `"tcp"` → untouched). Live: `dig +bufsize=512 @srv DNSKEY` on a PQ zone → TC=1
+   + small answer; `+tcp` → full. Re-run the pq-testbed UDP matrix → expect
+   **135/135** (TCP fallback) instead of 105/135.
+
+Effort: **moderate** — the wrapper + edns capture are small; the TSIG ordering is
+the only place to be careful.
+
+---
+
+### Plan B (P0-2) — persist effective policy + transactional config-reload
+
+**The gap.** The `change-policy` CLI path `setZonePolicy` (apihandler_zone.go:363)
+is transactional: rebind → `SignZone(force=true)` → **on failure revert to the old
+policy + error** (apihandler_zone.go:417-420) → **persist the override only on
+success** (:423). The **config-file-edit + reload** path is not: parseconfig
+resolves `zconf.DnssecPolicy` (parseconfig.go:788) and the refresh engine applies
+it via `EffectiveDnssecPolicyName` + re-sign (refreshengine.go:264/409/610), but
+with **no revert on failure**, no transactional refuse of an incompatible alg
+change, and **no persisted "last-applied" policy for config-only zones** — so a
+config change can't even be *detected* as a change, and a bad edit half-breaks a
+signed zone on the wire (Finding 2 / Decision 2).
+
+**Design (Decision 2, made concrete):**
+1. **Persist the effective policy for EVERY signed zone**, not just CLI overrides.
+   Extend the `ZonePolicyOverride` store (db_zone_policy_override.go; table
+   `zone, policy, set_at` at db_schema.go:188) into a *last-successfully-applied*
+   record written on every successful sign — CLI **and** config. Add a `source`
+   column (`config` | `command`) so origin is visible, but the stored fact is
+   *what the zone was last signed under*. **Do NOT infer the current policy from
+   keystore keys** (a keystore holds retired/multi-alg keys; the operator's intent
+   is a single policy — this record is authoritative).
+2. **Extract the transactional core** from `setZonePolicy` into a reusable
+   `applyZonePolicyTransactional(zd, kdb, newPol, newName) error`: rebind
+   (`zd.DnssecPolicy`/`Name`) → `UpdateSigValidityFloor` → `SignZone(kdb, true)` →
+   on error revert to old + return → on success persist the effective-policy
+   record. The CLI handler keeps its response-formatting wrapper around this core;
+   the config path calls the **same** core — single source of truth, the two
+   paths cannot drift.
+3. **At load (reload AND restart): compare intent vs last-applied.** Per signed
+   zone: resolve the intent policy (config YAML, or a live CLI override — existing
+   `EffectiveDnssecPolicyName` precedence), then GET the persisted last-applied.
+   - **equal** → no policy change → today's cheap path (SetupZoneSigning).
+   - **different** → policy change → route through `applyZonePolicyTransactional`:
+     - compatible (sig-validity/TTL/same-alg) → apply + re-sign; on failure
+       revert + keep last-applied + raise a **non-service-impacting** warning
+       (→ item 9 surfacing).
+     - **incompatible alg change** needing the (unbuilt) KSK rollover → **refuse,
+       keep the last-applied policy**, raise the warning. (This is the merged
+       c57a564 guard, now wired into the transactional flow instead of a one-off;
+       when the parent-DS/auto-rollover engine lands, route here instead of
+       refusing.)
+4. **Seam:** wire this into the three refresh-engine `EffectiveDnssecPolicyName`
+   sites (refreshengine.go:264/409/610), which already resolve the effective
+   policy on refresh — extend them to compare against the stored last-applied and
+   call the transactional core on a diff. (This composes cleanly with Finding 4's
+   "move `SignZone` off `confMu`": the async refresh engine is the right home for
+   the transactional re-sign anyway.)
+
+**Interlocks:** the *refuse/keep-old* behaviour (correctness) can land first; the
+*warning surfaced in `config status`* is **item 9** and can follow. It shares the
+already-merged fail-closed philosophy (A3 SERVFAIL / AXFR-refuse): a zone left on
+its old policy after a refused change is still correctly signed on the wire.
+
+Effort: **significant** — DB `source` column + migration, extract-and-share the
+transactional core, wire into the refresh engine, and the compatible-vs-
+incompatible classification. Highest-value correctness item nonetheless.
