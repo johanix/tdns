@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	algorithms "github.com/johanix/tdns/v2/algorithms"
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/johanix/tdns/v2/edns0"
 	"github.com/miekg/dns"
@@ -118,11 +119,13 @@ func PrintKeyRR(rr dns.RR, rrtype, ktype string, keyid uint16, leftpad, rightmar
 	fields = append(fields, "(")
 	fields = append(fields, keyparts...)
 	alg, _ := strconv.Atoi(p[6])
-	algstr := dns.AlgorithmToString[uint8(alg)]
-	if algstr == "" {
-		// Algorithm not registered in this process (e.g. a PQ alg a
-		// display-only tool like dog hasn't linked). Fall back to the
-		// numeric code rather than printing a blank, matching dig.
+	// Resolve the algorithm name via the tdns registry (the same source as the
+	// RRSIG comment and dog +algchase), so a PQ codepoint is named even when
+	// this binary links no real implementation for it. Fall back to the bare
+	// numeric code rather than printing a blank when the codepoint is entirely
+	// unknown, matching dig.
+	algstr, ok := algorithms.AlgorithmName(uint8(alg))
+	if !ok {
 		algstr = strconv.Itoa(alg)
 	}
 	commentStr := fmt.Sprintf("; %s alg = %s ; key id = %d", ktype, algstr, keyid)
@@ -184,7 +187,23 @@ func PrintRrsigRR(rr dns.RR, leftpad, rightmargin int) {
 		sigWidth = rightmargin - leftpad
 	}
 	sigParts := chunkString(p[12], sigWidth)
-	printFieldsWithWrap(spaces, sigParts, leftpad+1, rightmargin, " )")
+
+	// Annotate the closing paren with the signing algorithm's name, mirroring
+	// the DNSKEY comment in +multi output. The RRSIG wire form carries only the
+	// numeric algorithm (p[5]); with so many PQ codepoints now in play a bare
+	// number is hard to read, so append "; alg <n> = <NAME>". Resolve via the
+	// tdns algorithm registry (algorithms.AlgorithmName) -- the same source dog
+	// +algchase uses -- so any registry algorithm is named, not just the ones
+	// this binary links a real implementation for.
+	algClose := " )"
+	if algnum, err := strconv.Atoi(p[5]); err == nil {
+		algstr, ok := algorithms.AlgorithmName(uint8(algnum))
+		if !ok {
+			algstr = "unknown"
+		}
+		algClose = fmt.Sprintf(" ) ; alg %s = %s", p[5], algstr)
+	}
+	printFieldsWithWrap(spaces, sigParts, leftpad+1, rightmargin, algClose)
 }
 
 func PrintJwkRR(rr dns.RR, leftpad, rightmargin int) {
