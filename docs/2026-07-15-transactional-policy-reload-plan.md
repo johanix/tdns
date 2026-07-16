@@ -1,6 +1,145 @@
+> ═══════════════════════════════════════════════════════════════════════════
+> # ⟶ PR-2 KICKOFF (refreshed 2026-07-16 @ main 9d3d442) — START HERE
+> ═══════════════════════════════════════════════════════════════════════════
+
+Everything below the `═══` divider is the original whole-project plan and remains
+the **design reference** — but its line anchors predate the merges. Use the
+CURRENT anchors in this section.
+
+## Already merged — do NOT reimplement
+
+- **#285 / #286 / #287** — CLI relocation, Finding-4 async-reload-signing removal,
+  runtime-config snapshot (`ConfLive()`). Long merged.
+- **#288 = PR-1 (Phases 1–2) — MERGED.** Shipped the schema
+  (`applied_policy/source/at` + migration + seed), the applied CRUD, the entire
+  transactional core in `v2/zone_policy_apply.go`, the CLI refactor, **and** the
+  §6.7 `policy-reset` escape hatch. It also went **beyond** the plan: a **surgical
+  per-role** policy-reset (keeps keys whose algorithm is unchanged, drops only the
+  changed role), a **dry-run** preview (no `--confirm` = read-only), per-zone
+  `policyApplyMu`, and `ClearZonePolicyOverride`→UPDATE (preserves `applied_*`).
+  **Finding A is fully applied** — `PolicyChangeBenignInternals` and its test row
+  are gone; the classifier is `None` / `CompatibleName` / `IncompatibleAlg`.
+  (Decision ⑥ / the Finding-A follow-up is DONE.)
+- **#289 = G3 signing-keys snapshot — MERGED.** Keys are read lock-free via
+  `zd.ActiveDnssecKeys()` (`signing_keys_snapshot.go:49`, returns `*DnssecKeys`) /
+  `zd.SigningKeys()` (`:35`, returns the `*signingKeysSnapshot` wrapper);
+  `refreshActiveDnssecKeys` (`sign.go:270`) now republishes the snapshot. PR-2
+  reads keys through these.
+
+## What PR-2 is (Phases 3–4 ONLY)
+
+Wire the **three refresh-engine sites** through the already-merged core
+(`resolvePolicyPair → backfill → classify → apply/refuse`), **remove
+`applyReloadedPolicyLocked`**, add the §5.6 deleted-policy fallback, **close the
+backfill actually-signed GATE**, and retarget the guard test. Phases 1–2 (§4,
+§5.1–5.4, §6.1, §6.7) are DONE — reuse `v2/zone_policy_apply.go`, don't rebuild.
+
+## Current anchors (re-verified @ 9d3d442)
+
+**Transactional core — `v2/zone_policy_apply.go` (reuse as-is):**
+- `resolvePolicyPair(kdb, zone, configPolicyName)` — `:116` — **signature dropped
+  the `conf` param** vs plan §5.1; it reads `ConfLive()` internally.
+- `classifyPolicyChange(appliedPol, appliedName, intentPol, intentName)` — `:83`.
+- `applyZonePolicyTransactional(ctx, zd, kdb, newPol, newName, source)` — `:167`
+  (takes `policyApplyMu`, delegates to `…Locked`).
+- `applyZonePolicyTransactionalLocked(…)` — `:185` (caller holds `policyApplyMu`;
+  `ctx` inert — `_ = ctx` at `:193`; thread it, don't consume it).
+- `backfillAppliedIfEligible(kdb, zd, intentName, intentPol)` — `:273` — **NO
+  production caller; gated on the GATE below.**
+- `zoneActiveKeysMatchAlgs(kdb, zone, pol)` — `:303` — keystore-only predicate.
+
+**The three sites to rewire — all in `RefreshEngine` (`v2/refreshengine.go`):**
+
+| Site | Branch | Current binding | Line |
+|------|--------|-----------------|------|
+| (a) config reload | existing-zone (`else` of `FirstZoneLoad`, branch head `:334`) | `applyReloadedPolicyLocked(&dp, polName)` → `reapplyPolicy=true` → re-sign after unlock | **:425** |
+| (b) restart / first-bind | PRE-REGISTERED STUB (`if zd.FirstZoneLoad :248`, `if zd.ZoneType==0 :259`) | raw `zd.DnssecPolicy=&dp` / `DnssecPolicyName=polName` under `zd.mu` | **:297–298** |
+| (c) dynamic zone add | DYNAMIC ZONE (`:603`) | raw field init in a fresh `ZoneData` literal | **:646–647** |
+
+Only (a) uses the guard; (b)/(c) bind raw. **None** call the transactional core
+today — that is the divergence PR-2 closes. Each runs `initialLoadZone`
+(b `:310`, c `:661`) and installs the snapshot around signing.
+
+**`applyReloadedPolicyLocked` removal:** def `refreshengine.go:183`; the ONLY
+production call is **`:425`**. Its tests are `reload_policy_alg_guard_test.go:87`
+and `:125` — retarget that whole file to `classifyPolicyChange` with
+**applied-vs-intent** fixtures, including a **restart shape** where the in-memory
+binding equals intent but the DB `applied` differs (design lock ①).
+
+**CLI reference callers (behaviour must stay unchanged):** `setZonePolicy`
+(`apihandler_zone.go:374`→`:415`), `changeZonePolicy` (`:461`→`:545`),
+`resetZonePolicy` (`:597`→`:714`, holds `policyApplyMu`).
+
+## ⚠ The one real design correction since PR-1 — the backfill actually-signed GATE
+
+`backfillAppliedIfEligible` currently decides eligibility with
+`zoneActiveKeysMatchAlgs` — **keystore-only**. That is necessary but **not
+sufficient**: a zone can hold the right active keys yet not actually be signed
+(fresh keygen; a secondary with absent/stale RRSIGs). Recording `applied=intent`
+for such a zone falsely marks it "signed under intent." Before wiring backfill
+into any live refresh path, add a **served-signature** check — and the crux
+discovered in #288: that check reads **served** data, so **backfill must run
+AFTER the zone snapshot is Ready, NOT the pre-`initialLoadZone` placement that
+§5.5 line 516 / §6.3 float** (which assumed a keystore-only predicate).
+
+Now cleanly realizable (both prerequisites merged):
+- `zd.GetRRset(zd.ZoneName, dns.TypeSOA)` (`zone_utils.go:444`) is **already
+  `zd.Ready`-gated** (`GetOwner`, `:434-436`) and `MapZone`-gated (`:437-440`),
+  reading `zd.publishedSnapshot()`. Eligible only if `err==nil`, `soa!=nil`, and
+  some `rr` in `soa.RRSIGs` is a `*dns.RRSIG` with
+  `Algorithm == intentPol.ZSKAlgorithm` (CSK: `KSKAlgorithm`).
+- Ready-gated zone-data snapshot is #279; lock-free key reads are #289.
+
+The full recipe is captured verbatim in the `backfillAppliedIfEligible` GATE
+doc-comment (`zone_policy_apply.go:239-272`). **Closing this gate is a required
+PR-2 task**, not optional — otherwise the served-RRSIG check fails closed and
+every config-only zone falls through to a forced re-sign (the ② thundering herd
+this function exists to prevent).
+
+## Deltas from the mid-#288 plan text (so you don't trip on them)
+
+- `resolvePolicyPair` signature dropped `conf` (reads `ConfLive()` itself).
+- `applyZonePolicyTransactional[Locked]` take `ctx` first, still inert (`_ = ctx`).
+- `ClearZonePolicyOverride` is now an **UPDATE** (`policy=''`, `set_at=NULL`),
+  preserving `applied_*` (`db_zone_policy_override.go:51`); the separate applied-row
+  clear is `ClearZoneAppliedPolicy` (`:167`).
+- `applied_*` columns are added by migration (`db.go:268-270`) and seeded from CLI
+  overrides (`db.go:182-190`) — not in the base `CREATE`.
+- Ready helpers: `GetZoneAppliedPolicy` (`:142`), `SetZoneAppliedPolicy` (`:113`),
+  `EffectiveDnssecPolicyName` (`:86`).
+
+## Design-first before coding (confirm two points with Johan)
+
+1. **GATE predicate + placement** — the served-SOA-RRSIG check and running
+   backfill **post-snapshot-Ready** at each of the three sites (esp. (b)/(c),
+   whose binding is currently pre-`initialLoadZone`). This reshapes the §6.3
+   "suggested order".
+2. **§5.6 deleted-policy fallback** — `appliedName` present but no longer in
+   `ConfLive()`: keep current binding + existing keys signing + warning; no
+   nil-deref.
+
+Produce a short design note on those two, get sign-off, **then** implement
+Phases 3–4.
+
+## Working rules
+
+- Cut the PR-2 branch off `main` @ `9d3d442`; GPG-sign every commit (never
+  `--no-gpg-sign`); no `Co-Authored-By` / AI byline.
+- `build` + `vet` + full `v2 -race` green before each commit
+  (`GOROOT=/opt/local/lib/go CGO_ENABLED=1`).
+- Implement → commit → push → open PR → **stop** (do not merge).
+- Merge gate (plan §9): live YAML `dnssec_policy` edit → `config reload` / restart
+  matrix on a signed zone.
+
+> ═══════════════════════════════════════════════════════════════════════════
+> # Original whole-project plan (design reference; anchors predate the merges)
+> ═══════════════════════════════════════════════════════════════════════════
+
 # Implementation plan — persist effective DNSSEC policy + transactional config-reload (P0-2 / Plan B)
 
-**Status:** ready for implementation. Self-contained — no prior context needed.
+**Status:** Phases 1–2 (PR-1, #288) + G3 (#289) MERGED — remaining work is PR-2
+(Phases 3–4); see the **PR-2 KICKOFF** section at the top. Self-contained — no
+prior context needed.
 **Origin:** Finding 2 / Decision 2 in
 `docs/2026-07-14-snapshot-branch-signing-findings.md` (Plan B / P0-2).
 **Base branch — branch off `main` (a96cc79 or later).** All three prerequisites
