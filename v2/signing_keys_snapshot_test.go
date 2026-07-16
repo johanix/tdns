@@ -266,6 +266,81 @@ func TestSigningKeysFreshnessForceRoles(t *testing.T) {
 	assertSnapMatchesDB(t, kdb, zd)
 }
 
+// TestSigningKeysFreshnessDnssecKeyMgmtExternalTx covers the APIkeystore shape:
+// DnssecKeyMgmt always receives a non-nil tx, so its localtx republish never runs.
+// Commit alone must leave the snapshot stale; the external caller must republish
+// when NeedsSigningKeysRepublish is set (apihandler_funcs.go post-commit).
+func TestSigningKeysFreshnessDnssecKeyMgmtExternalTx(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := algTestZone(dns.ED25519, dns.ED25519)
+	zd.KeyDB = kdb
+	registerAlgZone(t, zd)
+
+	if _, _, err := kdb.GenerateKeypair(algZone, "test", DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, "KSK", nil); err != nil {
+		t.Fatalf("KSK: %v", err)
+	}
+	oldZSK := genZSK(t, kdb, DnskeyStateActive, dns.ED25519)
+	sb := genZSK(t, kdb, DnskeyStateStandby, dns.ED25519)
+	stampPublishedAt(t, kdb, sb, time.Now().Add(-time.Hour))
+	if err := zd.republishSigningKeys(kdb); err != nil {
+		t.Fatalf("initial republish: %v", err)
+	}
+	before := zd.signingKeys.Load()
+
+	tx, err := kdb.Begin("TestSigningKeysFreshnessDnssecKeyMgmtExternalTx")
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+	resp, err := kdb.DnssecKeyMgmt(t.Context(), tx, KeystorePost{
+		Command:    "dnssec-mgmt",
+		SubCommand: "rollover",
+		Zone:       algZone,
+		KeyType:    "ZSK",
+	})
+	if err != nil {
+		tx.Rollback()
+		t.Fatalf("DnssecKeyMgmt: %v", err)
+	}
+	if resp == nil || !resp.NeedsSigningKeysRepublish {
+		tx.Rollback()
+		t.Fatal("rollover must set NeedsSigningKeysRepublish for the external-tx caller")
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// Pre-fix API gap: commit without republish leaves the pre-mutation snapshot.
+	if zd.signingKeys.Load() != before {
+		t.Fatal("DnssecKeyMgmt with external tx must not republish mid-tx or inside the call")
+	}
+	stale := activeKeyIDsFromSnap(zd.ActiveDnssecKeys())
+	want := activeKeyIDsFromDB(t, kdb, algZone)
+	if len(stale) == len(want) {
+		same := true
+		for id := range want {
+			if !stale[id] {
+				same = false
+				break
+			}
+		}
+		if same {
+			t.Fatal("expected stale snapshot after external-tx commit without republish")
+		}
+	}
+	if !stale[oldZSK] {
+		t.Fatalf("stale snapshot should still hold retired ZSK %d; got %v", oldZSK, stale)
+	}
+
+	// Production fix path (APIkeystore post-commit).
+	if err := republishSigningKeysForZone(kdb, algZone); err != nil {
+		t.Fatalf("republishSigningKeysForZone: %v", err)
+	}
+	assertSnapMatchesDB(t, kdb, zd)
+	if activeKeyIDsFromSnap(zd.ActiveDnssecKeys())[oldZSK] {
+		t.Fatalf("after republish, retired ZSK %d must not remain active in snapshot", oldZSK)
+	}
+}
+
 // TestSigningKeysCASLazyVsMutation (M1): concurrent lazy fill must not leave
 // a stale pre-mutation snapshot installed after a mutation republish.
 func TestSigningKeysCASLazyVsMutation(t *testing.T) {

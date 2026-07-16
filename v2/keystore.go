@@ -324,6 +324,9 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		localtx = true
 	}
 	defer func() {
+		if out != nil && needsRepublish && err == nil {
+			out.NeedsSigningKeysRepublish = true
+		}
 		if localtx {
 			if txSuccess {
 				if cerr := tx.Commit(); cerr != nil {
@@ -342,8 +345,8 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 				tx.Rollback()
 			}
 		} else if txSuccess && needsRepublish {
-			// External tx: caller must republish after their Commit (R1).
-			lgSigner.Debug("DnssecKeyMgmt: external tx; caller must republishSigningKeysForZone post-commit",
+			// External tx (APIkeystore): caller must republish after Commit (R1).
+			lgSigner.Debug("DnssecKeyMgmt: external tx; APIkeystore must republishSigningKeysForZone post-commit",
 				"zone", kp.Zone)
 		}
 	}()

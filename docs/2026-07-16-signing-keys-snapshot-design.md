@@ -215,10 +215,16 @@ removed keys via a stale `built=true` snapshot.
 
 **External-tx callers that must republish after their Commit (enumerate):**
 
-- `DnssecKeyMgmt` (covers generate/rollover/policy-cleanup/clear/purge via R2 once)
+- **`APIkeystore` (`apihandler_funcs.go`)** — the production caller of `DnssecKeyMgmt`; always
+  passes a non-nil (external) tx. After a successful Commit, if
+  `resp.NeedsSigningKeysRepublish`, call `republishSigningKeysForZone` **before**
+  `triggerResign`. The `DnssecKeyMgmt` localtx/R2 republish path is never taken here.
 - `AtomicRollover` (`ksk_rollover_atomic.go` after `tx.Commit`)
 - KSK observe advance that uses `UpdateDnssecKeyStateTx` (created→ds-published — active set unchanged; republish optional/harmless; still call for uniformity if cheap)
-- Any future helper that passes a non-nil `*Tx` into the three external-tx mutators
+- Any future helper that passes a non-nil `*Tx` into `DnssecKeyMgmt` or the three external-tx mutators
+
+`DnssecKeyMgmt` with `tx==nil` (local tx) still self-republishes once post-commit (R2).
+That path is for direct/own-tx callers only — not the API.
 
 **KeyStateWorker / reconcile / most rollover pipeline** call `UpdateDnssecKeyState`
 (own-tx) — covered by self-republish. `EnsureActiveDnssecKeys` calls
@@ -472,7 +478,7 @@ scenario is gone).
 | Active-only (§4) | **Yes** |
 | Lazy fill | **CAS-if-unbuilt** (M1) — not plain Store; return-without-store also acceptable |
 | clear mid-tx RRSIG strip | **Out of G3** — follow-up ticket (D7-ordering violation) |
-| **D1** choke-point vs N-caller | **N-caller (R1) + freshness matrix (R4)** unless Johan overrides |
+| **D1** choke-point vs N-caller | **N-caller (R1) + freshness matrix (R4)** unless Johan overrides. Note: the APIkeystore external-tx gap showed N-caller still misses real callers; a tx-registered deferred republish remains an optional structural alternative. |
 | **D2** shadow-map vs big-bang | **Big-bang**, grep-clean at PR end |
 
 ## 17. References## 17. References
