@@ -2,4 +2,4 @@
 # algs.list (the input) IS committed; these outputs are not.
 /metadata_algs.go
 /registered_algs.go
-/algs-env.mk
+/algs-libs.mk

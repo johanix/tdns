@@ -203,40 +203,29 @@ func TestGenRegisteredEmptySelection(t *testing.T) {
 	}
 }
 
-// TestGenEnvMkRecordsAlgrepo verifies the generated algs-env.mk records
-// ALGREPO (so the app Makefile can re-run genalgs) in both the
-// library-backed and the no-library (metadata-only) cases.
-func TestGenEnvMkRecordsAlgrepo(t *testing.T) {
+// TestGenAlgrepoMkRecordsAlgrepo verifies the shared algs-env.mk records
+// ALGREPO (so any app Makefile can re-run genalgs).
+func TestGenAlgrepoMkRecordsAlgrepo(t *testing.T) {
 	const repo = "/abs/path/to/dnssec-algorithms"
-
-	// No C-backed algorithms selected: still records ALGREPO.
-	empty := string(genEnvMk(repo, map[string]bool{}, map[string]libEnv{}))
-	if !strings.Contains(empty, "ALGREPO := "+repo) {
-		t.Errorf("metadata-only algs-env.mk missing ALGREPO:\n%s", empty)
+	out := string(genAlgrepoMk(repo))
+	if !strings.Contains(out, "ALGREPO := "+repo) {
+		t.Errorf("shared algs-env.mk missing ALGREPO:\n%s", out)
 	}
-
-	// With a library: records ALGREPO and the PKG_CONFIG_PATH.
-	need := map[string]bool{"liboqs": true}
-	envs := map[string]libEnv{"liboqs": {group: "liboqs", vars: map[string]string{"PKG_CONFIG_PATH": "/x/pc"}}}
-	withLib := string(genEnvMk(repo, need, envs))
-	if !strings.Contains(withLib, "ALGREPO := "+repo) {
-		t.Errorf("library algs-env.mk missing ALGREPO:\n%s", withLib)
-	}
-	if !strings.Contains(withLib, "/x/pc") {
-		t.Errorf("library algs-env.mk missing PKG_CONFIG_PATH:\n%s", withLib)
+	if strings.Contains(out, "export ") {
+		t.Errorf("shared algs-env.mk must not carry per-app library exports:\n%s", out)
 	}
 }
 
-// TestGenEnvMkPathListJoin verifies that a path-list variable contributed
+// TestGenLibsMkPathListJoin verifies that a path-list variable contributed
 // by more than one library is colon-joined (not space-joined, which would
 // produce an invalid path), while a flag-list variable stays space-joined.
-func TestGenEnvMkPathListJoin(t *testing.T) {
+func TestGenLibsMkPathListJoin(t *testing.T) {
 	need := map[string]bool{"sqisign": true, "qruov": true}
 	envs := map[string]libEnv{
 		"sqisign": {group: "sqisign", vars: map[string]string{"LD_LIBRARY_PATH": "/a/lib", "CGO_LDFLAGS": "-lsqisign"}},
 		"qruov":   {group: "qruov", vars: map[string]string{"LD_LIBRARY_PATH": "/b/lib", "CGO_LDFLAGS": "-lqruov"}},
 	}
-	out := string(genEnvMk("/repo", need, envs))
+	out := string(genLibsMk(need, envs))
 
 	// Values are ordered by sortedGroups (qruov before sqisign). The point
 	// of the test is the SEPARATOR: colon for the path list, space for the
@@ -246,6 +235,16 @@ func TestGenEnvMkPathListJoin(t *testing.T) {
 	}
 	if !strings.Contains(out, "export CGO_LDFLAGS := -lqruov -lsqisign") {
 		t.Errorf("CGO_LDFLAGS must stay space-joined:\n%s", out)
+	}
+}
+
+func TestGenLibsMkEmpty(t *testing.T) {
+	out := string(genLibsMk(map[string]bool{}, map[string]libEnv{}))
+	if !strings.Contains(out, "no C-backed algorithms") {
+		t.Errorf("empty selection should note no library env:\n%s", out)
+	}
+	if strings.Contains(out, "export ") {
+		t.Errorf("empty selection must not export library vars:\n%s", out)
 	}
 }
 
@@ -281,7 +280,13 @@ func TestRunRelativeAlgrepo(t *testing.T) {
 	parent := filepath.Dir(algrepo)
 	rel := filepath.Base(algrepo)
 
-	outDir := t.TempDir()
+	// App out dir is a child of a scratch root so shared algs-env.mk lands
+	// in the parent (cmdv2 layout: app/ → ../algs-env.mk).
+	root := t.TempDir()
+	outDir := filepath.Join(root, "app")
+	if err := os.Mkdir(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	listPath := filepath.Join(outDir, "algs.list")
 	os.WriteFile(listPath, []byte("FALCON512\n"), 0o644) // liboqs-backed
 
@@ -292,13 +297,16 @@ func TestRunRelativeAlgrepo(t *testing.T) {
 	if err := run(rel, listPath, outDir, "main"); err != nil {
 		t.Fatalf("run with relative --algrepo failed (doubled-path regression?): %v", err)
 	}
-	// The env fragment should record an ABSOLUTE ALGREPO (the whole point
-	// of the fix). Match on the fixture's basename rather than the exact
+	// The shared env fragment should record an ABSOLUTE ALGREPO (the whole
+	// point of the fix). Match on the fixture's basename rather than the exact
 	// path: on macOS t.TempDir() lives under /var, a symlink to
 	// /private/var, so filepath.Abs yields the /private form.
-	mk, err := os.ReadFile(filepath.Join(outDir, "algs-env.mk"))
+	mk, err := os.ReadFile(filepath.Join(root, "algs-env.mk"))
 	if err != nil {
-		t.Fatalf("reading algs-env.mk: %v", err)
+		t.Fatalf("reading shared algs-env.mk: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "algs-libs.mk")); err != nil {
+		t.Fatalf("per-app algs-libs.mk missing: %v", err)
 	}
 	line := ""
 	for _, l := range strings.Split(string(mk), "\n") {
@@ -323,7 +331,11 @@ func TestRunRelativeAlgrepo(t *testing.T) {
 // error.
 func TestRunBadAlgrepo(t *testing.T) {
 	notARepo := t.TempDir() // no registry/registry.go under it
-	outDir := t.TempDir()
+	root := t.TempDir()
+	outDir := filepath.Join(root, "app")
+	if err := os.Mkdir(outDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
 	listPath := filepath.Join(outDir, "algs.list")
 	os.WriteFile(listPath, []byte("MLDSA44\n"), 0o644)
 

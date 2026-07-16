@@ -14,19 +14,21 @@
 // availability is guaranteed before emit, all Register calls collapse
 // into a single flat file with no //go:build tags.
 //
-// Outputs (into --out):
+// Outputs:
 //
-//   - metadata_algs.go: RegisterMetadata(...) for EVERY registry
+//   - --out/metadata_algs.go: RegisterMetadata(...) for EVERY registry
 //     algorithm. Pure Go, compiled into every app — the global
 //     codepoint<->name<->role table (enables dog +algchase).
-//   - registered_algs.go: Register(...) for every SELECTED algorithm,
+//   - --out/registered_algs.go: Register(...) for every SELECTED algorithm,
 //     one flat file, no build tags. Register promotes the metadata entry
 //     to a real, usable algorithm (see v2/algorithms record()).
-//   - algs-env.mk: a Makefile fragment exporting PKG_CONFIG_PATH /
-//     CGO_LDFLAGS / LD_LIBRARY_PATH for the libraries the selected
-//     algorithms need, for the app Makefile to `include`.
+//   - --out/algs-libs.mk: per-app Makefile fragment exporting PKG_CONFIG_PATH /
+//     CGO_LDFLAGS / LD_LIBRARY_PATH for the libraries this app's selection needs.
+//   - --out/../algs-env.mk (cmdv2/algs-env.mk): shared ALGREPO cache so one
+//     genalgs run lets every app Makefile re-run the generator without
+//     re-supplying --algrepo.
 //
-// The generated .go files are build artifacts: regenerated per build
+// The generated .go / .mk files are build artifacts: regenerated per build
 // host, not committed.
 //
 // Usage:
@@ -161,10 +163,17 @@ func run(algrepo, listPath, outDir, pkgName string) error {
 	if err := writeFormatted(regPath, genRegistered(pkgName, selected)); err != nil {
 		return err
 	}
-	mkPath := filepath.Join(outDir, "algs-env.mk")
-	vlog("writing %s (build env for %d libraries; ALGREPO=%s)", mkPath, len(needGroups), algrepo)
-	if err := os.WriteFile(mkPath, genEnvMk(algrepo, needGroups, envByGroup), 0o644); err != nil {
-		return fmt.Errorf("writing algs-env.mk: %w", err)
+	// Shared ALGREPO cache under cmdv2/ (parent of the app --out dir).
+	sharedMk := filepath.Join(filepath.Clean(outDir), "..", "algs-env.mk")
+	vlog("writing %s (shared ALGREPO=%s)", sharedMk, algrepo)
+	if err := os.WriteFile(sharedMk, genAlgrepoMk(algrepo), 0o644); err != nil {
+		return fmt.Errorf("writing shared algs-env.mk: %w", err)
+	}
+
+	libsMk := filepath.Join(outDir, "algs-libs.mk")
+	vlog("writing %s (build env for %d libraries)", libsMk, len(needGroups))
+	if err := os.WriteFile(libsMk, genLibsMk(needGroups, envByGroup), 0o644); err != nil {
+		return fmt.Errorf("writing algs-libs.mk: %w", err)
 	}
 
 	groups := sortedGroups(needGroups)

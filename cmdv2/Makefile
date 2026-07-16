@@ -1,4 +1,4 @@
-.PHONY: all v2 version clean install install-dirs check-root tarball
+.PHONY: all v2 genalgs version clean install install-dirs check-root tarball
 
 # WITH_LIBOQS=1  enables the liboqs-backed PQ algorithms (Falcon-512,
 #                MAYO-1, SNOVA-24_5_4) in agent/auth/imr.
@@ -18,7 +18,11 @@ MAKE_VARS = WITH_LIBOQS=$(WITH_LIBOQS) WITH_SQISIGN=$(WITH_SQISIGN) WITH_QRUOV=$
 # all apps in this directory
 all: v2
 
-version:
+# tdns-genalgs must exist before any app's generate rule runs.
+genalgs:
+	$(MAKE) -C ./genalgs/
+
+version: genalgs
 	$(MAKE) $(MAKE_VARS) -C ./auth/ version
 	$(MAKE) $(MAKE_VARS) -C ./cli/ version
 	$(MAKE) $(MAKE_VARS) -C ./agent/ version
@@ -26,7 +30,7 @@ version:
 	$(MAKE) $(MAKE_VARS) -C ./dog/ version
 
 # experimental version of major apps
-v2:
+v2: genalgs
 	$(MAKE) $(MAKE_VARS) -C ./auth/
 	$(MAKE) $(MAKE_VARS) -C ./cli/
 	$(MAKE) $(MAKE_VARS) -C ./agent/
@@ -34,6 +38,7 @@ v2:
 	$(MAKE) $(MAKE_VARS) -C ./dog/
 
 clean:
+	$(MAKE) -C ./genalgs/ clean
 	$(MAKE) $(MAKE_VARS) -C ./auth/ clean
 	$(MAKE) $(MAKE_VARS) -C ./cli/ clean
 	$(MAKE) $(MAKE_VARS) -C ./agent/ clean
