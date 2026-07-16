@@ -169,12 +169,16 @@ func drainAndRunOnFirstLoad(zd *ZoneData) {
 // completeFirstZonePolicyAndLoad finishes a first-bind after initialLoadZone:
 // publish the snapshot (Ready), sync DNSSEC policy (backfill GATE needs Ready),
 // then run deferred OnFirstLoad callbacks (SetupZoneSigning et al.).
-func completeFirstZonePolicyAndLoad(ctx context.Context, zd *ZoneData, conf *Config, configPolicyName string) {
+// On sync failure the OnFirstLoad callbacks are retained so a later retry can
+// still sign once the policy is bound.
+func completeFirstZonePolicyAndLoad(ctx context.Context, zd *ZoneData, conf *Config, configPolicyName string) error {
 	zd.InstallInitialSnapshot()
 	if err := syncZoneDnssecPolicyFromConfig(ctx, zd, conf.Internal.KeyDB, conf, configPolicyName); err != nil {
 		lgEngine.Warn("DNSSEC policy sync after first load failed", "zone", zd.ZoneName, "err", err)
+		return err
 	}
 	drainAndRunOnFirstLoad(zd)
+	return nil
 }
 
 func RefreshEngine(ctx context.Context, conf *Config) {
@@ -290,7 +294,24 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							}
 							continue
 						}
-						completeFirstZonePolicyAndLoad(ctx, zd, conf, zr.DnssecPolicy)
+						if err := completeFirstZonePolicyAndLoad(ctx, zd, conf, zr.DnssecPolicy); err != nil {
+							lgEngine.Error("zone policy sync after first load failed", "zone", zone, "error", err)
+							zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
+							zd.LatestError = time.Now()
+							if _, exists := refreshCounters.Get(zone); !exists {
+								refreshCounters.Set(zone, &RefreshCounter{
+									Name:       zone,
+									SOARefresh: 300,
+									CurRefresh: 30,
+								})
+							}
+							if zr.Response != nil {
+								resp.Error = true
+								resp.ErrorMsg = err.Error()
+								zr.Response <- resp
+							}
+							continue
+						}
 					} else {
 						// EXISTING ZONE: already loaded, normal refresh path.
 						if zd.HasServiceImpactingError() {
@@ -373,7 +394,16 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						if zr.DnssecPolicy != "" || zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
 							if err := syncZoneDnssecPolicyFromConfig(ctx, zd, conf.Internal.KeyDB, conf, zr.DnssecPolicy); err != nil {
 								lgEngine.Warn("DNSSEC policy sync on reload failed", "zone", zone, "err", err)
+								if zr.Response != nil {
+									resp.Error = true
+									resp.ErrorMsg = fmt.Sprintf("DNSSEC policy sync failed: %v", err)
+									zr.Response <- resp
+								}
+								continue
 							}
+							// Drain any OnFirstLoad retained after a prior first-load
+							// sync failure (callbacks are one-shot and must still run).
+							drainAndRunOnFirstLoad(zd)
 						}
 						lgEngine.Debug("updated configuration for zone", "zone", zone, "notify", zd.Notify, "primaries", zd.PrimariesConf, "upstreams", zd.Upstreams, "zonefile", zd.Zonefile, "store", ZoneStoreToString[zd.ZoneStore])
 
@@ -572,6 +602,22 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					zd.InstallInitialSnapshot()
 					if err := syncZoneDnssecPolicyFromConfig(ctx, zd, conf.Internal.KeyDB, conf, zr.DnssecPolicy); err != nil {
 						lgEngine.Warn("DNSSEC policy sync for dynamic zone failed", "zone", zone, "err", err)
+						zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
+						zd.LatestError = time.Now()
+						// Retain OnFirstLoad / skip signing so a later retry can finish.
+						if _, exists := refreshCounters.Get(zone); !exists {
+							refreshCounters.Set(zone, &RefreshCounter{
+								Name:       zone,
+								SOARefresh: 300,
+								CurRefresh: 30,
+							})
+						}
+						if zr.Response != nil {
+							resp.Error = true
+							resp.ErrorMsg = err.Error()
+							zr.Response <- resp
+						}
+						continue
 					}
 					// Dynamic zones: set up signing if needed (config zones do this
 					// via OnFirstLoad). Run after policy sync so SignZone sees the
@@ -629,7 +675,13 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.SetError(RefreshError, "refresh error: %v", err)
 							zd.LatestError = time.Now()
 						} else {
-							completeFirstZonePolicyAndLoad(ctx, zd, conf, zd.DnssecPolicyName)
+							if err := completeFirstZonePolicyAndLoad(ctx, zd, conf, zd.DnssecPolicyName); err != nil {
+								lgEngine.Error("initial load retry: policy sync failed", "zone", zone, "error", err)
+								zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
+								zd.LatestError = time.Now()
+								rc.CurRefresh = 30 // retry sooner
+								continue
+							}
 						}
 						rc.CurRefresh = rc.SOARefresh
 						continue

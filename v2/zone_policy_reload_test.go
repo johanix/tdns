@@ -49,8 +49,8 @@ func TestSyncZonePolicy_OnlineSigningFromUnsignedPrimaryApplies(t *testing.T) {
 	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
 	zd.ZoneType = Primary
 	zd.KeyDB = kdb
-	zd.DnssecPolicy = &pol
 	zd.DnssecPolicyName = "base"
+	// DnssecPolicy left unset — production first-load shape until post-Ready sync.
 
 	conf := &Config{}
 	if err := syncZoneDnssecPolicyFromConfig(context.Background(), zd, kdb, conf, "base"); err != nil {
@@ -181,5 +181,39 @@ func TestDrainAndRunOnFirstLoadRunsOnce(t *testing.T) {
 	drainAndRunOnFirstLoad(zd) // no-op
 	if n != 2 {
 		t.Fatalf("second drain must not re-run callbacks; n=%d", n)
+	}
+}
+
+func TestCompleteFirstZonePolicyAndLoadRetainsOnFirstLoadOnSyncFailure(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	// No live policies published — resolve yields intent name with nil struct →
+	// sync quarantines without error. Force a sync error via closed KeyDB after
+	// Ready so resolvePolicyPair fails.
+	zone := algZone + "\t3600\tIN\tSOA\tns." + algZone + " hostmaster." + algZone + " 1 7200 1800 604800 7200\n" +
+		algZone + "\t3600\tIN\tNS\tns." + algZone + "\n"
+	zd := testZone(t, algZone, zone)
+	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+	zd.ZoneType = Primary
+	zd.KeyDB = kdb
+	zd.DnssecPolicyName = "base"
+	ran := false
+	zd.OnFirstLoad = []func(*ZoneData){func(*ZoneData) { ran = true }}
+
+	if err := kdb.DB.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	conf := &Config{}
+	conf.Internal.KeyDB = kdb
+	// Ready already true from testZone; completeFirstZonePolicyAndLoad still
+	// InstallInitialSnapshot then sync — sync must fail on closed DB.
+	err := completeFirstZonePolicyAndLoad(context.Background(), zd, conf, "base")
+	if err == nil {
+		t.Fatal("expected sync failure with closed KeyDB")
+	}
+	if ran {
+		t.Fatal("OnFirstLoad must not run when sync fails")
+	}
+	if len(zd.OnFirstLoad) != 1 {
+		t.Fatal("OnFirstLoad must be retained for retry after sync failure")
 	}
 }

@@ -131,6 +131,30 @@ func TestBackfillAppliedIfEligible(t *testing.T) {
 		}
 	})
 
+	t.Run("ineligible: keys match but soa rrsig algorithm differs -> no backfill", func(t *testing.T) {
+		kdb := newTestKeyDB(t)
+		// Keys are ED25519; served SOA RRSIG is RSASHA256 — GATE must fail closed.
+		zd := readySignedApexZone(t, algZone, dns.RSASHA256)
+		zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+		zd.KeyDB = kdb
+		if _, _, err := kdb.GenerateKeypair(algZone, "test", DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, "KSK", nil); err != nil {
+			t.Fatalf("KSK: %v", err)
+		}
+		genZSK(t, kdb, DnskeyStateActive, dns.ED25519)
+
+		intent := kskzsk(dns.ED25519, dns.ED25519)
+		backfilled, err := backfillAppliedIfEligible(kdb, zd, "intentpol", &intent)
+		if err != nil {
+			t.Fatalf("backfill: %v", err)
+		}
+		if backfilled {
+			t.Fatal("GATE: matching keys with wrong SOA RRSIG algorithm must not backfill")
+		}
+		if _, _, ok, _ := GetZoneAppliedPolicy(kdb, algZone); ok {
+			t.Fatal("ineligible zone must not get an applied record")
+		}
+	})
+
 	t.Run("ineligible: keys match but no served soa rrsig -> no backfill", func(t *testing.T) {
 		kdb := newTestKeyDB(t)
 		zd := algTestZone(dns.ED25519, dns.ED25519) // not Ready / no SOA RRSIGs

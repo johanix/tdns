@@ -280,7 +280,7 @@ func backfillAppliedIfEligible(kdb *KeyDB, zd *ZoneData, intentName string, inte
 // KSKAlgorithm). Fail-closed: not Ready, not MapZone, missing SOA, or no
 // matching signature → false. soa.RRSIGs is []dns.RR — type-assert before use.
 func zoneServesIntentSOASig(zd *ZoneData, intentPol *DnssecPolicy) bool {
-	if zd == nil || intentPol == nil {
+	if zd == nil || intentPol == nil || !zd.Ready {
 		return false
 	}
 	soa, err := zd.GetRRset(zd.ZoneName, dns.TypeSOA)
@@ -361,9 +361,7 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 
 	intentName, intentPol, appliedName, appliedPol, appliedOK, err := resolvePolicyPair(kdb, zd.ZoneName, configPolicyName)
 	if err != nil {
-		lgEngine.Warn("resolvePolicyPair failed", "zone", zd.ZoneName, "err", err)
-		// Continue with whatever resolve returned; EffectiveDnssecPolicyName may
-		// still have yielded a usable intent name on a soft DB error.
+		return fmt.Errorf("resolve DNSSEC policy pair for zone %s: %w", zd.ZoneName, err)
 	}
 
 	// Intent unresolvable with a non-empty name → quarantine (existing behaviour).
@@ -379,6 +377,21 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 	}
 	if intentPol == nil {
 		return nil // no DNSSEC policy configured
+	}
+	if intentPol.Error != "" {
+		lgEngine.Warn("intent DNSSEC policy is broken; not binding it",
+			"zone", zd.ZoneName, "policy", intentName, "policy_error", intentPol.Error)
+		if zd.DnssecPolicy != nil && zd.DnssecPolicy.Error == "" {
+			zd.SetError(DnssecPolicyWarning, "intent DNSSEC policy %q is broken (%s); keeping bound policy %q",
+				intentName, intentPol.Error, zd.DnssecPolicyName)
+			return nil
+		}
+		zd.SetError(DnssecError, "DNSSEC policy %q is broken: %s", intentName, intentPol.Error)
+		zd.mu.Lock()
+		zd.DnssecPolicy = &DnssecPolicy{}
+		zd.DnssecPolicyName = ""
+		zd.mu.Unlock()
+		return nil
 	}
 
 	// Branch 0 — no applied row yet.
@@ -405,18 +418,24 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 		return nil
 	}
 
-	// appliedOK — §5.6 deleted applied policy name.
+	// appliedOK — §5.6 deleted applied policy name, or applied struct is broken
+	// (cannot classify/refuse against it; treat like missing appliedPol).
+	if appliedPol != nil && appliedPol.Error != "" {
+		lgEngine.Warn("applied DNSSEC policy is broken; ignoring it for classify",
+			"zone", zd.ZoneName, "applied", appliedName, "policy_error", appliedPol.Error)
+		appliedPol = nil
+	}
 	if appliedPol == nil {
-		if zd.DnssecPolicy != nil && zd.DnssecPolicyName != "" {
-			lgEngine.Warn("applied DNSSEC policy no longer in config; keeping current binding",
+		if zd.DnssecPolicy != nil && zd.DnssecPolicyName != "" && zd.DnssecPolicy.Error == "" {
+			lgEngine.Warn("applied DNSSEC policy unavailable; keeping current binding",
 				"zone", zd.ZoneName, "applied", appliedName, "bound", zd.DnssecPolicyName, "intent", intentName)
-			zd.SetError(DnssecPolicyWarning, "applied DNSSEC policy %q is no longer defined in config; keeping bound policy %q",
+			zd.SetError(DnssecPolicyWarning, "applied DNSSEC policy %q is unavailable; keeping bound policy %q",
 				appliedName, zd.DnssecPolicyName)
 			return nil
 		}
-		// First-bind: no binding to keep — proceed toward intent.
+		// First-bind: no healthy binding to keep — proceed toward intent.
 		if _, aerr := applyZonePolicyTransactional(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
-			lgEngine.Warn("config apply toward intent after deleted applied policy failed",
+			lgEngine.Warn("config apply toward intent after unavailable applied policy failed",
 				"zone", zd.ZoneName, "policy", intentName, "err", aerr)
 			return aerr
 		}
@@ -437,9 +456,11 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 	}
 
 	// Branch 1b — in-flight ZSK algorithm roll: do not clobber with config apply.
-	if st, ierr := zskAlgRollInFlight(kdb, zd.ZoneName, appliedPol.ZSKAlgorithm); ierr != nil {
-		lgEngine.Warn("zskAlgRollInFlight check failed", "zone", zd.ZoneName, "err", ierr)
-	} else if st.InFlight {
+	st, ierr := zskAlgRollInFlight(kdb, zd.ZoneName, appliedPol.ZSKAlgorithm)
+	if ierr != nil {
+		return fmt.Errorf("check ZSK algorithm rollover for zone %s: %w", zd.ZoneName, ierr)
+	}
+	if st.InFlight {
 		lgEngine.Debug("skipping config DNSSEC policy apply; ZSK algorithm roll in flight",
 			"zone", zd.ZoneName, "applied", appliedName, "intent", intentName)
 		return nil
@@ -471,8 +492,9 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 // refuseIncompatiblePolicyChange keeps the zone signing under appliedPol
 // (rebind when needed) and logs a warning. Used when classify reports
 // PolicyChangeIncompatibleAlg on the config path (rollover not implemented).
+// Does not bind a policy whose Error field is set.
 func refuseIncompatiblePolicyChange(zd *ZoneData, intentName, appliedName string, appliedPol *DnssecPolicy) {
-	if appliedPol == nil {
+	if appliedPol == nil || appliedPol.Error != "" {
 		return
 	}
 	zd.mu.Lock()
