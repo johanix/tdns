@@ -166,19 +166,36 @@ func drainAndRunOnFirstLoad(zd *ZoneData) {
 	}
 }
 
-// completeFirstZonePolicyAndLoad finishes a first-bind after initialLoadZone:
-// publish the snapshot (Ready), sync DNSSEC policy (backfill GATE needs Ready),
-// then run deferred OnFirstLoad callbacks (SetupZoneSigning et al.).
-// On sync failure the OnFirstLoad callbacks are retained so a later retry can
-// still sign once the policy is bound.
-func completeFirstZonePolicyAndLoad(ctx context.Context, zd *ZoneData, conf *Config, configPolicyName string) error {
-	zd.InstallInitialSnapshot()
+// hasPendingOnFirstLoad reports whether OnFirstLoad callbacks are still waiting
+// to run (e.g. after a first-load policy sync failure). Reads under zd.mu.
+func hasPendingOnFirstLoad(zd *ZoneData) bool {
+	if zd == nil {
+		return false
+	}
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return len(zd.OnFirstLoad) > 0
+}
+
+// finishFirstLoadPolicy is the post-Ready tail of first-bind completion: sync
+// DNSSEC policy then drain OnFirstLoad. Assumes the zone is already Ready —
+// does not call InstallInitialSnapshot (ticker completion retries must not
+// rebuild the snapshot from zd.Data).
+// On sync failure OnFirstLoad is retained for a later retry.
+func finishFirstLoadPolicy(ctx context.Context, zd *ZoneData, conf *Config, configPolicyName string) error {
 	if err := syncZoneDnssecPolicyFromConfig(ctx, zd, conf.Internal.KeyDB, conf, configPolicyName); err != nil {
 		lgEngine.Warn("DNSSEC policy sync after first load failed", "zone", zd.ZoneName, "err", err)
 		return err
 	}
 	drainAndRunOnFirstLoad(zd)
 	return nil
+}
+
+// completeFirstZonePolicyAndLoad finishes a first-bind after initialLoadZone:
+// publish the snapshot (Ready), then finishFirstLoadPolicy (sync + OnFirstLoad).
+func completeFirstZonePolicyAndLoad(ctx context.Context, zd *ZoneData, conf *Config, configPolicyName string) error {
+	zd.InstallInitialSnapshot()
+	return finishFirstLoadPolicy(ctx, zd, conf, configPolicyName)
 }
 
 func RefreshEngine(ctx context.Context, conf *Config) {
@@ -391,7 +408,12 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 						zd.mu.Unlock()
 
-						if zr.DnssecPolicy != "" || zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] {
+						// Policy sync only on config-bearing refreshers (same gate
+						// as notify/ACL). NOTIFY/CLI refreshes must not re-run
+						// resolve→backfill→classify→apply. First-load OnFirstLoad
+						// completion retries on the ticker (hasPendingOnFirstLoad),
+						// not here.
+						if zr.ConfigUpdate && (zr.DnssecPolicy != "" || zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) {
 							if err := syncZoneDnssecPolicyFromConfig(ctx, zd, conf.Internal.KeyDB, conf, zr.DnssecPolicy); err != nil {
 								lgEngine.Warn("DNSSEC policy sync on reload failed", "zone", zone, "err", err)
 								if zr.Response != nil {
@@ -401,9 +423,6 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								}
 								continue
 							}
-							// Drain any OnFirstLoad retained after a prior first-load
-							// sync failure (callbacks are one-shot and must still run).
-							drainAndRunOnFirstLoad(zd)
 						}
 						lgEngine.Debug("updated configuration for zone", "zone", zone, "notify", zd.Notify, "primaries", zd.PrimariesConf, "upstreams", zd.Upstreams, "zonefile", zd.Zonefile, "store", ZoneStoreToString[zd.ZoneStore])
 
@@ -600,11 +619,29 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					}
 
 					zd.InstallInitialSnapshot()
-					if err := syncZoneDnssecPolicyFromConfig(ctx, zd, conf.Internal.KeyDB, conf, zr.DnssecPolicy); err != nil {
+					// Dynamic zones historically called SetupZoneSigning inline
+					// (not via OnFirstLoad). Register it on OnFirstLoad so a
+					// sync failure is retryable by the ticker completion path
+					// (hasPendingOnFirstLoad → finishFirstLoadPolicy) the same
+					// way as config zones. Agent: empty marker so policy sync
+					// still retries without signing.
+					zd.mu.Lock()
+					if Globals.App.Type != AppTypeAgent {
+						resignQ := conf.Internal.ResignQ
+						zd.OnFirstLoad = append(zd.OnFirstLoad, func(z *ZoneData) {
+							if err := z.SetupZoneSigning(resignQ); err != nil {
+								lgEngine.Error("SetupZoneSigning failed", "zone", z.ZoneName, "error", err)
+							}
+						})
+					} else if len(zd.OnFirstLoad) == 0 {
+						zd.OnFirstLoad = append(zd.OnFirstLoad, func(*ZoneData) {})
+					}
+					zd.mu.Unlock()
+					if err := finishFirstLoadPolicy(ctx, zd, conf, zr.DnssecPolicy); err != nil {
 						lgEngine.Warn("DNSSEC policy sync for dynamic zone failed", "zone", zone, "err", err)
 						zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
 						zd.LatestError = time.Now()
-						// Retain OnFirstLoad / skip signing so a later retry can finish.
+						// OnFirstLoad retained — ticker completion retry will finish.
 						if _, exists := refreshCounters.Get(zone); !exists {
 							refreshCounters.Set(zone, &RefreshCounter{
 								Name:       zone,
@@ -619,15 +656,6 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 						continue
 					}
-					// Dynamic zones: set up signing if needed (config zones do this
-					// via OnFirstLoad). Run after policy sync so SignZone sees the
-					// correct binding.
-					if Globals.App.Type != AppTypeAgent {
-						if err := zd.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
-							lgEngine.Error("SetupZoneSigning failed", "zone", zone, "error", err)
-						}
-					}
-					drainAndRunOnFirstLoad(zd)
 				}
 			}
 			if zr.Response != nil && !zr.Wait {
@@ -682,6 +710,21 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								rc.CurRefresh = 30 // retry sooner
 								continue
 							}
+						}
+						rc.CurRefresh = rc.SOARefresh
+						continue
+					}
+
+					// Data loaded + Ready, but first-load policy sync/drain did
+					// not finish (OnFirstLoad retained). Retry only that — no
+					// re-Refresh, no re-InstallInitialSnapshot.
+					if hasPendingOnFirstLoad(zd) {
+						if err := finishFirstLoadPolicy(ctx, zd, conf, zd.DnssecPolicyName); err != nil {
+							lgEngine.Warn("first-load policy completion retry failed", "zone", zone, "err", err)
+							zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
+							zd.LatestError = time.Now()
+							rc.CurRefresh = 30
+							continue
 						}
 						rc.CurRefresh = rc.SOARefresh
 						continue

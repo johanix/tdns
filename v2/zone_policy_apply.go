@@ -339,6 +339,26 @@ func zoneActiveKeysMatchAlgs(kdb *KeyDB, zone string, pol *DnssecPolicy) (bool, 
 	return haveKSK && haveZSK, nil
 }
 
+// keepBindingOrQuarantineForBadIntent keeps a healthy in-memory DNSSEC binding
+// with a soft DnssecPolicyWarning, or hard-quarantines (DnssecError + clear
+// binding) when there is nothing safe to keep. Used for missing and broken
+// intent policies so the two paths cannot drift.
+func keepBindingOrQuarantineForBadIntent(zd *ZoneData, intentName, keepMsg, quarantineMsg string) {
+	if zd.DnssecPolicy != nil && zd.DnssecPolicyName != "" && zd.DnssecPolicy.Error == "" {
+		lgEngine.Warn("intent DNSSEC policy unusable; keeping bound policy",
+			"zone", zd.ZoneName, "intent", intentName, "bound", zd.DnssecPolicyName)
+		zd.SetError(DnssecPolicyWarning, "%s", keepMsg)
+		return
+	}
+	lgEngine.Error("zone has unusable effective DNSSEC policy, will not be signed",
+		"zone", zd.ZoneName, "policy", intentName)
+	zd.SetError(DnssecError, "%s", quarantineMsg)
+	zd.mu.Lock()
+	zd.DnssecPolicy = &DnssecPolicy{}
+	zd.DnssecPolicyName = ""
+	zd.mu.Unlock()
+}
+
 // syncZoneDnssecPolicyFromConfig is the refresh-engine policy path (plan §6.2):
 // resolve applied vs intent → Branch 0 backfill/first-apply → classify →
 // cheap rebind / skip-in-flight / transactional apply / refuse. Config source
@@ -364,33 +384,25 @@ func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyD
 		return fmt.Errorf("resolve DNSSEC policy pair for zone %s: %w", zd.ZoneName, err)
 	}
 
-	// Intent unresolvable with a non-empty name → quarantine (existing behaviour).
+	// Intent unresolvable with a non-empty name: keep a healthy binding (soft
+	// warning) so a running signed zone is not hard-quarantined when the
+	// operator deletes a still-referenced policy; quarantine only on first-bind
+	// with nothing to keep (plan §2/§10).
 	if intentName != "" && intentPol == nil {
-		lgEngine.Error("zone has unknown effective DNSSEC policy, will not be signed",
-			"zone", zd.ZoneName, "policy", intentName, "config_policy", configPolicyName)
-		zd.SetError(DnssecError, "DNSSEC policy %q does not exist", intentName)
-		zd.mu.Lock()
-		zd.DnssecPolicy = &DnssecPolicy{}
-		zd.DnssecPolicyName = ""
-		zd.mu.Unlock()
+		keepBindingOrQuarantineForBadIntent(zd, intentName,
+			fmt.Sprintf("effective DNSSEC policy %q is not defined in config; keeping bound policy %q",
+				intentName, zd.DnssecPolicyName),
+			fmt.Sprintf("DNSSEC policy %q does not exist", intentName))
 		return nil
 	}
 	if intentPol == nil {
 		return nil // no DNSSEC policy configured
 	}
 	if intentPol.Error != "" {
-		lgEngine.Warn("intent DNSSEC policy is broken; not binding it",
-			"zone", zd.ZoneName, "policy", intentName, "policy_error", intentPol.Error)
-		if zd.DnssecPolicy != nil && zd.DnssecPolicy.Error == "" {
-			zd.SetError(DnssecPolicyWarning, "intent DNSSEC policy %q is broken (%s); keeping bound policy %q",
-				intentName, intentPol.Error, zd.DnssecPolicyName)
-			return nil
-		}
-		zd.SetError(DnssecError, "DNSSEC policy %q is broken: %s", intentName, intentPol.Error)
-		zd.mu.Lock()
-		zd.DnssecPolicy = &DnssecPolicy{}
-		zd.DnssecPolicyName = ""
-		zd.mu.Unlock()
+		keepBindingOrQuarantineForBadIntent(zd, intentName,
+			fmt.Sprintf("intent DNSSEC policy %q is broken (%s); keeping bound policy %q",
+				intentName, intentPol.Error, zd.DnssecPolicyName),
+			fmt.Sprintf("DNSSEC policy %q is broken: %s", intentName, intentPol.Error))
 		return nil
 	}
 

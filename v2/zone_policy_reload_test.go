@@ -164,6 +164,108 @@ func TestSyncZonePolicy_DeletedAppliedFirstBindProceedsTowardIntent(t *testing.T
 	}
 }
 
+func TestSyncZonePolicy_DeletedIntentKeepsHealthyBinding(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	bound := kskzsk(dns.ED25519, dns.ED25519)
+	// Intent name present in zone config / applied row, but absent from ConfLive.
+	withLivePolicies(t, map[string]DnssecPolicy{})
+	if err := SetZoneAppliedPolicy(kdb, algZone, "gone", "config"); err != nil {
+		t.Fatalf("SetZoneAppliedPolicy: %v", err)
+	}
+
+	zd := readySignedApexZone(t, algZone, dns.ED25519)
+	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+	zd.KeyDB = kdb
+	zd.DnssecPolicy = &bound
+	zd.DnssecPolicyName = "bound-kept"
+
+	conf := &Config{}
+	if err := syncZoneDnssecPolicyFromConfig(context.Background(), zd, kdb, conf, "gone"); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if zd.DnssecPolicyName != "bound-kept" || zd.DnssecPolicy != &bound {
+		t.Fatalf("deleted-intent reload must keep binding: name=%q", zd.DnssecPolicyName)
+	}
+	if !zd.HasError(DnssecPolicyWarning) {
+		t.Fatal("deleted-intent must set DnssecPolicyWarning")
+	}
+	if zd.HasError(DnssecError) {
+		t.Fatal("deleted-intent must not set DnssecError on a healthy binding")
+	}
+	if zd.HasServiceImpactingError() {
+		t.Fatal("deleted-intent must remain non-service-impacting so later reloads can recover")
+	}
+}
+
+func TestSyncZonePolicy_DeletedIntentFirstBindQuarantines(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	withLivePolicies(t, map[string]DnssecPolicy{})
+
+	zone := algZone + "\t3600\tIN\tSOA\tns." + algZone + " hostmaster." + algZone + " 1 7200 1800 604800 7200\n" +
+		algZone + "\t3600\tIN\tNS\tns." + algZone + "\n"
+	zd := testZone(t, algZone, zone)
+	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+	zd.ZoneType = Primary
+	zd.KeyDB = kdb
+	// Genuine first-bind: no healthy binding to keep.
+	zd.DnssecPolicy = nil
+	zd.DnssecPolicyName = ""
+
+	conf := &Config{}
+	if err := syncZoneDnssecPolicyFromConfig(context.Background(), zd, kdb, conf, "gone"); err != nil {
+		t.Fatalf("sync: %v", err)
+	}
+	if !zd.HasError(DnssecError) {
+		t.Fatal("first-bind with unresolvable intent must set DnssecError")
+	}
+	if zd.DnssecPolicyName != "" {
+		t.Fatalf("first-bind quarantine must clear binding name, got %q", zd.DnssecPolicyName)
+	}
+}
+
+func TestFinishFirstLoadPolicyDrainsPendingOnSuccess(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	pol := kskzsk(dns.ED25519, dns.ED25519)
+	withLivePolicies(t, map[string]DnssecPolicy{"base": pol})
+
+	zd := readySignedApexZone(t, algZone, dns.ED25519)
+	zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+	zd.ZoneType = Primary
+	zd.KeyDB = kdb
+	zd.FirstZoneLoad = false // already past data load (ticker completion shape)
+	zd.DnssecPolicyName = "base"
+	if _, _, err := kdb.GenerateKeypair(algZone, "test", DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, "KSK", nil); err != nil {
+		t.Fatalf("KSK: %v", err)
+	}
+	genZSK(t, kdb, DnskeyStateActive, dns.ED25519)
+
+	ran := false
+	zd.OnFirstLoad = []func(*ZoneData){func(*ZoneData) { ran = true }}
+	serialBefore := zd.CurrentSerial
+
+	conf := &Config{}
+	conf.Internal.KeyDB = kdb
+	if err := finishFirstLoadPolicy(context.Background(), zd, conf, zd.DnssecPolicyName); err != nil {
+		t.Fatalf("finishFirstLoadPolicy: %v", err)
+	}
+	if !ran {
+		t.Fatal("pending OnFirstLoad must run after successful sync")
+	}
+	if hasPendingOnFirstLoad(zd) {
+		t.Fatal("OnFirstLoad must be drained after success")
+	}
+	if zd.DnssecPolicyName != "base" || zd.DnssecPolicy == nil {
+		t.Fatalf("policy must be bound: name=%q pol=%v", zd.DnssecPolicyName, zd.DnssecPolicy != nil)
+	}
+	name, _, ok, err := GetZoneAppliedPolicy(kdb, algZone)
+	if err != nil || !ok || name != "base" {
+		t.Fatalf("applied: got (%q,%v,%v), want (base,true,nil)", name, ok, err)
+	}
+	if zd.CurrentSerial != serialBefore {
+		t.Fatalf("completion retry must not re-Refresh/republish: serial %d → %d", serialBefore, zd.CurrentSerial)
+	}
+}
+
 func TestDrainAndRunOnFirstLoadRunsOnce(t *testing.T) {
 	zd := &ZoneData{ZoneName: "once.example."}
 	n := 0
