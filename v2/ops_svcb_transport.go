@@ -51,44 +51,41 @@ func GetAlpn(svcb *dns.SVCB) []string {
 	return alpn
 }
 
-// ValidateTransportAgainstAlpn is deprecated; transport is the source of truth.
-// Kept for compatibility; always returns nil.
-// func ValidateTransportAgainstAlpn(transports map[string]uint8, alpn []string) error { return nil }
-
-// ComputeDo53Remainder returns the implicit remainder for do53 (clip at 0).
-func ComputeDo53Remainder(pct map[string]uint8) uint8 {
-	var sum int
-	for _, v := range pct {
-		sum += int(v)
-	}
-	if sum >= 100 {
-		return 0
-	}
-	return uint8(100 - sum)
-}
-
-// GetTransportParam fetches and parses the transport parameter from the SVCB RR, if present.
+// GetTransportParam fetches and parses the oots SvcParam from the SVCB RR, if present.
 func GetTransportParam(svcb *dns.SVCB) (map[string]uint8, bool, error) {
 	if svcb == nil {
 		return nil, false, fmt.Errorf("GetTransportParam: nil svcb")
 	}
 	for _, kv := range svcb.Value {
-		if local, ok := kv.(*dns.SVCBLocal); ok {
-			if uint16(local.Key()) == SvcbTransportKey {
-				m, err := core.ParseTransportString(string(local.Data))
-				if err != nil {
-					return nil, true, err
-				}
-				return m, true, nil
-			}
+		if oots, ok := kv.(*dns.SVCBOots); ok {
+			m := svcbOotsToTransportMap(oots)
+			return m, true, nil
 		}
 	}
 	return nil, false, nil
 }
 
+// svcbOotsToTransportMap converts a parsed SVCBOots value into a weight map
+// with -03 absence defaults applied.
+func svcbOotsToTransportMap(oots *dns.SVCBOots) map[string]uint8 {
+	m := make(map[string]uint8)
+	if oots == nil {
+		core.ApplyTransportDefaults(m)
+		return m
+	}
+	for _, e := range oots.Oots {
+		w := e.Weight
+		if w > 100 {
+			w = 100
+		}
+		m[strings.ToLower(e.Proto)] = w
+	}
+	core.ApplyTransportDefaults(m)
+	return m
+}
+
 // ValidateExplicitServerSVCB validates an explicit SVCB RR for server use.
-// It checks transport weights against the ALPN list, if present. If transport is absent,
-// the record is accepted as-is. If transport is present but alpn is missing, it's invalid.
+// If oots is present it must parse cleanly; absence of oots is accepted.
 func ValidateExplicitServerSVCB(svcb *dns.SVCB) error {
 	if svcb == nil {
 		return fmt.Errorf("ValidateExplicitServerSVCB: nil svcb")

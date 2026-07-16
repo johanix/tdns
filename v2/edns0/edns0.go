@@ -4,8 +4,6 @@
 package edns0
 
 import (
-	"fmt"
-
 	"github.com/miekg/dns"
 )
 
@@ -14,10 +12,9 @@ type MsgOptions struct {
 	RD            bool
 	CD            bool
 	DO            bool
-	CO            bool // RFC 9824: Compact Ok bit (bit 14 in OPT header TTL)
-	PR            bool // Privacy Requested bit (bit 12 in OPT header TTL) - requires encrypted transport
-	OtsOptIn      bool
-	OtsOptOut     bool
+	CO            bool            // RFC 9824: Compact Ok bit (bit 14 in OPT header TTL)
+	PR            bool            // Privacy Requested bit (bit 12 in OPT header TTL) - requires encrypted transport
+	OtsOptIn      bool            // OOTS EDNS option present (opt-in by presence; -03)
 	HasEROption   bool            // True if ER option is present
 	ErAgentDomain string          // RFC9567: DNS Error Reporting agent domain
 	KeyState      *KeyStateOption // KeyState option if present
@@ -56,14 +53,8 @@ func ExtractFlagsAndEDNS0Options(r *dns.Msg) (*MsgOptions, error) {
 		if localOpt, ok := option.(*dns.EDNS0_LOCAL); ok {
 			switch localOpt.Code {
 			case EDNS0_OTS_OPTION_CODE:
-				// Extract OTS option (1 octet payload)
-				if len(localOpt.Data) == 1 {
-					payload := localOpt.Data[0]
-					msgoptions.OtsOptIn = payload == OTS_OPT_IN
-					msgoptions.OtsOptOut = payload == OTS_OPT_OUT
-				} else {
-					return nil, fmt.Errorf("EDNS0_LOCAL: OTS option data length is not 1")
-				}
+				// -03: OPTION-LENGTH MUST be 0; presence alone is opt-in.
+				msgoptions.OtsOptIn = true
 			case EDNS0_ER_OPTION_CODE:
 				// Extract ER option (domain name in DNS wire format)
 				if len(localOpt.Data) > 0 {

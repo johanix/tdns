@@ -53,7 +53,7 @@ type AuthServer struct {
 	Alpn             []string // {"do53", "doq", "dot", "doh"}
 	Transports       []core.Transport
 	PrefTransport    core.Transport           // "doq" | "dot" | "doh" | "do53"
-	TransportWeights map[core.Transport]uint8 // percentage per transport (sum <= 100). Remainder -> do53
+	TransportWeights map[core.Transport]uint8 // independent oots weights [0,100]; Do53 is ultimate fallback
 	// Optional config-only field for stubs: colon-separated transport weights, e.g. "doq:30,dot:70"
 	// When provided in config, this overrides Alpn for building Transports/PrefTransport/TransportWeights.
 	TransportSignal string                  `yaml:"transport" mapstructure:"transport"`

@@ -809,11 +809,12 @@ func sortTuplesByRTT(tuples []ServerAddrXportTuple) {
 }
 
 // candidateTransports returns the ordered list of transports to try for a
-// query to this (qname, server). The first entry is the deterministic
-// weighted-hash pick (same scheme as the legacy pickTransport so cache
-// distribution is preserved per server). Remaining entries are the other
-// configured transports in descending weight order, with the Do53 remainder
-// included when not requireEncrypted. requireEncrypted filters out Do53.
+// query to this (qname, server). Weights are independent capability estimates
+// (draft-johani-dnsop-svcb-oots), not a partition of 100: only transports with
+// weight > 1 are preferred; weight 0 is unavailable. When not requireEncrypted,
+// Do53 is always appended as the ultimate fallback even if advertised do53:0
+// (-03 always-fall-back-to-Do53). requireEncrypted filters out Do53 entirely
+// and is independent of OOTS weight semantics.
 func candidateTransports(server *cache.AuthServer, qname string, requireEncrypted bool) []core.Transport {
 	if server == nil {
 		if requireEncrypted {
@@ -826,7 +827,7 @@ func candidateTransports(server *cache.AuthServer, qname string, requireEncrypte
 		t core.Transport
 		w int
 	}
-	var weighted []wt
+	var preferred []wt
 	total := 0
 	for _, t := range server.Transports {
 		if requireEncrypted && !core.IsEncryptedTransport(t) {
@@ -836,67 +837,64 @@ func candidateTransports(server *cache.AuthServer, qname string, requireEncrypte
 		if !ok {
 			w = 0
 		}
-		weighted = append(weighted, wt{t: t, w: int(w)})
+		// -03: MAY attempt connections over any transport with weight > 1.
+		if w <= 1 {
+			continue
+		}
+		preferred = append(preferred, wt{t: t, w: int(w)})
 		total += int(w)
 	}
-	if !requireEncrypted && total < 100 {
-		// Do53 remainder (only if not already present at non-zero weight).
-		present := false
-		for i := range weighted {
-			if weighted[i].t == core.TransportDo53 {
-				weighted[i].w += 100 - total
-				present = true
+
+	var out []core.Transport
+	if len(preferred) > 0 {
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(qname))
+		_, _ = h.Write([]byte("|"))
+		_, _ = h.Write([]byte(server.Name))
+		bucket := int(h.Sum32() % uint32(maxInt(total, 1)))
+
+		winnerIdx := len(preferred) - 1
+		acc := 0
+		for i, c := range preferred {
+			acc += c.w
+			if bucket < acc {
+				winnerIdx = i
 				break
 			}
 		}
-		if !present {
-			weighted = append(weighted, wt{t: core.TransportDo53, w: 100 - total})
+
+		rest := make([]wt, 0, len(preferred)-1)
+		for i, c := range preferred {
+			if i == winnerIdx {
+				continue
+			}
+			rest = append(rest, c)
 		}
-		total = 100
-	}
-	if len(weighted) == 0 {
-		return nil
-	}
+		sort.SliceStable(rest, func(i, j int) bool {
+			if rest[i].w != rest[j].w {
+				return rest[i].w > rest[j].w
+			}
+			return rest[i].t < rest[j].t
+		})
 
-	// Deterministic hash bucket: same scheme as legacy pickTransport.
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(qname))
-	_, _ = h.Write([]byte("|"))
-	_, _ = h.Write([]byte(server.Name))
-	bucket := int(h.Sum32() % uint32(maxInt(total, 1)))
-
-	// Find the hash winner. Iteration order over server.Transports is stable
-	// (slice), so the cumulative walk is deterministic.
-	winnerIdx := len(weighted) - 1
-	acc := 0
-	for i, c := range weighted {
-		acc += c.w
-		if bucket < acc {
-			winnerIdx = i
-			break
+		out = make([]core.Transport, 0, len(preferred)+1)
+		out = append(out, preferred[winnerIdx].t)
+		for _, c := range rest {
+			out = append(out, c.t)
 		}
 	}
 
-	// Order: winner first, then remaining by descending weight, ties broken
-	// by transport ordinal for determinism.
-	rest := make([]wt, 0, len(weighted)-1)
-	for i, c := range weighted {
-		if i == winnerIdx {
-			continue
+	if !requireEncrypted {
+		hasDo53 := false
+		for _, t := range out {
+			if t == core.TransportDo53 {
+				hasDo53 = true
+				break
+			}
 		}
-		rest = append(rest, c)
-	}
-	sort.SliceStable(rest, func(i, j int) bool {
-		if rest[i].w != rest[j].w {
-			return rest[i].w > rest[j].w
+		if !hasDo53 {
+			out = append(out, core.TransportDo53)
 		}
-		return rest[i].t < rest[j].t
-	})
-
-	out := make([]core.Transport, 0, len(weighted))
-	out = append(out, weighted[winnerIdx].t)
-	for _, c := range rest {
-		out = append(out, c.t)
 	}
 	return out
 }
@@ -1092,12 +1090,12 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 	var rrset core.RRset
 	var rcode int
 
-	m, err := buildQuery(qname, qtype)
+	withOOTS := imr.Options[ImrOptUseTransportSignals] != "false"
+	m, err := buildQuery(qname, qtype, withOOTS)
 	if err != nil {
 		lg.Printf("IterativeDNSQuery: Error building query: %v", err)
 		return nil, 0, cache.ContextFailure, core.TransportDo53, err
 	}
-	// if Globals.Debug { fmt.Printf("IterativeDNSQuery: message after AddOTSToMessage: %s", m.String()) }
 
 	forceTCP := imr.dnskeyQueryForceTCP(qname, qtype)
 	if qtype == dns.TypeDNSKEY {
@@ -1414,35 +1412,29 @@ func (imr *Imr) parseSVCBTransportSignal(rr *dns.SVCB, serverName string, server
 		return false
 	}
 
-	haveLocal := false
+	if m, ok, err := GetTransportParam(rr); ok && err == nil {
+		if !imr.Quiet {
+			lgDns.Debug("SVCB oots for", "servername", serverName, "value", MarshalTransport(m))
+		}
+		if applyTransportMapToServer(server, m) {
+			server.PromoteConnMode(cache.ConnModeOpportunistic)
+		}
+		if owner := transportOwnerForNS(serverName); owner != "" {
+			imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
+		}
+		imr.maybeQueryTLSA(ctx, serverName)
+		return true
+	}
 	for _, kv := range rr.Value {
-		if local, ok := kv.(*dns.SVCBLocal); ok && local.KeyCode == dns.SVCBKey(SvcbTransportKey) {
+		if a, ok := kv.(*dns.SVCBAlpn); ok && len(a.Alpn) > 0 {
 			if !imr.Quiet {
-				lgDns.Debug("SVCB transport key for", "servername", serverName, "value", string(local.Data))
+				lgDns.Debug("SVCB ALPN for", "servername", serverName, "alpn", a.Alpn)
 			}
-			if imr.applyTransportSignalToServer(server, string(local.Data)) {
-				server.PromoteConnMode(cache.ConnModeOpportunistic)
-			}
-			if owner := transportOwnerForNS(serverName); owner != "" {
-				imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
-			}
-			imr.maybeQueryTLSA(ctx, serverName)
-			haveLocal = true
-			break
+			applyAlpnSignal(serverName, strings.Join(a.Alpn, ","), serverMap)
+			return true
 		}
 	}
-	if !haveLocal {
-		for _, kv := range rr.Value {
-			if a, ok := kv.(*dns.SVCBAlpn); ok && len(a.Alpn) > 0 {
-				if !imr.Quiet {
-					lgDns.Debug("SVCB ALPN for", "servername", serverName, "alpn", a.Alpn)
-				}
-				applyAlpnSignal(serverName, strings.Join(a.Alpn, ","), serverMap)
-				return true
-			}
-		}
-	}
-	return haveLocal
+	return false
 }
 
 // parseTSYNCTransportSignal extracts and applies transport signals from a TSYNC record.
@@ -1553,6 +1545,10 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 				continue
 			}
 		case *dns.SVCB, *dns.PrivateRR:
+			// -03: ignore Additional OOTS unless we set the OOTS option (use-transport-signals).
+			if imr.Options[ImrOptUseTransportSignals] == "false" {
+				continue
+			}
 			// Transport signals: process if:
 			// 1. First pass equivalent: isOTSOwner AND baseName in nsMap (will create server entry)
 			// 2. Second pass equivalent: isOTSOwner AND baseName in serverMap (server already exists)
@@ -1827,12 +1823,14 @@ func RecursiveDNSQuery(server, qname string, qtype uint16, timeout time.Duration
 }
 
 // Helpers
-func buildQuery(qname string, qtype uint16) (*dns.Msg, error) {
+func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
 	m := new(dns.Msg)
 	m.SetQuestion(qname, qtype)
 	m.SetEdns0(4096, true)
-	if err := edns0.AddOTSToMessage(m, edns0.OTS_OPT_IN); err != nil {
-		return nil, err
+	if withOOTS {
+		if err := edns0.AddOTSToMessage(m); err != nil {
+			return nil, err
+		}
 	}
 	return m, nil
 }
@@ -1934,6 +1932,14 @@ func (imr *Imr) applyTransportSignalToServer(server *cache.AuthServer, s string)
 		lgDns.Debug("applyTransportSignalToServer: invalid transport string for :", "name", server.Name, "s", s, "q", err)
 		return false
 	}
+	return applyTransportMapToServer(server, kvMap)
+}
+
+// applyTransportMapToServer installs a weight map on server (sorted by weight desc).
+func applyTransportMapToServer(server *cache.AuthServer, kvMap map[string]uint8) bool {
+	if server == nil || len(kvMap) == 0 {
+		return false
+	}
 	type pair struct {
 		k string
 		w uint8
@@ -1943,7 +1949,7 @@ func (imr *Imr) applyTransportSignalToServer(server *cache.AuthServer, s string)
 	for k, v := range kvMap {
 		t, err := core.StringToTransport(k)
 		if err != nil {
-			lgDns.Debug("applyTransportSignalToServer: unknown transport for", "name", server.Name, "s", k)
+			lgDns.Debug("applyTransportMapToServer: unknown transport", "name", server.Name, "proto", k)
 			continue
 		}
 		pairs = append(pairs, pair{k: k, w: v})
@@ -2058,10 +2064,9 @@ func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) {
 	}
 }
 
-// parseTransportForServerFromAdditional looks for a transport signal for the specific server in the Additional section
+// parseTransportForServerFromAdditional looks for a transport signal for the specific server in the Additional section.
+// -03: ignore Additional OOTS unless we set the OOTS option on the query (coupled to use-transport-signals).
 func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, server *cache.AuthServer, r *dns.Msg) {
-	// Transport signal processing is enabled by default (changed from opt-in to opt-out)
-	// Only skip if explicitly disabled
 	if imr.Options[ImrOptUseTransportSignals] == "false" {
 		return
 	}
@@ -2091,28 +2096,22 @@ func (imr *Imr) parseTransportForServerFromAdditional(ctx context.Context, serve
 		switch x := rr.(type) {
 		case *dns.SVCB:
 			lgDns.Debug("**** parseTransportForServerFromAdditional: x", "x", x)
-			haveLocal := false
-			for _, kv := range x.Value {
-				if local, ok := kv.(*dns.SVCBLocal); ok && local.KeyCode == dns.SVCBKey(SvcbTransportKey) {
-					lgDns.Debug("parseTransportForServerFromAdditional: parsing SVCB transport value", "value", string(local.Data))
-					if imr.applyTransportSignalToServer(server, string(local.Data)) {
-						server.PromoteConnMode(cache.ConnModeOpportunistic)
-					}
-					if owner := transportOwnerForNS(server.Name); owner != "" {
-						imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
-					}
-					imr.maybeQueryTLSA(ctx, server.Name)
-					haveLocal = true
-					break
+			if m, ok, err := GetTransportParam(x); ok && err == nil {
+				lgDns.Debug("parseTransportForServerFromAdditional: parsing SVCB oots", "value", MarshalTransport(m))
+				if applyTransportMapToServer(server, m) {
+					server.PromoteConnMode(cache.ConnModeOpportunistic)
 				}
+				if owner := transportOwnerForNS(server.Name); owner != "" {
+					imr.maybeQueryTransportSignal(ctx, owner, transportQueryReasonObservation)
+				}
+				imr.maybeQueryTLSA(ctx, server.Name)
+				continue
 			}
-			if !haveLocal {
-				for _, kv := range x.Value {
-					if a, ok := kv.(*dns.SVCBAlpn); ok && len(a.Alpn) > 0 {
-						lgDns.Debug("parseTransportForServerFromAdditional: parsing SVCB ALPN value", "alpn", a.Alpn)
-						applyAlpnSignalToServer(server, strings.Join(a.Alpn, ","))
-						break
-					}
+			for _, kv := range x.Value {
+				if a, ok := kv.(*dns.SVCBAlpn); ok && len(a.Alpn) > 0 {
+					lgDns.Debug("parseTransportForServerFromAdditional: parsing SVCB ALPN value", "alpn", a.Alpn)
+					applyAlpnSignalToServer(server, strings.Join(a.Alpn, ","))
+					break
 				}
 			}
 		case *dns.PrivateRR:
@@ -2165,17 +2164,11 @@ func (imr *Imr) applyTransportRRsetFromAnswer(qname string, rrset *core.RRset, v
 				if !ok {
 					continue
 				}
-				haveLocal := false
-				for _, kv := range svcb.Value {
-					if local, ok := kv.(*dns.SVCBLocal); ok && local.KeyCode == dns.SVCBKey(SvcbTransportKey) {
-						if imr.applyTransportSignalToServer(server, string(local.Data)) {
-							applied = true
-						}
-						haveLocal = true
-						break
+				if m, ok, err := GetTransportParam(svcb); ok && err == nil {
+					if applyTransportMapToServer(server, m) {
+						applied = true
 					}
-				}
-				if !haveLocal {
+				} else {
 					for _, kv := range svcb.Value {
 						if a, ok := kv.(*dns.SVCBAlpn); ok && len(a.Alpn) > 0 {
 							applyAlpnSignalToServer(server, strings.Join(a.Alpn, ","))

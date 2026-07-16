@@ -32,22 +32,52 @@ func TestCandidateTransports_SinglePreferred_Encrypted(t *testing.T) {
 	}
 }
 
-// TestCandidateTransports_Do53RemainderAdded: when configured weights don't
-// sum to 100, the remainder is added as Do53 unless requireEncrypted.
-func TestCandidateTransports_Do53RemainderAdded(t *testing.T) {
+// TestCandidateTransports_Do53UltimateFallback: Do53 is always the ultimate
+// fallback when not requireEncrypted, even if only encrypted weights are set.
+func TestCandidateTransports_Do53UltimateFallback(t *testing.T) {
 	s := cache.NewAuthServer("ns.example.")
 	s.SetTransports([]core.Transport{core.TransportDoT})
 	s.SetTransportWeight(core.TransportDoT, 30)
 
 	got := candidateTransports(s, "example.", false)
 	if !slices.Contains(got, core.TransportDo53) {
-		t.Errorf("expected Do53 in candidates (weight remainder), got %v", got)
+		t.Errorf("expected Do53 ultimate fallback, got %v", got)
 	}
 	if !slices.Contains(got, core.TransportDoT) {
 		t.Errorf("expected DoT in candidates, got %v", got)
 	}
-	if len(got) != 2 {
-		t.Errorf("expected exactly 2 candidates, got %d (%v)", len(got), got)
+	if got[len(got)-1] != core.TransportDo53 {
+		t.Errorf("Do53 should be last, got %v", got)
+	}
+}
+
+// TestCandidateTransports_Do53ZeroStillFallback: do53:0 excludes Do53 from
+// preferred selection but must still appear as ultimate fallback.
+func TestCandidateTransports_Do53ZeroStillFallback(t *testing.T) {
+	s := cache.NewAuthServer("ns.example.")
+	s.SetTransports([]core.Transport{core.TransportDoQ, core.TransportDo53})
+	s.SetTransportWeight(core.TransportDoQ, 100)
+	s.SetTransportWeight(core.TransportDo53, 0)
+
+	got := candidateTransports(s, "example.", false)
+	if len(got) != 2 || got[0] != core.TransportDoQ || got[1] != core.TransportDo53 {
+		t.Errorf("got %v, want [DoQ, Do53]", got)
+	}
+}
+
+// TestCandidateTransports_WeightOneExcluded: weight <= 1 is not preferred.
+func TestCandidateTransports_WeightOneExcluded(t *testing.T) {
+	s := cache.NewAuthServer("ns.example.")
+	s.SetTransports([]core.Transport{core.TransportDoT, core.TransportDoQ})
+	s.SetTransportWeight(core.TransportDoT, 1)
+	s.SetTransportWeight(core.TransportDoQ, 20)
+
+	got := candidateTransports(s, "example.", false)
+	if slices.Contains(got, core.TransportDoT) {
+		t.Errorf("weight 1 must be excluded from preferred, got %v", got)
+	}
+	if !slices.Contains(got, core.TransportDoQ) {
+		t.Errorf("expected DoQ, got %v", got)
 	}
 }
 
@@ -100,10 +130,12 @@ func TestCandidateTransports_DeterministicHashFirst(t *testing.T) {
 		}
 	}
 
-	// Ensure both transports appear in the result somewhere — winner first
-	// plus the loser in the fallback positions.
+	// Preferred encrypted transports plus ultimate Do53 fallback.
 	if !slices.Contains(first, core.TransportDoT) || !slices.Contains(first, core.TransportDoH) {
 		t.Errorf("expected both DoT and DoH in candidates, got %v", first)
+	}
+	if first[len(first)-1] != core.TransportDo53 {
+		t.Errorf("expected Do53 ultimate fallback last, got %v", first)
 	}
 }
 
@@ -118,13 +150,13 @@ func TestPrioritizeServers_PerTransportBackoffFiltering(t *testing.T) {
 	s := cache.NewAuthServer(ns)
 	s.SetAddrs([]string{addr})
 	s.SetTransports([]core.Transport{core.TransportDoT})
-	s.SetTransportWeight(core.TransportDoT, 30) // Do53 remainder = 70
+	s.SetTransportWeight(core.TransportDoT, 30) // Do53 appended as ultimate fallback
 
 	// Baseline: both (addr, DoT) and (addr, Do53) should be in the list.
 	serverMap := map[string]*cache.AuthServer{ns: s}
 	_, _, tuples := imr.prioritizeServers("foo.example.", serverMap, false)
 	if len(tuples) != 2 {
-		t.Fatalf("baseline: expected 2 tuples (DoT + Do53), got %d (%+v)", len(tuples), tuples)
+		t.Fatalf("baseline: expected 2 tuples (DoT + Do53 fallback), got %d (%+v)", len(tuples), tuples)
 	}
 
 	// Poison (addr, DoT). (addr, Do53) must remain.

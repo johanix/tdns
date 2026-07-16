@@ -117,19 +117,27 @@ func TestAddTransportSignal_DedupAgainstAnswer(t *testing.T) {
 	registerZones(t, zd)
 	sigs := zd.collectSignalRRsets(zd.publishedSnapshot())
 
+	optIn := &edns0.MsgOptions{OtsOptIn: true}
+
 	// Simulate a direct query for the signal: it is already in the Answer.
 	m := new(dns.Msg)
 	m.Answer = append(m.Answer, mustSVCB(t, `_dns.ns.example.com. 10800 IN SVCB 1 . alpn="dot"`))
-	if zd.addTransportSignal(m, sigs, &edns0.MsgOptions{}) {
+	if zd.addTransportSignal(m, sigs, optIn) {
 		t.Fatalf("signal already in Answer must not be re-added to Extra")
 	}
 	if len(m.Extra) != 0 {
 		t.Fatalf("Extra must stay empty, got %d", len(m.Extra))
 	}
 
-	// A plain query (signal not in Answer) should inject it into Extra.
+	// Without the OOTS EDNS option, -03 says do not inject.
+	mNoOpt := new(dns.Msg)
+	if zd.addTransportSignal(mNoOpt, sigs, &edns0.MsgOptions{}) {
+		t.Fatalf("no OOTS option: must not inject signal")
+	}
+
+	// A plain query with OOTS opt-in (signal not in Answer) should inject it.
 	m2 := new(dns.Msg)
-	if !zd.addTransportSignal(m2, sigs, &edns0.MsgOptions{}) {
+	if !zd.addTransportSignal(m2, sigs, optIn) {
 		t.Fatalf("signal not in Answer must be injected into Extra")
 	}
 	if len(m2.Extra) != 1 {
