@@ -684,11 +684,14 @@ func (imr *Imr) AuthDNSQuery(ctx context.Context, qname string, qtype uint16, na
 
 // ServerAddrXportTuple represents one prioritized query candidate: a server,
 // one of its addresses, and the transport to use for the attempt.
+// Rank is the index of Transport in candidateTransports for this
+// (qname, server) — 0 is the OOTS share-weighted winner.
 type ServerAddrXportTuple struct {
 	Server    *cache.AuthServer
 	Addr      string
 	NSName    string
 	Transport core.Transport
+	Rank      int
 }
 
 // prioritizeServers returns a flat, prioritized list of
@@ -698,17 +701,12 @@ type ServerAddrXportTuple struct {
 //   - Emit one tuple per available transport, filtered against the
 //     per-(addr, transport) backoff on both the server and the
 //     enclosing zone (lame-delegation tracking).
-//   - The first transport per (server, addr) is the deterministic
-//     "preferred" pick from the weighted-hash policy. Alternate
-//     transports follow, ordered by descending weight. This means a
-//     failure of (X, DoT) is followed immediately in the iteration by
-//     (X, Do53) — same address, different transport — instead of
-//     burning the next server first.
+//   - Rank mirrors candidateTransports order (OOTS share winner = 0).
+//   - Final order: ascending Rank, then ascending RTT within the same
+//     Rank, so a faster fallback cannot leapfrog the share-picked winner.
 //
 // requireEncrypted excludes Do53 tuples; if the server has no
 // encrypted transport available the server contributes no tuples.
-//
-// Future (W7): sort tuples by RTT across servers.
 func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.AuthServer, requireEncrypted bool) (string, *cache.Zone, []ServerAddrXportTuple) {
 	zoneName, _, _ := imr.Cache.FindClosestKnownZone(qname)
 	var zone *cache.Zone
@@ -726,7 +724,7 @@ func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.Auth
 			continue
 		}
 		for _, addr := range server.GetAddrs() {
-			for _, t := range transports {
+			for rank, t := range transports {
 				if !server.IsAddrXportAvailable(addr, t) {
 					if Globals.Debug {
 						lgDns.Debug("prioritizeServers: skipping (addr,transport) due to server backoff",
@@ -746,25 +744,24 @@ func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.Auth
 				// — but let one through per ProbeInterval as a recovery
 				// probe, appended after the healthy bucket.
 				fam := cache.FamilyOf(addr)
+				tup := ServerAddrXportTuple{
+					Server: server, Addr: addr, NSName: nsname, Transport: t, Rank: rank,
+				}
 				if imr.FamilyTracker.IsSuspect(fam) {
 					if imr.FamilyTracker.ShouldProbe(fam) {
-						suspectTuples = append(suspectTuples, ServerAddrXportTuple{
-							Server: server, Addr: addr, NSName: nsname, Transport: t,
-						})
+						suspectTuples = append(suspectTuples, tup)
 					} else if Globals.Debug {
 						lgDns.Debug("prioritizeServers: skipping suspect-family (addr,transport)",
 							"addr", addr, "transport", core.TransportToString[t], "family", int(fam))
 					}
 					continue
 				}
-				tuples = append(tuples, ServerAddrXportTuple{
-					Server: server, Addr: addr, NSName: nsname, Transport: t,
-				})
+				tuples = append(tuples, tup)
 			}
 		}
 	}
 
-	sortTuplesByRTT(tuples)
+	sortTuplesByRankThenRTT(tuples)
 	// Suspect-family tuples (if any) follow the healthy ones — they're
 	// reachable in principle, just deprioritized while the family is suspect.
 	tuples = append(tuples, suspectTuples...)
@@ -777,21 +774,19 @@ func (imr *Imr) prioritizeServers(qname string, serverMap map[string]*cache.Auth
 // real sample.
 const unprobedRTTSentinel = 200 * time.Millisecond
 
-// sortTuplesByRTT stable-sorts the slice in ascending RTT order, using
-// unprobedRTTSentinel for tuples without a usable sample. Stable: tuples
-// with equal RTT (including all unprobed tuples on first query) preserve
-// the order prioritizeServers emitted them in, which is the W6
-// preferred-first-per-(server,addr) order.
-func sortTuplesByRTT(tuples []ServerAddrXportTuple) {
+// sortTuplesByRankThenRTT stable-sorts by OOTS candidate Rank ascending
+// (share winner first), then by RTT ascending within the same Rank.
+// unprobedRTTSentinel is used when no usable RTT sample exists.
+func sortTuplesByRankThenRTT(tuples []ServerAddrXportTuple) {
 	if len(tuples) < 2 {
 		return
 	}
-	keys := make([]time.Duration, len(tuples))
+	rtts := make([]time.Duration, len(tuples))
 	for i, tup := range tuples {
 		if r, ok := tup.Server.GetRTT(tup.Addr, tup.Transport); ok {
-			keys[i] = r
+			rtts[i] = r
 		} else {
-			keys[i] = unprobedRTTSentinel
+			rtts[i] = unprobedRTTSentinel
 		}
 	}
 	indices := make([]int, len(tuples))
@@ -799,7 +794,11 @@ func sortTuplesByRTT(tuples []ServerAddrXportTuple) {
 		indices[i] = i
 	}
 	sort.SliceStable(indices, func(i, j int) bool {
-		return keys[indices[i]] < keys[indices[j]]
+		a, b := indices[i], indices[j]
+		if tuples[a].Rank != tuples[b].Rank {
+			return tuples[a].Rank < tuples[b].Rank
+		}
+		return rtts[a] < rtts[b]
 	})
 	sorted := make([]ServerAddrXportTuple, len(tuples))
 	for newIdx, oldIdx := range indices {
@@ -1733,13 +1732,9 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 	return serverMap, nil
 }
 
-// parseTransportString parses strings like "doq:30,dot:20" into a map[string]uint8
 // parseTransportString removed; use transport.ParseTransportString
 // pickTransport removed in W6 cleanup; its logic was absorbed into
-// candidateTransports + the prioritizeServers tuple-expansion loop. The
-// deterministic fnv32(qname|server.Name) weighted-hash bucket scheme is
-// preserved by sortTuplesByWeightedPreference so cache distribution per
-// query is unchanged from the legacy single-transport pick.
+// candidateTransports + the prioritizeServers tuple-expansion loop.
 
 func RecursiveDNSQueryWithConfig(qname string, qtype uint16, timeout time.Duration, retries int) (*core.RRset, error) {
 	resolvers := viper.GetStringSlice("dns.resolvers")

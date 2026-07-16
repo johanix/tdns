@@ -267,7 +267,7 @@ func TestPrioritizeServers_RequireEncryptedFilters(t *testing.T) {
 
 // TestPrioritizeServers_RTTSortAcrossServers: when two servers are configured
 // and one has a low recorded RTT while the other has a high recorded RTT, the
-// fast server's tuples should be listed first.
+// fast server's tuples should be listed first (same OOTS rank → RTT decides).
 func TestPrioritizeServers_RTTSortAcrossServers(t *testing.T) {
 	imr := newTestImr(t)
 
@@ -293,6 +293,55 @@ func TestPrioritizeServers_RTTSortAcrossServers(t *testing.T) {
 	}
 	if tuples[0].NSName != "fast.example." {
 		t.Errorf("expected fast.example. first, got %q (tuples=%+v)", tuples[0].NSName, tuples)
+	}
+}
+
+// TestPrioritizeServers_OotsRankBeatsRTT: a lower-RTT encrypted fallback must
+// not leapfrog the OOTS share-weighted winner (rank 0).
+func TestPrioritizeServers_OotsRankBeatsRTT(t *testing.T) {
+	imr := newTestImr(t)
+
+	const ns = "ns.example."
+	const addr = "10.0.0.7:53"
+	s := cache.NewAuthServer(ns)
+	s.SetAddrs([]string{addr})
+	m, err := core.ParseTransportString("do53:100,dot:10")
+	if err != nil {
+		t.Fatalf("ParseTransportString: %v", err)
+	}
+	if !applyTransportMapToServer(s, m) {
+		t.Fatal("applyTransportMapToServer failed")
+	}
+
+	// Find a qname whose share pick is Do53 (do53_share=90 → majority).
+	var qname string
+	for i := 0; i < 5000; i++ {
+		q := fmt.Sprintf("q%d.example.", i)
+		cands := candidateTransports(s, q, false)
+		if len(cands) > 0 && cands[0] == core.TransportDo53 {
+			qname = q
+			break
+		}
+	}
+	if qname == "" {
+		t.Fatal("could not find a qname where Do53 wins the share pick")
+	}
+
+	// Make DoT much faster than Do53 — under pure RTT sort DoT would win.
+	s.RecordRTT(addr, core.TransportDoT, 5*time.Millisecond)
+	s.RecordRTT(addr, core.TransportDo53, 500*time.Millisecond)
+
+	serverMap := map[string]*cache.AuthServer{ns: s}
+	_, _, tuples := imr.prioritizeServers(qname, serverMap, false)
+	if len(tuples) < 2 {
+		t.Fatalf("expected Do53+DoT tuples, got %d (%+v)", len(tuples), tuples)
+	}
+	if tuples[0].Transport != core.TransportDo53 {
+		t.Errorf("OOTS rank-0 winner Do53 must stay first despite slower RTT; got %v (tuples=%+v)",
+			tuples[0].Transport, tuples)
+	}
+	if tuples[0].Rank != 0 {
+		t.Errorf("first tuple Rank=%d, want 0", tuples[0].Rank)
 	}
 }
 
