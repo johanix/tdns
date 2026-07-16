@@ -125,6 +125,19 @@ DNSKEY-covering RRSIG** — on a ZSK-only flip the DNSKEY RRset changed, so the
 kept KSK's DNSKEY RRSIG covers a stale key set (not an orphan; additive re-sign
 won't remove it) — letting the re-sign regenerate exactly one fresh RRSIG per
 active KSK.
+
+**Review refinements (2c92b97):** (a) the RRSIG strip runs **after** the keystore
+commit, not inside the force op's tx — `forceZoneKeysToPolicyRoles` returns the
+surviving keytags and resetZonePolicy strips via `stripStaleRRSIGsForKeySet`
+post-commit — so a keystore commit failure can never leave the served zone
+published without its signatures. (b) A split↔CSK mode change is detected by
+comparing the reliable **`DnssecPolicy.Mode`** field (the zone's currently-bound
+policy Mode vs the config Mode) — NOT inferred from key shape, which misread a
+split zone transiently missing its ZSK as CSK and wrongly dropped the healthy
+KSK. `Mode` is a real, validated config field (`dnssec_policy.mode:`, default
+`ksk-zsk`), now also surfaced in the auth sample YAML (c2686ce). (c)
+`policyResetReport` takes the target Mode so a CSK replacement reads as "CSK
+algorithm rolled," not "KSK rolled, ZSK kept."
 **Motivation:** the original unconditional drop+regenerate-all rolled the KSK
 even for a ZSK-only change → new KSK keytag → the parent DS went stale and the
 chain of trust broke for nothing (confirmed on hardware: MAYO5+MAYO2 →
