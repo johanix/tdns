@@ -4,7 +4,10 @@
 package tdns
 
 import (
+	"log"
+	"os"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -82,6 +85,7 @@ func TestSigningKeysSnapshotNoRace(t *testing.T) {
 
 	var wg sync.WaitGroup
 	stop := make(chan struct{})
+	var republishErr atomic.Pointer[error]
 
 	wg.Add(1)
 	go func() {
@@ -91,7 +95,10 @@ func TestSigningKeysSnapshotNoRace(t *testing.T) {
 			case <-stop:
 				return
 			default:
-				_ = zd.republishSigningKeys(kdb)
+				if err := zd.republishSigningKeys(kdb); err != nil {
+					e := err
+					republishErr.CompareAndSwap(nil, &e)
+				}
 			}
 		}
 	}()
@@ -116,14 +123,38 @@ func TestSigningKeysSnapshotNoRace(t *testing.T) {
 	time.Sleep(40 * time.Millisecond)
 	close(stop)
 	wg.Wait()
+	if errp := republishErr.Load(); errp != nil {
+		t.Fatalf("republishSigningKeys failed during race: %v", *errp)
+	}
 }
 
 // TestSigningKeysMassResignDoesNotStore asserts SignZone without key mutation
 // leaves the signing-keys pointer unchanged.
 func TestSigningKeysMassResignDoesNotStore(t *testing.T) {
 	kdb := newTestKeyDB(t)
-	zd := algTestZone(dns.ED25519, dns.ED25519)
-	zd.KeyDB = kdb
+	zoneStr := `zsk-alg.example.		3600	IN	SOA	ns.zsk-alg.example. hostmaster.zsk-alg.example. 1 7200 1800 604800 7200
+zsk-alg.example.		3600	IN	NS	ns.zsk-alg.example.
+ns.zsk-alg.example.		3600	IN	A	192.0.2.1
+`
+	zd := &ZoneData{
+		ZoneName:  algZone,
+		ZoneStore: MapZone,
+		Options:   map[ZoneOption]bool{OptOnlineSigning: true},
+		DnssecPolicy: &DnssecPolicy{
+			Mode:         DnssecPolicyModeKSKZSK,
+			KSKAlgorithm: dns.ED25519,
+			ZSKAlgorithm: dns.ED25519,
+		},
+		DnssecPolicyName: "base",
+		KeyDB:            kdb,
+		Logger:           log.New(os.Stderr, "", 0),
+	}
+	if _, _, err := zd.ReadZoneData(zoneStr, true); err != nil {
+		t.Fatalf("ReadZoneData: %v", err)
+	}
+	zd.Ready = true
+	zd.InstallInitialSnapshot()
+	t.Cleanup(zd.stopPublisher)
 	registerAlgZone(t, zd)
 
 	if _, _, err := kdb.GenerateKeypair(algZone, "test", DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, "KSK", nil); err != nil {
@@ -138,22 +169,19 @@ func TestSigningKeysMassResignDoesNotStore(t *testing.T) {
 		t.Fatal("expected built snapshot before resign")
 	}
 
-	// Minimal apex so SignZone can run; if SignZone fails for fixture reasons,
-	// still assert a no-op path: ActiveDnssecKeys read must not Store.
 	_ = zd.ActiveDnssecKeys()
-	afterRead := zd.signingKeys.Load()
-	if afterRead != before {
+	if zd.signingKeys.Load() != before {
 		t.Fatal("ActiveDnssecKeys read republished keys snapshot")
 	}
 
-	// Mutation must change the pointer.
-	if err := UpdateDnssecKeyState(kdb, algZone, before.Active.KSKs[0].KeyId, DnskeyStateActive); err != nil {
-		// same-state update still commits + republishes
-		t.Logf("setstate same-state: %v", err)
+	if _, err := zd.SignZone(kdb, true); err != nil {
+		t.Fatalf("SignZone: %v", err)
 	}
-	// Force a real active-set change via generate standby then rollover needs standby —
-	// simpler: GenerateKeypair another ZSK as standby doesn't change active pointer
-	// content but republish still Stores a new built snapshot.
+	if zd.signingKeys.Load() != before {
+		t.Fatal("SignZone without key mutation republished signing-keys snapshot")
+	}
+
+	// Explicit republish must install a new pointer.
 	genZSK(t, kdb, DnskeyStateStandby, dns.ED25519)
 	if err := zd.republishSigningKeys(kdb); err != nil {
 		t.Fatalf("republish after standby: %v", err)
@@ -258,11 +286,10 @@ func TestSigningKeysCASLazyVsMutation(t *testing.T) {
 	// Force unbuilt so the next read takes the lazy CAS path.
 	zd.signingKeys.Store(&signingKeysSnapshot{built: false, Active: &DnssecKeys{}})
 
-	var wg sync.WaitGroup
-	wg.Add(1)
+	casErr := make(chan error, 1)
 	go func() {
-		defer wg.Done()
-		_, _ = zd.activeKeysCAS(kdb)
+		_, err := zd.activeKeysCAS(kdb)
+		casErr <- err
 	}()
 
 	// Mutate active set while lazy fill may be in flight.
@@ -271,7 +298,9 @@ func TestSigningKeysCASLazyVsMutation(t *testing.T) {
 	if _, _, err := kdb.RolloverKey(algZone, "ZSK", nil); err != nil {
 		t.Fatalf("RolloverKey: %v", err)
 	}
-	wg.Wait()
+	if err := <-casErr; err != nil {
+		t.Fatalf("activeKeysCAS: %v", err)
+	}
 
 	assertSnapMatchesDB(t, kdb, zd)
 	newIDs := activeKeyIDsFromSnap(zd.ActiveDnssecKeys())
@@ -354,5 +383,42 @@ func TestSigningKeysAccessorNeverNil(t *testing.T) {
 	}
 	if zd.SigningKeys().built {
 		t.Fatal("fresh ZoneData should report unbuilt")
+	}
+}
+
+// TestSigningKeysRepublishGenerationGate: an older overlapping republish must
+// not overwrite a newer published snapshot (generation check at Store time).
+func TestSigningKeysRepublishGenerationGate(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := algTestZone(dns.ED25519, dns.ED25519)
+	zd.KeyDB = kdb
+	registerAlgZone(t, zd)
+
+	if _, _, err := kdb.GenerateKeypair(algZone, "test", DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, "KSK", nil); err != nil {
+		t.Fatalf("KSK: %v", err)
+	}
+	genZSK(t, kdb, DnskeyStateActive, dns.ED25519)
+	if err := zd.republishSigningKeys(kdb); err != nil {
+		t.Fatalf("republish: %v", err)
+	}
+	newer := zd.signingKeys.Load()
+	oldGen := zd.signingKeysGen.Load()
+
+	// A newer republish starts (bumps gen) and publishes.
+	if err := zd.republishSigningKeys(kdb); err != nil {
+		t.Fatalf("second republish: %v", err)
+	}
+	latest := zd.signingKeys.Load()
+	if latest == newer {
+		t.Fatal("expected a new snapshot pointer from second republish")
+	}
+
+	// Late finish of the older generation must not Store.
+	stale := &signingKeysSnapshot{built: true, Active: &DnssecKeys{}}
+	if zd.signingKeysGen.Load() == oldGen {
+		zd.signingKeys.Store(stale)
+	}
+	if zd.signingKeys.Load() != latest {
+		t.Fatal("older generation must not overwrite newer snapshot")
 	}
 }

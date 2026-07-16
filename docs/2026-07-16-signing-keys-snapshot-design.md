@@ -158,7 +158,11 @@ func buildSigningKeysSnapshot(kdb *KeyDB, zone string) (*signingKeysSnapshot, er
 
 ```go
 // Call ONLY after the keystore tx that changed this zone's keys has COMMITTED.
+// Generation-gated: bump signingKeysGen at entry; Store (success or unbuilt
+// marker) only if that generation is still current — prevents an older
+// overlapping republish from clobbering a newer snapshot.
 func (zd *ZoneData) republishSigningKeys(kdb *KeyDB) error {
+    gen := zd.signingKeysGen.Add(1)
     snap, err := buildSigningKeysSnapshot(kdb, zd.ZoneName)
     if err != nil {
         lgSigner.Error("republishSigningKeys: build failed, retrying", "zone", zd.ZoneName, "err", err)
@@ -168,12 +172,16 @@ func (zd *ZoneData) republishSigningKeys(kdb *KeyDB) error {
         // M3: do NOT leave the old built snapshot installed silently.
         // Invalidate with a FRESH unbuilt marker (never the shared sentinel —
         // ABA with CAS-if-unbuilt). Next reader rebuilds via CAS.
-        zd.signingKeys.Store(&signingKeysSnapshot{built: false, Active: &DnssecKeys{}})
+        if zd.signingKeysGen.Load() == gen {
+            zd.signingKeys.Store(&signingKeysSnapshot{built: false, Active: &DnssecKeys{}})
+        }
         lgSigner.Error("republishSigningKeys: failed after retry; marked unbuilt",
             "zone", zd.ZoneName, "err", err)
         return err
     }
-    zd.signingKeys.Store(snap) // snap.built == true
+    if zd.signingKeysGen.Load() == gen {
+        zd.signingKeys.Store(snap) // snap.built == true
+    }
     return nil
 }
 

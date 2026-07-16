@@ -68,22 +68,31 @@ func buildSigningKeysSnapshot(kdb *KeyDB, zone string) (*signingKeysSnapshot, er
 // Call ONLY after the keystore transaction that changed this zone's keys has
 // COMMITTED. On persistent build failure: loud Error, mark unbuilt with a
 // fresh allocation (never the shared sentinel), return err (M3).
+//
+// Overlapping republishes are generation-gated: each call takes a new
+// signingKeysGen; Store (success or unbuilt marker) runs only if that
+// generation is still current, so an older build cannot clobber a newer one.
 func (zd *ZoneData) republishSigningKeys(kdb *KeyDB) error {
 	if zd == nil {
 		return fmt.Errorf("republishSigningKeys: nil ZoneData")
 	}
+	gen := zd.signingKeysGen.Add(1)
 	snap, err := buildSigningKeysSnapshot(kdb, zd.ZoneName)
 	if err != nil {
 		lgSigner.Error("republishSigningKeys: build failed, retrying", "zone", zd.ZoneName, "err", err)
 		snap, err = buildSigningKeysSnapshot(kdb, zd.ZoneName)
 	}
 	if err != nil {
-		zd.signingKeys.Store(&signingKeysSnapshot{built: false, Active: &DnssecKeys{}})
+		if zd.signingKeysGen.Load() == gen {
+			zd.signingKeys.Store(&signingKeysSnapshot{built: false, Active: &DnssecKeys{}})
+		}
 		lgSigner.Error("republishSigningKeys: failed after retry; marked unbuilt",
 			"zone", zd.ZoneName, "err", err)
 		return err
 	}
-	zd.signingKeys.Store(snap)
+	if zd.signingKeysGen.Load() == gen {
+		zd.signingKeys.Store(snap)
+	}
 	return nil
 }
 
@@ -183,6 +192,11 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 			dk.ZSKs = append(dk.ZSKs, pkc)
 			logmsg += fmt.Sprintf("%d (ZSK) ", keyid)
 		}
+	}
+
+	if err := rows.Err(); err != nil {
+		lgSigner.Error("iterate DNSSEC keys failed", "zone", zonename, "state", state, "err", err)
+		return nil, fmt.Errorf("iterate DNSSEC keys for zone %s: %w", zonename, err)
 	}
 
 	if !keysfound {

@@ -187,7 +187,11 @@ type ZoneData struct {
 	// Lock-free reads via SigningKeys() / ActiveDnssecKeys(); writers republish
 	// post-commit via republishSigningKeys. Separate from the zone-data snapshot.
 	signingKeys atomic.Pointer[signingKeysSnapshot]
-	workingSet  map[string]*OwnerData
+	// signingKeysGen is bumped at the start of each republishSigningKeys call.
+	// A build may Store only if it still owns the latest generation, so an
+	// older overlapping republish cannot overwrite a newer snapshot.
+	signingKeysGen atomic.Uint64
+	workingSet     map[string]*OwnerData
 	// wsSignalSynth stages the synthesized-transport-signal fallback map for the
 	// next publish (see zoneSnapshot.signalSynth). Seeded from the published
 	// snapshot in ensureWorkingSet so unrelated publishes preserve it.

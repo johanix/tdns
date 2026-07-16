@@ -299,7 +299,7 @@ SELECT zonename, state, keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WH
 	return &resp, nil
 }
 
-func (kdb *KeyDB) DnssecKeyMgmt(ctx context.Context, tx *Tx, kp KeystorePost) (*KeystoreResponse, error) {
+func (kdb *KeyDB) DnssecKeyMgmt(ctx context.Context, tx *Tx, kp KeystorePost) (out *KeystoreResponse, err error) {
 	// dump.P(kp)
 
 	const (
@@ -313,7 +313,6 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 	)
 
 	var localtx = false
-	var err error
 	var txSuccess bool
 	var needsRepublish bool // R2: one post-commit republish for the zone
 
@@ -327,8 +326,9 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 	defer func() {
 		if localtx {
 			if txSuccess {
-				if err := tx.Commit(); err != nil {
-					lgSigner.Error("DnssecKeyMgmt commit failed", "err", err)
+				if cerr := tx.Commit(); cerr != nil {
+					lgSigner.Error("DnssecKeyMgmt commit failed", "err", cerr)
+					err = cerr
 					return
 				}
 				if needsRepublish {
