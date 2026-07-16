@@ -358,15 +358,19 @@ func zoneOptionsFromStrings(strs []string) map[ZoneOption]bool {
 	return opts
 }
 
-// setZonePolicy applies a DNSSEC policy to a zone at runtime: it validates the
-// named policy, persists a per-zone override (so the change survives restart
-// without rewriting the operator's YAML), rebinds the zone to the new policy,
-// and re-signs. The re-sign is ADDITIVE (SignZone, not ResignZone): the
-// algorithm reconcile in EnsureActiveDnssecKeys retires any wrong-algorithm
-// active key and generates one of the new policy's algorithm, while the
-// retired key's existing RRSIGs stay in place. The zone is therefore briefly
-// double-signed and stays validatable; the KeyStateWorker removes the retired
-// keys and strips their RRSIGs after propagation_delay.
+// setZonePolicy binds a zone to a named (config-defined) DNSSEC policy at
+// runtime, persisting it as a per-zone override (so the change survives restart
+// without rewriting the operator's YAML) and re-signing under it. It is the
+// everyday "rebind this zone's policy" command; its intended use is switching to
+// a differently-named but SAME-algorithm policy (a change of sig-validity, TTLs
+// or key lifetimes).
+//
+// An abrupt ALGORITHM change is not applied here: the reconcile backstop in
+// SignZone refuses a KSK algorithm change (always) and a ZSK algorithm change in
+// strict mode, and the transactional core then reverts, persisting nothing. So
+// set-policy either applies a same-algorithm change immediately or refuses; it
+// never performs the legacy synchronous key-swap. (Route a gradual ZSK algorithm
+// roll via change-policy; force an abrupt switch via policy-reset.)
 func setZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName string) (string, error) {
 	policyName = strings.TrimSpace(policyName)
 	if policyName == "" {
@@ -436,8 +440,8 @@ func setZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName str
 }
 
 // changeZonePolicy binds a zone toward a new DNSSEC policy for a gradual,
-// relaxed-mode ZSK ALGORITHM rollover. Unlike set-policy (which retires the
-// old-alg key synchronously — the unsafe §2 swap for an algorithm change),
+// relaxed-mode ZSK ALGORITHM rollover. Unlike set-policy (which refuses an
+// abrupt algorithm change: the reconcile backstop rejects the synchronous swap),
 // change-policy only sets the algorithm of FUTURE-generated keys: it writes the
 // ZonePolicyOverride target + rebinds zd.DnssecPolicy, then the existing FIFO
 // ZSK pipeline drains in order. `auto-rollover asap -z <zone> --zsk` is the

@@ -381,7 +381,7 @@ func zoneActiveKeyRoleChanges(kdb *KeyDB, zone string, pol *DnssecPolicy, curren
 
 // policyResetDSWarning is the chain-of-trust break notice, emitted only when the
 // KSK algorithm actually changed (the parent DS no longer matches the new KSK).
-const policyResetDSWarning = "WARNING: this was an ABRUPT switch that BREAKS the chain of trust — the parent DS no longer matches the new KSK.\n" +
+const policyResetDSWarning = "WARNING: this was an ABRUPT switch that BREAKS the chain of trust - the parent DS no longer matches the new KSK.\n" +
 	"NOTE: validators will go BOGUS until the new DS is published at the parent (via the auto-rollover engine or a manual DS update)."
 
 // policyResetReport builds the operator-facing message for a completed
@@ -393,7 +393,7 @@ func policyResetReport(zone, configName, mode string, kskChanged, zskChanged boo
 	var b strings.Builder
 	switch {
 	case !kskChanged && !zskChanged:
-		fmt.Fprintf(&b, "Zone %s: DNSSEC policy reset to config policy %q; active keys already matched — no key roll. Re-signed (%d RRSIGs) and recorded applied=config.\n", zone, configName, newRRSIGs)
+		fmt.Fprintf(&b, "Zone %s: DNSSEC policy reset to config policy %q; active keys already matched - no key roll. Re-signed (%d RRSIGs) and recorded applied=config.\n", zone, configName, newRRSIGs)
 		b.WriteString("KSK and parent DS unchanged.")
 	case mode == DnssecPolicyModeCSK:
 		// CSK: a single key does both roles, so a change is a CSK replacement
@@ -402,7 +402,7 @@ func policyResetReport(zone, configName, mode string, kskChanged, zskChanged boo
 		b.WriteString(policyResetDSWarning)
 	case !kskChanged && zskChanged:
 		fmt.Fprintf(&b, "Zone %s: DNSSEC policy reset to config policy %q; ZSK algorithm rolled (dropped and regenerated the ZSK), KSK kept. Re-signed under the new ZSK (%d RRSIGs).\n", zone, configName, newRRSIGs)
-		b.WriteString("KSK and parent DS unchanged — no DS update needed.")
+		b.WriteString("KSK and parent DS unchanged - no DS update needed.")
 	case kskChanged && !zskChanged:
 		fmt.Fprintf(&b, "Zone %s: DNSSEC policy reset to config policy %q; KSK algorithm rolled (dropped and regenerated the KSK), ZSK kept. Re-signed (%d RRSIGs).\n", zone, configName, newRRSIGs)
 		b.WriteString(policyResetDSWarning)
@@ -429,10 +429,10 @@ const policyResetDryRunDSBreak = "  * !! BREAK the chain of trust: the parent DS
 // proceed. mode is the config policy's Mode ("ksk-zsk" | "csk").
 func policyResetDryRunReport(zone, configName, mode string, kskChanged, zskChanged bool) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "DRY RUN — policy-reset of zone %s to config policy %q would:\n", zone, configName)
+	fmt.Fprintf(&b, "DRY RUN - policy-reset of zone %s to config policy %q would:\n", zone, configName)
 	switch {
 	case !kskChanged && !zskChanged:
-		b.WriteString("  * roll NO keys — the active keys already match config; it would only re-sign and record applied=config.\n")
+		b.WriteString("  * roll NO keys - the active keys already match config; it would only re-sign and record applied=config.\n")
 		b.WriteString("  * leave the KSK and parent DS UNCHANGED.\n")
 		b.WriteString("This is safe (a no-op key-wise). " + policyResetDryRunConfirm)
 	case mode == DnssecPolicyModeCSK:
@@ -440,7 +440,7 @@ func policyResetDryRunReport(zone, configName, mode string, kskChanged, zskChang
 		b.WriteString(policyResetDryRunDSBreak)
 	case !kskChanged && zskChanged:
 		b.WriteString("  * roll the ZSK algorithm (drop and regenerate the ZSK), keeping the KSK.\n")
-		b.WriteString("  * leave the KSK and parent DS UNCHANGED — no DS update needed.\n")
+		b.WriteString("  * leave the KSK and parent DS UNCHANGED - no DS update needed.\n")
 		b.WriteString(policyResetDryRunConfirm)
 	case kskChanged && !zskChanged:
 		b.WriteString("  * roll the KSK algorithm (drop and regenerate the KSK), keeping the ZSK.\n")
