@@ -152,6 +152,19 @@ never fired) and is now unused by policy-reset, which uses
 general keystore-cache-invalidation hardening (all subcommands / external txs)
 remains a separate follow-up (G3).
 
+### D8 — policy-reset is a dry-run without --confirm
+**Decision:** running `zone dnssec policy-reset` WITHOUT `--confirm` is a DRY RUN
+(commit 39bf595): the server runs the guards + computes the per-role decision
+read-only and returns a preview of what the reset WOULD do (which roles would
+roll; whether the parent DS would break) — no key drop, no re-sign, no DB write.
+`--confirm` still gates the actual mutation; the CLI no longer refuses
+client-side, it sends the request so the server can produce the preview.
+**Motivation:** the old behaviour refused without `--confirm` with a generic
+danger lecture, so an operator had to add `--confirm` and re-run *just to discover
+the reset was a no-op*. The per-role decision is already cheap and read-only, so
+previewing it costs nothing and turns the safety gate into useful information
+(esp. "this would be a no-op" and "ZSK-only → DS intact").
+
 ---
 
 ## Deferred to PR-2 (gates)
