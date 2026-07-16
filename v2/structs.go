@@ -104,6 +104,15 @@ type ZoneRefreshAnalysis struct {
 
 type ZoneData struct {
 	mu sync.Mutex
+	// policyApplyMu serializes a full DNSSEC-policy apply (rebind → re-sign →
+	// persist → revert) for this zone. It is the OUTERMOST lock of that
+	// operation and is distinct from mu: SignZone takes mu internally, so the
+	// apply cannot hold mu across the sign; without a separate lock two
+	// concurrent applies could interleave and a failed revert could clobber a
+	// newer binding. Acquired by applyZonePolicyTransactional; policy-reset
+	// holds it across its clear+re-sign via the *Locked variant. Never held
+	// while mu is held, so there is no lock-order inversion with SignZone.
+	policyApplyMu sync.Mutex
 	// generation is bumped on every removal/replacement of this zone
 	// (RemoveDynamicZone, ModifyDynamicZone, config-reload Zones.Remove). A
 	// refresh goroutine snapshots it at dispatch; the pre-persist guard (B5b)

@@ -179,12 +179,24 @@ UNIQUE (keyname)
 		updated_at        TEXT
 	)`,
 
-	// ZonePolicyOverride records a per-zone DNSSEC policy set dynamically at
-	// runtime (via `zone set-policy`), overriding the policy named in the
-	// zone's YAML config. Sparse — only zones whose policy was changed live
-	// appear here. The effective policy for a zone is the override if present,
-	// else the config base. This lets a live policy change survive restart
-	// without the server rewriting the operator's YAML.
+	// ZonePolicyOverride records per-zone DNSSEC policy state.
+	//
+	// `policy` / `set_at` are the sparse CLI OVERRIDE (INTENT): a policy set
+	// dynamically via `zone dnssec policy-set`, overriding the policy named in
+	// the zone's YAML config. Only zones whose policy was changed live have a
+	// non-empty `policy`. The effective policy for a zone is the override if
+	// present, else the config base — this lets a live policy change survive
+	// restart without the server rewriting the operator's YAML.
+	//
+	// `applied_policy` / `applied_source` / `applied_at` are the LAST-APPLIED
+	// record (P0-2 / Plan B): the policy the zone was last successfully SIGNED
+	// under, so intent vs reality is always comparable on reload and restart.
+	// applied_source is 'config' | 'command'. These three columns are added by
+	// dbMigrateSchema (ALTER TABLE), not this CREATE, so an existing database
+	// gains them on upgrade; they are nullable and filled by the CLI-row data
+	// migration (dbMigrateData) and the refresh-engine runtime backfill. A row
+	// may therefore have applied_* set with an empty `policy` (config-only
+	// zone, no CLI override) or vice versa — the two concerns are independent.
 	"ZonePolicyOverride": `CREATE TABLE IF NOT EXISTS 'ZonePolicyOverride' (
 		zone    TEXT NOT NULL PRIMARY KEY,
 		policy  TEXT NOT NULL,
