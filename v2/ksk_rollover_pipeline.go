@@ -38,8 +38,8 @@ func GenerateKskRolloverCreated(kdb *KeyDB, zone, creator string, alg uint8, met
 		return 0, 0, fmt.Errorf("GenerateKskRolloverCreated: rollover state: %w", err)
 	}
 
-	delete(kdb.KeystoreDnskeyCache, zone+"+"+DnskeyStateCreated)
-
+	// Created-state key does not affect the active signing-keys snapshot; the
+	// caller republishes only if a later transition changes the active set (R1).
 	return pkc.KeyId, ri, nil
 }
 

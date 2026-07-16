@@ -266,6 +266,9 @@ INSERT OR REPLACE INTO Sig0KeyStore (zonename, state, keyid, algorithm, creator,
 INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags, creator, privatekey, keyrr) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
 	)
 
+	// When tx != nil (external), the caller must republishSigningKeysForZone
+	// after their Commit if the active set may have changed (R1). When tx == nil
+	// we own the commit and republish for DNSKEY inserts.
 	localtx := false
 	if tx == nil {
 		tx, err = kdb.Begin("GenerateKeypair")
@@ -274,13 +277,10 @@ INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags,
 		}
 		localtx = true
 	}
+	committed := false
 	defer func() {
-		if localtx {
-			if err != nil {
-				tx.Rollback()
-			} else {
-				tx.Commit()
-			}
+		if localtx && !committed {
+			tx.Rollback()
 		}
 	}()
 
@@ -313,9 +313,20 @@ INSERT OR REPLACE INTO DnssecKeyStore (zonename, state, keyid, algorithm, flags,
 		return nil, "", err
 	}
 
-	// log.Printf("Success storing generated SIG(0) key in keystore.")
+	msg := fmt.Sprintf("Generated new %s %s with keyid %d (initial state: %s)", owner, dns.TypeToString[rrtype], pkc.KeyId, state)
+	if localtx {
+		if err = tx.Commit(); err != nil {
+			return nil, "", err
+		}
+		committed = true
+		if rrtype == dns.TypeDNSKEY {
+			if rerr := republishSigningKeysForZone(kdb, owner); rerr != nil {
+				return pkc, msg, fmt.Errorf("GenerateKeypair: republish signing keys: %w", rerr)
+			}
+		}
+	}
 
-	return pkc, fmt.Sprintf("Generated new %s %s with keyid %d (initial state: %s)", owner, dns.TypeToString[rrtype], pkc.KeyId, state), nil
+	return pkc, msg, nil
 }
 
 func LoadSig0SigningKey(keyfile string) (*PrivateKeyCache, error) {

@@ -264,16 +264,15 @@ func NeedsResigning(rrsig *dns.RRSIG, servedTTL uint32) bool {
 	return false
 }
 
-// refreshActiveDnssecKeys invalidates the cache and re-fetches active DNSSEC keys.
-// context is used in error messages to indicate when/why the refresh occurred.
+// refreshActiveDnssecKeys rebuilds the per-zone signing-keys snapshot from the
+// committed keystore and returns the active set. context is used in error
+// messages to indicate when/why the refresh occurred.
 func (zd *ZoneData) refreshActiveDnssecKeys(kdb *KeyDB, context string) (*DnssecKeys, error) {
-	delete(kdb.KeystoreDnskeyCache, zd.ZoneName+"+"+DnskeyStateActive)
-	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
-	if err != nil {
-		lgSigner.Error("failed to get DNSSEC active keys", "zone", zd.ZoneName, "context", context, "err", err)
+	if err := zd.republishSigningKeys(kdb); err != nil {
+		lgSigner.Error("failed to republish DNSSEC active keys", "zone", zd.ZoneName, "context", context, "err", err)
 		return nil, err
 	}
-	return dak, nil
+	return zd.ActiveDnssecKeys(), nil
 }
 
 // reconcileActiveKeyAlgorithms reconciles active keys against the zone's policy
@@ -503,8 +502,6 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 
 	// Generate KSK if still missing
 	if len(dak.KSKs) == 0 {
-		// Invalidate cache before generating to ensure fresh data
-		delete(kdb.KeystoreDnskeyCache, zd.ZoneName+"+"+DnskeyStateActive)
 		pkc, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.KSKAlgorithm, "KSK", nil)
 		if err != nil {
 			return nil, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate KSK for zone %s: %v", zd.ZoneName, err)
@@ -533,8 +530,6 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 
 	// Generate ZSK only if we have zero real ZSKs
 	if realZSKCount == 0 {
-		// Invalidate cache before generating to ensure fresh data
-		delete(kdb.KeystoreDnskeyCache, zd.ZoneName+"+"+DnskeyStateActive)
 		_, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", nil)
 		if err != nil {
 			return nil, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate ZSK for zone %s: %v", zd.ZoneName, err)

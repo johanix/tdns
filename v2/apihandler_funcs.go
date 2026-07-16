@@ -37,6 +37,9 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 			confMu.Lock()
 		}
 
+		var dnssecRepublishZone string
+		var dnssecResignZone string
+
 		tx, err := kdb.Begin("APIkeystore")
 
 		defer func() {
@@ -50,20 +53,34 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 							resp.Error = true
 							resp.ErrorMsg = commitErr.Error()
 						}
-					} else if tsigCacheDelta != nil {
-						if !tsigMgmt {
-							confMu.Lock()
-						}
-						if applyErr := ApplyTsigCacheDelta(conf.Internal.TsigKeyStore, kdb, tsigCacheDelta); applyErr != nil {
-							lgApi.Error("ApplyTsigCacheDelta failed", "err", applyErr)
-							if resp == nil {
-								resp = &KeystoreResponse{Time: time.Now()}
+					} else {
+						// R1: DnssecKeyMgmt always receives this external tx, so its
+						// localtx republish path never runs. Republish here after
+						// Commit, before triggerResign, so SignZone sees the new set.
+						if dnssecRepublishZone != "" {
+							if rerr := republishSigningKeysForZone(kdb, dnssecRepublishZone); rerr != nil {
+								lgApi.Error("APIkeystore: post-commit signing-keys republish failed",
+									"zone", dnssecRepublishZone, "err", rerr)
 							}
-							resp.Error = true
-							resp.ErrorMsg = fmt.Sprintf("TSIG keystore committed, but runtime cache refresh failed: %v", applyErr)
 						}
-						if !tsigMgmt {
-							confMu.Unlock()
+						if dnssecResignZone != "" {
+							triggerResign(conf, dnssecResignZone)
+						}
+						if tsigCacheDelta != nil {
+							if !tsigMgmt {
+								confMu.Lock()
+							}
+							if applyErr := ApplyTsigCacheDelta(conf.Internal.TsigKeyStore, kdb, tsigCacheDelta); applyErr != nil {
+								lgApi.Error("ApplyTsigCacheDelta failed", "err", applyErr)
+								if resp == nil {
+									resp = &KeystoreResponse{Time: time.Now()}
+								}
+								resp.Error = true
+								resp.ErrorMsg = fmt.Sprintf("TSIG keystore committed, but runtime cache refresh failed: %v", applyErr)
+							}
+							if !tsigMgmt {
+								confMu.Unlock()
+							}
 						}
 					}
 				}
@@ -103,10 +120,13 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 					Error:    true,
 					ErrorMsg: err.Error(),
 				}
+			} else if resp != nil && resp.NeedsSigningKeysRepublish {
+				dnssecRepublishZone = kp.Zone
 			}
-			// Trigger re-sign and inventory push after state-changing operations
+			// Re-sign after state-changing ops — deferred until post-commit
+			// (alongside snapshot republish) so the resigner does not race the tx.
 			if err == nil && (kp.SubCommand == "rollover" || kp.SubCommand == "delete" || kp.SubCommand == "setstate" || kp.SubCommand == "clear" || kp.SubCommand == "policy-cleanup") {
-				triggerResign(conf, kp.Zone)
+				dnssecResignZone = kp.Zone
 			}
 
 		case "tsig-mgmt":
