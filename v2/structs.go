@@ -182,8 +182,12 @@ type ZoneData struct {
 	ParentDSTTLObserved uint32
 
 	// Zone snapshot publish path (Project B).
-	snapshot   atomic.Pointer[zoneSnapshot]
-	workingSet map[string]*OwnerData
+	snapshot atomic.Pointer[zoneSnapshot]
+	// signingKeys is the per-zone copy-on-write active DNSSEC key set (G3).
+	// Lock-free reads via SigningKeys() / ActiveDnssecKeys(); writers republish
+	// post-commit via republishSigningKeys. Separate from the zone-data snapshot.
+	signingKeys atomic.Pointer[signingKeysSnapshot]
+	workingSet  map[string]*OwnerData
 	// wsSignalSynth stages the synthesized-transport-signal fallback map for the
 	// next publish (see zoneSnapshot.signalSynth). Seeded from the published
 	// snapshot in ensureWorkingSet so unrelated publishes preserve it.
@@ -816,8 +820,7 @@ type KeyDB struct {
 	mu     sync.Mutex
 	// Sig0Cache   map[string]*Sig0KeyCache
 	KeystoreSig0Cache   map[string]*Sig0ActiveKeys
-	TruststoreSig0Cache *Sig0StoreT            // was *Sig0StoreT
-	KeystoreDnskeyCache map[string]*DnssecKeys // map[zonename]*DnssecActiveKeys
+	TruststoreSig0Cache *Sig0StoreT // was *Sig0StoreT
 	Ctx                 string
 	UpdateQ             chan UpdateRequest
 	KeyBootstrapperQ    chan KeyBootstrapperRequest
