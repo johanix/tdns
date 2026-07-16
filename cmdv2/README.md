@@ -1,51 +1,37 @@
 # tdns cmdv2 — building
 
 The five applications under this directory share `utils/Makefile.common`.
+Algorithm selection is per-app via `algs.list` + `tdns-genalgs` (not make
+flags). See `guide/pq-dnssec.md`.
 
-## Default build (no liboqs needed)
+## Default build
 
 ```
 cd cmdv2 && make
 ```
 
-Produces `tdns-auth`, `tdns-agent`, `tdns-imr`, `tdns-cli`, and `dog`.
-Pure-Go post-quantum algorithms (ML-DSA-44, SLH-DSA-128s) are wired in;
-the liboqs-backed ones (Falcon-512, MAYO-1, SNOVA-24_5_4) are present
-as metadata only — recognized by name but not usable for sign/verify.
+Builds `tdns-genalgs` first, then `tdns-auth`, `tdns-agent`, `tdns-imr`,
+`tdns-cli`, and `dog`. Each app links the algorithms named in its
+`algs.list`; C-backed libraries are detected at generate time and recorded
+in that app's `algs-libs.mk`. The shared `algs-env.mk` caches
+`ALGREPO` (path to the `dnssec-algorithms` checkout).
 
-## Full PQ build (`WITH_LIBOQS=1`)
-
-To enable Falcon-512, MAYO-1, and SNOVA-24_5_4, the build host needs
-liboqs installed and reachable via pkg-config.
+**First build** on a host (no `algs-env.mk` yet):
 
 ```
-# one-time per shell session — auto-detects liboqs install
-. ../../dnssec-algorithms/liboqs/liboqs-env.sh
-
-cd cmdv2 && make WITH_LIBOQS=1
+cd cmdv2
+make -C genalgs
+cd auth
+../genalgs/tdns-genalgs --algrepo <path-to-dnssec-algorithms> --list algs.list --out .
+cd .. && make
 ```
 
-The env script probes well-known prefixes (`/opt/local` for MacPorts,
-`/opt/homebrew` for Homebrew on Apple Silicon, `/usr/pkg` for NetBSD
-pkgsrc, `/usr/local`, `/usr` for Linux distro packages). Override with
-`LIBOQS_PREFIX=/your/path` or set `LIBOQS_INCLUDE_DIR` +
-`LIBOQS_LIB_DIR` explicitly.
+Thereafter a plain `make` regenerates as needed when an `algs.list` changes.
 
-If `make WITH_LIBOQS=1` is run without the env sourced, the build
-fails fast with a pointer back to the env script. No silent fallback.
+## Adding / enabling an algorithm
 
-See `dnssec-algorithms/README.md` for per-platform liboqs install
-notes (MacPorts, Homebrew, pkgsrc; Linux template still pending).
-
-## Adding a liboqs algorithm to a binary
-
-Each server binary has two files declaring its PQ algorithm bindings:
-
-- `pq_algorithms_liboqs.go` — built only with `-tags liboqs`. Real
-  registrations via `algs.Register`.
-- `pq_algorithms_noliboqs.go` — built by default. Metadata-only via
-  `algs.RegisterMetadata`.
-
-The split keeps the default-build dependency graph free of CGO/liboqs.
-`dog` and `tdns-cli` never need liboqs (they don't sign/verify with
-the relevant algorithms) — they have no `_liboqs.go` file at all.
+Edit the app's `algs.list` (one NAME per line). If the algorithm needs a
+C library (liboqs / sqisign / qruov), install it first — see
+`dnssec-algorithms/BUILDING.md` and the per-library `*-env.sh` scripts.
+`make` re-runs genalgs; if a required library is missing, generation fails
+loudly (no silent skip).

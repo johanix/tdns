@@ -3,4 +3,4 @@
 # libraries, resolved at generate time. algs.list (the input) IS committed.
 /metadata_algs.go
 /registered_algs.go
-/algs-env.mk
+/algs-libs.mk

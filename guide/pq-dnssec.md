@@ -254,32 +254,38 @@ authoritative registry in a local `dnssec-algorithms` checkout, and this
   algorithm, wiring its real implementation into the dispatch tables. No
   build tags: the generator verified each C library was installed before
   emitting these calls.
-- **`algs-env.mk`** — a Makefile fragment recording the C-library build
-  environment (`PKG_CONFIG_PATH`) and the `dnssec-algorithms` checkout
-  location (`ALGREPO`).
+- **`algs-libs.mk`** (per app) — Makefile fragment with the C-library build
+  environment (`PKG_CONFIG_PATH`, etc.) for that app's `algs.list` selection.
+- **`cmdv2/algs-env.mk`** (shared) — records only the `dnssec-algorithms`
+  checkout location (`ALGREPO`). One genalgs run for any app populates it,
+  so every other app's `make` can re-run the generator without re-supplying
+  `--algrepo`.
 
-These three are **build artifacts** — gitignored, regenerated per build
-host so the linked algorithm set always matches that host's installed
-libraries. The committed input is `algs.list`.
+These are **build artifacts** — gitignored, regenerated per build host so
+the linked algorithm set always matches that host's installed libraries.
+The committed input is `algs.list`.
 
 **Adding a new algorithm** to an app is therefore one line in that app's
 `algs.list` (plus, if the algorithm is new to the project, one row in the
 registry). No codepoints are edited by hand, no cross-app synchronization
 is needed, and there is no separate CLI name list to keep in step.
 
-**Running the generator.** `make` runs `genalgs` automatically when
-`registered_algs.go` is missing or older than `algs.list`, using the
-`ALGREPO` recorded in `algs-env.mk` from a previous run. The **first**
-time (no `algs-env.mk` yet), run it once by hand to record the path:
+**Running the generator.** `make` (from `cmdv2/` or an app dir) builds
+`genalgs/tdns-genalgs` first, then runs it when `registered_algs.go` is
+missing or older than `algs.list`, using `ALGREPO` from the shared
+`../algs-env.mk`. The **first** time (no shared `algs-env.mk` yet), run
+it once by hand to record the path:
 
 ```
-cd cmdv2/auth
+cd cmdv2
+make -C genalgs
+cd auth
 ../genalgs/tdns-genalgs --algrepo <path-to-dnssec-algorithms> --list algs.list --out .
 make
 ```
 
-Thereafter a plain `make` regenerates as needed. Three cases determine
-whether the generator runs at all:
+Thereafter a plain `make` in any app dir regenerates as needed. Three cases
+determine whether the generator runs at all:
 
 | `algs.list` | genalgs runs? | Needs dnssec-algorithms? |
 |-------------|---------------|--------------------------|
