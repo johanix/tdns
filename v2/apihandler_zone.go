@@ -574,16 +574,28 @@ func changeZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, policyName 
 // parent DS no longer matches the new KSK and validators go BOGUS until the
 // operator re-publishes the DS. Because it pre-aligns the keys before re-signing,
 // it works even in strict completeness mode (reconcile has nothing to refuse).
-// The only gates are --confirm and naming a single zone.
-func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool) (string, error) {
-	if !confirm {
-		return "", fmt.Errorf("policy-reset: refusing without --confirm — this drops and regenerates zone %s's DNSSEC keys for any role whose algorithm changed, and breaks the chain of trust (until the parent DS is re-published) if the KSK algorithm changed", zd.ZoneName)
-	}
+//
+// Without --confirm it is a DRY RUN: it reports what it WOULD do (which roles
+// would roll, and whether the parent DS would break) and changes nothing.
+// --confirm performs the reset. The only gates are --confirm and a single zone.
 
+// boundPolicyMode returns the zone's currently-bound DNSSEC policy Mode
+// ("ksk-zsk" | "csk"), or "" when unbound. Read under zd.mu.
+func boundPolicyMode(zd *ZoneData) string {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	if zd.DnssecPolicy == nil {
+		return ""
+	}
+	return zd.DnssecPolicy.Mode
+}
+
+func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool) (string, error) {
 	// Resolve the zone's CONFIG-base policy (its YAML dnssec_policy) — what the
 	// zone falls back to once the override + applied records are cleared. Read
 	// the name from Conf.Zones (as the list-zones handler does) and the struct
-	// from the ConfLive() snapshot (lock-free).
+	// from the ConfLive() snapshot (lock-free). These guards run for the dry-run
+	// too, so a preview also surfaces a missing/broken config policy.
 	// Conf.Zones is replaced wholesale by a config reload; guard the scan with
 	// confMu (read lock), matching the list-zones handler above.
 	var configName string
@@ -609,6 +621,19 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 		return "", fmt.Errorf("policy-reset: zone %s is not signed (neither online-signing nor inline-signing)", zd.ZoneName)
 	}
 
+	// DRY RUN (no --confirm): compute the per-role decision READ-ONLY and report
+	// what WOULD happen — no key drop, no re-sign, no DB write. This is the
+	// preview an operator gets before committing; the destructive run needs
+	// --confirm. currentMode is the zone's currently-bound policy Mode, so a
+	// genuine split↔CSK mode change is detected from that reliable field.
+	if !confirm {
+		kskChanged, zskChanged, err := zoneActiveKeyRoleChanges(kdb, zd.ZoneName, &pol, boundPolicyMode(zd))
+		if err != nil {
+			return "", fmt.Errorf("policy-reset: inspecting active keys for zone %s: %w", zd.ZoneName, err)
+		}
+		return policyResetDryRunReport(zd.ZoneName, configName, pol.Mode, kskChanged, zskChanged), nil
+	}
+
 	// Serialize the WHOLE reset (per-role decision → drop/regen the changed
 	// role(s) → re-sign → clear override) against concurrent policy applies on
 	// this zone. We hold policyApplyMu ourselves and call the *Locked apply
@@ -616,21 +641,11 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 	zd.policyApplyMu.Lock()
 	defer zd.policyApplyMu.Unlock()
 
-	// Decide, per role, which key(s) must be dropped+regenerated: keep a role
-	// whose active-key algorithm already matches config, roll only the one that
-	// changed. Computed under policyApplyMu so the decision and the key mutation
-	// are atomic w.r.t. other applies. kskChanged ⇒ the parent DS breaks.
-	// currentMode is the zone's currently-bound policy Mode, read BEFORE the
-	// rebind: a genuine split↔CSK mode change is detected from that reliable field,
-	// not inferred from key shape (which would misread a split zone missing its ZSK
-	// as CSK and wrongly drop the KSK).
-	currentMode := ""
-	zd.mu.Lock()
-	if zd.DnssecPolicy != nil {
-		currentMode = zd.DnssecPolicy.Mode
-	}
-	zd.mu.Unlock()
-	kskChanged, zskChanged, err := zoneActiveKeyRoleChanges(kdb, zd.ZoneName, &pol, currentMode)
+	// Recompute the per-role decision UNDER policyApplyMu so the decision and the
+	// key mutation are atomic w.r.t. other applies (the dry-run's read above was
+	// advisory). currentMode is read (before the rebind) from the reliable Mode
+	// field, not inferred from key shape. kskChanged ⇒ the parent DS breaks.
+	kskChanged, zskChanged, err := zoneActiveKeyRoleChanges(kdb, zd.ZoneName, &pol, boundPolicyMode(zd))
 	if err != nil {
 		return "", fmt.Errorf("policy-reset: inspecting active keys for zone %s: %w", zd.ZoneName, err)
 	}

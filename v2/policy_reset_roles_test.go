@@ -167,6 +167,41 @@ func TestPolicyResetReport(t *testing.T) {
 	}
 }
 
+// TestPolicyResetDryRunReport asserts the no-confirm preview labels itself a DRY
+// RUN, always prompts for --confirm, and warns about a DS break only when the
+// KSK (or CSK) would roll.
+func TestPolicyResetDryRunReport(t *testing.T) {
+	cases := []struct {
+		name        string
+		mode        string
+		ksk, zsk    bool
+		wantDSBreak bool
+		phrase      string
+	}{
+		{"split no-op", DnssecPolicyModeKSKZSK, false, false, false, "roll NO keys"},
+		{"split zsk-only", DnssecPolicyModeKSKZSK, false, true, false, "keeping the KSK"},
+		{"split ksk-only", DnssecPolicyModeKSKZSK, true, false, true, "roll the KSK"},
+		{"split both", DnssecPolicyModeKSKZSK, true, true, true, "roll BOTH"},
+		{"csk replacement", DnssecPolicyModeCSK, true, false, true, "regenerate the CSK"},
+	}
+	for _, c := range cases {
+		msg := policyResetDryRunReport("z.example.", "pol", c.mode, c.ksk, c.zsk)
+		if !strings.Contains(msg, "DRY RUN") {
+			t.Fatalf("%s: missing DRY RUN header\nmsg: %s", c.name, msg)
+		}
+		if !strings.Contains(msg, "--confirm") {
+			t.Fatalf("%s: missing --confirm prompt\nmsg: %s", c.name, msg)
+		}
+		dsBreak := strings.Contains(msg, "BREAK the chain of trust")
+		if dsBreak != c.wantDSBreak {
+			t.Fatalf("%s: DS-break present=%v, want %v\nmsg: %s", c.name, dsBreak, c.wantDSBreak, msg)
+		}
+		if !strings.Contains(msg, c.phrase) {
+			t.Fatalf("%s: missing %q\nmsg: %s", c.name, c.phrase, msg)
+		}
+	}
+}
+
 // TestForceZoneKeysToPolicyRoles verifies the surgical drop/regen in the
 // keystore: the kept role's keytag is preserved, the dropped role gets a fresh
 // key of the config algorithm. (The RRSIG strip is a separate step, tested in

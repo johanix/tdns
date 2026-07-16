@@ -412,3 +412,42 @@ func policyResetReport(zone, configName, mode string, kskChanged, zskChanged boo
 	}
 	return b.String()
 }
+
+// policyResetDryRunConfirm is the suffix for a dry-run preview whose apply is
+// destructive (a key roll): tells the operator how to actually run it.
+const policyResetDryRunConfirm = "Re-run with --confirm to apply."
+
+// policyResetDryRunDSBreak is the DS-break line for a dry-run preview whose
+// apply would roll the KSK (or CSK), plus the confirm prompt.
+const policyResetDryRunDSBreak = "  • ⚠ BREAK the chain of trust: the parent DS would no longer match the new KSK, and validators would go BOGUS until you re-publish the DS.\n" +
+	policyResetDryRunConfirm
+
+// policyResetDryRunReport describes what a policy-reset WOULD do, WITHOUT making
+// any change — the preview shown when --confirm is absent. It mirrors
+// policyResetReport's per-role classification in the conditional tense, states
+// whether the parent DS would break, and tells the operator to add --confirm to
+// proceed. mode is the config policy's Mode ("ksk-zsk" | "csk").
+func policyResetDryRunReport(zone, configName, mode string, kskChanged, zskChanged bool) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "DRY RUN — policy-reset of zone %s to config policy %q would:\n", zone, configName)
+	switch {
+	case !kskChanged && !zskChanged:
+		b.WriteString("  • roll NO keys — the active keys already match config; it would only re-sign and record applied=config.\n")
+		b.WriteString("  • leave the KSK and parent DS UNCHANGED.\n")
+		b.WriteString("This is safe (a no-op key-wise). " + policyResetDryRunConfirm)
+	case mode == DnssecPolicyModeCSK:
+		b.WriteString("  • drop and regenerate the CSK (the single combined-signing key).\n")
+		b.WriteString(policyResetDryRunDSBreak)
+	case !kskChanged && zskChanged:
+		b.WriteString("  • roll the ZSK algorithm (drop and regenerate the ZSK), keeping the KSK.\n")
+		b.WriteString("  • leave the KSK and parent DS UNCHANGED — no DS update needed.\n")
+		b.WriteString(policyResetDryRunConfirm)
+	case kskChanged && !zskChanged:
+		b.WriteString("  • roll the KSK algorithm (drop and regenerate the KSK), keeping the ZSK.\n")
+		b.WriteString(policyResetDryRunDSBreak)
+	default: // both roles changed
+		b.WriteString("  • roll BOTH the KSK and ZSK algorithms (drop and regenerate both).\n")
+		b.WriteString(policyResetDryRunDSBreak)
+	}
+	return b.String()
+}

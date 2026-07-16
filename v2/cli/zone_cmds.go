@@ -122,23 +122,27 @@ throughout.`,
 	var policyResetConfirm bool
 	policyReset := &cobra.Command{
 		Use:   "policy-reset",
-		Short: "DANGER (test/lab): drop a zone's DNSSEC keys and re-sign under its config policy",
-		Long: `Force a zone back onto its config dnssec_policy by DROPPING its current DNSSEC
-keys, clearing both the runtime override and the last-applied record, and
-re-signing from scratch under the YAML config policy.
+		Short: "Reset a zone's DNSSEC keys to its config policy, per role (dry-run without --confirm)",
+		Long: `Force a zone onto its config dnssec_policy: for each key role whose algorithm no
+longer matches config, drop and regenerate that role's keys and re-sign; any
+role whose algorithm is already correct is kept. It also clears the runtime
+override and records the config policy as applied.
 
 This is a break-glass tool for test/lab zones. It exists because an abrupt
-policy switch that changes the KSK/ZSK algorithm is otherwise refused (that
-needs a key rollover that is not built). It BREAKS THE CHAIN OF TRUST: the
-parent DS will not match the freshly generated KSK until you re-publish it, so
-validators go BOGUS until the parent DS is updated. NOT for production.
-Requires --confirm and a single --zone (no wildcards, no bulk).`,
+policy switch that changes a KSK/ZSK algorithm is otherwise refused (that needs
+a key rollover that is not built). If the KSK algorithm changes it BREAKS THE
+CHAIN OF TRUST: the parent DS will not match the new KSK until you re-publish it
+(a ZSK-only change keeps the KSK and the DS). NOT for production.
+
+Run WITHOUT --confirm for a DRY RUN that previews what it would do (which roles
+would roll, whether the parent DS would break) and changes nothing; add
+--confirm to apply. A single --zone only (no wildcards, no bulk).`,
 		Run: func(cmd *cobra.Command, args []string) {
 			RunZoneResetPolicy(role, policyResetConfirm)
 		},
 	}
 	policyReset.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to reset the DNSSEC policy for")
-	policyReset.Flags().BoolVar(&policyResetConfirm, "confirm", false, "Confirm this dangerous operation (drops keys, breaks the chain of trust)")
+	policyReset.Flags().BoolVar(&policyResetConfirm, "confirm", false, "Apply the reset; without it the command is a dry-run that only previews what would happen")
 	policyReset.MarkFlagRequired("zone")
 
 	proxyKey := &cobra.Command{
@@ -386,15 +390,13 @@ func RunZoneSetPolicy(parent, policy string) {
 	}
 }
 
-// RunZoneResetPolicy drives the `zone dnssec policy-reset` escape hatch: it
-// forwards --confirm as ZonePost.Force. The server refuses without it.
+// RunZoneResetPolicy drives the `zone dnssec policy-reset` command: it forwards
+// --confirm as ZonePost.Force. Without --confirm the server returns a DRY-RUN
+// preview (what the reset would do) instead of applying it, so we always send
+// the request rather than refusing client-side.
 func RunZoneResetPolicy(parent string, confirm bool) {
 	if tdns.Globals.Zonename == "" {
 		fmt.Println("Error: zone name not specified")
-		os.Exit(1)
-	}
-	if !confirm {
-		fmt.Println("Error: policy-reset is destructive (drops the zone's DNSSEC keys and breaks the chain of trust); re-run with --confirm")
 		os.Exit(1)
 	}
 	api, err := GetApiClient(parent, true)
