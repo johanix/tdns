@@ -830,6 +830,10 @@ func candidateTransports(server *cache.AuthServer, qname string, requireEncrypte
 	var preferred []wt
 	total := 0
 	for _, t := range server.Transports {
+		// Do53 is never preferred; it is always the ultimate fallback below.
+		if t == core.TransportDo53 {
+			continue
+		}
 		if requireEncrypted && !core.IsEncryptedTransport(t) {
 			continue
 		}
@@ -885,16 +889,7 @@ func candidateTransports(server *cache.AuthServer, qname string, requireEncrypte
 	}
 
 	if !requireEncrypted {
-		hasDo53 := false
-		for _, t := range out {
-			if t == core.TransportDo53 {
-				hasDo53 = true
-				break
-			}
-		}
-		if !hasDo53 {
-			out = append(out, core.TransportDo53)
-		}
+		out = append(out, core.TransportDo53)
 	}
 	return out
 }
@@ -1935,7 +1930,9 @@ func (imr *Imr) applyTransportSignalToServer(server *cache.AuthServer, s string)
 	return applyTransportMapToServer(server, kvMap)
 }
 
-// applyTransportMapToServer installs a weight map on server (sorted by weight desc).
+// applyTransportMapToServer installs a weight map on server. Preferred
+// transports are those with weight > 1 excluding Do53 (Do53 is the ultimate
+// fallback via candidateTransports, including when absence-defaulted to 100).
 func applyTransportMapToServer(server *cache.AuthServer, kvMap map[string]uint8) bool {
 	if server == nil || len(kvMap) == 0 {
 		return false
@@ -1952,8 +1949,11 @@ func applyTransportMapToServer(server *cache.AuthServer, kvMap map[string]uint8)
 			lgDns.Debug("applyTransportMapToServer: unknown transport", "name", server.Name, "proto", k)
 			continue
 		}
-		pairs = append(pairs, pair{k: k, w: v})
 		weights[t] = v
+		if t == core.TransportDo53 || v <= 1 {
+			continue
+		}
+		pairs = append(pairs, pair{k: k, w: v})
 	}
 	sort.SliceStable(pairs, func(i, j int) bool {
 		return pairs[i].w > pairs[j].w || (pairs[i].w == pairs[j].w && pairs[i].k < pairs[j].k)
@@ -1969,12 +1969,14 @@ func applyTransportMapToServer(server *cache.AuthServer, kvMap map[string]uint8)
 		alpnOrder = append(alpnOrder, p.k)
 	}
 	server.Transports = transports
-	if len(transports) > 0 {
-		server.PrefTransport = transports[0]
-	}
 	server.Alpn = alpnOrder
 	server.TransportWeights = weights
-	return len(transports) > 0
+	if len(transports) > 0 {
+		server.PrefTransport = transports[0]
+	} else {
+		server.PrefTransport = core.TransportDo53
+	}
+	return len(weights) > 0
 }
 
 func transportOwnerForNS(nsname string) string {

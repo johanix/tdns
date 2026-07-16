@@ -636,7 +636,9 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 		}
 
 		// +OTS / +OOTS: include the zero-length OOTS EDNS option (opt-in by presence).
-		if strings.HasPrefix(strings.ToUpper(ucarg), "+OTS") || strings.HasPrefix(strings.ToUpper(ucarg), "+OOTS") {
+		ucargUpper := strings.ToUpper(ucarg)
+		if ucargUpper == "+OTS" || ucargUpper == "+OOTS" ||
+			strings.HasPrefix(ucargUpper, "+OTS=") || strings.HasPrefix(ucargUpper, "+OOTS=") {
 			if strings.Contains(ucarg, "=") {
 				parts := strings.SplitN(ucarg, "=", 2)
 				arg := strings.ToLower(parts[1])

@@ -148,7 +148,8 @@ func (zd *ZoneData) buildServerSVCB(conf *Config, nsName string, ipv4s, ipv6s []
 	if Globals.ServerSVCB == nil {
 		return nil, fmt.Errorf("buildServerSVCB: no server SVCB configured")
 	}
-	values := append([]dns.SVCBKeyValue(nil), Globals.ServerSVCB.Value...)
+	// -03 OOTS record carries only the oots SvcParam (no inherited alpn/hints/tlsa).
+	values := make([]dns.SVCBKeyValue, 0, 1)
 	if sig := conf.Service.Transport.Signal; sig != "" {
 		oots, err := transportSignalToSVCBOots(sig)
 		if err != nil {

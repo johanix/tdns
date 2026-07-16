@@ -81,6 +81,40 @@ func TestCandidateTransports_WeightOneExcluded(t *testing.T) {
 	}
 }
 
+// TestCandidateTransports_DefaultedDo53NotPreferred: after ParseTransportString
+// absence defaults (do53→100), Do53 must not win the preferred pick — only
+// encrypted weights compete, with Do53 last as ultimate fallback.
+func TestCandidateTransports_DefaultedDo53NotPreferred(t *testing.T) {
+	s := cache.NewAuthServer("ns.example.")
+	m, err := core.ParseTransportString("doq:20,dot:10")
+	if err != nil {
+		t.Fatalf("ParseTransportString: %v", err)
+	}
+	if m["do53"] != 100 {
+		t.Fatalf("setup: expected do53 default 100, got %d", m["do53"])
+	}
+	if !applyTransportMapToServer(s, m) {
+		t.Fatal("applyTransportMapToServer failed")
+	}
+	if s.PrefTransport == core.TransportDo53 {
+		t.Fatalf("PrefTransport must not be Do53 after defaulted map, got %v", s.PrefTransport)
+	}
+
+	got := candidateTransports(s, "example.", false)
+	if len(got) < 2 {
+		t.Fatalf("got %v, want encrypted preferred + Do53 fallback", got)
+	}
+	if got[0] == core.TransportDo53 {
+		t.Errorf("defaulted do53:100 must not win preferred pick, got %v", got)
+	}
+	if got[len(got)-1] != core.TransportDo53 {
+		t.Errorf("Do53 must be last, got %v", got)
+	}
+	if !slices.Contains(got, core.TransportDoQ) || !slices.Contains(got, core.TransportDoT) {
+		t.Errorf("expected DoQ and DoT in candidates, got %v", got)
+	}
+}
+
 // TestCandidateTransports_EncryptedFiltersDo53: requireEncrypted excludes
 // Do53 even when it would otherwise be in the candidates.
 func TestCandidateTransports_EncryptedFiltersDo53(t *testing.T) {
