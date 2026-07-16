@@ -52,58 +52,68 @@ func activeRoleKeys(t *testing.T, kdb *KeyDB) (seps, zsks []DnssecKeyWithTimesta
 // TestZoneActiveKeyRoleChanges covers the per-role keep/drop decision across the
 // four split cases, CSK, mode changes, missing roles, and a mid-rollover mix.
 func TestZoneActiveKeyRoleChanges(t *testing.T) {
+	// currentMode is the zone's currently-bound policy Mode ("ksk-zsk" | "csk");
+	// the mode-change cases set it to differ from the target pol.Mode.
 	cases := []struct {
 		name             string
+		currentMode      string
 		setup            func(t *testing.T, kdb *KeyDB)
 		pol              *DnssecPolicy
 		wantKSK, wantZSK bool
 	}{
-		{"split no-op", func(t *testing.T, kdb *KeyDB) {
+		{"split no-op", DnssecPolicyModeKSKZSK, func(t *testing.T, kdb *KeyDB) {
 			genRoleKey(t, kdb, DnskeyStateActive, algA, "KSK")
 			genRoleKey(t, kdb, DnskeyStateActive, algB, "ZSK")
 		}, splitPol(algA, algB), false, false},
 
-		{"split zsk-only", func(t *testing.T, kdb *KeyDB) {
+		{"split zsk-only", DnssecPolicyModeKSKZSK, func(t *testing.T, kdb *KeyDB) {
 			genRoleKey(t, kdb, DnskeyStateActive, algA, "KSK")
 			genRoleKey(t, kdb, DnskeyStateActive, algB, "ZSK")
 		}, splitPol(algA, algC), false, true},
 
-		{"split ksk-only", func(t *testing.T, kdb *KeyDB) {
+		{"split ksk-only", DnssecPolicyModeKSKZSK, func(t *testing.T, kdb *KeyDB) {
 			genRoleKey(t, kdb, DnskeyStateActive, algA, "KSK")
 			genRoleKey(t, kdb, DnskeyStateActive, algB, "ZSK")
 		}, splitPol(algC, algB), true, false},
 
-		{"split both", func(t *testing.T, kdb *KeyDB) {
+		{"split both", DnssecPolicyModeKSKZSK, func(t *testing.T, kdb *KeyDB) {
 			genRoleKey(t, kdb, DnskeyStateActive, algA, "KSK")
 			genRoleKey(t, kdb, DnskeyStateActive, algB, "ZSK")
 		}, splitPol(algC, algD), true, true},
 
-		{"no active keys", func(t *testing.T, kdb *KeyDB) {}, splitPol(algA, algB), true, true},
+		{"no active keys", DnssecPolicyModeKSKZSK, func(t *testing.T, kdb *KeyDB) {}, splitPol(algA, algB), true, true},
 
-		{"ksk role missing", func(t *testing.T, kdb *KeyDB) {
+		{"ksk role missing", DnssecPolicyModeKSKZSK, func(t *testing.T, kdb *KeyDB) {
 			genRoleKey(t, kdb, DnskeyStateActive, algB, "ZSK")
 		}, splitPol(algA, algB), true, false},
 
-		{"zsk mid-rollover mix", func(t *testing.T, kdb *KeyDB) {
+		// The Finding-② regression: a split zone with a healthy KSK but a missing
+		// ZSK must roll only the ZSK and KEEP the KSK — NOT be misread as a CSK
+		// mode change that drops the KSK and breaks the DS.
+		{"zsk role missing (keep KSK)", DnssecPolicyModeKSKZSK, func(t *testing.T, kdb *KeyDB) {
+			genRoleKey(t, kdb, DnskeyStateActive, algA, "KSK")
+		}, splitPol(algA, algB), false, true},
+
+		{"zsk mid-rollover mix", DnssecPolicyModeKSKZSK, func(t *testing.T, kdb *KeyDB) {
 			genRoleKey(t, kdb, DnskeyStateActive, algA, "KSK")
 			genRoleKey(t, kdb, DnskeyStateActive, algB, "ZSK") // right alg
 			genRoleKey(t, kdb, DnskeyStateActive, algC, "ZSK") // wrong alg (in flight)
 		}, splitPol(algA, algB), false, true},
 
-		{"csk no-op", func(t *testing.T, kdb *KeyDB) {
+		{"csk no-op", DnssecPolicyModeCSK, func(t *testing.T, kdb *KeyDB) {
 			genRoleKey(t, kdb, DnskeyStateActive, algA, "CSK")
 		}, cskPol(algA), false, false},
 
-		{"csk alg change", func(t *testing.T, kdb *KeyDB) {
+		{"csk alg change", DnssecPolicyModeCSK, func(t *testing.T, kdb *KeyDB) {
 			genRoleKey(t, kdb, DnskeyStateActive, algA, "CSK")
 		}, cskPol(algB), true, false},
 
-		{"mode change split->csk", func(t *testing.T, kdb *KeyDB) {
+		{"mode change split->csk", DnssecPolicyModeKSKZSK, func(t *testing.T, kdb *KeyDB) {
 			genRoleKey(t, kdb, DnskeyStateActive, algA, "KSK")
 			genRoleKey(t, kdb, DnskeyStateActive, algB, "ZSK")
 		}, cskPol(algA), true, true},
 
-		{"mode change csk->split", func(t *testing.T, kdb *KeyDB) {
+		{"mode change csk->split", DnssecPolicyModeCSK, func(t *testing.T, kdb *KeyDB) {
 			genRoleKey(t, kdb, DnskeyStateActive, algA, "CSK")
 		}, splitPol(algA, algB), true, true},
 	}
@@ -111,7 +121,7 @@ func TestZoneActiveKeyRoleChanges(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			kdb := newTestKeyDB(t)
 			c.setup(t, kdb)
-			ksk, zsk, err := zoneActiveKeyRoleChanges(kdb, algZone, c.pol)
+			ksk, zsk, err := zoneActiveKeyRoleChanges(kdb, algZone, c.pol, c.currentMode)
 			if err != nil {
 				t.Fatalf("zoneActiveKeyRoleChanges: %v", err)
 			}
@@ -122,33 +132,45 @@ func TestZoneActiveKeyRoleChanges(t *testing.T) {
 	}
 }
 
-// TestPolicyResetReport asserts the DS-break warning fires iff the KSK changed.
+// TestPolicyResetReport asserts the DS-break warning fires iff the KSK changed,
+// and that a CSK replacement is reported as CSK (not "KSK rolled, ZSK kept").
 func TestPolicyResetReport(t *testing.T) {
 	cases := []struct {
-		ksk, zsk bool
-		wantWarn bool
-		phrase   string
+		name      string
+		mode      string
+		ksk, zsk  bool
+		wantWarn  bool
+		phrase    string
+		notPhrase string
 	}{
-		{false, false, false, "KSK and parent DS unchanged"},
-		{false, true, false, "KSK and parent DS unchanged"},
-		{true, false, true, "BREAKS the chain of trust"},
-		{true, true, true, "BREAKS the chain of trust"},
+		{"split no-op", DnssecPolicyModeKSKZSK, false, false, false, "KSK and parent DS unchanged", ""},
+		{"split zsk-only", DnssecPolicyModeKSKZSK, false, true, false, "KSK and parent DS unchanged", ""},
+		{"split ksk-only", DnssecPolicyModeKSKZSK, true, false, true, "BREAKS the chain of trust", ""},
+		{"split both", DnssecPolicyModeKSKZSK, true, true, true, "BREAKS the chain of trust", ""},
+		{"csk no-op", DnssecPolicyModeCSK, false, false, false, "KSK and parent DS unchanged", ""},
+		// CSK replacement: DS warning, "CSK algorithm rolled", and NOT the split
+		// "ZSK kept" wording.
+		{"csk replacement", DnssecPolicyModeCSK, true, false, true, "CSK algorithm rolled", "ZSK kept"},
 	}
 	for _, c := range cases {
-		msg := policyResetReport("z.example.", "pol", c.ksk, c.zsk, 42)
+		msg := policyResetReport("z.example.", "pol", c.mode, c.ksk, c.zsk, 42)
 		hasWarn := strings.Contains(msg, "BREAKS the chain of trust")
 		if hasWarn != c.wantWarn {
-			t.Fatalf("ksk=%v zsk=%v: DS warning present=%v, want %v\nmsg: %s", c.ksk, c.zsk, hasWarn, c.wantWarn, msg)
+			t.Fatalf("%s: DS warning present=%v, want %v\nmsg: %s", c.name, hasWarn, c.wantWarn, msg)
 		}
 		if !strings.Contains(msg, c.phrase) {
-			t.Fatalf("ksk=%v zsk=%v: message missing %q\nmsg: %s", c.ksk, c.zsk, c.phrase, msg)
+			t.Fatalf("%s: message missing %q\nmsg: %s", c.name, c.phrase, msg)
+		}
+		if c.notPhrase != "" && strings.Contains(msg, c.notPhrase) {
+			t.Fatalf("%s: message unexpectedly contains %q\nmsg: %s", c.name, c.notPhrase, msg)
 		}
 	}
 }
 
-// TestForceZoneKeysToPolicyRoles verifies the surgical drop/regen: the kept
-// role's keytag is preserved, the dropped role gets a fresh key of the config
-// algorithm. StripZoneRRSIGs no-ops on the data-less test zone.
+// TestForceZoneKeysToPolicyRoles verifies the surgical drop/regen in the
+// keystore: the kept role's keytag is preserved, the dropped role gets a fresh
+// key of the config algorithm. (The RRSIG strip is a separate step, tested in
+// TestForceZoneKeysDNSKEYRRSIGStrip.)
 func TestForceZoneKeysToPolicyRoles(t *testing.T) {
 	t.Run("zsk-only keeps KSK keytag", func(t *testing.T) {
 		kdb := newTestKeyDB(t)
@@ -156,7 +178,7 @@ func TestForceZoneKeysToPolicyRoles(t *testing.T) {
 		kskTag := genRoleKey(t, kdb, DnskeyStateActive, algA, "KSK")
 		zskTag := genRoleKey(t, kdb, DnskeyStateActive, algB, "ZSK")
 
-		if err := kdb.forceZoneKeysToPolicyRoles(context.Background(), zd, splitPol(algA, algC), false, true); err != nil {
+		if _, err := kdb.forceZoneKeysToPolicyRoles(zd, splitPol(algA, algC), false, true); err != nil {
 			t.Fatalf("forceZoneKeysToPolicyRoles: %v", err)
 		}
 		seps, zsks := activeRoleKeys(t, kdb)
@@ -174,7 +196,7 @@ func TestForceZoneKeysToPolicyRoles(t *testing.T) {
 		kskTag := genRoleKey(t, kdb, DnskeyStateActive, algA, "KSK")
 		zskTag := genRoleKey(t, kdb, DnskeyStateActive, algB, "ZSK")
 
-		if err := kdb.forceZoneKeysToPolicyRoles(context.Background(), zd, splitPol(algC, algB), true, false); err != nil {
+		if _, err := kdb.forceZoneKeysToPolicyRoles(zd, splitPol(algC, algB), true, false); err != nil {
 			t.Fatalf("forceZoneKeysToPolicyRoles: %v", err)
 		}
 		seps, zsks := activeRoleKeys(t, kdb)
@@ -192,7 +214,7 @@ func TestForceZoneKeysToPolicyRoles(t *testing.T) {
 		genRoleKey(t, kdb, DnskeyStateActive, algA, "KSK")
 		genRoleKey(t, kdb, DnskeyStateActive, algB, "ZSK")
 
-		if err := kdb.forceZoneKeysToPolicyRoles(context.Background(), zd, splitPol(algC, algD), true, true); err != nil {
+		if _, err := kdb.forceZoneKeysToPolicyRoles(zd, splitPol(algC, algD), true, true); err != nil {
 			t.Fatalf("forceZoneKeysToPolicyRoles: %v", err)
 		}
 		seps, zsks := activeRoleKeys(t, kdb)
@@ -212,7 +234,7 @@ func TestForceZoneKeysToPolicyRoles(t *testing.T) {
 		genRoleKey(t, kdb, DnskeyStateActive, algA, "KSK")
 		genRoleKey(t, kdb, DnskeyStateActive, algB, "ZSK")
 
-		if err := kdb.forceZoneKeysToPolicyRoles(context.Background(), zd, cskPol(algC), true, false); err != nil {
+		if _, err := kdb.forceZoneKeysToPolicyRoles(zd, cskPol(algC), true, false); err != nil {
 			t.Fatalf("forceZoneKeysToPolicyRoles: %v", err)
 		}
 		seps, zsks := activeRoleKeys(t, kdb)
@@ -266,9 +288,15 @@ zsk-alg.example.	3600	IN	NS	ns.zsk-alg.example.
 	apex.RRtypes.Set(dns.TypeSOA, soa)
 	zd.InstallInitialSnapshot()
 
-	// ZSK-only flip: keep KSK (algA), drop+regen ZSK (→ algC).
-	if err := kdb.forceZoneKeysToPolicyRoles(context.Background(), zd, splitPol(algA, algC), false, true); err != nil {
+	// ZSK-only flip: keep KSK (algA), drop+regen ZSK (→ algC). The force op only
+	// mutates keys now; the strip happens after via stripStaleRRSIGsForKeySet
+	// (mirroring resetZonePolicy: strip post-commit, before the re-sign).
+	surviving, err := kdb.forceZoneKeysToPolicyRoles(zd, splitPol(algA, algC), false, true)
+	if err != nil {
 		t.Fatalf("forceZoneKeysToPolicyRoles: %v", err)
+	}
+	if _, err := stripStaleRRSIGsForKeySet(context.Background(), zd, surviving); err != nil {
+		t.Fatalf("stripStaleRRSIGsForKeySet: %v", err)
 	}
 
 	// DNSKEY RRSIGs: ALL stripped — the kept KSK's stale one AND the ZSK orphan.

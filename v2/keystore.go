@@ -695,30 +695,32 @@ SELECT zonename, state, keyid, flags, algorithm, privatekey, keyrr FROM DnssecKe
 // forceZoneKeysToPolicyRoles is the surgical per-role counterpart to the keystore
 // `clear` operation, used by policy-reset. For each role flagged changed it drops
 // ALL of that role's keys (every state) and generates one fresh active key of the
-// config algorithm; the unchanged role's keys are left untouched. Orphaned RRSIGs
-// (those made by a dropped key) are stripped so only signatures by surviving keys
-// remain — the additive re-sign that follows re-signs under the new keys.
-// Everything runs in one transaction that rolls back on any failure; on success
-// the zone's key cache is invalidated post-commit (the DELETE+regen changed the
+// config algorithm; the unchanged role's keys are left untouched. It runs the key
+// mutation in one transaction that rolls back on any failure, and on success
+// invalidates the zone's key cache post-commit (the DELETE+regen changed the
 // active set, and this method owns its transaction, so the invalidation is
-// complete — unlike a mid-tx wipe that a read in the uncommitted window can
-// undo).
+// complete — unlike a mid-tx wipe that a read in the uncommitted window can undo).
+//
+// It returns the SURVIVING keytags (the kept role's keys + the regenerated ones);
+// the caller strips the now-stale served RRSIGs via stripStaleRRSIGsForKeySet
+// AFTER this returns — never before commit — so a keystore commit failure can
+// never leave the served zone published without its signatures.
 //
 // For a CSK policy a single SEP "CSK" key covers both roles: dropKSK true drops
 // every key and regenerates one CSK (dropZSK is ignored). For a split policy the
 // SEP bit selects the role (KSK = flags&1==1, ZSK = flags&1==0).
-func (kdb *KeyDB) forceZoneKeysToPolicyRoles(ctx context.Context, zd *ZoneData, pol *DnssecPolicy, dropKSK, dropZSK bool) error {
+func (kdb *KeyDB) forceZoneKeysToPolicyRoles(zd *ZoneData, pol *DnssecPolicy, dropKSK, dropZSK bool) (map[uint16]bool, error) {
 	if pol == nil {
-		return fmt.Errorf("forceZoneKeysToPolicyRoles: nil policy for zone %s", zd.ZoneName)
+		return nil, fmt.Errorf("forceZoneKeysToPolicyRoles: nil policy for zone %s", zd.ZoneName)
 	}
 	if !dropKSK && !dropZSK {
-		return nil // nothing to roll
+		return nil, nil // nothing to roll
 	}
 	zone := zd.ZoneName
 
 	tx, err := kdb.Begin("forceZoneKeysToPolicyRoles")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	committed := false
 	defer func() {
@@ -730,26 +732,26 @@ func (kdb *KeyDB) forceZoneKeysToPolicyRoles(ctx context.Context, zd *ZoneData, 
 	if pol.Mode == DnssecPolicyModeCSK {
 		// Collapse to a single CSK: drop every key, regenerate one active CSK.
 		if _, err := tx.Exec(`DELETE FROM DnssecKeyStore WHERE zonename=?`, zone); err != nil {
-			return fmt.Errorf("forceZoneKeysToPolicyRoles: delete keys for %s: %w", zone, err)
+			return nil, fmt.Errorf("forceZoneKeysToPolicyRoles: delete keys for %s: %w", zone, err)
 		}
 		if _, _, err := kdb.GenerateKeypair(zone, "policy-reset-regen", DnskeyStateActive, dns.TypeDNSKEY, pol.Algorithm, "CSK", tx); err != nil {
-			return fmt.Errorf("forceZoneKeysToPolicyRoles: regenerate CSK for %s: %w", zone, err)
+			return nil, fmt.Errorf("forceZoneKeysToPolicyRoles: regenerate CSK for %s: %w", zone, err)
 		}
 	} else {
 		if dropKSK {
 			if _, err := tx.Exec(`DELETE FROM DnssecKeyStore WHERE zonename=? AND (CAST(flags AS INTEGER) & 1) = 1`, zone); err != nil {
-				return fmt.Errorf("forceZoneKeysToPolicyRoles: delete KSK keys for %s: %w", zone, err)
+				return nil, fmt.Errorf("forceZoneKeysToPolicyRoles: delete KSK keys for %s: %w", zone, err)
 			}
 			if _, _, err := kdb.GenerateKeypair(zone, "policy-reset-regen", DnskeyStateActive, dns.TypeDNSKEY, pol.KSKAlgorithm, "KSK", tx); err != nil {
-				return fmt.Errorf("forceZoneKeysToPolicyRoles: regenerate KSK for %s: %w", zone, err)
+				return nil, fmt.Errorf("forceZoneKeysToPolicyRoles: regenerate KSK for %s: %w", zone, err)
 			}
 		}
 		if dropZSK {
 			if _, err := tx.Exec(`DELETE FROM DnssecKeyStore WHERE zonename=? AND (CAST(flags AS INTEGER) & 1) = 0`, zone); err != nil {
-				return fmt.Errorf("forceZoneKeysToPolicyRoles: delete ZSK keys for %s: %w", zone, err)
+				return nil, fmt.Errorf("forceZoneKeysToPolicyRoles: delete ZSK keys for %s: %w", zone, err)
 			}
 			if _, _, err := kdb.GenerateKeypair(zone, "policy-reset-regen", DnskeyStateActive, dns.TypeDNSKEY, pol.ZSKAlgorithm, "ZSK", tx); err != nil {
-				return fmt.Errorf("forceZoneKeysToPolicyRoles: regenerate ZSK for %s: %w", zone, err)
+				return nil, fmt.Errorf("forceZoneKeysToPolicyRoles: regenerate ZSK for %s: %w", zone, err)
 			}
 		}
 	}
@@ -758,23 +760,11 @@ func (kdb *KeyDB) forceZoneKeysToPolicyRoles(ctx context.Context, zd *ZoneData, 
 	// active key(s), visible within this tx.
 	surviving, err := txZoneKeytags(tx, zone)
 	if err != nil {
-		return fmt.Errorf("forceZoneKeysToPolicyRoles: list surviving keys for %s: %w", zone, err)
-	}
-	// Strip (a) orphaned RRSIGs — those made by a dropped key — AND (b) ALL RRSIGs
-	// over the DNSKEY RRset. The DNSKEY RRset content always changes when the key
-	// set changes (a DNSKEY comes or goes), so even the KEPT KSK's DNSKEY RRSIG now
-	// covers a stale key set; it is not an orphan (its key is still active) and the
-	// additive re-sign would leave it in place as bogus cruft. Stripping every
-	// DNSKEY RRSIG here lets the re-sign regenerate exactly one fresh RRSIG per
-	// active KSK. (This method only runs when a role changed, so the key set did.)
-	if _, err := zd.StripZoneRRSIGs(ctx, func(rrsig *dns.RRSIG) bool {
-		return !surviving[rrsig.KeyTag] || rrsig.TypeCovered == dns.TypeDNSKEY
-	}); err != nil {
-		return fmt.Errorf("forceZoneKeysToPolicyRoles: strip stale/orphaned RRSIGs for %s: %w", zone, err)
+		return nil, fmt.Errorf("forceZoneKeysToPolicyRoles: list surviving keys for %s: %w", zone, err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("forceZoneKeysToPolicyRoles: commit for %s: %w", zone, err)
+		return nil, fmt.Errorf("forceZoneKeysToPolicyRoles: commit for %s: %w", zone, err)
 	}
 	committed = true
 
@@ -786,7 +776,25 @@ func (kdb *KeyDB) forceZoneKeysToPolicyRoles(ctx context.Context, zd *ZoneData, 
 		}
 	}
 	kdb.mu.Unlock()
-	return nil
+	return surviving, nil
+}
+
+// stripStaleRRSIGsForKeySet removes served RRSIGs that a key-set change made
+// stale: (a) orphans — those made by a dropped key (keytag no longer in
+// `surviving`) — AND (b) EVERY DNSKEY-covering RRSIG. The DNSKEY RRset content
+// always changes when the key set changes (a DNSKEY comes or goes), so even a
+// KEPT KSK's DNSKEY RRSIG now covers a stale key set; it is not an orphan and the
+// additive re-sign would leave it in place as bogus cruft. The re-sign that
+// follows regenerates exactly one fresh RRSIG per active KSK.
+//
+// Call this AFTER the keystore mutation has committed (see
+// forceZoneKeysToPolicyRoles): running it before commit would publish the
+// stripped zone, and a subsequent commit failure would then leave the served
+// zone without its signatures.
+func stripStaleRRSIGsForKeySet(ctx context.Context, zd *ZoneData, surviving map[uint16]bool) (int, error) {
+	return zd.StripZoneRRSIGs(ctx, func(rrsig *dns.RRSIG) bool {
+		return !surviving[rrsig.KeyTag] || rrsig.TypeCovered == dns.TypeDNSKEY
+	})
 }
 
 // txZoneKeytags returns the set of keytags currently present in the keystore for

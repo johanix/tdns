@@ -620,7 +620,17 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 	// whose active-key algorithm already matches config, roll only the one that
 	// changed. Computed under policyApplyMu so the decision and the key mutation
 	// are atomic w.r.t. other applies. kskChanged ⇒ the parent DS breaks.
-	kskChanged, zskChanged, err := zoneActiveKeyRoleChanges(kdb, zd.ZoneName, &pol)
+	// currentMode is the zone's currently-bound policy Mode, read BEFORE the
+	// rebind: a genuine split↔CSK mode change is detected from that reliable field,
+	// not inferred from key shape (which would misread a split zone missing its ZSK
+	// as CSK and wrongly drop the KSK).
+	currentMode := ""
+	zd.mu.Lock()
+	if zd.DnssecPolicy != nil {
+		currentMode = zd.DnssecPolicy.Mode
+	}
+	zd.mu.Unlock()
+	kskChanged, zskChanged, err := zoneActiveKeyRoleChanges(kdb, zd.ZoneName, &pol, currentMode)
 	if err != nil {
 		return "", fmt.Errorf("policy-reset: inspecting active keys for zone %s: %w", zd.ZoneName, err)
 	}
@@ -649,28 +659,37 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 
 	// 2) Surgically drop+regenerate only the changed role(s), keeping any key
 	// whose algorithm is already correct — so a ZSK-only change leaves the KSK
-	// (and the parent DS) untouched. Atomic; strips the dropped keys' orphaned
-	// RRSIGs. Skipped entirely when nothing changed. On failure the tx rolled back
-	// (original keys intact) → restore the binding and tell the operator to retry.
+	// (and the parent DS) untouched. Skipped entirely when nothing changed. The
+	// keystore mutation is atomic: on failure the tx rolled back (original keys
+	// intact) → restore the binding and tell the operator to retry.
 	if kskChanged || zskChanged {
-		if err := kdb.forceZoneKeysToPolicyRoles(ctx, zd, &pol, kskChanged, zskChanged); err != nil {
+		surviving, ferr := kdb.forceZoneKeysToPolicyRoles(zd, &pol, kskChanged, zskChanged)
+		if ferr != nil {
 			zd.mu.Lock()
 			zd.DnssecPolicy = oldPol
 			zd.DnssecPolicyName = oldName
 			zd.mu.Unlock()
-			return "", fmt.Errorf("policy-reset: dropping/regenerating the changed key role(s) for zone %s FAILED — no persisted records were changed and the original keys are intact; re-run `zone dnssec policy-reset --confirm`: %w", zd.ZoneName, err)
+			return "", fmt.Errorf("policy-reset: dropping/regenerating the changed key role(s) for zone %s FAILED — no persisted records were changed and the original keys are intact; re-run `zone dnssec policy-reset --confirm`: %w", zd.ZoneName, ferr)
+		}
+
+		// The new key set is now COMMITTED. Every failure from here means "run
+		// resign" — NOT re-run policy-reset.
+		//
+		// 2a) Force a fresh active-key read: the regen invalidated the cache, and a
+		// stale read would make the re-sign refuse on an algorithm mismatch.
+		if _, err := zd.refreshActiveDnssecKeys(kdb, "policy-reset: after key regen"); err != nil {
+			return "", fmt.Errorf("policy-reset: re-reading regenerated keys for zone %s FAILED — the new config-policy keys are already in the keystore but the zone is not yet re-signed; run `zone dnssec resign -z %s` to converge: %w", zd.ZoneName, zd.ZoneName, err)
+		}
+		// 2b) Strip the now-stale served signatures (orphans + every DNSKEY RRSIG)
+		// AFTER the keystore commit and BEFORE the re-sign regenerates fresh ones.
+		// Doing this post-commit is what makes the whole reset transactionally safe:
+		// a keystore commit failure can never leave the served zone unsigned.
+		if _, err := stripStaleRRSIGsForKeySet(ctx, zd, surviving); err != nil {
+			return "", fmt.Errorf("policy-reset: stripping stale signatures for zone %s FAILED — the new config-policy keys are already in the keystore but the zone is not yet re-signed; run `zone dnssec resign -z %s` to converge: %w", zd.ZoneName, zd.ZoneName, err)
 		}
 	}
 
-	// 3) Force a fresh active-key read before re-signing: the regen invalidated
-	// the active-key cache within its tx, and a stale read would make the re-sign
-	// refuse on an algorithm mismatch. From here on the new keys ARE committed, so
-	// any later failure means "run resign" — NOT re-run policy-reset.
-	if _, err := zd.refreshActiveDnssecKeys(kdb, "policy-reset: after key regen"); err != nil {
-		return "", fmt.Errorf("policy-reset: re-reading regenerated keys for zone %s FAILED — the new config-policy keys are already in the keystore but the zone is not yet re-signed; run `zone dnssec resign -z %s` to converge: %w", zd.ZoneName, zd.ZoneName, err)
-	}
-
-	// 4) Re-sign under the config policy and record applied=config through the
+	// 3) Re-sign under the config policy and record applied=config through the
 	// shared core (source config → no CLI override written). We already hold
 	// policyApplyMu, so call the *Locked variant.
 	newrrsigs, err := applyZonePolicyTransactionalLocked(ctx, zd, kdb, &pol, configName, PolicyApplySourceConfig)
@@ -678,7 +697,7 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 		return "", fmt.Errorf("policy-reset: re-signing zone %s under config policy %q FAILED — the config-policy keys are already in the keystore, so run `zone dnssec resign -z %s` to converge (do NOT re-run policy-reset): %w", zd.ZoneName, configName, zd.ZoneName, err)
 	}
 
-	// 5) Only now that the zone is signed under config and applied=config is
+	// 4) Only now that the zone is signed under config and applied=config is
 	// recorded, clear any stale CLI override so intent matches reality. Done LAST
 	// so a failure here cannot strand an unsigned zone; it clears only the
 	// override (applied_* is preserved).
@@ -686,7 +705,7 @@ func resetZonePolicy(ctx context.Context, zd *ZoneData, kdb *KeyDB, confirm bool
 		return "", fmt.Errorf("policy-reset: zone %s is signed under config policy %q and applied=config recorded, but clearing the stale CLI override FAILED — the override still points at the old policy and a later reload may refuse it; bind the config policy explicitly with `zone dnssec policy-set -z %s -p %s`: %w", zd.ZoneName, configName, zd.ZoneName, configName, err)
 	}
 
-	return policyResetReport(zd.ZoneName, configName, kskChanged, zskChanged, newrrsigs), nil
+	return policyResetReport(zd.ZoneName, configName, pol.Mode, kskChanged, zskChanged, newrrsigs), nil
 }
 
 func APIzoneDsync(ctx context.Context, app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w http.ResponseWriter, r *http.Request) {
