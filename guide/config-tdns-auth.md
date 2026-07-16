@@ -436,6 +436,10 @@ dnssec:
 required. It is not a per-key-role setting: there is no `sigvalidity` under
 `ksk:` or `zsk:`, and those sub-blocks carry only `lifetime` and `algorithm`.
 
+`mode` selects the key scheme: `ksk-zsk` (the default when omitted) uses
+separate Key-Signing and Zone-Signing keys; `csk` uses a single Combined-Signing
+Key for both roles. An invalid value is rejected at config load.
+
 Durations accept Go duration strings plus a `d` (days) or `w` (weeks) suffix on
 a plain integer: `14d`, `2w`, `90m`. Key lifetimes additionally accept
 `forever` and `none`.
