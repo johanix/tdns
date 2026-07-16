@@ -32,8 +32,9 @@ func TestCandidateTransports_SinglePreferred_Encrypted(t *testing.T) {
 	}
 }
 
-// TestCandidateTransports_Do53UltimateFallback: Do53 is always the ultimate
-// fallback when not requireEncrypted, even if only encrypted weights are set.
+// TestCandidateTransports_Do53UltimateFallback: with only DoT:30, do53_share=70
+// so both compete in the share pool; Do53 must still appear when not
+// requireEncrypted.
 func TestCandidateTransports_Do53UltimateFallback(t *testing.T) {
 	s := cache.NewAuthServer("ns.example.")
 	s.SetTransports([]core.Transport{core.TransportDoT})
@@ -41,18 +42,15 @@ func TestCandidateTransports_Do53UltimateFallback(t *testing.T) {
 
 	got := candidateTransports(s, "example.", false)
 	if !slices.Contains(got, core.TransportDo53) {
-		t.Errorf("expected Do53 ultimate fallback, got %v", got)
+		t.Errorf("expected Do53 in share pool/fallback, got %v", got)
 	}
 	if !slices.Contains(got, core.TransportDoT) {
 		t.Errorf("expected DoT in candidates, got %v", got)
 	}
-	if got[len(got)-1] != core.TransportDo53 {
-		t.Errorf("Do53 should be last, got %v", got)
-	}
 }
 
-// TestCandidateTransports_Do53ZeroStillFallback: do53:0 excludes Do53 from
-// preferred selection but must still appear as ultimate fallback.
+// TestCandidateTransports_Do53ZeroStillFallback: do53_share=0 when encrypted
+// sums to 100; DoQ wins the pool and Do53 is appended last as reliability fallback.
 func TestCandidateTransports_Do53ZeroStillFallback(t *testing.T) {
 	s := cache.NewAuthServer("ns.example.")
 	s.SetTransports([]core.Transport{core.TransportDoQ, core.TransportDo53})
@@ -65,7 +63,8 @@ func TestCandidateTransports_Do53ZeroStillFallback(t *testing.T) {
 	}
 }
 
-// TestCandidateTransports_WeightOneExcluded: weight <= 1 is not preferred.
+// TestCandidateTransports_WeightOneExcluded: weight ≤ 1 is outside the share
+// pool; Do53 absorbs that capacity via do53_share.
 func TestCandidateTransports_WeightOneExcluded(t *testing.T) {
 	s := cache.NewAuthServer("ns.example.")
 	s.SetTransports([]core.Transport{core.TransportDoT, core.TransportDoQ})
@@ -74,44 +73,40 @@ func TestCandidateTransports_WeightOneExcluded(t *testing.T) {
 
 	got := candidateTransports(s, "example.", false)
 	if slices.Contains(got, core.TransportDoT) {
-		t.Errorf("weight 1 must be excluded from preferred, got %v", got)
+		t.Errorf("weight 1 must be excluded from share pool, got %v", got)
 	}
 	if !slices.Contains(got, core.TransportDoQ) {
 		t.Errorf("expected DoQ, got %v", got)
 	}
+	if !slices.Contains(got, core.TransportDo53) {
+		t.Errorf("expected Do53 (do53_share=80), got %v", got)
+	}
 }
 
-// TestCandidateTransports_DefaultedDo53NotPreferred: after ParseTransportString
-// absence defaults (do53→100), Do53 must not win the preferred pick — only
-// encrypted weights compete, with Do53 last as ultimate fallback.
-func TestCandidateTransports_DefaultedDo53NotPreferred(t *testing.T) {
+// TestCandidateTransports_SharePoolIncludesDo53: doq:20,dot:10 → do53_share=70.
+// Do53 is a valid (usually winning) hash pick; DoT/DoQ remain in the list;
+// PrefTransport follows the highest share (Do53).
+func TestCandidateTransports_SharePoolIncludesDo53(t *testing.T) {
 	s := cache.NewAuthServer("ns.example.")
 	m, err := core.ParseTransportString("doq:20,dot:10")
 	if err != nil {
 		t.Fatalf("ParseTransportString: %v", err)
 	}
 	if m["do53"] != 100 {
-		t.Fatalf("setup: expected do53 default 100, got %d", m["do53"])
+		t.Fatalf("setup: expected do53 decode default 100, got %d", m["do53"])
 	}
 	if !applyTransportMapToServer(s, m) {
 		t.Fatal("applyTransportMapToServer failed")
 	}
-	if s.PrefTransport == core.TransportDo53 {
-		t.Fatalf("PrefTransport must not be Do53 after defaulted map, got %v", s.PrefTransport)
+	if s.PrefTransport != core.TransportDo53 {
+		t.Fatalf("PrefTransport should be Do53 (share 70), got %v", s.PrefTransport)
 	}
 
 	got := candidateTransports(s, "example.", false)
-	if len(got) < 2 {
-		t.Fatalf("got %v, want encrypted preferred + Do53 fallback", got)
-	}
-	if got[0] == core.TransportDo53 {
-		t.Errorf("defaulted do53:100 must not win preferred pick, got %v", got)
-	}
-	if got[len(got)-1] != core.TransportDo53 {
-		t.Errorf("Do53 must be last, got %v", got)
-	}
-	if !slices.Contains(got, core.TransportDoQ) || !slices.Contains(got, core.TransportDoT) {
-		t.Errorf("expected DoQ and DoT in candidates, got %v", got)
+	if !slices.Contains(got, core.TransportDo53) ||
+		!slices.Contains(got, core.TransportDoQ) ||
+		!slices.Contains(got, core.TransportDoT) {
+		t.Errorf("expected Do53+DoQ+DoT in candidates, got %v", got)
 	}
 }
 
@@ -149,7 +144,8 @@ func TestCandidateTransports_NoEncryptedReturnsNil(t *testing.T) {
 
 // TestCandidateTransports_DeterministicHashFirst: the bucket-winning
 // transport is returned first; the same (qname, server.Name) pair must
-// produce the same first transport across calls.
+// produce the same first transport across calls. With DoT:50+DoH:50,
+// do53_share=0 so Do53 is reliability-appended last; winner is DoT or DoH.
 func TestCandidateTransports_DeterministicHashFirst(t *testing.T) {
 	s := cache.NewAuthServer("ns.example.")
 	s.SetTransports([]core.Transport{core.TransportDoT, core.TransportDoH})
@@ -164,12 +160,52 @@ func TestCandidateTransports_DeterministicHashFirst(t *testing.T) {
 		}
 	}
 
-	// Preferred encrypted transports plus ultimate Do53 fallback.
 	if !slices.Contains(first, core.TransportDoT) || !slices.Contains(first, core.TransportDoH) {
 		t.Errorf("expected both DoT and DoH in candidates, got %v", first)
 	}
+	if first[0] != core.TransportDoT && first[0] != core.TransportDoH {
+		t.Errorf("hash winner should be DoT or DoH (do53_share=0), got %v", first)
+	}
 	if first[len(first)-1] != core.TransportDo53 {
-		t.Errorf("expected Do53 ultimate fallback last, got %v", first)
+		t.Errorf("expected Do53 reliability fallback last, got %v", first)
+	}
+}
+
+// TestCandidateTransports_ShareDistribution: over many distinct qnames,
+// winners for do53:100,dot:10,doq:20 track ~70/10/20 shares.
+func TestCandidateTransports_ShareDistribution(t *testing.T) {
+	s := cache.NewAuthServer("ns.example.")
+	m, err := core.ParseTransportString("do53:100,dot:10,doq:20")
+	if err != nil {
+		t.Fatalf("ParseTransportString: %v", err)
+	}
+	if !applyTransportMapToServer(s, m) {
+		t.Fatal("applyTransportMapToServer failed")
+	}
+
+	const n = 10000
+	counts := map[core.Transport]int{}
+	for i := 0; i < n; i++ {
+		qname := fmt.Sprintf("q%d.example.", i)
+		got := candidateTransports(s, qname, false)
+		if len(got) == 0 {
+			t.Fatalf("empty candidates for %s", qname)
+		}
+		counts[got[0]]++
+	}
+
+	// Shares: do53=70, doq=20, dot=10. Allow ±3 percentage points.
+	pct := func(t core.Transport) float64 {
+		return 100 * float64(counts[t]) / float64(n)
+	}
+	if p := pct(core.TransportDo53); p < 67 || p > 73 {
+		t.Errorf("Do53 winner %% = %.1f, want ~70 (counts=%v)", p, counts)
+	}
+	if p := pct(core.TransportDoQ); p < 17 || p > 23 {
+		t.Errorf("DoQ winner %% = %.1f, want ~20 (counts=%v)", p, counts)
+	}
+	if p := pct(core.TransportDoT); p < 7 || p > 13 {
+		t.Errorf("DoT winner %% = %.1f, want ~10 (counts=%v)", p, counts)
 	}
 }
 

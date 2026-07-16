@@ -809,12 +809,13 @@ func sortTuplesByRTT(tuples []ServerAddrXportTuple) {
 }
 
 // candidateTransports returns the ordered list of transports to try for a
-// query to this (qname, server). Weights are independent capability estimates
-// (draft-johani-dnsop-svcb-oots), not a partition of 100: only transports with
-// weight > 1 are preferred; weight 0 is unavailable. When not requireEncrypted,
-// Do53 is always appended as the ultimate fallback even if advertised do53:0
-// (-03 always-fall-back-to-Do53). requireEncrypted filters out Do53 entirely
-// and is independent of OOTS weight semantics.
+// query to this (qname, server), honoring OOTS query-load shares (-03 /
+// svcb-oots-00): each encrypted transport with weight > 1 gets that share of
+// the load; do53_share = max(0, 100−Σ encrypted). The deterministic
+// fnv(qname|server) bucket picks the winner from that pool so Do53 usually
+// wins when its share dominates. When not requireEncrypted and do53_share is
+// 0, Do53 is still appended last as a reliability fallback. requireEncrypted
+// excludes Do53 entirely (independent of OOTS).
 func candidateTransports(server *cache.AuthServer, qname string, requireEncrypted bool) []core.Transport {
 	if server == nil {
 		if requireEncrypted {
@@ -827,69 +828,106 @@ func candidateTransports(server *cache.AuthServer, qname string, requireEncrypte
 		t core.Transport
 		w int
 	}
-	var preferred []wt
-	total := 0
-	for _, t := range server.Transports {
-		// Do53 is never preferred; it is always the ultimate fallback below.
-		if t == core.TransportDo53 {
-			continue
+
+	seen := map[core.Transport]bool{}
+	var encrypted []wt
+	encSum := 0
+	consider := func(t core.Transport) {
+		if seen[t] || !core.IsEncryptedTransport(t) {
+			return
 		}
-		if requireEncrypted && !core.IsEncryptedTransport(t) {
-			continue
-		}
-		w, ok := server.TransportWeights[t]
-		if !ok {
-			w = 0
-		}
+		seen[t] = true
+		w := server.TransportWeights[t]
 		// -03: MAY attempt connections over any transport with weight > 1.
 		if w <= 1 {
-			continue
+			return
 		}
-		preferred = append(preferred, wt{t: t, w: int(w)})
-		total += int(w)
+		encrypted = append(encrypted, wt{t: t, w: int(w)})
+		encSum += int(w)
+	}
+	for _, t := range server.Transports {
+		consider(t)
+	}
+	for t := range server.TransportWeights {
+		consider(t)
+	}
+	sort.SliceStable(encrypted, func(i, j int) bool {
+		return encrypted[i].t < encrypted[j].t
+	})
+
+	var pool []wt
+	if requireEncrypted {
+		pool = encrypted
+	} else {
+		do53Share := 100 - encSum
+		if do53Share < 0 {
+			do53Share = 0
+		}
+		if do53Share > 0 {
+			pool = append(pool, wt{t: core.TransportDo53, w: do53Share})
+		}
+		pool = append(pool, encrypted...)
 	}
 
-	var out []core.Transport
-	if len(preferred) > 0 {
-		h := fnv.New32a()
-		_, _ = h.Write([]byte(qname))
-		_, _ = h.Write([]byte("|"))
-		_, _ = h.Write([]byte(server.Name))
-		bucket := int(h.Sum32() % uint32(maxInt(total, 1)))
-
-		winnerIdx := len(preferred) - 1
-		acc := 0
-		for i, c := range preferred {
-			acc += c.w
-			if bucket < acc {
-				winnerIdx = i
-				break
-			}
+	if len(pool) == 0 {
+		if requireEncrypted {
+			return nil
 		}
+		return []core.Transport{core.TransportDo53}
+	}
 
-		rest := make([]wt, 0, len(preferred)-1)
-		for i, c := range preferred {
-			if i == winnerIdx {
-				continue
-			}
-			rest = append(rest, c)
-		}
-		sort.SliceStable(rest, func(i, j int) bool {
-			if rest[i].w != rest[j].w {
-				return rest[i].w > rest[j].w
-			}
-			return rest[i].t < rest[j].t
-		})
+	total := 0
+	for _, c := range pool {
+		total += c.w
+	}
 
-		out = make([]core.Transport, 0, len(preferred)+1)
-		out = append(out, preferred[winnerIdx].t)
-		for _, c := range rest {
-			out = append(out, c.t)
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(qname))
+	_, _ = h.Write([]byte("|"))
+	_, _ = h.Write([]byte(server.Name))
+	bucket := int(h.Sum32() % uint32(maxInt(total, 1)))
+
+	winnerIdx := len(pool) - 1
+	acc := 0
+	for i, c := range pool {
+		acc += c.w
+		if bucket < acc {
+			winnerIdx = i
+			break
 		}
+	}
+
+	rest := make([]wt, 0, len(pool)-1)
+	for i, c := range pool {
+		if i == winnerIdx {
+			continue
+		}
+		rest = append(rest, c)
+	}
+	sort.SliceStable(rest, func(i, j int) bool {
+		if rest[i].w != rest[j].w {
+			return rest[i].w > rest[j].w
+		}
+		return rest[i].t < rest[j].t
+	})
+
+	out := make([]core.Transport, 0, len(pool)+1)
+	out = append(out, pool[winnerIdx].t)
+	for _, c := range rest {
+		out = append(out, c.t)
 	}
 
 	if !requireEncrypted {
-		out = append(out, core.TransportDo53)
+		hasDo53 := false
+		for _, t := range out {
+			if t == core.TransportDo53 {
+				hasDo53 = true
+				break
+			}
+		}
+		if !hasDo53 {
+			out = append(out, core.TransportDo53)
+		}
 	}
 	return out
 }
@@ -1930,19 +1968,20 @@ func (imr *Imr) applyTransportSignalToServer(server *cache.AuthServer, s string)
 	return applyTransportMapToServer(server, kvMap)
 }
 
-// applyTransportMapToServer installs a weight map on server. Preferred
-// transports are those with weight > 1 excluding Do53 (Do53 is the ultimate
-// fallback via candidateTransports, including when absence-defaulted to 100).
+// applyTransportMapToServer installs a decoded weight map on server, keeping
+// all weights (including do53). PrefTransport is the highest OOTS share
+// (do53_share = max(0, 100−Σ encrypted>1); encrypted share = weight when >1).
 func applyTransportMapToServer(server *cache.AuthServer, kvMap map[string]uint8) bool {
 	if server == nil || len(kvMap) == 0 {
 		return false
 	}
 	type pair struct {
-		k string
-		w uint8
+		t     core.Transport
+		k     string
+		share int
 	}
-	var pairs []pair
 	weights := map[core.Transport]uint8{}
+	encSum := 0
 	for k, v := range kvMap {
 		t, err := core.StringToTransport(k)
 		if err != nil {
@@ -1950,33 +1989,56 @@ func applyTransportMapToServer(server *cache.AuthServer, kvMap map[string]uint8)
 			continue
 		}
 		weights[t] = v
-		if t == core.TransportDo53 || v <= 1 {
+		if core.IsEncryptedTransport(t) && v > 1 {
+			encSum += int(v)
+		}
+	}
+	if len(weights) == 0 {
+		return false
+	}
+	do53Share := 100 - encSum
+	if do53Share < 0 {
+		do53Share = 0
+	}
+
+	var pairs []pair
+	for k, v := range kvMap {
+		t, err := core.StringToTransport(k)
+		if err != nil {
 			continue
 		}
-		pairs = append(pairs, pair{k: k, w: v})
+		share := 0
+		switch {
+		case t == core.TransportDo53:
+			share = do53Share
+		case core.IsEncryptedTransport(t) && v > 1:
+			share = int(v)
+		}
+		pairs = append(pairs, pair{t: t, k: k, share: share})
 	}
 	sort.SliceStable(pairs, func(i, j int) bool {
-		return pairs[i].w > pairs[j].w || (pairs[i].w == pairs[j].w && pairs[i].k < pairs[j].k)
+		if pairs[i].share != pairs[j].share {
+			return pairs[i].share > pairs[j].share
+		}
+		return pairs[i].t < pairs[j].t
 	})
 	var transports []core.Transport
 	var alpnOrder []string
 	for _, p := range pairs {
-		t, err := core.StringToTransport(p.k)
-		if err != nil {
-			continue
-		}
-		transports = append(transports, t)
+		transports = append(transports, p.t)
 		alpnOrder = append(alpnOrder, p.k)
 	}
 	server.Transports = transports
 	server.Alpn = alpnOrder
 	server.TransportWeights = weights
-	if len(transports) > 0 {
-		server.PrefTransport = transports[0]
-	} else {
-		server.PrefTransport = core.TransportDo53
+	server.PrefTransport = core.TransportDo53
+	for _, p := range pairs {
+		if p.share > 0 {
+			server.PrefTransport = p.t
+			break
+		}
 	}
-	return len(weights) > 0
+	return true
 }
 
 func transportOwnerForNS(nsname string) string {
