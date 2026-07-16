@@ -24,6 +24,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/miekg/dns"
 )
 
 // PolicyApplySource records why a policy was applied, and is persisted as
@@ -238,38 +240,18 @@ func applyZonePolicyTransactionalLocked(
 
 // backfillAppliedIfEligible records applied = intent WITHOUT a forced re-sign
 // when a zone has no applied record yet but is ALREADY correctly signed under
-// intent — its active keys' algorithms match intent's KSK/ZSK algorithms
-// (blocking ②). This is the first-post-upgrade path for config-only signed
+// intent — its active keys' algorithms match intent's KSK/ZSK algorithms AND
+// it serves an apex SOA RRSIG by an intent signing algorithm (blocking ② /
+// PR-2 GATE). This is the first-post-upgrade path for config-only signed
 // zones; it avoids re-signing every already-correct zone.
 //
-// Precondition: caller has established that no applied record exists. Returns
-// true when a backfill was written (caller then skips the re-sign for policy
+// Precondition: caller has established that no applied record exists. The
+// served-RRSIG check reads Ready MapZone data via GetRRset — call only AFTER
+// InstallInitialSnapshot (or on an already-Ready reload path). Returns true
+// when a backfill was written (caller then skips the re-sign for policy
 // purposes). Returns false — without error — when the zone is not eligible
-// (unsigned, no intent, or active-key algorithms differ from intent); the
-// caller then drives a genuine transactional apply toward intent, whose
-// SignZone algorithm backstop refuses an unsafe swap.
-//
-// ⚠ PR-2 GATE (plan §5.5) — MUST be closed before this is called from any live
-// refresh-engine path. The eligibility predicate is CURRENTLY keystore-only: it
-// checks that the zone's ACTIVE keys match intent's algorithms
-// (zoneActiveKeysMatchAlgs). That is NECESSARY but NOT SUFFICIENT — a zone can
-// hold the right active keys yet not actually be signed (fresh keygen with no
-// sign; a secondary whose stored RRSIGs are absent or stale, §5.5 line 79).
-// Recording applied=intent for such a zone marks it "signed under intent" when
-// it is not. Before going live, additionally require the zone to actually SERVE
-// a signature by an active intent-algorithm key, e.g.:
-//
-//	soa, err := zd.GetRRset(zd.ZoneName, dns.TypeSOA) // needs zd.Ready + MapZone
-//	// eligible only if err==nil, soa!=nil, and some rr in soa.RRSIGs is a
-//	// *dns.RRSIG with Algorithm == intentPol.ZSKAlgorithm (CSK: KSKAlgorithm).
-//
-// That check reads served zone data, so the call site MUST run AFTER the zone
-// snapshot is Ready — NOT the pre-initialLoadZone placement §5.5 line 516
-// contemplates for a keystore-only predicate. Otherwise the served-RRSIG check
-// fails closed and every config-only zone falls through to a forced re-sign,
-// defeating blocking-② (the thundering-herd avoidance this function exists for).
-// Left keystore-only in PR-1 because backfill is not called by any production
-// path here (unit tests only).
+// (unsigned, no intent, keystore mismatch, or no matching served SOA RRSIG);
+// the caller then drives a genuine transactional apply toward intent.
 func backfillAppliedIfEligible(kdb *KeyDB, zd *ZoneData, intentName string, intentPol *DnssecPolicy) (backfilled bool, err error) {
 	if intentPol == nil || intentName == "" {
 		return false, nil
@@ -284,10 +266,41 @@ func backfillAppliedIfEligible(kdb *KeyDB, zd *ZoneData, intentName string, inte
 	if !match {
 		return false, nil
 	}
+	if !zoneServesIntentSOASig(zd, intentPol) {
+		return false, nil
+	}
 	if err := SetZoneAppliedPolicy(kdb, zd.ZoneName, intentName, string(PolicyApplySourceConfig)); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// zoneServesIntentSOASig reports whether the zone's published apex SOA RRset
+// carries an RRSIG whose Algorithm matches intent's ZSK algorithm (CSK:
+// KSKAlgorithm). Fail-closed: not Ready, not MapZone, missing SOA, or no
+// matching signature → false. soa.RRSIGs is []dns.RR — type-assert before use.
+func zoneServesIntentSOASig(zd *ZoneData, intentPol *DnssecPolicy) bool {
+	if zd == nil || intentPol == nil {
+		return false
+	}
+	soa, err := zd.GetRRset(zd.ZoneName, dns.TypeSOA)
+	if err != nil || soa == nil {
+		return false
+	}
+	want := intentPol.ZSKAlgorithm
+	if intentPol.Mode == DnssecPolicyModeCSK {
+		want = intentPol.KSKAlgorithm
+	}
+	for _, rr := range soa.RRSIGs {
+		sig, ok := rr.(*dns.RRSIG)
+		if !ok || sig == nil {
+			continue
+		}
+		if sig.Algorithm == want {
+			return true
+		}
+	}
+	return false
 }
 
 // zoneActiveKeysMatchAlgs reports whether the zone's ACTIVE keys already provide
@@ -298,8 +311,8 @@ func backfillAppliedIfEligible(kdb *KeyDB, zd *ZoneData, intentName string, inte
 // the signer and the standby→published migration use.
 //
 // NOTE (§5.5): this proves the KEYSTORE holds matching active keys, NOT that the
-// zone is actually signed under them. It is a necessary-not-sufficient input to
-// backfill eligibility — see the PR-2 GATE note on backfillAppliedIfEligible.
+// zone is actually signed under them. Combined with zoneServesIntentSOASig it
+// forms the backfill eligibility predicate.
 func zoneActiveKeysMatchAlgs(kdb *KeyDB, zone string, pol *DnssecPolicy) (bool, error) {
 	active, err := GetDnssecKeysByState(kdb, zone, DnskeyStateActive)
 	if err != nil {
@@ -324,6 +337,156 @@ func zoneActiveKeysMatchAlgs(kdb *KeyDB, zone string, pol *DnssecPolicy) (bool, 
 		}
 	}
 	return haveKSK && haveZSK, nil
+}
+
+// syncZoneDnssecPolicyFromConfig is the refresh-engine policy path (plan §6.2):
+// resolve applied vs intent → Branch 0 backfill/first-apply → classify →
+// cheap rebind / skip-in-flight / transactional apply / refuse. Config source
+// only — never writes a CLI override.
+//
+// Branch 0 (backfill) requires a Ready MapZone so the served-SOA-RRSIG GATE can
+// succeed; callers on first-bind must InstallInitialSnapshot before this.
+// Classify (Branches 1–3) reads only DB + ConfLive and does not need Ready.
+//
+// §5.6: when appliedOK but appliedPol is nil (YAML deleted the applied name):
+// keep an existing in-memory binding + DnssecPolicyWarning; on first-bind with
+// no binding yet, proceed toward intent when resolvable, else quarantine.
+func syncZoneDnssecPolicyFromConfig(ctx context.Context, zd *ZoneData, kdb *KeyDB, conf *Config, configPolicyName string) error {
+	if zd == nil || kdb == nil {
+		return fmt.Errorf("syncZoneDnssecPolicyFromConfig: nil zone or keydb")
+	}
+	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
+		return nil
+	}
+
+	intentName, intentPol, appliedName, appliedPol, appliedOK, err := resolvePolicyPair(kdb, zd.ZoneName, configPolicyName)
+	if err != nil {
+		lgEngine.Warn("resolvePolicyPair failed", "zone", zd.ZoneName, "err", err)
+		// Continue with whatever resolve returned; EffectiveDnssecPolicyName may
+		// still have yielded a usable intent name on a soft DB error.
+	}
+
+	// Intent unresolvable with a non-empty name → quarantine (existing behaviour).
+	if intentName != "" && intentPol == nil {
+		lgEngine.Error("zone has unknown effective DNSSEC policy, will not be signed",
+			"zone", zd.ZoneName, "policy", intentName, "config_policy", configPolicyName)
+		zd.SetError(DnssecError, "DNSSEC policy %q does not exist", intentName)
+		zd.mu.Lock()
+		zd.DnssecPolicy = &DnssecPolicy{}
+		zd.DnssecPolicyName = ""
+		zd.mu.Unlock()
+		return nil
+	}
+	if intentPol == nil {
+		return nil // no DNSSEC policy configured
+	}
+
+	// Branch 0 — no applied row yet.
+	if !appliedOK {
+		backfilled, berr := backfillAppliedIfEligible(kdb, zd, intentName, intentPol)
+		if berr != nil {
+			return fmt.Errorf("backfill applied for zone %s: %w", zd.ZoneName, berr)
+		}
+		if backfilled {
+			zd.mu.Lock()
+			zd.DnssecPolicy = intentPol
+			zd.DnssecPolicyName = intentName
+			zd.mu.Unlock()
+			UpdateSigValidityFloor(zd, intentPol, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm, false)
+			lgEngine.Info("backfilled applied DNSSEC policy without re-sign",
+				"zone", zd.ZoneName, "policy", intentName)
+			return nil
+		}
+		if _, aerr := applyZonePolicyTransactional(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
+			lgEngine.Warn("first config apply of DNSSEC policy failed; binding reverted",
+				"zone", zd.ZoneName, "policy", intentName, "err", aerr)
+			return aerr
+		}
+		return nil
+	}
+
+	// appliedOK — §5.6 deleted applied policy name.
+	if appliedPol == nil {
+		if zd.DnssecPolicy != nil && zd.DnssecPolicyName != "" {
+			lgEngine.Warn("applied DNSSEC policy no longer in config; keeping current binding",
+				"zone", zd.ZoneName, "applied", appliedName, "bound", zd.DnssecPolicyName, "intent", intentName)
+			zd.SetError(DnssecPolicyWarning, "applied DNSSEC policy %q is no longer defined in config; keeping bound policy %q",
+				appliedName, zd.DnssecPolicyName)
+			return nil
+		}
+		// First-bind: no binding to keep — proceed toward intent.
+		if _, aerr := applyZonePolicyTransactional(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
+			lgEngine.Warn("config apply toward intent after deleted applied policy failed",
+				"zone", zd.ZoneName, "policy", intentName, "err", aerr)
+			return aerr
+		}
+		return nil
+	}
+
+	class := classifyPolicyChange(appliedPol, appliedName, intentPol, intentName)
+
+	// Branch 1 — same name, same algs (incl. internals-only edits).
+	if intentName == appliedName && class == PolicyChangeNone {
+		zd.mu.Lock()
+		zd.DnssecPolicy = intentPol
+		zd.DnssecPolicyName = intentName
+		zd.mu.Unlock()
+		UpdateSigValidityFloor(zd, intentPol, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm, false)
+		zd.ClearError(DnssecPolicyWarning)
+		return nil
+	}
+
+	// Branch 1b — in-flight ZSK algorithm roll: do not clobber with config apply.
+	if st, ierr := zskAlgRollInFlight(kdb, zd.ZoneName, appliedPol.ZSKAlgorithm); ierr != nil {
+		lgEngine.Warn("zskAlgRollInFlight check failed", "zone", zd.ZoneName, "err", ierr)
+	} else if st.InFlight {
+		lgEngine.Debug("skipping config DNSSEC policy apply; ZSK algorithm roll in flight",
+			"zone", zd.ZoneName, "applied", appliedName, "intent", intentName)
+		return nil
+	}
+
+	switch class {
+	case PolicyChangeCompatibleName:
+		if _, aerr := applyZonePolicyTransactional(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
+			lgEngine.Warn("compatible DNSSEC policy rename apply failed; binding reverted",
+				"zone", zd.ZoneName, "from", appliedName, "to", intentName, "err", aerr)
+			return aerr
+		}
+		zd.ClearError(DnssecPolicyWarning)
+		return nil
+
+	case PolicyChangeIncompatibleAlg:
+		refuseIncompatiblePolicyChange(zd, intentName, appliedName, appliedPol)
+		return nil
+
+	default:
+		// Defensive: treat unknown as compatible apply.
+		if _, aerr := applyZonePolicyTransactional(ctx, zd, kdb, intentPol, intentName, PolicyApplySourceConfig); aerr != nil {
+			return aerr
+		}
+		return nil
+	}
+}
+
+// refuseIncompatiblePolicyChange keeps the zone signing under appliedPol
+// (rebind when needed) and logs a warning. Used when classify reports
+// PolicyChangeIncompatibleAlg on the config path (rollover not implemented).
+func refuseIncompatiblePolicyChange(zd *ZoneData, intentName, appliedName string, appliedPol *DnssecPolicy) {
+	if appliedPol == nil {
+		return
+	}
+	zd.mu.Lock()
+	zd.DnssecPolicy = appliedPol
+	zd.DnssecPolicyName = appliedName
+	zd.mu.Unlock()
+	lgEngine.Warn("refused incompatible DNSSEC algorithm change on reload; keeping applied policy",
+		"zone", zd.ZoneName,
+		"applied_policy", appliedName,
+		"config_policy", intentName,
+		"applied_ksk_alg", dns.AlgorithmToString[appliedPol.KSKAlgorithm],
+		"config_intent", intentName,
+		"applied_zsk_alg", dns.AlgorithmToString[appliedPol.ZSKAlgorithm],
+		"reason", "algorithm change requires a key rollover (not implemented)")
 }
 
 // zoneActiveKeyRoleChanges reports, per role, whether the zone's ACTIVE keys must

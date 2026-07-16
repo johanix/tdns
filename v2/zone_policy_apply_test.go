@@ -104,19 +104,14 @@ func TestResolvePolicyPairRestartDetectsChange(t *testing.T) {
 	}
 }
 
-// TestBackfillAppliedIfEligible covers blocking ②: a config-only signed zone
-// with no applied record but active keys already matching intent is backfilled
-// WITHOUT a re-sign; a zone whose active-key algorithms differ from intent is
-// NOT eligible (the caller then drives a real apply).
+// TestBackfillAppliedIfEligible covers blocking ② with the PR-2 GATE closed:
+// keystore match AND a served apex SOA RRSIG by the intent signing algorithm.
 func TestBackfillAppliedIfEligible(t *testing.T) {
-	// NOTE: this asserts PR-1's keystore-only predicate. Per the §5.5 PR-2 GATE
-	// on backfillAppliedIfEligible, going live additionally requires the zone to
-	// actually SERVE a signature; this positive case will then also need a
-	// signed-snapshot fixture (or move to the live matrix).
-	t.Run("eligible: keys match intent -> backfill, no sign", func(t *testing.T) {
+	t.Run("eligible: keys+soa-rrsig match intent -> backfill, no sign", func(t *testing.T) {
 		kdb := newTestKeyDB(t)
-		zd := algTestZone(dns.ED25519, dns.ED25519)
-		// Active KSK + ZSK of ED25519 — already signed under the intent alg.
+		zd := readySignedApexZone(t, algZone, dns.ED25519)
+		zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
+		zd.KeyDB = kdb
 		if _, _, err := kdb.GenerateKeypair(algZone, "test", DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, "KSK", nil); err != nil {
 			t.Fatalf("KSK: %v", err)
 		}
@@ -130,18 +125,34 @@ func TestBackfillAppliedIfEligible(t *testing.T) {
 		if !backfilled {
 			t.Fatal("zone already signed under intent must be eligible for backfill")
 		}
-		// Applied is recorded as config-source; nothing signed (a data-less zone
-		// would have errored in SignZone — proving backfill did not re-sign).
 		name, source, ok, err := GetZoneAppliedPolicy(kdb, algZone)
 		if err != nil || !ok || name != "intentpol" || source != "config" {
 			t.Fatalf("applied after backfill: got (%q,%q,%v,err=%v), want (intentpol,config,true,nil)", name, source, ok, err)
 		}
 	})
 
+	t.Run("ineligible: keys match but no served soa rrsig -> no backfill", func(t *testing.T) {
+		kdb := newTestKeyDB(t)
+		zd := algTestZone(dns.ED25519, dns.ED25519) // not Ready / no SOA RRSIGs
+		if _, _, err := kdb.GenerateKeypair(algZone, "test", DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, "KSK", nil); err != nil {
+			t.Fatalf("KSK: %v", err)
+		}
+		genZSK(t, kdb, DnskeyStateActive, dns.ED25519)
+
+		intent := kskzsk(dns.ED25519, dns.ED25519)
+		backfilled, err := backfillAppliedIfEligible(kdb, zd, "intentpol", &intent)
+		if err != nil {
+			t.Fatalf("backfill: %v", err)
+		}
+		if backfilled {
+			t.Fatal("GATE: keys alone must not backfill without a served SOA RRSIG")
+		}
+	})
+
 	t.Run("ineligible: keys differ from intent -> no backfill", func(t *testing.T) {
 		kdb := newTestKeyDB(t)
-		zd := algTestZone(dns.ED25519, dns.ED25519)
-		// Active keys are ED25519, but intent wants an RSASHA256 KSK.
+		zd := readySignedApexZone(t, algZone, dns.ED25519)
+		zd.Options = map[ZoneOption]bool{OptOnlineSigning: true}
 		if _, _, err := kdb.GenerateKeypair(algZone, "test", DnskeyStateActive, dns.TypeDNSKEY, dns.ED25519, "KSK", nil); err != nil {
 			t.Fatalf("KSK: %v", err)
 		}
@@ -162,13 +173,36 @@ func TestBackfillAppliedIfEligible(t *testing.T) {
 
 	t.Run("unsigned zone -> no backfill", func(t *testing.T) {
 		kdb := newTestKeyDB(t)
-		zd := algTestZone(dns.ED25519, dns.ED25519)
+		zd := readySignedApexZone(t, algZone, dns.ED25519)
 		zd.Options = map[ZoneOption]bool{} // not signed
 		intent := kskzsk(dns.ED25519, dns.ED25519)
 		if backfilled, err := backfillAppliedIfEligible(kdb, zd, "intentpol", &intent); err != nil || backfilled {
 			t.Fatalf("unsigned zone must not backfill (backfilled=%v err=%v)", backfilled, err)
 		}
 	})
+}
+
+// readySignedApexZone builds a Ready MapZone with an apex SOA RRSIG of the
+// given algorithm — the minimum fixture for the backfill served-signature GATE.
+func readySignedApexZone(t *testing.T, name string, sigAlg uint8) *ZoneData {
+	t.Helper()
+	zone := name + "\t3600\tIN\tSOA\tns." + name + " hostmaster." + name + " 1 7200 1800 604800 7200\n" +
+		name + "\t3600\tIN\tNS\tns." + name + "\n"
+	zd := testZone(t, name, zone)
+	apex, ok := zd.Data.Get(name)
+	if !ok {
+		t.Fatal("apex missing")
+	}
+	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+	soa.RRSIGs = []dns.RR{&dns.RRSIG{
+		Hdr:         dns.RR_Header{Name: name, Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 3600},
+		TypeCovered: dns.TypeSOA,
+		Algorithm:   sigAlg,
+		SignerName:  name,
+	}}
+	apex.RRtypes.Set(dns.TypeSOA, soa)
+	zd.InstallInitialSnapshot()
+	return zd
 }
 
 // TestApplyZonePolicyTransactionalRevertOnSignFailure asserts the transactional
