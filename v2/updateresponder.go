@@ -293,8 +293,16 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	err = zd.TrustUpdate(r, dur.Status)
 	if err != nil {
 		zd.Logger.Printf("Error from TrustUpdate(): %v", err)
+		// Relay the rcode + EDE that TrustUpdate/ValidateUpdate selected
+		// for this specific failure: BADKEY + key-not-known for an unknown
+		// key, REFUSED + key-known-not-trusted for a known-but-untrusted
+		// key, and BADSIG/BADTIME for a signature that did not verify.
+		// The previous hardcoded EDESig0KeyKnownButNotTrusted mislabelled
+		// the unknown-key and bad-signature cases.
 		m.SetRcode(m, int(dur.Status.ValidationRcode))
-		edns0.AttachEDEToResponse(m, edns0.EDESig0KeyKnownButNotTrusted)
+		if dur.Status.RejectionEDE != 0 {
+			edns0.AttachEDEToResponse(m, dur.Status.RejectionEDE)
+		}
 		w.WriteMsg(m)
 		return err
 	}

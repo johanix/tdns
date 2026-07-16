@@ -286,8 +286,36 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 	// dump.P(us)
 	if len(us.Signers) == 0 {
-		return fmt.Errorf("update has no signature")
+		// No locatable signing key for any SIG in the UPDATE. This branch
+		// also covers a fully-unsigned UPDATE (no SIG RR at all): both map
+		// to BADKEY(17). Per draft-ietf-dnsop-delegation-mgmt-via-ddns-02
+		// §"RCODE BADKEY", an unknown key is a definitive BADKEY so the
+		// child falls back to bootstrapping its key into the receiver.
+		// Conflating "unsigned" with "unknown key" is a deliberate choice:
+		// a child re-bootstrapping off its own unsigned UPDATE is harmless.
+		us.ValidationRcode = dns.RcodeBadKey
+		us.RejectionEDE = edns0.EDESig0KeyNotKnown
+		return fmt.Errorf("update has no locatable signing key")
 	}
+
+	// A key was located but no signature actually verified over the message
+	// bytes (forged/tampered signature, or one outside its validity window).
+	// ValidateUpdate already recorded the precise failure (BadSig / BadTime
+	// plus the matching EDE); do NOT fall through to the trust checks below,
+	// which read only the key's stored flags. Without this guard a trusted
+	// key's KeyTag placed over tampered bytes would be reported as trusted
+	// (us.ValidatedByTrustedKey=true) while ValidationRcode is still BadSig.
+	// ApproveUpdate also hard-rejects a non-Success ValidationRcode, but we
+	// fail closed here so the trust flags are never set for an unverified
+	// signature. A well-formed self-signed key upload verifies, so it has
+	// Validated=true and is unaffected.
+	if !us.Validated {
+		if us.RejectionEDE == 0 {
+			us.RejectionEDE = edns0.EDESig0BadSignature
+		}
+		return fmt.Errorf("update signed by %s (keyid %d) but no signature verified", us.Signers[0].Name, us.Signers[0].KeyId)
+	}
+
 	for _, key := range us.Signers {
 		// dump.P(key)
 		if key.Sig0Key.Trusted {
@@ -305,11 +333,14 @@ func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 			return nil
 		}
 	}
-	// If we get here then the update is not signed by any trusted, or DNSSEC validated key. Nor
-	// is it self-signed.
-	us.ValidationRcode = dns.RcodeBadKey
+	// A signature verified with a located key that is nonetheless neither
+	// trusted, DNSSEC-validated, nor a self-signed upload. Per ddns-02
+	// §"Communication in Case of Errors" the key is known but not (or no
+	// longer) trusted, so respond REFUSED carrying EDE KEY-KNOWN-NOT-TRUSTED
+	// — distinct from BADKEY, which means the key is unknown.
+	us.ValidationRcode = dns.RcodeRefused
 	us.RejectionEDE = edns0.EDESig0KeyKnownButNotTrusted
-	return fmt.Errorf("update is signed by %s (keyid %d) which is neither a trusted SIG(0) key nor a DNSSEC validated key", us.Signers[0].Name, us.Signers[0].KeyId)
+	return fmt.Errorf("update is signed by %s (keyid %d) which is known but not trusted", us.Signers[0].Name, us.Signers[0].KeyId)
 }
 
 func (zd *ZoneData) FindSig0KeyViaDNS(signer string, keyid uint16) (*Sig0Key, error) {
