@@ -144,13 +144,7 @@ func QueryParentKeyState(kdb *KeyDB, imr *Imr, keyName string, keyid uint16) (ui
 		return 0, fmt.Errorf("DSYNC lookup failed: %v", err)
 	}
 
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(keyName), dns.TypeANY)
-
-	edns0.AttachKeyStateToResponse(m, &edns0.KeyStateOption{
-		KeyID:    keyid,
-		KeyState: edns0.KeyStateInquiryKey,
-	})
+	m := newKeyStateInquiryMsg(keyName, keyid)
 
 	sak, err := kdb.GetSig0Keys(keyName, Sig0StateActive)
 	if err != nil || len(sak.Keys) == 0 {
@@ -201,13 +195,7 @@ func QueryParentKeyStateDetailed(kdb *KeyDB, imr *Imr, keyName string, keyid uin
 		return 0, "", fmt.Errorf("DSYNC lookup failed: %v", err)
 	}
 
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(keyName), dns.TypeANY)
-
-	edns0.AttachKeyStateToResponse(m, &edns0.KeyStateOption{
-		KeyID:    keyid,
-		KeyState: edns0.KeyStateInquiryKey,
-	})
+	m := newKeyStateInquiryMsg(keyName, keyid)
 
 	sak, err := kdb.GetSig0Keys(keyName, Sig0StateActive)
 	if err != nil || len(sak.Keys) == 0 {
