@@ -410,7 +410,7 @@ func (zd *ZoneData) addNSAndGlue(m *dns.Msg, apex *OwnerData, snap *zoneSnapshot
 // RRset are added when DO is set. Returns true if anything was added.
 func (zd *ZoneData) addTransportSignal(m *dns.Msg, sigs []core.RRset, msgoptions *edns0.MsgOptions) bool {
 	// -03: SHOULD NOT include OOTS SVCB unless the query carried the OOTS option.
-	if msgoptions == nil || !msgoptions.OtsOptIn || len(sigs) == 0 {
+	if msgoptions == nil || !msgoptions.OotsOptIn || len(sigs) == 0 {
 		return false
 	}
 	present := map[string]bool{}

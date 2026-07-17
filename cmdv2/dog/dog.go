@@ -65,7 +65,7 @@ var rootCmd = &cobra.Command{
 		+WIDTH=N: Set the width of the output to N characters
 		+BUFsize=N: Set the EDNS(0) UDP payload size (dig-compatible; +BUFSIZ=N accepted)
 		+OPCODE=QUERY|NOTIFY|UPDATE: Set the opcode of the query
-		+OTS=opt_in|opt_out: Set the OTS (transport signaling) EDNS(0)option
+		+OOTS=opt_in|opt_out: Set the OOTS (transport signaling) EDNS(0)option
 		+ER=agent.domain: Add EDNS(0) Error Reporting option with agent domain (RFC9567)
 		+DELEG: Set the DELEG bit in queries
 		+PRIVACY or +PR: Set the PR (Privacy Requested) bit in queries (requires encrypted transport)
@@ -317,10 +317,10 @@ var rootCmd = &cobra.Command{
 					// Set PR bit (bit 12) - Privacy Requested
 					opt.Hdr.Ttl |= 1 << 12
 				}
-				if _, ok := options["ots"]; ok {
+				if _, ok := options["oots"]; ok {
 					// -03: zero-length OOTS option; presence is opt-in.
-					if err := edns0.AddOTSOption(opt); err != nil {
-						fmt.Printf("Error from AddOTSOption: %v", err)
+					if err := edns0.AddOOTSOption(opt); err != nil {
+						fmt.Printf("Error from AddOOTSOption: %v", err)
 						os.Exit(1)
 					}
 				}
@@ -635,10 +635,9 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 			return options, nil
 		}
 
-		// +OTS / +OOTS: include the zero-length OOTS EDNS option (opt-in by presence).
+		// +OOTS: include the zero-length OOTS EDNS option (opt-in by presence).
 		ucargUpper := strings.ToUpper(ucarg)
-		if ucargUpper == "+OTS" || ucargUpper == "+OOTS" ||
-			strings.HasPrefix(ucargUpper, "+OTS=") || strings.HasPrefix(ucargUpper, "+OOTS=") {
+		if ucargUpper == "+OOTS" || strings.HasPrefix(ucargUpper, "+OOTS=") {
 			if strings.Contains(ucarg, "=") {
 				parts := strings.SplitN(ucarg, "=", 2)
 				arg := strings.ToLower(parts[1])
@@ -646,7 +645,7 @@ func ProcessOptions(options map[string]string, ucarg string) (map[string]string,
 					return nil, fmt.Errorf("OOTS is presence-only (-03); unsupported argument %q", arg)
 				}
 			}
-			options["ots"] = "opt_in"
+			options["oots"] = "opt_in"
 			return options, nil
 		}
 

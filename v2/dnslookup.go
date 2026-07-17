@@ -1420,17 +1420,17 @@ func (imr *Imr) CollectNSAddresses(ctx context.Context, rrset *core.RRset, respc
 }
 
 // parseOwnerName extracts the base server name from an owner name, handling both
-// direct nameserver names and OTS transport signal owners (_dns.{nsname}).
-// Returns: baseName, isOTSOwner, originalOwner
-func parseOwnerName(owner string) (baseName string, isOTSOwner bool, originalOwner string) {
+// direct nameserver names and OOTS transport signal owners (_dns.{nsname}).
+// Returns: baseName, isOOTSOwner, originalOwner
+func parseOwnerName(owner string) (baseName string, isOOTSOwner bool, originalOwner string) {
 	originalOwner = owner
 	if strings.HasPrefix(owner, "_dns.") {
-		isOTSOwner = true
+		isOOTSOwner = true
 		baseName = strings.TrimPrefix(owner, "_dns.")
 	} else {
 		baseName = owner
 	}
-	return baseName, isOTSOwner, originalOwner
+	return baseName, isOOTSOwner, originalOwner
 }
 
 // parseSVCBTransportSignal extracts and applies transport signals from an SVCB record.
@@ -1552,7 +1552,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		}
 
 		owner := rr.Header().Name
-		baseName, isOTSOwner, _ := parseOwnerName(owner)
+		baseName, isOOTSOwner, _ := parseOwnerName(owner)
 
 		// Determine which server name to use and whether to process this record
 		var serverName string
@@ -1562,7 +1562,7 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 		switch rr.(type) {
 		case *dns.A, *dns.AAAA:
 			// Glue records must match an NS name directly (not _dns.*)
-			if !isOTSOwner {
+			if !isOOTSOwner {
 				if _, exist := nsMap[baseName]; exist {
 					serverName = baseName
 					isGlueRecord = true
@@ -1582,20 +1582,20 @@ func (imr *Imr) ParseAdditionalForNSAddrs(ctx context.Context, src string, nsrrs
 				continue
 			}
 			// Transport signals: process if:
-			// 1. First pass equivalent: isOTSOwner AND baseName in nsMap (will create server entry)
-			// 2. Second pass equivalent: isOTSOwner AND baseName in serverMap (server already exists)
-			if isOTSOwner {
+			// 1. First pass equivalent: isOOTSOwner AND baseName in nsMap (will create server entry)
+			// 2. Second pass equivalent: isOOTSOwner AND baseName in serverMap (server already exists)
+			if isOOTSOwner {
 				_, inNsMap := nsMap[baseName]
 				_, inServerMap := serverMap[baseName]
 				if inNsMap || inServerMap {
 					serverName = baseName
 					shouldProcessTransportSignal = true
 				} else {
-					// OTS owner but server not in nsMap or serverMap, skip
+					// OOTS owner but server not in nsMap or serverMap, skip
 					continue
 				}
 			} else {
-				// Not OTS owner, skip transport signals (they should be _dns.*)
+				// Not OOTS owner, skip transport signals (they should be _dns.*)
 				if !imr.Quiet {
 					lgDns.Debug("*** IterativeDNSQuery: non-glue record in Additional", "additional", rr.String())
 				}
@@ -1856,7 +1856,7 @@ func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
 	m.SetQuestion(qname, qtype)
 	m.SetEdns0(4096, true)
 	if withOOTS {
-		if err := edns0.AddOTSToMessage(m); err != nil {
+		if err := edns0.AddOOTSToMessage(m); err != nil {
 			return nil, err
 		}
 	}

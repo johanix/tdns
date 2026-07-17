@@ -5,7 +5,7 @@ package edns0
 
 // Local EDNS(0) options that are defined in TDNS
 const (
-	EDNS0_OTS_OPTION_CODE           = 65001 // experimental OOTS EDNS option (-03; IANA TBD)
+	EDNS0_OOTS_OPTION_CODE          = 65001 // experimental OOTS EDNS option (-03; IANA TBD)
 	EDNS0_KEYSTATE_OPTION_CODE      = 65002
 	EDNS0_REPORT_OPTION_CODE        = 65003
 	EDNS0_CHUNK_OPTION_CODE         = 65004 // CHUNK EDNS(0) option for payload

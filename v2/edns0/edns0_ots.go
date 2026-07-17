@@ -9,31 +9,31 @@ import (
 	"github.com/miekg/dns"
 )
 
-// AddOTSOption adds a zero-length OOTS EDNS0 option to an existing OPT RR.
+// AddOOTSOption adds a zero-length OOTS EDNS0 option to an existing OPT RR.
 // draft-johani-dnsop-transport-signaling-03: OPTION-LENGTH MUST be 0;
 // presence of the option is the opt-in signal.
-func AddOTSOption(opt *dns.OPT) error {
+func AddOOTSOption(opt *dns.OPT) error {
 	if opt == nil {
 		return fmt.Errorf("OPT RR is nil")
 	}
 
 	option := &dns.EDNS0_LOCAL{
-		Code: EDNS0_OTS_OPTION_CODE,
+		Code: EDNS0_OOTS_OPTION_CODE,
 		Data: nil, // OPTION-LENGTH = 0
 	}
 	opt.Option = append(opt.Option, option)
 	return nil
 }
 
-// ExtractOTSOption reports whether the OOTS EDNS0 option is present on opt.
+// ExtractOOTSOption reports whether the OOTS EDNS0 option is present on opt.
 // Presence alone is the opt-in signal; any payload is ignored.
-func ExtractOTSOption(opt *dns.OPT) bool {
+func ExtractOOTSOption(opt *dns.OPT) bool {
 	if opt == nil {
 		return false
 	}
 	for _, option := range opt.Option {
 		if localOpt, ok := option.(*dns.EDNS0_LOCAL); ok {
-			if localOpt.Code == EDNS0_OTS_OPTION_CODE {
+			if localOpt.Code == EDNS0_OOTS_OPTION_CODE {
 				return true
 			}
 		}
@@ -41,18 +41,18 @@ func ExtractOTSOption(opt *dns.OPT) bool {
 	return false
 }
 
-// HasOTSOption checks if an OPT RR contains an OOTS option.
-func HasOTSOption(opt *dns.OPT) bool {
-	return ExtractOTSOption(opt)
+// HasOOTSOption checks if an OPT RR contains an OOTS option.
+func HasOOTSOption(opt *dns.OPT) bool {
+	return ExtractOOTSOption(opt)
 }
 
-// IsOTSEnabled is true when the OOTS option is present (opt-in by presence).
-func IsOTSEnabled(opt *dns.OPT) bool {
-	return ExtractOTSOption(opt)
+// IsOOTSEnabled is true when the OOTS option is present (opt-in by presence).
+func IsOOTSEnabled(opt *dns.OPT) bool {
+	return ExtractOOTSOption(opt)
 }
 
-// RemoveOTSOption removes the OOTS EDNS0 option from an OPT RR.
-func RemoveOTSOption(opt *dns.OPT) {
+// RemoveOOTSOption removes the OOTS EDNS0 option from an OPT RR.
+func RemoveOOTSOption(opt *dns.OPT) {
 	if opt == nil {
 		return
 	}
@@ -60,7 +60,7 @@ func RemoveOTSOption(opt *dns.OPT) {
 	var newOptions []dns.EDNS0
 	for _, option := range opt.Option {
 		if localOpt, ok := option.(*dns.EDNS0_LOCAL); ok {
-			if localOpt.Code == EDNS0_OTS_OPTION_CODE {
+			if localOpt.Code == EDNS0_OOTS_OPTION_CODE {
 				continue
 			}
 		}
@@ -72,7 +72,7 @@ func RemoveOTSOption(opt *dns.OPT) {
 
 // AddOTSToMessage adds an EDNS0 OPT RR to a message (if needed) and includes
 // the zero-length OOTS option.
-func AddOTSToMessage(msg *dns.Msg) error {
+func AddOOTSToMessage(msg *dns.Msg) error {
 	if msg == nil {
 		return fmt.Errorf("message is nil")
 	}
@@ -82,6 +82,6 @@ func AddOTSToMessage(msg *dns.Msg) error {
 		opt = msg.IsEdns0()
 	}
 
-	RemoveOTSOption(opt)
-	return AddOTSOption(opt)
+	RemoveOOTSOption(opt)
+	return AddOOTSOption(opt)
 }
