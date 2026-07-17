@@ -102,3 +102,34 @@ func RequestUDPSize(r *dns.Msg) uint16 {
 	}
 	return size
 }
+
+// EnsureResponseOPT makes the response m carry an EDNS(0) OPT record whenever
+// the query r carried one. RFC 6891 §6.1.1 requires a compliant responder to
+// include an OPT in the response to any request that carried an OPT; omitting
+// it can make a strict resolver downgrade to plain DNS (dropping the DO bit and
+// breaking DNSSEC validation). The OPT advertises version 0 and udpsize (the
+// server's own reassembly capacity) and copies the DO bit from the query, as
+// mandated by RFC 3225 §3.
+//
+// It is deliberately a no-op in two cases:
+//   - the query carried no OPT: a plain-DNS query gets a plain-DNS reply; and
+//   - m already carries an OPT: the EDE / KeyState paths build their own OPT,
+//     and a second SetEdns0 would append a duplicate OPT to the Additional
+//     section.
+//
+// The OPT is attached with an empty option list, leaving room for EDE (or any
+// other option) to be appended later on error paths (AttachEDEToResponse finds
+// and reuses this OPT rather than creating a second one).
+func EnsureResponseOPT(m, r *dns.Msg, udpsize uint16) {
+	if m == nil || r == nil {
+		return
+	}
+	reqOpt := r.IsEdns0()
+	if reqOpt == nil {
+		return
+	}
+	if m.IsEdns0() != nil {
+		return
+	}
+	m.SetEdns0(udpsize, reqOpt.Do())
+}
