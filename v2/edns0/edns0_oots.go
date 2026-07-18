@@ -70,7 +70,7 @@ func RemoveOOTSOption(opt *dns.OPT) {
 	opt.Option = newOptions
 }
 
-// AddOTSToMessage adds an EDNS0 OPT RR to a message (if needed) and includes
+// AddOOTSToMessage adds an EDNS0 OPT RR to a message (if needed) and includes
 // the zero-length OOTS option.
 func AddOOTSToMessage(msg *dns.Msg) error {
 	if msg == nil {

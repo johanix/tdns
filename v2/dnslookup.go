@@ -1964,19 +1964,16 @@ func (imr *Imr) applyTransportSignalToServer(server *cache.AuthServer, s string)
 }
 
 // applyTransportMapToServer installs a decoded weight map on server, keeping
-// all weights (including do53). PrefTransport is the highest OOTS share
-// (do53_share = max(0, 100−Σ encrypted>1); encrypted share = weight when >1).
+// all weights (including do53). The do53 share and the per-query transport
+// pick are computed later, at selection time, by candidateTransports — this
+// just records the decoded weights and the set of transports (any order).
 func applyTransportMapToServer(server *cache.AuthServer, kvMap map[string]uint8) bool {
 	if server == nil || len(kvMap) == 0 {
 		return false
 	}
-	type pair struct {
-		t     core.Transport
-		k     string
-		share int
-	}
 	weights := map[core.Transport]uint8{}
-	encSum := 0
+	var transports []core.Transport
+	var alpnOrder []string
 	for k, v := range kvMap {
 		t, err := core.StringToTransport(k)
 		if err != nil {
@@ -1984,55 +1981,15 @@ func applyTransportMapToServer(server *cache.AuthServer, kvMap map[string]uint8)
 			continue
 		}
 		weights[t] = v
-		if core.IsEncryptedTransport(t) && v > 1 {
-			encSum += int(v)
-		}
+		transports = append(transports, t)
+		alpnOrder = append(alpnOrder, k)
 	}
 	if len(weights) == 0 {
 		return false
 	}
-	do53Share := 100 - encSum
-	if do53Share < 0 {
-		do53Share = 0
-	}
-
-	var pairs []pair
-	for k, v := range kvMap {
-		t, err := core.StringToTransport(k)
-		if err != nil {
-			continue
-		}
-		share := 0
-		switch {
-		case t == core.TransportDo53:
-			share = do53Share
-		case core.IsEncryptedTransport(t) && v > 1:
-			share = int(v)
-		}
-		pairs = append(pairs, pair{t: t, k: k, share: share})
-	}
-	sort.SliceStable(pairs, func(i, j int) bool {
-		if pairs[i].share != pairs[j].share {
-			return pairs[i].share > pairs[j].share
-		}
-		return pairs[i].t < pairs[j].t
-	})
-	var transports []core.Transport
-	var alpnOrder []string
-	for _, p := range pairs {
-		transports = append(transports, p.t)
-		alpnOrder = append(alpnOrder, p.k)
-	}
 	server.Transports = transports
 	server.Alpn = alpnOrder
 	server.TransportWeights = weights
-	server.PrefTransport = core.TransportDo53
-	for _, p := range pairs {
-		if p.share > 0 {
-			server.PrefTransport = p.t
-			break
-		}
-	}
 	return true
 }
 
@@ -2080,9 +2037,6 @@ func applyAlpnSignal(owner string, alpnCSV string, serverMap map[string]*cache.A
 			server.Transports = append(server.Transports, t)
 		}
 	}
-	if len(server.Transports) > 0 {
-		server.PrefTransport = server.Transports[0]
-	}
 	serverMap[owner] = server
 }
 
@@ -2117,9 +2071,6 @@ func applyAlpnSignalToServer(server *cache.AuthServer, alpnCSV string) {
 		if t, err := core.StringToTransport(k); err == nil {
 			server.Transports = append(server.Transports, t)
 		}
-	}
-	if len(server.Transports) > 0 {
-		server.PrefTransport = server.Transports[0]
 	}
 }
 

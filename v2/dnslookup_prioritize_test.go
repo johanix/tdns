@@ -84,8 +84,7 @@ func TestCandidateTransports_WeightOneExcluded(t *testing.T) {
 }
 
 // TestCandidateTransports_SharePoolIncludesDo53: doq:20,dot:10 → do53_share=70.
-// Do53 is a valid (usually winning) hash pick; DoT/DoQ remain in the list;
-// PrefTransport follows the highest share (Do53).
+// Do53 is a valid (usually winning) hash pick; DoT/DoQ remain in the list.
 func TestCandidateTransports_SharePoolIncludesDo53(t *testing.T) {
 	s := cache.NewAuthServer("ns.example.")
 	m, err := core.ParseTransportString("doq:20,dot:10")
@@ -97,9 +96,6 @@ func TestCandidateTransports_SharePoolIncludesDo53(t *testing.T) {
 	}
 	if !applyTransportMapToServer(s, m) {
 		t.Fatal("applyTransportMapToServer failed")
-	}
-	if s.PrefTransport != core.TransportDo53 {
-		t.Fatalf("PrefTransport should be Do53 (share 70), got %v", s.PrefTransport)
 	}
 
 	got := candidateTransports(s, "example.", false)
