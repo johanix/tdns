@@ -32,7 +32,7 @@ var imrStatsTransportStatsCmd = &cobra.Command{
 		if len(args) == 1 {
 			data["zone"] = dns.Fqdn(args[0])
 		}
-		amr, err := SendImrMgmtCmd("imr", &tdns.AgentMgmtPost{
+		amr, err := SendImrMgmtCmd("imr", &tdns.ImrMgmtPost{
 			Command: "imr-transport-stats",
 			Data:    data,
 		})
@@ -67,9 +67,7 @@ var imrStatsTransportStatsCmd = &cobra.Command{
 				lastZone = rec.Zone
 			}
 			fmt.Printf("  Server: %s\n", rec.Server)
-			if rec.Signal != "" {
-				fmt.Printf("    signal: %s\n", rec.Signal)
-			}
+			fmt.Printf("    signal: %s\n", renderSignalFromWeights(weightsStringToTransport(rec.Weights)))
 			fmt.Printf("    %s\n", formatTransportStats(imrServerStatsToTransportStats(rec)))
 		}
 	},
@@ -84,9 +82,14 @@ func imrServerStatsToTransportStats(s tdns.ImrServerTransportStats) cache.Transp
 		}
 		out := make(map[core.Transport]uint64, len(m))
 		for k, v := range m {
-			if t, err := core.StringToTransport(k); err == nil {
-				out[t] = v
+			t, err := core.StringToTransport(k)
+			if err != nil {
+				// Don't silently drop: an unrecognized transport name (imr newer
+				// than this cli) would otherwise undercount the totals.
+				fmt.Fprintf(os.Stderr, "warning: unrecognized transport %q (count %d) omitted — imr/cli version skew?\n", k, v)
+				continue
 			}
+			out[t] = v
 		}
 		return out
 	}
@@ -96,6 +99,21 @@ func imrServerStatsToTransportStats(s tdns.ImrServerTransportStats) cache.Transp
 		Failed:    conv(s.Failed),
 		Truncated: s.Truncated,
 	}
+}
+
+// weightsStringToTransport converts a name-keyed weight map (from the API) into
+// a transport-keyed one for the shared signal renderer.
+func weightsStringToTransport(m map[string]uint8) map[core.Transport]uint8 {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[core.Transport]uint8, len(m))
+	for k, v := range m {
+		if t, err := core.StringToTransport(k); err == nil {
+			out[t] = v
+		}
+	}
+	return out
 }
 
 func init() {

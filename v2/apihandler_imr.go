@@ -28,7 +28,7 @@ import (
 type ImrServerTransportStats struct {
 	Zone      string            `json:"zone"`
 	Server    string            `json:"server"`
-	Signal    string            `json:"signal,omitempty"`
+	Weights   map[string]uint8  `json:"weights,omitempty"` // advertised OOTS weights (name-keyed), for signal rendering
 	Attempted map[string]uint64 `json:"attempted,omitempty"`
 	Used      map[string]uint64 `json:"used,omitempty"`
 	Failed    map[string]uint64 `json:"failed,omitempty"`
@@ -48,20 +48,33 @@ func transportCountsToStrings(m map[core.Transport]uint64) map[string]uint64 {
 	return out
 }
 
+// transportWeightsToStrings converts a transport-keyed weight map to a
+// name-keyed one for JSON transport over the API.
+func transportWeightsToStrings(m map[core.Transport]uint8) map[string]uint8 {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]uint8, len(m))
+	for t, w := range m {
+		out[core.TransportToString[t]] = w
+	}
+	return out
+}
+
 func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
-		var amp AgentMgmtPost
+		var amp ImrMgmtPost
 		err := decoder.Decode(&amp)
 		if err != nil {
-			lgApi.Warn("error decoding agent command post", "err", err)
+			lgApi.Warn("error decoding imr command post", "err", err)
 			http.Error(w, fmt.Sprintf("Invalid request format: %v", err), http.StatusBadRequest)
 			return
 		}
 
 		lgApi.Debug("received /imr request", "cmd", amp.Command, "from", r.RemoteAddr)
 
-		resp := AgentMgmtResponse{
+		resp := ImrMgmtResponse{
 			Time: time.Now(),
 		}
 
@@ -160,10 +173,10 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				resp.ErrorMsg = "IMR engine not available"
 				return
 			}
-			identity := string(amp.AgentId)
+			identity := amp.Id
 			if identity == "" {
 				resp.Error = true
-				resp.ErrorMsg = "agent_id (--id) is required"
+				resp.ErrorMsg = "id (--id) is required"
 				return
 			}
 			identity = dns.Fqdn(identity)
@@ -305,7 +318,7 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 					records = append(records, ImrServerTransportStats{
 						Zone:      item.Key,
 						Server:    name,
-						Signal:    server.TransportSignal,
+						Weights:   transportWeightsToStrings(server.GetTransportWeights()),
 						Attempted: transportCountsToStrings(ts.Attempted),
 						Used:      transportCountsToStrings(ts.Used),
 						Failed:    transportCountsToStrings(ts.Failed),

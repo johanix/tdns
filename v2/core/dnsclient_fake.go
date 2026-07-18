@@ -91,7 +91,9 @@ func (f *FakeDNSClient) Exchange(msg *dns.Msg, server string, debug bool) (*dns.
 func (f *FakeDNSClient) ExchangeWithResult(msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, ExchangeResult, error) {
 	r, rtt, err := f.Exchange(msg, server, debug)
 	res := ExchangeResult{WireTransport: f.transport}
-	if err == nil && r != nil && r.Truncated && (f.transport == TransportDo53 || f.transport == TransportDo53TCP) {
+	// Only a Do53/UDP response truncates; a Do53TCP transport is native TCP and
+	// never reports truncation (mirrors the real DNSClient's ForceTCP path).
+	if err == nil && r != nil && r.Truncated && f.transport == TransportDo53 {
 		res.WireTransport = TransportDo53TCP
 		res.Truncated = true
 	}

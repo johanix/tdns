@@ -776,7 +776,11 @@ func formatTransportCountMap(m map[core.Transport]uint64) string {
 // formatTransportStats renders the full per-server transport-usage matrix:
 // attempted / used / failed counts (all transports, incl. do53-tcp) and the
 // TC=1 truncation count. Shared by the interactive REPL dump and the
-// tdns-cli imr transport-stats command so the two cannot drift.
+// `tdns-cli imr stats transport-stats` command so the two cannot drift.
+//
+// Note: the DNS-truncation (large-response) signal is the `truncated` count,
+// NOT `used[do53-tcp]` — the latter also includes proactive force-TCP and
+// UDP-transient-error retries.
 func formatTransportStats(ts cache.TransportStats) string {
 	return fmt.Sprintf("attempted=[%s] used=[%s] failed=[%s] truncated=%d",
 		formatTransportCountMap(ts.Attempted),

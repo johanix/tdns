@@ -1937,7 +1937,12 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 			"transport", core.TransportToString[eff],
 			"error", err)
 		server.RecordAddressFailure(addr, eff, err)
-		server.IncrementFailedCounter(eff)
+		// Stats: key failed on the ACTUAL wire transport (symmetric with used on
+		// success). A TC=1-then-TCP failure is thus attributed to Do53TCP, and
+		// failed[Do53] stays 0 — preserving "failed[Do53]=0 => size upgrade".
+		// (RecordAddressFailure/RecordRTT stay on eff: backoff is keyed by the
+		// attempted (addr, transport) tuple, a separate concern from usage stats.)
+		server.IncrementFailedCounter(xres.WireTransport)
 		// Penalty RTT: record the full elapsed time so a slow-failing path
 		// naturally sorts to the bottom of prioritizeServers even after the
 		// backoff lifts.
