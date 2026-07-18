@@ -75,8 +75,8 @@ func TestTransportSignalToSVCBOots_OmitsImplicitZeros(t *testing.T) {
 func TestAddOTSOption_ZeroLengthPresence(t *testing.T) {
 	msg := new(dns.Msg)
 	msg.SetQuestion("example.", dns.TypeA)
-	if err := edns0.AddOTSToMessage(msg); err != nil {
-		t.Fatalf("AddOTSToMessage: %v", err)
+	if err := edns0.AddOOTSToMessage(msg); err != nil {
+		t.Fatalf("AddOOTSToMessage: %v", err)
 	}
 	opt := msg.IsEdns0()
 	if opt == nil {
@@ -84,7 +84,7 @@ func TestAddOTSOption_ZeroLengthPresence(t *testing.T) {
 	}
 	var found *dns.EDNS0_LOCAL
 	for _, o := range opt.Option {
-		if loc, ok := o.(*dns.EDNS0_LOCAL); ok && loc.Code == edns0.EDNS0_OTS_OPTION_CODE {
+		if loc, ok := o.(*dns.EDNS0_LOCAL); ok && loc.Code == edns0.EDNS0_OOTS_OPTION_CODE {
 			found = loc
 			break
 		}
@@ -99,8 +99,8 @@ func TestAddOTSOption_ZeroLengthPresence(t *testing.T) {
 	if err != nil {
 		t.Fatalf("extract: %v", err)
 	}
-	if !opts.OtsOptIn {
-		t.Error("presence must set OtsOptIn")
+	if !opts.OotsOptIn {
+		t.Error("presence must set OotsOptIn")
 	}
 }
 

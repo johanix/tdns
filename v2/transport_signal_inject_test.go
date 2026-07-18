@@ -117,7 +117,7 @@ func TestAddTransportSignal_DedupAgainstAnswer(t *testing.T) {
 	registerZones(t, zd)
 	sigs := zd.collectSignalRRsets(zd.publishedSnapshot())
 
-	optIn := &edns0.MsgOptions{OtsOptIn: true}
+	optIn := &edns0.MsgOptions{OotsOptIn: true}
 
 	// Simulate a direct query for the signal: it is already in the Answer.
 	m := new(dns.Msg)
