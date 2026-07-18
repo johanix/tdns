@@ -52,10 +52,9 @@ type AuthServer struct {
 	Addrs            []string
 	Alpn             []string // {"do53", "doq", "dot", "doh"}
 	Transports       []core.Transport
-	PrefTransport    core.Transport           // "doq" | "dot" | "doh" | "do53"
-	TransportWeights map[core.Transport]uint8 // percentage per transport (sum <= 100). Remainder -> do53
+	TransportWeights map[core.Transport]uint8 // independent oots weights [0,100]; Do53 is ultimate fallback
 	// Optional config-only field for stubs: colon-separated transport weights, e.g. "doq:30,dot:70"
-	// When provided in config, this overrides Alpn for building Transports/PrefTransport/TransportWeights.
+	// When provided in config, this overrides Alpn for building Transports/TransportWeights.
 	TransportSignal string                  `yaml:"transport" mapstructure:"transport"`
 	ConnMode        ConnMode                `yaml:"connmode" mapstructure:"connmode"`
 	TLSARecords     map[string]*CachedRRset // keyed by owner (_port._proto.name.), validated RRsets only
@@ -78,7 +77,6 @@ type AuthServer struct {
 // All other fields are initialized with safe defaults:
 //   - Alpn: ["do53"]
 //   - Transports: [TransportDo53]
-//   - PrefTransport: TransportDo53
 //   - Src: "unknown"
 //   - ConnMode: ConnModeLegacy
 //   - Other fields: nil or zero values
@@ -88,12 +86,11 @@ func NewAuthServer(name string) *AuthServer {
 		return nil
 	}
 	return &AuthServer{
-		Name:          name,
-		Alpn:          []string{"do53"},
-		Transports:    []core.Transport{core.TransportDo53},
-		PrefTransport: core.TransportDo53,
-		Src:           "unknown",
-		ConnMode:      ConnModeLegacy,
+		Name:       name,
+		Alpn:       []string{"do53"},
+		Transports: []core.Transport{core.TransportDo53},
+		Src:        "unknown",
+		ConnMode:   ConnModeLegacy,
 		// Other fields are zero-initialized:
 		// Addrs: nil
 		// TransportWeights: nil
@@ -332,26 +329,6 @@ func (as *AuthServer) SetExpire(expire time.Time) {
 	as.mu.Lock()
 	defer as.mu.Unlock()
 	as.Expire = expire
-}
-
-// GetPrefTransport returns the preferred transport. Thread-safe.
-func (as *AuthServer) GetPrefTransport() core.Transport {
-	if as == nil {
-		return core.TransportDo53
-	}
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	return as.PrefTransport
-}
-
-// SetPrefTransport sets the preferred transport. Thread-safe.
-func (as *AuthServer) SetPrefTransport(t core.Transport) {
-	if as == nil {
-		return
-	}
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	as.PrefTransport = t
 }
 
 // GetTransportWeights returns a copy of the transport weights map. Thread-safe.

@@ -272,6 +272,83 @@ func TestBuildLargeAlgorithmSetUnknown(t *testing.T) {
 	}
 }
 
+func TestResolveLargeAlgorithms(t *testing.T) {
+	// Synthetic name->codepoint catalog (mirrors the metadata registry) so the
+	// matcher is exercised independently of which algorithms a given binary
+	// links in. Names are the registry's canonical UPPERCASE form.
+	catalog := map[string]uint8{
+		"RSASHA512":             10,
+		"MLDSA44":               199,
+		"MLDSA65":               212,
+		"MLDSA87":               213,
+		"SLHDSA128S":            200,
+		"CROSS_RSDPG_128_SMALL": 214,
+	}
+
+	tests := []struct {
+		name    string
+		in      []string
+		want    []uint8
+		wantErr bool
+	}{
+		{"empty list", nil, nil, false},
+		{"exact name", []string{"RSASHA512"}, []uint8{10}, false},
+		{"exact case-insensitive", []string{"rsasha512"}, []uint8{10}, false},
+		{"exact trims whitespace", []string{"  MLDSA44 "}, []uint8{199}, false},
+		{"prefix expands family", []string{"MLDSA*"}, []uint8{199, 212, 213}, false},
+		{"prefix case-insensitive", []string{"mldsa*"}, []uint8{199, 212, 213}, false},
+		{"prefix single member", []string{"CROSS*"}, []uint8{214}, false},
+		{"prefix narrows within family", []string{"MLDSA8*"}, []uint8{213}, false},
+		{"bare star matches all", []string{"*"}, []uint8{10, 199, 200, 212, 213, 214}, false},
+		{"mixed exact and prefix", []string{"RSASHA512", "SLHDSA*"}, []uint8{10, 200}, false},
+		{"unknown exact errors", []string{"NOSUCHALG"}, nil, true},
+		{"unknown prefix errors", []string{"FOO*"}, nil, true},
+		{"one bad entry fails whole set", []string{"MLDSA*", "FOO*"}, nil, true},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := resolveLargeAlgorithms(tc.in, catalog)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("want error, got set=%v", got)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if len(got) != len(tc.want) {
+				t.Fatalf("got %v, want codepoints %v", got, tc.want)
+			}
+			for _, cp := range tc.want {
+				if !got[cp] {
+					t.Fatalf("codepoint %d missing from %v", cp, got)
+				}
+			}
+		})
+	}
+}
+
+func TestBuildLargeAlgorithmSetPrefixBuiltins(t *testing.T) {
+	// Against the real algorithms registry the miekg/dns built-ins are always
+	// present, so a "RSASHA*" prefix resolves with no PQ implementation linked.
+	set, err := buildLargeAlgorithmSet([]string{"RSASHA*"})
+	if err != nil {
+		t.Fatalf("buildLargeAlgorithmSet(RSASHA*): %v", err)
+	}
+	if !set[dns.RSASHA256] || !set[dns.RSASHA512] {
+		t.Fatalf("RSASHA* should cover RSASHA256 and RSASHA512, got %v", set)
+	}
+	if set[dns.ED25519] {
+		t.Fatal("RSASHA* must not match ED25519")
+	}
+	// A prefix that matches nothing known is a hard error.
+	if _, err := buildLargeAlgorithmSet([]string{"NOSUCHFAMILY*"}); err == nil {
+		t.Fatal("prefix matching no known algorithm must be a hard error")
+	}
+}
+
 func TestGenKeyLifetimeEmpty(t *testing.T) {
 	lt, err := GenKeyLifetime("")
 	if err != nil {

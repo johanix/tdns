@@ -89,13 +89,13 @@ imrengine:
    #    query_budget:            8s  # total wall-clock budget for one query
    #    upgrade_indirect_cache_hits: true   # left unset in code; treated as true
 
-# DNSSEC algorithm numbers whose DNSKEY/RRSIG payloads are large for UDP.
-# Consulted ONLY when dnskey_query_transport is "use_ds_signal" (the default).
-# When a referral DS RRset contains any listed algorithm, the IMR fetches
-# the child zone's DNSKEY over a non-UDP transport from the start, not UDP
-# with TC fallback. Listed by algorithm NAME (not codepoint): RSASHA512 is a
-# stand-in where ML-DSA-44 is unavailable. A name unknown to this binary's
-# registry is a hard config error. Inspect counters: tdns-cli imr stats large-ksk
+# DNSSEC algorithms whose DNSKEY/RRSIG payloads are large for UDP. When a
+# referral DS RRset uses one, the IMR fetches the child zone's DNSKEY over TCP
+# from the start (do53-tcp), not UDP with TC fallback. Each entry is an
+# algorithm NAME or a "family*" prefix (trailing "*"), matched case-insensitively
+# against the algorithms this binary knows — implemented or metadata-only. So
+# "MLDSA*" covers MLDSA44/65/87. An entry that matches no known algorithm is a
+# hard config error. Inspect counters: tdns-cli imr stats large-ksk
 #
 # dnskey_query_transport selects how the IMR picks a transport for DNSKEY
 # queries. DNSKEY queries are ~0.1% of traffic and exempt from a server's
@@ -113,7 +113,7 @@ imrengine:
 #                       the query if the server advertises no encrypted
 #                       transport.
 dnssec:
-   large_algorithms: [ RSASHA512 ]
+   large_algorithms: [ MLDSA*, SLHDSA*, FALCON*, CROSS* ]
    dnskey_query_transport: use_ds_signal
 
 # The HTTP management API. apikey is effectively required: SetupSimpleAPIRouter

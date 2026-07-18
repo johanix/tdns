@@ -1,6 +1,7 @@
 package tdns
 
 import (
+	"context"
 	"log"
 	"os"
 	"strings"
@@ -425,7 +426,7 @@ func TestT2StrictModeZskAlgChangeRefused(t *testing.T) {
 	withPolicies(t, map[string]DnssecPolicy{
 		"target": {Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.RSASHA256},
 	})
-	_, err := changeZonePolicy(zd, kdb, "target")
+	_, err := changeZonePolicy(context.Background(), zd, kdb, "target")
 	if err == nil {
 		t.Fatal("strict-mode ZSK alg change must be refused")
 	}
@@ -445,7 +446,7 @@ func TestT2bKskAndCskAlgChangeRefused(t *testing.T) {
 	withPolicies(t, map[string]DnssecPolicy{
 		"kskroll": {Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.RSASHA256, ZSKAlgorithm: dns.RSASHA256},
 	})
-	if _, err := changeZonePolicy(zd, kdb, "kskroll"); err == nil {
+	if _, err := changeZonePolicy(context.Background(), zd, kdb, "kskroll"); err == nil {
 		t.Fatal("KSK-only alg change must be refused")
 	}
 	if _, ok, _ := GetZonePolicyOverride(kdb, algZone); ok {
@@ -457,7 +458,7 @@ func TestT2bKskAndCskAlgChangeRefused(t *testing.T) {
 	withPolicies(t, map[string]DnssecPolicy{
 		"csk": {Mode: DnssecPolicyModeCSK, Algorithm: dns.RSASHA256, KSKAlgorithm: dns.RSASHA256, ZSKAlgorithm: dns.RSASHA256},
 	})
-	if _, err := changeZonePolicy(zdCsk, kdb, "csk"); err == nil {
+	if _, err := changeZonePolicy(context.Background(), zdCsk, kdb, "csk"); err == nil {
 		t.Fatal("CSK alg change must be refused")
 	}
 }
@@ -470,7 +471,7 @@ func TestT2cBothRoleChangeRejected(t *testing.T) {
 	withPolicies(t, map[string]DnssecPolicy{
 		"both": {Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.RSASHA256, ZSKAlgorithm: dns.RSASHA256},
 	})
-	_, err := changeZonePolicy(zd, kdb, "both")
+	_, err := changeZonePolicy(context.Background(), zd, kdb, "both")
 	if err == nil {
 		t.Fatal("both-role alg change must be rejected")
 	}
@@ -497,7 +498,7 @@ func TestT2dReentrancyRefused(t *testing.T) {
 		withPolicies(t, map[string]DnssecPolicy{
 			"target": {Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.RSASHA256},
 		})
-		if _, err := changeZonePolicy(zd, kdb, "target"); err == nil {
+		if _, err := changeZonePolicy(context.Background(), zd, kdb, "target"); err == nil {
 			t.Fatal("re-entrant change-policy (pre-promotion) must be refused")
 		}
 	})
@@ -516,7 +517,7 @@ func TestT2dReentrancyRefused(t *testing.T) {
 		withPolicies(t, map[string]DnssecPolicy{
 			"target": {Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.RSASHA256},
 		})
-		if _, err := changeZonePolicy(zd, kdb, "target"); err == nil {
+		if _, err := changeZonePolicy(context.Background(), zd, kdb, "target"); err == nil {
 			t.Fatal("re-entrant change-policy (drain window) must be refused")
 		}
 	})
@@ -590,7 +591,7 @@ func TestChangePolicyFreshZonePassesReentrancyGuard(t *testing.T) {
 	withPolicies(t, map[string]DnssecPolicy{
 		"mayoish": {Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.RSASHA256},
 	})
-	_, err := changeZonePolicy(zd, kdb, "mayoish")
+	_, err := changeZonePolicy(context.Background(), zd, kdb, "mayoish")
 	// It will likely error in SignZone (no real zone data), but NOT with the
 	// re-entrancy refusal.
 	if err != nil && strings.Contains(err.Error(), "already in progress") {

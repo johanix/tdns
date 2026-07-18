@@ -7,9 +7,9 @@ GOFLAGS:=-v
 
 # PQ algorithm selection is no longer a build-time WITH_* / -tags choice.
 # Each app declares the algorithms it wants in its algs.list; genalgs emits
-# the registration files and the C-library build environment (algs-env.mk),
-# which the app Makefile -includes. See the `generate` rule below and
-# guide/pq-dnssec.md.
+# the registration files, a per-app C-library env (algs-libs.mk), and a
+# shared ALGREPO cache (../algs-env.mk under cmdv2/). See `generate` below
+# and guide/pq-dnssec.md.
 
 GOOS ?= $(shell uname -s | tr A-Z a-z)
 
@@ -44,24 +44,29 @@ GENALGS ?= ../genalgs/tdns-genalgs
 #   * algs.list present with entries: the app links a real implementation
 #     for each named algorithm. genalgs emits metadata for all algorithms
 #     plus Register calls for the selected ones, and (for C-backed algs)
-#     the library build env.
+#     the library build env (algs-libs.mk).
 #
 # For the latter two (algs.list exists), genalgs is re-run whenever
 # registered_algs.go is missing or older than algs.list, using the
-# dnssec-algorithms path recorded as ALGREPO in the generated algs-env.mk.
-# If ALGREPO is unknown (no algs-env.mk yet — the first build), make stops
-# with a message telling the user to run genalgs once with --algrepo.
+# dnssec-algorithms path recorded as ALGREPO in the shared ../algs-env.mk
+# (under cmdv2/). If ALGREPO is unknown (no shared algs-env.mk yet — the
+# first build), make stops with a message telling the user to run genalgs
+# once with --algrepo; after that, every app benefits from the shared cache.
 #
-# ALGREPO comes from `-include algs-env.mk` in the app Makefile (below
-# this include).
+# ALGREPO comes from `-include ../algs-env.mk` in the app Makefile; per-app
+# C-library exports come from `-include algs-libs.mk`.
 build: generate
 	@test -f version.go || /bin/sh ../../utils/make-version.sh "unknown" "unknown" $(PROG)
 	$(GO) build $(GOFLAGS) -o ${PROG}
 
-generate:
+# Ensure the generator binary exists (cmdv2/Makefile also builds it first).
+$(GENALGS):
+	$(MAKE) -C $(dir $(GENALGS))
+
+generate: $(GENALGS)
 	@if [ ! -f algs.list ]; then \
 	   : "no algs.list -> standalone build, genalgs not run"; \
-	 elif [ -f registered_algs.go ] && [ ! algs.list -nt registered_algs.go ] && [ ! algs.list -nt algs-env.mk ]; then \
+	 elif [ -f registered_algs.go ] && [ ! algs.list -nt registered_algs.go ] && [ -f algs-libs.mk ] && [ -f ../algs-env.mk ]; then \
 	   : "generated files are current"; \
 	 elif [ -n "$(ALGREPO)" ]; then \
 	   echo "  algs.list changed (or no generated files); running genalgs --algrepo $(ALGREPO)"; \
@@ -74,8 +79,9 @@ generate:
 	   echo ""; \
 	   echo "    $(GENALGS) --algrepo <path-to-dnssec-algorithms> --list algs.list --out ."; \
 	   echo ""; \
-	   echo "  That generates registered_algs.go/metadata_algs.go and records the"; \
-	   echo "  path in algs-env.mk so future 'make' runs regenerate automatically."; \
+	   echo "  That generates registered_algs.go/metadata_algs.go/algs-libs.mk and"; \
+	   echo "  records ALGREPO in ../algs-env.mk (shared under cmdv2/) so future"; \
+	   echo "  'make' runs for every app regenerate automatically."; \
 	   echo ""; \
 	   exit 1; \
 	 fi

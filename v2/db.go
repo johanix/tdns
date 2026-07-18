@@ -168,6 +168,28 @@ WHERE state = 'standby' AND (CAST(flags AS INTEGER) & 1) = 1
 	if err != nil {
 		lgConfig.Error("data migration: rename old standby SEP keys to published failed", "err", err)
 	}
+
+	// Transactional policy reload (P0-2 / Plan B): seed applied_* from existing
+	// CLI overrides. A row with a non-empty `policy` was written by set-policy /
+	// change-policy AFTER a successful sign, so the zone is known to have been
+	// signed under that policy — copy it into the new last-applied columns
+	// (source 'command', applied_at = the override's set_at). Config-only zones
+	// have no override row and are backfilled at runtime by the refresh engine
+	// (§5.5), which can check that the zone is actually signed under intent.
+	//
+	// Idempotence: gated on applied_policy being unset, so a re-run (or a later
+	// applied_* write) is never overwritten.
+	if dbColumnExists(db, "ZonePolicyOverride", "applied_policy") {
+		_, err := db.Exec(`UPDATE ZonePolicyOverride
+SET applied_policy = policy,
+    applied_source = 'command',
+    applied_at = set_at
+WHERE policy IS NOT NULL AND policy != ''
+  AND (applied_policy IS NULL OR applied_policy = '')`)
+		if err != nil {
+			lgConfig.Error("data migration: seed applied_policy from CLI overrides failed", "err", err)
+		}
+	}
 }
 
 // dbMigrateSchema adds columns that may be missing from tables created by older schema versions.
@@ -235,6 +257,17 @@ func dbMigrateSchema(db *sql.DB) {
 		// would mix DDL-style migrations (idempotent column adds) with
 		// data-shape migrations (one-shot state transitions).
 		{"RolloverKeyState", "published_at", "ALTER TABLE RolloverKeyState ADD COLUMN published_at TEXT"},
+		// Transactional policy reload (P0-2 / Plan B): last-applied DNSSEC
+		// policy per zone, distinct from the sparse CLI `policy` override.
+		// applied_policy is the policy NAME the zone was last successfully
+		// signed under; applied_source is 'config' | 'command'; applied_at is
+		// the ISO timestamp of that apply. All nullable so existing rows (and
+		// config-only zones with no CLI override) migrate without a value —
+		// the CLI-row backfill below and the refresh-engine runtime backfill
+		// fill them in.
+		{"ZonePolicyOverride", "applied_policy", "ALTER TABLE ZonePolicyOverride ADD COLUMN applied_policy TEXT"},
+		{"ZonePolicyOverride", "applied_source", "ALTER TABLE ZonePolicyOverride ADD COLUMN applied_source TEXT"},
+		{"ZonePolicyOverride", "applied_at", "ALTER TABLE ZonePolicyOverride ADD COLUMN applied_at TEXT"},
 	}
 
 	for _, m := range migrations {
@@ -323,7 +356,6 @@ func NewKeyDB(dbfile string, force bool, options map[AuthOption]string) (*KeyDB,
 		DBFile:              dbfile,
 		KeystoreSig0Cache:   make(map[string]*Sig0ActiveKeys),
 		TruststoreSig0Cache: NewSig0StoreT(),
-		KeystoreDnskeyCache: make(map[string]*DnssecKeys),
 		UpdateQ:             make(chan UpdateRequest),
 		KeyBootstrapperQ:    make(chan KeyBootstrapperRequest, 10),
 	}

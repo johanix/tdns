@@ -82,6 +82,10 @@ type KeystoreResponse struct {
 	Error          bool
 	ErrorMsg       string
 	TsigCacheDelta *TsigCacheDelta `json:"-"`
+	// NeedsSigningKeysRepublish is set by DnssecKeyMgmt when the operation can
+	// change the zone's active signing-key set. External-tx callers (APIkeystore)
+	// must call republishSigningKeysForZone after their Commit (R1).
+	NeedsSigningKeysRepublish bool `json:"-"`
 }
 
 // TsigKeyExport carries a TSIG key's secret back to the caller for the explicit
@@ -208,7 +212,7 @@ type ZonePost struct {
 	Command    string
 	SubCommand string
 	Zone       string
-	Policy     string // target DNSSEC policy name for the "set-policy" command
+	Policy     string // target DNSSEC policy name for the "policy-set" command
 	Force      bool
 	Wait       bool
 	Timeout    string

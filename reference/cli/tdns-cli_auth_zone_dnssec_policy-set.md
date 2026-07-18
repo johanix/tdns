@@ -1,4 +1,4 @@
-## tdns-cli auth zone set-policy
+## tdns-cli auth zone dnssec policy-set
 
 Set a zone's DNSSEC policy at runtime (persists as an override, not in YAML)
 
@@ -13,13 +13,13 @@ KeyStateWorker removes them) and new keys take over; the zone stays signed
 throughout.
 
 ```
-tdns-cli auth zone set-policy [flags]
+tdns-cli auth zone dnssec policy-set [flags]
 ```
 
 ### Options
 
 ```
-  -h, --help            help for set-policy
+  -h, --help            help for policy-set
   -p, --policy string   DNSSEC policy name to apply
   -z, --zone string     Zone to set the DNSSEC policy for
 ```
@@ -33,9 +33,10 @@ tdns-cli auth zone set-policy [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
 ```
 
 ### SEE ALSO
 
-* [tdns-cli auth zone](tdns-cli_auth_zone.md)	 - Prefix command, not usable by itself
+* [tdns-cli auth zone dnssec](tdns-cli_auth_zone_dnssec.md)	 - Zone DNSSEC operations: signing, policy, and automated rollover
 

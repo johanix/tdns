@@ -76,14 +76,17 @@ type DnssecConf struct {
 	//                       query if the server advertises no encrypted transport.
 	DNSKEYTransport string `yaml:"dnskey_query_transport" mapstructure:"dnskey_query_transport"`
 
-	// LargeAlgorithms lists, by algorithm NAME (e.g. "RSASHA512",
-	// "FALCON512"), the DNSSEC algorithms whose DNSKEY/RRSIG sizes are large
-	// for UDP. The IMR may query child DNSKEY over TCP when parent DS uses
-	// one; the signer warns if one signs the bulk of a zone. Names (not
-	// codepoints) because non-standardized PQ codepoints are assigned per
-	// deployment at runtime by algorithms.Register — a bare codepoint could
-	// mean different algorithms on the IMR and the signer. A name unknown to
-	// the running binary's registry is a hard config error.
+	// LargeAlgorithms lists the DNSSEC algorithms whose DNSKEY/RRSIG sizes are
+	// large for UDP. The IMR may query child DNSKEY over TCP when a parent DS
+	// uses one; the signer warns if one signs the bulk of a zone. Each entry is
+	// an algorithm NAME (e.g. "RSASHA512", "MLDSA44") or a name prefix with a
+	// trailing "*" (e.g. "MLDSA*", "SNOVA*") matching a whole family. Names, not
+	// codepoints, because non-standardized PQ codepoints are assigned per
+	// deployment at runtime by algorithms.Register — a bare codepoint could mean
+	// different algorithms on the IMR and the signer. Matching is
+	// case-insensitive and resolves against the algorithm metadata registry, so
+	// a name or family this binary recognizes but cannot itself sign with still
+	// counts; an entry that matches no known algorithm is a hard config error.
 	LargeAlgorithms []string `yaml:"large_algorithms" mapstructure:"large_algorithms"`
 
 	// SplitAlgorithms gates which KSK/ZSK algorithm pairs a policy may use.
@@ -594,6 +597,11 @@ func (conf *Config) ReloadConfig() (string, error) {
 			lgConfig.Error("TSIG keys: config error on reload (affected keys skipped)", "err", kerr)
 		}
 	}
+	// Publish the new runtime-config snapshot on a successful reload (still under
+	// confMu); on a parse error keep the last-good snapshot.
+	if err == nil {
+		conf.publishRuntimeConfig()
+	}
 	Globals.App.ServerConfigTime = time.Now()
 	return "Config reloaded.", err
 }
@@ -673,6 +681,10 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 
 	lgConfig.Info("ReloadZones: zones after reloading", "zones", zonelist, "broken", brokenlist)
 	Globals.App.ServerConfigTime = time.Now()
+
+	// Publish the new runtime-config snapshot while still under confMu — the
+	// reloaded DnssecPolicies (via reloadDnssecFromFile above) are now final.
+	conf.publishRuntimeConfig()
 
 	// Capture hook reference before releasing lock to avoid deadlock
 	// if the hook re-enters config paths.

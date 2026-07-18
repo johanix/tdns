@@ -419,7 +419,8 @@ func rolloverZskForZone(ctx context.Context, conf *Config, kdb *KeyDB, zd *ZoneD
 	// afterward if anything was stamped.
 	if activeZSK.ActiveAt == nil || activeZSK.ActiveSeq == nil {
 		healZskActiveAt(kdb, zone, activeZSK)
-		delete(kdb.KeystoreDnskeyCache, zone+"+"+DnskeyStateActive)
+		// Metadata-only heal (active_at / active_seq); active key set unchanged —
+		// no signing-keys snapshot republish.
 		activeKeys, err = GetDnssecKeysByState(kdb, zone, DnskeyStateActive)
 		if err != nil {
 			return fmt.Errorf("re-list active keys after heal: %w", err)

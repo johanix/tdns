@@ -138,6 +138,11 @@ func AtomicRollover(conf *Config, kdb *KeyDB, zone string) (oldKid, newKid uint1
 	}
 	commit = true
 
+	// Post-commit signing-keys republish (UpdateDnssecKeyStateTx is external-tx; R1).
+	if rerr := republishSigningKeysForZone(kdb, zone); rerr != nil {
+		return 0, 0, fmt.Errorf("AtomicRollover: republish signing keys: %w", rerr)
+	}
+
 	lgSigner.Info("rollover: atomic_rollover committed",
 		"zone", zone, "old_keyid", oldKid, "new_keyid", newKid,
 		"phase", rolloverPhasePendingChildPublish)

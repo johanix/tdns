@@ -20,6 +20,7 @@ tdns-cli agent keystore dnssec [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 
@@ -28,7 +29,6 @@ tdns-cli agent keystore dnssec [flags]
 * [tdns-cli agent keystore](tdns-cli_agent_keystore.md)	 - Prefix command to access different features of the keystore
 * [tdns-cli agent keystore dnssec add](tdns-cli_agent_keystore_dnssec_add.md)	 - Add a new DNSSEC key pair to the keystore
 * [tdns-cli agent keystore dnssec algorithms](tdns-cli_agent_keystore_dnssec_algorithms.md)	 - List the DNSSEC algorithms the server supports
-* [tdns-cli agent keystore dnssec auto-rollover](tdns-cli_agent_keystore_dnssec_auto-rollover.md)	 - Manage and inspect automated KSK rollover (scheduled + manual-ASAP)
 * [tdns-cli agent keystore dnssec clear](tdns-cli_agent_keystore_dnssec_clear.md)	 - Permanently delete all DNSSEC keys for a zone (KeyStateWorker will regenerate as needed)
 * [tdns-cli agent keystore dnssec delete](tdns-cli_agent_keystore_dnssec_delete.md)	 - Delete DNSSEC key pair from TDNSD keystore
 * [tdns-cli agent keystore dnssec ds-push](tdns-cli_agent_keystore_dnssec_ds-push.md)	 - Compute DS RRset from keystore and push to parent (UPDATE-only in this offline mode)

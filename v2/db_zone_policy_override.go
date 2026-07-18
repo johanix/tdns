@@ -39,15 +39,21 @@ ON CONFLICT(zone) DO UPDATE SET
 	return err
 }
 
-// ClearZonePolicyOverride removes a zone's dynamic policy override (if any),
-// so the zone falls back to its config-base policy. Removing a non-existent
-// override is not an error.
+// ClearZonePolicyOverride removes a zone's dynamic policy override (if any), so
+// the zone falls back to its config-base policy. It clears ONLY the override
+// (intent) columns — `policy` and `set_at` — and leaves the last-applied record
+// (applied_*) in the same row intact: the override and the applied record are
+// independent (a config-only zone can carry applied_* with no override). It
+// therefore UPDATEs the row to an empty override rather than DELETEing it, so an
+// applied_* record is never collaterally erased. An empty `policy` reads as "no
+// override" via GetZonePolicyOverride. Clearing a non-existent override (no row)
+// is not an error.
 func ClearZonePolicyOverride(kdb *KeyDB, zone string) error {
 	if kdb == nil || kdb.DB == nil {
 		return fmt.Errorf("ClearZonePolicyOverride: nil keystore")
 	}
 	zone = dns.Fqdn(strings.TrimSpace(zone))
-	_, err := kdb.DB.Exec(`DELETE FROM ZonePolicyOverride WHERE zone = ?`, zone)
+	_, err := kdb.DB.Exec(`UPDATE ZonePolicyOverride SET policy = '', set_at = NULL WHERE zone = ?`, zone)
 	return err
 }
 
@@ -89,4 +95,83 @@ func EffectiveDnssecPolicyName(kdb *KeyDB, zone, configName string) (effective s
 		return name, true, nil
 	}
 	return configName, false, nil
+}
+
+// --- Last-applied policy (P0-2 / Plan B) ---------------------------------
+//
+// The applied_* columns record what a zone was LAST SUCCESSFULLY SIGNED under,
+// independent of the CLI `policy` override (INTENT). They live in the same
+// ZonePolicyOverride row so a single lookup covers both, but the two are
+// semantically distinct: a config-only zone can have applied_* set with an
+// empty `policy` (no override), and clearing the override does not erase the
+// last-applied record.
+
+// SetZoneAppliedPolicy records the policy a zone was last successfully signed
+// under (source 'config' | 'command'), stamping applied_at. It never touches
+// the CLI override `policy`: a fresh row is inserted with an empty override
+// (config-only zone), and an existing row keeps whatever override it had.
+func SetZoneAppliedPolicy(kdb *KeyDB, zone, policy, source string) error {
+	if kdb == nil || kdb.DB == nil {
+		return fmt.Errorf("SetZoneAppliedPolicy: nil keystore")
+	}
+	zone = dns.Fqdn(strings.TrimSpace(zone))
+	policy = strings.TrimSpace(policy)
+	source = strings.TrimSpace(source)
+	if zone == "." || policy == "" {
+		return fmt.Errorf("SetZoneAppliedPolicy: empty zone or policy")
+	}
+	if source != "config" && source != "command" {
+		return fmt.Errorf("SetZoneAppliedPolicy: invalid source %q (want 'config' or 'command')", source)
+	}
+	// On INSERT the override column is '' (this zone has no CLI override); on
+	// CONFLICT we update ONLY the applied_* columns, leaving `policy` intact.
+	const q = `
+INSERT INTO ZonePolicyOverride (zone, policy, applied_policy, applied_source, applied_at)
+VALUES (?, '', ?, ?, datetime('now'))
+ON CONFLICT(zone) DO UPDATE SET
+  applied_policy = excluded.applied_policy,
+  applied_source = excluded.applied_source,
+  applied_at     = excluded.applied_at`
+	_, err := kdb.DB.Exec(q, zone, policy, source)
+	return err
+}
+
+// GetZoneAppliedPolicy returns the last-applied policy name and source for a
+// zone. ok is false (and name/source "") when the zone has no applied record,
+// whether because it has no row at all or the applied_policy column is unset.
+func GetZoneAppliedPolicy(kdb *KeyDB, zone string) (name string, source string, ok bool, err error) {
+	if kdb == nil || kdb.DB == nil {
+		return "", "", false, fmt.Errorf("GetZoneAppliedPolicy: nil keystore")
+	}
+	zone = dns.Fqdn(strings.TrimSpace(zone))
+	var p, s sql.NullString
+	err = kdb.DB.QueryRow(
+		`SELECT applied_policy, applied_source FROM ZonePolicyOverride WHERE zone = ?`, zone,
+	).Scan(&p, &s)
+	if err == sql.ErrNoRows {
+		return "", "", false, nil
+	}
+	if err != nil {
+		return "", "", false, err
+	}
+	if !p.Valid || strings.TrimSpace(p.String) == "" {
+		return "", "", false, nil
+	}
+	return strings.TrimSpace(p.String), strings.TrimSpace(s.String), true, nil
+}
+
+// ClearZoneAppliedPolicy clears a zone's last-applied record (applied_* → NULL)
+// while leaving the CLI override row intact. Used by the `policy-reset` escape
+// hatch (§6.7) so a forced re-sign starts from a clean last-applied slate.
+// Clearing a zone with no row is not an error.
+func ClearZoneAppliedPolicy(kdb *KeyDB, zone string) error {
+	if kdb == nil || kdb.DB == nil {
+		return fmt.Errorf("ClearZoneAppliedPolicy: nil keystore")
+	}
+	zone = dns.Fqdn(strings.TrimSpace(zone))
+	_, err := kdb.DB.Exec(
+		`UPDATE ZonePolicyOverride
+SET applied_policy = NULL, applied_source = NULL, applied_at = NULL
+WHERE zone = ?`, zone)
+	return err
 }

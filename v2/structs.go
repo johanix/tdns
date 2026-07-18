@@ -104,6 +104,15 @@ type ZoneRefreshAnalysis struct {
 
 type ZoneData struct {
 	mu sync.Mutex
+	// policyApplyMu serializes a full DNSSEC-policy apply (rebind → re-sign →
+	// persist → revert) for this zone. It is the OUTERMOST lock of that
+	// operation and is distinct from mu: SignZone takes mu internally, so the
+	// apply cannot hold mu across the sign; without a separate lock two
+	// concurrent applies could interleave and a failed revert could clobber a
+	// newer binding. Acquired by applyZonePolicyTransactional; policy-reset
+	// holds it across its clear+re-sign via the *Locked variant. Never held
+	// while mu is held, so there is no lock-order inversion with SignZone.
+	policyApplyMu sync.Mutex
 	// generation is bumped on every removal/replacement of this zone
 	// (RemoveDynamicZone, ModifyDynamicZone, config-reload Zones.Remove). A
 	// refresh goroutine snapshots it at dispatch; the pre-persist guard (B5b)
@@ -173,8 +182,16 @@ type ZoneData struct {
 	ParentDSTTLObserved uint32
 
 	// Zone snapshot publish path (Project B).
-	snapshot   atomic.Pointer[zoneSnapshot]
-	workingSet map[string]*OwnerData
+	snapshot atomic.Pointer[zoneSnapshot]
+	// signingKeys is the per-zone copy-on-write active DNSSEC key set (G3).
+	// Lock-free reads via SigningKeys() / ActiveDnssecKeys(); writers republish
+	// post-commit via republishSigningKeys. Separate from the zone-data snapshot.
+	signingKeys atomic.Pointer[signingKeysSnapshot]
+	// signingKeysGen is bumped at the start of each republishSigningKeys call.
+	// A build may Store only if it still owns the latest generation, so an
+	// older overlapping republish cannot overwrite a newer snapshot.
+	signingKeysGen atomic.Uint64
+	workingSet     map[string]*OwnerData
 	// wsSignalSynth stages the synthesized-transport-signal fallback map for the
 	// next publish (see zoneSnapshot.signalSynth). Seeded from the published
 	// snapshot in ensureWorkingSet so unrelated publishes preserve it.
@@ -807,8 +824,7 @@ type KeyDB struct {
 	mu     sync.Mutex
 	// Sig0Cache   map[string]*Sig0KeyCache
 	KeystoreSig0Cache   map[string]*Sig0ActiveKeys
-	TruststoreSig0Cache *Sig0StoreT            // was *Sig0StoreT
-	KeystoreDnskeyCache map[string]*DnssecKeys // map[zonename]*DnssecActiveKeys
+	TruststoreSig0Cache *Sig0StoreT // was *Sig0StoreT
 	Ctx                 string
 	UpdateQ             chan UpdateRequest
 	KeyBootstrapperQ    chan KeyBootstrapperRequest

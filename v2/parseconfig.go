@@ -996,6 +996,17 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// directly. The setup functions are idempotent.
 
 		// Signing setup: zones with explicit signing options in config.
+		//
+		// First load: sign once the zone data is available (deferred via
+		// OnFirstLoad). Reload: we deliberately do NOT sign synchronously here.
+		// A synchronous SignZone on the reload branch ran under confMu (held
+		// across ParseZones by ReloadZoneConfig), serializing every signed
+		// zone's signing behind the global config lock (Finding 4). It was also
+		// redundant: the config-bearing forced refresh queued for every zone at
+		// the end of this loop already re-signs off-lock in the RefreshEngine —
+		// triggerResign() when the policy rebinds (see applyReloadedPolicyLocked
+		// in refreshengine.go) and the post-refresh SetupZoneSigning when the
+		// zone data changed. Both run in the refresh path, not under confMu.
 		if options[OptOnlineSigning] || options[OptInlineSigning] {
 			if zdp.FirstZoneLoad {
 				zdp.OnFirstLoad = append(zdp.OnFirstLoad, func(zd *ZoneData) {
@@ -1003,10 +1014,6 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 						lgConfig.Error("SetupZoneSigning failed in OnFirstLoad", "zone", zd.ZoneName, "error", err)
 					}
 				})
-			} else {
-				if err := zdp.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
-					lgConfig.Error("SetupZoneSigning failed on reload", "zone", zname, "error", err)
-				}
 			}
 		}
 

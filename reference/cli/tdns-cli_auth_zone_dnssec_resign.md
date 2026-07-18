@@ -1,9 +1,9 @@
-## tdns-cli auth zone resign
+## tdns-cli auth zone dnssec resign
 
 Re-sign zone from scratch with currently-active keys (drops all existing RRSIGs)
 
 ```
-tdns-cli auth zone resign [flags]
+tdns-cli auth zone dnssec resign [flags]
 ```
 
 ### Options
@@ -21,10 +21,11 @@ tdns-cli auth zone resign [flags]
   -H, --headers         show headers
   -Z, --pzone string    parent zone name
   -v, --verbose         verbose output
+      --version         print version and supported algorithms, then exit
   -z, --zone string     zone name
 ```
 
 ### SEE ALSO
 
-* [tdns-cli auth zone](tdns-cli_auth_zone.md)	 - Prefix command, not usable by itself
+* [tdns-cli auth zone dnssec](tdns-cli_auth_zone_dnssec.md)	 - Zone DNSSEC operations: signing, policy, and automated rollover
 

@@ -14,7 +14,6 @@ import (
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 // sig0TTL is the TTL used for SIG(0) records in signed messages.
@@ -190,7 +189,10 @@ func (zd *ZoneData) SignRRset(rrset *core.RRset, name string, dak *DnssecKeys, f
 		shouldSign := true
 		for idx, oldsig := range rrset.RRSIGs {
 			if oldsig.(*dns.RRSIG).KeyTag == key.DnskeyRR.KeyTag() {
-				shouldSign = NeedsResigning(oldsig.(*dns.RRSIG), rrset.RRs[0].Header().Ttl) || force
+				// force first: a forced re-sign (resignNow / triggerResign) must
+				// re-sign regardless, and short-circuiting skips NeedsResigning's
+				// work entirely on that path.
+				shouldSign = force || NeedsResigning(oldsig.(*dns.RRSIG), rrset.RRs[0].Header().Ttl)
 				if shouldSign {
 					lgSigner.Debug("removing older RRSIG by same DNSKEY", "name", oldsig.Header().Name, "rrtype", dns.TypeToString[uint16(rrset.RRs[0].Header().Rrtype)])
 					rrset.RRSIGs = append(rrset.RRSIGs[:idx], rrset.RRSIGs[idx+1:]...)
@@ -238,7 +240,11 @@ func NeedsResigning(rrsig *dns.RRSIG, servedTTL uint32) bool {
 	expirationTime := time.Unix(int64(rrsig.Expiration), 0)
 	remaining := time.Until(expirationTime)
 
-	scanInterval := time.Duration(viper.GetInt("resignerengine.interval")) * time.Second
+	// resignerengine.interval comes from the immutable RuntimeConfig snapshot
+	// (ConfLive), not the non-thread-safe global viper — this runs in the signing
+	// hot path concurrent with config reload. A zero value clamps to the 60s
+	// floor below.
+	scanInterval := time.Duration(ConfLive().ResignerInterval) * time.Second
 	if scanInterval < 60*time.Second {
 		scanInterval = 60 * time.Second
 	}
@@ -258,16 +264,15 @@ func NeedsResigning(rrsig *dns.RRSIG, servedTTL uint32) bool {
 	return false
 }
 
-// refreshActiveDnssecKeys invalidates the cache and re-fetches active DNSSEC keys.
-// context is used in error messages to indicate when/why the refresh occurred.
+// refreshActiveDnssecKeys rebuilds the per-zone signing-keys snapshot from the
+// committed keystore and returns the active set. context is used in error
+// messages to indicate when/why the refresh occurred.
 func (zd *ZoneData) refreshActiveDnssecKeys(kdb *KeyDB, context string) (*DnssecKeys, error) {
-	delete(kdb.KeystoreDnskeyCache, zd.ZoneName+"+"+DnskeyStateActive)
-	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
-	if err != nil {
-		lgSigner.Error("failed to get DNSSEC active keys", "zone", zd.ZoneName, "context", context, "err", err)
+	if err := zd.republishSigningKeys(kdb); err != nil {
+		lgSigner.Error("failed to republish DNSSEC active keys", "zone", zd.ZoneName, "context", context, "err", err)
 		return nil, err
 	}
-	return dak, nil
+	return zd.ActiveDnssecKeys(), nil
 }
 
 // reconcileActiveKeyAlgorithms reconciles active keys against the zone's policy
@@ -497,8 +502,6 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 
 	// Generate KSK if still missing
 	if len(dak.KSKs) == 0 {
-		// Invalidate cache before generating to ensure fresh data
-		delete(kdb.KeystoreDnskeyCache, zd.ZoneName+"+"+DnskeyStateActive)
 		pkc, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.KSKAlgorithm, "KSK", nil)
 		if err != nil {
 			return nil, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate KSK for zone %s: %v", zd.ZoneName, err)
@@ -527,8 +530,6 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 
 	// Generate ZSK only if we have zero real ZSKs
 	if realZSKCount == 0 {
-		// Invalidate cache before generating to ensure fresh data
-		delete(kdb.KeystoreDnskeyCache, zd.ZoneName+"+"+DnskeyStateActive)
 		_, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.ZSKAlgorithm, "ZSK", nil)
 		if err != nil {
 			return nil, fmt.Errorf("EnsureActiveDnssecKeys: failed to generate ZSK for zone %s: %v", zd.ZoneName, err)

@@ -285,6 +285,11 @@ dnssec:
       # reference this template need only declare their own key lifetimes.
       base:
          algorithm:  ED25519
+         # mode selects the key scheme:
+         #   ksk-zsk  (default) — separate Key-Signing + Zone-Signing keys.
+         #   csk                — a single Combined-Signing Key does both roles.
+         # Omitted → ksk-zsk. An invalid value is rejected at config load.
+         mode:  ksk-zsk
          sigvalidity:
             default:  14d
             dnskey:   30d
