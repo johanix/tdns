@@ -2364,13 +2364,14 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 func extractReferral(r *dns.Msg, qname string, qtype uint16) (*core.RRset, string, map[string]bool) {
 	nsMap := map[string]bool{}
 	zonename := ""
-	var nsrrs []dns.RR
-	switch qtype {
-	case dns.TypeNS:
-		nsrrs = r.Answer
-	default:
-		nsrrs = r.Ns
-	}
+	// A referral always carries its NS RRset in the AUTHORITY section, regardless
+	// of the query type — including a QTYPE=NS query whose parent delegation puts
+	// the child NS in Authority with an empty Answer. (The apex-NS *answer* case,
+	// NS in the ANSWER section with aa=1, is handled earlier by handleAnswer;
+	// extractReferral is only ever reached to extract a referral/delegation.)
+	// Previously this read r.Answer for QTYPE=NS, so a QTYPE=NS query would find
+	// no NS in the parent's referral and loop until "max iterations reached".
+	nsrrs := r.Ns
 	var rrset core.RRset
 	for _, rr := range nsrrs {
 		switch rr.Header().Rrtype {
