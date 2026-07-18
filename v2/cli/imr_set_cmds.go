@@ -123,9 +123,6 @@ Examples:
 
 		// Apply to server (complete replacement, not merge)
 		server.SetTransports(transports)
-		if len(transports) > 0 {
-			server.SetPrefTransport(transports[0])
-		}
 		server.SetAlpn(alpnOrder)
 		server.SetTransportWeights(weights) // Use SetTransportWeights to replace, not merge
 		server.PromoteConnMode(cache.ConnModeOpportunistic)

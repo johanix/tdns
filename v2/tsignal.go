@@ -6,6 +6,7 @@ package tdns
 import (
 	"fmt"
 	"net"
+	"sort"
 	"strings"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -137,39 +138,27 @@ func tsyncHasAlias(rrset core.RRset) bool {
 	return false
 }
 
-// buildServerSVCB constructs a synthesized ServiceMode "_dns.<ns> SVCB" RRset from
-// the server's configured SVCB parameters, optional address hints, the transport
-// signal, and a DANE-EE TLSA for the server certificate.
+// buildServerSVCB constructs a synthesized ServiceMode "_dns.<ns> SVCB" RRset
+// carrying the registered oots SvcParam (draft-johani-dnsop-svcb-oots / -03).
+// Address hints and the private tlsa SvcParam are not included on the OOTS
+// record (-03 does not use them).
 func (zd *ZoneData) buildServerSVCB(conf *Config, nsName string, ipv4s, ipv6s []net.IP) (*core.RRset, error) {
+	_ = ipv4s
+	_ = ipv6s
 	if Globals.ServerSVCB == nil {
 		return nil, fmt.Errorf("buildServerSVCB: no server SVCB configured")
 	}
-	values := append([]dns.SVCBKeyValue(nil), Globals.ServerSVCB.Value...)
-	if len(ipv4s) > 0 {
-		values = append(values, &dns.SVCBIPv4Hint{Hint: ipv4s})
-	}
-	if len(ipv6s) > 0 {
-		values = append(values, &dns.SVCBIPv6Hint{Hint: ipv6s})
-	}
+	// -03 OOTS record carries only the oots SvcParam (no inherited alpn/hints/tlsa).
+	values := make([]dns.SVCBKeyValue, 0, 1)
 	if sig := conf.Service.Transport.Signal; sig != "" {
-		values = append(values, &dns.SVCBLocal{KeyCode: dns.SVCBKey(SvcbTransportKey), Data: []byte(sig)})
+		oots, err := transportSignalToSVCBOots(sig)
+		if err != nil {
+			return nil, fmt.Errorf("buildServerSVCB: %w", err)
+		}
+		if oots != nil {
+			values = append(values, oots)
+		}
 	}
-	certData, err := parseCertificate(conf.Internal.CertData)
-	if err != nil {
-		return nil, fmt.Errorf("buildServerSVCB: failed to parse certificate: %v", err)
-	}
-	tlsaRR := dns.TLSA{
-		Hdr:          dns.RR_Header{Name: "_443._tcp." + nsName, Rrtype: dns.TypeTLSA, Class: dns.ClassINET, Ttl: 10800},
-		Usage:        3, // DANE-EE
-		Selector:     1, // SPKI
-		MatchingType: 1, // SHA-256
-		Certificate:  certData,
-	}
-	tlsastr, err := MarshalTLSAToString(&tlsaRR)
-	if err != nil {
-		return nil, fmt.Errorf("buildServerSVCB: failed to marshal TLSA: %v", err)
-	}
-	values = append(values, &dns.SVCBLocal{KeyCode: dns.SVCBKey(SvcbTLSAKey), Data: []byte(tlsastr)})
 
 	owner := "_dns." + nsName
 	svcb := &dns.SVCB{
@@ -179,6 +168,33 @@ func (zd *ZoneData) buildServerSVCB(conf *Config, nsName string, ipv4s, ipv6s []
 		Value:    values,
 	}
 	return &core.RRset{Name: owner, RRtype: dns.TypeSVCB, RRs: []dns.RR{svcb}}, nil
+}
+
+// transportSignalToSVCBOots builds a dns.SVCBOots from a config signal string.
+// Zero-weight entries other than do53 are omitted (absence means 0); do53:0 is
+// kept so "no Do53" is expressible on the wire.
+func transportSignalToSVCBOots(sig string) (*dns.SVCBOots, error) {
+	m, err := core.ParseTransportString(sig)
+	if err != nil {
+		return nil, err
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var entries []dns.SVCBOotsEntry
+	for _, k := range keys {
+		v := m[k]
+		if v == 0 && k != "do53" {
+			continue
+		}
+		entries = append(entries, dns.SVCBOotsEntry{Proto: k, Weight: v})
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	return &dns.SVCBOots{Oots: entries}, nil
 }
 
 // SVCB path. See CreateTransportSignalRRs for the storage/injection model.
