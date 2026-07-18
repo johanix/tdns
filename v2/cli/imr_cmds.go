@@ -240,13 +240,7 @@ var imrStatsAuthTransportsCmd = &cobra.Command{
 				fmt.Printf("\nServer: %s\n", name)
 				// Show received transport percentage signal (pct). If none: do53=100
 				fmt.Printf("  signal: %s\n", renderSignal(server))
-				counters := server.SnapshotCounters()
-				order := []core.Transport{core.TransportDo53, core.TransportDoT, core.TransportDoH, core.TransportDoQ}
-				for _, t := range order {
-					if c, ok := counters[t]; ok && c > 0 {
-						fmt.Printf("  %-4s: %d\n", core.TransportToString[t], c)
-					}
-				}
+				fmt.Printf("  %s\n", formatTransportCounters(server))
 			}
 			return
 		}
@@ -259,13 +253,7 @@ var imrStatsAuthTransportsCmd = &cobra.Command{
 			for name, server := range serverMap {
 				fmt.Printf("  Server: %s\n", name)
 				fmt.Printf("    signal: %s\n", renderSignal(server))
-				counters := server.SnapshotCounters()
-				order := []core.Transport{core.TransportDo53, core.TransportDoT, core.TransportDoH, core.TransportDoQ}
-				for _, t := range order {
-					if c, ok := counters[t]; ok && c > 0 {
-						fmt.Printf("    %-4s: %d\n", core.TransportToString[t], c)
-					}
-				}
+				fmt.Printf("    %s\n", formatTransportCounters(server))
 			}
 		}
 	},

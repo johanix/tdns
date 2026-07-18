@@ -744,30 +744,53 @@ func formatTransport(t core.Transport) string {
 	return "unknown"
 }
 
-// formatTransportCounters formats the transport usage counters for display.
-// Returns a string showing queries sent per transport, ordered by transport type.
-// Example: "doq:1234 dot:567 do53:89"
-func formatTransportCounters(server *cache.AuthServer) string {
-	if server == nil {
-		return ""
-	}
-	counters := server.SnapshotTransportCounters()
-	if len(counters) == 0 {
+// transportDisplayOrder is the canonical order for rendering per-transport
+// counters. It includes Do53TCP — both the proactive force-TCP path and the
+// TC=1 truncation upgrade land there — which the earlier renderers dropped,
+// silently undercounting the totals.
+var transportDisplayOrder = []core.Transport{
+	core.TransportDo53, core.TransportDo53TCP,
+	core.TransportDoT, core.TransportDoH, core.TransportDoQ,
+}
+
+// formatTransportCountMap renders a per-transport count map in canonical order
+// (including do53-tcp), non-zero entries only, with a complete total.
+func formatTransportCountMap(m map[core.Transport]uint64) string {
+	if len(m) == 0 {
 		return "none"
 	}
-	order := []core.Transport{core.TransportDoQ, core.TransportDoT, core.TransportDoH, core.TransportDo53}
 	var parts []string
 	var total uint64
-	for _, t := range order {
-		if count, ok := counters[t]; ok && count > 0 {
-			parts = append(parts, fmt.Sprintf("%s:%d", core.TransportToString[t], count))
-			total += count
+	for _, t := range transportDisplayOrder {
+		if c := m[t]; c > 0 {
+			parts = append(parts, fmt.Sprintf("%s:%d", core.TransportToString[t], c))
+			total += c
 		}
 	}
 	if len(parts) == 0 {
 		return "none"
 	}
 	return fmt.Sprintf("%s (total: %d)", strings.Join(parts, " "), total)
+}
+
+// formatTransportStats renders the full per-server transport-usage matrix:
+// attempted / used / failed counts (all transports, incl. do53-tcp) and the
+// TC=1 truncation count. Shared by the interactive REPL dump and the
+// tdns-cli imr transport-stats command so the two cannot drift.
+func formatTransportStats(ts cache.TransportStats) string {
+	return fmt.Sprintf("attempted=[%s] used=[%s] failed=[%s] truncated=%d",
+		formatTransportCountMap(ts.Attempted),
+		formatTransportCountMap(ts.Used),
+		formatTransportCountMap(ts.Failed),
+		ts.Truncated)
+}
+
+// formatTransportCounters renders a server's transport-usage stats for display.
+func formatTransportCounters(server *cache.AuthServer) string {
+	if server == nil {
+		return ""
+	}
+	return formatTransportStats(server.SnapshotTransportStats())
 }
 
 // If the state has no known mapping, it returns "[unset]".
