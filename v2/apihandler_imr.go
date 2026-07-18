@@ -22,6 +22,32 @@ import (
 // here, so the route and handler were renamed. tdns-mp keeps its
 // own /agent endpoint for MP-specific commands and now also exposes
 // /imr backed by an analogous APIimr handler.)
+// ImrServerTransportStats is the per-server transport-usage snapshot carried
+// over the /imr API for `tdns-cli imr stats transport-stats`. Count maps are
+// keyed by transport name (do53, do53-tcp, dot, doh, doq).
+type ImrServerTransportStats struct {
+	Zone      string            `json:"zone"`
+	Server    string            `json:"server"`
+	Signal    string            `json:"signal,omitempty"`
+	Attempted map[string]uint64 `json:"attempted,omitempty"`
+	Used      map[string]uint64 `json:"used,omitempty"`
+	Failed    map[string]uint64 `json:"failed,omitempty"`
+	Truncated uint64            `json:"truncated"`
+}
+
+// transportCountsToStrings converts a transport-keyed counter map to a
+// name-keyed one for JSON transport over the API.
+func transportCountsToStrings(m map[core.Transport]uint64) map[string]uint64 {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]uint64, len(m))
+	for t, c := range m {
+		out[core.TransportToString[t]] = c
+	}
+	return out
+}
+
 func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
@@ -256,6 +282,46 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				}
 			} else {
 				resp.Msg = fmt.Sprintf("%d zone-scoped backoffs", len(records))
+			}
+
+		case "imr-transport-stats":
+			imr := Globals.ImrEngine
+			if imr == nil || imr.Cache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "IMR engine not available"
+				return
+			}
+			zoneFilter, _ := amp.Data["zone"].(string)
+			if zoneFilter != "" {
+				zoneFilter = dns.Fqdn(zoneFilter)
+			}
+			var records []ImrServerTransportStats
+			for item := range imr.Cache.ServerMap.IterBuffered() {
+				if zoneFilter != "" && item.Key != zoneFilter {
+					continue
+				}
+				for name, server := range item.Val {
+					ts := server.SnapshotTransportStats()
+					records = append(records, ImrServerTransportStats{
+						Zone:      item.Key,
+						Server:    name,
+						Signal:    server.TransportSignal,
+						Attempted: transportCountsToStrings(ts.Attempted),
+						Used:      transportCountsToStrings(ts.Used),
+						Failed:    transportCountsToStrings(ts.Failed),
+						Truncated: ts.Truncated,
+					})
+				}
+			}
+			resp.Data = records
+			if len(records) == 0 {
+				if zoneFilter != "" {
+					resp.Msg = fmt.Sprintf("No auth servers recorded for %s", zoneFilter)
+				} else {
+					resp.Msg = "No auth servers recorded"
+				}
+			} else {
+				resp.Msg = fmt.Sprintf("Transport stats for %d server(s)", len(records))
 			}
 
 		default:
