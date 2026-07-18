@@ -84,6 +84,20 @@ func (f *FakeDNSClient) Exchange(msg *dns.Msg, server string, debug bool) (*dns.
 	return nil, 0, fmt.Errorf("FakeDNSClient: no programmed response for %s @ %s", qname, server)
 }
 
+// ExchangeWithResult satisfies DNSClienter. The fake performs no real UDP->TCP
+// fallback; it reports its own transport as the wire transport, and flags a
+// truncation (with a Do53TCP wire transport) when a programmed Do53 response
+// has the TC bit set — enough to exercise truncation-stat paths in tests.
+func (f *FakeDNSClient) ExchangeWithResult(msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, ExchangeResult, error) {
+	r, rtt, err := f.Exchange(msg, server, debug)
+	res := ExchangeResult{WireTransport: f.transport}
+	if err == nil && r != nil && r.Truncated && (f.transport == TransportDo53 || f.transport == TransportDo53TCP) {
+		res.WireTransport = TransportDo53TCP
+		res.Truncated = true
+	}
+	return r, rtt, res, err
+}
+
 // Set installs a response. Convenience wrapper around direct map assignment.
 func (f *FakeDNSClient) Set(qname, addr string, resp FakeResponse) {
 	f.mu.Lock()

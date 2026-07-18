@@ -1909,18 +1909,25 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 		}
 	}
 
-	// Single Exchange call: c.Exchange handles TC=1 and UDP-transient-error
-	// TCP fallback internally for Do53. DoT/DoH/DoQ have no fallback path.
-	// The Exchange timeout bounds wall time per call; the overall query budget
-	// (W2) bounds the wider iterative loop.
+	// Single Exchange call: ExchangeWithResult handles TC=1 and
+	// UDP-transient-error TCP fallback internally for Do53 (DoT/DoH/DoQ have no
+	// fallback path) and additionally reports the actual wire transport used and
+	// whether a TC=1 truncation drove a UDP->TCP upgrade — used below for the
+	// per-server transport-usage / truncation stats. The Exchange timeout bounds
+	// wall time per call; the overall query budget (W2) bounds the iterative loop.
 	//
 	// We measure wall-clock RTT ourselves instead of trusting the rtt returned
 	// by Exchange, because Exchange's TCP fallback path returns only the TCP
 	// rtt and hides any preceding UDP-timeout cost. The wall-clock value is
 	// what we actually care about for prioritization.
 	start := time.Now()
-	r, _, err := c.Exchange(m, addr, Globals.Debug && !imr.Quiet)
+	r, _, xres, err := c.ExchangeWithResult(m, addr, Globals.Debug && !imr.Quiet)
 	rtt := time.Since(start)
+	// A TC=1 truncation upgrade is a size-driven fact about this exchange (not a
+	// failure); record it regardless of the subsequent TCP outcome.
+	if xres.Truncated {
+		server.IncrementTruncated()
+	}
 	imr.FamilyTracker.RecordResult(addr, err == nil && r != nil)
 	if err != nil {
 		lgDns.Error("*** tryServer: query returned error",
@@ -1930,6 +1937,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 			"transport", core.TransportToString[eff],
 			"error", err)
 		server.RecordAddressFailure(addr, eff, err)
+		server.IncrementFailedCounter(eff)
 		// Penalty RTT: record the full elapsed time so a slow-failing path
 		// naturally sorts to the bottom of prioritizeServers even after the
 		// backoff lifts.
@@ -1938,6 +1946,7 @@ func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr st
 	}
 	if r != nil {
 		server.RecordAddressSuccess(addr, eff)
+		server.IncrementUsedCounter(xres.WireTransport)
 		server.RecordRTT(addr, eff, rtt)
 	} else if Globals.Debug {
 		lgDns.Debug("*** tryServer: query returned no response",
