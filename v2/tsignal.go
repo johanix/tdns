@@ -283,10 +283,15 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys) err
 		// resigner keeps its signature fresh thereafter. Store as a real
 		// _dns.<ns> owner RRset (replacing any prior synthesized server SVCB),
 		// so it is directly queryable and injected from the stored copy.
-		if _, err := zd.SignRRset(stored, "", dak, false, nil); err != nil {
-			lgDns.Error("createTransportSignalSVCB: error signing SVCB; not staging unsigned signal",
-				"owner", ownerName, "err", err)
-			return fmt.Errorf("createTransportSignalSVCB: failed to sign SVCB for %q: %w", ownerName, err)
+		// dak is nil exactly when the zone has neither online- nor
+		// inline-signing enabled (see CreateTransportSignalRRs) — an unsigned
+		// zone gets an unsigned transport signal, not a hard failure.
+		if dak != nil {
+			if _, err := zd.SignRRset(stored, "", dak, false, nil); err != nil {
+				lgDns.Error("createTransportSignalSVCB: error signing SVCB; not staging unsigned signal",
+					"owner", ownerName, "err", err)
+				return fmt.Errorf("createTransportSignalSVCB: failed to sign SVCB for %q: %w", ownerName, err)
+			}
 		}
 		lgDns.Debug("createTransportSignalSVCB: stored synthesized server SVCB",
 			"zone", zd.ZoneName, "ns", nsName, "owner", ownerName)
@@ -360,11 +365,16 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config, dak *DnssecKeys) er
 		}
 		stored := core.RRset{Name: ownerName, RRtype: core.TypeTSYNC, RRs: []dns.RR{trr}}
 		// Sign BEFORE staging (fixes the prior sign-after-commit ordering that
-		// froze an unsigned TSYNC into the snapshot).
-		if _, err := zd.SignRRset(&stored, "", dak, false, nil); err != nil {
-			lgDns.Error("createTransportSignalTSYNC: error signing TSYNC; not staging unsigned signal",
-				"owner", ownerName, "err", err)
-			return fmt.Errorf("createTransportSignalTSYNC: failed to sign TSYNC for %q: %w", ownerName, err)
+		// froze an unsigned TSYNC into the snapshot). dak is nil exactly when
+		// the zone has neither online- nor inline-signing enabled (see
+		// CreateTransportSignalRRs) — an unsigned zone gets an unsigned
+		// transport signal, not a hard failure.
+		if dak != nil {
+			if _, err := zd.SignRRset(&stored, "", dak, false, nil); err != nil {
+				lgDns.Error("createTransportSignalTSYNC: error signing TSYNC; not staging unsigned signal",
+					"owner", ownerName, "err", err)
+				return fmt.Errorf("createTransportSignalTSYNC: failed to sign TSYNC for %q: %w", ownerName, err)
+			}
 		}
 		lgDns.Debug("createTransportSignalTSYNC: stored synthesized TSYNC",
 			"zone", zd.ZoneName, "ns", nsName, "owner", ownerName, "rr", trr.String())
