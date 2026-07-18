@@ -283,10 +283,24 @@ func (zd *ZoneData) createTransportSignalSVCB(conf *Config, dak *DnssecKeys) err
 		// resigner keeps its signature fresh thereafter. Store as a real
 		// _dns.<ns> owner RRset (replacing any prior synthesized server SVCB),
 		// so it is directly queryable and injected from the stored copy.
-		if _, err := zd.SignRRset(stored, "", dak, false, nil); err != nil {
-			lgDns.Error("createTransportSignalSVCB: error signing SVCB; not staging unsigned signal",
-				"owner", ownerName, "err", err)
-			return fmt.Errorf("createTransportSignalSVCB: failed to sign SVCB for %q: %w", ownerName, err)
+		// Gate on dak, not on the static online/inline-signing options: this is
+		// deliberate and provably correct. CreateTransportSignalRRs resolves dak
+		// via EnsureActiveDnssecKeys, which for a signing zone returns non-nil
+		// keys or an error — never (nil, nil) — so a signing zone that is
+		// transiently keyless (bootstrap / mid policy-reset) errors out upstream
+		// and never reaches here with a nil dak; dak == nil is therefore exactly
+		// "the zone doesn't sign." Gating on dak is also what keeps a nil dak out
+		// of SignRRset, which under zd.mu would self-deadlock via PublishDnskeyRRs
+		// (the reason keys are resolved up in CreateTransportSignalRRs). An
+		// unsigned zone gets an unsigned transport signal, not a hard failure.
+		// (Revisit if EnsureActiveDnssecKeys is ever changed to return a nil dak
+		// for a signing zone.)
+		if dak != nil {
+			if _, err := zd.SignRRset(stored, "", dak, false, nil); err != nil {
+				lgDns.Error("createTransportSignalSVCB: error signing SVCB; not staging unsigned signal",
+					"owner", ownerName, "err", err)
+				return fmt.Errorf("createTransportSignalSVCB: failed to sign SVCB for %q: %w", ownerName, err)
+			}
 		}
 		lgDns.Debug("createTransportSignalSVCB: stored synthesized server SVCB",
 			"zone", zd.ZoneName, "ns", nsName, "owner", ownerName)
@@ -360,11 +374,22 @@ func (zd *ZoneData) createTransportSignalTSYNC(conf *Config, dak *DnssecKeys) er
 		}
 		stored := core.RRset{Name: ownerName, RRtype: core.TypeTSYNC, RRs: []dns.RR{trr}}
 		// Sign BEFORE staging (fixes the prior sign-after-commit ordering that
-		// froze an unsigned TSYNC into the snapshot).
-		if _, err := zd.SignRRset(&stored, "", dak, false, nil); err != nil {
-			lgDns.Error("createTransportSignalTSYNC: error signing TSYNC; not staging unsigned signal",
-				"owner", ownerName, "err", err)
-			return fmt.Errorf("createTransportSignalTSYNC: failed to sign TSYNC for %q: %w", ownerName, err)
+		// froze an unsigned TSYNC into the snapshot). Gate on dak, not the static
+		// signing options: CreateTransportSignalRRs resolves dak via
+		// EnsureActiveDnssecKeys, which for a signing zone returns non-nil keys or
+		// an error — never (nil, nil) — so a transiently-keyless signing zone
+		// (bootstrap / policy-reset) errors out upstream and never reaches here
+		// with a nil dak; dak == nil is exactly "the zone doesn't sign." Gating on
+		// dak also keeps nil out of SignRRset, which under zd.mu self-deadlocks
+		// via PublishDnskeyRRs. An unsigned zone gets an unsigned signal, not a
+		// hard failure. (Revisit if EnsureActiveDnssecKeys ever returns a nil dak
+		// for a signing zone.)
+		if dak != nil {
+			if _, err := zd.SignRRset(&stored, "", dak, false, nil); err != nil {
+				lgDns.Error("createTransportSignalTSYNC: error signing TSYNC; not staging unsigned signal",
+					"owner", ownerName, "err", err)
+				return fmt.Errorf("createTransportSignalTSYNC: failed to sign TSYNC for %q: %w", ownerName, err)
+			}
 		}
 		lgDns.Debug("createTransportSignalTSYNC: stored synthesized TSYNC",
 			"zone", zd.ZoneName, "ns", nsName, "owner", ownerName, "rr", trr.String())
