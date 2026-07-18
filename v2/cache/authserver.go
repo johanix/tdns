@@ -60,7 +60,10 @@ type AuthServer struct {
 	TLSARecords     map[string]*CachedRRset // keyed by owner (_port._proto.name.), validated RRsets only
 	// Stats (guarded by mu)
 	mu                sync.Mutex
-	TransportCounters map[core.Transport]uint64 // total queries attempted per transport
+	TransportCounters map[core.Transport]uint64 // queries ATTEMPTED per transport (transport chosen)
+	UsedCounters      map[core.Transport]uint64 // queries whose answer was CARRIED, by actual wire transport
+	FailedCounters    map[core.Transport]uint64 // attempts that ERRORED, by attempted transport
+	TruncatedCount    uint64                    // Do53/UDP responses TC=1 truncated and retried over TCP
 	Src               string                    // "answer", "glue", "hint", "priming", "stub", ...
 	Expire            time.Time
 	Debug             bool // If true, store error messages in AddressBackoff.LastError
@@ -460,6 +463,83 @@ func (as *AuthServer) IncrementTransportCounter(t core.Transport) {
 		as.TransportCounters = make(map[core.Transport]uint64)
 	}
 	as.TransportCounters[t]++
+}
+
+// IncrementUsedCounter records that a query's answer was carried over transport
+// t — the ACTUAL wire transport, which for Do53 may be Do53TCP after a fallback.
+func (as *AuthServer) IncrementUsedCounter(t core.Transport) {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if as.UsedCounters == nil {
+		as.UsedCounters = make(map[core.Transport]uint64)
+	}
+	as.UsedCounters[t]++
+}
+
+// IncrementFailedCounter records a failed attempt over transport t (the
+// transport we chose to try; e.g. an unreachable DoQ the server advertised).
+func (as *AuthServer) IncrementFailedCounter(t core.Transport) {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	if as.FailedCounters == nil {
+		as.FailedCounters = make(map[core.Transport]uint64)
+	}
+	as.FailedCounters[t]++
+}
+
+// IncrementTruncated records one Do53/UDP response that was TC=1 truncated and
+// retried over TCP (a size-driven upgrade, not a failure).
+func (as *AuthServer) IncrementTruncated() {
+	if as == nil {
+		return
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	as.TruncatedCount++
+}
+
+// TransportStats is a consistent point-in-time snapshot of a server's
+// per-transport usage counters plus its truncation count. Attempted = queries
+// initiated (by the transport chosen); Used = queries whose answer was carried
+// (by the actual wire transport); Failed = attempts that errored (by the chosen
+// transport); Truncated = Do53/UDP responses TC=1 truncated and retried over TCP.
+type TransportStats struct {
+	Attempted map[core.Transport]uint64
+	Used      map[core.Transport]uint64
+	Failed    map[core.Transport]uint64
+	Truncated uint64
+}
+
+// SnapshotTransportStats returns a consistent copy of all per-transport usage
+// counters and the truncation count under a single lock.
+func (as *AuthServer) SnapshotTransportStats() TransportStats {
+	var ts TransportStats
+	if as == nil {
+		return ts
+	}
+	as.mu.Lock()
+	defer as.mu.Unlock()
+	cp := func(m map[core.Transport]uint64) map[core.Transport]uint64 {
+		if len(m) == 0 {
+			return nil
+		}
+		out := make(map[core.Transport]uint64, len(m))
+		for k, v := range m {
+			out[k] = v
+		}
+		return out
+	}
+	ts.Attempted = cp(as.TransportCounters)
+	ts.Used = cp(as.UsedCounters)
+	ts.Failed = cp(as.FailedCounters)
+	ts.Truncated = as.TruncatedCount
+	return ts
 }
 
 // SnapshotTransportCounters returns a thread-safe copy of the transport counters.
