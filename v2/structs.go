@@ -290,9 +290,14 @@ type ZoneConf struct {
 	// projection of the zone's currently-bound policy's algorithm/lifetime/
 	// sig-validity detail. The bulk `list-zones` path (backing `zone list`) never
 	// sets these, so its output is unchanged. Not config; not serialized to YAML.
-	AppliedPolicy string            `yaml:"-"`
-	AppliedSource string            `yaml:"-"`
-	AppliedAt     string            `yaml:"-"`
+	AppliedPolicy string `yaml:"-"`
+	AppliedSource string `yaml:"-"`
+	AppliedAt     string `yaml:"-"`
+	// AppliedError is set (to the error text) when the keystore read for the
+	// applied-policy record failed, so `zone desc` can distinguish a backend
+	// failure from a genuinely absent record rather than showing both as
+	// "(not recorded)".
+	AppliedError  string            `yaml:"-"`
 	PolicyDetail  *DnssecPolicyView `yaml:"-"`
 	Template      string            `yaml:"template" mapstructure:"template"`
 	MultiSigner   string            `yaml:"multisigner" mapstructure:"multisigner"`

@@ -94,6 +94,21 @@ func TestDescribeZone_Unsigned(t *testing.T) {
 	}
 }
 
+// TestDescribeZone_AppliedError: a keystore read failure is rendered distinctly
+// (lookup failed: …), not conflated with a genuinely absent record.
+func TestDescribeZone_AppliedError(t *testing.T) {
+	out := DescribeZone(tdns.ZoneConf{
+		Name:         "err.example.",
+		AppliedError: "boom: disk gone",
+	})
+	if !strings.Contains(out, "Applied policy: (lookup failed: boom: disk gone)") {
+		t.Fatalf("keystore read error should render distinctly:\n%s", out)
+	}
+	if strings.Contains(out, "(not recorded)") {
+		t.Fatalf("a lookup error must not be shown as (not recorded):\n%s", out)
+	}
+}
+
 // TestDescribeZone_PolicyUnavailable: a zone bound to a policy the server could
 // not resolve (PolicyDetail nil but a policy name is bound) renders a clear
 // "policy unavailable" line naming the policy.

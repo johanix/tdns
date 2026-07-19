@@ -376,7 +376,10 @@ func buildListZoneConf(zd *ZoneData, zname string, kdb *KeyDB) ZoneConf {
 func populateZoneDescDetail(zconf *ZoneConf, zd *ZoneData, zname string, kdb *KeyDB) {
 	name, source, appliedAt, ok, err := GetZoneAppliedPolicyDetail(kdb, zname)
 	if err != nil {
+		// Surface the failure distinctly (not as an absent record) so the CLI can
+		// tell a backend error apart from "nothing was ever applied"; also log it.
 		lgApi.Warn("zone desc: failed to read applied policy", "zone", zname, "err", err)
+		zconf.AppliedError = err.Error()
 	} else if ok {
 		zconf.AppliedPolicy = name
 		zconf.AppliedSource = source

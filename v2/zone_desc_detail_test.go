@@ -83,3 +83,26 @@ func TestPopulateZoneDescDetail(t *testing.T) {
 		t.Fatalf("applied record must still be surfaced: got (%q, %q)", zGhost.AppliedPolicy, zGhost.AppliedSource)
 	}
 }
+
+// TestPopulateZoneDescDetail_AppliedError: a keystore read failure sets
+// AppliedError (distinct from an absent record) and does not block bound-policy
+// resolution. A nil keystore forces GetZoneAppliedPolicyDetail to error.
+func TestPopulateZoneDescDetail_AppliedError(t *testing.T) {
+	withLiveConfig(t, &RuntimeConfig{
+		DnssecPolicies: map[string]DnssecPolicy{
+			"pol-a": {Name: "pol-a", Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: 13, ZSKAlgorithm: 13},
+		},
+	})
+	zconf := ZoneConf{Name: "z.example."}
+	populateZoneDescDetail(&zconf, &ZoneData{DnssecPolicyName: "pol-a"}, "z.example.", nil)
+
+	if zconf.AppliedError == "" {
+		t.Fatalf("a keystore read error must set AppliedError")
+	}
+	if zconf.AppliedPolicy != "" {
+		t.Fatalf("AppliedPolicy must stay empty on a read error, got %q", zconf.AppliedPolicy)
+	}
+	if zconf.PolicyDetail == nil {
+		t.Fatalf("an applied-read error must not block bound-policy resolution")
+	}
+}

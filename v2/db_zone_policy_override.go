@@ -140,24 +140,10 @@ ON CONFLICT(zone) DO UPDATE SET
 // zone. ok is false (and name/source "") when the zone has no applied record,
 // whether because it has no row at all or the applied_policy column is unset.
 func GetZoneAppliedPolicy(kdb *KeyDB, zone string) (name string, source string, ok bool, err error) {
-	if kdb == nil || kdb.DB == nil {
-		return "", "", false, fmt.Errorf("GetZoneAppliedPolicy: nil keystore")
-	}
-	zone = dns.Fqdn(strings.TrimSpace(zone))
-	var p, s sql.NullString
-	err = kdb.DB.QueryRow(
-		`SELECT applied_policy, applied_source FROM ZonePolicyOverride WHERE zone = ?`, zone,
-	).Scan(&p, &s)
-	if err == sql.ErrNoRows {
-		return "", "", false, nil
-	}
-	if err != nil {
-		return "", "", false, err
-	}
-	if !p.Valid || strings.TrimSpace(p.String) == "" {
-		return "", "", false, nil
-	}
-	return strings.TrimSpace(p.String), strings.TrimSpace(s.String), true, nil
+	// Delegate to the detail accessor (single source of truth for the query and
+	// the ErrNoRows/blank-policy handling); the applied_at column is ignored here.
+	name, source, _, ok, err = GetZoneAppliedPolicyDetail(kdb, zone)
+	return name, source, ok, err
 }
 
 // GetZoneAppliedPolicyDetail is like GetZoneAppliedPolicy but also returns the

@@ -804,65 +804,7 @@ func VerboseListZone(cr tdns.ZoneResponse) {
 	hdr += "Frozen|Dirty|Options"
 	zoneLines := []string{}
 	for zname, zconf := range cr.Zones {
-		line := fmt.Sprintf("zone: %s\n", zname)
-		if zconf.Error {
-			// A service-impacting error is ERROR; a non-service-impacting
-			// warning (e.g. ConfigWarning) leaves the zone serving — render it
-			// as such, matching ListZones rather than masquerading as ERROR.
-			if tdns.ErrorTypeIsServiceImpacting(zconf.ErrorType) {
-				line += fmt.Sprintf("\tState: ERROR ErrorType: %s ErrorMsg: %s\n", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
-			} else {
-				line += fmt.Sprintf("\tState: serving Warning[%s]: %s\n", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
-			}
-		}
-		opts := []string{}
-		for _, opt := range zconf.Options {
-			opts = append(opts, tdns.ZoneOptionToString[opt])
-		}
-		sort.Strings(opts)
-		line += fmt.Sprintf("\tType: %s\tStore: %s\tOptions: %v\n", zconf.Type, zconf.Store, opts)
-
-		if zconf.EffectiveDnssecPolicy != "" {
-			pol := zconf.EffectiveDnssecPolicy
-			if zconf.DnssecPolicyOverridden {
-				if zconf.DnssecPolicyConfigBase != "" {
-					pol += fmt.Sprintf(" (override from config: %s)", zconf.DnssecPolicyConfigBase)
-				} else {
-					pol += " (override; set live, not in config)"
-				}
-			}
-			line += fmt.Sprintf("\tDNSSEC policy: %s\n", pol)
-		}
-
-		line += fmt.Sprintf("\tPrimary: %s\tNotify: %s\tFile: %s\n", peerConfAddrsString(zconf.Primaries), peerConfAddrsString(zconf.Notify), zconf.Zonefile)
-
-		// Check for catalog zone flags
-		isCatalogZone := false
-		isAutoConfigured := false
-		for _, opt := range zconf.Options {
-			if opt == tdns.OptCatalogZone {
-				isCatalogZone = true
-			}
-			if opt == tdns.OptAutomaticZone {
-				isAutoConfigured = true
-			}
-		}
-
-		configInfo := ""
-		if isCatalogZone {
-			configInfo = "Catalog Zone"
-		} else if isAutoConfigured {
-			if zconf.SourceCatalog != "" {
-				configInfo = fmt.Sprintf("Config: auto (from catalog %s)", zconf.SourceCatalog)
-			} else {
-				configInfo = "Config: auto"
-			}
-		} else {
-			configInfo = "Config: manual"
-		}
-
-		line += fmt.Sprintf("\tFrozen: %t\tDirty: %t\t%s\n", zconf.Frozen, zconf.Dirty, configInfo)
-		zoneLines = append(zoneLines, line)
+		zoneLines = append(zoneLines, zoneBaseDetail(zname, zconf))
 	}
 
 	sort.Slice(zoneLines, func(i, j int) bool {
@@ -871,27 +813,27 @@ func VerboseListZone(cr tdns.ZoneResponse) {
 	fmt.Printf("%s\n", columnize.SimpleFormat(zoneLines))
 }
 
-// DescribeZone renders the full single-zone detail block for `zone desc`:
-// everything VerboseListZone shows for a zone (state, type/store/options,
-// effective DNSSEC policy + override, primaries/notify/file, frozen/dirty/config
-// source) plus two sections that are only available via `zone desc` — the
-// last-applied DNSSEC-policy record and the bound policy's algorithm/lifetime/
-// sig-validity detail. It returns the text (trailing newline included) so it is
-// straightforward to unit test; RunZoneDesc prints the result.
-func DescribeZone(zconf tdns.ZoneConf) string {
+// zoneBaseDetail renders the per-zone detail block shared by VerboseListZone
+// (`zone list -v`) and DescribeZone (`zone desc`): the zone header, error/warning
+// state, type/store/options, effective DNSSEC policy + override, primaries/
+// notify/file, and the frozen/dirty/config-source line. It returns the multi-line
+// block (each line ending in a newline). Both renderers call it so they cannot
+// drift; the caller passes the display name (VerboseListZone uses the map key,
+// DescribeZone uses zconf.Name — equal in practice). `zone list -v` output must
+// stay byte-identical — see TestVerboseListZone_GoldenParity.
+func zoneBaseDetail(name string, zconf tdns.ZoneConf) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "zone: %s\n", zconf.Name)
-
+	fmt.Fprintf(&b, "zone: %s\n", name)
 	if zconf.Error {
 		// A service-impacting error is ERROR; a non-service-impacting warning
-		// (e.g. ConfigWarning) leaves the zone serving — mirror VerboseListZone.
+		// (e.g. ConfigWarning) leaves the zone serving — render it as such,
+		// matching ListZones rather than masquerading as ERROR.
 		if tdns.ErrorTypeIsServiceImpacting(zconf.ErrorType) {
 			fmt.Fprintf(&b, "\tState: ERROR ErrorType: %s ErrorMsg: %s\n", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
 		} else {
 			fmt.Fprintf(&b, "\tState: serving Warning[%s]: %s\n", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
 		}
 	}
-
 	opts := []string{}
 	for _, opt := range zconf.Options {
 		opts = append(opts, tdns.ZoneOptionToString[opt])
@@ -911,10 +853,9 @@ func DescribeZone(zconf tdns.ZoneConf) string {
 		fmt.Fprintf(&b, "\tDNSSEC policy: %s\n", pol)
 	}
 
-	fmt.Fprintf(&b, "\tPrimary: %s\tNotify: %s\tFile: %s\n",
-		peerConfAddrsString(zconf.Primaries), peerConfAddrsString(zconf.Notify), zconf.Zonefile)
+	fmt.Fprintf(&b, "\tPrimary: %s\tNotify: %s\tFile: %s\n", peerConfAddrsString(zconf.Primaries), peerConfAddrsString(zconf.Notify), zconf.Zonefile)
 
-	// Config-source line (catalog / auto / manual), same derivation as VerboseListZone.
+	// Check for catalog zone flags
 	isCatalogZone := false
 	isAutoConfigured := false
 	for _, opt := range zconf.Options {
@@ -925,7 +866,8 @@ func DescribeZone(zconf tdns.ZoneConf) string {
 			isAutoConfigured = true
 		}
 	}
-	configInfo := "Config: manual"
+
+	configInfo := ""
 	if isCatalogZone {
 		configInfo = "Catalog Zone"
 	} else if isAutoConfigured {
@@ -934,11 +876,33 @@ func DescribeZone(zconf tdns.ZoneConf) string {
 		} else {
 			configInfo = "Config: auto"
 		}
+	} else {
+		configInfo = "Config: manual"
 	}
-	fmt.Fprintf(&b, "\tFrozen: %t\tDirty: %t\t%s\n", zconf.Frozen, zconf.Dirty, configInfo)
 
-	// Section 1: last-applied DNSSEC policy record (from the keystore).
-	if zconf.AppliedPolicy != "" {
+	fmt.Fprintf(&b, "\tFrozen: %t\tDirty: %t\t%s\n", zconf.Frozen, zconf.Dirty, configInfo)
+	return b.String()
+}
+
+// DescribeZone renders the full single-zone detail block for `zone desc`:
+// everything VerboseListZone shows for a zone (state, type/store/options,
+// effective DNSSEC policy + override, primaries/notify/file, frozen/dirty/config
+// source) plus two sections that are only available via `zone desc` — the
+// last-applied DNSSEC-policy record and the bound policy's algorithm/lifetime/
+// sig-validity detail. It returns the text (trailing newline included) so it is
+// straightforward to unit test; RunZoneDesc prints the result.
+func DescribeZone(zconf tdns.ZoneConf) string {
+	var b strings.Builder
+	// Shared base block (identical to what `zone list -v` renders for the zone).
+	b.WriteString(zoneBaseDetail(zconf.Name, zconf))
+
+	// Section 1: last-applied DNSSEC policy record (from the keystore). A backend
+	// read failure is surfaced distinctly from a genuinely absent record so an
+	// operator diagnosing DNSSEC state isn't misled by "(not recorded)".
+	switch {
+	case zconf.AppliedError != "":
+		fmt.Fprintf(&b, "\tApplied policy: (lookup failed: %s)\n", zconf.AppliedError)
+	case zconf.AppliedPolicy != "":
 		src := zconf.AppliedSource
 		if src == "" {
 			src = "(unknown)"
@@ -948,7 +912,7 @@ func DescribeZone(zconf tdns.ZoneConf) string {
 			at = "(unknown)"
 		}
 		fmt.Fprintf(&b, "\tApplied policy: %s\tSource: %s\tApplied at: %s\n", zconf.AppliedPolicy, src, at)
-	} else {
+	default:
 		b.WriteString("\tApplied policy: (not recorded)\n")
 	}
 
