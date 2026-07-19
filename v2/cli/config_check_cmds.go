@@ -1018,13 +1018,16 @@ func fetchActiveKeyAlgsByZone(role string) (map[string]activeKeyAlgs, error) {
 // it requires. Config-declared policies (from the checked file) win; the
 // built-in `default` policy and any policy named only by the running server are
 // resolved from the server's loaded policies. false when neither source knows it.
-func resolveWantAlgs(polName string, declared map[string]tdns.PolicyAlgs, serverPols map[string]tdns.DnssecPolicyInfo) (wantAlgs, bool) {
+func resolveWantAlgs(polName string, declared map[string]tdns.PolicyAlgNames, serverPols map[string]tdns.DnssecPolicyInfo) (wantAlgs, bool) {
 	pn := lc(polName)
 	if pa, ok := declared[pn]; ok {
+		// pa.{KSKAlg,ZSKAlg} are already NAMES (resolved without codepoints), so a
+		// PQ policy this client cannot codepoint-resolve is still comparable — the
+		// active-key side is server-reported names too.
 		return wantAlgs{
 			mode: normalizeMode(pa.Mode),
-			ksk:  lc(dns.AlgorithmToString[pa.KSKAlg]),
-			zsk:  lc(dns.AlgorithmToString[pa.ZSKAlg]),
+			ksk:  lc(pa.KSKAlg),
+			zsk:  lc(pa.ZSKAlg),
 		}, true
 	}
 	if sp, ok := serverPols[pn]; ok {
@@ -1079,10 +1082,14 @@ func checkPolicyAlgVsActiveKeys(cfg *tdns.Config, v *viper.Viper, rep *ccReport,
 
 	// Config-declared policy algorithms (honors includes: same merged dnssec
 	// temp file checkDnssecPolicies validates).
-	var declared map[string]tdns.PolicyAlgs
+	// Resolve policy algorithms as NAMES (not codepoints): a pure client cannot
+	// resolve this deployment's runtime-assigned PQ codepoints, and the active-key
+	// side is already name-based (server-reported), so name-vs-name makes the
+	// correlation PQ-safe.
+	var declared map[string]tdns.PolicyAlgNames
 	if pols, _ := v.Get("dnssec.policies").(map[string]interface{}); len(pols) > 0 {
 		if tmp, err := writeTempYAML(map[string]interface{}{"dnssec": v.Get("dnssec")}); err == nil {
-			declared, _ = tdns.ResolveDnssecPolicyAlgs(tmp)
+			declared, _ = tdns.ResolveDnssecPolicyAlgNames(tmp)
 			os.Remove(tmp)
 		}
 	}
