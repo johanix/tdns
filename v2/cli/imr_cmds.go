@@ -240,13 +240,7 @@ var imrStatsAuthTransportsCmd = &cobra.Command{
 				fmt.Printf("\nServer: %s\n", name)
 				// Show received transport percentage signal (pct). If none: do53=100
 				fmt.Printf("  signal: %s\n", renderSignal(server))
-				counters := server.SnapshotCounters()
-				order := []core.Transport{core.TransportDo53, core.TransportDoT, core.TransportDoH, core.TransportDoQ}
-				for _, t := range order {
-					if c, ok := counters[t]; ok && c > 0 {
-						fmt.Printf("  %-4s: %d\n", core.TransportToString[t], c)
-					}
-				}
+				fmt.Printf("  %s\n", formatTransportCounters(server))
 			}
 			return
 		}
@@ -259,13 +253,7 @@ var imrStatsAuthTransportsCmd = &cobra.Command{
 			for name, server := range serverMap {
 				fmt.Printf("  Server: %s\n", name)
 				fmt.Printf("    signal: %s\n", renderSignal(server))
-				counters := server.SnapshotCounters()
-				order := []core.Transport{core.TransportDo53, core.TransportDoT, core.TransportDoH, core.TransportDoQ}
-				for _, t := range order {
-					if c, ok := counters[t]; ok && c > 0 {
-						fmt.Printf("    %-4s: %d\n", core.TransportToString[t], c)
-					}
-				}
+				fmt.Printf("    %s\n", formatTransportCounters(server))
 			}
 		}
 	},
@@ -457,10 +445,17 @@ var imrShowOptionsCmd = &cobra.Command{
 
 // renderSignal formats the received transport percentage signal. If none, returns "do53=100".
 func renderSignal(server *cache.AuthServer) string {
+	return renderSignalFromWeights(server.GetTransportWeights())
+}
+
+// renderSignalFromWeights formats advertised OOTS weights as "doq=20,dot=10,..."
+// (order-stable, non-zero only), falling back to "do53=100" when absent. Shared
+// by the in-process REPL and the remote transport-stats renderer so the signal
+// looks identical either way (fixes the REPL-vs-remote drift).
+func renderSignalFromWeights(weights map[core.Transport]uint8) string {
 	// Prefer showing only the received signal (SVCB pct). If absent, fallback to do53=100.
 	// Order by known transports for stable output.
 	order := []core.Transport{core.TransportDoQ, core.TransportDoT, core.TransportDoH, core.TransportDo53}
-	weights := server.TransportWeights
 	if len(weights) == 0 {
 		return "do53=100"
 	}

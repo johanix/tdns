@@ -22,20 +22,69 @@ import (
 // here, so the route and handler were renamed. tdns-mp keeps its
 // own /agent endpoint for MP-specific commands and now also exposes
 // /imr backed by an analogous APIimr handler.)
+// ImrServerTransportStats is the per-server transport-usage snapshot carried
+// over the /imr API for `tdns-cli imr stats transport-stats`. Count maps are
+// keyed by transport name (do53, do53-tcp, dot, doh, doq).
+type ImrServerTransportStats struct {
+	Zone      string            `json:"zone"`
+	Server    string            `json:"server"`
+	Weights   map[string]uint8  `json:"weights,omitempty"` // advertised OOTS weights (name-keyed), for signal rendering
+	Attempted map[string]uint64 `json:"attempted,omitempty"`
+	Used      map[string]uint64 `json:"used,omitempty"`
+	Failed    map[string]uint64 `json:"failed,omitempty"`
+	Truncated uint64            `json:"truncated"`
+}
+
+// transportName returns the string name for t, with a stable fallback so an
+// unregistered transport (a future enum value missing from TransportToString)
+// never produces an empty-string map key in the API JSON.
+func transportName(t core.Transport) string {
+	if name, ok := core.TransportToString[t]; ok {
+		return name
+	}
+	return fmt.Sprintf("unknown-%d", t)
+}
+
+// transportCountsToStrings converts a transport-keyed counter map to a
+// name-keyed one for JSON transport over the API.
+func transportCountsToStrings(m map[core.Transport]uint64) map[string]uint64 {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]uint64, len(m))
+	for t, c := range m {
+		out[transportName(t)] = c
+	}
+	return out
+}
+
+// transportWeightsToStrings converts a transport-keyed weight map to a
+// name-keyed one for JSON transport over the API.
+func transportWeightsToStrings(m map[core.Transport]uint8) map[string]uint8 {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]uint8, len(m))
+	for t, w := range m {
+		out[transportName(t)] = w
+	}
+	return out
+}
+
 func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
-		var amp AgentMgmtPost
+		var amp ImrMgmtPost
 		err := decoder.Decode(&amp)
 		if err != nil {
-			lgApi.Warn("error decoding agent command post", "err", err)
+			lgApi.Warn("error decoding imr command post", "err", err)
 			http.Error(w, fmt.Sprintf("Invalid request format: %v", err), http.StatusBadRequest)
 			return
 		}
 
 		lgApi.Debug("received /imr request", "cmd", amp.Command, "from", r.RemoteAddr)
 
-		resp := AgentMgmtResponse{
+		resp := ImrMgmtResponse{
 			Time: time.Now(),
 		}
 
@@ -134,10 +183,10 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				resp.ErrorMsg = "IMR engine not available"
 				return
 			}
-			identity := string(amp.AgentId)
+			identity := amp.Id
 			if identity == "" {
 				resp.Error = true
-				resp.ErrorMsg = "agent_id (--id) is required"
+				resp.ErrorMsg = "id (--id) is required"
 				return
 			}
 			identity = dns.Fqdn(identity)
@@ -256,6 +305,46 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 				}
 			} else {
 				resp.Msg = fmt.Sprintf("%d zone-scoped backoffs", len(records))
+			}
+
+		case "imr-transport-stats":
+			imr := Globals.ImrEngine
+			if imr == nil || imr.Cache == nil {
+				resp.Error = true
+				resp.ErrorMsg = "IMR engine not available"
+				return
+			}
+			zoneFilter, _ := amp.Data["zone"].(string)
+			if zoneFilter != "" {
+				zoneFilter = dns.Fqdn(zoneFilter)
+			}
+			var records []ImrServerTransportStats
+			for item := range imr.Cache.ServerMap.IterBuffered() {
+				if zoneFilter != "" && item.Key != zoneFilter {
+					continue
+				}
+				for name, server := range item.Val {
+					ts := server.SnapshotTransportStats()
+					records = append(records, ImrServerTransportStats{
+						Zone:      item.Key,
+						Server:    name,
+						Weights:   transportWeightsToStrings(server.GetTransportWeights()),
+						Attempted: transportCountsToStrings(ts.Attempted),
+						Used:      transportCountsToStrings(ts.Used),
+						Failed:    transportCountsToStrings(ts.Failed),
+						Truncated: ts.Truncated,
+					})
+				}
+			}
+			resp.Data = records
+			if len(records) == 0 {
+				if zoneFilter != "" {
+					resp.Msg = fmt.Sprintf("No auth servers recorded for %s", zoneFilter)
+				} else {
+					resp.Msg = "No auth servers recorded"
+				}
+			} else {
+				resp.Msg = fmt.Sprintf("Transport stats for %d server(s)", len(records))
 			}
 
 		default:

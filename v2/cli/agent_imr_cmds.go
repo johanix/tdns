@@ -41,7 +41,7 @@ func newImrQueryCmd(role string) *cobra.Command {
 			qname := dns.Fqdn(args[0])
 			qtype := args[1]
 
-			amr, err := SendImrMgmtCmd(role, &tdns.AgentMgmtPost{
+			amr, err := SendImrMgmtCmd(role, &tdns.ImrMgmtPost{
 				Command: "imr-query",
 				Data: map[string]interface{}{
 					"qname": qname,
@@ -87,7 +87,7 @@ func newImrFlushCmd(role string) *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
 			qname := dns.Fqdn(args[0])
-			amr, err := SendImrMgmtCmd(role, &tdns.AgentMgmtPost{
+			amr, err := SendImrMgmtCmd(role, &tdns.ImrMgmtPost{
 				Command: "imr-flush",
 				Data:    map[string]interface{}{"qname": qname},
 			})
@@ -108,7 +108,7 @@ func newImrResetCmd(role string) *cobra.Command {
 		Use:   "reset",
 		Short: "Flush entire IMR cache and re-prime (preserves root NS)",
 		Run: func(cmd *cobra.Command, args []string) {
-			amr, err := SendImrMgmtCmd(role, &tdns.AgentMgmtPost{Command: "imr-reset"})
+			amr, err := SendImrMgmtCmd(role, &tdns.ImrMgmtPost{Command: "imr-reset"})
 			if err != nil {
 				log.Fatalf("Request failed: %v", err)
 			}
@@ -130,9 +130,9 @@ func newImrShowCmd(role string) *cobra.Command {
 			if imrShowID == "" {
 				log.Fatal("--id flag is required")
 			}
-			amr, err := SendImrMgmtCmd(role, &tdns.AgentMgmtPost{
+			amr, err := SendImrMgmtCmd(role, &tdns.ImrMgmtPost{
 				Command: "imr-show",
-				AgentId: tdns.AgentId(imrShowID),
+				Id:      imrShowID,
 			})
 			if err != nil {
 				log.Fatalf("Request failed: %v", err)
@@ -181,7 +181,7 @@ func newImrDumpTuningCmd(role string) *cobra.Command {
 		Use:   "dump-tuning",
 		Short: "Show effective IMR tuning values (backoff policy, family, discovery, etc.)",
 		Run: func(cmd *cobra.Command, args []string) {
-			amr, err := SendImrMgmtCmd(role, &tdns.AgentMgmtPost{Command: "imr-dump-tuning"})
+			amr, err := SendImrMgmtCmd(role, &tdns.ImrMgmtPost{Command: "imr-dump-tuning"})
 			if err != nil {
 				log.Fatalf("Request failed: %v", err)
 			}
@@ -233,7 +233,7 @@ func newImrDumpZoneBackoffsCmd(role string) *cobra.Command {
 			if len(args) == 1 {
 				data["zone"] = dns.Fqdn(args[0])
 			}
-			amr, err := SendImrMgmtCmd(role, &tdns.AgentMgmtPost{
+			amr, err := SendImrMgmtCmd(role, &tdns.ImrMgmtPost{
 				Command: "imr-dump-zone-backoffs",
 				Data:    data,
 			})

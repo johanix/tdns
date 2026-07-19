@@ -409,7 +409,8 @@ func (zd *ZoneData) addNSAndGlue(m *dns.Msg, apex *OwnerData, snap *zoneSnapshot
 // query was a direct lookup for the signal itself). RRSIGs of each injected
 // RRset are added when DO is set. Returns true if anything was added.
 func (zd *ZoneData) addTransportSignal(m *dns.Msg, sigs []core.RRset, msgoptions *edns0.MsgOptions) bool {
-	if msgoptions.OtsOptOut || len(sigs) == 0 {
+	// -03: SHOULD NOT include OOTS SVCB unless the query carried the OOTS option.
+	if msgoptions == nil || !msgoptions.OotsOptIn || len(sigs) == 0 {
 		return false
 	}
 	present := map[string]bool{}
@@ -711,6 +712,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 		lgHandler.Info("QueryResponder: context cancelled")
 		m := new(dns.Msg)
 		m.SetReply(r)
+		edns0.EnsureResponseOPT(m, r, dns.DefaultMsgSize)
 		m.MsgHdr.Rcode = dns.RcodeServerFailure
 		w.WriteMsg(m)
 		return ctx.Err()
@@ -750,6 +752,13 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.MsgHdr.Authoritative = true
+	// RFC 6891 §6.1.1: an EDNS query MUST get an OPT in the response. Attach it
+	// once here, up front, so every exit path below (positive answers,
+	// referrals, NXDOMAIN/NODATA, DS, CNAME, SOA, REFUSED — all of which reuse
+	// this m) carries it. No-op for non-EDNS queries. Later EDE/CDE error paths
+	// find and reuse this OPT rather than adding a second one. Downstream UDP
+	// truncation preserves the OPT and re-appends it after trimming.
+	edns0.EnsureResponseOPT(m, r, dns.DefaultMsgSize)
 
 	// Pin ONE snapshot for the whole response so the answer, authority SOA, NS,
 	// and glue all come from the same serial — no intra-response tearing (C1).
@@ -913,6 +922,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 					servfail := new(dns.Msg)
 					servfail.SetReply(r)
 					servfail.MsgHdr.Authoritative = true
+					edns0.EnsureResponseOPT(servfail, r, dns.DefaultMsgSize)
 					servfail.MsgHdr.Rcode = dns.RcodeServerFailure
 					w.WriteMsg(servfail)
 					return nil

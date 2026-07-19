@@ -32,22 +32,77 @@ func TestCandidateTransports_SinglePreferred_Encrypted(t *testing.T) {
 	}
 }
 
-// TestCandidateTransports_Do53RemainderAdded: when configured weights don't
-// sum to 100, the remainder is added as Do53 unless requireEncrypted.
-func TestCandidateTransports_Do53RemainderAdded(t *testing.T) {
+// TestCandidateTransports_Do53UltimateFallback: with only DoT:30, do53_share=70
+// so both compete in the share pool; Do53 must still appear when not
+// requireEncrypted.
+func TestCandidateTransports_Do53UltimateFallback(t *testing.T) {
 	s := cache.NewAuthServer("ns.example.")
 	s.SetTransports([]core.Transport{core.TransportDoT})
 	s.SetTransportWeight(core.TransportDoT, 30)
 
 	got := candidateTransports(s, "example.", false)
 	if !slices.Contains(got, core.TransportDo53) {
-		t.Errorf("expected Do53 in candidates (weight remainder), got %v", got)
+		t.Errorf("expected Do53 in share pool/fallback, got %v", got)
 	}
 	if !slices.Contains(got, core.TransportDoT) {
 		t.Errorf("expected DoT in candidates, got %v", got)
 	}
-	if len(got) != 2 {
-		t.Errorf("expected exactly 2 candidates, got %d (%v)", len(got), got)
+}
+
+// TestCandidateTransports_Do53ZeroStillFallback: do53_share=0 when encrypted
+// sums to 100; DoQ wins the pool and Do53 is appended last as reliability fallback.
+func TestCandidateTransports_Do53ZeroStillFallback(t *testing.T) {
+	s := cache.NewAuthServer("ns.example.")
+	s.SetTransports([]core.Transport{core.TransportDoQ, core.TransportDo53})
+	s.SetTransportWeight(core.TransportDoQ, 100)
+	s.SetTransportWeight(core.TransportDo53, 0)
+
+	got := candidateTransports(s, "example.", false)
+	if len(got) != 2 || got[0] != core.TransportDoQ || got[1] != core.TransportDo53 {
+		t.Errorf("got %v, want [DoQ, Do53]", got)
+	}
+}
+
+// TestCandidateTransports_WeightOneExcluded: weight ≤ 1 is outside the share
+// pool; Do53 absorbs that capacity via do53_share.
+func TestCandidateTransports_WeightOneExcluded(t *testing.T) {
+	s := cache.NewAuthServer("ns.example.")
+	s.SetTransports([]core.Transport{core.TransportDoT, core.TransportDoQ})
+	s.SetTransportWeight(core.TransportDoT, 1)
+	s.SetTransportWeight(core.TransportDoQ, 20)
+
+	got := candidateTransports(s, "example.", false)
+	if slices.Contains(got, core.TransportDoT) {
+		t.Errorf("weight 1 must be excluded from share pool, got %v", got)
+	}
+	if !slices.Contains(got, core.TransportDoQ) {
+		t.Errorf("expected DoQ, got %v", got)
+	}
+	if !slices.Contains(got, core.TransportDo53) {
+		t.Errorf("expected Do53 (do53_share=80), got %v", got)
+	}
+}
+
+// TestCandidateTransports_SharePoolIncludesDo53: doq:20,dot:10 → do53_share=70.
+// Do53 is a valid (usually winning) hash pick; DoT/DoQ remain in the list.
+func TestCandidateTransports_SharePoolIncludesDo53(t *testing.T) {
+	s := cache.NewAuthServer("ns.example.")
+	m, err := core.ParseTransportString("doq:20,dot:10")
+	if err != nil {
+		t.Fatalf("ParseTransportString: %v", err)
+	}
+	if m["do53"] != 100 {
+		t.Fatalf("setup: expected do53 decode default 100, got %d", m["do53"])
+	}
+	if !applyTransportMapToServer(s, m) {
+		t.Fatal("applyTransportMapToServer failed")
+	}
+
+	got := candidateTransports(s, "example.", false)
+	if !slices.Contains(got, core.TransportDo53) ||
+		!slices.Contains(got, core.TransportDoQ) ||
+		!slices.Contains(got, core.TransportDoT) {
+		t.Errorf("expected Do53+DoQ+DoT in candidates, got %v", got)
 	}
 }
 
@@ -85,7 +140,8 @@ func TestCandidateTransports_NoEncryptedReturnsNil(t *testing.T) {
 
 // TestCandidateTransports_DeterministicHashFirst: the bucket-winning
 // transport is returned first; the same (qname, server.Name) pair must
-// produce the same first transport across calls.
+// produce the same first transport across calls. With DoT:50+DoH:50,
+// do53_share=0 so Do53 is reliability-appended last; winner is DoT or DoH.
 func TestCandidateTransports_DeterministicHashFirst(t *testing.T) {
 	s := cache.NewAuthServer("ns.example.")
 	s.SetTransports([]core.Transport{core.TransportDoT, core.TransportDoH})
@@ -100,10 +156,52 @@ func TestCandidateTransports_DeterministicHashFirst(t *testing.T) {
 		}
 	}
 
-	// Ensure both transports appear in the result somewhere — winner first
-	// plus the loser in the fallback positions.
 	if !slices.Contains(first, core.TransportDoT) || !slices.Contains(first, core.TransportDoH) {
 		t.Errorf("expected both DoT and DoH in candidates, got %v", first)
+	}
+	if first[0] != core.TransportDoT && first[0] != core.TransportDoH {
+		t.Errorf("hash winner should be DoT or DoH (do53_share=0), got %v", first)
+	}
+	if first[len(first)-1] != core.TransportDo53 {
+		t.Errorf("expected Do53 reliability fallback last, got %v", first)
+	}
+}
+
+// TestCandidateTransports_ShareDistribution: over many distinct qnames,
+// winners for do53:100,dot:10,doq:20 track ~70/10/20 shares.
+func TestCandidateTransports_ShareDistribution(t *testing.T) {
+	s := cache.NewAuthServer("ns.example.")
+	m, err := core.ParseTransportString("do53:100,dot:10,doq:20")
+	if err != nil {
+		t.Fatalf("ParseTransportString: %v", err)
+	}
+	if !applyTransportMapToServer(s, m) {
+		t.Fatal("applyTransportMapToServer failed")
+	}
+
+	const n = 10000
+	counts := map[core.Transport]int{}
+	for i := 0; i < n; i++ {
+		qname := fmt.Sprintf("q%d.example.", i)
+		got := candidateTransports(s, qname, false)
+		if len(got) == 0 {
+			t.Fatalf("empty candidates for %s", qname)
+		}
+		counts[got[0]]++
+	}
+
+	// Shares: do53=70, doq=20, dot=10. Allow ±3 percentage points.
+	pct := func(t core.Transport) float64 {
+		return 100 * float64(counts[t]) / float64(n)
+	}
+	if p := pct(core.TransportDo53); p < 67 || p > 73 {
+		t.Errorf("Do53 winner %% = %.1f, want ~70 (counts=%v)", p, counts)
+	}
+	if p := pct(core.TransportDoQ); p < 17 || p > 23 {
+		t.Errorf("DoQ winner %% = %.1f, want ~20 (counts=%v)", p, counts)
+	}
+	if p := pct(core.TransportDoT); p < 7 || p > 13 {
+		t.Errorf("DoT winner %% = %.1f, want ~10 (counts=%v)", p, counts)
 	}
 }
 
@@ -118,13 +216,13 @@ func TestPrioritizeServers_PerTransportBackoffFiltering(t *testing.T) {
 	s := cache.NewAuthServer(ns)
 	s.SetAddrs([]string{addr})
 	s.SetTransports([]core.Transport{core.TransportDoT})
-	s.SetTransportWeight(core.TransportDoT, 30) // Do53 remainder = 70
+	s.SetTransportWeight(core.TransportDoT, 30) // Do53 appended as ultimate fallback
 
 	// Baseline: both (addr, DoT) and (addr, Do53) should be in the list.
 	serverMap := map[string]*cache.AuthServer{ns: s}
 	_, _, tuples := imr.prioritizeServers("foo.example.", serverMap, false)
 	if len(tuples) != 2 {
-		t.Fatalf("baseline: expected 2 tuples (DoT + Do53), got %d (%+v)", len(tuples), tuples)
+		t.Fatalf("baseline: expected 2 tuples (DoT + Do53 fallback), got %d (%+v)", len(tuples), tuples)
 	}
 
 	// Poison (addr, DoT). (addr, Do53) must remain.
@@ -165,7 +263,7 @@ func TestPrioritizeServers_RequireEncryptedFilters(t *testing.T) {
 
 // TestPrioritizeServers_RTTSortAcrossServers: when two servers are configured
 // and one has a low recorded RTT while the other has a high recorded RTT, the
-// fast server's tuples should be listed first.
+// fast server's tuples should be listed first (same OOTS rank → RTT decides).
 func TestPrioritizeServers_RTTSortAcrossServers(t *testing.T) {
 	imr := newTestImr(t)
 
@@ -191,6 +289,55 @@ func TestPrioritizeServers_RTTSortAcrossServers(t *testing.T) {
 	}
 	if tuples[0].NSName != "fast.example." {
 		t.Errorf("expected fast.example. first, got %q (tuples=%+v)", tuples[0].NSName, tuples)
+	}
+}
+
+// TestPrioritizeServers_OotsRankBeatsRTT: a lower-RTT encrypted fallback must
+// not leapfrog the OOTS share-weighted winner (rank 0).
+func TestPrioritizeServers_OotsRankBeatsRTT(t *testing.T) {
+	imr := newTestImr(t)
+
+	const ns = "ns.example."
+	const addr = "10.0.0.7:53"
+	s := cache.NewAuthServer(ns)
+	s.SetAddrs([]string{addr})
+	m, err := core.ParseTransportString("do53:100,dot:10")
+	if err != nil {
+		t.Fatalf("ParseTransportString: %v", err)
+	}
+	if !applyTransportMapToServer(s, m) {
+		t.Fatal("applyTransportMapToServer failed")
+	}
+
+	// Find a qname whose share pick is Do53 (do53_share=90 → majority).
+	var qname string
+	for i := 0; i < 5000; i++ {
+		q := fmt.Sprintf("q%d.example.", i)
+		cands := candidateTransports(s, q, false)
+		if len(cands) > 0 && cands[0] == core.TransportDo53 {
+			qname = q
+			break
+		}
+	}
+	if qname == "" {
+		t.Fatal("could not find a qname where Do53 wins the share pick")
+	}
+
+	// Make DoT much faster than Do53 — under pure RTT sort DoT would win.
+	s.RecordRTT(addr, core.TransportDoT, 5*time.Millisecond)
+	s.RecordRTT(addr, core.TransportDo53, 500*time.Millisecond)
+
+	serverMap := map[string]*cache.AuthServer{ns: s}
+	_, _, tuples := imr.prioritizeServers(qname, serverMap, false)
+	if len(tuples) < 2 {
+		t.Fatalf("expected Do53+DoT tuples, got %d (%+v)", len(tuples), tuples)
+	}
+	if tuples[0].Transport != core.TransportDo53 {
+		t.Errorf("OOTS rank-0 winner Do53 must stay first despite slower RTT; got %v (tuples=%+v)",
+			tuples[0].Transport, tuples)
+	}
+	if tuples[0].Rank != 0 {
+		t.Errorf("first tuple Rank=%d, want 0", tuples[0].Rank)
 	}
 }
 

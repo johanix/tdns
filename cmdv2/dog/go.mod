@@ -58,4 +58,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.1
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.2

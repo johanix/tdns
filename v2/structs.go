@@ -951,6 +951,28 @@ type AgentMgmtResponse struct {
 	Data     interface{} `json:"data,omitempty"` // Generic data field for custom responses
 }
 
+// ImrMgmtPost is a management request to a daemon's /imr endpoint (tdns-imr, or
+// an agent/auth hosting an in-process IMR). Dedicated to the IMR mgmt API — it
+// deliberately does NOT reuse AgentMgmtPost, whose agent/RR fields are unrelated
+// to IMR operations and whose overloading here would be a future footgun.
+type ImrMgmtPost struct {
+	Command  string                 `json:"command"`
+	Zone     ZoneName               `json:"zone,omitempty"`
+	Id       string                 `json:"id,omitempty"`   // e.g. imr-show: cache identity to show
+	Data     map[string]interface{} `json:"data,omitempty"` // command-specific parameters
+	Response chan *ImrMgmtResponse   `json:"-"`
+}
+
+// ImrMgmtResponse is the response from a daemon's /imr endpoint.
+type ImrMgmtResponse struct {
+	Status   string
+	Time     time.Time
+	Msg      string
+	Error    bool
+	ErrorMsg string
+	Data     interface{} `json:"data,omitempty"` // command-specific response payload
+}
+
 // DnskeyStatus holds the result of DNSKEY change detection (local keys only).
 // 20260415 johani: somewhat unclear if we still need this.
 type DnskeyStatus struct {
