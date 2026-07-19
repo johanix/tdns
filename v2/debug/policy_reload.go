@@ -80,13 +80,19 @@ type AppliedRec struct {
 // against a later snapshot, whether it was re-signed and whether it dropped
 // unsigned. RRSIGs are the apex SOA + DNSKEY signatures (keyed by keytag).
 type ZoneSnapshot struct {
-	Zone    string     `json:"zone"`
-	OK      bool       `json:"ok"` // the SOA query answered (server authoritative for the zone)
-	ErrMsg  string     `json:"err,omitempty"`
-	Serial  uint32     `json:"serial"`
-	Signed  bool       `json:"signed"` // an RRSIG(SOA) accompanied the apex SOA (+dnssec)
-	RRSIGs  []RRSIGObs `json:"rrsigs,omitempty"`
-	Applied AppliedRec `json:"applied"`
+	Zone   string `json:"zone"`
+	OK     bool   `json:"ok"` // the SOA query answered (server authoritative for the zone)
+	ErrMsg string `json:"err,omitempty"`
+	Serial uint32 `json:"serial"`
+	Signed bool   `json:"signed"` // an RRSIG(SOA) accompanied the apex SOA (+dnssec)
+	// RRSIGErr is set when the apex-RRSIG probe itself failed (SOA answered but
+	// the SOA/DNSKEY +dnssec queries errored). It makes a probe failure
+	// distinguishable from a genuinely unsigned zone: Signed=false with a
+	// non-empty RRSIGErr is "unknown", not "confirmed unsigned", so the compare
+	// must not read it as a signedness drop or a cleared signature.
+	RRSIGErr string     `json:"rrsig_err,omitempty"`
+	RRSIGs   []RRSIGObs `json:"rrsigs,omitempty"`
+	Applied  AppliedRec `json:"applied"`
 }
 
 // PolicyReloadSnapshot is the whole before/after capture persisted between the
@@ -235,7 +241,11 @@ func snapshotZones(ctx context.Context, cfg PolicyReloadConfig, zones []string) 
 		zs.OK = true
 		zs.Serial = serial
 		rrsigs, rerr := queryApexRRSIGs(ctx, cfg.DnsServer, fqdn)
-		if rerr == nil {
+		if rerr != nil {
+			// SOA answered but the RRSIG probe failed: record it so the compare
+			// treats Signed=false as "unknown", not "confirmed unsigned".
+			zs.RRSIGErr = rerr.Error()
+		} else {
 			zs.RRSIGs = rrsigs
 			for _, o := range rrsigs {
 				if o.CoveredType == dns.TypeSOA {
@@ -345,6 +355,17 @@ func (c *PolicyReloadChecker) checkSignedness(zone string, b, a ZoneSnapshot) {
 			c.report.Violate("A2-signed",
 				fmt.Sprintf("zone %s stopped answering authoritatively (SERVFAIL / no SOA) after the reload trigger", zone),
 				a.ErrMsg)
+		}
+		return
+	}
+	// If the after-snapshot RRSIG probe itself failed, a.Signed=false is a probe
+	// artifact (SOA answered, the +dnssec queries errored), not a confirmed drop
+	// to unsigned — asserting here would be a false positive. Surface it as
+	// inconclusive instead. (A before-probe failure only ever suppresses the
+	// latch → a missed detection, never a false alarm, so it needs no guard.)
+	if a.RRSIGErr != "" {
+		if b.Signed {
+			c.report.Stat("signedness.inconclusive", 1)
 		}
 		return
 	}

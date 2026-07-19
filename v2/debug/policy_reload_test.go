@@ -208,6 +208,26 @@ func TestPolicyReloadServfailAfterTrigger(t *testing.T) {
 	}
 }
 
+// A transient apex-RRSIG probe failure in the AFTER snapshot (the SOA still
+// answers) must NOT read as a signed→unsigned drop: Signed=false there is a
+// probe artifact, not a confirmed regression. This guards the framework's
+// false-positive-free contract.
+func TestPolicyReloadAfterRRSIGProbeErrorIsNotADrop(t *testing.T) {
+	before := map[string]ZoneSnapshot{
+		"a.example.": signedZone("a.example.", 10, 1_700_000_000),
+	}
+	after := map[string]ZoneSnapshot{
+		"a.example.": {Zone: "a.example.", OK: true, Serial: 11, Signed: false, RRSIGErr: "read udp 127.0.0.1:5354: i/o timeout"},
+	}
+	rep := compare(0, false, before, after)
+	if len(rep.Violations) != 0 {
+		t.Fatalf("an after-snapshot RRSIG probe error must not violate, got %+v", rep.Violations)
+	}
+	if got := statOf(rep, "signedness.inconclusive"); got != 1 {
+		t.Errorf("expected signedness.inconclusive=1, got %d", got)
+	}
+}
+
 // A key rollover (a keytag present only in the after snapshot) is a config
 // change, not a re-sign of existing content — it must not trip A2 on its own.
 func TestPolicyReloadRolloverNewKeytagNotResign(t *testing.T) {

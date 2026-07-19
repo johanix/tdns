@@ -373,7 +373,8 @@ differentially against BIND/NSD). Exit: 0 = A2 held, 1 = a zone was re-signed
 func runPolicyReload(ctx context.Context) {
 	server := dnsServer
 	if server == "" {
-		log.Fatal("no DNS server: pass --dns")
+		log.Printf("no DNS server: pass --dns")
+		os.Exit(debug.ExitSetup)
 	}
 	if _, _, err := net.SplitHostPort(server); err != nil {
 		server = net.JoinHostPort(server, "53")
@@ -400,10 +401,12 @@ func runPolicyReload(ctx context.Context) {
 		}
 		zones = z
 	default:
-		log.Fatal("choose a mode: --phase before|after (restart) or --reload")
+		log.Printf("choose a mode: --phase before|after (restart) or --reload")
+		os.Exit(debug.ExitSetup)
 	}
 	if len(zones) == 0 {
-		log.Fatal("no zones to test: pass --zones or ensure the mgmt API lists signed zones")
+		log.Printf("no zones to test: pass --zones or ensure the mgmt API lists signed zones")
+		os.Exit(debug.ExitSetup)
 	}
 
 	// Capability probe + matrix (applied-readback is probed against a real zone;
