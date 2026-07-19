@@ -189,74 +189,27 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 
 		case "list-zones":
 			zones := map[string]ZoneConf{}
+			// Single-zone describe path (`zone desc`): scope the response to the
+			// named zone and populate the extra detail fields (last-applied policy
+			// record + bound-policy algorithm/lifetime detail). The bulk path below
+			// is left byte-identical so `zone list` (plain and -v) is unchanged.
+			if zp.Zone != "" {
+				zname := dns.Fqdn(zp.Zone)
+				zd, ok := Zones.Get(zname)
+				if !ok || zd == nil {
+					resp.Error = true
+					resp.ErrorMsg = fmt.Sprintf("Zone %s is unknown", zname)
+					return
+				}
+				zconf := buildListZoneConf(zd, zname, kdb)
+				populateZoneDescDetail(&zconf, zd, zname, kdb)
+				zones[zname] = zconf
+				resp.Zones = zones
+				return
+			}
 			lgApi.Debug("listing zones", "count", len(Zones.Keys()))
 			for item := range Zones.IterBuffered() {
-				zname := item.Key
-				zd := item.Val
-
-				// dump.P(zd.Options)
-				options := []ZoneOption{}
-				for opt, val := range zd.Options {
-					if val {
-						options = append(options, opt)
-					}
-				}
-
-				// For secondary zones, list as-written primaries from runtime state.
-				primaries := clonePeerConfs(zd.PrimariesConf)
-
-				// Snapshot the notify slice under the lock — the catalog notify
-				// add/remove handlers mutate zd.Notify under zd.mu, so an
-				// unsynchronized read here would race the slice header.
-				zd.mu.Lock()
-				notifySnapshot := append([]PeerConf(nil), zd.Notify...)
-				zd.mu.Unlock()
-
-				// Effective DNSSEC policy (the one bound to the running zone)
-				// and, when it came from a dynamic set-policy override, the
-				// config-base policy it overrides (for display). A lookup error
-				// degrades that one zone's override flag to false (the listing
-				// still succeeds); log it rather than silently swallow.
-				_, overridden, ovErr := GetZonePolicyOverride(kdb, zname)
-				if ovErr != nil {
-					lgApi.Warn("list-zones: failed to read DNSSEC policy override", "zone", zname, "err", ovErr)
-				}
-				configPolicy := ""
-				if overridden {
-					// Conf.Zones is replaced wholesale by a config reload;
-					// guard the scan with confMu (read lock).
-					confMu.RLock()
-					for i := range Conf.Zones {
-						if dns.Fqdn(Conf.Zones[i].Name) == zname {
-							configPolicy = Conf.Zones[i].DnssecPolicy
-							break
-						}
-					}
-					confMu.RUnlock()
-				}
-
-				zconf := ZoneConf{
-					Name:                   zname,
-					Type:                   ZoneTypeToString[zd.ZoneType],
-					Store:                  ZoneStoreToString[zd.ZoneStore],
-					Dirty:                  zd.Options[OptDirty],
-					Frozen:                 zd.Options[OptFrozen],
-					Options:                options,
-					Error:                  zd.Error,
-					ErrorType:              zd.ErrorType,
-					ErrorMsg:               zd.ErrorMsg,
-					RefreshCount:           zd.RefreshCount,
-					SourceCatalog:          zd.SourceCatalog,
-					ApiManaged:             zd.Options[OptApiManagedZone],
-					Provisioning:           zoneProvisioning(zd),
-					Zonefile:               zd.Zonefile,
-					Primaries:              primaries,
-					Notify:                 notifySnapshot, // Notify addresses (displayed by CLI)
-					EffectiveDnssecPolicy:  zd.DnssecPolicyName,
-					DnssecPolicyOverridden: overridden,
-					DnssecPolicyConfigBase: configPolicy,
-				}
-				zones[zname] = zconf
+				zones[item.Key] = buildListZoneConf(item.Val, item.Key, kdb)
 			}
 			resp.Zones = zones
 
@@ -341,6 +294,117 @@ func zoneProvisioning(zd *ZoneData) string {
 		return "error"
 	}
 	return ZoneStatusToString[zd.GetStatus()]
+}
+
+// buildListZoneConf builds the display ZoneConf for one zone exactly as the bulk
+// `list-zones` path renders it (type/store/options/primaries/notify/error state
+// plus effective-policy and override info). It is shared by the bulk listing and
+// the single-zone `zone desc` path so both show identical base fields; `zone
+// desc` additionally fills the detail fields via populateZoneDescDetail.
+func buildListZoneConf(zd *ZoneData, zname string, kdb *KeyDB) ZoneConf {
+	options := []ZoneOption{}
+	for opt, val := range zd.Options {
+		if val {
+			options = append(options, opt)
+		}
+	}
+
+	// For secondary zones, list as-written primaries from runtime state.
+	primaries := clonePeerConfs(zd.PrimariesConf)
+
+	// Snapshot the notify slice under the lock — the catalog notify add/remove
+	// handlers mutate zd.Notify under zd.mu, so an unsynchronized read here would
+	// race the slice header.
+	zd.mu.Lock()
+	notifySnapshot := append([]PeerConf(nil), zd.Notify...)
+	zd.mu.Unlock()
+
+	// Effective DNSSEC policy (the one bound to the running zone) and, when it
+	// came from a dynamic set-policy override, the config-base policy it overrides
+	// (for display). A lookup error degrades that one zone's override flag to
+	// false (the listing still succeeds); log it rather than silently swallow.
+	_, overridden, ovErr := GetZonePolicyOverride(kdb, zname)
+	if ovErr != nil {
+		lgApi.Warn("list-zones: failed to read DNSSEC policy override", "zone", zname, "err", ovErr)
+	}
+	configPolicy := ""
+	if overridden {
+		// Conf.Zones is replaced wholesale by a config reload; guard the scan with
+		// confMu (read lock).
+		confMu.RLock()
+		for i := range Conf.Zones {
+			if dns.Fqdn(Conf.Zones[i].Name) == zname {
+				configPolicy = Conf.Zones[i].DnssecPolicy
+				break
+			}
+		}
+		confMu.RUnlock()
+	}
+
+	return ZoneConf{
+		Name:                   zname,
+		Type:                   ZoneTypeToString[zd.ZoneType],
+		Store:                  ZoneStoreToString[zd.ZoneStore],
+		Dirty:                  zd.Options[OptDirty],
+		Frozen:                 zd.Options[OptFrozen],
+		Options:                options,
+		Error:                  zd.Error,
+		ErrorType:              zd.ErrorType,
+		ErrorMsg:               zd.ErrorMsg,
+		RefreshCount:           zd.RefreshCount,
+		SourceCatalog:          zd.SourceCatalog,
+		ApiManaged:             zd.Options[OptApiManagedZone],
+		Provisioning:           zoneProvisioning(zd),
+		Zonefile:               zd.Zonefile,
+		Primaries:              primaries,
+		Notify:                 notifySnapshot, // Notify addresses (displayed by CLI)
+		EffectiveDnssecPolicy:  zd.DnssecPolicyName,
+		DnssecPolicyOverridden: overridden,
+		DnssecPolicyConfigBase: configPolicy,
+	}
+}
+
+// populateZoneDescDetail fills the `zone desc`-only detail fields on zconf: the
+// zone's last-applied DNSSEC-policy record (from the keystore) and a display
+// projection of the policy currently bound to the running zone. Both degrade
+// gracefully — an absent applied record leaves AppliedPolicy empty; an unsigned
+// zone (no bound policy) or a bound-policy name that is not resolvable in the
+// live config snapshot leaves PolicyDetail nil — so the describe listing always
+// succeeds. The bound policy is read from the immutable runtime-config snapshot
+// (ConfLive), which is lock-free: a concurrent reload publishes a fresh snapshot
+// rather than mutating in place, so pol is a stable value copy.
+func populateZoneDescDetail(zconf *ZoneConf, zd *ZoneData, zname string, kdb *KeyDB) {
+	name, source, appliedAt, ok, err := GetZoneAppliedPolicyDetail(kdb, zname)
+	if err != nil {
+		lgApi.Warn("zone desc: failed to read applied policy", "zone", zname, "err", err)
+	} else if ok {
+		zconf.AppliedPolicy = name
+		zconf.AppliedSource = source
+		zconf.AppliedAt = appliedAt
+	}
+
+	polName := zd.DnssecPolicyName
+	if polName == "" {
+		return // unsigned zone: no bound policy → PolicyDetail stays nil ("not signed")
+	}
+	pol, polOK := ConfLive().DnssecPolicies[polName]
+	if !polOK {
+		return // bound policy not in the live snapshot → PolicyDetail stays nil ("policy unavailable")
+	}
+	zconf.PolicyDetail = &DnssecPolicyView{
+		Name:               polName,
+		Error:              pol.Error,
+		Mode:               pol.Mode,
+		Algorithm:          pol.Algorithm,
+		KSKAlgorithm:       pol.KSKAlgorithm,
+		ZSKAlgorithm:       pol.ZSKAlgorithm,
+		KSKLifetime:        pol.KSK.Lifetime,
+		ZSKLifetime:        pol.ZSK.Lifetime,
+		CSKLifetime:        pol.CSK.Lifetime,
+		SigValidityDefault: pol.SigValidity.Default,
+		SigValidityDNSKEY:  pol.SigValidity.DNSKEY,
+		SigValidityDS:      pol.SigValidity.DS,
+	}
 }
 
 // zoneOptionsFromStrings converts ZoneOption name strings (from the API) into

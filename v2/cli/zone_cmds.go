@@ -10,7 +10,9 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/miekg/dns"
@@ -46,6 +48,26 @@ func NewZoneCmd(role string, extras ...*cobra.Command) *cobra.Command {
 	list.Flags().BoolVarP(&showfile, "file", "f", false, "Show zone input file")
 	list.Flags().BoolVarP(&shownotify, "notify", "N", false, "Show zone downstream notify addresses")
 	list.Flags().BoolVarP(&showprimary, "primary", "P", false, "Show zone primary nameserver")
+
+	desc := &cobra.Command{
+		Use:   "desc",
+		Short: "Describe a single zone in full, including DNSSEC applied-policy state and policy detail",
+		Long: `Print a detailed, multi-line record for one zone: everything "zone list -v"
+shows (type, store, options, primaries, notify, error/warning state, effective
+DNSSEC policy and override info) plus two DNSSEC sections not otherwise visible
+from the CLI:
+
+  1. the last-applied policy record recorded in the keystore (applied policy
+     name, source config|command, and when it was applied); and
+  2. the currently-bound policy's detail — mode, KSK/ZSK (or CSK) algorithms,
+     key lifetimes and RRSIG validity.
+
+An unsigned zone or an unresolvable policy degrades gracefully rather than
+failing. Does not change anything; read-only.`,
+		Run: func(cmd *cobra.Command, args []string) { RunZoneDesc(role, args) },
+	}
+	desc.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to describe")
+	desc.MarkFlagRequired("zone")
 
 	reload := &cobra.Command{
 		Use:   "reload",
@@ -251,7 +273,7 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 	dnssecCmd.AddCommand(setPolicy, policyReset, newAutoRolloverPolicyChangeCmd(), newAutoRolloverCmd(role),
 		sign, resign, nsec)
 
-	c.AddCommand(list, dnssecCmd, reload, bump, write, freeze, thaw, proxyKey, add, del, modify, listDynamic)
+	c.AddCommand(list, desc, dnssecCmd, reload, bump, write, freeze, thaw, proxyKey, add, del, modify, listDynamic)
 	// Role-independent extras attached to every zone tree. Each is built
 	// fresh so the command pointer is unique per NewZoneCmd invocation.
 	c.AddCommand(newZoneReadFakeCmd(), newZoneUpdateCmd(role), newZoneDsyncCmd(role))
@@ -470,6 +492,41 @@ func RunZoneList(parent string, args []string) {
 	case false:
 		ListZones(cr)
 	}
+}
+
+// RunZoneDesc drives `zone desc`: it asks the server for the single named zone
+// (list-zones scoped to that zone, which also populates the extra DNSSEC detail
+// fields) and prints the full describe block. Requires a zone.
+func RunZoneDesc(parent string, args []string) {
+	if tdns.Globals.Zonename == "" {
+		fmt.Println("Error: zone name not specified")
+		os.Exit(1)
+	}
+	zone := dns.Fqdn(tdns.Globals.Zonename)
+
+	api, err := GetApiClient(parent, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", parent, err)
+	}
+
+	cr, err := SendZoneCommand(api, tdns.ZonePost{
+		Command: "list-zones",
+		Zone:    zone,
+	})
+	if err != nil {
+		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		os.Exit(1)
+	}
+	if cr.Msg != "" {
+		fmt.Printf("%s\n", cr.Msg)
+	}
+
+	zconf, ok := cr.Zones[zone]
+	if !ok {
+		fmt.Printf("Error: server returned no data for zone %s\n", zone)
+		os.Exit(1)
+	}
+	fmt.Print(DescribeZone(zconf))
 }
 
 func RunZoneBump(parent string, args []string) {
@@ -812,4 +869,143 @@ func VerboseListZone(cr tdns.ZoneResponse) {
 		return zoneLines[i] < zoneLines[j]
 	})
 	fmt.Printf("%s\n", columnize.SimpleFormat(zoneLines))
+}
+
+// DescribeZone renders the full single-zone detail block for `zone desc`:
+// everything VerboseListZone shows for a zone (state, type/store/options,
+// effective DNSSEC policy + override, primaries/notify/file, frozen/dirty/config
+// source) plus two sections that are only available via `zone desc` — the
+// last-applied DNSSEC-policy record and the bound policy's algorithm/lifetime/
+// sig-validity detail. It returns the text (trailing newline included) so it is
+// straightforward to unit test; RunZoneDesc prints the result.
+func DescribeZone(zconf tdns.ZoneConf) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "zone: %s\n", zconf.Name)
+
+	if zconf.Error {
+		// A service-impacting error is ERROR; a non-service-impacting warning
+		// (e.g. ConfigWarning) leaves the zone serving — mirror VerboseListZone.
+		if tdns.ErrorTypeIsServiceImpacting(zconf.ErrorType) {
+			fmt.Fprintf(&b, "\tState: ERROR ErrorType: %s ErrorMsg: %s\n", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
+		} else {
+			fmt.Fprintf(&b, "\tState: serving Warning[%s]: %s\n", tdns.ErrorTypeToString[zconf.ErrorType], zconf.ErrorMsg)
+		}
+	}
+
+	opts := []string{}
+	for _, opt := range zconf.Options {
+		opts = append(opts, tdns.ZoneOptionToString[opt])
+	}
+	sort.Strings(opts)
+	fmt.Fprintf(&b, "\tType: %s\tStore: %s\tOptions: %v\n", zconf.Type, zconf.Store, opts)
+
+	if zconf.EffectiveDnssecPolicy != "" {
+		pol := zconf.EffectiveDnssecPolicy
+		if zconf.DnssecPolicyOverridden {
+			if zconf.DnssecPolicyConfigBase != "" {
+				pol += fmt.Sprintf(" (override from config: %s)", zconf.DnssecPolicyConfigBase)
+			} else {
+				pol += " (override; set live, not in config)"
+			}
+		}
+		fmt.Fprintf(&b, "\tDNSSEC policy: %s\n", pol)
+	}
+
+	fmt.Fprintf(&b, "\tPrimary: %s\tNotify: %s\tFile: %s\n",
+		peerConfAddrsString(zconf.Primaries), peerConfAddrsString(zconf.Notify), zconf.Zonefile)
+
+	// Config-source line (catalog / auto / manual), same derivation as VerboseListZone.
+	isCatalogZone := false
+	isAutoConfigured := false
+	for _, opt := range zconf.Options {
+		if opt == tdns.OptCatalogZone {
+			isCatalogZone = true
+		}
+		if opt == tdns.OptAutomaticZone {
+			isAutoConfigured = true
+		}
+	}
+	configInfo := "Config: manual"
+	if isCatalogZone {
+		configInfo = "Catalog Zone"
+	} else if isAutoConfigured {
+		if zconf.SourceCatalog != "" {
+			configInfo = fmt.Sprintf("Config: auto (from catalog %s)", zconf.SourceCatalog)
+		} else {
+			configInfo = "Config: auto"
+		}
+	}
+	fmt.Fprintf(&b, "\tFrozen: %t\tDirty: %t\t%s\n", zconf.Frozen, zconf.Dirty, configInfo)
+
+	// Section 1: last-applied DNSSEC policy record (from the keystore).
+	if zconf.AppliedPolicy != "" {
+		src := zconf.AppliedSource
+		if src == "" {
+			src = "(unknown)"
+		}
+		at := zconf.AppliedAt
+		if at == "" {
+			at = "(unknown)"
+		}
+		fmt.Fprintf(&b, "\tApplied policy: %s\tSource: %s\tApplied at: %s\n", zconf.AppliedPolicy, src, at)
+	} else {
+		b.WriteString("\tApplied policy: (not recorded)\n")
+	}
+
+	// Section 2: bound-policy algorithm / lifetime / sig-validity detail.
+	b.WriteString(describePolicyDetail(zconf))
+
+	return b.String()
+}
+
+// describePolicyDetail renders the bound-policy DNSSEC detail block for
+// `zone desc`. It degrades gracefully: a zone with no bound policy prints
+// "not signed"; a bound policy name that the server could not resolve in the
+// running config prints "policy unavailable". Otherwise it renders mode, the
+// role algorithms (KSK/ZSK, or CSK in csk mode), key lifetimes and RRSIG
+// validity, and surfaces the policy's parse Error when set.
+func describePolicyDetail(zconf tdns.ZoneConf) string {
+	pd := zconf.PolicyDetail
+	if pd == nil {
+		if zconf.EffectiveDnssecPolicy == "" {
+			return "\tDNSSEC detail: not signed\n"
+		}
+		return fmt.Sprintf("\tDNSSEC detail: policy unavailable (%s)\n", zconf.EffectiveDnssecPolicy)
+	}
+
+	var b strings.Builder
+	mode := pd.Mode
+	if mode == "" {
+		mode = "(unset)"
+	}
+	fmt.Fprintf(&b, "\tDNSSEC detail: Mode: %s\n", mode)
+	if pd.Error != "" {
+		fmt.Fprintf(&b, "\t\tError: %s\n", pd.Error)
+	}
+	if pd.Mode == tdns.DnssecPolicyModeCSK {
+		fmt.Fprintf(&b, "\t\tCSK algorithm: %s\n", algName(pd.Algorithm))
+		fmt.Fprintf(&b, "\t\tCSK lifetime: %s\n", secsToDuration(pd.CSKLifetime))
+	} else {
+		fmt.Fprintf(&b, "\t\tKSK algorithm: %s\tZSK algorithm: %s\n", algName(pd.KSKAlgorithm), algName(pd.ZSKAlgorithm))
+		fmt.Fprintf(&b, "\t\tKSK lifetime: %s\tZSK lifetime: %s\n", secsToDuration(pd.KSKLifetime), secsToDuration(pd.ZSKLifetime))
+	}
+	fmt.Fprintf(&b, "\t\tSigValidity: default=%s DNSKEY=%s DS=%s\n",
+		secsToDuration(pd.SigValidityDefault), secsToDuration(pd.SigValidityDNSKEY), secsToDuration(pd.SigValidityDS))
+	return b.String()
+}
+
+// algName renders a DNSSEC algorithm number as its mnemonic, falling back to the
+// decimal number for algorithms miekg/dns does not name (matching how dns prints
+// an unknown algorithm).
+func algName(alg uint8) string {
+	if name := dns.AlgorithmToString[alg]; name != "" {
+		return name
+	}
+	return strconv.Itoa(int(alg))
+}
+
+// secsToDuration renders a seconds count as a human duration (e.g. "720h0m0s");
+// 0 renders as "0s".
+func secsToDuration(secs uint32) string {
+	return (time.Duration(secs) * time.Second).String()
 }

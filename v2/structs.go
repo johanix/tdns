@@ -280,16 +280,27 @@ type ZoneConf struct {
 	// `set-policy` override (rather than the config base); and, when
 	// overridden, the config-base policy it overrides. Not config; not
 	// serialized to YAML.
-	EffectiveDnssecPolicy  string    `yaml:"-"`
-	DnssecPolicyOverridden bool      `yaml:"-"`
-	DnssecPolicyConfigBase string    `yaml:"-"`
-	Template               string    `yaml:"template" mapstructure:"template"`
-	MultiSigner            string    `yaml:"multisigner" mapstructure:"multisigner"`
-	Error                  bool      // zone is broken and cannot be used
-	ErrorType              ErrorType // "config" | "refresh" | "agent" | "DNSSEC"
-	ErrorMsg               string    // reason for the error (if known)
-	RefreshCount           int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
-	SourceCatalog          string    // if auto-configured, which catalog zone created this zone
+	EffectiveDnssecPolicy  string `yaml:"-"`
+	DnssecPolicyOverridden bool   `yaml:"-"`
+	DnssecPolicyConfigBase string `yaml:"-"`
+	// AppliedPolicy / AppliedSource / AppliedAt and PolicyDetail are display-only
+	// fields populated ONLY by the single-zone `zone desc` path (list-zones scoped
+	// to one zone): the last-applied DNSSEC-policy record from the keystore
+	// (policy name; source config|command; the applied_at timestamp) and a
+	// projection of the zone's currently-bound policy's algorithm/lifetime/
+	// sig-validity detail. The bulk `list-zones` path (backing `zone list`) never
+	// sets these, so its output is unchanged. Not config; not serialized to YAML.
+	AppliedPolicy string            `yaml:"-"`
+	AppliedSource string            `yaml:"-"`
+	AppliedAt     string            `yaml:"-"`
+	PolicyDetail  *DnssecPolicyView `yaml:"-"`
+	Template      string            `yaml:"template" mapstructure:"template"`
+	MultiSigner   string            `yaml:"multisigner" mapstructure:"multisigner"`
+	Error         bool              // zone is broken and cannot be used
+	ErrorType     ErrorType         // "config" | "refresh" | "agent" | "DNSSEC"
+	ErrorMsg      string            // reason for the error (if known)
+	RefreshCount  int               // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
+	SourceCatalog string            // if auto-configured, which catalog zone created this zone
 	// ApiManaged marks a zone created/managed via the dynamic-zones API (zone
 	// add/delete/modify). Persisted so OptApiManagedZone can be re-derived on
 	// reload — a dedicated bool, not a SourceCatalog="api" sentinel.
@@ -301,6 +312,28 @@ type ZoneConf struct {
 	// ("pending"|"loading"|"ready"|"error") populated by the list handlers from
 	// ZoneStatus + the error registry. Not config; not serialized to YAML.
 	Provisioning string `yaml:"-" mapstructure:"-"`
+}
+
+// DnssecPolicyView is a display-only projection of the DnssecPolicy bound to a
+// zone, carried in ZoneConf.PolicyDetail and populated only by the `zone desc`
+// path. It holds the operator-relevant algorithm/lifetime/sig-validity fields as
+// raw values (algorithm numbers, lifetimes and sig-validity in seconds); the CLI
+// renderer turns them into algorithm names and human durations. Error mirrors
+// DnssecPolicy.Error: non-empty means the policy failed to parse and the other
+// fields may be incomplete. Not config; not serialized to YAML.
+type DnssecPolicyView struct {
+	Name               string
+	Error              string
+	Mode               string // ksk-zsk | csk
+	Algorithm          uint8  // default / CSK algorithm
+	KSKAlgorithm       uint8
+	ZSKAlgorithm       uint8
+	KSKLifetime        uint32 // seconds
+	ZSKLifetime        uint32 // seconds
+	CSKLifetime        uint32 // seconds
+	SigValidityDefault uint32 // seconds
+	SigValidityDNSKEY  uint32 // seconds
+	SigValidityDS      uint32 // seconds
 }
 
 type TemplateConf struct {
