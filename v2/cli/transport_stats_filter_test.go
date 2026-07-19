@@ -27,9 +27,18 @@ func TestTransportStatsFilter_Matches(t *testing.T) {
 		{"suffix-hit-child", transportStatsFilter{suffix: "dsync.se."}, "johani.dsync.se.", true},
 		{"suffix-hit-tld", transportStatsFilter{suffix: "se."}, "iis.se.", true},
 		{"suffix-miss", transportStatsFilter{suffix: "se."}, "example.com.", false},
+		// Suffix matching must respect DNS label boundaries: "sync.se." is a raw
+		// string suffix of "dsync.se." but NOT a zone suffix (it cuts into the
+		// "dsync" label), so it must NOT match.
+		{"suffix-partial-label-rejected", transportStatsFilter{suffix: "sync.se."}, "dsync.se.", false},
+		// DNS names are case-insensitive: mixed-case filters match.
+		{"suffix-mixed-case", transportStatsFilter{suffix: "SE."}, "dsync.se.", true},
+		{"exact-mixed-case", transportStatsFilter{zone: "DSYNC.SE."}, "dsync.se.", true},
 		// zone takes precedence over suffix when both are set (they never are in
 		// practice, but the precedence must be deterministic).
 		{"zone-wins-over-suffix", transportStatsFilter{zone: "dsync.se.", suffix: "com."}, "dsync.se.", true},
+		// precedence again, this time with a suffix that WOULD match: zone still wins.
+		{"zone-wins-over-matching-suffix", transportStatsFilter{zone: "iis.se.", suffix: "se."}, "dsync.se.", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

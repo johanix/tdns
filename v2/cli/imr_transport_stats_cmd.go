@@ -10,7 +10,6 @@ import (
 	"log"
 	"os"
 	"sort"
-	"strings"
 
 	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/cache"
@@ -30,15 +29,10 @@ type transportStatsFilter struct {
 }
 
 // matches reports whether a zone (ServerMap key, an fqdn) passes the filter.
+// Delegates to the shared, DNS-label-aware predicate so the in-process and API
+// paths cannot diverge.
 func (f transportStatsFilter) matches(zone string) bool {
-	switch {
-	case f.zone != "":
-		return zone == f.zone
-	case f.suffix != "":
-		return strings.HasSuffix(zone, f.suffix)
-	default:
-		return true
-	}
+	return tdns.ZoneMatchesSelector(zone, f.zone, f.suffix)
 }
 
 // data renders the filter into the API request payload for the remote path.

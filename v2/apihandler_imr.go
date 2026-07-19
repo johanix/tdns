@@ -71,6 +71,24 @@ func transportWeightsToStrings(m map[core.Transport]uint8) map[string]uint8 {
 	return out
 }
 
+// ZoneMatchesSelector reports whether zone (an fqdn) is selected by an optional
+// exact-zone / suffix filter pair — DNS-label-aware and case-insensitive. When
+// both are set, exactZone takes precedence; when both are empty, everything
+// matches. A suffix matches the zone itself and any subdomain of it, never a
+// partial label (e.g. suffix "sync.se." does NOT match "dsync.se."). Shared by
+// the /imr API handler and the cli transport-stats filter so the two cannot
+// diverge.
+func ZoneMatchesSelector(zone, exactZone, suffix string) bool {
+	switch {
+	case exactZone != "":
+		return strings.EqualFold(zone, exactZone)
+	case suffix != "":
+		return dns.IsSubDomain(suffix, zone)
+	default:
+		return true
+	}
+}
+
 func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 	return func(w http.ResponseWriter, r *http.Request) {
 		decoder := json.NewDecoder(r.Body)
@@ -324,10 +342,7 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 			}
 			var records []ImrServerTransportStats
 			for item := range imr.Cache.ServerMap.IterBuffered() {
-				if zoneFilter != "" && item.Key != zoneFilter {
-					continue
-				}
-				if suffixFilter != "" && !strings.HasSuffix(item.Key, suffixFilter) {
+				if !ZoneMatchesSelector(item.Key, zoneFilter, suffixFilter) {
 					continue
 				}
 				for name, server := range item.Val {
