@@ -624,6 +624,17 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 		lgConfig.Error("ReloadZoneConfig: failed to re-parse dnssec config, keeping previous policies", "err", err)
 	}
 
+	// Re-read the zones: block from the config file(s) so an added/removed zone or
+	// an edited zone→policy mapping (or primaries/ACLs/options/zonefile) is picked
+	// up by this reload, not only policy-definition edits. Previously ParseZones
+	// iterated the stale startup conf.Zones, so zone edits needed a restart. On a
+	// decode error, keep the previous zone set rather than failing the whole
+	// reload (matches the dnssec handling above). Dynamic/API/catalog zones are
+	// never in conf.Zones and are spared from removal below.
+	if err := conf.reloadZonesFromFile(); err != nil {
+		lgConfig.Error("ReloadZoneConfig: failed to re-read zones config, keeping previous zone set", "err", err)
+	}
+
 	prezones := Zones.Keys()
 	lgConfig.Info("ReloadZones: zones prior to reloading", "zones", prezones)
 	// XXX: This is wrong. We must get the zones config file from outside (to enamble things like MUSIC to use a different config file)
