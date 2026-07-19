@@ -187,6 +187,15 @@ func (zd *ZoneData) resignWorkingSetSOAIfSigned() {
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return
 	}
+	// A new zone's DNSSEC policy is bound post-Ready (PR-2 defers binding so a
+	// restart cannot hide applied≠intent, blocking ①). Until it is bound there is
+	// nothing to re-sign under, and EnsureActiveDnssecKeys below would deref a nil
+	// zd.DnssecPolicy while generating the zone's first keys (SIGSEGV at
+	// sign.go GenerateKeypair). Skip — SetupZoneSigning signs the zone after the
+	// post-Ready sync binds the policy.
+	if zd.DnssecPolicy == nil {
+		return
+	}
 	if zd.workingSet == nil {
 		return
 	}

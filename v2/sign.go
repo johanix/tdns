@@ -500,6 +500,16 @@ func (zd *ZoneData) EnsureActiveDnssecKeys(kdb *KeyDB, zdLocked bool) (*DnssecKe
 		}
 	}
 
+	// PR-2 defers DNSSEC policy binding to the post-Ready sync, so a brand-new
+	// zone can reach here mid-first-load with zd.DnssecPolicy still nil. Key
+	// generation below reads zd.DnssecPolicy.KSKAlgorithm / .ZSKAlgorithm — guard
+	// the nil deref (was a SIGSEGV) and return a clear error instead. The zone is
+	// signed later, after syncZoneDnssecPolicyFromConfig binds the policy and
+	// SetupZoneSigning runs post-Ready.
+	if (len(dak.KSKs) == 0 || len(dak.ZSKs) == 0) && zd.DnssecPolicy == nil {
+		return nil, fmt.Errorf("EnsureActiveDnssecKeys: zone %s has no DNSSEC policy bound yet; cannot generate active keys", zd.ZoneName)
+	}
+
 	// Generate KSK if still missing
 	if len(dak.KSKs) == 0 {
 		pkc, msg, err := kdb.GenerateKeypair(zd.ZoneName, "ensure-active-keys", DnskeyStateActive, dns.TypeDNSKEY, zd.DnssecPolicy.KSKAlgorithm, "KSK", nil)
