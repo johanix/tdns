@@ -20,6 +20,11 @@ type scriptedClient struct {
 
 func (s *scriptedClient) TransportKind() core.Transport { return core.TransportDo53 }
 
+func (s *scriptedClient) ExchangeWithResult(msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, core.ExchangeResult, error) {
+	r, rtt, err := s.Exchange(msg, server, debug)
+	return r, rtt, core.ExchangeResult{WireTransport: core.TransportDo53}, err
+}
+
 func (s *scriptedClient) Exchange(msg *dns.Msg, _ string, _ bool) (*dns.Msg, time.Duration, error) {
 	resp := new(dns.Msg)
 	resp.SetReply(msg)

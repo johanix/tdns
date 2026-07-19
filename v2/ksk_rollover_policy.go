@@ -648,21 +648,47 @@ func parseDnssecPolicyConfImpl(name string, dp *DnssecPolicyConf, quiet bool, sp
 	return out, nil
 }
 
-// ValidateDnssecPoliciesFromFile parses a YAML file with a dnssec.policies: map
-// and validates every policy the same way as runtime config loading.
-func ValidateDnssecPoliciesFromFile(path string) error {
+// PolicyAlgs is the effective algorithm set of one resolved DNSSEC policy: the
+// default/CSK algorithm plus the per-role KSK/ZSK algorithms (codepoints), and
+// the normalized mode ("csk" | "ksk-zsk"). It is the minimal projection a
+// consumer needs to dry-run the signer's active-key-algorithm reconcile against
+// a running keystore, without pulling in the full DnssecPolicy.
+type PolicyAlgs struct {
+	Mode   string
+	Alg    uint8 // default / CSK algorithm
+	KSKAlg uint8
+	ZSKAlg uint8
+}
+
+// loadDnssecPoliciesYAML reads a YAML file with a dnssec: block into the
+// policies/templates/split shape. Returns a structural error (unreadable file,
+// bad YAML, or no policies) distinct from any per-policy validation error.
+func loadDnssecPoliciesYAML(path string) (dnssecPoliciesYAML, error) {
+	var root dnssecPoliciesYAML
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return err
+		return root, err
 	}
-	var root dnssecPoliciesYAML
 	if err := yaml.Unmarshal(data, &root); err != nil {
-		return fmt.Errorf("yaml: %w", err)
+		return root, fmt.Errorf("yaml: %w", err)
 	}
 	if len(root.Dnssec.Policies) == 0 {
-		return errors.New("no dnssec.policies: block found (policies live under the dnssec: key)")
+		return root, errors.New("no dnssec.policies: block found (policies live under the dnssec: key)")
 	}
+	return root, nil
+}
+
+// resolveAndValidatePolicies runs, for every policy in root, the exact template
+// + role-algorithm resolution and full validation (split gating, role
+// capability, key lifetimes, FinishDnssecPolicy) that runtime config loading
+// does. It returns each policy's effective algorithms — recorded as soon as the
+// role algorithms resolve, so a policy that later fails a validation gate still
+// contributes its algorithms — plus the joined validation error. Both
+// ValidateDnssecPoliciesFromFile and ResolveDnssecPolicyAlgs are thin wrappers
+// over this, so validation and algorithm-resolution can never drift apart.
+func resolveAndValidatePolicies(root dnssecPoliciesYAML) (map[string]PolicyAlgs, error) {
 	splitAllowed := buildSplitAlgorithmSet(root.Dnssec.SplitAlgorithms)
+	out := make(map[string]PolicyAlgs, len(root.Dnssec.Policies))
 	var errs []error
 	for name, dp := range root.Dnssec.Policies {
 		dp.Name = name
@@ -677,6 +703,15 @@ func ValidateDnssecPoliciesFromFile(path string) error {
 			errs = append(errs, err)
 			continue
 		}
+		// Record effective algorithms once resolved (before the downstream
+		// validation gates), so an algorithm-correlating consumer still sees
+		// them for a policy that fails a later gate.
+		mode := strings.ToLower(strings.TrimSpace(dp.Mode))
+		if mode == "" {
+			mode = DnssecPolicyModeKSKZSK
+		}
+		out[name] = PolicyAlgs{Mode: mode, Alg: alg, KSKAlg: kskAlg, ZSKAlg: zskAlg}
+
 		if err := validateSplitAlgorithm(name, kskAlg, zskAlg, splitAllowed); err != nil {
 			errs = append(errs, err)
 			continue
@@ -713,5 +748,34 @@ func ValidateDnssecPoliciesFromFile(path string) error {
 			errs = append(errs, err)
 		}
 	}
-	return errors.Join(errs...)
+	return out, errors.Join(errs...)
+}
+
+// ValidateDnssecPoliciesFromFile parses a YAML file with a dnssec.policies: map
+// and validates every policy the same way as runtime config loading.
+func ValidateDnssecPoliciesFromFile(path string) error {
+	root, err := loadDnssecPoliciesYAML(path)
+	if err != nil {
+		return err
+	}
+	_, verr := resolveAndValidatePolicies(root)
+	return verr
+}
+
+// ResolveDnssecPolicyAlgs returns the effective algorithms (default/CSK, KSK,
+// ZSK codepoints) and mode of every DNSSEC policy in a YAML file's dnssec:
+// block, using the SAME template + role resolution as
+// ValidateDnssecPoliciesFromFile. Intended for tdns-cli's `config check` to
+// dry-run the signer's active-key-algorithm reconcile against the running
+// keystore. Only structural errors (unreadable file / bad YAML / no policies)
+// are returned; per-policy validation errors are the province of
+// ValidateDnssecPoliciesFromFile and are intentionally dropped here, while the
+// policy's resolved algorithms are still returned.
+func ResolveDnssecPolicyAlgs(path string) (map[string]PolicyAlgs, error) {
+	root, err := loadDnssecPoliciesYAML(path)
+	if err != nil {
+		return nil, err
+	}
+	algs, _ := resolveAndValidatePolicies(root)
+	return algs, nil
 }
