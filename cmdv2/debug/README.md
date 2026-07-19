@@ -50,21 +50,30 @@ as additional compositions on the same engine.
   no-re-sign/backfill test (A2). Proves that when the server first binds a
   signed, config-only zone with no applied-policy record it backfills
   `applied = intent` **without** re-signing the already-correct zone (the
-  failure mode is a thundering-herd re-sign of every zone at startup). A
-  re-sign is inferred from RRSIG inception — a re-sign stamps a fresh
-  inception, a backfill leaves it untouched — so the tool snapshots the apex
-  SOA and DNSKEY RRSIG inceptions per keytag before and after the trigger and
-  flags any zone whose inception advanced.
-  - `--phase before` snapshots and exits; restart the daemon; `--phase after`
-    snapshots again and emits the verdict (the primary, restart-triggered mode).
-  - `--reload` drives one `config reload` between the two snapshots in a single
-    invocation (secondary mode; needs the mgmt API).
+  failure mode is a thundering-herd re-sign of every zone). A re-sign is
+  inferred from RRSIG inception — a re-sign stamps a fresh inception, a
+  backfill leaves it untouched — so the tool snapshots the apex SOA and DNSKEY
+  RRSIG inceptions per keytag, drives one `reload-zones`, waits for all zones
+  Ready, snapshots again, and flags any zone whose inception advanced.
+  - Single-mode: it drives `reload-zones` (the reload path that re-runs the
+    per-zone DNSSEC-policy sync — where the backfill happens), not a daemon
+    restart. A restart can't validate A2: an online/inline-signed zone is
+    re-signed at every load, so a restart advances inception for every zone
+    regardless of backfill.
+  - **Arm first.** Clear `applied_*` to NULL under the running server before
+    running, or every zone already has an applied record, the sync takes the
+    same-name no-op branch, and the run is clean-but-vacuous (the tool emits an
+    "A2 backfill coverage" skip when it detects this):
+    `sqlite3 <keystore.db> "UPDATE ZonePolicyOverride SET applied_policy=NULL, applied_source=NULL, applied_at=NULL;"`
+  - **Sanity-check the checker first.** Before trusting a clean run, force a
+    re-sign of one zone (`tdns-cli auth zone dnssec resign -z <z>`) and confirm
+    the tool flags it — the live analogue of `TestPolicyReloadDetectsResign`.
   - Zone set is enumerated from the mgmt API (signed zones) or given with
     `--zones a,b,c | @file`. Applied-policy readback (`applied_*` from the
     scoped `list-zones`, #301) and the reload drive are optional capabilities —
     an absent one is SKIPPED, which also lets the inception-only check run
     differentially against BIND/NSD. Knobs: `--tolerance` (coincidental
-    background-resigner ticks), `--snapshot`, `--ready-timeout`, `--json`.
+    background-resigner ticks), `--ready-timeout`, `--json`.
 
 - **`tdns-debug list-tests`** — list known test identities and their
   stage history from the state file.

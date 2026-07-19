@@ -86,6 +86,50 @@ func TestPolicyReloadCleanBackfillNoResign(t *testing.T) {
 	}
 }
 
+// The coverage guard: if the operator forgot to arm applied_*→NULL, every zone
+// already has an applied record before the reload, the sync takes the same-name
+// no-op branch, and a "no re-sign" result proves nothing. Compare must surface
+// that as an "A2 backfill coverage" Skip (not silently pass), with no violation.
+func TestPolicyReloadBackfillCoverageGuard(t *testing.T) {
+	before := map[string]ZoneSnapshot{
+		"a.example.": withApplied(signedZone("a.example.", 10, 1_700_000_000), true, "config"),
+		"b.example.": withApplied(signedZone("b.example.", 20, 1_700_000_000), true, "config"),
+	}
+	after := map[string]ZoneSnapshot{
+		"a.example.": withApplied(signedZone("a.example.", 10, 1_700_000_000), true, "config"),
+		"b.example.": withApplied(signedZone("b.example.", 20, 1_700_000_000), true, "config"),
+	}
+	rep := compare(0, true, before, after)
+
+	if len(rep.Violations) != 0 {
+		t.Fatalf("no re-sign must not violate, got %+v", rep.Violations)
+	}
+	if !skipContains(rep, "A2 backfill coverage") {
+		t.Fatalf("all-applied-present (unarmed) must emit the backfill-coverage skip, skips=%v", rep.Skipped)
+	}
+	if got := statOf(rep, "applied.backfilled"); got != 0 {
+		t.Errorf("no backfill expected in the unarmed case, got applied.backfilled=%d", got)
+	}
+}
+
+// The armed case must NOT emit the coverage skip: at least one zone was
+// before-absent, so the backfill path was actually exercised.
+func TestPolicyReloadBackfillCoverageArmedNoSkip(t *testing.T) {
+	before := map[string]ZoneSnapshot{
+		"a.example.": withApplied(signedZone("a.example.", 10, 1_700_000_000), false, ""),
+	}
+	after := map[string]ZoneSnapshot{
+		"a.example.": withApplied(signedZone("a.example.", 10, 1_700_000_000), true, "config"),
+	}
+	rep := compare(0, true, before, after)
+	if skipContains(rep, "A2 backfill coverage") {
+		t.Fatalf("an armed run (a before-absent zone) must not emit the coverage skip, skips=%v", rep.Skipped)
+	}
+	if got := statOf(rep, "applied.backfilled"); got != 1 {
+		t.Errorf("expected applied.backfilled=1, got %d", got)
+	}
+}
+
 // A single zone re-signed: its apex RRSIG inception advanced. With tolerance 0
 // that is exactly one A2 violation, and it must name the re-signed zone (not the
 // two clean ones).
@@ -291,6 +335,15 @@ func TestPolicyReloadZoneSetChurnCounted(t *testing.T) {
 // --- test helpers -----------------------------------------------------------
 
 func contains(s, sub string) bool { return strings.Contains(s, sub) }
+
+func skipContains(rep *Report, sub string) bool {
+	for _, s := range rep.Skipped {
+		if strings.Contains(s, sub) {
+			return true
+		}
+	}
+	return false
+}
 
 func countInvariant(rep *Report, inv string) int {
 	n := 0

@@ -7,8 +7,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -29,9 +27,18 @@ import (
 // A2 proves: N zones get backfilled, and ZERO get re-signed. There is no
 // server-side sign counter, so "did a re-sign happen?" is inferred from the
 // only load-bearing signal available on the wire: RRSIG inception. A re-sign
-// stamps a fresh inception; a backfill leaves the served RRSIG untouched. The
-// tool snapshots apex RRSIG inceptions before and after the herd-risk moment
-// (a daemon restart, or a driven `config reload`) and compares per keytag.
+// stamps a fresh inception; a backfill leaves the served RRSIG untouched.
+//
+// The trigger is a driven `reload-zones` (POST /config Command=reload-zones):
+// that is the reload path that re-runs the per-zone DNSSEC-policy sync — where
+// the first-bind backfill (or the herd re-sign, if broken) happens. The tool
+// snapshots apex RRSIG inceptions immediately before and after that one reload
+// and compares per keytag. It is deliberately single-mode: a daemon RESTART
+// cannot validate A2, because an online/inline-signed zone is re-signed at
+// every load (inception is stamped time.Now() and RRSIGs are in-memory only),
+// so a restart advances inception for every zone regardless of backfill — a
+// systematic false positive — and the backfill is a reload-path property that
+// is not observable across a process restart at all.
 //
 // This is a pure DNS + mgmt-API client (design doc §3): the applied-policy
 // readback and the reload drive are OPTIONAL capabilities; an absent one is a
@@ -41,23 +48,18 @@ import (
 // PolicyReloadConfig parameterizes an A2 run.
 type PolicyReloadConfig struct {
 	DnsServer string          // addr:port for the DNS observations
-	Api       *tdns.ApiClient // enumerate zones + applied readback + reload drive; nil restricts modes
+	Api       *tdns.ApiClient // enumerate zones + applied readback + reload drive; nil disables the verdict
 	Target    string          // target name (informational, for the report)
 
-	// Zones is the explicit zone set for the `before`/`--reload` snapshot. Empty
-	// means the caller wants enumeration (EnumerateSignedZones). The `after`
-	// phase ignores it and uses the zone set recorded in the before snapshot.
+	// Zones is the zone set to test. Empty means the caller wants enumeration
+	// (EnumerateSignedZones).
 	Zones []string
-
-	Phase  string // "before" | "after" (restart mode); ignored when Reload is set
-	Reload bool   // reload mode: single invocation, drive `config reload` between snapshots
 
 	Tolerance int // allowed count of coincidentally-advanced zones (background resigner ticks)
 
 	AppliedCapable bool // CapAppliedRead probed → applied_* readback enabled
-	ReloadCapable  bool // mgmt API reachable → `config reload` can be driven (reload mode)
+	ReloadCapable  bool // mgmt API reachable → `reload-zones` can be driven
 
-	SnapshotPath string        // where the before snapshot is written (before) / read (after)
 	ReadyTimeout time.Duration // budget to wait for all zones to answer SOA again after the trigger
 
 	Tool string
@@ -95,119 +97,37 @@ type ZoneSnapshot struct {
 	Applied  AppliedRec `json:"applied"`
 }
 
-// PolicyReloadSnapshot is the whole before/after capture persisted between the
-// two restart-mode invocations. Capturing the target, DNS server and the
-// applied-readback capability makes the `after` phase self-contained: it needs
-// only the file to reproduce the same zone set and comparison scope.
-type PolicyReloadSnapshot struct {
-	Phase          string                  `json:"phase"` // before | after
-	Target         string                  `json:"target,omitempty"`
-	DnsServer      string                  `json:"dns_server"`
-	AppliedCapable bool                    `json:"applied_capable"`
-	Taken          time.Time               `json:"taken"`
-	Zones          map[string]ZoneSnapshot `json:"zones"`
-}
-
-// RunPolicyReload executes an A2 run and returns the report. A returned error is
-// a setup error (exit 2): unreachable target, no zones, missing before snapshot.
-// A recorded violation drives the report's exit code (1); the before phase never
-// violates (it only records the baseline).
+// RunPolicyReload executes an A2 run and returns the report. It is single-mode:
+// snapshot every zone → drive one `reload-zones` → wait for all zones Ready →
+// snapshot again → Compare. A returned error is a setup error (exit 2):
+// unreachable target, no zones. A recorded violation drives the report's exit
+// code (1). Driving the reload needs the mgmt API; without it the trigger cannot
+// fire, so the verdict is SKIPPED (never a failure) — this also lets the tool
+// run harmlessly against a non-tdns target.
 func RunPolicyReload(ctx context.Context, cfg PolicyReloadConfig) (*Report, error) {
 	if cfg.DnsServer == "" {
 		return nil, fmt.Errorf("no DNS server: pass --dns")
+	}
+	if len(cfg.Zones) == 0 {
+		return nil, fmt.Errorf("no zones to test: pass --zones or ensure the mgmt API lists signed zones")
 	}
 	if cfg.ReadyTimeout <= 0 {
 		cfg.ReadyTimeout = 60 * time.Second
 	}
 	rep := NewReport(cfg.Tool, "policy-reload")
 
-	switch {
-	case cfg.Reload:
-		return runPolicyReloadDriven(ctx, cfg, rep)
-	case cfg.Phase == "before":
-		return runPolicyReloadBefore(ctx, cfg, rep)
-	case cfg.Phase == "after":
-		return runPolicyReloadAfter(ctx, cfg, rep)
-	default:
-		return nil, fmt.Errorf("policy-reload: choose a mode — --phase before|after (restart) or --reload")
-	}
-}
-
-// runPolicyReloadBefore snapshots the current per-zone state, persists it, and
-// exits without a verdict (the operator then restarts the daemon and runs
-// --phase after).
-func runPolicyReloadBefore(ctx context.Context, cfg PolicyReloadConfig, rep *Report) (*Report, error) {
-	if len(cfg.Zones) == 0 {
-		return nil, fmt.Errorf("no zones to snapshot: pass --zones or ensure the mgmt API lists signed zones")
-	}
-	if cfg.SnapshotPath == "" {
-		return nil, fmt.Errorf("no snapshot path to write the before-state to")
-	}
-	snap := snapshotZones(ctx, cfg, cfg.Zones)
-	full := PolicyReloadSnapshot{
-		Phase:          "before",
-		Target:         cfg.Target,
-		DnsServer:      cfg.DnsServer,
-		AppliedCapable: cfg.AppliedCapable,
-		Taken:          time.Now(),
-		Zones:          snap,
-	}
-	if err := writePolicyReloadSnapshot(cfg.SnapshotPath, full); err != nil {
-		return nil, fmt.Errorf("writing before snapshot: %w", err)
-	}
-	rep.Stat("zones.snapshotted", int64(len(snap)))
-	rep.Stat("zones.signed", int64(countSigned(snap)))
-	rep.Skip("A2 verdict", fmt.Sprintf("before snapshot of %d zone(s) saved to %s — restart the daemon (or use --reload), wait for all zones Ready, then run --phase after", len(snap), cfg.SnapshotPath))
-	return rep, nil
-}
-
-// runPolicyReloadAfter loads the before snapshot, snapshots again, and compares.
-func runPolicyReloadAfter(ctx context.Context, cfg PolicyReloadConfig, rep *Report) (*Report, error) {
-	if cfg.SnapshotPath == "" {
-		return nil, fmt.Errorf("no snapshot path to read the before-state from")
-	}
-	before, err := readPolicyReloadSnapshot(cfg.SnapshotPath)
-	if err != nil {
-		return nil, fmt.Errorf("reading before snapshot (run --phase before first): %w", err)
-	}
-	if before.Phase != "before" {
-		return nil, fmt.Errorf("snapshot %s is not a before snapshot (phase=%q)", cfg.SnapshotPath, before.Phase)
-	}
-	zones := sortedKeys(before.Zones)
-	if len(zones) == 0 {
-		return nil, fmt.Errorf("before snapshot has no zones")
-	}
-	// Best-effort readiness wait: after a restart the operator has usually
-	// already waited, but a bounded poll keeps a still-loading zone from reading
-	// as a spurious "dropped unsigned".
-	waitZonesReady(ctx, cfg, zones, rep)
-	after := snapshotZones(ctx, cfg, zones)
-
-	chk := &PolicyReloadChecker{
-		report:         rep,
-		tolerance:      cfg.Tolerance,
-		appliedCapable: before.AppliedCapable && cfg.AppliedCapable,
-	}
-	chk.Compare(before.Zones, after)
-	return rep, nil
-}
-
-// runPolicyReloadDriven is the single-invocation reload mode: snapshot before →
-// drive `config reload` → wait Ready → snapshot after → compare. It needs the
-// mgmt API to drive the reload; without it the trigger cannot fire, so the whole
-// verdict is SKIPPED (never a failure) with a pointer to restart mode.
-func runPolicyReloadDriven(ctx context.Context, cfg PolicyReloadConfig, rep *Report) (*Report, error) {
-	if len(cfg.Zones) == 0 {
-		return nil, fmt.Errorf("no zones to snapshot: pass --zones or ensure the mgmt API lists signed zones")
-	}
 	if cfg.Api == nil || !cfg.ReloadCapable {
-		rep.Skip("reload-drive", "mgmt API unavailable — cannot drive `config reload`; use restart mode (--phase before/after) instead")
+		rep.Skip("reload-drive", "mgmt API unavailable — cannot drive `reload-zones`; the A2 backfill verdict needs the reload trigger")
 		rep.Skip("A2 verdict", "no reload trigger fired")
 		return rep, nil
 	}
+
 	before := snapshotZones(ctx, cfg, cfg.Zones)
-	if err := driveConfigReload(ctx, cfg.Api); err != nil {
-		return nil, fmt.Errorf("driving config reload: %w", err)
+	rep.Stat("zones.snapshotted", int64(len(before)))
+	rep.Stat("zones.signed", int64(countSigned(before)))
+
+	if err := driveReloadZones(ctx, cfg.Api); err != nil {
+		return nil, fmt.Errorf("driving reload-zones: %w", err)
 	}
 	rep.Stat("reload.issued", 1)
 	waitZonesReady(ctx, cfg, cfg.Zones, rep)
@@ -276,7 +196,8 @@ type PolicyReloadChecker struct {
 	tolerance      int
 	appliedCapable bool
 
-	advanced []advancedZone // zones whose apex RRSIG inception advanced (a re-sign)
+	advanced     []advancedZone // zones whose apex RRSIG inception advanced (a re-sign)
+	beforeAbsent int            // compared zones with no applied record in the before snapshot
 }
 
 // Compare evaluates A2 over the before/after snapshots. Only zones present in
@@ -318,6 +239,17 @@ func (c *PolicyReloadChecker) Compare(before, after map[string]ZoneSnapshot) {
 		if c.appliedCapable {
 			c.checkApplied(b, a)
 		}
+	}
+
+	// Coverage guard: A2 asserts "no zone was re-signed", but that is only
+	// meaningful if the backfill path actually ran — i.e. some zone had an absent
+	// applied record when the reload fired. If every zone already had `applied`
+	// present (operator forgot to arm applied_*→NULL), the sync takes the
+	// same-name None branch: no backfill, no re-sign, a clean-but-vacuous result.
+	// Surface that so a green run can't be mistaken for proof of the guarantee.
+	if c.appliedCapable && c.beforeAbsent == 0 {
+		c.report.Skip("A2 backfill coverage",
+			"no zone had an absent applied record before the reload — clear applied_* (→ NULL) under the running server BEFORE running so reload-zones actually backfills; otherwise this only proves 'no re-sign of already-recorded zones', not the backfill guarantee")
 	}
 
 	// Apply the re-sign verdict with the tolerance for coincidental background
@@ -418,6 +350,7 @@ func (c *PolicyReloadChecker) checkInception(zone string, b, a ZoneSnapshot) {
 // — the load-bearing invariant is the inception no-re-sign check above.
 func (c *PolicyReloadChecker) checkApplied(b, a ZoneSnapshot) {
 	if !b.Applied.Present {
+		c.beforeAbsent++
 		c.report.Stat("applied.before-absent", 1)
 	}
 	if a.Applied.Err != "" {
@@ -563,25 +496,28 @@ func ProbeAppliedPolicy(ctx context.Context, m *CapabilityMatrix, api *tdns.ApiC
 	m.set(CapAppliedRead, CapAvailable, "scoped list-zones returns applied_* fields")
 }
 
-// driveConfigReload issues one `config reload` (POST /config Command=reload) —
-// the whole-config reload that re-runs the per-zone policy sync path, which is
-// where the first-bind backfill (or the herd re-sign, if broken) happens. Not a
-// per-zone `zone reload`.
-func driveConfigReload(ctx context.Context, api *tdns.ApiClient) error {
+// driveReloadZones issues one `reload-zones` (POST /config Command=reload-zones)
+// — the reload path that re-parses the zone config and enqueues the ConfigUpdate
+// refreshers that carry the per-zone DNSSEC-policy sync (syncZoneDnssecPolicyFromConfig),
+// where the first-bind backfill (or the herd re-sign, if broken) happens. NOT
+// `config reload` (Command=reload): that path re-reads only the main config and
+// never calls ParseZones, so the per-zone sync — the whole point of A2 — never
+// runs and the "no inception change" result would be vacuous.
+func driveReloadZones(ctx context.Context, api *tdns.ApiClient) error {
 	status, buf, err := api.RequestNGWithContext(ctx, "POST", "/config",
-		tdns.ConfigPost{Command: "reload"}, false)
+		tdns.ConfigPost{Command: "reload-zones"}, false)
 	if err != nil {
 		return err
 	}
 	if status != 200 {
-		return fmt.Errorf("config reload: http status %d", status)
+		return fmt.Errorf("reload-zones: http status %d", status)
 	}
 	var cr struct {
 		Error    bool
 		ErrorMsg string
 	}
 	if err := json.Unmarshal(buf, &cr); err == nil && cr.Error {
-		return fmt.Errorf("config reload: %s", cr.ErrorMsg)
+		return fmt.Errorf("reload-zones: %s", cr.ErrorMsg)
 	}
 	return nil
 }
@@ -612,46 +548,6 @@ func waitZonesReady(ctx context.Context, cfg PolicyReloadConfig, zones []string,
 	if len(pending) > 0 {
 		rep.Stat("zones.not-ready", int64(len(pending)))
 	}
-}
-
-// --- snapshot persistence ---------------------------------------------------
-
-func writePolicyReloadSnapshot(path string, snap PolicyReloadSnapshot) error {
-	buf, err := json.MarshalIndent(snap, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return err
-	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, buf, 0644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
-}
-
-// PolicyReloadSnapshotZones returns the sorted zone names recorded in a before
-// snapshot. The CLI uses it in the after phase to scope capability probing (a
-// sample zone) and matrix display without re-enumerating the target.
-func PolicyReloadSnapshotZones(path string) ([]string, error) {
-	snap, err := readPolicyReloadSnapshot(path)
-	if err != nil {
-		return nil, err
-	}
-	return sortedKeys(snap.Zones), nil
-}
-
-func readPolicyReloadSnapshot(path string) (*PolicyReloadSnapshot, error) {
-	buf, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var snap PolicyReloadSnapshot
-	if err := json.Unmarshal(buf, &snap); err != nil {
-		return nil, fmt.Errorf("snapshot %s is not valid JSON: %w", path, err)
-	}
-	return &snap, nil
 }
 
 // --- small helpers ----------------------------------------------------------

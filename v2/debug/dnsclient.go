@@ -287,7 +287,9 @@ type RRSIGObs struct {
 	KeyTag      uint16 `json:"key_tag"`
 	Algorithm   uint8  `json:"algorithm"`
 	Inception   uint32 `json:"inception"`
-	Expiration  uint32 `json:"expiration"`
+	// Expiration is captured for the report/debug output only; the A2 Compare
+	// keys the no-re-sign decision on Inception alone.
+	Expiration uint32 `json:"expiration"`
 }
 
 // queryApexRRSIGs captures the apex SOA and DNSKEY RRSIGs for one zone: two
