@@ -188,3 +188,44 @@ without conflict. Otherwise fold it into PR-B.
 **Decisions reserved for Johan:** the PR-2 merge itself; fast-tracking PR-A;
 spinning out the `decodeConfigFile` precursor; ratifying §3.1/§3.2 LEANING/OPEN
 items; the coverage-scope and TOCTOU forks in §6.
+
+---
+
+## 8. Live evidence + ratified decisions (2026-07-19)
+
+PR-2 live testing on the foffe PQ testbed produced a concrete motivator for §3.2
+and three ratified follow-ups. Full context:
+`docs/2026-07-19-transactional-policy-reload-pr2-live-results.md`.
+
+**Live evidence for §3.2 (the reload guardrail).** Deleting a `dnssec.policies`
+entry a running signed zone depends on, then a plain `config reload-zones`,
+**silently quarantined the serving zone** (parseconfig fail-closed at
+`parseconfig.go:792` → `DnssecError` → online-signing ignored → zone stopped
+signing). `config check` **would have predicted it** (FAIL on the undefined
+`dnssecpolicy` ref) — proving the dry-run+correlate primitive (§5) is exactly what
+the reload gate should run before applying. This is the live demonstration that
+fail-closed-at-parse is strictly worse than refuse-at-reload-with-preview (§3.2):
+the former disrupts a running zone and needs a **restart** to undo; the latter
+never touches it. **Strengthens §3.2 → build it.**
+
+**Ratified decisions:**
+
+- **[DECIDED] Do NOT clear `DnssecError` on policy re-resolve — yet.** The obvious
+  fix for "a zone quarantined by a removed policy doesn't recover on re-add
+  reload" (`ClearError(DnssecError)` in `resolveZonePolicyRef`'s usable branch) is
+  **unsafe**: `DnssecError` is one `ErrorType` slot covering distinct causes
+  (parse-unresolvable ref `parseconfig.go:794`; sync-time quarantine
+  `zone_policy_apply.go:355`; future signing failures), and `ClearError` is keyed
+  by type, not cause — a blanket clear could wipe an unrelated, still-valid
+  `DnssecError`. **Blocked on a DNSSEC error-classification restructure** (new
+  dependency; see `docs/2026-07-19-dnssec-error-classification-restructure.md`).
+  Restart-only recovery stands as a known limitation until then.
+- **[DECIDED] `reload-zones` must re-read the `zones:` block from file — but it is
+  ORTHOGONAL to this guardrail and to PR-2.** Pre-existing bug in
+  `ReloadZoneConfig`/`ParseZones` (`config.go:629`'s own "This is wrong" comment),
+  affecting ALL config-driven zone changes (new zones, primaries, ACLs, options,
+  zonefile, multisigner — not just `dnssecpolicy`). Fixed on its own branch.
+- **[DECIDED] The reload guardrail (§3.2) is the destination** — not reached yet;
+  the D episode is the case for it (PR-B in §7).
+- **New dependency surfaced:** a **DNSSEC error-classification restructure** gates
+  the `ClearError` fix and would sharpen §3.2's diagnostics.
