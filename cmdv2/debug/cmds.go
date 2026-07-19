@@ -9,10 +9,13 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
 
+	tdns "github.com/johanix/tdns/v2"
 	"github.com/johanix/tdns/v2/debug"
 )
 
@@ -44,6 +47,14 @@ var (
 	reloadDuration     string
 	zoneSize           int
 	algorithm          string
+
+	// test policy-reload: the DNSSEC policy-reload no-re-sign/backfill test (A2).
+	policyReloadPhase  string
+	policyReloadReload bool
+	policyReloadZones  string
+	policyReloadTol    int
+	policyReloadSnap   string
+	policyReloadReady  string
 
 	// perf qps: adaptive max-QPS finder (query path only).
 	perfUDP         bool
@@ -310,6 +321,186 @@ func runReload(ctx context.Context, st *debug.State, rec *debug.TestRecord) {
 	os.Exit(rep.ExitCode())
 }
 
+// ---- test policy-reload -----------------------------------------------------
+
+var testPolicyReloadCmd = &cobra.Command{
+	Use:   "policy-reload",
+	Short: "DNSSEC policy-reload no-re-sign/backfill test (A2): first-bind must backfill applied=intent WITHOUT re-signing",
+	Long: `Validates the transactional DNSSEC policy-reload guarantee (test A2): the
+first time the server binds a signed, config-only zone that has no applied
+policy record, it must record applied = intent WITHOUT re-signing the (already
+correctly signed) zone. The failure mode is a thundering herd — SignZone(force)
+on every zone at once at daemon startup.
+
+There is no server-side sign counter, so a re-sign is inferred from RRSIG
+inception: a re-sign stamps a fresh inception, a backfill leaves the served
+signature untouched. This tool snapshots the apex SOA and DNSKEY RRSIG
+inceptions (per keytag) before and after the herd-risk moment and flags any zone
+whose inception advanced.
+
+Trigger modes:
+  restart (primary):  --phase before snapshots and exits; you restart the
+                      daemon; --phase after snapshots again and emits the verdict.
+  reload  (secondary): --reload drives one 'config reload' between the two
+                      snapshots in a single invocation (needs the mgmt API).
+
+Zone set: enumerated from the mgmt API (signed zones) or given with
+--zones a,b,c | @file.
+
+Operational flow (control for the background resigner — take the 'before'
+snapshot right after a full sign, no zone near RRSIG expiry, and keep
+before/after close in time):
+
+  1. arm: with the server stopped,
+       sqlite3 <keystore.db> "UPDATE ZonePolicyOverride \
+         SET applied_policy=NULL, applied_source=NULL, applied_at=NULL;"
+     (reload mode: clear applied_* under the running server, then use --reload).
+  2. tdns-debug test policy-reload --phase before --target <t> --dns <a:p>
+  3. restart the daemon (or run with --reload instead of --phase).
+  4. wait for all zones Ready.
+  5. tdns-debug test policy-reload --phase after  --target <t> --dns <a:p>
+
+Applied-policy readback and the reload drive are optional capabilities; an
+absent one is SKIPPED, never a failure (so the inception-only check can also run
+differentially against BIND/NSD). Exit: 0 = A2 held, 1 = a zone was re-signed
+(or dropped unsigned), 2 = setup error.`,
+	Run: func(cmd *cobra.Command, args []string) { runPolicyReload(cmd.Context()) },
+}
+
+// runPolicyReload resolves the zone set, probes capabilities (printing the
+// matrix so a limited run cannot masquerade as full coverage), and executes the
+// requested phase/mode.
+func runPolicyReload(ctx context.Context) {
+	server := dnsServer
+	if server == "" {
+		log.Fatal("no DNS server: pass --dns")
+	}
+	if _, _, err := net.SplitHostPort(server); err != nil {
+		server = net.JoinHostPort(server, "53")
+	}
+	api := apiClientFor(targetName)
+	snapPath := effectivePolicyReloadSnapshot()
+
+	// Resolve the zone set. before/reload enumerate (or take --zones); after
+	// reuses the exact set recorded in the before snapshot.
+	var zones []string
+	switch {
+	case policyReloadReload || policyReloadPhase == "before":
+		z, err := resolvePolicyReloadZones(ctx, api)
+		if err != nil {
+			log.Printf("resolving zones: %v", err)
+			os.Exit(debug.ExitSetup)
+		}
+		zones = z
+	case policyReloadPhase == "after":
+		z, err := debug.PolicyReloadSnapshotZones(snapPath)
+		if err != nil {
+			log.Printf("reading before snapshot %s (run --phase before first): %v", snapPath, err)
+			os.Exit(debug.ExitSetup)
+		}
+		zones = z
+	default:
+		log.Fatal("choose a mode: --phase before|after (restart) or --reload")
+	}
+	if len(zones) == 0 {
+		log.Fatal("no zones to test: pass --zones or ensure the mgmt API lists signed zones")
+	}
+
+	// Capability probe + matrix (applied-readback is probed against a real zone;
+	// the bulk list-zones path never populates the applied_* fields). In text mode
+	// print the matrix up front so the operator sees what is gated before any
+	// ready-wait; in JSON mode it is attached to the report below so stdout stays
+	// a single valid JSON document.
+	m := debug.ProbeApi(ctx, targetName, api)
+	debug.ProbeDns(ctx, m, server, zones[0])
+	debug.ProbeAppliedPolicy(ctx, m, api, zones[0])
+	if !reportJson {
+		fmt.Print(m.Render())
+	}
+
+	cfg := debug.PolicyReloadConfig{
+		DnsServer:      server,
+		Api:            api,
+		Target:         targetName,
+		Zones:          zones,
+		Phase:          policyReloadPhase,
+		Reload:         policyReloadReload,
+		Tolerance:      policyReloadTol,
+		AppliedCapable: m.Available(debug.CapAppliedRead),
+		ReloadCapable:  m.Available(debug.CapApi),
+		SnapshotPath:   snapPath,
+		ReadyTimeout:   mustDur(policyReloadReady, "ready-timeout"),
+		Tool:           appName + " " + appVersion,
+	}
+	rep, err := debug.RunPolicyReload(ctx, cfg)
+	if err != nil {
+		if reportJson {
+			// The matrix was not printed up front in JSON mode; surface it on
+			// stderr so the gating context is not lost on a setup error.
+			fmt.Fprint(os.Stderr, m.Render())
+		}
+		log.Printf("policy-reload setup error: %v", err)
+		os.Exit(debug.ExitSetup)
+	}
+	if reportJson {
+		rep.Capabilities = m
+		_ = rep.RenderJSON(os.Stdout)
+	} else {
+		rep.RenderText(os.Stdout)
+	}
+	os.Exit(rep.ExitCode())
+}
+
+// resolvePolicyReloadZones returns the explicit --zones set (comma list or
+// @file) or, absent that, the target's signed zones via the mgmt API.
+func resolvePolicyReloadZones(ctx context.Context, api *tdns.ApiClient) ([]string, error) {
+	if policyReloadZones != "" {
+		return parseZoneList(policyReloadZones)
+	}
+	return debug.EnumerateSignedZones(ctx, api)
+}
+
+// parseZoneList parses "a,b,c" or "@file" (one zone per line, # comments and
+// blanks ignored).
+func parseZoneList(spec string) ([]string, error) {
+	var raw []string
+	if strings.HasPrefix(spec, "@") {
+		buf, err := os.ReadFile(spec[1:])
+		if err != nil {
+			return nil, fmt.Errorf("reading zone list %s: %w", spec[1:], err)
+		}
+		raw = strings.Split(string(buf), "\n")
+	} else {
+		raw = strings.Split(spec, ",")
+	}
+	var zones []string
+	for _, z := range raw {
+		z = strings.TrimSpace(z)
+		if z == "" || strings.HasPrefix(z, "#") {
+			continue
+		}
+		zones = append(zones, z)
+	}
+	if len(zones) == 0 {
+		return nil, fmt.Errorf("no zones in %q", spec)
+	}
+	return zones, nil
+}
+
+// effectivePolicyReloadSnapshot resolves the before-snapshot file: an explicit
+// --snapshot wins, otherwise it lives under --configdir keyed by target so
+// concurrent tests against different targets don't collide.
+func effectivePolicyReloadSnapshot() string {
+	if policyReloadSnap != "" {
+		return policyReloadSnap
+	}
+	name := targetName
+	if name == "" {
+		name = "default"
+	}
+	return filepath.Join(configDir, "policy-reload-"+name+".json")
+}
+
 // ---- list-tests / cleanup ---------------------------------------------------
 
 var listTestsCmd = &cobra.Command{
@@ -497,6 +688,17 @@ func init() {
 	testReloadCmd.Flags().StringVar(&reloadDuration, "duration", "5m", "total run duration")
 	testReloadCmd.Flags().BoolVar(&reportJson, "json", false, "JSON report")
 	testCmd.AddCommand(testReloadCmd)
+
+	testPolicyReloadCmd.Flags().StringVar(&targetName, "target", "", "apiservers entry name for the mgmt API")
+	testPolicyReloadCmd.Flags().StringVar(&dnsServer, "dns", "", "DNS server addr:port to observe")
+	testPolicyReloadCmd.Flags().StringVar(&policyReloadZones, "zones", "", "explicit signed-zone set: a,b,c or @file (default: enumerate signed zones via the mgmt API)")
+	testPolicyReloadCmd.Flags().StringVar(&policyReloadPhase, "phase", "", "restart mode: 'before' (snapshot+exit) or 'after' (snapshot+compare)")
+	testPolicyReloadCmd.Flags().BoolVar(&policyReloadReload, "reload", false, "reload mode: single invocation, drive 'config reload' between the before/after snapshots")
+	testPolicyReloadCmd.Flags().IntVar(&policyReloadTol, "tolerance", 0, "allowed count of coincidentally re-signed zones (background-resigner ticks) before A2 fails")
+	testPolicyReloadCmd.Flags().StringVar(&policyReloadSnap, "snapshot", "", "before-snapshot file (default <configdir>/policy-reload-<target>.json)")
+	testPolicyReloadCmd.Flags().StringVar(&policyReloadReady, "ready-timeout", "60s", "how long to wait for all zones to answer SOA again after the trigger")
+	testPolicyReloadCmd.Flags().BoolVar(&reportJson, "json", false, "JSON report")
+	testCmd.AddCommand(testPolicyReloadCmd)
 
 	cleanupCmd.Flags().StringVar(&testId, "test", "", "test identity to clean up")
 	cleanupCmd.Flags().BoolVar(&rmArtifacts, "rm", false, "also remove the local artifact directory")

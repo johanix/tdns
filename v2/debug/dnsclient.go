@@ -274,3 +274,67 @@ func queryApexSignedness(ctx context.Context, server, zone string) (QuerySignedn
 	}
 	return obs, nil
 }
+
+// RRSIGObs is one apex RRSIG's identity and validity window, captured by
+// queryApexRRSIGs for the policy-reload no-re-sign check (test A2). Inception is
+// the load-bearing field: a genuine re-sign stamps a fresh inception, while a
+// pure backfill of the last-applied policy record leaves the served RRSIG (and
+// thus its inception) untouched. KeyTag/Algorithm/CoveredType key the comparison
+// so a zone that serves several apex RRSIGs mid-rollover is diffed per key, not
+// smeared together.
+type RRSIGObs struct {
+	CoveredType uint16 `json:"covered_type"`
+	KeyTag      uint16 `json:"key_tag"`
+	Algorithm   uint8  `json:"algorithm"`
+	Inception   uint32 `json:"inception"`
+	Expiration  uint32 `json:"expiration"`
+}
+
+// queryApexRRSIGs captures the apex SOA and DNSKEY RRSIGs for one zone: two
+// +dnssec (DO=1) queries — one for SOA (ZSK-signed), one for DNSKEY (KSK-signed)
+// — each retried over TCP on truncation (a PQ RRSIG/DNSKEY set overflows the UDP
+// buffer). Checking both covered types makes "no re-sign" hard to fake: a
+// backfill must leave BOTH the ZSK-stamped SOA signature and the KSK-stamped
+// DNSKEY signature byte-identical. It reads RRSIG PRESENCE and header fields
+// only, never signature validity, so it needs no algorithm support in the tool
+// (miekg/dns parses RRSIG regardless of algorithm). Follows querySOASerial's
+// UDP-then-TCP shape.
+func queryApexRRSIGs(ctx context.Context, server, zone string) ([]RRSIGObs, error) {
+	apex := dns.Fqdn(zone)
+	var out []RRSIGObs
+	for _, qtype := range []uint16{dns.TypeSOA, dns.TypeDNSKEY} {
+		m := new(dns.Msg)
+		m.SetQuestion(apex, qtype)
+		m.SetEdns0(1232, true) // DO bit: ask for the RRSIGs
+		c := &dns.Client{Timeout: 5 * time.Second}
+		r, _, err := c.ExchangeContext(ctx, m, server)
+		if err != nil {
+			return nil, err
+		}
+		if r.Truncated {
+			c.Net = "tcp"
+			r, _, err = c.ExchangeContext(ctx, m, server)
+			if err != nil {
+				return nil, err
+			}
+		}
+		for _, rr := range r.Answer {
+			sig, ok := rr.(*dns.RRSIG)
+			// Only apex RRSIGs covering the queried type: the SOA query's answer
+			// carries RRSIG(SOA), the DNSKEY query's carries RRSIG(DNSKEY). This
+			// filters out any incidental RRSIG (e.g. an apex NSEC) the server may
+			// bundle.
+			if !ok || sig.TypeCovered != qtype || !strings.EqualFold(rr.Header().Name, apex) {
+				continue
+			}
+			out = append(out, RRSIGObs{
+				CoveredType: sig.TypeCovered,
+				KeyTag:      sig.KeyTag,
+				Algorithm:   sig.Algorithm,
+				Inception:   sig.Inception,
+				Expiration:  sig.Expiration,
+			})
+		}
+	}
+	return out, nil
+}

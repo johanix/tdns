@@ -34,13 +34,14 @@ const (
 
 // Capability names. These are the keys actors declare in Actor.Requires().
 const (
-	CapDns          = "dns"                // pure DNS reachability (query/UPDATE/AXFR)
-	CapApi          = "mgmt-api"           // the mgmt API answers at all
-	CapZoneBump     = "zone-bump"          // POST /zone Command=bump
-	CapZoneResign   = "zone-resign"        // POST /zone Command=resign-zone
-	CapZoneReload   = "zone-reload"        // POST /zone Command=reload (the reload test's stimulus)
-	CapDebugTxlog   = "debug-zone-txlog"   // POST /debug Command=zone-txlog (snapshot branch)
-	CapNone         = ""                   // actor needs nothing beyond pure DNS
+	CapDns         = "dns"                 // pure DNS reachability (query/UPDATE/AXFR)
+	CapApi         = "mgmt-api"            // the mgmt API answers at all
+	CapZoneBump    = "zone-bump"           // POST /zone Command=bump
+	CapZoneResign  = "zone-resign"         // POST /zone Command=resign-zone
+	CapZoneReload  = "zone-reload"         // POST /zone Command=reload (the reload test's stimulus)
+	CapDebugTxlog  = "debug-zone-txlog"    // POST /debug Command=zone-txlog (snapshot branch)
+	CapAppliedRead = "applied-policy-read" // scoped list-zones returns the typed applied_* fields (#301) — policy-reload backfill readback
+	CapNone        = ""                    // actor needs nothing beyond pure DNS
 )
 
 type Capability struct {
