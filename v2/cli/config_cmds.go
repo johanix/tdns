@@ -63,6 +63,8 @@ overwrite all conflicts, or --interactive to prompt per conflict.`,
 	}
 
 	c.AddCommand(reload, reloadZones, reloadTsig, status)
+	c.AddCommand(newConfigCheckCmd(role))
+	c.AddCommand(newConfigMweCmd(role))
 	return c
 }
 
