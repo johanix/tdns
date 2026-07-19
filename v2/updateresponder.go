@@ -635,13 +635,23 @@ func (zd *ZoneData) ApproveTrustUpdate(zone string, us *UpdateStatus, r *dns.Msg
 
 	unvalidatedKeyUpload := false
 
-	if len(r.Ns) != 1 {
+	// A trust update is either a single KEY RR, or the self-signed bootstrap
+	// ceremony "DEL <child> ANY KEY" + "ADD <child> KEY" (draft §"Bootstrapping
+	// the Child's Key"). For the ceremony we approve/inspect the ADD KEY; the
+	// accompanying DEL-ANY-KEY is DEFERRED by the apply path (it must not evict
+	// an already-trusted key until the new key validates). A bare untrusted
+	// DEL-ANY-KEY (no ADD) is not a ceremony and remains refused below.
+	addKey, _, isCeremony := bootstrapCeremony(r.Ns)
+	if len(r.Ns) != 1 && !isCeremony {
 		us.Approved = false
-		lgHandler.Warn("trust update rejected: only a single KEY record allowed")
+		lgHandler.Warn("trust update rejected: only a single KEY record or a bootstrap DEL+ADD ceremony allowed", "rrs", len(r.Ns))
 		return false, false, nil
 	}
 
 	rr := r.Ns[0]
+	if isCeremony {
+		rr = addKey // operate on the ADD KEY; the DEL is handled by the apply path
+	}
 	// rrname := rr.Header().Name
 	rrtype := rr.Header().Rrtype
 	rrclass := rr.Header().Class
