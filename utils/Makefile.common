@@ -10,6 +10,14 @@ GOFLAGS:=-v
 # the registration files, a per-app C-library env (algs-libs.mk), and a
 # shared ALGREPO cache (../algs-env.mk under cmdv2/). See `generate` below
 # and guide/pq-dnssec.md.
+#
+# ALGS_ENV (default empty; algs-libs.mk overrides it when the app selects
+# C-backed algorithms) holds `VAR="val" ...` for the library env those
+# algorithms need. It is spliced directly onto the `go build` command line
+# below rather than `export`ed, because NetBSD's base `make` does not
+# implement GNU make's export-to-environment semantics — see the comment
+# on genLibsMk in cmdv2/genalgs/env.go.
+ALGS_ENV :=
 
 GOOS ?= $(shell uname -s | tr A-Z a-z)
 
@@ -54,10 +62,10 @@ GENALGS ?= ../genalgs/tdns-genalgs
 # once with --algrepo; after that, every app benefits from the shared cache.
 #
 # ALGREPO comes from `-include ../algs-env.mk` in the app Makefile; per-app
-# C-library exports come from `-include algs-libs.mk`.
+# C-library env comes from `-include algs-libs.mk` (see ALGS_ENV above).
 build: generate
 	@test -f version.go || /bin/sh ../../utils/make-version.sh "unknown" "unknown" $(PROG)
-	$(GO) build $(GOFLAGS) -o ${PROG}
+	$(ALGS_ENV) $(GO) build $(GOFLAGS) -o ${PROG}
 
 # Ensure the generator binary exists (cmdv2/Makefile also builds it first).
 $(GENALGS):
@@ -87,7 +95,7 @@ generate: $(GENALGS)
 	 fi
 
 netbsd:
-	GOOS=netbsd GOARCH=amd64 $(GO) build $(GOFLAGS) -o ${PROG}.netbsd
+	GOOS=netbsd GOARCH=amd64 $(ALGS_ENV) $(GO) build $(GOFLAGS) -o ${PROG}.netbsd
 
 # johaniaws: Sync local tdns source to remote AWS environment.
 # Requires: sshfs mount at ~/sshfs/msigner1
@@ -137,7 +145,7 @@ check-no-mutators:
 	fi
 
 test:
-	$(GO) test -v -cover
+	$(ALGS_ENV) $(GO) test -v -cover
 
 # install:
 # 	install -s -b -c ${PROG} /usr/local/bin/
