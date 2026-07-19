@@ -263,6 +263,11 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 		correlateRunningConfig(role, &cfg, cfgPath, daemonDBPath, rep)
 	}
 
+	// Signed-zone policy-algorithm vs active-key dry-run (predicts a
+	// would-break-on-reload algorithm change). Handles the offline info-skip
+	// itself.
+	checkPolicyAlgVsActiveKeys(&cfg, v, rep, online, role)
+
 	finishCheckconf(rep)
 }
 
@@ -807,6 +812,227 @@ func fetchKeystoreTsigNames(role string) (map[string]bool, error) {
 		out[lc(dns.Fqdn(k.Name))] = true
 	}
 	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// Policy-algorithm vs active-key correlation
+// ---------------------------------------------------------------------------
+//
+// The OPERATOR PRE-FLIGHT consumer of "what breaks on reload" for signed zones:
+// a CLI-side dry-run of the signer's reconcileActiveKeyAlgorithms (sign.go). A
+// same-name policy algorithm edit (e.g. KSK Ed25519->FALCON512 with the zone
+// still on that policy) passes every other check — the policy is valid — but a
+// reload-zones/restart then hits the reconcile, which REFUSES (no automatic
+// KSK/ZSK-algorithm rollover), leaving the zone serving stale signatures until
+// they expire, then bogus.
+//
+// OUT OF SCOPE (do NOT build here): the server-side reload gate / startup-hold
+// (guardrail-plan PR-B) still needs its own server-side dry-run+correlate
+// primitive; this CLI check is not that shared primitive. The client-side
+// config/include re-decode (loadConfigViper) is likewise left as-is; a decoder
+// shared with the daemon is a known drift risk but a separate refactor.
+
+// wantAlgs is the effective algorithm set (lowercased NAME strings) a policy
+// requires per role. Names, not codepoints: non-standardized PQ codepoints are
+// deployment-local, but the canonical names are stable across the CLI and the
+// daemon, so the daemon's active-key algorithm names compare directly.
+type wantAlgs struct {
+	mode string // "csk" | "ksk-zsk"
+	ksk  string // KSK (split) or CSK (csk mode) algorithm name
+	zsk  string // ZSK algorithm name (unused in csk mode)
+}
+
+// activeKeyAlgs is the set of active-key algorithm NAMES present per role in the
+// running keystore: ksk = SEP-set (KSK/CSK) algorithms, zsk = SEP-clear (ZSK).
+type activeKeyAlgs struct {
+	ksk map[string]bool
+	zsk map[string]bool
+}
+
+// roleMiss records one role whose policy algorithm is provided by no active key.
+type roleMiss struct {
+	role     string
+	wantAlg  string
+	haveAlgs []string
+}
+
+// missingRoleAlgs is the pure dry-run of reconcileActiveKeyAlgorithms, in the
+// lenient zoneActiveKeysMatchAlgs sense: a role is a "miss" only when the zone
+// HAS active key(s) for that role but NONE carries the wanted algorithm. Two
+// deliberate non-findings:
+//   - zero active keys for a role -> not a miss: the signer generates fresh
+//     keys of the policy algorithm on first sign, it does not refuse.
+//   - the wanted algorithm present alongside a wrong-algorithm key
+//     (mid-rollover, both old+new active) -> not a miss.
+//
+// Pure and dependency-free so it is directly unit-testable.
+func missingRoleAlgs(want wantAlgs, active activeKeyAlgs) []roleMiss {
+	var miss []roleMiss
+	check := func(role, wantAlg string, have map[string]bool) {
+		if wantAlg == "" || len(have) == 0 {
+			return
+		}
+		if have[wantAlg] {
+			return
+		}
+		miss = append(miss, roleMiss{role: role, wantAlg: wantAlg, haveAlgs: sortedKeys(have)})
+	}
+	if want.mode == tdns.DnssecPolicyModeCSK {
+		check("CSK", want.ksk, active.ksk)
+		return miss
+	}
+	check("KSK", want.ksk, active.ksk)
+	check("ZSK", want.zsk, active.zsk)
+	return miss
+}
+
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// fetchActiveKeyAlgsByZone lists the running keystore's DNSSEC keys and returns,
+// per zone (lowercased FQDN), the active-key algorithm NAMES split by SEP bit.
+// The dnssec-mgmt list endpoint returns ALL zones' keys, so it is fetched once
+// and indexed here rather than per zone.
+func fetchActiveKeyAlgsByZone(role string) (map[string]activeKeyAlgs, error) {
+	api, err := GetApiClient(role, false)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := SendKeystoreCmd(api, tdns.KeystorePost{Command: "dnssec-mgmt", SubCommand: "list"})
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]activeKeyAlgs{}
+	for _, k := range resp.Dnskeys {
+		if !strings.EqualFold(k.State, tdns.DnskeyStateActive) {
+			continue
+		}
+		zone := lc(dns.Fqdn(k.Name))
+		a, ok := out[zone]
+		if !ok {
+			a = activeKeyAlgs{ksk: map[string]bool{}, zsk: map[string]bool{}}
+		}
+		alg := lc(k.Algorithm)
+		if k.Flags&0x0001 == 0x0001 { // SEP bit set -> KSK/CSK
+			a.ksk[alg] = true
+		} else {
+			a.zsk[alg] = true
+		}
+		out[zone] = a
+	}
+	return out, nil
+}
+
+// resolveWantAlgs turns a zone's effective policy name into the algorithm NAMES
+// it requires. Config-declared policies (from the checked file) win; the
+// built-in `default` policy and any policy named only by the running server are
+// resolved from the server's loaded policies. false when neither source knows it.
+func resolveWantAlgs(polName string, declared map[string]tdns.PolicyAlgs, serverPols map[string]tdns.DnssecPolicyInfo) (wantAlgs, bool) {
+	pn := lc(polName)
+	if pa, ok := declared[pn]; ok {
+		return wantAlgs{
+			mode: normalizeMode(pa.Mode),
+			ksk:  lc(dns.AlgorithmToString[pa.KSKAlg]),
+			zsk:  lc(dns.AlgorithmToString[pa.ZSKAlg]),
+		}, true
+	}
+	if sp, ok := serverPols[pn]; ok {
+		return wantAlgs{
+			mode: normalizeMode(sp.Mode),
+			ksk:  lc(sp.KSKAlgorithm),
+			zsk:  lc(sp.ZSKAlgorithm),
+		}, true
+	}
+	return wantAlgs{}, false
+}
+
+func normalizeMode(m string) string {
+	if lc(m) == tdns.DnssecPolicyModeCSK {
+		return tdns.DnssecPolicyModeCSK
+	}
+	return tdns.DnssecPolicyModeKSKZSK
+}
+
+// checkPolicyAlgVsActiveKeys warns when a signed zone's checked policy wants a
+// role algorithm that the running zone's active keys do not provide — the one
+// "would-break-on-reload" failure the other checks miss. WARN, not FAIL: the
+// config is valid; this predicts a refusal on the next reload-zones/restart.
+// (To make check hard-block on it instead, change rep.warn -> rep.fail below.)
+func checkPolicyAlgVsActiveKeys(cfg *tdns.Config, v *viper.Viper, rep *ccReport, online bool, role string) {
+	const g = "Policy vs active keys"
+
+	// Signed zones with a resolvable effective policy name.
+	templateNames := map[string]tdns.ZoneConf{}
+	for _, t := range cfg.Templates {
+		templateNames[lc(t.Name)] = t
+	}
+	type signedZone struct{ name, policy string }
+	var signed []signedZone
+	for i := range cfg.Zones {
+		if cfg.Zones[i].Name == "" {
+			continue
+		}
+		eff := effectiveZone(cfg.Zones[i], templateNames)
+		if !hasSigningOption(eff.OptionsStrs) || lc(eff.DnssecPolicy) == "" {
+			continue
+		}
+		signed = append(signed, signedZone{name: cfg.Zones[i].Name, policy: eff.DnssecPolicy})
+	}
+	if len(signed) == 0 {
+		return
+	}
+	if !online {
+		rep.info(g, "correlation", "offline: cannot correlate policy algorithms against the running active keys")
+		return
+	}
+
+	// Config-declared policy algorithms (honors includes: same merged dnssec
+	// temp file checkDnssecPolicies validates).
+	var declared map[string]tdns.PolicyAlgs
+	if pols, _ := v.Get("dnssec.policies").(map[string]interface{}); len(pols) > 0 {
+		if tmp, err := writeTempYAML(map[string]interface{}{"dnssec": v.Get("dnssec")}); err == nil {
+			declared, _ = tdns.ResolveDnssecPolicyAlgs(tmp)
+			os.Remove(tmp)
+		}
+	}
+	// Running server's loaded policies (for `default`/server-only names).
+	serverPols := map[string]tdns.DnssecPolicyInfo{}
+	if sp, err := fetchServerPolicies(role); err == nil {
+		for _, p := range sp {
+			serverPols[lc(p.Name)] = p
+		}
+	}
+
+	activeByZone, err := fetchActiveKeyAlgsByZone(role)
+	if err != nil {
+		rep.warn(g, "keystore", fmt.Sprintf("could not list active DNSSEC keys: %v — policy/key algorithm correlation skipped", err), "")
+		return
+	}
+
+	for _, z := range signed {
+		want, ok := resolveWantAlgs(z.policy, declared, serverPols)
+		if !ok {
+			rep.info(g, z.name, fmt.Sprintf("cannot resolve algorithms for policy %q (not in this config and not loaded by the server) — skipping", z.policy))
+			continue
+		}
+		miss := missingRoleAlgs(want, activeByZone[lc(dns.Fqdn(z.name))])
+		if len(miss) == 0 {
+			rep.pass(g, z.name, fmt.Sprintf("active keys satisfy policy %q algorithms", z.policy))
+			continue
+		}
+		for _, m := range miss {
+			rep.warn(g, z.name,
+				fmt.Sprintf("config policy %q wants %s algorithm %s, but the running zone's active %s key(s) are [%s]. A reload-zones/restart would REFUSE this change (no automatic KSK/ZSK-algorithm rollover) — the zone keeps serving its current signatures until they expire, then goes bogus",
+					z.policy, m.role, m.wantAlg, m.role, strings.Join(m.haveAlgs, ", ")),
+				"roll the key deliberately via the rollover engine, or (test zones only) `tdns-cli auth zone dnssec policy-reset`")
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
