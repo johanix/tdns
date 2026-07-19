@@ -318,9 +318,16 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 			if zoneFilter != "" {
 				zoneFilter = dns.Fqdn(zoneFilter)
 			}
+			suffixFilter, _ := amp.Data["suffix"].(string)
+			if suffixFilter != "" {
+				suffixFilter = dns.Fqdn(suffixFilter)
+			}
 			var records []ImrServerTransportStats
 			for item := range imr.Cache.ServerMap.IterBuffered() {
 				if zoneFilter != "" && item.Key != zoneFilter {
+					continue
+				}
+				if suffixFilter != "" && !strings.HasSuffix(item.Key, suffixFilter) {
 					continue
 				}
 				for name, server := range item.Val {
@@ -338,9 +345,12 @@ func (conf *Config) APIimr() func(w http.ResponseWriter, r *http.Request) {
 			}
 			resp.Data = records
 			if len(records) == 0 {
-				if zoneFilter != "" {
+				switch {
+				case zoneFilter != "":
 					resp.Msg = fmt.Sprintf("No auth servers recorded for %s", zoneFilter)
-				} else {
+				case suffixFilter != "":
+					resp.Msg = fmt.Sprintf("No auth servers recorded with suffix %s", suffixFilter)
+				default:
 					resp.Msg = "No auth servers recorded"
 				}
 			} else {
