@@ -229,7 +229,7 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 	fmt.Println()
 
 	// Load the config the way the daemon does (main + single-level includes).
-	v, loadErr := loadAuthConfigViper(cfgPath, rep)
+	v, loadErr := loadConfigViper(cfgPath, rep)
 	if loadErr != nil {
 		rep.fail("Config file", "load", fmt.Sprintf("cannot load %s: %v", cfgPath, loadErr),
 			"fix the YAML syntax / missing file, then re-run")
@@ -240,7 +240,7 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 
 	// Required-field validation via the exported tdns validator (drives the
 	// `validate:"required"` struct tags AND the cert/key pair validation).
-	checkRequiredFields(v, cfgPath, rep)
+	checkRequiredFields(v, cfgPath, rep, tdns.AppTypeAuth)
 
 	// Decode into a typed Config for the structural checks. Best-effort: the
 	// legacy bare-string primary/ACL decode hooks live in the tdns package and
@@ -286,10 +286,10 @@ func finishCheckconf(rep *ccReport) {
 // Config loading (mirrors cmdv2/cli/root.go initConfig include handling)
 // ---------------------------------------------------------------------------
 
-// loadAuthConfigViper reads path into a fresh viper instance and merges any
+// loadConfigViper reads path into a fresh viper instance and merges any
 // top-level include: files (single level, non-recursive), exactly as the
 // daemon/CLI loaders do. A missing include is reported as a WARN, not fatal.
-func loadAuthConfigViper(path string, rep *ccReport) (*viper.Viper, error) {
+func loadConfigViper(path string, rep *ccReport) (*viper.Viper, error) {
 	v := viper.New()
 	v.SetConfigFile(path)
 	if err := v.ReadInConfig(); err != nil {
@@ -321,24 +321,30 @@ func loadAuthConfigViper(path string, rep *ccReport) (*viper.Viper, error) {
 // Static checks
 // ---------------------------------------------------------------------------
 
-func checkRequiredFields(v *viper.Viper, cfgPath string, rep *ccReport) {
-	// tdns.ValidateConfig selects the sections to validate based on the app
-	// type. Force AppTypeAuth so it validates service/db/apiserver/dnsengine.
+// checkRequiredFields runs the exported required-field validator for the given
+// app type (which selects the sections tdns.ValidateConfig checks: auth →
+// service/db/apiserver/dnsengine + log; imr → imrengine + log).
+func checkRequiredFields(v *viper.Viper, cfgPath string, rep *ccReport, appType tdns.AppType) {
 	saved := tdns.Globals.App.Type
-	tdns.Globals.App.Type = tdns.AppTypeAuth
+	tdns.Globals.App.Type = appType
 	defer func() { tdns.Globals.App.Type = saved }()
 
+	suggestion := "add the missing required keys (service.name, dnsengine.addresses/transports, apiserver.*, db.file, log.file)"
+	passMsg := "all required sections/keys present; apiserver cert/key pair valid"
+	if appType == tdns.AppTypeImr {
+		suggestion = "add the missing required keys (imrengine.addresses, imrengine.transports, log.file)"
+		passMsg = "required sections present (imrengine.addresses/transports, log.file)"
+	}
+
 	if err := tdns.ValidateConfig(v, cfgPath); err != nil {
-		rep.fail("Required fields", "required",
-			firstLine(err.Error()),
-			"add the missing required keys (service.name, dnsengine.addresses/transports, apiserver.*, db.file, log.file)")
+		rep.fail("Required fields", "required", firstLine(err.Error()), suggestion)
 		// Fall through: also surface the raw multi-line detail for the operator.
 		for _, ln := range extraLines(err.Error()) {
 			rep.info("Required fields", "detail", ln)
 		}
 		return
 	}
-	rep.pass("Required fields", "required", "all required sections/keys present; apiserver cert/key pair valid")
+	rep.pass("Required fields", "required", passMsg)
 }
 
 func checkDnsEngine(cfg *tdns.Config, rep *ccReport) {
