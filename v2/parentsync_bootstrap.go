@@ -49,20 +49,16 @@ func (conf *Config) ParentSyncAfterKeyPublication(zone ZoneName, keyName string,
 		return
 	}
 
-	// Retry KeyState inquiry with backoff: 5s, 10s, 20s, 40s, then give up.
-	maxRetries := 5
-	delay := 5 * time.Second
+	// Poll the parent's KeyState with the shared delegation-sync backoff
+	// (5s, 10s, 20s, 40s, then give up), re-bootstrapping once if the parent
+	// reports our key as unknown.
 	bootstrapped := false
-
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-
+	syncErr := retryWithBackoff(delegationSyncMaxRetries, delegationSyncInitialDelay, func(attempt int) (bool, error) {
 		keyState, err := QueryParentKeyState(kdb, imr, keyName, keyid)
 		if err != nil {
 			lgElect.Warn("ParentSyncAfterKeyPublication: KeyState inquiry failed",
 				"zone", zone, "attempt", attempt, "err", err)
-			time.Sleep(delay)
-			delay *= 2
-			continue
+			return false, err // retry
 		}
 
 		switch keyState {
@@ -87,51 +83,45 @@ func (conf *Config) ParentSyncAfterKeyPublication(zone ZoneName, keyName string,
 					lgElect.Warn("ParentSyncAfterKeyPublication: zone not found, skipping delegation verification", "zone", zone)
 				}
 			}
-			return
+			return true, nil // done
 
 		case edns0.KeyStateUnknown:
 			if bootstrapped {
 				// Already sent bootstrap, parent hasn't processed it yet — keep polling
 				lgElect.Info("ParentSyncAfterKeyPublication: parent still unknown after bootstrap, polling",
 					"zone", zone, "keyid", keyid, "attempt", attempt)
-				time.Sleep(delay)
-				delay *= 2
-				continue
+				return false, nil // retry
 			}
 			lgElect.Info("ParentSyncAfterKeyPublication: parent does not know our key, bootstrapping",
 				"zone", zone, "keyid", keyid)
 			UpdateParentState(kdb, keyName, keyid, keyState)
-			err := BootstrapWithParent(zone, keyName, algorithm)
-			if err != nil {
+			if err := BootstrapWithParent(zone, keyName, algorithm); err != nil {
 				lgElect.Error("ParentSyncAfterKeyPublication: bootstrap failed",
 					"zone", zone, "err", err)
-				return
+				return true, err // done (terminal error)
 			}
 			lgElect.Info("ParentSyncAfterKeyPublication: bootstrap UPDATE sent to parent, will poll for trust",
 				"zone", zone, "keyid", keyid)
 			bootstrapped = true
-			time.Sleep(delay)
-			delay *= 2
-			continue
+			return false, nil // retry
 
 		case edns0.KeyStateBootstrapAutoOngoing:
 			lgElect.Info("ParentSyncAfterKeyPublication: parent is verifying key, will poll",
 				"zone", zone, "keyid", keyid, "attempt", attempt)
 			UpdateParentState(kdb, keyName, keyid, keyState)
-			time.Sleep(delay)
-			delay *= 2
-			continue
+			return false, nil // retry
 
 		default:
 			lgElect.Info("ParentSyncAfterKeyPublication: parent returned unexpected state",
 				"zone", zone, "keyid", keyid, "state", keyState)
 			UpdateParentState(kdb, keyName, keyid, keyState)
-			return
+			return true, nil // done (terminal)
 		}
+	})
+	if syncErr != nil {
+		lgElect.Warn("ParentSyncAfterKeyPublication: gave up (exhausted retries or terminal error)",
+			"zone", zone, "keyid", keyid, "err", syncErr)
 	}
-
-	lgElect.Warn("ParentSyncAfterKeyPublication: exhausted retries",
-		"zone", zone, "keyid", keyid)
 }
 
 // QueryParentKeyState sends a KeyState EDNS(0) inquiry to the parent and
