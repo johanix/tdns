@@ -779,3 +779,44 @@ func ResolveDnssecPolicyAlgs(path string) (map[string]PolicyAlgs, error) {
 	algs, _ := resolveAndValidatePolicies(root)
 	return algs, nil
 }
+
+// PolicyAlgNames is a policy's effective algorithm NAMES (upper-cased) — the
+// name-only counterpart of PolicyAlgs, used where codepoints cannot be resolved
+// (a pure client without this deployment's runtime-assigned PQ algorithms).
+type PolicyAlgNames struct {
+	Mode   string
+	Alg    string // default / CSK
+	KSKAlg string
+	ZSKAlg string
+}
+
+// ResolveDnssecPolicyAlgNames returns each policy's effective algorithm NAMES
+// and mode, using the SAME template merge as ResolveDnssecPolicyAlgs but WITHOUT
+// resolving names to codepoints. tdns-cli's config check feeds these names to the
+// running server (list-algorithms) to ask whether each is a registered,
+// role-valid algorithm — so a PQ algorithm the client cannot itself resolve is
+// still checkable. Only structural errors (unreadable file / bad YAML / no
+// policies) are returned; a policy whose template does not resolve is skipped
+// (the offline structural check reports that separately).
+func ResolveDnssecPolicyAlgNames(path string) (map[string]PolicyAlgNames, error) {
+	root, err := loadDnssecPoliciesYAML(path)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]PolicyAlgNames, len(root.Dnssec.Policies))
+	for name, dp := range root.Dnssec.Policies {
+		dp.Name = name
+		expanded, terr := resolveDnssecPolicyTemplate(dp, root.Dnssec.Templates)
+		if terr != nil {
+			continue
+		}
+		dp = expanded
+		def, ksk, zsk := resolvePolicyRoleAlgorithmNames(&dp)
+		mode := strings.ToLower(strings.TrimSpace(dp.Mode))
+		if mode == "" {
+			mode = DnssecPolicyModeKSKZSK
+		}
+		out[name] = PolicyAlgNames{Mode: mode, Alg: def, KSKAlg: ksk, ZSKAlg: zsk}
+	}
+	return out, nil
+}
