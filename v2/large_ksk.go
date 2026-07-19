@@ -229,6 +229,26 @@ func resolvePolicyRoleAlgorithms(policyName string, dp *DnssecPolicyConf) (defau
 	return defaultAlg, kskAlg, zskAlg, nil
 }
 
+// resolvePolicyRoleAlgorithmNames returns a policy's effective role algorithm
+// NAMES (upper-cased), applying the same default→KSK/ZSK fallback as
+// resolvePolicyRoleAlgorithms but WITHOUT resolving names to codepoints. A pure
+// client (tdns-cli config check) cannot resolve this deployment's
+// runtime-assigned PQ codepoints, so it compares these names against the running
+// server's registered algorithms instead of a local table. Empty → "".
+func resolvePolicyRoleAlgorithmNames(dp *DnssecPolicyConf) (defaultAlg, kskAlg, zskAlg string) {
+	norm := func(s string) string { return strings.ToUpper(strings.TrimSpace(s)) }
+	defaultAlg = norm(dp.Algorithm)
+	kskAlg = defaultAlg
+	if s := norm(dp.KSK.Algorithm); s != "" {
+		kskAlg = s
+	}
+	zskAlg = defaultAlg
+	if s := norm(dp.ZSK.Algorithm); s != "" {
+		zskAlg = s
+	}
+	return defaultAlg, kskAlg, zskAlg
+}
+
 // bulkSigningAlgorithmAndRole returns the algorithm that signs non-DNSKEY RRsets
 // and a short role label for operator messages.
 func bulkSigningAlgorithmAndRole(pol *DnssecPolicy) (alg uint8, role string) {
