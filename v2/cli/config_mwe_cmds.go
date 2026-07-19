@@ -294,6 +294,11 @@ func ensureSelfSignedCert(certFile, keyFile string) (bool, error) {
 	if cerr == nil && kerr == nil {
 		return false, nil // reuse existing pair
 	}
+	// Only one of the pair exists: do NOT regenerate, which would silently
+	// overwrite the pre-existing file. Fail so the operator resolves it.
+	if cerr == nil || kerr == nil {
+		return false, fmt.Errorf("partial cert/key pair found (cert exists: %v, key exists: %v) — remove both or supply both, will not overwrite", cerr == nil, kerr == nil)
+	}
 
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {

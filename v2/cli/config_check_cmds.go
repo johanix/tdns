@@ -474,8 +474,17 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 		configTsig[lc(dns.Fqdn(k.Name))] = true
 	}
 	var keystoreTsig map[string]bool
+	keystoreOK := false
 	if online {
-		keystoreTsig = fetchKeystoreTsigNames(role)
+		var ksErr error
+		keystoreTsig, ksErr = fetchKeystoreTsigNames(role)
+		if ksErr != nil {
+			rep.warn(g, "keystore",
+				fmt.Sprintf("could not list TSIG keys from the keystore: %v — TSIG key presence not verified against the keystore", ksErr),
+				"re-run when the daemon/keystore is reachable")
+		} else {
+			keystoreOK = true
+		}
 	}
 
 	seen := map[string]bool{}
@@ -536,7 +545,7 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 			}
 			checkPrimaryZone(rep, g, zname, eff)
 		case "secondary":
-			checkSecondaryZone(rep, g, zname, eff, configTsig, keystoreTsig, online)
+			checkSecondaryZone(rep, g, zname, eff, configTsig, keystoreTsig, online, keystoreOK)
 		default:
 			rep.fail(g, zname, fmt.Sprintf("unknown zone type %q", eff.Type), "type must be primary or secondary")
 		}
@@ -563,29 +572,35 @@ func checkPrimaryZone(rep *ccReport, g, zname string, eff tdns.ZoneConf) {
 	rep.pass(g, zname, fmt.Sprintf("primary; zonefile %s exists and parses", zf))
 }
 
-func checkSecondaryZone(rep *ccReport, g, zname string, eff tdns.ZoneConf, configTsig, keystoreTsig map[string]bool, online bool) {
+func checkSecondaryZone(rep *ccReport, g, zname string, eff tdns.ZoneConf, configTsig, keystoreTsig map[string]bool, online, keystoreOK bool) {
 	if len(eff.Primaries) == 0 {
 		rep.fail(g, zname, "secondary zone has no primaries:", "add at least one primaries: {addr, key} entry")
 	}
 	// Collect TSIG key names referenced by this zone.
 	for _, p := range eff.Primaries {
-		checkTsigRef(rep, g, zname, "primaries", p.Key, configTsig, keystoreTsig, online)
+		checkTsigRef(rep, g, zname, "primaries", p.Key, configTsig, keystoreTsig, online, keystoreOK)
 	}
 	for _, p := range eff.Notify {
-		checkTsigRef(rep, g, zname, "notify", p.Key, configTsig, keystoreTsig, online)
+		checkTsigRef(rep, g, zname, "notify", p.Key, configTsig, keystoreTsig, online, keystoreOK)
 	}
 	for _, a := range eff.AllowNotify {
-		checkTsigRef(rep, g, zname, "allow-notify", a.Key, configTsig, keystoreTsig, online)
+		checkTsigRef(rep, g, zname, "allow-notify", a.Key, configTsig, keystoreTsig, online, keystoreOK)
 	}
 	for _, a := range eff.Downstreams {
-		checkTsigRef(rep, g, zname, "downstreams", a.Key, configTsig, keystoreTsig, online)
+		checkTsigRef(rep, g, zname, "downstreams", a.Key, configTsig, keystoreTsig, online, keystoreOK)
 	}
 	if len(eff.Primaries) > 0 {
 		rep.pass(g, zname, "secondary; primaries configured")
 	}
 }
 
-func checkTsigRef(rep *ccReport, g, zname, field, key string, configTsig, keystoreTsig map[string]bool, online bool) {
+// checkTsigRef verifies a referenced TSIG key resolves. A hard FAIL ("zone will
+// be quarantined") is reported ONLY when the keystore was actually consulted
+// (online && keystoreOK) and the key is absent there and in keys.tsig. When the
+// keystore could not be queried (offline, or the list call failed), the key's
+// keystore presence is unknown, so it is a WARN — never a FAIL — to avoid
+// manufacturing a false quarantine from a transient API error.
+func checkTsigRef(rep *ccReport, g, zname, field, key string, configTsig, keystoreTsig map[string]bool, online, keystoreOK bool) {
 	k := strings.TrimSpace(key)
 	if k == "" || strings.EqualFold(k, "NOKEY") || strings.EqualFold(k, "BLOCKED") {
 		return
@@ -594,7 +609,7 @@ func checkTsigRef(rep *ccReport, g, zname, field, key string, configTsig, keysto
 	if configTsig[fk] {
 		return
 	}
-	if online {
+	if online && keystoreOK {
 		if keystoreTsig[fk] {
 			return
 		}
@@ -602,8 +617,12 @@ func checkTsigRef(rep *ccReport, g, zname, field, key string, configTsig, keysto
 			"add the key under keys.tsig: or via `tdns-cli auth keystore tsig add`")
 		return
 	}
-	rep.warn(g, zname, fmt.Sprintf("%s references TSIG key %q not found in keys.tsig (offline: keystore not checked)", field, key),
-		"verify the key exists in the keystore, or run without --offline")
+	reason := "offline: keystore not checked"
+	if online {
+		reason = "keystore query failed: not verified"
+	}
+	rep.warn(g, zname, fmt.Sprintf("%s references TSIG key %q not found in keys.tsig (%s)", field, key, reason),
+		"verify the key exists in the keystore, or run online against a reachable daemon")
 }
 
 // checkApiServerCorrelation cross-checks the auth config's apiserver block
@@ -661,17 +680,21 @@ func correlateRunningConfig(role string, cfg *tdns.Config, cfgPath, daemonDBPath
 	}
 
 	// /config status: running dnsengine + apiserver.
-	if api, err := GetApiClient(role, false); err == nil {
-		if resp, err := SendConfigCommand(api, tdns.ConfigPost{Command: "status"}); err == nil {
-			correlateStatus(cfg, resp, rep, g)
-		}
+	if api, err := GetApiClient(role, false); err != nil {
+		rep.warn(g, "status", fmt.Sprintf("could not reach the daemon for status: %v — status drift not correlated", err), "")
+	} else if resp, err := SendConfigCommand(api, tdns.ConfigPost{Command: "status"}); err != nil {
+		rep.warn(g, "status", fmt.Sprintf("could not fetch running status: %v — status drift not correlated", err), "")
+	} else {
+		correlateStatus(cfg, resp, rep, g)
 	}
 
 	// Running zones vs config zones.
 	correlateZones(role, cfg, rep, g)
 
 	// Policies the server actually loaded (and any it rejected).
-	if pols, err := fetchServerPolicies(role); err == nil {
+	if pols, err := fetchServerPolicies(role); err != nil {
+		rep.warn("DNSSEC policies", "loaded", fmt.Sprintf("could not fetch loaded policies: %v — server-side policy errors not correlated", err), "")
+	} else {
 		var broken []string
 		for _, p := range pols {
 			if p.PolicyError != "" {
@@ -706,10 +729,12 @@ func correlateStatus(cfg *tdns.Config, resp tdns.ConfigResponse, rep *ccReport, 
 func correlateZones(role string, cfg *tdns.Config, rep *ccReport, g string) {
 	api, err := GetApiClient(role, false)
 	if err != nil {
+		rep.warn(g, "zones", fmt.Sprintf("could not reach the daemon to list zones: %v — zone drift not correlated", err), "")
 		return
 	}
 	resp, err := SendZoneCommand(api, tdns.ZonePost{Command: "list-zones"})
 	if err != nil {
+		rep.warn(g, "zones", fmt.Sprintf("could not list running zones: %v — zone drift not correlated", err), "")
 		return
 	}
 	running := map[string]tdns.ZoneConf{}
@@ -764,20 +789,24 @@ func fetchDaemonPaths(role string) (cfgFile, dbFile string, ok bool) {
 	return resp.ConfigFile, resp.DBFile, true
 }
 
-func fetchKeystoreTsigNames(role string) map[string]bool {
+// fetchKeystoreTsigNames lists the TSIG key names held in the daemon's
+// keystore. It returns an error rather than an empty map on failure: a failed
+// keystore-list must NOT be mistaken for "the key is absent" (that would turn a
+// transient API error into a false quarantine FAIL — see checkTsigRef).
+func fetchKeystoreTsigNames(role string) (map[string]bool, error) {
 	out := map[string]bool{}
 	api, err := GetApiClient(role, false)
 	if err != nil {
-		return out
+		return nil, err
 	}
 	resp, err := SendKeystoreCmd(api, tdns.KeystorePost{Command: "tsig-mgmt", SubCommand: "list"})
 	if err != nil {
-		return out
+		return nil, err
 	}
 	for _, k := range resp.TsigKeys {
 		out[lc(dns.Fqdn(k.Name))] = true
 	}
-	return out
+	return out, nil
 }
 
 // ---------------------------------------------------------------------------

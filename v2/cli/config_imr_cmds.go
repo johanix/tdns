@@ -85,12 +85,12 @@ func runImrConfigCheck(explicitPath string, offline bool) {
 	online := !offline
 	var status tdns.ConfigResponse
 	if online {
-		if s, ok := fetchImrStatus(); ok {
+		if s, err := fetchImrStatus(); err == nil {
 			status = s
 		} else {
 			online = false
 			rep.warn("Daemon", "reachability",
-				"could not reach the imr daemon; running static checks only",
+				fmt.Sprintf("could not reach the imr daemon: %v; running static checks only", err),
 				"start the daemon (or pass --offline) to enable apiserver correlation")
 		}
 	}
@@ -235,16 +235,16 @@ func checkImrApiServer(cfg *tdns.Config, v *viper.Viper, rep *ccReport) {
 // imr online correlation (thin: apiserver only)
 // ---------------------------------------------------------------------------
 
-func fetchImrStatus() (tdns.ConfigResponse, bool) {
+func fetchImrStatus() (tdns.ConfigResponse, error) {
 	api, err := GetApiClient("imr", false)
 	if err != nil {
-		return tdns.ConfigResponse{}, false
+		return tdns.ConfigResponse{}, err
 	}
 	resp, err := SendConfigCommand(api, tdns.ConfigPost{Command: "status"})
 	if err != nil {
-		return tdns.ConfigResponse{}, false
+		return tdns.ConfigResponse{}, err
 	}
-	return resp, true
+	return resp, nil
 }
 
 func correlateImrApiServer(cfg *tdns.Config, status tdns.ConfigResponse, rep *ccReport) {
