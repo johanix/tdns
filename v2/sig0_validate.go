@@ -213,31 +213,60 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 	// At this point we have a set of zero or more keys that match the signername and keyid for a
 	// SIG validating the update. Now we must iterate over the keys to see if any of them actually
 	// verify correctly.
+	verifySigners(us, msgbuf)
 
-	// Iterate by index so signer.Validated writes back into the
-	// slice (the previous range-over-value form mutated a copy).
-	//
-	// EVERY signer is verified; we deliberately do NOT stop at the first
-	// success. signer.Validated is a PER-SIGNER property ("this signer's own
-	// signature verified over the message bytes") and TrustUpdate reads it to
-	// decide whether a given signer may confer trust. Breaking on the first
-	// success left every later signer at Validated=false, which made trust
-	// depend on SIG RR ORDER: in a dual-signed rollover UPDATE (old trusted
-	// key + new not-yet-trusted key, both signing genuinely), if the untrusted
-	// key's SIG happened to come first the trusted key was never verified,
-	// TrustUpdate skipped it on !key.Validated, and a legitimate rollover was
-	// refused. Reversing the SIG order accepted the very same message.
-	//
-	// The aggregate fields (ValidationRcode / RejectionEDE / Validated /
-	// SignerName) still mean "at least one signature verified", so a later
-	// FAILING signer must not overwrite an earlier success — every failure
-	// path below is guarded on !us.Validated, which is what the old `break`
-	// was really protecting. First success wins for SignerName.
-	//
-	// This does not weaken the check TrustUpdate relies on: a forged SIG
-	// naming a trusted key still fails Verify(), keeps Validated=false, and is
-	// still skipped there. The signer set is bounded by the discovery loop
-	// above, which only appends signers whose key was actually locatable.
+	// When we get here then we have tried to validate all signatures and the result is in
+	// the us.Signers data.
+	return nil
+}
+
+// sig0Verify indirects SIG(0) signature verification so that verifySigners can
+// be exercised without a real, fully-packed, genuinely-signed DNS message.
+//
+// This seam exists because the per-signer semantics below CANNOT be driven
+// end-to-end against the real verifier today: miekg/dns's SIG.Verify always
+// verifies the LAST record in the packed buffer whatever *SIG receiver it is
+// called on (it derives bodyend and `sig := buf[sigend:]` from the buffer
+// tail, using the receiver only for the KeyTag/SignerName/Algorithm sanity
+// checks). With multiple SIG(0) RRs only the last one can ever verify, so in a
+// real message "the first signer that verifies" is necessarily also the last,
+// and the multi-signer ordering behaviour is unreachable.
+//
+// Production code MUST NOT reassign this. Tests reassign it and restore the
+// original via t.Cleanup (see stubSig0Verify).
+var sig0Verify = func(sig *dns.SIG, key *dns.KEY, msgbuf []byte) error {
+	return sig.Verify(key, msgbuf)
+}
+
+// verifySigners verifies each located signer's own signature over msgbuf and
+// records the outcome in us: signer.Validated per signer, plus the aggregate
+// ValidationRcode / RejectionEDE / Validated / SignerName fields.
+//
+// Iterate by index so signer.Validated writes back into the
+// slice (the previous range-over-value form mutated a copy).
+//
+// EVERY signer is verified; we deliberately do NOT stop at the first
+// success. signer.Validated is a PER-SIGNER property ("this signer's own
+// signature verified over the message bytes") and TrustUpdate reads it to
+// decide whether a given signer may confer trust. Breaking on the first
+// success left every later signer at Validated=false, which made trust
+// depend on SIG RR ORDER: in a dual-signed rollover UPDATE (old trusted
+// key + new not-yet-trusted key, both signing genuinely), if the untrusted
+// key's SIG happened to come first the trusted key was never verified,
+// TrustUpdate skipped it on !key.Validated, and a legitimate rollover was
+// refused. Reversing the SIG order accepted the very same message.
+//
+// The aggregate fields (ValidationRcode / RejectionEDE / Validated /
+// SignerName) still mean "at least one signature verified", so a later
+// FAILING signer must not overwrite an earlier success — every failure
+// path below is guarded on !us.Validated, which is what the old `break`
+// was really protecting. First success wins for SignerName.
+//
+// This does not weaken the check TrustUpdate relies on: a forged SIG
+// naming a trusted key still fails Verify(), keeps Validated=false, and is
+// still skipped there. The signer set is bounded by ValidateUpdate's
+// discovery loop, which only appends signers whose key was actually locatable.
+func verifySigners(us *UpdateStatus, msgbuf []byte) {
 	for i := range us.Signers {
 		signer := &us.Signers[i]
 		// Use the per-signer SIG, not the outer sig variable (which
@@ -251,7 +280,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 			continue
 		}
 		keyrr := signer.Sig0Key.Key
-		err = ssig.Verify(&keyrr, msgbuf)
+		err := sig0Verify(ssig, &keyrr, msgbuf)
 		if err != nil {
 			// This key failed to validate the update. Categorize the
 			// failure: if NOW is outside the signature's validity
@@ -308,10 +337,6 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 			us.SignerName = signer.Name
 		}
 	}
-
-	// When we get here then we have tried to validate all signatures and the result is in
-	// the us.Signers data.
-	return nil
 }
 
 // BERRA TODO kolla om man kan förbättra detta, så man kan skicka en EDE
