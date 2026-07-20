@@ -114,13 +114,34 @@ func TestApplyValidationFailureRelaysRecordedRcodeAndEDE(t *testing.T) {
 			if got != tc.ede {
 				t.Errorf("EDE info code = %d, want %d", got, tc.ede)
 			}
+
+			// The rejection must actually be sendable. BADSIG/BADKEY/BADTIME
+			// are extended rcodes: Pack() refuses Rcode > 0xF without an OPT
+			// RR to carry the upper bits, and WriteMsg's error is discarded
+			// by both rejection paths — an unpackable reply reaches the child
+			// as a TIMEOUT, not a rejection.
+			wire, err := m.Pack()
+			if err != nil {
+				t.Fatalf("rejection does not pack: %v", err)
+			}
+			var rt dns.Msg
+			if err := rt.Unpack(wire); err != nil {
+				t.Fatalf("packed rejection does not unpack: %v", err)
+			}
+			if rt.Rcode != int(tc.rcode) {
+				t.Errorf("rcode after wire round-trip = %d, want %d", rt.Rcode, tc.rcode)
+			}
 		})
 	}
 }
 
-// TestApplyValidationFailureOmitsZeroEDE: an EDE of 0 means "none recorded"
-// and must not be attached as if it were a real extended error.
-func TestApplyValidationFailureOmitsZeroEDE(t *testing.T) {
+// TestApplyValidationFailureZeroEDEStillPacks: an EDE of 0 means "none
+// recorded" and must not be attached as if it were a real extended error —
+// but an extended rcode (here BADSIG=16) must STILL produce a packable
+// message, which requires an OPT RR even without an EDE option in it. This
+// is the combination no current caller produces (every extended-rcode path
+// also records an EDE); the helper must not depend on that staying true.
+func TestApplyValidationFailureZeroEDEStillPacks(t *testing.T) {
 	m := new(dns.Msg)
 	m.SetUpdate("example.")
 
@@ -135,6 +156,17 @@ func TestApplyValidationFailureOmitsZeroEDE(t *testing.T) {
 				t.Error("an EDE was attached for RejectionEDE=0")
 			}
 		}
+	}
+	wire, err := m.Pack()
+	if err != nil {
+		t.Fatalf("BADSIG rejection without an EDE does not pack: %v", err)
+	}
+	var rt dns.Msg
+	if err := rt.Unpack(wire); err != nil {
+		t.Fatalf("packed rejection does not unpack: %v", err)
+	}
+	if rt.Rcode != dns.RcodeBadSig {
+		t.Errorf("rcode after wire round-trip = %d, want BADSIG(%d)", rt.Rcode, dns.RcodeBadSig)
 	}
 }
 

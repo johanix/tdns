@@ -87,6 +87,17 @@ func applyValidationFailure(m *dns.Msg, us *UpdateStatus) {
 	if us.RejectionEDE != 0 {
 		edns0.AttachEDEToResponse(m, us.RejectionEDE)
 	}
+	// BADSIG(16)/BADKEY(17)/BADTIME(18) are extended rcodes: the header field
+	// is 4 bits, and Pack() refuses Rcode > 0xF unless an OPT RR is present
+	// to carry the upper bits (ErrExtendedRcode). Every path that records
+	// such an rcode today also records an EDE, and AttachEDEToResponse
+	// creates the OPT — but that is an invariant of the current callers, not
+	// of this helper. Guarantee it here: without the OPT the rejection would
+	// fail to pack inside WriteMsg, whose error both rejection paths discard,
+	// and the child would see a TIMEOUT instead of a rejection.
+	if us.ValidationRcode > 0xF && m.IsEdns0() == nil {
+		m.SetEdns0(4096, false)
+	}
 }
 
 func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
