@@ -97,6 +97,13 @@ func TestApplyValidationFailureRelaysRecordedRcodeAndEDE(t *testing.T) {
 			if m.Rcode != int(tc.rcode) {
 				t.Errorf("response rcode = %d, want %d", m.Rcode, tc.rcode)
 			}
+			// RFC 2136: the UPDATE response echoes the Zone (Question) section.
+			// applyValidationFailure stamps a message that is already a reply,
+			// so it must not clobber the Zone section — guards against a
+			// SetRcode(m, ...) that re-derives Question from the response itself.
+			if len(m.Question) != 1 || m.Question[0].Name != "example." {
+				t.Errorf("Zone section not preserved: got %+v, want one question for example.", m.Question)
+			}
 			opt := m.IsEdns0()
 			if opt == nil {
 				t.Fatal("no OPT RR on the response; the EDE was not attached")
@@ -218,6 +225,14 @@ func TestApplyValidationFailureFailsClosedOnSuccessRcode(t *testing.T) {
 	}
 	if m.Rcode != dns.RcodeServerFailure {
 		t.Errorf("rcode = %d, want SERVFAIL(%d)", m.Rcode, dns.RcodeServerFailure)
+	}
+	// RFC 2136: the UPDATE response echoes the Zone (Question) section.
+	// applyValidationFailure sets the rcode on a message that is ALREADY a
+	// reply (UpdateResponder calls m.SetReply(r) upstream), so it must not
+	// clobber the Zone section. This guards against a SetRcode(m, ...) that
+	// re-derives Question from the response itself.
+	if len(m.Question) != 1 || m.Question[0].Name != "example." {
+		t.Errorf("Zone section not preserved: got %+v, want a single question for example.", m.Question)
 	}
 	if _, err := m.Pack(); err != nil {
 		t.Errorf("fail-closed response did not pack: %v", err)
