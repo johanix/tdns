@@ -196,3 +196,30 @@ func TestValidateUpdateUnsignedSetsFormError(t *testing.T) {
 		t.Error("Validated/ValidatedByTrustedKey must both be false for an unsigned UPDATE")
 	}
 }
+
+// TestApplyValidationFailureFailsClosedOnSuccessRcode covers the guard that the
+// ApproveUpdate rejection path depends on.
+//
+// ApproveUpdate only returns an error for an unknown update type, and it
+// reaches that with validation having SUCCEEDED — so us.ValidationRcode is
+// RcodeSuccess there. Relaying it raw (as that path did before it was routed
+// through applyValidationFailure) answers NOERROR for an update that was never
+// applied: the child records the change as landed. That is the same
+// wire-protocol lie the finalRcode logic further down UpdateResponder exists to
+// prevent for policy-rejected updates.
+func TestApplyValidationFailureFailsClosedOnSuccessRcode(t *testing.T) {
+	m := new(dns.Msg)
+	m.SetUpdate("example.")
+
+	applyValidationFailure(m, &UpdateStatus{ValidationRcode: dns.RcodeSuccess})
+
+	if m.Rcode == dns.RcodeSuccess {
+		t.Fatal("a rejected UPDATE was answered NOERROR; applyValidationFailure must fail closed")
+	}
+	if m.Rcode != dns.RcodeServerFailure {
+		t.Errorf("rcode = %d, want SERVFAIL(%d)", m.Rcode, dns.RcodeServerFailure)
+	}
+	if _, err := m.Pack(); err != nil {
+		t.Errorf("fail-closed response did not pack: %v", err)
+	}
+}
