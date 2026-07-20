@@ -30,7 +30,7 @@ var DelCmd = &cobra.Command{
 
 var delStatusCmd = &cobra.Command{
 	Use:   "status",
-	Short: "Make an API call to request TDNSD to analyse whether delegation is in sync or not",
+	Short: "Make an API call to request the daemon to analyse whether delegation is in sync or not",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 		if schemestr != "" {
@@ -96,7 +96,7 @@ var scheme uint8
 
 var delSyncCmd = &cobra.Command{
 	Use:   "sync",
-	Short: "Make an API call to request TDNSD to send a DDNS update to sync parent delegation info with child data",
+	Short: "Make an API call to request the daemon to send a DDNS update to sync parent delegation info with child data",
 	Run: func(cmd *cobra.Command, args []string) {
 		PrepArgs("zonename")
 		if schemestr != "" {

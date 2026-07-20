@@ -26,7 +26,7 @@ func NewConfigCmd(role string) *cobra.Command {
 
 	reload := &cobra.Command{
 		Use:   "reload",
-		Short: "Send config reload command to tdns-auth",
+		Short: "Send config reload command to tdns-" + role,
 		Run: func(cmd *cobra.Command, args []string) {
 			runConfigCmd(role, "reload", false)
 		},
@@ -34,7 +34,7 @@ func NewConfigCmd(role string) *cobra.Command {
 
 	reloadZones := &cobra.Command{
 		Use:   "reload-zones",
-		Short: "Send reload-zones command to tdns-auth",
+		Short: "Send reload-zones command to tdns-" + role,
 		Run: func(cmd *cobra.Command, args []string) {
 			runConfigCmd(role, "reload-zones", false)
 		},
@@ -56,13 +56,15 @@ overwrite all conflicts, or --interactive to prompt per conflict.`,
 
 	status := &cobra.Command{
 		Use:   "status",
-		Short: "Send config status command to tdns-auth",
+		Short: "Send config status command to tdns-" + role,
 		Run: func(cmd *cobra.Command, args []string) {
 			runConfigCmd(role, "status", true)
 		},
 	}
 
 	c.AddCommand(reload, reloadZones, reloadTsig, status)
+	c.AddCommand(newConfigCheckCmd(role))
+	c.AddCommand(newConfigMweCmd(role))
 	return c
 }
 
@@ -249,7 +251,9 @@ func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigRe
 	}
 
 	if cr.Error {
-		return cr, fmt.Errorf("error from tdns-auth: %s", cr.ErrorMsg)
+		// Generic: this helper is shared by every role (auth/agent/imr), so it
+		// must not name a specific daemon.
+		return cr, fmt.Errorf("error from the daemon: %s", cr.ErrorMsg)
 	}
 
 	return cr, nil

@@ -50,7 +50,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 
 	// If the query contains a KeyState EDNS(0) option and we are a parent zone,
 	// process the KeyState request and wrap the ResponseWriter to attach the
-	// response option to whatever DNS reply is sent. Per draft-berra-dnsop-keystate-02,
+	// response option to whatever DNS reply is sent. Per draft-berra-dnsop-keystate-03,
 	// the response is also signed with the UPDATE Receiver's SIG(0) key.
 	if msgoptions.KeyState != nil && kdb != nil {
 		if zd, _ := FindZone(qname); zd != nil && zd.Options[OptDelSyncParent] {

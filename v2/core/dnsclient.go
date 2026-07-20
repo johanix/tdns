@@ -82,6 +82,7 @@ func IsEncryptedTransport(t Transport) bool {
 // variant can be added without breaking this interface.
 type DNSClienter interface {
 	Exchange(msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, error)
+	ExchangeWithResult(msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, ExchangeResult, error)
 	TransportKind() Transport
 }
 
@@ -203,13 +204,28 @@ func NewDNSClient(transport Transport, port string, tlsConfig *tls.Config, opts 
 // Satisfies the DNSClienter interface.
 func (c *DNSClient) TransportKind() Transport { return c.Transport }
 
-// Exchange sends a DNS message and returns the response
+// ExchangeResult describes what actually happened on the wire for an Exchange:
+// the transport that carried the returned response (Do53 vs Do53TCP after an
+// internal fallback) and whether a Do53/UDP response was TC=1 truncated and
+// retried over TCP. The IMR uses this to record accurate per-server
+// transport-usage and truncation statistics; the plain Exchange wrapper below
+// discards it so existing callers are unaffected.
+type ExchangeResult struct {
+	WireTransport Transport // transport that carried the returned response
+	Truncated     bool      // a Do53/UDP response had TC=1 and was retried over TCP
+}
+
+// Exchange sends a DNS message and returns the response. Thin wrapper over
+// ExchangeWithResult that discards the wire-transport/truncation detail.
 func (c *DNSClient) Exchange(msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, error) {
-	//	if !Globals.Debug {
-	//		fmt.Printf("*** Exchange: Globals.Debug is NOT set\n")
-	//	} else {
-	//		fmt.Printf("*** Exchange: Globals.Debug is set\n")
-	//	}
+	r, rtt, _, err := c.ExchangeWithResult(msg, server, debug)
+	return r, rtt, err
+}
+
+// ExchangeWithResult is Exchange plus an ExchangeResult reporting the actual
+// wire transport used and whether a TC=1 truncation drove a UDP->TCP upgrade.
+// The (msg, rtt, err) return values are identical to Exchange's.
+func (c *DNSClient) ExchangeWithResult(msg *dns.Msg, server string, debug bool) (*dns.Msg, time.Duration, ExchangeResult, error) {
 	if debug {
 		fmt.Printf("*** Exchange: sending %s message to %s:%s opcode: %s qname: %s rrtype: %s\n",
 			TransportToString[c.Transport], server, c.Port,
@@ -227,38 +243,44 @@ func (c *DNSClient) Exchange(msg *dns.Msg, server string, debug bool) (*dns.Msg,
 		}
 		addr := net.JoinHostPort(server, c.Port)
 		if c.ForceTCP {
-			return c.DNSClientTCP.Exchange(msg, addr)
+			r, rtt, err := c.DNSClientTCP.Exchange(msg, addr)
+			return r, rtt, ExchangeResult{WireTransport: TransportDo53TCP}, err
 		}
 		r, rtt, err := c.DNSClientUDP.Exchange(msg, addr)
 		if err == nil && r != nil && r.Truncated && !c.DisableFallback && c.DNSClientTCP != nil {
 			log.Printf("Do53: UDP response from %s truncated (TC=1); retrying over TCP", addr)
-			return c.DNSClientTCP.Exchange(msg, addr)
+			tr, trtt, terr := c.DNSClientTCP.Exchange(msg, addr)
+			return tr, trtt, ExchangeResult{WireTransport: TransportDo53TCP, Truncated: true}, terr
 		}
 		// Timeout / transient-error fallback: a single dropped UDP packet
 		// (or a network blocking UDP) makes the UDP exchange return a transient
 		// error. Take one shot over TCP against the same address before giving
 		// up. This consolidates what used to live in the IMR tryServer path.
+		// (This is NOT a truncation — Truncated stays false.)
 		if err != nil && !c.DisableFallback && c.DNSClientTCP != nil && IsTransientNetErr(err) {
 			if debug {
 				log.Printf("Do53: UDP transient error from %s (%v); retrying over TCP", addr, err)
 			}
 			tr, trtt, terr := c.DNSClientTCP.Exchange(msg, addr)
 			if terr == nil {
-				return tr, trtt, nil
+				return tr, trtt, ExchangeResult{WireTransport: TransportDo53TCP}, nil
 			}
 			// Prefer the original UDP error if TCP also fails (operators usually
 			// want to know the primary-path symptom).
-			return r, rtt, err
+			return r, rtt, ExchangeResult{WireTransport: TransportDo53}, err
 		}
-		return r, rtt, err
+		return r, rtt, ExchangeResult{WireTransport: TransportDo53}, err
 	case TransportDoT:
-		return c.DNSClientTLS.Exchange(msg, net.JoinHostPort(server, c.Port))
+		r, rtt, err := c.DNSClientTLS.Exchange(msg, net.JoinHostPort(server, c.Port))
+		return r, rtt, ExchangeResult{WireTransport: TransportDoT}, err
 	case TransportDoH:
-		return c.exchangeDoH(msg, server, debug)
+		r, rtt, err := c.exchangeDoH(msg, server, debug)
+		return r, rtt, ExchangeResult{WireTransport: TransportDoH}, err
 	case TransportDoQ:
-		return c.exchangeDoQ(msg, net.JoinHostPort(server, c.Port), debug)
+		r, rtt, err := c.exchangeDoQ(msg, net.JoinHostPort(server, c.Port), debug)
+		return r, rtt, ExchangeResult{WireTransport: TransportDoQ}, err
 	default:
-		return nil, 0, fmt.Errorf("unsupported transport protocol: %d", c.Transport)
+		return nil, 0, ExchangeResult{WireTransport: c.Transport}, fmt.Errorf("unsupported transport protocol: %d", c.Transport)
 	}
 }
 

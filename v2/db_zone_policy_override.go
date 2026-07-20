@@ -140,24 +140,36 @@ ON CONFLICT(zone) DO UPDATE SET
 // zone. ok is false (and name/source "") when the zone has no applied record,
 // whether because it has no row at all or the applied_policy column is unset.
 func GetZoneAppliedPolicy(kdb *KeyDB, zone string) (name string, source string, ok bool, err error) {
+	// Delegate to the detail accessor (single source of truth for the query and
+	// the ErrNoRows/blank-policy handling); the applied_at column is ignored here.
+	name, source, _, ok, err = GetZoneAppliedPolicyDetail(kdb, zone)
+	return name, source, ok, err
+}
+
+// GetZoneAppliedPolicyDetail is like GetZoneAppliedPolicy but also returns the
+// applied_at timestamp (as stored by SQLite datetime('now'): 'YYYY-MM-DD
+// HH:MM:SS' in UTC). It is a read-only accessor for display (the `zone desc`
+// CLI); appliedAt is "" when the column is NULL. ok is false (and all strings
+// "") when the zone has no applied record.
+func GetZoneAppliedPolicyDetail(kdb *KeyDB, zone string) (name, source, appliedAt string, ok bool, err error) {
 	if kdb == nil || kdb.DB == nil {
-		return "", "", false, fmt.Errorf("GetZoneAppliedPolicy: nil keystore")
+		return "", "", "", false, fmt.Errorf("GetZoneAppliedPolicyDetail: nil keystore")
 	}
 	zone = dns.Fqdn(strings.TrimSpace(zone))
-	var p, s sql.NullString
+	var p, s, a sql.NullString
 	err = kdb.DB.QueryRow(
-		`SELECT applied_policy, applied_source FROM ZonePolicyOverride WHERE zone = ?`, zone,
-	).Scan(&p, &s)
+		`SELECT applied_policy, applied_source, applied_at FROM ZonePolicyOverride WHERE zone = ?`, zone,
+	).Scan(&p, &s, &a)
 	if err == sql.ErrNoRows {
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
 	if err != nil {
-		return "", "", false, err
+		return "", "", "", false, err
 	}
 	if !p.Valid || strings.TrimSpace(p.String) == "" {
-		return "", "", false, nil
+		return "", "", "", false, nil
 	}
-	return strings.TrimSpace(p.String), strings.TrimSpace(s.String), true, nil
+	return strings.TrimSpace(p.String), strings.TrimSpace(s.String), strings.TrimSpace(a.String), true, nil
 }
 
 // ClearZoneAppliedPolicy clears a zone's last-applied record (applied_* → NULL)

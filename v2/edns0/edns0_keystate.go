@@ -11,26 +11,38 @@ const (
 	// KeyState Option Code (temporary until IANA assignment)
 	// OptcodeKeyState = 65002
 
-	// Sender (Child) KeyStates — per draft-berra-dnsop-keystate-02
-	KeyStateRequestAutoBootstrap   = 0
-	KeyStateRequestManualBootstrap = 1
-	KeyStateInquiryKey             = 2
-	// Code 3 removed in draft-02 (policy discovery via SVCB bootstrap SvcParamKey)
+	// KeyState codepoints per draft-berra-dnsop-keystate-03,
+	// §"Defined and Reserved Values" (the KeyState registry table).
+	//
+	// Protocol-level responses, set by the UPDATE Receiver. These report
+	// on the KeyState exchange itself — the equivalents of DNS FORMERR
+	// and SERVFAIL — rather than on the state of any particular key.
+	// NOTE: codes 0 and 1 carried *sender* bootstrap-request meanings in
+	// keystate-02 (auto/manual bootstrap request); -03 removed those and
+	// reassigned both to receiver protocol-level responses. Bootstrap
+	// initiation is now via the self-signed DNS UPDATE plus the SVCB
+	// bootstrap SvcParamKey, not via a KeyState request code.
+	KeyStateRequestMalformed = 0 // KEY_REQUEST_MALFORMED: unrecognized/unassigned KEY-STATE, invalid KEY-DATA, or unparseable option
+	KeyStateTemporaryFailure = 1 // KEY_TEMPORARY_FAILURE: understood but temporarily unable to determine key state; child MAY retry
 
-	// Receiver (Parent) KeyStates — per draft-berra-dnsop-keystate-02
-	KeyStateTrusted                 = 4
-	KeyStateUnknown                 = 5
-	KeyStateInvalid                 = 6
-	KeyStateRefused                 = 7
-	KeyStateValidationFail          = 8
-	KeyStateBootstrapAutoOngoing    = 9
-	KeyStateBootstrapManualRequired = 10
-	KeyStateBootstrapAutoPending    = 11
+	// Inquiry, set by the sender (the child).
+	KeyStateInquiryKey = 2 // INTENT_INQUIRE_KEY: request the current KeyState for KEY-ID
+	// Code 3 is unassigned in -03.
 
-	KeyStateUninitialized = 255 // Uninitialized state
+	// Key-state reports, set by the UPDATE Receiver (the parent or its agent).
+	KeyStateTrusted                 = 4  // KEY_TRUSTED
+	KeyStateUnknown                 = 5  // KEY_UNKNOWN
+	KeyStateInvalid                 = 6  // KEY_INVALID
+	KeyStateRefused                 = 7  // KEY_REFUSED
+	KeyStateValidationFail          = 8  // KEY_VALIDATION_FAILED
+	KeyStateBootstrapAutoOngoing    = 9  // KEY_BOOTSTRAP_AUTO
+	KeyStateBootstrapManualRequired = 10 // KEY_BOOTSTRAP_MANUAL
+	// Codes 11-127 are unassigned; 128-255 are reserved for Private Use.
+
+	KeyStateUninitialized = 255 // local sentinel (in the Private Use range)
 )
 
-// KeyStateOption represents the KeyState EDNS(0) option per draft-berra-dnsop-keystate-02.
+// KeyStateOption represents the KeyState EDNS(0) option per draft-berra-dnsop-keystate-03.
 // Wire format: KEY-ID (16 bits) + KEY-STATE (8 bits) + KEY-DATA (8 bits) + EXTRA-TEXT (variable)
 type KeyStateOption struct {
 	KeyID     uint16
@@ -56,7 +68,7 @@ func CreateKeyStateOption(keyID uint16, keyState uint8, keyData uint8, extraText
 }
 
 // ParseKeyStateOption extracts KeyState data from an EDNS0_LOCAL option.
-// Wire format per draft-02: KEY-ID(2) + KEY-STATE(1) + KEY-DATA(1) + EXTRA-TEXT(var) = 4+ bytes
+// Wire format per draft-03: KEY-ID(2) + KEY-STATE(1) + KEY-DATA(1) + EXTRA-TEXT(var) = 4+ bytes
 func ParseKeyStateOption(opt *dns.EDNS0_LOCAL) (*KeyStateOption, error) {
 	if opt == nil {
 		return nil, fmt.Errorf("nil EDNS0_LOCAL option")
@@ -76,8 +88,8 @@ func ParseKeyStateOption(opt *dns.EDNS0_LOCAL) (*KeyStateOption, error) {
 // KeyStateToString returns a human-readable string for a KeyState code.
 func KeyStateToString(state uint8) string {
 	states := map[uint8]string{
-		KeyStateRequestAutoBootstrap:    "Request Auto Bootstrap",
-		KeyStateRequestManualBootstrap:  "Request Manual Bootstrap",
+		KeyStateRequestMalformed:        "Request Malformed",
+		KeyStateTemporaryFailure:        "Temporary Failure",
 		KeyStateInquiryKey:              "Key Inquiry",
 		KeyStateTrusted:                 "Trusted",
 		KeyStateUnknown:                 "Unknown",
@@ -86,7 +98,6 @@ func KeyStateToString(state uint8) string {
 		KeyStateValidationFail:          "Validation Failed",
 		KeyStateBootstrapAutoOngoing:    "Auto Bootstrap Ongoing",
 		KeyStateBootstrapManualRequired: "Manual Bootstrap Required",
-		KeyStateBootstrapAutoPending:    "Auto Bootstrap Pending",
 		KeyStateUninitialized:           "Uninitialized",
 	}
 	if s, ok := states[state]; ok {
