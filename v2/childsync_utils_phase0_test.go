@@ -4,6 +4,7 @@ import (
 	"net"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -38,7 +39,20 @@ func TestSendUpdateForcesTCP(t *testing.T) {
 	started := make(chan struct{})
 	srv.NotifyStartedFunc = func() { close(started) }
 	go func() { _ = srv.ActivateAndServe() }()
-	defer srv.Shutdown()
+	// dns.Server.Shutdown takes no context; wrap it in a watchdog so a shutdown
+	// blocked on a lingering test connection fails the test instead of hanging it.
+	defer func() {
+		done := make(chan struct{})
+		go func() {
+			_ = srv.Shutdown()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			t.Error("srv.Shutdown() timed out after 5s")
+		}
+	}()
 	<-started
 
 	// A small UPDATE — well under the 1232-byte UDP "safe" limit, so the old
