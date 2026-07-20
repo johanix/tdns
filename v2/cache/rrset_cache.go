@@ -641,6 +641,28 @@ func (rrcache *RRsetCacheT) StoreTLSAForServer(base, owner string, rrset *core.R
 	}
 }
 
+// LookupTLSAForServer returns the cached TLSA RRset for owner (a
+// _port._proto.name. label) on the nameserver base, or nil when absent or
+// expired. Entries are written by StoreTLSAForServer (SVCB/TSYNC discovery and
+// direct TLSA answers), which records the DNSSEC validation state the caller
+// should check (XoT DANE requires ValidationStateSecure).
+func (rrcache *RRsetCacheT) LookupTLSAForServer(base, owner string) *CachedRRset {
+	if rrcache == nil {
+		return nil
+	}
+	base = dns.Fqdn(strings.TrimSpace(base))
+	owner = dns.Fqdn(strings.TrimSpace(owner))
+	server, ok := rrcache.AuthServerMap.Get(base)
+	if !ok || server == nil {
+		return nil
+	}
+	rec := server.SnapshotTLSARecords()[owner]
+	if rec == nil || time.Now().After(rec.Expiration) {
+		return nil
+	}
+	return rec
+}
+
 func (rrcache *RRsetCacheT) SetPrimed(primed bool) {
 	rrcache.Primed = primed
 }

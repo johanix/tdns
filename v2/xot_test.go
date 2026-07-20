@@ -16,13 +16,17 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
+	"log"
 	"math/big"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	cache "github.com/johanix/tdns/v2/cache"
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -400,6 +404,241 @@ func TestNormalizeAddressPort(t *testing.T) {
 	}
 	if got := NormalizeAddress("192.0.2.1"); got != "192.0.2.1:53" {
 		t.Fatalf("NormalizeAddress default unchanged: %q", got)
+	}
+}
+
+// --- ClientTLSConfigForPeer -------------------------------------------------
+
+func TestClientTLSConfigForPeer_Do53ReturnsNil(t *testing.T) {
+	conf := &Config{}
+	for _, p := range []PeerConf{
+		{Addr: "192.0.2.1:53", Key: NOKEY},
+		{Addr: "192.0.2.1:53", Key: NOKEY, Transport: "do53"},
+	} {
+		cfg, err := conf.ClientTLSConfigForPeer(p)
+		if err != nil || cfg != nil {
+			t.Fatalf("do53 peer must yield (nil, nil), got (%v, %v)", cfg, err)
+		}
+	}
+}
+
+func TestClientTLSConfigForPeer_ServerNameSelection(t *testing.T) {
+	conf := &Config{}
+	// Hostname primary: hostname becomes SNI.
+	cfg, err := conf.ClientTLSConfigForPeer(PeerConf{Addr: "ns1.test:853", Key: NOKEY, Transport: TransportDoT, TLSAuth: TLSAuthPKIX})
+	if err != nil || cfg.ServerName != "ns1.test" {
+		t.Fatalf("hostname SNI: cfg=%+v err=%v", cfg, err)
+	}
+	// Explicit tls-name wins.
+	cfg, err = conf.ClientTLSConfigForPeer(PeerConf{Addr: "192.0.2.1:853", Key: NOKEY, Transport: TransportDoT, TLSAuth: TLSAuthPKIX, TLSName: "ns2.test"})
+	if err != nil || cfg.ServerName != "ns2.test" {
+		t.Fatalf("tls-name SNI: cfg=%+v err=%v", cfg, err)
+	}
+	// IP literal without tls-name: empty (crypto/tls fills from dial addr).
+	cfg, err = conf.ClientTLSConfigForPeer(PeerConf{Addr: "192.0.2.1:853", Key: NOKEY, Transport: TransportDoT, TLSAuth: TLSAuthPKIX})
+	if err != nil || cfg.ServerName != "" {
+		t.Fatalf("ip-literal SNI: cfg=%+v err=%v", cfg, err)
+	}
+	// DANE without any name is refused (backstop; config validation catches it earlier).
+	if _, err = conf.ClientTLSConfigForPeer(PeerConf{Addr: "192.0.2.1:853", Key: NOKEY, Transport: TransportDoT, TLSAuth: TLSAuthDANE}); err == nil {
+		t.Fatal("dane without name must error")
+	}
+	// Unknown auth mode is refused.
+	if _, err = conf.ClientTLSConfigForPeer(PeerConf{Addr: "ns1.test:853", Key: NOKEY, Transport: TransportDoT, TLSAuth: "nope"}); err == nil {
+		t.Fatal("unknown tls-auth must error")
+	}
+}
+
+// xotTransfer runs an AXFR against srv using the tls.Config built for peer.
+func xotTransfer(t *testing.T, conf *Config, peer PeerConf, srv *axfrTestServer, zone string) ([]dns.RR, error) {
+	t.Helper()
+	tlsCfg, err := conf.ClientTLSConfigForPeer(peer)
+	if err != nil {
+		return nil, err
+	}
+	if tlsCfg == nil {
+		t.Fatal("expected a TLS config for a dot peer")
+	}
+	return axfrClientTLS(t, srv.addr, zone, tlsCfg, nil)
+}
+
+// TestXoT_PinModeEndToEnd: pin match transfers; pin mismatch aborts the
+// handshake (and thus the transfer).
+func TestXoT_PinModeEndToEnd(t *testing.T) {
+	conf := &Config{}
+	zd := loadTestTransferZone(t, basicZone)
+	cert, leaf := newTestTLSCert(t, []string{"ns1.test"}, []net.IP{net.ParseIP("127.0.0.1")})
+	srv := startTestAXFRServerTLS(t, zd, nil, cert)
+	defer srv.shutdown()
+
+	good := PeerConf{Addr: srv.addr, Key: NOKEY, Transport: TransportDoT, TLSAuth: TLSAuthPin,
+		Pins: []string{SPKISHA256(leaf)}}
+	rrs, err := xotTransfer(t, conf, good, srv, zd.ZoneName)
+	if err != nil {
+		t.Fatalf("pin-match transfer failed: %v", err)
+	}
+	if len(rrs) < 4 {
+		t.Fatalf("expected full zone, got %d RRs", len(rrs))
+	}
+
+	wrongPin := base64.StdEncoding.EncodeToString(make([]byte, sha256.Size))
+	bad := good
+	bad.Pins = []string{wrongPin}
+	if _, err := xotTransfer(t, conf, bad, srv, zd.ZoneName); err == nil {
+		t.Fatal("pin-mismatch transfer must fail")
+	}
+	// Second pin in the list may be the matching one.
+	multi := good
+	multi.Pins = []string{wrongPin, SPKISHA256(leaf)}
+	if _, err := xotTransfer(t, conf, multi, srv, zd.ZoneName); err != nil {
+		t.Fatalf("any-pin-matches transfer failed: %v", err)
+	}
+}
+
+// daneTestConf builds a Config whose IMR has a pre-populated, validated TLSA
+// cache entry for ns1.test. at the given port: the injected-validated-TLSA
+// seam from the plan (the network fetch path needs a live resolver and is
+// exercised in the manual/testbed runs instead).
+func daneTestConf(t *testing.T, leafCert *x509.Certificate, port uint16, vstate cache.ValidationState, requireSecure bool) *Config {
+	t.Helper()
+	rrcache := cache.NewRRsetCache(log.Default(), false, false)
+	as := rrcache.GetOrCreateAuthServer("ns1.test.")
+	rrcache.ServerMap.Set("test.", map[string]*cache.AuthServer{"ns1.test.": as})
+
+	tlsa, err := NewTlsaRR("ns1.test.", port, leafCert)
+	if err != nil {
+		t.Fatalf("NewTlsaRR: %v", err)
+	}
+	rrset := &core.RRset{Name: tlsa.Hdr.Name, Class: dns.ClassINET, RRtype: dns.TypeTLSA, RRs: []dns.RR{tlsa}}
+	rrcache.StoreTLSAForServer("ns1.test.", tlsa.Hdr.Name, rrset, vstate)
+
+	conf := &Config{}
+	conf.Internal.ImrEngine = &Imr{Cache: rrcache, RequireDnssecValidation: requireSecure}
+	return conf
+}
+
+func serverPort(t *testing.T, srv *axfrTestServer) uint16 {
+	t.Helper()
+	_, portStr, err := net.SplitHostPort(srv.addr)
+	if err != nil {
+		t.Fatalf("split server addr: %v", err)
+	}
+	port, err := strconv.ParseUint(portStr, 10, 16)
+	if err != nil {
+		t.Fatalf("parse server port: %v", err)
+	}
+	return uint16(port)
+}
+
+// TestXoT_DANEModeEndToEnd: a secure cached TLSA matching the server cert
+// admits the transfer; a TLSA for a different cert aborts it.
+func TestXoT_DANEModeEndToEnd(t *testing.T) {
+	zd := loadTestTransferZone(t, basicZone)
+	cert, leaf := newTestTLSCert(t, []string{"ns1.test"}, []net.IP{net.ParseIP("127.0.0.1")})
+	srv := startTestAXFRServerTLS(t, zd, nil, cert)
+	defer srv.shutdown()
+	port := serverPort(t, srv)
+
+	peer := PeerConf{Addr: srv.addr, Key: NOKEY, Transport: TransportDoT, TLSAuth: TLSAuthDANE, TLSName: "ns1.test"}
+
+	conf := daneTestConf(t, leaf, port, cache.ValidationStateSecure, true)
+	rrs, err := xotTransfer(t, conf, peer, srv, zd.ZoneName)
+	if err != nil {
+		t.Fatalf("dane-match transfer failed: %v", err)
+	}
+	if len(rrs) < 4 {
+		t.Fatalf("expected full zone, got %d RRs", len(rrs))
+	}
+
+	_, otherLeaf := newTestTLSCert(t, []string{"ns1.test"}, nil)
+	confMismatch := daneTestConf(t, otherLeaf, port, cache.ValidationStateSecure, true)
+	if _, err := xotTransfer(t, confMismatch, peer, srv, zd.ZoneName); err == nil {
+		t.Fatal("dane-mismatch transfer must fail")
+	}
+}
+
+// TestXoT_DANEFailsClosedOnUnvalidated: an unvalidated TLSA is refused when
+// validation is required (the default), and accepted only in explicit lab mode
+// (require_dnssec_validation: false).
+func TestXoT_DANEFailsClosedOnUnvalidated(t *testing.T) {
+	zd := loadTestTransferZone(t, basicZone)
+	cert, leaf := newTestTLSCert(t, []string{"ns1.test"}, []net.IP{net.ParseIP("127.0.0.1")})
+	srv := startTestAXFRServerTLS(t, zd, nil, cert)
+	defer srv.shutdown()
+	port := serverPort(t, srv)
+
+	peer := PeerConf{Addr: srv.addr, Key: NOKEY, Transport: TransportDoT, TLSAuth: TLSAuthDANE, TLSName: "ns1.test"}
+
+	for _, state := range []cache.ValidationState{cache.ValidationStateNone, cache.ValidationStateInsecure, cache.ValidationStateBogus} {
+		conf := daneTestConf(t, leaf, port, state, true)
+		if _, err := xotTransfer(t, conf, peer, srv, zd.ZoneName); err == nil {
+			t.Fatalf("state %s: transfer must fail closed", cache.ValidationStateToString[state])
+		}
+	}
+
+	// Lab mode: insecure state is accepted (with a warning), matching the
+	// imrengine.require_dnssec_validation escape hatch semantics.
+	confLab := daneTestConf(t, leaf, port, cache.ValidationStateInsecure, false)
+	if _, err := xotTransfer(t, confLab, peer, srv, zd.ZoneName); err != nil {
+		t.Fatalf("lab-mode transfer failed: %v", err)
+	}
+}
+
+// TestXoT_DANEWithoutIMRFails: tls-auth dane with no IMR engine must refuse
+// the connection (fail closed), not fall back to unverified TLS.
+func TestXoT_DANEWithoutIMRFails(t *testing.T) {
+	zd := loadTestTransferZone(t, basicZone)
+	cert, _ := newTestTLSCert(t, []string{"ns1.test"}, []net.IP{net.ParseIP("127.0.0.1")})
+	srv := startTestAXFRServerTLS(t, zd, nil, cert)
+	defer srv.shutdown()
+
+	conf := &Config{} // no ImrEngine
+	peer := PeerConf{Addr: srv.addr, Key: NOKEY, Transport: TransportDoT, TLSAuth: TLSAuthDANE, TLSName: "ns1.test"}
+	if _, err := xotTransfer(t, conf, peer, srv, zd.ZoneName); err == nil {
+		t.Fatal("dane without IMR must fail")
+	}
+}
+
+// TestXoT_PKIXModeEndToEnd: chain verification against a ca-file; a CA that
+// did not issue the server cert aborts the handshake.
+func TestXoT_PKIXModeEndToEnd(t *testing.T) {
+	conf := &Config{}
+	zd := loadTestTransferZone(t, basicZone)
+	cert, leaf := newTestTLSCert(t, []string{"ns1.test"}, []net.IP{net.ParseIP("127.0.0.1")})
+	srv := startTestAXFRServerTLS(t, zd, nil, cert)
+	defer srv.shutdown()
+
+	caPath := t.TempDir() + "/ca.pem"
+	if err := writeCertPEM(caPath, leaf.Raw); err != nil {
+		t.Fatalf("write ca: %v", err)
+	}
+	good := PeerConf{Addr: srv.addr, Key: NOKEY, Transport: TransportDoT, TLSAuth: TLSAuthPKIX,
+		TLSName: "ns1.test", CAFile: caPath}
+	rrs, err := xotTransfer(t, conf, good, srv, zd.ZoneName)
+	if err != nil {
+		t.Fatalf("pkix transfer failed: %v", err)
+	}
+	if len(rrs) < 4 {
+		t.Fatalf("expected full zone, got %d RRs", len(rrs))
+	}
+
+	// A different (wrong) CA must not admit the server.
+	_, otherCA := newTestTLSCert(t, []string{"other-ca.test"}, nil)
+	wrongCAPath := t.TempDir() + "/wrong-ca.pem"
+	if err := writeCertPEM(wrongCAPath, otherCA.Raw); err != nil {
+		t.Fatalf("write wrong ca: %v", err)
+	}
+	bad := good
+	bad.CAFile = wrongCAPath
+	if _, err := xotTransfer(t, conf, bad, srv, zd.ZoneName); err == nil {
+		t.Fatal("pkix with wrong CA must fail")
+	}
+
+	// Wrong hostname expectation must fail too (SNI/hostname check).
+	badName := good
+	badName.TLSName = "ns2.test"
+	if _, err := xotTransfer(t, conf, badName, srv, zd.ZoneName); err == nil {
+		t.Fatal("pkix with wrong tls-name must fail")
 	}
 }
 
