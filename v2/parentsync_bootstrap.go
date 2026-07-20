@@ -122,6 +122,18 @@ func (conf *Config) ParentSyncAfterKeyPublication(zone ZoneName, keyName string,
 			delay *= 2
 			continue
 
+		case edns0.KeyStateTemporaryFailure:
+			// keystate-03: the receiver understood the inquiry but is
+			// temporarily unable to determine the key's state (e.g. a transient
+			// truststore error) — the child MAY retry later. Keep polling with
+			// backoff rather than giving up as the default branch would.
+			lgElect.Info("ParentSyncAfterKeyPublication: parent reports a temporary failure, will retry",
+				"zone", zone, "keyid", keyid, "attempt", attempt)
+			UpdateParentState(kdb, keyName, keyid, keyState)
+			time.Sleep(delay)
+			delay *= 2
+			continue
+
 		default:
 			lgElect.Info("ParentSyncAfterKeyPublication: parent returned unexpected state",
 				"zone", zone, "keyid", keyid, "state", keyState)
@@ -144,13 +156,7 @@ func QueryParentKeyState(kdb *KeyDB, imr *Imr, keyName string, keyid uint16) (ui
 		return 0, fmt.Errorf("DSYNC lookup failed: %v", err)
 	}
 
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(keyName), dns.TypeANY)
-
-	edns0.AttachKeyStateToResponse(m, &edns0.KeyStateOption{
-		KeyID:    keyid,
-		KeyState: edns0.KeyStateInquiryKey,
-	})
+	m := newKeyStateInquiryMsg(keyName, keyid)
 
 	sak, err := kdb.GetSig0Keys(keyName, Sig0StateActive)
 	if err != nil || len(sak.Keys) == 0 {
@@ -201,13 +207,7 @@ func QueryParentKeyStateDetailed(kdb *KeyDB, imr *Imr, keyName string, keyid uin
 		return 0, "", fmt.Errorf("DSYNC lookup failed: %v", err)
 	}
 
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(keyName), dns.TypeANY)
-
-	edns0.AttachKeyStateToResponse(m, &edns0.KeyStateOption{
-		KeyID:    keyid,
-		KeyState: edns0.KeyStateInquiryKey,
-	})
+	m := newKeyStateInquiryMsg(keyName, keyid)
 
 	sak, err := kdb.GetSig0Keys(keyName, Sig0StateActive)
 	if err != nil || len(sak.Keys) == 0 {
