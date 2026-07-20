@@ -56,21 +56,21 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResul
 	var edeCode uint16
 	var edeMessage string
 
-	// If the packed message exceeds the EDNS UDP buffer advertised on
-	// the message's OPT RR, use TCP. dns.Exchange is hardcoded UDP and
-	// does not fall back on truncation, so a too-large UPDATE just
-	// times out — common with ML-DSA-44 SIG(0), where the signature
-	// alone is ~2.4 KB. Fall back to 1232 (EDNS "safe" default) if the
-	// caller didn't attach an OPT.
-	udpSafeLimit := 1232
-	if opt := msg.IsEdns0(); opt != nil {
-		udpSafeLimit = int(opt.UDPSize())
-	}
-	useTCP := msg.Len() > udpSafeLimit
-	client := &dns.Client{}
-	if useTCP {
-		client.Net = "tcp"
-	}
+	// Force TCP for these delegation-sync UPDATEs regardless of message
+	// size. Per draft-ietf-dnsop-delegation-mgmt-via-ddns-02 §"Choice of
+	// SIG(0) Signature Algorithm": these UPDATEs are infrequent and SHOULD
+	// be carried over TCP (or a connection-oriented secure transport such
+	// as DoT). TCP avoids the UDP spoofing/fragmentation exposure of a
+	// message that mutates parent-side state, and accommodates the larger
+	// SIG(0) signatures of post-quantum algorithms (e.g. ML-DSA-44, whose
+	// signature alone is ~2.4 KB).
+	//
+	// Do NOT "optimize" this back to a size-gated UDP-first path: dns.Exchange
+	// is hardcoded UDP and does not fall back on truncation, so a too-large
+	// UPDATE would just time out — and the draft prefers TCP for all of these
+	// UPDATEs regardless of size, not only the large ones.
+	useTCP := true
+	client := &dns.Client{Net: "tcp"}
 
 	for _, dst := range addrs {
 		lgDns.Debug("sending DNS UPDATE", "zone", zonename, "dst", dst,

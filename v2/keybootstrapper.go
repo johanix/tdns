@@ -283,14 +283,8 @@ func (kdb *KeyDB) UpdateKeyState(ctx context.Context, keyName string, keyid uint
 		return fmt.Errorf("could not find DSYNC target: %v", err)
 	}
 
-	// Create DNS message with EDNS(0) KeyState option
-	m := new(dns.Msg)
-	m.SetQuestion(dns.Fqdn(keyName), dns.TypeANY)
-
-	edns0.AttachKeyStateToResponse(m, &edns0.KeyStateOption{
-		KeyID:    keyid,
-		KeyState: edns0.KeyStateInquiryKey,
-	})
+	// Create the KeyState inquiry (QTYPE=KEY + KeyState option)
+	m := newKeyStateInquiryMsg(keyName, keyid)
 
 	// Get active key for signing
 	sak, err := kdb.GetSig0Keys(keyName, Sig0StateActive)
