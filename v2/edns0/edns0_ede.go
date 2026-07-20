@@ -9,11 +9,21 @@ import (
 	"github.com/miekg/dns"
 )
 
+// Standard EDE codes (RFC 8914).
+//
+// These MUST stay in their own const block. They were previously declared at
+// the head of the private-code block below, where each additional standard code
+// consumed one iota step and silently shifted EVERY private code up by one:
+// EDESig0KeyNotKnown, documented and specified as 513, was actually compiled as
+// 514, and the whole block after it drifted with it. Adding a standard code
+// here can no longer renumber the private codes. See TestEDECodeValues.
 const (
-	// Standard EDE codes (RFC 8914)
 	EDEDNSSECBogus uint16 = 6 // RFC 8914: DNSSEC Bogus
+)
 
-	// Private EDE codes (above 512)
+// Private EDE codes (above 512). The first entry pins the base; the rest follow
+// by iota, so this block MUST begin at iota == 0 — do not prepend entries.
+const (
 	EDESig0KeyNotKnown uint16 = 513 + iota
 	EDESig0KeyKnownButNotTrusted
 	EDEDelegationSyncNotSupported
