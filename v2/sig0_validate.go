@@ -216,9 +216,28 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 
 	// Iterate by index so signer.Validated writes back into the
 	// slice (the previous range-over-value form mutated a copy).
-	// Break on first success so a later failing signer can't
-	// overwrite ValidationRcode / RejectionEDE / Validated and
-	// leave the status struct internally inconsistent.
+	//
+	// EVERY signer is verified; we deliberately do NOT stop at the first
+	// success. signer.Validated is a PER-SIGNER property ("this signer's own
+	// signature verified over the message bytes") and TrustUpdate reads it to
+	// decide whether a given signer may confer trust. Breaking on the first
+	// success left every later signer at Validated=false, which made trust
+	// depend on SIG RR ORDER: in a dual-signed rollover UPDATE (old trusted
+	// key + new not-yet-trusted key, both signing genuinely), if the untrusted
+	// key's SIG happened to come first the trusted key was never verified,
+	// TrustUpdate skipped it on !key.Validated, and a legitimate rollover was
+	// refused. Reversing the SIG order accepted the very same message.
+	//
+	// The aggregate fields (ValidationRcode / RejectionEDE / Validated /
+	// SignerName) still mean "at least one signature verified", so a later
+	// FAILING signer must not overwrite an earlier success — every failure
+	// path below is guarded on !us.Validated, which is what the old `break`
+	// was really protecting. First success wins for SignerName.
+	//
+	// This does not weaken the check TrustUpdate relies on: a forged SIG
+	// naming a trusted key still fails Verify(), keeps Validated=false, and is
+	// still skipped there. The signer set is bounded by the discovery loop
+	// above, which only appends signers whose key was actually locatable.
 	for i := range us.Signers {
 		signer := &us.Signers[i]
 		// Use the per-signer SIG, not the outer sig variable (which
@@ -244,11 +263,16 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 			// rollover overhaul: surface this as a specific rcode +
 			// EDE so the child operator can diagnose clock skew
 			// without parent-side log access.
-			if !cache.WithinValidityPeriod(ssig.Inception, ssig.Expiration, time.Now().UTC()) {
-				us.ValidationRcode = dns.RcodeBadTime
-				us.RejectionEDE = edns0.EDESig0BadTime
-			} else if us.RejectionEDE == 0 {
-				us.RejectionEDE = edns0.EDESig0BadSignature
+			//
+			// Guarded on !us.Validated: an earlier signer may already have
+			// verified, and this failure must not downgrade that success.
+			if !us.Validated {
+				if !cache.WithinValidityPeriod(ssig.Inception, ssig.Expiration, time.Now().UTC()) {
+					us.ValidationRcode = dns.RcodeBadTime
+					us.RejectionEDE = edns0.EDESig0BadTime
+				} else if us.RejectionEDE == 0 {
+					us.RejectionEDE = edns0.EDESig0BadSignature
+				}
 			}
 			lgDns.Warn("ValidateUpdate: signature verification failed", "signer", signer.Name, "keyid", signer.KeyId, "err", err)
 			lgDns.Debug("ValidateUpdate: timing details", "currentTime", time.Now(), "inception", ssig.Inception, "expiration", ssig.Expiration)
@@ -258,22 +282,31 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		// Ok, we have a signature that validated.
 		if !cache.WithinValidityPeriod(ssig.Inception, ssig.Expiration, time.Now().UTC()) {
 			lgDns.Warn("ValidateUpdate: signature NOT within validity period", "signer", signer.Name, "keyid", signer.KeyId)
-			us.ValidationRcode = dns.RcodeBadTime
-			us.RejectionEDE = edns0.EDESig0BadTime
+			// Guarded: must not downgrade an earlier signer's success.
+			if !us.Validated {
+				us.ValidationRcode = dns.RcodeBadTime
+				us.RejectionEDE = edns0.EDESig0BadTime
+			}
 			// This key validated the signature, but the signature is not within its validity period.
 			// Try the next key.
 			continue
 		}
 
-		// Signature is valid and within its validity period.
+		// Signature is valid and within its validity period. Mark THIS signer
+		// unconditionally — that is the per-signer fact TrustUpdate consumes.
 		lgDns.Info("ValidateUpdate: signature within validity period", "signer", signer.Name, "keyid", signer.KeyId)
 		lgDns.Info("ValidateUpdate: update validated by known and validated key")
-		us.ValidationRcode = dns.RcodeSuccess
-		us.RejectionEDE = 0 // success — clear any prior key's failure EDE
-		us.Validated = true // Now at least one key has validated the update
-		us.SignerName = signer.Name
 		signer.Validated = true
-		break
+
+		// Aggregate status: record the first success and leave it alone
+		// thereafter, so SignerName stays stable and a later signer cannot
+		// churn the rcode/EDE.
+		if !us.Validated {
+			us.ValidationRcode = dns.RcodeSuccess
+			us.RejectionEDE = 0 // success — clear any prior key's failure EDE
+			us.Validated = true // Now at least one key has validated the update
+			us.SignerName = signer.Name
+		}
 	}
 
 	// When we get here then we have tried to validate all signatures and the result is in
@@ -322,14 +355,19 @@ func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 		// the message bytes. us.Validated above is an aggregate ("at least one
 		// signature verified"), which is not sufficient here: ValidateUpdate's
 		// discovery loop appends a signer for every SIG RR matched on
-		// SignerName+KeyTag alone (before any signature is checked), and its
-		// verification loop breaks on the first success — so later entries keep
+		// SignerName+KeyTag alone, before any signature is checked, so a signer
+		// whose signature then failed to verify is still present with
 		// Validated=false. Without this per-signer check, a multi-SIG(0) UPDATE
 		// could pair a genuine signature from an untrusted key with a forged SIG
 		// naming a trusted key and be granted "by-trusted" status even though
 		// the trusted key's signature was never verified. That would also defeat
 		// the untrusted-KEY-delete refusal in ApproveTrustUpdate, which is gated
 		// on us.ValidatedByTrustedKey.
+		//
+		// ValidateUpdate verifies every signer (it does not stop at the first
+		// success), so in a legitimately dual-signed rollover UPDATE both the
+		// old and the new key carry Validated=true and the loop below finds the
+		// trusted one regardless of SIG RR order.
 		if !key.Validated {
 			continue
 		}
