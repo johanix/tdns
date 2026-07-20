@@ -344,13 +344,20 @@ func verifySigners(us *UpdateStatus, msgbuf []byte) {
 func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 	// dump.P(us)
 	if len(us.Signers) == 0 {
-		// No locatable signing key for any SIG in the UPDATE. This branch
-		// also covers a fully-unsigned UPDATE (no SIG RR at all): both map
-		// to BADKEY(17). Per draft-ietf-dnsop-delegation-mgmt-via-ddns-02
-		// §"RCODE BADKEY", an unknown key is a definitive BADKEY so the
-		// child falls back to bootstrapping its key into the receiver.
-		// Conflating "unsigned" with "unknown key" is a deliberate choice:
-		// a child re-bootstrapping off its own unsigned UPDATE is harmless.
+		// No locatable signing key for any SIG in the UPDATE. Per
+		// draft-ietf-dnsop-delegation-mgmt-via-ddns-02 §"RCODE BADKEY", an
+		// unknown key is a definitive BADKEY(17) so the child falls back to
+		// bootstrapping its key into the receiver.
+		//
+		// This also covers an UPDATE carrying no SIG RR at all but a
+		// non-empty Additional section (in practice: an OPT RR) — the
+		// discovery loop finds no SIG, so us.Signers is empty and we land
+		// here. Conflating "unsigned" with "unknown key" is a deliberate
+		// choice: a child re-bootstrapping off its own unsigned UPDATE is
+		// harmless. Note it does NOT cover an UPDATE with a completely
+		// empty Additional section: that short-circuits earlier, in
+		// ValidateUpdate's len(r.Extra)==0 branch, as FORMERR +
+		// EDESig0FormatError, which the responder now relays.
 		us.ValidationRcode = dns.RcodeBadKey
 		us.RejectionEDE = edns0.EDESig0KeyNotKnown
 		return fmt.Errorf("update has no locatable signing key")
@@ -368,6 +375,16 @@ func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 	// signature. A well-formed self-signed key upload verifies, so it has
 	// Validated=true and is unaffected.
 	if !us.Validated {
+		// Defensive: this branch relies on ValidateUpdate having run first and
+		// left a non-success ValidationRcode (its line-31 fail-closed default).
+		// If TrustUpdate is ever reached with a fresh UpdateStatus{} from a
+		// future call site, ValidationRcode would still be its zero value
+		// (RcodeSuccess) while we return an error — reintroducing exactly the
+		// "responder answers NOERROR for a rejected update" bug that default
+		// was added to prevent. Do not rely on a precondition we can enforce.
+		if us.ValidationRcode == dns.RcodeSuccess {
+			us.ValidationRcode = dns.RcodeBadSig
+		}
 		if us.RejectionEDE == 0 {
 			us.RejectionEDE = edns0.EDESig0BadSignature
 		}
