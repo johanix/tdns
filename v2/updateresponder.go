@@ -74,8 +74,10 @@ func UpdateHandler(ctx context.Context, conf *Config) error {
 
 // applyValidationFailure stamps the response with the rcode and EDE that
 // ValidateUpdate / TrustUpdate recorded for a rejected SIG(0) UPDATE, rather
-// than a hardcoded guess at the reason. Both rejection paths must use this so
-// they cannot drift apart again.
+// than a hardcoded guess at the reason. Every rejection path in
+// UpdateResponder must use this so they cannot drift apart again — there are
+// three (ValidateUpdate, TrustUpdate, ApproveUpdate), and the ApproveUpdate one
+// was originally missed.
 //
 // us.ValidationRcode is authoritative: ValidateUpdate fails closed by
 // defaulting it to BADSIG on entry, and TrustUpdate defends the same way, so
@@ -83,7 +85,18 @@ func UpdateHandler(ctx context.Context, conf *Config) error {
 // when one was actually selected — an EDE of 0 is "none recorded", not a
 // meaningful extended error.
 func applyValidationFailure(m *dns.Msg, us *UpdateStatus) {
-	m.SetRcode(m, int(us.ValidationRcode))
+	rcode := int(us.ValidationRcode)
+	if rcode == dns.RcodeSuccess {
+		// A validation error must never answer NOERROR. ValidateUpdate
+		// defaults ValidationRcode to BADSIG on entry, and TrustUpdate
+		// defends the same way, precisely so this cannot happen — fail
+		// closed if some future path forgets to set it. (Carried over from
+		// PR #307, which guarded only the ValidateUpdate branch inline;
+		// living in the shared helper it now covers TrustUpdate too.)
+		lgHandler.Error("SIG(0) UPDATE rejected but ValidationRcode was left at NOERROR; failing closed with SERVFAIL")
+		rcode = dns.RcodeServerFailure
+	}
+	m.SetRcode(m, rcode)
 	if us.RejectionEDE != 0 {
 		edns0.AttachEDEToResponse(m, us.RejectionEDE)
 	}
@@ -95,7 +108,14 @@ func applyValidationFailure(m *dns.Msg, us *UpdateStatus) {
 	// of this helper. Guarantee it here: without the OPT the rejection would
 	// fail to pack inside WriteMsg, whose error both rejection paths discard,
 	// and the child would see a TIMEOUT instead of a rejection.
-	if us.ValidationRcode > 0xF && m.IsEdns0() == nil {
+	//
+	// Test the local rcode that was actually stamped onto m, not
+	// us.ValidationRcode: the fail-closed branch above can substitute a
+	// different value, and the OPT requirement is dictated by whatever will be
+	// packed. (They coincide today — the only substitution is Success→SERVFAIL,
+	// neither of which is extended — but coupling the guard to the packed value
+	// keeps it correct if that ever changes.)
+	if rcode > 0xF && m.IsEdns0() == nil {
 		m.SetEdns0(4096, false)
 	}
 }
@@ -306,8 +326,9 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	// this is an update to auth data) then the update will validate and the SIG(0) key will be
 	// trusted. We always trust SIG(0) keys in the zone we are authoritative for.
 
-	// applyValidationFailure is deliberately shared by both the ValidateUpdate
-	// and TrustUpdate rejection paths below. They previously each hardcoded
+	// applyValidationFailure is deliberately shared by all three rejection
+	// paths below: ValidateUpdate, TrustUpdate, and ApproveUpdate. They
+	// previously each hardcoded
 	// their own rcode + EDE, and correcting only one of them is exactly how
 	// they drifted apart: the TrustUpdate path was fixed to relay the recorded
 	// values while the ValidateUpdate path kept answering SERVFAIL + "key not
@@ -354,11 +375,13 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	if err != nil {
 		lgHandler.Error("error from ApproveUpdate, ignoring update", "err", err)
 		// Even on internal error, send a response with the validation
-		// rcode + EDE so the child sees something coherent.
-		m = m.SetRcode(m, int(dur.Status.ValidationRcode))
-		if dur.Status.RejectionEDE != 0 {
-			edns0.AttachEDEToResponse(m, dur.Status.RejectionEDE)
-		}
+		// rcode + EDE so the child sees something coherent. This is the
+		// third rejection path and it needs the same two guards as the
+		// other two: ApproveUpdate only errors on an unknown update type,
+		// which it reaches with validation having SUCCEEDED — so relaying
+		// ValidationRcode raw would answer NOERROR for an update that was
+		// never applied.
+		applyValidationFailure(m, dur.Status)
 		w.WriteMsg(m)
 		return err
 	}
