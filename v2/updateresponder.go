@@ -108,7 +108,14 @@ func applyValidationFailure(m *dns.Msg, us *UpdateStatus) {
 	// of this helper. Guarantee it here: without the OPT the rejection would
 	// fail to pack inside WriteMsg, whose error both rejection paths discard,
 	// and the child would see a TIMEOUT instead of a rejection.
-	if us.ValidationRcode > 0xF && m.IsEdns0() == nil {
+	//
+	// Test the local rcode that was actually stamped onto m, not
+	// us.ValidationRcode: the fail-closed branch above can substitute a
+	// different value, and the OPT requirement is dictated by whatever will be
+	// packed. (They coincide today — the only substitution is Success→SERVFAIL,
+	// neither of which is extended — but coupling the guard to the packed value
+	// keeps it correct if that ever changes.)
+	if rcode > 0xF && m.IsEdns0() == nil {
 		m.SetEdns0(4096, false)
 	}
 }
