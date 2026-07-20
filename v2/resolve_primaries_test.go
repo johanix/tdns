@@ -91,7 +91,8 @@ func TestSortV4First(t *testing.T) {
 }
 
 func TestBuildUpstreams(t *testing.T) {
-	got := buildUpstreams([]string{"192.0.2.1", "2001:db8::1"}, "5353", "K1")
+	src := PeerConf{Addr: "ns.example.net", Key: "K1"}
+	got := buildUpstreams([]string{"192.0.2.1", "2001:db8::1"}, "5353", src, "ns.example.net")
 	if len(got) != 2 {
 		t.Fatalf("want 2, got %+v", got)
 	}
@@ -100,5 +101,70 @@ func TestBuildUpstreams(t *testing.T) {
 	}
 	if got[1].Addr != "[2001:db8::1]:5353" || got[1].Key != "K1" {
 		t.Fatalf("v6 tuple wrong: %+v", got[1])
+	}
+	// Do53 source: the resolved tuples must be identical to pre-XoT output —
+	// in particular TLSName stays empty.
+	if got[0].TLSName != "" || got[0].Transport != "" {
+		t.Fatalf("do53 tuple gained XoT fields: %+v", got[0])
+	}
+}
+
+func TestBuildUpstreams_DoTCarriesTLSNameAndAuth(t *testing.T) {
+	src := PeerConf{
+		Addr:      "ns.example.net",
+		Key:       NOKEY,
+		Transport: TransportDoT,
+		TLSAuth:   TLSAuthDANE,
+	}
+	got := buildUpstreams([]string{"192.0.2.1", "2001:db8::1"}, "853", src, "ns.example.net")
+	if len(got) != 2 {
+		t.Fatalf("want 2, got %+v", got)
+	}
+	for i, up := range got {
+		if up.Transport != TransportDoT || up.TLSAuth != TLSAuthDANE {
+			t.Fatalf("tuple %d lost XoT fields: %+v", i, up)
+		}
+		// The source hostname must survive resolution on every tuple
+		// (multi-address primaries all share the same SNI/DANE name).
+		if up.TLSName != "ns.example.net" {
+			t.Fatalf("tuple %d lost the hostname: %+v", i, up)
+		}
+	}
+}
+
+func TestBuildUpstreams_ExplicitTLSNameWins(t *testing.T) {
+	src := PeerConf{
+		Addr:      "xfr.example.net",
+		Key:       NOKEY,
+		Transport: TransportDoT,
+		TLSAuth:   TLSAuthPin,
+		Pins:      []string{"AAAA"},
+		TLSName:   "ns2.example.net",
+	}
+	got := buildUpstreams([]string{"192.0.2.1"}, "853", src, "xfr.example.net")
+	if len(got) != 1 || got[0].TLSName != "ns2.example.net" {
+		t.Fatalf("explicit tls-name must not be overwritten: %+v", got)
+	}
+}
+
+func TestResolvePrimaries_DoTIPLiteral(t *testing.T) {
+	// An IP-literal DoT primary defaults to port 853 and keeps its XoT fields.
+	res := resolvePrimaries(context.Background(), nil, []PeerConf{{
+		Addr:      "192.0.2.1",
+		Key:       NOKEY,
+		Transport: TransportDoT,
+		TLSAuth:   TLSAuthPin,
+		Pins:      []string{"AAAA"},
+		TLSName:   "ns1.example.net",
+	}})
+	if len(res.Resolved) != 1 {
+		t.Fatalf("want 1 resolved, got %+v", res)
+	}
+	up := res.Resolved[0]
+	if up.Addr != "192.0.2.1:853" {
+		t.Fatalf("DoT default port should be 853: %+v", up)
+	}
+	if up.Transport != TransportDoT || up.TLSAuth != TLSAuthPin || up.TLSName != "ns1.example.net" || len(up.Pins) != 1 {
+		t.Fatalf("XoT fields lost through resolution: %+v", up)
 	}
 }

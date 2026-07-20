@@ -50,9 +50,11 @@ func resolvePrimaries(ctx context.Context, imr *Imr, primaries []PeerConf) Prima
 }
 
 func expandPrimaryEntry(ctx context.Context, imr *Imr, p PeerConf) ([]PeerConf, bool) {
-	host, port := splitHostPortDefault(p.Addr)
+	host, port := splitHostPortDefault(p.Addr, defaultPortForPeer(p))
 	if ip := net.ParseIP(host); ip != nil {
-		return []PeerConf{{Addr: net.JoinHostPort(host, port), Key: p.Key}}, true
+		out := p // carry Key + the XoT fields (Transport/TLSAuth/TLSName/Pins/CAFile)
+		out.Addr = net.JoinHostPort(host, port)
+		return []PeerConf{out}, true
 	}
 
 	// Hostname. Resolution is the IMR's job; without one (e.g. imr disabled)
@@ -65,7 +67,7 @@ func expandPrimaryEntry(ctx context.Context, imr *Imr, p PeerConf) ([]PeerConf, 
 		return nil, false
 	}
 	lg.Debug("resolved hostname primary", "hostname", host, "addresses", addrs)
-	return buildUpstreams(addrs, port, p.Key), true
+	return buildUpstreams(addrs, port, p, host), true
 }
 
 // imrLookupAddrs returns host's A and AAAA addresses resolved through the IMR,
@@ -109,19 +111,27 @@ func sortV4First(addrs []string) []string {
 }
 
 // buildUpstreams turns resolved IP literals into addr:port PeerConfs, copying
-// key to each and preserving input order.
-func buildUpstreams(addrs []string, port, key string) []PeerConf {
+// the source entry's key and XoT fields to each and preserving input order.
+// For a DoT peer the source hostname is recorded as TLSName (unless the config
+// set one explicitly) so every produced tuple keeps the name needed for SNI
+// and the DANE TLSA base — the resolved Addr is an IP and no longer has it.
+func buildUpstreams(addrs []string, port string, src PeerConf, srcHost string) []PeerConf {
 	out := make([]PeerConf, 0, len(addrs))
 	for _, a := range addrs {
-		out = append(out, PeerConf{Addr: net.JoinHostPort(a, port), Key: key})
+		up := src
+		up.Addr = net.JoinHostPort(a, port)
+		if peerUsesDoT(up) && up.TLSName == "" {
+			up.TLSName = srcHost
+		}
+		out = append(out, up)
 	}
 	return out
 }
 
-func splitHostPortDefault(addr string) (host, port string) {
+func splitHostPortDefault(addr, defaultPort string) (host, port string) {
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
-		return addr, "53"
+		return addr, defaultPort
 	}
 	return host, port
 }

@@ -15,8 +15,10 @@ import (
 	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/pem"
 	"math/big"
 	"net"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -311,6 +313,93 @@ func TestSPKISHA256_PinRoundTrip(t *testing.T) {
 	}
 	if hex.EncodeToString(rawPin) != tlsa.Certificate {
 		t.Fatal("pin and TLSA 3-1-1 association data disagree")
+	}
+}
+
+// TestValidatePeerXoT covers the config-load validation matrix for the XoT
+// fields on a primary entry.
+func TestValidatePeerXoT(t *testing.T) {
+	// A valid pin: base64 of 32 bytes.
+	goodPin := base64.StdEncoding.EncodeToString(make([]byte, sha256.Size))
+
+	// A readable CA file with a CERTIFICATE block.
+	certTLS, _ := newTestTLSCert(t, []string{"ca.test"}, nil)
+	caPath := t.TempDir() + "/ca.pem"
+	if err := writeCertPEM(caPath, certTLS.Certificate[0]); err != nil {
+		t.Fatalf("write ca file: %v", err)
+	}
+	junkPath := t.TempDir() + "/junk.pem"
+	if err := os.WriteFile(junkPath, []byte("not a pem"), 0o600); err != nil {
+		t.Fatalf("write junk file: %v", err)
+	}
+
+	cases := []struct {
+		name string
+		peer PeerConf
+		ok   bool
+	}{
+		{"plain do53 untouched", PeerConf{Addr: "192.0.2.1:53", Key: NOKEY}, true},
+		{"explicit do53", PeerConf{Addr: "192.0.2.1:53", Key: NOKEY, Transport: "do53"}, true},
+		{"do53 with tls-auth", PeerConf{Addr: "192.0.2.1:53", Key: NOKEY, TLSAuth: "pin"}, false},
+		{"do53 with pins", PeerConf{Addr: "192.0.2.1:53", Key: NOKEY, Pins: []string{goodPin}}, false},
+		{"unknown transport", PeerConf{Addr: "192.0.2.1", Key: NOKEY, Transport: "doq"}, false},
+		{"dot without tls-auth", PeerConf{Addr: "ns1.test", Key: NOKEY, Transport: "dot"}, false},
+		{"dot unknown tls-auth", PeerConf{Addr: "ns1.test", Key: NOKEY, Transport: "dot", TLSAuth: "spki"}, false},
+		{"pin ok", PeerConf{Addr: "ns1.test", Key: NOKEY, Transport: "dot", TLSAuth: "pin", Pins: []string{goodPin}}, true},
+		{"pin without pins", PeerConf{Addr: "ns1.test", Key: NOKEY, Transport: "dot", TLSAuth: "pin"}, false},
+		{"pin bad base64", PeerConf{Addr: "ns1.test", Key: NOKEY, Transport: "dot", TLSAuth: "pin", Pins: []string{"!!!"}}, false},
+		{"pin wrong digest size", PeerConf{Addr: "ns1.test", Key: NOKEY, Transport: "dot", TLSAuth: "pin", Pins: []string{"AAAA"}}, false},
+		{"dane hostname ok", PeerConf{Addr: "ns1.test", Key: NOKEY, Transport: "dot", TLSAuth: "dane"}, true},
+		{"dane ip needs tls-name", PeerConf{Addr: "192.0.2.1:853", Key: NOKEY, Transport: "dot", TLSAuth: "dane"}, false},
+		{"dane ip with tls-name", PeerConf{Addr: "192.0.2.1:853", Key: NOKEY, Transport: "dot", TLSAuth: "dane", TLSName: "ns1.test"}, true},
+		{"pkix system roots", PeerConf{Addr: "ns1.test", Key: NOKEY, Transport: "dot", TLSAuth: "pkix"}, true},
+		{"pkix ca file ok", PeerConf{Addr: "ns1.test", Key: NOKEY, Transport: "dot", TLSAuth: "pkix", CAFile: caPath}, true},
+		{"pkix ca file missing", PeerConf{Addr: "ns1.test", Key: NOKEY, Transport: "dot", TLSAuth: "pkix", CAFile: "/nonexistent/ca.pem"}, false},
+		{"pkix ca file junk", PeerConf{Addr: "ns1.test", Key: NOKEY, Transport: "dot", TLSAuth: "pkix", CAFile: junkPath}, false},
+		{"case-insensitive DoT/DANE", PeerConf{Addr: "ns1.test", Key: NOKEY, Transport: "DoT", TLSAuth: "DANE"}, true},
+	}
+	for _, tc := range cases {
+		p := tc.peer
+		err := validatePeerXoT(&p)
+		if tc.ok && err != nil {
+			t.Errorf("%s: unexpected error: %v", tc.name, err)
+		}
+		if !tc.ok && err == nil {
+			t.Errorf("%s: expected error, got none", tc.name)
+		}
+	}
+
+	// Normalization: transport/tls-auth are lowercased in place.
+	p := PeerConf{Addr: "ns1.test", Key: NOKEY, Transport: "DOT", TLSAuth: "PKIX"}
+	if err := validatePeerXoT(&p); err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if p.Transport != TransportDoT || p.TLSAuth != TLSAuthPKIX {
+		t.Fatalf("expected normalized transport/tls-auth, got %+v", p)
+	}
+}
+
+func writeCertPEM(path string, der []byte) error {
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	return pem.Encode(f, &pem.Block{Type: "CERTIFICATE", Bytes: der})
+}
+
+func TestNormalizeAddressPort(t *testing.T) {
+	if got := NormalizeAddressPort("192.0.2.1", "853"); got != "192.0.2.1:853" {
+		t.Fatalf("got %q", got)
+	}
+	if got := NormalizeAddressPort("192.0.2.1:53", "853"); got != "192.0.2.1:53" {
+		t.Fatalf("explicit port must win: %q", got)
+	}
+	if got := NormalizeAddressPort("2001:db8::1", "853"); got != "[2001:db8::1]:853" {
+		t.Fatalf("v6 literal: %q", got)
+	}
+	if got := NormalizeAddress("192.0.2.1"); got != "192.0.2.1:53" {
+		t.Fatalf("NormalizeAddress default unchanged: %q", got)
 	}
 }
 

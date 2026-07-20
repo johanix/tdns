@@ -125,6 +125,40 @@ zones:
         - delegation-sync-child    # Push DS/NS updates to parent
 
    # ===========================================================================
+   # EXAMPLE 2b: SECONDARY zone pulling over XoT (XFR-over-TLS, RFC 9103)
+   # ===========================================================================
+   # Per-primary transport selection: transport: dot moves the SOA probe and
+   # the transfer itself to TLS (default port 853). Every dot primary MUST
+   # declare how the server certificate is authenticated (tls-auth):
+   #
+   #   pin   Static SPKI pinning. pins: lists base64 SHA-256 digests of the
+   #         server cert's SubjectPublicKeyInfo (get it from the primary
+   #         operator, or from the cert: dog +showpin, or
+   #         openssl x509 -in cert.pem -pubkey -noout | openssl pkey -pubin \
+   #           -outform der | openssl dgst -sha256 -binary | base64
+   #   dane  TLSA lookup at _<port>._tcp.<name>, DNSSEC-validated through the
+   #         built-in IMR. <name> is the primary's hostname (or tls-name when
+   #         the primary is configured as an IP literal).
+   #   pkix  WebPKI-style chain verification against ca-file (or the system
+   #         roots when ca-file is omitted).
+   #
+   # TSIG stays orthogonal: key: is still honored (RFC 9103 allows TSIG+TLS).
+   #- name:            example.com.
+   #  type:            secondary
+   #  primaries:
+   #     - addr: "ns1.example.net"        # hostname primary: port defaults to 853,
+   #       key:  NOKEY                    # the name doubles as SNI + TLSA base
+   #       transport: dot
+   #       tls-auth: dane
+   #     - addr: "203.0.113.1:853"        # IP-literal primary: tls-name required
+   #       key:  xfr-key-2026             # for dane (and used as SNI)
+   #       transport: dot
+   #       tls-auth: pin
+   #       tls-name: ns2.example.net
+   #       pins:
+   #          - "base64-spki-sha256-digest-here="
+
+   # ===========================================================================
    # EXAMPLE 3: Zone using a TEMPLATE (with overrides)
    # ===========================================================================
    - name:            example.org.

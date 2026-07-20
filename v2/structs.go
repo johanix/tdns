@@ -255,6 +255,16 @@ type PeerConf struct {
 	Addr   string `yaml:"addr" mapstructure:"addr"`
 	Key    string `yaml:"key" mapstructure:"key"`
 	Legacy string `yaml:"-" mapstructure:"-"` // bare-string marker; not config
+
+	// XoT (XFR-over-TLS, RFC 9103) fields. All optional; an empty Transport
+	// means Do53 and preserves pre-XoT behavior exactly. TSIG (Key) remains
+	// orthogonal: RFC 9103 allows TSIG and TLS together, so a peer may have
+	// both a TLS auth mode and a TSIG key. Validated by validatePeerXoT.
+	Transport string   `yaml:"transport" mapstructure:"transport"` // "" | do53 | dot
+	TLSAuth   string   `yaml:"tls-auth" mapstructure:"tls-auth"`   // pin | dane | pkix (required for dot)
+	TLSName   string   `yaml:"tls-name" mapstructure:"tls-name"`   // SNI + DANE base name; defaults to the Addr hostname
+	Pins      []string `yaml:"pins" mapstructure:"pins"`           // base64 SPKI SHA-256 pins (tls-auth: pin)
+	CAFile    string   `yaml:"ca-file" mapstructure:"ca-file"`     // PEM bundle (tls-auth: pkix); empty = system roots
 }
 
 // ZoneConf represents the external config for a zone; it contains no zone data
