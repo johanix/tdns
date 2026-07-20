@@ -281,8 +281,25 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	err := zd.ValidateUpdate(r, dur.Status)
 	if err != nil {
 		zd.Logger.Printf("Error from ValidateUpdate(): %v", err)
-		m.SetRcode(m, dns.RcodeServerFailure)
-		edns0.AttachEDEToResponse(m, edns0.EDESig0KeyNotKnown)
+		// Relay the rcode + EDE ValidateUpdate selected, exactly as the
+		// TrustUpdate branch below does. This used to hardcode SERVFAIL +
+		// EDESig0KeyNotKnown, discarding both: an UPDATE carrying no
+		// signature and no OPT sets FORMERR + EDESig0FormatError here, and
+		// was reported on the wire as SERVFAIL + "SIG(0) key not known" --
+		// two wrong answers at once, and it made EDESig0FormatError
+		// unreachable from this path entirely.
+		rcode := int(dur.Status.ValidationRcode)
+		if rcode == dns.RcodeSuccess {
+			// A validation error must never answer NOERROR. ValidateUpdate
+			// defaults ValidationRcode to BADSIG precisely so this cannot
+			// happen; fail closed if some future path forgets to set it.
+			lgHandler.Error("ValidateUpdate returned an error but left ValidationRcode at NOERROR; failing closed with SERVFAIL", "err", err)
+			rcode = dns.RcodeServerFailure
+		}
+		m.SetRcode(m, rcode)
+		if dur.Status.RejectionEDE != 0 {
+			edns0.AttachEDEToResponse(m, dur.Status.RejectionEDE)
+		}
 		w.WriteMsg(m)
 		return err
 	}
