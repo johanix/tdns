@@ -25,22 +25,14 @@ func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) erro
 		return fmt.Errorf("PublishTlsaRR: name %q is not a subdomain of %q", name, zd.ZoneName)
 	}
 
-	certData, err := parseCertificate(certPEM)
+	cert, err := parseCertificate(certPEM)
 	if err != nil {
 		return err
 	}
 
-	tlsa := dns.TLSA{
-		Usage:        3, // DANE-EE
-		Selector:     1, // SPKI
-		MatchingType: 1, // SHA-256
-		Certificate:  certData,
-	}
-	tlsa.Hdr = dns.RR_Header{
-		Name:   fmt.Sprintf("_%d._tcp.%s", port, name),
-		Rrtype: dns.TypeTLSA,
-		Class:  dns.ClassINET,
-		Ttl:    120,
+	tlsa, err := NewTlsaRR(name, port, cert)
+	if err != nil {
+		return err
 	}
 
 	lgHandler.Info("PublishTlsaRR: publishing TLSA RR", "rr", tlsa.String())
@@ -52,31 +44,65 @@ func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) erro
 	zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
-		Actions:        []dns.RR{&tlsa},
+		Actions:        []dns.RR{tlsa},
 		InternalUpdate: true,
 	}
 
 	return nil
 }
 
-func parseCertificate(certPEM string) (string, error) {
+// NewTlsaRR builds a DANE-EE / SPKI / SHA-256 ("3 1 1") TLSA record for the
+// given service name and port. The certificate association data is the SHA-256
+// digest of the SubjectPublicKeyInfo, per the advertised Selector.
+func NewTlsaRR(name string, port uint16, cert *x509.Certificate) (*dns.TLSA, error) {
+	data, err := tlsaSelectorBytes(cert, 1)
+	if err != nil {
+		return nil, err
+	}
+	hash := sha256.Sum256(data)
+
+	tlsa := &dns.TLSA{
+		Usage:        3, // DANE-EE
+		Selector:     1, // SPKI
+		MatchingType: 1, // SHA-256
+		Certificate:  hex.EncodeToString(hash[:]),
+	}
+	tlsa.Hdr = dns.RR_Header{
+		Name:   fmt.Sprintf("_%d._tcp.%s", port, name),
+		Rrtype: dns.TypeTLSA,
+		Class:  dns.ClassINET,
+		Ttl:    120,
+	}
+	return tlsa, nil
+}
+
+func parseCertificate(certPEM string) (*x509.Certificate, error) {
 	block, _ := pem.Decode([]byte(certPEM))
 	if block == nil {
-		return "", fmt.Errorf("failed to decode PEM data")
+		return nil, fmt.Errorf("failed to decode PEM data")
 	}
 	if block.Type != "CERTIFICATE" {
-		return "", fmt.Errorf("unexpected PEM block type: %s (expected CERTIFICATE)", block.Type)
+		return nil, fmt.Errorf("unexpected PEM block type: %s (expected CERTIFICATE)", block.Type)
 	}
 
 	cert, err := x509.ParseCertificate(block.Bytes)
 	if err != nil {
-		return "", fmt.Errorf("failed to parse certificate: %v", err)
+		return nil, fmt.Errorf("failed to parse certificate: %v", err)
 	}
+	return cert, nil
+}
 
-	// Use the entire certificate for hashing instead of just the public key
-	hash := sha256.Sum256(cert.Raw)
-	// log.Printf("parseCertificate: hash: %s", hex.EncodeToString(hash[:]))
-	return hex.EncodeToString(hash[:]), nil
+// tlsaSelectorBytes returns the certificate bytes that a TLSA record's
+// Selector field says the association data is computed over.
+func tlsaSelectorBytes(cert *x509.Certificate, selector uint8) ([]byte, error) {
+	switch selector {
+	case 0: // full certificate
+		return cert.Raw, nil
+	case 1: // SubjectPublicKeyInfo
+		return cert.RawSubjectPublicKeyInfo, nil
+	default:
+		return nil, fmt.Errorf("unsupported TLSA selector: %d", selector)
+	}
 }
 
 func (zd *ZoneData) UnpublishTlsaRR(port uint16) error {
@@ -111,29 +137,36 @@ func LookupTlsaRR(name string) (*core.RRset, error) {
 	return rrset, nil
 }
 
-func VerifyCertAgainstTlsaRR(tlsarr *dns.TLSA, rawcert []byte) error {
+// VerifyCertAgainstTlsaRR checks a presented certificate against one TLSA
+// record. Only usage 3 (DANE-EE) is supported. The Selector field decides
+// which certificate bytes the association data is computed over (0 = full
+// cert, 1 = SPKI); taking the parsed certificate (rather than raw bytes)
+// ensures the caller cannot hash the wrong form.
+func VerifyCertAgainstTlsaRR(tlsarr *dns.TLSA, cert *x509.Certificate) error {
 	decodedCert, err := hex.DecodeString(tlsarr.Certificate)
 	if err != nil {
 		return fmt.Errorf("failed to decode TLSA certificate: %v", err)
 	}
-	switch tlsarr.Usage {
-	case 3:
-		switch tlsarr.MatchingType {
-		case 1: // SHA-256
-			hash := sha256.Sum256(rawcert)
-			if subtle.ConstantTimeCompare(hash[:], decodedCert) == 1 {
-				return nil
-			}
-		case 2: // SHA-512
-			hash := sha512.Sum512(rawcert)
-			if subtle.ConstantTimeCompare(hash[:], decodedCert) == 1 {
-				return nil
-			}
-		default:
-			return fmt.Errorf("unsupported TLSA matching type: %d", tlsarr.MatchingType)
+	if tlsarr.Usage != 3 {
+		return fmt.Errorf("only TLSA usage 3 is supported (this TLSA has usage %d)", tlsarr.Usage)
+	}
+	data, err := tlsaSelectorBytes(cert, tlsarr.Selector)
+	if err != nil {
+		return err
+	}
+	switch tlsarr.MatchingType {
+	case 1: // SHA-256
+		hash := sha256.Sum256(data)
+		if subtle.ConstantTimeCompare(hash[:], decodedCert) == 1 {
+			return nil
+		}
+	case 2: // SHA-512
+		hash := sha512.Sum512(data)
+		if subtle.ConstantTimeCompare(hash[:], decodedCert) == 1 {
+			return nil
 		}
 	default:
-		return fmt.Errorf("only TLSA usage 3 is supported (this TLSA has usage %d)", tlsarr.Usage)
+		return fmt.Errorf("unsupported TLSA matching type: %d", tlsarr.MatchingType)
 	}
 	return fmt.Errorf("TLSA RR %s did not match cert", tlsarr.String())
 }
