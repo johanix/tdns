@@ -1,8 +1,10 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  *
- * `tdns-cli auth config check` — validate a tdns-auth configuration file and
- * correlate it against the running daemon.
+ * `tdns-cli <role> config check` — validate a tdns-auth or tdns-agent
+ * configuration file and correlate it against the running daemon. The
+ * agent-specific checks live in config_agent_cmds.go; tdns-imr has its own
+ * implementation in config_imr_cmds.go.
  *
  * The command is deliberately CLI-side and self-contained: it re-reads the
  * YAML the same way the daemon's loader does (main file + single-level
@@ -147,8 +149,9 @@ func (r *ccReport) render(verbose bool) {
 // Command
 // ---------------------------------------------------------------------------
 
-// newConfigCheckCmd builds the `config check` command for the given role. Only
-// wired for "auth" today; the role parameter keeps the door open for imr/agent.
+// newConfigCheckCmd builds the `config check` command for the given role.
+// Wired for "auth" and "agent" (via NewConfigCmd); "imr" has its own
+// implementation in config_imr_cmds.go.
 func newConfigCheckCmd(role string) *cobra.Command {
 	var (
 		serverConfig string
