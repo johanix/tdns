@@ -85,6 +85,17 @@ func startTestAXFRServerTLS(t *testing.T, zd *ZoneData, tsigProvider dns.TsigPro
 			record:         srv.recordSize,
 		}
 		serve := func(w2 dns.ResponseWriter, req *dns.Msg) {
+			// Answer SOA probes (the DoTransfer path) from the zone apex;
+			// AXFR/IXFR goes through the real transfer-out path.
+			if len(req.Question) == 1 && req.Question[0].Qtype == dns.TypeSOA {
+				m := new(dns.Msg)
+				m.SetReply(req)
+				if apex, ok := zd.Data.Get(zd.ZoneName); ok {
+					m.Answer = append(m.Answer, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
+				}
+				_ = w2.WriteMsg(m)
+				return
+			}
 			_, _ = zd.ZoneTransferOut(w2, req)
 		}
 		if tsigProvider != nil {
@@ -639,6 +650,95 @@ func TestXoT_PKIXModeEndToEnd(t *testing.T) {
 	badName.TLSName = "ns2.test"
 	if _, err := xotTransfer(t, conf, badName, srv, zd.ZoneName); err == nil {
 		t.Fatal("pkix with wrong tls-name must fail")
+	}
+}
+
+// --- Phase 3: the real secondary pull path (ZoneTransferIn / DoTransfer) ----
+
+// newTestSecondary builds a secondary ZoneData pulling from the given peer.
+func newTestSecondary(t *testing.T, up PeerConf) *ZoneData {
+	t.Helper()
+	return &ZoneData{
+		ZoneName:  "example.test.",
+		ZoneStore: MapZone,
+		ZoneType:  Secondary,
+		Logger:    log.Default(),
+		Upstreams: []PeerConf{up},
+	}
+}
+
+// TestXoT_ZoneTransferInOverDoT: the production inbound-transfer function
+// pulls a zone over verified TLS (pin) with TSIG on the envelopes; a wrong
+// pin aborts; DANE mode works against an injected validated TLSA.
+func TestXoT_ZoneTransferInOverDoT(t *testing.T) {
+	conf := testXfrConf(t)
+	primary := loadTestTransferZone(t, basicZone)
+	primary.Downstreams = []AclEntry{{Prefix: "127.0.0.0/8", Key: "tkey"}}
+	cert, leaf := newTestTLSCert(t, []string{"ns1.test"}, []net.IP{net.ParseIP("127.0.0.1")})
+	srv := startTestAXFRServerTLS(t, primary, conf.tsigProvider(), cert)
+	defer srv.shutdown()
+
+	pinPeer := PeerConf{Addr: srv.addr, Key: "tkey", Transport: TransportDoT,
+		TLSAuth: TLSAuthPin, Pins: []string{SPKISHA256(leaf)}}
+	sec := newTestSecondary(t, pinPeer)
+	serial, err := sec.ZoneTransferIn(pinPeer, 0, "axfr", conf)
+	if err != nil {
+		t.Fatalf("XoT pull (pin+tsig) failed: %v", err)
+	}
+	if serial != 1 {
+		t.Fatalf("expected serial 1, got %d", serial)
+	}
+	if sec.Data.IsEmpty() {
+		t.Fatal("secondary has no zone data after transfer")
+	}
+
+	// Tampered/wrong pin: the transfer must abort at the handshake.
+	badPeer := pinPeer
+	badPeer.Pins = []string{base64.StdEncoding.EncodeToString(make([]byte, sha256.Size))}
+	secBad := newTestSecondary(t, badPeer)
+	if _, err := secBad.ZoneTransferIn(badPeer, 0, "axfr", conf); err == nil {
+		t.Fatal("XoT pull with wrong pin must fail")
+	}
+
+	// DANE mode through the same production path.
+	danePeer := PeerConf{Addr: srv.addr, Key: "tkey", Transport: TransportDoT,
+		TLSAuth: TLSAuthDANE, TLSName: "ns1.test"}
+	daneConf := testXfrConf(t)
+	daneConf.Internal.ImrEngine = daneTestConf(t, leaf, serverPort(t, srv), cache.ValidationStateSecure, true).Internal.ImrEngine
+	secDane := newTestSecondary(t, danePeer)
+	if _, err := secDane.ZoneTransferIn(danePeer, 0, "axfr", daneConf); err != nil {
+		t.Fatalf("XoT pull (dane+tsig) failed: %v", err)
+	}
+}
+
+// TestXoT_DoTransferSOAProbeOverDoT: the SOA probe uses the same verified TLS
+// channel (and TSIG) as the transfer; a wrong pin makes the upstream count as
+// unreachable.
+func TestXoT_DoTransferSOAProbeOverDoT(t *testing.T) {
+	conf := testXfrConf(t)
+	primary := loadTestTransferZone(t, basicZone)
+	primary.Downstreams = []AclEntry{{Prefix: "127.0.0.0/8", Key: "tkey"}}
+	cert, leaf := newTestTLSCert(t, []string{"ns1.test"}, []net.IP{net.ParseIP("127.0.0.1")})
+	srv := startTestAXFRServerTLS(t, primary, conf.tsigProvider(), cert)
+	defer srv.shutdown()
+
+	pinPeer := PeerConf{Addr: srv.addr, Key: "tkey", Transport: TransportDoT,
+		TLSAuth: TLSAuthPin, Pins: []string{SPKISHA256(leaf)}}
+	sec := newTestSecondary(t, pinPeer)
+	should, serial, err := sec.DoTransfer(conf)
+	if err != nil {
+		t.Fatalf("SOA probe over DoT failed: %v", err)
+	}
+	if !should || serial != 1 {
+		t.Fatalf("expected (transfer=true, serial=1), got (%v, %d)", should, serial)
+	}
+
+	// Wrong pin: handshake fails -> all upstreams unreachable -> hard error.
+	badPeer := pinPeer
+	badPeer.Pins = []string{base64.StdEncoding.EncodeToString(make([]byte, sha256.Size))}
+	secBad := newTestSecondary(t, badPeer)
+	if _, _, err := secBad.DoTransfer(conf); err == nil {
+		t.Fatal("SOA probe with wrong pin must fail")
 	}
 }
 

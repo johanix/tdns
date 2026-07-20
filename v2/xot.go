@@ -53,6 +53,14 @@ func peerUsesDoT(p PeerConf) bool {
 	return p.Transport == TransportDoT
 }
 
+// transportLabel names the peer's transport for logging.
+func transportLabel(p PeerConf) string {
+	if peerUsesDoT(p) {
+		return TransportDoT
+	}
+	return TransportDo53
+}
+
 // peerHostIsIPLiteral reports whether the host part of p.Addr is an IP
 // literal (as opposed to a DNS name).
 func peerHostIsIPLiteral(p PeerConf) bool {

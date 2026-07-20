@@ -50,8 +50,11 @@ func clarifyXfrError(zone, upstream string, err error) error {
 	return err
 }
 
-func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype, keyName string, conf *Config) (uint32, error) {
-
+// ZoneTransferIn pulls the zone from the upstream primary described by up:
+// AXFR/IXFR over Do53, or over TLS (XoT, RFC 9103) when up.Transport is dot.
+// TSIG (up.Key) and TLS are independent layers and may be combined.
+func (zd *ZoneData) ZoneTransferIn(up PeerConf, serial uint32, ttype string, conf *Config) (uint32, error) {
+	upstream := up.Addr
 	if upstream == "" {
 		Fatal("ZoneTransfer: upstream not set")
 	}
@@ -67,12 +70,19 @@ func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype, keyNam
 	if zd.ZoneStore == MapZone {
 		zd.Data = core.NewCmap[OwnerData]()
 	}
-	lgDns.Info("ZoneTransferIn", "zone", zd.ZoneName, "store", ZoneStoreToString[zd.ZoneStore])
+	lgDns.Info("ZoneTransferIn", "zone", zd.ZoneName, "store", ZoneStoreToString[zd.ZoneStore], "transport", transportLabel(up))
 
 	transfer := new(dns.Transfer)
+	// XoT: a DoT peer gets a verifying TLS config (pin/dane/pkix) and the
+	// fork's Transfer.In dials tcp-tls with it. nil => plain TCP (Do53).
+	tlsCfg, terr := conf.ClientTLSConfigForPeer(up)
+	if terr != nil {
+		return 0, fmt.Errorf("ZoneTransferIn %s: TLS setup for %s: %w", zd.ZoneName, upstream, terr)
+	}
+	transfer.TLS = tlsCfg
 	// Sign the AXFR/IXFR request under this upstream's key (NOKEY => unsigned).
 	// The provider also verifies the TSIG on the inbound envelopes.
-	provider, serr := SignForPeer(msg, keyName, conf)
+	provider, serr := SignForPeer(msg, up.Key, conf)
 	if serr != nil {
 		return 0, fmt.Errorf("ZoneTransferIn %s: TSIG sign setup: %w", zd.ZoneName, serr)
 	}

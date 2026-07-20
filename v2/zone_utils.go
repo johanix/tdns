@@ -128,14 +128,24 @@ func (zd *ZoneData) DoTransfer(conf *Config) (bool, uint32, error) {
 		upstream := up.Addr
 		if _, _, err := net.SplitHostPort(upstream); err != nil {
 			// If error, assume no port was specified
-			upstream = net.JoinHostPort(upstream, "53")
-			lg.Debug("DoTransfer: no port specified for upstream, using default port 53", "zone", zd.ZoneName, "upstream", upstream)
+			upstream = net.JoinHostPort(upstream, defaultPortForPeer(up))
+			lg.Debug("DoTransfer: no port specified for upstream, using transport default", "zone", zd.ZoneName, "upstream", upstream)
 		}
 		// Fresh message per attempt: TSIG signing adds an RR with a per-attempt
 		// timestamp and this upstream's key.
 		m := new(dns.Msg)
 		m.SetQuestion(zd.ZoneName, dns.TypeSOA)
 		c := new(dns.Client)
+		// XoT peer: probe the SOA over the same verified-TLS channel the
+		// transfer itself will use (same pin/dane/pkix gate).
+		if tlsCfg, terr := conf.ClientTLSConfigForPeer(up); terr != nil {
+			lg.Error("DoTransfer: TLS setup failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "err", terr)
+			lastErr = terr
+			continue
+		} else if tlsCfg != nil {
+			c.Net = "tcp-tls"
+			c.TLSConfig = tlsCfg
+		}
 		provider, serr := SignForPeer(m, up.Key, conf)
 		if serr != nil {
 			lg.Error("DoTransfer: TSIG sign setup failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "key", up.Key, "err", serr)
@@ -286,7 +296,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 			Ready:          true, // this is only used by the checks for changes to DNSKEYs, HSYNC, etc.
 			// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 		}
-		if _, err := new_zd.ZoneTransferIn(upstream, zd.IncomingSerial, "axfr", up.Key, conf); err != nil {
+		if _, err := new_zd.ZoneTransferIn(up, zd.IncomingSerial, "axfr", conf); err != nil {
 			lg.Warn("FetchFromUpstream: AXFR from upstream failed, trying next", "zone", zd.ZoneName, "upstream", upstream, "err", err)
 			lastErr = err
 			continue
