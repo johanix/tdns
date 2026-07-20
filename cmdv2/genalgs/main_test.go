@@ -229,12 +229,20 @@ func TestGenLibsMkPathListJoin(t *testing.T) {
 
 	// Values are ordered by sortedGroups (qruov before sqisign). The point
 	// of the test is the SEPARATOR: colon for the path list, space for the
-	// flag list.
-	if !strings.Contains(out, "export LD_LIBRARY_PATH := /b/lib:/a/lib") {
+	// flag list. Variables are plain (not `export ... :=`) — see genLibsMk:
+	// NetBSD's base make doesn't implement GNU make's export semantics, so
+	// ALGS_ENV (checked below) is what actually reaches `go build`.
+	if strings.Contains(out, "export ") {
+		t.Errorf("algs-libs.mk must not use GNU-make-only `export` (breaks under bmake):\n%s", out)
+	}
+	if !strings.Contains(out, "LD_LIBRARY_PATH := /b/lib:/a/lib") {
 		t.Errorf("LD_LIBRARY_PATH must be colon-joined:\n%s", out)
 	}
-	if !strings.Contains(out, "export CGO_LDFLAGS := -lqruov -lsqisign") {
+	if !strings.Contains(out, "CGO_LDFLAGS := -lqruov -lsqisign") {
 		t.Errorf("CGO_LDFLAGS must stay space-joined:\n%s", out)
+	}
+	if !strings.Contains(out, `CGO_LDFLAGS="$(CGO_LDFLAGS)"`) || !strings.Contains(out, `LD_LIBRARY_PATH="$(LD_LIBRARY_PATH)"`) {
+		t.Errorf("ALGS_ENV must inline every variable for splicing onto the go build command line:\n%s", out)
 	}
 }
 
@@ -245,6 +253,9 @@ func TestGenLibsMkEmpty(t *testing.T) {
 	}
 	if strings.Contains(out, "export ") {
 		t.Errorf("empty selection must not export library vars:\n%s", out)
+	}
+	if !strings.Contains(out, "ALGS_ENV :=\n") {
+		t.Errorf("empty selection must still define an empty ALGS_ENV:\n%s", out)
 	}
 }
 

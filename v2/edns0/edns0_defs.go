@@ -13,7 +13,7 @@ package edns0
 // Code). Keep them adjacent so the next addition is an obvious next number, and
 // see TestLocalOptionCodesAreUnique.
 const (
-	EDNS0_OTS_OPTION_CODE           = 65001 // TBD: Replace with actual IANA assigned code
+	EDNS0_OOTS_OPTION_CODE          = 65001 // experimental OOTS EDNS option (-03; IANA TBD)
 	EDNS0_KEYSTATE_OPTION_CODE      = 65002
 	EDNS0_REPORT_OPTION_CODE        = 65003
 	EDNS0_CHUNK_OPTION_CODE         = 65004 // CHUNK EDNS(0) option for payload

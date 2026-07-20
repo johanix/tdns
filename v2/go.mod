@@ -53,8 +53,9 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 )
 
-// Pinned at johanix/dns:algorithm-registry tip — provides the
-// pluggable Algorithm interface. ML-DSA-44 itself lives out-of-tree
-// in github.com/johanix/dnssec-algorithms/mldsa44 and is wired in by
-// blank import from each binary's main package.
-replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.1
+// Pinned at johanix/dns v1.1.72-johanix.2 — provides the pluggable
+// Algorithm interface and the registered oots SvcParamKey (12) /
+// dns.SVCBOots. ML-DSA-44 lives out-of-tree in
+// github.com/johanix/dnssec-algorithms/mldsa44 and is wired in by blank
+// import from each binary's main package.
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.2

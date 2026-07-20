@@ -4,8 +4,6 @@
 package edns0
 
 import (
-	"fmt"
-
 	"github.com/miekg/dns"
 )
 
@@ -14,10 +12,9 @@ type MsgOptions struct {
 	RD            bool
 	CD            bool
 	DO            bool
-	CO            bool // RFC 9824: Compact Ok bit (bit 14 in OPT header TTL)
-	PR            bool // Privacy Requested bit (bit 12 in OPT header TTL) - requires encrypted transport
-	OtsOptIn      bool
-	OtsOptOut     bool
+	CO            bool            // RFC 9824: Compact Ok bit (bit 14 in OPT header TTL)
+	PR            bool            // Privacy Requested bit (bit 12 in OPT header TTL) - requires encrypted transport
+	OotsOptIn     bool            // OOTS EDNS option present (opt-in by presence; -03)
 	HasEROption   bool            // True if ER option is present
 	ErAgentDomain string          // RFC9567: DNS Error Reporting agent domain
 	KeyState      *KeyStateOption // KeyState option if present
@@ -55,15 +52,9 @@ func ExtractFlagsAndEDNS0Options(r *dns.Msg) (*MsgOptions, error) {
 	for _, option := range opt.Option {
 		if localOpt, ok := option.(*dns.EDNS0_LOCAL); ok {
 			switch localOpt.Code {
-			case EDNS0_OTS_OPTION_CODE:
-				// Extract OTS option (1 octet payload)
-				if len(localOpt.Data) == 1 {
-					payload := localOpt.Data[0]
-					msgoptions.OtsOptIn = payload == OTS_OPT_IN
-					msgoptions.OtsOptOut = payload == OTS_OPT_OUT
-				} else {
-					return nil, fmt.Errorf("EDNS0_LOCAL: OTS option data length is not 1")
-				}
+			case EDNS0_OOTS_OPTION_CODE:
+				// -03: OPTION-LENGTH MUST be 0; presence alone is opt-in.
+				msgoptions.OotsOptIn = true
 			case EDNS0_ER_OPTION_CODE:
 				// Extract ER option (domain name in DNS wire format)
 				if len(localOpt.Data) > 0 {
@@ -101,4 +92,35 @@ func RequestUDPSize(r *dns.Msg) uint16 {
 		return dns.MinMsgSize
 	}
 	return size
+}
+
+// EnsureResponseOPT makes the response m carry an EDNS(0) OPT record whenever
+// the query r carried one. RFC 6891 §6.1.1 requires a compliant responder to
+// include an OPT in the response to any request that carried an OPT; omitting
+// it can make a strict resolver downgrade to plain DNS (dropping the DO bit and
+// breaking DNSSEC validation). The OPT advertises version 0 and udpsize (the
+// server's own reassembly capacity) and copies the DO bit from the query, as
+// mandated by RFC 3225 §3.
+//
+// It is deliberately a no-op in two cases:
+//   - the query carried no OPT: a plain-DNS query gets a plain-DNS reply; and
+//   - m already carries an OPT: the EDE / KeyState paths build their own OPT,
+//     and a second SetEdns0 would append a duplicate OPT to the Additional
+//     section.
+//
+// The OPT is attached with an empty option list, leaving room for EDE (or any
+// other option) to be appended later on error paths (AttachEDEToResponse finds
+// and reuses this OPT rather than creating a second one).
+func EnsureResponseOPT(m, r *dns.Msg, udpsize uint16) {
+	if m == nil || r == nil {
+		return
+	}
+	reqOpt := r.IsEdns0()
+	if reqOpt == nil {
+		return
+	}
+	if m.IsEdns0() != nil {
+		return
+	}
+	m.SetEdns0(udpsize, reqOpt.Do())
 }

@@ -12,7 +12,7 @@ import "testing"
 // Add every new tdns-local option code here as well as in edns0_defs.go.
 func TestLocalOptionCodesAreUnique(t *testing.T) {
 	codes := map[string]uint16{
-		"EDNS0_OTS_OPTION_CODE":           EDNS0_OTS_OPTION_CODE,
+		"EDNS0_OOTS_OPTION_CODE":          EDNS0_OOTS_OPTION_CODE,
 		"EDNS0_KEYSTATE_OPTION_CODE":      EDNS0_KEYSTATE_OPTION_CODE,
 		"EDNS0_REPORT_OPTION_CODE":        EDNS0_REPORT_OPTION_CODE,
 		"EDNS0_CHUNK_OPTION_CODE":         EDNS0_CHUNK_OPTION_CODE,
