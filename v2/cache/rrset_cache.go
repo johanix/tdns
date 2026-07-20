@@ -430,9 +430,6 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 				}
 				tmpauthserver.SetAlpn(alpnOrder)
 				tmpauthserver.SetTransports(transports)
-				if len(transports) > 0 {
-					tmpauthserver.SetPrefTransport(transports[0])
-				}
 				tmpauthserver.MergeTransportWeights(weights)
 			}
 		} else {
@@ -441,7 +438,6 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 				tmpauthserver.SetAlpn([]string{"do53"})
 				tmpauthserver.SetTransports([]core.Transport{core.TransportDo53})
 				tmpauthserver.MergeTransportWeights(map[core.Transport]uint8{core.TransportDo53: 100})
-				tmpauthserver.SetPrefTransport(core.TransportDo53)
 			} else {
 				tmpauthserver.SetAlpn(server.Alpn)
 				var transports []core.Transport
@@ -454,9 +450,6 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 				}
 				tmpauthserver.SetTransports(transports)
 				tmpauthserver.MergeTransportWeights(weights)
-				if len(transports) > 0 {
-					tmpauthserver.SetPrefTransport(transports[0])
-				}
 			}
 		}
 		authservers[server.Name] = tmpauthserver
@@ -514,12 +507,6 @@ func (rrcache *RRsetCacheT) AddServers(zone string, sm map[string]*AuthServer) e
 
 		// Always assign the shared instance to this zone's map
 		serverMap[name] = sharedServer
-
-		// Set preferred transport if we have valid transports
-		transports := sharedServer.GetTransports()
-		if len(transports) > 0 {
-			sharedServer.SetPrefTransport(transports[0])
-		}
 	}
 	if rrcache.Debug {
 		fmt.Printf("rrcache: Adding servers for zone %s to cache\n", zone)
@@ -718,9 +705,6 @@ func (rrcache *RRsetCacheT) PrimeWithHints(ctx context.Context, hintsfile string
 			}
 			if len(server.Transports) == 0 {
 				server.Transports = []core.Transport{core.TransportDo53}
-			}
-			if server.PrefTransport == 0 {
-				server.PrefTransport = core.TransportDo53
 			}
 			authMap[nsname] = server
 			rootns = append(rootns, nsname)

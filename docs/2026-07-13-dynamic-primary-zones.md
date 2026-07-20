@@ -209,3 +209,98 @@ snapshot merge → this feature → tdns-debug provisioning upgrade (§6).
   re-expansion preserves the rewiring.
 - Wildcard-listener and zero-address bootstrap edge cases WARN as specified.
 - tdns-debug churn run green against an API-provisioned primary.
+
+---
+
+## 10. Implementation scoping (2026-07-19, code-verified)
+
+A second pass, tracing every claim in §2 against the tree (verified on
+`feature/transactional-policy-reload-pr2 @ 6da9344`, i.e. main + the PR-2
+merge; the code paths for this feature are main-equivalent — file:line
+anchors below may drift by a few lines on main but the structures match).
+**Conclusion: §2's "how little is missing" holds for the *plumbing*, but the
+residual work is a *medium* feature (~1,000–1,500 LOC across ~12–15 files,
+roughly half tests), not a small one. The risk is not spread thin — it
+concentrates in exactly two spots (§10.3).** Not scheduled for implementation
+at the time of writing; recorded here so the scope is known before it is.
+
+### 10.1 Confirmed genuinely free (reused unchanged)
+
+- **Delete** — `RemoveDynamicZone` (`v2/dynamic_zones.go:852`) already removes
+  map + config + zone file and guards on `OptApiManagedZone`; zone-type
+  agnostic, works for primaries as-is.
+- **Restart / boot re-expansion** — `ParseZones` already expands any
+  `zconf.Template` (`v2/parseconfig.go:632`) and enqueues a file-load refresh
+  for primaries carrying a `Zonefile` (`v2/refreshengine.go:376`). Persist
+  `template:` + `type: primary` and boot rebuilds the zone through existing
+  code.
+- **Template expansion** — `ExpandTemplate` (`v2/parseconfig.go:1157`)
+  gap-fills `UpdatePolicy`/`Downstreams`/`DnssecPolicy`, unions options, and
+  `%s`-substitutes the zonefile with a traversal guard — exactly a primary's
+  needs.
+- **Persist/rollback + `ApiManaged` marker** — reused as-is;
+  `ZoneConf.Template` (`v2/structs.go:261`) already exists as a field.
+
+### 10.2 The actual work
+
+| # | Item | Where | ~LOC | Risk |
+|---|------|-------|------|------|
+| A | Gate 1: `dynamiczones.dynamic.allowed` **bool → `[]string`** + custom "legacy bool" config error | `v2/config.go:429`, `dynamic_zones.go:713,144` | 80–120 | **Med** — breaking config change; `DynamicZoneTypeConf` is *shared* with the catalog structs, so `dynamic` needs its own type; a generic decode won't produce the required named-syntax error |
+| B | Gate 2: per-template `dynamiczones: true` opt-in | `v2/structs.go:261` (new field), `ExpandTemplate` skip map | ~40 | Low |
+| C | **Primary branch** in `ProvisionDynamicZone` | `v2/dynamic_zones.go:708` | 120–180 | **Med** — genuinely new control flow, not a deleted check (§10.3) |
+| D | Bootstrap apex synthesis (SOA/NS/A/AAAA from `dnsengine.addresses`) | new helper (`dnsengine.addresses` at `v2/config.go:184`) | 100–140 | Low-Med — isolated; edge cases (wildcard/zero-address) are the test surface |
+| E | **Factor policy-activation out of `ParseZones`** into a shared helper | `v2/parseconfig.go:811–894` | 120–160 | **Med-High** — hottest boot path (§10.3) |
+| F | Inline-TSIG **reinterpreted for `downstreams`** | `stageInlineTsigKey` (`v2/dynamic_zones.go:629`) | 60–100 | Low-Med — downstreams are `AclEntry`, not `PeerConf` → a parallel impl, not a reuse |
+| G | Persist `Template` | `ZoneData` (**no such field today**) + `zoneDataToZoneConf` (`v2/dynamic_zones.go:362`) | ~15 | Low |
+| H | Reject `modify` on a primary (v1) | handler / `ModifyDynamicZone` | ~15 | Low |
+| I | API + CLI wiring (`--type`, `--template`; relax `MarkFlagRequired("primaries")`) | `v2/api_structs.go:211`, `apihandler_zone.go:217`, `cli/zone_cmds.go:211` | 80–120 | Low — mechanical, but public surface |
+| J | Docs + sample YAMLs + `allowed:` migration note | `cmdv2/auth/*.sample.yaml`, config guide | 60–100 | Low |
+| K | Acceptance tests (§9 gate matrix, round-trip, inline-TSIG, edge cases) — note `dynamic_zones_cores_test.go:50` currently asserts the **opposite** and must be inverted | test files | 300–500 | — |
+
+### 10.3 Where the risk concentrates
+
+Two items make this not-an-afternoon; the rest is as light as §2 claims.
+
+1. **`ParseZones` policy-activation extraction (item E).** Lines 811–894 are
+   not a self-contained block — they are entangled with the `broken_zones`
+   accumulator, `zd.SetError`, and `continue` control flow, and they mutate
+   `options` (`OptAllowUpdates`/`OptAllowChildUpdates`) with a
+   delegation-backend cross-check. Extracting a helper both callers share is
+   a refactor of the path **every zone boots through**; it needs
+   behaviour-preservation proof against the existing tests, not just a clean
+   compile.
+
+2. **Snapshot-integration of the primary branch (item C).** Per §8 (now
+   satisfied — `feature/zone-snapshot-correctness` merged, `965df6f`), the
+   freshly-bootstrapped apex must land through the post-snapshot
+   `publish()` / initial-snapshot-install path, or it trips the
+   "Ready ⇒ valid snapshot" apex guard added on the snapshot branch. The
+   secondary add path already routes through this, so the primary path
+   inherits it — but the *bootstrap content* is new, and that is exactly the
+   class of thing that passes a unit test and SERVFAILs live.
+
+Plus one smaller sharp edge: the **breaking `allowed:` bool→list cutover**
+(item A) touches every deployed config (nox, foffe testbeds), and an existing
+test asserts the pre-feature behaviour and must be inverted.
+
+### 10.4 Suggested PR sequence
+
+The work splits cleanly so the two risky items land in isolation, each
+independently testable:
+
+- **PR1** — gates (A + B) + persistence (G); pure config plumbing, no primary
+  path yet.
+- **PR2** — the `ParseZones` factoring (E) **alone**, behaviour-preserving,
+  guarded by the existing tests.
+- **PR3** — primary add branch (C) + apex synthesis (D) + inline-TSIG (F) +
+  API/CLI wiring (I), stacked on PR2.
+- **PR4** — docs/samples + the acceptance matrix (J + K).
+
+### 10.5 Verdict
+
+The original description's instinct about the *shape* is right: the design
+front-loaded the hard architectural decisions into this document, so what
+remains reads mechanical, and most of §10.2 genuinely is. But three items
+carry real regression risk (E, the snapshot-integration of C, the gate
+cutover), and the acceptance surface (§9) is broad. Net: **a medium feature,
+~3–5 focused sessions — not an afternoon, and not a large project either.**

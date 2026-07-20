@@ -19,4 +19,4 @@ require (
 	golang.org/x/tools v0.44.0 // indirect
 )
 
-replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.1
+replace github.com/miekg/dns => github.com/johanix/dns v1.1.72-johanix.2
