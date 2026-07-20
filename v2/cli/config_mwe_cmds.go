@@ -29,9 +29,27 @@ import (
 )
 
 // newConfigMweCmd builds the `config mwe` subcommand for the given role.
-// Only tdns-auth is supported today.
+// auth and agent generate different trees — see runConfigMwe /
+// runAgentConfigMwe — because tdns-agent serves no primary zones and never
+// signs, so it has no zone files or dnssec: block to generate.
 func newConfigMweCmd(role string) *cobra.Command {
 	var dir string
+
+	generates := `  - a self-signed cert/key pair under <dir>/certs (for the API server and the
+    encrypted DNS transports)
+  - two example primary zones — one unsigned, one signed — using two different
+    zone templates, with generated zone files under <dir>/zones
+  - a commented-out secondary zone using a third template`
+	if role == "agent" {
+		generates = `  - a self-signed cert/key pair under <dir>/certs (for the API server and the
+    encrypted DNS transports)
+  - two secondary zone templates and a commented-out secondary zone
+
+tdns-agent is secondary-only and never signs, so the generated config declares
+no zones and no dnssec: block; the agent starts clean and you add secondaries
+by uncommenting the example.`
+	}
+
 	c := &cobra.Command{
 		Use:   "mwe",
 		Short: "Generate a minimal working example config (+ certs, zones) for tdns-" + role,
@@ -41,20 +59,20 @@ Writes a single self-contained YAML to <dir>/tdns-` + role + `.yaml (or, if that
 file already exists, to <dir>/tdns-` + role + `.yaml.mwe so nothing is
 clobbered). Also generates, unless already present:
 
-  - a self-signed cert/key pair under <dir>/certs (for the API server and the
-    encrypted DNS transports)
-  - two example primary zones — one unsigned, one signed — using two different
-    zone templates, with generated zone files under <dir>/zones
-  - a commented-out secondary zone using a third template
+` + generates + `
 
 The DNS engine listens on IPv4 and IPv6 localhost; extra listen addresses are
 shown commented out. The generated tree is designed to pass
 ` + "`tdns-cli " + role + " config check`" + `.`,
 		Run: func(cmd *cobra.Command, args []string) {
-			if role != "auth" {
-				cliFatalf("config mwe is currently only implemented for auth")
+			switch role {
+			case "auth":
+				runConfigMwe(role, dir)
+			case "agent":
+				runAgentConfigMwe(role, dir)
+			default:
+				cliFatalf("config mwe is not implemented for %s", role)
 			}
-			runConfigMwe(role, dir)
 		},
 	}
 	c.Flags().StringVar(&dir, "dir", "/etc/tdns", "base directory for the generated config, certs and zones")

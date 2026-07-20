@@ -117,7 +117,7 @@ failing. Does not change anything; read-only.`,
 
 	bump := &cobra.Command{
 		Use:   "bump",
-		Short: "Bump SOA serial and epoch (if any) in tdns-auth version of zone",
+		Short: "Bump SOA serial and epoch (if any) in the daemon's version of the zone",
 		Run:   func(cmd *cobra.Command, args []string) { RunZoneBump(role, args) },
 	}
 
