@@ -40,6 +40,21 @@ type TargetUpdateStatus struct {
 // Note: the target.Addresses must already be in addr:port format.
 // func SendUpdate(msg *dns.Msg, zonename string, target *DsyncTarget) (int, error) {
 // func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, error, UpdateResult) {
+//
+// Return contract: the error reports a TRANSPORT-level failure — no address
+// produced a DNS response at all (i/o timeout, no route to host, connection
+// refused). A response carrying a rejection RCODE is a successful exchange, so
+// it is reported through the returned rcode with a NIL error; the caller decides
+// what the rejection means.
+//
+// This matters because the whole delegation-sync RCODE policy of
+// draft-ietf-dnsop-delegation-mgmt-via-ddns-02 (BADKEY -> re-bootstrap, REFUSED
+// -> bounded retry; see sendUpdateWithRetry) keys on the rcode. An earlier
+// version returned the rcode ONLY on the NOERROR path and folded every rejection
+// into "all target addresses responded with errors", which made those branches
+// unreachable: every BADKEY and REFUSED arrived as a transport error carrying
+// rcode 0. ksk_rollover_ds_push.go already documented this contract and
+// mis-categorised every parent rejection as SoftfailTransport because of it.
 func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResult, error) {
 	if zonename == "." {
 		lgDns.Error("SendUpdate: zone name not specified")
@@ -71,6 +86,13 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResul
 	// UPDATEs regardless of size, not only the large ones.
 	useTCP := true
 	client := &dns.Client{Net: "tcp"}
+
+	// The last rejection RCODE actually received from a responding address.
+	// Tracked across the loop so that a non-NOERROR answer is still reported to
+	// the caller after the remaining addresses have been tried: "try the next
+	// address" must not cost us the rejection reason.
+	var lastRcode int
+	var gotResponse bool
 
 	for _, dst := range addrs {
 		lgDns.Debug("sending DNS UPDATE", "zone", zonename, "dst", dst,
@@ -110,6 +132,8 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResul
 			Sender:     edeSender,
 		}
 
+		lastRcode, gotResponse = res.Rcode, true
+
 		if res.Rcode != dns.RcodeSuccess {
 			lgDns.Debug("got bad rcode", "rcode", dns.RcodeToString[res.Rcode], "response", res.String())
 			lgDns.Warn("error rcode from target, trying next address", "dst", dst, "rcode", dns.RcodeToString[res.Rcode])
@@ -120,7 +144,17 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResul
 		}
 	}
 
-	return 0, ur, fmt.Errorf("all target addresses %v responded with errors or were unreachable", addrs)
+	// At least one address answered, but none with NOERROR. That is a parent
+	// REJECTION, not a transport failure: hand the caller the rcode (and a nil
+	// error) so it can apply the draft's per-RCODE policy.
+	if gotResponse {
+		lgDns.Warn("all target addresses rejected the update", "zone", zonename,
+			"addresses", addrs, "rcode", dns.RcodeToString[lastRcode])
+		return lastRcode, ur, nil
+	}
+
+	// No address produced a DNS response at all — a genuine transport failure.
+	return 0, ur, fmt.Errorf("all target addresses %v were unreachable", addrs)
 }
 
 // Parent is the zone to apply the update to.
