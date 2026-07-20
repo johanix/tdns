@@ -72,6 +72,34 @@ func UpdateHandler(ctx context.Context, conf *Config) error {
 	}
 }
 
+// applyValidationFailure stamps the response with the rcode and EDE that
+// ValidateUpdate / TrustUpdate recorded for a rejected SIG(0) UPDATE, rather
+// than a hardcoded guess at the reason. Both rejection paths must use this so
+// they cannot drift apart again.
+//
+// us.ValidationRcode is authoritative: ValidateUpdate fails closed by
+// defaulting it to BADSIG on entry, and TrustUpdate defends the same way, so
+// an error return always carries a non-success rcode. The EDE is attached only
+// when one was actually selected — an EDE of 0 is "none recorded", not a
+// meaningful extended error.
+func applyValidationFailure(m *dns.Msg, us *UpdateStatus) {
+	m.SetRcode(m, int(us.ValidationRcode))
+	if us.RejectionEDE != 0 {
+		edns0.AttachEDEToResponse(m, us.RejectionEDE)
+	}
+	// BADSIG(16)/BADKEY(17)/BADTIME(18) are extended rcodes: the header field
+	// is 4 bits, and Pack() refuses Rcode > 0xF unless an OPT RR is present
+	// to carry the upper bits (ErrExtendedRcode). Every path that records
+	// such an rcode today also records an EDE, and AttachEDEToResponse
+	// creates the OPT — but that is an invariant of the current callers, not
+	// of this helper. Guarantee it here: without the OPT the rejection would
+	// fail to pack inside WriteMsg, whose error both rejection paths discard,
+	// and the child would see a TIMEOUT instead of a rejection.
+	if us.ValidationRcode > 0xF && m.IsEdns0() == nil {
+		m.SetEdns0(4096, false)
+	}
+}
+
 func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	w := dur.ResponseWriter
 	r := dur.Msg
@@ -278,11 +306,18 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	// this is an update to auth data) then the update will validate and the SIG(0) key will be
 	// trusted. We always trust SIG(0) keys in the zone we are authoritative for.
 
+	// applyValidationFailure is deliberately shared by both the ValidateUpdate
+	// and TrustUpdate rejection paths below. They previously each hardcoded
+	// their own rcode + EDE, and correcting only one of them is exactly how
+	// they drifted apart: the TrustUpdate path was fixed to relay the recorded
+	// values while the ValidateUpdate path kept answering SERVFAIL + "key not
+	// known" for what is actually FORMERR + a format error — mislabelling a
+	// malformed request as a server-side fault and directing the child at
+	// bootstrapping a key, which does not fix a malformed message.
 	err := zd.ValidateUpdate(r, dur.Status)
 	if err != nil {
 		zd.Logger.Printf("Error from ValidateUpdate(): %v", err)
-		m.SetRcode(m, dns.RcodeServerFailure)
-		edns0.AttachEDEToResponse(m, edns0.EDESig0KeyNotKnown)
+		applyValidationFailure(m, dur.Status)
 		w.WriteMsg(m)
 		return err
 	}
@@ -293,8 +328,7 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	err = zd.TrustUpdate(r, dur.Status)
 	if err != nil {
 		zd.Logger.Printf("Error from TrustUpdate(): %v", err)
-		m.SetRcode(m, int(dur.Status.ValidationRcode))
-		edns0.AttachEDEToResponse(m, edns0.EDESig0KeyKnownButNotTrusted)
+		applyValidationFailure(m, dur.Status)
 		w.WriteMsg(m)
 		return err
 	}
