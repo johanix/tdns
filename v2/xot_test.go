@@ -45,7 +45,7 @@ func newTestTLSCert(t *testing.T, dnsNames []string, ips []net.IP) (tls.Certific
 		NotBefore:    time.Now().Add(-time.Hour),
 		NotAfter:     time.Now().Add(time.Hour),
 		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		DNSNames:     dnsNames,
 		IPAddresses:  ips,
 		BasicConstraintsValid: true,
@@ -66,15 +66,22 @@ func newTestTLSCert(t *testing.T, dnsNames []string, ips []net.IP) (tls.Certific
 // same AXFR-out handler behind a TLS listener, optionally with TSIG.
 func startTestAXFRServerTLS(t *testing.T, zd *ZoneData, tsigProvider dns.TsigProvider, cert tls.Certificate) *axfrTestServer {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	tlsLn := tls.NewListener(ln, &tls.Config{
+	return startTestAXFRServerTLSConfig(t, zd, tsigProvider, &tls.Config{
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS13,
 		NextProtos:   []string{"dot"},
 	})
+}
+
+// startTestAXFRServerTLSConfig serves AXFR behind a caller-supplied TLS
+// listener config (used by the mTLS tests, which need ClientAuth set).
+func startTestAXFRServerTLSConfig(t *testing.T, zd *ZoneData, tsigProvider dns.TsigProvider, tlsCfg *tls.Config) *axfrTestServer {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	tlsLn := tls.NewListener(ln, tlsCfg)
 
 	srv := &axfrTestServer{addr: ln.Addr().String()}
 	zone := dns.Fqdn(zd.ZoneName)
@@ -740,6 +747,141 @@ func TestXoT_DoTransferSOAProbeOverDoT(t *testing.T) {
 	if _, _, err := secBad.DoTransfer(conf); err == nil {
 		t.Fatal("SOA probe with wrong pin must fail")
 	}
+}
+
+// --- Phase 5: primary-side downstream mTLS -----------------------------------
+
+// mtlsServerConf builds a Config with the given downstream-auth settings and
+// returns the DoT listener tls.Config via the production builder.
+func mtlsServerTLS(t *testing.T, serverCert tls.Certificate, auth string, pins []string, caFile string) *tls.Config {
+	t.Helper()
+	conf := &Config{}
+	conf.DnsEngine.DownstreamAuth = auth
+	conf.DnsEngine.DownstreamPins = pins
+	conf.DnsEngine.DownstreamCA = caFile
+	cfg, err := ServerTLSConfigForDoT(conf, &serverCert, true)
+	if err != nil {
+		t.Fatalf("ServerTLSConfigForDoT: %v", err)
+	}
+	return cfg
+}
+
+// TestXoT_ServerMTLSPin: with downstream-auth pin, only a client presenting a
+// pinned certificate can transfer; unpinned and cert-less clients fail.
+func TestXoT_ServerMTLSPin(t *testing.T) {
+	zd := loadTestTransferZone(t, basicZone)
+	serverCert, serverLeaf := newTestTLSCert(t, []string{"ns1.test"}, []net.IP{net.ParseIP("127.0.0.1")})
+	clientCert, clientLeaf := newTestTLSCert(t, []string{"sec1.test"}, nil)
+	otherCert, _ := newTestTLSCert(t, []string{"rogue.test"}, nil)
+
+	srvTLS := mtlsServerTLS(t, serverCert, "pin", []string{SPKISHA256(clientLeaf)}, "")
+	srv := startTestAXFRServerTLSConfig(t, zd, nil, srvTLS)
+	defer srv.shutdown()
+
+	pool := x509.NewCertPool()
+	pool.AddCert(serverLeaf)
+	base := &tls.Config{RootCAs: pool, ServerName: "ns1.test", MinVersion: tls.VersionTLS13}
+
+	// Pinned client: admitted.
+	good := base.Clone()
+	good.Certificates = []tls.Certificate{clientCert}
+	rrs, err := axfrClientTLS(t, srv.addr, zd.ZoneName, good, nil)
+	if err != nil {
+		t.Fatalf("pinned client transfer failed: %v", err)
+	}
+	if len(rrs) < 4 {
+		t.Fatalf("expected full zone, got %d RRs", len(rrs))
+	}
+
+	// Unpinned client cert: refused.
+	bad := base.Clone()
+	bad.Certificates = []tls.Certificate{otherCert}
+	if _, err := axfrClientTLS(t, srv.addr, zd.ZoneName, bad, nil); err == nil {
+		t.Fatal("unpinned client must be refused")
+	}
+
+	// No client cert at all: refused.
+	if _, err := axfrClientTLS(t, srv.addr, zd.ZoneName, base.Clone(), nil); err == nil {
+		t.Fatal("cert-less client must be refused")
+	}
+}
+
+// TestXoT_ServerMTLSCA: with downstream-auth ca, chain verification against
+// the configured CA bundle gates the transfer.
+func TestXoT_ServerMTLSCA(t *testing.T) {
+	zd := loadTestTransferZone(t, basicZone)
+	serverCert, serverLeaf := newTestTLSCert(t, []string{"ns1.test"}, []net.IP{net.ParseIP("127.0.0.1")})
+	clientCert, clientLeaf := newTestTLSCert(t, []string{"sec1.test"}, nil)
+	otherCert, _ := newTestTLSCert(t, []string{"rogue.test"}, nil)
+
+	caPath := t.TempDir() + "/downstream-ca.pem"
+	if err := writeCertPEM(caPath, clientLeaf.Raw); err != nil {
+		t.Fatalf("write ca: %v", err)
+	}
+	srvTLS := mtlsServerTLS(t, serverCert, "ca", nil, caPath)
+	srv := startTestAXFRServerTLSConfig(t, zd, nil, srvTLS)
+	defer srv.shutdown()
+
+	pool := x509.NewCertPool()
+	pool.AddCert(serverLeaf)
+	base := &tls.Config{RootCAs: pool, ServerName: "ns1.test", MinVersion: tls.VersionTLS13}
+
+	good := base.Clone()
+	good.Certificates = []tls.Certificate{clientCert}
+	if _, err := axfrClientTLS(t, srv.addr, zd.ZoneName, good, nil); err != nil {
+		t.Fatalf("CA-verified client transfer failed: %v", err)
+	}
+
+	bad := base.Clone()
+	bad.Certificates = []tls.Certificate{otherCert}
+	if _, err := axfrClientTLS(t, srv.addr, zd.ZoneName, bad, nil); err == nil {
+		t.Fatal("client outside the CA must be refused")
+	}
+}
+
+// TestXoT_ServerMTLSConfigValidation: bad downstream-auth configs fail at
+// listener build (startup), not at the first connection.
+func TestXoT_ServerMTLSConfigValidation(t *testing.T) {
+	serverCert, _ := newTestTLSCert(t, []string{"ns1.test"}, nil)
+	mk := func(auth string, pins []string, ca string) error {
+		conf := &Config{}
+		conf.DnsEngine.DownstreamAuth = auth
+		conf.DnsEngine.DownstreamPins = pins
+		conf.DnsEngine.DownstreamCA = ca
+		_, err := ServerTLSConfigForDoT(conf, &serverCert, true)
+		return err
+	}
+	if err := mk("pin", nil, ""); err == nil {
+		t.Fatal("pin without pins must fail")
+	}
+	if err := mk("pin", []string{"junk"}, ""); err == nil {
+		t.Fatal("malformed pin must fail")
+	}
+	if err := mk("ca", nil, ""); err == nil {
+		t.Fatal("ca without downstream-ca must fail")
+	}
+	if err := mk("ca", nil, "/nonexistent.pem"); err == nil {
+		t.Fatal("unreadable downstream-ca must fail")
+	}
+	if err := mk("bogus", nil, ""); err == nil {
+		t.Fatal("unknown mode must fail")
+	}
+	// The IMR front end never applies downstream auth even when configured.
+	conf := &Config{}
+	conf.DnsEngine.DownstreamAuth = "pin"
+	conf.DnsEngine.DownstreamPins = []string{SPKISHA256FromB64Test()}
+	cfg, err := ServerTLSConfigForDoT(conf, &serverCert, false)
+	if err != nil {
+		t.Fatalf("imr-side build: %v", err)
+	}
+	if cfg.ClientAuth != tls.NoClientCert {
+		t.Fatal("imr-side listener must not request client certs")
+	}
+}
+
+// SPKISHA256FromB64Test returns a syntactically valid pin for config tests.
+func SPKISHA256FromB64Test() string {
+	return base64.StdEncoding.EncodeToString(make([]byte, sha256.Size))
 }
 
 // TestXoT_TransferRejectsUntrustedCert: the same server, but the client does

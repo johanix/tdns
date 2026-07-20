@@ -40,6 +40,14 @@ dnsengine:
    # those listeners are not started (do53 is unaffected).
    certfile:  /etc/tdns/certs/servers/localhost..crt
    keyfile:   /etc/tdns/certs/servers/localhost..key
+   # Optional XoT mTLS (RFC 9103): authenticate downstream secondaries at the
+   # TLS layer on the DoT listener. Opt-in; absent = no client certificate
+   # requested. TSIG + the per-zone downstreams: ACL keep working either way.
+   # See docs/2026-07-21-xot-operations.md.
+   #downstream-auth: pin        # pin | ca
+   #downstream-pins:            # base64 SPKI SHA-256 of each secondary's cert
+   #   - "sec1-spki-sha256-base64="
+   #downstream-ca: /etc/tdns/certs/downstream-ca.pem   # for downstream-auth: ca
    # outbound_soa_serial controls the SOA serial advertised to secondaries:
    #   keep      — outbound = inbound serial (default; current behavior)
    #   unixtime  — outbound = time.Now().Unix() at zone load

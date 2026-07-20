@@ -252,6 +252,67 @@ func (conf *Config) verifyPeerCertDANE(cs tls.ConnectionState, name, port string
 	return fmt.Errorf("xot: no TLSA record at _%s._tcp.%s matches the peer certificate", port, name)
 }
 
+// ServerTLSConfigForDoT builds the DoT listener's tls.Config. With
+// applyDownstreamAuth false (the IMR's DoT front end) or no downstream-auth
+// configured, the result matches the historical config: server cert only, no
+// client certificate requested. With dnsengine.downstream-auth set, the auth
+// listener enforces mTLS on every DoT connection:
+//   - pin: the client must present a certificate and its SPKI SHA-256 must
+//     match one of dnsengine.downstream-pins (chain building skipped — the
+//     mirror of the client-side pin mode).
+//   - ca: standard mTLS chain verification against dnsengine.downstream-ca.
+//
+// Client-side DANE (TLSA per downstream) is deliberately not offered: the
+// server cannot know which downstream is connecting before the handshake, so
+// there is no name to base a TLSA lookup on. Pins cover that case statically.
+func ServerTLSConfigForDoT(conf *Config, cert *tls.Certificate, applyDownstreamAuth bool) (*tls.Config, error) {
+	tlsCfg := &tls.Config{
+		Certificates: []tls.Certificate{*cert},
+		MinVersion:   tls.VersionTLS13,
+		NextProtos:   []string{"dot"},
+	}
+	if !applyDownstreamAuth {
+		return tlsCfg, nil
+	}
+	de := conf.DnsEngine
+	switch de.DownstreamAuth {
+	case "":
+		// No client-cert policy configured — serve exactly as before.
+	case "pin":
+		if len(de.DownstreamPins) == 0 {
+			return nil, fmt.Errorf("dnsengine: downstream-auth pin requires downstream-pins")
+		}
+		for _, pin := range de.DownstreamPins {
+			raw, err := base64.StdEncoding.DecodeString(pin)
+			if err != nil || len(raw) != sha256.Size {
+				return nil, fmt.Errorf("dnsengine: downstream pin %q is not a base64 SHA-256 SPKI digest", pin)
+			}
+		}
+		pins := append([]string(nil), de.DownstreamPins...)
+		tlsCfg.ClientAuth = tls.RequireAnyClientCert
+		tlsCfg.VerifyConnection = func(cs tls.ConnectionState) error {
+			return verifyPeerCertPins(cs, pins)
+		}
+	case "ca":
+		if de.DownstreamCA == "" {
+			return nil, fmt.Errorf("dnsengine: downstream-auth ca requires downstream-ca")
+		}
+		data, err := os.ReadFile(de.DownstreamCA)
+		if err != nil {
+			return nil, fmt.Errorf("dnsengine: reading downstream-ca: %v", err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(data) {
+			return nil, fmt.Errorf("dnsengine: no usable certificates in downstream-ca %s", de.DownstreamCA)
+		}
+		tlsCfg.ClientCAs = pool
+		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+	default:
+		return nil, fmt.Errorf("dnsengine: unknown downstream-auth %q (supported: pin, ca)", de.DownstreamAuth)
+	}
+	return tlsCfg, nil
+}
+
 // lookupTLSAValidated returns the TLSA RRset at _<port>._tcp.<name>. DANE over
 // an unvalidated lookup is meaningless, so this fails closed: no IMR, lookup
 // failure, or a not-secure validation state are all errors. The per-server

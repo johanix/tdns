@@ -16,21 +16,25 @@ import (
 	"github.com/spf13/viper"
 )
 
+// DnsDoTEngine starts the DoT listeners. applyDownstreamAuth selects whether
+// the dnsengine.downstream-auth mTLS policy applies: true for the auth
+// listener (the XoT primary side), false for the IMR's DoT front end, which
+// serves arbitrary clients and must never demand client certificates.
 func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs []string, cert *tls.Certificate,
-	ourDNSHandler func(w dns.ResponseWriter, r *dns.Msg)) error {
+	ourDNSHandler func(w dns.ResponseWriter, r *dns.Msg), applyDownstreamAuth bool) error {
 
 	if cert == nil {
 		return fmt.Errorf("DnsDoTEngine:DoT certificate is not set")
 	}
 
 	lgDns.Info("DnsEngine: DoT addresses", "addrs", dotaddrs)
-	// tlsConfig := DoTTLSConfig(certFile, keyFile)
 
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{*cert},
-		MinVersion:   tls.VersionTLS13, // or TLS12 if you need broader support
-		// ClientAuth: tls.NoClientCert, // optional: change if you want client certs
-		NextProtos: []string{"dot"}, // important for DoT
+	tlsConfig, err := ServerTLSConfigForDoT(conf, cert, applyDownstreamAuth)
+	if err != nil {
+		return fmt.Errorf("DnsDoTEngine: %v", err)
+	}
+	if tlsConfig.ClientAuth != tls.NoClientCert {
+		lgDns.Info("DnsEngine: DoT downstream mTLS enabled", "mode", conf.DnsEngine.DownstreamAuth)
 	}
 
 	// Wrap the DNS handler to add logging
