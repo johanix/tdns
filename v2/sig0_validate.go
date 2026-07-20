@@ -318,6 +318,21 @@ func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 
 	for _, key := range us.Signers {
 		// dump.P(key)
+		// A located key confers trust ONLY if its OWN signature verified over
+		// the message bytes. us.Validated above is an aggregate ("at least one
+		// signature verified"), which is not sufficient here: ValidateUpdate's
+		// discovery loop appends a signer for every SIG RR matched on
+		// SignerName+KeyTag alone (before any signature is checked), and its
+		// verification loop breaks on the first success — so later entries keep
+		// Validated=false. Without this per-signer check, a multi-SIG(0) UPDATE
+		// could pair a genuine signature from an untrusted key with a forged SIG
+		// naming a trusted key and be granted "by-trusted" status even though
+		// the trusted key's signature was never verified. That would also defeat
+		// the untrusted-KEY-delete refusal in ApproveTrustUpdate, which is gated
+		// on us.ValidatedByTrustedKey.
+		if !key.Validated {
+			continue
+		}
 		if key.Sig0Key.Trusted {
 			lgDns.Info("TrustUpdate: update signed by trusted SIG(0) key", "signer", key.Name, "keyid", key.KeyId)
 			us.SignatureType = "by-trusted"
