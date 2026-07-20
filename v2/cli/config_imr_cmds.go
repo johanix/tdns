@@ -115,6 +115,7 @@ func runImrConfigCheck(explicitPath string, offline bool) {
 		return
 	}
 	rep.pass("Config file", "load", "config file (and includes) parsed as YAML")
+	checkLogSection(v, cfgPath, rep)
 
 	checkRequiredFields(v, cfgPath, rep, tdns.AppTypeImr)
 
