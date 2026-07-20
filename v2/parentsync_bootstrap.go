@@ -122,6 +122,18 @@ func (conf *Config) ParentSyncAfterKeyPublication(zone ZoneName, keyName string,
 			delay *= 2
 			continue
 
+		case edns0.KeyStateTemporaryFailure:
+			// keystate-03: the receiver understood the inquiry but is
+			// temporarily unable to determine the key's state (e.g. a transient
+			// truststore error) — the child MAY retry later. Keep polling with
+			// backoff rather than giving up as the default branch would.
+			lgElect.Info("ParentSyncAfterKeyPublication: parent reports a temporary failure, will retry",
+				"zone", zone, "keyid", keyid, "attempt", attempt)
+			UpdateParentState(kdb, keyName, keyid, keyState)
+			time.Sleep(delay)
+			delay *= 2
+			continue
+
 		default:
 			lgElect.Info("ParentSyncAfterKeyPublication: parent returned unexpected state",
 				"zone", zone, "keyid", keyid, "state", keyState)
