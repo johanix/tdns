@@ -208,12 +208,60 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 	// At this point we have a set of zero or more keys that match the signername and keyid for a
 	// SIG validating the update. Now we must iterate over the keys to see if any of them actually
 	// verify correctly.
+	verifySigners(us, msgbuf)
 
-	// Iterate by index so signer.Validated writes back into the
-	// slice (the previous range-over-value form mutated a copy).
-	// Break on first success so a later failing signer can't
-	// overwrite ValidationRcode / RejectionEDE / Validated and
-	// leave the status struct internally inconsistent.
+	// When we get here then we have tried to validate all signatures and the result is in
+	// the us.Signers data.
+	return nil
+}
+
+// sig0Verify indirects SIG(0) signature verification so that verifySigners can
+// be exercised without a real, fully-packed, genuinely-signed DNS message.
+//
+// This seam exists because the per-signer semantics below CANNOT be driven
+// end-to-end against the real verifier today: miekg/dns's SIG.Verify always
+// verifies the LAST record in the packed buffer whatever *SIG receiver it is
+// called on (it derives bodyend and `sig := buf[sigend:]` from the buffer
+// tail, using the receiver only for the KeyTag/SignerName/Algorithm sanity
+// checks). With multiple SIG(0) RRs only the last one can ever verify, so in a
+// real message "the first signer that verifies" is necessarily also the last,
+// and the multi-signer ordering behaviour is unreachable.
+//
+// Production code MUST NOT reassign this. Tests reassign it and restore the
+// original via t.Cleanup (see stubSig0Verify).
+var sig0Verify = func(sig *dns.SIG, key *dns.KEY, msgbuf []byte) error {
+	return sig.Verify(key, msgbuf)
+}
+
+// verifySigners verifies each located signer's own signature over msgbuf and
+// records the outcome in us: signer.Validated per signer, plus the aggregate
+// ValidationRcode / RejectionEDE / Validated / SignerName fields.
+//
+// Iterate by index so signer.Validated writes back into the
+// slice (the previous range-over-value form mutated a copy).
+//
+// EVERY signer is verified; we deliberately do NOT stop at the first
+// success. signer.Validated is a PER-SIGNER property ("this signer's own
+// signature verified over the message bytes") and TrustUpdate reads it to
+// decide whether a given signer may confer trust. Breaking on the first
+// success left every later signer at Validated=false, which made trust
+// depend on SIG RR ORDER: in a dual-signed rollover UPDATE (old trusted
+// key + new not-yet-trusted key, both signing genuinely), if the untrusted
+// key's SIG happened to come first the trusted key was never verified,
+// TrustUpdate skipped it on !key.Validated, and a legitimate rollover was
+// refused. Reversing the SIG order accepted the very same message.
+//
+// The aggregate fields (ValidationRcode / RejectionEDE / Validated /
+// SignerName) still mean "at least one signature verified", so a later
+// FAILING signer must not overwrite an earlier success — every failure
+// path below is guarded on !us.Validated, which is what the old `break`
+// was really protecting. First success wins for SignerName.
+//
+// This does not weaken the check TrustUpdate relies on: a forged SIG
+// naming a trusted key still fails Verify(), keeps Validated=false, and is
+// still skipped there. The signer set is bounded by ValidateUpdate's
+// discovery loop, which only appends signers whose key was actually locatable.
+func verifySigners(us *UpdateStatus, msgbuf []byte) {
 	for i := range us.Signers {
 		signer := &us.Signers[i]
 		// Use the per-signer SIG, not the outer sig variable (which
@@ -227,7 +275,7 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 			continue
 		}
 		keyrr := signer.Sig0Key.Key
-		err = ssig.Verify(&keyrr, msgbuf)
+		err := sig0Verify(ssig, &keyrr, msgbuf)
 		if err != nil {
 			// This key failed to validate the update. Categorize the
 			// failure: if NOW is outside the signature's validity
@@ -239,11 +287,16 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 			// rollover overhaul: surface this as a specific rcode +
 			// EDE so the child operator can diagnose clock skew
 			// without parent-side log access.
-			if !cache.WithinValidityPeriod(ssig.Inception, ssig.Expiration, time.Now().UTC()) {
-				us.ValidationRcode = dns.RcodeBadTime
-				us.RejectionEDE = edns0.EDESig0BadTime
-			} else if us.RejectionEDE == 0 {
-				us.RejectionEDE = edns0.EDESig0BadSignature
+			//
+			// Guarded on !us.Validated: an earlier signer may already have
+			// verified, and this failure must not downgrade that success.
+			if !us.Validated {
+				if !cache.WithinValidityPeriod(ssig.Inception, ssig.Expiration, time.Now().UTC()) {
+					us.ValidationRcode = dns.RcodeBadTime
+					us.RejectionEDE = edns0.EDESig0BadTime
+				} else if us.RejectionEDE == 0 {
+					us.RejectionEDE = edns0.EDESig0BadSignature
+				}
 			}
 			lgDns.Warn("ValidateUpdate: signature verification failed", "signer", signer.Name, "keyid", signer.KeyId, "err", err)
 			lgDns.Debug("ValidateUpdate: timing details", "currentTime", time.Now(), "inception", ssig.Inception, "expiration", ssig.Expiration)
@@ -253,27 +306,32 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 		// Ok, we have a signature that validated.
 		if !cache.WithinValidityPeriod(ssig.Inception, ssig.Expiration, time.Now().UTC()) {
 			lgDns.Warn("ValidateUpdate: signature NOT within validity period", "signer", signer.Name, "keyid", signer.KeyId)
-			us.ValidationRcode = dns.RcodeBadTime
-			us.RejectionEDE = edns0.EDESig0BadTime
+			// Guarded: must not downgrade an earlier signer's success.
+			if !us.Validated {
+				us.ValidationRcode = dns.RcodeBadTime
+				us.RejectionEDE = edns0.EDESig0BadTime
+			}
 			// This key validated the signature, but the signature is not within its validity period.
 			// Try the next key.
 			continue
 		}
 
-		// Signature is valid and within its validity period.
+		// Signature is valid and within its validity period. Mark THIS signer
+		// unconditionally — that is the per-signer fact TrustUpdate consumes.
 		lgDns.Info("ValidateUpdate: signature within validity period", "signer", signer.Name, "keyid", signer.KeyId)
 		lgDns.Info("ValidateUpdate: update validated by known and validated key")
-		us.ValidationRcode = dns.RcodeSuccess
-		us.RejectionEDE = 0 // success — clear any prior key's failure EDE
-		us.Validated = true // Now at least one key has validated the update
-		us.SignerName = signer.Name
 		signer.Validated = true
-		break
-	}
 
-	// When we get here then we have tried to validate all signatures and the result is in
-	// the us.Signers data.
-	return nil
+		// Aggregate status: record the first success and leave it alone
+		// thereafter, so SignerName stays stable and a later signer cannot
+		// churn the rcode/EDE.
+		if !us.Validated {
+			us.ValidationRcode = dns.RcodeSuccess
+			us.RejectionEDE = 0 // success — clear any prior key's failure EDE
+			us.Validated = true // Now at least one key has validated the update
+			us.SignerName = signer.Name
+		}
+	}
 }
 
 // BERRA TODO kolla om man kan förbättra detta, så man kan skicka en EDE
@@ -281,13 +339,20 @@ func (zd *ZoneData) ValidateUpdate(r *dns.Msg, us *UpdateStatus) error {
 func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 	// dump.P(us)
 	if len(us.Signers) == 0 {
-		// No locatable signing key for any SIG in the UPDATE. This branch
-		// also covers a fully-unsigned UPDATE (no SIG RR at all): both map
-		// to BADKEY(17). Per draft-ietf-dnsop-delegation-mgmt-via-ddns-02
-		// §"RCODE BADKEY", an unknown key is a definitive BADKEY so the
-		// child falls back to bootstrapping its key into the receiver.
-		// Conflating "unsigned" with "unknown key" is a deliberate choice:
-		// a child re-bootstrapping off its own unsigned UPDATE is harmless.
+		// No locatable signing key for any SIG in the UPDATE. Per
+		// draft-ietf-dnsop-delegation-mgmt-via-ddns-02 §"RCODE BADKEY", an
+		// unknown key is a definitive BADKEY(17) so the child falls back to
+		// bootstrapping its key into the receiver.
+		//
+		// This also covers an UPDATE carrying no SIG RR at all but a
+		// non-empty Additional section (in practice: an OPT RR) — the
+		// discovery loop finds no SIG, so us.Signers is empty and we land
+		// here. Conflating "unsigned" with "unknown key" is a deliberate
+		// choice: a child re-bootstrapping off its own unsigned UPDATE is
+		// harmless. Note it does NOT cover an UPDATE with a completely
+		// empty Additional section: that short-circuits earlier, in
+		// ValidateUpdate's len(r.Extra)==0 branch, as FORMERR +
+		// EDESig0FormatError, which the responder now relays.
 		us.ValidationRcode = dns.RcodeBadKey
 		us.RejectionEDE = edns0.EDESig0KeyNotKnown
 		return fmt.Errorf("update has no locatable signing key")
@@ -305,6 +370,16 @@ func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 	// signature. A well-formed self-signed key upload verifies, so it has
 	// Validated=true and is unaffected.
 	if !us.Validated {
+		// Defensive: this branch relies on ValidateUpdate having run first and
+		// left a non-success ValidationRcode (its line-31 fail-closed default).
+		// If TrustUpdate is ever reached with a fresh UpdateStatus{} from a
+		// future call site, ValidationRcode would still be its zero value
+		// (RcodeSuccess) while we return an error — reintroducing exactly the
+		// "responder answers NOERROR for a rejected update" bug that default
+		// was added to prevent. Do not rely on a precondition we can enforce.
+		if us.ValidationRcode == dns.RcodeSuccess {
+			us.ValidationRcode = dns.RcodeBadSig
+		}
 		if us.RejectionEDE == 0 {
 			us.RejectionEDE = edns0.EDESig0BadSignature
 		}
@@ -313,6 +388,26 @@ func (zd *ZoneData) TrustUpdate(r *dns.Msg, us *UpdateStatus) error {
 
 	for _, key := range us.Signers {
 		// dump.P(key)
+		// A located key confers trust ONLY if its OWN signature verified over
+		// the message bytes. us.Validated above is an aggregate ("at least one
+		// signature verified"), which is not sufficient here: ValidateUpdate's
+		// discovery loop appends a signer for every SIG RR matched on
+		// SignerName+KeyTag alone, before any signature is checked, so a signer
+		// whose signature then failed to verify is still present with
+		// Validated=false. Without this per-signer check, a multi-SIG(0) UPDATE
+		// could pair a genuine signature from an untrusted key with a forged SIG
+		// naming a trusted key and be granted "by-trusted" status even though
+		// the trusted key's signature was never verified. That would also defeat
+		// the untrusted-KEY-delete refusal in ApproveTrustUpdate, which is gated
+		// on us.ValidatedByTrustedKey.
+		//
+		// ValidateUpdate verifies every signer (it does not stop at the first
+		// success), so in a legitimately dual-signed rollover UPDATE both the
+		// old and the new key carry Validated=true and the loop below finds the
+		// trusted one regardless of SIG RR order.
+		if !key.Validated {
+			continue
+		}
 		if key.Sig0Key.Trusted {
 			lgDns.Info("TrustUpdate: update signed by trusted SIG(0) key", "signer", key.Name, "keyid", key.KeyId)
 			us.SignatureType = "by-trusted"
