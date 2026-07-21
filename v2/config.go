@@ -197,6 +197,11 @@ type DnsEngineConf struct {
 	DownstreamAuth string   `yaml:"downstream-auth,omitempty" mapstructure:"downstream-auth" validate:"omitempty,oneof=pin ca"`
 	DownstreamPins []string `yaml:"downstream-pins,omitempty" mapstructure:"downstream-pins"`
 	DownstreamCA   string   `yaml:"downstream-ca,omitempty" mapstructure:"downstream-ca"`
+	// DownstreamNames (optional, ca mode only): with a shared CA, restrict
+	// which chain-valid client certs are accepted to those carrying one of
+	// these DNS SANs. Empty = any cert that chains to downstream-ca (the
+	// BIND model, fine for a dedicated CA).
+	DownstreamNames []string `yaml:"downstream-names,omitempty" mapstructure:"downstream-names"`
 	// OutboundSoaSerial controls the SOA serial advertised on outbound zone
 	// transfers and NOTIFYs. One of:
 	//   keep     — outbound = inbound serial (default; current behavior).

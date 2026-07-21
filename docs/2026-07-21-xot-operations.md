@@ -180,6 +180,9 @@ dnsengine:
    # ...or ca: standard mTLS against a CA bundle
    #downstream-auth: ca
    #downstream-ca:   /etc/tdns/certs/downstream-ca.pem
+   # optional with a SHARED ca: additionally require an allowlisted DNS SAN
+   # in the client cert (empty = any cert chaining to downstream-ca)
+   #downstream-names: [ sec1.example.net, sec2.example.net ]
 ```
 
 Notes:

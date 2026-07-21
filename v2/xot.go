@@ -307,6 +307,27 @@ func ServerTLSConfigForDoT(conf *Config, cert *tls.Certificate, applyDownstreamA
 		}
 		tlsCfg.ClientCAs = pool
 		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
+		// Optional identity binding for a shared CA (LE-4): the client
+		// leaf must additionally carry an allowlisted DNS SAN. The chain
+		// is already verified by RequireAndVerifyClientCert when
+		// VerifyConnection runs; this only narrows which subjects count.
+		if len(de.DownstreamNames) > 0 {
+			allowed := make(map[string]bool, len(de.DownstreamNames))
+			for _, n := range de.DownstreamNames {
+				allowed[strings.ToLower(strings.TrimSuffix(n, "."))] = true
+			}
+			tlsCfg.VerifyConnection = func(cs tls.ConnectionState) error {
+				if len(cs.PeerCertificates) == 0 {
+					return fmt.Errorf("xot: downstream presented no certificate")
+				}
+				for _, san := range cs.PeerCertificates[0].DNSNames {
+					if allowed[strings.ToLower(strings.TrimSuffix(san, "."))] {
+						return nil
+					}
+				}
+				return fmt.Errorf("xot: downstream cert SANs %v match none of the %d allowed downstream-names", cs.PeerCertificates[0].DNSNames, len(allowed))
+			}
+		}
 	default:
 		return nil, fmt.Errorf("dnsengine: unknown downstream-auth %q (supported: pin, ca)", de.DownstreamAuth)
 	}
