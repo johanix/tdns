@@ -619,11 +619,14 @@ func (rrcache *RRsetCacheT) StoreTLSAForServer(base, owner string, rrset *core.R
 	if rrcache == nil || rrset == nil || len(rrset.RRs) == 0 {
 		return
 	}
-	base = dns.Fqdn(strings.TrimSpace(base))
+	// Canonicalize (lowercase + fqdn) so mixed-case names key the same bucket;
+	// DNS names are case-insensitive (ASCII, RFC 4343) and dns.Fqdn alone
+	// preserves case, which would split NS1.Example. from ns1.example.
+	base = dns.CanonicalName(strings.TrimSpace(base))
 	if base == "." || base == "" {
 		return
 	}
-	owner = dns.Fqdn(strings.TrimSpace(owner))
+	owner = dns.CanonicalName(strings.TrimSpace(owner))
 	if owner == "." || owner == "" {
 		return
 	}
@@ -665,8 +668,9 @@ func (rrcache *RRsetCacheT) LookupTLSAForServer(base, owner string) *CachedRRset
 	if rrcache == nil {
 		return nil
 	}
-	base = dns.Fqdn(strings.TrimSpace(base))
-	owner = dns.Fqdn(strings.TrimSpace(owner))
+	// Canonicalize to match StoreTLSAForServer's keying (case-insensitive).
+	base = dns.CanonicalName(strings.TrimSpace(base))
+	owner = dns.CanonicalName(strings.TrimSpace(owner))
 	st, ok := rrcache.ServerTLSA.Get(base)
 	if !ok || st == nil {
 		return nil
@@ -687,7 +691,7 @@ func (rrcache *RRsetCacheT) SnapshotTLSAForServer(base string) map[string]*Cache
 	if rrcache == nil {
 		return nil
 	}
-	st, ok := rrcache.ServerTLSA.Get(dns.Fqdn(strings.TrimSpace(base)))
+	st, ok := rrcache.ServerTLSA.Get(dns.CanonicalName(strings.TrimSpace(base)))
 	if !ok || st == nil {
 		return nil
 	}

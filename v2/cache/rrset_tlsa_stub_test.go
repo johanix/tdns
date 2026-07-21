@@ -104,3 +104,29 @@ func TestDiscoverThenStubKeepsGlue(t *testing.T) {
 		t.Fatalf("stub private instance has wrong addrs: %v", sm[nsFQ].Addrs)
 	}
 }
+
+// TestServerTLSACaseInsensitive: DNS names are case-insensitive (ASCII, RFC
+// 4343), so a TLSA stored under one letter case must be retrievable under
+// another. The cache keys are canonicalized (dns.CanonicalName); a plain
+// dns.Fqdn would split NS1.Example. from ns1.example. into separate buckets.
+func TestServerTLSACaseInsensitive(t *testing.T) {
+	rrcache := NewRRsetCache(log.Default(), false, false)
+	const ownerLC = "_853._tcp.ns1.example."
+
+	// Store under UPPER/mixed case...
+	rrcache.StoreTLSAForServer("NS1.Example.", "_853._TCP.NS1.Example.", tlsaRRset(t, ownerLC), ValidationStateSecure)
+
+	// ...look up under lower case.
+	if got := rrcache.LookupTLSAForServer("ns1.example.", ownerLC); got == nil {
+		t.Fatal("lookup missed a record stored under different letter case (keys not canonicalized)")
+	}
+	// ...and with a mixed-case owner too.
+	if got := rrcache.LookupTLSAForServer("ns1.example.", "_853._Tcp.NS1.example."); got == nil {
+		t.Fatal("lookup missed under mixed-case owner")
+	}
+	// Snapshot canonicalizes the base and keys by the canonical owner.
+	snap := rrcache.SnapshotTLSAForServer("Ns1.Example.")
+	if len(snap) != 1 || snap[ownerLC] == nil {
+		t.Fatalf("snapshot missed the record under different base case: %+v", snap)
+	}
+}
