@@ -482,6 +482,12 @@ type InternalDnsConf struct {
 type InternalConf struct {
 	InternalDnsConf
 
+	// ServerErrors is the daemon-wide error registry (v2/servererror.go):
+	// transport/config error conditions surfaced by `config status`. Created
+	// once and preserved across config reloads (so boot-scoped Transport
+	// errors survive a reload).
+	ServerErrors *ServerErrorRegistry
+
 	// LargeAlgorithms is the derived lookup set from Dnssec.LargeAlgorithms.
 	LargeAlgorithms map[uint8]bool
 

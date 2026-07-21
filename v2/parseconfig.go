@@ -329,6 +329,14 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return fmt.Errorf("error decoding config: %v", err)
 	}
 
+	// Server-wide error registry: create once, preserve across reloads (so
+	// boot-scoped Transport errors survive a reload). parseconfig owns the
+	// Config/CertMissing check (clear-then-reassert on every load).
+	if conf.Internal.ServerErrors == nil {
+		conf.Internal.ServerErrors = NewServerErrorRegistry()
+	}
+	conf.validateDnsEngineCerts()
+
 	if len(md.Unused) > 0 {
 		// Split the unused keys into two buckets: keys that match a known
 		// DEPRECATED/RENAMED config shape (the config lags the code — emit

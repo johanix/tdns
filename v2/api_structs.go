@@ -281,8 +281,9 @@ type ConfigResponse struct {
 	Msg                  string
 	Error                bool
 	ErrorMsg             string
-	TsigConflicts        []string `json:"tsigconflicts,omitempty"`
-	TsigWithheldRemovals []string `json:"tsigwithheldremovals,omitempty"`
+	TsigConflicts        []string      `json:"tsigconflicts,omitempty"`
+	TsigWithheldRemovals []string      `json:"tsigwithheldremovals,omitempty"`
+	ServerErrors         []ServerError `json:"servererrors,omitempty"` // active server-wide error conditions
 }
 
 type DelegationPost struct {

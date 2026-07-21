@@ -42,6 +42,7 @@ func DnsDoQEngine(ctx context.Context, conf *Config, doqaddrs []string, cert *tl
 			})
 			if err != nil {
 				lgDns.Error("failed to setup DoQ listener", "hostport", hostport, "err", err)
+				conf.Internal.ServerErrors.SetTransportPortError("doq "+hostport, err)
 				continue
 			}
 			listeners = append(listeners, listener)
