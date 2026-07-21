@@ -193,7 +193,7 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 		addresses = tmp
 
 		if CaseFoldContains(conf.DnsEngine.Transports, "dot") {
-			err := DnsDoTEngine(ctx, conf, addresses, &cert, authDNSHandler)
+			err := DnsDoTEngine(ctx, conf, addresses, &cert, authDNSHandler, true)
 			if err != nil {
 				lgDns.Error("Failed to setup the DoT server", "err", err)
 			}

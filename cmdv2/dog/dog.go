@@ -117,7 +117,7 @@ var rootCmd = &cobra.Command{
 			}
 
 			if strings.HasPrefix(ucarg, "+") {
-				options, err = ProcessOptions(options, ucarg)
+				options, err = ProcessOptions(options, ucarg, arg)
 				if err != nil {
 					fmt.Printf("Error: %v\n", err)
 					os.Exit(1)
@@ -199,6 +199,14 @@ var rootCmd = &cobra.Command{
 				options["opcode"], options["server"], options["transport"], options["port"])
 		}
 
+		// +showpin needs no qname: connect, print the server cert's SPKI pin
+		// (and TLSA 3-1-1 record) and exit. Bootstrap helper for pins: config
+		// and TLSA publication.
+		if options["showpin"] == "true" {
+			showServerPin(options)
+			return
+		}
+
 		for _, qname := range cleanArgs {
 			qname = dns.Fqdn(qname)
 			if tdns.Globals.Verbose {
@@ -216,29 +224,7 @@ var rootCmd = &cobra.Command{
 					os.Exit(1)
 				}
 				chaserClient := core.NewDNSClient(chaserTransport, options["port"], nil)
-				// Resolve trust anchors via the standard priority chain:
-				//   --trust-anchor flag → IMR config → compiled-in.
-				taLogf := func(format string, args ...any) {
-					if tdns.Globals.Verbose {
-						fmt.Fprintf(os.Stderr, format+"\n", args...)
-					}
-				}
-				dss, keys, taSource := tdns.LoadDefaultTrustAnchors(trustAnchorFile, taLogf)
-				// Some TA files (autotrust / RFC 5011 managed) hold DNSKEY
-				// records rather than DS. Convert each KSK DNSKEY to its
-				// SHA-256 DS equivalent so the chaser, which keys off DS,
-				// can anchor the root regardless of file format.
-				for _, k := range keys {
-					if k.Flags&dns.SEP == 0 {
-						continue
-					}
-					if ds := k.ToDS(dns.SHA256); ds != nil {
-						dss = append(dss, ds)
-					}
-				}
-				if tdns.Globals.Verbose {
-					fmt.Fprintf(os.Stderr, ";; trust anchor source: %s (%d DS records, %d DNSKEYs)\n", taSource, len(dss), len(keys))
-				}
+				dss := loadChaserAnchors()
 				chaser := tdns.NewChaser(chaserClient, options["server"], dss)
 				result, err := chaser.Chase(qname, rrtype)
 				if err != nil {
@@ -263,13 +249,30 @@ var rootCmd = &cobra.Command{
 
 			switch rrtype {
 			case dns.TypeAXFR, dns.TypeIXFR:
-				if dogtransport.PlainDo53(options["transport"]) {
-					upstream := net.JoinHostPort(options["server"], options["port"])
-					if err := tdns.ZoneTransferPrint(qname, upstream, serial, rrtype, options, tsigName, tsigAlgo, tsigSecret); err != nil {
+				upstream := net.JoinHostPort(options["server"], options["port"])
+				// Verify flags only take effect over an encrypted transport;
+				// refuse rather than silently ignore them on plain Do53 (else
+				// +pin/+cafile/+tlsa give a false sense of a verified transfer).
+				if verifyFlagsGiven(options) && dogtransport.PlainDo53(options["transport"]) {
+					fmt.Fprintf(os.Stderr, "Error: +pin/+cafile/+tlsa require an encrypted transport (+dot); refusing to ignore them over Do53\n")
+					os.Exit(1)
+				}
+				var xferTLS *tls.Config
+				switch {
+				case dogtransport.PlainDo53(options["transport"]):
+					// nil TLS config: plain TCP, unchanged.
+				case strings.EqualFold(options["transport"], "DoT"):
+					var terr error
+					xferTLS, terr = buildDogTLSConfig(options)
+					if terr != nil {
+						fmt.Fprintf(os.Stderr, "Error: %v\n", terr)
 						os.Exit(1)
 					}
-				} else {
-					fmt.Printf("Zone transfer only supported over Do53/TCP, not %s\n", options["transport"])
+				default:
+					fmt.Printf("Zone transfer only supported over Do53/TCP and DoT, not %s\n", options["transport"])
+					os.Exit(1)
+				}
+				if err := tdns.ZoneTransferPrint(qname, upstream, serial, rrtype, options, tsigName, tsigAlgo, tsigSecret, xferTLS); err != nil {
 					os.Exit(1)
 				}
 
@@ -341,14 +344,41 @@ var rootCmd = &cobra.Command{
 				}
 
 				var tlsConfig *tls.Config
-				if transport, ok := options["transport"]; ok && transport != "do53" {
-					tlsConfig = &tls.Config{
-						InsecureSkipVerify: true,
-						MinVersion:         tls.VersionTLS12,
-					}
-					// Add ALPN for DoQ
-					if transport == "DoQ" {
-						tlsConfig.NextProtos = []string{"doq"}
+				// Verify flags only take effect over an encrypted transport;
+				// refuse rather than silently ignore them on plain Do53 (else
+				// +pin/+cafile/+tlsa give a false sense of a verified transfer).
+				if verifyFlagsGiven(options) && dogtransport.PlainDo53(options["transport"]) {
+					fmt.Fprintf(os.Stderr, "Error: +pin/+cafile/+tlsa require an encrypted transport (+dot/+doh/+doq); refusing to ignore them over Do53\n")
+					os.Exit(1)
+				}
+				// PlainDo53 is case-insensitive and also covers Do53-TCP/tcp;
+				// a bare transport != "do53" mishandles the canonical "Do53"
+				// spelling and would wrap a plain query in a TLS config.
+				if transport, ok := options["transport"]; ok && !dogtransport.PlainDo53(transport) {
+					if verifyFlagsGiven(options) {
+						var terr error
+						tlsConfig, terr = buildDogTLSConfig(options)
+						if terr != nil {
+							fmt.Fprintf(os.Stderr, "Error: %v\n", terr)
+							os.Exit(1)
+						}
+						// ALPN is per-transport; the builder assumes DoT.
+						switch transport {
+						case "DoQ":
+							tlsConfig.NextProtos = []string{"doq"}
+						case "DoH":
+							tlsConfig.NextProtos = nil // http client negotiates
+						}
+					} else {
+						fmt.Fprintf(os.Stderr, ";; WARNING: server certificate NOT verified; use +tlsa, +pin=<spki-b64> or +cafile=<pem>\n")
+						tlsConfig = &tls.Config{
+							InsecureSkipVerify: true,
+							MinVersion:         tls.VersionTLS12,
+						}
+						// Add ALPN for DoQ
+						if transport == "DoQ" {
+							tlsConfig.NextProtos = []string{"doq"}
+						}
 					}
 				}
 
@@ -531,9 +561,215 @@ func showDNSMessageTrace() bool {
 	return tdns.Globals.Verbose || tdns.Globals.Debug
 }
 
-func ProcessOptions(options map[string]string, ucarg string) (map[string]string, error) {
+// loadChaserAnchors resolves DS trust anchors via the standard priority
+// chain (--trust-anchor flag -> IMR config -> compiled-in). Some TA files
+// (autotrust / RFC 5011 managed) hold DNSKEY records rather than DS; each
+// KSK DNSKEY is converted to its SHA-256 DS equivalent so the chaser, which
+// keys off DS, can anchor the root regardless of file format.
+func loadChaserAnchors() []*dns.DS {
+	taLogf := func(format string, args ...any) {
+		if tdns.Globals.Verbose {
+			fmt.Fprintf(os.Stderr, format+"\n", args...)
+		}
+	}
+	dss, keys, taSource := tdns.LoadDefaultTrustAnchors(trustAnchorFile, taLogf)
+	for _, k := range keys {
+		if k.Flags&dns.SEP == 0 {
+			continue
+		}
+		if ds := k.ToDS(dns.SHA256); ds != nil {
+			dss = append(dss, ds)
+		}
+	}
+	if tdns.Globals.Verbose {
+		fmt.Fprintf(os.Stderr, ";; trust anchor source: %s (%d DS records, %d DNSKEYs)\n", taSource, len(dss), len(keys))
+	}
+	return dss
+}
+
+// verifyFlagsGiven reports whether any of the certificate-verification
+// options (+tlsa, +pin=, +cafile=) was requested.
+func verifyFlagsGiven(options map[string]string) bool {
+	return options["tlsa"] == "true" || options["pins"] != "" || options["cafile"] != ""
+}
+
+// buildDogTLSConfig returns the TLS config for an encrypted-transport dog
+// operation. With +pin/+cafile it builds a verifying config through
+// tdns.ClientTLSConfigForPeer (a synthetic PeerConf from the flags); with
+// +tlsa it chase-validates the server's TLSA RRset from the root trust
+// anchors and pins the handshake to it. Without any verify flag it keeps
+// dog's historical InsecureSkipVerify behavior, with a warning.
+func buildDogTLSConfig(options map[string]string) (*tls.Config, error) {
+	server := options["server"]
+	port := options["port"]
+
+	nVerify := 0
+	if options["tlsa"] == "true" {
+		nVerify++
+	}
+	if options["pins"] != "" {
+		nVerify++
+	}
+	if options["cafile"] != "" {
+		nVerify++
+	}
+	switch nVerify {
+	case 0:
+		fmt.Fprintf(os.Stderr, ";; WARNING: server certificate NOT verified; use +tlsa, +pin=<spki-b64> or +cafile=<pem>\n")
+		return &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}, nil
+	case 1:
+	default:
+		return nil, fmt.Errorf("choose ONE of +tlsa, +pin=, +cafile=")
+	}
+
+	if options["tlsa"] == "true" {
+		return dogDaneTLSConfig(server, port)
+	}
+
+	peer := tdns.PeerConf{
+		Addr:      net.JoinHostPort(server, port),
+		Key:       tdns.NOKEY,
+		Transport: tdns.TransportDoT,
+	}
+	if options["pins"] != "" {
+		peer.TLSAuth = tdns.TLSAuthPin
+		peer.Pins = strings.Split(options["pins"], ",")
+	} else {
+		peer.TLSAuth = tdns.TLSAuthPKIX
+		peer.CAFile = options["cafile"]
+	}
+	conf := &tdns.Config{}
+	return conf.ClientTLSConfigForPeer(peer)
+}
+
+// dogDaneTLSConfig implements +tlsa: fetch and chain-validate (from the root
+// trust anchors, via the system resolver) the TLSA RRset at
+// _<port>._tcp.<server>, then pin the TLS handshake to it. Fails closed when
+// the chain is not provably secure. The lookup goes through the system
+// resolver rather than @server because @server is typically the
+// authoritative primary being transferred from, not a recursive.
+func dogDaneTLSConfig(server, port string) (*tls.Config, error) {
+	if net.ParseIP(server) != nil {
+		return nil, fmt.Errorf("+tlsa needs a server NAME for the TLSA base; got IP literal %s (use +pin= or +cafile=)", server)
+	}
+	resolver, err := ParseResolvConf()
+	if err != nil {
+		return nil, fmt.Errorf("+tlsa: cannot determine system resolver: %v", err)
+	}
+	client := core.NewDNSClient(core.TransportDo53, "53", nil)
+	chaser := tdns.NewChaser(client, resolver, loadChaserAnchors())
+	owner := fmt.Sprintf("_%s._tcp.%s", port, dns.Fqdn(server))
+	res, err := chaser.Chase(owner, dns.TypeTLSA)
+	if err != nil {
+		return nil, fmt.Errorf("+tlsa: TLSA chase for %s failed: %v", owner, err)
+	}
+	if res.Status != tdns.ChainStatusSecure || res.Leaf.RRset == nil || len(res.Leaf.RRset.RRs) == 0 {
+		return nil, fmt.Errorf("+tlsa: TLSA RRset for %s is not provably secure; refusing (fail closed)", owner)
+	}
+	tlsaRRs := res.Leaf.RRset.RRs
+	if tdns.Globals.Verbose {
+		for _, rr := range tlsaRRs {
+			fmt.Fprintf(os.Stderr, ";; validated TLSA: %s\n", rr.String())
+		}
+	}
+	return &tls.Config{
+		ServerName: server,
+		MinVersion: tls.VersionTLS13,
+		NextProtos: []string{"dot"},
+		// DANE-EE replaces PKIX chain building; VerifyConnection is the gate.
+		InsecureSkipVerify: true,
+		VerifyConnection: func(cs tls.ConnectionState) error {
+			if len(cs.PeerCertificates) == 0 {
+				return fmt.Errorf("server presented no certificate")
+			}
+			for _, rr := range tlsaRRs {
+				if tlsa, ok := rr.(*dns.TLSA); ok {
+					if err := tdns.VerifyCertAgainstTlsaRR(tlsa, cs.PeerCertificates[0]); err == nil {
+						return nil
+					}
+				}
+			}
+			return fmt.Errorf("no validated TLSA record at %s matches the server certificate", owner)
+		},
+	}, nil
+}
+
+// showServerPin implements +showpin: connect over TLS (unverified — this IS
+// the bootstrap step), print the server certificate's SPKI SHA-256 pin and
+// the equivalent TLSA 3-1-1 record, then move on. A plain-Do53 transport
+// implies DoT on port 853.
+func showServerPin(options map[string]string) {
+	server := options["server"]
+	port := options["port"]
+	if dogtransport.PlainDo53(options["transport"]) {
+		port = "853"
+		fmt.Fprintf(os.Stderr, ";; +showpin: assuming DoT on port %s (use +dot with -p to override)\n", port)
+	}
+	addr := net.JoinHostPort(server, port)
+	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 5 * time.Second}, "tcp", addr,
+		&tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12, NextProtos: []string{"dot"}})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: cannot fetch server certificate from %s: %v\n", addr, err)
+		os.Exit(1)
+	}
+	defer conn.Close()
+	certs := conn.ConnectionState().PeerCertificates
+	if len(certs) == 0 {
+		fmt.Fprintf(os.Stderr, "Error: %s presented no certificate\n", addr)
+		os.Exit(1)
+	}
+	leaf := certs[0]
+	fmt.Printf(";; server:  %s\n", addr)
+	fmt.Printf(";; subject: %s\n", leaf.Subject)
+	fmt.Printf(";; SPKI pin (for pins: / +pin=): %s\n", tdns.SPKISHA256(leaf))
+	if portNum, perr := strconv.ParseUint(port, 10, 16); perr == nil {
+		if tlsa, terr := tdns.NewTlsaRR(dns.Fqdn(server), uint16(portNum), leaf); terr == nil {
+			fmt.Printf(";; TLSA:    %s\n", tlsa.String())
+		}
+	}
+}
+
+// ProcessOptions interprets one +option argument. ucarg is the uppercased
+// form (used for matching); arg is the original argument, needed whenever the
+// option value is case-sensitive (base64 pins, file paths).
+func ProcessOptions(options map[string]string, ucarg, arg string) (map[string]string, error) {
 	if options == nil {
 		options = make(map[string]string)
+	}
+
+	// XoT/TLS verification options (case-sensitive values -> parse from arg).
+	if strings.HasPrefix(ucarg, "+PIN=") {
+		pin := arg[len("+pin="):]
+		if pin == "" {
+			return nil, fmt.Errorf("+pin= requires a base64 SPKI SHA-256 digest")
+		}
+		// Repeatable; base64 std alphabet never contains ',' so join on it.
+		if options["pins"] != "" {
+			options["pins"] += ","
+		}
+		options["pins"] += pin
+		return options, nil
+	}
+	if strings.HasPrefix(ucarg, "+CAFILE=") {
+		path := arg[len("+cafile="):]
+		if path == "" {
+			return nil, fmt.Errorf("+cafile= requires a path to a PEM cert bundle")
+		}
+		options["cafile"] = path
+		return options, nil
+	}
+
+	switch ucarg {
+	case "+TLSA":
+		// DANE-verify the server cert: TLSA at _<port>._tcp.<server>,
+		// chase-validated from the root trust anchors.
+		options["tlsa"] = "true"
+		return options, nil
+	case "+SHOWPIN":
+		// Connect, print the server cert's SPKI pin (and TLSA 3-1-1 rdata),
+		// and exit. For bootstrapping pins: / TLSA records.
+		options["showpin"] = "true"
+		return options, nil
 	}
 
 	switch ucarg {

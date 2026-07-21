@@ -1386,7 +1386,7 @@ func (imr *Imr) StartImrEngineListeners(ctx context.Context, conf *Config) error
 		addresses = tmp
 
 		if CaseFoldContains(conf.Imr.Transports, "dot") {
-			err := DnsDoTEngine(ctx, conf, addresses, &cert, ImrHandler)
+			err := DnsDoTEngine(ctx, conf, addresses, &cert, ImrHandler, false)
 			if err != nil {
 				lgImr.Error("failed to setup DoT server", "err", err)
 			}

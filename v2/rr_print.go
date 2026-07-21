@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"crypto/tls"
 	"fmt"
 	"net"
 	"strconv"
@@ -311,10 +312,12 @@ func xfrErrorRcode(errstr string) (string, bool) {
 // tsigSecret) and the response envelope MACs are verified -- so a transfer gated
 // by a downstreams ACL that requires a key is accepted. tsigName == "" means an
 // unsigned transfer.
-func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, options map[string]string, tsigName, tsigAlgo, tsigSecret string) error {
+// ZoneTransferPrint runs an AXFR/IXFR and pretty-prints the result. A non-nil
+// tlsConfig moves the transfer to TLS (XoT); nil keeps plain TCP.
+func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, options map[string]string, tsigName, tsigAlgo, tsigSecret string, tlsConfig *tls.Config) error {
 	msg := new(dns.Msg)
 	if ttype == dns.TypeIXFR {
-		// msg.SetIxfr(zname, serial, soa.Ns, soa.Mbox)
+		// msg.SetIxfr(zone, serial, soa.Ns, soa.Mbox)
 		msg.SetIxfr(zname, serial, "", "")
 	} else {
 		msg.SetAxfr(zname)
@@ -332,6 +335,7 @@ func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, opti
 	}
 
 	transfer := new(dns.Transfer)
+	transfer.TLS = tlsConfig
 	// TSIG-sign the transfer request (dog -y) so a downstreams ACL that requires
 	// a key accepts it; miekg base64-decodes the secret and verifies the
 	// per-envelope response MACs.

@@ -714,10 +714,16 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 					secondaryOK = false
 					break
 				}
+				if err := validatePeerXoT(p); err != nil {
+					lgConfig.Error("secondary zone primary has invalid XoT config, zone in error state", "zone", zname, "primary", p.Addr, "err", err)
+					zd.SetError(ConfigError, "primary %s: %v", p.Addr, err)
+					secondaryOK = false
+					break
+				}
 				origPrimary := p.Addr
-				p.Addr = NormalizeAddress(p.Addr)
+				p.Addr = NormalizeAddressPort(p.Addr, defaultPortForPeer(*p))
 				if origPrimary != p.Addr {
-					lgConfig.Warn("primary has no port specified, using default :53", "zone", zname, "primary", origPrimary)
+					lgConfig.Warn("primary has no port specified, using transport default", "zone", zname, "primary", origPrimary, "port", defaultPortForPeer(*p))
 				}
 			}
 			if !secondaryOK {
@@ -765,6 +771,15 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			if n.Legacy != "" {
 				lgConfig.Error("zone uses legacy bare-string notify entry, zone in error state", "zone", zname, "notify", n.Legacy)
 				zd.SetError(ConfigError, "notify now requires {addr, key} (got bare string %q)", n.Legacy)
+				legacyNotify = true
+				break
+			}
+			// The XoT fields only apply to the transfer path (primaries:).
+			// NOTIFY goes out over Do53; reject rather than silently ignore
+			// a configured security setting.
+			if n.Transport != "" || n.TLSAuth != "" || n.TLSName != "" || len(n.Pins) > 0 || n.CAFile != "" {
+				lgConfig.Error("zone notify entry carries XoT fields, zone in error state", "zone", zname, "notify", n.Addr)
+				zd.SetError(ConfigError, "notify %s: transport/tls-* not supported for notify targets", n.Addr)
 				legacyNotify = true
 				break
 			}
@@ -1712,6 +1727,12 @@ func GenKeyLifetime(lifetime string) (KeyLifetime, error) {
 // This allows users to specify addresses as either "IP" or "IP:port" in config.
 // Returns empty string if input is empty.
 func NormalizeAddress(addr string) string {
+	return NormalizeAddressPort(addr, "53")
+}
+
+// NormalizeAddressPort is NormalizeAddress with a caller-chosen default port
+// (DoT peers default to 853, everything else to 53).
+func NormalizeAddressPort(addr, defaultPort string) string {
 	if addr == "" {
 		return ""
 	}
@@ -1720,8 +1741,7 @@ func NormalizeAddress(addr string) string {
 	_, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		// If SplitHostPort fails, it means no port is present
-		// Add default DNS port :53
-		return net.JoinHostPort(addr, "53")
+		return net.JoinHostPort(addr, defaultPort)
 	}
 	// Address already has a port, use as-is
 	return addr
