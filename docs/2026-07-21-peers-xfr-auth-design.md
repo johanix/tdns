@@ -101,9 +101,13 @@ design + implementation is accepted.
 peers:
    ns1-example:                       # identifier used in references
       addr: ns1.example.net:853       # outbound dial target (upstream role)
-      prefixes: [ 198.51.100.7 ]      # inbound source match (downstream role);
-                                      #   default: derived from addr's host
-      key: xfr-key-2026               # TSIG, both directions; NOKEY allowed
+      prefixes: [ 198.51.100.7,       # inbound source match (downstream role);
+                  2001:db8::7 ]       #   one server, several source addresses
+                                      #   (dual-stack); default: addr's host
+      keys: [ xfr-key-2026 ]          # TSIG key NAMES; NOKEY allowed (alone).
+                                      #   Outbound: sign with the FIRST.
+                                      #   Inbound: accept ANY listed.
+                                      #   `key: x` is sugar for `keys: [x]`.
       # --- outbound TLS: how WE verify ITS server cert when we dial ---
       transport: dot                  # "" | do53 | dot (as in PeerConf today)
       tls-auth: pkix                  # pin | dane | pkix
@@ -125,17 +129,43 @@ Design points:
   1:1 onto the existing struct, plus `prefixes` (inbound address match) and
   `tls-identity` (inbound certificate identity). One object serves both
   roles; which fields are consumed depends on where it is referenced.
+- **`keys:` is a list to keep TSIG rollover a one-place edit.** Today's
+  ACL grammar rolls a key by listing the same prefix twice with old and
+  new key; a peer expresses the same thing as
+  `keys: [ xfr-key-2026, xfr-key-2025 ]` — prepend the new key, migrate
+  the peer, drop the old entry. Inbound, any listed key is accepted;
+  outbound, where exactly one key must sign the request, the first is
+  used. `NOKEY` is only valid as the sole element — mixing `NOKEY` with
+  named keys inside one peer would recreate the NOKEY-shadows-TSIG footgun
+  in a single object, and is rejected at config load.
 - `tls-identity` is **data-driven**: whichever credentials are present
   determine which mechanisms this peer *can* satisfy (pins → `tls-pin`,
   ca-file → `tls-pkix`, dane+name → `tls-dane`). Which of those *suffice*
   is the zone's decision via `downstream-auth` (§5) — policy lives on the
   zone, data lives on the peer.
+- **`tls-identity.ca-file` holds trust anchors only** — the root CA
+  certificate(s), concatenated PEM; never an intermediate chain and never
+  the peer's leaf. If the peer's cert was issued via intermediates
+  (external PKI), those arrive in the TLS handshake as part of the
+  *client's presented chain* and are used as intermediates by the
+  server-side `x509.Verify`; the ca-file still holds only roots. Certs
+  from the tdns minimal CA involve no intermediates at all.
+- **Chain verification alone is not an identity** — any certificate the CA
+  ever signed passes it. The identity pin is `tls-identity.name`: the
+  `tls-pkix` mechanism requires chain **plus** leaf DNS SAN == name
+  whenever a name is known. Because `name` defaults to the host part of
+  `addr`, a normally-declared peer gets name-pinning by default; only a
+  peer declared with neither an `addr` hostname nor a `name` (i.e. there
+  is no name to check) degrades to chain-only semantics — the coarse
+  "any member of this CA" policy, acceptable for a CA dedicated to
+  transfer peers.
 - `prefixes` defaults to the host part of `addr` (exact /32 or /128).
   Multihomed peers whose transfer requests originate from other addresses
   list them explicitly.
 - Validation of the outbound fields reuses `validatePeerXoT` unchanged.
   Inbound: pins must be well-formed base64 SHA-256; `ca-file` readable PEM;
-  `dane: true` requires a resolvable `name`.
+  `dane: true` requires a resolvable `name`; `NOKEY` must be alone in
+  `keys`.
 
 ### 3.1 References
 
@@ -162,11 +192,14 @@ Expansion happens at parse time (immediately after template expansion, so
 templates may carry references too):
 
 - In `upstreams:`/`notify:` a reference expands to the peer's **outbound**
-  fields as an ordinary `PeerConf` — the entire existing runtime
-  (`resolvePrimaries`, the refresh engine, XoT) is untouched.
-- In `downstreams:`/`allow-notify:` a reference expands to one `AclEntry`
-  per prefix, carrying the peer's `key` plus (downstreams only) its
-  `tls-identity` and name for the transfer-time check (§6).
+  fields as an ordinary `PeerConf` (signing key = `keys[0]`) — the entire
+  existing runtime (`resolvePrimaries`, the refresh engine, XoT) is
+  untouched.
+- In `downstreams:`/`allow-notify:` a reference expands to the
+  **prefix × key cross-product** of `AclEntry`s — exactly the shape the
+  hand-written rollover pattern produces today, so the ACL matcher is
+  untouched — plus (downstreams only) the peer's `tls-identity` and name
+  for the transfer-time check (§6).
 - An unknown identifier quarantines the zone
   (`unknown peer "ns1-exmaple" (or legacy bare-address syntax?)`) — which
   also improves today's legacy bare-string error.
@@ -310,15 +343,17 @@ peers:
       transport: dot
       tls-auth: dane
    sec1:                               # modern secondary, mTLS-capable
-      addr: sec1.example.net:853       # (addr unused in downstream role,
-      prefixes: [ 198.51.100.7 ]       #  but documents the server)
-      key: xfr-key-2026
+      addr: sec1.example.net:853       # supplies the default tls-identity
+      prefixes: [ 198.51.100.7,        #   name and prefix; extra source
+                  2001:db8::7 ]        #   addresses listed explicitly
+      keys: [ xfr-key-2026,            # mid-rollover: new key signs/preferred,
+              xfr-key-2025 ]           #   old still accepted inbound
       tls-identity:
-         name: sec1.example.net
-         ca-file: /etc/tdns/certs/tdns-ca.crt
+         name: sec1.example.net        # the identity pin (SAN check)
+         ca-file: /etc/tdns/certs/tdns-ca.crt   # roots only — the trust domain
    sec-legacy:                         # NSD box on the trusted LAN, Do53 only
       prefixes: [ 10.1.2.3 ]
-      key: xfr-key-2026
+      key: xfr-key-2026                # sugar for keys: [ xfr-key-2026 ]
 
 templates:
    - name: served-strict
