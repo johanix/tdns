@@ -370,8 +370,13 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 			resp.ApiServer = conf.ApiServer
 			resp.Identities = conf.Service.Identities
 			resp.DBFile = conf.Db.File
-			resp.Msg = fmt.Sprintf("%s: Configuration is ok, boot time: %s, last config reload: %s",
-				Globals.App.Name, Globals.App.ServerBootTime.Format(TimeLayout), Globals.App.ServerConfigTime.Format(TimeLayout))
+			resp.ServerErrors = conf.Internal.ServerErrors.List()
+			health := "Configuration is ok"
+			if len(resp.ServerErrors) > 0 {
+				health = fmt.Sprintf("DEGRADED: %d active error(s)", len(resp.ServerErrors))
+			}
+			resp.Msg = fmt.Sprintf("%s: %s, boot time: %s, last config reload: %s",
+				Globals.App.Name, health, Globals.App.ServerBootTime.Format(TimeLayout), Globals.App.ServerConfigTime.Format(TimeLayout))
 
 		default:
 			resp.ErrorMsg = fmt.Sprintf("Unknown config command: %s", cp.Command)
