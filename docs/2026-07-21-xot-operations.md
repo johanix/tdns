@@ -81,12 +81,65 @@ Ask the primary operator, or bootstrap from the live cert:
 
 ```
 dog +showpin @ns1.example.net           # prints SPKI pin + TLSA 3-1-1 record
+tdns-cli cert pin cert.pem              # same, from a PEM file
 openssl x509 -in cert.pem -pubkey -noout \
   | openssl pkey -pubin -outform der | openssl dgst -sha256 -binary | base64
 ```
 
 Pin rotation: list the old and the new pin simultaneously (any match
 admits), roll the cert, then drop the old pin.
+
+## 1b. Provisioning certificates: `tdns-cli cert`
+
+You do not need an external CA. `tdns-cli cert` is a deliberately minimal
+internal PKI (no CRL/OCSP/renewal, no cert database — just PEM files plus an
+append-only `issued.log` audit trail next to the CA key, default home
+`/etc/tdns/ca/`).
+
+**Just testing tdns?** You don't need any of this: `config mwe` generates a
+self-signed cert, and `pin`/`dane` (and dog `+showpin`) work fine against it.
+
+**Single host, one command** — provision the local tdns-auth:
+
+```
+tdns-cli cert init [--serverconfig /etc/tdns/tdns-auth.yaml]
+```
+
+This creates the CA if absent (reuses it otherwise), derives SANs from the
+config's listen addresses + this host's name, writes cert/key to the exact
+`dnsengine.certfile`/`keyfile` paths the config already names, drops a CA
+copy next to them, and prints ready-to-paste secondary config for all three
+auth modes. Restart the daemon and you serve verified XoT. Re-running is
+safe; `--force` is needed to replace existing files.
+
+**Fleet / cross-org** — the primitives:
+
+```
+tdns-cli cert ca   --name xot-ca                                   # once
+tdns-cli cert leaf --ca .../xot-ca.crt --ca-key .../xot-ca.key \
+    --name ns1.example.net --dns ns1.example.net --ip 192.0.2.53 \
+    --emit-pin --emit-tlsa ns1.example.net                         # per server
+# remote secondary (key never leaves its host):
+tdns-cli cert csr  --name ns2.example.net --dns ns2.example.net    # on ns2
+tdns-cli cert sign --ca ... --ca-key ... --csr ns2.example.net.csr --client
+tdns-cli cert show cert.pem   # inspect; cert pin cert.pem for the pin only
+```
+
+One issuance feeds all three modes: the CA cert is the `ca-file` (pkix), the
+`--emit-pin` output is the `pins:` value, the `--emit-tlsa` output is the
+DANE record. Keys are written 0600 and never overwritten without `--force`.
+The CA is hard-coded pathlen-0 (it can only sign leaves, never a sub-CA)
+and its key is never auto-loaded by any daemon — keep it access-controlled,
+ideally on an admin host rather than the DNS servers.
+
+### Intermediate chains (external CAs)
+
+`dnsengine.certfile` may hold the full presented chain: **leaf first, then
+intermediates**, concatenated PEM — `tls.LoadX509KeyPair` presents every
+block. A CA-signed leaf without its intermediates makes secondaries fail
+chain building (the server logs an informational note at startup for the
+single-CA-signed-cert shape). Certs from `tdns-cli cert` need no bundling:
+secondaries trust the root directly.
 
 ## 2. Primary: serving XoT
 
@@ -177,6 +230,13 @@ dog +showpin @ns1.example.net                              # print server pin/TL
   unverified behavior but print a warning.
 
 ## 4. Limitations / notes
+
+- tdns-agent inherits the whole secondary XoT feature unchanged — both
+  daemons drive the same `FetchFromUpstream`/`DoTransfer` path (guarded by
+  `TestXoT_FetchFromUpstreamPKIX`).
+- dog `+cafile` against an IP-literal server verifies the cert's IP SANs
+  (dog prints a note); a name-mismatch failure there usually means the cert
+  lacks that IP SAN, not a bad CA.
 
 - IXFR: the secondary always requests AXFR today, and `ZoneTransferOut`
   answers IXFR requests with a full zone (AXFR-style response, which RFC

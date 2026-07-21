@@ -620,6 +620,11 @@ func buildDogTLSConfig(options map[string]string) (*tls.Config, error) {
 	} else {
 		peer.TLSAuth = tdns.TLSAuthPKIX
 		peer.CAFile = options["cafile"]
+		if net.ParseIP(server) != nil {
+			// PKIX against an IP literal matches the cert's IP SANs; a
+			// verify failure here is usually a missing IP SAN, not a bad CA.
+			fmt.Fprintf(os.Stderr, ";; note: server %s is an IP literal — PKIX will match the certificate's IP SANs (a name-mismatch failure usually means the cert lacks this IP SAN)\n", server)
+		}
 	}
 	conf := &tdns.Config{}
 	return conf.ClientTLSConfigForPeer(peer)

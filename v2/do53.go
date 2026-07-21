@@ -167,6 +167,15 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 				} else {
 					lgDns.Info("DnsEngine: TLS certificate expiry check passed", "expiry", x509Cert.NotAfter, "file", certFile)
 				}
+				// XoT chain-presentation note: LoadX509KeyPair presents every
+				// CERTIFICATE block in certfile, so a CA-signed leaf that
+				// needs intermediates must have them bundled (leaf first).
+				// A single CA-signed cert is also the normal shape for a
+				// two-tier PKI (e.g. tdns-cli cert init, where secondaries
+				// trust the root directly), hence Info, not Warn.
+				if parseErr == nil && len(cert.Certificate) == 1 && x509Cert.CheckSignatureFrom(x509Cert) != nil {
+					lgDns.Info("DnsEngine: certfile holds a single CA-signed certificate — fine when peers trust the issuing CA directly; if the CA uses intermediates, bundle them into certfile (leaf first) or secondaries will fail chain building", "file", certFile)
+				}
 			}
 		}
 
