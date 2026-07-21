@@ -50,21 +50,22 @@ Typical flows:
 }
 
 var (
-	certName      string
-	certOutDir    string
-	certValidity  int
-	certAlgorithm string
-	certForce     bool
-	certCAFile    string
-	certCAKeyFile string
-	certDNSNames  []string
-	certIPs       []string
-	certServer    bool
-	certClient    bool
-	certCSRFile   string
-	certEmitPin   bool
-	certEmitTlsa  string
-	certTlsaPort  uint16
+	certName       string
+	certOutDir     string
+	certValidity   int
+	certCAValidity int // separate backing var: certValidity is shared/rebound by addCommonLeafFlags
+	certAlgorithm  string
+	certForce      bool
+	certCAFile     string
+	certCAKeyFile  string
+	certDNSNames   []string
+	certIPs        []string
+	certServer     bool
+	certClient     bool
+	certCSRFile    string
+	certEmitPin    bool
+	certEmitTlsa   string
+	certTlsaPort   uint16
 )
 
 var certCaCmd = &cobra.Command{
@@ -74,7 +75,7 @@ var certCaCmd = &cobra.Command{
 		outDir := certOutDirDefault()
 		ca, err := tdns.CreateCA(tdns.CAOptions{
 			Name:     certName,
-			Validity: time.Duration(certValidity) * 24 * time.Hour,
+			Validity: time.Duration(certCAValidity) * 24 * time.Hour,
 			Alg:      tdns.CertAlgorithm(certAlgorithm),
 		})
 		if err != nil {
@@ -429,7 +430,10 @@ func init() {
 	}
 	certCsrCmd.Flags().StringVar(&certKeyFile, "key", "", "reuse this EXISTING private key (PKCS#8 or legacy openssl EC/RSA PEM) instead of generating one — keeps the SPKI, so pins/TLSA stay valid")
 	certCsrCmd.Flags().StringVar(&certFromCert, "from-cert", "", "copy CN and SANs from this existing certificate (PEM)")
-	certCaCmd.Flags().IntVar(&certValidity, "validity", 3650, "validity in days")
+	// Own backing variable: certValidity is shared with (and rebound to 397 by)
+	// addCommonLeafFlags below, which would otherwise leave `cert ca` minting a
+	// 397-day root instead of 3650.
+	certCaCmd.Flags().IntVar(&certCAValidity, "validity", 3650, "validity in days")
 
 	addCommonLeafFlags(certLeafCmd)
 	addCommonLeafFlags(certSignCmd)
