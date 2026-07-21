@@ -34,6 +34,12 @@ func decodeSample(t *testing.T, path string, result interface{}) mapstructure.Me
 	if err := yaml.Unmarshal(data, &raw); err != nil {
 		t.Fatalf("%s is not valid YAML: %v", path, err)
 	}
+	// Mirror ParseConfig: canonicalize the transfer-list spelling aliases
+	// (upstreams:/request-xfr: -> primaries etc.) before decoding, and a
+	// shipped sample must never carry a conflicting double spelling.
+	if conflicts := NormalizeXfrAliases(raw); len(conflicts) > 0 {
+		t.Fatalf("%s has conflicting transfer-list spellings: %v", path, conflicts)
+	}
 	var md mapstructure.Metadata
 	decoder, err := mapstructure.NewDecoder(&mapstructure.DecoderConfig{
 		TagName:  "yaml",

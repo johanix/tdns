@@ -121,8 +121,9 @@ scp ns2.example.net.crt tdns-ca.crt ns2:/etc/tdns/certs/servers/
 A CSR is public data — it can travel by scp, mail, or ticket attachment.
 The CA operator can inspect it before signing; `cert sign` refuses a CSR
 whose signature does not verify. `--client` on the sign step gives the cert
-the clientAuth EKU too, which a secondary needs if the primary enforces
-mutual TLS (`downstream-auth: ca`).
+the clientAuth EKU too, which a secondary needs when the primary's zones
+require a certificate mechanism in their `downstream-auth:` ladder (see
+[the tdns-auth config guide](config-tdns-auth.md)).
 
 ## Creating the ca-file (for each kind of cert)
 
@@ -160,18 +161,28 @@ Where a ca-file is consumed:
 zones:
    - name: example.com.
      type: secondary
-     primaries:
+     upstreams:
         - addr: ns1.example.net:853
           key: NOKEY
           transport: dot
           tls-auth: pkix
           ca-file: /etc/tdns/certs/tdns-ca.crt
 
-# primary: verify SECONDARIES' client certs (mutual TLS, optional)
-dnsengine:
-   downstream-auth: ca
-   downstream-ca:   /etc/tdns/certs/tdns-ca.crt
-   #downstream-names: [ ns2.example.net ]   # optional SAN allowlist
+# primary: verify SECONDARIES' client certs, per zone via peers +
+# downstream-auth (see the tdns-auth config guide)
+peers:
+   ns2:
+      prefixes: [ 198.51.100.7 ]
+      key: NOKEY
+      tls-identity:
+         name: ns2.example.net
+         ca-file: /etc/tdns/certs/tdns-ca.crt
+zones:
+   - name: example.com.
+     type: primary
+     downstream-auth: [ tls-pkix ]
+     downstreams:
+        - peers: [ ns2 ]
 ```
 
 and on the command line: `dog +dot +cafile=/etc/tdns/certs/tdns-ca.crt
@@ -212,4 +223,4 @@ One issuance feeds all three auth modes: `--emit-pin` prints the `pins:` /
 `+pin=` value and `--emit-tlsa <owner> [--tlsa-port 853]` prints the TLSA
 3-1-1 record for DANE. pkix is about *not* having to manage those
 per-server values — but nothing stops you from mixing modes per primary in
-`primaries:`.
+`upstreams:`.

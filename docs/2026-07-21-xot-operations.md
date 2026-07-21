@@ -21,13 +21,14 @@ tdns-agent share the secondary pull code, so both daemons get XoT.
 
 ## 1. Secondary: pulling a zone over XoT
 
-Per-primary configuration in the zone's `primaries:` list:
+Per-primary configuration in the zone's `upstreams:` list (BIND9
+spelling `primaries:` and NSD `request-xfr:` are accepted aliases):
 
 ```yaml
 zones:
    - name: example.com.
      type: secondary
-     primaries:
+     upstreams:
         # Hostname primary, DANE-authenticated. Port defaults to 853 for
         # transport: dot. The hostname doubles as SNI and the TLSA base.
         - addr: ns1.example.net
@@ -167,36 +168,49 @@ zones:
 The DoT listener runs the same handler as Do53: the `downstreams:` ACL and
 TSIG verification apply unchanged to transfer requests arriving over TLS.
 
-### Optional: authenticate secondaries with mTLS
+### Authenticating secondaries by certificate: per-zone downstream-auth
 
-`dnsengine.downstream-auth` gates every **auth** DoT connection (the IMR's
-DoT front end never requests client certificates):
+Certificate authentication of secondaries is PER ZONE, enforced at
+transfer time (docs/2026-07-21-peers-xfr-auth-design.md): describe each
+secondary once in the `peers:` block (its source prefixes, TSIG keys, and
+`tls-identity` — pins, ca-file, or dane), reference it from the zone's
+`downstreams:`, and state the acceptable proof classes in the zone's (or
+template's) `downstream-auth:` ladder:
 
 ```yaml
-dnsengine:
-   # pin: each secondary's client-cert SPKI digest is listed explicitly
-   downstream-auth: pin
-   downstream-pins:
-      - "sec1-spki-sha256-base64="
-      - "sec2-spki-sha256-base64="
+peers:
+   sec1:
+      prefixes: [ 198.51.100.7 ]
+      keys: [ xfr-key-2026 ]
+      tls-identity:
+         name: sec1.example.net
+         ca-file: /etc/tdns/certs/tdns-ca.crt
 
-   # ...or ca: standard mTLS against a CA bundle
-   #downstream-auth: ca
-   #downstream-ca:   /etc/tdns/certs/downstream-ca.pem
-   # optional with a SHARED ca: additionally require an allowlisted DNS SAN
-   # in the client cert (empty = any cert chaining to downstream-ca)
-   #downstream-names: [ sec1.example.net, sec2.example.net ]
+zones:
+   - name: example.com.
+     type: primary
+     downstream-auth: [ tls-pkix ]     # no verified client cert, no transfer
+     downstreams:
+        - peers: [ sec1 ]
 ```
 
 Notes:
 
+- The DoT listener always *requests* (never requires) a client
+  certificate and verifies nothing at the handshake — ordinary cert-less
+  DoT query clients (ADoT) are untouched, as are all other transports.
+  There is no listener-level client-cert policy; to refuse non-TLS
+  traffic entirely, restrict `dnsengine.transports:`.
+- Mechanisms: `tls-pin` (static SPKI digests), `tls-pkix` (chain to the
+  peer's trust anchors + SAN identity), and `tls-dane` (the client cert
+  must match the peer name's DNSSEC-validated TLSA at `_853._tcp.<name>`
+  — fail closed, no shared files at all). Plus `prefix`/`tsig` for the
+  classic classes and `[ any ]` to relax a template's policy.
 - RFC 9103 treats mTLS as one of several valid policies; TSIG + IP ACL
-  remains fully supported without it.
-- There is deliberately no `dane` mode here: the server cannot know which
-  downstream is connecting before the handshake, so it has no name to base
-  a TLSA lookup on. Pins cover that case statically.
-- Misconfiguration (missing/malformed pins, unreadable CA) fails at
-  startup, not at the first transfer.
+  remains fully supported (absent `downstream-auth` = exactly the
+  pre-ladder behavior).
+- Details and the full mechanism table: the tdns-auth config guide
+  (guide/config-tdns-auth.md).
 
 ### Advertising DoT
 

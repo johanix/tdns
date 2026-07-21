@@ -13,7 +13,11 @@
 #                    ("slice" is deprecated: it logs a warning and falls back to
 #                     "map". Any other value also falls back to "map".)
 #   template:        Template name to inherit settings from (optional)
-#   primaries:       Upstream servers for secondary zones — a LIST of {addr, key}
+#   upstreams:       Upstream servers for secondary zones — a LIST of {addr, key}
+#                    entries and/or `- peers: [ id, ... ]` references.
+#                    (Accepted alias spellings: primaries: (BIND9),
+#                    request-xfr: (NSD); same for downstreams: aka
+#                    secondaries:/provide-xfr:. Use ONE spelling per zone.)
 #                    entries (addr is IP:port or host:port; key is a TSIG key name,
 #                    or NOKEY for none). More than one provides redundancy; a host
 #                    name is resolved at load time and may expand to several
@@ -111,7 +115,7 @@ zones:
      type:            secondary
      zonefile:        /var/lib/tdns/zones/example.net.zone  # Optional: save transferred zone
      store:           map                                    # Default storage (serves queries)
-     primaries:                                              # Transfer from these servers (in order, with fallback)
+     upstreams:                                              # Transfer from these servers (in order, with fallback)
         - addr: "203.0.113.1:53"
           key:  NOKEY
         - addr: "203.0.113.2:53"
@@ -145,7 +149,7 @@ zones:
    # TSIG stays orthogonal: key: is still honored (RFC 9103 allows TSIG+TLS).
    #- name:            example.com.
    #  type:            secondary
-   #  primaries:
+   #  upstreams:
    #     - addr: "ns1.example.net"        # hostname primary: port defaults to 853,
    #       key:  NOKEY                    # the name doubles as SNI + TLSA base
    #       transport: dot
@@ -275,7 +279,7 @@ zones:
      type:            secondary
      zonefile:        /var/lib/tdns/zones/catalog-upstream.zone  # Optional persistence
      store:           map
-     primaries:                                 # Fetch catalog from here
+     upstreams:                                 # Fetch catalog from here
         - addr: "203.0.113.50:5353"
           key:  NOKEY
      options:
@@ -289,7 +293,7 @@ zones:
    - name:            catalog-readonly.
      type:            secondary
      store:           map
-     primaries:
+     upstreams:
         - addr: "203.0.113.60:5353"
           key:  NOKEY
      options:
