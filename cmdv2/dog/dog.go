@@ -250,6 +250,13 @@ var rootCmd = &cobra.Command{
 			switch rrtype {
 			case dns.TypeAXFR, dns.TypeIXFR:
 				upstream := net.JoinHostPort(options["server"], options["port"])
+				// Verify flags only take effect over an encrypted transport;
+				// refuse rather than silently ignore them on plain Do53 (else
+				// +pin/+cafile/+tlsa give a false sense of a verified transfer).
+				if verifyFlagsGiven(options) && dogtransport.PlainDo53(options["transport"]) {
+					fmt.Fprintf(os.Stderr, "Error: +pin/+cafile/+tlsa require an encrypted transport (+dot); refusing to ignore them over Do53\n")
+					os.Exit(1)
+				}
 				var xferTLS *tls.Config
 				switch {
 				case dogtransport.PlainDo53(options["transport"]):
@@ -337,7 +344,17 @@ var rootCmd = &cobra.Command{
 				}
 
 				var tlsConfig *tls.Config
-				if transport, ok := options["transport"]; ok && transport != "do53" {
+				// Verify flags only take effect over an encrypted transport;
+				// refuse rather than silently ignore them on plain Do53 (else
+				// +pin/+cafile/+tlsa give a false sense of a verified transfer).
+				if verifyFlagsGiven(options) && dogtransport.PlainDo53(options["transport"]) {
+					fmt.Fprintf(os.Stderr, "Error: +pin/+cafile/+tlsa require an encrypted transport (+dot/+doh/+doq); refusing to ignore them over Do53\n")
+					os.Exit(1)
+				}
+				// PlainDo53 is case-insensitive and also covers Do53-TCP/tcp;
+				// a bare transport != "do53" mishandles the canonical "Do53"
+				// spelling and would wrap a plain query in a TLS config.
+				if transport, ok := options["transport"]; ok && !dogtransport.PlainDo53(transport) {
 					if verifyFlagsGiven(options) {
 						var terr error
 						tlsConfig, terr = buildDogTLSConfig(options)
