@@ -170,9 +170,15 @@ func runConfigCmd(role, command string, showVerboseStatus bool) {
 		fmt.Printf("Status for %s:\n", resp.AppName)
 		if len(resp.DnsEngine.Addresses) > 0 {
 			fmt.Printf("DnsEngine: listening on %v\n", resp.DnsEngine.Addresses)
-			fmt.Printf("DnsEngine: active transports: %v\n", resp.DnsEngine.Transports)
+			fmt.Printf("DnsEngine: configured transports: %v\n", resp.DnsEngine.Transports)
 		} else {
 			fmt.Printf("DnsEngine: not listening on any addresses\n")
+		}
+		if len(resp.ServerErrors) > 0 {
+			fmt.Printf("Active errors:\n")
+			for _, e := range resp.ServerErrors {
+				fmt.Printf("  [%s/%s] %s\n", e.Category, e.Subtype, e.Message)
+			}
 		}
 		if len(resp.DnsEngine.Options) > 0 {
 			fmt.Printf("DnsEngine: auth options:\n")

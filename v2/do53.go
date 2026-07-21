@@ -82,6 +82,9 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 				if err := s.ListenAndServe(); err != nil {
 					// ListenAndServe only returns on error or shutdown.
 					lgDns.Error("DnsEngine: server failed to start or stopped unexpectedly", "addr", addr, "transport", transport, "err", err)
+					if ctx.Err() == nil { // a real bind/serve failure, not shutdown
+						conf.Internal.ServerErrors.SetTransportPortError(addr+"/"+transport, err)
+					}
 				} else {
 					// This case is basically never reached unless shutdown is very clean.
 					lgDns.Debug("DnsEngine: server exited normally", "addr", addr, "transport", transport)
@@ -113,20 +116,24 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 	certFile := viper.GetString("dnsengine.certfile")
 	keyFile := viper.GetString("dnsengine.keyfile")
 	certKey := true
+	certReason := ""
 
 	if certFile == "" || keyFile == "" {
 		lgDns.Info("DnsEngine: no certificate file or key file provided. Not starting DoT, DoH or DoQ service.")
 		certKey = false
+		certReason = "certfile/keyfile not configured"
 	}
 
 	if _, err := os.Stat(certFile); os.IsNotExist(err) {
 		lgDns.Info("DnsEngine: certificate file does not exist. Not starting DoT, DoH or DoQ service.", "file", certFile)
 		certKey = false
+		certReason = fmt.Sprintf("certfile %s does not exist", certFile)
 	}
 
 	if _, err := os.Stat(keyFile); os.IsNotExist(err) {
 		lgDns.Info("DnsEngine: key file does not exist. Not starting DoT, DoH or DoQ service.", "file", keyFile)
 		certKey = false
+		certReason = fmt.Sprintf("keyfile %s does not exist", keyFile)
 	}
 
 	var certPEM []byte
@@ -151,6 +158,7 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 		if err != nil {
 			lgDns.Error("DnsEngine: failed to load certificate, not starting DoT/DoH/DoQ service", "err", err)
 			certKey = false
+			certReason = fmt.Sprintf("loading certfile/keyfile: %v", err)
 		}
 
 		// Check certificate expiry at startup
@@ -203,6 +211,12 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 				lgDns.Error("Failed to setup the DoQ server", "err", err)
 			}
 		}
+	}
+	// Transport/Cert: encrypted transports are configured but the cert/key
+	// could not be loaded, so those listeners did not start (owned here,
+	// boot-scoped — clears on a fresh start with a working cert).
+	if !certKey && anyEncryptedTransport(conf.DnsEngine.Transports) {
+		conf.Internal.ServerErrors.SetTransportCertError(certReason)
 	}
 	return nil
 }
