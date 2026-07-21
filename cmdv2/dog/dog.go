@@ -362,6 +362,11 @@ var rootCmd = &cobra.Command{
 						if transport == "DoQ" {
 							tlsConfig.NextProtos = []string{"doq"}
 						}
+						// Still present a client identity if one was given.
+						if cerr := attachDogClientCert(tlsConfig, options); cerr != nil {
+							fmt.Fprintf(os.Stderr, "Error: %v\n", cerr)
+							os.Exit(1)
+						}
 					}
 				}
 
@@ -582,7 +587,40 @@ func verifyFlagsGiven(options map[string]string) bool {
 // +tlsa it chase-validates the server's TLSA RRset from the root trust
 // anchors and pins the handshake to it. Without any verify flag it keeps
 // dog's historical InsecureSkipVerify behavior, with a warning.
+// buildDogTLSConfig returns the outbound tls.Config: how we verify the
+// server's certificate (dogServerVerifyConfig) plus, when +cert=/+key= are
+// given, our own client identity to present for the server's mutual-TLS /
+// per-zone downstream-auth check.
 func buildDogTLSConfig(options map[string]string) (*tls.Config, error) {
+	cfg, err := dogServerVerifyConfig(options)
+	if err != nil {
+		return nil, err
+	}
+	if err := attachDogClientCert(cfg, options); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// attachDogClientCert loads +cert=/+key= into cfg.Certificates so dog can
+// present a client identity. No-op when neither is set.
+func attachDogClientCert(cfg *tls.Config, options map[string]string) error {
+	cc, ck := options["clientcert"], options["clientkey"]
+	if cc == "" && ck == "" {
+		return nil
+	}
+	if cc == "" || ck == "" {
+		return fmt.Errorf("+cert= and +key= must be given together")
+	}
+	pair, err := tls.LoadX509KeyPair(cc, ck)
+	if err != nil {
+		return fmt.Errorf("loading client cert/key (+cert/+key): %v", err)
+	}
+	cfg.Certificates = []tls.Certificate{pair}
+	return nil
+}
+
+func dogServerVerifyConfig(options map[string]string) (*tls.Config, error) {
 	server := options["server"]
 	port := options["port"]
 
@@ -744,6 +782,24 @@ func ProcessOptions(options map[string]string, ucarg, arg string) (map[string]st
 			return nil, fmt.Errorf("+cafile= requires a path to a PEM cert bundle")
 		}
 		options["cafile"] = path
+		return options, nil
+	}
+	// Client identity for mutual TLS / a server's per-zone downstream-auth
+	// (tls-pin/pkix/dane): present this cert so the server can authenticate us.
+	if strings.HasPrefix(ucarg, "+CERT=") {
+		path := arg[len("+cert="):]
+		if path == "" {
+			return nil, fmt.Errorf("+cert= requires a path to a PEM certificate")
+		}
+		options["clientcert"] = path
+		return options, nil
+	}
+	if strings.HasPrefix(ucarg, "+KEY=") {
+		path := arg[len("+key="):]
+		if path == "" {
+			return nil, fmt.Errorf("+key= requires a path to a PEM private key")
+		}
+		options["clientkey"] = path
 		return options, nil
 	}
 
