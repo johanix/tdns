@@ -35,6 +35,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	tdns "github.com/johanix/tdns/v2"
+	algregistry "github.com/johanix/tdns/v2/algorithms"
 )
 
 // ---------------------------------------------------------------------------
@@ -325,7 +326,7 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 
 	checkDnsEngine(&cfg, rep)
 	checkApiServer(&cfg, cfgPath, rep)
-	checkDnssecPolicies(v, rep, role)
+	checkDnssecPolicies(v, rep, online, role)
 	checkZones(&cfg, rep, online, role)
 	checkApiServerCorrelation(role, &cfg, rep)
 
@@ -523,7 +524,7 @@ func checkApiServer(cfg *tdns.Config, cfgPath string, rep *ccReport) {
 // does (template expansion + split-algorithm gating + role-capability + key
 // lifetimes) by handing the merged dnssec: subtree to the exported
 // tdns.ValidateDnssecPoliciesFromFile.
-func checkDnssecPolicies(v *viper.Viper, rep *ccReport, role string) {
+func checkDnssecPolicies(v *viper.Viper, rep *ccReport, online bool, role string) {
 	const g = "DNSSEC policies"
 	sub := v.Get("dnssec")
 	if sub == nil {
@@ -549,10 +550,29 @@ func checkDnssecPolicies(v *viper.Viper, rep *ccReport, role string) {
 	}
 	defer os.Remove(tmp)
 
+	if online {
+		// The running server is the ONLY authority on which algorithms this
+		// deployment implements: PQ codepoints are assigned at runtime per
+		// deployment, so the CLI's local table cannot know them and would
+		// false-FAIL every PQ policy. Validate policy algorithms by NAME against
+		// the server's list-algorithms instead. (The server's own validation of
+		// its LOADED policies is reported separately by the loaded-policy
+		// correlation.)
+		checkPolicyAlgsAgainstServer(tmp, rep, g, role, len(pols))
+		return
+	}
+
+	// Offline: only the CLI's local registry (standard algorithms) is available.
+	// A PQ algorithm is runtime-assigned and unknowable without the server, so an
+	// "unknown algorithm" offline is INCONCLUSIVE (WARN + hint), not a hard FAIL.
 	if err := tdns.ValidateDnssecPoliciesFromFile(tmp); err != nil {
 		for _, ln := range strings.Split(strings.TrimRight(err.Error(), "\n"), "\n") {
 			ln = strings.TrimSpace(ln)
 			if ln == "" {
+				continue
+			}
+			if strings.Contains(ln, "unknown") && strings.Contains(ln, "algorithm") {
+				rep.warn(g, "policy", ln+" — offline the CLI cannot confirm PQ algorithms; re-run without --offline to check against the server", "")
 				continue
 			}
 			rep.fail(g, "policy", ln,
@@ -560,7 +580,72 @@ func checkDnssecPolicies(v *viper.Viper, rep *ccReport, role string) {
 		}
 		return
 	}
-	rep.pass(g, "policies", fmt.Sprintf("all %d policy definition(s) valid (algorithms, split-gating, lifetimes)", len(pols)))
+	rep.pass(g, "policies", fmt.Sprintf("all %d policy definition(s) valid locally (CLI-known algorithms, split-gating, lifetimes)", len(pols)))
+}
+
+// checkPolicyAlgsAgainstServer validates each config policy's effective algorithm
+// NAMES (resolved without codepoints) against the running server's registered
+// algorithms (list-algorithms) — the authority on what this deployment
+// implements. Role-aware: each role's algorithm must be registered, a DNSSEC
+// signing algorithm, and valid for that role (KSK/ZSK).
+func checkPolicyAlgsAgainstServer(tmp string, rep *ccReport, g, role string, nPols int) {
+	algs, err := fetchServerAlgorithms(role)
+	if err != nil {
+		rep.warn(g, "algorithms", fmt.Sprintf("could not fetch the %s server's supported algorithms: %v — policy algorithms not checked", role, err), "")
+		return
+	}
+	byName := map[string]algregistry.AlgorithmInfo{}
+	for _, a := range algs {
+		byName[strings.ToUpper(a.Name)] = a
+	}
+	names, err := tdns.ResolveDnssecPolicyAlgNames(tmp)
+	if err != nil {
+		rep.warn(g, "algorithms", fmt.Sprintf("could not read policy algorithms: %v", err), "")
+		return
+	}
+
+	polNames := make([]string, 0, len(names))
+	for n := range names {
+		polNames = append(polNames, n)
+	}
+	sort.Strings(polNames)
+
+	allOK := true
+	check := func(polName, roleLabel, algName string, needKSK, needZSK bool) {
+		if algName == "" {
+			rep.fail(g, polName, fmt.Sprintf("policy %q has no %s algorithm", polName, roleLabel), "set the policy's algorithm")
+			allOK = false
+			return
+		}
+		info, known := byName[algName]
+		switch {
+		case !known:
+			rep.fail(g, polName, fmt.Sprintf("policy %q %s algorithm %q is not implemented by the %s server", polName, roleLabel, algName, role),
+				fmt.Sprintf("use an algorithm the server supports (`tdns-cli %s algorithms` lists them)", role))
+			allOK = false
+		case !info.ForDNSSEC:
+			rep.fail(g, polName, fmt.Sprintf("policy %q %s algorithm %q is registered but not a DNSSEC signing algorithm", polName, roleLabel, algName), "choose a DNSSEC algorithm")
+			allOK = false
+		case needKSK && !info.ForKSK:
+			rep.fail(g, polName, fmt.Sprintf("policy %q uses %q as %s, which is not valid as a KSK on the %s server", polName, algName, roleLabel, role), "choose a KSK-capable algorithm")
+			allOK = false
+		case needZSK && !info.ForZSK:
+			rep.fail(g, polName, fmt.Sprintf("policy %q uses %q as %s, which is not valid as a ZSK on the %s server", polName, algName, roleLabel, role), "choose a ZSK-capable algorithm")
+			allOK = false
+		}
+	}
+	for _, polName := range polNames {
+		pa := names[polName]
+		if pa.Mode == tdns.DnssecPolicyModeCSK {
+			check(polName, "CSK", pa.Alg, true, true)
+		} else {
+			check(polName, "KSK", pa.KSKAlg, true, false)
+			check(polName, "ZSK", pa.ZSKAlg, false, true)
+		}
+	}
+	if allOK {
+		rep.pass(g, "policies", fmt.Sprintf("all %d policy(ies) use algorithms the %s server implements and are role-valid", nPols, role))
+	}
 }
 
 func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
@@ -1064,13 +1149,16 @@ func fetchActiveKeyAlgsByZone(role string) (map[string]activeKeyAlgs, error) {
 // it requires. Config-declared policies (from the checked file) win; the
 // built-in `default` policy and any policy named only by the running server are
 // resolved from the server's loaded policies. false when neither source knows it.
-func resolveWantAlgs(polName string, declared map[string]tdns.PolicyAlgs, serverPols map[string]tdns.DnssecPolicyInfo) (wantAlgs, bool) {
+func resolveWantAlgs(polName string, declared map[string]tdns.PolicyAlgNames, serverPols map[string]tdns.DnssecPolicyInfo) (wantAlgs, bool) {
 	pn := lc(polName)
 	if pa, ok := declared[pn]; ok {
+		// pa.{KSKAlg,ZSKAlg} are already NAMES (resolved without codepoints), so a
+		// PQ policy this client cannot codepoint-resolve is still comparable — the
+		// active-key side is server-reported names too.
 		return wantAlgs{
 			mode: normalizeMode(pa.Mode),
-			ksk:  lc(dns.AlgorithmToString[pa.KSKAlg]),
-			zsk:  lc(dns.AlgorithmToString[pa.ZSKAlg]),
+			ksk:  lc(pa.KSKAlg),
+			zsk:  lc(pa.ZSKAlg),
 		}, true
 	}
 	if sp, ok := serverPols[pn]; ok {
@@ -1125,10 +1213,14 @@ func checkPolicyAlgVsActiveKeys(cfg *tdns.Config, v *viper.Viper, rep *ccReport,
 
 	// Config-declared policy algorithms (honors includes: same merged dnssec
 	// temp file checkDnssecPolicies validates).
-	var declared map[string]tdns.PolicyAlgs
+	// Resolve policy algorithms as NAMES (not codepoints): a pure client cannot
+	// resolve this deployment's runtime-assigned PQ codepoints, and the active-key
+	// side is already name-based (server-reported), so name-vs-name makes the
+	// correlation PQ-safe.
+	var declared map[string]tdns.PolicyAlgNames
 	if pols, _ := v.Get("dnssec.policies").(map[string]interface{}); len(pols) > 0 {
 		if tmp, err := writeTempYAML(map[string]interface{}{"dnssec": v.Get("dnssec")}); err == nil {
-			declared, _ = tdns.ResolveDnssecPolicyAlgs(tmp)
+			declared, _ = tdns.ResolveDnssecPolicyAlgNames(tmp)
 			os.Remove(tmp)
 		}
 	}

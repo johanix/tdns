@@ -1371,6 +1371,53 @@ func (conf *Config) reloadDnssecFromFile() error {
 	return conf.parseDnssecConfig()
 }
 
+// reloadZonesFromFile re-reads the config file(s), decodes just the zones: block,
+// and replaces conf.Zones. Used by the zone-reload path (ReloadZoneConfig) so a
+// config-file edit to the ZONE set — an added or removed zone, or a changed
+// dnssecpolicy/primaries/ACLs/options/zonefile — is picked up by a single
+// `reload-zones`, not only policy-definition edits. Without this, ParseZones
+// iterates the stale startup conf.Zones (the longstanding "must get the zones
+// config file from outside" gap in ReloadZoneConfig), so zone edits needed a
+// restart. Uses the SAME decode hooks + ZeroFields as the full ParseConfig so a
+// legacy bare-string primary:/notify: entry decodes to a PeerConf legacy marker
+// (quarantined per-zone) instead of failing the whole decode, and so a zone whose
+// YAML omits a field does not inherit a stale slot-neighbour's value.
+func (conf *Config) reloadZonesFromFile() error {
+	cfgfile := conf.Internal.CfgFile
+	if cfgfile == "" {
+		// No config file (e.g. embedded use) — keep the in-memory zone set.
+		return nil
+	}
+
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	if err != nil {
+		return fmt.Errorf("error processing config: %v", err)
+	}
+
+	var partial struct {
+		Zones []ZoneConf `yaml:"zones"`
+	}
+	decoderConfig := &mapstructure.DecoderConfig{
+		TagName:    "yaml",
+		Result:     &partial,
+		ZeroFields: true,
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			stringToPeerConfHook(),
+			stringToAclEntryHook(),
+		),
+	}
+	decoder, err := mapstructure.NewDecoder(decoderConfig)
+	if err != nil {
+		return fmt.Errorf("error creating decoder: %v", err)
+	}
+	if err := decoder.Decode(configMap); err != nil {
+		return fmt.Errorf("error decoding zones config: %v", err)
+	}
+
+	conf.Zones = partial.Zones
+	return nil
+}
+
 // reloadTsigKeysFromFile re-reads the config file and decodes just the keys:
 // block into conf.Keys. Used by reload-tsig without a full config reload.
 func (conf *Config) reloadTsigKeysFromFile() error {
