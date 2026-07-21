@@ -313,6 +313,16 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 	// `validate:"required"` struct tags AND the cert/key pair validation).
 	checkRequiredFields(v, cfgPath, rep, appTypeForRole(role))
 
+	// Mirror the daemon's ParseConfig: normalize the transfer-list spelling
+	// aliases (upstreams:/request-xfr: -> primaries, secondaries:/provide-xfr:
+	// -> downstreams) before decoding, so config check accepts exactly what
+	// the daemon does. Conflicting double-spellings are reported.
+	raw := v.AllSettings()
+	for name, why := range tdns.NormalizeXfrAliases(raw) {
+		rep.fail("Config file", name, "conflicting transfer-list spellings", why)
+	}
+	_ = v.MergeConfigMap(raw)
+
 	// Decode into a typed Config for the structural checks. Best-effort: the
 	// legacy bare-string primary/ACL decode hooks live in the tdns package and
 	// are not reachable here, but modern {addr,key} configs decode cleanly.
