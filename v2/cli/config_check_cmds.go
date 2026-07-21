@@ -698,12 +698,13 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 		}
 
 		if zname == "" {
-			rep.fail(g, zlabel, "zone has no name", "every zone needs a name (FQDN with trailing dot)")
+			rep.fail(g, zlabel, "zone has no name", "every zone needs a name")
 			continue
 		}
-		if !strings.HasSuffix(zname, ".") {
-			rep.warn(g, zname, "zone name is not a FQDN (missing trailing dot)", "write the name with a trailing dot, e.g. example.com.")
-		}
+		// A missing trailing dot is NOT flagged: tdns accepts zone names both
+		// with and without it, and the daemon canonicalizes to FQDN internally
+		// (correlateZones already compares dns.Fqdn-normalized names), so a
+		// non-FQDN name is not a defect.
 		if seen[lc(zname)] {
 			rep.fail(g, zname, "duplicate zone declaration", "remove the duplicate entry")
 			continue
