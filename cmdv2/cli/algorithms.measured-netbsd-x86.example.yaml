@@ -1,0 +1,218 @@
+# algorithms.measured-netbsd-x86.example.yaml
+#
+# A WORKED EXAMPLE of algorithms.yaml with signingcost / validationcost
+# filled in from a real benchmark run. This is NOT a drop-in config for
+# your deployment — the costs were measured on ONE machine and the
+# relative multipliers shift across architectures and across whether the
+# PQ C libraries were built with CPU-specific optimization (AVX2, etc.)
+# or as generic reference code.
+#
+# Measured with: go run ./cmd/algbench   (dnssec-algorithms repo)
+#   Host:     NetBSD VM on an Intel i9-12900 (godev101)
+#   Run:      -n 50, RSA at 2048-bit
+#   Reference: ED25519 (signingcost = validationcost = 1)
+#
+# Compare with algorithms.measured-arm64.example.yaml: the shape is the
+# same, but several PQ signing costs are much higher here — most
+# strikingly FALCON512 (119x vs 7.4x) and SLHDSA128S (40423x vs 7946x).
+#
+# This is NOT a missing-CPU-feature artifact: the host (a NetBSD/Xen
+# guest on an i9-12900H) does expose AVX2/FMA/AES/SHA to the guest. The
+# inflated PQ signing costs come from the C libraries being built as
+# generic / reference code rather than with the AVX2 signing paths
+# enabled — e.g. qruovc here builds the QR-UOV *ref* (non-vectorized)
+# platform by design, and the liboqs/sqisign builds were not compiled
+# with -march tuning. Rebuilding those with the optimized code paths
+# would very probably narrow the gap; the numbers below reflect the
+# library builds as currently installed on this host, not an upper
+# bound on the algorithms.
+#
+# SLHDSA128S signing here is ~1.6 SECONDS per signature: usable only for
+# offline signing of rarely-changing RRsets, never online — and that
+# holds regardless of build flags (hash-based signing is intrinsically
+# slow).
+#
+# To get numbers for YOUR reference hardware, run cmd/algbench there.
+# The canonical template (algorithms.sample.yaml) leaves these unset.
+#
+# Field meanings are documented in algorithms.sample.yaml.
+
+algorithms:
+   display:
+      descriptionwidth:  50
+
+   profiles:
+      ED25519:
+         description:     "Edwards-curve DSA (RFC 8080); classical, cost reference"
+         publickeybytes:  32
+         signaturebytes:  64
+         secretkeybytes:  32
+         maturity:        builtin
+         signingcost:     1
+         validationcost:  1
+
+      ECDSAP256SHA256:
+         description:     "ECDSA P-256 with SHA-256 (RFC 6605); classical, widely deployed"
+         publickeybytes:  64
+         signaturebytes:  64
+         secretkeybytes:  32
+         maturity:        builtin
+         signingcost:     1.4
+         validationcost:  1.1
+
+      ECDSAP384SHA384:
+         description:     "ECDSA P-384 with SHA-384 (RFC 6605); classical"
+         publickeybytes:  96
+         signaturebytes:  96
+         secretkeybytes:  48
+         maturity:        builtin
+         signingcost:     6.9
+         validationcost:  8.2
+
+      RSASHA256:
+         description:     "RSA with SHA-256 (RFC 5702); classical. Sizes shown for a 2048-bit key (variable)"
+         publickeybytes:  260
+         signaturebytes:  256
+         secretkeybytes:  1192
+         maturity:        builtin
+         signingcost:     39
+         validationcost:  0.8
+
+      RSASHA512:
+         description:     "RSA with SHA-512 (RFC 5702); classical. Sizes shown for a 2048-bit key (variable)"
+         publickeybytes:  260
+         signaturebytes:  256
+         secretkeybytes:  1192
+         maturity:        builtin
+         signingcost:     40
+         validationcost:  0.7
+
+      MLDSA44:
+         description:     "ML-DSA-44 (FIPS 204), lattice"
+         publickeybytes:  1312
+         signaturebytes:  2420
+         secretkeybytes:  2560
+         securitylevel:   2
+         maturity:        final
+         signingcost:     2.6
+         validationcost:  1.3
+
+      SLHDSA128S:
+         description:     "SLH-DSA-SHA2-128s (FIPS 205), hash-based; tiny keys, large slow signatures"
+         publickeybytes:  32
+         signaturebytes:  7856
+         secretkeybytes:  64
+         securitylevel:   1
+         maturity:        final
+         signingcost:     40423
+         validationcost:  18
+
+      FALCON512:
+         description:     "Falcon-512 (FIPS 206 draft), lattice; signature is variable-length, <= 752"
+         publickeybytes:  897
+         signaturebytes:  752
+         secretkeybytes:  1281
+         securitylevel:   1
+         maturity:        draft
+         signingcost:     119
+         validationcost:  0.4
+
+      MAYO1:
+         description:     "MAYO-1 (NIST onramp), oil-and-vinegar; seed-sized secret key"
+         publickeybytes:  1420
+         signaturebytes:  454
+         secretkeybytes:  24
+         securitylevel:   1
+         maturity:        candidate
+         signingcost:     25
+         validationcost:  2.1
+
+      SNOVA24_5_4:
+         description:     "SNOVA-24_5_4 (NIST onramp), oil-and-vinegar"
+         publickeybytes:  1016
+         signaturebytes:  248
+         secretkeybytes:  48
+         securitylevel:   1
+         maturity:        candidate
+         signingcost:     59
+         validationcost:  17
+
+      SQISIGN1:
+         description:     "SQIsign-I (NIST onramp), isogeny; very small keys and signatures, slow"
+         publickeybytes:  65
+         signaturebytes:  148
+         secretkeybytes:  353
+         securitylevel:   1
+         maturity:        candidate
+         signingcost:     3296
+         validationcost:  122
+
+      QRUOV_Q31_L3:
+         description:     "QR-UOV-I q=31 L=3 (NIST onramp), oil-and-vinegar; large public key"
+         publickeybytes:  23641
+         signaturebytes:  157
+         secretkeybytes:  32
+         securitylevel:   1
+         maturity:        candidate
+         signingcost:     100
+         validationcost:  37
+
+      MAYO2:
+         description:     "MAYO-2 (NIST onramp), oil-and-vinegar; larger pubkey / smaller sig than MAYO-1"
+         publickeybytes:  4912
+         signaturebytes:  186
+         secretkeybytes:  24
+         securitylevel:   1
+         maturity:        candidate
+         signingcost:     19
+         validationcost:  0.8
+
+      MAYO3:
+         description:     "MAYO-3 (NIST onramp), oil-and-vinegar; level-3 parameter set"
+         publickeybytes:  2986
+         signaturebytes:  681
+         secretkeybytes:  32
+         securitylevel:   3
+         maturity:        candidate
+         signingcost:     68
+         validationcost:  5.4
+
+      MAYO5:
+         description:     "MAYO-5 (NIST onramp), oil-and-vinegar; level-5 parameter set"
+         publickeybytes:  5554
+         signaturebytes:  964
+         secretkeybytes:  40
+         securitylevel:   5
+         maturity:        candidate
+         signingcost:     162
+         validationcost:  11
+
+      FALCON1024:
+         description:     "Falcon-1024 (FIPS 206 draft), lattice; level-5, variable-length sig <= 1462"
+         publickeybytes:  1793
+         signaturebytes:  1462
+         secretkeybytes:  2305
+         securitylevel:   5
+         maturity:        draft
+         signingcost:     259
+         validationcost:  1.1
+
+      SNOVA37_17_2:
+         description:     "SNOVA-37_17_2 (NIST onramp), oil-and-vinegar; smallest signature (124 B), larger public key"
+         publickeybytes:  9842
+         signaturebytes:  124
+         secretkeybytes:  48
+         securitylevel:   1
+         maturity:        candidate
+         signingcost:     59
+         validationcost:  8.2
+
+      SNOVA25_8_3:
+         description:     "SNOVA-25_8_3 (NIST onramp), oil-and-vinegar; small signature, modest public key"
+         publickeybytes:  2320
+         signaturebytes:  165
+         secretkeybytes:  48
+         securitylevel:   1
+         maturity:        candidate
+         signingcost:     29
+         validationcost:  6.6
