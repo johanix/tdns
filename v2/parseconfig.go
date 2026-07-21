@@ -322,6 +322,12 @@ func (conf *Config) ParseConfig(reload bool) error {
 		}
 	}
 
+	// Reset raw fields that derive an internal default when omitted, so a
+	// reload after the operator removes the YAML key reverts to the default
+	// instead of preserving the previously-decoded value (mapstructure leaves
+	// absent keys untouched).
+	conf.Dnssec.DNSKEYTransport = ""
+
 	// Decode the entire config at once. A bare-string primary:/notify: entry no
 	// longer aborts the decode — stringToPeerConfHook turns it into a PeerConf
 	// legacy marker that per-zone validation quarantines (see DecoderConfig above).
@@ -363,6 +369,12 @@ func (conf *Config) ParseConfig(reload bool) error {
 	if err := conf.parseDnssecConfig(); err != nil {
 		return err
 	}
+
+	dnskeyXport, err := parseDNSKEYTransportPolicy(conf.Dnssec.DNSKEYTransport)
+	if err != nil {
+		return err
+	}
+	conf.Internal.DNSKEYTransport = dnskeyXport
 
 	// Normalize service.transport.type (default: none)
 	if conf.Service.Transport.Type == "" {
