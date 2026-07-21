@@ -172,6 +172,22 @@ func (conf *Config) ClientTLSConfigForPeer(peer PeerConf) (*tls.Config, error) {
 		NextProtos: []string{"dot"},
 	}
 
+	// Present OUR OWN certificate when the server requests one (the primary's
+	// listener always RequestClientCert): this is how a secondary satisfies
+	// the primary's per-zone downstream-auth tls-* mechanisms. The daemon's
+	// dnsengine cert/key (loaded at DnsEngine start into Internal.CertData/
+	// KeyData; cert init issues it with both server and client EKU) doubles
+	// as the client identity. Absent cert material (e.g. dog's synthetic
+	// Config, or a Do53-only daemon) simply presents nothing — servers that
+	// do not request a cert never notice either way.
+	if conf.Internal.CertData != "" && conf.Internal.KeyData != "" {
+		if clientCert, err := tls.X509KeyPair([]byte(conf.Internal.CertData), []byte(conf.Internal.KeyData)); err == nil {
+			tlsCfg.Certificates = []tls.Certificate{clientCert}
+		} else {
+			lg.Warn("xot: cannot load own cert/key as client identity; connecting without a client certificate", "err", err)
+		}
+	}
+
 	switch peer.TLSAuth {
 	case TLSAuthPin:
 		// Pinning replaces PKIX chain building entirely: InsecureSkipVerify

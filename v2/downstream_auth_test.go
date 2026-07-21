@@ -11,6 +11,7 @@ package tdns
 import (
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"net"
 	"strings"
 	"testing"
@@ -18,6 +19,10 @@ import (
 	cache "github.com/johanix/tdns/v2/cache"
 	"github.com/miekg/dns"
 )
+
+func pemEncode(blockType string, der []byte) []byte {
+	return pem.EncodeToMemory(&pem.Block{Type: blockType, Bytes: der})
+}
 
 func TestDownstreamAuth_Validate(t *testing.T) {
 	mechs := []string{"TSIG", " tls-pin "}
@@ -248,6 +253,62 @@ func TestDownstreamAuth_DaneLadder(t *testing.T) {
 	good2.Certificates = []tls.Certificate{clientCert}
 	if _, err := axfrClientTLS(t, srv2.addr, "example.test.", good2, nil); err == nil {
 		t.Fatal("tls-dane without an IMR must fail closed")
+	}
+}
+
+// TestDownstreamAuth_SecondaryPresentsClientCert: the full daemon-to-daemon
+// shape — the secondary's ZoneTransferIn presents the daemon's own
+// dnsengine cert (Internal.CertData/KeyData) as its client identity, and
+// the primary's [tls-pkix] ladder accepts it. This is the wiring that makes
+// the inbound tls-* mechanisms satisfiable by a real tdns secondary at all.
+func TestDownstreamAuth_SecondaryPresentsClientCert(t *testing.T) {
+	// The secondary's identity cert (what cert init would issue: dual EKU).
+	secCert, secLeaf := newTestTLSCert(t, []string{"sec1.test"}, nil)
+
+	// Primary: zone locked to [tls-pkix], trusting the secondary's cert as
+	// its own root and requiring its SAN.
+	caPath := t.TempDir() + "/sec-ca.pem"
+	if err := writeCertPEM(caPath, secLeaf.Raw); err != nil {
+		t.Fatalf("write ca: %v", err)
+	}
+	ds := []AclEntry{{Prefix: "127.0.0.0/8", Key: NOKEY,
+		TLSIdentity: &TLSIdentity{Name: "sec1.test", CAFile: caPath}}}
+	_, srv, _ := dsAuthHarness(t, &Config{}, ds, []string{MechTLSPkix})
+
+	// Secondary: pin the primary's server cert, and carry its own cert/key
+	// in Internal.CertData/KeyData exactly as DnsEngine startup does.
+	serverPin := func() string {
+		// dsAuthHarness generated the server cert internally; fetch its pin
+		// via a plain unverified connection (the +showpin flow).
+		conn, err := tls.Dial("tcp", srv.addr, &tls.Config{InsecureSkipVerify: true, NextProtos: []string{"dot"}, MinVersion: tls.VersionTLS13})
+		if err != nil {
+			t.Fatalf("dial for pin: %v", err)
+		}
+		defer conn.Close()
+		return SPKISHA256(conn.ConnectionState().PeerCertificates[0])
+	}()
+
+	conf := &Config{}
+	secKeyDER, _ := x509.MarshalPKCS8PrivateKey(secCert.PrivateKey)
+	conf.Internal.CertData = string(pemEncode("CERTIFICATE", secCert.Certificate[0]))
+	conf.Internal.KeyData = string(pemEncode("PRIVATE KEY", secKeyDER))
+
+	peer := PeerConf{Addr: srv.addr, Key: NOKEY, Transport: TransportDoT,
+		TLSAuth: TLSAuthPin, Pins: []string{serverPin}}
+	sec := newTestSecondary(t, peer)
+	serial, err := sec.ZoneTransferIn(peer, 0, "axfr", conf)
+	if err != nil {
+		t.Fatalf("secondary pull with client cert failed: %v", err)
+	}
+	if serial != 1 {
+		t.Fatalf("expected serial 1, got %d", serial)
+	}
+
+	// Without the client identity the same pull must be refused.
+	confNoID := &Config{}
+	sec2 := newTestSecondary(t, peer)
+	if _, err := sec2.ZoneTransferIn(peer, 0, "axfr", confNoID); err == nil {
+		t.Fatal("pull without a client cert must be refused under [tls-pkix]")
 	}
 }
 
