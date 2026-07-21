@@ -50,6 +50,18 @@ type ConfigEntry struct {
 // The older style of multiple separate 'include' statements throughout the file
 // is not supported.
 // Returns the processed config map and a list of all included file paths (absolute).
+
+// LoadRawConfigMap loads a config file and its (single-level) includes into a
+// case-PRESERVING map, exactly as the daemon does before alias normalization
+// and viper decoding. `config check` uses it so NormalizeXfrAliases (and the
+// mis-cased-key scan) see the same key case the daemon sees: viper's
+// AllSettings lower-cases keys, which would make a mis-cased transfer-list key
+// like `Provide-Xfr:` look accepted while the daemon leaves it unknown and
+// silently drops it. Returns the merged map and the list of included files.
+func LoadRawConfigMap(file string) (map[string]interface{}, []string, error) {
+	return processConfigFile(file, filepath.Dir(file), 0)
+}
+
 func processConfigFile(file string, baseDir string, depth int) (map[string]interface{}, []string, error) {
 	if depth > 10 {
 		return nil, nil, errors.New("maximum include depth exceeded (10 levels)")
@@ -650,10 +662,14 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 
 		// A zone whose raw config used two spellings of the same transfer
 		// list (primaries:+upstreams:, etc.) is quarantined — never a
-		// silent preference between them.
-		if c := aliasConflictFor(conf.Internal.XfrAliasConflicts, zconf.Name); c != "" {
-			lgConfig.Error("conflicting transfer-list spellings, zone in error state", "zone", zname, "conflict", c)
-			zd.SetError(ConfigError, "conflicting transfer-list spellings: %s", c)
+		// silent preference between them. The conflict may live on the zone
+		// itself OR on the template it references (NormalizeXfrAliases keys
+		// template conflicts by the template name); a conflicted template
+		// would otherwise silently hand the zone its broader canonical ACL.
+		conflict := zoneOrTemplateAliasConflict(conf.Internal.XfrAliasConflicts, zconf.Name, zconf.Template)
+		if conflict != "" {
+			lgConfig.Error("conflicting transfer-list spellings, zone in error state", "zone", zname, "conflict", conflict)
+			zd.SetError(ConfigError, "conflicting transfer-list spellings: %s", conflict)
 			broken_zones = append(broken_zones, zname)
 			continue
 		}
@@ -1183,21 +1199,21 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				return nil, nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
 			}
 			zr := ZoneRefresher{
-				Name:          zname,
-				Force:         true,     // force refresh, ignoring SOA serial, when reloading from file
-				ZoneType:      zonetype, // primary | secondary
-				PrimariesConf: clonePeerConfs(zconf.Primaries),
-				Primaries:     resolvedPrimaries,
-				ZoneStore:     zonestore,
-				Notify:        zconf.Notify,
-				AllowNotify:   zconf.AllowNotify,
-				Downstreams:   zconf.Downstreams,
+				Name:           zname,
+				Force:          true,     // force refresh, ignoring SOA serial, when reloading from file
+				ZoneType:       zonetype, // primary | secondary
+				PrimariesConf:  clonePeerConfs(zconf.Primaries),
+				Primaries:      resolvedPrimaries,
+				ZoneStore:      zonestore,
+				Notify:         zconf.Notify,
+				AllowNotify:    zconf.AllowNotify,
+				Downstreams:    zconf.Downstreams,
 				DownstreamAuth: zconf.DownstreamAuth,
-				ConfigUpdate:  true, // config-bearing: lets reload clear removed ACLs
-				Zonefile:      zconf.Zonefile,
-				Options:       options,
-				UpdatePolicy:  policy,
-				DnssecPolicy:  zconf.DnssecPolicy,
+				ConfigUpdate:   true, // config-bearing: lets reload clear removed ACLs
+				Zonefile:       zconf.Zonefile,
+				Options:        options,
+				UpdatePolicy:   policy,
+				DnssecPolicy:   zconf.DnssecPolicy,
 			}
 			select {
 			case conf.Internal.RefreshZoneCh <- zr:

@@ -41,16 +41,19 @@ const (
 // defaultPortForPeer returns the default port implied by the peer's transport:
 // 853 for DoT (RFC 7858/9103), 53 otherwise.
 func defaultPortForPeer(p PeerConf) string {
-	if p.Transport == TransportDoT {
+	if peerUsesDoT(p) {
 		return "853"
 	}
 	return "53"
 }
 
 // peerUsesDoT reports whether this peer is configured for XFR-over-TLS.
-// (Transport is normalized to lowercase by validatePeerXoT at config load.)
+// validatePeerXoT lowercases Transport on the static config path, but
+// PeerConfs built programmatically (API/dynamic zones) may not have been
+// normalized — so compare case-insensitively rather than assume. Getting
+// this wrong silently downgrades an intended DoT pull to plaintext Do53.
 func peerUsesDoT(p PeerConf) bool {
-	return p.Transport == TransportDoT
+	return strings.EqualFold(strings.TrimSpace(p.Transport), TransportDoT)
 }
 
 // transportLabel names the peer's transport for logging.
@@ -122,6 +125,20 @@ func validatePeerXoT(p *PeerConf) error {
 		return fmt.Errorf("transport: dot requires tls-auth (pin | dane | pkix)")
 	default:
 		return fmt.Errorf("unknown tls-auth %q (supported: pin, dane, pkix)", p.TLSAuth)
+	}
+	return nil
+}
+
+// validatePrimariesXoT validates and normalizes (in place) the XoT fields of
+// every primary in the slice — the dynamic/API analogue of the per-primary
+// validatePeerXoT call the static secondary-zone path makes. Without it a
+// programmatic PeerConf can carry an unnormalized "DoT" transport (silently
+// pulling plaintext) or a malformed pin/ca-file.
+func validatePrimariesXoT(primaries []PeerConf) error {
+	for i := range primaries {
+		if err := validatePeerXoT(&primaries[i]); err != nil {
+			return fmt.Errorf("primary %s: %v", primaries[i].Addr, err)
+		}
 	}
 	return nil
 }

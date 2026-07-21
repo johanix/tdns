@@ -216,8 +216,17 @@ func (conf *Config) expandPeerList(in []PeerConf, where string, brokenPeers map[
 			out = append(out, e)
 			continue
 		}
+		// A reference entry carries ONLY peers:. Inline fields — the dial
+		// target (addr/key) or any TLS knob (transport/tls-auth/pins/ca-file/
+		// tls-name) — belong on the peer definition, not the reference; if we
+		// silently ignored them the operator would believe they configured
+		// pin/DoT on the zone while the pull actually used the peer's (maybe
+		// plaintext) settings. Reject rather than downgrade.
 		if e.Addr != "" || e.Key != "" {
 			return nil, fmt.Errorf("%s: an entry may be a reference (peers:) or inline (addr/key), not both", where)
+		}
+		if e.Transport != "" || e.TLSAuth != "" || e.TLSName != "" || len(e.Pins) > 0 || e.CAFile != "" {
+			return nil, fmt.Errorf("%s: TLS fields (transport/tls-auth/pins/ca-file/tls-name) must be set on the peer definition, not on a peers: reference entry", where)
 		}
 		for _, id := range e.PeersRef {
 			p, err := conf.lookupPeer(id, where, brokenPeers)
@@ -327,6 +336,71 @@ func NormalizeXfrAliases(configMap map[string]interface{}) map[string]string {
 	return conflicts
 }
 
+// MiscasedXfrKey names a transfer-list key whose lower-cased form is an
+// accepted spelling (alias or canonical) but whose actual case differs. The
+// daemon decodes YAML case-sensitively, so such a key is unknown to it and
+// silently dropped — `config check` surfaces these so an operator does not
+// believe a transfer list is configured when the daemon will ignore it.
+type MiscasedXfrKey struct {
+	Zone      string // zone or template name (from the entry's name:)
+	Key       string // the key exactly as written
+	Canonical string // the spelling the daemon accepts
+}
+
+// FindMiscasedXfrKeys scans zones: and templates: for transfer-list keys that
+// are correct except for letter case. This mirrors NormalizeXfrAliases' key
+// set (aliases + their canonical targets) but reports the near-misses the
+// daemon drops rather than normalizing them.
+func FindMiscasedXfrKeys(configMap map[string]interface{}) []MiscasedXfrKey {
+	// lower-cased accepted spelling -> canonical spelling to suggest.
+	accepted := map[string]string{
+		"primaries":   "primaries",
+		"downstreams": "downstreams",
+	}
+	for alias, canonical := range xfrKeyAliases {
+		accepted[alias] = canonical
+	}
+
+	var out []MiscasedXfrKey
+	for _, section := range []string{"zones", "templates"} {
+		list, ok := configMap[section].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, item := range list {
+			entry := asStringMap(item)
+			if entry == nil {
+				continue
+			}
+			name, _ := entry["name"].(string)
+			for k := range entry {
+				lower := strings.ToLower(k)
+				if canonical, known := accepted[lower]; known && k != lower {
+					out = append(out, MiscasedXfrKey{Zone: name, Key: k, Canonical: canonical})
+				}
+			}
+		}
+	}
+	return out
+}
+
+// CheckPeerRefs validates the peers: block and every zone's `- peers:`
+// references the same way ParseZones does at load, WITHOUT mutating conf.Zones,
+// so `config check` reports exactly the peer problems that would quarantine a
+// zone in the daemon. It returns the broken peer definitions (id -> reason) and
+// the zones whose references fail to expand (zone name -> reason).
+func (conf *Config) CheckPeerRefs() (brokenPeers, zoneErrors map[string]string) {
+	brokenPeers = conf.ValidatePeers()
+	zoneErrors = map[string]string{}
+	for i := range conf.Zones {
+		zc := conf.Zones[i] // copy: expandPeerRefs replaces the list fields
+		if err := conf.expandPeerRefs(&zc, brokenPeers); err != nil {
+			zoneErrors[conf.Zones[i].Name] = err.Error()
+		}
+	}
+	return brokenPeers, zoneErrors
+}
+
 // aliasKeysSorted returns the alias spellings in deterministic order so a
 // double-alias conflict (e.g. upstreams + request-xfr) reports stably.
 func aliasKeysSorted() []string {
@@ -365,6 +439,22 @@ func aliasConflictFor(conflicts map[string]string, name string) string {
 	}
 	if c, ok := conflicts[strings.TrimSuffix(name, ".")]; ok {
 		return c
+	}
+	return ""
+}
+
+// zoneOrTemplateAliasConflict returns the transfer-list spelling conflict that
+// must quarantine a zone: one recorded directly on the zone, or (failing that)
+// on the template it uses. NormalizeXfrAliases keys a template conflict by the
+// TEMPLATE name, so a zone that only inherits the conflict through its template
+// would otherwise load with the surviving broad canonical ACL. Consulting both
+// is what keeps a conflicted template from silently widening a dependent zone.
+func zoneOrTemplateAliasConflict(conflicts map[string]string, zoneName, template string) string {
+	if c := aliasConflictFor(conflicts, zoneName); c != "" {
+		return c
+	}
+	if template != "" {
+		return aliasConflictFor(conflicts, template)
 	}
 	return ""
 }
