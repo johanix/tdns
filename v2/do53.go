@@ -168,13 +168,17 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 					lgDns.Info("DnsEngine: TLS certificate expiry check passed", "expiry", x509Cert.NotAfter, "file", certFile)
 				}
 				// XoT chain-presentation note: LoadX509KeyPair presents every
-				// CERTIFICATE block in certfile, so a CA-signed leaf that
-				// needs intermediates must have them bundled (leaf first).
-				// A single CA-signed cert is also the normal shape for a
-				// two-tier PKI (e.g. tdns-cli cert init, where secondaries
-				// trust the root directly), hence Info, not Warn.
+				// CERTIFICATE block in certfile. The condition below fires for a
+				// single certificate that is NOT a self-signed CA — i.e. a leaf,
+				// whether CA-signed (cert init, two-tier PKI) or self-signed. A
+				// self-signed CA root (the mwe default) is exempt: CheckSignature-
+				// From(self) succeeds for it, so no note. Info, not Warn: presenting
+				// a single leaf is fine when peers trust it (or its issuing CA)
+				// directly; it only breaks if the leaf was issued via CA
+				// intermediates that were not bundled. Rewording avoids calling a
+				// self-signed leaf "CA-signed".
 				if parseErr == nil && len(cert.Certificate) == 1 && x509Cert.CheckSignatureFrom(x509Cert) != nil {
-					lgDns.Info("DnsEngine: certfile holds a single CA-signed certificate — fine when peers trust the issuing CA directly; if the CA uses intermediates, bundle them into certfile (leaf first) or secondaries will fail chain building", "file", certFile)
+					lgDns.Info("DnsEngine: certfile holds a single leaf certificate (no chain bundled) — fine when peers trust it, or its issuing CA, directly; but if it was issued via CA intermediates, bundle them into certfile (leaf first) or secondaries will fail chain building", "file", certFile)
 				}
 			}
 		}
