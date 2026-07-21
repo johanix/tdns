@@ -70,6 +70,7 @@ func NewRRsetCache(lg *log.Logger, verbose, debug bool) *RRsetCacheT {
 		ServerMap:            core.NewCmap[map[string]*AuthServer](), // servers stored as map[nsname]*AuthServer{}
 		AuthServerMap:        core.NewCmap[*AuthServer](),            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
 		ZoneMap:              core.NewCmap[*Zone](),                  // zone -> *Zone
+		ServerTLSA:           core.NewCmap[*ServerTLSARecords](),     // nsname -> validated TLSA cache
 		DnskeyCache:          DnskeyCache,
 		Logger:               lg,
 		LineWidth:            130, // default line width for truncating long lines in logging and output
@@ -376,12 +377,14 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 	authservers := map[string]*AuthServer{}
 	for i := range servers {
 		server := &servers[i]
-		// Use the shared per-nameserver instance (as AddServers does), so this
-		// stub server is also registered in AuthServerMap. A private NewAuthServer
-		// here would live only in ServerMap: StoreTLSAForServer writes TLSA onto
-		// the ServerMap instance, but LookupTLSAForServer reads AuthServerMap, so
-		// a stub upstream's cached TLSA would be invisible on the XoT DANE path.
-		tmpauthserver := rrcache.GetOrCreateAuthServer(server.Name)
+		// A stub gets a PRIVATE AuthServer instance (ServerMap only), never the
+		// shared AuthServerMap one: the setters below (SetAddrs/SetTransports/
+		// ForceSetSrc) would otherwise clobber the address/transport state that
+		// IMR discovery maintains for the same nameserver name, skewing ordinary
+		// recursion. TLSA visibility does NOT require sharing — it is cached at
+		// cache level (rrcache.ServerTLSA), keyed by name, independent of which
+		// AuthServer instance answered.
+		tmpauthserver := NewAuthServer(server.Name)
 		if tmpauthserver == nil {
 			continue // Skip invalid server names
 		}
@@ -606,6 +609,12 @@ func cloneRRs(rrs []dns.RR) []dns.RR {
 	return out
 }
 
+// StoreTLSAForServer caches a validated TLSA RRset for the nameserver base
+// (SVCB/TSYNC discovery and direct TLSA answers). The cache is keyed by the
+// server's base name at cache level (rrcache.ServerTLSA), NOT on the AuthServer
+// instance — so a stub's private AuthServer and a discovery-shared instance for
+// the same name observe the same TLSA cache without co-mingling their
+// address/transport state.
 func (rrcache *RRsetCacheT) StoreTLSAForServer(base, owner string, rrset *core.RRset, vstate ValidationState) {
 	if rrcache == nil || rrset == nil || len(rrset.RRs) == 0 {
 		return
@@ -618,32 +627,33 @@ func (rrcache *RRsetCacheT) StoreTLSAForServer(base, owner string, rrset *core.R
 	if owner == "." || owner == "" {
 		return
 	}
-	for zone, sm := range rrcache.ServerMap.Items() {
-		server, ok := sm[base]
-		if !ok {
-			continue
+	st, ok := rrcache.ServerTLSA.Get(base)
+	if !ok {
+		st = &ServerTLSARecords{recs: make(map[string]*CachedRRset)}
+		if !rrcache.ServerTLSA.SetIfAbsent(base, st) {
+			// Lost the race; adopt the instance that won.
+			st, _ = rrcache.ServerTLSA.Get(base)
 		}
-		server.mu.Lock()
-		if server.TLSARecords == nil {
-			server.TLSARecords = make(map[string]*CachedRRset)
-		}
-		server.TLSARecords[owner] = &CachedRRset{
-			Name:   owner,
-			RRtype: dns.TypeTLSA,
-			RRset: &core.RRset{
-				Name:   owner,
-				Class:  dns.ClassINET,
-				RRtype: dns.TypeTLSA,
-				RRs:    cloneRRs(rrset.RRs),
-				RRSIGs: cloneRRs(rrset.RRSIGs),
-			},
-			Context:    ContextAnswer,
-			State:      vstate,
-			Expiration: time.Now().Add(GetMinTTL(rrset.RRs)),
-		}
-		server.mu.Unlock()
-		rrcache.ServerMap.Set(zone, sm)
 	}
+	if st == nil {
+		return
+	}
+	st.mu.Lock()
+	st.recs[owner] = &CachedRRset{
+		Name:   owner,
+		RRtype: dns.TypeTLSA,
+		RRset: &core.RRset{
+			Name:   owner,
+			Class:  dns.ClassINET,
+			RRtype: dns.TypeTLSA,
+			RRs:    cloneRRs(rrset.RRs),
+			RRSIGs: cloneRRs(rrset.RRSIGs),
+		},
+		Context:    ContextAnswer,
+		State:      vstate,
+		Expiration: time.Now().Add(GetMinTTL(rrset.RRs)),
+	}
+	st.mu.Unlock()
 }
 
 // LookupTLSAForServer returns the cached TLSA RRset for owner (a
@@ -657,15 +667,40 @@ func (rrcache *RRsetCacheT) LookupTLSAForServer(base, owner string) *CachedRRset
 	}
 	base = dns.Fqdn(strings.TrimSpace(base))
 	owner = dns.Fqdn(strings.TrimSpace(owner))
-	server, ok := rrcache.AuthServerMap.Get(base)
-	if !ok || server == nil {
+	st, ok := rrcache.ServerTLSA.Get(base)
+	if !ok || st == nil {
 		return nil
 	}
-	rec := server.SnapshotTLSARecords()[owner]
+	st.mu.RLock()
+	rec := st.recs[owner]
+	st.mu.RUnlock()
 	if rec == nil || time.Now().After(rec.Expiration) {
 		return nil
 	}
 	return rec
+}
+
+// SnapshotTLSAForServer returns a copy of the cached TLSA records for the
+// nameserver base (owner -> CachedRRset), or nil if none. Used by the IMR cache
+// dump; expiry is not filtered here (the dump shows all cached entries).
+func (rrcache *RRsetCacheT) SnapshotTLSAForServer(base string) map[string]*CachedRRset {
+	if rrcache == nil {
+		return nil
+	}
+	st, ok := rrcache.ServerTLSA.Get(dns.Fqdn(strings.TrimSpace(base)))
+	if !ok || st == nil {
+		return nil
+	}
+	st.mu.RLock()
+	defer st.mu.RUnlock()
+	if len(st.recs) == 0 {
+		return nil
+	}
+	snap := make(map[string]*CachedRRset, len(st.recs))
+	for owner, rec := range st.recs {
+		snap[owner] = rec
+	}
+	return snap
 }
 
 func (rrcache *RRsetCacheT) SetPrimed(primed bool) {
