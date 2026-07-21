@@ -322,12 +322,26 @@ func (conf *Config) ParseConfig(reload bool) error {
 		}
 	}
 
+	// Reset raw fields that derive an internal default when omitted, so a
+	// reload after the operator removes the YAML key reverts to the default
+	// instead of preserving the previously-decoded value (mapstructure leaves
+	// absent keys untouched).
+	conf.Dnssec.DNSKEYTransport = ""
+
 	// Decode the entire config at once. A bare-string primary:/notify: entry no
 	// longer aborts the decode — stringToPeerConfHook turns it into a PeerConf
 	// legacy marker that per-zone validation quarantines (see DecoderConfig above).
 	if err := decoder.Decode(configMap); err != nil {
 		return fmt.Errorf("error decoding config: %v", err)
 	}
+
+	// Server-wide error registry: create once, preserve across reloads (so
+	// boot-scoped Transport errors survive a reload). parseconfig owns the
+	// Config/CertMissing check (clear-then-reassert on every load).
+	if conf.Internal.ServerErrors == nil {
+		conf.Internal.ServerErrors = NewServerErrorRegistry()
+	}
+	conf.validateDnsEngineCerts()
 
 	if len(md.Unused) > 0 {
 		// Split the unused keys into two buckets: keys that match a known
@@ -355,6 +369,12 @@ func (conf *Config) ParseConfig(reload bool) error {
 	if err := conf.parseDnssecConfig(); err != nil {
 		return err
 	}
+
+	dnskeyXport, err := parseDNSKEYTransportPolicy(conf.Dnssec.DNSKEYTransport)
+	if err != nil {
+		return err
+	}
+	conf.Internal.DNSKEYTransport = dnskeyXport
 
 	// Normalize service.transport.type (default: none)
 	if conf.Service.Transport.Type == "" {
@@ -1376,6 +1396,53 @@ func (conf *Config) reloadDnssecFromFile() error {
 
 	conf.Dnssec = partial.Dnssec
 	return conf.parseDnssecConfig()
+}
+
+// reloadZonesFromFile re-reads the config file(s), decodes just the zones: block,
+// and replaces conf.Zones. Used by the zone-reload path (ReloadZoneConfig) so a
+// config-file edit to the ZONE set — an added or removed zone, or a changed
+// dnssecpolicy/primaries/ACLs/options/zonefile — is picked up by a single
+// `reload-zones`, not only policy-definition edits. Without this, ParseZones
+// iterates the stale startup conf.Zones (the longstanding "must get the zones
+// config file from outside" gap in ReloadZoneConfig), so zone edits needed a
+// restart. Uses the SAME decode hooks + ZeroFields as the full ParseConfig so a
+// legacy bare-string primary:/notify: entry decodes to a PeerConf legacy marker
+// (quarantined per-zone) instead of failing the whole decode, and so a zone whose
+// YAML omits a field does not inherit a stale slot-neighbour's value.
+func (conf *Config) reloadZonesFromFile() error {
+	cfgfile := conf.Internal.CfgFile
+	if cfgfile == "" {
+		// No config file (e.g. embedded use) — keep the in-memory zone set.
+		return nil
+	}
+
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	if err != nil {
+		return fmt.Errorf("error processing config: %v", err)
+	}
+
+	var partial struct {
+		Zones []ZoneConf `yaml:"zones"`
+	}
+	decoderConfig := &mapstructure.DecoderConfig{
+		TagName:    "yaml",
+		Result:     &partial,
+		ZeroFields: true,
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			stringToPeerConfHook(),
+			stringToAclEntryHook(),
+		),
+	}
+	decoder, err := mapstructure.NewDecoder(decoderConfig)
+	if err != nil {
+		return fmt.Errorf("error creating decoder: %v", err)
+	}
+	if err := decoder.Decode(configMap); err != nil {
+		return fmt.Errorf("error decoding zones config: %v", err)
+	}
+
+	conf.Zones = partial.Zones
+	return nil
 }
 
 // reloadTsigKeysFromFile re-reads the config file and decodes just the keys:

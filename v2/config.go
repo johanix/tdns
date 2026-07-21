@@ -62,6 +62,20 @@ type Config struct {
 
 // DnssecConf holds DNSSEC-wide settings consumed by the signer and IMR.
 type DnssecConf struct {
+	// DNSKEYTransport selects how the IMR chooses a transport for DNSKEY
+	// queries. DNSKEY queries are ~0.1% of traffic and exempt from a server's
+	// probabilistic transport-weight distribution, so the chosen transport
+	// bypasses those weights (it still honors the server's advertised
+	// capabilities). Values:
+	//   "force_udp"       - disable Part 3; follow normal probabilistic selection.
+	//   "use_ds_signal"   - (default) bypass to best transport only when the
+	//                       cached parent DS uses a LargeAlgorithms algorithm.
+	//   "try_encrypted"   - bypass for all DNSKEY; prefer encrypted, fall back
+	//                       to TCP, never UDP.
+	//   "force_encrypted" - bypass for all DNSKEY; encrypted only, fail the
+	//                       query if the server advertises no encrypted transport.
+	DNSKEYTransport string `yaml:"dnskey_query_transport" mapstructure:"dnskey_query_transport"`
+
 	// LargeAlgorithms lists the DNSSEC algorithms whose DNSKEY/RRSIG sizes are
 	// large for UDP. The IMR may query child DNSKEY over TCP when a parent DS
 	// uses one; the signer warns if one signs the bulk of a zone. Each entry is
@@ -492,8 +506,18 @@ type InternalDnsConf struct {
 type InternalConf struct {
 	InternalDnsConf
 
+	// ServerErrors is the daemon-wide error registry (v2/servererror.go):
+	// transport/config error conditions surfaced by `config status`. Created
+	// once and preserved across config reloads (so boot-scoped Transport
+	// errors survive a reload).
+	ServerErrors *ServerErrorRegistry
+
 	// LargeAlgorithms is the derived lookup set from Dnssec.LargeAlgorithms.
 	LargeAlgorithms map[uint8]bool
+
+	// DNSKEYTransport is the validated policy derived from
+	// Dnssec.DNSKEYTransport. Defaults to DNSKEYTransportUseDSSignal.
+	DNSKEYTransport DNSKEYTransportPolicy
 
 	// SplitAlgorithms is the derived lookup set from Dnssec.SplitAlgorithms:
 	// kskAlg -> set of permitted zskAlgs. nil/empty means no mixed pair is
@@ -592,6 +616,10 @@ func (conf *Config) ReloadConfig() (string, error) {
 	// Publish the new runtime-config snapshot on a successful reload (still under
 	// confMu); on a parse error keep the last-good snapshot.
 	if err == nil {
+		// The IMR is a process singleton that snapshots the DNSSEC knobs at
+		// init; hand it the re-derived values or it serves the stale ones
+		// until restart.
+		conf.Internal.ImrEngine.RefreshDnssecPolicy(conf.Internal.LargeAlgorithms, conf.Internal.DNSKEYTransport)
 		conf.publishRuntimeConfig()
 	}
 	Globals.App.ServerConfigTime = time.Now()
@@ -632,6 +660,22 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 	// leaves the previous policies in place rather than failing the whole reload.
 	if err := conf.reloadDnssecFromFile(); err != nil {
 		lgConfig.Error("ReloadZoneConfig: failed to re-parse dnssec config, keeping previous policies", "err", err)
+	} else {
+		// parseDnssecConfig rebuilt Internal.LargeAlgorithms; hand the fresh
+		// set to the singleton Imr. DNSKEYTransport is not re-parsed on this
+		// path, so Internal still holds the last full-parse value.
+		conf.Internal.ImrEngine.RefreshDnssecPolicy(conf.Internal.LargeAlgorithms, conf.Internal.DNSKEYTransport)
+	}
+
+	// Re-read the zones: block from the config file(s) so an added/removed zone or
+	// an edited zone→policy mapping (or primaries/ACLs/options/zonefile) is picked
+	// up by this reload, not only policy-definition edits. Previously ParseZones
+	// iterated the stale startup conf.Zones, so zone edits needed a restart. On a
+	// decode error, keep the previous zone set rather than failing the whole
+	// reload (matches the dnssec handling above). Dynamic/API/catalog zones are
+	// never in conf.Zones and are spared from removal below.
+	if err := conf.reloadZonesFromFile(); err != nil {
+		lgConfig.Error("ReloadZoneConfig: failed to re-read zones config, keeping previous zone set", "err", err)
 	}
 
 	prezones := Zones.Keys()
