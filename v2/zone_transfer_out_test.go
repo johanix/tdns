@@ -44,7 +44,7 @@ func startTestAXFRServerCore(t *testing.T, zd *ZoneData, tsigProvider dns.TsigPr
 			record:         srv.recordSize,
 		}
 		serve := func(w2 dns.ResponseWriter, req *dns.Msg) {
-			_, _ = zd.ZoneTransferOut(w2, req)
+			_, _ = zd.ZoneTransferOut(w2, req, nil)
 		}
 		if tsigProvider != nil {
 			TsigSigningHandler(serve)(rec, r)
@@ -88,6 +88,9 @@ type recordingResponseWriter struct {
 	dns.ResponseWriter
 	record func(*dns.Msg)
 }
+
+// Unwrap lets connectionState reach the TLS state through the recorder.
+func (w *recordingResponseWriter) Unwrap() dns.ResponseWriter { return w.ResponseWriter }
 
 func (w *recordingResponseWriter) WriteMsg(m *dns.Msg) error {
 	if w.record != nil {
@@ -407,7 +410,7 @@ $ORIGIN example.test.
 	mux := dns.NewServeMux()
 	mux.HandleFunc(zone, func(w dns.ResponseWriter, r *dns.Msg) {
 		defer close(handlerDone)
-		_, _ = zd.ZoneTransferOut(w, r)
+		_, _ = zd.ZoneTransferOut(w, r, nil)
 	})
 	started := make(chan struct{})
 	dnsSrv := &dns.Server{
@@ -451,7 +454,7 @@ func TestZoneTransferOut_RefusesWhenNotReady(t *testing.T) {
 	w := &fakeRW{remote: udpAddr("127.0.0.1")}
 	r := new(dns.Msg)
 	r.SetAxfr(zd.ZoneName)
-	sent, err := zd.ZoneTransferOut(w, r)
+	sent, err := zd.ZoneTransferOut(w, r, nil)
 	if err != nil {
 		t.Fatalf("ZoneTransferOut: %v", err)
 	}
@@ -472,7 +475,7 @@ func TestZoneTransferOut_RefusesUnsignedMustBeSignedZone(t *testing.T) {
 	w := &fakeRW{remote: udpAddr("127.0.0.1")}
 	r := new(dns.Msg)
 	r.SetAxfr(zd.ZoneName)
-	sent, err := zd.ZoneTransferOut(w, r)
+	sent, err := zd.ZoneTransferOut(w, r, nil)
 	if err != nil {
 		t.Fatalf("ZoneTransferOut: %v", err)
 	}

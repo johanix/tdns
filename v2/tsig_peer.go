@@ -107,6 +107,10 @@ type tsigSignResponseWriter struct {
 	reqTsig *dns.TSIG
 }
 
+// Unwrap exposes the wrapped writer so connectionState (downstream_auth.go)
+// can reach the TLS ConnectionState through the wrapper chain.
+func (w *tsigSignResponseWriter) Unwrap() dns.ResponseWriter { return w.ResponseWriter }
+
 func (w *tsigSignResponseWriter) WriteMsg(m *dns.Msg) error {
 	if w.reqTsig != nil && w.ResponseWriter.TsigStatus() == nil && m.IsTsig() == nil {
 		m.SetTsig(w.reqTsig.Hdr.Name, w.reqTsig.Algorithm, tsigFudge, time.Now().Unix())
@@ -312,13 +316,6 @@ func (zd *ZoneData) allowNotifyDecision(src netip.Addr) (allowed bool, approvedK
 		return false, nil
 	}
 	return matchACL(zd.AllowNotify, src)
-}
-
-// downstreamsDecision resolves the downstreams (provide-xfr) ACL for an inbound
-// AXFR/IXFR's source IP. An empty ACL DENIES — a hard cutover that closes the
-// legacy open-AXFR default (matchACL already returns (false,nil) for an empty ACL).
-func (zd *ZoneData) downstreamsDecision(src netip.Addr) (allowed bool, approvedKeys []string) {
-	return matchACL(zd.Downstreams, src)
 }
 
 // peerIP reduces a "host:port" (or bare "host") address to its IP for ACL

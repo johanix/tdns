@@ -680,6 +680,17 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			continue
 		}
 
+		// downstream-auth mechanism ladder: validate/normalize the names
+		// (unknown => quarantine), then emit the never-fatal cross-check
+		// warnings (unsatisfiable mechanism, dead entry, tls-dane w/o IMR).
+		if err := validateDownstreamAuth(zconf.DownstreamAuth); err != nil {
+			lgConfig.Error("invalid downstream-auth, zone in error state", "zone", zname, "err", err)
+			zd.SetError(ConfigError, "downstream-auth: %v", err)
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+		crossCheckDownstreamAuth(zname, zconf.DownstreamAuth, zconf.Downstreams, conf.Internal.ImrEngine != nil)
+
 		zonestore := parseZoneStore(zconf.Store)
 
 		var zonetype ZoneType
@@ -1173,6 +1184,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				Notify:        zconf.Notify,
 				AllowNotify:   zconf.AllowNotify,
 				Downstreams:   zconf.Downstreams,
+				DownstreamAuth: zconf.DownstreamAuth,
 				ConfigUpdate:  true, // config-bearing: lets reload clear removed ACLs
 				Zonefile:      zconf.Zonefile,
 				Options:       options,

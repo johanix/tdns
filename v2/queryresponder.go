@@ -963,7 +963,7 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	if qtype == dns.TypeAXFR || qtype == dns.TypeIXFR {
 		if qname == zd.ZoneName {
 			lgHandler.Debug("serving zone transfer", "store", ZoneStoreToString[zd.ZoneStore], "qname", qname)
-			zd.ZoneTransferOut(w, r)
+			zd.ZoneTransferOut(w, r, imr)
 			return nil
 		} else {
 			m.MsgHdr.Rcode = dns.RcodeNotAuth

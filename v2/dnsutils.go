@@ -244,17 +244,18 @@ func estimateEnvelopeSize(rrs []dns.RR) int {
 	return len(packed)
 }
 
-func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, error) {
+// ZoneTransferOut streams the zone to an authorized downstream. imr is only
+// consulted by the downstream-auth tls-dane mechanism and may be nil (the
+// mechanism then fails closed).
+func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg, imr *Imr) (int, error) {
 	zone := dns.Fqdn(zd.ZoneName)
 
-	if src, ok := peerIP(w.RemoteAddr().String()); !ok {
-		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, unparseable source %q", zone, w.RemoteAddr())
-		return zd.refuseTransfer(w, r)
-	} else if allowed, approvedKeys := zd.downstreamsDecision(src); !allowed {
-		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer to %s (not permitted by downstreams ACL)", zone, src)
-		return zd.refuseTransfer(w, r)
-	} else if err := checkInboundTSIG(w, r, approvedKeys); err != nil {
-		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer to %s: %v", zone, src, err)
+	// The complete authorization gate: downstreams ACL (address + TSIG,
+	// unchanged semantics) plus the per-zone downstream-auth mechanism
+	// ladder (peers tls-identity checks against the connection's client
+	// certificate). See v2/downstream_auth.go.
+	if err := zd.authorizeTransfer(w, r, imr); err != nil {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer to %s: %v", zone, w.RemoteAddr(), err)
 		return zd.refuseTransfer(w, r)
 	}
 
