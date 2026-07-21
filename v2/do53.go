@@ -118,19 +118,20 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 	certKey := true
 	certReason := ""
 
+	// Mutually exclusive: an empty certFile/keyFile makes os.Stat("") return
+	// ENOENT (satisfies os.IsNotExist), so without the else-if the later
+	// blocks would run too and overwrite the accurate "not configured"
+	// reason with a misleading "keyfile  does not exist" (empty filename),
+	// besides the redundant stats/logs.
 	if certFile == "" || keyFile == "" {
 		lgDns.Info("DnsEngine: no certificate file or key file provided. Not starting DoT, DoH or DoQ service.")
 		certKey = false
 		certReason = "certfile/keyfile not configured"
-	}
-
-	if _, err := os.Stat(certFile); os.IsNotExist(err) {
+	} else if _, err := os.Stat(certFile); os.IsNotExist(err) {
 		lgDns.Info("DnsEngine: certificate file does not exist. Not starting DoT, DoH or DoQ service.", "file", certFile)
 		certKey = false
 		certReason = fmt.Sprintf("certfile %s does not exist", certFile)
-	}
-
-	if _, err := os.Stat(keyFile); os.IsNotExist(err) {
+	} else if _, err := os.Stat(keyFile); os.IsNotExist(err) {
 		lgDns.Info("DnsEngine: key file does not exist. Not starting DoT, DoH or DoQ service.", "file", keyFile)
 		certKey = false
 		certReason = fmt.Sprintf("keyfile %s does not exist", keyFile)
