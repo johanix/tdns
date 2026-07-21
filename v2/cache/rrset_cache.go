@@ -376,7 +376,12 @@ func (rrcache *RRsetCacheT) AddStub(zone string, servers []AuthServer) error {
 	authservers := map[string]*AuthServer{}
 	for i := range servers {
 		server := &servers[i]
-		tmpauthserver := NewAuthServer(server.Name)
+		// Use the shared per-nameserver instance (as AddServers does), so this
+		// stub server is also registered in AuthServerMap. A private NewAuthServer
+		// here would live only in ServerMap: StoreTLSAForServer writes TLSA onto
+		// the ServerMap instance, but LookupTLSAForServer reads AuthServerMap, so
+		// a stub upstream's cached TLSA would be invisible on the XoT DANE path.
+		tmpauthserver := rrcache.GetOrCreateAuthServer(server.Name)
 		if tmpauthserver == nil {
 			continue // Skip invalid server names
 		}
