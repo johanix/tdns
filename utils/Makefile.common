@@ -63,8 +63,13 @@ GENALGS ?= ../genalgs/tdns-genalgs
 #
 # ALGREPO comes from `-include ../algs-env.mk` in the app Makefile; per-app
 # C-library env comes from `-include algs-libs.mk` (see ALGS_ENV above).
+# version.go is kept current automatically: missing -> generated, and
+# regenerated whenever the version string changes (new commits, branch
+# switch, clean<->dirty transition — anything `git describe --dirty`
+# reflects). Left untouched otherwise so no-change rebuilds stay
+# no-ops. `make version` still forces a rewrite with a fresh appDate.
 build: generate
-	@test -f version.go || /bin/sh ../../utils/make-version.sh "unknown" "unknown" $(PROG)
+	@/bin/sh ../../utils/make-version.sh --if-changed $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
 	$(ALGS_ENV) $(GO) build $(GOFLAGS) -o ${PROG}
 
 # Ensure the generator binary exists (cmdv2/Makefile also builds it first).

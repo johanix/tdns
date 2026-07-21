@@ -33,26 +33,29 @@ func printLargeKskImrMetrics(m tdns.LargeKskImrMetrics) {
 	}
 
 	fmt.Printf("DNSKEY lookups:                     %d\n", m.DNSKEYLookupTotal)
-	fmt.Printf("  forced TCP from start (do53-tcp):  %d (%s)\n",
-		m.DNSKEYLookupForcedTCP, pct(m.DNSKEYLookupForcedTCP, m.DNSKEYLookupTotal))
+	fmt.Printf("  bypassed probabilistic (tcp/enc):  %d (%s)\n",
+		m.DNSKEYLookupBypassed, pct(m.DNSKEYLookupBypassed, m.DNSKEYLookupTotal))
 	var normal uint64
-	if m.DNSKEYLookupForcedTCP <= m.DNSKEYLookupTotal {
-		normal = m.DNSKEYLookupTotal - m.DNSKEYLookupForcedTCP
+	if m.DNSKEYLookupBypassed <= m.DNSKEYLookupTotal {
+		normal = m.DNSKEYLookupTotal - m.DNSKEYLookupBypassed
 	}
-	fmt.Printf("  normal (UDP / encrypted / other):  %d (%s)\n",
+	fmt.Printf("  normal (probabilistic selection):  %d (%s)\n",
 		normal, pct(normal, m.DNSKEYLookupTotal))
 }
 
 var imrStatsLargeKskCmd = &cobra.Command{
 	Use:   "large-ksk",
 	Short: "Show large-KSK IMR DS and DNSKEY lookup statistics",
-	Long: `Counters for evaluating direct-TCP DNSKEY fetching when parent DS
-signals a large KSK algorithm (dnssec.large_algorithms).
+	Long: `Counters for evaluating DNSKEY transport bypass when parent DS
+signals a large KSK algorithm (dnssec.large_algorithms) or when
+dnssec.dnskey_query_transport forces it.
 
 DS RRsets are counted when cached from referrals; large-alg DS RRs are
 counted individually per algorithm. DNSKEY lookups are counted at the
-start of each outbound DNSKEY query; forced-TCP means do53-tcp was
-selected from the start (not UDP-to-TCP fallback).`,
+start of each outbound DNSKEY query; bypassed means the query skipped
+probabilistic transport selection per dnssec.dnskey_query_transport and
+used the server's best advertised transport instead (encrypted preferred,
+else do53-tcp, never UDP).`,
 	Args: cobra.NoArgs,
 	Run: func(cmd *cobra.Command, args []string) {
 		printLargeKskImrMetrics(tdns.LargeKskImrMetricsSnapshot())

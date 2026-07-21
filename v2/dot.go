@@ -75,6 +75,9 @@ func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs []string, cert *tl
 				lgDns.Info("DnsEngine: serving on DoT", "hostport", hp)
 				if err := srv.ListenAndServe(); err != nil {
 					lgDns.Error("failed to setup DoT server", "hostport", hp, "err", err)
+					if ctx.Err() == nil {
+						conf.Internal.ServerErrors.SetTransportPortError("dot "+hp, err)
+					}
 				} else {
 					lgDns.Info("DnsEngine: listening on DoT", "hostport", hp)
 				}
