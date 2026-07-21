@@ -32,9 +32,11 @@ var rootCmd = &cobra.Command{
 			tdns.PrintVersionAndExit()
 		}
 		tdns.SetupCliLogging()
-		// keys generate (root-level) and gen-docs (offline doc generator) do
-		// not need config or API.
-		if isRootKeysCommand(cmd) || cmd.Name() == "gen-docs" {
+		// keys generate (root-level), gen-docs (offline doc generator) and
+		// the cert PKI subtree (offline provisioning; cert init reads the
+		// server config via its own --serverconfig flag) do not need
+		// config or API.
+		if isRootKeysCommand(cmd) || cmd.Name() == "gen-docs" || isCertCommand(cmd) {
 			return
 		}
 		initConfig()
@@ -67,6 +69,18 @@ func ExecuteContext(ctx context.Context) {
 //   - legacy: tdns-cli keys ...
 //   - current: tdns-cli util keys ...   (moved under 'util' in the
 //     CLI restructure; same no-config semantics).
+// isCertCommand returns true inside the root-level "cert" subtree — the
+// offline PKI provisioning commands, which must work with no daemon, no
+// tdns-cli config, and no API.
+func isCertCommand(cmd *cobra.Command) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		if c.Name() == "cert" && c.Parent() != nil && c.Parent().Name() == "tdns-cli" {
+			return true
+		}
+	}
+	return false
+}
+
 func isRootKeysCommand(cmd *cobra.Command) bool {
 	for c := cmd; c != nil; c = c.Parent() {
 		if c.Name() != "keys" {
