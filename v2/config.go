@@ -52,6 +52,10 @@ type Config struct {
 	DynamicZones DynamicZonesConf           `yaml:"dynamiczones" mapstructure:"dynamiczones"`
 	Zones        []ZoneConf                 `yaml:"zones"`
 	Templates    []ZoneConf                 `yaml:"templates"`
+	// Peers is the top-level peers: block — one declaration per remote
+	// server, referenced from upstreams:/notify:/downstreams:/allow-notify:
+	// as `- peers: [ id, ... ]` entries (docs/2026-07-21-peers-xfr-auth-design.md).
+	Peers map[string]PeerDef `yaml:"peers" mapstructure:"peers"`
 	Dnssec       DnssecConf                 `yaml:"dnssec" mapstructure:"dnssec"`
 	Keys         KeyConf                    `yaml:"keys" mapstructure:"keys"`
 	Db           DbConf
@@ -496,6 +500,14 @@ type InternalDnsConf struct {
 // MP state has moved to tdns-mp's own InternalMpConf.
 type InternalConf struct {
 	InternalDnsConf
+
+	// XfrAliasConflicts records zones/templates whose raw config used two
+	// spellings of the same transfer list (e.g. primaries: AND upstreams:).
+	// Set by ParseConfig (NormalizeXfrAliases); ParseZones quarantines the
+	// named zones. BrokenPeers records invalid peers: definitions (id ->
+	// reason); zones referencing one are quarantined at expansion time.
+	XfrAliasConflicts map[string]string
+	BrokenPeers       map[string]string
 
 	// LargeAlgorithms is the derived lookup set from Dnssec.LargeAlgorithms.
 	LargeAlgorithms map[uint8]bool

@@ -283,6 +283,13 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return fmt.Errorf("error processing config: %v", err)
 	}
 
+	// Transfer-terminology aliases: rewrite upstreams:/request-xfr: ->
+	// primaries and secondaries:/provide-xfr: -> downstreams in every
+	// zones:/templates: entry BEFORE decoding (so aliases neither fail to
+	// decode nor warn as unknown keys). Conflicting spellings are recorded;
+	// ParseZones quarantines the affected zones.
+	aliasConflicts := NormalizeXfrAliases(configMap)
+
 	// Configure mapstructure decoder to respect yaml tags. The decode hook
 	// converts a bare-string primary:/notify: entry (the pre-migration shape)
 	// into a PeerConf legacy marker instead of failing the whole-file decode —
@@ -328,6 +335,11 @@ func (conf *Config) ParseConfig(reload bool) error {
 	if err := decoder.Decode(configMap); err != nil {
 		return fmt.Errorf("error decoding config: %v", err)
 	}
+
+	// peers: block — validate/normalize definitions; a broken peer does not
+	// abort (zones referencing it are quarantined at expansion in ParseZones).
+	conf.Internal.XfrAliasConflicts = aliasConflicts
+	conf.Internal.BrokenPeers = conf.ValidatePeers()
 
 	if len(md.Unused) > 0 {
 		// Split the unused keys into two buckets: keys that match a known
@@ -628,6 +640,16 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			continue
 		}
 
+		// A zone whose raw config used two spellings of the same transfer
+		// list (primaries:+upstreams:, etc.) is quarantined — never a
+		// silent preference between them.
+		if c := aliasConflictFor(conf.Internal.XfrAliasConflicts, zconf.Name); c != "" {
+			lgConfig.Error("conflicting transfer-list spellings, zone in error state", "zone", zname, "conflict", c)
+			zd.SetError(ConfigError, "conflicting transfer-list spellings: %s", c)
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+
 		// Handle template expansion if specified
 		if zconf.Template != "" {
 			if tmpl, exist := Templates[zconf.Template]; exist {
@@ -645,6 +667,17 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				broken_zones = append(broken_zones, zname)
 				continue
 			}
+		}
+
+		// Expand `- peers: [ id, ... ]` references (from the zone or its
+		// template) into concrete PeerConf/AclEntry entries. Errors —
+		// unknown id, broken peer definition, mixed reference+inline entry,
+		// peer unusable in this role — quarantine just this zone.
+		if err := conf.expandPeerRefs(zconf, conf.Internal.BrokenPeers); err != nil {
+			lgConfig.Error("peer reference expansion failed, zone in error state", "zone", zname, "err", err)
+			zd.SetError(ConfigError, "peers: %v", err)
+			broken_zones = append(broken_zones, zname)
+			continue
 		}
 
 		zonestore := parseZoneStore(zconf.Store)

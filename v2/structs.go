@@ -256,6 +256,12 @@ type PeerConf struct {
 	Key    string `yaml:"key" mapstructure:"key"`
 	Legacy string `yaml:"-" mapstructure:"-"` // bare-string marker; not config
 
+	// PeersRef holds the ids of a `- peers: [ id, ... ]` reference entry
+	// (see the peers: block, v2/peers.go). Consumed (and cleared) by
+	// expandPeerList at parse time; post-expansion lists never contain
+	// reference entries.
+	PeersRef []string `yaml:"peers" mapstructure:"peers"`
+
 	// XoT (XFR-over-TLS, RFC 9103) fields. All optional; an empty Transport
 	// means Do53 and preserves pre-XoT behavior exactly. TSIG (Key) remains
 	// orthogonal: RFC 9103 allows TSIG and TLS together, so a peer may have

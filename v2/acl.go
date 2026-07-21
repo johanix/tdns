@@ -25,6 +25,16 @@ const BLOCKED = "BLOCKED"
 type AclEntry struct {
 	Prefix string `yaml:"prefix" mapstructure:"prefix"`
 	Key    string `yaml:"key" mapstructure:"key"`
+	// PeersRef holds the ids of a `- peers: [ id, ... ]` reference entry.
+	// Consumed (and cleared) by expandAclList at parse time; a post-expansion
+	// list never contains reference entries.
+	PeersRef []string `yaml:"peers" mapstructure:"peers"`
+	// TLSIdentity and PeerName are populated only by peer expansion in a
+	// downstreams: list — the per-zone downstream-auth mechanisms tls-pin/
+	// tls-pkix/tls-dane are satisfiable only through entries that carry an
+	// identity. Inline entries yield prefix/tsig mechanisms only.
+	TLSIdentity *TLSIdentity `yaml:"-" mapstructure:"-"`
+	PeerName    string       `yaml:"-" mapstructure:"-"`
 	// Legacy is set by stringToAclEntryHook when a bare-string allow-notify: /
 	// downstreams: value is found (the pre-{prefix,key} shape). Not config: it
 	// exists so a legacy list quarantines just that zone (ValidateACL rejects a
