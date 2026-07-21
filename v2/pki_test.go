@@ -4,8 +4,14 @@
 package tdns
 
 import (
+	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/pem"
 	"net"
 	"os"
 	"testing"
@@ -158,6 +164,75 @@ func TestPKI_CSRRoundTrip(t *testing.T) {
 	broken := append([]byte(nil), csrPEM...)
 	if _, err := SignCSR(ca.Cert, caKey, broken[:len(broken)/2], SignOptions{Client: true}); err == nil {
 		t.Fatal("truncated CSR must be refused")
+	}
+}
+
+// TestPKI_CSRWithExistingKey is the upgrade-in-place path: re-certifying an
+// existing (self-signed) key must keep the SPKI, so pins and published TLSA
+// records stay valid across the switch to a CA-signed cert.
+func TestPKI_CSRWithExistingKey(t *testing.T) {
+	ca := testCA(t, "")
+	caKey, _ := ParsePrivateKeyPEM(ca.KeyPEM)
+
+	// The "existing self-signed cert" being upgraded.
+	oldTLS, oldLeaf := newTestTLSCert(t, []string{"ns1.test"}, []net.IP{net.ParseIP("127.0.0.1")})
+	oldKey := oldTLS.PrivateKey.(crypto.Signer)
+
+	csrPEM, keyPEM, err := CreateCSR(CSROptions{
+		Name:     oldLeaf.Subject.CommonName,
+		DNSNames: oldLeaf.DNSNames,
+		IPs:      oldLeaf.IPAddresses,
+		Key:      oldKey,
+	})
+	if err != nil {
+		t.Fatalf("CreateCSR with existing key: %v", err)
+	}
+	if keyPEM != nil {
+		t.Fatal("no new key must be generated when one is supplied")
+	}
+	signed, err := SignCSR(ca.Cert, caKey, csrPEM, SignOptions{Server: true})
+	if err != nil {
+		t.Fatalf("SignCSR: %v", err)
+	}
+	// The whole point: SPKI (and so pin and TLSA rdata) unchanged.
+	if SPKISHA256(signed.Cert) != SPKISHA256(oldLeaf) {
+		t.Fatal("SPKI changed across re-certification — pins/TLSA would break")
+	}
+	oldTlsa, _ := NewTlsaRR("ns1.test.", 853, oldLeaf)
+	newTlsa, _ := NewTlsaRR("ns1.test.", 853, signed.Cert)
+	if oldTlsa.Certificate != newTlsa.Certificate {
+		t.Fatal("TLSA association data changed across re-certification")
+	}
+	// And the CA-signed cert verifies where the self-signed one could not.
+	pool := x509.NewCertPool()
+	pool.AddCert(ca.Cert)
+	if _, err := signed.Cert.Verify(x509.VerifyOptions{Roots: pool, DNSName: "ns1.test"}); err != nil {
+		t.Fatalf("upgraded cert does not verify against the CA: %v", err)
+	}
+}
+
+// TestPKI_ParseLegacyKeyPEM: keys from openssl/gen-cert.sh come in SEC1
+// ("EC PRIVATE KEY") and PKCS#1 ("RSA PRIVATE KEY") shapes too.
+func TestPKI_ParseLegacyKeyPEM(t *testing.T) {
+	ecKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("ecdsa: %v", err)
+	}
+	sec1, err := x509.MarshalECPrivateKey(ecKey)
+	if err != nil {
+		t.Fatalf("marshal sec1: %v", err)
+	}
+	if _, err := ParsePrivateKeyPEM(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: sec1})); err != nil {
+		t.Fatalf("SEC1 EC key: %v", err)
+	}
+
+	rsaKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("rsa: %v", err)
+	}
+	pkcs1 := x509.MarshalPKCS1PrivateKey(rsaKey)
+	if _, err := ParsePrivateKeyPEM(pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: pkcs1})); err != nil {
+		t.Fatalf("PKCS#1 RSA key: %v", err)
 	}
 }
 

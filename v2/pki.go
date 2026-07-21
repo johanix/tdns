@@ -73,6 +73,11 @@ type CSROptions struct {
 	DNSNames []string
 	IPs      []net.IP
 	Alg      CertAlgorithm
+	// Key, when set, is used to sign the CSR instead of generating a fresh
+	// key. This is the upgrade-in-place path: re-certifying an existing
+	// (e.g. self-signed) key keeps the SPKI, so published TLSA records and
+	// configured pins remain valid across the switch to a CA-signed cert.
+	Key crypto.Signer
 }
 
 type SignOptions struct {
@@ -144,16 +149,22 @@ func IssueLeaf(caCert *x509.Certificate, caKey crypto.Signer, opts LeafOptions) 
 	return assemblePKICert(der, key)
 }
 
-// CreateCSR generates a fresh key plus a certificate signing request — the
-// split-provisioning path where the private key never leaves the requesting
-// host.
+// CreateCSR builds a certificate signing request — the split-provisioning
+// path where the private key never leaves the requesting host. With
+// opts.Key set the existing key signs the CSR and keyPEM is nil (the key
+// already lives on disk); otherwise a fresh key is generated and returned.
 func CreateCSR(opts CSROptions) (csrPEM, keyPEM []byte, err error) {
 	if opts.Name == "" {
 		return nil, nil, fmt.Errorf("pki: CSR needs a name")
 	}
-	key, err := generateKey(opts.Alg)
-	if err != nil {
-		return nil, nil, err
+	key := opts.Key
+	generated := false
+	if key == nil {
+		key, err = generateKey(opts.Alg)
+		if err != nil {
+			return nil, nil, err
+		}
+		generated = true
 	}
 	tmpl := x509.CertificateRequest{
 		Subject:     pkix.Name{CommonName: opts.Name},
@@ -164,12 +175,15 @@ func CreateCSR(opts CSROptions) (csrPEM, keyPEM []byte, err error) {
 	if err != nil {
 		return nil, nil, fmt.Errorf("pki: create CSR: %v", err)
 	}
+	csrPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})
+	if !generated {
+		return csrPEM, nil, nil
+	}
 	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
 	if err != nil {
 		return nil, nil, fmt.Errorf("pki: marshal key: %v", err)
 	}
-	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}),
-		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), nil
+	return csrPEM, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}), nil
 }
 
 // SignCSR signs a parsed-and-verified CSR with the CA, copying the CSR's
@@ -221,15 +235,26 @@ func ParseCertPEM(data []byte) (*x509.Certificate, error) {
 	return nil, fmt.Errorf("pki: no CERTIFICATE block found")
 }
 
-// ParsePrivateKeyPEM parses a PKCS#8 PRIVATE KEY block into a crypto.Signer.
+// ParsePrivateKeyPEM parses the first private-key block into a crypto.Signer.
+// Accepts PKCS#8 ("PRIVATE KEY", what this PKI writes) plus the legacy
+// openssl shapes ("EC PRIVATE KEY" SEC1, "RSA PRIVATE KEY" PKCS#1), so an
+// existing self-signed key from gen-cert.sh/openssl can be re-certified.
 func ParsePrivateKeyPEM(data []byte) (crypto.Signer, error) {
 	for block, rest := pem.Decode(data); block != nil; block, rest = pem.Decode(rest) {
-		if block.Type != "PRIVATE KEY" {
+		var key any
+		var err error
+		switch block.Type {
+		case "PRIVATE KEY":
+			key, err = x509.ParsePKCS8PrivateKey(block.Bytes)
+		case "EC PRIVATE KEY":
+			key, err = x509.ParseECPrivateKey(block.Bytes)
+		case "RSA PRIVATE KEY":
+			key, err = x509.ParsePKCS1PrivateKey(block.Bytes)
+		default:
 			continue
 		}
-		key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
 		if err != nil {
-			return nil, fmt.Errorf("pki: parse PKCS#8 key: %v", err)
+			return nil, fmt.Errorf("pki: parse %s: %v", block.Type, err)
 		}
 		signer, ok := key.(crypto.Signer)
 		if !ok {
@@ -237,7 +262,7 @@ func ParsePrivateKeyPEM(data []byte) (crypto.Signer, error) {
 		}
 		return signer, nil
 	}
-	return nil, fmt.Errorf("pki: no PRIVATE KEY block found")
+	return nil, fmt.Errorf("pki: no private-key PEM block found")
 }
 
 func leafTemplate(name string, dnsNames []string, ips []net.IP, server, client bool, validity time.Duration) (*x509.Certificate, error) {

@@ -41,6 +41,17 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   support (ML-DSA / SLH-DSA / Falcon / MAYO / SNOVA for both
   SIG(0) and DNSSEC).
 
+- [Certificate Provisioning: the tdns Minimal CA](cert-provisioning.md)
+  -- Operator how-to for `tdns-cli cert`: the one-shot
+  `cert init` for the local tdns-auth, upgrading existing
+  self-signed certificates to CA-signed ones (locally and
+  on remote hosts, keeping the key so pins and TLSA records
+  stay valid), creating the `ca-file` for each kind of
+  certificate, renewal/rotation, and what the deliberately
+  minimal scope (no CRL/OCSP/renewal automation) means in
+  practice. Companion to the XoT transfer configuration in
+  the tdns-auth config guide.
+
 - [Agent as a DSYNC proxy](agent-dsync-proxy.md)
   -- Operator how-to for running tdns-agent as a secondary
   that forwards delegation-sync (NOTIFY and/or signed DNS

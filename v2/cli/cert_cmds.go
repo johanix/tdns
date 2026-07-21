@@ -112,23 +112,64 @@ var certLeafCmd = &cobra.Command{
 	},
 }
 
+var (
+	certKeyFile  string
+	certFromCert string
+)
+
 var certCsrCmd = &cobra.Command{
 	Use:   "csr",
-	Short: "Generate a key + certificate signing request (key never leaves this host)",
+	Short: "Generate a certificate signing request (key never leaves this host)",
+	Long: `Generate a certificate signing request. By default a fresh key is
+generated next to the CSR. With --key an EXISTING private key (PKCS#8, or
+legacy openssl EC/RSA PEM) signs the CSR instead — the upgrade-in-place
+path for turning a self-signed cert into a CA-signed one: the key (and so
+the SPKI) is unchanged, which keeps configured pins and published TLSA
+records valid. --from-cert copies CN and SANs from an existing
+certificate so the replacement matches what it replaces.`,
 	Run: func(cmd *cobra.Command, args []string) {
-		csrPEM, keyPEM, err := tdns.CreateCSR(tdns.CSROptions{
+		opts := tdns.CSROptions{
 			Name:     certName,
 			DNSNames: certDNSNames,
 			IPs:      parseIPFlags(),
 			Alg:      tdns.CertAlgorithm(certAlgorithm),
-		})
+		}
+		if certFromCert != "" {
+			old := readCertArg(certFromCert)
+			if opts.Name == "" {
+				opts.Name = old.Subject.CommonName
+			}
+			opts.DNSNames = append(append([]string(nil), old.DNSNames...), opts.DNSNames...)
+			for _, ip := range old.IPAddresses {
+				opts.IPs = append(opts.IPs, ip)
+			}
+		}
+		if opts.Name == "" {
+			cliFatalf("cert csr: need --name (or --from-cert with a CN)")
+		}
+		if certKeyFile != "" {
+			keyData, err := os.ReadFile(certKeyFile)
+			if err != nil {
+				cliFatalf("cert csr: reading --key: %v", err)
+			}
+			key, err := tdns.ParsePrivateKeyPEM(keyData)
+			if err != nil {
+				cliFatalf("cert csr: %v", err)
+			}
+			opts.Key = key
+		}
+		csrPEM, keyPEM, err := tdns.CreateCSR(opts)
 		if err != nil {
 			cliFatalf("cert csr: %v", err)
 		}
-		base := filepath.Join(certOutDirDefaultCwd(), safeFileName(certName))
-		writeFileSafe(base+".key", keyPEM, 0o600)
+		base := filepath.Join(certOutDirDefaultCwd(), safeFileName(opts.Name))
 		writeFileSafe(base+".csr", csrPEM, 0o644)
-		fmt.Printf("CSR:         %s.csr  (send this to the CA operator)\nprivate key: %s.key  (stays here)\n", base, base)
+		if keyPEM != nil {
+			writeFileSafe(base+".key", keyPEM, 0o600)
+			fmt.Printf("CSR:         %s.csr  (send this to the CA operator)\nprivate key: %s.key  (stays here)\n", base, base)
+		} else {
+			fmt.Printf("CSR:         %s.csr  (send this to the CA operator)\nreusing key: %s  (unchanged — existing pins and TLSA records stay valid)\n", base, certKeyFile)
+		}
 	},
 }
 
@@ -378,12 +419,16 @@ func init() {
 	}
 	for _, c := range []*cobra.Command{certCaCmd, certLeafCmd, certCsrCmd} {
 		c.Flags().StringVar(&certName, "name", "", "subject CN (and default file base name)")
-		_ = c.MarkFlagRequired("name")
 	}
+	// csr may take its name from --from-cert instead (validated in Run).
+	_ = certCaCmd.MarkFlagRequired("name")
+	_ = certLeafCmd.MarkFlagRequired("name")
 	for _, c := range []*cobra.Command{certLeafCmd, certCsrCmd} {
 		c.Flags().StringSliceVar(&certDNSNames, "dns", nil, "DNS SANs (comma-separated or repeated)")
 		c.Flags().StringSliceVar(&certIPs, "ip", nil, "IP SANs (comma-separated or repeated)")
 	}
+	certCsrCmd.Flags().StringVar(&certKeyFile, "key", "", "reuse this EXISTING private key (PKCS#8 or legacy openssl EC/RSA PEM) instead of generating one — keeps the SPKI, so pins/TLSA stay valid")
+	certCsrCmd.Flags().StringVar(&certFromCert, "from-cert", "", "copy CN and SANs from this existing certificate (PEM)")
 	certCaCmd.Flags().IntVar(&certValidity, "validity", 3650, "validity in days")
 
 	addCommonLeafFlags(certLeafCmd)

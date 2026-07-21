@@ -94,7 +94,10 @@ admits), roll the cert, then drop the old pin.
 You do not need an external CA. `tdns-cli cert` is a deliberately minimal
 internal PKI (no CRL/OCSP/renewal, no cert database — just PEM files plus an
 append-only `issued.log` audit trail next to the CA key, default home
-`/etc/tdns/ca/`).
+`/etc/tdns/ca/`). **Full operator how-to — including upgrading existing
+self-signed certs to CA-signed (keeping the key, so pins/TLSA stay valid)
+and building the `ca-file` for each kind of cert — in
+[guide/cert-provisioning.md](../guide/cert-provisioning.md).**
 
 **Just testing tdns?** You don't need any of this: `config mwe` generates a
 self-signed cert, and `pin`/`dane` (and dog `+showpin`) work fine against it.
