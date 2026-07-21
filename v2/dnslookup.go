@@ -1207,6 +1207,10 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			nsname := tuple.NSName
 			transport := tuple.Transport
 
+			// effTransport is what tryServer will actually attempt: the
+			// tuple's probabilistic pick, or the policy-preferred transport
+			// under dnskeyBypass.
+			effTransport := transport
 			if dnskeyBypass {
 				// All tuples for this (server, addr) collapse to the same
 				// preferred transport; skip the ones we've already tried.
@@ -1216,6 +1220,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 					continue
 				}
 				dnskeyAttempted[key] = true
+				effTransport = eff
 			}
 
 			lastNS, lastAddr, lastTransport = nsname, addr, transport
@@ -1223,7 +1228,7 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 
 			if Globals.Debug {
 				lg.Printf("IterativeDNSQuery: using nameserver %s@%s over %s (ALPN: %v) for <%s, %s> query\n",
-					addr, nsname, core.TransportToString[transport], server.Alpn, qname, dns.TypeToString[qtype])
+					addr, nsname, core.TransportToString[effTransport], server.Alpn, qname, dns.TypeToString[qtype])
 			}
 
 			r, _, wireTransport, err := imr.tryServer(ctx, server, addr, transport, m, qname, qtype, dnskeyBypass)

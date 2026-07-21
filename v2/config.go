@@ -600,6 +600,10 @@ func (conf *Config) ReloadConfig() (string, error) {
 	// Publish the new runtime-config snapshot on a successful reload (still under
 	// confMu); on a parse error keep the last-good snapshot.
 	if err == nil {
+		// The IMR is a process singleton that snapshots the DNSSEC knobs at
+		// init; hand it the re-derived values or it serves the stale ones
+		// until restart.
+		conf.Internal.ImrEngine.RefreshDnssecPolicy(conf.Internal.LargeAlgorithms, conf.Internal.DNSKEYTransport)
 		conf.publishRuntimeConfig()
 	}
 	Globals.App.ServerConfigTime = time.Now()
@@ -640,6 +644,11 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 	// leaves the previous policies in place rather than failing the whole reload.
 	if err := conf.reloadDnssecFromFile(); err != nil {
 		lgConfig.Error("ReloadZoneConfig: failed to re-parse dnssec config, keeping previous policies", "err", err)
+	} else {
+		// parseDnssecConfig rebuilt Internal.LargeAlgorithms; hand the fresh
+		// set to the singleton Imr. DNSKEYTransport is not re-parsed on this
+		// path, so Internal still holds the last full-parse value.
+		conf.Internal.ImrEngine.RefreshDnssecPolicy(conf.Internal.LargeAlgorithms, conf.Internal.DNSKEYTransport)
 	}
 
 	prezones := Zones.Keys()

@@ -113,10 +113,16 @@ func (imr *Imr) noteDNSKEYLookup(bypassed bool) {
 // dnskeyPolicy returns the effective DNSKEY transport policy, treating the
 // empty zero value as the default (use_ds_signal).
 func (imr *Imr) dnskeyPolicy() DNSKEYTransportPolicy {
-	if imr == nil || imr.dnskeyTransport == "" {
+	if imr == nil {
 		return DNSKEYTransportUseDSSignal
 	}
-	return imr.dnskeyTransport
+	imr.dnssecPolicyMu.RLock()
+	t := imr.dnskeyTransport
+	imr.dnssecPolicyMu.RUnlock()
+	if t == "" {
+		return DNSKEYTransportUseDSSignal
+	}
+	return t
 }
 
 // dnskeyTransportBypass reports whether this DNSKEY query should bypass the

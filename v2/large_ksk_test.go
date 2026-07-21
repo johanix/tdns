@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -514,4 +515,50 @@ func TestPreferredDNSKEYTransport(t *testing.T) {
 	if got := imrForce.preferredDNSKEYTransport(mkServer(core.TransportDo53, core.TransportDoT)); got != core.TransportDoT {
 		t.Fatalf("force_encrypted with DoT want DoT, got %v", got)
 	}
+}
+
+// RefreshDnssecPolicy must update the singleton Imr's cached knobs after a
+// config reload, and must be safe against concurrent query-path readers
+// (regression: reload previously left the init-time values in place forever;
+// a bare field assignment here would be a data race under -race).
+func TestRefreshDnssecPolicy(t *testing.T) {
+	imr := &Imr{
+		largeAlgs:       map[uint8]bool{dns.RSASHA512: true},
+		dnskeyTransport: DNSKEYTransportForceUDP,
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					_ = imr.isLargeAlgorithm(dns.RSASHA512)
+					_ = imr.dnskeyPolicy()
+				}
+			}
+		}()
+	}
+	for i := 0; i < 200; i++ {
+		imr.RefreshDnssecPolicy(map[uint8]bool{dns.ED25519: true}, DNSKEYTransportTryEncrypted)
+	}
+	close(stop)
+	wg.Wait()
+
+	if imr.isLargeAlgorithm(dns.RSASHA512) || !imr.isLargeAlgorithm(dns.ED25519) {
+		t.Fatalf("largeAlgs not refreshed: RSASHA512=%v ED25519=%v",
+			imr.isLargeAlgorithm(dns.RSASHA512), imr.isLargeAlgorithm(dns.ED25519))
+	}
+	if got := imr.dnskeyPolicy(); got != DNSKEYTransportTryEncrypted {
+		t.Fatalf("dnskeyTransport not refreshed: got %v", got)
+	}
+
+	// nil receiver must be a no-op, not a panic (auth daemons without an IMR).
+	var nilImr *Imr
+	nilImr.RefreshDnssecPolicy(map[uint8]bool{dns.ED25519: true}, DNSKEYTransportForceUDP)
 }

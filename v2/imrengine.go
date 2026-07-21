@@ -12,6 +12,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/viper"
@@ -54,16 +55,39 @@ type Imr struct {
 	// see W9.
 	TransportSignalDiscovery *cache.DiscoveryTracker
 	TLSADiscovery            *cache.DiscoveryTracker
-	// largeAlgs is copied from conf.Internal.LargeAlgorithms at init.
+	// dnssecPolicyMu guards largeAlgs and dnskeyTransport: both are read on
+	// the query path (isLargeAlgorithm / dnskeyPolicy) and swapped by
+	// RefreshDnssecPolicy on config reload.
+	dnssecPolicyMu sync.RWMutex
+	// largeAlgs is copied from conf.Internal.LargeAlgorithms at init and
+	// refreshed on config reload via RefreshDnssecPolicy.
 	largeAlgs map[uint8]bool
 	// dnskeyTransport is the DNSKEY-query transport policy, copied from
-	// conf.Internal.DNSKEYTransport at init. The empty zero value behaves
-	// as DNSKEYTransportUseDSSignal.
+	// conf.Internal.DNSKEYTransport at init and refreshed on config reload
+	// via RefreshDnssecPolicy. The empty zero value behaves as
+	// DNSKEYTransportUseDSSignal.
 	dnskeyTransport DNSKEYTransportPolicy
 }
 
 func (imr *Imr) isLargeAlgorithm(alg uint8) bool {
+	imr.dnssecPolicyMu.RLock()
+	defer imr.dnssecPolicyMu.RUnlock()
 	return imr.largeAlgs != nil && imr.largeAlgs[alg]
+}
+
+// RefreshDnssecPolicy swaps the Imr's cached DNSSEC knobs after a config
+// reload. Without this the process-singleton Imr keeps its init-time
+// large-algorithm set and DNSKEY transport policy until restart. The map is
+// installed by reference: callers pass the freshly built set from the parse
+// and must not mutate it afterwards.
+func (imr *Imr) RefreshDnssecPolicy(largeAlgs map[uint8]bool, transport DNSKEYTransportPolicy) {
+	if imr == nil {
+		return
+	}
+	imr.dnssecPolicyMu.Lock()
+	imr.largeAlgs = largeAlgs
+	imr.dnskeyTransport = transport
+	imr.dnssecPolicyMu.Unlock()
 }
 
 type ImrRequest struct {
