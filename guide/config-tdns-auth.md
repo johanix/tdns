@@ -202,6 +202,69 @@ downstreams:
      key:    BLOCKED          # denied even with a valid key
 ```
 
+### The TLS layer: authenticating secondaries by certificate (XoT)
+
+When the primary serves zone transfer over TLS (XoT — `dot` in
+`dnsengine.transports`), a second, independent gate is available in front
+of the `downstreams:` ACL: **mutual TLS**. It is configured in the
+`dnsengine:` block, not per zone, and it applies to **every connection on
+the auth DoT listener** (the IMR's DoT front end never requests client
+certificates):
+
+```yaml
+dnsengine:
+   transports: [ do53, dot ]
+   certfile:   /etc/tdns/certs/servers/ns1.example.net.crt
+   keyfile:    /etc/tdns/certs/servers/ns1.example.net.key
+
+   # EITHER: pin each secondary's client certificate explicitly
+   downstream-auth: pin
+   downstream-pins:
+      - "sec1-spki-sha256-base64="      # tdns-cli cert pin sec1.crt
+      - "sec2-spki-sha256-base64="
+
+   # OR: standard mTLS against a CA (see guide/cert-provisioning.md)
+   #downstream-auth: ca
+   #downstream-ca:   /etc/tdns/certs/tdns-ca.crt
+   ## optional, for a CA shared beyond the transfer trust domain: the
+   ## client cert must ALSO carry one of these DNS SANs
+   #downstream-names: [ sec2.example.net, sec3.example.net ]
+```
+
+- `pin` — the connecting secondary must present a certificate whose SPKI
+  SHA-256 digest is in `downstream-pins` (any match admits; list old +
+  new during rotation). No CA involved; get each pin with
+  `tdns-cli cert pin <cert.pem>` or `dog +showpin`.
+- `ca` — the client certificate must chain to `downstream-ca` (the same
+  CA file secondaries use to verify *us* — one file both ways when using
+  the tdns minimal CA). `downstream-names` optionally narrows which
+  chain-valid subjects count, which matters when the CA also signs certs
+  for hosts that should *not* be able to transfer.
+- Absent `downstream-auth` — no client certificate is requested; the DoT
+  listener behaves as before.
+
+**How the two layers compose.** They are ANDed, in order: the TLS
+handshake (including `downstream-auth`, if set) must succeed before any
+DNS message is read, and then the per-zone `downstreams:` prefix+TSIG ACL
+decides the transfer exactly as over Do53. TSIG remains fully meaningful
+inside TLS (RFC 9103 allows both), so the strongest configuration is
+mTLS + per-zone TSIG. Note the granularity difference: `downstream-auth`
+is one policy for the whole listener, while `downstreams:` is per zone —
+there is currently no per-zone certificate requirement inside a
+`downstreams:` entry.
+
+**Verifying the secondary's cert via TLSA/DANE is not currently offered**
+on the primary side (client-cert DANE would mean validating the presented
+certificate against the DNSSEC-signed TLSA record of the name it claims —
+feasible, but not implemented; `pin` covers the no-shared-files case
+today). The `dane` mode exists on the *secondary* side, where the
+secondary verifies the primary's server certificate (`tls-auth: dane` in
+`primaries:`).
+
+Provisioning the certificates for all of this — including the one-shot
+`tdns-cli cert init` and upgrading existing self-signed certs — is
+covered in [Certificate Provisioning](cert-provisioning.md).
+
 ## Zone declarations
 
 A zone is one entry in the top-level `zones:` list.
@@ -371,6 +434,10 @@ dnsengine:
 | `ports.doh` | `443` | listen ports for DoH |
 | `ports.doq` | `853` | listen ports for DoQ (only 853 is truly supported) |
 | `outbound_soa_serial` | `keep` | `keep`, `unixtime` or `persist` |
+| `downstream-auth` | — | opt-in mTLS on the DoT listener: `pin` or `ca` (see [the TLS layer](#the-tls-layer-authenticating-secondaries-by-certificate-xot)) |
+| `downstream-pins` | — | SPKI pins for `downstream-auth: pin` |
+| `downstream-ca` | — | CA bundle for `downstream-auth: ca` |
+| `downstream-names` | — | optional SAN allowlist for `ca` mode |
 | `options` | — | server-wide options, below |
 
 `ports.do53` is **not read**. Do53 always listens on the ports embedded in

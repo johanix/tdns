@@ -50,6 +50,11 @@ func init() {
 	// From ../../v2/cli/generate_cmds.go: daemon-agnostic record syntax helpers
 	cli.UtilCmd.AddCommand(cli.GenerateCmd)
 
+	// Offline PKI provisioning for XoT/TLS (docs/2026-07-21-pkix-cert-
+	// tooling-design.md). Top-level: it is daemon-agnostic and needs no
+	// config or API (root.go skips init for the cert subtree).
+	rootCmd.AddCommand(cli.CertCmd)
+
 	// From ../../v2/cli/notify_cmds.go: 'auth notify' — sends NOTIFY
 	// (CDS/CSYNC/DNSKEY) toward the parent or signer, an auth-daemon op.
 	cli.AuthCmd.AddCommand(cli.NotifyCmd)

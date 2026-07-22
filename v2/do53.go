@@ -127,39 +127,58 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 		lgDns.Info("DnsEngine: no certificate file or key file provided. Not starting DoT, DoH or DoQ service.")
 		certKey = false
 		certReason = "certfile/keyfile not configured"
-	} else if _, err := os.Stat(certFile); os.IsNotExist(err) {
-		lgDns.Info("DnsEngine: certificate file does not exist. Not starting DoT, DoH or DoQ service.", "file", certFile)
+	} else if _, err := os.Stat(certFile); err != nil {
+		// Any stat failure (missing, permission, not-a-directory, …) disables
+		// encrypted transports AND is recorded, so `config status` sees it —
+		// not only os.IsNotExist.
+		lgDns.Info("DnsEngine: certificate file not accessible. Not starting DoT, DoH or DoQ service.", "file", certFile, "err", err)
 		certKey = false
-		certReason = fmt.Sprintf("certfile %s does not exist", certFile)
-	} else if _, err := os.Stat(keyFile); os.IsNotExist(err) {
-		lgDns.Info("DnsEngine: key file does not exist. Not starting DoT, DoH or DoQ service.", "file", keyFile)
+		if os.IsNotExist(err) {
+			certReason = fmt.Sprintf("certfile %s does not exist", certFile)
+		} else {
+			certReason = fmt.Sprintf("certfile %s not accessible: %v", certFile, err)
+		}
+	} else if _, err := os.Stat(keyFile); err != nil {
+		lgDns.Info("DnsEngine: key file not accessible. Not starting DoT, DoH or DoQ service.", "file", keyFile, "err", err)
 		certKey = false
-		certReason = fmt.Sprintf("keyfile %s does not exist", keyFile)
+		if os.IsNotExist(err) {
+			certReason = fmt.Sprintf("keyfile %s does not exist", keyFile)
+		} else {
+			certReason = fmt.Sprintf("keyfile %s not accessible: %v", keyFile, err)
+		}
 	}
 
 	var certPEM []byte
 	var keyPEM []byte
+	var cert tls.Certificate
 	var err error
 
 	if certKey {
-		certPEM, err = os.ReadFile(certFile)
-		if err != nil {
-			return fmt.Errorf("DnsEngine: error reading cert file: %v", err)
-		}
-
-		keyPEM, err = os.ReadFile(keyFile)
-		if err != nil {
-			return fmt.Errorf("DnsEngine: error reading key file: %v", err)
-		}
-
-		conf.Internal.CertData = string(certPEM)
-		conf.Internal.KeyData = string(keyPEM)
-
-		cert, err := tls.LoadX509KeyPair(certFile, keyFile)
-		if err != nil {
-			lgDns.Error("DnsEngine: failed to load certificate, not starting DoT/DoH/DoQ service", "err", err)
+		// A cert/key access failure (unreadable file, a directory, a race
+		// after the stat above, …) is non-fatal, exactly like a missing file:
+		// disable encrypted transports and record certReason so `config status`
+		// reports it (via SetTransportCertError below), rather than aborting the
+		// whole DnsEngine and taking Do53 down with it.
+		if certPEM, err = os.ReadFile(certFile); err != nil {
+			lgDns.Error("DnsEngine: error reading cert file, not starting DoT/DoH/DoQ service", "file", certFile, "err", err)
 			certKey = false
-			certReason = fmt.Sprintf("loading certfile/keyfile: %v", err)
+			certReason = fmt.Sprintf("reading certfile %s: %v", certFile, err)
+		} else if keyPEM, err = os.ReadFile(keyFile); err != nil {
+			lgDns.Error("DnsEngine: error reading key file, not starting DoT/DoH/DoQ service", "file", keyFile, "err", err)
+			certKey = false
+			certReason = fmt.Sprintf("reading keyfile %s: %v", keyFile, err)
+		} else {
+			conf.Internal.CertData = string(certPEM)
+			conf.Internal.KeyData = string(keyPEM)
+
+			// Parse from the bytes already read, not LoadX509KeyPair(file,file):
+			// re-reading the files could parse a cert that no longer matches the
+			// CertData/KeyData captured above if the files changed in between.
+			if cert, err = tls.X509KeyPair(certPEM, keyPEM); err != nil {
+				lgDns.Error("DnsEngine: failed to load certificate, not starting DoT/DoH/DoQ service", "err", err)
+				certKey = false
+				certReason = fmt.Sprintf("loading certfile/keyfile: %v", err)
+			}
 		}
 
 		// Check certificate expiry at startup
@@ -175,6 +194,19 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 					lgDns.Warn("DnsEngine: TLS certificate expires within 30 days", "expiry", x509Cert.NotAfter, "remaining", x509Cert.NotAfter.Sub(now).Round(time.Hour), "file", certFile)
 				} else {
 					lgDns.Info("DnsEngine: TLS certificate expiry check passed", "expiry", x509Cert.NotAfter, "file", certFile)
+				}
+				// XoT chain-presentation note: LoadX509KeyPair presents every
+				// CERTIFICATE block in certfile. The condition below fires for a
+				// single certificate that is NOT a self-signed CA — i.e. a leaf,
+				// whether CA-signed (cert init, two-tier PKI) or self-signed. A
+				// self-signed CA root (the mwe default) is exempt: CheckSignature-
+				// From(self) succeeds for it, so no note. Info, not Warn: presenting
+				// a single leaf is fine when peers trust it (or its issuing CA)
+				// directly; it only breaks if the leaf was issued via CA
+				// intermediates that were not bundled. Rewording avoids calling a
+				// self-signed leaf "CA-signed".
+				if parseErr == nil && len(cert.Certificate) == 1 && x509Cert.CheckSignatureFrom(x509Cert) != nil {
+					lgDns.Info("DnsEngine: certfile holds a single leaf certificate (no chain bundled) — fine when peers trust it, or its issuing CA, directly; but if it was issued via CA intermediates, bundle them into certfile (leaf first) or secondaries will fail chain building", "file", certFile)
 				}
 			}
 		}

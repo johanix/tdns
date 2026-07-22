@@ -48,6 +48,7 @@ dnsengine:
    #downstream-pins:            # base64 SPKI SHA-256 of each secondary's cert
    #   - "sec1-spki-sha256-base64="
    #downstream-ca: /etc/tdns/certs/downstream-ca.pem   # for downstream-auth: ca
+   #downstream-names: [ sec1.example.net ]  # ca mode + shared CA: also require an allowlisted DNS SAN
    # outbound_soa_serial controls the SOA serial advertised to secondaries:
    #   keep      — outbound = inbound serial (default; current behavior)
    #   unixtime  — outbound = time.Now().Unix() at zone load
