@@ -171,7 +171,10 @@ func DnsEngine(ctx context.Context, conf *Config) error {
 			conf.Internal.CertData = string(certPEM)
 			conf.Internal.KeyData = string(keyPEM)
 
-			if cert, err = tls.LoadX509KeyPair(certFile, keyFile); err != nil {
+			// Parse from the bytes already read, not LoadX509KeyPair(file,file):
+			// re-reading the files could parse a cert that no longer matches the
+			// CertData/KeyData captured above if the files changed in between.
+			if cert, err = tls.X509KeyPair(certPEM, keyPEM); err != nil {
 				lgDns.Error("DnsEngine: failed to load certificate, not starting DoT/DoH/DoQ service", "err", err)
 				certKey = false
 				certReason = fmt.Sprintf("loading certfile/keyfile: %v", err)
