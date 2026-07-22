@@ -666,6 +666,24 @@ func FindZoneNG(qname string) *ZoneData {
 	return nil
 }
 
+// nearestHostedStrictAncestor returns the closest zone we host locally that is a
+// STRICT ancestor of qname (qname lies strictly below it), or nil if we host no
+// such zone. Unlike FindZone it never returns a zone whose apex equals qname.
+//
+// This is the parent-side lookup for DS queries: DS is authoritative in the zone
+// that DELEGATES to qname (RFC 4035 §3.1.4.1), never in qname's own zone, and it
+// must be resolved from the local Zones map — never via the recursive resolver.
+func nearestHostedStrictAncestor(qname string) *ZoneData {
+	labels := strings.Split(qname, ".")
+	// Start at i=1 so qname itself is excluded (strict ancestor only).
+	for i := 1; i < len(labels)-1; i++ {
+		if zd, ok := Zones.Get(strings.Join(labels[i:], ".")); ok {
+			return zd
+		}
+	}
+	return nil
+}
+
 // nextOutboundSerial returns the next SOA serial that should be advertised
 // to downstreams given zd.CurrentSerial and the configured outbound_soa_serial
 // mode:

@@ -109,7 +109,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 		}
 
 		lgHandler.Debug("query for known zone", "qname", qname)
-		err := zd.QueryResponder(ctx, w, r, qname, qtype, msgoptions, kdb, conf.Internal.ImrEngine)
+		err := zd.QueryResponder(ctx, w, r, qname, qtype, msgoptions, kdb)
 		if err != nil {
 			lgHandler.Error("QueryResponder failed", "error", err)
 			m := new(dns.Msg)
@@ -169,7 +169,7 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 		return nil
 	}
 
-	err := zd.QueryResponder(ctx, w, r, qname, qtype, msgoptions, kdb, conf.Internal.ImrEngine)
+	err := zd.QueryResponder(ctx, w, r, qname, qtype, msgoptions, kdb)
 	if err != nil {
 		lgHandler.Error("QueryResponder failed", "error", err)
 	}

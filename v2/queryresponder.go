@@ -226,133 +226,137 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 	return rrset, nil
 }
 
-// handleDSQuery handles DS queries.
+// handleDSQuery answers a DS query. DS is parent-side data (RFC 4035 §3.1.4.1):
+// it is authoritative in the zone that DELEGATES to qname, never in qname's own
+// zone. The answering zone is therefore the nearest zone we host that is a
+// STRICT ancestor of qname — and it is resolved entirely from the local Zones
+// map. We NEVER chase the parent via the recursive resolver.
 //
-// Two cases need to be distinguished by the relationship between qname and
-// the zone we matched on:
+// Four outcomes, decided by which ancestor we host and where its delegation
+// toward qname sits:
 //
-//  1. qname is a strict child of zd.ZoneName (e.g. zd is "dnslab.", qname is
-//     "bravo.dnslab."). We ARE the parent. Serve the DS RRset directly from
-//     our own zone tree at qname.
+//   - We host the immediate parent (it delegates directly to qname): serve the
+//     DS RRset if present; otherwise an authenticated NODATA proving the
+//     delegation is insecure (NS present, DS absent).
 //
-//  2. qname == zd.ZoneName (DS-at-our-apex query). We are the child. Walk
-//     up via imr.ParentZone() to find a parent zone we host, and serve DS
-//     from there. If we don't host the parent, return a SOA-only response
-//     authoritative for our own zone with EDE/CDE for guidance.
+//   - We host only a grandparent (it delegates to qname's real parent, which we
+//     do NOT host): return a referral to that parent — the DS is its to answer.
 //
-// Pre-fix behavior was always case (2), which broke DS queries against the
-// parent zone for any child name — the responder walked one zone too far up
-// and failed to find DS data that was correctly present in the parent zone.
-func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string, apex *OwnerData, snap *zoneSnapshot,
-	msgoptions *edns0.MsgOptions, kdb *KeyDB, dak *DnssecKeys, imr *Imr,
-	signFunc func(core.RRset, string) (core.RRset, error)) error {
+//   - We host qname (as its own zone) but no ancestor at all: REFUSED. The DS
+//     lives in a parent we don't host; answering NODATA would be us
+//     authoritatively denying parent-side data we don't own. (A correct
+//     validator asks the parent's servers for DS, never the child's, so this
+//     should not occur in practice.)
+//
+//   - qname is ordinary in-zone data of a hosted ancestor (e.g. `www DS`), or
+//     does not exist: NODATA / NXDOMAIN from that ancestor.
+func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string,
+	msgoptions *edns0.MsgOptions, kdb *KeyDB) error {
 
-	// Case 1: qname is a strict child of zd.ZoneName — we are the parent.
-	if qname != zd.ZoneName && dns.IsSubDomain(zd.ZoneName, qname) {
-		lgHandler.Debug("QueryResponder: DS query, serving from parent zone (this zone)",
-			"qname", qname, "zone", zd.ZoneName)
-		// Make sure apex RRsets are signed (SOA in authority for negative
-		// answers; DNSKEY/etc as needed by signApexRRsets).
-		soaRRset, _, err := zd.signedApexRRsets(apex, msgoptions, kdb, nil)
-		if err != nil {
-			lgHandler.Error("failed to sign parent apex RRsets for DS query", "err", err)
+	pzd := nearestHostedStrictAncestor(qname)
+	if pzd == nil {
+		// No hosted ancestor: we can only host qname itself (the child) or
+		// nothing relevant. Nothing to serve or refer to → REFUSED.
+		lgHandler.Debug("QueryResponder: DS query, no hosted parent zone — REFUSED",
+			"qname", qname)
+		m.MsgHdr.Authoritative = false
+		m.MsgHdr.Rcode = dns.RcodeRefused
+		w.WriteMsg(m)
+		return nil
+	}
+
+	// Switch to the parent-side zone: pin ITS snapshot, apex, and signer.
+	psnap := pzd.publishedSnapshot()
+	if psnap == nil {
+		lgHandler.Error("DS query: parent-side zone has no published snapshot",
+			"zone", pzd.ZoneName, "qname", qname)
+		m.MsgHdr.Rcode = dns.RcodeServerFailure
+		w.WriteMsg(m)
+		return nil
+	}
+	papex := getOwnerFrom(psnap, pzd.ZoneName)
+	if papex == nil {
+		lgHandler.Error("DS query: parent-side zone snapshot missing apex",
+			"zone", pzd.ZoneName, "qname", qname)
+		m.MsgHdr.Rcode = dns.RcodeServerFailure
+		w.WriteMsg(m)
+		return nil
+	}
+	// All signing below uses the parent-side zone's own keys. Only synthesized
+	// denial NSECs are signed here; stored data (DS, apex SOA) already carries
+	// its RRSIGs in the snapshot (or the zone is broken and SERVFAILs).
+	pSign := func(rrset core.RRset, name string) (core.RRset, error) {
+		return pzd.signRRsetForZone(rrset, name, msgoptions, kdb, nil)
+	}
+
+	cdd := pzd.findDelegationFrom(psnap, qname, msgoptions.DO)
+	switch {
+	case cdd != nil && cdd.ChildName == qname:
+		// Immediate parent: we delegate directly to qname, the DS is ours.
+		m.MsgHdr.Authoritative = true
+		if cdd.DS_rrset != nil && len(cdd.DS_rrset.RRs) > 0 {
+			lgHandler.Debug("QueryResponder: DS query, serving DS from parent zone",
+				"qname", qname, "parent", pzd.ZoneName)
+			m.MsgHdr.Rcode = dns.RcodeSuccess
+			ds := *cdd.DS_rrset
 			if msgoptions.DO {
-				m.MsgHdr.Rcode = dns.RcodeServerFailure
-				w.WriteMsg(m)
-				return fmt.Errorf("failed to sign parent apex RRsets for DS query: %v", err)
-			}
-		}
-		m.MsgHdr.Rcode = dns.RcodeSuccess
-		dsRRset := getRRsetFrom(snap, qname, dns.TypeDS)
-		if dsRRset != nil && len(dsRRset.RRs) > 0 {
-			signed, err := signFunc(*dsRRset, qname)
-			if err != nil {
-				lgHandler.Error("failed to sign DS RRset", "qname", qname, "err", err)
-				if msgoptions.DO {
+				signed, err := pSign(ds, qname)
+				if err != nil {
+					lgHandler.Error("DS query: failed to sign DS RRset", "qname", qname, "err", err)
 					m.MsgHdr.Rcode = dns.RcodeServerFailure
 					w.WriteMsg(m)
-					return fmt.Errorf("failed to sign DS RRset for %s: %v", qname, err)
+					return nil
 				}
-			} else {
-				dsRRset = &signed
+				ds = signed
 			}
-			m.Answer = append(m.Answer, dsRRset.RRs...)
+			m.Answer = append(m.Answer, ds.RRs...)
 			if msgoptions.DO {
-				m.Answer = append(m.Answer, dsRRset.RRSIGs...)
+				m.Answer = append(m.Answer, ds.RRSIGs...)
 			}
-		}
-		m.Ns = append(m.Ns, soaRRset.RRs...)
-		w.WriteMsg(m)
-		return nil
-	}
-
-	// Case 2: qname == zd.ZoneName — DS-at-apex query. Walk up to find a
-	// parent zone we host.
-	lgHandler.Debug("QueryResponder: DS-at-apex query, looking up parent zone",
-		"qname", qname, "zone", zd.ZoneName)
-	parent, err := imr.ParentZone(zd.ZoneName)
-	if err != nil {
-		lgHandler.Error("failed to find parent zone for DS query", "qname", qname)
-		m.MsgHdr.Rcode = dns.RcodeServerFailure
-		w.WriteMsg(m)
-		return nil
-	}
-	pzd, ok := FindZone(parent)
-	if !ok {
-		// we don't have the parent zone
-		m.MsgHdr.Rcode = dns.RcodeSuccess
-		m.Ns = append(m.Ns, apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs...)
-		if msgoptions.DO {
-			zd.addCDEResponse(m, qname, apex, nil, msgoptions, signFunc)
-		}
-		w.WriteMsg(m)
-		return nil
-	}
-	// We have the parent zone; pin ITS snapshot and read the DS from that.
-	zd = pzd
-	snap = zd.publishedSnapshot()
-	apex = getOwnerFrom(snap, zd.ZoneName)
-	if apex == nil {
-		lgHandler.Error("failed to get apex data for parent zone", "zone", zd.ZoneName)
-		m.MsgHdr.Rcode = dns.RcodeServerFailure
-		w.WriteMsg(m)
-		return nil
-	}
-	// Use parent zone's own keys; let signRRsetForZone fetch them via kdb.
-	soaRRset, _, err := zd.signedApexRRsets(apex, msgoptions, kdb, nil)
-	if err != nil {
-		lgHandler.Error("failed to sign parent apex RRsets for DS query", "err", err)
-		if msgoptions.DO {
-			m.MsgHdr.Rcode = dns.RcodeServerFailure
 			w.WriteMsg(m)
-			return fmt.Errorf("failed to sign parent apex RRsets for DS query: %v", err)
+			return nil
 		}
-	}
-	m.MsgHdr.Rcode = dns.RcodeSuccess
-	dsRRset := getRRsetFrom(snap, qname, dns.TypeDS)
-	if dsRRset != nil && len(dsRRset.RRs) > 0 {
-		// Use parent zone's signing context (signFunc closes over the
-		// original zd; route through signRRsetForZone on the parent we
-		// just switched to).
-		signed, err := zd.signRRsetForZone(*dsRRset, qname, msgoptions, kdb, nil)
-		if err != nil {
-			lgHandler.Error("failed to sign DS RRset", "qname", qname, "err", err)
-			if msgoptions.DO {
-				m.MsgHdr.Rcode = dns.RcodeServerFailure
-				w.WriteMsg(m)
-				return fmt.Errorf("failed to sign DS RRset for %s: %v", qname, err)
-			}
-		} else {
-			dsRRset = &signed
-		}
-		m.Answer = append(m.Answer, dsRRset.RRs...)
+		// Insecure delegation: delegation exists, no DS. Authenticated NODATA
+		// (compact NSEC at qname: NS present, DS absent).
+		lgHandler.Debug("QueryResponder: DS query, insecure delegation (no DS) — authenticated NODATA",
+			"qname", qname, "parent", pzd.ZoneName)
+		m.MsgHdr.Rcode = dns.RcodeSuccess
+		m.Ns = append(m.Ns, pzd.soaForResponseFrom(psnap, papex).RRs...)
 		if msgoptions.DO {
-			m.Answer = append(m.Answer, dsRRset.RRSIGs...)
+			pzd.addCDEResponse(m, qname, papex, []uint16{dns.TypeNS}, msgoptions, pSign)
 		}
+		w.WriteMsg(m)
+		return nil
+
+	case cdd != nil:
+		// Grandparent: we delegate to cdd.ChildName (qname's real parent, not
+		// hosted here). Refer the client to it; the DS is the parent's to serve.
+		lgHandler.Debug("QueryResponder: DS query, referring to unhosted parent",
+			"qname", qname, "parent", cdd.ChildName, "grandparent", pzd.ZoneName)
+		m.MsgHdr.Rcode = dns.RcodeSuccess
+		pzd.sendReferral(m, w, cdd, papex, msgoptions, pSign)
+		return nil
+
+	default:
+		// No delegation covering qname inside pzd: qname is ordinary in-zone
+		// data (e.g. `www.example.com DS`) or does not exist. DS is not a
+		// parent-side concern here — plain NODATA / NXDOMAIN from pzd.
+		if owner := getOwnerFrom(psnap, qname); owner != nil {
+			m.MsgHdr.Authoritative = true
+			m.MsgHdr.Rcode = dns.RcodeSuccess
+			m.Ns = append(m.Ns, pzd.soaForResponseFrom(psnap, papex).RRs...)
+			if msgoptions.DO {
+				// Existing types at qname (DS is not among them) → NODATA proof.
+				pzd.addCDEResponse(m, qname, papex, owner.RRtypes.Keys(), msgoptions, pSign)
+			}
+			w.WriteMsg(m)
+			return nil
+		}
+		lgHandler.Debug("QueryResponder: DS query for a name that does not exist — NXDOMAIN",
+			"qname", qname, "zone", pzd.ZoneName)
+		pzd.sendNXDOMAIN(m, w, qname, papex, psnap, msgoptions, pSign)
+		return nil
 	}
-	m.Ns = append(m.Ns, soaRRset.RRs...)
-	w.WriteMsg(m)
-	return nil
 }
 
 // sendReferral sends a referral response for a child delegation.
@@ -705,7 +709,7 @@ func (zd *ZoneData) handleCNAMEChain(m *dns.Msg, w dns.ResponseWriter, qname str
 }
 
 func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r *dns.Msg,
-	qname string, qtype uint16, msgoptions *edns0.MsgOptions, kdb *KeyDB, imr *Imr) error {
+	qname string, qtype uint16, msgoptions *edns0.MsgOptions, kdb *KeyDB) error {
 
 	select {
 	case <-ctx.Done():
@@ -795,9 +799,11 @@ func (zd *ZoneData) QueryResponder(ctx context.Context, w dns.ResponseWriter, r 
 	var wildqname string
 	origqname := qname
 
-	// 0. Is this a DS query? If so, trap it ASAP and try to find the parent zone
+	// 0. Is this a DS query? If so, trap it ASAP: DS is parent-side data, so it
+	// is answered from the nearest hosted ancestor of qname, resolved from the
+	// local Zones map (never the resolver). See handleDSQuery.
 	if qtype == dns.TypeDS {
-		return zd.handleDSQuery(m, w, qname, apex, snap, msgoptions, kdb, dak, imr, MaybeSignRRset)
+		return zd.handleDSQuery(m, w, qname, msgoptions, kdb)
 	}
 
 	// log.Printf("---> Checking for existence of qname %s", qname)

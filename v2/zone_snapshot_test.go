@@ -408,7 +408,7 @@ www.example. 3600 IN A 10.0.0.1
 		req := new(dns.Msg)
 		req.SetQuestion("www.example.", dns.TypeA)
 		rw := &fakeRW{}
-		if err := zd.QueryResponder(ctx, rw, req, "www.example.", dns.TypeA, msgo, nil, nil); err != nil {
+		if err := zd.QueryResponder(ctx, rw, req, "www.example.", dns.TypeA, msgo, nil); err != nil {
 			continue
 		}
 		resp := rw.written
@@ -484,7 +484,7 @@ www.broken.example. 3600 IN A 10.0.0.2
 	req := new(dns.Msg)
 	req.SetQuestion("www.broken.example.", dns.TypeA)
 	rw := &fakeRW{}
-	if err := zd.QueryResponder(ctx, rw, req, "www.broken.example.", dns.TypeA, &edns0.MsgOptions{DO: true}, kdb, nil); err != nil {
+	if err := zd.QueryResponder(ctx, rw, req, "www.broken.example.", dns.TypeA, &edns0.MsgOptions{DO: true}, kdb); err != nil {
 		t.Fatalf("QueryResponder (DO): %v", err)
 	}
 	resp := rw.written
@@ -506,7 +506,7 @@ www.broken.example. 3600 IN A 10.0.0.2
 	req2 := new(dns.Msg)
 	req2.SetQuestion("www.broken.example.", dns.TypeA)
 	rw2 := &fakeRW{}
-	if err := zd.QueryResponder(ctx, rw2, req2, "www.broken.example.", dns.TypeA, &edns0.MsgOptions{}, kdb, nil); err != nil {
+	if err := zd.QueryResponder(ctx, rw2, req2, "www.broken.example.", dns.TypeA, &edns0.MsgOptions{}, kdb); err != nil {
 		t.Fatalf("QueryResponder (non-DO): %v", err)
 	}
 	if rw2.written == nil || rw2.written.MsgHdr.Rcode != dns.RcodeSuccess {
@@ -616,7 +616,7 @@ ns.broken-wild.example. 3600 IN A 10.0.0.1
 		req := new(dns.Msg)
 		req.SetQuestion("nothere.broken-wild.example.", dns.TypeA)
 		rw := &fakeRW{}
-		if err := zd.QueryResponder(ctx, rw, req, "nothere.broken-wild.example.", dns.TypeA, &edns0.MsgOptions{DO: true}, kdb, nil); err != nil {
+		if err := zd.QueryResponder(ctx, rw, req, "nothere.broken-wild.example.", dns.TypeA, &edns0.MsgOptions{DO: true}, kdb); err != nil {
 			t.Fatalf("QueryResponder (DO wildcard): %v", err)
 		}
 		resp := rw.written
@@ -653,7 +653,7 @@ ns.signed-wild.example. 3600 IN A 10.0.0.1
 		req := new(dns.Msg)
 		req.SetQuestion("host.signed-wild.example.", dns.TypeA)
 		rw := &fakeRW{}
-		if err := zd.QueryResponder(ctx, rw, req, "host.signed-wild.example.", dns.TypeA, &edns0.MsgOptions{DO: true}, kdb, nil); err != nil {
+		if err := zd.QueryResponder(ctx, rw, req, "host.signed-wild.example.", dns.TypeA, &edns0.MsgOptions{DO: true}, kdb); err != nil {
 			t.Fatalf("QueryResponder (DO signed wildcard): %v", err)
 		}
 		resp := rw.written
@@ -693,7 +693,7 @@ ns.plain-wild.example. 3600 IN A 10.0.0.1
 		req := new(dns.Msg)
 		req.SetQuestion("host.plain-wild.example.", dns.TypeA)
 		rw := &fakeRW{}
-		if err := zd.QueryResponder(ctx, rw, req, "host.plain-wild.example.", dns.TypeA, &edns0.MsgOptions{DO: true}, kdb, nil); err != nil {
+		if err := zd.QueryResponder(ctx, rw, req, "host.plain-wild.example.", dns.TypeA, &edns0.MsgOptions{DO: true}, kdb); err != nil {
 			t.Fatalf("QueryResponder (DO unsigned wildcard): %v", err)
 		}
 		resp := rw.written
