@@ -49,7 +49,7 @@ www.example. 3600 IN A 10.0.0.2
 			t.Fatalf("ExtractFlagsAndEDNS0Options: %v", err)
 		}
 		rw := &fakeRW{}
-		if err := zd.QueryResponder(ctx, rw, req, "www.example.", dns.TypeA, msgo, kdb, nil); err != nil {
+		if err := zd.QueryResponder(ctx, rw, req, "www.example.", dns.TypeA, msgo, kdb); err != nil {
 			t.Fatalf("QueryResponder: %v", err)
 		}
 		if rw.written == nil {
@@ -115,7 +115,7 @@ www.example. 3600 IN A 10.0.0.2
 			t.Fatalf("ExtractFlagsAndEDNS0Options: %v", err)
 		}
 		rw := &fakeRW{}
-		if err := zd.QueryResponder(ctx, rw, req, "www.example.", dns.TypeNXNAME, msgo, kdb, nil); err != nil {
+		if err := zd.QueryResponder(ctx, rw, req, "www.example.", dns.TypeNXNAME, msgo, kdb); err != nil {
 			t.Fatalf("QueryResponder: %v", err)
 		}
 		resp := rw.written
