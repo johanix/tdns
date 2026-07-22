@@ -2,7 +2,7 @@
 language: "en-US"
 
 reviews:
-  profile: "chill"
+  profile: "assertive"
 
   # Only review Go source under v2/ and cmdv2/
   path_filters:

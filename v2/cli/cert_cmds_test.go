@@ -36,4 +36,20 @@ func TestCertValidityFlagBindings(t *testing.T) {
 			t.Fatalf("cert %s --validity default = %v, want 397", cmd, f)
 		}
 	}
+
+	// Verify the binding DIRECTLY, not just the default: setting the CA
+	// --validity value must land in certCAValidity and must NOT leak into
+	// certValidity (the shared leaf/sign backing var). Defaults alone would
+	// miss a mis-binding if the two defaults ever coincided. Restore both.
+	origCA, origLeaf := certCAValidity, certValidity
+	t.Cleanup(func() { certCAValidity, certValidity = origCA, origLeaf })
+	if err := caFlag.Value.Set("1234"); err != nil {
+		t.Fatalf("set cert ca --validity: %v", err)
+	}
+	if certCAValidity != 1234 {
+		t.Fatalf("cert ca --validity wrote the wrong variable: certCAValidity = %d, want 1234", certCAValidity)
+	}
+	if certValidity != origLeaf {
+		t.Fatalf("cert ca --validity leaked into certValidity (= %d, want %d): shared backing variable", certValidity, origLeaf)
+	}
 }
