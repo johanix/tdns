@@ -229,34 +229,39 @@ func (zd *ZoneData) signRRsetForZone(rrset core.RRset, name string, msgoptions *
 // handleDSQuery answers a DS query. DS is parent-side data (RFC 4035 §3.1.4.1):
 // it is authoritative in the zone that DELEGATES to qname, never in qname's own
 // zone. The answering zone is therefore the nearest zone we host that is a
-// STRICT ancestor of qname — and it is resolved entirely from the local Zones
-// map. We NEVER chase the parent via the recursive resolver.
+// STRICT ancestor of qname — found by stripping qname's leftmost label and
+// letting FindZone walk up from there, entirely within the local Zones map. We
+// NEVER chase the parent via the recursive resolver.
 //
-// Four outcomes, decided by which ancestor we host and where its delegation
-// toward qname sits:
+// Outcomes, ordered from most to least common (a grandparent referral is by far
+// the rarest, so it is the last arm):
+//
+//   - No hosted ancestor at all: REFUSED. The DS lives in a parent we don't
+//     host; answering NODATA would be us authoritatively denying parent-side
+//     data we don't own. (A correct validator asks the parent's servers for DS,
+//     never the child's, so this should not occur in practice.)
 //
 //   - We host the immediate parent (it delegates directly to qname): serve the
 //     DS RRset if present; otherwise an authenticated NODATA proving the
 //     delegation is insecure (NS present, DS absent).
 //
-//   - We host only a grandparent (it delegates to qname's real parent, which we
-//     do NOT host): return a referral to that parent — the DS is its to answer.
-//
-//   - We host qname (as its own zone) but no ancestor at all: REFUSED. The DS
-//     lives in a parent we don't host; answering NODATA would be us
-//     authoritatively denying parent-side data we don't own. (A correct
-//     validator asks the parent's servers for DS, never the child's, so this
-//     should not occur in practice.)
-//
 //   - qname is ordinary in-zone data of a hosted ancestor (e.g. `www DS`), or
 //     does not exist: NODATA / NXDOMAIN from that ancestor.
+//
+//   - We host only a grandparent (it delegates to qname's real parent, which we
+//     do NOT host): referral to that parent — the DS is its to answer. Rarest.
 func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string,
 	msgoptions *edns0.MsgOptions, kdb *KeyDB) error {
 
-	pzd := nearestHostedStrictAncestor(qname)
+	// DS can never live in qname's own zone, so strip qname's leftmost label
+	// and look up the parent side. FindZone walks up from there and returns the
+	// nearest hosted strict ancestor of qname (with the same case-folding as the
+	// main lookup); it can never return qname's own zone. qname is a FQDN here,
+	// so it always has at least the root dot.
+	pzd, _ := FindZone(qname[strings.Index(qname, ".")+1:])
 	if pzd == nil {
-		// No hosted ancestor: we can only host qname itself (the child) or
-		// nothing relevant. Nothing to serve or refer to → REFUSED.
+		// We host nothing above qname (at most qname itself). Nothing to serve
+		// or refer to → REFUSED.
 		lgHandler.Debug("QueryResponder: DS query, no hosted parent zone — REFUSED",
 			"qname", qname)
 		m.MsgHdr.Authoritative = false
@@ -289,6 +294,8 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 		return pzd.signRRsetForZone(rrset, name, msgoptions, kdb, nil)
 	}
 
+	// One local delegation lookup classifies the query; arms are ordered by
+	// frequency, with the (rare) grandparent referral last.
 	cdd := pzd.findDelegationFrom(psnap, qname, msgoptions.DO)
 	switch {
 	case cdd != nil && cdd.ChildName == qname:
@@ -328,16 +335,7 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 		w.WriteMsg(m)
 		return nil
 
-	case cdd != nil:
-		// Grandparent: we delegate to cdd.ChildName (qname's real parent, not
-		// hosted here). Refer the client to it; the DS is the parent's to serve.
-		lgHandler.Debug("QueryResponder: DS query, referring to unhosted parent",
-			"qname", qname, "parent", cdd.ChildName, "grandparent", pzd.ZoneName)
-		m.MsgHdr.Rcode = dns.RcodeSuccess
-		pzd.sendReferral(m, w, cdd, papex, msgoptions, pSign)
-		return nil
-
-	default:
+	case cdd == nil:
 		// No delegation covering qname inside pzd: qname is ordinary in-zone
 		// data (e.g. `www.example.com DS`) or does not exist. DS is not a
 		// parent-side concern here — plain NODATA / NXDOMAIN from pzd.
@@ -355,6 +353,16 @@ func (zd *ZoneData) handleDSQuery(m *dns.Msg, w dns.ResponseWriter, qname string
 		lgHandler.Debug("QueryResponder: DS query for a name that does not exist — NXDOMAIN",
 			"qname", qname, "zone", pzd.ZoneName)
 		pzd.sendNXDOMAIN(m, w, qname, papex, psnap, msgoptions, pSign)
+		return nil
+
+	default:
+		// cdd != nil && cdd.ChildName != qname — we host only a grandparent that
+		// delegates to qname's real parent (which we do NOT host). Refer the
+		// client to that parent; the DS is the parent's to serve. Rarest case.
+		lgHandler.Debug("QueryResponder: DS query, referring to unhosted parent",
+			"qname", qname, "parent", cdd.ChildName, "grandparent", pzd.ZoneName)
+		m.MsgHdr.Rcode = dns.RcodeSuccess
+		pzd.sendReferral(m, w, cdd, papex, msgoptions, pSign)
 		return nil
 	}
 }
