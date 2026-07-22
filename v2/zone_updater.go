@@ -214,6 +214,19 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					keyRR     string
 				}
 				var toVerify []pendingVerification
+
+				// If this is a self-signed bootstrap ceremony carrying a
+				// DEL-ANY-KEY, defer the DEL: register a pending key-replacement
+				// so that once the newly-added (untrusted) key is validated and
+				// promoted to trusted, the child's other keys are removed. The
+				// DEL itself is not applied now (the class-ANY case below skips
+				// it), so an un-validated bootstrap never evicts a trusted key.
+				if addKey, hasDel, ok := bootstrapCeremony(ur.Actions); ok && hasDel && !ur.Trusted {
+					registerPendingKeyReplacement(addKey.Header().Name, addKey.KeyTag())
+					lg.Info("ZoneUpdater: deferring DEL-ANY-KEY from self-signed bootstrap until new key is trusted",
+						"child", addKey.Header().Name, "keyid", addKey.KeyTag())
+				}
+
 				for _, rr := range ur.Actions {
 					var subcommand string
 					switch rr.Header().Class {
