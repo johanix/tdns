@@ -147,6 +147,7 @@ type ZoneData struct {
 	Notify            []PeerConf // downstream secondaries that we notify (addr + key)
 	AllowNotify       []AclEntry // secondary: who may NOTIFY us; empty => accept from resolved primaries
 	Downstreams       []AclEntry // primary: who may AXFR from us (provide-xfr ACL); empty => deny
+	DownstreamAuth    []string   // acceptable transfer-auth mechanism classes (empty => unrestricted); see authorizeTransfer
 	Zonefile          string
 	DelegationSyncQ   chan DelegationSyncRequest
 	Parent            string   // name of parentzone (if filled in)
@@ -256,6 +257,12 @@ type PeerConf struct {
 	Key    string `yaml:"key" mapstructure:"key"`
 	Legacy string `yaml:"-" mapstructure:"-"` // bare-string marker; not config
 
+	// PeersRef holds the ids of a `- peers: [ id, ... ]` reference entry
+	// (see the peers: block, v2/peers.go). Consumed (and cleared) by
+	// expandPeerList at parse time; post-expansion lists never contain
+	// reference entries.
+	PeersRef []string `yaml:"peers" mapstructure:"peers"`
+
 	// XoT (XFR-over-TLS, RFC 9103) fields. All optional; an empty Transport
 	// means Do53 and preserves pre-XoT behavior exactly. TSIG (Key) remains
 	// orthogonal: RFC 9103 allows TSIG and TLS together, so a peer may have
@@ -277,6 +284,7 @@ type ZoneConf struct {
 	Notify            []PeerConf
 	AllowNotify       []AclEntry   `yaml:"allow-notify" mapstructure:"allow-notify"` // secondary: who may NOTIFY us (ip-spec + key｜NOKEY｜BLOCKED)
 	Downstreams       []AclEntry   `yaml:"downstreams" mapstructure:"downstreams"`   // primary: who may AXFR from us (provide-xfr ACL)
+	DownstreamAuth    []string     `yaml:"downstream-auth" mapstructure:"downstream-auth"` // acceptable transfer-auth mechanisms: prefix|tsig|tls-pin|tls-pkix|tls-dane|any
 	OptionsStrs       []string     `yaml:"options" mapstructure:"options"`
 	Options           []ZoneOption `yaml:"-" mapstructure:"-"` // Ignore during both yaml and mapstructure decoding
 	Frozen            bool         // true if zone is frozen; not a config param
@@ -682,6 +690,7 @@ type ZoneRefresher struct {
 	Notify        []PeerConf
 	AllowNotify   []AclEntry // copied to zd.AllowNotify on merge
 	Downstreams   []AclEntry // copied to zd.Downstreams on merge
+	DownstreamAuth []string  // copied to zd.DownstreamAuth on merge (config-bearing only)
 	// ConfigUpdate marks a config-bearing refresher (from ParseZones /
 	// LoadDynamicZoneFiles) as opposed to a NOTIFY/refresh-only trigger. On reload
 	// it lets the merge assign Notify/AllowNotify/Downstreams even when they are

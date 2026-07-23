@@ -41,16 +41,19 @@ const (
 // defaultPortForPeer returns the default port implied by the peer's transport:
 // 853 for DoT (RFC 7858/9103), 53 otherwise.
 func defaultPortForPeer(p PeerConf) string {
-	if p.Transport == TransportDoT {
+	if peerUsesDoT(p) {
 		return "853"
 	}
 	return "53"
 }
 
 // peerUsesDoT reports whether this peer is configured for XFR-over-TLS.
-// (Transport is normalized to lowercase by validatePeerXoT at config load.)
+// validatePeerXoT lowercases Transport on the static config path, but
+// PeerConfs built programmatically (API/dynamic zones) may not have been
+// normalized — so compare case-insensitively rather than assume. Getting
+// this wrong silently downgrades an intended DoT pull to plaintext Do53.
 func peerUsesDoT(p PeerConf) bool {
-	return p.Transport == TransportDoT
+	return strings.EqualFold(strings.TrimSpace(p.Transport), TransportDoT)
 }
 
 // transportLabel names the peer's transport for logging.
@@ -126,6 +129,20 @@ func validatePeerXoT(p *PeerConf) error {
 	return nil
 }
 
+// validatePrimariesXoT validates and normalizes (in place) the XoT fields of
+// every primary in the slice — the dynamic/API analogue of the per-primary
+// validatePeerXoT call the static secondary-zone path makes. Without it a
+// programmatic PeerConf can carry an unnormalized "DoT" transport (silently
+// pulling plaintext) or a malformed pin/ca-file.
+func validatePrimariesXoT(primaries []PeerConf) error {
+	for i := range primaries {
+		if err := validatePeerXoT(&primaries[i]); err != nil {
+			return fmt.Errorf("primary %s: %v", primaries[i].Addr, err)
+		}
+	}
+	return nil
+}
+
 // checkPEMCertFile verifies that path is readable and contains at least one
 // CERTIFICATE PEM block, so a broken ca-file is caught at config load rather
 // than at the first transfer attempt.
@@ -170,6 +187,22 @@ func (conf *Config) ClientTLSConfigForPeer(peer PeerConf) (*tls.Config, error) {
 		ServerName: serverName,
 		MinVersion: tls.VersionTLS13,
 		NextProtos: []string{"dot"},
+	}
+
+	// Present OUR OWN certificate when the server requests one (the primary's
+	// listener always RequestClientCert): this is how a secondary satisfies
+	// the primary's per-zone downstream-auth tls-* mechanisms. The daemon's
+	// dnsengine cert/key (loaded at DnsEngine start into Internal.CertData/
+	// KeyData; cert init issues it with both server and client EKU) doubles
+	// as the client identity. Absent cert material (e.g. dog's synthetic
+	// Config, or a Do53-only daemon) simply presents nothing — servers that
+	// do not request a cert never notice either way.
+	if conf.Internal.CertData != "" && conf.Internal.KeyData != "" {
+		if clientCert, err := tls.X509KeyPair([]byte(conf.Internal.CertData), []byte(conf.Internal.KeyData)); err == nil {
+			tlsCfg.Certificates = []tls.Certificate{clientCert}
+		} else {
+			lg.Warn("xot: cannot load own cert/key as client identity; connecting without a client certificate", "err", err)
+		}
 	}
 
 	switch peer.TLSAuth {
@@ -253,83 +286,24 @@ func (conf *Config) verifyPeerCertDANE(cs tls.ConnectionState, name, port string
 }
 
 // ServerTLSConfigForDoT builds the DoT listener's tls.Config. With
-// applyDownstreamAuth false (the IMR's DoT front end) or no downstream-auth
-// configured, the result matches the historical config: server cert only, no
-// client certificate requested. With dnsengine.downstream-auth set, the auth
-// listener enforces mTLS on every DoT connection:
-//   - pin: the client must present a certificate and its SPKI SHA-256 must
-//     match one of dnsengine.downstream-pins (chain building skipped — the
-//     mirror of the client-side pin mode).
-//   - ca: standard mTLS chain verification against dnsengine.downstream-ca.
-//
-// Client-side DANE (TLSA per downstream) is deliberately not offered: the
-// server cannot know which downstream is connecting before the handshake, so
-// there is no name to base a TLSA lookup on. Pins cover that case statically.
-func ServerTLSConfigForDoT(conf *Config, cert *tls.Certificate, applyDownstreamAuth bool) (*tls.Config, error) {
+// requestClientCert true (the auth listener) the server REQUESTS — never
+// requires — a client certificate: cert-less clients (ordinary ADoT query
+// traffic) handshake exactly as before, and nothing is verified here.
+// Verification of a presented client cert happens per zone, at transfer
+// time, against the matched downstreams entry's tls-identity (see
+// authorizeTransfer, v2/downstream_auth.go). The IMR's DoT front end
+// passes false and never requests certificates. There is deliberately no
+// listener-level client-cert POLICY: dropping non-TLS traffic is
+// dnsengine.transports, and transfer authentication is per-zone
+// downstream-auth (docs/2026-07-21-peers-xfr-auth-design.md D6).
+func ServerTLSConfigForDoT(conf *Config, cert *tls.Certificate, requestClientCert bool) (*tls.Config, error) {
 	tlsCfg := &tls.Config{
 		Certificates: []tls.Certificate{*cert},
 		MinVersion:   tls.VersionTLS13,
 		NextProtos:   []string{"dot"},
 	}
-	if !applyDownstreamAuth {
-		return tlsCfg, nil
-	}
-	de := conf.DnsEngine
-	switch de.DownstreamAuth {
-	case "":
-		// No client-cert policy configured — serve exactly as before.
-	case "pin":
-		if len(de.DownstreamPins) == 0 {
-			return nil, fmt.Errorf("dnsengine: downstream-auth pin requires downstream-pins")
-		}
-		for _, pin := range de.DownstreamPins {
-			raw, err := base64.StdEncoding.DecodeString(pin)
-			if err != nil || len(raw) != sha256.Size {
-				return nil, fmt.Errorf("dnsengine: downstream pin %q is not a base64 SHA-256 SPKI digest", pin)
-			}
-		}
-		pins := append([]string(nil), de.DownstreamPins...)
-		tlsCfg.ClientAuth = tls.RequireAnyClientCert
-		tlsCfg.VerifyConnection = func(cs tls.ConnectionState) error {
-			return verifyPeerCertPins(cs, pins)
-		}
-	case "ca":
-		if de.DownstreamCA == "" {
-			return nil, fmt.Errorf("dnsengine: downstream-auth ca requires downstream-ca")
-		}
-		data, err := os.ReadFile(de.DownstreamCA)
-		if err != nil {
-			return nil, fmt.Errorf("dnsengine: reading downstream-ca: %v", err)
-		}
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(data) {
-			return nil, fmt.Errorf("dnsengine: no usable certificates in downstream-ca %s", de.DownstreamCA)
-		}
-		tlsCfg.ClientCAs = pool
-		tlsCfg.ClientAuth = tls.RequireAndVerifyClientCert
-		// Optional identity binding for a shared CA (LE-4): the client
-		// leaf must additionally carry an allowlisted DNS SAN. The chain
-		// is already verified by RequireAndVerifyClientCert when
-		// VerifyConnection runs; this only narrows which subjects count.
-		if len(de.DownstreamNames) > 0 {
-			allowed := make(map[string]bool, len(de.DownstreamNames))
-			for _, n := range de.DownstreamNames {
-				allowed[strings.ToLower(strings.TrimSuffix(n, "."))] = true
-			}
-			tlsCfg.VerifyConnection = func(cs tls.ConnectionState) error {
-				if len(cs.PeerCertificates) == 0 {
-					return fmt.Errorf("xot: downstream presented no certificate")
-				}
-				for _, san := range cs.PeerCertificates[0].DNSNames {
-					if allowed[strings.ToLower(strings.TrimSuffix(san, "."))] {
-						return nil
-					}
-				}
-				return fmt.Errorf("xot: downstream cert SANs %v match none of the %d allowed downstream-names", cs.PeerCertificates[0].DNSNames, len(allowed))
-			}
-		}
-	default:
-		return nil, fmt.Errorf("dnsengine: unknown downstream-auth %q (supported: pin, ca)", de.DownstreamAuth)
+	if requestClientCert {
+		tlsCfg.ClientAuth = tls.RequestClientCert
 	}
 	return tlsCfg, nil
 }
@@ -343,9 +317,15 @@ func ServerTLSConfigForDoT(conf *Config, cert *tls.Certificate, applyDownstreamA
 // lab-mode escape hatch (config: imrengine.require_dnssec_validation) is
 // honored, with a loud warning, to match how the rest of tdns treats TLSA.
 func (conf *Config) lookupTLSAValidated(name, port string) (*core.RRset, error) {
-	imr := conf.Internal.ImrEngine
+	return lookupTLSAValidatedIMR(conf.Internal.ImrEngine, name, port)
+}
+
+// lookupTLSAValidatedIMR is the IMR-based core of lookupTLSAValidated, usable
+// where no *Config is in reach (the transfer-time downstream-auth tls-dane
+// check receives the imr through QueryResponder).
+func lookupTLSAValidatedIMR(imr *Imr, name, port string) (*core.RRset, error) {
 	if imr == nil {
-		return nil, fmt.Errorf("xot: tls-auth dane requires the built-in IMR to be active")
+		return nil, fmt.Errorf("xot: dane requires the built-in IMR to be active")
 	}
 	fqdn := dns.Fqdn(name)
 	owner := fmt.Sprintf("_%s._tcp.%s", port, fqdn)

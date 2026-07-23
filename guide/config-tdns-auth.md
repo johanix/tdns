@@ -117,7 +117,7 @@ grants no authority of its own; it defaults to the key's origin.
 Two names are reserved and may not be used as key names: **`NOKEY`** and
 **`BLOCKED`**. Both are ACL sentinels, described next.
 
-A key name referenced from a zone's `primaries:`, `notify:`, `allow-notify:` or
+A key name referenced from a zone's `upstreams:`, `notify:`, `allow-notify:` or
 `downstreams:` must resolve, either here or in the keystore. If it does not,
 that zone is quarantined at config load:
 
@@ -136,7 +136,7 @@ what they guard:
 | `allow-notify:` | secondary | who may send NOTIFY **to** us | accept unsigned NOTIFY from any configured primary's address |
 
 Both are ordered lists of `{prefix, key}` entries. Note that `notify:` and
-`primaries:` are *not* ACLs — they are lists of destinations and sources, and
+`upstreams:` are *not* ACLs — they are lists of destinations and sources, and
 take `{addr, key}` entries where the address includes a port. Writing `addr:`
 inside a `downstreams:` entry is the single most common mistake; it decodes to
 an empty prefix and quarantines the zone with `bad ip-spec ""`.
@@ -202,68 +202,119 @@ downstreams:
      key:    BLOCKED          # denied even with a valid key
 ```
 
-### The TLS layer: authenticating secondaries by certificate (XoT)
+### Peers: describe a server once, reference it everywhere
 
-When the primary serves zone transfer over TLS (XoT — `dot` in
-`dnsengine.transports`), a second, independent gate is available in front
-of the `downstreams:` ACL: **mutual TLS**. It is configured in the
-`dnsengine:` block, not per zone, and it applies to **every connection on
-the auth DoT listener** (the IMR's DoT front end never requests client
-certificates):
+A primary typically serves the same secondaries for hundreds of zones (and a
+secondary pulls from the same primary for hundreds of zones). The top-level
+`peers:` block describes each remote server ONCE — addresses, TSIG keys, and
+TLS identity — and the four per-zone lists (`upstreams:`, `notify:`,
+`downstreams:`, `allow-notify:`) reference it:
 
 ```yaml
-dnsengine:
-   transports: [ do53, dot ]
-   certfile:   /etc/tdns/certs/servers/ns1.example.net.crt
-   keyfile:    /etc/tdns/certs/servers/ns1.example.net.key
+peers:
+   sec1:                              # identifier used in references
+      addr: sec1.example.net:853      # dial target (when used as an upstream);
+                                      #   also supplies name/prefix defaults
+      prefixes: [ 198.51.100.7,       # inbound source addresses (defaults to
+                  2001:db8::7 ]       #   addr's IP when addr is a literal)
+      keys: [ xfr-key-2026,           # TSIG: outbound signs with the FIRST,
+              xfr-key-2025 ]          #   inbound accepts ANY (one-place key
+                                      #   rollover); `key: x` = `keys: [x]`
+      tls-identity:                   # how WE verify ITS client certificate
+         name: sec1.example.net       #   the identity pin (SAN check / TLSA base)
+         ca-file: /etc/tdns/certs/tdns-ca.crt   # trust anchors ONLY (roots)
+         # pins: [ "spki-b64=" ]      #   and/or static SPKI pins
+         # dane: true                 #   and/or DNSSEC-validated TLSA
 
-   # EITHER: pin each secondary's client certificate explicitly
-   downstream-auth: pin
-   downstream-pins:
-      - "sec1-spki-sha256-base64="      # tdns-cli cert pin sec1.crt
-      - "sec2-spki-sha256-base64="
-
-   # OR: standard mTLS against a CA (see guide/cert-provisioning.md)
-   #downstream-auth: ca
-   #downstream-ca:   /etc/tdns/certs/tdns-ca.crt
-   ## optional, for a CA shared beyond the transfer trust domain: the
-   ## client cert must ALSO carry one of these DNS SANs
-   #downstream-names: [ sec2.example.net, sec3.example.net ]
+zones:
+   - name: example.net.
+     type: primary
+     downstreams:
+        - peers: [ sec1 ]             # reference — expands to prefix x key
+        - prefix: 192.0.2.0/24        # inline entries keep working unchanged
+          key: NOKEY
 ```
 
-- `pin` — the connecting secondary must present a certificate whose SPKI
-  SHA-256 digest is in `downstream-pins` (any match admits; list old +
-  new during rotation). No CA involved; get each pin with
-  `tdns-cli cert pin <cert.pem>` or `dog +showpin`.
-- `ca` — the client certificate must chain to `downstream-ca` (the same
-  CA file secondaries use to verify *us* — one file both ways when using
-  the tdns minimal CA). `downstream-names` optionally narrows which
-  chain-valid subjects count, which matters when the CA also signs certs
-  for hosts that should *not* be able to transfer.
-- Absent `downstream-auth` — no client certificate is requested; the DoT
-  listener behaves as before.
+Rules: an entry is a reference (`peers:`) or inline (`prefix:`/`key:` or
+`addr:`/`key:`), never both; an unknown identifier quarantines the zone;
+`NOKEY` must be the only element of `keys:`. In `downstreams:` a reference
+expands to the prefix × key cross-product (the same shape as the manual
+dual-key rollover pattern above), each entry carrying the peer's
+`tls-identity` for the transfer-time certificate check below.
 
-**How the two layers compose.** They are ANDed, in order: the TLS
-handshake (including `downstream-auth`, if set) must succeed before any
-DNS message is read, and then the per-zone `downstreams:` prefix+TSIG ACL
-decides the transfer exactly as over Do53. TSIG remains fully meaningful
-inside TLS (RFC 9103 allows both), so the strongest configuration is
-mTLS + per-zone TSIG. Note the granularity difference: `downstream-auth`
-is one policy for the whole listener, while `downstreams:` is per zone —
-there is currently no per-zone certificate requirement inside a
-`downstreams:` entry.
+**Spelling aliases.** The canonical names are `upstreams:` (where a
+secondary pulls from — BIND9 calls this `primaries:`, NSD `request-xfr:`)
+and `downstreams:` (who may transfer from us — BIND9 `secondaries:`, NSD
+`provide-xfr:`). All three spellings of each are accepted on input; using
+two spellings of the same list in one zone or template is an error that
+quarantines the zone. This guide uses `upstreams:`/`downstreams:`
+throughout.
 
-**Verifying the secondary's cert via TLSA/DANE is not currently offered**
-on the primary side (client-cert DANE would mean validating the presented
-certificate against the DNSSEC-signed TLSA record of the name it claims —
-feasible, but not implemented; `pin` covers the no-shared-files case
-today). The `dane` mode exists on the *secondary* side, where the
-secondary verifies the primary's server certificate (`tls-auth: dane` in
-`primaries:`).
+### Per-zone transfer authentication: downstream-auth
 
-Provisioning the certificates for all of this — including the one-shot
-`tdns-cli cert init` and upgrading existing self-signed certs — is
-covered in [Certificate Provisioning](cert-provisioning.md).
+`downstream-auth:` on a zone (or, more usefully, a template) lists which
+proof classes are acceptable for transferring THIS zone. The list is
+policy; the credentials live in the `downstreams:` entries and the peers
+they reference. Enforcement happens at transfer time — never at the TLS
+handshake — so ordinary queries on every transport, and cert-less DoT
+clients, are completely unaffected.
+
+```yaml
+templates:
+   - name: served-strict
+     type: primary
+     downstream-auth: [ tsig, tls-pkix ]    # no cert+TSIG, no transfer
+     downstreams:
+        - peers: [ sec1, sec-legacy ]
+
+zones:
+   - name: example.com.                     # 1 of 500 identical declarations
+     template: served-strict
+     zonefile: /var/lib/tdns/example.com
+   - name: internal.example.
+     template: served-strict
+     downstream-auth: [ any ]               # relaxes the template policy
+```
+
+The mechanism classes, weakest to strongest — each `tls-*` class escalates
+ON TOP of the matched entry's address/TSIG requirements:
+
+| Mechanism | The matched entry proved |
+|---|---|
+| `prefix` | source address only (entry key was `NOKEY`) |
+| `tsig` | source address + valid TSIG |
+| `tls-pin` | the above + client cert SPKI in the peer's `pins` |
+| `tls-pkix` | the above + client cert chains to the peer's `ca-file` and carries its `name` as a SAN |
+| `tls-dane` | the above + client cert matches the peer name's DNSSEC-validated TLSA |
+| `any` | sentinel: unrestricted (for overriding a template's policy) |
+
+Absent `downstream-auth` = unrestricted: any entry that matches by
+address+TSIG authorizes, exactly as before the ladder existed.
+
+Two consequences worth knowing:
+
+- **The NOKEY footgun becomes a hard refusal.** Under
+  `downstream-auth: [ tsig, ... ]`, a transfer that only satisfied a
+  broad `NOKEY` entry maps to mechanism `prefix` — not in the list — and
+  is refused even though an ACL entry matched.
+- **A `tls-*`-only list makes the zone DoT-only for transfers** (the TLS
+  mechanisms are only satisfiable on the DoT listener) while queries stay
+  available on every transport.
+
+Misconfiguration surfaces at load: unknown mechanism names quarantine the
+zone; a listed mechanism that no entry can satisfy, an entry that can only
+produce disallowed mechanisms (dead entry), and `tls-dane` without the IMR
+each log a warning.
+
+There is deliberately **no listener-level client-certificate policy** in
+`dnsengine:`. The auth DoT listener always *requests* (never requires) a
+client certificate, so a secondary that has one presents it and everyone
+else is unaffected; verification happens per zone as above. To refuse
+non-TLS traffic entirely, restrict `dnsengine.transports:`.
+
+Provisioning the certificates — including the one-shot `tdns-cli cert
+init` and upgrading existing self-signed certs — is covered in
+[Certificate Provisioning](cert-provisioning.md).
 
 ## Zone declarations
 
@@ -276,7 +327,7 @@ A zone is one entry in the top-level `zones:` list.
 | `zonefile` | path | required for primary; optional persistence for secondary |
 | `store` | string | `map` (default) or `xfr` |
 | `template` | string | name of an entry in `templates:` |
-| `primaries` | list of `{addr, key}` | required for `secondary` |
+| `upstreams` | list of `{addr, key}` entries and/or `- peers: [id]` refs | required for `secondary` (aliases: `primaries`, `request-xfr`) |
 | `notify` | list of `{addr, key}` | NOTIFY destinations |
 | `allow-notify` | list of `{prefix, key}` | inbound-NOTIFY ACL |
 | `downstreams` | list of `{prefix, key}` | provide-xfr ACL |
@@ -434,10 +485,6 @@ dnsengine:
 | `ports.doh` | `443` | listen ports for DoH |
 | `ports.doq` | `853` | listen ports for DoQ (only 853 is truly supported) |
 | `outbound_soa_serial` | `keep` | `keep`, `unixtime` or `persist` |
-| `downstream-auth` | — | opt-in mTLS on the DoT listener: `pin` or `ca` (see [the TLS layer](#the-tls-layer-authenticating-secondaries-by-certificate-xot)) |
-| `downstream-pins` | — | SPKI pins for `downstream-auth: pin` |
-| `downstream-ca` | — | CA bundle for `downstream-auth: ca` |
-| `downstream-names` | — | optional SAN allowlist for `ca` mode |
 | `options` | — | server-wide options, below |
 
 `ports.do53` is **not read**. Do53 always listens on the ports embedded in

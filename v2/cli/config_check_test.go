@@ -129,3 +129,33 @@ func TestCheckPolicyAlgVsActiveKeys_NoSignedZones(t *testing.T) {
 		t.Errorf("expected no findings for a config with no signed zones, got %+v", rep.byGroup["Policy vs active keys"])
 	}
 }
+
+// TestCheckPeers_ZoneRefWithoutPeersBlock is the F2 regression: a zone that
+// references a peer the daemon will quarantine must be FAILed by `config check`
+// even when there is NO peers: block at all. The old early-return on
+// len(cfg.Peers)==0 silently skipped CheckPeerRefs and hid the quarantine.
+func TestCheckPeers_ZoneRefWithoutPeersBlock(t *testing.T) {
+	cfg := &tdns.Config{
+		// Peers deliberately nil — the bug was the early return on this.
+		Zones: []tdns.ZoneConf{
+			{Name: "z.example.", Type: "secondary",
+				Primaries: []tdns.PeerConf{{PeersRef: []string{"nope"}}}},
+		},
+	}
+	rep := newCCReport()
+	checkPeers(cfg, rep)
+	if fails, _ := rep.counts(); fails == 0 {
+		t.Fatalf("expected a FAIL for a zone referencing undefined peer with no peers: block, got none: %+v", rep.byGroup["Peers"])
+	}
+}
+
+// TestCheckPeers_PeerlessNoRefs confirms the preserved no-op: no peers and no
+// zone references => checkPeers emits nothing.
+func TestCheckPeers_PeerlessNoRefs(t *testing.T) {
+	cfg := &tdns.Config{Zones: []tdns.ZoneConf{{Name: "plain.example.", Type: "primary"}}}
+	rep := newCCReport()
+	checkPeers(cfg, rep)
+	if got := len(rep.byGroup["Peers"]); got != 0 {
+		t.Fatalf("expected no Peers findings for a peerless config with no refs, got %d: %+v", got, rep.byGroup["Peers"])
+	}
+}

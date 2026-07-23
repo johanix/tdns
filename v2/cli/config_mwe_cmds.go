@@ -275,11 +275,11 @@ zones:
         - { prefix: "::1",         key: NOKEY }
 
    # Example SECONDARY zone (template: basic-secondary). Uncomment and point
-   # primaries: at your real primary to enable. A template may instead carry a
+   # upstreams: at your real primary to enable. A template may instead carry a
    # zonefile pattern like  zonefile: {{ZONESDIR}}/%szone  to derive the path.
    # - name:      secondary.example.
    #   template:  basic-secondary
-   #   primaries:
+   #   upstreams:
    #      - { addr: "192.0.2.1:53", key: NOKEY }
    #   allow-notify:
    #      - { prefix: "192.0.2.1", key: NOKEY }

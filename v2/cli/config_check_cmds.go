@@ -314,6 +314,32 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 	// `validate:"required"` struct tags AND the cert/key pair validation).
 	checkRequiredFields(v, cfgPath, rep, appTypeForRole(role))
 
+	// Mirror the daemon's ParseConfig: normalize the transfer-list spelling
+	// aliases (upstreams:/request-xfr: -> primaries, secondaries:/provide-xfr:
+	// -> downstreams) before decoding, so config check accepts exactly what
+	// the daemon does. Conflicting double-spellings are reported.
+	//
+	// Conflict detection AND the mis-cased-key scan run on a case-PRESERVED map
+	// (LoadRawConfigMap, the daemon's own loader), NOT viper's AllSettings:
+	// viper lower-cases keys, so a mis-cased key like `Provide-Xfr:` would look
+	// accepted here while the daemon leaves it unknown and silently drops it.
+	if rawCase, _, rawErr := tdns.LoadRawConfigMap(cfgPath); rawErr == nil {
+		for name, why := range tdns.NormalizeXfrAliases(rawCase) {
+			rep.fail("Config file", name, "conflicting transfer-list spellings", why)
+		}
+		for _, mc := range tdns.FindMiscasedXfrKeys(rawCase) {
+			rep.fail("Config file", mc.Zone,
+				fmt.Sprintf("transfer-list key %q is mis-cased; the daemon decodes YAML case-sensitively and silently ignores it", mc.Key),
+				fmt.Sprintf("use the canonical spelling %q", mc.Canonical))
+		}
+	}
+	// The viper view (lower-cased keys) still drives the structural decode
+	// below; normalize correctly-spelled aliases into their canonical keys so
+	// the typed structs are populated for the checks that follow.
+	raw := v.AllSettings()
+	_ = tdns.NormalizeXfrAliases(raw)
+	_ = v.MergeConfigMap(raw)
+
 	// Decode into a typed Config for the structural checks. Best-effort: the
 	// legacy bare-string primary/ACL decode hooks live in the tdns package and
 	// are not reachable here, but modern {addr,key} configs decode cleanly.
@@ -328,6 +354,7 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 	checkApiServer(&cfg, cfgPath, rep)
 	checkDnssecPolicies(v, rep, online, role)
 	checkZones(&cfg, rep, online, role)
+	checkPeers(&cfg, rep)
 	checkApiServerCorrelation(role, &cfg, rep)
 
 	// Agent-only: config that this binary silently ignores, and options the
@@ -771,6 +798,34 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 		default:
 			rep.fail(g, zname, fmt.Sprintf("unknown zone type %q", eff.Type), "type must be primary or secondary")
 		}
+	}
+}
+
+// checkPeers mirrors the daemon's peer wiring: it validates the peers: block
+// and every zone's `- peers:` references (ValidatePeers + expandPeerRefs). A
+// broken peer definition, or a zone referencing an unknown/broken/inline-mixed
+// peer, quarantines that zone at load — config check reports the same so a
+// clean check does not hide a zone the daemon will refuse.
+func checkPeers(cfg *tdns.Config, rep *ccReport) {
+	const g = "Peers"
+	// Always validate peer references — do NOT early-return on an empty peers:
+	// block. A zone carrying a `- peers: [id]` reference to an undefined peer is
+	// quarantined by the daemon even when there is no peers: block at all; an
+	// early return would hide that. CheckPeerRefs returns empty maps (a no-op
+	// here) when nothing references peers, so this is safe for peerless configs.
+	brokenPeers, zoneErrors := cfg.CheckPeerRefs()
+	for id, why := range brokenPeers {
+		rep.fail(g, id, fmt.Sprintf("invalid peer definition: %s", why),
+			"fix the peer under peers:; zones referencing it are quarantined at load")
+	}
+	for zone, why := range zoneErrors {
+		rep.fail(g, zone, fmt.Sprintf("peer reference does not expand: %s", why),
+			"fix or remove the - peers: reference; the daemon quarantines this zone")
+	}
+	// PASS only when there is a peers: block to vouch for; a config with no
+	// peers and no references produces no line here (matches the old no-op).
+	if len(cfg.Peers) > 0 && len(brokenPeers) == 0 && len(zoneErrors) == 0 {
+		rep.pass(g, "peers", fmt.Sprintf("%d peer definition(s) valid; all peer references expand", len(cfg.Peers)))
 	}
 }
 
