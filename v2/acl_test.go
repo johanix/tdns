@@ -153,9 +153,11 @@ func TestParseIPSpec_RejectsBareAddress(t *testing.T) {
 			t.Errorf("ValidateIPSpec(%q) = %v, want accepted", spec, err)
 		}
 	}
-	// A truly malformed spec keeps the "bad ip-spec" error, not the bare-address one.
-	if err := ValidateIPSpec("not-an-ip"); err == nil {
-		t.Error(`ValidateIPSpec("not-an-ip") = nil, want error`)
+	// A no-boundary token that isn't an address at all keeps the "bad ip-spec"
+	// parse error — distinct from the bare-address rejection above. ("not-an-ip"
+	// would route to the range branch via its hyphen, so use a separator-free token.)
+	if err := ValidateIPSpec("garbage"); err == nil || !strings.Contains(err.Error(), "bad ip-spec") {
+		t.Errorf(`ValidateIPSpec("garbage") = %v, want "bad ip-spec" error`, err)
 	}
 }
 
