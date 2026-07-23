@@ -252,9 +252,10 @@ var rootCmd = &cobra.Command{
 				upstream := net.JoinHostPort(options["server"], options["port"])
 				// Verify flags only take effect over an encrypted transport;
 				// refuse rather than silently ignore them on plain Do53 (else
-				// +pin/+cafile/+tlsa give a false sense of a verified transfer).
-				if verifyFlagsGiven(options) && dogtransport.PlainDo53(options["transport"]) {
-					fmt.Fprintf(os.Stderr, "Error: +pin/+cafile/+tlsa require an encrypted transport (+dot); refusing to ignore them over Do53\n")
+				// +pin/+cafile/+tlsa/+cert/+key give a false sense of a
+				// verified/authenticated transfer).
+				if (verifyFlagsGiven(options) || clientIdentityGiven(options)) && dogtransport.PlainDo53(options["transport"]) {
+					fmt.Fprintf(os.Stderr, "Error: +pin/+cafile/+tlsa/+cert/+key require an encrypted transport (+dot); refusing to ignore them over Do53\n")
 					os.Exit(1)
 				}
 				var xferTLS *tls.Config
@@ -346,9 +347,10 @@ var rootCmd = &cobra.Command{
 				var tlsConfig *tls.Config
 				// Verify flags only take effect over an encrypted transport;
 				// refuse rather than silently ignore them on plain Do53 (else
-				// +pin/+cafile/+tlsa give a false sense of a verified transfer).
-				if verifyFlagsGiven(options) && dogtransport.PlainDo53(options["transport"]) {
-					fmt.Fprintf(os.Stderr, "Error: +pin/+cafile/+tlsa require an encrypted transport (+dot/+doh/+doq); refusing to ignore them over Do53\n")
+				// +pin/+cafile/+tlsa/+cert/+key give a false sense of a
+				// verified/authenticated transfer).
+				if (verifyFlagsGiven(options) || clientIdentityGiven(options)) && dogtransport.PlainDo53(options["transport"]) {
+					fmt.Fprintf(os.Stderr, "Error: +pin/+cafile/+tlsa/+cert/+key require an encrypted transport (+dot/+doh/+doq); refusing to ignore them over Do53\n")
 					os.Exit(1)
 				}
 				// PlainDo53 is case-insensitive and also covers Do53-TCP/tcp;
@@ -596,6 +598,13 @@ func loadChaserAnchors() []*dns.DS {
 // options (+tlsa, +pin=, +cafile=) was requested.
 func verifyFlagsGiven(options map[string]string) bool {
 	return options["tlsa"] == "true" || options["pins"] != "" || options["cafile"] != ""
+}
+
+// clientIdentityGiven reports whether a client identity (+cert=/+key=) was
+// requested. Either flag alone counts, so a lone +cert or +key is also caught
+// (over plaintext it would otherwise be silently dropped).
+func clientIdentityGiven(options map[string]string) bool {
+	return options["clientcert"] != "" || options["clientkey"] != ""
 }
 
 // buildDogTLSConfig returns the TLS config for an encrypted-transport dog

@@ -808,9 +808,11 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 // clean check does not hide a zone the daemon will refuse.
 func checkPeers(cfg *tdns.Config, rep *ccReport) {
 	const g = "Peers"
-	if len(cfg.Peers) == 0 {
-		return
-	}
+	// Always validate peer references — do NOT early-return on an empty peers:
+	// block. A zone carrying a `- peers: [id]` reference to an undefined peer is
+	// quarantined by the daemon even when there is no peers: block at all; an
+	// early return would hide that. CheckPeerRefs returns empty maps (a no-op
+	// here) when nothing references peers, so this is safe for peerless configs.
 	brokenPeers, zoneErrors := cfg.CheckPeerRefs()
 	for id, why := range brokenPeers {
 		rep.fail(g, id, fmt.Sprintf("invalid peer definition: %s", why),
@@ -820,7 +822,9 @@ func checkPeers(cfg *tdns.Config, rep *ccReport) {
 		rep.fail(g, zone, fmt.Sprintf("peer reference does not expand: %s", why),
 			"fix or remove the - peers: reference; the daemon quarantines this zone")
 	}
-	if len(brokenPeers) == 0 && len(zoneErrors) == 0 {
+	// PASS only when there is a peers: block to vouch for; a config with no
+	// peers and no references produces no line here (matches the old no-op).
+	if len(cfg.Peers) > 0 && len(brokenPeers) == 0 && len(zoneErrors) == 0 {
 		rep.pass(g, "peers", fmt.Sprintf("%d peer definition(s) valid; all peer references expand", len(cfg.Peers)))
 	}
 }
