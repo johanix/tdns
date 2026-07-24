@@ -1,7 +1,7 @@
 # Algorithm Metadata Consolidation: retire algorithms.yaml's static data
 
 **Date:** 2026-07-06
-**Status:** DESIGN — not yet implemented.
+**Status: ✅ DONE** (tdns side implemented on main; verified against code 2026-07-24). Commits `3054f22`/`b8900a3`/`7ef4291`: static per-algorithm metadata now flows from the generated registry (`metadata_algs.go` → `AlgorithmInfo.Facts` → server → CLI); the CLI reads sizes/maturity from the server, not `algorithms.yaml`, and the old static-metadata sample yamls were deleted (only machine-dependent cost data remains, in the separate `algorithm-costs.yaml`). Remaining `algorithms.yaml` string references are vestigial (comments / one orphaned example). NOTE: the algbench-side work lives in the separate `dnssec-algorithms` repo and isn't tracked here.
 **Scope:** dnssec-algorithms (`registry/`, `cmd/algbench`) + tdns
 (`v2/algorithms`, `v2/cli`, `v2/apihandler_funcs.go`, `cmdv2/genalgs`)
 

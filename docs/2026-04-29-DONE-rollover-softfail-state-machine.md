@@ -3,7 +3,7 @@
 
 Author: Johan / Claude
 Date: 2026-04-29
-Status: draft (no implementation work yet)
+Status: ✅ DONE (implemented on main; verified against code 2026-07-24) — delivered as part of the merged rollover-overhaul work. Landed: the `parent-push-softfail` phase, retry-not-abandon (`handleAttemptFailed`), the `LastConfirmed*`-based push gate, failure categories (`ksk_rollover_categories.go`), the multi-error registry (`zd.Errors` + `RolloverParentBlocker`/`RolloverPolicyViolation`), and the loud `rollover stopped` / `SOFTFAIL` surfacing in `auto-rollover status|when`. Out of scope (intended): Prometheus metrics, multi-DS-algorithm.
 
 ## Background
 
