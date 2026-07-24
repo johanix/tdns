@@ -24,21 +24,27 @@ func NewConfigCmd(role string) *cobra.Command {
 		Short: "Commands to reload config, reload zones, etc",
 	}
 
+	var reloadConfirm bool
 	reload := &cobra.Command{
 		Use:   "reload",
 		Short: "Send config reload command to tdns-" + role,
 		Run: func(cmd *cobra.Command, args []string) {
-			runConfigCmd(role, "reload", false)
+			runConfigCmd(role, "reload", false, reloadConfirm)
 		},
 	}
+	reload.Flags().BoolVar(&reloadConfirm, "confirm", false,
+		"apply even if the reload would strand a signed zone by a same-name DNSSEC policy algorithm change")
 
+	var reloadZonesConfirm bool
 	reloadZones := &cobra.Command{
 		Use:   "reload-zones",
 		Short: "Send reload-zones command to tdns-" + role,
 		Run: func(cmd *cobra.Command, args []string) {
-			runConfigCmd(role, "reload-zones", false)
+			runConfigCmd(role, "reload-zones", false, reloadZonesConfirm)
 		},
 	}
+	reloadZones.Flags().BoolVar(&reloadZonesConfirm, "confirm", false,
+		"apply even if the reload would strand a signed zone by a same-name DNSSEC policy algorithm change")
 
 	var force, interactive bool
 	reloadTsig := &cobra.Command{
@@ -58,7 +64,7 @@ overwrite all conflicts, or --interactive to prompt per conflict.`,
 		Use:   "status",
 		Short: "Send config status command to tdns-" + role,
 		Run: func(cmd *cobra.Command, args []string) {
-			runConfigCmd(role, "status", true)
+			runConfigCmd(role, "status", true, false)
 		},
 	}
 
@@ -149,19 +155,23 @@ func reloadTsigWithheld(resp tdns.ConfigResponse) bool {
 // runConfigCmd posts a ConfigPost with the given command and prints the
 // response. showVerboseStatus expands the verbose dump used by the
 // "status" subcommand.
-func runConfigCmd(role, command string, showVerboseStatus bool) {
+func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 	api, err := GetApiClient(role, true)
 	if err != nil {
 		fmt.Printf("Error creating API client: %v\n", err)
 		os.Exit(1)
 	}
 
-	resp, err := SendConfigCommand(api, tdns.ConfigPost{Command: command})
+	resp, err := SendConfigCommand(api, tdns.ConfigPost{Command: command, Confirm: confirm})
 	if err != nil {
 		fmt.Printf("Error: %s\n", err.Error())
 		os.Exit(1)
 	}
 	if resp.Error {
+		if resp.GuardrailBlocked {
+			renderReloadGuardrail(resp)
+			os.Exit(1)
+		}
 		fmt.Printf("Error from %s: %s\n", resp.AppName, resp.ErrorMsg)
 		os.Exit(1)
 	}
@@ -235,6 +245,33 @@ func runConfigCmd(role, command string, showVerboseStatus bool) {
 	if resp.Msg != "" {
 		fmt.Printf("%s\n", resp.Msg)
 	}
+}
+
+// renderReloadGuardrail prints the DNSSEC policy-change guardrail refusal returned
+// by a `config reload` / `reload-zones` (server-side gate): the per-zone would-be
+// stranding and how to proceed. The server already refused atomically — nothing on
+// the running server changed.
+func renderReloadGuardrail(resp tdns.ConfigResponse) {
+	fmt.Printf("Reload REFUSED by %s — a DNSSEC policy algorithm change would strand %d signed zone(s):\n\n",
+		resp.AppName, len(resp.GuardrailZones))
+	for _, z := range resp.GuardrailZones {
+		for _, r := range z.Roles {
+			have := strings.Join(r.HaveAlgs, ", ")
+			if have == "" {
+				have = "none"
+			}
+			fmt.Printf("  - %s (policy %q): %s algorithm is now %s, but the zone's active %s key(s) are [%s]\n",
+				z.Zone, z.PolicyName, r.Role, r.WantAlg, r.Role, have)
+		}
+	}
+	fmt.Println()
+	fmt.Println("The running server was NOT changed — these zones keep serving under their current keys.")
+	fmt.Println("The signer has no automatic key-algorithm rollover, so applying this as-is would freeze")
+	fmt.Println("their signatures until expiry, then go BOGUS. To proceed, either:")
+	fmt.Println("  * roll the key deliberately via the auto-rollover engine, or")
+	fmt.Println("  * (test zones) run `tdns-cli auth zone dnssec policy-reset` to drop+regenerate keys, or")
+	fmt.Println("  * re-run this command with --confirm to apply the config anyway (the signer will still")
+	fmt.Println("    refuse to re-sign until the key is rolled).")
 }
 
 func SendConfigCommand(api *tdns.ApiClient, data tdns.ConfigPost) (tdns.ConfigResponse, error) {

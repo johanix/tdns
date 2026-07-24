@@ -268,6 +268,7 @@ type ZoneDsyncResponse struct {
 type ConfigPost struct {
 	Command       string   // status | reload | reload-zones | reload-tsig | ...
 	Force         bool     // reload-tsig: overwrite secret conflicts
+	Confirm       bool     `json:"confirm,omitempty"`       // reload / reload-zones: acknowledge a guarded DNSSEC policy algorithm change
 	TsigOverwrite []string `json:"tsigoverwrite,omitempty"` // reload-tsig --interactive: per-key overwrite
 }
 
@@ -281,9 +282,29 @@ type ConfigResponse struct {
 	Msg                  string
 	Error                bool
 	ErrorMsg             string
-	TsigConflicts        []string      `json:"tsigconflicts,omitempty"`
-	TsigWithheldRemovals []string      `json:"tsigwithheldremovals,omitempty"`
-	ServerErrors         []ServerError `json:"servererrors,omitempty"` // active server-wide error conditions
+	TsigConflicts        []string              `json:"tsigconflicts,omitempty"`
+	TsigWithheldRemovals []string              `json:"tsigwithheldremovals,omitempty"`
+	ServerErrors         []ServerError         `json:"servererrors,omitempty"`     // active server-wide error conditions
+	GuardrailBlocked     bool                  `json:"guardrailblocked,omitempty"` // reload refused by the DNSSEC policy-change guardrail
+	GuardrailZones       []ReloadGuardrailZone `json:"guardrailzones,omitempty"`   // per-zone would-strand findings (with GuardrailBlocked)
+}
+
+// ReloadGuardrailZone is one signed zone a config reload would strand: its bound
+// DNSSEC policy's algorithm changed under the same name to something the zone's
+// active keys cannot provide, which the signer refuses to re-sign (no automatic
+// key-algorithm rollover). See config_reload_guardrail.go.
+type ReloadGuardrailZone struct {
+	Zone       string
+	PolicyName string
+	Roles      []ReloadGuardrailRole
+}
+
+// ReloadGuardrailRole is one role (KSK/ZSK/CSK) of a stranded zone: the algorithm
+// the new policy wants vs the algorithm(s) the zone's active keys of that role carry.
+type ReloadGuardrailRole struct {
+	Role     string   // KSK | ZSK | CSK
+	WantAlg  string   // algorithm the new policy requires
+	HaveAlgs []string // algorithm(s) the zone's active keys of this role carry
 }
 
 type DelegationPost struct {
