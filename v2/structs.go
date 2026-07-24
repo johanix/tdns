@@ -136,19 +136,24 @@ type ZoneData struct {
 	XfrType string // axfr | ixfr
 	Logger  *log.Logger
 	// ZoneFile           string // TODO: Remove this
-	IncomingSerial    uint32 // SOA serial that we got from upstream
-	CurrentSerial     uint32 // SOA serial after local bumping
-	FirstZoneLoad     bool   // true until first zone data has been loaded
-	Verbose           bool
-	Debug             bool
-	IxfrChain         []Ixfr
-	PrimariesConf     []PeerConf // as-written primaries; persisted; re-resolved each load (P3)
-	Upstreams         []PeerConf // resolved addr:port tuples; runtime-only; used for transfer
-	Notify            []PeerConf // downstream secondaries that we notify (addr + key)
-	AllowNotify       []AclEntry // secondary: who may NOTIFY us; empty => accept from resolved primaries
-	Downstreams       []AclEntry // primary: who may AXFR from us (provide-xfr ACL); empty => deny
-	DownstreamAuth    []string   // acceptable transfer-auth mechanism classes (empty => unrestricted); see authorizeTransfer
-	Zonefile          string
+	IncomingSerial uint32 // SOA serial that we got from upstream
+	CurrentSerial  uint32 // SOA serial after local bumping
+	FirstZoneLoad  bool   // true until first zone data has been loaded
+	Verbose        bool
+	Debug          bool
+	IxfrChain      []Ixfr
+	PrimariesConf  []PeerConf // as-written primaries; persisted; re-resolved each load (P3)
+	Upstreams      []PeerConf // resolved addr:port tuples; runtime-only; used for transfer
+	Notify         []PeerConf // downstream secondaries that we notify (addr + key)
+	AllowNotify    []AclEntry // secondary: who may NOTIFY us; empty => accept from resolved primaries
+	Downstreams    []AclEntry // primary: who may AXFR from us (provide-xfr ACL); empty => deny
+	DownstreamAuth []string   // acceptable transfer-auth mechanism classes (empty => unrestricted); see authorizeTransfer
+	Zonefile       string
+	// Template names the config template an API-provisioned zone was expanded
+	// from (zone add --template). Persisted in the dynamic config entry so a
+	// restart re-expands it; the update policy is deliberately NOT persisted —
+	// it re-derives from the template at boot (one source of truth).
+	Template          string
 	DelegationSyncQ   chan DelegationSyncRequest
 	Parent            string   // name of parentzone (if filled in)
 	ParentNS          []string // names of parent nameservers
@@ -282,8 +287,8 @@ type ZoneConf struct {
 	Store             string     // xfr | map | slice | reg (defaults to "map" if not specified)
 	Primaries         []PeerConf `yaml:"primaries" mapstructure:"primaries"` // upstream set, for secondary zones
 	Notify            []PeerConf
-	AllowNotify       []AclEntry   `yaml:"allow-notify" mapstructure:"allow-notify"` // secondary: who may NOTIFY us (ip-spec + key｜NOKEY｜BLOCKED)
-	Downstreams       []AclEntry   `yaml:"downstreams" mapstructure:"downstreams"`   // primary: who may AXFR from us (provide-xfr ACL)
+	AllowNotify       []AclEntry   `yaml:"allow-notify" mapstructure:"allow-notify"`       // secondary: who may NOTIFY us (ip-spec + key｜NOKEY｜BLOCKED)
+	Downstreams       []AclEntry   `yaml:"downstreams" mapstructure:"downstreams"`         // primary: who may AXFR from us (provide-xfr ACL)
 	DownstreamAuth    []string     `yaml:"downstream-auth" mapstructure:"downstream-auth"` // acceptable transfer-auth mechanisms: prefix|tsig|tls-pin|tls-pkix|tls-dane|any
 	OptionsStrs       []string     `yaml:"options" mapstructure:"options"`
 	Options           []ZoneOption `yaml:"-" mapstructure:"-"` // Ignore during both yaml and mapstructure decoding
@@ -315,15 +320,21 @@ type ZoneConf struct {
 	// applied-policy record failed, so `zone desc` can distinguish a backend
 	// failure from a genuinely absent record rather than showing both as
 	// "(not recorded)".
-	AppliedError  string            `yaml:"-"`
-	PolicyDetail  *DnssecPolicyView `yaml:"-"`
-	Template      string            `yaml:"template" mapstructure:"template"`
-	MultiSigner   string            `yaml:"multisigner" mapstructure:"multisigner"`
-	Error         bool              // zone is broken and cannot be used
-	ErrorType     ErrorType         // "config" | "refresh" | "agent" | "DNSSEC"
-	ErrorMsg      string            // reason for the error (if known)
-	RefreshCount  int               // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
-	SourceCatalog string            // if auto-configured, which catalog zone created this zone
+	AppliedError string            `yaml:"-"`
+	PolicyDetail *DnssecPolicyView `yaml:"-"`
+	Template     string            `yaml:"template" mapstructure:"template"`
+	// DynamicZones marks a TEMPLATE as instantiable via the dynamic-zones API
+	// (zone add --type primary --template <name>). It is the per-template
+	// opt-in gate: an API client can only pick among operator-blessed
+	// configurations, never author one. Meaningful on templates only; never
+	// copied to zones by ExpandTemplate.
+	DynamicZones  bool      `yaml:"dynamiczones" mapstructure:"dynamiczones"`
+	MultiSigner   string    `yaml:"multisigner" mapstructure:"multisigner"`
+	Error         bool      // zone is broken and cannot be used
+	ErrorType     ErrorType // "config" | "refresh" | "agent" | "DNSSEC"
+	ErrorMsg      string    // reason for the error (if known)
+	RefreshCount  int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
+	SourceCatalog string    // if auto-configured, which catalog zone created this zone
 	// ApiManaged marks a zone created/managed via the dynamic-zones API (zone
 	// add/delete/modify). Persisted so OptApiManagedZone can be re-derived on
 	// reload — a dedicated bool, not a SourceCatalog="api" sentinel.
@@ -683,14 +694,14 @@ func rrsToStrings(rrs []dns.RR) []string {
 }
 
 type ZoneRefresher struct {
-	Name          string
-	ZoneType      ZoneType   // primary | secondary
-	PrimariesConf []PeerConf // as-written; copied to zd.PrimariesConf on merge
-	Primaries     []PeerConf // resolved; copied to zd.Upstreams on merge
-	Notify        []PeerConf
-	AllowNotify   []AclEntry // copied to zd.AllowNotify on merge
-	Downstreams   []AclEntry // copied to zd.Downstreams on merge
-	DownstreamAuth []string  // copied to zd.DownstreamAuth on merge (config-bearing only)
+	Name           string
+	ZoneType       ZoneType   // primary | secondary
+	PrimariesConf  []PeerConf // as-written; copied to zd.PrimariesConf on merge
+	Primaries      []PeerConf // resolved; copied to zd.Upstreams on merge
+	Notify         []PeerConf
+	AllowNotify    []AclEntry // copied to zd.AllowNotify on merge
+	Downstreams    []AclEntry // copied to zd.Downstreams on merge
+	DownstreamAuth []string   // copied to zd.DownstreamAuth on merge (config-bearing only)
 	// ConfigUpdate marks a config-bearing refresher (from ParseZones /
 	// LoadDynamicZoneFiles) as opposed to a NOTIFY/refresh-only trigger. On reload
 	// it lets the merge assign Notify/AllowNotify/Downstreams even when they are
@@ -700,14 +711,22 @@ type ZoneRefresher struct {
 	ConfigUpdate bool
 	ZoneStore    ZoneStore // 1=xfr, 2=map
 	Zonefile     string
-	Options      map[ZoneOption]bool
-	Edns0Options *edns0.MsgOptions
-	UpdatePolicy UpdatePolicy
-	DnssecPolicy string
-	MultiSigner  string
-	Force        bool // force refresh, ignoring SOA serial
-	Wait         bool // wait for refresh to complete before responding
-	Response     chan RefresherResponse
+	// Template propagates the config-template name of a dynamic zone to the
+	// ZoneData built by the RefreshEngine (copied to zd.Template), so a later
+	// persist re-serializes it. Empty for template-less zones.
+	Template string
+	// PublishCadence, when non-zero, sets the zone's minimum snapshot publish
+	// interval (zd.publishCadence). Carried parsed so the RefreshEngine does
+	// not re-parse; zero means "leave the zone's default".
+	PublishCadence time.Duration
+	Options        map[ZoneOption]bool
+	Edns0Options   *edns0.MsgOptions
+	UpdatePolicy   UpdatePolicy
+	DnssecPolicy   string
+	MultiSigner    string
+	Force          bool // force refresh, ignoring SOA serial
+	Wait           bool // wait for refresh to complete before responding
+	Response       chan RefresherResponse
 }
 
 type RefresherResponse struct {
@@ -1017,7 +1036,7 @@ type ImrMgmtPost struct {
 	Zone     ZoneName               `json:"zone,omitempty"`
 	Id       string                 `json:"id,omitempty"`   // e.g. imr-show: cache identity to show
 	Data     map[string]interface{} `json:"data,omitempty"` // command-specific parameters
-	Response chan *ImrMgmtResponse   `json:"-"`
+	Response chan *ImrMgmtResponse  `json:"-"`
 }
 
 // ImrMgmtResponse is the response from a daemon's /imr endpoint.

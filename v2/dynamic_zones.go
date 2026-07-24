@@ -140,8 +140,9 @@ func (conf *Config) ShouldPersistZone(zd *ZoneData) bool {
 	}
 
 	if zd.Options[OptApiManagedZone] {
-		// API-managed zone (zone add/delete/modify)
-		return conf.DynamicZones.Dynamic.Storage == "persistent" && conf.DynamicZones.Dynamic.Allowed
+		// API-managed zone (zone add/delete/modify); the allowed: gate is
+		// per zone type since the dynamic-primary extension
+		return conf.DynamicZones.Dynamic.Storage == "persistent" && conf.DynamicZones.Dynamic.Allows(zd.ZoneType)
 	}
 
 	return false
@@ -375,9 +376,15 @@ var (
 
 // zoneDataToZoneConf converts a ZoneData to ZoneConf for serialization
 func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
-	// Generate zone file path
-	zoneFileName := fmt.Sprintf("%s.zone", strings.TrimSuffix(zd.ZoneName, "."))
-	zoneFilePath := filepath.Join(zoneDirectory, zoneFileName)
+	// Zone file path: the zone's actual file when it has one (a template-
+	// expanded primary's file may live outside zonedirectory:), else the
+	// canonical <zonedirectory>/<zone>.zone derivation. For pre-existing
+	// dynamic-zone classes the two coincide, so this is behavior-neutral.
+	zoneFilePath := zd.Zonefile
+	if zoneFilePath == "" {
+		zoneFileName := fmt.Sprintf("%s.zone", strings.TrimSuffix(zd.ZoneName, "."))
+		zoneFilePath = filepath.Join(zoneDirectory, zoneFileName)
+	}
 
 	// Convert options to strings
 	optionsStrs := make([]string, 0)
@@ -417,6 +424,7 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 		Downstreams:    zd.Downstreams,
 		DownstreamAuth: zd.DownstreamAuth,
 		OptionsStrs:    optionsStrs,
+		Template:       zd.Template,
 		SourceCatalog:  zd.SourceCatalog,
 		ApiManaged:     zd.Options[OptApiManagedZone],
 		// Note: We don't serialize Frozen, Dirty, Error, ErrorType, ErrorMsg, RefreshCount
@@ -626,7 +634,11 @@ type DynamicZoneInput struct {
 	Name      string
 	Type      ZoneType
 	Primaries []PeerConf
-	Options   map[ZoneOption]bool
+	// Template names the operator-blessed config template a primary zone is
+	// expanded from. REQUIRED for Type == Primary (API path); unused for
+	// secondaries. The template must carry dynamiczones: true (gate 2).
+	Template string
+	Options  map[ZoneOption]bool
 	// Inline TSIG key (API/CLI add/modify). When TsigName is set it is validated
 	// and upserted into the keys: store, then applied to every keyless primary
 	// (NOKEY/empty). The secret is persisted with the zone (the dynamic config
@@ -724,16 +736,26 @@ func (conf *Config) commitStagedTsigKey(staged *TsigDetails) (rollback func(), e
 func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInput, fromAPI bool) (string, error) {
 	name := dns.Fqdn(in.Name)
 
-	// API/CLI callers are gated by dynamiczones.dynamic.allowed (defaults false).
+	// API/CLI callers are gated by dynamiczones.dynamic.allowed — a list of
+	// zone types since the dynamic-primary extension (defaults to deny-all).
 	// The catalog path is gated by its own members config, not this.
-	if fromAPI && !conf.DynamicZones.Dynamic.Allowed {
-		return "", fmt.Errorf("dynamic zone provisioning via API is not allowed (set dynamiczones.dynamic.allowed: true)")
+	if fromAPI && !conf.DynamicZones.Dynamic.Allows(in.Type) {
+		return "", fmt.Errorf("dynamic %s zone provisioning via API is not allowed (add %q to dynamiczones.dynamic.allowed)",
+			ZoneTypeToString[in.Type], ZoneTypeToString[in.Type])
 	}
 
-	// API/CLI v1 is secondary-only (primary + notify peers are static/catalog
-	// config until a later extension).
-	if fromAPI && in.Type != Secondary {
-		return "", fmt.Errorf("zone add supports secondary zones only (got %s)", ZoneTypeToString[in.Type])
+	// The API creates secondary zones (transfer-provisioned) and primary
+	// zones (template-provisioned; a template is REQUIRED for primaries —
+	// the operator curates the policy space, the API caller picks a point
+	// in it). Anything else is rejected.
+	switch in.Type {
+	case Secondary:
+	case Primary:
+		if fromAPI && in.Template == "" {
+			return "", fmt.Errorf("zone add for a primary zone requires a template (operator-blessed with dynamiczones: true)")
+		}
+	default:
+		return "", fmt.Errorf("zone add supports primary and secondary zones only (got %s)", ZoneTypeToString[in.Type])
 	}
 
 	if _, err := dns.IsDomainName(name); !err {

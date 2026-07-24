@@ -325,6 +325,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 		DecodeHook: mapstructure.ComposeDecodeHookFunc(
 			stringToPeerConfHook(),
 			stringToAclEntryHook(),
+			legacyDynamicAllowedHook(),
 		),
 	}
 	decoder, err := mapstructure.NewDecoder(decoderConfig)
@@ -366,6 +367,14 @@ func (conf *Config) ParseConfig(reload bool) error {
 		conf.Internal.ServerErrors = NewServerErrorRegistry()
 	}
 	conf.validateDnsEngineCerts()
+
+	// dynamiczones: value validation (e.g. an unknown zone type in
+	// dynamic.allowed) is a hard config error — the decoder accepts any
+	// string, so the check lives here. A legacy bool for dynamic.allowed is
+	// caught earlier, by legacyDynamicAllowedHook failing the decode.
+	if err := conf.DynamicZones.Validate(); err != nil {
+		return err
+	}
 
 	if len(md.Unused) > 0 {
 		// Split the unused keys into two buckets: keys that match a known
@@ -1285,6 +1294,9 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 	bespoke := map[string]bool{
 		"Name": true, "Template": true, // never copied from a template
 		"Zonefile": true, "OptionsStrs": true, "DnssecPolicy": true, // handled above
+		// DynamicZones is a property of the TEMPLATE (API-instantiable), not
+		// of the zones stamped out from it — never copied.
+		"DynamicZones": true,
 	}
 	gapFillStruct(reflect.ValueOf(&zconf).Elem(), reflect.ValueOf(tmpl).Elem(), bespoke, false)
 	return zconf, nil
@@ -1835,6 +1847,22 @@ func stringToAclEntryHook() mapstructure.DecodeHookFunc {
 			return data, nil
 		}
 		return AclEntry{Legacy: data.(string)}, nil
+	}
+}
+
+// legacyDynamicAllowedHook turns a legacy bool value for
+// dynamiczones.dynamic.allowed into a hard config error naming the new list
+// syntax. The field decodes into ZoneTypeList — a named type used by exactly
+// that key — so the hook cannot misfire on any other config field. There is
+// deliberately NO legacy decode (true -> [secondary]): the dynamic-primary
+// extension made "allowed" mean two independent capabilities, and a silent
+// mapping would hide that the operator has a decision to make.
+func legacyDynamicAllowedHook() mapstructure.DecodeHookFunc {
+	return func(from reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
+		if to != reflect.TypeOf(ZoneTypeList(nil)) || from.Kind() != reflect.Bool {
+			return data, nil
+		}
+		return nil, fmt.Errorf("dynamiczones.dynamic.allowed is now a list of zone types, not a bool: use `allowed: [secondary]` (add `primary` to also allow API-created primary zones)")
 	}
 }
 
