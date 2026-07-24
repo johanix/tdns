@@ -41,18 +41,22 @@ func TestPeers_ValidatePeerDef(t *testing.T) {
 		{"dot outbound ok", PeerDef{Addr: "ns1.test:853", Key: NOKEY, Transport: "dot", TLSAuth: "dane"}, true, ""},
 		{"outbound tls without addr", PeerDef{Key: NOKEY, Prefixes: []string{"192.0.2.1/32"}, Transport: "dot"}, false, "require addr"},
 		{"inbound-only", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3/32"}}, true, ""},
-		{"identity pins ok", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3/32"},
-			TLSIdentity: &TLSIdentity{Pins: []string{validPin()}}}, true, ""},
+		{"identity pins ok (inbound-only)", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3/32"},
+			Pins: []string{validPin()}}, true, ""},
 		{"identity bad pin", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3/32"},
-			TLSIdentity: &TLSIdentity{Pins: []string{"nope"}}}, false, "not a base64"},
-		{"identity ca ok", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3/32"},
-			TLSIdentity: &TLSIdentity{Name: "sec1.test", CAFile: caPath}}, true, ""},
+			Pins: []string{"nope"}}, false, "not a base64"},
+		{"identity ca ok (inbound-only, no addr)", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3/32"},
+			TLSName: "sec1.test", CAFile: caPath}, true, ""},
 		{"identity ca unreadable", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3/32"},
-			TLSIdentity: &TLSIdentity{CAFile: "/nonexistent.pem"}}, false, "ca-file"},
-		{"identity dane needs name", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3/32"},
-			TLSIdentity: &TLSIdentity{Dane: true}}, false, "dane requires a name"},
-		{"identity empty", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3/32"},
-			TLSIdentity: &TLSIdentity{Name: "sec1.test"}}, false, "tls-identity is empty"},
+			CAFile: "/nonexistent.pem"}, false, "ca-file"},
+		{"dane needs tls-name", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3/32"},
+			Dane: true}, false, "dane requires tls-name"},
+		{"name without creds ok", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3/32"},
+			TLSName: "sec1.test"}, true, ""},
+		{"bidirectional pkix (dial + inbound share ca)", PeerDef{Addr: "ns1.test:853", Key: NOKEY,
+			Transport: "dot", TLSAuth: "pkix", CAFile: caPath, Prefixes: []string{"192.0.2.9/32"}}, true, ""},
+		{"do53 dial + inbound ca-file", PeerDef{Addr: "ns1.test:53", Key: NOKEY,
+			TLSName: "ns1.test", CAFile: caPath}, true, ""},
 	}
 	for _, tc := range cases {
 		p := tc.peer
@@ -87,14 +91,14 @@ func TestPeers_Defaults(t *testing.T) {
 	if len(p6.Prefixes) != 1 || p6.Prefixes[0] != "2001:db8::7/128" {
 		t.Fatalf("v6 prefix not defaulted from addr as /128: %v", p6.Prefixes)
 	}
-	// Hostname addr defaults the tls-identity name, not the prefix.
+	// Hostname addr defaults the tls-name, not the prefix.
 	p2 := PeerDef{Addr: "sec1.test:853", Key: NOKEY,
-		TLSIdentity: &TLSIdentity{Pins: []string{validPin()}}}
+		Pins: []string{validPin()}}
 	if err := validatePeerDef(&p2); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	if p2.TLSIdentity.Name != "sec1.test" {
-		t.Fatalf("tls-identity name not defaulted from addr: %q", p2.TLSIdentity.Name)
+	if p2.TLSName != "sec1.test" {
+		t.Fatalf("tls-name not defaulted from addr: %q", p2.TLSName)
 	}
 	if len(p2.Prefixes) != 0 {
 		t.Fatalf("hostname addr must not default a prefix: %v", p2.Prefixes)
@@ -112,10 +116,8 @@ func peersTestConf(t *testing.T) *Config {
 		"sec1": {Addr: "sec1.test:853",
 			Prefixes: []string{"198.51.100.7/32", "2001:db8::7/128"},
 			Keys:     []string{"xfr-key-2026", "xfr-key-2025"},
-			TLSIdentity: &TLSIdentity{
-				Name: "sec1.test",
-				Pins: []string{validPin()},
-			}},
+			TLSName:  "sec1.test",
+			Pins:     []string{validPin()}},
 		"sec-legacy": {Prefixes: []string{"10.1.2.3/32"}, Key: "xfr-key-2026"},
 	}}
 	broken := conf.ValidatePeers()

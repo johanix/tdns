@@ -43,23 +43,28 @@ type TLSIdentity struct {
 	Dane bool `yaml:"dane" mapstructure:"dane"`
 }
 
-// PeerDef is one entry in the top-level peers: block — a superset of
-// PeerConf: the outbound fields (how we dial and verify the peer's server
-// cert) map 1:1, plus the inbound side (prefixes its requests come from and
-// the tls-identity its client cert must prove).
+// PeerDef is one entry in the top-level peers: block: one declaration per
+// remote server, carrying both directions. The TLS identity/trust material
+// (tls-name/pins/ca-file/dane) is SHARED — the same fields describe how we
+// verify the peer's SERVER cert when we dial it (outbound, per tls-auth) and
+// its CLIENT cert when it dials us (inbound, per the zone's downstream-auth).
 type PeerDef struct {
-	// Outbound (upstream/notify roles).
-	Addr      string   `yaml:"addr" mapstructure:"addr"`
-	Key       string   `yaml:"key" mapstructure:"key"`   // sugar for keys: [x]
-	Keys      []string `yaml:"keys" mapstructure:"keys"` // sign with FIRST, accept ANY inbound
-	Transport string   `yaml:"transport" mapstructure:"transport"`
-	TLSAuth   string   `yaml:"tls-auth" mapstructure:"tls-auth"`
-	TLSName   string   `yaml:"tls-name" mapstructure:"tls-name"`
-	Pins      []string `yaml:"pins" mapstructure:"pins"`
-	CAFile    string   `yaml:"ca-file" mapstructure:"ca-file"`
-	// Inbound (downstream/allow-notify roles).
-	Prefixes    []string     `yaml:"prefixes" mapstructure:"prefixes"` // default: addr's host as /32 or /128
-	TLSIdentity *TLSIdentity `yaml:"tls-identity" mapstructure:"tls-identity"`
+	Addr string   `yaml:"addr" mapstructure:"addr"`
+	Key  string   `yaml:"key" mapstructure:"key"`   // sugar for keys: [x]
+	Keys []string `yaml:"keys" mapstructure:"keys"` // sign with FIRST, accept ANY inbound
+
+	// Outbound-only mode selectors (require addr; tls-auth requires transport: dot).
+	Transport string `yaml:"transport" mapstructure:"transport"` // "" | do53 | dot
+	TLSAuth   string `yaml:"tls-auth" mapstructure:"tls-auth"`   // pin | pkix | dane
+
+	// Shared TLS identity + trust material (used in BOTH directions).
+	TLSName string   `yaml:"tls-name" mapstructure:"tls-name"` // SNI + required SAN + TLSA base; defaults to addr's host
+	Pins    []string `yaml:"pins" mapstructure:"pins"`         // base64 SPKI SHA-256 pins (pin)
+	CAFile  string   `yaml:"ca-file" mapstructure:"ca-file"`   // trust-anchor PEM (pkix)
+	Dane    bool     `yaml:"dane" mapstructure:"dane"`         // inbound tls-dane capability (outbound dane is tls-auth: dane)
+
+	// Inbound source addresses (default: addr's host as /32 or /128).
+	Prefixes []string `yaml:"prefixes" mapstructure:"prefixes"`
 }
 
 // peerAddrHost returns the host part of the peer's addr ("" if unset).
@@ -116,9 +121,17 @@ func validatePeerDef(p *PeerDef) error {
 		}
 	}
 
-	// Outbound: validate exactly like an inline upstream entry (only
-	// meaningful when the peer has a dial target).
-	if p.Addr != "" {
+	// transport/tls-auth are outbound-only mode selectors; they need a dial
+	// target. The identity/trust material (tls-name/pins/ca-file/dane) is
+	// shared with the inbound side and is validated below, independent of addr.
+	p.Transport = strings.ToLower(strings.TrimSpace(p.Transport))
+	p.TLSAuth = strings.ToLower(strings.TrimSpace(p.TLSAuth))
+	if (p.Transport != "" || p.TLSAuth != "") && p.Addr == "" {
+		return fmt.Errorf("transport/tls-auth require addr (an outbound dial target)")
+	}
+	// When we dial the peer over DoT, validate the outbound tls-auth mode and
+	// the material it needs — the same check an inline upstream entry gets.
+	if p.Addr != "" && (p.Transport == TransportDoT || p.TLSAuth != "") {
 		pc := PeerConf{
 			Addr:      p.Addr,
 			Key:       p.Keys[0],
@@ -131,10 +144,7 @@ func validatePeerDef(p *PeerDef) error {
 		if err := validatePeerXoT(&pc); err != nil {
 			return err
 		}
-		// validatePeerXoT normalizes transport/tls-auth; keep that.
 		p.Transport, p.TLSAuth = pc.Transport, pc.TLSAuth
-	} else if p.Transport != "" || p.TLSAuth != "" || p.TLSName != "" || len(p.Pins) > 0 || p.CAFile != "" {
-		return fmt.Errorf("outbound TLS fields (transport/tls-auth/...) require addr")
 	}
 
 	// Inbound prefixes: default from addr's host as an explicit single-host
@@ -157,29 +167,28 @@ func validatePeerDef(p *PeerDef) error {
 		// requires explicit prefixes (checked at reference time).
 	}
 
-	if ti := p.TLSIdentity; ti != nil {
-		if ti.Name == "" {
-			if host := p.addrHost(); host != "" && net.ParseIP(host) == nil {
-				ti.Name = host
-			}
+	// Shared TLS identity/trust material: default the name from the addr
+	// hostname, then validate whatever material is present. It is consumed
+	// inbound (per the zone's downstream-auth policy) and outbound (tls-auth
+	// above). A peer with no material is fine — a do53-only or plain peer.
+	if p.TLSName == "" {
+		if host := p.addrHost(); host != "" && net.ParseIP(host) == nil {
+			p.TLSName = host
 		}
-		for _, pin := range ti.Pins {
-			raw, err := base64.StdEncoding.DecodeString(pin)
-			if err != nil || len(raw) != sha256.Size {
-				return fmt.Errorf("tls-identity pin %q is not a base64 SHA-256 SPKI digest", pin)
-			}
+	}
+	for _, pin := range p.Pins {
+		raw, err := base64.StdEncoding.DecodeString(pin)
+		if err != nil || len(raw) != sha256.Size {
+			return fmt.Errorf("pin %q is not a base64 SHA-256 SPKI digest", pin)
 		}
-		if ti.CAFile != "" {
-			if err := checkPEMCertFile(ti.CAFile); err != nil {
-				return fmt.Errorf("tls-identity ca-file %q: %v", ti.CAFile, err)
-			}
+	}
+	if p.CAFile != "" {
+		if err := checkPEMCertFile(p.CAFile); err != nil {
+			return fmt.Errorf("ca-file %q: %v", p.CAFile, err)
 		}
-		if ti.Dane && ti.Name == "" {
-			return fmt.Errorf("tls-identity dane requires a name (none given, and addr provides no hostname)")
-		}
-		if len(ti.Pins) == 0 && ti.CAFile == "" && !ti.Dane {
-			return fmt.Errorf("tls-identity is empty (give pins, ca-file, or dane: true)")
-		}
+	}
+	if p.Dane && p.TLSName == "" {
+		return fmt.Errorf("dane requires tls-name (none given, and addr provides no hostname)")
 	}
 	return nil
 }
@@ -287,8 +296,11 @@ func (conf *Config) expandAclList(in []AclEntry, where string, withIdentity bool
 			for _, prefix := range p.Prefixes {
 				for _, key := range p.Keys {
 					ae := AclEntry{Prefix: prefix, Key: key, PeerName: id}
-					if withIdentity {
-						ae.TLSIdentity = p.TLSIdentity
+					// Build the runtime tls-identity from the peer's shared
+					// TLS material. Attach it only when the peer actually
+					// carries a credential (name alone can't prove anything).
+					if withIdentity && (len(p.Pins) > 0 || p.CAFile != "" || p.Dane) {
+						ae.TLSIdentity = &TLSIdentity{Name: p.TLSName, Pins: p.Pins, CAFile: p.CAFile, Dane: p.Dane}
 					}
 					out = append(out, ae)
 				}

@@ -223,11 +223,10 @@ peers:
       keys: [ xfr-key-2026,           # TSIG: outbound signs with the FIRST,
               xfr-key-2025 ]          #   inbound accepts ANY (one-place key
                                       #   rollover); `key: x` = `keys: [x]`
-      tls-identity:                   # how WE verify ITS client certificate
-         name: sec1.example.net       #   the identity pin (SAN check / TLSA base)
-         ca-file: /etc/tdns/certs/tdns-ca.crt   # trust anchors ONLY (roots)
-         # pins: [ "spki-b64=" ]      #   and/or static SPKI pins
-         # dane: true                 #   and/or DNSSEC-validated TLSA
+      tls-name: sec1.example.net      # peer cert identity (SAN check / TLSA base)
+      ca-file: /etc/tdns/certs/tdns-ca.crt   # verify ITS client cert against these roots
+      # pins: [ "spki-b64=" ]         #   and/or static SPKI pins
+      # dane: true                    #   and/or DNSSEC-validated TLSA
 
 zones:
    - name: example.net.
@@ -242,8 +241,9 @@ Rules: an entry is a reference (`peers:`) or inline (`prefix:`/`key:` or
 `addr:`/`key:`), never both; an unknown identifier quarantines the zone;
 `NOKEY` must be the only element of `keys:`. In `downstreams:` a reference
 expands to the prefix × key cross-product (the same shape as the manual
-dual-key rollover pattern above), each entry carrying the peer's
-`tls-identity` for the transfer-time certificate check below.
+dual-key rollover pattern above), each entry carrying the peer's TLS
+identity (`tls-name`/`ca-file`/`pins`/`dane`) for the transfer-time
+certificate check below.
 
 **Spelling aliases.** The canonical names are `upstreams:` (where a
 secondary pulls from — BIND9 calls this `primaries:`, NSD `request-xfr:`)
@@ -317,7 +317,11 @@ non-TLS traffic entirely, restrict `dnsengine.transports:`.
 
 Provisioning the certificates — including the one-shot `tdns-cli cert
 init` and upgrading existing self-signed certs — is covered in
-[Certificate Provisioning](cert-provisioning.md).
+[Certificate Provisioning](cert-provisioning.md). Complete worked setups for
+all three `tls-*` modes (cert generation, primary **and** secondary config, and
+`dog` test commands), plus the outbound `upstreams:` fields
+(`transport:`/`tls-auth:`/`tls-name:`) a secondary uses to pull over XoT, are in
+the [XoT guide](xot.md).
 
 ## Zone declarations
 
