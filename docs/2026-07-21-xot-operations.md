@@ -180,7 +180,7 @@ template's) `downstream-auth:` ladder:
 ```yaml
 peers:
    sec1:
-      prefixes: [ 198.51.100.7 ]
+      prefixes: [ 198.51.100.7/32 ]
       keys: [ xfr-key-2026 ]
       tls-identity:
          name: sec1.example.net

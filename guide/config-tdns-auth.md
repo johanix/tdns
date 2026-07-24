@@ -218,8 +218,8 @@ peers:
    sec1:                              # identifier used in references
       addr: sec1.example.net:853      # dial target (when used as an upstream);
                                       #   also supplies name/prefix defaults
-      prefixes: [ 198.51.100.7,       # inbound source addresses (defaults to
-                  2001:db8::7 ]       #   addr's IP when addr is a literal)
+      prefixes: [ 198.51.100.7/32,    # inbound source addresses (defaults to
+                  2001:db8::7/128 ]   #   addr's IP as a /32 or /128 literal)
       keys: [ xfr-key-2026,           # TSIG: outbound signs with the FIRST,
               xfr-key-2025 ]          #   inbound accepts ANY (one-place key
                                       #   rollover); `key: x` = `keys: [x]`

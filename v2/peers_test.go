@@ -39,19 +39,19 @@ func TestPeers_ValidatePeerDef(t *testing.T) {
 		{"NOKEY mixed with named", PeerDef{Addr: "192.0.2.1:53", Keys: []string{NOKEY, "k1"}}, false, "NOKEY must be the only"},
 		{"dot outbound needs tls-auth", PeerDef{Addr: "ns1.test:853", Key: NOKEY, Transport: "dot"}, false, "tls-auth"},
 		{"dot outbound ok", PeerDef{Addr: "ns1.test:853", Key: NOKEY, Transport: "dot", TLSAuth: "dane"}, true, ""},
-		{"outbound tls without addr", PeerDef{Key: NOKEY, Prefixes: []string{"192.0.2.1"}, Transport: "dot"}, false, "require addr"},
-		{"inbound-only", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3"}}, true, ""},
-		{"identity pins ok", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3"},
+		{"outbound tls without addr", PeerDef{Key: NOKEY, Prefixes: []string{"192.0.2.1/32"}, Transport: "dot"}, false, "require addr"},
+		{"inbound-only", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3/32"}}, true, ""},
+		{"identity pins ok", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3/32"},
 			TLSIdentity: &TLSIdentity{Pins: []string{validPin()}}}, true, ""},
-		{"identity bad pin", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3"},
+		{"identity bad pin", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3/32"},
 			TLSIdentity: &TLSIdentity{Pins: []string{"nope"}}}, false, "not a base64"},
-		{"identity ca ok", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3"},
+		{"identity ca ok", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3/32"},
 			TLSIdentity: &TLSIdentity{Name: "sec1.test", CAFile: caPath}}, true, ""},
-		{"identity ca unreadable", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3"},
+		{"identity ca unreadable", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3/32"},
 			TLSIdentity: &TLSIdentity{CAFile: "/nonexistent.pem"}}, false, "ca-file"},
-		{"identity dane needs name", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3"},
+		{"identity dane needs name", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3/32"},
 			TLSIdentity: &TLSIdentity{Dane: true}}, false, "dane requires a name"},
-		{"identity empty", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3"},
+		{"identity empty", PeerDef{Key: "k1", Prefixes: []string{"10.1.2.3/32"},
 			TLSIdentity: &TLSIdentity{Name: "sec1.test"}}, false, "tls-identity is empty"},
 	}
 	for _, tc := range cases {
@@ -76,8 +76,16 @@ func TestPeers_Defaults(t *testing.T) {
 	if err := validatePeerDef(&p); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-	if len(p.Prefixes) != 1 || p.Prefixes[0] != "192.0.2.7" {
-		t.Fatalf("prefix not defaulted from addr: %v", p.Prefixes)
+	if len(p.Prefixes) != 1 || p.Prefixes[0] != "192.0.2.7/32" {
+		t.Fatalf("prefix not defaulted from addr as /32: %v", p.Prefixes)
+	}
+	// An IPv6-literal addr defaults the inbound prefix to a /128.
+	p6 := PeerDef{Addr: "[2001:db8::7]:853", Key: NOKEY}
+	if err := validatePeerDef(&p6); err != nil {
+		t.Fatalf("validate v6: %v", err)
+	}
+	if len(p6.Prefixes) != 1 || p6.Prefixes[0] != "2001:db8::7/128" {
+		t.Fatalf("v6 prefix not defaulted from addr as /128: %v", p6.Prefixes)
 	}
 	// Hostname addr defaults the tls-identity name, not the prefix.
 	p2 := PeerDef{Addr: "sec1.test:853", Key: NOKEY,
@@ -102,13 +110,13 @@ func peersTestConf(t *testing.T) *Config {
 	conf := &Config{Peers: map[string]PeerDef{
 		"ns1": {Addr: "ns1.test:853", Key: NOKEY, Transport: "dot", TLSAuth: "dane"},
 		"sec1": {Addr: "sec1.test:853",
-			Prefixes: []string{"198.51.100.7", "2001:db8::7"},
+			Prefixes: []string{"198.51.100.7/32", "2001:db8::7/128"},
 			Keys:     []string{"xfr-key-2026", "xfr-key-2025"},
 			TLSIdentity: &TLSIdentity{
 				Name: "sec1.test",
 				Pins: []string{validPin()},
 			}},
-		"sec-legacy": {Prefixes: []string{"10.1.2.3"}, Key: "xfr-key-2026"},
+		"sec-legacy": {Prefixes: []string{"10.1.2.3/32"}, Key: "xfr-key-2026"},
 	}}
 	broken := conf.ValidatePeers()
 	if len(broken) != 0 {
@@ -170,8 +178,8 @@ func TestPeers_ExpandDownstreamsCrossProduct(t *testing.T) {
 		seen[e.Prefix+"/"+e.Key] = true
 	}
 	for _, want := range []string{
-		"198.51.100.7/xfr-key-2026", "198.51.100.7/xfr-key-2025",
-		"2001:db8::7/xfr-key-2026", "2001:db8::7/xfr-key-2025",
+		"198.51.100.7/32/xfr-key-2026", "198.51.100.7/32/xfr-key-2025",
+		"2001:db8::7/128/xfr-key-2026", "2001:db8::7/128/xfr-key-2025",
 	} {
 		if !seen[want] {
 			t.Fatalf("missing cross-product entry %s (have %v)", want, seen)

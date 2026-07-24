@@ -101,9 +101,9 @@ design + implementation is accepted.
 peers:
    ns1-example:                       # identifier used in references
       addr: ns1.example.net:853       # outbound dial target (upstream role)
-      prefixes: [ 198.51.100.7,       # inbound source match (downstream role);
-                  2001:db8::7 ]       #   one server, several source addresses
-                                      #   (dual-stack); default: addr's host
+      prefixes: [ 198.51.100.7/32,    # inbound source match (downstream role);
+                  2001:db8::7/128 ]   #   one server, several source addresses
+                                      #   (dual-stack); default: addr's host /32|/128
       keys: [ xfr-key-2026 ]          # TSIG key NAMES; NOKEY allowed (alone).
                                       #   Outbound: sign with the FIRST.
                                       #   Inbound: accept ANY listed.
@@ -344,15 +344,15 @@ peers:
       tls-auth: dane
    sec1:                               # modern secondary, mTLS-capable
       addr: sec1.example.net:853       # supplies the default tls-identity
-      prefixes: [ 198.51.100.7,        #   name and prefix; extra source
-                  2001:db8::7 ]        #   addresses listed explicitly
+      prefixes: [ 198.51.100.7/32,     #   name and prefix; extra source
+                  2001:db8::7/128 ]    #   addresses listed explicitly
       keys: [ xfr-key-2026,            # mid-rollover: new key signs/preferred,
               xfr-key-2025 ]           #   old still accepted inbound
       tls-identity:
          name: sec1.example.net        # the identity pin (SAN check)
          ca-file: /etc/tdns/certs/tdns-ca.crt   # roots only — the trust domain
    sec-legacy:                         # NSD box on the trusted LAN, Do53 only
-      prefixes: [ 10.1.2.3 ]
+      prefixes: [ 10.1.2.3/32 ]
       key: xfr-key-2026                # sugar for keys: [ xfr-key-2026 ]
 
 templates:

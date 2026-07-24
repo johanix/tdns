@@ -172,7 +172,7 @@ zones:
 # downstream-auth (see the tdns-auth config guide)
 peers:
    ns2:
-      prefixes: [ 198.51.100.7 ]
+      prefixes: [ 198.51.100.7/32 ]
       key: NOKEY
       tls-identity:
          name: ns2.example.net

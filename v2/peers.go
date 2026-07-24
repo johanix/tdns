@@ -58,7 +58,7 @@ type PeerDef struct {
 	Pins      []string `yaml:"pins" mapstructure:"pins"`
 	CAFile    string   `yaml:"ca-file" mapstructure:"ca-file"`
 	// Inbound (downstream/allow-notify roles).
-	Prefixes    []string     `yaml:"prefixes" mapstructure:"prefixes"` // default: addr's host
+	Prefixes    []string     `yaml:"prefixes" mapstructure:"prefixes"` // default: addr's host as /32 or /128
 	TLSIdentity *TLSIdentity `yaml:"tls-identity" mapstructure:"tls-identity"`
 }
 
@@ -137,10 +137,18 @@ func validatePeerDef(p *PeerDef) error {
 		return fmt.Errorf("outbound TLS fields (transport/tls-auth/...) require addr")
 	}
 
-	// Inbound prefixes: default from addr's host (exact address).
+	// Inbound prefixes: default from addr's host as an explicit single-host
+	// mask (/32 or /128). A bare IP is not a valid ip-spec (parseIPSpec rejects
+	// it), so the auto-generated default must carry the boundary too.
 	if len(p.Prefixes) == 0 {
-		if host := p.addrHost(); host != "" && net.ParseIP(host) != nil {
-			p.Prefixes = []string{host}
+		if host := p.addrHost(); host != "" {
+			if ip := net.ParseIP(host); ip != nil {
+				bits := 32
+				if ip.To4() == nil { // nil => IPv6
+					bits = 128
+				}
+				p.Prefixes = []string{fmt.Sprintf("%s/%d", host, bits)}
+			}
 		}
 		// A hostname addr yields no prefix default — inbound use then
 		// requires explicit prefixes (checked at reference time).
