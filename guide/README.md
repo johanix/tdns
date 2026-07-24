@@ -49,8 +49,15 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   stay valid), creating the `ca-file` for each kind of
   certificate, renewal/rotation, and what the deliberately
   minimal scope (no CRL/OCSP/renewal automation) means in
-  practice. Companion to the XoT transfer configuration in
-  the tdns-auth config guide.
+  practice. Companion to the [XoT transfer guide](xot.md).
+
+- [XFR over TLS (XoT)](xot.md)
+  -- Setting up encrypted, mutually-authenticated zone
+  transfers (RFC 9103): the `downstream-auth:` ladder, the
+  peer's shared TLS fields, and the outbound `upstreams:` fields.
+  Complete worked examples for `tls-pkix`, `tls-pin` (SPKI)
+  and `tls-dane`, each with `tdns-cli cert` provisioning and
+  `dog` test commands.
 
 - [Agent as a DSYNC proxy](agent-dsync-proxy.md)
   -- Operator how-to for running tdns-agent as a secondary
