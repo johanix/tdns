@@ -272,6 +272,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.Notify = normalizePeerAddrs(zr.Notify)
 							zd.AllowNotify = zr.AllowNotify
 							zd.Downstreams = zr.Downstreams
+							zd.DownstreamAuth = zr.DownstreamAuth
 							zd.Zonefile = zr.Zonefile
 							zd.ZoneType = zr.ZoneType
 							zd.Options = zr.Options
@@ -364,6 +365,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.Notify = normalizePeerAddrs(zr.Notify)
 							zd.AllowNotify = zr.AllowNotify
 							zd.Downstreams = zr.Downstreams
+							zd.DownstreamAuth = zr.DownstreamAuth
 						} else if zr.Notify != nil {
 							zd.Notify = normalizePeerAddrs(zr.Notify)
 						}
@@ -595,6 +597,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						Notify:           normalizePeerAddrs(zr.Notify),
 						AllowNotify:      zr.AllowNotify,
 						Downstreams:      zr.Downstreams,
+						DownstreamAuth:   zr.DownstreamAuth,
 						Zonefile:         zr.Zonefile,
 						ZoneType:         zr.ZoneType,
 						Options:          zr.Options,

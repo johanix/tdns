@@ -287,21 +287,36 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			skippedCount++
 			continue
 		}
+		// The static config path validates the per-zone downstream-auth ladder
+		// and normalizes each primary's XoT fields; the dynamic load path must
+		// too, or a persisted "DoT"/malformed peer downgrades to plaintext and a
+		// persisted downstream-auth: [tls-pkix] is dropped (fail-open).
+		if err := validateDownstreamAuth(zconf.DownstreamAuth); err != nil {
+			lg.Error("dynamic zone: invalid downstream-auth, skipping zone", "zone", zoneName, "err", err)
+			skippedCount++
+			continue
+		}
+		if err := validatePrimariesXoT(zconf.Primaries); err != nil {
+			lg.Error("dynamic zone: invalid primary XoT config, skipping zone", "zone", zoneName, "err", err)
+			skippedCount++
+			continue
+		}
 
 		// Create ZoneRefresher and enqueue to RefreshEngine (same as ParseZones does)
 		zr := ZoneRefresher{
-			Name:          zoneName,
-			Force:         true, // Force refresh on startup to load from disk
-			ZoneType:      zoneType,
-			PrimariesConf: clonePeerConfs(zconf.Primaries),
-			Primaries:     res.Resolved,
-			ZoneStore:     zoneStore,
-			Notify:        zconf.Notify,
-			AllowNotify:   zconf.AllowNotify,
-			Downstreams:   zconf.Downstreams,
-			ConfigUpdate:  true, // config-bearing (persisted dynamic zone)
-			Zonefile:      zconf.Zonefile,
-			Options:       options,
+			Name:           zoneName,
+			Force:          true, // Force refresh on startup to load from disk
+			ZoneType:       zoneType,
+			PrimariesConf:  clonePeerConfs(zconf.Primaries),
+			Primaries:      res.Resolved,
+			ZoneStore:      zoneStore,
+			Notify:         zconf.Notify,
+			AllowNotify:    zconf.AllowNotify,
+			Downstreams:    zconf.Downstreams,
+			DownstreamAuth: zconf.DownstreamAuth,
+			ConfigUpdate:   true, // config-bearing (persisted dynamic zone)
+			Zonefile:       zconf.Zonefile,
+			Options:        options,
 		}
 
 		// Blocking send, exactly like the static-zone enqueue in ParseZones.
@@ -392,17 +407,18 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 	}
 
 	zconf := ZoneConf{
-		Name:          zd.ZoneName,
-		Zonefile:      zoneFilePath,
-		Type:          typeStr,
-		Store:         storeStr,
-		Primaries:     clonePeerConfs(zd.PrimariesConf),
-		Notify:        zd.Notify,
-		AllowNotify:   zd.AllowNotify,
-		Downstreams:   zd.Downstreams,
-		OptionsStrs:   optionsStrs,
-		SourceCatalog: zd.SourceCatalog,
-		ApiManaged:    zd.Options[OptApiManagedZone],
+		Name:           zd.ZoneName,
+		Zonefile:       zoneFilePath,
+		Type:           typeStr,
+		Store:          storeStr,
+		Primaries:      clonePeerConfs(zd.PrimariesConf),
+		Notify:         zd.Notify,
+		AllowNotify:    zd.AllowNotify,
+		Downstreams:    zd.Downstreams,
+		DownstreamAuth: zd.DownstreamAuth,
+		OptionsStrs:    optionsStrs,
+		SourceCatalog:  zd.SourceCatalog,
+		ApiManaged:     zd.Options[OptApiManagedZone],
 		// Note: We don't serialize Frozen, Dirty, Error, ErrorType, ErrorMsg, RefreshCount
 		// as these are runtime state, not configuration
 	}
@@ -754,6 +770,13 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 				return "", fmt.Errorf("unknown primary key %q (define it in keys.tsig or keystore tsig, or use NOKEY for no TSIG)", p.Key)
 			}
 		}
+		// Normalize + validate each primary's XoT fields (the static path's
+		// per-primary validatePeerXoT) so an API primary with transport "DoT"
+		// or a malformed pin/ca-file is rejected here, not silently downgraded
+		// to plaintext at transfer time.
+		if err := validatePrimariesXoT(in.Primaries); err != nil {
+			return "", fmt.Errorf("zone %s: %v", name, err)
+		}
 	}
 
 	options := in.Options
@@ -916,6 +939,9 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 			return "", fmt.Errorf("zone %s primary %q has unknown key %q (define it in keys.tsig or keystore tsig, or use NOKEY)", name, p.Addr, p.Key)
 		}
 	}
+	if err := validatePrimariesXoT(in.Primaries); err != nil {
+		return "", fmt.Errorf("zone %s: %v", name, err)
+	}
 
 	// Resolve any new primaries up front, before mutating state, so a
 	// zero-resolution modify is rejected cleanly with no side effects. When no
@@ -958,22 +984,24 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	notify := append([]PeerConf(nil), oldZd.Notify...)
 	allowNotify := append([]AclEntry(nil), oldZd.AllowNotify...)
 	downstreams := append([]AclEntry(nil), oldZd.Downstreams...)
+	downstreamAuth := append([]string(nil), oldZd.DownstreamAuth...)
 	oldZd.mu.Unlock()
 
 	newZd := &ZoneData{
-		ZoneName:      name,
-		ZoneType:      oldZd.ZoneType,
-		ZoneStore:     MapZone,
-		PrimariesConf: primariesConf,
-		Upstreams:     upstreams,
-		Notify:        notify,
-		AllowNotify:   allowNotify,
-		Downstreams:   downstreams,
-		Logger:        log.Default(),
-		Options:       options,
-		Status:        ZoneStatusPending,
-		Data:          core.NewCmap[OwnerData](),
-		KeyDB:         conf.Internal.KeyDB,
+		ZoneName:       name,
+		ZoneType:       oldZd.ZoneType,
+		ZoneStore:      MapZone,
+		PrimariesConf:  primariesConf,
+		Upstreams:      upstreams,
+		Notify:         notify,
+		AllowNotify:    allowNotify,
+		Downstreams:    downstreams,
+		DownstreamAuth: downstreamAuth,
+		Logger:         log.Default(),
+		Options:        options,
+		Status:         ZoneStatusPending,
+		Data:           core.NewCmap[OwnerData](),
+		KeyDB:          conf.Internal.KeyDB,
 	}
 	// Commit the staged inline key just before persistence so the rewritten file
 	// includes it; roll it back if persistence fails.

@@ -52,12 +52,16 @@ type Config struct {
 	DynamicZones DynamicZonesConf           `yaml:"dynamiczones" mapstructure:"dynamiczones"`
 	Zones        []ZoneConf                 `yaml:"zones"`
 	Templates    []ZoneConf                 `yaml:"templates"`
-	Dnssec       DnssecConf                 `yaml:"dnssec" mapstructure:"dnssec"`
-	Keys         KeyConf                    `yaml:"keys" mapstructure:"keys"`
-	Db           DbConf
-	Registrars   map[string][]string
-	Log          LogConf
-	Internal     InternalConf
+	// Peers is the top-level peers: block — one declaration per remote
+	// server, referenced from upstreams:/notify:/downstreams:/allow-notify:
+	// as `- peers: [ id, ... ]` entries (docs/2026-07-21-peers-xfr-auth-design.md).
+	Peers      map[string]PeerDef `yaml:"peers" mapstructure:"peers"`
+	Dnssec     DnssecConf         `yaml:"dnssec" mapstructure:"dnssec"`
+	Keys       KeyConf            `yaml:"keys" mapstructure:"keys"`
+	Db         DbConf
+	Registrars map[string][]string
+	Log        LogConf
+	Internal   InternalConf
 }
 
 // DnssecConf holds DNSSEC-wide settings consumed by the signer and IMR.
@@ -201,21 +205,11 @@ type DnsEngineConf struct {
 	Transports  []string              `yaml:"transports" validate:"required,min=1,dive,oneof=do53 dot doh doq"` // "do53", "dot", "doh", "doq"
 	OptionsStrs []string              `yaml:"options" mapstructure:"options"`
 	Options     map[AuthOption]string `yaml:"-" mapstructure:"-"`
-	// Downstream (secondary) client-certificate authentication on the DoT
-	// listener — the primary side of XoT mTLS (RFC 9103 §9.3 lists mTLS as
-	// one valid policy; TSIG + IP ACL remain valid without it). Opt-in:
-	// empty = no client certificate requested (previous behavior). Applies
-	// only to the auth DoT listener, not the IMR's DoT front end.
-	//   pin  require a client cert whose SPKI SHA-256 is in downstream-pins
-	//   ca   standard mTLS chain verification against the downstream-ca PEM
-	DownstreamAuth string   `yaml:"downstream-auth,omitempty" mapstructure:"downstream-auth" validate:"omitempty,oneof=pin ca"`
-	DownstreamPins []string `yaml:"downstream-pins,omitempty" mapstructure:"downstream-pins"`
-	DownstreamCA   string   `yaml:"downstream-ca,omitempty" mapstructure:"downstream-ca"`
-	// DownstreamNames (optional, ca mode only): with a shared CA, restrict
-	// which chain-valid client certs are accepted to those carrying one of
-	// these DNS SANs. Empty = any cert that chains to downstream-ca (the
-	// BIND model, fine for a dedicated CA).
-	DownstreamNames []string `yaml:"downstream-names,omitempty" mapstructure:"downstream-names"`
+	// NOTE: there is deliberately NO listener-level client-cert policy here.
+	// Transfer authentication is per-zone (downstream-auth: + peers
+	// tls-identity, enforced at transfer time); dropping non-TLS traffic is
+	// transports:. The auth DoT listener always REQUESTS (never requires) a
+	// client certificate. See docs/2026-07-21-peers-xfr-auth-design.md D6.
 	// OutboundSoaSerial controls the SOA serial advertised on outbound zone
 	// transfers and NOTIFYs. One of:
 	//   keep     — outbound = inbound serial (default; current behavior).
@@ -510,6 +504,14 @@ type InternalDnsConf struct {
 // MP state has moved to tdns-mp's own InternalMpConf.
 type InternalConf struct {
 	InternalDnsConf
+
+	// XfrAliasConflicts records zones/templates whose raw config used two
+	// spellings of the same transfer list (e.g. primaries: AND upstreams:).
+	// Set by ParseConfig (NormalizeXfrAliases); ParseZones quarantines the
+	// named zones. BrokenPeers records invalid peers: definitions (id ->
+	// reason); zones referencing one are quarantined at expansion time.
+	XfrAliasConflicts map[string]string
+	BrokenPeers       map[string]string
 
 	// ServerErrors is the daemon-wide error registry (v2/servererror.go):
 	// transport/config error conditions surfaced by `config status`. Created

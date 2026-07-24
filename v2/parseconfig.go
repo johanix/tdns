@@ -50,6 +50,18 @@ type ConfigEntry struct {
 // The older style of multiple separate 'include' statements throughout the file
 // is not supported.
 // Returns the processed config map and a list of all included file paths (absolute).
+
+// LoadRawConfigMap loads a config file and its (single-level) includes into a
+// case-PRESERVING map, exactly as the daemon does before alias normalization
+// and viper decoding. `config check` uses it so NormalizeXfrAliases (and the
+// mis-cased-key scan) see the same key case the daemon sees: viper's
+// AllSettings lower-cases keys, which would make a mis-cased transfer-list key
+// like `Provide-Xfr:` look accepted while the daemon leaves it unknown and
+// silently drops it. Returns the merged map and the list of included files.
+func LoadRawConfigMap(file string) (map[string]interface{}, []string, error) {
+	return processConfigFile(file, filepath.Dir(file), 0)
+}
+
 func processConfigFile(file string, baseDir string, depth int) (map[string]interface{}, []string, error) {
 	if depth > 10 {
 		return nil, nil, errors.New("maximum include depth exceeded (10 levels)")
@@ -283,6 +295,13 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return fmt.Errorf("error processing config: %v", err)
 	}
 
+	// Transfer-terminology aliases: rewrite upstreams:/request-xfr: ->
+	// primaries and secondaries:/provide-xfr: -> downstreams in every
+	// zones:/templates: entry BEFORE decoding (so aliases neither fail to
+	// decode nor warn as unknown keys). Conflicting spellings are recorded;
+	// ParseZones quarantines the affected zones.
+	aliasConflicts := NormalizeXfrAliases(configMap)
+
 	// Configure mapstructure decoder to respect yaml tags. The decode hook
 	// converts a bare-string primary:/notify: entry (the pre-migration shape)
 	// into a PeerConf legacy marker instead of failing the whole-file decode —
@@ -334,6 +353,11 @@ func (conf *Config) ParseConfig(reload bool) error {
 	if err := decoder.Decode(configMap); err != nil {
 		return fmt.Errorf("error decoding config: %v", err)
 	}
+
+	// peers: block — validate/normalize definitions; a broken peer does not
+	// abort (zones referencing it are quarantined at expansion in ParseZones).
+	conf.Internal.XfrAliasConflicts = aliasConflicts
+	conf.Internal.BrokenPeers = conf.ValidatePeers()
 
 	// Server-wide error registry: create once, preserve across reloads (so
 	// boot-scoped Transport errors survive a reload). parseconfig owns the
@@ -648,6 +672,20 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			continue
 		}
 
+		// A zone whose raw config used two spellings of the same transfer
+		// list (primaries:+upstreams:, etc.) is quarantined — never a
+		// silent preference between them. The conflict may live on the zone
+		// itself OR on the template it references (NormalizeXfrAliases keys
+		// template conflicts by the template name); a conflicted template
+		// would otherwise silently hand the zone its broader canonical ACL.
+		conflict := zoneOrTemplateAliasConflict(conf.Internal.XfrAliasConflicts, zconf.Name, zconf.Template)
+		if conflict != "" {
+			lgConfig.Error("conflicting transfer-list spellings, zone in error state", "zone", zname, "conflict", conflict)
+			zd.SetError(ConfigError, "conflicting transfer-list spellings: %s", conflict)
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+
 		// Handle template expansion if specified
 		if zconf.Template != "" {
 			if tmpl, exist := Templates[zconf.Template]; exist {
@@ -666,6 +704,28 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				continue
 			}
 		}
+
+		// Expand `- peers: [ id, ... ]` references (from the zone or its
+		// template) into concrete PeerConf/AclEntry entries. Errors —
+		// unknown id, broken peer definition, mixed reference+inline entry,
+		// peer unusable in this role — quarantine just this zone.
+		if err := conf.expandPeerRefs(zconf, conf.Internal.BrokenPeers); err != nil {
+			lgConfig.Error("peer reference expansion failed, zone in error state", "zone", zname, "err", err)
+			zd.SetError(ConfigError, "peers: %v", err)
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+
+		// downstream-auth mechanism ladder: validate/normalize the names
+		// (unknown => quarantine), then emit the never-fatal cross-check
+		// warnings (unsatisfiable mechanism, dead entry, tls-dane w/o IMR).
+		if err := validateDownstreamAuth(zconf.DownstreamAuth); err != nil {
+			lgConfig.Error("invalid downstream-auth, zone in error state", "zone", zname, "err", err)
+			zd.SetError(ConfigError, "downstream-auth: %v", err)
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+		crossCheckDownstreamAuth(zname, zconf.DownstreamAuth, zconf.Downstreams, conf.Internal.ImrEngine != nil)
 
 		zonestore := parseZoneStore(zconf.Store)
 
@@ -1151,20 +1211,21 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				return nil, nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
 			}
 			zr := ZoneRefresher{
-				Name:          zname,
-				Force:         true,     // force refresh, ignoring SOA serial, when reloading from file
-				ZoneType:      zonetype, // primary | secondary
-				PrimariesConf: clonePeerConfs(zconf.Primaries),
-				Primaries:     resolvedPrimaries,
-				ZoneStore:     zonestore,
-				Notify:        zconf.Notify,
-				AllowNotify:   zconf.AllowNotify,
-				Downstreams:   zconf.Downstreams,
-				ConfigUpdate:  true, // config-bearing: lets reload clear removed ACLs
-				Zonefile:      zconf.Zonefile,
-				Options:       options,
-				UpdatePolicy:  policy,
-				DnssecPolicy:  zconf.DnssecPolicy,
+				Name:           zname,
+				Force:          true,     // force refresh, ignoring SOA serial, when reloading from file
+				ZoneType:       zonetype, // primary | secondary
+				PrimariesConf:  clonePeerConfs(zconf.Primaries),
+				Primaries:      resolvedPrimaries,
+				ZoneStore:      zonestore,
+				Notify:         zconf.Notify,
+				AllowNotify:    zconf.AllowNotify,
+				Downstreams:    zconf.Downstreams,
+				DownstreamAuth: zconf.DownstreamAuth,
+				ConfigUpdate:   true, // config-bearing: lets reload clear removed ACLs
+				Zonefile:       zconf.Zonefile,
+				Options:        options,
+				UpdatePolicy:   policy,
+				DnssecPolicy:   zconf.DnssecPolicy,
 			}
 			select {
 			case conf.Internal.RefreshZoneCh <- zr:

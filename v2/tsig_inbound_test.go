@@ -126,15 +126,15 @@ func TestAllowNotifyDecision(t *testing.T) {
 	}
 }
 
-func TestDownstreamsDecision(t *testing.T) {
-	// Empty downstreams: deny (hard cutover from open AXFR).
-	zd := &ZoneData{}
-	if ok, _ := zd.downstreamsDecision(netip.MustParseAddr("192.0.2.1")); ok {
+func TestDownstreamsAclMatch(t *testing.T) {
+	// The downstreams ACL is consumed by authorizeTransfer (matchedDownstreams)
+	// with matchACL semantics: empty downstreams deny (hard cutover from open
+	// AXFR); a matching entry approves its key.
+	if ok, _ := matchACL(nil, netip.MustParseAddr("192.0.2.1")); ok {
 		t.Error("empty downstreams must deny")
 	}
-
-	zd2 := &ZoneData{Downstreams: []AclEntry{{Prefix: "0.0.0.0/0", Key: "xkey"}}}
-	if ok, keys := zd2.downstreamsDecision(netip.MustParseAddr("192.0.2.1")); !ok || !keysContain(keys, "xkey") {
+	acl := []AclEntry{{Prefix: "0.0.0.0/0", Key: "xkey"}}
+	if ok, keys := matchACL(acl, netip.MustParseAddr("192.0.2.1")); !ok || !keysContain(keys, "xkey") {
 		t.Errorf("0.0.0.0/0 xkey: got (%v,%v), want (true,[xkey])", ok, keys)
 	}
 }

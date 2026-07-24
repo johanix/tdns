@@ -11,7 +11,6 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"fmt"
-	"strings"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -21,7 +20,11 @@ import (
 func (zd *ZoneData) PublishTlsaRR(name string, port uint16, certPEM string) error {
 	lgHandler.Debug("PublishTlsaRR: received request to publish TLSA record", "name", name, "port", port)
 
-	if !strings.HasSuffix(name, zd.ZoneName) {
+	// The owner must be at or below the zone apex, checked on LABEL boundaries:
+	// a bare strings.HasSuffix accepts "notexample.com." for zone "example.com."
+	// (suffix match across a label), which would inject an out-of-zone owner.
+	// dns.IsSubDomain compares whole labels (and is case-insensitive).
+	if !dns.IsSubDomain(dns.Fqdn(zd.ZoneName), dns.Fqdn(name)) {
 		return fmt.Errorf("PublishTlsaRR: name %q is not a subdomain of %q", name, zd.ZoneName)
 	}
 

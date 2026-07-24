@@ -13,11 +13,9 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/pem"
 	"log"
 	"math/big"
 	"net"
-	"os"
 	"testing"
 	"time"
 )
@@ -114,59 +112,6 @@ func TestXoT_PKIXIntermediateChain(t *testing.T) {
 	peer.Addr = srv2.addr
 	if _, err := xotTransfer(t, conf, peer, srv2, zd2.ZoneName); err == nil {
 		t.Fatal("transfer without the intermediate must fail chain building")
-	}
-}
-
-// TestXoT_ServerMTLSDownstreamNames (LE-4): with a shared CA, the optional
-// downstream-names allowlist narrows which chain-valid client certs are
-// accepted; an empty allowlist keeps chain-only behavior (covered by
-// TestXoT_ServerMTLSCA on feature/xot).
-func TestXoT_ServerMTLSDownstreamNames(t *testing.T) {
-	zd := loadTestTransferZone(t, basicZone)
-	serverCert, serverLeaf := newTestTLSCert(t, []string{"ns1.test"}, []net.IP{net.ParseIP("127.0.0.1")})
-	// Both clients chain to the same "CA" (their own self-signed certs are
-	// pooled together, mimicking one shared trust bundle).
-	allowedCert, allowedLeaf := newTestTLSCert(t, []string{"sec1.test"}, nil)
-	otherCert, otherLeaf := newTestTLSCert(t, []string{"rogue.test"}, nil)
-
-	caPath := t.TempDir() + "/shared-ca.pem"
-	f, err := os.Create(caPath)
-	if err != nil {
-		t.Fatalf("create ca bundle: %v", err)
-	}
-	for _, der := range [][]byte{allowedLeaf.Raw, otherLeaf.Raw} {
-		if err := pem.Encode(f, &pem.Block{Type: "CERTIFICATE", Bytes: der}); err != nil {
-			t.Fatalf("write ca bundle: %v", err)
-		}
-	}
-	f.Close()
-
-	conf := &Config{}
-	conf.DnsEngine.DownstreamAuth = "ca"
-	conf.DnsEngine.DownstreamCA = caPath
-	conf.DnsEngine.DownstreamNames = []string{"sec1.test"}
-	srvTLS, err := ServerTLSConfigForDoT(conf, &serverCert, true)
-	if err != nil {
-		t.Fatalf("ServerTLSConfigForDoT: %v", err)
-	}
-	srv := startTestAXFRServerTLSConfig(t, zd, nil, srvTLS)
-	defer srv.shutdown()
-
-	pool := x509.NewCertPool()
-	pool.AddCert(serverLeaf)
-	base := &tls.Config{RootCAs: pool, ServerName: "ns1.test", MinVersion: tls.VersionTLS13}
-
-	good := base.Clone()
-	good.Certificates = []tls.Certificate{allowedCert}
-	if _, err := axfrClientTLS(t, srv.addr, zd.ZoneName, good, nil); err != nil {
-		t.Fatalf("allowlisted client transfer failed: %v", err)
-	}
-
-	// Chain-valid but not allowlisted: refused.
-	bad := base.Clone()
-	bad.Certificates = []tls.Certificate{otherCert}
-	if _, err := axfrClientTLS(t, srv.addr, zd.ZoneName, bad, nil); err == nil {
-		t.Fatal("chain-valid client outside downstream-names must be refused")
 	}
 }
 
