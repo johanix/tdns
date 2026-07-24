@@ -45,8 +45,10 @@
 # they guard: allow-notify: guards inbound NOTIFY on a secondary, downstreams:
 # guards outbound zone transfer on a primary.
 #
-# prefix — an ip-spec matched against the SOURCE address of the request:
-#     bare IP     192.0.2.1              ::1
+# prefix — an ip-spec matched against the SOURCE address of the request. It must
+# carry an explicit boundary; a bare IP (e.g. 192.0.2.1) is rejected — write a
+# single host as an explicit /32 or /128:
+#     single host 192.0.2.1/32           ::1/128
 #     CIDR        192.0.2.0/24           2001:db8::/32
 #     netmask     192.0.2.0&255.255.255.0
 #     range       192.0.2.10-192.0.2.20  2001:db8::10-2001:db8::20
@@ -95,9 +97,9 @@ zones:
         - addr: "192.0.2.2:53"     # And this one
           key:  NOKEY
      downstreams:                  # ...and let those same secondaries transfer
-        - prefix: "192.0.2.1"
+        - prefix: "192.0.2.1/32"    # single host — explicit mask required
           key:    NOKEY
-        - prefix: "192.0.2.2"
+        - prefix: "192.0.2.2/32"
           key:    NOKEY
      options:
         - delegation-sync-parent   # Provide delegation sync for children
@@ -117,9 +119,9 @@ zones:
         - addr: "203.0.113.2:53"
           key:  NOKEY
      allow-notify:                                           # Only these may NOTIFY us
-        - prefix: "203.0.113.1"
+        - prefix: "203.0.113.1/32"                            # single host — explicit mask required
           key:    NOKEY
-        - prefix: "203.0.113.2"
+        - prefix: "203.0.113.2/32"
           key:    NOKEY
      options:
         - delegation-sync-child    # Push DS/NS updates to parent
@@ -200,7 +202,8 @@ zones:
    # EXAMPLE 6: AXFR restricted by prefix, unsigned (IPv4 + IPv6)
    # ===========================================================================
    # Still NOKEY (no TSIG), but only from our own secondary networks. Note the
-   # mixed ip-spec forms: CIDR, a bare host address, and a range.
+   # mixed ip-spec forms: CIDR, an explicit single-host /32, and a range. A bare
+   # host address (203.0.113.7 with no /len) is rejected — write it as /32.
    - name:            prefix-acl.example.
      type:            primary
      zonefile:        /etc/tdns/zones/prefix-acl.example.zone
@@ -209,11 +212,11 @@ zones:
           key:    NOKEY
         - prefix: "2001:db8:1::/48"                  # IPv6 CIDR
           key:    NOKEY
-        - prefix: "203.0.113.7"                      # a single IPv4 host
+        - prefix: "203.0.113.7/32"                   # a single IPv4 host (explicit /32)
           key:    NOKEY
         - prefix: "2001:db8:2::10-2001:db8:2::1f"    # an IPv6 range
           key:    NOKEY
-        - prefix: "192.0.2.66"                       # ...but never this one:
+        - prefix: "192.0.2.66/32"                    # ...but never this one:
           key:    BLOCKED                            # BLOCKED beats every allow
 
    # ===========================================================================
@@ -244,7 +247,7 @@ zones:
           key:    xfr-key-2026
         - prefix: "2001:db8:1::/48"
           key:    xfr-key-2025
-        - prefix: "192.0.2.66"      # compromised host: denied even with a key
+        - prefix: "192.0.2.66/32"   # compromised host: denied even with a key
           key:    BLOCKED
      options:
         - online-signing
@@ -261,7 +264,7 @@ zones:
         - addr: "192.0.2.20:53"    # Notify secondaries about catalog changes
           key:  NOKEY
      downstreams:
-        - prefix: "192.0.2.20"
+        - prefix: "192.0.2.20/32"
           key:    NOKEY
      options:
         - catalog-zone                    # RFC 9432 catalog zone

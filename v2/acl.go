@@ -17,9 +17,10 @@ import (
 const BLOCKED = "BLOCKED"
 
 // AclEntry is one entry in an allow-notify: / downstreams: address ACL (NSD
-// allow-notify / provide-xfr). Prefix is an ip-spec — a bare IP, CIDR
-// (1.2.3.4/24), mask (1.2.3.4&255.255.255.0), range (1.2.3.4-1.2.3.25), or
-// 0.0.0.0/0 / ::/0 for "any". Key is a keys.tsig name (TSIG required), NOKEY
+// allow-notify / provide-xfr). Prefix is an ip-spec — a CIDR (1.2.3.4/24, or
+// 1.2.3.4/32 for a single host), mask (1.2.3.4&255.255.255.0), range
+// (1.2.3.4-1.2.3.25), or 0.0.0.0/0 / ::/0 for "any". A bare IP is rejected;
+// write an explicit /32 (or /128). Key is a keys.tsig name (TSIG required), NOKEY
 // (unsigned accepted), or BLOCKED (deny). The struct shape matches PeerConf
 // ({addr, key}) so the config keeps one entry style.
 type AclEntry struct {
@@ -104,10 +105,11 @@ func ValidateACL(acl []AclEntry, keyDefined func(string) bool) error {
 	return nil
 }
 
-// parseIPSpec parses an ip-spec into either a netip.Prefix (CIDR / mask / bare-IP
-// host route) or a [lo, hi] netip.Addr range (isRange). lo/hi are Unmap'd and of
-// the same family. The string spellings a&m and a-b have no netip parser, so the
-// splitting is by hand; the addresses and matching are netip.
+// parseIPSpec parses an ip-spec into either a netip.Prefix (CIDR / mask) or a
+// [lo, hi] netip.Addr range (isRange). lo/hi are Unmap'd and of the same family.
+// A bare IP with no explicit boundary is rejected: a single host must be written
+// as an explicit /32 or /128 CIDR. The string spellings a&m and a-b have no netip
+// parser, so the splitting is by hand; the addresses and matching are netip.
 func parseIPSpec(spec string) (pfx netip.Prefix, lo, hi netip.Addr, isRange bool, err error) {
 	spec = strings.TrimSpace(spec)
 	switch {
@@ -158,12 +160,17 @@ func parseIPSpec(spec string) (pfx netip.Prefix, lo, hi netip.Addr, isRange bool
 		}
 		return pfx, loA, hiA, true, nil
 
-	default: // bare IP -> host route
+	default: // no explicit boundary — reject a bare IP
 		a, e := netip.ParseAddr(spec)
 		if e != nil {
 			return pfx, lo, hi, false, fmt.Errorf("bad ip-spec %q", spec)
 		}
+		// A single host must carry an explicit mask (/32 or /128); a bare address
+		// under a field called "prefix" is ambiguous, so require the boundary.
+		// BitLen is 32 for an (Unmap'd) IPv4 address and 128 for IPv6.
 		a = a.Unmap()
-		return netip.PrefixFrom(a, a.BitLen()), lo, hi, false, nil
+		return pfx, lo, hi, false, fmt.Errorf(
+			"bare address %q is not accepted; add an explicit prefix length, e.g. %q",
+			spec, fmt.Sprintf("%s/%d", spec, a.BitLen()))
 	}
 }
