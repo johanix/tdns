@@ -1,9 +1,14 @@
 # Design Spec: Automated KSK Rollover in tdns-auth
 
-**Status**: Draft (Phases **1–3** and **4A** in `tdns/v2`; **4B
-(scheduled rollover backbone)**, **4C (manual-ASAP CLI)**, **4D
-(clamp wiring)**, and **4E (double-signature worker branch)** are
-remaining scope — see §11 Phase breakdown.)
+**Status**: Core DONE on `main`. Phases **1–3, 4A, 4B (scheduled
+rollover backbone), 4C (manual-ASAP CLI: `auto-rollover
+when/asap/cancel/status/reset`), and 4D (K-step TTL clamp)** are
+implemented in `tdns/v2`. Only **4E (double-signature worker)** remains
+— lowest priority, and its *method* is superseded by the parallel-FIFO
+design (`2026-07-01-ksk-alg-rollover-parallel-fifo-design.md`); track 4E
+there, not here. (Corrected 2026-07-24 from a docs-vs-code audit; the
+original 2026-04-25 header listing 4B/4C/4D as remaining was stale.
+§11 Phase breakdown below may still read as of that date.)
 **Date**: 2026-04-23 (implementation status note: 2026-04-25)
 **Scope**: tdns-auth (single-signer). Non-MP zones only.
 **Related**: `2026-03-07-delegation-sync-refresh-plan.md` (delegation
