@@ -186,6 +186,63 @@ func TestPrepareDynamicPrimary_HappyPathAndTsigRewire(t *testing.T) {
 	if spec.Zconf.Downstreams[1].Key != "BLOCKED" {
 		t.Errorf("BLOCKED downstream must never be rewired: %+v", spec.Zconf.Downstreams[1])
 	}
+	// Rewiring must not leak the staged key back into the template: the next
+	// zone stamped from it would inherit this zone's key. (ExpandTemplate's
+	// gap-fill clones slices; this pins that invariant.)
+	if got := Templates["dyn-test"].Downstreams[0].Key; got != NOKEY {
+		t.Errorf("template mutated by rewiring: downstream key %q", got)
+	}
+}
+
+func TestProvisionDynamicZone_RejectsPathSeparatorNames(t *testing.T) {
+	resetZonesForTest()
+	conf, _ := newTestConfigForCores(t)
+	dir := t.TempDir()
+	withTestTemplates(t, map[string]ZoneConf{"dyn-test": dynPrimaryTestTemplate(dir)})
+
+	// dns.IsDomainName accepts "/" — the add path must not, for either type,
+	// since the name feeds file paths (template %s-pattern, zonedirectory).
+	for _, name := range []string{"evil/zone.example", `evil\zone.example`} {
+		if _, err := conf.ProvisionDynamicZone(context.Background(), DynamicZoneInput{
+			Name: name, Type: Primary, Template: "dyn-test",
+		}, true); err == nil || !strings.Contains(err.Error(), "path separators") {
+			t.Errorf("primary add with name %q must be rejected: %v", name, err)
+		}
+		if _, err := conf.ProvisionDynamicZone(context.Background(), DynamicZoneInput{
+			Name: name, Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}},
+		}, true); err == nil || !strings.Contains(err.Error(), "path separators") {
+			t.Errorf("secondary add with name %q must be rejected: %v", name, err)
+		}
+	}
+}
+
+func TestProvisionDynamicPrimary_EnqueueFailureMarksError(t *testing.T) {
+	resetZonesForTest()
+	conf, _ := newTestConfigForCores(t)
+	dir := t.TempDir()
+	withTestTemplates(t, map[string]ZoneConf{"dyn-test": dynPrimaryTestTemplate(dir)})
+
+	// A cancelled context makes enqueueRefresh fail immediately: the zone
+	// must be left registered with a visible error, not stuck "provisioning".
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	// Fill the channel so the select cannot take the send arm first.
+	ch := conf.Internal.RefreshZoneCh
+	for len(ch) < cap(ch) {
+		ch <- ZoneRefresher{}
+	}
+	if _, err := conf.ProvisionDynamicZone(ctx, DynamicZoneInput{
+		Name: "stuck.example", Type: Primary, Template: "dyn-test",
+	}, true); err == nil {
+		t.Fatal("expected enqueue failure with a cancelled context and full channel")
+	}
+	zd, ok := Zones.Get("stuck.example.")
+	if !ok {
+		t.Fatal("zone should remain registered after enqueue failure")
+	}
+	if !zd.HasError(RefreshError) {
+		t.Error("zone must carry a visible RefreshError after enqueue failure")
+	}
 }
 
 func TestProvisionDynamicPrimary_EndToEnd(t *testing.T) {

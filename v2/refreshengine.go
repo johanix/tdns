@@ -617,17 +617,16 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						publishCadence:   zr.PublishCadence,
 					}
 
-					Zones.Set(zone, zd)
-
-					if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,
-						tryPostpass); err != nil {
-						lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
-						zd.SetError(RefreshError, "refresh error: %v", err)
-						zd.LatestError = time.Now()
-						continue
-					}
-
-					zd.InstallInitialSnapshot()
+					// Register the OnFirstLoad callbacks BEFORE the initial load:
+					// on a first-load failure the ticker retry path re-runs
+					// initialLoadZone + completeFirstZonePolicyAndLoad against
+					// the SAME ZoneData, and only drains callbacks that are
+					// already registered — registering after a successful load
+					// (the historical order) meant a failed-then-retried dynamic
+					// zone never got signing/sync set up. Registration is inert
+					// until drainAndRunOnFirstLoad, so the success path is
+					// unchanged.
+					//
 					// Dynamic zones historically called SetupZoneSigning inline
 					// (not via OnFirstLoad). Register it on OnFirstLoad so a
 					// sync failure is retryable by the ticker completion path
@@ -649,6 +648,10 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// delegation sync on first load, as ParseZones does for
 					// static zones. Scoped to zr.Template != "" so no
 					// pre-existing dynamic-zone class changes behavior.
+					// SetupZoneSync's delegation-sync-child path does an
+					// unbounded send to DelegationSyncQ, and OnFirstLoad
+					// callbacks run inside this engine loop — dispatch async so
+					// a full/stopped consumer cannot stall refresh processing.
 					if zr.Template != "" && (zd.Options[OptDelSyncParent] || zd.Options[OptDelSyncChild]) {
 						delegationSyncQ := conf.Internal.DelegationSyncQ
 						zd.OnFirstLoad = append(zd.OnFirstLoad, func(z *ZoneData) {
@@ -656,12 +659,26 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								lgEngine.Error("DelegationSyncQ not available", "zone", z.ZoneName)
 								return
 							}
-							if err := z.SetupZoneSync(delegationSyncQ); err != nil {
-								lgEngine.Error("SetupZoneSync failed", "zone", z.ZoneName, "error", err)
-							}
+							go func() {
+								if err := z.SetupZoneSync(delegationSyncQ); err != nil {
+									lgEngine.Error("SetupZoneSync failed", "zone", z.ZoneName, "error", err)
+								}
+							}()
 						})
 					}
 					zd.mu.Unlock()
+
+					Zones.Set(zone, zd)
+
+					if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,
+						tryPostpass); err != nil {
+						lgEngine.Error("zone refresh failed", "zone", zone, "error", err)
+						zd.SetError(RefreshError, "refresh error: %v", err)
+						zd.LatestError = time.Now()
+						continue
+					}
+
+					zd.InstallInitialSnapshot()
 					if err := finishFirstLoadPolicy(ctx, zd, conf, zr.DnssecPolicy); err != nil {
 						lgEngine.Warn("DNSSEC policy sync for dynamic zone failed", "zone", zone, "err", err)
 						zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)

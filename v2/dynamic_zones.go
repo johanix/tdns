@@ -830,6 +830,14 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	if _, err := dns.IsDomainName(name); !err {
 		return "", fmt.Errorf("invalid zone name %q", in.Name)
 	}
+	// dns.IsDomainName is deliberately liberal (DNS is 8-bit) and accepts
+	// path separators. Zone names feed file paths — the template's %s-pattern
+	// zonefile and the <zonedirectory>/<zone>.zone derivation — so a name
+	// like "evil/zone" would create and later delete files in a caller-chosen
+	// subdirectory. Reject explicitly, for both zone types.
+	if strings.ContainsAny(name, `/\`) {
+		return "", fmt.Errorf("invalid zone name %q (path separators are not allowed)", in.Name)
+	}
 	if _, exists := Zones.Get(name); exists {
 		return "", fmt.Errorf("zone %s already exists", name)
 	}

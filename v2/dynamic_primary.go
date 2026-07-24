@@ -285,6 +285,21 @@ func (conf *Config) synthesizeBootstrapZonefile(zone, path string) error {
 		os.Remove(tempFilePath)
 		return fmt.Errorf("failed to write temp file: %v", err)
 	}
+	// Fsync before rename: without it a crash can leave a correctly-named but
+	// empty zonefile, which the boot path would load as an empty primary.
+	if err := tempFile.Sync(); err != nil {
+		tempFile.Close()
+		os.Remove(tempFilePath)
+		return fmt.Errorf("failed to sync temp file: %v", err)
+	}
+	// os.CreateTemp yields 0600; the UPDATE write-back (WriteZone → WriteFile
+	// → os.Create) produces 0644, so set 0644 up front rather than having the
+	// mode flip on the first update.
+	if err := tempFile.Chmod(0644); err != nil {
+		tempFile.Close()
+		os.Remove(tempFilePath)
+		return fmt.Errorf("failed to chmod temp file: %v", err)
+	}
 	if err := tempFile.Close(); err != nil {
 		os.Remove(tempFilePath)
 		return fmt.Errorf("failed to close temp file: %v", err)
@@ -397,6 +412,9 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 			}
 		})
 	}
+	// SetupZoneSync's delegation-sync-child path does an unbounded send to
+	// DelegationSyncQ, and OnFirstLoad callbacks run inside the RefreshEngine
+	// loop — dispatch async so a full/stopped consumer cannot stall it.
 	if options[OptDelSyncParent] || options[OptDelSyncChild] {
 		delegationSyncQ := conf.Internal.DelegationSyncQ
 		zd.OnFirstLoad = append(zd.OnFirstLoad, func(z *ZoneData) {
@@ -404,9 +422,11 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 				lg.Error("DelegationSyncQ not available", "zone", z.ZoneName)
 				return
 			}
-			if err := z.SetupZoneSync(delegationSyncQ); err != nil {
-				lg.Error("SetupZoneSync failed", "zone", z.ZoneName, "error", err)
-			}
+			go func() {
+				if err := z.SetupZoneSync(delegationSyncQ); err != nil {
+					lg.Error("SetupZoneSync failed", "zone", z.ZoneName, "error", err)
+				}
+			}()
 		})
 	}
 
@@ -445,6 +465,11 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 		Force:          true, // load from file regardless of serial
 	}
 	if err := conf.enqueueRefresh(ctx, zr); err != nil {
+		// Mark the registered-but-unscheduled zone so list-dynamic shows a
+		// visible error instead of an indefinite "provisioning" (the boot
+		// path registers an error state for its analogous failure).
+		// RefreshError is deliberately not service-impacting.
+		zd.SetError(RefreshError, "initial load not scheduled: %v", err)
 		return "", fmt.Errorf("zone %s registered but failed to schedule initial load: %w", name, err)
 	}
 

@@ -177,21 +177,43 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					}
 					if updated && !ur.InternalUpdate {
 						lg.Debug("ZoneUpdater: zone updated, setting dirty flag", "zone", zd.ZoneName)
-						zd.Options[OptDirty] = true
+						zd.SetOption(OptDirty, true)
 						logUpdateActions("ZONE-UPDATE", ur.Actions)
+					}
 
-						// API-managed primaries persist updated content
-						// immediately (the mirror of the CHILD-UPDATE 'direct'
-						// backend persist): without this, updated content
-						// lives only in RAM until a freeze/manual write and is
-						// lost on restart. WriteZone clears OptDirty on
-						// success, which also un-blocks the dirty-primary
-						// reload refusal.
-						if zd.ZoneType == Primary && zd.Options[OptApiManagedZone] && zd.Zonefile != "" {
-							if _, werr := zd.WriteZone(true, false); werr != nil {
-								lg.Warn("ZoneUpdater: failed to persist API-managed primary after ZONE-UPDATE (updated content is in memory only until the next successful write)", "zone", zd.ZoneName, "file", zd.Zonefile, "error", werr)
+					// API-managed primaries persist updated content
+					// immediately (the mirror of the CHILD-UPDATE 'direct'
+					// backend persist): without this, updated content lives
+					// only in RAM until a freeze/manual write and is lost on
+					// restart. Internal updates (CSYNC/KEY publication etc.)
+					// are included — they change zone data too but never set
+					// OptDirty, so they need force. WriteZone clears OptDirty
+					// on success, which also un-blocks the dirty-primary
+					// reload refusal. The persistence decision reads a
+					// zd.mu-protected snapshot (RefreshEngine mutates these
+					// fields under that lock on reload); the lock is NOT held
+					// across WriteZone, which reacquires it.
+					if updated {
+						zd.mu.Lock()
+						apiPrimary := zd.ZoneType == Primary && zd.Options[OptApiManagedZone]
+						zonefile := zd.Zonefile
+						zd.mu.Unlock()
+						if apiPrimary && zonefile != "" {
+							if _, werr := zd.WriteZone(true, ur.InternalUpdate); werr != nil {
+								// The client response is long gone (async queue),
+								// so surface the persistence failure durably:
+								// visible in zone list, deliberately NOT
+								// service-impacting (memory state is good).
+								lg.Warn("ZoneUpdater: failed to persist API-managed primary after ZONE-UPDATE (updated content is in memory only until the next successful write)", "zone", zd.ZoneName, "file", zonefile, "error", werr)
+								zd.SetError(RefreshError, "failed to persist zone after update: %v", werr)
+								zd.LatestError = time.Now()
 							} else {
-								lg.Debug("ZoneUpdater: persisted API-managed primary after ZONE-UPDATE", "zone", zd.ZoneName, "file", zd.Zonefile)
+								// A successful persist is the primary-zone
+								// analogue of a successful refresh (both are
+								// file I/O): clear RefreshError, same as the
+								// refresh paths do.
+								zd.ClearError(RefreshError)
+								lg.Debug("ZoneUpdater: persisted API-managed primary after ZONE-UPDATE", "zone", zd.ZoneName, "file", zonefile, "internal", ur.InternalUpdate)
 							}
 						}
 					}
