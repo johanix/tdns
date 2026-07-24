@@ -277,6 +277,11 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	if zd.workingSet == nil {
 		zd.publishQueued = false
 		zd.publishUrgent = false
+		// The epoch-reset flag is staged together with a working set; with no
+		// working set it is orphaned. Clear it so a dropped publish cannot
+		// carry it into a later unrelated publish (which would needlessly
+		// wipe the IXFR history).
+		zd.wsIxfrEpochReset = false
 		return
 	}
 	if !zoneStillLive(zd, gen) {
@@ -284,6 +289,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		zd.wsSignalSynth = nil
 		zd.publishQueued = false
 		zd.publishUrgent = false
+		zd.wsIxfrEpochReset = false
 		return
 	}
 
@@ -301,6 +307,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		zd.wsSignalSynth = nil
 		zd.publishQueued = false
 		zd.publishUrgent = false
+		zd.wsIxfrEpochReset = false
 		return
 	}
 

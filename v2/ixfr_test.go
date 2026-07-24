@@ -297,6 +297,40 @@ func TestIxfrChain_EpochResetOnRefreshReplacement(t *testing.T) {
 	}
 }
 
+// TestIxfrChain_DroppedEpochResetDoesNotLeak is the regression test for the
+// CodeRabbit round-1 finding: a staged wsIxfrEpochReset whose publish is
+// dropped (here: the apex-less refusal path) must NOT survive and wipe the
+// chain on the next, unrelated successful publish.
+func TestIxfrChain_DroppedEpochResetDoesNotLeak(t *testing.T) {
+	zd := loadIxfrTestZone(t, basicZone)
+	stageAndPublish(t, zd, stageAddA(t, zd, "one.example.test.", "192.0.2.11"))
+	if len(chainOf(zd)) != 1 {
+		t.Fatal("setup: expected 1 link")
+	}
+
+	// A wholesale-replace publish that gets REFUSED (apex-less working set),
+	// with the epoch-reset flag staged the way applyRefreshReplacementLocked
+	// stages it.
+	zd.mu.Lock()
+	zd.wsIxfrEpochReset = true
+	zd.workingSet = map[string]*OwnerData{}
+	zd.publishWorkingSetLocked(zd.generation.Load(), false)
+	leaked := zd.wsIxfrEpochReset
+	zd.mu.Unlock()
+	if leaked {
+		t.Fatal("refused publish left wsIxfrEpochReset set")
+	}
+	if len(chainOf(zd)) != 1 {
+		t.Fatalf("refused publish must not touch the served chain, got %d links", len(chainOf(zd)))
+	}
+
+	// The next ordinary incremental publish must EXTEND the chain, not wipe it.
+	stageAndPublish(t, zd, stageAddA(t, zd, "two.example.test.", "192.0.2.12"))
+	if got := chainOf(zd); len(got) != 2 {
+		t.Fatalf("stale epoch reset leaked into an unrelated publish: got %d links, want 2", len(got))
+	}
+}
+
 func TestIxfrChain_InstallInitialSnapshotResets(t *testing.T) {
 	zd := loadIxfrTestZone(t, basicZone)
 	stageAndPublish(t, zd, stageAddA(t, zd, "one.example.test.", "192.0.2.11"))
