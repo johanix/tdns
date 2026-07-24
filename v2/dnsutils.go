@@ -62,8 +62,10 @@ func (zd *ZoneData) ZoneTransferIn(up PeerConf, serial uint32, ttype string, con
 
 	msg := new(dns.Msg)
 	if ttype == "ixfr" {
-		// msg.SetIxfr(zone, serial, soa.Ns, soa.Mbox)
-		msg.SetIxfr(zd.ZoneName, serial, "", "")
+		// NB: SetIxfr("", "") packs ZERO bytes for the empty MNAME/RNAME
+		// (malformed SOA rdata → the primary FORMERRs the request). Root
+		// names pack correctly; the primary only reads the serial anyway.
+		msg.SetIxfr(zd.ZoneName, serial, ".", ".")
 	} else {
 		msg.SetAxfr(zd.ZoneName)
 	}
@@ -317,6 +319,36 @@ func (zd *ZoneData) ZoneTransferOut(ctx context.Context, w dns.ResponseWriter, r
 		zd.Logger.Printf("ZoneTransferOut: Will try to serve zone %s", zone)
 	}
 
+	// Outbound IXFR (RFC 1995, Project C). Decided before the envelope stream
+	// is set up: single-SOA answers short-circuit entirely; a provable delta
+	// (contiguous chain from the client's serial to the pinned snapshot's
+	// serial) is streamed below; anything else falls through to the full
+	// transfer, which IS the RFC 1995 §4 fallback shape. All decisions key on
+	// the pinned snapshot only.
+	var ixfrSteps []Ixfr
+	if len(r.Question) > 0 && r.Question[0].Qtype == dns.TypeIXFR && snap.SOA != nil {
+		clientSOA := ixfrQuerySOA(r)
+		switch {
+		case clientSOA == nil:
+			zd.Logger.Printf("ZoneTransferOut: %s: IXFR query from %s carries no SOA in the authority section; serving full zone",
+				zone, w.RemoteAddr())
+		case !serialNewer(snap.Serial, clientSOA.Serial):
+			// Client is same-or-newer than us: single SOA (RFC 1995 §2).
+			return zd.ixfrSingleSOAReply(w, r, dns.Copy(snap.SOA).(*dns.SOA))
+		case isUDPTransport(w):
+			// v1 never streams deltas over UDP: a single SOA at the current
+			// serial tells the client to retry over TCP (RFC 1995 §4).
+			return zd.ixfrSingleSOAReply(w, r, dns.Copy(snap.SOA).(*dns.SOA))
+		default:
+			if steps, ok := ixfrDeltaSteps(snap, clientSOA.Serial); ok {
+				ixfrSteps = steps
+			} else {
+				zd.Logger.Printf("ZoneTransferOut: %s: no contiguous IXFR history from serial %d to %d; falling back to full transfer",
+					zone, clientSOA.Serial, snap.Serial)
+			}
+		}
+	}
+
 	outbound_xfr := make(chan *dns.Envelope)
 	done := make(chan struct{})
 	var closeOnce sync.Once
@@ -356,6 +388,10 @@ func (zd *ZoneData) ZoneTransferOut(ctx context.Context, w dns.ResponseWriter, r
 		zd:            zd,
 	}
 
+	if ixfrSteps != nil {
+		return zd.emitIxfrDelta(bs, dns.Copy(snap.SOA).(*dns.SOA), ixfrSteps)
+	}
+
 	if !appendRRset(bs, transferSOA) {
 		return 0, nil
 	}
@@ -389,7 +425,14 @@ func (zd *ZoneData) ZoneTransferOut(ctx context.Context, w dns.ResponseWriter, r
 		}
 	}
 
-	trailingSOA := dns.Copy(soaCopy).(*dns.SOA)
+	return zd.finishTransferWithTrailingSOA(bs, dns.Copy(soaCopy).(*dns.SOA))
+}
+
+// finishTransferWithTrailingSOA appends the trailing SOA (flushing first when
+// it would not fit), runs the final oversize check, and sends the last
+// envelope. Shared by the AXFR and IXFR emission paths.
+func (zd *ZoneData) finishTransferWithTrailingSOA(bs *batchState, trailingSOA *dns.SOA) (int, error) {
+	zone := dns.Fqdn(zd.ZoneName)
 	trailingSize := estimateRRSize(trailingSOA)
 	if !maybeFlushBatch(bs, trailingSize, false) {
 		return 0, nil
@@ -421,20 +464,20 @@ func (zd *ZoneData) ZoneTransferOut(ctx context.Context, w dns.ResponseWriter, r
 		return 0, fmt.Errorf("ZoneTransferOut: %s: oversize transfer envelope (%d bytes)", zone, finalSize)
 	}
 
-	totalSent += *bs.count
+	*bs.totalSent += *bs.count
 	if zd.Verbose || Globals.Debug {
 		zd.Logger.Printf("XfrOut: Zone %s: Sending final batch #%d: %d RRs, %d bytes (total sent: %d RRs)",
-			zd.ZoneName, batchNum, len(*bs.rrs), finalSize, totalSent)
+			zd.ZoneName, *bs.batchNum, len(*bs.rrs), finalSize, *bs.totalSent)
 	} else {
 		zd.Logger.Printf("XfrOut: Zone %s: Sending final %d RRs (including trailing SOA, total sent %d)",
-			zd.ZoneName, len(*bs.rrs), totalSent)
+			zd.ZoneName, len(*bs.rrs), *bs.totalSent)
 	}
 	if !bs.sendEnvelope(*bs.rrs) {
 		return 0, nil
 	}
 
-	zd.Logger.Printf("ZoneTransferOut: %s: Sent %d RRs.", zone, totalSent)
-	return totalSent, nil
+	zd.Logger.Printf("ZoneTransferOut: %s: Sent %d RRs.", zone, *bs.totalSent)
+	return *bs.totalSent, nil
 }
 
 func oversizeRRsetOwner(rrs []dns.RR) (owner, rrtype string) {

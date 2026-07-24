@@ -1029,6 +1029,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		zdp.mu.Lock()
 		zdp.Options = newOpts
 		zdp.publishCadence = publishCadence
+		zdp.ixfrChainMaxBytes = zconf.IxfrChainMaxBytes
 		zdp.mu.Unlock()
 
 		invokeOptionHandlers(zname, options)

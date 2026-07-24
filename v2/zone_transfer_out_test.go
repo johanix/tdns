@@ -61,6 +61,7 @@ func startTestAXFRServerCore(t *testing.T, zd *ZoneData, tsigProvider dns.TsigPr
 		Listener:          ln,
 		Handler:           mux,
 		TsigProvider:      tsigProvider,
+		MsgAcceptFunc:     MsgAcceptFunc, // production accept func: permits the IXFR authority-SOA
 		NotifyStartedFunc: func() { close(started) },
 	}
 	go func() { _ = dnsSrv.ActivateAndServe() }()

@@ -314,6 +314,9 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	zd.resignWorkingSetSOAIfSigned()
 
 	data := zd.workingSet
+	// Maintain the IXFR delta history BEFORE building the snapshot so the
+	// chain copied into it ends exactly at this publish's serial (Project C).
+	zd.updateIxfrChainLocked(zd.snapshot.Load(), serial, data)
 	snap := zd.buildSnapshotLocked(serial, data, zd.wsSignalSynth)
 	zd.snapshot.Store(snap)
 
@@ -365,6 +368,8 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		zd.wsSignalSynth = nil
 	}
 	zd.repopulateWorkingSetLocked(dynamicRRs)
+	// A refresh replaces zone data wholesale: new IXFR epoch, no delta.
+	zd.wsIxfrEpochReset = true
 	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 
 	// Only advertise the zone as Ready once a snapshot actually exists. If the
@@ -445,6 +450,9 @@ func (zd *ZoneData) InstallInitialSnapshot() {
 		lg.Error("InstallInitialSnapshot: no apex in data and no valid snapshot; zone left not Ready", "zone", zd.ZoneName)
 		return
 	}
+	// This is a re-baseline from zd.Data outside the publish path: a new
+	// IXFR epoch by definition (no delta links the previous snapshot to it).
+	zd.IxfrChain = nil
 	snap := zd.buildSnapshotLocked(zd.CurrentSerial, data, nil)
 	zd.snapshot.Store(snap)
 	zd.Ready = true

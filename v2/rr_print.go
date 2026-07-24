@@ -317,8 +317,9 @@ func xfrErrorRcode(errstr string) (string, bool) {
 func ZoneTransferPrint(zname, upstream string, serial uint32, ttype uint16, options map[string]string, tsigName, tsigAlgo, tsigSecret string, tlsConfig *tls.Config) error {
 	msg := new(dns.Msg)
 	if ttype == dns.TypeIXFR {
-		// msg.SetIxfr(zone, serial, soa.Ns, soa.Mbox)
-		msg.SetIxfr(zname, serial, "", "")
+		// NB: empty MNAME/RNAME pack to zero bytes (malformed SOA rdata →
+		// FORMERR from the server); root names pack correctly.
+		msg.SetIxfr(zname, serial, ".", ".")
 	} else {
 		msg.SetAxfr(zname)
 	}
