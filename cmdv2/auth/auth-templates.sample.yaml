@@ -230,9 +230,9 @@ templates:
         - addr: "192.0.2.2:53"
           key:  NOKEY
      downstreams:                        # ...and let them transfer
-        - prefix: "192.0.2.1"
+        - prefix: "192.0.2.1/32"         # single host — explicit mask required
           key:    NOKEY
-        - prefix: "192.0.2.2"
+        - prefix: "192.0.2.2/32"
           key:    NOKEY
      options:
         - delegation-sync-parent

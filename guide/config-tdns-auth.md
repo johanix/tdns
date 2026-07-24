@@ -53,7 +53,7 @@ zones:
      downstreams:                                  # who may AXFR from us
         - prefix:  "127.0.0.0/8"
           key:     NOKEY
-        - prefix:  "::1"
+        - prefix:  "::1/128"                        # single host — explicit mask required
           key:     NOKEY
 ```
 
@@ -143,11 +143,14 @@ an empty prefix and quarantines the zone with `bad ip-spec ""`.
 
 ### The prefix field
 
-`prefix` is an ip-spec matched against the **source address** of the request:
+`prefix` is an ip-spec matched against the **source address** of the request. It
+must carry an explicit boundary — a bare address such as `192.0.2.1` is rejected
+with `add an explicit prefix length`; write a single host as an explicit `/32`
+(or `/128`):
 
 | Form | IPv4 | IPv6 |
 |------|------|------|
-| bare address | `192.0.2.1` | `::1` |
+| single host | `192.0.2.1/32` | `::1/128` |
 | CIDR | `192.0.2.0/24` | `2001:db8::/32` |
 | netmask | `192.0.2.0&255.255.255.0` | — |
 | range | `192.0.2.10-192.0.2.20` | `2001:db8::10-2001:db8::20` |
@@ -198,7 +201,7 @@ downstreams:
      key:    xfr-key-2026     # new key
    - prefix: "2001:db8:1::/48"
      key:    xfr-key-2025     # old key, still accepted during the overlap
-   - prefix: "192.0.2.66"
+   - prefix: "192.0.2.66/32"
      key:    BLOCKED          # denied even with a valid key
 ```
 
