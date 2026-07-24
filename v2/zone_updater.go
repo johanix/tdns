@@ -179,6 +179,21 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 						lg.Debug("ZoneUpdater: zone updated, setting dirty flag", "zone", zd.ZoneName)
 						zd.Options[OptDirty] = true
 						logUpdateActions("ZONE-UPDATE", ur.Actions)
+
+						// API-managed primaries persist updated content
+						// immediately (the mirror of the CHILD-UPDATE 'direct'
+						// backend persist): without this, updated content
+						// lives only in RAM until a freeze/manual write and is
+						// lost on restart. WriteZone clears OptDirty on
+						// success, which also un-blocks the dirty-primary
+						// reload refusal.
+						if zd.ZoneType == Primary && zd.Options[OptApiManagedZone] && zd.Zonefile != "" {
+							if _, werr := zd.WriteZone(true, false); werr != nil {
+								lg.Warn("ZoneUpdater: failed to persist API-managed primary after ZONE-UPDATE (updated content is in memory only until the next successful write)", "zone", zd.ZoneName, "file", zd.Zonefile, "error", werr)
+							} else {
+								lg.Debug("ZoneUpdater: persisted API-managed primary after ZONE-UPDATE", "zone", zd.ZoneName, "file", zd.Zonefile)
+							}
+						}
 					}
 
 					// Enqueue delegation sync after successful apply

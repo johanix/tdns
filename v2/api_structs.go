@@ -222,6 +222,12 @@ type ZonePost struct {
 	// strings.
 	Primaries []PeerConf
 	Options   []string
+	// ZoneType selects what `zone add` creates: "secondary" (the default) or
+	// "primary" (template-provisioned). Template names the operator-blessed
+	// (dynamiczones: true) template a primary is expanded from — REQUIRED for
+	// primaries, unused for secondaries.
+	ZoneType string
+	Template string
 	// Inline TSIG key for the add/modify: when TsigName is set the server upserts
 	// {name, algo, secret} into its keys: store, points keyless primaries at it,
 	// and persists it with the zone (survives restart). TsigAlgo defaults to

@@ -274,6 +274,10 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.Downstreams = zr.Downstreams
 							zd.DownstreamAuth = zr.DownstreamAuth
 							zd.Zonefile = zr.Zonefile
+							zd.Template = zr.Template
+							if zr.PublishCadence != 0 {
+								zd.publishCadence = zr.PublishCadence
+							}
 							zd.ZoneType = zr.ZoneType
 							zd.Options = zr.Options
 							zd.UpdatePolicy = zr.UpdatePolicy
@@ -599,6 +603,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						Downstreams:      zr.Downstreams,
 						DownstreamAuth:   zr.DownstreamAuth,
 						Zonefile:         zr.Zonefile,
+						Template:         zr.Template,
 						ZoneType:         zr.ZoneType,
 						Options:          zr.Options,
 						UpdatePolicy:     zr.UpdatePolicy,
@@ -609,6 +614,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						KeyDB:            conf.Internal.KeyDB,
 						FirstZoneLoad:    true,
 						Status:           ZoneStatusPending, // registered + enqueued, no data yet (B6)
+						publishCadence:   zr.PublishCadence,
 					}
 
 					Zones.Set(zone, zd)
@@ -638,6 +644,22 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						})
 					} else if len(zd.OnFirstLoad) == 0 {
 						zd.OnFirstLoad = append(zd.OnFirstLoad, func(*ZoneData) {})
+					}
+					// Template-driven dynamic zones (dynamic primaries): wire
+					// delegation sync on first load, as ParseZones does for
+					// static zones. Scoped to zr.Template != "" so no
+					// pre-existing dynamic-zone class changes behavior.
+					if zr.Template != "" && (zd.Options[OptDelSyncParent] || zd.Options[OptDelSyncChild]) {
+						delegationSyncQ := conf.Internal.DelegationSyncQ
+						zd.OnFirstLoad = append(zd.OnFirstLoad, func(z *ZoneData) {
+							if delegationSyncQ == nil {
+								lgEngine.Error("DelegationSyncQ not available", "zone", z.ZoneName)
+								return
+							}
+							if err := z.SetupZoneSync(delegationSyncQ); err != nil {
+								lgEngine.Error("SetupZoneSync failed", "zone", z.ZoneName, "error", err)
+							}
+						})
 					}
 					zd.mu.Unlock()
 					if err := finishFirstLoadPolicy(ctx, zd, conf, zr.DnssecPolicy); err != nil {

@@ -254,6 +254,69 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			options[OptApiManagedZone] = true
 		}
 
+		// Dynamic PRIMARY with a template: re-expand the template and
+		// re-activate the update policy through the same shared helper the
+		// add path uses (prepareDynamicPrimary) — persisted fields win over
+		// the template by gap-fill, and the update policy is deliberately NOT
+		// persisted (it re-derives from the template; one source of truth).
+		// A hand-authored template-less primary entry keeps the generic path
+		// below, unchanged. On error the zone is registered in ERROR state
+		// (visible in zone list) rather than silently skipped — §5: missing/
+		// broken template ⇒ ERROR state.
+		if zoneType == Primary && zconf.Template != "" {
+			spec, perr := conf.prepareDynamicPrimary(zconf, nil, false)
+			if perr != nil {
+				lg.Error("dynamic primary: config invalid, zone in error state", "zone", zoneName, "template", zconf.Template, "err", perr)
+				zd := &ZoneData{
+					ZoneName:  zoneName,
+					ZoneType:  Primary,
+					ZoneStore: MapZone,
+					Zonefile:  zconf.Zonefile,
+					Template:  zconf.Template,
+					Logger:    log.Default(),
+					Options:   options,
+					Status:    ZoneStatusPending,
+					Data:      core.NewCmap[OwnerData](),
+					KeyDB:     conf.Internal.KeyDB,
+				}
+				Zones.Set(zoneName, zd)
+				zd.SetError(ConfigError, "dynamic primary: %v", perr)
+				skippedCount++
+				continue
+			}
+			specOptions := spec.Options
+			// Re-derive the internal marker (B5a) onto the freshly parsed set.
+			if zconf.ApiManaged {
+				specOptions[OptApiManagedZone] = true
+			}
+			zr := ZoneRefresher{
+				Name:           zoneName,
+				Force:          true, // load from file on startup
+				ZoneType:       Primary,
+				ZoneStore:      MapZone,
+				Zonefile:       spec.Zconf.Zonefile,
+				Template:       zconf.Template,
+				PublishCadence: spec.PublishCadence,
+				Notify:         spec.Zconf.Notify,
+				AllowNotify:    spec.Zconf.AllowNotify,
+				Downstreams:    spec.Zconf.Downstreams,
+				DownstreamAuth: spec.Zconf.DownstreamAuth,
+				ConfigUpdate:   true, // config-bearing (persisted dynamic zone)
+				Options:        specOptions,
+				UpdatePolicy:   spec.Policy,
+				DnssecPolicy:   spec.Zconf.DnssecPolicy,
+			}
+			select {
+			case conf.Internal.RefreshZoneCh <- zr:
+				loadedCount++
+				lg.Info("LoadDynamicZoneFiles: enqueued dynamic primary for refresh", "zone", zoneName, "template", zconf.Template, "zonefile", spec.Zconf.Zonefile)
+			case <-ctx.Done():
+				lg.Warn("LoadDynamicZoneFiles: context cancelled while enqueueing dynamic zone", "zone", zoneName)
+				return ctx.Err()
+			}
+			continue
+		}
+
 		// Log what we're loading
 		if options[OptCatalogZone] {
 			lg.Debug("enqueuing catalog zone for refresh", "zone", zoneName, "type", zconf.Type)
@@ -765,6 +828,11 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 		return "", fmt.Errorf("zone %s already exists", name)
 	}
 
+	// Primary zones take the template-constrained path (dynamic_primary.go).
+	if in.Type == Primary {
+		return conf.provisionDynamicPrimary(ctx, in, fromAPI)
+	}
+
 	// Stage an inline TSIG key (tsig_name/secret/algo) and apply it to keyless
 	// primaries. Staging only validates + rewrites; the key is committed to the
 	// live store later (after persistence), so a rejected add installs nothing.
@@ -926,6 +994,14 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 			lg.Warn("RemoveDynamicZone: failed to remove zone file", "zone", name, "path", zoneFilePath, "error", err)
 		}
 	}
+	// Also the zone's actual file when it differs (a template-expanded
+	// primary's file lives at the template's pattern path, not under
+	// zonedirectory:). An API-managed zone is disposable by construction.
+	if zd.Zonefile != "" {
+		if err := os.Remove(zd.Zonefile); err != nil && !os.IsNotExist(err) {
+			lg.Warn("RemoveDynamicZone: failed to remove zone file", "zone", name, "path", zd.Zonefile, "error", err)
+		}
+	}
 
 	return fmt.Sprintf("zone %s deleted", name), nil
 }
@@ -944,6 +1020,12 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	}
 	if !oldZd.Options[OptApiManagedZone] {
 		return "", fmt.Errorf("zone %s is not API-managed and cannot be modified here", name)
+	}
+	// v1: modify is secondary-only. Modify-for-primary has murky semantics
+	// (re-expansion clobbers policy-legitimate drift; partial application is a
+	// new merge concept) and every concrete use has a cleaner home.
+	if oldZd.ZoneType == Primary {
+		return "", fmt.Errorf("zone %s is a primary; modify is not supported for primary zones (content via DNS UPDATE, keys via the keystore API, config via delete + re-add)", name)
 	}
 	// Stage an inline TSIG key (validate + rewrite keyless primaries) without
 	// mutating the live store. The key is committed only after the modify succeeds.

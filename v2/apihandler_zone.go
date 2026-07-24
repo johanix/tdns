@@ -214,9 +214,21 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			resp.Zones = zones
 
 		case "add":
+			zoneType := Secondary
+			switch strings.ToLower(zp.ZoneType) {
+			case "", "secondary":
+				// default
+			case "primary":
+				zoneType = Primary
+			default:
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("unknown zone type %q (valid: primary, secondary)", zp.ZoneType)
+				return
+			}
 			msg, err := Conf.ProvisionDynamicZone(r.Context(), DynamicZoneInput{
 				Name:       zp.Zone,
-				Type:       Secondary,
+				Type:       zoneType,
+				Template:   zp.Template,
 				Primaries:  zp.Primaries,
 				Options:    zoneOptionsFromStrings(zp.Options),
 				TsigName:   zp.TsigName,
