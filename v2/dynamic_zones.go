@@ -669,11 +669,19 @@ func (conf *Config) RemoveDynamicZoneFromConfig(zoneName string) error {
 	return conf.WriteDynamicConfigFile()
 }
 
-// CheckDynamicConfigFileIncluded checks if the dynamic config file is included in the main config
-// Returns true if included, false otherwise (logs warning if not included)
+// CheckDynamicConfigFileIncluded checks whether the dynamic config file is
+// pulled in via include: in the main config — and warns if it IS. Dynamic
+// zones are loaded at startup by LoadDynamicZoneFiles (which re-derives the
+// ApiManaged/SourceCatalog markers and, for template primaries, re-expands the
+// template); including the file additionally routes them through ParseZones,
+// which loses the markers (the zones degrade to looking static) — and the
+// include merge OVERRIDES list-valued keys, so a dynamic file carrying zones:
+// clobbers the zones: of any other config file. Returns true if included.
+// (Historical note: this check used to warn in the opposite direction, from
+// before LoadDynamicZoneFiles owned the boot path.)
 func (conf *Config) CheckDynamicConfigFileIncluded(includedFiles []string) bool {
 	if conf.DynamicZones.ConfigFile == "" {
-		return true // No config file configured, nothing to check
+		return false // No config file configured, nothing to check
 	}
 
 	configFileAbs := filepath.Clean(conf.DynamicZones.ConfigFile)
@@ -682,12 +690,10 @@ func (conf *Config) CheckDynamicConfigFileIncluded(includedFiles []string) bool 
 	for _, includedFile := range includedFiles {
 		includedFileAbs := filepath.Clean(includedFile)
 		if configFileAbs == includedFileAbs {
+			lg.Warn("dynamiczones.configfile is listed in include:; remove it — dynamic zones load at startup on their own, and the include path both drops their API-managed/catalog markers and overrides any zones: list from other config files", "path", conf.DynamicZones.ConfigFile)
 			return true
 		}
 	}
-
-	// Not included - log warning
-	lg.Warn("dynamic config file not included via 'include:' in main config, dynamic zones will not be loaded on startup", "path", conf.DynamicZones.ConfigFile)
 	return false
 }
 

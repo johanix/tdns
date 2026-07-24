@@ -434,7 +434,40 @@ is shared with the secondary path; only the rewiring target differs
 (static zones keep their existing direct-assignment path in `ParseZones` —
 untouched).
 
-### 11.10 Delivery shape
+### 11.10 Found live: query-handler registration on a zone-less server
+
+The live smoke run (add → serve on a config with `zones:` empty) exposed a
+pre-existing latent bug affecting ALL dynamic zones, not just primaries:
+`RegisterDefaultQueryHandlers` only registered the zone-based query handler
+when the config had static zones at boot, so a zone-less server — exactly the
+self-service deployment this feature targets — REFUSEd every query for
+dynamically added zones. Fixed: the handler also registers when dynamic zones
+are possible (`dynamiczones.configfile` set, or a non-empty
+`dynamic.allowed`). Testbeds never saw this because they always carry static
+zones.
+
+Relatedly, `CheckDynamicConfigFileIncluded` warned in the WRONG direction
+("not included via include: — dynamic zones will not be loaded on startup"),
+a leftover from before `LoadDynamicZoneFiles` owned the boot path. It now
+warns when the dynamic config file IS in `include:` (which would drop the
+API-managed/catalog markers via ParseZones and clobber other files' `zones:`
+lists through the include merge's list-override). The sample config no longer
+lists the dynamic file under `include:`.
+
+### 11.11 Live validation (2026-07-24)
+
+Smoke-validated end-to-end on a freshly built tdns-auth with an empty
+`zones:` list: `zone add --type primary --template api-primary` → bootstrap
+apex synthesized → SOA/NS/glue served; unsigned DNS UPDATE refused; restart →
+`LoadDynamicZoneFiles` re-expanded the template (policy re-derived, zone
+Ready and still update-gated); `zone delete` → RCODE back to REFUSED, zone
+file removed, dynamic config entry gone. Gate matrix, bootstrap edge cases,
+TSIG rewiring, and the activation helper are covered by unit tests
+(`dynamic_primary_test.go`, `dynamic_zones_gates_test.go`,
+`update_policy_activation_test.go`); full `-race` suites green in all five
+modules.
+
+### 11.12 Delivery shape
 
 Implemented as ONE branch/PR (`feature/dynamic-primary-zones`) with commits
 sequenced per §10.4's PR1→PR4 stages, because the owner asked for a single

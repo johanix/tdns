@@ -178,14 +178,20 @@ func DefaultQueryHandler(ctx context.Context, req *DnsQueryRequest) error {
 
 // RegisterDefaultQueryHandlers registers the default zone-based query handler.
 // This is called automatically during TDNS initialization.
-// The default handler is registered if (a) zones are configured in the config, or
-// (b) app type is Agent (agent gets an autozone from SetupAgent, needed for SOA/AXFR).
+// The default handler is registered if (a) zones are configured in the config,
+// (b) app type is Agent (agent gets an autozone from SetupAgent, needed for
+// SOA/AXFR), or (c) dynamic zones can appear at runtime (persisted dynamic
+// config, or API zone-adds allowed) — a zone-less server that mints its first
+// zone via `zone add` must not REFUSE its queries.
 // Apps that need .server. query support should register ServerQueryHandler themselves.
 func RegisterDefaultQueryHandlers(conf *Config) error {
 	// Register default query handler if we will have zones to serve:
 	// - zones in config (auth, combiner, etc.), or
 	// - agent (autozone is created later in SetupAgent; handler will serve SOA/AXFR at query time)
-	needDefault := conf != nil && (len(conf.Zones) > 0 || Globals.App.Type == AppTypeAgent)
+	// - dynamic zones possible: persisted dynamic zones load at startup
+	//   (LoadDynamicZoneFiles) and API adds create zones at runtime
+	needDefault := conf != nil && (len(conf.Zones) > 0 || Globals.App.Type == AppTypeAgent ||
+		conf.DynamicZones.ConfigFile != "" || len(conf.DynamicZones.Dynamic.Allowed) > 0)
 	if needDefault {
 		if err := RegisterQueryHandler(0, DefaultQueryHandler); err != nil {
 			return err
