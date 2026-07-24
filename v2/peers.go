@@ -143,11 +143,14 @@ func validatePeerDef(p *PeerDef) error {
 	if len(p.Prefixes) == 0 {
 		if host := p.addrHost(); host != "" {
 			if ip := net.ParseIP(host); ip != nil {
-				bits := 32
-				if ip.To4() == nil { // nil => IPv6
-					bits = 128
+				// Use the canonical IPv4 form for a v4 (or v4-mapped) address, so
+				// we never emit "::ffff:a.b.c.d/32" — which parseIPSpec would read
+				// as a v6 /32 (a huge block), not the intended single host.
+				if v4 := ip.To4(); v4 != nil {
+					p.Prefixes = []string{v4.String() + "/32"}
+				} else {
+					p.Prefixes = []string{host + "/128"}
 				}
-				p.Prefixes = []string{fmt.Sprintf("%s/%d", host, bits)}
 			}
 		}
 		// A hostname addr yields no prefix default — inbound use then

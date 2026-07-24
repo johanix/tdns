@@ -40,14 +40,14 @@ func newTestTLSCert(t *testing.T, dnsNames []string, ips []net.IP) (tls.Certific
 		t.Fatalf("generate key: %v", err)
 	}
 	tmpl := x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "xot-test"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-		KeyUsage:     x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
-		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
-		DNSNames:     dnsNames,
-		IPAddresses:  ips,
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "xot-test"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageCertSign,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+		DNSNames:              dnsNames,
+		IPAddresses:           ips,
 		BasicConstraintsValid: true,
 		IsCA:                  true, // self-signed: lets the client use it as its own root
 	}
@@ -112,7 +112,7 @@ func startTestAXFRServerTLSConfigIMR(t *testing.T, zd *ZoneData, tsigProvider dn
 				_ = w2.WriteMsg(m)
 				return
 			}
-			_, _ = zd.ZoneTransferOut(w2, req, imr)
+			_, _ = zd.ZoneTransferOut(context.Background(), w2, req, imr)
 		}
 		if tsigProvider != nil {
 			TsigSigningHandler(serve)(rec, r)

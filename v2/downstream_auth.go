@@ -13,6 +13,7 @@
 package tdns
 
 import (
+	"context"
 	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
@@ -94,7 +95,7 @@ const daneClientTLSAPort = "853"
 // checkInboundTSIG) plus the per-zone downstream-auth mechanism ladder.
 // Returns nil when the transfer is authorized. imr may be nil; it is only
 // needed for the tls-dane mechanism (which fails closed without it).
-func (zd *ZoneData) authorizeTransfer(w dns.ResponseWriter, r *dns.Msg, imr *Imr) error {
+func (zd *ZoneData) authorizeTransfer(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, imr *Imr) error {
 	src, ok := peerIP(w.RemoteAddr().String())
 	if !ok {
 		return fmt.Errorf("unparseable source %q", w.RemoteAddr())
@@ -168,7 +169,7 @@ func (zd *ZoneData) authorizeTransfer(w dns.ResponseWriter, r *dns.Msg, imr *Imr
 			}
 		}
 		if allowedSet[MechTLSDane] && ti.Dane && ti.Name != "" {
-			if err := verifyClientCertDANE(leaf, ti.Name, imr); err == nil {
+			if err := verifyClientCertDANE(ctx, leaf, ti.Name, imr); err == nil {
 				return nil
 			} else {
 				tried = append(tried, fmt.Sprintf("tls-dane(%v)", err))
@@ -266,11 +267,11 @@ func verifyClientCertPKIX(leaf *x509.Certificate, presented []*x509.Certificate,
 // DNSSEC-validated TLSA RRset at _853._tcp.<name>. Fails closed: no IMR,
 // lookup failure, or a not-secure state all refuse (the lab-mode
 // require_dnssec_validation escape hatch is honored inside the lookup).
-func verifyClientCertDANE(leaf *x509.Certificate, name string, imr *Imr) error {
+func verifyClientCertDANE(ctx context.Context, leaf *x509.Certificate, name string, imr *Imr) error {
 	if imr == nil {
 		return fmt.Errorf("tls-dane requires the built-in IMR")
 	}
-	rrset, err := lookupTLSAValidatedIMR(imr, name, daneClientTLSAPort)
+	rrset, err := lookupTLSAValidatedIMR(ctx, imr, name, daneClientTLSAPort)
 	if err != nil {
 		return err
 	}

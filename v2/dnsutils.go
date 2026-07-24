@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -247,14 +248,14 @@ func estimateEnvelopeSize(rrs []dns.RR) int {
 // ZoneTransferOut streams the zone to an authorized downstream. imr is only
 // consulted by the downstream-auth tls-dane mechanism and may be nil (the
 // mechanism then fails closed).
-func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg, imr *Imr) (int, error) {
+func (zd *ZoneData) ZoneTransferOut(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, imr *Imr) (int, error) {
 	zone := dns.Fqdn(zd.ZoneName)
 
 	// The complete authorization gate: downstreams ACL (address + TSIG,
 	// unchanged semantics) plus the per-zone downstream-auth mechanism
 	// ladder (peers tls-identity checks against the connection's client
 	// certificate). See v2/downstream_auth.go.
-	if err := zd.authorizeTransfer(w, r, imr); err != nil {
+	if err := zd.authorizeTransfer(ctx, w, r, imr); err != nil {
 		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer to %s: %v", zone, w.RemoteAddr(), err)
 		return zd.refuseTransfer(w, r)
 	}

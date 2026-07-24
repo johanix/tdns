@@ -317,13 +317,15 @@ func ServerTLSConfigForDoT(conf *Config, cert *tls.Certificate, requestClientCer
 // lab-mode escape hatch (config: imrengine.require_dnssec_validation) is
 // honored, with a loud warning, to match how the rest of tdns treats TLSA.
 func (conf *Config) lookupTLSAValidated(name, port string) (*core.RRset, error) {
-	return lookupTLSAValidatedIMR(conf.Internal.ImrEngine, name, port)
+	// Outbound secondary-pull path: a background refresh, not a request, so it
+	// uses context.Background() (the DANE lookup's own timeout still applies).
+	return lookupTLSAValidatedIMR(context.Background(), conf.Internal.ImrEngine, name, port)
 }
 
 // lookupTLSAValidatedIMR is the IMR-based core of lookupTLSAValidated, usable
 // where no *Config is in reach (the transfer-time downstream-auth tls-dane
 // check receives the imr through QueryResponder).
-func lookupTLSAValidatedIMR(imr *Imr, name, port string) (*core.RRset, error) {
+func lookupTLSAValidatedIMR(ctx context.Context, imr *Imr, name, port string) (*core.RRset, error) {
 	if imr == nil {
 		return nil, fmt.Errorf("xot: dane requires the built-in IMR to be active")
 	}
@@ -346,7 +348,7 @@ func lookupTLSAValidatedIMR(imr *Imr, name, port string) (*core.RRset, error) {
 		return cr.RRset, nil
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), daneLookupTimeout)
+	ctx, cancel := context.WithTimeout(ctx, daneLookupTimeout)
 	defer cancel()
 	rrset, err := imr.DefaultRRsetFetcher(ctx, owner, dns.TypeTLSA)
 	if err != nil {
