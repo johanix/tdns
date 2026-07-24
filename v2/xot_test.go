@@ -93,6 +93,9 @@ func startTestAXFRServerTLSConfigIMR(t *testing.T, zd *ZoneData, tsigProvider dn
 	tlsLn := tls.NewListener(ln, tlsCfg)
 
 	srv := &axfrTestServer{addr: ln.Addr().String()}
+	// srvCtx models the daemon lifecycle: cancelled at shutdown so any
+	// in-flight transfer-out (and the DANE lookup it propagates) unwinds promptly.
+	srvCtx, srvCancel := context.WithCancel(context.Background())
 	zone := dns.Fqdn(zd.ZoneName)
 	mux := dns.NewServeMux()
 	mux.HandleFunc(zone, func(w dns.ResponseWriter, r *dns.Msg) {
@@ -112,7 +115,7 @@ func startTestAXFRServerTLSConfigIMR(t *testing.T, zd *ZoneData, tsigProvider dn
 				_ = w2.WriteMsg(m)
 				return
 			}
-			_, _ = zd.ZoneTransferOut(context.Background(), w2, req, imr)
+			_, _ = zd.ZoneTransferOut(srvCtx, w2, req, imr)
 		}
 		if tsigProvider != nil {
 			TsigSigningHandler(serve)(rec, r)
@@ -135,9 +138,12 @@ func startTestAXFRServerTLSConfigIMR(t *testing.T, zd *ZoneData, tsigProvider dn
 		t.Fatal("test DoT AXFR server did not start")
 	}
 	srv.shutdown = func() {
+		srvCancel()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_ = dnsSrv.ShutdownContext(ctx)
+		if err := dnsSrv.ShutdownContext(ctx); err != nil {
+			t.Errorf("test DoT AXFR server did not shut down cleanly within timeout: %v", err)
+		}
 	}
 	return srv
 }

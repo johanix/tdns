@@ -36,6 +36,9 @@ func startTestAXFRServerCore(t *testing.T, zd *ZoneData, tsigProvider dns.TsigPr
 	}
 
 	srv := &axfrTestServer{addr: ln.Addr().String()}
+	// srvCtx models the daemon lifecycle: cancelled at shutdown so any
+	// in-flight transfer-out (and the ctx it propagates) unwinds promptly.
+	srvCtx, srvCancel := context.WithCancel(context.Background())
 	zone := dns.Fqdn(zd.ZoneName)
 	mux := dns.NewServeMux()
 	mux.HandleFunc(zone, func(w dns.ResponseWriter, r *dns.Msg) {
@@ -44,7 +47,7 @@ func startTestAXFRServerCore(t *testing.T, zd *ZoneData, tsigProvider dns.TsigPr
 			record:         srv.recordSize,
 		}
 		serve := func(w2 dns.ResponseWriter, req *dns.Msg) {
-			_, _ = zd.ZoneTransferOut(context.Background(), w2, req, nil)
+			_, _ = zd.ZoneTransferOut(srvCtx, w2, req, nil)
 		}
 		if tsigProvider != nil {
 			TsigSigningHandler(serve)(rec, r)
@@ -67,9 +70,12 @@ func startTestAXFRServerCore(t *testing.T, zd *ZoneData, tsigProvider dns.TsigPr
 		t.Fatal("test AXFR server did not start")
 	}
 	srv.shutdown = func() {
+		srvCancel()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		_ = dnsSrv.ShutdownContext(ctx)
+		if err := dnsSrv.ShutdownContext(ctx); err != nil {
+			t.Errorf("test AXFR server did not shut down cleanly within timeout: %v", err)
+		}
 	}
 	return srv
 }
