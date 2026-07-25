@@ -496,6 +496,7 @@ func (zd *ZoneData) refuseTransfer(w dns.ResponseWriter, r *dns.Msg) (int, error
 	signResponseLikeRequest(w, r, m)
 	if err := w.WriteMsg(m); err != nil {
 		zd.Logger.Printf("ZoneTransferOut: %s: WriteMsg on REFUSED failed: %v", dns.Fqdn(zd.ZoneName), err)
+		return 0, err
 	}
 	return 0, nil
 }

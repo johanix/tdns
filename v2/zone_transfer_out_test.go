@@ -473,6 +473,25 @@ func TestZoneTransferOut_RefusesWhenNotReady(t *testing.T) {
 	}
 }
 
+// TestZoneTransferOut_RefuseWriteErrorPropagates mirrors the IXFR single-SOA
+// error-path test: a WriteMsg failure on the REFUSED reply must surface to the
+// caller rather than being swallowed as (0, nil). AXFR and IXFR are treated the
+// same way on the refuse path (failingRW is defined in ixfr_test.go).
+func TestZoneTransferOut_RefuseWriteErrorPropagates(t *testing.T) {
+	zd := loadTestTransferZone(t, basicZone)
+	zd.Status = ZoneStatusLoading // force the refuse path
+	w := &failingRW{fakeRW: fakeRW{remote: udpAddr("127.0.0.1")}, writeErr: fmt.Errorf("boom")}
+	r := new(dns.Msg)
+	r.SetAxfr(zd.ZoneName)
+	sent, err := zd.ZoneTransferOut(context.Background(), w, r, nil)
+	if err == nil {
+		t.Fatal("expected the WriteMsg failure to propagate, got nil error")
+	}
+	if sent != 0 {
+		t.Fatalf("expected 0 RRs reported on write failure, got %d", sent)
+	}
+}
+
 // TestZoneTransferOut_RefusesUnsignedMustBeSignedZone: a zone configured for
 // online/inline signing whose SOA carries no RRSIG (unsigned/broken) must be
 // refused, never transferred unsigned to a secondary (fail-closed).
