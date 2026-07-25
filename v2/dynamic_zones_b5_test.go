@@ -83,10 +83,10 @@ func TestZoneDataToZoneConf_PersistsAsWrittenPrimaries(t *testing.T) {
 func TestShouldPersistZone_DynamicBranch(t *testing.T) {
 	conf := &Config{}
 	conf.DynamicZones.ZoneDirectory = "/tmp/zones"
-	conf.DynamicZones.Dynamic.Allowed = true
+	conf.DynamicZones.Dynamic.Allowed = ZoneTypeList{"secondary"}
 	conf.DynamicZones.Dynamic.Storage = "persistent"
 
-	api := &ZoneData{ZoneName: "api.example.", Options: map[ZoneOption]bool{OptApiManagedZone: true}}
+	api := &ZoneData{ZoneName: "api.example.", ZoneType: Secondary, Options: map[ZoneOption]bool{OptApiManagedZone: true}}
 	if !conf.ShouldPersistZone(api) {
 		t.Error("API-managed zone should persist when dynamic allowed+persistent")
 	}

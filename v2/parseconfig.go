@@ -325,6 +325,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 		DecodeHook: mapstructure.ComposeDecodeHookFunc(
 			stringToPeerConfHook(),
 			stringToAclEntryHook(),
+			legacyDynamicAllowedHook(),
 		),
 	}
 	decoder, err := mapstructure.NewDecoder(decoderConfig)
@@ -366,6 +367,14 @@ func (conf *Config) ParseConfig(reload bool) error {
 		conf.Internal.ServerErrors = NewServerErrorRegistry()
 	}
 	conf.validateDnsEngineCerts()
+
+	// dynamiczones: value validation (e.g. an unknown zone type in
+	// dynamic.allowed) is a hard config error — the decoder accepts any
+	// string, so the check lives here. A legacy bool for dynamic.allowed is
+	// caught earlier, by legacyDynamicAllowedHook failing the decode.
+	if err := conf.DynamicZones.Validate(); err != nil {
+		return err
+	}
 
 	if len(md.Unused) > 0 {
 		// Split the unused keys into two buckets: keys that match a known
@@ -905,87 +914,12 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 
 		lgConfig.Debug("zone incoming update policy", "zone", zname, "policy", fmt.Sprintf("%+v", zconf.UpdatePolicy))
 
-		switch zconf.UpdatePolicy.Child.Type {
-		case "selfsub", "self":
-			// all ok, we know these
-		case "none", "":
-			// these are also ok, but imply that no updates are allowed
-			options[OptAllowChildUpdates] = false
-		default:
-			lgConfig.Error("zone has unknown child update policy type, zone in error state", "zone", zname, "type", zconf.UpdatePolicy.Child.Type)
-			zd.SetError(ConfigError, "unknown child update policy type: %s", zconf.UpdatePolicy.Child.Type)
+		policy, perr := activateUpdatePolicy(zconf, options)
+		if perr != nil {
+			lgConfig.Error("zone update policy invalid, zone in error state", "zone", zname, "err", perr)
+			zd.SetError(ConfigError, "%s", perr)
 			broken_zones = append(broken_zones, zname)
 			continue
-		}
-
-		// A zone that accepts child updates MUST have a delegation backend.
-		// Without one, the write path mutates in-memory zone data while the
-		// scanner read path queries the (nil) backend, so diff computation
-		// always sees "empty current state" and child updates accumulate
-		// without ever being removed. Refuse to start such a zone rather
-		// than letting it silently misbehave.
-		if options[OptAllowChildUpdates] && zconf.DelegationBackend == "" {
-			lgConfig.Error("zone has 'allow-child-updates' but no 'delegationbackend' configured, zone in error state", "zone", zname)
-			zd.SetError(ConfigError, "allow-child-updates requires delegationbackend to be configured (e.g. 'delegationbackend: direct')")
-			broken_zones = append(broken_zones, zname)
-			continue
-		}
-
-		switch zconf.UpdatePolicy.Zone.Type {
-		case "selfsub", "self":
-			// all ok, we know these
-		case "none", "":
-			// these are also ok, but imply that no updates are allowed
-			options[OptAllowUpdates] = false
-		default:
-			lgConfig.Error("zone has unknown update policy type, zone in error state", "zone", zname, "type", zconf.UpdatePolicy.Zone.Type)
-			zd.SetError(ConfigError, "unknown update policy type: %s", zconf.UpdatePolicy.Zone.Type)
-			broken_zones = append(broken_zones, zname)
-			continue
-		}
-
-		// log.Printf("*** ParseZones: 2")
-		var rrt uint16
-		var exist bool
-		childrrtypes := map[uint16]bool{}
-		for _, rrtype := range zconf.UpdatePolicy.Child.RRtypes {
-			rrtype = strings.ToUpper(rrtype)
-			if rrt, exist = dns.StringToType[rrtype]; exist {
-				childrrtypes[rrt] = true
-			}
-		}
-
-		// log.Printf("*** ParseZones: 3")
-		zonerrtypes := map[uint16]bool{}
-		for _, rrtype := range zconf.UpdatePolicy.Zone.RRtypes {
-			rrtype = strings.ToUpper(rrtype)
-			if rrt, exist = dns.StringToType[rrtype]; exist {
-				zonerrtypes[rrt] = true
-			}
-		}
-
-		// log.Printf("*** ParseZones: 4")
-		childTTL := zconf.UpdatePolicy.Child.TTL
-		if childTTL == 0 {
-			childTTL = 120
-		}
-		zoneTTL := zconf.UpdatePolicy.Zone.TTL
-		if zoneTTL == 0 {
-			zoneTTL = 120
-		}
-		policy := UpdatePolicy{
-			Child: UpdatePolicyDetail{
-				Type:         zconf.UpdatePolicy.Child.Type,
-				RRtypes:      childrrtypes,
-				KeyBootstrap: zconf.UpdatePolicy.Child.KeyBootstrap,
-				KeyUpload:    zconf.UpdatePolicy.Child.KeyUpload,
-				TTL:          childTTL,
-			},
-			Zone: UpdatePolicyDetail{
-				Type:    zconf.UpdatePolicy.Zone.Type,
-				RRtypes: zonerrtypes,
-				TTL:     zoneTTL,
-			},
 		}
 
 		if Globals.App.Type == AppTypeAgent && zconf.Type == "primary" {
@@ -1242,6 +1176,88 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 	return all_zones, broken_zones, nil
 }
 
+// activateUpdatePolicy validates a zone's update-policy config and builds the
+// runtime UpdatePolicy, mutating options to reflect it: a "none"/unset policy
+// type forces the corresponding OptAllowChildUpdates/OptAllowUpdates option
+// off, and allow-child-updates without a delegation backend is refused (the
+// write path would mutate in-memory zone data while the scanner queries the
+// nil backend — silent misbehavior). Extracted verbatim from ParseZones so the
+// dynamic-primary add/load paths activate policy through the SAME code and
+// cannot drift; error strings are the exact former ConfigError texts. Unknown
+// RRtype names are silently dropped (pre-extraction behavior, preserved).
+func activateUpdatePolicy(zconf *ZoneConf, options map[ZoneOption]bool) (UpdatePolicy, error) {
+	switch zconf.UpdatePolicy.Child.Type {
+	case "selfsub", "self":
+		// all ok, we know these
+	case "none", "":
+		// these are also ok, but imply that no updates are allowed
+		options[OptAllowChildUpdates] = false
+	default:
+		return UpdatePolicy{}, fmt.Errorf("unknown child update policy type: %s", zconf.UpdatePolicy.Child.Type)
+	}
+
+	// A zone that accepts child updates MUST have a delegation backend.
+	// Without one, the write path mutates in-memory zone data while the
+	// scanner read path queries the (nil) backend, so diff computation
+	// always sees "empty current state" and child updates accumulate
+	// without ever being removed. Refuse to start such a zone rather
+	// than letting it silently misbehave.
+	if options[OptAllowChildUpdates] && zconf.DelegationBackend == "" {
+		return UpdatePolicy{}, fmt.Errorf("allow-child-updates requires delegationbackend to be configured (e.g. 'delegationbackend: direct')")
+	}
+
+	switch zconf.UpdatePolicy.Zone.Type {
+	case "selfsub", "self":
+		// all ok, we know these
+	case "none", "":
+		// these are also ok, but imply that no updates are allowed
+		options[OptAllowUpdates] = false
+	default:
+		return UpdatePolicy{}, fmt.Errorf("unknown update policy type: %s", zconf.UpdatePolicy.Zone.Type)
+	}
+
+	var rrt uint16
+	var exist bool
+	childrrtypes := map[uint16]bool{}
+	for _, rrtype := range zconf.UpdatePolicy.Child.RRtypes {
+		rrtype = strings.ToUpper(rrtype)
+		if rrt, exist = dns.StringToType[rrtype]; exist {
+			childrrtypes[rrt] = true
+		}
+	}
+
+	zonerrtypes := map[uint16]bool{}
+	for _, rrtype := range zconf.UpdatePolicy.Zone.RRtypes {
+		rrtype = strings.ToUpper(rrtype)
+		if rrt, exist = dns.StringToType[rrtype]; exist {
+			zonerrtypes[rrt] = true
+		}
+	}
+
+	childTTL := zconf.UpdatePolicy.Child.TTL
+	if childTTL == 0 {
+		childTTL = 120
+	}
+	zoneTTL := zconf.UpdatePolicy.Zone.TTL
+	if zoneTTL == 0 {
+		zoneTTL = 120
+	}
+	return UpdatePolicy{
+		Child: UpdatePolicyDetail{
+			Type:         zconf.UpdatePolicy.Child.Type,
+			RRtypes:      childrrtypes,
+			KeyBootstrap: zconf.UpdatePolicy.Child.KeyBootstrap,
+			KeyUpload:    zconf.UpdatePolicy.Child.KeyUpload,
+			TTL:          childTTL,
+		},
+		Zone: UpdatePolicyDetail{
+			Type:    zconf.UpdatePolicy.Zone.Type,
+			RRtypes: zonerrtypes,
+			TTL:     zoneTTL,
+		},
+	}, nil
+}
+
 // ExpandTemplate applies template tmpl's settings to zone zconf. Every config
 // field the template SETS is copied to the zone UNLESS the zone already set it
 // (the zone always wins), so new ZoneConf config fields are propagated
@@ -1286,6 +1302,9 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 	bespoke := map[string]bool{
 		"Name": true, "Template": true, // never copied from a template
 		"Zonefile": true, "OptionsStrs": true, "DnssecPolicy": true, // handled above
+		// DynamicZones is a property of the TEMPLATE (API-instantiable), not
+		// of the zones stamped out from it — never copied.
+		"DynamicZones": true,
 	}
 	gapFillStruct(reflect.ValueOf(&zconf).Elem(), reflect.ValueOf(tmpl).Elem(), bespoke, false)
 	return zconf, nil
@@ -1836,6 +1855,22 @@ func stringToAclEntryHook() mapstructure.DecodeHookFunc {
 			return data, nil
 		}
 		return AclEntry{Legacy: data.(string)}, nil
+	}
+}
+
+// legacyDynamicAllowedHook turns a legacy bool value for
+// dynamiczones.dynamic.allowed into a hard config error naming the new list
+// syntax. The field decodes into ZoneTypeList — a named type used by exactly
+// that key — so the hook cannot misfire on any other config field. There is
+// deliberately NO legacy decode (true -> [secondary]): the dynamic-primary
+// extension made "allowed" mean two independent capabilities, and a silent
+// mapping would hide that the operator has a decision to make.
+func legacyDynamicAllowedHook() mapstructure.DecodeHookFunc {
+	return func(from reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
+		if to != reflect.TypeOf(ZoneTypeList(nil)) || from.Kind() != reflect.Bool {
+			return data, nil
+		}
+		return nil, fmt.Errorf("dynamiczones.dynamic.allowed is now a list of zone types, not a bool: use `allowed: [secondary]` (add `primary` to also allow API-created primary zones)")
 	}
 }
 

@@ -206,25 +206,42 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 	// flag: dynamic zones are map-only. The --tsig-* flags are accepted now but
 	// inert in Improvement 1 (a non-NOKEY key is rejected server-side).
 	var dzPrimaryKey, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo string
+	var dzZoneType, dzTemplate string
 	var dzPrimaries, dzOptions []string
 
 	add := &cobra.Command{
 		Use:   "add",
-		Short: "Add a dynamic secondary zone at runtime (persists across restart)",
+		Short: "Add a dynamic zone at runtime: secondary, or template-constrained primary (persists across restart)",
 		Run: func(cmd *cobra.Command, args []string) {
-			RunZoneAdd(role, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo)
+			// --primaries is required for secondaries (the pre-primary
+			// MarkFlagRequired behavior) and refused server-side for
+			// primaries; --template is required for primaries.
+			switch strings.ToLower(dzZoneType) {
+			case "", "secondary":
+				if len(dzPrimaries) == 0 {
+					fmt.Println("Error: a secondary zone requires --primaries")
+					os.Exit(1)
+				}
+			case "primary":
+				if dzTemplate == "" {
+					fmt.Println("Error: a primary zone requires --template (an operator-blessed template with dynamiczones: true)")
+					os.Exit(1)
+				}
+			}
+			RunZoneAdd(role, dzZoneType, dzTemplate, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo)
 		},
 	}
 	add.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add")
-	add.Flags().StringSliceVar(&dzPrimaries, "primaries", nil, "Primary (upstream) addresses [host:port], comma-separated")
+	add.Flags().StringVar(&dzZoneType, "type", "secondary", "Zone type: secondary (default) or primary (requires --template)")
+	add.Flags().StringVar(&dzTemplate, "template", "", "Config template for a primary zone (must carry dynamiczones: true)")
+	add.Flags().StringSliceVar(&dzPrimaries, "primaries", nil, "Primary (upstream) addresses [host:port], comma-separated (secondary zones)")
 	add.Flags().StringVar(&dzPrimaryKey, "primary-key", tdns.NOKEY, "Primary TSIG key name applied to all primaries (NOKEY for none)")
-	add.Flags().StringSliceVar(&dzOptions, "options", nil, "Zone options (comma-separated)")
-	add.Flags().StringVar(&dzTsigName, "tsig-name", "", "Inline TSIG key name; created in keystore if absent and applied to keyless primaries")
+	add.Flags().StringSliceVar(&dzOptions, "options", nil, "Zone options (comma-separated; secondary zones — primaries take options from the template)")
+	add.Flags().StringVar(&dzTsigName, "tsig-name", "", "Inline TSIG key name; created in keystore if absent and applied to keyless primaries (secondary) or keyless downstreams (primary)")
 	add.Flags().StringVar(&dzTsigSecretFile, "tsig-secret-file", "", "File containing the inline TSIG secret (base64); preferred over --tsig-secret")
 	add.Flags().StringVar(&dzTsigSecret, "tsig-secret", "", "Inline TSIG secret (base64). WARNING: visible in shell history / process list; prefer --tsig-secret-file")
 	add.Flags().StringVar(&dzTsigAlgo, "tsig-algo", "", "Inline TSIG algorithm (default hmac-sha256)")
 	add.MarkFlagRequired("zone")
-	add.MarkFlagRequired("primaries")
 
 	del := &cobra.Command{
 		Use:   "delete",
@@ -584,7 +601,7 @@ func resolveTsigSecret(literal, file string) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
-func RunZoneAdd(role string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigSecretFile, tsigAlgo string) {
+func RunZoneAdd(role, zoneType, template string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigSecretFile, tsigAlgo string) {
 	if tdns.Globals.Zonename == "" {
 		fmt.Println("Error: zone name not specified")
 		os.Exit(1)
@@ -601,6 +618,8 @@ func RunZoneAdd(role string, primaries []string, primaryKey string, options []st
 	cr, err := SendZoneCommand(api, tdns.ZonePost{
 		Command:    "add",
 		Zone:       dns.Fqdn(tdns.Globals.Zonename),
+		ZoneType:   zoneType,
+		Template:   template,
 		Primaries:  peerConfsFromAddrs(primaries, primaryKey),
 		Options:    options,
 		TsigName:   tsigName,

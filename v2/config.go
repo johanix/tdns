@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -444,13 +445,54 @@ type DynamicZonesConf struct {
 	ZoneDirectory  string                   `yaml:"zonedirectory" mapstructure:"zonedirectory"`     // Absolute path to zone file directory
 	CatalogZones   DynamicZoneTypeConf      `yaml:"catalog_zones" mapstructure:"catalog_zones"`     // Configuration for catalog zones
 	CatalogMembers DynamicCatalogMemberConf `yaml:"catalog_members" mapstructure:"catalog_members"` // Configuration for catalog member zones
-	Dynamic        DynamicZoneTypeConf      `yaml:"dynamic" mapstructure:"dynamic"`                 // Configuration for direct API-created zones (future)
+	Dynamic        DynamicApiZoneConf       `yaml:"dynamic" mapstructure:"dynamic"`                 // Configuration for direct API-created zones
 }
 
 // DynamicZoneTypeConf defines configuration for a type of dynamic zone
 type DynamicZoneTypeConf struct {
 	Allowed bool   `yaml:"allowed" mapstructure:"allowed"`                                              // Whether this type of zone is allowed
 	Storage string `yaml:"storage" mapstructure:"storage" validate:"omitempty,oneof=memory persistent"` // "memory" or "persistent"
+}
+
+// ZoneTypeList is the value of dynamiczones.dynamic.allowed: the zone types
+// ("primary", "secondary") that may be created via the zone-add API. A named
+// type so legacyDynamicAllowedHook can target exactly this field and turn a
+// legacy bool value into a config error naming the new syntax.
+type ZoneTypeList []string
+
+// DynamicApiZoneConf defines configuration for direct API-created zones
+// (zone add/delete/modify). Unlike the catalog blocks (DynamicZoneTypeConf,
+// still bool-gated), the API gate is a LIST of allowed zone types — the
+// dynamic-primary extension made "allowed" two independent capabilities.
+// Absent/empty list means deny all.
+type DynamicApiZoneConf struct {
+	Allowed ZoneTypeList `yaml:"allowed" mapstructure:"allowed"`                                              // Zone types the API may create: primary, secondary
+	Storage string       `yaml:"storage" mapstructure:"storage" validate:"omitempty,oneof=memory persistent"` // "memory" or "persistent"
+}
+
+// Allows reports whether the API may create zones of type zt.
+func (c DynamicApiZoneConf) Allows(zt ZoneType) bool {
+	want := ZoneTypeToString[zt]
+	for _, t := range c.Allowed {
+		if strings.EqualFold(strings.TrimSpace(t), want) {
+			return true
+		}
+	}
+	return false
+}
+
+// Validate checks the dynamiczones: block for values the decoder accepts but
+// the code does not. Called from both the daemon loader (ParseConfig) and
+// `config check` (ValidateConfig) so the two cannot disagree.
+func (d *DynamicZonesConf) Validate() error {
+	for _, t := range d.Dynamic.Allowed {
+		switch strings.ToLower(strings.TrimSpace(t)) {
+		case "primary", "secondary":
+		default:
+			return fmt.Errorf("dynamiczones.dynamic.allowed: unknown zone type %q (valid values: primary, secondary)", t)
+		}
+	}
+	return nil
 }
 
 // DynamicCatalogMemberConf defines configuration for catalog member zones (includes add/remove policy)
