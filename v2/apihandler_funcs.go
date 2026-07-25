@@ -335,18 +335,20 @@ func APIconfig(conf *Config) func(w http.ResponseWriter, r *http.Request) {
 		switch cp.Command {
 		case "reload":
 			lgApi.Info("reloading configuration")
-			resp.Msg, err = conf.ReloadConfig()
+			resp.Msg, err = conf.ReloadConfigConfirm(cp.Confirm)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
+				applyReloadGuardrail(&resp, err)
 			}
 
 		case "reload-zones":
 			lgApi.Info("reloading zones")
-			resp.Msg, err = conf.ReloadZoneConfig(r.Context())
+			resp.Msg, err = conf.ReloadZoneConfigConfirm(r.Context(), cp.Confirm)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
+				applyReloadGuardrail(&resp, err)
 			}
 
 		case "reload-tsig":
