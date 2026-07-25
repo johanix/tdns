@@ -348,7 +348,7 @@ func (zd *ZoneData) ixfrSingleSOAReply(w dns.ResponseWriter, r *dns.Msg, soa *dn
 	if err := w.WriteMsg(m); err != nil {
 		zd.Logger.Printf("ZoneTransferOut: %s: WriteMsg on IXFR single-SOA reply failed: %v",
 			dns.Fqdn(zd.ZoneName), err)
-		return 0, nil
+		return 0, err
 	}
 	return 1, nil
 }

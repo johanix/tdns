@@ -621,6 +621,30 @@ func TestZoneTransferOut_IXFRUDPSingleSOA(t *testing.T) {
 	}
 }
 
+// failingRW is a fakeRW whose WriteMsg always errors, for asserting that
+// single-message reply paths propagate transport write failures.
+type failingRW struct {
+	fakeRW
+	writeErr error
+}
+
+func (f *failingRW) WriteMsg(m *dns.Msg) error { return f.writeErr }
+
+func TestZoneTransferOut_IXFRSingleSOAWriteErrorPropagates(t *testing.T) {
+	zd := loadIxfrTestZone(t, basicZone)
+
+	w := &failingRW{fakeRW: fakeRW{remote: udpAddr("127.0.0.1")}, writeErr: fmt.Errorf("boom")}
+	r := new(dns.Msg)
+	r.SetIxfr(zd.ZoneName, 1, ".", ".") // up-to-date: single-SOA reply path
+	sent, err := zd.ZoneTransferOut(context.Background(), w, r, nil)
+	if err == nil {
+		t.Fatal("expected the WriteMsg failure to propagate, got nil error")
+	}
+	if sent != 0 {
+		t.Fatalf("expected 0 RRs reported on write failure, got %d", sent)
+	}
+}
+
 func TestZoneTransferOut_IXFRNoSOAInQueryServesFullZone(t *testing.T) {
 	zd := loadIxfrTestZone(t, basicZone)
 	srv := startTestAXFRServer(t, zd)
