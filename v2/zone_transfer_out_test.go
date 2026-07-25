@@ -61,6 +61,7 @@ func startTestAXFRServerCore(t *testing.T, zd *ZoneData, tsigProvider dns.TsigPr
 		Listener:          ln,
 		Handler:           mux,
 		TsigProvider:      tsigProvider,
+		MsgAcceptFunc:     MsgAcceptFunc, // production accept func: permits the IXFR authority-SOA
 		NotifyStartedFunc: func() { close(started) },
 	}
 	go func() { _ = dnsSrv.ActivateAndServe() }()
@@ -469,6 +470,25 @@ func TestZoneTransferOut_RefusesWhenNotReady(t *testing.T) {
 	}
 	if w.written == nil || w.written.Rcode != dns.RcodeRefused {
 		t.Fatalf("expected REFUSED, got %v", w.written)
+	}
+}
+
+// TestZoneTransferOut_RefuseWriteErrorPropagates mirrors the IXFR single-SOA
+// error-path test: a WriteMsg failure on the REFUSED reply must surface to the
+// caller rather than being swallowed as (0, nil). AXFR and IXFR are treated the
+// same way on the refuse path (failingRW is defined in ixfr_test.go).
+func TestZoneTransferOut_RefuseWriteErrorPropagates(t *testing.T) {
+	zd := loadTestTransferZone(t, basicZone)
+	zd.Status = ZoneStatusLoading // force the refuse path
+	w := &failingRW{fakeRW: fakeRW{remote: udpAddr("127.0.0.1")}, writeErr: fmt.Errorf("boom")}
+	r := new(dns.Msg)
+	r.SetAxfr(zd.ZoneName)
+	sent, err := zd.ZoneTransferOut(context.Background(), w, r, nil)
+	if err == nil {
+		t.Fatal("expected the WriteMsg failure to propagate, got nil error")
+	}
+	if sent != 0 {
+		t.Fatalf("expected 0 RRs reported on write failure, got %d", sent)
 	}
 }
 

@@ -201,15 +201,24 @@ type ZoneData struct {
 	// wsSignalSynth stages the synthesized-transport-signal fallback map for the
 	// next publish (see zoneSnapshot.signalSynth). Seeded from the published
 	// snapshot in ensureWorkingSet so unrelated publishes preserve it.
-	wsSignalSynth   map[string]*core.RRset
-	publishCadence  time.Duration
-	publishQueued   bool
-	publishUrgent   bool
-	lastPublish     time.Time
-	publishWake     chan struct{}
-	publisherOnce   sync.Once
-	publishStop     chan struct{}
-	publishStopOnce sync.Once
+	wsSignalSynth  map[string]*core.RRset
+	publishCadence time.Duration
+	publishQueued  bool
+	publishUrgent  bool
+	// wsIxfrEpochReset marks the next publish as a new IXFR epoch (wholesale
+	// zone replacement): updateIxfrChainLocked clears the delta history
+	// instead of diffing. Set under zd.mu by applyRefreshReplacementLocked.
+	wsIxfrEpochReset bool
+	// ixfrChainMaxBytes bounds the retained IXFR delta history (estimated
+	// wire bytes). 0 => DefaultIxfrChainMaxBytes; negative => retention
+	// disabled (IXFR queries are answered with full transfers). From zone
+	// config ixfr-chain-max-bytes; written at parse time under zd.mu.
+	ixfrChainMaxBytes int
+	lastPublish       time.Time
+	publishWake       chan struct{}
+	publisherOnce     sync.Once
+	publishStop       chan struct{}
+	publishStopOnce   sync.Once
 	// RemoteDNSKEYs holds DNSKEY RRs from other signers (multi-signer mode 4).
 	// These are DNSKEYs found in the incoming zone that do not match keys in our
 	// local keystore. They are preserved across resignings and merged into the
@@ -342,6 +351,10 @@ type ZoneConf struct {
 	// PublishCadence is the minimum interval between coalesced snapshot publishes
 	// for this zone (default 5s when unset). RFC 2136 urgent publishes bypass.
 	PublishCadence string `yaml:"publish-cadence" mapstructure:"publish-cadence"`
+	// IxfrChainMaxBytes bounds the retained outbound-IXFR delta history for
+	// this zone (estimated wire bytes). 0/unset => 1 MiB default; negative =>
+	// disable retention (IXFR clients always get a full transfer).
+	IxfrChainMaxBytes int `yaml:"ixfr-chain-max-bytes" mapstructure:"ixfr-chain-max-bytes"`
 	// Provisioning is a display-only derived lifecycle string
 	// ("pending"|"loading"|"ready"|"error") populated by the list handlers from
 	// ZoneStatus + the error registry. Not config; not serialized to YAML.
@@ -606,8 +619,16 @@ type DnssecPolicyTTLS struct {
 type Ixfr struct {
 	FromSerial uint32
 	ToSerial   uint32
-	Removed    []core.RRset
-	Added      []core.RRset
+	// FromSOA/ToSOA are the bracketing SOA RRs for this difference sequence,
+	// stored as full RRs because SOA RDATA (timers/MNAME) may change between
+	// serials — rewriting the current SOA's serial would not reproduce them.
+	FromSOA *dns.SOA
+	ToSOA   *dns.SOA
+	Removed []core.RRset
+	Added   []core.RRset
+	// EstBytes is the estimated wire size of this link (RRs + bracket SOAs),
+	// used for the byte-bounded chain trim.
+	EstBytes int
 }
 
 type OwnerData struct {

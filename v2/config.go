@@ -644,9 +644,29 @@ func (conf *Config) KaspPropagationDelay() time.Duration {
 	return d
 }
 
-func (conf *Config) ReloadConfig() (string, error) {
+// ReloadConfig reloads the full configuration. Kept for existing callers and
+// SIGHUP-style triggers that cannot consent — it never sets confirm, so the
+// DNSSEC policy-algorithm guardrail (checkReloadPolicyGuardrail) holds a dangerous
+// same-name algorithm change rather than applying it. Use ReloadConfigConfirm to
+// carry an operator's explicit confirm.
+func (conf *Config) ReloadConfig() (string, error) { return conf.reloadConfig(false) }
+
+// ReloadConfigConfirm is ReloadConfig with the operator's confirm flag: confirm
+// lets a guarded DNSSEC policy-algorithm change through the reload gate.
+func (conf *Config) ReloadConfigConfirm(confirm bool) (string, error) {
+	return conf.reloadConfig(confirm)
+}
+
+func (conf *Config) reloadConfig(confirm bool) (string, error) {
 	confMu.Lock()
 	defer confMu.Unlock()
+	// Guardrail (plan §3.2): correlate the incoming DNSSEC policies against the
+	// running zones' active keys BEFORE mutating anything, and refuse a
+	// would-strand same-name algorithm change unless confirmed. Runs first so a
+	// refusal is atomic — the running config is left completely untouched.
+	if gerr := conf.checkReloadPolicyGuardrail(confirm); gerr != nil {
+		return "", gerr
+	}
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
@@ -691,10 +711,34 @@ func (conf *Config) ReloadTsigConfig(opts TsigReconcileOptions) (TsigReconcileRe
 	return result, err
 }
 
+// ReloadZoneConfig reloads the zones + dnssec blocks. Kept for existing callers
+// and the SIGHUP watcher, which cannot consent — it never sets confirm, so the
+// DNSSEC policy-algorithm guardrail holds a dangerous same-name algorithm change
+// automatically ("free SIGHUP coverage"). Use ReloadZoneConfigConfirm to carry an
+// operator's explicit confirm.
 func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
+	return conf.reloadZoneConfig(ctx, false)
+}
+
+// ReloadZoneConfigConfirm is ReloadZoneConfig with the operator's confirm flag.
+func (conf *Config) ReloadZoneConfigConfirm(ctx context.Context, confirm bool) (string, error) {
+	return conf.reloadZoneConfig(ctx, confirm)
+}
+
+func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string, error) {
 	confMu.Lock()
 	if ctx == nil {
 		ctx = context.Background()
+	}
+
+	// Guardrail (plan §3.2): correlate the incoming DNSSEC policies against the
+	// running zones' active keys BEFORE any live state is mutated (before
+	// templates/dnssec/zones are re-read), and refuse a would-strand same-name
+	// algorithm change unless confirmed. Atomic — a refusal leaves every zone
+	// exactly as it is. confMu is held manually on this path, so unlock on refuse.
+	if gerr := conf.checkReloadPolicyGuardrail(confirm); gerr != nil {
+		confMu.Unlock()
+		return "", gerr
 	}
 
 	// Re-read config file to pick up template changes
