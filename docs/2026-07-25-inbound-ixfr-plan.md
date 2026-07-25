@@ -3,10 +3,14 @@
 **Date:** 2026-07-25
 **Status:** AGREED — firmed up against main @ 138c9ce (which has #328 outbound
 IXFR merged), and both open forks decided 2026-07-25 (F1: `request-ixfr`,
-default ON; F2: materialize+swap for v1). Ready to implement as a single PR.
-The one deferred idea — retaining inbound deltas in the outbound chain so a
-cascaded secondary re-serves them as deltas — is an explicit later-PR candidate
-(§5, §7 F2, §8 PR-2).
+default ON; F2: materialize+swap for v1). Ready to implement.
+Onward-relay of inbound deltas to further downstreams is now **in scope for the
+non-signing case** — the serial-mirror fix in [[secondary-zones-immutable]]
+collapses the inbound/outbound serial spaces, making an inbound delta a verbatim
+outbound-chain link (§5). Only the *signing*-secondary relay (staging-apply)
+stays deferred (§7 F2-follow-up, §8 PR-2).
+**Depends on:** `2026-07-25-secondary-zones-immutable.md` must land first
+(serial mirror is the enabler for both correct serial handling and cheap relay).
 **Companion / base:** `2026-07-02-ixfr-support.md` (Project C). #328 delivered
 the outbound half (retention + serving); this is the deferred C2 half — the
 secondary side that *requests and consumes* incremental transfers.
@@ -181,20 +185,43 @@ and `CurrentSerial` advance to `S` (the server's serial), identical to the AXFR
 path's post-transfer assignment. The up-to-date case leaves both unchanged and
 triggers the existing `new_zd.IncomingSerial == zd.IncomingSerial` no-op branch.
 
-## 5. Interaction with the merged outbound chain (#328)
+## 5. Interaction with the merged outbound chain (#328) — and why onward relay is nearly free in the immutable case
 
-A tdns secondary can itself be a primary to further-downstreams. Because v1
-applies inbound deltas via `applyRefreshReplacementLocked` — which sets
-`wsIxfrEpochReset = true` — **each inbound refresh resets this server's own
-outbound IXFR chain.** Consequence: this server's downstreams get an AXFR (not a
-delta) across each inbound-refresh boundary. That is *correct and safe*, just
-not optimal, and it is the direct trade-off of the simple materialize+swap
-model. Removing it is exactly what the F2-follow-up "retain inbound deltas in
-the outbound chain" work buys (applying inbound deltas through the staging API
-would let them flow straight into the outbound chain and re-serve as deltas) —
-agreed as a later-PR possibility (§7 F2-follow-up, §8 PR-2), deferred because it
-is more entangled with locking and is a pure optimization on top of a correct
-v1.
+A tdns secondary can itself be a primary to further-downstreams. The naive
+materialize+swap does `wsIxfrEpochReset = true`, which would reset this server's
+outbound IXFR chain on every inbound refresh, so downstreams would get an AXFR
+across each boundary — correct and safe, but not optimal.
+
+**But for the common case — a non-signing tdns-auth secondary (immutable,
+[[secondary-zones-immutable]] `2026-07-25-secondary-zones-immutable.md`) —
+retaining inbound deltas as outbound deltas is nearly free, and this plan folds
+it in rather than deferring it.** The enabler is the secondary-immutable
+**serial-mirror fix**: once a non-signing secondary mirrors the upstream serial
+(`CurrentSerial = IncomingSerial`), the outbound and inbound serial spaces
+**collapse into one**. An inbound IXFR delta (upstream serial N→N+1) is then
+*verbatim* a valid outbound delta (our serial N→N+1) — identical FromSerial /
+ToSerial, identical RRs, and its bracket SOAs equal our served SOAs (we mirror
+them). And #328 already ships the whole `IxfrChain` machine (the `Ixfr` link
+struct, append, byte-budget trim, contiguity-checked serving). So retention
+reduces to: **build an `Ixfr` link from the parsed inbound difference sequence
+and append it (reusing #328's trim), instead of epoch-resetting the chain.** No
+staging API, no serial translation, no re-derivation.
+
+Safety rests directly on immutability: because we serve a faithful mirror, the
+retained inbound delta is guaranteed consistent with our served content, so
+relaying it cannot ship a wrong delta. Boundaries and edges are already handled:
+an inbound **AXFR** (first load / fallback / gap) is an epoch-reset point (no
+delta to append); and a **multi-upstream / cross-signer** seam is caught by
+#328's serve-time contiguity check, which falls a downstream back to AXFR when
+its serial isn't in the contiguous chain — safe and self-healing, just not
+delta-efficient at that seam.
+
+**Scope of the fold-in:** this applies to the **non-signing** secondary only. A
+**signing** secondary re-signs, so its served content ≠ the inbound delta's
+content; it would have to *build* fresh outbound deltas from its re-signed data —
+the harder staging-apply variant, which stays deferred (§7 F2-follow-up, §8
+PR-2). So: non-signing onward-relay is in scope for this project; the
+signing/staging-apply variant remains a later PR.
 
 ## 6. Tests
 
@@ -214,6 +241,12 @@ v1.
 - **Fallback (integration):** malformed/truncated delta and a non-contiguous
   chain both drive a clean AXFR re-pull and correct convergence; a plain AXFR
   primary (IXFR unsupported) works unchanged.
+- **Onward-relay (non-signing, §5):** primary → tdns secondary (non-signing) →
+  tdns edge, all IXFR-enabled. Bump the primary; assert the secondary applies
+  the inbound delta AND appends it to its own outbound `IxfrChain`, and that the
+  edge then pulls the change from the secondary *as a delta* (not AXFR) and
+  converges byte-identically. Plus: after an inbound AXFR/gap boundary, the edge
+  correctly falls back to AXFR (chain reset).
 - Gate: full `v2` `-race`; gofmt; cmdv2 binaries build via gmake.
 
 ## 7. Design forks
@@ -225,20 +258,25 @@ v1.
   is retired in the same PR.
 - **F2 — apply model. DECIDED (2026-07-25): v1 = materialize+swap (§4.4).**
   Simple, reuses the whole refresh path, obviously correct — at the accepted
-  cost of a full-zone copy per delta and the outbound-chain reset (§5). The
-  alternative (staging-apply, which avoids the copy and keeps the outbound chain
-  intact) is explicitly deferred to a later PR — see the F2-follow-up note
-  below and §8 PR-2.
-- **F2-follow-up (later PR, agreed as a possibility) — retain inbound deltas in
-  the outbound chain.** Applying inbound deltas via the live staging API
-  (`stageRRsetLocked`/`stageDeleteLocked` + `publishLocked`, the UPDATE
-  machinery) instead of the wholesale swap would let a received delta flow
-  straight into this server's *outbound* `IxfrChain`, so a cascaded secondary
-  re-serves it to its own downstreams as a delta rather than forcing an AXFR at
-  each refresh boundary (§5). Deferred, not dropped: it is a pure optimization
-  on top of a correct v1, and more entangled with locking and publish cadence.
-- **F3 — outbound-chain continuity across inbound refresh. DECIDED by F2:**
-  v1 accepts AXFR-at-the-boundary for downstreams (§5). Not a correctness issue.
+  cost of a full-zone copy per delta. (The copy cost, not chain continuity, is
+  now the only downside — see F2-follow-up.)
+- **F2-follow-up — retain inbound deltas in the outbound chain. SPLIT
+  (2026-07-25):**
+  - **Non-signing secondary — IN SCOPE for this project (§5).** Once the
+    serial-mirror fix ([[secondary-zones-immutable]]) collapses the serial
+    spaces, an inbound delta *is* a valid outbound delta, so we append it to
+    #328's existing `IxfrChain` instead of epoch-resetting — near-trivial, no
+    staging API. Folded into PR-1 (§8).
+  - **Signing secondary — still DEFERRED.** A re-signing secondary's served
+    content ≠ the inbound delta, so it must *build* fresh outbound deltas from
+    re-signed data via the staging API (`stageRRsetLocked`/`stageDeleteLocked`
+    + `publishLocked`). More entangled with locking and publish cadence; a pure
+    optimization on top of a correct v1. Later PR (§8 PR-2).
+- **F3 — outbound-chain continuity across inbound refresh. UPDATED (2026-07-25):**
+  a non-signing secondary now *preserves* continuity (relays deltas, per the F2
+  fold-in); a signing secondary, and any AXFR/gap boundary, falls downstreams
+  back to AXFR — safe and self-healing via #328's contiguity check. Not a
+  correctness issue either way.
 - **F4 — full-zone-fallback detection.** Use `IsIxfr` on the collected slice
   (SOA-then-SOA ⇒ delta; SOA-then-non-SOA ⇒ full zone). Decided; `IsIxfr`
   already exists and is exactly this test.
@@ -247,20 +285,24 @@ v1.
 
 ## 8. Phasing
 
-- **PR-1 — parser + apply + AXFR fallback, behind the option (default per F1).**
-  The difference-sequence parser, the materialize+apply, the classification and
-  AXFR-fallback wiring in `FetchFromUpstream`/`ZoneTransferIn`, the new
-  `request-ixfr` option, `XfrType` retirement. Parser + apply unit tests + the
-  end-to-end loopback convergence test. This is the whole feature; it is not
-  obviously splittable further without shipping something half-usable.
-- **PR-2 (optional, later) — retain inbound deltas in the outbound chain**
-  (F2-follow-up): apply inbound deltas via the staging API so a cascaded
-  secondary re-serves them to its own downstreams as deltas instead of AXFR at
-  each refresh boundary. Agreed as a possibility, not scheduled.
+- **PR-1 — parser + apply + AXFR fallback + non-signing onward-relay, behind the
+  option (default per F1).** The difference-sequence parser, the
+  materialize+apply, the classification and AXFR-fallback wiring in
+  `FetchFromUpstream`/`ZoneTransferIn`, the new `request-ixfr` option, `XfrType`
+  retirement, **plus appending each inbound delta to the outbound `IxfrChain`
+  for a non-signing secondary** (§5 / F2-follow-up — cheap once the serial-mirror
+  fix lands, reusing #328's chain). Depends on [[secondary-zones-immutable]]
+  landing first (serial mirror is the enabler). Parser + apply unit tests, the
+  end-to-end loopback convergence test, and a relay test (secondary re-serves an
+  inbound delta downstream as a delta).
+- **PR-2 (optional, later) — signing-secondary onward-relay via staging-apply**
+  (the deferred half of F2-follow-up): build fresh outbound deltas from
+  re-signed data so a *signing* cascaded secondary also relays deltas. Agreed as
+  a possibility, not scheduled.
 
 ## 9. Deferred / out of scope
 
-- Staging-apply / outbound-chain continuity (F2, §5).
+- Signing-secondary staging-apply relay (F2-follow-up second half, §5, §8 PR-2).
 - IXFR over UDP-in (we always use TCP for transfers; non-issue).
 - Any change to outbound IXFR (#328 is done).
 
