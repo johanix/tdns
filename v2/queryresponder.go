@@ -377,9 +377,27 @@ func (zd *ZoneData) sendReferral(m *dns.Msg, w dns.ResponseWriter, cdd *ChildDel
 	m.Extra = append(m.Extra, cdd.A_glue...)
 	m.Extra = append(m.Extra, cdd.AAAA_glue...)
 
-	// RFC 9824, Section 3.4: Add NSEC for unsigned referrals
 	if msgoptions.DO {
-		addReferralNSEC(m, cdd, apex, zd.ZoneName, signFunc)
+		if cdd.DS_rrset != nil && len(cdd.DS_rrset.RRs) > 0 {
+			// Secure delegation (RFC 4035 §3.1.4.1): include the DS RRset and
+			// its RRSIG in the authority section so a validating resolver can
+			// establish the child's chain of trust straight from the referral,
+			// without a separate DS query. A signing failure is non-fatal — the
+			// referral itself is still valid and the resolver falls back to an
+			// explicit DS query — so on error we omit the DS rather than emit an
+			// unsigned (useless) one.
+			ds := *cdd.DS_rrset
+			if signed, err := signFunc(ds, cdd.ChildName); err != nil {
+				lgHandler.Error("referral: failed to sign DS RRset; omitting DS from referral",
+					"child", cdd.ChildName, "err", err)
+			} else {
+				m.Ns = append(m.Ns, signed.RRs...)
+				m.Ns = append(m.Ns, signed.RRSIGs...)
+			}
+		} else {
+			// Insecure delegation (RFC 9824 §3.4): NSEC proving no DS exists.
+			addReferralNSEC(m, cdd, apex, zd.ZoneName, signFunc)
+		}
 	}
 
 	w.WriteMsg(m)
