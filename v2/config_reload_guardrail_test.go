@@ -288,3 +288,54 @@ func TestDetectStrandingSkipsRemovedPolicyName(t *testing.T) {
 		t.Fatalf("a removed policy name must not be flagged as an alg-change strand, got %+v", findings)
 	}
 }
+
+// The collector must forward the relaxed (dnssec.completeness) flag end-to-end: a
+// same-name ZSK algorithm change strands in strict mode but is carried by the
+// gradual FIFO ZSK roll in relaxed mode (not flagged), while a KSK algorithm change
+// strands in either mode. (The pure predicate's relaxed behavior is covered by
+// TestPolicyAlgStrandsActiveKeys; this pins the collector's forwarding of the flag.)
+func TestDetectStrandingRelaxedForwardsZSKSkip(t *testing.T) {
+	withCompleteness(t, CompletenessStrict)
+	kdb := newTestKeyDB(t)
+	conf := &Config{}
+	conf.Internal.KeyDB = kdb
+
+	zone := "relaxed.example."
+	addSignedZone(t, kdb, zone, "foo", dns.ED25519, dns.ED25519)
+
+	// NEW "foo" changes ONLY the ZSK algorithm; the KSK stays Ed25519.
+	zskChange := map[string]DnssecPolicy{
+		"foo": {Name: "foo", Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.ED25519, ZSKAlgorithm: dns.RSASHA256},
+	}
+
+	// Strict mode (relaxed=false): the ZSK algorithm change strands the zone.
+	strict, err := conf.detectStrandingPolicyChanges(zskChange, false)
+	if err != nil {
+		t.Fatalf("detectStrandingPolicyChanges (strict): %v", err)
+	}
+	if len(strict) != 1 || len(strict[0].Roles) != 1 || strict[0].Roles[0].Role != "ZSK" {
+		t.Fatalf("strict: want 1 ZSK strand, got %+v", strict)
+	}
+
+	// Relaxed mode (relaxed=true): the same ZSK change is carried by the gradual roll,
+	// so the collector must forward the flag and NOT flag it.
+	relaxed, err := conf.detectStrandingPolicyChanges(zskChange, true)
+	if err != nil {
+		t.Fatalf("detectStrandingPolicyChanges (relaxed): %v", err)
+	}
+	if len(relaxed) != 0 {
+		t.Fatalf("relaxed: a ZSK-only alg change must not strand, got %+v", relaxed)
+	}
+
+	// A KSK algorithm change is a strand even in relaxed mode.
+	kskChange := map[string]DnssecPolicy{
+		"foo": {Name: "foo", Mode: DnssecPolicyModeKSKZSK, KSKAlgorithm: dns.RSASHA256, ZSKAlgorithm: dns.ED25519},
+	}
+	stillStrands, err := conf.detectStrandingPolicyChanges(kskChange, true)
+	if err != nil {
+		t.Fatalf("detectStrandingPolicyChanges (relaxed KSK): %v", err)
+	}
+	if len(stillStrands) != 1 || len(stillStrands[0].Roles) != 1 || stillStrands[0].Roles[0].Role != "KSK" {
+		t.Fatalf("relaxed: a KSK alg change must still strand, got %+v", stillStrands)
+	}
+}

@@ -163,7 +163,12 @@ func runConfigCmd(role, command string, showVerboseStatus, confirm bool) {
 	}
 
 	resp, err := SendConfigCommand(api, tdns.ConfigPost{Command: command, Confirm: confirm})
-	if err != nil {
+	// A daemon-side error is carried structurally on resp (resp.Error, and for a
+	// guardrail refusal resp.GuardrailBlocked) *and* returned as a non-nil err by
+	// SendConfigCommand. Let the resp.Error block below handle those so the guardrail
+	// refusal renders; only bail here on a transport-level error (err set, resp not
+	// populated by the daemon).
+	if err != nil && !resp.Error {
 		fmt.Printf("Error: %s\n", err.Error())
 		os.Exit(1)
 	}

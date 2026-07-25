@@ -336,7 +336,11 @@ func (conf *Config) checkReloadPolicyGuardrail(confirm bool) error {
 	}
 	findings, err := conf.detectStrandingPolicyChanges(newPolicies, relaxed)
 	if err != nil {
-		lgConfig.Warn("reload guardrail: correlation failed; allowing reload (fail-open)", "err", err)
+		// Fail-open: the guardrail is an additive safety net, never worse than the
+		// pre-guardrail behavior. But a safety control that silently fails open must
+		// not slip by unnoticed, and tdns has no metrics endpoint to count it, so log
+		// this loudly at Error rather than Warn.
+		lgConfig.Error("reload guardrail FAILED OPEN: correlation error; reload allowed WITHOUT the same-name DNSSEC algorithm-change safety check — investigate", "err", err)
 		return nil
 	}
 	if derr := reloadGuardrailDecision(findings, confirm); derr != nil {
