@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -1194,8 +1195,49 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 
 	lgConfig.Info("zones parsed and refreshing", "count", len(all_zones), "zones", all_zones, "broken", broken_zones, "queued", len(conf.Internal.RefreshZoneCh))
 
+	warnGlobalOutboundSerialSuppressed(conf)
+
 	lgConfig.Debug("ParseZones complete")
 	return all_zones, broken_zones, nil
+}
+
+// warnGlobalOutboundSerialSuppressed tells the operator, once per parse, that a
+// server-wide outbound_soa_serial of persist/unixtime is being ignored for the
+// tdns-auth secondaries on this server.
+//
+// The option normalizer warns per zone about an EXPLICIT per-zone mode, but a
+// secondary that merely inherits a global one gets no per-zone warning — that
+// would be noise on every secondary of a server whose primaries legitimately
+// use persist. Without this, though, the suppression would be entirely
+// invisible: the operator set a server-wide policy and some zones quietly do
+// not follow it. Name them once instead.
+func warnGlobalOutboundSerialSuppressed(conf *Config) {
+	mode := strings.TrimSpace(strings.ToLower(conf.DnsEngine.OutboundSoaSerial))
+	if mode != OutboundSoaSerialPersist && mode != OutboundSoaSerialUnixtime {
+		return
+	}
+	if Globals.App.Type != AppTypeAuth {
+		return
+	}
+
+	var suppressed []string
+	for zname, zd := range Zones.Items() {
+		// Only zones inheriting the global are interesting here; an explicit
+		// per-zone value already drew the normalizer's per-zone warning.
+		if zd == nil || zd.OutboundSoaSerial != "" {
+			continue
+		}
+		if !zoneMayOriginateContent(zd) {
+			suppressed = append(suppressed, zname)
+		}
+	}
+	if len(suppressed) == 0 {
+		return
+	}
+	sort.Strings(suppressed)
+	lgConfig.Warn("global outbound_soa_serial is suppressed for secondary zones",
+		"mode", mode, "count", len(suppressed), "zones", suppressed,
+		"reason", "a secondary must serve the serial it received from upstream, unmodified")
 }
 
 // activateUpdatePolicy validates a zone's update-policy config and builds the
