@@ -288,8 +288,10 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								zd.publishCadence = zr.PublishCadence
 							}
 							zd.ZoneType = zr.ZoneType
-							zd.Options = zr.Options
-							zd.OutboundSoaSerial = zr.OutboundSoaSerial
+							// Normalize AFTER ZoneType is assigned — the
+							// predicate depends on it (Fix B chokepoint).
+							zd.Options, zd.OutboundSoaSerial =
+								zd.applyOptionNormalization(zr.ZoneType, zr.Options, zr.OutboundSoaSerial)
 							zd.UpdatePolicy = zr.UpdatePolicy
 							// Record the config-base policy name only (no struct bind).
 							// syncZoneDnssecPolicyFromConfig binds post-Ready; this
@@ -396,18 +398,42 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						if zr.ZoneStore != 0 {
 							zd.ZoneStore = zr.ZoneStore
 						}
-						// Replace options only if provided (don't merge) to match config reload behavior
-						if zr.Options != nil {
-							zd.Options = zr.Options
-						}
-						// Outbound serial mode: gate on ConfigUpdate, NOT on
-						// non-emptiness. Empty is a MEANINGFUL value here
-						// ("inherit the global"), so a config edit that removes
-						// a per-zone mode must clear it — while a bare
-						// NOTIFY/refresh-only refresher (which carries no
-						// config) must not wipe the configured mode.
-						if zr.ConfigUpdate {
-							zd.OutboundSoaSerial = zr.OutboundSoaSerial
+						// Options and the outbound serial mode are normalized
+						// TOGETHER (the normalizer covers both), so they are
+						// merged in one place — assigning either separately
+						// afterwards would overwrite a normalized value with
+						// the raw one.
+						//
+						// Their update rules differ, though:
+						//   - Options replace only if provided (don't merge),
+						//     matching config-reload behaviour.
+						//   - The serial mode is gated on ConfigUpdate, NOT on
+						//     non-emptiness: empty is MEANINGFUL there
+						//     ("inherit the global"), so a config edit that
+						//     removes a per-zone mode must clear it, while a
+						//     bare NOTIFY/refresh-only refresher (carrying no
+						//     config) must not wipe a configured one.
+						if zr.Options != nil || zr.ConfigUpdate {
+							// Normalize against the zone's EFFECTIVE type: the
+							// ZoneType assignment below is conditional, so
+							// prefer the incoming type when the refresher
+							// carries one — otherwise a reload that flips
+							// Primary->Secondary would normalize against the
+							// stale role.
+							ztype := zd.ZoneType
+							if zr.ZoneType != 0 {
+								ztype = zr.ZoneType
+							}
+							newOpts := zd.Options
+							if zr.Options != nil {
+								newOpts = zr.Options
+							}
+							newSerial := zd.OutboundSoaSerial
+							if zr.ConfigUpdate {
+								newSerial = zr.OutboundSoaSerial
+							}
+							zd.Options, zd.OutboundSoaSerial =
+								zd.applyOptionNormalization(ztype, newOpts, newSerial)
 						}
 						// Update UpdatePolicy only if provided (check if it has meaningful content)
 						// UpdatePolicy is a struct, so we check if any fields are set
@@ -636,6 +662,12 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						Status:            ZoneStatusPending, // registered + enqueued, no data yet (B6)
 						publishCadence:    zr.PublishCadence,
 					}
+
+					// Strip origination settings this zone may not act on. The
+					// ZoneData is fully constructed at this point, so the
+					// normalizer sees the final role (Fix B chokepoint).
+					zd.Options, zd.OutboundSoaSerial =
+						zd.applyOptionNormalization(zd.ZoneType, zd.Options, zd.OutboundSoaSerial)
 
 					// Register the OnFirstLoad callbacks BEFORE the initial load:
 					// on a first-load failure the ticker retry path re-runs

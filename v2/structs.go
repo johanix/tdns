@@ -167,6 +167,14 @@ type ZoneData struct {
 	Children          map[string]*ChildDelegationData
 	DelegationBackend DelegationBackend // parent-side: backend for storing child delegation data
 	Options           map[ZoneOption]bool
+	// SuppressedOptions records the origination options that were configured
+	// for this zone but stripped by normalizeOptionsForRole (a tdns-auth
+	// secondary may not originate content). Options above is the EFFECTIVE
+	// set; Options ∪ SuppressedOptions is the AS-CONFIGURED set, which is what
+	// must be re-serialized when a dynamic zone's config file is regenerated —
+	// otherwise the operator's stated intent is silently deleted from their own
+	// config. Use asConfiguredOptions(). nil when nothing was suppressed.
+	SuppressedOptions map[ZoneOption]bool
 	UpdatePolicy      UpdatePolicy
 	DnssecPolicy      *DnssecPolicy
 	DnssecPolicyName  string // name of currently-applied policy; used to detect config-reload-driven changes

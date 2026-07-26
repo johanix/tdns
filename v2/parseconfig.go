@@ -905,6 +905,21 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		}
 
 		options := parseZoneOptions(conf, zname, zconf, zd)
+
+		// Strip origination settings a tdns-auth secondary may not act on
+		// (Fix B). This MUST run before activateUpdatePolicy below: that
+		// function returns a HARD error — quarantining the zone — when
+		// allow-child-updates is set without a delegationbackend, and a
+		// secondary configured that way should get the soft warning and keep
+		// serving, not be taken out of service. Running here also means the
+		// delegation-sync setup block further down sees delegation-sync-parent
+		// already false, so SetupZoneSync never registers for a secondary and
+		// the DSYNC vector is closed at parse time with no extra wiring.
+		//
+		// zd.ZoneType is not yet assigned at this point in the parse, so the
+		// locally resolved zonetype is passed explicitly.
+		options, zconf.OutboundSoaSerial = zd.applyOptionNormalization(zonetype, options, zconf.OutboundSoaSerial)
+
 		var outopts []string
 		for o, val := range options {
 			if val {

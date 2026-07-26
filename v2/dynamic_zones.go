@@ -453,9 +453,15 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 		zoneFilePath = filepath.Join(zoneDirectory, zoneFileName)
 	}
 
-	// Convert options to strings
+	// Convert options to strings. Serialize the AS-CONFIGURED set, not the
+	// effective one: this file is REGENERATED from live state on every
+	// successful refresh of a persistable dynamic zone, so writing the
+	// post-normalization set would permanently delete the operator's
+	// origination options from their own config — after which the warning
+	// clears and the misconfiguration becomes invisible, silently "fixed" by
+	// destroying the evidence.
 	optionsStrs := make([]string, 0)
-	for opt, enabled := range zd.Options {
+	for opt, enabled := range zd.asConfiguredOptions() {
 		if enabled {
 			if optStr, ok := ZoneOptionToString[opt]; ok {
 				// Skip internal options that shouldn't be in config.
@@ -1113,6 +1119,10 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	// TSIG-only modify would silently reset a zone that has one to the global
 	// default.
 	outboundSoaSerial := oldZd.OutboundSoaSerial
+	// Carry the suppressed-options record across the replacement too, so the
+	// as-configured view survives a modify and the operator's origination
+	// options are not dropped from the persisted config by the next rewrite.
+	suppressedOptions := oldZd.SuppressedOptions
 	oldZd.mu.Unlock()
 
 	newZd := &ZoneData{
@@ -1132,6 +1142,7 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		KeyDB:          conf.Internal.KeyDB,
 
 		OutboundSoaSerial: outboundSoaSerial,
+		SuppressedOptions: suppressedOptions,
 	}
 	// Commit the staged inline key just before persistence so the rewritten file
 	// includes it; roll it back if persistence fails.
