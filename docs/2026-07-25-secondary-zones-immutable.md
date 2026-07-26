@@ -1,8 +1,9 @@
 # Secondary zones are immutable — MUST-NOT-MODIFY invariant + audit
 
 **Date:** 2026-07-25, revised 2026-07-26 (rev 2, rev 2.1, rev 2.2 same day)
-**Status:** PROPOSED — design agreed in discussion; rev 2 incorporates a
-code-verified re-audit of every claim in rev 1. Not implemented.
+**Status:** IN IMPLEMENTATION (started 2026-07-26). Design agreed; rev 2
+incorporates a code-verified re-audit of every claim in rev 1. Per-item
+progress in §14.1.
 **Origin:** surfaced while cooking the inbound-IXFR plan
 (`2026-07-25-inbound-ixfr-plan.md`). A confirmed serial-bump bug on secondaries
 turned out to be one instance of a whole missing invariant. This is a
@@ -846,3 +847,48 @@ Per work item, in §13's commit order:
 3. **Fix D's blast radius is not a LOC risk** (15 lines) — it is a *validation*
    cost: the doc requires foffe testbed time on top of `-race`, which is
    wall-clock, not diff size.
+
+## 14.1 Implementation progress
+
+Branch `feature/secondary-zones-immutable`. Every commit compiles, is
+GPG-signed, and leaves the full `v2` suite green.
+
+| Item | Status | Commit(s) |
+|---|---|---|
+| §5 per-zone `outbound_soa_serial` (schema + plumbing) | **DONE** | `c5dc33a` |
+| §5 per-zone mode tests | **DONE** | `095374a` |
+| Fix A — serial mirror + six-site suppression + row-clear + backwards ERROR | **DONE** (mutation-verified) | `a030ab4` |
+| Fix E — role gate on the per-publish SOA re-sign | **DONE** | `1fa3f36` |
+| freeze/thaw missing `return`s (§12 item 5) | **DONE** | `82b54f5` |
+| Fix D — fail-closed applier gate | **DONE** (see finding below) | `477ea49` |
+| Fix B — option normalizer + as-configured/effective split | TODO | — |
+| Fix C — API origination gate (both zone handlers + catalog) | TODO | — |
+| §7 diagnostics — serial visibility, all-primaries probe | TODO | — |
+| §9 forced-transfer contract (equal-serial no-op) | TODO | — |
+| §5 startup warning (global persist/unixtime + auth secondaries) | TODO | — |
+
+Notes from implementation:
+
+- **The predicate lives in `v2/zone_origination.go`** as
+  `zoneMayOriginateContent(zd)`, and it returns **true for every app type other
+  than tdns-auth**. Folding the app-type test into the predicate rather than
+  repeating `Globals.App.Type == AppTypeAuth &&` at each call site means the
+  §1.1 guarantee is stated once and no future gate can forget it. Consequence
+  for tests: a test asserting any gate must set `Globals.App.Type` explicitly,
+  since an unset (zero) app type reads as "not tdns-auth" and every gate stands
+  down.
+
+- **FINDING — the ZONE-UPDATE vectors are currently inert on a secondary, for
+  an unrelated reason.** `ApplyZoneUpdateToDB` ([zone_updater.go:786](../v2/zone_updater.go))
+  is a `return nil` **placeholder**, and it is the entire `ZoneType == Secondary`
+  branch of the ZONE-UPDATE apply path. So on a tdns-auth secondary today,
+  *every* ZONE-UPDATE-borne vector — DDNS (#2), transport signals (#3), DSYNC
+  (4d), and the whole `ops_*`/InternalUpdate family (#10) — reaches the applier
+  and then does nothing. This does **not** invalidate any fix, but it corrects
+  the audit's severity claims: those vectors are **latent, not live**. They
+  become live the moment that placeholder is implemented — which is precisely
+  the argument for Fix D being a structural gate rather than a per-vector patch.
+  What *is* live on a secondary today: the refresh serial bump (#1, Fix A), the
+  signing/direct-publish class (5b/5c/5d, Fix E + normalizer), CHILD-UPDATE (a
+  real `DelegationBackend.ApplyChildUpdate`), and the API actions (Fix C).
+  §2's table should be re-read with this distinction in mind.
