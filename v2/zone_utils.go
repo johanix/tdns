@@ -699,7 +699,11 @@ func (zd *ZoneData) EffectiveOutboundSoaSerial() string {
 //     (e.g. multiple bumps within the same wallclock second), in which case
 //     fall back to prev + 1 to preserve monotonicity.
 func nextOutboundSerial(zd *ZoneData) uint32 {
-	if zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialUnixtime {
+	// A mirroring secondary never rewrites its serial into timestamp space —
+	// MUST-NOT-MODIFY is absolute, not keep-mode-only. (Reaching here at all on
+	// such a zone means something staged a publish-with-bump on it, which the
+	// other gates should have prevented; +1 is the conservative fallback.)
+	if zoneMayOriginateContent(zd) && zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialUnixtime {
 		s := uint32(time.Now().Unix())
 		if s > zd.CurrentSerial {
 			return s

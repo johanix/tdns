@@ -116,7 +116,16 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		zd.ClearError(RefreshError)
 		// Apply outbound_soa_serial mode for the serial we'll advertise
 		// to secondaries.
-		if zd.KeyDB != nil {
+		// MUST-NOT-MODIFY: neither outbound mode may rewrite the serial of a
+		// tdns-auth secondary that did not originate this content. Clear any
+		// serial persisted before the zone became a mirror, so the inflated
+		// legacy value cannot be resurrected by a later change here.
+		if zd.KeyDB != nil && !zoneMayOriginateContent(zd) {
+			if err := zd.KeyDB.DeleteOutgoingSerial(zone); err != nil {
+				lgEngine.Warn("failed to clear persisted outgoing serial for mirroring secondary",
+					"zone", zone, "err", err)
+			}
+		} else if zd.KeyDB != nil {
 			serialChanged := false
 			switch zd.EffectiveOutboundSoaSerial() {
 			case OutboundSoaSerialUnixtime:
@@ -793,8 +802,13 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// Successful refresh clears RefreshError. Other categories
 						// (rollover-policy, parent-DSYNC, config) survive.
 						zd.ClearError(RefreshError)
-						// Apply outbound_soa_serial mode after upstream refresh.
-						if zd.KeyDB != nil {
+						// Apply outbound_soa_serial mode after upstream refresh —
+						// but never for a mirroring secondary (MUST-NOT-MODIFY;
+						// applyRefreshReplacementLocked already set the serial
+						// to upstream's and nothing may move it off that).
+						if zd.KeyDB != nil && !zoneMayOriginateContent(zd) {
+							// no-op: serial belongs to upstream
+						} else if zd.KeyDB != nil {
 							serialChanged := false
 							switch zd.EffectiveOutboundSoaSerial() {
 							case OutboundSoaSerialUnixtime:

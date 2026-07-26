@@ -333,7 +333,10 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	zd.publishUrgent = false
 	zd.lastPublish = time.Now()
 
-	if zd.KeyDB != nil && zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialPersist {
+	// Persist only for a zone that may originate: a mirroring secondary's
+	// serial is upstream's property, not ours to record and later restore.
+	if zd.KeyDB != nil && zoneMayOriginateContent(zd) &&
+		zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialPersist {
 		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
 			lg.Error("publish: failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
 		}
@@ -348,10 +351,36 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 
 func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs []*core.RRset, firstLoad bool) error {
 	zd.IncomingSerial = new_zd.IncomingSerial
-	if firstLoad {
+	switch {
+	case firstLoad:
 		zd.CurrentSerial = new_zd.CurrentSerial
 		zd.FirstZoneLoad = false
-	} else {
+
+	case !zoneMayOriginateContent(zd):
+		// MUST-NOT-MODIFY: a tdns-auth secondary that did not originate this
+		// content mirrors the upstream serial verbatim. The historical
+		// unconditional ++ below made every such secondary drift +1 per
+		// refresh, so two masters downstream of one signer (say BIND9 and
+		// tdns-auth) advertised different serials for identical content and
+		// edge nodes always fetched from the tdns one — silently collapsing a
+		// redundant pair. This is the fix.
+		prev := zd.CurrentSerial
+		zd.CurrentSerial = new_zd.IncomingSerial
+		// A secondary that had already inflated its serial (or was running in
+		// persist/unixtime mode before the upgrade) steps BACKWARDS here, once.
+		// Its own downstreams will then refuse to transfer until upstream
+		// climbs past the old value — RFC 1982 serial arithmetic, so BIND/NSD
+		// behave the same and a NOTIFY carrying a lower serial is ignored.
+		// Shout, so the operator can force a retransfer on the downstreams
+		// (`tdns-cli zone reload --force <zone>`) instead of discovering it as
+		// mysteriously stale data.
+		if prev != 0 && zd.CurrentSerial < prev {
+			lg.Error("secondary SOA serial steps BACKWARDS to mirror upstream; downstreams will refuse to transfer until forced",
+				"zone", zd.ZoneName, "old_serial", prev, "new_serial", zd.CurrentSerial,
+				"action", "force a retransfer on each downstream (tdns-cli zone reload --force)")
+		}
+
+	default:
 		zd.CurrentSerial++
 		if zd.KeyDB != nil && zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialPersist {
 			if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
