@@ -408,6 +408,15 @@ func buildListZoneConf(zd *ZoneData, zname string, kdb *KeyDB) ZoneConf {
 		EffectiveDnssecPolicy:  zd.DnssecPolicyName,
 		DnssecPolicyOverridden: overridden,
 		DnssecPolicyConfigBase: configPolicy,
+
+		// Serial visibility (§7). Free — both are already on ZoneData, no
+		// network — so the bulk listing carries them and `zone list -v` can
+		// show outbound vs inbound side by side. The live per-primary probe
+		// is single-zone only; see populateZoneDescDetail.
+		CurrentSerial:              zd.CurrentSerial,
+		IncomingSerial:             zd.IncomingSerial,
+		EffectiveOutboundSoaSerial: zd.EffectiveOutboundSoaSerial(),
+		OutboundSoaSerialSource:    zd.outboundSoaSerialSource(),
 	}
 }
 
@@ -421,6 +430,15 @@ func buildListZoneConf(zd *ZoneData, zname string, kdb *KeyDB) ZoneConf {
 // (ConfLive), which is lock-free: a concurrent reload publishes a fresh snapshot
 // rather than mutating in place, so pol is a stable value copy.
 func populateZoneDescDetail(zconf *ZoneConf, zd *ZoneData, zname string, kdb *KeyDB) {
+	// Live per-primary SOA probe (§7). Single-zone only — one query per
+	// configured primary — and read-only. Per-primary rather than one value is
+	// the point: two masters disagreeing about a zone's serial is the failure
+	// that motivated the MUST-NOT-MODIFY work, and there was previously no way
+	// to see it from tdns.
+	if len(zd.Upstreams) > 0 {
+		zconf.UpstreamSerials = zd.ProbeUpstreamSerials(&Conf)
+	}
+
 	name, source, appliedAt, ok, err := GetZoneAppliedPolicyDetail(kdb, zname)
 	if err != nil {
 		// Surface the failure distinctly (not as an absent record) so the CLI can

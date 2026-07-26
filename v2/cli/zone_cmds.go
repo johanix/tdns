@@ -860,6 +860,24 @@ func zoneBaseDetail(name string, zconf tdns.ZoneConf) string {
 	sort.Strings(opts)
 	fmt.Fprintf(&b, "\tType: %s\tStore: %s\tOptions: %v\n", zconf.Type, zconf.Store, opts)
 
+	// Serial visibility (design doc §7). Emitted only when there is something
+	// to show, which also keeps the `zone list -v` golden (a fixture with zero
+	// serials) byte-identical — see TestVerboseListZone_GoldenParity.
+	//
+	// Outbound is what we advertise to our downstreams, inbound what we last
+	// received from upstream. On a correct secondary they are equal; a gap is
+	// exactly the drift the MUST-NOT-MODIFY work exists to prevent.
+	if zconf.CurrentSerial != 0 || zconf.IncomingSerial != 0 {
+		fmt.Fprintf(&b, "\tSerial: outbound %d\tinbound %d\n", zconf.CurrentSerial, zconf.IncomingSerial)
+	}
+	if zconf.EffectiveOutboundSoaSerial != "" {
+		src := zconf.OutboundSoaSerialSource
+		if src == "" {
+			src = "unknown"
+		}
+		fmt.Fprintf(&b, "\tOutbound serial mode: %s (from: %s)\n", zconf.EffectiveOutboundSoaSerial, src)
+	}
+
 	if zconf.EffectiveDnssecPolicy != "" {
 		pol := zconf.EffectiveDnssecPolicy
 		if zconf.DnssecPolicyOverridden {
@@ -937,6 +955,27 @@ func DescribeZone(zconf tdns.ZoneConf) string {
 
 	// Section 2: bound-policy algorithm / lifetime / sig-validity detail.
 	b.WriteString(describePolicyDetail(zconf))
+
+	// Section 3: live per-primary SOA serials (design doc §7). `zone desc` only
+	// — one query per primary. Showing them individually is the point: two
+	// masters serving the same zone at different serials is the split-brain
+	// that motivated the MUST-NOT-MODIFY work, and it was previously invisible
+	// from tdns. A primary that could not be probed is listed with its error
+	// rather than omitted — an unreachable master is itself diagnostic.
+	if len(zconf.UpstreamSerials) > 0 {
+		b.WriteString("\tUpstream serials:\n")
+		for _, us := range zconf.UpstreamSerials {
+			if us.Err != "" {
+				fmt.Fprintf(&b, "\t\t%s: (probe failed: %s)\n", us.Addr, us.Err)
+				continue
+			}
+			marker := ""
+			if zconf.IncomingSerial != 0 && us.Serial != zconf.IncomingSerial {
+				marker = "\t<-- differs from our inbound serial"
+			}
+			fmt.Fprintf(&b, "\t\t%s: %d%s\n", us.Addr, us.Serial, marker)
+		}
+	}
 
 	return b.String()
 }

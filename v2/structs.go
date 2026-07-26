@@ -353,7 +353,26 @@ type ZoneConf struct {
 	// "(not recorded)".
 	AppliedError string            `yaml:"-"`
 	PolicyDetail *DnssecPolicyView `yaml:"-"`
-	Template     string            `yaml:"template" mapstructure:"template"`
+	// Serial visibility (display-only; not config). CurrentSerial is what we
+	// advertise to our downstreams, IncomingSerial what we last received from
+	// upstream. Both are free to populate — they are already on ZoneData — and
+	// `zone list -v` shows them side by side.
+	//
+	// UpstreamSerials is populated ONLY by the single-zone `zone desc` path: it
+	// costs a live SOA probe per configured primary, which is fine for one zone
+	// and not for a bulk listing. Per-primary rather than one aggregate value
+	// is the point — "this master says 42, that one says 5000" is the direct
+	// diagnostic for the split-brain that motivated the MUST-NOT-MODIFY work,
+	// and there is currently no way to see it from tdns at all.
+	CurrentSerial   uint32           `yaml:"-"`
+	IncomingSerial  uint32           `yaml:"-"`
+	UpstreamSerials []UpstreamSerial `yaml:"-"`
+	// EffectiveOutboundSoaSerial is the resolved outbound serial mode and where
+	// it came from ("zone", "global" or "default"), so an operator can see both
+	// the value and why it applies.
+	EffectiveOutboundSoaSerial string `yaml:"-"`
+	OutboundSoaSerialSource    string `yaml:"-"`
+	Template                   string `yaml:"template" mapstructure:"template"`
 	// DynamicZones marks a TEMPLATE as instantiable via the dynamic-zones API
 	// (zone add --type primary --template <name>). It is the per-template
 	// opt-in gate: an API client can only pick among operator-blessed
@@ -734,6 +753,16 @@ func rrsToStrings(rrs []dns.RR) []string {
 		out[i] = rr.String()
 	}
 	return out
+}
+
+// UpstreamSerial is one primary's answer to a live SOA probe, for `zone desc`.
+// Err carries the probe failure (unreachable, REFUSED, TSIG mismatch, ...) so a
+// primary that cannot be reached is shown as such rather than silently omitted
+// — an unreachable master is itself diagnostic.
+type UpstreamSerial struct {
+	Addr   string
+	Serial uint32
+	Err    string
 }
 
 type ZoneRefresher struct {
