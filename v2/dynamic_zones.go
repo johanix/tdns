@@ -305,6 +305,8 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 				Options:        specOptions,
 				UpdatePolicy:   spec.Policy,
 				DnssecPolicy:   spec.Zconf.DnssecPolicy,
+
+				OutboundSoaSerial: spec.Zconf.OutboundSoaSerial,
 			}
 			select {
 			case conf.Internal.RefreshZoneCh <- zr:
@@ -381,6 +383,8 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			ConfigUpdate:   true, // config-bearing (persisted dynamic zone)
 			Zonefile:       zconf.Zonefile,
 			Options:        options,
+
+			OutboundSoaSerial: zconf.OutboundSoaSerial,
 		}
 
 		// Blocking send, exactly like the static-zone enqueue in ParseZones.
@@ -477,19 +481,20 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 	}
 
 	zconf := ZoneConf{
-		Name:           zd.ZoneName,
-		Zonefile:       zoneFilePath,
-		Type:           typeStr,
-		Store:          storeStr,
-		Primaries:      clonePeerConfs(zd.PrimariesConf),
-		Notify:         zd.Notify,
-		AllowNotify:    zd.AllowNotify,
-		Downstreams:    zd.Downstreams,
-		DownstreamAuth: zd.DownstreamAuth,
-		OptionsStrs:    optionsStrs,
-		Template:       zd.Template,
-		SourceCatalog:  zd.SourceCatalog,
-		ApiManaged:     zd.Options[OptApiManagedZone],
+		Name:              zd.ZoneName,
+		Zonefile:          zoneFilePath,
+		Type:              typeStr,
+		Store:             storeStr,
+		OutboundSoaSerial: zd.OutboundSoaSerial,
+		Primaries:         clonePeerConfs(zd.PrimariesConf),
+		Notify:            zd.Notify,
+		AllowNotify:       zd.AllowNotify,
+		Downstreams:       zd.Downstreams,
+		DownstreamAuth:    zd.DownstreamAuth,
+		OptionsStrs:       optionsStrs,
+		Template:          zd.Template,
+		SourceCatalog:     zd.SourceCatalog,
+		ApiManaged:        zd.Options[OptApiManagedZone],
 		// Note: We don't serialize Frozen, Dirty, Error, ErrorType, ErrorMsg, RefreshCount
 		// as these are runtime state, not configuration
 	}
@@ -1103,6 +1108,11 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	allowNotify := append([]AclEntry(nil), oldZd.AllowNotify...)
 	downstreams := append([]AclEntry(nil), oldZd.Downstreams...)
 	downstreamAuth := append([]string(nil), oldZd.DownstreamAuth...)
+	// Same reason as the ACLs above: modify does not carry an outbound serial
+	// mode (there is deliberately no API knob for it), so without this a
+	// TSIG-only modify would silently reset a zone that has one to the global
+	// default.
+	outboundSoaSerial := oldZd.OutboundSoaSerial
 	oldZd.mu.Unlock()
 
 	newZd := &ZoneData{
@@ -1120,6 +1130,8 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		Status:         ZoneStatusPending,
 		Data:           core.NewCmap[OwnerData](),
 		KeyDB:          conf.Internal.KeyDB,
+
+		OutboundSoaSerial: outboundSoaSerial,
 	}
 	// Commit the staged inline key just before persistence so the rewritten file
 	// includes it; roll it back if persistence fails.
@@ -1157,6 +1169,8 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		ZoneStore:     MapZone,
 		Options:       options,
 		Force:         true,
+
+		OutboundSoaSerial: outboundSoaSerial,
 	}
 	if err := conf.enqueueRefresh(ctx, zr); err != nil {
 		return "", fmt.Errorf("zone %s modified but failed to schedule refresh: %w", name, err)

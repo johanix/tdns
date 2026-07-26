@@ -666,20 +666,40 @@ func FindZoneNG(qname string) *ZoneData {
 	return nil
 }
 
+// EffectiveOutboundSoaSerial resolves the outbound serial mode actually in
+// force for this zone, newest tier first:
+//
+//  1. the per-zone setting (zones: <z>: outbound_soa_serial, possibly
+//     inherited from the zone's template via ExpandTemplate's gap-fill);
+//  2. the server-global dnsengine.outbound_soa_serial (resolved onto the
+//     KeyDB at parse time by applyOutboundSoaSerial);
+//  3. OutboundSoaSerialKeep, the documented default.
+//
+// Every consumer of the mode MUST go through this rather than reading
+// zd.KeyDB.OutboundSoaSerial directly, so the per-zone tier is honoured.
+// Suppression for a non-originating tdns-auth secondary is deliberately NOT
+// applied here — this answers "what mode is configured", not "may this zone
+// act on it"; the callers pair it with the origination predicate.
+func (zd *ZoneData) EffectiveOutboundSoaSerial() string {
+	if zd.OutboundSoaSerial != "" {
+		return zd.OutboundSoaSerial
+	}
+	if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial != "" {
+		return zd.KeyDB.OutboundSoaSerial
+	}
+	return OutboundSoaSerialKeep
+}
+
 // nextOutboundSerial returns the next SOA serial that should be advertised
-// to downstreams given zd.CurrentSerial and the configured outbound_soa_serial
-// mode:
+// to downstreams given zd.CurrentSerial and the effective outbound_soa_serial
+// mode (per-zone, else server-global):
 //   - "" / "keep" / "persist": prev + 1 (legacy behaviour; "persist" only
 //     differs in that the resulting serial is also written to OutgoingSerials)
 //   - "unixtime": time.Now().Unix(), unless that would not advance the serial
 //     (e.g. multiple bumps within the same wallclock second), in which case
 //     fall back to prev + 1 to preserve monotonicity.
 func nextOutboundSerial(zd *ZoneData) uint32 {
-	mode := ""
-	if zd.KeyDB != nil {
-		mode = zd.KeyDB.OutboundSoaSerial
-	}
-	if mode == OutboundSoaSerialUnixtime {
+	if zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialUnixtime {
 		s := uint32(time.Now().Unix())
 		if s > zd.CurrentSerial {
 			return s

@@ -138,17 +138,23 @@ type ZoneData struct {
 	// ZoneFile           string // TODO: Remove this
 	IncomingSerial uint32 // SOA serial that we got from upstream
 	CurrentSerial  uint32 // SOA serial after local bumping
-	FirstZoneLoad  bool   // true until first zone data has been loaded
-	Verbose        bool
-	Debug          bool
-	IxfrChain      []Ixfr
-	PrimariesConf  []PeerConf // as-written primaries; persisted; re-resolved each load (P3)
-	Upstreams      []PeerConf // resolved addr:port tuples; runtime-only; used for transfer
-	Notify         []PeerConf // downstream secondaries that we notify (addr + key)
-	AllowNotify    []AclEntry // secondary: who may NOTIFY us; empty => accept from resolved primaries
-	Downstreams    []AclEntry // primary: who may AXFR from us (provide-xfr ACL); empty => deny
-	DownstreamAuth []string   // acceptable transfer-auth mechanism classes (empty => unrestricted); see authorizeTransfer
-	Zonefile       string
+	// OutboundSoaSerial is the PER-ZONE outbound serial mode (keep | unixtime
+	// | persist), sourced from the zone's config (possibly via its template).
+	// Empty means "inherit the server-global dnsengine.outbound_soa_serial".
+	// Never read directly — call zd.EffectiveOutboundSoaSerial(), which
+	// resolves the zone/global tiers.
+	OutboundSoaSerial string
+	FirstZoneLoad     bool // true until first zone data has been loaded
+	Verbose           bool
+	Debug             bool
+	IxfrChain         []Ixfr
+	PrimariesConf     []PeerConf // as-written primaries; persisted; re-resolved each load (P3)
+	Upstreams         []PeerConf // resolved addr:port tuples; runtime-only; used for transfer
+	Notify            []PeerConf // downstream secondaries that we notify (addr + key)
+	AllowNotify       []AclEntry // secondary: who may NOTIFY us; empty => accept from resolved primaries
+	Downstreams       []AclEntry // primary: who may AXFR from us (provide-xfr ACL); empty => deny
+	DownstreamAuth    []string   // acceptable transfer-auth mechanism classes (empty => unrestricted); see authorizeTransfer
+	Zonefile          string
 	// Template names the config template an API-provisioned zone was expanded
 	// from (zone add --template). Persisted in the dynamic config entry so a
 	// restart re-expands it; the update policy is deliberately NOT persisted —
@@ -306,6 +312,14 @@ type ZoneConf struct {
 	UpdatePolicy      UpdatePolicyConf
 	DelegationBackend string `yaml:"delegationbackend" mapstructure:"delegationbackend"` // named backend for child delegation data
 	DnssecPolicy      string `yaml:"dnssecpolicy" mapstructure:"dnssecpolicy"`
+	// OutboundSoaSerial is the per-zone override of the server-global
+	// dnsengine.outbound_soa_serial. Empty (the default) inherits the global.
+	// Set it on a TEMPLATE to give a whole class of zones a serial policy —
+	// that is the intended granularity; a zone that sets it explicitly wins
+	// over its template (ExpandTemplate gap-fills only unset fields, and a
+	// non-empty string counts as set, so an explicit "keep" beats a template
+	// "persist").
+	OutboundSoaSerial string `yaml:"outbound_soa_serial,omitempty" mapstructure:"outbound_soa_serial" validate:"omitempty,oneof=keep unixtime persist"`
 	// EffectiveDnssecPolicy / DnssecPolicyOverridden / DnssecPolicyConfigBase
 	// are display-only fields populated by the list-zones handler: the policy
 	// actually bound to the running zone; whether it came from a dynamic
@@ -744,10 +758,15 @@ type ZoneRefresher struct {
 	Edns0Options   *edns0.MsgOptions
 	UpdatePolicy   UpdatePolicy
 	DnssecPolicy   string
-	MultiSigner    string
-	Force          bool // force refresh, ignoring SOA serial
-	Wait           bool // wait for refresh to complete before responding
-	Response       chan RefresherResponse
+	// OutboundSoaSerial carries the per-zone outbound serial mode to the
+	// RefreshEngine (copied to zd.OutboundSoaSerial on merge). Empty means
+	// "inherit the server-global setting" and is a valid, self-consistent
+	// value, so it is always copied — no "only if non-empty" guard.
+	OutboundSoaSerial string
+	MultiSigner       string
+	Force             bool // force refresh, ignoring SOA serial
+	Wait              bool // wait for refresh to complete before responding
+	Response          chan RefresherResponse
 }
 
 type RefresherResponse struct {

@@ -463,6 +463,11 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 		UpdatePolicy:   spec.Policy,
 		DnssecPolicy:   spec.Zconf.DnssecPolicy,
 		Force:          true, // load from file regardless of serial
+
+		// Template-expanded: a template carrying outbound_soa_serial gives
+		// every zone stamped from it that serial policy (the intended
+		// granularity — see the per-zone config model in the design doc).
+		OutboundSoaSerial: spec.Zconf.OutboundSoaSerial,
 	}
 	if err := conf.enqueueRefresh(ctx, zr); err != nil {
 		// Mark the registered-but-unscheduled zone so list-dynamic shows a

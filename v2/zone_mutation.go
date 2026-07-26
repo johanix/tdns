@@ -333,7 +333,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	zd.publishUrgent = false
 	zd.lastPublish = time.Now()
 
-	if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial == OutboundSoaSerialPersist {
+	if zd.KeyDB != nil && zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialPersist {
 		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
 			lg.Error("publish: failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
 		}
@@ -353,7 +353,7 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		zd.FirstZoneLoad = false
 	} else {
 		zd.CurrentSerial++
-		if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial == OutboundSoaSerialPersist {
+		if zd.KeyDB != nil && zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialPersist {
 			if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
 				return fmt.Errorf("persist outgoing serial for zone %s: %w", zd.ZoneName, err)
 			}

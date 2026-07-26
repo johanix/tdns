@@ -615,11 +615,14 @@ func applyOutboundSoaSerial(kdb *KeyDB, raw string) error {
 	}
 	kdb.OutboundSoaSerial = mode
 
-	if mode == OutboundSoaSerialPersist {
-		schema := DefaultTables["OutgoingSerials"]
-		if _, err := kdb.DB.Exec(schema); err != nil {
-			return fmt.Errorf("failed to create OutgoingSerials table: %w", err)
-		}
+	// Create the table unconditionally. The mode is now a PER-ZONE setting that
+	// merely defaults to this global one (zd.EffectiveOutboundSoaSerial), so any
+	// individual zone may be in persist mode even when the global is keep — and
+	// zones are parsed after this runs, so we cannot know yet whether one is.
+	// CREATE IF NOT EXISTS on an unused table is cheap.
+	schema := DefaultTables["OutgoingSerials"]
+	if _, err := kdb.DB.Exec(schema); err != nil {
+		return fmt.Errorf("failed to create OutgoingSerials table: %w", err)
 	}
 	return nil
 }
@@ -1161,6 +1164,10 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				Options:        options,
 				UpdatePolicy:   policy,
 				DnssecPolicy:   zconf.DnssecPolicy,
+				// Always carried (empty == inherit the global), so a config
+				// edit that REMOVES a per-zone mode actually reverts the zone
+				// to the global on reload instead of keeping the stale value.
+				OutboundSoaSerial: zconf.OutboundSoaSerial,
 			}
 			select {
 			case conf.Internal.RefreshZoneCh <- zr:

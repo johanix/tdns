@@ -118,7 +118,7 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		// to secondaries.
 		if zd.KeyDB != nil {
 			serialChanged := false
-			switch zd.KeyDB.OutboundSoaSerial {
+			switch zd.EffectiveOutboundSoaSerial() {
 			case OutboundSoaSerialUnixtime:
 				zd.CurrentSerial = uint32(time.Now().Unix())
 				lgEngine.Info("zone loaded; outbound_soa_serial=unixtime",
@@ -280,6 +280,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							}
 							zd.ZoneType = zr.ZoneType
 							zd.Options = zr.Options
+							zd.OutboundSoaSerial = zr.OutboundSoaSerial
 							zd.UpdatePolicy = zr.UpdatePolicy
 							// Record the config-base policy name only (no struct bind).
 							// syncZoneDnssecPolicyFromConfig binds post-Ready; this
@@ -389,6 +390,15 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// Replace options only if provided (don't merge) to match config reload behavior
 						if zr.Options != nil {
 							zd.Options = zr.Options
+						}
+						// Outbound serial mode: gate on ConfigUpdate, NOT on
+						// non-emptiness. Empty is a MEANINGFUL value here
+						// ("inherit the global"), so a config edit that removes
+						// a per-zone mode must clear it — while a bare
+						// NOTIFY/refresh-only refresher (which carries no
+						// config) must not wipe the configured mode.
+						if zr.ConfigUpdate {
+							zd.OutboundSoaSerial = zr.OutboundSoaSerial
 						}
 						// Update UpdatePolicy only if provided (check if it has meaningful content)
 						// UpdatePolicy is a struct, so we check if any fields are set
@@ -593,28 +603,29 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					primariesConf := clonePeerConfs(zr.PrimariesConf)
 					upstreams := clonePeerConfs(zr.Primaries)
 					zd := &ZoneData{
-						ZoneName:         zone,
-						ZoneStore:        zr.ZoneStore,
-						Logger:           log.Default(),
-						PrimariesConf:    primariesConf,
-						Upstreams:        upstreams,
-						Notify:           normalizePeerAddrs(zr.Notify),
-						AllowNotify:      zr.AllowNotify,
-						Downstreams:      zr.Downstreams,
-						DownstreamAuth:   zr.DownstreamAuth,
-						Zonefile:         zr.Zonefile,
-						Template:         zr.Template,
-						ZoneType:         zr.ZoneType,
-						Options:          zr.Options,
-						UpdatePolicy:     zr.UpdatePolicy,
-						DnssecPolicyName: zr.DnssecPolicy, // config-base hint; struct bound post-Ready
-						MultiSigner:      &msc,
-						DelegationSyncQ:  conf.Internal.DelegationSyncQ,
-						Data:             core.NewCmap[OwnerData](),
-						KeyDB:            conf.Internal.KeyDB,
-						FirstZoneLoad:    true,
-						Status:           ZoneStatusPending, // registered + enqueued, no data yet (B6)
-						publishCadence:   zr.PublishCadence,
+						ZoneName:          zone,
+						ZoneStore:         zr.ZoneStore,
+						Logger:            log.Default(),
+						PrimariesConf:     primariesConf,
+						Upstreams:         upstreams,
+						Notify:            normalizePeerAddrs(zr.Notify),
+						AllowNotify:       zr.AllowNotify,
+						Downstreams:       zr.Downstreams,
+						DownstreamAuth:    zr.DownstreamAuth,
+						Zonefile:          zr.Zonefile,
+						Template:          zr.Template,
+						ZoneType:          zr.ZoneType,
+						Options:           zr.Options,
+						OutboundSoaSerial: zr.OutboundSoaSerial,
+						UpdatePolicy:      zr.UpdatePolicy,
+						DnssecPolicyName:  zr.DnssecPolicy, // config-base hint; struct bound post-Ready
+						MultiSigner:       &msc,
+						DelegationSyncQ:   conf.Internal.DelegationSyncQ,
+						Data:              core.NewCmap[OwnerData](),
+						KeyDB:             conf.Internal.KeyDB,
+						FirstZoneLoad:     true,
+						Status:            ZoneStatusPending, // registered + enqueued, no data yet (B6)
+						publishCadence:    zr.PublishCadence,
 					}
 
 					// Register the OnFirstLoad callbacks BEFORE the initial load:
@@ -785,7 +796,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// Apply outbound_soa_serial mode after upstream refresh.
 						if zd.KeyDB != nil {
 							serialChanged := false
-							switch zd.KeyDB.OutboundSoaSerial {
+							switch zd.EffectiveOutboundSoaSerial() {
 							case OutboundSoaSerialUnixtime:
 								zd.CurrentSerial = uint32(time.Now().Unix())
 								lgEngine.Info("zone updated from upstream; outbound_soa_serial=unixtime",
