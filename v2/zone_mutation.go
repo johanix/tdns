@@ -187,6 +187,18 @@ func (zd *ZoneData) resignWorkingSetSOAIfSigned() {
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return
 	}
+	// Role gate (Fix E). SetupZoneSigning has one — "a non-primary signs only
+	// with inline-signing" — but this path did not, and it runs inside
+	// publishWorkingSetLocked, i.e. on EVERY publish including the refresh
+	// path. Without this, a tdns-auth secondary carrying `online-signing`
+	// re-signs the upstream SOA with locally generated keys (EnsureActiveDnssecKeys
+	// below will mint them if absent) — signatures from a key that is not in the
+	// zone's published DNSKEY RRset, i.e. BOGUS to every validator downstream.
+	// `online-signing` is also normalized off for such a zone; this is the
+	// defence in depth behind that.
+	if !zoneMayOriginateContent(zd) {
+		return
+	}
 	// A new zone's DNSSEC policy is bound post-Ready (PR-2 defers binding so a
 	// restart cannot hide applied≠intent, blocking ①). Until it is bound there is
 	// nothing to re-sign under, and EnsureActiveDnssecKeys below would deref a nil
