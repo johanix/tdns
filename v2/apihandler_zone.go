@@ -63,6 +63,18 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			return
 		}
 
+		// Origination gate (Fix C): refuse the actions that would write into
+		// the zone or advance its serial on a tdns-auth secondary. One check
+		// ahead of the switch rather than a line per case, so a command added
+		// to originationAPICommands is gated automatically.
+		if originationAPICommands[zp.Command] {
+			if msg := zoneOriginationRefusal(zd, zp.Command); msg != "" {
+				resp.Error = true
+				resp.ErrorMsg = msg
+				return
+			}
+		}
+
 		switch zp.Command {
 		case "bump":
 			// resp.Msg, err = BumpSerial(conf, cp.Zone)
@@ -142,6 +154,19 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			}
 
 		case "freeze":
+			// Role check FIRST (Fix C). OptFrozen gates DDNS and nothing else
+			// (see updateresponder.go) — it does not pause refresh — so on a
+			// secondary, where allow-updates is always normalized off, it is
+			// functionally inert. Refusing it costs nothing real.
+			//
+			// Order matters: the allow-updates precondition below would
+			// otherwise fire first and tell the operator to enable an option
+			// the normalizer immediately strips again. Name the true reason.
+			if msg := zoneOriginationRefusal(zd, "freeze"); msg != "" {
+				resp.Error = true
+				resp.ErrorMsg = msg
+				return
+			}
 			// If a zone has modifications, freezing implies that the updated
 			// zone data should be written out to disk.
 			if !zd.Options[OptAllowUpdates] && !zd.Options[OptAllowChildUpdates] {
@@ -168,6 +193,12 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			}
 
 		case "thaw":
+			// Role check first, same reasoning as freeze above.
+			if msg := zoneOriginationRefusal(zd, "thaw"); msg != "" {
+				resp.Error = true
+				resp.ErrorMsg = msg
+				return
+			}
 			if !zd.Options[OptAllowUpdates] && !zd.Options[OptAllowChildUpdates] {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("ThawZone: zone %s does not allow updates. Thaw would be a no-op", zd.ZoneName)
@@ -843,6 +874,17 @@ func APIzoneDsync(ctx context.Context, app *AppDetails, refreshq chan ZoneRefres
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Zone %q is unknown", zdp.Zone)
 			return
+		}
+
+		// Origination gate (Fix C). The publish/unpublish-dsync-rrset commands
+		// write the _dsync DSYNC RRset into the zone, which a secondary must
+		// not do — publishing DSYNC is the primary's job (or an agent's).
+		if originationAPICommands[zdp.Command] {
+			if msg := zoneOriginationRefusal(zd, zdp.Command); msg != "" {
+				resp.Error = true
+				resp.ErrorMsg = msg
+				return
+			}
 		}
 
 		// Most of the dsync commands relate to the child role. The exception is the publish/unpublish commands
