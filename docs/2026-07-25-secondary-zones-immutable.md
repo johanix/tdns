@@ -1,9 +1,10 @@
 # Secondary zones are immutable — MUST-NOT-MODIFY invariant + audit
 
 **Date:** 2026-07-25, revised 2026-07-26 (rev 2, rev 2.1, rev 2.2 same day)
-**Status:** IN IMPLEMENTATION (started 2026-07-26). Design agreed; rev 2
-incorporates a code-verified re-audit of every claim in rev 1. Per-item
-progress in §14.1.
+**Status:** IMPLEMENTED (2026-07-26) — all items in §14.1 landed on
+`feature/secondary-zones-immutable`; not yet reviewed or merged, and the
+live-testbed validation Fix D calls for is still outstanding. Design agreed;
+rev 2 incorporates a code-verified re-audit of every claim in rev 1.
 **Origin:** surfaced while cooking the inbound-IXFR plan
 (`2026-07-25-inbound-ixfr-plan.md`). A confirmed serial-bump bug on secondaries
 turned out to be one instance of a whole missing invariant. This is a
@@ -851,7 +852,13 @@ Per work item, in §13's commit order:
 ## 14.1 Implementation progress
 
 Branch `feature/secondary-zones-immutable`. Every commit compiles, is
-GPG-signed, and leaves the full `v2` suite green.
+GPG-signed, and leaves the full `v2` suite green. Final state verified with
+`go vet`, `go test -race` (v2 + cli) and a full `make -C cmdv2 v2` binary build.
+
+**Still outstanding before this is merge-ready:** review, and the live foffe
+testbed validation Fix D calls for (§3, blast-radius note) — the applier gate
+changes a path that today accepts every internal update unconditionally, and
+unit tests cannot cover that the way the testbed can.
 
 | Item | Status | Commit(s) |
 |---|---|---|
@@ -862,10 +869,10 @@ GPG-signed, and leaves the full `v2` suite green.
 | freeze/thaw missing `return`s (§12 item 5) | **DONE** | `82b54f5` |
 | Fix D — fail-closed applier gate | **DONE** (see finding below) | `477ea49` |
 | Fix B — option normalizer + as-configured/effective split | **DONE** | `6c6b295` |
-| Fix C — API origination gate (both zone handlers + catalog) | TODO | — |
-| §7 diagnostics — serial visibility, all-primaries probe | TODO | — |
-| §9 forced-transfer contract (equal-serial no-op) | TODO | — |
-| §5 startup warning (global persist/unixtime + auth secondaries) | TODO | — |
+| Fix C — API origination gate (both zone handlers + catalog) | **DONE** | `b4b0744` |
+| §7 diagnostics — serial visibility, all-primaries probe | **DONE** | `4275b29` |
+| §9 forced-transfer contract (equal-serial no-op) | **DONE** (mutation-verified) | `5db9c4a` |
+| §5 startup warning (global persist/unixtime + auth secondaries) | **DONE** | `fbff7ed` |
 
 Notes from implementation:
 
