@@ -147,11 +147,13 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			if !zd.Options[OptAllowUpdates] && !zd.Options[OptAllowChildUpdates] {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("FreezeZone: zone %s does not allow updates. Freeze would be a no-op", zd.ZoneName)
+				return
 			}
 
 			if zd.Options[OptFrozen] {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("FreezeZone: zone %s is already frozen", zd.ZoneName)
+				return
 			}
 
 			// zd.mu.Lock()
@@ -169,10 +171,12 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			if !zd.Options[OptAllowUpdates] && !zd.Options[OptAllowChildUpdates] {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("ThawZone: zone %s does not allow updates. Thaw would be a no-op", zd.ZoneName)
+				return
 			}
 			if !zd.Options[OptFrozen] {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("ThawZone: zone %s is not frozen", zd.ZoneName)
+				return
 			}
 			zd.SetOption(OptFrozen, false)
 			resp.Msg = fmt.Sprintf("Zone %s is now thawed", zd.ZoneName)
