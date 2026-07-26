@@ -905,6 +905,9 @@ func (rrcache *RRsetCacheT) backfillDS(ctx context.Context, name string, fetcher
 	}
 	_, servers, err := rrcache.FindClosestKnownZone(name)
 	if err != nil {
+		if rrcache.Verbose {
+			log.Printf("backfillDS: FindClosestKnownZone(%q) failed: %v", name, err)
+		}
 		return nil
 	}
 	if len(servers) == 0 {
@@ -929,6 +932,9 @@ func (rrcache *RRsetCacheT) backfillDS(ctx context.Context, name string, fetcher
 	// DS special-case).
 	vstate, err := rrcache.ValidateRRset(ctx, fetched, fetcher)
 	if err != nil {
+		if rrcache.Verbose {
+			log.Printf("backfillDS: ValidateRRset for DS %q failed: %v", name, err)
+		}
 		return nil
 	}
 	entry := &CachedRRset{
