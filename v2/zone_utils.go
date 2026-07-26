@@ -78,7 +78,7 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, err
 			} else if force {
 				lg.Debug("forced retransfer regardless of SOA serial", "zone", zd.ZoneName)
 			}
-			updated, err = zd.FetchFromUpstream(verbose, debug, dynamicRRs, conf)
+			updated, err = zd.FetchFromUpstream(verbose, debug, force, dynamicRRs, conf)
 			if err != nil {
 				lg.Error("FetchZone failed", "zone", zd.ZoneName, "upstream", firstUpstreamAddr(zd.Upstreams), "err", err)
 				return false, err
@@ -259,7 +259,26 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 }
 
 // Return updated, err
-func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RRset, conf *Config) (bool, error) {
+// shouldDiscardUnchangedTransfer reports whether a completed transfer should be
+// thrown away because it carries the serial we already have.
+//
+// The force exemption is the §9 forced-transfer contract: a forced transfer
+// MUST apply whatever upstream has, including a serial equal to (or lower than)
+// our own. Without it a forced retransfer of an already-current zone silently
+// did nothing while reporting success — so `force` did not mean force.
+//
+// That matters beyond tidiness: a forced retransfer is the only remedy for a
+// downstream wedged behind a secondary whose serial stepped backwards (see the
+// migration section of the design doc), and the only escape hatch from a zone
+// holding corrupt data under a current serial.
+func shouldDiscardUnchangedTransfer(incomingSerial, currentSerial uint32, force bool) bool {
+	return incomingSerial == currentSerial && !force
+}
+
+// force means the operator explicitly asked for a retransfer, so the zone is
+// re-fetched and re-applied even when upstream's serial has not moved. See the
+// unchanged-serial check below for why that matters.
+func (zd *ZoneData) FetchFromUpstream(verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config) (bool, error) {
 
 	if len(zd.Upstreams) == 0 {
 		return false, fmt.Errorf("FetchFromUpstream: zone %s has no upstreams configured", zd.ZoneName)
@@ -310,10 +329,26 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 		return false, fmt.Errorf("AXFR of %s failed: tried all %d upstream(s): %w", zd.ZoneName, len(zd.Upstreams), lastErr)
 	}
 
-	if new_zd.IncomingSerial == zd.IncomingSerial {
+	// A forced transfer MUST apply whatever upstream has, including a serial
+	// equal to (or lower than) our own. Without the force exemption here, a
+	// forced retransfer of an already-current zone silently did nothing while
+	// reporting success — so `force` did not mean force.
+	//
+	// This is load-bearing for the strict-passthrough migration: a forced
+	// retransfer is the ONLY remedy for a downstream wedged behind a secondary
+	// whose serial stepped backwards, and the only escape hatch from a zone
+	// with corrupt-but-current-serial data. The lower-serial case already
+	// worked, but only incidentally (DoTransfer returns do_transfer=false
+	// without an error, and the caller's `do_transfer || force` lets it
+	// through); it is now pinned by a regression test.
+	if shouldDiscardUnchangedTransfer(new_zd.IncomingSerial, zd.IncomingSerial, force) {
 		lg.Debug("FetchFromUpstream: upstream serial is unchanged", "zone", zd.ZoneName, "serial", zd.IncomingSerial)
 		zd.SetStatus(prevStatus) // no-op refresh — nothing changed, restore prior status
 		return false, nil
+	}
+	if new_zd.IncomingSerial == zd.IncomingSerial {
+		lg.Info("FetchFromUpstream: forced retransfer, re-applying zone despite unchanged serial",
+			"zone", zd.ZoneName, "serial", zd.IncomingSerial)
 	}
 
 	new_zd.Ready = true
