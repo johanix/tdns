@@ -145,7 +145,15 @@ func TestSendReferral_InsecureDelegationHasNSEC(t *testing.T) {
 	soa := mustRR(t, zd.ZoneName+" 3600 IN SOA ns.pq.axfr.net. hostmaster.pq.axfr.net. 1 3600 600 86400 600")
 	apex.RRtypes.Set(dns.TypeSOA, core.RRset{Name: zd.ZoneName, RRtype: dns.TypeSOA, Class: dns.ClassINET, RRs: []dns.RR{soa}})
 
-	signFunc := func(rrset core.RRset, name string) (core.RRset, error) { return rrset, nil }
+	// Stub signer that attaches a marker RRSIG(NSEC), so the test also proves
+	// the NSEC's signature reaches the wire — an NSEC without its RRSIG proves
+	// nothing to a validator.
+	signFunc := func(rrset core.RRset, name string) (core.RRset, error) {
+		if len(rrset.RRs) > 0 && rrset.RRs[0].Header().Rrtype == dns.TypeNSEC {
+			rrset.RRSIGs = []dns.RR{mustRR(t, name+" 3600 IN RRSIG NSEC 15 3 3600 20260805122917 20260722122719 16089 pq.axfr.net. AA==")}
+		}
+		return rrset, nil
+	}
 
 	w := &fakeRW{remote: udpAddr("127.0.0.1")}
 	m := new(dns.Msg)
@@ -154,17 +162,27 @@ func TestSendReferral_InsecureDelegationHasNSEC(t *testing.T) {
 	if w.written == nil {
 		t.Fatal("sendReferral wrote no response")
 	}
-	var sawNSEC, sawDS bool
+	var sawNSEC, sawNSECSig, sawDS bool
 	for _, rr := range w.written.Ns {
-		switch rr.Header().Rrtype {
-		case dns.TypeNSEC:
-			sawNSEC = true
-		case dns.TypeDS:
-			sawDS = true
+		switch v := rr.(type) {
+		case *dns.RRSIG:
+			if v.TypeCovered == dns.TypeNSEC {
+				sawNSECSig = true
+			}
+		default:
+			switch rr.Header().Rrtype {
+			case dns.TypeNSEC:
+				sawNSEC = true
+			case dns.TypeDS:
+				sawDS = true
+			}
 		}
 	}
 	if !sawNSEC {
 		t.Fatal("insecure (no-DS) referral must carry an NSEC proving no DS")
+	}
+	if !sawNSECSig {
+		t.Fatal("insecure (no-DS) referral must carry the RRSIG covering that NSEC")
 	}
 	if sawDS {
 		t.Fatal("insecure delegation must not carry a DS")
