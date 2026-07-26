@@ -1,6 +1,6 @@
 # Secondary zones are immutable — MUST-NOT-MODIFY invariant + audit
 
-**Date:** 2026-07-25, revised 2026-07-26 (rev 2, then rev 2.1 same day)
+**Date:** 2026-07-25, revised 2026-07-26 (rev 2, rev 2.1, rev 2.2 same day)
 **Status:** PROPOSED — design agreed in discussion; rev 2 incorporates a
 code-verified re-audit of every claim in rev 1. Not implemented.
 **Origin:** surfaced while cooking the inbound-IXFR plan
@@ -8,9 +8,9 @@ code-verified re-audit of every claim in rev 1. Not implemented.
 turned out to be one instance of a whole missing invariant. This is a
 **prerequisite** for inbound IXFR (which needs a correct outbound/inbound
 serial-space contract), but stands on its own as a correctness fix.
-**Base:** main @ 138c9ce / 78a83ff. NOTE: the `feature/secondary-zones-immutable`
-branch currently carries no commits and is behind main; it needs a forward-merge
-before implementation starts.
+**Base:** main @ 0536be8 (originally audited against 138c9ce / 78a83ff; the
+`feature/secondary-zones-immutable` branch is forward-merged from main and
+carries this doc).
 
 ---
 
@@ -55,6 +55,15 @@ a full `OptOnlineSigning` consumer survey (~40 sites):
   enforcement (§2 conclusion).
 - Item 3 decided: stale persisted serials are **cleared**. Item 5 decided:
   freeze/thaw `return`s land as a **separate commit in the same PR**.
+
+**Rev 2.2 (2026-07-26)** — closes §12 item 1: per-zone `outbound_soa_serial`
+is **folded into this PR** (own commit pair, first). The invasiveness scoping
+showed ~120–180 lines + tests, not the feared doubling — template propagation
+is free via `ExpandTemplate`'s generic gap-fill, the six read sites are lines
+Fix A edits anyway, and the `OutgoingSerials` table is already per-zone.
+Details in §5. Full implementation scope estimate added as §14: ~450–550
+production LOC over ~14 files + ~1,200–1,600 test LOC, net ~+2,000/−200 in
+9–10 commits.
 
 ---
 
@@ -223,6 +232,13 @@ A single `normalizeOptionsForRole(appType, zonetype, opts) → (opts, softErr)`
 that, **for AppTypeAuth only**, and for a non-`inline-signing` secondary, turns
 **off** the origination options (§4) and records a **soft** error so the operator
 sees the misconfig while the zone keeps serving.
+
+**Rev 2.2 note:** the normalizer's duty extends beyond `ZoneOption`s — the §5
+per-zone `OutboundSoaSerial` field is a string, not an option, so an explicit
+`persist`/`unixtime` on a secondary is warned-about-and-cleared either by
+widening this signature to take the serial mode too, or by a sibling helper
+invoked from the same call sites. Implementer's choice; the invariant is that
+every call site below covers both.
 
 Rev 2 changes:
 
@@ -484,30 +500,60 @@ Consequence: **the rule "a secondary must not persist its serial" cannot be
 expressed at config level.** A server hosting primaries *and* secondaries has one
 setting; rejecting `persist` for a secondary would break the co-hosted primaries.
 
-Two-part resolution:
+Resolution (both parts land in this PR — see the sequencing decision below):
 
-1. **Short term (this PR):** per-zone *suppression* at the point of use — the six
-   sites in Fix A. The global setting is honoured for zones that may originate and
-   ignored for those that may not. Plus a one-time startup warning when the mode is
-   `persist`/`unixtime` **and** the server hosts tdns-auth secondaries, naming the
-   zones where it is being suppressed, so the operator sees it.
+1. **The schema change:** `outbound_soa_serial` becomes a **per-zone** setting —
+   in practice per **template**, since that is how zone policy is curated. The
+   global value becomes the default (empty per-zone field = inherit). This is
+   the right model independent of this invariant: outbound serial policy is a
+   property of a zone's role and downstream contract, not of the server process.
 
-2. **Correct fix (agreed, scope TBD):** make `outbound_soa_serial` a **per-zone**
-   setting — in practice per **template**, since that is how zone policy is
-   curated. The global value becomes the default. This is the right model
-   independent of this invariant: outbound serial policy is a property of a zone's
-   role and downstream contract, not of the server process.
+2. **Suppression regardless of source:** the effective mode — whether set
+   per-zone, inherited from a template, or defaulted from the global — is
+   *suppressed* for a tdns-auth pure secondary at the six Fix A sites. An
+   **explicit** per-zone `persist`/`unixtime` on a secondary additionally gets a
+   Fix B-style normalizer warning (see below); a secondary merely *inheriting* a
+   global `persist`/`unixtime` is covered by a one-time startup warning naming
+   the zones where the mode is being suppressed, so the operator sees it either
+   way.
 
-**Sequencing is an open decision.** The per-zone change touches the config schema,
-template expansion, the dynamic-zone config round-trip, and reload — orthogonal to
-the immutability invariant and large enough to deserve its own PR and review. The
-recommendation is: land the invariant with per-zone *suppression* (1), then do the
-schema change (2) as a follow-up, with this section as its starting point. If it
-is folded into this PR instead, the PR roughly doubles in surface area and the
-migration story in §8 has to be re-derived against the new schema.
+**Sequencing DECIDED (rev 2.2): folded into this PR.** The invasiveness scoping
+showed the "roughly doubles the PR" fear was wrong — three facts collapse the
+cost:
 
-*(Rev 2.1 status: leaning toward folding it in, contingent on an invasiveness
-scoping of the schema change — §12 item 1.)*
+1. **Template propagation is free.** `ExpandTemplate`
+   ([parseconfig.go:1261](../v2/parseconfig.go)) generically gap-fills new
+   `ZoneConf` fields, so a new `OutboundSoaSerial string` field is
+   template-inheritable with zero template code. The gap-fill zero-value caveat
+   does not bite: an explicit `keep` under a `persist` template wins ("keep" is
+   non-zero; a bool field would have been trapped).
+2. **The six read sites are lines Fix A already edits** — switching them to an
+   effective-mode helper (zone-level if set, else global; suppressed for an
+   auth pure secondary) is the same diff, not new surface.
+3. **Storage is already per-zone** (`OutgoingSerials` keyed by zone); only the
+   mode is global. Sole change: create the table unconditionally
+   (`CREATE IF NOT EXISTS`) instead of only when the global mode is persist.
+
+Genuinely new surface: the `ZoneConf` field
+(`validate:"omitempty,oneof=keep unixtime persist"`, empty = inherit global) +
+`ZoneData` field + effective-mode helper (~15 lines) + `ZoneRefresher` field
+with copies at the ParseZones construction and the three refresher assignment
+sites (the same three sites Fix B's chokepoint touches; always-copy is safe
+since empty = inherit) + the dynamic-zone round-trip (2 lines) + tests.
+Estimate ~120–180 lines of code plus tests. Land as its own commit pair within
+the PR: schema+plumbing first, then Fix A's reads via the helper.
+
+Bonuses: this section's "cannot be expressed at config level" premise inverts —
+a secondary carrying an explicit `persist`/`unixtime` becomes per-zone-visible
+misconfig the Fix B normalizer warns about and clears; and §8 needs no
+re-derivation, since an empty field inherits the global and every existing
+config keeps byte-identical semantics.
+
+**Deliberate non-feature:** no API knob in `zone add`/`zone modify` — templates
+carry outbound-serial policy ("in practice per template"); API-created
+secondaries inherit the default. Recorded as a decision, not an omission.
+`zone desc`/`zone list -v` should display the effective mode and its source
+(zone / template / global), synergizing with §7.
 
 ## 6. Ordering and the persisted-config round-trip
 
@@ -648,6 +694,15 @@ genuinely re-fetches and re-applies.
   code, passes on the fix. Plus: signing (inline) secondary still advances;
   `unixtime`/`persist` on a pure secondary does not rewrite the serial at **any** of
   the six sites; the persisted row is cleared.
+- **Per-zone `outbound_soa_serial` (§5):** zone-level value wins over template;
+  template fills a gap when the zone is silent; explicit `keep` under a
+  `persist` template wins (the gap-fill zero-value caveat does not bite);
+  empty everywhere → global default applies; a config-reload flip of the
+  per-zone value takes effect; the field round-trips through the dynamic-zone
+  config file (`zoneDataToZoneConf` serialize + re-parse); an explicit
+  `persist`/`unixtime` on a secondary draws the normalizer warning; a primary
+  with per-zone `persist` persists while a co-hosted global-`keep` primary does
+  not (per-zone independence).
 - **Fix B:** a secondary configured with each of the five origination options →
   option ends up off, soft `ConfigWarning` present, zone still `Ready`/served;
   reload with a clean config clears it. Cover the dynamic-zone add **and modify**
@@ -708,12 +763,8 @@ is better than hoped:
 
 ## 12. Open items
 
-Still open (neither blocks starting implementation):
+Still open (does not block starting implementation):
 
-1. **§5 sequencing** — per-zone `outbound_soa_serial` in this PR or a follow-up.
-   Leaning toward **including it**, contingent on how invasive the schema change
-   turns out to be — an invasiveness scoping pass decides. Until then the
-   follow-up recommendation in §5 stands as the fallback.
 4. **"Pause refresh" on a secondary** — parked for a later discussion. (The
    idea, for that discussion: an operator control to stop refreshing from a
    known-bad upstream while continuing to serve the current data — the
@@ -722,6 +773,9 @@ Still open (neither blocks starting implementation):
 
 Closed since rev 2 (rulings 2026-07-26):
 
+1. **§5 sequencing** — CLOSED (rev 2.2): per-zone `outbound_soa_serial` is
+   **folded into this PR** as its own commit pair; invasiveness scoping showed
+   ~120–180 lines + tests, not the feared doubling. Details in §5.
 2. **`online-signing` normalization** — CLOSED (rev 2.1): normalized **off** on
    a tdns-auth secondary; Fix E stays as defence in depth; the distributed-key
    edge-signer future (tdns-nm/tdns-es) is deliberately not foreclosed. See §4.
@@ -736,9 +790,59 @@ Closed since rev 2 (rulings 2026-07-26):
   `IncomingSerial`) that IXFR-in's SOA handling depends on only makes sense once the
   secondary serial actually mirrors upstream. Land this first.
 - Independent of the IXFR-out work already merged (#328).
-- Suggested single PR `feature/secondary-zones-immutable`: Fix A (serial mirror +
-  six-site suppression) + Fix B (normalizer) + Fix C (API gate + freeze/thaw +
-  returns) + Fix D (applier gate) + Fix E (re-sign role gate) + §7 diagnostics + §9
-  forced-transfer contract + tests. Its own branch, landing ahead of inbound IXFR.
-  Note the branch currently has no commits and is behind main; it needs a
-  forward-merge first.
+- Suggested single PR `feature/secondary-zones-immutable`: per-zone
+  `outbound_soa_serial` (§5, own commit pair, first) + Fix A (serial mirror +
+  six-site suppression via the effective-mode helper) + Fix B (normalizer) +
+  Fix C (freeze/thaw `return`s as a separate commit, then the API gate) + Fix D
+  (applier gate) + Fix E (re-sign role gate) + §7 diagnostics + §9
+  forced-transfer contract + tests. Its own branch, landing ahead of inbound
+  IXFR. (Branch forward-merged from main and carrying this doc as of rev 2.)
+
+## 14. Implementation scope estimate (rev 2.2)
+
+Per work item, in §13's commit order:
+
+| # | Work item | Files touched (non-test) | Code LOC (±) |
+|---|---|---|---|
+| 1 | Per-zone `outbound_soa_serial` (§5) | structs.go (ZoneConf + ZoneData fields), refreshengine.go (ZoneRefresher + 3 copy sites), parseconfig.go (zr construction, unconditional table), zone_utils.go (effective-mode helper), dynamic_zones.go (round-trip ×2) | ~50 |
+| 2 | Fix A — mirror + six-site suppression + row-clear + backwards-jump ERROR | zone_mutation.go, refreshengine.go ×2 blocks, zone_utils.go (`nextOutboundSerial`, `mayOriginate` helper), db_outgoing_serial.go (delete func) | ~85 |
+| 3 | Fix B — normalizer + serial-mode sibling + ~7 call sites + as-configured/effective split | new option_normalize.go (or parseoptions.go), parseconfig.go, dynamic_zones.go, dynamic_primary.go, refreshengine.go (chokepoint ×3 + effective-type caveat), structs.go + dynamic_zones.go (as-configured storage + serializer) | ~105 |
+| 4 | Freeze/thaw `return`s (own commit) | apihandler_zone.go | ~6 |
+| 5 | Fix C — both zone handlers + catalog handler + freeze/thaw role refusal | apihandler_zone.go, apihandler_catalog.go (cleanest as one gate in `regenerateCatalogZone` + handler messages) | ~55 |
+| 6 | Fix D — applier gate | zone_updater.go | ~15 |
+| 7 | Fix E — re-sign role gate | zone_mutation.go | ~5 |
+| 8 | §7 diagnostics — serials in `list -v`, all-primaries probe in `desc`, mode display | zone_utils.go (probe extraction from `DoTransfer` — the one real refactor), apihandler_zone.go, structs.go (carrier fields), cli/zone_cmds.go | ~115 |
+| 9 | §9 forced-transfer — equal-serial fix needs `force` **threaded into `FetchFromUpstream`** (signature change; it does not take force today) | zone_utils.go + call sites | ~15 |
+| 10 | §5 startup warning (global persist/unixtime + auth secondaries) | parseconfig.go | ~12 |
+
+**Totals:**
+
+- **Production code: ~450–550 LOC** added/changed across **~14 files**. Heavy
+  concentration — zone_utils.go, refreshengine.go, zone_mutation.go,
+  apihandler_zone.go, parseconfig.go and dynamic_zones.go are each touched by
+  2–4 items — which argues for the §13 commit ordering being strictly serial,
+  not parallelized.
+- **Tests: ~1,200–1,600 LOC** in **7–9 new/extended test files** (§10's matrix
+  is genuinely large: mirror semantics, six-site suppression, normalizer ×
+  5 options × 4 ingress paths, ordering-vs-quarantine, config round-trip, both
+  API handlers, applier gate, forced transfer, per-zone mode × 8 cases,
+  app-scope proof).
+- **Existing-test fallout: ~100–200 LOC adjusted** — anything asserting
+  `CurrentSerial++` on refresh (e.g. `ixfr_test.go` drives
+  `applyRefreshReplacementLocked` directly) plus publish-path tests.
+- **Net diff: roughly +2,000 / −200 over ~20–24 files, in 9–10 commits** — the
+  same order of magnitude as the outbound-IXFR PR (#328); a solid multi-session
+  PR, not a monster.
+
+**Uncertainty drivers, in order of risk:**
+
+1. **The as-configured vs effective options mechanism (item 3)** — the one open
+   design choice (§6). If it turns into threading a second options
+   representation through more places than `zoneDataToZoneConf`, item 3 grows
+   by 50–100 LOC.
+2. **The `DoTransfer` probe extraction (item 8)** — refactoring a live transfer
+   path for read-only reuse; mechanically simple but it touches the most
+   battle-hardened function in the set.
+3. **Fix D's blast radius is not a LOC risk** (15 lines) — it is a *validation*
+   cost: the doc requires foffe testbed time on top of `-race`, which is
+   wall-clock, not diff size.
