@@ -1,6 +1,6 @@
 # Secondary zones are immutable — MUST-NOT-MODIFY invariant + audit
 
-**Date:** 2026-07-25, revised 2026-07-26 (rev 2)
+**Date:** 2026-07-25, revised 2026-07-26 (rev 2, then rev 2.1 same day)
 **Status:** PROPOSED — design agreed in discussion; rev 2 incorporates a
 code-verified re-audit of every claim in rev 1. Not implemented.
 **Origin:** surfaced while cooking the inbound-IXFR plan
@@ -39,6 +39,22 @@ because the existing gates sit at **call sites**, and the applier they feed
 | 12 | **New: forced-transfer contract** | Force must apply whatever upstream has; today it works for a lower serial only incidentally, and no-ops on an equal one |
 | 13 | **New: diagnostics** (`zone desc` / `zone list -v` serial visibility) | There is currently no way to see the split-brain that motivated this work |
 | 14 | Residuals #9 and #2 **resolved** | Zero callers, and dead code, respectively |
+
+**Rev 2.1 (2026-07-26, later the same day)** — closes §12 items 2, 3 and 5 after
+a full `OptOnlineSigning` consumer survey (~40 sites):
+
+- **`online-signing` joins the turn-off list (now five).** With local keys —
+  the only keys tdns-auth has — it is unsafe and plain wrong on a secondary:
+  two further role-ungated mutation vectors found (5c, 5d in §2), plus a
+  response-path and an outbound-transfer failure mode. Fix E alone would make
+  things *worse* (§3, Fix E). The legitimate form — signing at the edge with
+  **distributed** keys — is the tdns-nm/tdns-es future and will most likely be
+  a new app, which §1.1 already accommodates untouched.
+- **Enforcement framing refined:** Fix D backstops only the UpdateQ class of
+  publishers; for the direct-under-`zd.mu` class the normalizer *is* the
+  enforcement (§2 conclusion).
+- Item 3 decided: stale persisted serials are **cleared**. Item 5 decided:
+  freeze/thaw `return`s land as a **separate commit in the same PR**.
 
 ---
 
@@ -102,6 +118,19 @@ parent zone **at the primary** and reach the secondaries by AXFR. That is
 MUST-NOT-MODIFY working exactly as intended, and it is the reason the app-scope
 constraint is not merely defensive bookkeeping.
 
+**A second worked example (rev 2.1): the future edge signer.** Signing at a
+secondary is not inherently wrong — with **distributed** keys (the correct keys
+delivered to the edge, rather than locally minted ones) it is a legitimate
+architecture, and it is exactly what the tdns-nm ("node manager") and tdns-es
+("edge signer") projects are about (today mostly standalone; intended to
+leverage tdns-transport like tdns-mp does, once the tdns-mp/tdns-transport
+refactoring lands). When that project resumes it will most likely be a **new
+app** — with its own AppType from the already-partitioned enum (nm 33–48 /
+es 49–64 reserved) — and every gate in this doc is then automatically a no-op
+for it, zero refactoring required. What §4 turns off is `online-signing` on
+**tdns-auth**, whose only keys are local; the edge-signing future is
+unaffected by construction.
+
 ## 2. The audit — every mutation vector, classified
 
 Method: enumerate every call site that stages content and publishes, advances
@@ -123,7 +152,9 @@ staged. What matters is the **source** and its **enabler**:
 | 4c | Delegation sync — **sending** (bootstrap KEY to parent, NOTIFY, UPDATE) | `OptDelSyncParent`/`OptDelSyncChild` | sends outward; **does not mutate the served zone** | out of scope (§4 note) |
 | **4d** | **Delegation sync — DSYNC publication** (`SetupZoneSync` → `PublishDsyncRRs`, [zone_utils.go:773](../v2/zone_utils.go), [ops_dsync.go:16](../v2/ops_dsync.go)) — publishes `_dsync.<zone>` DSYNC + address RRs via InternalUpdate | **`OptDelSyncParent` alone.** No `allow-updates` check. Unlike CDS it is **not** a no-op without local DNSKEYs — it synthesizes from `delegationsync.parent.schemes` | **YES** | **Fix B** (delsync-parent joins the turn-off list) + **Fix D** |
 | 5 | **DNSSEC signing / KSK-ZSK rollover / resign** ([sign.go](../v2/sign.go), ksk_rollover_*, resign engine) | `OptOnlineSigning`/`OptInlineSigning` **and** `SetupZoneSigning`'s role gate: a non-primary signs *only* with `inline-signing` ([zone_utils.go:1107](../v2/zone_utils.go)) | only if `inline-signing` — the **sanctioned** signing secondary | **kept** (the exception); Fix A treats it as an originator |
-| **5b** | **Per-publish SOA re-sign** — `resignWorkingSetSOAIfSigned` ([zone_mutation.go:186](../v2/zone_mutation.go)) re-signs the apex SOA inside `publishWorkingSetLocked`, i.e. on **every publish including the refresh path** | `OptOnlineSigning` or `OptInlineSigning` — **no role gate**, unlike #5. `EnsureActiveDnssecKeys` will *generate* keys if absent | **YES**, on a secondary carrying `online-signing` | **Fix E** |
+| **5b** | **Per-publish SOA re-sign** — `resignWorkingSetSOAIfSigned` ([zone_mutation.go:186](../v2/zone_mutation.go)) re-signs the apex SOA inside `publishWorkingSetLocked`, i.e. on **every publish including the refresh path** | `OptOnlineSigning` or `OptInlineSigning` — **no role gate**, unlike #5. `EnsureActiveDnssecKeys` will *generate* keys if absent | **YES**, on a secondary carrying `online-signing` | **Fix B** (rev 2.1: option normalized off) + **Fix E** |
+| **5c** | **DNSKEY injection on refresh (rev 2.1)** — `CollectDynamicRRs` ([zone_utils.go:894](../v2/zone_utils.go)) pulls local DNSKEYs from the keystore and repopulates them into the served zone after **every refresh** | `OptOnlineSigning` or `OptInlineSigning` (outer gate also admits `OptAllowUpdates`) — **no role gate** | **YES**, with `online-signing` | **Fix B** (rev 2.1). NOT Fix-D-covered: publishes via the refresh working set, not UpdateQ |
+| **5d** | **Key-state-driven whole-zone re-sign (rev 2.1)** — `maintainStandbyKeys` / key-state transitions → `triggerResign` ([key_state_worker.go:405](../v2/key_state_worker.go)) → `ResignQ` → `resignNow` → `SignZone(force=true)` ([resigner.go:52](../v2/resigner.go)); `maintainStandbyKeys` also **mints standby KSKs/ZSKs** for every signing zone ([key_state_worker.go:267](../v2/key_state_worker.go)) | `OptOnlineSigning` or `OptInlineSigning` — key_state_worker.go, resigner.go and sign.go contain **zero** role checks; the only role gate is in `SetupZoneSigning` ([zone_utils.go:1107](../v2/zone_utils.go)), which is just one of **two** ResignQ senders | **YES**, with `online-signing` — the largest mutation vector in the audit: wholesale re-sign of upstream content with locally generated keys | **Fix B** (rev 2.1). NOT Fix-D-covered: `SignZone` publishes directly under `zd.mu` |
 | 6 | **Catalog *consumption*** — auto-create/delete **member** zones from a catalog ([catalog.go:270](../v2/catalog.go), [apihandler_catalog.go:330](../v2/apihandler_catalog.go)) | `OptCatalogMemberAutoCreate`/`Delete` | yes — and **desired**: it provisions *other* zones, never mutates the catalog zone (RFC 9432; the whole point) | **allow, no gating** (§4) |
 | **6b** | **Catalog *authoring* via the API** — `handleCatalogZoneAdd`/`Delete`/group add/remove → `regenerateCatalogZone` → `stageRRsetLocked` + `publishLocked` ([apihandler_catalog.go:541](../v2/apihandler_catalog.go)) | **none.** The handlers take a catalog zone name and mutate it; no role check anywhere on the path | **YES.** *(Rev 1 said "not reachable for a secondary" — that was wrong; only the `CreateCatalogZone` author path was considered)* | **Fix C** |
 | 7 | **API `bump`** — the zone handler ([apihandler_zone.go:70](../v2/apihandler_zone.go)); the refresh-engine `bumpch` handler ([refreshengine.go:880](../v2/refreshengine.go)) is **dead code**, see §11 | *none* — no role check | **YES** | **Fix C** |
@@ -142,6 +173,15 @@ neutralizes only those callers that happen to check their option first. Vector
 them right, and DSYNC still slipped through because it is reached from
 `SetupZoneSync` instead. **Enforcement belongs at the applier (Fix D); option
 normalization (Fix B) is the operator-facing visibility layer.**
+
+**Rev 2.1 refinement:** that division of labour holds only for the **UpdateQ
+class** of publishers. A second class publishes **directly under `zd.mu`** and
+never touches `UpdateQ` — `SignZone` ([sign.go:790](../v2/sign.go)),
+`PublishDnskeyRRs` ([ops_dnskey.go:26](../v2/ops_dnskey.go)),
+`CollectDynamicRRs` (via the refresh working set) — so Fix D cannot backstop
+it. For that class there is no applier chokepoint and **the option normalizer
+is itself the enforcement**, which is why the turn-off list must be right
+(five options, §4) and why Fix E exists as defence in depth.
 
 ## 3. The fixes — one predicate, five homes
 
@@ -186,8 +226,8 @@ sees the misconfig while the zone keeps serving.
 
 Rev 2 changes:
 
-- **Four options, not three** — `delegation-sync-parent` joins `allow-updates`,
-  `allow-child-updates`, `add-transport-signal`. See §4.
+- **Five options, not three** — rev 2 added `delegation-sync-parent`; rev 2.1
+  adds `online-signing` after the full consumer survey. See §4.
 - **Use `ConfigWarning`, not `ConfigError`.** Rev 1 verified that `SetError`
   does not touch `Status` — correct — but `ConfigError` is in
   `serviceImpactingErrors` ([enums.go:348](../v2/enums.go)), documented as "a
@@ -202,7 +242,8 @@ Rev 2 changes:
 - **Message wording is part of the fix.** The normalizer warning, the Fix C
   refusal and the Fix D log line must all name the same reason — origination on
   a secondary — so an operator gets one story from three places rather than three
-  unrelated denials.
+  unrelated denials. For `online-signing` specifically, the warning should
+  additionally suggest `inline-signing` as the almost-certainly intended option.
 
 **Call sites (revised — rev 1's list was incomplete and the wrong shape):**
 
@@ -328,16 +369,27 @@ an originator under the predicate, so Fix A mirrors its serial, but this would
 still re-sign the upstream SOA with locally generated keys
 (`EnsureActiveDnssecKeys` generates them if absent). Apply the same role gate.
 
-Open sub-question for implementation: whether `online-signing` on a tdns-auth
-secondary should additionally be normalized off by Fix B, or merely be inert. Fix
-E alone makes it harmless for the SOA; a survey of other `OptOnlineSigning`
-consumers should decide.
+**Resolved (rev 2.1): `online-signing` is normalized off; Fix E stays as
+defence in depth.** The consumer survey (~40 sites) showed Fix E alone would
+make things *worse*, via an interlock with the outbound-transfer guard: today
+the locally-signed SOA (this vector) lets `ZoneTransferOut`'s fail-closed check
+pass, so downstreams receive a zone whose SOA RRSIG comes from a key absent
+from the DNSKEY RRset — bogus, but flowing. Gate the re-sign without turning
+the option off, and the SOA is no longer signed, so
+[dnsutils.go:299](../v2/dnsutils.go) sees a to-be-signed zone with an unsigned
+SOA and **refuses every outbound transfer** — the secondary silently stops
+feeding its downstreams. Beyond that, vectors 5c/5d fire regardless of Fix E,
+and the response path ([queryresponder.go:179](../v2/queryresponder.go)) either
+signs synthesized denial NSECs with local keys (BOGUS negatives) or, when
+upstream is unsigned, SERVFAILs every stored RRset. There is no coherent
+"inert" state; off is the only correct one. See §4 for the rationale and the
+edge-signer future this deliberately does not foreclose.
 
 ## 4. Option classification
 
-**Turn OFF for a non-inline-signing tdns-auth secondary (origination) — four:**
+**Turn OFF for a non-inline-signing tdns-auth secondary (origination) — five:**
 `allow-updates`, `allow-child-updates`, `add-transport-signal`,
-**`delegation-sync-parent`**.
+**`delegation-sync-parent`**, **`online-signing`** (rev 2.1).
 
 **`delegation-sync-parent` (rev 2 — reversed from rev 1).** Rev 1 excluded it,
 reasoning that every delsync path that publishes into the zone is itself gated on
@@ -372,6 +424,20 @@ agent, the keystore is not replicated by AXFR, and the one path that would
 generate a key locally is `allow-updates`-gated and therefore off. A tdns-auth
 secondary can never hold that key in any deployment, so leaving the processing on
 would produce **unsigned** KeyState responses — worse than not answering.
+
+**`online-signing` (rev 2.1 — closes §12 item 2).** On tdns-auth the only keys
+available are **local** ones, and signing upstream content with local keys is
+unsafe and plain wrong — the option unlocks, with no role check anywhere:
+whole-zone re-signing via the ResignQ path (vector 5d, the largest in the
+audit), standby-key minting, per-refresh DNSKEY injection (5c), the per-publish
+SOA re-sign (5b), BOGUS ephemeral signing of denial NSECs, and SERVFAIL of
+every response when upstream is unsigned. The *concept* — a secondary signing
+with **distributed** keys — is legitimate and is exactly the tdns-nm / tdns-es
+project (§1.1, second worked example); when that resumes it will most likely be
+a new app with its own AppType, which this design accommodates untouched, or a
+deliberate refactor made with better knowledge of the requirements. Nothing
+here forecloses it. The normalizer warning should suggest `inline-signing` as
+the likely intended option.
 
 **NOT gated here — `delegation-sync-child`.** Its zone-publishing paths are
 genuinely `allow-updates`/`allow-child-updates`-gated (above) and Fix D backstops
@@ -439,6 +505,9 @@ recommendation is: land the invariant with per-zone *suppression* (1), then do t
 schema change (2) as a follow-up, with this section as its starting point. If it
 is folded into this PR instead, the PR roughly doubles in surface area and the
 migration story in §8 has to be re-derived against the new schema.
+
+*(Rev 2.1 status: leaning toward folding it in, contingent on an invasiveness
+scoping of the schema change — §12 item 1.)*
 
 ## 6. Ordering and the persisted-config round-trip
 
@@ -579,7 +648,7 @@ genuinely re-fetches and re-applies.
   code, passes on the fix. Plus: signing (inline) secondary still advances;
   `unixtime`/`persist` on a pure secondary does not rewrite the serial at **any** of
   the six sites; the persisted row is cleared.
-- **Fix B:** a secondary configured with each of the four origination options →
+- **Fix B:** a secondary configured with each of the five origination options →
   option ends up off, soft `ConfigWarning` present, zone still `Ready`/served;
   reload with a clean config clears it. Cover the dynamic-zone add **and modify**
   paths, and the API (`zoneOptionsFromStrings`) path.
@@ -590,8 +659,12 @@ genuinely re-fetches and re-applies.
   warning does not silently disappear.
 - **Vector 4d:** a secondary with `delegation-sync-parent` publishes **no**
   `_dsync.<zone>` DSYNC RRset and no address RRs; `SetupZoneSync` does not register.
-- **Vector 5b (Fix E):** a secondary with `online-signing` and no local keys does
-  not generate keys and does not re-sign the upstream SOA across refreshes.
+- **Vectors 5b/5c/5d (`online-signing` normalized + Fix E):** a secondary
+  configured with `online-signing` has the option normalized off (warning
+  suggests `inline-signing`), generates no keys, injects no DNSKEYs on refresh,
+  is never whole-zone re-signed via the ResignQ path, and does not re-sign the
+  upstream SOA across refreshes; outbound transfer of the (now unsigned-mirror)
+  zone is **not** refused by the `ZoneTransferOut` signed-zone guard.
 - **Vector 6b (Fix C):** the catalog authoring API refuses against a secondary
   catalog zone.
 - **Catalog not regressed (the §4 carve-out):** a secondary catalog zone with
@@ -635,21 +708,26 @@ is better than hoped:
 
 ## 12. Open items
 
-Carried forward for decision; none blocks starting implementation:
+Still open (neither blocks starting implementation):
 
 1. **§5 sequencing** — per-zone `outbound_soa_serial` in this PR or a follow-up.
-   Recommendation: follow-up.
-2. **Fix E sub-question** — whether `online-signing` on a tdns-auth secondary should
-   also be normalized off, or merely made inert.
-3. **Stale persisted serials** — clear on upgrade (recommended) vs. document as
-   deliberately retained.
-4. **"Pause refresh" on a secondary** — a genuinely useful operational capability
-   (stop following a known-bad upstream) that rev 1's incorrect freeze rationale
-   accidentally described. It does not exist today. Captured as a future item,
-   explicitly **not** built here.
-5. **Freeze/thaw missing `return`s** — folded into this PR (§3, Fix C) because the
-   refusal depends on the guards actually returning; could equally be a separate
-   preparatory commit.
+   Leaning toward **including it**, contingent on how invasive the schema change
+   turns out to be — an invasiveness scoping pass decides. Until then the
+   follow-up recommendation in §5 stands as the fallback.
+4. **"Pause refresh" on a secondary** — parked for a later discussion. (The
+   idea, for that discussion: an operator control to stop refreshing from a
+   known-bad upstream while continuing to serve the current data — the
+   capability rev 1's incorrect freeze rationale accidentally described. It does
+   not exist today; `OptFrozen` gates DDNS only. Explicitly **not** built here.)
+
+Closed since rev 2 (rulings 2026-07-26):
+
+2. **`online-signing` normalization** — CLOSED (rev 2.1): normalized **off** on
+   a tdns-auth secondary; Fix E stays as defence in depth; the distributed-key
+   edge-signer future (tdns-nm/tdns-es) is deliberately not foreclosed. See §4.
+3. **Stale persisted serials** — CLOSED: **clear them out** (Fix A does so).
+5. **Freeze/thaw missing `return`s** — CLOSED: **separate commit in the same
+   PR**, ahead of the Fix C commit that depends on it.
 
 ## 13. Relationship to other work
 
