@@ -861,7 +861,7 @@ GPG-signed, and leaves the full `v2` suite green.
 | Fix E — role gate on the per-publish SOA re-sign | **DONE** | `1fa3f36` |
 | freeze/thaw missing `return`s (§12 item 5) | **DONE** | `82b54f5` |
 | Fix D — fail-closed applier gate | **DONE** (see finding below) | `477ea49` |
-| Fix B — option normalizer + as-configured/effective split | TODO | — |
+| Fix B — option normalizer + as-configured/effective split | **DONE** | `6c6b295` |
 | Fix C — API origination gate (both zone handlers + catalog) | TODO | — |
 | §7 diagnostics — serial visibility, all-primaries probe | TODO | — |
 | §9 forced-transfer contract (equal-serial no-op) | TODO | — |
@@ -892,3 +892,21 @@ Notes from implementation:
   signing/direct-publish class (5b/5c/5d, Fix E + normalizer), CHILD-UPDATE (a
   real `DelegationBackend.ApplyChildUpdate`), and the API actions (Fix C).
   §2's table should be re-read with this distinction in mind.
+
+- **The as-configured/effective split (§6) resolved as `SuppressedOptions`.**
+  Rather than duplicating the whole options map, `ZoneData` records only the set
+  the normalizer *stripped*; the as-configured view is the union
+  (`asConfiguredOptions()`), which `zoneDataToZoneConf` serializes. Minimal
+  surface — only the normalizer writes it and only the serializer reads it — and
+  self-healing across reloads, since both are recomputed from the config each
+  parse. `ModifyDynamicZone` carries the record across its ZoneData
+  replacement, alongside the existing Notify/ACL carry-forward.
+
+- **Normalization runs against the EFFECTIVE zone type.** At the refresher merge
+  point the `ZoneType` assignment is conditional, so the incoming type is
+  preferred when the refresher carries one; otherwise a reload flipping
+  Primary→Secondary would normalize against the stale role. Options and the
+  serial mode are normalized *together* there — assigning either separately
+  afterwards would overwrite a normalized value with the raw one — while keeping
+  their different update rules (options replace only if provided; the serial
+  mode is gated on `ConfigUpdate`, since empty means "inherit the global").
