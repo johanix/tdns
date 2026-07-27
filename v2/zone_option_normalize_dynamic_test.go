@@ -1,88 +1,123 @@
 package tdns
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
-// Regression tests for two findings from the PR #331 review.
+// Regression tests for findings from the PR #331 reviews.
+//
+// These drive the REAL ModifyDynamicZone/ProvisionDynamicZone paths rather than
+// the normalizer helper: an earlier version of this file exercised only the
+// helper, so it would still have passed if the dynamic-zone paths stopped
+// calling it — which was precisely the bug under test.
 
-// TestModifyNormalizesSubmittedOptions pins the ModifyDynamicZone case: the
-// options SUBMITTED with a modify must be normalized, not just the ones carried
-// forward when none are supplied.
+// TestModifyNormalizesSubmittedOptions: options SUBMITTED with a modify must be
+// normalized, not just the ones carried forward when none are supplied.
 //
-// Without that, `zone modify --options allow-updates` on a secondary installed
-// them live and persisted them with a STALE SuppressedOptions record and no
-// warning — re-enabling exactly what the normalizer exists to strip, through
-// the one ingress the design doc singled out as most likely to be missed.
-//
-// Exercised at the normalizer boundary that ModifyDynamicZone now calls, so it
-// fails if that call is dropped.
+// Without this, `zone modify --options allow-updates` on a secondary installed
+// them live and persisted them with no ConfigWarning — re-enabling exactly what
+// the normalizer exists to strip, through the ingress the design doc singled
+// out as most likely to be missed.
 func TestModifyNormalizesSubmittedOptions(t *testing.T) {
-	// A modify submitting origination options against a secondary.
-	submitted := map[ZoneOption]bool{
-		OptAllowUpdates:   true,
-		OptApiManagedZone: true, // set by the modify path itself
-	}
-	eff, _, sup, msg := normalizeOptionsForRole(AppTypeAuth, Secondary, submitted, "")
+	withAppType(t, AppTypeAuth)
+	resetZonesForTest()
+	conf, ch := newTestConfigForCores(t)
 
-	if eff[OptAllowUpdates] {
-		t.Error("submitted allow-updates survived normalization on a secondary")
+	in := DynamicZoneInput{Name: "modopt.example", Type: Secondary,
+		Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}}}
+	if _, err := conf.ProvisionDynamicZone(context.Background(), in, true); err != nil {
+		t.Fatalf("add failed: %v", err)
 	}
-	if !sup[OptAllowUpdates] {
-		t.Error("suppressed set does not record the submitted option")
+	<-ch
+
+	// Submit an origination option against the (secondary) zone.
+	mod := DynamicZoneInput{Name: "modopt.example", Type: Secondary,
+		Primaries: []PeerConf{{Addr: "192.0.2.9:53", Key: NOKEY}},
+		Options:   map[ZoneOption]bool{OptAllowUpdates: true},
 	}
-	if !eff[OptApiManagedZone] {
-		t.Error("normalization dropped an unrelated internal marker")
+	if _, err := conf.ModifyDynamicZone(context.Background(), mod); err != nil {
+		t.Fatalf("modify failed: %v", err)
 	}
-	if msg == "" {
-		t.Error("no warning produced for a submitted origination option")
+	<-ch
+
+	zd, _ := Zones.Get("modopt.example.")
+	if zd.Options[OptAllowUpdates] {
+		t.Error("submitted allow-updates went live on a secondary: normalization was skipped")
+	}
+	if !zd.SuppressedOptions[OptAllowUpdates] {
+		t.Error("suppressed record does not mention the submitted option")
+	}
+	if !zd.HasError(ConfigWarning) {
+		t.Error("no ConfigWarning raised for the submitted origination option")
+	}
+	// The operator's intent must still round-trip into the persisted config.
+	if !zd.asConfiguredOptions()[OptAllowUpdates] {
+		t.Error("as-configured view lost the submitted option")
 	}
 }
 
-// TestModifySuppressedSetReflectsSubmission guards the staleness half of the
-// same finding: the suppressed record must describe the options actually
-// submitted, not whatever the zone's previous incarnation carried. A modify
-// that REMOVES the offending option must clear the record, or the as-configured
-// view would keep resurrecting it into the persisted config forever.
-func TestModifySuppressedSetReflectsSubmission(t *testing.T) {
-	// Previous incarnation had allow-updates suppressed; the new submission
-	// drops it and asks only for a serving-behaviour option.
-	clean := map[ZoneOption]bool{OptFoldCase: true}
-	eff, _, sup, msg := normalizeOptionsForRole(AppTypeAuth, Secondary, clean, "")
+// TestModifyWithoutOptionsPreservesSuppressed is the regression for the bug the
+// FIRST round of review fixes introduced: with in.Options == nil, the carried
+// options are already the EFFECTIVE (stripped) set, so re-normalizing them
+// finds nothing to strip and returns an empty suppressed set — which then
+// overwrote the carried-forward record. The operator's origination options
+// would be permanently deleted from their own persisted config by the next
+// rewrite, silently, with the warning clearing at the same time.
+func TestModifyWithoutOptionsPreservesSuppressed(t *testing.T) {
+	withAppType(t, AppTypeAuth)
+	resetZonesForTest()
+	conf, ch := newTestConfigForCores(t)
 
-	if len(sup) != 0 {
-		t.Errorf("suppressed set should be empty for a clean submission, got %v", sup)
+	// Add a secondary that asks for an origination option; it is stripped at
+	// provisioning and recorded as suppressed.
+	in := DynamicZoneInput{Name: "modnil.example", Type: Secondary,
+		Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}},
+		Options:   map[ZoneOption]bool{OptAllowUpdates: true},
 	}
-	if msg != "" {
-		t.Errorf("clean submission should draw no warning, got %q", msg)
+	if _, err := conf.ProvisionDynamicZone(context.Background(), in, true); err != nil {
+		t.Fatalf("add failed: %v", err)
 	}
-	if !eff[OptFoldCase] {
-		t.Error("serving-behaviour option was dropped")
+	<-ch
+
+	before, _ := Zones.Get("modnil.example.")
+	if !before.SuppressedOptions[OptAllowUpdates] {
+		t.Fatal("setup: provisioning did not record the suppressed option")
+	}
+
+	// A TSIG/primaries-only modify, carrying NO options.
+	mod := DynamicZoneInput{Name: "modnil.example", Type: Secondary,
+		Primaries: []PeerConf{{Addr: "192.0.2.9:53", Key: NOKEY}}}
+	if _, err := conf.ModifyDynamicZone(context.Background(), mod); err != nil {
+		t.Fatalf("modify failed: %v", err)
+	}
+	<-ch
+
+	after, _ := Zones.Get("modnil.example.")
+	if after.Options[OptAllowUpdates] {
+		t.Error("allow-updates became effective across a modify")
+	}
+	if !after.SuppressedOptions[OptAllowUpdates] {
+		t.Error("modify DESTROYED the suppressed record: the operator's config would be silently rewritten")
+	}
+	if !after.asConfiguredOptions()[OptAllowUpdates] {
+		t.Error("as-configured view lost the option across a modify")
 	}
 }
 
-// TestGlobalSuppressionWarningUsesResolvedRole is the regression for the
-// cold-start false positive: the warning must be driven by the role resolved
-// during the parse, never by re-reading zd.ZoneType from the registry.
-//
-// zd.ZoneType is assigned asynchronously by the RefreshEngine when it consumes
-// the ZoneRefresher, so at warning time a freshly registered zone still has
-// ZoneType == 0. Reading it there made zoneMayOriginateContent false for
-// essentially every zone without inline-signing — PRIMARIES INCLUDED — so a
-// server with a global persist mode would list its primaries as "suppressed
-// secondaries" on every cold start.
-//
-// Pinned by asserting the predicate the collection now uses, against a zone
-// whose registry entry has NOT yet been populated.
-func TestGlobalSuppressionWarningUsesResolvedRole(t *testing.T) {
+// TestGlobalSuppressionCandidate covers the predicate the suppression warning
+// is driven by. It takes loose values, not a *ZoneData, because zd.ZoneType is
+// assigned asynchronously by the RefreshEngine: reading it at parse time
+// classified PRIMARIES as secondaries and mis-reported them on every cold start.
+func TestGlobalSuppressionCandidate(t *testing.T) {
 	withAppType(t, AppTypeAuth)
 
-	// What the registry looks like at warning time on a cold start: the type
-	// has not been assigned yet.
+	// What a registry entry actually looks like at warning time on cold start.
 	unpopulated := &ZoneData{ZoneName: "primary.example.", Options: map[ZoneOption]bool{}}
 	if zoneMayOriginateContent(unpopulated) {
-		t.Fatal("setup: an unpopulated ZoneData is expected to read as non-originating")
+		t.Fatal("setup: an unpopulated ZoneData reads as non-originating — the trap being avoided")
 	}
 
-	// ...which is precisely why the collection uses the PARSED role instead.
 	for _, tc := range []struct {
 		name      string
 		appType   AppType
@@ -104,8 +139,7 @@ func TestGlobalSuppressionWarningUsesResolvedRole(t *testing.T) {
 			if opts == nil {
 				opts = map[ZoneOption]bool{}
 			}
-			got := serialSuppressionCandidate(tc.appType, tc.ztype, opts, tc.perZone)
-			if got != tc.candidate {
+			if got := serialSuppressionCandidate(tc.appType, tc.ztype, opts, tc.perZone); got != tc.candidate {
 				t.Errorf("serialSuppressionCandidate = %v, want %v", got, tc.candidate)
 			}
 		})

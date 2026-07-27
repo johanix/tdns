@@ -925,15 +925,6 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// locally resolved zonetype is passed explicitly.
 		options, zconf.OutboundSoaSerial = zd.applyOptionNormalization(zonetype, options, zconf.OutboundSoaSerial)
 
-		// Collect zones where a GLOBAL persist/unixtime is being suppressed,
-		// using the role and per-zone mode resolved right here. Doing this from
-		// the registry afterwards would read zd.ZoneType before the
-		// RefreshEngine has assigned it. A zone with its own explicit mode is
-		// excluded: it already drew the normalizer's per-zone warning.
-		if serialSuppressionCandidate(Globals.App.Type, zonetype, options, zconf.OutboundSoaSerial) {
-			serialSuppressedZones = append(serialSuppressedZones, zname)
-		}
-
 		var outopts []string
 		for o, val := range options {
 			if val {
@@ -1165,6 +1156,20 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// Leader election OnFirstLoad is registered in StartAgent() (not here)
 		// because LeaderElectionManager doesn't exist until StartAgent runs.
 		// MP zone KEY publication is registered in tdns-mp's StartAgent.
+
+		// Collect zones where a GLOBAL persist/unixtime outbound mode is being
+		// suppressed, from the role and per-zone mode resolved in THIS pass.
+		// (Reading them back off the registry instead would see a ZoneType the
+		// RefreshEngine has not assigned yet — see serialSuppressionCandidate.)
+		//
+		// Deliberately here, at the bottom of the loop body: every `continue`
+		// above rejects the zone (bad ACL, invalid update policy, unusable
+		// store, ...), and a rejected zone is not serving, so reporting it as a
+		// secondary with a suppressed serial policy would be noise about a zone
+		// that is not running at all.
+		if serialSuppressionCandidate(Globals.App.Type, zonetype, options, zconf.OutboundSoaSerial) {
+			serialSuppressedZones = append(serialSuppressedZones, zname)
+		}
 
 		// Non-zone-serving app types skip zone refresh. Everything
 		// else (Auth, Agent, downstream MP/NM/ES roles) queues each

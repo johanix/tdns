@@ -1113,8 +1113,17 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		// mutable map with oldZd, or the B5 replace-not-mutate strategy breaks
 		// (an in-flight refresh on oldZd and later updates on newZd would race on
 		// one map guarded by two different mutexes).
-		options = make(map[ZoneOption]bool, len(oldZd.Options))
-		for k, v := range oldZd.Options {
+		//
+		// Carry the AS-CONFIGURED set, not the effective one. Copying only
+		// oldZd.Options would hand the normalizer a set that has already been
+		// stripped: it would find nothing to strip, return an empty suppressed
+		// set, and that empty set would then overwrite the carried-forward
+		// record — permanently deleting the operator's origination options from
+		// the persisted config on the next rewrite. Re-normalizing the
+		// as-configured set instead reproduces the same suppressed record.
+		src := oldZd.asConfiguredOptions()
+		options = make(map[ZoneOption]bool, len(src))
+		for k, v := range src {
 			options[k] = v
 		}
 	} else {
