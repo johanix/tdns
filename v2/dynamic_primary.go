@@ -380,26 +380,33 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 	// engine's config merge, so everything must be carried here.
 	msc := ConfLive().MultiSigner[spec.Zconf.MultiSigner]
 	zd := &ZoneData{
-		ZoneName:         name,
-		ZoneType:         Primary,
-		ZoneStore:        MapZone,
-		Zonefile:         spec.Zconf.Zonefile,
-		Template:         in.Template,
-		Notify:           normalizePeerAddrs(spec.Zconf.Notify),
-		AllowNotify:      spec.Zconf.AllowNotify,
-		Downstreams:      spec.Zconf.Downstreams,
-		DownstreamAuth:   spec.Zconf.DownstreamAuth,
-		Logger:           log.Default(),
-		Options:          options,
-		UpdatePolicy:     spec.Policy,
-		DnssecPolicyName: spec.Zconf.DnssecPolicy, // config-base name; struct bound post-Ready
-		MultiSigner:      &msc,
-		DelegationSyncQ:  conf.Internal.DelegationSyncQ,
-		Status:           ZoneStatusPending,
-		Data:             core.NewCmap[OwnerData](),
-		KeyDB:            conf.Internal.KeyDB,
-		FirstZoneLoad:    true,
-		publishCadence:   spec.PublishCadence,
+		ZoneName: name,
+		ZoneType: Primary,
+		// Set directly, like every other field here: this ZoneData is
+		// pre-registered with ZoneType already Primary, and the RefreshEngine
+		// merge block that would otherwise copy it off the ZoneRefresher is
+		// gated on `zd.ZoneType == 0`. Relying on the zr path alone would
+		// silently drop a template's outbound_soa_serial and leave the zone on
+		// the server-global default.
+		OutboundSoaSerial: spec.Zconf.OutboundSoaSerial,
+		ZoneStore:         MapZone,
+		Zonefile:          spec.Zconf.Zonefile,
+		Template:          in.Template,
+		Notify:            normalizePeerAddrs(spec.Zconf.Notify),
+		AllowNotify:       spec.Zconf.AllowNotify,
+		Downstreams:       spec.Zconf.Downstreams,
+		DownstreamAuth:    spec.Zconf.DownstreamAuth,
+		Logger:            log.Default(),
+		Options:           options,
+		UpdatePolicy:      spec.Policy,
+		DnssecPolicyName:  spec.Zconf.DnssecPolicy, // config-base name; struct bound post-Ready
+		MultiSigner:       &msc,
+		DelegationSyncQ:   conf.Internal.DelegationSyncQ,
+		Status:            ZoneStatusPending,
+		Data:              core.NewCmap[OwnerData](),
+		KeyDB:             conf.Internal.KeyDB,
+		FirstZoneLoad:     true,
+		publishCadence:    spec.PublishCadence,
 	}
 
 	// First-load callbacks, mirroring what ParseZones registers for static

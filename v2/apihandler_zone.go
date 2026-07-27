@@ -237,7 +237,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 					return
 				}
 				zconf := buildListZoneConf(zd, zname, kdb)
-				populateZoneDescDetail(&zconf, zd, zname, kdb)
+				populateZoneDescDetail(r.Context(), &zconf, zd, zname, kdb)
 				zones[zname] = zconf
 				resp.Zones = zones
 				return
@@ -359,6 +359,10 @@ func buildListZoneConf(zd *ZoneData, zname string, kdb *KeyDB) ZoneConf {
 	// For secondary zones, list as-written primaries from runtime state.
 	primaries := clonePeerConfs(zd.PrimariesConf)
 
+	// Value and source together, from one resolver, so the displayed source
+	// always matches the displayed value.
+	outboundMode, outboundSource := zd.EffectiveOutboundSoaSerialWithSource()
+
 	// Snapshot the notify slice under the lock — the catalog notify add/remove
 	// handlers mutate zd.Notify under zd.mu, so an unsynchronized read here would
 	// race the slice header.
@@ -415,8 +419,8 @@ func buildListZoneConf(zd *ZoneData, zname string, kdb *KeyDB) ZoneConf {
 		// is single-zone only; see populateZoneDescDetail.
 		CurrentSerial:              zd.CurrentSerial,
 		IncomingSerial:             zd.IncomingSerial,
-		EffectiveOutboundSoaSerial: zd.EffectiveOutboundSoaSerial(),
-		OutboundSoaSerialSource:    zd.outboundSoaSerialSource(),
+		EffectiveOutboundSoaSerial: outboundMode,
+		OutboundSoaSerialSource:    outboundSource,
 	}
 }
 
@@ -429,14 +433,14 @@ func buildListZoneConf(zd *ZoneData, zname string, kdb *KeyDB) ZoneConf {
 // succeeds. The bound policy is read from the immutable runtime-config snapshot
 // (ConfLive), which is lock-free: a concurrent reload publishes a fresh snapshot
 // rather than mutating in place, so pol is a stable value copy.
-func populateZoneDescDetail(zconf *ZoneConf, zd *ZoneData, zname string, kdb *KeyDB) {
+func populateZoneDescDetail(ctx context.Context, zconf *ZoneConf, zd *ZoneData, zname string, kdb *KeyDB) {
 	// Live per-primary SOA probe (§7). Single-zone only — one query per
 	// configured primary — and read-only. Per-primary rather than one value is
 	// the point: two masters disagreeing about a zone's serial is the failure
 	// that motivated the MUST-NOT-MODIFY work, and there was previously no way
 	// to see it from tdns.
 	if len(zd.Upstreams) > 0 {
-		zconf.UpstreamSerials = zd.ProbeUpstreamSerials(&Conf)
+		zconf.UpstreamSerials = zd.ProbeUpstreamSerials(ctx, &Conf)
 	}
 
 	name, source, appliedAt, ok, err := GetZoneAppliedPolicyDetail(kdb, zname)

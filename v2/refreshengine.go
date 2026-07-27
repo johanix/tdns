@@ -839,7 +839,18 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// applyRefreshReplacementLocked already set the serial
 						// to upstream's and nothing may move it off that).
 						if zd.KeyDB != nil && !zoneMayOriginateContent(zd) {
-							// no-op: serial belongs to upstream
+							// The serial belongs to upstream, so neither mode
+							// may touch it. Also clear anything persisted
+							// BEFORE this zone became a mirror: a zone that
+							// turns non-originating via a live config reload
+							// never passes through initialLoadZone, so without
+							// this its stale row survives, and a later flip back
+							// to may-originate under persist mode would let
+							// LoadOutgoingSerial resurrect an inflated serial.
+							if err := zd.KeyDB.DeleteOutgoingSerial(zone); err != nil {
+								lgEngine.Warn("failed to clear persisted outgoing serial for mirroring secondary",
+									"zone", zone, "err", err)
+							}
 						} else if zd.KeyDB != nil {
 							serialChanged := false
 							switch zd.EffectiveOutboundSoaSerial() {

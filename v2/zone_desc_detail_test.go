@@ -4,7 +4,10 @@
 
 package tdns
 
-import "testing"
+import (
+	"context"
+	"testing"
+)
 
 // withLiveConfig swaps in a runtime-config snapshot for the duration of a test
 // and restores the previous one on cleanup.
@@ -42,7 +45,7 @@ func TestPopulateZoneDescDetail(t *testing.T) {
 		t.Fatalf("SetZoneAppliedPolicy: %v", err)
 	}
 	zconf := ZoneConf{Name: "signed.example."}
-	populateZoneDescDetail(&zconf, &ZoneData{DnssecPolicyName: "pol-a"}, "signed.example.", kdb)
+	populateZoneDescDetail(context.Background(), &zconf, &ZoneData{DnssecPolicyName: "pol-a"}, "signed.example.", kdb)
 
 	if zconf.AppliedPolicy != "pol-a" || zconf.AppliedSource != "command" || zconf.AppliedAt == "" {
 		t.Fatalf("applied fields: got (%q, %q, at=%q), want (\"pol-a\", \"command\", non-empty)",
@@ -61,7 +64,7 @@ func TestPopulateZoneDescDetail(t *testing.T) {
 
 	// --- unsigned zone: no bound policy, no applied record ---
 	zUnsigned := ZoneConf{Name: "plain.example."}
-	populateZoneDescDetail(&zUnsigned, &ZoneData{DnssecPolicyName: ""}, "plain.example.", kdb)
+	populateZoneDescDetail(context.Background(), &zUnsigned, &ZoneData{DnssecPolicyName: ""}, "plain.example.", kdb)
 	if zUnsigned.PolicyDetail != nil {
 		t.Fatalf("unsigned zone must have nil PolicyDetail, got %+v", zUnsigned.PolicyDetail)
 	}
@@ -75,7 +78,7 @@ func TestPopulateZoneDescDetail(t *testing.T) {
 		t.Fatalf("SetZoneAppliedPolicy: %v", err)
 	}
 	zGhost := ZoneConf{Name: "ghost.example.", EffectiveDnssecPolicy: "ghost-pol"}
-	populateZoneDescDetail(&zGhost, &ZoneData{DnssecPolicyName: "ghost-pol"}, "ghost.example.", kdb)
+	populateZoneDescDetail(context.Background(), &zGhost, &ZoneData{DnssecPolicyName: "ghost-pol"}, "ghost.example.", kdb)
 	if zGhost.PolicyDetail != nil {
 		t.Fatalf("unresolvable bound policy must have nil PolicyDetail, got %+v", zGhost.PolicyDetail)
 	}
@@ -94,7 +97,7 @@ func TestPopulateZoneDescDetail_AppliedError(t *testing.T) {
 		},
 	})
 	zconf := ZoneConf{Name: "z.example."}
-	populateZoneDescDetail(&zconf, &ZoneData{DnssecPolicyName: "pol-a"}, "z.example.", nil)
+	populateZoneDescDetail(context.Background(), &zconf, &ZoneData{DnssecPolicyName: "pol-a"}, "z.example.", nil)
 
 	if zconf.AppliedError == "" {
 		t.Fatalf("a keystore read error must set AppliedError")

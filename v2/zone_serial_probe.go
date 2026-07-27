@@ -7,6 +7,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"net"
 
@@ -28,14 +29,32 @@ import (
 // Read-only: it mutates no zone state and makes no transfer decision. Costs one
 // query per primary, so it belongs on the single-zone `zone desc` path rather
 // than in a bulk listing.
-func (zd *ZoneData) ProbeUpstreamSerials(conf *Config) []UpstreamSerial {
+//
+// ctx is the caller's context (the HTTP request's, from the zone API handler)
+// and is honoured per probe via ExchangeContext. That matters because the
+// probes are sequential: with the library's 2s default timeout, a zone with
+// several unreachable primaries would otherwise pin the handler for
+// len(Upstreams) x 2s regardless of the request deadline. On cancellation the
+// remaining primaries are reported as such rather than silently omitted.
+func (zd *ZoneData) ProbeUpstreamSerials(ctx context.Context, conf *Config) []UpstreamSerial {
 	if zd == nil || len(zd.Upstreams) == 0 {
 		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
 	}
 
 	out := make([]UpstreamSerial, 0, len(zd.Upstreams))
 	for _, up := range zd.Upstreams {
 		res := UpstreamSerial{Addr: up.Addr}
+
+		// Stop probing once the caller has given up, but still record the
+		// remaining primaries: "not probed" is honest, silence is not.
+		if err := ctx.Err(); err != nil {
+			res.Err = fmt.Sprintf("not probed: %v", err)
+			out = append(out, res)
+			continue
+		}
 
 		upstream := up.Addr
 		if _, _, err := net.SplitHostPort(upstream); err != nil {
@@ -65,7 +84,7 @@ func (zd *ZoneData) ProbeUpstreamSerials(conf *Config) []UpstreamSerial {
 		}
 		c.TsigProvider = provider // nil for NOKEY => plain exchange
 
-		r, _, err := c.Exchange(m, upstream)
+		r, _, err := c.ExchangeContext(ctx, m, upstream)
 		switch {
 		case err != nil:
 			res.Err = err.Error()
@@ -85,14 +104,6 @@ func (zd *ZoneData) ProbeUpstreamSerials(conf *Config) []UpstreamSerial {
 	return out
 }
 
-// outboundSoaSerialSource names which tier supplied the zone's effective
-// outbound serial mode, so `zone desc` can show the value AND why it applies.
-func (zd *ZoneData) outboundSoaSerialSource() string {
-	if zd.OutboundSoaSerial != "" {
-		return "zone" // per-zone setting, possibly inherited from its template
-	}
-	if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial != "" {
-		return "global" // dnsengine.outbound_soa_serial
-	}
-	return "default"
-}
+// (The value/source pair is resolved by EffectiveOutboundSoaSerialWithSource in
+// zone_utils.go — deliberately one function, so the precedence chain is not
+// stated twice and cannot drift.)

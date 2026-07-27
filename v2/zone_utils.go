@@ -716,13 +716,23 @@ func FindZoneNG(qname string) *ZoneData {
 // applied here — this answers "what mode is configured", not "may this zone
 // act on it"; the callers pair it with the origination predicate.
 func (zd *ZoneData) EffectiveOutboundSoaSerial() string {
+	mode, _ := zd.EffectiveOutboundSoaSerialWithSource()
+	return mode
+}
+
+// EffectiveOutboundSoaSerialWithSource is EffectiveOutboundSoaSerial plus the
+// tier that supplied the value ("zone", "global" or "default"), for display by
+// `zone desc`. Both live here, in one function, so the precedence chain cannot
+// be stated twice and silently diverge — which would make `zone desc` report a
+// source that does not match the value actually in force.
+func (zd *ZoneData) EffectiveOutboundSoaSerialWithSource() (mode, source string) {
 	if zd.OutboundSoaSerial != "" {
-		return zd.OutboundSoaSerial
+		return zd.OutboundSoaSerial, "zone" // per-zone, possibly via its template
 	}
 	if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial != "" {
-		return zd.KeyDB.OutboundSoaSerial
+		return zd.KeyDB.OutboundSoaSerial, "global" // dnsengine.outbound_soa_serial
 	}
-	return OutboundSoaSerialKeep
+	return OutboundSoaSerialKeep, "default"
 }
 
 // nextOutboundSerial returns the next SOA serial that should be advertised

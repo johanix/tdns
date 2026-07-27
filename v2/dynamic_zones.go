@@ -901,6 +901,15 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	if fromAPI {
 		options[OptApiManagedZone] = true
 	}
+	// Normalize here, at the option-finalization site, rather than relying on
+	// the RefreshEngine merge that happens later: the zone is registered and
+	// persisted below, so without this it would be live (and written to the
+	// dynamic config) carrying origination options it may not act on, with no
+	// ConfigWarning, until the async refresh caught up.
+	normOptions, normSerial, suppressedOptions, normMsg := normalizeOptionsForRole(
+		Globals.App.Type, in.Type, options, "")
+	options = normOptions
+	_ = normSerial // no per-zone serial mode on the API add path (no knob)
 
 	// Resolve hostname primaries to addresses via the IMR at add time (not only
 	// on the next restart). Zero resolved on a secondary -> reject the add.
@@ -924,6 +933,12 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 		Status:        ZoneStatusPending,
 		Data:          core.NewCmap[OwnerData](),
 		KeyDB:         conf.Internal.KeyDB,
+
+		SuppressedOptions: suppressedOptions,
+	}
+	if normMsg != "" {
+		lg.Warn("zone option normalization", "zone", name, "detail", normMsg)
+		zd.SetError(ConfigWarning, "%s", normMsg)
 	}
 
 	// Commit the staged inline key just before registration/persistence (so the
@@ -1125,6 +1140,19 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	suppressedOptions := oldZd.SuppressedOptions
 	oldZd.mu.Unlock()
 
+	// Normalize the SUBMITTED options, not just the carried-forward ones.
+	// Without this, `zone modify --options allow-updates` on a secondary would
+	// install them live and persist them with a STALE SuppressedOptions record
+	// and no ConfigWarning — re-enabling exactly what the normalizer exists to
+	// strip. Recomputing here also means the suppressed set describes the
+	// options actually submitted rather than whatever the previous incarnation
+	// of this zone happened to carry.
+	normOptions, normSerial, normSuppressed, normMsg := normalizeOptionsForRole(
+		Globals.App.Type, oldZd.ZoneType, options, outboundSoaSerial)
+	options = normOptions
+	outboundSoaSerial = normSerial
+	suppressedOptions = normSuppressed
+
 	newZd := &ZoneData{
 		ZoneName:       name,
 		ZoneType:       oldZd.ZoneType,
@@ -1149,6 +1177,10 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	rollbackKey, cerr := conf.commitStagedTsigKey(staged)
 	if cerr != nil {
 		return "", fmt.Errorf("zone %s: %w", name, cerr)
+	}
+	if normMsg != "" {
+		lg.Warn("zone option normalization", "zone", name, "detail", normMsg)
+		newZd.SetError(ConfigWarning, "%s", normMsg)
 	}
 	Zones.Set(name, newZd)
 
