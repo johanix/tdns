@@ -37,11 +37,28 @@ import (
 // len(Upstreams) x 2s regardless of the request deadline. On cancellation the
 // remaining primaries are reported as such rather than silently omitted.
 func (zd *ZoneData) ProbeUpstreamSerials(ctx context.Context, conf *Config) []UpstreamSerial {
-	if zd == nil || len(zd.Upstreams) == 0 {
+	if zd == nil {
 		return nil
 	}
 	if ctx == nil {
 		ctx = context.Background()
+	}
+
+	// zd.Upstreams is mutated in place under zd.mu by the refresh engine
+	// (refreshengine.go), so take a copy under that lock rather than ranging
+	// over the live slice -- confMu guards the config, not zone data.
+	//
+	// Deliberately NOT held together with confMu below. The two locks are
+	// nested nowhere else in the tree, and a read-only diagnostic path is a
+	// poor reason to introduce an ordering constraint that every future
+	// writer would then have to respect.
+	zd.mu.Lock()
+	upstreams := make([]PeerConf, len(zd.Upstreams))
+	copy(upstreams, zd.Upstreams)
+	zd.mu.Unlock()
+
+	if len(upstreams) == 0 {
+		return nil
 	}
 
 	// Phase 1 -- resolve everything that reads config, under a single read
@@ -62,10 +79,10 @@ func (zd *ZoneData) ProbeUpstreamSerials(ctx context.Context, conf *Config) []Up
 		tsigAlgo string
 		failed   bool
 	}
-	plans := make([]probePlan, 0, len(zd.Upstreams))
+	plans := make([]probePlan, 0, len(upstreams))
 
 	confMu.RLock()
-	for _, up := range zd.Upstreams {
+	for _, up := range upstreams {
 		p := probePlan{res: UpstreamSerial{Addr: up.Addr}, upstream: up.Addr}
 		if _, _, err := net.SplitHostPort(p.upstream); err != nil {
 			p.upstream = net.JoinHostPort(p.upstream, defaultPortForPeer(up))
