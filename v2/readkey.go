@@ -329,6 +329,18 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 	}
 	pkc.CS = signer
 
+	// PKCS#8 PEM is the form that crosses the API. Unlike the BIND base64 in
+	// pkc.PrivateKey it is algorithm-agnostic: RSA's BIND private-key format
+	// has eight fields (Modulus, PrivateExponent, Prime1, ...) and no single
+	// "PrivateKey:" line, so pkc.PrivateKey is empty for RSA and the server
+	// has nothing to rebuild from. PEM covers every algorithm uniformly,
+	// including the registered PQ ones.
+	pkc.PrivateKeyPEM, err = PrivateKeyToPEM(pkc.K)
+	if err != nil {
+		return nil, fmt.Errorf("error encoding private key for algorithm %s as PKCS#8 PEM: %v",
+			dns.AlgorithmToString[pkc.Algorithm], err)
+	}
+
 	//	log.Printf("PrepareKeyCache: Zone: %s, algorithm: %s, keyid: %d,\nprivkey: %s,\npubkey: %s\npkc.K: %v",
 	//		rr.Header().Name, dns.AlgorithmToString[pkc.Algorithm], pkc.KeyId, pkc.PrivateKey, pubkey, pkc.K)
 
