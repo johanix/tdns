@@ -147,8 +147,13 @@ func TestDnssecImportRSACarriesPEM(t *testing.T) {
 	if err != nil {
 		t.Fatalf("MarshalPKCS8: %v", err)
 	}
-	os.WriteFile(base+".private", pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0600)
-	os.WriteFile(base+".key", []byte(key.String()+"\n"), 0644)
+	if err := os.WriteFile(base+".private",
+		pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(base+".key", []byte(key.String()+"\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	pkc, err := ReadPrivateKey(base + ".key")
 	if err != nil {

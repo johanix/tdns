@@ -5,7 +5,6 @@ package tdns
 
 import (
 	"context"
-	"crypto"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -94,38 +93,9 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		pkc := kp.PrivateKeyCache
 		lgSigner.Info("importing private key", "type", fmt.Sprintf("%T", pkc.K))
 
-		// Convert private key to PEM format for storage
-		// If pkc.K is nil (e.g., when received via JSON API), reconstruct it from pkc.PrivateKey
-		var privkey crypto.PrivateKey
-		// K is json:"-" so it is nil for anything that arrived over the API;
-		// it is only populated in-process. Type-assert rather than nil-check:
-		// a decode that half-succeeded could leave a non-nil but unusable
-		// value here, and every real private key type implements crypto.Signer.
-		if signer, ok := pkc.K.(crypto.Signer); ok {
-			privkey = signer
-		} else if pkc.PrivateKeyPEM != "" {
-			// The normal API path. PKCS#8 PEM covers every algorithm,
-			// including RSA, which the BIND-base64 route below cannot.
-			privkey, err = PEMToPrivateKey(pkc.PrivateKeyPEM)
-			if err != nil {
-				return &resp, fmt.Errorf("failed to parse private key PEM: %v", err)
-			}
-		} else {
-			// Reconstruct from PrivateKey string (BIND format) and public key RR
-			// We need to parse the private key using the public key RR
-			if pkc.KeyType == dns.TypeKEY {
-				bindFormat, err := PrivKeyToBindFormat(pkc.PrivateKey, dns.AlgorithmToString[pkc.Algorithm])
-				if err != nil {
-					return &resp, fmt.Errorf("failed to convert private key to BIND format: %v", err)
-				}
-				reconstructedPkc, err := PrepareKeyCache(bindFormat, pkc.KeyRR.String())
-				if err != nil {
-					return &resp, fmt.Errorf("failed to reconstruct private key: %v", err)
-				}
-				privkey = reconstructedPkc.K
-			} else {
-				return &resp, fmt.Errorf("unsupported key type for reconstruction: %d", pkc.KeyType)
-			}
+		privkey, err := reconstructSigningKey(pkc, pkc.KeyRR.String(), dns.TypeKEY)
+		if err != nil {
+			return &resp, err
 		}
 
 		privkeyPEM, err := PrivateKeyToPEM(privkey)
@@ -405,36 +375,9 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 
 		// Convert private key to PEM format for storage
 		// If pkc.K is nil (e.g., when received via JSON API), reconstruct it from pkc.PrivateKey
-		var privkey crypto.PrivateKey
-		// K is json:"-" so it is nil for anything that arrived over the API;
-		// it is only populated in-process. Type-assert rather than nil-check:
-		// a decode that half-succeeded could leave a non-nil but unusable
-		// value here, and every real private key type implements crypto.Signer.
-		if signer, ok := pkc.K.(crypto.Signer); ok {
-			privkey = signer
-		} else if pkc.PrivateKeyPEM != "" {
-			// The normal API path. PKCS#8 PEM covers every algorithm,
-			// including RSA, which the BIND-base64 route below cannot.
-			privkey, err = PEMToPrivateKey(pkc.PrivateKeyPEM)
-			if err != nil {
-				return &resp, fmt.Errorf("failed to parse private key PEM: %v", err)
-			}
-		} else {
-			// Reconstruct from PrivateKey string (BIND format) and public key RR
-			// We need to parse the private key using the public key RR
-			if pkc.KeyType == dns.TypeDNSKEY {
-				bindFormat, err := PrivKeyToBindFormat(pkc.PrivateKey, dns.AlgorithmToString[pkc.Algorithm])
-				if err != nil {
-					return &resp, fmt.Errorf("failed to convert private key to BIND format: %v", err)
-				}
-				reconstructedPkc, err := PrepareKeyCache(bindFormat, pkc.DnskeyRR.String())
-				if err != nil {
-					return &resp, fmt.Errorf("failed to reconstruct private key: %v", err)
-				}
-				privkey = reconstructedPkc.K
-			} else {
-				return &resp, fmt.Errorf("unsupported key type for reconstruction: %d", pkc.KeyType)
-			}
+		privkey, err := reconstructSigningKey(pkc, pkc.DnskeyRR.String(), dns.TypeDNSKEY)
+		if err != nil {
+			return &resp, err
 		}
 
 		privkeyPEM, err := PrivateKeyToPEM(privkey)

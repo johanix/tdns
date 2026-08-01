@@ -614,3 +614,45 @@ func ReadPubKeys(keydir string) (map[string]dns.KEY, error) {
 
 	return keymap, nil
 }
+
+// reconstructSigningKey resolves the usable private key for a keystore write.
+//
+// Shared by the SIG(0) and DNSSEC import paths, which previously carried this
+// precedence verbatim in two places. Order matters:
+//
+//  1. K, if it is a real key. It is json:"-", so it is populated only
+//     in-process and is nil for anything that arrived over the API. Type-assert
+//     rather than nil-check: a half-succeeded decode can leave a non-nil but
+//     unusable value (a string, a map) here, and every real private key type
+//     implements crypto.Signer.
+//  2. PrivateKeyPEM, the normal API path. PKCS#8 PEM covers every algorithm,
+//     including RSA, which the BIND-base64 route below cannot represent.
+//  3. The legacy BIND base64, for callers predating PrivateKeyPEM.
+//
+// rrstr is the matching public-key RR (KEY or DNSKEY) and wantType the RR type
+// the caller expects, so a mismatched cache is rejected rather than silently
+// reconstructed against the wrong record.
+func reconstructSigningKey(pkc *PrivateKeyCache, rrstr string, wantType uint16) (crypto.PrivateKey, error) {
+	if signer, ok := pkc.K.(crypto.Signer); ok {
+		return signer, nil
+	}
+	if pkc.PrivateKeyPEM != "" {
+		privkey, err := PEMToPrivateKey(pkc.PrivateKeyPEM)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse private key PEM: %v", err)
+		}
+		return privkey, nil
+	}
+	if pkc.KeyType != wantType {
+		return nil, fmt.Errorf("unsupported key type for reconstruction: %d", pkc.KeyType)
+	}
+	bindFormat, err := PrivKeyToBindFormat(pkc.PrivateKey, dns.AlgorithmToString[pkc.Algorithm])
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert private key to BIND format: %v", err)
+	}
+	reconstructed, err := PrepareKeyCache(bindFormat, rrstr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to reconstruct private key: %v", err)
+	}
+	return reconstructed.K, nil
+}

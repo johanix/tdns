@@ -177,12 +177,15 @@ func genLibsMk(needGroups map[string]bool, envByGroup map[string]libEnv) []byte 
 		// moment the value is expanded (which ALGS_ENV below does). It is a
 		// hard build failure on the platform the lab actually runs on.
 		//
-		// Nothing is lost by dropping the "append any pre-existing
-		// PKG_CONFIG_PATH" clause: the paths computed here are exactly the
-		// ones the selected algorithms need, and a caller who wants to add
-		// more can still set PKG_CONFIG_PATH in the environment, which
-		// pkg-config itself merges.
-		fmt.Fprintf(&b, "PKG_CONFIG_PATH := %s\n", strings.Join(pkgPaths, ":"))
+		// Note the ALGS_ prefix: the make variable must NOT be named after the
+		// environment variable it feeds. GNU make re-exports any variable that
+		// originated in the environment, so a make variable called
+		// PKG_CONFIG_PATH would overwrite the caller's value in the recipe's
+		// environment -- and the shell expansion in ALGS_ENV below would then
+		// append the generated paths to themselves instead of to the caller's.
+		// (bmake does not re-export, so this only misbehaved under GNU make:
+		// exactly the kind of divergence worth avoiding outright.)
+		fmt.Fprintf(&b, "ALGS_PKG_CONFIG_PATH := %s\n", strings.Join(pkgPaths, ":"))
 		varNames = append(varNames, "PKG_CONFIG_PATH")
 	}
 	otherNames := make([]string, 0, len(others))
@@ -198,7 +201,7 @@ func genLibsMk(needGroups map[string]bool, envByGroup map[string]libEnv) []byte 
 		if isPathListVar(n) {
 			sep = ":"
 		}
-		fmt.Fprintf(&b, "%s := %s\n", n, strings.Join(others[n], sep))
+		fmt.Fprintf(&b, "ALGS_%s := %s\n", n, strings.Join(others[n], sep))
 		varNames = append(varNames, n)
 	}
 
@@ -207,7 +210,22 @@ func genLibsMk(needGroups map[string]bool, envByGroup map[string]libEnv) []byte 
 		if i > 0 {
 			b.WriteByte(' ')
 		}
-		fmt.Fprintf(&b, `%s="$(%s)"`, n, n)
+		if isPathListVar(n) {
+			// Append whatever the caller already had. ALGS_ENV is used as a
+			// command prefix ("PKG_CONFIG_PATH=... go build"), which OVERRIDES
+			// the inherited environment rather than adding to it, so a caller
+			// who had set PKG_CONFIG_PATH would silently lose it.
+			//
+			// $(NAME) is expanded by make (the generated paths); $${NAME}
+			// survives make as a literal ${NAME} and is expanded by the shell
+			// that runs the recipe, using the inherited value. That keeps the
+			// conditional out of make entirely, so it works under GNU make and
+			// NetBSD bmake alike -- unlike $(if ...), which is GNU-only and is
+			// what made this file a hard parse error under bmake.
+			fmt.Fprintf(&b, `%s="$(ALGS_%s)$${%s:+:$${%s}}"`, n, n, n, n)
+		} else {
+			fmt.Fprintf(&b, `%s="$(ALGS_%s)"`, n, n)
+		}
 	}
 	b.WriteByte('\n')
 	return []byte(b.String())
