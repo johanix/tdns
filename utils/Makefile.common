@@ -31,7 +31,11 @@ version:
 	/bin/sh ../../utils/make-version.sh $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
 
 # Path to the genalgs binary (built from cmdv2/genalgs). Overridable.
-GENALGS ?= ../genalgs/tdns-genalgs
+# The directory is spelled out rather than derived with $(dir ...): that is a
+# GNU-make function which NetBSD bmake does not have, and it would expand to
+# nothing there.
+GENALGS_DIR ?= ../genalgs
+GENALGS ?= $(GENALGS_DIR)/tdns-genalgs
 
 # Algorithm code generation.
 #
@@ -72,14 +76,23 @@ build: generate
 	@/bin/sh ../../utils/make-version.sh --if-changed $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
 	$(ALGS_ENV) $(GO) build $(GOFLAGS) -o ${PROG}
 
-# Ensure the generator binary exists (cmdv2/Makefile also builds it first).
+# Ensure the generator binary exists AND IS CURRENT.
+#
+# This target is deliberately .PHONY. As a plain file rule with no
+# prerequisites it only ever ran when the binary was MISSING, so a generator
+# built months earlier kept silently emitting stale output long after its
+# sources were updated -- a host could pull hundreds of commits of fixes and
+# still regenerate months-old build config, with no error anywhere. Delegating
+# unconditionally lets the generator's own Makefile decide; a no-op go build
+# costs almost nothing thanks to the build cache.
+.PHONY: $(GENALGS)
 $(GENALGS):
-	$(MAKE) -C $(dir $(GENALGS))
+	@$(MAKE) -C $(GENALGS_DIR)
 
 generate: $(GENALGS)
 	@if [ ! -f algs.list ]; then \
 	   : "no algs.list -> standalone build, genalgs not run"; \
-	 elif [ -f registered_algs.go ] && [ ! algs.list -nt registered_algs.go ] && [ -f algs-libs.mk ] && [ -f ../algs-env.mk ]; then \
+	 elif [ -f registered_algs.go ] && [ ! algs.list -nt registered_algs.go ] && [ ! $(GENALGS) -nt registered_algs.go ] && [ -f algs-libs.mk ] && [ -f ../algs-env.mk ]; then \
 	   : "generated files are current"; \
 	 elif [ -n "$(ALGREPO)" ]; then \
 	   echo "  algs.list changed (or no generated files); running genalgs --algrepo $(ALGREPO)"; \

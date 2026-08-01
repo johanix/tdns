@@ -171,8 +171,18 @@ func genLibsMk(needGroups map[string]bool, envByGroup map[string]libEnv) []byte 
 
 	varNames := []string{}
 	if len(pkgPaths) > 0 {
-		fmt.Fprintf(&b, "PKG_CONFIG_PATH := %s$(if $(PKG_CONFIG_PATH),:$(PKG_CONFIG_PATH))\n",
-			strings.Join(pkgPaths, ":"))
+		// Plain assignment only. This file is read by NetBSD bmake as well as
+		// GNU make, and $(if ...) is a GNU-only function: bmake parses it as a
+		// variable modifier and fails with `Unknown modifier "<path>"` the
+		// moment the value is expanded (which ALGS_ENV below does). It is a
+		// hard build failure on the platform the lab actually runs on.
+		//
+		// Nothing is lost by dropping the "append any pre-existing
+		// PKG_CONFIG_PATH" clause: the paths computed here are exactly the
+		// ones the selected algorithms need, and a caller who wants to add
+		// more can still set PKG_CONFIG_PATH in the environment, which
+		// pkg-config itself merges.
+		fmt.Fprintf(&b, "PKG_CONFIG_PATH := %s\n", strings.Join(pkgPaths, ":"))
 		varNames = append(varNames, "PKG_CONFIG_PATH")
 	}
 	otherNames := make([]string, 0, len(others))
