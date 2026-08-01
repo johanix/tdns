@@ -44,62 +44,105 @@ func (zd *ZoneData) ProbeUpstreamSerials(ctx context.Context, conf *Config) []Up
 		ctx = context.Background()
 	}
 
-	out := make([]UpstreamSerial, 0, len(zd.Upstreams))
+	// Phase 1 -- resolve everything that reads config, under a single read
+	// lock, with NO network I/O. ProbeUpstreamSerials receives the mutable
+	// global &Conf, and a reload replaces its contents wholesale; resolving
+	// per-upstream inside the probe loop would let a reload landing midway
+	// hand later primaries TLS/TSIG material from a different config
+	// generation than earlier ones. Snapshot once, then probe.
+	//
+	// The lock is NOT held across the exchanges below: a probe blocks until
+	// the peer answers or the request deadline expires, and holding confMu
+	// for that would stall every config reload behind an unreachable primary.
+	type probePlan struct {
+		res      UpstreamSerial
+		client   *dns.Client
+		upstream string
+		keyName  string
+		tsigAlgo string
+		failed   bool
+	}
+	plans := make([]probePlan, 0, len(zd.Upstreams))
+
+	confMu.RLock()
 	for _, up := range zd.Upstreams {
-		res := UpstreamSerial{Addr: up.Addr}
-
-		// Stop probing once the caller has given up, but still record the
-		// remaining primaries: "not probed" is honest, silence is not.
-		if err := ctx.Err(); err != nil {
-			res.Err = fmt.Sprintf("not probed: %v", err)
-			out = append(out, res)
-			continue
+		p := probePlan{res: UpstreamSerial{Addr: up.Addr}, upstream: up.Addr}
+		if _, _, err := net.SplitHostPort(p.upstream); err != nil {
+			p.upstream = net.JoinHostPort(p.upstream, defaultPortForPeer(up))
 		}
-
-		upstream := up.Addr
-		if _, _, err := net.SplitHostPort(upstream); err != nil {
-			upstream = net.JoinHostPort(upstream, defaultPortForPeer(up))
-		}
-
-		m := new(dns.Msg)
-		m.SetQuestion(zd.ZoneName, dns.TypeSOA)
-		c := new(dns.Client)
+		p.client = new(dns.Client)
 
 		// Probe over the same verified channel the transfer itself would use,
 		// so an XoT peer is not silently probed in plaintext and a TSIG
 		// mismatch surfaces here rather than at transfer time.
 		if tlsCfg, terr := conf.ClientTLSConfigForPeer(up); terr != nil {
-			res.Err = fmt.Sprintf("TLS setup failed: %v", terr)
-			out = append(out, res)
+			p.res.Err = fmt.Sprintf("TLS setup failed: %v", terr)
+			p.failed = true
+			plans = append(plans, p)
 			continue
 		} else if tlsCfg != nil {
-			c.Net = "tcp-tls"
-			c.TLSConfig = tlsCfg
+			p.client.Net = "tcp-tls"
+			p.client.TLSConfig = tlsCfg
 		}
-		provider, serr := SignForPeer(m, up.Key, conf)
+
+		provider, algo, serr := TsigMaterialForPeer(up.Key, conf)
 		if serr != nil {
-			res.Err = fmt.Sprintf("TSIG sign setup failed: %v", serr)
-			out = append(out, res)
+			p.res.Err = fmt.Sprintf("TSIG sign setup failed: %v", serr)
+			p.failed = true
+			plans = append(plans, p)
 			continue
 		}
-		c.TsigProvider = provider // nil for NOKEY => plain exchange
+		p.client.TsigProvider = provider // nil for NOKEY => plain exchange
+		if provider != nil {
+			p.keyName, p.tsigAlgo = up.Key, algo
+		}
+		plans = append(plans, p)
+	}
+	confMu.RUnlock()
 
-		r, _, err := c.ExchangeContext(ctx, m, upstream)
+	// Phase 2 -- network only. Nothing here reads shared config.
+	out := make([]UpstreamSerial, 0, len(plans))
+	for i := range plans {
+		p := &plans[i]
+		if p.failed {
+			out = append(out, p.res)
+			continue
+		}
+
+		// Stop probing once the caller has given up, but still record the
+		// remaining primaries: "not probed" is honest, silence is not.
+		if err := ctx.Err(); err != nil {
+			p.res.Err = fmt.Sprintf("not probed: %v", err)
+			out = append(out, p.res)
+			continue
+		}
+
+		m := new(dns.Msg)
+		m.SetQuestion(zd.ZoneName, dns.TypeSOA)
+		// Stamped here, not in phase 1: the probes are sequential and each can
+		// block until the deadline, so a timestamp taken during the snapshot
+		// could be well outside the fudge window by the time the last message
+		// is sent, and the peer would answer BADTIME.
+		if p.keyName != "" {
+			StampTsigForPeer(m, p.keyName, p.tsigAlgo)
+		}
+
+		r, _, err := p.client.ExchangeContext(ctx, m, p.upstream)
 		switch {
 		case err != nil:
-			res.Err = err.Error()
+			p.res.Err = err.Error()
 		case r.MsgHdr.Rcode != dns.RcodeSuccess:
-			res.Err = dns.RcodeToString[r.MsgHdr.Rcode]
+			p.res.Err = dns.RcodeToString[r.MsgHdr.Rcode]
 		case len(r.Answer) == 0:
-			res.Err = "NOERROR but empty answer section"
+			p.res.Err = "NOERROR but empty answer section"
 		default:
 			if soa, ok := r.Answer[0].(*dns.SOA); ok {
-				res.Serial = soa.Serial
+				p.res.Serial = soa.Serial
 			} else {
-				res.Err = "first answer is not a SOA"
+				p.res.Err = "first answer is not a SOA"
 			}
 		}
-		out = append(out, res)
+		out = append(out, p.res)
 	}
 	return out
 }
