@@ -1022,16 +1022,14 @@ SELECT keyid, algorithm, privatekey, keyrr FROM Sig0KeyStore WHERE zonename=? AN
 		}
 
 		// Parse private key, detecting old BIND format or new PEM format
-		_, alg, bindFormat, err := ParsePrivateKeyFromDB(privatekey, algorithm, keyrrstr)
+		// PrivateKeyCacheFromDB, NOT ParsePrivateKeyFromDB + PrepareKeyCache: the
+		// latter pair re-derives a BIND blob from an already-parsed PEM and
+		// re-parses it via NewPrivateKey, which dispatches on the algorithm
+		// codepoint and fails ("dns: bad private key") for any key stored under
+		// a codepoint that has since been renumbered.
+		pkc, alg, err := PrivateKeyCacheFromDB(privatekey, algorithm, keyrrstr)
 		if err != nil {
-			lgSigner.Error("ParsePrivateKeyFromDB failed", "err", err)
-			return nil, err
-		}
-
-		// Use PrepareKeyCache with the BIND format (it handles both old and new keys this way)
-		pkc, err := PrepareKeyCache(bindFormat, keyrrstr)
-		if err != nil {
-			lgSigner.Error("PrepareKeyCache failed", "err", err)
+			lgSigner.Error("PrivateKeyCacheFromDB failed", "err", err)
 			return nil, err
 		}
 

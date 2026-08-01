@@ -449,6 +449,48 @@ func IsPEMFormat(keyData string) bool {
 //
 // Returns an error if the algorithm is unknown, PEM decoding/parsing fails, the public key RR
 // cannot be parsed, conversion to BIND format fails, or the legacy BIND parsing logic fails.
+// PrivateKeyCacheFromDB builds a PrivateKeyCache from a keystore row, without
+// ever round-tripping the key through BIND format.
+//
+// This exists because ParsePrivateKeyFromDB does the opposite: for a stored
+// PKCS#8 PEM it parses the key correctly and then THROWS THE RESULT AWAY,
+// re-deriving a BIND-format blob via dns.DNSKEY.PrivateKeyString() for the
+// caller to hand back to PrepareKeyCache. PrepareKeyCache then takes its BIND
+// branch and re-parses with dns.DNSKEY.NewPrivateKey(), which dispatches on the
+// algorithm CODEPOINT. So any key written under a codepoint that has since been
+// renumbered failed with a bare "dns: bad private key" -- even though the PEM
+// had just parsed cleanly moments earlier. That took out slhdsa128s.foo and
+// cpt.p.axfr.net on the gocpt101 testbed: zones served, but signing was dead.
+//
+// PrepareKeyCache already detects and handles PEM properly. The only thing it
+// cannot do is take the legacy bare-base64 form, which has no BIND header --
+// so wrap that case and pass everything else straight through.
+func PrivateKeyCacheFromDB(privatekey, algorithm, keyrrstr string) (*PrivateKeyCache, uint8, error) {
+	alg, ok := dns.StringToAlgorithm[strings.ToUpper(algorithm)]
+	if !ok {
+		return nil, 0, fmt.Errorf("unknown algorithm: %s", algorithm)
+	}
+
+	keydata := privatekey
+	if !IsPEMFormat(privatekey) {
+		// Legacy rows hold the bare base64 with no "Private-key-format:"
+		// header; PrepareKeyCache's BIND branch needs the full blob.
+		var err error
+		keydata, err = PrivKeyToBindFormat(privatekey, algorithm)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to convert stored key to BIND format: %v", err)
+		}
+	}
+
+	pkc, err := PrepareKeyCache(keydata, keyrrstr)
+	if err != nil {
+		return nil, 0, err
+	}
+	return pkc, alg, nil
+}
+
+// Deprecated: use PrivateKeyCacheFromDB. This returns a BIND-format string even
+// for PEM input, which forces callers through a codepoint-sensitive re-parse.
 func ParsePrivateKeyFromDB(privatekey, algorithm, keyrrstr string) (crypto.PrivateKey, uint8, string, error) {
 	var privkey crypto.PrivateKey
 	var alg uint8
