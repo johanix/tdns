@@ -15,10 +15,20 @@ import (
 
 // --- selection ---------------------------------------------------------
 
+// mustSelector builds a selector for tests that supply known-good input.
+func mustSelector(t *testing.T, exact, subtree []string) KeySelector {
+	t.Helper()
+	sel, err := NewKeySelector(exact, subtree)
+	if err != nil {
+		t.Fatalf("NewKeySelector(%v, %v): %v", exact, subtree, err)
+	}
+	return sel
+}
+
 func TestKeySelectorSubtreeIsLabelBounded(t *testing.T) {
 	// The whole reason --zones is not a string suffix: notpq.dnslab must not
 	// be swept up by --zones pq.dnslab.
-	sel := NewKeySelector(nil, []string{"pq.dnslab"})
+	sel := mustSelector(t, nil, []string{"pq.dnslab"})
 	cases := map[string]bool{
 		"pq.dnslab.":                 true,
 		"mldsa87-ed25519.pq.dnslab.": true,
@@ -35,7 +45,7 @@ func TestKeySelectorSubtreeIsLabelBounded(t *testing.T) {
 }
 
 func TestKeySelectorExactAndCaseAndRoot(t *testing.T) {
-	sel := NewKeySelector([]string{"DNSLAB"}, nil)
+	sel := mustSelector(t, []string{"DNSLAB"}, nil)
 	if !sel.Matches("dnslab.") {
 		t.Error("exact selection must be case- and trailing-dot-insensitive")
 	}
@@ -44,16 +54,32 @@ func TestKeySelectorExactAndCaseAndRoot(t *testing.T) {
 	}
 
 	// --zones . is the root's subtree, i.e. everything.
-	root := NewKeySelector(nil, []string{"."})
+	root := mustSelector(t, nil, []string{"."})
 	for _, n := range []string{".", "se.", "a.b.c."} {
 		if !root.Matches(n) {
 			t.Errorf("root subtree should match %q", n)
 		}
 	}
 	// --zone . is the root alone.
-	rootExact := NewKeySelector([]string{"."}, nil)
+	rootExact := mustSelector(t, []string{"."}, nil)
 	if !rootExact.Matches(".") || rootExact.Matches("se.") {
 		t.Error("exact root selection must match only the root")
+	}
+}
+
+func TestKeySelectorRefusesBlankValues(t *testing.T) {
+	// `--zones "$SUBTREE"` with an unset variable. Dropping the blank would
+	// leave the selector empty, and empty means everything -- so a typo or an
+	// unset shell variable would export every private key in the keystore.
+	for _, tc := range []struct{ exact, subtree []string }{
+		{exact: []string{""}},
+		{exact: []string{"  "}},
+		{subtree: []string{""}},
+		{exact: []string{"ok.example."}, subtree: []string{""}},
+	} {
+		if _, err := NewKeySelector(tc.exact, tc.subtree); err == nil {
+			t.Errorf("NewKeySelector(%q, %q) should refuse a blank value", tc.exact, tc.subtree)
+		}
 	}
 }
 
@@ -254,7 +280,7 @@ func TestBulkExportSelectsSubtree(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	got, err := kdb.BulkExportDnssec(nil, NewKeySelector(nil, []string{"pq.dnslab"}))
+	got, err := kdb.BulkExportDnssec(nil, mustSelector(t, nil, []string{"pq.dnslab"}))
 	if err != nil {
 		t.Fatalf("export: %v", err)
 	}
@@ -384,5 +410,37 @@ func TestManifestSavedModeIsOwnerOnly(t *testing.T) {
 	}
 	if mode := info.Mode().Perm(); mode&0o077 != 0 {
 		t.Errorf("manifest holds TSIG secrets; mode is %04o, want owner-only", mode)
+	}
+}
+
+// TestBulkImportSig0InvalidatesTheCache is the regression test for a bulk
+// import leaving a stale key in KeystoreSig0Cache. GetSig0Keys is read-through
+// against that cache, so without invalidation a running daemon would keep
+// signing UPDATEs with the superseded key until the next restart.
+func TestBulkImportSig0InvalidatesTheCache(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	key := BulkSig0Key{
+		Zone: "child.dnslab.", Keyid: 4242, Algorithm: "ED25519", State: Sig0StateActive,
+		PrivateKey: "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIC6yHwqbCmGr+aAPEfQKDIqWBPfdFhy3erXHhdsPqeKT\n-----END PRIVATE KEY-----\n",
+	}
+	// A KEY RR whose keytag matches, so validation passes.
+	rr := &dns.KEY{DNSKEY: dns.DNSKEY{
+		Hdr:       dns.RR_Header{Name: "child.dnslab.", Rrtype: dns.TypeKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags:     512,
+		Protocol:  3,
+		Algorithm: dns.ED25519,
+		PublicKey: "aIufB25wu/A9nLOZOm7ZlAxkdQyeCqAQcH7wMCg8DVo=",
+	}}
+	key.Keyid = rr.KeyTag()
+	key.KeyRR = rr.String()
+
+	// Poison the cache the way a live daemon would have populated it.
+	kdb.KeystoreSig0Cache["child.dnslab.+"+Sig0StateActive] = &Sig0ActiveKeys{}
+
+	if _, err := kdb.BulkImportSig0(nil, []BulkSig0Key{key}, false); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if _, stale := kdb.KeystoreSig0Cache["child.dnslab.+"+Sig0StateActive]; stale {
+		t.Error("bulk import must drop the cached SIG(0) keys for a zone it changed")
 	}
 }

@@ -135,6 +135,63 @@ func TestPreloadOverwriteExistingKeysReplaces(t *testing.T) {
 	}
 }
 
+// TestPreloadTsigSurvivesTheStartupConfigSync is the regression test for the
+// interaction that made TSIG pre-load useless: PreloadKeystore runs immediately
+// before LoadTsigKeys, whose SyncConfigTsigKeys deletes every origin=config row
+// that is not in this host's keys.tsig -- with no isReferenced withholding on
+// the startup path. A key restored under its exported origin would therefore be
+// deleted seconds after pre-load logged it as imported, on every boot.
+func TestPreloadTsigSurvivesTheStartupConfigSync(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	dir := t.TempDir()
+
+	m := &KeystoreManifest{Version: KeystoreManifestVersion}
+	m.UpsertTsig(ManifestTsigKey{
+		Keyname:   "xfr.dnslab.",
+		Algorithm: "hmac-sha256.",
+		Secret:    "c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0Cg==",
+		Origin:    "config", // what a config-declared key carries when exported
+	})
+	if err := m.Save(dir); err != nil {
+		t.Fatalf("save manifest: %v", err)
+	}
+
+	conf := &Config{}
+	conf.Internal.KeyDB = kdb
+	conf.Keystore.Preload.Tsig = dir
+
+	if err := conf.PreloadKeystore(); err != nil {
+		t.Fatalf("PreloadKeystore: %v", err)
+	}
+
+	// Exactly what MainInit does next: LoadTsigKeys -> SyncConfigTsigKeys with
+	// this host's keys.tsig entries, which a pre-load-only host has none of.
+	if err := kdb.SyncConfigTsigKeys(nil); err != nil {
+		t.Fatalf("SyncConfigTsigKeys: %v", err)
+	}
+
+	got, err := kdb.BulkExportTsig(nil, KeySelector{})
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("pre-loaded TSIG key did not survive startup: %+v", got)
+	}
+	if got[0].Origin != "api" {
+		t.Errorf("pre-load must restore TSIG keys as api-origin, got %q", got[0].Origin)
+	}
+}
+
+func TestPreloadWithoutKeystoreIsAWarningNotAFailure(t *testing.T) {
+	// A keystore: block reaching an app that has no keystore (tdns-imr, or any
+	// daemon sharing a config file via include:) must not stop it from starting.
+	conf := &Config{}
+	conf.Keystore.Preload.Tsig = t.TempDir()
+	if err := conf.PreloadKeystore(); err != nil {
+		t.Errorf("an app with no keystore should warn and continue, got %v", err)
+	}
+}
+
 func TestPreloadFailsLoudlyOnMissingDirectory(t *testing.T) {
 	conf := &Config{}
 	conf.Internal.KeyDB = newTestKeyDB(t)
@@ -150,14 +207,6 @@ func TestPreloadUnconfiguredIsANoOp(t *testing.T) {
 	// No KeyDB either: apps without a keystore must not trip over this.
 	if err := conf.PreloadKeystore(); err != nil {
 		t.Errorf("unconfigured pre-load should do nothing, got %v", err)
-	}
-}
-
-func TestPreloadConfiguredWithoutKeystoreIsAnError(t *testing.T) {
-	conf := &Config{}
-	conf.Keystore.Preload.Tsig = t.TempDir()
-	if err := conf.PreloadKeystore(); err == nil {
-		t.Error("pre-load configured for an app with no keystore must be reported, not ignored")
 	}
 }
 

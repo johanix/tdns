@@ -132,6 +132,17 @@ func bulkExportRun(role, class string) {
 		os.Exit(1)
 	}
 
+	// A blank value is refused rather than ignored. Ignoring it would leave the
+	// selector empty, and empty means "everything" — so `--zones "$SUBTREE"`
+	// with an unset variable would dump every private key in the keystore.
+	// (The server refuses it too; this is just the better error.)
+	for _, v := range append(append([]string{}, bulkSelExact...), bulkSelSubtre...) {
+		if strings.TrimSpace(v) == "" {
+			fmt.Printf("Error: empty selector value. To export everything, pass no selector at all.\n")
+			os.Exit(1)
+		}
+	}
+
 	if len(bulkSelExact) == 0 && len(bulkSelSubtre) == 0 {
 		fmt.Printf("No selector given: exporting every %s key in the keystore.\n", classLabel(class))
 	}

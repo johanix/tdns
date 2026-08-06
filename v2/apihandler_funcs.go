@@ -82,12 +82,20 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 						}
 						// A bulk import touches many zones at once, so it gets
 						// its own plural republish rather than trying to squeeze
-						// through the single-zone field above.
+						// through the single-zone field above. Re-sign each one
+						// too: a bulk import changes the active key set exactly
+						// like setstate/rollover/delete do, and those all
+						// re-sign. Without it a forced key replacement would
+						// leave the zone's RRSIGs made by the superseded key
+						// until the resigner's next scheduled pass.
 						for _, z := range dnssecBulkRepublishZones {
 							if rerr := republishSigningKeysForZone(kdb, z); rerr != nil {
 								lgApi.Error("APIkeystore: post-commit signing-keys republish failed after bulk import",
 									"zone", z, "err", rerr)
 							}
+						}
+						for _, z := range dnssecBulkRepublishZones {
+							triggerResign(conf, z)
 						}
 						if dnssecResignZone != "" {
 							triggerResign(conf, dnssecResignZone)

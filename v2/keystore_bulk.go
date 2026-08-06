@@ -103,19 +103,33 @@ type KeySelector struct {
 
 // NewKeySelector normalizes caller-supplied names to lowercase FQDNs so that
 // "PQ.DNSLAB" and "pq.dnslab." select the same thing.
-func NewKeySelector(exact, subtree []string) KeySelector {
-	norm := func(in []string) []string {
+//
+// A blank entry is an ERROR, not something to drop. Dropping it would leave the
+// selector Empty(), and an empty selector means "everything" — so `--zones
+// "$SUBTREE"` with an unset variable would silently export every private key in
+// the keystore instead of failing. "No selector at all" must stay a deliberate
+// act, never something a caller can arrive at by accident.
+func NewKeySelector(exact, subtree []string) (KeySelector, error) {
+	norm := func(in []string, what string) ([]string, error) {
 		out := make([]string, 0, len(in))
 		for _, n := range in {
-			n = strings.TrimSpace(n)
-			if n == "" {
-				continue
+			trimmed := strings.TrimSpace(n)
+			if trimmed == "" {
+				return nil, fmt.Errorf("empty %s selector: to select everything, pass no selector at all", what)
 			}
-			out = append(out, dns.Fqdn(strings.ToLower(n)))
+			out = append(out, dns.Fqdn(strings.ToLower(trimmed)))
 		}
-		return out
+		return out, nil
 	}
-	return KeySelector{Exact: norm(exact), Subtree: norm(subtree)}
+	e, err := norm(exact, "exact")
+	if err != nil {
+		return KeySelector{}, err
+	}
+	s, err := norm(subtree, "subtree")
+	if err != nil {
+		return KeySelector{}, err
+	}
+	return KeySelector{Exact: e, Subtree: s}, nil
 }
 
 // Empty reports whether the selector constrains anything.
@@ -432,6 +446,14 @@ func (kdb *KeyDB) BulkImportDnssec(tx *Tx, keys []BulkDnssecKey, force bool) ([]
 }
 
 // BulkImportSig0 is the SIG(0) counterpart of BulkImportDnssec.
+//
+// It also invalidates the in-memory KeystoreSig0Cache for every key it actually
+// changes. GetSig0Keys is read-through against that cache, and every other
+// SIG(0) write path drops the affected entries — without this a bulk import on
+// a RUNNING daemon would leave it signing UPDATEs with the superseded key until
+// the next restart. (Pre-load runs before anything populates the cache, so this
+// matters only on the live API path.) The plain map delete matches what the
+// other write paths do; the cache has never been mutex-guarded.
 func (kdb *KeyDB) BulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool) ([]BulkKeyDisposition, error) {
 	tx, done, err := kdb.bulkTx(tx, "BulkImportSig0")
 	if err != nil {
@@ -493,8 +515,24 @@ func (kdb *KeyDB) BulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool) ([]Bulk
 			}
 		}
 	}
+	for _, d := range out {
+		if d.Status == BulkStatusImported || d.Status == BulkStatusReplaced {
+			kdb.invalidateSig0Cache(d.Name)
+		}
+	}
 	ok = true
 	return out, nil
+}
+
+// invalidateSig0Cache drops every cached state entry for one zone, mirroring
+// what Sig0KeyMgmt does after add/generate/delete/setstate.
+func (kdb *KeyDB) invalidateSig0Cache(zone string) {
+	if kdb.KeystoreSig0Cache == nil {
+		return
+	}
+	for _, state := range []string{Sig0StateCreated, Sig0StatePublished, Sig0StateActive, Sig0StateRetired} {
+		delete(kdb.KeystoreSig0Cache, zone+"+"+state)
+	}
 }
 
 // BulkImportTsig is the TSIG counterpart. Callers that hold the live TSIG cache

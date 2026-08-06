@@ -76,7 +76,11 @@ func (kdb *KeyDB) TsigKeyMgmt(conf *Config, tx *Tx, kp KeystorePost) (resp *Keys
 		}
 
 	case "bulk-export":
-		keys, err := kdb.BulkExportTsig(tx, NewKeySelector(kp.SelectExact, kp.SelectSubtree))
+		sel, serr := NewKeySelector(kp.SelectExact, kp.SelectSubtree)
+		if serr != nil {
+			return resp, serr
+		}
+		keys, err := kdb.BulkExportTsig(tx, sel)
 		if err != nil {
 			return resp, err
 		}

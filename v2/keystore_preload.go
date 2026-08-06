@@ -43,11 +43,14 @@ func (conf *Config) PreloadKeystore() error {
 		return nil
 	}
 	if conf.Internal.KeyDB == nil {
-		// Reaching here means the operator configured pre-load for an app that
-		// has no keystore at all. Silently ignoring it would leave them waiting
-		// for keys that will never appear.
-		return fmt.Errorf("keystore.preload is configured but this app (%s) has no keystore",
-			Globals.App.Name)
+		// An app with no keystore at all — tdns-imr, tdns-cli. This is normal
+		// when one config file is shared via include:, so it must not be fatal:
+		// refusing to start a daemon over a block it does not use would be a
+		// much worse outcome than the operator not getting keys it never had.
+		// Loud enough to notice if it IS a mistake.
+		lgConfig.Warn("keystore.preload is configured but this app has no keystore; ignoring",
+			"app", Globals.App.Name, "classes", len(dirs))
+		return nil
 	}
 
 	// Deterministic order, and dnssec first: it is the class an operator is
@@ -139,9 +142,20 @@ func (conf *Config) preloadClass(class, dir string, overwrite bool) error {
 	case "tsig":
 		keys := manifest.TsigKeys()
 		for i := range keys {
-			if keys[i].Origin == "" {
-				keys[i].Origin = "preload"
-			}
+			// Restore as api-origin, ALWAYS — never as the config origin the
+			// manifest may record.
+			//
+			// LoadTsigKeys runs immediately after pre-load and ends in
+			// SyncConfigTsigKeys, which deletes every origin=config row that is
+			// not in this host's keys.tsig: (no isReferenced withholding on the
+			// startup path). A key restored as config-origin would therefore be
+			// deleted seconds later, on every boot, right after pre-load logged
+			// it as imported.
+			//
+			// api is also the only other origin insertTsigKeystore accepts.
+			// The config file stays authoritative: if it declares this key,
+			// SyncConfigTsigKeys reconciles against it as usual.
+			keys[i].Origin = "api"
 		}
 		offered = len(keys)
 		if offered == 0 {

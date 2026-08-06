@@ -133,7 +133,13 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		resp.Msg += fmt.Sprintf("\nAdded public key to TrustStore: %s", tsresp.Msg)
 
 	case "bulk-export":
-		keys, err := kdb.BulkExportSig0(tx, NewKeySelector(kp.SelectExact, kp.SelectSubtree))
+		sel, err := NewKeySelector(kp.SelectExact, kp.SelectSubtree)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+		keys, err := kdb.BulkExportSig0(tx, sel)
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = err.Error()
@@ -424,7 +430,13 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		needsRepublish = true
 
 	case "bulk-export":
-		keys, err := kdb.BulkExportDnssec(tx, NewKeySelector(kp.SelectExact, kp.SelectSubtree))
+		sel, err := NewKeySelector(kp.SelectExact, kp.SelectSubtree)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+		keys, err := kdb.BulkExportDnssec(tx, sel)
 		if err != nil {
 			resp.Error = true
 			resp.ErrorMsg = err.Error()

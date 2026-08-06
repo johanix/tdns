@@ -194,7 +194,9 @@ Selection is additive and repeatable:
   label boundaries, so `--zones pq.example.` does not also pick up
   `notpq.example.`.
 - neither — the whole class. That is the whole-keystore backup case; the command
-  says so before it does it.
+  says so before it does it. A *blank* selector value is an error, not the same
+  thing: `--zones "$SUBTREE"` with an unset variable fails rather than quietly
+  exporting every key you have.
 - `--zones .` is the root's subtree, i.e. everything. `--zone .` is the root
   zone alone.
 
@@ -368,6 +370,17 @@ rather than by winning a race.
 Setting a directory is the whole switch — there is no separate enable flag, so
 "enabled, but no directory" cannot be expressed. Classes left unset are not
 touched.
+
+TSIG keys are always restored as `origin=api`, whatever the manifest records.
+A restored key is not owned by this host's config file, and the startup config
+sync deletes `origin=config` rows that the local `keys.tsig:` does not declare —
+so restoring one under its exported origin would delete it moments later. The
+config file stays authoritative: if it declares the key, the sync reconciles
+against it as usual.
+
+If a class directory is configured on an app that has no keystore at all —
+`tdns-imr`, or any daemon sharing a config file via `include:` — pre-load logs a
+warning and carries on rather than refusing to start.
 
 Pre-load is create-if-absent, exactly like `bulk-import` without `--force`.
 On each boot you get one summary line per class:
