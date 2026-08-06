@@ -92,6 +92,49 @@ func TestPreloadNeverOverwritesTheLiveKeystore(t *testing.T) {
 	}
 }
 
+func TestPreloadOverwriteExistingKeysReplaces(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	key := testDnssecKey(t, "pq.dnslab.", 257)
+
+	// Same setup as the test above — export says "active", keystore says
+	// "retired" — but with the knob set the on-disk copy now wins.
+	dir := writeExportDir(t, key)
+	rolled := key
+	rolled.State = DnskeyStateRetired
+	if _, err := kdb.BulkImportDnssec(nil, []BulkDnssecKey{rolled}, false); err != nil {
+		t.Fatalf("seed: %v", err)
+	}
+
+	conf := &Config{}
+	conf.Internal.KeyDB = kdb
+	conf.Keystore.Preload.Dnssec = dir
+	conf.Keystore.Preload.OverwriteExistingKeys = true
+
+	if err := conf.PreloadKeystore(); err != nil {
+		t.Fatalf("PreloadKeystore: %v", err)
+	}
+	got, err := kdb.BulkExportDnssec(nil, KeySelector{})
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(got) != 1 || got[0].State != DnskeyStateActive {
+		t.Fatalf("overwrite-existing-keys must replace the keystore's copy, got %+v", got)
+	}
+
+	// Still idempotent: once the keystore matches, a further boot changes
+	// nothing (and so logs no replacements).
+	if err := conf.PreloadKeystore(); err != nil {
+		t.Fatalf("second PreloadKeystore: %v", err)
+	}
+	got, err = kdb.BulkExportDnssec(nil, KeySelector{})
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(got) != 1 || got[0].State != DnskeyStateActive {
+		t.Fatalf("second pass should be a no-op, got %+v", got)
+	}
+}
+
 func TestPreloadFailsLoudlyOnMissingDirectory(t *testing.T) {
 	conf := &Config{}
 	conf.Internal.KeyDB = newTestKeyDB(t)

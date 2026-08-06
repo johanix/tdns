@@ -145,8 +145,7 @@ cannot mistake it for a successful restore.
 
 `--force` flips conflicts to overwrite. That is the recovery path: it exists
 because sometimes the thing you are restoring *from* is the correct copy and the
-keystore is the wrong one. Pre-load never forces — recovering from files is a
-deliberate, manual act.
+keystore is the wrong one.
 
 An import is all-or-nothing. A single invalid key rolls the whole batch back; a
 partially-restored keystore is the state nobody can reason about.
@@ -182,6 +181,35 @@ material is the keystore winning, which is the designed behaviour. Each one is
 logged individually at WARN, because the operator needs to know their on-disk
 copy is not what is running.
 
+### overwrite-existing-keys
+
+`keystore.preload.overwrite-existing-keys: true` inverts that rule for every
+configured class: an on-disk key that differs replaces the keystore's copy.
+
+It exists for hosts rebuilt from a repo — a training lab master, where the
+committed export *is* the source of truth and the keystore is disposable. That
+case wants a build script with no manual reconcile step in the middle, and
+without this it does not have one.
+
+It is dangerous everywhere else, and in a specific way. The CLI's
+`bulk-import --force` is one shot, aimed, at a moment the operator chose. This
+stays armed on **every restart**, so a stale committed export can silently
+revert a key that was rolled by hand months later — and the restart that does it
+may be unrelated and unattended.
+
+Two mitigations, both deliberate:
+
+- Every replacement is logged at WARN, naming the key and the fields that
+  changed. If this setting ever reverts something, that line is the only place
+  that says so.
+- The setting is announced at WARN **on every boot**, before anything is
+  touched — not only on boots where it happens to change something — so the log
+  always records which mode the host is in.
+
+The alternative for a scripted build, if you would rather not arm it, is to
+delete the keystore file before first start: an empty keystore has nothing to
+conflict with, so pre-load imports everything cleanly.
+
 A directory readable beyond its owner gets a warning, not a refusal. It holds
 private keys, but there are deliberate reasons to relax that (a lab where the
 keys are public on purpose), and refusing to start over a permission bit is
@@ -195,6 +223,9 @@ keystore:
       dnssec:  /etc/tdns/keys/dnssec
       sig0:    /etc/tdns/keys/sig0
       tsig:    /etc/tdns/keys/tsig
+
+      # Optional, DANGEROUS, applies to every class above. See above.
+      overwrite-existing-keys:  false
 ```
 
 The directory is the whole switch: set it and that class is pre-loaded, leave it

@@ -415,13 +415,27 @@ type KeystoreConf struct {
 // it empty and it is not. One knob rather than an enable flag plus a path,
 // which cannot then be set to the invalid combination.
 //
-// Pre-load is always create-if-absent — never force. The running keystore wins
-// over a file that may be arbitrarily stale; recovering FROM the files is a
-// deliberate, manual act (keystore <class> bulk-import --force).
+// Pre-load is create-if-absent by default: the running keystore wins over a
+// file that may be arbitrarily stale.
 type KeystorePreloadConf struct {
 	Dnssec string `yaml:"dnssec" mapstructure:"dnssec"`
 	Sig0   string `yaml:"sig0" mapstructure:"sig0"`
 	Tsig   string `yaml:"tsig" mapstructure:"tsig"`
+
+	// OverwriteExistingKeys inverts the conflict rule for EVERY configured
+	// class: an on-disk key that differs from the keystore's replaces it,
+	// instead of being reported and skipped.
+	//
+	// This exists for hosts that are rebuilt from a repo, where the committed
+	// export is the source of truth and the keystore is disposable — it makes a
+	// full lab build scriptable without a manual reconcile step. It is
+	// dangerous everywhere else, and dangerous in a specific way: unlike the
+	// CLI's one-shot `bulk-import --force`, this stays armed on EVERY restart,
+	// so a stale committed export can silently revert a key that was rolled by
+	// hand months later. Each replacement is logged at WARN, and the setting
+	// itself is announced at WARN on every boot, so the log always says which
+	// mode the host is in.
+	OverwriteExistingKeys bool `yaml:"overwrite-existing-keys" mapstructure:"overwrite-existing-keys"`
 }
 
 // Dirs returns the configured directories keyed by class name, skipping unset

@@ -58,8 +58,18 @@ func (conf *Config) PreloadKeystore() error {
 	}
 	sort.Slice(classes, func(i, j int) bool { return classOrder(classes[i]) < classOrder(classes[j]) })
 
+	overwrite := conf.Keystore.Preload.OverwriteExistingKeys
+	if overwrite {
+		// Announced unconditionally, before anything is touched, so the setting
+		// is visible in the log of every boot -- not only the boots where it
+		// happens to change something.
+		lgConfig.Warn("keystore pre-load: overwrite-existing-keys is SET; on-disk keys will REPLACE differing keystore entries",
+			"classes", classes,
+			"hint", "intended for rebuilt-from-repo hosts; on a host whose keystore is authoritative this can revert a key rolled by hand")
+	}
+
 	for _, class := range classes {
-		if err := conf.preloadClass(class, dirs[class]); err != nil {
+		if err := conf.preloadClass(class, dirs[class], overwrite); err != nil {
 			return fmt.Errorf("keystore.preload.%s: %w", class, err)
 		}
 	}
@@ -77,7 +87,7 @@ func classOrder(class string) int {
 	}
 }
 
-func (conf *Config) preloadClass(class, dir string) error {
+func (conf *Config) preloadClass(class, dir string, overwrite bool) error {
 	info, err := os.Stat(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -109,7 +119,7 @@ func (conf *Config) preloadClass(class, dir string) error {
 		if offered == 0 {
 			break
 		}
-		if dispositions, err = kdb.BulkImportDnssec(nil, keys, false); err != nil {
+		if dispositions, err = kdb.BulkImportDnssec(nil, keys, overwrite); err != nil {
 			return err
 		}
 
@@ -122,7 +132,7 @@ func (conf *Config) preloadClass(class, dir string) error {
 		if offered == 0 {
 			break
 		}
-		if dispositions, err = kdb.BulkImportSig0(nil, keys, false); err != nil {
+		if dispositions, err = kdb.BulkImportSig0(nil, keys, overwrite); err != nil {
 			return err
 		}
 
@@ -137,7 +147,7 @@ func (conf *Config) preloadClass(class, dir string) error {
 		if offered == 0 {
 			break
 		}
-		if dispositions, err = kdb.BulkImportTsig(nil, keys, false); err != nil {
+		if dispositions, err = kdb.BulkImportTsig(nil, keys, overwrite); err != nil {
 			return err
 		}
 
@@ -151,7 +161,7 @@ func (conf *Config) preloadClass(class, dir string) error {
 		return nil
 	}
 
-	imported, unchanged, conflicts := 0, 0, 0
+	imported, unchanged, conflicts, replaced := 0, 0, 0, 0
 	for _, d := range dispositions {
 		switch d.Status {
 		case BulkStatusImported:
@@ -163,10 +173,17 @@ func (conf *Config) preloadClass(class, dir string) error {
 			lgConfig.Warn("keystore pre-load: key differs from the one already in the keystore; KEEPING the keystore's copy",
 				"class", class, "name", d.Name, "keyid", d.Keyid, "differs", d.Detail,
 				"hint", "the on-disk export is stale; re-export, or 'keystore "+class+" bulk-import --force' to overwrite")
+		case BulkStatusReplaced:
+			replaced++
+			// One line per key actually overwritten. This is the destructive
+			// path: if overwrite-existing-keys ever reverts a key that was
+			// rolled by hand, this line is the only place that says so.
+			lgConfig.Warn("keystore pre-load: OVERWROTE a differing key in the keystore (keystore.preload.overwrite-existing-keys is set)",
+				"class", class, "name", d.Name, "keyid", d.Keyid, "differs", d.Detail)
 		}
 	}
 	lgConfig.Info("keystore pre-load complete", "class", class, "dir", dir,
-		"imported", imported, "unchanged", unchanged, "conflicts", conflicts)
+		"imported", imported, "unchanged", unchanged, "conflicts", conflicts, "replaced", replaced)
 	return nil
 }
 
