@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -263,6 +264,45 @@ func TestConvertBindKeyDirIsAllOrNothing(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, KeystoreManifestFile)); err == nil {
 		t.Error("no manifest may be written by a failed run")
+	}
+}
+
+// An unreadable private key is a VALIDATION failure, and must not be reported
+// as a partial conversion: telling the operator the directory may be
+// half-converted when it is untouched sends them hunting for damage that is not
+// there -- the mirror image of the bug that motivated PartialConvertError.
+//
+// Scope, stated honestly: this exercises the phase-1 path. It does NOT prove
+// the touched/untouched distinction inside phase 2, and an earlier version of
+// this test claimed to and did not -- chmod 0000 makes phase 1's own read fail,
+// so phase 2 is never reached, and the test passed with the distinction
+// deliberately broken.
+//
+// That case is now closed by construction rather than by assertion: phase 2 no
+// longer re-reads the private key (it carries the bytes from phase 1), so its
+// first action on any key is a write. There is no read left in phase 2 to fail
+// before something has been touched.
+func TestConvertBindKeyDirValidationFailureIsNotReportedAsPartial(t *testing.T) {
+	dir := t.TempDir()
+	base, _ := writeBindKeyTriple(t, dir, "pq.dnslab.", 257,
+		"DNSKEYState: omnipresent\nKRRSIGState: omnipresent\nDSState: omnipresent\n")
+
+	priv := filepath.Join(dir, base+".private")
+	if err := os.Chmod(priv, 0000); err != nil {
+		t.Skipf("cannot make the private key unreadable: %v", err)
+	}
+	t.Cleanup(func() { os.Chmod(priv, 0600) })
+
+	_, err := ConvertBindKeyDir(dir, BindConvertOptions{Class: "dnssec", Backup: true})
+	if err == nil {
+		t.Fatal("an unreadable private key must fail the run")
+	}
+	var partial *PartialConvertError
+	if errors.As(err, &partial) {
+		t.Fatalf("a validation failure must NOT be reported as partial: %v", err)
+	}
+	if _, serr := os.Stat(filepath.Join(dir, base+".private.orig")); serr == nil {
+		t.Error("no backup should exist after a validation failure")
 	}
 }
 

@@ -172,14 +172,21 @@ func bulkConvertRun(class string) {
 		// by looking at the directory.
 		var partial *tdns.PartialConvertError
 		if errors.As(err, &partial) {
-			fmt.Printf("\nThe failure happened while writing, so this directory is PARTIALLY\n" +
-				"converted: some keys are PEM, others are still in bind format.\n")
+			// MAY have changed, not HAS. The failure happened after writing
+			// began, but which keys got as far as being rewritten depends on
+			// where in the loop it stopped, and claiming more than that is how
+			// the previous version of this message came to be wrong in the
+			// other direction.
+			fmt.Printf("\nThe failure happened after writing began, so this directory MAY be\n" +
+				"partially converted: some keys may now hold PEM while others are\n" +
+				"still in bind format.\n")
 			if len(ds) > 0 {
-				fmt.Printf("Keys planned for conversion in this run:\n")
+				fmt.Printf("Keys this run planned to convert:\n")
 				printConvertDispositions(ds)
 			}
-			fmt.Printf("Each converted key's original is beside it as .private.orig.\n" +
-				"Re-running is safe: already-converted keys are left alone.\n")
+			fmt.Printf("Check the .private files against any .private.orig beside them before\n" +
+				"re-running. Re-running is safe in itself: an already-converted key is\n" +
+				"left alone, and an existing .private.orig is never overwritten.\n")
 		} else {
 			fmt.Printf("Nothing was converted; the directory is unchanged.\n")
 		}

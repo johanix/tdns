@@ -90,13 +90,26 @@ func TestVerifyKeyPairCorrespondenceHandlesSig0Keys(t *testing.T) {
 		return k, pem
 	}
 
+	// checked is asserted, not discarded. VerifyStoredKeyPair returns
+	// (false, nil) for a key it cannot load, so ignoring it lets this test pass
+	// green while verifying nothing at all -- which is precisely the failure it
+	// exists to guard against, since the ZONE-flag bug made every SIG(0) key
+	// fail and a test that never ran would not have noticed.
 	kA, pemA := mk("agent.dnslab.")
-	if _, err := VerifyStoredKeyPair(pemA, &kA.DNSKEY); err != nil {
+	checked, err := VerifyStoredKeyPair(pemA, &kA.DNSKEY)
+	if !checked {
+		t.Fatal("the SIG(0) key must actually have been checked, not skipped as unloadable")
+	}
+	if err != nil {
 		t.Fatalf("a matched SIG(0) pair must verify despite the missing ZONE flag: %v", err)
 	}
 
 	_, pemB := mk("other.dnslab.")
-	if _, err := VerifyStoredKeyPair(pemB, &kA.DNSKEY); err == nil {
+	checked, err = VerifyStoredKeyPair(pemB, &kA.DNSKEY)
+	if !checked {
+		t.Fatal("the swapped SIG(0) key must actually have been checked")
+	}
+	if err == nil {
 		t.Fatal("a swapped SIG(0) pair must be refused")
 	}
 }

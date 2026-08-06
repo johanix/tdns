@@ -88,9 +88,15 @@ type convertPlan struct {
 	privPath string
 	origPath string
 	privPEM  string
-	dnssec   *ManifestDnssecKey
-	sig0     *ManifestSig0Key
-	disp     BindConvertDisposition
+	// origBytes is the bind-format original, read during phase 1. Kept rather
+	// than re-read at backup time: a second read is a second chance to fail,
+	// and it fails in the one place where "did anything change on disk?" is
+	// hardest to answer. It is also a TOCTOU window -- the bytes backed up
+	// would not necessarily be the bytes that were parsed and converted.
+	origBytes []byte
+	dnssec    *ManifestDnssecKey
+	sig0      *ManifestSig0Key
+	disp      BindConvertDisposition
 }
 
 // ConvertBindKeyDir converts every bind9 key in dir and writes the manifest.
@@ -146,28 +152,44 @@ func ConvertBindKeyDir(dir string, opts BindConvertOptions) ([]BindConvertDispos
 	}
 
 	// --- phase 2: write --------------------------------------------------
+	//
+	// touched goes true the moment anything on disk COULD have changed, and
+	// only failures after that point are reported as partial. Being in phase 2
+	// is not itself evidence that a file was written: the first thing this loop
+	// does is a plain read, and a failure there leaves the directory as intact
+	// as any phase-1 refusal. Wrapping every phase-2 error would trade one
+	// false certainty ("nothing was converted") for its mirror image.
+	touched := false
+	fail := func(err error) ([]BindConvertDisposition, error) {
+		if touched {
+			return dispositions, &PartialConvertError{err}
+		}
+		return dispositions, err
+	}
+
 	for _, p := range plans {
 		if opts.Backup {
-			orig, err := os.ReadFile(p.privPath)
-			if err != nil {
-				return dispositions, &PartialConvertError{fmt.Errorf("%s: re-reading the private key to back it up: %v", p.base, err)}
-			}
 			// O_EXCL: never silently replace an existing backup. Phase 1 already
 			// established that the path is free, so reaching this error means
 			// something else is writing into the directory concurrently.
-			if err := writeNewFileExcl(p.origPath, orig, 0600); err != nil {
-				return dispositions, &PartialConvertError{fmt.Errorf("%s: %v", p.base, err)}
+			//
+			// Marked as touched BEFORE the attempt, not after: a write that
+			// fails partway through has still created the file.
+			touched = true
+			if err := writeNewFileExcl(p.origPath, p.origBytes, 0600); err != nil {
+				return fail(fmt.Errorf("%s: %v", p.base, err))
 			}
 		}
 		// Tighten BEFORE writing, not after. os.WriteFile keeps an existing
 		// file's mode, so a .private that arrived at 0644 through a repo or a
 		// tarball would otherwise hold the PKCS#8 PEM at 0644 for the duration
 		// of the write -- a window in which any local user can read it.
+		touched = true
 		if err := os.Chmod(p.privPath, 0600); err != nil {
-			return dispositions, &PartialConvertError{fmt.Errorf("%s: securing the private key before rewriting it: %v", p.base, err)}
+			return fail(fmt.Errorf("%s: securing the private key before rewriting it: %v", p.base, err))
 		}
 		if err := os.WriteFile(p.privPath, []byte(p.privPEM), 0600); err != nil {
-			return dispositions, &PartialConvertError{fmt.Errorf("%s: writing the converted private key: %v", p.base, err)}
+			return fail(fmt.Errorf("%s: writing the converted private key: %v", p.base, err))
 		}
 		if p.dnssec != nil {
 			manifest.UpsertDnssec(*p.dnssec)
@@ -179,7 +201,7 @@ func ConvertBindKeyDir(dir string, opts BindConvertOptions) ([]BindConvertDispos
 
 	if len(plans) > 0 {
 		if err := manifest.Save(dir); err != nil {
-			return dispositions, &PartialConvertError{fmt.Errorf("writing the manifest: %v", err)}
+			return fail(fmt.Errorf("writing the manifest: %v", err))
 		}
 	}
 	return dispositions, nil
@@ -302,6 +324,7 @@ func planBindKeyConversion(dir, base string, manifest *KeystoreManifest, opts Bi
 		return plan, err
 	}
 	plan.privPEM = pkc.PrivateKeyPEM
+	plan.origBytes = privBytes
 
 	if opts.Backup {
 		if _, err := os.Stat(plan.origPath); err == nil {
