@@ -56,6 +56,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 		var dnssecRepublishZone string
 		var dnssecResignZone string
 		var dnssecBulkRepublishZones []string
+		var sig0InvalidateZones []string
 
 		tx, err := kdb.Begin("APIkeystore")
 
@@ -88,17 +89,36 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 						// re-sign. Without it a forced key replacement would
 						// leave the zone's RRSIGs made by the superseded key
 						// until the resigner's next scheduled pass.
+						// Per zone, and re-sign ONLY where the republish
+						// succeeded. Re-signing after a failed republish is
+						// worse than not re-signing at all: the resigner would
+						// run against the stale in-memory signing-key set and
+						// mint a fresh, correctly-dated set of RRSIGs made by
+						// the superseded key — converting a loud "your import
+						// did not take effect" into a zone that looks freshly
+						// signed and is not. Leaving the old RRSIGs in place
+						// keeps the failure visible until the operator acts.
 						for _, z := range dnssecBulkRepublishZones {
 							if rerr := republishSigningKeysForZone(kdb, z); rerr != nil {
 								lgApi.Error("APIkeystore: post-commit signing-keys republish failed after bulk import",
-									"zone", z, "err", rerr)
+									"zone", z, "err", rerr,
+									"consequence", "NOT re-signing this zone; it keeps serving the pre-import key set")
+								continue
 							}
-						}
-						for _, z := range dnssecBulkRepublishZones {
 							triggerResign(conf, z)
 						}
 						if dnssecResignZone != "" {
 							triggerResign(conf, dnssecResignZone)
+						}
+						// SIG(0) bulk import owns no transaction of its own on
+						// this path, so it cannot drop its own cache entries --
+						// the commit that makes the new rows visible is the one
+						// just above. Doing it here closes the window in which a
+						// read-through GetSig0Keys would repopulate the cache
+						// from pre-commit rows and keep signing UPDATEs with the
+						// superseded key until restart.
+						for _, zone := range sig0InvalidateZones {
+							kdb.invalidateSig0Cache(zone)
 						}
 						if tsigCacheDelta != nil {
 							if !tsigMgmt {
@@ -144,6 +164,8 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 					Error:    true,
 					ErrorMsg: err.Error(),
 				}
+			} else if resp != nil && len(resp.BulkSig0InvalidateZones) > 0 {
+				sig0InvalidateZones = resp.BulkSig0InvalidateZones
 			}
 
 		case "dnssec-mgmt":
