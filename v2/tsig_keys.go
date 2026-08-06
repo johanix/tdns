@@ -194,6 +194,33 @@ func (conf *Config) tsigKeyDefined(name string) bool {
 	return name == NOKEY || conf.Internal.TsigKeyStore.Has(name)
 }
 
+// tsigKeyDeclaredInConfig reports whether name appears in this host's keys.tsig.
+//
+// Deliberately NOT conf.Internal.TsigKeyStore.Has(). That store is the RUNTIME
+// cache: loadTsigKeysFromDB fills it from the whole TsigKeystore table, and the
+// dynamic-zone API Add()s into it, so it answers "is this key loaded" -- true
+// for api-origin keys just as much as for config ones. Using it to decide
+// config ownership made an ordinary API-managed key un-importable, reported as
+// a config conflict that force could not clear.
+//
+// conf.Keys.Tsig IS the declaration, so it cannot drift from the YAML.
+//
+// The raw list rather than collectValidConfigTsigKeys: an entry the operator
+// declared but got wrong is still them saying "this name is mine", and
+// answering "not declared" would let an import quietly take a name that the
+// next successful config load will then fight over.
+//
+// Callers must hold confMu; APIkeystore takes it for every tsig-mgmt command.
+func (conf *Config) tsigKeyDeclaredInConfig(name string) bool {
+	want := dns.CanonicalName(name)
+	for _, t := range conf.Keys.Tsig {
+		if dns.CanonicalName(t.Name) == want {
+			return true
+		}
+	}
+	return false
+}
+
 func tsigNameIsReserved(name string) bool {
 	c := dns.CanonicalName(name)
 	return strings.EqualFold(c, dns.CanonicalName(NOKEY)) || strings.EqualFold(c, dns.CanonicalName(BLOCKED))

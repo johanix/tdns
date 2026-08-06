@@ -655,6 +655,17 @@ func (kdb *KeyDB) BulkImportTsig(tx *Tx, keys []BulkTsigKey, force bool, policy 
 		row := tx.QueryRow(bulkSelectTsigSql, name)
 		scanErr := row.Scan(&curAlg, &curSecret, &curOrigin, &curOwner, &curCreator, &curCreated, &curC)
 
+		// A real read failure is handled HERE, before any policy branch. The
+		// switch below also catches it, but the config-ownership check can
+		// `continue` past that switch -- so a failed read on a config-declared
+		// key was reported as an ordinary conflict ("key is declared in
+		// keys.tsig..."), with a nil error for the import as a whole. A database
+		// that cannot be read must not be indistinguishable from a policy
+		// refusal.
+		if scanErr != nil && scanErr != sql.ErrNoRows {
+			return nil, fmt.Errorf("reading TSIG key %s: %v", name, scanErr)
+		}
+
 		if policy.StillInConfig != nil {
 			// The config declares this key, so the config owns it -- whatever the
 			// origin column happens to say, and whether or not a row exists yet.

@@ -89,13 +89,10 @@ func (kdb *KeyDB) TsigKeyMgmt(conf *Config, tx *Tx, kp KeystorePost) (resp *Keys
 		resp.TsigCacheDelta = nil // read-only: nothing to patch in the live cache
 
 	case "bulk-import":
-		// The live TSIG store is built from keys.tsig by LoadTsigKeys and kept in
-		// step by SyncConfigTsigKeys, so on a running daemon "is it in the store
-		// as a config key" is the same question as "is it still in the YAML".
+		// Declaration lookup, not a runtime-cache lookup -- see
+		// tsigKeyDeclaredInConfig for why those are not the same question.
 		dispositions, err := kdb.BulkImportTsig(tx, kp.BulkTsigKeys, kp.Force, TsigBulkPolicy{
-			StillInConfig: func(name string) bool {
-				return conf.Internal.TsigKeyStore != nil && conf.Internal.TsigKeyStore.Has(name)
-			},
+			StillInConfig: conf.tsigKeyDeclaredInConfig,
 		})
 		if err != nil {
 			return resp, err
