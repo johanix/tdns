@@ -933,6 +933,20 @@ func validateDnssecKeyRR(k BulkDnssecKey) error {
 	if name, ok := dns.AlgorithmToString[dnskey.Algorithm]; ok && !strings.EqualFold(name, k.Algorithm) {
 		return fmt.Errorf("DNSKEY algorithm %s does not match the recorded algorithm %s", name, k.Algorithm)
 	}
+	// Everything above is metadata: it would pass just as happily on a manifest
+	// entry that files one zone's public key beside another zone's private key,
+	// and the zone would then publish this DNSKEY while signing with a key
+	// nobody can verify against it.
+	//
+	// Opportunistic by design. A "checked=false" result means this binary
+	// cannot load the algorithm, not that the key is good -- which preserves
+	// the property the whole import path is built on: a key whose algorithm is
+	// not linked still restores, so pre-load remains safe to run before any
+	// zone is bound. On a build that could actually serve the zone, the check
+	// runs.
+	if _, err := VerifyStoredKeyPair(k.PrivateKey, dnskey); err != nil {
+		return err
+	}
 	if err := validKeyState(k.State, dnssecKeyStates); err != nil {
 		return err
 	}
@@ -960,6 +974,13 @@ func validateSig0KeyRR(k BulkSig0Key) error {
 	}
 	if name, ok := dns.AlgorithmToString[key.Algorithm]; ok && !strings.EqualFold(name, k.Algorithm) {
 		return fmt.Errorf("KEY algorithm %s does not match the recorded algorithm %s", name, k.Algorithm)
+	}
+	// Same reasoning as validateDnssecKeyRR: the checks above are all metadata,
+	// and a SIG(0) key that cannot verify against its own public half signs
+	// UPDATEs nobody will accept. dns.KEY embeds DNSKEY, and the signature
+	// maths is identical.
+	if _, err := VerifyStoredKeyPair(k.PrivateKey, &key.DNSKEY); err != nil {
+		return err
 	}
 	if err := validKeyState(k.State, sig0KeyStates); err != nil {
 		return err

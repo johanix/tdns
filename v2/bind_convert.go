@@ -58,6 +58,20 @@ type BindConvertOptions struct {
 	Backup bool
 }
 
+// PartialConvertError marks a failure that happened AFTER writing began.
+//
+// The two-phase design means most failures leave the directory untouched, and
+// the CLI says so -- which is worth saying, because it tells the operator to fix
+// the cause and re-run rather than go looking for a mess. But phase 2 can fail
+// too (a backup write, the PEM write, a chmod, the manifest save), and by then
+// earlier keys have already been rewritten. Claiming "nothing was converted"
+// there would be a confident lie about exactly the state that is hardest to
+// diagnose by looking at the directory.
+type PartialConvertError struct{ Err error }
+
+func (e *PartialConvertError) Error() string { return e.Err.Error() }
+func (e *PartialConvertError) Unwrap() error { return e.Err }
+
 // BindConvertDisposition is one key's outcome, in the order the keys were found.
 type BindConvertDisposition struct {
 	Basename string
@@ -136,23 +150,24 @@ func ConvertBindKeyDir(dir string, opts BindConvertOptions) ([]BindConvertDispos
 		if opts.Backup {
 			orig, err := os.ReadFile(p.privPath)
 			if err != nil {
-				return dispositions, fmt.Errorf("%s: re-reading the private key to back it up: %v", p.base, err)
+				return dispositions, &PartialConvertError{fmt.Errorf("%s: re-reading the private key to back it up: %v", p.base, err)}
 			}
 			// O_EXCL: never silently replace an existing backup. Phase 1 already
 			// established that the path is free, so reaching this error means
 			// something else is writing into the directory concurrently.
 			if err := writeNewFileExcl(p.origPath, orig, 0600); err != nil {
-				return dispositions, fmt.Errorf("%s: %v", p.base, err)
+				return dispositions, &PartialConvertError{fmt.Errorf("%s: %v", p.base, err)}
 			}
 		}
-		// 0600 explicitly rather than inheriting: the file existed already, so
-		// WriteFile keeps its old mode, and dnssec-keygen's 0600 is not
-		// guaranteed to have survived a trip through a repo or a tarball.
-		if err := os.WriteFile(p.privPath, []byte(p.privPEM), 0600); err != nil {
-			return dispositions, fmt.Errorf("%s: writing the converted private key: %v", p.base, err)
-		}
+		// Tighten BEFORE writing, not after. os.WriteFile keeps an existing
+		// file's mode, so a .private that arrived at 0644 through a repo or a
+		// tarball would otherwise hold the PKCS#8 PEM at 0644 for the duration
+		// of the write -- a window in which any local user can read it.
 		if err := os.Chmod(p.privPath, 0600); err != nil {
-			return dispositions, fmt.Errorf("%s: securing the converted private key: %v", p.base, err)
+			return dispositions, &PartialConvertError{fmt.Errorf("%s: securing the private key before rewriting it: %v", p.base, err)}
+		}
+		if err := os.WriteFile(p.privPath, []byte(p.privPEM), 0600); err != nil {
+			return dispositions, &PartialConvertError{fmt.Errorf("%s: writing the converted private key: %v", p.base, err)}
 		}
 		if p.dnssec != nil {
 			manifest.UpsertDnssec(*p.dnssec)
@@ -164,7 +179,7 @@ func ConvertBindKeyDir(dir string, opts BindConvertOptions) ([]BindConvertDispos
 
 	if len(plans) > 0 {
 		if err := manifest.Save(dir); err != nil {
-			return dispositions, fmt.Errorf("writing the manifest: %v", err)
+			return dispositions, &PartialConvertError{fmt.Errorf("writing the manifest: %v", err)}
 		}
 	}
 	return dispositions, nil
@@ -267,8 +282,24 @@ func planBindKeyConversion(dir, base string, manifest *KeystoreManifest, opts Bi
 	if pkc.PrivateKeyPEM == "" {
 		return plan, fmt.Errorf("converting the private key produced no PEM output")
 	}
-	if pkc.KeyId != keyid {
-		return plan, fmt.Errorf("private key belongs to keyid %d, public key to %d", pkc.KeyId, keyid)
+
+	// Prove the two halves belong together, by signing with the private key and
+	// verifying with the published one.
+	//
+	// This replaces a check that compared pkc.KeyId to the keytag -- both of
+	// which PrepareKeyCache derives from the SAME public RR, so it compared the
+	// public key to itself and could never fire. Every other check in this
+	// function is metadata-only for good reasons, which leaves a directory
+	// pairing one zone's .key with another's .private converting and importing
+	// clean, and the zone then publishing one key while signing with another.
+	//
+	// Cheap to do here because the private key has just been parsed anyway.
+	verifyAgainst := dnskey
+	if !isDnskey {
+		verifyAgainst = &keyrr.DNSKEY // dns.KEY embeds it; the maths is identical
+	}
+	if err := VerifyKeyPairCorrespondence(pkc.CS, verifyAgainst); err != nil {
+		return plan, err
 	}
 	plan.privPEM = pkc.PrivateKeyPEM
 

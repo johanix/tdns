@@ -605,20 +605,7 @@ func TestManifestSavedModeIsOwnerOnly(t *testing.T) {
 // signing UPDATEs with the superseded key until the next restart.
 func TestBulkImportSig0InvalidatesTheCache(t *testing.T) {
 	kdb := newTestKeyDB(t)
-	key := BulkSig0Key{
-		Zone: "child.dnslab.", Keyid: 4242, Algorithm: "ED25519", State: Sig0StateActive,
-		PrivateKey: "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIC6yHwqbCmGr+aAPEfQKDIqWBPfdFhy3erXHhdsPqeKT\n-----END PRIVATE KEY-----\n",
-	}
-	// A KEY RR whose keytag matches, so validation passes.
-	rr := &dns.KEY{DNSKEY: dns.DNSKEY{
-		Hdr:       dns.RR_Header{Name: "child.dnslab.", Rrtype: dns.TypeKEY, Class: dns.ClassINET, Ttl: 3600},
-		Flags:     512,
-		Protocol:  3,
-		Algorithm: dns.ED25519,
-		PublicKey: "aIufB25wu/A9nLOZOm7ZlAxkdQyeCqAQcH7wMCg8DVo=",
-	}}
-	key.Keyid = rr.KeyTag()
-	key.KeyRR = rr.String()
+	key := testBulkSig0Key(t, "child.dnslab.")
 
 	// Poison the cache the way a live daemon would have populated it.
 	kdb.KeystoreSig0Cache["child.dnslab.+"+Sig0StateActive] = &Sig0ActiveKeys{}
@@ -631,8 +618,14 @@ func TestBulkImportSig0InvalidatesTheCache(t *testing.T) {
 	}
 }
 
-// testBulkSig0Key builds a SIG(0) key whose KEY RR and keyid agree, so bulk
-// validation passes. Same material as the cache test above.
+// testBulkSig0Key builds a REAL SIG(0) keypair: the private half genuinely
+// belongs to the KEY RR it is filed with.
+//
+// It used to pair a hardcoded PEM with an unrelated hardcoded public key, and
+// only the keytag was made to line up. Every metadata check passed, so the
+// fixture looked fine -- until the correspondence check went in and refused it.
+// A fixture that could not be imported by a correct implementation is not
+// testing what its name says.
 func testBulkSig0Key(t *testing.T, zone string) BulkSig0Key {
 	t.Helper()
 	rr := &dns.KEY{DNSKEY: dns.DNSKEY{
@@ -640,11 +633,18 @@ func testBulkSig0Key(t *testing.T, zone string) BulkSig0Key {
 		Flags:     512,
 		Protocol:  3,
 		Algorithm: dns.ED25519,
-		PublicKey: "aIufB25wu/A9nLOZOm7ZlAxkdQyeCqAQcH7wMCg8DVo=",
 	}}
+	priv, err := rr.Generate(256)
+	if err != nil {
+		t.Fatalf("generating test SIG(0) key: %v", err)
+	}
+	privPEM, err := PrivateKeyToPEM(priv)
+	if err != nil {
+		t.Fatalf("converting test SIG(0) key to PEM: %v", err)
+	}
 	return BulkSig0Key{
 		Zone: dns.Fqdn(zone), Keyid: rr.KeyTag(), Algorithm: "ED25519", State: Sig0StateActive,
-		PrivateKey: "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIC6yHwqbCmGr+aAPEfQKDIqWBPfdFhy3erXHhdsPqeKT\n-----END PRIVATE KEY-----\n",
+		PrivateKey: privPEM,
 		KeyRR:      rr.String(),
 	}
 }
