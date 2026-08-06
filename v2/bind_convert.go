@@ -1,0 +1,429 @@
+/*
+ * Copyright (c) 2026 Johan Stenstam, johani@johani.org
+ *
+ * Turning a directory of bind9-generated keys into one tdns can pre-load.
+ *
+ * Pre-load reads a DIRECTORY, and LoadKeystoreManifest fails outright when the
+ * manifest is absent -- so raw dnssec-keygen output is unloadable even though
+ * the key material itself is perfectly good. Two things are missing: the private
+ * half is in bind's own format rather than PKCS#8 PEM, and there is no manifest
+ * to say which keys are present or what state they are in.
+ *
+ * This fills both gaps offline, with no running daemon, which is the point: the
+ * keys have to be committed to a config repo BEFORE the server that will serve
+ * them exists. Going through the API instead would mean importing into a live
+ * keystore and exporting straight back out again.
+ *
+ * What it does NOT touch is the .key file. tdns's own export format already
+ * stores exactly what bind writes there -- the public RR as zone-file text -- so
+ * the public half is already in its final form.
+ */
+
+package tdns
+
+import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strings"
+
+	"github.com/miekg/dns"
+)
+
+// Outcomes of a single key. Not the Bulk* statuses: those describe what
+// happened to a keystore ROW, these describe what happened to a pair of files.
+const (
+	BindConvertConverted  = "converted"
+	BindConvertAlreadyPEM = "already-pem"
+	BindConvertSkipped    = "skipped"
+)
+
+// BindConvertOptions controls one conversion run.
+type BindConvertOptions struct {
+	// Class is "dnssec" or "sig0" and decides which RR type is accepted. A
+	// directory holding both is normal, so the other class is skipped rather
+	// than treated as an error.
+	Class string
+
+	// DefaultState is used for a key with no .state file. Empty means "refuse
+	// such a key": guessing a state is how a retired key gets published again,
+	// so the operator has to say it out loud.
+	DefaultState string
+
+	// Backup writes the original bind-format private key alongside as
+	// <base>.private.orig before overwriting. On by default in the CLI; the
+	// original is still a private key, so a caller keeping these directories in
+	// version control may not want a second copy of every secret.
+	Backup bool
+}
+
+// BindConvertDisposition is one key's outcome, in the order the keys were found.
+type BindConvertDisposition struct {
+	Basename string
+	Zone     string
+	Keyid    uint16
+	Status   string
+	Detail   string
+}
+
+// convertPlan is one validated key, ready to write. Nothing is written until
+// every key in the directory has produced one of these.
+type convertPlan struct {
+	base     string
+	privPath string
+	origPath string
+	privPEM  string
+	dnssec   *ManifestDnssecKey
+	sig0     *ManifestSig0Key
+	disp     BindConvertDisposition
+}
+
+// ConvertBindKeyDir converts every bind9 key in dir and writes the manifest.
+//
+// Two-phase on purpose: every key is read, parsed and mapped before ANY file is
+// written. A directory half-converted because the nineteenth key was malformed
+// is far worse than one that was refused whole -- the operator cannot tell by
+// looking which halves are which, and the failure arrives when the server tries
+// to start.
+//
+// Re-running is safe. A key whose private half is already PEM is left alone,
+// and the manifest merges rather than replaces, so a directory can be built up
+// over several runs.
+func ConvertBindKeyDir(dir string, opts BindConvertOptions) ([]BindConvertDisposition, error) {
+	if opts.Class != "dnssec" && opts.Class != "sig0" {
+		return nil, fmt.Errorf("unknown key class %q", opts.Class)
+	}
+	if opts.DefaultState != "" {
+		states := dnssecKeyStates
+		if opts.Class == "sig0" {
+			states = sig0KeyStates
+		}
+		if err := validKeyState(opts.DefaultState, states); err != nil {
+			return nil, fmt.Errorf("--state: %v", err)
+		}
+	}
+
+	manifest, err := LoadOrNewKeystoreManifest(dir)
+	if err != nil {
+		return nil, err
+	}
+
+	bases, err := discoverBindKeyBasenames(dir)
+	if err != nil {
+		return nil, err
+	}
+	if len(bases) == 0 {
+		return nil, fmt.Errorf("no bind9 key files (*.key with a matching .private) found in %s", dir)
+	}
+
+	// --- phase 1: validate everything, write nothing ---------------------
+	var plans []convertPlan
+	var dispositions []BindConvertDisposition
+	for _, base := range bases {
+		plan, err := planBindKeyConversion(dir, base, manifest, opts)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %v", base, err)
+		}
+		dispositions = append(dispositions, plan.disp)
+		if plan.disp.Status == BindConvertConverted {
+			plans = append(plans, plan)
+		}
+	}
+
+	// --- phase 2: write --------------------------------------------------
+	for _, p := range plans {
+		if opts.Backup {
+			orig, err := os.ReadFile(p.privPath)
+			if err != nil {
+				return dispositions, fmt.Errorf("%s: re-reading the private key to back it up: %v", p.base, err)
+			}
+			// O_EXCL: never silently replace an existing backup. Phase 1 already
+			// established that the path is free, so reaching this error means
+			// something else is writing into the directory concurrently.
+			if err := writeNewFileExcl(p.origPath, orig, 0600); err != nil {
+				return dispositions, fmt.Errorf("%s: %v", p.base, err)
+			}
+		}
+		// 0600 explicitly rather than inheriting: the file existed already, so
+		// WriteFile keeps its old mode, and dnssec-keygen's 0600 is not
+		// guaranteed to have survived a trip through a repo or a tarball.
+		if err := os.WriteFile(p.privPath, []byte(p.privPEM), 0600); err != nil {
+			return dispositions, fmt.Errorf("%s: writing the converted private key: %v", p.base, err)
+		}
+		if err := os.Chmod(p.privPath, 0600); err != nil {
+			return dispositions, fmt.Errorf("%s: securing the converted private key: %v", p.base, err)
+		}
+		if p.dnssec != nil {
+			manifest.UpsertDnssec(*p.dnssec)
+		}
+		if p.sig0 != nil {
+			manifest.UpsertSig0(*p.sig0)
+		}
+	}
+
+	if len(plans) > 0 {
+		if err := manifest.Save(dir); err != nil {
+			return dispositions, fmt.Errorf("writing the manifest: %v", err)
+		}
+	}
+	return dispositions, nil
+}
+
+// discoverBindKeyBasenames returns the sorted basenames of every .key file that
+// has a matching .private. Sorted so a run is reproducible and its output
+// diffable; .key-anchored so .private.orig files from an earlier run cannot be
+// mistaken for input.
+func discoverBindKeyBasenames(dir string) ([]string, error) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %v", dir, err)
+	}
+	var out []string
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".key") {
+			continue
+		}
+		base := strings.TrimSuffix(e.Name(), ".key")
+		if _, err := os.Stat(filepath.Join(dir, base+".private")); err != nil {
+			continue // a public half with no private half is not ours to convert
+		}
+		out = append(out, base)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func planBindKeyConversion(dir, base string, manifest *KeystoreManifest, opts BindConvertOptions) (convertPlan, error) {
+	plan := convertPlan{
+		base:     base,
+		privPath: filepath.Join(dir, base+".private"),
+		origPath: filepath.Join(dir, base+".private.orig"),
+		disp:     BindConvertDisposition{Basename: base},
+	}
+
+	pubBytes, err := os.ReadFile(filepath.Join(dir, base+".key"))
+	if err != nil {
+		return plan, fmt.Errorf("reading the public key: %v", err)
+	}
+	pubkey := stripZonefileComments(string(pubBytes))
+	rr, err := dns.NewRR(pubkey)
+	if err != nil {
+		return plan, fmt.Errorf("unparsable public key RR: %v", err)
+	}
+
+	// Wrong class for this run is a skip, not a failure: an operator may
+	// reasonably keep DNSSEC and SIG(0) keys in one directory.
+	dnskey, isDnskey := rr.(*dns.DNSKEY)
+	keyrr, isKey := rr.(*dns.KEY)
+	switch {
+	case opts.Class == "dnssec" && !isDnskey:
+		plan.disp.Status, plan.disp.Detail = BindConvertSkipped, "not a DNSKEY"
+		return plan, nil
+	case opts.Class == "sig0" && !isKey:
+		plan.disp.Status, plan.disp.Detail = BindConvertSkipped, "not a KEY"
+		return plan, nil
+	}
+
+	var owner, algName string
+	var keyid, flags uint16
+	if isDnskey {
+		owner, keyid, flags = dnskey.Header().Name, dnskey.KeyTag(), dnskey.Flags
+		algName = dns.AlgorithmToString[dnskey.Algorithm]
+	} else {
+		owner, keyid, flags = keyrr.Header().Name, keyrr.KeyTag(), keyrr.Flags
+		algName = dns.AlgorithmToString[keyrr.Algorithm]
+	}
+	if algName == "" {
+		return plan, fmt.Errorf("unknown DNSSEC algorithm in the public key RR")
+	}
+	plan.disp.Zone, plan.disp.Keyid = owner, keyid
+
+	privBytes, err := os.ReadFile(plan.privPath)
+	if err != nil {
+		return plan, fmt.Errorf("reading the private key: %v", err)
+	}
+
+	// Already converted. Left alone -- but only if the manifest knows about it,
+	// because a PEM key with no manifest entry is what an interrupted earlier
+	// run leaves behind, and reporting that as "nothing to do" would hide it.
+	if IsPEMFormat(string(privBytes)) {
+		if manifestHasKey(manifest, opts.Class, owner, keyid) {
+			plan.disp.Status, plan.disp.Detail = BindConvertAlreadyPEM, "already converted"
+			return plan, nil
+		}
+		return plan, fmt.Errorf("private key is already PKCS#8 PEM but the manifest has no entry for it; " +
+			"an earlier run may have been interrupted -- restore the .private.orig or remove the key and re-export")
+	}
+
+	// Parses the whole bind private-key format, RSA's eight-field variant
+	// included, and hands back PKCS#8 PEM. Note PrivateKeyPEM, never
+	// PrivateKey: the latter is bind's single base64 field, which does not
+	// exist for RSA.
+	pkc, err := PrepareKeyCache(string(privBytes), pubkey)
+	if err != nil {
+		return plan, fmt.Errorf("converting the private key: %v", err)
+	}
+	if pkc.PrivateKeyPEM == "" {
+		return plan, fmt.Errorf("converting the private key produced no PEM output")
+	}
+	if pkc.KeyId != keyid {
+		return plan, fmt.Errorf("private key belongs to keyid %d, public key to %d", pkc.KeyId, keyid)
+	}
+	plan.privPEM = pkc.PrivateKeyPEM
+
+	if opts.Backup {
+		if _, err := os.Stat(plan.origPath); err == nil {
+			return plan, fmt.Errorf("%s already exists; move it aside if you mean to re-convert", plan.origPath)
+		} else if !os.IsNotExist(err) {
+			return plan, fmt.Errorf("checking for %s: %v", plan.origPath, err)
+		}
+	}
+
+	times := ParseBindKeyTimes(privBytes)
+	state, stateTimes, err := resolveBindKeyState(dir, base, flags, opts)
+	if err != nil {
+		return plan, err
+	}
+	if stateTimes != nil {
+		times = *stateTimes
+	}
+
+	published, err := BindTimeToRFC3339(times.Publish)
+	if err != nil {
+		return plan, err
+	}
+	active, err := BindTimeToRFC3339(times.Activate)
+	if err != nil {
+		return plan, err
+	}
+	retired, err := BindTimeToRFC3339(times.Inactive)
+	if err != nil {
+		return plan, err
+	}
+
+	if isDnskey {
+		plan.dnssec = &ManifestDnssecKey{
+			Zone: owner, Keyid: keyid, Flags: flags, Algorithm: algName, State: state,
+			Creator: "bind9", PublishedAt: published, ActiveAt: active, RetiredAt: retired,
+			PrivateFile: base + ".private", PublicFile: base + ".key",
+		}
+	} else {
+		plan.sig0 = &ManifestSig0Key{
+			Zone: owner, Keyid: keyid, Algorithm: algName, State: state, Creator: "bind9",
+			PrivateFile: base + ".private", PublicFile: base + ".key",
+		}
+	}
+	plan.disp.Status = BindConvertConverted
+	plan.disp.Detail = "state " + state
+	return plan, nil
+}
+
+// resolveBindKeyState decides the key's tdns state, preferring the .state file
+// and falling back to the operator's --state.
+//
+// When a .state file is present its timestamps are returned too: for a
+// dnssec-policy zone those are what actually happened, where the .private
+// file's are the schedule that was planned.
+func resolveBindKeyState(dir, base string, flags uint16, opts BindConvertOptions) (string, *BindKeyTimes, error) {
+	statePath := filepath.Join(dir, base+".state")
+	data, err := os.ReadFile(statePath)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			return "", nil, fmt.Errorf("reading %s: %v", statePath, err)
+		}
+		if opts.DefaultState == "" {
+			return "", nil, fmt.Errorf("no .state file and no --state given; " +
+				"a key's state cannot be guessed, and guessing wrong republishes a retired key")
+		}
+		return opts.DefaultState, nil, nil
+	}
+
+	// SIG(0) keys are not KASP-managed, so a .state file beside one is not
+	// something to interpret.
+	if opts.Class == "sig0" {
+		if opts.DefaultState == "" {
+			return "", nil, fmt.Errorf("SIG(0) keys carry no KASP state; --state is required")
+		}
+		return opts.DefaultState, nil, nil
+	}
+
+	st, err := ParseBindKeyState(data)
+	if err != nil {
+		return "", nil, fmt.Errorf("%s: %v", base+".state", err)
+	}
+
+	// The SEP bit in the RR, not the .state file's KSK:/ZSK: booleans. They
+	// should agree; if they do not, one of the two files does not belong to
+	// this key, and silently trusting either is how a ZSK gets judged on the
+	// KSK's signing record.
+	isKSK := flags&0x0001 != 0
+	if st.KSK != isKSK {
+		return "", nil, fmt.Errorf("%s says KSK=%v but the DNSKEY flags (%d) say KSK=%v; "+
+			"the .state file does not match the key", base+".state", st.KSK, flags, isKSK)
+	}
+
+	state, err := BindStateToDnssecState(st, isKSK)
+	if err != nil {
+		return "", nil, fmt.Errorf("%s: %v", base+".state", err)
+	}
+	return state, &BindKeyTimes{
+		Created:  st.Generated,
+		Publish:  st.Published,
+		Activate: st.Active,
+		Inactive: st.Retired,
+		Delete:   st.Removed,
+	}, nil
+}
+
+func manifestHasKey(m *KeystoreManifest, class, zone string, keyid uint16) bool {
+	if class == "sig0" {
+		for _, k := range m.Sig0 {
+			if strings.EqualFold(k.Zone, zone) && k.Keyid == keyid {
+				return true
+			}
+		}
+		return false
+	}
+	for _, k := range m.Dnssec {
+		if strings.EqualFold(k.Zone, zone) && k.Keyid == keyid {
+			return true
+		}
+	}
+	return false
+}
+
+// stripZonefileComments removes the ";" comment lines dnssec-keygen writes above
+// the RR in a .key file. tdns's own exports have none, so the zone parser has
+// never had to cope with them here.
+func stripZonefileComments(s string) string {
+	var out []string
+	for _, line := range strings.Split(s, "\n") {
+		if strings.HasPrefix(strings.TrimSpace(line), ";") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
+}
+
+// writeNewFileExcl writes data to path, refusing to replace an existing file.
+// O_CREATE|O_EXCL makes that refusal atomic rather than a check-then-write race,
+// which matters because the file being protected is an unredacted private key.
+func writeNewFileExcl(path string, data []byte, perm os.FileMode) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		if os.IsExist(err) {
+			return fmt.Errorf("refusing to overwrite existing file %s", path)
+		}
+		return fmt.Errorf("open %s: %v", path, err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return fmt.Errorf("write %s: %v", path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close %s: %v", path, err)
+	}
+	return nil
+}

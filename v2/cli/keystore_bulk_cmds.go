@@ -28,6 +28,9 @@ import (
 var (
 	bulkDest      string
 	bulkSrc       string
+	bulkDir       string
+	bulkState     string
+	bulkNoBackup  bool
 	bulkForce     bool
 	bulkSelExact  []string
 	bulkSelSubtre []string
@@ -97,6 +100,103 @@ recovering a keystore you know to be wrong.`, classLabel(class)),
 	bulkImport.MarkFlagRequired("src")
 
 	parent.AddCommand(bulkExport, bulkImport)
+
+	// TSIG keys have no key files -- the secret travels in the manifest -- so
+	// there is nothing for a file converter to do.
+	if class == "tsig" {
+		return
+	}
+
+	bulkConvert := &cobra.Command{
+		Use:   "bulk-convert",
+		Short: fmt.Sprintf("Convert a directory of bind9 %s keys into one tdns can pre-load", classLabel(class)),
+		Long: fmt.Sprintf(`Convert bind9-generated %s keys in --dir into the form keystore.preload reads.
+
+Two things stand between dnssec-keygen output and a pre-loadable directory: the
+private half is in bind's own format rather than PKCS#8 PEM, and there is no
+manifest, without which pre-load refuses the directory outright.
+
+This rewrites each .private in place as PEM, keeping the original alongside as
+.private.orig, and writes the manifest. The .key files are NOT touched: they
+already hold the public RR in exactly the form tdns exports.
+
+Key state comes from bind's .state file (9.16+, dnssec-policy zones), mapped
+onto tdns's states. A key with no .state file has no state to read, and it is
+not guessed -- pass --state to say which one applies. Guessing wrong is how a
+retired key gets published again.
+
+Runs entirely locally: no daemon, no API, no keystore. That is the point --
+these directories are built and committed before the server that serves them
+exists. Re-running is safe; already-converted keys are left alone.`, classLabel(class)),
+		Run: func(cmd *cobra.Command, args []string) {
+			bulkConvertRun(class)
+		},
+	}
+	bulkConvert.Flags().StringVar(&bulkDir, "dir", "", "Directory of bind9 key files to convert in place")
+	bulkConvert.Flags().StringVar(&bulkState, "state", "",
+		"Key state for keys with no .state file (required only for those)")
+	bulkConvert.Flags().BoolVar(&bulkNoBackup, "no-backup", false,
+		"Do not keep the original bind-format key as .private.orig")
+	bulkConvert.MarkFlagRequired("dir")
+
+	parent.AddCommand(bulkConvert)
+}
+
+func bulkConvertRun(class string) {
+	// The destination holds private keys and is about to hold more of them in a
+	// second form. Same check the export path makes, and for the same reason:
+	// MkdirAll's mode is not involved here at all, so an existing 0755 course
+	// directory would otherwise go unremarked.
+	if mode, leaks, err := tdns.DirLeaksBeyondOwner(bulkDir); err != nil {
+		fmt.Printf("Error: cannot check permissions on %s: %v\n", bulkDir, err)
+		os.Exit(1)
+	} else if leaks {
+		fmt.Printf("WARNING: %s is mode %04o, i.e. readable beyond its owner, and holds\n"+
+			"         private key material. Run 'chmod 700 %s'\n"+
+			"         unless that exposure is intended.\n", bulkDir, mode, bulkDir)
+	}
+
+	ds, err := tdns.ConvertBindKeyDir(bulkDir, tdns.BindConvertOptions{
+		Class:        class,
+		DefaultState: bulkState,
+		Backup:       !bulkNoBackup,
+	})
+	if err != nil {
+		// Nothing was written: the conversion validates the whole directory
+		// before touching a file. Worth saying, so the operator knows they can
+		// fix the cause and re-run rather than hunting for a half-done state.
+		fmt.Printf("Error: %v\n", err)
+		fmt.Printf("Nothing was converted; the directory is unchanged.\n")
+		os.Exit(1)
+	}
+
+	var converted, skipped int
+	var lines []string
+	for _, d := range ds {
+		switch d.Status {
+		case tdns.BindConvertConverted:
+			converted++
+			lines = append(lines, fmt.Sprintf("  %-11s %s keyid %d (%s)",
+				d.Status, d.Zone, d.Keyid, d.Detail))
+		default:
+			skipped++
+			lines = append(lines, fmt.Sprintf("  %-11s %s  (%s)", d.Status, d.Basename, d.Detail))
+		}
+	}
+	sort.Strings(lines)
+	if len(lines) > 0 {
+		fmt.Printf("%s\n", strings.Join(lines, "\n"))
+	}
+	fmt.Printf("Converted %d %s key(s) in %s; %d left alone.\n",
+		converted, classLabel(class), bulkDir, skipped)
+	if converted > 0 {
+		if bulkNoBackup {
+			fmt.Printf("The bind-format originals were NOT kept (--no-backup).\n")
+		} else {
+			fmt.Printf("The bind-format originals are kept as *.private.orig -- still private keys.\n")
+		}
+		fmt.Printf("Point keystore.preload.%s at this directory to load them at startup.\n", class)
+	}
 }
 
 func classLabel(class string) string {
