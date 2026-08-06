@@ -67,7 +67,8 @@ In addition, TDNS-AUTH has a couple of extra features:
 10. Support for a built-in keystore (to store private/public DNSSEC
     and SIG(0) key pairs, plus shared-secret TSIG keys). These are
     used to sign zone data and DNS UPDATE messages, and to
-    authenticate zone transfers and NOTIFY.
+    authenticate zone transfers and NOTIFY. See
+    [The tdns Keystore](keystore.md).
 
 11. Support for a built-in truststore (to store public DNSSEC and 
     SIG(0) keys). These are used to validate child CDS and CSYNC
@@ -111,7 +112,7 @@ In addition, TDNS-AUTH has a couple of extra features:
     must explicitly list the peers it will answer.
 
 17. First-class TSIG (RFC 8945). TSIG keys live in the
-    DB-backed keystore (managed via `tdns-cli` and the REST API)
+    DB-backed [keystore](keystore.md) (managed via `tdns-cli` and the REST API)
     and are referenced by name from peer (`primaries:`,
     `notify:`) and ACL (`allow-notify:`, `downstreams:`) config.
     A primary specified by hostname rather than IP is resolved

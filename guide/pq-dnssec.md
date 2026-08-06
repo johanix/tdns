@@ -50,7 +50,7 @@ distinct place in the source tree:
    cannot be re-registered. Every module that wants PQ support carries a
    `replace github.com/miekg/dns => github.com/johanix/dns <version>`
    directive. Design and rationale:
-   [`docs/2026-05-13-miekg-dns-pluggable-algorithms-proposal.md`](../docs/2026-05-13-miekg-dns-pluggable-algorithms-proposal.md).
+   [`docs/2026-05-13-miekg-dns-pluggable-algorithms-proposal.md`](../docs/2026-05-13-DONE-miekg-dns-pluggable-algorithms-proposal.md).
 
 2. **The `dnssec-algorithms` module** — a separate repository of unified
    Go wrappers, one subpackage per algorithm, each presenting the single
@@ -166,7 +166,7 @@ strength — see [§4](#4-ksk-vs-zsk-suitability).
 (`AlgorithmFacts` in `dnssec-algorithms/registry/registry.go`) alongside
 the codepoint/role decisions, and flow through the generated metadata to
 the server, which reports them to `tdns-cli`. So
-`tdns-cli ... keystore <sig0|dnssec> algorithms` shows each algorithm's
+`tdns-cli ... `[`keystore`](keystore.md)` <sig0|dnssec> algorithms` shows each algorithm's
 key/signature sizes, NIST level, maturity, and description with no local
 configuration. **Signing/validation cost** is the one exception: it is
 machine-dependent, measured per CPU architecture by

@@ -86,6 +86,11 @@ the keystore. Both end up in the same place: the keystore lives in the SQLite
 database named by `db.file`, and there is no separate keystore path to
 configure.
 
+Because it is one opaque database file, backing the keys up or moving them to a
+new host needs its own tooling. See [The tdns Keystore](keystore.md) for the
+full picture, including `bulk-export`/`bulk-import` and the `keystore.preload`
+block that restores exported keys at startup.
+
 ```yaml
 keys:
    tsig:
@@ -100,7 +105,7 @@ Supported algorithms are `hmac-sha1`, `hmac-sha224`, `hmac-sha256`,
 
 Keys declared here are synchronised into the keystore at startup as
 `origin=config` rows, and the in-memory cache is then rebuilt from the
-database. Keys added at runtime are stored with `origin=keystore`:
+database. Keys added at runtime are stored with `origin=api`:
 
 ```console
 $ tdns-cli auth keystore tsig add --name xfr-key-2026. \
