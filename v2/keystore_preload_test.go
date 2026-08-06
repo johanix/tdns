@@ -62,6 +62,52 @@ func TestPreloadKeystoreLoadsBeforeAnythingElse(t *testing.T) {
 	}
 }
 
+// TestPreloadIsAtomicAcrossClasses pins the all-or-nothing promise in
+// PreloadKeystore's doc comment. Each class used to commit on its own, so a
+// dnssec class that loaded followed by a sig0 class that failed left the daemon
+// booting with half the operator's key material in place and an error saying
+// none of it was -- the "pre-load that half worked" the feature exists to
+// prevent, produced by pre-load itself.
+//
+// Ordering matters to the test: classOrder runs dnssec before sig0, so the
+// class that must be rolled back is the one that already succeeded.
+func TestPreloadIsAtomicAcrossClasses(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	key := testDnssecKey(t, "pq.dnslab.", 257)
+	dnssecDir := writeExportDir(t, key)
+
+	// A sig0 directory whose manifest names a key file that is not there. The
+	// failure is deliberately in the LOAD, not the import: it is the shape an
+	// operator actually hits (a half-copied export directory), and it happens
+	// after the dnssec class has already written its rows.
+	sig0Dir := t.TempDir()
+	m := &KeystoreManifest{Version: KeystoreManifestVersion}
+	m.UpsertSig0(ManifestSig0Key{
+		Zone: "pq.dnslab.", Keyid: 4242, Algorithm: "ED25519", State: "active",
+		PrivateFile: "missing.private", PublicFile: "missing.key",
+	})
+	if err := m.Save(sig0Dir); err != nil {
+		t.Fatalf("save sig0 manifest: %v", err)
+	}
+
+	conf := &Config{}
+	conf.Internal.KeyDB = kdb
+	conf.Keystore.Preload.Dnssec = dnssecDir
+	conf.Keystore.Preload.Sig0 = sig0Dir
+
+	if err := conf.PreloadKeystore(); err == nil {
+		t.Fatalf("PreloadKeystore must fail when a class cannot be loaded")
+	}
+
+	got, err := kdb.BulkExportDnssec(nil, KeySelector{})
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("the dnssec class committed despite a later class failing: %+v", got)
+	}
+}
+
 func TestPreloadNeverOverwritesTheLiveKeystore(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	key := testDnssecKey(t, "pq.dnslab.", 257)
@@ -147,7 +193,11 @@ func TestPreloadTsigSurvivesTheStartupConfigSync(t *testing.T) {
 
 	m := &KeystoreManifest{Version: KeystoreManifestVersion}
 	m.UpsertTsig(ManifestTsigKey{
-		Keyname:   "xfr.dnslab.",
+		Keyname: "xfr.dnslab.",
+		// Dotted, because that IS the stored form: insertTsigKeystore and
+		// updateTsigKeystore both write dns.CanonicalName(algorithm), so every
+		// row a real export reads back carries the trailing dot. The fixture
+		// asserts it below rather than leaving it unchecked.
 		Algorithm: "hmac-sha256.",
 		Secret:    "c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0Cg==",
 		Origin:    "config", // what a config-declared key carries when exported
@@ -179,6 +229,82 @@ func TestPreloadTsigSurvivesTheStartupConfigSync(t *testing.T) {
 	}
 	if got[0].Origin != "api" {
 		t.Errorf("pre-load must restore TSIG keys as api-origin, got %q", got[0].Origin)
+	}
+	// The algorithm must land in the keystore's canonical (dotted) form, which
+	// is what every non-bulk writer produces. Asserted rather than assumed: bulk
+	// import used to store this column verbatim, so a manifest whose spelling
+	// differed produced a row that no plain string compare in the tree matched,
+	// and nothing on the pre-load path said a word about it.
+	if got[0].Algorithm != "hmac-sha256." {
+		t.Errorf("pre-loaded TSIG algorithm stored as %q, want %q", got[0].Algorithm, "hmac-sha256.")
+	}
+}
+
+// TestBulkImportTsigCanonicalisesAlgorithm pins the normalisation directly:
+// whichever spelling a manifest carries, the stored row must match what
+// insertTsigKeystore/updateTsigKeystore write, or the two writers produce rows
+// that do not compare equal to each other.
+func TestBulkImportTsigCanonicalisesAlgorithm(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	if _, err := kdb.BulkImportTsig(nil, []BulkTsigKey{{
+		Keyname:   "undotted.dnslab.",
+		Algorithm: "hmac-sha256", // no trailing dot, and mixed-case name below
+		Secret:    "c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0Cg==",
+	}}, false, TsigBulkPolicy{}); err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	got, err := kdb.BulkExportTsig(nil, KeySelector{})
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(got) != 1 || got[0].Algorithm != "hmac-sha256." {
+		t.Fatalf("algorithm not canonicalised on write: %+v", got)
+	}
+
+	// ...and re-importing the same key in EITHER spelling is then unchanged,
+	// not a phantom conflict against the row it just wrote.
+	for _, spelling := range []string{"hmac-sha256", "hmac-sha256."} {
+		ds, err := kdb.BulkImportTsig(nil, []BulkTsigKey{{
+			Keyname:   "undotted.dnslab.",
+			Algorithm: spelling,
+			Secret:    "c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0Cg==",
+		}}, false, TsigBulkPolicy{})
+		if err != nil {
+			t.Fatalf("re-import %q: %v", spelling, err)
+		}
+		if len(ds) != 1 || ds[0].Status != BulkStatusUnchanged {
+			t.Fatalf("re-import of %q: got %+v, want one %q", spelling, ds, BulkStatusUnchanged)
+		}
+	}
+}
+
+// TestBulkImportTsigRejectsUnusableKeyMaterial covers the validation bulk import
+// used to skip entirely: it was the one way into the keystore that did not run
+// validateTsigKeySpec, so a key that could never sign imported clean and failed
+// much later, at signing time, far from the import that caused it.
+func TestBulkImportTsigRejectsUnusableKeyMaterial(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		key  BulkTsigKey
+	}{
+		{"unsupported algorithm", BulkTsigKey{Keyname: "bad.dnslab.", Algorithm: "hmac-md5",
+			Secret: "c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0Cg=="}},
+		{"secret is not base64", BulkTsigKey{Keyname: "bad.dnslab.", Algorithm: "hmac-sha256",
+			Secret: "this is not base64!!"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			kdb := newTestKeyDB(t)
+			if _, err := kdb.BulkImportTsig(nil, []BulkTsigKey{tc.key}, false, TsigBulkPolicy{}); err == nil {
+				t.Fatalf("import must refuse %s", tc.name)
+			}
+			got, err := kdb.BulkExportTsig(nil, KeySelector{})
+			if err != nil {
+				t.Fatalf("export: %v", err)
+			}
+			if len(got) != 0 {
+				t.Fatalf("refused key must not reach the keystore: %+v", got)
+			}
+		})
 	}
 }
 

@@ -304,7 +304,10 @@ func TestBulkImportTsigRoundTrip(t *testing.T) {
 		Secret:    "c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0Cg==",
 		Origin:    "config",
 	}
-	ds, err := kdb.BulkImportTsig(nil, []BulkTsigKey{key}, false)
+	// An empty policy (no StillInConfig predicate) throughout: this case is
+	// about the raw round trip, including that an explicitly-offered origin is
+	// stored as offered. Config ownership is covered separately below.
+	ds, err := kdb.BulkImportTsig(nil, []BulkTsigKey{key}, false, TsigBulkPolicy{})
 	if err != nil {
 		t.Fatalf("import: %v", err)
 	}
@@ -323,13 +326,162 @@ func TestBulkImportTsigRoundTrip(t *testing.T) {
 	// A different secret under the same name is a conflict, not a silent swap.
 	rotated := key
 	rotated.Secret = "ZGlmZmVyZW50LXNlY3JldC1oZXJlLXBsZWFzZQo="
-	ds, err = kdb.BulkImportTsig(nil, []BulkTsigKey{rotated}, false)
+	ds, err = kdb.BulkImportTsig(nil, []BulkTsigKey{rotated}, false, TsigBulkPolicy{})
 	if err != nil {
 		t.Fatalf("conflicting import: %v", err)
 	}
 	if len(ds) != 1 || ds[0].Status != BulkStatusConflict {
 		t.Fatalf("got %+v, want one %q", ds, BulkStatusConflict)
 	}
+
+	// ...and with force it IS replaced. Until this case existed bulkUpdateTsigSql
+	// had no coverage at all: every assertion above lands in the insert branch or
+	// the conflict branch, so the UPDATE could have been syntactically broken and
+	// the suite would still have been green.
+	ds, err = kdb.BulkImportTsig(nil, []BulkTsigKey{rotated}, true, TsigBulkPolicy{})
+	if err != nil {
+		t.Fatalf("forced import: %v", err)
+	}
+	if len(ds) != 1 || ds[0].Status != BulkStatusReplaced {
+		t.Fatalf("got %+v, want one %q", ds, BulkStatusReplaced)
+	}
+	got, err = kdb.BulkExportTsig(nil, KeySelector{})
+	if err != nil {
+		t.Fatalf("export after forced replace: %v", err)
+	}
+	if len(got) != 1 || got[0].Secret != rotated.Secret {
+		t.Fatalf("forced replacement did not reach the row: %+v", got)
+	}
+}
+
+// TestBulkImportTsigDefaultsOriginToApi pins the default origin for an import
+// that does not state one. It used to be "import", which is neither value
+// TsigKeyMgmt accepts: setowner and delete both refuse any origin but api (and
+// config), so such a key was imported, looked fine, and could not afterwards be
+// operated on at all.
+func TestBulkImportTsigDefaultsOriginToApi(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	ds, err := kdb.BulkImportTsig(nil, []BulkTsigKey{{
+		Keyname:   "noorigin.dnslab.",
+		Algorithm: "hmac-sha256",
+		Secret:    "c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0Cg==",
+		// Origin deliberately omitted -- that is the whole point.
+	}}, false, TsigBulkPolicy{})
+	if err != nil {
+		t.Fatalf("import: %v", err)
+	}
+	if len(ds) != 1 || ds[0].Status != BulkStatusImported {
+		t.Fatalf("got %+v, want one %q", ds, BulkStatusImported)
+	}
+
+	got, err := kdb.BulkExportTsig(nil, KeySelector{})
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(got) != 1 || got[0].Origin != "api" {
+		t.Fatalf("an import that states no origin must be stored as api-origin, got %+v", got)
+	}
+}
+
+// TestBulkImportTsigYamlIsTruth covers the config-ownership rule. The test is
+// NOT "is the row marked origin=config" but "is the key still in keys.tsig":
+// SyncConfigTsigKeys deletes every config row the YAML no longer names, so a
+// leftover config row is already condemned and protecting it protects nothing.
+func TestBulkImportTsigYamlIsTruth(t *testing.T) {
+	const (
+		secretA = "c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0Cg=="
+		secretB = "ZGlmZmVyZW50LXNlY3JldC1oZXJlLXBsZWFzZQo="
+	)
+	// Stands in for the live TSIG store on a running daemon.
+	inConfig := func(names ...string) TsigBulkPolicy {
+		set := map[string]bool{}
+		for _, n := range names {
+			set[dns.CanonicalName(n)] = true
+		}
+		return TsigBulkPolicy{StillInConfig: func(name string) bool { return set[dns.CanonicalName(name)] }}
+	}
+
+	// Declared in the YAML: the config owns it, so an import may not replace it
+	// even with force -- force overrides "this differs", not "not yours".
+	t.Run("declared in config: refused", func(t *testing.T) {
+		kdb := newTestKeyDB(t)
+		seed := BulkTsigKey{Keyname: "cfg.dnslab.", Algorithm: "hmac-sha256",
+			Secret: secretA, Origin: "config"}
+		if _, err := kdb.BulkImportTsig(nil, []BulkTsigKey{seed}, false, TsigBulkPolicy{}); err != nil {
+			t.Fatalf("seeding the config row: %v", err)
+		}
+
+		rotated := seed
+		rotated.Secret = secretB
+		ds, err := kdb.BulkImportTsig(nil, []BulkTsigKey{rotated}, true, inConfig("cfg.dnslab."))
+		if err != nil {
+			t.Fatalf("forced import over a config-declared key: %v", err)
+		}
+		if len(ds) != 1 || ds[0].Status != BulkStatusConflict {
+			t.Fatalf("got %+v, want one %q", ds, BulkStatusConflict)
+		}
+		got, err := kdb.BulkExportTsig(nil, KeySelector{})
+		if err != nil {
+			t.Fatalf("export: %v", err)
+		}
+		if len(got) != 1 || got[0].Secret != secretA {
+			t.Fatalf("a config-declared key was modified anyway: %+v", got)
+		}
+	})
+
+	// Same stale origin=config row, but the operator has since removed the key
+	// from keys.tsig. It is no longer config-managed in truth, and the next boot
+	// deletes it regardless, so the import must be allowed through.
+	t.Run("removed from config: allowed, and demoted to api", func(t *testing.T) {
+		kdb := newTestKeyDB(t)
+		seed := BulkTsigKey{Keyname: "orphan.dnslab.", Algorithm: "hmac-sha256",
+			Secret: secretA, Origin: "config"}
+		if _, err := kdb.BulkImportTsig(nil, []BulkTsigKey{seed}, false, TsigBulkPolicy{}); err != nil {
+			t.Fatalf("seeding the orphaned config row: %v", err)
+		}
+
+		rotated := seed
+		rotated.Secret = secretB
+		ds, err := kdb.BulkImportTsig(nil, []BulkTsigKey{rotated}, true, inConfig( /* nothing declared */ ))
+		if err != nil {
+			t.Fatalf("forced import over an orphaned config row: %v", err)
+		}
+		if len(ds) != 1 || ds[0].Status != BulkStatusReplaced {
+			t.Fatalf("got %+v, want one %q", ds, BulkStatusReplaced)
+		}
+		got, err := kdb.BulkExportTsig(nil, KeySelector{})
+		if err != nil {
+			t.Fatalf("export: %v", err)
+		}
+		// Demoted: claiming config origin for a key keys.tsig does not name is
+		// false, and self-deleting at the next SyncConfigTsigKeys.
+		if len(got) != 1 || got[0].Secret != secretB || got[0].Origin != "api" {
+			t.Fatalf("orphan should be replaced and stored as api-origin: %+v", got)
+		}
+	})
+
+	// Minting a fresh row that claims config origin for a key the YAML does not
+	// declare: allowed as a key, but stored as api, never as config.
+	t.Run("undeclared new key is stored as api", func(t *testing.T) {
+		kdb := newTestKeyDB(t)
+		ds, err := kdb.BulkImportTsig(nil, []BulkTsigKey{{
+			Keyname: "minted.dnslab.", Algorithm: "hmac-sha256",
+			Secret: secretA, Origin: "config",
+		}}, false, inConfig())
+		if err != nil {
+			t.Fatalf("import: %v", err)
+		}
+		if len(ds) != 1 || ds[0].Status != BulkStatusImported {
+			t.Fatalf("got %+v, want one %q", ds, BulkStatusImported)
+		}
+		got, err := kdb.BulkExportTsig(nil, KeySelector{})
+		if err != nil {
+			t.Fatalf("export: %v", err)
+		}
+		if len(got) != 1 || got[0].Origin != "api" {
+			t.Fatalf("an undeclared key must not be stored as config-origin: %+v", got)
+		}
+	})
 }
 
 // --- manifest ----------------------------------------------------------
