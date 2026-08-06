@@ -2,8 +2,13 @@ package tdns
 
 import (
 	"crypto"
+	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/pem"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -108,5 +113,130 @@ func TestPrivateKeyCacheFromDBAcceptsLegacyBareBase64(t *testing.T) {
 	}
 	if _, ok := pkc.K.(crypto.Signer); !ok {
 		t.Fatalf("legacy key did not come back usable: %T", pkc.K)
+	}
+}
+
+// --- registered (non-built-in) algorithm coverage -----------------------
+
+// orphanedAlg is a registered algorithm whose BIND private-key parser always
+// fails. That is precisely what a renumbered codepoint looks like from the
+// keystore's side: the stored PEM is fine, but anything that re-parses it by
+// dispatching on the algorithm number cannot reconstruct the key.
+//
+// Everything else is ed25519 underneath, so the key material is real and the
+// PKCS#8 encoding goes through the stdlib marshaller.
+type orphanedAlg struct{}
+
+func (orphanedAlg) Name() string      { return testOrphanAlgName }
+func (orphanedAlg) Hash() crypto.Hash { return 0 }
+
+func (orphanedAlg) Generate(bits int) (crypto.PrivateKey, error) {
+	_, priv, err := ed25519.GenerateKey(rand.Reader)
+	return priv, err
+}
+
+func (orphanedAlg) PublicKeyFromWire(keybuf []byte) (crypto.PublicKey, error) {
+	if len(keybuf) != ed25519.PublicKeySize {
+		return nil, fmt.Errorf("bad public key size %d", len(keybuf))
+	}
+	return ed25519.PublicKey(keybuf), nil
+}
+
+func (orphanedAlg) PublicKeyToWire(pub crypto.PublicKey) ([]byte, error) {
+	k, ok := pub.(ed25519.PublicKey)
+	if !ok {
+		return nil, fmt.Errorf("not an ed25519 public key: %T", pub)
+	}
+	return k, nil
+}
+
+// ReadPrivateKey is the orphaned half: the codepoint no longer resolves to a
+// usable parser. This is the failure the fix must not depend on.
+func (orphanedAlg) ReadPrivateKey(map[string]string) (crypto.PrivateKey, error) {
+	return nil, fmt.Errorf("dns: bad private key")
+}
+
+func (orphanedAlg) PrivateKeyToString(priv crypto.PrivateKey) (string, error) {
+	k, ok := priv.(ed25519.PrivateKey)
+	if !ok {
+		return "", fmt.Errorf("not an ed25519 private key: %T", priv)
+	}
+	return "PrivateKey: " + base64.StdEncoding.EncodeToString(k.Seed()) + "\n", nil
+}
+
+// SignaturePostProcess is pass-through, as it is for ED25519.
+func (orphanedAlg) SignaturePostProcess(sig []byte) ([]byte, error) { return sig, nil }
+
+func (orphanedAlg) Verify(pub crypto.PublicKey, hashed, sig []byte) error {
+	k, ok := pub.(ed25519.PublicKey)
+	if !ok {
+		return fmt.Errorf("not an ed25519 public key: %T", pub)
+	}
+	if !ed25519.Verify(k, hashed, sig) {
+		return dns.ErrSig
+	}
+	return nil
+}
+
+const (
+	// 253 is private use, so it cannot collide with a real assignment.
+	testOrphanAlgCode = 253
+	testOrphanAlgName = "TESTORPHAN253"
+)
+
+// TestPrivateKeyCacheFromDBHandlesRegisteredAlgorithm is the test that actually
+// covers the bug this change was written for. The other cases here use
+// built-in algorithms, whose BIND round trip works -- so they would pass with
+// or without the fix. This one uses a REGISTERED algorithm whose BIND parser
+// fails, which is what a renumbered codepoint leaves behind, and asserts both
+// halves: the old route breaks, the new one does not.
+func TestPrivateKeyCacheFromDBHandlesRegisteredAlgorithm(t *testing.T) {
+	if err := dns.RegisterAlgorithm(testOrphanAlgCode, orphanedAlg{}); err != nil &&
+		!errors.Is(err, dns.ErrAlgRegistered) {
+		t.Fatalf("registering test algorithm: %v", err)
+	}
+
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	der, err := x509.MarshalPKCS8PrivateKey(priv)
+	if err != nil {
+		t.Fatalf("marshal PKCS#8: %v", err)
+	}
+	privPEM := string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
+
+	rr := &dns.DNSKEY{
+		Hdr:       dns.RR_Header{Name: "orphan.example.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags:     257,
+		Protocol:  3,
+		Algorithm: testOrphanAlgCode,
+		PublicKey: base64.StdEncoding.EncodeToString(pub),
+	}
+	keyrr := rr.String()
+
+	// The fix: straight from PEM, no codepoint-dispatched re-parse.
+	pkc, alg, err := PrivateKeyCacheFromDB(privPEM, testOrphanAlgName, keyrr)
+	if err != nil {
+		t.Fatalf("PrivateKeyCacheFromDB must read a registered algorithm's stored PEM: %v", err)
+	}
+	if alg != testOrphanAlgCode {
+		t.Errorf("algorithm = %d, want %d", alg, testOrphanAlgCode)
+	}
+	if pkc.CS == nil {
+		t.Fatal("no crypto.Signer produced")
+	}
+	if got, ok := pkc.CS.Public().(ed25519.PublicKey); !ok || !got.Equal(pub) {
+		t.Error("the signer does not carry the key that was stored")
+	}
+
+	// And the shape of the old route, to show this test would have caught it:
+	// ParsePrivateKeyFromDB hands back BIND format, and re-parsing that
+	// dispatches on the codepoint -- which is exactly what no longer works.
+	if _, _, bindFormat, perr := ParsePrivateKeyFromDB(privPEM, testOrphanAlgName, keyrr); perr == nil {
+		if _, cerr := PrepareKeyCache(bindFormat, keyrr); cerr == nil {
+			t.Error("expected the BIND re-parse route to fail for an orphaned codepoint; " +
+				"if this now succeeds the regression this test pins has changed shape")
+		}
 	}
 }
