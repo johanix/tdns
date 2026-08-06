@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -460,6 +461,39 @@ func TestBulkImportTsigYamlIsTruth(t *testing.T) {
 		}
 	})
 
+	// The predicate must answer "declared in keys.tsig", NOT "present in the
+	// runtime TSIG store". Those differ: the store is loaded from the whole
+	// TsigKeystore table and the dynamic-zone API Add()s into it, so it holds
+	// api-origin keys too. Using it made an ordinary API-managed key
+	// un-importable, reported as a config conflict that force could not clear.
+	t.Run("api-managed key present at runtime but not declared", func(t *testing.T) {
+		kdb := newTestKeyDB(t)
+		api := BulkTsigKey{Keyname: "apikey.dnslab.", Algorithm: "hmac-sha256",
+			Secret: secretA, Origin: "api"}
+		if _, err := kdb.BulkImportTsig(nil, []BulkTsigKey{api}, false, TsigBulkPolicy{}); err != nil {
+			t.Fatalf("seeding the api-origin key: %v", err)
+		}
+
+		// The runtime store holds it -- as it would on a live daemon -- but
+		// keys.tsig does not declare it, so the import must go through.
+		conf := &Config{}
+		conf.Internal.TsigKeyStore = NewTsigKeyStore()
+		conf.Internal.TsigKeyStore.Add(TsigDetails{
+			Name: "apikey.dnslab.", Algorithm: "hmac-sha256", Secret: secretA,
+		})
+
+		rotated := api
+		rotated.Secret = secretB
+		ds, err := kdb.BulkImportTsig(nil, []BulkTsigKey{rotated}, true,
+			TsigBulkPolicy{StillInConfig: conf.tsigKeyDeclaredInConfig})
+		if err != nil {
+			t.Fatalf("import of an api-managed key: %v", err)
+		}
+		if len(ds) != 1 || ds[0].Status != BulkStatusReplaced {
+			t.Fatalf("got %+v, want one %q -- an api key is not config-owned", ds, BulkStatusReplaced)
+		}
+	})
+
 	// Minting a fresh row that claims config origin for a key the YAML does not
 	// declare: allowed as a key, but stored as api, never as config.
 	t.Run("undeclared new key is stored as api", func(t *testing.T) {
@@ -595,4 +629,133 @@ func TestBulkImportSig0InvalidatesTheCache(t *testing.T) {
 	if _, stale := kdb.KeystoreSig0Cache["child.dnslab.+"+Sig0StateActive]; stale {
 		t.Error("bulk import must drop the cached SIG(0) keys for a zone it changed")
 	}
+}
+
+// testBulkSig0Key builds a SIG(0) key whose KEY RR and keyid agree, so bulk
+// validation passes. Same material as the cache test above.
+func testBulkSig0Key(t *testing.T, zone string) BulkSig0Key {
+	t.Helper()
+	rr := &dns.KEY{DNSKEY: dns.DNSKEY{
+		Hdr:       dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags:     512,
+		Protocol:  3,
+		Algorithm: dns.ED25519,
+		PublicKey: "aIufB25wu/A9nLOZOm7ZlAxkdQyeCqAQcH7wMCg8DVo=",
+	}}
+	return BulkSig0Key{
+		Zone: dns.Fqdn(zone), Keyid: rr.KeyTag(), Algorithm: "ED25519", State: Sig0StateActive,
+		PrivateKey: "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIC6yHwqbCmGr+aAPEfQKDIqWBPfdFhy3erXHhdsPqeKT\n-----END PRIVATE KEY-----\n",
+		KeyRR:      rr.String(),
+	}
+}
+
+// trustStoreEntry reads one Sig0TrustStore row, or reports absence.
+//
+// Keyed off the map key rather than the struct: the truststore "list" handler
+// encodes the keyid into the map key ("<name>::<keyid>") and leaves the Keyid
+// FIELD unset, so matching on k.Keyid silently compares against zero.
+func trustStoreEntry(t *testing.T, kdb *KeyDB, name string, keyid uint16) (Sig0Key, bool) {
+	t.Helper()
+	resp, err := kdb.Sig0TrustMgmt(nil, TruststorePost{Command: "truststore", SubCommand: "list"})
+	if err != nil {
+		t.Fatalf("truststore list: %v", err)
+	}
+	k, ok := resp.ChildSig0keys[fmt.Sprintf("%s::%d", dns.Fqdn(name), keyid)]
+	return k, ok
+}
+
+// TestSig0BulkImportSyncsTheTrustStore pins the invariant that "add" and
+// "generate" already hold: a SIG(0) key tdns holds the private half of is one it
+// must also be willing to VERIFY. bulk-import wrote Sig0KeyStore alone, so a
+// restored key could sign and not verify -- and after a forced replace the
+// TrustStore kept the SUPERSEDED public key, which is worse than absent.
+func TestSig0BulkImportSyncsTheTrustStore(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	key := testBulkSig0Key(t, "child.dnslab.")
+
+	resp, err := kdb.Sig0KeyMgmt(nil, KeystorePost{
+		Command: "sig0-mgmt", SubCommand: "bulk-import",
+		BulkSig0Keys: []BulkSig0Key{key},
+	})
+	if err != nil {
+		t.Fatalf("bulk-import: %v", err)
+	}
+	if len(resp.BulkDispositions) != 1 || resp.BulkDispositions[0].Status != BulkStatusImported {
+		t.Fatalf("got %+v, want one %q", resp.BulkDispositions, BulkStatusImported)
+	}
+
+	got, found := trustStoreEntry(t, kdb, key.Zone, key.Keyid)
+	if !found {
+		t.Fatalf("bulk-import must mirror the public half into the TrustStore")
+	}
+	if !got.Validated || !got.Trusted {
+		t.Errorf("a key we hold the private half of must be trusted, got validated=%v trusted=%v",
+			got.Validated, got.Trusted)
+	}
+
+	// A key that was NOT changed must not be touched: an unchanged disposition
+	// leaves the keystore alone, so it must leave the TrustStore alone too.
+	resp, err = kdb.Sig0KeyMgmt(nil, KeystorePost{
+		Command: "sig0-mgmt", SubCommand: "bulk-import",
+		BulkSig0Keys: []BulkSig0Key{key},
+	})
+	if err != nil {
+		t.Fatalf("re-import: %v", err)
+	}
+	if resp.BulkDispositions[0].Status != BulkStatusUnchanged {
+		t.Fatalf("re-import: got %+v, want %q", resp.BulkDispositions, BulkStatusUnchanged)
+	}
+}
+
+// TestSig0KeyMgmtBulkImportHandsBackTheCacheDelta covers BOTH commit owners.
+// The invalidation cannot happen where the rows are written -- the commit that
+// makes them visible has not happened yet -- so who does it depends on who
+// commits, and neither path may drop it.
+func TestSig0KeyMgmtBulkImportHandsBackTheCacheDelta(t *testing.T) {
+	key := testBulkSig0Key(t, "child.dnslab.")
+	cacheKey := "child.dnslab.+" + Sig0StateActive
+
+	t.Run("local tx: invalidated after its own commit", func(t *testing.T) {
+		kdb := newTestKeyDB(t)
+		kdb.KeystoreSig0Cache[cacheKey] = &Sig0ActiveKeys{}
+
+		if _, err := kdb.Sig0KeyMgmt(nil, KeystorePost{
+			Command: "sig0-mgmt", SubCommand: "bulk-import",
+			BulkSig0Keys: []BulkSig0Key{key},
+		}); err != nil {
+			t.Fatalf("bulk-import: %v", err)
+		}
+		if _, stale := kdb.KeystoreSig0Cache[cacheKey]; stale {
+			t.Error("the local-tx path must drop the cached SIG(0) keys after committing")
+		}
+	})
+
+	t.Run("external tx: delegated to the caller", func(t *testing.T) {
+		kdb := newTestKeyDB(t)
+		kdb.KeystoreSig0Cache[cacheKey] = &Sig0ActiveKeys{}
+
+		tx, err := kdb.Begin("test")
+		if err != nil {
+			t.Fatalf("begin: %v", err)
+		}
+		resp, err := kdb.Sig0KeyMgmt(tx, KeystorePost{
+			Command: "sig0-mgmt", SubCommand: "bulk-import",
+			BulkSig0Keys: []BulkSig0Key{key},
+		})
+		if err != nil {
+			t.Fatalf("bulk-import: %v", err)
+		}
+		// Still cached: the caller has not committed, so invalidating now would
+		// let a read-through GetSig0Keys repopulate from pre-commit rows.
+		if _, present := kdb.KeystoreSig0Cache[cacheKey]; !present {
+			t.Error("must NOT invalidate before the owning transaction commits")
+		}
+		if len(resp.BulkSig0InvalidateZones) != 1 || resp.BulkSig0InvalidateZones[0] != "child.dnslab." {
+			t.Fatalf("the caller needs the zone list to act on after ITS commit, got %+v",
+				resp.BulkSig0InvalidateZones)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit: %v", err)
+		}
+	})
 }
