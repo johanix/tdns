@@ -525,6 +525,28 @@ dynamiczones:
 db:
    file:  /var/lib/tdns/tdns-auth.db
 
+# The keystore lives inside the db above, which is a poor home for key material
+# that has to outlive the machine: it cannot be reviewed, diffed or committed,
+# and losing it loses every key for every zone this server signs.
+#
+# 'keystore <class> bulk-export --dest DIR' writes a selected subset out as
+# BIND-convention key files plus a manifest; naming that directory here restores
+# it at every startup. The load happens BEFORE zones are parsed, so a signed zone
+# finds its keys already present and adopts them instead of minting replacements
+# that no parent's DS will match.
+#
+# Setting a directory is the whole switch — there is no separate enable flag.
+# Pre-load is always create-if-absent: a key already in the keystore is never
+# overwritten from disk (a stale export would otherwise silently un-roll a rolled
+# key on every restart). Conflicts are logged at WARN; to overwrite deliberately,
+# use 'keystore <class> bulk-import --force'.
+#
+# keystore:
+#    preload:
+#       dnssec:  /etc/tdns/keys/dnssec
+#       sig0:    /etc/tdns/keys/sig0
+#       tsig:    /etc/tdns/keys/tsig
+
 log:
    file:   /var/log/axfr.net/tdns-auth.log
 

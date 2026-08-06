@@ -143,6 +143,14 @@ func (conf *Config) MainInit(ctx context.Context, defaultcfg string) error {
 	default:
 		lgConfig.Info("not initializing KeyDB", "app", Globals.App.Name, "mode", AppTypeToString[Globals.App.Type])
 	}
+	// Restore exported key material BEFORE anything consumes the keystore: ahead
+	// of LoadTsigKeys so the TSIG reconcile sees the restored rows, and well
+	// ahead of ParseZones so a signed zone adopts its real keys instead of
+	// minting replacements the parent's DS will not match. Fatal on error — a
+	// half-completed pre-load is the state this is meant to rule out.
+	if err := conf.PreloadKeystore(); err != nil {
+		return fmt.Errorf("error pre-loading keystore: %w", err)
+	}
 	// Build the replication TSIG store before zones are parsed so primary/notify/ACL
 	// key names validate against it. Bad keys.tsig entries are non-fatal (skipped).
 	if err := conf.LoadTsigKeys(); err != nil {

@@ -59,6 +59,7 @@ type Config struct {
 	Peers      map[string]PeerDef `yaml:"peers" mapstructure:"peers"`
 	Dnssec     DnssecConf         `yaml:"dnssec" mapstructure:"dnssec"`
 	Keys       KeyConf            `yaml:"keys" mapstructure:"keys"`
+	Keystore   KeystoreConf       `yaml:"keystore" mapstructure:"keystore"`
 	Db         DbConf
 	Registrars map[string][]string
 	Log        LogConf
@@ -396,6 +397,43 @@ type ApiServerAppConf struct {
 
 type DbConf struct {
 	File string // `validate:"required"`
+}
+
+// KeystoreConf is the keystore: block. Today it carries only pre-load, but the
+// keystore has other deployment-wide knobs coming, so it is a block rather than
+// a top-level key.
+type KeystoreConf struct {
+	Preload KeystorePreloadConf `yaml:"preload" mapstructure:"preload"`
+}
+
+// KeystorePreloadConf names, per key class, a directory of exported keys to
+// load into the keystore at startup — before any zone is parsed, so a signed
+// zone finds its keys already present and adopts them instead of minting new
+// ones (EnsureActiveDnssecKeys).
+//
+// A directory is the whole switch: set it and that class is pre-loaded, leave
+// it empty and it is not. One knob rather than an enable flag plus a path,
+// which cannot then be set to the invalid combination.
+//
+// Pre-load is always create-if-absent — never force. The running keystore wins
+// over a file that may be arbitrarily stale; recovering FROM the files is a
+// deliberate, manual act (keystore <class> bulk-import --force).
+type KeystorePreloadConf struct {
+	Dnssec string `yaml:"dnssec" mapstructure:"dnssec"`
+	Sig0   string `yaml:"sig0" mapstructure:"sig0"`
+	Tsig   string `yaml:"tsig" mapstructure:"tsig"`
+}
+
+// Dirs returns the configured directories keyed by class name, skipping unset
+// ones, so callers can iterate without repeating the field list.
+func (k KeystorePreloadConf) Dirs() map[string]string {
+	out := map[string]string{}
+	for class, dir := range map[string]string{"dnssec": k.Dnssec, "sig0": k.Sig0, "tsig": k.Tsig} {
+		if strings.TrimSpace(dir) != "" {
+			out[class] = strings.TrimSpace(dir)
+		}
+	}
+	return out
 }
 
 // CatalogConf defines configuration for catalog zone support (RFC 9432)
