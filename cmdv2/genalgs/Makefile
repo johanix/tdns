@@ -4,19 +4,32 @@
 PROG := tdns-genalgs
 GO   ?= go
 
-# $(PROG) is .PHONY on purpose. As a file target with no prerequisites it was
-# only ever built when MISSING, so an existing tdns-genalgs was treated as
-# up to date no matter how old it was -- which is how hosts ended up
-# regenerating months-old build config from a stale generator long after the
-# sources were fixed, silently. Listing the .go sources instead would need
-# $(wildcard ...), which is GNU-make-only and unavailable in NetBSD bmake.
-# Deferring to `go build` every time is correct and nearly free: its build
-# cache makes a no-op rebuild a fraction of a second.
-.PHONY: all clean $(PROG)
+# Sources are listed explicitly rather than gathered with $(wildcard ...),
+# which is a GNU make function and expands to nothing under NetBSD bmake.
+# Keep this list in step with the .go files here (test files excluded: they
+# are not inputs to the binary).
+SRCS := env.go main.go registry.go
+
+# $(PROG) must NOT be .PHONY, and the prerequisites above are the reason.
+#
+# Without prerequisites it was only ever built when MISSING, so a months-old
+# generator counted as up to date and silently emitted stale build config.
+# Making it .PHONY fixed that but overshot: `go build -o` rewrites the output
+# file on every run, so the binary's mtime always moved, which made the
+# "generated files are current" test in utils/Makefile.common
+# ([ ! $(GENALGS) -nt registered_algs.go ]) fail every time. Every build in
+# every app directory then regenerated -- and, worse, needed the
+# dnssec-algorithms checkout present, so a host that built fine from current
+# generated files would start failing if that path moved.
+#
+# With real prerequisites the binary is relinked only when its sources change,
+# its mtime is stable, and that test does what it was written to do. The
+# always-recurse behaviour lives in Makefile.common, where it belongs.
+.PHONY: all clean
 
 all: $(PROG)
 
-$(PROG):
+$(PROG): $(SRCS)
 	$(GO) build -o $(PROG) .
 
 clean:

@@ -5,8 +5,11 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -173,5 +176,91 @@ func TestDnssecImportRSACarriesPEM(t *testing.T) {
 	}
 	if _, ok := back.(crypto.Signer); !ok {
 		t.Fatalf("round-tripped RSA key is not usable: %T", back)
+	}
+}
+
+// TestReconstructSigningKeyRejectsMismatchedKeyType covers the guard that used
+// to sit behind the two branches that actually run: a SIG(0) cache offered to
+// the DNSSEC import (or the reverse) must be refused, not stored in the wrong
+// table under a zero-valued RR.
+func TestReconstructSigningKeyRejectsMismatchedKeyType(t *testing.T) {
+	k := &dns.DNSKEY{
+		Hdr:       dns.RR_Header{Name: "example.", Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags:     257,
+		Protocol:  3,
+		Algorithm: dns.ED25519,
+	}
+	priv, err := k.Generate(256)
+	if err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	pem, err := PrivateKeyToPEM(priv)
+	if err != nil {
+		t.Fatalf("to PEM: %v", err)
+	}
+
+	// A SIG(0) cache, as it would arrive over the API: K is json:"-" so it is
+	// nil, and the usable material is in PrivateKeyPEM.
+	sig0Cache := &PrivateKeyCache{
+		KeyType:       dns.TypeKEY,
+		Algorithm:     dns.ED25519,
+		PrivateKeyPEM: pem,
+	}
+	if _, err := reconstructSigningKey(sig0Cache, k.String(), dns.TypeDNSKEY); err == nil {
+		t.Error("a TypeKEY cache must be refused by the DNSSEC import path")
+	}
+
+	// The matching type still works.
+	dnssecCache := &PrivateKeyCache{
+		KeyType:       dns.TypeDNSKEY,
+		Algorithm:     dns.ED25519,
+		PrivateKeyPEM: pem,
+	}
+	if _, err := reconstructSigningKey(dnssecCache, k.String(), dns.TypeDNSKEY); err != nil {
+		t.Errorf("a matching cache must still be accepted: %v", err)
+	}
+}
+
+// TestAPIkeystoreRejectsMalformedJSON covers the decode-failure path added with
+// the import fix. The handler used to log a decode error and carry on, which is
+// how a half-decoded PrivateKeyCache reached the PKCS#8 marshaller in the first
+// place. It must now answer 400, in JSON (every other exit from this handler is
+// JSON, so a text/plain body would break any client that decodes
+// unconditionally), and start no keystore work at all.
+func TestAPIkeystoreRejectsMalformedJSON(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	handler := kdb.APIkeystore(&Config{})
+
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/keystore",
+		strings.NewReader(`{"command":"dnssec-mgmt","subcommand":"add","privatekeycache":`))
+	w := httptest.NewRecorder()
+	handler(w, req)
+
+	res := w.Result()
+	defer res.Body.Close()
+
+	if res.StatusCode != http.StatusBadRequest {
+		t.Errorf("status = %d, want %d", res.StatusCode, http.StatusBadRequest)
+	}
+	if ct := res.Header.Get("Content-Type"); ct != "application/json" {
+		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+
+	var kr KeystoreResponse
+	if err := json.NewDecoder(res.Body).Decode(&kr); err != nil {
+		t.Fatalf("response body must be a decodable KeystoreResponse: %v", err)
+	}
+	if !kr.Error || kr.ErrorMsg == "" {
+		t.Errorf("malformed request must be reported as an error, got %+v", kr)
+	}
+
+	// Nothing may have been written: a rejected request must not leave a
+	// partially-built key behind.
+	var n int
+	if err := kdb.QueryRow("SELECT COUNT(*) FROM DnssecKeyStore").Scan(&n); err != nil {
+		t.Fatalf("counting DnssecKeyStore: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("a rejected request must not touch the keystore, found %d row(s)", n)
 	}
 }

@@ -645,7 +645,20 @@ func ReadPubKeys(keydir string) (map[string]dns.KEY, error) {
 // rrstr is the matching public-key RR (KEY or DNSKEY) and wantType the RR type
 // the caller expects, so a mismatched cache is rejected rather than silently
 // reconstructed against the wrong record.
+//
+// The wantType check is FIRST, deliberately. It used to guard only the legacy
+// branch below, which meant the two paths that actually run — an in-process K,
+// or PrivateKeyPEM over the API — accepted a SIG(0) cache on the DNSSEC import
+// and vice versa. The key then went into the wrong table, and for the DNSSEC
+// direction pkc.DnskeyRR was zero-valued, so the row was written with an empty
+// zone name. Both in-tree callers build the cache through PrepareKeyCache,
+// which always sets KeyType, so requiring it costs nothing and closes the hole
+// the comment above always claimed was closed.
 func reconstructSigningKey(pkc *PrivateKeyCache, rrstr string, wantType uint16) (crypto.PrivateKey, error) {
+	if pkc.KeyType != wantType {
+		return nil, fmt.Errorf("key cache is for %s, but this operation needs %s (KeyType %d, wanted %d)",
+			dns.TypeToString[pkc.KeyType], dns.TypeToString[wantType], pkc.KeyType, wantType)
+	}
 	if signer, ok := pkc.K.(crypto.Signer); ok {
 		return signer, nil
 	}
@@ -655,9 +668,6 @@ func reconstructSigningKey(pkc *PrivateKeyCache, rrstr string, wantType uint16) 
 			return nil, fmt.Errorf("failed to parse private key PEM: %v", err)
 		}
 		return privkey, nil
-	}
-	if pkc.KeyType != wantType {
-		return nil, fmt.Errorf("unsupported key type for reconstruction: %d", pkc.KeyType)
 	}
 	bindFormat, err := PrivKeyToBindFormat(pkc.PrivateKey, dns.AlgorithmToString[pkc.Algorithm])
 	if err != nil {

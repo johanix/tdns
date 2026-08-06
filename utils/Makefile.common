@@ -82,9 +82,14 @@ build: generate
 # prerequisites it only ever ran when the binary was MISSING, so a generator
 # built months earlier kept silently emitting stale output long after its
 # sources were updated -- a host could pull hundreds of commits of fixes and
-# still regenerate months-old build config, with no error anywhere. Delegating
-# unconditionally lets the generator's own Makefile decide; a no-op go build
-# costs almost nothing thanks to the build cache.
+# still regenerate months-old build config, with no error anywhere.
+#
+# So the recursion is unconditional and the DECISION belongs to the
+# generator's own Makefile, which lists its sources: it relinks only when they
+# changed, leaving the binary's mtime alone otherwise. That is what keeps the
+# "generated files are current" test below meaningful -- if this rule caused a
+# relink on every build, that test could never pass and every build would
+# regenerate (and would need the dnssec-algorithms checkout to be present).
 .PHONY: $(GENALGS)
 $(GENALGS):
 	@$(MAKE) -C $(GENALGS_DIR)
