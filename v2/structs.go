@@ -895,11 +895,30 @@ type NotifyStatus struct {
 
 // Migrating all DB access to own interface to be able to have local receiver functions.
 type PrivateKeyCache struct {
-	K          crypto.PrivateKey
-	PrivateKey string // This is only used when reading from file with ReadKeyNG()
-	CS         crypto.Signer
-	RR         dns.RR
-	KeyType    uint16
+	// K, CS and RR are interfaces and MUST NOT cross the API boundary.
+	//
+	// json.Marshal writes an ed25519.PrivateKey (a []byte) as a base64
+	// string; on the way back in, that string decodes happily into the
+	// empty interface crypto.PrivateKey but FAILS against the non-empty
+	// crypto.Signer, aborting the decode partway through. The server used
+	// to log that error and carry on, leaving K holding a plain string —
+	// which then reached x509.MarshalPKCS8PrivateKey and produced the
+	// misleading "pkcs8: codec does not support this key/OID".
+	//
+	// The wire form carries PrivateKey (base64) + DnskeyRR/KeyRR, which is
+	// everything the server needs to rebuild the key locally.
+	K crypto.PrivateKey `json:"-"`
+	// PrivateKey is the BIND single-field base64. Kept for existing callers,
+	// but do NOT rely on it across the API: it is empty for RSA, whose BIND
+	// format has eight fields and no "PrivateKey:" line. Use PrivateKeyPEM.
+	PrivateKey string
+	// PrivateKeyPEM is the PKCS#8 PEM encoding and is what the server rebuilds
+	// the key from. Algorithm-agnostic: works for RSA, ECDSA, Ed25519 and the
+	// registered PQ algorithms alike.
+	PrivateKeyPEM string
+	CS            crypto.Signer `json:"-"`
+	RR            dns.RR        `json:"-"`
+	KeyType       uint16
 	Algorithm  uint8
 	KeyId      uint16
 	KeyRR      dns.KEY

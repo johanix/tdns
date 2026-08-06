@@ -25,7 +25,23 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 		var kp KeystorePost
 		err := decoder.Decode(&kp)
 		if err != nil {
-			lgApi.Warn("error decoding keystore post", "err", err)
+			// Do NOT continue on a failed decode. json.Decode populates
+			// fields up to the point of failure, so carrying on here meant
+			// operating on a half-built request — which is how a partially
+			// decoded key ended up being handed to the PKCS#8 marshaller.
+			//
+			// Answer with a KeystoreResponse, not http.Error: every other
+			// path out of this handler writes application/json, so a client
+			// that decodes JSON unconditionally (as it must for all of them)
+			// would choke on a text/plain body.
+			lgApi.Error("error decoding keystore post", "err", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			json.NewEncoder(w).Encode(&KeystoreResponse{
+				Error:    true,
+				ErrorMsg: fmt.Sprintf("malformed keystore request: %v", err),
+			})
+			return
 		}
 
 		lgApi.Debug("received /keystore request", "cmd", kp.Command, "subcmd", kp.SubCommand, "from", r.RemoteAddr)

@@ -329,6 +329,31 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 	}
 	pkc.CS = signer
 
+	// PKCS#8 PEM is the form that crosses the API. Unlike the BIND base64 in
+	// pkc.PrivateKey it is algorithm-agnostic: RSA's BIND private-key format
+	// has eight fields (Modulus, PrivateExponent, Prime1, ...) and no single
+	// "PrivateKey:" line, so pkc.PrivateKey is empty for RSA and the server
+	// has nothing to rebuild from. PEM covers every algorithm uniformly,
+	// including the registered PQ ones.
+	//
+	// NOTE, for whoever adds the next algorithm: this makes a PKCS#8 codec a
+	// hard requirement for SIGNING, not just for export. PrepareKeyCache is on
+	// the READ path -- PrivateKeyCacheFromDB calls it for the signing-keys
+	// snapshot and for every SIG(0) key load -- so an algorithm that can sign
+	// but has no codec would not merely fail to export, it would fail to load
+	// at all, and its zones would stop signing.
+	//
+	// That is safe today because every algorithm in dnssec-algorithms/registry
+	// ships a pkcs8.go whose init() calls dnsalgpkcs8.Register, and the codec
+	// therefore links in with the algorithm package that genalgs pulls in --
+	// the two cannot be separated by accident. Keep it that way: an algorithm
+	// package without a PKCS#8 codec is not usable in tdns.
+	pkc.PrivateKeyPEM, err = PrivateKeyToPEM(pkc.K)
+	if err != nil {
+		return nil, fmt.Errorf("error encoding private key for algorithm %s as PKCS#8 PEM: %v",
+			dns.AlgorithmToString[pkc.Algorithm], err)
+	}
+
 	//	log.Printf("PrepareKeyCache: Zone: %s, algorithm: %s, keyid: %d,\nprivkey: %s,\npubkey: %s\npkc.K: %v",
 	//		rr.Header().Name, dns.AlgorithmToString[pkc.Algorithm], pkc.KeyId, pkc.PrivateKey, pubkey, pkc.K)
 
@@ -437,6 +462,48 @@ func IsPEMFormat(keyData string) bool {
 //
 // Returns an error if the algorithm is unknown, PEM decoding/parsing fails, the public key RR
 // cannot be parsed, conversion to BIND format fails, or the legacy BIND parsing logic fails.
+// PrivateKeyCacheFromDB builds a PrivateKeyCache from a keystore row, without
+// ever round-tripping the key through BIND format.
+//
+// This exists because ParsePrivateKeyFromDB does the opposite: for a stored
+// PKCS#8 PEM it parses the key correctly and then THROWS THE RESULT AWAY,
+// re-deriving a BIND-format blob via dns.DNSKEY.PrivateKeyString() for the
+// caller to hand back to PrepareKeyCache. PrepareKeyCache then takes its BIND
+// branch and re-parses with dns.DNSKEY.NewPrivateKey(), which dispatches on the
+// algorithm CODEPOINT. So any key written under a codepoint that has since been
+// renumbered failed with a bare "dns: bad private key" -- even though the PEM
+// had just parsed cleanly moments earlier. That took out slhdsa128s.foo and
+// cpt.p.axfr.net on the gocpt101 testbed: zones served, but signing was dead.
+//
+// PrepareKeyCache already detects and handles PEM properly. The only thing it
+// cannot do is take the legacy bare-base64 form, which has no BIND header --
+// so wrap that case and pass everything else straight through.
+func PrivateKeyCacheFromDB(privatekey, algorithm, keyrrstr string) (*PrivateKeyCache, uint8, error) {
+	alg, ok := dns.StringToAlgorithm[strings.ToUpper(algorithm)]
+	if !ok {
+		return nil, 0, fmt.Errorf("unknown algorithm: %s", algorithm)
+	}
+
+	keydata := privatekey
+	if !IsPEMFormat(privatekey) {
+		// Legacy rows hold the bare base64 with no "Private-key-format:"
+		// header; PrepareKeyCache's BIND branch needs the full blob.
+		var err error
+		keydata, err = PrivKeyToBindFormat(privatekey, algorithm)
+		if err != nil {
+			return nil, 0, fmt.Errorf("failed to convert stored key to BIND format: %v", err)
+		}
+	}
+
+	pkc, err := PrepareKeyCache(keydata, keyrrstr)
+	if err != nil {
+		return nil, 0, err
+	}
+	return pkc, alg, nil
+}
+
+// Deprecated: use PrivateKeyCacheFromDB. This returns a BIND-format string even
+// for PEM input, which forces callers through a codepoint-sensitive re-parse.
 func ParsePrivateKeyFromDB(privatekey, algorithm, keyrrstr string) (crypto.PrivateKey, uint8, string, error) {
 	var privkey crypto.PrivateKey
 	var alg uint8
@@ -559,4 +626,56 @@ func ReadPubKeys(keydir string) (map[string]dns.KEY, error) {
 	}
 
 	return keymap, nil
+}
+
+// reconstructSigningKey resolves the usable private key for a keystore write.
+//
+// Shared by the SIG(0) and DNSSEC import paths, which previously carried this
+// precedence verbatim in two places. Order matters:
+//
+//  1. K, if it is a real key. It is json:"-", so it is populated only
+//     in-process and is nil for anything that arrived over the API. Type-assert
+//     rather than nil-check: a half-succeeded decode can leave a non-nil but
+//     unusable value (a string, a map) here, and every real private key type
+//     implements crypto.Signer.
+//  2. PrivateKeyPEM, the normal API path. PKCS#8 PEM covers every algorithm,
+//     including RSA, which the BIND-base64 route below cannot represent.
+//  3. The legacy BIND base64, for callers predating PrivateKeyPEM.
+//
+// rrstr is the matching public-key RR (KEY or DNSKEY) and wantType the RR type
+// the caller expects, so a mismatched cache is rejected rather than silently
+// reconstructed against the wrong record.
+//
+// The wantType check is FIRST, deliberately. It used to guard only the legacy
+// branch below, which meant the two paths that actually run — an in-process K,
+// or PrivateKeyPEM over the API — accepted a SIG(0) cache on the DNSSEC import
+// and vice versa. The key then went into the wrong table, and for the DNSSEC
+// direction pkc.DnskeyRR was zero-valued, so the row was written with an empty
+// zone name. Both in-tree callers build the cache through PrepareKeyCache,
+// which always sets KeyType, so requiring it costs nothing and closes the hole
+// the comment above always claimed was closed.
+func reconstructSigningKey(pkc *PrivateKeyCache, rrstr string, wantType uint16) (crypto.PrivateKey, error) {
+	if pkc.KeyType != wantType {
+		return nil, fmt.Errorf("key cache is for %s, but this operation needs %s (KeyType %d, wanted %d)",
+			dns.TypeToString[pkc.KeyType], dns.TypeToString[wantType], pkc.KeyType, wantType)
+	}
+	if signer, ok := pkc.K.(crypto.Signer); ok {
+		return signer, nil
+	}
+	if pkc.PrivateKeyPEM != "" {
+		privkey, err := PEMToPrivateKey(pkc.PrivateKeyPEM)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse private key PEM: %v", err)
+		}
+		return privkey, nil
+	}
+	bindFormat, err := PrivKeyToBindFormat(pkc.PrivateKey, dns.AlgorithmToString[pkc.Algorithm])
+	if err != nil {
+		return nil, fmt.Errorf("failed to convert private key to BIND format: %v", err)
+	}
+	reconstructed, err := PrepareKeyCache(bindFormat, rrstr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to reconstruct private key: %v", err)
+	}
+	return reconstructed.K, nil
 }

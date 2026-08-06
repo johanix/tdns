@@ -235,14 +235,24 @@ func TestGenLibsMkPathListJoin(t *testing.T) {
 	if strings.Contains(out, "export ") {
 		t.Errorf("algs-libs.mk must not use GNU-make-only `export` (breaks under bmake):\n%s", out)
 	}
-	if !strings.Contains(out, "LD_LIBRARY_PATH := /b/lib:/a/lib") {
-		t.Errorf("LD_LIBRARY_PATH must be colon-joined:\n%s", out)
+	// Generated variables are ALGS_-prefixed so they cannot collide with a
+	// value the operator already has in the environment; ALGS_ENV then splices
+	// them onto the go build command line under their real names.
+	if !strings.Contains(out, "ALGS_LD_LIBRARY_PATH := /b/lib:/a/lib") {
+		t.Errorf("ALGS_LD_LIBRARY_PATH must be colon-joined:\n%s", out)
 	}
-	if !strings.Contains(out, "CGO_LDFLAGS := -lqruov -lsqisign") {
-		t.Errorf("CGO_LDFLAGS must stay space-joined:\n%s", out)
+	if !strings.Contains(out, "ALGS_CGO_LDFLAGS := -lqruov -lsqisign") {
+		t.Errorf("ALGS_CGO_LDFLAGS must stay space-joined:\n%s", out)
 	}
-	if !strings.Contains(out, `CGO_LDFLAGS="$(CGO_LDFLAGS)"`) || !strings.Contains(out, `LD_LIBRARY_PATH="$(LD_LIBRARY_PATH)"`) {
-		t.Errorf("ALGS_ENV must inline every variable for splicing onto the go build command line:\n%s", out)
+	if !strings.Contains(out, `CGO_LDFLAGS="$(ALGS_CGO_LDFLAGS)"`) {
+		t.Errorf("ALGS_ENV must splice the flag list under its real name:\n%s", out)
+	}
+	// A path list must APPEND to whatever the caller already had, and the
+	// inherited half must survive make as a literal for the shell to expand --
+	// hence $$. Getting this wrong silently drops the operator's own
+	// LD_LIBRARY_PATH, since ALGS_ENV is a command prefix, not an addition.
+	if !strings.Contains(out, `LD_LIBRARY_PATH="$(ALGS_LD_LIBRARY_PATH)$${LD_LIBRARY_PATH:+:$${LD_LIBRARY_PATH}}"`) {
+		t.Errorf("ALGS_ENV must append the inherited path list using escaped $$ references:\n%s", out)
 	}
 }
 
@@ -282,7 +292,7 @@ func stubEnvScript(t *testing.T, algrepo, group, rel string) {
 // relative path works. The test runs from a scratch cwd with a relative
 // path to the fixture repo, selecting a liboqs-backed algorithm.
 func TestRunRelativeAlgrepo(t *testing.T) {
-	algrepo := writeFixture(t)               // has registry/registry.go
+	algrepo := writeFixture(t) // has registry/registry.go
 	stubEnvScript(t, algrepo, "liboqs", "liboqs/liboqs-env.sh")
 
 	// A working directory a fixed number of levels below algrepo's parent,
