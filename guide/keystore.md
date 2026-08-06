@@ -52,6 +52,12 @@ not an HSM: the API key and the file's permissions are the trust boundary, not
 encryption at rest. Treat `db.file` exactly as you would treat a directory of
 private keys.
 
+The same goes for the API key itself. It has always been able to read private
+keys one at a time (`keystore <class> export`), but `bulk-export` reads the
+whole keystore in a single call that needs no prior knowledge of what is in
+there. That is not new authority, but it is a much shorter path — worth
+weighing before exposing the management API beyond localhost.
+
 ### Not the keystore: the truststore
 
 `tdns-cli auth truststore sig0` is a different store with a confusingly similar

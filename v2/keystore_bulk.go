@@ -179,6 +179,13 @@ FROM TsigKeystore`
 
 // BulkExportDnssec returns every DNSSEC key matching sel, key material
 // included and unredacted — that is the point of an export.
+//
+// Worth being deliberate about: this adds no new authorization (the same API
+// key already permits per-key `keystore dnssec export`), but it does change the
+// SHAPE of the exposure. Reading the whole keystore went from N calls, each
+// needing a zone and a keyid the caller had to know, to one call that needs
+// neither — and it leaves one line in the audit log instead of N. Anyone
+// weighing where to expose the management API should price that in.
 func (kdb *KeyDB) BulkExportDnssec(tx *Tx, sel KeySelector) ([]BulkDnssecKey, error) {
 	rows, err := bulkQuery(kdb, tx, bulkGetDnssecSql)
 	if err != nil {

@@ -448,6 +448,17 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 		return &resp, nil
 
 	case "bulk-import":
+		// NOTE for a future in-process caller: the post-write signing-keys
+		// republish and re-sign for these zones ride on resp.BulkRepublishZones,
+		// which only APIkeystore consumes. needsRepublish is deliberately NOT
+		// set — it is single-zone (kp.Zone), and a bulk import spans zones.
+		//
+		// So calling DnssecKeyMgmt(ctx, nil, kp) directly with bulk-import
+		// commits the keys and republishes nothing. Nothing does that today
+		// (pre-load calls kdb.BulkImportDnssec directly, before any zone is
+		// bound, so there is nothing to republish). A caller that needs it on a
+		// live server must either go through the API or walk BulkRepublishZones
+		// itself.
 		dispositions, err := kdb.BulkImportDnssec(tx, kp.BulkDnssecKeys, kp.Force)
 		if err != nil {
 			resp.Error = true

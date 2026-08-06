@@ -390,6 +390,16 @@ func readManifestKeyFiles(dir, privateFile, publicFile string) (privPEM, keyRR s
 	return priv, strings.TrimRight(pub, "\n"), nil
 }
 
+// readContainedFile reads one file named by the manifest, refusing an absolute
+// path or one that climbs out of dir.
+//
+// LIMITATION: containment is checked on the PATH, not on what the path resolves
+// to, so a symlink placed inside dir is followed wherever it points. Closing
+// that would need an openat2/O_NOFOLLOW-style walk, and it buys little here:
+// planting the symlink already requires write access to a directory that holds
+// private keys, at which point the attacker can simply write the key file. The
+// check exists to stop a manifest -- a data file that may have travelled from
+// somewhere else -- from naming ../../etc/anything, and it does that.
 func readContainedFile(dir, name string) (string, error) {
 	if name == "" {
 		return "", fmt.Errorf("manifest entry has no file name")
