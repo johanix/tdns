@@ -42,6 +42,14 @@ type KeystorePost struct {
 	TsigImportFormat string   `json:"tsigimportformat,omitempty"`
 	TsigOverwrite    []string `json:"tsigoverwrite,omitempty"`
 	TsigVerbose      bool     `json:"tsigverbose,omitempty"`
+	// Bulk export/import (subcommands "bulk-export" / "bulk-import"). Select*
+	// narrows an export; the Bulk*Keys carry the payload of an import. Force
+	// (above) turns import's create-if-absent into overwrite.
+	SelectExact    []string        `json:"selectexact,omitempty"`
+	SelectSubtree  []string        `json:"selectsubtree,omitempty"`
+	BulkDnssecKeys []BulkDnssecKey `json:"bulkdnsseckeys,omitempty"`
+	BulkSig0Keys   []BulkSig0Key   `json:"bulksig0keys,omitempty"`
+	BulkTsigKeys   []BulkTsigKey   `json:"bulktsigkeys,omitempty"`
 }
 
 type TsigKeyInfo struct {
@@ -67,21 +75,32 @@ type TsigCacheDelta struct {
 }
 
 type KeystoreResponse struct {
-	AppName        string
-	Time           time.Time
-	Status         string
-	Zone           string
-	Dnskeys        map[string]DnssecKey // TrustAnchor
-	Sig0keys       map[string]Sig0Key
-	TsigKeys       []TsigKeyInfo              `json:"tsigkeys,omitempty"`
-	TsigImport     []TsigKeyDisposition       `json:"tsigimport,omitempty"`
-	TsigExport     *TsigKeyExport             `json:"tsigexport,omitempty"`
-	Algorithms     []algorithms.AlgorithmInfo // populated by the "list-algorithms" command
-	Policies       []DnssecPolicyInfo         // populated by the "list-policies" command
-	Msg            string
-	Error          bool
-	ErrorMsg       string
-	TsigCacheDelta *TsigCacheDelta `json:"-"`
+	AppName    string
+	Time       time.Time
+	Status     string
+	Zone       string
+	Dnskeys    map[string]DnssecKey // TrustAnchor
+	Sig0keys   map[string]Sig0Key
+	TsigKeys   []TsigKeyInfo        `json:"tsigkeys,omitempty"`
+	TsigImport []TsigKeyDisposition `json:"tsigimport,omitempty"`
+	TsigExport *TsigKeyExport       `json:"tsigexport,omitempty"`
+	// Bulk export/import. The Bulk*Keys carry an export's payload (key material
+	// included — that is what an export is for); BulkDispositions reports one
+	// outcome per key offered to an import.
+	BulkDnssecKeys   []BulkDnssecKey      `json:"bulkdnsseckeys,omitempty"`
+	BulkSig0Keys     []BulkSig0Key        `json:"bulksig0keys,omitempty"`
+	BulkTsigKeys     []BulkTsigKey        `json:"bulktsigkeys,omitempty"`
+	BulkDispositions []BulkKeyDisposition `json:"bulkdispositions,omitempty"`
+	// BulkRepublishZones names the zones a DNSSEC bulk import actually changed.
+	// Like NeedsSigningKeysRepublish it is an instruction to the external-tx
+	// caller, not wire data — but plural, because one bulk import spans zones.
+	BulkRepublishZones []string                   `json:"-"`
+	Algorithms         []algorithms.AlgorithmInfo // populated by the "list-algorithms" command
+	Policies           []DnssecPolicyInfo         // populated by the "list-policies" command
+	Msg                string
+	Error              bool
+	ErrorMsg           string
+	TsigCacheDelta     *TsigCacheDelta `json:"-"`
 	// NeedsSigningKeysRepublish is set by DnssecKeyMgmt when the operation can
 	// change the zone's active signing-key set. External-tx callers (APIkeystore)
 	// must call republishSigningKeysForZone after their Commit (R1).

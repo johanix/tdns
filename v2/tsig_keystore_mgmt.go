@@ -75,6 +75,32 @@ func (kdb *KeyDB) TsigKeyMgmt(conf *Config, tx *Tx, kp KeystorePost) (resp *Keys
 			return resp, err
 		}
 
+	case "bulk-export":
+		keys, err := kdb.BulkExportTsig(tx, NewKeySelector(kp.SelectExact, kp.SelectSubtree))
+		if err != nil {
+			return resp, err
+		}
+		resp.BulkTsigKeys = keys
+		resp.Msg = fmt.Sprintf("Exported %d TSIG key(s)", len(keys))
+		resp.TsigCacheDelta = nil // read-only: nothing to patch in the live cache
+
+	case "bulk-import":
+		dispositions, err := kdb.BulkImportTsig(tx, kp.BulkTsigKeys, kp.Force)
+		if err != nil {
+			return resp, err
+		}
+		resp.BulkDispositions = dispositions
+		resp.Msg = summarizeDispositions(dispositions, kp.Force)
+		// TsigKeyStore.Get is a plain in-memory lookup, NOT read-through: a
+		// restored key that is not also put in the cache stays invisible to
+		// every transfer and UPDATE until the next restart. Mark each key that
+		// actually changed so the caller patches the cache after commit.
+		for _, d := range dispositions {
+			if d.Status == BulkStatusImported || d.Status == BulkStatusReplaced {
+				resp.TsigCacheDelta.markChanged(d.Name)
+			}
+		}
+
 	case "generate":
 		algo := kp.TsigAlgorithm
 		if algo == "" {

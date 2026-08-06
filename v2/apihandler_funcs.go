@@ -55,6 +55,7 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 
 		var dnssecRepublishZone string
 		var dnssecResignZone string
+		var dnssecBulkRepublishZones []string
 
 		tx, err := kdb.Begin("APIkeystore")
 
@@ -77,6 +78,15 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 							if rerr := republishSigningKeysForZone(kdb, dnssecRepublishZone); rerr != nil {
 								lgApi.Error("APIkeystore: post-commit signing-keys republish failed",
 									"zone", dnssecRepublishZone, "err", rerr)
+							}
+						}
+						// A bulk import touches many zones at once, so it gets
+						// its own plural republish rather than trying to squeeze
+						// through the single-zone field above.
+						for _, z := range dnssecBulkRepublishZones {
+							if rerr := republishSigningKeysForZone(kdb, z); rerr != nil {
+								lgApi.Error("APIkeystore: post-commit signing-keys republish failed after bulk import",
+									"zone", z, "err", rerr)
 							}
 						}
 						if dnssecResignZone != "" {
@@ -138,6 +148,9 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 				}
 			} else if resp != nil && resp.NeedsSigningKeysRepublish {
 				dnssecRepublishZone = kp.Zone
+			}
+			if err == nil && resp != nil && len(resp.BulkRepublishZones) > 0 {
+				dnssecBulkRepublishZones = resp.BulkRepublishZones
 			}
 			// Re-sign after state-changing ops — deferred until post-commit
 			// (alongside snapshot republish) so the resigner does not race the tx.

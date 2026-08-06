@@ -132,6 +132,30 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+kp.State)
 		resp.Msg += fmt.Sprintf("\nAdded public key to TrustStore: %s", tsresp.Msg)
 
+	case "bulk-export":
+		keys, err := kdb.BulkExportSig0(tx, NewKeySelector(kp.SelectExact, kp.SelectSubtree))
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+		resp.BulkSig0Keys = keys
+		resp.Msg = fmt.Sprintf("Exported %d SIG(0) key(s)", len(keys))
+		txSuccess = true
+		return &resp, nil
+
+	case "bulk-import":
+		dispositions, err := kdb.BulkImportSig0(tx, kp.BulkSig0Keys, kp.Force)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+		resp.BulkDispositions = dispositions
+		resp.Msg = summarizeDispositions(dispositions, kp.Force)
+		txSuccess = true
+		return &resp, nil
+
 	case "generate":
 		lgSigner.Info("generating new SIG(0) keypair", "name", kp.Keyname)
 		if kp.Keyname == "" {
@@ -398,6 +422,31 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			resp.Msg = fmt.Sprintf("Updated %d rows", rows)
 		}
 		needsRepublish = true
+
+	case "bulk-export":
+		keys, err := kdb.BulkExportDnssec(tx, NewKeySelector(kp.SelectExact, kp.SelectSubtree))
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+		resp.BulkDnssecKeys = keys
+		resp.Msg = fmt.Sprintf("Exported %d DNSSEC key(s)", len(keys))
+		txSuccess = true
+		return &resp, nil
+
+	case "bulk-import":
+		dispositions, err := kdb.BulkImportDnssec(tx, kp.BulkDnssecKeys, kp.Force)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+		resp.BulkDispositions = dispositions
+		resp.BulkRepublishZones = changedZones(dispositions)
+		resp.Msg = summarizeDispositions(dispositions, kp.Force)
+		txSuccess = true
+		return &resp, nil
 
 	case "generate":
 		_, msg, err := kdb.GenerateKeypair(kp.Zone, "api-request", kp.State, dns.TypeDNSKEY, kp.Algorithm, kp.KeyType, tx)
