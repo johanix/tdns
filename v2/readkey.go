@@ -335,6 +335,19 @@ func PrepareKeyCache(privkey, pubkey string) (*PrivateKeyCache, error) {
 	// "PrivateKey:" line, so pkc.PrivateKey is empty for RSA and the server
 	// has nothing to rebuild from. PEM covers every algorithm uniformly,
 	// including the registered PQ ones.
+	//
+	// NOTE, for whoever adds the next algorithm: this makes a PKCS#8 codec a
+	// hard requirement for SIGNING, not just for export. PrepareKeyCache is on
+	// the READ path -- PrivateKeyCacheFromDB calls it for the signing-keys
+	// snapshot and for every SIG(0) key load -- so an algorithm that can sign
+	// but has no codec would not merely fail to export, it would fail to load
+	// at all, and its zones would stop signing.
+	//
+	// That is safe today because every algorithm in dnssec-algorithms/registry
+	// ships a pkcs8.go whose init() calls dnsalgpkcs8.Register, and the codec
+	// therefore links in with the algorithm package that genalgs pulls in --
+	// the two cannot be separated by accident. Keep it that way: an algorithm
+	// package without a PKCS#8 codec is not usable in tdns.
 	pkc.PrivateKeyPEM, err = PrivateKeyToPEM(pkc.K)
 	if err != nil {
 		return nil, fmt.Errorf("error encoding private key for algorithm %s as PKCS#8 PEM: %v",
