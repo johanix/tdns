@@ -354,8 +354,10 @@ UPDATE TsigKeystore SET algorithm=?, secret=?, origin=?, owner=?, creator=?, cre
 // is stored verbatim, so a key whose algorithm this binary does not link still
 // restores correctly (it will fail later, loudly, if the zone actually tries to
 // sign with it) — which is what makes pre-load safe to run before any zone is
-// bound. The public half IS parsed, because that is a cheap, crypto-free way to
-// catch a manifest that disagrees with its own files.
+// bound. It is still checked for PEM armour, since storing a non-PEM blob in
+// the PEM column would otherwise surface only at signing time. The public half
+// IS parsed, because that is a cheap, crypto-free way to catch a manifest that
+// disagrees with its own files.
 func (kdb *KeyDB) BulkImportDnssec(tx *Tx, keys []BulkDnssecKey, force bool) ([]BulkKeyDisposition, error) {
 	tx, done, err := kdb.bulkTx(tx, "BulkImportDnssec")
 	if err != nil {
@@ -678,14 +680,34 @@ func ptrInt64String(v *int64) string {
 	return fmt.Sprint(*v)
 }
 
+// validateBulkPrivateKey checks that the private half is what the keystore
+// column expects: PKCS#8 PEM. It does NOT parse the key — IsPEMFormat only looks
+// at the armour — so the "never parse a private key" property that lets an
+// unknown algorithm restore correctly is preserved.
+//
+// The check earns its place because bulk import writes the blob through
+// verbatim. The single-key `keystore <class> import` accepts BIND-format
+// private keys too and converts them (PrepareKeyCache), so a BIND blob in an
+// export directory is a plausible mistake — and without this it would be stored
+// happily and only fail much later, at signing time.
+func validateBulkPrivateKey(privkey string) error {
+	if strings.TrimSpace(privkey) == "" {
+		return fmt.Errorf("no private key material")
+	}
+	if !IsPEMFormat(privkey) {
+		return fmt.Errorf("private key is not PKCS#8 PEM; for a BIND-format key use 'keystore <class> import', which converts it")
+	}
+	return nil
+}
+
 // validateDnssecKeyRR checks the public half against the metadata that travels
 // with it. This is deliberately crypto-free — it parses the RR and compares
 // flags/algorithm/owner/keytag — so it works for algorithms this binary has no
 // implementation for, and still catches a manifest that has drifted from its
 // key files (the failure that would otherwise surface as an unsignable zone).
 func validateDnssecKeyRR(k BulkDnssecKey) error {
-	if strings.TrimSpace(k.PrivateKey) == "" {
-		return fmt.Errorf("no private key material")
+	if err := validateBulkPrivateKey(k.PrivateKey); err != nil {
+		return err
 	}
 	rr, err := dns.NewRR(k.KeyRR)
 	if err != nil {
@@ -712,8 +734,8 @@ func validateDnssecKeyRR(k BulkDnssecKey) error {
 
 // validateSig0KeyRR is the KEY-RR counterpart of validateDnssecKeyRR.
 func validateSig0KeyRR(k BulkSig0Key) error {
-	if strings.TrimSpace(k.PrivateKey) == "" {
-		return fmt.Errorf("no private key material")
+	if err := validateBulkPrivateKey(k.PrivateKey); err != nil {
+		return err
 	}
 	rr, err := dns.NewRR(k.KeyRR)
 	if err != nil {

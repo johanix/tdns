@@ -158,6 +158,13 @@ implementation for its algorithm (it will fail later, loudly, if the zone
 actually tries to sign with it), and it is what makes pre-load safe to run before
 any zone is bound.
 
+It is still checked for PKCS#8 PEM armour, which is a look at the header rather
+than a parse. The keystore column holds PEM and nothing else, but the single-key
+`keystore <class> import` *also* accepts BIND-format private keys and converts
+them — so a `dnssec-keygen` `.private` file landing in an export directory is a
+plausible mistake. Without the check it would be stored happily and fail much
+later, at signing time.
+
 The public half *is* parsed, because it is a cheap, crypto-free consistency
 check: owner name must match the zone, flags and keytag must match what the
 manifest claims. That catches a manifest that has drifted from its own files —

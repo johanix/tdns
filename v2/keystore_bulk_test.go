@@ -68,6 +68,10 @@ func TestKeySelectorEmptySelectsEverything(t *testing.T) {
 
 // testDnssecKey builds a real ED25519 DNSKEY so keytag/flags/owner validation
 // has something genuine to check against.
+//
+// The private half is PKCS#8 PEM, not the BIND format dns.PrivateKeyString
+// returns: PEM is what the keystore column actually holds, so a fixture using
+// anything else would be testing a shape production never produces.
 func testDnssecKey(t *testing.T, zone string, flags uint16) BulkDnssecKey {
 	t.Helper()
 	k := &dns.DNSKEY{
@@ -80,6 +84,10 @@ func testDnssecKey(t *testing.T, zone string, flags uint16) BulkDnssecKey {
 	if err != nil {
 		t.Fatalf("generating test key: %v", err)
 	}
+	privPEM, err := PrivateKeyToPEM(priv)
+	if err != nil {
+		t.Fatalf("converting test key to PEM: %v", err)
+	}
 	return BulkDnssecKey{
 		Zone:       dns.Fqdn(zone),
 		Keyid:      k.KeyTag(),
@@ -87,7 +95,7 @@ func testDnssecKey(t *testing.T, zone string, flags uint16) BulkDnssecKey {
 		Algorithm:  "ED25519",
 		State:      DnskeyStateActive,
 		Creator:    "test",
-		PrivateKey: k.PrivateKeyString(priv),
+		PrivateKey: privPEM,
 		KeyRR:      k.String(),
 	}
 }
@@ -184,6 +192,34 @@ func TestBulkImportDnssecRejectsInconsistentMetadata(t *testing.T) {
 	noPriv.PrivateKey = ""
 	if _, err := kdb.BulkImportDnssec(nil, []BulkDnssecKey{noPriv}, false); err == nil {
 		t.Error("a key with no private material must be refused")
+	}
+}
+
+func TestBulkImportRefusesNonPEMPrivateKey(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	// The realistic mistake: dropping a dnssec-keygen .private file into an
+	// export directory. The single-key import converts BIND format; bulk import
+	// stores verbatim, so it has to refuse rather than write a blob into a
+	// column that is supposed to hold PEM.
+	bindFormat := testDnssecKey(t, "pq.dnslab.", 257)
+	bindFormat.PrivateKey = "Private-key-format: v1.3\nAlgorithm: 15 (ED25519)\n" +
+		"PrivateKey: LrIfCpsKYav5oA8R9AoMipYE990WHLd6tceF2w+p4pM=\n"
+	_, err := kdb.BulkImportDnssec(nil, []BulkDnssecKey{bindFormat}, false)
+	if err == nil {
+		t.Fatal("a BIND-format private key must be refused by bulk import")
+	}
+	if !strings.Contains(err.Error(), "PEM") {
+		t.Errorf("the error should say what format was expected, got %q", err)
+	}
+
+	// Same rule on the SIG(0) side.
+	sig0 := BulkSig0Key{
+		Zone: "pq.dnslab.", Keyid: 1, Algorithm: "ED25519", State: Sig0StateActive,
+		PrivateKey: "not pem at all", KeyRR: "pq.dnslab. 3600 IN KEY 512 3 15 aIufB25wu/A9nLOZOm7ZlAxkdQyeCqAQcH7wMCg8DVo=",
+	}
+	if _, err := kdb.BulkImportSig0(nil, []BulkSig0Key{sig0}, false); err == nil {
+		t.Error("a non-PEM SIG(0) private key must be refused by bulk import")
 	}
 }
 
