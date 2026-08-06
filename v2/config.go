@@ -7,6 +7,7 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -440,11 +441,15 @@ type KeystorePreloadConf struct {
 
 // Dirs returns the configured directories keyed by class name, skipping unset
 // ones, so callers can iterate without repeating the field list.
+// Normalised once, here, so every consumer sees the same path. PreloadDirsForCheck
+// used to filepath.Clean the values on its own while preloadClass stat'ed them
+// raw, which meant `config check` and the actual pre-load could report and use
+// different strings for the same configured directory.
 func (k KeystorePreloadConf) Dirs() map[string]string {
 	out := map[string]string{}
 	for class, dir := range map[string]string{"dnssec": k.Dnssec, "sig0": k.Sig0, "tsig": k.Tsig} {
-		if strings.TrimSpace(dir) != "" {
-			out[class] = strings.TrimSpace(dir)
+		if trimmed := strings.TrimSpace(dir); trimmed != "" {
+			out[class] = filepath.Clean(trimmed)
 		}
 	}
 	return out

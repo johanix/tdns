@@ -247,8 +247,12 @@ func TestPreloadTsigSurvivesTheStartupConfigSync(t *testing.T) {
 func TestBulkImportTsigCanonicalisesAlgorithm(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	if _, err := kdb.BulkImportTsig(nil, []BulkTsigKey{{
-		Keyname:   "undotted.dnslab.",
-		Algorithm: "hmac-sha256", // no trailing dot, and mixed-case name below
+		// Both non-canonical forms at once: an undotted algorithm and a
+		// mixed-case, undotted key name. BulkImportTsig canonicalises both, and
+		// the assertions below check both -- the comment used to promise a
+		// mixed-case name that the fixture did not actually have.
+		Keyname:   "UnDotted.DnsLab",
+		Algorithm: "hmac-sha256",
 		Secret:    "c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0Cg==",
 	}}, false, TsigBulkPolicy{}); err != nil {
 		t.Fatalf("import: %v", err)
@@ -260,12 +264,15 @@ func TestBulkImportTsigCanonicalisesAlgorithm(t *testing.T) {
 	if len(got) != 1 || got[0].Algorithm != "hmac-sha256." {
 		t.Fatalf("algorithm not canonicalised on write: %+v", got)
 	}
+	if got[0].Keyname != "undotted.dnslab." {
+		t.Fatalf("key name not canonicalised on write: %q", got[0].Keyname)
+	}
 
 	// ...and re-importing the same key in EITHER spelling is then unchanged,
 	// not a phantom conflict against the row it just wrote.
 	for _, spelling := range []string{"hmac-sha256", "hmac-sha256."} {
 		ds, err := kdb.BulkImportTsig(nil, []BulkTsigKey{{
-			Keyname:   "undotted.dnslab.",
+			Keyname:   "UnDotted.DnsLab",
 			Algorithm: spelling,
 			Secret:    "c2VjcmV0LXNlY3JldC1zZWNyZXQtc2VjcmV0Cg==",
 		}}, false, TsigBulkPolicy{})
@@ -336,10 +343,72 @@ func TestPreloadUnconfiguredIsANoOp(t *testing.T) {
 	}
 }
 
-func TestPreloadDirsSkipsUnset(t *testing.T) {
-	c := KeystorePreloadConf{Dnssec: "/a", Tsig: "  "}
+func TestPreloadDirsSkipsUnsetAndNormalises(t *testing.T) {
+	// Whitespace-only is unset. The others are set but written the way an
+	// operator writes them -- surrounding spaces, a trailing slash, a stray
+	// ".." -- and must come back in the one canonical form every consumer uses.
+	// The previous fixture used "/a", already canonical, so it could not tell
+	// normalisation from a plain passthrough.
+	c := KeystorePreloadConf{Dnssec: "  /a/b/  ", Sig0: "/a/b/../c", Tsig: "  "}
 	dirs := c.Dirs()
-	if len(dirs) != 1 || dirs["dnssec"] != "/a" {
+	if len(dirs) != 2 {
 		t.Fatalf("Dirs() should return only the set entries, got %+v", dirs)
+	}
+	if dirs["dnssec"] != "/a/b" {
+		t.Errorf("dnssec dir not trimmed and cleaned: %q", dirs["dnssec"])
+	}
+	if dirs["sig0"] != "/a/c" {
+		t.Errorf("sig0 dir not cleaned: %q", dirs["sig0"])
+	}
+
+	// config check must report exactly what pre-load will use.
+	conf := &Config{}
+	conf.Keystore.Preload = c
+	got := conf.PreloadDirsForCheck()
+	if len(got) != 2 || got[0] != "/a/b" || got[1] != "/a/c" {
+		t.Fatalf("PreloadDirsForCheck disagrees with Dirs(): %+v", got)
+	}
+}
+
+// A blank or comment-only manifest must be refused, not read as "this directory
+// holds no keys". The doc comment on LoadKeystoreManifest says a MISSING
+// manifest must never mean that; a truncated one reaches the same outcome by
+// another road -- pre-load imports nothing, returns nil, startup continues, and
+// a signed zone mints replacement keys the parent DS does not match.
+func TestLoadKeystoreManifestRefusesAnEmptyManifest(t *testing.T) {
+	for _, tc := range []struct{ name, content string }{
+		{"zero length", ""},
+		{"whitespace only", "\n  \n\t\n"},
+		{"comments only", "# tdns keystore export manifest (v1)\n# generated\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dir, KeystoreManifestFile),
+				[]byte(tc.content), 0600); err != nil {
+				t.Fatalf("write: %v", err)
+			}
+			if _, err := LoadKeystoreManifest(dir); err == nil {
+				t.Fatal("an empty manifest must be refused")
+			}
+
+			// And it must abort startup rather than booting with no keys.
+			conf := &Config{}
+			conf.Internal.KeyDB = newTestKeyDB(t)
+			conf.Keystore.Preload.Dnssec = dir
+			if err := conf.PreloadKeystore(); err == nil {
+				t.Fatal("pre-load must fail on an empty manifest, not import zero keys")
+			}
+		})
+	}
+
+	// A manifest that omits `version` but has real content is still valid --
+	// the check is blank-data only, and must not reject hand-written files.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, KeystoreManifestFile),
+		[]byte("dnssec: []\n"), 0600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := LoadKeystoreManifest(dir); err != nil {
+		t.Fatalf("a version-less but non-empty manifest must still load: %v", err)
 	}
 }

@@ -551,16 +551,9 @@ func (kdb *KeyDB) BulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool) (dispos
 			}
 		}
 	}
-	seen := map[string]bool{}
-	for _, d := range out {
-		if d.Status != BulkStatusImported && d.Status != BulkStatusReplaced {
-			continue
-		}
-		if !seen[d.Name] {
-			seen[d.Name] = true
-			invalidate = append(invalidate, d.Name)
-		}
-	}
+	// changedZones is the same filter-and-dedupe rule, already written once.
+	// Two copies drift.
+	invalidate = changedZones(out)
 	ok = true
 	return out, nil
 }
@@ -879,11 +872,6 @@ func validateBulkPrivateKey(privkey string) error {
 	return nil
 }
 
-// validateDnssecKeyRR checks the public half against the metadata that travels
-// with it. This is deliberately crypto-free — it parses the RR and compares
-// flags/algorithm/owner/keytag — so it works for algorithms this binary has no
-// implementation for, and still catches a manifest that has drifted from its
-// key files (the failure that would otherwise surface as an unsignable zone).
 // validKeyState reports whether state is one this codebase actually recognises.
 //
 // Without this, a manifest typo such as "activ" imports cleanly and the row is

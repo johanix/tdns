@@ -20,9 +20,7 @@ package tdns
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
-	"strings"
 )
 
 // PreloadKeystore loads each configured keystore.preload directory into the
@@ -291,10 +289,12 @@ func warnIfWorldReadable(dir string, info os.FileInfo) {
 // PreloadDirsForCheck exposes the configured directories for `config check`,
 // which validates them without loading anything.
 func (conf *Config) PreloadDirsForCheck() []string {
+	// Dirs() already trims and cleans; re-doing it here is how the two paths
+	// came to disagree in the first place.
 	dirs := conf.Keystore.Preload.Dirs()
 	out := make([]string, 0, len(dirs))
 	for _, d := range dirs {
-		out = append(out, filepath.Clean(strings.TrimSpace(d)))
+		out = append(out, d)
 	}
 	sort.Strings(out)
 	return out

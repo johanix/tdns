@@ -110,6 +110,21 @@ func LoadKeystoreManifest(dir string) (*KeystoreManifest, error) {
 	if err != nil {
 		return nil, fmt.Errorf("reading keystore manifest %s: %v", path, err)
 	}
+	// A blank or comment-only manifest is refused, not read as "no keys". It
+	// unmarshals happily into a zero value, Version gets promoted below, and the
+	// caller receives an accepted manifest describing nothing -- so pre-load
+	// imports zero keys, returns nil, startup continues, and a signed zone mints
+	// replacements the parent DS does not match. That is the exact failure the
+	// doc comment above says a missing manifest must never cause; a truncated
+	// one reaches it by another road.
+	//
+	// Deliberately a blank-data check and nothing more: a hand-written manifest
+	// that omits `version` or lists only one class is still perfectly valid.
+	if !manifestHasContent(data) {
+		return nil, fmt.Errorf("keystore manifest %s is empty; refusing to read that as "+
+			"\"this directory holds no keys\" (remove the directory from keystore.preload, "+
+			"or re-export into it)", path)
+	}
 	var m KeystoreManifest
 	if err := yaml.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("parsing keystore manifest %s: %v", path, err)
@@ -437,4 +452,17 @@ func readContainedFile(dir, name string) (string, error) {
 		return "", fmt.Errorf("reading %s: %v", clean, err)
 	}
 	return string(data), nil
+}
+
+// manifestHasContent reports whether data holds anything but blank lines and
+// '#' comments. The generated manifest always carries a header comment, so
+// "the file is not zero bytes" is not on its own evidence of content.
+func manifestHasContent(data []byte) bool {
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "#") {
+			return true
+		}
+	}
+	return false
 }

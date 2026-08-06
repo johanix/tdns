@@ -26,21 +26,28 @@ import (
 	tdns "github.com/johanix/tdns/v2"
 )
 
-var (
-	bulkDest      string
-	bulkSrc       string
-	bulkDir       string
-	bulkState     string
-	bulkNoBackup  bool
-	bulkForce     bool
-	bulkSelExact  []string
-	bulkSelSubtre []string
-)
+// bulkFlags holds one command tree's flag targets. addBulkCommands runs once
+// per class in the same process, so package-level targets would be shared by
+// all three registrations: correct today only because every registration writes
+// the same zero default and one command runs per invocation, and silently
+// wrong the moment any class wants a different default. The surrounding
+// commands in keystore_cmds.go already scope their targets this way.
+type bulkFlags struct {
+	dest      string
+	src       string
+	dir       string
+	state     string
+	noBackup  bool
+	force     bool
+	selExact  []string
+	selSubtre []string
+}
 
 // addBulkCommands hangs bulk-export/bulk-import off a class's command tree.
 // class is "dnssec", "sig0" or "tsig"; the flag names differ for tsig because
 // its keys are named, not zone-scoped.
 func addBulkCommands(parent *cobra.Command, role, class string) {
+	f := &bulkFlags{}
 	exactHelp, subtreeHelp := "Zone to include (repeatable)",
 		"Include this zone and everything below it (repeatable)"
 	exactFlag, subtreeFlag := "zone", "zones"
@@ -70,12 +77,12 @@ Re-exporting into a directory MERGES: entries for keys not covered by this
 run are left in place, so several exports can populate one directory.`,
 			classLabel(class), exactFlag, subtreeFlag, subtreeFlag),
 		Run: func(cmd *cobra.Command, args []string) {
-			bulkExportRun(role, class)
+			bulkExportRun(role, class, f)
 		},
 	}
-	bulkExport.Flags().StringVar(&bulkDest, "dest", "", "Directory to write keys and manifest to")
-	bulkExport.Flags().StringArrayVarP(&bulkSelExact, exactFlag, exactShorthand, nil, exactHelp)
-	bulkExport.Flags().StringArrayVar(&bulkSelSubtre, subtreeFlag, nil, subtreeHelp)
+	bulkExport.Flags().StringVar(&f.dest, "dest", "", "Directory to write keys and manifest to")
+	bulkExport.Flags().StringArrayVarP(&f.selExact, exactFlag, exactShorthand, nil, exactHelp)
+	bulkExport.Flags().StringArrayVar(&f.selSubtre, subtreeFlag, nil, subtreeHelp)
 	bulkExport.MarkFlagRequired("dest")
 
 	bulkImport := &cobra.Command{
@@ -92,11 +99,11 @@ export un-rolls a rolled key.
 --force flips that last case to overwrite, which is what you want when
 recovering a keystore you know to be wrong.`, classLabel(class)),
 		Run: func(cmd *cobra.Command, args []string) {
-			bulkImportRun(role, class)
+			bulkImportRun(role, class, f)
 		},
 	}
-	bulkImport.Flags().StringVar(&bulkSrc, "src", "", "Directory to read keys and manifest from")
-	bulkImport.Flags().BoolVar(&bulkForce, "force", false,
+	bulkImport.Flags().StringVar(&f.src, "src", "", "Directory to read keys and manifest from")
+	bulkImport.Flags().BoolVar(&f.force, "force", false,
 		"Overwrite keystore entries that differ (default: report and skip them)")
 	bulkImport.MarkFlagRequired("src")
 
@@ -130,37 +137,37 @@ Runs entirely locally: no daemon, no API, no keystore. That is the point --
 these directories are built and committed before the server that serves them
 exists. Re-running is safe; already-converted keys are left alone.`, classLabel(class)),
 		Run: func(cmd *cobra.Command, args []string) {
-			bulkConvertRun(class)
+			bulkConvertRun(class, f)
 		},
 	}
-	bulkConvert.Flags().StringVar(&bulkDir, "dir", "", "Directory of bind9 key files to convert in place")
-	bulkConvert.Flags().StringVar(&bulkState, "state", "",
+	bulkConvert.Flags().StringVar(&f.dir, "dir", "", "Directory of bind9 key files to convert in place")
+	bulkConvert.Flags().StringVar(&f.state, "state", "",
 		"Key state for keys with no .state file (required only for those)")
-	bulkConvert.Flags().BoolVar(&bulkNoBackup, "no-backup", false,
+	bulkConvert.Flags().BoolVar(&f.noBackup, "no-backup", false,
 		"Do not keep the original bind-format key as .private.orig")
 	bulkConvert.MarkFlagRequired("dir")
 
 	parent.AddCommand(bulkConvert)
 }
 
-func bulkConvertRun(class string) {
+func bulkConvertRun(class string, f *bulkFlags) {
 	// The destination holds private keys and is about to hold more of them in a
 	// second form. Same check the export path makes, and for the same reason:
 	// MkdirAll's mode is not involved here at all, so an existing 0755 course
 	// directory would otherwise go unremarked.
-	if mode, leaks, err := tdns.DirLeaksBeyondOwner(bulkDir); err != nil {
-		fmt.Printf("Error: cannot check permissions on %s: %v\n", bulkDir, err)
+	if mode, leaks, err := tdns.DirLeaksBeyondOwner(f.dir); err != nil {
+		fmt.Printf("Error: cannot check permissions on %s: %v\n", f.dir, err)
 		os.Exit(1)
 	} else if leaks {
 		fmt.Printf("WARNING: %s is mode %04o, i.e. readable beyond its owner, and holds\n"+
 			"         private key material. Run 'chmod 700 %s'\n"+
-			"         unless that exposure is intended.\n", bulkDir, mode, bulkDir)
+			"         unless that exposure is intended.\n", f.dir, mode, f.dir)
 	}
 
-	ds, err := tdns.ConvertBindKeyDir(bulkDir, tdns.BindConvertOptions{
+	ds, err := tdns.ConvertBindKeyDir(f.dir, tdns.BindConvertOptions{
 		Class:        class,
-		DefaultState: bulkState,
-		Backup:       !bulkNoBackup,
+		DefaultState: f.state,
+		Backup:       !f.noBackup,
 	})
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -195,9 +202,9 @@ func bulkConvertRun(class string) {
 
 	converted, skipped := printConvertDispositions(ds)
 	fmt.Printf("Converted %d %s key(s) in %s; %d left alone.\n",
-		converted, classLabel(class), bulkDir, skipped)
+		converted, classLabel(class), f.dir, skipped)
 	if converted > 0 {
-		if bulkNoBackup {
+		if f.noBackup {
 			fmt.Printf("The bind-format originals were NOT kept (--no-backup).\n")
 		} else {
 			fmt.Printf("The bind-format originals are kept as *.private.orig -- still private keys.\n")
@@ -232,7 +239,7 @@ func classCommand(class string) string {
 
 // --- export ------------------------------------------------------------
 
-func bulkExportRun(role, class string) {
+func bulkExportRun(role, class string, f *bulkFlags) {
 	api, err := GetApiClient(role, true)
 	if err != nil {
 		fmt.Printf("Error creating API client: %v\n", err)
@@ -243,22 +250,22 @@ func bulkExportRun(role, class string) {
 	// selector empty, and empty means "everything" — so `--zones "$SUBTREE"`
 	// with an unset variable would dump every private key in the keystore.
 	// (The server refuses it too; this is just the better error.)
-	for _, v := range append(append([]string{}, bulkSelExact...), bulkSelSubtre...) {
+	for _, v := range append(append([]string{}, f.selExact...), f.selSubtre...) {
 		if strings.TrimSpace(v) == "" {
 			fmt.Printf("Error: empty selector value. To export everything, pass no selector at all.\n")
 			os.Exit(1)
 		}
 	}
 
-	if len(bulkSelExact) == 0 && len(bulkSelSubtre) == 0 {
+	if len(f.selExact) == 0 && len(f.selSubtre) == 0 {
 		fmt.Printf("No selector given: exporting every %s key in the keystore.\n", classLabel(class))
 	}
 
 	tr, err := SendKeystoreCmd(api, tdns.KeystorePost{
 		Command:       classCommand(class),
 		SubCommand:    "bulk-export",
-		SelectExact:   bulkSelExact,
-		SelectSubtree: bulkSelSubtre,
+		SelectExact:   f.selExact,
+		SelectSubtree: f.selSubtre,
 	})
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
@@ -270,8 +277,8 @@ func bulkExportRun(role, class string) {
 	}
 
 	// 0700: this directory is about to hold private keys.
-	if err := os.MkdirAll(bulkDest, 0700); err != nil {
-		fmt.Printf("Error creating %s: %v\n", bulkDest, err)
+	if err := os.MkdirAll(f.dest, 0700); err != nil {
+		fmt.Printf("Error creating %s: %v\n", f.dest, err)
 		os.Exit(1)
 	}
 	// MkdirAll applies that 0700 only when it CREATES the directory. Exporting
@@ -285,15 +292,15 @@ func bulkExportRun(role, class string) {
 	// material is already on disk. Warning rather than refusal, matching the
 	// pre-load side: a lab where these keys are public on purpose is a real
 	// case, and this is the operator's own explicitly-named destination.
-	if mode, leaks, err := tdns.DirLeaksBeyondOwner(bulkDest); err != nil {
-		fmt.Printf("Error: cannot check permissions on %s: %v\n", bulkDest, err)
+	if mode, leaks, err := tdns.DirLeaksBeyondOwner(f.dest); err != nil {
+		fmt.Printf("Error: cannot check permissions on %s: %v\n", f.dest, err)
 		os.Exit(1)
 	} else if leaks {
 		fmt.Printf("WARNING: %s is mode %04o, i.e. readable beyond its owner, and is about\n"+
 			"         to receive private key material. Run 'chmod 700 %s'\n"+
-			"         unless that exposure is intended.\n", bulkDest, mode, bulkDest)
+			"         unless that exposure is intended.\n", f.dest, mode, f.dest)
 	}
-	manifest, err := tdns.LoadOrNewKeystoreManifest(bulkDest)
+	manifest, err := tdns.LoadOrNewKeystoreManifest(f.dest)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
@@ -312,7 +319,7 @@ func bulkExportRun(role, class string) {
 				fmt.Printf("Error: %s keyid %d: %v\n", k.Zone, k.Keyid, err)
 				os.Exit(1)
 			}
-			if err := writeKeyPair(bulkDest, base, k.PrivateKey, k.KeyRR); err != nil {
+			if err := writeKeyPair(f.dest, base, k.PrivateKey, k.KeyRR); err != nil {
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -331,7 +338,7 @@ func bulkExportRun(role, class string) {
 				fmt.Printf("Error: %s keyid %d: %v\n", k.Zone, k.Keyid, err)
 				os.Exit(1)
 			}
-			if err := writeKeyPair(bulkDest, base, k.PrivateKey, k.KeyRR); err != nil {
+			if err := writeKeyPair(f.dest, base, k.PrivateKey, k.KeyRR); err != nil {
 				fmt.Printf("Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -352,11 +359,11 @@ func bulkExportRun(role, class string) {
 		}
 	}
 
-	if err := manifest.Save(bulkDest); err != nil {
+	if err := manifest.Save(f.dest); err != nil {
 		fmt.Printf("Error writing manifest: %v\n", err)
 		os.Exit(1)
 	}
-	fmt.Printf("Exported %d %s key(s) to %s\n", written, classLabel(class), bulkDest)
+	fmt.Printf("Exported %d %s key(s) to %s\n", written, classLabel(class), f.dest)
 	fmt.Printf("These files contain private key material. Keep the directory at mode 0700.\n")
 }
 
@@ -405,14 +412,14 @@ func writeOrVerifyFile(path, content string, perm os.FileMode) error {
 
 // --- import ------------------------------------------------------------
 
-func bulkImportRun(role, class string) {
+func bulkImportRun(role, class string, f *bulkFlags) {
 	api, err := GetApiClient(role, true)
 	if err != nil {
 		fmt.Printf("Error creating API client: %v\n", err)
 		os.Exit(1)
 	}
 
-	manifest, err := tdns.LoadKeystoreManifest(bulkSrc)
+	manifest, err := tdns.LoadKeystoreManifest(f.src)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
 		os.Exit(1)
@@ -421,13 +428,13 @@ func bulkImportRun(role, class string) {
 	data := tdns.KeystorePost{
 		Command:    classCommand(class),
 		SubCommand: "bulk-import",
-		Force:      bulkForce,
+		Force:      f.force,
 	}
 	var offered int
 
 	switch class {
 	case "dnssec":
-		keys, err := manifest.LoadDnssecKeys(bulkSrc)
+		keys, err := manifest.LoadDnssecKeys(f.src)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
@@ -435,7 +442,7 @@ func bulkImportRun(role, class string) {
 		data.BulkDnssecKeys, offered = keys, len(keys)
 
 	case "sig0":
-		keys, err := manifest.LoadSig0Keys(bulkSrc)
+		keys, err := manifest.LoadSig0Keys(f.src)
 		if err != nil {
 			fmt.Printf("Error: %v\n", err)
 			os.Exit(1)
@@ -448,7 +455,7 @@ func bulkImportRun(role, class string) {
 	}
 
 	if offered == 0 {
-		fmt.Printf("Manifest in %s lists no %s keys; nothing to do.\n", bulkSrc, classLabel(class))
+		fmt.Printf("Manifest in %s lists no %s keys; nothing to do.\n", f.src, classLabel(class))
 		return
 	}
 

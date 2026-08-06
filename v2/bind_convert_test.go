@@ -292,6 +292,14 @@ func TestConvertBindKeyDirValidationFailureIsNotReportedAsPartial(t *testing.T) 
 		t.Skipf("cannot make the private key unreadable: %v", err)
 	}
 	t.Cleanup(func() { os.Chmod(priv, 0600) })
+	// chmod SUCCEEDS for root and then means nothing: root reads the file
+	// regardless of the bits, the run converts the key, and the assertion below
+	// fails for an environmental reason rather than a defect. Many CI images
+	// run tests as root, so prove the premise before relying on it.
+	if _, rerr := os.ReadFile(priv); rerr == nil {
+		t.Skip("this process can read a mode-0000 file (running as root?); " +
+			"the unreadable-key premise does not hold here")
+	}
 
 	_, err := ConvertBindKeyDir(dir, BindConvertOptions{Class: "dnssec", Backup: true})
 	if err == nil {
@@ -340,4 +348,97 @@ func TestConvertBindKeyDirRefusesMismatchedStateFile(t *testing.T) {
 	if !strings.Contains(err.Error(), "does not match the key") {
 		t.Errorf("the error should name the mismatch, got: %v", err)
 	}
+}
+
+// Two distinct keys that collide on zone+keyid are one manifest entry, and
+// Upsert* replaces rather than appends. Converting both would rewrite both
+// .private files while describing only the second, leaving the first converted
+// and unreferenced -- pre-load would never restore it, and nothing would say so.
+func TestConvertBindKeyDirRefusesManifestIdentityCollision(t *testing.T) {
+	dir := t.TempDir()
+	base, keyid := writeBindKeyTriple(t, dir, "pq.dnslab.", 257,
+		"DNSKEYState: omnipresent\nKRRSIGState: omnipresent\nDSState: omnipresent\n")
+
+	// A second, genuinely different key forced onto the same keytag by copying
+	// the first one's filename identity is not possible through the filename
+	// alone -- the identity comes from the RR -- so build the collision the way
+	// it would really arise: a second key whose RR carries the same owner and
+	// keytag. Simplest faithful construction is to copy the triple under a new
+	// basename, which yields two files describing one manifest identity.
+	for _, ext := range []string{".key", ".private", ".state"} {
+		data, err := os.ReadFile(filepath.Join(dir, base+ext))
+		if err != nil {
+			t.Fatalf("read %s: %v", ext, err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, base+".copy"+ext), data, 0600); err != nil {
+			t.Fatalf("write copy%s: %v", ext, err)
+		}
+	}
+
+	_, err := ConvertBindKeyDir(dir, BindConvertOptions{Class: "dnssec", Backup: true})
+	if err == nil {
+		t.Fatal("two keys sharing one manifest identity must fail the run")
+	}
+	if !strings.Contains(err.Error(), "share zone") {
+		t.Errorf("the error should name the collision, got: %v", err)
+	}
+	_ = keyid
+
+	// All-or-nothing: neither copy may have been converted.
+	for _, b := range []string{base, base + ".copy"} {
+		priv, rerr := os.ReadFile(filepath.Join(dir, b+".private"))
+		if rerr != nil {
+			t.Fatalf("read %s: %v", b, rerr)
+		}
+		if IsPEMFormat(string(priv)) {
+			t.Errorf("%s was converted despite the collision", b)
+		}
+	}
+}
+
+// The converted key is written atomically, so a reader never sees a truncated
+// file and a crash mid-write cannot destroy the only copy of the key material.
+func TestConvertBindKeyDirWritesTheKeyAtomically(t *testing.T) {
+	dir := t.TempDir()
+	base, _ := writeBindKeyTriple(t, dir, "pq.dnslab.", 257,
+		"DNSKEYState: omnipresent\nKRRSIGState: omnipresent\nDSState: omnipresent\n")
+
+	if _, err := ConvertBindKeyDir(dir, BindConvertOptions{Class: "dnssec", Backup: false}); err != nil {
+		t.Fatalf("convert: %v", err)
+	}
+
+	priv := filepath.Join(dir, base+".private")
+	data, err := os.ReadFile(priv)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !IsPEMFormat(string(data)) {
+		t.Fatalf("not converted: %q", string(data[:min(40, len(data))]))
+	}
+	// The mode must arrive with the file, not be applied afterwards to
+	// something that already holds the secret.
+	info, err := os.Stat(priv)
+	if err != nil {
+		t.Fatalf("stat: %v", err)
+	}
+	if info.Mode().Perm() != 0600 {
+		t.Errorf("converted key is mode %04o, want 0600", info.Mode().Perm())
+	}
+	// No temp files left behind, whether or not the run succeeded.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("readdir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".") && strings.Contains(e.Name(), ".tmp") {
+			t.Errorf("temp file left behind: %s", e.Name())
+		}
+	}
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }

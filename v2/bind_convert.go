@@ -140,15 +140,32 @@ func ConvertBindKeyDir(dir string, opts BindConvertOptions) ([]BindConvertDispos
 	// --- phase 1: validate everything, write nothing ---------------------
 	var plans []convertPlan
 	var dispositions []BindConvertDisposition
+	// A manifest entry is identified by zone plus keyid, and Upsert* REPLACES a
+	// matching entry. Two distinct keys for one zone can collide on keytag --
+	// uncommon, but nothing prevents it -- and the result would be quietly
+	// lossy: both .private files rewritten, only the second described in the
+	// manifest, the first converted and unreferenced so pre-load never restores
+	// it. Caught here so the run refuses whole, per the all-or-nothing contract,
+	// rather than half-succeeding without saying so.
+	identity := map[string]string{}
 	for _, base := range bases {
 		plan, err := planBindKeyConversion(dir, base, manifest, opts)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %v", base, err)
 		}
 		dispositions = append(dispositions, plan.disp)
-		if plan.disp.Status == BindConvertConverted {
-			plans = append(plans, plan)
+		if plan.disp.Status != BindConvertConverted {
+			continue
 		}
+		id := fmt.Sprintf("%s::%d", plan.disp.Zone, plan.disp.Keyid)
+		if prev, clash := identity[id]; clash {
+			return nil, fmt.Errorf("%s and %s are different keys but share zone %s keyid %d, "+
+				"which is one manifest entry: converting both would leave one of them "+
+				"unreferenced and unrestorable. Move one aside and convert it separately",
+				prev, base, plan.disp.Zone, plan.disp.Keyid)
+		}
+		identity[id] = base
+		plans = append(plans, plan)
 	}
 
 	// --- phase 2: write --------------------------------------------------
@@ -180,15 +197,14 @@ func ConvertBindKeyDir(dir string, opts BindConvertOptions) ([]BindConvertDispos
 				return fail(fmt.Errorf("%s: %v", p.base, err))
 			}
 		}
-		// Tighten BEFORE writing, not after. os.WriteFile keeps an existing
-		// file's mode, so a .private that arrived at 0644 through a repo or a
-		// tarball would otherwise hold the PKCS#8 PEM at 0644 for the duration
-		// of the write -- a window in which any local user can read it.
+		// Atomic replace rather than truncate-in-place: the target is the
+		// operator's private key, and a half-written one is unrecoverable when
+		// --no-backup is in force. The temp file is created at 0600, so the
+		// mode arrives with the rename instead of being applied to a file that
+		// already holds the secret -- which is why there is no pre-chmod here
+		// any more.
 		touched = true
-		if err := os.Chmod(p.privPath, 0600); err != nil {
-			return fail(fmt.Errorf("%s: securing the private key before rewriting it: %v", p.base, err))
-		}
-		if err := os.WriteFile(p.privPath, []byte(p.privPEM), 0600); err != nil {
+		if err := writeFileAtomic(p.privPath, []byte(p.privPEM), 0600); err != nil {
 			return fail(fmt.Errorf("%s: writing the converted private key: %v", p.base, err))
 		}
 		if p.dnssec != nil {
@@ -464,6 +480,63 @@ func stripZonefileComments(s string) string {
 // writeNewFileExcl writes data to path, refusing to replace an existing file.
 // O_CREATE|O_EXCL makes that refusal atomic rather than a check-then-write race,
 // which matters because the file being protected is an unredacted private key.
+// writeFileAtomic replaces path's contents via a temp file in the same
+// directory: write, fsync, chmod, rename, then fsync the directory.
+//
+// The naive os.WriteFile truncates in place, and this file is an operator's
+// private key. A crash, a full disk or a short write during that call leaves
+// something that is neither the bind-format original nor valid PKCS#8 PEM --
+// and with --no-backup there is then no copy of the key material anywhere.
+// KeystoreManifest.Save already goes to this trouble for the manifest; the key
+// itself deserves it at least as much.
+//
+// Creating the temp file at 0600 also removes the need to pre-chmod the target:
+// the mode arrives with the rename rather than being applied to a file that
+// already holds the secret.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp")
+	if err != nil {
+		return fmt.Errorf("creating a temp file beside %s: %v", path, err)
+	}
+	tmpPath := tmp.Name()
+	cleanup := func() {
+		tmp.Close()
+		os.Remove(tmpPath)
+	}
+	if _, err := tmp.Write(data); err != nil {
+		cleanup()
+		return fmt.Errorf("writing %s: %v", tmpPath, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		cleanup()
+		return fmt.Errorf("syncing %s: %v", tmpPath, err)
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		cleanup()
+		return fmt.Errorf("chmod %s: %v", tmpPath, err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("closing %s: %v", tmpPath, err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		os.Remove(tmpPath)
+		return fmt.Errorf("renaming into place as %s: %v", path, err)
+	}
+	// The rename is directory metadata; syncing the file above does not make
+	// the NAME durable. Same reasoning as the manifest save.
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("opening %s to make the rename durable: %v", dir, err)
+	}
+	if err := d.Sync(); err != nil {
+		d.Close()
+		return fmt.Errorf("syncing %s: %v", dir, err)
+	}
+	return d.Close()
+}
+
 func writeNewFileExcl(path string, data []byte, perm os.FileMode) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
 	if err != nil {

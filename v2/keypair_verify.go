@@ -141,6 +141,16 @@ func VerifyStoredKeyPair(privPEM string, pub *dns.DNSKEY) (checked bool, err err
 	}
 	signer, perr := ParsePrivateKeyPEM([]byte(privPEM))
 	if perr != nil || signer == nil {
+		// Logged, not swallowed. Two very different inputs land here -- a key
+		// whose algorithm this binary does not link, and a .private that is
+		// corrupt -- and only the first is benign. Returning a bare false for
+		// both makes the second invisible until the zone fails to sign, long
+		// after the import that accepted it.
+		lgSigner.Warn("could not verify that a stored private key matches its public key",
+			"zone", pub.Header().Name, "keytag", pub.KeyTag(),
+			"algorithm", dns.AlgorithmToString[pub.Algorithm], "reason", perr,
+			"consequence", "key imported unverified; if this is a corrupt key rather than "+
+				"an algorithm this build does not link, it will fail at signing time")
 		return false, nil
 	}
 	if verr := VerifyKeyPairCorrespondence(signer, pub); verr != nil {

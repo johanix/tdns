@@ -98,14 +98,31 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 						// did not take effect" into a zone that looks freshly
 						// signed and is not. Leaving the old RRSIGs in place
 						// keeps the failure visible until the operator acts.
+						var republishFailed []string
 						for _, z := range dnssecBulkRepublishZones {
 							if rerr := republishSigningKeysForZone(kdb, z); rerr != nil {
 								lgApi.Error("APIkeystore: post-commit signing-keys republish failed after bulk import",
 									"zone", z, "err", rerr,
 									"consequence", "NOT re-signing this zone; it keeps serving the pre-import key set")
+								republishFailed = append(republishFailed, z)
 								continue
 							}
 							triggerResign(conf, z)
+						}
+						// Say so on the response, not only in the log. The
+						// transaction committed, so the keys ARE in the
+						// keystore -- but a zone whose republish failed is
+						// still serving the pre-import key set, and reporting
+						// unqualified success lets a restore script tick the
+						// box and move on. The dispositions are deliberately
+						// left in place: the database write did happen, and the
+						// caller needs to know which keys landed.
+						if len(republishFailed) > 0 && resp != nil {
+							resp.Error = true
+							resp.ErrorMsg = fmt.Sprintf(
+								"keys were imported and committed, but %d zone(s) could not be "+
+									"republished and are still serving the pre-import signing keys: %s",
+								len(republishFailed), strings.Join(republishFailed, ", "))
 						}
 						if dnssecResignZone != "" {
 							triggerResign(conf, dnssecResignZone)
