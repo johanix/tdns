@@ -191,6 +191,27 @@ func (m *KeystoreManifest) Save(dir string) error {
 		os.Remove(tmpPath)
 		return fmt.Errorf("renaming temp manifest to %s: %v", path, err)
 	}
+	// Fsync the PARENT DIRECTORY as well. Syncing the temp file above makes its
+	// contents durable; it says nothing about the directory entry that now
+	// names them. A rename is a directory-metadata operation, so a crash in
+	// this window can still leave the manifest missing or pointing at nothing —
+	// exactly the outcome the temp+rename dance and the sync above exist to
+	// prevent, reached by the one path they do not cover.
+	//
+	// A failure here is reported rather than swallowed: the manifest IS in
+	// place at this point, but it is not known to have survived a power cut,
+	// and the caller is writing an export it intends to rely on later.
+	d, err := os.Open(dir)
+	if err != nil {
+		return fmt.Errorf("opening %s to make the manifest rename durable: %v", dir, err)
+	}
+	if err := d.Sync(); err != nil {
+		d.Close()
+		return fmt.Errorf("syncing %s after renaming the manifest into place: %v", dir, err)
+	}
+	if err := d.Close(); err != nil {
+		return fmt.Errorf("closing %s after syncing the manifest rename: %v", dir, err)
+	}
 	return nil
 }
 
