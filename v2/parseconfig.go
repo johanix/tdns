@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -615,11 +616,14 @@ func applyOutboundSoaSerial(kdb *KeyDB, raw string) error {
 	}
 	kdb.OutboundSoaSerial = mode
 
-	if mode == OutboundSoaSerialPersist {
-		schema := DefaultTables["OutgoingSerials"]
-		if _, err := kdb.DB.Exec(schema); err != nil {
-			return fmt.Errorf("failed to create OutgoingSerials table: %w", err)
-		}
+	// Create the table unconditionally. The mode is now a PER-ZONE setting that
+	// merely defaults to this global one (zd.EffectiveOutboundSoaSerial), so any
+	// individual zone may be in persist mode even when the global is keep — and
+	// zones are parsed after this runs, so we cannot know yet whether one is.
+	// CREATE IF NOT EXISTS on an unused table is cheap.
+	schema := DefaultTables["OutgoingSerials"]
+	if _, err := kdb.DB.Exec(schema); err != nil {
+		return fmt.Errorf("failed to create OutgoingSerials table: %w", err)
 	}
 	return nil
 }
@@ -641,6 +645,10 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 	lgConfig.Debug("parsing authoritative zones", "count", len(conf.Zones))
 	var all_zones []string
 	var broken_zones []string
+	// Zones where a GLOBAL persist/unixtime outbound mode is being suppressed
+	// because the zone is a mirroring secondary. Collected in-loop from the
+	// freshly resolved role/mode; see warnGlobalOutboundSerialSuppressed.
+	var serialSuppressedZones []string
 
 	// Process each zone configuration
 	for i := range conf.Zones {
@@ -902,6 +910,21 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		}
 
 		options := parseZoneOptions(conf, zname, zconf, zd)
+
+		// Strip origination settings a tdns-auth secondary may not act on
+		// (Fix B). This MUST run before activateUpdatePolicy below: that
+		// function returns a HARD error — quarantining the zone — when
+		// allow-child-updates is set without a delegationbackend, and a
+		// secondary configured that way should get the soft warning and keep
+		// serving, not be taken out of service. Running here also means the
+		// delegation-sync setup block further down sees delegation-sync-parent
+		// already false, so SetupZoneSync never registers for a secondary and
+		// the DSYNC vector is closed at parse time with no extra wiring.
+		//
+		// zd.ZoneType is not yet assigned at this point in the parse, so the
+		// locally resolved zonetype is passed explicitly.
+		options, zconf.OutboundSoaSerial = zd.applyOptionNormalization(zonetype, options, zconf.OutboundSoaSerial)
+
 		var outopts []string
 		for o, val := range options {
 			if val {
@@ -1134,6 +1157,20 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// because LeaderElectionManager doesn't exist until StartAgent runs.
 		// MP zone KEY publication is registered in tdns-mp's StartAgent.
 
+		// Collect zones where a GLOBAL persist/unixtime outbound mode is being
+		// suppressed, from the role and per-zone mode resolved in THIS pass.
+		// (Reading them back off the registry instead would see a ZoneType the
+		// RefreshEngine has not assigned yet — see serialSuppressionCandidate.)
+		//
+		// Deliberately here, at the bottom of the loop body: every `continue`
+		// above rejects the zone (bad ACL, invalid update policy, unusable
+		// store, ...), and a rejected zone is not serving, so reporting it as a
+		// secondary with a suppressed serial policy would be noise about a zone
+		// that is not running at all.
+		if serialSuppressionCandidate(Globals.App.Type, zonetype, options, zconf.OutboundSoaSerial) {
+			serialSuppressedZones = append(serialSuppressedZones, zname)
+		}
+
 		// Non-zone-serving app types skip zone refresh. Everything
 		// else (Auth, Agent, downstream MP/NM/ES roles) queues each
 		// parsed zone for refresh.
@@ -1161,6 +1198,10 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				Options:        options,
 				UpdatePolicy:   policy,
 				DnssecPolicy:   zconf.DnssecPolicy,
+				// Always carried (empty == inherit the global), so a config
+				// edit that REMOVES a per-zone mode actually reverts the zone
+				// to the global on reload instead of keeping the stale value.
+				OutboundSoaSerial: zconf.OutboundSoaSerial,
 			}
 			select {
 			case conf.Internal.RefreshZoneCh <- zr:
@@ -1172,8 +1213,60 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 
 	lgConfig.Info("zones parsed and refreshing", "count", len(all_zones), "zones", all_zones, "broken", broken_zones, "queued", len(conf.Internal.RefreshZoneCh))
 
+	warnGlobalOutboundSerialSuppressed(conf, serialSuppressedZones)
+
 	lgConfig.Debug("ParseZones complete")
 	return all_zones, broken_zones, nil
+}
+
+// warnGlobalOutboundSerialSuppressed tells the operator, once per parse, that a
+// server-wide outbound_soa_serial of persist/unixtime is being ignored for the
+// tdns-auth secondaries on this server.
+//
+// The option normalizer warns per zone about an EXPLICIT per-zone mode, but a
+// secondary that merely inherits a global one gets no per-zone warning — that
+// would be noise on every secondary of a server whose primaries legitimately
+// use persist. Without this, though, the suppression would be entirely
+// invisible: the operator set a server-wide policy and some zones quietly do
+// not follow it. Name them once instead.
+//
+// suppressed is collected by the caller DURING the parse loop, from the
+// zonetype/options/serial-mode it has just resolved. It deliberately does NOT
+// re-scan the Zones registry: zd.ZoneType is assigned asynchronously by the
+// RefreshEngine when it consumes the ZoneRefresher, so at this point a
+// cold-start registry entry still has ZoneType == 0 — which would read as
+// "not a primary" and mis-report every zone without inline-signing, PRIMARIES
+// INCLUDED, as a suppressed secondary. On reload it would read the previous
+// parse's values rather than this one's.
+// serialSuppressionCandidate reports whether a zone — described by the role,
+// options and per-zone mode resolved DURING the parse — is one where a global
+// persist/unixtime outbound mode will be silently suppressed.
+//
+// Takes loose values rather than a *ZoneData on purpose: the registry entry's
+// ZoneType is assigned asynchronously by the RefreshEngine, so at parse time it
+// is still 0 and reading it would classify primaries as secondaries.
+//
+// A zone carrying its OWN explicit mode is not a candidate: the normalizer
+// already warned about it per zone, and reporting it twice would just be noise.
+func serialSuppressionCandidate(appType AppType, ztype ZoneType, opts map[ZoneOption]bool, perZoneMode string) bool {
+	if appType != AppTypeAuth || perZoneMode != "" {
+		return false
+	}
+	return ztype == Secondary && !opts[OptInlineSigning]
+}
+
+func warnGlobalOutboundSerialSuppressed(conf *Config, suppressed []string) {
+	mode := strings.TrimSpace(strings.ToLower(conf.DnsEngine.OutboundSoaSerial))
+	if mode != OutboundSoaSerialPersist && mode != OutboundSoaSerialUnixtime {
+		return
+	}
+	if Globals.App.Type != AppTypeAuth || len(suppressed) == 0 {
+		return
+	}
+	sort.Strings(suppressed)
+	lgConfig.Warn("global outbound_soa_serial is suppressed for secondary zones",
+		"mode", mode, "count", len(suppressed), "zones", suppressed,
+		"reason", "a secondary must serve the serial it received from upstream, unmodified")
 }
 
 // activateUpdatePolicy validates a zone's update-policy config and builds the

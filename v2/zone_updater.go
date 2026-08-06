@@ -30,6 +30,19 @@ type UpdateRequest struct {
 	Action         func() error
 }
 
+// updaterCmdMutatesZoneContent reports whether a ZoneUpdater command writes
+// ZONE CONTENT (as opposed to some side store), and is therefore subject to the
+// origination gate at the head of the updater loop.
+//
+// Only these two write the zone. TRUSTSTORE-UPDATE writes the keystore via
+// TruststorePost and must pass through untouched even on a zone that may not
+// originate — gating it would break SIG(0) key management on secondaries.
+// DEFERRED-UPDATE is rejected by the loop as a wrong-queue error, and PING is
+// handled before the zone is even resolved.
+func updaterCmdMutatesZoneContent(cmd string) bool {
+	return cmd == "ZONE-UPDATE" || cmd == "CHILD-UPDATE"
+}
+
 func SprintUpdates(actions []dns.RR) string {
 	var buf string
 	for _, rr := range actions {
@@ -90,6 +103,36 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 			if !ok {
 				lg.Warn("ZoneUpdater: unknown zone in update request, ignoring", "cmd", ur.Cmd, "zone", ur.ZoneName)
 				lg.Debug("ZoneUpdater: known zones", "zones", Zones.Keys())
+				continue
+			}
+
+			// Fail-closed origination gate (Fix D). The per-command checks
+			// below gate ZONE-UPDATE on allow-updates OR ur.InternalUpdate --
+			// and EVERY ops_* publisher sets InternalUpdate, so allow-updates
+			// is a call-site convention rather than an applier gate. Any
+			// publisher that does not check the option at its own call site
+			// therefore walks straight through and mutates the zone.
+			//
+			// This is the chokepoint that makes the invariant structural
+			// rather than a promise kept by N call sites: a tdns-auth zone
+			// that may not originate content never has zone content applied,
+			// whatever flags the request carries.
+			//
+			// Scoped to the two zone-content commands. TRUSTSTORE-UPDATE must
+			// pass through untouched -- it writes the keystore, never zone
+			// content. DEFERRED-UPDATE errors out below; PING returned above.
+			//
+			// Logged at ERROR as an invariant violation, matching the existing
+			// precedent for the child-updates case a few lines down: once the
+			// origination options are normalized off, nothing should ever
+			// reach this gate, so a hit means some path bypassed the option
+			// system -- a code bug worth shouting about. Deliberately not
+			// recorded in the zone's error registry, so it cannot collide with
+			// the operator-facing config warning.
+			if updaterCmdMutatesZoneContent(ur.Cmd) && !zoneMayOriginateContent(zd) {
+				lg.Error("ZoneUpdater: refusing zone mutation on a secondary that may not originate content (invariant violation)",
+					"cmd", ur.Cmd, "zone", ur.ZoneName, "internal", ur.InternalUpdate,
+					"description", ur.Description, "actions", len(ur.Actions))
 				continue
 			}
 

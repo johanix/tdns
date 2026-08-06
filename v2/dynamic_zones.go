@@ -305,6 +305,8 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 				Options:        specOptions,
 				UpdatePolicy:   spec.Policy,
 				DnssecPolicy:   spec.Zconf.DnssecPolicy,
+
+				OutboundSoaSerial: spec.Zconf.OutboundSoaSerial,
 			}
 			select {
 			case conf.Internal.RefreshZoneCh <- zr:
@@ -381,6 +383,8 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			ConfigUpdate:   true, // config-bearing (persisted dynamic zone)
 			Zonefile:       zconf.Zonefile,
 			Options:        options,
+
+			OutboundSoaSerial: zconf.OutboundSoaSerial,
 		}
 
 		// Blocking send, exactly like the static-zone enqueue in ParseZones.
@@ -449,9 +453,15 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 		zoneFilePath = filepath.Join(zoneDirectory, zoneFileName)
 	}
 
-	// Convert options to strings
+	// Convert options to strings. Serialize the AS-CONFIGURED set, not the
+	// effective one: this file is REGENERATED from live state on every
+	// successful refresh of a persistable dynamic zone, so writing the
+	// post-normalization set would permanently delete the operator's
+	// origination options from their own config — after which the warning
+	// clears and the misconfiguration becomes invisible, silently "fixed" by
+	// destroying the evidence.
 	optionsStrs := make([]string, 0)
-	for opt, enabled := range zd.Options {
+	for opt, enabled := range zd.asConfiguredOptions() {
 		if enabled {
 			if optStr, ok := ZoneOptionToString[opt]; ok {
 				// Skip internal options that shouldn't be in config.
@@ -477,19 +487,20 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 	}
 
 	zconf := ZoneConf{
-		Name:           zd.ZoneName,
-		Zonefile:       zoneFilePath,
-		Type:           typeStr,
-		Store:          storeStr,
-		Primaries:      clonePeerConfs(zd.PrimariesConf),
-		Notify:         zd.Notify,
-		AllowNotify:    zd.AllowNotify,
-		Downstreams:    zd.Downstreams,
-		DownstreamAuth: zd.DownstreamAuth,
-		OptionsStrs:    optionsStrs,
-		Template:       zd.Template,
-		SourceCatalog:  zd.SourceCatalog,
-		ApiManaged:     zd.Options[OptApiManagedZone],
+		Name:              zd.ZoneName,
+		Zonefile:          zoneFilePath,
+		Type:              typeStr,
+		Store:             storeStr,
+		OutboundSoaSerial: zd.OutboundSoaSerial,
+		Primaries:         clonePeerConfs(zd.PrimariesConf),
+		Notify:            zd.Notify,
+		AllowNotify:       zd.AllowNotify,
+		Downstreams:       zd.Downstreams,
+		DownstreamAuth:    zd.DownstreamAuth,
+		OptionsStrs:       optionsStrs,
+		Template:          zd.Template,
+		SourceCatalog:     zd.SourceCatalog,
+		ApiManaged:        zd.Options[OptApiManagedZone],
 		// Note: We don't serialize Frozen, Dirty, Error, ErrorType, ErrorMsg, RefreshCount
 		// as these are runtime state, not configuration
 	}
@@ -890,6 +901,15 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 	if fromAPI {
 		options[OptApiManagedZone] = true
 	}
+	// Normalize here, at the option-finalization site, rather than relying on
+	// the RefreshEngine merge that happens later: the zone is registered and
+	// persisted below, so without this it would be live (and written to the
+	// dynamic config) carrying origination options it may not act on, with no
+	// ConfigWarning, until the async refresh caught up.
+	normOptions, normSerial, suppressedOptions, normMsg := normalizeOptionsForRole(
+		Globals.App.Type, in.Type, options, "")
+	options = normOptions
+	_ = normSerial // no per-zone serial mode on the API add path (no knob)
 
 	// Resolve hostname primaries to addresses via the IMR at add time (not only
 	// on the next restart). Zero resolved on a secondary -> reject the add.
@@ -913,6 +933,12 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 		Status:        ZoneStatusPending,
 		Data:          core.NewCmap[OwnerData](),
 		KeyDB:         conf.Internal.KeyDB,
+
+		SuppressedOptions: suppressedOptions,
+	}
+	if normMsg != "" {
+		lg.Warn("zone option normalization", "zone", name, "detail", normMsg)
+		zd.SetError(ConfigWarning, "%s", normMsg)
 	}
 
 	// Commit the staged inline key just before registration/persistence (so the
@@ -1087,8 +1113,17 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		// mutable map with oldZd, or the B5 replace-not-mutate strategy breaks
 		// (an in-flight refresh on oldZd and later updates on newZd would race on
 		// one map guarded by two different mutexes).
-		options = make(map[ZoneOption]bool, len(oldZd.Options))
-		for k, v := range oldZd.Options {
+		//
+		// Carry the AS-CONFIGURED set, not the effective one. Copying only
+		// oldZd.Options would hand the normalizer a set that has already been
+		// stripped: it would find nothing to strip, return an empty suppressed
+		// set, and that empty set would then overwrite the carried-forward
+		// record — permanently deleting the operator's origination options from
+		// the persisted config on the next rewrite. Re-normalizing the
+		// as-configured set instead reproduces the same suppressed record.
+		src := oldZd.asConfiguredOptions()
+		options = make(map[ZoneOption]bool, len(src))
+		for k, v := range src {
 			options[k] = v
 		}
 	} else {
@@ -1103,7 +1138,29 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	allowNotify := append([]AclEntry(nil), oldZd.AllowNotify...)
 	downstreams := append([]AclEntry(nil), oldZd.Downstreams...)
 	downstreamAuth := append([]string(nil), oldZd.DownstreamAuth...)
+	// Same reason as the ACLs above: modify does not carry an outbound serial
+	// mode (there is deliberately no API knob for it), so without this a
+	// TSIG-only modify would silently reset a zone that has one to the global
+	// default.
+	outboundSoaSerial := oldZd.OutboundSoaSerial
+	// Carry the suppressed-options record across the replacement too, so the
+	// as-configured view survives a modify and the operator's origination
+	// options are not dropped from the persisted config by the next rewrite.
+	suppressedOptions := oldZd.SuppressedOptions
 	oldZd.mu.Unlock()
+
+	// Normalize the SUBMITTED options, not just the carried-forward ones.
+	// Without this, `zone modify --options allow-updates` on a secondary would
+	// install them live and persist them with a STALE SuppressedOptions record
+	// and no ConfigWarning — re-enabling exactly what the normalizer exists to
+	// strip. Recomputing here also means the suppressed set describes the
+	// options actually submitted rather than whatever the previous incarnation
+	// of this zone happened to carry.
+	normOptions, normSerial, normSuppressed, normMsg := normalizeOptionsForRole(
+		Globals.App.Type, oldZd.ZoneType, options, outboundSoaSerial)
+	options = normOptions
+	outboundSoaSerial = normSerial
+	suppressedOptions = normSuppressed
 
 	newZd := &ZoneData{
 		ZoneName:       name,
@@ -1120,12 +1177,19 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		Status:         ZoneStatusPending,
 		Data:           core.NewCmap[OwnerData](),
 		KeyDB:          conf.Internal.KeyDB,
+
+		OutboundSoaSerial: outboundSoaSerial,
+		SuppressedOptions: suppressedOptions,
 	}
 	// Commit the staged inline key just before persistence so the rewritten file
 	// includes it; roll it back if persistence fails.
 	rollbackKey, cerr := conf.commitStagedTsigKey(staged)
 	if cerr != nil {
 		return "", fmt.Errorf("zone %s: %w", name, cerr)
+	}
+	if normMsg != "" {
+		lg.Warn("zone option normalization", "zone", name, "detail", normMsg)
+		newZd.SetError(ConfigWarning, "%s", normMsg)
 	}
 	Zones.Set(name, newZd)
 
@@ -1157,6 +1221,8 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		ZoneStore:     MapZone,
 		Options:       options,
 		Force:         true,
+
+		OutboundSoaSerial: outboundSoaSerial,
 	}
 	if err := conf.enqueueRefresh(ctx, zr); err != nil {
 		return "", fmt.Errorf("zone %s modified but failed to schedule refresh: %w", name, err)

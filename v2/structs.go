@@ -138,17 +138,23 @@ type ZoneData struct {
 	// ZoneFile           string // TODO: Remove this
 	IncomingSerial uint32 // SOA serial that we got from upstream
 	CurrentSerial  uint32 // SOA serial after local bumping
-	FirstZoneLoad  bool   // true until first zone data has been loaded
-	Verbose        bool
-	Debug          bool
-	IxfrChain      []Ixfr
-	PrimariesConf  []PeerConf // as-written primaries; persisted; re-resolved each load (P3)
-	Upstreams      []PeerConf // resolved addr:port tuples; runtime-only; used for transfer
-	Notify         []PeerConf // downstream secondaries that we notify (addr + key)
-	AllowNotify    []AclEntry // secondary: who may NOTIFY us; empty => accept from resolved primaries
-	Downstreams    []AclEntry // primary: who may AXFR from us (provide-xfr ACL); empty => deny
-	DownstreamAuth []string   // acceptable transfer-auth mechanism classes (empty => unrestricted); see authorizeTransfer
-	Zonefile       string
+	// OutboundSoaSerial is the PER-ZONE outbound serial mode (keep | unixtime
+	// | persist), sourced from the zone's config (possibly via its template).
+	// Empty means "inherit the server-global dnsengine.outbound_soa_serial".
+	// Never read directly — call zd.EffectiveOutboundSoaSerial(), which
+	// resolves the zone/global tiers.
+	OutboundSoaSerial string
+	FirstZoneLoad     bool // true until first zone data has been loaded
+	Verbose           bool
+	Debug             bool
+	IxfrChain         []Ixfr
+	PrimariesConf     []PeerConf // as-written primaries; persisted; re-resolved each load (P3)
+	Upstreams         []PeerConf // resolved addr:port tuples; runtime-only; used for transfer
+	Notify            []PeerConf // downstream secondaries that we notify (addr + key)
+	AllowNotify       []AclEntry // secondary: who may NOTIFY us; empty => accept from resolved primaries
+	Downstreams       []AclEntry // primary: who may AXFR from us (provide-xfr ACL); empty => deny
+	DownstreamAuth    []string   // acceptable transfer-auth mechanism classes (empty => unrestricted); see authorizeTransfer
+	Zonefile          string
 	// Template names the config template an API-provisioned zone was expanded
 	// from (zone add --template). Persisted in the dynamic config entry so a
 	// restart re-expands it; the update policy is deliberately NOT persisted —
@@ -161,6 +167,14 @@ type ZoneData struct {
 	Children          map[string]*ChildDelegationData
 	DelegationBackend DelegationBackend // parent-side: backend for storing child delegation data
 	Options           map[ZoneOption]bool
+	// SuppressedOptions records the origination options that were configured
+	// for this zone but stripped by normalizeOptionsForRole (a tdns-auth
+	// secondary may not originate content). Options above is the EFFECTIVE
+	// set; Options ∪ SuppressedOptions is the AS-CONFIGURED set, which is what
+	// must be re-serialized when a dynamic zone's config file is regenerated —
+	// otherwise the operator's stated intent is silently deleted from their own
+	// config. Use asConfiguredOptions(). nil when nothing was suppressed.
+	SuppressedOptions map[ZoneOption]bool
 	UpdatePolicy      UpdatePolicy
 	DnssecPolicy      *DnssecPolicy
 	DnssecPolicyName  string // name of currently-applied policy; used to detect config-reload-driven changes
@@ -306,6 +320,14 @@ type ZoneConf struct {
 	UpdatePolicy      UpdatePolicyConf
 	DelegationBackend string `yaml:"delegationbackend" mapstructure:"delegationbackend"` // named backend for child delegation data
 	DnssecPolicy      string `yaml:"dnssecpolicy" mapstructure:"dnssecpolicy"`
+	// OutboundSoaSerial is the per-zone override of the server-global
+	// dnsengine.outbound_soa_serial. Empty (the default) inherits the global.
+	// Set it on a TEMPLATE to give a whole class of zones a serial policy —
+	// that is the intended granularity; a zone that sets it explicitly wins
+	// over its template (ExpandTemplate gap-fills only unset fields, and a
+	// non-empty string counts as set, so an explicit "keep" beats a template
+	// "persist").
+	OutboundSoaSerial string `yaml:"outbound_soa_serial,omitempty" mapstructure:"outbound_soa_serial" validate:"omitempty,oneof=keep unixtime persist"`
 	// EffectiveDnssecPolicy / DnssecPolicyOverridden / DnssecPolicyConfigBase
 	// are display-only fields populated by the list-zones handler: the policy
 	// actually bound to the running zone; whether it came from a dynamic
@@ -331,7 +353,26 @@ type ZoneConf struct {
 	// "(not recorded)".
 	AppliedError string            `yaml:"-"`
 	PolicyDetail *DnssecPolicyView `yaml:"-"`
-	Template     string            `yaml:"template" mapstructure:"template"`
+	// Serial visibility (display-only; not config). CurrentSerial is what we
+	// advertise to our downstreams, IncomingSerial what we last received from
+	// upstream. Both are free to populate — they are already on ZoneData — and
+	// `zone list -v` shows them side by side.
+	//
+	// UpstreamSerials is populated ONLY by the single-zone `zone desc` path: it
+	// costs a live SOA probe per configured primary, which is fine for one zone
+	// and not for a bulk listing. Per-primary rather than one aggregate value
+	// is the point — "this master says 42, that one says 5000" is the direct
+	// diagnostic for the split-brain that motivated the MUST-NOT-MODIFY work,
+	// and there is currently no way to see it from tdns at all.
+	CurrentSerial   uint32           `yaml:"-"`
+	IncomingSerial  uint32           `yaml:"-"`
+	UpstreamSerials []UpstreamSerial `yaml:"-"`
+	// EffectiveOutboundSoaSerial is the resolved outbound serial mode and where
+	// it came from ("zone", "global" or "default"), so an operator can see both
+	// the value and why it applies.
+	EffectiveOutboundSoaSerial string `yaml:"-"`
+	OutboundSoaSerialSource    string `yaml:"-"`
+	Template                   string `yaml:"template" mapstructure:"template"`
 	// DynamicZones marks a TEMPLATE as instantiable via the dynamic-zones API
 	// (zone add --type primary --template <name>). It is the per-template
 	// opt-in gate: an API client can only pick among operator-blessed
@@ -714,6 +755,16 @@ func rrsToStrings(rrs []dns.RR) []string {
 	return out
 }
 
+// UpstreamSerial is one primary's answer to a live SOA probe, for `zone desc`.
+// Err carries the probe failure (unreachable, REFUSED, TSIG mismatch, ...) so a
+// primary that cannot be reached is shown as such rather than silently omitted
+// — an unreachable master is itself diagnostic.
+type UpstreamSerial struct {
+	Addr   string
+	Serial uint32
+	Err    string
+}
+
 type ZoneRefresher struct {
 	Name           string
 	ZoneType       ZoneType   // primary | secondary
@@ -744,10 +795,15 @@ type ZoneRefresher struct {
 	Edns0Options   *edns0.MsgOptions
 	UpdatePolicy   UpdatePolicy
 	DnssecPolicy   string
-	MultiSigner    string
-	Force          bool // force refresh, ignoring SOA serial
-	Wait           bool // wait for refresh to complete before responding
-	Response       chan RefresherResponse
+	// OutboundSoaSerial carries the per-zone outbound serial mode to the
+	// RefreshEngine (copied to zd.OutboundSoaSerial on merge). Empty means
+	// "inherit the server-global setting" and is a valid, self-consistent
+	// value, so it is always copied — no "only if non-empty" guard.
+	OutboundSoaSerial string
+	MultiSigner       string
+	Force             bool // force refresh, ignoring SOA serial
+	Wait              bool // wait for refresh to complete before responding
+	Response          chan RefresherResponse
 }
 
 type RefresherResponse struct {
