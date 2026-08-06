@@ -67,12 +67,22 @@ func VerifyKeyPairCorrespondence(signer crypto.Signer, pub *dns.DNSKEY) error {
 	// constraint belongs to the RRset-signing path this probe happens to
 	// borrow.
 	//
-	// Borrowing it is deliberate: one code path covers both classes and every
-	// algorithm that can sign at all, including the registered PQ ones. The
-	// flags play no part in the signature maths -- they are metadata, validated
-	// elsewhere -- so copying the public key onto a ZONE-flagged DNSKEY asks
-	// exactly the question worth asking: does this private key correspond to
-	// this public key material?
+	// Borrowing it is deliberate, and the alternative was considered: a SIG(0)
+	// key could be checked with SIG.Sign/SIG.Verify instead, which needs no
+	// probe at all. That would be the more faithful test -- it exercises the key
+	// in the mode it is actually used -- but it means building and signing a
+	// whole dns.Msg, and then a second code path to maintain beside this one.
+	// Signing a three-record RRset is markedly simpler, and the question being
+	// asked is about key material rather than about message framing.
+	//
+	// So: one code path for both classes and for every algorithm that can sign
+	// at all, the registered PQ ones included. The flags play no part in the
+	// signature maths -- they are metadata, validated elsewhere -- so copying
+	// the public key onto a ZONE-flagged DNSKEY asks exactly the question worth
+	// asking: does this private key correspond to this public key material?
+	//
+	// If this ever needs to become a genuine "can this key do SIG(0)" check
+	// rather than a correspondence check, SIG.Sign/SIG.Verify is the route.
 	probe := &dns.DNSKEY{
 		Hdr: dns.RR_Header{Name: owner, Rrtype: dns.TypeDNSKEY,
 			Class: dns.ClassINET, Ttl: keypairProbeTTL},
