@@ -379,13 +379,20 @@ UPDATE TsigKeystore SET algorithm=?, secret=?, origin=?, owner=?, creator=?, cre
 // the PEM column would otherwise surface only at signing time. The public half
 // IS parsed, because that is a cheap, crypto-free way to catch a manifest that
 // disagrees with its own files.
-func (kdb *KeyDB) BulkImportDnssec(tx *Tx, keys []BulkDnssecKey, force bool) ([]BulkKeyDisposition, error) {
+func (kdb *KeyDB) BulkImportDnssec(tx *Tx, keys []BulkDnssecKey, force bool) (dispositions []BulkKeyDisposition, err error) {
 	tx, done, err := kdb.bulkTx(tx, "BulkImportDnssec")
 	if err != nil {
 		return nil, err
 	}
 	var ok bool
-	defer func() { done(ok) }()
+	// A commit failure must not be reported as a successful import. Clear the
+	// dispositions too: "imported" for rows that were rolled back is worse than
+	// no answer, because it is the answer an operator acts on.
+	defer func() {
+		if cerr := done(ok); cerr != nil && err == nil {
+			dispositions, err = nil, cerr
+		}
+	}()
 
 	out := make([]BulkKeyDisposition, 0, len(keys))
 	for _, k := range keys {
@@ -461,13 +468,35 @@ func (kdb *KeyDB) BulkImportDnssec(tx *Tx, keys []BulkDnssecKey, force bool) ([]
 // the next restart. (Pre-load runs before anything populates the cache, so this
 // matters only on the live API path.) The plain map delete matches what the
 // other write paths do; the cache has never been mutex-guarded.
-func (kdb *KeyDB) BulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool) ([]BulkKeyDisposition, error) {
+func (kdb *KeyDB) BulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool) (dispositions []BulkKeyDisposition, err error) {
+	// Whether WE own the transaction decides who invalidates the SIG(0) cache.
+	// If we do, we can only safely do it after our own commit (below). If the
+	// caller does, the commit happens after we return, so the caller must do it
+	// -- it has the dispositions and can see which names changed. Invalidating
+	// here in that case would leave a window for a concurrent read-through
+	// GetSig0Keys to repopulate from pre-commit rows, which is the failure this
+	// invalidation exists to prevent.
+	ownTx := tx == nil
+	var invalidate []string
+
 	tx, done, err := kdb.bulkTx(tx, "BulkImportSig0")
 	if err != nil {
 		return nil, err
 	}
 	var ok bool
-	defer func() { done(ok) }()
+	// A commit failure must not be reported as a successful import. Clear the
+	// dispositions too: "imported" for rows that were rolled back is worse than
+	// no answer, because it is the answer an operator acts on.
+	defer func() {
+		if cerr := done(ok); cerr != nil && err == nil {
+			dispositions, err = nil, cerr
+		}
+		if err == nil && ownTx {
+			for _, zone := range invalidate {
+				kdb.invalidateSig0Cache(zone)
+			}
+		}
+	}()
 
 	out := make([]BulkKeyDisposition, 0, len(keys))
 	for _, k := range keys {
@@ -522,9 +551,14 @@ func (kdb *KeyDB) BulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool) ([]Bulk
 			}
 		}
 	}
+	seen := map[string]bool{}
 	for _, d := range out {
-		if d.Status == BulkStatusImported || d.Status == BulkStatusReplaced {
-			kdb.invalidateSig0Cache(d.Name)
+		if d.Status != BulkStatusImported && d.Status != BulkStatusReplaced {
+			continue
+		}
+		if !seen[d.Name] {
+			seen[d.Name] = true
+			invalidate = append(invalidate, d.Name)
 		}
 	}
 	ok = true
@@ -545,13 +579,20 @@ func (kdb *KeyDB) invalidateSig0Cache(zone string) {
 // BulkImportTsig is the TSIG counterpart. Callers that hold the live TSIG cache
 // (the API handler) must refresh it afterwards; pre-load runs before the cache
 // is built, so it has nothing to invalidate.
-func (kdb *KeyDB) BulkImportTsig(tx *Tx, keys []BulkTsigKey, force bool) ([]BulkKeyDisposition, error) {
+func (kdb *KeyDB) BulkImportTsig(tx *Tx, keys []BulkTsigKey, force bool) (dispositions []BulkKeyDisposition, err error) {
 	tx, done, err := kdb.bulkTx(tx, "BulkImportTsig")
 	if err != nil {
 		return nil, err
 	}
 	var ok bool
-	defer func() { done(ok) }()
+	// A commit failure must not be reported as a successful import. Clear the
+	// dispositions too: "imported" for rows that were rolled back is worse than
+	// no answer, because it is the answer an operator acts on.
+	defer func() {
+		if cerr := done(ok); cerr != nil && err == nil {
+			dispositions, err = nil, cerr
+		}
+	}()
 
 	out := make([]BulkKeyDisposition, 0, len(keys))
 	for _, k := range keys {
@@ -561,7 +602,12 @@ func (kdb *KeyDB) BulkImportTsig(tx *Tx, keys []BulkTsigKey, force bool) ([]Bulk
 		}
 		origin := k.Origin
 		if origin == "" {
-			origin = "import"
+			// "api", not "import". Only config and api are accepted origins:
+			// TsigKeyMgmt setowner/delete refuse anything else, so a key stored
+			// as "import" would be in the keystore and unmanageable. This is the
+			// same trap as the origin=config pre-load bug -- a key that is
+			// present, looks fine, and cannot be operated on.
+			origin = "api"
 		}
 
 		var (
@@ -619,22 +665,33 @@ func (kdb *KeyDB) BulkImportTsig(tx *Tx, keys []BulkTsigKey, force bool) ([]Bulk
 // otherwise it commits on success and rolls back on failure. An import is
 // all-or-nothing: a partially-restored keystore is the state nobody can reason
 // about.
-func (kdb *KeyDB) bulkTx(tx *Tx, who string) (*Tx, func(bool), error) {
+// The finisher RETURNS the commit error rather than only logging it. It used to
+// be a func(bool), which gave it nowhere to report to: a failed commit was
+// logged and the caller returned a nil error together with a full set of
+// "imported" dispositions, though nothing had been written. That reached the
+// startup path directly -- PreloadKeystore treats a nil error as a completed
+// pre-load -- so a commit failure at boot would have produced exactly the
+// outcome this whole feature exists to prevent: a signed zone coming up against
+// an empty keystore, minting its own keys, and publishing a DNSKEY set no
+// parent DS matches. Silently, and having just claimed success.
+func (kdb *KeyDB) bulkTx(tx *Tx, who string) (*Tx, func(bool) error, error) {
 	if tx != nil {
-		return tx, func(bool) {}, nil
+		return tx, func(bool) error { return nil }, nil
 	}
 	newTx, err := kdb.Begin(who)
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s: begin: %v", who, err)
 	}
-	return newTx, func(ok bool) {
+	return newTx, func(ok bool) error {
 		if ok {
 			if err := newTx.Commit(); err != nil {
 				lgSigner.Error("bulk keystore import commit failed", "who", who, "err", err)
+				return fmt.Errorf("%s: commit: %v", who, err)
 			}
-			return
+			return nil
 		}
 		newTx.Rollback()
+		return nil
 	}, nil
 }
 
@@ -750,6 +807,31 @@ func validateBulkPrivateKey(privkey string) error {
 // flags/algorithm/owner/keytag — so it works for algorithms this binary has no
 // implementation for, and still catches a manifest that has drifted from its
 // key files (the failure that would otherwise surface as an unsignable zone).
+// validKeyState reports whether state is one this codebase actually recognises.
+//
+// Without this, a manifest typo such as "activ" imports cleanly and the row is
+// then invisible to every state-scoped query. The zone finds no active key,
+// mints a replacement, and publishes a DNSKEY set the parent DS does not match
+// -- the precise failure this whole feature exists to prevent, reached through
+// a single missing letter that nothing ever complained about.
+func validKeyState(state string, allowed []string) error {
+	for _, a := range allowed {
+		if state == a {
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown key state %q (known: %s)", state, strings.Join(allowed, ", "))
+}
+
+var dnssecKeyStates = []string{
+	DnskeyStateCreated, DnskeyStatePublished, DnskeyStateDsPublished,
+	DnskeyStateStandby, DnskeyStateActive, DnskeyStateRetired, DnskeyStateRemoved,
+}
+
+var sig0KeyStates = []string{
+	Sig0StateCreated, Sig0StatePublished, Sig0StateActive, Sig0StateRetired,
+}
+
 func validateDnssecKeyRR(k BulkDnssecKey) error {
 	if err := validateBulkPrivateKey(k.PrivateKey); err != nil {
 		return err
@@ -773,6 +855,9 @@ func validateDnssecKeyRR(k BulkDnssecKey) error {
 	}
 	if name, ok := dns.AlgorithmToString[dnskey.Algorithm]; ok && !strings.EqualFold(name, k.Algorithm) {
 		return fmt.Errorf("DNSKEY algorithm %s does not match the recorded algorithm %s", name, k.Algorithm)
+	}
+	if err := validKeyState(k.State, dnssecKeyStates); err != nil {
+		return err
 	}
 	return nil
 }
@@ -798,6 +883,9 @@ func validateSig0KeyRR(k BulkSig0Key) error {
 	}
 	if name, ok := dns.AlgorithmToString[key.Algorithm]; ok && !strings.EqualFold(name, k.Algorithm) {
 		return fmt.Errorf("KEY algorithm %s does not match the recorded algorithm %s", name, k.Algorithm)
+	}
+	if err := validKeyState(k.State, sig0KeyStates); err != nil {
+		return err
 	}
 	return nil
 }
