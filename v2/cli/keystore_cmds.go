@@ -182,6 +182,7 @@ candidates, or --interactive to prompt per key.`,
 	exportCmd.Flags().BoolVar(&tsigExportNsd, "nsd", false, "Output a complete NSD key: block")
 
 	c.AddCommand(list, add, generate, importCmd, exportCmd, setowner, deleteCmd, purgeCmd)
+	addBulkCommands(c, role, "tsig")
 	return c
 }
 
@@ -564,6 +565,7 @@ KEY RR). The resulting pair is directly consumable by commands accepting
 	setstate.Flags().StringVarP(&NewState, "state", "", "", "New state of key (created|published|active|retired)")
 
 	c.AddCommand(add, importCmd, generate, algorithms, list, export, delete, setstate)
+	addBulkCommands(c, role, "sig0")
 	return c
 }
 
@@ -797,6 +799,7 @@ without modifying anything. Pass --force to actually delete.`,
 	// auto-rollover moved to `zone dnssec auto-rollover` (auth only; agents never
 	// sign, so it was vestigial under `agent keystore dnssec`).
 	c.AddCommand(add, importCmd, generate, algorithms, policies, list, export, delete, setstate, genDS, rollover, clear, policyCleanup, purge, newKeystoreDnssecPolicyCmd(role), newKeystoreDnssecDsPushCmd(role), newKeystoreDnssecQueryParentCmd(role))
+	addBulkCommands(c, role, "dnssec")
 	return c
 }
 
