@@ -7,6 +7,7 @@ package tdns
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -35,7 +36,7 @@ func writeBindKeyTriple(t *testing.T, dir, zone string, flags uint16, state stri
 	keyid = k.KeyTag()
 	base = KeyFileBasename(dns.Fqdn(zone), dns.ED25519, keyid)
 
-	pub := "; This is a key-signing key, keyid " + itoa(int(keyid)) + ", for " + dns.Fqdn(zone) + "\n" +
+	pub := "; This is a key-signing key, keyid " + strconv.Itoa(int(keyid)) + ", for " + dns.Fqdn(zone) + "\n" +
 		"; Created: 20260715120000 (Wed Jul 15 14:00:00 2026)\n" + k.String() + "\n"
 	if err := os.WriteFile(filepath.Join(dir, base+".key"), []byte(pub), 0644); err != nil {
 		t.Fatalf("write .key: %v", err)
@@ -53,7 +54,7 @@ func writeBindKeyTriple(t *testing.T, dir, zone string, flags uint16, state stri
 		if flags&0x0001 != 0 {
 			ksk, zsk = "yes", "no"
 		}
-		st := "; This is the state of key " + itoa(int(keyid)) + ", for " + dns.Fqdn(zone) + ".\n" +
+		st := "; This is the state of key " + strconv.Itoa(int(keyid)) + ", for " + dns.Fqdn(zone) + ".\n" +
 			"Algorithm: 15\nLength: 256\nLifetime: 0\n" +
 			"KSK: " + ksk + "\nZSK: " + zsk + "\n" +
 			"Generated: 20260715120000\nPublished: 20260715120000\nActive: 20260716000000\n" + state
@@ -62,18 +63,6 @@ func writeBindKeyTriple(t *testing.T, dir, zone string, flags uint16, state stri
 		}
 	}
 	return base, keyid
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var b []byte
-	for n > 0 {
-		b = append([]byte{byte('0' + n%10)}, b...)
-		n /= 10
-	}
-	return string(b)
 }
 
 // TestConvertBindKeyDirEndToEnd is the whole point of the command: a directory

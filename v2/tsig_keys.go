@@ -211,7 +211,17 @@ func (conf *Config) tsigKeyDefined(name string) bool {
 // next successful config load will then fight over.
 //
 // Callers must hold confMu; APIkeystore takes it for every tsig-mgmt command.
+//
+// A nil receiver answers false, i.e. "cannot say", which is the semantics
+// TsigBulkPolicy.StillInConfig documents for a caller that cannot answer.
+// TsigKeyMgmt treats a nil conf as valid -- its refCount closure guards for it
+// -- and it is the same function that hands this method value to
+// BulkImportTsig, so without the guard a nil conf panics on the first key of a
+// bulk import rather than skipping the ownership policy.
 func (conf *Config) tsigKeyDeclaredInConfig(name string) bool {
+	if conf == nil {
+		return false
+	}
 	want := dns.CanonicalName(name)
 	for _, t := range conf.Keys.Tsig {
 		if dns.CanonicalName(t.Name) == want {

@@ -14,6 +14,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -162,31 +163,30 @@ func bulkConvertRun(class string) {
 		Backup:       !bulkNoBackup,
 	})
 	if err != nil {
-		// Nothing was written: the conversion validates the whole directory
-		// before touching a file. Worth saying, so the operator knows they can
-		// fix the cause and re-run rather than hunting for a half-done state.
 		fmt.Printf("Error: %v\n", err)
-		fmt.Printf("Nothing was converted; the directory is unchanged.\n")
+		// Only claim the directory is untouched when it actually is. Validation
+		// failures happen before anything is written, and saying so tells the
+		// operator to fix the cause and re-run. But a phase-2 failure means
+		// earlier keys were already rewritten, and reporting THAT as "unchanged"
+		// would be a confident lie about the one state that cannot be diagnosed
+		// by looking at the directory.
+		var partial *tdns.PartialConvertError
+		if errors.As(err, &partial) {
+			fmt.Printf("\nThe failure happened while writing, so this directory is PARTIALLY\n" +
+				"converted: some keys are PEM, others are still in bind format.\n")
+			if len(ds) > 0 {
+				fmt.Printf("Keys planned for conversion in this run:\n")
+				printConvertDispositions(ds)
+			}
+			fmt.Printf("Each converted key's original is beside it as .private.orig.\n" +
+				"Re-running is safe: already-converted keys are left alone.\n")
+		} else {
+			fmt.Printf("Nothing was converted; the directory is unchanged.\n")
+		}
 		os.Exit(1)
 	}
 
-	var converted, skipped int
-	var lines []string
-	for _, d := range ds {
-		switch d.Status {
-		case tdns.BindConvertConverted:
-			converted++
-			lines = append(lines, fmt.Sprintf("  %-11s %s keyid %d (%s)",
-				d.Status, d.Zone, d.Keyid, d.Detail))
-		default:
-			skipped++
-			lines = append(lines, fmt.Sprintf("  %-11s %s  (%s)", d.Status, d.Basename, d.Detail))
-		}
-	}
-	sort.Strings(lines)
-	if len(lines) > 0 {
-		fmt.Printf("%s\n", strings.Join(lines, "\n"))
-	}
+	converted, skipped := printConvertDispositions(ds)
 	fmt.Printf("Converted %d %s key(s) in %s; %d left alone.\n",
 		converted, classLabel(class), bulkDir, skipped)
 	if converted > 0 {
@@ -492,4 +492,26 @@ func printBulkDispositions(ds []tdns.BulkKeyDisposition) {
 	}
 	sort.Strings(lines)
 	fmt.Printf("%s\n", strings.Join(lines, "\n"))
+}
+
+// printConvertDispositions renders one line per key and returns the converted
+// and left-alone counts.
+func printConvertDispositions(ds []tdns.BindConvertDisposition) (converted, skipped int) {
+	var lines []string
+	for _, d := range ds {
+		switch d.Status {
+		case tdns.BindConvertConverted:
+			converted++
+			lines = append(lines, fmt.Sprintf("  %-11s %s keyid %d (%s)",
+				d.Status, d.Zone, d.Keyid, d.Detail))
+		default:
+			skipped++
+			lines = append(lines, fmt.Sprintf("  %-11s %s  (%s)", d.Status, d.Basename, d.Detail))
+		}
+	}
+	sort.Strings(lines)
+	if len(lines) > 0 {
+		fmt.Printf("%s\n", strings.Join(lines, "\n"))
+	}
+	return converted, skipped
 }
