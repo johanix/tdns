@@ -576,10 +576,33 @@ func (kdb *KeyDB) invalidateSig0Cache(zone string) {
 	}
 }
 
+// TsigBulkPolicy says how a bulk import must treat keys the YAML config owns.
+//
+// The YAML is the ultimate truth for a TSIG key: SyncConfigTsigKeys reconciles
+// the keystore against this host's keys.tsig on every boot, inserting what the
+// config declares and DELETING every origin=config row it does not. So the
+// question a bulk import has to answer is not "is this row marked
+// origin=config" but "is this key STILL in the config". A leftover config row
+// for a key the operator has since removed is config-managed by nothing but its
+// own stale origin column, and is deleted at the next boot either way --
+// refusing to touch it would be protecting a row that is already condemned.
+type TsigBulkPolicy struct {
+	// StillInConfig reports whether name is currently declared in keys.tsig.
+	//
+	// A nil predicate means the caller cannot answer the question, and the
+	// config-ownership rules are then not applied. Pre-load passes nil and MUST:
+	// it runs before LoadTsigKeys (main_initfuncs.go:151 vs :156), so the live
+	// TSIG store is still empty and the predicate would answer "not in config"
+	// for every key, including every key that is. Pre-load compensates by
+	// forcing each restored key to origin=api, so it cannot mint a config row by
+	// any route.
+	StillInConfig func(name string) bool
+}
+
 // BulkImportTsig is the TSIG counterpart. Callers that hold the live TSIG cache
 // (the API handler) must refresh it afterwards; pre-load runs before the cache
 // is built, so it has nothing to invalidate.
-func (kdb *KeyDB) BulkImportTsig(tx *Tx, keys []BulkTsigKey, force bool) (dispositions []BulkKeyDisposition, err error) {
+func (kdb *KeyDB) BulkImportTsig(tx *Tx, keys []BulkTsigKey, force bool, policy TsigBulkPolicy) (dispositions []BulkKeyDisposition, err error) {
 	tx, done, err := kdb.bulkTx(tx, "BulkImportTsig")
 	if err != nil {
 		return nil, err
@@ -596,9 +619,24 @@ func (kdb *KeyDB) BulkImportTsig(tx *Tx, keys []BulkTsigKey, force bool) (dispos
 
 	out := make([]BulkKeyDisposition, 0, len(keys))
 	for _, k := range keys {
-		name := dns.Fqdn(k.Keyname)
-		if k.Algorithm == "" || k.Secret == "" {
-			return nil, fmt.Errorf("TSIG key %s: algorithm and secret are both required", name)
+		// Canonicalised on write, exactly as insertTsigKeystore/updateTsigKeystore
+		// do it. Bulk import used to store both columns verbatim, which made it
+		// the one writer in the tree producing non-canonical rows: an undotted
+		// "hmac-sha256" (or a differently-cased key name) landed beside the
+		// dotted, lowercased rows every other path writes. Nothing then MATCHED
+		// on a plain string compare -- including the diff below, which reported a
+		// spurious "algorithm" conflict against a row that named the same
+		// algorithm, and under --force rewrote the row into the non-canonical
+		// form.
+		name := dns.CanonicalName(k.Keyname)
+		algo := dns.CanonicalName(k.Algorithm)
+		// Full validation, not just the two emptiness checks this used to do:
+		// bulk import was the only way into the keystore that skipped
+		// validateTsigKeySpec, so an unsupported algorithm or a secret that is
+		// not valid base64 imported clean and failed later, at signing time,
+		// nowhere near the import that caused it.
+		if err := validateTsigKeySpec(k.Keyname, k.Algorithm, k.Secret); err != nil {
+			return nil, fmt.Errorf("TSIG key %s: %v", name, err)
 		}
 		origin := k.Origin
 		if origin == "" {
@@ -617,9 +655,32 @@ func (kdb *KeyDB) BulkImportTsig(tx *Tx, keys []BulkTsigKey, force bool) (dispos
 		row := tx.QueryRow(bulkSelectTsigSql, name)
 		scanErr := row.Scan(&curAlg, &curSecret, &curOrigin, &curOwner, &curCreator, &curCreated, &curC)
 
+		if policy.StillInConfig != nil {
+			// The config declares this key, so the config owns it -- whatever the
+			// origin column happens to say, and whether or not a row exists yet.
+			// Checked before the diff and regardless of force: force overrides
+			// "this differs", not "this is not yours to change".
+			if policy.StillInConfig(name) {
+				out = append(out, BulkKeyDisposition{Name: name, Status: BulkStatusConflict,
+					Detail: "key is declared in keys.tsig and the config is authoritative for it; change it there"})
+				continue
+			}
+			// Not in the config, so it must not claim to be config-managed.
+			// origin=config for an undeclared key is simply a false statement,
+			// and a self-deleting one: SyncConfigTsigKeys drops every config row
+			// that keys.tsig does not name, so the import would be reported as
+			// successful and be gone by the next boot. Stored as api instead,
+			// which is both true and durable. When this rewrites an existing
+			// config row the origin shows up in the diff below, so it surfaces as
+			// a conflict unless the operator forces it.
+			if origin == "config" {
+				origin = "api"
+			}
+		}
+
 		switch {
 		case scanErr == sql.ErrNoRows:
-			if _, err := tx.Exec(bulkInsertTsigSql, name, k.Algorithm, k.Secret, origin,
+			if _, err := tx.Exec(bulkInsertTsigSql, name, algo, k.Secret, origin,
 				k.Owner, k.Creator, k.CreatedAt, k.Comment); err != nil {
 				return nil, fmt.Errorf("inserting TSIG key %s: %v", name, err)
 			}
@@ -630,7 +691,12 @@ func (kdb *KeyDB) BulkImportTsig(tx *Tx, keys []BulkTsigKey, force bool) (dispos
 
 		default:
 			diffs := diffFields(
-				field{"algorithm", curAlg, k.Algorithm},
+				// Both sides canonical: a stored "hmac-sha256." and an offered
+				// "hmac-sha256" name the same algorithm and must not read as a
+				// difference. Pre-existing rows written by the old verbatim path
+				// can hold either spelling, so this also stops them showing up as
+				// permanent phantom conflicts on every re-import.
+				field{"algorithm", dns.CanonicalName(curAlg), algo},
 				field{"secret", curSecret, k.Secret},
 				field{"origin", curOrigin, origin},
 				field{"owner", curOwner.String, k.Owner},
@@ -645,7 +711,7 @@ func (kdb *KeyDB) BulkImportTsig(tx *Tx, keys []BulkTsigKey, force bool) (dispos
 				out = append(out, BulkKeyDisposition{Name: name, Status: BulkStatusConflict,
 					Detail: strings.Join(diffs, ", ")})
 			default:
-				if _, err := tx.Exec(bulkUpdateTsigSql, k.Algorithm, k.Secret, origin, k.Owner,
+				if _, err := tx.Exec(bulkUpdateTsigSql, algo, k.Secret, origin, k.Owner,
 					k.Creator, k.CreatedAt, k.Comment, name); err != nil {
 					return nil, fmt.Errorf("replacing TSIG key %s: %v", name, err)
 				}

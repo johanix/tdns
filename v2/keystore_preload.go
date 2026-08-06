@@ -71,10 +71,45 @@ func (conf *Config) PreloadKeystore() error {
 			"hint", "intended for rebuilt-from-repo hosts; on a host whose keystore is authoritative this can revert a key rolled by hand")
 	}
 
+	// ONE transaction across every class. The doc comment above promises
+	// all-or-nothing, and per-class commits did not deliver it: a dnssec class
+	// that loaded followed by a sig0 class that failed left the daemon booting
+	// with half the operator's key material in place and an error telling them
+	// none of it was — the "pre-load that half worked" this feature exists to
+	// prevent, produced by pre-load itself.
+	kdb := conf.Internal.KeyDB
+	tx, err := kdb.Begin("PreloadKeystore")
+	if err != nil {
+		return fmt.Errorf("keystore.preload: starting transaction: %v", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Rollback()
+		}
+	}()
+
+	var sig0Invalidate []string
 	for _, class := range classes {
-		if err := conf.preloadClass(class, dirs[class], overwrite); err != nil {
+		inv, err := conf.preloadClass(tx, class, dirs[class], overwrite)
+		if err != nil {
 			return fmt.Errorf("keystore.preload.%s: %w", class, err)
 		}
+		sig0Invalidate = append(sig0Invalidate, inv...)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("keystore.preload: committing: %v", err)
+	}
+	committed = true
+
+	// BulkImportSig0 delegates cache invalidation to whoever owns the
+	// transaction, and that is now us. Expected to be a no-op in practice --
+	// pre-load runs before anything reads a SIG(0) key, so the cache is still
+	// nil and invalidateSig0Cache returns immediately. Done anyway: the
+	// correctness of the delegation should not rest on startup ordering that
+	// some later change is free to shuffle.
+	for _, zone := range sig0Invalidate {
+		kdb.invalidateSig0Cache(zone)
 	}
 	return nil
 }
@@ -90,54 +125,63 @@ func classOrder(class string) int {
 	}
 }
 
-func (conf *Config) preloadClass(class, dir string, overwrite bool) error {
+// preloadClass loads one class into the caller's transaction. It never commits:
+// PreloadKeystore owns the transaction so that the classes land together or not
+// at all.
+//
+// The returned names are the zones whose SIG(0) cache entries the import
+// invalidated. They travel back rather than being dropped here because the rows
+// are not visible until the caller commits — see BulkSig0InvalidateZones.
+func (conf *Config) preloadClass(tx *Tx, class, dir string, overwrite bool) ([]string, error) {
 	info, err := os.Stat(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("directory %s does not exist", dir)
+			return nil, fmt.Errorf("directory %s does not exist", dir)
 		}
-		return fmt.Errorf("cannot stat %s: %v", dir, err)
+		return nil, fmt.Errorf("cannot stat %s: %v", dir, err)
 	}
 	if !info.IsDir() {
-		return fmt.Errorf("%s is not a directory", dir)
+		return nil, fmt.Errorf("%s is not a directory", dir)
 	}
 	warnIfWorldReadable(dir, info)
 
 	manifest, err := LoadKeystoreManifest(dir)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	kdb := conf.Internal.KeyDB
 	var dispositions []BulkKeyDisposition
+	var sig0Invalidate []string
 	var offered int
 
 	switch class {
 	case "dnssec":
 		keys, err := manifest.LoadDnssecKeys(dir)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		offered = len(keys)
 		if offered == 0 {
 			break
 		}
-		if dispositions, err = kdb.BulkImportDnssec(nil, keys, overwrite); err != nil {
-			return err
+		if dispositions, err = kdb.BulkImportDnssec(tx, keys, overwrite); err != nil {
+			return nil, err
 		}
 
 	case "sig0":
 		keys, err := manifest.LoadSig0Keys(dir)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		offered = len(keys)
 		if offered == 0 {
 			break
 		}
-		if dispositions, err = kdb.BulkImportSig0(nil, keys, overwrite); err != nil {
-			return err
+		if dispositions, err = kdb.BulkImportSig0(tx, keys, overwrite); err != nil {
+			return nil, err
 		}
+		sig0Invalidate = changedZones(dispositions)
 
 	case "tsig":
 		keys := manifest.TsigKeys()
@@ -161,18 +205,24 @@ func (conf *Config) preloadClass(class, dir string, overwrite bool) error {
 		if offered == 0 {
 			break
 		}
-		if dispositions, err = kdb.BulkImportTsig(nil, keys, overwrite); err != nil {
-			return err
+		// Nil StillInConfig: at this point in startup the live TSIG store is
+		// still empty (LoadTsigKeys runs next), so the predicate could only
+		// answer "not in config" for every key and would be worse than no
+		// answer. Safe here precisely because of the loop above -- every
+		// restored key is forced to origin=api, so pre-load cannot create or
+		// impersonate a config-managed row whatever the manifest claims.
+		if dispositions, err = kdb.BulkImportTsig(tx, keys, overwrite, TsigBulkPolicy{}); err != nil {
+			return nil, err
 		}
 
 	default:
-		return fmt.Errorf("unknown key class %q", class)
+		return nil, fmt.Errorf("unknown key class %q", class)
 	}
 
 	if offered == 0 {
 		lgConfig.Warn("keystore pre-load: manifest lists no keys for this class",
 			"class", class, "dir", dir)
-		return nil
+		return nil, nil
 	}
 
 	imported, unchanged, conflicts, replaced := 0, 0, 0, 0
@@ -196,9 +246,34 @@ func (conf *Config) preloadClass(class, dir string, overwrite bool) error {
 				"class", class, "name", d.Name, "keyid", d.Keyid, "differs", d.Detail)
 		}
 	}
-	lgConfig.Info("keystore pre-load complete", "class", class, "dir", dir,
+	// "staged", not "complete": nothing is durable until PreloadKeystore
+	// commits, and a later class can still take the whole pre-load down.
+	lgConfig.Info("keystore pre-load staged", "class", class, "dir", dir,
 		"imported", imported, "unchanged", unchanged, "conflicts", conflicts, "replaced", replaced)
-	return nil
+	return sig0Invalidate, nil
+}
+
+// modeLeaksBeyondOwner is the single definition of "exposed" for a directory
+// holding private key material: any permission bit granted to group or other.
+func modeLeaksBeyondOwner(mode os.FileMode) bool {
+	return mode.Perm()&0o077 != 0
+}
+
+// DirLeaksBeyondOwner stats dir and reports its permission bits together with
+// whether they reach beyond the owner.
+//
+// Exported because the WRITE side needs the same check: `keystore <class>
+// bulk-export` lives in v2/cli and creates these directories, while pre-load
+// only ever reads them. Two independent notions of "exposed" — one on the
+// producer, one on the consumer — would be worse than either check alone, so
+// both go through this.
+func DirLeaksBeyondOwner(dir string) (os.FileMode, bool, error) {
+	info, err := os.Stat(dir)
+	if err != nil {
+		return 0, false, err
+	}
+	mode := info.Mode().Perm()
+	return mode, modeLeaksBeyondOwner(mode), nil
 }
 
 // warnIfWorldReadable flags an export directory that anyone on the box can
@@ -206,7 +281,7 @@ func (conf *Config) preloadClass(class, dir string, overwrite bool) error {
 // operator may have deliberate reasons (a lab where the keys are public on
 // purpose), and refusing to start over a permission bit is worse than saying so.
 func warnIfWorldReadable(dir string, info os.FileInfo) {
-	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+	if mode := info.Mode().Perm(); modeLeaksBeyondOwner(mode) {
 		lgConfig.Warn("keystore pre-load: directory is readable beyond its owner",
 			"dir", dir, "mode", fmt.Sprintf("%04o", mode),
 			"hint", "it holds private keys; chmod 700 unless the exposure is intended")

@@ -167,6 +167,25 @@ func bulkExportRun(role, class string) {
 		fmt.Printf("Error creating %s: %v\n", bulkDest, err)
 		os.Exit(1)
 	}
+	// MkdirAll applies that 0700 only when it CREATES the directory. Exporting
+	// into one that already exists — a checked-out labconfig repo, a shared
+	// scratch dir, anything at the usual 0755 — leaves the mode untouched and
+	// drops .private files (and, for TSIG, a manifest full of secrets) into a
+	// world-listable path with nothing said about it.
+	//
+	// Checked here, BEFORE the first key is written, so the warning arrives
+	// while the operator can still stop and fix the mode rather than after the
+	// material is already on disk. Warning rather than refusal, matching the
+	// pre-load side: a lab where these keys are public on purpose is a real
+	// case, and this is the operator's own explicitly-named destination.
+	if mode, leaks, err := tdns.DirLeaksBeyondOwner(bulkDest); err != nil {
+		fmt.Printf("Error: cannot check permissions on %s: %v\n", bulkDest, err)
+		os.Exit(1)
+	} else if leaks {
+		fmt.Printf("WARNING: %s is mode %04o, i.e. readable beyond its owner, and is about\n"+
+			"         to receive private key material. Run 'chmod 700 %s'\n"+
+			"         unless that exposure is intended.\n", bulkDest, mode, bulkDest)
+	}
 	manifest, err := tdns.LoadOrNewKeystoreManifest(bulkDest)
 	if err != nil {
 		fmt.Printf("Error: %v\n", err)
