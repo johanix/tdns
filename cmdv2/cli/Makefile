@@ -10,10 +10,14 @@ include ../../utils/Makefile.common
 -include ../algs-env.mk
 -include algs-libs.mk
 
-.PHONY: clean install docs
+.PHONY: clean install docs pkg
 
 install:
 	install -s -b -c ${PROG} /usr/local/bin/
+
+# NetBSD binary package; rule and rationale in ../../utils/Makefile.common.
+# This one also ships dog, and builds and installs ../dog to get it.
+pkg:	pkg_tdns_cli
 
 # Regenerate the generated CLI reference (reference/cli/*.md) from the live
 # cobra command tree. Output is stable (no auto-gen date footer), so re-running
