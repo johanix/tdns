@@ -26,6 +26,11 @@ cmdv2/dog/dog
 cmdv2/imr/tdns-imr
 cmdv2/agent/tdns-agent
 
+# NetBSD binary packages built by "make pkg"; they land beside the binary in
+# the app directory.
+cmd/*/*.tgz
+cmdv2/*/*.tgz
+
 # old stuff; going away:
 sidecar/music-sidecar
 sidecar-cli/sidecar-cli

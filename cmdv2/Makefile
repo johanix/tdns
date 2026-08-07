@@ -1,4 +1,4 @@
-.PHONY: all v2 genalgs version clean install install-dirs check-root tarball
+.PHONY: all v2 genalgs version clean install install-dirs check-root tarball pkg
 
 # all apps in this directory
 all: v2
@@ -44,6 +44,24 @@ install: check-root install-dirs
 	$(MAKE) -C ./agent/ install
 	$(MAKE) -C ./imr/ install
 	$(MAKE) -C ./dog/ install
+
+# NetBSD binary packages -- four of them, one per component. See
+# ../utils/mkpkg.sh for the reasoning and ../utils/Makefile.common for the
+# rules. Each app's "pkg" target builds, installs and packs its own binaries,
+# so this needs root for the same reason "install" does.
+#
+# The .tgz files are left in the app directories. Publishing is deliberately
+# NOT a target here: they go into a per-osrelease tree
+# (/var/tmp/axfr.net/ftpfiles/pkg/amd64-<osrelease>/) on a lab dom0, and the
+# same file is copied into EVERY such tree -- OS_VERSION mismatch only warns.
+# Which trees exist is a property of the lab, not of this repo.
+#
+# cli/ also builds and installs dog/, so dog is not listed separately.
+pkg: check-root install-dirs genalgs
+	$(MAKE) -C ./auth/ pkg
+	$(MAKE) -C ./agent/ pkg
+	$(MAKE) -C ./imr/ pkg
+	$(MAKE) -C ./cli/ pkg
 
 TAR_VERSION:=v2
 TARFILE:=/tmp/usr.local.tdns.$(TAR_VERSION).tar.gz
