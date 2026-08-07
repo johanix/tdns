@@ -11,13 +11,18 @@
  * already there and adopts them — the correct outcome by construction rather
  * than by racing the signer.
  *
- * Pre-load never forces. See keystore_bulk.go for why the running keystore
- * outranks a file on disk.
+ * Pre-load does not force BY DEFAULT: a key already in the keystore under
+ * different material is the keystore winning, because a file on disk may be
+ * arbitrarily stale (see keystore_bulk.go). keystore.preload.overwrite-existing-keys
+ * reverses that for a host rebuilt from a repo, and is passed straight through
+ * as the import's force argument -- so on such a host the on-disk copy DOES
+ * overwrite, and every replacement is logged individually.
  */
 
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sort"
@@ -35,7 +40,7 @@ import (
 // material is the keystore winning, which is the designed behaviour. Those are
 // logged at WARN, individually, because the operator needs to know their
 // on-disk copy is not what is running.
-func (conf *Config) PreloadKeystore() error {
+func (conf *Config) PreloadKeystore(ctx context.Context) error {
 	dirs := conf.Keystore.Preload.Dirs()
 	if len(dirs) == 0 {
 		return nil
@@ -89,6 +94,12 @@ func (conf *Config) PreloadKeystore() error {
 
 	var sig0Invalidate []string
 	for _, class := range classes {
+		// Between classes, not inside one: a class is a single all-or-nothing
+		// import and there is nothing useful to do half way through it. The
+		// transaction rolls back via the defer either way.
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("keystore.preload: aborted before class %s: %w", class, err)
+		}
 		inv, err := conf.preloadClass(tx, class, dirs[class], overwrite)
 		if err != nil {
 			return fmt.Errorf("keystore.preload.%s: %w", class, err)
@@ -141,7 +152,7 @@ func (conf *Config) preloadClass(tx *Tx, class, dir string, overwrite bool) ([]s
 	if !info.IsDir() {
 		return nil, fmt.Errorf("%s is not a directory", dir)
 	}
-	warnIfWorldReadable(dir, info)
+	warnIfReadableBeyondOwner(dir, info)
 
 	manifest, err := LoadKeystoreManifest(dir)
 	if err != nil {
@@ -274,11 +285,13 @@ func DirLeaksBeyondOwner(dir string) (os.FileMode, bool, error) {
 	return mode, modeLeaksBeyondOwner(mode), nil
 }
 
-// warnIfWorldReadable flags an export directory that anyone on the box can
-// read. It is a warning, not a refusal: this is private-key material, but the
+// warnIfReadableBeyondOwner flags an export directory that anyone else on the
+// box can read. Named for what it checks: modeLeaksBeyondOwner tests the group
+// bits as well as other, so mode 0750 trips it while not being world-readable
+// at all. It is a warning, not a refusal: this is private-key material, but the
 // operator may have deliberate reasons (a lab where the keys are public on
 // purpose), and refusing to start over a permission bit is worse than saying so.
-func warnIfWorldReadable(dir string, info os.FileInfo) {
+func warnIfReadableBeyondOwner(dir string, info os.FileInfo) {
 	if mode := info.Mode().Perm(); modeLeaksBeyondOwner(mode) {
 		lgConfig.Warn("keystore pre-load: directory is readable beyond its owner",
 			"dir", dir, "mode", fmt.Sprintf("%04o", mode),

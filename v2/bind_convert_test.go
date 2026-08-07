@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -153,7 +154,7 @@ func TestConvertBindKeyDirEndToEnd(t *testing.T) {
 	conf := &Config{}
 	conf.Internal.KeyDB = kdb
 	conf.Keystore.Preload.Dnssec = dir
-	if err := conf.PreloadKeystore(); err != nil {
+	if err := conf.PreloadKeystore(context.Background()); err != nil {
 		t.Fatalf("converted directory must be pre-loadable: %v", err)
 	}
 	got, err := kdb.BulkExportDnssec(nil, KeySelector{})

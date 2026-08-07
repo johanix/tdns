@@ -5,6 +5,8 @@
 package tdns
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -38,7 +40,7 @@ func TestPreloadKeystoreLoadsBeforeAnythingElse(t *testing.T) {
 	conf.Internal.KeyDB = kdb
 	conf.Keystore.Preload.Dnssec = dir
 
-	if err := conf.PreloadKeystore(); err != nil {
+	if err := conf.PreloadKeystore(context.Background()); err != nil {
 		t.Fatalf("PreloadKeystore: %v", err)
 	}
 	got, err := kdb.BulkExportDnssec(nil, KeySelector{})
@@ -50,7 +52,7 @@ func TestPreloadKeystoreLoadsBeforeAnythingElse(t *testing.T) {
 	}
 
 	// Idempotent: the second boot must be a clean no-op, not a conflict storm.
-	if err := conf.PreloadKeystore(); err != nil {
+	if err := conf.PreloadKeystore(context.Background()); err != nil {
 		t.Fatalf("second PreloadKeystore: %v", err)
 	}
 	got, err = kdb.BulkExportDnssec(nil, KeySelector{})
@@ -95,7 +97,7 @@ func TestPreloadIsAtomicAcrossClasses(t *testing.T) {
 	conf.Keystore.Preload.Dnssec = dnssecDir
 	conf.Keystore.Preload.Sig0 = sig0Dir
 
-	if err := conf.PreloadKeystore(); err == nil {
+	if err := conf.PreloadKeystore(context.Background()); err == nil {
 		t.Fatalf("PreloadKeystore must fail when a class cannot be loaded")
 	}
 
@@ -126,7 +128,7 @@ func TestPreloadNeverOverwritesTheLiveKeystore(t *testing.T) {
 	conf.Internal.KeyDB = kdb
 	conf.Keystore.Preload.Dnssec = dir
 
-	if err := conf.PreloadKeystore(); err != nil {
+	if err := conf.PreloadKeystore(context.Background()); err != nil {
 		t.Fatalf("PreloadKeystore should report the conflict, not fail: %v", err)
 	}
 	got, err := kdb.BulkExportDnssec(nil, KeySelector{})
@@ -156,7 +158,7 @@ func TestPreloadOverwriteExistingKeysReplaces(t *testing.T) {
 	conf.Keystore.Preload.Dnssec = dir
 	conf.Keystore.Preload.OverwriteExistingKeys = true
 
-	if err := conf.PreloadKeystore(); err != nil {
+	if err := conf.PreloadKeystore(context.Background()); err != nil {
 		t.Fatalf("PreloadKeystore: %v", err)
 	}
 	got, err := kdb.BulkExportDnssec(nil, KeySelector{})
@@ -169,7 +171,7 @@ func TestPreloadOverwriteExistingKeysReplaces(t *testing.T) {
 
 	// Still idempotent: once the keystore matches, a further boot changes
 	// nothing (and so logs no replacements).
-	if err := conf.PreloadKeystore(); err != nil {
+	if err := conf.PreloadKeystore(context.Background()); err != nil {
 		t.Fatalf("second PreloadKeystore: %v", err)
 	}
 	got, err = kdb.BulkExportDnssec(nil, KeySelector{})
@@ -210,7 +212,7 @@ func TestPreloadTsigSurvivesTheStartupConfigSync(t *testing.T) {
 	conf.Internal.KeyDB = kdb
 	conf.Keystore.Preload.Tsig = dir
 
-	if err := conf.PreloadKeystore(); err != nil {
+	if err := conf.PreloadKeystore(context.Background()); err != nil {
 		t.Fatalf("PreloadKeystore: %v", err)
 	}
 
@@ -320,7 +322,7 @@ func TestPreloadWithoutKeystoreIsAWarningNotAFailure(t *testing.T) {
 	// daemon sharing a config file via include:) must not stop it from starting.
 	conf := &Config{}
 	conf.Keystore.Preload.Tsig = t.TempDir()
-	if err := conf.PreloadKeystore(); err != nil {
+	if err := conf.PreloadKeystore(context.Background()); err != nil {
 		t.Errorf("an app with no keystore should warn and continue, got %v", err)
 	}
 }
@@ -330,7 +332,7 @@ func TestPreloadFailsLoudlyOnMissingDirectory(t *testing.T) {
 	conf.Internal.KeyDB = newTestKeyDB(t)
 	conf.Keystore.Preload.Dnssec = filepath.Join(t.TempDir(), "does-not-exist")
 
-	if err := conf.PreloadKeystore(); err == nil {
+	if err := conf.PreloadKeystore(context.Background()); err == nil {
 		t.Error("a configured pre-load directory that does not exist must abort startup")
 	}
 }
@@ -338,7 +340,7 @@ func TestPreloadFailsLoudlyOnMissingDirectory(t *testing.T) {
 func TestPreloadUnconfiguredIsANoOp(t *testing.T) {
 	conf := &Config{}
 	// No KeyDB either: apps without a keystore must not trip over this.
-	if err := conf.PreloadKeystore(); err != nil {
+	if err := conf.PreloadKeystore(context.Background()); err != nil {
 		t.Errorf("unconfigured pre-load should do nothing, got %v", err)
 	}
 }
@@ -395,7 +397,7 @@ func TestLoadKeystoreManifestRefusesAnEmptyManifest(t *testing.T) {
 			conf := &Config{}
 			conf.Internal.KeyDB = newTestKeyDB(t)
 			conf.Keystore.Preload.Dnssec = dir
-			if err := conf.PreloadKeystore(); err == nil {
+			if err := conf.PreloadKeystore(context.Background()); err == nil {
 				t.Fatal("pre-load must fail on an empty manifest, not import zero keys")
 			}
 		})
@@ -410,5 +412,35 @@ func TestLoadKeystoreManifestRefusesAnEmptyManifest(t *testing.T) {
 	}
 	if _, err := LoadKeystoreManifest(dir); err != nil {
 		t.Fatalf("a version-less but non-empty manifest must still load: %v", err)
+	}
+}
+
+// Pre-load reads every manifest entry from disk inside one transaction, so its
+// duration scales with the export directories. A cancelled context must abort
+// it rather than run to completion, and must leave nothing behind.
+func TestPreloadKeystoreHonoursContextCancellation(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	key := testDnssecKey(t, "pq.dnslab.", 257)
+	dir := writeExportDir(t, key)
+
+	conf := &Config{}
+	conf.Internal.KeyDB = kdb
+	conf.Keystore.Preload.Dnssec = dir
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if err := conf.PreloadKeystore(ctx); err == nil {
+		t.Fatal("a cancelled context must abort pre-load")
+	} else if !errors.Is(err, context.Canceled) {
+		t.Errorf("the error should wrap context.Canceled, got %v", err)
+	}
+
+	got, err := kdb.BulkExportDnssec(nil, KeySelector{})
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("an aborted pre-load must commit nothing: %+v", got)
 	}
 }
