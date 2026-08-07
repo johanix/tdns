@@ -215,6 +215,10 @@ func (kdb *KeyDB) TriggerChildKeyVerification(childZone string, keyid uint16, ke
 
 				lgSigner.Info("child key verified and trusted",
 					"zone", childZone, "keyid", keyid, "dnssec", dnssecValidated)
+
+				// The key is now trusted; complete any deferred bootstrap
+				// DEL-ANY-KEY by removing the child's now-superseded keys.
+				kdb.applyPendingKeyReplacement(childZone, keyid)
 				return
 			}
 

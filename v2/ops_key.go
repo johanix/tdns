@@ -221,13 +221,18 @@ func (zd *ZoneData) BootstrapSig0KeyWithParent(ctx context.Context, alg uint8) (
 	lgHandler.Info("BootstrapSig0KeyWithParent: DSYNC target found", "zone", zd.ZoneName, "target", dsyncTarget.RR)
 	// dump.P(dsyncTarget)
 
-	// 3. Create the DNS UPDATE message
-	// adds := []dns.RR{&sak.Keys[0].KeyRR}
-	adds := []dns.RR{&pkc.KeyRR}
-	msg, err := CreateUpdate(zd.Parent, adds, []dns.RR{})
-	if err != nil {
-		return fmt.Sprintf("BootstrapSig0KeyWithParent(%q) failed to create update message: %v", zd.ZoneName, err), UpdateResult{}, err
-	}
+	// 3. Create the self-signed bootstrap ceremony "DEL <child> ANY KEY" +
+	// "ADD <child> KEY" (draft-ietf-dnsop-delegation-mgmt-via-ddns-02
+	// §"Bootstrapping the Child's Key"). The DEL removes any previously
+	// published keys for this child; the parent UPDATE Receiver MUST defer it
+	// until this new key is validated, so it never evicts an already-trusted
+	// key on an un-validated bootstrap. RemoveRRset builds the class-ANY RRset
+	// delete (CreateUpdate's Remove would emit class-NONE per-RR deletes).
+	msg := new(dns.Msg)
+	msg.SetUpdate(zd.Parent)
+	msg.RemoveRRset([]dns.RR{&pkc.KeyRR}) // DEL <child> ANY KEY
+	msg.Insert([]dns.RR{&pkc.KeyRR})      // ADD <child> KEY
+	msg.SetEdns0(1232, true)              // OPT RR so the parent can return EDE
 
 	msg, err = SignMsg(*msg, zd.ZoneName, sak)
 	if err != nil {

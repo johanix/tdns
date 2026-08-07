@@ -87,9 +87,15 @@ func (kdb *KeyDB) SendSig0KeyUpdate(ctx context.Context, childpri, parpri string
 	rcode, _, err := SendUpdate(smsg, Globals.ParentZone, dsynctarget.Addresses)
 	if err != nil {
 		return fmt.Errorf("error from SendUpdate(%v): %v", dsynctarget, err)
-	} else {
-		lgDns.Info("SendUpdate completed", "parent", Globals.ParentZone, "target", dsynctarget.Addresses, "rcode", dns.RcodeToString[rcode])
 	}
+	// SendUpdate reports a parent REJECTION through the rcode with a nil error
+	// (only a transport failure is an error), so the rcode must be checked
+	// explicitly or a BADKEY/REFUSED would be reported to the caller as success.
+	if rcode != dns.RcodeSuccess {
+		return fmt.Errorf("parent %s rejected the update: rcode %s",
+			Globals.ParentZone, dns.RcodeToString[rcode])
+	}
+	lgDns.Info("SendUpdate completed", "parent", Globals.ParentZone, "target", dsynctarget.Addresses, "rcode", dns.RcodeToString[rcode])
 	return nil
 }
 

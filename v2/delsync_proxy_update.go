@@ -434,7 +434,7 @@ func (zd *ZoneData) ProxyUpdateParent(ctx context.Context, kdb *KeyDB, imr *Imr)
 		return "", state, fmt.Errorf("ProxyUpdateParent: sign UPDATE: %w", serr)
 	}
 
-	rcode, _, uerr := SendUpdate(smsg, zd.Parent, target.Addresses)
+	rcode, _, uerr := zd.SendUpdateWithRetry(smsg, zd.Parent, target.Addresses)
 	if uerr != nil {
 		return "", state, fmt.Errorf("ProxyUpdateParent: send UPDATE to %s: %w", zd.Parent, uerr)
 	}

@@ -499,9 +499,9 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 	lgDns.Info("SyncZoneDelegationViaUpdate: sending the signed update",
 		"target", dsynctarget.Name, "addresses", dsynctarget.Addresses, "port", dsynctarget.Port)
 
-	rcode, ur, err := SendUpdate(smsg, zd.Parent, dsynctarget.Addresses)
+	rcode, ur, err := zd.SendUpdateWithRetry(smsg, zd.Parent, dsynctarget.Addresses)
 	if err != nil {
-		lgDns.Error("error from SendUpdate", "zone", zd.Parent, "err", err)
+		lgDns.Error("error from SendUpdateWithRetry", "zone", zd.Parent, "err", err)
 		return "", 0, ur, err
 	}
 	msg := fmt.Sprintf("SendUpdate(%s) returned rcode %s", zd.Parent, dns.RcodeToString[rcode])
