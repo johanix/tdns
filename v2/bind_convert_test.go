@@ -437,9 +437,52 @@ func TestConvertBindKeyDirWritesTheKeyAtomically(t *testing.T) {
 	}
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
+// The same collision, but with the two owners differing only in CASE. DNS names
+// are case-insensitive, yet the manifest's own matchers disagree about that --
+// UpsertDnssec compares with ==, manifestHasKey uses EqualFold -- so an
+// unnormalised collision key would let these through to be appended as two
+// entries for what is one zone, and imported as two keystore rows.
+func TestConvertBindKeyDirCollisionIsCaseInsensitive(t *testing.T) {
+	dir := t.TempDir()
+	base, _ := writeBindKeyTriple(t, dir, "pq.dnslab.", 257,
+		"DNSKEYState: omnipresent\nKRRSIGState: omnipresent\nDSState: omnipresent\n")
+
+	// Copy the triple, upper-casing the owner in the public RR so the parsed
+	// name differs only by case.
+	for _, ext := range []string{".key", ".private", ".state"} {
+		data, err := os.ReadFile(filepath.Join(dir, base+ext))
+		if err != nil {
+			t.Fatalf("read %s: %v", ext, err)
+		}
+		out := string(data)
+		if ext == ".key" {
+			// The OWNER on the RR line, not the first match in the file: the
+			// first "pq.dnslab." is inside dnssec-keygen's ';' comment header,
+			// which stripZonefileComments discards before parsing. Rewriting
+			// that changed nothing the parser ever saw, and the test quietly
+			// became a second copy of the plain-collision case.
+			var lines []string
+			for _, ln := range strings.Split(out, "\n") {
+				if !strings.HasPrefix(strings.TrimSpace(ln), ";") && strings.HasPrefix(ln, "pq.dnslab.") {
+					ln = "PQ.DNSLAB." + strings.TrimPrefix(ln, "pq.dnslab.")
+				}
+				lines = append(lines, ln)
+			}
+			out = strings.Join(lines, "\n")
+			if !strings.Contains(out, "PQ.DNSLAB.\t") && !strings.Contains(out, "PQ.DNSLAB. ") {
+				t.Fatalf("fixture did not upper-case the RR owner:\n%s", out)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(dir, base+".upper"+ext), []byte(out), 0600); err != nil {
+			t.Fatalf("write upper%s: %v", ext, err)
+		}
 	}
-	return b
+
+	_, err := ConvertBindKeyDir(dir, BindConvertOptions{Class: "dnssec", Backup: true})
+	if err == nil {
+		t.Fatal("owners differing only by case are one zone and must collide")
+	}
+	if !strings.Contains(err.Error(), "share zone") {
+		t.Errorf("the error should name the collision, got: %v", err)
+	}
 }

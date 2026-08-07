@@ -290,6 +290,16 @@ func planBindKeyConversion(dir, base string, manifest *KeystoreManifest, opts Bi
 	if algName == "" {
 		return plan, fmt.Errorf("unknown DNSSEC algorithm in the public key RR")
 	}
+	// Canonicalised once, here, so the collision key below, the manifest entry
+	// and the reported zone are all the same string.
+	//
+	// DNS names are case-insensitive but the RR carries whatever case the file
+	// used, and the manifest's two matchers disagree about that:
+	// UpsertDnssec/UpsertSig0 compare with ==, while manifestHasKey uses
+	// EqualFold. So PQ.DNSLAB. and pq.dnslab. are one zone to one and two to
+	// the other -- they would evade the collision check, be appended as two
+	// manifest entries, and import as two keystore rows for a single zone.
+	owner = dns.CanonicalName(owner)
 	plan.disp.Zone, plan.disp.Keyid = owner, keyid
 
 	privBytes, err := os.ReadFile(plan.privPath)
