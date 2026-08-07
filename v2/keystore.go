@@ -14,7 +14,12 @@ import (
 	"github.com/miekg/dns"
 )
 
-func (kdb *KeyDB) Sig0KeyMgmt(tx *Tx, kp KeystorePost) (*KeystoreResponse, error) {
+// Named returns so the deferred commit can report its own failure, matching
+// DnssecKeyMgmt below. Without them a localtx commit error was logged and
+// dropped: the function had already returned a fully-populated response and a
+// nil error, so every caller was told the write succeeded when nothing had been
+// written.
+func (kdb *KeyDB) Sig0KeyMgmt(tx *Tx, kp KeystorePost) (out *KeystoreResponse, err error) {
 
 	const (
 		addSig0KeySql = `
@@ -30,8 +35,12 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 	var res sql.Result
 
 	var localtx = false
-	var err error
 	var txSuccess bool
+	// Zones whose SIG(0) cache entries a bulk-import invalidated. Applied below
+	// only on the localtx path; when the caller owns the transaction they travel
+	// out on resp.BulkSig0InvalidateZones instead, because the commit that makes
+	// the new rows visible has not happened yet at that point.
+	var sig0InvalidateZones []string
 
 	if tx == nil {
 		tx, err = kdb.Begin("Sig0KeyMgmt")
@@ -43,8 +52,27 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 	defer func() {
 		if localtx {
 			if txSuccess {
-				if err := tx.Commit(); err != nil {
-					lgSigner.Error("Sig0KeyMgmt commit failed", "err", err)
+				if cerr := tx.Commit(); cerr != nil {
+					lgSigner.Error("Sig0KeyMgmt commit failed", "err", cerr)
+					err = cerr
+					// The response was built on the assumption that the write
+					// would land. Handing back "imported"/"added" for rows that
+					// were just rolled back is worse than handing back nothing,
+					// because that is the answer an operator acts on -- the same
+					// reasoning as the bulkTx commit-error fix.
+					if out != nil {
+						out.Error = true
+						out.ErrorMsg = cerr.Error()
+						out.BulkDispositions = nil
+						out.BulkSig0InvalidateZones = nil
+					}
+					// Nothing was written, so nothing is stale: skipping the
+					// invalidation keeps the cache consistent with the DB.
+					return
+				}
+				// AFTER the commit, never before -- see BulkSig0InvalidateZones.
+				for _, zone := range sig0InvalidateZones {
+					kdb.invalidateSig0Cache(zone)
 				}
 			} else {
 				tx.Rollback()
@@ -131,6 +159,92 @@ SELECT zonename, state, keyid, algorithm, creator, privatekey, keyrr FROM Sig0Ke
 		}
 		delete(kdb.KeystoreSig0Cache, kp.Keyname+"+"+kp.State)
 		resp.Msg += fmt.Sprintf("\nAdded public key to TrustStore: %s", tsresp.Msg)
+
+	case "bulk-export":
+		sel, err := NewKeySelector(kp.SelectExact, kp.SelectSubtree)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+		keys, err := kdb.BulkExportSig0(tx, sel)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+		resp.BulkSig0Keys = keys
+		resp.Msg = fmt.Sprintf("Exported %d SIG(0) key(s)", len(keys))
+		txSuccess = true
+		return &resp, nil
+
+	case "bulk-import":
+		dispositions, err := kdb.BulkImportSig0(tx, kp.BulkSig0Keys, kp.Force)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+
+		// Mirror every changed key into the TrustStore, in THIS transaction.
+		//
+		// Both single-key paths that put a private SIG(0) key into the keystore
+		// -- "add" above and "generate" below -- also write the public half to
+		// the TrustStore, because a key tdns holds the private half of is one it
+		// must also be willing to verify. bulk-import wrote Sig0KeyStore only,
+		// so a restored key was present for signing and absent for verification;
+		// after a forced replace it was worse than absent, since the TrustStore
+		// kept the superseded public key.
+		//
+		// Same tx as the rows themselves: the two stores must not be able to
+		// diverge across a rollback. Driven off the dispositions, not the
+		// offered keys, so unchanged and conflicted keys leave the TrustStore
+		// alone exactly as they left the keystore alone. The underlying SQL is
+		// INSERT OR REPLACE, which is what makes "replaced" work.
+		offered := make(map[string]BulkSig0Key, len(kp.BulkSig0Keys))
+		for _, k := range kp.BulkSig0Keys {
+			offered[fmt.Sprintf("%s::%d", dns.Fqdn(k.Zone), k.Keyid)] = k
+		}
+		for _, d := range dispositions {
+			if d.Status != BulkStatusImported && d.Status != BulkStatusReplaced {
+				continue
+			}
+			k, found := offered[fmt.Sprintf("%s::%d", d.Name, d.Keyid)]
+			if !found {
+				// Unreachable: every disposition is produced from an offered
+				// key. Fail rather than log-and-continue -- silently skipping
+				// would leave a key that can sign but not verify, which is the
+				// precise state this block exists to prevent.
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("internal: no offered SIG(0) key matches disposition %s keyid %d", d.Name, d.Keyid)
+				return &resp, fmt.Errorf("%s", resp.ErrorMsg)
+			}
+			tspost := TruststorePost{
+				Command:    "truststore",
+				SubCommand: "add",
+				Keyname:    d.Name,
+				Keyid:      int(d.Keyid),
+				Validated:  true,
+				Trusted:    true, // we hold the private half; same reasoning as "add"
+				Src:        "keystore",
+				KeyRR:      k.KeyRR,
+			}
+			if _, err := kdb.Sig0TrustMgmt(tx, tspost); err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return &resp, fmt.Errorf("bulk-import: TrustStore update for %s keyid %d: %v", d.Name, d.Keyid, err)
+			}
+		}
+
+		resp.BulkDispositions = dispositions
+		// Who drops the stale cache entries depends on who commits: the localtx
+		// defer above, or the external-tx caller via this field. Set on both
+		// paths -- on the localtx path the field is simply unread.
+		resp.BulkSig0InvalidateZones = changedZones(dispositions)
+		sig0InvalidateZones = resp.BulkSig0InvalidateZones
+		resp.Msg = summarizeDispositions(dispositions, kp.Force)
+		txSuccess = true
+		return &resp, nil
 
 	case "generate":
 		lgSigner.Info("generating new SIG(0) keypair", "name", kp.Keyname)
@@ -296,6 +410,10 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 	var localtx = false
 	var txSuccess bool
 	var needsRepublish bool // R2: one post-commit republish for the zone
+	// bulkRepublishZones is the plural counterpart of needsRepublish, for the
+	// one subcommand that spans zones. Kept separate because needsRepublish is
+	// hardwired to kp.Zone, which a bulk import does not have.
+	var bulkRepublishZones []string
 
 	if tx == nil {
 		tx, err = kdb.Begin("DnssecKeyMgmt")
@@ -319,6 +437,17 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 					if rerr := republishSigningKeysForZone(kdb, kp.Zone); rerr != nil {
 						lgSigner.Error("DnssecKeyMgmt: post-commit signing-keys republish failed",
 							"zone", kp.Zone, "err", rerr)
+					}
+				}
+				// A bulk import on the local-tx path used to commit the rows and
+				// republish nothing, leaving every affected zone serving the
+				// pre-import signing-key set with no indication anything was
+				// pending. resp.BulkRepublishZones carried the information out,
+				// but only APIkeystore ever read it.
+				for _, z := range bulkRepublishZones {
+					if rerr := republishSigningKeysForZone(kdb, z); rerr != nil {
+						lgSigner.Error("DnssecKeyMgmt: post-commit signing-keys republish failed after bulk import",
+							"zone", z, "err", rerr)
 					}
 				}
 			} else {
@@ -398,6 +527,52 @@ SELECT zonename, state, keyid, flags, algorithm, creator, privatekey, keyrr FROM
 			resp.Msg = fmt.Sprintf("Updated %d rows", rows)
 		}
 		needsRepublish = true
+
+	case "bulk-export":
+		sel, err := NewKeySelector(kp.SelectExact, kp.SelectSubtree)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+		keys, err := kdb.BulkExportDnssec(tx, sel)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+		resp.BulkDnssecKeys = keys
+		resp.Msg = fmt.Sprintf("Exported %d DNSSEC key(s)", len(keys))
+		txSuccess = true
+		return &resp, nil
+
+	case "bulk-import":
+		// needsRepublish is deliberately NOT set: it is single-zone (kp.Zone),
+		// and a bulk import spans zones. bulkRepublishZones is its plural twin,
+		// consumed by the local-tx defer above; resp.BulkRepublishZones carries
+		// the same names out for the external-tx caller (APIkeystore).
+		//
+		// NOTE for a future in-process caller: what the local-tx path does NOT
+		// do is trigger a RE-SIGN. That needs the ResignQ, which lives on
+		// *Config, which this function does not take — and threading conf
+		// through DnssecKeyMgmt for one subcommand with no in-process caller
+		// today is not worth the churn. The consequence is bounded and not a
+		// correctness hole: the signing-key set is republished immediately, so
+		// the zone stops using the superseded key, and the RRSIGs are refreshed
+		// on the resigner's next scheduled pass rather than at once. A caller
+		// that needs it sooner should go through the API, which does both.
+		dispositions, err := kdb.BulkImportDnssec(tx, kp.BulkDnssecKeys, kp.Force)
+		if err != nil {
+			resp.Error = true
+			resp.ErrorMsg = err.Error()
+			return &resp, err
+		}
+		resp.BulkDispositions = dispositions
+		resp.BulkRepublishZones = changedZones(dispositions)
+		bulkRepublishZones = resp.BulkRepublishZones
+		resp.Msg = summarizeDispositions(dispositions, kp.Force)
+		txSuccess = true
+		return &resp, nil
 
 	case "generate":
 		_, msg, err := kdb.GenerateKeypair(kp.Zone, "api-request", kp.State, dns.TypeDNSKEY, kp.Algorithm, kp.KeyType, tx)

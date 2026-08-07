@@ -525,6 +525,42 @@ dynamiczones:
 db:
    file:  /var/lib/tdns/tdns-auth.db
 
+# The keystore lives inside the db above, which is a poor home for key material
+# that has to outlive the machine: it cannot be reviewed, diffed or committed,
+# and losing it loses every key for every zone this server signs.
+#
+# 'keystore <class> bulk-export --dest DIR' writes a selected subset out as
+# BIND-convention key files plus a manifest; naming that directory here restores
+# it at every startup. The load happens BEFORE zones are parsed, so a signed zone
+# finds its keys already present and adopts them instead of minting replacements
+# that no parent's DS will match.
+#
+# Setting a directory is the whole switch — there is no separate enable flag.
+# Pre-load is create-if-absent by default: a key already in the keystore is never
+# overwritten from disk (a stale export would otherwise silently un-roll a rolled
+# key on every restart). Conflicts are logged at WARN; to overwrite once and
+# deliberately, use 'keystore <class> bulk-import --force'.
+#
+# keystore:
+#    preload:
+#       dnssec:  /etc/tdns/keys/dnssec
+#       sig0:    /etc/tdns/keys/sig0
+#       tsig:    /etc/tdns/keys/tsig
+#
+#       # DANGEROUS. Inverts the rule above for every class listed: an on-disk
+#       # key that differs REPLACES the keystore's copy instead of being skipped.
+#       #
+#       # Set this only where the exported directory is the source of truth and
+#       # the keystore is disposable — a host rebuilt from a config repo, e.g. a
+#       # training lab. It makes such a build scriptable with no manual step.
+#       #
+#       # Do NOT set it on a host whose keystore is authoritative. Unlike the
+#       # one-shot 'bulk-import --force', this stays armed on every restart, so a
+#       # stale committed export can silently revert a key you rolled by hand
+#       # long afterwards. Every replacement is logged at WARN, and the setting
+#       # is announced at WARN on each boot.
+#       overwrite-existing-keys:  false
+
 log:
    file:   /var/log/axfr.net/tdns-auth.log
 

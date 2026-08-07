@@ -55,6 +55,8 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 
 		var dnssecRepublishZone string
 		var dnssecResignZone string
+		var dnssecBulkRepublishZones []string
+		var sig0InvalidateZones []string
 
 		tx, err := kdb.Begin("APIkeystore")
 
@@ -79,8 +81,61 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 									"zone", dnssecRepublishZone, "err", rerr)
 							}
 						}
+						// A bulk import touches many zones at once, so it gets
+						// its own plural republish rather than trying to squeeze
+						// through the single-zone field above. Re-sign each one
+						// too: a bulk import changes the active key set exactly
+						// like setstate/rollover/delete do, and those all
+						// re-sign. Without it a forced key replacement would
+						// leave the zone's RRSIGs made by the superseded key
+						// until the resigner's next scheduled pass.
+						// Per zone, and re-sign ONLY where the republish
+						// succeeded. Re-signing after a failed republish is
+						// worse than not re-signing at all: the resigner would
+						// run against the stale in-memory signing-key set and
+						// mint a fresh, correctly-dated set of RRSIGs made by
+						// the superseded key — converting a loud "your import
+						// did not take effect" into a zone that looks freshly
+						// signed and is not. Leaving the old RRSIGs in place
+						// keeps the failure visible until the operator acts.
+						var republishFailed []string
+						for _, z := range dnssecBulkRepublishZones {
+							if rerr := republishSigningKeysForZone(kdb, z); rerr != nil {
+								lgApi.Error("APIkeystore: post-commit signing-keys republish failed after bulk import",
+									"zone", z, "err", rerr,
+									"consequence", "NOT re-signing this zone; it keeps serving the pre-import key set")
+								republishFailed = append(republishFailed, z)
+								continue
+							}
+							triggerResign(conf, z)
+						}
+						// Say so on the response, not only in the log. The
+						// transaction committed, so the keys ARE in the
+						// keystore -- but a zone whose republish failed is
+						// still serving the pre-import key set, and reporting
+						// unqualified success lets a restore script tick the
+						// box and move on. The dispositions are deliberately
+						// left in place: the database write did happen, and the
+						// caller needs to know which keys landed.
+						if len(republishFailed) > 0 && resp != nil {
+							resp.Error = true
+							resp.ErrorMsg = fmt.Sprintf(
+								"keys were imported and committed, but %d zone(s) could not be "+
+									"republished and are still serving the pre-import signing keys: %s",
+								len(republishFailed), strings.Join(republishFailed, ", "))
+						}
 						if dnssecResignZone != "" {
 							triggerResign(conf, dnssecResignZone)
+						}
+						// SIG(0) bulk import owns no transaction of its own on
+						// this path, so it cannot drop its own cache entries --
+						// the commit that makes the new rows visible is the one
+						// just above. Doing it here closes the window in which a
+						// read-through GetSig0Keys would repopulate the cache
+						// from pre-commit rows and keep signing UPDATEs with the
+						// superseded key until restart.
+						for _, zone := range sig0InvalidateZones {
+							kdb.invalidateSig0Cache(zone)
 						}
 						if tsigCacheDelta != nil {
 							if !tsigMgmt {
@@ -126,6 +181,8 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 					Error:    true,
 					ErrorMsg: err.Error(),
 				}
+			} else if resp != nil && len(resp.BulkSig0InvalidateZones) > 0 {
+				sig0InvalidateZones = resp.BulkSig0InvalidateZones
 			}
 
 		case "dnssec-mgmt":
@@ -138,6 +195,9 @@ func (kdb *KeyDB) APIkeystore(conf *Config) func(w http.ResponseWriter, r *http.
 				}
 			} else if resp != nil && resp.NeedsSigningKeysRepublish {
 				dnssecRepublishZone = kp.Zone
+			}
+			if err == nil && resp != nil && len(resp.BulkRepublishZones) > 0 {
+				dnssecBulkRepublishZones = resp.BulkRepublishZones
 			}
 			// Re-sign after state-changing ops — deferred until post-commit
 			// (alongside snapshot republish) so the resigner does not race the tx.

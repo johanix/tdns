@@ -52,8 +52,9 @@ interactive CLI for manual queries and cache inspection.
 A CLI tool to interact with TDNS services via their REST
 APIs. Sub-commands cover zone management (signing, NSEC
 chains, reload, and dynamic add/modify/delete), DNS UPDATE
-composition, keystore management (DNSSEC, SIG(0), and TSIG
-keys) and truststore management, generalized NOTIFY, and
+composition, [keystore](keystore.md) management (DNSSEC,
+SIG(0), and TSIG keys) and truststore management,
+generalized NOTIFY, and
 DSYNC inspection.
 
 [Full documentation](app-tdns-cli.md)

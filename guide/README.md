@@ -32,6 +32,15 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   the `imrengine.tuning.*` knobs) and
   [tdns-agent](config-tdns-agent.md) (placeholder).
 
+- [The tdns Keystore](keystore.md)
+  -- What the keystore is and everything you can do with
+  it: the three key classes (DNSSEC, SIG(0), TSIG), where
+  it lives, key states, the full `tdns-cli auth keystore`
+  command tree, and getting key material out and back --
+  `bulk-export`/`bulk-import`, the on-disk manifest format,
+  and `keystore.preload` for restoring keys at startup
+  before any zone is parsed.
+
 - [TDNS Special Features and Extensions](special-features.md)
   -- Delegation sync (parent side, child side, and the
   agent-as-proxy path for DSYNC-unaware primaries, including
