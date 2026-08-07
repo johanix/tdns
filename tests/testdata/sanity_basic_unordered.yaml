@@ -1,0 +1,11 @@
+mqueue:
+  - [] # Server not used in this test
+expected:
+  - "foo"
+  - "bar"
+fetcher: "getBarFoo"
+checker: "unorderedSliceCompare"
+runs: 1
+config:
+  address: "127.0.0.1"
+  port: "53532"
