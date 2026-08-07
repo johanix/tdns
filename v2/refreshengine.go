@@ -666,8 +666,14 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// Strip origination settings this zone may not act on. The
 					// ZoneData is fully constructed at this point, so the
 					// normalizer sees the final role (Fix B chokepoint).
+					//
+					// Under zd.mu: applyOptionNormalization records the outcome
+					// on the ZoneData and requires the lock. Nothing else holds
+					// it here, so this cannot deadlock.
+					zd.mu.Lock()
 					zd.Options, zd.OutboundSoaSerial =
 						zd.applyOptionNormalization(zd.ZoneType, zd.Options, zd.OutboundSoaSerial)
+					zd.mu.Unlock()
 
 					// Register the OnFirstLoad callbacks BEFORE the initial load:
 					// on a first-load failure the ticker retry path re-runs

@@ -143,17 +143,28 @@ func normalizeOptionsForRole(appType AppType, ztype ZoneType, opts map[ZoneOptio
 // ztype is passed explicitly rather than read from zd.ZoneType because the
 // static-config path normalizes before the parsed type has been assigned to the
 // ZoneData.
+// The caller MUST already hold zd.mu: this records the outcome on the
+// ZoneData, and two of the four call sites run inside the refresh engine's
+// per-zone critical section. Holding it at the other two costs nothing and
+// makes the contract uniform, which is what keeps this from silently becoming
+// a data race the next time a call site is added.
 func (zd *ZoneData) applyOptionNormalization(ztype ZoneType, opts map[ZoneOption]bool, serialMode string) (map[ZoneOption]bool, string) {
 	effective, effSerial, suppressed, msg := normalizeOptionsForRole(
 		Globals.App.Type, ztype, opts, serialMode)
 
 	zd.SuppressedOptions = suppressed
+	// The *Locked variants, because the CALLER MUST ALREADY HOLD zd.mu (see the
+	// doc comment above). ClearError and SetError take zd.mu themselves, so
+	// calling them from here deadlocked the zone against itself: RefreshEngine
+	// holds the lock across this call, the first zone never finished loading,
+	// and the refresh engine never reached the second. Every zone after it sat
+	// with no published snapshot, answering SERVFAIL.
 	if msg == "" {
-		zd.ClearError(ConfigWarning)
+		zd.clearErrorLocked(ConfigWarning)
 		return effective, effSerial
 	}
 	lg.Warn("zone option normalization", "zone", zd.ZoneName, "detail", msg)
-	zd.SetError(ConfigWarning, "%s", msg)
+	zd.setErrorLocked(ConfigWarning, "%s", msg)
 	return effective, effSerial
 }
 

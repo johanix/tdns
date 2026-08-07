@@ -923,7 +923,13 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		//
 		// zd.ZoneType is not yet assigned at this point in the parse, so the
 		// locally resolved zonetype is passed explicitly.
+		// Under zd.mu, which applyOptionNormalization requires. The zone is
+		// still being constructed here and is not yet shared, so the lock is
+		// uncontended -- it is taken to honour the contract, not because
+		// anything is racing for it today.
+		zd.mu.Lock()
 		options, zconf.OutboundSoaSerial = zd.applyOptionNormalization(zonetype, options, zconf.OutboundSoaSerial)
+		zd.mu.Unlock()
 
 		var outopts []string
 		for o, val := range options {
