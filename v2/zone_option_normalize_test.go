@@ -3,6 +3,7 @@ package tdns
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 // Fix B: the option normalizer. It strips origination settings a tdns-auth
@@ -165,8 +166,10 @@ func TestAsConfiguredOptionsRoundTrip(t *testing.T) {
 	withAppType(t, AppTypeAuth)
 
 	zd := &ZoneData{ZoneName: "sec.example.", ZoneType: Secondary}
+	zd.mu.Lock()
 	opts, serial := zd.applyOptionNormalization(
 		Secondary, optSet(OptAllowUpdates, OptFoldCase), OutboundSoaSerialPersist)
+	zd.mu.Unlock()
 	zd.Options = opts
 	zd.OutboundSoaSerial = serial
 
@@ -203,7 +206,9 @@ func TestApplyOptionNormalizationUsesConfigWarning(t *testing.T) {
 	withAppType(t, AppTypeAuth)
 
 	zd := &ZoneData{ZoneName: "sec.example.", ZoneType: Secondary}
+	zd.mu.Lock()
 	zd.applyOptionNormalization(Secondary, optSet(OptAllowUpdates), "")
+	zd.mu.Unlock()
 
 	if !zd.HasError(ConfigWarning) {
 		t.Fatal("expected a ConfigWarning")
@@ -216,11 +221,64 @@ func TestApplyOptionNormalizationUsesConfigWarning(t *testing.T) {
 	}
 
 	// Recomputed each parse: a clean config clears the warning on reload.
+	zd.mu.Lock()
 	zd.applyOptionNormalization(Secondary, optSet(OptFoldCase), "")
+	zd.mu.Unlock()
 	if zd.HasError(ConfigWarning) {
 		t.Error("warning should clear once the config is clean")
 	}
 	if len(zd.SuppressedOptions) != 0 {
 		t.Error("suppressed set should be empty once the config is clean")
+	}
+}
+
+// applyOptionNormalization records its outcome on the ZoneData and therefore
+// requires zd.mu. Two of its four call sites are inside the refresh engine's
+// per-zone critical section, so it MUST be safe to call with the lock held.
+//
+// It was not. It called ClearError/SetError, which take zd.mu themselves, and
+// deadlocked the zone against itself: on a live master the refresh engine
+// announced "loading pre-registered zone" for the first zone and stopped there
+// forever. Every other zone stayed unloaded and answered SERVFAIL ("no
+// published snapshot"), while the process sat at 0% CPU looking merely idle.
+//
+// Both branches are covered because both recorded an error: the quiet path
+// cleared the warning, the warning path set it, and either deadlocked.
+func TestApplyOptionNormalizationIsSafeUnderLock(t *testing.T) {
+	withAppType(t, AppTypeAuth)
+
+	cases := []struct {
+		name string
+		zt   ZoneType
+		opts map[ZoneOption]bool
+	}{
+		// No normalization needed: takes the clearErrorLocked branch.
+		{"quiet", Primary, optSet(OptOnlineSigning)},
+		// Origination options on a secondary get stripped, so this warns:
+		// takes the setErrorLocked branch.
+		{"warns", Secondary, optSet(OptAllowUpdates)},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			zd := &ZoneData{ZoneName: "example.", ZoneType: tc.zt}
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				zd.mu.Lock()
+				defer zd.mu.Unlock()
+				zd.applyOptionNormalization(tc.zt, tc.opts, "")
+			}()
+
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				// Deliberately not t.Fatal from the goroutine: the point is
+				// that it never returns, so the timeout IS the assertion.
+				t.Fatal("applyOptionNormalization deadlocked while zd.mu was held " +
+					"-- it must use the *Locked error variants")
+			}
+		})
 	}
 }
