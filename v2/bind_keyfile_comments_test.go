@@ -12,6 +12,9 @@
 package tdns
 
 import (
+	"bytes"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -383,5 +386,71 @@ func TestCanonicalSig0KeyRRRequiresKEY(t *testing.T) {
 	}
 	if _, err := canonicalSig0KeyRR(bindCommentHeader); err == nil {
 		t.Error("a comment-only input was accepted by canonicalSig0KeyRR")
+	}
+}
+
+// captureSignerLog swaps lgSigner for one writing into a buffer, for the
+// duration of the test.
+func captureSignerLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := lgSigner
+	lgSigner = slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	t.Cleanup(func() { lgSigner = prev })
+	return &buf
+}
+
+// TestLoadSig0ChildKeysReportsNonKeyRows: writes are guarded now, but a database
+// deployed before that can already hold a non-KEY row. Loading used to fall
+// through a bare type assertion with no else, so such a row was skipped in total
+// silence -- the key was just missing from the runtime cache with nothing said
+// about why. It must now be reported, must NOT abort the load, and must not stop
+// the good rows around it from loading.
+func TestLoadSig0ChildKeysReportsNonKeyRows(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	buf := captureSignerLog(t)
+
+	good := testBulkSig0Key(t, "good.dnslab.")
+	dnskey := testDnssecKey(t, "bad.dnslab.", 257)
+
+	// Straight to SQL: Sig0TrustMgmt now refuses these, which is the point --
+	// this is the legacy row it can no longer create.
+	ins := `INSERT INTO Sig0TrustStore (zonename, keyid, validated, dnssecvalidated, trusted, source, keyrr)
+	        VALUES (?, ?, 1, 0, 1, 'keystore', ?)`
+	for _, r := range []struct {
+		zone  string
+		keyid uint16
+		rr    string
+	}{
+		{"bad.dnslab.", dnskey.Keyid, dnskey.KeyRR}, // a DNSKEY where a KEY belongs
+		{"empty.dnslab.", 1, "; nothing but a comment"},
+		{"good.dnslab.", good.Keyid, good.KeyRR},
+	} {
+		if _, err := kdb.DB.Exec(ins, r.zone, int(r.keyid), r.rr); err != nil {
+			t.Fatalf("seeding %s: %v", r.zone, err)
+		}
+	}
+
+	if err := kdb.LoadSig0ChildKeys(); err != nil {
+		t.Fatalf("one unusable row aborted the whole load: %v", err)
+	}
+
+	// The good row still loaded -- a bad row must not shadow its neighbours.
+	if _, ok := kdb.TruststoreSig0Cache.Map.Get(
+		fmt.Sprintf("good.dnslab.::%d", good.Keyid)); !ok {
+		t.Error("the valid KEY row was not loaded into the cache")
+	}
+	// The bad ones did not.
+	if _, ok := kdb.TruststoreSig0Cache.Map.Get(
+		fmt.Sprintf("bad.dnslab.::%d", dnskey.Keyid)); ok {
+		t.Error("a DNSKEY row was loaded into the SIG(0) cache")
+	}
+
+	// And, the whole point of this change, it is no longer silent.
+	log := buf.String()
+	for _, want := range []string{"not a KEY record", "bad.dnslab.", "DNSKEY", "empty.dnslab."} {
+		if !strings.Contains(log, want) {
+			t.Errorf("log does not mention %q:\n%s", want, log)
+		}
 	}
 }
