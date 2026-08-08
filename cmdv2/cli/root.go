@@ -32,11 +32,13 @@ var rootCmd = &cobra.Command{
 			tdns.PrintVersionAndExit()
 		}
 		tdns.SetupCliLogging()
-		// keys generate (root-level), gen-docs (offline doc generator) and
+		// keys generate (root-level), gen-docs (offline doc generator),
+		// show-cmds (pure introspection of the in-memory command tree) and
 		// the cert PKI subtree (offline provisioning; cert init reads the
 		// server config via its own --serverconfig flag) do not need
 		// config or API.
-		if isRootKeysCommand(cmd) || cmd.Name() == "gen-docs" || isCertCommand(cmd) {
+		if isRootKeysCommand(cmd) || cmd.Name() == "gen-docs" ||
+			cmd.Name() == cli.ShowCmdsName || isCertCommand(cmd) {
 			return
 		}
 		initConfig()
@@ -54,12 +56,17 @@ var rootCmd = &cobra.Command{
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
+	cli.AttachShowCmds(rootCmd)
 	cobra.CheckErr(rootCmd.Execute())
 }
 
 // ExecuteContext adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main() with a context for signal handling.
 func ExecuteContext(ctx context.Context) {
+	// Attached here rather than from an init(): the command tree is wired up
+	// by init()s spread over several files in two packages, and show-cmds
+	// must not be attached until all of them have run.
+	cli.AttachShowCmds(rootCmd)
 	cobra.CheckErr(rootCmd.ExecuteContext(ctx))
 }
 
