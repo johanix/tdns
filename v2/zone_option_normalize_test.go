@@ -166,8 +166,10 @@ func TestAsConfiguredOptionsRoundTrip(t *testing.T) {
 	withAppType(t, AppTypeAuth)
 
 	zd := &ZoneData{ZoneName: "sec.example.", ZoneType: Secondary}
+	zd.mu.Lock()
 	opts, serial := zd.applyOptionNormalization(
 		Secondary, optSet(OptAllowUpdates, OptFoldCase), OutboundSoaSerialPersist)
+	zd.mu.Unlock()
 	zd.Options = opts
 	zd.OutboundSoaSerial = serial
 
@@ -204,7 +206,9 @@ func TestApplyOptionNormalizationUsesConfigWarning(t *testing.T) {
 	withAppType(t, AppTypeAuth)
 
 	zd := &ZoneData{ZoneName: "sec.example.", ZoneType: Secondary}
+	zd.mu.Lock()
 	zd.applyOptionNormalization(Secondary, optSet(OptAllowUpdates), "")
+	zd.mu.Unlock()
 
 	if !zd.HasError(ConfigWarning) {
 		t.Fatal("expected a ConfigWarning")
@@ -217,7 +221,9 @@ func TestApplyOptionNormalizationUsesConfigWarning(t *testing.T) {
 	}
 
 	// Recomputed each parse: a clean config clears the warning on reload.
+	zd.mu.Lock()
 	zd.applyOptionNormalization(Secondary, optSet(OptFoldCase), "")
+	zd.mu.Unlock()
 	if zd.HasError(ConfigWarning) {
 		t.Error("warning should clear once the config is clean")
 	}
