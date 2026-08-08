@@ -414,6 +414,13 @@ func ManifestEntryForTsig(k BulkTsigKey) ManifestTsigKey {
 // manifest entry. Paths are resolved against dir and are refused if they try to
 // escape it: a manifest is a data file, and an export directory pulled from
 // somewhere else must not be able to make the reader open ../../etc/anything.
+//
+// The public half is returned as the RR alone. A .key file written by
+// dnssec-keygen carries four ";" comment lines above the record, and returning
+// the file verbatim used to put all of that in the keystore's keyrr column --
+// the comment is what "keystore dnssec list" then showed instead of the DNSKEY.
+// Nothing downstream caught it: dns.NewRR skips comments, so the record parsed
+// fine and every metadata check passed.
 func readManifestKeyFiles(dir, privateFile, publicFile string) (privPEM, keyRR string, err error) {
 	priv, err := readContainedFile(dir, privateFile)
 	if err != nil {
@@ -423,7 +430,11 @@ func readManifestKeyFiles(dir, privateFile, publicFile string) (privPEM, keyRR s
 	if err != nil {
 		return "", "", err
 	}
-	return priv, strings.TrimRight(pub, "\n"), nil
+	rr, err := canonicalKeyRR(pub)
+	if err != nil {
+		return "", "", fmt.Errorf("public key file %q: %v", publicFile, err)
+	}
+	return priv, rr, nil
 }
 
 // readContainedFile reads one file named by the manifest, refusing an absolute

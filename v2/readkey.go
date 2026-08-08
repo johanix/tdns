@@ -34,6 +34,35 @@ func StripKeyFileComments(data []byte) []byte {
 	return []byte(strings.Join(out, "\n"))
 }
 
+// canonicalKeyRR parses one DNSKEY or KEY record out of the text of a .key file
+// and returns it in canonical presentation form, discarding everything else in
+// the file.
+//
+// BIND's dnssec-keygen writes four ";" comment lines above the record; tdns's
+// own exports write none. dns.NewRR skips comments, so keeping a .key file
+// verbatim was never a parse error -- it just meant that whatever consumed the
+// text kept the comment header along with the record. Where that text is stored
+// rather than re-parsed, as in the keystore's keyrr column, the comment is what
+// surfaces later.
+func canonicalKeyRR(s string) (string, error) {
+	rr, err := dns.NewRR(s)
+	if err != nil {
+		return "", fmt.Errorf("unparsable public key RR: %v", err)
+	}
+	// NewRR reports no error for input that holds no record at all -- an empty
+	// file, or one that is nothing but comments.
+	if rr == nil {
+		return "", fmt.Errorf("no DNSKEY or KEY record found")
+	}
+	switch rr.(type) {
+	case *dns.DNSKEY, *dns.KEY:
+		return rr.String(), nil
+	default:
+		return "", fmt.Errorf("expected a DNSKEY or KEY record, got %s",
+			dns.TypeToString[rr.Header().Rrtype])
+	}
+}
+
 type BindPrivateKey struct {
 	Private_Key_Format string `yaml:"Private-key-format"`
 	Algorithm          string `yaml:"Algorithm"`

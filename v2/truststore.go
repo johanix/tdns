@@ -108,6 +108,26 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		resp.Msg = "Here are all the child SIG(0) keys that we know"
 
 	case "add":
+		// The keyrr column holds RR text that is displayed and re-parsed later,
+		// so it must hold the record and nothing else. A KEY read out of a
+		// dnssec-keygen .key file arrives with four ";" comment lines above it,
+		// and every path below stores tp.KeyRR verbatim -- so without this the
+		// comment header is what "truststore list" shows. Same defect the
+		// keystore had via the manifest reader; fixed here at the storage
+		// boundary so it covers file, keystore and child-update alike.
+		//
+		// src=dns supplies no key (it schedules a fetch), hence the guard.
+		if tp.KeyRR != "" {
+			canon, cerr := canonicalKeyRR(tp.KeyRR)
+			if cerr != nil {
+				err = fmt.Errorf("SIG(0) key for %s keyid %d: %v", tp.Keyname, tp.Keyid, cerr)
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return &resp, err
+			}
+			tp.KeyRR = canon
+		}
+
 		// 1. If src=file and key is supplied then add it (but as untrusted)
 		// 2. If src=dns then schedule some soort of DNS fetching exercise.
 		if tp.Src == "file" {
