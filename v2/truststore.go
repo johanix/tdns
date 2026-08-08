@@ -108,6 +108,31 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		resp.Msg = "Here are all the child SIG(0) keys that we know"
 
 	case "add":
+		// The keyrr column holds RR text that is displayed and re-parsed later,
+		// so it must hold the record and nothing else. A KEY read out of a
+		// dnssec-keygen .key file arrives with four ";" comment lines above it,
+		// and every path below stores tp.KeyRR verbatim -- so without this the
+		// comment header is what "truststore list" shows. Same defect the
+		// keystore had via the manifest reader; fixed here at the storage
+		// boundary so it covers file, keystore and child-update alike.
+		//
+		// Narrowed to KEY, not "DNSKEY or KEY": LoadSig0ChildKeys reads this
+		// table back through a *dns.KEY assertion and silently skips anything
+		// else, so a DNSKEY accepted here would vanish from the runtime cache
+		// with nothing logged at either end.
+		//
+		// src=dns supplies no key (it schedules a fetch), hence the guard.
+		if tp.KeyRR != "" {
+			canon, cerr := canonicalSig0KeyRR(tp.KeyRR)
+			if cerr != nil {
+				err = fmt.Errorf("SIG(0) key for %s keyid %d: %v", tp.Keyname, tp.Keyid, cerr)
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return &resp, err
+			}
+			tp.KeyRR = canon
+		}
+
 		// 1. If src=file and key is supplied then add it (but as untrusted)
 		// 2. If src=dns then schedule some soort of DNS fetching exercise.
 		if tp.Src == "file" {
@@ -324,15 +349,38 @@ SELECT child, keyid, validated, trusted, source, keyrr FROM Sig0TrustStore WHERE
 			return fmt.Errorf("error from dns.NewRR(%s): %v", keyrrstr, err)
 		}
 
-		if keyrr, ok := rr.(*dns.KEY); ok {
-			mapkey := fmt.Sprintf("%s::%d", keyname, keyrr.KeyTag())
-			kdb.TruststoreSig0Cache.Map.Set(mapkey, Sig0Key{
-				Name:      keyname,
-				Validated: validated,
-				Trusted:   trusted,
-				Key:       *keyrr,
-			})
+		keyrr, isKey := rr.(*dns.KEY)
+		if !isKey {
+			// This used to be a bare "if ok" with no else, which made a
+			// non-KEY row invisible twice over: the write was accepted, and
+			// then the key was simply absent from the runtime cache with
+			// nothing said about why. Sig0TrustMgmt now refuses anything but
+			// a KEY, so this is for rows already sitting in a deployed
+			// database, which no code change can reach.
+			//
+			// Logged rather than fatal on purpose. One unusable row must not
+			// stop a daemon from starting with the keys that are good --
+			// SIG(0) verification failing closed for one child is a much
+			// smaller outage than not booting.
+			//
+			// dns.NewRR yields (nil, nil) for text that holds no record at
+			// all, so rr can be nil here as well as the wrong type.
+			rrtype := "empty"
+			if rr != nil {
+				rrtype = dns.TypeToString[rr.Header().Rrtype]
+			}
+			lgSigner.Warn("SIG(0) truststore row is not a KEY record, skipping it",
+				"zone", keyname, "keyid", keyid, "rrtype", rrtype)
+			continue
 		}
+
+		mapkey := fmt.Sprintf("%s::%d", keyname, keyrr.KeyTag())
+		kdb.TruststoreSig0Cache.Map.Set(mapkey, Sig0Key{
+			Name:      keyname,
+			Validated: validated,
+			Trusted:   trusted,
+			Key:       *keyrr,
+		})
 	}
 
 	// If a validator trusted key config file is found, read it in.

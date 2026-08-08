@@ -397,9 +397,15 @@ func (kdb *KeyDB) BulkImportDnssec(tx *Tx, keys []BulkDnssecKey, force bool) (di
 	out := make([]BulkKeyDisposition, 0, len(keys))
 	for _, k := range keys {
 		zone := dns.Fqdn(k.Zone)
-		if err := validateDnssecKeyRR(k); err != nil {
+		canonRR, err := validateDnssecKeyRR(k)
+		if err != nil {
 			return nil, fmt.Errorf("%s keyid %d: %v", zone, k.Keyid, err)
 		}
+		// Store the canonical record, never the caller's text. Also makes the
+		// diff below compare like with like, so re-importing a .key file that
+		// still has its comment header reports "unchanged" against an
+		// already-clean row rather than a spurious keyrr conflict.
+		k.KeyRR = canonRR
 
 		var (
 			curState, curAlg                          string
@@ -501,9 +507,11 @@ func (kdb *KeyDB) BulkImportSig0(tx *Tx, keys []BulkSig0Key, force bool) (dispos
 	out := make([]BulkKeyDisposition, 0, len(keys))
 	for _, k := range keys {
 		zone := dns.Fqdn(k.Zone)
-		if err := validateSig0KeyRR(k); err != nil {
+		canonRR, err := validateSig0KeyRR(k)
+		if err != nil {
 			return nil, fmt.Errorf("%s keyid %d: %v", zone, k.Keyid, err)
 		}
+		k.KeyRR = canonRR
 
 		var (
 			curState, curAlg                          string
@@ -897,29 +905,40 @@ var sig0KeyStates = []string{
 	Sig0StateCreated, Sig0StatePublished, Sig0StateActive, Sig0StateRetired,
 }
 
-func validateDnssecKeyRR(k BulkDnssecKey) error {
+// validateDnssecKeyRR checks a wire key and returns its DNSKEY in canonical
+// presentation form. The caller must store the returned string rather than
+// k.KeyRR: a payload assembled by hand, or by a tdns old enough to have copied
+// .key files verbatim, can carry dnssec-keygen's ";" comment header, and every
+// check below would still pass -- dns.NewRR skips comments, so the record parses
+// and all the metadata matches. Storing that text put the comment in the
+// keystore's keyrr column, where "keystore dnssec list" showed it in place of
+// the DNSKEY.
+func validateDnssecKeyRR(k BulkDnssecKey) (string, error) {
 	if err := validateBulkPrivateKey(k.PrivateKey); err != nil {
-		return err
+		return "", err
 	}
 	rr, err := dns.NewRR(k.KeyRR)
 	if err != nil {
-		return fmt.Errorf("unparsable DNSKEY RR: %v", err)
+		return "", fmt.Errorf("unparsable DNSKEY RR: %v", err)
+	}
+	if rr == nil {
+		return "", fmt.Errorf("no DNSKEY RR found")
 	}
 	dnskey, isDnskey := rr.(*dns.DNSKEY)
 	if !isDnskey {
-		return fmt.Errorf("expected a DNSKEY RR, got %s", dns.TypeToString[rr.Header().Rrtype])
+		return "", fmt.Errorf("expected a DNSKEY RR, got %s", dns.TypeToString[rr.Header().Rrtype])
 	}
 	if !strings.EqualFold(dnskey.Header().Name, dns.Fqdn(k.Zone)) {
-		return fmt.Errorf("DNSKEY owner %q does not match zone %q", dnskey.Header().Name, dns.Fqdn(k.Zone))
+		return "", fmt.Errorf("DNSKEY owner %q does not match zone %q", dnskey.Header().Name, dns.Fqdn(k.Zone))
 	}
 	if dnskey.Flags != k.Flags {
-		return fmt.Errorf("DNSKEY flags %d do not match the recorded flags %d", dnskey.Flags, k.Flags)
+		return "", fmt.Errorf("DNSKEY flags %d do not match the recorded flags %d", dnskey.Flags, k.Flags)
 	}
 	if tag := dnskey.KeyTag(); tag != k.Keyid {
-		return fmt.Errorf("DNSKEY keytag %d does not match the recorded keyid %d", tag, k.Keyid)
+		return "", fmt.Errorf("DNSKEY keytag %d does not match the recorded keyid %d", tag, k.Keyid)
 	}
 	if name, ok := dns.AlgorithmToString[dnskey.Algorithm]; ok && !strings.EqualFold(name, k.Algorithm) {
-		return fmt.Errorf("DNSKEY algorithm %s does not match the recorded algorithm %s", name, k.Algorithm)
+		return "", fmt.Errorf("DNSKEY algorithm %s does not match the recorded algorithm %s", name, k.Algorithm)
 	}
 	// Everything above is metadata: it would pass just as happily on a manifest
 	// entry that files one zone's public key beside another zone's private key,
@@ -933,45 +952,49 @@ func validateDnssecKeyRR(k BulkDnssecKey) error {
 	// zone is bound. On a build that could actually serve the zone, the check
 	// runs.
 	if _, err := VerifyStoredKeyPair(k.PrivateKey, dnskey); err != nil {
-		return err
+		return "", err
 	}
 	if err := validKeyState(k.State, dnssecKeyStates); err != nil {
-		return err
+		return "", err
 	}
-	return nil
+	return dnskey.String(), nil
 }
 
-// validateSig0KeyRR is the KEY-RR counterpart of validateDnssecKeyRR.
-func validateSig0KeyRR(k BulkSig0Key) error {
+// validateSig0KeyRR is the KEY-RR counterpart of validateDnssecKeyRR, and
+// returns the canonical KEY for the same reason: see that function.
+func validateSig0KeyRR(k BulkSig0Key) (string, error) {
 	if err := validateBulkPrivateKey(k.PrivateKey); err != nil {
-		return err
+		return "", err
 	}
 	rr, err := dns.NewRR(k.KeyRR)
 	if err != nil {
-		return fmt.Errorf("unparsable KEY RR: %v", err)
+		return "", fmt.Errorf("unparsable KEY RR: %v", err)
+	}
+	if rr == nil {
+		return "", fmt.Errorf("no KEY RR found")
 	}
 	key, isKey := rr.(*dns.KEY)
 	if !isKey {
-		return fmt.Errorf("expected a KEY RR, got %s", dns.TypeToString[rr.Header().Rrtype])
+		return "", fmt.Errorf("expected a KEY RR, got %s", dns.TypeToString[rr.Header().Rrtype])
 	}
 	if !strings.EqualFold(key.Header().Name, dns.Fqdn(k.Zone)) {
-		return fmt.Errorf("KEY owner %q does not match zone %q", key.Header().Name, dns.Fqdn(k.Zone))
+		return "", fmt.Errorf("KEY owner %q does not match zone %q", key.Header().Name, dns.Fqdn(k.Zone))
 	}
 	if tag := key.KeyTag(); tag != k.Keyid {
-		return fmt.Errorf("KEY keytag %d does not match the recorded keyid %d", tag, k.Keyid)
+		return "", fmt.Errorf("KEY keytag %d does not match the recorded keyid %d", tag, k.Keyid)
 	}
 	if name, ok := dns.AlgorithmToString[key.Algorithm]; ok && !strings.EqualFold(name, k.Algorithm) {
-		return fmt.Errorf("KEY algorithm %s does not match the recorded algorithm %s", name, k.Algorithm)
+		return "", fmt.Errorf("KEY algorithm %s does not match the recorded algorithm %s", name, k.Algorithm)
 	}
 	// Same reasoning as validateDnssecKeyRR: the checks above are all metadata,
 	// and a SIG(0) key that cannot verify against its own public half signs
 	// UPDATEs nobody will accept. dns.KEY embeds DNSKEY, and the signature
 	// maths is identical.
 	if _, err := VerifyStoredKeyPair(k.PrivateKey, &key.DNSKEY); err != nil {
-		return err
+		return "", err
 	}
 	if err := validKeyState(k.State, sig0KeyStates); err != nil {
-		return err
+		return "", err
 	}
-	return nil
+	return key.String(), nil
 }

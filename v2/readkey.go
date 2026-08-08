@@ -34,6 +34,65 @@ func StripKeyFileComments(data []byte) []byte {
 	return []byte(strings.Join(out, "\n"))
 }
 
+// canonicalKeyRR parses one DNSKEY or KEY record out of the text of a .key file
+// and returns it in canonical presentation form, discarding everything else in
+// the file.
+//
+// BIND's dnssec-keygen writes four ";" comment lines above the record; tdns's
+// own exports write none. dns.NewRR skips comments, so keeping a .key file
+// verbatim was never a parse error -- it just meant that whatever consumed the
+// text kept the comment header along with the record. Where that text is stored
+// rather than re-parsed, as in the keystore's keyrr column, the comment is what
+// surfaces later.
+func canonicalKeyRR(s string) (string, error) {
+	rr, err := parseKeyRR(s)
+	if err != nil {
+		return "", err
+	}
+	switch rr.(type) {
+	case *dns.DNSKEY, *dns.KEY:
+		return rr.String(), nil
+	default:
+		return "", fmt.Errorf("expected a DNSKEY or KEY record, got %s",
+			dns.TypeToString[rr.Header().Rrtype])
+	}
+}
+
+// canonicalSig0KeyRR is canonicalKeyRR narrowed to KEY, for the SIG(0)
+// truststore.
+//
+// That table is read back with a *dns.KEY type assertion (LoadSig0ChildKeys),
+// and anything else is SILENTLY skipped -- no error, no log. So a DNSKEY written
+// there is accepted at write time and then simply absent from the runtime
+// truststore cache, which is a much harder thing to notice than a refusal.
+func canonicalSig0KeyRR(s string) (string, error) {
+	rr, err := parseKeyRR(s)
+	if err != nil {
+		return "", err
+	}
+	key, isKey := rr.(*dns.KEY)
+	if !isKey {
+		return "", fmt.Errorf("expected a KEY record, got %s",
+			dns.TypeToString[rr.Header().Rrtype])
+	}
+	return key.String(), nil
+}
+
+// parseKeyRR pulls the single record out of key-file text, rejecting input that
+// holds none.
+func parseKeyRR(s string) (dns.RR, error) {
+	rr, err := dns.NewRR(s)
+	if err != nil {
+		return nil, fmt.Errorf("unparsable public key RR: %v", err)
+	}
+	// NewRR reports no error for input that holds no record at all -- an empty
+	// file, or one that is nothing but comments.
+	if rr == nil {
+		return nil, fmt.Errorf("no DNSKEY or KEY record found")
+	}
+	return rr, nil
+}
+
 type BindPrivateKey struct {
 	Private_Key_Format string `yaml:"Private-key-format"`
 	Algorithm          string `yaml:"Algorithm"`
