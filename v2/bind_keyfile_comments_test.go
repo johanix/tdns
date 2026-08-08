@@ -329,3 +329,59 @@ func TestTruststoreRejectsRecordlessKeyRR(t *testing.T) {
 		t.Errorf("src=dns with no KeyRR was rejected: %v", err)
 	}
 }
+
+// TestTruststoreRejectsDnskey: the SIG(0) truststore must hold KEY records only.
+// LoadSig0ChildKeys reads the table back through a *dns.KEY assertion and
+// silently skips anything else, so a DNSKEY accepted here would be stored, then
+// be absent from the runtime cache, with nothing logged at either end. Refusing
+// it at the write boundary is the only place the operator finds out.
+func TestTruststoreRejectsDnskey(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	// Same key material, published as a DNSKEY rather than a KEY.
+	dnssec := testDnssecKey(t, "dnslab.", 257)
+
+	_, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
+		Command: "truststore", SubCommand: "add",
+		Keyname: "dnslab.", Keyid: int(dnssec.Keyid),
+		Validated: true, Trusted: true, Src: "keystore",
+		KeyRR: dnssec.KeyRR,
+	})
+	if err == nil {
+		t.Fatal("a DNSKEY was accepted into the SIG(0) truststore")
+	}
+	if !strings.Contains(err.Error(), "KEY") {
+		t.Errorf("error does not say what was expected: %v", err)
+	}
+
+	var n int
+	if err := kdb.DB.QueryRow(`SELECT COUNT(*) FROM Sig0TrustStore WHERE zonename=?`,
+		"dnslab.").Scan(&n); err != nil {
+		t.Fatalf("counting rows: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("the rejected DNSKEY was stored anyway: %d row(s)", n)
+	}
+}
+
+// TestCanonicalSig0KeyRRRequiresKEY is the unit-level counterpart: KEY through,
+// DNSKEY refused, comments stripped either way.
+func TestCanonicalSig0KeyRRRequiresKEY(t *testing.T) {
+	keyrr := "dnslab.\t3600\tIN\tKEY\t512 3 15 C4RKfg3IUwpjc+CnISaCuDX4OGpxsUIe7dqRVXj0KdU="
+	dnskey := "dnslab.\t3600\tIN\tDNSKEY\t257 3 15 C4RKfg3IUwpjc+CnISaCuDX4OGpxsUIe7dqRVXj0KdU="
+
+	got, err := canonicalSig0KeyRR(bindCommentHeader + keyrr + "\n")
+	if err != nil {
+		t.Fatalf("canonicalSig0KeyRR on a KEY: %v", err)
+	}
+	if got != keyrr {
+		t.Errorf("got  %q\nwant %q", got, keyrr)
+	}
+
+	if _, err := canonicalSig0KeyRR(dnskey); err == nil {
+		t.Error("a DNSKEY was accepted by canonicalSig0KeyRR")
+	}
+	if _, err := canonicalSig0KeyRR(bindCommentHeader); err == nil {
+		t.Error("a comment-only input was accepted by canonicalSig0KeyRR")
+	}
+}

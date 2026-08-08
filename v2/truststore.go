@@ -116,9 +116,14 @@ DELETE FROM Sig0TrustStore WHERE zonename=? AND keyid=?`
 		// keystore had via the manifest reader; fixed here at the storage
 		// boundary so it covers file, keystore and child-update alike.
 		//
+		// Narrowed to KEY, not "DNSKEY or KEY": LoadSig0ChildKeys reads this
+		// table back through a *dns.KEY assertion and silently skips anything
+		// else, so a DNSKEY accepted here would vanish from the runtime cache
+		// with nothing logged at either end.
+		//
 		// src=dns supplies no key (it schedules a fetch), hence the guard.
 		if tp.KeyRR != "" {
-			canon, cerr := canonicalKeyRR(tp.KeyRR)
+			canon, cerr := canonicalSig0KeyRR(tp.KeyRR)
 			if cerr != nil {
 				err = fmt.Errorf("SIG(0) key for %s keyid %d: %v", tp.Keyname, tp.Keyid, cerr)
 				resp.Error = true
