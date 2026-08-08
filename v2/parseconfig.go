@@ -943,12 +943,32 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 
 		lgConfig.Debug("zone incoming update policy", "zone", zname, "policy", fmt.Sprintf("%+v", zconf.UpdatePolicy))
 
+		// Captured BEFORE the call, because activateUpdatePolicy mutates
+		// options in place: an absent or "none" child policy silently clears
+		// allow-child-updates, and afterwards there is no way to tell a zone
+		// that never asked for it from one whose request was dropped.
+		wantedChildUpdates := options[OptAllowChildUpdates]
+
 		policy, perr := activateUpdatePolicy(zconf, options)
 		if perr != nil {
 			lgConfig.Error("zone update policy invalid, zone in error state", "zone", zname, "err", perr)
 			zd.SetError(ConfigError, "%s", perr)
 			broken_zones = append(broken_zones, zname)
 			continue
+		}
+
+		// Record it ON THE ZONE, not just in the log. The zone is otherwise
+		// perfectly healthy -- it loads, serves, and simply refuses every child
+		// update -- so a log line at startup is the only trace, and by the time
+		// anyone asks why "zone list" no longer shows the option, that line has
+		// scrolled away. ConfigWarning rather than ConfigError deliberately:
+		// the zone is serving correctly for every other purpose and taking it
+		// out of service would be a worse answer than telling the truth about
+		// one disabled option.
+		if wantedChildUpdates && !options[OptAllowChildUpdates] {
+			zd.SetError(ConfigWarning,
+				"allow-child-updates was requested but is DISABLED: updatepolicy.child.type "+
+					"is unset or \"none\". Set it to selfsub or self.")
 		}
 
 		if Globals.App.Type == AppTypeAgent && zconf.Type == "primary" {
@@ -1290,6 +1310,22 @@ func activateUpdatePolicy(zconf *ZoneConf, options map[ZoneOption]bool) (UpdateP
 		// all ok, we know these
 	case "none", "":
 		// these are also ok, but imply that no updates are allowed
+		//
+		// Say so when the operator asked for the opposite. Clearing an option
+		// the config explicitly requested, silently, produces a zone that
+		// starts, looks healthy, and refuses every child update -- with the
+		// option simply absent from "zone list" and nothing anywhere saying
+		// why. An unset policy is the easy way to hit this, because "" lands
+		// in the same case as an explicit "none".
+		if options[OptAllowChildUpdates] {
+			why := "no updatepolicy.child.type is set"
+			if zconf.UpdatePolicy.Child.Type == "none" {
+				why = "updatepolicy.child.type is \"none\""
+			}
+			lgConfig.Error("allow-child-updates requested but DISABLED by update policy",
+				"zone", zconf.Name, "reason", why,
+				"fix", "set updatepolicy.child.type to selfsub or self")
+		}
 		options[OptAllowChildUpdates] = false
 	default:
 		return UpdatePolicy{}, fmt.Errorf("unknown child update policy type: %s", zconf.UpdatePolicy.Child.Type)
