@@ -49,7 +49,14 @@ in -h at the top level and under each application prefix; deeper down it is
 hidden to keep the help screens clean. It still works there, e.g.
 "tdns-cli auth keystore dnssec show-cmds".`,
 		Args: cobra.NoArgs,
-		Run: func(cmd *cobra.Command, args []string) {
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// 0 is the documented sentinel for "no limit". A negative value
+			// would quietly mean the same thing, turning a typo into a full
+			// 300-line dump instead of an error.
+			if maxDepth < 0 {
+				return fmt.Errorf("--depth must be 0 or greater, got %d", maxDepth)
+			}
+
 			// The subtree to report on is our parent, not us. A show-cmds
 			// with no parent (never wired up) degenerates to itself, which
 			// is empty but not a crash.
@@ -76,6 +83,7 @@ hidden to keep the help screens clean. It still works there, e.g.
 				}
 				fmt.Printf("%s\n", e.path)
 			}
+			return nil
 		},
 	}
 
@@ -137,6 +145,10 @@ func skipInShowCmds(c *cobra.Command, showAll bool) bool {
 // ("tdns-cli show-cmds", "tdns-cli auth show-cmds") are listed in -h. Deeper
 // copies are marked Hidden so that ~60 help screens don't each grow a line
 // for it; they remain fully usable, and are documented in the Long text above.
+//
+// Calling this more than once on the same tree is safe: cobra's AddCommand
+// does not deduplicate, so without a guard a second call would give every
+// parent a second show-cmds child.
 func AttachShowCmds(root *cobra.Command) {
 	attachShowCmds(root, 0)
 }
@@ -150,9 +162,11 @@ func attachShowCmds(cmd *cobra.Command, depth int) {
 	// set and not into the show-cmds we are about to add.
 	kids := append([]*cobra.Command(nil), cmd.Commands()...)
 
-	sc := NewShowCmdsCmd()
-	sc.Hidden = depth >= 2
-	cmd.AddCommand(sc)
+	if !hasShowCmdsChild(kids) {
+		sc := NewShowCmdsCmd()
+		sc.Hidden = depth >= 2
+		cmd.AddCommand(sc)
+	}
 
 	for _, c := range kids {
 		switch c.Name() {
@@ -161,4 +175,15 @@ func attachShowCmds(cmd *cobra.Command, depth int) {
 		}
 		attachShowCmds(c, depth+1)
 	}
+}
+
+// hasShowCmdsChild reports whether a show-cmds is already among these
+// commands, i.e. whether this parent has been attached to before.
+func hasShowCmdsChild(kids []*cobra.Command) bool {
+	for _, c := range kids {
+		if c.Name() == ShowCmdsName {
+			return true
+		}
+	}
+	return false
 }
