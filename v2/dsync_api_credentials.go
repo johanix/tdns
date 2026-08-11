@@ -171,6 +171,16 @@ func (kdb *KeyDB) AddDsyncApiCredential(parentZone, username, principal, comment
 	defer kdb.mu.Unlock()
 	if _, err := kdb.DB.Exec(q, zone, user, princ, hashDsyncApiKey(key),
 		time.Now().Unix(), exp, comment); err != nil {
+		// The UNIQUE constraint is the expected way to fail here, and sqlite's
+		// message for it names columns rather than the thing the operator did.
+		// It is also easy to hit without realising: usernames are normalised,
+		// so "CHILD1.EXAMPLE" collides with an existing "child1.example." --
+		// which the raw message does nothing to explain.
+		if strings.Contains(err.Error(), "UNIQUE constraint failed") {
+			return "", fmt.Errorf("a credential for %q already exists in zone %s"+
+				" (usernames are normalised, so it may have been created with different"+
+				" capitalisation or without the trailing dot)", user, zone)
+		}
 		return "", fmt.Errorf("storing DSYNC API credential for %s in %s: %v", user, zone, err)
 	}
 	return key, nil

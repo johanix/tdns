@@ -4,6 +4,7 @@
 package tdns
 
 import (
+	"strings"
 	"testing"
 	"time"
 )
@@ -207,8 +208,16 @@ func TestDsyncApiCredentialNormalisation(t *testing.T) {
 		if _, err := kdb.VerifyDsyncApiCredential("example.", spelling, key); err != nil {
 			t.Errorf("username spelling %q did not resolve to the same account: %v", spelling, err)
 		}
-		if _, err := kdb.AddDsyncApiCredential("example.", spelling, "", "", time.Time{}); err == nil {
+		_, err := kdb.AddDsyncApiCredential("example.", spelling, "", "", time.Time{})
+		if err == nil {
 			t.Errorf("username spelling %q was accepted as a second account", spelling)
+			continue
+		}
+		// And says so in a way an operator can act on. The raw sqlite message
+		// names columns and does not mention that normalisation is why two
+		// apparently different usernames collided.
+		if !strings.Contains(err.Error(), "already exists") {
+			t.Errorf("duplicate of %q reported as %q; want a message about it already existing", spelling, err)
 		}
 	}
 
