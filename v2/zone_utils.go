@@ -896,8 +896,17 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 
 		// Figure out if there is a DSYNC RR with scheme UPDATE; if so, we need to ensure that
 		// we generate a SIG(0) key pair for the target and publish the public key in the zone.
-		updateTarget := dns.Fqdn(strings.Replace(viper.GetString("delegationsync.parent.update.target"), "{ZONENAME}", zd.ZoneName, 1))
-		if _, ok := dns.IsDomainName(updateTarget); !ok {
+		//
+		// An unset target means this parent does not offer the UPDATE scheme
+		// — which used to be unusual and is now ordinary, since a parent may
+		// offer only API. Without the guard the empty template expands to ".",
+		// which is a syntactically valid domain name, and the zone would get a
+		// SIG(0) keypair generated for the root.
+		updateTargetTpl := DelegationSyncConfig().Parent.Update.Target
+		updateTarget := dns.Fqdn(strings.Replace(updateTargetTpl, "{ZONENAME}", zd.ZoneName, 1))
+		if updateTargetTpl == "" {
+			lg.Debug("SetupZoneSync: no DSYNC update target configured, skipping SIG(0) key prep", "zone", zd.ZoneName)
+		} else if _, ok := dns.IsDomainName(updateTarget); !ok {
 			lg.Error("SetupZoneSync: invalid DSYNC update target", "zone", zd.ZoneName, "target", updateTarget)
 		} else {
 			lg.Debug("SetupZoneSync: DSYNC update target", "zone", zd.ZoneName, "target", updateTarget)
