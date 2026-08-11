@@ -87,8 +87,21 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			}
 			resp.Msg = fmt.Sprintf("Zone %s: bumped SOA serial from %d to %d", zp.Zone, br.OldSerial, br.NewSerial)
 
-		case "write-zone":
+		// "sync" is an alias for "write-zone": spool the current zone content
+		// out to disk, without the freeze/thaw ritual around it. Named for
+		// rndc sync, which is what an operator coming from bind9 will reach
+		// for. One implementation, two names -- not two code paths that can
+		// drift.
+		case "write-zone", "sync":
 			msg, err := zd.WriteZone(false, zp.Force)
+			resp.Msg = msg
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+
+		case "update":
+			msg, err := zd.ApiZoneUpdate(zp)
 			resp.Msg = msg
 			if err != nil {
 				resp.Error = true

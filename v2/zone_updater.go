@@ -25,10 +25,23 @@ type UpdateRequest struct {
 	Validated      bool     // Signature over update msg is validated
 	Trusted        bool     // Content of update is trusted (via validation or policy)
 	InternalUpdate bool     // Internal update, not a DNS UPDATE from the outside
-	Status         *UpdateStatus
-	Description    string
-	PreCondition   func() bool
-	Action         func() error
+	// PreAuthorized marks a request whose authorization was already settled by
+	// the management API handler (the X-API-Key is the credential) and which
+	// therefore bypasses update-policy, exactly as InternalUpdate does. It is
+	// set in ONE place -- the API zone-update handler, after that handler has
+	// checked allow-api-updates -- and nowhere else. Nothing on the DNS
+	// UPDATE path may ever set it: a wire request that arrived with this flag
+	// would be an unauthenticated update.
+	//
+	// Deliberately a third boolean rather than folding wire/internal/api into
+	// one Origin enum. The enum is the better model and worth doing, but it
+	// touches every InternalUpdate site in the tree and that is a separate
+	// change from adding a channel.
+	PreAuthorized bool
+	Status        *UpdateStatus
+	Description   string
+	PreCondition  func() bool
+	Action        func() error
 }
 
 // updaterCmdMutatesZoneContent reports whether a ZoneUpdater command writes
@@ -188,7 +201,13 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				// (i.e. not child delegation information).
 				lg.Info("ZoneUpdater: ZONE-UPDATE request", "zone", ur.ZoneName, "actions", len(ur.Actions))
 				lg.Debug("ZoneUpdater: ZONE-UPDATE actions detail", "actions", SprintUpdates(ur.Actions))
-				if zd.Options[OptAllowUpdates] || ur.InternalUpdate {
+				// Admission: the DDNS channel is gated by allow-updates, the
+				// management-API channel by allow-api-updates (checked again
+				// in the handler, which is where PreAuthorized is set -- this
+				// is the backstop, not the only gate), and internal content
+				// changes bypass both.
+				if zd.Options[OptAllowUpdates] || ur.InternalUpdate ||
+					(ur.PreAuthorized && zd.Options[OptAllowApiUpdates]) {
 					// Compute delegation sync status before apply (needs pre-state),
 					// but only enqueue after successful apply.
 					var dss DelegationSyncStatus
@@ -703,7 +722,8 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 					retained++
 					continue
 				}
-				if _, allowed := zd.UpdatePolicy.Zone.RRtypes[t]; !allowed && !ur.InternalUpdate {
+				if _, allowed := zd.UpdatePolicy.Zone.RRtypes[t]; !allowed &&
+					!ur.InternalUpdate && !ur.PreAuthorized {
 					denied++
 					continue
 				}
@@ -722,8 +742,12 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 		rrcopy.Header().Class = dns.ClassINET
 
 		// First check whether this update is allowed by the update-policy.
+		// update-policy governs the DDNS channel. Internal changes and
+		// API-channel requests bypass it: the API's authorization is the API
+		// key, already checked by the handler that set PreAuthorized. Zone
+		// self-service therefore stays on DDNS, where the policy applies.
 		_, ok := zd.UpdatePolicy.Zone.RRtypes[rrtype]
-		if !ok && !ur.InternalUpdate {
+		if !ok && !ur.InternalUpdate && !ur.PreAuthorized {
 			lg.Error("ApplyZoneUpdateToZoneData: RR type denied by policy", "rrtype", rrtypestr)
 			continue
 		}

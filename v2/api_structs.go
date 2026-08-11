@@ -256,6 +256,15 @@ type ZonePost struct {
 	// primaries, unused for secondaries.
 	ZoneType string
 	Template string
+	// Zone content updates ("zone update <verb>"). UpdateRRs carries
+	// presentation-form records for addrr/delrr/replacerrset; UpdateName and
+	// UpdateRrtype address an RRset or a name for delrrset/delname. See
+	// BuildZoneUpdateActions, which both this channel and the DDNS channel
+	// translate through.
+	UpdateVerb   string
+	UpdateRRs    []string
+	UpdateName   string
+	UpdateRrtype string
 	// Inline TSIG key for the add/modify: when TsigName is set the server upserts
 	// {name, algo, secret} into its keys: store, points keyless primaries at it,
 	// and persists it with the zone (survives restart). TsigAlgo defaults to
