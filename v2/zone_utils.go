@@ -425,6 +425,33 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 		zd.mu.Lock()
 		zd.Options[OptDirty] = false
 		zd.mu.Unlock()
+
+		// Phase 2: the changes are now IN the file, which is the source of
+		// truth. The persisted deltas exist only to carry changes the file
+		// does not yet have, so replaying them over this file on the next load
+		// would apply everything a second time. Drop them.
+		//
+		// Order matters and is deliberate: the file write must succeed first.
+		// Dropping the deltas before a failed write would lose the changes
+		// entirely -- they would be neither in the file nor in the database.
+		// This is also why freeze/sync/write-zone need no delta handling of
+		// their own; they all reach the file through here.
+		//
+		// A failure to drop them is not fatal. The file is correct and being
+		// served; the cost is that a restart replays changes the file already
+		// contains. Adds are idempotent, deletes of absent records are
+		// no-ops, so the replayed result matches -- but it is still wrong
+		// enough to log loudly.
+		if zd.KeyDB != nil {
+			if n, derr := zd.KeyDB.DeleteZoneDeltas(zd.ZoneName); derr != nil {
+				lg.Error("zone written to file but its persisted deltas could not be dropped;"+
+					" a restart will replay changes the file already contains",
+					"zone", zd.ZoneName, "file", fname, "error", derr)
+			} else if n > 0 {
+				lg.Info("zone written to file; persisted deltas dropped",
+					"zone", zd.ZoneName, "file", fname, "rows", n)
+			}
+		}
 	}
 	return fmt.Sprintf("Zone %s written to %s", zd.ZoneName, fname), err
 }

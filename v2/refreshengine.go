@@ -204,7 +204,38 @@ func finishFirstLoadPolicy(ctx context.Context, zd *ZoneData, conf *Config, conf
 // publish the snapshot (Ready), then finishFirstLoadPolicy (sync + OnFirstLoad).
 func completeFirstZonePolicyAndLoad(ctx context.Context, zd *ZoneData, conf *Config, configPolicyName string) error {
 	zd.InstallInitialSnapshot()
+	// Phase 2: the file is the source of truth but lags behind it -- it holds
+	// the zone as of the last write-zone/sync/freeze, while the persisted
+	// deltas hold everything that has happened since. Serving the file alone
+	// would silently roll the zone back to that point.
+	replayZoneDeltasOnLoad(zd)
 	return finishFirstLoadPolicy(ctx, zd, conf, configPolicyName)
+}
+
+// replayZoneDeltasOnLoad re-applies persisted deltas over a freshly loaded
+// zone, logging rather than failing the load.
+//
+// A zone that cannot replay its deltas is a zone whose served content silently
+// differs from what the operator last saw -- but refusing to load it entirely
+// would take a working zone off the air over lost recent changes, which is
+// worse. Load it, serve the file, and say plainly what is missing.
+func replayZoneDeltasOnLoad(zd *ZoneData) {
+	if zd == nil || zd.KeyDB == nil {
+		return
+	}
+	n, err := zd.ReplayPersistedDeltas(zd.KeyDB)
+	if err != nil {
+		lg.Error("could not replay persisted deltas; the zone is serving its file alone"+
+			" and recent changes are NOT present",
+			"zone", zd.ZoneName, "error", err)
+		zd.SetError(ConfigWarning,
+			"persisted zone deltas could not be replayed; serving the zone file alone: %v", err)
+		return
+	}
+	if n > 0 {
+		lg.Info("replayed persisted zone deltas over the zone file",
+			"zone", zd.ZoneName, "deltas", n, "serial", zd.CurrentSerial)
+	}
 }
 
 func RefreshEngine(ctx context.Context, conf *Config) {
@@ -737,6 +768,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					}
 
 					zd.InstallInitialSnapshot()
+					replayZoneDeltasOnLoad(zd)
 					if err := finishFirstLoadPolicy(ctx, zd, conf, zr.DnssecPolicy); err != nil {
 						lgEngine.Warn("DNSSEC policy sync for dynamic zone failed", "zone", zone, "err", err)
 						zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)

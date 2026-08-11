@@ -38,10 +38,15 @@ type UpdateRequest struct {
 	// touches every InternalUpdate site in the tree and that is a separate
 	// change from adding a channel.
 	PreAuthorized bool
-	Status        *UpdateStatus
-	Description   string
-	PreCondition  func() bool
-	Action        func() error
+	// Replay marks the re-application of already-persisted deltas over a
+	// freshly loaded zone file. It suppresses persistence for that apply:
+	// these changes are already in the ZoneDelta table, and recording them
+	// again would double the stored history on every restart.
+	Replay       bool
+	Status       *UpdateStatus
+	Description  string
+	PreCondition func() bool
+	Action       func() error
 }
 
 // updaterCmdMutatesZoneContent reports whether a ZoneUpdater command writes
@@ -656,10 +661,43 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 
 	var updated bool
 
+	// Phase 2: persist the published difference so it survives a restart until
+	// it reaches the zone file.
+	//
+	// Registered BEFORE the lock is taken, so it runs LAST (defers are LIFO) --
+	// i.e. after the publish-and-unlock defer below has released zd.mu. That
+	// ordering is the point: the SQLite write must not happen under the zone
+	// lock. Holding zd.mu across disk I/O is how this codebase has produced
+	// deadlocks before, and the applier already calls into signing under the
+	// same lock.
+	//
+	// pendingDelta is a plain local, handed over while still locked, so there
+	// is nothing for a concurrent publish to race against.
+	var pendingDelta *PendingZoneDelta
+	defer func() {
+		if pendingDelta == nil {
+			return
+		}
+		if err := pendingDelta.Persist(kdb); err != nil {
+			// The change is already published and being served. Failing to
+			// record it means it will be missing after a restart, which is a
+			// durability loss worth shouting about -- but not a reason to
+			// unpublish content the zone is already answering with.
+			lg.Error("failed to persist zone delta; change is live but will not survive a restart",
+				"zone", zd.ZoneName, "from_serial", pendingDelta.FromSerial,
+				"to_serial", pendingDelta.ToSerial, "error", err)
+		}
+	}()
+
 	zd.mu.Lock()
 	defer func() {
 		if updated {
+			zd.wsPersistDelta = !ur.Replay
 			zd.publishLocked(zd.generation.Load())
+			// Read the staged delta out while still holding the lock; the
+			// write itself happens in the outer defer, after the unlock below.
+			pendingDelta = zd.wsPendingDelta
+			zd.wsPendingDelta = nil
 		}
 		zd.mu.Unlock()
 	}()

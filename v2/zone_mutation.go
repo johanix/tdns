@@ -333,9 +333,37 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	zd.resignWorkingSetSOAIfSigned()
 
 	data := zd.workingSet
+	oldSnap := zd.snapshot.Load()
 	// Maintain the IXFR delta history BEFORE building the snapshot so the
 	// chain copied into it ends exactly at this publish's serial (Project C).
-	zd.updateIxfrChainLocked(zd.snapshot.Load(), serial, data)
+	zd.updateIxfrChainLocked(oldSnap, serial, data)
+
+	// Phase 2: stage the same difference for durable storage when this publish
+	// is a real content change. Deliberately computed here rather than reused
+	// from updateIxfrChainLocked: that function returns early on a retention
+	// budget of zero, on an epoch reset and on a missing baseline, none of
+	// which say anything about whether the change should survive a restart.
+	// The two histories answer different questions and must not share an
+	// early-return.
+	//
+	// Only staged here. The write happens in the applier, after zd.mu is
+	// released -- see wsPendingDelta.
+	if zd.wsPersistDelta {
+		zd.wsPersistDelta = false
+		if oldSnap != nil {
+			removed, added, _ := computeZoneDelta(zd.ZoneName, oldSnap.Data, data)
+			if len(removed) > 0 || len(added) > 0 {
+				zd.wsPendingDelta = &PendingZoneDelta{
+					Zone:       zd.ZoneName,
+					FromSerial: oldSnap.Serial,
+					ToSerial:   serial,
+					Removed:    removed,
+					Added:      added,
+				}
+			}
+		}
+	}
+
 	snap := zd.buildSnapshotLocked(serial, data, zd.wsSignalSynth)
 	zd.snapshot.Store(snap)
 

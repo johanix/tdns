@@ -223,6 +223,19 @@ type ZoneData struct {
 	// zone replacement): updateIxfrChainLocked clears the delta history
 	// instead of diffing. Set under zd.mu by applyRefreshReplacementLocked.
 	wsIxfrEpochReset bool
+	// wsPersistDelta marks the next publish as a real content change whose
+	// delta belongs in the ZoneDelta table (Phase 2). Only the applier sets
+	// it. Every other publish -- refresh, reload, signalSynth-only, and above
+	// all the replay of persisted deltas during load -- leaves it clear. A
+	// replay that re-persisted what it just replayed would double the stored
+	// history on every restart.
+	wsPersistDelta bool
+	// wsPendingDelta carries a computed delta from publishWorkingSetLocked out
+	// to the applier, which writes it to the database AFTER releasing zd.mu.
+	// Written and read under the lock by the same goroutine; the SQLite write
+	// itself deliberately happens outside it, so disk I/O never blocks the
+	// zone lock and no database path can re-enter zone locking.
+	wsPendingDelta *PendingZoneDelta
 	// ixfrChainMaxBytes bounds the retained IXFR delta history (estimated
 	// wire bytes). 0 => DefaultIxfrChainMaxBytes; negative => retention
 	// disabled (IXFR queries are answered with full transfers). From zone
