@@ -110,6 +110,16 @@ func (zd *ZoneData) ApiZoneUpdate(ctx context.Context, zp ZonePost) (string, err
 			return fmt.Sprintf("Zone %s: %s changed nothing", zd.ZoneName, zp.UpdateVerb), nil
 		}
 
+	case <-ctx.Done():
+		// The client hung up mid-apply. Stop waiting -- but say plainly that
+		// the update was NOT cancelled: it is already queued and the updater
+		// will finish it. Reporting this as "cancelled" would invite a retry
+		// on the assumption that nothing happened.
+		return "", fmt.Errorf(
+			"zone %s: client went away while %s was being applied;"+
+				" the update was already queued and is NOT cancelled: %w",
+			zd.ZoneName, zp.UpdateVerb, ctx.Err())
+
 	case <-time.After(UpdateApplyTimeout):
 		return "", fmt.Errorf(
 			"zone %s: timed out after %s waiting for %s to be applied;"+
