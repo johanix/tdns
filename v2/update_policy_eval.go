@@ -42,14 +42,14 @@ func evalUpdatePolicyRR(policy UpdatePolicyDetail, principal string, rr dns.RR, 
 
 	switch policy.Type {
 	case "selfsub":
-		if !strings.HasSuffix(owner, principal) {
+		if !nameWithinPrincipal(principal, owner, true) {
 			lgHandler.Warn(label+" rejected: owner name outside selfsub tree",
 				"owner", owner, "principal", principal)
 			return false, edns0.EDEZoneUpdateOwnerOutsidePolicy
 		}
 
 	case "self":
-		if owner != principal {
+		if !nameWithinPrincipal(principal, owner, false) {
 			lgHandler.Warn(label+" rejected: owner name differs from principal violating self policy",
 				"owner", owner, "principal", principal)
 			return false, edns0.EDEZoneUpdateOwnerOutsidePolicy
@@ -74,6 +74,39 @@ func evalUpdatePolicyRR(policy UpdatePolicyDetail, principal string, rr dns.RR, 
 	}
 
 	return true, 0
+}
+
+// nameWithinPrincipal answers whether owner is inside the principal's tree
+// (sub=true, the selfsub policy) or is the principal itself (sub=false, self).
+//
+// Both are comparisons of DNS names, which means label-aligned and
+// case-insensitive. That has to be done deliberately, because doing it with
+// string operations very nearly works and is wrong in both directions:
+//
+//	strings.HasSuffix("evilchild1.example.", "child1.example.") == true
+//	"CHILD1.example." != "child1.example."
+//
+// The first grants the holder of child1.example.'s key authority over a
+// differently-named sibling delegation. The second refuses a legitimate update
+// over letter case, in a protocol where case carries no meaning.
+func nameWithinPrincipal(principal, owner string, sub bool) bool {
+	p := strings.TrimSpace(principal)
+	o := strings.TrimSpace(owner)
+	if p == "" || o == "" {
+		return false
+	}
+	p = dns.CanonicalName(dns.Fqdn(p))
+	o = dns.CanonicalName(dns.Fqdn(o))
+
+	// The root as a principal would put every name inside its tree. Nothing
+	// legitimate sets that, so it is refused rather than honoured.
+	if p == "." {
+		return false
+	}
+	if sub {
+		return dns.IsSubDomain(p, o)
+	}
+	return p == o
 }
 
 // ApproveActionsForPrincipal runs a set of records past a policy on behalf of a

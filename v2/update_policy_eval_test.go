@@ -81,6 +81,16 @@ func policyCases() []policyCase {
 		{"self: unrelated name", self, "child1.example.", "other.example. 60 IN A 192.0.2.1"},
 		{"self: rrtype not allowed", self, "child1.example.", "child1.example. 60 IN MX 10 mail.example."},
 
+		// The cases the extraction exposed. Listed in intentionalDivergence
+		// below, so the replica comparison asserts that they DID change.
+		{"selfsub: sibling whose name ends with the principal", selfsub, "child1.example.",
+			"evilchild1.example. 60 IN A 192.0.2.1"},
+		{"selfsub: owner differing only in case", selfsub, "child1.example.",
+			"CHILD1.example. 60 IN NS ns1.child1.example."},
+		{"self: owner differing only in case", self, "child1.example.",
+			"CHILD1.example. 60 IN NS ns1.child1.example."},
+		{"selfsub: empty principal", selfsub, "", "anything.example. 60 IN A 192.0.2.1"},
+
 		{"policy none", policyDetail("none", dns.TypeA), "child1.example.", "child1.example. 60 IN A 192.0.2.1"},
 		{"policy empty", policyDetail("", dns.TypeA), "child1.example.", "child1.example. 60 IN A 192.0.2.1"},
 		{"policy unknown", policyDetail("selfsubb", dns.TypeA), "child1.example.", "child1.example. 60 IN A 192.0.2.1"},
@@ -89,9 +99,21 @@ func policyCases() []policyCase {
 }
 
 // The extraction must not change any verdict. Anything it does change has to be
-// listed in intentionalDivergence with a reason, so a behaviour change can
-// never arrive as a silent side effect of moving code.
-var intentionalDivergence = map[string]string{}
+// listed here with a reason, so a behaviour change can never arrive as a silent
+// side effect of moving code.
+//
+// The entries below are the name-matching fix: the inline code compared DNS
+// names with strings.HasSuffix and ==, which is not what either operator means.
+var intentionalDivergence = map[string]string{
+	"selfsub: sibling whose name ends with the principal": "" +
+		"HasSuffix is not label-aligned, so child1.example. could change " +
+		"evilchild1.example. -- one child holding authority over another's delegation",
+	"selfsub: owner differing only in case": "DNS names are case-insensitive; " +
+		"the string compare refused a legitimate update over letter case",
+	"self: owner differing only in case": "same, for the self policy",
+	"selfsub: empty principal": "an empty principal made every name a suffix match, " +
+		"so it approved everything",
+}
 
 func TestUpdatePolicyEvalMatchesPreExtractionBehaviour(t *testing.T) {
 	for _, tc := range policyCases() {
@@ -151,6 +173,47 @@ func TestUpdatePolicyEvalVerdicts(t *testing.T) {
 			if gotOk != tc.wantOk || gotEde != tc.wantEde {
 				t.Errorf("got (approved=%v, ede=%d), want (approved=%v, ede=%d)",
 					gotOk, gotEde, tc.wantOk, tc.wantEde)
+			}
+		})
+	}
+}
+
+// The name matching, stated directly. selfsub means "at or below this name in
+// the DNS tree", not "this string appears at the end of that string".
+func TestUpdatePolicyNameMatchingIsLabelAligned(t *testing.T) {
+	selfsub := policyDetail("selfsub", dns.TypeA)
+	self := policyDetail("self", dns.TypeA)
+
+	for _, tc := range []struct {
+		policy UpdatePolicyDetail
+		princ  string
+		owner  string
+		want   bool
+		why    string
+	}{
+		{selfsub, "child1.example.", "child1.example.", true, "the principal itself is inside its own tree"},
+		{selfsub, "child1.example.", "ns1.child1.example.", true, "a label below"},
+		{selfsub, "child1.example.", "a.b.child1.example.", true, "several labels below"},
+		{selfsub, "child1.example.", "evilchild1.example.", false, "a sibling, not a subdomain"},
+		{selfsub, "child1.example.", "xchild1.example.", false, "a sibling, not a subdomain"},
+		{selfsub, "child1.example.", "example.", false, "the parent is not below the child"},
+		{selfsub, "child1.example.", "child1.example.org.", false, "a different tree entirely"},
+		{selfsub, "CHILD1.example.", "ns1.child1.EXAMPLE.", true, "case carries no meaning in DNS"},
+		{selfsub, "child1.example", "ns1.child1.example.", true, "a principal written without the trailing dot"},
+		{selfsub, ".", "anything.example.", false, "the root as principal would own the whole zone"},
+		{selfsub, "", "anything.example.", false, "an empty principal owns nothing"},
+
+		{self, "child1.example.", "child1.example.", true, "exactly itself"},
+		{self, "child1.example.", "CHILD1.EXAMPLE.", true, "case carries no meaning in DNS"},
+		{self, "child1.example.", "ns1.child1.example.", false, "self is not selfsub"},
+		{self, "child1.example.", "evilchild1.example.", false, "a sibling"},
+		{self, "", "anything.example.", false, "an empty principal owns nothing"},
+	} {
+		t.Run(fmt.Sprintf("%s/%s/%s", tc.policy.Type, tc.princ, tc.owner), func(t *testing.T) {
+			rr := policyTestRR(t, fmt.Sprintf("%s 60 IN A 192.0.2.1", dns.Fqdn(tc.owner)))
+			got, ede := evalUpdatePolicyRR(tc.policy, tc.princ, rr, "test")
+			if got != tc.want {
+				t.Errorf("approved=%v (ede=%d), want %v: %s", got, ede, tc.want, tc.why)
 			}
 		})
 	}
