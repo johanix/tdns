@@ -61,6 +61,13 @@ func (zd *ZoneData) ApiZoneUpdate(zp ZonePost) (string, error) {
 		return "", fmt.Errorf("zone updater is not available")
 	}
 
+	// Answer only once the change has actually been made, for the same reason
+	// the DNS UPDATE responder does: a 200 that means "queued" is a promise the
+	// server has not kept, and the caller has no way to find out later whether
+	// it was. Buffered, so the updater's non-blocking reply always lands even
+	// if the wait below has already given up.
+	respch := make(chan ZoneUpdateResult, 1)
+
 	select {
 	case zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:           "ZONE-UPDATE",
@@ -68,15 +75,37 @@ func (zd *ZoneData) ApiZoneUpdate(zp ZonePost) (string, error) {
 		Actions:       actions,
 		PreAuthorized: true,
 		Description:   fmt.Sprintf("API %s", zp.UpdateVerb),
+		Resp:          respch,
 	}:
 	case <-time.After(5 * time.Second):
 		return "", fmt.Errorf("timeout while queueing the update for zone %s", zd.ZoneName)
 	}
 
-	lgApi.Info("api zone update queued", "zone", zd.ZoneName,
+	select {
+	case res := <-respch:
+		if res.Err != nil {
+			return "", fmt.Errorf("zone %s: %s not applied: %v",
+				zd.ZoneName, zp.UpdateVerb, res.Err)
+		}
+		if !res.Applied {
+			// Accepted and durable, but nothing actually changed -- e.g. adding
+			// an RR that is already present. Worth saying plainly rather than
+			// reporting a change that did not happen.
+			lgApi.Info("api zone update was a no-op", "zone", zd.ZoneName, "verb", zp.UpdateVerb)
+			return fmt.Sprintf("Zone %s: %s changed nothing", zd.ZoneName, zp.UpdateVerb), nil
+		}
+
+	case <-time.After(UpdateApplyTimeout):
+		return "", fmt.Errorf(
+			"zone %s: timed out after %s waiting for %s to be applied;"+
+				" it may or may not have taken effect",
+			zd.ZoneName, UpdateApplyTimeout, zp.UpdateVerb)
+	}
+
+	lgApi.Info("api zone update applied", "zone", zd.ZoneName,
 		"verb", zp.UpdateVerb, "actions", len(actions))
 
-	return fmt.Sprintf("Zone %s: %s queued (%d update record%s)",
+	return fmt.Sprintf("Zone %s: %s applied (%d update record%s)",
 		zd.ZoneName, zp.UpdateVerb, len(actions), plural(len(actions))), nil
 }
 

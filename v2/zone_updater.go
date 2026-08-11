@@ -42,11 +42,45 @@ type UpdateRequest struct {
 	// freshly loaded zone file. It suppresses persistence for that apply:
 	// these changes are already in the ZoneDelta table, and recording them
 	// again would double the stored history on every restart.
-	Replay       bool
+	Replay bool
+	// Resp, when non-nil, receives the outcome once the update has been
+	// applied, persisted and published -- or once it has been refused. It
+	// exists so a caller can answer its own client only after the change is
+	// durable, which is what RFC 2136 means by a NOERROR response: a promise
+	// the server has already kept, not one it intends to.
+	//
+	// Buffered by the sender and written with a non-blocking send, so the
+	// updater is never held up by a caller that has given up waiting, and a
+	// double send (belt-and-braces responses on several exit paths) is
+	// harmless.
+	Resp         chan ZoneUpdateResult
 	Status       *UpdateStatus
 	Description  string
 	PreCondition func() bool
 	Action       func() error
+}
+
+// ZoneUpdateResult is the outcome of one update, delivered on UpdateRequest.Resp.
+// Applied is false both for a refused update and for one that changed nothing.
+type ZoneUpdateResult struct {
+	Applied bool
+	Err     error
+}
+
+// respond delivers the outcome to a waiting caller, if there is one.
+//
+// Non-blocking: a caller that timed out and walked away must never wedge the
+// single ZoneUpdater goroutine, which serves every zone. Safe to call more than
+// once for the same request, so exit paths can each report without having to
+// reason about which one got there first.
+func (ur *UpdateRequest) respond(applied bool, err error) {
+	if ur.Resp == nil {
+		return
+	}
+	select {
+	case ur.Resp <- ZoneUpdateResult{Applied: applied, Err: err}:
+	default:
+	}
 }
 
 // updaterCmdMutatesZoneContent reports whether a ZoneUpdater command writes
@@ -122,6 +156,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 			if !ok {
 				lg.Warn("ZoneUpdater: unknown zone in update request, ignoring", "cmd", ur.Cmd, "zone", ur.ZoneName)
 				lg.Debug("ZoneUpdater: known zones", "zones", Zones.Keys())
+				ur.respond(false, fmt.Errorf("unknown zone %s", ur.ZoneName))
 				continue
 			}
 
@@ -152,6 +187,8 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				lg.Error("ZoneUpdater: refusing zone mutation on a secondary that may not originate content (invariant violation)",
 					"cmd", ur.Cmd, "zone", ur.ZoneName, "internal", ur.InternalUpdate,
 					"description", ur.Description, "actions", len(ur.Actions))
+				ur.respond(false, fmt.Errorf(
+					"zone %s may not originate content", ur.ZoneName))
 				continue
 			}
 
@@ -243,6 +280,14 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 							updated = true
 						}
 					}
+					// The change is now durable AND visible, or it failed. This is
+					// the earliest point at which a caller may honestly answer
+					// its own client, so release any waiter here rather than at
+					// the end of the case: the remaining work below (zonefile
+					// write-back for API-managed primaries, delegation sync) is
+					// follow-up, not part of the promise.
+					ur.respond(updated, err)
+
 					if updated && !ur.InternalUpdate {
 						lg.Debug("ZoneUpdater: zone updated, setting dirty flag", "zone", zd.ZoneName)
 						zd.SetOption(OptDirty, true)
@@ -303,6 +348,8 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					}
 				} else {
 					lg.Warn("ZoneUpdater: updates disallowed for zone, dropping ZONE-UPDATE", "zone", zd.ZoneName)
+					ur.respond(false, fmt.Errorf(
+						"zone %s does not allow updates on this channel", zd.ZoneName))
 				}
 				lg.Debug("ZoneUpdater: ZONE-UPDATE done")
 
