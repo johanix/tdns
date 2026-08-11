@@ -219,6 +219,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 			switch ur.Cmd {
 			case "DEFERRED-UPDATE":
 				lg.Error("ZoneUpdater: received deferred update on wrong queue", "description", ur.Description)
+				ur.respond(false, fmt.Errorf("deferred update sent to the wrong queue"))
 				continue
 
 			case "CHILD-UPDATE":
@@ -241,20 +242,34 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				backend := zd.DelegationBackend
 				zd.mu.Unlock()
 
+				// Every exit from here answers ur.Resp. A caller that is
+				// waiting for the change to be durable before it says so --
+				// the RFC 2136 responder, and the DSYNC API handler -- has no
+				// other way to find out, and silence costs it a full
+				// UpdateApplyTimeout before it gives up and reports failure
+				// for an update that may well have succeeded.
 				if !allowChildUpdates {
 					lg.Warn("ZoneUpdater: zone does not allow child updates, dropping CHILD-UPDATE", "zone", ur.ZoneName)
+					ur.respond(false, fmt.Errorf("zone %s does not allow child updates", ur.ZoneName))
 					continue
 				}
 				if backend == nil {
 					lg.Error("ZoneUpdater: zone allows child updates but has no DelegationBackend, dropping CHILD-UPDATE (invariant violation)", "zone", ur.ZoneName)
+					ur.respond(false, fmt.Errorf("zone %s has no delegation backend", ur.ZoneName))
 					continue
 				}
 				if err := backend.ApplyChildUpdate(ur.ZoneName, ur); err != nil {
 					lg.Error("ZoneUpdater: DelegationBackend.ApplyChildUpdate failed",
 						"backend", backend.Name(), "error", err)
+					ur.respond(false, err)
 				} else {
 					lg.Info("ZoneUpdater: CHILD-UPDATE applied",
 						"zone", ur.ZoneName, "backend", backend.Name())
+					// ApplyChildUpdate is durable by the time it returns: the
+					// direct backend has written the zone file, the db backend
+					// has written the row. So this is the same promise the
+					// ZONE-UPDATE path makes.
+					ur.respond(true, nil)
 					// OptDirty is managed by the backend: 'direct' sets
 					// then clears it via WriteZone after persisting; DB-
 					// and zonefile-backends don't touch in-memory zone
@@ -446,6 +461,14 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				err = tx.Commit()
 				if err != nil {
 					lg.Error("tx.Commit failed", "error", err)
+					// The commit is what makes a key upload durable, so this
+					// is the one outcome here the caller must not be told
+					// succeeded. Same reasoning as the CHILD-UPDATE branch:
+					// silence would cost it a full UpdateApplyTimeout and then
+					// report failure without knowing.
+					ur.respond(false, fmt.Errorf("truststore update not committed: %v", err))
+				} else {
+					ur.respond(true, nil)
 				}
 				logUpdateActions("TRUSTSTORE-UPDATE", ur.Actions)
 
@@ -457,6 +480,10 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				}
 			default:
 				lg.Error("ZoneUpdater: unknown command, ignoring", "cmd", ur.Cmd)
+				// Including this one: a caller waiting on a command the
+				// updater does not implement should be told so, not left to
+				// time out.
+				ur.respond(false, fmt.Errorf("unknown update command %q", ur.Cmd))
 			}
 			lg.Info("ZoneUpdater: update request completed", "type", ur.Cmd)
 		}
