@@ -151,6 +151,40 @@ func TestBuildZoneUpdateActionsReplaceRejectsMixedRRsets(t *testing.T) {
 	}
 }
 
+// The apex SOA and NS RRsets are what make the zone a zone; deleting either
+// leaves something unservable, and the applier's apex guard would then refuse
+// the whole publish, taking any other change in the same update with it.
+func TestBuildZoneUpdateActionsRefusesApexSoaNsDelete(t *testing.T) {
+	for _, rrtype := range []string{"SOA", "NS"} {
+		if _, err := BuildZoneUpdateActions("alpha.dnslab.", ZoneUpdateSpec{
+			Verb: VerbDelRRset, Name: "alpha.dnslab.", Rrtype: rrtype,
+		}); err == nil {
+			t.Errorf("delrrset accepted deleting the apex %s RRset", rrtype)
+		}
+	}
+
+	// The same types below the apex are ordinary data: an NS RRset at a
+	// delegation point is exactly what delegation management edits.
+	if _, err := BuildZoneUpdateActions("alpha.dnslab.", ZoneUpdateSpec{
+		Verb: VerbDelRRset, Name: "child.alpha.dnslab.", Rrtype: "NS",
+	}); err != nil {
+		t.Errorf("delrrset refused a non-apex NS RRset: %v", err)
+	}
+}
+
+// Meta and query types never exist as RRsets in a zone, but dns.StringToType
+// resolves them happily -- so without a check the statement is built, queued,
+// and silently does nothing.
+func TestBuildZoneUpdateActionsRefusesMetaTypes(t *testing.T) {
+	for _, rrtype := range []string{"TSIG", "TKEY", "AXFR", "IXFR", "OPT", "MAILB"} {
+		if _, err := BuildZoneUpdateActions("alpha.dnslab.", ZoneUpdateSpec{
+			Verb: VerbDelRRset, Name: "foo.alpha.dnslab.", Rrtype: rrtype,
+		}); err == nil {
+			t.Errorf("delrrset accepted meta type %s", rrtype)
+		}
+	}
+}
+
 func TestBuildZoneUpdateActionsRefusesOutOfBailiwick(t *testing.T) {
 	for _, spec := range []ZoneUpdateSpec{
 		{Verb: VerbAddRR, RRs: []string{"foo.beta.dnslab. IN A 1.2.3.4"}},
