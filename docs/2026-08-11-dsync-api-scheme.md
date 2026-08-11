@@ -208,6 +208,14 @@ Nothing else is added. A credential names one principal; scope comes from the
 zone's policy, not from the credential. (A credential that is *narrower* than
 its principal's policy is a plausible later refinement — §14.)
 
+Usernames are normalised as domain names — case-folded and given a trailing dot
+— even when they are not domain names: `acme-registrar` is stored and matched as
+`acme-registrar.`. A username only has to be unique, and this provides that at
+no cost. The alternative, leaving the dot alone, makes `bob` and `bob.` two
+accounts; everywhere else in this system those name the same thing, so a
+credential store where they do not is a trap whose failure mode is an
+indistinguishable 401.
+
 ### 6.3 The one refactor
 
 `ApproveChildUpdate` currently takes `(zone, *UpdateStatus, *dns.Msg)` and

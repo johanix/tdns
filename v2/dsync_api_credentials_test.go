@@ -199,44 +199,51 @@ func TestDsyncApiCredentialNormalisation(t *testing.T) {
 		t.Errorf("zone normalisation failed: %v", err)
 	}
 
-	// The username is case-folded, so this is the same account.
-	if _, err := kdb.VerifyDsyncApiCredential("example.", "CHILD1.EXAMPLE", key); err != nil {
-		t.Errorf("username case folding failed: %v", err)
-	}
-	if _, err := kdb.AddDsyncApiCredential("example.", "CHILD1.EXAMPLE", "", "", time.Time{}); err == nil {
-		t.Error("a username differing only in case was accepted as a second account")
+	// Usernames get domain-name normalisation too, so all four spellings are
+	// one account. In a DNS system "bob" and "bob." naming different things
+	// would be a trap: provisioned one way, typed the other, and the failure
+	// is an indistinguishable 401 that says nothing about why.
+	for _, spelling := range []string{"child1.example", "child1.example.", "CHILD1.EXAMPLE", "CHILD1.EXAMPLE."} {
+		if _, err := kdb.VerifyDsyncApiCredential("example.", spelling, key); err != nil {
+			t.Errorf("username spelling %q did not resolve to the same account: %v", spelling, err)
+		}
+		if _, err := kdb.AddDsyncApiCredential("example.", spelling, "", "", time.Time{}); err == nil {
+			t.Errorf("username spelling %q was accepted as a second account", spelling)
+		}
 	}
 
-	// But the username is NOT a domain name: it is opaque and matched
-	// literally, so a trailing dot makes it a different account name. The
-	// principal derived from it IS normalised as a domain name.
 	creds, err := kdb.ListDsyncApiCredentials("example.")
 	if err != nil || len(creds) != 1 {
 		t.Fatalf("ListDsyncApiCredentials: %v (%d creds)", err, len(creds))
 	}
-	if creds[0].Username != "child1.example" {
-		t.Errorf("username = %q, want it stored verbatim (case-folded only)", creds[0].Username)
+	if creds[0].Username != "child1.example." {
+		t.Errorf("username = %q, want the canonical form %q", creds[0].Username, "child1.example.")
 	}
 	if creds[0].Principal != "child1.example." {
 		t.Errorf("principal = %q, want the FQDN form %q", creds[0].Principal, "child1.example.")
 	}
 }
 
-// An opaque username must survive intact: not every deployment names accounts
-// after zones.
-func TestDsyncApiCredentialOpaqueUsername(t *testing.T) {
+// A username that is not a domain name still works: it just gets the same
+// normalisation, so "acme-registrar" is stored and matched as
+// "acme-registrar.". Not every deployment names accounts after zones.
+func TestDsyncApiCredentialNonDomainUsername(t *testing.T) {
 	kdb := newTestKeyDB(t)
 
 	key, err := kdb.AddDsyncApiCredential("example.", "acme-registrar", "child1.example.", "", time.Time{})
 	if err != nil {
 		t.Fatalf("AddDsyncApiCredential: %v", err)
 	}
-	cred, err := kdb.VerifyDsyncApiCredential("example.", "acme-registrar", key)
-	if err != nil {
-		t.Fatalf("VerifyDsyncApiCredential: %v", err)
-	}
-	if cred.Username != "acme-registrar" {
-		t.Errorf("username = %q, want it unchanged", cred.Username)
+	// Either spelling authenticates; the client need not know which form was
+	// used at provisioning.
+	for _, spelling := range []string{"acme-registrar", "acme-registrar."} {
+		cred, err := kdb.VerifyDsyncApiCredential("example.", spelling, key)
+		if err != nil {
+			t.Fatalf("VerifyDsyncApiCredential(%q): %v", spelling, err)
+		}
+		if cred.Username != "acme-registrar." {
+			t.Errorf("username = %q, want the canonical %q", cred.Username, "acme-registrar.")
+		}
 	}
 
 	// An opaque username with no explicit principal cannot work: it would

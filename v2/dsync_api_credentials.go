@@ -83,21 +83,26 @@ func canonDsyncApiZone(zone string) string {
 	return strings.ToLower(dns.Fqdn(strings.TrimSpace(zone)))
 }
 
-// canonDsyncApiUser normalises a username.
+// canonDsyncApiUser normalises a username: trimmed, case-folded, and given a
+// trailing dot.
 //
-// Trimmed and case-folded, and nothing else. The username is an OPAQUE
-// identifier matched literally, not a domain name -- it usually looks like one,
-// because the recommended convention is to name the account after the child
-// zone, but it does not have to be, and "acme-registrar" must survive intact.
-// So no trailing dot is supplied: "child1.example" and "child1.example." are
-// two different account names, exactly as "bob" and "bob." would be.
+// A username does not have to be a domain name -- the recommended convention is
+// to name the account after the child zone, but "acme-registrar" is a perfectly
+// good account name, and it is stored as "acme-registrar." here. What a
+// username has to provide is uniqueness, and domain-name normalisation provides
+// it while costing nothing.
 //
-// Case is folded because the convention makes domain names common here and case
-// carries no meaning in one; two accounts differing only in case is a way to
-// end up with a credential nobody remembers issuing. The principal, which IS a
-// domain name, is normalised as one -- see AddDsyncApiCredential.
+// The alternative, folding case but leaving the dot alone, makes "bob" and
+// "bob." two different accounts. Everywhere else in this system those two
+// strings name the same thing, so a credential store where they do not is a
+// trap: the account is provisioned one way, typed the other, and the failure is
+// an indistinguishable 401 (§5) that says nothing about why.
+//
+// Case is folded for the same reason it is on any domain name, and because two
+// accounts differing only in case is a way to end up with a credential nobody
+// remembers issuing.
 func canonDsyncApiUser(user string) string {
-	return strings.ToLower(strings.TrimSpace(user))
+	return strings.ToLower(dns.Fqdn(strings.TrimSpace(user)))
 }
 
 // usableAsPrincipal reports whether s can serve as a policy principal.
@@ -132,7 +137,10 @@ func usableAsPrincipal(s string) bool {
 func (kdb *KeyDB) AddDsyncApiCredential(parentZone, username, principal, comment string, expires time.Time) (string, error) {
 	zone := canonDsyncApiZone(parentZone)
 	user := canonDsyncApiUser(username)
-	if zone == "." || user == "" {
+	// Both normalise an empty string to ".", so that is what "missing" looks
+	// like here. A username of "." alone is refused by the same check, which
+	// is correct: it is the root, not a name.
+	if zone == "." || user == "." {
 		return "", fmt.Errorf("both a parent zone and a username are required")
 	}
 
