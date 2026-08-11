@@ -64,10 +64,25 @@ type DsyncApiChildConf struct {
 	// parentupdater config is a list.
 	Credentials []DsyncApiChildCredentialConf `yaml:"credentials" mapstructure:"credentials"`
 
+	// CaFile is an additional CA bundle to trust for DSYNC API endpoints, on
+	// top of the system roots.
+	//
+	// This is NOT a way to weaken verification: certificates are still fully
+	// validated, against a larger set of roots. It exists because the natural
+	// deployment is a private trust domain -- `tdns-cli cert ca` mints exactly
+	// such a CA -- and the alternative would be installing that CA into the
+	// host's system trust store, which grants it authority over every TLS
+	// connection the host makes rather than just these.
+	CaFile string `yaml:"cafile" mapstructure:"cafile"`
+
 	// AllowInsecure permits a plain-http endpoint AND an endpoint discovered
 	// without DNSSEC validation. Deliberately one switch for both: they are
 	// the same protection seen from two sides, and an operator who turns off
 	// one while believing the other still holds has no protection at all.
+	//
+	// It does NOT disable certificate validation -- use CaFile for a private
+	// CA. There is no switch for turning verification off, because a
+	// credential sent to an unverified endpoint is a credential given away.
 	// A lab convenience. Never a production setting.
 	AllowInsecure bool `yaml:"allow-insecure" mapstructure:"allow-insecure"`
 }

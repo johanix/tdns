@@ -96,7 +96,7 @@ func TestDsyncApiRefusesPlaintextEndpoint(t *testing.T) {
 
 	_, err := DsyncApiPostDelegationRequest(context.Background(), ep, cred, "child1.example.", []DsyncApiRRset{
 		{Owner: "child1.example.", Type: "NS", RRs: []string{"child1.example. 60 IN NS ns1.child1.example."}},
-	}, false)
+	}, false, "")
 	if err == nil {
 		t.Fatal("a plaintext endpoint was used")
 	}
@@ -122,7 +122,7 @@ func TestDsyncApiSendsNoCredentialToAPlaintextEndpoint(t *testing.T) {
 	cred := DsyncApiClientCredential{Parent: "example.", Username: "child1.example.", Key: "secret"}
 	rrsets := []DsyncApiRRset{{Owner: "child1.example.", Type: "NS", RRs: []string{"child1.example. 60 IN NS ns1.child1.example."}}}
 
-	if _, err := DsyncApiPostDelegationRequest(context.Background(), ep, cred, "child1.example.", rrsets, false); err == nil {
+	if _, err := DsyncApiPostDelegationRequest(context.Background(), ep, cred, "child1.example.", rrsets, false, ""); err == nil {
 		t.Fatal("the plaintext endpoint was used")
 	}
 	if sawAuth {
@@ -131,7 +131,7 @@ func TestDsyncApiSendsNoCredentialToAPlaintextEndpoint(t *testing.T) {
 
 	// With allow-insecure the request does go through -- the lab escape hatch
 	// is real, which is exactly why it is named after what it costs.
-	if _, err := DsyncApiPostDelegationRequest(context.Background(), ep, cred, "child1.example.", rrsets, true); err != nil {
+	if _, err := DsyncApiPostDelegationRequest(context.Background(), ep, cred, "child1.example.", rrsets, true, ""); err != nil {
 		t.Fatalf("allow-insecure did not permit the request: %v", err)
 	}
 	if !sawAuth {
@@ -156,7 +156,7 @@ func TestDsyncApiRefusesRedirects(t *testing.T) {
 
 	_, err := DsyncApiPostDelegationRequest(context.Background(), ep, cred, "child1.example.", []DsyncApiRRset{
 		{Owner: "child1.example.", Type: "NS", RRs: []string{"child1.example. 60 IN NS ns1.child1.example."}},
-	}, true)
+	}, true, "")
 	if err == nil {
 		t.Fatal("a redirect was followed")
 	}
@@ -184,7 +184,7 @@ func TestDsyncApiPostSendsTheDeclaredDelegation(t *testing.T) {
 		{Owner: "child1.example.", Type: "NS", RRs: []string{"child1.example. 60 IN NS ns1.child1.example."}},
 	}
 
-	out, err := DsyncApiPostDelegationRequest(context.Background(), ep, cred, "child1.example.", rrsets, true)
+	out, err := DsyncApiPostDelegationRequest(context.Background(), ep, cred, "child1.example.", rrsets, true, "")
 	if err != nil {
 		t.Fatalf("DsyncApiPostDelegationRequest: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestDsyncApiReportsParentRefusal(t *testing.T) {
 
 	_, err := DsyncApiPostDelegationRequest(context.Background(), ep, cred, "child1.example.", []DsyncApiRRset{
 		{Owner: "child1.example.", Type: "NS", RRs: []string{"child1.example. 60 IN NS ns1.child1.example."}},
-	}, true)
+	}, true, "")
 	if err == nil {
 		t.Fatal("a 403 was treated as success")
 	}

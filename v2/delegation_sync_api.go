@@ -74,7 +74,7 @@ func (zd *ZoneData) SyncZoneDelegationViaApi(ctx context.Context, imr *Imr,
 	}
 
 	if _, err := DsyncApiPostDelegationRequest(dctx, endpoint, cred, zd.ZoneName, rrsets,
-		childconf.AllowInsecure); err != nil {
+		childconf.AllowInsecure, childconf.CaFile); err != nil {
 		return "", dns.RcodeServerFailure, fmt.Errorf("zone %s: %v", zd.ZoneName, err)
 	}
 

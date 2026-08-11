@@ -7,11 +7,13 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -159,7 +161,7 @@ type DsyncApiClientCredential struct {
 // clear to anyone on the path.
 func DsyncApiPostDelegationRequest(ctx context.Context, endpoint *DsyncApiEndpoint,
 	cred DsyncApiClientCredential, child string, rrsets []DsyncApiRRset,
-	allowInsecure bool) (*DsyncApiDelegation, error) {
+	allowInsecure bool, caFile string) (*DsyncApiDelegation, error) {
 
 	if endpoint == nil || endpoint.Url == "" {
 		return nil, fmt.Errorf("no endpoint")
@@ -191,7 +193,11 @@ func DsyncApiPostDelegationRequest(ctx context.Context, endpoint *DsyncApiEndpoi
 	req.Header.Set("Content-Type", "application/json")
 	req.SetBasicAuth(cred.Username, cred.Key)
 
-	resp, err := dsyncApiHttpClient().Do(req)
+	client, err := dsyncApiHttpClient(caFile)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("posting the delegation to %s: %v", reqUrl, err)
 	}
@@ -230,7 +236,30 @@ func DsyncApiPostDelegationRequest(ctx context.Context, endpoint *DsyncApiEndpoi
 //     which turns a redirect into a silent auth failure rather than a leak,
 //     but a same-host redirect still carries the credential -- and a redirect
 //     on this endpoint means something is wrong either way.
-func dsyncApiHttpClient() *http.Client {
+func dsyncApiHttpClient(caFile string) (*http.Client, error) {
+	tlsconf := &tls.Config{MinVersion: tls.VersionTLS12}
+
+	// An extra CA on top of the system roots, for the private trust domain
+	// `tdns-cli cert ca` mints. Additive: everything is still verified, just
+	// against a larger set of roots. A CA file that is named but unreadable is
+	// an error rather than a silent fallback to the system roots -- the
+	// operator asked for that CA, and quietly not using it would mean every
+	// request failing later with a confusing certificate error.
+	if strings.TrimSpace(caFile) != "" {
+		pem, err := os.ReadFile(caFile)
+		if err != nil {
+			return nil, fmt.Errorf("reading delegationsync.child.api.cafile %q: %v", caFile, err)
+		}
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if !pool.AppendCertsFromPEM(pem) {
+			return nil, fmt.Errorf("no certificates found in %q", caFile)
+		}
+		tlsconf.RootCAs = pool
+	}
+
 	return &http.Client{
 		Timeout: 30 * time.Second,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -238,9 +267,9 @@ func dsyncApiHttpClient() *http.Client {
 				req.URL.Redacted())
 		},
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+			TLSClientConfig: tlsconf,
 		},
-	}
+	}, nil
 }
 
 // DsyncApiRRsetsFromSyncStatus renders the child's desired delegation as the
