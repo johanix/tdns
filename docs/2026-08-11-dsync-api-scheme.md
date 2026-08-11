@@ -524,3 +524,123 @@ Integration (foffe, as with phase 2):
   certificate, redirect. Each must refuse **before** the credential is sent —
   asserted by observing that no request carrying `Authorization` was made, not
   merely that the operation failed.
+
+---
+
+## 16. What changed from the design, and why
+
+All five PRs are built. Recorded here rather than quietly folded into the text
+above, so the decisions that did not survive contact with the code are visible.
+
+### 16.1 The request shape: a list, not a map keyed by type
+
+§7.2 sketched `"rrsets": {"NS": [...], "A": [...]}`. That does not survive glue.
+NS lives at the child and its addresses live at the nameserver names, so a
+map keyed by type alone cannot say *which* A records to remove — and removal is
+expressed by an empty list, which has no record to infer an owner from.
+
+Each entry now names owner and type explicitly:
+
+```json
+{"child": "child1.example.",
+ "rrsets": [
+   {"owner": "child1.example.",     "type": "NS", "rrs": ["child1.example. 3600 IN NS ns1.child1.example."]},
+   {"owner": "ns1.child1.example.", "type": "A",  "rrs": ["ns1.child1.example. 3600 IN A 192.0.2.1"]},
+   {"owner": "child1.example.",     "type": "DS", "rrs": []}
+ ]}
+```
+
+Absent means "leave alone"; empty means "remove". Unchanged from the design.
+
+### 16.2 The three records go out in one update
+
+The design proposed a `PublishTxtRR` mirroring `PublishUriRR`. Both send an
+update of their own, which would have published the DSYNC, the URI and the TXT
+as three separate changes. A child that resolved the DSYNC but not yet the URI
+can do nothing except fail, so they are built inline and travel in one
+`UpdateRequest`: one serial bump, all three visible together or not at all.
+
+### 16.3 CHILD-UPDATE, not ZONE-UPDATE — and a regression it exposed
+
+Delegation data belongs to the configured `DelegationBackend`. Queuing it as
+ordinary zone content would mutate in-memory state behind the scanner's back,
+which is the disagreement the `delegationbackend` requirement exists to
+prevent. So the handler queues `CHILD-UPDATE`.
+
+Which surfaced a live bug in phase 2: only the `ZONE-UPDATE` branch of the
+updater answered the reply channel. The RFC 2136 responder queues with
+`dur.Status.Type`, which is `CHILD-UPDATE` or `TRUSTSTORE-UPDATE` as often as
+it is `ZONE-UPDATE` — so every delegation update from a child (the whole DSYNC
+UPDATE scheme) and every SIG(0) key upload stalled for `UpdateApplyTimeout` and
+then answered SERVFAIL, for an update that had in fact been applied. Fixed for
+all four branches, with a test that reads the switch so a new command cannot be
+added without answering.
+
+### 16.4 The policy extraction found an authorization bug
+
+§6.3 predicted a behaviour-neutral refactor. It was — but extracting the
+comparison made visible that `selfsub` was `strings.HasSuffix`, which is not
+label-aligned:
+
+```
+strings.HasSuffix("evilchild1.example.", "child1.example.") == true
+```
+
+so a trusted key named `child1.example.` could change a differently-named
+sibling's delegation. On the existing SIG(0) path, for every zone with a
+`self`/`selfsub` policy, whether or not it ever enables this scheme. Fixed
+along with the empty principal (every string has the empty suffix, so it
+approved everything), the root as principal, and a case-sensitive comparison
+that refused legitimate updates. See §13.
+
+### 16.5 The endpoint decides what it is about; the policy decides who may
+
+`dsyncApiManagedTypes` is `NS, DS, A, AAAA` and is deliberately *not* driven by
+`updatepolicy.child.rrtypes`. A parent that allows TXT in its child policy
+still does not want this endpoint used to manage arbitrary text records at a
+delegation point. Both gates apply: the endpoint refuses an unmanaged type with
+400, the policy refuses a disallowed one with 403.
+
+### 16.6 One switch for plaintext and for unvalidated discovery
+
+The design gave `allow-insecure` for `http://` and treated the DNSSEC
+requirement separately. They are the same protection seen from two sides —
+DNSSEC establishes which endpoint was meant, TLS establishes that this is it —
+and an operator who disables one while believing the other still holds has no
+protection at all. One switch, `delegationsync.child.api.allow-insecure`,
+covers both. Certificate validation has no switch at all.
+
+### 16.7 Address resolution is skipped for this scheme
+
+`BestSyncScheme` resolves the DSYNC target to an address, because NOTIFY and
+UPDATE send DNS to it. An API target is a service description point whose
+address records are optional, so resolving it would fail on a *correctly*
+configured parent. Skipped for `SchemeAPI` only.
+
+---
+
+## 17. As-built status
+
+| PR | Scope | Status |
+|----|-------|--------|
+| 1 | Parent publishes DSYNC + URI + TXT | built, live-verified on foffe |
+| 2 | Policy extraction (+ the §16.4 fix) | built, tested against a verbatim replica |
+| 3 | Credential store + CLI | built, live-verified on foffe |
+| 4 | The listener | built, live-verified on foffe |
+| 5 | Child side | built, unit-tested |
+
+Verified live on foffe (`/var/tmp/dsyncapi`, parent `dsynctest.example.`):
+the three records resolve and decode correctly; `401` with no credentials and
+with a wrong key; `200` on GET with correct policy scoping; `404` for a child
+with no hosted parent; `200` on POST with the change served in DNS and written
+through to the zone file; `403` for a cross-child attempt; `403` for the
+label-boundary case the old suffix match allowed; `400` for an unmanaged type
+and for an owner outside the child.
+
+**Not yet verified live: the child half of §11 end to end.** It needs a signed
+parent zone (so discovery validates) and a certificate the child trusts, and
+the foffe rig has neither — the parent is unsigned and the listener uses a
+self-signed certificate. The client's own guards are unit-tested against
+`httptest` servers, including that no `Authorization` header is sent before a
+refusal, but the DNSSEC discovery path has not been exercised against a real
+signed parent. That is the remaining gap.
