@@ -515,7 +515,19 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 	zd.mu.Lock()
 	defer func() {
 		if updated {
+			// Phase 2: delegation records written by a CHILD-UPDATE are zone
+			// content like any other -- they are staged into the working set
+			// and published from here. Without this they would be served but
+			// not recorded, and would silently roll back at the next restart
+			// while every other kind of change survived.
+			zd.wsPersistDelta = !ur.Replay
 			zd.publishLocked(zd.generation.Load())
+			if zd.wsPersistErr != nil {
+				lg.Error("child update not applied: could not persist the change",
+					"zone", zd.ZoneName, "error", zd.wsPersistErr)
+				zd.wsPersistErr = nil
+				updated = false
+			}
 		}
 		zd.mu.Unlock()
 	}()
@@ -635,12 +647,19 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 	return updated, nil
 }
 
-func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bool, error) {
+// ApplyZoneUpdateToZoneData applies one update's actions to the zone.
+//
+// The returns are named because the deferred publish below can fail: a change
+// whose delta cannot be persisted is refused rather than served (see
+// publishWorkingSetLocked), and that has to surface as an error here rather
+// than as a successful-looking (true, nil).
+func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (updated bool, err error) {
 
 	// dump.P(ur)
 	// log.Printf("**** ApplyZoneUpdateToZoneData: ur=%+v", ur)
 
-	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+	var dak *DnssecKeys
+	dak, err = kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 	// Resolve keys (generating if needed) BEFORE taking zd.mu below — including
 	// the (nil,nil) "no error, no keys" case. Otherwise SignRRset is later called
 	// under zd.mu with a nil dak, reaches PublishDnskeyRRs, and self-deadlocks
@@ -659,45 +678,22 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 		}
 	}
 
-	var updated bool
-
-	// Phase 2: persist the published difference so it survives a restart until
-	// it reaches the zone file.
-	//
-	// Registered BEFORE the lock is taken, so it runs LAST (defers are LIFO) --
-	// i.e. after the publish-and-unlock defer below has released zd.mu. That
-	// ordering is the point: the SQLite write must not happen under the zone
-	// lock. Holding zd.mu across disk I/O is how this codebase has produced
-	// deadlocks before, and the applier already calls into signing under the
-	// same lock.
-	//
-	// pendingDelta is a plain local, handed over while still locked, so there
-	// is nothing for a concurrent publish to race against.
-	var pendingDelta *PendingZoneDelta
-	defer func() {
-		if pendingDelta == nil {
-			return
-		}
-		if err := pendingDelta.Persist(kdb); err != nil {
-			// The change is already published and being served. Failing to
-			// record it means it will be missing after a restart, which is a
-			// durability loss worth shouting about -- but not a reason to
-			// unpublish content the zone is already answering with.
-			lg.Error("failed to persist zone delta; change is live but will not survive a restart",
-				"zone", zd.ZoneName, "from_serial", pendingDelta.FromSerial,
-				"to_serial", pendingDelta.ToSerial, "error", err)
-		}
-	}()
-
 	zd.mu.Lock()
 	defer func() {
 		if updated {
+			// Phase 2: the publish writes the delta durably BEFORE making the
+			// change visible, and refuses the publish if that write fails --
+			// see publishWorkingSetLocked. Report such a failure as an error:
+			// nothing was published, so returning success would claim a change
+			// the zone is not serving and will not remember.
 			zd.wsPersistDelta = !ur.Replay
 			zd.publishLocked(zd.generation.Load())
-			// Read the staged delta out while still holding the lock; the
-			// write itself happens in the outer defer, after the unlock below.
-			pendingDelta = zd.wsPendingDelta
-			zd.wsPendingDelta = nil
+			if zd.wsPersistErr != nil {
+				err = fmt.Errorf("zone %s: update not applied: could not persist the change: %w",
+					zd.ZoneName, zd.wsPersistErr)
+				zd.wsPersistErr = nil
+				updated = false
+			}
 		}
 		zd.mu.Unlock()
 	}()

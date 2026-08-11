@@ -300,6 +300,61 @@ func TestZoneDeltaDroppedOnWriteZone(t *testing.T) {
 	}
 }
 
+// TestZoneDeltaPersistFailureRefusesPublish pins the durable-before-visible
+// ordering. If the delta cannot be written, the change must not be published:
+// once a snapshot is stored the content is being served and a secondary can
+// pull it, and a change that is served but not recorded silently rolls back at
+// the next restart, leaving that secondary holding content the primary has no
+// record of.
+//
+// So a failed write must leave the zone exactly as it was -- old content, old
+// serial -- and must be reported as an error rather than a quiet success.
+func TestZoneDeltaPersistFailureRefusesPublish(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	zd := testZone(t, "example.", deltaZone)
+	registerZones(t, zd)
+	zd.KeyDB = kdb
+	zd.UpdatePolicy = policyAllowing(dns.TypeA)
+
+	serialBefore := zd.CurrentSerial
+
+	actions, err := BuildZoneUpdateActions("example.", ZoneUpdateSpec{
+		Verb: VerbAddRR, RRs: []string{"new.example. 3600 IN A 10.0.0.7"},
+	})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+
+	// Break the database so the delta write cannot succeed.
+	if err := kdb.DB.Close(); err != nil {
+		t.Fatalf("closing test db: %v", err)
+	}
+
+	updated, err := zd.ApplyZoneUpdateToZoneData(UpdateRequest{
+		Cmd: "ZONE-UPDATE", ZoneName: "example.", Actions: actions,
+	}, kdb)
+	if err == nil {
+		t.Error("a change that could not be persisted was reported as applied")
+	}
+	if updated {
+		t.Error("updated=true despite the publish being refused")
+	}
+
+	// The new name must not be served: it is neither durable nor visible.
+	if od, gerr := zd.GetOwner("new.example."); gerr == nil && od != nil {
+		if _, present := od.RRtypes.Get(dns.TypeA); present {
+			t.Error("the unpersistable change was published anyway")
+		}
+	}
+	// And the serial must not have moved, or the next real change would
+	// publish under a serial a secondary has already seen.
+	if zd.CurrentSerial != serialBefore {
+		t.Errorf("serial advanced to %d despite the refused publish (was %d)",
+			zd.CurrentSerial, serialBefore)
+	}
+}
+
 func aAddrs(t *testing.T, zd *ZoneData, owner string) []string {
 	t.Helper()
 	od, err := zd.GetOwner(owner)

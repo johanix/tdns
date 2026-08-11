@@ -24,26 +24,6 @@ const (
 	ZoneDeltaAdd = "add"
 )
 
-// PendingZoneDelta is a computed-but-unwritten delta, handed from
-// publishWorkingSetLocked (which holds zd.mu) to the applier, which writes it
-// once the lock is released.
-type PendingZoneDelta struct {
-	Zone       string
-	FromSerial uint32
-	ToSerial   uint32
-	Removed    []core.RRset
-	Added      []core.RRset
-}
-
-// Persist writes the staged delta. Safe to call on nil, so callers can hand it
-// the result of a publish that staged nothing.
-func (p *PendingZoneDelta) Persist(kdb *KeyDB) error {
-	if p == nil {
-		return nil
-	}
-	return kdb.PersistZoneDelta(p.Zone, p.FromSerial, p.ToSerial, p.Removed, p.Added)
-}
-
 // ZoneDeltaRR is one record of one delta, in presentation form.
 type ZoneDeltaRR struct {
 	Action string // ZoneDeltaDel | ZoneDeltaAdd

@@ -323,6 +323,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		return
 	}
 
+	prevSerial := zd.CurrentSerial
 	serial := zd.CurrentSerial
 	if bumpSerial {
 		zd.CurrentSerial = nextOutboundSerial(zd)
@@ -334,35 +335,68 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 
 	data := zd.workingSet
 	oldSnap := zd.snapshot.Load()
-	// Maintain the IXFR delta history BEFORE building the snapshot so the
-	// chain copied into it ends exactly at this publish's serial (Project C).
-	zd.updateIxfrChainLocked(oldSnap, serial, data)
 
-	// Phase 2: stage the same difference for durable storage when this publish
-	// is a real content change. Deliberately computed here rather than reused
-	// from updateIxfrChainLocked: that function returns early on a retention
-	// budget of zero, on an epoch reset and on a missing baseline, none of
-	// which say anything about whether the change should survive a restart.
-	// The two histories answer different questions and must not share an
-	// early-return.
+	// Phase 2: make the change DURABLE BEFORE making it VISIBLE.
 	//
-	// Only staged here. The write happens in the applier, after zd.mu is
-	// released -- see wsPendingDelta.
+	// This runs ahead of updateIxfrChainLocked and the snapshot swap on
+	// purpose. Once the snapshot is stored the content is being served and a
+	// secondary can pull it via NOTIFY -> IXFR; if the process then died before
+	// the row was written, that secondary would hold content the primary has
+	// no record of and silently rolls back on restart. Durable-then-visible is
+	// the only order in which a crash cannot desync a secondary, and it is what
+	// F12 of the design specified.
+	//
+	// The difference is computed here rather than reused from
+	// updateIxfrChainLocked: that function returns early on a zero retention
+	// budget, on an epoch reset and on a missing baseline, none of which say
+	// anything about whether a change should survive a restart. The two
+	// histories answer different questions and must not share an early return.
+	//
+	// Yes, this is a database write under zd.mu. That is deliberate and it is
+	// what BIND does with its journal. The earlier arrangement -- persisting
+	// after the unlock -- was chosen to keep disk I/O off the zone lock, citing
+	// this tree's deadlock history. That history is about paths which RE-ENTER
+	// zone locking (signing, PublishDnskeyRRs); PersistZoneDelta is a leaf that
+	// runs a few INSERTs in one transaction and calls nothing back. So the cost
+	// here is latency, not deadlock, and latency is the cheaper thing to pay
+	// for durability.
 	if zd.wsPersistDelta {
 		zd.wsPersistDelta = false
-		if oldSnap != nil {
+		if oldSnap != nil && zd.KeyDB != nil {
 			removed, added, _ := computeZoneDelta(zd.ZoneName, oldSnap.Data, data)
 			if len(removed) > 0 || len(added) > 0 {
-				zd.wsPendingDelta = &PendingZoneDelta{
-					Zone:       zd.ZoneName,
-					FromSerial: oldSnap.Serial,
-					ToSerial:   serial,
-					Removed:    removed,
-					Added:      added,
+				if err := zd.KeyDB.PersistZoneDelta(zd.ZoneName,
+					oldSnap.Serial, serial, removed, added); err != nil {
+					// Refuse the publish. The alternative is to serve a change
+					// that is guaranteed to vanish at the next restart, which
+					// is worse than not serving it: the operator gets an error
+					// they can act on instead of silent data loss later.
+					//
+					// Unwind cleanly. Nothing else has been touched yet -- the
+					// IXFR chain has not been updated and no snapshot has been
+					// stored -- so dropping the working set and restoring the
+					// serial leaves the zone exactly as it was, still serving
+					// the previous snapshot.
+					zd.wsPersistErr = err
+					zd.CurrentSerial = prevSerial
+					zd.workingSet = nil
+					zd.wsSignalSynth = nil
+					zd.publishQueued = false
+					zd.publishUrgent = false
+					zd.wsIxfrEpochReset = false
+					lg.Error("refusing to publish a zone change that could not be persisted;"+
+						" the zone continues to serve its previous content",
+						"zone", zd.ZoneName, "from_serial", oldSnap.Serial,
+						"to_serial", serial, "error", err)
+					return
 				}
 			}
 		}
 	}
+
+	// Maintain the IXFR delta history BEFORE building the snapshot so the
+	// chain copied into it ends exactly at this publish's serial (Project C).
+	zd.updateIxfrChainLocked(oldSnap, serial, data)
 
 	snap := zd.buildSnapshotLocked(serial, data, zd.wsSignalSynth)
 	zd.snapshot.Store(snap)

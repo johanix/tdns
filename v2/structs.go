@@ -230,12 +230,12 @@ type ZoneData struct {
 	// replay that re-persisted what it just replayed would double the stored
 	// history on every restart.
 	wsPersistDelta bool
-	// wsPendingDelta carries a computed delta from publishWorkingSetLocked out
-	// to the applier, which writes it to the database AFTER releasing zd.mu.
-	// Written and read under the lock by the same goroutine; the SQLite write
-	// itself deliberately happens outside it, so disk I/O never blocks the
-	// zone lock and no database path can re-enter zone locking.
-	wsPendingDelta *PendingZoneDelta
+	// wsPersistErr carries a failed delta write from publishWorkingSetLocked
+	// back to the applier. A publish whose delta could not be persisted is
+	// refused outright -- serving a change that is certain to vanish at the
+	// next restart is worse than not serving it -- and this is how the applier
+	// learns to report that rather than claim success.
+	wsPersistErr error
 	// ixfrChainMaxBytes bounds the retained IXFR delta history (estimated
 	// wire bytes). 0 => DefaultIxfrChainMaxBytes; negative => retention
 	// disabled (IXFR queries are answered with full transfers). From zone
