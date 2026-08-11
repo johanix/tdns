@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -667,6 +668,53 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 				"class", dns.ClassToString[class],
 				"apex_cds_rrs_before", before,
 				"internal_update", ur.InternalUpdate)
+		}
+
+		// DELNAME (RFC 2136 §2.5.3): CLASS=ANY with TYPE=ANY deletes every
+		// RRset at the owner name. It has to be handled here, above the
+		// per-rrtype policy gate below, because TypeANY is never a key in
+		// UpdatePolicy.Zone.RRtypes -- the gate would take the "denied"
+		// branch and `continue`, which is why DELNAME has always been a
+		// silent no-op. That gap was not specific to our own CLI; bind9
+		// nsupdate's "update delete <name>" hit it too.
+		//
+		// Two deliberate restrictions:
+		//
+		//   - At the apex, SOA and NS are retained (RFC 2136 §3.4.2.3).
+		//     Deleting them would dismantle the zone rather than a name in it.
+		//
+		//   - Each rrtype is still checked against the update policy. Hoisting
+		//     the whole statement above the gate would otherwise turn DELNAME
+		//     into a privilege escalation: a requestor permitted to touch only
+		//     TXT could erase every type at the name in one statement. Types
+		//     the policy denies are skipped, so a DELNAME under a restrictive
+		//     policy deletes what that requestor could have deleted one
+		//     statement at a time, and nothing more.
+		if class == dns.ClassANY && rrtype == dns.TypeANY {
+			owner := zd.stagedOwner(ownerName)
+			if owner == nil {
+				lg.Warn("ApplyZoneUpdateToZoneData: DELNAME for unknown owner", "owner", ownerName)
+				continue
+			}
+			isApex := strings.EqualFold(ownerName, zd.ZoneName)
+			var deleted, denied, retained int
+			for _, t := range owner.RRtypes.Keys() {
+				if isApex && (t == dns.TypeSOA || t == dns.TypeNS) {
+					retained++
+					continue
+				}
+				if _, allowed := zd.UpdatePolicy.Zone.RRtypes[t]; !allowed && !ur.InternalUpdate {
+					denied++
+					continue
+				}
+				zd.stageDeleteLocked(ownerName, t)
+				deleted++
+				updated = true
+			}
+			lg.Debug("ApplyZoneUpdateToZoneData: DELNAME", "owner", ownerName,
+				"apex", isApex, "deleted", deleted, "denied_by_policy", denied,
+				"retained_apex_rrsets", retained)
+			continue
 		}
 
 		rrcopy := dns.Copy(rr)
