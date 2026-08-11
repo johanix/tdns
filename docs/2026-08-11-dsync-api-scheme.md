@@ -638,10 +638,40 @@ through to the zone file; `403` for a cross-child attempt; `403` for the
 label-boundary case the old suffix match allowed; `400` for an unmanaged type
 and for an owner outside the child.
 
-**Not yet verified live: the child half of §11 end to end.** It needs a signed
-parent zone (so discovery validates) and a certificate the child trusts, and
-the foffe rig has neither — the parent is unsigned and the listener uses a
-self-signed certificate. The client's own guards are unit-tested against
-`httptest` servers, including that no `Authorization` header is sent before a
-refusal, but the DNSSEC discovery path has not been exercised against a real
-signed parent. That is the remaining gap.
+**The child half of §11, and what blocked it.** A full child→parent run was
+attempted on foffe with a signed parent and a `tdns-cli cert` CA. Two of the
+three pieces work:
+
+- **TLS with the internal CA works.** `tdns-cli cert ca` + `cert leaf` for
+  `dsync-api.dsynctest.example.`, the listener configured with that pair, and a
+  request validated against the CA file: certificate chain verified, SAN
+  matched, Basic authenticated, policy approved, change applied and served.
+  This is what `delegationsync.child.api.cafile` exists for — trusting a
+  private CA without granting it authority over every TLS connection the host
+  makes.
+- **The parent signs and the trust anchor works.** `inline-signing` plus a
+  `default` policy, and the parent's KSK as `imrengine.trust-anchor-file` on
+  the child: the child's IMR fetched and validated the parent's DNSKEY RRset
+  and recorded it as a trust anchor.
+
+- **The child's IMR cannot resolve the parent through a stub**, which stops
+  `AnalyseZoneDelegation` before any DSYNC-API code runs. The stub registers
+  (`adding stub zone=dsynctest.example. servers=ns1.dsynctest.example.
+  (127.0.0.2)`) and the trust-anchor DNSKEY bootstrap uses it successfully, but
+  an ordinary query for the parent's SOA or NS reports *"no auth-server
+  attempts made"* and SERVFAILs. That is an IMR stub-resolution issue, not a
+  DSYNC-API one — it would block any child-side delegation sync against a
+  stub-reached parent, on any scheme. Worth its own look; it belongs with the
+  other imr nits rather than here.
+
+So the client's guards are unit-tested (including that no `Authorization`
+header is sent before a refusal), the transport and credential path is verified
+live against the real listener, and the one untested seam is
+`DiscoverDsyncApiEndpoint` reading URI+TXT through an IMR — which needs the
+stub issue fixed first.
+
+Two lab notes from the run, neither a code issue: `127.0.0.2` needs an explicit
+`ifconfig lo0 alias` on NetBSD (a `127.0.0.1/8` on lo0 does not make the whole
+/8 bindable), and the IMR sample config shows `stubs: servers: [ 192.0.2.53 ]`
+as bare IPs, which does not decode — `AuthServer` needs the map form with
+`name:` and `addrs:`.
