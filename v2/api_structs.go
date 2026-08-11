@@ -308,6 +308,34 @@ type ZoneDsyncResponse struct {
 	ErrorMsg     string
 	UpdateResult UpdateResult
 }
+
+// DsyncApiCredentialPost manages credentials for the DSYNC API scheme
+// (docs/2026-08-11-dsync-api-scheme.md §10). This travels on the MANAGEMENT
+// API -- an operator surface -- and is not the DSYNC API itself, which is a
+// separate listener with separate auth.
+type DsyncApiCredentialPost struct {
+	Command   string // add | list | delete | disable | enable
+	Zone      string // the parent zone the credential is scoped to
+	Username  string
+	Principal string // empty means "same as username"
+	Comment   string
+	ExpiresAt int64 // Unix time; 0 means never
+}
+
+type DsyncApiCredentialResponse struct {
+	AppName     string
+	Time        time.Time
+	Status      string
+	Zone        string
+	Credentials []DsyncApiCredential
+	// Key is the plaintext key, returned by "add" and by nothing else. It is
+	// not stored and cannot be retrieved again.
+	Key      string
+	Msg      string
+	Error    bool
+	ErrorMsg string
+}
+
 type ConfigPost struct {
 	Command       string   // status | reload | reload-zones | reload-tsig | ...
 	Force         bool     // reload-tsig: overwrite secret conflicts
