@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"sync/atomic"
+
+	"github.com/miekg/dns"
 )
 
 // The delegationsync: block, typed.
@@ -48,7 +50,48 @@ type DelegationSyncParentConf struct {
 
 type DelegationSyncChildConf struct {
 	// Schemes we are willing to use against a parent, in preference order.
-	Schemes []string `yaml:"schemes" mapstructure:"schemes"`
+	Schemes []string          `yaml:"schemes" mapstructure:"schemes"`
+	Api     DsyncApiChildConf `yaml:"api" mapstructure:"api"`
+}
+
+// DsyncApiChildConf is what a child needs to use the API scheme against its
+// parents: one credential per parent, obtained out of band.
+type DsyncApiChildConf struct {
+	// A LIST, not a map keyed by parent name. viper splits keys on ".", so a
+	// map keyed "example." would arrive keyed "example" with every setting
+	// beneath it somewhere the struct cannot see -- and the credential would
+	// read back empty with nothing logged anywhere. Same reason the labstuff
+	// parentupdater config is a list.
+	Credentials []DsyncApiChildCredentialConf `yaml:"credentials" mapstructure:"credentials"`
+
+	// AllowInsecure permits a plain-http endpoint AND an endpoint discovered
+	// without DNSSEC validation. Deliberately one switch for both: they are
+	// the same protection seen from two sides, and an operator who turns off
+	// one while believing the other still holds has no protection at all.
+	// A lab convenience. Never a production setting.
+	AllowInsecure bool `yaml:"allow-insecure" mapstructure:"allow-insecure"`
+}
+
+type DsyncApiChildCredentialConf struct {
+	Parent   string          `yaml:"parent" mapstructure:"parent"`
+	Username string          `yaml:"username" mapstructure:"username"`
+	Key      SensitiveString `yaml:"key" mapstructure:"key"`
+}
+
+// CredentialFor returns the credential for a parent zone, matching as FQDNs so
+// a config written with or without the trailing dot works either way.
+func (c DsyncApiChildConf) CredentialFor(parent string) (DsyncApiClientCredential, bool) {
+	want := strings.ToLower(dns.Fqdn(strings.TrimSpace(parent)))
+	for _, cc := range c.Credentials {
+		if strings.ToLower(dns.Fqdn(strings.TrimSpace(cc.Parent))) == want {
+			return DsyncApiClientCredential{
+				Parent:   want,
+				Username: strings.TrimSpace(cc.Username),
+				Key:      cc.Key.Value(),
+			}, true
+		}
+	}
+	return DsyncApiClientCredential{}, false
 }
 
 // DsyncDnsSchemeConf configures a scheme whose DSYNC target is a host that

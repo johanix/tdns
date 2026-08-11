@@ -19,6 +19,14 @@ type DsyncResult struct {
 	Rdata  []*core.DSYNC
 	Parent string
 	Error  error
+	// Validated reports whether the DSYNC lookup DNSSEC-validated.
+	//
+	// Only the API scheme consults it, and it is not optional there: the
+	// DSYNC record names the target whose URI says where a BEARER credential
+	// gets sent, so an unvalidated chain is an attacker's endpoint. NOTIFY and
+	// UPDATE do not need it -- a misdirected SIG(0)-signed message leaks
+	// nothing -- which is why the field is additive rather than a gate here.
+	Validated bool
 }
 
 // extractDsyncFromResponse extracts DSYNC records and parent zone name from ImrQuery response
@@ -110,7 +118,7 @@ func (imr *Imr) DsyncDiscovery(ctx context.Context, child string, verbose bool) 
 		return dr, err
 	}
 	if len(prrs) > 0 {
-		dr = DsyncResult{Qname: name, Rdata: prrs, Parent: parent_guess}
+		dr = DsyncResult{Qname: name, Rdata: prrs, Parent: parent_guess, Validated: resp != nil && resp.Validated}
 		lgDns.Debug("found DSYNC RRs", "count", len(prrs), "name", name, "rrs", prrs)
 		return dr, nil
 	}
@@ -179,7 +187,7 @@ func xxxDsyncDiscovery(child, imr string, verbose bool) (DsyncResult, error) {
 		return dr, err
 	}
 	if len(prrs) > 0 {
-		dr = DsyncResult{Qname: name, Rdata: prrs, Parent: parent_guess}
+		dr = DsyncResult{Qname: name, Rdata: prrs, Parent: parent_guess, Validated: resp != nil && resp.Validated}
 		lgDns.Debug("found DSYNC RRs", "count", len(prrs), "name", name, "rrs", prrs)
 		return dr, nil
 	}

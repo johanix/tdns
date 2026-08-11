@@ -205,7 +205,32 @@ delegationsync:
       # in child zones, we attempt the following schemes, if the parent supports
       # them and we're allowed to modify the child zone (adding CDS, CSYNC, KEY
       # RRs, re-signing, etc):
+      #
+      # Preference order. Put "api" last: it is the fallback for children that
+      # cannot sign a DNS message, not the first choice. It also requires the
+      # PARENT zone to be signed -- the endpoint is discovered from DNS and the
+      # credential is a bearer token, so an unvalidated lookup could send it to
+      # an attacker.
       schemes:  [ notify, update ]      # REQUIRED for child-side delegation sync
+
+      # Credentials for the api scheme, one per parent, obtained out of band
+      # from the parent operator. Without one, a parent offering only "api"
+      # logs a single line saying so and does not retry -- a credential cannot
+      # arrive by retrying.
+      #
+      # A LIST, not a map keyed by parent name: viper splits keys on ".", so a
+      # map key like "example." gets split and the credential reads back empty
+      # with nothing logged anywhere.
+      # api:
+      #    credentials:
+      #       - parent:   example.
+      #         username: child1.example.
+      #         key:      REPLACE-ME
+      #    # Permits BOTH a plain-http endpoint and one discovered without
+      #    # DNSSEC validation. Deliberately one switch: they are the same
+      #    # protection from two sides, and turning off one while believing
+      #    # the other holds leaves none. Lab only.
+      #    allow-insecure: false
       update:
          keygen:
             # `algorithm` and `generator` are read on the child side; `mode` is not.
