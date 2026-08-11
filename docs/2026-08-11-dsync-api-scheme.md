@@ -1,7 +1,8 @@
 # DSYNC scheme "API": child-to-parent delegation updates over HTTPS
 
 **Date:** 2026-08-11
-**Status:** DESIGN. Nothing built.
+**Status:** AS BUILT. All five PRs implemented on `feature/dsync-api-scheme`;
+what changed from the design is in §16, what was verified in §17.
 **Depends on:** `feature/api-zone-updates-phase2` — this reuses the statement
 vocabulary, the applier and the durability ordering built there
 (`2026-08-10-ddns-cli-and-api-updates.md`).
