@@ -24,6 +24,26 @@ const (
 	ZoneDeltaAdd = "add"
 )
 
+// PendingZoneDelta is a computed-but-unwritten delta, handed from
+// publishWorkingSetLocked (which holds zd.mu) to the applier, which writes it
+// once the lock is released.
+type PendingZoneDelta struct {
+	Zone       string
+	FromSerial uint32
+	ToSerial   uint32
+	Removed    []core.RRset
+	Added      []core.RRset
+}
+
+// Persist writes the staged delta. Safe to call on nil, so callers can hand it
+// the result of a publish that staged nothing.
+func (p *PendingZoneDelta) Persist(kdb *KeyDB) error {
+	if p == nil {
+		return nil
+	}
+	return kdb.PersistZoneDelta(p.Zone, p.FromSerial, p.ToSerial, p.Removed, p.Added)
+}
+
 // ZoneDeltaRR is one record of one delta, in presentation form.
 type ZoneDeltaRR struct {
 	Action string // ZoneDeltaDel | ZoneDeltaAdd
@@ -44,6 +64,31 @@ type ZoneDeltaRecord struct {
 // the applier itself uses: replacing an RRset is a delete of the old set
 // followed by the new records, and replaying those in the other order would
 // leave the RRset empty.
+//
+// RRSIGs are deliberately NOT persisted. computeZoneDelta carries signature
+// changes in RRset.RRSIGs, and only RRset.RRs is read here.
+//
+// The reason is validity windows. A stored RRSIG is a signature with a fixed
+// inception and expiration; replaying it after a long outage would republish a
+// signature that expired while the server was down -- and the longer the
+// outage, the more certain that becomes. The applier re-signs added RRsets on
+// the replay path, so the signatures are regenerated fresh instead, which is
+// correct regardless of how long the gap was.
+//
+// Two consequences worth knowing:
+//
+//   - Replay depends on the zone being able to sign, i.e. online-signing or
+//     inline-signing. A zone that accepts updates without either was already
+//     producing unsigned RRsets when the update was first applied, so replay
+//     reproduces that state rather than causing it; ReplayPersistedDeltas warns
+//     when it sees the combination.
+//
+//   - A resign-only change (identical RRs, new RRSIGs) yields no rows at all
+//     and is not persisted, so routine re-signing never churns this table.
+//
+// The apex SOA is likewise absent, because diffOwner strips it for IXFR wire
+// framing. That is exactly what we want: the serial is restored explicitly at
+// the end of a replay, and a replayed SOA record would fight that.
 //
 // An empty delta is not persisted. Serial-only advances (outbound_soa_serial =
 // unixtime, for instance) publish with no content change, and recording those

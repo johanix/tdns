@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -103,11 +104,112 @@ func TestZoneDeltaSurvivesRestart(t *testing.T) {
 		}
 	}
 
-	// The zone must resume at the serial it had, not at file_serial + 1: a
-	// lower serial looks to a secondary like the zone went backwards.
-	if reloaded.CurrentSerial != liveSerial {
-		t.Errorf("serial after replay = %d, want %d (the serial the zone actually had)",
+	// The serial must end up STRICTLY past the one the zone last published.
+	// Equal would mean secondaries hold a different image of that serial --
+	// the RRSIGs were regenerated here -- and never transfer the difference.
+	if !serialNewer(reloaded.CurrentSerial, liveSerial) {
+		t.Errorf("serial after replay = %d, must be strictly newer than the last published serial %d",
 			reloaded.CurrentSerial, liveSerial)
+	}
+}
+
+// TestZoneDeltaReplaySerialStrictlyExceedsLastPublished is the guarantee stated
+// plainly, in the default increment mode where it is not free.
+//
+// Replay regenerates RRSIGs, so the zone it publishes is NOT byte-identical to
+// what was published under the recorded serial. Landing on that serial would
+// leave every secondary holding a different "serial N" with no reason to ever
+// re-transfer -- and a restart done to refresh signatures near expiry would
+// refresh only the primary.
+func TestZoneDeltaReplaySerialStrictlyExceedsLastPublished(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	live := testZone(t, "example.", deltaZone)
+	registerZones(t, live)
+	live.KeyDB = kdb
+	live.UpdatePolicy = policyAllowing(dns.TypeA)
+
+	fileSerial := live.CurrentSerial
+
+	actions, err := BuildZoneUpdateActions("example.", ZoneUpdateSpec{
+		Verb: VerbAddRR, RRs: []string{"new.example. 3600 IN A 10.0.0.7"},
+	})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if _, err := live.ApplyZoneUpdateToZoneData(UpdateRequest{
+		Cmd: "ZONE-UPDATE", ZoneName: "example.", Actions: actions,
+	}, kdb); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	x := live.CurrentSerial
+	if !serialNewer(x, fileSerial) {
+		t.Fatalf("precondition: the update should have advanced the serial past %d, got %d",
+			fileSerial, x)
+	}
+
+	reloaded := testZone(t, "example.", deltaZone)
+	registerZones(t, reloaded)
+	reloaded.KeyDB = kdb
+	reloaded.UpdatePolicy = policyAllowing(dns.TypeA)
+	if _, err := reloaded.ReplayPersistedDeltas(kdb); err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	y := reloaded.CurrentSerial
+
+	if !serialNewer(y, x) {
+		t.Errorf("Y=%d is not strictly newer than X=%d; secondaries would never"+
+			" pick up the regenerated signatures", y, x)
+	}
+}
+
+// TestZoneDeltaReplayRefusesMismatchedChain: deltas are computed against one
+// specific base. If the zone file has been edited or restored from an older
+// copy since, replaying them produces a zone that never existed -- some changes
+// land on content that is gone, and fresh operator edits are silently
+// overwritten. Refuse instead.
+func TestZoneDeltaReplayRefusesMismatchedChain(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	live := testZone(t, "example.", deltaZone)
+	registerZones(t, live)
+	live.KeyDB = kdb
+	live.UpdatePolicy = policyAllowing(dns.TypeA)
+
+	actions, err := BuildZoneUpdateActions("example.", ZoneUpdateSpec{
+		Verb: VerbAddRR, RRs: []string{"new.example. 3600 IN A 10.0.0.7"},
+	})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if _, err := live.ApplyZoneUpdateToZoneData(UpdateRequest{
+		Cmd: "ZONE-UPDATE", ZoneName: "example.", Actions: actions,
+	}, kdb); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	// The operator edits the zone file: same content, bumped serial. The
+	// deltas now chain from a serial this file no longer has.
+	edited := `example.	3600	IN	SOA	ns.example. hostmaster.example. 42 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+www.example.	3600	IN	A	192.0.2.1
+`
+	reloaded := testZone(t, "example.", edited)
+	registerZones(t, reloaded)
+	reloaded.KeyDB = kdb
+	reloaded.UpdatePolicy = policyAllowing(dns.TypeA)
+
+	n, err := reloaded.ReplayPersistedDeltas(kdb)
+	if err == nil {
+		t.Fatal("replay onto an edited zone file was accepted; expected a refusal")
+	}
+	if n != 0 {
+		t.Errorf("refused replay still reported %d deltas applied", n)
+	}
+	for _, want := range []string{"do not chain", "serial"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q does not mention %q", err, want)
+		}
 	}
 }
 
