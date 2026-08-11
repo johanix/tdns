@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"time"
 
@@ -30,17 +31,26 @@ import (
 // the ZoneUpdater that authorization was settled here (the API key is the
 // credential) and that update-policy does not apply. Nothing on the DNS path
 // sets that flag.
-func (zd *ZoneData) ApiZoneUpdate(zp ZonePost) (string, error) {
+func (zd *ZoneData) ApiZoneUpdate(ctx context.Context, zp ZonePost) (string, error) {
 	if zd == nil {
 		return "", fmt.Errorf("no such zone")
 	}
 
-	if !zd.Options[OptAllowApiUpdates] {
+	// Snapshot both options together under the lock. RefreshEngine and config
+	// reload mutate zd.Options under zd.mu, so reading the map here unlocked is
+	// a data race, and reading the two independently would let a reload flip
+	// one between the checks. Matches the CHILD-UPDATE handling in the updater.
+	zd.mu.Lock()
+	allowApi := zd.Options[OptAllowApiUpdates]
+	frozen := zd.Options[OptFrozen]
+	zd.mu.Unlock()
+
+	if !allowApi {
 		return "", fmt.Errorf(
 			"zone %s does not allow updates via the management API (needs the allow-api-updates option)",
 			zd.ZoneName)
 	}
-	if zd.Options[OptFrozen] {
+	if frozen {
 		return "", fmt.Errorf("zone %s is frozen; thaw it before updating", zd.ZoneName)
 	}
 
@@ -77,6 +87,11 @@ func (zd *ZoneData) ApiZoneUpdate(zp ZonePost) (string, error) {
 		Description:   fmt.Sprintf("API %s", zp.UpdateVerb),
 		Resp:          respch,
 	}:
+	case <-ctx.Done():
+		// The HTTP client hung up. Stop waiting rather than hold a handler
+		// goroutine on a queue nobody is going to read the answer from.
+		return "", fmt.Errorf("request cancelled while queueing the update for zone %s: %w",
+			zd.ZoneName, ctx.Err())
 	case <-time.After(5 * time.Second):
 		return "", fmt.Errorf("timeout while queueing the update for zone %s", zd.ZoneName)
 	}

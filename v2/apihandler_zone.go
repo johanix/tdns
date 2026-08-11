@@ -101,7 +101,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			}
 
 		case "update":
-			msg, err := zd.ApiZoneUpdate(zp)
+			msg, err := zd.ApiZoneUpdate(r.Context(), zp)
 			resp.Msg = msg
 			if err != nil {
 				resp.Error = true

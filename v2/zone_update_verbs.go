@@ -99,6 +99,17 @@ func BuildZoneUpdateActions(zone string, spec ZoneUpdateSpec) ([]dns.RR, error) 
 		if err != nil {
 			return nil, err
 		}
+		// The apex SOA and NS RRsets are what make the zone a zone. Deleting
+		// either leaves something that cannot be served, and the applier's
+		// apex guard would then refuse the entire publish -- taking any other
+		// change in the same update down with it. Refuse here, where the error
+		// can name the problem. (delname protects these too, plus the DNSSEC
+		// and signalling RRsets, because it is a wholesale statement.)
+		if strings.EqualFold(owner, zone) && (rrtype == dns.TypeSOA || rrtype == dns.TypeNS) {
+			return nil, fmt.Errorf(
+				"refusing to delete the apex %s RRset of %s: the zone cannot be served without it",
+				dns.TypeToString[rrtype], zone)
+		}
 		// RFC 2136 §2.5.2: CLASS=ANY, the type to delete, empty RDATA.
 		return []dns.RR{&dns.ANY{Hdr: dns.RR_Header{
 			Name: owner, Rrtype: rrtype, Class: dns.ClassANY, Ttl: 0,
@@ -215,6 +226,15 @@ func specRrtype(s string) (uint16, error) {
 	rrtype, ok := dns.StringToType[s]
 	if !ok {
 		return 0, fmt.Errorf("unknown rrtype %q", s)
+	}
+	// Meta and query types never exist as RRsets in a zone, so a delete
+	// targeting one can only ever be a mistake -- but dns.StringToType happily
+	// resolves them, so without this the statement is built, queued and
+	// silently does nothing. OPT is a pseudo-RR that lives in the additional
+	// section; 128-255 covers TKEY, TSIG, IXFR, AXFR, MAILB and MAILA (ANY is
+	// caught above with a more useful message).
+	if rrtype == dns.TypeOPT || (rrtype >= 128 && rrtype <= 255) {
+		return 0, fmt.Errorf("%q is a meta type and never exists as an RRset in a zone", s)
 	}
 	return rrtype, nil
 }

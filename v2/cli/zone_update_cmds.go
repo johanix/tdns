@@ -96,6 +96,12 @@ error, not a silent delete.`,
 	nameVerbs := []*cobra.Command{delrrset, delname}
 
 	for _, sub := range append(append([]*cobra.Command{}, rrVerbs...), nameVerbs...) {
+		// Every verb takes its input through flags and runZoneUpdateVerb never
+		// looks at args. Without this, "zone update addrr foo.example. --via api"
+		// silently discards the positional and then fails with the builder's
+		// generic "addrr requires at least one RR", which names the wrong
+		// mistake.
+		sub.Args = cobra.NoArgs
 		sub.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
 		sub.Flags().StringVar(&zoneUpdateVia, "via", "", "Transport: \"api\" or \"ddns\" (required)")
 		// --signer/--server/--key are only consulted for --via ddns, but are
@@ -167,7 +173,10 @@ func runZoneUpdateViaApi(role, zone string, spec tdns.ZoneUpdateSpec) {
 		UpdateRrtype: spec.Rrtype,
 	})
 	if err != nil {
-		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
+		// cr is the zero value on a transport error, so cr.AppName would render
+		// as an empty name -- `Error from "":`. The role is what the operator
+		// actually asked for and is always known.
+		fmt.Printf("Error from %s: %s\n", role, err.Error())
 		os.Exit(1)
 	}
 	if cr.Msg != "" {

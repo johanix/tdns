@@ -83,6 +83,30 @@ func (ur *UpdateRequest) respond(applied bool, err error) {
 	}
 }
 
+// apexRetainedOnDelname reports whether an rrtype survives a DELNAME aimed at
+// the zone apex.
+//
+// RFC 2136 §3.4.2.3 requires only SOA and NS to be retained. The rest are kept
+// because DELNAME is a WHOLESALE statement -- "delete everything at this name"
+// -- and nobody issuing it at the apex means "and also dismantle DNSSEC and
+// stop every rollover signal mid-flight". Deleting the apex DNSKEY RRset on a
+// zone whose DS is published at the parent does not make the zone insecure, it
+// makes it BOGUS: resolvers stop answering for the whole zone. There is no
+// legitimate use of DELNAME that wants that, and an operator who genuinely
+// means it can still say "delrrset --type DNSKEY", which is unambiguous.
+//
+// This is a deliberate deviation from a strict reading of §3.4.2.3, in the
+// conservative direction: it deletes less than the RFC permits, never more.
+func apexRetainedOnDelname(rrtype uint16) bool {
+	switch rrtype {
+	case dns.TypeSOA, dns.TypeNS: // RFC 2136 §3.4.2.3
+		return true
+	case dns.TypeDNSKEY, dns.TypeCDS, dns.TypeCDNSKEY, dns.TypeCSYNC:
+		return true // DNSSEC and delegation-maintenance signalling
+	}
+	return false
+}
+
 // updaterCmdMutatesZoneContent reports whether a ZoneUpdater command writes
 // ZONE CONTENT (as opposed to some side store), and is therefore subject to the
 // origination gate at the head of the updater loop.
@@ -248,8 +272,18 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				// in the handler, which is where PreAuthorized is set -- this
 				// is the backstop, not the only gate), and internal content
 				// changes bypass both.
-				if zd.Options[OptAllowUpdates] || ur.InternalUpdate ||
-					(ur.PreAuthorized && zd.Options[OptAllowApiUpdates]) {
+				//
+				// Snapshot both options together under zd.mu: config reload
+				// mutates the map under that lock, so an unlocked read is a
+				// data race and two independent reads could straddle a reload.
+				// Same treatment the CHILD-UPDATE case above gives its options.
+				zd.mu.Lock()
+				allowUpdates := zd.Options[OptAllowUpdates]
+				allowApiUpdates := zd.Options[OptAllowApiUpdates]
+				zd.mu.Unlock()
+
+				if allowUpdates || ur.InternalUpdate ||
+					(ur.PreAuthorized && allowApiUpdates) {
 					// Compute delegation sync status before apply (needs pre-state),
 					// but only enqueue after successful apply.
 					var dss DelegationSyncStatus
@@ -799,7 +833,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 			isApex := strings.EqualFold(ownerName, zd.ZoneName)
 			var deleted, denied, retained int
 			for _, t := range owner.RRtypes.Keys() {
-				if isApex && (t == dns.TypeSOA || t == dns.TypeNS) {
+				if isApex && apexRetainedOnDelname(t) {
 					retained++
 					continue
 				}
@@ -819,7 +853,16 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 		}
 
 		rrcopy := dns.Copy(rr)
-		rrcopy.Header().Ttl = zd.UpdatePolicy.Zone.TTL
+		// update-policy dictates the TTL for records arriving over DDNS: a
+		// wire client does not get to choose how long the zone caches what it
+		// just added. It has no business rewriting the TTL on the other two
+		// channels. An operator using the API said 3600 deliberately, and an
+		// internal publisher (CSYNC/CDS/KEY) picks TTLs that matter to the
+		// signalling it is driving -- a rollover wanting a short TTL would
+		// silently get the policy's instead.
+		if !ur.InternalUpdate && !ur.PreAuthorized {
+			rrcopy.Header().Ttl = zd.UpdatePolicy.Zone.TTL
+		}
 		rrcopy.Header().Class = dns.ClassINET
 
 		// First check whether this update is allowed by the update-policy.
@@ -884,7 +927,25 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 			continue
 
 		case dns.ClassANY:
-			// ClassANY: Remove RRset
+			// ClassANY: Remove RRset.
+			//
+			// Refuse the two RRsets that constitute the zone itself. The CLI
+			// builder already declines these, but actions can also be built
+			// locally, and a zone whose apex SOA or NS RRset has been deleted
+			// is not a zone -- the apex guard in publishWorkingSetLocked would
+			// then refuse the whole publish, discarding every other change in
+			// the same update along with it.
+			//
+			// Only SOA and NS, deliberately. DNSKEY and the signalling RRsets
+			// are protected against wholesale DELNAME (see
+			// apexRetainedOnDelname), but an explicit "delrrset --type DNSKEY"
+			// is unambiguous intent and stays possible.
+			if strings.EqualFold(ownerName, zd.ZoneName) &&
+				(rrtype == dns.TypeSOA || rrtype == dns.TypeNS) {
+				lg.Warn("ApplyZoneUpdateToZoneData: refusing to delete an apex RRset the zone cannot exist without",
+					"zone", zd.ZoneName, "rrtype", rrtypestr)
+				continue
+			}
 			zd.stageDeleteLocked(ownerName, rrtype)
 			// XXX: As long as we don't maintain any NSEC chain removing a complete RRset should not require any resigning.
 			updated = true
