@@ -10,7 +10,6 @@ import (
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 func (zd *ZoneData) PublishDsyncRRs() error {
@@ -19,7 +18,16 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		Name: zd.ZoneName,
 	}
 
-	// Verify that there is no DSYNC RRset already present
+	// Verify that there is no DSYNC RRset already present.
+	//
+	// Note that this is all-or-nothing and deliberately left that way: an
+	// existing DSYNC RRset is treated as the operator's, and tdns does not
+	// add to it. The consequence, worth knowing before deploying a new
+	// scheme: adding "api" to delegationsync.parent.schemes on a zone that
+	// already publishes DSYNC records does nothing until the existing RRset
+	// is removed (UnpublishDsyncRRs) and republished. Making the guard
+	// per-scheme would change behaviour on the working NOTIFY/UPDATE paths,
+	// which does not belong in the PR that adds a scheme.
 	owner, err := zd.GetOwner("_dsync." + zd.ZoneName)
 	if err != nil {
 		return fmt.Errorf("PublishDsyncRRs: error fetching _dsync owner for zone %s: %v", zd.ZoneName, err)
@@ -60,10 +68,10 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 		return nil
 	}
 
-	schemes := viper.GetStringSlice("delegationsync.parent.schemes")
-	lg.Debug("defined DSYNC schemes", "zone", zd.ZoneName, "schemes", schemes)
+	dsc := DelegationSyncConfig().Parent
+	lg.Debug("defined DSYNC schemes", "zone", zd.ZoneName, "schemes", dsc.Schemes)
 
-	for _, scheme := range schemes {
+	for _, scheme := range dsc.Schemes {
 		lg.Debug("checking DSYNC scheme", "zone", zd.ZoneName, "scheme", scheme)
 		switch s := strings.ToUpper(scheme); s {
 		case "NOTIFY":
@@ -71,17 +79,17 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 			if replacer == "." {
 				replacer = "root"
 			}
-			target := dns.Fqdn(strings.Replace(viper.GetString("delegationsync.parent.notify.target"), "{ZONENAME}", replacer, 1))
+			target := dns.Fqdn(strings.Replace(dsc.Notify.Target, "{ZONENAME}", replacer, 1))
 			if _, ok := dns.IsDomainName(target); !ok {
 				return fmt.Errorf("zone %s: invalid DSYNC notify target: %s", zd.ZoneName, target)
 			}
 
-			port := uint16(viper.GetInt("delegationsync.parent.notify.port"))
+			port := dsc.Notify.Port
 			if port == 0 {
 				return fmt.Errorf("zone %s: no notify port found, config broken", zd.ZoneName)
 			}
 
-			notifyTypes := viper.GetStringSlice("delegationsync.parent.notify.types")
+			notifyTypes := dsc.Notify.Types
 			if len(notifyTypes) == 0 {
 				return fmt.Errorf("zone %s: no notify types found, config broken", zd.ZoneName)
 			}
@@ -96,7 +104,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 				dsync_added = true
 			}
 
-			notifyAddresses := viper.GetStringSlice("delegationsync.parent.notify.addresses")
+			notifyAddresses := dsc.Notify.Addresses
 			if len(notifyAddresses) == 0 {
 				return fmt.Errorf("zone %s: no notify addresses found, config broken", zd.ZoneName)
 			}
@@ -111,17 +119,17 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 			if replacer == "." {
 				replacer = "root"
 			}
-			target := dns.Fqdn(strings.Replace(viper.GetString("delegationsync.parent.update.target"), "{ZONENAME}", replacer, 1))
+			target := dns.Fqdn(strings.Replace(dsc.Update.Target, "{ZONENAME}", replacer, 1))
 			if _, ok := dns.IsDomainName(target); !ok {
 				return fmt.Errorf("zone %s: invalid DSYNC update target: %s", zd.ZoneName, target)
 			}
 
-			port := uint16(viper.GetInt("delegationsync.parent.update.port"))
+			port := dsc.Update.Port
 			if port == 0 {
 				return fmt.Errorf("zone %s: no update port found, config broken", zd.ZoneName)
 			}
 
-			updateTypes := viper.GetStringSlice("delegationsync.parent.update.types")
+			updateTypes := dsc.Update.Types
 			if len(updateTypes) == 0 {
 				return fmt.Errorf("zone %s: no update types found, config broken", zd.ZoneName)
 			}
@@ -136,11 +144,63 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 				dsync_added = true
 			}
 
-			updateAddresses := viper.GetStringSlice("delegationsync.parent.update.addresses")
+			updateAddresses := dsc.Update.Addresses
 			if len(updateAddresses) == 0 {
 				return fmt.Errorf("zone %s: no update addresses found, config broken", zd.ZoneName)
 			}
 			for _, addr := range updateAddresses {
+				if err := MaybeAddAddressRR(target, addr); err != nil {
+					return err
+				}
+			}
+
+		case "API":
+			// Unlike NOTIFY and UPDATE, the target is not a host that
+			// receives DNS: it is where the service description lives. The
+			// DSYNC record points at it, and the URI and TXT published there
+			// say what the endpoint is and what dialect it speaks.
+			//
+			// All three go into the same UpdateRequest below, and that is
+			// load bearing rather than tidiness: a child that resolved the
+			// DSYNC record but not yet the URI cannot do anything except
+			// fail. One update, one serial bump, all three visible together.
+			apiconf := dsc.Api.WithDefaults()
+			if err := apiconf.Validate(); err != nil {
+				return fmt.Errorf("zone %s: %v", zd.ZoneName, err)
+			}
+
+			replacer := zd.ZoneName
+			if replacer == "." {
+				replacer = "root"
+			}
+			target := dns.Fqdn(strings.Replace(apiconf.Target, "{ZONENAME}", replacer, 1))
+			if _, ok := dns.IsDomainName(target); !ok {
+				return fmt.Errorf("zone %s: invalid DSYNC api target: %s", zd.ZoneName, target)
+			}
+
+			for _, t := range apiconf.Types {
+				foo := fmt.Sprintf("_dsync.%s %d IN DSYNC %s %s %d %s", replacer, ttl, t, s, apiconf.Port, target)
+				dsyncrr, err := dns.NewRR(foo)
+				if err != nil {
+					lg.Error("failed to create DSYNC RR", "rr", foo, "err", err)
+					return err
+				}
+				rrset.RRs = append(rrset.RRs, dsyncrr)
+				dsync_added = true
+			}
+
+			uriRR, err := dsyncApiUriRR(target, apiconf, uint32(ttl))
+			if err != nil {
+				return fmt.Errorf("zone %s: %v", zd.ZoneName, err)
+			}
+			txtRR := dsyncApiTxtRR(target, apiconf, uint32(ttl))
+			rrset.RRs = append(rrset.RRs, uriRR, txtRR)
+			lg.Info("added DSYNC API service description", "zone", zd.ZoneName,
+				"target", target, "uri", uriRR.Target, "dialect", apiconf.Dialect)
+
+			// Optional for this scheme: the URI's authority resolves by
+			// ordinary means, and is often a name this zone does not serve.
+			for _, addr := range apiconf.Addresses {
 				if err := MaybeAddAddressRR(target, addr); err != nil {
 					return err
 				}
@@ -159,9 +219,9 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 	// Publish SVCB bootstrap capability record at the DSYNC UPDATE target.
 	// This advertises which bootstrap methods the parent supports, per
 	// draft-ietf-dnsop-delegation-mgmt-via-ddns-01, section "SvcParamKey bootstrap".
-	bootstrapMethods := viper.GetString("delegationsync.parent.bootstrap.methods")
+	bootstrapMethods := dsc.Bootstrap.Methods
 	if bootstrapMethods != "" {
-		updateTarget := viper.GetString("delegationsync.parent.update.target")
+		updateTarget := dsc.Update.Target
 		if updateTarget != "" {
 			replacer := zd.ZoneName
 			if replacer == "." {
@@ -238,7 +298,7 @@ func (zd *ZoneData) PublishDsyncRRs() error {
 // DsyncUpdateTargetName computes the DSYNC UPDATE target name for a parent zone
 // from the global config. Returns empty string if not configured.
 func DsyncUpdateTargetName(zonename string) string {
-	tpl := viper.GetString("delegationsync.parent.update.target")
+	tpl := DelegationSyncConfig().Parent.Update.Target
 	if tpl == "" {
 		return ""
 	}
@@ -259,11 +319,27 @@ func (zd *ZoneData) UnpublishDsyncRRs() error {
 	}
 	anti_dsync.Header().Class = dns.ClassANY // Delete DSYNC RRset
 
+	actions := []dns.RR{anti_dsync}
+
+	// The API scheme's service description lives at a separate name, so
+	// dropping the DSYNC RRset alone would leave a URI and TXT behind
+	// advertising an endpoint nothing points at any more. Removed in the same
+	// update, in the same order they were published.
+	if apiTarget := DsyncApiTargetName(zd.ZoneName); apiTarget != "" {
+		anti_uri := &dns.URI{
+			Hdr: dns.RR_Header{Name: apiTarget, Rrtype: dns.TypeURI, Class: dns.ClassANY},
+		}
+		anti_txt := &dns.TXT{
+			Hdr: dns.RR_Header{Name: apiTarget, Rrtype: dns.TypeTXT, Class: dns.ClassANY},
+		}
+		actions = append(actions, anti_uri, anti_txt)
+	}
+
 	select {
 	case zd.KeyDB.UpdateQ <- UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
-		Actions:        []dns.RR{anti_dsync},
+		Actions:        actions,
 		InternalUpdate: true,
 	}:
 	case <-time.After(5 * time.Second):

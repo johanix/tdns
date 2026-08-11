@@ -488,6 +488,13 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// KDC and KRS configuration parsing has been moved to tdns-nm
 	// See kdc.ParseKdcConfigFromFile() and krs.ParseKrsConfigFromFile()
 
+	// Install the parsed delegationsync: block for the readers that have no
+	// *Config in hand (PublishDsyncRRs and friends). Unconditional and before
+	// anything that could publish: on reload this must be swapped in before a
+	// zone re-reads it, and on first start it must be present before
+	// SetupZoneSync runs further down.
+	SetDelegationSyncConfig(conf.DelegationSync)
+
 	// On first start: build the KeyDB. On reload: keep the existing
 	// KeyDB but re-apply outbound_soa_serial so a config edit takes
 	// effect without a full restart.
