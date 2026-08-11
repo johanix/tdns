@@ -27,6 +27,11 @@ import (
 // authenticated username on the API path. It is a domain name either way,
 // which is what makes self/selfsub mean the same thing on both.
 //
+// Every update policy in tdns is enforced here -- child and zone, all
+// transports. See nameWithinPrincipal below, which carries a security fix that
+// therefore applies to all of them, not only to the API scheme this branch
+// adds.
+//
 // label prefixes the log lines ("update", "auth update") and exists only so
 // the messages read as they always have.
 //
@@ -78,6 +83,15 @@ func evalUpdatePolicyRR(policy UpdatePolicyDetail, principal string, rr dns.RR, 
 
 // nameWithinPrincipal answers whether owner is inside the principal's tree
 // (sub=true, the selfsub policy) or is the principal itself (sub=false, self).
+//
+// SCOPE, because this arrived on the DSYNC-API branch and is not about the
+// DSYNC API: this function decides self/selfsub for EVERY update policy tdns
+// has. updatepolicy.child and updatepolicy.zone, on every transport --
+// RFC 2136 UPDATE over SIG(0) as it works today, the API scheme once it
+// exists. A zone with a self or selfsub policy was affected whether or not it
+// ever enables the API scheme, and whether or not it is a delegation parent.
+// The fix rode along in this branch only because extracting the evaluator is
+// what made the bug visible; nothing about it is specific to the new scheme.
 //
 // Both are comparisons of DNS names, which means label-aligned and
 // case-insensitive. That has to be done deliberately, because doing it with

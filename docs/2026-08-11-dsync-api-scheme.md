@@ -453,6 +453,31 @@ Each row is a PR that stands on its own and is testable without the next.
 PR 2 landing early and alone is the important ordering decision: it is the only
 part that can break something that works today.
 
+### PR 2 carries a security fix with a wider blast radius than this feature
+
+Extracting the evaluator exposed a bug in the name matching it was extracted
+from, and the fix rides in this branch (commit `5027fd9`). **It is not scoped to
+the API scheme.** `evalUpdatePolicyRR` enforces `updatepolicy.child` and
+`updatepolicy.zone` for every transport, so every zone with a `self` or
+`selfsub` policy was affected — on the RFC 2136 SIG(0) path that works today,
+whether or not the zone is a delegation parent and whether or not it ever
+enables the API scheme.
+
+`selfsub` compared names with `strings.HasSuffix`, which is not label-aligned:
+
+```
+strings.HasSuffix("evilchild1.example.", "child1.example.") == true
+```
+
+so a trusted key named `child1.example.` could change `evilchild1.example.` —
+a different child's delegation, NS and DS included. Also fixed in the same
+commit: an empty principal (every string has the empty suffix, so it approved
+everything), the root as a principal, and a case-sensitive comparison that
+refused legitimate updates.
+
+Anyone reviewing this branch for the DSYNC API should read PR 2 as a change to
+the existing update paths that happens to have been found here.
+
 ---
 
 ## 14. Deferred
