@@ -589,43 +589,15 @@ func (zd *ZoneData) ApproveChildUpdate(zone string, us *UpdateStatus, r *dns.Msg
 			return false, false, nil
 		}
 
-		if !zd.UpdatePolicy.Child.RRtypes[rrtype] {
+		// The policy itself, shared with ApproveAuthUpdate and with the
+		// DSYNC API handler. Called here rather than after the loop so the
+		// interleaving with the SIG(0) checks above is unchanged: an update
+		// whose first record fails policy and whose second fails validation
+		// still reports the policy failure.
+		if ok, ede := evalUpdatePolicyRR(zd.UpdatePolicy.Child, us.SignerName, rr, "update"); !ok {
 			us.Approved = false
-			us.RejectionEDE = edns0.EDEZoneUpdateRRtypeNotAllowed
-			lgHandler.Warn("update rejected: unapproved RR type", "rrtype", dns.TypeToString[rr.Header().Rrtype])
+			us.RejectionEDE = ede
 			return false, false, nil
-		}
-
-		switch zd.UpdatePolicy.Child.Type {
-		case "selfsub":
-			if !strings.HasSuffix(rr.Header().Name, us.SignerName) {
-				us.Approved = false
-				us.RejectionEDE = edns0.EDEZoneUpdateOwnerOutsidePolicy
-				lgHandler.Warn("update rejected: owner name outside selfsub tree", "owner", rr.Header().Name, "signer", us.SignerName)
-				return false, false, nil
-			}
-
-		case "self":
-			if rr.Header().Name != us.SignerName {
-				us.Approved = false
-				us.RejectionEDE = edns0.EDEZoneUpdateOwnerOutsidePolicy
-				lgHandler.Warn("update rejected: owner name differs from signer name violating self policy", "owner", rr.Header().Name, "signer", us.SignerName)
-				return false, false, nil
-			}
-		default:
-			us.Approved = false
-			us.RejectionEDE = edns0.EDEZoneUpdatesNotAllowed
-			lgHandler.Warn("unknown policy type", "policyType", zd.UpdatePolicy.Child.Type)
-			return false, false, nil
-		}
-
-		switch rrclass {
-		case dns.ClassNONE:
-			lgHandler.Debug("remove RR", "rr", rr.String())
-		case dns.ClassANY:
-			lgHandler.Debug("remove RRset", "rr", rr.String())
-		default:
-			lgHandler.Debug("add RR", "rr", rr.String())
 		}
 	}
 	us.Approved = true
@@ -670,50 +642,10 @@ func (zd *ZoneData) ApproveAuthUpdate(zone string, us *UpdateStatus, r *dns.Msg)
 
 		lgHandler.Debug("ApproveAuthUpdate checking RR", "rrtype", dns.TypeToString[rrtype], "class", dns.ClassToString[rrclass], "updateRRs", len(r.Ns))
 
-		if !zd.UpdatePolicy.Zone.RRtypes[rrtype] {
+		if ok, ede := evalUpdatePolicyRR(zd.UpdatePolicy.Zone, us.SignerName, rr, "auth update"); !ok {
 			us.Approved = false
-			us.RejectionEDE = edns0.EDEZoneUpdateRRtypeNotAllowed
-			lgHandler.Warn("auth update rejected: unapproved RR type", "rrtype", dns.TypeToString[rr.Header().Rrtype])
+			us.RejectionEDE = ede
 			return false, false, nil
-		}
-
-		switch zd.UpdatePolicy.Zone.Type {
-		case "selfsub":
-			if !strings.HasSuffix(rr.Header().Name, us.SignerName) {
-				us.Approved = false
-				us.RejectionEDE = edns0.EDEZoneUpdateOwnerOutsidePolicy
-				lgHandler.Warn("auth update rejected: owner name outside selfsub tree", "owner", rr.Header().Name, "signer", us.SignerName)
-				return false, false, nil
-			}
-
-		case "self":
-			if rr.Header().Name != us.SignerName {
-				us.Approved = false
-				us.RejectionEDE = edns0.EDEZoneUpdateOwnerOutsidePolicy
-				lgHandler.Warn("auth update rejected: owner name differs from signer name violating self policy", "owner", rr.Header().Name, "signer", us.SignerName)
-				return false, false, nil
-			}
-
-		case "none":
-			us.Approved = false
-			us.RejectionEDE = edns0.EDEZoneUpdatesNotAllowed
-			lgHandler.Warn("auth update rejected: policy type none disallows all updates")
-			return false, false, nil
-
-		default:
-			us.Approved = false
-			us.RejectionEDE = edns0.EDEZoneUpdatesNotAllowed
-			lgHandler.Warn("unknown policy type", "policyType", zd.UpdatePolicy.Zone.Type)
-			return false, false, nil
-		}
-
-		switch rrclass {
-		case dns.ClassNONE:
-			lgHandler.Debug("remove RR", "rr", rr.String())
-		case dns.ClassANY:
-			lgHandler.Debug("remove RRset", "rr", rr.String())
-		default:
-			lgHandler.Debug("add RR", "rr", rr.String())
 		}
 	}
 	us.Approved = true

@@ -1,0 +1,98 @@
+/*
+ * Copyright (c) Johan Stenstam, johani@johani.org
+ */
+package tdns
+
+import (
+	"strings"
+
+	"github.com/johanix/tdns/v2/edns0"
+	"github.com/miekg/dns"
+)
+
+// evalUpdatePolicyRR decides whether one update policy permits one record to be
+// changed by one principal. It is the whole of what an update policy means.
+//
+// Extracted from ApproveChildUpdate and ApproveAuthUpdate, which had two copies
+// of it, and about to gain a third caller: the DSYNC API scheme
+// (docs/2026-08-11-dsync-api-scheme.md §6.3) authenticates over HTTP Basic and
+// then applies this same policy, substituting the authenticated principal for
+// the SIG(0) signer name. Two transports enforcing subtly different policies
+// from two copies of this logic is the failure this consolidation exists to
+// prevent -- the second copy had already drifted to the point of using a
+// different log prefix, which is harmless, but nothing structural stopped it
+// drifting somewhere that mattered.
+//
+// principal is who is asking: the SIG(0) signer name on the DDNS path, the
+// authenticated username on the API path. It is a domain name either way,
+// which is what makes self/selfsub mean the same thing on both.
+//
+// label prefixes the log lines ("update", "auth update") and exists only so
+// the messages read as they always have.
+//
+// Returns (approved, EDE). The EDE is 0 when approved.
+func evalUpdatePolicyRR(policy UpdatePolicyDetail, principal string, rr dns.RR, label string) (bool, uint16) {
+	owner := rr.Header().Name
+	rrtype := rr.Header().Rrtype
+
+	if !policy.RRtypes[rrtype] {
+		lgHandler.Warn(label+" rejected: unapproved RR type", "rrtype", dns.TypeToString[rrtype])
+		return false, edns0.EDEZoneUpdateRRtypeNotAllowed
+	}
+
+	switch policy.Type {
+	case "selfsub":
+		if !strings.HasSuffix(owner, principal) {
+			lgHandler.Warn(label+" rejected: owner name outside selfsub tree",
+				"owner", owner, "principal", principal)
+			return false, edns0.EDEZoneUpdateOwnerOutsidePolicy
+		}
+
+	case "self":
+		if owner != principal {
+			lgHandler.Warn(label+" rejected: owner name differs from principal violating self policy",
+				"owner", owner, "principal", principal)
+			return false, edns0.EDEZoneUpdateOwnerOutsidePolicy
+		}
+
+	default:
+		// "none", "" and anything unrecognised. Both former copies landed
+		// here with the same EDE: the child one via its default case, the
+		// zone one via an explicit "none" case plus a default that did the
+		// same thing.
+		lgHandler.Warn(label+" rejected: policy type disallows all updates", "policyType", policy.Type)
+		return false, edns0.EDEZoneUpdatesNotAllowed
+	}
+
+	switch rr.Header().Class {
+	case dns.ClassNONE:
+		lgHandler.Debug("remove RR", "rr", rr.String())
+	case dns.ClassANY:
+		lgHandler.Debug("remove RRset", "rr", rr.String())
+	default:
+		lgHandler.Debug("add RR", "rr", rr.String())
+	}
+
+	return true, 0
+}
+
+// ApproveActionsForPrincipal runs a set of records past a policy on behalf of a
+// principal, stopping at the first refusal.
+//
+// This is the entry point for callers that have no DNS message and no SIG(0)
+// status to consult -- the DSYNC API handler. The DDNS path does not use it:
+// it has per-record validation state of its own to interleave, and calls
+// evalUpdatePolicyRR directly so the order in which reasons are reported does
+// not change.
+func (zd *ZoneData) ApproveActionsForPrincipal(policy UpdatePolicyDetail, principal string, actions []dns.RR, label string) (bool, uint16) {
+	if strings.TrimSpace(principal) == "" {
+		lgHandler.Warn(label + " rejected: no principal")
+		return false, edns0.EDEZoneUpdatesNotAllowed
+	}
+	for _, rr := range actions {
+		if ok, ede := evalUpdatePolicyRR(policy, principal, rr, label); !ok {
+			return false, ede
+		}
+	}
+	return true, 0
+}
