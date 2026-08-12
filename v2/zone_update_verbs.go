@@ -164,6 +164,21 @@ func BuildZoneUpdateActions(zone string, spec ZoneUpdateSpec) ([]dns.RR, error) 
 			return nil, err
 		}
 
+		// The apex SOA is not replaceable through this channel: tdns owns the
+		// serial, and a client-supplied SOA would fight the serial machinery
+		// on every update. Refused here so it fails at the client with a
+		// reason, rather than in the applier -- which drops the delete half of
+		// the replacement and would silently leave the old SOA in place.
+		//
+		// The apex NS IS replaceable, and must be: moving to a new set of
+		// nameservers is exactly what an operator uses this for. The applier
+		// recognises a replacement and permits that delete (see
+		// updateReplacesRRset).
+		if strings.EqualFold(owner, zone) && rrtype == dns.TypeSOA {
+			return nil, fmt.Errorf(
+				"refusing to replace the apex SOA of %s: the serial is maintained by the server", zone)
+		}
+
 		// Delete the RRset, then add the replacements, in ONE action list.
 		// The applier walks the list in a single pass under one zd.mu and
 		// publishes once at the end, so the empty intermediate RRset is never

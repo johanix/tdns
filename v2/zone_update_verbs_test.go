@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/miekg/dns"
@@ -184,12 +185,13 @@ example.	3600	IN	NS	ns.example.
 example.	3600	IN	TXT	"apex text"
 example.	3600	IN	DNSKEY	257 3 15 dem0H2M22a8CDAe0PDZoGBBCBB2fHJ1fe39FkhNToAA=
 example.	3600	IN	CDS	1234 15 2 0000000000000000000000000000000000000000000000000000000000000000
+example.	3600	IN	CDNSKEY	257 3 15 dem0H2M22a8CDAe0PDZoGBBCBB2fHJ1fe39FkhNToAA=
 example.	3600	IN	CSYNC	66 3 A NS AAAA
 `
 	zd := testZone(t, "example.", signedApex)
 	registerZones(t, zd)
 	zd.UpdatePolicy = policyAllowing(dns.TypeTXT, dns.TypeDNSKEY, dns.TypeCDS,
-		dns.TypeCSYNC, dns.TypeSOA, dns.TypeNS)
+		dns.TypeCDNSKEY, dns.TypeCSYNC, dns.TypeSOA, dns.TypeNS)
 
 	delname := &dns.ANY{Hdr: dns.RR_Header{
 		Name: "example.", Rrtype: dns.TypeANY, Class: dns.ClassANY,
@@ -201,7 +203,10 @@ example.	3600	IN	CSYNC	66 3 A NS AAAA
 	}
 
 	after := verbOwnerTypes(t, zd, "example.")
-	for _, rt := range []uint16{dns.TypeSOA, dns.TypeNS, dns.TypeDNSKEY, dns.TypeCDS, dns.TypeCSYNC} {
+	// CDNSKEY is in apexRetainedOnDelname alongside CDS and must be asserted
+	// with it: a rollover signal half-deleted is worse than not deleted.
+	for _, rt := range []uint16{dns.TypeSOA, dns.TypeNS, dns.TypeDNSKEY, dns.TypeCDS,
+		dns.TypeCDNSKEY, dns.TypeCSYNC} {
 		if !after[rt] {
 			t.Errorf("apex %s was deleted by DELNAME", dns.TypeToString[rt])
 		}
@@ -356,5 +361,112 @@ func TestReplaceRRsetIsAtomicInOneApply(t *testing.T) {
 	// see an intermediate serial in which the RRset did not exist at all.
 	if bumped := zd.CurrentSerial - serialBefore; bumped != 1 {
 		t.Errorf("serial advanced by %d, want exactly 1 -- REPLACE must publish once", bumped)
+	}
+}
+
+// replacerrset on the apex NS must REPLACE, not append.
+//
+// The regression it guards: replacerrset emits a ClassANY delete followed by
+// the new records, and the applier refuses ClassANY deletes of the apex SOA
+// and NS. The delete was dropped while the additions still ran, so an operator
+// moving to a new set of nameservers got the union of old and new -- silently,
+// and on the one RRset where a wrong answer breaks the delegation.
+func TestReplaceApexNSReplacesRatherThanAppends(t *testing.T) {
+	const apex = `example.	3600	IN	SOA	ns.example. hostmaster.example. 1 7200 1800 604800 7200
+example.	3600	IN	NS	ns1.example.
+example.	3600	IN	NS	ns2.example.
+`
+	zd := testZone(t, "example.", apex)
+	registerZones(t, zd)
+	zd.UpdatePolicy = policyAllowing(dns.TypeNS)
+
+	actions, err := BuildZoneUpdateActions("example.", ZoneUpdateSpec{
+		Verb: VerbReplaceRRset,
+		RRs: []string{
+			"example. 3600 IN NS ns3.example.",
+			"example. 3600 IN NS ns4.example.",
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildZoneUpdateActions: %v", err)
+	}
+	if _, err := zd.ApplyZoneUpdateToZoneData(UpdateRequest{
+		Cmd: "ZONE-UPDATE", ZoneName: "example.", Actions: actions,
+	}, newTestKeyDB(t)); err != nil {
+		t.Fatalf("ApplyZoneUpdateToZoneData: %v", err)
+	}
+
+	owner, err := zd.GetOwner("example.")
+	if err != nil || owner == nil {
+		t.Fatalf("GetOwner: %v", err)
+	}
+	nsset, ok := owner.RRtypes.Get(dns.TypeNS)
+	if !ok {
+		t.Fatal("the apex NS RRset is gone; a replacement must leave one behind")
+	}
+
+	got := map[string]bool{}
+	for _, rr := range nsset.RRs {
+		if ns, ok := rr.(*dns.NS); ok {
+			got[ns.Ns] = true
+		}
+	}
+	for _, want := range []string{"ns3.example.", "ns4.example."} {
+		if !got[want] {
+			t.Errorf("%s missing from the replaced apex NS RRset", want)
+		}
+	}
+	for _, gone := range []string{"ns1.example.", "ns2.example."} {
+		if got[gone] {
+			t.Errorf("%s survived the replacement: the RRset was appended to, not replaced", gone)
+		}
+	}
+	if len(nsset.RRs) != 2 {
+		t.Errorf("apex NS RRset has %d records, want exactly the 2 replacements", len(nsset.RRs))
+	}
+}
+
+// A standalone delrrset of the apex NS is still refused -- the exception above
+// is only for a delete that is one half of a replacement.
+func TestDeleteApexNSStillRefused(t *testing.T) {
+	const apex = `example.	3600	IN	SOA	ns.example. hostmaster.example. 1 7200 1800 604800 7200
+example.	3600	IN	NS	ns1.example.
+`
+	zd := testZone(t, "example.", apex)
+	registerZones(t, zd)
+	zd.UpdatePolicy = policyAllowing(dns.TypeNS)
+
+	// Straight to the applier: the builder refuses this too, and both layers
+	// must hold.
+	delrrset := &dns.ANY{Hdr: dns.RR_Header{
+		Name: "example.", Rrtype: dns.TypeNS, Class: dns.ClassANY,
+	}}
+	if _, err := zd.ApplyZoneUpdateToZoneData(UpdateRequest{
+		Cmd: "ZONE-UPDATE", ZoneName: "example.", Actions: []dns.RR{delrrset},
+	}, newTestKeyDB(t)); err != nil {
+		t.Fatalf("ApplyZoneUpdateToZoneData: %v", err)
+	}
+
+	owner, err := zd.GetOwner("example.")
+	if err != nil || owner == nil {
+		t.Fatalf("GetOwner: %v", err)
+	}
+	if _, ok := owner.RRtypes.Get(dns.TypeNS); !ok {
+		t.Error("the apex NS RRset was deleted by a standalone delrrset")
+	}
+}
+
+// The apex SOA is refused at the builder, so it never reaches the applier as a
+// half-applied replacement.
+func TestReplaceApexSOARefused(t *testing.T) {
+	_, err := BuildZoneUpdateActions("example.", ZoneUpdateSpec{
+		Verb: VerbReplaceRRset,
+		RRs:  []string{"example. 3600 IN SOA ns.example. hostmaster.example. 99 7200 1800 604800 7200"},
+	})
+	if err == nil {
+		t.Fatal("replacerrset accepted the apex SOA")
+	}
+	if !strings.Contains(err.Error(), "serial is maintained by the server") {
+		t.Errorf("error = %q; want it to say why", err)
 	}
 }

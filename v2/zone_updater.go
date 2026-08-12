@@ -859,11 +859,29 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 			// are protected against wholesale DELNAME (see
 			// apexRetainedOnDelname), but an explicit "delrrset --type DNSKEY"
 			// is unambiguous intent and stays possible.
+			//
+			// UNLESS the same update replaces it. A replacerrset is a
+			// ClassANY delete followed by the new records in one action list,
+			// so the zone ends the update WITH an apex NS RRset and the
+			// guard's concern does not apply. Without this exception the
+			// delete is dropped and the additions still run, so
+			// "replacerrset" on the apex NS silently APPENDS to the existing
+			// RRset instead of replacing it -- the operator asks to move to a
+			// new set of nameservers and gets the union of old and new.
+			//
+			// SOA has no such exception: tdns owns the serial, and the
+			// builder refuses replacerrset for it outright so the failure is
+			// loud and at the client rather than silent here.
 			if strings.EqualFold(ownerName, zd.ZoneName) &&
 				(rrtype == dns.TypeSOA || rrtype == dns.TypeNS) {
-				lg.Warn("ApplyZoneUpdateToZoneData: refusing to delete an apex RRset the zone cannot exist without",
-					"zone", zd.ZoneName, "rrtype", rrtypestr)
-				continue
+				if rrtype == dns.TypeNS && updateReplacesRRset(ur.Actions, ownerName, rrtype) {
+					lg.Debug("ApplyZoneUpdateToZoneData: apex NS delete is part of a replacement, allowing",
+						"zone", zd.ZoneName)
+				} else {
+					lg.Warn("ApplyZoneUpdateToZoneData: refusing to delete an apex RRset the zone cannot exist without",
+						"zone", zd.ZoneName, "rrtype", rrtypestr)
+					continue
+				}
 			}
 			zd.stageDeleteLocked(ownerName, rrtype)
 			// XXX: As long as we don't maintain any NSEC chain removing a complete RRset should not require any resigning.
@@ -1447,4 +1465,25 @@ func computeNewDS(dss *DelegationSyncStatus, zd *ZoneData) {
 		}
 	}
 	dss.NewDS = newDS
+}
+
+// updateReplacesRRset reports whether actions contain at least one record to
+// ADD for owner/rrtype, i.e. whether a ClassANY delete of that RRset in the
+// same update is one half of an atomic replacement rather than a removal.
+//
+// BuildZoneUpdateActions emits replacerrset as exactly that pair, and the
+// applier walks the whole list in one pass under one zd.mu and publishes once,
+// so the empty intermediate RRset is never observable. That is what makes it
+// safe to let a replacement delete an apex RRset the zone cannot be served
+// without: by the end of the same pass, it has one again.
+func updateReplacesRRset(actions []dns.RR, owner string, rrtype uint16) bool {
+	for _, rr := range actions {
+		if rr.Header().Class != dns.ClassINET {
+			continue
+		}
+		if rr.Header().Rrtype == rrtype && strings.EqualFold(rr.Header().Name, owner) {
+			return true
+		}
+	}
+	return false
 }
