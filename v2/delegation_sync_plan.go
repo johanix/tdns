@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  *
- * delegation-sync-proxy: ONE task, not three schemes.
+ * Delegation synchronisation with the parent: ONE task, not three schemes.
  *
  * Synchronising a delegation with the parent is a single job. NOTIFY, UPDATE
  * and API are three transports for it, each with a gate deciding whether it is
@@ -30,6 +30,26 @@
  * and walk it. A gate that fails is recorded with its reason rather than
  * silently dropping the scheme, because "nothing was forwarded" is not a
  * diagnosis and every one of these has a different fix.
+ *
+ * BOTH ROLES USE THIS. A tdns-auth zone syncing its own delegation and a
+ * tdns-agent proxying for a DSYNC-unaware primary are the same task; they
+ * differ in exactly two places, and both are parameterised rather than
+ * duplicated:
+ *
+ *   - the UPDATE gate. A child publishes its own KEY at its apex, so there is
+ *     nothing to wait for. A proxy is a SECONDARY and cannot author the zone,
+ *     so it needs the §10.8 bootstrap -- the operator must publish the agent's
+ *     KEY at the primary -- and until that happens UPDATE is not usable.
+ *   - who sends. The child calls SyncZoneDelegationVia*, the proxy calls
+ *     Proxy*Parent. Same walk, different senders; walkSyncPlan holds the walk.
+ *
+ * Before this, the child path had its own scheme selection in BestSyncScheme,
+ * which picked ONE scheme by operator preference and lived with it: if that
+ * scheme failed, nothing else was tried even when the parent advertised a
+ * transport that would have worked. It also resolved target addresses with
+ * net.LookupHost -- the stdlib resolver, via /etc/resolv.conf -- while the rest
+ * of this code deliberately uses the IMR. In a DNS training lab those are very
+ * different answers. BestSyncScheme is gone; this is what replaced it.
  */
 package tdns
 
@@ -41,6 +61,22 @@ import (
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
+)
+
+// SyncRole is which of the two callers is building the plan. It selects the
+// UPDATE gate, and nothing else.
+type SyncRole int
+
+const (
+	// SyncRoleChild is a tdns-auth zone syncing its OWN delegation. It
+	// publishes its own KEY at its apex, so UPDATE needs no bootstrap: the
+	// only question is whether the parent advertises it.
+	SyncRoleChild SyncRole = iota
+	// SyncRoleProxy is a tdns-agent secondary forwarding on behalf of a
+	// DSYNC-unaware primary. It cannot author the zone, so the agent's KEY has
+	// to be published at the PRIMARY by the operator before the parent will
+	// trust an UPDATE -- the §10.8 state machine, which is the UPDATE gate.
+	SyncRoleProxy
 )
 
 // SyncCandidate is one transport that is advertised by the parent, configured
@@ -103,7 +139,9 @@ func (p *ParentSyncPlan) Summary() string {
 // broken: the zone is still served, and the resilient-config quarantine model
 // says that is a per-zone warning rather than a hard error. Only a genuine
 // discovery failure is returned as an error.
-func (zd *ZoneData) BuildParentSyncPlan(ctx context.Context, kdb *KeyDB, imr *Imr) (*ParentSyncPlan, error) {
+func (zd *ZoneData) BuildParentSyncPlan(ctx context.Context, kdb *KeyDB, imr *Imr,
+	role SyncRole) (*ParentSyncPlan, error) {
+
 	plan := &ParentSyncPlan{}
 
 	// No IMR means no discovery is possible at all. Not an error: it is how a
@@ -153,7 +191,7 @@ func (zd *ZoneData) BuildParentSyncPlan(ctx context.Context, kdb *KeyDB, imr *Im
 	for _, scheme := range schemes {
 		switch strings.ToLower(strings.TrimSpace(scheme)) {
 		case "update":
-			zd.planConsiderUpdate(ctx, kdb, imr, dsyncRes, plan)
+			zd.planConsiderUpdate(ctx, kdb, imr, dsyncRes, plan, role)
 		case "api":
 			zd.planConsiderApi(dsyncRes, plan)
 		case "notify":
@@ -166,14 +204,57 @@ func (zd *ZoneData) BuildParentSyncPlan(ctx context.Context, kdb *KeyDB, imr *Im
 	return plan, nil
 }
 
+// updateGateBlocked is the one role-dependent gate: whether this host can sign
+// an UPDATE the parent will trust.
+//
+// A PROXY must clear the §10.8 KEY bootstrap first. It is a SECONDARY and
+// cannot author the zone, so the operator has to publish the agent's KEY at the
+// primary; until then an UPDATE would be REFUSED and there is no point sending
+// one.
+//
+// A CHILD publishes its own KEY and has nothing to clear, so it is never
+// blocked here. Adding a gate would invent a restriction that never existed on
+// that path -- and a child whose signing key is genuinely missing fails at send
+// time, which is the right shape for a runtime problem: the walk records it and
+// moves on to the next transport.
+//
+// The gate that used to sit at the top of the state machine -- "does the parent
+// advertise UPDATE?" -- is the caller's findDsync, so nothing here rediscovers.
+func (zd *ZoneData) updateGateBlocked(kdb *KeyDB, role SyncRole) (string, bool) {
+	if role != SyncRoleProxy {
+		return "", false
+	}
+	state, err := zd.proxyUpdateKeyState(kdb)
+	if err != nil {
+		return fmt.Sprintf("key state: %v", err), true
+	}
+	if state != ProxyUpdateReady {
+		return string(state), true
+	}
+	return "", false
+}
+
+// zoneIsSigned reports whether the parent will have anything to validate.
+//
+// Published DNSKEYs are the direct evidence and are what a PROXY sees: it
+// serves a transferred copy, so if the primary signs the zone the DNSKEYs are
+// in the data. A tdns-auth CHILD may sign the zone itself, where the keys are
+// not necessarily sitting in the parsed zone at the moment this is asked --
+// hence the options. Either is sufficient; asking only about the RRset would
+// wrongly call an online-signing child unsigned and silently drop NOTIFY from
+// its plan.
+func zoneIsSigned(zd *ZoneData) bool {
+	return zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning] || zoneLooksSigned(zd)
+}
+
 // findDsync returns the first advertised DSYNC RR for a scheme, or nil.
 func findDsync(res DsyncResult, scheme core.DsyncScheme, wantNotifyType bool) *core.DSYNC {
 	for _, drr := range res.Rdata {
 		if drr.Scheme != scheme {
 			continue
 		}
-		// NOTIFY is only actionable for the types the proxy can signal about;
-		// this mirrors BestSyncScheme's long-standing filter.
+		// NOTIFY is only actionable for the types that can be signalled about;
+		// this preserves the filter BestSyncScheme applied for years.
 		if wantNotifyType && drr.Type != dns.TypeCSYNC && drr.Type != dns.TypeANY {
 			continue
 		}
@@ -183,23 +264,15 @@ func findDsync(res DsyncResult, scheme core.DsyncScheme, wantNotifyType bool) *c
 }
 
 func (zd *ZoneData) planConsiderUpdate(ctx context.Context, kdb *KeyDB, imr *Imr,
-	res DsyncResult, plan *ParentSyncPlan) {
+	res DsyncResult, plan *ParentSyncPlan, role SyncRole) {
 
 	drr := findDsync(res, core.SchemeUpdate, false)
 	if drr == nil {
 		plan.Skipped = append(plan.Skipped, SkippedScheme{"UPDATE", "parent does not advertise it"})
 		return
 	}
-	// The KEY-bootstrap state machine (§10.8). The gate that used to live at
-	// the top of it -- "does the parent advertise UPDATE?" -- is the findDsync
-	// above, so this no longer re-discovers anything.
-	state, err := zd.proxyUpdateKeyState(kdb)
-	if err != nil {
-		plan.Skipped = append(plan.Skipped, SkippedScheme{"UPDATE", fmt.Sprintf("key state: %v", err)})
-		return
-	}
-	if state != ProxyUpdateReady {
-		plan.Skipped = append(plan.Skipped, SkippedScheme{"UPDATE", string(state)})
+	if reason, blocked := zd.updateGateBlocked(kdb, role); blocked {
+		plan.Skipped = append(plan.Skipped, SkippedScheme{"UPDATE", reason})
 		return
 	}
 	target, terr := resolveDsyncTarget(ctx, imr, drr)
@@ -252,7 +325,7 @@ func (zd *ZoneData) planConsiderNotify(ctx context.Context, imr *Imr, res DsyncR
 	// achieved nothing while UPDATE -- which works fine unsigned -- was never
 	// tried. So it is removed from the list, not merely ranked below the
 	// others.
-	if !zoneLooksSigned(zd) {
+	if !zoneIsSigned(zd) {
 		plan.Skipped = append(plan.Skipped, SkippedScheme{"NOTIFY",
 			"zone is unsigned; a NOTIFY would leave the parent nothing it can validate"})
 		return
@@ -271,8 +344,8 @@ func (zd *ZoneData) planConsiderNotify(ctx context.Context, imr *Imr, res DsyncR
 // its target without a second discovery query. It goes through the IMR rather
 // than net.LookupHost -- the stdlib resolver consults /etc/resolv.conf, which
 // in a DNS training lab is not the view of the namespace the rest of this code
-// is working in. (BestSyncScheme still uses net.LookupHost on the tdns-auth
-// child path; a separate inconsistency, untouched here.)
+// is working in. BestSyncScheme, which resolved with net.LookupHost, was the
+// last caller doing that and is gone.
 
 // SyncWithParent walks the plan, trying each usable transport until one gets
 // the change to the parent.
@@ -294,29 +367,45 @@ func (zd *ZoneData) SyncWithParent(ctx context.Context, kdb *KeyDB, notifyq chan
 		return "no usable sync scheme; nothing forwarded (" + plan.Summary() + ")", nil
 	}
 
-	var failures []string
-	for _, cand := range plan.Candidates {
-		var msg string
-		var err error
-
+	return zd.walkSyncPlan(plan, func(cand SyncCandidate) (string, error) {
 		switch cand.Scheme {
 		case "UPDATE":
-			msg, err = zd.ProxyUpdateParent(ctx, kdb, imr, cand.Target)
+			return zd.ProxyUpdateParent(ctx, kdb, imr, cand.Target)
 		case "API":
-			msg, err = zd.ProxyApiParent(ctx, imr, cand.Target, analysis)
+			return zd.ProxyApiParent(ctx, imr, cand.Target, analysis)
 		case "NOTIFY":
-			msg, err = zd.ProxyNotifyParent(ctx, notifyq, analysis, cand.Target)
-		default:
-			err = fmt.Errorf("unknown scheme %q in plan", cand.Scheme)
+			return zd.ProxyNotifyParent(ctx, notifyq, analysis, cand.Target)
 		}
+		return "", fmt.Errorf("unknown scheme %q in plan", cand.Scheme)
+	})
+}
 
+// walkSyncPlan tries each candidate via send, returning the first success.
+//
+// Shared by both roles: the candidates and the reasons are the same question,
+// only the sender differs. Keeping the walk in one place is also what keeps the
+// two honest about the thing that matters -- a failure does NOT end the walk.
+// The intersection of "what the parent offers" and "what this host is
+// configured for" is usually one or two entries, so there is nothing to be
+// gained by giving up on the first, and the old child path did exactly that:
+// BestSyncScheme picked one scheme and a failure was the end of it, even when
+// the parent advertised another transport that would have worked.
+//
+// All failures are returned together. A caller shown only the last one cannot
+// tell which transport was even expected to work.
+func (zd *ZoneData) walkSyncPlan(plan *ParentSyncPlan,
+	send func(SyncCandidate) (string, error)) (string, error) {
+
+	var failures []string
+	for _, cand := range plan.Candidates {
+		msg, err := send(cand)
 		if err == nil {
 			if len(failures) > 0 {
 				return fmt.Sprintf("%s (after %s)", msg, strings.Join(failures, "; ")), nil
 			}
 			return msg, nil
 		}
-		lgDns.Warn("delegation-sync-proxy: scheme failed, trying the next one",
+		lgDns.Warn("delegation sync: scheme failed, trying the next one",
 			"zone", zd.ZoneName, "scheme", cand.Scheme, "err", err)
 		failures = append(failures, fmt.Sprintf("%s failed: %v", cand.Scheme, err))
 	}

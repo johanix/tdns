@@ -161,8 +161,8 @@ func (zd *ZoneData) ProxyDelegationPostRefresh(delsyncq chan DelegationSyncReque
 // while the sync plan was built.
 //
 // It used to call BestSyncScheme itself, which is what broke the fallback from
-// UPDATE: BestSyncScheme returns the operator's PREFERRED scheme, so a fallback
-// into here was handed "UPDATE" again, failed the scheme != "NOTIFY" check, and
+// UPDATE: that returned the operator's PREFERRED scheme, so a fallback into
+// here was handed "UPDATE" again, failed the scheme != "NOTIFY" check, and
 // reported that the parent advertised no NOTIFY target while it was advertising
 // one. A function that is reached BY a fallback must not re-decide which scheme
 // the caller wanted.

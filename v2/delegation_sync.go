@@ -397,24 +397,48 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 	// 	return fmt.Sprintf("Error from LookupDSYNCTarget(%s, %s): %v", zd.Parent, zd.ParentServers[0], err), err
 	// }
 
-	scheme, dsynctarget, err := zd.BestSyncScheme(ctx, imr)
+	// One discovery, then every usable transport in operator-preference order.
+	//
+	// This replaced BestSyncScheme, which picked ONE scheme and lived with it:
+	// if that scheme failed, nothing else was tried even when the parent
+	// advertised a transport that would have worked. The gates also settle
+	// here what used to be discovered by failing -- an API scheme with no
+	// credential is skipped with a reason instead of returning REFUSED, and a
+	// NOTIFY for an unsigned zone (which leaves the parent nothing it can
+	// validate) is not attempted at all.
+	plan, err := zd.BuildParentSyncPlan(ctx, kdb, imr, SyncRoleChild)
 	if err != nil {
-		lgDns.Error("DelegationSyncEngine: error from BestSyncScheme, ignoring sync request", "zone", zd.ZoneName, "err", err)
+		lgDns.Error("DelegationSyncEngine: could not build the parent sync plan, ignoring sync request",
+			"zone", zd.ZoneName, "err", err)
 		return "", 0, UpdateResult{}, err
 	}
+	if !plan.Usable() {
+		lgDns.Warn("DelegationSyncEngine: no usable sync scheme", "zone", zd.ZoneName,
+			"parent", plan.Parent, "plan", plan.Summary())
+		return "", 0, UpdateResult{}, fmt.Errorf("zone %s: no usable delegation sync scheme: %s",
+			zd.ZoneName, plan.Summary())
+	}
 
-	var msg string
+	// rcode and ur are captured from whichever attempt succeeds; on total
+	// failure walkSyncPlan returns the error and they are not consulted.
 	var rcode uint8
 	var ur UpdateResult
 
-	switch scheme {
-	case "UPDATE":
-		msg, rcode, ur, err = zd.SyncZoneDelegationViaUpdate(kdb, syncstate, dsynctarget)
-	case "NOTIFY":
-		msg, rcode, err = zd.SyncZoneDelegationViaNotify(kdb, notifyq, syncstate, dsynctarget)
-	case "API":
-		msg, rcode, err = zd.SyncZoneDelegationViaApi(ctx, imr, syncstate, dsynctarget)
-	}
+	msg, err := zd.walkSyncPlan(plan, func(cand SyncCandidate) (string, error) {
+		var m string
+		var e error
+		switch cand.Scheme {
+		case "UPDATE":
+			m, rcode, ur, e = zd.SyncZoneDelegationViaUpdate(kdb, syncstate, cand.Target)
+		case "NOTIFY":
+			m, rcode, e = zd.SyncZoneDelegationViaNotify(kdb, notifyq, syncstate, cand.Target)
+		case "API":
+			m, rcode, e = zd.SyncZoneDelegationViaApi(ctx, imr, syncstate, cand.Target)
+		default:
+			e = fmt.Errorf("unknown scheme %q in plan", cand.Scheme)
+		}
+		return m, e
+	})
 
 	return msg, rcode, ur, err
 }

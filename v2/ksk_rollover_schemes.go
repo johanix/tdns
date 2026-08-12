@@ -46,7 +46,7 @@ type schemeChoice struct {
 // Filter rule for NOTIFY: matches DSYNC RRs with RRtype == TypeCDS or
 // RRtype == TypeANY. The rollover engine pushes DS by publishing CDS;
 // CSYNC-only NOTIFY advertisements do not satisfy the rollover's
-// requirements. (BestSyncScheme uses a different filter — CSYNC or
+// requirements. (The delegation-sync plan uses a different filter — CSYNC or
 // ANY — because it serves the general delegation-sync path, which is
 // CSYNC-driven. Don't unify.)
 //

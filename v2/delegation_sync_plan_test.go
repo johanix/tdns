@@ -12,6 +12,7 @@ package tdns
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -270,5 +271,139 @@ func TestProxyAnalysisFromSyncStatusWitnessesUnsigning(t *testing.T) {
 	ds, ok := rrsetFor(rrsets, proxyApiZone, "DS")
 	if !ok || len(ds.RRs) != 0 {
 		t.Fatalf("want an explicit empty DS rrset, got present=%v rrs=%v", ok, ds.RRs)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Role: the one gate that differs between a child and a proxy
+// ---------------------------------------------------------------------------
+
+// A proxy is a SECONDARY: it cannot publish its own KEY at the child apex, so
+// until the operator does it at the primary an UPDATE would be REFUSED. A
+// child publishes its own and is never blocked here -- gating it would invent
+// a restriction that path never had.
+func TestUpdateGateIsProxyOnly(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := testZone(t, proxyApiZone, proxyApiBaseZone()) // no KEY at the apex
+	zd.KeyDB = kdb
+
+	reason, blocked := zd.updateGateBlocked(kdb, SyncRoleProxy)
+	if !blocked {
+		t.Fatal("proxy with no KEY published at the apex was not blocked")
+	}
+	if !strings.Contains(reason, string(ProxyUpdateWaiting)) {
+		t.Errorf("blocked reason = %q, want it to name the waiting-for-key state", reason)
+	}
+
+	if _, blocked := zd.updateGateBlocked(kdb, SyncRoleChild); blocked {
+		t.Error("a child was blocked by the proxy KEY-bootstrap gate")
+	}
+}
+
+// ---------------------------------------------------------------------------
+// zoneIsSigned
+// ---------------------------------------------------------------------------
+
+// Published DNSKEYs are what a proxy sees (it serves a transferred copy). A
+// child may sign the zone itself, where the keys are not necessarily in the
+// parsed zone at the moment this is asked -- so the signing options count too.
+// Asking only about the RRset would call an online-signing child unsigned and
+// silently drop NOTIFY from its plan.
+func TestZoneIsSignedAcceptsBothEvidence(t *testing.T) {
+	unsigned := testZone(t, proxyApiZone, proxyApiBaseZone())
+	if zoneIsSigned(unsigned) {
+		t.Error("a zone with no DNSKEYs and no signing options reported as signed")
+	}
+
+	withKeys := testZone(t, proxyApiZone, proxyApiSignedZone())
+	if !zoneIsSigned(withKeys) {
+		t.Error("a zone with a published DNSKEY reported as unsigned")
+	}
+
+	for _, opt := range []ZoneOption{OptOnlineSigning, OptInlineSigning} {
+		signer := testZone(t, proxyApiZone, proxyApiBaseZone())
+		if signer.Options == nil {
+			signer.Options = map[ZoneOption]bool{}
+		}
+		signer.Options[opt] = true
+		if !zoneIsSigned(signer) {
+			t.Errorf("a zone with %v set reported as unsigned", opt)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// walkSyncPlan
+// ---------------------------------------------------------------------------
+
+// A failure must not end the walk. This is what the child path did NOT do
+// before: BestSyncScheme picked one scheme and a failure was the end of it,
+// even when the parent advertised another transport that would have worked.
+func TestWalkSyncPlanContinuesPastAFailure(t *testing.T) {
+	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
+	plan := &ParentSyncPlan{Candidates: []SyncCandidate{
+		{Scheme: "UPDATE"}, {Scheme: "API"}, {Scheme: "NOTIFY"},
+	}}
+
+	var tried []string
+	msg, err := zd.walkSyncPlan(plan, func(c SyncCandidate) (string, error) {
+		tried = append(tried, c.Scheme)
+		if c.Scheme == "API" {
+			return "sent via API", nil
+		}
+		return "", fmt.Errorf("%s is broken", c.Scheme)
+	})
+	if err != nil {
+		t.Fatalf("walk failed even though API succeeded: %v", err)
+	}
+	if strings.Join(tried, ",") != "UPDATE,API" {
+		t.Errorf("tried %v, want UPDATE then API and no further", tried)
+	}
+	// The success is reported, but so is what had to be stepped over to reach
+	// it -- an operator seeing only "sent via API" would not know UPDATE broke.
+	if !strings.Contains(msg, "sent via API") || !strings.Contains(msg, "UPDATE failed") {
+		t.Errorf("message %q should carry both the success and the earlier failure", msg)
+	}
+}
+
+func TestWalkSyncPlanStopsAtTheFirstSuccess(t *testing.T) {
+	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
+	plan := &ParentSyncPlan{Candidates: []SyncCandidate{{Scheme: "UPDATE"}, {Scheme: "NOTIFY"}}}
+
+	var tried []string
+	msg, err := zd.walkSyncPlan(plan, func(c SyncCandidate) (string, error) {
+		tried = append(tried, c.Scheme)
+		return "sent via " + c.Scheme, nil
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tried) != 1 || tried[0] != "UPDATE" {
+		t.Errorf("tried %v, want only UPDATE", tried)
+	}
+	if msg != "sent via UPDATE" {
+		t.Errorf("msg = %q", msg)
+	}
+}
+
+// When nothing worked, every attempt is named. A caller shown only the last
+// error cannot tell which transport was even expected to work.
+func TestWalkSyncPlanReportsEveryFailure(t *testing.T) {
+	zd := testZone(t, proxyApiZone, proxyApiBaseZone())
+	plan := &ParentSyncPlan{
+		Candidates: []SyncCandidate{{Scheme: "UPDATE"}, {Scheme: "API"}},
+		Skipped:    []SkippedScheme{{"NOTIFY", "zone is unsigned"}},
+	}
+
+	_, err := zd.walkSyncPlan(plan, func(c SyncCandidate) (string, error) {
+		return "", fmt.Errorf("%s exploded", c.Scheme)
+	})
+	if err == nil {
+		t.Fatal("no error when every candidate failed")
+	}
+	for _, want := range []string{"UPDATE exploded", "API exploded", "NOTIFY", "unsigned"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q is missing %q", err, want)
+		}
 	}
 }

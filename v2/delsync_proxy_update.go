@@ -297,7 +297,7 @@ func (zd *ZoneData) proxyCurrentDelegationRRs() (newNS, newA, newAAAA, newDS []d
 // available, via the same plan the steady-state path uses.
 func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB,
 	notifyq chan NotifyRequest, imr *Imr) (string, error) {
-	plan, err := zd.BuildParentSyncPlan(ctx, kdb, imr)
+	plan, err := zd.BuildParentSyncPlan(ctx, kdb, imr, SyncRoleProxy)
 	if err != nil {
 		return "", fmt.Errorf("ProxyStartupReconcile: %w", err)
 	}
@@ -340,7 +340,7 @@ func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB,
 // removed the repeated discovery (three to four per sync, all returning the
 // same RRset) and the fallback that never fired.
 func (zd *ZoneData) ProxyDelegationSync(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest, imr *Imr, analysis *ProxyDelegationAnalysis) (string, error) {
-	plan, err := zd.BuildParentSyncPlan(ctx, kdb, imr)
+	plan, err := zd.BuildParentSyncPlan(ctx, kdb, imr, SyncRoleProxy)
 	if err != nil {
 		return "", fmt.Errorf("ProxyDelegationSync: %w", err)
 	}
