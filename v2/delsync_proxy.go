@@ -157,28 +157,23 @@ func (zd *ZoneData) ProxyDelegationPostRefresh(delsyncq chan DelegationSyncReque
 // them itself. NOTIFY is the only scheme used here (D3/D9); if the parent does
 // not advertise a NOTIFY DSYNC target, this is a no-op (not an error — the
 // parent may not offer the service, or may want UPDATE, which is later work).
-func (zd *ZoneData) ProxyNotifyParent(ctx context.Context, notifyq chan NotifyRequest, imr *Imr, analysis *ProxyDelegationAnalysis) (string, error) {
+// The NOTIFY target is the CALLER's to supply, from the single discovery done
+// while the sync plan was built.
+//
+// It used to call BestSyncScheme itself, which is what broke the fallback from
+// UPDATE: BestSyncScheme returns the operator's PREFERRED scheme, so a fallback
+// into here was handed "UPDATE" again, failed the scheme != "NOTIFY" check, and
+// reported that the parent advertised no NOTIFY target while it was advertising
+// one. A function that is reached BY a fallback must not re-decide which scheme
+// the caller wanted.
+func (zd *ZoneData) ProxyNotifyParent(ctx context.Context, notifyq chan NotifyRequest,
+	analysis *ProxyDelegationAnalysis, dsynctarget *DsyncTarget) (string, error) {
+
 	if analysis == nil || !analysis.anyChange() {
 		return "no change to proxy", nil
 	}
-	if zd.Parent == "" || zd.Parent == "." {
-		p, err := imr.ParentZone(zd.ZoneName)
-		if err != nil {
-			return "", fmt.Errorf("ProxyNotifyParent: ParentZone(%s): %w", zd.ZoneName, err)
-		}
-		zd.Parent = p
-	}
-
-	scheme, dsynctarget, err := zd.BestSyncScheme(ctx, imr)
-	if err != nil {
-		return "", fmt.Errorf("ProxyNotifyParent: BestSyncScheme(%s): %w", zd.ZoneName, err)
-	}
-	// NOTIFY-only for now (D3/D9). If the parent advertises only UPDATE we
-	// cannot proxy yet; report and stop without error.
-	if scheme != "NOTIFY" || dsynctarget == nil || len(dsynctarget.Addresses) == 0 {
-		lgDns.Info("delegation-sync-proxy: parent does not advertise a usable NOTIFY DSYNC target; nothing forwarded",
-			"zone", zd.ZoneName, "parent", zd.Parent, "scheme", scheme)
-		return "parent advertises no NOTIFY DSYNC target; nothing forwarded", nil
+	if dsynctarget == nil || len(dsynctarget.Addresses) == 0 {
+		return "", fmt.Errorf("ProxyNotifyParent: no usable NOTIFY target for %s", zd.ZoneName)
 	}
 
 	sent := zd.emitProxyNotifies(ctx, notifyq, analysis, dsynctarget.Addresses)

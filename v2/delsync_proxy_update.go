@@ -103,7 +103,22 @@ func (zd *ZoneData) ProxyUpdatePreconditionCheck(ctx context.Context, kdb *KeyDB
 		zd.clearProxyUpdateWarning()
 		return ProxyUpdateUnsupported, nil
 	}
+	return zd.proxyUpdateKeyState(kdb)
+}
 
+// proxyUpdateKeyState is the §10.8 state machine from step 2 onwards: the
+// caller has already established that the parent advertises a DSYNC UPDATE
+// receiver, and this decides whether the agent can actually sign for the child.
+//
+// Split out so the sync plan (delsync_proxy_plan.go) can evaluate the UPDATE
+// gate from a DSYNC RRset it already holds. Previously the only way to ask
+// "can we UPDATE?" was ProxyUpdatePreconditionCheck, which began by discovering
+// the DSYNC RRset again -- so every caller that had just discovered it paid for
+// a second lookup, and the startup path paid for a third.
+//
+// Side-effecting in the WAITING state only: it generates a SIG(0) keypair if
+// the keystore has none, so the operator instruction can be produced.
+func (zd *ZoneData) proxyUpdateKeyState(kdb *KeyDB) (ProxyUpdateState, error) {
 	// Step 2: inspect the apex KEY RRset.
 	apexKeys := zd.proxyApexKEYs()
 	if len(apexKeys) > 0 {
@@ -269,29 +284,29 @@ func (zd *ZoneData) proxyCurrentDelegationRRs() (newNS, newA, newAAAA, newDS []d
 }
 
 // ProxyStartupReconcile runs once when a delegation-sync-proxy zone first
-// loads: it runs the §10.8 precondition state machine and, if UPDATE-proxy is
-// READY, does a one-time parent-vs-child reconcile — `AnalyseZoneDelegation`
-// (the network compare) and, only when out of sync, a proxied UPDATE. This
-// catches delegation drift that accumulated while the agent was down WITHOUT
-// re-sending on every restart (the sync check gates the send even though
-// replace-form would otherwise be harmless to re-send). Steady-state changes
-// after this are handled by the PreRefresh diff + PROXY-SYNC dispatch (U-e),
-// which need no parent round-trip.
-func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB, imr *Imr) (string, error) {
-	state, err := zd.ProxyUpdatePreconditionCheck(ctx, kdb, imr)
+// loads: a one-time parent-vs-child reconcile that catches delegation drift
+// accumulated while the agent was down, WITHOUT re-sending on every restart
+// (the InSync check gates the send even though replace-form would otherwise be
+// harmless to re-send). Steady-state changes after this are handled by the
+// PreRefresh diff + PROXY-SYNC dispatch (U-e), which need no parent round-trip.
+//
+// It used to be UPDATE-only: it ran the §10.8 precondition and gave up unless
+// the state was READY, so a parent offering only API or only NOTIFY got no
+// startup reconcile at all and its drift went uncorrected until the next
+// transfer happened to change something. It now uses whatever transport is
+// available, via the same plan the steady-state path uses.
+func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB,
+	notifyq chan NotifyRequest, imr *Imr) (string, error) {
+	plan, err := zd.BuildParentSyncPlan(ctx, kdb, imr)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("ProxyStartupReconcile: %w", err)
 	}
-	if state != ProxyUpdateReady {
-		// Not operable via UPDATE (yet). Nothing to reconcile here; the NOTIFY
-		// path and the per-zone warning cover this.
-		return fmt.Sprintf("startup reconcile: UPDATE proxy not ready (%s)", state), nil
+	if !plan.Usable() {
+		// Degraded, not broken: the zone is served either way, and the reasons
+		// are in the summary rather than in a shrug.
+		return "startup reconcile: " + plan.Summary(), nil
 	}
-	if zd.Parent == "" || zd.Parent == "." {
-		if p, perr := imr.ParentZone(zd.ZoneName); perr == nil {
-			zd.Parent = p
-		}
-	}
+
 	dss, aerr := zd.AnalyseZoneDelegation(imr)
 	if aerr != nil {
 		return "", fmt.Errorf("ProxyStartupReconcile: AnalyseZoneDelegation(%s): %w", zd.ZoneName, aerr)
@@ -300,52 +315,36 @@ func (zd *ZoneData) ProxyStartupReconcile(ctx context.Context, kdb *KeyDB, imr *
 		lgDns.Info("delegation-sync-proxy: startup reconcile — parent already in sync", "zone", zd.ZoneName)
 		return "startup reconcile: parent already in sync; nothing sent", nil
 	}
-	lgDns.Info("delegation-sync-proxy: startup reconcile — parent out of sync, sending UPDATE", "zone", zd.ZoneName)
-	msg, _, uerr := zd.ProxyUpdateParent(ctx, kdb, imr)
-	if uerr != nil {
-		return "", fmt.Errorf("ProxyStartupReconcile: %w", uerr)
+
+	// NOTIFY needs to know WHICH signal to send, which the steady-state path
+	// gets from the transfer diff. There is no transfer here, so it comes from
+	// the parent-vs-child comparison just made.
+	analysis := proxyAnalysisFromSyncStatus(dss)
+
+	lgDns.Info("delegation-sync-proxy: startup reconcile — parent out of sync",
+		"zone", zd.ZoneName, "plan", plan.Summary())
+	msg, serr := zd.SyncWithParent(ctx, kdb, notifyq, imr, plan, analysis)
+	if serr != nil {
+		return "", fmt.Errorf("ProxyStartupReconcile: %w", serr)
 	}
 	return "startup reconcile: " + msg, nil
 }
 
 // ProxyDelegationSync is the steady-state dispatcher: on a detected change it
-// picks the scheme the parent advertises and forwards accordingly — a DNS
-// UPDATE (carrying the delegation records) when the parent advertises UPDATE, or
-// a NOTIFY (a "come re-scan me" signal) when it advertises NOTIFY. Runs in the
-// DelegationSyncher (off the refresh path), so the network calls (scheme
-// discovery, the send) are fine here. UPDATE is preferred when both are
-// advertised because it lands the change in one round-trip and works for
-// unsigned zones; NOTIFY is the fallback (and the only option for an unsigned
-// zone whose parent offers only NOTIFY — there it is a no-op, nothing to scan).
+// forwards to the parent over whichever transport is actually usable.
+//
+// It no longer picks one scheme and lives with it. Synchronising a delegation
+// is one task; NOTIFY, UPDATE and API are three transports for it, each with a
+// gate. BuildParentSyncPlan discovers the parent's DSYNC RRset ONCE and works
+// out which transports pass their gate; SyncWithParent walks them. That is what
+// removed the repeated discovery (three to four per sync, all returning the
+// same RRset) and the fallback that never fired.
 func (zd *ZoneData) ProxyDelegationSync(ctx context.Context, kdb *KeyDB, notifyq chan NotifyRequest, imr *Imr, analysis *ProxyDelegationAnalysis) (string, error) {
-	scheme, _, err := zd.BestSyncScheme(ctx, imr)
+	plan, err := zd.BuildParentSyncPlan(ctx, kdb, imr)
 	if err != nil {
-		return "", fmt.Errorf("ProxyDelegationSync: BestSyncScheme(%s): %w", zd.ZoneName, err)
+		return "", fmt.Errorf("ProxyDelegationSync: %w", err)
 	}
-	switch scheme {
-	case "UPDATE":
-		msg, state, uerr := zd.ProxyUpdateParent(ctx, kdb, imr)
-		if uerr != nil {
-			return "", uerr
-		}
-		// If the UPDATE precondition is not ready (KEY not yet published, etc.)
-		// the parent may still accept a NOTIFY — fall back so the change is not
-		// silently dropped while the operator completes the KEY bootstrap.
-		if state != ProxyUpdateReady {
-			nmsg, nerr := zd.ProxyNotifyParent(ctx, notifyq, imr, analysis)
-			if nerr != nil {
-				return msg, nil // UPDATE not ready, NOTIFY failed — report the UPDATE state
-			}
-			return fmt.Sprintf("%s; fell back to NOTIFY: %s", msg, nmsg), nil
-		}
-		return msg, nil
-	case "NOTIFY":
-		return zd.ProxyNotifyParent(ctx, notifyq, imr, analysis)
-	default:
-		lgDns.Info("delegation-sync-proxy: parent advertises no usable sync scheme; nothing forwarded",
-			"zone", zd.ZoneName, "scheme", scheme)
-		return "parent advertises no usable sync scheme; nothing forwarded", nil
-	}
+	return zd.SyncWithParent(ctx, kdb, notifyq, imr, plan, analysis)
 }
 
 // proxyUpdateMode returns the parent-update form for the proxy: the operator's
@@ -367,29 +366,19 @@ func proxyUpdateMode(kdb *KeyDB) string {
 // sets `parent-update: delta` (proxyUpdateMode). Replace DELetes the child's
 // delegation RRsets and ADDs the current authoritative members (NS + glue + DS).
 //
-// It is gated on the precondition state machine (§10.8): if the parent does not
-// advertise UPDATE, or the agent's KEY is not published/ours, it does nothing
-// and reports the state — it never sends an UPDATE the parent would REFUSE.
-func (zd *ZoneData) ProxyUpdateParent(ctx context.Context, kdb *KeyDB, imr *Imr) (string, ProxyUpdateState, error) {
-	state, err := zd.ProxyUpdatePreconditionCheck(ctx, kdb, imr)
-	if err != nil {
-		return "", state, err
-	}
-	if state != ProxyUpdateReady {
-		return fmt.Sprintf("UPDATE proxy not ready (%s); nothing sent", state), state, nil
-	}
+// The §10.8 precondition and the parent's UPDATE target are the CALLER's
+// responsibility: both are settled while the sync plan is built, from one
+// discovery. This function is only reached for a candidate that already passed
+// its gate, so it never sends an UPDATE the parent would REFUSE — the check
+// simply happens earlier, and once.
+func (zd *ZoneData) ProxyUpdateParent(ctx context.Context, kdb *KeyDB, imr *Imr,
+	target *DsyncTarget) (string, error) {
 
-	// Resolve the parent's UPDATE target.
-	if zd.Parent == "" || zd.Parent == "." {
-		p, perr := imr.ParentZone(zd.ZoneName)
-		if perr != nil {
-			return "", state, fmt.Errorf("ProxyUpdateParent: ParentZone(%s): %w", zd.ZoneName, perr)
-		}
-		zd.Parent = p
+	if target == nil || len(target.Addresses) == 0 {
+		return "", fmt.Errorf("ProxyUpdateParent: no usable UPDATE target for %s", zd.ZoneName)
 	}
-	target, terr := imr.LookupDSYNCTarget(ctx, zd.ZoneName, dns.TypeANY, core.SchemeUpdate)
-	if terr != nil || target == nil || len(target.Addresses) == 0 {
-		return "", state, fmt.Errorf("ProxyUpdateParent: no UPDATE target for %s: %w", zd.ZoneName, terr)
+	if zd.Parent == "" || zd.Parent == "." {
+		return "", fmt.Errorf("ProxyUpdateParent: parent zone for %s is unknown", zd.ZoneName)
 	}
 
 	// Build the UPDATE in the configured form (replace by default, delta if the
@@ -401,10 +390,10 @@ func (zd *ZoneData) ProxyUpdateParent(ctx context.Context, kdb *KeyDB, imr *Imr)
 	if mode == UpdateModeDelta {
 		dss, aerr := zd.AnalyseZoneDelegation(imr)
 		if aerr != nil {
-			return "", state, fmt.Errorf("ProxyUpdateParent: analyse delegation (delta): %w", aerr)
+			return "", fmt.Errorf("ProxyUpdateParent: analyse delegation (delta): %w", aerr)
 		}
 		if dss.InSync {
-			return "delta: parent already in sync; nothing sent", state, nil
+			return "delta: parent already in sync; nothing sent", nil
 		}
 		var adds, removes []dns.RR
 		adds = append(adds, dss.NsAdds...)
@@ -421,24 +410,24 @@ func (zd *ZoneData) ProxyUpdateParent(ctx context.Context, kdb *KeyDB, imr *Imr)
 		m, berr = CreateChildReplaceUpdate(zd.Parent, zd.ZoneName, newNS, newA, newAAAA, newDS)
 	}
 	if berr != nil {
-		return "", state, fmt.Errorf("ProxyUpdateParent: build %s UPDATE: %w", mode, berr)
+		return "", fmt.Errorf("ProxyUpdateParent: build %s UPDATE: %w", mode, berr)
 	}
 
 	// Sign as the child with the agent's SIG(0) key.
 	sak, kerr := kdb.GetSig0Keys(zd.ZoneName, Sig0StateActive)
 	if kerr != nil || sak == nil || len(sak.Keys) == 0 {
-		return "", state, fmt.Errorf("ProxyUpdateParent: no active SIG(0) key for %s", zd.ZoneName)
+		return "", fmt.Errorf("ProxyUpdateParent: no active SIG(0) key for %s", zd.ZoneName)
 	}
 	smsg, serr := SignMsg(*m, zd.ZoneName, sak)
 	if serr != nil || smsg == nil {
-		return "", state, fmt.Errorf("ProxyUpdateParent: sign UPDATE: %w", serr)
+		return "", fmt.Errorf("ProxyUpdateParent: sign UPDATE: %w", serr)
 	}
 
 	rcode, _, uerr := SendUpdate(smsg, zd.Parent, target.Addresses)
 	if uerr != nil {
-		return "", state, fmt.Errorf("ProxyUpdateParent: send UPDATE to %s: %w", zd.Parent, uerr)
+		return "", fmt.Errorf("ProxyUpdateParent: send UPDATE to %s: %w", zd.Parent, uerr)
 	}
 	msg := fmt.Sprintf("proxied %s UPDATE to parent %s (rcode %s)", mode, zd.Parent, dns.RcodeToString[rcode])
 	lgDns.Info("delegation-sync-proxy: "+msg, "zone", zd.ZoneName, "mode", mode)
-	return msg, state, nil
+	return msg, nil
 }

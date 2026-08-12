@@ -163,7 +163,7 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 			case "PROXY-SYNC":
 				// delegation-sync-proxy: an agent secondary forwards a detected
 				// change to the parent on behalf of a DSYNC-unaware primary,
-				// picking UPDATE or NOTIFY by what the parent advertises.
+				// over whichever of UPDATE / API / NOTIFY is actually usable.
 				msg, perr := zd.ProxyDelegationSync(ctx, kdb, notifyq, imr(), ds.ProxyAnalysis)
 				if perr != nil {
 					lgDns.Error("DelegationSyncher: proxy sync failed", "zone", ds.ZoneName, "err", perr)
@@ -172,13 +172,13 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 				}
 
 			case "PROXY-UPDATE-SETUP":
-				// delegation-sync-proxy UPDATE path, first load: run the
-				// precondition + KEY-bootstrap state machine (§10.8) and, if
-				// READY, a one-time parent-vs-child reconcile (catches drift from
-				// while the agent was down, without re-sending every restart).
-				// Off the refresh path (DSYNC discovery + parent compare are
-				// network). A no-op for the NOTIFY proxy.
-				msg, perr := zd.ProxyStartupReconcile(ctx, kdb, imr())
+				// delegation-sync-proxy, first load: build the sync plan (which
+				// runs the §10.8 KEY-bootstrap state machine as the UPDATE gate)
+				// and, if any transport is usable, do a one-time parent-vs-child
+				// reconcile — catching drift from while the agent was down
+				// without re-sending on every restart. Off the refresh path
+				// (DSYNC discovery + parent compare are network).
+				msg, perr := zd.ProxyStartupReconcile(ctx, kdb, notifyq, imr())
 				if perr != nil {
 					lgDns.Error("DelegationSyncher: proxy startup reconcile error", "zone", ds.ZoneName, "err", perr)
 				} else {
