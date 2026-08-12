@@ -87,6 +87,10 @@ The zone to update is mandatory to specify on the command line with the --zone f
 	create.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to update")
 	AttachUpdateCreateFlags(create)
 	c.AddCommand(create)
+	// The one-off content statements (addrr, delrr, delrrset, delname,
+	// replacerrset) live beside "create", which is the interactive
+	// multi-statement session.
+	AttachZoneUpdateVerbs(c, role)
 	return c
 }
 

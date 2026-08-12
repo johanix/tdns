@@ -47,6 +47,12 @@ const (
 	OptCatalogMemberAutoDelete
 	OptMultiSigner  // Dynamically set by signer when HSYNC shows multiple signers
 	OptDelSyncProxy // agent secondary: proxy CDS/CSYNC NOTIFYs upstream for a DSYNC-unaware primary
+	// OptAllowApiUpdates gates RR updates arriving over the management API,
+	// separately from allow-updates (which gates RFC 2136 DDNS). Appended here
+	// rather than beside allow-updates on purpose: ZoneOption values are
+	// positional (iota), so inserting mid-list would renumber every option
+	// after it.
+	OptAllowApiUpdates
 	optZoneOptionTdnsSentinel
 )
 
@@ -80,6 +86,7 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptCatalogMemberAutoDelete: "catalog-member-auto-delete",
 	OptMultiSigner:             "multi-signer",
 	OptDelSyncProxy:            "delegation-sync-proxy",
+	OptAllowApiUpdates:         "allow-api-updates",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -105,6 +112,7 @@ var StringToZoneOption = map[string]ZoneOption{
 	"catalog-member-auto-delete": OptCatalogMemberAutoDelete,
 	"multi-signer":               OptMultiSigner,
 	"delegation-sync-proxy":      OptDelSyncProxy,
+	"allow-api-updates":          OptAllowApiUpdates,
 }
 
 type ImrOption uint8

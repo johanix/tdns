@@ -184,6 +184,7 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			OptDelSyncProxy,
 			OptAllowUpdates,
 			OptAllowChildUpdates,
+			OptAllowApiUpdates,
 			OptAllowEdits,
 			OptFoldCase,
 			OptBlackLies,

@@ -39,6 +39,12 @@ import (
 var originationOptions = []ZoneOption{
 	OptAllowUpdates,
 	OptAllowChildUpdates,
+	// allow-api-updates is origination by definition: it admits operator RR
+	// changes over the management API. A tdns-auth secondary that may not
+	// originate content must not accept them either, or the API becomes a way
+	// around the MUST-NOT-MODIFY invariant that allow-updates already enforces
+	// for the DDNS channel.
+	OptAllowApiUpdates,
 	OptAddTransportSignal,
 	OptDelSyncParent,
 	OptOnlineSigning,
