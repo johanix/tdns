@@ -378,6 +378,9 @@ func PushDSRRsetForRollover(ctx context.Context, deps RolloverEngineDeps) (KSKDS
 		case core.SchemeNotify:
 			res, perr := pushDSRRsetViaNotify(ctx, deps, ch.Target)
 			results[0] = pathResultLite{scheme: "NOTIFY", res: res, err: perr}
+		case core.SchemeAPI:
+			res, perr := pushDSRRsetViaApi(ctx, deps, ch.Target)
+			results[0] = pathResultLite{scheme: "API", res: res, err: perr}
 		default:
 			return KSKDSPushResult{
 				Category: SoftfailChildConfigLocalError,
@@ -399,6 +402,9 @@ func PushDSRRsetForRollover(ctx context.Context, deps RolloverEngineDeps) (KSKDS
 				case core.SchemeNotify:
 					res, perr := pushDSRRsetViaNotify(ctx, deps, ch.Target)
 					results[i] = pathResultLite{scheme: "NOTIFY", res: res, err: perr}
+				case core.SchemeAPI:
+					res, perr := pushDSRRsetViaApi(ctx, deps, ch.Target)
+					results[i] = pathResultLite{scheme: "API", res: res, err: perr}
 				default:
 					results[i] = pathResultLite{
 						scheme: schemeName(ch.Scheme),
