@@ -470,3 +470,120 @@ func TestReplaceApexSOARefused(t *testing.T) {
 		t.Errorf("error = %q; want it to say why", err)
 	}
 }
+
+// An add BEFORE a delete is not a replacement -- RFC 2136 §3.4.2.6 processes
+// the update section in order, so that list means "add ns9, then delete every
+// NS", which would leave the apex with no NS RRset. The exception that lets a
+// replacement delete the apex NS must not be reachable that way.
+//
+// BuildZoneUpdateActions always emits delete-first, but the Ns section of a
+// DNS UPDATE arrives in whatever order the client sent.
+func TestApexNSDeleteAfterAddIsNotAReplacement(t *testing.T) {
+	const apex = `example.	3600	IN	SOA	ns.example. hostmaster.example. 1 7200 1800 604800 7200
+example.	3600	IN	NS	ns1.example.
+`
+	zd := testZone(t, "example.", apex)
+	registerZones(t, zd)
+	zd.UpdatePolicy = policyAllowing(dns.TypeNS)
+
+	add, err := dns.NewRR("example. 3600 IN NS ns9.example.")
+	if err != nil {
+		t.Fatalf("NewRR: %v", err)
+	}
+	del := &dns.ANY{Hdr: dns.RR_Header{
+		Name: "example.", Rrtype: dns.TypeNS, Class: dns.ClassANY,
+	}}
+
+	// Add first, delete second.
+	if _, err := zd.ApplyZoneUpdateToZoneData(UpdateRequest{
+		Cmd: "ZONE-UPDATE", ZoneName: "example.", Actions: []dns.RR{add, del},
+	}, newTestKeyDB(t)); err != nil {
+		t.Fatalf("ApplyZoneUpdateToZoneData: %v", err)
+	}
+
+	owner, err := zd.GetOwner("example.")
+	if err != nil || owner == nil {
+		t.Fatalf("GetOwner: %v", err)
+	}
+	nsset, ok := owner.RRtypes.Get(dns.TypeNS)
+	if !ok || len(nsset.RRs) == 0 {
+		t.Fatal("the apex NS RRset was deleted: an add before the delete was treated as a replacement")
+	}
+}
+
+// The delegation-sync delta must report an applied apex-NS replacement as
+// removals too. Without this the local zone drops its old nameservers while the
+// parent is only ever told about the new ones, and serves the union -- the same
+// append-instead-of-replace bug, one hop further out.
+func TestApexNSReplacementReportsRemovals(t *testing.T) {
+	const apex = `example.	3600	IN	SOA	ns.example. hostmaster.example. 1 7200 1800 604800 7200
+example.	3600	IN	NS	ns1.example.
+example.	3600	IN	NS	ns2.example.
+`
+	zd := testZone(t, "example.", apex)
+	registerZones(t, zd)
+	zd.UpdatePolicy = policyAllowing(dns.TypeNS)
+
+	// ns1 is kept, ns2 is dropped, ns3 is new.
+	actions, err := BuildZoneUpdateActions("example.", ZoneUpdateSpec{
+		Verb: VerbReplaceRRset,
+		RRs: []string{
+			"example. 3600 IN NS ns1.example.",
+			"example. 3600 IN NS ns3.example.",
+		},
+	})
+	if err != nil {
+		t.Fatalf("BuildZoneUpdateActions: %v", err)
+	}
+
+	// Computed BEFORE the apply, as the updater does: it needs the pre-state.
+	dss, err := zd.ZoneUpdateChangesDelegationDataNG(UpdateRequest{
+		Cmd: "ZONE-UPDATE", ZoneName: "example.", Actions: actions,
+	})
+	if err != nil {
+		t.Fatalf("ZoneUpdateChangesDelegationDataNG: %v", err)
+	}
+
+	removed := map[string]bool{}
+	for _, rr := range dss.NsRemoves {
+		if ns, ok := rr.(*dns.NS); ok {
+			removed[ns.Ns] = true
+		}
+	}
+	if !removed["ns2.example."] {
+		t.Error("ns2 was replaced away but not reported as removed; the parent would keep it")
+	}
+	// A nameserver the replacement re-adds must NOT be reported gone: on the
+	// delta path an add reordered before its own remove would lose it.
+	if removed["ns1.example."] {
+		t.Error("ns1 survives the replacement but was reported as removed")
+	}
+	if dss.InSync {
+		t.Error("a delegation change was reported as in sync")
+	}
+}
+
+// A standalone apex-NS delete is still ignored by the delta computation, since
+// the applier still refuses it. Reporting a removal that never happened would
+// tell the parent to drop nameservers the child still serves.
+func TestStandaloneApexNSDeleteReportsNoRemovals(t *testing.T) {
+	const apex = `example.	3600	IN	SOA	ns.example. hostmaster.example. 1 7200 1800 604800 7200
+example.	3600	IN	NS	ns1.example.
+`
+	zd := testZone(t, "example.", apex)
+	registerZones(t, zd)
+	zd.UpdatePolicy = policyAllowing(dns.TypeNS)
+
+	del := &dns.ANY{Hdr: dns.RR_Header{
+		Name: "example.", Rrtype: dns.TypeNS, Class: dns.ClassANY,
+	}}
+	dss, err := zd.ZoneUpdateChangesDelegationDataNG(UpdateRequest{
+		Cmd: "ZONE-UPDATE", ZoneName: "example.", Actions: []dns.RR{del},
+	})
+	if err != nil {
+		t.Fatalf("ZoneUpdateChangesDelegationDataNG: %v", err)
+	}
+	if len(dss.NsRemoves) != 0 {
+		t.Errorf("a refused standalone delete reported %d NS removals", len(dss.NsRemoves))
+	}
+}

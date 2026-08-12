@@ -808,7 +808,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 	zd.ensureWorkingSet()
 
 	lg.Debug("ApplyZoneUpdateToZoneData: processing actions", "zone", zd.ZoneName, "count", len(ur.Actions))
-	for _, rr := range ur.Actions {
+	for actionIdx, rr := range ur.Actions {
 		class := rr.Header().Class
 		ownerName := rr.Header().Name
 		rrtype := rr.Header().Rrtype
@@ -982,7 +982,8 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (upd
 			// loud and at the client rather than silent here.
 			if strings.EqualFold(ownerName, zd.ZoneName) &&
 				(rrtype == dns.TypeSOA || rrtype == dns.TypeNS) {
-				if rrtype == dns.TypeNS && updateReplacesRRset(ur.Actions, ownerName, rrtype) {
+				if rrtype == dns.TypeNS &&
+					updateReplacesRRset(ur.Actions[actionIdx+1:], ownerName, rrtype) {
 					lg.Debug("ApplyZoneUpdateToZoneData: apex NS delete is part of a replacement, allowing",
 						"zone", zd.ZoneName)
 				} else {
@@ -1191,10 +1192,41 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			switch rrtype {
 			case dns.TypeNS:
 				if ownerName == zd.ZoneName {
-					// XXX: It must not be allowed to remove the *entire* NS RRset for a zone.
-					// XXX: This should have been caught during approval. But here we are and we
-					// XXX: will complain, but ignore this update
-					// log.Printf("Error: update contains a REMOVE for the entire zone NS RRset. This is illegal and ignored.")
+					// A standalone delete of the apex NS RRset is refused by
+					// the applier and correctly ignored here.
+					//
+					// A delete that is one half of a REPLACEMENT is applied,
+					// though, and then this has to report it: otherwise the
+					// local zone drops the old nameservers while the parent is
+					// only ever told about the new ones, and ends up serving
+					// the union -- the same append-instead-of-replace bug the
+					// applier fix closed, one hop further out.
+					//
+					// Only the records the replacement does not re-add are
+					// reported gone. A remove+add of the same record would be
+					// churn at best, and on the delta path -- where the parent
+					// applies the list in order -- an add reordered before its
+					// own remove would lose the record.
+					newNS := apexNSReplacementRecords(ur.Actions, zd.ZoneName)
+					// No replacement records means this is a standalone
+					// delete, which the applier refuses -- so nothing was
+					// removed and nothing may be reported. Without this the
+					// loop below finds none of the current records in an empty
+					// replacement set and reports the whole RRset gone, telling
+					// the parent to drop nameservers the child still serves.
+					if len(newNS) == 0 {
+						break
+					}
+					for _, cur := range apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs {
+						if rrPresentIn(newNS, cur) {
+							continue
+						}
+						gone := dns.Copy(cur)
+						gone.Header().Ttl = 3600
+						dss.InSync = false
+						dss.NsRemoves = append(dss.NsRemoves, gone)
+						ddata.Actions = append(ddata.Actions, gone)
+					}
 				}
 
 			case dns.TypeA:
@@ -1579,6 +1611,18 @@ func computeNewDS(dss *DelegationSyncStatus, zd *ZoneData) {
 // ADD for owner/rrtype, i.e. whether a ClassANY delete of that RRset in the
 // same update is one half of an atomic replacement rather than a removal.
 //
+// Callers pass the actions AFTER the delete, never the whole list. RFC 2136
+// §3.4.2.6 processes the update section in order, so an add that comes BEFORE
+// the delete is not a replacement -- it is a record the delete then removes.
+// Scanning the whole list would read
+//
+//	[ add NS ns9, delete-RRset NS ]
+//
+// as a replacement, permit the delete, and leave the apex with no NS RRset at
+// all: exactly the state the guard exists to prevent, reached through the
+// exception meant to be safe. Actions built here always come delete-first, but
+// the Ns section of a DNS UPDATE arrives in whatever order the client sent.
+//
 // BuildZoneUpdateActions emits replacerrset as exactly that pair, and the
 // applier walks the whole list in one pass under one zd.mu and publishes once,
 // so the empty intermediate RRset is never observable. That is what makes it
@@ -1590,6 +1634,46 @@ func updateReplacesRRset(actions []dns.RR, owner string, rrtype uint16) bool {
 			continue
 		}
 		if rr.Header().Rrtype == rrtype && strings.EqualFold(rr.Header().Name, owner) {
+			return true
+		}
+	}
+	return false
+}
+
+// apexNSReplacementRecords returns the apex NS records an update adds AFTER a
+// ClassANY delete of that RRset, i.e. the set an apex-NS replacement replaces
+// the old one with. Empty when the update is not such a replacement.
+//
+// Walks in wire order, and deliberately shares that rule with the applier's
+// updateReplacesRRset: the two must agree about what counts as a replacement,
+// or the zone and the delegation report drift apart.
+func apexNSReplacementRecords(actions []dns.RR, zone string) []dns.RR {
+	for i, rr := range actions {
+		if rr.Header().Class != dns.ClassANY || rr.Header().Rrtype != dns.TypeNS {
+			continue
+		}
+		if !strings.EqualFold(rr.Header().Name, zone) {
+			continue
+		}
+		var newNS []dns.RR
+		for _, later := range actions[i+1:] {
+			if later.Header().Class == dns.ClassINET &&
+				later.Header().Rrtype == dns.TypeNS &&
+				strings.EqualFold(later.Header().Name, zone) {
+				newNS = append(newNS, later)
+			}
+		}
+		return newNS
+	}
+	return nil
+}
+
+// rrPresentIn reports whether rr appears in the list, comparing rdata rather
+// than TTL: a nameserver kept across a replacement is the same nameserver even
+// if the new record spells its TTL differently.
+func rrPresentIn(list []dns.RR, rr dns.RR) bool {
+	for _, cand := range list {
+		if dns.IsDuplicate(cand, rr) {
 			return true
 		}
 	}
