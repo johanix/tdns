@@ -294,6 +294,17 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		// carry it into a later unrelated publish (which would needlessly
 		// wipe the IXFR history).
 		zd.wsIxfrEpochReset = false
+		// Same reasoning for the delta staging: wsPersistDelta says "the
+		// working set about to be published carries a change worth
+		// journalling". A dropped publish leaves it staged, and the NEXT
+		// publish for this zone -- a refresh, a reload, a signalSynth-only
+		// republish -- would then write a ZoneDelta row it does not own,
+		// diffed against a working set no applier staged. Replay would later
+		// apply that row as though it were an update. wsPersistErr is cleared
+		// with it so a later applier cannot read a failure belonging to a
+		// publish that never happened.
+		zd.wsPersistDelta = false
+		zd.wsPersistErr = nil
 		return
 	}
 	if !zoneStillLive(zd, gen) {
@@ -302,6 +313,17 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		zd.publishQueued = false
 		zd.publishUrgent = false
 		zd.wsIxfrEpochReset = false
+		// Same reasoning for the delta staging: wsPersistDelta says "the
+		// working set about to be published carries a change worth
+		// journalling". A dropped publish leaves it staged, and the NEXT
+		// publish for this zone -- a refresh, a reload, a signalSynth-only
+		// republish -- would then write a ZoneDelta row it does not own,
+		// diffed against a working set no applier staged. Replay would later
+		// apply that row as though it were an update. wsPersistErr is cleared
+		// with it so a later applier cannot read a failure belonging to a
+		// publish that never happened.
+		zd.wsPersistDelta = false
+		zd.wsPersistErr = nil
 		return
 	}
 
@@ -320,6 +342,9 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		zd.publishQueued = false
 		zd.publishUrgent = false
 		zd.wsIxfrEpochReset = false
+		// A refused publish must not leave the delta staged; see above.
+		zd.wsPersistDelta = false
+		zd.wsPersistErr = nil
 		return
 	}
 

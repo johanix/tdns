@@ -569,7 +569,16 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 	return nil
 }
 
-func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bool, error) {
+// The return values are NAMED deliberately. The deferred block below sets
+// updated=false when the change could not be persisted, and with unnamed
+// results that assignment lands on a local the caller never sees: `return
+// updated, nil` copies the value into the result slot BEFORE deferred
+// functions run. A child update whose persist failed would then be reported as
+// applied -- and on the DSYNC API path, answered 200, which is precisely the
+// promise this persistence work exists to keep. ApplyZoneUpdateToZoneData has
+// named results for the same reason; this one did not, and that asymmetry was
+// the bug.
+func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (updated bool, err error) {
 
 	lg.Debug("ApplyChildUpdateToZoneData", "request", fmt.Sprintf("%+v", ur))
 
@@ -592,7 +601,6 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 		}
 	}
 
-	var updated bool
 	zd.mu.Lock()
 	defer func() {
 		if updated {

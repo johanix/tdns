@@ -373,3 +373,84 @@ func aAddrs(t *testing.T, zd *ZoneData, owner string) []string {
 	}
 	return out
 }
+
+// The CHILD-UPDATE half of durable-before-visible.
+//
+// ApplyChildUpdateToZoneData stages wsPersistDelta and reads wsPersistErr in
+// the same shape as ApplyZoneUpdateToZoneData, but its results were UNNAMED:
+// `return updated, nil` copies the value into the result slot before deferred
+// functions run, so the deferred `updated = false` on a persist failure landed
+// on a local the caller never saw. A child update that could not be made
+// durable was reported as applied -- and on the DSYNC API path, answered 200,
+// which is exactly the promise this persistence work exists to keep.
+func TestChildUpdatePersistFailureRefusesPublish(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	zd := testZone(t, "example.", deltaZone)
+	registerZones(t, zd)
+	zd.KeyDB = kdb
+	// policyAllowing populates only the ZONE scope; the child applier gates on
+	// UpdatePolicy.CHILD.RRtypes, so without this every action is skipped, the
+	// deferred block never runs, and the test passes for the wrong reason.
+	zd.UpdatePolicy = policyAllowing(dns.TypeA, dns.TypeNS)
+	zd.UpdatePolicy.Child = UpdatePolicyDetail{
+		Type:    "selfsub",
+		RRtypes: map[uint16]bool{dns.TypeNS: true, dns.TypeA: true},
+		TTL:     3600,
+	}
+	// The child applier sets zd.Options[OptDirty]; a real zone always has the
+	// map from parseconfig, testZone does not.
+	if zd.Options == nil {
+		zd.Options = map[ZoneOption]bool{}
+	}
+
+	serialBefore := zd.CurrentSerial
+
+	ns, err := dns.NewRR("child.example. 3600 IN NS ns1.child.example.")
+	if err != nil {
+		t.Fatalf("NewRR: %v", err)
+	}
+
+	// Break the database so the delta write cannot succeed.
+	if err := kdb.DB.Close(); err != nil {
+		t.Fatalf("closing test db: %v", err)
+	}
+
+	updated, err := zd.ApplyChildUpdateToZoneData(UpdateRequest{
+		Cmd: "CHILD-UPDATE", ZoneName: "example.", Actions: []dns.RR{ns},
+	}, kdb)
+	if err != nil {
+		t.Fatalf("ApplyChildUpdateToZoneData: %v", err)
+	}
+	if updated {
+		t.Error("updated=true despite the publish being refused -- the deferred" +
+			" failure handling did not reach the caller (unnamed results?)")
+	}
+	if zd.CurrentSerial != serialBefore {
+		t.Errorf("serial advanced to %d despite the refused publish (was %d)",
+			zd.CurrentSerial, serialBefore)
+	}
+}
+
+// A dropped publish must not leave the delta staged: the next publish for the
+// zone -- a refresh, a reload, a signalSynth-only republish -- would otherwise
+// write a ZoneDelta row it does not own, diffed against a working set no
+// applier staged, and replay would later apply it as though it were an update.
+func TestDroppedPublishDoesNotLeaveDeltaStaged(t *testing.T) {
+	zd := testZone(t, "example.", deltaZone)
+	registerZones(t, zd)
+	zd.KeyDB = newTestKeyDB(t)
+
+	zd.mu.Lock()
+	// Stage a delta the way an applier does, then drop the publish by the
+	// no-working-set path.
+	zd.wsPersistDelta = true
+	zd.workingSet = nil
+	zd.publishWorkingSetLocked(zd.generation.Load(), true)
+	staged := zd.wsPersistDelta
+	zd.mu.Unlock()
+
+	if staged {
+		t.Error("wsPersistDelta survived a dropped publish; it would attach to the next unrelated one")
+	}
+}

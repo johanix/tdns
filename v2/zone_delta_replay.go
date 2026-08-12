@@ -99,15 +99,27 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 	// from what the operator last saw.
 	//
 	// Replay: suppresses re-persisting what we are replaying.
-	if _, err := zd.ApplyZoneUpdateToZoneData(UpdateRequest{
+	applied, err := zd.ApplyZoneUpdateToZoneData(UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
 		Actions:        actions,
 		InternalUpdate: true,
 		Replay:         true,
 		Description:    "replay of persisted deltas",
-	}, kdb); err != nil {
+	}, kdb)
+	if err != nil {
 		return 0, fmt.Errorf("zone %s: replaying deltas: %v", zd.ZoneName, err)
+	}
+	// The applier returns false when every action was skipped -- a stored
+	// delete whose owner is no longer in the file, say, which it only logs at
+	// warn level. Reporting the delta COUNT regardless would tell the operator
+	// the changes are present when they are not: the chain-serial check
+	// upstream only proves the deltas were computed against this file, not that
+	// they landed. Say what actually happened.
+	if !applied {
+		lg.Warn("zone deltas replayed but nothing was applied; the zone is serving the file as-is",
+			"zone", zd.ZoneName, "deltas", len(deltas))
+		return 0, nil
 	}
 
 	// The published serial must end up STRICTLY GREATER than the highest serial

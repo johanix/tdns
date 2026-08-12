@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"database/sql"
 	"fmt"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -183,16 +184,25 @@ func (kdb *KeyDB) DeleteZoneDeltas(zone string) (int64, error) {
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		// The delete succeeded; only the count is unavailable.
+		// The delete succeeded; only the count is unavailable. Callers cannot
+		// otherwise tell that apart from "no rows deleted", and WriteZone only
+		// logs when n > 0, so without this the path is entirely silent.
+		lg.Warn("DeleteZoneDeltas: rows deleted but the count is unavailable",
+			"zone", zone, "error", err)
 		return 0, nil
 	}
 	return n, nil
 }
 
 // ZoneDeltaActions turns a persisted delta back into update-section records,
-// ready for the applier. Deletes become CLASS=ANY RRset deletes only when the
-// delta removed the whole RRset; individual records use CLASS=NONE, which is
-// what the applier's ClassNONE branch expects.
+// ready for the applier.
+//
+// EVERY delete becomes a per-record CLASS=NONE delete; nothing here emits
+// CLASS=ANY. A journalled RRset removal is stored as one row per record, and
+// deleting them individually reaches the same end state, so the RRset case
+// needs no separate representation. (The comment here previously claimed a
+// CLASS=ANY branch that has never existed, which invited someone to go looking
+// for it -- or to add a redundant one.)
 func ZoneDeltaActions(rec ZoneDeltaRecord) ([]dns.RR, error) {
 	var actions []dns.RR
 	for _, row := range rec.RRs {
@@ -218,4 +228,57 @@ func ZoneDeltaActions(rec ZoneDeltaRecord) ([]dns.RR, error) {
 		actions = append(actions, rr)
 	}
 	return actions, nil
+}
+
+// MaxZoneDeltaID returns the highest ZoneDelta row id currently stored for
+// zone, or 0 when there are none.
+//
+// Used to bound the drop that follows a zone-file write. WriteZoneToFile
+// serialises a PUBLISHED snapshot and does not hold zd.mu across the write,
+// and the write-zone API handler runs on the HTTP path rather than inside the
+// ZoneUpdater loop -- so a publish can commit between the snapshot being
+// captured and the deltas being dropped. An unbounded DELETE would then throw
+// away a journal row describing a change the freshly written file does not
+// contain, and that change would be lost at the next restart: gone from the
+// journal, absent from the file.
+//
+// Reading the ceiling BEFORE the file is written makes the drop describe
+// exactly the rows the file accounts for. Anything newer is left to be
+// replayed, which is the safe direction: replaying a change the file already
+// has is idempotent, losing one is not.
+func (kdb *KeyDB) MaxZoneDeltaID(zone string) (int64, error) {
+	kdb.mu.Lock()
+	defer kdb.mu.Unlock()
+
+	var maxID sql.NullInt64
+	err := kdb.DB.QueryRow(`SELECT MAX(id) FROM ZoneDelta WHERE zone=?`, zone).Scan(&maxID)
+	if err != nil {
+		return 0, fmt.Errorf("MaxZoneDeltaID: %v", err)
+	}
+	if !maxID.Valid {
+		return 0, nil
+	}
+	return maxID.Int64, nil
+}
+
+// DeleteZoneDeltasThrough drops the zone's deltas up to and including maxID,
+// leaving anything newer in place. maxID <= 0 deletes nothing.
+func (kdb *KeyDB) DeleteZoneDeltasThrough(zone string, maxID int64) (int64, error) {
+	if maxID <= 0 {
+		return 0, nil
+	}
+	kdb.mu.Lock()
+	defer kdb.mu.Unlock()
+
+	res, err := kdb.DB.Exec(`DELETE FROM ZoneDelta WHERE zone=? AND id<=?`, zone, maxID)
+	if err != nil {
+		return 0, fmt.Errorf("DeleteZoneDeltasThrough: %v", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		lg.Warn("DeleteZoneDeltasThrough: rows deleted but the count is unavailable",
+			"zone", zone, "through_id", maxID, "error", err)
+		return 0, nil
+	}
+	return n, nil
 }
