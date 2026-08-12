@@ -745,6 +745,35 @@ discovering child would follow the URI record. For lab infrastructure that is
 the correct trade; for a registrant's provisioning system it is not, which is
 why discovery remains the default and this is the documented exception.
 
+### The general principle behind it
+
+Johan, 2026-08-12:
+
+> tdns is aiming to be a general purpose s/w, but statusd and the other training
+> lab components are not. They are designed for a very specific, single, purpose
+> which must always work, regardless of external breakage.
+
+That is a sharper rule than "prefer static config here", and it flips the
+default on several trade-offs. General-purpose tdns wants discovery, graceful
+degradation and flexibility, because it does not know what it will be asked to
+do. Lab infrastructure wants the fewest moving parts that can possibly work,
+because it knows exactly what it must do and must do it while everything around
+it is on fire — by design, since breaking the DNS is what the students are
+there for.
+
+Applied, for any lab component:
+
+- **No discovery.** Configured, not resolved.
+- **No fallbacks.** A fallback means the component behaves differently depending
+  on what was broken at the time, and in a lab nobody can tell which path ran.
+- **No dependency on the service it exists to repair.** This is the one that
+  bites: it is easy to write a delegation-repair path that needs working DNS to
+  find out which delegation to repair.
+
+The third is worth stating as a REQUIREMENT rather than a preference, so that a
+later change cannot helpfully undo it. Adding discovery to statusd would look
+like an improvement in a review; it is a regression.
+
 ### Consequences for the statusd migration
 
 - statusd replaces its existing static `baseurl`/`apikey` pointing at the tdns
