@@ -99,6 +99,37 @@ func resolveLargeAlgorithms(names []string, catalog map[string]uint8) (map[uint8
 	return m, nil
 }
 
+// DNSKEYTransportPolicy selects how the IMR chooses a transport for DNSKEY
+// queries. See DnssecConf.DNSKEYTransport for the semantics of each value.
+type DNSKEYTransportPolicy string
+
+const (
+	DNSKEYTransportForceUDP       DNSKEYTransportPolicy = "force_udp"
+	DNSKEYTransportUseDSSignal    DNSKEYTransportPolicy = "use_ds_signal"
+	DNSKEYTransportTryEncrypted   DNSKEYTransportPolicy = "try_encrypted"
+	DNSKEYTransportForceEncrypted DNSKEYTransportPolicy = "force_encrypted"
+)
+
+// parseDNSKEYTransportPolicy validates the configured dnskey_query_transport
+// value. An empty value defaults to use_ds_signal (the backward-compatible
+// DS-driven behavior).
+func parseDNSKEYTransportPolicy(s string) (DNSKEYTransportPolicy, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "":
+		return DNSKEYTransportUseDSSignal, nil
+	case string(DNSKEYTransportForceUDP):
+		return DNSKEYTransportForceUDP, nil
+	case string(DNSKEYTransportUseDSSignal):
+		return DNSKEYTransportUseDSSignal, nil
+	case string(DNSKEYTransportTryEncrypted):
+		return DNSKEYTransportTryEncrypted, nil
+	case string(DNSKEYTransportForceEncrypted):
+		return DNSKEYTransportForceEncrypted, nil
+	default:
+		return "", fmt.Errorf("unknown dnssec.dnskey_query_transport %q (valid: force_udp, use_ds_signal, try_encrypted, force_encrypted)", s)
+	}
+}
+
 // IsLargeAlgorithm reports whether alg is listed in dnssec.large_algorithms.
 func (conf *Config) IsLargeAlgorithm(alg uint8) bool {
 	if conf == nil || conf.Internal.LargeAlgorithms == nil {
@@ -227,6 +258,26 @@ func resolvePolicyRoleAlgorithms(policyName string, dp *DnssecPolicyConf) (defau
 		}
 	}
 	return defaultAlg, kskAlg, zskAlg, nil
+}
+
+// resolvePolicyRoleAlgorithmNames returns a policy's effective role algorithm
+// NAMES (upper-cased), applying the same default→KSK/ZSK fallback as
+// resolvePolicyRoleAlgorithms but WITHOUT resolving names to codepoints. A pure
+// client (tdns-cli config check) cannot resolve this deployment's
+// runtime-assigned PQ codepoints, so it compares these names against the running
+// server's registered algorithms instead of a local table. Empty → "".
+func resolvePolicyRoleAlgorithmNames(dp *DnssecPolicyConf) (defaultAlg, kskAlg, zskAlg string) {
+	norm := func(s string) string { return strings.ToUpper(strings.TrimSpace(s)) }
+	defaultAlg = norm(dp.Algorithm)
+	kskAlg = defaultAlg
+	if s := norm(dp.KSK.Algorithm); s != "" {
+		kskAlg = s
+	}
+	zskAlg = defaultAlg
+	if s := norm(dp.ZSK.Algorithm); s != "" {
+		zskAlg = s
+	}
+	return defaultAlg, kskAlg, zskAlg
 }
 
 // bulkSigningAlgorithmAndRole returns the algorithm that signs non-DNSKEY RRsets

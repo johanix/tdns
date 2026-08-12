@@ -168,15 +168,14 @@ SELECT keyid, flags, algorithm, privatekey, keyrr FROM DnssecKeyStore WHERE zone
 
 		keysfound = true
 
-		_, alg, bindFormat, err := ParsePrivateKeyFromDB(privatekey, algorithm, keyrrstr)
+		// PrivateKeyCacheFromDB, NOT ParsePrivateKeyFromDB + PrepareKeyCache: the
+		// latter pair re-derives a BIND blob from an already-parsed PEM and
+		// re-parses it via NewPrivateKey, which dispatches on the algorithm
+		// codepoint and fails ("dns: bad private key") for any key stored under
+		// a codepoint that has since been renumbered.
+		pkc, alg, err := PrivateKeyCacheFromDB(privatekey, algorithm, keyrrstr)
 		if err != nil {
-			lgSigner.Error("ParsePrivateKeyFromDB failed", "err", err)
-			return nil, err
-		}
-
-		pkc, err := PrepareKeyCache(bindFormat, keyrrstr)
-		if err != nil {
-			lgSigner.Error("PrepareKeyCache failed", "err", err)
+			lgSigner.Error("PrivateKeyCacheFromDB failed", "err", err)
 			return nil, err
 		}
 

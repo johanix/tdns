@@ -1,5 +1,13 @@
 # First-class TSIG keystore — implementation plan (consolidated 2026-06-29)
 
+**Status: ✅ DONE** (implemented on main; verified against code 2026-07-24). Landed
+via PR #270 (merge `77913e1`): TSIG keys are now DB-backed keystore members — the
+authoritative `TsigKeystore` table (the in-memory map is a read-through cache), the
+`keystore tsig` CLI group, and `tsig-mgmt` management-API support, alongside
+SIG(0)/DNSSEC. The "## 1. Current state (in-memory map)" section below is a snapshot
+from 2026-06-29 and no longer reflects main. Deferred (see the punch-list):
+minimum-secret-length validation (should warn, not reject).
+
 Consolidates the original plan, the critical review
 ([…-plan-review.md](./2026-06-29-first-class-tsig-keystore-plan-review.md)), and the
 follow-up design discussion into an implementation-ready spec. **All code refs are

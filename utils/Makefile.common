@@ -31,7 +31,11 @@ version:
 	/bin/sh ../../utils/make-version.sh $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
 
 # Path to the genalgs binary (built from cmdv2/genalgs). Overridable.
-GENALGS ?= ../genalgs/tdns-genalgs
+# The directory is spelled out rather than derived with $(dir ...): that is a
+# GNU-make function which NetBSD bmake does not have, and it would expand to
+# nothing there.
+GENALGS_DIR ?= ../genalgs
+GENALGS ?= $(GENALGS_DIR)/tdns-genalgs
 
 # Algorithm code generation.
 #
@@ -63,18 +67,37 @@ GENALGS ?= ../genalgs/tdns-genalgs
 #
 # ALGREPO comes from `-include ../algs-env.mk` in the app Makefile; per-app
 # C-library env comes from `-include algs-libs.mk` (see ALGS_ENV above).
+# version.go is kept current automatically: missing -> generated, and
+# regenerated whenever the version string changes (new commits, branch
+# switch, clean<->dirty transition — anything `git describe --dirty`
+# reflects). Left untouched otherwise so no-change rebuilds stay
+# no-ops. `make version` still forces a rewrite with a fresh appDate.
 build: generate
-	@test -f version.go || /bin/sh ../../utils/make-version.sh "unknown" "unknown" $(PROG)
+	@/bin/sh ../../utils/make-version.sh --if-changed $(VERSION)-$(BRANCH)-$(COMMIT) $(APPDATE) $(PROG)
 	$(ALGS_ENV) $(GO) build $(GOFLAGS) -o ${PROG}
 
-# Ensure the generator binary exists (cmdv2/Makefile also builds it first).
+# Ensure the generator binary exists AND IS CURRENT.
+#
+# This target is deliberately .PHONY. As a plain file rule with no
+# prerequisites it only ever ran when the binary was MISSING, so a generator
+# built months earlier kept silently emitting stale output long after its
+# sources were updated -- a host could pull hundreds of commits of fixes and
+# still regenerate months-old build config, with no error anywhere.
+#
+# So the recursion is unconditional and the DECISION belongs to the
+# generator's own Makefile, which lists its sources: it relinks only when they
+# changed, leaving the binary's mtime alone otherwise. That is what keeps the
+# "generated files are current" test below meaningful -- if this rule caused a
+# relink on every build, that test could never pass and every build would
+# regenerate (and would need the dnssec-algorithms checkout to be present).
+.PHONY: $(GENALGS)
 $(GENALGS):
-	$(MAKE) -C $(dir $(GENALGS))
+	@$(MAKE) -C $(GENALGS_DIR)
 
 generate: $(GENALGS)
 	@if [ ! -f algs.list ]; then \
 	   : "no algs.list -> standalone build, genalgs not run"; \
-	 elif [ -f registered_algs.go ] && [ ! algs.list -nt registered_algs.go ] && [ -f algs-libs.mk ] && [ -f ../algs-env.mk ]; then \
+	 elif [ -f registered_algs.go ] && [ ! algs.list -nt registered_algs.go ] && [ ! $(GENALGS) -nt registered_algs.go ] && [ -f algs-libs.mk ] && [ -f ../algs-env.mk ]; then \
 	   : "generated files are current"; \
 	 elif [ -n "$(ALGREPO)" ]; then \
 	   echo "  algs.list changed (or no generated files); running genalgs --algrepo $(ALGREPO)"; \
@@ -147,6 +170,90 @@ check-no-mutators:
 test:
 	$(ALGS_ENV) $(GO) test -v -cover
 
+# --- packages -----------------------------------------------------------
+#
+# Four NetBSD binary packages, one per component: tdns-auth, tdns-agent and
+# tdns-imr each ship their own daemon, and tdns-cli ships the two client tools
+# (tdns-cli and dog). See utils/mkpkg.sh for why a package rather than a
+# tarball, and for the pkg_create details that are not obvious.
+#
+# The file lists below are exactly the paths each app's OWN "install:" target
+# places under /usr/local -- libexec for the daemons, bin for the clients.
+# They are NOT the v2-suffixed names carried by the old hand-assembled
+# usr.local.tdns bintar: that suffix is a leftover of the v1/v2 split, and the
+# lab configs still naming it are being updated rather than perpetuated here.
+#
+# The package is a REAL make target, with the app's OWN BUILT BINARY as the
+# prerequisite -- not the installed copy under /usr/local.
+#
+# That distinction is the whole point. Depending on /usr/local/libexec/<daemon>
+# looks right and is actively wrong: if the app was rebuilt but not installed,
+# the stale copy still satisfies the dependency, make declares the package
+# current, and a THREE-DAY-OLD BINARY ships inside a package stamped with
+# today's date. That is not hypothetical -- it happened in labstuff, where the
+# first axfr-statusd package carried a build three days older than the tree and
+# nothing said so until the daemon was asked its version on a booted master.
+#
+# So: depend on ./$(PROG) AND on install. Since install is phony it always
+# runs, which means the package is repacked on every "make pkg" -- the no-op
+# optimisation is gone. That is the right trade: a 40MB repack costs seconds,
+# and the alternative cost a stale binary reaching a booted master silently.
+#
+# tdns-cli is the one package shipping a binary built in ANOTHER app directory
+# (dog). Rather than leave that to be remembered, its recipe builds and
+# installs ../dog itself, which closes the cross-directory staleness hole for
+# the only case tdns has.
+
+# VERSION lives at the repo root, and this file is included from three
+# different depths (repo/Makefile, repo/cmd/Makefile, repo/cmdv2/<app>/
+# Makefile), so the lookup walks up rather than assuming one of them.
+#
+# "!=" rather than "$(shell ...)": $(shell) is GNU-make only and under NetBSD's
+# bmake expands to NOTHING -- silently. In labstuff that produced a plausibly
+# named, full-size, VERSIONLESS package. mkpkg.sh now refuses such a version,
+# and this is the other half of that fix.
+PKGBASEVER!= for f in ../../VERSION ../VERSION VERSION; do if [ -f "$$f" ]; then sed -e 's/^[vV]//' -e 's/[^0-9.].*$$//' "$$f"; break; fi; done 2>/dev/null || echo ""
+PKGDATE!= date +%Y%m%d
+PKGVER=$(PKGBASEVER).$(PKGDATE)
+
+PKG_TDNS_AUTH:=tdns-auth-$(PKGVER).tgz
+PKG_TDNS_AGENT:=tdns-agent-$(PKGVER).tgz
+PKG_TDNS_IMR:=tdns-imr-$(PKGVER).tgz
+PKG_TDNS_CLI:=tdns-cli-$(PKGVER).tgz
+
+pkg_tdns_auth: $(PKG_TDNS_AUTH)
+$(PKG_TDNS_AUTH): $(PROG) install
+	PKGVERSION=$(PKGVER) \
+	PKGCOMMENT="tdns-auth, the tdns authoritative nameserver" \
+	/bin/sh ../../utils/mkpkg.sh tdns-auth /usr/local \
+	libexec/tdns-auth
+
+pkg_tdns_agent: $(PKG_TDNS_AGENT)
+$(PKG_TDNS_AGENT): $(PROG) install
+	PKGVERSION=$(PKGVER) \
+	PKGCOMMENT="tdns-agent, the tdns delegation-sync agent" \
+	/bin/sh ../../utils/mkpkg.sh tdns-agent /usr/local \
+	libexec/tdns-agent
+
+pkg_tdns_imr: $(PKG_TDNS_IMR)
+$(PKG_TDNS_IMR): $(PROG) install
+	PKGVERSION=$(PKGVER) \
+	PKGCOMMENT="tdns-imr, the tdns iterative resolver" \
+	/bin/sh ../../utils/mkpkg.sh tdns-imr /usr/local \
+	bin/tdns-imr
+
+# dog ships here rather than in its own package, and is built and installed by
+# this recipe because nothing else in the cli/ directory would do it.
+pkg_tdns_cli: $(PKG_TDNS_CLI)
+$(PKG_TDNS_CLI): $(PROG) install
+	$(MAKE) -C ../dog
+	$(MAKE) -C ../dog install
+	PKGVERSION=$(PKGVER) \
+	PKGCOMMENT="tdns-cli and dog, the tdns command-line tools" \
+	/bin/sh ../../utils/mkpkg.sh tdns-cli /usr/local \
+	bin/tdns-cli \
+	bin/dog
+
 # install:
 # 	install -s -b -c ${PROG} /usr/local/bin/
 
@@ -158,3 +265,4 @@ lint: check-no-mutators
 	golangci-lint run
 
 .PHONY: build generate version clean check-no-mutators
+.PHONY: pkg_tdns_auth pkg_tdns_agent pkg_tdns_imr pkg_tdns_cli

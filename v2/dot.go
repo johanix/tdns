@@ -16,21 +16,23 @@ import (
 	"github.com/spf13/viper"
 )
 
+// DnsDoTEngine starts the DoT listeners. requestClientCert is true for the
+// auth listener — it REQUESTS (never requires) a client certificate so the
+// per-zone downstream-auth check at transfer time can see one when the
+// downstream has it; cert-less clients are unaffected. The IMR's DoT front
+// end passes false and never requests certificates.
 func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs []string, cert *tls.Certificate,
-	ourDNSHandler func(w dns.ResponseWriter, r *dns.Msg)) error {
+	ourDNSHandler func(w dns.ResponseWriter, r *dns.Msg), requestClientCert bool) error {
 
 	if cert == nil {
 		return fmt.Errorf("DnsDoTEngine:DoT certificate is not set")
 	}
 
 	lgDns.Info("DnsEngine: DoT addresses", "addrs", dotaddrs)
-	// tlsConfig := DoTTLSConfig(certFile, keyFile)
 
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{*cert},
-		MinVersion:   tls.VersionTLS13, // or TLS12 if you need broader support
-		// ClientAuth: tls.NoClientCert, // optional: change if you want client certs
-		NextProtos: []string{"dot"}, // important for DoT
+	tlsConfig, err := ServerTLSConfigForDoT(conf, cert, requestClientCert)
+	if err != nil {
+		return fmt.Errorf("DnsDoTEngine: %v", err)
 	}
 
 	// Wrap the DNS handler to add logging
@@ -71,6 +73,9 @@ func DnsDoTEngine(ctx context.Context, conf *Config, dotaddrs []string, cert *tl
 				lgDns.Info("DnsEngine: serving on DoT", "hostport", hp)
 				if err := srv.ListenAndServe(); err != nil {
 					lgDns.Error("failed to setup DoT server", "hostport", hp, "err", err)
+					if ctx.Err() == nil {
+						conf.Internal.ServerErrors.SetTransportPortError("dot "+hp, err)
+					}
 				} else {
 					lgDns.Info("DnsEngine: listening on DoT", "hostport", hp)
 				}

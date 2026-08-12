@@ -39,6 +39,7 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 		mapstructure.StringToSliceHookFunc(","),
 		stringToPeerConfHook(),
 		stringToAclEntryHook(),
+		legacyDynamicAllowedHook(),
 	))
 	if v == nil {
 		if err := viper.Unmarshal(&config, decodeHook); err != nil {
@@ -48,6 +49,12 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 		if err := v.Unmarshal(&config, decodeHook); err != nil {
 			return fmt.Errorf("ValidateConfig: Unmarshal error: %v", err)
 		}
+	}
+
+	// Same dynamiczones: value validation the daemon loader applies
+	// (ParseConfig), so `config check` and the daemon cannot disagree.
+	if err := config.DynamicZones.Validate(); err != nil {
+		return fmt.Errorf("ValidateConfig: %v", err)
 	}
 
 	var configsections = make(map[string]interface{}, 5)

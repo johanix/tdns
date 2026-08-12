@@ -51,6 +51,7 @@ type RRsetCacheT struct {
 	ServerMap     *core.ConcurrentMap[string, map[string]*AuthServer] // map[zone]map[nsname]*AuthServer
 	AuthServerMap *core.ConcurrentMap[string, *AuthServer]            // Global map: nsname -> *AuthServer (ensures single instance per nameserver)
 	ZoneMap       *core.ConcurrentMap[string, *Zone]                  // map[zone]*Zone
+	ServerTLSA    *core.ConcurrentMap[string, *ServerTLSARecords]     // nsname -> validated TLSA cache, decoupled from AuthServer instances
 	DnskeyCache   *DnskeyCacheT
 	DNSClient     map[core.Transport]core.DNSClienter
 	//Options                map[ImrOption]string
@@ -62,6 +63,17 @@ type RRsetCacheT struct {
 	Quiet                bool // if true, suppress informational logging (useful for CLI tools)
 	nsRevalidateMu       sync.Mutex
 	nsRevalidateInFlight map[string]struct{}
+}
+
+// ServerTLSARecords is the validated TLSA cache for one nameserver, keyed by
+// owner (_port._proto.name.). It lives at cache level (RRsetCacheT.ServerTLSA,
+// keyed by the server's base name) rather than on the AuthServer instance, so a
+// stub's private AuthServer and a discovery-shared instance for the same name
+// share the TLSA cache WITHOUT sharing — and clobbering — address/transport
+// state. Guarded by its own mutex.
+type ServerTLSARecords struct {
+	mu   sync.RWMutex
+	recs map[string]*CachedRRset // keyed by owner
 }
 
 type Zone struct {

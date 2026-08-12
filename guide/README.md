@@ -32,6 +32,15 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   the `imrengine.tuning.*` knobs) and
   [tdns-agent](config-tdns-agent.md) (placeholder).
 
+- [The tdns Keystore](keystore.md)
+  -- What the keystore is and everything you can do with
+  it: the three key classes (DNSSEC, SIG(0), TSIG), where
+  it lives, key states, the full `tdns-cli auth keystore`
+  command tree, and getting key material out and back --
+  `bulk-export`/`bulk-import`, the on-disk manifest format,
+  and `keystore.preload` for restoring keys at startup
+  before any zone is parsed.
+
 - [TDNS Special Features and Extensions](special-features.md)
   -- Delegation sync (parent side, child side, and the
   agent-as-proxy path for DSYNC-unaware primaries, including
@@ -40,6 +49,24 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   experimental record types, and post-quantum algorithm
   support (ML-DSA / SLH-DSA / Falcon / MAYO / SNOVA for both
   SIG(0) and DNSSEC).
+
+- [Certificate Provisioning: the tdns Minimal CA](cert-provisioning.md)
+  -- Operator how-to for `tdns-cli cert`: the one-shot
+  `cert init` for the local tdns-auth, upgrading existing
+  self-signed certificates to CA-signed ones (locally and
+  on remote hosts, keeping the key so pins and TLSA records
+  stay valid), creating the `ca-file` for each kind of
+  certificate, renewal/rotation, and what the deliberately
+  minimal scope (no CRL/OCSP/renewal automation) means in
+  practice. Companion to the [XoT transfer guide](xot.md).
+
+- [XFR over TLS (XoT)](xot.md)
+  -- Setting up encrypted, mutually-authenticated zone
+  transfers (RFC 9103): the `downstream-auth:` ladder, the
+  peer's shared TLS fields, and the outbound `upstreams:` fields.
+  Complete worked examples for `tls-pkix`, `tls-pin` (SPKI)
+  and `tls-dane`, each with `tdns-cli cert` provisioning and
+  `dog` test commands.
 
 - [Agent as a DSYNC proxy](agent-dsync-proxy.md)
   -- Operator how-to for running tdns-agent as a secondary

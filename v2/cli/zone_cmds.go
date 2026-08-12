@@ -117,7 +117,7 @@ failing. Does not change anything; read-only.`,
 
 	bump := &cobra.Command{
 		Use:   "bump",
-		Short: "Bump SOA serial and epoch (if any) in tdns-auth version of zone",
+		Short: "Bump SOA serial and epoch (if any) in the daemon's version of the zone",
 		Run:   func(cmd *cobra.Command, args []string) { RunZoneBump(role, args) },
 	}
 
@@ -206,25 +206,42 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 	// flag: dynamic zones are map-only. The --tsig-* flags are accepted now but
 	// inert in Improvement 1 (a non-NOKEY key is rejected server-side).
 	var dzPrimaryKey, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo string
+	var dzZoneType, dzTemplate string
 	var dzPrimaries, dzOptions []string
 
 	add := &cobra.Command{
 		Use:   "add",
-		Short: "Add a dynamic secondary zone at runtime (persists across restart)",
+		Short: "Add a dynamic zone at runtime: secondary, or template-constrained primary (persists across restart)",
 		Run: func(cmd *cobra.Command, args []string) {
-			RunZoneAdd(role, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo)
+			// --primaries is required for secondaries (the pre-primary
+			// MarkFlagRequired behavior) and refused server-side for
+			// primaries; --template is required for primaries.
+			switch strings.ToLower(dzZoneType) {
+			case "", "secondary":
+				if len(dzPrimaries) == 0 {
+					fmt.Println("Error: a secondary zone requires --primaries")
+					os.Exit(1)
+				}
+			case "primary":
+				if dzTemplate == "" {
+					fmt.Println("Error: a primary zone requires --template (an operator-blessed template with dynamiczones: true)")
+					os.Exit(1)
+				}
+			}
+			RunZoneAdd(role, dzZoneType, dzTemplate, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo)
 		},
 	}
 	add.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add")
-	add.Flags().StringSliceVar(&dzPrimaries, "primaries", nil, "Primary (upstream) addresses [host:port], comma-separated")
+	add.Flags().StringVar(&dzZoneType, "type", "secondary", "Zone type: secondary (default) or primary (requires --template)")
+	add.Flags().StringVar(&dzTemplate, "template", "", "Config template for a primary zone (must carry dynamiczones: true)")
+	add.Flags().StringSliceVar(&dzPrimaries, "primaries", nil, "Primary (upstream) addresses [host:port], comma-separated (secondary zones)")
 	add.Flags().StringVar(&dzPrimaryKey, "primary-key", tdns.NOKEY, "Primary TSIG key name applied to all primaries (NOKEY for none)")
-	add.Flags().StringSliceVar(&dzOptions, "options", nil, "Zone options (comma-separated)")
-	add.Flags().StringVar(&dzTsigName, "tsig-name", "", "Inline TSIG key name; created in keystore if absent and applied to keyless primaries")
+	add.Flags().StringSliceVar(&dzOptions, "options", nil, "Zone options (comma-separated; secondary zones — primaries take options from the template)")
+	add.Flags().StringVar(&dzTsigName, "tsig-name", "", "Inline TSIG key name; created in keystore if absent and applied to keyless primaries (secondary) or keyless downstreams (primary)")
 	add.Flags().StringVar(&dzTsigSecretFile, "tsig-secret-file", "", "File containing the inline TSIG secret (base64); preferred over --tsig-secret")
 	add.Flags().StringVar(&dzTsigSecret, "tsig-secret", "", "Inline TSIG secret (base64). WARNING: visible in shell history / process list; prefer --tsig-secret-file")
 	add.Flags().StringVar(&dzTsigAlgo, "tsig-algo", "", "Inline TSIG algorithm (default hmac-sha256)")
 	add.MarkFlagRequired("zone")
-	add.MarkFlagRequired("primaries")
 
 	del := &cobra.Command{
 		Use:   "delete",
@@ -584,7 +601,7 @@ func resolveTsigSecret(literal, file string) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
-func RunZoneAdd(role string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigSecretFile, tsigAlgo string) {
+func RunZoneAdd(role, zoneType, template string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigSecretFile, tsigAlgo string) {
 	if tdns.Globals.Zonename == "" {
 		fmt.Println("Error: zone name not specified")
 		os.Exit(1)
@@ -601,6 +618,8 @@ func RunZoneAdd(role string, primaries []string, primaryKey string, options []st
 	cr, err := SendZoneCommand(api, tdns.ZonePost{
 		Command:    "add",
 		Zone:       dns.Fqdn(tdns.Globals.Zonename),
+		ZoneType:   zoneType,
+		Template:   template,
 		Primaries:  peerConfsFromAddrs(primaries, primaryKey),
 		Options:    options,
 		TsigName:   tsigName,
@@ -841,6 +860,24 @@ func zoneBaseDetail(name string, zconf tdns.ZoneConf) string {
 	sort.Strings(opts)
 	fmt.Fprintf(&b, "\tType: %s\tStore: %s\tOptions: %v\n", zconf.Type, zconf.Store, opts)
 
+	// Serial visibility (design doc §7). Emitted only when there is something
+	// to show, which also keeps the `zone list -v` golden (a fixture with zero
+	// serials) byte-identical — see TestVerboseListZone_GoldenParity.
+	//
+	// Outbound is what we advertise to our downstreams, inbound what we last
+	// received from upstream. On a correct secondary they are equal; a gap is
+	// exactly the drift the MUST-NOT-MODIFY work exists to prevent.
+	if zconf.CurrentSerial != 0 || zconf.IncomingSerial != 0 {
+		fmt.Fprintf(&b, "\tSerial: outbound %d\tinbound %d\n", zconf.CurrentSerial, zconf.IncomingSerial)
+	}
+	if zconf.EffectiveOutboundSoaSerial != "" {
+		src := zconf.OutboundSoaSerialSource
+		if src == "" {
+			src = "unknown"
+		}
+		fmt.Fprintf(&b, "\tOutbound serial mode: %s (from: %s)\n", zconf.EffectiveOutboundSoaSerial, src)
+	}
+
 	if zconf.EffectiveDnssecPolicy != "" {
 		pol := zconf.EffectiveDnssecPolicy
 		if zconf.DnssecPolicyOverridden {
@@ -918,6 +955,27 @@ func DescribeZone(zconf tdns.ZoneConf) string {
 
 	// Section 2: bound-policy algorithm / lifetime / sig-validity detail.
 	b.WriteString(describePolicyDetail(zconf))
+
+	// Section 3: live per-primary SOA serials (design doc §7). `zone desc` only
+	// — one query per primary. Showing them individually is the point: two
+	// masters serving the same zone at different serials is the split-brain
+	// that motivated the MUST-NOT-MODIFY work, and it was previously invisible
+	// from tdns. A primary that could not be probed is listed with its error
+	// rather than omitted — an unreachable master is itself diagnostic.
+	if len(zconf.UpstreamSerials) > 0 {
+		b.WriteString("\tUpstream serials:\n")
+		for _, us := range zconf.UpstreamSerials {
+			if us.Err != "" {
+				fmt.Fprintf(&b, "\t\t%s: (probe failed: %s)\n", us.Addr, us.Err)
+				continue
+			}
+			marker := ""
+			if zconf.IncomingSerial != 0 && us.Serial != zconf.IncomingSerial {
+				marker = "\t<-- differs from our inbound serial"
+			}
+			fmt.Fprintf(&b, "\t\t%s: %d%s\n", us.Addr, us.Serial, marker)
+		}
+	}
 
 	return b.String()
 }

@@ -13,7 +13,11 @@
 #                    ("slice" is deprecated: it logs a warning and falls back to
 #                     "map". Any other value also falls back to "map".)
 #   template:        Template name to inherit settings from (optional)
-#   primaries:       Upstream servers for secondary zones — a LIST of {addr, key}
+#   upstreams:       Upstream servers for secondary zones — a LIST of {addr, key}
+#                    entries and/or `- peers: [ id, ... ]` references.
+#                    (Accepted alias spellings: primaries: (BIND9),
+#                    request-xfr: (NSD); same for downstreams: aka
+#                    secondaries:/provide-xfr:. Use ONE spelling per zone.)
 #                    entries (addr is IP:port or host:port; key is a TSIG key name,
 #                    or NOKEY for none). More than one provides redundancy; a host
 #                    name is resolved at load time and may expand to several
@@ -45,8 +49,10 @@
 # they guard: allow-notify: guards inbound NOTIFY on a secondary, downstreams:
 # guards outbound zone transfer on a primary.
 #
-# prefix — an ip-spec matched against the SOURCE address of the request:
-#     bare IP     192.0.2.1              ::1
+# prefix — an ip-spec matched against the SOURCE address of the request. It must
+# carry an explicit boundary; a bare IP (e.g. 192.0.2.1) is rejected — write a
+# single host as an explicit /32 or /128:
+#     single host 192.0.2.1/32           ::1/128
 #     CIDR        192.0.2.0/24           2001:db8::/32
 #     netmask     192.0.2.0&255.255.255.0
 #     range       192.0.2.10-192.0.2.20  2001:db8::10-2001:db8::20
@@ -95,9 +101,9 @@ zones:
         - addr: "192.0.2.2:53"     # And this one
           key:  NOKEY
      downstreams:                  # ...and let those same secondaries transfer
-        - prefix: "192.0.2.1"
+        - prefix: "192.0.2.1/32"    # single host — explicit mask required
           key:    NOKEY
-        - prefix: "192.0.2.2"
+        - prefix: "192.0.2.2/32"
           key:    NOKEY
      options:
         - delegation-sync-parent   # Provide delegation sync for children
@@ -111,18 +117,52 @@ zones:
      type:            secondary
      zonefile:        /var/lib/tdns/zones/example.net.zone  # Optional: save transferred zone
      store:           map                                    # Default storage (serves queries)
-     primaries:                                              # Transfer from these servers (in order, with fallback)
+     upstreams:                                              # Transfer from these servers (in order, with fallback)
         - addr: "203.0.113.1:53"
           key:  NOKEY
         - addr: "203.0.113.2:53"
           key:  NOKEY
      allow-notify:                                           # Only these may NOTIFY us
-        - prefix: "203.0.113.1"
+        - prefix: "203.0.113.1/32"                            # single host — explicit mask required
           key:    NOKEY
-        - prefix: "203.0.113.2"
+        - prefix: "203.0.113.2/32"
           key:    NOKEY
      options:
         - delegation-sync-child    # Push DS/NS updates to parent
+
+   # ===========================================================================
+   # EXAMPLE 2b: SECONDARY zone pulling over XoT (XFR-over-TLS, RFC 9103)
+   # ===========================================================================
+   # Per-primary transport selection: transport: dot moves the SOA probe and
+   # the transfer itself to TLS (default port 853). Every dot primary MUST
+   # declare how the server certificate is authenticated (tls-auth):
+   #
+   #   pin   Static SPKI pinning. pins: lists base64 SHA-256 digests of the
+   #         server cert's SubjectPublicKeyInfo (get it from the primary
+   #         operator, or from the cert: dog +showpin, or
+   #         openssl x509 -in cert.pem -pubkey -noout | openssl pkey -pubin \
+   #           -outform der | openssl dgst -sha256 -binary | base64
+   #   dane  TLSA lookup at _<port>._tcp.<name>, DNSSEC-validated through the
+   #         built-in IMR. <name> is the primary's hostname (or tls-name when
+   #         the primary is configured as an IP literal).
+   #   pkix  WebPKI-style chain verification against ca-file (or the system
+   #         roots when ca-file is omitted).
+   #
+   # TSIG stays orthogonal: key: is still honored (RFC 9103 allows TSIG+TLS).
+   #- name:            example.com.
+   #  type:            secondary
+   #  upstreams:
+   #     - addr: "ns1.example.net"        # hostname primary: port defaults to 853,
+   #       key:  NOKEY                    # the name doubles as SNI + TLSA base
+   #       transport: dot
+   #       tls-auth: dane
+   #     - addr: "203.0.113.1:853"        # IP-literal primary: tls-name required
+   #       key:  xfr-key-2026             # for dane (and used as SNI)
+   #       transport: dot
+   #       tls-auth: pin
+   #       tls-name: ns2.example.net
+   #       pins:
+   #          - "base64-spki-sha256-digest-here="
 
    # ===========================================================================
    # EXAMPLE 3: Zone using a TEMPLATE (with overrides)
@@ -166,7 +206,8 @@ zones:
    # EXAMPLE 6: AXFR restricted by prefix, unsigned (IPv4 + IPv6)
    # ===========================================================================
    # Still NOKEY (no TSIG), but only from our own secondary networks. Note the
-   # mixed ip-spec forms: CIDR, a bare host address, and a range.
+   # mixed ip-spec forms: CIDR, an explicit single-host /32, and a range. A bare
+   # host address (203.0.113.7 with no /len) is rejected — write it as /32.
    - name:            prefix-acl.example.
      type:            primary
      zonefile:        /etc/tdns/zones/prefix-acl.example.zone
@@ -175,11 +216,11 @@ zones:
           key:    NOKEY
         - prefix: "2001:db8:1::/48"                  # IPv6 CIDR
           key:    NOKEY
-        - prefix: "203.0.113.7"                      # a single IPv4 host
+        - prefix: "203.0.113.7/32"                   # a single IPv4 host (explicit /32)
           key:    NOKEY
         - prefix: "2001:db8:2::10-2001:db8:2::1f"    # an IPv6 range
           key:    NOKEY
-        - prefix: "192.0.2.66"                       # ...but never this one:
+        - prefix: "192.0.2.66/32"                    # ...but never this one:
           key:    BLOCKED                            # BLOCKED beats every allow
 
    # ===========================================================================
@@ -210,7 +251,7 @@ zones:
           key:    xfr-key-2026
         - prefix: "2001:db8:1::/48"
           key:    xfr-key-2025
-        - prefix: "192.0.2.66"      # compromised host: denied even with a key
+        - prefix: "192.0.2.66/32"   # compromised host: denied even with a key
           key:    BLOCKED
      options:
         - online-signing
@@ -227,7 +268,7 @@ zones:
         - addr: "192.0.2.20:53"    # Notify secondaries about catalog changes
           key:  NOKEY
      downstreams:
-        - prefix: "192.0.2.20"
+        - prefix: "192.0.2.20/32"
           key:    NOKEY
      options:
         - catalog-zone                    # RFC 9432 catalog zone
@@ -241,7 +282,7 @@ zones:
      type:            secondary
      zonefile:        /var/lib/tdns/zones/catalog-upstream.zone  # Optional persistence
      store:           map
-     primaries:                                 # Fetch catalog from here
+     upstreams:                                 # Fetch catalog from here
         - addr: "203.0.113.50:5353"
           key:  NOKEY
      options:
@@ -255,7 +296,7 @@ zones:
    - name:            catalog-readonly.
      type:            secondary
      store:           map
-     primaries:
+     upstreams:
         - addr: "203.0.113.60:5353"
           key:  NOKEY
      options:

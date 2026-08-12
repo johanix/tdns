@@ -1,64 +1,19 @@
-# Main TDNS configuration
+# Main TDNS configuration for tdns-agent.
+#
+# tdns-agent is a SECONDARY-only server: it refuses primary zones (they are
+# put in config-error state at startup) and it never signs, so online-signing
+# and inline-signing are ignored. Host primary and/or signed zones on
+# tdns-auth.
+#
+# There is no `multi-provider:` block here. The multi-provider role is
+# implemented by tdns-mpagent in the tdns-mp repository, which owns that
+# config; a standalone tdns-agent cannot parse it and would silently ignore
+# the whole block. See tdns-mp/cmd/mpagent/tdns-mpagent.sample.yaml.
+#
+# Validate this file with:  tdns-cli agent config check --serverconfig <file>
+
 include:
   - agent-zones.yaml
-
-multi-provider:
-   role:		agent
-   identity:		agent.provider.
-   # Active transport mechanisms: "api" and/or "dns" (default: both if configured)
-   # Use ["api"] to disable DNS transport, ["dns"] to disable API, or ["api", "dns"] for both
-   supported_mechanisms:	[ api, dns ]
-   # Secure CHUNK comms with combiner (no enrollment; configure keys and address)
-   long_term_jose_priv_key:	/etc/tdns/agent.jose.private
-   combiner:
-      address:		1.2.3.4:5678
-      long_term_jose_pub_key:	/etc/tdns/combiner.jose.pub
-      # api_base_url:	https://1.2.3.4:8085/api/v1   # optional; for tdns-cli agent combiner ping --api
-   # Authorized peer agents (identity-only list - addresses and keys discovered via DNS)
-   # authorized_peers:
-   #    - agent2.example.com
-   #    - agent3.example.com
-   # --- agent autozone and secondaries (local) ---
-   local:
-      # Secondaries to send NOTIFY to when the agent autozone changes
-      notify:	[]
-      # Authoritative nameserver hostnames for the agent autozone (normalized to FQDN; no glue; must be outside the autozone)
-      # nameservers:	[ ns1.example.org., ns2.example.org ]
-   # --- discovery and heartbeat (remote) ---
-   remote:
-      LocateInterval:	60    # seconds between locate/discovery runs
-      BeatInterval:	30    # seconds between heartbeats to the same destination
-   # --- zone transfer (xfr): allow AXFR/IXFR to/from listed addresses, optional TSIG ---
-   xfr:
-      outgoing:
-         addresses:	[]   # allow AXFR/IXFR from these addresses
-         auth:	[]   # TSIG key names for outgoing XFR auth
-      incoming:
-         addresses:	[]   # allow AXFR/IXFR to these addresses
-         auth:	[]   # TSIG key names for incoming XFR auth
-   api:
-      addresses:
-         publish:	[ 1.2.3.4 ]
-         listen:	[ 127.0.0.1:8999 ]
-      baseurl:		https://api.{TARGET}:{PORT}/api/v1 # TARGET will be expanded to identity
-      port:		8999
-      certfile:		/etc/tdns/certs/agent.provider..crt
-      keyfile:		/etc/tdns/certs/agent.provider..key
-   dns:
-      addresses:
-         publish:	[ 1.2.3.4 ]
-         listen:	[ 127.0.0.1:8998 ]
-      baseurl:		dns://dns.{TARGET}:{PORT}/ # TARGET will be expanded to identity
-      port:		8998
-      # control_zone:	agent.provider.   # optional; zone used for NOTIFY(CHUNK) QNAMEs (default: agent identity)
-      # chunk_mode:	edns0   # default: send payload in EDNS(0) CHUNK option (code 65004)
-      # chunk_mode:	query   # store payload by qname; send NOTIFY without payload; receiver fetches via CHUNK query (then chunk_query_endpoint is required)
-      # chunk_query_endpoint:	include   # when chunk_mode=query: signal CHUNK query endpoint in NOTIFY (EDNS0 option 65005). Required when chunk_mode=query.
-      # chunk_query_endpoint:	none      # when chunk_mode=query: do not add endpoint to NOTIFY; receiver uses agent_peer.address
-   # --- sync engine (syncengine): always active, manages Hello retries and peer sync ---
-   syncengine:
-      intervals:
-         helloretry:	15    # seconds between Hello retries (range: 15-1800)
 
 service:
    name:		TDNS-AGENT
@@ -73,13 +28,17 @@ service:
 dnsengine:
    addresses:		[ 127.0.0.1:5357, '[::1]:5357']
    transports:		[ doq, dot, do53 ]
+   # The encrypted transports (dot/doq/doh) need their own cert/key; without
+   # them those listeners are silently skipped and only do53 comes up.
+   certfile:		/etc/tdns/certs/localhost.crt
+   keyfile:		/etc/tdns/certs/localhost.key
    # Zone file path comes from zone's zonefile: when set (no filedir/filetmpl needed)
 
 apiserver:
    addresses:     	[ 127.0.0.1:8987 ]
    apikey:         	winter-is-coming-santa-stuck-in-chimney
-   certfile:		/etc/tdns/certs/localhost..crt
-   keyfile:		/etc/tdns/certs/localhost..key
+   certfile:		/etc/tdns/certs/localhost.crt
+   keyfile:		/etc/tdns/certs/localhost.key
 
 server:
    id:			ooga booga boo

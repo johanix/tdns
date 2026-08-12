@@ -14,7 +14,7 @@ func newTestConfigForCores(t *testing.T) (*Config, chan ZoneRefresher) {
 	ch := make(chan ZoneRefresher, 16)
 	conf := &Config{}
 	conf.Internal.RefreshZoneCh = ch
-	conf.DynamicZones.Dynamic.Allowed = true
+	conf.DynamicZones.Dynamic.Allowed = ZoneTypeList{"secondary", "primary"}
 	// A real (empty-cache) IMR so hostname primaries route through the resolver;
 	// literal-IP primaries short-circuit before any lookup.
 	conf.Internal.ImrEngine = newTestImr(t)
@@ -31,7 +31,7 @@ func resetZonesForTest() {
 func TestProvisionDynamicZone_Gate(t *testing.T) {
 	resetZonesForTest()
 	conf, _ := newTestConfigForCores(t)
-	conf.DynamicZones.Dynamic.Allowed = false
+	conf.DynamicZones.Dynamic.Allowed = nil
 
 	in := DynamicZoneInput{Name: "gated.example", Type: Secondary, Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}}}
 	if _, err := conf.ProvisionDynamicZone(context.Background(), in, true); err == nil {
@@ -43,14 +43,16 @@ func TestProvisionDynamicZone_Gate(t *testing.T) {
 	}
 }
 
-func TestProvisionDynamicZone_RejectsPrimaryAndBadKey(t *testing.T) {
+func TestProvisionDynamicZone_RejectsTemplatelessPrimaryAndBadKey(t *testing.T) {
 	resetZonesForTest()
 	conf, _ := newTestConfigForCores(t)
 
-	// type: primary is rejected on the API path (v1 secondary-only).
-	prim := DynamicZoneInput{Name: "prim.example", Type: Primary, Primaries: []PeerConf{{Addr: "192.0.2.1:53", Key: NOKEY}}}
+	// type: primary without a template is rejected on the API path (a
+	// template is REQUIRED for primaries — the operator-blessed envelope).
+	// Template-provisioned primaries are exercised in dynamic_primary_test.go.
+	prim := DynamicZoneInput{Name: "prim.example", Type: Primary}
 	if _, err := conf.ProvisionDynamicZone(context.Background(), prim, true); err == nil {
-		t.Error("expected type: primary to be rejected on API path")
+		t.Error("expected template-less primary to be rejected on API path")
 	}
 
 	// non-NOKEY key is rejected until TSIG keys exist.

@@ -474,6 +474,21 @@ func regenerateCatalogZone(catalogZoneName string) error {
 		return fmt.Errorf("catalog zone %s not found", catalogZoneName)
 	}
 
+	// Origination gate (Fix C). This rewrites the catalog zone's own PTR/TXT
+	// records and publishes, so it is authoring — and a tdns-auth secondary of
+	// a catalog zone must mirror the catalog verbatim, exactly like any other
+	// secondary. Gating here rather than at the four handlers that call it
+	// (add/delete zone, add/delete group) covers every entry point, including
+	// any added later.
+	//
+	// This does NOT touch catalog CONSUMPTION: auto-create/auto-delete of
+	// MEMBER zones acts on other zones, never on the catalog zone, and is the
+	// entire point of RFC 9432 — a secondary that could not consume a catalog
+	// would make the feature pointless. Those options stay enabled (§4).
+	if msg := zoneOriginationRefusal(zd, "catalog zone authoring"); msg != "" {
+		return fmt.Errorf("%s", msg)
+	}
+
 	cm := GetOrCreateCatalogMembership(catalogZoneName)
 
 	zd.mu.Lock()

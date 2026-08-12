@@ -17,6 +17,11 @@ include ../../utils/Makefile.common
 install:
 	install -s -b -c ${PROG} /usr/local/bin/
 
+# No "pkg" target here on purpose: dog ships inside the tdns-cli package, whose
+# recipe (in ../../utils/Makefile.common) builds and installs this directory
+# before packing. A "pkg" alias here would build that same package from a
+# directory that cannot say whether tdns-cli itself is current.
+
 clean:
 	rm -f $(PROG)
 	find . -type f -name '*~' -delete

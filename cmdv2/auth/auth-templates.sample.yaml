@@ -49,6 +49,16 @@
 # set `template:` to inherit from another template; cycles are detected and
 # rejected.
 #
+# DYNAMIC-ZONE BLESSING: a template carrying `dynamiczones: true` may be
+# instantiated at runtime via the management API (tdns-cli auth zone add
+# --type primary --template <name>), provided dynamiczones.dynamic.allowed
+# includes "primary" in the main config. The flag marks the TEMPLATE as
+# API-instantiable and is never copied to zones. This is the security
+# envelope: an API client cannot express an update policy, it can only pick
+# among templates you bless here. A blessed template for a dynamic primary
+# must yield a zonefile (set a %s pattern) and must not use
+# allow-child-updates, catalog-*, or multi-provider options (refused in v1).
+#
 # ==============================================================================
 # COMPLETE LIST OF ZONE OPTIONS
 # ==============================================================================
@@ -230,9 +240,9 @@ templates:
         - addr: "192.0.2.2:53"
           key:  NOKEY
      downstreams:                        # ...and let them transfer
-        - prefix: "192.0.2.1"
+        - prefix: "192.0.2.1/32"         # single host — explicit mask required
           key:    NOKEY
-        - prefix: "192.0.2.2"
+        - prefix: "192.0.2.2/32"
           key:    NOKEY
      options:
         - delegation-sync-parent
@@ -249,3 +259,20 @@ templates:
      downstreams:
         - prefix: "2001:db8::/32"
           key:    NOKEY
+
+   # API-instantiable dynamic-primary template (see DYNAMIC-ZONE BLESSING
+   # above): `tdns-cli auth zone add -z <zone> --type primary --template
+   # api-primary` mints a primary with this exact configuration — a
+   # bootstrapped apex (SOA/NS/glue from dnsengine.addresses), updatable via
+   # DNS UPDATE per the update policy below, persisted across restarts.
+   - name:            api-primary
+     dynamiczones:    true                    # operator blessing (gate 2)
+     type:            primary
+     store:           map
+     zonefile:        /var/lib/tdns/zones/%szone
+     options:
+        - allow-updates
+     updatepolicy:
+        zone:
+           type:     selfsub
+           rrtypes:  [ TXT, A, AAAA ]

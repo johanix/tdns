@@ -107,6 +107,10 @@ type tsigSignResponseWriter struct {
 	reqTsig *dns.TSIG
 }
 
+// Unwrap exposes the wrapped writer so connectionState (downstream_auth.go)
+// can reach the TLS ConnectionState through the wrapper chain.
+func (w *tsigSignResponseWriter) Unwrap() dns.ResponseWriter { return w.ResponseWriter }
+
 func (w *tsigSignResponseWriter) WriteMsg(m *dns.Msg) error {
 	if w.reqTsig != nil && w.ResponseWriter.TsigStatus() == nil && m.IsTsig() == nil {
 		m.SetTsig(w.reqTsig.Hdr.Name, w.reqTsig.Algorithm, tsigFudge, time.Now().Unix())
@@ -213,15 +217,43 @@ func writeTsigErrorResponse(w dns.ResponseWriter, r *dns.Msg, reqTsig *dns.TSIG,
 // validation). The key's algorithm comes from the keystore; the wire name and
 // algorithm are canonicalised (lowercase FQDN) per RFC 8945.
 func SignForPeer(msg *dns.Msg, keyName string, conf *Config) (dns.TsigProvider, error) {
+	provider, algorithm, err := TsigMaterialForPeer(keyName, conf)
+	if err != nil || provider == nil {
+		return nil, err
+	}
+	StampTsigForPeer(msg, keyName, algorithm)
+	return provider, nil
+}
+
+// TsigMaterialForPeer resolves the provider and algorithm for a peer key
+// WITHOUT stamping a message, so config reads and message signing can happen at
+// different times.
+//
+// That split matters for callers that must snapshot config up front but sign
+// late. A multi-primary probe reads TSIG material for every upstream in one go
+// (so a concurrent reload cannot hand different primaries material from
+// different config generations), but the probes themselves are sequential and
+// each may block until the request deadline. Stamping every message during the
+// snapshot would leave the last message carrying a timestamp minutes old by the
+// time it goes out, and the peer would reject it as BADTIME. Resolve early,
+// stamp immediately before each exchange.
+//
+// Returns (nil, "", nil) for an unset key or NOKEY, matching SignForPeer.
+func TsigMaterialForPeer(keyName string, conf *Config) (dns.TsigProvider, string, error) {
 	if keyName == "" || keyName == NOKEY {
-		return nil, nil
+		return nil, "", nil
 	}
 	d, ok := conf.Internal.TsigKeyStore.Get(keyName)
 	if !ok {
-		return nil, fmt.Errorf("TSIG key %q not found in keys store", keyName)
+		return nil, "", fmt.Errorf("TSIG key %q not found in keys store", keyName)
 	}
-	msg.SetTsig(dns.CanonicalName(keyName), dns.CanonicalName(d.Algorithm), tsigFudge, time.Now().Unix())
-	return conf.tsigProvider(), nil
+	return conf.tsigProvider(), d.Algorithm, nil
+}
+
+// StampTsigForPeer sets the TSIG RR on msg with a current timestamp. Call it
+// immediately before the exchange; see TsigMaterialForPeer.
+func StampTsigForPeer(msg *dns.Msg, keyName, algorithm string) {
+	msg.SetTsig(dns.CanonicalName(keyName), dns.CanonicalName(algorithm), tsigFudge, time.Now().Unix())
 }
 
 // notifyKeyFor returns the TSIG key name to sign an outbound NOTIFY to target,
@@ -312,13 +344,6 @@ func (zd *ZoneData) allowNotifyDecision(src netip.Addr) (allowed bool, approvedK
 		return false, nil
 	}
 	return matchACL(zd.AllowNotify, src)
-}
-
-// downstreamsDecision resolves the downstreams (provide-xfr) ACL for an inbound
-// AXFR/IXFR's source IP. An empty ACL DENIES — a hard cutover that closes the
-// legacy open-AXFR default (matchACL already returns (false,nil) for an empty ACL).
-func (zd *ZoneData) downstreamsDecision(src netip.Addr) (allowed bool, approvedKeys []string) {
-	return matchACL(zd.Downstreams, src)
 }
 
 // peerIP reduces a "host:port" (or bare "host") address to its IP for ACL

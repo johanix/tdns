@@ -182,6 +182,7 @@ candidates, or --interactive to prompt per key.`,
 	exportCmd.Flags().BoolVar(&tsigExportNsd, "nsd", false, "Output a complete NSD key: block")
 
 	c.AddCommand(list, add, generate, importCmd, exportCmd, setowner, deleteCmd, purgeCmd)
+	addBulkCommands(c, role, "tsig")
 	return c
 }
 
@@ -544,7 +545,7 @@ KEY RR). The resulting pair is directly consumable by commands accepting
 
 	delete := &cobra.Command{
 		Use:   "delete",
-		Short: "Delete SIG(0) key pair from TDNSD keystore",
+		Short: "Delete SIG(0) key pair from the keystore",
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("keyid", "childzone")
 			sig0KeyMgmt(role, "delete")
@@ -554,7 +555,7 @@ KEY RR). The resulting pair is directly consumable by commands accepting
 
 	setstate := &cobra.Command{
 		Use:   "setstate",
-		Short: "Set the state of and existing SIG(0) key pair in the TDNSD keystore",
+		Short: "Set the state of and existing SIG(0) key pair in the keystore",
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("keyid", "zonename", "state")
 			sig0KeyMgmt(role, "setstate")
@@ -564,6 +565,7 @@ KEY RR). The resulting pair is directly consumable by commands accepting
 	setstate.Flags().StringVarP(&NewState, "state", "", "", "New state of key (created|published|active|retired)")
 
 	c.AddCommand(add, importCmd, generate, algorithms, list, export, delete, setstate)
+	addBulkCommands(c, role, "sig0")
 	return c
 }
 
@@ -668,7 +670,7 @@ DNSKEY RR). The resulting pair is directly consumable by 'keystore dnssec import
 
 	delete := &cobra.Command{
 		Use:   "delete",
-		Short: "Delete DNSSEC key pair from TDNSD keystore",
+		Short: "Delete DNSSEC key pair from the keystore",
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("keyid", "zonename")
 			dnssecKeyMgmt(role, "delete")
@@ -678,7 +680,7 @@ DNSKEY RR). The resulting pair is directly consumable by 'keystore dnssec import
 
 	setstate := &cobra.Command{
 		Use:   "setstate",
-		Short: "Set the state of and existing DNSSEC key pair in the TDNSD keystore",
+		Short: "Set the state of and existing DNSSEC key pair in the keystore",
 		Run: func(cmd *cobra.Command, args []string) {
 			PrepArgs("keyid", "zonename", "state")
 			dnssecKeyMgmt(role, "setstate")
@@ -797,6 +799,7 @@ without modifying anything. Pass --force to actually delete.`,
 	// auto-rollover moved to `zone dnssec auto-rollover` (auth only; agents never
 	// sign, so it was vestigial under `agent keystore dnssec`).
 	c.AddCommand(add, importCmd, generate, algorithms, policies, list, export, delete, setstate, genDS, rollover, clear, policyCleanup, purge, newKeystoreDnssecPolicyCmd(role), newKeystoreDnssecDsPushCmd(role), newKeystoreDnssecQueryParentCmd(role))
+	addBulkCommands(c, role, "dnssec")
 	return c
 }
 
@@ -878,7 +881,7 @@ func sig0KeyMgmt(role, cmd string) {
 	}
 
 	if tr.Error {
-		fmt.Printf("Error from TDNSD: %s\n", tr.ErrorMsg)
+		fmt.Printf("Error from the daemon: %s\n", tr.ErrorMsg)
 		os.Exit(1)
 	}
 
@@ -1062,7 +1065,7 @@ func dnssecKeyMgmt(role, cmd string) {
 	}
 
 	if tr.Error {
-		fmt.Printf("Error from TDNSD: %s\n", tr.ErrorMsg)
+		fmt.Printf("Error from the daemon: %s\n", tr.ErrorMsg)
 		os.Exit(1)
 	}
 
@@ -1174,7 +1177,7 @@ func dnssecKeyPurgeCmd(role string, cmd *cobra.Command) {
 		os.Exit(1)
 	}
 	if tr.Error {
-		fmt.Printf("Error from TDNSD: %s\n", tr.ErrorMsg)
+		fmt.Printf("Error from the daemon: %s\n", tr.ErrorMsg)
 		os.Exit(1)
 	}
 

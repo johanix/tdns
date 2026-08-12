@@ -5,6 +5,7 @@ package tdns
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -50,16 +51,21 @@ func clarifyXfrError(zone, upstream string, err error) error {
 	return err
 }
 
-func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype, keyName string, conf *Config) (uint32, error) {
-
+// ZoneTransferIn pulls the zone from the upstream primary described by up:
+// AXFR/IXFR over Do53, or over TLS (XoT, RFC 9103) when up.Transport is dot.
+// TSIG (up.Key) and TLS are independent layers and may be combined.
+func (zd *ZoneData) ZoneTransferIn(up PeerConf, serial uint32, ttype string, conf *Config) (uint32, error) {
+	upstream := up.Addr
 	if upstream == "" {
 		Fatal("ZoneTransfer: upstream not set")
 	}
 
 	msg := new(dns.Msg)
 	if ttype == "ixfr" {
-		// msg.SetIxfr(zone, serial, soa.Ns, soa.Mbox)
-		msg.SetIxfr(zd.ZoneName, serial, "", "")
+		// NB: SetIxfr("", "") packs ZERO bytes for the empty MNAME/RNAME
+		// (malformed SOA rdata → the primary FORMERRs the request). Root
+		// names pack correctly; the primary only reads the serial anyway.
+		msg.SetIxfr(zd.ZoneName, serial, ".", ".")
 	} else {
 		msg.SetAxfr(zd.ZoneName)
 	}
@@ -67,12 +73,19 @@ func (zd *ZoneData) ZoneTransferIn(upstream string, serial uint32, ttype, keyNam
 	if zd.ZoneStore == MapZone {
 		zd.Data = core.NewCmap[OwnerData]()
 	}
-	lgDns.Info("ZoneTransferIn", "zone", zd.ZoneName, "store", ZoneStoreToString[zd.ZoneStore])
+	lgDns.Info("ZoneTransferIn", "zone", zd.ZoneName, "store", ZoneStoreToString[zd.ZoneStore], "transport", transportLabel(up))
 
 	transfer := new(dns.Transfer)
+	// XoT: a DoT peer gets a verifying TLS config (pin/dane/pkix) and the
+	// fork's Transfer.In dials tcp-tls with it. nil => plain TCP (Do53).
+	tlsCfg, terr := conf.ClientTLSConfigForPeer(up)
+	if terr != nil {
+		return 0, fmt.Errorf("ZoneTransferIn %s: TLS setup for %s: %w", zd.ZoneName, upstream, terr)
+	}
+	transfer.TLS = tlsCfg
 	// Sign the AXFR/IXFR request under this upstream's key (NOKEY => unsigned).
 	// The provider also verifies the TSIG on the inbound envelopes.
-	provider, serr := SignForPeer(msg, keyName, conf)
+	provider, serr := SignForPeer(msg, up.Key, conf)
 	if serr != nil {
 		return 0, fmt.Errorf("ZoneTransferIn %s: TSIG sign setup: %w", zd.ZoneName, serr)
 	}
@@ -234,17 +247,18 @@ func estimateEnvelopeSize(rrs []dns.RR) int {
 	return len(packed)
 }
 
-func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, error) {
+// ZoneTransferOut streams the zone to an authorized downstream. imr is only
+// consulted by the downstream-auth tls-dane mechanism and may be nil (the
+// mechanism then fails closed).
+func (zd *ZoneData) ZoneTransferOut(ctx context.Context, w dns.ResponseWriter, r *dns.Msg, imr *Imr) (int, error) {
 	zone := dns.Fqdn(zd.ZoneName)
 
-	if src, ok := peerIP(w.RemoteAddr().String()); !ok {
-		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer, unparseable source %q", zone, w.RemoteAddr())
-		return zd.refuseTransfer(w, r)
-	} else if allowed, approvedKeys := zd.downstreamsDecision(src); !allowed {
-		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer to %s (not permitted by downstreams ACL)", zone, src)
-		return zd.refuseTransfer(w, r)
-	} else if err := checkInboundTSIG(w, r, approvedKeys); err != nil {
-		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer to %s: %v", zone, src, err)
+	// The complete authorization gate: downstreams ACL (address + TSIG,
+	// unchanged semantics) plus the per-zone downstream-auth mechanism
+	// ladder (peers tls-identity checks against the connection's client
+	// certificate). See v2/downstream_auth.go.
+	if err := zd.authorizeTransfer(ctx, w, r, imr); err != nil {
+		zd.Logger.Printf("ZoneTransferOut: %s: refusing transfer to %s: %v", zone, w.RemoteAddr(), err)
 		return zd.refuseTransfer(w, r)
 	}
 
@@ -305,6 +319,36 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 		zd.Logger.Printf("ZoneTransferOut: Will try to serve zone %s", zone)
 	}
 
+	// Outbound IXFR (RFC 1995, Project C). Decided before the envelope stream
+	// is set up: single-SOA answers short-circuit entirely; a provable delta
+	// (contiguous chain from the client's serial to the pinned snapshot's
+	// serial) is streamed below; anything else falls through to the full
+	// transfer, which IS the RFC 1995 §4 fallback shape. All decisions key on
+	// the pinned snapshot only.
+	var ixfrSteps []Ixfr
+	if len(r.Question) > 0 && r.Question[0].Qtype == dns.TypeIXFR && snap.SOA != nil {
+		clientSOA := ixfrQuerySOA(r)
+		switch {
+		case clientSOA == nil:
+			zd.Logger.Printf("ZoneTransferOut: %s: IXFR query from %s carries no SOA in the authority section; serving full zone",
+				zone, w.RemoteAddr())
+		case !serialNewer(snap.Serial, clientSOA.Serial):
+			// Client is same-or-newer than us: single SOA (RFC 1995 §2).
+			return zd.ixfrSingleSOAReply(w, r, dns.Copy(snap.SOA).(*dns.SOA))
+		case isUDPTransport(w):
+			// v1 never streams deltas over UDP: a single SOA at the current
+			// serial tells the client to retry over TCP (RFC 1995 §4).
+			return zd.ixfrSingleSOAReply(w, r, dns.Copy(snap.SOA).(*dns.SOA))
+		default:
+			if steps, ok := ixfrDeltaSteps(snap, clientSOA.Serial); ok {
+				ixfrSteps = steps
+			} else {
+				zd.Logger.Printf("ZoneTransferOut: %s: no contiguous IXFR history from serial %d to %d; falling back to full transfer",
+					zone, clientSOA.Serial, snap.Serial)
+			}
+		}
+	}
+
 	outbound_xfr := make(chan *dns.Envelope)
 	done := make(chan struct{})
 	var closeOnce sync.Once
@@ -344,6 +388,10 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 		zd:            zd,
 	}
 
+	if ixfrSteps != nil {
+		return zd.emitIxfrDelta(bs, dns.Copy(snap.SOA).(*dns.SOA), ixfrSteps)
+	}
+
 	if !appendRRset(bs, transferSOA) {
 		return 0, nil
 	}
@@ -377,7 +425,14 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 		}
 	}
 
-	trailingSOA := dns.Copy(soaCopy).(*dns.SOA)
+	return zd.finishTransferWithTrailingSOA(bs, dns.Copy(soaCopy).(*dns.SOA))
+}
+
+// finishTransferWithTrailingSOA appends the trailing SOA (flushing first when
+// it would not fit), runs the final oversize check, and sends the last
+// envelope. Shared by the AXFR and IXFR emission paths.
+func (zd *ZoneData) finishTransferWithTrailingSOA(bs *batchState, trailingSOA *dns.SOA) (int, error) {
+	zone := dns.Fqdn(zd.ZoneName)
 	trailingSize := estimateRRSize(trailingSOA)
 	if !maybeFlushBatch(bs, trailingSize, false) {
 		return 0, nil
@@ -409,20 +464,20 @@ func (zd *ZoneData) ZoneTransferOut(w dns.ResponseWriter, r *dns.Msg) (int, erro
 		return 0, fmt.Errorf("ZoneTransferOut: %s: oversize transfer envelope (%d bytes)", zone, finalSize)
 	}
 
-	totalSent += *bs.count
+	*bs.totalSent += *bs.count
 	if zd.Verbose || Globals.Debug {
 		zd.Logger.Printf("XfrOut: Zone %s: Sending final batch #%d: %d RRs, %d bytes (total sent: %d RRs)",
-			zd.ZoneName, batchNum, len(*bs.rrs), finalSize, totalSent)
+			zd.ZoneName, *bs.batchNum, len(*bs.rrs), finalSize, *bs.totalSent)
 	} else {
 		zd.Logger.Printf("XfrOut: Zone %s: Sending final %d RRs (including trailing SOA, total sent %d)",
-			zd.ZoneName, len(*bs.rrs), totalSent)
+			zd.ZoneName, len(*bs.rrs), *bs.totalSent)
 	}
 	if !bs.sendEnvelope(*bs.rrs) {
 		return 0, nil
 	}
 
-	zd.Logger.Printf("ZoneTransferOut: %s: Sent %d RRs.", zone, totalSent)
-	return totalSent, nil
+	zd.Logger.Printf("ZoneTransferOut: %s: Sent %d RRs.", zone, *bs.totalSent)
+	return *bs.totalSent, nil
 }
 
 func oversizeRRsetOwner(rrs []dns.RR) (owner, rrtype string) {
@@ -441,6 +496,7 @@ func (zd *ZoneData) refuseTransfer(w dns.ResponseWriter, r *dns.Msg) (int, error
 	signResponseLikeRequest(w, r, m)
 	if err := w.WriteMsg(m); err != nil {
 		zd.Logger.Printf("ZoneTransferOut: %s: WriteMsg on REFUSED failed: %v", dns.Fqdn(zd.ZoneName), err)
+		return 0, err
 	}
 	return 0, nil
 }

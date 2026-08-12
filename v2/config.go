@@ -7,7 +7,9 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,16 +54,35 @@ type Config struct {
 	DynamicZones DynamicZonesConf           `yaml:"dynamiczones" mapstructure:"dynamiczones"`
 	Zones        []ZoneConf                 `yaml:"zones"`
 	Templates    []ZoneConf                 `yaml:"templates"`
-	Dnssec       DnssecConf                 `yaml:"dnssec" mapstructure:"dnssec"`
-	Keys         KeyConf                    `yaml:"keys" mapstructure:"keys"`
-	Db           DbConf
-	Registrars   map[string][]string
-	Log          LogConf
-	Internal     InternalConf
+	// Peers is the top-level peers: block — one declaration per remote
+	// server, referenced from upstreams:/notify:/downstreams:/allow-notify:
+	// as `- peers: [ id, ... ]` entries (docs/2026-07-21-peers-xfr-auth-design.md).
+	Peers      map[string]PeerDef `yaml:"peers" mapstructure:"peers"`
+	Dnssec     DnssecConf         `yaml:"dnssec" mapstructure:"dnssec"`
+	Keys       KeyConf            `yaml:"keys" mapstructure:"keys"`
+	Keystore   KeystoreConf       `yaml:"keystore" mapstructure:"keystore"`
+	Db         DbConf
+	Registrars map[string][]string
+	Log        LogConf
+	Internal   InternalConf
 }
 
 // DnssecConf holds DNSSEC-wide settings consumed by the signer and IMR.
 type DnssecConf struct {
+	// DNSKEYTransport selects how the IMR chooses a transport for DNSKEY
+	// queries. DNSKEY queries are ~0.1% of traffic and exempt from a server's
+	// probabilistic transport-weight distribution, so the chosen transport
+	// bypasses those weights (it still honors the server's advertised
+	// capabilities). Values:
+	//   "force_udp"       - disable Part 3; follow normal probabilistic selection.
+	//   "use_ds_signal"   - (default) bypass to best transport only when the
+	//                       cached parent DS uses a LargeAlgorithms algorithm.
+	//   "try_encrypted"   - bypass for all DNSKEY; prefer encrypted, fall back
+	//                       to TCP, never UDP.
+	//   "force_encrypted" - bypass for all DNSKEY; encrypted only, fail the
+	//                       query if the server advertises no encrypted transport.
+	DNSKEYTransport string `yaml:"dnskey_query_transport" mapstructure:"dnskey_query_transport"`
+
 	// LargeAlgorithms lists the DNSSEC algorithms whose DNSKEY/RRSIG sizes are
 	// large for UDP. The IMR may query child DNSKEY over TCP when a parent DS
 	// uses one; the signer warns if one signs the bulk of a zone. Each entry is
@@ -187,6 +208,11 @@ type DnsEngineConf struct {
 	Transports  []string              `yaml:"transports" validate:"required,min=1,dive,oneof=do53 dot doh doq"` // "do53", "dot", "doh", "doq"
 	OptionsStrs []string              `yaml:"options" mapstructure:"options"`
 	Options     map[AuthOption]string `yaml:"-" mapstructure:"-"`
+	// NOTE: there is deliberately NO listener-level client-cert policy here.
+	// Transfer authentication is per-zone (downstream-auth: + peers
+	// tls-identity, enforced at transfer time); dropping non-TLS traffic is
+	// transports:. The auth DoT listener always REQUESTS (never requires) a
+	// client certificate. See docs/2026-07-21-peers-xfr-auth-design.md D6.
 	// OutboundSoaSerial controls the SOA serial advertised on outbound zone
 	// transfers and NOTIFYs. One of:
 	//   keep     — outbound = inbound serial (default; current behavior).
@@ -374,6 +400,61 @@ type DbConf struct {
 	File string // `validate:"required"`
 }
 
+// KeystoreConf is the keystore: block. Today it carries only pre-load, but the
+// keystore has other deployment-wide knobs coming, so it is a block rather than
+// a top-level key.
+type KeystoreConf struct {
+	Preload KeystorePreloadConf `yaml:"preload" mapstructure:"preload"`
+}
+
+// KeystorePreloadConf names, per key class, a directory of exported keys to
+// load into the keystore at startup — before any zone is parsed, so a signed
+// zone finds its keys already present and adopts them instead of minting new
+// ones (EnsureActiveDnssecKeys).
+//
+// A directory is the whole switch: set it and that class is pre-loaded, leave
+// it empty and it is not. One knob rather than an enable flag plus a path,
+// which cannot then be set to the invalid combination.
+//
+// Pre-load is create-if-absent by default: the running keystore wins over a
+// file that may be arbitrarily stale.
+type KeystorePreloadConf struct {
+	Dnssec string `yaml:"dnssec" mapstructure:"dnssec"`
+	Sig0   string `yaml:"sig0" mapstructure:"sig0"`
+	Tsig   string `yaml:"tsig" mapstructure:"tsig"`
+
+	// OverwriteExistingKeys inverts the conflict rule for EVERY configured
+	// class: an on-disk key that differs from the keystore's replaces it,
+	// instead of being reported and skipped.
+	//
+	// This exists for hosts that are rebuilt from a repo, where the committed
+	// export is the source of truth and the keystore is disposable — it makes a
+	// full lab build scriptable without a manual reconcile step. It is
+	// dangerous everywhere else, and dangerous in a specific way: unlike the
+	// CLI's one-shot `bulk-import --force`, this stays armed on EVERY restart,
+	// so a stale committed export can silently revert a key that was rolled by
+	// hand months later. Each replacement is logged at WARN, and the setting
+	// itself is announced at WARN on every boot, so the log always says which
+	// mode the host is in.
+	OverwriteExistingKeys bool `yaml:"overwrite-existing-keys" mapstructure:"overwrite-existing-keys"`
+}
+
+// Dirs returns the configured directories keyed by class name, skipping unset
+// ones, so callers can iterate without repeating the field list.
+// Normalised once, here, so every consumer sees the same path. PreloadDirsForCheck
+// used to filepath.Clean the values on its own while preloadClass stat'ed them
+// raw, which meant `config check` and the actual pre-load could report and use
+// different strings for the same configured directory.
+func (k KeystorePreloadConf) Dirs() map[string]string {
+	out := map[string]string{}
+	for class, dir := range map[string]string{"dnssec": k.Dnssec, "sig0": k.Sig0, "tsig": k.Tsig} {
+		if trimmed := strings.TrimSpace(dir); trimmed != "" {
+			out[class] = filepath.Clean(trimmed)
+		}
+	}
+	return out
+}
+
 // CatalogConf defines configuration for catalog zone support (RFC 9432)
 type CatalogConf struct {
 	GroupPrefixes GroupPrefixesConf             `yaml:"group_prefixes" mapstructure:"group_prefixes"`
@@ -421,13 +502,54 @@ type DynamicZonesConf struct {
 	ZoneDirectory  string                   `yaml:"zonedirectory" mapstructure:"zonedirectory"`     // Absolute path to zone file directory
 	CatalogZones   DynamicZoneTypeConf      `yaml:"catalog_zones" mapstructure:"catalog_zones"`     // Configuration for catalog zones
 	CatalogMembers DynamicCatalogMemberConf `yaml:"catalog_members" mapstructure:"catalog_members"` // Configuration for catalog member zones
-	Dynamic        DynamicZoneTypeConf      `yaml:"dynamic" mapstructure:"dynamic"`                 // Configuration for direct API-created zones (future)
+	Dynamic        DynamicApiZoneConf       `yaml:"dynamic" mapstructure:"dynamic"`                 // Configuration for direct API-created zones
 }
 
 // DynamicZoneTypeConf defines configuration for a type of dynamic zone
 type DynamicZoneTypeConf struct {
 	Allowed bool   `yaml:"allowed" mapstructure:"allowed"`                                              // Whether this type of zone is allowed
 	Storage string `yaml:"storage" mapstructure:"storage" validate:"omitempty,oneof=memory persistent"` // "memory" or "persistent"
+}
+
+// ZoneTypeList is the value of dynamiczones.dynamic.allowed: the zone types
+// ("primary", "secondary") that may be created via the zone-add API. A named
+// type so legacyDynamicAllowedHook can target exactly this field and turn a
+// legacy bool value into a config error naming the new syntax.
+type ZoneTypeList []string
+
+// DynamicApiZoneConf defines configuration for direct API-created zones
+// (zone add/delete/modify). Unlike the catalog blocks (DynamicZoneTypeConf,
+// still bool-gated), the API gate is a LIST of allowed zone types — the
+// dynamic-primary extension made "allowed" two independent capabilities.
+// Absent/empty list means deny all.
+type DynamicApiZoneConf struct {
+	Allowed ZoneTypeList `yaml:"allowed" mapstructure:"allowed"`                                              // Zone types the API may create: primary, secondary
+	Storage string       `yaml:"storage" mapstructure:"storage" validate:"omitempty,oneof=memory persistent"` // "memory" or "persistent"
+}
+
+// Allows reports whether the API may create zones of type zt.
+func (c DynamicApiZoneConf) Allows(zt ZoneType) bool {
+	want := ZoneTypeToString[zt]
+	for _, t := range c.Allowed {
+		if strings.EqualFold(strings.TrimSpace(t), want) {
+			return true
+		}
+	}
+	return false
+}
+
+// Validate checks the dynamiczones: block for values the decoder accepts but
+// the code does not. Called from both the daemon loader (ParseConfig) and
+// `config check` (ValidateConfig) so the two cannot disagree.
+func (d *DynamicZonesConf) Validate() error {
+	for _, t := range d.Dynamic.Allowed {
+		switch strings.ToLower(strings.TrimSpace(t)) {
+		case "primary", "secondary":
+		default:
+			return fmt.Errorf("dynamiczones.dynamic.allowed: unknown zone type %q (valid values: primary, secondary)", t)
+		}
+	}
+	return nil
 }
 
 // DynamicCatalogMemberConf defines configuration for catalog member zones (includes add/remove policy)
@@ -482,8 +604,26 @@ type InternalDnsConf struct {
 type InternalConf struct {
 	InternalDnsConf
 
+	// XfrAliasConflicts records zones/templates whose raw config used two
+	// spellings of the same transfer list (e.g. primaries: AND upstreams:).
+	// Set by ParseConfig (NormalizeXfrAliases); ParseZones quarantines the
+	// named zones. BrokenPeers records invalid peers: definitions (id ->
+	// reason); zones referencing one are quarantined at expansion time.
+	XfrAliasConflicts map[string]string
+	BrokenPeers       map[string]string
+
+	// ServerErrors is the daemon-wide error registry (v2/servererror.go):
+	// transport/config error conditions surfaced by `config status`. Created
+	// once and preserved across config reloads (so boot-scoped Transport
+	// errors survive a reload).
+	ServerErrors *ServerErrorRegistry
+
 	// LargeAlgorithms is the derived lookup set from Dnssec.LargeAlgorithms.
 	LargeAlgorithms map[uint8]bool
+
+	// DNSKEYTransport is the validated policy derived from
+	// Dnssec.DNSKEYTransport. Defaults to DNSKEYTransportUseDSSignal.
+	DNSKEYTransport DNSKEYTransportPolicy
 
 	// SplitAlgorithms is the derived lookup set from Dnssec.SplitAlgorithms:
 	// kskAlg -> set of permitted zskAlgs. nil/empty means no mixed pair is
@@ -561,9 +701,29 @@ func (conf *Config) KaspPropagationDelay() time.Duration {
 	return d
 }
 
-func (conf *Config) ReloadConfig() (string, error) {
+// ReloadConfig reloads the full configuration. Kept for existing callers and
+// SIGHUP-style triggers that cannot consent — it never sets confirm, so the
+// DNSSEC policy-algorithm guardrail (checkReloadPolicyGuardrail) holds a dangerous
+// same-name algorithm change rather than applying it. Use ReloadConfigConfirm to
+// carry an operator's explicit confirm.
+func (conf *Config) ReloadConfig() (string, error) { return conf.reloadConfig(false) }
+
+// ReloadConfigConfirm is ReloadConfig with the operator's confirm flag: confirm
+// lets a guarded DNSSEC policy-algorithm change through the reload gate.
+func (conf *Config) ReloadConfigConfirm(confirm bool) (string, error) {
+	return conf.reloadConfig(confirm)
+}
+
+func (conf *Config) reloadConfig(confirm bool) (string, error) {
 	confMu.Lock()
 	defer confMu.Unlock()
+	// Guardrail (plan §3.2): correlate the incoming DNSSEC policies against the
+	// running zones' active keys BEFORE mutating anything, and refuse a
+	// would-strand same-name algorithm change unless confirmed. Runs first so a
+	// refusal is atomic — the running config is left completely untouched.
+	if gerr := conf.checkReloadPolicyGuardrail(confirm); gerr != nil {
+		return "", gerr
+	}
 	err := conf.ParseConfig(true) // true: reload, not initial parsing
 	if err != nil {
 		lgConfig.Error("error parsing config", "err", err)
@@ -582,6 +742,10 @@ func (conf *Config) ReloadConfig() (string, error) {
 	// Publish the new runtime-config snapshot on a successful reload (still under
 	// confMu); on a parse error keep the last-good snapshot.
 	if err == nil {
+		// The IMR is a process singleton that snapshots the DNSSEC knobs at
+		// init; hand it the re-derived values or it serves the stale ones
+		// until restart.
+		conf.Internal.ImrEngine.RefreshDnssecPolicy(conf.Internal.LargeAlgorithms, conf.Internal.DNSKEYTransport)
 		conf.publishRuntimeConfig()
 	}
 	Globals.App.ServerConfigTime = time.Now()
@@ -604,10 +768,34 @@ func (conf *Config) ReloadTsigConfig(opts TsigReconcileOptions) (TsigReconcileRe
 	return result, err
 }
 
+// ReloadZoneConfig reloads the zones + dnssec blocks. Kept for existing callers
+// and the SIGHUP watcher, which cannot consent — it never sets confirm, so the
+// DNSSEC policy-algorithm guardrail holds a dangerous same-name algorithm change
+// automatically ("free SIGHUP coverage"). Use ReloadZoneConfigConfirm to carry an
+// operator's explicit confirm.
 func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
+	return conf.reloadZoneConfig(ctx, false)
+}
+
+// ReloadZoneConfigConfirm is ReloadZoneConfig with the operator's confirm flag.
+func (conf *Config) ReloadZoneConfigConfirm(ctx context.Context, confirm bool) (string, error) {
+	return conf.reloadZoneConfig(ctx, confirm)
+}
+
+func (conf *Config) reloadZoneConfig(ctx context.Context, confirm bool) (string, error) {
 	confMu.Lock()
 	if ctx == nil {
 		ctx = context.Background()
+	}
+
+	// Guardrail (plan §3.2): correlate the incoming DNSSEC policies against the
+	// running zones' active keys BEFORE any live state is mutated (before
+	// templates/dnssec/zones are re-read), and refuse a would-strand same-name
+	// algorithm change unless confirmed. Atomic — a refusal leaves every zone
+	// exactly as it is. confMu is held manually on this path, so unlock on refuse.
+	if gerr := conf.checkReloadPolicyGuardrail(confirm); gerr != nil {
+		confMu.Unlock()
+		return "", gerr
 	}
 
 	// Re-read config file to pick up template changes
@@ -622,6 +810,22 @@ func (conf *Config) ReloadZoneConfig(ctx context.Context) (string, error) {
 	// leaves the previous policies in place rather than failing the whole reload.
 	if err := conf.reloadDnssecFromFile(); err != nil {
 		lgConfig.Error("ReloadZoneConfig: failed to re-parse dnssec config, keeping previous policies", "err", err)
+	} else {
+		// parseDnssecConfig rebuilt Internal.LargeAlgorithms; hand the fresh
+		// set to the singleton Imr. DNSKEYTransport is not re-parsed on this
+		// path, so Internal still holds the last full-parse value.
+		conf.Internal.ImrEngine.RefreshDnssecPolicy(conf.Internal.LargeAlgorithms, conf.Internal.DNSKEYTransport)
+	}
+
+	// Re-read the zones: block from the config file(s) so an added/removed zone or
+	// an edited zone→policy mapping (or primaries/ACLs/options/zonefile) is picked
+	// up by this reload, not only policy-definition edits. Previously ParseZones
+	// iterated the stale startup conf.Zones, so zone edits needed a restart. On a
+	// decode error, keep the previous zone set rather than failing the whole
+	// reload (matches the dnssec handling above). Dynamic/API/catalog zones are
+	// never in conf.Zones and are spared from removal below.
+	if err := conf.reloadZonesFromFile(); err != nil {
+		lgConfig.Error("ReloadZoneConfig: failed to re-read zones config, keeping previous zone set", "err", err)
 	}
 
 	prezones := Zones.Keys()

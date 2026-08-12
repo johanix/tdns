@@ -1,6 +1,6 @@
 # Design & plan — imr per-server transport statistics (collection, presentation, remote access)
 
-**Status:** design agreed (scope confirmed 2026-07-18); ready to turn into an implementation plan.
+**Status: ✅ DONE** (implemented on main; verified against code 2026-07-24). All four phases landed (branch `feature/imr-transport-stats`): the `core.ExchangeResult` wire-transport enabler, per-server used/failed/truncated counters wired into `tryServer`, the consolidated `formatTransportStats` presenter (incl. the Do53TCP row), and the `imr-transport-stats` API + `tdns-cli imr stats transport-stats` CLI. Not built (explicitly optional/deferred): per-(server,qtype) granularity and the phase-2 bypass-attribution refinement.
 **Base:** branch off `main` (≥ `76c3ff6`, the merge of OOTS draft-03 #293). Work in the **`v2/` tree only**.
 **Relationship to OOTS:** this is **separate from and orthogonal to** the OOTS draft-03 feature (#293, merged). OOTS delivered the `oots` wire format + weight-honoring transport *selection*; this project is about *measuring* what transports were actually used per auth server. The two share the same subject (per-server transport) but no code path is entangled.
 

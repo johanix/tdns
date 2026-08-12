@@ -6,14 +6,11 @@ import (
 	"github.com/miekg/dns"
 )
 
-// TestApplyReloadedPolicyLocked exercises the config-reload guard that refuses
-// an incompatible DNSSEC-algorithm policy change (which would need an
-// unimplemented key rollover) while still applying benign, same-algorithm
-// edits. This is the reload-path (FirstZoneLoad == false) analogue of the
-// SignZone algorithm check in reconcileActiveKeyAlgorithms (sign.go).
-func TestApplyReloadedPolicyLocked(t *testing.T) {
-	// A KSK+ZSK policy currently bound to the zone (the OLD, effective policy).
-	oldPol := &DnssecPolicy{
+// TestClassifyPolicyChange_AppliedVsIntentRetarget replaces the old
+// applyReloadedPolicyLocked guard tests. Classification is always applied
+// (DB) vs intent — never the in-memory binding (blocking ①).
+func TestClassifyPolicyChange_AppliedVsIntentRetarget(t *testing.T) {
+	applied := &DnssecPolicy{
 		Name:         "pq-sqisign",
 		Mode:         DnssecPolicyModeKSKZSK,
 		Algorithm:    dns.ED25519,
@@ -23,46 +20,37 @@ func TestApplyReloadedPolicyLocked(t *testing.T) {
 
 	tests := []struct {
 		name       string
-		newPol     *DnssecPolicy
-		newName    string
-		wantApply  bool   // did the rebind happen?
-		wantPolPtr string // expected DnssecPolicyName after the call
+		intentPol  *DnssecPolicy
+		intentName string
+		want       PolicyChangeClass
 	}{
 		{
-			// Effective KSK algorithm changes (ED25519 -> RSASHA256): needs a
-			// KSK rollover, not implemented -> REFUSE, keep the old policy.
-			name: "ksk-algorithm-change-refused",
-			newPol: &DnssecPolicy{
+			name: "ksk-algorithm-change-incompatible",
+			intentPol: &DnssecPolicy{
 				Name:         "pq-mldsa",
 				Mode:         DnssecPolicyModeKSKZSK,
 				Algorithm:    dns.RSASHA256,
 				KSKAlgorithm: dns.RSASHA256,
 				ZSKAlgorithm: dns.ECDSAP256SHA256,
 			},
-			newName:    "pq-mldsa",
-			wantApply:  false,
-			wantPolPtr: "pq-sqisign",
+			intentName: "pq-mldsa",
+			want:       PolicyChangeIncompatibleAlg,
 		},
 		{
-			// Effective ZSK algorithm changes (ECDSAP256 -> ED25519): also an
-			// algorithm change -> REFUSE, keep the old policy.
-			name: "zsk-algorithm-change-refused",
-			newPol: &DnssecPolicy{
+			name: "zsk-algorithm-change-incompatible",
+			intentPol: &DnssecPolicy{
 				Name:         "pq-mldsa",
 				Mode:         DnssecPolicyModeKSKZSK,
 				Algorithm:    dns.ED25519,
 				KSKAlgorithm: dns.ED25519,
 				ZSKAlgorithm: dns.ED25519,
 			},
-			newName:    "pq-mldsa",
-			wantApply:  false,
-			wantPolPtr: "pq-sqisign",
+			intentName: "pq-mldsa",
+			want:       PolicyChangeIncompatibleAlg,
 		},
 		{
-			// Same effective KSK and ZSK algorithms, only non-algorithm fields
-			// changed (mode/rollover/name) -> benign, APPLY.
-			name: "benign-same-algorithm-edit-applied",
-			newPol: &DnssecPolicy{
+			name: "compatible-rename-same-algorithms",
+			intentPol: &DnssecPolicy{
 				Name:         "pq-sqisign-v2",
 				Mode:         DnssecPolicyModeKSKZSK,
 				Algorithm:    dns.ED25519,
@@ -70,65 +58,81 @@ func TestApplyReloadedPolicyLocked(t *testing.T) {
 				ZSKAlgorithm: dns.ECDSAP256SHA256,
 				Rollover:     RolloverPolicy{Method: RolloverMethodMultiDS},
 			},
-			newName:    "pq-sqisign-v2",
-			wantApply:  true,
-			wantPolPtr: "pq-sqisign-v2",
+			intentName: "pq-sqisign-v2",
+			want:       PolicyChangeCompatibleName,
+		},
+		{
+			name: "identical-none",
+			intentPol: &DnssecPolicy{
+				Name:         "pq-sqisign",
+				Mode:         DnssecPolicyModeKSKZSK,
+				Algorithm:    dns.ED25519,
+				KSKAlgorithm: dns.ED25519,
+				ZSKAlgorithm: dns.ECDSAP256SHA256,
+			},
+			intentName: "pq-sqisign",
+			want:       PolicyChangeNone,
 		},
 	}
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			zd := &ZoneData{
-				ZoneName:         "example.",
-				DnssecPolicy:     oldPol,
-				DnssecPolicyName: oldPol.Name,
-			}
-			zd.mu.Lock()
-			applied := zd.applyReloadedPolicyLocked(tc.newPol, tc.newName)
-			zd.mu.Unlock()
-
-			if applied != tc.wantApply {
-				t.Fatalf("applyReloadedPolicyLocked returned %v, want %v", applied, tc.wantApply)
-			}
-			if zd.DnssecPolicyName != tc.wantPolPtr {
-				t.Fatalf("DnssecPolicyName = %q, want %q", zd.DnssecPolicyName, tc.wantPolPtr)
-			}
-			if tc.wantApply {
-				// Benign edit: the new policy struct is now bound.
-				if zd.DnssecPolicy != tc.newPol {
-					t.Fatalf("expected new policy pointer to be bound after a benign edit")
-				}
-			} else {
-				// Refusal: the OLD policy struct must still be bound, so the
-				// zone keeps signing with its existing keys.
-				if zd.DnssecPolicy != oldPol {
-					t.Fatalf("expected the old policy pointer to remain bound after a refused algorithm change")
-				}
+			got := classifyPolicyChange(applied, applied.Name, tc.intentPol, tc.intentName)
+			if got != tc.want {
+				t.Fatalf("classify: got %s, want %s", got, tc.want)
 			}
 		})
 	}
 }
 
-// TestApplyReloadedPolicyLocked_FirstBind verifies that a zone with no policy
-// yet bound (the nil-current case) always applies the new policy — the guard
-// only fires when there is an OLD effective policy to compare against.
-func TestApplyReloadedPolicyLocked_FirstBind(t *testing.T) {
-	zd := &ZoneData{ZoneName: "example."}
-	newPol := &DnssecPolicy{
-		Name:         "pq-mldsa",
+// TestClassifyPolicyChange_RestartShape is the ① regression in guard-test form:
+// on restart the in-memory binding equals intent, but DB applied differs — the
+// classifier must still see the change when given applied vs intent.
+func TestClassifyPolicyChange_RestartShape(t *testing.T) {
+	applied := &DnssecPolicy{
+		Name:         "polA",
 		Mode:         DnssecPolicyModeKSKZSK,
-		Algorithm:    dns.RSASHA256,
-		KSKAlgorithm: dns.RSASHA256,
-		ZSKAlgorithm: dns.RSASHA256,
+		KSKAlgorithm: dns.ED25519,
+		ZSKAlgorithm: dns.ED25519,
 	}
-	zd.mu.Lock()
-	applied := zd.applyReloadedPolicyLocked(newPol, "pq-mldsa")
-	zd.mu.Unlock()
+	intent := &DnssecPolicy{
+		Name:         "polB",
+		Mode:         DnssecPolicyModeKSKZSK,
+		KSKAlgorithm: dns.ED25519,
+		ZSKAlgorithm: dns.ED25519,
+	}
+	// Restart trap: binding == intent.
+	binding := intent
+	if got := classifyPolicyChange(binding, "polB", intent, "polB"); got != PolicyChangeNone {
+		t.Fatalf("binding-vs-intent hide: got %s, want none", got)
+	}
+	if got := classifyPolicyChange(applied, "polA", intent, "polB"); got != PolicyChangeCompatibleName {
+		t.Fatalf("applied-vs-intent: got %s, want compatible-name", got)
+	}
+}
 
-	if !applied {
-		t.Fatalf("expected a first bind (nil current policy) to apply")
+// TestRefuseIncompatiblePolicyChangeRebindsApplied asserts the config-path
+// refuse helper keeps the zone on appliedPol (not intent).
+func TestRefuseIncompatiblePolicyChangeRebindsApplied(t *testing.T) {
+	applied := &DnssecPolicy{
+		Name:         "polA",
+		Mode:         DnssecPolicyModeKSKZSK,
+		KSKAlgorithm: dns.ED25519,
+		ZSKAlgorithm: dns.ED25519,
 	}
-	if zd.DnssecPolicyName != "pq-mldsa" || zd.DnssecPolicy != newPol {
-		t.Fatalf("first bind did not bind the new policy: name=%q", zd.DnssecPolicyName)
+	intent := &DnssecPolicy{
+		Name:         "polB",
+		Mode:         DnssecPolicyModeKSKZSK,
+		KSKAlgorithm: dns.RSASHA256,
+		ZSKAlgorithm: dns.ED25519,
+	}
+	zd := &ZoneData{
+		ZoneName:         "example.",
+		DnssecPolicy:     intent, // wrongly bound to intent (restart trap shape)
+		DnssecPolicyName: "polB",
+	}
+	refuseIncompatiblePolicyChange(zd, "polB", "polA", applied)
+	if zd.DnssecPolicy != applied || zd.DnssecPolicyName != "polA" {
+		t.Fatalf("refuse must rebind to applied: name=%q", zd.DnssecPolicyName)
 	}
 }

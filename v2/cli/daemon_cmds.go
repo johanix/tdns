@@ -88,8 +88,8 @@ Right now this doesn't do much, but later on various services will be able to re
 
 	start := &cobra.Command{
 		Use:   "start",
-		Short: "Start the axfr-statusd daemon",
-		Long:  `Start the axfr-statusd daemon. If it was already running, then this is a no-op.`,
+		Short: "Start the tdns-" + role + " daemon",
+		Long:  `Start the tdns-` + role + ` daemon. If it was already running, then this is a no-op.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			api, _ := GetApiClient(role, true)
 
@@ -219,8 +219,8 @@ Right now this doesn't do much, but later on various services will be able to re
 
 	apiCmd := &cobra.Command{
 		Use:   "api",
-		Short: "request a statusd api summary",
-		Long: `The daemon api queries the statusd for the provided API
+		Short: "request an API summary from the tdns-" + role + " daemon",
+		Long: `The daemon api command queries tdns-` + role + ` for the provided API
 and prints that out in a (hopefully) comprehensible fashion.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			api, _ := GetApiClient(role, true)

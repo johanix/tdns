@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"sort"
 	"strings"
 	"time"
 
@@ -50,6 +51,18 @@ type ConfigEntry struct {
 // The older style of multiple separate 'include' statements throughout the file
 // is not supported.
 // Returns the processed config map and a list of all included file paths (absolute).
+
+// LoadRawConfigMap loads a config file and its (single-level) includes into a
+// case-PRESERVING map, exactly as the daemon does before alias normalization
+// and viper decoding. `config check` uses it so NormalizeXfrAliases (and the
+// mis-cased-key scan) see the same key case the daemon sees: viper's
+// AllSettings lower-cases keys, which would make a mis-cased transfer-list key
+// like `Provide-Xfr:` look accepted while the daemon leaves it unknown and
+// silently drops it. Returns the merged map and the list of included files.
+func LoadRawConfigMap(file string) (map[string]interface{}, []string, error) {
+	return processConfigFile(file, filepath.Dir(file), 0)
+}
+
 func processConfigFile(file string, baseDir string, depth int) (map[string]interface{}, []string, error) {
 	if depth > 10 {
 		return nil, nil, errors.New("maximum include depth exceeded (10 levels)")
@@ -283,6 +296,13 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return fmt.Errorf("error processing config: %v", err)
 	}
 
+	// Transfer-terminology aliases: rewrite upstreams:/request-xfr: ->
+	// primaries and secondaries:/provide-xfr: -> downstreams in every
+	// zones:/templates: entry BEFORE decoding (so aliases neither fail to
+	// decode nor warn as unknown keys). Conflicting spellings are recorded;
+	// ParseZones quarantines the affected zones.
+	aliasConflicts := NormalizeXfrAliases(configMap)
+
 	// Configure mapstructure decoder to respect yaml tags. The decode hook
 	// converts a bare-string primary:/notify: entry (the pre-migration shape)
 	// into a PeerConf legacy marker instead of failing the whole-file decode —
@@ -306,6 +326,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 		DecodeHook: mapstructure.ComposeDecodeHookFunc(
 			stringToPeerConfHook(),
 			stringToAclEntryHook(),
+			legacyDynamicAllowedHook(),
 		),
 	}
 	decoder, err := mapstructure.NewDecoder(decoderConfig)
@@ -322,11 +343,38 @@ func (conf *Config) ParseConfig(reload bool) error {
 		}
 	}
 
+	// Reset raw fields that derive an internal default when omitted, so a
+	// reload after the operator removes the YAML key reverts to the default
+	// instead of preserving the previously-decoded value (mapstructure leaves
+	// absent keys untouched).
+	conf.Dnssec.DNSKEYTransport = ""
+
 	// Decode the entire config at once. A bare-string primary:/notify: entry no
 	// longer aborts the decode — stringToPeerConfHook turns it into a PeerConf
 	// legacy marker that per-zone validation quarantines (see DecoderConfig above).
 	if err := decoder.Decode(configMap); err != nil {
 		return fmt.Errorf("error decoding config: %v", err)
+	}
+
+	// peers: block — validate/normalize definitions; a broken peer does not
+	// abort (zones referencing it are quarantined at expansion in ParseZones).
+	conf.Internal.XfrAliasConflicts = aliasConflicts
+	conf.Internal.BrokenPeers = conf.ValidatePeers()
+
+	// Server-wide error registry: create once, preserve across reloads (so
+	// boot-scoped Transport errors survive a reload). parseconfig owns the
+	// Config/CertMissing check (clear-then-reassert on every load).
+	if conf.Internal.ServerErrors == nil {
+		conf.Internal.ServerErrors = NewServerErrorRegistry()
+	}
+	conf.validateDnsEngineCerts()
+
+	// dynamiczones: value validation (e.g. an unknown zone type in
+	// dynamic.allowed) is a hard config error — the decoder accepts any
+	// string, so the check lives here. A legacy bool for dynamic.allowed is
+	// caught earlier, by legacyDynamicAllowedHook failing the decode.
+	if err := conf.DynamicZones.Validate(); err != nil {
+		return err
 	}
 
 	if len(md.Unused) > 0 {
@@ -355,6 +403,12 @@ func (conf *Config) ParseConfig(reload bool) error {
 	if err := conf.parseDnssecConfig(); err != nil {
 		return err
 	}
+
+	dnskeyXport, err := parseDNSKEYTransportPolicy(conf.Dnssec.DNSKEYTransport)
+	if err != nil {
+		return err
+	}
+	conf.Internal.DNSKEYTransport = dnskeyXport
 
 	// Normalize service.transport.type (default: none)
 	if conf.Service.Transport.Type == "" {
@@ -562,11 +616,14 @@ func applyOutboundSoaSerial(kdb *KeyDB, raw string) error {
 	}
 	kdb.OutboundSoaSerial = mode
 
-	if mode == OutboundSoaSerialPersist {
-		schema := DefaultTables["OutgoingSerials"]
-		if _, err := kdb.DB.Exec(schema); err != nil {
-			return fmt.Errorf("failed to create OutgoingSerials table: %w", err)
-		}
+	// Create the table unconditionally. The mode is now a PER-ZONE setting that
+	// merely defaults to this global one (zd.EffectiveOutboundSoaSerial), so any
+	// individual zone may be in persist mode even when the global is keep — and
+	// zones are parsed after this runs, so we cannot know yet whether one is.
+	// CREATE IF NOT EXISTS on an unused table is cheap.
+	schema := DefaultTables["OutgoingSerials"]
+	if _, err := kdb.DB.Exec(schema); err != nil {
+		return fmt.Errorf("failed to create OutgoingSerials table: %w", err)
 	}
 	return nil
 }
@@ -588,6 +645,10 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 	lgConfig.Debug("parsing authoritative zones", "count", len(conf.Zones))
 	var all_zones []string
 	var broken_zones []string
+	// Zones where a GLOBAL persist/unixtime outbound mode is being suppressed
+	// because the zone is a mirroring secondary. Collected in-loop from the
+	// freshly resolved role/mode; see warnGlobalOutboundSerialSuppressed.
+	var serialSuppressedZones []string
 
 	// Process each zone configuration
 	for i := range conf.Zones {
@@ -628,6 +689,20 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			continue
 		}
 
+		// A zone whose raw config used two spellings of the same transfer
+		// list (primaries:+upstreams:, etc.) is quarantined — never a
+		// silent preference between them. The conflict may live on the zone
+		// itself OR on the template it references (NormalizeXfrAliases keys
+		// template conflicts by the template name); a conflicted template
+		// would otherwise silently hand the zone its broader canonical ACL.
+		conflict := zoneOrTemplateAliasConflict(conf.Internal.XfrAliasConflicts, zconf.Name, zconf.Template)
+		if conflict != "" {
+			lgConfig.Error("conflicting transfer-list spellings, zone in error state", "zone", zname, "conflict", conflict)
+			zd.SetError(ConfigError, "conflicting transfer-list spellings: %s", conflict)
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+
 		// Handle template expansion if specified
 		if zconf.Template != "" {
 			if tmpl, exist := Templates[zconf.Template]; exist {
@@ -646,6 +721,28 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				continue
 			}
 		}
+
+		// Expand `- peers: [ id, ... ]` references (from the zone or its
+		// template) into concrete PeerConf/AclEntry entries. Errors —
+		// unknown id, broken peer definition, mixed reference+inline entry,
+		// peer unusable in this role — quarantine just this zone.
+		if err := conf.expandPeerRefs(zconf, conf.Internal.BrokenPeers); err != nil {
+			lgConfig.Error("peer reference expansion failed, zone in error state", "zone", zname, "err", err)
+			zd.SetError(ConfigError, "peers: %v", err)
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+
+		// downstream-auth mechanism ladder: validate/normalize the names
+		// (unknown => quarantine), then emit the never-fatal cross-check
+		// warnings (unsatisfiable mechanism, dead entry, tls-dane w/o IMR).
+		if err := validateDownstreamAuth(zconf.DownstreamAuth); err != nil {
+			lgConfig.Error("invalid downstream-auth, zone in error state", "zone", zname, "err", err)
+			zd.SetError(ConfigError, "downstream-auth: %v", err)
+			broken_zones = append(broken_zones, zname)
+			continue
+		}
+		crossCheckDownstreamAuth(zname, zconf.DownstreamAuth, zconf.Downstreams, conf.Internal.ImrEngine != nil)
 
 		zonestore := parseZoneStore(zconf.Store)
 
@@ -694,10 +791,16 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 					secondaryOK = false
 					break
 				}
+				if err := validatePeerXoT(p); err != nil {
+					lgConfig.Error("secondary zone primary has invalid XoT config, zone in error state", "zone", zname, "primary", p.Addr, "err", err)
+					zd.SetError(ConfigError, "primary %s: %v", p.Addr, err)
+					secondaryOK = false
+					break
+				}
 				origPrimary := p.Addr
-				p.Addr = NormalizeAddress(p.Addr)
+				p.Addr = NormalizeAddressPort(p.Addr, defaultPortForPeer(*p))
 				if origPrimary != p.Addr {
-					lgConfig.Warn("primary has no port specified, using default :53", "zone", zname, "primary", origPrimary)
+					lgConfig.Warn("primary has no port specified, using transport default", "zone", zname, "primary", origPrimary, "port", defaultPortForPeer(*p))
 				}
 			}
 			if !secondaryOK {
@@ -745,6 +848,15 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 			if n.Legacy != "" {
 				lgConfig.Error("zone uses legacy bare-string notify entry, zone in error state", "zone", zname, "notify", n.Legacy)
 				zd.SetError(ConfigError, "notify now requires {addr, key} (got bare string %q)", n.Legacy)
+				legacyNotify = true
+				break
+			}
+			// The XoT fields only apply to the transfer path (primaries:).
+			// NOTIFY goes out over Do53; reject rather than silently ignore
+			// a configured security setting.
+			if n.Transport != "" || n.TLSAuth != "" || n.TLSName != "" || len(n.Pins) > 0 || n.CAFile != "" {
+				lgConfig.Error("zone notify entry carries XoT fields, zone in error state", "zone", zname, "notify", n.Addr)
+				zd.SetError(ConfigError, "notify %s: transport/tls-* not supported for notify targets", n.Addr)
 				legacyNotify = true
 				break
 			}
@@ -798,6 +910,27 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		}
 
 		options := parseZoneOptions(conf, zname, zconf, zd)
+
+		// Strip origination settings a tdns-auth secondary may not act on
+		// (Fix B). This MUST run before activateUpdatePolicy below: that
+		// function returns a HARD error — quarantining the zone — when
+		// allow-child-updates is set without a delegationbackend, and a
+		// secondary configured that way should get the soft warning and keep
+		// serving, not be taken out of service. Running here also means the
+		// delegation-sync setup block further down sees delegation-sync-parent
+		// already false, so SetupZoneSync never registers for a secondary and
+		// the DSYNC vector is closed at parse time with no extra wiring.
+		//
+		// zd.ZoneType is not yet assigned at this point in the parse, so the
+		// locally resolved zonetype is passed explicitly.
+		// Under zd.mu, which applyOptionNormalization requires. The zone is
+		// still being constructed here and is not yet shared, so the lock is
+		// uncontended -- it is taken to honour the contract, not because
+		// anything is racing for it today.
+		zd.mu.Lock()
+		options, zconf.OutboundSoaSerial = zd.applyOptionNormalization(zonetype, options, zconf.OutboundSoaSerial)
+		zd.mu.Unlock()
+
 		var outopts []string
 		for o, val := range options {
 			if val {
@@ -810,87 +943,32 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 
 		lgConfig.Debug("zone incoming update policy", "zone", zname, "policy", fmt.Sprintf("%+v", zconf.UpdatePolicy))
 
-		switch zconf.UpdatePolicy.Child.Type {
-		case "selfsub", "self":
-			// all ok, we know these
-		case "none", "":
-			// these are also ok, but imply that no updates are allowed
-			options[OptAllowChildUpdates] = false
-		default:
-			lgConfig.Error("zone has unknown child update policy type, zone in error state", "zone", zname, "type", zconf.UpdatePolicy.Child.Type)
-			zd.SetError(ConfigError, "unknown child update policy type: %s", zconf.UpdatePolicy.Child.Type)
+		// Captured BEFORE the call, because activateUpdatePolicy mutates
+		// options in place: an absent or "none" child policy silently clears
+		// allow-child-updates, and afterwards there is no way to tell a zone
+		// that never asked for it from one whose request was dropped.
+		wantedChildUpdates := options[OptAllowChildUpdates]
+
+		policy, perr := activateUpdatePolicy(zconf, options)
+		if perr != nil {
+			lgConfig.Error("zone update policy invalid, zone in error state", "zone", zname, "err", perr)
+			zd.SetError(ConfigError, "%s", perr)
 			broken_zones = append(broken_zones, zname)
 			continue
 		}
 
-		// A zone that accepts child updates MUST have a delegation backend.
-		// Without one, the write path mutates in-memory zone data while the
-		// scanner read path queries the (nil) backend, so diff computation
-		// always sees "empty current state" and child updates accumulate
-		// without ever being removed. Refuse to start such a zone rather
-		// than letting it silently misbehave.
-		if options[OptAllowChildUpdates] && zconf.DelegationBackend == "" {
-			lgConfig.Error("zone has 'allow-child-updates' but no 'delegationbackend' configured, zone in error state", "zone", zname)
-			zd.SetError(ConfigError, "allow-child-updates requires delegationbackend to be configured (e.g. 'delegationbackend: direct')")
-			broken_zones = append(broken_zones, zname)
-			continue
-		}
-
-		switch zconf.UpdatePolicy.Zone.Type {
-		case "selfsub", "self":
-			// all ok, we know these
-		case "none", "":
-			// these are also ok, but imply that no updates are allowed
-			options[OptAllowUpdates] = false
-		default:
-			lgConfig.Error("zone has unknown update policy type, zone in error state", "zone", zname, "type", zconf.UpdatePolicy.Zone.Type)
-			zd.SetError(ConfigError, "unknown update policy type: %s", zconf.UpdatePolicy.Zone.Type)
-			broken_zones = append(broken_zones, zname)
-			continue
-		}
-
-		// log.Printf("*** ParseZones: 2")
-		var rrt uint16
-		var exist bool
-		childrrtypes := map[uint16]bool{}
-		for _, rrtype := range zconf.UpdatePolicy.Child.RRtypes {
-			rrtype = strings.ToUpper(rrtype)
-			if rrt, exist = dns.StringToType[rrtype]; exist {
-				childrrtypes[rrt] = true
-			}
-		}
-
-		// log.Printf("*** ParseZones: 3")
-		zonerrtypes := map[uint16]bool{}
-		for _, rrtype := range zconf.UpdatePolicy.Zone.RRtypes {
-			rrtype = strings.ToUpper(rrtype)
-			if rrt, exist = dns.StringToType[rrtype]; exist {
-				zonerrtypes[rrt] = true
-			}
-		}
-
-		// log.Printf("*** ParseZones: 4")
-		childTTL := zconf.UpdatePolicy.Child.TTL
-		if childTTL == 0 {
-			childTTL = 120
-		}
-		zoneTTL := zconf.UpdatePolicy.Zone.TTL
-		if zoneTTL == 0 {
-			zoneTTL = 120
-		}
-		policy := UpdatePolicy{
-			Child: UpdatePolicyDetail{
-				Type:         zconf.UpdatePolicy.Child.Type,
-				RRtypes:      childrrtypes,
-				KeyBootstrap: zconf.UpdatePolicy.Child.KeyBootstrap,
-				KeyUpload:    zconf.UpdatePolicy.Child.KeyUpload,
-				TTL:          childTTL,
-			},
-			Zone: UpdatePolicyDetail{
-				Type:    zconf.UpdatePolicy.Zone.Type,
-				RRtypes: zonerrtypes,
-				TTL:     zoneTTL,
-			},
+		// Record it ON THE ZONE, not just in the log. The zone is otherwise
+		// perfectly healthy -- it loads, serves, and simply refuses every child
+		// update -- so a log line at startup is the only trace, and by the time
+		// anyone asks why "zone list" no longer shows the option, that line has
+		// scrolled away. ConfigWarning rather than ConfigError deliberately:
+		// the zone is serving correctly for every other purpose and taking it
+		// out of service would be a worse answer than telling the truth about
+		// one disabled option.
+		if wantedChildUpdates && !options[OptAllowChildUpdates] {
+			zd.SetError(ConfigWarning,
+				"allow-child-updates was requested but is DISABLED: updatepolicy.child.type "+
+					"is unset or \"none\". Set it to selfsub or self.")
 		}
 
 		if Globals.App.Type == AppTypeAgent && zconf.Type == "primary" {
@@ -934,6 +1012,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		zdp.mu.Lock()
 		zdp.Options = newOpts
 		zdp.publishCadence = publishCadence
+		zdp.ixfrChainMaxBytes = zconf.IxfrChainMaxBytes
 		zdp.mu.Unlock()
 
 		invokeOptionHandlers(zname, options)
@@ -1104,6 +1183,20 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		// because LeaderElectionManager doesn't exist until StartAgent runs.
 		// MP zone KEY publication is registered in tdns-mp's StartAgent.
 
+		// Collect zones where a GLOBAL persist/unixtime outbound mode is being
+		// suppressed, from the role and per-zone mode resolved in THIS pass.
+		// (Reading them back off the registry instead would see a ZoneType the
+		// RefreshEngine has not assigned yet — see serialSuppressionCandidate.)
+		//
+		// Deliberately here, at the bottom of the loop body: every `continue`
+		// above rejects the zone (bad ACL, invalid update policy, unusable
+		// store, ...), and a rejected zone is not serving, so reporting it as a
+		// secondary with a suppressed serial policy would be noise about a zone
+		// that is not running at all.
+		if serialSuppressionCandidate(Globals.App.Type, zonetype, options, zconf.OutboundSoaSerial) {
+			serialSuppressedZones = append(serialSuppressedZones, zname)
+		}
+
 		// Non-zone-serving app types skip zone refresh. Everything
 		// else (Auth, Agent, downstream MP/NM/ES roles) queues each
 		// parsed zone for refresh.
@@ -1116,20 +1209,25 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 				return nil, nil, errors.New("parseZones: error: refresh channel is not configured, zones will not be refreshed, terminating")
 			}
 			zr := ZoneRefresher{
-				Name:          zname,
-				Force:         true,     // force refresh, ignoring SOA serial, when reloading from file
-				ZoneType:      zonetype, // primary | secondary
-				PrimariesConf: clonePeerConfs(zconf.Primaries),
-				Primaries:     resolvedPrimaries,
-				ZoneStore:     zonestore,
-				Notify:        zconf.Notify,
-				AllowNotify:   zconf.AllowNotify,
-				Downstreams:   zconf.Downstreams,
-				ConfigUpdate:  true, // config-bearing: lets reload clear removed ACLs
-				Zonefile:      zconf.Zonefile,
-				Options:       options,
-				UpdatePolicy:  policy,
-				DnssecPolicy:  zconf.DnssecPolicy,
+				Name:           zname,
+				Force:          true,     // force refresh, ignoring SOA serial, when reloading from file
+				ZoneType:       zonetype, // primary | secondary
+				PrimariesConf:  clonePeerConfs(zconf.Primaries),
+				Primaries:      resolvedPrimaries,
+				ZoneStore:      zonestore,
+				Notify:         zconf.Notify,
+				AllowNotify:    zconf.AllowNotify,
+				Downstreams:    zconf.Downstreams,
+				DownstreamAuth: zconf.DownstreamAuth,
+				ConfigUpdate:   true, // config-bearing: lets reload clear removed ACLs
+				Zonefile:       zconf.Zonefile,
+				Options:        options,
+				UpdatePolicy:   policy,
+				DnssecPolicy:   zconf.DnssecPolicy,
+				// Always carried (empty == inherit the global), so a config
+				// edit that REMOVES a per-zone mode actually reverts the zone
+				// to the global on reload instead of keeping the stale value.
+				OutboundSoaSerial: zconf.OutboundSoaSerial,
 			}
 			select {
 			case conf.Internal.RefreshZoneCh <- zr:
@@ -1141,8 +1239,158 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 
 	lgConfig.Info("zones parsed and refreshing", "count", len(all_zones), "zones", all_zones, "broken", broken_zones, "queued", len(conf.Internal.RefreshZoneCh))
 
+	warnGlobalOutboundSerialSuppressed(conf, serialSuppressedZones)
+
 	lgConfig.Debug("ParseZones complete")
 	return all_zones, broken_zones, nil
+}
+
+// warnGlobalOutboundSerialSuppressed tells the operator, once per parse, that a
+// server-wide outbound_soa_serial of persist/unixtime is being ignored for the
+// tdns-auth secondaries on this server.
+//
+// The option normalizer warns per zone about an EXPLICIT per-zone mode, but a
+// secondary that merely inherits a global one gets no per-zone warning — that
+// would be noise on every secondary of a server whose primaries legitimately
+// use persist. Without this, though, the suppression would be entirely
+// invisible: the operator set a server-wide policy and some zones quietly do
+// not follow it. Name them once instead.
+//
+// suppressed is collected by the caller DURING the parse loop, from the
+// zonetype/options/serial-mode it has just resolved. It deliberately does NOT
+// re-scan the Zones registry: zd.ZoneType is assigned asynchronously by the
+// RefreshEngine when it consumes the ZoneRefresher, so at this point a
+// cold-start registry entry still has ZoneType == 0 — which would read as
+// "not a primary" and mis-report every zone without inline-signing, PRIMARIES
+// INCLUDED, as a suppressed secondary. On reload it would read the previous
+// parse's values rather than this one's.
+// serialSuppressionCandidate reports whether a zone — described by the role,
+// options and per-zone mode resolved DURING the parse — is one where a global
+// persist/unixtime outbound mode will be silently suppressed.
+//
+// Takes loose values rather than a *ZoneData on purpose: the registry entry's
+// ZoneType is assigned asynchronously by the RefreshEngine, so at parse time it
+// is still 0 and reading it would classify primaries as secondaries.
+//
+// A zone carrying its OWN explicit mode is not a candidate: the normalizer
+// already warned about it per zone, and reporting it twice would just be noise.
+func serialSuppressionCandidate(appType AppType, ztype ZoneType, opts map[ZoneOption]bool, perZoneMode string) bool {
+	if appType != AppTypeAuth || perZoneMode != "" {
+		return false
+	}
+	return ztype == Secondary && !opts[OptInlineSigning]
+}
+
+func warnGlobalOutboundSerialSuppressed(conf *Config, suppressed []string) {
+	mode := strings.TrimSpace(strings.ToLower(conf.DnsEngine.OutboundSoaSerial))
+	if mode != OutboundSoaSerialPersist && mode != OutboundSoaSerialUnixtime {
+		return
+	}
+	if Globals.App.Type != AppTypeAuth || len(suppressed) == 0 {
+		return
+	}
+	sort.Strings(suppressed)
+	lgConfig.Warn("global outbound_soa_serial is suppressed for secondary zones",
+		"mode", mode, "count", len(suppressed), "zones", suppressed,
+		"reason", "a secondary must serve the serial it received from upstream, unmodified")
+}
+
+// activateUpdatePolicy validates a zone's update-policy config and builds the
+// runtime UpdatePolicy, mutating options to reflect it: a "none"/unset policy
+// type forces the corresponding OptAllowChildUpdates/OptAllowUpdates option
+// off, and allow-child-updates without a delegation backend is refused (the
+// write path would mutate in-memory zone data while the scanner queries the
+// nil backend — silent misbehavior). Extracted verbatim from ParseZones so the
+// dynamic-primary add/load paths activate policy through the SAME code and
+// cannot drift; error strings are the exact former ConfigError texts. Unknown
+// RRtype names are silently dropped (pre-extraction behavior, preserved).
+func activateUpdatePolicy(zconf *ZoneConf, options map[ZoneOption]bool) (UpdatePolicy, error) {
+	switch zconf.UpdatePolicy.Child.Type {
+	case "selfsub", "self":
+		// all ok, we know these
+	case "none", "":
+		// these are also ok, but imply that no updates are allowed
+		//
+		// Say so when the operator asked for the opposite. Clearing an option
+		// the config explicitly requested, silently, produces a zone that
+		// starts, looks healthy, and refuses every child update -- with the
+		// option simply absent from "zone list" and nothing anywhere saying
+		// why. An unset policy is the easy way to hit this, because "" lands
+		// in the same case as an explicit "none".
+		if options[OptAllowChildUpdates] {
+			why := "no updatepolicy.child.type is set"
+			if zconf.UpdatePolicy.Child.Type == "none" {
+				why = "updatepolicy.child.type is \"none\""
+			}
+			lgConfig.Error("allow-child-updates requested but DISABLED by update policy",
+				"zone", zconf.Name, "reason", why,
+				"fix", "set updatepolicy.child.type to selfsub or self")
+		}
+		options[OptAllowChildUpdates] = false
+	default:
+		return UpdatePolicy{}, fmt.Errorf("unknown child update policy type: %s", zconf.UpdatePolicy.Child.Type)
+	}
+
+	// A zone that accepts child updates MUST have a delegation backend.
+	// Without one, the write path mutates in-memory zone data while the
+	// scanner read path queries the (nil) backend, so diff computation
+	// always sees "empty current state" and child updates accumulate
+	// without ever being removed. Refuse to start such a zone rather
+	// than letting it silently misbehave.
+	if options[OptAllowChildUpdates] && zconf.DelegationBackend == "" {
+		return UpdatePolicy{}, fmt.Errorf("allow-child-updates requires delegationbackend to be configured (e.g. 'delegationbackend: direct')")
+	}
+
+	switch zconf.UpdatePolicy.Zone.Type {
+	case "selfsub", "self":
+		// all ok, we know these
+	case "none", "":
+		// these are also ok, but imply that no updates are allowed
+		options[OptAllowUpdates] = false
+	default:
+		return UpdatePolicy{}, fmt.Errorf("unknown update policy type: %s", zconf.UpdatePolicy.Zone.Type)
+	}
+
+	var rrt uint16
+	var exist bool
+	childrrtypes := map[uint16]bool{}
+	for _, rrtype := range zconf.UpdatePolicy.Child.RRtypes {
+		rrtype = strings.ToUpper(rrtype)
+		if rrt, exist = dns.StringToType[rrtype]; exist {
+			childrrtypes[rrt] = true
+		}
+	}
+
+	zonerrtypes := map[uint16]bool{}
+	for _, rrtype := range zconf.UpdatePolicy.Zone.RRtypes {
+		rrtype = strings.ToUpper(rrtype)
+		if rrt, exist = dns.StringToType[rrtype]; exist {
+			zonerrtypes[rrt] = true
+		}
+	}
+
+	childTTL := zconf.UpdatePolicy.Child.TTL
+	if childTTL == 0 {
+		childTTL = 120
+	}
+	zoneTTL := zconf.UpdatePolicy.Zone.TTL
+	if zoneTTL == 0 {
+		zoneTTL = 120
+	}
+	return UpdatePolicy{
+		Child: UpdatePolicyDetail{
+			Type:         zconf.UpdatePolicy.Child.Type,
+			RRtypes:      childrrtypes,
+			KeyBootstrap: zconf.UpdatePolicy.Child.KeyBootstrap,
+			KeyUpload:    zconf.UpdatePolicy.Child.KeyUpload,
+			TTL:          childTTL,
+		},
+		Zone: UpdatePolicyDetail{
+			Type:    zconf.UpdatePolicy.Zone.Type,
+			RRtypes: zonerrtypes,
+			TTL:     zoneTTL,
+		},
+	}, nil
 }
 
 // ExpandTemplate applies template tmpl's settings to zone zconf. Every config
@@ -1189,6 +1437,9 @@ func ExpandTemplate(zconf ZoneConf, tmpl *ZoneConf, appMode AppType) (ZoneConf, 
 	bespoke := map[string]bool{
 		"Name": true, "Template": true, // never copied from a template
 		"Zonefile": true, "OptionsStrs": true, "DnssecPolicy": true, // handled above
+		// DynamicZones is a property of the TEMPLATE (API-instantiable), not
+		// of the zones stamped out from it — never copied.
+		"DynamicZones": true,
 	}
 	gapFillStruct(reflect.ValueOf(&zconf).Elem(), reflect.ValueOf(tmpl).Elem(), bespoke, false)
 	return zconf, nil
@@ -1361,6 +1612,53 @@ func (conf *Config) reloadDnssecFromFile() error {
 
 	conf.Dnssec = partial.Dnssec
 	return conf.parseDnssecConfig()
+}
+
+// reloadZonesFromFile re-reads the config file(s), decodes just the zones: block,
+// and replaces conf.Zones. Used by the zone-reload path (ReloadZoneConfig) so a
+// config-file edit to the ZONE set — an added or removed zone, or a changed
+// dnssecpolicy/primaries/ACLs/options/zonefile — is picked up by a single
+// `reload-zones`, not only policy-definition edits. Without this, ParseZones
+// iterates the stale startup conf.Zones (the longstanding "must get the zones
+// config file from outside" gap in ReloadZoneConfig), so zone edits needed a
+// restart. Uses the SAME decode hooks + ZeroFields as the full ParseConfig so a
+// legacy bare-string primary:/notify: entry decodes to a PeerConf legacy marker
+// (quarantined per-zone) instead of failing the whole decode, and so a zone whose
+// YAML omits a field does not inherit a stale slot-neighbour's value.
+func (conf *Config) reloadZonesFromFile() error {
+	cfgfile := conf.Internal.CfgFile
+	if cfgfile == "" {
+		// No config file (e.g. embedded use) — keep the in-memory zone set.
+		return nil
+	}
+
+	configMap, _, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	if err != nil {
+		return fmt.Errorf("error processing config: %v", err)
+	}
+
+	var partial struct {
+		Zones []ZoneConf `yaml:"zones"`
+	}
+	decoderConfig := &mapstructure.DecoderConfig{
+		TagName:    "yaml",
+		Result:     &partial,
+		ZeroFields: true,
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			stringToPeerConfHook(),
+			stringToAclEntryHook(),
+		),
+	}
+	decoder, err := mapstructure.NewDecoder(decoderConfig)
+	if err != nil {
+		return fmt.Errorf("error creating decoder: %v", err)
+	}
+	if err := decoder.Decode(configMap); err != nil {
+		return fmt.Errorf("error decoding zones config: %v", err)
+	}
+
+	conf.Zones = partial.Zones
+	return nil
 }
 
 // reloadTsigKeysFromFile re-reads the config file and decodes just the keys:
@@ -1645,6 +1943,12 @@ func GenKeyLifetime(lifetime string) (KeyLifetime, error) {
 // This allows users to specify addresses as either "IP" or "IP:port" in config.
 // Returns empty string if input is empty.
 func NormalizeAddress(addr string) string {
+	return NormalizeAddressPort(addr, "53")
+}
+
+// NormalizeAddressPort is NormalizeAddress with a caller-chosen default port
+// (DoT peers default to 853, everything else to 53).
+func NormalizeAddressPort(addr, defaultPort string) string {
 	if addr == "" {
 		return ""
 	}
@@ -1653,8 +1957,7 @@ func NormalizeAddress(addr string) string {
 	_, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		// If SplitHostPort fails, it means no port is present
-		// Add default DNS port :53
-		return net.JoinHostPort(addr, "53")
+		return net.JoinHostPort(addr, defaultPort)
 	}
 	// Address already has a port, use as-is
 	return addr
@@ -1687,6 +1990,22 @@ func stringToAclEntryHook() mapstructure.DecodeHookFunc {
 			return data, nil
 		}
 		return AclEntry{Legacy: data.(string)}, nil
+	}
+}
+
+// legacyDynamicAllowedHook turns a legacy bool value for
+// dynamiczones.dynamic.allowed into a hard config error naming the new list
+// syntax. The field decodes into ZoneTypeList — a named type used by exactly
+// that key — so the hook cannot misfire on any other config field. There is
+// deliberately NO legacy decode (true -> [secondary]): the dynamic-primary
+// extension made "allowed" mean two independent capabilities, and a silent
+// mapping would hide that the operator has a decision to make.
+func legacyDynamicAllowedHook() mapstructure.DecodeHookFunc {
+	return func(from reflect.Type, to reflect.Type, data interface{}) (interface{}, error) {
+		if to != reflect.TypeOf(ZoneTypeList(nil)) || from.Kind() != reflect.Bool {
+			return data, nil
+		}
+		return nil, fmt.Errorf("dynamiczones.dynamic.allowed is now a list of zone types, not a bool: use `allowed: [secondary]` (add `primary` to also allow API-created primary zones)")
 	}
 }
 

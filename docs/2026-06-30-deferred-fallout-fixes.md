@@ -128,6 +128,36 @@ dot, so this is latent, not biting today.
 **Status:** noted, not fixed (out of scope for D3, which was about field propagation).
 Small, low-risk.
 
+### D5 — Thread ctx into the outbound DANE verification path (shutdown cancellation; heavy lift)
+
+**Problem.** `verifyClientCertDANE` (inbound XFR-**out** authorization) threads a request
+`context.Context` down to the DNSSEC-validated TLSA lookup, so an in-flight DANE lookup is
+cancelled when the request/daemon context is (landed in #318). The **outbound** analog
+`verifyPeerCertDANE` — used when *we* pull a zone as secondary and verify the primary's cert
+with `tls-auth: dane` — does **not**: it runs inside a `tls.Config.VerifyConnection` callback
+(`func(tls.ConnectionState) error`), whose signature is fixed by crypto/tls and carries no ctx.
+So `lookupTLSAValidated` falls back to `context.Background()`, and the outbound DANE lookup +
+DNSSEC validation cannot be cancelled on shutdown — it runs to its own `daneLookupTimeout`
+regardless. Bounded (no hang, no goroutine leak), but it does not honor shutdown.
+
+**Fix direction.** Thread a cancellable ctx from the refresh-engine worker down to the outbound
+DANE verify. Because `VerifyConnection` cannot receive a ctx parameter, the ctx must be
+**captured in the closure that builds the `tls.Config`** (`ClientTLSConfigForPeer`) and pushed
+up through that function's callers into the refresh/pull engine. This belongs with the broader
+**refresh-engine context-propagation** work rather than as an isolated change; only the
+top-level background worker should initialize the root ctx.
+
+**Files.** `v2/xot.go` (`lookupTLSAValidated`, `verifyPeerCertDANE`, `ClientTLSConfigForPeer`),
+`v2/dnsutils.go`, `v2/zone_utils.go`; then `v2/xot_test.go`'s outbound-pull path can assert
+clean shutdown too, matching the inbound test-server helpers hardened in #318 (`8dfd907`).
+
+**Only affects:** outbound secondary pulls that use `tls-auth: dane`. The inbound XFR-out DANE
+path already threads ctx (#318). Impact is a bounded shutdown delay, not a hang.
+
+**Status:** deferred. Raised by CodeRabbit on PR #318 (labelled "🟠 Major / 🏗️ Heavy lift"); the
+inbound half + test-server shutdown assertions landed in #318, this outbound half rides with
+the refresh-engine ctx pass. The #318 review thread is left open as the tracking anchor.
+
 ---
 
 ## Decisions made (context — not deferred fixes)

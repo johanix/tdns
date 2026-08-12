@@ -63,6 +63,18 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			return
 		}
 
+		// Origination gate (Fix C): refuse the actions that would write into
+		// the zone or advance its serial on a tdns-auth secondary. One check
+		// ahead of the switch rather than a line per case, so a command added
+		// to originationAPICommands is gated automatically.
+		if originationAPICommands[zp.Command] {
+			if msg := zoneOriginationRefusal(zd, zp.Command); msg != "" {
+				resp.Error = true
+				resp.ErrorMsg = msg
+				return
+			}
+		}
+
 		switch zp.Command {
 		case "bump":
 			// resp.Msg, err = BumpSerial(conf, cp.Zone)
@@ -75,8 +87,21 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			}
 			resp.Msg = fmt.Sprintf("Zone %s: bumped SOA serial from %d to %d", zp.Zone, br.OldSerial, br.NewSerial)
 
-		case "write-zone":
+		// "sync" is an alias for "write-zone": spool the current zone content
+		// out to disk, without the freeze/thaw ritual around it. Named for
+		// rndc sync, which is what an operator coming from bind9 will reach
+		// for. One implementation, two names -- not two code paths that can
+		// drift.
+		case "write-zone", "sync":
 			msg, err := zd.WriteZone(false, zp.Force)
+			resp.Msg = msg
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+			}
+
+		case "update":
+			msg, err := zd.ApiZoneUpdate(r.Context(), zp)
 			resp.Msg = msg
 			if err != nil {
 				resp.Error = true
@@ -142,16 +167,31 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			}
 
 		case "freeze":
+			// Role check FIRST (Fix C). OptFrozen gates DDNS and nothing else
+			// (see updateresponder.go) — it does not pause refresh — so on a
+			// secondary, where allow-updates is always normalized off, it is
+			// functionally inert. Refusing it costs nothing real.
+			//
+			// Order matters: the allow-updates precondition below would
+			// otherwise fire first and tell the operator to enable an option
+			// the normalizer immediately strips again. Name the true reason.
+			if msg := zoneOriginationRefusal(zd, "freeze"); msg != "" {
+				resp.Error = true
+				resp.ErrorMsg = msg
+				return
+			}
 			// If a zone has modifications, freezing implies that the updated
 			// zone data should be written out to disk.
 			if !zd.Options[OptAllowUpdates] && !zd.Options[OptAllowChildUpdates] {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("FreezeZone: zone %s does not allow updates. Freeze would be a no-op", zd.ZoneName)
+				return
 			}
 
 			if zd.Options[OptFrozen] {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("FreezeZone: zone %s is already frozen", zd.ZoneName)
+				return
 			}
 
 			// zd.mu.Lock()
@@ -166,13 +206,21 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			}
 
 		case "thaw":
+			// Role check first, same reasoning as freeze above.
+			if msg := zoneOriginationRefusal(zd, "thaw"); msg != "" {
+				resp.Error = true
+				resp.ErrorMsg = msg
+				return
+			}
 			if !zd.Options[OptAllowUpdates] && !zd.Options[OptAllowChildUpdates] {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("ThawZone: zone %s does not allow updates. Thaw would be a no-op", zd.ZoneName)
+				return
 			}
 			if !zd.Options[OptFrozen] {
 				resp.Error = true
 				resp.ErrorMsg = fmt.Sprintf("ThawZone: zone %s is not frozen", zd.ZoneName)
+				return
 			}
 			zd.SetOption(OptFrozen, false)
 			resp.Msg = fmt.Sprintf("Zone %s is now thawed", zd.ZoneName)
@@ -202,7 +250,7 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 					return
 				}
 				zconf := buildListZoneConf(zd, zname, kdb)
-				populateZoneDescDetail(&zconf, zd, zname, kdb)
+				populateZoneDescDetail(r.Context(), &zconf, zd, zname, kdb)
 				zones[zname] = zconf
 				resp.Zones = zones
 				return
@@ -214,9 +262,21 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			resp.Zones = zones
 
 		case "add":
+			zoneType := Secondary
+			switch strings.ToLower(zp.ZoneType) {
+			case "", "secondary":
+				// default
+			case "primary":
+				zoneType = Primary
+			default:
+				resp.Error = true
+				resp.ErrorMsg = fmt.Sprintf("unknown zone type %q (valid: primary, secondary)", zp.ZoneType)
+				return
+			}
 			msg, err := Conf.ProvisionDynamicZone(r.Context(), DynamicZoneInput{
 				Name:       zp.Zone,
-				Type:       Secondary,
+				Type:       zoneType,
+				Template:   zp.Template,
 				Primaries:  zp.Primaries,
 				Options:    zoneOptionsFromStrings(zp.Options),
 				TsigName:   zp.TsigName,
@@ -312,6 +372,10 @@ func buildListZoneConf(zd *ZoneData, zname string, kdb *KeyDB) ZoneConf {
 	// For secondary zones, list as-written primaries from runtime state.
 	primaries := clonePeerConfs(zd.PrimariesConf)
 
+	// Value and source together, from one resolver, so the displayed source
+	// always matches the displayed value.
+	outboundMode, outboundSource := zd.EffectiveOutboundSoaSerialWithSource()
+
 	// Snapshot the notify slice under the lock — the catalog notify add/remove
 	// handlers mutate zd.Notify under zd.mu, so an unsynchronized read here would
 	// race the slice header.
@@ -361,6 +425,15 @@ func buildListZoneConf(zd *ZoneData, zname string, kdb *KeyDB) ZoneConf {
 		EffectiveDnssecPolicy:  zd.DnssecPolicyName,
 		DnssecPolicyOverridden: overridden,
 		DnssecPolicyConfigBase: configPolicy,
+
+		// Serial visibility (§7). Free — both are already on ZoneData, no
+		// network — so the bulk listing carries them and `zone list -v` can
+		// show outbound vs inbound side by side. The live per-primary probe
+		// is single-zone only; see populateZoneDescDetail.
+		CurrentSerial:              zd.CurrentSerial,
+		IncomingSerial:             zd.IncomingSerial,
+		EffectiveOutboundSoaSerial: outboundMode,
+		OutboundSoaSerialSource:    outboundSource,
 	}
 }
 
@@ -373,7 +446,16 @@ func buildListZoneConf(zd *ZoneData, zname string, kdb *KeyDB) ZoneConf {
 // succeeds. The bound policy is read from the immutable runtime-config snapshot
 // (ConfLive), which is lock-free: a concurrent reload publishes a fresh snapshot
 // rather than mutating in place, so pol is a stable value copy.
-func populateZoneDescDetail(zconf *ZoneConf, zd *ZoneData, zname string, kdb *KeyDB) {
+func populateZoneDescDetail(ctx context.Context, zconf *ZoneConf, zd *ZoneData, zname string, kdb *KeyDB) {
+	// Live per-primary SOA probe (§7). Single-zone only — one query per
+	// configured primary — and read-only. Per-primary rather than one value is
+	// the point: two masters disagreeing about a zone's serial is the failure
+	// that motivated the MUST-NOT-MODIFY work, and there was previously no way
+	// to see it from tdns.
+	if len(zd.Upstreams) > 0 {
+		zconf.UpstreamSerials = zd.ProbeUpstreamSerials(ctx, &Conf)
+	}
+
 	name, source, appliedAt, ok, err := GetZoneAppliedPolicyDetail(kdb, zname)
 	if err != nil {
 		// Surface the failure distinctly (not as an absent record) so the CLI can
@@ -827,6 +909,17 @@ func APIzoneDsync(ctx context.Context, app *AppDetails, refreshq chan ZoneRefres
 			resp.Error = true
 			resp.ErrorMsg = fmt.Sprintf("Zone %q is unknown", zdp.Zone)
 			return
+		}
+
+		// Origination gate (Fix C). The publish/unpublish-dsync-rrset commands
+		// write the _dsync DSYNC RRset into the zone, which a secondary must
+		// not do — publishing DSYNC is the primary's job (or an agent's).
+		if originationAPICommands[zdp.Command] {
+			if msg := zoneOriginationRefusal(zd, zdp.Command); msg != "" {
+				resp.Error = true
+				resp.ErrorMsg = msg
+				return
+			}
 		}
 
 		// Most of the dsync commands relate to the child role. The exception is the publish/unpublish commands

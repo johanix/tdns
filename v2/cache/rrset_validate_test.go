@@ -220,3 +220,66 @@ func TestValidator_ExplicitValidVerdictIsReused(t *testing.T) {
 		t.Errorf("expected ValidationStateSecure reused from cache, got %v", got)
 	}
 }
+
+// TestValidateDNSKEYs_BackfillsMissingDS is the regression test for the
+// DS-backfill fix. To anchor a zone's DNSKEY the validator needs the zone's
+// DS; pre-fix it only ever looked in the cache and, on a miss, returned
+// Indeterminate without fetching — so a cold resolution of a signed child
+// (whose DS was never cached, e.g. because the same server is authoritative
+// for both parent and child, so no DS-bearing referral is ever emitted) could
+// never validate. The fix fetches the missing DS on demand via the fetcher.
+//
+// This asserts the load-bearing behaviour: on a DS cache miss, ValidateDNSKEYs
+// ASKS the fetcher for the DS at all. (The mock returns no DS, so the verdict
+// stays Indeterminate — the point is purely that the fetch is attempted, which
+// pre-fix it never was.)
+func TestValidateDNSKEYs_BackfillsMissingDS(t *testing.T) {
+	rrcache := NewRRsetCache(log.New(os.Stderr, "test ", 0), false, false)
+
+	// Seed root servers so backfillDS can reach the fetcher (same
+	// FindClosestKnownZone + ServerMap["."] path the DNSKEY fetch uses).
+	rrcache.ServerMap.Set(".", map[string]*AuthServer{"a.root.": {}})
+
+	const child = "falcon512-mayo2.pq.axfr.net."
+	ksk := &dns.DNSKEY{
+		Hdr:       dns.RR_Header{Name: child, Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+		Flags:     257,
+		Protocol:  3,
+		Algorithm: dns.ED25519,
+		PublicKey: "l02Woi0iS8Aa25FQkUd9RMzZHJpBoRQwAQEX1SxZJA4=",
+	}
+	sig := &dns.RRSIG{
+		Hdr:         dns.RR_Header{Name: child, Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 3600},
+		TypeCovered: dns.TypeDNSKEY,
+		Algorithm:   dns.ED25519,
+		Labels:      4,
+		OrigTtl:     3600,
+		Inception:   uint32(time.Now().Add(-time.Hour).Unix()),
+		Expiration:  uint32(time.Now().Add(24 * time.Hour).Unix()),
+		KeyTag:      ksk.KeyTag(),
+		SignerName:  child,
+		Signature:   "AAAA",
+	}
+	dnskeyRRset := &core.RRset{
+		Name:   child,
+		Class:  dns.ClassINET,
+		RRtype: dns.TypeDNSKEY,
+		RRs:    []dns.RR{ksk},
+		RRSIGs: []dns.RR{sig},
+	}
+
+	var askedDS bool
+	fetcher := func(ctx context.Context, qname string, qtype uint16, servers map[string]*AuthServer) (*core.RRset, error) {
+		if dns.Fqdn(qname) == child && qtype == dns.TypeDS {
+			askedDS = true
+		}
+		return nil, nil // no DS returned; verdict stays Indeterminate
+	}
+
+	if _, err := rrcache.ValidateDNSKEYs(context.Background(), dnskeyRRset, fetcher); err != nil {
+		t.Fatalf("ValidateDNSKEYs error: %v", err)
+	}
+	if !askedDS {
+		t.Fatalf("ValidateDNSKEYs did not fetch the missing DS for %s on a cache miss — DS-backfill regression", child)
+	}
+}

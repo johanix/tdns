@@ -1,8 +1,10 @@
 /*
  * Copyright (c) 2026 Johan Stenstam, johan.stenstam@internetstiftelsen.se
  *
- * `tdns-cli auth config check` — validate a tdns-auth configuration file and
- * correlate it against the running daemon.
+ * `tdns-cli <role> config check` — validate a tdns-auth or tdns-agent
+ * configuration file and correlate it against the running daemon. The
+ * agent-specific checks live in config_agent_cmds.go; tdns-imr has its own
+ * implementation in config_imr_cmds.go.
  *
  * The command is deliberately CLI-side and self-contained: it re-reads the
  * YAML the same way the daemon's loader does (main file + single-level
@@ -33,6 +35,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	tdns "github.com/johanix/tdns/v2"
+	algregistry "github.com/johanix/tdns/v2/algorithms"
 )
 
 // ---------------------------------------------------------------------------
@@ -147,13 +150,23 @@ func (r *ccReport) render(verbose bool) {
 // Command
 // ---------------------------------------------------------------------------
 
-// newConfigCheckCmd builds the `config check` command for the given role. Only
-// wired for "auth" today; the role parameter keeps the door open for imr/agent.
+// newConfigCheckCmd builds the `config check` command for the given role.
+// Wired for "auth" and "agent" (via NewConfigCmd); "imr" has its own
+// implementation in config_imr_cmds.go.
 func newConfigCheckCmd(role string) *cobra.Command {
 	var (
 		serverConfig string
 		offline      bool
 	)
+	// Only tdns-auth serves GET /config/paths, so only there can the target
+	// config file be discovered from the running daemon.
+	resolution := "  1. an explicit path (positional arg or --serverconfig)\n" +
+		"  2. otherwise the compiled-in default (/etc/tdns/tdns-" + role + ".yaml)"
+	if roleHasConfigPaths(role) {
+		resolution = "  1. an explicit path (positional arg or --serverconfig)\n" +
+			"  2. otherwise, online, the path the daemon reports via GET /config/paths\n" +
+			"  3. otherwise the compiled-in default (/etc/tdns/tdns-" + role + ".yaml)"
+	}
 	c := &cobra.Command{
 		Use:   "check [config-file]",
 		Short: "Validate the tdns-" + role + " config and correlate it with the running daemon",
@@ -162,9 +175,7 @@ consistency, and (unless --offline) correlate it against the running daemon to
 report drift between the file on disk and what the server actually loaded.
 
 Target config resolution:
-  1. an explicit path (positional arg or --serverconfig)
-  2. otherwise, online, the path the daemon reports via GET /config/paths
-  3. otherwise the compiled-in default (/etc/tdns/tdns-` + role + `.yaml)
+` + resolution + `
 
 Exit status is non-zero if any check FAILs (WARNs do not fail the run).`,
 		Args: cobra.MaximumNArgs(1),
@@ -178,6 +189,61 @@ Exit status is non-zero if any check FAILs (WARNs do not fail the run).`,
 	c.Flags().StringVar(&serverConfig, "serverconfig", "", "path to the tdns-"+role+" config file to check (default: ask the daemon, else the compiled-in default)")
 	c.Flags().BoolVar(&offline, "offline", false, "do not contact the daemon; run static checks only")
 	return c
+}
+
+// ---------------------------------------------------------------------------
+// Role plumbing
+//
+// `config check` is shared by the auth and agent roles (imr has its own
+// implementation in config_imr_cmds.go). The three things that genuinely differ
+// per role are collected here rather than sprinkled through the checks.
+// ---------------------------------------------------------------------------
+
+// defaultCfgFileForRole returns the compiled-in default config path used when
+// neither an explicit path nor daemon path-discovery yields one.
+func defaultCfgFileForRole(role string) string {
+	switch role {
+	case "agent":
+		return tdns.DefaultAgentCfgFile
+	case "imr":
+		return tdns.DefaultImrCfgFile
+	default:
+		return tdns.DefaultAuthCfgFile
+	}
+}
+
+// appTypeForRole maps a CLI role to the tdns app type, which selects the
+// sections tdns.ValidateConfig enforces.
+func appTypeForRole(role string) tdns.AppType {
+	switch role {
+	case "agent":
+		return tdns.AppTypeAgent
+	case "imr":
+		return tdns.AppTypeImr
+	default:
+		return tdns.AppTypeAuth
+	}
+}
+
+// roleHasConfigPaths reports whether the daemon serves GET /config/paths.
+// Only tdns-auth registers it (see SetupAPIRouter) — so for every other role
+// the target config file cannot be discovered from the running daemon, and
+// crucially a 404 there must NOT be read as "the daemon is down".
+func roleHasConfigPaths(role string) bool { return role == "auth" }
+
+// daemonReachable probes the daemon with an API ping. This is deliberately
+// separate from fetchDaemonPaths: /config/paths is auth-only, so using it as
+// the liveness probe would silently disable ALL running-config correlation for
+// every other role, even against a perfectly healthy daemon.
+func daemonReachable(role string) bool {
+	api, err := GetApiClient(role, false)
+	if err != nil {
+		return false
+	}
+	if _, err := api.SendPing(0, false); err != nil {
+		return false
+	}
+	return true
 }
 
 // ---------------------------------------------------------------------------
@@ -196,13 +262,18 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 	online := !offline
 	var daemonCfgPath, daemonDBPath string
 	if online {
-		if p, db, ok := fetchDaemonPaths(role); ok {
-			daemonCfgPath, daemonDBPath = p, db
-		} else {
+		// Liveness is probed with a ping, NOT with /config/paths: that route is
+		// auth-only, so treating its absence as "daemon down" would disable all
+		// correlation for a healthy agent.
+		if !daemonReachable(role) {
 			online = false
 			rep.warn("Daemon", "reachability",
 				fmt.Sprintf("could not reach the %s daemon; running static checks only", role),
 				"start the daemon (or pass --offline) to enable running-config correlation")
+		} else if roleHasConfigPaths(role) {
+			if p, db, ok := fetchDaemonPaths(role); ok {
+				daemonCfgPath, daemonDBPath = p, db
+			}
 		}
 	}
 
@@ -213,7 +284,7 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 	case daemonCfgPath != "":
 		cfgPath = daemonCfgPath
 	default:
-		cfgPath = tdns.DefaultAuthCfgFile
+		cfgPath = defaultCfgFileForRole(role)
 	}
 	cfgPath = absClean(cfgPath)
 
@@ -237,10 +308,37 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 		return
 	}
 	rep.pass("Config file", "load", "config file (and includes) parsed as YAML")
+	checkLogSection(v, cfgPath, rep)
 
 	// Required-field validation via the exported tdns validator (drives the
 	// `validate:"required"` struct tags AND the cert/key pair validation).
-	checkRequiredFields(v, cfgPath, rep, tdns.AppTypeAuth)
+	checkRequiredFields(v, cfgPath, rep, appTypeForRole(role))
+
+	// Mirror the daemon's ParseConfig: normalize the transfer-list spelling
+	// aliases (upstreams:/request-xfr: -> primaries, secondaries:/provide-xfr:
+	// -> downstreams) before decoding, so config check accepts exactly what
+	// the daemon does. Conflicting double-spellings are reported.
+	//
+	// Conflict detection AND the mis-cased-key scan run on a case-PRESERVED map
+	// (LoadRawConfigMap, the daemon's own loader), NOT viper's AllSettings:
+	// viper lower-cases keys, so a mis-cased key like `Provide-Xfr:` would look
+	// accepted here while the daemon leaves it unknown and silently drops it.
+	if rawCase, _, rawErr := tdns.LoadRawConfigMap(cfgPath); rawErr == nil {
+		for name, why := range tdns.NormalizeXfrAliases(rawCase) {
+			rep.fail("Config file", name, "conflicting transfer-list spellings", why)
+		}
+		for _, mc := range tdns.FindMiscasedXfrKeys(rawCase) {
+			rep.fail("Config file", mc.Zone,
+				fmt.Sprintf("transfer-list key %q is mis-cased; the daemon decodes YAML case-sensitively and silently ignores it", mc.Key),
+				fmt.Sprintf("use the canonical spelling %q", mc.Canonical))
+		}
+	}
+	// The viper view (lower-cased keys) still drives the structural decode
+	// below; normalize correctly-spelled aliases into their canonical keys so
+	// the typed structs are populated for the checks that follow.
+	raw := v.AllSettings()
+	_ = tdns.NormalizeXfrAliases(raw)
+	_ = v.MergeConfigMap(raw)
 
 	// Decode into a typed Config for the structural checks. Best-effort: the
 	// legacy bare-string primary/ACL decode hooks live in the tdns package and
@@ -254,9 +352,16 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 
 	checkDnsEngine(&cfg, rep)
 	checkApiServer(&cfg, cfgPath, rep)
-	checkDnssecPolicies(v, rep)
+	checkDnssecPolicies(v, rep, online, role)
 	checkZones(&cfg, rep, online, role)
+	checkPeers(&cfg, rep)
 	checkApiServerCorrelation(role, &cfg, rep)
+
+	// Agent-only: config that this binary silently ignores, and options the
+	// agent rejects at startup. See config_agent_cmds.go.
+	if role == "agent" {
+		checkAgentSpecifics(&cfg, v, rep)
+	}
 
 	// Running-config correlation.
 	if online {
@@ -265,8 +370,11 @@ func runConfigCheck(role, explicitPath string, offline bool) {
 
 	// Signed-zone policy-algorithm vs active-key dry-run (predicts a
 	// would-break-on-reload algorithm change). Handles the offline info-skip
-	// itself.
-	checkPolicyAlgVsActiveKeys(&cfg, v, rep, online, role)
+	// itself. Skipped for the agent, which never signs (SetupZoneSigning
+	// returns early for AppTypeAgent), so no policy can break a reload there.
+	if role != "agent" {
+		checkPolicyAlgVsActiveKeys(&cfg, v, rep, online, role)
+	}
 
 	finishCheckconf(rep)
 }
@@ -325,6 +433,31 @@ func loadConfigViper(path string, rep *ccReport) (*viper.Viper, error) {
 // ---------------------------------------------------------------------------
 // Static checks
 // ---------------------------------------------------------------------------
+
+// checkLogSection verifies that log: is reachable the way the daemon reads it.
+// SetupLogging parses the MAIN config file directly and runs BEFORE include:
+// resolution, so a log: block that lives only in an included file satisfies
+// every merged-view check here and still aborts startup. Applies to every role.
+func checkLogSection(v *viper.Viper, cfgPath string, rep *ccReport) {
+	// Nothing to add if the merged view has no log.file at all: the
+	// required-field validator already FAILs on that.
+	if v.GetString("log.file") == "" {
+		return
+	}
+
+	mainOnly := viper.New()
+	mainOnly.SetConfigFile(cfgPath)
+	if err := mainOnly.ReadInConfig(); err != nil {
+		// The main file already parsed once in loadConfigViper; a failure here
+		// is not worth a second complaint.
+		return
+	}
+	if mainOnly.GetString("log.file") == "" {
+		rep.fail("Config file", "log",
+			"log: is only set in an included file — logging is set up from the main config file, before include: is resolved, so the daemon will refuse to start",
+			fmt.Sprintf("move the log: block into %s", cfgPath))
+	}
+}
 
 // checkRequiredFields runs the exported required-field validator for the given
 // app type (which selects the sections tdns.ValidateConfig checks: auth →
@@ -418,10 +551,16 @@ func checkApiServer(cfg *tdns.Config, cfgPath string, rep *ccReport) {
 // does (template expansion + split-algorithm gating + role-capability + key
 // lifetimes) by handing the merged dnssec: subtree to the exported
 // tdns.ValidateDnssecPoliciesFromFile.
-func checkDnssecPolicies(v *viper.Viper, rep *ccReport) {
+func checkDnssecPolicies(v *viper.Viper, rep *ccReport, online bool, role string) {
 	const g = "DNSSEC policies"
 	sub := v.Get("dnssec")
 	if sub == nil {
+		if role == "agent" {
+			// The agent never signs, so a missing dnssec: block is simply
+			// normal rather than a fallback-to-default situation.
+			rep.info(g, "policies", "no dnssec: block (tdns-agent never signs)")
+			return
+		}
 		rep.info(g, "policies", "no dnssec: block; zones needing signing fall back to the built-in default policy")
 		return
 	}
@@ -438,10 +577,29 @@ func checkDnssecPolicies(v *viper.Viper, rep *ccReport) {
 	}
 	defer os.Remove(tmp)
 
+	if online {
+		// The running server is the ONLY authority on which algorithms this
+		// deployment implements: PQ codepoints are assigned at runtime per
+		// deployment, so the CLI's local table cannot know them and would
+		// false-FAIL every PQ policy. Validate policy algorithms by NAME against
+		// the server's list-algorithms instead. (The server's own validation of
+		// its LOADED policies is reported separately by the loaded-policy
+		// correlation.)
+		checkPolicyAlgsAgainstServer(tmp, rep, g, role, len(pols))
+		return
+	}
+
+	// Offline: only the CLI's local registry (standard algorithms) is available.
+	// A PQ algorithm is runtime-assigned and unknowable without the server, so an
+	// "unknown algorithm" offline is INCONCLUSIVE (WARN + hint), not a hard FAIL.
 	if err := tdns.ValidateDnssecPoliciesFromFile(tmp); err != nil {
 		for _, ln := range strings.Split(strings.TrimRight(err.Error(), "\n"), "\n") {
 			ln = strings.TrimSpace(ln)
 			if ln == "" {
+				continue
+			}
+			if strings.Contains(ln, "unknown") && strings.Contains(ln, "algorithm") {
+				rep.warn(g, "policy", ln+" — offline the CLI cannot confirm PQ algorithms; re-run without --offline to check against the server", "")
 				continue
 			}
 			rep.fail(g, "policy", ln,
@@ -449,7 +607,72 @@ func checkDnssecPolicies(v *viper.Viper, rep *ccReport) {
 		}
 		return
 	}
-	rep.pass(g, "policies", fmt.Sprintf("all %d policy definition(s) valid (algorithms, split-gating, lifetimes)", len(pols)))
+	rep.pass(g, "policies", fmt.Sprintf("all %d policy definition(s) valid locally (CLI-known algorithms, split-gating, lifetimes)", len(pols)))
+}
+
+// checkPolicyAlgsAgainstServer validates each config policy's effective algorithm
+// NAMES (resolved without codepoints) against the running server's registered
+// algorithms (list-algorithms) — the authority on what this deployment
+// implements. Role-aware: each role's algorithm must be registered, a DNSSEC
+// signing algorithm, and valid for that role (KSK/ZSK).
+func checkPolicyAlgsAgainstServer(tmp string, rep *ccReport, g, role string, nPols int) {
+	algs, err := fetchServerAlgorithms(role)
+	if err != nil {
+		rep.warn(g, "algorithms", fmt.Sprintf("could not fetch the %s server's supported algorithms: %v — policy algorithms not checked", role, err), "")
+		return
+	}
+	byName := map[string]algregistry.AlgorithmInfo{}
+	for _, a := range algs {
+		byName[strings.ToUpper(a.Name)] = a
+	}
+	names, err := tdns.ResolveDnssecPolicyAlgNames(tmp)
+	if err != nil {
+		rep.warn(g, "algorithms", fmt.Sprintf("could not read policy algorithms: %v", err), "")
+		return
+	}
+
+	polNames := make([]string, 0, len(names))
+	for n := range names {
+		polNames = append(polNames, n)
+	}
+	sort.Strings(polNames)
+
+	allOK := true
+	check := func(polName, roleLabel, algName string, needKSK, needZSK bool) {
+		if algName == "" {
+			rep.fail(g, polName, fmt.Sprintf("policy %q has no %s algorithm", polName, roleLabel), "set the policy's algorithm")
+			allOK = false
+			return
+		}
+		info, known := byName[algName]
+		switch {
+		case !known:
+			rep.fail(g, polName, fmt.Sprintf("policy %q %s algorithm %q is not implemented by the %s server", polName, roleLabel, algName, role),
+				fmt.Sprintf("use an algorithm the server supports (`tdns-cli %s algorithms` lists them)", role))
+			allOK = false
+		case !info.ForDNSSEC:
+			rep.fail(g, polName, fmt.Sprintf("policy %q %s algorithm %q is registered but not a DNSSEC signing algorithm", polName, roleLabel, algName), "choose a DNSSEC algorithm")
+			allOK = false
+		case needKSK && !info.ForKSK:
+			rep.fail(g, polName, fmt.Sprintf("policy %q uses %q as %s, which is not valid as a KSK on the %s server", polName, algName, roleLabel, role), "choose a KSK-capable algorithm")
+			allOK = false
+		case needZSK && !info.ForZSK:
+			rep.fail(g, polName, fmt.Sprintf("policy %q uses %q as %s, which is not valid as a ZSK on the %s server", polName, algName, roleLabel, role), "choose a ZSK-capable algorithm")
+			allOK = false
+		}
+	}
+	for _, polName := range polNames {
+		pa := names[polName]
+		if pa.Mode == tdns.DnssecPolicyModeCSK {
+			check(polName, "CSK", pa.Alg, true, true)
+		} else {
+			check(polName, "KSK", pa.KSKAlg, true, false)
+			check(polName, "ZSK", pa.ZSKAlg, false, true)
+		}
+	}
+	if allOK {
+		rep.pass(g, "policies", fmt.Sprintf("all %d policy(ies) use algorithms the %s server implements and are role-valid", nPols, role))
+	}
 }
 
 func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
@@ -502,12 +725,13 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 		}
 
 		if zname == "" {
-			rep.fail(g, zlabel, "zone has no name", "every zone needs a name (FQDN with trailing dot)")
+			rep.fail(g, zlabel, "zone has no name", "every zone needs a name")
 			continue
 		}
-		if !strings.HasSuffix(zname, ".") {
-			rep.warn(g, zname, "zone name is not a FQDN (missing trailing dot)", "write the name with a trailing dot, e.g. example.com.")
-		}
+		// A missing trailing dot is NOT flagged: tdns accepts zone names both
+		// with and without it, and the daemon canonicalizes to FQDN internally
+		// (correlateZones already compares dns.Fqdn-normalized names), so a
+		// non-FQDN name is not a defect.
 		if seen[lc(zname)] {
 			rep.fail(g, zname, "duplicate zone declaration", "remove the duplicate entry")
 			continue
@@ -537,16 +761,36 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 				"define it under multisigner: or fix the name")
 		}
 
-		// Signing option requires a policy.
-		if hasSigningOption(eff.OptionsStrs) && lc(eff.DnssecPolicy) == "" {
-			rep.fail(g, zname, "online-signing/inline-signing set but no dnssecpolicy — the zone will be quarantined",
-				"set dnssecpolicy: on the zone or its template")
+		// Signing option requires a policy — except on the agent, which never
+		// signs: it rejects the option outright at parse time rather than
+		// quarantining the zone, so the missing policy is not the problem.
+		if hasSigningOption(eff.OptionsStrs) {
+			switch {
+			case role == "agent":
+				rep.warn(g, zname, "online-signing/inline-signing is ignored on tdns-agent — the agent never signs",
+					"drop the option, or host the zone on tdns-auth if it needs signing")
+			case lc(eff.DnssecPolicy) == "":
+				rep.fail(g, zname, "online-signing/inline-signing set but no dnssecpolicy — the zone will be quarantined",
+					"set dnssecpolicy: on the zone or its template")
+			}
 		}
 
 		switch lc(eff.Type) {
-		case "primary", "":
-			if lc(eff.Type) == "" {
-				rep.warn(g, zname, "no zone type (and none inherited from a template)", "set type: primary or secondary")
+		case "primary":
+			// tdns-agent refuses primary zones outright (parseconfig.go): the
+			// zone is put in ConfigError state at startup, so predict it here.
+			if role == "agent" {
+				rep.fail(g, zname, "tdns-agent does not serve primary zones — this zone will be quarantined at startup",
+					"make it a secondary, or host it on tdns-auth (or tdns-mpagent for multi-provider roles)")
+				continue
+			}
+			checkPrimaryZone(rep, g, zname, eff)
+		case "":
+			rep.warn(g, zname, "no zone type (and none inherited from a template)", "set type: primary or secondary")
+			if role == "agent" {
+				// Don't fall through to the primary-zone checks on the agent;
+				// an untyped agent zone is never a primary.
+				continue
 			}
 			checkPrimaryZone(rep, g, zname, eff)
 		case "secondary":
@@ -554,6 +798,34 @@ func checkZones(cfg *tdns.Config, rep *ccReport, online bool, role string) {
 		default:
 			rep.fail(g, zname, fmt.Sprintf("unknown zone type %q", eff.Type), "type must be primary or secondary")
 		}
+	}
+}
+
+// checkPeers mirrors the daemon's peer wiring: it validates the peers: block
+// and every zone's `- peers:` references (ValidatePeers + expandPeerRefs). A
+// broken peer definition, or a zone referencing an unknown/broken/inline-mixed
+// peer, quarantines that zone at load — config check reports the same so a
+// clean check does not hide a zone the daemon will refuse.
+func checkPeers(cfg *tdns.Config, rep *ccReport) {
+	const g = "Peers"
+	// Always validate peer references — do NOT early-return on an empty peers:
+	// block. A zone carrying a `- peers: [id]` reference to an undefined peer is
+	// quarantined by the daemon even when there is no peers: block at all; an
+	// early return would hide that. CheckPeerRefs returns empty maps (a no-op
+	// here) when nothing references peers, so this is safe for peerless configs.
+	brokenPeers, zoneErrors := cfg.CheckPeerRefs()
+	for id, why := range brokenPeers {
+		rep.fail(g, id, fmt.Sprintf("invalid peer definition: %s", why),
+			"fix the peer under peers:; zones referencing it are quarantined at load")
+	}
+	for zone, why := range zoneErrors {
+		rep.fail(g, zone, fmt.Sprintf("peer reference does not expand: %s", why),
+			"fix or remove the - peers: reference; the daemon quarantines this zone")
+	}
+	// PASS only when there is a peers: block to vouch for; a config with no
+	// peers and no references produces no line here (matches the old no-op).
+	if len(cfg.Peers) > 0 && len(brokenPeers) == 0 && len(zoneErrors) == 0 {
+		rep.pass(g, "peers", fmt.Sprintf("%d peer definition(s) valid; all peer references expand", len(cfg.Peers)))
 	}
 }
 
@@ -933,13 +1205,16 @@ func fetchActiveKeyAlgsByZone(role string) (map[string]activeKeyAlgs, error) {
 // it requires. Config-declared policies (from the checked file) win; the
 // built-in `default` policy and any policy named only by the running server are
 // resolved from the server's loaded policies. false when neither source knows it.
-func resolveWantAlgs(polName string, declared map[string]tdns.PolicyAlgs, serverPols map[string]tdns.DnssecPolicyInfo) (wantAlgs, bool) {
+func resolveWantAlgs(polName string, declared map[string]tdns.PolicyAlgNames, serverPols map[string]tdns.DnssecPolicyInfo) (wantAlgs, bool) {
 	pn := lc(polName)
 	if pa, ok := declared[pn]; ok {
+		// pa.{KSKAlg,ZSKAlg} are already NAMES (resolved without codepoints), so a
+		// PQ policy this client cannot codepoint-resolve is still comparable — the
+		// active-key side is server-reported names too.
 		return wantAlgs{
 			mode: normalizeMode(pa.Mode),
-			ksk:  lc(dns.AlgorithmToString[pa.KSKAlg]),
-			zsk:  lc(dns.AlgorithmToString[pa.ZSKAlg]),
+			ksk:  lc(pa.KSKAlg),
+			zsk:  lc(pa.ZSKAlg),
 		}, true
 	}
 	if sp, ok := serverPols[pn]; ok {
@@ -994,10 +1269,14 @@ func checkPolicyAlgVsActiveKeys(cfg *tdns.Config, v *viper.Viper, rep *ccReport,
 
 	// Config-declared policy algorithms (honors includes: same merged dnssec
 	// temp file checkDnssecPolicies validates).
-	var declared map[string]tdns.PolicyAlgs
+	// Resolve policy algorithms as NAMES (not codepoints): a pure client cannot
+	// resolve this deployment's runtime-assigned PQ codepoints, and the active-key
+	// side is already name-based (server-reported), so name-vs-name makes the
+	// correlation PQ-safe.
+	var declared map[string]tdns.PolicyAlgNames
 	if pols, _ := v.Get("dnssec.policies").(map[string]interface{}); len(pols) > 0 {
 		if tmp, err := writeTempYAML(map[string]interface{}{"dnssec": v.Get("dnssec")}); err == nil {
-			declared, _ = tdns.ResolveDnssecPolicyAlgs(tmp)
+			declared, _ = tdns.ResolveDnssecPolicyAlgNames(tmp)
 			os.Remove(tmp)
 		}
 	}

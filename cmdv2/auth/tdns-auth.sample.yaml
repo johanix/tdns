@@ -9,7 +9,11 @@
 include:
    - auth-templates.sample.yaml          # Zone templates (rename to .yaml when deploying)
    - auth-zones.sample.yaml              # Zone declarations (rename to .yaml when deploying)
-   - /var/lib/tdns/dynamic-zones.yaml    # Dynamic zones (auto-managed, don't edit manually)
+   # NOTE: do NOT include the dynamiczones configfile here. Dynamic zones are
+   # loaded at startup on their own (with their API-managed/catalog markers);
+   # including the file would route them through the static zone parser (which
+   # drops the markers) and its zones: list would OVERRIDE the zones: of the
+   # other included files (include merges replace list-valued keys).
 
 service:
    name:              TDNS-AUTH
@@ -40,6 +44,9 @@ dnsengine:
    # those listeners are not started (do53 is unaffected).
    certfile:  /etc/tdns/certs/servers/localhost..crt
    keyfile:   /etc/tdns/certs/servers/localhost..key
+   # NOTE: transfer authentication is PER ZONE (zone/template downstream-auth:
+   # plus the peers' TLS fields tls-name/ca-file/pins/dane), enforced at transfer
+   # time — there is no listener-level client-cert policy. See guide/xot.md.
    # outbound_soa_serial controls the SOA serial advertised to secondaries:
    #   keep      — outbound = inbound serial (default; current behavior)
    #   unixtime  — outbound = time.Now().Unix() at zone load
@@ -486,7 +493,8 @@ catalog:
 # catalog member zones, and API-created zones).
 dynamiczones:
    # Absolute path to YAML file where dynamic zone configs are stored.
-   # This file should be included in the 'include:' section above.
+   # Loaded automatically at startup — do NOT add it to include: (see the
+   # note in the include: section above).
    # Server must have write access to this file.
    configfile:     /var/lib/tdns/dynamic-zones.yaml
 
@@ -504,13 +512,54 @@ dynamiczones:
       allowed:  true             # Whether catalog member zones are allowed
       storage:  persistent       # "memory" or "persistent" - default: "memory"
 
-   # Configuration for direct API-created zones (future feature)
+   # Configuration for direct API-created zones (zone add/delete/modify).
+   # allowed: is a LIST of zone types the API may create — secondary
+   # (transfer-provisioned) and/or primary (template-provisioned; the
+   # template must carry dynamiczones: true, see auth-templates.sample.yaml).
+   # Absent/empty means deny all. NOTE: the pre-2026-07 bool form
+   # (allowed: true/false) is a hard config error naming this syntax.
    dynamic:
-      allowed:  false            # Whether direct API-created zones are allowed (default: false)
+      allowed:  [ ]              # e.g. [ secondary ] or [ secondary, primary ]
       storage:  memory           # "memory" or "persistent" - default: "memory"
 
 db:
    file:  /var/lib/tdns/tdns-auth.db
+
+# The keystore lives inside the db above, which is a poor home for key material
+# that has to outlive the machine: it cannot be reviewed, diffed or committed,
+# and losing it loses every key for every zone this server signs.
+#
+# 'keystore <class> bulk-export --dest DIR' writes a selected subset out as
+# BIND-convention key files plus a manifest; naming that directory here restores
+# it at every startup. The load happens BEFORE zones are parsed, so a signed zone
+# finds its keys already present and adopts them instead of minting replacements
+# that no parent's DS will match.
+#
+# Setting a directory is the whole switch — there is no separate enable flag.
+# Pre-load is create-if-absent by default: a key already in the keystore is never
+# overwritten from disk (a stale export would otherwise silently un-roll a rolled
+# key on every restart). Conflicts are logged at WARN; to overwrite once and
+# deliberately, use 'keystore <class> bulk-import --force'.
+#
+# keystore:
+#    preload:
+#       dnssec:  /etc/tdns/keys/dnssec
+#       sig0:    /etc/tdns/keys/sig0
+#       tsig:    /etc/tdns/keys/tsig
+#
+#       # DANGEROUS. Inverts the rule above for every class listed: an on-disk
+#       # key that differs REPLACES the keystore's copy instead of being skipped.
+#       #
+#       # Set this only where the exported directory is the source of truth and
+#       # the keystore is disposable — a host rebuilt from a config repo, e.g. a
+#       # training lab. It makes such a build scriptable with no manual step.
+#       #
+#       # Do NOT set it on a host whose keystore is authoritative. Unlike the
+#       # one-shot 'bulk-import --force', this stays armed on every restart, so a
+#       # stale committed export can silently revert a key you rolled by hand
+#       # long afterwards. Every replacement is logged at WARN, and the setting
+#       # is announced at WARN on each boot.
+#       overwrite-existing-keys:  false
 
 log:
    file:   /var/log/axfr.net/tdns-auth.log

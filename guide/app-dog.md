@@ -36,8 +36,10 @@ $ dog @ns1.example.com www.example.com AAAA +dnssec +multi
   `quic://`, `doq://` — which select the transport directly.
 - **The query type** is any name dog knows, including the experimental types
   above. Default is `A`.
-- **`IXFR=<serial>`** requests an IXFR from that serial. `AXFR` and `IXFR` are
-  Do53-only.
+- **`IXFR=<serial>`** requests an IXFR from that serial. `AXFR`/`IXFR` run over
+  Do53 (forced to TCP) and over **DoT** — add `+dot` (with `+cert=`/`+key=` for
+  a cert-authenticated primary) to transfer over TLS (XoT, RFC 9103). See the
+  [XoT guide](xot.md) for worked examples.
 - **DNS classes are not supported.** There is no `IN`/`CH`/`HS` positional
   argument; queries are always class IN.
 
@@ -64,6 +66,11 @@ Do53-TCP and DoT only).
 | `+TLS`, `+DOT` | DoT (default port 853) |
 | `+HTTPS`, `+DOH` | DoH (default port 443) |
 | `+QUIC`, `+DOQ` | DoQ (default port 853) |
+| `+cert=<file>`, `+key=<file>` | Present a client certificate (XoT / mutual DoT); needs an encrypted transport |
+| `+cafile=<file>` | Verify the server cert against a PEM CA bundle (encrypted transport) |
+| `+pin=<spki-b64>` | Verify the server cert by SPKI pin (encrypted transport) |
+| `+tlsa` | DANE-verify the server cert against `_port._tcp.<server>` (encrypted transport) |
+| `+showpin` | Print the server cert's SPKI pin (for use with `+pin=`/`pins:`) |
 | `+OPCODE=QUERY\|NOTIFY\|UPDATE` | Set the opcode (numeric 0/4/5 also accepted) |
 | `+OTS`, `+OTS=opt_in\|opt_out` | EDNS(0) transport-signaling option |
 | `+ER=<agent.domain>` | EDNS(0) Error Reporting, RFC 9567 |

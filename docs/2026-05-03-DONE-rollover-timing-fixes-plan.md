@@ -20,8 +20,16 @@
 > transition is now `ds-published → published` (C18 published/standby
 > split), not `…ToStandby` as named in W1 below. `effectiveServedDnskeyTTL`
 > (`:1400`) implements the E13 clamp with the deferral branch W1 specified.
-> The remaining operator-signalling / multi-error workstreams (W4–W9) were
-> not separately re-verified in this pass.
+> **Update 2026-07-24 (docs-vs-code audit):** the operator-signalling /
+> multi-error workstreams **W4, W5, W6, W8 and W9 also landed** — they
+> shipped later under the C-series/P-series refactor (e.g. the dedicated
+> `RolloverParentBlocker` category in `enums.go`, the `deps.TargetKeySnapshot`
+> keystore hoist, and the multi-error registry `zd.Errors` + `auto-rollover`
+> CLI gating), all confirmed on `main`. **Only W7** — the cosmetic
+> `RolloverEngineDeps` signature migration of the top-level entry points —
+> remains, and it has **zero correctness/safety impact** (inline `deps`
+> construction is functionally identical to threading it). This plan is
+> effectively complete; fold W7 into any future rollover-engine touch.
 
 ## Recommendation: where to fix
 

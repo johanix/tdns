@@ -139,7 +139,7 @@ var dumpAuthServersCmd = &cobra.Command{
 					if counters := formatTransportCounters(server); counters != "" {
 						fmt.Printf("    Transport usage: %s\n", counters)
 					}
-					if tlsaSnapshot := server.SnapshotTLSARecords(); len(tlsaSnapshot) > 0 {
+					if tlsaSnapshot := Conf.Internal.RRsetCache.SnapshotTLSAForServer(server.Name); len(tlsaSnapshot) > 0 {
 						fmt.Printf("    TLSA records:\n")
 						var owners []string
 						for owner := range tlsaSnapshot {
@@ -824,7 +824,7 @@ func printAuthServerVerbose(name string, server *cache.AuthServer) {
 	if counters := formatTransportCounters(server); counters != "" {
 		fmt.Printf("    Transport usage: %s\n", counters)
 	}
-	if tlsaSnapshot := server.SnapshotTLSARecords(); len(tlsaSnapshot) > 0 {
+	if tlsaSnapshot := Conf.Internal.RRsetCache.SnapshotTLSAForServer(server.Name); len(tlsaSnapshot) > 0 {
 		fmt.Printf("    TLSA records:\n")
 		var owners []string
 		for owner := range tlsaSnapshot {

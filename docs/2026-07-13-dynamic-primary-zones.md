@@ -1,9 +1,11 @@
 # Dynamic primary zones — API-provisioned, template-constrained
 
 **Date:** 2026-07-13
-**Status:** DESIGN — agreed in discussion. **Sequenced after
-`feature/zone-snapshot-correctness` merges** (see §8); implementation must build
-on the post-snapshot world.
+**Status:** IMPLEMENTED on `feature/dynamic-primary-zones` (2026-07-24, PR
+pending). §2 was re-verified against main @ `7885f23` before implementation;
+claims that had drifted are corrected in place and every design fork resolved
+during the (owner-AFK) implementation is recorded in §11. The §8 sequencing
+precondition (snapshot-correctness merge) was satisfied 2026-07-15 (`965df6f`).
 **Companion:** `2026-07-13-tdns-debug-test-tool.md` — whose provisioning stage
 (§6.3 there) is the immediate consumer; this feature turns its
 "operator installs zone + config" step into a fully automated
@@ -38,16 +40,29 @@ The striking finding is how little is missing:
   options unioned, and `Zonefile` as a `%s`-pattern substituted with the zone
   name (traversal-guarded) — built for stamping out many zones from one
   declaration.
-- **Restart already works.** The dynamic config file is pulled in via
-  `include:` and parsed by the normal `ParseZones` at boot — the same path
-  that performs template expansion and update-policy activation (including
-  `OptAllowUpdates`) for static zones. Persist `type: primary` +
-  `template: <name>` in the dynamic entry and a restarted server rebuilds the
-  zone with full policy through existing code. (Today `zoneDataToZoneConf`
-  does not serialize `Template` — a one-field addition, §5.)
-- **Dirty-primary machinery exists.** `OptDirty` blocks reload of a modified
-  primary; the refresh engine's zone-file write-back covers persistable
-  (API-managed, B5a) zones with the B5b `zoneStillLive` guards.
+- **Restart mostly works — but through `LoadDynamicZoneFiles`, not
+  `include:`+`ParseZones`.** *(Corrected 2026-07-24; the original claim had
+  drifted.)* Since B5a, the canonical boot path for dynamic zones is
+  `LoadDynamicZoneFiles` (called from StartAuth/StartAgent after the
+  RefreshEngine is up): it re-derives the `ApiManaged`/`SourceCatalog`
+  markers, validates persisted ACLs, and enqueues file-load refreshers. The
+  `include:` route still exists but is NOT the mechanism to build on: the
+  include merge *overrides* list-valued keys, so an included dynamic file
+  carrying `zones:` clobbers the `zones:` of any other config file, and the
+  `ParseZones` path would drop the `ApiManaged` marker (it is re-derived only
+  in `LoadDynamicZoneFiles`). Consequence: boot-time template re-expansion +
+  update-policy activation for dynamic primaries must be added to
+  `LoadDynamicZoneFiles` (§11.1) — small, and it reuses the same shared
+  helper as the add path, so the two cannot drift. (`zoneDataToZoneConf` not
+  serializing `Template` remains a one-field addition, §5.)
+- **Dirty-primary machinery exists, with one persistence gap.** `OptDirty`
+  blocks reload of a modified primary, and the refresh engine's zone-file
+  write-back covers persistable (API-managed, B5a) zones with the B5b
+  `zoneStillLive` guards — but that write-back only runs on a *refresh*, and
+  a dirty primary refuses refresh, so RFC 2136 ZONE-UPDATE content was never
+  auto-persisted (only `freeze`, the `zone write` API, and the CHILD-UPDATE
+  `direct` backend wrote the file). An update-time write-back for
+  API-managed primaries closes this (§11.4).
 
 What is genuinely new is only the **add path** (§4) and the **gates** (§3).
 
@@ -71,16 +86,21 @@ What is genuinely new is only the **add path** (§4) and the **gates** (§3).
 
    ```yaml
    templates:
-     churn-test:
+     - name: churn-test
        dynamiczones: true
-       zonefile: /var/tdns/dynamic/%s.zone
-       update-policy:
+       type: primary
+       zonefile: /var/tdns/dynamic/%szone   # %s includes the trailing dot
+       updatepolicy:
          zone:
            type: selfsub   # signer key _churn.<id>.<zone> owns names under itself
            rrtypes: [ TXT ]
        downstreams:
          - { prefix: 127.0.0.1/32, key: NOKEY }
    ```
+
+   *(Example corrected 2026-07-24: `templates:` is a LIST with per-entry
+   `name:`, the key is `updatepolicy:` not `update-policy:`, and the
+   `zonefile:` `%s` substitution includes the zone's trailing dot.)*
 
    (Named `dynamiczones:`, not `dynamic:` — it is the *zones using* the
    template that are dynamic, not the template.) A template without the flag
@@ -304,3 +324,152 @@ remains reads mechanical, and most of §10.2 genuinely is. But three items
 carry real regression risk (E, the snapshot-integration of C, the gate
 cutover), and the acceptance surface (§9) is broad. Net: **a medium feature,
 ~3–5 focused sessions — not an afternoon, and not a large project either.**
+
+---
+
+## 11. Implementation decisions (2026-07-24, `feature/dynamic-primary-zones`)
+
+The owner was AFK during implementation; each open fork was resolved with the
+minimal option consistent with this document's direction and the existing
+dynamic-secondary / peers / keystore patterns. Recorded here with rationale.
+
+### 11.1 Boot path: re-expansion in `LoadDynamicZoneFiles`, not `include:`
+
+Per the corrected §2: the persisted dynamic entry carries `type: primary` +
+`template:` (+ the materialized `zonefile:`/ACLs/options), and
+`LoadDynamicZoneFiles` re-expands the template and re-activates the update
+policy at boot through the SAME shared helper the add path uses
+(`prepareDynamicPrimary`), then enqueues a file-load refresher. The
+gap-fill semantics the original design counted on still hold: the persisted
+(materialized) fields win over the template's. A dynamic-primary entry whose
+template has been *removed* from config registers an error-state zone
+(visible in `zone list`, not silently skipped) — the §5 "missing template ⇒
+ERROR state" behavior, now explicit in the load path. `include:`-ing the
+dynamic config file remains possible but is not required and not the
+supported restart mechanism for primaries.
+
+### 11.2 v1 restrictions on what a blessed template may express
+
+- **`allow-child-updates` is refused** for dynamic primaries. Child updates
+  require a wired delegation backend; backend wiring lives in `ParseZones`
+  only, so an API-added zone (and a `LoadDynamicZoneFiles`-restored one)
+  would carry the option with a nil backend — the exact "silently misbehaving
+  scanner" state the static path refuses to start. Zone-scope
+  `allow-updates` (the driving use case) is fully supported. Revisit if a
+  real need appears.
+- **`catalog-zone`, `catalog-member-auto-*`, and `multi-provider` options
+  are refused** — different machinery with its own provisioning paths.
+- **Store must be `map`** (template `store:` of anything else is refused) —
+  the existing dynamic-zones map-only chokepoint, kept loud.
+- **The template's own `type:` must be `primary` or unset** when used for a
+  primary add; the expanded config's type always comes from the request.
+- **The expanded config must yield a `zonefile:`** (the template carries the
+  `%s` pattern); a primary with no file has nothing to load or persist.
+- **An unusable `dnssecpolicy:`** (unknown/broken policy reference) refuses
+  the add rather than minting an unsigned zone (ParseZones quarantines
+  instead; for an API request the refusal IS the quarantine-equivalent, and
+  fail-loud beats silently serving unsigned).
+
+### 11.3 Modify: refused for primaries (as designed in §5)
+
+`ModifyDynamicZone` rejects `ZoneType == Primary` with a pointer at the
+supported channels (DNS UPDATE for content, keystore API for keys,
+delete + re-add for config).
+
+### 11.4 Content persistence: update-time write-back
+
+RFC 2136 ZONE-UPDATEs on an API-managed primary now persist the zone file
+immediately after a successful apply (`WriteZone(tosource)` — the exact
+mirror of the CHILD-UPDATE `direct`-backend persist, and scoped to
+`OptApiManagedZone` primaries so no existing zone class changes behavior).
+This closes the §2 gap: without it, updated content lived only in RAM until
+a freeze/manual write, and "restart → content survives" (§9) failed.
+
+### 11.5 Zone-file path handling for template-pattern files
+
+- `zoneDataToZoneConf` now serializes `zd.Zonefile` when set (falling back
+  to the `<zonedirectory>/<zone>zone` derivation) plus `zd.Template` and the
+  real zone type. Previously it unconditionally derived the path from
+  `zonedirectory:`, which would silently re-point a template-pattern primary
+  (e.g. `/etc/tdns/zones/%szone`) at the wrong file on the next persist.
+  For every existing dynamic-zone class the two paths coincide, so this is
+  behavior-neutral outside the new feature.
+- `RemoveDynamicZone` additionally best-effort removes `zd.Zonefile` (the
+  template-expanded path) — an API-managed primary is disposable by
+  construction (§5); previously only the `zonedirectory:`-derived path was
+  removed.
+
+### 11.6 Concurrency: template access under `confMu`
+
+The add path copies the template out of the global `Templates` map under
+`confMu.RLock()` (the map is wholesale-replaced by template reload under
+`confMu.Lock()`; entries are never mutated in place, so a copied entry is
+safe to use after release). Matches the list-zones handler's locking
+convention.
+
+### 11.7 Gate 1 mechanics (bool → list cutover)
+
+`dynamiczones.dynamic:` gets its own config type (`DynamicApiZoneConf`) so
+the cutover does not touch the catalog structs that share the old
+`DynamicZoneTypeConf`. The `allowed:` field decodes via a dedicated
+mapstructure hook that turns a legacy bool into a hard config error naming
+the new syntax (`allowed: [secondary]`), wired into BOTH decode chains (the
+daemon loader and `config check`/`ValidateConfig`) so the checker and the
+daemon cannot disagree. Unknown list values are a hard config error.
+Absent/empty list ⇒ deny all (unchanged default posture).
+
+### 11.8 Inline TSIG on a primary add
+
+As §4: the staged key is applied to every keyless (`""`/`NOKEY`)
+`downstreams:` entry of the *expanded* config — `BLOCKED` entries are never
+rewired — and the rewired ACL is persisted with the zone, so boot
+re-expansion preserves it by gap-fill. The staging/commit/rollback machinery
+is shared with the secondary path; only the rewiring target differs
+(`AclEntry` downstreams vs `PeerConf` primaries).
+
+### 11.9 Publish cadence
+
+`ZoneRefresher` gains a parsed `PublishCadence` field so a template's
+`publish-cadence:` reaches dynamic zones on both the add and boot paths
+(static zones keep their existing direct-assignment path in `ParseZones` —
+untouched).
+
+### 11.10 Found live: query-handler registration on a zone-less server
+
+The live smoke run (add → serve on a config with `zones:` empty) exposed a
+pre-existing latent bug affecting ALL dynamic zones, not just primaries:
+`RegisterDefaultQueryHandlers` only registered the zone-based query handler
+when the config had static zones at boot, so a zone-less server — exactly the
+self-service deployment this feature targets — REFUSEd every query for
+dynamically added zones. Fixed: the handler also registers when dynamic zones
+are possible (`dynamiczones.configfile` set, or a non-empty
+`dynamic.allowed`). Testbeds never saw this because they always carry static
+zones.
+
+Relatedly, `CheckDynamicConfigFileIncluded` warned in the WRONG direction
+("not included via include: — dynamic zones will not be loaded on startup"),
+a leftover from before `LoadDynamicZoneFiles` owned the boot path. It now
+warns when the dynamic config file IS in `include:` (which would drop the
+API-managed/catalog markers via ParseZones and clobber other files' `zones:`
+lists through the include merge's list-override). The sample config no longer
+lists the dynamic file under `include:`.
+
+### 11.11 Live validation (2026-07-24)
+
+Smoke-validated end-to-end on a freshly built tdns-auth with an empty
+`zones:` list: `zone add --type primary --template api-primary` → bootstrap
+apex synthesized → SOA/NS/glue served; unsigned DNS UPDATE refused; restart →
+`LoadDynamicZoneFiles` re-expanded the template (policy re-derived, zone
+Ready and still update-gated); `zone delete` → RCODE back to REFUSED, zone
+file removed, dynamic config entry gone. Gate matrix, bootstrap edge cases,
+TSIG rewiring, and the activation helper are covered by unit tests
+(`dynamic_primary_test.go`, `dynamic_zones_gates_test.go`,
+`update_policy_activation_test.go`); full `-race` suites green in all five
+modules.
+
+### 11.12 Delivery shape
+
+Implemented as ONE branch/PR (`feature/dynamic-primary-zones`) with commits
+sequenced per §10.4's PR1→PR4 stages, because the owner asked for a single
+reviewable PR end-to-end. The §10.4 split remains the right review order —
+the commits follow it.

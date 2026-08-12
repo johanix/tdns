@@ -1129,9 +1129,9 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		return nil, 0, cache.ContextFailure, core.TransportDo53, err
 	}
 
-	forceTCP := imr.dnskeyQueryForceTCP(qname, qtype)
+	dnskeyBypass := imr.dnskeyTransportBypass(qname, qtype)
 	if qtype == dns.TypeDNSKEY {
-		imr.noteDNSKEYLookup(forceTCP)
+		imr.noteDNSKEYLookup(dnskeyBypass)
 	}
 
 	// If PR flag is set, verify at least one server has encrypted transports available
@@ -1184,6 +1184,12 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 		lastErr          error
 		attempts         int
 	)
+	// When the DNSKEY transport policy bypasses probabilistic selection, every
+	// tuple for a given (server, addr) resolves to the SAME preferred transport.
+	// prioritizeServers still emits one tuple per advertised transport, so dedup
+	// by resolved (addr, transport) to avoid re-querying an identical path that
+	// just failed.
+	dnskeyAttempted := map[cache.AddrXport]bool{}
 	for attempt := 0; attempt < 2; attempt++ {
 		zoneName, zone, prioritized = imr.prioritizeServers(qname, serverMap, requireEncrypted)
 		if Globals.Debug {
@@ -1200,15 +1206,32 @@ func (imr *Imr) IterativeDNSQueryWithLoopDetection(ctx context.Context, qname st
 			addr := tuple.Addr
 			nsname := tuple.NSName
 			transport := tuple.Transport
+
+			// effTransport is what tryServer will actually attempt: the
+			// tuple's probabilistic pick, or the policy-preferred transport
+			// under dnskeyBypass.
+			effTransport := transport
+			if dnskeyBypass {
+				// All tuples for this (server, addr) collapse to the same
+				// preferred transport; skip the ones we've already tried.
+				eff := imr.preferredDNSKEYTransport(server)
+				key := cache.AddrXport{Addr: addr, Transport: eff}
+				if dnskeyAttempted[key] {
+					continue
+				}
+				dnskeyAttempted[key] = true
+				effTransport = eff
+			}
+
 			lastNS, lastAddr, lastTransport = nsname, addr, transport
 			attempts++
 
 			if Globals.Debug {
 				lg.Printf("IterativeDNSQuery: using nameserver %s@%s over %s (ALPN: %v) for <%s, %s> query\n",
-					addr, nsname, core.TransportToString[transport], server.Alpn, qname, dns.TypeToString[qtype])
+					addr, nsname, core.TransportToString[effTransport], server.Alpn, qname, dns.TypeToString[qtype])
 			}
 
-			r, _, wireTransport, err := imr.tryServer(ctx, server, addr, transport, m, qname, qtype, forceTCP)
+			r, _, wireTransport, err := imr.tryServer(ctx, server, addr, transport, m, qname, qtype, dnskeyBypass)
 			lastTransport = wireTransport
 			if err != nil {
 				lastErr = err
@@ -1866,10 +1889,19 @@ func buildQuery(qname string, qtype uint16, withOOTS bool) (*dns.Msg, error) {
 // tryServer executes one query attempt for an explicit (server, addr,
 // transport) tuple selected upstream by prioritizeServers. It records the
 // outcome against the server's per-(addr, transport) backoff map.
-func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport, m *dns.Msg, qname string, qtype uint16, forceTCP bool) (*dns.Msg, time.Duration, core.Transport, error) {
+func (imr *Imr) tryServer(ctx context.Context, server *cache.AuthServer, addr string, t core.Transport, m *dns.Msg, qname string, qtype uint16, dnskeyBypass bool) (*dns.Msg, time.Duration, core.Transport, error) {
 	eff := t
-	if forceTCP && t == core.TransportDo53 {
-		eff = core.TransportDo53TCP
+	if dnskeyBypass {
+		// DNSKEY transport policy bypasses this server's probabilistic
+		// transport weights and picks the best advertised transport instead.
+		// Returns 0 only under force_encrypted when the server has no
+		// encrypted transport; in that case we must fail rather than fall
+		// back to cleartext.
+		pref := imr.preferredDNSKEYTransport(server)
+		if pref == 0 {
+			return nil, 0, t, fmt.Errorf("dnssec.dnskey_query_transport=force_encrypted but server %s advertises no encrypted transport", server.Name)
+		}
+		eff = pref
 	}
 
 	select {
@@ -2364,13 +2396,14 @@ func (imr *Imr) handleAnswer(ctx context.Context, qname string, qtype uint16, r 
 func extractReferral(r *dns.Msg, qname string, qtype uint16) (*core.RRset, string, map[string]bool) {
 	nsMap := map[string]bool{}
 	zonename := ""
-	var nsrrs []dns.RR
-	switch qtype {
-	case dns.TypeNS:
-		nsrrs = r.Answer
-	default:
-		nsrrs = r.Ns
-	}
+	// A referral always carries its NS RRset in the AUTHORITY section, regardless
+	// of the query type — including a QTYPE=NS query whose parent delegation puts
+	// the child NS in Authority with an empty Answer. (The apex-NS *answer* case,
+	// NS in the ANSWER section with aa=1, is handled earlier by handleAnswer;
+	// extractReferral is only ever reached to extract a referral/delegation.)
+	// Previously this read r.Answer for QTYPE=NS, so a QTYPE=NS query would find
+	// no NS in the parent's referral and loop until "max iterations reached".
+	nsrrs := r.Ns
 	var rrset core.RRset
 	for _, rr := range nsrrs {
 		switch rr.Header().Rrtype {

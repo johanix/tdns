@@ -101,19 +101,11 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 	tryPostpass(zone)
 
 	// Note: SetupZoneSigning and SetupZoneSync are NOT called here.
-	// For config-defined zones, they are registered as OnFirstLoad callbacks
-	// in ParseZones. For dynamic zones (catalog, API), they are called
-	// explicitly after initialLoadZone.
-
-	// Execute OnFirstLoad callbacks (one-shot)
-	zd.mu.Lock()
-	callbacks := zd.OnFirstLoad
-	zd.OnFirstLoad = nil
-	zd.mu.Unlock()
-	for i, cb := range callbacks {
-		lgEngine.Info("executing OnFirstLoad callback", "zone", zone, "callback", i+1, "total", len(callbacks))
-		cb(zd)
-	}
+	// OnFirstLoad callbacks (incl. SetupZoneSigning from ParseZones) are
+	// drained by completeFirstZonePolicyAndLoad AFTER InstallInitialSnapshot
+	// and syncZoneDnssecPolicyFromConfig so the served-SOA-RRSIG backfill GATE
+	// and first-sign see a Ready zone with the correct binding (#286 deferral
+	// preserved; order moved post-Ready for PR-2).
 
 	if updated {
 		zd.LatestRefresh = time.Now()
@@ -124,9 +116,18 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 		zd.ClearError(RefreshError)
 		// Apply outbound_soa_serial mode for the serial we'll advertise
 		// to secondaries.
-		if zd.KeyDB != nil {
+		// MUST-NOT-MODIFY: neither outbound mode may rewrite the serial of a
+		// tdns-auth secondary that did not originate this content. Clear any
+		// serial persisted before the zone became a mirror, so the inflated
+		// legacy value cannot be resurrected by a later change here.
+		if zd.KeyDB != nil && !zoneMayOriginateContent(zd) {
+			if err := zd.KeyDB.DeleteOutgoingSerial(zone); err != nil {
+				lgEngine.Warn("failed to clear persisted outgoing serial for mirroring secondary",
+					"zone", zone, "err", err)
+			}
+		} else if zd.KeyDB != nil {
 			serialChanged := false
-			switch zd.KeyDB.OutboundSoaSerial {
+			switch zd.EffectiveOutboundSoaSerial() {
 			case OutboundSoaSerialUnixtime:
 				zd.CurrentSerial = uint32(time.Now().Unix())
 				lgEngine.Info("zone loaded; outbound_soa_serial=unixtime",
@@ -158,45 +159,52 @@ func initialLoadZone(ctx context.Context, zd *ZoneData, zone string, zr ZoneRefr
 	return updated, nil
 }
 
-// applyReloadedPolicyLocked rebinds a signed zone to a DNSSEC policy freshly
-// resolved from the config on RELOAD, UNLESS doing so would change the zone's
-// effective KSK or ZSK ALGORITHM.
-//
-// An algorithm change requires a key rollover that is not yet implemented:
-// SignZone (reconcileActiveKeyAlgorithms, sign.go) refuses the mismatch, so
-// blindly rebinding to the new policy would leave the zone bound to a policy it
-// can never sign under — it would go unsigned. To preserve availability we
-// REFUSE the change here: keep the OLD policy bound, log a warning, and let the
-// zone keep signing with its existing keys. A benign edit (same effective KSK
-// and ZSK algorithms, only lifetimes/sigvalidity/rollover/ttls changed) applies
-// normally.
-//
-// This runs only on the reload path (FirstZoneLoad == false), where the current
-// binding is the OLD policy; a first bind (nil current policy) is always
-// applied. The separate set-policy/change-policy command path
-// (apihandler_zone.go) has its own revert-on-failure handling and must not use
-// this guard. The effective algorithms are the resolved DnssecPolicy.KSKAlgorithm
-// / .ZSKAlgorithm fields (top-level algorithm plus any per-role override), the
-// same fields SignZone and set-policy compare against the active keys.
-//
-// Caller must hold zd.mu. Returns true if newPol was applied.
-func (zd *ZoneData) applyReloadedPolicyLocked(newPol *DnssecPolicy, newName string) bool {
-	if cur := zd.DnssecPolicy; cur != nil &&
-		(cur.KSKAlgorithm != newPol.KSKAlgorithm || cur.ZSKAlgorithm != newPol.ZSKAlgorithm) {
-		lgEngine.Warn("refused incompatible DNSSEC algorithm change on reload; keeping existing policy",
-			"zone", zd.ZoneName,
-			"effective_policy", zd.DnssecPolicyName,
-			"config_policy", newName,
-			"effective_ksk_alg", dns.AlgorithmToString[cur.KSKAlgorithm],
-			"config_ksk_alg", dns.AlgorithmToString[newPol.KSKAlgorithm],
-			"effective_zsk_alg", dns.AlgorithmToString[cur.ZSKAlgorithm],
-			"config_zsk_alg", dns.AlgorithmToString[newPol.ZSKAlgorithm],
-			"reason", "algorithm change requires a key rollover (not implemented)")
+// drainAndRunOnFirstLoad clears zd.OnFirstLoad and runs the callbacks. Called
+// AFTER InstallInitialSnapshot + syncZoneDnssecPolicyFromConfig on first-bind
+// paths so SetupZoneSigning (registered by ParseZones) sees a Ready zone with
+// the correct policy binding. Preserves the #286 one-shot deferral: callbacks
+// still run once, just post-Ready rather than mid-load.
+func drainAndRunOnFirstLoad(zd *ZoneData) {
+	zd.mu.Lock()
+	callbacks := zd.OnFirstLoad
+	zd.OnFirstLoad = nil
+	zd.mu.Unlock()
+	for i, cb := range callbacks {
+		lgEngine.Info("executing OnFirstLoad callback", "zone", zd.ZoneName, "callback", i+1, "total", len(callbacks))
+		cb(zd)
+	}
+}
+
+// hasPendingOnFirstLoad reports whether OnFirstLoad callbacks are still waiting
+// to run (e.g. after a first-load policy sync failure). Reads under zd.mu.
+func hasPendingOnFirstLoad(zd *ZoneData) bool {
+	if zd == nil {
 		return false
 	}
-	zd.DnssecPolicy = newPol
-	zd.DnssecPolicyName = newName
-	return true
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return len(zd.OnFirstLoad) > 0
+}
+
+// finishFirstLoadPolicy is the post-Ready tail of first-bind completion: sync
+// DNSSEC policy then drain OnFirstLoad. Assumes the zone is already Ready —
+// does not call InstallInitialSnapshot (ticker completion retries must not
+// rebuild the snapshot from zd.Data).
+// On sync failure OnFirstLoad is retained for a later retry.
+func finishFirstLoadPolicy(ctx context.Context, zd *ZoneData, conf *Config, configPolicyName string) error {
+	if err := syncZoneDnssecPolicyFromConfig(ctx, zd, conf.Internal.KeyDB, conf, configPolicyName); err != nil {
+		lgEngine.Warn("DNSSEC policy sync after first load failed", "zone", zd.ZoneName, "err", err)
+		return err
+	}
+	drainAndRunOnFirstLoad(zd)
+	return nil
+}
+
+// completeFirstZonePolicyAndLoad finishes a first-bind after initialLoadZone:
+// publish the snapshot (Ready), then finishFirstLoadPolicy (sync + OnFirstLoad).
+func completeFirstZonePolicyAndLoad(ctx context.Context, zd *ZoneData, conf *Config, configPolicyName string) error {
+	zd.InstallInitialSnapshot()
+	return finishFirstLoadPolicy(ctx, zd, conf, configPolicyName)
 }
 
 func RefreshEngine(ctx context.Context, conf *Config) {
@@ -257,28 +265,11 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// retry (CLI reload, ticker), the zd already has config
 						// from the first attempt — must not overwrite with zeros.
 						if zd.ZoneType == 0 {
-							// Effective policy = dynamic override (set via
-							// `zone set-policy`) if present, else the config base.
-							polName := zr.DnssecPolicy
-							if eff, overridden, err := EffectiveDnssecPolicyName(conf.Internal.KeyDB, zone, zr.DnssecPolicy); err != nil {
-								lgEngine.Warn("failed to read DNSSEC policy override, using config base", "zone", zone, "err", err)
-							} else if overridden {
-								lgEngine.Info("DNSSEC policy override in effect", "zone", zone, "policy", eff, "config", zr.DnssecPolicy)
-								polName = eff
-							}
-							// Look up the resolved policy. A non-empty name that is
-							// not in the map (e.g. an override pointing to a removed
-							// policy) must not bind a zero-value policy — quarantine
-							// the zone instead.
-							dp := ConfLive().DnssecPolicies[polName]
-							if polName != "" {
-								if _, exists := ConfLive().DnssecPolicies[polName]; !exists {
-									lgEngine.Error("zone has unknown effective DNSSEC policy, will not be signed", "zone", zone, "policy", polName, "config_policy", zr.DnssecPolicy)
-									zd.SetError(DnssecError, "DNSSEC policy %q does not exist", polName)
-									dp = DnssecPolicy{}
-									polName = ""
-								}
-							}
+							// Effective policy name is resolved later by
+							// syncZoneDnssecPolicyFromConfig (post-Ready). Do NOT
+							// bind intent here — on restart that pre-bind hides
+							// applied≠intent (blocking ①). Quarantine for an
+							// unresolvable intent happens inside the sync helper.
 							msc := ConfLive().MultiSigner[zr.MultiSigner]
 
 							zd.mu.Lock()
@@ -290,21 +281,28 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.Notify = normalizePeerAddrs(zr.Notify)
 							zd.AllowNotify = zr.AllowNotify
 							zd.Downstreams = zr.Downstreams
+							zd.DownstreamAuth = zr.DownstreamAuth
 							zd.Zonefile = zr.Zonefile
+							zd.Template = zr.Template
+							if zr.PublishCadence != 0 {
+								zd.publishCadence = zr.PublishCadence
+							}
 							zd.ZoneType = zr.ZoneType
-							zd.Options = zr.Options
+							// Normalize AFTER ZoneType is assigned — the
+							// predicate depends on it (Fix B chokepoint).
+							zd.Options, zd.OutboundSoaSerial =
+								zd.applyOptionNormalization(zr.ZoneType, zr.Options, zr.OutboundSoaSerial)
 							zd.UpdatePolicy = zr.UpdatePolicy
-							zd.DnssecPolicy = &dp
-							zd.DnssecPolicyName = polName
+							// Record the config-base policy name only (no struct bind).
+							// syncZoneDnssecPolicyFromConfig binds post-Ready; this
+							// name survives a failed first load so ticker retry can
+							// still resolve intent.
+							zd.DnssecPolicyName = zr.DnssecPolicy
 							zd.MultiSigner = &msc
 							zd.DelegationSyncQ = conf.Internal.DelegationSyncQ
 							zd.KeyDB = conf.Internal.KeyDB
 							zd.Data = core.NewCmap[OwnerData]()
 							zd.mu.Unlock()
-							if zd.DnssecPolicy != nil &&
-								(zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) {
-								UpdateSigValidityFloor(zd, zd.DnssecPolicy, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm, false)
-							}
 						}
 
 						if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,
@@ -330,7 +328,24 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							}
 							continue
 						}
-						zd.InstallInitialSnapshot()
+						if err := completeFirstZonePolicyAndLoad(ctx, zd, conf, zr.DnssecPolicy); err != nil {
+							lgEngine.Error("zone policy sync after first load failed", "zone", zone, "error", err)
+							zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
+							zd.LatestError = time.Now()
+							if _, exists := refreshCounters.Get(zone); !exists {
+								refreshCounters.Set(zone, &RefreshCounter{
+									Name:       zone,
+									SOARefresh: 300,
+									CurRefresh: 30,
+								})
+							}
+							if zr.Response != nil {
+								resp.Error = true
+								resp.ErrorMsg = err.Error()
+								zr.Response <- resp
+							}
+							continue
+						}
 					} else {
 						// EXISTING ZONE: already loaded, normal refresh path.
 						if zd.HasServiceImpactingError() {
@@ -366,6 +381,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							zd.Notify = normalizePeerAddrs(zr.Notify)
 							zd.AllowNotify = zr.AllowNotify
 							zd.Downstreams = zr.Downstreams
+							zd.DownstreamAuth = zr.DownstreamAuth
 						} else if zr.Notify != nil {
 							zd.Notify = normalizePeerAddrs(zr.Notify)
 						}
@@ -382,9 +398,42 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						if zr.ZoneStore != 0 {
 							zd.ZoneStore = zr.ZoneStore
 						}
-						// Replace options only if provided (don't merge) to match config reload behavior
-						if zr.Options != nil {
-							zd.Options = zr.Options
+						// Options and the outbound serial mode are normalized
+						// TOGETHER (the normalizer covers both), so they are
+						// merged in one place — assigning either separately
+						// afterwards would overwrite a normalized value with
+						// the raw one.
+						//
+						// Their update rules differ, though:
+						//   - Options replace only if provided (don't merge),
+						//     matching config-reload behaviour.
+						//   - The serial mode is gated on ConfigUpdate, NOT on
+						//     non-emptiness: empty is MEANINGFUL there
+						//     ("inherit the global"), so a config edit that
+						//     removes a per-zone mode must clear it, while a
+						//     bare NOTIFY/refresh-only refresher (carrying no
+						//     config) must not wipe a configured one.
+						if zr.Options != nil || zr.ConfigUpdate {
+							// Normalize against the zone's EFFECTIVE type: the
+							// ZoneType assignment below is conditional, so
+							// prefer the incoming type when the refresher
+							// carries one — otherwise a reload that flips
+							// Primary->Secondary would normalize against the
+							// stale role.
+							ztype := zd.ZoneType
+							if zr.ZoneType != 0 {
+								ztype = zr.ZoneType
+							}
+							newOpts := zd.Options
+							if zr.Options != nil {
+								newOpts = zr.Options
+							}
+							newSerial := zd.OutboundSoaSerial
+							if zr.ConfigUpdate {
+								newSerial = zr.OutboundSoaSerial
+							}
+							zd.Options, zd.OutboundSoaSerial =
+								zd.applyOptionNormalization(ztype, newOpts, newSerial)
 						}
 						// Update UpdatePolicy only if provided (check if it has meaningful content)
 						// UpdatePolicy is a struct, so we check if any fields are set
@@ -398,37 +447,9 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							}
 							zd.ZoneType = zr.ZoneType
 						}
-						// Lookup DNSSEC policy and MultiSigner from config (same as new zone creation).
-						// Compare by name (not pointer): conf.Internal.DnssecPolicies stores
-						// values, so &dp is a fresh address every refresh tick.
-						var reapplyPolicy bool
-						if zr.DnssecPolicy != "" {
-							// Effective policy = dynamic override if present, else config base.
-							polName := zr.DnssecPolicy
-							if eff, overridden, err := EffectiveDnssecPolicyName(conf.Internal.KeyDB, zone, zr.DnssecPolicy); err != nil {
-								lgEngine.Warn("failed to read DNSSEC policy override, using config base", "zone", zone, "err", err)
-							} else if overridden {
-								polName = eff
-							}
-							if dp, exists := ConfLive().DnssecPolicies[polName]; exists {
-								// Rebind so a same-name policy whose internals changed
-								// on reload (lifetimes, sigvalidity, rollover, ttls, …)
-								// takes effect; the re-sign below converges the zone
-								// (the algorithm reconcile in EnsureActiveDnssecKeys is
-								// idempotent — no key churn when keys already match).
-								// BUT applyReloadedPolicyLocked refuses a change that
-								// alters the effective KSK/ZSK algorithm: that needs a
-								// key rollover that is not yet built, and applying it
-								// would leave the zone bound to an unusable policy and
-								// serving unsigned. On refusal the OLD policy stays
-								// bound (no re-sign) so the zone keeps signing.
-								if zd.applyReloadedPolicyLocked(&dp, polName) {
-									reapplyPolicy = true
-								}
-							} else {
-								lgEngine.Warn("DNSSEC policy not found, keeping existing", "policy", polName, "zone", zone)
-							}
-						}
+						// Lookup MultiSigner from config. DNSSEC policy sync runs
+						// AFTER unlock via syncZoneDnssecPolicyFromConfig (applied
+						// vs intent; replaces applyReloadedPolicyLocked).
 						if zr.MultiSigner != "" {
 							if msc, exists := ConfLive().MultiSigner[zr.MultiSigner]; exists {
 								zd.MultiSigner = &msc
@@ -438,17 +459,21 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						}
 						zd.mu.Unlock()
 
-						// Re-sign on every reload of a signed zone so a changed
-						// policy takes effect — whether the policy NAME changed or
-						// just its internals (algorithm, ttls.max_served, …). The
-						// re-sign drives EnsureActiveDnssecKeys, whose algorithm
-						// reconcile retires wrong-algorithm keys and generates new
-						// ones; it is idempotent, so an unchanged policy causes no
-						// key churn.
-						if reapplyPolicy && zd.DnssecPolicy != nil &&
-							(zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) {
-							UpdateSigValidityFloor(zd, zd.DnssecPolicy, conf.KaspPropagationDelay(), 0, false, conf.IsLargeAlgorithm, false)
-							triggerResign(conf, zone)
+						// Policy sync only on config-bearing refreshers (same gate
+						// as notify/ACL). NOTIFY/CLI refreshes must not re-run
+						// resolve→backfill→classify→apply. First-load OnFirstLoad
+						// completion retries on the ticker (hasPendingOnFirstLoad),
+						// not here.
+						if zr.ConfigUpdate && (zr.DnssecPolicy != "" || zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) {
+							if err := syncZoneDnssecPolicyFromConfig(ctx, zd, conf.Internal.KeyDB, conf, zr.DnssecPolicy); err != nil {
+								lgEngine.Warn("DNSSEC policy sync on reload failed", "zone", zone, "err", err)
+								if zr.Response != nil {
+									resp.Error = true
+									resp.ErrorMsg = fmt.Sprintf("DNSSEC policy sync failed: %v", err)
+									zr.Response <- resp
+								}
+								continue
+							}
 						}
 						lgEngine.Debug("updated configuration for zone", "zone", zone, "notify", zd.Notify, "primaries", zd.PrimariesConf, "upstreams", zd.Upstreams, "zonefile", zd.Zonefile, "store", ZoneStoreToString[zd.ZoneStore])
 
@@ -604,26 +629,8 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					// DYNAMIC ZONE: not from config (catalog member, API-created).
 					// Config-defined zones are always pre-registered by ParseZones.
 					lgEngine.Info("adding dynamic zone (not pre-registered)", "zone", zone)
-					// Effective policy = dynamic override if present, else config base.
-					polName := zr.DnssecPolicy
-					if eff, overridden, err := EffectiveDnssecPolicyName(conf.Internal.KeyDB, zone, zr.DnssecPolicy); err != nil {
-						lgEngine.Warn("failed to read DNSSEC policy override, using config base", "zone", zone, "err", err)
-					} else if overridden {
-						polName = eff
-					}
-					// A non-empty effective policy name that is not in the map
-					// (e.g. an override to a removed policy) must not bind a
-					// zero-value policy — quarantine the zone after creation.
-					dp := ConfLive().DnssecPolicies[polName]
-					unknownPolicy := ""
-					if polName != "" {
-						if _, exists := ConfLive().DnssecPolicies[polName]; !exists {
-							lgEngine.Error("dynamic zone has unknown effective DNSSEC policy, will not be signed", "zone", zone, "policy", polName, "config_policy", zr.DnssecPolicy)
-							unknownPolicy = polName
-							dp = DnssecPolicy{}
-							polName = ""
-						}
-					}
+					// Do not bind DNSSEC policy pre-load (blocking ①); sync runs
+					// post-Ready via completeFirstZonePolicyAndLoad.
 					msc := ConfLive().MultiSigner[zr.MultiSigner]
 					// Resolution happens at every ingress path (parse/load/add/
 					// modify/catalog), so a config-bearing refresher always carries
@@ -631,32 +638,95 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 					primariesConf := clonePeerConfs(zr.PrimariesConf)
 					upstreams := clonePeerConfs(zr.Primaries)
 					zd := &ZoneData{
-						ZoneName:         zone,
-						ZoneStore:        zr.ZoneStore,
-						Logger:           log.Default(),
-						PrimariesConf:    primariesConf,
-						Upstreams:        upstreams,
-						Notify:           normalizePeerAddrs(zr.Notify),
-						AllowNotify:      zr.AllowNotify,
-						Downstreams:      zr.Downstreams,
-						Zonefile:         zr.Zonefile,
-						ZoneType:         zr.ZoneType,
-						Options:          zr.Options,
-						UpdatePolicy:     zr.UpdatePolicy,
-						DnssecPolicy:     &dp,
-						DnssecPolicyName: polName,
-						MultiSigner:      &msc,
-						DelegationSyncQ:  conf.Internal.DelegationSyncQ,
-						Data:             core.NewCmap[OwnerData](),
-						KeyDB:            conf.Internal.KeyDB,
-						FirstZoneLoad:    true,
-						Status:           ZoneStatusPending, // registered + enqueued, no data yet (B6)
+						ZoneName:          zone,
+						ZoneStore:         zr.ZoneStore,
+						Logger:            log.Default(),
+						PrimariesConf:     primariesConf,
+						Upstreams:         upstreams,
+						Notify:            normalizePeerAddrs(zr.Notify),
+						AllowNotify:       zr.AllowNotify,
+						Downstreams:       zr.Downstreams,
+						DownstreamAuth:    zr.DownstreamAuth,
+						Zonefile:          zr.Zonefile,
+						Template:          zr.Template,
+						ZoneType:          zr.ZoneType,
+						Options:           zr.Options,
+						OutboundSoaSerial: zr.OutboundSoaSerial,
+						UpdatePolicy:      zr.UpdatePolicy,
+						DnssecPolicyName:  zr.DnssecPolicy, // config-base hint; struct bound post-Ready
+						MultiSigner:       &msc,
+						DelegationSyncQ:   conf.Internal.DelegationSyncQ,
+						Data:              core.NewCmap[OwnerData](),
+						KeyDB:             conf.Internal.KeyDB,
+						FirstZoneLoad:     true,
+						Status:            ZoneStatusPending, // registered + enqueued, no data yet (B6)
+						publishCadence:    zr.PublishCadence,
 					}
 
-					Zones.Set(zone, zd)
-					if unknownPolicy != "" {
-						zd.SetError(DnssecError, "DNSSEC policy %q does not exist", unknownPolicy)
+					// Strip origination settings this zone may not act on. The
+					// ZoneData is fully constructed at this point, so the
+					// normalizer sees the final role (Fix B chokepoint).
+					//
+					// Under zd.mu: applyOptionNormalization records the outcome
+					// on the ZoneData and requires the lock. Nothing else holds
+					// it here, so this cannot deadlock.
+					zd.mu.Lock()
+					zd.Options, zd.OutboundSoaSerial =
+						zd.applyOptionNormalization(zd.ZoneType, zd.Options, zd.OutboundSoaSerial)
+					zd.mu.Unlock()
+
+					// Register the OnFirstLoad callbacks BEFORE the initial load:
+					// on a first-load failure the ticker retry path re-runs
+					// initialLoadZone + completeFirstZonePolicyAndLoad against
+					// the SAME ZoneData, and only drains callbacks that are
+					// already registered — registering after a successful load
+					// (the historical order) meant a failed-then-retried dynamic
+					// zone never got signing/sync set up. Registration is inert
+					// until drainAndRunOnFirstLoad, so the success path is
+					// unchanged.
+					//
+					// Dynamic zones historically called SetupZoneSigning inline
+					// (not via OnFirstLoad). Register it on OnFirstLoad so a
+					// sync failure is retryable by the ticker completion path
+					// (hasPendingOnFirstLoad → finishFirstLoadPolicy) the same
+					// way as config zones. Agent: empty marker so policy sync
+					// still retries without signing.
+					zd.mu.Lock()
+					if Globals.App.Type != AppTypeAgent {
+						resignQ := conf.Internal.ResignQ
+						zd.OnFirstLoad = append(zd.OnFirstLoad, func(z *ZoneData) {
+							if err := z.SetupZoneSigning(resignQ); err != nil {
+								lgEngine.Error("SetupZoneSigning failed", "zone", z.ZoneName, "error", err)
+							}
+						})
+					} else if len(zd.OnFirstLoad) == 0 {
+						zd.OnFirstLoad = append(zd.OnFirstLoad, func(*ZoneData) {})
 					}
+					// Template-driven dynamic zones (dynamic primaries): wire
+					// delegation sync on first load, as ParseZones does for
+					// static zones. Scoped to zr.Template != "" so no
+					// pre-existing dynamic-zone class changes behavior.
+					// SetupZoneSync's delegation-sync-child path does an
+					// unbounded send to DelegationSyncQ, and OnFirstLoad
+					// callbacks run inside this engine loop — dispatch async so
+					// a full/stopped consumer cannot stall refresh processing.
+					if zr.Template != "" && (zd.Options[OptDelSyncParent] || zd.Options[OptDelSyncChild]) {
+						delegationSyncQ := conf.Internal.DelegationSyncQ
+						zd.OnFirstLoad = append(zd.OnFirstLoad, func(z *ZoneData) {
+							if delegationSyncQ == nil {
+								lgEngine.Error("DelegationSyncQ not available", "zone", z.ZoneName)
+								return
+							}
+							go func() {
+								if err := z.SetupZoneSync(delegationSyncQ); err != nil {
+									lgEngine.Error("SetupZoneSync failed", "zone", z.ZoneName, "error", err)
+								}
+							}()
+						})
+					}
+					zd.mu.Unlock()
+
+					Zones.Set(zone, zd)
 
 					if _, err := initialLoadZone(ctx, zd, zone, zr, conf, refreshCounters,
 						tryPostpass); err != nil {
@@ -666,14 +736,26 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						continue
 					}
 
-					// Dynamic zones: set up signing if needed
-					// (config zones do this via OnFirstLoad callback registered in ParseZones)
-					if Globals.App.Type != AppTypeAgent {
-						if err := zd.SetupZoneSigning(conf.Internal.ResignQ); err != nil {
-							lgEngine.Error("SetupZoneSigning failed", "zone", zone, "error", err)
-						}
-					}
 					zd.InstallInitialSnapshot()
+					if err := finishFirstLoadPolicy(ctx, zd, conf, zr.DnssecPolicy); err != nil {
+						lgEngine.Warn("DNSSEC policy sync for dynamic zone failed", "zone", zone, "err", err)
+						zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
+						zd.LatestError = time.Now()
+						// OnFirstLoad retained — ticker completion retry will finish.
+						if _, exists := refreshCounters.Get(zone); !exists {
+							refreshCounters.Set(zone, &RefreshCounter{
+								Name:       zone,
+								SOARefresh: 300,
+								CurRefresh: 30,
+							})
+						}
+						if zr.Response != nil {
+							resp.Error = true
+							resp.ErrorMsg = err.Error()
+							zr.Response <- resp
+						}
+						continue
+					}
 				}
 			}
 			if zr.Response != nil && !zr.Wait {
@@ -720,6 +802,29 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							lgEngine.Error("initial load retry failed", "zone", zone, "error", err)
 							zd.SetError(RefreshError, "refresh error: %v", err)
 							zd.LatestError = time.Now()
+						} else {
+							if err := completeFirstZonePolicyAndLoad(ctx, zd, conf, zd.DnssecPolicyName); err != nil {
+								lgEngine.Error("initial load retry: policy sync failed", "zone", zone, "error", err)
+								zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
+								zd.LatestError = time.Now()
+								rc.CurRefresh = 30 // retry sooner
+								continue
+							}
+						}
+						rc.CurRefresh = rc.SOARefresh
+						continue
+					}
+
+					// Data loaded + Ready, but first-load policy sync/drain did
+					// not finish (OnFirstLoad retained). Retry only that — no
+					// re-Refresh, no re-InstallInitialSnapshot.
+					if hasPendingOnFirstLoad(zd) {
+						if err := finishFirstLoadPolicy(ctx, zd, conf, zd.DnssecPolicyName); err != nil {
+							lgEngine.Warn("first-load policy completion retry failed", "zone", zone, "err", err)
+							zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
+							zd.LatestError = time.Now()
+							rc.CurRefresh = 30
+							continue
 						}
 						rc.CurRefresh = rc.SOARefresh
 						continue
@@ -735,10 +840,26 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						// Successful refresh clears RefreshError. Other categories
 						// (rollover-policy, parent-DSYNC, config) survive.
 						zd.ClearError(RefreshError)
-						// Apply outbound_soa_serial mode after upstream refresh.
-						if zd.KeyDB != nil {
+						// Apply outbound_soa_serial mode after upstream refresh —
+						// but never for a mirroring secondary (MUST-NOT-MODIFY;
+						// applyRefreshReplacementLocked already set the serial
+						// to upstream's and nothing may move it off that).
+						if zd.KeyDB != nil && !zoneMayOriginateContent(zd) {
+							// The serial belongs to upstream, so neither mode
+							// may touch it. Also clear anything persisted
+							// BEFORE this zone became a mirror: a zone that
+							// turns non-originating via a live config reload
+							// never passes through initialLoadZone, so without
+							// this its stale row survives, and a later flip back
+							// to may-originate under persist mode would let
+							// LoadOutgoingSerial resurrect an inflated serial.
+							if err := zd.KeyDB.DeleteOutgoingSerial(zone); err != nil {
+								lgEngine.Warn("failed to clear persisted outgoing serial for mirroring secondary",
+									"zone", zone, "err", err)
+							}
+						} else if zd.KeyDB != nil {
 							serialChanged := false
-							switch zd.KeyDB.OutboundSoaSerial {
+							switch zd.EffectiveOutboundSoaSerial() {
 							case OutboundSoaSerialUnixtime:
 								zd.CurrentSerial = uint32(time.Now().Unix())
 								lgEngine.Info("zone updated from upstream; outbound_soa_serial=unixtime",

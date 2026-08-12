@@ -1,30 +1,36 @@
+# Zones and zone templates for tdns-agent.
+#
+# tdns-agent is SECONDARY-only: a zone with `type: primary` is refused at
+# startup and left in config-error state (host primary zones on tdns-auth).
+# The agent also never signs, so online-signing/inline-signing are ignored
+# here.
+
 templates:
    - name:            agent
      type:            secondary
-     primary:         127.0.0.1:5355
-
-   - name: child-agent
      store:           map
+     primaries:
+        - { addr: 127.0.0.1:5355, key: NOKEY }
+
+   - name:            child-agent
      type:            secondary
-     notify:          [ 127.0.0.1:5399 ]
-     options:         [ delegation-sync-child, multisigner ]
-     dnssecpolicy:    none
-     multisigner:     mstest
+     store:           map
+     primaries:
+        - { addr: 127.0.0.1:5355, key: NOKEY }
+     notify:
+        - { addr: 127.0.0.1:5399, key: NOKEY }
+     # delegation-sync-proxy: the agent acts on behalf of a DSYNC-unaware
+     # primary (BIND/Knot), watching inbound transfers for CDS/CSYNC changes
+     # and forwarding to the parent. Valid only on an agent secondary zone.
+     options:         [ delegation-sync-proxy ]
 
 zones:
-   - name:            test.net
-     zonefile:        /etc/tdns/zones/test.net
-     template:        parent-primary
-     notify:	      [ 127.0.0.1:5366 ]
+   - name:            test.net.
+     template:        agent
 
    - name:            johani.org.
-     zonefile:        /etc/tdns/zones/johani.org
-     options:	      [ online-signing ]
-     template:        secondary
+     template:        child-agent
 
    # Commented zones kept for reference
-   # child.test.net:
-   #    name:         child.test.net
-   #    zonefile:     /etc/tdns/zones/child.test.net
-   #    template:     child-primary
-   # ... other commented zones ...
+   # - name:          child.test.net.
+   #   template:      agent

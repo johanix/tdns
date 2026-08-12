@@ -666,6 +666,17 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 	var dsRRs *CachedRRset
 	if name != "." {
 		dsRRs = rrcache.Get(name, dns.TypeDS)
+		if dsRRs == nil {
+			// Backfill: the DS for this zone is not cached, so the chain of
+			// trust cannot be anchored yet. Fetch and validate it on demand
+			// (mirroring the DNSKEY on-demand fetch a few lines above) instead
+			// of giving up with Indeterminate. This is what lets a cold
+			// resolution of a signed child's data validate without a prior
+			// explicit DS query — a secure delegation is never conveyed to us
+			// as a referral when the same server is authoritative for both
+			// parent and child, so the DS must be fetched explicitly here.
+			dsRRs = rrcache.backfillDS(ctx, name, fetcher)
+		}
 		// If DS exists but is not secure, we cannot validate DNSKEYs
 		if dsRRs != nil && dsRRs.State != ValidationStateSecure {
 			// Mark zone with same state as DS and return
@@ -869,6 +880,76 @@ func (rrcache *RRsetCacheT) ValidateDNSKEYs(ctx context.Context, rrset *core.RRs
 		}
 	}
 	return ValidationStateIndeterminate, nil
+}
+
+// backfillDS fetches and validates the DS RRset for `name` when it is not
+// already cached, so ValidateDNSKEYs can anchor the zone's DNSKEY to its parent
+// without depending on a prior explicit DS query. The DS lives in the parent
+// zone (signed by the parent's ZSK); fetching it drives its own validation up
+// the chain to the trust anchor. On success the validated DS is cached so
+// subsequent lookups hit the fast path; returns nil (leaving the caller to
+// report Indeterminate) when the DS cannot be obtained.
+//
+// Scope: this handles the SECURE case (a DS exists). An authenticated NODATA
+// (proof of no DS ⇒ an insecure delegation) is returned by the fetcher as an
+// empty answer here and left as Indeterminate; proper insecure-delegation
+// handling via NSEC/NSEC3 proof is separate, future work.
+//
+// Termination: validating the fetched DS needs the PARENT's DNSKEY, which may
+// recurse into ValidateDNSKEYs(parent) → backfillDS(parent) → … strictly
+// UP the tree, ending at the root / a configured trust anchor. It never
+// re-enters for `name` itself, so there is no unbounded recursion.
+func (rrcache *RRsetCacheT) backfillDS(ctx context.Context, name string, fetcher RRsetFetcher) *CachedRRset {
+	if fetcher == nil || name == "." {
+		return nil
+	}
+	_, servers, err := rrcache.FindClosestKnownZone(name)
+	if err != nil {
+		if rrcache.Verbose {
+			log.Printf("backfillDS: FindClosestKnownZone(%q) failed: %v", name, err)
+		}
+		return nil
+	}
+	if len(servers) == 0 {
+		if sm, ok := rrcache.ServerMap.Get("."); ok {
+			servers = sm
+		}
+	}
+	if len(servers) == 0 {
+		return nil
+	}
+	fetched, err := fetcher(ctx, name, dns.TypeDS, servers)
+	if err != nil || fetched == nil || len(fetched.RRs) == 0 {
+		// Fetch failed, or authenticated NODATA (no DS ⇒ insecure delegation,
+		// out of scope here). Leave the zone unresolved: caller → Indeterminate.
+		if rrcache.Verbose {
+			log.Printf("backfillDS: no DS obtained for %q (err=%v); leaving chain unanchored", name, err)
+		}
+		return nil
+	}
+	// Validate the fetched DS against the parent's DNSKEY (recurses up-tree).
+	// This also marks the zone Secure in ZoneMap on success (see ValidateRRset's
+	// DS special-case).
+	vstate, err := rrcache.ValidateRRset(ctx, fetched, fetcher)
+	if err != nil {
+		if rrcache.Verbose {
+			log.Printf("backfillDS: ValidateRRset for DS %q failed: %v", name, err)
+		}
+		return nil
+	}
+	entry := &CachedRRset{
+		Name:       name,
+		RRtype:     dns.TypeDS,
+		RRset:      fetched,
+		Context:    ContextAnswer,
+		State:      vstate,
+		Expiration: time.Now().Add(GetMinTTL(fetched.RRs)),
+	}
+	rrcache.Set(name, dns.TypeDS, entry)
+	if rrcache.Verbose {
+		log.Printf("backfillDS: fetched+validated DS for %q (state=%s)", name, ValidationStateToString[vstate])
+	}
+	return entry
 }
 
 func (rrcache *RRsetCacheT) ValidateNegativeResponse(ctx context.Context, qname string, qtype uint16, rcode uint8,

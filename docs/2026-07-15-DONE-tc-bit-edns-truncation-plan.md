@@ -1,6 +1,6 @@
 # Implementation plan — EDNS-aware UDP truncation / the TC bit (tdns-auth)
 
-**Status:** ready for implementation. Self-contained — no prior context needed.
+**Status: ✅ DONE** (implemented on main; verified against code 2026-07-24). Landed in `0bcab4e` (+ CodeRabbit follow-up `54a9baa`): `truncatingResponseWriter` (`v2/udp_truncate.go`) installed on the Do53 mux inside `TsigSigningHandler`, EDNS bufsize via `edns0.RequestUDPSize`, TC=1 + trailing-RR trim on oversized UDP, truncation-before-TSIG-MAC, and room reserved for the response TSIG RR. The one open decision (a 1232-byte anti-fragmentation cap) was resolved as uncapped — honor the client's advertised size. Only the testbed live-validation re-run (pq.axfr.net UDP matrix) is outstanding.
 **Origin:** pq.axfr.net testbed bug TB2 (see
 `docs/2026-07-14-snapshot-branch-signing-findings.md`, "pq.axfr.net testbed
 bugs"). This doc is the cooked plan; implement against `main`.

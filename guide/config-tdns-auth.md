@@ -53,7 +53,7 @@ zones:
      downstreams:                                  # who may AXFR from us
         - prefix:  "127.0.0.0/8"
           key:     NOKEY
-        - prefix:  "::1"
+        - prefix:  "::1/128"                        # single host — explicit mask required
           key:     NOKEY
 ```
 
@@ -86,6 +86,11 @@ the keystore. Both end up in the same place: the keystore lives in the SQLite
 database named by `db.file`, and there is no separate keystore path to
 configure.
 
+Because it is one opaque database file, backing the keys up or moving them to a
+new host needs its own tooling. See [The tdns Keystore](keystore.md) for the
+full picture, including `bulk-export`/`bulk-import` and the `keystore.preload`
+block that restores exported keys at startup.
+
 ```yaml
 keys:
    tsig:
@@ -100,7 +105,7 @@ Supported algorithms are `hmac-sha1`, `hmac-sha224`, `hmac-sha256`,
 
 Keys declared here are synchronised into the keystore at startup as
 `origin=config` rows, and the in-memory cache is then rebuilt from the
-database. Keys added at runtime are stored with `origin=keystore`:
+database. Keys added at runtime are stored with `origin=api`:
 
 ```console
 $ tdns-cli auth keystore tsig add --name xfr-key-2026. \
@@ -117,7 +122,7 @@ grants no authority of its own; it defaults to the key's origin.
 Two names are reserved and may not be used as key names: **`NOKEY`** and
 **`BLOCKED`**. Both are ACL sentinels, described next.
 
-A key name referenced from a zone's `primaries:`, `notify:`, `allow-notify:` or
+A key name referenced from a zone's `upstreams:`, `notify:`, `allow-notify:` or
 `downstreams:` must resolve, either here or in the keystore. If it does not,
 that zone is quarantined at config load:
 
@@ -136,18 +141,21 @@ what they guard:
 | `allow-notify:` | secondary | who may send NOTIFY **to** us | accept unsigned NOTIFY from any configured primary's address |
 
 Both are ordered lists of `{prefix, key}` entries. Note that `notify:` and
-`primaries:` are *not* ACLs — they are lists of destinations and sources, and
+`upstreams:` are *not* ACLs — they are lists of destinations and sources, and
 take `{addr, key}` entries where the address includes a port. Writing `addr:`
 inside a `downstreams:` entry is the single most common mistake; it decodes to
 an empty prefix and quarantines the zone with `bad ip-spec ""`.
 
 ### The prefix field
 
-`prefix` is an ip-spec matched against the **source address** of the request:
+`prefix` is an ip-spec matched against the **source address** of the request. It
+must carry an explicit boundary — a bare address such as `192.0.2.1` is rejected
+with `add an explicit prefix length`; write a single host as an explicit `/32`
+(or `/128`):
 
 | Form | IPv4 | IPv6 |
 |------|------|------|
-| bare address | `192.0.2.1` | `::1` |
+| single host | `192.0.2.1/32` | `::1/128` |
 | CIDR | `192.0.2.0/24` | `2001:db8::/32` |
 | netmask | `192.0.2.0&255.255.255.0` | — |
 | range | `192.0.2.10-192.0.2.20` | `2001:db8::10-2001:db8::20` |
@@ -198,9 +206,127 @@ downstreams:
      key:    xfr-key-2026     # new key
    - prefix: "2001:db8:1::/48"
      key:    xfr-key-2025     # old key, still accepted during the overlap
-   - prefix: "192.0.2.66"
+   - prefix: "192.0.2.66/32"
      key:    BLOCKED          # denied even with a valid key
 ```
+
+### Peers: describe a server once, reference it everywhere
+
+A primary typically serves the same secondaries for hundreds of zones (and a
+secondary pulls from the same primary for hundreds of zones). The top-level
+`peers:` block describes each remote server ONCE — addresses, TSIG keys, and
+TLS identity — and the four per-zone lists (`upstreams:`, `notify:`,
+`downstreams:`, `allow-notify:`) reference it:
+
+```yaml
+peers:
+   sec1:                              # identifier used in references
+      addr: sec1.example.net:853      # dial target (when used as an upstream);
+                                      #   also supplies name/prefix defaults
+      prefixes: [ 198.51.100.7/32,    # inbound source addresses (defaults to
+                  2001:db8::7/128 ]   #   addr's IP as a /32 or /128 literal)
+      keys: [ xfr-key-2026,           # TSIG: outbound signs with the FIRST,
+              xfr-key-2025 ]          #   inbound accepts ANY (one-place key
+                                      #   rollover); `key: x` = `keys: [x]`
+      tls-name: sec1.example.net      # peer cert identity (SAN check / TLSA base)
+      ca-file: /etc/tdns/certs/tdns-ca.crt   # verify ITS client cert against these roots
+      # pins: [ "spki-b64=" ]         #   and/or static SPKI pins
+      # dane: true                    #   and/or DNSSEC-validated TLSA
+
+zones:
+   - name: example.net.
+     type: primary
+     downstreams:
+        - peers: [ sec1 ]             # reference — expands to prefix x key
+        - prefix: 192.0.2.0/24        # inline entries keep working unchanged
+          key: NOKEY
+```
+
+Rules: an entry is a reference (`peers:`) or inline (`prefix:`/`key:` or
+`addr:`/`key:`), never both; an unknown identifier quarantines the zone;
+`NOKEY` must be the only element of `keys:`. In `downstreams:` a reference
+expands to the prefix × key cross-product (the same shape as the manual
+dual-key rollover pattern above), each entry carrying the peer's TLS
+identity (`tls-name`/`ca-file`/`pins`/`dane`) for the transfer-time
+certificate check below.
+
+**Spelling aliases.** The canonical names are `upstreams:` (where a
+secondary pulls from — BIND9 calls this `primaries:`, NSD `request-xfr:`)
+and `downstreams:` (who may transfer from us — BIND9 `secondaries:`, NSD
+`provide-xfr:`). All three spellings of each are accepted on input; using
+two spellings of the same list in one zone or template is an error that
+quarantines the zone. This guide uses `upstreams:`/`downstreams:`
+throughout.
+
+### Per-zone transfer authentication: downstream-auth
+
+`downstream-auth:` on a zone (or, more usefully, a template) lists which
+proof classes are acceptable for transferring THIS zone. The list is
+policy; the credentials live in the `downstreams:` entries and the peers
+they reference. Enforcement happens at transfer time — never at the TLS
+handshake — so ordinary queries on every transport, and cert-less DoT
+clients, are completely unaffected.
+
+```yaml
+templates:
+   - name: served-strict
+     type: primary
+     downstream-auth: [ tsig, tls-pkix ]    # no cert+TSIG, no transfer
+     downstreams:
+        - peers: [ sec1, sec-legacy ]
+
+zones:
+   - name: example.com.                     # 1 of 500 identical declarations
+     template: served-strict
+     zonefile: /var/lib/tdns/example.com
+   - name: internal.example.
+     template: served-strict
+     downstream-auth: [ any ]               # relaxes the template policy
+```
+
+The mechanism classes, weakest to strongest — each `tls-*` class escalates
+ON TOP of the matched entry's address/TSIG requirements:
+
+| Mechanism | The matched entry proved |
+|---|---|
+| `prefix` | source address only (entry key was `NOKEY`) |
+| `tsig` | source address + valid TSIG |
+| `tls-pin` | the above + client cert SPKI in the peer's `pins` |
+| `tls-pkix` | the above + client cert chains to the peer's `ca-file` and carries its `name` as a SAN |
+| `tls-dane` | the above + client cert matches the peer name's DNSSEC-validated TLSA |
+| `any` | sentinel: unrestricted (for overriding a template's policy) |
+
+Absent `downstream-auth` = unrestricted: any entry that matches by
+address+TSIG authorizes, exactly as before the ladder existed.
+
+Two consequences worth knowing:
+
+- **The NOKEY footgun becomes a hard refusal.** Under
+  `downstream-auth: [ tsig, ... ]`, a transfer that only satisfied a
+  broad `NOKEY` entry maps to mechanism `prefix` — not in the list — and
+  is refused even though an ACL entry matched.
+- **A `tls-*`-only list makes the zone DoT-only for transfers** (the TLS
+  mechanisms are only satisfiable on the DoT listener) while queries stay
+  available on every transport.
+
+Misconfiguration surfaces at load: unknown mechanism names quarantine the
+zone; a listed mechanism that no entry can satisfy, an entry that can only
+produce disallowed mechanisms (dead entry), and `tls-dane` without the IMR
+each log a warning.
+
+There is deliberately **no listener-level client-certificate policy** in
+`dnsengine:`. The auth DoT listener always *requests* (never requires) a
+client certificate, so a secondary that has one presents it and everyone
+else is unaffected; verification happens per zone as above. To refuse
+non-TLS traffic entirely, restrict `dnsengine.transports:`.
+
+Provisioning the certificates — including the one-shot `tdns-cli cert
+init` and upgrading existing self-signed certs — is covered in
+[Certificate Provisioning](cert-provisioning.md). Complete worked setups for
+all three `tls-*` modes (cert generation, primary **and** secondary config, and
+`dog` test commands), plus the outbound `upstreams:` fields
+(`transport:`/`tls-auth:`/`tls-name:`) a secondary uses to pull over XoT, are in
+the [XoT guide](xot.md).
 
 ## Zone declarations
 
@@ -213,7 +339,7 @@ A zone is one entry in the top-level `zones:` list.
 | `zonefile` | path | required for primary; optional persistence for secondary |
 | `store` | string | `map` (default) or `xfr` |
 | `template` | string | name of an entry in `templates:` |
-| `primaries` | list of `{addr, key}` | required for `secondary` |
+| `upstreams` | list of `{addr, key}` entries and/or `- peers: [id]` refs | required for `secondary` (aliases: `primaries`, `request-xfr`) |
 | `notify` | list of `{addr, key}` | NOTIFY destinations |
 | `allow-notify` | list of `{prefix, key}` | inbound-NOTIFY ACL |
 | `downstreams` | list of `{prefix, key}` | provide-xfr ACL |

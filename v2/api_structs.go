@@ -42,6 +42,14 @@ type KeystorePost struct {
 	TsigImportFormat string   `json:"tsigimportformat,omitempty"`
 	TsigOverwrite    []string `json:"tsigoverwrite,omitempty"`
 	TsigVerbose      bool     `json:"tsigverbose,omitempty"`
+	// Bulk export/import (subcommands "bulk-export" / "bulk-import"). Select*
+	// narrows an export; the Bulk*Keys carry the payload of an import. Force
+	// (above) turns import's create-if-absent into overwrite.
+	SelectExact    []string        `json:"selectexact,omitempty"`
+	SelectSubtree  []string        `json:"selectsubtree,omitempty"`
+	BulkDnssecKeys []BulkDnssecKey `json:"bulkdnsseckeys,omitempty"`
+	BulkSig0Keys   []BulkSig0Key   `json:"bulksig0keys,omitempty"`
+	BulkTsigKeys   []BulkTsigKey   `json:"bulktsigkeys,omitempty"`
 }
 
 type TsigKeyInfo struct {
@@ -67,21 +75,41 @@ type TsigCacheDelta struct {
 }
 
 type KeystoreResponse struct {
-	AppName        string
-	Time           time.Time
-	Status         string
-	Zone           string
-	Dnskeys        map[string]DnssecKey // TrustAnchor
-	Sig0keys       map[string]Sig0Key
-	TsigKeys       []TsigKeyInfo              `json:"tsigkeys,omitempty"`
-	TsigImport     []TsigKeyDisposition       `json:"tsigimport,omitempty"`
-	TsigExport     *TsigKeyExport             `json:"tsigexport,omitempty"`
-	Algorithms     []algorithms.AlgorithmInfo // populated by the "list-algorithms" command
-	Policies       []DnssecPolicyInfo         // populated by the "list-policies" command
-	Msg            string
-	Error          bool
-	ErrorMsg       string
-	TsigCacheDelta *TsigCacheDelta `json:"-"`
+	AppName    string
+	Time       time.Time
+	Status     string
+	Zone       string
+	Dnskeys    map[string]DnssecKey // TrustAnchor
+	Sig0keys   map[string]Sig0Key
+	TsigKeys   []TsigKeyInfo        `json:"tsigkeys,omitempty"`
+	TsigImport []TsigKeyDisposition `json:"tsigimport,omitempty"`
+	TsigExport *TsigKeyExport       `json:"tsigexport,omitempty"`
+	// Bulk export/import. The Bulk*Keys carry an export's payload (key material
+	// included — that is what an export is for); BulkDispositions reports one
+	// outcome per key offered to an import.
+	BulkDnssecKeys   []BulkDnssecKey      `json:"bulkdnsseckeys,omitempty"`
+	BulkSig0Keys     []BulkSig0Key        `json:"bulksig0keys,omitempty"`
+	BulkTsigKeys     []BulkTsigKey        `json:"bulktsigkeys,omitempty"`
+	BulkDispositions []BulkKeyDisposition `json:"bulkdispositions,omitempty"`
+	// BulkRepublishZones names the zones a DNSSEC bulk import actually changed.
+	// Like NeedsSigningKeysRepublish it is an instruction to the external-tx
+	// caller, not wire data — but plural, because one bulk import spans zones.
+	BulkRepublishZones []string `json:"-"`
+	// BulkSig0InvalidateZones names the zones a SIG(0) bulk import actually
+	// changed, for the external-tx caller to drop from KeystoreSig0Cache after
+	// ITS commit. Same shape and same reason as BulkRepublishZones: the
+	// invalidation cannot happen where the rows are written, because the commit
+	// that makes them visible has not happened yet, and invalidating early
+	// leaves a window for a read-through GetSig0Keys to repopulate the cache
+	// from pre-commit state — pinning the superseded key until restart, which is
+	// the exact failure the invalidation exists to prevent.
+	BulkSig0InvalidateZones []string                   `json:"-"`
+	Algorithms              []algorithms.AlgorithmInfo // populated by the "list-algorithms" command
+	Policies                []DnssecPolicyInfo         // populated by the "list-policies" command
+	Msg                     string
+	Error                   bool
+	ErrorMsg                string
+	TsigCacheDelta          *TsigCacheDelta `json:"-"`
 	// NeedsSigningKeysRepublish is set by DnssecKeyMgmt when the operation can
 	// change the zone's active signing-key set. External-tx callers (APIkeystore)
 	// must call republishSigningKeysForZone after their Commit (R1).
@@ -222,6 +250,21 @@ type ZonePost struct {
 	// strings.
 	Primaries []PeerConf
 	Options   []string
+	// ZoneType selects what `zone add` creates: "secondary" (the default) or
+	// "primary" (template-provisioned). Template names the operator-blessed
+	// (dynamiczones: true) template a primary is expanded from — REQUIRED for
+	// primaries, unused for secondaries.
+	ZoneType string
+	Template string
+	// Zone content updates ("zone update <verb>"). UpdateRRs carries
+	// presentation-form records for addrr/delrr/replacerrset; UpdateName and
+	// UpdateRrtype address an RRset or a name for delrrset/delname. See
+	// BuildZoneUpdateActions, which both this channel and the DDNS channel
+	// translate through.
+	UpdateVerb   string
+	UpdateRRs    []string
+	UpdateName   string
+	UpdateRrtype string
 	// Inline TSIG key for the add/modify: when TsigName is set the server upserts
 	// {name, algo, secret} into its keys: store, points keyless primaries at it,
 	// and persists it with the zone (survives restart). TsigAlgo defaults to
@@ -268,6 +311,7 @@ type ZoneDsyncResponse struct {
 type ConfigPost struct {
 	Command       string   // status | reload | reload-zones | reload-tsig | ...
 	Force         bool     // reload-tsig: overwrite secret conflicts
+	Confirm       bool     `json:"confirm,omitempty"`       // reload / reload-zones: acknowledge a guarded DNSSEC policy algorithm change
 	TsigOverwrite []string `json:"tsigoverwrite,omitempty"` // reload-tsig --interactive: per-key overwrite
 }
 
@@ -281,8 +325,29 @@ type ConfigResponse struct {
 	Msg                  string
 	Error                bool
 	ErrorMsg             string
-	TsigConflicts        []string `json:"tsigconflicts,omitempty"`
-	TsigWithheldRemovals []string `json:"tsigwithheldremovals,omitempty"`
+	TsigConflicts        []string              `json:"tsigconflicts,omitempty"`
+	TsigWithheldRemovals []string              `json:"tsigwithheldremovals,omitempty"`
+	ServerErrors         []ServerError         `json:"servererrors,omitempty"`     // active server-wide error conditions
+	GuardrailBlocked     bool                  `json:"guardrailblocked,omitempty"` // reload refused by the DNSSEC policy-change guardrail
+	GuardrailZones       []ReloadGuardrailZone `json:"guardrailzones,omitempty"`   // per-zone would-strand findings (with GuardrailBlocked)
+}
+
+// ReloadGuardrailZone is one signed zone a config reload would strand: its bound
+// DNSSEC policy's algorithm changed under the same name to something the zone's
+// active keys cannot provide, which the signer refuses to re-sign (no automatic
+// key-algorithm rollover). See config_reload_guardrail.go.
+type ReloadGuardrailZone struct {
+	Zone       string
+	PolicyName string
+	Roles      []ReloadGuardrailRole
+}
+
+// ReloadGuardrailRole is one role (KSK/ZSK/CSK) of a stranded zone: the algorithm
+// the new policy wants vs the algorithm(s) the zone's active keys of that role carry.
+type ReloadGuardrailRole struct {
+	Role     string   // KSK | ZSK | CSK
+	WantAlg  string   // algorithm the new policy requires
+	HaveAlgs []string // algorithm(s) the zone's active keys of this role carry
 }
 
 type DelegationPost struct {

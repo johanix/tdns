@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -24,10 +25,60 @@ type UpdateRequest struct {
 	Validated      bool     // Signature over update msg is validated
 	Trusted        bool     // Content of update is trusted (via validation or policy)
 	InternalUpdate bool     // Internal update, not a DNS UPDATE from the outside
-	Status         *UpdateStatus
-	Description    string
-	PreCondition   func() bool
-	Action         func() error
+	// PreAuthorized marks a request whose authorization was already settled by
+	// the management API handler (the X-API-Key is the credential) and which
+	// therefore bypasses update-policy, exactly as InternalUpdate does. It is
+	// set in ONE place -- the API zone-update handler, after that handler has
+	// checked allow-api-updates -- and nowhere else. Nothing on the DNS
+	// UPDATE path may ever set it: a wire request that arrived with this flag
+	// would be an unauthenticated update.
+	//
+	// Deliberately a third boolean rather than folding wire/internal/api into
+	// one Origin enum. The enum is the better model and worth doing, but it
+	// touches every InternalUpdate site in the tree and that is a separate
+	// change from adding a channel.
+	PreAuthorized bool
+	Status        *UpdateStatus
+	Description   string
+	PreCondition  func() bool
+	Action        func() error
+}
+
+// apexRetainedOnDelname reports whether an rrtype survives a DELNAME aimed at
+// the zone apex.
+//
+// RFC 2136 §3.4.2.3 requires only SOA and NS to be retained. The rest are kept
+// because DELNAME is a WHOLESALE statement -- "delete everything at this name"
+// -- and nobody issuing it at the apex means "and also dismantle DNSSEC and
+// stop every rollover signal mid-flight". Deleting the apex DNSKEY RRset on a
+// zone whose DS is published at the parent does not make the zone insecure, it
+// makes it BOGUS: resolvers stop answering for the whole zone. There is no
+// legitimate use of DELNAME that wants that, and an operator who genuinely
+// means it can still say "delrrset --type DNSKEY", which is unambiguous.
+//
+// This is a deliberate deviation from a strict reading of §3.4.2.3, in the
+// conservative direction: it deletes less than the RFC permits, never more.
+func apexRetainedOnDelname(rrtype uint16) bool {
+	switch rrtype {
+	case dns.TypeSOA, dns.TypeNS: // RFC 2136 §3.4.2.3
+		return true
+	case dns.TypeDNSKEY, dns.TypeCDS, dns.TypeCDNSKEY, dns.TypeCSYNC:
+		return true // DNSSEC and delegation-maintenance signalling
+	}
+	return false
+}
+
+// updaterCmdMutatesZoneContent reports whether a ZoneUpdater command writes
+// ZONE CONTENT (as opposed to some side store), and is therefore subject to the
+// origination gate at the head of the updater loop.
+//
+// Only these two write the zone. TRUSTSTORE-UPDATE writes the keystore via
+// TruststorePost and must pass through untouched even on a zone that may not
+// originate — gating it would break SIG(0) key management on secondaries.
+// DEFERRED-UPDATE is rejected by the loop as a wrong-queue error, and PING is
+// handled before the zone is even resolved.
+func updaterCmdMutatesZoneContent(cmd string) bool {
+	return cmd == "ZONE-UPDATE" || cmd == "CHILD-UPDATE"
 }
 
 func SprintUpdates(actions []dns.RR) string {
@@ -93,6 +144,36 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				continue
 			}
 
+			// Fail-closed origination gate (Fix D). The per-command checks
+			// below gate ZONE-UPDATE on allow-updates OR ur.InternalUpdate --
+			// and EVERY ops_* publisher sets InternalUpdate, so allow-updates
+			// is a call-site convention rather than an applier gate. Any
+			// publisher that does not check the option at its own call site
+			// therefore walks straight through and mutates the zone.
+			//
+			// This is the chokepoint that makes the invariant structural
+			// rather than a promise kept by N call sites: a tdns-auth zone
+			// that may not originate content never has zone content applied,
+			// whatever flags the request carries.
+			//
+			// Scoped to the two zone-content commands. TRUSTSTORE-UPDATE must
+			// pass through untouched -- it writes the keystore, never zone
+			// content. DEFERRED-UPDATE errors out below; PING returned above.
+			//
+			// Logged at ERROR as an invariant violation, matching the existing
+			// precedent for the child-updates case a few lines down: once the
+			// origination options are normalized off, nothing should ever
+			// reach this gate, so a hit means some path bypassed the option
+			// system -- a code bug worth shouting about. Deliberately not
+			// recorded in the zone's error registry, so it cannot collide with
+			// the operator-facing config warning.
+			if updaterCmdMutatesZoneContent(ur.Cmd) && !zoneMayOriginateContent(zd) {
+				lg.Error("ZoneUpdater: refusing zone mutation on a secondary that may not originate content (invariant violation)",
+					"cmd", ur.Cmd, "zone", ur.ZoneName, "internal", ur.InternalUpdate,
+					"description", ur.Description, "actions", len(ur.Actions))
+				continue
+			}
+
 			switch ur.Cmd {
 			case "DEFERRED-UPDATE":
 				lg.Error("ZoneUpdater: received deferred update on wrong queue", "description", ur.Description)
@@ -144,7 +225,23 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				// (i.e. not child delegation information).
 				lg.Info("ZoneUpdater: ZONE-UPDATE request", "zone", ur.ZoneName, "actions", len(ur.Actions))
 				lg.Debug("ZoneUpdater: ZONE-UPDATE actions detail", "actions", SprintUpdates(ur.Actions))
-				if zd.Options[OptAllowUpdates] || ur.InternalUpdate {
+				// Admission: the DDNS channel is gated by allow-updates, the
+				// management-API channel by allow-api-updates (checked again
+				// in the handler, which is where PreAuthorized is set -- this
+				// is the backstop, not the only gate), and internal content
+				// changes bypass both.
+				//
+				// Snapshot both options together under zd.mu: config reload
+				// mutates the map under that lock, so an unlocked read is a
+				// data race and two independent reads could straddle a reload.
+				// Same treatment the CHILD-UPDATE case above gives its options.
+				zd.mu.Lock()
+				allowUpdates := zd.Options[OptAllowUpdates]
+				allowApiUpdates := zd.Options[OptAllowApiUpdates]
+				zd.mu.Unlock()
+
+				if allowUpdates || ur.InternalUpdate ||
+					(ur.PreAuthorized && allowApiUpdates) {
 					// Compute delegation sync status before apply (needs pre-state),
 					// but only enqueue after successful apply.
 					var dss DelegationSyncStatus
@@ -177,8 +274,45 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					}
 					if updated && !ur.InternalUpdate {
 						lg.Debug("ZoneUpdater: zone updated, setting dirty flag", "zone", zd.ZoneName)
-						zd.Options[OptDirty] = true
+						zd.SetOption(OptDirty, true)
 						logUpdateActions("ZONE-UPDATE", ur.Actions)
+					}
+
+					// API-managed primaries persist updated content
+					// immediately (the mirror of the CHILD-UPDATE 'direct'
+					// backend persist): without this, updated content lives
+					// only in RAM until a freeze/manual write and is lost on
+					// restart. Internal updates (CSYNC/KEY publication etc.)
+					// are included — they change zone data too but never set
+					// OptDirty, so they need force. WriteZone clears OptDirty
+					// on success, which also un-blocks the dirty-primary
+					// reload refusal. The persistence decision reads a
+					// zd.mu-protected snapshot (RefreshEngine mutates these
+					// fields under that lock on reload); the lock is NOT held
+					// across WriteZone, which reacquires it.
+					if updated {
+						zd.mu.Lock()
+						apiPrimary := zd.ZoneType == Primary && zd.Options[OptApiManagedZone]
+						zonefile := zd.Zonefile
+						zd.mu.Unlock()
+						if apiPrimary && zonefile != "" {
+							if _, werr := zd.WriteZone(true, ur.InternalUpdate); werr != nil {
+								// The client response is long gone (async queue),
+								// so surface the persistence failure durably:
+								// visible in zone list, deliberately NOT
+								// service-impacting (memory state is good).
+								lg.Warn("ZoneUpdater: failed to persist API-managed primary after ZONE-UPDATE (updated content is in memory only until the next successful write)", "zone", zd.ZoneName, "file", zonefile, "error", werr)
+								zd.SetError(RefreshError, "failed to persist zone after update: %v", werr)
+								zd.LatestError = time.Now()
+							} else {
+								// A successful persist is the primary-zone
+								// analogue of a successful refresh (both are
+								// file I/O): clear RefreshError, same as the
+								// refresh paths do.
+								zd.ClearError(RefreshError)
+								lg.Debug("ZoneUpdater: persisted API-managed primary after ZONE-UPDATE", "zone", zd.ZoneName, "file", zonefile, "internal", ur.InternalUpdate)
+							}
+						}
 					}
 
 					// Enqueue delegation sync after successful apply
@@ -579,7 +713,7 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 	zd.ensureWorkingSet()
 
 	lg.Debug("ApplyZoneUpdateToZoneData: processing actions", "zone", zd.ZoneName, "count", len(ur.Actions))
-	for _, rr := range ur.Actions {
+	for actionIdx, rr := range ur.Actions {
 		class := rr.Header().Class
 		ownerName := rr.Header().Name
 		rrtype := rr.Header().Rrtype
@@ -602,13 +736,74 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 				"internal_update", ur.InternalUpdate)
 		}
 
+		// DELNAME (RFC 2136 §2.5.3): CLASS=ANY with TYPE=ANY deletes every
+		// RRset at the owner name. It has to be handled here, above the
+		// per-rrtype policy gate below, because TypeANY is never a key in
+		// UpdatePolicy.Zone.RRtypes -- the gate would take the "denied"
+		// branch and `continue`, which is why DELNAME has always been a
+		// silent no-op. That gap was not specific to our own CLI; bind9
+		// nsupdate's "update delete <name>" hit it too.
+		//
+		// Two deliberate restrictions:
+		//
+		//   - At the apex, SOA and NS are retained (RFC 2136 §3.4.2.3).
+		//     Deleting them would dismantle the zone rather than a name in it.
+		//
+		//   - Each rrtype is still checked against the update policy. Hoisting
+		//     the whole statement above the gate would otherwise turn DELNAME
+		//     into a privilege escalation: a requestor permitted to touch only
+		//     TXT could erase every type at the name in one statement. Types
+		//     the policy denies are skipped, so a DELNAME under a restrictive
+		//     policy deletes what that requestor could have deleted one
+		//     statement at a time, and nothing more.
+		if class == dns.ClassANY && rrtype == dns.TypeANY {
+			owner := zd.stagedOwner(ownerName)
+			if owner == nil {
+				lg.Warn("ApplyZoneUpdateToZoneData: DELNAME for unknown owner", "owner", ownerName)
+				continue
+			}
+			isApex := strings.EqualFold(ownerName, zd.ZoneName)
+			var deleted, denied, retained int
+			for _, t := range owner.RRtypes.Keys() {
+				if isApex && apexRetainedOnDelname(t) {
+					retained++
+					continue
+				}
+				if _, allowed := zd.UpdatePolicy.Zone.RRtypes[t]; !allowed &&
+					!ur.InternalUpdate && !ur.PreAuthorized {
+					denied++
+					continue
+				}
+				zd.stageDeleteLocked(ownerName, t)
+				deleted++
+				updated = true
+			}
+			lg.Debug("ApplyZoneUpdateToZoneData: DELNAME", "owner", ownerName,
+				"apex", isApex, "deleted", deleted, "denied_by_policy", denied,
+				"retained_apex_rrsets", retained)
+			continue
+		}
+
 		rrcopy := dns.Copy(rr)
-		rrcopy.Header().Ttl = zd.UpdatePolicy.Zone.TTL
+		// update-policy dictates the TTL for records arriving over DDNS: a
+		// wire client does not get to choose how long the zone caches what it
+		// just added. It has no business rewriting the TTL on the other two
+		// channels. An operator using the API said 3600 deliberately, and an
+		// internal publisher (CSYNC/CDS/KEY) picks TTLs that matter to the
+		// signalling it is driving -- a rollover wanting a short TTL would
+		// silently get the policy's instead.
+		if !ur.InternalUpdate && !ur.PreAuthorized {
+			rrcopy.Header().Ttl = zd.UpdatePolicy.Zone.TTL
+		}
 		rrcopy.Header().Class = dns.ClassINET
 
 		// First check whether this update is allowed by the update-policy.
+		// update-policy governs the DDNS channel. Internal changes and
+		// API-channel requests bypass it: the API's authorization is the API
+		// key, already checked by the handler that set PreAuthorized. Zone
+		// self-service therefore stays on DDNS, where the policy applies.
 		_, ok := zd.UpdatePolicy.Zone.RRtypes[rrtype]
-		if !ok && !ur.InternalUpdate {
+		if !ok && !ur.InternalUpdate && !ur.PreAuthorized {
 			lg.Error("ApplyZoneUpdateToZoneData: RR type denied by policy", "rrtype", rrtypestr)
 			continue
 		}
@@ -664,7 +859,44 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 			continue
 
 		case dns.ClassANY:
-			// ClassANY: Remove RRset
+			// ClassANY: Remove RRset.
+			//
+			// Refuse the two RRsets that constitute the zone itself. The CLI
+			// builder already declines these, but actions can also be built
+			// locally, and a zone whose apex SOA or NS RRset has been deleted
+			// is not a zone -- the apex guard in publishWorkingSetLocked would
+			// then refuse the whole publish, discarding every other change in
+			// the same update along with it.
+			//
+			// Only SOA and NS, deliberately. DNSKEY and the signalling RRsets
+			// are protected against wholesale DELNAME (see
+			// apexRetainedOnDelname), but an explicit "delrrset --type DNSKEY"
+			// is unambiguous intent and stays possible.
+			//
+			// UNLESS the same update replaces it. A replacerrset is a
+			// ClassANY delete followed by the new records in one action list,
+			// so the zone ends the update WITH an apex NS RRset and the
+			// guard's concern does not apply. Without this exception the
+			// delete is dropped and the additions still run, so
+			// "replacerrset" on the apex NS silently APPENDS to the existing
+			// RRset instead of replacing it -- the operator asks to move to a
+			// new set of nameservers and gets the union of old and new.
+			//
+			// SOA has no such exception: tdns owns the serial, and the
+			// builder refuses replacerrset for it outright so the failure is
+			// loud and at the client rather than silent here.
+			if strings.EqualFold(ownerName, zd.ZoneName) &&
+				(rrtype == dns.TypeSOA || rrtype == dns.TypeNS) {
+				if rrtype == dns.TypeNS &&
+					updateReplacesRRset(ur.Actions[actionIdx+1:], ownerName, rrtype) {
+					lg.Debug("ApplyZoneUpdateToZoneData: apex NS delete is part of a replacement, allowing",
+						"zone", zd.ZoneName)
+				} else {
+					lg.Warn("ApplyZoneUpdateToZoneData: refusing to delete an apex RRset the zone cannot exist without",
+						"zone", zd.ZoneName, "rrtype", rrtypestr)
+					continue
+				}
+			}
 			zd.stageDeleteLocked(ownerName, rrtype)
 			// XXX: As long as we don't maintain any NSEC chain removing a complete RRset should not require any resigning.
 			updated = true
@@ -865,10 +1097,41 @@ func (zd *ZoneData) ZoneUpdateChangesDelegationDataNG(ur UpdateRequest) (Delegat
 			switch rrtype {
 			case dns.TypeNS:
 				if ownerName == zd.ZoneName {
-					// XXX: It must not be allowed to remove the *entire* NS RRset for a zone.
-					// XXX: This should have been caught during approval. But here we are and we
-					// XXX: will complain, but ignore this update
-					// log.Printf("Error: update contains a REMOVE for the entire zone NS RRset. This is illegal and ignored.")
+					// A standalone delete of the apex NS RRset is refused by
+					// the applier and correctly ignored here.
+					//
+					// A delete that is one half of a REPLACEMENT is applied,
+					// though, and then this has to report it: otherwise the
+					// local zone drops the old nameservers while the parent is
+					// only ever told about the new ones, and ends up serving
+					// the union -- the same append-instead-of-replace bug the
+					// applier fix closed, one hop further out.
+					//
+					// Only the records the replacement does not re-add are
+					// reported gone. A remove+add of the same record would be
+					// churn at best, and on the delta path -- where the parent
+					// applies the list in order -- an add reordered before its
+					// own remove would lose the record.
+					newNS := apexNSReplacementRecords(ur.Actions, zd.ZoneName)
+					// No replacement records means this is a standalone
+					// delete, which the applier refuses -- so nothing was
+					// removed and nothing may be reported. Without this the
+					// loop below finds none of the current records in an empty
+					// replacement set and reports the whole RRset gone, telling
+					// the parent to drop nameservers the child still serves.
+					if len(newNS) == 0 {
+						break
+					}
+					for _, cur := range apex.RRtypes.GetOnlyRRSet(dns.TypeNS).RRs {
+						if rrPresentIn(newNS, cur) {
+							continue
+						}
+						gone := dns.Copy(cur)
+						gone.Header().Ttl = 3600
+						dss.InSync = false
+						dss.NsRemoves = append(dss.NsRemoves, gone)
+						ddata.Actions = append(ddata.Actions, gone)
+					}
 				}
 
 			case dns.TypeA:
@@ -1247,4 +1510,77 @@ func computeNewDS(dss *DelegationSyncStatus, zd *ZoneData) {
 		}
 	}
 	dss.NewDS = newDS
+}
+
+// updateReplacesRRset reports whether actions contain at least one record to
+// ADD for owner/rrtype, i.e. whether a ClassANY delete of that RRset in the
+// same update is one half of an atomic replacement rather than a removal.
+//
+// Callers pass the actions AFTER the delete, never the whole list. RFC 2136
+// §3.4.2.6 processes the update section in order, so an add that comes BEFORE
+// the delete is not a replacement -- it is a record the delete then removes.
+// Scanning the whole list would read
+//
+//	[ add NS ns9, delete-RRset NS ]
+//
+// as a replacement, permit the delete, and leave the apex with no NS RRset at
+// all: exactly the state the guard exists to prevent, reached through the
+// exception meant to be safe. Actions built here always come delete-first, but
+// the Ns section of a DNS UPDATE arrives in whatever order the client sent.
+//
+// BuildZoneUpdateActions emits replacerrset as exactly that pair, and the
+// applier walks the whole list in one pass under one zd.mu and publishes once,
+// so the empty intermediate RRset is never observable. That is what makes it
+// safe to let a replacement delete an apex RRset the zone cannot be served
+// without: by the end of the same pass, it has one again.
+func updateReplacesRRset(actions []dns.RR, owner string, rrtype uint16) bool {
+	for _, rr := range actions {
+		if rr.Header().Class != dns.ClassINET {
+			continue
+		}
+		if rr.Header().Rrtype == rrtype && strings.EqualFold(rr.Header().Name, owner) {
+			return true
+		}
+	}
+	return false
+}
+
+// apexNSReplacementRecords returns the apex NS records an update adds AFTER a
+// ClassANY delete of that RRset, i.e. the set an apex-NS replacement replaces
+// the old one with. Empty when the update is not such a replacement.
+//
+// Walks in wire order, and deliberately shares that rule with the applier's
+// updateReplacesRRset: the two must agree about what counts as a replacement,
+// or the zone and the delegation report drift apart.
+func apexNSReplacementRecords(actions []dns.RR, zone string) []dns.RR {
+	for i, rr := range actions {
+		if rr.Header().Class != dns.ClassANY || rr.Header().Rrtype != dns.TypeNS {
+			continue
+		}
+		if !strings.EqualFold(rr.Header().Name, zone) {
+			continue
+		}
+		var newNS []dns.RR
+		for _, later := range actions[i+1:] {
+			if later.Header().Class == dns.ClassINET &&
+				later.Header().Rrtype == dns.TypeNS &&
+				strings.EqualFold(later.Header().Name, zone) {
+				newNS = append(newNS, later)
+			}
+		}
+		return newNS
+	}
+	return nil
+}
+
+// rrPresentIn reports whether rr appears in the list, comparing rdata rather
+// than TTL: a nameserver kept across a replacement is the same nameserver even
+// if the new record spells its TTL differently.
+func rrPresentIn(list []dns.RR, rr dns.RR) bool {
+	for _, cand := range list {
+		if dns.IsDuplicate(cand, rr) {
+			return true
+		}
+	}
+	return false
 }

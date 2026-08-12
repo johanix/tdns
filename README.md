@@ -31,6 +31,9 @@ See the [TDNS Guide](guide/README.md):
   all applications with links to detailed docs
 - [Special Features and Extensions](guide/special-features.md)
   -- delegation sync, transport signaling, experimental RR types
+- [The tdns Keystore](guide/keystore.md) -- DNSSEC, SIG(0)
+  and TSIG keys: inspection, lifecycle, and exporting keys
+  to a reviewable directory that is restored at startup
 - Future Work (coming soon)
 
 For multi-provider DNSSEC, see the

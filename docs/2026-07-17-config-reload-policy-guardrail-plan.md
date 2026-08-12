@@ -1,13 +1,15 @@
 # Config-reload policy-change guardrail — design & sequencing plan
 
-- **Status:** DRAFT, for discussion. Records the design thread of 2026-07-16/17.
-  Sections are tagged **[DECIDED]**, **[LEANING]**, or **[OPEN]** — do not treat
-  LEANING/OPEN items as ratified.
+- **Status:** **PR-B IMPLEMENTED 2026-07-24** (branch
+  `feature/config-reload-policy-guardrail`). §1–§7 below are the original design
+  thread of 2026-07-16/17 (tags **[DECIDED]** / **[LEANING]** / **[OPEN]**); the
+  code has since drifted (PR-2 merged, other parts already landed). **§9 is the
+  authoritative "what was verified and built" layer — read it first.** Inline
+  `[UPD 2026-07-24]` notes mark where the historical design no longer matches main.
 - **Relationship to other work:** builds on PR-2 (transactional policy reload,
-  `docs/2026-07-15-transactional-policy-reload-plan.md`, PR #292). Sequenced to
-  land *after* PR-2 merges. See §7.
-- **Intended home:** `tdns-project/tdns/docs/2026-07-17-config-reload-policy-guardrail-plan.md`
-  (staged in scratchpad because the Write safety-classifier was transiently down).
+  `docs/2026-07-15-transactional-policy-reload-plan.md`, PR #292 — **now MERGED to
+  main**, so this guardrail's precondition is met).
+- **Intended home:** `tdns-project/tdns/docs/2026-07-17-config-reload-policy-guardrail-plan.md`.
 
 ---
 
@@ -103,6 +105,17 @@ This is where "restart = policy-reset" lives, but note it generalizes:
 
 ## 4. The template-fallback bug **[DECIDED: it's a bug]** — independent
 
+> **[UPD 2026-07-24] ALREADY FIXED on main — no work needed (PR-A dropped).**
+> Verified against current `parseconfig.go`: `ExpandTemplate` (parseconfig.go:1253)
+> runs BEFORE the policy resolution and gap-fills `DnssecPolicy` only when the
+> zone left it empty (zone-wins, line 1277). The zone loop then calls
+> `resolveZonePolicyRef` (parseconfig.go:1718) at line 885, which **fails closed**:
+> an explicit-but-unresolvable policy sets `zconf.DnssecPolicy = ""` **and**
+> `zd.SetError(DnssecError, …)` (parseconfig.go:886-889) → the zone is quarantined,
+> never silently signed under the template's `default`. The §8 live evidence
+> (2026-07-19) already relied on this fail-closed behavior. So PR-A is a no-op and
+> is not part of the implemented PR-B.
+
 A zone with an **explicit** `dnssecpolicy` whose name does **not** resolve
 currently falls back to the template's policy (observed: `test.foo` bound to
 `no-such-policy-xyz` silently signed under the template's `default`). This is
@@ -113,6 +126,21 @@ policy resolution (`resolveZonePolicyRef`, `parseconfig.go:1570`, called from
 `parseconfig.go:790`), independent of §3/§3.2.
 
 ## 5. Feasibility of the server-side dry-run (investigated 2026-07-17)
+
+> **[UPD 2026-07-24] Confirmed and built (this is the core of PR-B).** Two notes on
+> drift: (a) the anchors moved — `ParseConfig` decode is now parseconfig.go:283-330,
+> `parseDnssecConfig` is parseconfig.go:1624, `reloadDnssecFromFile` is
+> parseconfig.go:1431; (b) the §5.3 "refactor `processConfigFile`+decode into a
+> shared `decodeConfigFile`" was **NOT** done — the implemented `dryParseDnssecPolicies`
+> re-reads the file the SAME way `reloadDnssecFromFile` does (a scratch `&Config{}`
+> receiver + `parseDnssecConfig`), which is the §5 "decode into a scratch `*Config`"
+> path and needs no refactor. `decodeConfigFile` extraction stays a future de-dup.
+> Also: the "build once, three consumers" payoff did NOT materialize as a single
+> shared primitive — `config check` (PR-D, PR #303) had already shipped its OWN
+> CLIENT-side predictor (`checkPolicyAlgVsActiveKeys` / `missingRoleAlgs`,
+> config_check_cmds.go). PR-B adds a parallel SERVER-side predictor
+> (`policyAlgStrandsActiveKeys`, config_reload_guardrail.go); both are small, pure,
+> and unit-tested. Consolidating them is deferred (see §9).
 
 **Verdict: low-complexity for the part that matters; most enabling code exists.**
 
@@ -229,3 +257,99 @@ never touches it. **Strengthens §3.2 → build it.**
   the D episode is the case for it (PR-B in §7).
 - **New dependency surfaced:** a **DNSSEC error-classification restructure** gates
   the `ClearError` fix and would sharpen §3.2's diagnostics.
+
+---
+
+## 9. Implementation — PR-B landed (2026-07-24) **[AUTHORITATIVE]**
+
+Branch `feature/config-reload-policy-guardrail`, cut off current `main` (post-#292).
+This section supersedes the §1–§7 sequencing where they disagree.
+
+### 9.1 Verification of the plan against current main
+
+| Plan item | Status on main (2026-07-24) | Action |
+|-----------|-----------------------------|--------|
+| PR-2 (transactional reload, #292) | **MERGED** — precondition met | — |
+| §1 blind spot (same-name alg edit invisible to the classifier) | **Still real.** `classifyPolicyChange` (zone_policy_apply.go:85) resolves applied+intent from the same `ConfLive()` by name; a same-name edit → both resolve to the *new* policy → `PolicyChangeNone` → Branch 1 rebinds with no re-sign; `reconcileActiveKeyAlgorithms` (sign.go:302) then REFUSES at sign. | **Guardrail built (PR-B).** |
+| §4 template fail-closed (PR-A) | **ALREADY FIXED** (see §4 note). | Dropped. |
+| §5 server-side dry-run+correlate | Feasible as described; anchors moved. | **Built.** |
+| PR-D `tdns-checkconf` | **ALREADY SHIPPED** as `config check` (#303), CLIENT-side. | Reused as prior art; not rebuilt. |
+| PR-C converge (`refuse → drop+regen` + auto-CDS) | Not built; MUST follow PR-B. | **Deferred (out of scope).** |
+
+### 9.2 What PR-B implements
+
+The server-side reload guardrail (§3.2 / §5), all in `v2/`:
+
+- **`config_reload_guardrail.go`** (new):
+  - `policyAlgStrandsActiveKeys(want, active, relaxed)` — the **pure** dry-run of
+    `reconcileActiveKeyAlgorithms`, lenient in the same sense as the CLI's
+    `missingRoleAlgs` (zero-keys → not a miss; mid-rollover with the wanted alg
+    present → not a miss). Compares **codepoints** (in-process, no name dance).
+  - `dryParseDnssecPolicies()` — re-reads the `dnssec:` block into a throwaway
+    `&Config{}` and runs `parseDnssecConfig` (no side effects); returns the
+    would-be-new policies + the new `completeness` mode.
+  - `detectStrandingPolicyChanges(newPolicies, relaxed)` — the §5.2 correlation: a
+    read-only loop over live `Zones` comparing `newPolicies[zd.DnssecPolicyName]`
+    (the zone's CURRENT bound name — same-name scope, §6) against the zone's active
+    keys. Never mutates.
+  - `ReloadGuardrailError` + `reloadGuardrailDecision(findings, confirm)` (the pure
+    confirm gate) + `checkReloadPolicyGuardrail(confirm)` (the entry point).
+- **`config.go`**: `ReloadConfig`/`ReloadZoneConfig` kept as thin wrappers that call
+  new `reloadConfig(confirm)`/`reloadZoneConfig(ctx, confirm)`;
+  `ReloadConfigConfirm`/`ReloadZoneConfigConfirm` added for the confirm-carrying
+  API path. `checkReloadPolicyGuardrail` runs **first, under `confMu`, before any
+  mutation** → a refusal is atomic.
+- **`api_structs.go`**: `ConfigPost.Confirm`; `ConfigResponse.GuardrailBlocked` +
+  `.GuardrailZones` (with `ReloadGuardrailZone`/`ReloadGuardrailRole`).
+- **`apihandler_funcs.go`**: `reload`/`reload-zones` call the `*Confirm` variants
+  and surface structured findings via `applyReloadGuardrail`.
+- **`cli/config_cmds.go`**: `--confirm` flag on `reload` and `reload-zones`; a rich
+  `renderReloadGuardrail` block on refusal.
+- **Tests** (`config_reload_guardrail_test.go`): the pure predicate (10 cases incl.
+  same-name catch, benign, zero-keys, mid-rollover, relaxed-vs-strict ZSK, CSK);
+  the confirm gate; and an end-to-end `detectStrandingPolicyChanges` over a real
+  KeyDB + live `Zones` (dangerous caught, benign clean, confirm proceeds, removed
+  policy name skipped).
+
+### 9.3 Forks resolved (owner AFK — minimal, safest, "YAML is truth / converge
+behind a confirm gate")
+
+- **§6 coverage scope → v1 = same-name only.** Uses the zone's current bound name
+  vs new policies. A zone rebound FOO→BAR is left to the existing classifier
+  (`PolicyChangeIncompatibleAlg` → refuse). A rare *simultaneous* name-change +
+  same-name alg-edit can produce a fail-**safe** false-positive confirm prompt —
+  accepted (the classifier still handles the rebind correctly).
+- **§6 TOCTOU → simple re-parse.** Dry-parse to scratch → gate → then the real
+  reload re-parses. Both parses are under `confMu` (µs apart, same file); the tiny
+  window is accepted over refactoring `Reload*`. A refusal mutates nothing.
+- **§3.2 hold-vs-refuse → SIGHUP hold is FREE and shipped.** SIGHUP calls
+  `ReloadZoneConfig` (confirm=false) → the gate holds the change and logs ERROR.
+  **True server startup hold is DEFERRED** (see §9.4).
+- **§3.2 "refuse the whole reload atomically" [LEANING] → RATIFIED.** The gate runs
+  before any mutation, so refusal is all-or-nothing and surfaces a latent dangerous
+  edit even to an operator reloading for something unrelated.
+- **Relaxed-mode ZSK → not flagged.** A ZSK alg change in `completeness: relaxed`
+  is a supported gradual FIFO roll (reconcile no-ops); flagging it would refuse a
+  safe op. KSK/CSK changes are flagged in either mode. (Server-side precision the
+  CLI's mode-agnostic predictor lacks.)
+- **Fail-open on error.** If the dry-parse or the keystore correlation errors, the
+  reload proceeds (logged). The guardrail is an additive safety net; an internal
+  hiccup must not brick a legitimate reload.
+- **Predictor consolidation → NOT done.** Server predictor is parallel to the CLI's
+  (§5 note). Deferred.
+
+### 9.4 Deferred (documented, NOT in PR-B)
+
+- **PR-C converge** (`refuse → drop+regenerate` + auto-CDS to bound the DS-break
+  window). PR-B deliberately keeps the signer's REFUSE, so a *confirmed* reload
+  applies the new binding but the signer still refuses to re-sign until the key is
+  rolled (via the auto-rollover engine or, on a test zone, `policy-reset`). The
+  hard sequencing constraint (§7: PR-B before PR-C) is honored.
+- **True startup-hold** for the un-confirmable restart/crash path
+  (`ParseConfig(false)` at first-bind). Needs the DNSSEC error-classification
+  restructure (§8) to hold-and-scream without wiping unrelated `DnssecError`s;
+  riskier and out of scope. Restart remains a way to force a dangerous alg change
+  through — a known, documented limitation.
+- **make-before-break** whole-zone double-signature rollover (§3.1) — future.
+- **`decodeConfigFile` extraction** and **CLI/server predictor consolidation** —
+  de-dup refactors, not behavior.

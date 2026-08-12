@@ -3,7 +3,7 @@
 
 Author: Johan / Claude
 Date: 2026-04-28
-Status: draft (no implementation work yet)
+Status: ✅ DONE (implemented on main; verified against code 2026-07-24) — delivered by the merged rollover-overhaul work. All six endpoints (`GET /rollover/{status,when}`, `POST /rollover/{asap,cancel,reset,unstick}`) in `apihandler_rollover.go`; the auto-rollover CLI is API-by-default (`GetApiClient`), with an `--offline` postmortem fallback and a per-zone rollover lock (`rollover_lock.go`). Out of scope (intended): tdns-mp parallel endpoints.
 
 ## Background
 

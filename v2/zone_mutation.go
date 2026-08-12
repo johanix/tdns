@@ -187,6 +187,27 @@ func (zd *ZoneData) resignWorkingSetSOAIfSigned() {
 	if !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
 		return
 	}
+	// Role gate (Fix E). SetupZoneSigning has one — "a non-primary signs only
+	// with inline-signing" — but this path did not, and it runs inside
+	// publishWorkingSetLocked, i.e. on EVERY publish including the refresh
+	// path. Without this, a tdns-auth secondary carrying `online-signing`
+	// re-signs the upstream SOA with locally generated keys (EnsureActiveDnssecKeys
+	// below will mint them if absent) — signatures from a key that is not in the
+	// zone's published DNSKEY RRset, i.e. BOGUS to every validator downstream.
+	// `online-signing` is also normalized off for such a zone; this is the
+	// defence in depth behind that.
+	if !zoneMayOriginateContent(zd) {
+		return
+	}
+	// A new zone's DNSSEC policy is bound post-Ready (PR-2 defers binding so a
+	// restart cannot hide applied≠intent, blocking ①). Until it is bound there is
+	// nothing to re-sign under, and EnsureActiveDnssecKeys below would deref a nil
+	// zd.DnssecPolicy while generating the zone's first keys (SIGSEGV at
+	// sign.go GenerateKeypair). Skip — SetupZoneSigning signs the zone after the
+	// post-Ready sync binds the policy.
+	if zd.DnssecPolicy == nil {
+		return
+	}
 	if zd.workingSet == nil {
 		return
 	}
@@ -268,6 +289,11 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	if zd.workingSet == nil {
 		zd.publishQueued = false
 		zd.publishUrgent = false
+		// The epoch-reset flag is staged together with a working set; with no
+		// working set it is orphaned. Clear it so a dropped publish cannot
+		// carry it into a later unrelated publish (which would needlessly
+		// wipe the IXFR history).
+		zd.wsIxfrEpochReset = false
 		return
 	}
 	if !zoneStillLive(zd, gen) {
@@ -275,6 +301,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		zd.wsSignalSynth = nil
 		zd.publishQueued = false
 		zd.publishUrgent = false
+		zd.wsIxfrEpochReset = false
 		return
 	}
 
@@ -292,6 +319,7 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		zd.wsSignalSynth = nil
 		zd.publishQueued = false
 		zd.publishUrgent = false
+		zd.wsIxfrEpochReset = false
 		return
 	}
 
@@ -305,6 +333,9 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	zd.resignWorkingSetSOAIfSigned()
 
 	data := zd.workingSet
+	// Maintain the IXFR delta history BEFORE building the snapshot so the
+	// chain copied into it ends exactly at this publish's serial (Project C).
+	zd.updateIxfrChainLocked(zd.snapshot.Load(), serial, data)
 	snap := zd.buildSnapshotLocked(serial, data, zd.wsSignalSynth)
 	zd.snapshot.Store(snap)
 
@@ -314,7 +345,10 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	zd.publishUrgent = false
 	zd.lastPublish = time.Now()
 
-	if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial == OutboundSoaSerialPersist {
+	// Persist only for a zone that may originate: a mirroring secondary's
+	// serial is upstream's property, not ours to record and later restore.
+	if zd.KeyDB != nil && zoneMayOriginateContent(zd) &&
+		zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialPersist {
 		if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
 			lg.Error("publish: failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
 		}
@@ -329,12 +363,38 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 
 func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs []*core.RRset, firstLoad bool) error {
 	zd.IncomingSerial = new_zd.IncomingSerial
-	if firstLoad {
+	switch {
+	case firstLoad:
 		zd.CurrentSerial = new_zd.CurrentSerial
 		zd.FirstZoneLoad = false
-	} else {
+
+	case !zoneMayOriginateContent(zd):
+		// MUST-NOT-MODIFY: a tdns-auth secondary that did not originate this
+		// content mirrors the upstream serial verbatim. The historical
+		// unconditional ++ below made every such secondary drift +1 per
+		// refresh, so two masters downstream of one signer (say BIND9 and
+		// tdns-auth) advertised different serials for identical content and
+		// edge nodes always fetched from the tdns one — silently collapsing a
+		// redundant pair. This is the fix.
+		prev := zd.CurrentSerial
+		zd.CurrentSerial = new_zd.IncomingSerial
+		// A secondary that had already inflated its serial (or was running in
+		// persist/unixtime mode before the upgrade) steps BACKWARDS here, once.
+		// Its own downstreams will then refuse to transfer until upstream
+		// climbs past the old value — RFC 1982 serial arithmetic, so BIND/NSD
+		// behave the same and a NOTIFY carrying a lower serial is ignored.
+		// Shout, so the operator can force a retransfer on the downstreams
+		// (`tdns-cli zone reload --force <zone>`) instead of discovering it as
+		// mysteriously stale data.
+		if prev != 0 && zd.CurrentSerial < prev {
+			lg.Error("secondary SOA serial steps BACKWARDS to mirror upstream; downstreams will refuse to transfer until forced",
+				"zone", zd.ZoneName, "old_serial", prev, "new_serial", zd.CurrentSerial,
+				"action", "force a retransfer on each downstream (tdns-cli zone reload --force)")
+		}
+
+	default:
 		zd.CurrentSerial++
-		if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial == OutboundSoaSerialPersist {
+		if zd.KeyDB != nil && zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialPersist {
 			if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
 				return fmt.Errorf("persist outgoing serial for zone %s: %w", zd.ZoneName, err)
 			}
@@ -356,6 +416,8 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		zd.wsSignalSynth = nil
 	}
 	zd.repopulateWorkingSetLocked(dynamicRRs)
+	// A refresh replaces zone data wholesale: new IXFR epoch, no delta.
+	zd.wsIxfrEpochReset = true
 	zd.publishWorkingSetLocked(zd.generation.Load(), false)
 
 	// Only advertise the zone as Ready once a snapshot actually exists. If the
@@ -436,6 +498,9 @@ func (zd *ZoneData) InstallInitialSnapshot() {
 		lg.Error("InstallInitialSnapshot: no apex in data and no valid snapshot; zone left not Ready", "zone", zd.ZoneName)
 		return
 	}
+	// This is a re-baseline from zd.Data outside the publish path: a new
+	// IXFR epoch by definition (no delta links the previous snapshot to it).
+	zd.IxfrChain = nil
 	snap := zd.buildSnapshotLocked(zd.CurrentSerial, data, nil)
 	zd.snapshot.Store(snap)
 	zd.Ready = true

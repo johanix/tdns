@@ -96,6 +96,9 @@ func DnsDoHEngine(ctx context.Context, conf *Config, dohaddrs []string, certFile
 				lgDns.Info("DnsEngine: setting up DoH server", "hostport", hp)
 				if err := s.ListenAndServeTLS(certFile, keyFile); err != http.ErrServerClosed {
 					lgDns.Error("failed to setup DoH server", "hostport", hp, "err", err)
+					if ctx.Err() == nil {
+						conf.Internal.ServerErrors.SetTransportPortError("doh "+hp, err)
+					}
 				} else {
 					lgDns.Info("DnsEngine: listening on DoH", "hostport", hp)
 				}

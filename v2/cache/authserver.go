@@ -55,9 +55,8 @@ type AuthServer struct {
 	TransportWeights map[core.Transport]uint8 // independent oots weights [0,100]; Do53 is ultimate fallback
 	// Optional config-only field for stubs: colon-separated transport weights, e.g. "doq:30,dot:70"
 	// When provided in config, this overrides Alpn for building Transports/TransportWeights.
-	TransportSignal string                  `yaml:"transport" mapstructure:"transport"`
-	ConnMode        ConnMode                `yaml:"connmode" mapstructure:"connmode"`
-	TLSARecords     map[string]*CachedRRset // keyed by owner (_port._proto.name.), validated RRsets only
+	TransportSignal string   `yaml:"transport" mapstructure:"transport"`
+	ConnMode        ConnMode `yaml:"connmode" mapstructure:"connmode"`
 	// Stats (guarded by mu)
 	mu                sync.Mutex
 	TransportCounters map[core.Transport]uint64 // queries ATTEMPTED per transport (transport chosen)
@@ -98,7 +97,6 @@ func NewAuthServer(name string) *AuthServer {
 		// Addrs: nil
 		// TransportWeights: nil
 		// TransportSignal: ""
-		// TLSARecords: nil
 		// TransportCounters: nil (will be initialized on first use)
 		// Expire: zero time
 		// Debug: false
@@ -394,22 +392,6 @@ func (as *AuthServer) SetTransportWeights(weights map[core.Transport]uint8) {
 	for k, v := range weights {
 		as.TransportWeights[k] = v
 	}
-}
-
-func (as *AuthServer) SnapshotTLSARecords() map[string]*CachedRRset {
-	if as == nil {
-		return nil
-	}
-	as.mu.Lock()
-	defer as.mu.Unlock()
-	if len(as.TLSARecords) == 0 {
-		return nil
-	}
-	snap := make(map[string]*CachedRRset, len(as.TLSARecords))
-	for owner, rec := range as.TLSARecords {
-		snap[owner] = rec
-	}
-	return snap
 }
 
 // SnapshotCounters returns a copy of the per-transport counters.

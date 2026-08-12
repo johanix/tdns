@@ -78,7 +78,7 @@ func (zd *ZoneData) Refresh(verbose, debug, force bool, conf *Config) (bool, err
 			} else if force {
 				lg.Debug("forced retransfer regardless of SOA serial", "zone", zd.ZoneName)
 			}
-			updated, err = zd.FetchFromUpstream(verbose, debug, dynamicRRs, conf)
+			updated, err = zd.FetchFromUpstream(verbose, debug, force, dynamicRRs, conf)
 			if err != nil {
 				lg.Error("FetchZone failed", "zone", zd.ZoneName, "upstream", firstUpstreamAddr(zd.Upstreams), "err", err)
 				return false, err
@@ -128,14 +128,24 @@ func (zd *ZoneData) DoTransfer(conf *Config) (bool, uint32, error) {
 		upstream := up.Addr
 		if _, _, err := net.SplitHostPort(upstream); err != nil {
 			// If error, assume no port was specified
-			upstream = net.JoinHostPort(upstream, "53")
-			lg.Debug("DoTransfer: no port specified for upstream, using default port 53", "zone", zd.ZoneName, "upstream", upstream)
+			upstream = net.JoinHostPort(upstream, defaultPortForPeer(up))
+			lg.Debug("DoTransfer: no port specified for upstream, using transport default", "zone", zd.ZoneName, "upstream", upstream)
 		}
 		// Fresh message per attempt: TSIG signing adds an RR with a per-attempt
 		// timestamp and this upstream's key.
 		m := new(dns.Msg)
 		m.SetQuestion(zd.ZoneName, dns.TypeSOA)
 		c := new(dns.Client)
+		// XoT peer: probe the SOA over the same verified-TLS channel the
+		// transfer itself will use (same pin/dane/pkix gate).
+		if tlsCfg, terr := conf.ClientTLSConfigForPeer(up); terr != nil {
+			lg.Error("DoTransfer: TLS setup failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "err", terr)
+			lastErr = terr
+			continue
+		} else if tlsCfg != nil {
+			c.Net = "tcp-tls"
+			c.TLSConfig = tlsCfg
+		}
 		provider, serr := SignForPeer(m, up.Key, conf)
 		if serr != nil {
 			lg.Error("DoTransfer: TSIG sign setup failed, trying next upstream", "zone", zd.ZoneName, "upstream", upstream, "key", up.Key, "err", serr)
@@ -249,7 +259,26 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 }
 
 // Return updated, err
-func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RRset, conf *Config) (bool, error) {
+// shouldDiscardUnchangedTransfer reports whether a completed transfer should be
+// thrown away because it carries the serial we already have.
+//
+// The force exemption is the §9 forced-transfer contract: a forced transfer
+// MUST apply whatever upstream has, including a serial equal to (or lower than)
+// our own. Without it a forced retransfer of an already-current zone silently
+// did nothing while reporting success — so `force` did not mean force.
+//
+// That matters beyond tidiness: a forced retransfer is the only remedy for a
+// downstream wedged behind a secondary whose serial stepped backwards (see the
+// migration section of the design doc), and the only escape hatch from a zone
+// holding corrupt data under a current serial.
+func shouldDiscardUnchangedTransfer(incomingSerial, currentSerial uint32, force bool) bool {
+	return incomingSerial == currentSerial && !force
+}
+
+// force means the operator explicitly asked for a retransfer, so the zone is
+// re-fetched and re-applied even when upstream's serial has not moved. See the
+// unchanged-serial check below for why that matters.
+func (zd *ZoneData) FetchFromUpstream(verbose, debug, force bool, dynamicRRs []*core.RRset, conf *Config) (bool, error) {
 
 	if len(zd.Upstreams) == 0 {
 		return false, fmt.Errorf("FetchFromUpstream: zone %s has no upstreams configured", zd.ZoneName)
@@ -286,7 +315,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 			Ready:          true, // this is only used by the checks for changes to DNSKEYs, HSYNC, etc.
 			// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 		}
-		if _, err := new_zd.ZoneTransferIn(upstream, zd.IncomingSerial, "axfr", up.Key, conf); err != nil {
+		if _, err := new_zd.ZoneTransferIn(up, zd.IncomingSerial, "axfr", conf); err != nil {
 			lg.Warn("FetchFromUpstream: AXFR from upstream failed, trying next", "zone", zd.ZoneName, "upstream", upstream, "err", err)
 			lastErr = err
 			continue
@@ -300,10 +329,26 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug bool, dynamicRRs []*core.RR
 		return false, fmt.Errorf("AXFR of %s failed: tried all %d upstream(s): %w", zd.ZoneName, len(zd.Upstreams), lastErr)
 	}
 
-	if new_zd.IncomingSerial == zd.IncomingSerial {
+	// A forced transfer MUST apply whatever upstream has, including a serial
+	// equal to (or lower than) our own. Without the force exemption here, a
+	// forced retransfer of an already-current zone silently did nothing while
+	// reporting success — so `force` did not mean force.
+	//
+	// This is load-bearing for the strict-passthrough migration: a forced
+	// retransfer is the ONLY remedy for a downstream wedged behind a secondary
+	// whose serial stepped backwards, and the only escape hatch from a zone
+	// with corrupt-but-current-serial data. The lower-serial case already
+	// worked, but only incidentally (DoTransfer returns do_transfer=false
+	// without an error, and the caller's `do_transfer || force` lets it
+	// through); it is now pinned by a regression test.
+	if shouldDiscardUnchangedTransfer(new_zd.IncomingSerial, zd.IncomingSerial, force) {
 		lg.Debug("FetchFromUpstream: upstream serial is unchanged", "zone", zd.ZoneName, "serial", zd.IncomingSerial)
 		zd.SetStatus(prevStatus) // no-op refresh — nothing changed, restore prior status
 		return false, nil
+	}
+	if new_zd.IncomingSerial == zd.IncomingSerial {
+		lg.Info("FetchFromUpstream: forced retransfer, re-applying zone despite unchanged serial",
+			"zone", zd.ZoneName, "serial", zd.IncomingSerial)
 	}
 
 	new_zd.Ready = true
@@ -656,20 +701,54 @@ func FindZoneNG(qname string) *ZoneData {
 	return nil
 }
 
+// EffectiveOutboundSoaSerial resolves the outbound serial mode actually in
+// force for this zone, newest tier first:
+//
+//  1. the per-zone setting (zones: <z>: outbound_soa_serial, possibly
+//     inherited from the zone's template via ExpandTemplate's gap-fill);
+//  2. the server-global dnsengine.outbound_soa_serial (resolved onto the
+//     KeyDB at parse time by applyOutboundSoaSerial);
+//  3. OutboundSoaSerialKeep, the documented default.
+//
+// Every consumer of the mode MUST go through this rather than reading
+// zd.KeyDB.OutboundSoaSerial directly, so the per-zone tier is honoured.
+// Suppression for a non-originating tdns-auth secondary is deliberately NOT
+// applied here — this answers "what mode is configured", not "may this zone
+// act on it"; the callers pair it with the origination predicate.
+func (zd *ZoneData) EffectiveOutboundSoaSerial() string {
+	mode, _ := zd.EffectiveOutboundSoaSerialWithSource()
+	return mode
+}
+
+// EffectiveOutboundSoaSerialWithSource is EffectiveOutboundSoaSerial plus the
+// tier that supplied the value ("zone", "global" or "default"), for display by
+// `zone desc`. Both live here, in one function, so the precedence chain cannot
+// be stated twice and silently diverge — which would make `zone desc` report a
+// source that does not match the value actually in force.
+func (zd *ZoneData) EffectiveOutboundSoaSerialWithSource() (mode, source string) {
+	if zd.OutboundSoaSerial != "" {
+		return zd.OutboundSoaSerial, "zone" // per-zone, possibly via its template
+	}
+	if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial != "" {
+		return zd.KeyDB.OutboundSoaSerial, "global" // dnsengine.outbound_soa_serial
+	}
+	return OutboundSoaSerialKeep, "default"
+}
+
 // nextOutboundSerial returns the next SOA serial that should be advertised
-// to downstreams given zd.CurrentSerial and the configured outbound_soa_serial
-// mode:
+// to downstreams given zd.CurrentSerial and the effective outbound_soa_serial
+// mode (per-zone, else server-global):
 //   - "" / "keep" / "persist": prev + 1 (legacy behaviour; "persist" only
 //     differs in that the resulting serial is also written to OutgoingSerials)
 //   - "unixtime": time.Now().Unix(), unless that would not advance the serial
 //     (e.g. multiple bumps within the same wallclock second), in which case
 //     fall back to prev + 1 to preserve monotonicity.
 func nextOutboundSerial(zd *ZoneData) uint32 {
-	mode := ""
-	if zd.KeyDB != nil {
-		mode = zd.KeyDB.OutboundSoaSerial
-	}
-	if mode == OutboundSoaSerialUnixtime {
+	// A mirroring secondary never rewrites its serial into timestamp space —
+	// MUST-NOT-MODIFY is absolute, not keep-mode-only. (Reaching here at all on
+	// such a zone means something staged a publish-with-bump on it, which the
+	// other gates should have prevented; +1 is the conservative fallback.)
+	if zoneMayOriginateContent(zd) && zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialUnixtime {
 		s := uint32(time.Now().Unix())
 		if s > zd.CurrentSerial {
 			return s

@@ -136,9 +136,15 @@ type ZoneData struct {
 	XfrType string // axfr | ixfr
 	Logger  *log.Logger
 	// ZoneFile           string // TODO: Remove this
-	IncomingSerial    uint32 // SOA serial that we got from upstream
-	CurrentSerial     uint32 // SOA serial after local bumping
-	FirstZoneLoad     bool   // true until first zone data has been loaded
+	IncomingSerial uint32 // SOA serial that we got from upstream
+	CurrentSerial  uint32 // SOA serial after local bumping
+	// OutboundSoaSerial is the PER-ZONE outbound serial mode (keep | unixtime
+	// | persist), sourced from the zone's config (possibly via its template).
+	// Empty means "inherit the server-global dnsengine.outbound_soa_serial".
+	// Never read directly — call zd.EffectiveOutboundSoaSerial(), which
+	// resolves the zone/global tiers.
+	OutboundSoaSerial string
+	FirstZoneLoad     bool // true until first zone data has been loaded
 	Verbose           bool
 	Debug             bool
 	IxfrChain         []Ixfr
@@ -147,7 +153,13 @@ type ZoneData struct {
 	Notify            []PeerConf // downstream secondaries that we notify (addr + key)
 	AllowNotify       []AclEntry // secondary: who may NOTIFY us; empty => accept from resolved primaries
 	Downstreams       []AclEntry // primary: who may AXFR from us (provide-xfr ACL); empty => deny
+	DownstreamAuth    []string   // acceptable transfer-auth mechanism classes (empty => unrestricted); see authorizeTransfer
 	Zonefile          string
+	// Template names the config template an API-provisioned zone was expanded
+	// from (zone add --template). Persisted in the dynamic config entry so a
+	// restart re-expands it; the update policy is deliberately NOT persisted —
+	// it re-derives from the template at boot (one source of truth).
+	Template          string
 	DelegationSyncQ   chan DelegationSyncRequest
 	Parent            string   // name of parentzone (if filled in)
 	ParentNS          []string // names of parent nameservers
@@ -155,6 +167,14 @@ type ZoneData struct {
 	Children          map[string]*ChildDelegationData
 	DelegationBackend DelegationBackend // parent-side: backend for storing child delegation data
 	Options           map[ZoneOption]bool
+	// SuppressedOptions records the origination options that were configured
+	// for this zone but stripped by normalizeOptionsForRole (a tdns-auth
+	// secondary may not originate content). Options above is the EFFECTIVE
+	// set; Options ∪ SuppressedOptions is the AS-CONFIGURED set, which is what
+	// must be re-serialized when a dynamic zone's config file is regenerated —
+	// otherwise the operator's stated intent is silently deleted from their own
+	// config. Use asConfiguredOptions(). nil when nothing was suppressed.
+	SuppressedOptions map[ZoneOption]bool
 	UpdatePolicy      UpdatePolicy
 	DnssecPolicy      *DnssecPolicy
 	DnssecPolicyName  string // name of currently-applied policy; used to detect config-reload-driven changes
@@ -195,15 +215,24 @@ type ZoneData struct {
 	// wsSignalSynth stages the synthesized-transport-signal fallback map for the
 	// next publish (see zoneSnapshot.signalSynth). Seeded from the published
 	// snapshot in ensureWorkingSet so unrelated publishes preserve it.
-	wsSignalSynth   map[string]*core.RRset
-	publishCadence  time.Duration
-	publishQueued   bool
-	publishUrgent   bool
-	lastPublish     time.Time
-	publishWake     chan struct{}
-	publisherOnce   sync.Once
-	publishStop     chan struct{}
-	publishStopOnce sync.Once
+	wsSignalSynth  map[string]*core.RRset
+	publishCadence time.Duration
+	publishQueued  bool
+	publishUrgent  bool
+	// wsIxfrEpochReset marks the next publish as a new IXFR epoch (wholesale
+	// zone replacement): updateIxfrChainLocked clears the delta history
+	// instead of diffing. Set under zd.mu by applyRefreshReplacementLocked.
+	wsIxfrEpochReset bool
+	// ixfrChainMaxBytes bounds the retained IXFR delta history (estimated
+	// wire bytes). 0 => DefaultIxfrChainMaxBytes; negative => retention
+	// disabled (IXFR queries are answered with full transfers). From zone
+	// config ixfr-chain-max-bytes; written at parse time under zd.mu.
+	ixfrChainMaxBytes int
+	lastPublish       time.Time
+	publishWake       chan struct{}
+	publisherOnce     sync.Once
+	publishStop       chan struct{}
+	publishStopOnce   sync.Once
 	// RemoteDNSKEYs holds DNSKEY RRs from other signers (multi-signer mode 4).
 	// These are DNSKEYs found in the incoming zone that do not match keys in our
 	// local keystore. They are preserved across resignings and merged into the
@@ -255,6 +284,22 @@ type PeerConf struct {
 	Addr   string `yaml:"addr" mapstructure:"addr"`
 	Key    string `yaml:"key" mapstructure:"key"`
 	Legacy string `yaml:"-" mapstructure:"-"` // bare-string marker; not config
+
+	// PeersRef holds the ids of a `- peers: [ id, ... ]` reference entry
+	// (see the peers: block, v2/peers.go). Consumed (and cleared) by
+	// expandPeerList at parse time; post-expansion lists never contain
+	// reference entries.
+	PeersRef []string `yaml:"peers" mapstructure:"peers"`
+
+	// XoT (XFR-over-TLS, RFC 9103) fields. All optional; an empty Transport
+	// means Do53 and preserves pre-XoT behavior exactly. TSIG (Key) remains
+	// orthogonal: RFC 9103 allows TSIG and TLS together, so a peer may have
+	// both a TLS auth mode and a TSIG key. Validated by validatePeerXoT.
+	Transport string   `yaml:"transport" mapstructure:"transport"` // "" | do53 | dot
+	TLSAuth   string   `yaml:"tls-auth" mapstructure:"tls-auth"`   // pin | dane | pkix (required for dot)
+	TLSName   string   `yaml:"tls-name" mapstructure:"tls-name"`   // SNI + DANE base name; defaults to the Addr hostname
+	Pins      []string `yaml:"pins" mapstructure:"pins"`           // base64 SPKI SHA-256 pins (tls-auth: pin)
+	CAFile    string   `yaml:"ca-file" mapstructure:"ca-file"`     // PEM bundle (tls-auth: pkix); empty = system roots
 }
 
 // ZoneConf represents the external config for a zone; it contains no zone data
@@ -265,8 +310,9 @@ type ZoneConf struct {
 	Store             string     // xfr | map | slice | reg (defaults to "map" if not specified)
 	Primaries         []PeerConf `yaml:"primaries" mapstructure:"primaries"` // upstream set, for secondary zones
 	Notify            []PeerConf
-	AllowNotify       []AclEntry   `yaml:"allow-notify" mapstructure:"allow-notify"` // secondary: who may NOTIFY us (ip-spec + key｜NOKEY｜BLOCKED)
-	Downstreams       []AclEntry   `yaml:"downstreams" mapstructure:"downstreams"`   // primary: who may AXFR from us (provide-xfr ACL)
+	AllowNotify       []AclEntry   `yaml:"allow-notify" mapstructure:"allow-notify"`       // secondary: who may NOTIFY us (ip-spec + key｜NOKEY｜BLOCKED)
+	Downstreams       []AclEntry   `yaml:"downstreams" mapstructure:"downstreams"`         // primary: who may AXFR from us (provide-xfr ACL)
+	DownstreamAuth    []string     `yaml:"downstream-auth" mapstructure:"downstream-auth"` // acceptable transfer-auth mechanisms: prefix|tsig|tls-pin|tls-pkix|tls-dane|any
 	OptionsStrs       []string     `yaml:"options" mapstructure:"options"`
 	Options           []ZoneOption `yaml:"-" mapstructure:"-"` // Ignore during both yaml and mapstructure decoding
 	Frozen            bool         // true if zone is frozen; not a config param
@@ -274,6 +320,14 @@ type ZoneConf struct {
 	UpdatePolicy      UpdatePolicyConf
 	DelegationBackend string `yaml:"delegationbackend" mapstructure:"delegationbackend"` // named backend for child delegation data
 	DnssecPolicy      string `yaml:"dnssecpolicy" mapstructure:"dnssecpolicy"`
+	// OutboundSoaSerial is the per-zone override of the server-global
+	// dnsengine.outbound_soa_serial. Empty (the default) inherits the global.
+	// Set it on a TEMPLATE to give a whole class of zones a serial policy —
+	// that is the intended granularity; a zone that sets it explicitly wins
+	// over its template (ExpandTemplate gap-fills only unset fields, and a
+	// non-empty string counts as set, so an explicit "keep" beats a template
+	// "persist").
+	OutboundSoaSerial string `yaml:"outbound_soa_serial,omitempty" mapstructure:"outbound_soa_serial" validate:"omitempty,oneof=keep unixtime persist"`
 	// EffectiveDnssecPolicy / DnssecPolicyOverridden / DnssecPolicyConfigBase
 	// are display-only fields populated by the list-zones handler: the policy
 	// actually bound to the running zone; whether it came from a dynamic
@@ -297,15 +351,40 @@ type ZoneConf struct {
 	// applied-policy record failed, so `zone desc` can distinguish a backend
 	// failure from a genuinely absent record rather than showing both as
 	// "(not recorded)".
-	AppliedError  string            `yaml:"-"`
-	PolicyDetail  *DnssecPolicyView `yaml:"-"`
-	Template      string            `yaml:"template" mapstructure:"template"`
-	MultiSigner   string            `yaml:"multisigner" mapstructure:"multisigner"`
-	Error         bool              // zone is broken and cannot be used
-	ErrorType     ErrorType         // "config" | "refresh" | "agent" | "DNSSEC"
-	ErrorMsg      string            // reason for the error (if known)
-	RefreshCount  int               // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
-	SourceCatalog string            // if auto-configured, which catalog zone created this zone
+	AppliedError string            `yaml:"-"`
+	PolicyDetail *DnssecPolicyView `yaml:"-"`
+	// Serial visibility (display-only; not config). CurrentSerial is what we
+	// advertise to our downstreams, IncomingSerial what we last received from
+	// upstream. Both are free to populate — they are already on ZoneData — and
+	// `zone list -v` shows them side by side.
+	//
+	// UpstreamSerials is populated ONLY by the single-zone `zone desc` path: it
+	// costs a live SOA probe per configured primary, which is fine for one zone
+	// and not for a bulk listing. Per-primary rather than one aggregate value
+	// is the point — "this master says 42, that one says 5000" is the direct
+	// diagnostic for the split-brain that motivated the MUST-NOT-MODIFY work,
+	// and there is currently no way to see it from tdns at all.
+	CurrentSerial   uint32           `yaml:"-"`
+	IncomingSerial  uint32           `yaml:"-"`
+	UpstreamSerials []UpstreamSerial `yaml:"-"`
+	// EffectiveOutboundSoaSerial is the resolved outbound serial mode and where
+	// it came from ("zone", "global" or "default"), so an operator can see both
+	// the value and why it applies.
+	EffectiveOutboundSoaSerial string `yaml:"-"`
+	OutboundSoaSerialSource    string `yaml:"-"`
+	Template                   string `yaml:"template" mapstructure:"template"`
+	// DynamicZones marks a TEMPLATE as instantiable via the dynamic-zones API
+	// (zone add --type primary --template <name>). It is the per-template
+	// opt-in gate: an API client can only pick among operator-blessed
+	// configurations, never author one. Meaningful on templates only; never
+	// copied to zones by ExpandTemplate.
+	DynamicZones  bool      `yaml:"dynamiczones" mapstructure:"dynamiczones"`
+	MultiSigner   string    `yaml:"multisigner" mapstructure:"multisigner"`
+	Error         bool      // zone is broken and cannot be used
+	ErrorType     ErrorType // "config" | "refresh" | "agent" | "DNSSEC"
+	ErrorMsg      string    // reason for the error (if known)
+	RefreshCount  int       // number of times the zone has been sucessfully refreshed (used to determine if we have zonedata)
+	SourceCatalog string    // if auto-configured, which catalog zone created this zone
 	// ApiManaged marks a zone created/managed via the dynamic-zones API (zone
 	// add/delete/modify). Persisted so OptApiManagedZone can be re-derived on
 	// reload — a dedicated bool, not a SourceCatalog="api" sentinel.
@@ -313,6 +392,10 @@ type ZoneConf struct {
 	// PublishCadence is the minimum interval between coalesced snapshot publishes
 	// for this zone (default 5s when unset). RFC 2136 urgent publishes bypass.
 	PublishCadence string `yaml:"publish-cadence" mapstructure:"publish-cadence"`
+	// IxfrChainMaxBytes bounds the retained outbound-IXFR delta history for
+	// this zone (estimated wire bytes). 0/unset => 1 MiB default; negative =>
+	// disable retention (IXFR clients always get a full transfer).
+	IxfrChainMaxBytes int `yaml:"ixfr-chain-max-bytes" mapstructure:"ixfr-chain-max-bytes"`
 	// Provisioning is a display-only derived lifecycle string
 	// ("pending"|"loading"|"ready"|"error") populated by the list handlers from
 	// ZoneStatus + the error registry. Not config; not serialized to YAML.
@@ -577,8 +660,16 @@ type DnssecPolicyTTLS struct {
 type Ixfr struct {
 	FromSerial uint32
 	ToSerial   uint32
-	Removed    []core.RRset
-	Added      []core.RRset
+	// FromSOA/ToSOA are the bracketing SOA RRs for this difference sequence,
+	// stored as full RRs because SOA RDATA (timers/MNAME) may change between
+	// serials — rewriting the current SOA's serial would not reproduce them.
+	FromSOA *dns.SOA
+	ToSOA   *dns.SOA
+	Removed []core.RRset
+	Added   []core.RRset
+	// EstBytes is the estimated wire size of this link (RRs + bracket SOAs),
+	// used for the byte-bounded chain trim.
+	EstBytes int
 }
 
 type OwnerData struct {
@@ -664,14 +755,25 @@ func rrsToStrings(rrs []dns.RR) []string {
 	return out
 }
 
+// UpstreamSerial is one primary's answer to a live SOA probe, for `zone desc`.
+// Err carries the probe failure (unreachable, REFUSED, TSIG mismatch, ...) so a
+// primary that cannot be reached is shown as such rather than silently omitted
+// — an unreachable master is itself diagnostic.
+type UpstreamSerial struct {
+	Addr   string
+	Serial uint32
+	Err    string
+}
+
 type ZoneRefresher struct {
-	Name          string
-	ZoneType      ZoneType   // primary | secondary
-	PrimariesConf []PeerConf // as-written; copied to zd.PrimariesConf on merge
-	Primaries     []PeerConf // resolved; copied to zd.Upstreams on merge
-	Notify        []PeerConf
-	AllowNotify   []AclEntry // copied to zd.AllowNotify on merge
-	Downstreams   []AclEntry // copied to zd.Downstreams on merge
+	Name           string
+	ZoneType       ZoneType   // primary | secondary
+	PrimariesConf  []PeerConf // as-written; copied to zd.PrimariesConf on merge
+	Primaries      []PeerConf // resolved; copied to zd.Upstreams on merge
+	Notify         []PeerConf
+	AllowNotify    []AclEntry // copied to zd.AllowNotify on merge
+	Downstreams    []AclEntry // copied to zd.Downstreams on merge
+	DownstreamAuth []string   // copied to zd.DownstreamAuth on merge (config-bearing only)
 	// ConfigUpdate marks a config-bearing refresher (from ParseZones /
 	// LoadDynamicZoneFiles) as opposed to a NOTIFY/refresh-only trigger. On reload
 	// it lets the merge assign Notify/AllowNotify/Downstreams even when they are
@@ -681,14 +783,27 @@ type ZoneRefresher struct {
 	ConfigUpdate bool
 	ZoneStore    ZoneStore // 1=xfr, 2=map
 	Zonefile     string
-	Options      map[ZoneOption]bool
-	Edns0Options *edns0.MsgOptions
-	UpdatePolicy UpdatePolicy
-	DnssecPolicy string
-	MultiSigner  string
-	Force        bool // force refresh, ignoring SOA serial
-	Wait         bool // wait for refresh to complete before responding
-	Response     chan RefresherResponse
+	// Template propagates the config-template name of a dynamic zone to the
+	// ZoneData built by the RefreshEngine (copied to zd.Template), so a later
+	// persist re-serializes it. Empty for template-less zones.
+	Template string
+	// PublishCadence, when non-zero, sets the zone's minimum snapshot publish
+	// interval (zd.publishCadence). Carried parsed so the RefreshEngine does
+	// not re-parse; zero means "leave the zone's default".
+	PublishCadence time.Duration
+	Options        map[ZoneOption]bool
+	Edns0Options   *edns0.MsgOptions
+	UpdatePolicy   UpdatePolicy
+	DnssecPolicy   string
+	// OutboundSoaSerial carries the per-zone outbound serial mode to the
+	// RefreshEngine (copied to zd.OutboundSoaSerial on merge). Empty means
+	// "inherit the server-global setting" and is a valid, self-consistent
+	// value, so it is always copied — no "only if non-empty" guard.
+	OutboundSoaSerial string
+	MultiSigner       string
+	Force             bool // force refresh, ignoring SOA serial
+	Wait              bool // wait for refresh to complete before responding
+	Response          chan RefresherResponse
 }
 
 type RefresherResponse struct {
@@ -836,11 +951,30 @@ type NotifyStatus struct {
 
 // Migrating all DB access to own interface to be able to have local receiver functions.
 type PrivateKeyCache struct {
-	K          crypto.PrivateKey
-	PrivateKey string // This is only used when reading from file with ReadKeyNG()
-	CS         crypto.Signer
-	RR         dns.RR
-	KeyType    uint16
+	// K, CS and RR are interfaces and MUST NOT cross the API boundary.
+	//
+	// json.Marshal writes an ed25519.PrivateKey (a []byte) as a base64
+	// string; on the way back in, that string decodes happily into the
+	// empty interface crypto.PrivateKey but FAILS against the non-empty
+	// crypto.Signer, aborting the decode partway through. The server used
+	// to log that error and carry on, leaving K holding a plain string —
+	// which then reached x509.MarshalPKCS8PrivateKey and produced the
+	// misleading "pkcs8: codec does not support this key/OID".
+	//
+	// The wire form carries PrivateKey (base64) + DnskeyRR/KeyRR, which is
+	// everything the server needs to rebuild the key locally.
+	K crypto.PrivateKey `json:"-"`
+	// PrivateKey is the BIND single-field base64. Kept for existing callers,
+	// but do NOT rely on it across the API: it is empty for RSA, whose BIND
+	// format has eight fields and no "PrivateKey:" line. Use PrivateKeyPEM.
+	PrivateKey string
+	// PrivateKeyPEM is the PKCS#8 PEM encoding and is what the server rebuilds
+	// the key from. Algorithm-agnostic: works for RSA, ECDSA, Ed25519 and the
+	// registered PQ algorithms alike.
+	PrivateKeyPEM string
+	CS            crypto.Signer `json:"-"`
+	RR            dns.RR        `json:"-"`
+	KeyType       uint16
 	Algorithm  uint8
 	KeyId      uint16
 	KeyRR      dns.KEY
@@ -998,7 +1132,7 @@ type ImrMgmtPost struct {
 	Zone     ZoneName               `json:"zone,omitempty"`
 	Id       string                 `json:"id,omitempty"`   // e.g. imr-show: cache identity to show
 	Data     map[string]interface{} `json:"data,omitempty"` // command-specific parameters
-	Response chan *ImrMgmtResponse   `json:"-"`
+	Response chan *ImrMgmtResponse  `json:"-"`
 }
 
 // ImrMgmtResponse is the response from a daemon's /imr endpoint.
