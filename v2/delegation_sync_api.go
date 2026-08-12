@@ -33,7 +33,12 @@ func (zd *ZoneData) SyncZoneDelegationViaApi(ctx context.Context, imr *Imr,
 	}
 
 	childconf := DelegationSyncConfig().Child.Api
-	cred, ok := childconf.CredentialFor(parent)
+	// Child-aware even here, where the zone IS the child and a generic
+	// per-parent entry is the normal config. Passing the zone name costs
+	// nothing and means an operator who does name a child on the entry gets
+	// the same answer from both paths -- rather than the proxy honouring the
+	// field and this one silently ignoring it.
+	cred, ok := childconf.CredentialForChild(parent, zd.ZoneName)
 	if !ok {
 		// One clear line and no retry loop. There is nothing to wait for: a
 		// credential arrives out of band, by definition (§10), so retrying

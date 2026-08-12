@@ -88,23 +88,84 @@ type DsyncApiChildConf struct {
 }
 
 type DsyncApiChildCredentialConf struct {
-	Parent   string          `yaml:"parent" mapstructure:"parent"`
+	Parent string `yaml:"parent" mapstructure:"parent"`
+
+	// Child names the child zone this credential is for. OPTIONAL, and empty
+	// in every config written before delegation-sync-proxy existed.
+	//
+	// A tdns-auth child is itself the child zone, so the parent alone
+	// identifies the relationship and this stays empty. A tdns-agent running
+	// delegation-sync-proxy can be secondary for SEVERAL child zones under one
+	// parent, each with its own username and key at that parent -- and parent
+	// alone can no longer say which. Naming the child here is how the second
+	// and subsequent ones are expressed.
+	//
+	// An entry naming a child matches only that child. An entry with no child
+	// matches any child under that parent, which is what keeps existing
+	// single-child configs working untouched.
+	Child string `yaml:"child" mapstructure:"child"`
+
 	Username string          `yaml:"username" mapstructure:"username"`
 	Key      SensitiveString `yaml:"key" mapstructure:"key"`
 }
 
 // CredentialFor returns the credential for a parent zone, matching as FQDNs so
 // a config written with or without the trailing dot works either way.
+//
+// Kept for callers that have no child to offer. Prefer CredentialForChild:
+// this one cannot see a child-specific entry, so on a host that proxies
+// several children under one parent it returns whichever generic entry exists
+// -- or nothing, if every entry names a child.
 func (c DsyncApiChildConf) CredentialFor(parent string) (DsyncApiClientCredential, bool) {
-	want := strings.ToLower(dns.Fqdn(strings.TrimSpace(parent)))
-	for _, cc := range c.Credentials {
-		if strings.ToLower(dns.Fqdn(strings.TrimSpace(cc.Parent))) == want {
-			return DsyncApiClientCredential{
-				Parent:   want,
-				Username: strings.TrimSpace(cc.Username),
-				Key:      cc.Key.Value(),
-			}, true
+	return c.CredentialForChild(parent, "")
+}
+
+// CredentialForChild returns the credential for a (parent, child) pair.
+//
+// Most specific wins: an entry naming this child is preferred over a generic
+// entry for the parent. The generic entry is the fallback rather than an
+// error, because it is what every pre-existing config looks like and the
+// single-child case has no ambiguity to resolve.
+//
+// The alternative -- matching on username == child -- was rejected: §6.2 keeps
+// principal and username deliberately distinct, so the parent does not require
+// them to be equal and neither should this.
+func (c DsyncApiChildConf) CredentialForChild(parent, child string) (DsyncApiClientCredential, bool) {
+	norm := func(s string) string {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			return ""
 		}
+		return strings.ToLower(dns.Fqdn(s))
+	}
+	wantParent, wantChild := norm(parent), norm(child)
+
+	build := func(cc DsyncApiChildCredentialConf) DsyncApiClientCredential {
+		return DsyncApiClientCredential{
+			Parent:   wantParent,
+			Username: strings.TrimSpace(cc.Username),
+			Key:      cc.Key.Value(),
+		}
+	}
+
+	var generic *DsyncApiChildCredentialConf
+	for i, cc := range c.Credentials {
+		if norm(cc.Parent) != wantParent {
+			continue
+		}
+		ccChild := norm(cc.Child)
+		if ccChild == "" {
+			if generic == nil {
+				generic = &c.Credentials[i]
+			}
+			continue
+		}
+		if wantChild != "" && ccChild == wantChild {
+			return build(cc), true
+		}
+	}
+	if generic != nil {
+		return build(*generic), true
 	}
 	return DsyncApiClientCredential{}, false
 }
