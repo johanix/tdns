@@ -7,7 +7,10 @@ authoritative and recursive DNS service.
 
 1. [**Automatic Delegation Synchronization**](#1-automatic-delegation-synchronization)
    -- Keeping parent zone delegation data in sync with child
-   zone changes.
+   zone changes: the NOTIFY and UPDATE schemes, delegation
+   backends, the agent-as-proxy path, and the
+   [DSYNC API scheme](#17-the-dsync-api-scheme-https-for-children-that-cannot-sign)
+   for children that cannot sign a DNS message.
 2. [**DNS Transport Signaling**](#2-dns-transport-signaling)
    -- Enabling resolvers to discover and use encrypted
    transports (DoT, DoQ, DoH) when communicating with
@@ -83,7 +86,7 @@ the necessary DSYNC RRs at the well-known owner name
 ```yaml
 delegationsync:
    parent:
-      schemes: [ notify, update ]
+      schemes: [ notify, update ]      # and/or `api`, see 1.7
       notify:
          types:     [ CDS, CSYNC ]
          target:    notifications.{ZONENAME}
@@ -299,8 +302,10 @@ OnFirstLoad). This:
 `DelegationSyncher` consumes `DelegationSyncQ` and routes
 each change to `SyncZoneDelegation`, which discovers the
 parent's DSYNC RRset and sends either a SIG(0)-signed
-UPDATE, a generalized NOTIFY(CDS/CSYNC), or both -- driven
-by what the parent advertises and by per-policy preference.
+UPDATE, a generalized NOTIFY(CDS/CSYNC), an HTTPS POST over
+the API scheme ([1.7](#17-the-dsync-api-scheme-https-for-children-that-cannot-sign)),
+or several -- driven by what the parent advertises and by
+per-policy preference.
 The same dispatch logic is reused by the auto-rollover
 engine; see section 5 for the full picture.
 
@@ -364,6 +369,248 @@ primary (a one-time `zone proxy-key` bootstrap). For the
 full operator how-to -- configuration, the UPDATE
 KEY-bootstrap, limitations, and verification -- see
 [Agent as a DSYNC proxy](agent-dsync-proxy.md).
+
+
+### 1.7 The DSYNC API scheme: HTTPS for children that cannot sign
+
+The NOTIFY and UPDATE schemes above are both DNS, and the
+UPDATE scheme needs the child to hold a SIG(0) key the
+parent trusts. Many provisioning systems can POST JSON and
+cannot sign a DNS message; today that means falling back to
+a registrar web form.
+
+The **API scheme** (`SchemeAPI`, DSYNC scheme 4) is for
+those children. It is a fallback, not a preference: the
+UPDATE scheme is the one to reach for when the child can
+manage it.
+
+#### What the parent publishes
+
+Three records, in one update:
+
+```
+_dsync.example.      7200 IN DSYNC CDS   API 443 dsync-api.example.
+_dsync.example.      7200 IN DSYNC CSYNC API 443 dsync-api.example.
+dsync-api.example.   7200 IN URI   1 1 "https://dsync-api.example:443/dsync/v1"
+dsync-api.example.   7200 IN TXT   "tdns-child-api-v1.0"
+```
+
+Unlike NOTIFY and UPDATE, **the DSYNC target here is not a
+host you send DNS to** -- it is a name at which the service
+description lives. The URI carries the endpoint and the TXT
+says what dialect it speaks; the URI's own host resolves by
+ordinary means. Address records at the target are therefore
+optional, where the other two schemes require them.
+
+The TXT is whitespace-separated tokens. The first is the
+dialect identifier -- protocol and version in one opaque
+string, matched literally -- and any that follow are
+SVCB-style `key=value` parameters, all optional and ignored
+if unrecognised. Several TXT records at the name is how a
+parent advertises more than one dialect at once, which is
+the version-migration story. A child that recognises none of
+them does not use the endpoint and does not send its
+credential there.
+
+Parent configuration:
+
+```yaml
+delegationsync:
+   parent:
+      schemes: [ notify, update, api ]
+      api:
+         types:    [ CDS, CSYNC ]
+         target:   dsync-api.{ZONENAME}
+         baseurl:  "https://{TARGET}:{PORT}/dsync/v1"
+         port:     443
+         dialect:  tdns-child-api-v1.0
+         listen:   [ "0.0.0.0:443" ]
+         cert:     /etc/tdns/dsync-api.crt
+         key:      /etc/tdns/dsync-api.key
+```
+
+The listener is its **own socket, with its own router and
+its own middleware** -- not a subtree of the management API.
+A registrant's provisioning script is not a trusted
+operator, and the surest guarantee that its credential
+cannot reach operator endpoints is that those endpoints are
+not on the socket it connects to. TLS is mandatory; tdns
+refuses to serve this endpoint without a certificate.
+
+Note the guard in [§1.1](#11-parent-publishing-dsync): an
+existing DSYNC RRset is left alone, so adding `api` to a
+zone that already publishes DSYNC does nothing until the
+RRset is removed and republished.
+
+#### Authentication: `<username, key>`, not a shared key
+
+Requests authenticate with HTTP Basic over TLS. Not the
+management API's single `apiserver.apikey`, and the reason
+is authorization rather than authentication strength: a
+shared key names nobody, and a policy that cannot name the
+principal cannot be granular.
+
+Credentials are issued by the operator, over the management
+API:
+
+```sh
+tdns-cli auth dsync-api credential add    --zone example. --user child1.example.
+tdns-cli auth dsync-api credential list   --zone example.
+tdns-cli auth dsync-api credential disable --zone example. --user child1.example.
+tdns-cli auth dsync-api credential delete --zone example. --user child1.example.
+```
+
+`add` generates the key, prints it **once**, and stores only
+a hash. There is no way to read it back; if it is lost,
+delete the credential and issue another. Prefer `disable`
+over `delete` when the question "who had access, and when"
+might be asked later -- disabling stops the credential
+working and keeps the record.
+
+Usernames are normalised as domain names (case-folded, given
+a trailing dot) even when they are not domain names, so
+`bob` and `bob.` are one account rather than two.
+Provisioning is out of band by definition: a child that
+could bootstrap a credential in band could sign a DNS
+message, and would use the UPDATE scheme.
+
+#### Authorization: the same `updatepolicy.child`
+
+This is the part that keeps the feature small. The
+authenticated **principal** is substituted for the SIG(0)
+signer name, and the zone's existing child update policy is
+applied unchanged:
+
+```yaml
+zones:
+   - name:    example.
+     options: [ delegation-sync-parent, allow-child-updates ]
+     delegationbackend: direct
+     updatepolicy:
+        child:
+           type:    selfsub
+           rrtypes: [ A, AAAA, NS, DS ]
+```
+
+Under that policy, principal `child1.example.` may change
+`A/AAAA/NS/DS` at or below `child1.example.` and nowhere
+else -- whether the change arrives as a SIG(0)-signed UPDATE
+or as an authenticated POST. One policy, one meaning, two
+transports.
+
+The principal defaults to the username. A credential may
+carry an explicit `--principal` when the account should have
+a human-readable name (`acme-registrar` acting for
+`child1.example.`).
+
+#### The endpoints
+
+```
+GET  /dsync/v1/delegation/{child}    what the parent currently holds
+POST /dsync/v1/delegation/{child}    declare the desired delegation
+```
+
+Declarative, not imperative: the child states what its
+delegation should be and the parent computes the change.
+That mirrors the UPDATE scheme's replace mode, is idempotent
+under retry, and keeps the zone-update statement vocabulary
+off an untrusted surface.
+
+```json
+{"child": "child1.example.",
+ "rrsets": [
+   {"owner": "child1.example.",     "type": "NS", "rrs": ["child1.example. 3600 IN NS ns1.child1.example."]},
+   {"owner": "ns1.child1.example.", "type": "A",  "rrs": ["ns1.child1.example. 3600 IN A 192.0.2.1"]},
+   {"owner": "child1.example.",     "type": "DS", "rrs": []}
+ ]}
+```
+
+Each entry names owner *and* type explicitly, because glue
+lives at the nameserver names while NS lives at the child --
+a body keyed by type alone could not say which A records to
+remove. An entry with an empty `rrs` **removes** that RRset;
+an RRset **not mentioned is left alone**. That distinction
+is what makes the endpoint safe for a client that manages
+only DS: omitting NS must not wipe the delegation.
+
+Changes are applied through the configured **delegation
+backend** ([§1.4](#14-parent-delegation-backends)), like any
+other child update. `200` means applied, persisted and being
+served -- the same promise the UPDATE scheme makes.
+
+| Status | Meaning |
+|---|---|
+| 200 | applied, durable, being served |
+| 400 | malformed body, unparseable RRs, owner not below the child, unmanaged type |
+| 401 | missing or bad credentials (no body: unknown user, wrong key, disabled and expired are indistinguishable by design) |
+| 403 | authenticated, but `updatepolicy.child` refuses |
+| 404 | no hosted parent zone for that child, or it does not offer this scheme |
+| 409 | zone frozen |
+| 503 | apply timed out, or the updater is unavailable |
+
+The endpoint manages `NS`, `DS`, `A` and `AAAA`. That is
+decided by the endpoint, not by
+`updatepolicy.child.rrtypes`: a parent that allows TXT in
+its child policy still does not want this endpoint used to
+manage arbitrary text records at a delegation point. Both
+gates apply.
+
+#### Child side
+
+```yaml
+delegationsync:
+   child:
+      schemes: [ notify, update, api ]     # preference order; api last
+      api:
+         cafile: /etc/tdns/dsync-api-ca.crt
+         credentials:
+            - parent:   example.
+              username: child1.example.
+              key:      "the key printed by credential add"
+```
+
+A child with no credential for a parent that offers only
+`api` logs one clear line and stops. Retrying cannot make a
+credential appear.
+
+#### Why this scheme is stricter than the others
+
+The credential is a **bearer token**, and that is the one
+exposure the UPDATE scheme does not have. A child fooled
+into sending a SIG(0)-signed update to the wrong server
+leaks nothing: the message is signed, the wrong server
+cannot use it, and the change simply does not happen. A
+child fooled into POSTing here hands an attacker a working
+credential.
+
+So, on the child side:
+
+- **The DSYNC, URI and TXT lookups must DNSSEC-validate.**
+  This is a prerequisite, not a recommendation -- which
+  means **the scheme requires a signed parent zone**, and is
+  a real constraint on who can use the fallback.
+- **https only**, with full certificate validation. Use
+  `cafile` for a private CA (`tdns-cli cert ca` mints one);
+  it *adds* roots rather than removing verification, and
+  avoids installing that CA into the host's system trust
+  store where it would gain authority over every TLS
+  connection the host makes. There is no switch to disable
+  verification.
+- **Redirects are refused outright.** Go strips
+  `Authorization` across hosts, so a cross-host redirect is
+  a silent auth failure rather than a leak -- but a
+  same-host redirect still carries the credential, and a
+  redirect here means something is wrong either way.
+- **A credential is scoped to one parent** and is never sent
+  to another.
+
+`delegationsync.child.api.allow-insecure` relaxes the first
+two of those -- plaintext endpoints *and* unvalidated
+discovery, deliberately as a single switch, because they are
+the same protection seen from two sides and an operator who
+disables one while believing the other still holds has none.
+It does not disable certificate validation. It is a lab
+convenience and never a production setting.
 
 
 ## 2. DNS Transport Signaling

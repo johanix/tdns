@@ -4,6 +4,10 @@
 **Status:** OPEN. Reproduced on foffe, root cause not found.
 **Severity:** blocks child-side delegation sync against any parent reached via a
 stub — on every DSYNC scheme, not just the new API one.
+**Contains:** the main problem (§1-5) plus three separate IMR issues found
+alongside it (§6): an accessor aliasing asymmetry, a silent failure mode that
+makes this class of bug hard to diagnose, and a sample config that does not
+load. IMR issues are kept together here rather than filed apart.
 **Found:** while trying to run the child half of the DSYNC API scheme end to end
 (`2026-08-11-dsync-api-scheme.md` §17). Not caused by that work; it sits
 underneath it.
@@ -133,22 +137,88 @@ server, every time.
    returning zero (server, addr, transport) tuples, hence `attempts == 0` with
    nothing to log.
 
-2. **`IterativeDNSQuery` mutating the caller's map.** `processTrustAnchorZone`
-   obtains the map with `ServerMap.Get(anchorName)`, which returns the *stored*
-   map rather than a copy — unlike `FindClosestKnownZone`, which explicitly
-   copies (`rrset_cache.go:906-911`) with a comment about exactly this hazard.
-   If any callee deletes from it, the cached stub entry is damaged in place.
-   Less likely given §3 shows the entry still populated afterwards, but the
-   asymmetry between the two accessors is real and worth closing regardless.
+2. **`IterativeDNSQuery` mutating the caller's map.** See issue B in §6 — the
+   accessor asymmetry is a standing hazard whether or not it is this bug.
 
-3. **`prioritizeServers` silently yielding nothing.** Whatever the cause, it
-   produces no log line at debug level. A zero-tuple result is always a dead
-   end for the query and should say so — that alone would have made this a
-   five-minute diagnosis instead of an evening.
+3. **`prioritizeServers` silently yielding nothing.** See issue C in §6.
 
 ---
 
-## 6. Impact
+## 6. Three separate issues found alongside this one
+
+Kept here rather than filed apart, so the IMR problems stay together. All three
+are worth fixing on their own terms, independently of whatever turns out to be
+the root cause of §1.
+
+### Issue B — `ServerMap.Get` hands out the stored map; `FindClosestKnownZone` copies
+
+`processTrustAnchorZone` takes its server map with
+`imr.Cache.ServerMap.Get(anchorName)` (`imrengine.go:1790`), which returns the
+map **stored in the cache**. `FindClosestKnownZone` returns a shallow **copy**
+(`rrset_cache.go:906-911`), with a comment saying why:
+
+> Return a shallow copy of the map so concurrent callers don't race on writes
+> (e.g. processAddressRecords adding resolved NS addresses).
+
+So one accessor is guarded against exactly the hazard the other is wide open
+to. Any callee that adds to or deletes from the map it was handed mutates the
+cache in place through the first accessor and cannot through the second — and
+`IterativeDNSQuery` does write into its `serverMap` argument
+(`dnslookup.go:556,571,581,982,1644`). Whether or not this is the cause of §1,
+two accessors for the same data with opposite aliasing rules is a footgun with
+no upside. Either make `Get` copy too, or document the asymmetry at both ends.
+
+### Issue C — a zero-tuple `prioritizeServers` result logs nothing
+
+When `prioritizeServers` returns no (server, addr, transport) tuples, the
+query loop simply never executes and the caller gets `attempts == 0`. Nothing
+is logged, at any level, including `debug: true` — the only trace is the phrase
+"no auth-server attempts made" in an error string, and only if someone happens
+to surface that error.
+
+A zero-tuple result is always a dead end for the query. It is never normal and
+never recoverable, so it should say so: which zone, which servers were
+considered, and why each produced nothing (no addresses / in backoff / no
+usable transport / encryption required). **This is what turned §1 from a
+five-minute diagnosis into an evening**, and it will do the same to the next
+person.
+
+### Issue D — the IMR sample config's stub form does not decode
+
+`cmdv2/imr/tdns-imr.sample.yaml` documents:
+
+```yaml
+# stubs:
+#    - zone:     internal.example.
+#      servers:  [ 192.0.2.53, 2001:db8::53 ]
+```
+
+`ImrStubConf.Servers` is `[]cache.AuthServer` (`config.go:375-379`), so a bare
+IP fails at config load with:
+
+```
+'imrengine.stubs[0].Servers[0]' expected a map, got 'string'
+```
+
+The daemon refuses to start. The working form is:
+
+```yaml
+stubs:
+   - zone:       internal.example.
+     servers:
+        - name:   ns.internal.example.
+          addrs:  [ 192.0.2.53, 2001:db8::53 ]
+          alpn:   [ do53 ]
+```
+
+Either the sample or the decoder should change. A `StringToAuthServer` decode
+hook would make the documented form work and is arguably the nicer config; the
+one-line sample fix is the smaller change. Anyone copying the sample today gets
+a daemon that will not start.
+
+---
+
+## 7. Impact
 
 - Any child whose parent is reachable only via a stub cannot run delegation
   sync at all: `AnalyseZoneDelegation` fails before any scheme-specific code
@@ -162,23 +232,17 @@ server, every time.
 
 ---
 
-## 7. Two lab notes from the same session
+## 8. Lab note from the same session
 
-Not bugs in the resolver, but both cost time:
+Not a bug in tdns, but it cost time and will again:
 
-- **`127.0.0.2` needs an explicit alias on NetBSD.** `inet 127.0.0.1/8` on lo0
-  does *not* make the rest of the /8 bindable, unlike Linux; without
-  `ifconfig lo0 alias 127.0.0.2 netmask 255.255.255.255` the listener fails
-  with `bind: can't assign requested address`.
-- **The IMR sample config's stub form does not decode.** It shows
+**`127.0.0.2` needs an explicit alias on NetBSD.** `inet 127.0.0.1/8` on lo0
+does *not* make the rest of the /8 bindable, unlike Linux. Without
 
-  ```yaml
-  # stubs:
-  #    - zone:     internal.example.
-  #      servers:  [ 192.0.2.53, 2001:db8::53 ]
-  ```
+```
+ifconfig lo0 alias 127.0.0.2 netmask 255.255.255.255
+```
 
-  but `ImrStubConf.Servers` is `[]cache.AuthServer`, so a bare IP fails with
-  `'imrengine.stubs[0].Servers[0]' expected a map, got 'string'`. The working
-  form is `- name: ... / addrs: [ ... ] / alpn: [ do53 ]`. Either the sample or
-  the decoder should change; the sample is the smaller fix.
+a listener on `127.0.0.2` fails with `bind: can't assign requested address` —
+and, because the failure is per-listener rather than fatal, the daemon comes up
+and answers on its other sockets while quietly serving no DNS at all.

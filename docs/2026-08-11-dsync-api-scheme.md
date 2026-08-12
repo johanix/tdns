@@ -675,3 +675,86 @@ Two lab notes from the run, neither a code issue: `127.0.0.2` needs an explicit
 /8 bindable), and the IMR sample config shows `stubs: servers: [ 192.0.2.53 ]`
 as bare IPs, which does not decode — `AuthServer` needs the map form with
 `name:` and `addrs:`.
+
+---
+
+## 18. Consumers that must not depend on DNS resolution
+
+**Requirement (Johan, 2026-08-12), for the statusd migration and any
+lab-infrastructure consumer:**
+
+> In a DNS training lab we will not have the responsible servers (like statusd)
+> depend on working DNS resolution. The model I aim for is that statusd uses the
+> api endpoints announced via dsync api but *without* needing the dns lookups.
+> Statusd should have the result of the dsync discovery as static config
+> (replacing the existing static config for finding the tdns mgmt API).
+
+This is not a weakening of §8. It is a statement about **who does the
+discovery**, and it matters because statusd is part of the machinery that makes
+the lab's DNS work: a statusd that cannot publish a delegation until DNS
+resolves has a bootstrap cycle in it, and in a teaching lab the DNS is
+*expected* to be broken half the time — that is what the students are there to
+do.
+
+### The shape
+
+Discovery (§3, §11) produces exactly three things:
+
+| From | Value |
+|---|---|
+| DSYNC record | the target name |
+| URI at the target | the endpoint URL |
+| TXT at the target | the dialect |
+
+For a consumer like statusd, those three are **configured**, not resolved. The
+endpoint is then used exactly as a discovered one would be: same HTTPS, same
+Basic credential, same TLS verification, same policy enforcement at the parent.
+Nothing about the *server* side changes, and nothing about the credential
+handling changes.
+
+### The seam already exists
+
+`DsyncApiPostDelegationRequest` takes a `*DsyncApiEndpoint` and never resolves
+anything itself; `DiscoverDsyncApiEndpoint` is a separate function that
+*produces* one. A statically-configured consumer constructs the struct and
+skips the discovery call:
+
+```go
+ep := &tdns.DsyncApiEndpoint{
+    Target:  "dsync-api.dnslab.",                        // for logging only
+    Url:     "https://dsync-api.dnslab:8443/dsync/v1",   // from config
+    Dialect: tdns.DsyncApiDialectV1,                     // from config
+}
+```
+
+So no code change is needed to support this — it is a matter of which of the
+two entry points the consumer calls.
+
+### What is lost, and why that is the right trade here
+
+DNSSEC-validated discovery is what stops a credential being sent to an
+attacker's URL (§8). Static configuration replaces that protection with a
+different one: the endpoint came from the operator's own config file, which is
+a stronger statement of intent than a DNS lookup, not a weaker one. The
+remaining exposure is the same one every statically-configured API client has,
+and it is covered by TLS certificate validation — which stays mandatory.
+
+What is genuinely given away is **agility**: a parent that moves its endpoint
+has to have every statically-configured consumer updated by hand, where a
+discovering child would follow the URI record. For lab infrastructure that is
+the correct trade; for a registrant's provisioning system it is not, which is
+why discovery remains the default and this is the documented exception.
+
+### Consequences for the statusd migration
+
+- statusd replaces its existing static `baseurl`/`apikey` pointing at the tdns
+  **management** API with a static endpoint + `<username, key>` pointing at the
+  **DSYNC API**. Same shape of config, different surface.
+- It thereby stops holding an operator credential that can do anything, and
+  starts holding a registrant credential confined by `updatepolicy.child` —
+  which is the actual point of the migration, and is worth more than the
+  discovery it forgoes.
+- The current `parentupdater` work (mechanism `tdns-api`, talking to the
+  management API) is the temporary step. This is the destination.
+- No IMR, no resolver dependency, and no bootstrap cycle: statusd can publish a
+  delegation into a zone that nothing can yet resolve.
