@@ -507,6 +507,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 			// responder kept the stale startup map. SetOptions swaps the map
 			// atomically, so the per-query lock-free readers are race-free.
 			conf.Internal.KeyDB.SetOptions(conf.DnsEngine.Options)
+			conf.Internal.KeyDB.TransferSrc = conf.DnsEngine.TransferSrc
 			if err := applyOutboundSoaSerial(conf.Internal.KeyDB, conf.DnsEngine.OutboundSoaSerial); err != nil {
 				return err
 			}
@@ -595,6 +596,7 @@ func (conf *Config) InitializeKeyDB() error {
 	}
 	conf.Internal.KeyDB = kdb
 
+	kdb.TransferSrc = conf.DnsEngine.TransferSrc
 	if err := applyOutboundSoaSerial(kdb, conf.DnsEngine.OutboundSoaSerial); err != nil {
 		return err
 	}
@@ -930,6 +932,7 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		zd.mu.Lock()
 		options, zconf.OutboundSoaSerial = zd.applyOptionNormalization(zonetype, options, zconf.OutboundSoaSerial)
 		zd.mu.Unlock()
+		zd.TransferSrc = zconf.TransferSrc
 
 		var outopts []string
 		for o, val := range options {

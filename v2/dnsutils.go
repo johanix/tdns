@@ -6,14 +6,17 @@ package tdns
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -90,6 +93,28 @@ func (zd *ZoneData) ZoneTransferIn(up PeerConf, serial uint32, ttype string, con
 		return 0, fmt.Errorf("ZoneTransferIn %s: TSIG sign setup: %w", zd.ZoneName, serr)
 	}
 	transfer.TsigProvider = provider
+
+	// Bind the local (source) address when the zone or the server names one.
+	// This is what the upstream's allow-transfer/provide-xfr ACL sees; without
+	// it the kernel picks a source from the outgoing interface, which on a
+	// multi-homed server is generally not the address we advertise as our
+	// identity -- so an ACL naming that address refuses us.
+	//
+	// dns.Transfer.In only dials when Conn is nil, and the library documents
+	// pre-dialling for exactly this purpose, so no fork change is needed.
+	if src := zd.EffectiveTransferSrc(); len(src) > 0 {
+		conn, derr := dialTransferConn(upstream, tlsCfg, src, transfer.DialTimeout)
+		if derr != nil {
+			return 0, fmt.Errorf("ZoneTransferIn %s: dial %s: %w", zd.ZoneName, upstream, derr)
+		}
+		// nil means no configured source matched this upstream's family; leave
+		// Conn unset so In() dials normally rather than relying on a typed-nil
+		// pointer comparing equal to nil.
+		if conn != nil {
+			transfer.Conn = conn
+		}
+	}
+
 	answerChan, err := transfer.In(msg, upstream)
 	if err != nil {
 		zd.Logger.Printf("Error from transfer.In: %v\n", err)
@@ -825,4 +850,54 @@ func readLineFromFile(filename string, lineNum int) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("line %d not found", lineNum)
+}
+
+// transferSrcFor picks the source address to bind for an upstream: the first
+// configured entry whose address family matches. A family with no configured
+// source returns nil, meaning "dial unbound" -- deliberately forgiving, because
+// an operator who names only a v4 source should not thereby break every v6
+// upstream. Unparseable entries are skipped.
+func transferSrcFor(upstream string, srcs []string) net.IP {
+	host, _, err := net.SplitHostPort(upstream)
+	if err != nil {
+		host = upstream
+	}
+	want4 := net.ParseIP(host).To4() != nil
+
+	for _, s := range srcs {
+		ip := net.ParseIP(strings.TrimSpace(s))
+		if ip == nil {
+			continue
+		}
+		if (ip.To4() != nil) == want4 {
+			return ip
+		}
+	}
+	return nil
+}
+
+// dialTransferConn dials upstream with the source address bound, returning a
+// *dns.Conn ready to hand to dns.Transfer. tlsCfg non-nil selects XoT.
+func dialTransferConn(upstream string, tlsCfg *tls.Config, srcs []string, timeout time.Duration) (*dns.Conn, error) {
+	src := transferSrcFor(upstream, srcs)
+	if src == nil {
+		return nil, nil // no matching family; caller leaves Conn nil and In() dials
+	}
+	if timeout == 0 {
+		timeout = 2 * time.Second
+	}
+	d := &net.Dialer{Timeout: timeout, LocalAddr: &net.TCPAddr{IP: src}}
+
+	if tlsCfg != nil {
+		c, err := tls.DialWithDialer(d, "tcp", upstream, tlsCfg)
+		if err != nil {
+			return nil, err
+		}
+		return &dns.Conn{Conn: c}, nil
+	}
+	c, err := d.Dial("tcp", upstream)
+	if err != nil {
+		return nil, err
+	}
+	return &dns.Conn{Conn: c}, nil
 }

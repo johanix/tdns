@@ -292,6 +292,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							// predicate depends on it (Fix B chokepoint).
 							zd.Options, zd.OutboundSoaSerial =
 								zd.applyOptionNormalization(zr.ZoneType, zr.Options, zr.OutboundSoaSerial)
+							zd.TransferSrc = zr.TransferSrc
 							zd.UpdatePolicy = zr.UpdatePolicy
 							// Record the config-base policy name only (no struct bind).
 							// syncZoneDnssecPolicyFromConfig binds post-Ready; this
@@ -434,6 +435,11 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							}
 							zd.Options, zd.OutboundSoaSerial =
 								zd.applyOptionNormalization(ztype, newOpts, newSerial)
+							// Same rule as newSerial above: a config update
+							// replaces the source, anything else keeps it.
+							if zr.ConfigUpdate {
+								zd.TransferSrc = zr.TransferSrc
+							}
 						}
 						// Update UpdatePolicy only if provided (check if it has meaningful content)
 						// UpdatePolicy is a struct, so we check if any fields are set
@@ -652,6 +658,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						ZoneType:          zr.ZoneType,
 						Options:           zr.Options,
 						OutboundSoaSerial: zr.OutboundSoaSerial,
+						TransferSrc:       zr.TransferSrc,
 						UpdatePolicy:      zr.UpdatePolicy,
 						DnssecPolicyName:  zr.DnssecPolicy, // config-base hint; struct bound post-Ready
 						MultiSigner:       &msc,

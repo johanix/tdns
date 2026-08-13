@@ -144,17 +144,21 @@ type ZoneData struct {
 	// Never read directly — call zd.EffectiveOutboundSoaSerial(), which
 	// resolves the zone/global tiers.
 	OutboundSoaSerial string
-	FirstZoneLoad     bool // true until first zone data has been loaded
-	Verbose           bool
-	Debug             bool
-	IxfrChain         []Ixfr
-	PrimariesConf     []PeerConf // as-written primaries; persisted; re-resolved each load (P3)
-	Upstreams         []PeerConf // resolved addr:port tuples; runtime-only; used for transfer
-	Notify            []PeerConf // downstream secondaries that we notify (addr + key)
-	AllowNotify       []AclEntry // secondary: who may NOTIFY us; empty => accept from resolved primaries
-	Downstreams       []AclEntry // primary: who may AXFR from us (provide-xfr ACL); empty => deny
-	DownstreamAuth    []string   // acceptable transfer-auth mechanism classes (empty => unrestricted); see authorizeTransfer
-	Zonefile          string
+	// TransferSrc is the per-zone source address for OUTBOUND transfers, i.e.
+	// what the upstream's allow-transfer ACL sees. Never read directly — call
+	// zd.EffectiveTransferSrc(), which falls back to dnsengine.transfer_src.
+	TransferSrc    []string
+	FirstZoneLoad  bool // true until first zone data has been loaded
+	Verbose        bool
+	Debug          bool
+	IxfrChain      []Ixfr
+	PrimariesConf  []PeerConf // as-written primaries; persisted; re-resolved each load (P3)
+	Upstreams      []PeerConf // resolved addr:port tuples; runtime-only; used for transfer
+	Notify         []PeerConf // downstream secondaries that we notify (addr + key)
+	AllowNotify    []AclEntry // secondary: who may NOTIFY us; empty => accept from resolved primaries
+	Downstreams    []AclEntry // primary: who may AXFR from us (provide-xfr ACL); empty => deny
+	DownstreamAuth []string   // acceptable transfer-auth mechanism classes (empty => unrestricted); see authorizeTransfer
+	Zonefile       string
 	// Template names the config template an API-provisioned zone was expanded
 	// from (zone add --template). Persisted in the dynamic config entry so a
 	// restart re-expands it; the update policy is deliberately NOT persisted —
@@ -328,6 +332,14 @@ type ZoneConf struct {
 	// non-empty string counts as set, so an explicit "keep" beats a template
 	// "persist").
 	OutboundSoaSerial string `yaml:"outbound_soa_serial,omitempty" mapstructure:"outbound_soa_serial" validate:"omitempty,oneof=keep unixtime persist"`
+	// TransferSrc is the per-zone override of the server-global
+	// dnsengine.transfer_src: the local address to bind when dialling this
+	// zone's upstreams, which is what the primary's allow-transfer ACL sees.
+	// Empty (the default) inherits the global. Set it on a TEMPLATE to give a
+	// whole class of zones one source address -- the same granularity argument
+	// as OutboundSoaSerial above, and the reason a dynamically-provisioned
+	// secondary can get a source address without the API having to carry one.
+	TransferSrc []string `yaml:"transfer-src,omitempty" mapstructure:"transfer-src"`
 	// EffectiveDnssecPolicy / DnssecPolicyOverridden / DnssecPolicyConfigBase
 	// are display-only fields populated by the list-zones handler: the policy
 	// actually bound to the running zone; whether it came from a dynamic
@@ -800,10 +812,13 @@ type ZoneRefresher struct {
 	// "inherit the server-global setting" and is a valid, self-consistent
 	// value, so it is always copied — no "only if non-empty" guard.
 	OutboundSoaSerial string
-	MultiSigner       string
-	Force             bool // force refresh, ignoring SOA serial
-	Wait              bool // wait for refresh to complete before responding
-	Response          chan RefresherResponse
+	// TransferSrc carries the per-zone outbound-transfer source to the
+	// RefreshEngine (copied to zd.TransferSrc on merge). Empty inherits.
+	TransferSrc []string
+	MultiSigner string
+	Force       bool // force refresh, ignoring SOA serial
+	Wait        bool // wait for refresh to complete before responding
+	Response    chan RefresherResponse
 }
 
 type RefresherResponse struct {
@@ -975,10 +990,10 @@ type PrivateKeyCache struct {
 	CS            crypto.Signer `json:"-"`
 	RR            dns.RR        `json:"-"`
 	KeyType       uint16
-	Algorithm  uint8
-	KeyId      uint16
-	KeyRR      dns.KEY
-	DnskeyRR   dns.DNSKEY
+	Algorithm     uint8
+	KeyId         uint16
+	KeyRR         dns.KEY
+	DnskeyRR      dns.DNSKEY
 }
 
 type Sig0ActiveKeys struct {
@@ -1010,6 +1025,10 @@ type KeyDB struct {
 	// Sourced from DnsEngineConf.OutboundSoaSerial at parse, defaulted to
 	// OutboundSoaSerialKeep if unset.
 	OutboundSoaSerial string
+	// TransferSrc is the server-global source address list for outbound zone
+	// transfers (dnsengine.transfer_src). Per-zone ZoneData.TransferSrc wins;
+	// see zd.EffectiveTransferSrc().
+	TransferSrc []string
 }
 
 // Lock and Unlock expose the mutex for code that moves to

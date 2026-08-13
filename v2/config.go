@@ -223,6 +223,23 @@ type DnsEngineConf struct {
 	//              the serial stays put — secondaries don't see a regression
 	//              and don't trigger an unnecessary AXFR.
 	OutboundSoaSerial string `yaml:"outbound_soa_serial,omitempty" mapstructure:"outbound_soa_serial" validate:"omitempty,oneof=keep unixtime persist"`
+
+	// TransferSrc is the server-global source address for OUTBOUND zone
+	// transfers -- the local address we bind before dialling an upstream, i.e.
+	// the address the primary's allow-transfer/provide-xfr ACL will see.
+	//
+	// Without it the kernel picks a source from the outgoing interface, which on
+	// a multi-homed server is generally NOT the address the operator publishes
+	// as the secondary's identity. A primary whose ACL names that published
+	// address then refuses us, and the only workaround is to open the ACL to
+	// any -- which is how this was found (a lab secondary advertising .53 while
+	// transferring from whatever the route picked).
+	//
+	// A LIST, so both families can be named: the entry whose family matches the
+	// upstream is used, and an upstream with no matching entry is dialled
+	// unbound rather than failed. Per-zone ZoneConf.TransferSrc overrides this;
+	// empty there inherits.
+	TransferSrc []string `yaml:"transfer_src,omitempty" mapstructure:"transfer_src"`
 }
 
 type ImrEngineConf struct {

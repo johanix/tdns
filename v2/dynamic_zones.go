@@ -307,6 +307,7 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 				DnssecPolicy:   spec.Zconf.DnssecPolicy,
 
 				OutboundSoaSerial: spec.Zconf.OutboundSoaSerial,
+				TransferSrc:       spec.Zconf.TransferSrc,
 			}
 			select {
 			case conf.Internal.RefreshZoneCh <- zr:
@@ -385,6 +386,7 @@ func (conf *Config) LoadDynamicZoneFiles(ctx context.Context) error {
 			Options:        options,
 
 			OutboundSoaSerial: zconf.OutboundSoaSerial,
+			TransferSrc:       zconf.TransferSrc,
 		}
 
 		// Blocking send, exactly like the static-zone enqueue in ParseZones.
@@ -492,6 +494,7 @@ func zoneDataToZoneConf(zd *ZoneData, zoneDirectory string) ZoneConf {
 		Type:              typeStr,
 		Store:             storeStr,
 		OutboundSoaSerial: zd.OutboundSoaSerial,
+		TransferSrc:       zd.TransferSrc,
 		Primaries:         clonePeerConfs(zd.PrimariesConf),
 		Notify:            zd.Notify,
 		AllowNotify:       zd.AllowNotify,
@@ -1143,6 +1146,7 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	// TSIG-only modify would silently reset a zone that has one to the global
 	// default.
 	outboundSoaSerial := oldZd.OutboundSoaSerial
+	transferSrc := oldZd.TransferSrc
 	// Carry the suppressed-options record across the replacement too, so the
 	// as-configured view survives a modify and the operator's origination
 	// options are not dropped from the persisted config by the next rewrite.
@@ -1179,6 +1183,7 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		KeyDB:          conf.Internal.KeyDB,
 
 		OutboundSoaSerial: outboundSoaSerial,
+		TransferSrc:       transferSrc,
 		SuppressedOptions: suppressedOptions,
 	}
 	// Commit the staged inline key just before persistence so the rewritten file
@@ -1223,6 +1228,7 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 		Force:         true,
 
 		OutboundSoaSerial: outboundSoaSerial,
+		TransferSrc:       transferSrc,
 	}
 	if err := conf.enqueueRefresh(ctx, zr); err != nil {
 		return "", fmt.Errorf("zone %s modified but failed to schedule refresh: %w", name, err)

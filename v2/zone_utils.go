@@ -715,6 +715,29 @@ func FindZoneNG(qname string) *ZoneData {
 // Suppression for a non-originating tdns-auth secondary is deliberately NOT
 // applied here — this answers "what mode is configured", not "may this zone
 // act on it"; the callers pair it with the origination predicate.
+// EffectiveTransferSrc returns the source addresses to bind when dialling this
+// zone's upstreams, resolving the per-zone value over the server-global
+// dnsengine.transfer_src. Empty means "let the kernel choose", which is the
+// behaviour every zone had before this existed.
+func (zd *ZoneData) EffectiveTransferSrc() []string {
+	srcs, _ := zd.EffectiveTransferSrcWithSource()
+	return srcs
+}
+
+// EffectiveTransferSrcWithSource is EffectiveTransferSrc plus the tier that
+// supplied it ("zone", "global" or "default"), for display by `zone desc`. Both
+// live in one function for the same reason as the outbound-serial pair below:
+// so the precedence chain cannot be stated twice and silently diverge.
+func (zd *ZoneData) EffectiveTransferSrcWithSource() (srcs []string, source string) {
+	if len(zd.TransferSrc) > 0 {
+		return zd.TransferSrc, "zone" // per-zone, possibly via its template
+	}
+	if zd.KeyDB != nil && len(zd.KeyDB.TransferSrc) > 0 {
+		return zd.KeyDB.TransferSrc, "global" // dnsengine.transfer_src
+	}
+	return nil, "default"
+}
+
 func (zd *ZoneData) EffectiveOutboundSoaSerial() string {
 	mode, _ := zd.EffectiveOutboundSoaSerialWithSource()
 	return mode
