@@ -272,3 +272,39 @@ func TestResolveTransferSrcUpdate(t *testing.T) {
 		t.Errorf("nil/nil should stay nil, got %v", got)
 	}
 }
+
+// TestTransferScratchZoneCarriesTransferSrc is the regression test for the bug
+// that made transfer-src inert in practice.
+//
+// An inbound AXFR is not received into the live zone; FetchFromUpstream builds a
+// throwaway ZoneData and calls ZoneTransferIn on THAT. The copy lists its fields
+// explicitly, and transfer-src was missing from the list -- so the config was
+// accepted, persisted, reloaded and displayed correctly, and every transfer
+// still went out from whatever source the kernel picked. The only visible
+// evidence was in the far end's ACL log.
+func TestTransferScratchZoneCarriesTransferSrc(t *testing.T) {
+	live := &ZoneData{
+		ZoneName:    "yankee.dnslab.",
+		ZoneType:    Secondary,
+		TransferSrc: []string{"172.16.0.53"},
+	}
+	got := newTransferScratchZone(live)
+
+	if len(got.TransferSrc) != 1 || got.TransferSrc[0] != "172.16.0.53" {
+		t.Fatalf("scratch zone dropped transfer-src: got %v, want [172.16.0.53]", got.TransferSrc)
+	}
+	// It must resolve the same way on the copy as on the live zone, because the
+	// copy is what ZoneTransferIn asks.
+	if src := (&got).EffectiveTransferSrc(); len(src) != 1 || src[0] != "172.16.0.53" {
+		t.Errorf("EffectiveTransferSrc on the scratch zone = %v, want [172.16.0.53]", src)
+	}
+	// The fields the transfer itself depends on must survive too.
+	if got.ZoneName != live.ZoneName || got.ZoneType != live.ZoneType {
+		t.Errorf("scratch zone lost identity: name=%q type=%v", got.ZoneName, got.ZoneType)
+	}
+	// A zone with no per-zone value must not invent one.
+	empty := newTransferScratchZone(&ZoneData{ZoneName: "x."})
+	if src := (&empty).EffectiveTransferSrc(); len(src) != 0 {
+		t.Errorf("unset zone should resolve to no source, got %v", src)
+	}
+}

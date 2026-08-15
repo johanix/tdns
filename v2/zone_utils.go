@@ -194,6 +194,41 @@ func (zd *ZoneData) DoTransfer(conf *Config) (bool, uint32, error) {
 	return false, 0, fmt.Errorf("SOA probe of %s failed: all %d upstream(s) unreachable: %w", zd.ZoneName, len(zd.Upstreams), lastErr)
 }
 
+// newTransferScratchZone builds the throwaway ZoneData an inbound AXFR is
+// received into. The transfer must not write into the live zone until it has
+// succeeded, so it lands here first and is flipped in afterwards.
+//
+// It is a PARTIAL copy, and that is the trap: anything ZoneTransferIn reads off
+// its receiver has to be listed here, or the transfer silently runs without it.
+// transfer-src was added to ZoneData and to the config, plumbed all the way
+// through provisioning, persistence and reload -- and then dropped here, one
+// line before the call that uses it. The feature was inert on every AXFR while
+// looking correct everywhere an operator could inspect it.
+//
+// TransferSrc is resolved on the LIVE zone rather than copied raw: the live zone
+// is the one holding both the per-zone value and the KeyDB carrying the global
+// default, so this hands over an already-resolved list and the scratch zone does
+// not need a KeyDB of its own.
+//
+// Anything added to ZoneTransferIn's reads of zd belongs in this function.
+func newTransferScratchZone(zd *ZoneData) ZoneData {
+	return ZoneData{
+		ZoneName:       zd.ZoneName,
+		ZoneType:       zd.ZoneType,
+		ZoneStore:      zd.ZoneStore,
+		XfrType:        zd.XfrType,
+		IncomingSerial: zd.IncomingSerial,
+		CurrentSerial:  zd.CurrentSerial,
+		Logger:         zd.Logger,
+		Verbose:        zd.Verbose,
+		Debug:          zd.Debug,
+		Options:        zd.Options,
+		TransferSrc:    zd.EffectiveTransferSrc(),
+		Ready:          true, // this is only used by the checks for changes to DNSKEYs, HSYNC, etc.
+		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
+	}
+}
+
 // Return updated, error
 func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core.RRset) (bool, error) {
 
@@ -301,20 +336,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug, force bool, dynamicRRs []*
 	for _, up := range zd.Upstreams {
 		upstream := up.Addr
 		lg.Info("transferring zone via AXFR", "zone", zd.ZoneName, "upstream", upstream)
-		new_zd = ZoneData{
-			ZoneName:       zd.ZoneName,
-			ZoneType:       zd.ZoneType,
-			ZoneStore:      zd.ZoneStore,
-			XfrType:        zd.XfrType,
-			IncomingSerial: zd.IncomingSerial,
-			CurrentSerial:  zd.CurrentSerial,
-			Logger:         zd.Logger,
-			Verbose:        zd.Verbose,
-			Debug:          zd.Debug,
-			Options:        zd.Options,
-			Ready:          true, // this is only used by the checks for changes to DNSKEYs, HSYNC, etc.
-			// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
-		}
+		new_zd = newTransferScratchZone(zd)
 		if _, err := new_zd.ZoneTransferIn(up, zd.IncomingSerial, "axfr", conf); err != nil {
 			lg.Warn("FetchFromUpstream: AXFR from upstream failed, trying next", "zone", zd.ZoneName, "upstream", upstream, "err", err)
 			lastErr = err
