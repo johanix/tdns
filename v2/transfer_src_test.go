@@ -141,30 +141,30 @@ func TestPickTransferSrcHostnameUpstream(t *testing.T) {
 		{
 			// THE REGRESSION. v6 source listed first; the name is v4-only.
 			// The old code bound the v6 source here and the transfer failed.
-			name: "v4-only hostname must not get the v6 source",
+			name:     "v4-only hostname must not get the v6 source",
 			resolves: v4, srcs: []string{"2a01:bad:cafe:f::53", "172.16.0.53"},
 			wantIP: "172.16.0.53", wantNetwork: "tcp4",
 		},
 		{
-			name: "v6-only hostname must not get the v4 source",
+			name:     "v6-only hostname must not get the v4 source",
 			resolves: v6, srcs: []string{"172.16.0.53", "2a01:bad:cafe:f::53"},
 			wantIP: "2a01:bad:cafe:f::53", wantNetwork: "tcp6",
 		},
 		{
 			// Dual-stack: configured order decides, so the ACL-visible
 			// address stays predictable.
-			name: "dual-stack hostname follows configured order",
+			name:     "dual-stack hostname follows configured order",
 			resolves: both, srcs: []string{"2a01:bad:cafe:f::53", "172.16.0.53"},
 			wantIP: "2a01:bad:cafe:f::53", wantNetwork: "tcp6",
 		},
 		{
-			name: "dual-stack, only v4 configured",
+			name:     "dual-stack, only v4 configured",
 			resolves: both, srcs: []string{"172.16.0.53"},
 			wantIP: "172.16.0.53", wantNetwork: "tcp4",
 		},
 		{
 			// No source for the family the name has -> unbound, not a guess.
-			name: "v4-only hostname, only v6 source -> unbound",
+			name:     "v4-only hostname, only v6 source -> unbound",
 			resolves: v4, srcs: []string{"2a01:bad:cafe:f::53"},
 			wantIP: "", wantNetwork: "",
 		},
@@ -245,5 +245,30 @@ func TestValidateTransferSrc(t *testing.T) {
 				t.Errorf("error %q does not name the offending entry", err)
 			}
 		})
+	}
+}
+
+// TestResolveTransferSrcUpdate pins the modify semantics. The distinction that
+// matters is nil vs empty: without it a per-zone transfer-src could be set but
+// never removed except by deleting and re-adding the zone, which for a
+// secondary means dropping and re-pulling it.
+func TestResolveTransferSrcUpdate(t *testing.T) {
+	old := []string{"172.16.0.53"}
+
+	if got := resolveTransferSrcUpdate(old, nil); len(got) != 1 || got[0] != "172.16.0.53" {
+		t.Errorf("nil input should keep the stored value, got %v", got)
+	}
+	if got := resolveTransferSrcUpdate(old, []string{}); len(got) != 0 {
+		t.Errorf("empty (non-nil) input should clear, got %v", got)
+	}
+	if got := resolveTransferSrcUpdate(old, []string{"10.0.0.9"}); len(got) != 1 || got[0] != "10.0.0.9" {
+		t.Errorf("non-empty input should replace, got %v", got)
+	}
+	if got := resolveTransferSrcUpdate(nil, []string{"10.0.0.9"}); len(got) != 1 {
+		t.Errorf("setting on a zone that had none should work, got %v", got)
+	}
+	// A zone with no value and a caller saying nothing stays with no value.
+	if got := resolveTransferSrcUpdate(nil, nil); got != nil {
+		t.Errorf("nil/nil should stay nil, got %v", got)
 	}
 }

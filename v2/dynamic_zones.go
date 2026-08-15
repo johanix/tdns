@@ -730,6 +730,12 @@ type DynamicZoneInput struct {
 	TsigName   string
 	TsigSecret string
 	TsigAlgo   string
+	// TransferSrc is the per-zone outbound-transfer source address. Optional;
+	// empty inherits dnsengine.transfer_src. On modify, nil means "leave as is"
+	// and a non-nil empty slice means "clear" -- the two are distinguishable
+	// because the caller built this struct, so the distinction is honest here
+	// in a way a JSON round-trip alone would not be.
+	TransferSrc []string
 }
 
 // stageInlineTsigKey validates an inline TSIG key supplied with an add/modify
@@ -839,6 +845,14 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 		}
 	default:
 		return "", fmt.Errorf("zone add supports primary and secondary zones only (got %s)", ZoneTypeToString[in.Type])
+	}
+
+	// Same check the config file gets. Without it the API is the one way in
+	// that could still land an unusable value, and the failure would be the
+	// silent one transfer-src exists to prevent: transfers going out unbound
+	// from a zone whose config says otherwise.
+	if err := ValidateTransferSrc(fmt.Sprintf("zone %s: transfer-src", name), in.TransferSrc); err != nil {
+		return "", err
 	}
 
 	if _, err := dns.IsDomainName(name); !err {
@@ -978,6 +992,7 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 		Primaries:     upstreams,
 		ZoneStore:     MapZone,
 		Options:       options,
+		TransferSrc:   in.TransferSrc,
 	}
 	if err := conf.enqueueRefresh(ctx, zr); err != nil {
 		return "", fmt.Errorf("zone %s registered but failed to schedule initial transfer: %w", name, err)
@@ -1055,6 +1070,22 @@ func (conf *Config) RemoveDynamicZone(name string) (string, error) {
 // without a lock, so the changed params live on a fresh ZoneData and the old one
 // is only ever read by its now-doomed refresh. Scope: primary addr/key and
 // options; store is fixed at map; rename is out of scope (= delete+add).
+// resolveTransferSrcUpdate decides a modified zone's transfer-src from the
+// stored value and what the request carried.
+//
+// nil means the caller said nothing: keep what the zone has. A non-nil slice
+// REPLACES, including a non-nil empty one, which clears the per-zone value so
+// the zone falls back to dnsengine.transfer_src. Collapsing those two into
+// "empty means unchanged" would make a per-zone setting impossible to remove
+// without deleting and re-adding the zone -- which for a secondary means
+// dropping and re-pulling it.
+func resolveTransferSrcUpdate(old, in []string) []string {
+	if in == nil {
+		return old
+	}
+	return in
+}
+
 func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) (string, error) {
 	name := dns.Fqdn(in.Name)
 	oldZd, exists := Zones.Get(name)
@@ -1069,6 +1100,11 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	// new merge concept) and every concrete use has a cleaner home.
 	if oldZd.ZoneType == Primary {
 		return "", fmt.Errorf("zone %s is a primary; modify is not supported for primary zones (content via DNS UPDATE, keys via the keystore API, config via delete + re-add)", name)
+	}
+	// Validated before anything is staged, so a bad value cannot leave the zone
+	// half-modified.
+	if err := ValidateTransferSrc(fmt.Sprintf("zone %s: transfer-src", name), in.TransferSrc); err != nil {
+		return "", err
 	}
 	// Stage an inline TSIG key (validate + rewrite keyless primaries) without
 	// mutating the live store. The key is committed only after the modify succeeds.
@@ -1146,7 +1182,16 @@ func (conf *Config) ModifyDynamicZone(ctx context.Context, in DynamicZoneInput) 
 	// TSIG-only modify would silently reset a zone that has one to the global
 	// default.
 	outboundSoaSerial := oldZd.OutboundSoaSerial
-	transferSrc := oldZd.TransferSrc
+	// transfer-src, unlike the outbound serial mode above, DOES have an API
+	// knob, so modify has to be able to change it -- otherwise a zone whose
+	// source address is wrong can only be corrected by delete + re-add, which
+	// for a secondary means dropping and re-pulling the zone.
+	//
+	// nil and empty are deliberately different here: nil means the caller said
+	// nothing and the current value is kept, empty means "clear it" and the
+	// zone falls back to the global default. A caller that cannot express that
+	// distinction should send nil.
+	transferSrc := resolveTransferSrcUpdate(oldZd.TransferSrc, in.TransferSrc)
 	// Carry the suppressed-options record across the replacement too, so the
 	// as-configured view survives a modify and the operator's origination
 	// options are not dropped from the persisted config by the next rewrite.
