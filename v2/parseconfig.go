@@ -380,7 +380,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// transfer_src: same reasoning as dynamiczones above -- the decoder takes
 	// any string, and a bad entry here fails silently at transfer time rather
 	// than loudly at load.
-	if err := ValidateTransferSrc("dnsengine.transfer_src", conf.DnsEngine.TransferSrc); err != nil {
+	if err := ValidateAllTransferSrc(conf); err != nil {
 		return err
 	}
 

@@ -254,6 +254,35 @@ type DnsEngineConf struct {
 // is in place. An operator who writes "172.16.0.53:53" would see transfers
 // refused by the upstream ACL and no reason anywhere.
 //
+// ValidateAllTransferSrc checks every transfer-src in a parsed config: the
+// server-global list, each zone's override, and each template's.
+//
+// One function, called from BOTH the daemon loader (ParseConfig) and
+// `config check` (ValidateConfig). The first cut validated the global list in
+// both but the per-zone overrides only in the loader, so `config check` passed
+// configs the daemon then refused -- which defeats the purpose of having a
+// check command at all.
+//
+// Templates matter as much as zones and were missed by both: a template is a
+// ZoneConf, and ExpandTemplate gap-fills its transfer-src onto every primary
+// expanded from it, so a bad value there reaches real zones.
+func ValidateAllTransferSrc(conf *Config) error {
+	if err := ValidateTransferSrc("dnsengine.transfer_src", conf.DnsEngine.TransferSrc); err != nil {
+		return err
+	}
+	for _, z := range conf.Zones {
+		if err := ValidateTransferSrc(fmt.Sprintf("zone %s: transfer-src", z.Name), z.TransferSrc); err != nil {
+			return err
+		}
+	}
+	for _, t := range conf.Templates {
+		if err := ValidateTransferSrc(fmt.Sprintf("template %s: transfer-src", t.Name), t.TransferSrc); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // where names the config key, so the message points at the right one of the
 // global list and a per-zone override.
 func ValidateTransferSrc(where string, srcs []string) error {

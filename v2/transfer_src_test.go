@@ -308,3 +308,60 @@ func TestTransferScratchZoneCarriesTransferSrc(t *testing.T) {
 		t.Errorf("unset zone should resolve to no source, got %v", src)
 	}
 }
+
+// TestValidateAllTransferSrc covers the CodeRabbit finding on #352: the first
+// cut validated the global list in both the daemon loader and `config check`,
+// but per-zone overrides only in the loader -- so `config check` passed configs
+// that startup then refused, which defeats having a check command.
+//
+// Templates were missed by both, and matter as much as zones: a template is a
+// ZoneConf and ExpandTemplate gap-fills its transfer-src onto every primary
+// expanded from it, so a bad value there reaches real zones.
+func TestValidateAllTransferSrc(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		conf    *Config
+		wantErr string
+	}{
+		{"all empty", &Config{}, ""},
+		{
+			name: "valid everywhere",
+			conf: &Config{
+				DnsEngine: DnsEngineConf{TransferSrc: []string{"172.16.0.53"}},
+				Zones:     []ZoneConf{{Name: "a.example.", TransferSrc: []string{"10.0.0.1"}}},
+				Templates: []ZoneConf{{Name: "tmpl", TransferSrc: []string{"10.0.0.2"}}},
+			},
+		},
+		{
+			name:    "bad global",
+			conf:    &Config{DnsEngine: DnsEngineConf{TransferSrc: []string{"172.16.0.53:53"}}},
+			wantErr: "dnsengine.transfer_src",
+		},
+		{
+			name:    "bad zone override is caught here too",
+			conf:    &Config{Zones: []ZoneConf{{Name: "a.example.", TransferSrc: []string{"nope"}}}},
+			wantErr: "zone a.example.",
+		},
+		{
+			name:    "bad template override",
+			conf:    &Config{Templates: []ZoneConf{{Name: "tmpl", TransferSrc: []string{"ns.example.com"}}}},
+			wantErr: "template tmpl",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateAllTransferSrc(tc.conf)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateAllTransferSrc = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ValidateAllTransferSrc = nil, want error naming %q", tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error %q does not name %q", err, tc.wantErr)
+			}
+		})
+	}
+}

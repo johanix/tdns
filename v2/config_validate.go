@@ -57,7 +57,9 @@ func ValidateConfig(v *viper.Viper, cfgfile string) error {
 		return fmt.Errorf("ValidateConfig: %v", err)
 	}
 
-	if err := ValidateTransferSrc("dnsengine.transfer_src", config.DnsEngine.TransferSrc); err != nil {
+	// Global + every zone + every template, via the same function the daemon
+	// loader uses, so this command cannot pass what startup would refuse.
+	if err := ValidateAllTransferSrc(&config); err != nil {
 		return fmt.Errorf("ValidateConfig: %v", err)
 	}
 
