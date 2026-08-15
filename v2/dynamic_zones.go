@@ -950,6 +950,13 @@ func (conf *Config) ProvisionDynamicZone(ctx context.Context, in DynamicZoneInpu
 		Status:        ZoneStatusPending,
 		Data:          core.NewCmap[OwnerData](),
 		KeyDB:         conf.Internal.KeyDB,
+		// Set HERE, not only on the ZoneRefresher below. AddDynamicZoneToConfig
+		// persists from the live Zones map, and it runs before the refresh is
+		// processed -- so without this the zone is written to the dynamic config
+		// file with no transfer-src, and a restart in that window loses the
+		// setting silently. The modify path already carries it onto its newZd
+		// for the same reason.
+		TransferSrc: in.TransferSrc,
 
 		SuppressedOptions: suppressedOptions,
 	}

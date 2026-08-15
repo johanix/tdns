@@ -212,19 +212,21 @@ func (zd *ZoneData) DoTransfer(conf *Config) (bool, uint32, error) {
 //
 // Anything added to ZoneTransferIn's reads of zd belongs in this function.
 func newTransferScratchZone(zd *ZoneData) ZoneData {
+	srcs, tier := zd.EffectiveTransferSrcWithSource()
 	return ZoneData{
-		ZoneName:       zd.ZoneName,
-		ZoneType:       zd.ZoneType,
-		ZoneStore:      zd.ZoneStore,
-		XfrType:        zd.XfrType,
-		IncomingSerial: zd.IncomingSerial,
-		CurrentSerial:  zd.CurrentSerial,
-		Logger:         zd.Logger,
-		Verbose:        zd.Verbose,
-		Debug:          zd.Debug,
-		Options:        zd.Options,
-		TransferSrc:    zd.EffectiveTransferSrc(),
-		Ready:          true, // this is only used by the checks for changes to DNSKEYs, HSYNC, etc.
+		ZoneName:        zd.ZoneName,
+		ZoneType:        zd.ZoneType,
+		ZoneStore:       zd.ZoneStore,
+		XfrType:         zd.XfrType,
+		IncomingSerial:  zd.IncomingSerial,
+		CurrentSerial:   zd.CurrentSerial,
+		Logger:          zd.Logger,
+		Verbose:         zd.Verbose,
+		Debug:           zd.Debug,
+		Options:         zd.Options,
+		TransferSrc:     srcs,
+		TransferSrcTier: tier,
+		Ready:           true, // this is only used by the checks for changes to DNSKEYs, HSYNC, etc.
 		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}
 }
@@ -752,6 +754,9 @@ func (zd *ZoneData) EffectiveTransferSrc() []string {
 // so the precedence chain cannot be stated twice and silently diverge.
 func (zd *ZoneData) EffectiveTransferSrcWithSource() (srcs []string, source string) {
 	if len(zd.TransferSrc) > 0 {
+		if zd.TransferSrcTier != "" {
+			return zd.TransferSrc, zd.TransferSrcTier // already resolved upstream
+		}
 		return zd.TransferSrc, "zone" // per-zone, possibly via its template
 	}
 	if zd.KeyDB != nil {

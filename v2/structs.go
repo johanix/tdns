@@ -147,18 +147,25 @@ type ZoneData struct {
 	// TransferSrc is the per-zone source address for OUTBOUND transfers, i.e.
 	// what the upstream's allow-transfer ACL sees. Never read directly — call
 	// zd.EffectiveTransferSrc(), which falls back to dnsengine.transfer_src.
-	TransferSrc    []string
-	FirstZoneLoad  bool // true until first zone data has been loaded
-	Verbose        bool
-	Debug          bool
-	IxfrChain      []Ixfr
-	PrimariesConf  []PeerConf // as-written primaries; persisted; re-resolved each load (P3)
-	Upstreams      []PeerConf // resolved addr:port tuples; runtime-only; used for transfer
-	Notify         []PeerConf // downstream secondaries that we notify (addr + key)
-	AllowNotify    []AclEntry // secondary: who may NOTIFY us; empty => accept from resolved primaries
-	Downstreams    []AclEntry // primary: who may AXFR from us (provide-xfr ACL); empty => deny
-	DownstreamAuth []string   // acceptable transfer-auth mechanism classes (empty => unrestricted); see authorizeTransfer
-	Zonefile       string
+	TransferSrc []string
+	// TransferSrcTier records which tier TransferSrc was resolved FROM, and is
+	// set only when TransferSrc was populated by resolution rather than by
+	// configuration -- i.e. on the scratch zone an inbound AXFR is received
+	// into, which is handed an already-resolved list. Empty on a normal zone,
+	// where EffectiveTransferSrcWithSource derives the tier itself. Without it
+	// a globally-configured source is reported as coming from the zone.
+	TransferSrcTier string
+	FirstZoneLoad   bool // true until first zone data has been loaded
+	Verbose         bool
+	Debug           bool
+	IxfrChain       []Ixfr
+	PrimariesConf   []PeerConf // as-written primaries; persisted; re-resolved each load (P3)
+	Upstreams       []PeerConf // resolved addr:port tuples; runtime-only; used for transfer
+	Notify          []PeerConf // downstream secondaries that we notify (addr + key)
+	AllowNotify     []AclEntry // secondary: who may NOTIFY us; empty => accept from resolved primaries
+	Downstreams     []AclEntry // primary: who may AXFR from us (provide-xfr ACL); empty => deny
+	DownstreamAuth  []string   // acceptable transfer-auth mechanism classes (empty => unrestricted); see authorizeTransfer
+	Zonefile        string
 	// Template names the config template an API-provisioned zone was expanded
 	// from (zone add --template). Persisted in the dynamic config entry so a
 	// restart re-expands it; the update policy is deliberately NOT persisted —

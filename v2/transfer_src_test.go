@@ -455,3 +455,31 @@ func TestTransferSrcListIsACopy(t *testing.T) {
 		t.Errorf("returned slice aliases the stored value: %v", again)
 	}
 }
+
+// TestScratchZoneReportsResolvedTier: the scratch zone is handed an
+// already-resolved source list, so without carrying the tier it would report
+// every source as coming from the zone -- including one that actually came from
+// dnsengine.transfer_src. That lands in the ZoneTransferIn log, which exists
+// precisely so an operator does not have to guess where the address came from.
+func TestScratchZoneReportsResolvedTier(t *testing.T) {
+	// Global tier: no per-zone value, KeyDB supplies it.
+	kdb := &KeyDB{}
+	kdb.SetTransferSrc([]string{"172.16.0.53"})
+	live := &ZoneData{ZoneName: "example.", KeyDB: kdb}
+
+	scratch := newTransferScratchZone(live)
+	srcs, tier := (&scratch).EffectiveTransferSrcWithSource()
+	if len(srcs) != 1 || srcs[0] != "172.16.0.53" {
+		t.Fatalf("scratch zone lost the global source: %v", srcs)
+	}
+	if tier != "global" {
+		t.Errorf("tier = %q, want %q -- a global source must not be reported as per-zone", tier, "global")
+	}
+
+	// Zone tier still reports as zone.
+	live2 := &ZoneData{ZoneName: "example.", TransferSrc: []string{"10.0.0.1"}, KeyDB: kdb}
+	scratch2 := newTransferScratchZone(live2)
+	if _, tier := (&scratch2).EffectiveTransferSrcWithSource(); tier != "zone" {
+		t.Errorf("per-zone tier = %q, want %q", tier, "zone")
+	}
+}
