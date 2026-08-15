@@ -7,6 +7,7 @@ package tdns
 import (
 	"context"
 	"fmt"
+	"net"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -240,6 +241,39 @@ type DnsEngineConf struct {
 	// unbound rather than failed. Per-zone ZoneConf.TransferSrc overrides this;
 	// empty there inherits.
 	TransferSrc []string `yaml:"transfer_src,omitempty" mapstructure:"transfer_src"`
+}
+
+// ValidateTransferSrc checks a transfer-src list. Every entry must be a bare IP
+// literal: an address is what gets bound as the local address, so a hostname, an
+// addr:port, or a typo has nothing usable in it.
+//
+// This has to be a hard config error rather than a skip. The failure mode of
+// skipping is silent and actively misleading: the entry is ignored, no source
+// matches, and the transfer is dialled UNBOUND -- which is exactly the bug
+// transfer-src exists to fix, now hidden behind a config that looks like the fix
+// is in place. An operator who writes "172.16.0.53:53" would see transfers
+// refused by the upstream ACL and no reason anywhere.
+//
+// where names the config key, so the message points at the right one of the
+// global list and a per-zone override.
+func ValidateTransferSrc(where string, srcs []string) error {
+	for _, s := range srcs {
+		t := strings.TrimSpace(s)
+		if t == "" {
+			return fmt.Errorf("%s: empty entry; remove it or give an IP address", where)
+		}
+		if net.ParseIP(t) != nil {
+			continue
+		}
+		// Name the likely mistake rather than only rejecting it.
+		if _, _, err := net.SplitHostPort(t); err == nil {
+			return fmt.Errorf("%s: %q includes a port; transfer-src is a source ADDRESS only "+
+				"(the source port is chosen by the kernel)", where, s)
+		}
+		return fmt.Errorf("%s: %q is not an IP address (a hostname is not usable here: "+
+			"the value is bound as the local address before any lookup)", where, s)
+	}
+	return nil
 }
 
 type ImrEngineConf struct {

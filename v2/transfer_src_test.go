@@ -4,7 +4,13 @@
 
 package tdns
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"net"
+	"strings"
+	"testing"
+)
 
 // TestTransferSrcFor pins the family matching. Binding a v4 source before
 // dialling a v6 upstream fails at connect time, so picking the wrong entry
@@ -46,15 +52,27 @@ func TestTransferSrcFor(t *testing.T) {
 		{"whitespace tolerated", "10.25.0.4:53", []string{"  172.16.0.53 "}, "172.16.0.53"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := transferSrcFor(tc.upstream, tc.srcs)
+			got, network := pickTransferSrc(context.Background(), nil, tc.upstream, tc.srcs)
 			if tc.want == "" {
 				if got != nil {
-					t.Fatalf("transferSrcFor(%q, %v) = %v, want nil", tc.upstream, tc.srcs, got)
+					t.Fatalf("pickTransferSrc(%q, %v) = %v, want nil", tc.upstream, tc.srcs, got)
+				}
+				if network != "" {
+					t.Fatalf("no source picked but network = %q", network)
 				}
 				return
 			}
 			if got == nil || got.String() != tc.want {
-				t.Fatalf("transferSrcFor(%q, %v) = %v, want %s", tc.upstream, tc.srcs, got, tc.want)
+				t.Fatalf("pickTransferSrc(%q, %v) = %v, want %s", tc.upstream, tc.srcs, got, tc.want)
+			}
+			// The dial network must match the bound source's family, or the
+			// destination can land in the other family and the dial fails.
+			wantNet := "tcp6"
+			if got.To4() != nil {
+				wantNet = "tcp4"
+			}
+			if network != wantNet {
+				t.Fatalf("source %v bound but network = %q, want %q", got, network, wantNet)
 			}
 		})
 	}
@@ -91,6 +109,140 @@ func TestEffectiveTransferSrc(t *testing.T) {
 				if srcs[i] != tc.wantSrcs[i] {
 					t.Errorf("srcs[%d] = %q, want %q", i, srcs[i], tc.wantSrcs[i])
 				}
+			}
+		})
+	}
+}
+
+// TestPickTransferSrcHostnameUpstream covers the bug this fix exists for. The
+// first version read the family off net.ParseIP(host), which is nil for a
+// hostname -- so want4 was false and a hostname upstream got an IPv6 source
+// bound, whatever the name actually resolved to, and the dial then failed.
+//
+// The resolver is stubbed: a real "localhost" is usually dual-stack, which
+// would make binding v6 look legitimate and hide exactly the regression this
+// test is for.
+func TestPickTransferSrcHostnameUpstream(t *testing.T) {
+	v4 := []net.IPAddr{{IP: net.ParseIP("10.25.0.4")}}
+	v6 := []net.IPAddr{{IP: net.ParseIP("2a01:bad:cafe:f::5")}}
+	both := append(append([]net.IPAddr{}, v4...), v6...)
+
+	stub := func(addrs []net.IPAddr) func(context.Context, string) ([]net.IPAddr, error) {
+		return func(context.Context, string) ([]net.IPAddr, error) { return addrs, nil }
+	}
+
+	for _, tc := range []struct {
+		name        string
+		resolves    []net.IPAddr
+		srcs        []string
+		wantIP      string
+		wantNetwork string
+	}{
+		{
+			// THE REGRESSION. v6 source listed first; the name is v4-only.
+			// The old code bound the v6 source here and the transfer failed.
+			name: "v4-only hostname must not get the v6 source",
+			resolves: v4, srcs: []string{"2a01:bad:cafe:f::53", "172.16.0.53"},
+			wantIP: "172.16.0.53", wantNetwork: "tcp4",
+		},
+		{
+			name: "v6-only hostname must not get the v4 source",
+			resolves: v6, srcs: []string{"172.16.0.53", "2a01:bad:cafe:f::53"},
+			wantIP: "2a01:bad:cafe:f::53", wantNetwork: "tcp6",
+		},
+		{
+			// Dual-stack: configured order decides, so the ACL-visible
+			// address stays predictable.
+			name: "dual-stack hostname follows configured order",
+			resolves: both, srcs: []string{"2a01:bad:cafe:f::53", "172.16.0.53"},
+			wantIP: "2a01:bad:cafe:f::53", wantNetwork: "tcp6",
+		},
+		{
+			name: "dual-stack, only v4 configured",
+			resolves: both, srcs: []string{"172.16.0.53"},
+			wantIP: "172.16.0.53", wantNetwork: "tcp4",
+		},
+		{
+			// No source for the family the name has -> unbound, not a guess.
+			name: "v4-only hostname, only v6 source -> unbound",
+			resolves: v4, srcs: []string{"2a01:bad:cafe:f::53"},
+			wantIP: "", wantNetwork: "",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ip, network := pickTransferSrc(context.Background(), stub(tc.resolves),
+				"ns.example.com:53", tc.srcs)
+			if tc.wantIP == "" {
+				if ip != nil || network != "" {
+					t.Fatalf("got (%v, %q), want (nil, \"\")", ip, network)
+				}
+				return
+			}
+			if ip == nil || ip.String() != tc.wantIP {
+				t.Fatalf("got IP %v, want %s", ip, tc.wantIP)
+			}
+			if network != tc.wantNetwork {
+				t.Fatalf("got network %q, want %q", network, tc.wantNetwork)
+			}
+		})
+	}
+}
+
+// TestPickTransferSrcUnresolvableHostname: a name we cannot resolve must fall
+// back to unbound rather than to a guess. Binding the wrong family would fail a
+// transfer that would otherwise have worked.
+func TestPickTransferSrcUnresolvableHostname(t *testing.T) {
+	failing := func(context.Context, string) ([]net.IPAddr, error) {
+		return nil, errors.New("no such host")
+	}
+	ip, network := pickTransferSrc(context.Background(), failing,
+		"no-such-host.invalid.:53", []string{"127.0.0.1", "::1"})
+	if ip != nil || network != "" {
+		t.Fatalf("unresolvable upstream: got (%v, %q), want (nil, \"\")", ip, network)
+	}
+}
+
+// TestValidateTransferSrc is the other half of the fix. A bad entry used to be
+// skipped silently, which meant the transfer went out UNBOUND -- the exact bug
+// transfer-src exists to fix, hidden behind a config that looked correct.
+func TestValidateTransferSrc(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		srcs    []string
+		wantErr string // substring; "" means must pass
+	}{
+		{"empty list", nil, ""},
+		{"v4", []string{"172.16.0.53"}, ""},
+		{"v6", []string{"2a01:bad:cafe:f::53"}, ""},
+		{"both", []string{"172.16.0.53", "2a01:bad:cafe:f::53"}, ""},
+		{"whitespace tolerated", []string{"  172.16.0.53  "}, ""},
+
+		// The mistake actually worth catching: it looks like every other
+		// address:port in the config file.
+		{"addr:port", []string{"172.16.0.53:53"}, "includes a port"},
+		{"v6 addr:port", []string{"[2a01:bad:cafe:f::53]:53"}, "includes a port"},
+		{"hostname", []string{"ns1.example.com"}, "not an IP address"},
+		{"garbage", []string{"not-an-ip"}, "not an IP address"},
+		{"empty entry", []string{""}, "empty entry"},
+		{"good then bad still fails", []string{"172.16.0.53", "oops"}, "not an IP address"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := ValidateTransferSrc("dnsengine.transfer_src", tc.srcs)
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("ValidateTransferSrc(%v) = %v, want nil", tc.srcs, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("ValidateTransferSrc(%v) = nil, want error containing %q", tc.srcs, tc.wantErr)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("error %q does not contain %q", err, tc.wantErr)
+			}
+			// The offending value must be named, or an operator cannot find it.
+			if tc.srcs[len(tc.srcs)-1] != "" && !strings.Contains(err.Error(), strings.TrimSpace(tc.srcs[len(tc.srcs)-1])) {
+				t.Errorf("error %q does not name the offending entry", err)
 			}
 		})
 	}

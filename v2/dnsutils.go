@@ -852,50 +852,108 @@ func readLineFromFile(filename string, lineNum int) (string, error) {
 	return "", fmt.Errorf("line %d not found", lineNum)
 }
 
-// transferSrcFor picks the source address to bind for an upstream: the first
-// configured entry whose address family matches. A family with no configured
-// source returns nil, meaning "dial unbound" -- deliberately forgiving, because
-// an operator who names only a v4 source should not thereby break every v6
-// upstream. Unparseable entries are skipped.
-func transferSrcFor(upstream string, srcs []string) net.IP {
+// pickTransferSrc picks the source address to bind for an upstream, and the
+// network ("tcp4"/"tcp6") to dial so the destination cannot end up in the other
+// family. A family with no configured source returns nil, meaning "dial
+// unbound" -- deliberately forgiving, because an operator who names only a v4
+// source should not thereby break every v6 upstream.
+//
+// The upstream may be a LITERAL or a HOSTNAME. For a literal the family is read
+// off the address. For a hostname it has to be resolved: the first version of
+// this bound whichever family net.ParseIP happened to report for a name it
+// could not parse -- always "not v4" -- so a hostname upstream that resolves to
+// IPv4 got an IPv6 source bound and the dial failed. Resolution failure falls
+// back to unbound rather than to a guess.
+//
+// When a hostname resolves to both families, the configured sources decide:
+// whichever family we have a source for wins, in configured order. That keeps
+// the ACL-visible address predictable, which is the entire point of the option.
+// lookup is injected so the hostname path is testable without depending on what
+// the test host's resolver happens to return -- a dual-stack "localhost" would
+// make the v4-only case untestable, which is precisely the case that was broken.
+// nil means the system resolver.
+func pickTransferSrc(ctx context.Context, lookup func(context.Context, string) ([]net.IPAddr, error), upstream string, srcs []string) (net.IP, string) {
 	host, _, err := net.SplitHostPort(upstream)
 	if err != nil {
 		host = upstream
 	}
-	want4 := net.ParseIP(host).To4() != nil
 
+	// Parsed sources, in configured order. Unparseable entries cannot reach
+	// here -- ValidateTransferSrc rejects them at config load -- but skip them
+	// rather than binding something meaningless if one ever does.
+	var parsed []net.IP
 	for _, s := range srcs {
-		ip := net.ParseIP(strings.TrimSpace(s))
-		if ip == nil {
-			continue
-		}
-		if (ip.To4() != nil) == want4 {
-			return ip
+		if ip := net.ParseIP(strings.TrimSpace(s)); ip != nil {
+			parsed = append(parsed, ip)
 		}
 	}
-	return nil
+	if len(parsed) == 0 {
+		return nil, ""
+	}
+
+	// Which families can the upstream actually be reached over?
+	var have4, have6 bool
+	if ip := net.ParseIP(host); ip != nil {
+		have4, have6 = ip.To4() != nil, ip.To4() == nil
+	} else {
+		if lookup == nil {
+			lookup = net.DefaultResolver.LookupIPAddr
+		}
+		addrs, rerr := lookup(ctx, host)
+		if rerr != nil {
+			// Cannot tell the family; binding a guess risks failing a transfer
+			// that would otherwise work.
+			return nil, ""
+		}
+		for _, a := range addrs {
+			if a.IP.To4() != nil {
+				have4 = true
+			} else {
+				have6 = true
+			}
+		}
+	}
+
+	for _, ip := range parsed {
+		if ip.To4() != nil && have4 {
+			return ip, "tcp4"
+		}
+		if ip.To4() == nil && have6 {
+			return ip, "tcp6"
+		}
+	}
+	return nil, ""
 }
 
 // dialTransferConn dials upstream with the source address bound, returning a
 // *dns.Conn ready to hand to dns.Transfer. tlsCfg non-nil selects XoT.
+//
+// The network is pinned to the source's family. Dialling "tcp" with a v4
+// LocalAddr and letting the resolver hand back a v6 destination (or the
+// reverse) is a guaranteed failure, and for a dual-stack hostname upstream that
+// is not a hypothetical. The hostname is still what gets dialled, so SNI and
+// certificate verification on the XoT path are unchanged.
 func dialTransferConn(upstream string, tlsCfg *tls.Config, srcs []string, timeout time.Duration) (*dns.Conn, error) {
-	src := transferSrcFor(upstream, srcs)
-	if src == nil {
-		return nil, nil // no matching family; caller leaves Conn nil and In() dials
-	}
 	if timeout == 0 {
 		timeout = 2 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	src, network := pickTransferSrc(ctx, nil, upstream, srcs)
+	if src == nil {
+		return nil, nil // no matching family; caller leaves Conn nil and In() dials
 	}
 	d := &net.Dialer{Timeout: timeout, LocalAddr: &net.TCPAddr{IP: src}}
 
 	if tlsCfg != nil {
-		c, err := tls.DialWithDialer(d, "tcp", upstream, tlsCfg)
+		c, err := tls.DialWithDialer(d, network, upstream, tlsCfg)
 		if err != nil {
 			return nil, err
 		}
 		return &dns.Conn{Conn: c}, nil
 	}
-	c, err := d.Dial("tcp", upstream)
+	c, err := d.Dial(network, upstream)
 	if err != nil {
 		return nil, err
 	}

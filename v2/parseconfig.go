@@ -377,6 +377,13 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return err
 	}
 
+	// transfer_src: same reasoning as dynamiczones above -- the decoder takes
+	// any string, and a bad entry here fails silently at transfer time rather
+	// than loudly at load.
+	if err := ValidateTransferSrc("dnsengine.transfer_src", conf.DnsEngine.TransferSrc); err != nil {
+		return err
+	}
+
 	if len(md.Unused) > 0 {
 		// Split the unused keys into two buckets: keys that match a known
 		// DEPRECATED/RENAMED config shape (the config lags the code — emit
@@ -932,6 +939,12 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		zd.mu.Lock()
 		options, zconf.OutboundSoaSerial = zd.applyOptionNormalization(zonetype, options, zconf.OutboundSoaSerial)
 		zd.mu.Unlock()
+		// Validated per zone as well as globally: a per-zone override is the
+		// more likely place for a typo, and it silently shadows a correct
+		// global list rather than falling back to it.
+		if err := ValidateTransferSrc(fmt.Sprintf("zone %s: transfer-src", zname), zconf.TransferSrc); err != nil {
+			return nil, nil, err
+		}
 		zd.TransferSrc = zconf.TransferSrc
 
 		var outopts []string
