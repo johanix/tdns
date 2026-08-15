@@ -1020,15 +1020,55 @@ type KeyDB struct {
 	// reload, so it is stored behind an atomic.Pointer for lock-free reads and a
 	// race-free swap. Access via AuthOption()/SetOptions(), never directly.
 	options atomic.Pointer[map[AuthOption]string]
-	// OutboundSoaSerial is the resolved mode for outbound SOA serials:
+	// outboundSoaSerial is the resolved mode for outbound SOA serials:
 	// OutboundSoaSerialKeep / OutboundSoaSerialUnixtime / OutboundSoaSerialPersist.
 	// Sourced from DnsEngineConf.OutboundSoaSerial at parse, defaulted to
 	// OutboundSoaSerialKeep if unset.
-	OutboundSoaSerial string
-	// TransferSrc is the server-global source address list for outbound zone
+	//
+	// Behind an atomic.Pointer for the same reason as options above: written
+	// wholesale by config reload, read from zone-serving goroutines. Access via
+	// OutboundSoaSerialMode()/SetOutboundSoaSerial(), never directly.
+	outboundSoaSerial atomic.Pointer[string]
+	// transferSrc is the server-global source address list for outbound zone
 	// transfers (dnsengine.transfer_src). Per-zone ZoneData.TransferSrc wins;
-	// see zd.EffectiveTransferSrc().
-	TransferSrc []string
+	// see zd.EffectiveTransferSrc(). Same reload-vs-read exposure as the two
+	// above; access via TransferSrcList()/SetTransferSrc().
+	transferSrc atomic.Pointer[[]string]
+}
+
+// SetOutboundSoaSerial replaces the server-global outbound serial mode. Called
+// at parse and on every config reload.
+func (kdb *KeyDB) SetOutboundSoaSerial(mode string) {
+	m := mode
+	kdb.outboundSoaSerial.Store(&m)
+}
+
+// OutboundSoaSerialMode returns the server-global outbound serial mode, or ""
+// if none has been set.
+func (kdb *KeyDB) OutboundSoaSerialMode() string {
+	if m := kdb.outboundSoaSerial.Load(); m != nil {
+		return *m
+	}
+	return ""
+}
+
+// SetTransferSrc replaces the server-global outbound-transfer source list.
+// Stores a copy, so a caller that later mutates the slice it passed cannot
+// change what serving goroutines observe.
+func (kdb *KeyDB) SetTransferSrc(srcs []string) {
+	cp := append([]string(nil), srcs...)
+	kdb.transferSrc.Store(&cp)
+}
+
+// TransferSrcList returns the server-global outbound-transfer source list.
+// Returns a copy: the caller receives a stable snapshot that a concurrent
+// reload cannot mutate underneath it.
+func (kdb *KeyDB) TransferSrcList() []string {
+	s := kdb.transferSrc.Load()
+	if s == nil || len(*s) == 0 {
+		return nil
+	}
+	return append([]string(nil), (*s)...)
 }
 
 // Lock and Unlock expose the mutex for code that moves to

@@ -754,8 +754,10 @@ func (zd *ZoneData) EffectiveTransferSrcWithSource() (srcs []string, source stri
 	if len(zd.TransferSrc) > 0 {
 		return zd.TransferSrc, "zone" // per-zone, possibly via its template
 	}
-	if zd.KeyDB != nil && len(zd.KeyDB.TransferSrc) > 0 {
-		return zd.KeyDB.TransferSrc, "global" // dnsengine.transfer_src
+	if zd.KeyDB != nil {
+		if srcs := zd.KeyDB.TransferSrcList(); len(srcs) > 0 {
+			return srcs, "global" // dnsengine.transfer_src
+		}
 	}
 	return nil, "default"
 }
@@ -774,8 +776,10 @@ func (zd *ZoneData) EffectiveOutboundSoaSerialWithSource() (mode, source string)
 	if zd.OutboundSoaSerial != "" {
 		return zd.OutboundSoaSerial, "zone" // per-zone, possibly via its template
 	}
-	if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial != "" {
-		return zd.KeyDB.OutboundSoaSerial, "global" // dnsengine.outbound_soa_serial
+	if zd.KeyDB != nil {
+		if mode := zd.KeyDB.OutboundSoaSerialMode(); mode != "" {
+			return mode, "global" // dnsengine.outbound_soa_serial
+		}
 	}
 	return OutboundSoaSerialKeep, "default"
 }

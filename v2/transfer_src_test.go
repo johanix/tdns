@@ -9,7 +9,9 @@ import (
 	"errors"
 	"net"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // TestTransferSrcFor pins the family matching. Binding a v4 source before
@@ -96,7 +98,9 @@ func TestEffectiveTransferSrc(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			zd := &ZoneData{TransferSrc: tc.zone}
 			if tc.global != nil {
-				zd.KeyDB = &KeyDB{TransferSrc: tc.global}
+				kdb := &KeyDB{}
+				kdb.SetTransferSrc(tc.global)
+				zd.KeyDB = kdb
 			}
 			srcs, source := zd.EffectiveTransferSrcWithSource()
 			if source != tc.wantSource {
@@ -363,5 +367,91 @@ func TestValidateAllTransferSrc(t *testing.T) {
 				t.Errorf("error %q does not name %q", err, tc.wantErr)
 			}
 		})
+	}
+}
+
+// TestKeyDBGlobalsNoRace exercises the reload-vs-serve race CodeRabbit flagged
+// on #352: config reload replaces the server-global transfer-src and outbound
+// serial mode while serving goroutines read them through the Effective*
+// resolvers. Both were plain struct fields, so the write and the read were an
+// unsynchronised slice-header / string-header access.
+//
+// Only meaningful under -race; without it a torn read is simply unlikely rather
+// than impossible, which is what makes this class of bug survive review.
+func TestKeyDBGlobalsNoRace(t *testing.T) {
+	kdb := &KeyDB{}
+	kdb.SetTransferSrc([]string{"172.16.0.53"})
+	kdb.SetOutboundSoaSerial(OutboundSoaSerialKeep)
+
+	// A zone with no per-zone value, so both resolvers fall through to the
+	// global tier -- the tier the reload is rewriting.
+	zd := &ZoneData{ZoneName: "example.", KeyDB: kdb}
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Reloader.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if i%2 == 0 {
+				kdb.SetTransferSrc([]string{"172.16.0.53"})
+				kdb.SetOutboundSoaSerial(OutboundSoaSerialUnixtime)
+			} else {
+				kdb.SetTransferSrc([]string{"10.0.0.1", "2a01:bad:cafe:f::53"})
+				kdb.SetOutboundSoaSerial(OutboundSoaSerialKeep)
+			}
+		}
+	}()
+
+	// Readers, as the transfer and serial paths do.
+	for i := 0; i < 4; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				for _, s := range zd.EffectiveTransferSrc() {
+					if s == "" {
+						t.Error("observed an empty entry in the global transfer-src")
+					}
+				}
+				_ = zd.EffectiveOutboundSoaSerial()
+			}
+		}()
+	}
+
+	time.Sleep(150 * time.Millisecond)
+	close(stop)
+	wg.Wait()
+}
+
+// TestTransferSrcListIsACopy: a caller must not be able to mutate what other
+// goroutines observe, nor be mutated under by the next reload.
+func TestTransferSrcListIsACopy(t *testing.T) {
+	kdb := &KeyDB{}
+	orig := []string{"172.16.0.53"}
+	kdb.SetTransferSrc(orig)
+
+	// Mutating the slice we passed in must not change the stored value.
+	orig[0] = "10.0.0.99"
+	if got := kdb.TransferSrcList(); len(got) != 1 || got[0] != "172.16.0.53" {
+		t.Errorf("stored value followed the caller's slice: %v", got)
+	}
+	// Mutating what we got back must not change the stored value either.
+	got := kdb.TransferSrcList()
+	got[0] = "10.0.0.98"
+	if again := kdb.TransferSrcList(); again[0] != "172.16.0.53" {
+		t.Errorf("returned slice aliases the stored value: %v", again)
 	}
 }

@@ -514,7 +514,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 			// responder kept the stale startup map. SetOptions swaps the map
 			// atomically, so the per-query lock-free readers are race-free.
 			conf.Internal.KeyDB.SetOptions(conf.DnsEngine.Options)
-			conf.Internal.KeyDB.TransferSrc = conf.DnsEngine.TransferSrc
+			conf.Internal.KeyDB.SetTransferSrc(conf.DnsEngine.TransferSrc)
 			if err := applyOutboundSoaSerial(conf.Internal.KeyDB, conf.DnsEngine.OutboundSoaSerial); err != nil {
 				return err
 			}
@@ -603,7 +603,7 @@ func (conf *Config) InitializeKeyDB() error {
 	}
 	conf.Internal.KeyDB = kdb
 
-	kdb.TransferSrc = conf.DnsEngine.TransferSrc
+	kdb.SetTransferSrc(conf.DnsEngine.TransferSrc)
 	if err := applyOutboundSoaSerial(kdb, conf.DnsEngine.OutboundSoaSerial); err != nil {
 		return err
 	}
@@ -623,7 +623,7 @@ func applyOutboundSoaSerial(kdb *KeyDB, raw string) error {
 	if mode == "" {
 		mode = OutboundSoaSerialKeep
 	}
-	kdb.OutboundSoaSerial = mode
+	kdb.SetOutboundSoaSerial(mode)
 
 	// Create the table unconditionally. The mode is now a PER-ZONE setting that
 	// merely defaults to this global one (zd.EffectiveOutboundSoaSerial), so any
