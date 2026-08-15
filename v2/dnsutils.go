@@ -102,7 +102,12 @@ func (zd *ZoneData) ZoneTransferIn(up PeerConf, serial uint32, ttype string, con
 	//
 	// dns.Transfer.In only dials when Conn is nil, and the library documents
 	// pre-dialling for exactly this purpose, so no fork change is needed.
-	if src := zd.EffectiveTransferSrc(); len(src) > 0 {
+	//
+	// Logged either way. Whether a source was bound is invisible from the
+	// outside until an upstream ACL refuses the transfer, and then the only
+	// evidence is in the far end's log -- which is where an afternoon goes.
+	src, tier := zd.EffectiveTransferSrcWithSource()
+	if len(src) > 0 {
 		conn, derr := dialTransferConn(upstream, tlsCfg, src, transfer.DialTimeout)
 		if derr != nil {
 			return 0, fmt.Errorf("ZoneTransferIn %s: dial %s: %w", zd.ZoneName, upstream, derr)
@@ -112,7 +117,15 @@ func (zd *ZoneData) ZoneTransferIn(up PeerConf, serial uint32, ttype string, con
 		// pointer comparing equal to nil.
 		if conn != nil {
 			transfer.Conn = conn
+			lgDns.Info("ZoneTransferIn: bound source address", "zone", zd.ZoneName,
+				"upstream", upstream, "src", conn.LocalAddr().String(), "from", tier)
+		} else {
+			lgDns.Warn("ZoneTransferIn: no configured transfer-src matches this upstream's family; dialling unbound",
+				"zone", zd.ZoneName, "upstream", upstream, "configured", src, "from", tier)
 		}
+	} else {
+		lgDns.Debug("ZoneTransferIn: no transfer-src configured; dialling unbound",
+			"zone", zd.ZoneName, "upstream", upstream)
 	}
 
 	answerChan, err := transfer.In(msg, upstream)
