@@ -46,12 +46,16 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 	// in the first place. The journal is anchored to the file on the write
 	// side (see LastZoneDeltaSerial); anchoring it to the file here too means
 	// the two sides cannot drift apart no matter where replay is called from.
+	// Both values in ONE critical section. CurrentSerial is written under zd.mu
+	// by publishWorkingSetLocked and by the refresh engine, so reading it
+	// outside is a data race -- and reading it after the unlock could also pick
+	// up a serial the chain check below was never validated against.
 	zd.mu.Lock()
 	fileSerial := zd.fileSerial
-	zd.mu.Unlock()
 	if fileSerial == 0 {
 		fileSerial = zd.CurrentSerial
 	}
+	zd.mu.Unlock()
 
 	// Already replayed for THIS file load? Then say so quietly and stop.
 	//

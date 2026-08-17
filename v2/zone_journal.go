@@ -134,16 +134,24 @@ func (zd *ZoneData) JournalInfo(detail bool) (*ZoneJournalInfo, error) {
 // JournalInstructions flattens the journal into one instruction list, in
 // replay order. This is what `journal list --instructions` prints and what
 // purge preserves.
-func (zd *ZoneData) JournalInstructions() ([]ZoneDeltaRR, error) {
+//
+// The second return is the highest row id the list covers. Callers that then
+// DELETE what they have just read must bound the delete by it -- see
+// JournalPurge.
+func (zd *ZoneData) JournalInstructions() ([]ZoneDeltaRR, int64, error) {
 	deltas, err := zd.KeyDB.LoadZoneDeltas(zd.ZoneName)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	var out []ZoneDeltaRR
+	var maxID int64
 	for _, d := range deltas {
 		out = append(out, d.RRs...)
+		if d.MaxID > maxID {
+			maxID = d.MaxID
+		}
 	}
-	return out, nil
+	return out, maxID, nil
 }
 
 // ZoneJournalPurgeResult reports what a purge did.
@@ -152,6 +160,10 @@ type ZoneJournalPurgeResult struct {
 	Deltas       int
 	Artefact     string        // where the discarded content was written ("" if nowhere)
 	Instructions []ZoneDeltaRR // and the content itself, always
+	// Remaining counts deltas that were still in the journal afterwards, which
+	// happens only when an update published DURING the purge. Those are not in
+	// the artefact and were deliberately not deleted.
+	Remaining int
 }
 
 // JournalPurge discards the whole journal, having first written what it holds
@@ -162,7 +174,7 @@ type ZoneJournalPurgeResult struct {
 // It is not silent. Everything discarded is written to
 // {zonefile}.{serial}.purged as ADD/DEL instructions, and returned to the
 // caller besides, so a purge issued in error is recoverable by feeding the
-// artefact back through `zone update --from-file`.
+// artefact back through `zone update from-file`.
 //
 // It refuses a HEALTHY journal without force. A journal that will replay holds
 // changes that exist nowhere else; discarding those is a real decision and
@@ -188,7 +200,7 @@ func (zd *ZoneData) JournalPurge(force bool) (*ZoneJournalPurgeResult, error) {
 			zd.ZoneName, info.Records, info.Deltas)
 	}
 
-	insns, err := zd.JournalInstructions()
+	insns, maxID, err := zd.JournalInstructions()
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +221,7 @@ func (zd *ZoneData) JournalPurge(force bool) (*ZoneJournalPurgeResult, error) {
 			fmt.Sprintf("purged:   %s", time.Now().Format(time.RFC3339)),
 			"",
 			"Replay what you want back with:",
-			fmt.Sprintf("  tdns-cli auth zone update --from-file %s --zone %s --via api",
+			fmt.Sprintf("  tdns-cli auth zone update from-file --file %s --zone %s --via api",
 				path, zd.ZoneName),
 		}, insns); err != nil {
 			return nil, fmt.Errorf("zone %s: refusing to purge the journal, because the discarded"+
@@ -225,20 +237,42 @@ func (zd *ZoneData) JournalPurge(force bool) (*ZoneJournalPurgeResult, error) {
 			"zone", zd.ZoneName, "records", info.Records)
 	}
 
-	n, err := zd.KeyDB.DeleteZoneDeltas(zd.ZoneName)
+	// Delete exactly what the artefact records, and not a row more.
+	//
+	// An update can publish between the read above and this delete. Its delta
+	// is not in the artefact -- it did not exist when the artefact was written
+	// -- so an unbounded delete would destroy content that was never saved
+	// anywhere, which is the one thing purge must not do. Bounding by the row
+	// id the snapshot covered leaves such a delta in place.
+	n, err := zd.KeyDB.DeleteZoneDeltasThroughID(zd.ZoneName, maxID)
 	if err != nil {
 		return nil, err
 	}
 	res.Rows = n
 
-	// The journal is gone, so nothing remains to replay for this load. Leaving
-	// the flag set would be harmless today and a lie tomorrow.
+	// Did anything arrive during the purge? Then the journal is not empty, and
+	// what remains no longer chains from the zone file -- its predecessors are
+	// gone. Say so: silence here would leave the operator believing the purge
+	// finished the job, and the next restart reporting a journal that refuses
+	// to replay with no obvious cause.
+	if after, err := zd.JournalInfo(false); err == nil && after.Deltas > 0 {
+		res.Remaining = after.Deltas
+		lg.Warn("an update published while the journal was being purged;"+
+			" its delta was kept (it is not in the purge artefact) but no longer chains"+
+			" from the zone file",
+			"zone", zd.ZoneName, "remaining_deltas", after.Deltas)
+	}
+
+	// Nothing remains to replay for this load -- unless something arrived
+	// mid-purge, in which case it has NOT been applied and the flag must not
+	// claim otherwise either way.
 	zd.mu.Lock()
 	zd.deltasReplayed = false
 	zd.mu.Unlock()
 
 	lg.Info("zone journal purged", "zone", zd.ZoneName, "deltas", info.Deltas,
-		"records", info.Records, "rows", n, "artefact", res.Artefact)
+		"records", info.Records, "rows", n, "artefact", res.Artefact,
+		"remaining", res.Remaining)
 
 	return res, nil
 }
@@ -293,7 +327,7 @@ func (zd *ZoneData) ApiZoneJournal(zp ZonePost) (*ZoneResponse, error) {
 		}
 		resp.Journal = info
 		if zp.Instructions {
-			insns, err := zd.JournalInstructions()
+			insns, _, err := zd.JournalInstructions()
 			if err != nil {
 				return nil, err
 			}
@@ -326,6 +360,12 @@ func (zd *ZoneData) ApiZoneJournal(zp ZonePost) (*ZoneResponse, error) {
 			resp.Msg = fmt.Sprintf("Zone %s: journal purged (%d delta(s), %d record(s));"+
 				" NOT saved to disk (the zone has no zone file) -- the content is in this"+
 				" response only", zd.ZoneName, res.Deltas, len(res.Instructions))
+		}
+		if res.Remaining > 0 {
+			resp.Msg += fmt.Sprintf("\nNOTE: %d delta(s) were published while the purge ran."+
+				" They are NOT in the artefact and were not deleted, but they no longer chain"+
+				" from the zone file. Run `zone sync` to fold them in, or purge again to"+
+				" discard them.", res.Remaining)
 		}
 
 	default:

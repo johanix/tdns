@@ -230,6 +230,44 @@ func (kdb *KeyDB) DeleteZoneDeltas(zone string) (int64, error) {
 	return n, nil
 }
 
+// DeleteZoneDeltasThroughID drops every delta row up to and including maxID,
+// and reports how many went.
+//
+// Bounded by row id because that is what a caller can capture ATOMICALLY with
+// the content it has read. A purge loads the journal, writes what it holds to
+// an artefact, and then deletes -- and an update publishing in between persists
+// a delta that is not in the artefact. An unbounded delete would remove that
+// row too: content destroyed AND unrecorded, which is precisely the failure
+// this command exists not to be. Rows created after the snapshot have higher
+// ids and survive.
+//
+// Same reasoning as DeleteZoneDeltasThroughSerial, one layer down: bound the
+// delete by what was actually observed, never by a ceiling read separately.
+func (kdb *KeyDB) DeleteZoneDeltasThroughID(zone string, maxID int64) (int64, error) {
+	if kdb == nil || kdb.DB == nil {
+		return 0, fmt.Errorf("DeleteZoneDeltasThroughID: no database")
+	}
+	if maxID <= 0 {
+		return 0, nil
+	}
+	zone = dns.Fqdn(zone)
+
+	kdb.mu.Lock()
+	defer kdb.mu.Unlock()
+
+	res, err := kdb.DB.Exec(`DELETE FROM ZoneDelta WHERE zone=? AND id<=?`, zone, maxID)
+	if err != nil {
+		return 0, fmt.Errorf("DeleteZoneDeltasThroughID: %v", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		lg.Warn("DeleteZoneDeltasThroughID: rows deleted but the count is unavailable",
+			"zone", zone, "through_id", maxID, "error", err)
+		return 0, nil
+	}
+	return n, nil
+}
+
 // ZoneDeltaActions turns a persisted delta back into update-section records,
 // ready for the applier.
 //

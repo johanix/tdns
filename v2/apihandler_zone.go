@@ -122,6 +122,10 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 			resp.Msg = jr.Msg
 			resp.Journal = jr.Journal
 			resp.Instructions = jr.Instructions
+			// Artefact too. Without it every purge looks to the client like one
+			// whose content could not be saved -- which is the branch that
+			// prints the instructions as the last remaining copy.
+			resp.Artefact = jr.Artefact
 
 		case "sign-zone":
 			newrrsigs, err := zd.SignZone(kdb, zp.Force)

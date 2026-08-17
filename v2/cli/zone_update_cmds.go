@@ -121,8 +121,10 @@ applied as ONE update — there is no half-applied outcome.`,
 	rrVerbs := []*cobra.Command{addrr, delrr, replacerrset}
 	nameVerbs := []*cobra.Command{delrrset, delname}
 
+	// One flag, not two. --file and --from-file both wrote to this variable, so
+	// giving both silently kept whichever cobra parsed last -- and on a command
+	// already named "from-file", "--from-file" reads as a typo either way.
 	fromFile.Flags().StringVar(&zoneUpdateFile, "file", "", "Instruction file to apply (required)")
-	fromFile.Flags().StringVar(&zoneUpdateFile, "from-file", "", "Alias for --file")
 
 	for _, sub := range append(append(append([]*cobra.Command{}, rrVerbs...), nameVerbs...), fromFile) {
 		// Every verb takes its input through flags and runZoneUpdateVerb never

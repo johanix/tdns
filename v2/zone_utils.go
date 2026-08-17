@@ -447,7 +447,17 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 	_, wroteSerial, err := zd.WriteFileWithSerial(fname)
 	if err == nil {
 		zd.mu.Lock()
-		zd.Options[OptDirty] = false
+		// Clean only if the file caught up with what the zone is serving. A
+		// publish can land WHILE this write runs: we then wrote serial 11 while
+		// the zone moved to 12, and clearing the flag unconditionally would
+		// report the zone as written out when the file is a serial behind.
+		// The next `zone write` would answer "not modified, writing to disk not
+		// needed" and decline to fix it. (No content is lost -- serial 12's
+		// delta is bounded by serial, so it survives the drop below and replays
+		// -- but the operator is told the file is current when it is not.)
+		if zd.CurrentSerial == wroteSerial {
+			zd.Options[OptDirty] = false
+		}
 		// The file now carries this serial, so that is what a future journal
 		// anchors to. Without this the next change would chain from the serial
 		// the file had BEFORE this write, and the load after that would refuse

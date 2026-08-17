@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"unicode"
 
 	"github.com/miekg/dns"
 )
@@ -23,7 +24,7 @@ import (
 //
 // It is deliberately BOTH an output and an input format. The journal CLI
 // emits it (`journal list --instructions`, and the artefact `journal purge`
-// writes before discarding anything), and `zone update --from-file` reads it
+// writes before discarding anything), and `zone update from-file` reads it
 // back. That symmetry is the point: an operator can take what the server
 // produced, open it in an editor, delete the lines they agree with, keep the
 // ones they do not, and replay what is left. A format that could only be
@@ -99,11 +100,18 @@ func ParseUpdateInstructions(r io.Reader) ([]ZoneDeltaRR, error) {
 			continue
 		}
 
-		kw, rest, found := strings.Cut(text, " ")
-		if !found {
+		// Split on the first run of whitespace, not on a literal space. Records
+		// render with TABS -- rr.String() produces them, so every line this
+		// program writes and every line pasted out of a zone file has them --
+		// and a space-only split turns "ADD<tab>foo. IN A 1.2.3.4" into "not an
+		// instruction", naming the wrong mistake in a file whose whole purpose
+		// is to be edited by hand.
+		sep := strings.IndexFunc(text, unicode.IsSpace)
+		if sep < 0 {
 			return nil, fmt.Errorf("line %d: %q is not an instruction"+
 				" (expected %s or %s followed by a resource record)", line, text, InstrAdd, InstrDel)
 		}
+		kw, rest := text[:sep], text[sep:]
 
 		var action string
 		switch strings.ToUpper(strings.TrimSpace(kw)) {

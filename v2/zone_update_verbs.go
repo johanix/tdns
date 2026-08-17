@@ -24,7 +24,7 @@ const (
 	VerbDelName      = "delname"
 	VerbReplaceRRset = "replacerrset"
 	// VerbInstructions is not a statement an operator types. It is what
-	// `zone update --from-file` becomes: a list of adds and deletes that were
+	// `zone update from-file` becomes: a list of adds and deletes that were
 	// produced by the server (a purge artefact, a journal listing) and possibly
 	// edited by hand before being sent back.
 	//

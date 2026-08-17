@@ -69,7 +69,7 @@ single record, append a correction with an ordinary "zone update" instead.`,
 		Long: `Discard every delta, after writing what they hold to {zonefile}.{serial}.purged
 as ADD/DEL instructions. Nothing is lost silently: replay what you want back with
 
-  tdns-cli ... zone update --from-file {zonefile}.{serial}.purged --zone <zone> --via api
+  tdns-cli ... zone update from-file --file {zonefile}.{serial}.purged --zone <zone> --via api
 
 A journal that would replay cleanly holds changes that exist nowhere else, so
 purging one needs --force. Prefer "zone sync", which folds the same changes into
@@ -150,7 +150,7 @@ func runZoneJournal(role, subcmd string) {
 func emitInstructions(insns []tdns.ZoneDeltaRR, zone string) {
 	comments := []string{
 		fmt.Sprintf("tdns journal contents for %s", zone),
-		fmt.Sprintf("replay with: tdns-cli ... zone update --from-file <this file> --zone %s --via api", zone),
+		fmt.Sprintf("replay with: tdns-cli ... zone update from-file --file <this file> --zone %s --via api", zone),
 	}
 
 	if journalOutfile == "" {

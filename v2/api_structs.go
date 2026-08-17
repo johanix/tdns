@@ -266,7 +266,7 @@ type ZonePost struct {
 	UpdateName   string
 	UpdateRrtype string
 	// UpdateInstructions carries an ADD/DEL instruction list — the payload of
-	// `zone update --from-file`, and the same format the journal emits. The
+	// `zone update from-file`, and the same format the journal emits. The
 	// client parses the file (so it can report line numbers, which is the whole
 	// point of a hand-edited file) and the server parses the records again when
 	// it builds the update, so both ends validate and the server stays

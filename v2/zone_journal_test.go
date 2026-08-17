@@ -475,3 +475,87 @@ func hasARRset(t *testing.T, zd *ZoneData, name string) bool {
 	}
 	return rrset != nil && len(rrset.RRs) > 0
 }
+
+// TestParseInstructionsAcceptsATabSeparator. rr.String() renders with tabs, so
+// every line this program writes and every line pasted out of a zone file has
+// them. A space-only split would call that "not an instruction", naming the
+// wrong mistake in a file whose whole purpose is to be hand-edited.
+func TestParseInstructionsAcceptsATabSeparator(t *testing.T) {
+	insns, err := ParseUpdateInstructions(strings.NewReader(
+		"ADD\tfoo.example. 3600 IN A 1.2.3.4\nDEL\t\tbar.example. 3600 IN A 5.6.7.8\n"))
+	if err != nil {
+		t.Fatalf("a tab after the keyword was rejected: %v", err)
+	}
+	if len(insns) != 2 {
+		t.Fatalf("parsed %d instructions, want 2", len(insns))
+	}
+	if insns[0].Action != ZoneDeltaAdd || insns[1].Action != ZoneDeltaDel {
+		t.Fatalf("actions parsed as %q/%q", insns[0].Action, insns[1].Action)
+	}
+}
+
+// TestPurgeKeepsADeltraPublishedDuringTheSnapshot: an update landing between
+// the artefact snapshot and the delete must NOT be deleted -- it is not in the
+// artefact, so deleting it would destroy content saved nowhere at all.
+//
+// The race is simulated by persisting a delta directly, in the window the real
+// updater would publish in.
+func TestPurgeKeepsADeltaPublishedDuringTheSnapshot(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := journalTestZone(t, kdb)
+	zd.Zonefile = filepath.Join(t.TempDir(), "example.zone")
+
+	insns, maxID, err := zd.JournalInstructions()
+	if err != nil {
+		t.Fatalf("JournalInstructions: %v", err)
+	}
+
+	// The concurrent publish: a delta chaining from the journal's head.
+	info, err := zd.JournalInfo(false)
+	if err != nil {
+		t.Fatalf("JournalInfo: %v", err)
+	}
+	if err := kdb.PersistZoneDelta("example.", info.HeadSerial, info.HeadSerial+1, nil,
+		journalRRset(t, "late.example. 3600 IN A 10.9.9.9")); err != nil {
+		t.Fatalf("persisting the concurrent delta: %v", err)
+	}
+
+	// Now the purge's delete half, bounded by what the snapshot covered.
+	n, err := kdb.DeleteZoneDeltasThroughID("example.", maxID)
+	if err != nil {
+		t.Fatalf("DeleteZoneDeltasThroughID: %v", err)
+	}
+	if int(n) != len(insns) {
+		t.Fatalf("deleted %d rows, snapshot covered %d", n, len(insns))
+	}
+
+	after, err := zd.JournalInfo(false)
+	if err != nil {
+		t.Fatalf("JournalInfo: %v", err)
+	}
+	if after.Deltas != 1 {
+		t.Fatalf("deltas left = %d, want the 1 that arrived during the purge", after.Deltas)
+	}
+	if after.HeadSerial != info.HeadSerial+1 {
+		t.Fatalf("the surviving delta is %d, want the late one at %d",
+			after.HeadSerial, info.HeadSerial+1)
+	}
+}
+
+// TestJournalPurgeReportsWhatArrivedDuringIt. Keeping the late delta is only
+// half the job: leaving it unmentioned means a journal that silently refuses to
+// replay at the next restart, with no obvious cause.
+func TestJournalPurgeReportsWhatArrivedDuringIt(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := journalTestZone(t, kdb)
+	zd.Zonefile = filepath.Join(t.TempDir(), "example.zone")
+
+	// Purge with nothing concurrent: nothing to report.
+	res, err := zd.JournalPurge(true)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if res.Remaining != 0 {
+		t.Fatalf("Remaining = %d on an uncontended purge, want 0", res.Remaining)
+	}
+}
