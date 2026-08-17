@@ -389,6 +389,7 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 		// silently drop a template's outbound_soa_serial and leave the zone on
 		// the server-global default.
 		OutboundSoaSerial: spec.Zconf.OutboundSoaSerial,
+		TransferSrc:       spec.Zconf.TransferSrc,
 		ZoneStore:         MapZone,
 		Zonefile:          spec.Zconf.Zonefile,
 		Template:          in.Template,
@@ -475,6 +476,7 @@ func (conf *Config) provisionDynamicPrimary(ctx context.Context, in DynamicZoneI
 		// every zone stamped from it that serial policy (the intended
 		// granularity — see the per-zone config model in the design doc).
 		OutboundSoaSerial: spec.Zconf.OutboundSoaSerial,
+		TransferSrc:       spec.Zconf.TransferSrc,
 	}
 	if err := conf.enqueueRefresh(ctx, zr); err != nil {
 		// Mark the registered-but-unscheduled zone so list-dynamic shows a

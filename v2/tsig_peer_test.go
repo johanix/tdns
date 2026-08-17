@@ -99,7 +99,7 @@ func TestNotifyKeyFor(t *testing.T) {
 		"192.0.2.1:9999": "k1", // IP-only match (configured vs actual port differ)
 		"192.0.2.2:5353": "k2",
 		"192.0.2.3:53":   NOKEY,
-		"203.0.113.9:53":  NOKEY, // no matching notify peer
+		"203.0.113.9:53": NOKEY, // no matching notify peer
 	}
 	for target, want := range cases {
 		if got := zd.notifyKeyFor(target); got != want {

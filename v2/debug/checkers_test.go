@@ -64,10 +64,10 @@ func TestI9DetectsTornContent(t *testing.T) {
 
 	a, b, d := rec("1._churn.z."), rec("2._churn.z."), rec("3._churn.z.")
 	t0 := time.Unix(1_700_000_000, 0)
-	l.RecordAccepted(OpAdd, a, t0)              // prefix {a}
-	l.RecordAccepted(OpAdd, b, t0.Add(1))       // prefix {a,b}
-	l.RecordAccepted(OpDel, a, t0.Add(2))       // prefix {b}
-	l.RecordAccepted(OpAdd, d, t0.Add(3))       // prefix {b,d}
+	l.RecordAccepted(OpAdd, a, t0)        // prefix {a}
+	l.RecordAccepted(OpAdd, b, t0.Add(1)) // prefix {a,b}
+	l.RecordAccepted(OpDel, a, t0.Add(2)) // prefix {b}
+	l.RecordAccepted(OpAdd, d, t0.Add(3)) // prefix {b,d}
 
 	// Torn: {a, b, d} — 'a' was deleted before 'd' was added; no prefix holds
 	// all three. A correct server can never serve this set.
