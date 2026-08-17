@@ -191,6 +191,23 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 	// chain check against a serial this pass has already moved.
 	zd.mu.Lock()
 	zd.deltasReplayed = true
+	if applied {
+		// And mark the zone DIRTY. The file demonstrably lacks what was just
+		// applied -- that is what the journal was for -- and dirty is exactly
+		// the flag that says "memory differs from disk".
+		//
+		// The updater only sets it for non-internal updates, and replay is
+		// internal, so without this the zone comes up clean while differing
+		// from its file: WriteZone then short-circuits with "not modified,
+		// writing to disk not needed", the journal is never folded in, it
+		// grows without bound, and every restart replays the whole thing from
+		// the beginning. Observed as exactly that -- "zone sync" doing nothing
+		// on a zone whose changes had just been replayed.
+		if zd.Options == nil {
+			zd.Options = map[ZoneOption]bool{}
+		}
+		zd.Options[OptDirty] = true
+	}
 	zd.mu.Unlock()
 
 	if !applied {
