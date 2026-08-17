@@ -420,23 +420,7 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 	if !zd.Options[OptDirty] && !force {
 		return fmt.Sprintf("Zone %s not modified, writing to disk not needed", zd.ZoneName), nil
 	}
-	// Read the delta ceiling BEFORE writing: the file about to be written
-	// accounts for exactly the rows that exist now. A publish committing
-	// during the write would add a row the file does not contain, and an
-	// unbounded drop afterwards would discard it -- losing that change from
-	// both the file and the journal. See MaxZoneDeltaID.
-	var deltaCeiling int64
-	if zd.KeyDB != nil {
-		var cerr error
-		if deltaCeiling, cerr = zd.KeyDB.MaxZoneDeltaID(zd.ZoneName); cerr != nil {
-			lg.Warn("could not read the zone's delta ceiling before writing;"+
-				" persisted deltas will be left in place",
-				"zone", zd.ZoneName, "error", cerr)
-			deltaCeiling = 0
-		}
-	}
-
-	_, err = zd.WriteFile(fname)
+	_, wroteSerial, err := zd.WriteFileWithSerial(fname)
 	if err == nil {
 		zd.mu.Lock()
 		zd.Options[OptDirty] = false
@@ -459,7 +443,13 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 		// no-ops, so the replayed result matches -- but it is still wrong
 		// enough to log loudly.
 		if zd.KeyDB != nil {
-			if n, derr := zd.KeyDB.DeleteZoneDeltasThrough(zd.ZoneName, deltaCeiling); derr != nil {
+			// Bound the drop by the serial actually WRITTEN, not by a ceiling
+			// read beforehand. A ceiling has a window: a publish can land in
+			// the file after the ceiling is read, and its delta row then
+			// survives the drop and fails the chain check on the next load.
+			// "Is this change already in the file?" is answered by the file's
+			// serial, and that has no window at all.
+			if n, derr := zd.KeyDB.DeleteZoneDeltasThroughSerial(zd.ZoneName, wroteSerial); derr != nil {
 				lg.Error("zone written to file but its persisted deltas could not be dropped;"+
 					" a restart will replay changes the file already contains",
 					"zone", zd.ZoneName, "file", fname, "error", derr)

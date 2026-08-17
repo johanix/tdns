@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -540,5 +541,65 @@ www.example.	3600	IN	A	192.0.2.1
 
 	if _, err := fresh.ReplayPersistedDeltas(kdb); err == nil {
 		t.Fatal("a replaced zone file was accepted; the chain check must still refuse it")
+	}
+}
+
+// Checking only deltas[0] proves the chain STARTS at this file; it says nothing
+// about whether it is continuous. A gapped sequence would be applied as one
+// update, landing the zone on a serial whose history never happened.
+func TestZoneDeltaReplayRefusesAGappedChain(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	// A->B and C->D: each link is fine on its own, the pair is not.
+	if err := kdb.PersistZoneDelta("example.", 1, 2, nil, []core.RRset{deltaRRset(t, "a.example. 3600 IN A 10.0.0.1")}); err != nil {
+		t.Fatalf("persist 1->2: %v", err)
+	}
+	if err := kdb.PersistZoneDelta("example.", 7, 8, nil, []core.RRset{deltaRRset(t, "b.example. 3600 IN A 10.0.0.2")}); err != nil {
+		t.Fatalf("persist 7->8: %v", err)
+	}
+
+	zd := testZone(t, "example.", deltaZone)
+	registerZones(t, zd)
+	zd.KeyDB = kdb
+	zd.UpdatePolicy = policyAllowing(dns.TypeA)
+	zd.CurrentSerial = 1 // matches deltas[0].FromSerial, so the first check passes
+
+	_, err := zd.ReplayPersistedDeltas(kdb)
+	if err == nil {
+		t.Fatal("a gapped delta chain was accepted")
+	}
+	if !strings.Contains(err.Error(), "not continuous") {
+		t.Errorf("error = %q; want it to name the gap", err)
+	}
+}
+
+// A journalled delta that does not advance the serial cannot be replayed into a
+// coherent history and would break the strictly-greater guarantee the publish
+// relies on.
+func TestZoneDeltaReplayRefusesANonAdvancingLink(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	// A single delta that does not move the serial. Note the schema's
+	// UNIQUE(zone, toserial, seq) prevents building this as a SECOND delta
+	// landing on a serial already used, so the case that can actually be stored
+	// is the first one -- which is why the check must cover deltas[0] and not
+	// only the links after it.
+	if err := kdb.PersistZoneDelta("example.", 5, 5, nil,
+		[]core.RRset{deltaRRset(t, "a.example. 3600 IN A 10.0.0.1")}); err != nil {
+		t.Fatalf("persist 5->5: %v", err)
+	}
+
+	zd := testZone(t, "example.", deltaZone)
+	registerZones(t, zd)
+	zd.KeyDB = kdb
+	zd.UpdatePolicy = policyAllowing(dns.TypeA)
+	zd.CurrentSerial = 5 // matches FromSerial, so the chain-start check passes
+
+	_, err := zd.ReplayPersistedDeltas(kdb)
+	if err == nil {
+		t.Fatal("a non-advancing delta was accepted")
+	}
+	if !strings.Contains(err.Error(), "does not advance") {
+		t.Errorf("error = %q; want it to name the non-advancing delta", err)
 	}
 }

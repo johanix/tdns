@@ -671,28 +671,40 @@ func (zd *ZoneData) WriteTmpFile(lg *log.Logger) (string, error) {
 		return f.Name(), err
 	}
 
-	err = zd.WriteZoneToFile(f)
+	_, err = zd.WriteZoneToFile(f)
 	if err != nil {
 		return f.Name(), err
 	}
 	return f.Name(), nil
 }
 
+// WriteFile writes the zone and returns the filename. Callers that need the
+// serial written -- WriteZone, to bound its delta drop -- use
+// WriteFileWithSerial.
 func (zd *ZoneData) WriteFile(filename string) (string, error) {
+	fname, _, err := zd.WriteFileWithSerial(filename)
+	return fname, err
+}
+
+func (zd *ZoneData) WriteFileWithSerial(filename string) (string, uint32, error) {
 	fname := fmt.Sprintf("%s/%s", viper.GetString("external.filedir"), filename)
 	f, err := os.Create(fname)
 	if err != nil {
-		return fname, err
+		return fname, 0, err
 	}
 
-	err = zd.WriteZoneToFile(f)
+	wrote, err := zd.WriteZoneToFile(f)
 	if err != nil {
-		return f.Name(), err
+		return f.Name(), 0, err
 	}
-	return f.Name(), nil
+	return f.Name(), wrote, nil
 }
 
-func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
+// WriteZoneToFile serialises the PUBLISHED snapshot and reports the SOA serial
+// it wrote. That serial is what makes the delta drop in WriteZone exact: any
+// journalled change whose ToSerial is not newer than it is, by definition,
+// already in this file.
+func (zd *ZoneData) WriteZoneToFile(f *os.File) (uint32, error) {
 	var err error
 	var bytes, totalbytes int
 	zonedata := ""
@@ -703,9 +715,23 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	apex := getOwnerFrom(snap, zd.ZoneName)
 	if apex == nil {
 		lgDns.Error("WriteZoneToFile: failed to get zone apex", "zone", zd.ZoneName)
-		return fmt.Errorf("WriteZoneToFile: %s: no apex in published snapshot", zd.ZoneName)
+		return 0, fmt.Errorf("WriteZoneToFile: %s: no apex in published snapshot", zd.ZoneName)
 	}
 	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+
+	// The serial actually written. Reported to the caller so the delta drop in
+	// WriteZone can be bound to this file's CONTENT rather than to a time
+	// window. Reading a journal ceiling before the write leaves a gap in which
+	// a publish lands in the file while its delta row survives the drop, and
+	// that retained row then fails the chain check on the next load -- the same
+	// false "the file has been edited or replaced" accusation, reached from the
+	// other side.
+	var wroteSerial uint32
+	if len(soa.RRs) > 0 {
+		if s, ok := soa.RRs[0].(*dns.SOA); ok {
+			wroteSerial = s.Serial
+		}
+	}
 
 	//	zonedata += soa.String() + "\n"
 	count := 0
@@ -746,7 +772,7 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 			if count >= 1000 {
 				bytes, err = writer.WriteString(zonedata)
 				if err != nil {
-					return err
+					return 0, err
 				}
 				totalbytes += bytes
 				bytes = 0
@@ -761,7 +787,7 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	// 		if rrcount%1000 == 0 {
 	// 			bytes, err = writer.WriteString(zonedata)
 	// 			if err != nil {
-	// 				return err
+	// 				return 0, err
 	// 			}
 	// 			totalbytes += bytes
 	// 			bytes = 0
@@ -770,11 +796,11 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	// 	}
 	bytes, err = writer.WriteString(zonedata)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	totalbytes += bytes
 	writer.Flush()
-	return err
+	return wroteSerial, err
 }
 
 func RRsetToString(rrset *core.RRset) string {
