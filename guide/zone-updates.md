@@ -20,7 +20,9 @@ see [Automatic Delegation Synchronization](special-features.md#1-automatic-deleg
 5. [What "applied" means](#5-what-applied-means)
 6. [Durability: the zone file, and the delta journal](#6-durability-the-zone-file-and-the-delta-journal)
 7. [freeze, thaw and sync](#7-freeze-thaw-and-sync)
-8. [Refusals and what they mean](#8-refusals-and-what-they-mean)
+8. [Working with the journal](#8-working-with-the-journal)
+9. [Replaying an instruction file](#9-replaying-an-instruction-file)
+10. [Refusals and what they mean](#10-refusals-and-what-they-mean)
 
 
 ## 1. The two channels, and how they differ
@@ -239,12 +241,19 @@ gap. The consequence: replay needs a zone that can sign
 (`online-signing` or `inline-signing`).
 
 **Replay is chain-validated.** The first delta must start from
-the serial the zone file actually has. If it does not — someone
-edited the file behind the server's back, say — the deltas are
-refused rather than applied to a base they were not computed
-against, and the zone serves the file as it stands. The refusal
-is logged and recorded in the zone's error registry; it is not
-silent.
+the serial the zone file actually has, and every delta after it
+must continue where the previous one ended. If the chain does not
+start at the file — someone edited it behind the server's back,
+say — the deltas are refused rather than applied to a base they
+were not computed against, and the zone serves the file as it
+stands. The refusal is logged and recorded in the zone's error
+registry; it is not silent. `zone journal status` (§8) answers
+the same question on demand, before a restart rather than after.
+
+A refused journal does not block updates. A change that lands
+afterwards is journalled from where the zone now is; what it
+cannot do is rescue the refused deltas, which stay in the
+database until you deal with them deliberately.
 
 
 ## 7. freeze, thaw and sync
@@ -270,11 +279,137 @@ paths that can drift: the server dispatches both to the same handler.
 The name `sync` exists because it is what an operator coming from bind9
 (`rndc sync`) reaches for.
 
-All three drop the zone's deltas once the file is written: the
-file now contains what they described.
+All three drop the zone's deltas once the file is written — but
+only those the written file actually contains, judged by its
+serial. A change published *during* the write is a serial ahead
+of the file, so its delta stays in the journal and replays
+normally.
+
+The write itself is staged and renamed into place, so a reader —
+the next startup, above all — never sees a partially written zone
+file. If any part of it fails, the deltas are **not** dropped:
+the journal is the only other copy of those changes, and a write
+that half-succeeded is exactly when you still need it.
 
 
-## 8. Refusals and what they mean
+## 8. Working with the journal
+
+```bash
+tdns-cli auth zone journal status   --zone alpha.dnslab.
+tdns-cli auth zone journal list     --zone alpha.dnslab. [--instructions] [--out FILE]
+tdns-cli auth zone journal truncate --zone alpha.dnslab. --serial <n>
+tdns-cli auth zone journal purge    --zone alpha.dnslab. [--force] [--out FILE]
+```
+
+### status
+
+The one to reach for first. It answers *will this journal
+survive a restart?* — using the same chain check the load path
+runs, so the answer cannot differ from what actually happens.
+
+```
+Zone dnslab. journal:
+  deltas:        2 (10 records)
+  chain:         2026081701 -> 2026081708
+  zone file:     /var/dns/zones/dnslab (serial 2026081701)
+  serving:       2026081711
+  will replay:   yes
+```
+
+Two lines are worth reading carefully. **`chain`** must start at
+the zone file's serial; when it does not, `will replay` says `NO`
+and a `why not` line gives the reason. And the head of the chain
+sitting behind `serving` is normal, not a symptom: a serial that
+advances without a content change — re-signing, a bump — records
+no delta, so the journal only marks serials where something
+actually changed.
+
+`applied now: NO` is the line that matters most when it appears.
+It means the deltas are in the database but *not* in what the
+zone is currently answering with.
+
+### list
+
+The deltas and the records in them. `--instructions` prints the
+whole journal in the ADD/DEL form of §9 instead of a summary, so
+"what is in the journal that my file does not have" and "give me
+that as something I can replay" are one flag apart. `--out`
+writes it to a file.
+
+### truncate
+
+Keeps the chain through the delta ending at `--serial` and drops
+everything after it.
+
+Only a *suffix* can go, and that is not an arbitrary restriction.
+The journal is a chain — each delta continues where the previous
+one ended — and replay refuses a chain with a gap, so removing a
+delta from the middle would leave a journal that can never be
+replayed again. There is deliberately no "delete this one
+record": to undo a single record, append a correction with an
+ordinary `zone update`. The serial must name a real boundary in
+the chain; anything else is refused rather than guessed at.
+
+### purge
+
+Discards the whole journal — the equivalent of deleting a bind9
+`.jnl`, without the part that makes deleting a `.jnl` painful.
+
+Everything discarded is first written to
+`{zonefile}.{serial}.purged` as replayable instructions, and the
+purge fails if that cannot be written. So a purge issued in error
+is recoverable: the material is on disk, in the form §9 accepts.
+
+A journal that *would* replay holds changes that exist nowhere
+else, so purging one requires `--force`, and the refusal points
+at `zone sync` — which folds the same changes into the zone file
+and loses nothing. A journal that would *not* replay needs no
+flag: its changes are already absent from what the zone serves,
+and an obstacle in front of the only remedy helps nobody.
+
+If an update publishes while the purge is running, its delta is
+kept rather than deleted — it is not in the artefact, so
+discarding it would destroy something saved nowhere at all — and
+purge says so. That surviving delta no longer chains from the
+file, so follow it with `zone sync` or a second purge.
+
+
+## 9. Replaying an instruction file
+
+```bash
+tdns-cli auth zone update from-file --file <path> --zone <zone> --via <api|ddns>
+```
+
+The format is a list of operations rather than a zone:
+
+```
+; tdns journal contents for dnslab.
+ADD	ns2.romeo.dnslab.	3600	IN	A	172.16.91.18
+DEL	ns.romeo.dnslab.	3600	IN	A	172.16.91.17
+```
+
+It is what `journal purge` and `journal list --instructions`
+produce, and the point is not bulk update — it is **selective
+override**. Open what the server wrote, delete the lines you
+agree with, keep the ones you do not, and replay what is left.
+
+Accordingly:
+
+- comments (`;` or `#`) and blank lines are ignored, so you can
+  annotate as you go. Only a *leading* `;` starts a comment — a
+  semicolon inside quoted rdata is part of the record;
+- parse errors name the line, not the file:
+  `line 4: cannot parse "bogus record here": dns: not a TTL`;
+- everything that survives your editing is applied as **one**
+  update. There is no half-applied outcome.
+
+It is not a separate authorization path. `--via` means exactly
+what it means everywhere else in this document, and the records
+go through the same builder, the same admission checks and the
+same applier as a typed statement.
+
+
+## 10. Refusals and what they mean
 
 | Message | Cause |
 |---|---|
