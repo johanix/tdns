@@ -38,9 +38,20 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 		return 0, nil
 	}
 
-	// The serial of the file we just loaded. Captured before anything is
-	// applied, because the replay below moves it.
-	fileSerial := zd.CurrentSerial
+	// The serial of the file we just loaded.
+	//
+	// zd.fileSerial, not zd.CurrentSerial. They are equal right now -- replay
+	// runs before the load-time signing and republication that move
+	// CurrentSerial -- but relying on that ordering is what made this fragile
+	// in the first place. The journal is anchored to the file on the write
+	// side (see LastZoneDeltaSerial); anchoring it to the file here too means
+	// the two sides cannot drift apart no matter where replay is called from.
+	zd.mu.Lock()
+	fileSerial := zd.fileSerial
+	zd.mu.Unlock()
+	if fileSerial == 0 {
+		fileSerial = zd.CurrentSerial
+	}
 
 	// Already replayed for THIS file load? Then say so quietly and stop.
 	//

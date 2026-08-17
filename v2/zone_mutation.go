@@ -489,6 +489,10 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	// PREVIOUS file no longer applies to this one, so a replay for the new file
 	// is due again.
 	zd.deltasReplayed = false
+	// The file's serial travels with the data it came from. The parse happens
+	// on a scratch ZoneData, so without this the live zone keeps a fileSerial
+	// of 0 and the journal anchors to nothing.
+	zd.fileSerial = new_zd.fileSerial
 	zd.IncomingSerial = new_zd.IncomingSerial
 	switch {
 	case firstLoad:

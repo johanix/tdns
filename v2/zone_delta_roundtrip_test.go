@@ -562,7 +562,8 @@ func TestZoneDeltaReplayRefusesAGappedChain(t *testing.T) {
 	registerZones(t, zd)
 	zd.KeyDB = kdb
 	zd.UpdatePolicy = policyAllowing(dns.TypeA)
-	zd.CurrentSerial = 1 // matches deltas[0].FromSerial, so the first check passes
+	zd.CurrentSerial = 1
+	zd.fileSerial = 1 // matches deltas[0].FromSerial, so the first check passes
 
 	_, err := zd.ReplayPersistedDeltas(kdb)
 	if err == nil {
@@ -593,7 +594,10 @@ func TestZoneDeltaReplayRefusesANonAdvancingLink(t *testing.T) {
 	registerZones(t, zd)
 	zd.KeyDB = kdb
 	zd.UpdatePolicy = policyAllowing(dns.TypeA)
-	zd.CurrentSerial = 5 // matches FromSerial, so the chain-start check passes
+	// Both anchors: replay validates against fileSerial, and the zone must look
+	// as though the file itself was loaded at 5.
+	zd.CurrentSerial = 5
+	zd.fileSerial = 5 // matches FromSerial, so the chain-start check passes
 
 	_, err := zd.ReplayPersistedDeltas(kdb)
 	if err == nil {
