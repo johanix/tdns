@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"database/sql"
 	"fmt"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -36,6 +37,9 @@ type ZoneDeltaRecord struct {
 	FromSerial uint32
 	ToSerial   uint32
 	RRs        []ZoneDeltaRR
+	// MaxID is the highest ZoneDelta row id belonging to this delta. Used to
+	// bound a delete to the deltas a written zone file already contains.
+	MaxID int64
 }
 
 // PersistZoneDelta records one published delta for zone.
@@ -134,7 +138,7 @@ func (kdb *KeyDB) LoadZoneDeltas(zone string) ([]ZoneDeltaRecord, error) {
 	zone = dns.Fqdn(zone)
 
 	const selectSql = `
-SELECT fromserial, toserial, action, rr FROM ZoneDelta WHERE zone=? ORDER BY id ASC`
+SELECT id, fromserial, toserial, action, rr FROM ZoneDelta WHERE zone=? ORDER BY id ASC`
 
 	rows, err := kdb.DB.Query(selectSql, zone)
 	if err != nil {
@@ -144,9 +148,10 @@ SELECT fromserial, toserial, action, rr FROM ZoneDelta WHERE zone=? ORDER BY id 
 
 	var out []ZoneDeltaRecord
 	for rows.Next() {
+		var rowID int64
 		var fromSerial, toSerial uint32
 		var action, rr string
-		if err := rows.Scan(&fromSerial, &toSerial, &action, &rr); err != nil {
+		if err := rows.Scan(&rowID, &fromSerial, &toSerial, &action, &rr); err != nil {
 			return nil, fmt.Errorf("LoadZoneDeltas: scan: %v", err)
 		}
 		// Consecutive rows of the same delta are grouped. They are contiguous
@@ -154,9 +159,11 @@ SELECT fromserial, toserial, action, rr FROM ZoneDelta WHERE zone=? ORDER BY id 
 		// order.
 		if n := len(out); n > 0 && out[n-1].FromSerial == fromSerial && out[n-1].ToSerial == toSerial {
 			out[n-1].RRs = append(out[n-1].RRs, ZoneDeltaRR{Action: action, RR: rr})
+			out[n-1].MaxID = rowID
 			continue
 		}
 		out = append(out, ZoneDeltaRecord{
+			MaxID:      rowID,
 			FromSerial: fromSerial,
 			ToSerial:   toSerial,
 			RRs:        []ZoneDeltaRR{{Action: action, RR: rr}},
@@ -183,16 +190,25 @@ func (kdb *KeyDB) DeleteZoneDeltas(zone string) (int64, error) {
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		// The delete succeeded; only the count is unavailable.
+		// The delete succeeded; only the count is unavailable. Callers cannot
+		// otherwise tell that apart from "no rows deleted", and WriteZone only
+		// logs when n > 0, so without this the path is entirely silent.
+		lg.Warn("DeleteZoneDeltas: rows deleted but the count is unavailable",
+			"zone", zone, "error", err)
 		return 0, nil
 	}
 	return n, nil
 }
 
 // ZoneDeltaActions turns a persisted delta back into update-section records,
-// ready for the applier. Deletes become CLASS=ANY RRset deletes only when the
-// delta removed the whole RRset; individual records use CLASS=NONE, which is
-// what the applier's ClassNONE branch expects.
+// ready for the applier.
+//
+// EVERY delete becomes a per-record CLASS=NONE delete; nothing here emits
+// CLASS=ANY. A journalled RRset removal is stored as one row per record, and
+// deleting them individually reaches the same end state, so the RRset case
+// needs no separate representation. (The comment here previously claimed a
+// CLASS=ANY branch that has never existed, which invited someone to go looking
+// for it -- or to add a redundant one.)
 func ZoneDeltaActions(rec ZoneDeltaRecord) ([]dns.RR, error) {
 	var actions []dns.RR
 	for _, row := range rec.RRs {
@@ -218,4 +234,93 @@ func ZoneDeltaActions(rec ZoneDeltaRecord) ([]dns.RR, error) {
 		actions = append(actions, rr)
 	}
 	return actions, nil
+}
+
+// DeleteZoneDeltasThroughSerial drops every delta whose ToSerial is not newer
+// than serial -- i.e. exactly those the freshly written zone file already
+// contains -- and leaves anything newer for replay.
+//
+// Bound by CONTENT, not by time. Reading a row-id ceiling before the write
+// leaves a window in which a publish lands in the file while its delta row
+// survives the drop; that retained row then starts from a serial the file has
+// already passed and fails the chain check on the next load, producing the
+// false "the file has been edited or replaced" accusation. "Is this change
+// already in the file?" is a question about the file's serial, and answering it
+// that way has no window.
+//
+// Comparison is RFC 1982 serial arithmetic, so a wrapped serial behaves like
+// every other serial comparison in this package. That is also why the filter
+// cannot be pushed into SQL as `toserial <= ?`.
+func (kdb *KeyDB) DeleteZoneDeltasThroughSerial(zone string, serial uint32) (int64, error) {
+	if kdb == nil || kdb.DB == nil {
+		return 0, fmt.Errorf("DeleteZoneDeltasThroughSerial: no database")
+	}
+
+	deltas, err := kdb.LoadZoneDeltas(zone)
+	if err != nil {
+		return 0, err
+	}
+
+	var maxID int64
+	for _, d := range deltas {
+		if d.ToSerial == serial || !serialNewer(d.ToSerial, serial) {
+			if d.MaxID > maxID {
+				maxID = d.MaxID
+			}
+		}
+	}
+	if maxID == 0 {
+		return 0, nil
+	}
+
+	kdb.mu.Lock()
+	defer kdb.mu.Unlock()
+
+	res, err := kdb.DB.Exec(`DELETE FROM ZoneDelta WHERE zone=? AND id<=?`, zone, maxID)
+	if err != nil {
+		return 0, fmt.Errorf("DeleteZoneDeltasThroughSerial: %v", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		lg.Warn("DeleteZoneDeltasThroughSerial: rows deleted but the count is unavailable",
+			"zone", zone, "through_serial", serial, "error", err)
+		return 0, nil
+	}
+	return n, nil
+}
+
+// LastZoneDeltaSerial returns the ToSerial of the most recently stored delta
+// for zone, and whether there is one at all.
+//
+// This is what a new delta chains from. Chaining from the last published serial
+// instead looks equivalent and is not: a zone that re-signs or republishes
+// during load advances its published serial well past the serial its FILE
+// carries, so the first change after a load would be journalled as starting
+// from a serial the file has never had. The next load then reads the file,
+// compares it against that base, finds a mismatch, and refuses the whole
+// journal -- losing every change and reporting the file as tampered with.
+//
+// Anchoring the first delta to the file (ZoneData.fileSerial) and every
+// subsequent one to the journal's own tail makes the chain continuous by
+// construction, from a base the next load will actually see.
+func (kdb *KeyDB) LastZoneDeltaSerial(zone string) (uint32, bool, error) {
+	if kdb == nil || kdb.DB == nil {
+		return 0, false, fmt.Errorf("LastZoneDeltaSerial: no database")
+	}
+	kdb.mu.Lock()
+	defer kdb.mu.Unlock()
+
+	var toSerial sql.NullInt64
+	err := kdb.DB.QueryRow(
+		`SELECT toserial FROM ZoneDelta WHERE zone=? ORDER BY id DESC LIMIT 1`, zone).Scan(&toSerial)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("LastZoneDeltaSerial: %v", err)
+	}
+	if !toSerial.Valid {
+		return 0, false, nil
+	}
+	return uint32(toSerial.Int64), true, nil
 }

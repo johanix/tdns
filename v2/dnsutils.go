@@ -6,14 +6,17 @@ package tdns
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -90,6 +93,41 @@ func (zd *ZoneData) ZoneTransferIn(up PeerConf, serial uint32, ttype string, con
 		return 0, fmt.Errorf("ZoneTransferIn %s: TSIG sign setup: %w", zd.ZoneName, serr)
 	}
 	transfer.TsigProvider = provider
+
+	// Bind the local (source) address when the zone or the server names one.
+	// This is what the upstream's allow-transfer/provide-xfr ACL sees; without
+	// it the kernel picks a source from the outgoing interface, which on a
+	// multi-homed server is generally not the address we advertise as our
+	// identity -- so an ACL naming that address refuses us.
+	//
+	// dns.Transfer.In only dials when Conn is nil, and the library documents
+	// pre-dialling for exactly this purpose, so no fork change is needed.
+	//
+	// Logged either way. Whether a source was bound is invisible from the
+	// outside until an upstream ACL refuses the transfer, and then the only
+	// evidence is in the far end's log -- which is where an afternoon goes.
+	src, tier := zd.EffectiveTransferSrcWithSource()
+	if len(src) > 0 {
+		conn, derr := dialTransferConn(upstream, tlsCfg, src, transfer.DialTimeout)
+		if derr != nil {
+			return 0, fmt.Errorf("ZoneTransferIn %s: dial %s: %w", zd.ZoneName, upstream, derr)
+		}
+		// nil means no configured source matched this upstream's family; leave
+		// Conn unset so In() dials normally rather than relying on a typed-nil
+		// pointer comparing equal to nil.
+		if conn != nil {
+			transfer.Conn = conn
+			lgDns.Info("ZoneTransferIn: bound source address", "zone", zd.ZoneName,
+				"upstream", upstream, "src", conn.LocalAddr().String(), "from", tier)
+		} else {
+			lgDns.Warn("ZoneTransferIn: no configured transfer-src matches this upstream's family; dialling unbound",
+				"zone", zd.ZoneName, "upstream", upstream, "configured", src, "from", tier)
+		}
+	} else {
+		lgDns.Debug("ZoneTransferIn: no transfer-src configured; dialling unbound",
+			"zone", zd.ZoneName, "upstream", upstream)
+	}
+
 	answerChan, err := transfer.In(msg, upstream)
 	if err != nil {
 		zd.Logger.Printf("Error from transfer.In: %v\n", err)
@@ -115,6 +153,9 @@ func (zd *ZoneData) ZoneTransferIn(up PeerConf, serial uint32, ttype string, con
 	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0].(*dns.SOA)
 	zd.CurrentSerial = soa.Serial
 	zd.IncomingSerial = soa.Serial
+	// The journal anchors to the FILE, not to whatever the serial becomes
+	// after load-time signing and republication. See ZoneData.fileSerial.
+	zd.fileSerial = soa.Serial
 
 	zd.Logger.Printf("*** Zone %s transferred from upstream %s. No errors.", zd.ZoneName, upstream)
 	if zd.Data.IsEmpty() {
@@ -589,6 +630,9 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string
 
 	zd.CurrentSerial = soa.Serial
 	zd.IncomingSerial = soa.Serial
+	// The journal anchors to the FILE, not to whatever the serial becomes
+	// after load-time signing and republication. See ZoneData.fileSerial.
+	zd.fileSerial = soa.Serial
 
 	zd.XfrType = "axfr"
 	// Return true only if serial changed (indicates actual update)
@@ -671,28 +715,40 @@ func (zd *ZoneData) WriteTmpFile(lg *log.Logger) (string, error) {
 		return f.Name(), err
 	}
 
-	err = zd.WriteZoneToFile(f)
+	_, err = zd.WriteZoneToFile(f)
 	if err != nil {
 		return f.Name(), err
 	}
 	return f.Name(), nil
 }
 
+// WriteFile writes the zone and returns the filename. Callers that need the
+// serial written -- WriteZone, to bound its delta drop -- use
+// WriteFileWithSerial.
 func (zd *ZoneData) WriteFile(filename string) (string, error) {
+	fname, _, err := zd.WriteFileWithSerial(filename)
+	return fname, err
+}
+
+func (zd *ZoneData) WriteFileWithSerial(filename string) (string, uint32, error) {
 	fname := fmt.Sprintf("%s/%s", viper.GetString("external.filedir"), filename)
 	f, err := os.Create(fname)
 	if err != nil {
-		return fname, err
+		return fname, 0, err
 	}
 
-	err = zd.WriteZoneToFile(f)
+	wrote, err := zd.WriteZoneToFile(f)
 	if err != nil {
-		return f.Name(), err
+		return f.Name(), 0, err
 	}
-	return f.Name(), nil
+	return f.Name(), wrote, nil
 }
 
-func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
+// WriteZoneToFile serialises the PUBLISHED snapshot and reports the SOA serial
+// it wrote. That serial is what makes the delta drop in WriteZone exact: any
+// journalled change whose ToSerial is not newer than it is, by definition,
+// already in this file.
+func (zd *ZoneData) WriteZoneToFile(f *os.File) (uint32, error) {
 	var err error
 	var bytes, totalbytes int
 	zonedata := ""
@@ -703,9 +759,23 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	apex := getOwnerFrom(snap, zd.ZoneName)
 	if apex == nil {
 		lgDns.Error("WriteZoneToFile: failed to get zone apex", "zone", zd.ZoneName)
-		return fmt.Errorf("WriteZoneToFile: %s: no apex in published snapshot", zd.ZoneName)
+		return 0, fmt.Errorf("WriteZoneToFile: %s: no apex in published snapshot", zd.ZoneName)
 	}
 	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+
+	// The serial actually written. Reported to the caller so the delta drop in
+	// WriteZone can be bound to this file's CONTENT rather than to a time
+	// window. Reading a journal ceiling before the write leaves a gap in which
+	// a publish lands in the file while its delta row survives the drop, and
+	// that retained row then fails the chain check on the next load -- the same
+	// false "the file has been edited or replaced" accusation, reached from the
+	// other side.
+	var wroteSerial uint32
+	if len(soa.RRs) > 0 {
+		if s, ok := soa.RRs[0].(*dns.SOA); ok {
+			wroteSerial = s.Serial
+		}
+	}
 
 	//	zonedata += soa.String() + "\n"
 	count := 0
@@ -746,7 +816,7 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 			if count >= 1000 {
 				bytes, err = writer.WriteString(zonedata)
 				if err != nil {
-					return err
+					return 0, err
 				}
 				totalbytes += bytes
 				bytes = 0
@@ -761,7 +831,7 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	// 		if rrcount%1000 == 0 {
 	// 			bytes, err = writer.WriteString(zonedata)
 	// 			if err != nil {
-	// 				return err
+	// 				return 0, err
 	// 			}
 	// 			totalbytes += bytes
 	// 			bytes = 0
@@ -770,11 +840,11 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	// 	}
 	bytes, err = writer.WriteString(zonedata)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	totalbytes += bytes
 	writer.Flush()
-	return err
+	return wroteSerial, err
 }
 
 func RRsetToString(rrset *core.RRset) string {
@@ -825,4 +895,112 @@ func readLineFromFile(filename string, lineNum int) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("line %d not found", lineNum)
+}
+
+// pickTransferSrc picks the source address to bind for an upstream, and the
+// network ("tcp4"/"tcp6") to dial so the destination cannot end up in the other
+// family. A family with no configured source returns nil, meaning "dial
+// unbound" -- deliberately forgiving, because an operator who names only a v4
+// source should not thereby break every v6 upstream.
+//
+// The upstream may be a LITERAL or a HOSTNAME. For a literal the family is read
+// off the address. For a hostname it has to be resolved: the first version of
+// this bound whichever family net.ParseIP happened to report for a name it
+// could not parse -- always "not v4" -- so a hostname upstream that resolves to
+// IPv4 got an IPv6 source bound and the dial failed. Resolution failure falls
+// back to unbound rather than to a guess.
+//
+// When a hostname resolves to both families, the configured sources decide:
+// whichever family we have a source for wins, in configured order. That keeps
+// the ACL-visible address predictable, which is the entire point of the option.
+// lookup is injected so the hostname path is testable without depending on what
+// the test host's resolver happens to return -- a dual-stack "localhost" would
+// make the v4-only case untestable, which is precisely the case that was broken.
+// nil means the system resolver.
+func pickTransferSrc(ctx context.Context, lookup func(context.Context, string) ([]net.IPAddr, error), upstream string, srcs []string) (net.IP, string) {
+	host, _, err := net.SplitHostPort(upstream)
+	if err != nil {
+		host = upstream
+	}
+
+	// Parsed sources, in configured order. Unparseable entries cannot reach
+	// here -- ValidateTransferSrc rejects them at config load -- but skip them
+	// rather than binding something meaningless if one ever does.
+	var parsed []net.IP
+	for _, s := range srcs {
+		if ip := net.ParseIP(strings.TrimSpace(s)); ip != nil {
+			parsed = append(parsed, ip)
+		}
+	}
+	if len(parsed) == 0 {
+		return nil, ""
+	}
+
+	// Which families can the upstream actually be reached over?
+	var have4, have6 bool
+	if ip := net.ParseIP(host); ip != nil {
+		have4, have6 = ip.To4() != nil, ip.To4() == nil
+	} else {
+		if lookup == nil {
+			lookup = net.DefaultResolver.LookupIPAddr
+		}
+		addrs, rerr := lookup(ctx, host)
+		if rerr != nil {
+			// Cannot tell the family; binding a guess risks failing a transfer
+			// that would otherwise work.
+			return nil, ""
+		}
+		for _, a := range addrs {
+			if a.IP.To4() != nil {
+				have4 = true
+			} else {
+				have6 = true
+			}
+		}
+	}
+
+	for _, ip := range parsed {
+		if ip.To4() != nil && have4 {
+			return ip, "tcp4"
+		}
+		if ip.To4() == nil && have6 {
+			return ip, "tcp6"
+		}
+	}
+	return nil, ""
+}
+
+// dialTransferConn dials upstream with the source address bound, returning a
+// *dns.Conn ready to hand to dns.Transfer. tlsCfg non-nil selects XoT.
+//
+// The network is pinned to the source's family. Dialling "tcp" with a v4
+// LocalAddr and letting the resolver hand back a v6 destination (or the
+// reverse) is a guaranteed failure, and for a dual-stack hostname upstream that
+// is not a hypothetical. The hostname is still what gets dialled, so SNI and
+// certificate verification on the XoT path are unchanged.
+func dialTransferConn(upstream string, tlsCfg *tls.Config, srcs []string, timeout time.Duration) (*dns.Conn, error) {
+	if timeout == 0 {
+		timeout = 2 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	src, network := pickTransferSrc(ctx, nil, upstream, srcs)
+	if src == nil {
+		return nil, nil // no matching family; caller leaves Conn nil and In() dials
+	}
+	d := &net.Dialer{Timeout: timeout, LocalAddr: &net.TCPAddr{IP: src}}
+
+	if tlsCfg != nil {
+		c, err := tls.DialWithDialer(d, network, upstream, tlsCfg)
+		if err != nil {
+			return nil, err
+		}
+		return &dns.Conn{Conn: c}, nil
+	}
+	c, err := d.Dial(network, upstream)
+	if err != nil {
+		return nil, err
+	}
+	return &dns.Conn{Conn: c}, nil
 }

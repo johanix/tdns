@@ -26,10 +26,12 @@ func TestEffectiveOutboundSoaSerialTiers(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			kdb := &KeyDB{}
+			kdb.SetOutboundSoaSerial(tc.global)
 			zd := &ZoneData{
 				ZoneName:          "example.",
 				OutboundSoaSerial: tc.zone,
-				KeyDB:             &KeyDB{OutboundSoaSerial: tc.global},
+				KeyDB:             kdb,
 			}
 			if got := zd.EffectiveOutboundSoaSerial(); got != tc.want {
 				t.Errorf("EffectiveOutboundSoaSerial() = %q, want %q", got, tc.want)
@@ -63,7 +65,7 @@ func TestNextOutboundSerialUsesPerZoneMode(t *testing.T) {
 		ZoneName:          "example.",
 		CurrentSerial:     10,
 		OutboundSoaSerial: OutboundSoaSerialUnixtime,
-		KeyDB:             &KeyDB{OutboundSoaSerial: OutboundSoaSerialKeep},
+		KeyDB:             kdbWithSoaSerial(OutboundSoaSerialKeep),
 	}
 	if got := nextOutboundSerial(zd); got <= 11 {
 		t.Errorf("per-zone unixtime: got %d, want a unix timestamp (>> 11)", got)
@@ -74,7 +76,7 @@ func TestNextOutboundSerialUsesPerZoneMode(t *testing.T) {
 		ZoneName:          "example.",
 		CurrentSerial:     10,
 		OutboundSoaSerial: OutboundSoaSerialKeep,
-		KeyDB:             &KeyDB{OutboundSoaSerial: OutboundSoaSerialUnixtime},
+		KeyDB:             kdbWithSoaSerial(OutboundSoaSerialUnixtime),
 	}
 	if got := nextOutboundSerial(zd); got != 11 {
 		t.Errorf("per-zone keep: got %d, want 11", got)
@@ -143,4 +145,13 @@ func TestZoneDataToZoneConfOutboundSoaSerial(t *testing.T) {
 	if got := zoneDataToZoneConf(zd, "/tmp/zones").OutboundSoaSerial; got != "" {
 		t.Errorf("unset OutboundSoaSerial serialized as %q, want empty", got)
 	}
+}
+
+// kdbWithSoaSerial builds a KeyDB carrying a server-global outbound serial mode.
+// The field is unexported (behind an atomic.Pointer, so a config reload cannot
+// race a serving goroutine), so tests set it through the accessor.
+func kdbWithSoaSerial(mode string) *KeyDB {
+	kdb := &KeyDB{}
+	kdb.SetOutboundSoaSerial(mode)
+	return kdb
 }

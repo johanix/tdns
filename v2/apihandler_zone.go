@@ -274,14 +274,15 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				return
 			}
 			msg, err := Conf.ProvisionDynamicZone(r.Context(), DynamicZoneInput{
-				Name:       zp.Zone,
-				Type:       zoneType,
-				Template:   zp.Template,
-				Primaries:  zp.Primaries,
-				Options:    zoneOptionsFromStrings(zp.Options),
-				TsigName:   zp.TsigName,
-				TsigSecret: zp.TsigSecret,
-				TsigAlgo:   zp.TsigAlgo,
+				Name:        zp.Zone,
+				Type:        zoneType,
+				Template:    zp.Template,
+				Primaries:   zp.Primaries,
+				Options:     zoneOptionsFromStrings(zp.Options),
+				TsigName:    zp.TsigName,
+				TsigSecret:  zp.TsigSecret,
+				TsigAlgo:    zp.TsigAlgo,
+				TransferSrc: zp.TransferSrc,
 			}, true)
 			if err != nil {
 				resp.Error = true
@@ -303,13 +304,14 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 
 		case "modify":
 			msg, err := Conf.ModifyDynamicZone(r.Context(), DynamicZoneInput{
-				Name:       zp.Zone,
-				Type:       Secondary,
-				Primaries:  zp.Primaries,
-				Options:    zoneOptionsFromStrings(zp.Options),
-				TsigName:   zp.TsigName,
-				TsigSecret: zp.TsigSecret,
-				TsigAlgo:   zp.TsigAlgo,
+				Name:        zp.Zone,
+				Type:        Secondary,
+				Primaries:   zp.Primaries,
+				Options:     zoneOptionsFromStrings(zp.Options),
+				TsigName:    zp.TsigName,
+				TsigSecret:  zp.TsigSecret,
+				TsigAlgo:    zp.TsigAlgo,
+				TransferSrc: zp.TransferSrc,
 			})
 			if err != nil {
 				resp.Error = true
