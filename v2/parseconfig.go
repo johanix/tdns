@@ -377,6 +377,13 @@ func (conf *Config) ParseConfig(reload bool) error {
 		return err
 	}
 
+	// transfer_src: same reasoning as dynamiczones above -- the decoder takes
+	// any string, and a bad entry here fails silently at transfer time rather
+	// than loudly at load.
+	if err := ValidateAllTransferSrc(conf); err != nil {
+		return err
+	}
+
 	if len(md.Unused) > 0 {
 		// Split the unused keys into two buckets: keys that match a known
 		// DEPRECATED/RENAMED config shape (the config lags the code — emit
@@ -514,6 +521,7 @@ func (conf *Config) ParseConfig(reload bool) error {
 			// responder kept the stale startup map. SetOptions swaps the map
 			// atomically, so the per-query lock-free readers are race-free.
 			conf.Internal.KeyDB.SetOptions(conf.DnsEngine.Options)
+			conf.Internal.KeyDB.SetTransferSrc(conf.DnsEngine.TransferSrc)
 			if err := applyOutboundSoaSerial(conf.Internal.KeyDB, conf.DnsEngine.OutboundSoaSerial); err != nil {
 				return err
 			}
@@ -602,6 +610,7 @@ func (conf *Config) InitializeKeyDB() error {
 	}
 	conf.Internal.KeyDB = kdb
 
+	kdb.SetTransferSrc(conf.DnsEngine.TransferSrc)
 	if err := applyOutboundSoaSerial(kdb, conf.DnsEngine.OutboundSoaSerial); err != nil {
 		return err
 	}
@@ -621,7 +630,7 @@ func applyOutboundSoaSerial(kdb *KeyDB, raw string) error {
 	if mode == "" {
 		mode = OutboundSoaSerialKeep
 	}
-	kdb.OutboundSoaSerial = mode
+	kdb.SetOutboundSoaSerial(mode)
 
 	// Create the table unconditionally. The mode is now a PER-ZONE setting that
 	// merely defaults to this global one (zd.EffectiveOutboundSoaSerial), so any
@@ -937,6 +946,13 @@ func (conf *Config) ParseZones(ctx context.Context, reload bool) ([]string, []st
 		zd.mu.Lock()
 		options, zconf.OutboundSoaSerial = zd.applyOptionNormalization(zonetype, options, zconf.OutboundSoaSerial)
 		zd.mu.Unlock()
+		// Validated per zone as well as globally: a per-zone override is the
+		// more likely place for a typo, and it silently shadows a correct
+		// global list rather than falling back to it.
+		if err := ValidateTransferSrc(fmt.Sprintf("zone %s: transfer-src", zname), zconf.TransferSrc); err != nil {
+			return nil, nil, err
+		}
+		zd.TransferSrc = zconf.TransferSrc
 
 		var outopts []string
 		for o, val := range options {

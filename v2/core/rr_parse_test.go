@@ -85,7 +85,6 @@ func testCHUNKRoundTrip(t *testing.T, original *CHUNK, name string) {
 		t.Logf("Warning: Failed to write file: %v", err)
 	}
 
-
 	// Parse the string back
 	tokens := parseCHUNKString(str)
 

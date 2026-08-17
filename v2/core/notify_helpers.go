@@ -31,7 +31,8 @@ import (
 //   - The constructed NOTIFY QNAME as FQDN
 //
 // Example:
-//   BuildNotifyQNAME("a1b2", "kdc.example.com") -> "a1b2.kdc.example.com."
+//
+//	BuildNotifyQNAME("a1b2", "kdc.example.com") -> "a1b2.kdc.example.com."
 func BuildNotifyQNAME(distributionID, zone string) string {
 	// Ensure zone is FQDN
 	zoneFQDN := zone
@@ -56,12 +57,13 @@ func BuildNotifyQNAME(distributionID, zone string) string {
 //
 // Returns:
 //   - The distribution ID (without trailing dots), or an error if:
-//     - QNAME doesn't end with zone
-//     - QNAME equals zone (no distribution ID present)
-//     - Zone is empty
+//   - QNAME doesn't end with zone
+//   - QNAME equals zone (no distribution ID present)
+//   - Zone is empty
 //
 // Example:
-//   ExtractDistributionIDFromQNAME("a1b2.kdc.example.com.", "kdc.example.com.") -> "a1b2", nil
+//
+//	ExtractDistributionIDFromQNAME("a1b2.kdc.example.com.", "kdc.example.com.") -> "a1b2", nil
 func ExtractDistributionIDFromQNAME(qname, zone string) (string, error) {
 	if zone == "" {
 		return "", fmt.Errorf("zone cannot be empty")

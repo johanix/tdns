@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
 )
 
@@ -372,4 +373,237 @@ func aAddrs(t *testing.T, zd *ZoneData, owner string) []string {
 		}
 	}
 	return out
+}
+
+// The CHILD-UPDATE half of durable-before-visible.
+//
+// ApplyChildUpdateToZoneData stages wsPersistDelta and reads wsPersistErr in
+// the same shape as ApplyZoneUpdateToZoneData, but its results were UNNAMED:
+// `return updated, nil` copies the value into the result slot before deferred
+// functions run, so the deferred `updated = false` on a persist failure landed
+// on a local the caller never saw. A child update that could not be made
+// durable was reported as applied -- and on the DSYNC API path, answered 200,
+// which is exactly the promise this persistence work exists to keep.
+func TestChildUpdatePersistFailureRefusesPublish(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	zd := testZone(t, "example.", deltaZone)
+	registerZones(t, zd)
+	zd.KeyDB = kdb
+	// policyAllowing populates only the ZONE scope; the child applier gates on
+	// UpdatePolicy.CHILD.RRtypes, so without this every action is skipped, the
+	// deferred block never runs, and the test passes for the wrong reason.
+	zd.UpdatePolicy = policyAllowing(dns.TypeA, dns.TypeNS)
+	zd.UpdatePolicy.Child = UpdatePolicyDetail{
+		Type:    "selfsub",
+		RRtypes: map[uint16]bool{dns.TypeNS: true, dns.TypeA: true},
+		TTL:     3600,
+	}
+	// The child applier sets zd.Options[OptDirty]; a real zone always has the
+	// map from parseconfig, testZone does not.
+	if zd.Options == nil {
+		zd.Options = map[ZoneOption]bool{}
+	}
+
+	serialBefore := zd.CurrentSerial
+
+	ns, err := dns.NewRR("child.example. 3600 IN NS ns1.child.example.")
+	if err != nil {
+		t.Fatalf("NewRR: %v", err)
+	}
+
+	// Break the database so the delta write cannot succeed.
+	if err := kdb.DB.Close(); err != nil {
+		t.Fatalf("closing test db: %v", err)
+	}
+
+	updated, err := zd.ApplyChildUpdateToZoneData(UpdateRequest{
+		Cmd: "CHILD-UPDATE", ZoneName: "example.", Actions: []dns.RR{ns},
+	}, kdb)
+	if err != nil {
+		t.Fatalf("ApplyChildUpdateToZoneData: %v", err)
+	}
+	if updated {
+		t.Error("updated=true despite the publish being refused -- the deferred" +
+			" failure handling did not reach the caller (unnamed results?)")
+	}
+	if zd.CurrentSerial != serialBefore {
+		t.Errorf("serial advanced to %d despite the refused publish (was %d)",
+			zd.CurrentSerial, serialBefore)
+	}
+}
+
+// A dropped publish must not leave the delta staged: the next publish for the
+// zone -- a refresh, a reload, a signalSynth-only republish -- would otherwise
+// write a ZoneDelta row it does not own, diffed against a working set no
+// applier staged, and replay would later apply it as though it were an update.
+func TestDroppedPublishDoesNotLeaveDeltaStaged(t *testing.T) {
+	zd := testZone(t, "example.", deltaZone)
+	registerZones(t, zd)
+	zd.KeyDB = newTestKeyDB(t)
+
+	zd.mu.Lock()
+	// Stage a delta the way an applier does, then drop the publish by the
+	// no-working-set path.
+	zd.wsPersistDelta = true
+	zd.workingSet = nil
+	zd.publishWorkingSetLocked(zd.generation.Load(), true)
+	staged := zd.wsPersistDelta
+	zd.mu.Unlock()
+
+	if staged {
+		t.Error("wsPersistDelta survived a dropped publish; it would attach to the next unrelated one")
+	}
+}
+
+// A second completion attempt for the SAME file load must not re-run the chain
+// check against a serial the first replay already advanced.
+//
+// The first-load retry path reaches replay twice: initialLoadZone's `updated`
+// result is discarded by its caller, and FirstZoneLoad is cleared only on a
+// successful data replacement, so a load returning (false, nil) leaves the flag
+// set and the ticker retries. Without a guard the second pass reports "the file
+// has been edited or replaced" -- accusing the operator of tampering with a
+// file nobody touched, and recording a ConfigWarning to match.
+func TestZoneDeltaReplayIsIdempotentForOneLoad(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	live := testZone(t, "example.", deltaZone)
+	registerZones(t, live)
+	live.KeyDB = kdb
+	live.UpdatePolicy = policyAllowing(dns.TypeA)
+
+	actions, err := BuildZoneUpdateActions("example.", ZoneUpdateSpec{
+		Verb: VerbAddRR, RRs: []string{"new.example. 3600 IN A 10.0.0.7"},
+	})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if _, err := live.ApplyZoneUpdateToZoneData(UpdateRequest{
+		Cmd: "ZONE-UPDATE", ZoneName: "example.", Actions: actions,
+	}, kdb); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	reloaded := testZone(t, "example.", deltaZone)
+	registerZones(t, reloaded)
+	reloaded.KeyDB = kdb
+	reloaded.UpdatePolicy = policyAllowing(dns.TypeA)
+
+	if _, err := reloaded.ReplayPersistedDeltas(kdb); err != nil {
+		t.Fatalf("first replay: %v", err)
+	}
+	// Second attempt for the same load: quiet no-op, NOT a chain-mismatch error.
+	n, err := reloaded.ReplayPersistedDeltas(kdb)
+	if err != nil {
+		t.Fatalf("a repeated replay for the same load reported an error: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("repeated replay reported %d deltas applied; want 0", n)
+	}
+}
+
+// The guard above must not be inferred from the serial: "current serial is
+// ahead of the delta chain" is equally true when the operator really did
+// replace the file, which is what the chain check exists to catch. A
+// serial-based guard would silence a real detection to fix a false one.
+func TestReplayGuardDoesNotMaskAReplacedFile(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	live := testZone(t, "example.", deltaZone)
+	registerZones(t, live)
+	live.KeyDB = kdb
+	live.UpdatePolicy = policyAllowing(dns.TypeA)
+
+	actions, err := BuildZoneUpdateActions("example.", ZoneUpdateSpec{
+		Verb: VerbAddRR, RRs: []string{"new.example. 3600 IN A 10.0.0.7"},
+	})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	if _, err := live.ApplyZoneUpdateToZoneData(UpdateRequest{
+		Cmd: "ZONE-UPDATE", ZoneName: "example.", Actions: actions,
+	}, kdb); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+
+	// A replaced file whose serial is FAR AHEAD of the delta chain -- the shape
+	// a naive "serial is ahead, so we must have replayed already" guard would
+	// wave through.
+	replaced := `example.	3600	IN	SOA	ns.example. hostmaster.example. 9999 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+www.example.	3600	IN	A	192.0.2.1
+`
+	fresh := testZone(t, "example.", replaced)
+	registerZones(t, fresh)
+	fresh.KeyDB = kdb
+	fresh.UpdatePolicy = policyAllowing(dns.TypeA)
+
+	if _, err := fresh.ReplayPersistedDeltas(kdb); err == nil {
+		t.Fatal("a replaced zone file was accepted; the chain check must still refuse it")
+	}
+}
+
+// Checking only deltas[0] proves the chain STARTS at this file; it says nothing
+// about whether it is continuous. A gapped sequence would be applied as one
+// update, landing the zone on a serial whose history never happened.
+func TestZoneDeltaReplayRefusesAGappedChain(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	// A->B and C->D: each link is fine on its own, the pair is not.
+	if err := kdb.PersistZoneDelta("example.", 1, 2, nil, []core.RRset{deltaRRset(t, "a.example. 3600 IN A 10.0.0.1")}); err != nil {
+		t.Fatalf("persist 1->2: %v", err)
+	}
+	if err := kdb.PersistZoneDelta("example.", 7, 8, nil, []core.RRset{deltaRRset(t, "b.example. 3600 IN A 10.0.0.2")}); err != nil {
+		t.Fatalf("persist 7->8: %v", err)
+	}
+
+	zd := testZone(t, "example.", deltaZone)
+	registerZones(t, zd)
+	zd.KeyDB = kdb
+	zd.UpdatePolicy = policyAllowing(dns.TypeA)
+	zd.CurrentSerial = 1
+	zd.fileSerial = 1 // matches deltas[0].FromSerial, so the first check passes
+
+	_, err := zd.ReplayPersistedDeltas(kdb)
+	if err == nil {
+		t.Fatal("a gapped delta chain was accepted")
+	}
+	if !strings.Contains(err.Error(), "not continuous") {
+		t.Errorf("error = %q; want it to name the gap", err)
+	}
+}
+
+// A journalled delta that does not advance the serial cannot be replayed into a
+// coherent history and would break the strictly-greater guarantee the publish
+// relies on.
+func TestZoneDeltaReplayRefusesANonAdvancingLink(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	// A single delta that does not move the serial. Note the schema's
+	// UNIQUE(zone, toserial, seq) prevents building this as a SECOND delta
+	// landing on a serial already used, so the case that can actually be stored
+	// is the first one -- which is why the check must cover deltas[0] and not
+	// only the links after it.
+	if err := kdb.PersistZoneDelta("example.", 5, 5, nil,
+		[]core.RRset{deltaRRset(t, "a.example. 3600 IN A 10.0.0.1")}); err != nil {
+		t.Fatalf("persist 5->5: %v", err)
+	}
+
+	zd := testZone(t, "example.", deltaZone)
+	registerZones(t, zd)
+	zd.KeyDB = kdb
+	zd.UpdatePolicy = policyAllowing(dns.TypeA)
+	// Both anchors: replay validates against fileSerial, and the zone must look
+	// as though the file itself was loaded at 5.
+	zd.CurrentSerial = 5
+	zd.fileSerial = 5 // matches FromSerial, so the chain-start check passes
+
+	_, err := zd.ReplayPersistedDeltas(kdb)
+	if err == nil {
+		t.Fatal("a non-advancing delta was accepted")
+	}
+	if !strings.Contains(err.Error(), "does not advance") {
+		t.Errorf("error = %q; want it to name the non-advancing delta", err)
+	}
 }

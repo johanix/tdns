@@ -17,16 +17,19 @@ func init() {
 }
 
 // Zone file syntax:
-//   owner TTL CLASS TSYNC alias "transport=..." "v4=..." "v6=..."
+//
+//	owner TTL CLASS TSYNC alias "transport=..." "v4=..." "v6=..."
 //
 // Example:
-//   _tsync.example.com. 3600 IN TSYNC ns1.example.com. "transport=doq=30,dot=20" "v4=192.0.2.1,198.51.100.1" "v6=2001:db8::1"
+//
+//	_tsync.example.com. 3600 IN TSYNC ns1.example.com. "transport=doq=30,dot=20" "v4=192.0.2.1,198.51.100.1" "v6=2001:db8::1"
 //
 // Fields:
-//   alias      - FQDN (mandatory)
-//   transport  - quoted key=value: comma-separated transport=priority pairs (optional)
-//   v4         - quoted key=value: comma-separated IPv4 addresses (optional)
-//   v6         - quoted key=value: comma-separated IPv6 addresses (optional)
+//
+//	alias      - FQDN (mandatory)
+//	transport  - quoted key=value: comma-separated transport=priority pairs (optional)
+//	v4         - quoted key=value: comma-separated IPv4 addresses (optional)
+//	v6         - quoted key=value: comma-separated IPv6 addresses (optional)
 type TSYNC struct {
 	Type       uint16
 	Alias      string

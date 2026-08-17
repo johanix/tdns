@@ -154,7 +154,7 @@ func TestNextOutboundSerialSuppressedForMirroringSecondary(t *testing.T) {
 		Options:           map[ZoneOption]bool{},
 		CurrentSerial:     10,
 		OutboundSoaSerial: OutboundSoaSerialUnixtime,
-		KeyDB:             &KeyDB{OutboundSoaSerial: OutboundSoaSerialUnixtime},
+		KeyDB:             kdbWithSoaSerial(OutboundSoaSerialUnixtime),
 	}
 	if got := nextOutboundSerial(zd); got != 11 {
 		t.Errorf("mirroring secondary in unixtime mode: got %d, want 11 (no timestamp rewrite)", got)

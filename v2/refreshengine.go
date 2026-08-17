@@ -201,15 +201,41 @@ func finishFirstLoadPolicy(ctx context.Context, zd *ZoneData, conf *Config, conf
 }
 
 // completeFirstZonePolicyAndLoad finishes a first-bind after initialLoadZone:
-// publish the snapshot (Ready), then finishFirstLoadPolicy (sync + OnFirstLoad).
+// publish the snapshot (Ready), bind the DNSSEC policy, replay persisted
+// deltas, then drain OnFirstLoad.
+//
+// The ORDER of the middle two matters and is not the obvious one. Replay
+// re-signs the RRsets it touches, and the signature lifetime comes from
+// zd.DnssecPolicy via sigValiditySeconds -- which returns 0 for a nil policy,
+// which sigLifetime turns into FIVE MINUTES. Replaying before the policy is
+// bound therefore hands a signed zone a set of RRSIGs that expire five minutes
+// after every restart, and nothing on the normal path re-signs them: the policy
+// sync does not trigger a resign, and the resigner's periodic mode is off by
+// default. The zone would go bogus shortly after each boot that had deltas to
+// replay.
+//
+// OnFirstLoad still runs last, after replay, so its callbacks (DSYNC
+// publication, delegation-sync setup) see the zone's actual content rather than
+// the pre-replay file.
 func completeFirstZonePolicyAndLoad(ctx context.Context, zd *ZoneData, conf *Config, configPolicyName string) error {
 	zd.InstallInitialSnapshot()
+
+	// Bind the policy BEFORE replay signs anything. On failure OnFirstLoad is
+	// retained for a later retry, exactly as finishFirstLoadPolicy does -- and
+	// the deltas are left unreplayed rather than replayed with a nil policy.
+	if err := syncZoneDnssecPolicyFromConfig(ctx, zd, conf.Internal.KeyDB, conf, configPolicyName); err != nil {
+		lgEngine.Warn("DNSSEC policy sync after first load failed", "zone", zd.ZoneName, "err", err)
+		return err
+	}
+
 	// Phase 2: the file is the source of truth but lags behind it -- it holds
 	// the zone as of the last write-zone/sync/freeze, while the persisted
 	// deltas hold everything that has happened since. Serving the file alone
 	// would silently roll the zone back to that point.
 	replayZoneDeltasOnLoad(zd)
-	return finishFirstLoadPolicy(ctx, zd, conf, configPolicyName)
+
+	drainAndRunOnFirstLoad(zd)
+	return nil
 }
 
 // replayZoneDeltasOnLoad re-applies persisted deltas over a freshly loaded
@@ -323,6 +349,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							// predicate depends on it (Fix B chokepoint).
 							zd.Options, zd.OutboundSoaSerial =
 								zd.applyOptionNormalization(zr.ZoneType, zr.Options, zr.OutboundSoaSerial)
+							zd.TransferSrc = zr.TransferSrc
 							zd.UpdatePolicy = zr.UpdatePolicy
 							// Record the config-base policy name only (no struct bind).
 							// syncZoneDnssecPolicyFromConfig binds post-Ready; this
@@ -465,6 +492,11 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							}
 							zd.Options, zd.OutboundSoaSerial =
 								zd.applyOptionNormalization(ztype, newOpts, newSerial)
+							// Same rule as newSerial above: a config update
+							// replaces the source, anything else keeps it.
+							if zr.ConfigUpdate {
+								zd.TransferSrc = zr.TransferSrc
+							}
 						}
 						// Update UpdatePolicy only if provided (check if it has meaningful content)
 						// UpdatePolicy is a struct, so we check if any fields are set
@@ -683,6 +715,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						ZoneType:          zr.ZoneType,
 						Options:           zr.Options,
 						OutboundSoaSerial: zr.OutboundSoaSerial,
+						TransferSrc:       zr.TransferSrc,
 						UpdatePolicy:      zr.UpdatePolicy,
 						DnssecPolicyName:  zr.DnssecPolicy, // config-base hint; struct bound post-Ready
 						MultiSigner:       &msc,

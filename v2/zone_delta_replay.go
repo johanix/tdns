@@ -38,9 +38,50 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 		return 0, nil
 	}
 
-	// The serial of the file we just loaded. Captured before anything is
-	// applied, because the replay below moves it.
-	fileSerial := zd.CurrentSerial
+	// The serial of the file we just loaded.
+	//
+	// zd.fileSerial, not zd.CurrentSerial. They are equal right now -- replay
+	// runs before the load-time signing and republication that move
+	// CurrentSerial -- but relying on that ordering is what made this fragile
+	// in the first place. The journal is anchored to the file on the write
+	// side (see LastZoneDeltaSerial); anchoring it to the file here too means
+	// the two sides cannot drift apart no matter where replay is called from.
+	zd.mu.Lock()
+	fileSerial := zd.fileSerial
+	zd.mu.Unlock()
+	if fileSerial == 0 {
+		fileSerial = zd.CurrentSerial
+	}
+
+	// Already replayed for THIS file load? Then say so quietly and stop.
+	//
+	// Replay can be reached twice for one load: initialLoadZone's `updated`
+	// result is discarded by its caller, and FirstZoneLoad is cleared only on a
+	// successful data replacement -- so a load that returns (false, nil) leaves
+	// the flag set, the ticker retries the initial load, and completion runs a
+	// second time.
+	//
+	// Without this the second pass falls into the chain validation below with a
+	// serial the FIRST replay already advanced, and reports "the file has been
+	// edited or replaced" -- accusing the operator of tampering with a file
+	// nobody touched, and recording a ConfigWarning to match.
+	//
+	// Deliberately NOT inferred from the serial. "Current serial is ahead of
+	// the delta chain" is equally true when the operator really did replace the
+	// file with a newer one, which is exactly the case the chain check exists
+	// to catch; a serial-based guard would silence a real detection to fix a
+	// false one. The flag is set on a successful replay and cleared by
+	// applyRefreshReplacementLocked whenever the zone is re-read from file, so
+	// it means precisely "these deltas have already been applied on top of the
+	// file currently loaded".
+	zd.mu.Lock()
+	alreadyReplayed := zd.deltasReplayed
+	zd.mu.Unlock()
+	if alreadyReplayed {
+		lg.Debug("persisted zone deltas already replayed for this load; nothing to do",
+			"zone", zd.ZoneName, "serial", fileSerial)
+		return 0, nil
+	}
 
 	// Chain validation. Each delta was computed as the difference from one
 	// specific base, and the first one's FromSerial names the file it was
@@ -61,6 +102,35 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 				" Reconcile deliberately: write the zone out to adopt the in-memory"+
 				" state, or clear the stored deltas to adopt the file",
 			zd.ZoneName, deltas[0].FromSerial, fileSerial)
+	}
+
+	// And every link after the first. Checking only deltas[0] proves the chain
+	// STARTS at this file; it says nothing about whether it is continuous. A
+	// sequence like A->B, C->D passes the first check and is then applied as
+	// one update, so the zone lands on D while never having been C -- a serial
+	// claiming a history that did not happen. That is the same "invents a zone"
+	// failure the first check exists to prevent, one link further in.
+	//
+	// A gap means rows were lost or written from elsewhere; neither is
+	// something to paper over by applying what remains.
+	for i := 0; i < len(deltas); i++ {
+		if i > 0 && deltas[i].FromSerial != deltas[i-1].ToSerial {
+			return 0, fmt.Errorf(
+				"zone %s: persisted deltas are not continuous (delta %d ends at serial %d,"+
+					" delta %d starts at serial %d); refusing to apply a chain with a gap."+
+					" Reconcile deliberately: write the zone out to adopt the in-memory"+
+					" state, or clear the stored deltas to adopt the file",
+				zd.ZoneName, i-1, deltas[i-1].ToSerial, i, deltas[i].FromSerial)
+		}
+		// Each link must also advance. A delta that does not move the serial
+		// forward cannot be replayed into a coherent history, and would break
+		// the strictly-greater guarantee the publish below relies on.
+		if !serialNewer(deltas[i].ToSerial, deltas[i].FromSerial) {
+			return 0, fmt.Errorf(
+				"zone %s: persisted delta %d does not advance the serial (%d -> %d);"+
+					" refusing to replay it",
+				zd.ZoneName, i, deltas[i].FromSerial, deltas[i].ToSerial)
+		}
 	}
 
 	// A signed zone that cannot re-sign will replay its content unsigned:
@@ -99,15 +169,51 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 	// from what the operator last saw.
 	//
 	// Replay: suppresses re-persisting what we are replaying.
-	if _, err := zd.ApplyZoneUpdateToZoneData(UpdateRequest{
+	applied, err := zd.ApplyZoneUpdateToZoneData(UpdateRequest{
 		Cmd:            "ZONE-UPDATE",
 		ZoneName:       zd.ZoneName,
 		Actions:        actions,
 		InternalUpdate: true,
 		Replay:         true,
 		Description:    "replay of persisted deltas",
-	}, kdb); err != nil {
+	}, kdb)
+	if err != nil {
 		return 0, fmt.Errorf("zone %s: replaying deltas: %v", zd.ZoneName, err)
+	}
+	// The applier returns false when every action was skipped -- a stored
+	// delete whose owner is no longer in the file, say, which it only logs at
+	// warn level. Reporting the delta COUNT regardless would tell the operator
+	// the changes are present when they are not: the chain-serial check
+	// upstream only proves the deltas were computed against this file, not that
+	// they landed. Say what actually happened.
+	// Mark the replay done for this file load, whether or not the actions
+	// changed anything: a second attempt on the same load must not re-run the
+	// chain check against a serial this pass has already moved.
+	zd.mu.Lock()
+	zd.deltasReplayed = true
+	if applied {
+		// And mark the zone DIRTY. The file demonstrably lacks what was just
+		// applied -- that is what the journal was for -- and dirty is exactly
+		// the flag that says "memory differs from disk".
+		//
+		// The updater only sets it for non-internal updates, and replay is
+		// internal, so without this the zone comes up clean while differing
+		// from its file: WriteZone then short-circuits with "not modified,
+		// writing to disk not needed", the journal is never folded in, it
+		// grows without bound, and every restart replays the whole thing from
+		// the beginning. Observed as exactly that -- "zone sync" doing nothing
+		// on a zone whose changes had just been replayed.
+		if zd.Options == nil {
+			zd.Options = map[ZoneOption]bool{}
+		}
+		zd.Options[OptDirty] = true
+	}
+	zd.mu.Unlock()
+
+	if !applied {
+		lg.Warn("zone deltas replayed but nothing was applied; the zone is serving the file as-is",
+			"zone", zd.ZoneName, "deltas", len(deltas))
+		return 0, nil
 	}
 
 	// The published serial must end up STRICTLY GREATER than the highest serial
