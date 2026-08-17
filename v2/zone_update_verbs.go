@@ -23,9 +23,21 @@ const (
 	VerbDelRRset     = "delrrset"
 	VerbDelName      = "delname"
 	VerbReplaceRRset = "replacerrset"
+	// VerbInstructions is not a statement an operator types. It is what
+	// `zone update --from-file` becomes: a list of adds and deletes that were
+	// produced by the server (a purge artefact, a journal listing) and possibly
+	// edited by hand before being sent back.
+	//
+	// Modelling it as a verb rather than as its own API command is deliberate.
+	// It then travels the identical path -- same admission checks, same
+	// builder, same applier, same durability -- and works over --via ddns for
+	// free, because the transports differ only in how they carry actions.
+	VerbInstructions = "instructions"
 )
 
 // ZoneUpdateVerbs lists the statements in the order they are documented.
+// VerbInstructions is deliberately absent: it is a transport for the others,
+// not a sixth thing an operator chooses between.
 var ZoneUpdateVerbs = []string{VerbAddRR, VerbDelRR, VerbDelRRset, VerbDelName, VerbReplaceRRset}
 
 // ZoneUpdateSpec is one statement. RRs carry presentation-form records for the
@@ -36,6 +48,8 @@ type ZoneUpdateSpec struct {
 	RRs    []string // addrr, delrr, replacerrset
 	Name   string   // delrrset, delname
 	Rrtype string   // delrrset
+	// Instructions carries the parsed ADD/DEL list for VerbInstructions.
+	Instructions []ZoneDeltaRR
 }
 
 // BuildZoneUpdateActions turns a statement into the update-section records for
@@ -59,6 +73,25 @@ func BuildZoneUpdateActions(zone string, spec ZoneUpdateSpec) ([]dns.RR, error) 
 	}
 
 	switch strings.ToLower(strings.TrimSpace(spec.Verb)) {
+
+	case VerbInstructions:
+		if len(spec.Instructions) == 0 {
+			return nil, fmt.Errorf("no instructions given")
+		}
+		actions, err := UpdateInstructionActions(spec.Instructions)
+		if err != nil {
+			return nil, err
+		}
+		// Bailiwick is checked here as for every other verb. An instruction
+		// file is likely to have been edited by hand, and a stray record for
+		// another zone -- pasted in, or left over from a different artefact --
+		// should be named as such rather than handed to the applier.
+		for _, rr := range actions {
+			if err := inBailiwick(rr.Header().Name); err != nil {
+				return nil, err
+			}
+		}
+		return actions, nil
 
 	case VerbAddRR, VerbDelRR:
 		rrs, err := parseSpecRRs(spec.RRs)

@@ -108,6 +108,21 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				resp.ErrorMsg = err.Error()
 			}
 
+		// The delta journal's operator surface. Not in
+		// originationAPICommands: none of these change zone content, they
+		// change what is stored about it, and a secondary that somehow
+		// acquired a journal is exactly a zone whose journal wants inspecting.
+		case "journal":
+			jr, err := zd.ApiZoneJournal(zp)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+			resp.Msg = jr.Msg
+			resp.Journal = jr.Journal
+			resp.Instructions = jr.Instructions
+
 		case "sign-zone":
 			newrrsigs, err := zd.SignZone(kdb, zp.Force)
 			if err != nil {

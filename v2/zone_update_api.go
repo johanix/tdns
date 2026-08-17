@@ -55,10 +55,11 @@ func (zd *ZoneData) ApiZoneUpdate(ctx context.Context, zp ZonePost) (string, err
 	}
 
 	actions, err := BuildZoneUpdateActions(zd.ZoneName, ZoneUpdateSpec{
-		Verb:   zp.UpdateVerb,
-		RRs:    zp.UpdateRRs,
-		Name:   zp.UpdateName,
-		Rrtype: zp.UpdateRrtype,
+		Verb:         zp.UpdateVerb,
+		RRs:          zp.UpdateRRs,
+		Name:         zp.UpdateName,
+		Rrtype:       zp.UpdateRrtype,
+		Instructions: zp.UpdateInstructions,
 	})
 	if err != nil {
 		return "", err

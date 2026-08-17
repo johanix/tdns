@@ -98,6 +98,36 @@ func (kdb *KeyDB) PersistZoneDelta(zone string, fromSerial, toSerial uint32, rem
 		return nil
 	}
 
+	// A delta must advance the serial, and must not land on one the journal
+	// already holds. Both are guarded by UNIQUE (zone, toserial, seq) in the
+	// schema -- but a UNIQUE violation reaches the operator as
+	//
+	//	UNIQUE constraint failed: ZoneDelta.zone, ZoneDelta.toserial, ZoneDelta.seq
+	//
+	// which names a table and says nothing about the zone, the situation, or
+	// what to do. That is what a live zone did report, on every single update,
+	// after its journal was left anchored to a file that had been replaced: the
+	// zone was serving below the journal's serial range and every publish
+	// collided with rows already there.
+	//
+	// Diagnose it here instead, while we still know which serials are involved
+	// and can name the command that inspects them. The constraint stays as the
+	// backstop it should have been all along.
+	if !serialNewer(toSerial, fromSerial) {
+		return fmt.Errorf("PersistZoneDelta: zone %s: refusing to record a delta that does not"+
+			" advance the serial (%d -> %d). The journal is anchored to a serial the zone is"+
+			" no longer at, which happens when the zone file is replaced behind the server."+
+			" Inspect it with `zone journal status`", zone, fromSerial, toSerial)
+	}
+	if have, err := kdb.zoneDeltaExistsAtSerial(zone, toSerial); err != nil {
+		return err
+	} else if have {
+		return fmt.Errorf("PersistZoneDelta: zone %s: the journal already holds a delta ending at"+
+			" serial %d, so this change (%d -> %d) would collide with it. The zone is publishing"+
+			" into serials the journal has already used -- inspect it with `zone journal status`",
+			zone, toSerial, fromSerial, toSerial)
+	}
+
 	const insertSql = `
 INSERT INTO ZoneDelta (zone, fromserial, toserial, seq, action, rr) VALUES (?, ?, ?, ?, ?, ?)`
 
@@ -209,31 +239,14 @@ func (kdb *KeyDB) DeleteZoneDeltas(zone string) (int64, error) {
 // needs no separate representation. (The comment here previously claimed a
 // CLASS=ANY branch that has never existed, which invited someone to go looking
 // for it -- or to add a redundant one.)
+//
+// The translation itself lives in instructionActions, shared with the
+// update-instruction file format: a stored delta and a hand-written
+// instruction list are the same thing in two places, and two copies of "del
+// means CLASS=NONE, ttl 0" is two chances to fix only one of them.
 func ZoneDeltaActions(rec ZoneDeltaRecord) ([]dns.RR, error) {
-	var actions []dns.RR
-	for _, row := range rec.RRs {
-		rr, err := dns.NewRR(row.RR)
-		if err != nil {
-			return nil, fmt.Errorf("delta %d->%d: cannot parse %q: %v",
-				rec.FromSerial, rec.ToSerial, row.RR, err)
-		}
-		if rr == nil {
-			return nil, fmt.Errorf("delta %d->%d: %q is not a resource record",
-				rec.FromSerial, rec.ToSerial, row.RR)
-		}
-		switch row.Action {
-		case ZoneDeltaDel:
-			rr.Header().Class = dns.ClassNONE
-			rr.Header().Ttl = 0
-		case ZoneDeltaAdd:
-			rr.Header().Class = dns.ClassINET
-		default:
-			return nil, fmt.Errorf("delta %d->%d: unknown action %q",
-				rec.FromSerial, rec.ToSerial, row.Action)
-		}
-		actions = append(actions, rr)
-	}
-	return actions, nil
+	return instructionActions(rec.RRs,
+		fmt.Sprintf("delta %d->%d", rec.FromSerial, rec.ToSerial))
 }
 
 // DeleteZoneDeltasThroughSerial drops every delta whose ToSerial is not newer
@@ -284,6 +297,84 @@ func (kdb *KeyDB) DeleteZoneDeltasThroughSerial(zone string, serial uint32) (int
 	if err != nil {
 		lg.Warn("DeleteZoneDeltasThroughSerial: rows deleted but the count is unavailable",
 			"zone", zone, "through_serial", serial, "error", err)
+		return 0, nil
+	}
+	return n, nil
+}
+
+// zoneDeltaExistsAtSerial reports whether the journal already holds a delta
+// ending at toSerial. Exact equality, not serial arithmetic: this asks about
+// the UNIQUE key, which is an exact-match index.
+func (kdb *KeyDB) zoneDeltaExistsAtSerial(zone string, toSerial uint32) (bool, error) {
+	kdb.mu.Lock()
+	defer kdb.mu.Unlock()
+
+	var one int
+	err := kdb.DB.QueryRow(
+		`SELECT 1 FROM ZoneDelta WHERE zone=? AND toserial=? LIMIT 1`, zone, toSerial).Scan(&one)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("PersistZoneDelta: checking for an existing delta at serial %d: %v",
+			toSerial, err)
+	}
+	return true, nil
+}
+
+// TruncateZoneDeltasAfterSerial drops the tail of a zone's journal, keeping
+// the chain up to and including the delta that ends at serial.
+//
+// A journal is a chain, and that constrains what may be removed from it. Every
+// delta's FromSerial is its predecessor's ToSerial, and replay refuses a chain
+// with a gap -- so dropping a delta from the MIDDLE would leave a journal that
+// can never be replayed again. Only a suffix can go. That is what this does,
+// and it is why there is no "delete this one record from the journal": the way
+// to correct a log is to append a correction, which here means an ordinary
+// zone update that undoes the record.
+//
+// serial must name a delta that actually exists, rather than being any old
+// number the tail is measured from. "Keep everything up to 2026081704" is
+// unambiguous when that is a real boundary in the chain and a guess otherwise,
+// and guessing here silently discards changes.
+func (kdb *KeyDB) TruncateZoneDeltasAfterSerial(zone string, serial uint32) (int64, error) {
+	if kdb == nil || kdb.DB == nil {
+		return 0, fmt.Errorf("TruncateZoneDeltasAfterSerial: no database")
+	}
+	zone = dns.Fqdn(zone)
+
+	deltas, err := kdb.LoadZoneDeltas(zone)
+	if err != nil {
+		return 0, err
+	}
+	if len(deltas) == 0 {
+		return 0, nil
+	}
+
+	keepThrough := int64(-1)
+	var available []uint32
+	for _, d := range deltas {
+		available = append(available, d.ToSerial)
+		if d.ToSerial == serial {
+			keepThrough = d.MaxID
+		}
+	}
+	if keepThrough < 0 {
+		return 0, fmt.Errorf("zone %s: no journal delta ends at serial %d;"+
+			" the chain's boundaries are %v", zone, serial, available)
+	}
+
+	kdb.mu.Lock()
+	defer kdb.mu.Unlock()
+
+	res, err := kdb.DB.Exec(`DELETE FROM ZoneDelta WHERE zone=? AND id>?`, zone, keepThrough)
+	if err != nil {
+		return 0, fmt.Errorf("TruncateZoneDeltasAfterSerial: %v", err)
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		lg.Warn("TruncateZoneDeltasAfterSerial: rows deleted but the count is unavailable",
+			"zone", zone, "after_serial", serial, "error", err)
 		return 0, nil
 	}
 	return n, nil
