@@ -265,6 +265,19 @@ type ZonePost struct {
 	UpdateRRs    []string
 	UpdateName   string
 	UpdateRrtype string
+	// UpdateInstructions carries an ADD/DEL instruction list — the payload of
+	// `zone update from-file`, and the same format the journal emits. The
+	// client parses the file (so it can report line numbers, which is the whole
+	// point of a hand-edited file) and the server parses the records again when
+	// it builds the update, so both ends validate and the server stays
+	// authoritative.
+	UpdateInstructions []ZoneDeltaRR `json:"updateinstructions,omitempty"`
+	// Journal management ("zone journal ..."), dispatched on SubCommand:
+	// status | list | truncate | purge. Serial is truncate's boundary;
+	// Instructions asks `list` to also return the flattened ADD/DEL form;
+	// Force is purge's confirmation on a healthy journal.
+	Serial       uint32 `json:"serial,omitempty"`
+	Instructions bool   `json:"instructions,omitempty"`
 	// Inline TSIG key for the add/modify: when TsigName is set the server upserts
 	// {name, algo, secret} into its keys: store, points keyless primaries at it,
 	// and persists it with the zone (survives restart). TsigAlgo defaults to
@@ -297,6 +310,18 @@ type ZoneResponse struct {
 	Msg      string
 	Error    bool
 	ErrorMsg string
+	// Journal carries the delta-journal report for "zone journal status|list".
+	Journal *ZoneJournalInfo `json:"journal,omitempty"`
+	// Instructions carries an ADD/DEL list back to the client: the flattened
+	// journal for "list --instructions", and — more importantly — everything a
+	// purge discarded, so the content survives the round trip even when the
+	// server could not write it to disk.
+	Instructions []ZoneDeltaRR `json:"instructions,omitempty"`
+	// Artefact is where the server saved discarded content, empty when it
+	// could not (a zone with no zone file). The client checks this rather than
+	// reading it out of Msg: when it is empty, Instructions above is the only
+	// remaining copy and the client must not let it go unprinted.
+	Artefact string `json:"artefact,omitempty"`
 }
 type ZoneDsyncPost struct {
 	Command   string // status | bootstrap | ...

@@ -20,6 +20,7 @@ var (
 	zoneUpdateRRs    []string
 	zoneUpdateName   string
 	zoneUpdateRrtype string
+	zoneUpdateFile   string
 )
 
 // AttachZoneUpdateVerbs adds the one-off content statements to an existing
@@ -92,10 +93,40 @@ error, not a silent delete.`,
 		Run: func(cmd *cobra.Command, args []string) { runZoneUpdateVerb(role, tdns.VerbReplaceRRset) },
 	}
 
+	// --from-file is not a sixth statement, it is a way of supplying a mixture
+	// of the others: an ADD/DEL instruction list, of the kind "journal purge"
+	// writes out and a merge will one day leave behind as .rejected. The
+	// intended workflow is to open that file, delete the lines you agree with,
+	// keep the ones you do not, and replay what is left.
+	fromFile := &cobra.Command{
+		Use:   "from-file",
+		Short: "Apply an ADD/DEL instruction file to a zone",
+		Long: `Apply a list of update instructions from a file.
+
+  ADD foo.alpha.dnslab. 3600 IN A 1.2.3.4
+  DEL bar.alpha.dnslab. IN A 5.6.7.8
+
+This is the format "zone journal purge" and "zone journal list --instructions"
+produce, so a file the server wrote can be edited down to the changes you want
+and fed straight back:
+
+  tdns-cli ... zone update from-file --file /var/dns/zones/alpha.2026081704.purged \
+      --zone alpha.dnslab. --via api
+
+Comments (";" or "#") and blank lines are ignored. Everything that survives is
+applied as ONE update — there is no half-applied outcome.`,
+		Run: func(cmd *cobra.Command, args []string) { runZoneUpdateFromFile(role) },
+	}
+
 	rrVerbs := []*cobra.Command{addrr, delrr, replacerrset}
 	nameVerbs := []*cobra.Command{delrrset, delname}
 
-	for _, sub := range append(append([]*cobra.Command{}, rrVerbs...), nameVerbs...) {
+	// One flag, not two. --file and --from-file both wrote to this variable, so
+	// giving both silently kept whichever cobra parsed last -- and on a command
+	// already named "from-file", "--from-file" reads as a typo either way.
+	fromFile.Flags().StringVar(&zoneUpdateFile, "file", "", "Instruction file to apply (required)")
+
+	for _, sub := range append(append(append([]*cobra.Command{}, rrVerbs...), nameVerbs...), fromFile) {
 		// Every verb takes its input through flags and runZoneUpdateVerb never
 		// looks at args. Without this, "zone update addrr foo.example. --via api"
 		// silently discards the positional and then fails with the builder's
@@ -117,6 +148,63 @@ error, not a silent delete.`,
 		sub.Flags().StringVar(&zoneUpdateName, "name", "", "Owner name")
 	}
 	delrrset.Flags().StringVar(&zoneUpdateRrtype, "type", "", "RR type to delete")
+}
+
+// runZoneUpdateFromFile parses the instruction file locally and then hands the
+// result to the ordinary update path.
+//
+// Parsing here rather than shipping the raw bytes is the whole point: this
+// file is meant to have been edited by hand, so the operator needs to be told
+// which LINE is wrong, and only the side holding the file can say that. The
+// server re-parses the records when it builds the update, so it remains
+// authoritative — this is an extra gate, not a substitute for one.
+func runZoneUpdateFromFile(role string) {
+	PrepArgs("zonename")
+
+	if zoneUpdateFile == "" {
+		fmt.Printf("Error: --file is required (the instruction file to apply).\n")
+		os.Exit(1)
+	}
+
+	f, err := os.Open(zoneUpdateFile)
+	if err != nil {
+		fmt.Printf("Error: cannot read %s: %v\n", zoneUpdateFile, err)
+		os.Exit(1)
+	}
+	defer f.Close()
+
+	insns, err := tdns.ParseUpdateInstructions(f)
+	if err != nil {
+		fmt.Printf("Error in %s: %v\n", zoneUpdateFile, err)
+		os.Exit(1)
+	}
+
+	adds, dels := 0, 0
+	for _, insn := range insns {
+		if insn.Action == tdns.ZoneDeltaDel {
+			dels++
+		} else {
+			adds++
+		}
+	}
+	fmt.Printf("Applying %d instruction(s) from %s: %d add, %d delete\n",
+		len(insns), zoneUpdateFile, adds, dels)
+
+	spec := tdns.ZoneUpdateSpec{Verb: tdns.VerbInstructions, Instructions: insns}
+	zone := dns.Fqdn(tdns.Globals.Zonename)
+
+	switch strings.ToLower(strings.TrimSpace(zoneUpdateVia)) {
+	case "api":
+		runZoneUpdateViaApi(role, zone, spec)
+	case "ddns":
+		runZoneUpdateViaDdns(zone, spec)
+	case "":
+		fmt.Printf("Error: --via is required (\"api\" or \"ddns\").\n")
+		os.Exit(1)
+	default:
+		fmt.Printf("Error: unknown --via %q (want \"api\" or \"ddns\")\n", zoneUpdateVia)
+		os.Exit(1)
+	}
 }
 
 func runZoneUpdateVerb(role, verb string) {
@@ -165,12 +253,13 @@ func runZoneUpdateViaApi(role, zone string, spec tdns.ZoneUpdateSpec) {
 	}
 
 	cr, err := SendZoneCommand(api, tdns.ZonePost{
-		Command:      "update",
-		Zone:         zone,
-		UpdateVerb:   spec.Verb,
-		UpdateRRs:    spec.RRs,
-		UpdateName:   spec.Name,
-		UpdateRrtype: spec.Rrtype,
+		Command:            "update",
+		Zone:               zone,
+		UpdateVerb:         spec.Verb,
+		UpdateRRs:          spec.RRs,
+		UpdateName:         spec.Name,
+		UpdateRrtype:       spec.Rrtype,
+		UpdateInstructions: spec.Instructions,
 	})
 	if err != nil {
 		// cr is the zero value on a transport error, so cr.AppName would render

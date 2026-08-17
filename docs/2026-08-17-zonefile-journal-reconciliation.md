@@ -1,0 +1,476 @@
+# Reconciling the Zone File with the Delta Journal
+
+2026-08-17
+
+## 1. What this is about
+
+Phase 2 gave a primary zone a **delta journal**: changes applied through
+DDNS or the management API are recorded in the `ZoneDelta` table at
+publish time and replayed over the zone file on load, so a restart loses
+nothing. The journal is anchored to the zone file — the first delta's
+`fromserial` is the serial of the file it was computed against.
+
+That anchoring is what makes the journal meaningful, and it is also its
+single point of failure. If the file on disk is no longer the file the
+journal was computed against, the chain cannot be replayed, and today the
+load refuses it wholesale.
+
+This document specifies what should happen instead.
+
+## 2. What went wrong, concretely
+
+On `cpt-proxy.axfr.net`, `dnslab.` reached this state:
+
+| | |
+|---|---|
+| zone file | serial `2026081701` |
+| journal | `…03 → …04`, `…04 → …05`, `…05 → …06` |
+| served after load | `2026081703` |
+
+The journal had been written by a pre-fix binary that anchored deltas to
+the *published* serial rather than to the file's. On restart, the current
+binary correctly refused the chain:
+
+```
+could not replay persisted deltas; the zone is serving its file alone
+  and recent changes are NOT present
+  deltas start at serial 2026081703, file is at serial 2026081701
+```
+
+Detection worked. What followed did not. The zone served the file,
+republished to `…03` after load-time signing, and the operator's next
+update published `…03 → …04` — a `toserial` the journal already holds.
+`UNIQUE (zone, toserial, seq)` rejected the row, the publish was refused,
+and **every subsequent update failed identically**. One stale journal
+rendered the zone permanently unable to accept a change, reporting a
+SQLite constraint rather than the actual problem.
+
+Worse, the remedy the refusal names does not exist:
+
+- `write` / `sync` / `freeze` drop deltas only *through the written
+  serial*, so a journal sitting **ahead** of the current serial survives
+  the write-out untouched.
+- there is no command to clear the journal at all.
+
+So there are two distinct defects: a design gap (no reconciliation path)
+and a plain bug (a stale journal occupies serial space and bricks the
+zone).
+
+## 3. Position relative to the long-term goal
+
+The agreed long-term direction is that **the database holds the zone**
+and the zone file becomes an export of it. That is a larger refactor than
+is in scope here, with known unknowns.
+
+The present design is deliberately a compromise: file-authoritative
+storage with a journal carrying what the file does not have. But the
+reconciliation rule below moves in the agreed direction rather than away
+from it — it accepts data in the DB as a potentially *permanent* part of
+the served zone, never forced out into the file. That is DB-as-truth
+reached inefficiently (replaying a journal rather than storing the truth
+directly), but it is the same destination.
+
+## 4. Detection: a canonical content digest
+
+### 4.1 Why not a file hash
+
+A byte-level hash of the zone file answers "did these bytes change",
+which is not the question. Reordering records, adding or editing
+comments, reflowing whitespace, changing `$TTL` style or `$ORIGIN` usage
+— none of these change the zone, and all of them would register as
+divergence. The zone file is meant to stay human-authored and
+revision-control friendly; a detector that fires on formatting makes it
+neither.
+
+### 4.2 ZONEMD
+
+Use the RFC 8976 ZONEMD digest computation: canonical ordering, canonical
+wire form, the apex ZONEMD RRset excluded. It is exactly a
+content-semantic fingerprint of a zone, it is specified rather than
+invented here, and it is immune to every formatting change listed above.
+
+We use the **algorithm**, not necessarily the record: nothing is
+published. If we compute it anyway, publishing ZONEMD later becomes
+nearly free.
+
+Cost is a canonical sort plus one digest pass over a zone we have just
+parsed. A signed zone already pays the canonical-ordering cost for its
+NSEC chain.
+
+RRSIGs fall inside the digest, which is harmless here because we only
+ever compare **file to file**, never file to in-memory: the in-memory
+zone carries freshly minted signatures by construction and would never
+match. An externally re-signed file does read as changed, which is
+correct.
+
+*Implementation note:* the tree has `dns.TypeZONEMD` but no digest
+computation. Either miekg/dns provides one in a version we can pin, or we
+write it — a few dozen lines over the canonical iteration we already
+have.
+
+### 4.3 What is recorded
+
+Per zone, at every read from and every write to the zone file:
+
+```
+ZoneFileState(zone, serial, digest, algorithm, scheme, updated)
+```
+
+`serial` is retained alongside the digest because it is what the refusal
+messages and the serial floor (§8) are stated in.
+
+### 4.4 The three outcomes at load
+
+| Recorded digest | Verdict |
+|---|---|
+| matches the file | the file is the one the journal was computed against — replay as today |
+| differs | the file changed — reconcile (§5) |
+| absent | no basis for comparison — reconcile (§5) |
+
+The third row is the upgrade case, and it wants no special handling: with
+a reconciliation path available, "we cannot prove this is the same file"
+is no longer fatal. Note that this alone would have carried `dnslab.`
+through §2 without a brick.
+
+## 5. The merge rule
+
+When the file has changed, the merge is: **parse the new file, then
+replay the journal onto it.** With `on-conflict-db-wins` (§9), the
+journal wins every contest.
+
+### 5.1 What a conflict is
+
+The journal's *removes* name specific records. So:
+
+> **A conflict is a record present in the new zone file that the journal
+> deletes.**
+
+That is computable from the journal alone. No old-file content, no
+per-RRset digests, no extra bookkeeping — the ZONEMD stays purely a
+detector.
+
+Adds do not conflict. An add at an owner/type the new file also populates
+simply unions, and a `replacerrset` carries its own removes, so genuine
+replacements are caught by the rule above.
+
+### 5.2 The mirror case
+
+There is a second, equally detectable contest with no record to point at:
+
+> The journal **adds** R, and the new file does not contain R.
+
+The operator either deleted R or is working from a file that predates it.
+Replaying re-adds it, so their deletion is silently undone. Same conflict,
+same resolution, but what lost is an *absence*, not a record. It must be
+reported, or the artefact in §6 would cover only the half of the
+conflicts that happen to be expressible as records.
+
+### 5.3 Summary
+
+| Situation | Merged result | Reported |
+|---|---|---|
+| journal deletes R, file has R | R absent | yes |
+| journal adds R, file lacks R | R present | yes |
+| journal adds R, file has R | R present | no — agreement |
+| file changed something the journal never touches | file's version | no — uncontested |
+| journal touches something the file never had | journal's version | no — uncontested |
+
+## 6. The `.rejected` artefact
+
+Every merge that resolved at least one conflict writes:
+
+```
+{zonefile}.{serial}.rejected
+```
+
+where `{serial}` is the **new file's** serial — it identifies the file
+whose records were overruled.
+
+### 6.1 It is an executable inverse, not a description
+
+The file is not a list of what was rejected. It is *the update that would
+undo the merge's decisions in favour of your zone file*:
+
+| Conflict | Instruction |
+|---|---|
+| journal deleted R, your file had R | `ADD R` |
+| journal added R, your file lacked R | `DEL R` |
+
+So an operator who disagrees with the merge inspects it and feeds it
+straight back through `tdns-cli auth zone update`. The descriptive
+reading — "here is what was thrown away" — is strictly less useful and
+cannot express the mirror case of §5.2 at all.
+
+Format is one instruction per line, `ADD`/`DEL` followed by the record in
+presentation format, with comments carrying the zone, the serials
+involved and the timestamp.
+
+### 6.2 The artefact is an input format, not just an output
+
+```
+tdns-cli auth zone update --from-file {file} --zone <zone> --via <api|ddns>
+```
+
+The intended workflow is not "replay the whole thing or nothing". It is:
+**open the file, delete the lines you agree with, keep the ones you
+don't, replay what's left.** The merge decided in favour of the journal;
+this is how an operator selectively overrides that decision, record by
+record, having seen exactly what it cost.
+
+That makes the format a first-class *input*, which raises the bar on it:
+
+- comments (`;` and `#`) and blank lines are tolerated everywhere, since
+  the file is meant to be edited by hand;
+- parse errors name the line number and the offending text — an operator
+  editing at 3am gets told which line, not that "the file is invalid";
+- the surviving instructions apply as **one** update, atomically. A
+  half-applied reconciliation is a third state nobody asked for.
+
+Nothing about the format is specific to `.rejected`. `--from-file` is
+simply "apply this list of ADD/DEL instructions to this zone", which is
+also what `journal purge` emits (§10.4), what `journal list
+--instructions` prints (§10.3), and a reasonable batch-update input for
+anything scripted.
+
+## 7. Re-anchoring, not rewriting
+
+After a merge the journal is anchored to a file that no longer exists.
+The obvious repair is to write the merged zone out and drop the journal —
+and it is the wrong one. It destroys record ordering and comments, breaks
+the file's usefulness under revision control, and on a signing zone would
+spray out signatures that go stale immediately.
+
+Instead, **re-anchor**:
+
+1. diff the merged zone against the parsed new file — `computeZoneDelta`,
+   which already exists and already runs on every publish;
+2. replace the journal, in one transaction, with that single delta,
+   recorded against the new file's serial and ZONEMD.
+
+The journal once again means exactly "what this file does not have", the
+anchor is correct, the serial-collision class disappears by construction,
+and **the operator's file is never touched**. The file is rewritten only
+on an explicit `write` / `sync` / `freeze` — when the operator asked for
+it.
+
+This is also the mechanism by which §3 holds: journal content can remain
+in the DB indefinitely, a permanent part of the served zone, without ever
+being forced into the file.
+
+## 8. Serial floor
+
+The merged zone must publish at a serial strictly newer (RFC 1982) than
+**both**:
+
+- the highest serial this server has previously served for the zone, and
+- the new file's serial.
+
+`dnslab.` is the live example of why the second alone is insufficient:
+file at `…01`, served at `…03`, journal head at `…06`. Publishing at
+`…02` would take the zone backwards for every secondary that already
+holds `…03`.
+
+## 9. One path, and the option
+
+**Startup and explicit reload take the same path.** The digest tells us
+whether the file changed regardless of who asked; two behaviours for one
+situation is how this class of bug returns. A crash-restart with content
+in the journal must apply it — that is the entire point of the journal.
+
+The per-zone option:
+
+```yaml
+options: [ on-conflict-db-wins ]     # or on-conflict-zonefile-wins
+```
+
+`on-conflict-db-wins` is the first and initially the only supported
+behaviour; `on-conflict-zonefile-wins` is specified here so the option's
+shape is not invented later, and implemented in a second step. Under it
+the resolution inverts and the `.rejected` artefact describes the
+*journal* records that lost.
+
+The option governs conflict resolution only. Detection, merging,
+re-anchoring and the serial floor are unconditional.
+
+### 9.1 The default is materialized at parse
+
+`on-conflict-db-wins` is the default. It is not implemented as a
+fallback read at each decision point, but **set on the zone during option
+parsing** whenever `on-conflict-zonefile-wins` is absent.
+
+The difference matters. A default that lives in the code as "if neither
+option is set, assume db-wins" has to be remembered at every site that
+asks, and the day one site forgets, a zone silently resolves conflicts
+the other way. Materializing it means every zone carries exactly one of
+the two options, always, and the merge code asks a question with two
+answers rather than three.
+
+It is also what an operator sees: `zone status` and the journal `status`
+below report the option the zone is actually running under, not a blank
+that has to be interpreted.
+
+Setting **both** options is a contradiction, not a preference order: it
+is a hard config error at startup, in line with how the other mutually
+exclusive zone options are treated.
+
+## 10. The journal CLI
+
+The journal is durable state that decides what a zone serves, and until
+now it has had no operator surface at all — not even a way to see whether
+it holds anything. That is the gap `rm zone.jnl` fills in the BIND world,
+badly.
+
+```
+tdns-cli auth zone journal status  --zone <zone>
+tdns-cli auth zone journal list    --zone <zone> [--serial <n>] [--instructions]
+tdns-cli auth zone journal truncate --zone <zone> --after <serial>
+tdns-cli auth zone journal purge   --zone <zone> [--force]
+```
+
+### 10.1 A chain admits only two kinds of edit
+
+The journal is a chain: every delta's `fromserial` is its predecessor's
+`toserial`, and replay refuses a chain with a gap (that check is why a
+sequence like `A→B, C→D` cannot be applied as though the zone had been
+`C`). So the chain-safe operations are exactly:
+
+- **drop a suffix** — `truncate --after <serial>` keeps a valid shorter
+  chain;
+- **drop everything** — `purge`.
+
+There is deliberately no "remove this record from the journal". It would
+either leave a delta claiming a serial transition it no longer performs,
+or require recomputing every downstream delta against a base that never
+existed. The journal is a log; the way to correct a log is to append a
+correction, which here means an ordinary `zone update` that undoes the
+record. That is one command, it is auditable, and it cannot invent a
+zone.
+
+### 10.2 status
+
+Reports what an operator needs before deciding anything:
+
+- number of deltas, and the serial range they span;
+- what the chain is anchored to, and whether the zone file still matches
+  that anchor (§4) — the direct answer to "will this replay on restart?";
+- when the file was last written, and how far behind it is;
+- the conflict option in force (§9.1);
+- the outcome of the last load: replayed cleanly, or merged — and if
+  merged, where the `.rejected` artefact was written.
+
+### 10.3 list
+
+The deltas themselves. Default output is a per-delta summary; `--serial`
+narrows to one; `--instructions` emits the same `ADD`/`DEL` format used
+by `.rejected` (§6), so "what is in the journal that my file does not
+have" and "give me that as something I can replay" are one command
+apart.
+
+### 10.4 purge
+
+The `rm zone.jnl` equivalent — with the property that made `rm` a bad
+answer removed. Purge always writes what it discards to
+
+```
+{zonefile}.{serial}.purged
+```
+
+in the executable-instruction format of §6, before deleting anything. So
+purge is recoverable: the material is on disk, in a form that can be fed
+straight back through `zone update`.
+
+On a **healthy** journal, purge discards changes that exist nowhere else
+and it refuses without `--force`, pointing instead at `sync` — which
+folds the same changes into the zone file and loses nothing. `--force`
+exists because "I do not want these changes" is a legitimate position;
+it should just not be reachable by typo.
+
+Note what purge is *not*, after §7: with re-anchoring, a journal that
+cannot be replayed no longer persists as a stuck state, so purge is not
+the recovery mechanism it would have had to be under the current design.
+It is an expression of operator intent, plus a backstop for the residue
+of an older binary — exactly the `dnslab.` case in §2.
+
+## 11. The plain bug
+
+Independent of everything above, and true whatever reconciliation policy
+is in force:
+
+- `PersistZoneDelta` must reject a non-advancing serial with a diagnosis
+  in English rather than surfacing a SQLite `UNIQUE` constraint.
+- A journal that could not be applied must never sit in the serial space
+  silently blocking future updates. §7 removes the cause; this is the
+  backstop.
+
+## 12. Out of scope, but noted
+
+- **RRSIGs in the zone file.** For an online- or inline-signing zone,
+  writing signatures into the file is questionable — they are regenerated
+  on load and the journal already omits them for exactly that reason.
+  Worth a separate look at `WriteZoneToFile`.
+- **Publishing ZONEMD.** Cheap once §4 exists; a feature in its own right.
+- **DB-as-truth.** The refactor this design is a step toward, not a
+  substitute for.
+
+## 13. Delivery
+
+Four stages, each independently shippable and independently testable.
+
+**Stage 0 — into #348, before it merges.** The plain bug (§11) plus the
+journal CLI (§10) and `--from-file` (§6.2).
+
+This is a merge precondition, not a nice-to-have. As it stands #348
+introduces durable state that decides what a zone serves and gives the
+operator no way to see it, list it, or clear it — there is no `journal`
+command in the tree at all. A journal you cannot inspect is worse than no
+journal, because when it misbehaves the operator has nothing to look at.
+Stage 0 also converts the §2 failure from a SQLite constraint into a
+diagnosis with a remedy, which is what makes shipping the rest as
+follow-on work acceptable rather than reckless.
+
+Roughly 800 LOC with tests. No design risk: nothing here depends on the
+merge existing.
+
+**Stages 1–3 — a new branch off main, after #348 lands.**
+
+| Stage | Content | ~LOC |
+|---|---|---|
+| 1 | ZONEMD + `ZoneFileState` + detection only; still refuses on mismatch, but with a precise verdict and no false positives from formatting | 450 |
+| 2 | merge, re-anchor, `.rejected`, serial floor | 1100 |
+| 3 | the option and `on-conflict-zonefile-wins` | 150 |
+
+Stage 1 is worth having on its own even if 2 never shipped: it replaces a
+serial comparison that lies about reformatted files with a content digest
+that doesn't.
+
+**Before Stage 2, resolve the delegation-backend question.** A zone with
+`delegationbackend: db` has a second DB-side content source —
+`ChildDelegationData` — which is not in the journal and which §5 does not
+account for. `dnslab.` is such a zone. Whether child delegation data is
+re-applied on top of a merged zone, double-applied, or lost is unknown,
+and the answer could change the merge rule. It is the largest unknown in
+this design and it should be settled before code is written against §5,
+not after.
+
+## 14. Verification
+
+1. **No change** — restart with an untouched file; digest matches;
+   journal replays; no `.rejected`.
+2. **Formatting only** — reorder records, add comments, reflow; digest
+   matches; journal replays; no `.rejected`. *(This is the case a byte
+   hash would fail.)*
+3. **Composable edit** — edit RRsets the journal never touches; digest
+   differs; merge keeps both sides; no conflicts reported.
+4. **Delete conflict** — the file contains a record the journal deletes;
+   record absent after merge; `.rejected` contains `ADD` for it.
+5. **Mirror conflict** — the file lacks a record the journal adds; record
+   present after merge; `.rejected` contains `DEL` for it.
+6. **Feeding `.rejected` back** through `zone update` restores the file's
+   version of every contested record.
+7. **Serial floor** — file rolled back below the served serial; merged
+   zone publishes above the previously served serial.
+8. **Re-anchor** — after any merge, the file is byte-identical to before,
+   and the journal holds exactly one delta chaining from it.
+9. **Restart after merge** — replays cleanly, no refusal, no `.rejected`.
+10. **The `dnslab.` case** — the exact §2 state reproduced from scratch
+    loads, merges, and accepts the next update.

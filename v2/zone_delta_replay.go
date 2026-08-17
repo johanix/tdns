@@ -46,12 +46,16 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 	// in the first place. The journal is anchored to the file on the write
 	// side (see LastZoneDeltaSerial); anchoring it to the file here too means
 	// the two sides cannot drift apart no matter where replay is called from.
+	// Both values in ONE critical section. CurrentSerial is written under zd.mu
+	// by publishWorkingSetLocked and by the refresh engine, so reading it
+	// outside is a data race -- and reading it after the unlock could also pick
+	// up a serial the chain check below was never validated against.
 	zd.mu.Lock()
 	fileSerial := zd.fileSerial
-	zd.mu.Unlock()
 	if fileSerial == 0 {
 		fileSerial = zd.CurrentSerial
 	}
+	zd.mu.Unlock()
 
 	// Already replayed for THIS file load? Then say so quietly and stop.
 	//
@@ -83,54 +87,8 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 		return 0, nil
 	}
 
-	// Chain validation. Each delta was computed as the difference from one
-	// specific base, and the first one's FromSerial names the file it was
-	// computed against. If the file on disk is no longer that file -- an
-	// operator edited it, or an older copy was restored from backup -- then
-	// replaying this chain produces a zone that never existed at any point in
-	// its history: some of the changes apply to content that is no longer
-	// there, and content the operator has just added is silently overwritten.
-	//
-	// Refuse rather than proceed. Serving the file alone loses recent changes,
-	// which is bad and is reported as such; replaying onto the wrong base
-	// invents a zone, which is worse and is invisible.
-	if deltas[0].FromSerial != fileSerial {
-		return 0, fmt.Errorf(
-			"zone %s: persisted deltas do not chain from this zone file"+
-				" (deltas start at serial %d, file is at serial %d);"+
-				" the file has been edited or replaced since the deltas were recorded."+
-				" Reconcile deliberately: write the zone out to adopt the in-memory"+
-				" state, or clear the stored deltas to adopt the file",
-			zd.ZoneName, deltas[0].FromSerial, fileSerial)
-	}
-
-	// And every link after the first. Checking only deltas[0] proves the chain
-	// STARTS at this file; it says nothing about whether it is continuous. A
-	// sequence like A->B, C->D passes the first check and is then applied as
-	// one update, so the zone lands on D while never having been C -- a serial
-	// claiming a history that did not happen. That is the same "invents a zone"
-	// failure the first check exists to prevent, one link further in.
-	//
-	// A gap means rows were lost or written from elsewhere; neither is
-	// something to paper over by applying what remains.
-	for i := 0; i < len(deltas); i++ {
-		if i > 0 && deltas[i].FromSerial != deltas[i-1].ToSerial {
-			return 0, fmt.Errorf(
-				"zone %s: persisted deltas are not continuous (delta %d ends at serial %d,"+
-					" delta %d starts at serial %d); refusing to apply a chain with a gap."+
-					" Reconcile deliberately: write the zone out to adopt the in-memory"+
-					" state, or clear the stored deltas to adopt the file",
-				zd.ZoneName, i-1, deltas[i-1].ToSerial, i, deltas[i].FromSerial)
-		}
-		// Each link must also advance. A delta that does not move the serial
-		// forward cannot be replayed into a coherent history, and would break
-		// the strictly-greater guarantee the publish below relies on.
-		if !serialNewer(deltas[i].ToSerial, deltas[i].FromSerial) {
-			return 0, fmt.Errorf(
-				"zone %s: persisted delta %d does not advance the serial (%d -> %d);"+
-					" refusing to replay it",
-				zd.ZoneName, i, deltas[i].FromSerial, deltas[i].ToSerial)
-		}
+	if err := validateDeltaChain(zd.ZoneName, deltas, fileSerial); err != nil {
+		return 0, err
 	}
 
 	// A signed zone that cannot re-sign will replay its content unsigned:
@@ -255,6 +213,71 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 		"serial", finalSerial)
 
 	return len(deltas), nil
+}
+
+// validateDeltaChain reports whether deltas can be replayed over a zone file
+// sitting at fileSerial, and says why not when they cannot.
+//
+// Extracted so that ReplayPersistedDeltas and the `zone journal status`
+// reporting share one definition of "will this replay?". Two copies would
+// eventually disagree, and the copy an operator consults would be the one
+// telling them everything is fine.
+//
+// The three conditions:
+//
+//  1. The chain must START at this file. Each delta was computed as the
+//     difference from one specific base, and the first one's FromSerial names
+//     the file it was computed against. If the file on disk is no longer that
+//     file -- an operator edited it, or an older copy was restored from backup
+//     -- then replaying produces a zone that never existed at any point in its
+//     history: some changes apply to content that is no longer there, and
+//     content the operator has just added is silently overwritten.
+//
+//  2. The chain must be CONTINUOUS. Checking only the first delta proves where
+//     the chain starts and says nothing about whether it holds together. A
+//     sequence like A->B, C->D passes (1) and is then applied as one update, so
+//     the zone lands on D while never having been C -- a serial claiming a
+//     history that did not happen. Same failure as (1), one link further in.
+//
+//  3. Every link must ADVANCE the serial. A delta that does not move forward
+//     cannot be replayed into a coherent history, and breaks the
+//     strictly-greater guarantee the publish relies on.
+//
+// Refuse rather than proceed on any of them. Serving the file alone loses
+// recent changes, which is bad and is reported as such; replaying onto the
+// wrong base invents a zone, which is worse and is invisible.
+func validateDeltaChain(zone string, deltas []ZoneDeltaRecord, fileSerial uint32) error {
+	if len(deltas) == 0 {
+		return nil
+	}
+
+	if deltas[0].FromSerial != fileSerial {
+		return fmt.Errorf(
+			"zone %s: persisted deltas do not chain from this zone file"+
+				" (deltas start at serial %d, file is at serial %d);"+
+				" the file has been edited or replaced since the deltas were recorded."+
+				" Reconcile deliberately: write the zone out to adopt the in-memory"+
+				" state, or discard the journal with `zone journal purge` to adopt the file",
+			zone, deltas[0].FromSerial, fileSerial)
+	}
+
+	for i := 0; i < len(deltas); i++ {
+		if i > 0 && deltas[i].FromSerial != deltas[i-1].ToSerial {
+			return fmt.Errorf(
+				"zone %s: persisted deltas are not continuous (delta %d ends at serial %d,"+
+					" delta %d starts at serial %d); refusing to apply a chain with a gap."+
+					" Reconcile deliberately: write the zone out to adopt the in-memory"+
+					" state, or discard the journal with `zone journal purge` to adopt the file",
+				zone, i-1, deltas[i-1].ToSerial, i, deltas[i].FromSerial)
+		}
+		if !serialNewer(deltas[i].ToSerial, deltas[i].FromSerial) {
+			return fmt.Errorf(
+				"zone %s: persisted delta %d does not advance the serial (%d -> %d);"+
+					" refusing to replay it",
+				zone, i, deltas[i].FromSerial, deltas[i].ToSerial)
+		}
+	}
+	return nil
 }
 
 // zoneLooksSigned reports whether the zone carries a DNSKEY RRset at its apex,

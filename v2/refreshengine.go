@@ -800,9 +800,15 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 						continue
 					}
 
-					zd.InstallInitialSnapshot()
-					replayZoneDeltasOnLoad(zd)
-					if err := finishFirstLoadPolicy(ctx, zd, conf, zr.DnssecPolicy); err != nil {
+					// completeFirstZonePolicyAndLoad, not the three steps by
+					// hand. This path used to install the snapshot, replay, and
+					// only then bind the policy -- so replay re-signed with a nil
+					// zd.DnssecPolicy, sigValiditySeconds returned 0, and
+					// sigLifetime turned that into FIVE-MINUTE RRSIGs that nothing
+					// on the normal path renews. That is the exact ordering bug
+					// the helper was extracted to prevent on the static-zone path;
+					// the dynamic path kept its own copy and kept the bug.
+					if err := completeFirstZonePolicyAndLoad(ctx, zd, conf, zr.DnssecPolicy); err != nil {
 						lgEngine.Warn("DNSSEC policy sync for dynamic zone failed", "zone", zone, "err", err)
 						zd.SetError(DnssecPolicyWarning, "DNSSEC policy sync failed: %v", err)
 						zd.LatestError = time.Now()

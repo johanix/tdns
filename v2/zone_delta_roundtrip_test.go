@@ -580,14 +580,21 @@ func TestZoneDeltaReplayRefusesAGappedChain(t *testing.T) {
 func TestZoneDeltaReplayRefusesANonAdvancingLink(t *testing.T) {
 	kdb := newTestKeyDB(t)
 
-	// A single delta that does not move the serial. Note the schema's
-	// UNIQUE(zone, toserial, seq) prevents building this as a SECOND delta
-	// landing on a serial already used, so the case that can actually be stored
-	// is the first one -- which is why the check must cover deltas[0] and not
-	// only the links after it.
-	if err := kdb.PersistZoneDelta("example.", 5, 5, nil,
-		[]core.RRset{deltaRRset(t, "a.example. 3600 IN A 10.0.0.1")}); err != nil {
-		t.Fatalf("persist 5->5: %v", err)
+	// A single delta that does not move the serial, written straight into the
+	// table rather than through PersistZoneDelta -- which now refuses to
+	// record one, and says why.
+	//
+	// Bypassing the writer is the point of this test, not a shortcut around
+	// it. The replay-side check exists for rows the writer did not produce:
+	// those left by an older binary, restored from a backup, or edited into
+	// the database by hand. A guard on the way in does not make a guard on the
+	// way out redundant, and dropping this test because the fixture is no
+	// longer reachable through the front door would leave the read path
+	// unverified against exactly the data it is there to catch.
+	if _, err := kdb.DB.Exec(
+		`INSERT INTO ZoneDelta (zone, fromserial, toserial, seq, action, rr) VALUES (?,?,?,?,?,?)`,
+		"example.", 5, 5, 0, ZoneDeltaAdd, "a.example.\t3600\tIN\tA\t10.0.0.1"); err != nil {
+		t.Fatalf("insert 5->5: %v", err)
 	}
 
 	zd := testZone(t, "example.", deltaZone)

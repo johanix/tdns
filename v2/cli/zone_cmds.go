@@ -316,6 +316,10 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 	// Role-independent extras attached to every zone tree. Each is built
 	// fresh so the command pointer is unique per NewZoneCmd invocation.
 	c.AddCommand(newZoneReadFakeCmd(), newZoneUpdateCmd(role), newZoneDsyncCmd(role))
+	// The delta journal's operator surface. Under "zone", not under
+	// "zone update": it inspects and manages what is stored about the zone,
+	// which is not a way of changing the zone's content.
+	AttachZoneJournalCmds(c, role)
 	for _, e := range extras {
 		c.AddCommand(e)
 	}

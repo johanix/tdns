@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -730,18 +731,81 @@ func (zd *ZoneData) WriteFile(filename string) (string, error) {
 	return fname, err
 }
 
+// WriteFileWithSerial writes the zone out and reports the SOA serial it wrote.
+//
+// The write is staged in a temporary file in the same directory and renamed
+// into place, and every step -- flush, sync, close, rename -- is checked. Both
+// properties are load-bearing for Phase 2, not general tidiness.
+//
+// WriteZone treats a successful return here as "the file now contains
+// everything the zone has" and DELETES the journal deltas up to that serial.
+// The journal is the only replayable copy of those changes. So a write that
+// half-succeeded and reported success would take the file AND the journal in
+// one move: os.Create truncates first, and the buffered tail can fail to flush
+// on a full or failing disk long after the early records landed. Returning the
+// error keeps the journal, which is what makes the failure survivable.
+//
+// Staging and renaming closes the other half: a reader -- the next startup,
+// most of all -- never sees a partially written zone file, because the name
+// only ever points at a complete one. The directory fsync is what makes that
+// rename outlive a power cut rather than merely a process crash.
 func (zd *ZoneData) WriteFileWithSerial(filename string) (string, uint32, error) {
 	fname := fmt.Sprintf("%s/%s", viper.GetString("external.filedir"), filename)
-	f, err := os.Create(fname)
+
+	dir := filepath.Dir(fname)
+	tmp, err := os.CreateTemp(dir, filepath.Base(fname)+".tmp")
+	if err != nil {
+		return fname, 0, fmt.Errorf("creating a temporary file beside %s: %v", fname, err)
+	}
+	tmpname := tmp.Name()
+
+	committed := false
+	defer func() {
+		if !committed {
+			tmp.Close()
+			os.Remove(tmpname)
+		}
+	}()
+
+	wrote, err := zd.WriteZoneToFile(tmp)
 	if err != nil {
 		return fname, 0, err
 	}
-
-	wrote, err := zd.WriteZoneToFile(f)
-	if err != nil {
-		return f.Name(), 0, err
+	if err := tmp.Sync(); err != nil {
+		return fname, 0, fmt.Errorf("syncing %s: %v", tmpname, err)
 	}
-	return f.Name(), wrote, nil
+	if err := tmp.Close(); err != nil {
+		return fname, 0, fmt.Errorf("closing %s: %v", tmpname, err)
+	}
+
+	// os.CreateTemp makes the file 0600. Carry over the mode of the file being
+	// replaced, so a zone file readable by a non-root process stays readable.
+	mode := os.FileMode(0644)
+	if fi, serr := os.Stat(fname); serr == nil {
+		mode = fi.Mode().Perm()
+	}
+	if err := os.Chmod(tmpname, mode); err != nil {
+		return fname, 0, fmt.Errorf("setting mode on %s: %v", tmpname, err)
+	}
+
+	if err := os.Rename(tmpname, fname); err != nil {
+		return fname, 0, fmt.Errorf("renaming %s to %s: %v", tmpname, fname, err)
+	}
+	committed = true
+
+	// Persist the rename itself. Without this the directory entry can still be
+	// lost to a power failure, leaving the old file -- while the journal that
+	// would have restored the difference has already been dropped.
+	if d, derr := os.Open(dir); derr == nil {
+		if serr := d.Sync(); serr != nil {
+			lg.Warn("zone file renamed but its directory could not be synced;"+
+				" the rename may not survive a power failure",
+				"zone", zd.ZoneName, "dir", dir, "error", serr)
+		}
+		d.Close()
+	}
+
+	return fname, wrote, nil
 }
 
 // WriteZoneToFile serialises the PUBLISHED snapshot and reports the SOA serial
@@ -843,8 +907,16 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) (uint32, error) {
 		return 0, err
 	}
 	totalbytes += bytes
-	writer.Flush()
-	return wroteSerial, err
+	// Flush's error is the one that matters most and used to be discarded. Every
+	// WriteString above only fills a buffer; the actual disk write happens here,
+	// so a full or failing disk shows up at THIS call and nowhere earlier. The
+	// old `return wroteSerial, err` returned the (nil) error from the last
+	// WriteString instead, reporting a complete file to a caller that then
+	// deleted the journal.
+	if err := writer.Flush(); err != nil {
+		return 0, fmt.Errorf("writing zone %s: %v", zd.ZoneName, err)
+	}
+	return wroteSerial, nil
 }
 
 func RRsetToString(rrset *core.RRset) string {
