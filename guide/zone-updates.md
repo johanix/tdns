@@ -253,6 +253,7 @@ silent.
 tdns-cli auth zone freeze --zone alpha.dnslab.    # write out, stop accepting updates
 tdns-cli auth zone thaw   --zone alpha.dnslab.    # resume accepting updates
 tdns-cli auth zone sync   --zone alpha.dnslab.    # write out, keep accepting updates
+tdns-cli auth zone write  --zone alpha.dnslab.    # the same operation, other name
 ```
 
 `freeze` makes the zone file the authority right now: it writes
@@ -261,9 +262,13 @@ until thawed. Accepting changes while frozen would silently
 strand them the next time the file was read.
 
 `sync` is `freeze` without the freezing — the same write-out, but
-the zone keeps accepting updates. It is the one to use when you
-simply want the file brought up to date. (It is an alias for
-`write-zone`.)
+the zone keeps accepting updates. It is the one to use when you simply
+want the file brought up to date.
+
+`sync` and `write` are two names for one implementation, not two code
+paths that can drift: the server dispatches both to the same handler.
+The name `sync` exists because it is what an operator coming from bind9
+(`rndc sync`) reaches for.
 
 All three drop the zone's deltas once the file is written: the
 file now contains what they described.
