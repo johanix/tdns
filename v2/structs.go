@@ -241,6 +241,12 @@ type ZoneData struct {
 	// replay that re-persisted what it just replayed would double the stored
 	// history on every restart.
 	wsPersistDelta bool
+	// fileSerial is the SOA serial of the zone FILE as last read from or
+	// written to disk. It is NOT CurrentSerial: a zone that re-signs or
+	// republishes during load advances CurrentSerial well past what the file
+	// says, and the delta journal has to be anchored to the file, because the
+	// file is what the next load starts from. Guarded by zd.mu.
+	fileSerial uint32
 	// deltasReplayed records that the persisted deltas have already been
 	// applied on top of the zone file CURRENTLY loaded. Set by
 	// ReplayPersistedDeltas on success and cleared by

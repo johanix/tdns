@@ -390,8 +390,44 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		if oldSnap != nil && zd.KeyDB != nil {
 			removed, added, _ := computeZoneDelta(zd.ZoneName, oldSnap.Data, data)
 			if len(removed) > 0 || len(added) > 0 {
+				// What this delta chains FROM.
+				//
+				// NOT oldSnap.Serial, which is where the zone was last
+				// published. A zone that re-signs or republishes during load
+				// advances its published serial past the serial its FILE
+				// carries -- on a signed zone, by several -- so the first
+				// change after a load would be journalled as starting from a
+				// serial the file has never had. The next load reads the file,
+				// compares it against that base, finds a mismatch, and refuses
+				// the entire journal: every change lost, and the operator told
+				// their zone file had been edited. That is the shape of the
+				// bug this replaces.
+				//
+				// The first delta of a journal anchors to the FILE; every
+				// later one anchors to the journal's own tail. The chain is
+				// then continuous by construction and starts where the next
+				// load will actually begin.
+				fromSerial := zd.fileSerial
+				if last, have, lerr := zd.KeyDB.LastZoneDeltaSerial(zd.ZoneName); lerr != nil {
+					// Refusing here rather than guessing: a wrong base is
+					// silent data loss at the next restart, which is exactly
+					// what this whole path exists to prevent.
+					zd.wsPersistErr = lerr
+					zd.CurrentSerial = prevSerial
+					zd.workingSet = nil
+					zd.wsSignalSynth = nil
+					zd.publishQueued = false
+					zd.publishUrgent = false
+					zd.wsIxfrEpochReset = false
+					lg.Error("publish refused: could not determine the delta chain base",
+						"zone", zd.ZoneName, "error", lerr)
+					return
+				} else if have {
+					fromSerial = last
+				}
+
 				if err := zd.KeyDB.PersistZoneDelta(zd.ZoneName,
-					oldSnap.Serial, serial, removed, added); err != nil {
+					fromSerial, serial, removed, added); err != nil {
 					// Refuse the publish. The alternative is to serve a change
 					// that is guaranteed to vanish at the next restart, which
 					// is worse than not serving it: the operator gets an error

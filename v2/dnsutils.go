@@ -153,6 +153,9 @@ func (zd *ZoneData) ZoneTransferIn(up PeerConf, serial uint32, ttype string, con
 	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0].(*dns.SOA)
 	zd.CurrentSerial = soa.Serial
 	zd.IncomingSerial = soa.Serial
+	// The journal anchors to the FILE, not to whatever the serial becomes
+	// after load-time signing and republication. See ZoneData.fileSerial.
+	zd.fileSerial = soa.Serial
 
 	zd.Logger.Printf("*** Zone %s transferred from upstream %s. No errors.", zd.ZoneName, upstream)
 	if zd.Data.IsEmpty() {
@@ -627,6 +630,9 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string
 
 	zd.CurrentSerial = soa.Serial
 	zd.IncomingSerial = soa.Serial
+	// The journal anchors to the FILE, not to whatever the serial becomes
+	// after load-time signing and republication. See ZoneData.fileSerial.
+	zd.fileSerial = soa.Serial
 
 	zd.XfrType = "axfr"
 	// Return true only if serial changed (indicates actual update)

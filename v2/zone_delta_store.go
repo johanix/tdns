@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"database/sql"
 	"fmt"
 
 	core "github.com/johanix/tdns/v2/core"
@@ -286,4 +287,40 @@ func (kdb *KeyDB) DeleteZoneDeltasThroughSerial(zone string, serial uint32) (int
 		return 0, nil
 	}
 	return n, nil
+}
+
+// LastZoneDeltaSerial returns the ToSerial of the most recently stored delta
+// for zone, and whether there is one at all.
+//
+// This is what a new delta chains from. Chaining from the last published serial
+// instead looks equivalent and is not: a zone that re-signs or republishes
+// during load advances its published serial well past the serial its FILE
+// carries, so the first change after a load would be journalled as starting
+// from a serial the file has never had. The next load then reads the file,
+// compares it against that base, finds a mismatch, and refuses the whole
+// journal -- losing every change and reporting the file as tampered with.
+//
+// Anchoring the first delta to the file (ZoneData.fileSerial) and every
+// subsequent one to the journal's own tail makes the chain continuous by
+// construction, from a base the next load will actually see.
+func (kdb *KeyDB) LastZoneDeltaSerial(zone string) (uint32, bool, error) {
+	if kdb == nil || kdb.DB == nil {
+		return 0, false, fmt.Errorf("LastZoneDeltaSerial: no database")
+	}
+	kdb.mu.Lock()
+	defer kdb.mu.Unlock()
+
+	var toSerial sql.NullInt64
+	err := kdb.DB.QueryRow(
+		`SELECT toserial FROM ZoneDelta WHERE zone=? ORDER BY id DESC LIMIT 1`, zone).Scan(&toSerial)
+	if err == sql.ErrNoRows {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("LastZoneDeltaSerial: %v", err)
+	}
+	if !toSerial.Valid {
+		return 0, false, nil
+	}
+	return uint32(toSerial.Int64), true, nil
 }

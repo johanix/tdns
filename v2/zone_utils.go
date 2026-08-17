@@ -448,6 +448,13 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 	if err == nil {
 		zd.mu.Lock()
 		zd.Options[OptDirty] = false
+		// The file now carries this serial, so that is what a future journal
+		// anchors to. Without this the next change would chain from the serial
+		// the file had BEFORE this write, and the load after that would refuse
+		// the journal.
+		if wroteSerial != 0 {
+			zd.fileSerial = wroteSerial
+		}
 		zd.mu.Unlock()
 
 		// Phase 2: the changes are now IN the file, which is the source of
