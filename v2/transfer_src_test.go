@@ -483,3 +483,109 @@ func TestScratchZoneReportsResolvedTier(t *testing.T) {
 		t.Errorf("per-zone tier = %q, want %q", tier, "zone")
 	}
 }
+
+// TestDialTransferConnBindsSource is the only test that opens a socket. Every
+// other transfer-src test stops at "which address would we pick"; this one
+// checks that the pick is actually bound, for BOTH families.
+//
+// That matters most for IPv6, which cannot be exercised against the live lab:
+// the secondary service advertises a v4 address only, so the v6 half of the
+// list has no deployment that would catch a mistake in it. Loopback is enough
+// -- binding ::1 and connecting to a ::1 listener exercises the same
+// net.Dialer{LocalAddr} + network-family path a real v6 upstream would.
+func TestDialTransferConnBindsSource(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		network string
+		listen  string
+		src     string
+	}{
+		{"v4", "tcp4", "127.0.0.1:0", "127.0.0.1"},
+		{"v6", "tcp6", "[::1]:0", "::1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ln, err := net.Listen(tc.network, tc.listen)
+			if err != nil {
+				t.Skipf("%s loopback unavailable here: %v", tc.name, err)
+			}
+			defer ln.Close()
+			go func() {
+				if c, aerr := ln.Accept(); aerr == nil {
+					c.Close()
+				}
+			}()
+
+			conn, derr := dialTransferConn(ln.Addr().String(), nil, []string{tc.src}, 2*time.Second)
+			if derr != nil {
+				t.Fatalf("dial %s: %v", ln.Addr(), derr)
+			}
+			if conn == nil {
+				t.Fatalf("no connection returned; the %s source did not match the upstream family", tc.name)
+			}
+			defer conn.Close()
+
+			host, _, serr := net.SplitHostPort(conn.LocalAddr().String())
+			if serr != nil {
+				t.Fatalf("SplitHostPort(%q): %v", conn.LocalAddr(), serr)
+			}
+			if got, want := net.ParseIP(host), net.ParseIP(tc.src); !got.Equal(want) {
+				t.Errorf("bound source = %v, want %v", got, want)
+			}
+		})
+	}
+
+	// THE ONE WITH TEETH. The loopback cases above pass even if the source is
+	// never bound at all -- dialling loopback, the kernel picks a loopback
+	// source anyway, so "bound == expected" is trivially true. (Verified:
+	// deleting LocalAddr from the dialer leaves them green.)
+	//
+	// Binding an address the host does not have must therefore FAIL. Without
+	// the bind the dial succeeds; with it the kernel refuses. That is the only
+	// assertion here that distinguishes the two, and it covers both families --
+	// which is the whole point for v6, since the live secondary service is v4
+	// only and cannot exercise it.
+	for _, tc := range []struct {
+		name    string
+		network string
+		listen  string
+		absent  string
+	}{
+		{"v4 source not on this host", "tcp4", "127.0.0.1:0", "192.0.2.1"},
+		{"v6 source not on this host", "tcp6", "[::1]:0", "2001:db8::1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ln, err := net.Listen(tc.network, tc.listen)
+			if err != nil {
+				t.Skipf("%s loopback unavailable here: %v", tc.name, err)
+			}
+			defer ln.Close()
+
+			conn, derr := dialTransferConn(ln.Addr().String(), nil, []string{tc.absent}, 2*time.Second)
+			if conn != nil {
+				conn.Close()
+			}
+			if derr == nil {
+				t.Fatalf("dial succeeded while binding %s, an address this host does not have -- the source is not being bound", tc.absent)
+			}
+		})
+	}
+
+	// Family mismatch must dial UNBOUND rather than fail: naming only one
+	// family must not break upstreams in the other.
+	t.Run("mismatched family dials unbound", func(t *testing.T) {
+		ln, err := net.Listen("tcp4", "127.0.0.1:0")
+		if err != nil {
+			t.Skipf("v4 loopback unavailable: %v", err)
+		}
+		defer ln.Close()
+
+		conn, derr := dialTransferConn(ln.Addr().String(), nil, []string{"::1"}, 2*time.Second)
+		if derr != nil {
+			t.Fatalf("unexpected error: %v", derr)
+		}
+		if conn != nil {
+			conn.Close()
+			t.Error("expected no connection (caller then dials unbound), got one")
+		}
+	})
+}
