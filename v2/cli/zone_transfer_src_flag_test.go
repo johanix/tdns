@@ -88,6 +88,14 @@ func TestTransferSrcFlagNilVsEmpty(t *testing.T) {
 			if !changed {
 				t.Fatalf("flag given but not reported as changed")
 			}
+			// NON-NIL is the property that matters, not just the length.
+			// ModifyDynamicZone branches on nil vs non-nil: nil means "keep the
+			// stored value", non-nil means "replace" -- so if cobra ever handed
+			// back nil for --transfer-src=, clearing a zone's source would
+			// silently become a no-op and len(got)==0 would still pass.
+			if got == nil {
+				t.Fatalf("flag was given but parsed to a nil slice; clear would be indistinguishable from omitted")
+			}
 			if len(got) != tc.wantLen {
 				t.Fatalf("len = %d, want %d (value %q)", len(got), tc.wantLen, got)
 			}
