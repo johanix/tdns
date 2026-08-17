@@ -99,6 +99,22 @@ failing. Does not change anything; read-only.`,
 		Run:   func(cmd *cobra.Command, args []string) { RunZoneWrite(role, args) },
 	}
 
+	// "sync" is the name an operator coming from bind9 reaches for (rndc sync).
+	// The server already treats it as an alias for write-zone; this exposes it,
+	// which the CLI had never done -- so the documented command did not exist.
+	sync := &cobra.Command{
+		Use:   "sync",
+		Short: "Spool the zone out to disk (alias for write, no freeze/thaw)",
+		Long: `Write the zone's current content to its file, without freezing it.
+
+Identical to "zone write". Both fold any persisted change deltas into the file
+and drop them, so the file becomes the whole truth again.
+
+Use "zone freeze" instead when you want the file to be authoritative and
+updates refused until you thaw.`,
+		Run: func(cmd *cobra.Command, args []string) { RunZoneSync(role, args) },
+	}
+
 	freeze := &cobra.Command{
 		Use:   "freeze",
 		Short: "Freeze a zone (i.e. stop accepting DDNS updates to the zone data)",
@@ -296,7 +312,7 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 	dnssecCmd.AddCommand(setPolicy, policyReset, newAutoRolloverPolicyChangeCmd(), newAutoRolloverCmd(role),
 		sign, resign, nsec)
 
-	c.AddCommand(list, desc, dnssecCmd, reload, bump, write, freeze, thaw, proxyKey, add, del, modify, listDynamic)
+	c.AddCommand(list, desc, dnssecCmd, reload, bump, write, sync, freeze, thaw, proxyKey, add, del, modify, listDynamic)
 	// Role-independent extras attached to every zone tree. Each is built
 	// fresh so the command pointer is unique per NewZoneCmd invocation.
 	c.AddCommand(newZoneReadFakeCmd(), newZoneUpdateCmd(role), newZoneDsyncCmd(role))
@@ -1038,4 +1054,28 @@ func algName(alg uint8) string {
 // 0 renders as "0s".
 func secsToDuration(secs uint32) string {
 	return (time.Duration(secs) * time.Second).String()
+}
+
+// RunZoneSync sends the "sync" command. Same server-side implementation as
+// write-zone -- one code path, two names, so they cannot drift.
+func RunZoneSync(parent string, args []string) {
+	PrepArgs("childzone")
+
+	api, err := GetApiClient(parent, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", parent, err)
+	}
+
+	cr, err := SendZoneCommand(api, tdns.ZonePost{
+		Command: "sync",
+		Zone:    tdns.Globals.Zonename,
+		Force:   force,
+	})
+	if err != nil {
+		fmt.Printf("Error from %s: %s\n", parent, err.Error())
+		os.Exit(1)
+	}
+	if cr.Msg != "" {
+		fmt.Printf("%s\n", cr.Msg)
+	}
 }
