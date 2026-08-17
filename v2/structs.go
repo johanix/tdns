@@ -230,6 +230,13 @@ type ZoneData struct {
 	// replay that re-persisted what it just replayed would double the stored
 	// history on every restart.
 	wsPersistDelta bool
+	// deltasReplayed records that the persisted deltas have already been
+	// applied on top of the zone file CURRENTLY loaded. Set by
+	// ReplayPersistedDeltas on success and cleared by
+	// applyRefreshReplacementLocked whenever the zone is re-read from file, so
+	// a genuine reload replays again while a repeated completion attempt for
+	// the same load does not. Guarded by zd.mu.
+	deltasReplayed bool
 	// wsPersistErr carries a failed delta write from publishWorkingSetLocked
 	// back to the applier. A publish whose delta could not be persisted is
 	// refused outright -- serving a change that is certain to vanish at the

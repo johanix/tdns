@@ -449,6 +449,10 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 }
 
 func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs []*core.RRset, firstLoad bool) error {
+	// The zone has just been re-read; whatever was replayed on top of the
+	// PREVIOUS file no longer applies to this one, so a replay for the new file
+	// is due again.
+	zd.deltasReplayed = false
 	zd.IncomingSerial = new_zd.IncomingSerial
 	switch {
 	case firstLoad:

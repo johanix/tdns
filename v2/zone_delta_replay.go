@@ -42,6 +42,36 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 	// applied, because the replay below moves it.
 	fileSerial := zd.CurrentSerial
 
+	// Already replayed for THIS file load? Then say so quietly and stop.
+	//
+	// Replay can be reached twice for one load: initialLoadZone's `updated`
+	// result is discarded by its caller, and FirstZoneLoad is cleared only on a
+	// successful data replacement -- so a load that returns (false, nil) leaves
+	// the flag set, the ticker retries the initial load, and completion runs a
+	// second time.
+	//
+	// Without this the second pass falls into the chain validation below with a
+	// serial the FIRST replay already advanced, and reports "the file has been
+	// edited or replaced" -- accusing the operator of tampering with a file
+	// nobody touched, and recording a ConfigWarning to match.
+	//
+	// Deliberately NOT inferred from the serial. "Current serial is ahead of
+	// the delta chain" is equally true when the operator really did replace the
+	// file with a newer one, which is exactly the case the chain check exists
+	// to catch; a serial-based guard would silence a real detection to fix a
+	// false one. The flag is set on a successful replay and cleared by
+	// applyRefreshReplacementLocked whenever the zone is re-read from file, so
+	// it means precisely "these deltas have already been applied on top of the
+	// file currently loaded".
+	zd.mu.Lock()
+	alreadyReplayed := zd.deltasReplayed
+	zd.mu.Unlock()
+	if alreadyReplayed {
+		lg.Debug("persisted zone deltas already replayed for this load; nothing to do",
+			"zone", zd.ZoneName, "serial", fileSerial)
+		return 0, nil
+	}
+
 	// Chain validation. Each delta was computed as the difference from one
 	// specific base, and the first one's FromSerial names the file it was
 	// computed against. If the file on disk is no longer that file -- an
@@ -116,6 +146,13 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 	// the changes are present when they are not: the chain-serial check
 	// upstream only proves the deltas were computed against this file, not that
 	// they landed. Say what actually happened.
+	// Mark the replay done for this file load, whether or not the actions
+	// changed anything: a second attempt on the same load must not re-run the
+	// chain check against a serial this pass has already moved.
+	zd.mu.Lock()
+	zd.deltasReplayed = true
+	zd.mu.Unlock()
+
 	if !applied {
 		lg.Warn("zone deltas replayed but nothing was applied; the zone is serving the file as-is",
 			"zone", zd.ZoneName, "deltas", len(deltas))
