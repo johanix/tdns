@@ -272,6 +272,19 @@ type ZonePost struct {
 	TsigName   string
 	TsigSecret string
 	TsigAlgo   string
+	// TransferSrc is the per-zone source address for this zone's OUTBOUND
+	// transfers. Optional: unset inherits dnsengine.transfer_src, and unset
+	// there means the kernel chooses, which is the pre-existing behaviour.
+	//
+	// It has to be settable here rather than only in the config file, because
+	// the zones that most need it are dynamic: a secondary provisioned over
+	// this API has no config-file stanza to carry it, and no template either
+	// (templates are a primary-only mechanism). Without this field the value
+	// could be persisted and reloaded but never set in the first place.
+	//
+	// On modify, a nil slice leaves the current value alone; an explicitly
+	// empty one clears it. See ModifyDynamicZone.
+	TransferSrc []string
 }
 
 type ZoneResponse struct {

@@ -206,6 +206,7 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 	// flag: dynamic zones are map-only. The --tsig-* flags are accepted now but
 	// inert in Improvement 1 (a non-NOKEY key is rejected server-side).
 	var dzPrimaryKey, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo string
+	var dzTransferSrc []string
 	var dzZoneType, dzTemplate string
 	var dzPrimaries, dzOptions []string
 
@@ -228,7 +229,7 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 					os.Exit(1)
 				}
 			}
-			RunZoneAdd(role, dzZoneType, dzTemplate, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo)
+			RunZoneAdd(role, dzZoneType, dzTemplate, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo, dzTransferSrc)
 		},
 	}
 	add.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add")
@@ -241,6 +242,8 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 	add.Flags().StringVar(&dzTsigSecretFile, "tsig-secret-file", "", "File containing the inline TSIG secret (base64); preferred over --tsig-secret")
 	add.Flags().StringVar(&dzTsigSecret, "tsig-secret", "", "Inline TSIG secret (base64). WARNING: visible in shell history / process list; prefer --tsig-secret-file")
 	add.Flags().StringVar(&dzTsigAlgo, "tsig-algo", "", "Inline TSIG algorithm (default hmac-sha256)")
+	add.Flags().StringSliceVar(&dzTransferSrc, "transfer-src", nil,
+		"Source address(es) to bind for this zone's outbound transfers (IP only, one per family)")
 	add.MarkFlagRequired("zone")
 
 	del := &cobra.Command{
@@ -257,7 +260,7 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 		Use:   "modify",
 		Short: "Modify a dynamic (API-managed) zone's primary or options",
 		Run: func(cmd *cobra.Command, args []string) {
-			RunZoneModify(role, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo)
+			RunZoneModify(role, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo, dzTransferSrc)
 		},
 	}
 	modify.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to modify")
@@ -268,6 +271,9 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 	modify.Flags().StringVar(&dzTsigSecretFile, "tsig-secret-file", "", "File containing the inline TSIG secret (base64); preferred over --tsig-secret")
 	modify.Flags().StringVar(&dzTsigSecret, "tsig-secret", "", "Inline TSIG secret (base64). WARNING: visible in shell history / process list; prefer --tsig-secret-file")
 	modify.Flags().StringVar(&dzTsigAlgo, "tsig-algo", "", "Inline TSIG algorithm (default hmac-sha256)")
+	// Unset leaves the zone's current value alone; --transfer-src="" clears it.
+	modify.Flags().StringSliceVar(&dzTransferSrc, "transfer-src", nil,
+		"Replace the zone's outbound-transfer source address(es); omit to leave unchanged")
 	modify.MarkFlagRequired("zone")
 
 	listDynamic := &cobra.Command{
@@ -601,7 +607,7 @@ func resolveTsigSecret(literal, file string) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
-func RunZoneAdd(role, zoneType, template string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigSecretFile, tsigAlgo string) {
+func RunZoneAdd(role, zoneType, template string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigSecretFile, tsigAlgo string, transferSrc []string) {
 	if tdns.Globals.Zonename == "" {
 		fmt.Println("Error: zone name not specified")
 		os.Exit(1)
@@ -616,15 +622,16 @@ func RunZoneAdd(role, zoneType, template string, primaries []string, primaryKey 
 		log.Fatalf("Error getting API client for %s: %v", role, err)
 	}
 	cr, err := SendZoneCommand(api, tdns.ZonePost{
-		Command:    "add",
-		Zone:       dns.Fqdn(tdns.Globals.Zonename),
-		ZoneType:   zoneType,
-		Template:   template,
-		Primaries:  peerConfsFromAddrs(primaries, primaryKey),
-		Options:    options,
-		TsigName:   tsigName,
-		TsigSecret: secret,
-		TsigAlgo:   tsigAlgo,
+		Command:     "add",
+		Zone:        dns.Fqdn(tdns.Globals.Zonename),
+		ZoneType:    zoneType,
+		Template:    template,
+		Primaries:   peerConfsFromAddrs(primaries, primaryKey),
+		Options:     options,
+		TsigName:    tsigName,
+		TsigSecret:  secret,
+		TsigAlgo:    tsigAlgo,
+		TransferSrc: transferSrc,
 	})
 	if err != nil {
 		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
@@ -657,7 +664,7 @@ func RunZoneDelete(role string) {
 	}
 }
 
-func RunZoneModify(role string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigSecretFile, tsigAlgo string) {
+func RunZoneModify(role string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigSecretFile, tsigAlgo string, transferSrc []string) {
 	if tdns.Globals.Zonename == "" {
 		fmt.Println("Error: zone name not specified")
 		os.Exit(1)
@@ -672,12 +679,13 @@ func RunZoneModify(role string, primaries []string, primaryKey string, options [
 		log.Fatalf("Error getting API client for %s: %v", role, err)
 	}
 	post := tdns.ZonePost{
-		Command:    "modify",
-		Zone:       dns.Fqdn(tdns.Globals.Zonename),
-		Options:    options,
-		TsigName:   tsigName,
-		TsigSecret: secret,
-		TsigAlgo:   tsigAlgo,
+		Command:     "modify",
+		Zone:        dns.Fqdn(tdns.Globals.Zonename),
+		Options:     options,
+		TsigName:    tsigName,
+		TsigSecret:  secret,
+		TsigAlgo:    tsigAlgo,
+		TransferSrc: transferSrc,
 	}
 	if peers := peerConfsFromAddrs(primaries, primaryKey); len(peers) > 0 {
 		post.Primaries = peers

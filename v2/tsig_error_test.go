@@ -11,14 +11,19 @@ import (
 
 type fakeWriteRW struct{ written []byte }
 
-func (f *fakeWriteRW) LocalAddr() net.Addr         { return nil }
-func (f *fakeWriteRW) RemoteAddr() net.Addr        { return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5353} }
-func (f *fakeWriteRW) WriteMsg(*dns.Msg) error     { return nil }
-func (f *fakeWriteRW) Write(b []byte) (int, error) { f.written = append([]byte(nil), b...); return len(b), nil }
-func (f *fakeWriteRW) Close() error                { return nil }
-func (f *fakeWriteRW) TsigStatus() error           { return nil }
-func (f *fakeWriteRW) TsigTimersOnly(bool)         {}
-func (f *fakeWriteRW) Hijack()                     {}
+func (f *fakeWriteRW) LocalAddr() net.Addr { return nil }
+func (f *fakeWriteRW) RemoteAddr() net.Addr {
+	return &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 5353}
+}
+func (f *fakeWriteRW) WriteMsg(*dns.Msg) error { return nil }
+func (f *fakeWriteRW) Write(b []byte) (int, error) {
+	f.written = append([]byte(nil), b...)
+	return len(b), nil
+}
+func (f *fakeWriteRW) Close() error        { return nil }
+func (f *fakeWriteRW) TsigStatus() error   { return nil }
+func (f *fakeWriteRW) TsigTimersOnly(bool) {}
+func (f *fakeWriteRW) Hijack()             {}
 
 func TestWriteTsigErrorResponse(t *testing.T) {
 	req := new(dns.Msg)

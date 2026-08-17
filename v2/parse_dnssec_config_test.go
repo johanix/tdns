@@ -96,9 +96,9 @@ func TestParseDnssecConfig(t *testing.T) {
 // and consults its capabilities.
 type kskOnlyStub struct{}
 
-func (kskOnlyStub) Number() uint8       { return kskOnlyStubNum }
-func (kskOnlyStub) Name() string        { return kskOnlyStubName }
-func (kskOnlyStub) Hash() crypto.Hash   { return 0 }
+func (kskOnlyStub) Number() uint8     { return kskOnlyStubNum }
+func (kskOnlyStub) Name() string      { return kskOnlyStubName }
+func (kskOnlyStub) Hash() crypto.Hash { return 0 }
 func (kskOnlyStub) Generate(int) (crypto.PrivateKey, error) {
 	return nil, errors.New("kskOnlyStub: not implemented")
 }
@@ -154,7 +154,7 @@ func TestParseDnssecConfig_RoleEnforcement(t *testing.T) {
 	//   zsk-role-bad: KSK=ED25519, ZSK=KSKONLYSTUB → ED25519 allows KSKONLYSTUB
 	//   ksk-role-ok:  KSK=KSKONLYSTUB, ZSK=ED25519 → KSKONLYSTUB allows ED25519
 	conf.Dnssec.SplitAlgorithms = map[string][]string{
-		"ED25519":      {kskOnlyStubName},
+		"ED25519":       {kskOnlyStubName},
 		kskOnlyStubName: {"ED25519"},
 	}
 	conf.Dnssec.Policies = map[string]DnssecPolicyConf{

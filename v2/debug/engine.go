@@ -45,9 +45,9 @@ type churn struct {
 	suffix string // "_churn.<zone>."
 	rng    *rand.Rand
 
-	mu       sync.Mutex
-	seq      int
-	owners   []string // every owner ever added (for the query hammer)
+	mu     sync.Mutex
+	seq    int
+	owners []string // every owner ever added (for the query hammer)
 }
 
 // RunChurn executes a churn test to completion and returns the filled report.

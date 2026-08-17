@@ -194,6 +194,43 @@ func (zd *ZoneData) DoTransfer(conf *Config) (bool, uint32, error) {
 	return false, 0, fmt.Errorf("SOA probe of %s failed: all %d upstream(s) unreachable: %w", zd.ZoneName, len(zd.Upstreams), lastErr)
 }
 
+// newTransferScratchZone builds the throwaway ZoneData an inbound AXFR is
+// received into. The transfer must not write into the live zone until it has
+// succeeded, so it lands here first and is flipped in afterwards.
+//
+// It is a PARTIAL copy, and that is the trap: anything ZoneTransferIn reads off
+// its receiver has to be listed here, or the transfer silently runs without it.
+// transfer-src was added to ZoneData and to the config, plumbed all the way
+// through provisioning, persistence and reload -- and then dropped here, one
+// line before the call that uses it. The feature was inert on every AXFR while
+// looking correct everywhere an operator could inspect it.
+//
+// TransferSrc is resolved on the LIVE zone rather than copied raw: the live zone
+// is the one holding both the per-zone value and the KeyDB carrying the global
+// default, so this hands over an already-resolved list and the scratch zone does
+// not need a KeyDB of its own.
+//
+// Anything added to ZoneTransferIn's reads of zd belongs in this function.
+func newTransferScratchZone(zd *ZoneData) ZoneData {
+	srcs, tier := zd.EffectiveTransferSrcWithSource()
+	return ZoneData{
+		ZoneName:        zd.ZoneName,
+		ZoneType:        zd.ZoneType,
+		ZoneStore:       zd.ZoneStore,
+		XfrType:         zd.XfrType,
+		IncomingSerial:  zd.IncomingSerial,
+		CurrentSerial:   zd.CurrentSerial,
+		Logger:          zd.Logger,
+		Verbose:         zd.Verbose,
+		Debug:           zd.Debug,
+		Options:         zd.Options,
+		TransferSrc:     srcs,
+		TransferSrcTier: tier,
+		Ready:           true, // this is only used by the checks for changes to DNSKEYs, HSYNC, etc.
+		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
+	}
+}
+
 // Return updated, error
 func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core.RRset) (bool, error) {
 
@@ -301,20 +338,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug, force bool, dynamicRRs []*
 	for _, up := range zd.Upstreams {
 		upstream := up.Addr
 		lg.Info("transferring zone via AXFR", "zone", zd.ZoneName, "upstream", upstream)
-		new_zd = ZoneData{
-			ZoneName:       zd.ZoneName,
-			ZoneType:       zd.ZoneType,
-			ZoneStore:      zd.ZoneStore,
-			XfrType:        zd.XfrType,
-			IncomingSerial: zd.IncomingSerial,
-			CurrentSerial:  zd.CurrentSerial,
-			Logger:         zd.Logger,
-			Verbose:        zd.Verbose,
-			Debug:          zd.Debug,
-			Options:        zd.Options,
-			Ready:          true, // this is only used by the checks for changes to DNSKEYs, HSYNC, etc.
-			// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
-		}
+		new_zd = newTransferScratchZone(zd)
 		if _, err := new_zd.ZoneTransferIn(up, zd.IncomingSerial, "axfr", conf); err != nil {
 			lg.Warn("FetchFromUpstream: AXFR from upstream failed, trying next", "zone", zd.ZoneName, "upstream", upstream, "err", err)
 			lastErr = err
@@ -715,6 +739,34 @@ func FindZoneNG(qname string) *ZoneData {
 // Suppression for a non-originating tdns-auth secondary is deliberately NOT
 // applied here — this answers "what mode is configured", not "may this zone
 // act on it"; the callers pair it with the origination predicate.
+// EffectiveTransferSrc returns the source addresses to bind when dialling this
+// zone's upstreams, resolving the per-zone value over the server-global
+// dnsengine.transfer_src. Empty means "let the kernel choose", which is the
+// behaviour every zone had before this existed.
+func (zd *ZoneData) EffectiveTransferSrc() []string {
+	srcs, _ := zd.EffectiveTransferSrcWithSource()
+	return srcs
+}
+
+// EffectiveTransferSrcWithSource is EffectiveTransferSrc plus the tier that
+// supplied it ("zone", "global" or "default"), for display by `zone desc`. Both
+// live in one function for the same reason as the outbound-serial pair below:
+// so the precedence chain cannot be stated twice and silently diverge.
+func (zd *ZoneData) EffectiveTransferSrcWithSource() (srcs []string, source string) {
+	if len(zd.TransferSrc) > 0 {
+		if zd.TransferSrcTier != "" {
+			return zd.TransferSrc, zd.TransferSrcTier // already resolved upstream
+		}
+		return zd.TransferSrc, "zone" // per-zone, possibly via its template
+	}
+	if zd.KeyDB != nil {
+		if srcs := zd.KeyDB.TransferSrcList(); len(srcs) > 0 {
+			return srcs, "global" // dnsengine.transfer_src
+		}
+	}
+	return nil, "default"
+}
+
 func (zd *ZoneData) EffectiveOutboundSoaSerial() string {
 	mode, _ := zd.EffectiveOutboundSoaSerialWithSource()
 	return mode
@@ -729,8 +781,10 @@ func (zd *ZoneData) EffectiveOutboundSoaSerialWithSource() (mode, source string)
 	if zd.OutboundSoaSerial != "" {
 		return zd.OutboundSoaSerial, "zone" // per-zone, possibly via its template
 	}
-	if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial != "" {
-		return zd.KeyDB.OutboundSoaSerial, "global" // dnsengine.outbound_soa_serial
+	if zd.KeyDB != nil {
+		if mode := zd.KeyDB.OutboundSoaSerialMode(); mode != "" {
+			return mode, "global" // dnsengine.outbound_soa_serial
+		}
 	}
 	return OutboundSoaSerialKeep, "default"
 }
