@@ -54,6 +54,12 @@ type ZoneJournalInfo struct {
 	// database but NOT in what the zone is serving.
 	Replayed bool
 
+	// PersistenceActive is false when the deployment-wide kill-switch
+	// (journal: active: false) is set. A server quietly not persisting is the
+	// thing this whole subsystem exists to prevent, so it is reported rather
+	// than left to be inferred from a journal that never grows.
+	PersistenceActive bool
+
 	Deltalist []ZoneJournalDelta `json:",omitempty"`
 }
 
@@ -91,13 +97,14 @@ func (zd *ZoneData) JournalInfo(detail bool) (*ZoneJournalInfo, error) {
 	zd.mu.Unlock()
 
 	info := &ZoneJournalInfo{
-		Zone:         zd.ZoneName,
-		Zonefile:     zd.Zonefile,
-		Deltas:       len(deltas),
-		FileSerial:   fileSerial,
-		ServedSerial: served,
-		Replayed:     replayed,
-		Replayable:   true,
+		Zone:              zd.ZoneName,
+		Zonefile:          zd.Zonefile,
+		Deltas:            len(deltas),
+		FileSerial:        fileSerial,
+		ServedSerial:      served,
+		Replayed:          replayed,
+		Replayable:        true,
+		PersistenceActive: JournalActive(),
 	}
 
 	for _, d := range deltas {

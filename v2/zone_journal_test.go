@@ -559,3 +559,108 @@ func TestJournalPurgeReportsWhatArrivedDuringIt(t *testing.T) {
 		t.Fatalf("Remaining = %d on an uncontended purge, want 0", res.Remaining)
 	}
 }
+
+// withJournalActive sets the deployment-wide kill-switch for the duration of a
+// test. Absent config means ON, so the tests that need it OFF must say so.
+func withJournalActive(t *testing.T, active bool) {
+	t.Helper()
+	confMu.Lock()
+	prev := Conf.Journal.Active
+	Conf.Journal.Active = &active
+	confMu.Unlock()
+	t.Cleanup(func() {
+		confMu.Lock()
+		Conf.Journal.Active = prev
+		confMu.Unlock()
+	})
+}
+
+// TestJournalActiveDefaultsOn is the single most important property of the
+// switch. It is a *bool so that ABSENT means on -- a plain bool would default
+// to false and silently disable persistence for every existing config on
+// upgrade, which is the exact failure this subsystem exists to prevent.
+func TestJournalActiveDefaultsOn(t *testing.T) {
+	confMu.Lock()
+	prev := Conf.Journal.Active
+	Conf.Journal.Active = nil
+	confMu.Unlock()
+	t.Cleanup(func() {
+		confMu.Lock()
+		Conf.Journal.Active = prev
+		confMu.Unlock()
+	})
+
+	if !JournalActive() {
+		t.Fatal("an absent journal.active disabled persistence; it must default ON")
+	}
+}
+
+func TestJournalActiveExplicitValues(t *testing.T) {
+	withJournalActive(t, false)
+	if JournalActive() {
+		t.Fatal("journal.active=false did not disable persistence")
+	}
+	withJournalActive(t, true)
+	if !JournalActive() {
+		t.Fatal("journal.active=true did not enable persistence")
+	}
+}
+
+// TestKillSwitchStopsNewDeltas: an update still applies and is served, it just
+// is not recorded.
+func TestKillSwitchStopsNewDeltas(t *testing.T) {
+	withJournalActive(t, false)
+
+	kdb := newTestKeyDB(t)
+	zd := journalTestZone(t, kdb)
+
+	info, err := zd.JournalInfo(false)
+	if err != nil {
+		t.Fatalf("JournalInfo: %v", err)
+	}
+	if info.Deltas != 0 {
+		t.Fatalf("the kill-switch was set but %d delta(s) were recorded", info.Deltas)
+	}
+	if info.PersistenceActive {
+		t.Fatal("status reports persistence active while the kill-switch is set")
+	}
+	// The update itself still landed -- off means "not durable", not "refused".
+	if !hasARRset(t, zd, "one.example.") {
+		t.Fatal("the kill-switch stopped the update being applied; it must only stop recording")
+	}
+}
+
+// TestKillSwitchStillReplaysAnExistingJournal. Flipping the switch must not
+// discard what is already recorded, or the escape hatch becomes a second way to
+// lose data.
+func TestKillSwitchStillReplaysAnExistingJournal(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	// Build a journal with persistence ON.
+	zd := journalTestZone(t, kdb)
+	if info, err := zd.JournalInfo(false); err != nil {
+		t.Fatalf("JournalInfo: %v", err)
+	} else if info.Deltas == 0 {
+		t.Fatal("precondition: no journal was recorded")
+	}
+
+	// Now the operator sets the kill-switch and restarts.
+	withJournalActive(t, false)
+
+	fresh := testZone(t, "example.", deltaZone)
+	registerZones(t, fresh)
+	fresh.KeyDB = kdb
+	fresh.UpdatePolicy = policyAllowing(dns.TypeA, dns.TypeTXT)
+
+	n, err := fresh.ReplayPersistedDeltas(kdb)
+	if err != nil {
+		t.Fatalf("replay with the kill-switch set: %v", err)
+	}
+	if n == 0 {
+		t.Fatal("the kill-switch suppressed replay of an EXISTING journal;" +
+			" it must only stop new deltas being recorded")
+	}
+	if !hasARRset(t, fresh, "one.example.") {
+		t.Fatal("the already-recorded change did not come back")
+	}
+}
