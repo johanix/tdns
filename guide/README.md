@@ -32,6 +32,21 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   the `imrengine.tuning.*` knobs) and
   [tdns-agent](config-tdns-agent.md) (placeholder).
 
+- [Changing Zone Content: DDNS and the Management API](zone-updates.md)
+  -- The two channels that change a running primary zone
+  without touching its file: RFC 2136 UPDATE and the
+  management API. How they differ (and why `--via` has no
+  default), the five statements (`addrr`, `delrr`,
+  `delrrset`, `delname`, `replacerrset`) and their sharp
+  edges, what "applied" promises, durability via the zone
+  file and the delta journal, the journal CLI
+  (`status`/`list`/`truncate`/`purge`) and replaying an
+  instruction file, `freeze`/`thaw`/`sync`, and the
+  refusals. For a *child's* delegation data in a parent
+  zone see delegation sync in
+  [special-features.md](special-features.md#1-automatic-delegation-synchronization)
+  instead.
+
 - [The tdns Keystore](keystore.md)
   -- What the keystore is and everything you can do with
   it: the three key classes (DNSSEC, SIG(0), TSIG), where

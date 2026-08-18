@@ -387,7 +387,19 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	// for durability.
 	if zd.wsPersistDelta {
 		zd.wsPersistDelta = false
-		if oldSnap != nil && zd.KeyDB != nil {
+		// The kill-switch (journal: active: false). Checked HERE, at the single
+		// point where a delta would be written, rather than at the two places
+		// that set wsPersistDelta -- one gate cannot drift from the other, and a
+		// future third setter is covered without being remembered.
+		//
+		// Only the WRITE side is gated. Replay is untouched: an operator who
+		// disables the journal must not thereby discard the deltas already in
+		// it, or the escape hatch becomes a second way to lose data.
+		if !JournalActive() {
+			lg.Debug("delta persistence is disabled (journal: active: false);"+
+				" this change will NOT survive a restart",
+				"zone", zd.ZoneName, "serial", serial)
+		} else if oldSnap != nil && zd.KeyDB != nil {
 			removed, added, _ := computeZoneDelta(zd.ZoneName, oldSnap.Data, data)
 			if len(removed) > 0 || len(added) > 0 {
 				// What this delta chains FROM.
