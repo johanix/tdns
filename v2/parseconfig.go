@@ -1378,6 +1378,18 @@ func activateUpdatePolicy(zconf *ZoneConf, options map[ZoneOption]bool) (UpdateP
 		options[OptOnConflictDBWins] = true
 	}
 
+	// With the conflict options settled, the backend can be checked against
+	// them. Order matters: rule (2) below reads OptOnConflictDBWins.
+	if err := validateDelegationBackendCombination(zconf, options); err != nil {
+		return UpdatePolicy{}, err
+	}
+	if msg := delegationBackendUnusedWarning(zconf, options); msg != "" {
+		lgConfig.Warn(msg, "zone", zconf.Name)
+	}
+	if msg := delegationBackendContract(zconf, options); msg != "" {
+		lgConfig.Info(msg, "zone", zconf.Name, "backend", zconf.DelegationBackend)
+	}
+
 	switch zconf.UpdatePolicy.Zone.Type {
 	case "selfsub", "self":
 		// all ok, we know these
