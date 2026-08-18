@@ -292,6 +292,40 @@ func replayZoneDeltasOnLoad(zd *ZoneData) {
 		}
 	}
 
+	// A CHANGED file takes the merge path, not the replay path. Replay asserts
+	// the chain starts at this file and refuses otherwise -- correct when the
+	// file is the one the journal was computed against, and destructive when it
+	// is not, because refusing discards every journalled change.
+	if verdict == ZoneFileChanged {
+		res, merr := zd.MergeJournalOverNewFile(zd.KeyDB)
+		if merr != nil {
+			lg.Error("could not merge the persisted deltas with the replaced zone file;"+
+				" the zone is serving its file alone and recent changes are NOT present",
+				"zone", zd.ZoneName, "error", merr)
+			zd.SetError(ConfigWarning,
+				"zone file changed and its deltas could not be merged: %v", merr)
+			return
+		}
+		switch {
+		case len(res.Instructions) == 0:
+			lg.Info("the zone file changed; no persisted deltas to reconcile with it",
+				"zone", zd.ZoneName, "serial", zd.CurrentSerial)
+		case len(res.Conflicts) == 0:
+			lg.Info("the zone file changed; merged the persisted deltas over it with no conflicts",
+				"zone", zd.ZoneName, "records", len(res.Instructions), "serial", zd.CurrentSerial)
+		default:
+			lg.Warn("the zone file changed; merged the persisted deltas over it, and records"+
+				" from the FILE lost where the two disagreed",
+				"zone", zd.ZoneName, "records", len(res.Instructions),
+				"conflicts", len(res.Conflicts), "policy", res.Policy.String(),
+				"rejected", res.Artefact, "serial", zd.CurrentSerial)
+			zd.SetError(ConfigWarning,
+				"zone file changed; %d record(s) from the file lost the merge, see %s",
+				len(res.Conflicts), res.Artefact)
+		}
+		return
+	}
+
 	n, err := zd.ReplayPersistedDeltas(zd.KeyDB)
 	if err != nil {
 		lg.Error("could not replay persisted deltas; the zone is serving its file alone"+

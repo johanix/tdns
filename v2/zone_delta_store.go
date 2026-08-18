@@ -453,3 +453,66 @@ func (kdb *KeyDB) LastZoneDeltaSerial(zone string) (uint32, bool, error) {
 	}
 	return uint32(toSerial.Int64), true, nil
 }
+
+// ReplaceZoneJournal atomically swaps a zone's whole journal for a single
+// delta. Used by the merge: after reconciling with a replaced zone file, the
+// old chain describes a file that no longer exists, and the one delta that
+// matters is "the difference between the file in hand and what is now served".
+//
+// One transaction, because the intermediate state -- old chain gone, new delta
+// not yet written -- is a zone with no record of its unwritten changes at all.
+// A crash there would lose them.
+func (kdb *KeyDB) ReplaceZoneJournal(zone string, fromSerial, toSerial uint32,
+	removed, added []core.RRset) error {
+
+	if kdb == nil || kdb.DB == nil {
+		return fmt.Errorf("ReplaceZoneJournal: no database")
+	}
+	if !serialNewer(toSerial, fromSerial) {
+		return fmt.Errorf("ReplaceZoneJournal: zone %s: %d -> %d does not advance the serial",
+			zone, fromSerial, toSerial)
+	}
+	zone = dns.Fqdn(zone)
+
+	rows := make([]ZoneDeltaRR, 0, len(removed)+len(added))
+	for _, rrset := range removed {
+		for _, rr := range rrset.RRs {
+			rows = append(rows, ZoneDeltaRR{Action: ZoneDeltaDel, RR: rr.String()})
+		}
+	}
+	for _, rrset := range added {
+		for _, rr := range rrset.RRs {
+			rows = append(rows, ZoneDeltaRR{Action: ZoneDeltaAdd, RR: rr.String()})
+		}
+	}
+
+	tx, err := kdb.Begin("ReplaceZoneJournal")
+	if err != nil {
+		return err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			tx.Rollback()
+		}
+	}()
+
+	if _, err := tx.Exec(`DELETE FROM ZoneDelta WHERE zone=?`, zone); err != nil {
+		return fmt.Errorf("ReplaceZoneJournal: clearing the old chain: %v", err)
+	}
+
+	const insertSql = `
+INSERT INTO ZoneDelta (zone, fromserial, toserial, seq, action, rr) VALUES (?, ?, ?, ?, ?, ?)`
+	for i, row := range rows {
+		if _, err := tx.Exec(insertSql, zone, fromSerial, toSerial, i, row.Action, row.RR); err != nil {
+			return fmt.Errorf("ReplaceZoneJournal: zone %s serial %d->%d: %v",
+				zone, fromSerial, toSerial, err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("ReplaceZoneJournal: commit: %v", err)
+	}
+	committed = true
+	return nil
+}

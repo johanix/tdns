@@ -153,24 +153,39 @@ Adds do not conflict. An add at an owner/type the new file also populates
 simply unions, and a `replacerrset` carries its own removes, so genuine
 replacements are caught by the rule above.
 
-### 5.2 The mirror case
+### 5.2 The mirror case does not exist (corrected)
 
-There is a second, equally detectable contest with no record to point at:
+This section previously claimed a second, symmetric contest — *the
+journal adds R and the new file lacks R, so the operator deleted it*.
+**That case does not exist**, and implementing it would have flagged
+every ordinary journal entry as a conflict.
 
-> The journal **adds** R, and the new file does not contain R.
+A journal ADD implies the **old** file lacked that record: the delta was
+computed as the difference from that file, so anything it adds was absent
+there. Therefore:
 
-The operator either deleted R or is working from a file that predates it.
-Replaying re-adds it, so their deletion is silently undone. Same conflict,
-same resolution, but what lost is an *absence*, not a record. It must be
-reported, or the artefact in §6 would cover only the half of the
-conflicts that happen to be expressible as records.
+- the new file also lacks it → it agrees with the old file, and the
+  operator removed nothing;
+- the new file has it → the operator added the same record
+  independently, which is agreement.
+
+Neither is a conflict and neither needs resolving. The consequence is
+that §5.1 is the whole rule, every inverse is an `ADD`, and the artefact
+in §6 never contains a `DEL`.
+
+**One conflict does stay invisible**, and no care in the implementation
+would surface it: an operator who regenerates the file from the *live
+zone* while deliberately omitting a record the journal added. That file
+is indistinguishable from one that simply predates the addition, and
+telling them apart needs the old file's contents, which is not something
+we store. Named here rather than papered over.
 
 ### 5.3 Summary
 
 | Situation | Merged result | Reported |
 |---|---|---|
 | journal deletes R, file has R | R absent | yes |
-| journal adds R, file lacks R | R present | yes |
+| journal adds R, file lacks R | R present | no — the old file lacked it too (§5.2) |
 | journal adds R, file has R | R present | no — agreement |
 | file changed something the journal never touches | file's version | no — uncontested |
 | journal touches something the file never had | journal's version | no — uncontested |
@@ -194,7 +209,11 @@ undo the merge's decisions in favour of your zone file*:
 | Conflict | Instruction |
 |---|---|
 | journal deleted R, your file had R | `ADD R` |
-| journal added R, your file lacked R | `DEL R` |
+
+There is only one row, for the reason given in §5.2, so an artefact
+consists entirely of `ADD` lines. The format still carries `DEL` — it is
+shared with `journal purge` and `journal list --instructions`, which do
+emit both.
 
 So an operator who disagrees with the merge inspects it and feeds it
 straight back through `tdns-cli auth zone update`. The descriptive

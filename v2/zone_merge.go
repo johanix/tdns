@@ -6,6 +6,8 @@ package tdns
 
 import (
 	"bytes"
+	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -206,4 +208,169 @@ func mergeSerialFloor(fileSerial, servedSerial, journalHead uint32) uint32 {
 		floor = journalHead
 	}
 	return floor + 1
+}
+
+// MergeJournalOverNewFile reconciles a REPLACED zone file with the delta
+// journal, and returns what it decided.
+//
+// Called instead of ReplayPersistedDeltas when the file's digest says it
+// changed. The distinction matters: replay asserts the chain starts at this
+// file and refuses otherwise, which is right when the file is the one the
+// journal was computed against and wrong -- destructively wrong, since it
+// discards every journalled change -- when it is not.
+//
+// The sequence, and why it is this order:
+//
+//  1. Snapshot the file as parsed. Conflict detection needs the file BEFORE
+//     the journal touches it, and so does the re-anchor in step 6.
+//  2. Find conflicts and write the artefact FIRST, before applying anything.
+//     An artefact written after a failed apply describes a merge that did not
+//     happen; one written before describes a decision we are about to make.
+//  3. Lift the serial clear of everything already served, BEFORE applying, so
+//     one publish does it.
+//  4. Apply the journal (db-wins).
+//  5. Re-anchor: replace the whole journal with one delta from THIS file.
+//
+// Step 5 is what makes the merge repeatable. Without it the chain still claims
+// to start at a file that no longer exists, so the next load merges again --
+// re-applying changes the zone already has and re-reporting conflicts already
+// resolved.
+func (zd *ZoneData) MergeJournalOverNewFile(kdb *KeyDB) (*ZoneMergeResult, error) {
+	if zd == nil || kdb == nil {
+		return nil, fmt.Errorf("no zone or no database")
+	}
+
+	insns, _, err := zd.JournalInstructions()
+	if err != nil {
+		return nil, err
+	}
+	if len(insns) == 0 {
+		// Nothing to reconcile: the file changed but the journal is empty, so
+		// the file is simply the zone. This is the common case after any
+		// write-out, and it is not a conflict of any kind.
+		return &ZoneMergeResult{Policy: ConflictDBWins}, nil
+	}
+
+	// (1) The file as parsed, before the journal is applied to it.
+	fileSnap := zd.publishedSnapshot()
+	if fileSnap == nil {
+		return nil, fmt.Errorf("zone %s: no published snapshot to merge onto", zd.ZoneName)
+	}
+	fileData := fileSnap.Data
+	fileRRs := zoneRRsFromSnapshot(fileSnap)
+
+	zd.mu.Lock()
+	fileSerial := zd.fileSerial
+	zonefile := zd.Zonefile
+	zd.mu.Unlock()
+
+	// (2) Conflicts, and the inverse on disk before anything is applied.
+	conflicts, err := findMergeConflicts(fileRRs, insns)
+	if err != nil {
+		return nil, err
+	}
+	res := &ZoneMergeResult{Policy: ConflictDBWins, Conflicts: conflicts, Instructions: insns}
+
+	if len(conflicts) > 0 {
+		path, werr := writeRejectedArtefact(zonefile, zd.ZoneName, fileSerial, ConflictDBWins, conflicts)
+		if werr != nil {
+			// Refuse the merge. Resolving conflicts in the journal's favour
+			// without being able to tell the operator which of their records
+			// lost is precisely the silent data loss this design exists to
+			// avoid -- and the zone still serves the file, which is intact.
+			return nil, fmt.Errorf("zone %s: refusing to merge, because the records your zone"+
+				" file would lose could not be saved to %s.%d.rejected: %v",
+				zd.ZoneName, zonefile, fileSerial, werr)
+		}
+		res.Artefact = path
+	}
+
+	// (3) Lift the serial BEFORE applying, so the publish the apply performs
+	// lands above everything already served rather than needing a second bump
+	// afterwards (which secondaries would see as two changes, and which the
+	// configured outbound_soa_serial mode would have to be fought over twice).
+	//
+	// LoadOutgoingSerial is the durable record of what secondaries have been
+	// handed. Without this floor the merged zone can publish BELOW a serial one
+	// of them already holds, and a secondary refreshes on a serial increase and
+	// nothing else -- so it would serve the pre-merge zone indefinitely.
+	//
+	// Raising CurrentSerial rather than setting the final value: every bump
+	// mode only ever moves forward, so starting the publish one below the floor
+	// guarantees it lands at or above it whatever the mode.
+	// A zone that has never notified a secondary has no outgoing serial, and
+	// that is the normal case rather than a failure -- sql.ErrNoRows here means
+	// "nothing has been served yet", so the floor is simply the file's own
+	// serial. Only a real database error is worth warning about.
+	outgoing, oerr := kdb.LoadOutgoingSerial(zd.ZoneName)
+	if oerr != nil {
+		outgoing = 0
+		if !errors.Is(oerr, sql.ErrNoRows) {
+			lg.Warn("could not read the outgoing serial; the merged zone may publish below"+
+				" a serial some secondary already holds",
+				"zone", zd.ZoneName, "error", oerr)
+		}
+	}
+	zd.mu.Lock()
+	floor := mergeSerialFloor(fileSerial, outgoing, zd.CurrentSerial)
+	if serialNewer(floor-1, zd.CurrentSerial) {
+		lg.Info("lifting the merged zone's serial clear of what has already been served",
+			"zone", zd.ZoneName, "from", zd.CurrentSerial, "floor", floor,
+			"file_serial", fileSerial, "outgoing_serial", outgoing)
+		zd.CurrentSerial = floor - 1
+	}
+	zd.mu.Unlock()
+
+	// (4) Apply. InternalUpdate: these changes were authorized when first
+	// applied. Replay: suppresses re-persisting what we are replaying, since
+	// step 5 rewrites the journal wholesale.
+	actions, err := UpdateInstructionActions(insns)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := zd.ApplyZoneUpdateToZoneData(UpdateRequest{
+		Cmd:            "ZONE-UPDATE",
+		ZoneName:       zd.ZoneName,
+		Actions:        actions,
+		InternalUpdate: true,
+		Replay:         true,
+		Description:    "merge of persisted deltas over a replaced zone file",
+	}, kdb); err != nil {
+		return nil, fmt.Errorf("zone %s: applying the journal to the new file: %v", zd.ZoneName, err)
+	}
+
+	// (5) Re-anchor. The journal now means exactly "what this file does not
+	// have", which is what it is supposed to mean and what the next load will
+	// check it against.
+	mergedSnap := zd.publishedSnapshot()
+	if mergedSnap == nil {
+		return nil, fmt.Errorf("zone %s: no snapshot after the merge", zd.ZoneName)
+	}
+	removed, added, _ := computeZoneDelta(zd.ZoneName, fileData, mergedSnap.Data)
+	if len(removed) == 0 && len(added) == 0 {
+		// The merge changed nothing the file did not already have. Then the
+		// file IS the zone and the journal has nothing left to carry.
+		if _, derr := kdb.DeleteZoneDeltas(zd.ZoneName); derr != nil {
+			return nil, fmt.Errorf("zone %s: clearing a journal the file already contains: %v",
+				zd.ZoneName, derr)
+		}
+	} else if rerr := kdb.ReplaceZoneJournal(zd.ZoneName, fileSerial,
+		mergedSnap.Serial, removed, added); rerr != nil {
+		return nil, fmt.Errorf("zone %s: re-anchoring the journal to the new file: %v",
+			zd.ZoneName, rerr)
+	}
+
+	zd.mu.Lock()
+	zd.deltasReplayed = true
+	// Dirty: the file demonstrably lacks what was just merged in, and dirty is
+	// the flag that says "memory differs from disk". Guarded because a nil
+	// Options map must not panic the LOAD path -- a zone that fails to come up
+	// is a worse outcome than a zone that comes up without a dirty flag.
+	if zd.Options == nil {
+		zd.Options = map[ZoneOption]bool{}
+	}
+	zd.Options[OptDirty] = true
+	zd.mu.Unlock()
+
+	return res, nil
 }
