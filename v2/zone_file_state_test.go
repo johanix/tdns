@@ -7,7 +7,6 @@ package tdns
 import (
 	"strings"
 	"testing"
-
 )
 
 // TestZoneFileStateRoundTrip: what is recorded comes back.

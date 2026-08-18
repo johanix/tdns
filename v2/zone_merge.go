@@ -155,26 +155,39 @@ func findMergeConflicts(fileRRs []dns.RR, insns []ZoneDeltaRR) ([]ZoneMergeConfl
 func writeRejectedArtefact(zonefile string, zone string, serial uint32,
 	policy ZoneConflictPolicy, conflicts []ZoneMergeConflict) (string, error) {
 
-	if zonefile == "" || len(conflicts) == 0 {
-		return "", nil
-	}
-	path := fmt.Sprintf("%s.%d.rejected", zonefile, serial)
-
 	insns := make([]ZoneDeltaRR, 0, len(conflicts))
 	for _, c := range conflicts {
 		insns = append(insns, c.Inverse)
 	}
+	return writeRejectedArtefactInstructions(zonefile, zone, serial, policy, insns)
+}
+
+// writeRejectedArtefactInstructions writes an already-composed instruction list.
+// Under db-wins those are ADDs restoring the zone file's records; under
+// zonefile-wins they are the journal's DELETEs that were not applied.
+func writeRejectedArtefactInstructions(zonefile string, zone string, serial uint32,
+	policy ZoneConflictPolicy, insns []ZoneDeltaRR) (string, error) {
+
+	if zonefile == "" || len(insns) == 0 {
+		return "", nil
+	}
+	path := fmt.Sprintf("%s.%d.rejected", zonefile, serial)
+
+	losing := "records from your zone file that lost a merge with the delta journal"
+	if policy == ConflictZonefileWins {
+		losing = "changes from the delta journal that lost a merge with your zone file"
+	}
 
 	comments := []string{
-		"tdns: records from your zone file that lost a merge with the delta journal",
+		"tdns: " + losing,
 		fmt.Sprintf("zone:     %s", zone),
 		fmt.Sprintf("file:     %s (serial %d)", zonefile, serial),
 		fmt.Sprintf("policy:   %s", policy),
 		fmt.Sprintf("merged:   %s", time.Now().Format(time.RFC3339)),
 		"",
-		"These are NOT a log of what happened -- they are the update that would put",
-		"your version back. Delete the lines you agree with, keep the ones you do",
-		"not, and replay what is left:",
+		"These are NOT a log of what happened -- they are the update that would",
+		"REVERSE the decisions below. Delete the lines you agree with, keep the",
+		"ones you do not, and replay what is left:",
 		"",
 		fmt.Sprintf("  tdns-cli auth zone update from-file --file %s --zone %s --via api",
 			path, zone),
@@ -244,11 +257,13 @@ func (zd *ZoneData) MergeJournalOverNewFile(kdb *KeyDB) (*ZoneMergeResult, error
 	if err != nil {
 		return nil, err
 	}
+	policy := zoneConflictPolicy(zd)
+
 	if len(insns) == 0 {
 		// Nothing to reconcile: the file changed but the journal is empty, so
 		// the file is simply the zone. This is the common case after any
 		// write-out, and it is not a conflict of any kind.
-		return &ZoneMergeResult{Policy: ConflictDBWins}, nil
+		return &ZoneMergeResult{Policy: policy}, nil
 	}
 
 	// (1) The file as parsed, before the journal is applied to it.
@@ -269,17 +284,23 @@ func (zd *ZoneData) MergeJournalOverNewFile(kdb *KeyDB) (*ZoneMergeResult, error
 	if err != nil {
 		return nil, err
 	}
-	res := &ZoneMergeResult{Policy: ConflictDBWins, Conflicts: conflicts, Instructions: insns}
+	res := &ZoneMergeResult{Policy: policy, Conflicts: conflicts, Instructions: insns}
 
-	if len(conflicts) > 0 {
-		path, werr := writeRejectedArtefact(zonefile, zd.ZoneName, fileSerial, ConflictDBWins, conflicts)
+	// Which instructions actually get applied, and what the artefact records,
+	// both depend on who wins. The two directions are mirror images: the
+	// artefact is always the update that would flip the merge's decision.
+	apply, artefactInsns := applicableInstructions(insns, conflicts, policy)
+
+	if len(artefactInsns) > 0 {
+		path, werr := writeRejectedArtefactInstructions(zonefile, zd.ZoneName, fileSerial,
+			policy, artefactInsns)
 		if werr != nil {
 			// Refuse the merge. Resolving conflicts in the journal's favour
 			// without being able to tell the operator which of their records
 			// lost is precisely the silent data loss this design exists to
 			// avoid -- and the zone still serves the file, which is intact.
-			return nil, fmt.Errorf("zone %s: refusing to merge, because the records your zone"+
-				" file would lose could not be saved to %s.%d.rejected: %v",
+			return nil, fmt.Errorf("zone %s: refusing to merge, because the records that would"+
+				" lose could not be saved to %s.%d.rejected: %v",
 				zd.ZoneName, zonefile, fileSerial, werr)
 		}
 		res.Artefact = path
@@ -324,19 +345,28 @@ func (zd *ZoneData) MergeJournalOverNewFile(kdb *KeyDB) (*ZoneMergeResult, error
 	// (4) Apply. InternalUpdate: these changes were authorized when first
 	// applied. Replay: suppresses re-persisting what we are replaying, since
 	// step 5 rewrites the journal wholesale.
-	actions, err := UpdateInstructionActions(insns)
+	if len(apply) == 0 {
+		// zonefile-wins where every instruction was contested: the file already
+		// says everything the merge would have said.
+		lg.Info("zone file wins every contested record; nothing from the journal to apply",
+			"zone", zd.ZoneName, "conflicts", len(conflicts))
+	}
+	actions, err := UpdateInstructionActions(apply)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := zd.ApplyZoneUpdateToZoneData(UpdateRequest{
-		Cmd:            "ZONE-UPDATE",
-		ZoneName:       zd.ZoneName,
-		Actions:        actions,
-		InternalUpdate: true,
-		Replay:         true,
-		Description:    "merge of persisted deltas over a replaced zone file",
-	}, kdb); err != nil {
-		return nil, fmt.Errorf("zone %s: applying the journal to the new file: %v", zd.ZoneName, err)
+	if len(actions) > 0 {
+		if _, err := zd.ApplyZoneUpdateToZoneData(UpdateRequest{
+			Cmd:            "ZONE-UPDATE",
+			ZoneName:       zd.ZoneName,
+			Actions:        actions,
+			InternalUpdate: true,
+			Replay:         true,
+			Description:    "merge of persisted deltas over a replaced zone file",
+		}, kdb); err != nil {
+			return nil, fmt.Errorf("zone %s: applying the journal to the new file: %v",
+				zd.ZoneName, err)
+		}
 	}
 
 	// (5) Re-anchor. The journal now means exactly "what this file does not
@@ -373,4 +403,69 @@ func (zd *ZoneData) MergeJournalOverNewFile(kdb *KeyDB) (*ZoneMergeResult, error
 	zd.mu.Unlock()
 
 	return res, nil
+}
+
+// zoneConflictPolicy reads the policy the zone runs under.
+//
+// Exactly one of the two options is always set: the config parser materialises
+// db-wins when neither is given, and rejects both together. So this is a
+// question with two answers, not three, and there is no default to remember
+// here. The fallback below exists only for a ZoneData built outside the config
+// parser (tests, mainly) and agrees with the parser's default.
+func zoneConflictPolicy(zd *ZoneData) ZoneConflictPolicy {
+	if zd == nil {
+		return ConflictDBWins
+	}
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	if zd.Options[OptOnConflictZonefileWins] {
+		return ConflictZonefileWins
+	}
+	return ConflictDBWins
+}
+
+// applicableInstructions returns the journal instructions to apply under the
+// given policy, and the artefact contents describing what lost.
+//
+// Under db-wins every instruction is applied, and the artefact holds ADDs that
+// would put the file's contested records back.
+//
+// Under zonefile-wins the contested DELETES are DROPPED -- the file keeps its
+// records -- and the artefact holds those same deletes, so an operator who
+// decides the journal was right after all can replay them. The two directions
+// are mirror images: in both cases the artefact is the update that would flip
+// the merge's decision.
+func applicableInstructions(insns []ZoneDeltaRR, conflicts []ZoneMergeConflict,
+	policy ZoneConflictPolicy) (apply []ZoneDeltaRR, artefact []ZoneDeltaRR) {
+
+	if policy == ConflictDBWins {
+		art := make([]ZoneDeltaRR, 0, len(conflicts))
+		for _, c := range conflicts {
+			art = append(art, c.Inverse)
+		}
+		return insns, art
+	}
+
+	// zonefile-wins: drop the deletes that contest a record the file still has.
+	contested := make(map[string]bool, len(conflicts))
+	for _, c := range conflicts {
+		if rr, err := dns.NewRR(c.RR); err == nil && rr != nil {
+			contested[rrKey(rr)] = true
+		}
+	}
+
+	apply = make([]ZoneDeltaRR, 0, len(insns))
+	for _, insn := range insns {
+		if insn.Action == ZoneDeltaDel {
+			if rr, err := dns.NewRR(insn.RR); err == nil && rr != nil && contested[rrKey(rr)] {
+				// The journal wanted this gone; the file still has it and the
+				// file wins. Record the instruction so the decision can be
+				// reversed, and do not apply it.
+				artefact = append(artefact, insn)
+				continue
+			}
+		}
+		apply = append(apply, insn)
+	}
+	return apply, artefact
 }

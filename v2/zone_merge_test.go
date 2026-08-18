@@ -384,3 +384,110 @@ func TestMergeWithAnEmptyJournalIsANoOp(t *testing.T) {
 			len(res.Conflicts), len(res.Instructions))
 	}
 }
+
+// TestZonefileWinsKeepsTheFilesRecord is the mirror of
+// TestMergeDBWinsAndRecordsTheLoser: same collision, opposite outcome.
+func TestZonefileWinsKeepsTheFilesRecord(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	const replaced = `example.	3600	IN	SOA	ns.example. hostmaster.example. 9 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+www.example.	3600	IN	A	192.0.2.1
+old.example.	3600	IN	TXT	"remove me"
+`
+	zd := mergeTestZone(t, kdb, replaced, nil, []string{"www.example. 3600 IN A 192.0.2.1"})
+	zd.mu.Lock()
+	if zd.Options == nil {
+		zd.Options = map[ZoneOption]bool{}
+	}
+	zd.Options[OptOnConflictZonefileWins] = true
+	zd.mu.Unlock()
+
+	res, err := zd.MergeJournalOverNewFile(kdb)
+	if err != nil {
+		t.Fatalf("MergeJournalOverNewFile: %v", err)
+	}
+	if res.Policy != ConflictZonefileWins {
+		t.Fatalf("policy = %v, want zonefile-wins", res.Policy)
+	}
+	// The file's record survives -- the opposite of db-wins.
+	if !hasARRset(t, zd, "www.example.") {
+		t.Error("zonefile-wins did not win: the file's record was deleted anyway")
+	}
+	if res.Artefact == "" {
+		t.Fatal("no artefact written for the journal changes that lost")
+	}
+
+	// And the artefact holds the journal's DELETE, so the decision is reversible.
+	body, err := os.ReadFile(res.Artefact)
+	if err != nil {
+		t.Fatalf("reading the artefact: %v", err)
+	}
+	back, err := ParseUpdateInstructions(bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("the artefact does not parse back: %v", err)
+	}
+	if len(back) != 1 || back[0].Action != ZoneDeltaDel {
+		t.Fatalf("artefact = %+v, want one DEL (the journal change that lost)", back)
+	}
+}
+
+// TestZonefileWinsStillAppliesUncontestedChanges. The policy governs contested
+// records only; a journalled change the file says nothing about is not a
+// conflict and must still land, or zonefile-wins would silently mean "ignore
+// the journal entirely".
+func TestZonefileWinsStillAppliesUncontestedChanges(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	const replaced = `example.	3600	IN	SOA	ns.example. hostmaster.example. 9 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+www.example.	3600	IN	A	192.0.2.1
+old.example.	3600	IN	TXT	"remove me"
+`
+	zd := mergeTestZone(t, kdb, replaced,
+		[]string{"journal.example. 3600 IN A 10.1.1.1"},
+		[]string{"www.example. 3600 IN A 192.0.2.1"})
+	zd.mu.Lock()
+	if zd.Options == nil {
+		zd.Options = map[ZoneOption]bool{}
+	}
+	zd.Options[OptOnConflictZonefileWins] = true
+	zd.mu.Unlock()
+
+	if _, err := zd.MergeJournalOverNewFile(kdb); err != nil {
+		t.Fatalf("MergeJournalOverNewFile: %v", err)
+	}
+	if !hasARRset(t, zd, "www.example.") {
+		t.Error("the contested record should have survived under zonefile-wins")
+	}
+	if !hasARRset(t, zd, "journal.example.") {
+		t.Error("an UNCONTESTED journal addition was dropped; the policy over-applied")
+	}
+}
+
+// TestApplicableInstructionsMirrorsTheDecision pins the symmetry at unit level:
+// whatever the policy, the artefact is the update that would flip it.
+func TestApplicableInstructionsMirrorsTheDecision(t *testing.T) {
+	insns := []ZoneDeltaRR{
+		{Action: ZoneDeltaDel, RR: "www.example.\t3600\tIN\tA\t192.0.2.1"},
+		{Action: ZoneDeltaAdd, RR: "new.example.\t3600\tIN\tA\t10.0.0.1"},
+	}
+	conflicts := []ZoneMergeConflict{{
+		RR:      "www.example.\t3600\tIN\tA\t192.0.2.1",
+		Inverse: ZoneDeltaRR{Action: ZoneDeltaAdd, RR: "www.example.\t3600\tIN\tA\t192.0.2.1"},
+	}}
+
+	apply, art := applicableInstructions(insns, conflicts, ConflictDBWins)
+	if len(apply) != 2 {
+		t.Fatalf("db-wins applied %d instructions, want both", len(apply))
+	}
+	if len(art) != 1 || art[0].Action != ZoneDeltaAdd {
+		t.Fatalf("db-wins artefact = %+v, want one ADD", art)
+	}
+
+	apply, art = applicableInstructions(insns, conflicts, ConflictZonefileWins)
+	if len(apply) != 1 || apply[0].Action != ZoneDeltaAdd {
+		t.Fatalf("zonefile-wins applied %+v, want only the uncontested ADD", apply)
+	}
+	if len(art) != 1 || art[0].Action != ZoneDeltaDel {
+		t.Fatalf("zonefile-wins artefact = %+v, want the dropped DEL", art)
+	}
+}
