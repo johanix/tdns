@@ -12,7 +12,6 @@ import (
 // TestDirectOnSecondaryIsRefused: a secondary's content belongs to its primary,
 // so direct's edits are overwritten at the next transfer.
 func TestDirectOnSecondaryIsRefused(t *testing.T) {
-	withAppType(t, AppTypeAuth)
 	err := validateDelegationBackendCombination(
 		&ZoneConf{Name: "example.", Type: "secondary", DelegationBackend: "direct"},
 		map[ZoneOption]bool{OptOnConflictDBWins: true})
@@ -24,15 +23,18 @@ func TestDirectOnSecondaryIsRefused(t *testing.T) {
 	}
 }
 
-// ...but only for tdns-auth. a derived app such as tdns-mpcombiner edits zones as a secondary, and
-// that is its whole job; imposing tdns-auth's invariant on every app that
-// embeds this library is how a derived app breaks at its next pin bump.
-func TestDirectOnSecondaryIsAllowedForOtherApps(t *testing.T) {
-	withAppType(t, AppTypeAgent)
-	if err := validateDelegationBackendCombination(
-		&ZoneConf{Name: "example.", Type: "secondary", DelegationBackend: "direct"},
-		map[ZoneOption]bool{OptOnConflictDBWins: true}); err != nil {
-		t.Fatalf("direct on a secondary was refused for a non-auth app: %v", err)
+// ...for EVERY app, not just tdns-auth. The rule is about whether the edits
+// survive, not about who is allowed to make them: a transfer overwrites the
+// zone whoever wrote it. Gating per app would also make one config valid or
+// invalid depending on which binary read it.
+func TestDirectOnSecondaryIsRefusedForEveryApp(t *testing.T) {
+	for _, at := range []AppType{AppTypeAuth, AppTypeAgent, AppTypeScanner} {
+		withAppType(t, at)
+		if err := validateDelegationBackendCombination(
+			&ZoneConf{Name: "example.", Type: "secondary", DelegationBackend: "direct"},
+			map[ZoneOption]bool{OptOnConflictDBWins: true}); err == nil {
+			t.Errorf("direct on a secondary was accepted for app type %v", at)
+		}
 	}
 }
 
@@ -84,7 +86,6 @@ func TestPrimaryDirectIsFineUnderEitherPolicy(t *testing.T) {
 // The agent case, which is the reason the handoff backends exist: a zone this
 // instance does not serve as primary, handing approved updates onward.
 func TestAgentSecondaryWithHandoffBackendIsFine(t *testing.T) {
-	withAppType(t, AppTypeAuth)
 	if err := validateDelegationBackendCombination(
 		&ZoneConf{Name: "example.", Type: "secondary", DelegationBackend: "db"},
 		map[ZoneOption]bool{OptOnConflictDBWins: true, OptAllowChildUpdates: true}); err != nil {

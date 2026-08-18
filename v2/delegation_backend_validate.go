@@ -41,15 +41,19 @@ func validateDelegationBackendCombination(zconf *ZoneConf, options map[ZoneOptio
 	isSecondary := zconf.Type == "secondary"
 
 	// (1) `direct` mutates the zone it is given and writes that zone's file. On
-	// a SECONDARY the content belongs to the primary, so those edits are
-	// overwritten at the next transfer -- and on tdns-auth they violate the
-	// MUST-NOT-MODIFY invariant outright.
+	// a SECONDARY the content belongs to the primary and is replaced wholesale
+	// at the next transfer, so those edits do not survive.
 	//
-	// Gated on the app type for the same reason zoneMayOriginateContent is:
-	// tdns-mpcombiner edits zones as a secondary, and that is its whole job.
-	// Imposing tdns-auth's invariant on every app that embeds this library is
-	// how a derived app breaks at its next pin bump.
-	if isSecondary && backend == "direct" && Globals.App.Type == AppTypeAuth {
+	// Deliberately NOT gated on the app type, unlike zoneMayOriginateContent.
+	// That gate answers a different question -- "may this app author content
+	// for this zone?" -- which is a permissions question and legitimately
+	// app-specific, since a derived app may edit secondaries as its whole job.
+	// This one asks whether the edits will still be there afterwards, and the
+	// answer is no whoever makes them: a transfer overwrites the zone either
+	// way. Gating it per app would also make one config valid or invalid
+	// depending on which binary read it, which is a poor property for a rule
+	// about a combination.
+	if isSecondary && backend == "direct" {
 		return fmt.Errorf(
 			"zone %s is a secondary and delegationbackend is %q: a secondary's content belongs"+
 				" to its primary, so direct's edits would be overwritten at the next transfer."+
