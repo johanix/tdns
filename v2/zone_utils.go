@@ -444,11 +444,61 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 	if !zd.Options[OptDirty] && !force {
 		return fmt.Sprintf("Zone %s not modified, writing to disk not needed", zd.ZoneName), nil
 	}
-	_, err = zd.WriteFile(fname)
+	_, wroteSerial, err := zd.WriteFileWithSerial(fname)
 	if err == nil {
 		zd.mu.Lock()
-		zd.Options[OptDirty] = false
+		// Clean only if the file caught up with what the zone is serving. A
+		// publish can land WHILE this write runs: we then wrote serial 11 while
+		// the zone moved to 12, and clearing the flag unconditionally would
+		// report the zone as written out when the file is a serial behind.
+		// The next `zone write` would answer "not modified, writing to disk not
+		// needed" and decline to fix it. (No content is lost -- serial 12's
+		// delta is bounded by serial, so it survives the drop below and replays
+		// -- but the operator is told the file is current when it is not.)
+		if zd.CurrentSerial == wroteSerial {
+			zd.Options[OptDirty] = false
+		}
+		// The file now carries this serial, so that is what a future journal
+		// anchors to. Without this the next change would chain from the serial
+		// the file had BEFORE this write, and the load after that would refuse
+		// the journal.
+		if wroteSerial != 0 {
+			zd.fileSerial = wroteSerial
+		}
 		zd.mu.Unlock()
+
+		// Phase 2: the changes are now IN the file, which is the source of
+		// truth. The persisted deltas exist only to carry changes the file
+		// does not yet have, so replaying them over this file on the next load
+		// would apply everything a second time. Drop them.
+		//
+		// Order matters and is deliberate: the file write must succeed first.
+		// Dropping the deltas before a failed write would lose the changes
+		// entirely -- they would be neither in the file nor in the database.
+		// This is also why freeze/sync/write-zone need no delta handling of
+		// their own; they all reach the file through here.
+		//
+		// A failure to drop them is not fatal. The file is correct and being
+		// served; the cost is that a restart replays changes the file already
+		// contains. Adds are idempotent, deletes of absent records are
+		// no-ops, so the replayed result matches -- but it is still wrong
+		// enough to log loudly.
+		if zd.KeyDB != nil {
+			// Bound the drop by the serial actually WRITTEN, not by a ceiling
+			// read beforehand. A ceiling has a window: a publish can land in
+			// the file after the ceiling is read, and its delta row then
+			// survives the drop and fails the chain check on the next load.
+			// "Is this change already in the file?" is answered by the file's
+			// serial, and that has no window at all.
+			if n, derr := zd.KeyDB.DeleteZoneDeltasThroughSerial(zd.ZoneName, wroteSerial); derr != nil {
+				lg.Error("zone written to file but its persisted deltas could not be dropped;"+
+					" a restart will replay changes the file already contains",
+					"zone", zd.ZoneName, "file", fname, "error", derr)
+			} else if n > 0 {
+				lg.Info("zone written to file; persisted deltas dropped",
+					"zone", zd.ZoneName, "file", fname, "rows", n)
+			}
+		}
 	}
 	return fmt.Sprintf("Zone %s written to %s", zd.ZoneName, fname), err
 }

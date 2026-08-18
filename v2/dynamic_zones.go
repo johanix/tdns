@@ -48,7 +48,7 @@ func (zd *ZoneData) WriteDynamicZoneFile(zoneDirectory string) (string, error) {
 	tempFilePath := tempFile.Name()
 
 	// Write zone data to temp file
-	err = zd.WriteZoneToFile(tempFile)
+	_, err = zd.WriteZoneToFile(tempFile)
 	if err != nil {
 		tempFile.Close()
 		os.Remove(tempFilePath) // Clean up temp file on error

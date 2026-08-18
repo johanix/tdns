@@ -38,10 +38,49 @@ type UpdateRequest struct {
 	// touches every InternalUpdate site in the tree and that is a separate
 	// change from adding a channel.
 	PreAuthorized bool
-	Status        *UpdateStatus
-	Description   string
-	PreCondition  func() bool
-	Action        func() error
+	// Replay marks the re-application of already-persisted deltas over a
+	// freshly loaded zone file. It suppresses persistence for that apply:
+	// these changes are already in the ZoneDelta table, and recording them
+	// again would double the stored history on every restart.
+	Replay bool
+	// Resp, when non-nil, receives the outcome once the update has been
+	// applied, persisted and published -- or once it has been refused. It
+	// exists so a caller can answer its own client only after the change is
+	// durable, which is what RFC 2136 means by a NOERROR response: a promise
+	// the server has already kept, not one it intends to.
+	//
+	// Buffered by the sender and written with a non-blocking send, so the
+	// updater is never held up by a caller that has given up waiting, and a
+	// double send (belt-and-braces responses on several exit paths) is
+	// harmless.
+	Resp         chan ZoneUpdateResult
+	Status       *UpdateStatus
+	Description  string
+	PreCondition func() bool
+	Action       func() error
+}
+
+// ZoneUpdateResult is the outcome of one update, delivered on UpdateRequest.Resp.
+// Applied is false both for a refused update and for one that changed nothing.
+type ZoneUpdateResult struct {
+	Applied bool
+	Err     error
+}
+
+// respond delivers the outcome to a waiting caller, if there is one.
+//
+// Non-blocking: a caller that timed out and walked away must never wedge the
+// single ZoneUpdater goroutine, which serves every zone. Safe to call more than
+// once for the same request, so exit paths can each report without having to
+// reason about which one got there first.
+func (ur *UpdateRequest) respond(applied bool, err error) {
+	if ur.Resp == nil {
+		return
+	}
+	select {
+	case ur.Resp <- ZoneUpdateResult{Applied: applied, Err: err}:
+	default:
+	}
 }
 
 // apexRetainedOnDelname reports whether an rrtype survives a DELNAME aimed at
@@ -141,6 +180,7 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 			if !ok {
 				lg.Warn("ZoneUpdater: unknown zone in update request, ignoring", "cmd", ur.Cmd, "zone", ur.ZoneName)
 				lg.Debug("ZoneUpdater: known zones", "zones", Zones.Keys())
+				ur.respond(false, fmt.Errorf("unknown zone %s", ur.ZoneName))
 				continue
 			}
 
@@ -171,6 +211,8 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				lg.Error("ZoneUpdater: refusing zone mutation on a secondary that may not originate content (invariant violation)",
 					"cmd", ur.Cmd, "zone", ur.ZoneName, "internal", ur.InternalUpdate,
 					"description", ur.Description, "actions", len(ur.Actions))
+				ur.respond(false, fmt.Errorf(
+					"zone %s may not originate content", ur.ZoneName))
 				continue
 			}
 
@@ -272,6 +314,14 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 							updated = true
 						}
 					}
+					// The change is now durable AND visible, or it failed. This is
+					// the earliest point at which a caller may honestly answer
+					// its own client, so release any waiter here rather than at
+					// the end of the case: the remaining work below (zonefile
+					// write-back for API-managed primaries, delegation sync) is
+					// follow-up, not part of the promise.
+					ur.respond(updated, err)
+
 					if updated && !ur.InternalUpdate {
 						lg.Debug("ZoneUpdater: zone updated, setting dirty flag", "zone", zd.ZoneName)
 						zd.SetOption(OptDirty, true)
@@ -332,6 +382,8 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					}
 				} else {
 					lg.Warn("ZoneUpdater: updates disallowed for zone, dropping ZONE-UPDATE", "zone", zd.ZoneName)
+					ur.respond(false, fmt.Errorf(
+						"zone %s does not allow updates on this channel", zd.ZoneName))
 				}
 				lg.Debug("ZoneUpdater: ZONE-UPDATE done")
 
@@ -517,7 +569,16 @@ INSERT OR REPLACE INTO ChildDelegationData (owner, rrtype, rr) VALUES (?, ?, ?)`
 	return nil
 }
 
-func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bool, error) {
+// The return values are NAMED deliberately. The deferred block below sets
+// updated=false when the change could not be persisted, and with unnamed
+// results that assignment lands on a local the caller never sees: `return
+// updated, nil` copies the value into the result slot BEFORE deferred
+// functions run. A child update whose persist failed would then be reported as
+// applied -- and on the DSYNC API path, answered 200, which is precisely the
+// promise this persistence work exists to keep. ApplyZoneUpdateToZoneData has
+// named results for the same reason; this one did not, and that asymmetry was
+// the bug.
+func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (updated bool, err error) {
 
 	lg.Debug("ApplyChildUpdateToZoneData", "request", fmt.Sprintf("%+v", ur))
 
@@ -540,11 +601,22 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 		}
 	}
 
-	var updated bool
 	zd.mu.Lock()
 	defer func() {
 		if updated {
+			// Phase 2: delegation records written by a CHILD-UPDATE are zone
+			// content like any other -- they are staged into the working set
+			// and published from here. Without this they would be served but
+			// not recorded, and would silently roll back at the next restart
+			// while every other kind of change survived.
+			zd.wsPersistDelta = !ur.Replay
 			zd.publishLocked(zd.generation.Load())
+			if zd.wsPersistErr != nil {
+				lg.Error("child update not applied: could not persist the change",
+					"zone", zd.ZoneName, "error", zd.wsPersistErr)
+				zd.wsPersistErr = nil
+				updated = false
+			}
 		}
 		zd.mu.Unlock()
 	}()
@@ -664,12 +736,19 @@ func (zd *ZoneData) ApplyChildUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bo
 	return updated, nil
 }
 
-func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (bool, error) {
+// ApplyZoneUpdateToZoneData applies one update's actions to the zone.
+//
+// The returns are named because the deferred publish below can fail: a change
+// whose delta cannot be persisted is refused rather than served (see
+// publishWorkingSetLocked), and that has to surface as an error here rather
+// than as a successful-looking (true, nil).
+func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (updated bool, err error) {
 
 	// dump.P(ur)
 	// log.Printf("**** ApplyZoneUpdateToZoneData: ur=%+v", ur)
 
-	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
+	var dak *DnssecKeys
+	dak, err = kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
 	// Resolve keys (generating if needed) BEFORE taking zd.mu below — including
 	// the (nil,nil) "no error, no keys" case. Otherwise SignRRset is later called
 	// under zd.mu with a nil dak, reaches PublishDnskeyRRs, and self-deadlocks
@@ -688,12 +767,22 @@ func (zd *ZoneData) ApplyZoneUpdateToZoneData(ur UpdateRequest, kdb *KeyDB) (boo
 		}
 	}
 
-	var updated bool
-
 	zd.mu.Lock()
 	defer func() {
 		if updated {
+			// Phase 2: the publish writes the delta durably BEFORE making the
+			// change visible, and refuses the publish if that write fails --
+			// see publishWorkingSetLocked. Report such a failure as an error:
+			// nothing was published, so returning success would claim a change
+			// the zone is not serving and will not remember.
+			zd.wsPersistDelta = !ur.Replay
 			zd.publishLocked(zd.generation.Load())
+			if zd.wsPersistErr != nil {
+				err = fmt.Errorf("zone %s: update not applied: could not persist the change: %w",
+					zd.ZoneName, zd.wsPersistErr)
+				zd.wsPersistErr = nil
+				updated = false
+			}
 		}
 		zd.mu.Unlock()
 	}()

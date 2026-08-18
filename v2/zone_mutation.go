@@ -294,6 +294,17 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		// carry it into a later unrelated publish (which would needlessly
 		// wipe the IXFR history).
 		zd.wsIxfrEpochReset = false
+		// Same reasoning for the delta staging: wsPersistDelta says "the
+		// working set about to be published carries a change worth
+		// journalling". A dropped publish leaves it staged, and the NEXT
+		// publish for this zone -- a refresh, a reload, a signalSynth-only
+		// republish -- would then write a ZoneDelta row it does not own,
+		// diffed against a working set no applier staged. Replay would later
+		// apply that row as though it were an update. wsPersistErr is cleared
+		// with it so a later applier cannot read a failure belonging to a
+		// publish that never happened.
+		zd.wsPersistDelta = false
+		zd.wsPersistErr = nil
 		return
 	}
 	if !zoneStillLive(zd, gen) {
@@ -302,6 +313,17 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		zd.publishQueued = false
 		zd.publishUrgent = false
 		zd.wsIxfrEpochReset = false
+		// Same reasoning for the delta staging: wsPersistDelta says "the
+		// working set about to be published carries a change worth
+		// journalling". A dropped publish leaves it staged, and the NEXT
+		// publish for this zone -- a refresh, a reload, a signalSynth-only
+		// republish -- would then write a ZoneDelta row it does not own,
+		// diffed against a working set no applier staged. Replay would later
+		// apply that row as though it were an update. wsPersistErr is cleared
+		// with it so a later applier cannot read a failure belonging to a
+		// publish that never happened.
+		zd.wsPersistDelta = false
+		zd.wsPersistErr = nil
 		return
 	}
 
@@ -320,9 +342,13 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		zd.publishQueued = false
 		zd.publishUrgent = false
 		zd.wsIxfrEpochReset = false
+		// A refused publish must not leave the delta staged; see above.
+		zd.wsPersistDelta = false
+		zd.wsPersistErr = nil
 		return
 	}
 
+	prevSerial := zd.CurrentSerial
 	serial := zd.CurrentSerial
 	if bumpSerial {
 		zd.CurrentSerial = nextOutboundSerial(zd)
@@ -333,9 +359,118 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	zd.resignWorkingSetSOAIfSigned()
 
 	data := zd.workingSet
+	oldSnap := zd.snapshot.Load()
+
+	// Phase 2: make the change DURABLE BEFORE making it VISIBLE.
+	//
+	// This runs ahead of updateIxfrChainLocked and the snapshot swap on
+	// purpose. Once the snapshot is stored the content is being served and a
+	// secondary can pull it via NOTIFY -> IXFR; if the process then died before
+	// the row was written, that secondary would hold content the primary has
+	// no record of and silently rolls back on restart. Durable-then-visible is
+	// the only order in which a crash cannot desync a secondary, and it is what
+	// F12 of the design specified.
+	//
+	// The difference is computed here rather than reused from
+	// updateIxfrChainLocked: that function returns early on a zero retention
+	// budget, on an epoch reset and on a missing baseline, none of which say
+	// anything about whether a change should survive a restart. The two
+	// histories answer different questions and must not share an early return.
+	//
+	// Yes, this is a database write under zd.mu. That is deliberate and it is
+	// what BIND does with its journal. The earlier arrangement -- persisting
+	// after the unlock -- was chosen to keep disk I/O off the zone lock, citing
+	// this tree's deadlock history. That history is about paths which RE-ENTER
+	// zone locking (signing, PublishDnskeyRRs); PersistZoneDelta is a leaf that
+	// runs a few INSERTs in one transaction and calls nothing back. So the cost
+	// here is latency, not deadlock, and latency is the cheaper thing to pay
+	// for durability.
+	if zd.wsPersistDelta {
+		zd.wsPersistDelta = false
+		// The kill-switch (journal: active: false). Checked HERE, at the single
+		// point where a delta would be written, rather than at the two places
+		// that set wsPersistDelta -- one gate cannot drift from the other, and a
+		// future third setter is covered without being remembered.
+		//
+		// Only the WRITE side is gated. Replay is untouched: an operator who
+		// disables the journal must not thereby discard the deltas already in
+		// it, or the escape hatch becomes a second way to lose data.
+		if !JournalActive() {
+			lg.Debug("delta persistence is disabled (journal: active: false);"+
+				" this change will NOT survive a restart",
+				"zone", zd.ZoneName, "serial", serial)
+		} else if oldSnap != nil && zd.KeyDB != nil {
+			removed, added, _ := computeZoneDelta(zd.ZoneName, oldSnap.Data, data)
+			if len(removed) > 0 || len(added) > 0 {
+				// What this delta chains FROM.
+				//
+				// NOT oldSnap.Serial, which is where the zone was last
+				// published. A zone that re-signs or republishes during load
+				// advances its published serial past the serial its FILE
+				// carries -- on a signed zone, by several -- so the first
+				// change after a load would be journalled as starting from a
+				// serial the file has never had. The next load reads the file,
+				// compares it against that base, finds a mismatch, and refuses
+				// the entire journal: every change lost, and the operator told
+				// their zone file had been edited. That is the shape of the
+				// bug this replaces.
+				//
+				// The first delta of a journal anchors to the FILE; every
+				// later one anchors to the journal's own tail. The chain is
+				// then continuous by construction and starts where the next
+				// load will actually begin.
+				fromSerial := zd.fileSerial
+				if last, have, lerr := zd.KeyDB.LastZoneDeltaSerial(zd.ZoneName); lerr != nil {
+					// Refusing here rather than guessing: a wrong base is
+					// silent data loss at the next restart, which is exactly
+					// what this whole path exists to prevent.
+					zd.wsPersistErr = lerr
+					zd.CurrentSerial = prevSerial
+					zd.workingSet = nil
+					zd.wsSignalSynth = nil
+					zd.publishQueued = false
+					zd.publishUrgent = false
+					zd.wsIxfrEpochReset = false
+					lg.Error("publish refused: could not determine the delta chain base",
+						"zone", zd.ZoneName, "error", lerr)
+					return
+				} else if have {
+					fromSerial = last
+				}
+
+				if err := zd.KeyDB.PersistZoneDelta(zd.ZoneName,
+					fromSerial, serial, removed, added); err != nil {
+					// Refuse the publish. The alternative is to serve a change
+					// that is guaranteed to vanish at the next restart, which
+					// is worse than not serving it: the operator gets an error
+					// they can act on instead of silent data loss later.
+					//
+					// Unwind cleanly. Nothing else has been touched yet -- the
+					// IXFR chain has not been updated and no snapshot has been
+					// stored -- so dropping the working set and restoring the
+					// serial leaves the zone exactly as it was, still serving
+					// the previous snapshot.
+					zd.wsPersistErr = err
+					zd.CurrentSerial = prevSerial
+					zd.workingSet = nil
+					zd.wsSignalSynth = nil
+					zd.publishQueued = false
+					zd.publishUrgent = false
+					zd.wsIxfrEpochReset = false
+					lg.Error("refusing to publish a zone change that could not be persisted;"+
+						" the zone continues to serve its previous content",
+						"zone", zd.ZoneName, "from_serial", oldSnap.Serial,
+						"to_serial", serial, "error", err)
+					return
+				}
+			}
+		}
+	}
+
 	// Maintain the IXFR delta history BEFORE building the snapshot so the
 	// chain copied into it ends exactly at this publish's serial (Project C).
-	zd.updateIxfrChainLocked(zd.snapshot.Load(), serial, data)
+	zd.updateIxfrChainLocked(oldSnap, serial, data)
+
 	snap := zd.buildSnapshotLocked(serial, data, zd.wsSignalSynth)
 	zd.snapshot.Store(snap)
 
@@ -362,6 +497,14 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 }
 
 func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs []*core.RRset, firstLoad bool) error {
+	// The zone has just been re-read; whatever was replayed on top of the
+	// PREVIOUS file no longer applies to this one, so a replay for the new file
+	// is due again.
+	zd.deltasReplayed = false
+	// The file's serial travels with the data it came from. The parse happens
+	// on a scratch ZoneData, so without this the live zone keeps a fileSerial
+	// of 0 and the journal anchors to nothing.
+	zd.fileSerial = new_zd.fileSerial
 	zd.IncomingSerial = new_zd.IncomingSerial
 	switch {
 	case firstLoad:

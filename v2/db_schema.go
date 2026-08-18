@@ -237,6 +237,34 @@ UNIQUE (keyname)
 		started_at TEXT NOT NULL,
 		appname    TEXT
 	)`,
+
+	// ZoneDelta persists in-flight content changes for zones whose source of
+	// truth is still the zone FILE. Each row is one RR of one published delta.
+	//
+	// The zone file is authoritative; these rows are what has happened to the
+	// zone since the file was last written. On load, the file is parsed and
+	// then the deltas are replayed over it in order. On write-zone / sync /
+	// freeze the changes reach the file, and the rows for that zone are
+	// deleted -- the file now contains them, so replaying would double-apply.
+	//
+	// Replay order is `id`, i.e. insertion order, NOT toserial. Serials are
+	// mod-2^32 (RFC 1982) and wrap; ordering a replay by a wrapping number
+	// would silently reorder the tail of a long-lived zone's history. The
+	// serials are carried for diagnostics and for matching against the
+	// zone file's own serial, not for sequencing.
+	//
+	// UNIQUE columns are VARCHAR rather than TEXT (house rule at the head of
+	// this file).
+	"ZoneDelta": `CREATE TABLE IF NOT EXISTS 'ZoneDelta' (
+		id         INTEGER PRIMARY KEY,
+		zone       VARCHAR(255) NOT NULL,
+		fromserial INTEGER NOT NULL,
+		toserial   INTEGER NOT NULL,
+		seq        INTEGER NOT NULL,
+		action     VARCHAR(8) NOT NULL,
+		rr         TEXT NOT NULL,
+		UNIQUE (zone, toserial, seq)
+	)`,
 }
 
 // Note that there is no DNSSEC TrustStore, because whatever DNSSEC keys we have

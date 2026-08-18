@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	// "github.com/gookit/goutil/dump"
 	edns0 "github.com/johanix/tdns/v2/edns0"
@@ -399,13 +400,16 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		// right wire rcode (NOERROR would be a wire-protocol lie).
 		finalRcode = dns.RcodeRefused
 	}
-	m = m.SetRcode(m, finalRcode)
 	if dur.Status.RejectionEDE != 0 {
 		edns0.AttachEDEToResponse(m, dur.Status.RejectionEDE)
 	}
-	w.WriteMsg(m)
 
+	// A rejected update is answered immediately: there is nothing to wait for.
+	// An approved one is NOT answered here -- see below, where the response is
+	// sent only after the update has actually been applied.
 	if !dur.Status.Approved {
+		m = m.SetRcode(m, finalRcode)
+		w.WriteMsg(m)
 		lgHandler.Warn("ApproveUpdate rejected the update, ignored")
 		for _, rr := range r.Ns {
 			switch rr.Header().Class {
@@ -430,7 +434,18 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 	// dump.P(dur.Status)
 	lgHandler.Info("update queued for zone update", "cmd", dur.Status.Type, "zone", zone, "validated", dur.Status.Validated, "trusted", dur.Status.ValidatedByTrustedKey)
 
-	// send into suitable channel for pending updates
+	// RFC 2136 §3.4.2.5: a NOERROR response means the requested update HAS been
+	// made. Answering as soon as the request was queued makes that a statement
+	// of intent rather than of fact -- the client is told the change is safe
+	// while it is still a message on a channel, and a crash or a refusal in the
+	// updater loses it silently after the client was told otherwise.
+	//
+	// So: hand the request over with a reply channel and answer only once the
+	// update has been applied, persisted and published. Buffered, so the
+	// updater's non-blocking send always lands even if the wait below has
+	// already timed out.
+	respch := make(chan ZoneUpdateResult, 1)
+
 	// XXX: This should be separated into updates to auth data in the zone and updates to child data.
 	updateq <- UpdateRequest{
 		Cmd:       dur.Status.Type,
@@ -439,9 +454,45 @@ func UpdateResponder(dur *DnsUpdateRequest, updateq chan UpdateRequest) error {
 		Validated: dur.Status.Validated,
 		Trusted:   dur.Status.ValidatedByTrustedKey,
 		Status:    dur.Status,
+		Resp:      respch,
 	}
+
+	select {
+	case res := <-respch:
+		if res.Err != nil {
+			// The update was refused or could not be made durable. SERVFAIL is
+			// the honest answer: the client learns to retry or escalate,
+			// instead of believing a change that was never made.
+			lgHandler.Error("update was not applied; answering SERVFAIL",
+				"zone", zone, "error", res.Err)
+			m.SetRcode(m, dns.RcodeServerFailure)
+			edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdateNotApplied)
+		} else {
+			m.SetRcode(m, finalRcode)
+		}
+
+	case <-time.After(UpdateApplyTimeout):
+		// The updater is a single goroutine serving every zone, so a slow or
+		// wedged apply shows up here. Do NOT answer NOERROR on a timeout: the
+		// update may yet be applied, but we no longer know, and the whole point
+		// of this wait is to stop claiming otherwise. SERVFAIL is retryable and
+		// an RFC 2136 update is idempotent, so a retry that arrives after a
+		// late apply is harmless.
+		lgHandler.Error("timed out waiting for the update to be applied; answering SERVFAIL",
+			"zone", zone, "timeout", UpdateApplyTimeout)
+		m.SetRcode(m, dns.RcodeServerFailure)
+		edns0.AttachEDEToResponse(m, edns0.EDEZoneUpdateApplyTimeout)
+	}
+	w.WriteMsg(m)
+
 	return nil
 }
+
+// UpdateApplyTimeout bounds how long an UPDATE responder waits for the
+// ZoneUpdater to apply, persist and publish a change before giving up and
+// answering SERVFAIL. Generous: the wait covers a database write and, on a
+// signed zone, re-signing the affected RRsets.
+const UpdateApplyTimeout = 10 * time.Second
 
 // Returns approved, updatezone, error
 func (zd *ZoneData) ApproveUpdate(zone string, us *UpdateStatus, r *dns.Msg) (bool, bool, error) {
