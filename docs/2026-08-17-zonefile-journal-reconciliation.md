@@ -471,7 +471,7 @@ format with it — writer, parser, `writeInstructionFile`, and the
 lines. So `.rejected` is now "compose different comment lines and call
 the existing writer", and Stage 2 shrinks accordingly.
 
-### Stages 1–3 — a sibling branch off #348
+### Stages 1–3 — DONE, on `feature/zonefile-journal-reconciliation`
 
 `feature/zonefile-journal-reconciliation`, cut from
 `feature/api-zone-updates-phase2` and initially targeting it, so GitHub
@@ -484,24 +484,36 @@ reconciliation to unrelated DSYNC work. A sibling keeps the review depth
 where it is; the one shared file at risk of collision with #349 is
 `guide/zone-updates.md`.
 
-| Stage | Content | ~LOC (revised after Stage 0) |
-|---|---|---|
-| 1 | ZONEMD + `ZoneFileState` + detection only; still refuses on mismatch, but with a precise verdict and no false positives from formatting | 450 |
-| 2 | merge, re-anchor, `.rejected`, serial floor | ~800 (was 1100; the instruction format shipped in Stage 0) |
-| 3 | the option and `on-conflict-zonefile-wins` | 150 |
+| Stage | Content | Estimate | Actual | Commit |
+|---|---|---|---|---|
+| 1 | ZONEMD + `ZoneFileState` + detection | 450 | ~960 | `5a84937`, `c622ba2` |
+| 2 | merge, re-anchor, `.rejected`, serial floor | ~800 | ~890 | `93235ab`, `47f0c62` |
+| 3 | the option, defaulted at parse | 150 | ~330 | `4aad47a` |
+
+Stage 1 ran over because the RFC 8976 digest is more than a hash call:
+canonical ordering (labels compared right-to-left, case-insensitively)
+and RFC 4034 §6.2 RDATA down-casing had to be written, neither existing
+in the tree. Validated against all three Appendix A vectors — and A.2
+caught a real bug, out-of-zone data not being excluded, that A.1 and A.3
+cannot see.
 
 Stage 1 is worth having on its own even if 2 never shipped: it replaces a
 serial comparison that lies about reformatted files with a content digest
 that doesn't.
 
-**Before Stage 2, resolve the delegation-backend question.** A zone with
-`delegationbackend: db` has a second DB-side content source —
-`ChildDelegationData` — which is not in the journal and which §5 does not
-account for. `dnslab.` is such a zone. Whether child delegation data is
-re-applied on top of a merged zone, double-applied, or lost is unknown,
-and the answer could change the merge rule. It is the largest unknown in
-this design and it should be settled before code is written against §5,
-not after.
+**The delegation-backend question — resolved, and it does not affect
+§5.** `ChildDelegationData` is not zone content. `DBDelegationBackend`
+writes rows and touches neither the served zone nor the zone file (the
+`CHILD-UPDATE` branch of the updater dispatches solely to the backend),
+so a merge has nothing to reconcile it against. §5 stands unchanged.
+
+That investigation did surface something separate and worth its own
+work: nothing validates the *combination* of application role, zone type
+and delegation backend. The only rule today is that
+`allow-child-updates` requires some backend. Combinations that cannot
+work — `direct` on an instance that does not serve the zone, `direct` on
+a secondary — are accepted silently. Tracked separately; not part of this
+design.
 
 ## 14. Verification
 
