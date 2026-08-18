@@ -175,6 +175,11 @@ func emitInstructions(insns []tdns.ZoneDeltaRR, zone string) {
 }
 
 func printJournalInfo(info *tdns.ZoneJournalInfo, detail bool) {
+	if !info.PersistenceActive {
+		fmt.Printf("  !! delta persistence is DISABLED deployment-wide (journal: active: false).\n")
+		fmt.Printf("     Updates are applied and served but will NOT survive a restart.\n\n")
+	}
+
 	if info.Deltas == 0 {
 		fmt.Printf("Zone %s: journal is empty (zone file serial %d, serving %d)\n",
 			info.Zone, info.FileSerial, info.ServedSerial)

@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 )
 
@@ -54,6 +55,12 @@ type ZoneJournalInfo struct {
 	// database but NOT in what the zone is serving.
 	Replayed bool
 
+	// PersistenceActive is false when the deployment-wide kill-switch
+	// (journal: active: false) is set. A server quietly not persisting is the
+	// thing this whole subsystem exists to prevent, so it is reported rather
+	// than left to be inferred from a journal that never grows.
+	PersistenceActive bool
+
 	Deltalist []ZoneJournalDelta `json:",omitempty"`
 }
 
@@ -91,13 +98,14 @@ func (zd *ZoneData) JournalInfo(detail bool) (*ZoneJournalInfo, error) {
 	zd.mu.Unlock()
 
 	info := &ZoneJournalInfo{
-		Zone:         zd.ZoneName,
-		Zonefile:     zd.Zonefile,
-		Deltas:       len(deltas),
-		FileSerial:   fileSerial,
-		ServedSerial: served,
-		Replayed:     replayed,
-		Replayable:   true,
+		Zone:              zd.ZoneName,
+		Zonefile:          zd.Zonefile,
+		Deltas:            len(deltas),
+		FileSerial:        fileSerial,
+		ServedSerial:      served,
+		Replayed:          replayed,
+		Replayable:        true,
+		PersistenceActive: JournalActive(),
 	}
 
 	for _, d := range deltas {
@@ -255,7 +263,17 @@ func (zd *ZoneData) JournalPurge(force bool) (*ZoneJournalPurgeResult, error) {
 	// gone. Say so: silence here would leave the operator believing the purge
 	// finished the job, and the next restart reporting a journal that refuses
 	// to replay with no obvious cause.
-	if after, err := zd.JournalInfo(false); err == nil && after.Deltas > 0 {
+	after, aerr := zd.JournalInfo(false)
+	switch {
+	case aerr != nil:
+		// Do not report a clean purge we cannot vouch for. The rows are gone
+		// either way, but whether an update landed mid-purge is now unknown,
+		// and unknown is not the same as none.
+		res.Remaining = -1
+		lg.Error("journal purged, but the post-purge state could not be read;"+
+			" whether an update landed during the purge is unknown",
+			"zone", zd.ZoneName, "error", aerr)
+	case after.Deltas > 0:
 		res.Remaining = after.Deltas
 		lg.Warn("an update published while the journal was being purged;"+
 			" its delta was kept (it is not in the purge artefact) but no longer chains"+
@@ -290,15 +308,66 @@ func (zd *ZoneData) JournalTruncate(serial uint32) (int64, error) {
 	return n, nil
 }
 
-// writeInstructionFile renders instructions to path atomically-ish: build the
-// whole thing in memory first, so a formatting failure leaves no half-file
-// behind claiming to be a complete record of what was discarded.
+// writeInstructionFile renders instructions to path DURABLY: staged in a
+// temporary file beside the target, synced, closed, renamed into place, and the
+// directory synced afterwards.
+//
+// os.WriteFile was not enough, and the reason is specific to what this file is
+// for. JournalPurge deletes the journal rows once this returns, so the artefact
+// is the only surviving copy of those changes -- and os.WriteFile neither syncs
+// the data nor publishes it atomically. A host crash could therefore take the
+// journal and leave a truncated or absent artefact, which is exactly the
+// failure `purge` exists not to have.
+//
+// Building the whole thing in memory first is kept for the same reason as
+// before: a formatting failure must leave nothing behind claiming to be a
+// complete record.
 func writeInstructionFile(path string, comments []string, insns []ZoneDeltaRR) error {
 	var buf bytes.Buffer
 	if err := WriteUpdateInstructions(&buf, comments, insns); err != nil {
 		return err
 	}
-	return os.WriteFile(path, buf.Bytes(), 0644)
+
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, filepath.Base(path)+".tmp")
+	if err != nil {
+		return fmt.Errorf("creating a temporary file beside %s: %v", path, err)
+	}
+	tmpname := tmp.Name()
+	committed := false
+	defer func() {
+		if !committed {
+			tmp.Close()
+			os.Remove(tmpname)
+		}
+	}()
+
+	if _, err := tmp.Write(buf.Bytes()); err != nil {
+		return fmt.Errorf("writing %s: %v", tmpname, err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fmt.Errorf("syncing %s: %v", tmpname, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("closing %s: %v", tmpname, err)
+	}
+	if err := os.Chmod(tmpname, 0644); err != nil {
+		return fmt.Errorf("setting mode on %s: %v", tmpname, err)
+	}
+	if err := os.Rename(tmpname, path); err != nil {
+		return fmt.Errorf("renaming %s to %s: %v", tmpname, path, err)
+	}
+	committed = true
+
+	d, derr := os.Open(dir)
+	if derr != nil {
+		return fmt.Errorf("opening %s to sync the rename: %v", dir, derr)
+	}
+	if serr := d.Sync(); serr != nil {
+		d.Close()
+		return fmt.Errorf("syncing %s after writing %s: %v", dir, path, serr)
+	}
+	return d.Close()
 }
 
 // ApiZoneJournal dispatches the journal subcommands arriving over the

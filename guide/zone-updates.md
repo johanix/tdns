@@ -19,6 +19,7 @@ see [Automatic Delegation Synchronization](special-features.md#1-automatic-deleg
 4. [The CLI](#4-the-cli)
 5. [What "applied" means](#5-what-applied-means)
 6. [Durability: the zone file, and the delta journal](#6-durability-the-zone-file-and-the-delta-journal)
+   - [Turning persistence off](#turning-persistence-off)
 7. [freeze, thaw and sync](#7-freeze-thaw-and-sync)
 8. [Working with the journal](#8-working-with-the-journal)
 9. [Replaying an instruction file](#9-replaying-an-instruction-file)
@@ -254,6 +255,49 @@ A refused journal does not block updates. A change that lands
 afterwards is journalled from where the zone now is; what it
 cannot do is rescue the refused deltas, which stay in the
 database until you deal with them deliberately.
+
+
+### Turning persistence off
+
+```yaml
+journal:
+   active: false
+```
+
+A deployment-wide **kill-switch**. Leaving it out is the correct
+configuration: absent means on.
+
+It is not a tuning knob and it is deliberately not per-zone. Persistence
+is what makes "applied" mean "will survive a restart", and a per-zone
+switch would make that promise mean different things on different
+zones — so every client would have to reason about durability zone by
+zone. A zone with it off also looks identical to one with it on, right
+up until the restart that loses data.
+
+It exists for one situation: persistence itself misbehaving, with
+updates that need to keep flowing until a fix ships. That is not
+hypothetical — the first production failure of the journal was not lost
+data but *refused updates*, on every write, and clearing it took a new
+binary. One config value is a better answer at 3am.
+
+With it off:
+
+- updates are still **applied and served** — off means "not durable",
+  not "not allowed";
+- nothing new is recorded;
+- an **existing journal is still replayed** on load. Turning the switch
+  off must not discard what has already been recorded, or the escape
+  hatch becomes a second way to lose data;
+- `zone journal status` says so, prominently, on every invocation. A
+  server quietly not persisting is the thing this whole mechanism exists
+  to prevent.
+
+The consequence to keep in mind is what a restart then does. Changes
+applied since the last write-out are gone, and because a secondary only
+refreshes on a serial *increase*, secondaries will keep serving the
+newer content they already hold rather than following the primary
+backwards. The primary and its secondaries diverge, and only the primary
+looks wrong.
 
 
 ## 7. freeze, thaw and sync

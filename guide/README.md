@@ -39,8 +39,10 @@ companion [tdns-mp Guide](../../tdns-mp/guide/README.md).
   default), the five statements (`addrr`, `delrr`,
   `delrrset`, `delname`, `replacerrset`) and their sharp
   edges, what "applied" promises, durability via the zone
-  file and the delta journal, `freeze`/`thaw`/`sync`, and
-  the refusals. For a *child's* delegation data in a parent
+  file and the delta journal, the journal CLI
+  (`status`/`list`/`truncate`/`purge`) and replaying an
+  instruction file, `freeze`/`thaw`/`sync`, and the
+  refusals. For a *child's* delegation data in a parent
   zone see delegation sync in
   [special-features.md](special-features.md#1-automatic-delegation-synchronization)
   instead.

@@ -416,27 +416,59 @@ is in force:
 
 Four stages, each independently shippable and independently testable.
 
-**Stage 0 — into #348, before it merges.** The plain bug (§11) plus the
-journal CLI (§10) and `--from-file` (§6.2).
+### Stage 0 — DONE, in #348 (`abdfe78`, `2b6f909`)
 
-This is a merge precondition, not a nice-to-have. As it stands #348
-introduces durable state that decides what a zone serves and gives the
-operator no way to see it, list it, or clear it — there is no `journal`
-command in the tree at all. A journal you cannot inspect is worse than no
-journal, because when it misbehaves the operator has nothing to look at.
-Stage 0 also converts the §2 failure from a SQLite constraint into a
-diagnosis with a remedy, which is what makes shipping the rest as
-follow-on work acceptable rather than reckless.
+The plain bug (§11), the journal CLI (§10) and `--from-file` (§6.2).
 
-Roughly 800 LOC with tests. No design risk: nothing here depends on the
-merge existing.
+It was a merge precondition, not a nice-to-have: #348 introduced durable
+state that decides what a zone serves and gave the operator no way to see
+it, list it, or clear it — there was no `journal` command in the tree at
+all. A journal you cannot inspect is worse than no journal, because when
+it misbehaves there is nothing to look at. Stage 0 also converted the §2
+failure from a SQLite constraint into a diagnosis with a remedy, which is
+what makes shipping the rest as follow-on work acceptable rather than
+reckless.
 
-**Stages 1–3 — a new branch off main, after #348 lands.**
+**Estimated ~800 LOC; actual 2341 insertions** across the two commits —
+low by about 3×. The overrun was almost entirely the review round, which
+found two durability defects in the seam this design depends on:
 
-| Stage | Content | ~LOC |
+- `WriteZoneToFile` discarded `bufio.Writer.Flush`'s error and returned
+  the nil error from the last `WriteString`; `WriteFileWithSerial` never
+  closed the file. `WriteZone` treats that success as licence to delete
+  the journal, so a failing disk took the file and the journal together.
+  Now flush/sync/close are all checked and the write is staged in a
+  temporary file and renamed into place, with the directory synced.
+- `JournalPurge` snapshotted the journal and then deleted every row, so
+  an update publishing in that window was destroyed and recorded nowhere.
+  The delete is now bounded by the row id the snapshot covered.
+
+Both are worth knowing for what follows: §7 re-anchors the journal after
+a merge, and that is the same seam.
+
+**Scope that moved forward.** `--from-file` brought the whole instruction
+format with it — writer, parser, `writeInstructionFile`, and the
+`instructions` verb — which had been budgeted inside Stage 2 at ~410
+lines. So `.rejected` is now "compose different comment lines and call
+the existing writer", and Stage 2 shrinks accordingly.
+
+### Stages 1–3 — a sibling branch off #348
+
+`feature/zonefile-journal-reconciliation`, cut from
+`feature/api-zone-updates-phase2` and initially targeting it, so GitHub
+retargets the PR to `main` when #348 lands (no rebase).
+
+Not off `main`: this work touches `zone_delta_replay.go`,
+`zone_utils.go`, `dnsutils.go` and `refreshengine.go`, all of which #348
+has not landed yet. Not stacked under #349/#350 either, which would bind
+reconciliation to unrelated DSYNC work. A sibling keeps the review depth
+where it is; the one shared file at risk of collision with #349 is
+`guide/zone-updates.md`.
+
+| Stage | Content | ~LOC (revised after Stage 0) |
 |---|---|---|
 | 1 | ZONEMD + `ZoneFileState` + detection only; still refuses on mismatch, but with a precise verdict and no false positives from formatting | 450 |
-| 2 | merge, re-anchor, `.rejected`, serial floor | 1100 |
+| 2 | merge, re-anchor, `.rejected`, serial floor | ~800 (was 1100; the instruction format shipped in Stage 0) |
 | 3 | the option and `on-conflict-zonefile-wins` | 150 |
 
 Stage 1 is worth having on its own even if 2 never shipped: it replaces a

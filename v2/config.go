@@ -64,13 +64,16 @@ type Config struct {
 	// registered in ValidateConfig's configsections, so a config without the
 	// block is exactly as valid as it was before this field existed.
 	DelegationSync DelegationSyncConf `yaml:"delegationsync" mapstructure:"delegationsync"`
-	Dnssec         DnssecConf         `yaml:"dnssec" mapstructure:"dnssec"`
-	Keys           KeyConf            `yaml:"keys" mapstructure:"keys"`
-	Keystore       KeystoreConf       `yaml:"keystore" mapstructure:"keystore"`
-	Db             DbConf
-	Registrars     map[string][]string
-	Log            LogConf
-	Internal       InternalConf
+	// Journal is the journal: block -- deployment-wide settings for the delta
+	// journal (Phase 2 persistence).
+	Journal    JournalConf  `yaml:"journal" mapstructure:"journal"`
+	Dnssec     DnssecConf   `yaml:"dnssec" mapstructure:"dnssec"`
+	Keys       KeyConf      `yaml:"keys" mapstructure:"keys"`
+	Keystore   KeystoreConf `yaml:"keystore" mapstructure:"keystore"`
+	Db         DbConf
+	Registrars map[string][]string
+	Log        LogConf
+	Internal   InternalConf
 }
 
 // DnssecConf holds DNSSEC-wide settings consumed by the signer and IMR.
@@ -483,6 +486,44 @@ type ApiServerAppConf struct {
 
 type DbConf struct {
 	File string // `validate:"required"`
+}
+
+// JournalConf is the journal: block. A block rather than a top-level key for
+// the same reason keystore: is one -- the journal has further deployment-wide
+// knobs coming (retention, auto-sync thresholds) and they belong together.
+type JournalConf struct {
+	// Active is a KILL-SWITCH, not a tuning knob.
+	//
+	// Persistence is what makes an applied update survive a restart, and the
+	// point of Phase 2 is that a client told NOERROR may forget the update.
+	// Turning it off breaks that promise, so this is deliberately NOT per-zone:
+	// that would make "applied" mean different things on different zones, and a
+	// zone with it off looks identical to one with it on until the restart that
+	// loses data.
+	//
+	// It exists because of how the journal failed in practice. When it broke on
+	// a live parent zone the symptom was not lost data -- it was that EVERY
+	// update was refused, and clearing that needed a code change, a rebuild and
+	// a redeploy. One config value is a better answer at 3am on another
+	// continent.
+	//
+	// Pointer, following imrengine's active:, so that ABSENT MEANS ON. A plain
+	// bool defaults to false, which would silently disable persistence for every
+	// existing config on upgrade -- the exact failure this subsystem exists to
+	// prevent.
+	//
+	// Off stops NEW deltas being recorded. An existing journal is still replayed
+	// on load: flipping the switch must not discard changes already recorded, or
+	// the escape hatch becomes a second way to lose data.
+	Active *bool `yaml:"active" mapstructure:"active"`
+}
+
+// JournalActive reports whether delta persistence is enabled. Absent config
+// means enabled.
+func JournalActive() bool {
+	confMu.RLock()
+	defer confMu.RUnlock()
+	return Conf.Journal.Active == nil || *Conf.Journal.Active
 }
 
 // KeystoreConf is the keystore: block. Today it carries only pre-load, but the

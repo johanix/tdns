@@ -667,3 +667,21 @@ registrars:
       - child._dsync.parent.   IN DSYNC CDS    NOTIFY 5354 notifications.mooga-reg.axfr.net.
       - child._dsync.parent.   IN DSYNC CSYNC  NOTIFY 5354 notifications.mooga-reg.axfr.net.
       - child._dsync.parent.   IN DSYNC ANY    UPDATE 5354 notifications.mooga-reg.axfr.net.
+
+# journal: -- the delta journal (persistence of zone updates).
+#
+# Changes applied through DDNS or the management API are recorded here and
+# replayed over the zone file on load, so a restart loses nothing. Inspect a
+# zone's journal with "tdns-cli auth zone journal status --zone <zone>".
+#
+# active: is a KILL-SWITCH, not a tuning knob. Absent (or true) means ON, which
+# is what you want: leaving it out is the correct configuration. Set it to false
+# only to stop the journal deployment-wide -- for instance if persistence itself
+# is misbehaving and you need updates flowing again before the fix ships.
+#
+# With it off, updates are still applied and served; they simply do not survive
+# a restart. An EXISTING journal is still replayed on load, so turning it off
+# never discards what has already been recorded.
+#
+# journal:
+#    active: false
