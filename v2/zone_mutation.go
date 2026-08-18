@@ -493,6 +493,7 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 	// on a scratch ZoneData, so without this the live zone keeps a fileSerial
 	// of 0 and the journal anchors to nothing.
 	zd.fileSerial = new_zd.fileSerial
+	zd.fileDigest = new_zd.fileDigest
 	zd.IncomingSerial = new_zd.IncomingSerial
 	switch {
 	case firstLoad:

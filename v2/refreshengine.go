@@ -249,6 +249,49 @@ func replayZoneDeltasOnLoad(zd *ZoneData) {
 	if zd == nil || zd.KeyDB == nil {
 		return
 	}
+
+	// Did the zone file change since we last read or wrote it? Asked BEFORE the
+	// replay, because it is the question that decides what the replay means.
+	//
+	// Stage 1 of the reconciliation design reports the answer and nothing more:
+	// the chain check still governs whether the deltas are applied. What the
+	// digest adds today is precision. A serial comparison calls a reformatted,
+	// re-commented or reordered file "changed" -- none of which change the zone
+	// -- and calls a regenerated file that reused its serial "unchanged", which
+	// is the dangerous direction. Recording the verdict now also means the
+	// merge in stage 2 has a trustworthy signal to switch on rather than a
+	// serial mismatch that is wrong in both directions.
+	verdict, prev, verr := zd.CompareZoneFileState()
+	switch {
+	case verr != nil:
+		lg.Warn("could not compare the zone file against its recorded identity",
+			"zone", zd.ZoneName, "error", verr)
+	case verdict == ZoneFileChanged:
+		lg.Warn("the zone file has CHANGED since tdns last read or wrote it"+
+			" (its content digest differs, so this is not merely reformatting);"+
+			" any persisted deltas were computed against the previous file",
+			"zone", zd.ZoneName, "recorded_serial", prev.Serial,
+			"file_serial", zd.fileSerial)
+	case verdict == ZoneFileUnchanged:
+		lg.Debug("zone file unchanged since tdns last read or wrote it",
+			"zone", zd.ZoneName, "serial", zd.fileSerial)
+	default:
+		lg.Debug("no recorded identity for this zone file; nothing to compare against",
+			"zone", zd.ZoneName, "serial", zd.fileSerial)
+	}
+
+	// Record what we have just read, whatever the verdict. The file in hand is
+	// now the reference for the next load -- including when it changed, because
+	// the alternative is reporting the same change on every restart forever.
+	zd.mu.Lock()
+	digest, serial := zd.fileDigest, zd.fileSerial
+	zd.mu.Unlock()
+	if digest != "" {
+		if err := zd.RecordZoneFileState(serial, digest); err != nil {
+			lg.Warn("could not record the zone file identity", "zone", zd.ZoneName, "error", err)
+		}
+	}
+
 	n, err := zd.ReplayPersistedDeltas(zd.KeyDB)
 	if err != nil {
 		lg.Error("could not replay persisted deltas; the zone is serving its file alone"+

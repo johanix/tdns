@@ -254,6 +254,13 @@ type ZoneData struct {
 	// a genuine reload replays again while a repeated completion attempt for
 	// the same load does not. Guarded by zd.mu.
 	deltasReplayed bool
+	// fileDigest is the ZONEMD digest of the zone FILE as last read from or
+	// written to disk, the companion to fileSerial. The serial says which
+	// version the file claims to be; the digest says whether it is actually
+	// that version -- a file can be regenerated, restored or reformatted
+	// without the serial moving. Empty when the zone did not come from a file.
+	// Guarded by zd.mu.
+	fileDigest string
 	// wsPersistErr carries a failed delta write from publishWorkingSetLocked
 	// back to the applier. A publish whose delta could not be persisted is
 	// refused outright -- serving a change that is certain to vanish at the

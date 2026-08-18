@@ -467,6 +467,27 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 		}
 		zd.mu.Unlock()
 
+		// Record the file's new identity: this is the other end of the
+		// comparison the next load makes. The digest is of the published
+		// snapshot, which is exactly what WriteZoneToFile just serialised, so
+		// reading this file back must reproduce it.
+		//
+		// Best-effort, and deliberately not fatal: the file is written and
+		// being served, and the cost of a missing record is that the next load
+		// reports "no basis for comparison" instead of "unchanged". Failing the
+		// write here would turn a bookkeeping problem into an operational one.
+		if zd.KeyDB != nil {
+			if digest, derr := zd.ZoneDigestOfPublished(); derr != nil {
+				lg.Warn("zone written but its digest could not be computed;"+
+					" the next load will have no basis for comparison",
+					"zone", zd.ZoneName, "error", derr)
+			} else if rerr := zd.RecordZoneFileState(wroteSerial, digest); rerr != nil {
+				lg.Warn("zone written but its file identity could not be recorded;"+
+					" the next load will have no basis for comparison",
+					"zone", zd.ZoneName, "error", rerr)
+			}
+		}
+
 		// Phase 2: the changes are now IN the file, which is the source of
 		// truth. The persisted deltas exist only to carry changes the file
 		// does not yet have, so replaying them over this file on the next load

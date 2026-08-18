@@ -635,6 +635,23 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string
 	// after load-time signing and republication. See ZoneData.fileSerial.
 	zd.fileSerial = soa.Serial
 
+	// And its ZONEMD digest, taken HERE for the same reason: this is the last
+	// moment at which the in-memory zone is what the file says and nothing
+	// else. Anything computed after load-time signing includes RRSIGs the file
+	// never had, and would never match the file it is meant to identify.
+	//
+	// A failure is not fatal to the load. The digest is a detector; without it
+	// the zone falls back to comparing serials, which is what it did before
+	// this existed. Refusing to serve a zone because we could not fingerprint
+	// it would be a poor trade.
+	if digest, derr := zd.zoneDigestOfWorkingData(); derr != nil {
+		lgDns.Warn("could not compute the zone file digest; file-change detection"+
+			" falls back to the SOA serial for this load",
+			"zone", zd.ZoneName, "error", derr)
+	} else {
+		zd.fileDigest = digest
+	}
+
 	zd.XfrType = "axfr"
 	// Return true only if serial changed (indicates actual update)
 	// If force=true but serial unchanged, return false (validated but no update)
