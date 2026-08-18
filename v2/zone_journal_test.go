@@ -664,3 +664,51 @@ func TestKillSwitchStillReplaysAnExistingJournal(t *testing.T) {
 		t.Fatal("the already-recorded change did not come back")
 	}
 }
+
+// TestPurgeArtefactIsDurablyWritten. The artefact is the only surviving copy
+// once the rows are deleted, so it must be complete on disk before that
+// happens -- not merely handed to the page cache.
+func TestPurgeArtefactIsDurablyWritten(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "example.zone.42.purged")
+
+	insns := []ZoneDeltaRR{{Action: ZoneDeltaAdd, RR: "a.example.\t3600\tIN\tA\t10.0.0.1"}}
+	if err := writeInstructionFile(path, []string{"a comment"}, insns); err != nil {
+		t.Fatalf("writeInstructionFile: %v", err)
+	}
+
+	back, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading it back: %v", err)
+	}
+	if parsed, err := ParseUpdateInstructions(bytes.NewReader(back)); err != nil {
+		t.Fatalf("the artefact does not parse: %v", err)
+	} else if len(parsed) != 1 {
+		t.Fatalf("parsed %d instructions, want 1", len(parsed))
+	}
+
+	// No staging file may survive: a leftover .tmp beside the artefact is how a
+	// reader ends up recovering from a half-written copy.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.Contains(e.Name(), ".tmp") {
+			t.Fatalf("a staging file was left behind: %s", e.Name())
+		}
+	}
+	if len(entries) != 1 {
+		t.Fatalf("directory holds %d entries, want just the artefact", len(entries))
+	}
+}
+
+// TestWriteInstructionFileFailsOnAnUnwritableDirectory: the failure must be
+// reported, because JournalPurge deletes the rows only if this succeeds.
+func TestWriteInstructionFileFailsOnAnUnwritableDirectory(t *testing.T) {
+	err := writeInstructionFile(filepath.Join(t.TempDir(), "no", "such", "dir", "x.purged"),
+		nil, []ZoneDeltaRR{{Action: ZoneDeltaAdd, RR: "a.example. 3600 IN A 10.0.0.1"}})
+	if err == nil {
+		t.Fatal("writing into a non-existent directory reported success")
+	}
+}

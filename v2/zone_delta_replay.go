@@ -101,6 +101,16 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 		lg.Warn("replaying deltas on a signed zone that cannot re-sign;"+
 			" the replayed RRsets will have no valid RRSIGs",
 			"zone", zd.ZoneName, "deltas", len(deltas))
+		// Recorded in the error registry, not just logged. Review asked for this
+		// to be a REFUSAL; refusing is worse. Such a zone was already producing
+		// unsigned RRsets when the update was first applied -- replay reproduces
+		// that state rather than causing it -- so refusing would discard changes
+		// the operator has been told are live, in exchange for signatures that
+		// were never going to be there. What was missing is visibility, so the
+		// condition now reaches `zone status` instead of only the log.
+		zd.SetError(ConfigWarning,
+			"replaying %d delta(s) on a signed zone with neither online-signing nor"+
+				" inline-signing: the replayed RRsets have no valid RRSIGs", len(deltas))
 	}
 
 	var actions []dns.RR
@@ -119,7 +129,11 @@ func (zd *ZoneData) ReplayPersistedDeltas(kdb *KeyDB) (int, error) {
 
 	lg.Info("replaying persisted zone deltas over the zone file",
 		"zone", zd.ZoneName, "deltas", len(deltas), "records", len(actions),
-		"file_serial", zd.CurrentSerial, "target_serial", lastSerial)
+		// The CAPTURED fileSerial, not zd.CurrentSerial: the latter is read
+		// without the lock and is a different value besides -- labelling it
+		// file_serial would print a serial the chain was never validated
+		// against, which is worse than not logging it at all.
+		"file_serial", fileSerial, "target_serial", lastSerial)
 
 	// InternalUpdate: these changes were authorized when they were first
 	// applied; re-checking update-policy now would drop content on a policy
