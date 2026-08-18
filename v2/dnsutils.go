@@ -810,16 +810,24 @@ func (zd *ZoneData) WriteFileWithSerial(filename string) (string, uint32, error)
 	}
 	committed = true
 
-	// Persist the rename itself. Without this the directory entry can still be
-	// lost to a power failure, leaving the old file -- while the journal that
-	// would have restored the difference has already been dropped.
-	if d, derr := os.Open(dir); derr == nil {
-		if serr := d.Sync(); serr != nil {
-			lg.Warn("zone file renamed but its directory could not be synced;"+
-				" the rename may not survive a power failure",
-				"zone", zd.ZoneName, "dir", dir, "error", serr)
-		}
+	// Persist the rename itself, and FAIL if that cannot be done.
+	//
+	// Logging and returning success was the wrong call: WriteZone reads a
+	// successful return as licence to delete the journal deltas, so a directory
+	// entry that never reached disk leaves a power failure with the OLD zone
+	// file and no journal -- the precise loss the staging and syncing above
+	// exist to prevent, reached one step later. Reporting the write as
+	// incomplete keeps the journal, which is what makes it survivable.
+	d, derr := os.Open(dir)
+	if derr != nil {
+		return fname, 0, fmt.Errorf("opening %s to sync the rename: %v", dir, derr)
+	}
+	if serr := d.Sync(); serr != nil {
 		d.Close()
+		return fname, 0, fmt.Errorf("syncing %s after renaming %s into place: %v", dir, fname, serr)
+	}
+	if cerr := d.Close(); cerr != nil {
+		return fname, 0, fmt.Errorf("closing %s after syncing: %v", dir, cerr)
 	}
 
 	return fname, wrote, nil
