@@ -142,10 +142,10 @@ func runCertInit() {
 	appendIssuedLog(caDir, "init-server-leaf", leaf.Cert)
 	fmt.Printf("server cert:     %s\nserver key:      %s\n", certFile, keyFile)
 
-	// Drop a copy of the CA cert next to the server cert for use as
-	// ca-file / downstream-ca on this host. Idempotent: identical content
-	// is left alone; a different file needs --force.
-	caCopy := filepath.Join(filepath.Dir(certFile), safeFileName(certInitCAName)+".crt")
+	// Drop a copy of the CA cert where ca-file / downstream-ca consumers on
+	// this host look for it. Idempotent: identical content is left alone; a
+	// different file needs --force.
+	caCopy := caCopyPath(certFile)
 	if existing, err := os.ReadFile(caCopy); err != nil || !bytes.Equal(existing, mustReadFile(caCertPath)) {
 		writeFileSafe(caCopy, mustReadFile(caCertPath), 0o644)
 	}
@@ -154,7 +154,7 @@ func runCertInit() {
 	dotPort := initDotPort(v)
 	fmt.Printf("Restart tdns-auth to serve the new certificate. Secondaries can then use any of:\n\n")
 	fmt.Printf("  # pkix — copy %s to the secondary:\n", filepath.Base(caCopy))
-	fmt.Printf("  primaries:\n     - addr: %s:%s\n       key: NOKEY\n       transport: dot\n       tls-auth: pkix\n       ca-file: /etc/tdns/certs/%s\n\n", leafName, dotPort, filepath.Base(caCopy))
+	fmt.Printf("  primaries:\n     - addr: %s:%s\n       key: NOKEY\n       transport: dot\n       tls-auth: pkix\n       ca-file: %s\n\n", leafName, dotPort, caCopy)
 	fmt.Printf("  # pin — no file distribution needed:\n")
 	fmt.Printf("  #    tls-auth: pin\n  #    pins: [ %q ]\n\n", tdns.SPKISHA256(leaf.Cert))
 	tlsa, terr := tdns.NewTlsaRR(dns.Fqdn(leafName), initPortNum(dotPort), leaf.Cert)
@@ -240,4 +240,24 @@ func init() {
 	certInitCmd.Flags().IntVar(&certValidity, "validity", 397, "server cert validity in days")
 	certInitCmd.Flags().StringVar(&certAlgorithm, "algorithm", "ed25519", "key algorithm: ed25519 | ecdsa-p256 | rsa2048")
 	certInitCmd.Flags().BoolVar(&certForce, "force", false, "overwrite existing cert/key files")
+}
+
+// caCopyPath is where the CA certificate copy is written, given the server
+// certificate's path.
+//
+// The convention is <certs-dir>/tdns-ca.crt, one level above the server certs:
+// the server directory holds per-host leaves, while the CA cert is the one file
+// every consumer on the host shares — a ca-file for XoT, a cacert for tdns-cli.
+// Putting it beside the leaves buried it a level deeper than anything looks.
+//
+// Only the "servers" directory is climbed out of, because that is the layout
+// this is a convention for. A certfile placed anywhere else keeps its copy
+// alongside, which is at worst the previous behaviour and never writes outside
+// the directory the operator pointed at.
+func caCopyPath(certFile string) string {
+	dir := filepath.Dir(certFile)
+	if filepath.Base(dir) == "servers" {
+		dir = filepath.Dir(dir)
+	}
+	return filepath.Join(dir, safeFileName(certInitCAName)+".crt")
 }
