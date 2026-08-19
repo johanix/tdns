@@ -63,6 +63,81 @@ func LoadRawConfigMap(file string) (map[string]interface{}, []string, error) {
 	return processConfigFile(file, filepath.Dir(file), 0)
 }
 
+// decodeConfigFile turns a config FILE into a Config exactly as the daemon
+// does: include processing, transfer-alias normalisation, the apiserver.usetls
+// default, then a STRICT mapstructure decode.
+//
+// Shared by ParseConfig and ValidateConfig so that `config check` cannot pass a
+// file the daemon would refuse to start on. The checker used to decode through
+// viper.Unmarshal instead, which is materially more permissive: viper sets
+// WeaklyTypedInput and adds StringToSlice/StringToTimeDuration hooks this
+// decoder does not have. A config writing `schemes: notify` where the struct
+// wants a slice, or `port: "5354"` where it wants a uint16, therefore validated
+// clean and then failed at startup -- a checker handing out a green light on a
+// config that could not boot.
+func decodeConfigFile(cfgfile string, conf *Config) (mapstructure.Metadata, []string, map[string]string, error) {
+	var md mapstructure.Metadata
+
+	configMap, includedFiles, err := processConfigFile(cfgfile, filepath.Dir(cfgfile), 0)
+	if err != nil {
+		return md, nil, nil, err
+	}
+	aliasConflicts := NormalizeXfrAliases(configMap)
+
+	if err := decodeConfigMap(configMap, conf, &md); err != nil {
+		return md, includedFiles, aliasConflicts, err
+	}
+	return md, includedFiles, aliasConflicts, nil
+}
+
+// decodeConfigMap is the decode half alone, for callers that already hold a
+// settings map. Same strictness, same hooks, same tag: a divergence here is a
+// checker that disagrees with the daemon.
+func decodeConfigMap(configMap map[string]interface{}, conf *Config, md *mapstructure.Metadata) error {
+	decoderConfig := &mapstructure.DecoderConfig{
+		TagName: "yaml",
+		Result:  conf,
+		// Replace, don't merge. Result is the long-lived conf, reused across
+		// reloads, and ParseZones writes template-expanded options/policy back
+		// into conf.Zones[i] (*zconf = updated). Without ZeroFields, a reload
+		// merges the new zones list into the stale slice, so a zone whose YAML
+		// omits a field silently inherits a former slot-neighbour's value --
+		// e.g. a plain secondary gaining online-signing + a dnssecpolicy. It
+		// also drops Templates/Policies deleted from the config. Absent keys are
+		// still skipped, so runtime state in conf.Internal is untouched.
+		ZeroFields: true,
+		Metadata:   md,
+		DecodeHook: mapstructure.ComposeDecodeHookFunc(
+			stringToPeerConfHook(),
+			stringToAclEntryHook(),
+			legacyDynamicAllowedHook(),
+		),
+	}
+	decoder, derr := mapstructure.NewDecoder(decoderConfig)
+	if derr != nil {
+		return fmt.Errorf("error creating decoder: %v", derr)
+	}
+
+	// apiserver.usetls defaults to true, applied to the raw map so an absent
+	// key and an explicit `usetls: true` decode identically.
+	if apiserverMap, ok := configMap["apiserver"].(map[string]interface{}); ok {
+		if _, explicitlySet := apiserverMap["usetls"]; !explicitlySet {
+			apiserverMap["usetls"] = true
+		}
+	}
+
+	// Reset raw fields that derive an internal default when omitted, so a
+	// reload after the operator removes the YAML key reverts to the default
+	// instead of preserving the previously-decoded value (mapstructure leaves
+	// absent keys untouched).
+	conf.Dnssec.DNSKEYTransport = ""
+
+	if derr := decoder.Decode(configMap); derr != nil {
+		return fmt.Errorf("error decoding config: %v", derr)
+	}
+	return nil
+}
+
 func processConfigFile(file string, baseDir string, depth int) (map[string]interface{}, []string, error) {
 	if depth > 10 {
 		return nil, nil, errors.New("maximum include depth exceeded (10 levels)")
@@ -303,57 +378,12 @@ func (conf *Config) ParseConfig(reload bool) error {
 	// ParseZones quarantines the affected zones.
 	aliasConflicts := NormalizeXfrAliases(configMap)
 
-	// Configure mapstructure decoder to respect yaml tags. The decode hook
-	// converts a bare-string primary:/notify: entry (the pre-migration shape)
-	// into a PeerConf legacy marker instead of failing the whole-file decode —
-	// per-zone validation then quarantines just that zone to ERROR. A custom
-	// yaml.Unmarshaler does NOT work here: config decodes yaml -> map ->
-	// mapstructure, and mapstructure ignores the yaml.Unmarshaler interface.
+	// Decode through the shared helper, so ValidateConfig -- and therefore
+	// `config check` -- applies byte-for-byte the same strictness. A decoder
+	// written out twice is a checker that eventually disagrees with the daemon.
 	var md mapstructure.Metadata
-	decoderConfig := &mapstructure.DecoderConfig{
-		TagName: "yaml",
-		Result:  conf,
-		// Replace, don't merge. Result is the long-lived conf, reused across
-		// reloads, and ParseZones writes template-expanded options/policy back
-		// into conf.Zones[i] (*zconf = updated). Without ZeroFields, a reload
-		// merges the new zones list into the stale slice, so a zone whose YAML
-		// omits a field silently inherits a former slot-neighbour's value —
-		// e.g. a plain secondary gaining online-signing + a dnssecpolicy. It
-		// also drops Templates/Policies deleted from the config. Absent keys are
-		// still skipped, so runtime state in conf.Internal is untouched.
-		ZeroFields: true,
-		Metadata:   &md,
-		DecodeHook: mapstructure.ComposeDecodeHookFunc(
-			stringToPeerConfHook(),
-			stringToAclEntryHook(),
-			legacyDynamicAllowedHook(),
-		),
-	}
-	decoder, err := mapstructure.NewDecoder(decoderConfig)
-	if err != nil {
-		return fmt.Errorf("error creating decoder: %v", err)
-	}
-
-	// Set default for apiserver.usetls (default: true) before decoding
-	// Check if usetls was explicitly set in the config by checking the raw map
-	if apiserverMap, ok := configMap["apiserver"].(map[string]interface{}); ok {
-		if _, explicitlySet := apiserverMap["usetls"]; !explicitlySet {
-			// usetls was not explicitly set, set default to true in the map
-			apiserverMap["usetls"] = true
-		}
-	}
-
-	// Reset raw fields that derive an internal default when omitted, so a
-	// reload after the operator removes the YAML key reverts to the default
-	// instead of preserving the previously-decoded value (mapstructure leaves
-	// absent keys untouched).
-	conf.Dnssec.DNSKEYTransport = ""
-
-	// Decode the entire config at once. A bare-string primary:/notify: entry no
-	// longer aborts the decode — stringToPeerConfHook turns it into a PeerConf
-	// legacy marker that per-zone validation quarantines (see DecoderConfig above).
-	if err := decoder.Decode(configMap); err != nil {
-		return fmt.Errorf("error decoding config: %v", err)
+	if err := decodeConfigMap(configMap, conf, &md); err != nil {
+		return err
 	}
 
 	// peers: block — validate/normalize definitions; a broken peer does not
