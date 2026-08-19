@@ -11,7 +11,6 @@ import (
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 func (zd *ZoneData) PublishKeyRRs(sak *Sig0ActiveKeys) error {
@@ -106,7 +105,7 @@ func (zd *ZoneData) VerifyPublishedKeyRRs() error {
 	}
 	if len(sak.Keys) == 0 {
 		// Ok, no active key found, try to generate a new one
-		algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
+		algstr := DelegationSyncConfig().Child.Update.Keygen.Algorithm
 		alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 		if alg == 0 {
 			return fmt.Errorf("unknown keygen algorithm: %q", algstr)

@@ -208,7 +208,7 @@ func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
 		return nil
 	}
 
-	// algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
+	// algstr := DelegationSyncConfig().Child.Update.Keygen.Algorithm
 	// alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 	// if alg == 0 {
 	// 	log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
@@ -242,7 +242,7 @@ func (zd *ZoneData) DelegationSyncSetup(ctx context.Context, kdb *KeyDB) error {
 }
 
 func (zd *ZoneData) ParentSig0KeyPrep(name string, kdb *KeyDB) error {
-	// algstr := viper.GetString("delegationsync.parent.update.keygen.algorithm")
+	// algstr := DelegationSyncConfig().Parent.Update.Keygen.Algorithm
 	// alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 	// if alg == 0 {
 	// 	log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)
@@ -260,7 +260,7 @@ func (zd *ZoneData) ParentSig0KeyPrep(name string, kdb *KeyDB) error {
 // MusicSig0KeyPrep and ParentSig0KeyPrep are identical except for the source of the keygen algorithm
 // which is specified in the relevant section of the configuration file.
 func (zd *ZoneData) MusicSig0KeyPrep(name string, kdb *KeyDB) error {
-	// algstr := viper.GetString("delegationsync.child.update.keygen.algorithm")
+	// algstr := DelegationSyncConfig().Child.Update.Keygen.Algorithm
 	// alg := dns.StringToAlgorithm[strings.ToUpper(algstr)]
 	// if alg == 0 {
 	// 	log.Printf("Sig0KeyPreparation: Unknown keygen algorithm: \"%s\", using ED25519", algstr)

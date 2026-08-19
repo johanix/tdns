@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 // LookupChildKeyAtApex queries the child zone apex for KEY records via the
@@ -84,7 +83,7 @@ func LookupChildKeyAtSignal(ctx context.Context, childZone string, imr *Imr) ([]
 // be found via the configured verification mechanisms (at-apex, at-ns). Returns
 // true if any mechanism succeeds (key found + optionally DNSSEC-validated).
 func VerifyChildKey(ctx context.Context, childZone string, keyRR string, imr *Imr) (verified bool, dnssecValidated bool) {
-	mechanisms := viper.GetStringSlice("delegationsync.parent.update.key-verification.mechanisms")
+	mechanisms := DelegationSyncConfig().Parent.Update.KeyVerification.Mechanisms
 	if len(mechanisms) == 0 {
 		mechanisms = []string{"at-apex", "at-ns"}
 	}
@@ -148,11 +147,11 @@ func matchKeyRR(rrs []dns.RR, keyRR string) bool {
 // retry pattern: verify via DNS lookup, retry with backoff, then trust.
 func (kdb *KeyDB) TriggerChildKeyVerification(childZone string, keyid uint16, keyRR string) {
 	go func() {
-		maxAttempts := viper.GetInt("delegationsync.parent.update.key-verification.max-attempts")
+		maxAttempts := DelegationSyncConfig().Parent.Update.KeyVerification.MaxAttempts
 		if maxAttempts == 0 {
 			maxAttempts = 5
 		}
-		retryInterval := viper.GetDuration("delegationsync.parent.update.key-verification.retry-interval")
+		retryInterval := DelegationSyncConfig().Parent.Update.KeyVerification.RetryInterval
 		if retryInterval == 0 {
 			retryInterval = 10 * time.Second
 		}
@@ -176,9 +175,14 @@ func (kdb *KeyDB) TriggerChildKeyVerification(childZone string, keyid uint16, ke
 
 			verified, dnssecValidated := VerifyChildKey(ctx, childZone, keyRR, imr)
 
+			// Default true; only an explicit false turns it off. The pointer
+			// preserves the distinction the viper reader made with its
+			// nil-check: absent and false are different answers here, and
+			// collapsing them would silently downgrade key verification on
+			// every config that does not mention the key.
 			requireDnssec := true
-			if v := viper.Get("delegationsync.parent.update.key-verification.require-dnssec"); v != nil {
-				requireDnssec = viper.GetBool("delegationsync.parent.update.key-verification.require-dnssec")
+			if rd := DelegationSyncConfig().Parent.Update.KeyVerification.RequireDnssec; rd != nil {
+				requireDnssec = *rd
 			}
 
 			accepted := verified && (!requireDnssec || dnssecValidated)

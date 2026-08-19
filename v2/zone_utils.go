@@ -17,7 +17,6 @@ import (
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
-	"github.com/spf13/viper"
 )
 
 var lg = Logger("zones")
@@ -1002,7 +1001,7 @@ func (zd *ZoneData) SetupZoneSync(delsyncq chan<- DelegationSyncRequest) error {
 	if zd.Options[OptDelSyncChild] &&
 		((Globals.App.Type == AppTypeAuth && !zd.Options[OptMultiProvider]) ||
 			(Globals.App.Type == AppTypeAgent && zd.Options[OptMultiProvider])) {
-		schemes := viper.GetStringSlice("delegationsync.child.schemes")
+		schemes := DelegationSyncConfig().Child.Schemes
 		if len(schemes) == 0 {
 			lg.Error("SetupZoneSync: zone has delegation-sync-child enabled but delegationsync.child.schemes is not configured — delegation sync will not work", "zone", zd.ZoneName)
 			zd.SetError(ConfigError, "delegation-sync-child enabled but delegationsync.child.schemes is not configured")
