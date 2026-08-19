@@ -408,6 +408,8 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				tx, err := kdb.Begin("UpdaterEngine")
 				if err != nil {
 					lg.Error("kdb.Begin failed", "error", err)
+					ur.respond(false, fmt.Errorf("truststore update not started: %v", err))
+					continue
 				}
 				type pendingVerification struct {
 					childZone string
@@ -415,6 +417,8 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					keyRR     string
 				}
 				var toVerify []pendingVerification
+				var applyErr error
+			trustLoop:
 				for _, rr := range ur.Actions {
 					var subcommand string
 					switch rr.Header().Class {
@@ -423,56 +427,75 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 					case dns.ClassNONE:
 						subcommand = "delete"
 					case dns.ClassANY:
-						lg.Error("ZoneUpdater: TRUSTSTORE-UPDATE: class ANY (delete RRset) not supported, ignoring")
-						continue
+						applyErr = fmt.Errorf("class ANY (delete RRset) is not supported for a truststore update")
+						break trustLoop
 					default:
-						lg.Error("ZoneUpdater: TRUSTSTORE-UPDATE: unknown class, ignoring", "rr", rr.String())
-						continue
+						applyErr = fmt.Errorf("unknown class %s in truststore update", dns.ClassToString[rr.Header().Class])
+						break trustLoop
 					}
 
-					if keyrr, ok := rr.(*dns.KEY); ok {
-						tppost := TruststorePost{
-							SubCommand: subcommand,
-							Src:        "child-update",
-							Keyname:    keyrr.Header().Name,
-							Keyid:      int(keyrr.KeyTag()),
-							KeyRR:      rr.String(),
-							Validated:  ur.Validated,
-							Trusted:    ur.Trusted,
-						}
-
-						_, err := kdb.Sig0TrustMgmt(tx, tppost)
-						if err != nil {
-							lg.Error("kdb.Sig0TrustMgmt failed", "error", err)
-						}
-
-						// Queue untrusted child-update adds for async verification.
-						if subcommand == "add" && !ur.Trusted {
-							toVerify = append(toVerify, pendingVerification{
-								childZone: keyrr.Header().Name,
-								keyid:     uint16(keyrr.KeyTag()),
-								keyRR:     rr.String(),
-							})
-						}
-					} else {
-						lg.Error("ZoneUpdater: TRUSTSTORE-UPDATE: not a KEY RR", "rr", rr.String())
+					keyrr, ok := rr.(*dns.KEY)
+					if !ok {
+						applyErr = fmt.Errorf("truststore update is not a KEY RR")
+						break trustLoop
 					}
+					tppost := TruststorePost{
+						SubCommand: subcommand,
+						Src:        "child-update",
+						Keyname:    keyrr.Header().Name,
+						Keyid:      int(keyrr.KeyTag()),
+						KeyRR:      rr.String(),
+						Validated:  ur.Validated,
+						Trusted:    ur.Trusted,
+					}
+
+					// Sig0TrustMgmt reports storage failures two ways: a
+					// returned error (canonicalisation, begin), and resp.Error
+					// with a nil error (the SQL Exec paths). Both are a failed
+					// update; checking only err is how a KEY upload that did
+					// not land used to be answered NOERROR.
+					resp, err := kdb.Sig0TrustMgmt(tx, tppost)
+					if err != nil {
+						applyErr = err
+						break trustLoop
+					}
+					if resp != nil && resp.Error {
+						applyErr = fmt.Errorf("truststore update failed: %s", resp.ErrorMsg)
+						break trustLoop
+					}
+
+					if subcommand == "add" && !ur.Trusted {
+						toVerify = append(toVerify, pendingVerification{
+							childZone: keyrr.Header().Name,
+							keyid:     uint16(keyrr.KeyTag()),
+							keyRR:     rr.String(),
+						})
+					}
+				}
+				if applyErr != nil {
+					lg.Error("ZoneUpdater: TRUSTSTORE-UPDATE failed", "error", applyErr)
+					if rerr := tx.Rollback(); rerr != nil {
+						lg.Error("tx.Rollback failed", "error", rerr)
+					}
+					ur.respond(false, applyErr)
+					continue
+				}
+				if len(ur.Actions) == 0 {
+					if rerr := tx.Rollback(); rerr != nil {
+						lg.Error("tx.Rollback failed", "error", rerr)
+					}
+					ur.respond(false, fmt.Errorf("truststore update contained no records"))
+					continue
 				}
 				err = tx.Commit()
 				if err != nil {
 					lg.Error("tx.Commit failed", "error", err)
-					// The commit is what makes a key upload durable, so this
-					// is the one outcome here the caller must not be told
-					// succeeded. Same reasoning as the CHILD-UPDATE branch:
-					// silence would cost it a full UpdateApplyTimeout and then
-					// report failure without knowing.
 					ur.respond(false, fmt.Errorf("truststore update not committed: %v", err))
-				} else {
-					ur.respond(true, nil)
+					continue
 				}
+				ur.respond(true, nil)
 				logUpdateActions("TRUSTSTORE-UPDATE", ur.Actions)
 
-				// Trigger async DNS verification for newly stored untrusted child keys.
 				for _, pv := range toVerify {
 					lg.Info("ZoneUpdater: triggering child key verification",
 						"zone", pv.childZone, "keyid", pv.keyid)
