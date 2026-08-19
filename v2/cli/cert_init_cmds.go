@@ -125,6 +125,35 @@ func runCertInit() {
 		fmt.Printf("reusing CA:      %s\n", caCertPath)
 	}
 
+	// Nothing to do is not a failure.
+	//
+	// "Re-running is safe" is this command's documented contract, and a boot
+	// script that provisions certificates on first start re-runs it at every
+	// boot thereafter. Falling through to writeFileSafe made it exit non-zero
+	// with "already exists (use --force)", so an rc.d script that checked the
+	// exit status reported a failed component on every reboot of a correctly
+	// provisioned host -- a false alarm in the failure list, which is worse
+	// than no list because it teaches people to skim it.
+	//
+	// Checked HERE rather than by loosening writeFileSafe: csr, sign and
+	// selfsign share that helper and SHOULD refuse to clobber, since for them
+	// an existing file means the operator is about to lose a key they asked
+	// for. Only init has "already provisioned" as a legitimate outcome.
+	//
+	// Both halves must be present. One without the other is the same
+	// inconsistent state the CA check above refuses, and silently keeping it
+	// would leave a daemon unable to start with nothing saying why.
+	if !certForce {
+		_, certErr := os.Stat(certFile)
+		_, keyErr := os.Stat(keyFile)
+		if certErr == nil && keyErr == nil {
+			fmt.Printf("server cert:     %s (already present, unchanged)\n", certFile)
+			fmt.Printf("server key:      %s (already present, unchanged)\n", keyFile)
+			fmt.Printf("\nNothing to do. Use --force to reissue.\n")
+			return
+		}
+	}
+
 	leaf, err := tdns.IssueLeaf(caCert, caKey, tdns.LeafOptions{
 		Name:     leafName,
 		DNSNames: dnsSANs,
