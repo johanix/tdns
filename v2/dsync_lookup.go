@@ -142,7 +142,7 @@ func (imr *Imr) DsyncDiscovery(ctx context.Context, child string, verbose bool) 
 			return dr, err
 		}
 		if len(prrs) > 0 {
-			return DsyncResult{Qname: name, Rdata: prrs, Parent: parent}, nil
+			return DsyncResult{Qname: name, Rdata: prrs, Parent: parent, Validated: resp != nil && resp.Validated}, nil
 		}
 	}
 
@@ -165,7 +165,7 @@ func (imr *Imr) DsyncDiscovery(ctx context.Context, child string, verbose bool) 
 		return dr, err
 	}
 
-	return DsyncResult{Qname: name, Rdata: prrs, Parent: parent}, nil
+	return DsyncResult{Qname: name, Rdata: prrs, Parent: parent, Validated: resp != nil && resp.Validated}, nil
 }
 
 /*
@@ -206,7 +206,7 @@ func xxxDsyncDiscovery(child, imr string, verbose bool) (DsyncResult, error) {
 			return dr, err
 		}
 		if len(prrs) > 0 {
-			return DsyncResult{Qname: name, Rdata: prrs, Parent: parent}, nil
+			return DsyncResult{Qname: name, Rdata: prrs, Parent: parent, Validated: resp != nil && resp.Validated}, nil
 		}
 	}
 
@@ -223,7 +223,7 @@ func xxxDsyncDiscovery(child, imr string, verbose bool) (DsyncResult, error) {
 		return dr, err
 	}
 
-	return DsyncResult{Qname: name, Rdata: prrs, Parent: parent}, nil
+	return DsyncResult{Qname: name, Rdata: prrs, Parent: parent, Validated: resp != nil && resp.Validated}, nil
 }
 */
 

@@ -5,12 +5,19 @@ package tdns
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
+	"encoding/pem"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gorilla/mux"
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
 )
@@ -331,4 +338,175 @@ delegationsync:
 	if _, ok := api.CredentialFor("nosuch.example."); ok {
 		t.Error("a credential was returned for a parent that has none")
 	}
+}
+
+// TestDsyncApiRRsetsIncludesAAAAGlue covers the IPv6 half of
+// DsyncApiRRsetsFromSyncStatus. It loops over both A and AAAA and groups glue
+// per owner; the A path was tested and the AAAA path was not, so a regression
+// in the v6 grouping would have gone unnoticed.
+func TestDsyncApiRRsetsIncludesAAAAGlue(t *testing.T) {
+	mustRR := func(s string) dns.RR {
+		t.Helper()
+		rr, err := dns.NewRR(s)
+		if err != nil {
+			t.Fatalf("parsing %q: %v", s, err)
+		}
+		return rr
+	}
+
+	status := DelegationSyncStatus{
+		NewNS: []dns.RR{
+			mustRR("child1.example. 3600 IN NS ns1.child1.example."),
+			mustRR("child1.example. 3600 IN NS ns2.child1.example."),
+		},
+		NewA: []dns.RR{
+			mustRR("ns1.child1.example. 3600 IN A 192.0.2.1"),
+		},
+		NewAAAA: []dns.RR{
+			mustRR("ns1.child1.example. 3600 IN AAAA 2001:db8::1"),
+			mustRR("ns1.child1.example. 3600 IN AAAA 2001:db8::2"),
+			mustRR("ns2.child1.example. 3600 IN AAAA 2001:db8::3"),
+		},
+	}
+
+	sets := DsyncApiRRsetsFromSyncStatus("child1.example.", status)
+	byKey := map[string]DsyncApiRRset{}
+	for _, s := range sets {
+		byKey[s.Owner+"/"+s.Type] = s
+	}
+
+	// Grouped per owner, not lumped into one AAAA entry.
+	for key, want := range map[string]int{
+		"ns1.child1.example./AAAA": 2,
+		"ns2.child1.example./AAAA": 1,
+		"ns1.child1.example./A":    1,
+	} {
+		got, ok := byKey[key]
+		if !ok {
+			t.Errorf("no entry for %s; got %v", key, keysOfRRsets(sets))
+			continue
+		}
+		if len(got.RRs) != want {
+			t.Errorf("%s has %d records, want %d", key, len(got.RRs), want)
+		}
+	}
+
+	// ns2 has no A record, so there must be no empty A entry for it: an empty
+	// entry means "remove this RRset".
+	if e, ok := byKey["ns2.child1.example./A"]; ok {
+		t.Errorf("an A entry was emitted for a name with no A glue: %+v", e)
+	}
+}
+
+// TestDsyncApiListenerBlocksUntilShutdown asserts the property the engine
+// wiring actually depends on: StartDsyncApiListener must NOT return while its
+// listeners are serving, and must return once shutdown is requested.
+//
+// Both halves are needed. StartEngine marks the engine done when this function
+// returns and Shutdowner waits on engineWg before exiting, so a version that
+// starts the listeners and returns immediately makes the wait cover nothing:
+// os.Exit can run mid-drain, killing a request that has queued a CHILD-UPDATE
+// and is waiting for the updater's answer, and the child cannot tell whether
+// its delegation update was applied.
+//
+// Asserting only "it returns within N seconds" does not catch that -- the
+// broken version returns in microseconds and passes. The first version of this
+// test made exactly that mistake.
+func TestDsyncApiListenerBlocksUntilShutdown(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// stopIt triggers shutdown by whichever mechanism is under test.
+		stopIt func(cancel context.CancelFunc, stop chan struct{})
+	}{
+		{"stop channel", func(_ context.CancelFunc, stop chan struct{}) { close(stop) }},
+		// A plain context cancellation (SIGTERM) does not close APIStopCh, so a
+		// wait on the stop channel alone leaks the goroutine and leaves the
+		// listeners up.
+		{"context cancel", func(cancel context.CancelFunc, _ chan struct{}) { cancel() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			conf, router, certOK := dsyncApiTestListener(t)
+			if !certOK {
+				t.Skip("no test certificate available")
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			stop := make(chan struct{})
+			done := make(chan error, 1)
+			go func() { done <- conf.StartDsyncApiListener(ctx, router, stop) }()
+
+			// It must still be running: nothing has asked it to stop.
+			select {
+			case err := <-done:
+				t.Fatalf("StartDsyncApiListener returned (%v) while its listeners were"+
+					" still serving; engineWg would not cover the drain and os.Exit"+
+					" could run mid-shutdown", err)
+			case <-time.After(500 * time.Millisecond):
+			}
+
+			tc.stopIt(cancel, stop)
+
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatalf("listener returned an error: %v", err)
+				}
+			case <-time.After(10 * time.Second):
+				t.Fatal("StartDsyncApiListener did not return within 10s of shutdown being requested")
+			}
+		})
+	}
+}
+
+// dsyncApiTestListener builds a Config whose delegationsync.parent.api points
+// at a free loopback port and a freshly written self-signed cert/key pair, plus
+// a router to serve. Reuses newTestTLSCert so there is one certificate
+// generator in the package rather than two.
+func dsyncApiTestListener(t *testing.T) (*Config, *mux.Router, bool) {
+	t.Helper()
+
+	cert, _ := newTestTLSCert(t, []string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1")})
+
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "cert.pem")
+	keyPath := filepath.Join(dir, "key.pem")
+
+	certOut, err := os.Create(certPath)
+	if err != nil {
+		t.Fatalf("creating cert file: %v", err)
+	}
+	if err := pem.Encode(certOut, &pem.Block{Type: "CERTIFICATE", Bytes: cert.Certificate[0]}); err != nil {
+		t.Fatalf("writing cert: %v", err)
+	}
+	certOut.Close()
+
+	keyDER, err := x509.MarshalPKCS8PrivateKey(cert.PrivateKey)
+	if err != nil {
+		t.Fatalf("marshalling key: %v", err)
+	}
+	keyOut, err := os.Create(keyPath)
+	if err != nil {
+		t.Fatalf("creating key file: %v", err)
+	}
+	if err := pem.Encode(keyOut, &pem.Block{Type: "PRIVATE KEY", Bytes: keyDER}); err != nil {
+		t.Fatalf("writing key: %v", err)
+	}
+	keyOut.Close()
+
+	// A port the kernel just handed out is one nothing else is on.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserving a port: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	conf := &Config{}
+	conf.DelegationSync.Parent.Api.Listen = []string{addr}
+	conf.DelegationSync.Parent.Api.CertFile = certPath
+	conf.DelegationSync.Parent.Api.KeyFile = keyPath
+	SetDelegationSyncConfig(conf.DelegationSync)
+
+	return conf, mux.NewRouter(), true
 }

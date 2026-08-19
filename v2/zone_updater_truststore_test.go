@@ -34,7 +34,13 @@ func runTruststoreUpdate(t *testing.T, kdb *KeyDB, ur UpdateRequest) ZoneUpdateR
 		t.Fatal("updater did not answer the TRUSTSTORE-UPDATE")
 	}
 	cancel()
-	<-done
+	// Bounded: an engine that does not exit on cancellation is a bug worth a
+	// failed test, not a test run that hangs until the suite is killed.
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("ZoneUpdaterEngine did not exit within 5s of context cancellation")
+	}
 	return res
 }
 

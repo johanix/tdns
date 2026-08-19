@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -134,17 +135,49 @@ func pickDsyncApiDialect(rrs []dns.RR) (string, error) {
 		advertised, dsyncApiSupportedDialects)
 }
 
+// pickDsyncApiUrl chooses one endpoint from a URI RRset per RFC 7553: lowest
+// Priority wins, and among equal priorities the choice is weighted by Weight.
+//
+// Returning the first usable target made the choice depend on answer order,
+// which a resolver is free to vary -- so a parent publishing a primary and a
+// backup endpoint had no way to say which was which, and successive runs of the
+// same child could pick differently.
+//
+// Weighted selection is deterministic here rather than random: this is a
+// delegation-maintenance client making occasional calls, not a load balancer,
+// and a stable choice is easier to operate and to debug. Weight still orders
+// the candidates, so a parent's preference is honoured; equal weights fall back
+// to target order for stability.
 func pickDsyncApiUrl(rrs []dns.RR) (string, error) {
+	type cand struct {
+		target   string
+		priority uint16
+		weight   uint16
+	}
+	var cands []cand
 	for _, rr := range rrs {
 		uri, ok := rr.(*dns.URI)
 		if !ok {
 			continue
 		}
-		if strings.TrimSpace(uri.Target) != "" {
-			return strings.TrimSpace(uri.Target), nil
+		if t := strings.TrimSpace(uri.Target); t != "" {
+			cands = append(cands, cand{target: t, priority: uri.Priority, weight: uri.Weight})
 		}
 	}
-	return "", fmt.Errorf("no usable URI target")
+	if len(cands) == 0 {
+		return "", fmt.Errorf("no usable URI target")
+	}
+
+	sort.SliceStable(cands, func(i, j int) bool {
+		if cands[i].priority != cands[j].priority {
+			return cands[i].priority < cands[j].priority // lowest priority first
+		}
+		if cands[i].weight != cands[j].weight {
+			return cands[i].weight > cands[j].weight // higher weight preferred
+		}
+		return cands[i].target < cands[j].target
+	})
+	return cands[0].target, nil
 }
 
 // DsyncApiClientCredential is what a child holds for one parent.
@@ -250,8 +283,17 @@ func dsyncApiHttpClient(caFile string) (*http.Client, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading delegationsync.child.api.cafile %q: %v", caFile, err)
 		}
+		// Additive: the private CA is ADDED to the system roots, so an endpoint
+		// chaining to a public CA keeps verifying. Falling back to an empty
+		// pool on error silently narrowed trust to the private CA alone, which
+		// contradicted the comment above and surfaced as a certificate error
+		// naming the endpoint rather than the missing system pool.
 		pool, err := x509.SystemCertPool()
 		if err != nil || pool == nil {
+			lgDsyncApi.Warn("system certificate pool unavailable;"+
+				" verifying against delegationsync.child.api.cafile alone."+
+				" An endpoint whose certificate chains to a public CA will not verify.",
+				"cafile", caFile, "err", err)
 			pool = x509.NewCertPool()
 		}
 		if !pool.AppendCertsFromPEM(pem) {

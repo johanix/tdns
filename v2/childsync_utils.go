@@ -427,6 +427,24 @@ schemeLoop:
 
 		case "api":
 			lgDns.Debug("BestSyncScheme: checking API alternative")
+			// The API scheme needs the DSYNC lookup to have DNSSEC-validated,
+			// and this is the check that makes DsyncResult.Validated mean
+			// something. The DSYNC record names the target whose URI carries
+			// the endpoint this client then sends a bearer credential to, so an
+			// unvalidated lookup lets whoever can answer the query choose where
+			// the credential goes. NOTIFY and UPDATE do not carry a secret and
+			// are not gated this way.
+			//
+			// allow-insecure is the same switch DiscoverDsyncApiEndpoint uses
+			// for its own requireDnssec, so one setting governs the whole path
+			// rather than half of it.
+			if !dsync_res.Validated && !DelegationSyncConfig().Child.Api.AllowInsecure {
+				lgDns.Warn("BestSyncScheme: skipping the API scheme:"+
+					" the DSYNC lookup did not DNSSEC-validate and"+
+					" delegationsync.child.api.allow-insecure is not set",
+					"qname", dsync_res.Qname, "parent", dsync_res.Parent)
+				continue schemeLoop
+			}
 			for _, drr := range dsync_res.Rdata {
 				if drr.Scheme == core.SchemeAPI {
 					active_drr = drr
