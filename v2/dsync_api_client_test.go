@@ -510,3 +510,81 @@ func dsyncApiTestListener(t *testing.T) (*Config, *mux.Router, bool) {
 
 	return conf, mux.NewRouter(), true
 }
+
+// TestPickDsyncApiUrlHonoursPriorityAndWeight pins RFC 7553 selection.
+//
+// The assertions are chosen to be deterministic despite the selection being
+// random: priority is absolute, a zero-weight candidate can never win while a
+// positive weight is present (the running-sum algorithm gives it no interval),
+// and over many draws every positive-weight candidate must appear at least
+// once -- the probability of a false failure there is 2^-199.
+func TestPickDsyncApiUrlHonoursPriorityAndWeight(t *testing.T) {
+	uri := func(prio, weight uint16, target string) dns.RR {
+		return &dns.URI{
+			Hdr:      dns.RR_Header{Name: "_dsync.example.", Rrtype: dns.TypeURI, Class: dns.ClassINET},
+			Priority: prio, Weight: weight, Target: target,
+		}
+	}
+
+	t.Run("lowest priority always wins", func(t *testing.T) {
+		rrs := []dns.RR{
+			uri(20, 100, "https://backup.example/api"),
+			uri(10, 1, "https://primary.example/api"),
+		}
+		for i := 0; i < 200; i++ {
+			got, err := pickDsyncApiUrl(rrs)
+			if err != nil {
+				t.Fatalf("pickDsyncApiUrl: %v", err)
+			}
+			// Priority beats weight: the backup has 100x the weight and must
+			// still never be chosen while the primary is present.
+			if got != "https://primary.example/api" {
+				t.Fatalf("draw %d picked %q; a higher-numbered priority must not be used", i, got)
+			}
+		}
+	})
+
+	t.Run("a zero weight never wins against a positive one", func(t *testing.T) {
+		rrs := []dns.RR{
+			uri(10, 0, "https://never.example/api"),
+			uri(10, 5, "https://always.example/api"),
+		}
+		for i := 0; i < 200; i++ {
+			got, _ := pickDsyncApiUrl(rrs)
+			if got != "https://always.example/api" {
+				t.Fatalf("draw %d picked the zero-weight candidate %q", i, got)
+			}
+		}
+	})
+
+	t.Run("equal priorities distribute over weights", func(t *testing.T) {
+		rrs := []dns.RR{
+			uri(10, 1, "https://a.example/api"),
+			uri(10, 1, "https://b.example/api"),
+		}
+		seen := map[string]int{}
+		for i := 0; i < 200; i++ {
+			got, _ := pickDsyncApiUrl(rrs)
+			seen[got]++
+		}
+		// Deterministic selection -- the previous implementation -- puts 200 in
+		// one bucket and 0 in the other. That is the regression this catches.
+		if len(seen) != 2 {
+			t.Fatalf("200 draws produced %d distinct endpoints (%v);"+
+				" weighted selection must not always return the same one", len(seen), seen)
+		}
+	})
+
+	t.Run("a single candidate is returned as-is", func(t *testing.T) {
+		got, err := pickDsyncApiUrl([]dns.RR{uri(10, 0, "https://only.example/api")})
+		if err != nil || got != "https://only.example/api" {
+			t.Fatalf("got %q, %v", got, err)
+		}
+	})
+
+	t.Run("no usable target is an error", func(t *testing.T) {
+		if _, err := pickDsyncApiUrl([]dns.RR{uri(10, 5, "   ")}); err == nil {
+			t.Fatal("an empty target was accepted")
+		}
+	})
+}
