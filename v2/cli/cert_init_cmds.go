@@ -12,6 +12,7 @@ package cli
 
 import (
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"os"
@@ -79,6 +80,63 @@ func runCertInit() {
 		cliFatalf("cert init: %s does not set dnsengine.certfile/keyfile — set both (they are where the new cert/key will be written), then re-run", cfgPath)
 	}
 
+	// Nothing to do is not a failure.
+	//
+	// "Re-running is safe" is this command's documented contract, and a boot
+	// script that provisions certificates on first start re-runs it at every
+	// boot after that. Falling through to writeFileSafe made it exit non-zero
+	// with "already exists (use --force)", so an rc.d script checking the exit
+	// status reported a failed component on every reboot of a correctly
+	// provisioned host -- a false alarm in the failure list, which is worse
+	// than no list because it teaches people to skim past the real entries.
+	//
+	// BEFORE the hostname, SAN and CA work below, not after. Returning later
+	// would already have run the CA branch, so a host with a server pair but
+	// no CA would mint a fresh CA and then report nothing to do -- leaving a
+	// stray CA that signs nothing, whose private key is precisely what should
+	// not be lying around. A half-present CA would abort before the check was
+	// ever reached, turning a no-op into an error.
+	//
+	// Checked here rather than by loosening writeFileSafe: csr, sign and
+	// selfsign share that helper and SHOULD refuse to clobber, since for them
+	// an existing file means the operator is about to lose a key they asked
+	// for. Only init has "already provisioned" as a legitimate outcome.
+	if !certForce {
+		certPEM, certErr := os.ReadFile(certFile)
+		keyPEM, keyErr := os.ReadFile(keyFile)
+		switch {
+		case certErr == nil && keyErr == nil:
+			// Present is not the same as usable. A certificate and a key that
+			// are not a matching pair load here exactly as they will in the
+			// daemon -- tls.X509KeyPair, the same call do53 makes -- so say so
+			// now rather than report success and let the daemon fail to serve
+			// with a TLS error that names nothing.
+			//
+			// Parsed from the bytes just read rather than via
+			// LoadX509KeyPair(file, file), matching do53 for the same reason:
+			// re-reading could parse files that changed in between.
+			if _, err := tls.X509KeyPair(certPEM, keyPEM); err != nil {
+				cliFatalf("cert init: %s and %s exist but are not a usable pair: %v"+
+					" — repair them, or re-run with --force to reissue both",
+					certFile, keyFile, err)
+			}
+			fmt.Printf("server cert:     %s (already present, unchanged)\n", certFile)
+			fmt.Printf("server key:      %s (already present, unchanged)\n", keyFile)
+			fmt.Printf("\nNothing to do. Use --force to reissue.\n")
+			return
+		case os.IsNotExist(certErr) && os.IsNotExist(keyErr):
+			// Neither present: the ordinary first run. Fall through and issue.
+		default:
+			// One without the other is the same inconsistent state the CA
+			// check below refuses, and for the same reason: silently
+			// overwriting the half that exists destroys a key nobody asked to
+			// lose, while silently keeping it leaves a daemon unable to start.
+			cliFatalf("cert init: inconsistent server cert state (found one of %s / %s"+
+				" but not both) — repair or remove before re-running, or use --force",
+				certFile, keyFile)
+		}
+	}
+
 	hostname, err := os.Hostname()
 	if err != nil || hostname == "" {
 		cliFatalf("cert init: cannot determine hostname: %v", err)
@@ -123,35 +181,6 @@ func runCertInit() {
 		fmt.Printf("created CA:      %s (+ .key, mode 0600 — guard it)\n", caCertPath)
 	} else {
 		fmt.Printf("reusing CA:      %s\n", caCertPath)
-	}
-
-	// Nothing to do is not a failure.
-	//
-	// "Re-running is safe" is this command's documented contract, and a boot
-	// script that provisions certificates on first start re-runs it at every
-	// boot thereafter. Falling through to writeFileSafe made it exit non-zero
-	// with "already exists (use --force)", so an rc.d script that checked the
-	// exit status reported a failed component on every reboot of a correctly
-	// provisioned host -- a false alarm in the failure list, which is worse
-	// than no list because it teaches people to skim it.
-	//
-	// Checked HERE rather than by loosening writeFileSafe: csr, sign and
-	// selfsign share that helper and SHOULD refuse to clobber, since for them
-	// an existing file means the operator is about to lose a key they asked
-	// for. Only init has "already provisioned" as a legitimate outcome.
-	//
-	// Both halves must be present. One without the other is the same
-	// inconsistent state the CA check above refuses, and silently keeping it
-	// would leave a daemon unable to start with nothing saying why.
-	if !certForce {
-		_, certErr := os.Stat(certFile)
-		_, keyErr := os.Stat(keyFile)
-		if certErr == nil && keyErr == nil {
-			fmt.Printf("server cert:     %s (already present, unchanged)\n", certFile)
-			fmt.Printf("server key:      %s (already present, unchanged)\n", keyFile)
-			fmt.Printf("\nNothing to do. Use --force to reissue.\n")
-			return
-		}
 	}
 
 	leaf, err := tdns.IssueLeaf(caCert, caKey, tdns.LeafOptions{
