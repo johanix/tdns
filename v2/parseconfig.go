@@ -1380,8 +1380,17 @@ func activateUpdatePolicy(zconf *ZoneConf, options map[ZoneOption]bool) (UpdateP
 
 	// With the conflict options settled, the backend can be checked against
 	// them. Order matters: rule (2) below reads OptOnConflictDBWins.
-	if err := validateDelegationBackendCombination(zconf, options); err != nil {
-		return UpdatePolicy{}, err
+	// Only when the backend can actually run. Without allow-child-updates
+	// nothing ever reaches the backend, so a combination that "cannot work" has
+	// no effect to speak of -- and failing here would mark the zone broken and
+	// refuse to load it over a setting that does nothing.
+	//
+	// delegationBackendUnusedWarning is the right response to that case, and it
+	// only gets the chance to say so if we do not error first.
+	if options[OptAllowChildUpdates] {
+		if err := validateDelegationBackendCombination(zconf, options); err != nil {
+			return UpdatePolicy{}, err
+		}
 	}
 	if msg := delegationBackendUnusedWarning(zconf, options); msg != "" {
 		lgConfig.Warn(msg, "zone", zconf.Name)

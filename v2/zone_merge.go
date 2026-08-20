@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sort"
 	"time"
 
@@ -73,9 +74,21 @@ type ZoneMergeResult struct {
 // would report a conflict for a record whose only difference is a TTL the
 // deleting side never specified, and then "resolve" it by deleting a record the
 // operator still has.
+// The comparison is on the RFC 4034 canonical wire form, not the presentation
+// string, because domain names inside RDATA are case-insensitive too. A file
+// spelling an NS target "NS1.Example.COM." and a journal spelling it
+// "ns1.example.com." are the same record, and comparing presentation strings
+// would call them different -- missing the conflict and deleting a record the
+// operator still has.
 func rrKey(rr dns.RR) string {
 	c := dns.Copy(rr)
 	c.Header().Ttl = 0
+	if wire, err := canonicalRRWire(c); err == nil {
+		return string(wire)
+	}
+	// Packing failed, which for a record we just parsed means something exotic.
+	// The presentation form still identifies it; it only misses case
+	// equivalence inside RDATA, which is strictly better than dropping it.
 	c.Header().Name = dns.CanonicalName(c.Header().Name)
 	return c.String()
 }
@@ -124,9 +137,18 @@ func findMergeConflicts(fileRRs []dns.RR, insns []ZoneDeltaRR) ([]ZoneMergeConfl
 		if insn.Action != ZoneDeltaDel {
 			continue
 		}
+		// Abort rather than skip. This matches instructionActions, which the
+		// merge feeds a few steps later and which fails on the same record --
+		// so skipping here would only move the failure, not avoid it, and would
+		// meanwhile have resolved conflicts against a record it could not read.
+		// A corrupt journal is a thing to report, not to route around; nothing
+		// is destroyed by refusing, and the journal is still there afterwards.
 		rr, err := dns.NewRR(insn.RR)
-		if err != nil || rr == nil {
+		if err != nil {
 			return nil, fmt.Errorf("journal holds an unparseable record %q: %v", insn.RR, err)
+		}
+		if rr == nil {
+			return nil, fmt.Errorf("journal holds %q, which is not a resource record", insn.RR)
 		}
 		key := rrKey(rr)
 		victim, present := inFile[key]
@@ -168,8 +190,18 @@ func writeRejectedArtefact(zonefile string, zone string, serial uint32,
 func writeRejectedArtefactInstructions(zonefile string, zone string, serial uint32,
 	policy ZoneConflictPolicy, insns []ZoneDeltaRR) (string, error) {
 
-	if zonefile == "" || len(insns) == 0 {
+	// Nothing to write is fine and common. Nowhere to write it is not: the
+	// caller refuses the merge on an error from here, and returning a nil error
+	// with an empty path would let it resolve conflicts in the journal's favour
+	// without ever telling the operator which of their records lost. That is
+	// the silent loss this whole path exists to prevent, so the two cases have
+	// to be distinguishable.
+	if len(insns) == 0 {
 		return "", nil
+	}
+	if zonefile == "" {
+		return "", fmt.Errorf("zone %s has no zone file path, so the %d record(s) that lose"+
+			" the merge cannot be written anywhere", zone, len(insns))
 	}
 	path := fmt.Sprintf("%s.%d.rejected", zonefile, serial)
 
@@ -197,7 +229,26 @@ func writeRejectedArtefactInstructions(zonefile string, zone string, serial uint
 	if err := WriteUpdateInstructions(&buf, comments, insns); err != nil {
 		return "", err
 	}
-	if err := os.WriteFile(path, buf.Bytes(), 0644); err != nil {
+	// Write through a temporary file in the same directory and rename. A
+	// half-written artefact is worse than none at all: the operator is told to
+	// feed this straight back through `zone update from-file`, and a truncated
+	// file replays as though it were the complete set of records to restore.
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(tmp.Name()) // no-op once the rename below has succeeded
+	if _, err := tmp.Write(buf.Bytes()); err != nil {
+		tmp.Close()
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(tmp.Name(), 0644); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
 		return "", err
 	}
 	return path, nil
@@ -248,6 +299,19 @@ func mergeSerialFloor(fileSerial, servedSerial, journalHead uint32) uint32 {
 // to start at a file that no longer exists, so the next load merges again --
 // re-applying changes the zone already has and re-reporting conflicts already
 // resolved.
+// The error contract is two-valued on purpose, because the two failure modes
+// need opposite advice:
+//
+//	(nil, err) -- nothing was applied. The zone serves its file alone and the
+//	              journal is untouched, so the operator's recent changes are
+//	              NOT present.
+//	(res, err) -- the merge WAS applied and published; only the journal
+//	              re-anchoring afterwards failed. The changes ARE present, and
+//	              the cost is that the next load will merge again.
+//
+// Telling an operator their changes are missing when the zone is in fact
+// serving them invites a restore or a replay on top of a zone that already has
+// them, which is how a reporting bug becomes a data-loss bug.
 func (zd *ZoneData) MergeJournalOverNewFile(kdb *KeyDB) (*ZoneMergeResult, error) {
 	if zd == nil || kdb == nil {
 		return nil, fmt.Errorf("no zone or no database")
@@ -374,19 +438,22 @@ func (zd *ZoneData) MergeJournalOverNewFile(kdb *KeyDB) (*ZoneMergeResult, error
 	// check it against.
 	mergedSnap := zd.publishedSnapshot()
 	if mergedSnap == nil {
-		return nil, fmt.Errorf("zone %s: no snapshot after the merge", zd.ZoneName)
+		// Past this point the merge is APPLIED and the zone is serving it, so
+		// every failure below returns the result alongside the error. See the
+		// contract on MergeJournalOverNewFile.
+		return res, fmt.Errorf("zone %s: no snapshot after the merge", zd.ZoneName)
 	}
 	removed, added, _ := computeZoneDelta(zd.ZoneName, fileData, mergedSnap.Data)
 	if len(removed) == 0 && len(added) == 0 {
 		// The merge changed nothing the file did not already have. Then the
 		// file IS the zone and the journal has nothing left to carry.
 		if _, derr := kdb.DeleteZoneDeltas(zd.ZoneName); derr != nil {
-			return nil, fmt.Errorf("zone %s: clearing a journal the file already contains: %v",
+			return res, fmt.Errorf("zone %s: clearing a journal the file already contains: %v",
 				zd.ZoneName, derr)
 		}
 	} else if rerr := kdb.ReplaceZoneJournal(zd.ZoneName, fileSerial,
 		mergedSnap.Serial, removed, added); rerr != nil {
-		return nil, fmt.Errorf("zone %s: re-anchoring the journal to the new file: %v",
+		return res, fmt.Errorf("zone %s: re-anchoring the journal to the new file: %v",
 			zd.ZoneName, rerr)
 	}
 

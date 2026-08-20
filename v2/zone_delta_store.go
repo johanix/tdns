@@ -468,11 +468,12 @@ func (kdb *KeyDB) ReplaceZoneJournal(zone string, fromSerial, toSerial uint32,
 	if kdb == nil || kdb.DB == nil {
 		return fmt.Errorf("ReplaceZoneJournal: no database")
 	}
+	// Normalise before the errors below quote it, not after.
+	zone = dns.Fqdn(zone)
 	if !serialNewer(toSerial, fromSerial) {
 		return fmt.Errorf("ReplaceZoneJournal: zone %s: %d -> %d does not advance the serial",
 			zone, fromSerial, toSerial)
 	}
-	zone = dns.Fqdn(zone)
 
 	rows := make([]ZoneDeltaRR, 0, len(removed)+len(added))
 	for _, rrset := range removed {
@@ -484,6 +485,21 @@ func (kdb *KeyDB) ReplaceZoneJournal(zone string, fromSerial, toSerial uint32,
 		for _, rr := range rrset.RRs {
 			rows = append(rows, ZoneDeltaRR{Action: ZoneDeltaAdd, RR: rr.String()})
 		}
+	}
+
+	// Refuse rather than erase. The DELETE below clears the whole chain, so
+	// replacing it with nothing would leave a zone whose unwritten changes are
+	// recorded in neither the file nor the journal -- and return nil, so the
+	// caller books it as success and the next restart loses them silently.
+	//
+	// This is reachable with non-empty removed/added whose RRsets all hold no
+	// RRs, which the caller's len(removed)==0 && len(added)==0 test does not
+	// catch because it counts RRsets rather than records. Clearing the journal
+	// on purpose is what DeleteZoneDeltas is for.
+	if len(rows) == 0 {
+		return fmt.Errorf("ReplaceZoneJournal: zone %s: refusing to replace the journal with an"+
+			" empty delta (%d -> %d); use DeleteZoneDeltas to clear it deliberately",
+			zone, fromSerial, toSerial)
 	}
 
 	tx, err := kdb.Begin("ReplaceZoneJournal")

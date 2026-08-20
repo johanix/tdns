@@ -262,6 +262,14 @@ func replayZoneDeltasOnLoad(zd *ZoneData) {
 	// merge in stage 2 has a trustworthy signal to switch on rather than a
 	// serial mismatch that is wrong in both directions.
 	verdict, prev, verr := zd.CompareZoneFileState()
+
+	// One locked read for the log lines below. zd.fileSerial is written by the
+	// parse paths under zd.mu, so reading it bare here is a race -- and a
+	// pointless one, since every use is a log field.
+	zd.mu.Lock()
+	loggedFileSerial := zd.fileSerial
+	zd.mu.Unlock()
+
 	switch {
 	case verr != nil:
 		lg.Warn("could not compare the zone file against its recorded identity",
@@ -271,13 +279,13 @@ func replayZoneDeltasOnLoad(zd *ZoneData) {
 			" (its content digest differs, so this is not merely reformatting);"+
 			" any persisted deltas were computed against the previous file",
 			"zone", zd.ZoneName, "recorded_serial", prev.Serial,
-			"file_serial", zd.fileSerial)
+			"file_serial", loggedFileSerial)
 	case verdict == ZoneFileUnchanged:
 		lg.Debug("zone file unchanged since tdns last read or wrote it",
-			"zone", zd.ZoneName, "serial", zd.fileSerial)
+			"zone", zd.ZoneName, "serial", loggedFileSerial)
 	default:
 		lg.Debug("no recorded identity for this zone file; nothing to compare against",
-			"zone", zd.ZoneName, "serial", zd.fileSerial)
+			"zone", zd.ZoneName, "serial", loggedFileSerial)
 	}
 
 	// Record what we have just read, whatever the verdict. The file in hand is
@@ -298,12 +306,26 @@ func replayZoneDeltasOnLoad(zd *ZoneData) {
 	// is not, because refusing discards every journalled change.
 	if verdict == ZoneFileChanged {
 		res, merr := zd.MergeJournalOverNewFile(zd.KeyDB)
-		if merr != nil {
+		if merr != nil && res == nil {
 			lg.Error("could not merge the persisted deltas with the replaced zone file;"+
 				" the zone is serving its file alone and recent changes are NOT present",
 				"zone", zd.ZoneName, "error", merr)
 			zd.SetError(ConfigWarning,
 				"zone file changed and its deltas could not be merged: %v", merr)
+			return
+		}
+		if merr != nil {
+			// A result WITH an error means the merge was applied and published
+			// and only the journal re-anchor failed. Reporting "changes are NOT
+			// present" here would be exactly backwards, and would invite a
+			// restore or a replay on top of a zone that already holds them.
+			lg.Error("the persisted deltas were merged over the replaced zone file and the zone"+
+				" IS serving them, but the journal could not be re-anchored afterwards;"+
+				" the next load will merge again",
+				"zone", zd.ZoneName, "conflicts", len(res.Conflicts), "error", merr)
+			zd.SetError(ConfigWarning,
+				"zone file changed; its deltas were merged and ARE being served, but the journal"+
+					" could not be re-anchored: %v", merr)
 			return
 		}
 		switch {

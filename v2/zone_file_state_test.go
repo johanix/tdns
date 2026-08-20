@@ -5,6 +5,9 @@
 package tdns
 
 import (
+	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -92,10 +95,16 @@ www.example.	3600	IN	A	192.0.2.1
 example.	3600	IN	NS	ns.example.
 www.example.	3600	IN	A	192.0.2.99
 `
-	a, _ := ZoneDigestHex("example.", parseZoneRRs(t, "example.", before),
+	a, err := ZoneDigestHex("example.", parseZoneRRs(t, "example.", before),
 		ZonemdSchemeSimple, zoneFileStateAlg)
-	b, _ := ZoneDigestHex("example.", parseZoneRRs(t, "example.", after),
+	if err != nil {
+		t.Fatalf("digest of the zone before the change: %v", err)
+	}
+	b, err := ZoneDigestHex("example.", parseZoneRRs(t, "example.", after),
 		ZonemdSchemeSimple, zoneFileStateAlg)
+	if err != nil {
+		t.Fatalf("digest of the zone after the change: %v", err)
+	}
 	if a == b {
 		t.Fatal("a changed A record did not change the digest")
 	}
@@ -112,10 +121,16 @@ www.example.	3600	IN	A	192.0.2.1
 example.	3600	IN	NS	ns.example.
 www.example.	60	IN	A	192.0.2.1
 `
-	a, _ := ZoneDigestHex("example.", parseZoneRRs(t, "example.", before),
+	a, err := ZoneDigestHex("example.", parseZoneRRs(t, "example.", before),
 		ZonemdSchemeSimple, zoneFileStateAlg)
-	b, _ := ZoneDigestHex("example.", parseZoneRRs(t, "example.", after),
+	if err != nil {
+		t.Fatalf("digest of the zone before the TTL change: %v", err)
+	}
+	b, err := ZoneDigestHex("example.", parseZoneRRs(t, "example.", after),
 		ZonemdSchemeSimple, zoneFileStateAlg)
+	if err != nil {
+		t.Fatalf("digest of the zone after the TTL change: %v", err)
+	}
 	if a == b {
 		t.Fatal("a changed TTL did not change the digest")
 	}
@@ -177,10 +192,16 @@ example.	3600	IN	NS	ns.example.
 example.	3600	IN	NS	ns.example.
 foo.elsewhere.	3600	IN	TXT	"not mine"
 `
-	a, _ := ZoneDigestHex("example.", parseZoneRRs(t, "example.", clean),
+	a, err := ZoneDigestHex("example.", parseZoneRRs(t, "example.", clean),
 		ZonemdSchemeSimple, zoneFileStateAlg)
-	b, _ := ZoneDigestHex("example.", parseZoneRRs(t, "example.", withStray),
+	if err != nil {
+		t.Fatalf("digest of the clean zone: %v", err)
+	}
+	b, err := ZoneDigestHex("example.", parseZoneRRs(t, "example.", withStray),
 		ZonemdSchemeSimple, zoneFileStateAlg)
+	if err != nil {
+		t.Fatalf("digest of the zone with a stray record: %v", err)
+	}
 	if a != b {
 		t.Fatal("an out-of-zone record changed the digest; it must be excluded")
 	}
@@ -206,5 +227,56 @@ func TestCanonicalOwnerLess(t *testing.T) {
 		if got := canonicalOwnerLess(tc.a, tc.b); got != tc.want {
 			t.Errorf("canonicalOwnerLess(%q, %q) = %v, want %v", tc.a, tc.b, got, tc.want)
 		}
+	}
+}
+
+// TestZoneDigestSurvivesAWriteReadRoundTrip pins the contract that file-change
+// detection rests on: what WriteFileWithSerial serialises and what the parser
+// digests on the way back in must cover the same records.
+//
+// If the two ever diverge -- one of them including a record class the other
+// skips, say -- then every load after a perfectly ordinary write-out digests
+// something different from what was recorded, reports ZoneFileChanged for a file
+// nobody touched, and sends the zone through the whole merge path: serial
+// lifted, possibly a .rejected artefact, and a ConfigWarning raised. That is an
+// expensive way to find out about a traversal change, so it is worth a test.
+func TestZoneDigestSurvivesAWriteReadRoundTrip(t *testing.T) {
+	const zone = `example.	3600	IN	SOA	ns.example. hostmaster.example. 3 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+ns.example.	3600	IN	A	192.0.2.53
+www.example.	3600	IN	A	192.0.2.1
+www.example.	3600	IN	A	192.0.2.2
+txt.example.	3600	IN	TXT	"a string with spaces"
+mx.example.	3600	IN	MX	10 Mail.Example.
+`
+	zd := testZone(t, "example.", zone)
+
+	published, err := zd.ZoneDigestOfPublished()
+	if err != nil {
+		t.Fatalf("digest of the published snapshot: %v", err)
+	}
+
+	path := filepath.Join(t.TempDir(), "example.zone")
+	if _, _, err := zd.WriteFileWithSerial(path); err != nil {
+		t.Fatalf("WriteFileWithSerial: %v", err)
+	}
+
+	// A fresh zone, as a restart would build it, reading the file just written.
+	reread := &ZoneData{
+		ZoneName:  "example.",
+		ZoneStore: MapZone,
+		Logger:    log.New(os.Stderr, "", 0),
+	}
+	if _, _, rerr := reread.ReadZoneFile(path, true); rerr != nil {
+		t.Fatalf("ReadZoneFile: %v", rerr)
+	}
+	back, err := reread.zoneDigestOfWorkingData()
+	if err != nil {
+		t.Fatalf("digest of the re-read file: %v", err)
+	}
+
+	if published != back {
+		t.Fatalf("a write/read round trip changed the digest:\n  published %s\n  re-read   %s\n"+
+			"every load after a write-out would report the file as CHANGED", published, back)
 	}
 }

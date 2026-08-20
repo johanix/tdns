@@ -71,6 +71,13 @@ func (zd *ZoneData) WriteDynamicZoneFile(zoneDirectory string) (string, error) {
 	return zoneFilePath, nil
 }
 
+// UNUSED as of this writing, and not safe to wire up as it stands: it calls
+// zd.ReadZoneFile on the receiver, and ParseZoneFromReader writes the file
+// identity fields without zd.mu. That is fine only while the zone is unshared.
+// If this is ever called on a zone already in the Zones map, parse into a
+// scratch ZoneData and copy the fields under the lock, the way FetchFromFile
+// does.
+//
 // LoadDynamicZoneFile loads a zone from a file in the dynamic zones directory
 // Returns true if zone was updated, the serial number, and any error
 // If the file is corrupted, creates the zone but sets an error state

@@ -4,7 +4,10 @@
 
 package tdns
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // Which delegation backend makes sense for which kind of zone.
 //
@@ -37,8 +40,14 @@ func validateDelegationBackendCombination(zconf *ZoneConf, options map[ZoneOptio
 		return nil // "no backend" is governed by the allow-child-updates rule.
 	}
 
-	isPrimary := zconf.Type == "primary"
-	isSecondary := zconf.Type == "secondary"
+	// ParseZones accepts the zone type case-insensitively, so these rules have
+	// to normalise the same way it does. Comparing the raw string would let
+	// `Type: "SECONDARY"` slip past rule (1) below and have its approved child
+	// updates overwritten by the next transfer -- the exact outcome the rule
+	// exists to prevent, reached by nothing more than a capital letter.
+	zoneType := strings.ToLower(zconf.Type)
+	isPrimary := zoneType == "primary"
+	isSecondary := zoneType == "secondary"
 
 	// (1) `direct` mutates the zone it is given and writes that zone's file. On
 	// a SECONDARY the content belongs to the primary and is replaced wholesale

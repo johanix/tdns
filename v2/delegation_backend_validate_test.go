@@ -136,3 +136,33 @@ func TestHandoffContractIsStated(t *testing.T) {
 		t.Fatal("stated a handoff contract for the direct backend")
 	}
 }
+
+// TestUnusedBackendDoesNotBreakTheZone drives the real call site. A primary with
+// a db backend and NO allow-child-updates is a harmless misconfiguration: the
+// backend is never reached, so nothing can go wrong with it. Validating it
+// anyway made activateUpdatePolicy fail, which makes ParseZones mark the zone
+// broken and decline to load it -- taking a zone off the air over a setting
+// that does nothing. delegationBackendUnusedWarning is the right response.
+func TestUnusedBackendDoesNotBreakTheZone(t *testing.T) {
+	zconf := &ZoneConf{
+		Name:              "example.",
+		Type:              "primary",
+		DelegationBackend: "db",
+	}
+	// A real child policy, or activateUpdatePolicy disables child updates for
+	// us and the second half below would pass for the wrong reason.
+	zconf.UpdatePolicy.Child.Type = "selfsub"
+
+	// No OptAllowChildUpdates: the backend cannot run.
+	if _, err := activateUpdatePolicy(zconf, map[ZoneOption]bool{}); err != nil {
+		t.Fatalf("a primary with an unused db backend was rejected: %v", err)
+	}
+
+	// With child updates enabled the same combination IS a real contradiction,
+	// and must still be caught.
+	if _, err := activateUpdatePolicy(zconf, map[ZoneOption]bool{
+		OptAllowChildUpdates: true,
+	}); err == nil {
+		t.Fatal("primary + db-wins + db backend was accepted while child updates are enabled")
+	}
+}

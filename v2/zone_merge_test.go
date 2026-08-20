@@ -318,7 +318,9 @@ www.example.	3600	IN	A	192.0.2.1
 old.example.	3600	IN	TXT	"remove me"
 `
 	zd := mergeTestZone(t, kdb, replaced, []string{"journal.example. 3600 IN A 10.1.1.1"}, nil)
+	zd.mu.Lock()
 	fileSerial := zd.fileSerial
+	zd.mu.Unlock()
 
 	if _, err := zd.MergeJournalOverNewFile(kdb); err != nil {
 		t.Fatalf("MergeJournalOverNewFile: %v", err)
@@ -489,5 +491,52 @@ func TestApplicableInstructionsMirrorsTheDecision(t *testing.T) {
 	}
 	if len(art) != 1 || art[0].Action != ZoneDeltaDel {
 		t.Fatalf("zonefile-wins artefact = %+v, want the dropped DEL", art)
+	}
+}
+
+// TestFindMergeConflictsIgnoresRDATANameCase: domain names inside RDATA are
+// case-insensitive, so a file that spells an MX target in mixed case and a
+// journal that spells it in lower case are talking about the same record.
+// Comparing presentation strings would call them different, miss the conflict,
+// and delete a record the operator still has -- silently, which is the whole
+// failure mode this merge exists to prevent.
+func TestFindMergeConflictsIgnoresRDATANameCase(t *testing.T) {
+	const file = `example.	3600	IN	SOA	ns.example. hostmaster.example. 2 7200 1800 604800 7200
+example.	3600	IN	MX	10 Mail.Example.
+`
+	insns := []ZoneDeltaRR{
+		{Action: ZoneDeltaDel, RR: "example.\t3600\tIN\tMX\t10 mail.example."},
+	}
+
+	conflicts, err := findMergeConflicts(parseZoneRRs(t, "example.", file), insns)
+	if err != nil {
+		t.Fatalf("findMergeConflicts: %v", err)
+	}
+	if len(conflicts) != 1 {
+		t.Fatalf("a case difference inside RDATA hid the conflict: got %d, want 1", len(conflicts))
+	}
+}
+
+// TestRejectedArtefactRefusesWhenThereIsNowhereToWriteIt: a zone with no file
+// path must not silently resolve conflicts. The caller refuses the merge on an
+// error from here, so returning a nil error with an empty path would let the
+// journal win without the operator ever learning which of their records lost.
+func TestRejectedArtefactRefusesWhenThereIsNowhereToWriteIt(t *testing.T) {
+	insns := []ZoneDeltaRR{
+		{Action: ZoneDeltaAdd, RR: "www.example.\t3600\tIN\tA\t192.0.2.1"},
+	}
+
+	path, err := writeRejectedArtefactInstructions("", "example.", 7, ConflictDBWins, insns)
+	if err == nil {
+		t.Fatal("an empty zonefile path was accepted; the losing records would vanish unreported")
+	}
+	if path != "" {
+		t.Fatalf("no file should have been written, got %q", path)
+	}
+
+	// Nothing to write, on the other hand, is not an error.
+	path, err = writeRejectedArtefactInstructions("", "example.", 7, ConflictDBWins, nil)
+	if err != nil || path != "" {
+		t.Fatalf("an empty instruction list must be a quiet no-op, got %q / %v", path, err)
 	}
 }
