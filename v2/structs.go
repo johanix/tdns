@@ -261,6 +261,20 @@ type ZoneData struct {
 	// without the serial moving. Empty when the zone did not come from a file.
 	// Guarded by zd.mu.
 	fileDigest string
+	// fileStatPath, fileModTime and fileSize are the stat of the zone file as
+	// tdns last LOOKED at it -- the cheap gate in front of the digest, so a
+	// refresh of an untouched file does not parse and digest a zone to learn
+	// that nothing happened. In memory only and deliberately not persisted: a
+	// zero value means "not looked at in this process", which is exactly right
+	// for a first load, and a restart re-establishes them by parsing once.
+	//
+	// Unlike fileDigest, these are recorded whether or not the file was
+	// ADOPTED, because they answer a different question -- "have we already
+	// looked at this exact file?" rather than "which file is the zone
+	// serving?". Guarded by zd.mu.
+	fileStatPath string
+	fileModTime  time.Time
+	fileSize     int64
 	// wsPersistErr carries a failed delta write from publishWorkingSetLocked
 	// back to the applier. A publish whose delta could not be persisted is
 	// refused outright -- serving a change that is certain to vanish at the

@@ -432,6 +432,20 @@ Two consequences of the digest deciding:
   is what keeps the ticker from republishing an untouched zone every
   refresh interval. `--force` re-reads and re-applies regardless.
 
+**The digest is gated on a stat.** Deciding on content means parsing and
+digesting the whole zone, which is seconds of work on a large one and
+which the refresh ticker does inline, so tdns asks the cheap question
+first: has anything written to this file since it last looked? An
+untouched file is not re-read at all. A touched one is parsed and judged
+on its digest exactly as described above, so reformatting is still not a
+change.
+
+The gate can only ever say "do not bother looking", never "the file
+changed", so it cannot make tdns see a change that is not there. Its one
+blind spot is a file rewritten to exactly the same size with its mtime
+restored — not something an editor or a zone generator does — and
+`zone reload --force`, or a restart, reads the file regardless.
+
 `zone reload` is refused only when the zone holds changes that *nothing
 but memory* has. "The zone has been modified" is the ordinary state of a
 zone with unwritten changes — the journal has them, and the reload

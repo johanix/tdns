@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -517,5 +518,128 @@ www.example.	3600	IN	A	192.0.2.99
 		t.Fatalf("GetZoneFileState: %v", err)
 	} else if !have {
 		t.Fatal("adopting the file did not record its identity, so the next edit could not be detected")
+	}
+}
+
+// refreshOnce runs a refresh and fails the test on error.
+func refreshOnce(t *testing.T, zd *ZoneData) bool {
+	t.Helper()
+	updated, err := zd.Refresh(false, false, false, &Config{})
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	return updated
+}
+
+// TestRefreshSkipsAFileNothingHasTouched. Deciding on content means parsing
+// and digesting the whole zone, which is seconds of work on a large one, and
+// the ticker does it inline in the refresh engine. So the stat is asked first.
+//
+// The only way to prove the gate is live is to fall into its one hole
+// deliberately: change the content while restoring both the size and the
+// mtime. Nothing an editor or a zone generator does looks like this, which is
+// the point -- but it also means this test documents the hole as precisely as
+// it documents the optimisation.
+func TestRefreshSkipsAFileNothingHasTouched(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := reloadZone(t, kdb, reloadBase)
+
+	// One refresh through the normal path, to establish the recorded stat.
+	refreshOnce(t, zd)
+
+	before, err := os.Stat(zd.Zonefile)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+
+	// Same number of bytes: 192.0.2.1 -> 10.0.0.11.
+	edited := strings.Replace(reloadBase, "192.0.2.1\n", "10.0.0.11\n", 1)
+	if len(edited) != len(reloadBase) {
+		t.Fatalf("the edit changed the file length (%d -> %d); the size check would catch it",
+			len(reloadBase), len(edited))
+	}
+	operatorEdit(t, zd, edited)
+	if err := os.Chtimes(zd.Zonefile, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	if refreshOnce(t, zd) {
+		t.Error("a file with an identical stat was re-read; the gate is not in force")
+	}
+
+	// Touching it is enough to be looked at again, and the content decides from
+	// there -- note the SOA serial has not moved at any point.
+	if err := os.Chtimes(zd.Zonefile, time.Now(), time.Now()); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+	if !refreshOnce(t, zd) {
+		t.Fatal("a touched file with changed content was not detected")
+	}
+	rrset, err := zd.GetRRset("www.example.", dns.TypeA)
+	if err != nil {
+		t.Fatalf("GetRRset: %v", err)
+	}
+	if rrset == nil || len(rrset.RRs) == 0 || !strings.Contains(rrset.RRs[0].String(), "10.0.0.11") {
+		t.Errorf("the edit is not served: %v", rrset)
+	}
+}
+
+// TestForcedRefreshIgnoresTheStatGate. --force means look, whatever the cheap
+// signals say.
+func TestForcedRefreshIgnoresTheStatGate(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := reloadZone(t, kdb, reloadBase)
+	refreshOnce(t, zd)
+
+	before, err := os.Stat(zd.Zonefile)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	edited := strings.Replace(reloadBase, "192.0.2.1\n", "10.0.0.11\n", 1)
+	operatorEdit(t, zd, edited)
+	if err := os.Chtimes(zd.Zonefile, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	updated, err := zd.Refresh(false, false, true, &Config{})
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if !updated {
+		t.Fatal("--force did not get past the stat gate")
+	}
+}
+
+// TestStatIsRecordedEvenWhenTheFileIsNotAdopted. Reformatting changes the
+// file's stat but not the zone, so the digest correctly declines to adopt it.
+// The stat must still be recorded, or that file would be fully parsed and
+// digested on every refresh for the rest of the process's life.
+func TestStatIsRecordedEvenWhenTheFileIsNotAdopted(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := reloadZone(t, kdb, reloadBase)
+	refreshOnce(t, zd)
+
+	operatorEdit(t, zd, `; reordered and re-commented -- same zone
+www.example.   3600 IN A   192.0.2.1
+
+example.       3600 IN NS  ns.example.
+
+example. 3600 IN SOA ns.example. hostmaster.example. 100 7200 1800 604800 7200
+`)
+	if refreshOnce(t, zd) {
+		t.Fatal("reformatting was adopted as a change")
+	}
+
+	st, err := os.Stat(zd.Zonefile)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	zd.mu.Lock()
+	gotTime, gotSize := zd.fileModTime, zd.fileSize
+	zd.mu.Unlock()
+	if !gotTime.Equal(st.ModTime()) || gotSize != st.Size() {
+		t.Errorf("the stat of a file we parsed but did not adopt was not recorded"+
+			" (recorded %v/%d, file %v/%d); it would be re-parsed on every refresh",
+			gotTime, gotSize, st.ModTime(), st.Size())
 	}
 }

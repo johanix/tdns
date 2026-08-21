@@ -231,8 +231,77 @@ func newTransferScratchZone(zd *ZoneData) ZoneData {
 	}
 }
 
+// zoneFileLooksUntouched answers the cheap half of "did the file change?": has
+// anything written to this file at all since tdns last looked at it?
+//
+// It is a CACHE, not a detector. It can only ever say "do not bother looking";
+// every file it lets through is still judged on its ZONEMD digest, so no
+// reformatted file is ever mistaken for a changed one. That asymmetry is what
+// makes it compatible with the design's rejection of byte-level comparison:
+// the objection there is to false POSITIVES from reordering, comments and
+// whitespace, and the only error this can make is a false negative -- a file
+// rewritten to exactly the same size with its mtime restored, which is not
+// something an editor or a zone generator does.
+//
+// The alternative is not free. Deciding on content means parsing and digesting
+// the whole zone, measured at ~9 seconds for a 1.1M-record zone (the digest
+// being some 80% of it), and the refresh ticker calls that inline in the
+// refresh engine, where every other zone waits behind it. Paying that once per
+// refresh interval per zone to learn that nothing happened is a poor trade for
+// closing a hole that takes deliberate effort to fall into -- and a restart, or
+// `zone reload --force`, closes it anyway.
+//
+// A zero fileModTime means "not looked at in this process", which is every
+// zone's first load.
+func (zd *ZoneData) zoneFileLooksUntouched(fname string, st os.FileInfo) bool {
+	if zd == nil || st == nil {
+		return false
+	}
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	if zd.fileModTime.IsZero() || zd.fileStatPath != path.Clean(fname) {
+		return false
+	}
+	return zd.fileSize == st.Size() && zd.fileModTime.Equal(st.ModTime())
+}
+
+// recordZoneFileStat remembers the stat of the file just read or written.
+//
+// Recorded whether or not the file was ADOPTED, unlike the digest identity,
+// which describes the file the zone is SERVING and so is recorded only when
+// the file is adopted. Without that difference a merely reformatted file would
+// be re-parsed on every refresh forever: its mtime differs, its content does
+// not, and nothing would ever record that we had already looked.
+func (zd *ZoneData) recordZoneFileStat(fname string, st os.FileInfo) {
+	if zd == nil || st == nil {
+		return
+	}
+	zd.mu.Lock()
+	zd.fileStatPath = path.Clean(fname)
+	zd.fileModTime = st.ModTime()
+	zd.fileSize = st.Size()
+	zd.mu.Unlock()
+}
+
 // Return updated, error
 func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core.RRset) (bool, error) {
+
+	// The cheap question first, and BEFORE the read: has anything touched the
+	// file since we last looked? Taken before rather than after so that a file
+	// replaced while we are reading it records the OLDER stat -- the next
+	// refresh then re-reads, which is the safe direction to be wrong in.
+	//
+	// A stat we could not take is not a reason to skip; ReadZoneFile below
+	// reports the real error with the real message.
+	st, statErr := os.Stat(zd.Zonefile)
+	if statErr != nil {
+		st = nil
+	}
+	if !force && zd.zoneFileLooksUntouched(zd.Zonefile, st) {
+		lg.Debug("zone file untouched since tdns last looked at it; not re-reading",
+			"zone", zd.ZoneName, "file", zd.Zonefile)
+		return false, nil
+	}
 
 	// log.Printf("Reading zone %s from file %s\n", zd.ZoneName, zd.Zonefile)
 	// Capture prior status so an error or no-op (unchanged) file read of an
@@ -275,6 +344,9 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	}
 
 	// zd.Logger.Printf("FetchFromFile: Zone %s: zone file read, updated=%v delegation sync=%v", zd.ZoneName, updated, zd.Optoins["delegationsync"])
+
+	// We have now looked at this file, whatever we go on to decide about it.
+	zd.recordZoneFileStat(zd.Zonefile, st)
 
 	// Is this the file tdns last read or wrote? Asked of the file just parsed,
 	// against the identity recorded for the zone -- file against file, never
@@ -539,6 +611,13 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 			zd.fileSerial = wroteSerial
 		}
 		zd.mu.Unlock()
+
+		// The file we have just written is a file we have looked at, so the
+		// next refresh can skip it. Without this every write-out would cost one
+		// full parse and digest at the following refresh.
+		if wst, werr := os.Stat(fname); werr == nil {
+			zd.recordZoneFileStat(fname, wst)
+		}
 
 		// Record the file's new identity: this is the other end of the
 		// comparison the next load makes. The digest is of the published

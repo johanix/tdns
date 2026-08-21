@@ -526,6 +526,21 @@ mistake:
   than both, which is what §8 already required of the merge — it just
   has to hold when there is no journal to merge, too.
 
+- **A stat gate in front of the digest.** Deciding on content means
+  parsing and digesting the whole zone on every refresh interval, where
+  the serial comparison it replaces stopped at the first SOA. Measured on
+  a delegation-heavy zone: 133 ms at 22.5k records, 1.6 s at 225k, 9.3 s
+  at 1.1M — the digest being some 80% of each — against 21–35 µs for the
+  early return. The ticker calls `Refresh` inline in the refresh engine,
+  so that is not just CPU but head-of-line blocking for every other zone.
+  The file's mtime and size, recorded in memory at every read and every
+  write, now decide whether to look at all; the digest still decides what
+  looking means. One full parse per zone per process start, 17 µs
+  thereafter. §4.1's objection to byte-level comparison does not apply to
+  it: that objection is to false POSITIVES from reordering, comments and
+  whitespace, and a stat gate can only produce a false negative — a file
+  rewritten to the same size with its mtime restored.
+
 One judgement call beyond the issue: a dirty primary was refused a
 reload outright. Since both replay and merge set that flag at every
 load, the refusal made `zone reload` permanently unavailable to exactly
