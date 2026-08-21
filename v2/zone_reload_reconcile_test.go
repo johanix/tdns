@@ -405,3 +405,117 @@ func TestRefreshNeverWritesAPrimaryBackToItsSourceFile(t *testing.T) {
 		})
 	}
 }
+
+// TestReloadDetectsAnEditWithNoJournalAndNoSerialChange is the plainest form
+// of the question, and the one with no journal in it at all: nothing in the
+// database, records changed in the file, SOA serial left where it was.
+//
+// The serial comparison this replaced answers "no change" here, which is the
+// dangerous direction -- it is also what a regenerated file that reuses its
+// serial looks like. The digest answers on content and gets it right.
+//
+// The served serial must still advance, even though the file's did not. A
+// secondary refreshes on a serial increase and nothing else, so publishing the
+// new content under the file's own serial would leave every secondary serving
+// the old zone indefinitely.
+func TestReloadDetectsAnEditWithNoJournalAndNoSerialChange(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := reloadZone(t, kdb, reloadBase)
+
+	if _, have, err := kdb.LastZoneDeltaSerial("example."); err != nil {
+		t.Fatalf("LastZoneDeltaSerial: %v", err)
+	} else if have {
+		t.Fatal("the journal is not empty; this case is about a zone with no db changes")
+	}
+
+	zd.mu.Lock()
+	servedBefore := zd.CurrentSerial
+	zd.mu.Unlock()
+
+	// One record changed, one added. The SOA serial does not move.
+	operatorEdit(t, zd, `example.	3600	IN	SOA	ns.example. hostmaster.example. 100 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+www.example.	3600	IN	A	192.0.2.99
+operator.example.	3600	IN	A	10.9.9.9
+`)
+
+	updated, err := zd.Refresh(false, false, false, &Config{})
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if !updated {
+		t.Fatal("an edited zone file went undetected because its SOA serial had not moved")
+	}
+	if !hasARRset(t, zd, "operator.example.") {
+		t.Error("the added record is not served")
+	}
+	rrset, err := zd.GetRRset("www.example.", dns.TypeA)
+	if err != nil {
+		t.Fatalf("GetRRset: %v", err)
+	}
+	if rrset == nil || len(rrset.RRs) == 0 || !strings.Contains(rrset.RRs[0].String(), "192.0.2.99") {
+		t.Errorf("the changed record is not served: %v", rrset)
+	}
+
+	zd.mu.Lock()
+	servedAfter, fileSerial := zd.CurrentSerial, zd.fileSerial
+	zd.mu.Unlock()
+	if !serialNewer(servedAfter, servedBefore) {
+		t.Errorf("the served serial did not advance (%d -> %d), so no secondary would ever fetch"+
+			" the edit", servedBefore, servedAfter)
+	}
+	if fileSerial != 100 {
+		t.Errorf("the file's serial was recorded as %d, want 100 (the operator did not move it)", fileSerial)
+	}
+}
+
+// TestReloadWithNoRecordedIdentityFallsBackToTheSerial documents the one case
+// the digest cannot answer: nothing recorded for this zone, so there is no
+// left-hand side to compare against. Detection falls back to the serial, which
+// is what this path did before the digest existed.
+//
+// It is not a hole in practice. The identity is recorded at every read of the
+// file and every write to it, and a zone's FIRST load is a read -- so a running
+// server has one for every zone it serves, and an existing database acquires
+// them at the next startup.
+//
+// The file is deliberately NOT adopted here, and therefore deliberately not
+// recorded either: recording an identity for a file the zone is not serving
+// would make the next load call that file "unchanged" and never load it, which
+// turns a missed edit into a permanently hidden one.
+func TestReloadWithNoRecordedIdentityFallsBackToTheSerial(t *testing.T) {
+	kdb := newTestKeyDB(t)
+	zd := reloadZone(t, kdb, reloadBase)
+
+	// An existing database that predates this code.
+	if err := kdb.DeleteZoneFileState("example."); err != nil {
+		t.Fatalf("DeleteZoneFileState: %v", err)
+	}
+
+	operatorEdit(t, zd, `example.	3600	IN	SOA	ns.example. hostmaster.example. 100 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+www.example.	3600	IN	A	192.0.2.99
+`)
+	updated, err := zd.Refresh(false, false, false, &Config{})
+	if err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if updated {
+		t.Error("with nothing recorded to compare against, the serial should have decided")
+	}
+
+	// A serial bump still works, and adopting the file records the identity --
+	// after which the digest decides from then on.
+	operatorEdit(t, zd, `example.	3600	IN	SOA	ns.example. hostmaster.example. 101 7200 1800 604800 7200
+example.	3600	IN	NS	ns.example.
+www.example.	3600	IN	A	192.0.2.99
+`)
+	if _, err := zd.Refresh(false, false, false, &Config{}); err != nil {
+		t.Fatalf("Refresh: %v", err)
+	}
+	if _, have, err := kdb.GetZoneFileState("example."); err != nil {
+		t.Fatalf("GetZoneFileState: %v", err)
+	} else if !have {
+		t.Fatal("adopting the file did not record its identity, so the next edit could not be detected")
+	}
+}
