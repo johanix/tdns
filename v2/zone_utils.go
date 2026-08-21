@@ -254,7 +254,20 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}
 
-	updated, _, err := new_zd.ReadZoneFile(zd.Zonefile, force)
+	// Parse the WHOLE file, always. The parser's own short-circuit answers "has
+	// the SOA serial moved?", which is not the question this path has to
+	// answer: a zone file can be edited, regenerated or restored from backup
+	// without its serial moving, and the recorded content digest exists
+	// precisely to catch that. Reaching the digest at all means parsing past
+	// the SOA -- so parse unconditionally here and decide below, on content.
+	//
+	// This is the reload half of #362. With the serial deciding, a file whose
+	// SOA serial matched the one last read was not read at all: an edit that
+	// changed records without moving the serial past it simply did not load,
+	// while `zone reload` reported success. --force did not help either -- it
+	// parsed the file to validate it and then reported "not updated", so the
+	// parse was thrown away.
+	serialMoved, _, err := new_zd.ReadZoneFile(zd.Zonefile, true)
 	if err != nil {
 		lg.Error("ReadZoneFile failed", "zone", zd.ZoneName, "err", err)
 		zd.SetStatus(prevStatus)
@@ -262,6 +275,46 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	}
 
 	// zd.Logger.Printf("FetchFromFile: Zone %s: zone file read, updated=%v delegation sync=%v", zd.ZoneName, updated, zd.Optoins["delegationsync"])
+
+	// Is this the file tdns last read or wrote? Asked of the file just parsed,
+	// against the identity recorded for the zone -- file against file, never
+	// file against the in-memory zone, which carries freshly minted signatures
+	// and would report every signed zone as modified.
+	verdict := ZoneFileUnknown
+	var prev *ZoneFileIdentity
+	var verr error
+	if zd.KeyDB != nil {
+		verdict, prev, verr = zd.KeyDB.CompareZoneFileDigest(zd.ZoneName, new_zd.fileDigest)
+		if verr != nil {
+			// Not fatal, and not evidence of a change: a zone that cannot be
+			// compared falls back to the serial below, which is what this path
+			// did before the digest existed. reconcileZoneFileWithJournal
+			// reports the failure once, further down.
+			verdict = ZoneFileUnknown
+		}
+	}
+
+	// A load that has published nothing must adopt the file whatever the
+	// verdict says. "Unchanged" means the file is what the ZONE ALREADY HAS,
+	// and a zone serving nothing has nothing -- the recorded identity is the
+	// previous process's, and every restart of an untouched zone would
+	// otherwise decline to load it at all.
+	updated := force || zd.publishedSnapshot() == nil
+	switch verdict {
+	case ZoneFileChanged:
+		updated = true
+	case ZoneFileUnchanged:
+		// The file's CONTENT is what the zone already has. Reordering,
+		// re-commenting and reflowing all land here, and republishing for
+		// those would churn the serial and NOTIFY every secondary over a
+		// change that is not one. The refresh ticker calls this path on every
+		// refresh interval, so that would be perpetual.
+	default: // ZoneFileUnknown
+		// No basis for a content comparison: nothing recorded for this zone
+		// yet, no database, or the digest could not be computed. Fall back to
+		// the serial.
+		updated = updated || serialMoved
+	}
 
 	if !updated {
 		zd.SetStatus(prevStatus)
@@ -280,12 +333,28 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	// Publish replacement: working set from refreshed data + dynamic RRs.
 	zd.mu.Lock()
 	firstLoad := zd.FirstZoneLoad
-	if err := zd.applyRefreshReplacementLocked(&new_zd, dynamicRRs, firstLoad); err != nil {
+	if err := zd.applyRefreshReplacementLocked(&new_zd, dynamicRRs, firstLoad, true); err != nil {
 		zd.mu.Unlock()
 		lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
 		return false, err
 	}
 	zd.mu.Unlock()
+
+	// Reconcile the journal with the file that was just adopted -- the same
+	// function a first load reaches, from the verdict already in hand.
+	//
+	// Not on a first load, though: that path reconciles from
+	// completeFirstZonePolicyAndLoad, AFTER the DNSSEC policy is bound.
+	// Reconciling here would re-sign the RRsets it touches with no policy
+	// bound, which sigLifetime turns into five-minute RRSIGs that nothing on
+	// the normal path renews.
+	//
+	// Before the post-refresh callbacks, for the reason drainAndRunOnFirstLoad
+	// runs after replay on the load path: a callback should see the zone's
+	// actual content, not the file before the journal was applied to it.
+	if !firstLoad {
+		zd.reconcileZoneFileWithJournal(verdict, prev, verr)
+	}
 
 	// Post-refresh callbacks: queue sends and notifications that need the live zone pointer.
 	for _, cb := range zd.OnZonePostRefresh {
@@ -385,7 +454,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug, force bool, dynamicRRs []*
 	// Publish replacement: working set from transferred data + dynamic RRs.
 	zd.mu.Lock()
 	firstLoad := zd.FirstZoneLoad
-	if err := zd.applyRefreshReplacementLocked(&new_zd, dynamicRRs, firstLoad); err != nil {
+	if err := zd.applyRefreshReplacementLocked(&new_zd, dynamicRRs, firstLoad, false); err != nil {
 		zd.mu.Unlock()
 		lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
 		return false, err

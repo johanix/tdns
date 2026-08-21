@@ -26,6 +26,25 @@ func zoneStillLive(zd *ZoneData, gen uint64) bool {
 	return live && cur == zd && zd.generation.Load() == gen
 }
 
+// refreshWritesZoneToSourceFile reports whether a successful refresh should
+// write the zone out to zd.Zonefile.
+//
+// Never for a Primary. Its zone file is its SOURCE, and the refresh has just
+// read it: writing it back rewrites the operator's file behind their back,
+// losing ordering and comments -- and does it at the worst possible moment,
+// because a zone that merged its journal over an edited file comes out of the
+// refresh DIRTY, so this is reached exactly when the operator has just edited
+// that file. The reconciliation design is explicit that the file is written
+// when asked and not otherwise: write / sync / freeze.
+//
+// This branch is for zones whose content came from somewhere else -- typically
+// a secondary persisting what it transferred. Dynamic zones (catalog, catalog
+// member, API-managed) are handled ahead of it by ShouldPersistZone, which
+// writes to the dynamic-zone directory rather than to a configured source file.
+func refreshWritesZoneToSourceFile(zd *ZoneData) bool {
+	return zd != nil && zd.Zonefile != "" && zd.ZoneType != Primary
+}
+
 // After all zones are initialized, (re)compute transport signals across zones to resolve cross-zone dependencies.
 func runTransportSignalPostpass(conf *Config) {
 	for zname, zdz := range Zones.Items() {
@@ -238,13 +257,12 @@ func completeFirstZonePolicyAndLoad(ctx context.Context, zd *ZoneData, conf *Con
 	return nil
 }
 
-// replayZoneDeltasOnLoad re-applies persisted deltas over a freshly loaded
-// zone, logging rather than failing the load.
+// replayZoneDeltasOnLoad reconciles a freshly loaded zone with its journal:
+// the FIRST-load entry point into reconcileZoneFileWithJournal.
 //
-// A zone that cannot replay its deltas is a zone whose served content silently
-// differs from what the operator last saw -- but refusing to load it entirely
-// would take a working zone off the air over lost recent changes, which is
-// worse. Load it, serve the file, and say plainly what is missing.
+// The reload entry point is FetchFromFile, which has already asked the same
+// question by the time it publishes the new file. Both end in the same
+// function, which is the point -- see the note on reconcileZoneFileWithJournal.
 func replayZoneDeltasOnLoad(zd *ZoneData) {
 	if zd == nil || zd.KeyDB == nil {
 		return
@@ -253,15 +271,42 @@ func replayZoneDeltasOnLoad(zd *ZoneData) {
 	// Did the zone file change since we last read or wrote it? Asked BEFORE the
 	// replay, because it is the question that decides what the replay means.
 	//
-	// Stage 1 of the reconciliation design reports the answer and nothing more:
-	// the chain check still governs whether the deltas are applied. What the
-	// digest adds today is precision. A serial comparison calls a reformatted,
-	// re-commented or reordered file "changed" -- none of which change the zone
-	// -- and calls a regenerated file that reused its serial "unchanged", which
-	// is the dangerous direction. Recording the verdict now also means the
-	// merge in stage 2 has a trustworthy signal to switch on rather than a
-	// serial mismatch that is wrong in both directions.
+	// A serial comparison calls a reformatted, re-commented or reordered file
+	// "changed" -- none of which change the zone -- and calls a regenerated
+	// file that reused its serial "unchanged", which is the dangerous
+	// direction. The digest is wrong in neither.
 	verdict, prev, verr := zd.CompareZoneFileState()
+
+	zd.reconcileZoneFileWithJournal(verdict, prev, verr)
+}
+
+// reconcileZoneFileWithJournal is what a zone does with its delta journal once
+// a zone file has been read: report what the file did, record its identity,
+// and then either MERGE the journal over it (the file changed) or REPLAY the
+// journal onto it (it did not).
+//
+// One function, reached from both entry points, because startup and an
+// explicit reload are the same situation: a zone file has just been read and
+// the journal has to be reconciled with it. The digest says whether the file
+// changed regardless of who asked, and two behaviours for one situation is how
+// this class of bug returns -- which it did (#362): reload went through the
+// serial-gated refresh instead, so an edit that left the SOA serial where tdns
+// last read it was never loaded at all, and one that jumped past it left the
+// journal anchored to a serial the served zone had not followed.
+//
+// It logs rather than fails. A zone that cannot reconcile is a zone whose
+// served content silently differs from what the operator last saw -- but
+// refusing to load it entirely would take a working zone off the air over lost
+// recent changes, which is worse. Load it, serve the file, and say plainly
+// what is missing.
+//
+// The caller passes the verdict rather than having it recomputed here: the
+// reload path must ask before it adopts the file, when the fresh digest is
+// still on a scratch ZoneData and the live zone carries the previous file's.
+func (zd *ZoneData) reconcileZoneFileWithJournal(verdict ZoneFileVerdict, prev *ZoneFileIdentity, verr error) {
+	if zd == nil || zd.KeyDB == nil {
+		return
+	}
 
 	// One locked read for the log lines below. zd.fileSerial is written by the
 	// parse paths under zd.mu, so reading it bare here is a race -- and a
@@ -722,7 +767,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 											lgEngine.Warn("failed to update dynamic config file", "zone", zd.ZoneName, "error", err)
 											// Don't fail the operation, just log the warning
 										}
-									} else if zd.Zonefile != "" {
+									} else if refreshWritesZoneToSourceFile(zd) {
 										// Regular zone with zonefile configured (typically secondary zones)
 										lgEngine.Info("writing updated zone to file", "zone", zd.ZoneName, "file", zd.Zonefile)
 										_, err := zd.WriteFile(zd.Zonefile)
@@ -1084,7 +1129,7 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 								lgEngine.Warn("failed to update dynamic config file", "zone", zd.ZoneName, "error", err)
 								// Don't fail the operation, just log the warning
 							}
-						} else if zd.Zonefile != "" {
+						} else if refreshWritesZoneToSourceFile(zd) {
 							// Regular zone with zonefile configured (typically secondary zones)
 							lgEngine.Info("writing updated zone to file", "zone", zd.ZoneName, "file", zd.Zonefile)
 							_, err := zd.WriteFile(zd.Zonefile)
