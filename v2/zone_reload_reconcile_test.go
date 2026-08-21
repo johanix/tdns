@@ -310,6 +310,38 @@ func TestForcedReloadOfAnUnchangedFileReapplies(t *testing.T) {
 	}
 }
 
+// TestReloadRefusalTracksWhetherTheJournalHoldsTheChanges. "The zone is dirty"
+// is the normal state of a zone with journalled changes -- both replay and
+// merge set the flag themselves -- so refusing a reload on it alone made
+// `zone reload` permanently unavailable to exactly those zones.
+func TestReloadRefusalTracksWhetherTheJournalHoldsTheChanges(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	clean := &ZoneData{ZoneName: "example.", Options: map[ZoneOption]bool{}, KeyDB: kdb}
+	if reloadWouldLoseChanges(clean) {
+		t.Error("a clean zone was reported as having changes to lose")
+	}
+
+	dirty := &ZoneData{ZoneName: "example.",
+		Options: map[ZoneOption]bool{OptDirty: true}, KeyDB: kdb}
+	if reloadWouldLoseChanges(dirty) {
+		t.Error("a dirty zone whose changes are journalled was refused a reload")
+	}
+
+	noDB := &ZoneData{ZoneName: "example.", Options: map[ZoneOption]bool{OptDirty: true}}
+	if !reloadWouldLoseChanges(noDB) {
+		t.Error("a dirty zone with no database was allowed a reload that would discard its changes")
+	}
+
+	off := false
+	prev := Conf.Journal.Active
+	Conf.Journal.Active = &off
+	t.Cleanup(func() { Conf.Journal.Active = prev })
+	if !reloadWouldLoseChanges(dirty) {
+		t.Error("a dirty zone was allowed a reload with the journal switched off")
+	}
+}
+
 // TestRestartLoadsAZoneWhoseFileIsUnchanged. The identity recorded by the
 // previous run says "unchanged", and on a reload that means there is nothing to
 // do -- but a restart has published nothing, so the file is not what the zone

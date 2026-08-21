@@ -1408,9 +1408,35 @@ func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
 	return nil
 }
 
+// reloadWouldLoseChanges reports whether re-reading the zone file would discard
+// in-memory changes nothing else holds.
+//
+// "The zone is dirty" used to be the whole answer and a reload was refused on
+// it alone. With the delta journal that is the wrong answer: dirty means
+// memory differs from the file, which is the NORMAL state of a zone with
+// journalled changes -- ReplayPersistedDeltas and MergeJournalOverNewFile both
+// set the flag themselves, at every load. Refusing on it makes `zone reload`
+// permanently unavailable to exactly the zones reconciliation exists for,
+// which is the same "reload is not wired into the design" gap as #362.
+//
+// What the refusal protects is a change that only memory holds. The publish
+// path refuses any change it could not journal (see publishWorkingSetLocked),
+// so with a database and an active journal, dirty means "in the journal" and a
+// reload merges rather than discards. Without them -- `journal: active: false`,
+// or no keystore at all -- memory really is the only copy and the refusal
+// still earns its keep.
+func reloadWouldLoseChanges(zd *ZoneData) bool {
+	if zd == nil || !zd.Options[OptDirty] {
+		return false
+	}
+	return zd.KeyDB == nil || !JournalActive()
+}
+
 func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool, wait bool, timeoutStr string) (string, error) {
-	if zd.Options[OptDirty] {
-		return "", fmt.Errorf("zone %s: zone has been modified, reload not possible", zd.ZoneName)
+	if reloadWouldLoseChanges(zd) {
+		return "", fmt.Errorf("zone %s: the zone has changes that only memory holds, because the"+
+			" delta journal is not recording them; a reload would discard them. Write them out"+
+			" first with `zone sync`", zd.ZoneName)
 	}
 
 	// Re-read and re-parse the dnssec: block from the config file so this zone

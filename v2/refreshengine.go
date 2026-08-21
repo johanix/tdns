@@ -558,9 +558,10 @@ func RefreshEngine(ctx context.Context, conf *Config) {
 							}
 							continue
 						}
-						if zd.ZoneType == Primary && zd.Options[OptDirty] {
-							resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s has modifications, reload not possible", zone)
-							lgEngine.Warn("zone has modifications, reload not possible", "zone", zone)
+						if zd.ZoneType == Primary && reloadWouldLoseChanges(zd) {
+							resp.Msg = fmt.Sprintf("RefreshEngine: Zone %s has changes that only memory holds"+
+								" (the delta journal is not recording them), reload not possible", zone)
+							lgEngine.Warn("zone has unjournalled modifications, reload not possible", "zone", zone)
 							if zr.Response != nil {
 								zr.Response <- resp
 							}
