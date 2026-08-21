@@ -71,55 +71,6 @@ func (zd *ZoneData) WriteDynamicZoneFile(zoneDirectory string) (string, error) {
 	return zoneFilePath, nil
 }
 
-// UNUSED as of this writing, and not safe to wire up as it stands: it calls
-// zd.ReadZoneFile on the receiver, and ParseZoneFromReader writes the file
-// identity fields without zd.mu. That is fine only while the zone is unshared.
-// If this is ever called on a zone already in the Zones map, parse into a
-// scratch ZoneData and copy the fields under the lock, the way FetchFromFile
-// does.
-//
-// LoadDynamicZoneFile loads a zone from a file in the dynamic zones directory
-// Returns true if zone was updated, the serial number, and any error
-// If the file is corrupted, creates the zone but sets an error state
-func (zd *ZoneData) LoadDynamicZoneFile(zoneDirectory string) (bool, uint32, error) {
-	if zoneDirectory == "" {
-		return false, 0, fmt.Errorf("zone directory is required")
-	}
-
-	// Generate zone file name (same logic as WriteDynamicZoneFile)
-	zoneFileName := fmt.Sprintf("%s.zone", strings.TrimSuffix(zd.ZoneName, "."))
-	zoneFilePath := filepath.Join(zoneDirectory, zoneFileName)
-
-	// Check if file exists
-	if _, err := os.Stat(zoneFilePath); os.IsNotExist(err) {
-		return false, 0, fmt.Errorf("zone file does not exist: %s", zoneFilePath)
-	}
-
-	// Try to read the zone file
-	updated, serial, err := zd.ReadZoneFile(zoneFilePath, false)
-	if err != nil {
-		// File is corrupted - create zone but set error state
-		lg.Error("failed to load zone file", "zone", zd.ZoneName, "path", zoneFilePath, "err", err)
-
-		// Ensure zone exists in Zones map (create if needed)
-		if _, exists := Zones.Get(zd.ZoneName); !exists {
-			Zones.Set(zd.ZoneName, zd)
-		}
-
-		// Set persistent error state
-		zd.SetError(ConfigError, "Failed to load zone file: %v", err)
-
-		return false, 0, fmt.Errorf("zone file corrupted: %v", err)
-	}
-
-	// Successful load clears ConfigError specifically. Other categories
-	// (rollover-policy, refresh, etc.) are independent and survive.
-	zd.ClearError(ConfigError)
-
-	lg.Info("loaded zone file", "zone", zd.ZoneName, "path", zoneFilePath, "serial", serial)
-	return updated, serial, nil
-}
-
 // GetDynamicZoneFilePath returns the expected file path for a dynamic zone file
 // This is useful for checking if a file exists before attempting to load it
 func GetDynamicZoneFilePath(zoneName, zoneDirectory string) string {
