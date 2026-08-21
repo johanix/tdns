@@ -167,6 +167,20 @@ func findMergeConflicts(fileRRs []dns.RR, insns []ZoneDeltaRR) ([]ZoneMergeConfl
 	return out, nil
 }
 
+// freeArtefactPath returns the first unused "<base>.N" beside an artefact whose
+// name is already taken by different content.
+func freeArtefactPath(base string) (string, error) {
+	for n := 1; n <= 1000; n++ {
+		candidate := fmt.Sprintf("%s.%d", base, n)
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			return candidate, nil
+		} else if err != nil {
+			return "", err
+		}
+	}
+	return "", fmt.Errorf("no free name beside %s after 1000 tries", base)
+}
+
 // writeRejectedArtefact writes the merge's inverse to {zonefile}.{serial}.rejected.
 //
 // The file is not a description of what was rejected; it is the update that
@@ -229,6 +243,24 @@ func writeRejectedArtefactInstructions(zonefile string, zone string, serial uint
 	if err := WriteUpdateInstructions(&buf, comments, insns); err != nil {
 		return "", err
 	}
+	// The path is keyed on the file's serial, which is not unique: a merge that
+	// fails after writing the artefact is retried on the next load and writes
+	// the same path again, and a regenerated file can reuse a serial. Rewriting
+	// identical content is what the retry needs, so allow exactly that -- but
+	// never overwrite an artefact holding something else, because the operator
+	// may be part-way through replaying it and the losing records exist nowhere
+	// else.
+	if existing, rerr := os.ReadFile(path); rerr == nil {
+		if bytes.Equal(existing, buf.Bytes()) {
+			return path, nil
+		}
+		alt, aerr := freeArtefactPath(path)
+		if aerr != nil {
+			return "", aerr
+		}
+		path = alt
+	}
+
 	// Write through a temporary file in the same directory and rename. A
 	// half-written artefact is worse than none at all: the operator is told to
 	// feed this straight back through `zone update from-file`, and a truncated
@@ -317,7 +349,7 @@ func (zd *ZoneData) MergeJournalOverNewFile(kdb *KeyDB) (*ZoneMergeResult, error
 		return nil, fmt.Errorf("no zone or no database")
 	}
 
-	insns, _, err := zd.JournalInstructions()
+	insns, journalMaxID, err := zd.JournalInstructions()
 	if err != nil {
 		return nil, err
 	}
@@ -447,12 +479,15 @@ func (zd *ZoneData) MergeJournalOverNewFile(kdb *KeyDB) (*ZoneMergeResult, error
 	if len(removed) == 0 && len(added) == 0 {
 		// The merge changed nothing the file did not already have. Then the
 		// file IS the zone and the journal has nothing left to carry.
-		if _, derr := kdb.DeleteZoneDeltas(zd.ZoneName); derr != nil {
+		// Bounded by what this merge read, for the same reason
+		// ReplaceZoneJournal is: a delta persisted since then is not in the
+		// file either, so clearing it would lose it outright.
+		if _, derr := kdb.DeleteZoneDeltasThroughID(zd.ZoneName, journalMaxID); derr != nil {
 			return res, fmt.Errorf("zone %s: clearing a journal the file already contains: %v",
 				zd.ZoneName, derr)
 		}
 	} else if rerr := kdb.ReplaceZoneJournal(zd.ZoneName, fileSerial,
-		mergedSnap.Serial, removed, added); rerr != nil {
+		mergedSnap.Serial, removed, added, journalMaxID); rerr != nil {
 		return res, fmt.Errorf("zone %s: re-anchoring the journal to the new file: %v",
 			zd.ZoneName, rerr)
 	}

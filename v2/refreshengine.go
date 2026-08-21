@@ -343,13 +343,22 @@ func replayZoneDeltasOnLoad(zd *ZoneData) {
 			return
 		}
 		recordFileIdentity()
+
+		// One locked read for the four log lines below. CurrentSerial is
+		// written under zd.mu by the publish paths, so reading it bare four
+		// times is a race -- and a pointless one, since every use is a log
+		// field describing the serial this merge just produced.
+		zd.mu.Lock()
+		mergedSerial := zd.CurrentSerial
+		zd.mu.Unlock()
+
 		switch {
 		case len(res.Instructions) == 0:
 			lg.Info("the zone file changed; no persisted deltas to reconcile with it",
-				"zone", zd.ZoneName, "serial", zd.CurrentSerial)
+				"zone", zd.ZoneName, "serial", mergedSerial)
 		case len(res.Conflicts) == 0:
 			lg.Info("the zone file changed; merged the persisted deltas over it with no conflicts",
-				"zone", zd.ZoneName, "records", len(res.Instructions), "serial", zd.CurrentSerial)
+				"zone", zd.ZoneName, "records", len(res.Instructions), "serial", mergedSerial)
 		case res.Policy == ConflictZonefileWins:
 			// Under zonefile-wins it is the journal's deletes that are dropped
 			// and the file's records that survive, and the artefact holds those
@@ -360,7 +369,7 @@ func replayZoneDeltasOnLoad(zd *ZoneData) {
 				" from the JOURNAL lost where the two disagreed",
 				"zone", zd.ZoneName, "records", len(res.Instructions),
 				"conflicts", len(res.Conflicts), "policy", res.Policy.String(),
-				"rejected", res.Artefact, "serial", zd.CurrentSerial)
+				"rejected", res.Artefact, "serial", mergedSerial)
 			zd.SetError(ConfigWarning,
 				"zone file changed; %d journalled change(s) lost the merge, see %s",
 				len(res.Conflicts), res.Artefact)
@@ -369,7 +378,7 @@ func replayZoneDeltasOnLoad(zd *ZoneData) {
 				" from the FILE lost where the two disagreed",
 				"zone", zd.ZoneName, "records", len(res.Instructions),
 				"conflicts", len(res.Conflicts), "policy", res.Policy.String(),
-				"rejected", res.Artefact, "serial", zd.CurrentSerial)
+				"rejected", res.Artefact, "serial", mergedSerial)
 			zd.SetError(ConfigWarning,
 				"zone file changed; %d record(s) from the file lost the merge, see %s",
 				len(res.Conflicts), res.Artefact)
@@ -388,8 +397,11 @@ func replayZoneDeltasOnLoad(zd *ZoneData) {
 	}
 	recordFileIdentity()
 	if n > 0 {
+		zd.mu.Lock()
+		replayedSerial := zd.CurrentSerial
+		zd.mu.Unlock()
 		lg.Info("replayed persisted zone deltas over the zone file",
-			"zone", zd.ZoneName, "deltas", n, "serial", zd.CurrentSerial)
+			"zone", zd.ZoneName, "deltas", n, "serial", replayedSerial)
 	}
 }
 

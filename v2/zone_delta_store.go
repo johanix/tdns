@@ -462,8 +462,15 @@ func (kdb *KeyDB) LastZoneDeltaSerial(zone string) (uint32, bool, error) {
 // One transaction, because the intermediate state -- old chain gone, new delta
 // not yet written -- is a zone with no record of its unwritten changes at all.
 // A crash there would lose them.
+// throughID bounds the delete to the rows the caller actually observed. The
+// replacement rows are derived from a snapshot taken at some earlier instant,
+// so a delta persisted after that snapshot is represented nowhere in them --
+// and an unbounded delete would erase it, leaving a change recorded in neither
+// the file nor the journal. Rows above throughID are left alone; at worst a
+// concurrent change ends up described twice, which re-applies idempotently,
+// rather than once too few, which loses it.
 func (kdb *KeyDB) ReplaceZoneJournal(zone string, fromSerial, toSerial uint32,
-	removed, added []core.RRset) error {
+	removed, added []core.RRset, throughID int64) error {
 
 	if kdb == nil || kdb.DB == nil {
 		return fmt.Errorf("ReplaceZoneJournal: no database")
@@ -513,7 +520,11 @@ func (kdb *KeyDB) ReplaceZoneJournal(zone string, fromSerial, toSerial uint32,
 		}
 	}()
 
-	if _, err := tx.Exec(`DELETE FROM ZoneDelta WHERE zone=?`, zone); err != nil {
+	if throughID > 0 {
+		if _, err := tx.Exec(`DELETE FROM ZoneDelta WHERE zone=? AND id<=?`, zone, throughID); err != nil {
+			return fmt.Errorf("ReplaceZoneJournal: clearing the old chain: %v", err)
+		}
+	} else if _, err := tx.Exec(`DELETE FROM ZoneDelta WHERE zone=?`, zone); err != nil {
 		return fmt.Errorf("ReplaceZoneJournal: clearing the old chain: %v", err)
 	}
 

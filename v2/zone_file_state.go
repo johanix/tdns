@@ -252,3 +252,14 @@ func (v ZoneFileVerdict) String() string {
 		return "unknown"
 	}
 }
+
+// serialStillIs reports whether the zone is still publishing the serial a
+// caller acted on. Used to close the gap between deciding that a written file
+// matches what is being served and recording that fact: the lock is dropped in
+// between, and a publish landing there would otherwise have its digest stored
+// as the identity of an older file.
+func (zd *ZoneData) serialStillIs(serial uint32) bool {
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	return zd.CurrentSerial == serial
+}
