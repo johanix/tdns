@@ -148,7 +148,7 @@ func TestRejectedArtefactIsAnExecutableInverse(t *testing.T) {
 	}
 }
 
-// TestMergeSerialFloor. dnslab. is the live case: file 01, served 03, journal
+// TestMergeSerialFloor. The case that matters: file 01, served 03, journal
 // head 06. Publishing at 02 would take the zone backwards for every secondary
 // already holding 03 -- and a secondary refreshes on a serial increase and
 // nothing else, so it would ignore the merged content indefinitely.
@@ -157,7 +157,7 @@ func TestMergeSerialFloor(t *testing.T) {
 		name                            string
 		file, served, journal, wantMore uint32
 	}{
-		{"the dnslab case", 2026081701, 2026081703, 2026081706, 2026081707},
+		{"file behind both served and journal", 2026081701, 2026081703, 2026081706, 2026081707},
 		{"file ahead of everything", 100, 50, 60, 101},
 		{"served ahead", 10, 90, 20, 91},
 		{"journal head ahead", 10, 20, 90, 91},
@@ -342,8 +342,8 @@ old.example.	3600	IN	TXT	"remove me"
 	}
 }
 
-// TestMergeLiftsTheSerialClearOfWhatWasServed. The dnslab. shape: the
-// replacement file's serial is BELOW what secondaries have already been handed.
+// TestMergeLiftsTheSerialClearOfWhatWasServed: the replacement file's serial
+// is BELOW what secondaries have already been handed.
 func TestMergeLiftsTheSerialClearOfWhatWasServed(t *testing.T) {
 	kdb := newTestKeyDB(t)
 

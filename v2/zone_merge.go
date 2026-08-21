@@ -258,8 +258,8 @@ func writeRejectedArtefactInstructions(zonefile string, zone string, serial uint
 // newer (RFC 1982) than everything this server has already served AND than the
 // new file's own serial.
 //
-// The second condition alone is not enough, and dnslab. is the live example --
-// file at ...01, served at ...03, journal head at ...06. Publishing the merge at
+// The second condition alone is not enough. Take a file at ...01, a served
+// serial of ...03 and a journal head at ...06: publishing the merge at
 // ...02 would take the zone BACKWARDS for every secondary already holding ...03:
 // they would ignore the new content indefinitely, since a secondary refreshes on
 // a serial increase and nothing else.
