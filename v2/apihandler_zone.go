@@ -171,13 +171,6 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				resp.ErrorMsg = err.Error()
 			}
 
-		case "generate-nsec":
-			err := zd.GenerateNsecChain(kdb)
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = err.Error()
-			}
-
 		case "show-nsec-chain":
 			resp.Names, err = zd.ShowNsecChain()
 			if err != nil {

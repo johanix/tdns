@@ -116,6 +116,32 @@ func (kdb *KeyDB) DeleteZoneFileState(zone string) error {
 // Deliberately mirrors what WriteZoneToFile serialises, RRSIGs included: the
 // two must see the same records, or the digest recorded at write time would
 // not match the digest computed when that same file is read back.
+// ownerRRsForDigest returns every record an owner contributes to the ZONEMD
+// digest: its RRsets, their signatures, and the NSEC property with its own.
+//
+// Both digest collectors go through here deliberately. The digest of the file
+// just parsed and the digest of the zone about to be written must agree for
+// identical content, and they are computed in different places over different
+// structures. Omitting the NSEC property from one of them would make every
+// load report the file as CHANGED -- the file itself still contains NSEC
+// records, because a secondary loading from disk needs them -- and the zone
+// would be merged and republished on every restart. See
+// docs/2026-08-22-nsec-chain-correctness.md §3.
+func ownerRRsForDigest(od *OwnerData) []dns.RR {
+	if od == nil {
+		return nil
+	}
+	var out []dns.RR
+	for _, rrt := range od.RRtypes.Keys() {
+		rrset := od.RRtypes.GetOnlyRRSet(rrt)
+		out = append(out, rrset.RRs...)
+		out = append(out, rrset.RRSIGs...)
+	}
+	out = append(out, od.NSEC.RRs...)
+	out = append(out, od.NSEC.RRSIGs...)
+	return out
+}
+
 func zoneRRsFromSnapshot(snap *zoneSnapshot) []dns.RR {
 	if snap == nil {
 		return nil
@@ -126,11 +152,7 @@ func zoneRRsFromSnapshot(snap *zoneSnapshot) []dns.RR {
 		if od == nil {
 			continue
 		}
-		for _, rrt := range od.RRtypes.Keys() {
-			rrset := od.RRtypes.GetOnlyRRSet(rrt)
-			out = append(out, rrset.RRs...)
-			out = append(out, rrset.RRSIGs...)
-		}
+		out = append(out, ownerRRsForDigest(od)...)
 	}
 	return out
 }
@@ -165,11 +187,7 @@ func (zd *ZoneData) zoneDigestOfWorkingData() (string, error) {
 	var rrs []dns.RR
 	for tuple := range zd.Data.Iter() {
 		od := tuple.Val
-		for _, rrt := range od.RRtypes.Keys() {
-			rrset := od.RRtypes.GetOnlyRRSet(rrt)
-			rrs = append(rrs, rrset.RRs...)
-			rrs = append(rrs, rrset.RRSIGs...)
-		}
+		rrs = append(rrs, ownerRRsForDigest(&od)...)
 	}
 	if len(rrs) == 0 {
 		return "", fmt.Errorf("zone %s: no data to digest", zd.ZoneName)
