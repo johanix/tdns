@@ -37,7 +37,7 @@ func refreshTo(t *testing.T, zd *ZoneData, upstreamSerial string) {
 		t.Fatalf("ReadZoneData: %v", err)
 	}
 	zd.mu.Lock()
-	err := zd.applyRefreshReplacementLocked(newZd, nil, false)
+	err := zd.applyRefreshReplacementLocked(newZd, nil, false, false)
 	zd.mu.Unlock()
 	if err != nil {
 		t.Fatalf("applyRefreshReplacementLocked: %v", err)

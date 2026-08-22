@@ -304,8 +304,8 @@ looks wrong.
 ### When the zone file changes underneath
 
 The journal is anchored to the zone file: it holds what the file does
-not have yet. So the interesting question at load time is whether the
-file is still the one those deltas were computed against.
+not have yet. So the interesting question, every time that file is read,
+is whether it is still the one those deltas were computed against.
 
 tdns answers it with a **ZONEMD digest** of the file's contents,
 recorded every time the file is read or written. Not the SOA serial:
@@ -406,6 +406,51 @@ that published below them would never reach them at all.
 to the file in hand, as a single delta. Ordering, comments and revision
 control survive; the file is written only when you ask, with `write`,
 `sync` or `freeze`.
+
+#### Startup and `zone reload` do the same thing
+
+The zone file is read at startup, by `zone reload`, and by the refresh
+ticker — which re-reads a primary's file every SOA `refresh` interval.
+All three ask the digest whether it changed, and all three merge when
+the answer is yes.
+
+They have not always. Reload used to decide on the SOA serial instead,
+and got it wrong in both of the directions a serial can be wrong: an
+edit that did not advance the serial past what tdns last read was not
+loaded at all, while `zone reload` reported success; and one that jumped
+well past it was loaded, but left the journal anchored to a serial the
+served zone had not followed, after which every update was refused until
+a restart.
+
+Two consequences of the digest deciding:
+
+- **An edit that leaves the serial alone is still picked up.** Bump it
+  anyway — secondaries follow the serial and nothing else — but
+  forgetting to no longer means the reload quietly does nothing.
+- **A reload that finds nothing changed does nothing.** No republish, no
+  serial bump, no NOTIFY. Reformatting counts as nothing changed, which
+  is what keeps the ticker from republishing an untouched zone every
+  refresh interval. `--force` re-reads and re-applies regardless.
+
+**The digest is gated on a stat.** Deciding on content means parsing and
+digesting the whole zone, which is seconds of work on a large one and
+which the refresh ticker does inline, so tdns asks the cheap question
+first: has anything written to this file since it last looked? An
+untouched file is not re-read at all. A touched one is parsed and judged
+on its digest exactly as described above, so reformatting is still not a
+change.
+
+The gate can only ever say "do not bother looking", never "the file
+changed", so it cannot make tdns see a change that is not there. Its one
+blind spot is a file rewritten to exactly the same size with its mtime
+restored — not something an editor or a zone generator does — and
+`zone reload --force`, or a restart, reads the file regardless.
+
+`zone reload` is refused only when the zone holds changes that *nothing
+but memory* has. "The zone has been modified" is the ordinary state of a
+zone with unwritten changes — the journal has them, and the reload
+merges them back over the new file. With `journal: active: false` there
+is no second copy, and the refusal stands.
 
 
 ## 7. freeze, thaw and sync

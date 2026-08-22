@@ -189,24 +189,42 @@ func (zd *ZoneData) CompareZoneFileState() (ZoneFileVerdict, *ZoneFileIdentity, 
 		return ZoneFileUnknown, nil, fmt.Errorf("no zone or no database")
 	}
 
-	prev, have, err := zd.KeyDB.GetZoneFileState(zd.ZoneName)
+	zd.mu.Lock()
+	cur := zd.fileDigest
+	zd.mu.Unlock()
+
+	return zd.KeyDB.CompareZoneFileDigest(zd.ZoneName, cur)
+}
+
+// CompareZoneFileDigest compares a digest just computed from a zone file
+// against the identity recorded for that zone.
+//
+// Split out of CompareZoneFileState because a RELOAD has to ask the question
+// before it has adopted the file: the parse happens on a scratch ZoneData, and
+// the answer is what decides whether that scratch zone is published at all.
+// Reading the digest off the live zone at that point would answer for the file
+// the zone is already serving, which is never the file being considered.
+//
+// An empty digest is ZoneFileUnknown, like a missing record: it means the
+// comparison has no left-hand side, not that the file differs.
+func (kdb *KeyDB) CompareZoneFileDigest(zone, digest string) (ZoneFileVerdict, *ZoneFileIdentity, error) {
+	if kdb == nil {
+		return ZoneFileUnknown, nil, fmt.Errorf("no database")
+	}
+
+	prev, have, err := kdb.GetZoneFileState(zone)
 	if err != nil {
 		return ZoneFileUnknown, nil, err
 	}
 	if !have {
 		return ZoneFileUnknown, nil, nil
 	}
-
-	zd.mu.Lock()
-	cur := zd.fileDigest
-	zd.mu.Unlock()
-
-	if cur == "" {
+	if digest == "" {
 		// Nothing to compare against on our side either -- a zone that reached
 		// this point without passing the parse site, e.g. a transferred zone.
 		return ZoneFileUnknown, prev, nil
 	}
-	if strings.EqualFold(cur, prev.Digest) {
+	if strings.EqualFold(digest, prev.Digest) {
 		return ZoneFileUnchanged, prev, nil
 	}
 	return ZoneFileChanged, prev, nil

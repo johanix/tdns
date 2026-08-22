@@ -606,8 +606,11 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string
 					zd.Logger.Printf("ParseZoneFromReader: %s: new SOA serial is the same as current. Reload not needed.", zd.ZoneName)
 					return false, soa.Serial, nil
 				}
-				// force=true: continue parsing to validate zone file, but serial didn't change
-				zd.Logger.Printf("ParseZoneFromReader: %s: new SOA serial is the same as current but still forced to reload (validating zone file).", zd.ZoneName)
+				// force=true: parse the whole file anyway. For the zone-file
+				// refresh path that is not "the operator forced it" but the
+				// normal case -- whether the file changed is decided on its
+				// content digest, which cannot be computed without parsing it.
+				zd.Logger.Printf("ParseZoneFromReader: %s: new SOA serial is the same as the one last read; parsing the whole file anyway.", zd.ZoneName)
 				serialChanged = false
 			} else {
 				// Serial changed - this indicates an actual update

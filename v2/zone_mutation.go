@@ -496,7 +496,15 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	_ = zd.NotifyDownstreams()
 }
 
-func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs []*core.RRset, firstLoad bool) error {
+// applyRefreshReplacementLocked swaps freshly loaded zone data in and publishes
+// it.
+//
+// fromZoneFile says the replacement was read from this zone's own file rather
+// than transferred from an upstream. It governs the serial floor in the default
+// branch below and nothing else, because only a file-backed zone anchors its
+// delta journal to the content it has just loaded.
+func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs []*core.RRset,
+	firstLoad, fromZoneFile bool) error {
 	// The zone has just been re-read; whatever was replayed on top of the
 	// PREVIOUS file no longer applies to this one, so a replay for the new file
 	// is due again.
@@ -537,7 +545,34 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		}
 
 	default:
-		zd.CurrentSerial++
+		// Strictly newer than what this server has already served -- and, when
+		// the content came from this zone's own file, than the serial that file
+		// carries.
+		//
+		// The served serial alone is the obvious choice, and for a reload it is
+		// not enough. A reload adopts the new file as the journal's anchor
+		// (zd.fileSerial, assigned above), so a file whose serial jumped ahead
+		// of what is being served leaves that anchor ahead of the zone: the
+		// next change is then a delta from the file's serial to a lower one,
+		// PersistZoneDelta refuses it, and the zone accepts no further update
+		// until it is restarted. That was the second half of #362, and it needs
+		// no journal to happen -- with an empty journal the next delta anchors
+		// to zd.fileSerial directly.
+		//
+		// Same floor MergeJournalOverNewFile applies, and for the same reason;
+		// it just has to hold whether or not there is a journal to merge.
+		//
+		// A TRANSFERRED zone is excluded deliberately. Its serial is its own,
+		// not upstream's -- an inline-signing secondary re-signs what it
+		// receives and advances in its own space (see the MUST-NOT-MODIFY
+		// design), and off tdns-auth the whole gate stands down. Nothing there
+		// anchors a journal to the received serial, so there is nothing to
+		// floor.
+		next := zd.CurrentSerial
+		if fromZoneFile && serialNewer(zd.fileSerial, next) {
+			next = zd.fileSerial
+		}
+		zd.CurrentSerial = next + 1
 		if zd.KeyDB != nil && zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialPersist {
 			if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
 				return fmt.Errorf("persist outgoing serial for zone %s: %w", zd.ZoneName, err)

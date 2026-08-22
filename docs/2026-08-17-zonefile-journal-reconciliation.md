@@ -296,6 +296,12 @@ whether the file changed regardless of who asked; two behaviours for one
 situation is how this class of bug returns. A crash-restart with content
 in the journal must apply it — that is the entire point of the journal.
 
+Stages 1–3 wired only the startup path, and the sentence above stayed
+untrue until Stage 4 (§13, #362): reload went through the serial-gated
+refresh instead, which reached neither the digest nor the merge. The
+class of bug returned exactly as predicted, in both of the directions a
+serial comparison is wrong in.
+
 The per-zone option:
 
 ```yaml
@@ -489,6 +495,69 @@ where it is; the one shared file at risk of collision with #349 is
 | 1 | ZONEMD + `ZoneFileState` + detection | 450 | ~960 | `5a84937`, `c622ba2` |
 | 2 | merge, re-anchor, `.rejected`, serial floor | ~800 | ~890 | `93235ab`, `47f0c62` |
 | 3 | the option, defaulted at parse | 150 | ~330 | `4aad47a` |
+| 4 | reload takes the same path (#362) | — | ~190 | `feature/reload-reconciliation` |
+
+### Stage 4 — reload takes the same path
+
+Not foreseen as a stage: §9 states the property, and the startup path
+was taken to be the only path that reads a zone file. It is not. An
+explicit `zone reload` and the refresh ticker both re-read a primary's
+file through `Refresh` → `FetchFromFile`, which decided on the SOA
+serial and never reached the digest.
+
+Three things had to change, and they are all consequences of the same
+mistake:
+
+- **Detection.** The parser short-circuits as soon as it sees an SOA
+  whose serial matches the last one read. `FetchFromFile` now parses the
+  whole file unconditionally and decides on the digest, falling back to
+  the serial only where there is no recorded identity to compare
+  against. `--force` re-applies an unchanged file rather than parsing it
+  and discarding the result.
+- **Reconciliation.** The merge/replay tail of `replayZoneDeltasOnLoad`
+  became `ReconcileZoneFileWithJournal`, which both entry points call.
+  Not on a first load from `FetchFromFile`, though: that path must
+  reconcile after the DNSSEC policy is bound, or replay signs with a nil
+  policy and mints five-minute RRSIGs.
+- **The serial floor.** A reload adopts the new file as the journal's
+  anchor but bumped the served serial by one, so a file whose serial had
+  jumped ahead left the anchor above the zone and `PersistZoneDelta`
+  refused every subsequent update. The reload now lands strictly newer
+  than both, which is what §8 already required of the merge — it just
+  has to hold when there is no journal to merge, too.
+
+- **A stat gate in front of the digest.** Deciding on content means
+  parsing and digesting the whole zone on every refresh interval, where
+  the serial comparison it replaces stopped at the first SOA. Measured on
+  a delegation-heavy zone: 133 ms at 22.5k records, 1.6 s at 225k, 9.3 s
+  at 1.1M — the digest being some 80% of each — against 21–35 µs for the
+  early return. The ticker calls `Refresh` inline in the refresh engine,
+  so that is not just CPU but head-of-line blocking for every other zone.
+  The file's mtime and size, recorded in memory at every read and every
+  write, now decide whether to look at all; the digest still decides what
+  looking means. One full parse per zone per process start, 17 µs
+  thereafter. §4.1's objection to byte-level comparison does not apply to
+  it: that objection is to false POSITIVES from reordering, comments and
+  whitespace, and a stat gate can only produce a false negative — a file
+  rewritten to the same size with its mtime restored.
+
+  The gate has one coupling that is not obvious and is easy to reintroduce.
+  The identity is recorded on success only, so that a load which could not
+  deal with the file leaves the previous identity in place and the next load
+  sees the file as CHANGED and retries. A cached stat saying "nothing has
+  touched it" defeats that retry entirely — the next refresh does not read
+  the file at all, and the merge is not attempted again until the process
+  restarts. So the two are set together and dropped together: **a cached stat
+  is only ever trusted while a recorded identity describes the file it
+  names.** Neither branch had this defect on its own; it appeared only when
+  the two were merged.
+
+One judgement call beyond the issue: a dirty primary was refused a
+reload outright. Since both replay and merge set that flag at every
+load, the refusal made `zone reload` permanently unavailable to exactly
+the zones this design is about. It now refuses only what it was
+protecting — changes the journal is not recording, i.e. no database or
+`journal: active: false`.
 
 Stage 1 ran over because the RFC 8976 digest is more than a hash call:
 canonical ordering (labels compared right-to-left, case-insensitively)
