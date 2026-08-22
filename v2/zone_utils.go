@@ -194,8 +194,132 @@ func (zd *ZoneData) DoTransfer(conf *Config) (bool, uint32, error) {
 	return false, 0, fmt.Errorf("SOA probe of %s failed: all %d upstream(s) unreachable: %w", zd.ZoneName, len(zd.Upstreams), lastErr)
 }
 
+// newTransferScratchZone builds the throwaway ZoneData an inbound AXFR is
+// received into. The transfer must not write into the live zone until it has
+// succeeded, so it lands here first and is flipped in afterwards.
+//
+// It is a PARTIAL copy, and that is the trap: anything ZoneTransferIn reads off
+// its receiver has to be listed here, or the transfer silently runs without it.
+// transfer-src was added to ZoneData and to the config, plumbed all the way
+// through provisioning, persistence and reload -- and then dropped here, one
+// line before the call that uses it. The feature was inert on every AXFR while
+// looking correct everywhere an operator could inspect it.
+//
+// TransferSrc is resolved on the LIVE zone rather than copied raw: the live zone
+// is the one holding both the per-zone value and the KeyDB carrying the global
+// default, so this hands over an already-resolved list and the scratch zone does
+// not need a KeyDB of its own.
+//
+// Anything added to ZoneTransferIn's reads of zd belongs in this function.
+func newTransferScratchZone(zd *ZoneData) ZoneData {
+	srcs, tier := zd.EffectiveTransferSrcWithSource()
+	return ZoneData{
+		ZoneName:        zd.ZoneName,
+		ZoneType:        zd.ZoneType,
+		ZoneStore:       zd.ZoneStore,
+		XfrType:         zd.XfrType,
+		IncomingSerial:  zd.IncomingSerial,
+		CurrentSerial:   zd.CurrentSerial,
+		Logger:          zd.Logger,
+		Verbose:         zd.Verbose,
+		Debug:           zd.Debug,
+		Options:         zd.Options,
+		TransferSrc:     srcs,
+		TransferSrcTier: tier,
+		Ready:           true, // this is only used by the checks for changes to DNSKEYs, HSYNC, etc.
+		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
+	}
+}
+
+// zoneFileLooksUntouched answers the cheap half of "did the file change?": has
+// anything written to this file at all since tdns last looked at it?
+//
+// It is a CACHE, not a detector. It can only ever say "do not bother looking";
+// every file it lets through is still judged on its ZONEMD digest, so no
+// reformatted file is ever mistaken for a changed one. That asymmetry is what
+// makes it compatible with the design's rejection of byte-level comparison:
+// the objection there is to false POSITIVES from reordering, comments and
+// whitespace, and the only error this can make is a false negative -- a file
+// rewritten to exactly the same size with its mtime restored, which is not
+// something an editor or a zone generator does.
+//
+// The alternative is not free. Deciding on content means parsing and digesting
+// the whole zone, measured at ~9 seconds for a 1.1M-record zone (the digest
+// being some 80% of it), and the refresh ticker calls that inline in the
+// refresh engine, where every other zone waits behind it. Paying that once per
+// refresh interval per zone to learn that nothing happened is a poor trade for
+// closing a hole that takes deliberate effort to fall into -- and a restart, or
+// `zone reload --force`, closes it anyway.
+//
+// A zero fileModTime means "not looked at in this process", which is every
+// zone's first load.
+func (zd *ZoneData) zoneFileLooksUntouched(fname string, st os.FileInfo) bool {
+	if zd == nil || st == nil {
+		return false
+	}
+	zd.mu.Lock()
+	defer zd.mu.Unlock()
+	if zd.fileModTime.IsZero() || zd.fileStatPath != path.Clean(fname) {
+		return false
+	}
+	return zd.fileSize == st.Size() && zd.fileModTime.Equal(st.ModTime())
+}
+
+// recordZoneFileStat remembers the stat of the file just read or written.
+//
+// Recorded whether or not the file was ADOPTED, unlike the digest identity,
+// which describes the file the zone is SERVING and so is recorded only when
+// the file is adopted. Without that difference a merely reformatted file would
+// be re-parsed on every refresh forever: its mtime differs, its content does
+// not, and nothing would ever record that we had already looked.
+func (zd *ZoneData) recordZoneFileStat(fname string, st os.FileInfo) {
+	if zd == nil || st == nil {
+		return
+	}
+	zd.mu.Lock()
+	zd.fileStatPath = path.Clean(fname)
+	zd.fileModTime = st.ModTime()
+	zd.fileSize = st.Size()
+	zd.mu.Unlock()
+}
+
+// forgetZoneFileStat drops the cached stat, so the next refresh reads the file
+// again instead of trusting that nothing has happened to it.
+//
+// Called when a load could not finish dealing with the file it read. The
+// recorded identity is deliberately left stale in that case so the next load
+// sees the file as changed and retries; the cached stat would otherwise stop
+// that next load from ever looking.
+func (zd *ZoneData) forgetZoneFileStat() {
+	if zd == nil {
+		return
+	}
+	zd.mu.Lock()
+	zd.fileStatPath = ""
+	zd.fileModTime = time.Time{}
+	zd.fileSize = 0
+	zd.mu.Unlock()
+}
+
 // Return updated, error
 func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core.RRset) (bool, error) {
+
+	// The cheap question first, and BEFORE the read: has anything touched the
+	// file since we last looked? Taken before rather than after so that a file
+	// replaced while we are reading it records the OLDER stat -- the next
+	// refresh then re-reads, which is the safe direction to be wrong in.
+	//
+	// A stat we could not take is not a reason to skip; ReadZoneFile below
+	// reports the real error with the real message.
+	st, statErr := os.Stat(zd.Zonefile)
+	if statErr != nil {
+		st = nil
+	}
+	if !force && zd.zoneFileLooksUntouched(zd.Zonefile, st) {
+		lg.Debug("zone file untouched since tdns last looked at it; not re-reading",
+			"zone", zd.ZoneName, "file", zd.Zonefile)
+		return false, nil
+	}
 
 	// log.Printf("Reading zone %s from file %s\n", zd.ZoneName, zd.Zonefile)
 	// Capture prior status so an error or no-op (unchanged) file read of an
@@ -217,7 +341,20 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 		// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
 	}
 
-	updated, _, err := new_zd.ReadZoneFile(zd.Zonefile, force)
+	// Parse the WHOLE file, always. The parser's own short-circuit answers "has
+	// the SOA serial moved?", which is not the question this path has to
+	// answer: a zone file can be edited, regenerated or restored from backup
+	// without its serial moving, and the recorded content digest exists
+	// precisely to catch that. Reaching the digest at all means parsing past
+	// the SOA -- so parse unconditionally here and decide below, on content.
+	//
+	// This is the reload half of #362. With the serial deciding, a file whose
+	// SOA serial matched the one last read was not read at all: an edit that
+	// changed records without moving the serial past it simply did not load,
+	// while `zone reload` reported success. --force did not help either -- it
+	// parsed the file to validate it and then reported "not updated", so the
+	// parse was thrown away.
+	serialMoved, _, err := new_zd.ReadZoneFile(zd.Zonefile, true)
 	if err != nil {
 		lg.Error("ReadZoneFile failed", "zone", zd.ZoneName, "err", err)
 		zd.SetStatus(prevStatus)
@@ -225,6 +362,49 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	}
 
 	// zd.Logger.Printf("FetchFromFile: Zone %s: zone file read, updated=%v delegation sync=%v", zd.ZoneName, updated, zd.Optoins["delegationsync"])
+
+	// We have now looked at this file, whatever we go on to decide about it.
+	zd.recordZoneFileStat(zd.Zonefile, st)
+
+	// Is this the file tdns last read or wrote? Asked of the file just parsed,
+	// against the identity recorded for the zone -- file against file, never
+	// file against the in-memory zone, which carries freshly minted signatures
+	// and would report every signed zone as modified.
+	verdict := ZoneFileUnknown
+	var prev *ZoneFileIdentity
+	var verr error
+	if zd.KeyDB != nil {
+		verdict, prev, verr = zd.KeyDB.CompareZoneFileDigest(zd.ZoneName, new_zd.fileDigest)
+		if verr != nil {
+			// Not fatal, and not evidence of a change: a zone that cannot be
+			// compared falls back to the serial below, which is what this path
+			// did before the digest existed. reconcileZoneFileWithJournal
+			// reports the failure once, further down.
+			verdict = ZoneFileUnknown
+		}
+	}
+
+	// A load that has published nothing must adopt the file whatever the
+	// verdict says. "Unchanged" means the file is what the ZONE ALREADY HAS,
+	// and a zone serving nothing has nothing -- the recorded identity is the
+	// previous process's, and every restart of an untouched zone would
+	// otherwise decline to load it at all.
+	updated := force || zd.publishedSnapshot() == nil
+	switch verdict {
+	case ZoneFileChanged:
+		updated = true
+	case ZoneFileUnchanged:
+		// The file's CONTENT is what the zone already has. Reordering,
+		// re-commenting and reflowing all land here, and republishing for
+		// those would churn the serial and NOTIFY every secondary over a
+		// change that is not one. The refresh ticker calls this path on every
+		// refresh interval, so that would be perpetual.
+	default: // ZoneFileUnknown
+		// No basis for a content comparison: nothing recorded for this zone
+		// yet, no database, or the digest could not be computed. Fall back to
+		// the serial.
+		updated = updated || serialMoved
+	}
 
 	if !updated {
 		zd.SetStatus(prevStatus)
@@ -243,12 +423,43 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	// Publish replacement: working set from refreshed data + dynamic RRs.
 	zd.mu.Lock()
 	firstLoad := zd.FirstZoneLoad
-	if err := zd.applyRefreshReplacementLocked(&new_zd, dynamicRRs, firstLoad); err != nil {
+	if err := zd.applyRefreshReplacementLocked(&new_zd, dynamicRRs, firstLoad, true); err != nil {
 		zd.mu.Unlock()
+		// Nothing was published: the only error that path returns comes from
+		// persisting the outgoing serial, which happens before the working set
+		// is swapped in, so the zone still serves exactly what it did before.
+		//
+		// Put the status back, as the two failure returns above already do.
+		// Leaving it at `loading` reports a zone as mid-load forever, on the
+		// strength of one failed database write.
+		zd.SetStatus(prevStatus)
+		// And drop the cached stat. It was recorded when the file was read,
+		// which is right for a file we merely declined to adopt -- but this
+		// file we tried to adopt and could not, so the next refresh has to look
+		// again. Without this it would see an untouched file, skip it, and the
+		// zone would never pick that file up at all. Same coupling as a failed
+		// reconciliation, one step earlier.
+		zd.forgetZoneFileStat()
 		lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
 		return false, err
 	}
 	zd.mu.Unlock()
+
+	// Reconcile the journal with the file that was just adopted -- the same
+	// function a first load reaches, from the verdict already in hand.
+	//
+	// Not on a first load, though: that path reconciles from
+	// completeFirstZonePolicyAndLoad, AFTER the DNSSEC policy is bound.
+	// Reconciling here would re-sign the RRsets it touches with no policy
+	// bound, which sigLifetime turns into five-minute RRSIGs that nothing on
+	// the normal path renews.
+	//
+	// Before the post-refresh callbacks, for the reason drainAndRunOnFirstLoad
+	// runs after replay on the load path: a callback should see the zone's
+	// actual content, not the file before the journal was applied to it.
+	if !firstLoad {
+		zd.reconcileZoneFileWithJournal(verdict, prev, verr)
+	}
 
 	// Post-refresh callbacks: queue sends and notifications that need the live zone pointer.
 	for _, cb := range zd.OnZonePostRefresh {
@@ -301,20 +512,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug, force bool, dynamicRRs []*
 	for _, up := range zd.Upstreams {
 		upstream := up.Addr
 		lg.Info("transferring zone via AXFR", "zone", zd.ZoneName, "upstream", upstream)
-		new_zd = ZoneData{
-			ZoneName:       zd.ZoneName,
-			ZoneType:       zd.ZoneType,
-			ZoneStore:      zd.ZoneStore,
-			XfrType:        zd.XfrType,
-			IncomingSerial: zd.IncomingSerial,
-			CurrentSerial:  zd.CurrentSerial,
-			Logger:         zd.Logger,
-			Verbose:        zd.Verbose,
-			Debug:          zd.Debug,
-			Options:        zd.Options,
-			Ready:          true, // this is only used by the checks for changes to DNSKEYs, HSYNC, etc.
-			// FoldCase:       zd.FoldCase, // Must be here, as this is an instruction to the zone reader
-		}
+		new_zd = newTransferScratchZone(zd)
 		if _, err := new_zd.ZoneTransferIn(up, zd.IncomingSerial, "axfr", conf); err != nil {
 			lg.Warn("FetchFromUpstream: AXFR from upstream failed, trying next", "zone", zd.ZoneName, "upstream", upstream, "err", err)
 			lastErr = err
@@ -361,7 +559,7 @@ func (zd *ZoneData) FetchFromUpstream(verbose, debug, force bool, dynamicRRs []*
 	// Publish replacement: working set from transferred data + dynamic RRs.
 	zd.mu.Lock()
 	firstLoad := zd.FirstZoneLoad
-	if err := zd.applyRefreshReplacementLocked(&new_zd, dynamicRRs, firstLoad); err != nil {
+	if err := zd.applyRefreshReplacementLocked(&new_zd, dynamicRRs, firstLoad, false); err != nil {
 		zd.mu.Unlock()
 		lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
 		return false, err
@@ -420,11 +618,84 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 	if !zd.Options[OptDirty] && !force {
 		return fmt.Sprintf("Zone %s not modified, writing to disk not needed", zd.ZoneName), nil
 	}
-	_, err = zd.WriteFile(fname)
+	_, wroteSerial, err := zd.WriteFileWithSerial(fname)
 	if err == nil {
 		zd.mu.Lock()
-		zd.Options[OptDirty] = false
+		// The same question the dirty flag asks, captured once under the lock
+		// and reused for the identity record below: is the file still what the
+		// zone is serving?
+		fileIsCurrent := zd.CurrentSerial == wroteSerial
+		// Clean only if the file caught up with what the zone is serving. A
+		// publish can land WHILE this write runs: we then wrote serial 11 while
+		// the zone moved to 12, and clearing the flag unconditionally would
+		// report the zone as written out when the file is a serial behind.
+		// The next `zone write` would answer "not modified, writing to disk not
+		// needed" and decline to fix it. (No content is lost -- serial 12's
+		// delta is bounded by serial, so it survives the drop below and replays
+		// -- but the operator is told the file is current when it is not.)
+		if fileIsCurrent {
+			zd.Options[OptDirty] = false
+		}
+		// The file now carries this serial, so that is what a future journal
+		// anchors to. Without this the next change would chain from the serial
+		// the file had BEFORE this write, and the load after that would refuse
+		// the journal.
+		if wroteSerial != 0 {
+			zd.fileSerial = wroteSerial
+		}
 		zd.mu.Unlock()
+
+		// The file we have just written is a file we have looked at, so the
+		// next refresh can skip it. Without this every write-out would cost one
+		// full parse and digest at the following refresh.
+		if wst, werr := os.Stat(fname); werr == nil {
+			zd.recordZoneFileStat(fname, wst)
+		}
+
+		// Record the file's new identity: this is the other end of the
+		// comparison the next load makes. The digest is of the published
+		// snapshot, which is exactly what WriteZoneToFile just serialised, so
+		// reading this file back must reproduce it.
+		//
+		// Best-effort, and deliberately not fatal: the file is written and
+		// being served, and the cost of a missing record is that the next load
+		// reports "no basis for comparison" instead of "unchanged". Failing the
+		// write here would turn a bookkeeping problem into an operational one.
+		// Gated on the same condition, and for the same reason. ZoneDigestOfPublished
+		// digests the snapshot published NOW, not the one WriteFileWithSerial
+		// serialised, so it only describes this file while the two serials
+		// agree. Recording it after a publish landed mid-write would store a
+		// digest of serial 12 as the identity of a file holding serial 11 --
+		// and the next load, finding a mismatch, would report the file as
+		// CHANGED and merge the journal over a file nobody edited, lifting the
+		// serial and possibly writing a .rejected artefact.
+		//
+		// wroteSerial != 0 for the same reason the fileSerial assignment above
+		// refuses zero: recording serial 0 as the file's identity is worse than
+		// recording nothing, which merely reads as "no basis for comparison".
+		if zd.KeyDB != nil && fileIsCurrent && wroteSerial != 0 {
+			if digest, derr := zd.ZoneDigestOfPublished(); derr != nil {
+				lg.Warn("zone written but its digest could not be computed;"+
+					" the next load will have no basis for comparison",
+					"zone", zd.ZoneName, "error", derr)
+			} else if !zd.serialStillIs(wroteSerial) {
+				// fileIsCurrent was decided before the lock was dropped, and
+				// ZoneDigestOfPublished digests whatever is published when it
+				// runs. A publish landing in between leaves a digest of the
+				// newer zone about to be recorded as the identity of the file
+				// we wrote -- the very mismatch the gate above exists to
+				// prevent, one step later. Recording nothing is safe: the next
+				// load reads "no basis for comparison" and re-establishes it.
+				lg.Warn("zone written but a publish landed before its identity could be"+
+					" recorded; leaving the file unidentified rather than recording a"+
+					" digest of different content",
+					"zone", zd.ZoneName, "wrote_serial", wroteSerial)
+			} else if rerr := zd.RecordZoneFileState(wroteSerial, digest); rerr != nil {
+				lg.Warn("zone written but its file identity could not be recorded;"+
+					" the next load will have no basis for comparison",
+					"zone", zd.ZoneName, "error", rerr)
+			}
+		}
 
 		// Phase 2: the changes are now IN the file, which is the source of
 		// truth. The persisted deltas exist only to carry changes the file
@@ -443,7 +714,13 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 		// no-ops, so the replayed result matches -- but it is still wrong
 		// enough to log loudly.
 		if zd.KeyDB != nil {
-			if n, derr := zd.KeyDB.DeleteZoneDeltas(zd.ZoneName); derr != nil {
+			// Bound the drop by the serial actually WRITTEN, not by a ceiling
+			// read beforehand. A ceiling has a window: a publish can land in
+			// the file after the ceiling is read, and its delta row then
+			// survives the drop and fails the chain check on the next load.
+			// "Is this change already in the file?" is answered by the file's
+			// serial, and that has no window at all.
+			if n, derr := zd.KeyDB.DeleteZoneDeltasThroughSerial(zd.ZoneName, wroteSerial); derr != nil {
 				lg.Error("zone written to file but its persisted deltas could not be dropped;"+
 					" a restart will replay changes the file already contains",
 					"zone", zd.ZoneName, "file", fname, "error", derr)
@@ -742,6 +1019,34 @@ func FindZoneNG(qname string) *ZoneData {
 // Suppression for a non-originating tdns-auth secondary is deliberately NOT
 // applied here — this answers "what mode is configured", not "may this zone
 // act on it"; the callers pair it with the origination predicate.
+// EffectiveTransferSrc returns the source addresses to bind when dialling this
+// zone's upstreams, resolving the per-zone value over the server-global
+// dnsengine.transfer_src. Empty means "let the kernel choose", which is the
+// behaviour every zone had before this existed.
+func (zd *ZoneData) EffectiveTransferSrc() []string {
+	srcs, _ := zd.EffectiveTransferSrcWithSource()
+	return srcs
+}
+
+// EffectiveTransferSrcWithSource is EffectiveTransferSrc plus the tier that
+// supplied it ("zone", "global" or "default"), for display by `zone desc`. Both
+// live in one function for the same reason as the outbound-serial pair below:
+// so the precedence chain cannot be stated twice and silently diverge.
+func (zd *ZoneData) EffectiveTransferSrcWithSource() (srcs []string, source string) {
+	if len(zd.TransferSrc) > 0 {
+		if zd.TransferSrcTier != "" {
+			return zd.TransferSrc, zd.TransferSrcTier // already resolved upstream
+		}
+		return zd.TransferSrc, "zone" // per-zone, possibly via its template
+	}
+	if zd.KeyDB != nil {
+		if srcs := zd.KeyDB.TransferSrcList(); len(srcs) > 0 {
+			return srcs, "global" // dnsengine.transfer_src
+		}
+	}
+	return nil, "default"
+}
+
 func (zd *ZoneData) EffectiveOutboundSoaSerial() string {
 	mode, _ := zd.EffectiveOutboundSoaSerialWithSource()
 	return mode
@@ -756,8 +1061,10 @@ func (zd *ZoneData) EffectiveOutboundSoaSerialWithSource() (mode, source string)
 	if zd.OutboundSoaSerial != "" {
 		return zd.OutboundSoaSerial, "zone" // per-zone, possibly via its template
 	}
-	if zd.KeyDB != nil && zd.KeyDB.OutboundSoaSerial != "" {
-		return zd.KeyDB.OutboundSoaSerial, "global" // dnsengine.outbound_soa_serial
+	if zd.KeyDB != nil {
+		if mode := zd.KeyDB.OutboundSoaSerialMode(); mode != "" {
+			return mode, "global" // dnsengine.outbound_soa_serial
+		}
 	}
 	return OutboundSoaSerialKeep, "default"
 }
@@ -1234,9 +1541,49 @@ func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
 	return nil
 }
 
+// reloadWouldLoseChanges reports whether re-reading the zone file would discard
+// in-memory changes nothing else holds.
+//
+// "The zone is dirty" used to be the whole answer and a reload was refused on
+// it alone. With the delta journal that is the wrong answer: dirty means
+// memory differs from the file, which is the NORMAL state of a zone with
+// journalled changes -- ReplayPersistedDeltas and MergeJournalOverNewFile both
+// set the flag themselves, at every load. Refusing on it makes `zone reload`
+// permanently unavailable to exactly the zones reconciliation exists for,
+// which is the same "reload is not wired into the design" gap as #362.
+//
+// What the refusal protects is a change that only memory holds. The publish
+// path refuses any change it could not journal (see publishWorkingSetLocked),
+// so with a database and an active journal, dirty means "in the journal" and a
+// reload merges rather than discards. Without them -- `journal: active: false`,
+// or no keystore at all -- memory really is the only copy and the refusal
+// still earns its keep.
+func reloadWouldLoseChanges(zd *ZoneData) bool {
+	if zd == nil {
+		return false
+	}
+	// Under zd.mu. Options is a MAP, replaced wholesale by a config reload and
+	// written into by the updater, WriteZone and both load paths, all under
+	// that lock -- while this runs on the API goroutine and on the refresh
+	// engine, neither of which holds it. An unguarded read is a concurrent map
+	// access, which Go turns into a process-wide fatal error rather than a
+	// stale answer.
+	zd.mu.Lock()
+	dirty := zd.Options[OptDirty]
+	zd.mu.Unlock()
+	if !dirty {
+		return false
+	}
+	// After the unlock: JournalActive takes the config lock, and there is no
+	// reason to hold two.
+	return zd.KeyDB == nil || !JournalActive()
+}
+
 func (zd *ZoneData) ReloadZone(refreshCh chan<- ZoneRefresher, force bool, wait bool, timeoutStr string) (string, error) {
-	if zd.Options[OptDirty] {
-		return "", fmt.Errorf("zone %s: zone has been modified, reload not possible", zd.ZoneName)
+	if reloadWouldLoseChanges(zd) {
+		return "", fmt.Errorf("zone %s: the zone has changes that only memory holds, because the"+
+			" delta journal is not recording them; a reload would discard them. Write them out"+
+			" first with `zone sync`", zd.ZoneName)
 	}
 
 	// Re-read and re-parse the dnssec: block from the config file so this zone

@@ -108,6 +108,25 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				resp.ErrorMsg = err.Error()
 			}
 
+		// The delta journal's operator surface. Not in
+		// originationAPICommands: none of these change zone content, they
+		// change what is stored about it, and a secondary that somehow
+		// acquired a journal is exactly a zone whose journal wants inspecting.
+		case "journal":
+			jr, err := zd.ApiZoneJournal(zp)
+			if err != nil {
+				resp.Error = true
+				resp.ErrorMsg = err.Error()
+				return
+			}
+			resp.Msg = jr.Msg
+			resp.Journal = jr.Journal
+			resp.Instructions = jr.Instructions
+			// Artefact too. Without it every purge looks to the client like one
+			// whose content could not be saved -- which is the branch that
+			// prints the instructions as the last remaining copy.
+			resp.Artefact = jr.Artefact
+
 		case "sign-zone":
 			newrrsigs, err := zd.SignZone(kdb, zp.Force)
 			if err != nil {
@@ -147,13 +166,6 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 
 		case "proxy-key":
 			resp.Msg, err = zd.ProxyKeyStatus(context.Background(), kdb, Globals.ImrEngine)
-			if err != nil {
-				resp.Error = true
-				resp.ErrorMsg = err.Error()
-			}
-
-		case "generate-nsec":
-			err := zd.GenerateNsecChain(kdb)
 			if err != nil {
 				resp.Error = true
 				resp.ErrorMsg = err.Error()
@@ -274,14 +286,15 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 				return
 			}
 			msg, err := Conf.ProvisionDynamicZone(r.Context(), DynamicZoneInput{
-				Name:       zp.Zone,
-				Type:       zoneType,
-				Template:   zp.Template,
-				Primaries:  zp.Primaries,
-				Options:    zoneOptionsFromStrings(zp.Options),
-				TsigName:   zp.TsigName,
-				TsigSecret: zp.TsigSecret,
-				TsigAlgo:   zp.TsigAlgo,
+				Name:        zp.Zone,
+				Type:        zoneType,
+				Template:    zp.Template,
+				Primaries:   zp.Primaries,
+				Options:     zoneOptionsFromStrings(zp.Options),
+				TsigName:    zp.TsigName,
+				TsigSecret:  zp.TsigSecret,
+				TsigAlgo:    zp.TsigAlgo,
+				TransferSrc: zp.TransferSrc,
 			}, true)
 			if err != nil {
 				resp.Error = true
@@ -303,13 +316,14 @@ func APIzone(app *AppDetails, refreshq chan ZoneRefresher, kdb *KeyDB) func(w ht
 
 		case "modify":
 			msg, err := Conf.ModifyDynamicZone(r.Context(), DynamicZoneInput{
-				Name:       zp.Zone,
-				Type:       Secondary,
-				Primaries:  zp.Primaries,
-				Options:    zoneOptionsFromStrings(zp.Options),
-				TsigName:   zp.TsigName,
-				TsigSecret: zp.TsigSecret,
-				TsigAlgo:   zp.TsigAlgo,
+				Name:        zp.Zone,
+				Type:        Secondary,
+				Primaries:   zp.Primaries,
+				Options:     zoneOptionsFromStrings(zp.Options),
+				TsigName:    zp.TsigName,
+				TsigSecret:  zp.TsigSecret,
+				TsigAlgo:    zp.TsigAlgo,
+				TransferSrc: zp.TransferSrc,
 			})
 			if err != nil {
 				resp.Error = true

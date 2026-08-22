@@ -17,7 +17,7 @@ import (
 func TestOriginationAPICommandSet(t *testing.T) {
 	gated := []string{
 		"bump", "sign-zone", "resign-zone",
-		"policy-set", "change-policy", "policy-reset", "generate-nsec",
+		"policy-set", "change-policy", "policy-reset",
 		"publish-dsync-rrset", "unpublish-dsync-rrset",
 	}
 	for _, cmd := range gated {

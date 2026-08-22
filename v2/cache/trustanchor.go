@@ -29,6 +29,7 @@ import (
 // Current state (2026):
 //   - KSK-2017 (keytag 20326) — still active in the root DNSKEY RRset
 //   - KSK-2024 (keytag 38696) — now the primary signing key
+//
 // Both DS records published by IANA at
 // https://data.iana.org/root-anchors/root-anchors.xml
 const CompiledInRootTrustAnchor = `; Root trust anchors - IANA-published DS records for the root KSKs

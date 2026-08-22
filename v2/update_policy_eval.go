@@ -126,6 +126,13 @@ func nameWithinPrincipal(principal, owner string, sub bool) bool {
 // ApproveActionsForPrincipal runs a set of records past a policy on behalf of a
 // principal, stopping at the first refusal.
 //
+// It does NOT confine owner names to zd.ZoneName. The receiver is carried for
+// call-site symmetry and for the error context, and this method evaluates only
+// the policy it is handed against the actions it is handed. Bailiwick is the
+// caller's job -- dsyncApiBuildActions rejects owners outside the child before
+// it gets here -- so a future caller that skips that step gets no zone
+// confinement from this method, whatever the receiver suggests.
+//
 // This is the entry point for callers that have no DNS message and no SIG(0)
 // status to consult -- the DSYNC API handler. The DDNS path does not use it:
 // it has per-record validation state of its own to interleave, and calls

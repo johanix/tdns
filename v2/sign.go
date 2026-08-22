@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"math/big"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -682,7 +683,7 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 			if rrt == dns.TypeA || rrt == dns.TypeAAAA {
 				var isglue bool
 				for _, del := range delegations {
-					if strings.HasSuffix(name, del) {
+					if name != del && dns.IsSubDomain(del, name) {
 						isglue = true
 						break
 					}
@@ -705,6 +706,28 @@ func (zd *ZoneData) ResignZone(kdb *KeyDB) (int, error) {
 				return newrrsigs, err
 			}
 			zd.stageRRsetLocked(name, rrset)
+			if resigned {
+				newrrsigs++
+			}
+		}
+
+		// The NSEC property is signed like any other RRset. It is not in
+		// RRtypes, so the loop above cannot reach it -- and an unsigned NSEC
+		// makes the whole chain useless to the secondaries that depend on it,
+		// which is not visible here because this server synthesises its own
+		// denial and never consults the chain.
+		if cur := zd.stagedOwner(name); cur != nil && len(cur.NSEC.RRs) > 0 {
+			// A copy: signing clamps TTLs in place, and these records are
+			// shared with the snapshot currently being served.
+			nsec := cloneRRset(cur.NSEC)
+			nsec.RRSIGs = nil
+			resigned, err := zd.SignRRset(&nsec, zd.ZoneName, dak, true, clamp)
+			if err != nil {
+				lgSigner.Error("ResignZone: signing the NSEC failed",
+					"zone", zd.ZoneName, "name", name, "err", err)
+				return newrrsigs, err
+			}
+			zd.stageNsecLocked(name, nsec)
 			if resigned {
 				newrrsigs++
 			}
@@ -888,7 +911,7 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 			if rrt == dns.TypeA || rrt == dns.TypeAAAA {
 				// log.Printf("SignZone: checking whether %s %s is a glue record for a delegation", name, dns.TypeToString[uint16(rrt)])
 				for _, del := range delegations {
-					if strings.HasSuffix(name, del) {
+					if name != del && dns.IsSubDomain(del, name) {
 						lgSigner.Debug("not signing glue record", "zone", zd.ZoneName, "name", name, "rrtype", dns.TypeToString[uint16(rrt)], "delegation", del)
 						wasglue = true
 						continue
@@ -912,6 +935,15 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 				}
 			}
 		}
+
+		// The NSEC property, for the same reason as in ResignZone: it is not
+		// an RRtypes entry, so nothing above signs it.
+		if cur := zd.stagedOwner(name); cur != nil && len(cur.NSEC.RRs) > 0 {
+			nsec := cloneRRset(cur.NSEC)
+			nsec.RRSIGs = nil
+			nsec, _ = MaybeSignRRset(nsec, zd.ZoneName)
+			zd.stageNsecLocked(name, nsec)
+		}
 	}
 
 	zd.publishLocked(zd.generation.Load())
@@ -926,23 +958,127 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 	return newrrsigs, nil
 }
 
-func (zd *ZoneData) GenerateNsecChain(kdb *KeyDB) error {
-	if !zd.Options[OptAllowUpdates] && !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
-		return fmt.Errorf("GenerateNsecChain: zone %s is not allowed to be updated or signed", zd.ZoneName)
+// chainNamesLocked reduces the owner names to those the NSEC chain covers:
+// the zone's own authoritative names, plus its delegation points, and nothing
+// underneath them.
+//
+// A delegation point itself DOES get an NSEC (bitmap NS, and DS where the
+// delegation is signed); the glue and any other name below it does not, being
+// the child zone's data rather than this zone's.
+func (zd *ZoneData) chainNamesLocked(names []string) []string {
+	var delegations []string
+	for _, name := range names {
+		if name == zd.ZoneName {
+			continue
+		}
+		od := zd.stagedOwner(name)
+		if od == nil {
+			continue
+		}
+		if _, isDelegation := od.RRtypes.Get(dns.TypeNS); isDelegation {
+			delegations = append(delegations, name)
+		}
 	}
-	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
-	if err != nil {
-		lgSigner.Error("failed to get DNSSEC active keys for NSEC chain", "zone", zd.ZoneName, "err", err)
-		return err
+	// No early return when there are no delegations: the occlusion test is only
+	// one of the two filters here, and skipping both would leave data-less
+	// names in the chain of every zone that has no delegation at all -- which
+	// is most of them.
+
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		// A name that owns no RRsets is not in the zone, whatever the working
+		// set still has an entry for. Giving it an NSEC is what turns a deleted
+		// name into a ghost that proves its own existence for ever.
+		if !ownerHasData(zd.stagedOwner(name)) {
+			continue
+		}
+		occluded := false
+		for _, del := range delegations {
+			// Label-aware: a plain suffix test also matches
+			// "notexample.com." against "example.com.".
+			if name != del && dns.IsSubDomain(del, name) {
+				occluded = true
+				break
+			}
+		}
+		if !occluded {
+			out = append(out, name)
+		}
 	}
-	zd.mu.Lock()
-	defer zd.mu.Unlock()
-	zd.ensureWorkingSet()
-	if err := zd.GenerateNsecChainWithDak(dak); err != nil {
-		return err
+	return out
+}
+
+// nsecTTLLocked returns the TTL an NSEC record should carry: the SOA minimum
+// (RFC 4034 §4), which is the zone's negative-caching TTL and so the right
+// lifetime for a record that proves absence. Falls back to the apex SOA's own
+// header TTL if the zone has no readable SOA, which should not happen on a
+// path that is about to sign.
+func (zd *ZoneData) nsecTTLLocked() uint32 {
+	od := zd.stagedOwner(zd.ZoneName)
+	if od == nil {
+		return 3600
 	}
-	zd.publishLocked(zd.generation.Load())
-	return nil
+	soa := od.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+	if len(soa.RRs) == 0 {
+		return 3600
+	}
+	if s, ok := soa.RRs[0].(*dns.SOA); ok {
+		return s.Minttl
+	}
+	return soa.RRs[0].Header().Ttl
+}
+
+// nsecRRForLocked builds the NSEC record for one name, pointing at next.
+//
+// Shared by the full generator and the incremental restitch so the two cannot
+// disagree about what an NSEC looks like -- a chain half-built by one and half
+// by the other is exactly the kind of drift that does not show up in a query.
+//
+// Returns nil when the name owns nothing (it is not in the chain).
+func (zd *ZoneData) nsecRRForLocked(name, next string, ttl uint32, dak *DnssecKeys) (dns.RR, error) {
+	owner := zd.stagedOwner(name)
+	if owner == nil {
+		return nil, nil
+	}
+
+	tmap := []int{int(dns.TypeNSEC)}
+	for _, rrt := range owner.RRtypes.Keys() {
+		if rrt == dns.TypeRRSIG {
+			// Unreachable: SortFunc routes RRSIGs into the .RRSIGs field of the
+			// RRset they cover, never into an RRtypes key. Kept as a guard in
+			// case that ever changes.
+			continue
+		}
+		if rrt == dns.TypeNSEC {
+			continue
+		}
+		if rrt == 0 {
+			lgSigner.Warn("NSEC chain: unexpected zero rrtype", "name", name, "rrtype", rrt)
+			continue
+		}
+		// Deleting the last RR of an RRset can leave the type entry behind
+		// holding nothing. The bitmap must describe the records that exist,
+		// not the entries that remain -- the same distinction ownerHasData
+		// draws for the name as a whole.
+		if len(owner.RRtypes.GetOnlyRRSet(rrt).RRs) == 0 {
+			continue
+		}
+		tmap = append(tmap, int(rrt))
+	}
+	// Every authoritative name in a signed zone carries at least the RRSIG over
+	// its own NSEC, so the zone-level condition is the whole answer.
+	if dak != nil && (zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && len(dak.KSKs) > 0 {
+		tmap = append(tmap, int(dns.TypeRRSIG))
+	}
+
+	sort.Ints(tmap) // the NSEC type bitmap must be in order
+	rrts := make([]string, len(tmap))
+	for i, t := range tmap {
+		rrts[i] = dns.TypeToString[uint16(t)]
+	}
+
+	items := append([]string{name, strconv.FormatUint(uint64(ttl), 10), "IN", "NSEC", next}, rrts...)
+	return dns.NewRR(strings.Join(items, " "))
 }
 
 // GenerateNsecChainWithDak builds or refreshes the NSEC chain using the given active DNSSEC keys.
@@ -951,73 +1087,40 @@ func (zd *ZoneData) GenerateNsecChainWithDak(dak *DnssecKeys) error {
 		return fmt.Errorf("GenerateNsecChainWithDak: zone %s is not allowed to be updated or signed", zd.ZoneName)
 	}
 
-	//	MaybeSignRRset := func(rrset RRset, zone string, kdb *KeyDB) RRset {
-	//		if zd.Options["online-signing"] && len(dak.ZSKs) > 0 {
-	//			err := SignRRset(&rrset, zone, dak)
-	//			if err != nil {
-	//				log.Printf("GenerateNsecChain: failed to sign %s NSEC RRset for zone %s", rrset.RRs[0].Header().Name, zd.ZoneName)
-	//			} else {
-	//				log.Printf("GenerateNsecChain: signed %s NSEC RRset for zone %s", rrset.RRs[0].Header().Name, zd.ZoneName)
-	//			}
-	//		}
-	//		return rrset
-	//	}
+	// The chain covers authoritative names only. Anything below a delegation
+	// is the child's data, not this zone's, and must not appear: verified
+	// against BIND, which emits an NSEC at the delegation point and none for
+	// the glue beneath it.
+	all := zd.workingOwnerNamesLocked()
+	names := zd.chainNamesLocked(all)
 
-	names := zd.workingOwnerNamesLocked()
+	// Names that used to be in the chain and are not any more must lose the
+	// NSEC they were given, or they keep asserting their own existence.
+	inChain := make(map[string]bool, len(names))
+	for _, n := range names {
+		inChain[n] = true
+	}
+	for _, n := range all {
+		if !inChain[n] {
+			zd.stageNsecDeleteLocked(n)
+		}
+	}
 
-	var nextidx int
-	var nextname string
-
-	var hasRRSIG bool
+	// RFC 4034 §4: the NSEC RR SHOULD carry the SOA minimum. Built into the
+	// record explicitly -- assembling it without a TTL leaves dns.NewRR's
+	// default, which is unrelated to the zone's negative-caching TTL.
+	ttl := zd.nsecTTLLocked()
 
 	for idx, name := range names {
-		owner := zd.stagedOwner(name)
-		if owner == nil {
-			continue
-		}
-
-		nextidx = idx + 1
-		if nextidx == len(names) {
-			nextidx = 0
-		}
-		nextname = names[nextidx]
-		var tmap = []int{int(dns.TypeNSEC)}
-		for _, rrt := range owner.RRtypes.Keys() {
-			if rrt == dns.TypeRRSIG {
-				hasRRSIG = true
-				continue
-			}
-			if rrt != dns.TypeNSEC {
-				if rrt == 0 {
-					lgSigner.Warn("NSEC chain: unexpected zero rrtype", "name", name, "rrtype", rrt)
-				}
-				tmap = append(tmap, int(rrt))
-			}
-		}
-		if hasRRSIG || ((zd.Options[OptOnlineSigning] || zd.Options[OptInlineSigning]) && len(dak.KSKs) > 0) {
-			tmap = append(tmap, int(dns.TypeRRSIG))
-		}
-
-		// log.Printf("GenerateNsecChain: name: %s tmap: %v", name, tmap)
-
-		sort.Ints(tmap) // unfortunately the NSEC TypeBitMap must be in order...
-		var rrts = make([]string, len(tmap))
-		for idx, t := range tmap {
-			rrts[idx] = dns.TypeToString[uint16(t)]
-		}
-
-		// log.Printf("GenerateNsecChain: creating NSEC RR for name %s: %v %v", name, tmap, rrts)
-
-		items := []string{name, "NSEC", nextname}
-		items = append(items, rrts...)
-		nsecrr, err := dns.NewRR(strings.Join(items, " "))
+		next := names[(idx+1)%len(names)]
+		nsecrr, err := zd.nsecRRForLocked(name, next, ttl, dak)
 		if err != nil {
 			return err
 		}
-		tmp := owner.RRtypes.GetOnlyRRSet(dns.TypeNSEC)
-		tmp.RRs = []dns.RR{nsecrr}
-		zd.stageRRsetLocked(name, tmp)
-
+		if nsecrr == nil {
+			continue
+		}
+		zd.stageNsecLocked(name, core.RRset{RRs: []dns.RR{nsecrr}})
 	}
 
 	return nil
@@ -1040,8 +1143,7 @@ func (zd *ZoneData) ShowNsecChain() ([]string, error) {
 			continue
 		}
 		if name != zd.ZoneName {
-			rrs := owner.RRtypes.GetOnlyRRSet(dns.TypeNSEC).RRs
-			if len(rrs) == 1 {
+			if rrs := owner.NSEC.RRs; len(rrs) == 1 {
 				nsecrrs = append(nsecrrs, rrs[0].String())
 			}
 		}

@@ -70,7 +70,6 @@ var originationAPICommands = map[string]bool{
 	"policy-set":    true,
 	"change-policy": true,
 	"policy-reset":  true,
-	"generate-nsec": true,
 	// /zone/dsync — publishes the _dsync DSYNC RRset into the zone
 	"publish-dsync-rrset":   true,
 	"unpublish-dsync-rrset": true,

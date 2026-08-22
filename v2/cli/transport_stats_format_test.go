@@ -28,8 +28,8 @@ func TestFormatTransportStats_IncludesDo53TCPAndTotal(t *testing.T) {
 	out := formatTransportStats(ts)
 
 	for _, want := range []string{
-		"do53-tcp:10",     // Do53TCP attempted is rendered
-		"total: 105",      // attempted total includes do53-tcp (90+10+5)
+		"do53-tcp:10",       // Do53TCP attempted is rendered
+		"total: 105",        // attempted total includes do53-tcp (90+10+5)
 		"used=[do53-tcp:12", // used Do53TCP rendered
 		"failed=[doq:3",
 		"truncated=7",

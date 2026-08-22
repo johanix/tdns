@@ -53,6 +53,16 @@ const (
 	// positional (iota), so inserting mid-list would renumber every option
 	// after it.
 	OptAllowApiUpdates
+	// OptOnConflictDBWins / OptOnConflictZonefileWins select who wins when the
+	// zone file has been replaced behind the server and its content contests a
+	// record the delta journal changed. Exactly one is always set: the parser
+	// materialises db-wins when neither is given (see zoneConflictPolicyFromOptions),
+	// so no code downstream has to carry a default of its own.
+	//
+	// Appended at the end for the same reason allow-api-updates was: ZoneOption
+	// values are positional, so inserting mid-list renumbers everything after.
+	OptOnConflictDBWins
+	OptOnConflictZonefileWins
 	optZoneOptionTdnsSentinel
 )
 
@@ -87,6 +97,8 @@ var ZoneOptionToString = map[ZoneOption]string{
 	OptMultiSigner:             "multi-signer",
 	OptDelSyncProxy:            "delegation-sync-proxy",
 	OptAllowApiUpdates:         "allow-api-updates",
+	OptOnConflictDBWins:        "on-conflict-db-wins",
+	OptOnConflictZonefileWins:  "on-conflict-zonefile-wins",
 }
 
 var StringToZoneOption = map[string]ZoneOption{
@@ -113,6 +125,8 @@ var StringToZoneOption = map[string]ZoneOption{
 	"multi-signer":               OptMultiSigner,
 	"delegation-sync-proxy":      OptDelSyncProxy,
 	"allow-api-updates":          OptAllowApiUpdates,
+	"on-conflict-db-wins":        OptOnConflictDBWins,
+	"on-conflict-zonefile-wins":  OptOnConflictZonefileWins,
 }
 
 type ImrOption uint8
