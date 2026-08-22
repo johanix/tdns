@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
 	"github.com/spf13/viper"
@@ -160,29 +161,28 @@ func (kdb *KeyDB) DelegationSyncher(ctx context.Context, delsyncq chan Delegatio
 					}
 				}
 
-			case "PROXY-SYNC":
-				// delegation-sync-proxy: an agent secondary forwards a detected
-				// change to the parent on behalf of a DSYNC-unaware primary,
-				// over whichever of UPDATE / API / NOTIFY is actually usable.
-				msg, perr := zd.ProxyDelegationSync(ctx, kdb, notifyq, imr(), ds.ProxyAnalysis)
-				if perr != nil {
-					lgDns.Error("DelegationSyncher: proxy sync failed", "zone", ds.ZoneName, "err", perr)
-				} else {
-					lgDns.Info("DelegationSyncher: proxy sync done", "zone", ds.ZoneName, "msg", msg)
+			case "PROXY-SYNC", "PROXY-UPDATE-SETUP":
+				// Both need an IMR: the parent's DSYNC records are discovered,
+				// not configured. At startup the zone's first transfer routinely
+				// arrives before InitImrEngine has finished priming, and the
+				// plan then skips every scheme with "no IMR available" and
+				// nothing retries -- so a restarted proxy forwarded nothing at
+				// all until the child zone happened to change again.
+				//
+				// Put the request back rather than running it against a nil IMR.
+				if imr() == nil {
+					if deferForImr(ctx, delsyncq, ds, imrWaitInterval) {
+						continue
+					}
+					lgDns.Error("DelegationSyncher: giving up waiting for the IMR",
+						"zone", ds.ZoneName, "command", ds.Command, "waits", ds.ImrWaits)
+					continue
 				}
-
-			case "PROXY-UPDATE-SETUP":
-				// delegation-sync-proxy, first load: build the sync plan (which
-				// runs the §10.8 KEY-bootstrap state machine as the UPDATE gate)
-				// and, if any transport is usable, do a one-time parent-vs-child
-				// reconcile — catching drift from while the agent was down
-				// without re-sending on every restart. Off the refresh path
-				// (DSYNC discovery + parent compare are network).
-				msg, perr := zd.ProxyStartupReconcile(ctx, kdb, notifyq, imr())
-				if perr != nil {
-					lgDns.Error("DelegationSyncher: proxy startup reconcile error", "zone", ds.ZoneName, "err", perr)
-				} else {
-					lgDns.Info("DelegationSyncher: proxy startup reconcile", "zone", ds.ZoneName, "msg", msg)
+				switch ds.Command {
+				case "PROXY-SYNC":
+					proxySync(ctx, zd, kdb, notifyq, imr(), ds)
+				case "PROXY-UPDATE-SETUP":
+					proxyStartupReconcile(ctx, zd, kdb, notifyq, imr(), ds)
 				}
 
 			default:
@@ -610,4 +610,76 @@ func (zd *ZoneData) SyncZoneDelegationViaNotify(kdb *KeyDB, notifyq chan NotifyR
 
 	msg := fmt.Sprintf("SyncZoneDelegationViaNotify: Sent notify request(s) for zone %s to NotifierEngine", zd.ZoneName)
 	return msg, dns.RcodeSuccess, nil
+}
+
+// maxImrWaits / imrWaitInterval bound the wait for the IMR. Roughly a minute in
+// total: long enough to cover priming (a handful of queries to the root servers
+// named in the hints), short enough that a permanently absent IMR is reported
+// rather than retried forever.
+const (
+	maxImrWaits     = 30
+	imrWaitInterval = 2 * time.Second
+)
+
+// deferForImr puts a proxy request back on the queue after a short delay, so it
+// runs once the IMR is up. Reports whether it was deferred; false means the
+// budget is spent and the caller should give up.
+//
+// The re-enqueue happens from its own goroutine: DelegationSyncher is the only
+// reader of delsyncq, so sending from the loop itself would deadlock as soon as
+// the channel filled.
+// The delay is a parameter rather than a package var so tests can shorten it
+// without writing shared state that the spawned goroutines read concurrently.
+func deferForImr(ctx context.Context, delsyncq chan DelegationSyncRequest,
+	ds DelegationSyncRequest, delay time.Duration) bool {
+	if ds.ImrWaits >= maxImrWaits {
+		return false
+	}
+	ds.ImrWaits++
+	if ds.ImrWaits == 1 {
+		lgDns.Info("DelegationSyncher: IMR not up yet, deferring proxy work",
+			"zone", ds.ZoneName, "command", ds.Command, "retry_in", delay)
+	}
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		select {
+		case <-ctx.Done():
+		case <-timer.C:
+			select {
+			case delsyncq <- ds:
+			case <-ctx.Done():
+			}
+		}
+	}()
+	return true
+}
+
+// proxySync forwards a detected change to the parent on behalf of a
+// DSYNC-unaware primary, over whichever of UPDATE / API / NOTIFY is usable.
+func proxySync(ctx context.Context, zd *ZoneData, kdb *KeyDB, notifyq chan NotifyRequest,
+	imr *Imr, ds DelegationSyncRequest) {
+
+	msg, err := zd.ProxyDelegationSync(ctx, kdb, notifyq, imr, ds.ProxyAnalysis)
+	if err != nil {
+		lgDns.Error("DelegationSyncher: proxy sync failed", "zone", ds.ZoneName, "err", err)
+		return
+	}
+	lgDns.Info("DelegationSyncher: proxy sync done", "zone", ds.ZoneName, "msg", msg)
+}
+
+// proxyStartupReconcile builds the sync plan on first load (which runs the
+// KEY-bootstrap state machine as the UPDATE gate) and, if any transport is
+// usable, does a one-time parent-vs-child reconcile -- catching drift from
+// while the agent was down, without re-sending on every restart. Off the
+// refresh path, since DSYNC discovery and the parent compare are both network.
+func proxyStartupReconcile(ctx context.Context, zd *ZoneData, kdb *KeyDB, notifyq chan NotifyRequest,
+	imr *Imr, ds DelegationSyncRequest) {
+
+	msg, err := zd.ProxyStartupReconcile(ctx, kdb, notifyq, imr)
+	if err != nil {
+		lgDns.Error("DelegationSyncher: proxy startup reconcile error", "zone", ds.ZoneName, "err", err)
+		return
+	}
+	lgDns.Info("DelegationSyncher: proxy startup reconcile", "zone", ds.ZoneName, "msg", msg)
 }
