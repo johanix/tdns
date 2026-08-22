@@ -12,6 +12,7 @@ package cli
 
 import (
 	"bytes"
+	"crypto/tls"
 	"fmt"
 	"net"
 	"os"
@@ -79,6 +80,63 @@ func runCertInit() {
 		cliFatalf("cert init: %s does not set dnsengine.certfile/keyfile — set both (they are where the new cert/key will be written), then re-run", cfgPath)
 	}
 
+	// Nothing to do is not a failure.
+	//
+	// "Re-running is safe" is this command's documented contract, and a boot
+	// script that provisions certificates on first start re-runs it at every
+	// boot after that. Falling through to writeFileSafe made it exit non-zero
+	// with "already exists (use --force)", so an rc.d script checking the exit
+	// status reported a failed component on every reboot of a correctly
+	// provisioned host -- a false alarm in the failure list, which is worse
+	// than no list because it teaches people to skim past the real entries.
+	//
+	// BEFORE the hostname, SAN and CA work below, not after. Returning later
+	// would already have run the CA branch, so a host with a server pair but
+	// no CA would mint a fresh CA and then report nothing to do -- leaving a
+	// stray CA that signs nothing, whose private key is precisely what should
+	// not be lying around. A half-present CA would abort before the check was
+	// ever reached, turning a no-op into an error.
+	//
+	// Checked here rather than by loosening writeFileSafe: csr, sign and
+	// selfsign share that helper and SHOULD refuse to clobber, since for them
+	// an existing file means the operator is about to lose a key they asked
+	// for. Only init has "already provisioned" as a legitimate outcome.
+	if !certForce {
+		certPEM, certErr := os.ReadFile(certFile)
+		keyPEM, keyErr := os.ReadFile(keyFile)
+		switch {
+		case certErr == nil && keyErr == nil:
+			// Present is not the same as usable. A certificate and a key that
+			// are not a matching pair load here exactly as they will in the
+			// daemon -- tls.X509KeyPair, the same call do53 makes -- so say so
+			// now rather than report success and let the daemon fail to serve
+			// with a TLS error that names nothing.
+			//
+			// Parsed from the bytes just read rather than via
+			// LoadX509KeyPair(file, file), matching do53 for the same reason:
+			// re-reading could parse files that changed in between.
+			if _, err := tls.X509KeyPair(certPEM, keyPEM); err != nil {
+				cliFatalf("cert init: %s and %s exist but are not a usable pair: %v"+
+					" — repair them, or re-run with --force to reissue both",
+					certFile, keyFile, err)
+			}
+			fmt.Printf("server cert:     %s (already present, unchanged)\n", certFile)
+			fmt.Printf("server key:      %s (already present, unchanged)\n", keyFile)
+			fmt.Printf("\nNothing to do. Use --force to reissue.\n")
+			return
+		case os.IsNotExist(certErr) && os.IsNotExist(keyErr):
+			// Neither present: the ordinary first run. Fall through and issue.
+		default:
+			// One without the other is the same inconsistent state the CA
+			// check below refuses, and for the same reason: silently
+			// overwriting the half that exists destroys a key nobody asked to
+			// lose, while silently keeping it leaves a daemon unable to start.
+			cliFatalf("cert init: inconsistent server cert state (found one of %s / %s"+
+				" but not both) — repair or remove before re-running, or use --force",
+				certFile, keyFile)
+		}
+	}
+
 	hostname, err := os.Hostname()
 	if err != nil || hostname == "" {
 		cliFatalf("cert init: cannot determine hostname: %v", err)
@@ -142,10 +200,10 @@ func runCertInit() {
 	appendIssuedLog(caDir, "init-server-leaf", leaf.Cert)
 	fmt.Printf("server cert:     %s\nserver key:      %s\n", certFile, keyFile)
 
-	// Drop a copy of the CA cert next to the server cert for use as
-	// ca-file / downstream-ca on this host. Idempotent: identical content
-	// is left alone; a different file needs --force.
-	caCopy := filepath.Join(filepath.Dir(certFile), safeFileName(certInitCAName)+".crt")
+	// Drop a copy of the CA cert where ca-file / downstream-ca consumers on
+	// this host look for it. Idempotent: identical content is left alone; a
+	// different file needs --force.
+	caCopy := caCopyPath(certFile)
 	if existing, err := os.ReadFile(caCopy); err != nil || !bytes.Equal(existing, mustReadFile(caCertPath)) {
 		writeFileSafe(caCopy, mustReadFile(caCertPath), 0o644)
 	}
@@ -154,7 +212,7 @@ func runCertInit() {
 	dotPort := initDotPort(v)
 	fmt.Printf("Restart tdns-auth to serve the new certificate. Secondaries can then use any of:\n\n")
 	fmt.Printf("  # pkix — copy %s to the secondary:\n", filepath.Base(caCopy))
-	fmt.Printf("  primaries:\n     - addr: %s:%s\n       key: NOKEY\n       transport: dot\n       tls-auth: pkix\n       ca-file: /etc/tdns/certs/%s\n\n", leafName, dotPort, filepath.Base(caCopy))
+	fmt.Printf("  primaries:\n     - addr: %s:%s\n       key: NOKEY\n       transport: dot\n       tls-auth: pkix\n       ca-file: %s\n\n", leafName, dotPort, caCopy)
 	fmt.Printf("  # pin — no file distribution needed:\n")
 	fmt.Printf("  #    tls-auth: pin\n  #    pins: [ %q ]\n\n", tdns.SPKISHA256(leaf.Cert))
 	tlsa, terr := tdns.NewTlsaRR(dns.Fqdn(leafName), initPortNum(dotPort), leaf.Cert)
@@ -240,4 +298,24 @@ func init() {
 	certInitCmd.Flags().IntVar(&certValidity, "validity", 397, "server cert validity in days")
 	certInitCmd.Flags().StringVar(&certAlgorithm, "algorithm", "ed25519", "key algorithm: ed25519 | ecdsa-p256 | rsa2048")
 	certInitCmd.Flags().BoolVar(&certForce, "force", false, "overwrite existing cert/key files")
+}
+
+// caCopyPath is where the CA certificate copy is written, given the server
+// certificate's path.
+//
+// The convention is <certs-dir>/tdns-ca.crt, one level above the server certs:
+// the server directory holds per-host leaves, while the CA cert is the one file
+// every consumer on the host shares — a ca-file for XoT, a cacert for tdns-cli.
+// Putting it beside the leaves buried it a level deeper than anything looks.
+//
+// Only the "servers" directory is climbed out of, because that is the layout
+// this is a convention for. A certfile placed anywhere else keeps its copy
+// alongside, which is at worst the previous behaviour and never writes outside
+// the directory the operator pointed at.
+func caCopyPath(certFile string) string {
+	dir := filepath.Dir(certFile)
+	if filepath.Base(dir) == "servers" {
+		dir = filepath.Dir(dir)
+	}
+	return filepath.Join(dir, safeFileName(certInitCAName)+".crt")
 }

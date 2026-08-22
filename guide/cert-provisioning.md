@@ -110,11 +110,14 @@ scp ns2.example.net.csr ca-host:
 # --- on the CA host ---
 tdns-cli cert sign --ca /etc/tdns/ca/tdns-ca.crt --ca-key /etc/tdns/ca/tdns-ca.key \
     --csr ns2.example.net.csr --server --client
-scp ns2.example.net.crt tdns-ca.crt ns2:/etc/tdns/certs/servers/
+scp ns2.example.net.crt ns2:/etc/tdns/certs/servers/
+scp tdns-ca.crt ns2:/etc/tdns/certs/
 
 # --- back on the REMOTE host ---
-# ns2.example.net.crt replaces the self-signed cert (same key, same paths);
-# tdns-ca.crt is there for when ns2 needs a ca-file itself (see below).
+# ns2.example.net.crt replaces the self-signed cert (same key, same paths).
+# tdns-ca.crt goes one level up, in the certs directory rather than servers/:
+# it is the one file every consumer on the host shares, and it is where
+# ca-file and cacert settings point (see below).
 # Restart the daemon.
 ```
 

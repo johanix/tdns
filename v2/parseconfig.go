@@ -1402,6 +1402,48 @@ func activateUpdatePolicy(zconf *ZoneConf, options map[ZoneOption]bool) (UpdateP
 		return UpdatePolicy{}, fmt.Errorf("allow-child-updates requires delegationbackend to be configured (e.g. 'delegationbackend: direct')")
 	}
 
+	// Conflict resolution: exactly one of the two is always set on the zone.
+	//
+	// Setting both is a contradiction, not a preference order, so it is a hard
+	// config error rather than a silent pick.
+	//
+	// Otherwise db-wins is MATERIALISED here rather than left to be inferred at
+	// each decision point. A default that lives in the code as "if neither is
+	// set, assume db-wins" has to be remembered everywhere it is asked, and the
+	// day one site forgets, a zone quietly resolves conflicts the other way.
+	// Setting it once means the merge faces a question with two answers rather
+	// than three, and `zone status` reports what the zone actually runs under
+	// instead of a blank the operator has to interpret.
+	if options[OptOnConflictDBWins] && options[OptOnConflictZonefileWins] {
+		return UpdatePolicy{}, fmt.Errorf(
+			"zone options on-conflict-db-wins and on-conflict-zonefile-wins are mutually exclusive;" +
+				" set one or neither (neither means on-conflict-db-wins)")
+	}
+	if !options[OptOnConflictZonefileWins] {
+		options[OptOnConflictDBWins] = true
+	}
+
+	// With the conflict options settled, the backend can be checked against
+	// them. Order matters: rule (2) below reads OptOnConflictDBWins.
+	// Only when the backend can actually run. Without allow-child-updates
+	// nothing ever reaches the backend, so a combination that "cannot work" has
+	// no effect to speak of -- and failing here would mark the zone broken and
+	// refuse to load it over a setting that does nothing.
+	//
+	// delegationBackendUnusedWarning is the right response to that case, and it
+	// only gets the chance to say so if we do not error first.
+	if options[OptAllowChildUpdates] {
+		if err := validateDelegationBackendCombination(zconf, options); err != nil {
+			return UpdatePolicy{}, err
+		}
+	}
+	if msg := delegationBackendUnusedWarning(zconf, options); msg != "" {
+		lgConfig.Warn(msg, "zone", zconf.Name)
+	}
+	if msg := delegationBackendContract(zconf, options); msg != "" {
+		lgConfig.Info(msg, "zone", zconf.Name, "backend", zconf.DelegationBackend)
+	}
+
 	switch zconf.UpdatePolicy.Zone.Type {
 	case "selfsub", "self":
 		// all ok, we know these

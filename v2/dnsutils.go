@@ -445,6 +445,12 @@ func (zd *ZoneData) ZoneTransferOut(ctx context.Context, w dns.ResponseWriter, r
 			return 0, nil
 		}
 	}
+	// The NSEC property travels in the transfer like any other record. The
+	// receiving secondary has no private key and cannot synthesise denial, so
+	// the chain it gets here is the only one it will ever have.
+	if len(apex.NSEC.RRs) > 0 && !appendRRset(bs, apex.NSEC) {
+		return 0, nil
+	}
 
 	names := make([]string, 0, len(snap.Data))
 	for name := range snap.Data {
@@ -464,6 +470,9 @@ func (zd *ZoneData) ZoneTransferOut(ctx context.Context, w dns.ResponseWriter, r
 			if !appendRRset(bs, rrset) {
 				return 0, nil
 			}
+		}
+		if len(omap.NSEC.RRs) > 0 && !appendRRset(bs, omap.NSEC) {
+			return 0, nil
 		}
 	}
 
@@ -558,6 +567,17 @@ func (zd *ZoneData) ReadZoneData(zoneData string, force bool) (bool, uint32, err
 	return zd.ParseZoneFromReader(strings.NewReader(zoneData), force, "")
 }
 
+// The receiver must be a ZoneData the caller owns exclusively. This writes the
+// file identity fields (fileSerial, fileDigest) directly and without taking
+// zd.mu, so parsing into a zone other goroutines can already observe is a data
+// race against every reader of that state.
+//
+// The lock is deliberately NOT taken here: several callers construct a zone and
+// parse into it before anyone else can see it, and one of them would have to
+// hold zd.mu across the parse to be correct -- which would deadlock. The
+// invariant belongs to the caller instead. FetchFromFile shows the pattern for
+// a registered zone: parse into a scratch new_zd, then copy the fields across
+// under the lock.
 func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string) (bool, uint32, error) {
 	zd.Logger.Printf("ParseZoneFromReader: zone: %s", zd.ZoneName)
 
@@ -595,8 +615,11 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string
 					zd.Logger.Printf("ParseZoneFromReader: %s: new SOA serial is the same as current. Reload not needed.", zd.ZoneName)
 					return false, soa.Serial, nil
 				}
-				// force=true: continue parsing to validate zone file, but serial didn't change
-				zd.Logger.Printf("ParseZoneFromReader: %s: new SOA serial is the same as current but still forced to reload (validating zone file).", zd.ZoneName)
+				// force=true: parse the whole file anyway. For the zone-file
+				// refresh path that is not "the operator forced it" but the
+				// normal case -- whether the file changed is decided on its
+				// content digest, which cannot be computed without parsing it.
+				zd.Logger.Printf("ParseZoneFromReader: %s: new SOA serial is the same as the one last read; parsing the whole file anyway.", zd.ZoneName)
 				serialChanged = false
 			} else {
 				// Serial changed - this indicates an actual update
@@ -634,6 +657,23 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string
 	// The journal anchors to the FILE, not to whatever the serial becomes
 	// after load-time signing and republication. See ZoneData.fileSerial.
 	zd.fileSerial = soa.Serial
+
+	// And its ZONEMD digest, taken HERE for the same reason: this is the last
+	// moment at which the in-memory zone is what the file says and nothing
+	// else. Anything computed after load-time signing includes RRSIGs the file
+	// never had, and would never match the file it is meant to identify.
+	//
+	// A failure is not fatal to the load. The digest is a detector; without it
+	// the zone falls back to comparing serials, which is what it did before
+	// this existed. Refusing to serve a zone because we could not fingerprint
+	// it would be a poor trade.
+	if digest, derr := zd.zoneDigestOfWorkingData(); derr != nil {
+		lgDns.Warn("could not compute the zone file digest; file-change detection"+
+			" falls back to the SOA serial for this load",
+			"zone", zd.ZoneName, "error", derr)
+	} else {
+		zd.fileDigest = digest
+	}
 
 	zd.XfrType = "axfr"
 	// Return true only if serial changed (indicates actual update)
@@ -687,10 +727,28 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 			}
 		}
 
+	case *dns.NSEC:
+		// NSEC is a property of the owner, not an RRset of its own: see
+		// OwnerData.NSEC. Parsed here so a zone file written by this server --
+		// or by anything else -- round-trips, and so a secondary loading a
+		// signed zone from disk keeps the chain it was given.
+		switch ztype {
+		case MapZone:
+			omap.NSEC.Name, omap.NSEC.RRtype, omap.NSEC.Class = owner, dns.TypeNSEC, dns.ClassINET
+			omap.NSEC.RRs = append(omap.NSEC.RRs, rr)
+		}
+
 	case *dns.RRSIG:
 		rrt := v.TypeCovered
 		switch ztype {
 		case MapZone:
+			if rrt == dns.TypeNSEC {
+				// Follows its NSEC into the property rather than into
+				// RRtypes[NSEC], which no longer exists.
+				omap.NSEC.Name, omap.NSEC.RRtype, omap.NSEC.Class = owner, dns.TypeNSEC, dns.ClassINET
+				omap.NSEC.RRSIGs = append(omap.NSEC.RRSIGs, rr)
+				break
+			}
 			tmp = omap.RRtypes.GetOnlyRRSet(rrt)
 			tmp.RRSIGs = append(tmp.RRSIGs, rr)
 			omap.RRtypes.Set(rrt, tmp)
@@ -865,6 +923,12 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) (uint32, error) {
 			count += len(rrset.RRs) + len(rrset.RRSIGs)
 		}
 	}
+	// The NSEC property is written like any other record. A secondary that
+	// loads this file in the absence of its primary has no private key and
+	// answers denial from the chain in the file, so leaving it out would hand
+	// that secondary a signed zone it cannot prove anything with.
+	zonedata += RRsetToString(&apex.NSEC)
+	count += len(apex.NSEC.RRs) + len(apex.NSEC.RRSIGs)
 
 	// Rest of zone
 	names := make([]string, 0, len(snap.Data))
@@ -880,6 +944,8 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) (uint32, error) {
 		if omap == nil {
 			continue
 		}
+		zonedata += RRsetToString(&omap.NSEC)
+		count += len(omap.NSEC.RRs) + len(omap.NSEC.RRSIGs)
 		for _, rrt := range omap.RRtypes.Keys() {
 			rrl := omap.RRtypes.GetOnlyRRSet(rrt)
 			zonedata += RRsetToString(&rrl)
