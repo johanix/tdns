@@ -5,6 +5,7 @@
 package tdns
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -675,13 +676,24 @@ www.example.	3600	IN	A	192.0.2.1
 operator.example.	3600	IN	A	10.9.9.9
 `)
 
-	// Make the artefact unwritable: the merge refuses rather than resolve
-	// conflicts it cannot report.
-	dir := filepath.Dir(zd.Zonefile)
-	if err := os.Chmod(dir, 0o500); err != nil {
-		t.Fatalf("Chmod: %v", err)
+	// Make the artefact impossible to write, so the merge refuses rather than
+	// resolve conflicts it cannot report.
+	//
+	// By putting a DIRECTORY where the artefact must go, not by removing write
+	// permission from its directory. Root ignores the permission bit, so on a
+	// CI container running as root the merge would quietly succeed and this
+	// test would report a defect that is not there. A rename onto a directory
+	// fails for root too, so the failure is injected the same way everywhere.
+	//
+	// The artefact is named for the FILE's serial, which the edit above left
+	// where it was.
+	zd.mu.Lock()
+	artefactSerial := zd.fileSerial
+	zd.mu.Unlock()
+	artefact := fmt.Sprintf("%s.%d.rejected", zd.Zonefile, artefactSerial)
+	if err := os.Mkdir(artefact, 0o700); err != nil {
+		t.Fatalf("Mkdir: %v", err)
 	}
-	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
 
 	before, _, err := kdb.GetZoneFileState("example.")
 	if err != nil {
@@ -706,9 +718,9 @@ operator.example.	3600	IN	A	10.9.9.9
 			" file and never retry the merge")
 	}
 
-	// The retry: nothing has touched the file, and it must be read anyway.
-	if err := os.Chmod(dir, 0o700); err != nil {
-		t.Fatalf("Chmod: %v", err)
+	// The retry: nothing has touched the zone file, and it must be read anyway.
+	if err := os.Remove(artefact); err != nil {
+		t.Fatalf("Remove: %v", err)
 	}
 	refreshOnce(t, zd)
 

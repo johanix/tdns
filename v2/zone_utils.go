@@ -1535,9 +1535,23 @@ func (zd *ZoneData) SetupZoneSigning(resignq chan<- *ZoneData) error {
 // or no keystore at all -- memory really is the only copy and the refusal
 // still earns its keep.
 func reloadWouldLoseChanges(zd *ZoneData) bool {
-	if zd == nil || !zd.Options[OptDirty] {
+	if zd == nil {
 		return false
 	}
+	// Under zd.mu. Options is a MAP, replaced wholesale by a config reload and
+	// written into by the updater, WriteZone and both load paths, all under
+	// that lock -- while this runs on the API goroutine and on the refresh
+	// engine, neither of which holds it. An unguarded read is a concurrent map
+	// access, which Go turns into a process-wide fatal error rather than a
+	// stale answer.
+	zd.mu.Lock()
+	dirty := zd.Options[OptDirty]
+	zd.mu.Unlock()
+	if !dirty {
+		return false
+	}
+	// After the unlock: JournalActive takes the config lock, and there is no
+	// reason to hold two.
 	return zd.KeyDB == nil || !JournalActive()
 }
 
