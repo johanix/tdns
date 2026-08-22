@@ -250,8 +250,14 @@ func DsyncUpdateTargetName(zonename string) string {
 }
 
 func (zd *ZoneData) UnpublishDsyncRRs() error {
-	// Create a string representation of an empty DSYNC record for deletion
-	dsync_str := fmt.Sprintf("_dsync.%s 0 IN DSYNC \"NOTIFY\" 53 1.2.3.4", zd.ZoneName)
+	// A placeholder DSYNC record, used only to carry the owner name and type
+	// into a delete. The class is set to ClassANY immediately below, which
+	// removes the entire RRset, so none of the rdata values matter -- but the
+	// string still has to PARSE, and DSYNC rdata is Type, Scheme, Port, Target
+	// (see core/rr_dsync.go). The previous form omitted the leading type field
+	// and quoted the scheme, so dns.NewRR failed on every zone and unpublish
+	// could never do anything at all.
+	dsync_str := fmt.Sprintf("_dsync.%s 0 IN DSYNC CDS NOTIFY 53 .", zd.ZoneName)
 
 	anti_dsync, err := dns.NewRR(dsync_str)
 	if err != nil {
