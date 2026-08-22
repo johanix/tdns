@@ -10,7 +10,8 @@ summarised here; update both as work lands.
 | 1 | K-6 KEY-DATA sub-reason | **DECLINED** — optional; KEY-DATA stays 0, documented at the emit site |
 | 1 | K-4 receiver code set | **PARTIAL** — 1,4,5,6,9,10 emitted; **7 and 8 dormant** |
 | 2 | D-2b UPDATE retry, D-4 bootstrap ceremony | **DONE** (PR #312) |
-| 2 | D-6 SVCB bootstrap, D-7 mutual auth, D-3b CDS/CSYNC acceptance | **NOT STARTED** |
+| 2 | D-6 SVCB bootstrap, D-7 mutual auth | **NOT STARTED** |
+| 2 | D-3b CDS/CSYNC acceptance | **NOT STARTED**, deferred to its own PR (scanner extraction first) |
 | 3 | IANA alignment | **DEFERRED** by design |
 | — | Cross-cutting vocabulary | **NOT STARTED** |
 
@@ -123,7 +124,19 @@ The two drafts are **coupled**: KeyState is delegation-mgmt's key-state inquiry 
 - **Change:** (i) child acquires+validates the UPDATE Receiver's KEY (from the DSYNC {target}, DNSSEC-validated, else manual) and **verifies the SIG(0) signature** on KeyState inquiry responses — reject/ignore unsigned or invalidly-signed responses. (ii) Confirm/implement receiver-KEY publication as a KEY RR at the DSYNC {target}. (iii) Consider signing plain UPDATE responses (draft SHOULD; the MUST is on inquiry responses).
 - **Acceptance:** a forged (unsigned/wrong-key) KeyState response is rejected by the child; the receiver's KEY is published and DNSSEC-validatable.
 
-### D-3b. CDS/CSYNC acceptance semantics on the UPDATE path — **NOT STARTED**
+### D-3b. CDS/CSYNC acceptance semantics on the UPDATE path — **NOT STARTED**, **deferred to its own PR** (decided 2026-08-22)
+
+- **Why its own PR:** "reuse the scanner's check functions" understates this.
+  `scanner_csync.go` is ~457 lines with seven methods on `*Scanner` and ~53
+  references to scanner state, so the checks cannot simply be called from the
+  UPDATE path — the decision logic has to be lifted out of the scanner first.
+- **Do it in two steps, in this order:** (1) extract the acceptance logic into
+  free functions with the scanner still its only caller, reviewable purely
+  against "the scanner behaves identically"; (2) wire the UPDATE path to the
+  extracted functions. Bundling the refactor with the behaviour change makes
+  both unreviewable and puts a live path at risk for a completeness item.
+- **Last of the remaining Phase 2 items.** D-7 is exposure; this is
+  completeness.
 - **Draft (ddns-02 §"Processing the UPDATE"):** once authenticated, the change is subjected to the **same** acceptance checks a CDS/CSYNC scanner runs — RFC7344/8078 for DS, RFC7477 for NS/glue.
 - **Current (PARTIAL):** the UPDATE path applies SIG(0)-trust + name-scope + an RR-type policy gate only (`v2/updateresponder.go:484-512`); the RFC7344/8078/7477 semantic checks live in the scanner path and are not reused for UPDATEs.
 - **Change:** run the scanner's CDS/CSYNC acceptance checks on the UPDATE-carried delegation change before applying it (reuse the scanner's check functions).
