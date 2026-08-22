@@ -137,16 +137,20 @@ follow from that placement are 2.3 and the journal problem. Moving NSEC to
 an owner-level property makes both unrepresentable:
 
 - a name whose last RRset is deleted has nothing left to keep it in
-  `RRtypes`, so it ceases to exist and its NSEC property goes with it —
-  ghosts become impossible rather than pruned;
-- `ReplaceZoneJournal` reads `rrset.RRs`, so NSEC changes never reach the
-  journal — no filter to apply and none to forget.
+  `RRtypes`, so it ceases to exist and its NSEC property goes with it;
+- the journal reads `RRtypes`, so a regenerated NSEC is not, by default,
+  something it can record as though an operator had written it.
 
-The second matters because restitching at publish (2.2) puts NSEC changes
-into the publish delta. Without the move, every update would write NSEC rows
-into the journal, and the zone-file reconciliation would then report
-conflicts on records no operator ever wrote and offer `.rejected` artefacts
-full of them.
+The second turned out to need a filter after all, and the reasoning above is
+why it was not expected to. Restitching at publish (2.2) means secondaries
+have to receive the chain change, so `diffOwner` diffs the property into the
+delta — and that same delta feeds the journal. The placement removes the
+default path into the journal but not the deliberate one. §4 records the
+filter and what its absence looked like.
+
+Ghosts are a different matter: the property alone was not sufficient there
+either. An owner survives its last RRset being deleted, so the name has to be
+removed explicitly — see §4 and the two defects the invariant check found.
 
 ### The trap
 
