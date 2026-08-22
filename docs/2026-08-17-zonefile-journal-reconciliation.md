@@ -541,6 +541,17 @@ mistake:
   whitespace, and a stat gate can only produce a false negative — a file
   rewritten to the same size with its mtime restored.
 
+  The gate has one coupling that is not obvious and is easy to reintroduce.
+  The identity is recorded on success only, so that a load which could not
+  deal with the file leaves the previous identity in place and the next load
+  sees the file as CHANGED and retries. A cached stat saying "nothing has
+  touched it" defeats that retry entirely — the next refresh does not read
+  the file at all, and the merge is not attempted again until the process
+  restarts. So the two are set together and dropped together: **a cached stat
+  is only ever trusted while a recorded identity describes the file it
+  names.** Neither branch had this defect on its own; it appeared only when
+  the two were merged.
+
 One judgement call beyond the issue: a dirty primary was refused a
 reload outright. Since both replay and merge set that flag at every
 load, the refusal made `zone reload` permanently unavailable to exactly
