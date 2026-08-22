@@ -166,7 +166,17 @@ func (zd *ZoneData) workingOwnerNamesLocked() []string {
 	for name := range zd.workingSet {
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	// Canonical order (RFC 4034 §6.1), NOT lexicographic. The NSEC chain is
+	// built by walking this slice and linking each name to the next, so the
+	// order IS the chain: a lexicographic sort produces a chain that is a
+	// permutation of the right names in the wrong sequence, which no validator
+	// will accept and which no query against the signer will reveal, because
+	// denial is answered by compact denial rather than from the chain.
+	//
+	// The two differ whenever a label boundary falls inside a shared prefix:
+	// "ns.example." sorts after "alpha.example." canonically but before
+	// "clean.example." as a plain string.
+	sort.Slice(names, func(i, j int) bool { return canonicalOwnerLess(names[i], names[j]) })
 	return names
 }
 
