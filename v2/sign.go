@@ -996,16 +996,17 @@ func (zd *ZoneData) chainNamesLocked(names []string) []string {
 			delegations = append(delegations, name)
 		}
 	}
-	if len(delegations) == 0 {
-		return names
-	}
+	// No early return when there are no delegations: the occlusion test is only
+	// one of the two filters here, and skipping both would leave data-less
+	// names in the chain of every zone that has no delegation at all -- which
+	// is most of them.
 
 	out := make([]string, 0, len(names))
 	for _, name := range names {
 		// A name that owns no RRsets is not in the zone, whatever the working
 		// set still has an entry for. Giving it an NSEC is what turns a deleted
 		// name into a ghost that proves its own existence for ever.
-		if od := zd.stagedOwner(name); od == nil || od.RRtypes.Count() == 0 {
+		if !ownerHasData(zd.stagedOwner(name)) {
 			continue
 		}
 		occluded := false

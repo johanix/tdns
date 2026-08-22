@@ -133,7 +133,7 @@ func (zd *ZoneData) restitchNsecLocked() {
 			// Deleting the last RRset at a name removes the name from the zone;
 			// leaving an entry behind holding nothing but the record that
 			// proves it exists is the ghost this is here to prevent.
-			if od := zd.stagedOwner(name); od != nil && od.RRtypes.Count() == 0 {
+			if !ownerHasData(zd.stagedOwner(name)) {
 				zd.stageOwnerDeleteLocked(name)
 			}
 		}
@@ -220,4 +220,23 @@ func withoutDerivedRecords(rrsets []core.RRset) []core.RRset {
 		out = append(out, rs)
 	}
 	return out
+}
+
+// ownerHasData reports whether a name exists in the zone: it owns at least one
+// actual record.
+//
+// Not RRtypes.Count(): deleting the last RR of an RRset can leave the type
+// entry behind holding an empty RRset, so counting entries reports a name that
+// owns nothing as though it were still in the zone -- and it then keeps its
+// place in the chain, asserting its own existence with nothing to prove.
+func ownerHasData(od *OwnerData) bool {
+	if od == nil || od.RRtypes == nil {
+		return false
+	}
+	for _, rrt := range od.RRtypes.Keys() {
+		if len(od.RRtypes.GetOnlyRRSet(rrt).RRs) > 0 {
+			return true
+		}
+	}
+	return false
 }
