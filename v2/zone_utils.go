@@ -447,6 +447,10 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 	_, wroteSerial, err := zd.WriteFileWithSerial(fname)
 	if err == nil {
 		zd.mu.Lock()
+		// The same question the dirty flag asks, captured once under the lock
+		// and reused for the identity record below: is the file still what the
+		// zone is serving?
+		fileIsCurrent := zd.CurrentSerial == wroteSerial
 		// Clean only if the file caught up with what the zone is serving. A
 		// publish can land WHILE this write runs: we then wrote serial 11 while
 		// the zone moved to 12, and clearing the flag unconditionally would
@@ -455,7 +459,7 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 		// needed" and decline to fix it. (No content is lost -- serial 12's
 		// delta is bounded by serial, so it survives the drop below and replays
 		// -- but the operator is told the file is current when it is not.)
-		if zd.CurrentSerial == wroteSerial {
+		if fileIsCurrent {
 			zd.Options[OptDirty] = false
 		}
 		// The file now carries this serial, so that is what a future journal
@@ -466,6 +470,51 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 			zd.fileSerial = wroteSerial
 		}
 		zd.mu.Unlock()
+
+		// Record the file's new identity: this is the other end of the
+		// comparison the next load makes. The digest is of the published
+		// snapshot, which is exactly what WriteZoneToFile just serialised, so
+		// reading this file back must reproduce it.
+		//
+		// Best-effort, and deliberately not fatal: the file is written and
+		// being served, and the cost of a missing record is that the next load
+		// reports "no basis for comparison" instead of "unchanged". Failing the
+		// write here would turn a bookkeeping problem into an operational one.
+		// Gated on the same condition, and for the same reason. ZoneDigestOfPublished
+		// digests the snapshot published NOW, not the one WriteFileWithSerial
+		// serialised, so it only describes this file while the two serials
+		// agree. Recording it after a publish landed mid-write would store a
+		// digest of serial 12 as the identity of a file holding serial 11 --
+		// and the next load, finding a mismatch, would report the file as
+		// CHANGED and merge the journal over a file nobody edited, lifting the
+		// serial and possibly writing a .rejected artefact.
+		//
+		// wroteSerial != 0 for the same reason the fileSerial assignment above
+		// refuses zero: recording serial 0 as the file's identity is worse than
+		// recording nothing, which merely reads as "no basis for comparison".
+		if zd.KeyDB != nil && fileIsCurrent && wroteSerial != 0 {
+			if digest, derr := zd.ZoneDigestOfPublished(); derr != nil {
+				lg.Warn("zone written but its digest could not be computed;"+
+					" the next load will have no basis for comparison",
+					"zone", zd.ZoneName, "error", derr)
+			} else if !zd.serialStillIs(wroteSerial) {
+				// fileIsCurrent was decided before the lock was dropped, and
+				// ZoneDigestOfPublished digests whatever is published when it
+				// runs. A publish landing in between leaves a digest of the
+				// newer zone about to be recorded as the identity of the file
+				// we wrote -- the very mismatch the gate above exists to
+				// prevent, one step later. Recording nothing is safe: the next
+				// load reads "no basis for comparison" and re-establishes it.
+				lg.Warn("zone written but a publish landed before its identity could be"+
+					" recorded; leaving the file unidentified rather than recording a"+
+					" digest of different content",
+					"zone", zd.ZoneName, "wrote_serial", wroteSerial)
+			} else if rerr := zd.RecordZoneFileState(wroteSerial, digest); rerr != nil {
+				lg.Warn("zone written but its file identity could not be recorded;"+
+					" the next load will have no basis for comparison",
+					"zone", zd.ZoneName, "error", rerr)
+			}
+		}
 
 		// Phase 2: the changes are now IN the file, which is the source of
 		// truth. The persisted deltas exist only to carry changes the file

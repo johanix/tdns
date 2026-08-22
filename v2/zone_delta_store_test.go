@@ -173,3 +173,36 @@ func TestZoneDeltaActionsClasses(t *testing.T) {
 		t.Error("an unknown action was accepted")
 	}
 }
+
+// TestReplaceZoneJournalRefusesAnEmptyDelta: ReplaceZoneJournal clears the whole
+// chain before writing the replacement, so a replacement that flattens to no
+// records at all would leave the zone with its changes recorded in neither the
+// file nor the journal -- and return nil, so the caller books it as success and
+// the next restart loses them.
+//
+// The caller's own guard counts RRsets, not records, so RRsets that carry no RRs
+// slip past it. That is the case here.
+func TestReplaceZoneJournalRefusesAnEmptyDelta(t *testing.T) {
+	kdb := newTestKeyDB(t)
+
+	seedRemoved := []core.RRset{deltaRRset(t, "www.example. 3600 IN A 192.0.2.1")}
+	if err := kdb.PersistZoneDelta("example.", 1, 2, seedRemoved, nil); err != nil {
+		t.Fatalf("PersistZoneDelta: %v", err)
+	}
+
+	// Non-empty RRset slices whose RRs are all empty: rows comes out empty.
+	empty := []core.RRset{{Name: "www.example.", RRtype: dns.TypeA}}
+	err := kdb.ReplaceZoneJournal("example.", 2, 3, empty, empty, 0)
+	if err == nil {
+		t.Fatal("an empty replacement was accepted; it would have erased the journal")
+	}
+
+	// And the seeded chain must still be there.
+	got, lerr := kdb.LoadZoneDeltas("example.")
+	if lerr != nil {
+		t.Fatalf("LoadZoneDeltas: %v", lerr)
+	}
+	if len(got) == 0 {
+		t.Fatal("the journal was erased despite the refusal")
+	}
+}

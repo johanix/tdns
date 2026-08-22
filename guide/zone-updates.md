@@ -20,6 +20,7 @@ see [Automatic Delegation Synchronization](special-features.md#1-automatic-deleg
 5. [What "applied" means](#5-what-applied-means)
 6. [Durability: the zone file, and the delta journal](#6-durability-the-zone-file-and-the-delta-journal)
    - [Turning persistence off](#turning-persistence-off)
+   - [When the zone file changes underneath](#when-the-zone-file-changes-underneath)
 7. [freeze, thaw and sync](#7-freeze-thaw-and-sync)
 8. [Working with the journal](#8-working-with-the-journal)
 9. [Replaying an instruction file](#9-replaying-an-instruction-file)
@@ -243,18 +244,18 @@ gap. The consequence: replay needs a zone that can sign
 
 **Replay is chain-validated.** The first delta must start from
 the serial the zone file actually has, and every delta after it
-must continue where the previous one ended. If the chain does not
-start at the file — someone edited it behind the server's back,
-say — the deltas are refused rather than applied to a base they
-were not computed against, and the zone serves the file as it
-stands. The refusal is logged and recorded in the zone's error
-registry; it is not silent. `zone journal status` (§8) answers
-the same question on demand, before a restart rather than after.
+must continue where the previous one ended. A chain with a gap is
+refused rather than applied to a base it was not computed
+against: applying part of it would produce a zone that never
+existed at any point in its history. The refusal is logged and
+recorded in the zone's error registry; it is not silent, and
+`zone journal status` (§8) answers the same question on demand,
+before a restart rather than after.
 
-A refused journal does not block updates. A change that lands
-afterwards is journalled from where the zone now is; what it
-cannot do is rescue the refused deltas, which stay in the
-database until you deal with them deliberately.
+A file that has genuinely *changed* is a different case, and it
+is not refused — it is merged. See
+[When the zone file changes underneath](#when-the-zone-file-changes-underneath)
+below.
 
 
 ### Turning persistence off
@@ -298,6 +299,113 @@ refreshes on a serial *increase*, secondaries will keep serving the
 newer content they already hold rather than following the primary
 backwards. The primary and its secondaries diverge, and only the primary
 looks wrong.
+
+
+### When the zone file changes underneath
+
+The journal is anchored to the zone file: it holds what the file does
+not have yet. So the interesting question at load time is whether the
+file is still the one those deltas were computed against.
+
+tdns answers it with a **ZONEMD digest** of the file's contents,
+recorded every time the file is read or written. Not the SOA serial:
+that is wrong in both directions. It calls a file that was reordered,
+re-commented or reflowed "changed" — none of which change the zone, and
+all of which you do to a file kept under revision control — and it calls
+a file that was regenerated while reusing its serial "unchanged", which
+is the dangerous direction.
+
+When the digest says the file did change, the deltas are **merged over
+it** rather than refused. Refusing is what earlier versions did, and it
+discards every change the journal held while telling you your zone file
+has been tampered with.
+
+#### What counts as a conflict
+
+Exactly one thing:
+
+> a record present in the new zone file that the journal **deletes**.
+
+That is the whole set. It is worth knowing why there is no mirror case,
+because there appears to be one: *the journal adds R and the new file
+lacks R*. That is not a conflict, because a journal ADD implies the
+**old** file lacked that record too — the delta was computed as the
+difference from it. So a new file that also lacks it agrees with the old
+one and you removed nothing; a new file that has it added the same
+record independently. Treating those as conflicts would flag every
+ordinary journal entry as one.
+
+Everything else merges silently: edits to parts of the zone the journal
+never touches, and journalled changes to parts the file never mentions,
+both survive.
+
+One genuine conflict is invisible, and nothing here can surface it:
+regenerating the file from the *live zone* while deliberately omitting a
+record the journal added. That file cannot be told apart from one that
+simply predates the addition without keeping a copy of the old file,
+which tdns does not.
+
+#### Choosing who wins
+
+```yaml
+options: [ on-conflict-db-wins ]        # the default
+options: [ on-conflict-zonefile-wins ]
+```
+
+Exactly one is always in force. Naming both is a config error rather
+than a preference order, and naming neither means `on-conflict-db-wins`
+— materialised onto the zone at parse time, so `zone status` reports
+what the zone actually runs under rather than a blank you have to
+interpret.
+
+| | db-wins | zonefile-wins |
+|---|---|---|
+| Contested record | the journal's version is served | the file's version is served |
+| Suits | this server owns the zone | the file is generated elsewhere |
+| `delegationbackend` | `direct` | `db` or `zonefile` |
+
+The last row is not a coincidence, and tdns enforces it: a primary with
+`on-conflict-db-wins` and a handoff delegation backend is refused at
+startup. `db-wins` says this server's data beats the zone file; a `db`
+or `zonefile` backend says approved child updates are handed to whoever
+generates that file, which makes them its author. Both cannot be true.
+
+The policy governs **contested records only**. A journalled change the
+file says nothing about still applies under either setting — otherwise
+`zonefile-wins` would quietly mean "ignore the journal entirely".
+
+#### What the merge leaves you
+
+`{zonefile}.{serial}.rejected`, written before anything is applied, and
+the merge is refused outright if it cannot be written. Resolving
+conflicts without being able to say which records lost is the silent
+loss this whole mechanism exists to prevent.
+
+It is **not a log of what happened**. It is the update that would
+*reverse* the merge's decisions:
+
+```
+; tdns: records from your zone file that lost a merge with the delta journal
+ADD	www.alpha.dnslab.	3600	IN	A	192.0.2.1
+```
+
+So you open it, delete the lines you agree with, keep the ones you do
+not, and replay what is left (§9). Under `db-wins` it holds `ADD` lines
+restoring your file's records; under `zonefile-wins` it holds the
+journal's `DEL` lines that were not applied.
+
+Two consequences worth expecting:
+
+**The merged zone's serial jumps.** It is lifted clear of everything
+already served, not merely of the new file's serial. Restoring an old
+file does not make secondaries you have already fed a higher serial go
+backwards — they refresh on an increase and nothing else — so a merge
+that published below them would never reach them at all.
+
+**Your zone file is not rewritten.** The journal is instead re-anchored
+to the file in hand, as a single delta. Ordering, comments and revision
+control survive; the file is written only when you ask, with `write`,
+`sync` or `freeze`.
 
 
 ## 7. freeze, thaw and sync
@@ -465,6 +573,8 @@ same applier as a typed statement.
 | `all RRs must share one owner`/`one type` | `replacerrset` given a mixed set |
 | `requires at least one RR` | `replacerrset` with none — use `delrrset` |
 | `outside the zone` | an owner name not in bailiwick |
+| `on-conflict-db-wins and on-conflict-zonefile-wins are mutually exclusive` | both named on one zone; they are a contradiction, not a preference order (§6) |
+| `refusing to merge, because the records that would lose could not be saved` | the `.rejected` artefact could not be written, so the merge was abandoned rather than resolved silently (§6) |
 
 On the DDNS path a policy refusal is REFUSED with an EDE naming
 the reason: `EDEZoneUpdateRRtypeNotAllowed` (the type is not in

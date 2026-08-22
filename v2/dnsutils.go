@@ -558,6 +558,17 @@ func (zd *ZoneData) ReadZoneData(zoneData string, force bool) (bool, uint32, err
 	return zd.ParseZoneFromReader(strings.NewReader(zoneData), force, "")
 }
 
+// The receiver must be a ZoneData the caller owns exclusively. This writes the
+// file identity fields (fileSerial, fileDigest) directly and without taking
+// zd.mu, so parsing into a zone other goroutines can already observe is a data
+// race against every reader of that state.
+//
+// The lock is deliberately NOT taken here: several callers construct a zone and
+// parse into it before anyone else can see it, and one of them would have to
+// hold zd.mu across the parse to be correct -- which would deadlock. The
+// invariant belongs to the caller instead. FetchFromFile shows the pattern for
+// a registered zone: parse into a scratch new_zd, then copy the fields across
+// under the lock.
 func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string) (bool, uint32, error) {
 	zd.Logger.Printf("ParseZoneFromReader: zone: %s", zd.ZoneName)
 
@@ -634,6 +645,23 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string
 	// The journal anchors to the FILE, not to whatever the serial becomes
 	// after load-time signing and republication. See ZoneData.fileSerial.
 	zd.fileSerial = soa.Serial
+
+	// And its ZONEMD digest, taken HERE for the same reason: this is the last
+	// moment at which the in-memory zone is what the file says and nothing
+	// else. Anything computed after load-time signing includes RRSIGs the file
+	// never had, and would never match the file it is meant to identify.
+	//
+	// A failure is not fatal to the load. The digest is a detector; without it
+	// the zone falls back to comparing serials, which is what it did before
+	// this existed. Refusing to serve a zone because we could not fingerprint
+	// it would be a poor trade.
+	if digest, derr := zd.zoneDigestOfWorkingData(); derr != nil {
+		lgDns.Warn("could not compute the zone file digest; file-change detection"+
+			" falls back to the SOA serial for this load",
+			"zone", zd.ZoneName, "error", derr)
+	} else {
+		zd.fileDigest = digest
+	}
 
 	zd.XfrType = "axfr"
 	// Return true only if serial changed (indicates actual update)

@@ -255,6 +255,19 @@ UNIQUE (keyname)
 	//
 	// UNIQUE columns are VARCHAR rather than TEXT (house rule at the head of
 	// this file).
+	// ZoneFileState records the identity of the zone file as tdns last read or
+	// wrote it: SOA serial plus a ZONEMD digest of its contents. One row per
+	// zone -- this is a "what does the file look like now" record, not a
+	// history -- so the zone is the primary key and writes are upserts.
+	"ZoneFileState": `CREATE TABLE IF NOT EXISTS 'ZoneFileState' (
+		zone       VARCHAR(255) NOT NULL PRIMARY KEY,
+		serial     INTEGER NOT NULL,
+		digest     VARCHAR(128) NOT NULL,
+		scheme     INTEGER NOT NULL,
+		algorithm  INTEGER NOT NULL,
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+	)`,
+
 	"ZoneDelta": `CREATE TABLE IF NOT EXISTS 'ZoneDelta' (
 		id         INTEGER PRIMARY KEY,
 		zone       VARCHAR(255) NOT NULL,

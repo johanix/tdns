@@ -249,6 +249,143 @@ func replayZoneDeltasOnLoad(zd *ZoneData) {
 	if zd == nil || zd.KeyDB == nil {
 		return
 	}
+
+	// Did the zone file change since we last read or wrote it? Asked BEFORE the
+	// replay, because it is the question that decides what the replay means.
+	//
+	// Stage 1 of the reconciliation design reports the answer and nothing more:
+	// the chain check still governs whether the deltas are applied. What the
+	// digest adds today is precision. A serial comparison calls a reformatted,
+	// re-commented or reordered file "changed" -- none of which change the zone
+	// -- and calls a regenerated file that reused its serial "unchanged", which
+	// is the dangerous direction. Recording the verdict now also means the
+	// merge in stage 2 has a trustworthy signal to switch on rather than a
+	// serial mismatch that is wrong in both directions.
+	verdict, prev, verr := zd.CompareZoneFileState()
+
+	// One locked read for the log lines below. zd.fileSerial is written by the
+	// parse paths under zd.mu, so reading it bare here is a race -- and a
+	// pointless one, since every use is a log field.
+	zd.mu.Lock()
+	loggedFileSerial := zd.fileSerial
+	zd.mu.Unlock()
+
+	switch {
+	case verr != nil:
+		lg.Warn("could not compare the zone file against its recorded identity",
+			"zone", zd.ZoneName, "error", verr)
+	case verdict == ZoneFileChanged:
+		lg.Warn("the zone file has CHANGED since tdns last read or wrote it"+
+			" (its content digest differs, so this is not merely reformatting);"+
+			" any persisted deltas were computed against the previous file",
+			"zone", zd.ZoneName, "recorded_serial", prev.Serial,
+			"file_serial", loggedFileSerial)
+	case verdict == ZoneFileUnchanged:
+		lg.Debug("zone file unchanged since tdns last read or wrote it",
+			"zone", zd.ZoneName, "serial", loggedFileSerial)
+	default:
+		lg.Debug("no recorded identity for this zone file; nothing to compare against",
+			"zone", zd.ZoneName, "serial", loggedFileSerial)
+	}
+
+	// The recorded identity is what gives the NEXT load's verdict its meaning,
+	// so it must not be updated until this load has actually dealt with the
+	// file in hand.
+	//
+	// Recording it up front and then failing is silently destructive: the
+	// identity ends up naming a file whose deltas were never applied, the next
+	// load compares equal and calls the file unchanged, and the unchanged
+	// verdict takes the replay path -- which refuses, because the journal is
+	// still anchored to the PREVIOUS file. The merge is never retried and the
+	// journalled changes are stranded behind a file that looks settled.
+	//
+	// So record on success only. A failure leaves the old identity in place,
+	// the next load sees CHANGED again, and the merge is retried. Repeating
+	// the report until it succeeds is the point, not a cost.
+	zd.mu.Lock()
+	digest, serial := zd.fileDigest, zd.fileSerial
+	zd.mu.Unlock()
+	recordFileIdentity := func() {
+		if digest == "" {
+			return
+		}
+		if err := zd.RecordZoneFileState(serial, digest); err != nil {
+			lg.Warn("could not record the zone file identity", "zone", zd.ZoneName, "error", err)
+		}
+	}
+
+	// A CHANGED file takes the merge path, not the replay path. Replay asserts
+	// the chain starts at this file and refuses otherwise -- correct when the
+	// file is the one the journal was computed against, and destructive when it
+	// is not, because refusing discards every journalled change.
+	if verdict == ZoneFileChanged {
+		res, merr := zd.MergeJournalOverNewFile(zd.KeyDB)
+		if merr != nil && res == nil {
+			lg.Error("could not merge the persisted deltas with the replaced zone file;"+
+				" the zone is serving its file alone and recent changes are NOT present",
+				"zone", zd.ZoneName, "error", merr)
+			zd.SetError(ConfigWarning,
+				"zone file changed and its deltas could not be merged: %v", merr)
+			return
+		}
+		if merr != nil {
+			// A result WITH an error means the merge was applied and published
+			// and only the journal re-anchor failed. Reporting "changes are NOT
+			// present" here would be exactly backwards, and would invite a
+			// restore or a replay on top of a zone that already holds them.
+			lg.Error("the persisted deltas were merged over the replaced zone file and the zone"+
+				" IS serving them, but the journal could not be re-anchored afterwards;"+
+				" the next load will merge again",
+				"zone", zd.ZoneName, "conflicts", len(res.Conflicts), "error", merr)
+			zd.SetError(ConfigWarning,
+				"zone file changed; its deltas were merged and ARE being served, but the journal"+
+					" could not be re-anchored: %v", merr)
+			return
+		}
+		recordFileIdentity()
+
+		// One locked read for the four log lines below. CurrentSerial is
+		// written under zd.mu by the publish paths, so reading it bare four
+		// times is a race -- and a pointless one, since every use is a log
+		// field describing the serial this merge just produced.
+		zd.mu.Lock()
+		mergedSerial := zd.CurrentSerial
+		zd.mu.Unlock()
+
+		switch {
+		case len(res.Instructions) == 0:
+			lg.Info("the zone file changed; no persisted deltas to reconcile with it",
+				"zone", zd.ZoneName, "serial", mergedSerial)
+		case len(res.Conflicts) == 0:
+			lg.Info("the zone file changed; merged the persisted deltas over it with no conflicts",
+				"zone", zd.ZoneName, "records", len(res.Instructions), "serial", mergedSerial)
+		case res.Policy == ConflictZonefileWins:
+			// Under zonefile-wins it is the journal's deletes that are dropped
+			// and the file's records that survive, and the artefact holds those
+			// dropped INSTRUCTIONS. Reporting it the other way round would send
+			// the operator to a file containing the opposite of what they were
+			// told was in it.
+			lg.Warn("the zone file changed; merged the persisted deltas over it, and changes"+
+				" from the JOURNAL lost where the two disagreed",
+				"zone", zd.ZoneName, "records", len(res.Instructions),
+				"conflicts", len(res.Conflicts), "policy", res.Policy.String(),
+				"rejected", res.Artefact, "serial", mergedSerial)
+			zd.SetError(ConfigWarning,
+				"zone file changed; %d journalled change(s) lost the merge, see %s",
+				len(res.Conflicts), res.Artefact)
+		default:
+			lg.Warn("the zone file changed; merged the persisted deltas over it, and records"+
+				" from the FILE lost where the two disagreed",
+				"zone", zd.ZoneName, "records", len(res.Instructions),
+				"conflicts", len(res.Conflicts), "policy", res.Policy.String(),
+				"rejected", res.Artefact, "serial", mergedSerial)
+			zd.SetError(ConfigWarning,
+				"zone file changed; %d record(s) from the file lost the merge, see %s",
+				len(res.Conflicts), res.Artefact)
+		}
+		return
+	}
+
 	n, err := zd.ReplayPersistedDeltas(zd.KeyDB)
 	if err != nil {
 		lg.Error("could not replay persisted deltas; the zone is serving its file alone"+
@@ -258,9 +395,13 @@ func replayZoneDeltasOnLoad(zd *ZoneData) {
 			"persisted zone deltas could not be replayed; serving the zone file alone: %v", err)
 		return
 	}
+	recordFileIdentity()
 	if n > 0 {
+		zd.mu.Lock()
+		replayedSerial := zd.CurrentSerial
+		zd.mu.Unlock()
 		lg.Info("replayed persisted zone deltas over the zone file",
-			"zone", zd.ZoneName, "deltas", n, "serial", zd.CurrentSerial)
+			"zone", zd.ZoneName, "deltas", n, "serial", replayedSerial)
 	}
 }
 
