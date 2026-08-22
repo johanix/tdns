@@ -181,6 +181,15 @@ func ownerTypes(od *OwnerData) []uint16 {
 	return od.RRtypes.Keys()
 }
 
+// ownerNsec returns an owner's NSEC property, tolerating a nil owner (one side
+// of a diff where the name was added or deleted).
+func ownerNsec(od *OwnerData) core.RRset {
+	if od == nil {
+		return core.RRset{}
+	}
+	return od.NSEC
+}
+
 func ownerRRset(od *OwnerData, t uint16) core.RRset {
 	if od == nil || od.RRtypes == nil {
 		return core.RRset{}
@@ -203,6 +212,26 @@ func diffOwner(zoneName, name string, old, new *OwnerData) (removed, added []cor
 		sorted = append(sorted, t)
 	}
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i] < sorted[j] })
+
+	// The NSEC property is diffed alongside the RRtypes, because a secondary
+	// answers denial from the chain it is handed -- it has no private key and
+	// cannot synthesise one. A chain change that never reaches it leaves it
+	// proving the wrong thing about the zone.
+	//
+	// Deliberately NOT an RRtypes entry: see OwnerData.NSEC. The journal reads
+	// RRtypes only, which is what keeps regenerated NSECs out of it.
+	nsecRem, nsecAdd := rrDiff(ownerNsec(old).RRs, ownerNsec(new).RRs)
+	nsecSigRem, nsecSigAdd := rrDiff(ownerNsec(old).RRSIGs, ownerNsec(new).RRSIGs)
+	if len(nsecRem) > 0 || len(nsecSigRem) > 0 {
+		rs := core.RRset{Name: name, Class: dns.ClassINET, RRtype: dns.TypeNSEC, RRs: nsecRem, RRSIGs: nsecSigRem}
+		removed = append(removed, rs)
+		est += rrsetWireEstimate(rs)
+	}
+	if len(nsecAdd) > 0 || len(nsecSigAdd) > 0 {
+		rs := core.RRset{Name: name, Class: dns.ClassINET, RRtype: dns.TypeNSEC, RRs: nsecAdd, RRSIGs: nsecSigAdd}
+		added = append(added, rs)
+		est += rrsetWireEstimate(rs)
+	}
 
 	apexSOA := name == zoneName
 	for _, t := range sorted {

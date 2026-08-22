@@ -189,7 +189,14 @@ func parseZoneOptions(conf *Config, zname string, zconf *ZoneConf, zd *ZoneData)
 			OptFoldCase,
 			OptBlackLies,
 			OptDontPublishKey,
-			OptAddTransportSignal:
+			OptAddTransportSignal,
+			// Conflict resolution carries no condition of its own here. The
+			// pair is mutually exclusive and db-wins is materialised when
+			// neither is given, but both of those are decided in
+			// activateUpdatePolicy, which runs after this switch and needs
+			// the flags to have survived it.
+			OptOnConflictDBWins,
+			OptOnConflictZonefileWins:
 			options[opt] = true
 			cleanoptions = append(cleanoptions, opt)
 

@@ -99,6 +99,22 @@ failing. Does not change anything; read-only.`,
 		Run:   func(cmd *cobra.Command, args []string) { RunZoneWrite(role, args) },
 	}
 
+	// "sync" is the name an operator coming from bind9 reaches for (rndc sync).
+	// The server already treats it as an alias for write-zone; this exposes it,
+	// which the CLI had never done -- so the documented command did not exist.
+	sync := &cobra.Command{
+		Use:   "sync",
+		Short: "Spool the zone out to disk (alias for write, no freeze/thaw)",
+		Long: `Write the zone's current content to its file, without freezing it.
+
+Identical to "zone write". Both fold any persisted change deltas into the file
+and drop them, so the file becomes the whole truth again.
+
+Use "zone freeze" instead when you want the file to be authoritative and
+updates refused until you thaw.`,
+		Run: func(cmd *cobra.Command, args []string) { RunZoneSync(role, args) },
+	}
+
 	freeze := &cobra.Command{
 		Use:   "freeze",
 		Short: "Freeze a zone (i.e. stop accepting DDNS updates to the zone data)",
@@ -186,13 +202,6 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 		Use:   "nsec",
 		Short: "Prefix command, not usable by itself",
 	}
-	nsecGenerate := &cobra.Command{
-		Use:   "generate",
-		Short: "Generate NSEC records for a zone",
-		Run: func(cmd *cobra.Command, args []string) {
-			runZoneSimpleCmd(role, "generate-nsec")
-		},
-	}
 	nsecShow := &cobra.Command{
 		Use:   "show",
 		Short: "Show the NSEC chain for a zone",
@@ -200,12 +209,13 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 			runZoneShowNsec(role)
 		},
 	}
-	nsec.AddCommand(nsecGenerate, nsecShow)
+	nsec.AddCommand(nsecShow)
 
 	// Dynamic-zones management (add/delete/modify/list-dynamic). No --store
 	// flag: dynamic zones are map-only. The --tsig-* flags are accepted now but
 	// inert in Improvement 1 (a non-NOKEY key is rejected server-side).
 	var dzPrimaryKey, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo string
+	var dzTransferSrc []string
 	var dzZoneType, dzTemplate string
 	var dzPrimaries, dzOptions []string
 
@@ -228,7 +238,7 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 					os.Exit(1)
 				}
 			}
-			RunZoneAdd(role, dzZoneType, dzTemplate, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo)
+			RunZoneAdd(role, dzZoneType, dzTemplate, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo, dzTransferSrc)
 		},
 	}
 	add.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to add")
@@ -241,6 +251,8 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 	add.Flags().StringVar(&dzTsigSecretFile, "tsig-secret-file", "", "File containing the inline TSIG secret (base64); preferred over --tsig-secret")
 	add.Flags().StringVar(&dzTsigSecret, "tsig-secret", "", "Inline TSIG secret (base64). WARNING: visible in shell history / process list; prefer --tsig-secret-file")
 	add.Flags().StringVar(&dzTsigAlgo, "tsig-algo", "", "Inline TSIG algorithm (default hmac-sha256)")
+	add.Flags().StringSliceVar(&dzTransferSrc, "transfer-src", nil,
+		"Source address(es) to bind for this zone's outbound transfers (IP only, one per family)")
 	add.MarkFlagRequired("zone")
 
 	del := &cobra.Command{
@@ -257,7 +269,7 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 		Use:   "modify",
 		Short: "Modify a dynamic (API-managed) zone's primary or options",
 		Run: func(cmd *cobra.Command, args []string) {
-			RunZoneModify(role, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo)
+			RunZoneModify(role, dzPrimaries, dzPrimaryKey, dzOptions, dzTsigName, dzTsigSecret, dzTsigSecretFile, dzTsigAlgo, dzTransferSrc)
 		},
 	}
 	modify.Flags().StringVarP(&tdns.Globals.Zonename, "zone", "z", "", "Zone to modify")
@@ -268,6 +280,9 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 	modify.Flags().StringVar(&dzTsigSecretFile, "tsig-secret-file", "", "File containing the inline TSIG secret (base64); preferred over --tsig-secret")
 	modify.Flags().StringVar(&dzTsigSecret, "tsig-secret", "", "Inline TSIG secret (base64). WARNING: visible in shell history / process list; prefer --tsig-secret-file")
 	modify.Flags().StringVar(&dzTsigAlgo, "tsig-algo", "", "Inline TSIG algorithm (default hmac-sha256)")
+	// Unset leaves the zone's current value alone; --transfer-src="" clears it.
+	modify.Flags().StringSliceVar(&dzTransferSrc, "transfer-src", nil,
+		"Replace the zone's outbound-transfer source address(es); omit to leave unchanged")
 	modify.MarkFlagRequired("zone")
 
 	listDynamic := &cobra.Command{
@@ -290,10 +305,14 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 	dnssecCmd.AddCommand(setPolicy, policyReset, newAutoRolloverPolicyChangeCmd(), newAutoRolloverCmd(role),
 		sign, resign, nsec)
 
-	c.AddCommand(list, desc, dnssecCmd, reload, bump, write, freeze, thaw, proxyKey, add, del, modify, listDynamic)
+	c.AddCommand(list, desc, dnssecCmd, reload, bump, write, sync, freeze, thaw, proxyKey, add, del, modify, listDynamic)
 	// Role-independent extras attached to every zone tree. Each is built
 	// fresh so the command pointer is unique per NewZoneCmd invocation.
 	c.AddCommand(newZoneReadFakeCmd(), newZoneUpdateCmd(role), newZoneDsyncCmd(role))
+	// The delta journal's operator surface. Under "zone", not under
+	// "zone update": it inspects and manages what is stored about the zone,
+	// which is not a way of changing the zone's content.
+	AttachZoneJournalCmds(c, role)
 	for _, e := range extras {
 		c.AddCommand(e)
 	}
@@ -301,7 +320,7 @@ States: update-unsupported / ready / foreign-key / waiting-for-key.`,
 }
 
 // runZoneSimpleCmd runs a ZonePost command after PrepArgs("childzone")
-// and only reports resp.Msg on success. Used by sign, freeze, thaw, generate-nsec.
+// and only reports resp.Msg on success. Used by sign, freeze and thaw.
 func runZoneSimpleCmd(role, command string) {
 	PrepArgs("childzone")
 
@@ -601,7 +620,7 @@ func resolveTsigSecret(literal, file string) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
-func RunZoneAdd(role, zoneType, template string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigSecretFile, tsigAlgo string) {
+func RunZoneAdd(role, zoneType, template string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigSecretFile, tsigAlgo string, transferSrc []string) {
 	if tdns.Globals.Zonename == "" {
 		fmt.Println("Error: zone name not specified")
 		os.Exit(1)
@@ -616,15 +635,16 @@ func RunZoneAdd(role, zoneType, template string, primaries []string, primaryKey 
 		log.Fatalf("Error getting API client for %s: %v", role, err)
 	}
 	cr, err := SendZoneCommand(api, tdns.ZonePost{
-		Command:    "add",
-		Zone:       dns.Fqdn(tdns.Globals.Zonename),
-		ZoneType:   zoneType,
-		Template:   template,
-		Primaries:  peerConfsFromAddrs(primaries, primaryKey),
-		Options:    options,
-		TsigName:   tsigName,
-		TsigSecret: secret,
-		TsigAlgo:   tsigAlgo,
+		Command:     "add",
+		Zone:        dns.Fqdn(tdns.Globals.Zonename),
+		ZoneType:    zoneType,
+		Template:    template,
+		Primaries:   peerConfsFromAddrs(primaries, primaryKey),
+		Options:     options,
+		TsigName:    tsigName,
+		TsigSecret:  secret,
+		TsigAlgo:    tsigAlgo,
+		TransferSrc: transferSrc,
 	})
 	if err != nil {
 		fmt.Printf("Error from %q: %s\n", cr.AppName, err.Error())
@@ -657,7 +677,7 @@ func RunZoneDelete(role string) {
 	}
 }
 
-func RunZoneModify(role string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigSecretFile, tsigAlgo string) {
+func RunZoneModify(role string, primaries []string, primaryKey string, options []string, tsigName, tsigSecret, tsigSecretFile, tsigAlgo string, transferSrc []string) {
 	if tdns.Globals.Zonename == "" {
 		fmt.Println("Error: zone name not specified")
 		os.Exit(1)
@@ -672,12 +692,13 @@ func RunZoneModify(role string, primaries []string, primaryKey string, options [
 		log.Fatalf("Error getting API client for %s: %v", role, err)
 	}
 	post := tdns.ZonePost{
-		Command:    "modify",
-		Zone:       dns.Fqdn(tdns.Globals.Zonename),
-		Options:    options,
-		TsigName:   tsigName,
-		TsigSecret: secret,
-		TsigAlgo:   tsigAlgo,
+		Command:     "modify",
+		Zone:        dns.Fqdn(tdns.Globals.Zonename),
+		Options:     options,
+		TsigName:    tsigName,
+		TsigSecret:  secret,
+		TsigAlgo:    tsigAlgo,
+		TransferSrc: transferSrc,
 	}
 	if peers := peerConfsFromAddrs(primaries, primaryKey); len(peers) > 0 {
 		post.Primaries = peers
@@ -1030,4 +1051,28 @@ func algName(alg uint8) string {
 // 0 renders as "0s".
 func secsToDuration(secs uint32) string {
 	return (time.Duration(secs) * time.Second).String()
+}
+
+// RunZoneSync sends the "sync" command. Same server-side implementation as
+// write-zone -- one code path, two names, so they cannot drift.
+func RunZoneSync(parent string, args []string) {
+	PrepArgs("childzone")
+
+	api, err := GetApiClient(parent, true)
+	if err != nil {
+		log.Fatalf("Error getting API client for %s: %v", parent, err)
+	}
+
+	cr, err := SendZoneCommand(api, tdns.ZonePost{
+		Command: "sync",
+		Zone:    tdns.Globals.Zonename,
+		Force:   force,
+	})
+	if err != nil {
+		fmt.Printf("Error from %s: %s\n", parent, err.Error())
+		os.Exit(1)
+	}
+	if cr.Msg != "" {
+		fmt.Printf("%s\n", cr.Msg)
+	}
 }

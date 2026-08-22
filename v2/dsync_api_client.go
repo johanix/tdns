@@ -11,9 +11,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	mrand "math/rand/v2"
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -134,17 +136,85 @@ func pickDsyncApiDialect(rrs []dns.RR) (string, error) {
 		advertised, dsyncApiSupportedDialects)
 }
 
+// pickDsyncApiUrl chooses one endpoint from a URI RRset per RFC 7553: the
+// lowest Priority wins, and among equal priorities the choice is WEIGHTED
+// RANDOM, larger weights being proportionately more likely.
+//
+// Returning the first usable target made the choice depend on answer order,
+// which a resolver is free to vary, so a parent publishing a primary and a
+// backup had no way to say which was which.
+//
+// Sorting by descending weight and taking the first was the intermediate fix
+// and was not enough: it reads Weight and orders by it, which looks like
+// weighting but always picks the same endpoint. A parent that publishes two
+// equal-priority endpoints weighted 100 and 1 means "send roughly one request
+// in a hundred to the second one", and never sending any is not an
+// implementation of that.
+//
+// Selection follows the RFC 2782 running-sum algorithm, which gives a
+// zero-weight candidate no chance while any positive weight is present, and
+// falls back to a uniform choice when every weight is zero (the common case:
+// nobody sets weights).
 func pickDsyncApiUrl(rrs []dns.RR) (string, error) {
+	type cand struct {
+		target   string
+		priority uint16
+		weight   uint16
+	}
+	var cands []cand
 	for _, rr := range rrs {
 		uri, ok := rr.(*dns.URI)
 		if !ok {
 			continue
 		}
-		if strings.TrimSpace(uri.Target) != "" {
-			return strings.TrimSpace(uri.Target), nil
+		if t := strings.TrimSpace(uri.Target); t != "" {
+			cands = append(cands, cand{target: t, priority: uri.Priority, weight: uri.Weight})
 		}
 	}
-	return "", fmt.Errorf("no usable URI target")
+	if len(cands) == 0 {
+		return "", fmt.Errorf("no usable URI target")
+	}
+
+	// Lowest priority only. RFC 7553: contact the lowest-numbered priority
+	// reachable; the rest are alternatives for when it is not.
+	best := cands[0].priority
+	for _, c := range cands[1:] {
+		if c.priority < best {
+			best = c.priority
+		}
+	}
+	var pool []cand
+	for _, c := range cands {
+		if c.priority == best {
+			pool = append(pool, c)
+		}
+	}
+	if len(pool) == 1 {
+		return pool[0].target, nil
+	}
+
+	// Stable order first, so the selection depends on the weights and a random
+	// draw rather than on the order the resolver happened to return.
+	sort.SliceStable(pool, func(i, j int) bool { return pool[i].target < pool[j].target })
+
+	var total uint32
+	for _, c := range pool {
+		total += uint32(c.weight)
+	}
+	if total == 0 {
+		return pool[mrand.IntN(len(pool))].target, nil
+	}
+	r := mrand.Uint32N(total)
+	var running uint32
+	for _, c := range pool {
+		running += uint32(c.weight)
+		if r < running {
+			return c.target, nil
+		}
+	}
+	// Unreachable while total > 0; returning the last candidate rather than an
+	// error keeps a rounding surprise from failing a delegation update.
+	return pool[len(pool)-1].target, nil
 }
 
 // DsyncApiClientCredential is what a child holds for one parent.
@@ -250,8 +320,17 @@ func dsyncApiHttpClient(caFile string) (*http.Client, error) {
 		if err != nil {
 			return nil, fmt.Errorf("reading delegationsync.child.api.cafile %q: %v", caFile, err)
 		}
+		// Additive: the private CA is ADDED to the system roots, so an endpoint
+		// chaining to a public CA keeps verifying. Falling back to an empty
+		// pool on error silently narrowed trust to the private CA alone, which
+		// contradicted the comment above and surfaced as a certificate error
+		// naming the endpoint rather than the missing system pool.
 		pool, err := x509.SystemCertPool()
 		if err != nil || pool == nil {
+			lgDsyncApi.Warn("system certificate pool unavailable;"+
+				" verifying against delegationsync.child.api.cafile alone."+
+				" An endpoint whose certificate chains to a public CA will not verify.",
+				"cafile", caFile, "err", err)
 			pool = x509.NewCertPool()
 		}
 		if !pool.AppendCertsFromPEM(pem) {

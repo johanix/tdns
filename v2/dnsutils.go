@@ -6,14 +6,18 @@ package tdns
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	core "github.com/johanix/tdns/v2/core"
 	"github.com/miekg/dns"
@@ -90,6 +94,41 @@ func (zd *ZoneData) ZoneTransferIn(up PeerConf, serial uint32, ttype string, con
 		return 0, fmt.Errorf("ZoneTransferIn %s: TSIG sign setup: %w", zd.ZoneName, serr)
 	}
 	transfer.TsigProvider = provider
+
+	// Bind the local (source) address when the zone or the server names one.
+	// This is what the upstream's allow-transfer/provide-xfr ACL sees; without
+	// it the kernel picks a source from the outgoing interface, which on a
+	// multi-homed server is generally not the address we advertise as our
+	// identity -- so an ACL naming that address refuses us.
+	//
+	// dns.Transfer.In only dials when Conn is nil, and the library documents
+	// pre-dialling for exactly this purpose, so no fork change is needed.
+	//
+	// Logged either way. Whether a source was bound is invisible from the
+	// outside until an upstream ACL refuses the transfer, and then the only
+	// evidence is in the far end's log -- which is where an afternoon goes.
+	src, tier := zd.EffectiveTransferSrcWithSource()
+	if len(src) > 0 {
+		conn, derr := dialTransferConn(upstream, tlsCfg, src, transfer.DialTimeout)
+		if derr != nil {
+			return 0, fmt.Errorf("ZoneTransferIn %s: dial %s: %w", zd.ZoneName, upstream, derr)
+		}
+		// nil means no configured source matched this upstream's family; leave
+		// Conn unset so In() dials normally rather than relying on a typed-nil
+		// pointer comparing equal to nil.
+		if conn != nil {
+			transfer.Conn = conn
+			lgDns.Info("ZoneTransferIn: bound source address", "zone", zd.ZoneName,
+				"upstream", upstream, "src", conn.LocalAddr().String(), "from", tier)
+		} else {
+			lgDns.Warn("ZoneTransferIn: no configured transfer-src matches this upstream's family; dialling unbound",
+				"zone", zd.ZoneName, "upstream", upstream, "configured", src, "from", tier)
+		}
+	} else {
+		lgDns.Debug("ZoneTransferIn: no transfer-src configured; dialling unbound",
+			"zone", zd.ZoneName, "upstream", upstream)
+	}
+
 	answerChan, err := transfer.In(msg, upstream)
 	if err != nil {
 		zd.Logger.Printf("Error from transfer.In: %v\n", err)
@@ -115,6 +154,9 @@ func (zd *ZoneData) ZoneTransferIn(up PeerConf, serial uint32, ttype string, con
 	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA).RRs[0].(*dns.SOA)
 	zd.CurrentSerial = soa.Serial
 	zd.IncomingSerial = soa.Serial
+	// The journal anchors to the FILE, not to whatever the serial becomes
+	// after load-time signing and republication. See ZoneData.fileSerial.
+	zd.fileSerial = soa.Serial
 
 	zd.Logger.Printf("*** Zone %s transferred from upstream %s. No errors.", zd.ZoneName, upstream)
 	if zd.Data.IsEmpty() {
@@ -403,6 +445,12 @@ func (zd *ZoneData) ZoneTransferOut(ctx context.Context, w dns.ResponseWriter, r
 			return 0, nil
 		}
 	}
+	// The NSEC property travels in the transfer like any other record. The
+	// receiving secondary has no private key and cannot synthesise denial, so
+	// the chain it gets here is the only one it will ever have.
+	if len(apex.NSEC.RRs) > 0 && !appendRRset(bs, apex.NSEC) {
+		return 0, nil
+	}
 
 	names := make([]string, 0, len(snap.Data))
 	for name := range snap.Data {
@@ -422,6 +470,9 @@ func (zd *ZoneData) ZoneTransferOut(ctx context.Context, w dns.ResponseWriter, r
 			if !appendRRset(bs, rrset) {
 				return 0, nil
 			}
+		}
+		if len(omap.NSEC.RRs) > 0 && !appendRRset(bs, omap.NSEC) {
+			return 0, nil
 		}
 	}
 
@@ -516,6 +567,17 @@ func (zd *ZoneData) ReadZoneData(zoneData string, force bool) (bool, uint32, err
 	return zd.ParseZoneFromReader(strings.NewReader(zoneData), force, "")
 }
 
+// The receiver must be a ZoneData the caller owns exclusively. This writes the
+// file identity fields (fileSerial, fileDigest) directly and without taking
+// zd.mu, so parsing into a zone other goroutines can already observe is a data
+// race against every reader of that state.
+//
+// The lock is deliberately NOT taken here: several callers construct a zone and
+// parse into it before anyone else can see it, and one of them would have to
+// hold zd.mu across the parse to be correct -- which would deadlock. The
+// invariant belongs to the caller instead. FetchFromFile shows the pattern for
+// a registered zone: parse into a scratch new_zd, then copy the fields across
+// under the lock.
 func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string) (bool, uint32, error) {
 	zd.Logger.Printf("ParseZoneFromReader: zone: %s", zd.ZoneName)
 
@@ -553,8 +615,11 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string
 					zd.Logger.Printf("ParseZoneFromReader: %s: new SOA serial is the same as current. Reload not needed.", zd.ZoneName)
 					return false, soa.Serial, nil
 				}
-				// force=true: continue parsing to validate zone file, but serial didn't change
-				zd.Logger.Printf("ParseZoneFromReader: %s: new SOA serial is the same as current but still forced to reload (validating zone file).", zd.ZoneName)
+				// force=true: parse the whole file anyway. For the zone-file
+				// refresh path that is not "the operator forced it" but the
+				// normal case -- whether the file changed is decided on its
+				// content digest, which cannot be computed without parsing it.
+				zd.Logger.Printf("ParseZoneFromReader: %s: new SOA serial is the same as the one last read; parsing the whole file anyway.", zd.ZoneName)
 				serialChanged = false
 			} else {
 				// Serial changed - this indicates an actual update
@@ -589,6 +654,26 @@ func (zd *ZoneData) ParseZoneFromReader(r io.Reader, force bool, filename string
 
 	zd.CurrentSerial = soa.Serial
 	zd.IncomingSerial = soa.Serial
+	// The journal anchors to the FILE, not to whatever the serial becomes
+	// after load-time signing and republication. See ZoneData.fileSerial.
+	zd.fileSerial = soa.Serial
+
+	// And its ZONEMD digest, taken HERE for the same reason: this is the last
+	// moment at which the in-memory zone is what the file says and nothing
+	// else. Anything computed after load-time signing includes RRSIGs the file
+	// never had, and would never match the file it is meant to identify.
+	//
+	// A failure is not fatal to the load. The digest is a detector; without it
+	// the zone falls back to comparing serials, which is what it did before
+	// this existed. Refusing to serve a zone because we could not fingerprint
+	// it would be a poor trade.
+	if digest, derr := zd.zoneDigestOfWorkingData(); derr != nil {
+		lgDns.Warn("could not compute the zone file digest; file-change detection"+
+			" falls back to the SOA serial for this load",
+			"zone", zd.ZoneName, "error", derr)
+	} else {
+		zd.fileDigest = digest
+	}
 
 	zd.XfrType = "axfr"
 	// Return true only if serial changed (indicates actual update)
@@ -642,10 +727,28 @@ func (zd *ZoneData) SortFunc(rr dns.RR, firstSoaSeen bool) bool {
 			}
 		}
 
+	case *dns.NSEC:
+		// NSEC is a property of the owner, not an RRset of its own: see
+		// OwnerData.NSEC. Parsed here so a zone file written by this server --
+		// or by anything else -- round-trips, and so a secondary loading a
+		// signed zone from disk keeps the chain it was given.
+		switch ztype {
+		case MapZone:
+			omap.NSEC.Name, omap.NSEC.RRtype, omap.NSEC.Class = owner, dns.TypeNSEC, dns.ClassINET
+			omap.NSEC.RRs = append(omap.NSEC.RRs, rr)
+		}
+
 	case *dns.RRSIG:
 		rrt := v.TypeCovered
 		switch ztype {
 		case MapZone:
+			if rrt == dns.TypeNSEC {
+				// Follows its NSEC into the property rather than into
+				// RRtypes[NSEC], which no longer exists.
+				omap.NSEC.Name, omap.NSEC.RRtype, omap.NSEC.Class = owner, dns.TypeNSEC, dns.ClassINET
+				omap.NSEC.RRSIGs = append(omap.NSEC.RRSIGs, rr)
+				break
+			}
 			tmp = omap.RRtypes.GetOnlyRRSet(rrt)
 			tmp.RRSIGs = append(tmp.RRSIGs, rr)
 			omap.RRtypes.Set(rrt, tmp)
@@ -671,28 +774,111 @@ func (zd *ZoneData) WriteTmpFile(lg *log.Logger) (string, error) {
 		return f.Name(), err
 	}
 
-	err = zd.WriteZoneToFile(f)
+	_, err = zd.WriteZoneToFile(f)
 	if err != nil {
 		return f.Name(), err
 	}
 	return f.Name(), nil
 }
 
+// WriteFile writes the zone and returns the filename. Callers that need the
+// serial written -- WriteZone, to bound its delta drop -- use
+// WriteFileWithSerial.
 func (zd *ZoneData) WriteFile(filename string) (string, error) {
-	fname := fmt.Sprintf("%s/%s", viper.GetString("external.filedir"), filename)
-	f, err := os.Create(fname)
-	if err != nil {
-		return fname, err
-	}
-
-	err = zd.WriteZoneToFile(f)
-	if err != nil {
-		return f.Name(), err
-	}
-	return f.Name(), nil
+	fname, _, err := zd.WriteFileWithSerial(filename)
+	return fname, err
 }
 
-func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
+// WriteFileWithSerial writes the zone out and reports the SOA serial it wrote.
+//
+// The write is staged in a temporary file in the same directory and renamed
+// into place, and every step -- flush, sync, close, rename -- is checked. Both
+// properties are load-bearing for Phase 2, not general tidiness.
+//
+// WriteZone treats a successful return here as "the file now contains
+// everything the zone has" and DELETES the journal deltas up to that serial.
+// The journal is the only replayable copy of those changes. So a write that
+// half-succeeded and reported success would take the file AND the journal in
+// one move: os.Create truncates first, and the buffered tail can fail to flush
+// on a full or failing disk long after the early records landed. Returning the
+// error keeps the journal, which is what makes the failure survivable.
+//
+// Staging and renaming closes the other half: a reader -- the next startup,
+// most of all -- never sees a partially written zone file, because the name
+// only ever points at a complete one. The directory fsync is what makes that
+// rename outlive a power cut rather than merely a process crash.
+func (zd *ZoneData) WriteFileWithSerial(filename string) (string, uint32, error) {
+	fname := fmt.Sprintf("%s/%s", viper.GetString("external.filedir"), filename)
+
+	dir := filepath.Dir(fname)
+	tmp, err := os.CreateTemp(dir, filepath.Base(fname)+".tmp")
+	if err != nil {
+		return fname, 0, fmt.Errorf("creating a temporary file beside %s: %v", fname, err)
+	}
+	tmpname := tmp.Name()
+
+	committed := false
+	defer func() {
+		if !committed {
+			tmp.Close()
+			os.Remove(tmpname)
+		}
+	}()
+
+	wrote, err := zd.WriteZoneToFile(tmp)
+	if err != nil {
+		return fname, 0, err
+	}
+	if err := tmp.Sync(); err != nil {
+		return fname, 0, fmt.Errorf("syncing %s: %v", tmpname, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fname, 0, fmt.Errorf("closing %s: %v", tmpname, err)
+	}
+
+	// os.CreateTemp makes the file 0600. Carry over the mode of the file being
+	// replaced, so a zone file readable by a non-root process stays readable.
+	mode := os.FileMode(0644)
+	if fi, serr := os.Stat(fname); serr == nil {
+		mode = fi.Mode().Perm()
+	}
+	if err := os.Chmod(tmpname, mode); err != nil {
+		return fname, 0, fmt.Errorf("setting mode on %s: %v", tmpname, err)
+	}
+
+	if err := os.Rename(tmpname, fname); err != nil {
+		return fname, 0, fmt.Errorf("renaming %s to %s: %v", tmpname, fname, err)
+	}
+	committed = true
+
+	// Persist the rename itself, and FAIL if that cannot be done.
+	//
+	// Logging and returning success was the wrong call: WriteZone reads a
+	// successful return as licence to delete the journal deltas, so a directory
+	// entry that never reached disk leaves a power failure with the OLD zone
+	// file and no journal -- the precise loss the staging and syncing above
+	// exist to prevent, reached one step later. Reporting the write as
+	// incomplete keeps the journal, which is what makes it survivable.
+	d, derr := os.Open(dir)
+	if derr != nil {
+		return fname, 0, fmt.Errorf("opening %s to sync the rename: %v", dir, derr)
+	}
+	if serr := d.Sync(); serr != nil {
+		d.Close()
+		return fname, 0, fmt.Errorf("syncing %s after renaming %s into place: %v", dir, fname, serr)
+	}
+	if cerr := d.Close(); cerr != nil {
+		return fname, 0, fmt.Errorf("closing %s after syncing: %v", dir, cerr)
+	}
+
+	return fname, wrote, nil
+}
+
+// WriteZoneToFile serialises the PUBLISHED snapshot and reports the SOA serial
+// it wrote. That serial is what makes the delta drop in WriteZone exact: any
+// journalled change whose ToSerial is not newer than it is, by definition,
+// already in this file.
+func (zd *ZoneData) WriteZoneToFile(f *os.File) (uint32, error) {
 	var err error
 	var bytes, totalbytes int
 	zonedata := ""
@@ -703,9 +889,23 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	apex := getOwnerFrom(snap, zd.ZoneName)
 	if apex == nil {
 		lgDns.Error("WriteZoneToFile: failed to get zone apex", "zone", zd.ZoneName)
-		return fmt.Errorf("WriteZoneToFile: %s: no apex in published snapshot", zd.ZoneName)
+		return 0, fmt.Errorf("WriteZoneToFile: %s: no apex in published snapshot", zd.ZoneName)
 	}
 	soa := apex.RRtypes.GetOnlyRRSet(dns.TypeSOA)
+
+	// The serial actually written. Reported to the caller so the delta drop in
+	// WriteZone can be bound to this file's CONTENT rather than to a time
+	// window. Reading a journal ceiling before the write leaves a gap in which
+	// a publish lands in the file while its delta row survives the drop, and
+	// that retained row then fails the chain check on the next load -- the same
+	// false "the file has been edited or replaced" accusation, reached from the
+	// other side.
+	var wroteSerial uint32
+	if len(soa.RRs) > 0 {
+		if s, ok := soa.RRs[0].(*dns.SOA); ok {
+			wroteSerial = s.Serial
+		}
+	}
 
 	//	zonedata += soa.String() + "\n"
 	count := 0
@@ -723,6 +923,12 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 			count += len(rrset.RRs) + len(rrset.RRSIGs)
 		}
 	}
+	// The NSEC property is written like any other record. A secondary that
+	// loads this file in the absence of its primary has no private key and
+	// answers denial from the chain in the file, so leaving it out would hand
+	// that secondary a signed zone it cannot prove anything with.
+	zonedata += RRsetToString(&apex.NSEC)
+	count += len(apex.NSEC.RRs) + len(apex.NSEC.RRSIGs)
 
 	// Rest of zone
 	names := make([]string, 0, len(snap.Data))
@@ -738,6 +944,8 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 		if omap == nil {
 			continue
 		}
+		zonedata += RRsetToString(&omap.NSEC)
+		count += len(omap.NSEC.RRs) + len(omap.NSEC.RRSIGs)
 		for _, rrt := range omap.RRtypes.Keys() {
 			rrl := omap.RRtypes.GetOnlyRRSet(rrt)
 			zonedata += RRsetToString(&rrl)
@@ -746,7 +954,7 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 			if count >= 1000 {
 				bytes, err = writer.WriteString(zonedata)
 				if err != nil {
-					return err
+					return 0, err
 				}
 				totalbytes += bytes
 				bytes = 0
@@ -761,7 +969,7 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	// 		if rrcount%1000 == 0 {
 	// 			bytes, err = writer.WriteString(zonedata)
 	// 			if err != nil {
-	// 				return err
+	// 				return 0, err
 	// 			}
 	// 			totalbytes += bytes
 	// 			bytes = 0
@@ -770,11 +978,19 @@ func (zd *ZoneData) WriteZoneToFile(f *os.File) error {
 	// 	}
 	bytes, err = writer.WriteString(zonedata)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	totalbytes += bytes
-	writer.Flush()
-	return err
+	// Flush's error is the one that matters most and used to be discarded. Every
+	// WriteString above only fills a buffer; the actual disk write happens here,
+	// so a full or failing disk shows up at THIS call and nowhere earlier. The
+	// old `return wroteSerial, err` returned the (nil) error from the last
+	// WriteString instead, reporting a complete file to a caller that then
+	// deleted the journal.
+	if err := writer.Flush(); err != nil {
+		return 0, fmt.Errorf("writing zone %s: %v", zd.ZoneName, err)
+	}
+	return wroteSerial, nil
 }
 
 func RRsetToString(rrset *core.RRset) string {
@@ -825,4 +1041,112 @@ func readLineFromFile(filename string, lineNum int) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("line %d not found", lineNum)
+}
+
+// pickTransferSrc picks the source address to bind for an upstream, and the
+// network ("tcp4"/"tcp6") to dial so the destination cannot end up in the other
+// family. A family with no configured source returns nil, meaning "dial
+// unbound" -- deliberately forgiving, because an operator who names only a v4
+// source should not thereby break every v6 upstream.
+//
+// The upstream may be a LITERAL or a HOSTNAME. For a literal the family is read
+// off the address. For a hostname it has to be resolved: the first version of
+// this bound whichever family net.ParseIP happened to report for a name it
+// could not parse -- always "not v4" -- so a hostname upstream that resolves to
+// IPv4 got an IPv6 source bound and the dial failed. Resolution failure falls
+// back to unbound rather than to a guess.
+//
+// When a hostname resolves to both families, the configured sources decide:
+// whichever family we have a source for wins, in configured order. That keeps
+// the ACL-visible address predictable, which is the entire point of the option.
+// lookup is injected so the hostname path is testable without depending on what
+// the test host's resolver happens to return -- a dual-stack "localhost" would
+// make the v4-only case untestable, which is precisely the case that was broken.
+// nil means the system resolver.
+func pickTransferSrc(ctx context.Context, lookup func(context.Context, string) ([]net.IPAddr, error), upstream string, srcs []string) (net.IP, string) {
+	host, _, err := net.SplitHostPort(upstream)
+	if err != nil {
+		host = upstream
+	}
+
+	// Parsed sources, in configured order. Unparseable entries cannot reach
+	// here -- ValidateTransferSrc rejects them at config load -- but skip them
+	// rather than binding something meaningless if one ever does.
+	var parsed []net.IP
+	for _, s := range srcs {
+		if ip := net.ParseIP(strings.TrimSpace(s)); ip != nil {
+			parsed = append(parsed, ip)
+		}
+	}
+	if len(parsed) == 0 {
+		return nil, ""
+	}
+
+	// Which families can the upstream actually be reached over?
+	var have4, have6 bool
+	if ip := net.ParseIP(host); ip != nil {
+		have4, have6 = ip.To4() != nil, ip.To4() == nil
+	} else {
+		if lookup == nil {
+			lookup = net.DefaultResolver.LookupIPAddr
+		}
+		addrs, rerr := lookup(ctx, host)
+		if rerr != nil {
+			// Cannot tell the family; binding a guess risks failing a transfer
+			// that would otherwise work.
+			return nil, ""
+		}
+		for _, a := range addrs {
+			if a.IP.To4() != nil {
+				have4 = true
+			} else {
+				have6 = true
+			}
+		}
+	}
+
+	for _, ip := range parsed {
+		if ip.To4() != nil && have4 {
+			return ip, "tcp4"
+		}
+		if ip.To4() == nil && have6 {
+			return ip, "tcp6"
+		}
+	}
+	return nil, ""
+}
+
+// dialTransferConn dials upstream with the source address bound, returning a
+// *dns.Conn ready to hand to dns.Transfer. tlsCfg non-nil selects XoT.
+//
+// The network is pinned to the source's family. Dialling "tcp" with a v4
+// LocalAddr and letting the resolver hand back a v6 destination (or the
+// reverse) is a guaranteed failure, and for a dual-stack hostname upstream that
+// is not a hypothetical. The hostname is still what gets dialled, so SNI and
+// certificate verification on the XoT path are unchanged.
+func dialTransferConn(upstream string, tlsCfg *tls.Config, srcs []string, timeout time.Duration) (*dns.Conn, error) {
+	if timeout == 0 {
+		timeout = 2 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	src, network := pickTransferSrc(ctx, nil, upstream, srcs)
+	if src == nil {
+		return nil, nil // no matching family; caller leaves Conn nil and In() dials
+	}
+	d := &net.Dialer{Timeout: timeout, LocalAddr: &net.TCPAddr{IP: src}}
+
+	if tlsCfg != nil {
+		c, err := tls.DialWithDialer(d, network, upstream, tlsCfg)
+		if err != nil {
+			return nil, err
+		}
+		return &dns.Conn{Conn: c}, nil
+	}
+	c, err := d.Dial(network, upstream)
+	if err != nil {
+		return nil, err
+	}
+	return &dns.Conn{Conn: c}, nil
 }

@@ -27,11 +27,11 @@ import (
 //	    Deleted         []PendingOwnerChangeJSON `json:"deleted,omitempty"`
 //	}
 type TxlogView struct {
-	PublishedSerial uint32              `json:"published_serial"`
-	PublishQueued   bool                `json:"publish_queued"`
-	Added           []string            `json:"added,omitempty"`
-	Replaced        []TxlogOwnerChange  `json:"replaced,omitempty"`
-	Deleted         []TxlogOwnerChange  `json:"deleted,omitempty"`
+	PublishedSerial uint32             `json:"published_serial"`
+	PublishQueued   bool               `json:"publish_queued"`
+	Added           []string           `json:"added,omitempty"`
+	Replaced        []TxlogOwnerChange `json:"replaced,omitempty"`
+	Deleted         []TxlogOwnerChange `json:"deleted,omitempty"`
 }
 
 type TxlogOwnerChange struct {

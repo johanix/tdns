@@ -23,7 +23,23 @@ func (kdb *KeyDB) APIdsyncApiCredential() func(w http.ResponseWriter, r *http.Re
 		decoder := json.NewDecoder(r.Body)
 		var cp DsyncApiCredentialPost
 		if err := decoder.Decode(&cp); err != nil {
+			// Returning here rather than continuing with a zero-value cp. That
+			// left Command empty, so the switch below fell to default and the
+			// client was told `unknown command: ""` -- naming a symptom of the
+			// real fault (a malformed body) and sending the operator looking
+			// for a command name that was never sent.
 			lgApi.Warn("error decoding dsync-api credential post", "err", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusBadRequest)
+			if encErr := json.NewEncoder(w).Encode(DsyncApiCredentialResponse{
+				AppName:  Globals.App.Name,
+				Time:     time.Now(),
+				Error:    true,
+				ErrorMsg: fmt.Sprintf("malformed request body: %v", err),
+			}); encErr != nil {
+				lgApi.Error("error writing dsync-api credential error response", "err", encErr)
+			}
+			return
 		}
 
 		// Username is logged, the key never is: "add" mints one and it exists

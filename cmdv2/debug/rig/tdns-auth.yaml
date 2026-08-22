@@ -1,0 +1,53 @@
+service:
+   name:        TDNS-IXFR-RIG
+   identities:  [ ixfrrig.local. ]
+
+dnsengine:
+   addresses:   [ 127.0.0.1:5400 ]
+   transports:  [ do53 ]
+
+apiserver:
+   addresses:  [ 127.0.0.1:8400 ]
+   apikey:     ixfrtest-secret
+   certfile:   /etc/tdns/certs/api.crt
+   keyfile:    /etc/tdns/certs/api.key
+
+db:
+   file:  /var/tmp/ixfrtest/tdns.db
+
+log:
+   file:   /var/tmp/ixfrtest/log/tdns.log
+   level:  debug
+
+dnssec:
+   policies:
+      rig:
+         algorithm:  ED25519
+         ksk:
+            lifetime:  forever
+         zsk:
+            lifetime:  forever
+         csk:
+            lifetime:  none
+         sigvalidity:
+            default:  14d
+            dnskey:   30d
+            ds:       14d
+
+zones:
+   - name:      rig.example.
+     type:      primary
+     zonefile:  /var/tmp/ixfrtest/zones/rig.example
+     store:     map
+     options:   [ allow-updates, allow-api-updates, inline-signing ]
+     dnssecpolicy: rig
+     notify:
+        - addr: "127.0.0.1:5401"
+          key:  NOKEY
+     downstreams:
+        - prefix: "127.0.0.1/32"
+          key:    NOKEY
+     updatepolicy:
+        zone:
+           type:     selfsub
+           rrtypes:  [ A, AAAA, TXT, NS ]

@@ -249,10 +249,17 @@ func TestApproveActionsForPrincipal(t *testing.T) {
 	}
 }
 
-// Both approval paths must reach the same verdict for the same inputs, since
-// that is the entire point of there being one evaluator. Belt and braces: this
-// compares the two exported entry points rather than the internals.
-func TestChildAndZonePoliciesEvaluateIdentically(t *testing.T) {
+// A one-record verdict from evalUpdatePolicyRR and the whole-set verdict from
+// ApproveActionsForPrincipal must agree, since the latter is defined as the
+// former applied record by record.
+//
+// Named for what it actually asserts. It was previously called
+// TestChildAndZonePoliciesEvaluateIdentically and claimed to compare "the two
+// exported entry points" -- it calls neither ApproveChildUpdate nor
+// ApproveAuthUpdate, and evalUpdatePolicyRR is unexported. A reader could
+// reasonably have concluded the two DDNS approval paths were covered here.
+// They are not covered anywhere in this file.
+func TestSingleRecordAndSetVerdictsAgree(t *testing.T) {
 	zd := &ZoneData{ZoneName: "example."}
 	policy := policyDetail("selfsub", dns.TypeA)
 

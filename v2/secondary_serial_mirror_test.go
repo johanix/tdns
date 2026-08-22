@@ -37,7 +37,7 @@ func refreshTo(t *testing.T, zd *ZoneData, upstreamSerial string) {
 		t.Fatalf("ReadZoneData: %v", err)
 	}
 	zd.mu.Lock()
-	err := zd.applyRefreshReplacementLocked(newZd, nil, false)
+	err := zd.applyRefreshReplacementLocked(newZd, nil, false, false)
 	zd.mu.Unlock()
 	if err != nil {
 		t.Fatalf("applyRefreshReplacementLocked: %v", err)
@@ -154,7 +154,7 @@ func TestNextOutboundSerialSuppressedForMirroringSecondary(t *testing.T) {
 		Options:           map[ZoneOption]bool{},
 		CurrentSerial:     10,
 		OutboundSoaSerial: OutboundSoaSerialUnixtime,
-		KeyDB:             &KeyDB{OutboundSoaSerial: OutboundSoaSerialUnixtime},
+		KeyDB:             kdbWithSoaSerial(OutboundSoaSerialUnixtime),
 	}
 	if got := nextOutboundSerial(zd); got != 11 {
 		t.Errorf("mirroring secondary in unixtime mode: got %d, want 11 (no timestamp rewrite)", got)

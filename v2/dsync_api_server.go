@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -35,6 +36,12 @@ const DsyncApiPathPrefix = "/dsync/v1"
 // UpdateApplyTimeout, so a slow apply reports as an apply timeout with its own
 // explanation rather than as the connection simply going away.
 const DsyncApiRequestTimeout = 20 * time.Second
+
+// DsyncApiShutdownTimeout bounds the graceful drain at shutdown. Shorter than
+// the request timeout on purpose: a request still running at shutdown is one
+// nobody is waiting for any more, and holding the process open for it delays
+// every other engine's exit.
+const DsyncApiShutdownTimeout = 5 * time.Second
 
 // SetupDsyncApiRouter builds the router. Returns nil when the scheme is not
 // configured, which is how a deployment that has not opted in ends up with no
@@ -103,15 +110,52 @@ func (conf *Config) StartDsyncApiListener(ctx context.Context, router *mux.Route
 		}(srv)
 	}
 
-	go func() {
-		<-done
-		lgDsyncApi.Info("shutting down DSYNC API listeners")
-		for _, srv := range servers {
-			if err := srv.Shutdown(context.Background()); err != nil {
-				lgDsyncApi.Error("DSYNC API shutdown failed", "err", err)
+	// BLOCK until the listeners are down, rather than returning once they are
+	// started.
+	//
+	// StartEngine calls engineWg.Done() when this function returns, and
+	// Shutdowner does engineWg.Wait() and then os.Exit shortly after. Returning
+	// early therefore told the shutdown sequence that this engine was finished
+	// while its listeners were still serving: os.Exit could run mid-drain, and
+	// a DSYNC API request that had queued a CHILD-UPDATE and was waiting for
+	// the updater's answer would die without a response -- leaving the child
+	// unable to tell whether its delegation update had been applied.
+	//
+	// Waiting on ctx.Done() as well as on done: the stop channel is closed by
+	// the API stop endpoint, but a plain context cancellation (SIGTERM) does
+	// not close it, and waiting only on done would leak this goroutine and keep
+	// the listeners up.
+	select {
+	case <-done:
+		lgDsyncApi.Info("shutting down DSYNC API listeners", "reason", "stop requested")
+	case <-ctx.Done():
+		lgDsyncApi.Info("shutting down DSYNC API listeners", "reason", "context cancelled")
+	}
+
+	// Bounded: an in-flight request that never finishes must not hold the whole
+	// shutdown open. Shutdown returns ctx.Err() on expiry and the deferred
+	// Close below then drops what is left.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), DsyncApiShutdownTimeout)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for _, srv := range servers {
+		wg.Add(1)
+		go func(srv *http.Server) {
+			defer wg.Done()
+			if err := srv.Shutdown(shutdownCtx); err != nil {
+				lgDsyncApi.Error("DSYNC API graceful shutdown did not complete;"+
+					" closing the listener",
+					"address", srv.Addr, "err", err)
+				if cerr := srv.Close(); cerr != nil {
+					lgDsyncApi.Error("DSYNC API listener close failed",
+						"address", srv.Addr, "err", cerr)
+				}
 			}
-		}
-	}()
+		}(srv)
+	}
+	wg.Wait()
+	lgDsyncApi.Info("DSYNC API listeners stopped")
 
 	return nil
 }

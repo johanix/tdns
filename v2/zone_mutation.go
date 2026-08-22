@@ -35,6 +35,16 @@ func (zd *ZoneData) cloneOwner(name string) *OwnerData {
 			rs, _ := src.RRtypes.Get(t)
 			nod.RRtypes.Set(t, rs)
 		}
+		// The NSEC property travels with the owner. Rebuilding an owner from
+		// its RRtypes alone would drop the chain entry silently, and the name
+		// would fall out of the chain on the next publish without anything
+		// having asked for that.
+		//
+		// Deep-copied, because the published snapshot shares these records and
+		// signing rewrites them: applyClampToRRset assigns Header().Ttl in
+		// place, so a shared RR would have its TTL changed underneath a
+		// snapshot that is being served right now.
+		nod.NSEC = cloneRRset(src.NSEC)
 	}
 	zd.workingSet[name] = nod
 	return nod
@@ -166,7 +176,17 @@ func (zd *ZoneData) workingOwnerNamesLocked() []string {
 	for name := range zd.workingSet {
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	// Canonical order (RFC 4034 §6.1), NOT lexicographic. The NSEC chain is
+	// built by walking this slice and linking each name to the next, so the
+	// order IS the chain: a lexicographic sort produces a chain that is a
+	// permutation of the right names in the wrong sequence, which no validator
+	// will accept and which no query against the signer will reveal, because
+	// denial is answered by compact denial rather than from the chain.
+	//
+	// The two differ whenever a label boundary falls inside a shared prefix:
+	// "ns.example." sorts after "alpha.example." canonically but before
+	// "clean.example." as a plain string.
+	sort.Slice(names, func(i, j int) bool { return canonicalOwnerLess(names[i], names[j]) })
 	return names
 }
 
@@ -263,6 +283,30 @@ func (zd *ZoneData) stageRRsetLocked(name string, rs core.RRset) {
 	zd.cloneOwner(name).RRtypes.Set(rrtype, cloneRRset(rs))
 }
 
+// stageNsecLocked sets an owner's NSEC property. Unlike stageRRsetLocked it
+// cannot bring an owner into existence: an NSEC belongs to a name that has
+// authoritative data, and staging one for a name with none would recreate the
+// ghosts the property exists to prevent.
+func (zd *ZoneData) stageNsecLocked(name string, rs core.RRset) {
+	zd.ensureWorkingSet()
+	od := zd.stagedOwner(name)
+	if od == nil {
+		return
+	}
+	rs.Name, rs.RRtype, rs.Class = name, dns.TypeNSEC, dns.ClassINET
+	zd.cloneOwner(name).NSEC = cloneRRset(rs)
+}
+
+// stageNsecDeleteLocked drops an owner's NSEC property, for a name leaving the
+// chain.
+func (zd *ZoneData) stageNsecDeleteLocked(name string) {
+	zd.ensureWorkingSet()
+	if od := zd.stagedOwner(name); od == nil {
+		return
+	}
+	zd.cloneOwner(name).NSEC = core.RRset{}
+}
+
 func (zd *ZoneData) stageDeleteLocked(name string, rrtype uint16) {
 	zd.ensureWorkingSet()
 	zd.cloneOwner(name).RRtypes.Delete(rrtype)
@@ -294,6 +338,17 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		// carry it into a later unrelated publish (which would needlessly
 		// wipe the IXFR history).
 		zd.wsIxfrEpochReset = false
+		// Same reasoning for the delta staging: wsPersistDelta says "the
+		// working set about to be published carries a change worth
+		// journalling". A dropped publish leaves it staged, and the NEXT
+		// publish for this zone -- a refresh, a reload, a signalSynth-only
+		// republish -- would then write a ZoneDelta row it does not own,
+		// diffed against a working set no applier staged. Replay would later
+		// apply that row as though it were an update. wsPersistErr is cleared
+		// with it so a later applier cannot read a failure belonging to a
+		// publish that never happened.
+		zd.wsPersistDelta = false
+		zd.wsPersistErr = nil
 		return
 	}
 	if !zoneStillLive(zd, gen) {
@@ -302,6 +357,17 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		zd.publishQueued = false
 		zd.publishUrgent = false
 		zd.wsIxfrEpochReset = false
+		// Same reasoning for the delta staging: wsPersistDelta says "the
+		// working set about to be published carries a change worth
+		// journalling". A dropped publish leaves it staged, and the NEXT
+		// publish for this zone -- a refresh, a reload, a signalSynth-only
+		// republish -- would then write a ZoneDelta row it does not own,
+		// diffed against a working set no applier staged. Replay would later
+		// apply that row as though it were an update. wsPersistErr is cleared
+		// with it so a later applier cannot read a failure belonging to a
+		// publish that never happened.
+		zd.wsPersistDelta = false
+		zd.wsPersistErr = nil
 		return
 	}
 
@@ -320,6 +386,9 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 		zd.publishQueued = false
 		zd.publishUrgent = false
 		zd.wsIxfrEpochReset = false
+		// A refused publish must not leave the delta staged; see above.
+		zd.wsPersistDelta = false
+		zd.wsPersistErr = nil
 		return
 	}
 
@@ -332,6 +401,16 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	zd.setWorkingSetSOASerial(serial)
 
 	zd.resignWorkingSetSOAIfSigned()
+
+	// The chain must describe the snapshot about to be published, so it is
+	// repaired HERE -- before the delta is computed and before the swap, so
+	// that secondaries receive the change together with the data that caused
+	// it. Doing it in a later pass would publish a second serial and leave a
+	// window in which the served chain contradicts the served zone.
+	if err := zd.restitchNsecLocked(); err != nil {
+		zd.refuseUnrepairableChainLocked(prevSerial, err)
+		return
+	}
 
 	data := zd.workingSet
 	oldSnap := zd.snapshot.Load()
@@ -362,11 +441,70 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	// for durability.
 	if zd.wsPersistDelta {
 		zd.wsPersistDelta = false
-		if oldSnap != nil && zd.KeyDB != nil {
+		// The kill-switch (journal: active: false). Checked HERE, at the single
+		// point where a delta would be written, rather than at the two places
+		// that set wsPersistDelta -- one gate cannot drift from the other, and a
+		// future third setter is covered without being remembered.
+		//
+		// Only the WRITE side is gated. Replay is untouched: an operator who
+		// disables the journal must not thereby discard the deltas already in
+		// it, or the escape hatch becomes a second way to lose data.
+		if !JournalActive() {
+			lg.Debug("delta persistence is disabled (journal: active: false);"+
+				" this change will NOT survive a restart",
+				"zone", zd.ZoneName, "serial", serial)
+		} else if oldSnap != nil && zd.KeyDB != nil {
 			removed, added, _ := computeZoneDelta(zd.ZoneName, oldSnap.Data, data)
+			// The journal carries authored data only. NSEC is derived -- this
+			// publish just regenerated it -- and the same delta computation
+			// feeds the IXFR chain, where secondaries DO need it.
+			//
+			// Journalling it would replay regenerated records onto a zone file
+			// as though an operator had written them, and the zone-file
+			// reconciliation would then report conflicts on records nobody
+			// authored and offer .rejected artefacts full of them. It also
+			// reinstates the ghosts the property model removes, by putting
+			// NSEC back into an owner's RRtypes on replay.
+			removed, added = withoutDerivedRecords(removed), withoutDerivedRecords(added)
 			if len(removed) > 0 || len(added) > 0 {
+				// What this delta chains FROM.
+				//
+				// NOT oldSnap.Serial, which is where the zone was last
+				// published. A zone that re-signs or republishes during load
+				// advances its published serial past the serial its FILE
+				// carries -- on a signed zone, by several -- so the first
+				// change after a load would be journalled as starting from a
+				// serial the file has never had. The next load reads the file,
+				// compares it against that base, finds a mismatch, and refuses
+				// the entire journal: every change lost, and the operator told
+				// their zone file had been edited. That is the shape of the
+				// bug this replaces.
+				//
+				// The first delta of a journal anchors to the FILE; every
+				// later one anchors to the journal's own tail. The chain is
+				// then continuous by construction and starts where the next
+				// load will actually begin.
+				fromSerial := zd.fileSerial
+				if last, have, lerr := zd.KeyDB.LastZoneDeltaSerial(zd.ZoneName); lerr != nil {
+					// Refusing here rather than guessing: a wrong base is
+					// silent data loss at the next restart, which is exactly
+					// what this whole path exists to prevent.
+					zd.wsPersistErr = lerr
+					zd.CurrentSerial = prevSerial
+					zd.workingSet = nil
+					zd.wsSignalSynth = nil
+					zd.publishQueued = false
+					zd.publishUrgent = false
+					zd.wsIxfrEpochReset = false
+					lg.Error("publish refused: could not determine the delta chain base",
+						"zone", zd.ZoneName, "error", lerr)
+					return
+				} else if have {
+					fromSerial = last
+				}
+
 				if err := zd.KeyDB.PersistZoneDelta(zd.ZoneName,
-					oldSnap.Serial, serial, removed, added); err != nil {
+					fromSerial, serial, removed, added); err != nil {
 					// Refuse the publish. The alternative is to serve a change
 					// that is guaranteed to vanish at the next restart, which
 					// is worse than not serving it: the operator gets an error
@@ -423,7 +561,24 @@ func (zd *ZoneData) publishWorkingSetLocked(gen uint64, bumpSerial bool) {
 	_ = zd.NotifyDownstreams()
 }
 
-func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs []*core.RRset, firstLoad bool) error {
+// applyRefreshReplacementLocked swaps freshly loaded zone data in and publishes
+// it.
+//
+// fromZoneFile says the replacement was read from this zone's own file rather
+// than transferred from an upstream. It governs the serial floor in the default
+// branch below and nothing else, because only a file-backed zone anchors its
+// delta journal to the content it has just loaded.
+func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs []*core.RRset,
+	firstLoad, fromZoneFile bool) error {
+	// The zone has just been re-read; whatever was replayed on top of the
+	// PREVIOUS file no longer applies to this one, so a replay for the new file
+	// is due again.
+	zd.deltasReplayed = false
+	// The file's serial travels with the data it came from. The parse happens
+	// on a scratch ZoneData, so without this the live zone keeps a fileSerial
+	// of 0 and the journal anchors to nothing.
+	zd.fileSerial = new_zd.fileSerial
+	zd.fileDigest = new_zd.fileDigest
 	zd.IncomingSerial = new_zd.IncomingSerial
 	switch {
 	case firstLoad:
@@ -455,7 +610,34 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		}
 
 	default:
-		zd.CurrentSerial++
+		// Strictly newer than what this server has already served -- and, when
+		// the content came from this zone's own file, than the serial that file
+		// carries.
+		//
+		// The served serial alone is the obvious choice, and for a reload it is
+		// not enough. A reload adopts the new file as the journal's anchor
+		// (zd.fileSerial, assigned above), so a file whose serial jumped ahead
+		// of what is being served leaves that anchor ahead of the zone: the
+		// next change is then a delta from the file's serial to a lower one,
+		// PersistZoneDelta refuses it, and the zone accepts no further update
+		// until it is restarted. That was the second half of #362, and it needs
+		// no journal to happen -- with an empty journal the next delta anchors
+		// to zd.fileSerial directly.
+		//
+		// Same floor MergeJournalOverNewFile applies, and for the same reason;
+		// it just has to hold whether or not there is a journal to merge.
+		//
+		// A TRANSFERRED zone is excluded deliberately. Its serial is its own,
+		// not upstream's -- an inline-signing secondary re-signs what it
+		// receives and advances in its own space (see the MUST-NOT-MODIFY
+		// design), and off tdns-auth the whole gate stands down. Nothing there
+		// anchors a journal to the received serial, so there is nothing to
+		// floor.
+		next := zd.CurrentSerial
+		if fromZoneFile && serialNewer(zd.fileSerial, next) {
+			next = zd.fileSerial
+		}
+		zd.CurrentSerial = next + 1
 		if zd.KeyDB != nil && zd.EffectiveOutboundSoaSerial() == OutboundSoaSerialPersist {
 			if err := zd.KeyDB.SaveOutgoingSerial(zd.ZoneName, zd.CurrentSerial); err != nil {
 				return fmt.Errorf("persist outgoing serial for zone %s: %w", zd.ZoneName, err)
@@ -491,6 +673,30 @@ func (zd *ZoneData) applyRefreshReplacementLocked(new_zd *ZoneData, dynamicRRs [
 		zd.Status = ZoneStatusReady
 	}
 	return nil
+}
+
+// refuseUnrepairableChainLocked abandons a publish whose NSEC chain could not
+// be repaired. Runs with zd.mu HELD, which is the whole reason it exists as a
+// function: the obvious spelling of this -- zd.SetError -- takes zd.mu itself
+// and deadlocks the publish it is trying to report on.
+//
+// Serving a zone whose chain does not describe it is the failure this path
+// exists to prevent, and a secondary cannot repair it: having no private key,
+// it answers denial from whatever chain it was handed. So the previous
+// snapshot goes on being served, which is at least self-consistent, and the
+// change stays staged in the working set for the next publish to retry.
+//
+// The serial is rolled back with it. It was advanced before the repair ran,
+// and leaving it advanced would have publishSync report a serial to its caller
+// that no snapshot carries and no secondary will ever be offered.
+func (zd *ZoneData) refuseUnrepairableChainLocked(prevSerial uint32, err error) {
+	zd.CurrentSerial = prevSerial
+	lg.Error("publish: refusing to publish, because the NSEC chain could not be"+
+		" repaired to describe this zone; the previous snapshot is still being"+
+		" served and the change remains staged",
+		"zone", zd.ZoneName, "error", err)
+	zd.setErrorLocked(DnssecPolicyWarning,
+		"the NSEC chain could not be repaired, so the zone was not published: %v", err)
 }
 
 func (zd *ZoneData) buildSnapshotLocked(serial uint32, data map[string]*OwnerData, signalSynth map[string]*core.RRset) *zoneSnapshot {
