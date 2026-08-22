@@ -1,9 +1,11 @@
 package tdns
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -97,7 +99,7 @@ func TestApplyPendingKeyReplacement(t *testing.T) {
 	addChildKey(t, kdb, child, 222, keyRR, true, true) // new key, just promoted to trusted
 
 	registerPendingKeyReplacement(child, 222)
-	kdb.applyPendingKeyReplacement(child, 222)
+	kdb.applyPendingKeyReplacement(context.Background(), child, 222)
 
 	keys := listChildKeyids(t, kdb, child)
 	if keys[111] {
@@ -120,10 +122,61 @@ func TestApplyPendingKeyReplacementNoPending(t *testing.T) {
 	addChildKey(t, kdb, child, 111, keyRR, true, true)
 	addChildKey(t, kdb, child, 222, keyRR, true, true)
 
-	kdb.applyPendingKeyReplacement(child, 222) // nothing registered
+	kdb.applyPendingKeyReplacement(context.Background(), child, 222) // nothing registered
 
 	keys := listChildKeyids(t, kdb, child)
 	if !keys[111] || !keys[222] {
 		t.Errorf("no key may be removed when no replacement is pending; have 111=%v 222=%v", keys[111], keys[222])
+	}
+}
+
+// A DEL-ANY-KEY record carries RDLENGTH=0 (RFC 2136 §2.5.2). Classifying on
+// Class+Type alone would accept a record with RDATA as a wholesale "delete
+// every KEY at this name".
+func TestBootstrapCeremonyRejectsDelAnyKeyWithRdata(t *testing.T) {
+	addKey, err := dns.NewRR("child.example. 3600 IN KEY 512 3 15 dGVzdA==")
+	if err != nil {
+		t.Fatal(err)
+	}
+	del := &dns.ANY{Hdr: dns.RR_Header{
+		Name: "child.example.", Rrtype: dns.TypeKEY, Class: dns.ClassANY, Rdlength: 0,
+	}}
+
+	if _, hasDel, ok := bootstrapCeremony([]dns.RR{del, addKey}); !ok || !hasDel {
+		t.Fatal("a well-formed ceremony (RDLENGTH=0) was rejected")
+	}
+
+	del.Hdr.Rdlength = 4 // not a delete-RRset record any more
+	if _, _, ok := bootstrapCeremony([]dns.RR{del, addKey}); ok {
+		t.Error("a class-ANY KEY record carrying RDATA was accepted as a DEL-ANY-KEY")
+	}
+}
+
+// The cleanup must retry on its own. A key is promoted to trusted exactly once,
+// so "keep the marker and let the next promotion retry" never retries at all --
+// the superseded keys stay authorized for the life of the process.
+func TestPendingKeyReplacementRetriesRatherThanWaitingForAnotherPromotion(t *testing.T) {
+	const child = "retry.example."
+	registerPendingKeyReplacement(child, 111)
+	t.Cleanup(func() { pendingKeyReplacements.Delete(pendingKeyReplacementKey(child, 111)) })
+
+	// A cancelled context makes the bounded retry give up immediately instead
+	// of sleeping through its schedule; what matters is that it RETRIED rather
+	// than returning after a single attempt.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	kdb := newTestKeyDB(t)
+	start := time.Now()
+	kdb.applyPendingKeyReplacement(ctx, child, 111)
+	if elapsed := time.Since(start); elapsed > 3*time.Second {
+		t.Errorf("took %v — the cancelled context did not stop the retry schedule", elapsed)
+	}
+
+	// The marker is retained on failure: it is the only record that these keys
+	// were meant to be removed and still are not.
+	if _, still := pendingKeyReplacements.Load(pendingKeyReplacementKey(child, 111)); !still {
+		t.Error("the pending marker was dropped after a failed cleanup, so nothing records" +
+			" that superseded keys remain authorized")
 	}
 }

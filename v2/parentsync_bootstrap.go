@@ -58,7 +58,7 @@ func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone Zone
 	// reports our key as unknown.
 	bootstrapped := false
 	syncErr := retryWithBackoff(ctx, delegationSyncMaxRetries, delegationSyncInitialDelay, func(attempt int) (bool, error) {
-		keyState, err := QueryParentKeyState(kdb, imr, keyName, keyid)
+		keyState, err := QueryParentKeyState(ctx, kdb, imr, keyName, keyid)
 		if err != nil {
 			lgElect.Warn("ParentSyncAfterKeyPublication: KeyState inquiry failed",
 				"zone", zone, "attempt", attempt, "err", err)
@@ -99,7 +99,7 @@ func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone Zone
 			lgElect.Info("ParentSyncAfterKeyPublication: parent does not know our key, bootstrapping",
 				"zone", zone, "keyid", keyid)
 			UpdateParentState(kdb, keyName, keyid, keyState)
-			if err := BootstrapWithParent(zone, keyName, algorithm); err != nil {
+			if err := BootstrapWithParent(ctx, zone, keyName, algorithm); err != nil {
 				lgElect.Error("ParentSyncAfterKeyPublication: bootstrap failed",
 					"zone", zone, "err", err)
 				return true, err // done (terminal error)
@@ -147,8 +147,7 @@ func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone Zone
 
 // QueryParentKeyState sends a KeyState EDNS(0) inquiry to the parent and
 // returns the parent's reported state for the key.
-func QueryParentKeyState(kdb *KeyDB, imr *Imr, keyName string, keyid uint16) (uint8, error) {
-	ctx := context.Background()
+func QueryParentKeyState(ctx context.Context, kdb *KeyDB, imr *Imr, keyName string, keyid uint16) (uint8, error) {
 
 	dsyncTarget, err := imr.LookupDSYNCTarget(ctx, keyName, dns.TypeANY, core.SchemeUpdate)
 	if err != nil {
@@ -174,7 +173,7 @@ func QueryParentKeyState(kdb *KeyDB, imr *Imr, keyName string, keyid uint16) (ui
 		return 0, fmt.Errorf("DSYNC target has no addresses for %s", keyName)
 	}
 
-	r, _, err := c.Exchange(signedMsg, dsyncTarget.Addresses[0])
+	r, _, err := c.ExchangeContext(ctx, signedMsg, dsyncTarget.Addresses[0])
 	if err != nil {
 		return 0, fmt.Errorf("DNS exchange failed: %v", err)
 	}
@@ -198,8 +197,7 @@ func QueryParentKeyState(kdb *KeyDB, imr *Imr, keyName string, keyid uint16) (ui
 
 // QueryParentKeyStateDetailed is like QueryParentKeyState but also returns the
 // ExtraText from the KeyState response, for display purposes.
-func QueryParentKeyStateDetailed(kdb *KeyDB, imr *Imr, keyName string, keyid uint16) (uint8, string, error) {
-	ctx := context.Background()
+func QueryParentKeyStateDetailed(ctx context.Context, kdb *KeyDB, imr *Imr, keyName string, keyid uint16) (uint8, string, error) {
 
 	dsyncTarget, err := imr.LookupDSYNCTarget(ctx, keyName, dns.TypeANY, core.SchemeUpdate)
 	if err != nil {
@@ -225,7 +223,7 @@ func QueryParentKeyStateDetailed(kdb *KeyDB, imr *Imr, keyName string, keyid uin
 		return 0, "", fmt.Errorf("DSYNC target has no addresses for %s", keyName)
 	}
 
-	r, _, err := c.Exchange(signedMsg, dsyncTarget.Addresses[0])
+	r, _, err := c.ExchangeContext(ctx, signedMsg, dsyncTarget.Addresses[0])
 	if err != nil {
 		return 0, "", fmt.Errorf("DNS exchange failed: %v", err)
 	}
@@ -277,7 +275,7 @@ func UpdateParentState(kdb *KeyDB, keyName string, keyid uint16, parentState uin
 
 // BootstrapWithParent sends a self-signed UPDATE to the parent to bootstrap
 // trust for the child's SIG(0) key.
-func BootstrapWithParent(zone ZoneName, keyName string, algorithm uint8) error {
+func BootstrapWithParent(ctx context.Context, zone ZoneName, keyName string, algorithm uint8) error {
 	lgElect.Info("BootstrapWithParent: starting", "zone", zone, "keyName", keyName, "algorithm", algorithm)
 
 	// Try Zones map first, then FindZone (label-walking).
@@ -290,7 +288,6 @@ func BootstrapWithParent(zone ZoneName, keyName string, algorithm uint8) error {
 		return fmt.Errorf("zone %s not found (available zones: %v)", keyName, Zones.Keys())
 	}
 
-	ctx := context.Background()
 	msg, ur, err := zd.BootstrapSig0KeyWithParent(ctx, algorithm)
 	if err != nil {
 		return fmt.Errorf("BootstrapSig0KeyWithParent: %s: %v", msg, err)

@@ -55,7 +55,17 @@ type TargetUpdateStatus struct {
 // unreachable: every BADKEY and REFUSED arrived as a transport error carrying
 // rcode 0. ksk_rollover_ds_push.go already documented this contract and
 // mis-categorised every parent rejection as SoftfailTransport because of it.
+// SendUpdate sends without a deadline of its own. Callers that have a context
+// -- anything on a path that must stop when the process does -- should use
+// SendUpdateContext instead.
 func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResult, error) {
+	return SendUpdateContext(context.Background(), msg, zonename, addrs)
+}
+
+// SendUpdateContext is SendUpdate bound to a context: the exchange with each
+// address is abandoned when ctx is done, so a shutdown does not have to wait
+// for a parent that has stopped answering.
+func SendUpdateContext(ctx context.Context, msg *dns.Msg, zonename string, addrs []string) (int, UpdateResult, error) {
 	if zonename == "." {
 		lgDns.Error("SendUpdate: zone name not specified")
 		return 0, UpdateResult{}, fmt.Errorf("zone name not specified")
@@ -101,7 +111,7 @@ func SendUpdate(msg *dns.Msg, zonename string, addrs []string) (int, UpdateResul
 
 		lgDns.Debug("sending update message", "msg", msg.String())
 
-		res, _, err := client.Exchange(msg, dst)
+		res, _, err := client.ExchangeContext(ctx, msg, dst)
 		if err != nil {
 			lgDns.Warn("error from dns.Exchange, trying next address", "dst", dst, "err", err)
 			ur.TargetStatus[dst] = TargetUpdateStatus{

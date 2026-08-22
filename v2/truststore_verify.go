@@ -224,7 +224,7 @@ func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone str
 
 				// The key is now trusted; complete any deferred bootstrap
 				// DEL-ANY-KEY by removing the child's now-superseded keys.
-				kdb.applyPendingKeyReplacement(childZone, keyid)
+				kdb.applyPendingKeyReplacement(ctx, childZone, keyid)
 				return
 			}
 

@@ -73,6 +73,7 @@ func retryWithBackoff(ctx context.Context, maxRetries int, initialDelay time.Dur
 // RCODE handling (draft-ietf-dnsop-delegation-mgmt-via-ddns-02):
 //   - NOERROR  -> done.
 //   - REFUSED  -> bounded retry (a single REFUSED is not a stop signal).
+//   - SERVFAIL -> bounded retry (transient parent-side failure).
 //   - BADKEY   -> re-bootstrap the child's key with the parent AT MOST ONCE,
 //     then retry. A BADKEY that recurs after re-bootstrap is a hard error.
 //   - other    -> hard error.
@@ -101,6 +102,15 @@ func sendUpdateWithRetry(ctx context.Context, maxRetries int, initialDelay time.
 		case dns.RcodeRefused:
 			lgDns.Warn("sendUpdateWithRetry: parent REFUSED, bounded retry", "attempt", attempt)
 			return false, fmt.Errorf("parent REFUSED the delegation UPDATE")
+		case dns.RcodeServerFailure:
+			// Transient by definition: the parent failed to process a request
+			// it did not reject. The draft names BADKEY and REFUSED explicitly
+			// and is silent here, but treating SERVFAIL as terminal gives up
+			// after one attempt on exactly the failure a retry exists for --
+			// and it is indistinguishable, to the child, from the no-response
+			// case the draft does say to retry.
+			lgDns.Warn("sendUpdateWithRetry: parent SERVFAIL, bounded retry", "attempt", attempt)
+			return false, fmt.Errorf("parent returned SERVFAIL for the delegation UPDATE")
 		case dns.RcodeBadKey:
 			if reBootstrapped {
 				return true, fmt.Errorf("delegation UPDATE still BADKEY after re-bootstrap")
@@ -128,7 +138,7 @@ func sendUpdateWithRetry(ctx context.Context, maxRetries int, initialDelay time.
 func (zd *ZoneData) SendUpdateWithRetry(ctx context.Context, msg *dns.Msg, parent string, addrs []string) (int, UpdateResult, error) {
 	return sendUpdateWithRetry(ctx, delegationSyncMaxRetries, delegationSyncInitialDelay,
 		func() (int, UpdateResult, error) {
-			return SendUpdate(msg, parent, addrs)
+			return SendUpdateContext(ctx, msg, parent, addrs)
 		},
 		func() error {
 			// Re-bootstrap re-uploads the child's existing active SIG(0) key

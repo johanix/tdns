@@ -1,10 +1,12 @@
 package tdns
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/miekg/dns"
 )
@@ -36,6 +38,12 @@ func bootstrapCeremony(ns []dns.RR) (addKey *dns.KEY, hasDelAnyKey bool, ok bool
 			}
 			addKey = k
 		case h.Class == dns.ClassANY && h.Rrtype == dns.TypeKEY:
+			if h.Rdlength != 0 {
+				// RFC 2136 §2.5.2: a delete-RRset record carries RDLENGTH=0.
+				// Classifying on Class+Type alone would accept a record with
+				// RDATA as a wholesale "delete every KEY at this name".
+				return nil, false, false
+			}
 			if hasDelAnyKey {
 				return nil, false, false // more than one DEL ANY KEY
 			}
@@ -90,22 +98,56 @@ func registerPendingKeyReplacement(childZone string, keyid uint16) {
 // nothing could retry, and the key the ceremony was supposed to supersede
 // stayed authorized to sign UPDATEs for that child indefinitely. Retrying a
 // completed cleanup is harmless; abandoning an incomplete one is not.
-func (kdb *KeyDB) applyPendingKeyReplacement(childZone string, keyid uint16) {
+func (kdb *KeyDB) applyPendingKeyReplacement(ctx context.Context, childZone string, keyid uint16) {
 	mapKeyPending := pendingKeyReplacementKey(childZone, keyid)
 	if _, ok := pendingKeyReplacements.Load(mapKeyPending); !ok {
 		return
 	}
 
+	// Retried here, rather than left for "the next promotion". A key is
+	// promoted to trusted once, so a bootstrap that hit a transient failure
+	// would never get a second call -- retaining the marker would record the
+	// problem and fix nothing, leaving the superseded keys authorized for as
+	// long as the process lives.
+	err := retryWithBackoff(ctx, pendingCleanupMaxRetries, pendingCleanupInitialDelay,
+		func(attempt int) (bool, error) {
+			done, cerr := kdb.tryPendingKeyReplacement(childZone, keyid)
+			if done {
+				return true, cerr
+			}
+			lgSigner.Warn("applyPendingKeyReplacement: cleanup incomplete, will retry",
+				"zone", childZone, "keptKeyid", keyid, "attempt", attempt, "err", cerr)
+			return false, cerr
+		})
+	if err != nil {
+		// Marker retained deliberately: it is the only record that these keys
+		// are still authorized and were meant not to be.
+		lgSigner.Error("applyPendingKeyReplacement: gave up; superseded SIG(0) key(s) for this"+
+			" child remain authorized to sign UPDATEs",
+			"zone", childZone, "keptKeyid", keyid, "err", err)
+		return
+	}
+	pendingKeyReplacements.Delete(mapKeyPending)
+}
+
+// Bounded, so a permanently failing truststore cannot spin. Short delays: this
+// runs after the new key is already trusted, and the window in which the old
+// key is still authorized is exactly what is being closed.
+const (
+	pendingCleanupMaxRetries   = 4
+	pendingCleanupInitialDelay = 2 * time.Second
+)
+
+// tryPendingKeyReplacement makes one attempt at removing the child's superseded
+// keys. done=false means "retry" -- either the listing failed or at least one
+// delete did.
+func (kdb *KeyDB) tryPendingKeyReplacement(childZone string, keyid uint16) (bool, error) {
 	tr, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
 		Command:    "child-sig0-mgmt",
 		SubCommand: "list",
 	})
 	if err != nil {
-		// Marker retained: the next promotion of this key retries.
-		lgSigner.Error("applyPendingKeyReplacement: failed to list child keys;"+
-			" the superseded key(s) are still authorized and the cleanup will be retried",
-			"zone", childZone, "err", err)
-		return
+		return false, fmt.Errorf("listing the child's keys: %w", err)
 	}
 
 	prefix := childZone + "::"
@@ -141,10 +183,7 @@ func (kdb *KeyDB) applyPendingKeyReplacement(childZone string, keyid uint16) {
 	}
 
 	if failed > 0 {
-		lgSigner.Error("applyPendingKeyReplacement: cleanup incomplete; keeping the pending"+
-			" marker so it is retried rather than leaving superseded keys authorized",
-			"zone", childZone, "keptKeyid", keyid, "failed", failed)
-		return
+		return false, fmt.Errorf("%d superseded key(s) could not be removed", failed)
 	}
-	pendingKeyReplacements.Delete(mapKeyPending)
+	return true, nil
 }
