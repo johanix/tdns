@@ -91,16 +91,25 @@ func (zd *ZoneData) ProxyDelegationPreRefresh(new_zd *ZoneData) {
 
 // apexRRsetChanged reports whether the apex RRset of type rrtype differs between
 // the served zone (zd) and the incoming zone (new_zd), using the canonical
-// RRset comparison. A missing owner / RRset on either side is treated as an
-// empty set, so an appearance or disappearance counts as a change.
+// RRset comparison. A missing RRset on either side is treated as an empty set,
+// so an appearance or disappearance of the RRset counts as a change.
+//
+// A missing APEX in the incoming zone is different, and is not a change: a zone
+// without an apex is a broken or empty transfer, not a child that withdrew
+// every record at once. Treating it as an empty set would report the served
+// zone's CDS/CSYNC as removed and send the parent a notification about a
+// transfer that failed. An RRset removal from a zone that still HAS an apex
+// stays detectable, which is the case that carries real intent.
 func (zd *ZoneData) apexRRsetChanged(new_zd *ZoneData, rrtype uint16) bool {
 	var oldRRs, newRRs []dns.RR
 	if oldapex, err := zd.GetOwner(zd.ZoneName); err == nil && oldapex != nil {
 		oldRRs = oldapex.RRtypes.GetOnlyRRSet(rrtype).RRs
 	}
-	if newapex, err := new_zd.ownerForAnalysis(zd.ZoneName); err == nil && newapex != nil {
-		newRRs = newapex.RRtypes.GetOnlyRRSet(rrtype).RRs
+	newapex, err := new_zd.ownerForAnalysis(zd.ZoneName)
+	if err != nil || newapex == nil {
+		return false
 	}
+	newRRs = newapex.RRtypes.GetOnlyRRSet(rrtype).RRs
 	differ, _, _ := core.RRsetDiffer(zd.ZoneName, newRRs, oldRRs, rrtype, zd.Logger, Globals.Verbose, Globals.Debug)
 	return differ
 }

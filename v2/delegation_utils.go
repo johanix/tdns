@@ -489,6 +489,20 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 	if err != nil {
 		return false, err
 	}
+	// An incoming zone with no apex has no DNSKEY RRset either, but that is a
+	// broken transfer rather than a zone that unsigned itself. Without this the
+	// "DNSKEYs removed" branch below fires for any signed zone whose transfer
+	// arrived empty, and the proxy tells the parent to withdraw the DS.
+	newapex, err := newzd.ownerForAnalysis(zd.ZoneName)
+	if err != nil {
+		return false, fmt.Errorf("error from newzd.ownerForAnalysis(%s): %v", zd.ZoneName, err)
+	}
+	if newapex == nil {
+		lgDns.Warn("DnskeysChangedNG: no apex in the incoming zone; treating as no DNSKEY change",
+			"zone", zd.ZoneName)
+		return false, nil
+	}
+
 	newkeys, err := newzd.rrsetForAnalysis(zd.ZoneName, dns.TypeDNSKEY)
 	if err != nil {
 		return false, err
