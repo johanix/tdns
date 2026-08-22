@@ -645,6 +645,18 @@ func (zd *ZoneData) WriteZone(tosource bool, force bool) (string, error) {
 				lg.Warn("zone written but its digest could not be computed;"+
 					" the next load will have no basis for comparison",
 					"zone", zd.ZoneName, "error", derr)
+			} else if !zd.serialStillIs(wroteSerial) {
+				// fileIsCurrent was decided before the lock was dropped, and
+				// ZoneDigestOfPublished digests whatever is published when it
+				// runs. A publish landing in between leaves a digest of the
+				// newer zone about to be recorded as the identity of the file
+				// we wrote -- the very mismatch the gate above exists to
+				// prevent, one step later. Recording nothing is safe: the next
+				// load reads "no basis for comparison" and re-establishes it.
+				lg.Warn("zone written but a publish landed before its identity could be"+
+					" recorded; leaving the file unidentified rather than recording a"+
+					" digest of different content",
+					"zone", zd.ZoneName, "wrote_serial", wroteSerial)
 			} else if rerr := zd.RecordZoneFileState(wroteSerial, digest); rerr != nil {
 				lg.Warn("zone written but its file identity could not be recorded;"+
 					" the next load will have no basis for comparison",

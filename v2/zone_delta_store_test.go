@@ -192,7 +192,7 @@ func TestReplaceZoneJournalRefusesAnEmptyDelta(t *testing.T) {
 
 	// Non-empty RRset slices whose RRs are all empty: rows comes out empty.
 	empty := []core.RRset{{Name: "www.example.", RRtype: dns.TypeA}}
-	err := kdb.ReplaceZoneJournal("example.", 2, 3, empty, empty)
+	err := kdb.ReplaceZoneJournal("example.", 2, 3, empty, empty, 0)
 	if err == nil {
 		t.Fatal("an empty replacement was accepted; it would have erased the journal")
 	}

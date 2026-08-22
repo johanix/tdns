@@ -1,5 +1,10 @@
 # DDNS update CLI + API RR-update channel — design
 
+> **Superseded by [`2026-08-10-ddns-cli-and-api-updates.md`](2026-08-10-ddns-cli-and-api-updates.md).**
+> Kept as discussion history only. The successor retargets persistence from a
+> BIND-style journal to SQLite (source of truth), adds atomic REPLACE, and
+> leaves the API admission-gate shape open.
+
 > **⚠️ DRAFT — NOT FULLY COOKED.** Committed to main mid-discussion only so the
 > work isn't lost. Several forks in §8 are still OPEN — notably **F10**
 > (persistence timing: immediate write-back vs. a bind9-style journal) — and all
