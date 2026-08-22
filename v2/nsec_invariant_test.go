@@ -284,11 +284,12 @@ func TestDelegationChangesReconcileChainMembership(t *testing.T) {
 // so a refusal that leaves it advanced makes publishSync report a serial that
 // no snapshot carries.
 //
-// Driven directly rather than through an injected signing failure: clearing
-// the KeyDB makes the restitch skip itself rather than fail, and a policy
-// naming an unsupported algorithm hangs in key generation instead of
-// returning an error. Both are worth looking at separately; neither is a good
-// lever for this.
+// Driven directly rather than through an injected signing failure. Clearing
+// the KeyDB does not work as a lever: zoneMaintainsItsOwnChain skips the
+// restitch entirely when it is nil, and the publish then panics further along
+// (johanix/tdns#368). A policy naming an unsupported algorithm DOES make the
+// restitch fail cleanly, but it exercises the same path this drives directly
+// while depending on key generation to keep rejecting that algorithm.
 func TestRefusingAnUnrepairableChainDoesNotDeadlockOrKeepTheSerial(t *testing.T) {
 	kdb := newTestKeyDB(t)
 	zd := signingTestZone(t, kdb)
