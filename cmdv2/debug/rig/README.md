@@ -8,10 +8,31 @@ secondary or move a serial backwards.
 
 This is a snapshot of a rig that was built by hand while working on the delta
 journal (#348), zone-file reconciliation (#353) and the reload path (#362 /
-#363). It is committed here because its assertions are statements about tdns's
+#363). It is committed because its assertions are statements about tdns's
 behaviour, and they have twice needed to change in step with that behaviour —
 section G was written for #353, section H for #363. A rig that lives only on a
 test host cannot be reviewed alongside the change it is evidence for.
+
+## Relative to tdns-debug
+
+It lives here because it shares `tdns-debug`'s purpose — aggressive correctness
+testing of a *running* server — and differs only in what it can reach and how it
+is written.
+
+`tdns-debug` drives one live server hard and checks every observation against a
+ledger of states a correct server could be in. This rig does something the
+framework cannot do yet: it **stops and starts the primary**, edits its zone
+file behind its back, and watches a **second, independent implementation** decide
+whether to follow. Restart, reload and the file-versus-journal reconciliation are
+lifecycle properties, and interoperability is a second opinion; neither is
+expressible as load against a server that stays up.
+
+It is shell because that is what could stop a daemon, rewrite a file and restart
+it in an afternoon, while the bug being chased was live. The scenarios are the
+durable part — `test reconcile` and `test lifecycle` families on the `tdns-debug`
+engine would be a better home for them, once that engine can provision, restart
+and observe a foreign secondary. Until then this runs, and it has caught real
+defects.
 
 ## What it covers
 
@@ -37,10 +58,11 @@ what is committed here is what has been run, not a tidied version of it.
 
 ```sh
 mkdir -p /var/tmp/ixfrtest/{named,zones,log}
-cp -r rig/tdns-auth.yaml rig/tdns-cli.yaml /var/tmp/ixfrtest/
-cp rig/named/named.conf /var/tmp/ixfrtest/named/
-cp rig/zones/rig.example /var/tmp/ixfrtest/zones/
-cp rig/run-ixfr-tests.sh rig/reseed.sh /var/tmp/ixfrtest/
+cd cmdv2/debug/rig
+cp tdns-auth.yaml tdns-cli.yaml /var/tmp/ixfrtest/
+cp named/named.conf /var/tmp/ixfrtest/named/
+cp zones/rig.example /var/tmp/ixfrtest/zones/
+cp run-ixfr-tests.sh reseed.sh /var/tmp/ixfrtest/
 
 SRC=/path/to/a/built/tdns/worktree /var/tmp/ixfrtest/run-ixfr-tests.sh
 ```
