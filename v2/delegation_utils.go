@@ -257,9 +257,19 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 		return false, dss, nil
 	}
 
-	newapex, err := newzd.GetOwner(zd.ZoneName)
+	// ownerForAnalysis, not GetOwner: newzd is the not-yet-published incoming
+	// zone, and GetOwner would read its (absent) snapshot and return nil.
+	newapex, err := newzd.ownerForAnalysis(zd.ZoneName)
 	if err != nil {
-		return false, dss, fmt.Errorf("error from newzd.GetOwner(%s): %v", zd.ZoneName, err)
+		return false, dss, fmt.Errorf("error from newzd.ownerForAnalysis(%s): %v", zd.ZoneName, err)
+	}
+	if newapex == nil {
+		// An incoming zone with no apex is a broken or empty transfer. It is
+		// deliberately NOT reported as a delegation change: doing so would
+		// drive a withdrawal of the delegation at the parent.
+		lgDns.Warn("DDCNG: no apex in the incoming zone; treating as no delegation change",
+			"zone", zd.ZoneName)
+		return false, dss, nil
 	}
 
 	lgDns.Debug("DDCNG: comparing NS RRtypes", "zone", zd.ZoneName)
@@ -301,7 +311,7 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 	for _, ns := range dss.NsAdds {
 		lgDns.Debug("DDCNG: added NS", "ns", ns.String())
 		if nsrr, ok := ns.(*dns.NS); ok {
-			nsowner, err := newzd.GetOwner(nsrr.Ns)
+			nsowner, err := newzd.ownerForAnalysis(nsrr.Ns)
 			if err != nil {
 				lgDns.Warn("DDCNG: nsname of NS has no RRs", "nsname", nsrr.Ns, "ns", nsrr.String())
 			} else if nsowner != nil { // nsowner != nil if the NS is in bailiwick
@@ -330,7 +340,7 @@ func (zd *ZoneData) DelegationDataChangedNG(newzd *ZoneData) (bool, DelegationSy
 			lgDns.Warn("DDCNG: in-bailiwick nameserver has no address records in old zone", "ns", nsname)
 			continue
 		}
-		newowner, err := newzd.GetOwner(nsname)
+		newowner, err := newzd.ownerForAnalysis(nsname)
 		if err != nil || newowner == nil {
 			lgDns.Warn("DDCNG: in-bailiwick nameserver has no address records in new zone", "ns", nsname)
 			for _, rr := range oldowner.RRtypes.GetOnlyRRSet(dns.TypeA).RRs {
@@ -422,7 +432,7 @@ func (zd *ZoneData) DnskeysChanged(newzd *ZoneData) (bool, DelegationSyncStatus,
 	if err != nil {
 		return false, dss, err
 	}
-	newkeys, err := newzd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+	newkeys, err := newzd.rrsetForAnalysis(zd.ZoneName, dns.TypeDNSKEY)
 	if err != nil {
 		return false, dss, err
 	}
@@ -479,7 +489,7 @@ func (zd *ZoneData) DnskeysChangedNG(newzd *ZoneData) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	newkeys, err := newzd.GetRRset(zd.ZoneName, dns.TypeDNSKEY)
+	newkeys, err := newzd.rrsetForAnalysis(zd.ZoneName, dns.TypeDNSKEY)
 	if err != nil {
 		return false, err
 	}

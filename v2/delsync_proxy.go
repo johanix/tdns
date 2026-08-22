@@ -98,7 +98,7 @@ func (zd *ZoneData) apexRRsetChanged(new_zd *ZoneData, rrtype uint16) bool {
 	if oldapex, err := zd.GetOwner(zd.ZoneName); err == nil && oldapex != nil {
 		oldRRs = oldapex.RRtypes.GetOnlyRRSet(rrtype).RRs
 	}
-	if newapex, err := new_zd.GetOwner(zd.ZoneName); err == nil && newapex != nil {
+	if newapex, err := new_zd.ownerForAnalysis(zd.ZoneName); err == nil && newapex != nil {
 		newRRs = newapex.RRtypes.GetOnlyRRSet(rrtype).RRs
 	}
 	differ, _, _ := core.RRsetDiffer(zd.ZoneName, newRRs, oldRRs, rrtype, zd.Logger, Globals.Verbose, Globals.Debug)
