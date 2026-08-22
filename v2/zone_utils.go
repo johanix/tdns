@@ -425,6 +425,21 @@ func (zd *ZoneData) FetchFromFile(verbose, debug, force bool, dynamicRRs []*core
 	firstLoad := zd.FirstZoneLoad
 	if err := zd.applyRefreshReplacementLocked(&new_zd, dynamicRRs, firstLoad, true); err != nil {
 		zd.mu.Unlock()
+		// Nothing was published: the only error that path returns comes from
+		// persisting the outgoing serial, which happens before the working set
+		// is swapped in, so the zone still serves exactly what it did before.
+		//
+		// Put the status back, as the two failure returns above already do.
+		// Leaving it at `loading` reports a zone as mid-load forever, on the
+		// strength of one failed database write.
+		zd.SetStatus(prevStatus)
+		// And drop the cached stat. It was recorded when the file was read,
+		// which is right for a file we merely declined to adopt -- but this
+		// file we tried to adopt and could not, so the next refresh has to look
+		// again. Without this it would see an untouched file, skip it, and the
+		// zone would never pick that file up at all. Same coupling as a failed
+		// reconciliation, one step earlier.
+		zd.forgetZoneFileStat()
 		lg.Error("failed to persist outgoing serial", "zone", zd.ZoneName, "err", err)
 		return false, err
 	}
