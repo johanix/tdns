@@ -958,25 +958,6 @@ func (zd *ZoneData) SignZone(kdb *KeyDB, force bool) (int, error) {
 	return newrrsigs, nil
 }
 
-func (zd *ZoneData) GenerateNsecChain(kdb *KeyDB) error {
-	if !zd.Options[OptAllowUpdates] && !zd.Options[OptOnlineSigning] && !zd.Options[OptInlineSigning] {
-		return fmt.Errorf("GenerateNsecChain: zone %s is not allowed to be updated or signed", zd.ZoneName)
-	}
-	dak, err := kdb.GetDnssecKeys(zd.ZoneName, DnskeyStateActive)
-	if err != nil {
-		lgSigner.Error("failed to get DNSSEC active keys for NSEC chain", "zone", zd.ZoneName, "err", err)
-		return err
-	}
-	zd.mu.Lock()
-	defer zd.mu.Unlock()
-	zd.ensureWorkingSet()
-	if err := zd.GenerateNsecChainWithDak(dak); err != nil {
-		return err
-	}
-	zd.publishLocked(zd.generation.Load())
-	return nil
-}
-
 // chainNamesLocked reduces the owner names to those the NSEC chain covers:
 // the zone's own authoritative names, plus its delegation points, and nothing
 // underneath them.

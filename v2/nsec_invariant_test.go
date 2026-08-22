@@ -123,8 +123,8 @@ charlie.inv.example.	3600	IN	A	10.0.0.3
 	zd.UpdatePolicy = policyAllowing(dns.TypeA, dns.TypeTXT)
 	zd.InstallInitialSnapshot()
 
-	// Sign the zone, which builds the chain AND signs it -- the path a real
-	// zone takes. GenerateNsecChain alone leaves the NSECs unsigned.
+	// Sign the zone, which builds the chain and signs it in one pass -- the
+	// only way a chain is produced.
 	if _, err := zd.SignZone(kdb, true); err != nil {
 		t.Fatalf("initial SignZone: %v", err)
 	}
