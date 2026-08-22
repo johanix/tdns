@@ -25,17 +25,37 @@ const (
 //
 // The schedule is parameterized so callers share one implementation (the
 // KeyState poller and the UPDATE sender) and tests can use tiny delays.
-func retryWithBackoff(maxRetries int, initialDelay time.Duration, fn func(attempt int) (done bool, err error)) error {
+// The backoff waits on ctx as well as the clock. With the delegation-sync
+// schedule a caller can otherwise sit in uncancellable sleeps for 5+10+20+40 =
+// 75 seconds per send, which a shutdown cannot interrupt and a cancelled
+// operation keeps paying for.
+func retryWithBackoff(ctx context.Context, maxRetries int, initialDelay time.Duration, fn func(attempt int) (done bool, err error)) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	delay := initialDelay
 	var lastErr error
 	for attempt := 1; attempt <= maxRetries; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("retryWithBackoff: cancelled before attempt %d: %w", attempt, err)
+		}
 		done, err := fn(attempt)
 		if done {
 			return err
 		}
 		lastErr = err
 		if attempt < maxRetries {
-			time.Sleep(delay)
+			timer := time.NewTimer(delay)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				if lastErr != nil {
+					return fmt.Errorf("retryWithBackoff: cancelled after attempt %d (last error: %v): %w",
+						attempt, lastErr, ctx.Err())
+				}
+				return fmt.Errorf("retryWithBackoff: cancelled after attempt %d: %w", attempt, ctx.Err())
+			case <-timer.C:
+			}
 			delay *= 2
 		}
 	}
@@ -60,14 +80,14 @@ func retryWithBackoff(maxRetries int, initialDelay time.Duration, fn func(attemp
 // The re-bootstrap is bounded to one attempt per call and reBootstrap must not
 // itself route back through this function, so there is no BADKEY -> re-bootstrap
 // -> BADKEY loop.
-func sendUpdateWithRetry(maxRetries int, initialDelay time.Duration,
+func sendUpdateWithRetry(ctx context.Context, maxRetries int, initialDelay time.Duration,
 	send func() (int, UpdateResult, error), reBootstrap func() error) (int, UpdateResult, error) {
 
 	reBootstrapped := false
 	var lastRcode int
 	var lastUR UpdateResult
 
-	err := retryWithBackoff(maxRetries, initialDelay, func(attempt int) (bool, error) {
+	err := retryWithBackoff(ctx, maxRetries, initialDelay, func(attempt int) (bool, error) {
 		rcode, ur, serr := send()
 		lastRcode, lastUR = rcode, ur
 		if serr != nil {
@@ -105,8 +125,8 @@ func sendUpdateWithRetry(maxRetries int, initialDelay time.Duration,
 // and RCODE handling of draft-ietf-dnsop-delegation-mgmt-via-ddns-02. It is for
 // the delegation-DATA senders only; the shared SendUpdate keeps single-shot
 // semantics for its other callers (KSK DS push, CLI, etc.).
-func (zd *ZoneData) SendUpdateWithRetry(msg *dns.Msg, parent string, addrs []string) (int, UpdateResult, error) {
-	return sendUpdateWithRetry(delegationSyncMaxRetries, delegationSyncInitialDelay,
+func (zd *ZoneData) SendUpdateWithRetry(ctx context.Context, msg *dns.Msg, parent string, addrs []string) (int, UpdateResult, error) {
+	return sendUpdateWithRetry(ctx, delegationSyncMaxRetries, delegationSyncInitialDelay,
 		func() (int, UpdateResult, error) {
 			return SendUpdate(msg, parent, addrs)
 		},
@@ -116,7 +136,26 @@ func (zd *ZoneData) SendUpdateWithRetry(msg *dns.Msg, parent string, addrs []str
 			// not the case for a zone already sending signed delegation UPDATEs).
 			// BootstrapSig0KeyWithParent never calls SendUpdateWithRetry, so this
 			// cannot recurse.
-			_, _, berr := zd.BootstrapSig0KeyWithParent(context.Background(), 0)
+			// The caller's context, not a fresh Background one: a re-bootstrap
+			// is part of the operation being cancelled, not separate from it.
+			_, _, berr := zd.BootstrapSig0KeyWithParent(ctx, 0)
 			return berr
 		})
+}
+
+// sleepOrDone waits for d, or returns false as soon as ctx is done. Used by the
+// retry loops that would otherwise sleep through a shutdown.
+func sleepOrDone(ctx context.Context, d time.Duration) bool {
+	if ctx == nil {
+		time.Sleep(d)
+		return true
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
 }

@@ -409,7 +409,7 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 
 	switch scheme {
 	case "UPDATE":
-		msg, rcode, ur, err = zd.SyncZoneDelegationViaUpdate(kdb, syncstate, dsynctarget)
+		msg, rcode, ur, err = zd.SyncZoneDelegationViaUpdate(ctx, kdb, syncstate, dsynctarget)
 	case "NOTIFY":
 		msg, rcode, err = zd.SyncZoneDelegationViaNotify(kdb, notifyq, syncstate, dsynctarget)
 	}
@@ -417,7 +417,7 @@ func (zd *ZoneData) SyncZoneDelegation(ctx context.Context, kdb *KeyDB, notifyq 
 	return msg, rcode, ur, err
 }
 
-func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate DelegationSyncStatus,
+func (zd *ZoneData) SyncZoneDelegationViaUpdate(ctx context.Context, kdb *KeyDB, syncstate DelegationSyncStatus,
 	dsynctarget *DsyncTarget) (string, uint8, UpdateResult, error) {
 
 	// dump.P(syncstate)
@@ -499,7 +499,7 @@ func (zd *ZoneData) SyncZoneDelegationViaUpdate(kdb *KeyDB, syncstate Delegation
 	lgDns.Info("SyncZoneDelegationViaUpdate: sending the signed update",
 		"target", dsynctarget.Name, "addresses", dsynctarget.Addresses, "port", dsynctarget.Port)
 
-	rcode, ur, err := zd.SendUpdateWithRetry(smsg, zd.Parent, dsynctarget.Addresses)
+	rcode, ur, err := zd.SendUpdateWithRetry(ctx, smsg, zd.Parent, dsynctarget.Addresses)
 	if err != nil {
 		lgDns.Error("error from SendUpdateWithRetry", "zone", zd.Parent, "err", err)
 		return "", 0, ur, err

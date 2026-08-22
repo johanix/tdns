@@ -16,8 +16,12 @@ type captureWriter struct {
 	got *dns.Msg
 }
 
-func (c *captureWriter) LocalAddr() net.Addr  { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 53} }
-func (c *captureWriter) RemoteAddr() net.Addr { return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4711} }
+func (c *captureWriter) LocalAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 53}
+}
+func (c *captureWriter) RemoteAddr() net.Addr {
+	return &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 4711}
+}
 func (c *captureWriter) WriteMsg(m *dns.Msg) error {
 	c.got = m
 	return nil

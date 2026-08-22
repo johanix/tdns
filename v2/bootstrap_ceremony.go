@@ -84,8 +84,15 @@ func registerPendingKeyReplacement(childZone string, keyid uint16) {
 // the child's OTHER SIG(0) keys from the truststore. It is a no-op if no
 // replacement was pending. Called only AFTER the key has been promoted to
 // trusted, so it can never evict a key that is still the sole trusted one.
+// The marker is cleared only once every superseded key is actually gone. An
+// earlier version removed it up front, which turned any failure below --
+// listing the child's keys, or deleting one of them -- into a permanent one:
+// nothing could retry, and the key the ceremony was supposed to supersede
+// stayed authorized to sign UPDATEs for that child indefinitely. Retrying a
+// completed cleanup is harmless; abandoning an incomplete one is not.
 func (kdb *KeyDB) applyPendingKeyReplacement(childZone string, keyid uint16) {
-	if _, ok := pendingKeyReplacements.LoadAndDelete(pendingKeyReplacementKey(childZone, keyid)); !ok {
+	mapKeyPending := pendingKeyReplacementKey(childZone, keyid)
+	if _, ok := pendingKeyReplacements.Load(mapKeyPending); !ok {
 		return
 	}
 
@@ -94,28 +101,37 @@ func (kdb *KeyDB) applyPendingKeyReplacement(childZone string, keyid uint16) {
 		SubCommand: "list",
 	})
 	if err != nil {
-		lgSigner.Error("applyPendingKeyReplacement: failed to list child keys", "zone", childZone, "err", err)
+		// Marker retained: the next promotion of this key retries.
+		lgSigner.Error("applyPendingKeyReplacement: failed to list child keys;"+
+			" the superseded key(s) are still authorized and the cleanup will be retried",
+			"zone", childZone, "err", err)
 		return
 	}
 
 	prefix := childZone + "::"
+	failed := 0
 	for mapKey := range tr.ChildSig0keys {
 		if !strings.HasPrefix(mapKey, prefix) {
 			continue
 		}
-		otherKeyid, err := strconv.Atoi(strings.TrimPrefix(mapKey, prefix))
+		// ParseUint bounded to 16 bits: a key id is a uint16, and Atoi+narrowing
+		// would silently wrap a malformed or oversized suffix into a valid-looking
+		// id -- which here selects which key gets DELETED.
+		otherKeyid64, err := strconv.ParseUint(strings.TrimPrefix(mapKey, prefix), 10, 16)
 		if err != nil {
 			continue
 		}
-		if uint16(otherKeyid) == keyid {
+		otherKeyid := uint16(otherKeyid64)
+		if otherKeyid == keyid {
 			continue // keep the newly-trusted key
 		}
 		if _, err := kdb.Sig0TrustMgmt(nil, TruststorePost{
 			Command:    "child-sig0-mgmt",
 			SubCommand: "delete",
 			Keyname:    childZone,
-			Keyid:      otherKeyid,
+			Keyid:      int(otherKeyid),
 		}); err != nil {
+			failed++
 			lgSigner.Error("applyPendingKeyReplacement: failed to remove superseded key",
 				"zone", childZone, "keyid", otherKeyid, "err", err)
 		} else {
@@ -123,4 +139,12 @@ func (kdb *KeyDB) applyPendingKeyReplacement(childZone string, keyid uint16) {
 				"zone", childZone, "removedKeyid", otherKeyid, "keptKeyid", keyid)
 		}
 	}
+
+	if failed > 0 {
+		lgSigner.Error("applyPendingKeyReplacement: cleanup incomplete; keeping the pending"+
+			" marker so it is retried rather than leaving superseded keys authorized",
+			"zone", childZone, "keptKeyid", keyid, "failed", failed)
+		return
+	}
+	pendingKeyReplacements.Delete(mapKeyPending)
 }

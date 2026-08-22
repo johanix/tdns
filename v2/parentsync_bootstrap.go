@@ -25,7 +25,7 @@ import (
 //  4. KeyStateUnknown → bootstrap
 //  5. KeyStateBootstrapAutoOngoing → poll
 //  6. Query failure → retry with backoff
-func (conf *Config) ParentSyncAfterKeyPublication(zone ZoneName, keyName string, keyid uint16, algorithm uint8) {
+func (conf *Config) ParentSyncAfterKeyPublication(ctx context.Context, zone ZoneName, keyName string, keyid uint16, algorithm uint8) {
 	kdb := conf.Internal.KeyDB
 
 	// Wait for IMR to become available (it starts asynchronously).
@@ -53,7 +53,7 @@ func (conf *Config) ParentSyncAfterKeyPublication(zone ZoneName, keyName string,
 	// (5s, 10s, 20s, 40s, then give up), re-bootstrapping once if the parent
 	// reports our key as unknown.
 	bootstrapped := false
-	syncErr := retryWithBackoff(delegationSyncMaxRetries, delegationSyncInitialDelay, func(attempt int) (bool, error) {
+	syncErr := retryWithBackoff(ctx, delegationSyncMaxRetries, delegationSyncInitialDelay, func(attempt int) (bool, error) {
 		keyState, err := QueryParentKeyState(kdb, imr, keyName, keyid)
 		if err != nil {
 			lgElect.Warn("ParentSyncAfterKeyPublication: KeyState inquiry failed",
@@ -122,10 +122,17 @@ func (conf *Config) ParentSyncAfterKeyPublication(zone ZoneName, keyName string,
 			return false, nil // retry
 
 		default:
-			lgElect.Info("ParentSyncAfterKeyPublication: parent returned unexpected state",
-				"zone", zone, "keyid", keyid, "state", keyState)
+			// Terminal, and a failure: the child's key is not trusted and no
+			// further attempt will change that. Reported at Info it looked like
+			// a successful outcome in the logs, and the caller's "gave up"
+			// branch never fired because the error was nil.
+			lgElect.Error("ParentSyncAfterKeyPublication: parent returned an unexpected key state;"+
+				" the child's key is NOT trusted and bootstrap will not complete",
+				"zone", zone, "keyid", keyid, "state", keyState,
+				"statename", edns0.KeyStateToString(keyState))
 			UpdateParentState(kdb, keyName, keyid, keyState)
-			return true, nil // done (terminal)
+			return true, fmt.Errorf("parent returned unexpected key state %d (%s)",
+				keyState, edns0.KeyStateToString(keyState))
 		}
 	})
 	if syncErr != nil {

@@ -146,7 +146,11 @@ func matchKeyRR(rrs []dns.RR, keyRR string) bool {
 // TriggerChildKeyVerification starts an async verification of a child KEY
 // that was just stored in the TrustStore. It uses the KeyBootstrapper's
 // retry pattern: verify via DNS lookup, retry with backoff, then trust.
-func (kdb *KeyDB) TriggerChildKeyVerification(childZone string, keyid uint16, keyRR string) {
+// ctx is the engine's lifetime context. The verification retries with
+// exponential backoff and can therefore be sleeping for a long time when the
+// process is asked to stop; without it the goroutine ignores shutdown and the
+// deferred key cleanup it performs runs against a database that is closing.
+func (kdb *KeyDB) TriggerChildKeyVerification(ctx context.Context, childZone string, keyid uint16, keyRR string) {
 	go func() {
 		maxAttempts := viper.GetInt("delegationsync.parent.update.key-verification.max-attempts")
 		if maxAttempts == 0 {
@@ -157,15 +161,17 @@ func (kdb *KeyDB) TriggerChildKeyVerification(childZone string, keyid uint16, ke
 			retryInterval = 10 * time.Second
 		}
 
-		ctx := context.Background()
-
 		for attempt := 1; attempt <= maxAttempts; attempt++ {
 			imr := Globals.ImrEngine
 			if imr == nil {
 				lgSigner.Warn("TriggerChildKeyVerification: IMR engine not yet available, will retry",
 					"zone", childZone, "keyid", keyid, "attempt", attempt)
 				if attempt < maxAttempts {
-					time.Sleep(retryInterval)
+					if !sleepOrDone(ctx, retryInterval) {
+						lgSigner.Info("TriggerChildKeyVerification: shutting down, abandoning verification",
+							"zone", childZone, "keyid", keyid)
+						return
+					}
 					retryInterval *= 2
 				}
 				continue
@@ -225,7 +231,11 @@ func (kdb *KeyDB) TriggerChildKeyVerification(childZone string, keyid uint16, ke
 			if attempt < maxAttempts {
 				lgSigner.Info("child key not yet verifiable, will retry",
 					"zone", childZone, "keyid", keyid, "delay", retryInterval)
-				time.Sleep(retryInterval)
+				if !sleepOrDone(ctx, retryInterval) {
+					lgSigner.Info("TriggerChildKeyVerification: shutting down, abandoning verification",
+						"zone", childZone, "keyid", keyid)
+					return
+				}
 				retryInterval *= 2 // exponential backoff
 			}
 		}

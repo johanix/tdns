@@ -407,10 +407,13 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				// promoted to trusted, the child's other keys are removed. The
 				// DEL itself is not applied now (the class-ANY case below skips
 				// it), so an un-validated bootstrap never evicts a trusted key.
+				// Noted here, REGISTERED after the commit below succeeds. A
+				// marker written for a key that then failed to store would
+				// outlive the failure and could complete a cleanup for a key
+				// this update never actually added.
+				ceremonyKey, ceremonyDeferred := (*dns.KEY)(nil), false
 				if addKey, hasDel, ok := bootstrapCeremony(ur.Actions); ok && hasDel && !ur.Trusted {
-					registerPendingKeyReplacement(addKey.Header().Name, addKey.KeyTag())
-					lg.Info("ZoneUpdater: deferring DEL-ANY-KEY from self-signed bootstrap until new key is trusted",
-						"child", addKey.Header().Name, "keyid", addKey.KeyTag())
+					ceremonyKey, ceremonyDeferred = addKey, true
 				}
 
 				for _, rr := range ur.Actions {
@@ -462,11 +465,21 @@ func (kdb *KeyDB) ZoneUpdaterEngine(ctx context.Context) error {
 				}
 				logUpdateActions("TRUSTSTORE-UPDATE", ur.Actions)
 
+				// The deferred half of a bootstrap DEL-ANY-KEY: the new key is
+				// stored, so once it is validated and promoted to trusted the
+				// child's superseded keys may be removed. Registered only now,
+				// because the key had to actually land first.
+				if ceremonyDeferred && err == nil {
+					registerPendingKeyReplacement(ceremonyKey.Header().Name, ceremonyKey.KeyTag())
+					lg.Info("ZoneUpdater: deferring DEL-ANY-KEY from self-signed bootstrap until new key is trusted",
+						"child", ceremonyKey.Header().Name, "keyid", ceremonyKey.KeyTag())
+				}
+
 				// Trigger async DNS verification for newly stored untrusted child keys.
 				for _, pv := range toVerify {
 					lg.Info("ZoneUpdater: triggering child key verification",
 						"zone", pv.childZone, "keyid", pv.keyid)
-					kdb.TriggerChildKeyVerification(pv.childZone, pv.keyid, pv.keyRR)
+					kdb.TriggerChildKeyVerification(ctx, pv.childZone, pv.keyid, pv.keyRR)
 				}
 			default:
 				lg.Error("ZoneUpdater: unknown command, ignoring", "cmd", ur.Cmd)
